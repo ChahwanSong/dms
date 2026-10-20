@@ -543,7 +543,7 @@ def _emitted_markers():
     """모든 preflight 스크립트(연산 x role)에서 실제로 찍히는 마커를 긁어온다."""
     specs = [
         (_spec(operation="scan", tool="dscan", paths={"target": "/x"}), None),
-        (_spec(operation="rm", tool="drm", paths={"target": "/x"}), None),
+        (_spec(operation="rm", tool="drm", paths={"target": "/x", "managed_root": "/"}), None),
         (_sync_spec("/s", "/d"), None),
         (_sync_spec("/s", "/d"), "source"),
         (_sync_spec("/s", "/d"), "destination"),

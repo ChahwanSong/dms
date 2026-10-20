@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, StrictBool
-from ..batch_orchestrator import auto_confirm_hold
+from ..batch_orchestrator import auto_confirm_hold, preview_files
 from ..batch_cancel import mark_cancel_reached, record_item_terminal, settle_child
 from ..domain import (DataJobState, DomainValidationError, Operation, build_data_payload,
                       confirm_gated, validate_batch, validate_batch_controls,
@@ -361,18 +361,36 @@ def _reopen_after_new_queued(repo, batch, *, reactivate: bool = True) -> str:
     return observed if fresh is None else fresh["status"]
 
 
-def _validated_item(batch, items, new_item, *, replace_seq=None):
-    """항목 payload 검증(생성 create 와 같은 두 겹): ① build_data_payload 로 연산별
-    스키마·경로 검증, ② 배치 전체의 단일 스토리지 동질성. 동질성은 편집 후의
-    **전체 목록**을 validate_batch 에 그대로 넣어 판정한다 — 규칙을 여기서 다시
-    쓰면 validate_batch(스토리지 종류 수만 본다)와 어긋나는 두 벌이 된다."""
-    prospective = [it["payload"] for it in items if it["seq"] != replace_seq]
-    prospective.append(new_item)
-    try:
-        build_data_payload(batch["operation"], options=batch["options"], **new_item)
-        validate_batch(batch["operation"], batch["max_concurrency"], prospective)
-    except (DomainValidationError, TypeError) as e:
-        raise HTTPException(status_code=422, detail=getattr(e, "reason_code", "invalid_batch"))
+def _item_validator(new_item, *, replace_seq=None):
+    """항목 payload 검증 콜백(생성 create 와 같은 두 겹): ① build_data_payload 로 연산별 스키마·경로 검증, ② 배치 전체
+    규칙(단일 스토리지 동질성·rm 대상 겹침). 전체 규칙은 편집 후의 **전체 목록**을 validate_batch 에 그대로 넣어 판정한다 —
+    규칙을 여기서 다시 쓰면 validate_batch 와 어긋나는 두 벌이 된다.
+
+    콜백인 이유(2026-10-21 리뷰): 판정이 저장소 쓰기와 **같은 트랜잭션**, 배치 잠금 뒤의 읽기로 돌아야 한다
+    (BatchesRepository._lock_items_then_batch) -- 라우트가 트랜잭션 밖 스냅샷으로 판정하면 동시 추가·수정 둘이 서로의 항목을
+    못 본 채 통과해 a 와 a/b 가 한 rm 배치에 같이 들어갔다. 던지는 것은 DomainValidationError 하나다(인자 모양 TypeError 도
+    invalid_batch 로 접는다) -- 라우트가 그것만 422 로 바꾸고, 저장소 코드의 다른 예외를 422 로 삼키지 않는다."""
+    def check(batch, items):
+        prospective = [it["payload"] for it in items if it["seq"] != replace_seq]
+        prospective.append(new_item)
+        try:
+            build_data_payload(batch["operation"], options=batch["options"], **new_item)
+            validate_batch(batch["operation"], batch["max_concurrency"], prospective)
+        except TypeError as e:
+            raise DomainValidationError("invalid_batch", str(e)) from e
+    return check
+
+
+def _items_validator(new_items):
+    """항목 전체 교체(replace_batch_items)의 검증 콜백 -- 생성과 같은 두 겹을 잠근 배치 행(연산·옵션·동시 실행 상한)으로."""
+    def check(batch, _current):
+        try:
+            validate_batch(batch["operation"], batch["max_concurrency"], new_items)
+            for item in new_items:
+                build_data_payload(batch["operation"], options=batch["options"], **item)
+        except TypeError as e:
+            raise DomainValidationError("invalid_batch", str(e)) from e
+    return check
 
 
 def _reject_stale_options(batch) -> None:
@@ -380,7 +398,7 @@ def _reject_stale_options(batch) -> None:
     규칙이 바뀐 뒤 남은 옛 배치(2026-10-01 chown 이름 거부가 첫 사례)를 422 로 바로 알린다. 그냥 두면 항목이
     Queued 로 돌아간 뒤 orchestrator 가 자식 생성 시점에 하나씩 Rejected 로 떨어뜨린다(배치 오케스트레이터
     _materialize) -- 결과는 같지만 사용자는 "돌렸는데 전부 거부"를 나중에야 본다. 항목 추가·수정·교체는 이미
-    _validated_item(build_data_payload)이 배치 옵션까지 재검증한다. rm 은 recursive 동의까지 본다(validate_batch_options --
+    _item_validator·_items_validator(build_data_payload)가 배치 옵션까지 재검증한다. rm 은 recursive 동의까지 본다(validate_batch_options --
     옵션은 build_data_payload 의 항목별 검사 밖이라 여기서 안 보면 확인·재실행 뒤 항목마다 Rejected 로 늦게 드러난다)."""
     try:
         validate_batch_options(batch["operation"], batch["options"])
@@ -395,12 +413,16 @@ def update_batch_item(batch_id: str, seq: int, body: dict, request: Request,
     _require_batch_privilege(request, identity)
     repo = request.app.state.repos.batches
     b = _get_batch_or_404(request, batch_id)
-    items = repo.list_items(batch_id)
-    if not any(it["seq"] == seq for it in items):
+    if repo.get_item(batch_id, seq) is None:
         raise HTTPException(status_code=404, detail="batch_item_not_found")
-    _validated_item(b, items, body, replace_seq=seq)
     only_queued = b["status"] not in _TERMINAL_BATCH
-    if not repo.update_item_payload(batch_id, seq, body, only_queued=only_queued):
+    try:
+        # 검증은 저장소 트랜잭션 안, 배치 잠금 뒤의 목록으로(_item_validator docstring).
+        updated = repo.update_item_payload(batch_id, seq, body, only_queued=only_queued,
+                                           validate=_item_validator(body, replace_seq=seq))
+    except DomainValidationError as e:
+        raise HTTPException(status_code=422, detail=e.reason_code)
+    if not updated:
         # 존재는 위에서 확인했으니 영향 행 0 = Queued 가드 패배(materialize 경합
         # 포함) — 종단 배치 경로(가드 없음)에선 동시 삭제의 극소 창뿐이다.
         raise HTTPException(status_code=409, detail="batch_item_not_editable")
@@ -451,15 +473,13 @@ def replace_batch_items(batch_id: str, body: ReplaceItemsBody, request: Request,
     b = _get_batch_or_404(request, batch_id)
     if b["status"] not in _TERMINAL_BATCH:
         raise HTTPException(status_code=409, detail="batch_items_not_replaceable")
+    # 위의 읽기와 쓰기 사이에 배치가 지워졌거나(None) 다시 돌기 시작했으면(False) repo 가 아무것도 쓰지 않았다 --
+    # 거짓 200 으로 배치 없는 고아 항목·활성 배치의 전량 교체를 숨기지 않는다(repo docstring, 2026-10-10). 검증은 쓰기와
+    # 같은 트랜잭션에서 잠근 배치 행으로 한다(2026-10-21 -- _items_validator).
     try:
-        validate_batch(b["operation"], b["max_concurrency"], body.items)
-        for item in body.items:
-            build_data_payload(b["operation"], options=b["options"], **item)
-    except (DomainValidationError, TypeError) as e:
-        raise HTTPException(status_code=422, detail=getattr(e, "reason_code", "invalid_batch"))
-    # 위의 읽기·검증과 쓰기 사이에 배치가 지워졌거나(None) 다시 돌기 시작했으면(False) repo 가 아무것도 쓰지 않았다 --
-    # 거짓 200 으로 배치 없는 고아 항목·활성 배치의 전량 교체를 숨기지 않는다(repo docstring, 2026-10-10).
-    done = repo.replace_items(batch_id, body.items)
+        done = repo.replace_items(batch_id, body.items, validate=_items_validator(body.items))
+    except DomainValidationError as e:
+        raise HTTPException(status_code=422, detail=e.reason_code)
     if done is None:
         raise HTTPException(status_code=404, detail="batch_not_found")
     if done is False:
@@ -475,8 +495,11 @@ def add_batch_item(batch_id: str, body: dict, request: Request,
     repo = request.app.state.repos.batches
     b = _get_batch_or_404(request, batch_id)
     _reject_cancelling(b)
-    _validated_item(b, repo.list_items(batch_id), body)
-    seq = repo.add_item(batch_id, body)
+    try:
+        # 검증은 저장소 트랜잭션 안, 배치 잠금 뒤의 목록으로(_item_validator docstring).
+        seq = repo.add_item(batch_id, body, validate=_item_validator(body))
+    except DomainValidationError as e:
+        raise HTTPException(status_code=422, detail=e.reason_code)
     if seq is None:
         # 위에서 읽은 뒤 INSERT 전에 배치가 지워졌다(배치 단위 삭제·배치 기록 삭제) -- repo 가 아무것도 쓰지 않았다.
         raise HTTPException(status_code=404, detail="batch_not_found")
@@ -562,20 +585,11 @@ class ConfirmBatchBody(BaseModel):
     # 운영자가 확인 대화상자를 연 확인 회차(GET 배치 응답의 preview_round). 생략·null 은 422 -- 무엇을 봤는지
     # 말하지 않는 확인(옛 포탈 탭·스크립트)은 받지 않는다(fail-closed).
     preview_round: int | None = None
-
-
-def _preview_files(items) -> dict:
-    """ConfirmPending 항목 preview_summary.files 의 합(아는 값만)과 모르는 항목 수 -- null≠0: 하나도 모르면 files_total 은
-    None 이고 0 은 정상값이다(rm 의 0 = 대상 경로 없음). 포탈 확인 대화상자의 「삭제·복사 대상」과 같은 집계다. DB 가 신뢰
-    경계라 bool·음수·비정수는 모름으로 센다(stepper 의 _as_count 와 같은 결)."""
-    pending = [it for it in items if it.get("job_state") == DataJobState.CONFIRM_PENDING.value]
-    known = []
-    for it in pending:
-        s = it.get("preview_summary")
-        v = s.get("files") if isinstance(s, dict) else None
-        if isinstance(v, int) and not isinstance(v, bool) and v >= 0:
-            known.append(v)
-    return {"files_total": sum(known) if known else None, "files_unknown": len(pending) - len(known)}
+    # rm 배치의 「되돌릴 수 없음」 동의(2026-10-21 리뷰). **명시 true 만** 통과(StrictBool -- "yes"·1 은 422, 생략·false 는
+    # rm 에서 422 batch_rm_confirm_ack_required). 왜 서버가 보나: 그 체크는 새 포탈에만 있다 -- 롤링 배포 중 열려 있던 옛 포탈
+    # 탭은 rm 배치에도 sync 문구(「복사 대상」·소유권)의 대화상자를 그리고 {preview_round} 만 보내, 삭제임을 보지 않은 클릭이
+    # root drm 을 시작했다. sync 는 이 키를 보지 않는다(실어도 무시).
+    acknowledge_irreversible: StrictBool | None = None
 
 
 @router.post("/api/admin/batches/{batch_id}:confirm")
@@ -604,6 +618,10 @@ def confirm_batch(batch_id: str, request: Request, body: ConfirmBatchBody | None
         raise HTTPException(status_code=409, detail="batch_not_confirmable")
     if b["preview_round"] != body.preview_round:
         raise HTTPException(status_code=409, detail="batch_preview_changed")
+    # rm 은 「되돌릴 수 없음」 동의가 본문에 있어야 한다(ConfirmBatchBody 주석 -- 옛 포탈 탭의 sync 문구 확인 차단). 연산
+    # 비교는 rm 하나로 좁힌다: sync 확인 계약(옛 탭·스크립트의 {preview_round})은 그대로다.
+    if b["operation"] == Operation.RM.value and body.acknowledge_irreversible is not True:
+        raise HTTPException(status_code=422, detail="batch_rm_confirm_ack_required")
     _reject_stale_options(b)
     items = repo.list_items_detail(batch_id)
     summary = {
@@ -611,8 +629,11 @@ def confirm_batch(batch_id: str, request: Request, body: ConfirmBatchBody | None
         "items": len(items),
         "options": b["options"],
         # 확인한 미리보기의 대상 수 합계(rm = 지울 항목, sync = 복사 대상) -- 「누가 몇 개 삭제를 확인했나」를 감사 행에.
-        **_preview_files(items),
+        # 자동 확인(orchestrator)도 같은 함수로 같은 키를 남긴다(batch_orchestrator.preview_files).
+        **preview_files(items),
     }
+    if b["operation"] == Operation.RM.value:
+        summary["acknowledged_irreversible"] = True          # 감사 행에 동의 사실도(rm 만 -- 위에서 True 를 확인했다)
     if not repo.confirm(batch_id, actor=identity.actor, summary=summary, expected_round=body.preview_round):
         # 0 행 = 그 사이 상태가 바뀌었거나(항목 추가·재실행으로 Previewing 복귀, 취소) 회차가 바뀌었거나 Queued 항목이
         # 있다. Queued 로 확인 대기에 갇히지 않게 Previewing 으로 되돌린다(미리보기 뒤 다시 확인 대기가 된다).

@@ -492,3 +492,42 @@ def test_replace_items_locks_items_then_batch_on_postgres(db):
     assert BatchesRepository(spy).replace_items(bid, [{"storage": "s1", "target": "n"}]) is True
     locked = [re.search(r"FROM (\w+)", q).group(1) for q in spy.sql if q.rstrip().endswith("FOR UPDATE")]
     assert locked == ["batch_items", "batches"]
+
+
+def test_add_and_edit_lock_items_then_batch_and_validate_after_the_lock(db):
+    # 2026-10-21 리뷰 [1]: 배치 전체 규칙 판정(validate 콜백)은 잠금 **뒤**에 읽은 목록으로 -- 동시 추가·수정이 배치 행
+    # 잠금에서 줄을 서고, 뒤의 것은 앞의 것이 커밋한 항목을 보고 판정한다. 잠금 순서는 replace_items 와 같다(교착 없음).
+    import re
+    from dms.repositories.batches import BatchesRepository
+    bid = _edit_batch(Repositories(db), n=2, status="Completed")
+    for call in (lambda repo, v: repo.add_item(bid, {"storage": "s1", "target": "n"}, validate=v),
+                 lambda repo, v: repo.update_item_payload(bid, 0, {"storage": "s1", "target": "e"},
+                                                          only_queued=False, validate=v)):
+        spy = _PgSpy(db)
+        seen = []
+
+        def validate(batch, items):
+            seen.append((batch["batch_id"], len(spy.sql), [it["payload"]["target"] for it in items]))
+        assert call(BatchesRepository(spy), validate) not in (None, False)
+        locked = [(i, re.search(r"FROM (\w+)", q).group(1)) for i, q in enumerate(spy.sql)
+                  if q.rstrip().endswith("FOR UPDATE")]
+        assert [t for _, t in locked] == ["batch_items", "batches"]
+        assert len(seen) == 1 and seen[0][0] == bid and seen[0][1] > locked[-1][0]     # 판정은 잠금 뒤의 읽기로
+
+
+def test_validate_failure_rolls_back_the_write(db):
+    import pytest
+    from dms.domain import DomainValidationError
+    repos = Repositories(db)
+    bid = _edit_batch(repos, n=1, status="Completed")
+
+    def refuse(batch, items):
+        raise DomainValidationError("batch_rm_targets_overlap", "x")
+    with pytest.raises(DomainValidationError):
+        repos.batches.add_item(bid, {"storage": "s1", "target": "n"}, validate=refuse)
+    with pytest.raises(DomainValidationError):
+        repos.batches.update_item_payload(bid, 0, {"storage": "s1", "target": "e"}, only_queued=False, validate=refuse)
+    with pytest.raises(DomainValidationError):
+        repos.batches.replace_items(bid, [{"storage": "s1", "target": "r"}], validate=refuse)
+    assert [it["payload"]["target"] for it in repos.batches.list_items(bid)] == ["t0"]
+    assert repos.batches.get(bid)["item_count"] == 1

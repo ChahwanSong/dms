@@ -797,10 +797,11 @@ function ConfirmBatchDialog({ b, confirm, absOf }: {
       <div className="mt-4 flex justify-end gap-2">
         <Button variant="ghost" onClick={() => setOpen(false)}>취소</Button>
         {/* 미리보기 완료 0 으로 막지 않는다: 판정은 서버다(job_state 를 모르는 옛 응답이면 0 으로 보여 확인이 막힌다).
-            회차가 바뀌었으면 잠근다 -- 보낸다 해도 서버가 409 다. rm 은 「되돌릴 수 없음」 체크 전에도 잠근다(화면 마찰 --
-            서버 계약은 그대로 preview_round). */}
+            회차가 바뀌었으면 잠근다 -- 보낸다 해도 서버가 409 다. rm 은 「되돌릴 수 없음」 체크 전에도 잠그고, 체크했을 때만
+            동의(acknowledge_irreversible: true)를 싣는다 -- 서버도 rm 확인에 그 동의를 요구한다(옛 탭 차단, useConfirmBatch). */}
         <Button disabled={confirm.isPending || changed || round === null || (isRm && !ack)}
-                onClick={() => confirm.mutate({ preview_round: round ?? current },
+                onClick={() => confirm.mutate(
+                  { preview_round: round ?? current, ...(isRm && ack ? { acknowledge_irreversible: true as const } : {}) },
                   { onSuccess: () => setOpen(false) })}>{isRm ? "삭제 실행 확인" : "실행 확인"}</Button>
       </div>
     </Dialog>

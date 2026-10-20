@@ -39,6 +39,8 @@ def test_build_spec_uses_absolute_paths(db):
     JobStepper(repos, adapter, settings=_Settings()).run_once()  # preflight submit
     spec = adapter.submitted_specs()[0]
     assert spec.paths["target"] == "/cephfs/dms/team/data"  # managed_root + rel
+    # rm 대상 봉쇄의 기준(2026-10-21) -- target 을 조합한 바로 그 값이 함께 실린다(대상 하나 연산 공통, 단건·배치 자식 같은 경로).
+    assert spec.paths["managed_root"] == "/cephfs/dms"
 
 
 def test_sync_recheck_preflight_before_execution(db):

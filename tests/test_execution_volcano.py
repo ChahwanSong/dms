@@ -225,7 +225,8 @@ def test_terminate_idempotent_and_error():
     assert len(k8s.deleted) >= 1
     k8s.fail_delete = True
     ref2 = _adapter(k8s).submit(_spec(phase="execution", op="rm", tool="drm",
-                                      paths={"target": "/cephfs/x", "storage": "cephfs-dms"}))
+                                      paths={"target": "/cephfs/dms/x", "storage": "cephfs-dms",
+                                             "managed_root": "/cephfs/dms"}))
     with pytest.raises(ExecutionError):
         a.terminate(ref2)
 

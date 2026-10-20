@@ -21,6 +21,9 @@ WORKER_READY_TIMEOUT_SECONDS = 300
 # dms_job_runner 는 dms 를 import 하지 않는 독립 패키지라 중복 정의, 계약 테스트가 둘을 잇는다).
 EXECUTION_REASON_MARKER = "DMS_EXEC_REASON="
 WORKERS_UNREACHABLE = "workers_unreachable"
+# rm 대상 봉쇄 재확인(2026-10-21 리뷰, rm_target_redirected) -- preflight 마커와 같은 코드(execution_manifests 의
+# PREFLIGHT_REASONS·EXECUTION_REASONS 양쪽, 계약 테스트가 잇는다).
+TARGET_PATH_REDIRECTED = "target_path_redirected"
 
 # 슬라이스 24 §2.1 층3: 러너가 exec 할 수 있는 도구의 최종 allowlist.
 # dms 패키지의 config.AGENT_TOOL_NAMES 와 같은 값이어야 하지만 dms_job_runner 는
@@ -30,6 +33,40 @@ WORKERS_UNREACHABLE = "workers_unreachable"
 # (tool_argv)가 뚫려도 -- 이미 제출된 매니페스트/env 의 사후 변조까지 포함해 --
 # 이 층만은 실행을 막는다.
 ALLOWED_TOOLS = ("dscan", "dsync", "nsync", "drm")
+
+
+def _realpath_strict(path):
+    return os.path.realpath(path, strict=True)
+
+
+def rm_target_redirected(target, root, *, realpath=_realpath_strict) -> bool:
+    """drm 대상의 상위 경로가 managed_root 아래 **심링크 성분 없이** 그 자리에 있는가의 반대(True = 막는다).
+
+    execution_manifests._RM_CONTAINMENT_CHECK(preflight·exec_preflight 셸)와 **같은 규칙**이다 -- 둘이 갈라지면 한쪽만
+    통과하는 경로가 생긴다(tests/test_rm_containment_sh.py 가 같은 트리로 두 판정을 대조한다). 왜 러너도 보나: exec_preflight
+    파드와 실행 vcjob 은 다른 파드라 그 사이(Volcano 대기는 길 수 있다)에 사용자가 상위 디렉터리를 심링크로 바꾸면 root drm
+    이 다른 트리를 지운다. 여기는 mpirun 바로 앞이라 창이 「워커 기동 + drm 의 걷기 시작」까지로 줄어든다(완전히 닫히지는
+    않는다 -- BACKLOG §4). target 은 drm argv 마지막(tool_argv), root 는 env DMS_JR_RM_ROOT(stepper 가 target 을 조합한 값).
+    마지막 성분은 심링크여도 된다(drm 은 링크 자체만 지운다). 실제 경로를 못 구하면(없는 상위·고리) 막는다(fail-closed)."""
+    if not isinstance(target, str) or not isinstance(root, str) or root == "":
+        return True
+    if target.endswith("/") or target.endswith("/.") or target.endswith("/..") or "/" not in target:
+        return True
+    parent = os.path.dirname(target)
+    base = root[:-1] if root.endswith("/") else root      # 셸 "${R%/}" 와 같다(끝 슬래시 하나만)
+    if parent in (root, base):
+        rel = ""
+    elif parent.startswith(base + "/"):
+        rel = parent[len(base) + 1:]
+    else:
+        return True
+    try:
+        real_root = realpath(root)
+        real_parent = realpath(parent)
+    except (OSError, ValueError):
+        return True
+    want = real_root if rel == "" else f"{real_root[:-1] if real_root.endswith('/') else real_root}/{rel}"
+    return real_parent != want
 
 
 def run_job(env, *, run, write_text, read_text, sleep, wait_hostfile,
@@ -118,6 +155,22 @@ def run_job(env, *, run, write_text, read_text, sleep, wait_hostfile,
     #     "Failed to write output file"로 실패). 이후 summary/로그는 root가 다시 써도
     #     되고(권한 무시), world-readable이라 컨트롤러 read_summary가 읽을 수 있다.
     run(["chown", "-R", f"{uid}:{gid}", artifact_dir])
+
+    # 6c. rm 대상 봉쇄 재확인(rm_target_redirected docstring) -- mpirun 바로 앞(워커 준비 대기 뒤)이라 가장 늦은 자리다.
+    #     env 키 부재 = 이 검사 전의 제어면이 만든 매니페스트(롤링 업그레이드) -- 그 제어면의 preflight 도 보지 않았으니
+    #     종전대로 둔다. 키가 있으면(빈 값 포함) 판정한다.
+    if tool == "drm" and "DMS_JR_RM_ROOT" in env:
+        target = argv[-1] if argv else None
+        if rm_target_redirected(target, env["DMS_JR_RM_ROOT"]):
+            lines = (f"{EXECUTION_REASON_MARKER}{TARGET_PATH_REDIRECTED}\n"
+                     f"DMS_JR_RM_TARGET_REDIRECTED target={target!r} root={env['DMS_JR_RM_ROOT']!r}\n")
+            sys.stdout.write(lines)
+            sys.stdout.flush()
+            write_text(f"{artifact_dir}/stderr.log", lines)
+            # 도구는 실행되지 않았다 -- returncode 는 모름(null), 3키 계약 유지(워커 준비 실패와 같은 모양).
+            write_text(f"{artifact_dir}/summary.json",
+                       json.dumps({"returncode": None, "files": None, "bytes": None}))
+            return 1
 
     # 7. mpirun — runuser로 요청자 신원, OMPI env + -x 전파(commands.mpirun_command)
     proc = run(mpirun_command(process_count=process_count, hostfile=hostfile_path,

@@ -219,7 +219,10 @@ export const useDeleteBatches = () => {
   });
 };
 // 확인은 대화상자를 연 회차(preview_round)를 싣는다 -- 서버가 다른 회차면 409 batch_preview_changed(ABA 방지).
-export const useConfirmBatch = (id: string) => _action<{ preview_round: number }>(id, "confirm");
+// rm 은 「되돌릴 수 없음」 체크를 켰을 때만 acknowledge_irreversible: true 를 함께 싣는다(2026-10-21 -- 없으면 서버 422
+// batch_rm_confirm_ack_required: 그 체크가 없는 옛 포탈 탭의 확인을 서버가 막는다). sync 는 싣지 않는다.
+export const useConfirmBatch = (id: string) =>
+  _action<{ preview_round: number; acknowledge_irreversible?: true }>(id, "confirm");
 export const useRerunFailed = (id: string) => _action(id, "rerun-failed");
 export const useCancelBatch = (id: string) => _action(id, "cancel");
 // sync 자동 확인 끄기(어느 상태에서나 -- 진행 중 브레이크). 켜기는 생성·실행 설정 변경(특권 게이트)뿐이다.

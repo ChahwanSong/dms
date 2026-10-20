@@ -477,13 +477,17 @@ class JobStepper:
         if change is not None:
             raise IdentityChangedAtStep({"job_id": job["job_id"], "phase": phase, "queued": True, **change})
 
-    def _abs(self, storage_name, rel):
+    def _managed_root(self, storage_name):
         storage = self._repos.storages.get(storage_name)
         root = (storage or {}).get("managed_root")
         if root is None or root == "":
             # 컬럼이 NOT NULL(migrations.py:209)이라 여기 도달은 사실상 "행
             # 삭제"와 직접 DB 조작뿐이다(설계 §1-8). 폴백 금지 -- fail-closed.
             raise StorageMissingAtStep(storage_name)
+        return root
+
+    def _abs(self, storage_name, rel):
+        root = self._managed_root(storage_name)
         # f-string 결합이 아니라 join(설계 §2.2): 검증 이전에 DB 에 남아 있을 수
         # 있는 root "/" 행에서 f"{root}/{rel}" 은 "//rel" 을 만들고 POSIX 는
         # "//" 를 구현 정의로 취급한다(문자열 비교 계열 -- 감사 로그·아티팩트
@@ -554,8 +558,11 @@ class JobStepper:
                      "destination": self._abs(job["destination_storage"], job["destination"]),
                      "destination_storage": job["destination_storage"]}
         else:
-            paths = {"target": self._abs(job["storage_name"], job["target"]),
-                     "storage": job["storage_name"]}
+            # managed_root 도 싣는다(2026-10-21 rm 대상 봉쇄 -- execution_manifests._RM_CONTAINMENT_CHECK·러너 재확인의 기준).
+            # 한 번 읽은 같은 값으로 target 을 조합한다: 두 번 읽으면 그 사이 스토리지 수정이 기준과 대상을 갈라 놓는다.
+            root = self._managed_root(job["storage_name"])
+            paths = {"target": managed_abs_path(root, job["target"]),
+                     "storage": job["storage_name"], "managed_root": root}
         # job["tool"]은 실행 파일 이름(dscan/dsync/nsync/drm)이지 정책 키(scan/dsync/
         # nsync/rm)가 아니다 -- planner.py가 policy를 조회할 때 쓰는 것과 동일한
         # TOOL_TO_POLICY 매핑을 거쳐야 scan/rm 잡의 정책을 정확히 찾는다.

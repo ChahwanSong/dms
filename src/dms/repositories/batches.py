@@ -277,7 +277,29 @@ class BatchesRepository:
                  WHERE batch_id = :b""",
             {"b": batch_id, "now": utc_now_iso()})
 
-    def update_item_payload(self, batch_id, seq, payload, *, only_queued: bool) -> bool:
+    def _lock_items_then_batch(self, batch_id, *, with_items=True):
+        """항목 쓰기(추가·수정·교체) 트랜잭션의 첫 문장들 -- 잠근 배치 행(hydrate)과 그 순간의 항목 목록을 돌려준다(배치
+        행이 없으면 (None, None); with_items=False 면 목록 자리는 [] -- 전체 교체는 기존 목록을 보지 않는다). 반드시
+        transaction() 안에서 부른다.
+
+        왜(2026-10-21 리뷰): 배치 전체 규칙(rm 대상 겹침·단일 스토리지 동질성 -- domain.validate_batch)은 **목록 전체**를
+        보는 판정이라, 라우트가 트랜잭션 밖 스냅샷으로 판정하면 두 요청(두 탭·두 세션)이 서로의 항목을 못 본 채 둘 다
+        통과해 a 와 a/b 가 한 rm 배치에 같이 들어갔다. 그래서 판정을 쓰기와 같은 트랜잭션, 이 잠금 **뒤**의 읽기로 옮긴다.
+        PG: 항목 행 → 배치 행 순서로 FOR UPDATE -- 오케스트레이터 _record_terminal(batch_items UPDATE → batches UPDATE,
+        다른 프로세스)·replace_items 와 같은 방향이라 교착이 없다(배치 행을 먼저 쥐고 항목을 바꾸면 역순이다). 항목 잠금은
+        seq 순(같은 배치를 잠그는 두 트랜잭션이 같은 순서로 집는다). 배치 행 잠금이 직렬화 지점이다 -- 항목이 0개여도
+        (잠글 항목 행이 없어도) 두 추가는 여기서 줄을 선다. READ COMMITTED 라 잠금을 얻은 뒤의 목록 읽기는 앞 트랜잭션이
+        커밋한 항목을 본다. sqlite(개발·테스트): FOR UPDATE 가 없고, 한 프로세스의 단일 커넥션 RLock(db.transaction)이
+        트랜잭션 전체를 직렬화한다."""
+        lock = " FOR UPDATE" if self._db.dialect == "postgresql" else ""
+        if lock:
+            self._db.query(f"SELECT seq FROM batch_items WHERE batch_id = :b ORDER BY seq{lock}", {"b": batch_id})
+        row = self._db.query_one(f"SELECT * FROM batches WHERE batch_id = :b{lock}", {"b": batch_id})
+        if row is None:
+            return None, None
+        return _hydrate(row), (self.list_items(batch_id) if with_items else [])
+
+    def update_item_payload(self, batch_id, seq, payload, *, only_queued: bool, validate=None) -> bool:
         """항목 편집 = payload 교체 + **Queued 리셋**(request_id/reason_code NULL).
         종단 항목의 payload 만 바꾸면 "이 payload 가 그 결과를 냈다"는 거짓 기록이
         된다(실행 기록 위조 금지) — 편집된 항목은 항상 미실행으로 되돌린다(리셋
@@ -285,9 +307,18 @@ class BatchesRepository:
         only_queued=True(활성 배치): WHERE status='Queued' 원자 가드 — orchestrator
         materialize(5s 틱)와의 경합에서 영향 행 0 이면 False(호출자가 409).
         DB 가 신뢰 경계라 가드는 SQL 한 문장에 둔다 — 읽고 나서 쓰면 그 사이가
-        경합 창이다."""
+        경합 창이다.
+
+        validate(batch, items)(2026-10-21): 잠근 배치 행과 지금 항목 목록으로 편집 뒤 배치 규칙을 판정하는 콜백
+        (_lock_items_then_batch docstring). 던지면 트랜잭션째 롤백되고 예외가 호출자로 간다(라우트 422). 배치 행이
+        없으면(그 사이 삭제) False -- 아무것도 쓰지 않는다."""
         guard = " AND status = 'Queued'" if only_queued else ""
         with self._db.transaction():
+            batch, items = self._lock_items_then_batch(batch_id)
+            if batch is None:
+                return False
+            if validate is not None:
+                validate(batch, items)
             n = self._db.execute_count(
                 f"""UPDATE batch_items SET payload = :p, status = 'Queued',
                         request_id = NULL, reason_code = NULL, updated_at = :now
@@ -315,7 +346,7 @@ class BatchesRepository:
             self._recount(batch_id)
         return True
 
-    def add_item(self, batch_id, payload) -> "int | None":
+    def add_item(self, batch_id, payload, *, validate=None) -> "int | None":
         """항목 추가: seq = MAX(seq)+1(빈 배치는 0). COUNT 가 아닌 이유: 중간
         삭제로 구멍이 있으면 COUNT 는 살아있는 꼬리 seq 와 PK 충돌하거나 구멍을
         재사용해 "seq = 등록 순서" 의미가 흐려진다(releases.seq 의 MAX+1 관례와
@@ -323,14 +354,17 @@ class BatchesRepository:
         받으면 PK(batch_id, seq) 충돌로 한쪽이 죽는 fail-closed.
 
         배치 행이 없으면 None(아무것도 쓰지 않는다 -- 라우트가 404 batch_not_found). 라우트가 배치를 읽은 뒤 INSERT 전에
-        배치가 지워지면(배치 단위 삭제·배치 기록 삭제) 배치 없는 고아 항목이 생겼다(2026-10-10) -- 트랜잭션 첫 문장에서
-        배치 행을 다시 본다(PG 는 행 잠금). 잠금 순서가 batches → batch_items 지만 이 경로는 API 프로세스 안이라 RLock 으로
-        직렬화되고, 다른 프로세스(오케스트레이터)는 배치 행을 잠그지 않고 짧은 UPDATE 만 해서 교착이 없다."""
+        배치가 지워지면(배치 단위 삭제·배치 기록 삭제) 배치 없는 고아 항목이 생겼다(2026-10-10) -- 트랜잭션 첫 문장들에서
+        배치 행을 다시 본다(_lock_items_then_batch -- PG 는 항목 행 → 배치 행 잠금).
+        validate(batch, items)(2026-10-21): 추가 뒤 배치 규칙(rm 겹침·스토리지 동질성) 판정 콜백 -- 잠금 뒤 읽은 목록으로
+        보므로 동시 추가·수정이 서로의 항목을 못 본 채 둘 다 통과하지 않는다. 던지면 롤백 + 호출자로(라우트 422)."""
         now = utc_now_iso()
-        lock = " FOR UPDATE" if self._db.dialect == "postgresql" else ""
         with self._db.transaction():
-            if self._db.query_one(f"SELECT 1 AS x FROM batches WHERE batch_id = :b{lock}", {"b": batch_id}) is None:
+            batch, items = self._lock_items_then_batch(batch_id)
+            if batch is None:
                 return None
+            if validate is not None:
+                validate(batch, items)
             row = self._db.query_one(
                 "SELECT COALESCE(MAX(seq) + 1, 0) AS next_seq FROM batch_items "
                 "WHERE batch_id = :b", {"b": batch_id})
@@ -343,7 +377,7 @@ class BatchesRepository:
             self._recount(batch_id)
         return seq
 
-    def replace_items(self, batch_id, items) -> "bool | None":
+    def replace_items(self, batch_id, items, *, validate=None) -> "bool | None":
         """항목 전량 교체(CSV 재업로드 동선): 기존 batch_items 전량 DELETE + 신규
         INSERT(seq 0..n-1 재부여) + 카운터 절대값 재계산 — 한 트랜잭션. 단건
         삭제(delete_item)는 seq 구멍을 유지하지만(남은 항목의 이력 사칭 방지)
@@ -359,18 +393,18 @@ class BatchesRepository:
         (2026-10-10 검증 지적, add_item 과 같은 경합). 그래서 트랜잭션 안에서 배치 행과 상태를 다시 본다 -- 라우트의 종단
         판정과 이 쓰기 사이에 :rescan·항목 추가가 배치를 되살린 경합도 같은 자리에서 닫힌다. 잠금 순서는 batch_items →
         batches(PG): 오케스트레이터 _record_terminal(batch_items UPDATE → batches UPDATE, 다른 프로세스)과 같은 방향이다
-        -- 배치 행을 먼저 쥐고 항목을 DELETE 하면 그 경로와 역순이라 교착이다(add_item 은 기존 항목을 잠그지 않아 해당
-        없다)."""
+        -- 배치 행을 먼저 쥐고 항목을 DELETE 하면 그 경로와 역순이라 교착이다(_lock_items_then_batch -- 추가·수정도 같은
+        순서다). validate(batch, items)(2026-10-21): 새 목록의 배치 규칙 판정을 잠근 배치 행(연산·옵션·동시 실행 상한)으로
+        같은 트랜잭션에서 한다 -- 라우트가 읽은 뒤 바뀐 옵션으로 판정하지 않는다. 던지면 롤백 + 호출자로(라우트 422)."""
         now = utc_now_iso()
-        lock = " FOR UPDATE" if self._db.dialect == "postgresql" else ""
         with self._db.transaction():
-            if lock:
-                self._db.query(f"SELECT seq FROM batch_items WHERE batch_id = :b{lock}", {"b": batch_id})
-            row = self._db.query_one(f"SELECT status FROM batches WHERE batch_id = :b{lock}", {"b": batch_id})
-            if row is None:
+            batch, _ = self._lock_items_then_batch(batch_id, with_items=False)
+            if batch is None:
                 return None
-            if row["status"] not in ("Completed", "Cancelled"):
+            if batch["status"] not in ("Completed", "Cancelled"):
                 return False
+            if validate is not None:
+                validate(batch, [])
             self._db.execute("DELETE FROM batch_items WHERE batch_id = :b",
                              {"b": batch_id})
             for seq, item in enumerate(items):
