@@ -853,7 +853,7 @@ export function BatchCreate() {
               즉시 삭제됩니다. 결과를 보고 지우려면 자동 실행을 끄세요.
             </p>
             <label className="mt-2 flex items-start gap-2 font-medium">
-              <input type="checkbox" className="mt-0.5" aria-label="확인 없이 삭제되는 것에 동의"
+              <input type="checkbox" className="mt-0.5" aria-required="true"
                      checked={f.autoConfirmAck} onChange={on("autoConfirmAck")} />
               <span>확인 없이 root 로 삭제되며 되돌릴 수 없다는 것을 이해했습니다(필수)</span>
             </label>

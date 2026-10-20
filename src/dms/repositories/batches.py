@@ -724,7 +724,8 @@ class BatchesRepository:
                                      WHERE batch_id = :b AND status NOT IN ({ph}))""",
             {"now": utc_now_iso(), "b": batch_id, "cur": from_status}) == 1
 
-    def confirm(self, batch_id, *, actor, summary, expected_round, expected_auto_confirm_by=None) -> bool:
+    def confirm(self, batch_id, *, actor, summary, expected_round, expected_auto_confirm_by=None,
+                auto_confirm_env_listed=False) -> bool:
         """확인 게이트 배치(sync·rm -- domain.confirm_gated) 확인(PreviewReady → Running) + 감사 행, 한 트랜잭션
         (2026-10-07).
 
@@ -745,15 +746,20 @@ class BatchesRepository:
         자동 확인(expected_auto_confirm_by, 2026-10-11 -- orchestrator 만 넘긴다): 확인을 **그 동의**에 묶는다 -- 같은
         문장에서 켠 사람이 아직 그 사람이고(그 사이 :auto-confirm-off 가 커밋됐으면 NULL 이라 0 행) 그 계정이 지금도
         활성 관리자일 때만 통과한다. 틱이 배치를 읽은 뒤 운영자가 「자동 실행 끄기」를 눌러 200 을 받았는데 루프가 옛
-        읽기로 확인해 root 로 돌던 창(2026-10-11 리뷰 재현)을 닫는다. 특권 목록(설정)은 SQL 밖이라 호출자가 직전에
-        본다(batch_orchestrator.auto_confirm_hold). 사람의 확인 라우트는 None(조건 없음)."""
+        읽기로 확인해 root 로 돌던 창(2026-10-11 리뷰 재현)을 닫는다. 자격도 같은 문장에서 다시 본다: env 목록(설정 --
+        SQL 밖이라 호출자가 auto_confirm_env_listed 로 넘긴다, 재시작 전엔 바뀌지 않는다)이거나 **지금** 계정 화면 부여
+        (root_granted = 1)가 서 있어야 한다 -- 부여가 DB 로 옮겨 온 뒤(2026-10-12)에도 이 절은 역할·활성만 봐서, 직전
+        판정(auto_confirm_hold) 뒤 회수된 부여가 그 틱의 확인(rm 이면 되돌릴 수 없는 root 삭제)을 막지 못했다(2026-10-21 리뷰
+        재현). 사람의 확인 라우트는 None(조건 없음)."""
         now = utc_now_iso()
         consent = ""
         params = {"now": now, "b": batch_id, "r": expected_round}
         if expected_auto_confirm_by is not None:
             consent = """ AND auto_confirm_by = :by
-                        AND EXISTS (SELECT 1 FROM accounts WHERE username = :by AND role = 'admin' AND disabled = 0)"""
+                        AND EXISTS (SELECT 1 FROM accounts WHERE username = :by AND role = 'admin' AND disabled = 0
+                                      AND (:env = 1 OR root_granted = 1))"""
             params["by"] = expected_auto_confirm_by
+            params["env"] = 1 if auto_confirm_env_listed is True else 0
         with self._db.transaction():
             n = self._db.execute_count(
                 f"""UPDATE batches SET status = 'Running', updated_at = :now

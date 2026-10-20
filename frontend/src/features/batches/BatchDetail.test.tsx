@@ -1975,6 +1975,16 @@ test("rm 항목 펼침: 「삭제한 항목」 라벨 + 「삭제 대상(미리�
   expect(screen.queryByText("데이터 온도")).toBeNull();
 });
 
+test("rm CSV 교체 안내: 자동 실행이 켜진 배치면 「배치 확인」을 약속하지 않고 확인 없이 삭제된다고 말한다", async () => {
+  renderItems(rmBatch({ status: "Completed", auto_confirm: true, auto_confirm_by: "root",
+                        items: [rmItem(0, "old/a", { status: "Succeeded" })] }));
+  await userEvent.click(await screen.findByRole("button", { name: "CSV로 전체 교체" }));
+  const note = within(await screen.findByRole("dialog", { name: "CSV로 전체 교체" }))
+    .getByRole("note", { name: "삭제 경로 교체" });
+  expect(note).toHaveTextContent("「배치 확인」 없이 이 경로들이 root 로 삭제됩니다");
+  expect(note).not.toHaveTextContent("「배치 확인」을 거쳐");
+});
+
 test("rm 현재 항목 CSV·CSV 교체: target 1열 왕복 + {storage,target} PUT + 「교체만으로는 지워지지 않습니다」·겹침 즉답", async () => {
   let sent: any = null;
   server.use(http.put("/api/admin/batches/b1/items", async ({ request }) => {
@@ -2041,15 +2051,15 @@ test("rm 실행 설정 변경: 자동 실행을 켜면 빨간 경고 + 필수 �
   expect(q.getByText(/「배치 확인」 없이 삭제\(root\)됩니다/)).toBeInTheDocument();
   const save = q.getByRole("button", { name: "저장" });
   expect(save).toBeDisabled();
-  const ack = q.getByLabelText("확인 없이 삭제되는 것에 동의");
+  const ack = q.getByLabelText(/되돌릴 수 없다는 것을 이해했습니다/);
   await userEvent.click(ack);
   expect(save).toBeEnabled();
   // 자동 실행 체크를 껐다 켜면 동의도 다시 받는다(지난 동의가 이어지지 않게)
   await userEvent.click(q.getByLabelText("미리보기 후 자동 실행"));
   await userEvent.click(q.getByLabelText("미리보기 후 자동 실행"));
-  expect(q.getByLabelText("확인 없이 삭제되는 것에 동의")).not.toBeChecked();
+  expect(q.getByLabelText(/되돌릴 수 없다는 것을 이해했습니다/)).not.toBeChecked();
   expect(q.getByRole("button", { name: "저장" })).toBeDisabled();
-  await userEvent.click(q.getByLabelText("확인 없이 삭제되는 것에 동의"));
+  await userEvent.click(q.getByLabelText(/되돌릴 수 없다는 것을 이해했습니다/));
   await userEvent.click(q.getByRole("button", { name: "저장" }));
   await waitFor(() => expect(sent).not.toBeNull());
   expect(sent.auto_confirm).toBe(true);
