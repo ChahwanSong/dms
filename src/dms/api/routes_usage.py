@@ -20,6 +20,8 @@
 - 메모리(같은 날): 창이 1만이 되면서 창 전체의 latest 포인트를 세우는 옛 구조는 1만 내보내기 한 건이 +~465MiB, 동시
   3건이면 api 한도 1Gi 를 넘었다(PG 실측). 그래서 지표 정렬은 창의 정렬 **값만** _CHUNK 묶음으로 계산하고(요약은 값을 뽑은
   뒤 버린다) 반환할 행만 포인트를 만들며, 내보내기는 _CHUNK 타깃 묶음씩 흘려보낸다(StreamingResponse).
+- 스토리지 합계(2026-10-21 사용자 요청: 「스토리지별 사용량 및 정보들의 총합」): 지금 탭 하나만 storage-totals 가 게으르게
+  계산한다 -- 최상위 대상만·목록 열과 같은 값·지표마다 known/unknown·한 호출 읽기 예산(규칙은 storage_totals docstring).
 """
 import json
 import sys
@@ -37,7 +39,8 @@ from .routes_request_purge import MAX_DELETE, MAX_DELETE_BATCHES
 from .routes_requests import reject_when_maintenance
 from .routes_scan_paths import (_buckets, _is_number, _numbers, _time_histograms,
                                 _total_bytes)
-from ..usage_metrics import METRIC_SORTS, SORT_PATTERN, metric_value, sort_keyed
+from ..metrics_series import storage_filesystem
+from ..usage_metrics import METRIC_SORTS, SORT_PATTERN, StorageTotals, maximal_targets, metric_value, sort_keyed
 
 router = APIRouter(dependencies=[Depends(require_admin)])
 
@@ -56,6 +59,10 @@ _WINDOW_LIMIT = 10000
 # 창·내보내기의 묶음 크기 -- 캐시 조회(get_many)·잡 조회(target IN·job_id IN)·캐시 쓰기(put_many)가 한 번에 다루는 상한.
 # 메모리는 묶음 하나(요약·잡 행 500개)만큼만 든다.
 _CHUNK = 500
+# 스토리지 합계 한 호출이 여는 아티팩트 상한(캐시에 없는 최상위 대상의 리포트) -- 나머지는 pending 으로 말하고, 포탈이
+# 다시 부르면 캐시가 찬 만큼 이어 간다. 탭을 열기만 해도 한 요청이 공유 스토리지 I/O 를 최대 1만 건(동기 스레드풀 점유,
+# artifacts.py 의 위험 기록) 붙잡지 않게 한 묶음으로 묶는다.
+_TOTALS_READ_BUDGET = 500
 _ORDER = "^(asc|desc)$"
 
 
@@ -382,8 +389,11 @@ def usage_storages(request: Request):
       source "last_known"), 그것도 없으면 null·source null(모름) -- 내보내기 행의 storage 와 같은 규칙(_storage_infos).
     - 순서: 등록 이름순 → 미등록 이름순(파이썬 문자열 순 -- 방언의 콜레이션과 무관하게, unregistered-storages 와 같은 순).
       최근 스캔순이 아닌 이유: 스캔이 끝날 때마다 탭이 움직인다.
-    - 총 사용량은 싣지 않는다: 타깃 경로가 겹쳐(team ⊃ team/sub) 합이 이중 계산이고, 잡 행 bytes_count 의 SQL 합은 화면
-      규칙(리포트 요약의 total_bytes)과 다르다 -- 러너가 용량을 기록하기 전 잡은 NULL 이라 조용히 빠진다(null≠0).
+    - 총 사용량은 여기 싣지 않는다 -- 지금 탭 하나만 GET /api/admin/usage/storage-totals 가 계산한다(2026-10-21: 최상위
+      대상만, 목록 열과 같은 값 규칙, 지표마다 known/unknown). 여기서 전 스토리지를 합하면 페이지를 열 때마다 모든 스토리지의
+      모든 대상 요약을 읽는다(GROUP BY 한 번 9ms → 1.5만 대상 ~2초, 캐시가 비면 아티팩트 수천 건). 잡 행 bytes_count 의 SQL
+      합으로 대신하지 않는 이유도 그대로다: 타깃 경로가 겹쳐(team ⊃ team/sub) 이중 계산이고, 러너가 용량을 기록하기 전
+      잡은 NULL 이라 조용히 빠진다(null≠0).
     - 실패 scan 만 남은 미등록 이름은 여기 없다(사용량 기준 = 성공 scan) -- 정리할 거리는 unregistered-storages 가 말한다.
     집계는 GROUP BY 한 번(DataJobsRepository.scan_storage_summary) + 미등록 이름마다 감사 기록 한 번."""
     repos = request.app.state.repos
@@ -400,6 +410,71 @@ def usage_storages(request: Request):
                                         backend_type=(known or {}).get("backend_type"),
                                         mount_path=(known or {}).get("mount_path")))
     return {"window_limit": _WINDOW_LIMIT, "storages": out}
+
+
+@router.get("/api/admin/usage/storage-totals")
+def storage_totals(request: Request, storage: str = Query(..., max_length=512)):
+    """스토리지 하나의 합계(2026-10-21 사용자 요청: 「사용량 분석에 스토리지별 사용량 및 정보들의 총합을 볼수있도록」).
+    storage 는 필수이고 실린 값은 빈 문자열도 그 이름 하나다(scan-targets 와 같은 정확 일치 -- /storages 가 변조·구형 행의
+    빈 이름도 탭으로 낸다). 이름을 경로(/storages/{name}/totals)가 아니라 쿼리로 받는 이유: 미등록 옛 이름은 지금의 이름
+    규칙 밖 글자('/' 등)를 가질 수 있다(PurgeScanHistoryBody 와 같은 이유). 없는 이름은 404 가 아니라 빈 합계(0개·null) --
+    scan-history 의 「빈 points = 정상」과 같다. 읽기 전용이라 require_admin(라우터)만 건다.
+
+    규칙(값의 원천은 목록·내보내기와 한 벌):
+    1. 대상 = 그 스토리지의 머리(scan_target_heads, 최근 스캔 순) 창 _WINDOW_LIMIT 개 -- 넘으면 truncated(「최근 스캔된
+       1만 개 기준 부분 합」, 조용한 절단 금지). 창 밖 조상은 모르므로 그 하위가 창 안에서 최상위로 셀 수 있다(부분 합이다).
+    2. 그중 **최상위**(조상 대상이 없는) 대상만 더한다(usage_metrics.maximal_targets -- 경로 성분 단위, 모양이 틀린 target 은
+       invalid 로 세고 조상 판정에도 쓰지 않는다). 하위 대상이 더 새로 스캔됐어도 상위의 최신 scan 값을 쓴다 -- 상위 리포트
+       안에서 하위가 차지하는 몫을 모르므로 섞을 수 없다(시점 범위 oldest/newest 를 함께 싣는다).
+    3. 각 최상위 대상의 값 = 그 대상의 최신 성공 scan 하나. 실 사용량은 목록 열과 같은 값(metric_value(latest, "bytes") --
+       리포트를 못 읽으면 러너가 남긴 bytes_count), 나머지는 리포트 요약(usage_metrics.StorageTotals -- 지표마다 sum·known·
+       unknown, known 0 이면 sum null, hot 은 bytes 가중, 크기 분포는 가장 최근 리포트의 구간 서명과 같은 것만).
+    4. 읽기 예산(_TOTALS_READ_BUDGET): 캐시에 없는 최상위 대상의 리포트는 한 호출에 그만큼만 연다(_read_and_cache --
+       owner_uid fail-closed). 넘은 대상은 pending_count, 열었는데 못 읽은 대상은 unreadable_count(캐시에 넣지 않는다 --
+       일시 오류를 영구 모름으로 굳히지 않게), 둘 다 이번 응답에선 리포트 유래 값이 모름이다(실 사용량만 bytes_count 대체).
+       progressed = 이번 호출에서 하나라도 새로 읽어 캐시에 넣었는가 -- 포탈은 pending > 0 && progressed 동안 다시 부른다
+       (진전이 없으면 멈춘다). 못 읽은 최상위 대상을 그 하위 대상들로 대체하지 않는다 -- 하위가 상위를 덮는다는 보장이 없어
+       조용한 과소 보고가 된다.
+    5. filesystem = 그 스토리지가 Ready 마운트포인트인 노드의 statvfs(metrics_series.storage_filesystem -- 신선 우선 → 최신).
+       미등록 이름은 null(지운 스토리지의 마지막 사용량은 보이되 df 는 지금 값이 아니다). 스토리지끼리 더하지 않는다 -- 여러
+       스토리지가 한 파일시스템일 수 있다. 스캔 합계와 기준이 달라(스캔 안 한 경로·할당 블록·예약 블록) 비율을 내지 않는다.
+
+    메모리는 _CHUNK 묶음 하나(요약 500개 -- 값을 더한 뒤 버린다)와 머리 행들이다. 결과 캐시는 두지 않는다(1만 대상 sqlite
+    ~1.2초, 포탈 staleTime 30초) -- 필요해지면 (storage, 머리 job_id 집합) 키의 프로세스 내 사전이다(요약이 불변이라 키가
+    같으면 값이 같다; pending·unreadable 이 0 인 결과만)."""
+    repos, settings = request.app.state.repos, request.app.state.settings
+    heads = repos.data_jobs.scan_target_heads(storage=storage, order="desc", limit=_WINDOW_LIMIT + 1)
+    truncated = len(heads) > _WINDOW_LIMIT
+    heads = heads[:_WINDOW_LIMIT]
+    top, nested, invalid = maximal_targets(heads)
+    base = _base(request)
+    acc = StorageTotals()
+    budget, pending, unreadable, read_ok = _TOTALS_READ_BUDGET, 0, 0, 0
+    for i in range(0, len(top), _CHUNK):
+        chunk = top[i:i + _CHUNK]
+        digests = _cached_digests(repos, [h["job_id"] for h in chunk])
+        missing = [h["job_id"] for h in chunk if h["job_id"] not in digests]
+        take, later = missing[:budget], missing[budget:]
+        budget -= len(take)
+        pending += len(later)
+        if take:
+            fresh = _read_and_cache(repos, base, list(repos.data_jobs.jobs_by_ids(take).values()))
+            read_ok += len(fresh)
+            unreadable += sum(1 for jid in take if jid not in fresh)      # 그 사이 지워진 잡도 못 읽은 것이다
+            digests.update(fresh)
+        for h in chunk:
+            d = digests.get(h["job_id"])           # 못 읽음·지연 = None -> 실 사용량은 bytes_count(목록 열과 같은 대체)
+            acc.add(h, metric_value({"latest": _point(h, d)}, "bytes"), d)
+        del digests
+    registered = repos.storages.get(storage) is not None
+    filesystem = None
+    if registered:
+        filesystem = storage_filesystem(
+            storage, repos.agents.list_nodes(stale_seconds=settings.agent_report_stale_seconds))
+    return {"storage_name": storage, "computed_at": utc_now_iso(), "truncated": truncated,
+            "window_limit": _WINDOW_LIMIT, "target_count": len(heads), "summed_target_count": len(top),
+            "nested_target_count": nested, "invalid_target_count": invalid, "unreadable_count": unreadable,
+            "pending_count": pending, "progressed": read_ok > 0, **acc.result(), "filesystem": filesystem}
 
 
 @router.get("/api/admin/usage/unregistered-storages")

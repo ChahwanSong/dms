@@ -245,3 +245,81 @@ def test_sched_wait_reuses_submit_buckets_and_zero_lands_in_first_bucket():
     counts = {b["bucket"]: b["count"] for b in hist}
     assert counts["<10s"] == 1      # 0 이 산다
     assert counts["10-30s"] == 1
+
+
+# ---- 2026-10-21: 스토리지 합계의 파일시스템(statvfs) ----
+
+def _node(name, *, at="2026-10-20T08:00:00Z", fresh=True, mounts=None, disks=None):
+    return {"node_name": name, "reported_at": at, "fresh": fresh,
+            "report": {"mounts": mounts if mounts is not None else [], "os": {"disks": disks or []}}}
+
+
+def _mount(storage, status="Ready", is_mountpoint=True):
+    return {"storage_name": storage, "status": status, "is_mountpoint": is_mountpoint}
+
+
+def _disk(storage, total, used):
+    return {"storage_name": storage, "total_bytes": total, "used_bytes": used}
+
+
+def test_storage_filesystem_uses_only_ready_mountpoints():
+    # 테스트베드 실측 모양: 마운트가 없는 노드(Missing/not_a_mountpoint)도 statvfs 를 불러 노드 루트 디스크 값을 싣는다 --
+    # 그 값(40 GB, 노드마다 다름)은 버리고 Ready 마운트포인트 노드의 값만 쓴다.
+    from dms.metrics_series import storage_filesystem
+    nodes = [_node("w1", at="2026-10-20T09:00:00Z", mounts=[_mount("sec", "Missing", False)],
+                   disks=[_disk("sec", 40483942400, 15265992704)]),
+             _node("w4", mounts=[_mount("sec")], disks=[_disk("sec", 24498929664, 37748736)]),
+             _node("w5", mounts=[_mount("sec")], disks=[_disk("sec", 24498929664, 37748736)]),
+             # Ready 라도 마운트포인트가 아니면(보고 모양이 어긋남) 쓰지 않는다
+             _node("w6", at="2026-10-20T09:30:00Z", mounts=[_mount("sec", "Ready", False)],
+                   disks=[_disk("sec", 1000, 1)])]
+    assert storage_filesystem("sec", nodes) == {
+        "total_bytes": 24498929664, "used_bytes": 37748736, "node_name": "w5", "reported_at": "2026-10-20T08:00:00Z",
+        "fresh": True, "node_count": 2, "consistent": True}
+    # Ready 노드가 하나도 없으면 None(루트 디스크 값으로 지어내지 않는다) -- 보고에 없는 스토리지도 None
+    assert storage_filesystem("sec", nodes[:1] + nodes[3:]) is None
+    assert storage_filesystem("nope", nodes) is None
+    assert storage_filesystem("sec", []) is None
+
+
+def test_storage_filesystem_prefers_fresh_then_latest_and_marks_inconsistency():
+    from dms.metrics_series import storage_filesystem
+    stale_newer = _node("a", at="2026-10-20T10:00:00Z", fresh=False, mounts=[_mount("s")], disks=[_disk("s", 500, 1)])
+    fresh_old = _node("b", at="2026-10-20T07:00:00Z", mounts=[_mount("s")], disks=[_disk("s", 100, 10)])
+    fresh_new = _node("c", at="2026-10-20T08:00:00Z", mounts=[_mount("s")], disks=[_disk("s", 200, 20)])
+    got = storage_filesystem("s", [stale_newer, fresh_old, fresh_new])
+    # 신선 > 최신: 더 늦게 보고한 a 는 신선하지 않아 밀린다. 신선 집합(b, c)의 total 이 달라 consistent False
+    # (노드 로컬 스토리지 -- 화면이 「노드마다 다름 — c 기준」으로 말한다). 신선하지 않은 a 는 개수에 들지 않는다.
+    assert (got["node_name"], got["total_bytes"], got["used_bytes"]) == ("c", 200, 20)
+    assert (got["fresh"], got["node_count"], got["consistent"]) == (True, 2, False)
+    # 신선한 후보가 없으면 오래된 보고라도 쓰고 fresh False 로 말한다
+    got = storage_filesystem("s", [stale_newer])
+    assert (got["node_name"], got["fresh"], got["node_count"], got["consistent"]) == ("a", False, 1, True)
+
+
+def test_storage_filesystem_rejects_tampered_values():
+    # DB 가 신뢰 경계: 비정수·bool·음수·total 0·used > total, 비 dict report·mounts·disks 는 그 노드를 뺀다(500 없음)
+    from dms.metrics_series import storage_filesystem
+    bad = [_node("b1", disks=[_disk("s", True, 1)]),
+           _node("b2", disks=[_disk("s", 100, -1)]),
+           _node("b3", disks=[_disk("s", 0, 0)]),
+           _node("b4", disks=[_disk("s", 100, 101)]),
+           _node("b5", disks=[_disk("s", 100.0, 1)]),
+           _node("b6", disks=["s"]),
+           {"node_name": "b7", "reported_at": "2026-10-20T08:00:00Z", "fresh": True, "report": "oops"},
+           {"node_name": "b8", "reported_at": "2026-10-20T08:00:00Z", "fresh": True,
+            "report": {"mounts": "Ready", "os": {"disks": [_disk("s", 100, 1)]}}},
+           {"node_name": "b9", "reported_at": "2026-10-20T08:00:00Z", "fresh": True,
+            "report": {"mounts": [_mount("s")], "os": {"disks": {"s": 1}}}},
+           {"node_name": "b10", "reported_at": "2026-10-20T08:00:00Z", "fresh": True,
+            "report": {"mounts": [_mount("s")], "os": "x"}},
+           {"node_name": "b11", "reported_at": None, "fresh": True,
+            "report": {"mounts": [_mount("s")], "os": {"disks": [_disk("s", 100, 1)]}}},
+           "not-a-node"]
+    for n in bad:
+        if isinstance(n, dict) and isinstance(n.get("report"), dict) and n["report"].get("mounts") == []:
+            n["report"]["mounts"] = [_mount("s")]
+    assert storage_filesystem("s", bad) is None
+    good = _node("ok", mounts=[_mount("s")], disks=[_disk("s", 100, 100)])          # used == total 은 정상(가득 참)
+    assert storage_filesystem("s", bad + [good])["node_name"] == "ok"
+    assert storage_filesystem("s", None) is None
