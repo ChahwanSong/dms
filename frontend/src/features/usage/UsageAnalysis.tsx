@@ -174,7 +174,8 @@ export function UsageAnalysis() {
       </header>
 
       {/* 스토리지별 비교(2026-10-21) -- 접힌 한 줄, 열면 스토리지마다의 합계 표(패널 합계와 같은 쿼리). 행 = 그 탭 선택. */}
-      {ready && <UsageOverview tabs={tabs} active={active} onSelect={selectTab} now={now} />}
+      {ready && <UsageOverview tabs={tabs} active={active} onSelect={selectTab} now={now}
+                              windowLimit={summaryQ.data?.window_limit ?? null} />}
 
       {(purge.data || orphanError || summaryQ.isError || unregQ.isError) && (
         <div className="space-y-2">

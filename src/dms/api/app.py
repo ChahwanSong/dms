@@ -41,7 +41,7 @@ from .routes_builds import router as builds_router
 from .routes_registry import router as registry_router
 from .routes_releases import router as releases_router
 from .routes_metrics import router as metrics_router
-from .routes_usage import router as usage_router
+from .routes_usage import ReportReadFailures, router as usage_router
 
 
 def create_app(settings: Settings, db: Database, exit_fn=None) -> FastAPI:
@@ -87,6 +87,9 @@ def create_app(settings: Settings, db: Database, exit_fn=None) -> FastAPI:
     app.state.verification_guess_limiter = LoginRateLimiter(
         VERIFICATION_GUESS_PER_CLIENT_LIMIT, VERIFICATION_GUESS_WINDOW_SECONDS)
     app.state.verification_guess_lock = threading.Lock()   # 검사 -> 소비 -> 기록을 원자로(_consume_code)
+    # 2026-10-21 리뷰: 스토리지 합계의 리포트 읽기 실패 기억(프로세스 메모리, TTL) -- 같은 실패가 호출마다 읽기 예산을 먼저
+    # 써서 뒤의 읽을 수 있는 대상에 닿지 못하는 것을 막는다(routes_usage.storage_totals 규칙 4).
+    app.state.report_read_failures = ReportReadFailures()
 
     @app.exception_handler(RequestValidationError)
     async def _validation_error(request, exc: RequestValidationError):

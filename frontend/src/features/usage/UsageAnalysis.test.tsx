@@ -158,7 +158,8 @@ interface Setup {
   onHistory?: (u: URL) => void;
   onExport?: (u: URL) => unknown;
   // 스토리지 합계(storage 파라미터로 고른다 -- 없으면 대상 0 응답). "error" = 500, "html" = 옛 API 의 SPA 200.
-  totals?: Record<string, UsageStorageTotals | "error" | "html"> | ((storage: string, call: number) => UsageStorageTotals);
+  totals?: Record<string, UsageStorageTotals | "error" | "html">
+    | ((storage: string, call: number) => UsageStorageTotals | "error" | "html");
   onTotals?: (u: URL) => void;
 }
 
@@ -982,6 +983,46 @@ test("진전 없는 pending(progressed false)은 다시 부르지 않고 「값 
   expect(calls).toEqual([1]);
 });
 
+test("재조회 실패로 이어 읽기가 멈추면 「읽는 중」이라 말하지 않는다 -- 남은 대상은 값 모름, 「다시 시도」로 이어 읽는다", async () => {
+  // 리뷰: 오류 중엔 폴링이 멈추는데(useStorageTotals) 캐시에 남은 응답이 pending·progressed 라 「요약 읽는 중 240개」와
+  // 「요약을 읽는 중입니다…」가 아무것도 읽지 않는 동안 남았고, 값 모름은 pending 만큼 적게 셌다.
+  const calls: number[] = [];
+  let failing = true;
+  setup({ totals: (s, call) => {
+    calls.push(call);
+    if (call === 1) {
+      return totalsOf(s, { target_count: 300, summed_target_count: 300, pending_count: 240, progressed: true,
+                           total_files: m(null, 0, 300), file_size_histogram: { buckets: [], known: 0, unknown: 300 } });
+    }
+    return failing ? "error" : totalsOf(s);
+  } });
+  const box = await totalsBox();
+  expect(await within(box).findByText(/요약 읽는 중 240개/)).toBeInTheDocument();
+  expect(box).toHaveTextContent("값 모름 60개");
+  expect(within(box).getByText("요약을 읽는 중입니다…")).toBeInTheDocument();
+  expect(await within(box).findByText(/합계를 새로 고치지 못했습니다/, undefined, { timeout: 3000 })).toBeInTheDocument();
+  expect(box).not.toHaveTextContent("요약 읽는 중");
+  expect(box).not.toHaveTextContent("요약을 읽는 중입니다");
+  expect(within(box).getByText("크기 분포를 아는 대상이 없습니다")).toBeInTheDocument();
+  expect(box).toHaveTextContent("값 모름 300개");
+  await new Promise((r) => setTimeout(r, 1300));
+  expect(calls).toEqual([1, 2]);                                       // 오류 중엔 다시 부르지 않는다
+  failing = false;
+  await userEvent.click(within(box).getByRole("button", { name: "다시 시도" }));
+  await waitFor(() => expect(valueOf(box, "파일")).toHaveTextContent(/^662개$/));
+  expect(box).not.toHaveTextContent("새로 고치지 못했습니다");
+  expect(calls).toEqual([1, 2, 3]);
+});
+
+test("합계 개수 값은 title 에 정확한 값(칸이 좁아 말줄임돼도 읽힌다)", async () => {
+  setup({ totals: { "cephfs-dms": totalsOf("cephfs-dms", { total_files: m(1234567890, 3, 1) }) } });
+  const box = await totalsBox();
+  await within(box).findByText("1,234,567,890개");
+  expect(valueOf(box, "파일")).toHaveAttribute("title", "1,234,567,890개");
+  expect(valueOf(box, "파일")).toHaveTextContent(/^1,234,567,890개 이상$/);
+  expect(valueOf(box, "디렉터리")).toHaveAttribute("title", "243개");
+});
+
 test("합계 실패여도 표는 그려진다 -- 서버 사유는 덧붙이고, 옛 API(SPA index.html 200)의 파서 문장은 띄우지 않는다", async () => {
   setup({ totals: { "cephfs-dms": "error" } });
   expect(await screen.findByText("합계를 불러오지 못했습니다 — internal")).toBeInTheDocument();
@@ -1087,4 +1128,49 @@ test("스토리지별 비교: 기본 닫힘(그 동안 합계 요청은 지금 �
   within(table).getByRole("button", { name: "empty 탭 열기" }).focus();
   await userEvent.keyboard("{Enter}");
   expect(loc().get("storage")).toBe("empty");
+});
+
+test("스토리지별 비교: 창을 넘어 잘린 합은 「이상」(부분 합) · 대상 칸은 탭 배지와 같은 수 · 각주가 두 뜻을 말한다", async () => {
+  // 리뷰: 1만 넘는 스토리지의 행이 최근 스캔된 1만 개만 더한 값을 표식 없이 보였고, 대상 칸은 잘린 10,000 이라 탭(12,345)과 달랐다.
+  setup({ storages: [st("cephfs-dms"), st("weka")], summary: [sum("cephfs-dms"), sum("weka", { target_count: 12345 })],
+          windowLimit: 10000,
+          totals: { "cephfs-dms": totalsOf("cephfs-dms"),
+                    weka: totalsOf("weka", { truncated: true, target_count: 10000, summed_target_count: 9876,
+                                             total_bytes: m(1024 ** 4, 9876), total_files: m(3551020, 9876),
+                                             total_directories: m(98113, 9876),
+                                             hot_ratio: { value: 0.91, hot_bytes: 91, total_bytes: 100, known: 9876,
+                                                          unknown: 0 } }) } });
+  await within(await totalsBox()).findByText("17.0 MiB");
+  expect(screen.getByRole("tab", { name: /^weka/ })).toHaveAccessibleName("weka 대상 12,345개");
+  const toggle = screen.getByText("스토리지별 비교");
+  const details = toggle.closest("details")!;
+  await userEvent.click(toggle);
+  const table = await within(details).findByRole("table");
+  const rowOf = (name: string) => within(table).getByRole("button", { name: `${name} 탭 열기` }).closest("tr")!;
+  await waitFor(() => expect(rowOf("weka")).toHaveTextContent("1.0 TiB이상"));
+  const weka = within(rowOf("weka")).getAllByRole("cell").map((c) => c.textContent);
+  expect([weka[1], weka[2], weka[3], weka[4], weka[6]]).toEqual(["1.0 TiB이상", "3,551,020이상", "98,113이상", "91%", "12,345"]);
+  expect(within(rowOf("weka")).getAllByRole("cell")[6]).toHaveAttribute(
+    "title", "합계는 최근 스캔된 10,000개 대상 기준 부분 합 · 최상위 9,876개 합계");
+  // 잘리지 않고 모름도 없으면 표식 없음 -- 대상 칸은 탭 배지(요약)와 같은 수
+  await waitFor(() => expect(rowOf("cephfs-dms")).toHaveTextContent("17.0 MiB"));
+  expect(rowOf("cephfs-dms")).not.toHaveTextContent("이상");
+  expect(within(rowOf("cephfs-dms")).getAllByRole("cell")[6]).toHaveTextContent(/^2$/);
+  expect(within(rowOf("cephfs-dms")).getAllByRole("cell")[6]).toHaveAttribute("title", "최상위 4개 합계");
+  expect(details).toHaveTextContent(
+    "「이상」 = 값을 모르는 대상(요약 읽는 중 포함)을 뺀 합이거나 대상이 많아 최근 스캔된 10,000개 대상만 더한 부분 합");
+});
+
+test("스토리지별 비교: 요약이 없으면 대상 칸은 합계의 수 -- 잘렸으면 「+」, 각주는 창 크기를 지어내지 않는다", async () => {
+  setup({ storages: [st("cephfs-dms"), st("weka")], summary: "error", scanStorages: ["cephfs-dms", "weka"],
+          totals: { "cephfs-dms": totalsOf("cephfs-dms"),
+                    weka: totalsOf("weka", { truncated: true, target_count: 10000, summed_target_count: 9876 }) } });
+  await within(await totalsBox()).findByText("17.0 MiB");
+  const toggle = screen.getByText("스토리지별 비교");
+  await userEvent.click(toggle);
+  const table = await within(toggle.closest("details")!).findByRole("table");
+  const rowOf = (name: string) => within(table).getByRole("button", { name: `${name} 탭 열기` }).closest("tr")!;
+  await waitFor(() => expect(within(rowOf("weka")).getAllByRole("cell")[6]).toHaveTextContent(/^10,000\+$/));
+  expect(within(rowOf("cephfs-dms")).getAllByRole("cell")[6]).toHaveTextContent(/^9$/);
+  expect(toggle.closest("details")!).toHaveTextContent("최근 스캔된 창 안의 대상만 더한 부분 합");
 });

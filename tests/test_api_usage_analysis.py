@@ -730,10 +730,11 @@ def test_real_chunk_bounds_every_id_list_of_the_window_and_the_stream(tmp_path, 
     assert len(rows) == 200
     assert client.get("/api/admin/usage/export", params={"storage": "s1"}).json()["count"] == 1100
     # 스토리지 합계(2026-10-21)도 같은 묶음 상한 안이다 -- 최상위 1,100 개 중 캐시에 없는 580 개는 읽기 예산(500)만큼만
-    # 열고(아티팩트가 없어 전부 못 읽음 -- 캐시에 넣지 않는다) 나머지는 pending 이다.
+    # 열고(아티팩트가 없어 전부 못 읽음 -- 영구 캐시에 넣지 않고 실패 기억에) 나머지는 pending 이다. 실패를 기억했으니
+    # 진전이다(다음 호출이 나머지 80 개를 연다).
     tot = client.get("/api/admin/usage/storage-totals", params={"storage": "s1"}).json()
     assert (tot["target_count"], tot["summed_target_count"]) == (1100, 1100)
-    assert (tot["unreadable_count"], tot["pending_count"], tot["progressed"]) == (500, 80, False)
+    assert (tot["unreadable_count"], tot["pending_count"], tot["progressed"]) == (500, 80, True)
     assert tot["total_files"] == {"sum": 520 * 7, "known": 520, "unknown": 580}
     assert tot["total_bytes"]["known"] == 1100                 # 못 읽은·지연 대상도 실 사용량은 bytes_count(목록 열 규칙)
 
@@ -850,9 +851,18 @@ def test_storage_totals_sum_only_maximal_targets_with_their_latest_scan(tmp_path
     assert again["progressed"] is False and again["total_bytes"] == t["total_bytes"]
 
 
+def _fake_failure_clock(client):
+    """합계의 읽기 실패 기억(app.state.report_read_failures)을 손으로 돌리는 시계로 바꾼다 -- [now] 를 돌려준다."""
+    from dms.api.routes_usage import ReportReadFailures
+    now = [1000.0]
+    client.app.state.report_read_failures = ReportReadFailures(clock=lambda: now[0])
+    return now
+
+
 def test_storage_totals_unreadable_top_target_is_unknown_but_bytes_fall_back_to_db(tmp_path):
+    from dms.api import routes_usage
     # 못 읽은 최상위 대상: 리포트 유래 값은 모름(unknown), 실 사용량만 러너가 남긴 bytes_count(목록 열과 같은 대체).
-    # 캐시에 넣지 않는다 -- 리포트가 나중에 생기면 다음 호출이 읽는다. 하위 대상으로 대체하지 않는다.
+    # 영구 캐시에 넣지 않는다 -- 리포트가 나중에 생기면 실패 기억(TTL)이 지난 뒤의 호출이 읽는다. 하위 대상으로 대체하지 않는다.
     art = tmp_path / "artifacts"
     client = _client(tmp_path, art)
     _login(client, "admin", "admin")
@@ -862,9 +872,10 @@ def test_storage_totals_unreadable_top_target_is_unknown_but_bytes_fall_back_to_
     sub, _ = _scan_job(client, target="team/sub", art_base=art)
     _at(client, jid, "2026-09-01T00:00:00Z")
     _at(client, sub, "2026-09-02T00:00:00Z")
+    clock = _fake_failure_clock(client)
     t = _totals(client)
     assert (t["summed_target_count"], t["nested_target_count"]) == (1, 1)
-    assert (t["unreadable_count"], t["pending_count"], t["progressed"]) == (1, 0, False)
+    assert (t["unreadable_count"], t["pending_count"], t["progressed"]) == (1, 0, True)    # 실패를 기억했다(진전)
     assert t["total_bytes"] == {"sum": 1234, "known": 1, "unknown": 0}
     assert t["total_files"] == {"sum": None, "known": 0, "unknown": 1}        # 하위 값(7)으로 메우지 않는다
     assert t["hot_ratio"]["value"] is None and t["hot_ratio"]["unknown"] == 1
@@ -873,6 +884,9 @@ def test_storage_totals_unreadable_top_target_is_unknown_but_bytes_fall_back_to_
     d = art / jid / "execution"
     d.mkdir(parents=True)
     (d / "dscan-report.json").write_text(json.dumps(_report()))
+    t = _totals(client)
+    assert (t["unreadable_count"], t["progressed"]) == (1, False)            # TTL 안: 다시 열지 않는다
+    clock[0] += routes_usage._FAILED_READ_TTL_SECONDS
     t = _totals(client)
     assert (t["unreadable_count"], t["progressed"]) == (0, True)
     assert t["total_bytes"] == {"sum": 50, "known": 1, "unknown": 0}          # 리포트를 읽으면 목록 열처럼 리포트 값
@@ -896,6 +910,85 @@ def test_storage_totals_read_budget_leaves_pending_and_next_call_progresses(tmp_
         seen.append((t["pending_count"], t["progressed"], t["total_files"]["known"], t["total_files"]["unknown"]))
     assert seen == [(2, True, 1, 2), (1, True, 2, 1), (0, True, 3, 0), (0, False, 3, 0)]
     assert t["unreadable_count"] == 0 and t["total_files"]["sum"] == 21
+
+
+def test_storage_totals_unreadable_heads_do_not_starve_readable_targets_behind_them(tmp_path, monkeypatch):
+    # 2026-10-21 리뷰: 못 읽은 리포트는 영구 캐시에 두지 않으므로, 기억이 없으면 같은 실패가 호출마다 같은 순서(최근 스캔
+    # 순)로 예산 앞자리를 먼저 쓴다 -- 영구히 못 읽는 최상위가 예산만큼 앞에 있으면 뒤의 읽을 수 있는 대상은 영영 pending
+    # 이고 progressed False 라 포탈이 멈췄다(옛 동작: 매 호출 (pending 4, False, known 0)). 실패 기억(TTL) 안의 잡은 열지
+    # 않고 unreadable 로 세며 예산은 아직 안 열어 본 잡이 먼저 -- 실패만 기억해도 진전이다(다음 호출이 그 뒤를 연다).
+    from dms.api import routes_usage
+    monkeypatch.setattr(routes_usage, "_TOTALS_READ_BUDGET", 2)
+    opened = []
+    real_read = routes_usage._read_digest
+    monkeypatch.setattr(routes_usage, "_read_digest", lambda base, job: (opened[-1].append(job["target"]),
+                                                                        real_read(base, job))[1])
+    art = tmp_path / "artifacts"
+    client = _client(tmp_path, art)
+    _login(client, "admin", "admin")
+    clock = _fake_failure_clock(client)
+    jobs = {}
+    # 최근 스캔 순 u1, u2, r1, u3, r2, r3 -- u = 리포트 없음(영구히 못 읽음), r = 읽을 수 있음
+    for day, target in [(6, "u1"), (5, "u2"), (4, "r1"), (3, "u3"), (2, "r2"), (1, "r3")]:
+        jid, _ = _scan_job(client, target=target, art_base=art, write_report=target.startswith("r"))
+        _at(client, jid, f"2026-09-0{day}T00:00:00Z")
+        jobs[target] = jid
+
+    def drain(n):
+        seen = []
+        for _ in range(n):
+            opened.append([])
+            t = _totals(client)
+            seen.append((t["pending_count"], t["progressed"], t["total_files"]["known"], t["unreadable_count"]))
+        return seen
+    assert drain(4) == [(4, True, 0, 2), (2, True, 1, 3), (0, True, 3, 3), (0, False, 3, 3)]
+    # TTL 안의 실패는 다시 열지 않는다(한 호출 안의 여는 순서는 jobs_by_ids 사전 순이라 집합으로 본다)
+    assert [set(o) for o in opened] == [{"u1", "u2"}, {"r1", "u3"}, {"r2", "r3"}, set()]
+    assert _totals(client)["total_files"] == {"sum": 21, "known": 3, "unknown": 3}
+    assert {r["job_id"] for r in _digest_rows(client)} == {jobs["r1"], jobs["r2"], jobs["r3"]}   # 실패는 영구 캐시 밖
+
+    # TTL 이 지나면 다시 연다(일시 오류를 영구 「모름」으로 굳히지 않는다) -- 단 아직 열어 본 적 없는 잡(가장 오래된 r4)이
+    # 예산을 먼저 받고, 옛 실패는 최근 스캔 순으로 그 뒤다. 그 사이 리포트가 생긴 u1 은 읽힌다.
+    r4, _ = _scan_job(client, target="r4", art_base=art)
+    _at(client, r4, "2026-08-15T00:00:00Z")
+    d = art / jobs["u1"] / "execution"
+    d.mkdir(parents=True)
+    (d / "dscan-report.json").write_text(json.dumps(_report()))
+    clock[0] += routes_usage._FAILED_READ_TTL_SECONDS
+    opened.clear()
+    assert drain(3) == [(2, True, 5, 0), (0, True, 5, 2), (0, False, 5, 2)]
+    assert [set(o) for o in opened] == [{"r4", "u1"}, {"u2", "u3"}, set()]
+
+
+def test_report_read_failures_ttl_and_cap_never_evict_live_entries():
+    # 상한이 차면 만료 항목만 걷고, 그래도 차 있으면 새 실패를 기록하지 않는다(살아 있는 기억을 밀어내면 여러 스토리지의
+    # 실패가 서로를 밀어내며 포탈이 같은 실패를 1초마다 끝없이 다시 부를 수 있다) -- record 는 실제로 기록한 수를 돌려준다.
+    from dms.api.routes_usage import ReportReadFailures
+    now = [0.0]
+    f = ReportReadFailures(ttl_seconds=10, cap=2, clock=lambda: now[0])
+    assert f.record(["a", "b", "c"]) == 2
+    assert f.split(["a", "b", "c"]) == ({"a", "b"}, set())
+    now[0] = 5
+    assert f.record(["a"]) == 1                                # 이미 있는 id 는 상한과 무관하게 시각만 새로
+    now[0] = 12
+    assert f.split(["a", "b", "c"]) == ({"a"}, {"b"})          # b 는 만료(옛 실패 -- 재시도 대상), c 는 기억에 없음
+    assert f.record(["c", "d"]) == 1                           # 만료된 b 를 걷고 c 는 들어가고, d 는 자리가 없다
+    assert f.split(["a", "b", "c", "d"]) == ({"a", "c"}, set())
+
+
+def test_storage_totals_unrecorded_failure_is_not_progress(tmp_path):
+    # 실패 기억이 상한이라 기록하지 못한 실패는 진전이 아니다 -- progressed True 로 말하면 포탈이 1초마다 같은 실패를
+    # 다시 연다(옛 동작으로 돌아갈 뿐, 끝없는 재조회는 없다).
+    from dms.api.routes_usage import ReportReadFailures
+    art = tmp_path / "artifacts"
+    client = _client(tmp_path, art)
+    _login(client, "admin", "admin")
+    full = ReportReadFailures(cap=1)
+    assert full.record(["someone-else"]) == 1
+    client.app.state.report_read_failures = full
+    _scan_job(client, target="team", art_base=art, write_report=False)
+    t = _totals(client)
+    assert (t["unreadable_count"], t["pending_count"], t["progressed"]) == (1, 0, False)
 
 
 def test_storage_totals_empty_and_unknown_storage_is_null_not_zero(tmp_path):

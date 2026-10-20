@@ -33,11 +33,13 @@ export function Stat({ label, value, lowerBound = false, title }: {
   return (
     <div className="min-w-0">
       <dt className="text-xs text-muted">{label}</dt>
-      {/* 값은 한 줄(「81,241,347개」가 「개」에서 꺾이지 않게), 「이상」은 한 덩어리로 -- 좁으면 통째로 다음 줄(앞 공백은 줄 끝에서
-          접혀 다음 줄 「이상」이 들여 쓰이지 않는다). */}
-      <dd className="mt-0.5 text-lg font-medium tabular-nums text-ink" title={title}>
-        <span className="whitespace-nowrap">{value}</span>
-        {lowerBound && <>{" "}<span className="inline-block whitespace-nowrap text-xs font-normal text-muted">이상</span></>}
+      {/* 값은 한 줄(「81,241,347개」가 「개」에서 꺾이지 않게), 「이상」은 한 덩어리로 -- 좁으면 통째로 다음 줄(flex-wrap, 첫 줄
+          기준선 정렬). 칸보다 넓은 값은 칸 안에서 말줄임한다(min-w-0 truncate -- 옆 칸 숫자를 덮지 않게, 2026-10-21 리뷰: 768px
+          에서 「1,234,567,890개」가 옆 칸에 겹쳤다) -- 정확한 값은 title. 사이 공백 글자는 낭독·textContent 용이다(flex 안에선
+          그려지지 않고 간격은 gap). */}
+      <dd className="mt-0.5 flex flex-wrap items-baseline gap-x-1 text-lg font-medium tabular-nums text-ink" title={title}>
+        <span className="min-w-0 max-w-full truncate">{value}</span>
+        {lowerBound && <>{" "}<span className="whitespace-nowrap text-xs font-normal text-muted">이상</span></>}
       </dd>
     </div>
   );
