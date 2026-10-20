@@ -206,7 +206,7 @@ export function BatchExecutionSettingsDialog({ b }: { b: Batch }) {
                    className="rounded-lg border border-bad/30 bg-badbg px-3 py-2 text-sm text-bad">
                 <p className="font-medium">미리보기가 끝나면 사람 확인 없이 root 권한으로 삭제됩니다 — 되돌릴 수 없습니다</p>
                 <label className="mt-2 flex items-start gap-2 font-medium">
-                  <input type="checkbox" className="mt-0.5" aria-label="확인 없이 삭제되는 것에 동의" checked={f.ack}
+                  <input type="checkbox" className="mt-0.5" aria-required="true" checked={f.ack}
                          onChange={(e) => setF({ ...f, ack: e.target.checked })} />
                   <span>확인 없이 root 로 삭제되며 되돌릴 수 없다는 것을 이해했습니다(필수)</span>
                 </label>

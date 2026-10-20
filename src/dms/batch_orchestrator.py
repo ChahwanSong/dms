@@ -336,8 +336,11 @@ class BatchOrchestrator:
         summary = {"previewed": previewed, "items": total, "options": batch["options"],
                    "auto_confirm_by": batch["auto_confirm_by"],
                    **preview_files(self._repos.batches.list_items_detail(bid))}
+        # 자격 재확인(같은 UPDATE): env 목록이면 그 사실을 넘기고, 아니면 SQL 이 지금의 계정 부여(root_granted)를 본다.
+        env_listed = batch["auto_confirm_by"] in frozenset(self._settings.privileged_requesters)
         if self._repos.batches.confirm(bid, actor=AUTO_CONFIRM_ACTOR, summary=summary, expected_round=rnd,
-                                       expected_auto_confirm_by=batch["auto_confirm_by"]):
+                                       expected_auto_confirm_by=batch["auto_confirm_by"],
+                                       auto_confirm_env_listed=env_listed):
             _HELD_ROUND.pop(bid, None)
             self._repos.observability.record_event(
                 component="batch-orchestrator", severity="info", event_type="batch_auto_confirmed",

@@ -13,6 +13,7 @@
 """
 import json
 
+import pytest
 from fastapi.testclient import TestClient
 
 from dms.batch_orchestrator import AUTO_CONFIRM_ACTOR, BatchOrchestrator, auto_confirm_hold
@@ -422,6 +423,45 @@ def test_demotion_mid_tick_stops_the_confirm(db, monkeypatch):
     BatchOrchestrator(repos, settings=_S()).run_once()
     assert repos.batches.get(bid)["status"] == "PreviewReady"
     assert repos.data_jobs.get_job(jid)["confirmed_fingerprint"] is None
+
+
+@pytest.mark.parametrize("op", ["sync", "rm"])
+def test_root_grant_revoked_mid_tick_stops_the_confirm(db, monkeypatch, op):
+    # env 목록 밖, 계정 화면 부여로 자격을 얻은 사람이 켠 배치: 술어(auto_confirm_hold) 통과 뒤 부여가 회수되면 같은 UPDATE
+    # 문장의 자격 조건이 막는다(2026-10-21 리뷰 재현 -- 예전 절은 역할·활성만 봐 회수가 그 틱의 확인을 못 막았다).
+    class NoEnv(_S):
+        privileged_requesters = frozenset()
+    repos = Repositories(db)
+    _ops(repos)
+    db.execute("UPDATE accounts SET root_granted = 1 WHERE username = 'ops'")
+    bid = _batch(repos, op=op)
+    _rid, jid = _confirmpending_child(repos, bid, 0)
+    import dms.batch_orchestrator as orch_mod
+    real_hold = orch_mod.auto_confirm_hold
+
+    def hold_then_revoke(*a, **kw):
+        out = real_hold(*a, **kw)
+        db.execute("UPDATE accounts SET root_granted = NULL WHERE username = 'ops'")
+        return out
+    monkeypatch.setattr(orch_mod, "auto_confirm_hold", hold_then_revoke)
+    BatchOrchestrator(repos, settings=NoEnv()).run_once()
+    assert repos.batches.get(bid)["status"] == "PreviewReady"
+    assert repos.data_jobs.get_job(jid)["confirmed_fingerprint"] is None
+
+
+@pytest.mark.parametrize("op", ["sync", "rm"])
+def test_root_granted_enabler_outside_env_still_auto_confirms(db, op):
+    # 대조: 부여가 서 있으면(env 목록 밖) 자동 확인은 그대로 된다 -- 자격 절이 정당한 경로를 막지 않는다.
+    class NoEnv(_S):
+        privileged_requesters = frozenset()
+    repos = Repositories(db)
+    _ops(repos)
+    db.execute("UPDATE accounts SET root_granted = 1 WHERE username = 'ops'")
+    bid = _batch(repos, op=op)
+    _rid, jid = _confirmpending_child(repos, bid, 0)
+    BatchOrchestrator(repos, settings=NoEnv()).run_once()
+    assert repos.batches.get(bid)["status"] == "Running"
+    assert repos.data_jobs.get_job(jid)["confirmed_fingerprint"] == "sha256:fp"
 
 
 def test_held_when_the_enabler_is_demoted_disabled_or_missing(db, tmp_path):

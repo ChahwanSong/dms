@@ -825,7 +825,7 @@ test("rm: 자동 실행을 켜면 빨간 경고 + 필수 동의 체크 — 체�
   const warn = screen.getByRole("note", { name: "자동 삭제 경고" });
   expect(warn).toHaveTextContent("미리보기가 끝나면 사람 확인 없이 root 권한으로 삭제됩니다 — 되돌릴 수 없습니다");
   expect(warn).toHaveClass("text-bad");
-  const ack = screen.getByLabelText("확인 없이 삭제되는 것에 동의");
+  const ack = screen.getByLabelText(/되돌릴 수 없다는 것을 이해했습니다/);
   expect(ack).not.toBeChecked();
   expect(createButton()).toBeDisabled();
   expect(screen.getByText("자동 실행으로 삭제하려면 경고를 읽고 동의를 체크하세요")).toBeInTheDocument();
@@ -850,20 +850,20 @@ test("rm: 자동 실행을 껐다 켜거나 연산을 바꿨다 오면 동의를
   renderPage(RM_POLICIES);
   await fillRm();
   await userEvent.click(screen.getByLabelText("미리보기 후 자동 실행"));
-  await userEvent.click(screen.getByLabelText("확인 없이 삭제되는 것에 동의"));
+  await userEvent.click(screen.getByLabelText(/되돌릴 수 없다는 것을 이해했습니다/));
   expect(createButton()).toBeEnabled();
   await userEvent.click(screen.getByLabelText("미리보기 후 자동 실행"));      // 끄면 동의 칸도 사라진다
-  expect(screen.queryByLabelText("확인 없이 삭제되는 것에 동의")).toBeNull();
+  expect(screen.queryByLabelText(/되돌릴 수 없다는 것을 이해했습니다/)).toBeNull();
   expect(createButton()).toBeEnabled();                                     // 끈 rm 은 동의가 필요 없다
   await userEvent.click(screen.getByLabelText("미리보기 후 자동 실행"));
-  expect(screen.getByLabelText("확인 없이 삭제되는 것에 동의")).not.toBeChecked();
+  expect(screen.getByLabelText(/되돌릴 수 없다는 것을 이해했습니다/)).not.toBeChecked();
   expect(createButton()).toBeDisabled();
-  await userEvent.click(screen.getByLabelText("확인 없이 삭제되는 것에 동의"));
+  await userEvent.click(screen.getByLabelText(/되돌릴 수 없다는 것을 이해했습니다/));
   await userEvent.selectOptions(screen.getByLabelText("연산"), "scan");
   await userEvent.selectOptions(screen.getByLabelText("연산"), "rm");
   expect(screen.getByLabelText("미리보기 후 자동 실행")).not.toBeChecked();   // rm 으로 들어오면 꺼진 채
   await userEvent.click(screen.getByLabelText("미리보기 후 자동 실행"));
-  expect(screen.getByLabelText("확인 없이 삭제되는 것에 동의")).not.toBeChecked();
+  expect(screen.getByLabelText(/되돌릴 수 없다는 것을 이해했습니다/)).not.toBeChecked();
   expect(createButton()).toBeDisabled();
 });
 

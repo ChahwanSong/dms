@@ -387,9 +387,11 @@ function ItemScanStats({ requestId, succeeded }: {
 // 실행 제어·옵션만). 종단 배치는 항목이 반드시 있으므로 첫 항목 payload 에서
 // 물려받는다(항목 추가와 같은 동질성 계약) — 항목 0개면 호출측이 이 컴포넌트
 // 자체를 안 그린다(물려받을 스토리지가 없다).
-function ReplaceItemsCsvDialog({ batchId, operation, firstPayload, chown }: {
+function ReplaceItemsCsvDialog({ batchId, operation, firstPayload, chown, auto = false }: {
   batchId: string; operation: ItemsCsvOp;
   firstPayload: Record<string, unknown>; chown: string;
+  // 자동 실행이 켜져 있고 보류가 아님(AddItemDialog 와 같은 식) -- rm 이면 「배치 확인」을 거친다는 약속이 거짓이 된다(리뷰).
+  auto?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const replace = useReplaceBatchItems(batchId);
@@ -424,8 +426,11 @@ function ReplaceItemsCsvDialog({ batchId, operation, firstPayload, chown }: {
         {operation === "sync" && <SyncDestHint chown={chown} />}
         {operation === "rm" && (
           <p className="text-xs text-bad" role="note" aria-label="삭제 경로 교체">
-            교체만으로는 아무것도 지워지지 않습니다 — 재실행하면 미리보기 뒤 「배치 확인」을 거쳐 이 경로들이 root 로
-            삭제됩니다.
+            {auto
+              ? "교체만으로는 아무것도 지워지지 않습니다 — 단, 자동 실행이 켜져 있어 재실행하면 미리보기가 끝나는 즉시 "
+                + "「배치 확인」 없이 이 경로들이 root 로 삭제됩니다. 되돌릴 수 없습니다."
+              : "교체만으로는 아무것도 지워지지 않습니다 — 재실행하면 미리보기 뒤 「배치 확인」을 거쳐 이 경로들이 root 로 "
+                + "삭제됩니다."}
           </p>
         )}
         <label className="text-sm block">
@@ -1209,6 +1214,7 @@ export function BatchDetail() {
             {b && terminal && firstPayload && (
               <ReplaceItemsCsvDialog batchId={batchId}
                                      operation={csvOp(b.operation)}
+                                     auto={b.auto_confirm === true && !b.auto_confirm_hold}
                                      firstPayload={firstPayload} chown={String(b.options?.chown ?? "")} />
             )}
           </div>

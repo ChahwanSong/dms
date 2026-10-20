@@ -66,7 +66,7 @@ test.describe("E13 — rm 배치 자동 확인", () => {
     const warn = page.getByRole("note", { name: "자동 삭제 경고" });
     await expect(warn).toContainText("미리보기가 끝나면 사람 확인 없이 root 권한으로 삭제됩니다 — 되돌릴 수 없습니다");
     await expect(create).toBeDisabled();
-    await page.getByLabel("확인 없이 삭제되는 것에 동의").check();
+    await page.getByLabel(/되돌릴 수 없다는 것을 이해했습니다/).check();
     await expect(create).toBeEnabled();
     await create.click();
     await page.waitForURL(/\/admin\/batches\/[0-9a-f]{32}$/);
