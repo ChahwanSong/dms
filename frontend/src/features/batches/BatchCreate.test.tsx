@@ -767,3 +767,145 @@ test("자동 실행을 켠 뒤 scan 으로 바꾸면 싣지 않는다(서버 422
   await screen.findByRole("heading", { name: "배치 b9" });
   expect(captured.body).not.toHaveProperty("auto_confirm");
 });
+
+
+// ---- rm 배치(2026-10-21 「배치작업에 rm도」) -------------------------------------------------------
+// 항목 모양은 scan(스토리지 하나 + 행당 경로), 확인 흐름은 sync(미리보기 → 「배치 확인」, 자동 실행 없음).
+const RM_POLICIES = [...POLICIES, policyRow("rm", 3, 2, "mid", "high")];
+
+async function fillRm(paths: string[] = ["old/a"]) {
+  await userEvent.selectOptions(screen.getByLabelText("연산"), "rm");
+  await pickStorage("스토리지", "s1");
+  for (let i = 0; i < paths.length; i += 1) {
+    if (i > 0) await userEvent.click(screen.getByRole("button", { name: "행 추가" }));
+    await userEvent.type(screen.getByLabelText(`${i + 1}행 경로`), paths[i]);
+  }
+}
+
+test("rm: 스토리지 하나 + 행당 경로, 바디는 {storage,target} 행 + options {recursive:true} 명시 — 소스·목적지·자동 실행 없음", async () => {
+  const captured = captureCreate();
+  renderPage(RM_POLICIES);
+  await fillRm(["old/a", "old/b"]);
+  expect(screen.queryByLabelText("소스 스토리지")).toBeNull();
+  expect(screen.queryByLabelText("1행 목적지")).toBeNull();
+  expect(screen.getByText("삭제할 경로")).toBeInTheDocument();
+  expect(screen.getByLabelText("재귀 삭제(필수)")).toBeChecked();
+  expect(createButton()).toBeEnabled();
+  await userEvent.click(createButton());
+  await screen.findByRole("heading", { name: "배치 b9" });
+  expect(captured.body.operation).toBe("rm");
+  expect(captured.body.items).toEqual([{ storage: "s1", target: "old/a" }, { storage: "s1", target: "old/b" }]);
+  expect(captured.body.options).toEqual({ recursive: true });
+  expect("auto_confirm" in captured.body).toBe(false);
+});
+
+test("rm: 자동 실행 체크박스가 없다 — sync 에서 켠 뒤 rm 으로 바꿔도 auto_confirm 을 싣지 않는다", async () => {
+  const captured = captureCreate();
+  renderPage(RM_POLICIES);
+  await fillSync();
+  await userEvent.click(screen.getByLabelText("미리보기 후 자동 실행"));
+  await userEvent.selectOptions(screen.getByLabelText("연산"), "rm");
+  expect(screen.queryByLabelText("미리보기 후 자동 실행")).toBeNull();
+  await pickStorage("스토리지", "s1");
+  expect(screen.getByText("실행 확인").closest("div")).toHaveTextContent("직접 — 미리보기 후 「배치 확인」(rm 은 자동 실행 없음)");
+  await userEvent.click(createButton());
+  await screen.findByRole("heading", { name: "배치 b9" });
+  expect("auto_confirm" in captured.body).toBe(false);
+  expect(captured.body.items).toEqual([{ storage: "s1", target: "a" }]);   // 연산을 바꿔도 행(경로)은 유지
+});
+
+test("rm: 재귀 삭제(필수) 해제·stat+lite 는 즉답과 함께 생성이 잠긴다(SubmitJob 과 같은 문구)", async () => {
+  renderPage(RM_POLICIES);
+  await fillRm();
+  expect(createButton()).toBeEnabled();
+  await userEvent.click(screen.getByLabelText("재귀 삭제(필수)"));
+  expect(screen.getByText("재귀 옵션이 필요합니다")).toBeInTheDocument();
+  expect(createButton()).toBeDisabled();
+  await userEvent.click(screen.getByLabelText("재귀 삭제(필수)"));
+  await userEvent.click(screen.getByLabelText("stat"));
+  await userEvent.click(screen.getByLabelText("lite"));
+  expect(screen.getByText("stat과 lite는 함께 쓸 수 없습니다")).toBeInTheDocument();
+  expect(createButton()).toBeDisabled();
+  await userEvent.click(screen.getByLabelText("lite"));
+  expect(createButton()).toBeEnabled();
+  expect(screen.getByText("옵션").closest("div")).toHaveTextContent(/recursive.*stat/);
+});
+
+test("rm: 관리 디렉토리 자신(.)·「..」·「/」 시작 행은 행 번호와 이유로 말하고 생성이 잠긴다", async () => {
+  renderPage(RM_POLICIES);
+  await fillRm(["old/a", ".", "/etc", "a/../b"]);
+  const list = screen.getByRole("list", { name: "삭제할 수 없는 경로" });
+  expect(within(list).getAllByRole("listitem").map((li) => li.textContent)).toEqual([
+    "2행: 관리 디렉토리 자신(.)은 지정할 수 없습니다 — 그 아래 경로를 적으세요",
+    "3행: \"/\" 로 시작할 수 없습니다 — 관리 디렉토리 아래 상대경로로 적으세요",
+    "4행: \"..\" 은 쓸 수 없습니다 — 관리 디렉토리 밖을 가리킬 수 없습니다",
+  ]);
+  expect(screen.getByText("삭제할 수 없는 경로 3개를 고치세요")).toBeInTheDocument();
+  expect(createButton()).toBeDisabled();
+});
+
+test("rm: 한 배치 안 겹침(같은 경로·조상과 자손)은 어느 행끼리인지 말하고 생성이 잠긴다 — 형제·접두 이름은 허용", async () => {
+  renderPage(RM_POLICIES);
+  await fillRm(["team/old", "team/old/sub", "x", "x/", "team/older", "y/a", "y/b"]);
+  const list = screen.getByRole("list", { name: "겹치는 삭제 경로" });
+  expect(within(list).getAllByRole("listitem").map((li) => li.textContent)).toEqual([
+    "2행: 1행의 경로(team/old) 아래입니다 — 상위 경로를 지우면 함께 지워지니 하나만 남기세요",
+    "4행: 같은 경로(x)가 3행에도 있습니다",
+  ]);
+  expect(screen.getByText("겹치는 삭제 경로 2개를 정리하세요")).toBeInTheDocument();
+  expect(createButton()).toBeDisabled();
+  await userEvent.click(screen.getByRole("button", { name: "4행 삭제" }));
+  await userEvent.click(screen.getByRole("button", { name: "2행 삭제" }));
+  expect(screen.queryByRole("list", { name: "겹치는 삭제 경로" })).toBeNull();
+  expect(createButton()).toBeEnabled();
+});
+
+test("rm: 「삭제 범위」 안내·요약 위 빨간 경고·실행 권한 빨강 — sync 의 목적지·소유권 안내와 sync 옵션은 없다", async () => {
+  renderPage(RM_POLICIES);
+  await fillRm();
+  const scope = screen.getByRole("note", { name: "삭제 범위" });
+  expect(scope).toHaveTextContent("되돌릴 수 없습니다");
+  expect(scope).toHaveTextContent("관리자 특권(root)으로 실행돼");
+  expect(screen.getByText(/삭제는 되돌릴 수 없습니다\. 항목별 미리보기에서/)).toBeInTheDocument();
+  expect(screen.getByText("실행 권한").closest("div")!.querySelector("dd")).toHaveClass("text-bad");
+  expect(screen.getByText("이 배치는 관리자 특권(root)으로 삭제합니다 — 파일 권한·소유와 관계없이 지워집니다."))
+    .toBeInTheDocument();
+  expect(screen.queryByRole("note", { name: "목적지 조건과 소유권" })).toBeNull();
+  for (const label of ["open_noatime", "chown", "delete", "batch_files", "verbose"])
+    expect(screen.queryByLabelText(label)).toBeNull();
+  expect(screen.queryByText("목적지 소유")).toBeNull();
+});
+
+test("rm: 정책 캡션·우선순위 기본·상한이 rm 정책 실값이다(dsync/nsync 병기·nsync 면당 캡션 없음)", async () => {
+  renderPage(RM_POLICIES);
+  await fillRm();
+  expect(screen.getByText("정책 기본: 최대 3노드 · 노드당 2프로세스")).toBeInTheDocument();
+  expect(screen.getByRole("option", { name: "(정책 기본: mid)" })).toBeInTheDocument();
+  expect(screen.getByText(/^정책 상한: high/)).toBeInTheDocument();
+  expect(screen.queryByText(/dsync/)).toBeNull();
+  expect(screen.queryByText(/nsync 폴백/)).toBeNull();
+});
+
+test("rm: rm 정책 행이 없으면 그 사실을 말한다(지어내지 않는다)", async () => {
+  renderPage(POLICIES);
+  await fillRm();
+  expect(screen.getByText("정책 미조회 — rm 정책 행이 없습니다")).toBeInTheDocument();
+  expect(screen.getByRole("option", { name: "(정책 기본)" })).toBeInTheDocument();
+});
+
+test("rm: CSV 붙여넣기는 1열(target 헤더 스킵) — 2열은 오류, 반영 결과는 1열 표", async () => {
+  renderPage(RM_POLICIES);
+  await userEvent.selectOptions(screen.getByLabelText("연산"), "rm");
+  await pickStorage("스토리지", "s1");
+  await userEvent.click(screen.getByRole("button", { name: "CSV 붙여넣기" }));
+  expect(screen.getByText(/행당 경로 1개/)).toBeInTheDocument();
+  await userEvent.type(screen.getByLabelText("CSV"), "a,b");
+  await userEvent.click(screen.getByRole("button", { name: "테이블에 반영" }));
+  expect(screen.getByText("1행: 경로 1개(콤마 없이)여야 합니다")).toBeInTheDocument();
+  await userEvent.clear(screen.getByLabelText("CSV"));
+  await userEvent.type(screen.getByLabelText("CSV"), "target{enter}old/a{enter}old/b");
+  await userEvent.click(screen.getByRole("button", { name: "테이블에 반영" }));
+  expect(screen.getByLabelText("1행 경로")).toHaveValue("old/a");
+  expect(screen.getByLabelText("2행 경로")).toHaveValue("old/b");
+  expect(createButton()).toBeEnabled();
+});

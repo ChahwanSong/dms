@@ -52,6 +52,18 @@ class Operation(StrEnum):
     RM = "rm"
 
 
+# 배치로 받는 연산(2026-10-21 rm 추가 -- 사용자 요청 「배치작업에 rm도 할수있도록」).
+BATCH_OPERATIONS = (Operation.SCAN.value, Operation.SYNC.value, Operation.RM.value)
+
+
+def confirm_gated(operation) -> bool:
+    """미리보기 → (사람의) 「배치 확인」을 거쳐야 실행되는 연산인가. scan 만 게이트가 없다 -- sync·rm, 그리고 DB 변조로
+    들어온 미지 연산은 게이트 쪽으로 읽는다(fail-closed). 배치 생성 상태·Queued 재생성 뒤 복귀·:rescan·orchestrator 의
+    Running 분기가 이 술어 하나를 쓴다 -- 두 벌이면 한쪽만 rm 을 모르는 순간 확인된 자식이 영영 멈추거나(Running 분기가
+    rm 을 scan 으로 읽던 2026-10-21 이전 모양) 사람이 본 적 없는 미리보기가 실행된다."""
+    return operation != Operation.SCAN.value
+
+
 class Tool(StrEnum):
     DSCAN = "dscan"
     DSYNC = "dsync"
@@ -280,6 +292,17 @@ def validate_options(operation: Operation, options: dict) -> dict:
     return out
 
 
+def validate_batch_options(operation, options) -> dict:
+    """배치 행 옵션 검증 = validate_options + rm 동의 게이트(recursive is True -- validate_rm_target 과 같은 규칙·사유).
+    배치 옵션은 항목 전체가 공유하는데 rm 의 recursive 는 build_data_payload(항목별)에서만 본다 -- 옵션만 바꾸는 경로
+    (종단 배치 실행 설정 변경, 확인·재실행 전 재검증)가 이 함수로 같은 422 를 미리 낸다. 아니면 recursive 를 뺀 옵션이
+    저장되고, 재실행에서야 항목마다 Rejected(rm_recursive_required)로 늦게 드러난다(fail-closed 지만 늦은 알림)."""
+    out = validate_options(operation, options)
+    if Operation(operation) is Operation.RM and out.get("recursive") is not True:
+        raise DomainValidationError("rm_recursive_required", "options.recursive must be true")
+    return out
+
+
 def option_fingerprint(options: dict) -> str:
     payload = json.dumps(options or {}, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode()).hexdigest()
@@ -384,7 +407,7 @@ def validate_batch(operation, max_concurrency, items, *,
                    priority: str | None = None,
                    node_count: int | None = None,
                    procs_per_node: int | None = None) -> None:
-    if operation not in (Operation.SCAN.value, Operation.SYNC.value):
+    if operation not in BATCH_OPERATIONS:
         raise DomainValidationError("invalid_batch_operation", operation)
     _validate_max_concurrency(max_concurrency)
     if not items:
@@ -401,4 +424,36 @@ def validate_batch(operation, max_concurrency, items, *,
         storages = {(i or {}).get("storage") for i in items}
         if len(storages) > 1:
             raise DomainValidationError("batch_storage_mixed", f"{sorted(map(str, storages))}")
+        if operation == Operation.RM.value:
+            _reject_overlapping_rm_targets(items)
     _validate_batch_overrides(priority, node_count, procs_per_node)
+
+
+def _reject_overlapping_rm_targets(items) -> None:
+    """한 rm 배치 안의 대상 겹침(같은 경로 두 번·조상과 자손) 거부(2026-10-21, 사유 batch_rm_targets_overlap). 자식 충돌
+    판정은 resource_key(data.rm:<스토리지>:<대상>)가 **정확히 같을 때만**이라 a 와 a/b 는 둘 다 계획·미리보기된다 -- 확인
+    창의 「삭제 대상」 합계가 겹쳐 부풀고, 실행에서 a 가 a/b 를 먼저 지우면 a/b 는 재검증(parent_not_writable)·ENOENT
+    실패 항목이 된다(운영자가 본 확인 화면과 결과가 어긋난다). 같은 경로 두 번이면 둘째가 resource_conflict 다.
+
+    비교는 validate_relative_path 정규화 뒤 경로 **성분** 단위다(a 와 ab·「a b」는 겹치지 않는다). 형식이 틀린 대상은
+    건너뛴다 -- 정확한 사유(unsafe_path·rm_root_forbidden)는 뒤이은 build_data_payload 가 낸다. 판정 집합은 항목 전체
+    (종단 항목 포함 -- 단일 스토리지 판정과 같은 집합이고, 생성·추가·수정·교체가 모두 이 함수를 지난다). 포탈
+    (lib/rmTargets.ts)이 같은 규칙으로 제출 전에 즉답한다. 다른 요청·배치와의 겹침은 여기서 보지 않는다(BACKLOG)."""
+    seen: set[str] = set()
+    for i in items:
+        t = i.get("target") if isinstance(i, dict) else None
+        if not isinstance(t, str):
+            continue
+        try:
+            n = validate_relative_path(t)
+        except DomainValidationError:
+            continue
+        if n in seen:
+            raise DomainValidationError("batch_rm_targets_overlap", f"duplicate {n!r}")
+        seen.add(n)
+    for n in sorted(seen):
+        parts = n.split("/")
+        for k in range(1, len(parts)):
+            anc = "/".join(parts[:k])
+            if anc in seen:
+                raise DomainValidationError("batch_rm_targets_overlap", f"{anc!r} contains {n!r}")

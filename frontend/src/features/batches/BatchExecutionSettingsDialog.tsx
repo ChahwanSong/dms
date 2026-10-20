@@ -21,11 +21,14 @@ import { useUpdateBatchExecution, type BatchExecutionBody } from "./useBatches";
 // 옛 옵션(예: scan top_k)뿐이고, 남겨 보내면 저장이 늘 422 다. 모르는 키는 "저장하면 빠집니다"로 보여 주고 뺀다
 // (이 화면이 그런 옛 배치를 다시 돌릴 수 있게 고치는 길이다).
 
-const BOOLS = { scan: ["verbose", "quiet"], sync: ["delete", "contents", "direct", "quiet", "open_noatime"] } as const;
-const INTS = { scan: ["batch_files", "broken_limit"], sync: ["batch_files", "bufsize"] } as const;
-const STRS = { scan: [], sync: ["chmod", "chown"] } as const;
-type Op = "scan" | "sync";
-const opOf = (b: Batch): Op => (b.operation === "sync" ? "sync" : "scan");
+// rm(2026-10-21): 키 집합을 넣지 않으면 opOf 가 rm 을 scan 으로 접어, 저장할 때 recursive 를 「지원하지 않는 옛 옵션」으로
+// 빼고 scan 옵션을 보낸다(서버 422 — 고치더라도 재실행 전부 rm_recursive_required). 그래서 rm 도 서버 스펙 그대로 둔다.
+const BOOLS = { scan: ["verbose", "quiet"], sync: ["delete", "contents", "direct", "quiet", "open_noatime"],
+                rm: ["recursive", "stat", "lite", "quiet"] } as const;
+const INTS = { scan: ["batch_files", "broken_limit"], sync: ["batch_files", "bufsize"], rm: [] } as const;
+const STRS = { scan: [], sync: ["chmod", "chown"], rm: [] } as const;
+type Op = "scan" | "sync" | "rm";
+const opOf = (b: Batch): Op => (b.operation === "sync" ? "sync" : b.operation === "rm" ? "rm" : "scan");
 const knownKeys = (op: Op): string[] => [...BOOLS[op], ...INTS[op], ...STRS[op]];
 
 interface Form {
@@ -106,7 +109,14 @@ export function BatchExecutionSettingsDialog({ b }: { b: Batch }) {
   const chownError = op === "sync" ? chownFieldError(f.strs.chown) : null;
   const verboseQuiet = op === "scan" && f.bools.verbose && f.bools.quiet
     ? "verbose와 quiet은 함께 쓸 수 없습니다" : null;
-  const errors = [mcError, nodeCountError, procsPerNodeError, ...intErrors, chmodError, chownError, verboseQuiet];
+  // rm: 생성 폼·단일 작업과 같은 즉답 — recursive 해제는 서버도 422(rm_recursive_required, validate_batch_options)지만
+  // 저장 전에 화면이 먼저 말한다. stat+lite 는 invalid_option.
+  const rmErrors = op === "rm"
+    ? [f.bools.recursive ? null : "재귀 옵션이 필요합니다",
+       f.bools.stat && f.bools.lite ? "stat과 lite는 함께 쓸 수 없습니다" : null]
+    : [];
+  const errors = [mcError, nodeCountError, procsPerNodeError, ...intErrors, chmodError, chownError, verboseQuiet,
+                  ...rmErrors];
   const invalid = errors.some((e) => e !== null);
 
   // 바뀐 것이 없으면 저장을 잠근다(서버도 같은 값이면 쓰지 않지만, 누를 이유가 없는 버튼은 헛클릭이다).
@@ -189,6 +199,7 @@ export function BatchExecutionSettingsDialog({ b }: { b: Batch }) {
             ))}
           </div>
           {err(verboseQuiet)}
+          {rmErrors.map((e, i) => e && <p key={i} className="text-bad text-sm">{e}</p>)}
           {INTS[op].map((k, i) => (
             <label key={k} className="text-sm block">
               {op === "scan"

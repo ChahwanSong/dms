@@ -96,3 +96,12 @@ test("왕복: parse(serialize(rows)) == rows", () => {
   expect(syncText.split(/\r?\n/)[0]).toBe("source,destination");
   expect(parseItemsCsv("sync", syncText).rows).toEqual(syncRows);
 });
+
+test("rm(2026-10-21): scan 과 같은 1열 계약 — target/path 헤더 스킵, 콤마 행은 오류, 직렬화 왕복", () => {
+  expect(parseItemsCsv("rm", "target\nold/a\nold/b")).toEqual({ rows: [{ target: "old/a" }, { target: "old/b" }], errors: [] });
+  expect(parseItemsCsv("rm", "path\nx").rows).toEqual([{ target: "x" }]);
+  expect(parseItemsCsv("rm", "a,b").errors).toEqual(["1행: 경로 1개(콤마 없이)여야 합니다"]);
+  const text = serializeItemsCsv("rm", [{ target: "old/a" }, { target: "old/b" }]);
+  expect(text).toBe("target\nold/a\nold/b");
+  expect(parseItemsCsv("rm", text).rows).toEqual([{ target: "old/a" }, { target: "old/b" }]);
+});

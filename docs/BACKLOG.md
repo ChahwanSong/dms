@@ -76,8 +76,13 @@
   - **정리 이벤트 뷰어** — 정리 실패의 상세(`purge_failed`·`purge_ref_rejected`·`artifact_left_at_old_base`·
     `request_purged`, 전부 request_id=NULL)는 events 에만 있고 포탈엔 전역 이벤트 화면이 없다. 지금 표면은
     작업 목록 툴바의 정리 현황(`GET /api/admin/request-purges` — 대기·지연 건수와 첫 지연 사유)뿐이다.
-- 🔧 **배치 CSV 업로드/내보내기·템플릿·rm 배치** — 현재 배치는 scan|sync 만
-  (`domain.py::validate_batch`), CSV 는 프론트 파싱. 백엔드화·rm 배치는 미착수.
+- 🔧 **배치 CSV 업로드/내보내기·템플릿** — CSV 는 프론트 파싱(`lib/csv.ts`). 백엔드화는 미착수. (rm 배치는
+  2026-10-21 완료 — CHANGELOG.)
+- 🔧 **rm 경로의 다른 요청·배치와의 겹침 판정**(2026-10-21 배치 rm 의 열린 결정 D4) — 한 rm 배치 **안**의 겹침만 422
+  `batch_rm_targets_overlap` 이고, 다른 요청과는 「정확히 같은 대상의 rm」(resource_key 같음 → `resource_conflict`)만 막는다.
+  진행 중 sync 의 소스·목적지, 다른 rm 의 조상·자손, scan 대상과 겹치는 rm 은 둘 다 계획·실행된다(단건 rm 도 같다).
+  대칭 판정(sync 계획 때도 rm 을 보는)이 없으면 반쪽이고, 위험한 순간은 확인 뒤 실행 직전이라 planner 1회 판정으로는
+  부족하다 — 경로 접두 잠금 같은 별도 설계감.
 - 🔧 **배치 생성 폼의 스토리지 드롭다운** — 현재 자유 입력.
 - 🔧 **에이전트 설정 푸시** — 에이전트 설정은 배포 시 고정.
 - 🔧 **알림/경보** — 슬라이스 14 비목표("대시보드는 표시만"). 임계 초과 알림 없음.

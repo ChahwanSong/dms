@@ -4,9 +4,9 @@ import { useBatch, useConfirmBatch, useRerunFailed, useRequestScanStats,
          useCancelBatch, useRescanBatch, useUpdateBatch, useDeleteBatch,
          useUpdateBatchItem, useDeleteBatchItem, useDeleteBatchItems,
          useAddBatchItem, useReplaceBatchItems, useRerunBatchItems,
-         useDisableAutoConfirm } from "./useBatches";
+         useDisableAutoConfirm, needsBatchConfirm } from "./useBatches";
 import { parseItemsCsv, serializeItemsCsv,
-         type ScanRow, type SyncRow } from "../../lib/csv";
+         type ItemsCsvOp, type ScanRow, type SyncRow } from "../../lib/csv";
 import { Card } from "../../components/ui/Card";
 import { Dialog } from "../../components/ui/Dialog";
 import { StatusPill } from "../../components/ui/StatusPill";
@@ -18,7 +18,8 @@ import { field } from "../jobs/formFields";
 import { BatchExecutionSettingsDialog } from "./BatchExecutionSettingsDialog";
 import { batchJobsPath, useRequestJobs } from "../jobs/useJobs";
 import { reasonText, ApiError } from "../../lib/api";
-import { absSummary } from "../../lib/storagePaths";
+import { absSummary, pathSummary, relativePathProblem } from "../../lib/storagePaths";
+import { rmTargetOverlaps, type RmTargetEntry } from "../../lib/rmTargets";
 import { toolSummary } from "../../lib/jobTool";
 import { useStorageRoots } from "../storages/useUserStorages";
 import { batchPillVariant, batchStatusLabel } from "../../lib/jobState";
@@ -158,6 +159,19 @@ function summarizeItem(operation: string | undefined,
   return `${operation ?? "—"} · ${body}`;
 }
 
+// CSV 대화상자 연산: 항목 **모양**만 가른다(sync = 쌍, 나머지 = 대상 하나). 모르는 문자열은 1열(scan)로 읽는다 — 예전
+// `isSync ? "sync" : "scan"` 과 같은 결이고, rm(2026-10-21)은 이름을 그대로 넘겨 교체 안내를 rm 문맥으로 말한다.
+const csvOp = (op: string | undefined): ItemsCsvOp => (op === "sync" ? "sync" : op === "rm" ? "rm" : "scan");
+// rm 미리보기 수 문구(단건 previewSummaryText·StageResults 와 같은 뜻): drm walk 는 대상 자신을 세므로 0 = 대상 경로를
+// 찾지 못함(오타·이미 삭제·권한), 수가 아니면 모름 — null≠0 이라 둘을 다른 말로 한다.
+const rmCount = (n: unknown): string => (typeof n !== "number" ? "모름"
+  : n === 0 ? "0개(대상 경로를 찾지 못함)" : `${n.toLocaleString("ko-KR")}개`);
+// 기존 항목의 rm 대상 → 겹침 즉답 재료(lib/rmTargets). 대상이 문자열이 아니면(DB 변조) 판정에서 뺀다 — 서버도 형식이
+// 틀린 대상은 겹침에서 건너뛴다.
+const rmEntriesOf = (items: BatchItem[], skipSeq?: number): RmTargetEntry[] =>
+  items.flatMap((it) => (it.seq !== skipSeq && typeof it.payload.target === "string"
+    ? [{ label: `기존 #${it.seq}`, target: it.payload.target }] : []));
+
 // 옵션 humanize: scan/sync 옵션은 평평한 스칼라 맵(batch_files 등)이라 키=값
 // 나열이 JSON 원문보다 읽기 쉽다. 비스칼라 값만 JSON 으로 접는다(방어 — 현행
 // 계약엔 없지만 [object Object] 를 찍는 것보다 낫다). 빈 옵션은 "없음" — 빈
@@ -200,12 +214,13 @@ function BatchSettings({ b }: { b: Batch }) {
           <dt className="text-muted">실행 신원</dt>
           <dd>{b.owner_username}</dd>
         </>)}
-        {/* sync 실행 확인 방식(2026-10-11 자동 확인) — scan 은 확인 단계가 없어 행 생략. */}
-        {b.operation === "sync" && (<>
+        {/* 실행 확인 방식(sync 2026-10-11 자동 확인, rm 2026-10-21 늘 직접) — scan 은 확인 단계가 없어 행 생략. */}
+        {needsBatchConfirm(b.operation) && (<>
           <dt className="text-muted">실행 확인</dt>
-          <dd>{b.auto_confirm === true
-            ? `자동 — 미리보기가 끝나면 바로 실행${b.auto_confirm_by ? ` (켠 사람 ${b.auto_confirm_by})` : ""}`
-            : "직접 — 미리보기 후 「배치 확인」"}</dd>
+          <dd>{b.operation === "rm" ? "직접 — 미리보기 후 「배치 확인」(rm 은 자동 실행 없음)"
+            : b.auto_confirm === true
+              ? `자동 — 미리보기가 끝나면 바로 실행${b.auto_confirm_by ? ` (켠 사람 ${b.auto_confirm_by})` : ""}`
+              : "직접 — 미리보기 후 「배치 확인」"}</dd>
         </>)}
       </dl>
       {/* 2026-10-02 부터 종단 배치는 실행 설정을 바꿀 수 있어(실행 설정 변경) 이 값이 이미 끝난 항목이 실제로 돈 값과
@@ -372,7 +387,7 @@ function ItemScanStats({ requestId, succeeded }: {
 // 물려받는다(항목 추가와 같은 동질성 계약) — 항목 0개면 호출측이 이 컴포넌트
 // 자체를 안 그린다(물려받을 스토리지가 없다).
 function ReplaceItemsCsvDialog({ batchId, operation, firstPayload, chown }: {
-  batchId: string; operation: "scan" | "sync";
+  batchId: string; operation: ItemsCsvOp;
   firstPayload: Record<string, unknown>; chown: string;
 }) {
   const [open, setOpen] = useState(false);
@@ -392,18 +407,32 @@ function ReplaceItemsCsvDialog({ batchId, operation, firstPayload, chown }: {
         destination_storage: firstPayload.destination_storage,
         destination: (r as SyncRow).destination }
     : { storage: firstPayload.storage, target: (r as ScanRow).target });
+  // rm 교체 즉답(생성 화면과 같은 규칙 — 서버 422 batch_rm_targets_overlap·rm_root_forbidden 의 미러).
+  const rmProblems = operation === "rm"
+    ? [...rows.flatMap((r, i) => {
+        const p = relativePathProblem((r as ScanRow).target);
+        return p === null ? [] : [`${i + 1}행: ${p}`];
+      }),
+       ...rmTargetOverlaps(rows.map((r, i) => ({ label: `${i + 1}행`, target: (r as ScanRow).target })))]
+    : [];
   return (
     <Dialog open={open} onOpenChange={setOpen} title="CSV로 전체 교체"
             trigger={<Button variant="ghost">CSV로 전체 교체</Button>}>
       <div className="space-y-2">
         <p className="text-muted text-sm">기존 항목이 모두 사라지고 붙여넣은 CSV 로 대체됩니다.</p>
         {operation === "sync" && <SyncDestHint chown={chown} />}
+        {operation === "rm" && (
+          <p className="text-xs text-bad" role="note" aria-label="삭제 경로 교체">
+            교체만으로는 아무것도 지워지지 않습니다 — 재실행하면 미리보기 뒤 「배치 확인」을 거쳐 이 경로들이 root 로
+            삭제됩니다.
+          </p>
+        )}
         <label className="text-sm block">
-          {`행 형식 — ${operation === "scan" ? "행당 경로 1개" : "행당 source,destination"}`}
+          {`행 형식 — ${operation === "sync" ? "행당 source,destination" : "행당 경로 1개"}`}
           <textarea aria-label="교체 CSV" className={`${field} h-40 font-mono`}
-                    placeholder={operation === "scan"
-                      ? "team\nprojects/alpha"
-                      : "team/dataset,backup/dataset\nprojects/alpha,backup/alpha"}
+                    placeholder={operation === "sync"
+                      ? "team/dataset,backup/dataset\nprojects/alpha,backup/alpha"
+                      : "team\nprojects/alpha"}
                     value={text}
                     onChange={(e) => { setText(e.target.value);
                                        replace.reset(); /* 이전 시도 잔상 제거 */ }} />
@@ -419,13 +448,18 @@ function ReplaceItemsCsvDialog({ batchId, operation, firstPayload, chown }: {
             {errors.map((err, i) => <li key={i}>{err}</li>)}
           </ul>
         )}
+        {rmProblems.length > 0 && (
+          <ul aria-label="교체할 수 없는 삭제 경로" className="text-bad text-sm space-y-1">
+            {rmProblems.map((err) => <li key={err}>{err}</li>)}
+          </ul>
+        )}
         {replace.isError && (
           <p className="text-bad text-sm">{(replace.error as ApiError).message}</p>
         )}
         <div className="flex justify-end gap-2 pt-1">
           <Button variant="ghost" onClick={() => setOpen(false)}>닫기</Button>
           {parsed !== null && (
-            <Button disabled={errors.length > 0 || rows.length === 0 || replace.isPending}
+            <Button disabled={errors.length > 0 || rmProblems.length > 0 || rows.length === 0 || replace.isPending}
                     onClick={() => replace.mutate(items,
                       { onSuccess: () => setOpen(false) })}>교체</Button>
           )}
@@ -442,7 +476,7 @@ function ReplaceItemsCsvDialog({ batchId, operation, firstPayload, chown }: {
 // 동작한다. 헤더 포함 직렬화라 교체 팝업에 그대로 붙여넣으면 같은 항목이
 // 복원된다(왕복 계약).
 function CurrentItemsCsvDialog({ operation, items }: {
-  operation: "scan" | "sync"; items: BatchItem[];
+  operation: ItemsCsvOp; items: BatchItem[];
 }) {
   const [open, setOpen] = useState(false);
   const text = serializeItemsCsv(operation, items.map((it) => operation === "sync"
@@ -480,20 +514,32 @@ function SyncDestHint({ chown }: { chown: string }) {
 }
 
 // 항목 추가(경로만 입력 — 스토리지는 첫 항목에서 물려받는다). 종단 배치에
-// 추가하면 서버가 재활성화(scan→Running/sync→Previewing)하고 신규 Queued 항목만
+// 추가하면 서버가 재활성화(scan→Running/sync·rm→Previewing)하고 신규 Queued 항목만
 // 실행된다. 성공 시 팝업을 닫는다: 추가된 항목은 뒤의 목록에 나타나므로 화면에
 // 남아 있을 이유가 없다(invalidate 는 훅 onSettled 몫). 항목이 없으면 물려받을
 // 스토리지가 없어 호출측이 버튼 대신 안내를 보인다.
-function AddItemDialog({ batchId, isSync, firstPayload, chown, status, auto }: {
+function AddItemDialog({ batchId, isSync, firstPayload, chown, status, auto, confirmFlow, rmExisting }: {
   batchId: string; isSync: boolean; firstPayload: Record<string, unknown>; chown: string; status: string;
   // 자동 확인이 켜져 있고 **보류되지 않은** 배치만 true -- 보류 중이면 종전처럼 사람이 확인한다(문구도 그 말).
   auto: boolean;
+  // 확인 흐름(sync·rm — needsBatchConfirm): 진행 중·확인 대기 배치에 추가하면 다시 미리보기 → 「배치 확인」을 거친다.
+  confirmFlow: boolean;
+  // rm 배치의 기존 대상(겹침 즉답 재료) — rm 이 아니면 null.
+  rmExisting: RmTargetEntry[] | null;
 }) {
   const [open, setOpen] = useState(false);
   const add = useAddBatchItem(batchId);
   const [path, setPath] = useState("");
   const [dst, setDst] = useState("");
   useEffect(() => { if (!open) { setPath(""); setDst(""); add.reset(); } }, [open]);
+  // rm 즉답(2026-10-21): 관리 디렉토리 자신·「..」·「/」, 그리고 기존 항목과의 겹침(종단 항목 포함 — 서버 validate_batch 와
+  // 같은 집합)을 누르기 전에 말한다. 서버 422(rm_root_forbidden·unsafe_path·batch_rm_targets_overlap)가 최종 심판이다.
+  const rmProblems = rmExisting === null || path.trim() === "" ? []
+    : (() => {
+        const p = relativePathProblem(path);
+        if (p !== null) return [p];
+        return rmTargetOverlaps([...rmExisting, { label: "추가할 경로", target: path }], rmExisting.length);
+      })();
   return (
     <Dialog open={open} onOpenChange={setOpen} title="항목 추가"
             trigger={<Button variant="ghost">항목 추가</Button>}>
@@ -508,7 +554,21 @@ function AddItemDialog({ batchId, isSync, firstPayload, chown, status, auto }: {
                    onChange={(e) => setDst(e.target.value)} />
           </label>
           <SyncDestHint chown={chown} />
-          {/* 서버 계약(2026-10-07): 진행 중·확인 대기 sync 배치에 추가하면 배치가 미리보기 단계로 돌아간다 --
+        </>) : (
+          <label className="text-sm block">추가할 대상 경로
+            <input aria-label="추가할 대상 경로" className={field} value={path}
+                   onChange={(e) => setPath(e.target.value)} />
+          </label>
+        )}
+        {rmProblems.length > 0 && (
+          <ul aria-label="추가할 수 없는 삭제 경로" className="text-bad text-sm space-y-1">
+            {rmProblems.map((m) => <li key={m}>{m}</li>)}
+          </ul>
+        )}
+        {/* 확인 흐름 안내는 연산 모양(쌍/대상 하나)과 무관하다 -- sync·rm 둘 다(rm 2026-10-21, 문구는 그대로 참이다:
+            삭제도 「실행」이다). scan 은 확인 단계가 없어 안내가 없다. */}
+        {confirmFlow && (<>
+          {/* 서버 계약(2026-10-07): 진행 중·확인 대기 확인 게이트 배치에 추가하면 배치가 미리보기 단계로 돌아간다 --
               새 경로가 사람 확인 없이 root 로 돌지 않게. 누르기 전에 그 결과를 말한다. */}
           {/* 자동 확인(2026-10-11)이 켜진 배치는 새 항목도 미리보기가 끝나면 확인 없이 실행된다 -- 아래 「다시 눌러야」
               문구가 거짓이 되므로 대신 이 사실을 말한다. */}
@@ -530,18 +590,13 @@ function AddItemDialog({ batchId, isSync, firstPayload, chown, status, auto }: {
               「배치 확인」을 다시 눌러야 나머지가 실행되며, 그 사이 미리보기가 만료된 항목은 거부(실패로 집계)됩니다.
             </p>
           )}
-        </>) : (
-          <label className="text-sm block">추가할 대상 경로
-            <input aria-label="추가할 대상 경로" className={field} value={path}
-                   onChange={(e) => setPath(e.target.value)} />
-          </label>
-        )}
+        </>)}
         {add.isError && (
           <p className="text-bad text-sm">{(add.error as ApiError).message}</p>
         )}
         <div className="flex justify-end gap-2 pt-1">
           <Button variant="ghost" onClick={() => setOpen(false)}>닫기</Button>
-          <Button disabled={add.isPending}
+          <Button disabled={add.isPending || rmProblems.length > 0}
                   onClick={() => add.mutate(itemBody(isSync, firstPayload, path, dst),
                     { onSuccess: () => setOpen(false) })}>항목 추가</Button>
         </div>
@@ -580,11 +635,20 @@ function notRunCause(it: BatchItem): string | null {
   return null;
 }
 
-function ConfirmBatchDialog({ b, confirm }: { b: BatchDetailData; confirm: ReturnType<typeof useConfirmBatch> }) {
+// rm 배치(2026-10-21): 같은 대화상자의 rm 갈래 -- 확인이 곧 root 삭제 시작이라 마찰을 여기 둔다. 무엇이 지워지는지(항목별
+// 삭제 대상 수 + 실제 경로를 **전부** -- 「실행되지 않는 항목」의 10개 상한과 달리 삭제 검토는 누락이 없어야 한다, 목록만
+// 스크롤), 대상 경로를 못 찾은 항목(미리보기 0), 그리고 「되돌릴 수 없음」 체크를 켜야만 주 버튼 「삭제 실행 확인」이 풀린다.
+// 체크는 열 때마다 풀린다(지난 확인이 새 회차로 이어지지 않게). 버튼 색은 그대로 primary -- danger 는 「멈추는 취소」
+// 전용 의미다(Button.tsx). sync 의 문자열·소유권 줄은 바꾸지 않는다(rm 에 「복사된 파일 소유」는 거짓이라 sync 로 좁힌다).
+function ConfirmBatchDialog({ b, confirm, absOf }: {
+  b: BatchDetailData; confirm: ReturnType<typeof useConfirmBatch>; absOf: (it: BatchItem) => string | null;
+}) {
   const [open, setOpen] = useState(false);
   const [round, setRound] = useState<number | null>(null);
+  const [ack, setAck] = useState(false);
+  const isRm = b.operation === "rm";
   const current = b.preview_round ?? 0;
-  const onOpenChange = (o: boolean) => { setOpen(o); if (o) setRound(current); };
+  const onOpenChange = (o: boolean) => { setOpen(o); if (o) { setRound(current); setAck(false); } };
   const changed = open && round !== null && round !== current;
   // 닫을 때(그리고 다시 확인 대기가 돼 새로 붙을 때) 지난 실패를 비운다(DeleteBatchButton 과 같은 이유 -- "취소"는
   // Radix onOpenChange 를 거치지 않는다). 변이는 페이지(BatchDetail)가 가진다: 409 뒤 배치가 Previewing 으로 돌아가면
@@ -606,6 +670,8 @@ function ConfirmBatchDialog({ b, confirm }: { b: BatchDetailData; confirm: Retur
     .filter((n): n is number => typeof n === "number");
   const unknownFiles = runnable.length - known.length;
   const fileTotal = known.reduce((a, n) => a + n, 0);
+  // rm: 미리보기에서 대상 경로를 못 찾은 항목(0 -- walk 는 대상 자신을 세므로 빈 디렉토리도 1). 실행해도 지울 것이 없다.
+  const notFound = isRm ? runnable.filter((it) => it.preview_summary?.files === 0).length : 0;
   const expiries = runnable.map((it) => it.preview_expires_at).filter((x): x is string => !!x).sort();
   const earliest = expiries[0] ?? null;
   const del = b.options?.delete === true;
@@ -614,12 +680,22 @@ function ConfirmBatchDialog({ b, confirm }: { b: BatchDetailData; confirm: Retur
   const ownership = syncOwnership({ chown: String(b.options?.chown ?? ""), chmod: String(b.options?.chmod ?? ""),
                                     root: true, runAs: null, self: true }).long;
   return (
-    <Dialog open={open} onOpenChange={onOpenChange} title="배치 확인"
+    // rm 은 넓은 창(lg): 항목별 실제 경로 목록까지 실으면 md 폭에선 1280×900 에서도 버튼이 창 아래로 밀렸다(캡처 실측).
+    <Dialog open={open} onOpenChange={onOpenChange} title="배치 확인" size={isRm ? "lg" : "md"}
             trigger={<Button>배치 확인</Button>}>
       <p className="text-sm">
-        {`확인하면 미리보기를 마친 항목 ${runnable.length}개가 동시 실행 상한 ${b.max_concurrency}개씩 차례로 관리자 `
-          + "특권(root)으로 실행됩니다 — 항목별 확인은 없습니다."}
+        {isRm
+          ? `확인하면 미리보기를 마친 항목 ${runnable.length}개의 경로가 동시 실행 상한 ${b.max_concurrency}개씩 차례로 `
+            + "관리자 특권(root)으로 삭제됩니다 — 항목별 확인은 없고, 되돌릴 수 없습니다."
+          : `확인하면 미리보기를 마친 항목 ${runnable.length}개가 동시 실행 상한 ${b.max_concurrency}개씩 차례로 관리자 `
+            + "특권(root)으로 실행됩니다 — 항목별 확인은 없습니다."}
       </p>
+      {isRm && (
+        <p role="note" aria-label="삭제 경고"
+           className="mt-3 rounded-lg border border-bad/30 bg-badbg px-3 py-2 text-sm text-bad">
+          각 항목의 경로와 그 아래 파일·디렉토리가 모두 삭제됩니다. root 로 실행돼 파일 권한·소유와 관계없이 지워집니다.
+        </p>
+      )}
       {/* 자동 확인(2026-10-11)이 곧 같은 확인을 할 수 있다 -- 먼저 누르면 사람 확인으로 남고, 시스템이 먼저면 이 확인은
           거부되지만 배치는 이미 실행 중이다(헤더가 그렇게 말한다). */}
       {b.auto_confirm === true && !b.auto_confirm_hold && (
@@ -648,16 +724,47 @@ function ConfirmBatchDialog({ b, confirm }: { b: BatchDetailData; confirm: Retur
             {notRunItems.length > NOT_RUN_LIST_MAX && <li>{`외 ${notRunItems.length - NOT_RUN_LIST_MAX}개`}</li>}
           </ul>
         </>)}</dd>
-        <dt className="text-muted">복사 대상</dt>
+        <dt className="text-muted">{isRm ? "삭제 대상" : "복사 대상"}</dt>
         <dd>{runnable.length === 0 ? "—"
           : known.length === 0 ? `모름(미리보기 ${runnable.length}개 항목 모두 수 미기록)`
-          : `${fileTotal.toLocaleString("ko-KR")}개(항목별 미리보기 합계${unknownFiles > 0 ? `, ${unknownFiles}개 항목은 모름` : ""})`}</dd>
+          : isRm
+            ? `${fileTotal.toLocaleString("ko-KR")}개(대상 경로 포함 파일·디렉터리, 항목별 미리보기 합계${
+                unknownFiles > 0 ? `, ${unknownFiles}개 항목은 모름` : ""})`
+            : `${fileTotal.toLocaleString("ko-KR")}개(항목별 미리보기 합계${unknownFiles > 0 ? `, ${unknownFiles}개 항목은 모름` : ""})`}</dd>
+        {notFound > 0 && (<>
+          <dt className="text-muted">대상 경로 없음</dt>
+          <dd className="text-bad">
+            {`${notFound}개 항목 — 미리보기에서 찾지 못했습니다(오타·이미 삭제·권한). 확인해도 지울 것이 없습니다.`}
+          </dd>
+        </>)}
         <dt className="text-muted">동시 실행 상한</dt>
         <dd className="tabular-nums">{b.max_concurrency}</dd>
         <dt className="text-muted">미리보기 만료</dt>
         <dd>{earliest ? `${kstStampOrDash(earliest)}(가장 이른 항목) — 확인 시각이 아니라 각 항목의 실행 시작 기준입니다. `
           + "슬롯을 기다리다 만료된 항목은 실행되지 않고 거부(실패로 집계)됩니다." : "—"}</dd>
       </dl>
+      {isRm && runnable.length > 0 && (
+        <div className="mt-3">
+          <p className="text-sm font-medium">항목별 삭제 대상(미리보기)</p>
+          {/* 실제 경로는 지금의 managed_root 로 조합(absOf -- 모르면 줄 생략). 긴 경로는 아무 데서나 끊는다(375 폭). */}
+          <ul aria-label="항목별 삭제 대상"
+              className="mt-1 max-h-60 space-y-1 overflow-y-auto rounded-lg border border-line px-3 py-2 text-xs">
+            {runnable.map((it) => {
+              const sm = it.preview_summary;
+              const abs = absOf(it);
+              const rc = typeof sm?.returncode === "number" && sm.returncode !== 0
+                ? ` · dry-run 종료코드 ${sm.returncode}` : "";
+              return (
+                <li key={it.seq} className={`[overflow-wrap:anywhere] ${sm?.files === 0 || rc !== "" ? "text-bad" : ""}`}>
+                  {`#${it.seq} ${pathSummary(b.operation, it.payload)} — `}
+                  <span className="font-medium tabular-nums">{`${rmCount(sm?.files)}${rc}`}</span>
+                  {abs !== null && <span className="block text-muted">{`실제 경로: ${abs}`}</span>}
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
       {expired > 0 && (
         <p className="mt-2 text-sm text-bad">
           {`미리보기 만료 ${expired}개 — 확인해도 실행되지 않고 거부로 기록됩니다(항목 재실행으로 다시 미리보기).`}
@@ -668,7 +775,9 @@ function ConfirmBatchDialog({ b, confirm }: { b: BatchDetailData; confirm: Retur
           delete 옵션: 원본에 없는 파일·디렉토리를 목적지에서 지웁니다(미러 동기화).
         </p>
       )}
-      <p className="mt-2 text-sm" role="note" aria-label="목적지 소유">{`소유권: ${ownership}`}</p>
+      {b.operation === "sync" && (
+        <p className="mt-2 text-sm" role="note" aria-label="목적지 소유">{`소유권: ${ownership}`}</p>
+      )}
       {changed && (
         <p role="alert" className="mt-3 text-bad text-sm">
           이 대화상자를 연 뒤 배치 내용이 바뀌었습니다(항목 추가·재실행으로 다시 미리보기됨) — 닫고 다시 열어 바뀐 내용을 검토하세요.
@@ -678,13 +787,21 @@ function ConfirmBatchDialog({ b, confirm }: { b: BatchDetailData; confirm: Retur
       {confirm.isError && !(changed && (confirm.error as ApiError).code === "batch_preview_changed") && (
         <p role="alert" className="mt-3 text-bad text-sm">{(confirm.error as ApiError).message}</p>
       )}
+      {isRm && (
+        <label className="mt-3 flex items-start gap-2 text-sm">
+          <input type="checkbox" className="mt-0.5 h-4 w-4 shrink-0" aria-label="되돌릴 수 없는 삭제임을 확인했습니다"
+                 checked={ack} onChange={(e) => setAck(e.target.checked)} />
+          {`위 경로 ${runnable.length}개를 root 로 삭제합니다 — 되돌릴 수 없음을 확인했습니다`}
+        </label>
+      )}
       <div className="mt-4 flex justify-end gap-2">
         <Button variant="ghost" onClick={() => setOpen(false)}>취소</Button>
         {/* 미리보기 완료 0 으로 막지 않는다: 판정은 서버다(job_state 를 모르는 옛 응답이면 0 으로 보여 확인이 막힌다).
-            회차가 바뀌었으면 잠근다 -- 보낸다 해도 서버가 409 다. */}
-        <Button disabled={confirm.isPending || changed || round === null}
+            회차가 바뀌었으면 잠근다 -- 보낸다 해도 서버가 409 다. rm 은 「되돌릴 수 없음」 체크 전에도 잠근다(화면 마찰 --
+            서버 계약은 그대로 preview_round). */}
+        <Button disabled={confirm.isPending || changed || round === null || (isRm && !ack)}
                 onClick={() => confirm.mutate({ preview_round: round ?? current },
-                  { onSuccess: () => setOpen(false) })}>실행 확인</Button>
+                  { onSuccess: () => setOpen(false) })}>{isRm ? "삭제 실행 확인" : "실행 확인"}</Button>
       </div>
     </Dialog>
   );
@@ -904,7 +1021,7 @@ export function BatchDetail() {
                 이름까지 고치는데 메모만 말해 어색했고 "이름·메모 편집"은 길다.
                 PATCH {name, note} 계약·폼 구조는 무변경. */}
             {b && !editing && <Button variant="ghost" onClick={startEdit}>편집</Button>}
-            {b?.status === "PreviewReady" && <ConfirmBatchDialog b={b} confirm={confirm} />}
+            {b?.status === "PreviewReady" && <ConfirmBatchDialog b={b} confirm={confirm} absOf={absOf} />}
             {b?.status === "Completed" && (b?.failed_count ?? 0) > 0 && <Button disabled={rerun.isPending} onClick={() => rerun.mutate()}>실패분 재실행</Button>}
             {/* 전체 재실행(:rescan): 종단 배치 한정(서버 가드 미러) — 성공 item 포함
                 전부 재큐잉(성장 모니터링). "실패분 재실행"(실패만)과 공존한다 */}
@@ -961,15 +1078,22 @@ export function BatchDetail() {
             {executing > 0 && ` 이미 실행 중인 항목 ${executing}개는 끝까지 실행(root)됩니다.`}
           </p>
         )}
-        {b?.operation === "sync" && b.status === "Previewing" && b.auto_confirm !== true && (
+        {/* rm(2026-10-21)도 같은 확인 흐름 -- 문구만 「삭제」로(미리보기는 지울 항목을 세기만 한다). */}
+        {needsBatchConfirm(b?.operation) && b?.status === "Previewing" && b.auto_confirm !== true && (
           <p className="mt-2 text-sm text-muted">
-            {executing > 0
-              ? `미리보기 단계입니다 — 이미 실행 중인 항목 ${executing}개는 끝까지 실행(root)되고, 나머지는 확인을 `
-                + "기다립니다. 미리보기가 끝나면 「배치 확인」을 눌러야 나머지가 실행됩니다."
-              : "항목별 미리보기(dry-run) 중입니다 — 끝나면 「배치 확인」을 눌러야 실행됩니다."}
+            {b.operation === "rm"
+              ? (executing > 0
+                  ? `미리보기 단계입니다 — 이미 확인돼 삭제 중인 항목 ${executing}개는 끝까지 실행(root)되고, 나머지는 확인을 `
+                    + "기다립니다. 미리보기가 끝나면 「배치 확인」을 눌러야 나머지가 삭제됩니다."
+                  : "항목별 미리보기(dry-run) 중입니다 — 지울 항목을 세기만 하고 아무것도 지우지 않습니다. 끝나면 "
+                    + "「배치 확인」을 눌러야 삭제됩니다.")
+              : executing > 0
+                ? `미리보기 단계입니다 — 이미 실행 중인 항목 ${executing}개는 끝까지 실행(root)되고, 나머지는 확인을 `
+                  + "기다립니다. 미리보기가 끝나면 「배치 확인」을 눌러야 나머지가 실행됩니다."
+                : "항목별 미리보기(dry-run) 중입니다 — 끝나면 「배치 확인」을 눌러야 실행됩니다."}
           </p>
         )}
-        {b?.operation === "sync" && b.status === "Running" && (
+        {needsBatchConfirm(b?.operation) && b?.status === "Running" && (
           <p className="mt-2 text-sm text-muted">
             확인된 항목은 동시 실행 상한({b.max_concurrency})만큼씩 차례로 실행됩니다.
           </p>
@@ -991,10 +1115,16 @@ export function BatchDetail() {
         )}
         {b?.status === "PreviewReady" && b.auto_confirm !== true && (
           <p className="mt-2 rounded-lg bg-infobg px-3 py-2 text-sm" role="status">
-            {executing > 0
-              ? `미리보기가 끝났습니다 — 「배치 확인」을 눌러야 나머지가 실행됩니다. 이미 확인돼 실행 중인 항목 ${executing}개만 `
-                + "계속 돌고, 확인 전에는 다른 항목이 실행되지 않습니다."
-              : "미리보기가 끝났습니다 — 「배치 확인」을 눌러야 실행됩니다. 확인 전에는 어떤 항목도 실행되지 않습니다."}
+            {b.operation === "rm"
+              ? (executing > 0
+                  ? `미리보기가 끝났습니다 — 「배치 확인」에서 항목별 삭제 대상을 검토하고 확인해야 나머지가 삭제됩니다. 이미 `
+                    + `확인돼 삭제 중인 항목 ${executing}개만 계속 돌고, 확인 전에는 다른 항목이 지워지지 않습니다.`
+                  : "미리보기가 끝났습니다 — 「배치 확인」에서 항목별 삭제 대상을 검토하고 확인해야 삭제됩니다. 확인 전에는 "
+                    + "아무것도 지워지지 않습니다.")
+              : executing > 0
+                ? `미리보기가 끝났습니다 — 「배치 확인」을 눌러야 나머지가 실행됩니다. 이미 확인돼 실행 중인 항목 ${executing}개만 `
+                  + "계속 돌고, 확인 전에는 다른 항목이 실행되지 않습니다."
+                : "미리보기가 끝났습니다 — 「배치 확인」을 눌러야 실행됩니다. 확인 전에는 어떤 항목도 실행되지 않습니다."}
           </p>
         )}
         {b?.note && !editing && <p className="text-muted text-sm mt-2">{b.note}</p>}
@@ -1046,17 +1176,19 @@ export function BatchDetail() {
             {/* 노출 조건은 인라인 시절 그대로: CSV 계열·추가는 항목 존재(스토리지
                 상속원), 교체는 종단 배치 한정. */}
             {b && hasItems && (
-              <CurrentItemsCsvDialog operation={isSync ? "sync" : "scan"}
+              <CurrentItemsCsvDialog operation={csvOp(b.operation)}
                                      items={b.items ?? []} />
             )}
             {b && firstPayload && (
               <AddItemDialog batchId={batchId} isSync={isSync} status={b.status}
                              auto={b.auto_confirm === true && !b.auto_confirm_hold}
+                             confirmFlow={needsBatchConfirm(b.operation)}
+                             rmExisting={b.operation === "rm" ? rmEntriesOf(b.items ?? []) : null}
                              firstPayload={firstPayload} chown={String(b.options?.chown ?? "")} />
             )}
             {b && terminal && firstPayload && (
               <ReplaceItemsCsvDialog batchId={batchId}
-                                     operation={isSync ? "sync" : "scan"}
+                                     operation={csvOp(b.operation)}
                                      firstPayload={firstPayload} chown={String(b.options?.chown ?? "")} />
             )}
           </div>
@@ -1248,8 +1380,13 @@ export function BatchDetail() {
                     <ItemTool requestId={it.request_id} />
                     {/* null = 모름(잡 없음/미기록) — 0(파일 없음)은 정상값으로 그대로
                         표기한다(null≠0, ?? 로만 접는다). */}
-                    <dt className="text-muted">파일 수</dt>
+                    {/* rm 의 결과 수는 「삭제한 항목」(요청 상세 KPI 와 같은 이름 — requestOutcome) + 확인 때 본 미리보기 수 */}
+                    <dt className="text-muted">{b?.operation === "rm" ? "삭제한 항목" : "파일 수"}</dt>
                     <dd className="tabular-nums">{it.files_count ?? "—"}</dd>
+                    {b?.operation === "rm" && it.preview_summary != null && (<>
+                      <dt className="text-muted">삭제 대상(미리보기)</dt>
+                      <dd className="tabular-nums">{rmCount(it.preview_summary.files)}</dd>
+                    </>)}
                     <dt className="text-muted">완료 시각</dt>
                     <dd className="text-muted">{kstStampOrDash(it.completed_at)}</dd>
                     <dt className="text-muted">payload</dt>

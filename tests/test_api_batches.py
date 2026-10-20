@@ -1004,3 +1004,109 @@ def test_cancel_completed_batch_rejected(client):
     r = client.post(f"/api/admin/batches/{bid}:cancel")
     assert r.status_code == 409
     assert r.json()["detail"] == "batch_not_cancelable"
+
+
+# --- rm 배치(2026-10-21 「배치작업에 rm도」): 생성은 Previewing(확인 게이트), 항목은 scan 과 같은 {storage, target} ---
+
+def _rm_body(items, **extra):
+    return {"operation": "rm", "max_concurrency": 2, "options": {"recursive": True}, "note": None,
+            "items": items, **extra}
+
+
+def test_create_rm_batch_is_previewing(client):
+    _admin(client)
+    r = client.post("/api/admin/batches", json=_rm_body([{"storage": "s1", "target": "old/a"},
+                                                          {"storage": "s1", "target": "old/b"}]))
+    assert r.status_code == 202 and r.json()["status"] == "Previewing"
+    b = client.app.state.repos.batches.get(r.json()["batch_id"])
+    assert b["operation"] == "rm" and b["options"] == {"recursive": True}
+    assert b["auto_confirm"] is False and b["auto_confirm_by"] is None
+
+
+def test_create_rm_batch_rejects_unsafe_items(client):
+    _admin(client)
+    cases = [
+        ({"options": {}}, [{"storage": "s1", "target": "a"}], "rm_recursive_required"),
+        ({"options": {"recursive": False}}, [{"storage": "s1", "target": "a"}], "rm_recursive_required"),
+        ({}, [{"storage": "s1", "target": ""}], "rm_root_forbidden"),
+        ({}, [{"storage": "s1", "target": "."}], "rm_root_forbidden"),
+        ({}, [{"storage": "s1", "target": "/etc"}], "unsafe_path"),
+        ({}, [{"storage": "s1", "target": "a/../.."}], "unsafe_path"),
+        ({}, [{"storage": "s1", "target": "a", "path": "x"}], "invalid_batch"),        # 모르는 항목 키
+        ({"options": {"recursive": True, "stat": True, "lite": True}}, [{"storage": "s1", "target": "a"}],
+         "invalid_option"),
+        ({"options": {"recursive": True, "delete": True}}, [{"storage": "s1", "target": "a"}], "unknown_option"),
+        ({}, [{"storage": "s1", "target": "a"}, {"storage": "s2", "target": "b"}], "batch_storage_mixed"),
+        ({"auto_confirm": True}, [{"storage": "s1", "target": "a"}], "auto_confirm_sync_only"),
+    ]
+    repo = client.app.state.repos.batches
+    before = len(repo.list())
+    for extra, items, code in cases:
+        r = client.post("/api/admin/batches", json=_rm_body(items, **extra))
+        assert r.status_code == 422 and r.json()["detail"] == code, (items, extra, r.text)
+    assert len(repo.list()) == before                                       # 아무것도 만들지 않았다
+
+
+def test_rm_overlap_is_rejected_on_create_add_edit_and_replace(client):
+    # 한 배치 안 겹침(같은 경로·조상과 자손)은 네 경로 모두 422 -- 판정은 validate_batch 한 곳(종단 항목 포함 전체 목록).
+    _admin(client)
+    repo = client.app.state.repos.batches
+    r = client.post("/api/admin/batches", json=_rm_body([{"storage": "s1", "target": "a"},
+                                                          {"storage": "s1", "target": "a/b"}]))
+    assert r.status_code == 422 and r.json()["detail"] == "batch_rm_targets_overlap"
+    r = client.post("/api/admin/batches", json=_rm_body([{"storage": "s1", "target": "a/b"},
+                                                          {"storage": "s1", "target": "a/b/"}]))
+    assert r.status_code == 422 and r.json()["detail"] == "batch_rm_targets_overlap"
+
+    bid = client.post("/api/admin/batches", json=_rm_body([{"storage": "s1", "target": "a/b"},
+                                                            {"storage": "s1", "target": "c"}])).json()["batch_id"]
+    r = client.post(f"/api/admin/batches/{bid}/items", json={"storage": "s1", "target": "a"})       # 조상 추가
+    assert r.status_code == 422 and r.json()["detail"] == "batch_rm_targets_overlap"
+    r = client.post(f"/api/admin/batches/{bid}/items", json={"storage": "s1", "target": "c/d"})     # 자손 추가
+    assert r.status_code == 422 and r.json()["detail"] == "batch_rm_targets_overlap"
+    r = client.put(f"/api/admin/batches/{bid}/items/1", json={"storage": "s1", "target": "a/b/x"})  # 수정으로 겹침
+    assert r.status_code == 422 and r.json()["detail"] == "batch_rm_targets_overlap"
+    r = client.put(f"/api/admin/batches/{bid}/items/1", json={"storage": "s1", "target": "a/c"})    # 자기 자리 교체는 무관
+    assert r.status_code == 200
+    assert [it["payload"]["target"] for it in repo.list_items(bid)] == ["a/b", "a/c"]
+
+    for it in repo.list_items(bid):
+        repo.set_item_status(bid, it["seq"], "Succeeded")
+    repo.set_status(bid, "Completed")
+    r = client.put(f"/api/admin/batches/{bid}/items", json={"items": [{"storage": "s1", "target": "x"},
+                                                                      {"storage": "s1", "target": "x/y"}]})
+    assert r.status_code == 422 and r.json()["detail"] == "batch_rm_targets_overlap"
+    # 종단 항목과도 겹치면 안 된다 -- 「이미 지운 a/b」 아래를 다시 넣는 것도 같은 배치에선 받지 않는다(같은 집합 규칙)
+    r = client.post(f"/api/admin/batches/{bid}/items", json={"storage": "s1", "target": "a/b/late"})
+    assert r.status_code == 422 and r.json()["detail"] == "batch_rm_targets_overlap"
+    r = client.post(f"/api/admin/batches/{bid}/items", json={"storage": "s1", "target": "z"})
+    assert r.status_code == 202 and r.json()["status"] == "Previewing"
+
+
+def test_rm_batch_add_rejects_bad_item_with_its_own_reason(client):
+    _admin(client)
+    bid = client.post("/api/admin/batches", json=_rm_body([{"storage": "s1", "target": "a"}])).json()["batch_id"]
+    r = client.post(f"/api/admin/batches/{bid}/items", json={"storage": "s1", "target": "."})
+    assert r.status_code == 422 and r.json()["detail"] == "rm_root_forbidden"
+    r = client.post(f"/api/admin/batches/{bid}/items", json={"storage": "s2", "target": "b"})
+    assert r.status_code == 422 and r.json()["detail"] == "batch_storage_mixed"
+
+
+def test_rm_batch_materializes_root_eligible_children_with_the_batch_options(client):
+    # 자식 payload = 단건 rm 과 같은 모양(storage·target·options) + 배치 실행 제어 주입. planner 의 root 판정
+    # (배치 자식 = PRIVILEGE_IF_ELIGIBLE)은 기존 그대로라 여기서는 모양과 연산만 본다.
+    from dms.batch_orchestrator import BatchOrchestrator
+
+    class _S:
+        preview_ttl_seconds = 900
+    _admin(client)
+    repos = client.app.state.repos
+    bid = client.post("/api/admin/batches", json=_rm_body([{"storage": "s1", "target": "old/a"}],
+                                                          node_count=2, owner_username="alice")).json()["batch_id"]
+    BatchOrchestrator(repos, settings=_S()).run_once()
+    it = repos.batches.list_items(bid)[0]
+    req = repos.requests.get(it["request_id"])
+    assert req["operation"] == "rm" and req["batch_id"] == bid
+    assert req["payload"] == {"storage": "s1", "target": "old/a", "options": {"recursive": True},
+                              "node_count": 2, "owner_username": "alice"}
+    assert req["resource_key"] == "data.rm:s1:old/a"

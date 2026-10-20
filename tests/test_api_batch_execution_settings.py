@@ -323,3 +323,61 @@ def test_orchestrator_leaves_batch_cancelled_after_snapshot_alone(client):
     BatchOrchestrator(repos, settings=_S())._drive(snap)
     assert repos.batches.get(bid)["status"] == "Cancelled"
     assert all(it["request_id"] is None for it in repos.batches.list_items(bid))
+
+
+# --- rm 배치(2026-10-21): 옵션만 바꾸는 경로도 recursive 동의 게이트를 본다(domain.validate_batch_options) ---
+
+RM = {"operation": "rm", "max_concurrency": 2, "options": {"recursive": True}, "note": None,
+      "items": [{"storage": "s1", "target": "old/a"}, {"storage": "s1", "target": "old/b"}]}
+
+
+def test_rm_settings_change_keeps_the_recursive_consent(client, db):
+    # 예전엔 validate_options 만 봐서 recursive 를 뺀 옵션이 저장되고, 재실행에서야 항목마다 Rejected 로 드러났다.
+    _admin(client)
+    bid = _batch(client, RM)
+    for opts in ({}, {"recursive": False}, {"stat": True}):
+        r = _patch(client, bid, {"options": opts})
+        assert r.status_code == 422 and r.json()["detail"] == "rm_recursive_required", opts
+    r = _patch(client, bid, {"options": {"recursive": True, "stat": True, "lite": True}})
+    assert r.status_code == 422 and r.json()["detail"] == "invalid_option"
+    assert client.app.state.repos.batches.get(bid)["options"] == {"recursive": True}
+    assert _audits(db) == []
+    r = _patch(client, bid, {"options": {"recursive": True, "lite": True, "quiet": True}, "max_concurrency": 4})
+    assert r.status_code == 200, r.text
+    assert r.json()["options"] == {"recursive": True, "lite": True, "quiet": True}
+
+
+def test_rm_rerun_with_stale_options_is_refused_up_front(client, db):
+    # DB 변조·옛 행: 저장된 rm 옵션에 recursive 가 없으면 재실행 전에 422 -- 항목을 Queued 로 돌리지 않는다.
+    _admin(client)
+    repos = client.app.state.repos
+    bid = _batch(client, RM)
+    db.execute("UPDATE batches SET options = :o WHERE batch_id = :b", {"o": json.dumps({"stat": True}), "b": bid})
+    for call in (lambda: client.post(f"/api/admin/batches/{bid}:rescan"),
+                 lambda: client.post(f"/api/admin/batches/{bid}/items:rerun", json={"seqs": [0]})):
+        r = call()
+        assert r.status_code == 422 and r.json()["detail"] == "rm_recursive_required"
+    assert {it["status"] for it in repos.batches.list_items(bid)} == {"Succeeded"}
+    assert repos.batches.get(bid)["status"] == "Completed"
+
+
+@pytest.mark.parametrize("call", [
+    lambda c, bid: c.post(f"/api/admin/batches/{bid}:rerun-failed"),
+    lambda c, bid: c.post(f"/api/admin/batches/{bid}:rescan"),
+    lambda c, bid: c.post(f"/api/admin/batches/{bid}/items:rerun", json={"seqs": [0]}),
+], ids=["rerun-failed", "rescan", "items-rerun"])
+def test_rm_rerun_after_option_change_goes_through_preview(client, call):
+    # rm 은 sync 와 같은 확인 게이트 -- 어느 재실행이든 미리보기 → 운영자 「배치 확인」을 거친다(자동 실행 없음).
+    _admin(client)
+    repos = client.app.state.repos
+    bid = client.post("/api/admin/batches", json=RM).json()["batch_id"]
+    repos.batches.set_item_status(bid, 0, "Failed")
+    repos.batches.set_item_status(bid, 1, "Succeeded")
+    repos.batches.set_status(bid, "Completed")
+    assert _patch(client, bid, {"options": {"recursive": True, "stat": True}}).status_code == 200
+    r = call(client, bid)
+    assert r.status_code == 200 and r.json()["status"] == "Previewing"
+    BatchOrchestrator(repos, settings=_S()).run_once()
+    it = repos.batches.list_items(bid)[0]
+    assert it["status"] == "Materialized"
+    assert repos.requests.get(it["request_id"])["payload"]["options"] == {"recursive": True, "stat": True}

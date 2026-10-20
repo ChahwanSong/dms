@@ -677,7 +677,8 @@ class BatchesRepository:
             {"now": utc_now_iso(), "b": batch_id, "cur": from_status}) == 1
 
     def confirm(self, batch_id, *, actor, summary, expected_round, expected_auto_confirm_by=None) -> bool:
-        """sync 배치 확인(PreviewReady → Running) + 감사 행, 한 트랜잭션(2026-10-07).
+        """확인 게이트 배치(sync·rm -- domain.confirm_gated) 확인(PreviewReady → Running) + 감사 행, 한 트랜잭션
+        (2026-10-07).
 
         가드는 SQL 한 문장(WHERE status = 'PreviewReady')이다 -- 라우트가 읽은 뒤 그 사이 항목 추가·재실행으로 배치가
         Previewing 으로 되돌아갔으면 영향 행 0 = False(호출자 409). 읽고 나서 set_status 로 쓰면 운영자가 본 것과 다른

@@ -1,8 +1,11 @@
 // 슬라이스 32: 스토리지가 배치 레벨 선택으로 올라가면서 CSV 는 경로만 나른다.
-// scan = 행당 1열(target), sync = 행당 2열(source,destination — 콤마 구분).
+// scan·rm = 행당 1열(target), sync = 행당 2열(source,destination — 콤마 구분). rm(2026-10-21)은 scan 과 같은 모양 —
+// 스토리지는 배치 레벨이고 행은 지울 경로 하나다.
 // 헤더 유연: 첫 줄 셀이 전부 알려진 헤더 토큰이면(대소문자 무시) 스킵하고,
 // 아니면 데이터로 취급한다 — 내보내기(serialize)는 헤더를 포함하므로 왕복이 성립.
 // 열 수 불일치·빈 셀은 "N행: ..." 오류로 수집한다(조용한 드랍 금지 — 기존 계약).
+
+export type ItemsCsvOp = "scan" | "sync" | "rm";
 
 export interface ScanRow {
   target: string;
@@ -17,16 +20,16 @@ export interface SyncRow {
 const SCAN_HEADER_TOKENS = new Set(["target", "path"]);
 const SYNC_HEADER = ["source", "destination"];
 
-function isHeaderLine(operation: "scan" | "sync", cells: string[]): boolean {
+function isHeaderLine(operation: ItemsCsvOp, cells: string[]): boolean {
   const lower = cells.map((c) => c.toLowerCase());
-  if (operation === "scan") {
+  if (operation !== "sync") {
     return lower.length === 1 && SCAN_HEADER_TOKENS.has(lower[0]);
   }
   return lower.length === 2 && lower[0] === SYNC_HEADER[0] && lower[1] === SYNC_HEADER[1];
 }
 
 export function parseItemsCsv(
-  operation: "scan" | "sync",
+  operation: ItemsCsvOp,
   text: string,
 ): { rows: (ScanRow | SyncRow)[]; errors: string[] } {
   const errors: string[] = [];
@@ -42,7 +45,7 @@ export function parseItemsCsv(
   const rows: (ScanRow | SyncRow)[] = [];
   body.forEach((line, i) => {
     const cells = line.split(",").map((c) => c.trim());
-    if (operation === "scan") {
+    if (operation !== "sync") {
       // 1열 계약: 콤마가 들어 있으면 경로 오타인지 다열 CSV 인지 알 수 없다 —
       // 침묵 분할하지 않고 오류로 보인다.
       if (cells.length !== 1 || cells[0] === "") {
@@ -62,11 +65,11 @@ export function parseItemsCsv(
 }
 
 export function serializeItemsCsv(
-  operation: "scan" | "sync",
+  operation: ItemsCsvOp,
   rows: (ScanRow | SyncRow)[],
 ): string {
   // 헤더 포함 내보내기 — 재붙여넣기(파싱) 왕복이 성립해야 한다.
-  if (operation === "scan") {
+  if (operation !== "sync") {
     return ["target", ...rows.map((r) => (r as ScanRow).target)].join("\n");
   }
   return [

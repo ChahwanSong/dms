@@ -66,6 +66,8 @@ export const REASON_MESSAGES: Record<string, string> = {
   invalid_batch_operation: "배치로 지원하지 않는 연산입니다",
   invalid_max_concurrency: "동시 실행 수 값이 올바르지 않습니다",
   batch_storage_mixed: "배치의 스토리지가 섞여 있습니다 — 한 배치는 하나의 스토리지만",
+  // rm 배치(2026-10-21): 한 배치 안의 같은 경로 두 번·조상과 자손(domain._reject_overlapping_rm_targets).
+  batch_rm_targets_overlap: "한 rm 배치에 같은 경로가 두 번 있거나 한 경로가 다른 경로를 포함합니다 — 상위 경로 하나만 남기세요",
   invalid_node_count: "노드 수 값이 올바르지 않습니다",
   invalid_procs_per_node: "노드당 프로세스 수 값이 올바르지 않습니다",
   batch_not_rescannable: "재실행할 수 없는 상태의 배치입니다 — 완료·취소된 배치만 가능합니다",
@@ -184,7 +186,7 @@ export const REASON_MESSAGES: Record<string, string> = {
   admin_session_required: "빌드·릴리스·컨트롤 상태·레지스트리 삭제·결과 폴더(artifact base) 변경·작업 삭제는 포탈에 로그인한 관리자만 할 수 있습니다(토큰 인증 불가)",
   preview_round_required: "배치 확인에는 확인한 미리보기 회차가 필요합니다 — 화면을 새로고침한 뒤 「배치 확인」을 다시 여세요",
   batch_preview_changed: "확인 대화상자를 연 뒤 배치 내용이 바뀌었습니다(항목 추가·재실행으로 다시 미리보기됨) — 대화상자를 닫고 다시 열어 바뀐 내용을 검토하세요",
-  auto_confirm_sync_only: "자동 실행(미리보기 후 확인 생략)은 sync 배치에만 있습니다 — scan 은 확인 단계가 없습니다",
+  auto_confirm_sync_only: "자동 실행(미리보기 후 확인 생략)은 sync 배치에만 있습니다 — rm 배치는 늘 직접 「배치 확인」을 누르고, scan 은 확인 단계가 없습니다",
   auto_confirm_not_privileged: "자동 실행을 켠 관리자가 지금 특권 실행 목록에 없어 자동 실행이 보류됐습니다 — 미리보기를 보고 「배치 확인」을 눌러 주세요",
   auto_confirm_not_admin: "자동 실행을 켠 계정이 지금 관리자가 아니거나 비활성이라 자동 실행이 보류됐습니다 — 미리보기를 보고 「배치 확인」을 눌러 주세요",
   auto_confirm_privileged_disabled: "이 사이트의 특권(root) 실행이 꺼져 있어 자동 실행이 보류됐습니다 — 배치는 root 로 실행되므로 특권 실행을 다시 켜기 전에는 「배치 확인」을 눌러도 항목이 실행되지 않을 수 있습니다",

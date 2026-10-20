@@ -24,6 +24,7 @@ from dms.repositories import Repositories
 TOKEN = {"Authorization": "Bearer tok-shared"}
 SYNC_ITEM = {"source_storage": "s1", "source": "a", "destination_storage": "s2", "destination": "b"}
 SCAN_ITEM = {"storage": "s1", "target": "a"}
+RM_ITEM = {"storage": "s1", "target": "a"}
 
 
 def _app(db, **overrides):
@@ -47,29 +48,38 @@ def _login(client, username):
 
 
 def _batch(repos, *, op="sync", status="Previewing", item_status=None, n=1):
-    item = SYNC_ITEM if op == "sync" else SCAN_ITEM
+    item = {"sync": SYNC_ITEM, "rm": RM_ITEM}.get(op, SCAN_ITEM)
     items = [{**item, ("destination" if op == "sync" else "target"): f"d{i}"} for i in range(n)]
+    # rm 은 recursive 동의가 배치 옵션이다(서버 기본값 없음) -- 없으면 항목 추가·확인이 rm_recursive_required 422.
     bid = repos.batches.create(operation=op, requester_id="ops", actor="ops", max_concurrency=2,
-                               options={}, items=items, note=None, status=status,
-                               auth_method="session")
+                               options={"recursive": True} if op == "rm" else {}, items=items, note=None,
+                               status=status, auth_method="session")
     if item_status is not None:
         for it in repos.batches.list_items(bid):
             repos.batches.set_item_status(bid, it["seq"], item_status)
     return bid
 
 
-def _confirmpending_child(repos, bid, seq=0, fp="sha256:fp", expires="2099-01-01T00:00:00Z"):
-    """배치 항목 seq 를 materialize 하고 자식 잡을 ConfirmPending 으로 만든다(미리보기 완료 시뮬)."""
-    rid = repos.requests.create(operation="sync", requester_id="ops", actor="ops", resource_key=f"k-{bid}-{seq}",
-                                payload=dict(SYNC_ITEM), priority="mid", batch_id=bid, auth_method="session")
+def _confirmpending_child(repos, bid, seq=0, fp="sha256:fp", expires="2099-01-01T00:00:00Z", op="sync",
+                          summary=None):
+    """배치 항목 seq 를 materialize 하고 자식 잡을 ConfirmPending 으로 만든다(미리보기 완료 시뮬). op="rm" 이면 drm 자식."""
+    payload = dict(RM_ITEM, options={"recursive": True}) if op == "rm" else dict(SYNC_ITEM)
+    rid = repos.requests.create(operation=op, requester_id="ops", actor="ops", resource_key=f"k-{bid}-{seq}",
+                                payload=payload, priority="mid", batch_id=bid, auth_method="session")
     repos.batches.set_item_materialized(bid, seq, rid)
     repos.requests.set_state(rid, RequestState.PLANNED, actor="planner")
     plan = repos.data_jobs.create_plan(rid, actor="planner")
-    jid = repos.data_jobs.create_job(rid, plan, operation="sync", priority="mid", source_storage="s1",
-                                     destination_storage="s2", source="a", destination="b", options={},
-                                     tool="dsync", worker_pool={}, precondition={}, actor="planner")
+    if op == "rm":
+        jid = repos.data_jobs.create_job(rid, plan, operation="rm", priority="mid", storage_name="s1", target="a",
+                                         options={"recursive": True}, tool="drm", worker_pool={}, precondition={},
+                                         actor="planner")
+    else:
+        jid = repos.data_jobs.create_job(rid, plan, operation="sync", priority="mid", source_storage="s1",
+                                         destination_storage="s2", source="a", destination="b", options={},
+                                         tool="dsync", worker_pool={}, precondition={}, actor="planner")
     repos.data_jobs.set_preview(jid, fingerprint=fp, expires_at=expires, artifact_uri="x",
-                                summary={"files": 42, "bytes": None, "returncode": 0})
+                                summary=summary if summary is not None
+                                else {"files": 42, "bytes": None, "returncode": 0})
     repos.data_jobs.set_job_state(jid, DataJobState.CONFIRM_PENDING, actor="stepper")
     return rid, jid
 
@@ -682,3 +692,149 @@ def test_no_empty_confirm_wait_when_only_confirmed_children_remain(client):
     orch.run_once()
     b = repos.batches.get(bid)
     assert b["status"] == "Completed" and b["succeeded_count"] == 1
+
+
+
+# --- rm 배치(2026-10-21 「배치작업에 rm도」): sync 와 같은 확인 게이트(domain.confirm_gated) --------------------------
+# rm 자식은 root drm 으로 지운다 -- 그래서 sync 의 둑(특권 3중 게이트·재확인 복귀·도장·단건 컨펌 차단)이 전부 rm 에도
+# 서야 한다. 이전 Running 분기는 sync 만 봐서 rm 은 확인된 자식이 정체되고 Queued 는 사람 확인 없이 미리보기됐다.
+
+def _rm_gated_cases(repos):
+    return [
+        ("post", "/items", dict(RM_ITEM, target="new"), _batch(repos, op="rm", status="Running")),
+        ("put", "/items/0", dict(RM_ITEM, target="new"), _batch(repos, op="rm", status="Running")),
+        ("put", "/items", {"items": [dict(RM_ITEM, target="x")]},
+         _batch(repos, op="rm", status="Completed", item_status="Succeeded")),
+        ("post", "/items:rerun", {"seqs": [0]}, _batch(repos, op="rm", status="Completed", item_status="Failed")),
+        ("post", ":rerun-failed", None, _batch(repos, op="rm", status="Completed", item_status="Failed")),
+        ("post", ":rescan", None, _batch(repos, op="rm", status="Completed", item_status="Succeeded")),
+        ("post", ":confirm", {"preview_round": 0}, _ready_rm_batch(repos)),
+    ]
+
+
+def _ready_rm_batch(repos):
+    bid = _batch(repos, op="rm", status="PreviewReady")
+    _confirmpending_child(repos, bid, 0, op="rm")
+    return bid
+
+
+def test_rm_execution_routes_need_the_privileged_session_gate(db):
+    app = _app(db, DMS_ALLOW_PRIVILEGED_REQUESTERS="true", DMS_PRIVILEGED_REQUESTERS="ops")
+    client = TestClient(app)
+    repos = app.state.repos
+    for method, tail, body, bid in _rm_gated_cases(repos):
+        before = (repos.batches.get(bid)["status"], [(i["status"], i["payload"]) for i in repos.batches.list_items(bid)])
+        r = _call(client, method, bid, tail, body, headers=TOKEN)
+        assert r.status_code == 403 and r.json()["detail"] == "privileged_not_authorized", (tail, r.text)
+        after = (repos.batches.get(bid)["status"], [(i["status"], i["payload"]) for i in repos.batches.list_items(bid)])
+        assert after == before, tail
+    _login(client, "ops")
+    for method, tail, body, bid in _rm_gated_cases(repos):
+        r = _call(client, method, bid, tail, body)
+        assert r.status_code in (200, 202), (tail, r.text)
+
+
+def test_rm_reruns_and_additions_go_back_to_previewing(client):
+    # 확인 흐름이 있는 연산이라 Queued 를 새로 만들면 늘 미리보기 → 「배치 확인」을 다시 거친다(scan 의 Running 과 다르다).
+    _admin(client)
+    repos = client.app.state.repos
+    bid = _batch(repos, op="rm", status="Running")
+    r = client.post(f"/api/admin/batches/{bid}/items", json=dict(RM_ITEM, target="new"))
+    assert r.status_code == 202 and r.json()["status"] == "Previewing"
+    bid = _batch(repos, op="rm", status="Running", n=2)
+    repos.batches.set_item_status(bid, 0, "Failed")
+    assert client.post(f"/api/admin/batches/{bid}:rerun-failed").json()["status"] == "Previewing"
+    bid = _batch(repos, op="rm", status="Completed", item_status="Succeeded")
+    assert client.post(f"/api/admin/batches/{bid}:rescan").json()["status"] == "Previewing"
+    bid = _batch(repos, op="rm", status="Completed", item_status="Succeeded")
+    assert client.post(f"/api/admin/batches/{bid}/items",
+                       json=dict(RM_ITEM, target="added")).json()["status"] == "Previewing"
+    bid = _batch(repos, op="rm", status="Completed", item_status="Failed")
+    r = client.post(f"/api/admin/batches/{bid}/items:rerun", json={"seqs": [0]})
+    assert r.json()["status"] == "Previewing"
+
+
+def test_running_rm_batch_with_queued_items_goes_back_to_previewing(client):
+    # 백스톱(sync 와 같다): Running rm 배치의 Queued 는 materialize 하지 않고 Previewing 으로 -- 확인받은 자식도 컨펌 안 함.
+    repos = client.app.state.repos
+    bid = _batch(repos, op="rm", status="Running", n=2)
+    _, jid = _confirmpending_child(repos, bid, 0, op="rm")
+    BatchOrchestrator(repos, settings=_S()).run_once()
+    assert repos.batches.get(bid)["status"] == "Previewing"
+    assert [it["status"] for it in repos.batches.list_items(bid)] == ["Materialized", "Queued"]
+    assert repos.data_jobs.get_job(jid)["state"] == "ConfirmPending"
+
+
+def test_confirmed_rm_batch_executes_only_stamped_previews(client, db):
+    # 확인 → 도장 → Running 루프가 도장 자식만 Executing 으로(정체 없음). 다시 미리보기된(지문이 바뀐) 자식은 실행하지
+    # 않고 Previewing 으로 되돌린다. 만료된 미리보기는 컨펌하지 않는다.
+    _admin(client)
+    repos = client.app.state.repos
+    bid = _batch(repos, op="rm", status="PreviewReady", n=3)
+    _, j0 = _confirmpending_child(repos, bid, 0, op="rm", fp="sha256:a")
+    _, j1 = _confirmpending_child(repos, bid, 1, op="rm", fp="sha256:b")
+    _, j2 = _confirmpending_child(repos, bid, 2, op="rm", fp="sha256:c", expires="2000-01-01T00:00:00Z")
+    assert client.post(f"/api/admin/batches/{bid}:confirm", json={"preview_round": 0}).status_code == 200
+    assert repos.data_jobs.get_job(j0)["confirmed_fingerprint"] == "sha256:a"
+    BatchOrchestrator(repos, settings=_S()).run_once()
+    assert repos.data_jobs.get_job(j0)["state"] == "Executing"
+    assert repos.data_jobs.get_job(j1)["state"] == "Executing"
+    assert repos.data_jobs.get_job(j2)["state"] == "ConfirmPending"        # 만료 -- stepper 가 Rejected 로 끝낸다
+    assert repos.batches.get(bid)["status"] == "Running"
+
+    bid = _batch(repos, op="rm", status="PreviewReady")
+    _, jid = _confirmpending_child(repos, bid, 0, op="rm", fp="sha256:old")
+    assert repos.batches.confirm(bid, actor="ops", summary={}, expected_round=0)
+    db.execute("UPDATE data_jobs SET preview_fingerprint = 'sha256:new' WHERE job_id = :j", {"j": jid})
+    BatchOrchestrator(repos, settings=_S()).run_once()
+    assert repos.batches.get(bid)["status"] == "Previewing"
+    assert repos.data_jobs.get_job(jid)["state"] == "ConfirmPending"
+
+
+def test_rm_batch_child_cannot_be_confirmed_individually(client):
+    _admin(client)
+    repos = client.app.state.repos
+    bid = _batch(repos, op="rm", status="PreviewReady")
+    _, jid = _confirmpending_child(repos, bid, 0, op="rm", fp="sha256:fp")
+    r = client.post(f"/api/user/jobs/{jid}:confirm", json={"fingerprint": "sha256:fp"})
+    assert r.status_code == 409 and r.json()["detail"] == "batch_child_confirm_via_batch"
+    assert repos.data_jobs.get_job(jid)["state"] == "ConfirmPending"
+
+
+def test_confirm_audit_records_the_preview_file_total(client, db):
+    # 확인 감사 행에 확인한 미리보기의 대상 수 합계 -- 「누가 몇 개 삭제를 확인했나」. null≠0: 수를 모르는 항목은 합계에
+    # 더하지 않고 따로 세며, rm 의 0(대상 경로 없음)은 아는 값 0 이다. 변조된 값(bool·음수)은 모름으로 센다.
+    import json
+    _admin(client)
+    repos = client.app.state.repos
+    bid = _batch(repos, op="rm", status="PreviewReady", n=6)
+    _confirmpending_child(repos, bid, 0, op="rm", summary={"files": 1234, "bytes": None, "returncode": 0})
+    _confirmpending_child(repos, bid, 1, op="rm", summary={"files": 0, "bytes": None, "returncode": 0})
+    _confirmpending_child(repos, bid, 2, op="rm", summary={"files": None, "bytes": None, "returncode": 0})
+    _confirmpending_child(repos, bid, 3, op="rm", summary={"files": True, "bytes": None, "returncode": 0})
+    _confirmpending_child(repos, bid, 4, op="rm", summary={"files": -5, "bytes": None, "returncode": 0})
+    repos.batches.set_item_status(bid, 5, "Rejected")                     # 미리보기 없는 종단 항목은 세지 않는다
+    assert client.post(f"/api/admin/batches/{bid}:confirm", json={"preview_round": 0}).status_code == 200
+    row = db.query_one("SELECT after_state FROM audit_log WHERE operation = 'confirm' AND target_key = :b", {"b": bid})
+    after = json.loads(row["after_state"])
+    assert after["previewed"] == 5 and after["files_total"] == 1234 and after["files_unknown"] == 3
+    assert after["options"] == {"recursive": True}
+
+    bid = _batch(repos, op="rm", status="PreviewReady")
+    _confirmpending_child(repos, bid, 0, op="rm", summary={"files": None, "bytes": None, "returncode": 0})
+    assert client.post(f"/api/admin/batches/{bid}:confirm", json={"preview_round": 0}).status_code == 200
+    row = db.query_one("SELECT after_state FROM audit_log WHERE operation = 'confirm' AND target_key = :b", {"b": bid})
+    after = json.loads(row["after_state"])
+    assert after["files_total"] is None and after["files_unknown"] == 1     # 모름 -- 0 으로 뭉개지 않는다
+
+
+def test_confirm_rejects_an_rm_batch_whose_options_lost_recursive(client, db):
+    # DB 가 신뢰 경계 -- 저장된 rm 옵션에서 recursive 가 빠졌으면 확인(=root 삭제 시작) 전에 422(rm_recursive_required).
+    import json
+    _admin(client)
+    repos = client.app.state.repos
+    bid = _ready_rm_batch(repos)
+    db.execute("UPDATE batches SET options = :o WHERE batch_id = :b", {"o": json.dumps({}), "b": bid})
+    r = client.post(f"/api/admin/batches/{bid}:confirm", json={"preview_round": 0})
+    assert r.status_code == 422 and r.json()["detail"] == "rm_recursive_required"
+    assert repos.batches.get(bid)["status"] == "PreviewReady"

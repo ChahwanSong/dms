@@ -8,6 +8,12 @@ import type { Batch, BatchDetail, RequestScanStats } from "../../lib/types";
 // 있는 척한다(진짜 차단은 서버 409 batch_not_deletable).
 const BATCH_TERMINAL = new Set(["Completed", "Cancelled"]);
 export const isBatchTerminal = (status: string) => BATCH_TERMINAL.has(status);
+// 배치 연산(2026-10-21 rm 추가). 「미리보기 → 「배치 확인」」을 거치는 연산 = 서버 domain.confirm_gated(scan 밖 전부)의
+// 화면 쪽 거울. 화면은 **명시 집합**으로 본다: 모르는 연산 문자열(DB 신뢰 경계)을 확인 흐름이라고 추정해 「확인하면
+// 삭제됩니다」 같은 문장을 지어내지 않는다(서버는 그런 행을 fail-closed 로 게이트에 묶는다 — 화면은 말을 아낀다).
+export type BatchOp = "scan" | "sync" | "rm";
+const CONFIRM_OPS: ReadonlySet<string> = new Set(["sync", "rm"]);
+export const needsBatchConfirm = (op: string | undefined): boolean => op !== undefined && CONFIRM_OPS.has(op);
 export const useBatches = () =>
   useQuery({ queryKey: ["batches"], queryFn: () => apiGet<Batch[]>("/api/admin/batches"),
             refetchInterval: 4000 });

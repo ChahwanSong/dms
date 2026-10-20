@@ -1,5 +1,6 @@
 import pytest
-from dms.domain import build_data_payload, validate_batch, DomainValidationError
+from dms.domain import (build_data_payload, confirm_gated, validate_batch, validate_batch_options,
+                        DomainValidationError)
 
 def test_build_data_payload_scan():
     payload, key = build_data_payload("scan", storage="s1", target="a/b", options={})
@@ -30,8 +31,9 @@ def test_validate_batch_ok():
     validate_batch("scan", 3, [{"storage": "s1", "target": "a"}])
 
 def test_validate_batch_rejects():
-    with pytest.raises(DomainValidationError):
-        validate_batch("rm", 3, [{}])            # rm 불가
+    with pytest.raises(DomainValidationError) as exc:
+        validate_batch("bogus", 3, [{}])         # 배치로 받지 않는 연산
+    assert exc.value.reason_code == "invalid_batch_operation"
     with pytest.raises(DomainValidationError):
         validate_batch("scan", 0, [{}])          # max_concurrency<1
     with pytest.raises(DomainValidationError):
@@ -98,3 +100,67 @@ def test_validate_batch_procs_per_node():
         assert exc.value.reason_code == "invalid_procs_per_node"
     validate_batch("scan", 3, [{"storage": "s1", "target": "a"}], procs_per_node=None)
     validate_batch("scan", 3, [{"storage": "s1", "target": "a"}], procs_per_node=4)
+
+
+# --- rm 배치(2026-10-21 「배치작업에 rm도」) ---
+
+def test_validate_batch_accepts_rm_on_one_storage():
+    validate_batch("rm", 3, [{"storage": "s1", "target": "a"}, {"storage": "s1", "target": "b/c"}])
+
+
+def test_validate_batch_rm_mixed_storage_rejected():
+    with pytest.raises(DomainValidationError) as exc:
+        validate_batch("rm", 3, [{"storage": "s1", "target": "a"}, {"storage": "s2", "target": "b"}])
+    assert exc.value.reason_code == "batch_storage_mixed"
+
+
+@pytest.mark.parametrize("targets", [
+    ["a", "a"],                     # 같은 경로 두 번
+    ["a", "a/"],                    # 정규화하면 같다
+    ["a/./b", "a/b"],
+    ["a", "a/b"],                   # 조상과 자손(순서 무관)
+    ["a/b/c", "x", "a"],
+    ["team/old", "team/old/sub/deeper"],
+])
+def test_rm_batch_rejects_overlapping_targets(targets):
+    with pytest.raises(DomainValidationError) as exc:
+        validate_batch("rm", 3, [{"storage": "s1", "target": t} for t in targets])
+    assert exc.value.reason_code == "batch_rm_targets_overlap"
+
+
+@pytest.mark.parametrize("targets", [
+    ["a/b", "a/c"],                 # 형제
+    ["a", "ab", "a b", "a.b"],      # 접두 문자열이 같아도 성분이 다르면 겹치지 않는다
+    ["a/b", "b/a"],
+])
+def test_rm_batch_accepts_disjoint_targets(targets):
+    validate_batch("rm", 3, [{"storage": "s1", "target": t} for t in targets])
+
+
+def test_rm_overlap_check_skips_malformed_targets():
+    # 형식 오류 대상은 겹침 판정에서 건너뛴다 -- 정확한 사유(unsafe_path·rm_root_forbidden)는 build_data_payload 가 낸다.
+    validate_batch("rm", 3, [{"storage": "s1", "target": t} for t in ("..", ".", "", "/abs", "a")] + [{"storage": "s1"}])
+
+
+def test_scan_and_sync_batches_do_not_use_the_rm_overlap_rule():
+    # scan 은 비파괴라 a 와 a/b 를 함께 재는 것이 정상 운영이다(성장 모니터링).
+    validate_batch("scan", 3, [{"storage": "s1", "target": "a"}, {"storage": "s1", "target": "a/b"}])
+
+
+def test_validate_batch_options_requires_recursive_for_rm():
+    for opts in ({}, {"recursive": False}, {"stat": True}):
+        with pytest.raises(DomainValidationError) as exc:
+            validate_batch_options("rm", opts)
+        assert exc.value.reason_code == "rm_recursive_required"
+    with pytest.raises(DomainValidationError) as exc:
+        validate_batch_options("rm", {"recursive": True, "stat": True, "lite": True})
+    assert exc.value.reason_code == "invalid_option"
+    assert validate_batch_options("rm", {"recursive": True, "quiet": True}) == {"recursive": True, "quiet": True}
+    # scan·sync 는 validate_options 와 같다(서버 기본값 채움 포함)
+    assert validate_batch_options("scan", {}) == {"batch_files": 1_000_000, "broken_limit": 100}
+
+
+def test_confirm_gated_is_everything_but_scan():
+    assert confirm_gated("sync") and confirm_gated("rm")
+    assert not confirm_gated("scan")
+    assert confirm_gated("bogus")                   # DB 변조 미지 연산은 확인 게이트 쪽(fail-closed)

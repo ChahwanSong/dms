@@ -756,7 +756,7 @@ export function SubmitJob() {
         <h1 className="text-2xl font-bold">단일 작업</h1>
         {me.data !== undefined && (
           <p className="mt-1 text-sm text-muted">
-            {isAdmin ? "경로 하나에 sync·scan·rm 을 실행합니다 — 여러 경로의 sync·scan 은 배치 작업으로 묶어 요청하세요."
+            {isAdmin ? "경로 하나에 sync·scan·rm 을 실행합니다 — 여러 경로의 sync·scan·rm 은 배치 작업으로 묶어 요청하세요."
               : "스토리지 사이에서 디렉토리 하나를 sync 합니다."}
           </p>
         )}
