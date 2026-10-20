@@ -36,6 +36,9 @@ test("useDeleteRequests: POST {request_ids, batches} — 지운 요청·잡의 �
                 ["artifacts", JID], ["artifact", JID, "preview", "stdout.log"], ["joblogs", JID, "execution"]];
   const kept = [["request", OTHER], ["request", OTHER, "jobs"], ["artifacts", OTHER_JOB], ["joblogs", OTHER_JOB, "preview"]];
   for (const k of [...gone, ...kept]) qc.setQueryData(k, { x: 1 });
+  // 스토리지 합계(2026-10-21)는 ["usage-storages", "totals", 이름] -- 목록의 ["usage-storages"] 접두가 함께 무효화한다.
+  const TOTALS_KEY = ["usage-storages", "totals", "cephfs-dms"];
+  qc.setQueryData(TOTALS_KEY, { x: 1 });
   const { result } = renderHook(() => useDeleteRequests(), { wrapper });
   result.current.mutate({ request_ids: [RID, OTHER], batches: [] });
   await waitFor(() => expect(result.current.isSuccess).toBe(true));
@@ -47,6 +50,7 @@ test("useDeleteRequests: POST {request_ids, batches} — 지운 요청·잡의 �
                    ["usage-history"], ["metrics", "jobs"], ["audit"], ["batches"]]) {
     expect(invalidated).toContainEqual(k);
   }
+  expect(qc.getQueryState(TOTALS_KEY)?.isInvalidated).toBe(true);
   expect(result.current.data?.skipped).toEqual([{ request_id: OTHER, reason: "request_job_active" }]);
 });
 

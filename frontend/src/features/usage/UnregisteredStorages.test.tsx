@@ -47,6 +47,11 @@ function renderPage(getList: () => UnregisteredStorage[] | Response) {
     }),
     http.get(LIST_URL, () => { const l = getList(); return Array.isArray(l) ? HttpResponse.json(l) : l; }),
     http.get("/api/admin/usage/scan-targets", () => HttpResponse.json([])),
+    // 스토리지 합계(2026-10-21) -- 이 파일은 정리 흐름만 본다: 대상 0 응답이면 패널의 합계 블록이 없다(합계 화면은
+    // UsageAnalysis.test 몫).
+    http.get("/api/admin/usage/storage-totals", ({ request }) => HttpResponse.json({
+      storage_name: new URL(request.url).searchParams.get("storage") ?? "", target_count: 0, summed_target_count: 0,
+      pending_count: 0, progressed: false, filesystem: null })),
   );
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(<QueryClientProvider client={qc}><MemoryRouter initialEntries={["/admin/usage"]}>

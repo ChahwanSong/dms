@@ -13,11 +13,12 @@ import { buildUsageCsv, usageCsvFilename } from "./usageCsv";
 import { DETAIL_ID, TargetTable } from "./TargetTable";
 import { TargetDetail } from "./TargetDetail";
 import { UnregisteredBanner } from "./UnregisteredStorages";
+import { StorageTotals } from "./StorageTotals";
 import { storageLabel, type StorageTab } from "./usageTabs";
 
 // 스토리지 하나의 패널(2026-10-20, 탭 패널 = 카드 하나). 위에서 아래로: 메타 한 줄(마운트 · 타입 · 대상 수 · 최근 스캔) 또는
-// 미등록 경고 띠 → 툴바(경로 검색 · 건수 · CSV) → 6열 표(행 아래 펼침 상세) → 각주 한 줄 → 목록 밖 딥링크 폴백. 페이지가
-// key={storage} 로 그려 탭을 바꾸면 내보내기 상태가 새로 시작한다. 경로 검색·정렬은 페이지 상태라 탭을 바꿔도 남는다(sync
+// 미등록 경고 띠 → 이 스토리지 합계(2026-10-21, StorageTotals) → 툴바(경로 검색 · 건수 · CSV) → 6열 표(행 아래 펼침 상세) →
+// 각주 한 줄 → 목록 밖 딥링크 폴백. 페이지가 key={storage} 로 그려 탭을 바꾸면 내보내기 상태가 새로 시작한다. 경로 검색·정렬은 페이지 상태라 탭을 바꿔도 남는다(sync
 // 쌍은 같은 트리를 미러하므로 스토리지끼리 같은 경로를 비교하기 쉽다 -- 검색창이 늘 보여 숨은 필터가 되지 않는다).
 
 const METRIC_SORTS: UsageSort[] = ["bytes", "files", "hot"];
@@ -135,6 +136,10 @@ export function StoragePanel({
         <UnregisteredBanner name={tab.name} row={tab.unregistered} summary={tab.summary} purge={purge} progress={progress}
                             setProgress={setProgress} onResultFocus={onResultFocus} now={now} />
       )}
+
+      {/* 스토리지 합계(2026-10-21) -- 기록이 있다고 알거나(대상 수 > 0) 모를 때(요약 실패 -- null)만. 0 이면 빈 상태가 말한다
+          (실패 기록만 남은 미등록 탭도 0). 미등록 탭은 띠 아래 같은 블록(옛 기록의 합계, df 는 없음). */}
+      {tab.targetCount !== 0 && <StorageTotals storage={storage} now={now} />}
 
       {/* 기록이 하나도 없으면(검색 없이 빈 목록) 검색·CSV 는 할 일이 없다 -- 빈 상태 안내만. */}
       {!noRecords && <div>

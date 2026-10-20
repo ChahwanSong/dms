@@ -181,7 +181,7 @@ export function TargetTable({ storage, rows, activeTarget, onToggle, sort, order
                     <div id={DETAIL_ID} role="region" aria-label={`${storage}:${r.target} 상세`}
                          className="sticky left-0 border-l-2 border-accent bg-surface px-4 pb-5 pt-4"
                          style={wrap.width !== null ? { width: wrap.width } : undefined}>
-                      <TargetDetail storage={storage} target={r.target} showTitle={false} />
+                      <TargetDetail storage={storage} target={r.target} showTitle={false} latest={p} />
                     </div>
                   </td>
                 </tr>

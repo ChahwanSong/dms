@@ -1,0 +1,128 @@
+import { useState } from "react";
+import { ChevronRight } from "lucide-react";
+import { Card } from "../../components/ui/Card";
+import { Skeleton } from "../../components/ui/Skeleton";
+import { Table } from "../../components/ui/Table";
+import { useStorageTotals } from "./useUsage";
+import { humanBytes } from "./usageStats";
+import { storageLabel, type StorageTab } from "./usageTabs";
+import { FilesystemUse, fsShape, hotText, lowerBound, sumOf } from "./StorageTotals";
+
+// 스토리지별 비교(2026-10-21 사용자 요청 「스토리지별 사용량 및 정보들의 총합」의 전체 개요). 머리말 아래 접힌 한 줄(기본 닫힘 --
+// 매일 쓰는 탭·표를 밀어내지 않는다, 열림 상태는 기억하지 않는다). 열면 탭의 스토리지마다 합계를 부른다 -- 패널의 「이 스토리지
+// 합계」와 **같은 쿼리 키**라 숫자 한 벌이고, 열기 전엔 요청이 없다(스토리지마다 서버가 대상 요약을 읽는다). 행을 누르면 그 탭.
+//
+// 스토리지끼리 더한 총계 행은 두지 않는다: 여러 스토리지가 한 파일시스템을 쓰거나(테스트베드 cephfs 셋이 같은 df) 관리 경로가
+// 겹칠 수 있어 합이 이중 계산이 된다 -- 각주 한 줄이 그 이유를 말한다. 미등록 탭도 행이다(옛 기록의 합계 -- 탭과 같은 집합·순서).
+//
+// 375 폭: 표는 래퍼 안에서만 가로로 넘치고(Table overflow-x-auto) 이름 칸은 고정(sticky left-0, 불투명 바탕, z-index 없음 --
+// TargetTable 머리 주석의 결정 그대로). 카드 목록을 따로 두지 않는다(두 벌 DOM -- Tabs 머리 주석).
+
+const TH = "px-3 py-2 text-xs font-medium text-muted whitespace-nowrap";
+const TD = "whitespace-nowrap px-3 py-2 text-right tabular-nums";
+const SEP = "\u00a0· ";
+const MORE = <span className="ml-1 text-[11px] text-muted">이상</span>;
+
+function CompareRow({ tab, selected, onSelect, now }: {
+  tab: StorageTab; selected: boolean; onSelect: (name: string) => void; now: number;
+}) {
+  const q = useStorageTotals(tab.name);
+  const t = q.data;
+  const label = storageLabel(tab.name);
+  const bg = selected ? "bg-infobg" : "bg-surface group-hover:bg-panel";
+  const num = (n: number | null) => (n === null ? "—" : n.toLocaleString("ko-KR"));
+  const cells = (() => {
+    if (t === undefined) {
+      return q.isError
+        ? [<td key="e" className={`${TD} text-xs text-bad`}>불러오지 못함</td>,
+           ...[0, 1, 2].map((i) => <td key={i} className={`${TD} text-muted`}>—</td>),
+           <td key="fs" className="px-3 py-2 text-muted">—</td>, <td key="n" className={`${TD} text-muted`}>—</td>]
+        : [0, 1, 2, 3, 4, 5].map((i) => <td key={i} className="px-3 py-2"><Skeleton className="ml-auto h-4 w-14" /></td>);
+    }
+    const bytes = sumOf(t.total_bytes), files = sumOf(t.total_files), dirs = sumOf(t.total_directories);
+    const fs = fsShape(t.filesystem);
+    return [
+      <td key="b" className={TD} title={bytes === null ? undefined : `${bytes.toLocaleString("ko-KR")} B`}>
+        {bytes === null ? "—" : humanBytes(bytes)}{lowerBound(t.total_bytes, bytes) && MORE}</td>,
+      <td key="f" className={TD}>{num(files)}{lowerBound(t.total_files, files) && MORE}</td>,
+      <td key="d" className={TD}>{num(dirs)}{lowerBound(t.total_directories, dirs) && MORE}</td>,
+      <td key="h" className={TD}>{hotText(t)}</td>,
+      <td key="fs" className="whitespace-nowrap px-3 py-2">
+        {fs === null ? <span className="text-muted">—</span> : <FilesystemUse fs={fs} now={now} compact />}</td>,
+      <td key="n" className={TD}
+          title={typeof t.summed_target_count === "number"
+            ? `최상위 ${t.summed_target_count.toLocaleString("ko-KR")}개 합계` : undefined}>
+        {typeof t.target_count === "number" ? t.target_count.toLocaleString("ko-KR") : "—"}</td>,
+    ];
+  })();
+  return (
+    // 행 전체가 누르는 자리(마우스), 키보드는 이름 버튼 -- 버튼 클릭이 행으로 올라가 두 번 고르지 않게 멈춘다.
+    <tr className={`group cursor-pointer border-t border-line ${selected ? "bg-infobg" : "hover:bg-panel"}`}
+        onClick={() => onSelect(tab.name)}>
+      <td className={`sticky left-0 py-2 pl-2 pr-3 ${bg}`}>
+        <span className="inline-flex max-w-[11rem] items-center gap-1.5 whitespace-nowrap sm:max-w-[16rem]">
+          <button type="button" aria-label={`${label} 탭 열기`} aria-current={selected ? "true" : undefined}
+                  onClick={(e) => { e.stopPropagation(); onSelect(tab.name); }}
+                  className={`min-w-0 truncate rounded text-left hover:underline focus-visible:outline-none
+                              focus-visible:ring-2 focus-visible:ring-accent ${selected ? "font-medium text-ink" : "text-accent"}
+                              ${tab.name === "" ? "italic" : ""}`}>
+            {label}
+          </button>
+          {!tab.registered && (
+            <span className="shrink-0 rounded border border-attn/30 bg-attnbg px-1 text-[11px] leading-4 text-attn">미등록</span>
+          )}
+        </span>
+      </td>
+      {cells}
+    </tr>
+  );
+}
+
+function CompareTable({ tabs, active, onSelect, now }: {
+  tabs: StorageTab[]; active: string | null; onSelect: (name: string) => void; now: number;
+}) {
+  return (
+    <div className="space-y-3">
+      <Table>
+        <thead><tr>
+          <th className={`${TH} sticky left-0 bg-surface pl-2`}>스토리지</th>
+          <th className={`${TH} text-right`}>실 사용량</th>
+          <th className={`${TH} text-right`}>파일</th>
+          <th className={`${TH} text-right`}>디렉터리</th>
+          <th className={`${TH} text-right`}>hot 비율</th>
+          <th className={TH}>파일시스템(df)</th>
+          <th className={`${TH} text-right`}>대상</th>
+        </tr></thead>
+        <tbody>
+          {tabs.map((t) => (
+            <CompareRow key={t.name} tab={t} selected={t.name === active} onSelect={onSelect} now={now} />
+          ))}
+        </tbody>
+      </Table>
+      <p className="text-xs text-muted break-keep">
+        스토리지마다 최상위 대상의 최근 성공 scan 합계{SEP}df = 노드가 잰 파일시스템 전체 사용량(* 노드마다 다르거나 오래된
+        보고){SEP}스토리지끼리는 더하지 않습니다(한 파일시스템 공유·경로 중첩 가능)
+      </p>
+    </div>
+  );
+}
+
+export function UsageOverview({ tabs, active, onSelect, now }: {
+  tabs: StorageTab[]; active: string | null; onSelect: (name: string) => void; now: number;
+}) {
+  const [open, setOpen] = useState(false);
+  // 스토리지가 하나뿐이면 비교할 것이 없다(패널 합계와 같은 숫자의 반복).
+  if (tabs.length < 2) return null;
+  return (
+    <details className="group/ov" onToggle={(e) => setOpen((e.currentTarget as HTMLDetailsElement).open)}>
+      <summary className="inline-flex cursor-pointer list-none items-center gap-1 rounded text-sm font-medium text-ink
+                          hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent
+                          [&::-webkit-details-marker]:hidden">
+        <ChevronRight aria-hidden className="h-4 w-4 text-muted transition-transform group-open/ov:rotate-90" />
+        스토리지별 비교
+      </summary>
+      {/* 열려 있을 때만 그린다 -- 닫힌 동안 스토리지마다의 합계 요청이 나가지 않게. */}
+      {open && <Card className="mt-3"><CompareTable tabs={tabs} active={active} onSelect={onSelect} now={now} /></Card>}
+    </details>
+  );
+}
