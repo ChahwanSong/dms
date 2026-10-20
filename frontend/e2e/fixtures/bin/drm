@@ -1,6 +1,47 @@
 #!/bin/sh
-# e2e 배선 검증용 가짜 도구다 -- 에이전트의 which 발견(→도구 Ready)과 --version
-# 프로브에 답하는 것이 전부고, 실제 잡 실행은 stub 실행 어댑터가 대신한다.
+# e2e 배선 검증용 가짜 drm. 에이전트의 which 발견(→도구 Ready)에 답하고, 2026-10-21(E12 배치 rm)부터는 e2e 컨트롤러
+# (fixtures/e2e_controller.py)가 drm 잡을 이걸로 실제로 돌린다 -- 하네스 tmp 스토리지(DMS_E2E_RM_ROOT) **아래**만 세고
+# 지운다. 출력은 mpifileutils drm 의 요약 줄 모양(러너 파서 dms_job_runner.parsers 가 읽는 것)만 흉내 낸다:
+#   미리보기(--dryrun) = "[ts] Walked N items in S seconds (" -- N = 대상 자신 + 그 아래 전부(없으면 0)
+#   실행               = 같은 walk 줄 + "Removed N items"
 # 도구 자체의 실측은 테스트베드(실 클러스터)의 몫이다.
-echo "drm (dms-e2e-fake) 0.0.0"
+dry=0
+target=""
+for a in "$@"; do
+  case "$a" in
+    --version|--help) echo "drm (dms-e2e-fake) 0.0.0"; exit 0 ;;
+    --dryrun) dry=1 ;;
+    --stat|--lite|--quiet) ;;
+    -*) echo "drm(e2e fake): 모르는 옵션 $a" >&2; exit 64 ;;
+    *) target="$a" ;;
+  esac
+done
+if [ -z "$target" ]; then
+  echo "drm (dms-e2e-fake) 0.0.0"
+  exit 0
+fi
+root="${DMS_E2E_RM_ROOT:-}"
+case "$root" in
+  ""|/) echo "drm(e2e fake): DMS_E2E_RM_ROOT 가 없다 -- 지우지 않는다" >&2; exit 2 ;;
+esac
+case "$target" in
+  "$root"/?*) ;;
+  *) echo "drm(e2e fake): $target 는 $root 밖 -- 거부" >&2; exit 2 ;;
+esac
+case "/$target/" in
+  */../*) echo "drm(e2e fake): .. 성분 거부" >&2; exit 2 ;;
+esac
+ts=$(date -u +%Y-%m-%dT%H:%M:%S)
+if [ -e "$target" ] || [ -L "$target" ]; then
+  n=$(find "$target" -print0 | tr -dc '\000' | wc -c | tr -d ' ')
+else
+  n=0
+fi
+echo "[$ts] Walking $target"
+echo "[$ts] Walked $n items in 0.001 seconds ($n items/sec)"
+if [ "$dry" = 1 ]; then
+  exit 0
+fi
+rm -rf -- "$target"
+echo "[$ts] Removed $n items in 0.001 seconds ($n items/sec)"
 exit 0

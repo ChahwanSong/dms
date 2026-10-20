@@ -6,7 +6,7 @@ import path from "node:path";
 
 import {
   ADMIN, ADMIN_TOKEN, BASE_URL, PORT, SHARED_TOKEN, STORAGE_NAME,
-  backendEnv, distDir, fakeBinDir, findDmsBin,
+  backendEnv, distDir, e2eControllerPath, fakeBinDir, findDmsBin, pythonBesideDms,
 } from "./env";
 
 // 풀스택 부팅·시드. 이 파일이 성공했다는 사실 자체가 시나리오 ④(풀스택 부팅)의
@@ -80,6 +80,7 @@ export default async function globalSetup(): Promise<void> {
   await assertPortFree();
 
   const dmsBin = findDmsBin();
+  const pythonBin = pythonBesideDms(dmsBin);
   if (!fs.existsSync(path.join(distDir, "index.html"))) {
     // dist 를 서빙해야 spa_fallback(app.py)이 검사 대상에 들어온다 -- vite dev
     // 서버로는 그 코드가 영영 안 돌아간다(설계 §1-6).
@@ -109,10 +110,10 @@ export default async function globalSetup(): Promise<void> {
 
   const children: ChildProcess[] = [];
   const spawnLongLived = (label: string, args: string[],
-                          extraEnv: Record<string, string>): ChildProcess => {
+                          extraEnv: Record<string, string>, exe: string = dmsBin): ChildProcess => {
     const outPath = path.join(tmpDir, `${label}.log`);
     const out = fs.openSync(outPath, "a");
-    const child = spawn(dmsBin, args, {
+    const child = spawn(exe, args, {
       env: backendEnv(dbPath, extraEnv),
       stdio: ["ignore", out, out],
     });
@@ -225,7 +226,10 @@ export default async function globalSetup(): Promise<void> {
     //    1s 로 줄이는 것은 **잡 전진에 관여하는 루프만**이다(pod-gc·build-watcher·
     //    rollout·retention 은 기본값 -- 1s 로 돌려봐야 무의미한 쿼리만 는다).
     //    request-purge 도 1s(E7 이 삭제 뒤 정리 대기 0 수렴을 기다린다 -- 기본 15s 면 단계 3개에 수십 초).
-    const controller = spawnLongLived("controller", ["controller"], {
+    //    진입점은 `dms controller` 가 아니라 e2e_controller.py(2026-10-21 E12): 같은 cli.main 배선에 drm 잡만 가짜 drm 으로
+    //    **실제로** 돌리는 어댑터를 끼운다(배치 rm 이 확인한 경로를 정말 지우는지 -- stub 은 파일을 안 건드린다). 지우는
+    //    범위는 DMS_E2E_RM_ROOT = 하네스 tmp 스토리지 아래로 봉쇄된다(진입점·가짜 drm 두 겹).
+    const controller = spawnLongLived("controller", [e2eControllerPath], {
       DMS_PLANNER_INTERVAL_SECONDS: "1",
       DMS_STEPPER_INTERVAL_SECONDS: "1",
       DMS_RECONCILE_INTERVAL_SECONDS: "1",
@@ -233,7 +237,8 @@ export default async function globalSetup(): Promise<void> {
       DMS_REQUEST_PURGE_INTERVAL_SECONDS: "1",
       DMS_AGENT_REPORT_STALE_SECONDS: "3600",
       DMS_ARTIFACT_BASE_URI: artifactBaseUri,
-    });
+      DMS_E2E_RM_ROOT: storageDir,
+    }, pythonBin);
 
     // 6) 부팅 스모크 마감: 스토리지가 Ready 가 되려면 (a) 에이전트 리포트가 실렸고
     //    (b) 컨트롤러의 storage-reconciler 가 **살아서** 틱을 돌아야 한다.
@@ -254,6 +259,8 @@ export default async function globalSetup(): Promise<void> {
     process.env.DMS_E2E_API_PID = String(api.pid);
     process.env.DMS_E2E_CTRL_PID = String(controller.pid);
     process.env.DMS_E2E_TMPDIR = tmpDir;
+    // 스토리지 실디렉터리(E12 가 지울 트리를 심고, 지워졌는지 직접 본다). 워커는 러너 메인의 env 를 물려받는다.
+    process.env.DMS_E2E_STORAGE_DIR = storageDir;
     console.log(`[e2e harness] up: api pid=${api.pid} controller pid=${controller.pid} ` +
       `tmp=${tmpDir}`);
   } catch (e) {

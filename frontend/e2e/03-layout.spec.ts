@@ -109,6 +109,9 @@ test.describe("E3 레이아웃 불변식", () => {
 
     await visit(page, "/admin/batches/new", "배치 생성");
     await assertLayoutSane(page, { minTableCells: 0 });
+    // rm(2026-10-21): 「삭제 범위」 안내·rm 옵션 줄·요약 위 경고가 넘치지 않는다.
+    await page.getByLabel("연산").selectOption("rm");
+    await assertLayoutSane(page, { minTableCells: 0 });
 
     await visitUsage(page);
     await assertLayoutSane(page, { minTableCells: 0 });
@@ -135,6 +138,9 @@ test.describe("E3 레이아웃 불변식", () => {
 
     await visit(page, "/admin/batches/new", "배치 생성");
     await assertLayoutSane(page, { sidebarFixed: false, minTableCells: 0 });
+    await page.getByLabel("연산").selectOption("rm");
+    await assertLayoutSane(page, { sidebarFixed: false, minTableCells: 0 });
+    await page.getByLabel("연산").selectOption("scan");
     // 입력 방식 세그먼트는 좁은 폭에서도 라벨이 음절 중간에서 접히지 않는다(통째로 다음 줄로).
     // L4 는 aside a·table button 만 보므로 여기서 직접 잰다(한 줄 = 높이 < 줄 높이 2배).
     const wrapped = await page.locator("button[aria-pressed]").evaluateAll((bs) => bs
