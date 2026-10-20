@@ -35,6 +35,8 @@ export const REASON_MESSAGES: Record<string, string> = {
   destination_not_owned: "목적지 디렉토리가 작업을 실행하는 계정(요청자 본인 또는 지정된 실행 신원)의 소유가 아닙니다 — sync 는 목적지 최상위의 소유·권한·시각을 맞추는데 남의 디렉토리에는 그럴 수 없어(dsync 는 부분 복사 뒤 실패) 미리 거부합니다. 그룹 쓰기 권한이 있어도 소유자가 아니면 거부합니다. 본인 소유 디렉토리나 새 경로를 지정하세요",
   artifact_base_not_traversable: "작업 기록(artifact) 저장소에 실행 신원이 들어갈 수 없습니다 — 관리자에게 문의하세요(artifact base 디렉토리에 다른 사용자 실행(x) 권한이 필요합니다: 711 또는 755)",
   parent_not_writable: "대상의 상위 디렉토리에 쓸 수 없습니다",
+  // rm 대상 봉쇄(2026-10-21): preflight·exec_preflight 와 러너의 drm 직전 재확인이 같은 코드를 낸다.
+  target_path_redirected: "삭제 대상의 상위 경로가 심볼릭 링크로 다른 곳을 가리킵니다 — 실제 경로를 확인하세요(관리 디렉토리 아래 상위 경로에 심볼릭 링크가 끼면 삭제하지 않습니다. 대상 자신이 링크면 링크만 지웁니다)",
   target_not_readable: "대상 경로를 읽을 수 없습니다 — 경로와 권한을 확인하세요",
   // 복합 접두 (stepper.py 가 f"{prefix}:{ExecutionError.reason_code}" 형태로 발생시킨다)
   preflight_submit_failed: "사전 점검을 시작하지 못했습니다",
@@ -186,6 +188,8 @@ export const REASON_MESSAGES: Record<string, string> = {
   admin_session_required: "빌드·릴리스·컨트롤 상태·레지스트리 삭제·결과 폴더(artifact base) 변경·작업 삭제는 포탈에 로그인한 관리자만 할 수 있습니다(토큰 인증 불가)",
   preview_round_required: "배치 확인에는 확인한 미리보기 회차가 필요합니다 — 화면을 새로고침한 뒤 「배치 확인」을 다시 여세요",
   batch_preview_changed: "확인 대화상자를 연 뒤 배치 내용이 바뀌었습니다(항목 추가·재실행으로 다시 미리보기됨) — 대화상자를 닫고 다시 열어 바뀐 내용을 검토하세요",
+  // rm 배치 확인은 「되돌릴 수 없음」 동의를 본문에 실어야 한다(2026-10-21 -- 그 체크가 없는 옛 포탈 탭의 확인을 막는다).
+  batch_rm_confirm_ack_required: "삭제 배치 확인에는 「되돌릴 수 없음」 확인이 필요합니다 — 화면을 새로고침한 뒤 「배치 확인」을 다시 열어 삭제 대상을 검토하세요",
   auto_confirm_sync_only: "자동 실행(미리보기 후 확인 생략)은 sync 배치에만 있습니다 — rm 배치는 늘 직접 「배치 확인」을 누르고, scan 은 확인 단계가 없습니다",
   auto_confirm_not_privileged: "자동 실행을 켠 관리자가 지금 특권 실행 목록에 없어 자동 실행이 보류됐습니다 — 미리보기를 보고 「배치 확인」을 눌러 주세요",
   auto_confirm_not_admin: "자동 실행을 켠 계정이 지금 관리자가 아니거나 비활성이라 자동 실행이 보류됐습니다 — 미리보기를 보고 「배치 확인」을 눌러 주세요",

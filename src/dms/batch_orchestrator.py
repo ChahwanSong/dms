@@ -65,6 +65,24 @@ def _stamped(job) -> bool:
     return job.get("confirmed_fingerprint") is not None and job["confirmed_fingerprint"] == job.get("preview_fingerprint")
 
 
+def preview_files(items) -> dict:
+    """ConfirmPending 항목 preview_summary.files 의 합(아는 값만)과 모르는 항목 수 -- null≠0: 하나도 모르면 files_total 은
+    None 이고 0 은 정상값이다(rm 의 0 = 대상 경로 없음). 포탈 확인 대화상자의 「삭제·복사 대상」과 같은 집계다. DB 가 신뢰
+    경계라 bool·음수·비정수는 모름으로 센다(stepper 의 _as_count 와 같은 결). items = BatchesRepository.list_items_detail.
+
+    **사람의 확인(routes_batches.confirm_batch)과 자동 확인(_auto_confirm)이 같이 쓴다**(2026-10-21 리뷰): 감사 행
+    `batch/confirm` 의 모양이 누르는 주체와 무관해야 「같은 confirm, 같은 기록」이다 -- 자동 확인이 자기 요약을 따로
+    만들면서 이 두 키가 자동 확인 행에만 빠져 있었다."""
+    pending = [it for it in items if it.get("job_state") == DataJobState.CONFIRM_PENDING.value]
+    known = []
+    for it in pending:
+        s = it.get("preview_summary")
+        v = s.get("files") if isinstance(s, dict) else None
+        if isinstance(v, int) and not isinstance(v, bool) and v >= 0:
+            known.append(v)
+    return {"files_total": sum(known) if known else None, "files_unknown": len(pending) - len(known)}
+
+
 # 자동 확인 감사 행의 actor. 계정 이름 규칙(repositories/accounts._USERNAME_RE -- [a-z0-9][a-z0-9._-]*)에 없는 ':' 를
 # 넣어, 같은 이름의 사람 계정이 확인한 기록이 「자동 확인」으로 읽히는 일이 없게 한다. 켠 사람은 after_state 에 남는다.
 AUTO_CONFIRM_ACTOR = "system:auto-confirm"
@@ -306,8 +324,10 @@ class BatchOrchestrator:
                     message=(f"batch {bid} round {rnd}: auto-confirm held ({hold}) -- "
                              f"enabled by {batch.get('auto_confirm_by')}, waiting for a manual batch confirm")[:500])
             return
+        # 확인한 미리보기의 대상 수 합계 -- 사람의 확인과 같은 함수·같은 입력(list_items_detail)이라 감사 행 모양이 같다.
         summary = {"previewed": previewed, "items": total, "options": batch["options"],
-                   "auto_confirm_by": batch["auto_confirm_by"]}
+                   "auto_confirm_by": batch["auto_confirm_by"],
+                   **preview_files(self._repos.batches.list_items_detail(bid))}
         if self._repos.batches.confirm(bid, actor=AUTO_CONFIRM_ACTOR, summary=summary, expected_round=rnd,
                                        expected_auto_confirm_by=batch["auto_confirm_by"]):
             _HELD_ROUND.pop(bid, None)

@@ -211,6 +211,14 @@
   broken 에 넣을지, 카운터만 둘지가 사용자 결정. 잡 이미지·에이전트 재빌드 필요.
 - 📝 **drm 은 unlink 실패에도 종료 코드 0**(포크 `drm.c` — `mfu_flist_unlink` 가 void). 일부만 지워졌는데 rm 이
   Succeeded 로 끝날 수 있다(같은 조사에서 발견). 해법: 포크에서 실패 수를 rc 로, 또는 러너가 오류 줄을 판정.
+- 📝 **rm 대상 봉쇄의 남은 TOCTOU 창**(2026-10-21 배치 rm 리뷰). 「상위 경로에 심링크 성분 없음」은 preflight·exec_preflight
+  (`_RM_CONTAINMENT_CHECK`)와 러너의 drm 직전 재확인(`runner.rm_target_redirected` — launcher 가 같은 스토리지 hostPath 를
+  마운트하고 root 라 가능했다) 세 번 본다. 그래도 러너 확인 → mpirun → 워커 rank 의 drm 이 경로를 lstat·걷기 시작할 때까지
+  (워커 기동·MPI 초기화, 보통 수 초)는 비어 있다 — 상위 디렉터리에 쓸 수 있는 사용자가 그 사이에 정확히 심링크로 바꾸면 root
+  drm 이 링크를 따라간다(예전 창은 exec_preflight 파드 → Volcano 대기 → 실행으로 분 단위였다). 닫는 길은 포크 `drm.c` 가
+  대상의 상위 경로를 성분마다 `openat(O_NOFOLLOW|O_DIRECTORY)`(또는 `openat2(RESOLVE_NO_SYMLINKS|RESOLVE_BENEATH)`, 기준
+  fd = managed_root)로 열고 그 fd 기준으로 지우는 것 — 잡 이미지 재빌드가 필요해 보류. 단건 root rm·root sync 목적지의 상위
+  심링크도 같은 종류다(sync 목적지는 봉쇄 검사 밖).
 - 📝 **제출 경계의 lone surrogate 는 422 가 아니라 500**(같은 조사). JSON 본문 `"target":"a/\udcb4x"` 는 파이썬 json·
   pydantic 을 통과해 DB INSERT 에서 UnicodeEncodeError → 500(요청 행은 안 생긴다). `domain.validate_relative_path` 에
   `path.encode("utf-8")` 실패 → `unsafe_path`(이미 양쪽 등록된 코드)를 넣으면 422 가 된다. 경로를 받는 다른 입력도 같다.

@@ -210,6 +210,32 @@ def test_previewready_auto_batch_is_confirmed_by_the_same_gate_and_stamped(db):
     assert repos.data_jobs.get_job(jid)["state"] == DataJobState.EXECUTING.value
 
 
+def test_auto_confirm_audit_has_the_same_preview_file_keys_as_a_human_confirm(db):
+    # 2026-10-21 리뷰: 자동 확인은 자기 요약을 따로 만들어 files_total·files_unknown 이 빠졌다 -- 「같은 confirm, 같은 기록」.
+    # 사람의 확인과 같은 함수(batch_orchestrator.preview_files)·같은 입력이다. null≠0: 모르는 항목은 합에 넣지 않고 센다.
+    repos = Repositories(db)
+    _ops(repos)
+    bid = _batch(repos, n=3)
+    _rid, j0 = _confirmpending_child(repos, bid, 0)                      # files 42
+    _rid, j1 = _confirmpending_child(repos, bid, 1)
+    _rid, j2 = _confirmpending_child(repos, bid, 2)
+    db.execute("UPDATE data_jobs SET preview_summary = :s WHERE job_id = :j",
+               {"s": json.dumps({"files": 0, "bytes": None, "returncode": 0}), "j": j1})       # 0 은 아는 값
+    db.execute("UPDATE data_jobs SET preview_summary = :s WHERE job_id = :j",
+               {"s": json.dumps({"files": None, "bytes": None, "returncode": 0}), "j": j2})    # 모름
+    BatchOrchestrator(repos, settings=_S()).run_once()
+    assert repos.batches.get(bid)["status"] == "Running"
+    after = json.loads(_audit(db, "confirm")[0]["after_state"])
+    assert (after["files_total"], after["files_unknown"]) == (42, 1)
+
+    bid = _batch(repos)                                                  # 하나도 모르면 None(0 이 아니다)
+    _rid, jid = _confirmpending_child(repos, bid, 0)
+    db.execute("UPDATE data_jobs SET preview_summary = NULL WHERE job_id = :j", {"j": jid})
+    BatchOrchestrator(repos, settings=_S()).run_once()
+    rows = [json.loads(r["after_state"]) for r in _audit(db, "confirm") if r["target_key"] == bid]
+    assert len(rows) == 1 and rows[0]["files_total"] is None and rows[0]["files_unknown"] == 1
+
+
 def test_full_cycle_previewing_to_execution_without_a_human(db):
     repos = Repositories(db)
     _ops(repos)

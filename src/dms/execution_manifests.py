@@ -337,7 +337,7 @@ def _launcher_env(spec):
     ap = _abs_paths(spec)
     argv = tool_argv(spec, abs_paths=ap)
     ident = spec.identity or {}
-    return {
+    env = {
         "DMS_JR_TOOL": spec.tool, "DMS_JR_OPERATION": spec.operation,
         "DMS_JR_PHASE": spec.phase, "DMS_JR_DRYRUN": "1" if spec.dryrun else "0",
         "DMS_JR_PROCESS_COUNT": str(spec.process_count),
@@ -347,6 +347,11 @@ def _launcher_env(spec):
         "DMS_JR_USERNAME": ident.get("username", "root"),
         "DMS_JR_ARTIFACT_DIR": _artifact_dir(spec),  # 스킴 제거된 파일시스템 경로
     }
+    if spec.tool == "drm":
+        # 러너가 drm 직전에 대상 봉쇄를 다시 본다(EXECUTION_REASONS 주석) -- 대상은 argv 마지막(tool_argv), 기준은 이 값.
+        # 연산이 아니라 도구로 거는 이유: 지우는 것은 drm 이다(변조 행의 연산·도구 불일치도 봉쇄 밖으로 새지 않는다).
+        env["DMS_JR_RM_ROOT"] = _rm_managed_root(spec)
+    return env
 
 
 def _job_name(spec):
@@ -488,6 +493,35 @@ _DEST_CHECK = (
     'test -w "$dest_parent" || '
     '{ echo DMS_PREFLIGHT_REASON=destination_parent_not_writable; exit 1; }; ')
 
+# rm 대상 봉쇄(2026-10-21 리뷰): $1 = 대상 절대경로(drm argv 의 그 문자열), $R = 그 스토리지 managed_root(stepper._abs 가
+# $1 을 조합한 바로 그 값), $parent = dirname "$1". 「대상의 상위 경로 실제 위치 == realpath(managed_root) + 글자 그대로의
+# 상대 상위 경로」여야 통과 -- managed_root 아래 상위 경로 성분 어디에도 심링크가 없다는 뜻이다. 왜: drm 은 경로 문자열을
+# 걸어 들어가 중간 심링크를 커널이 따라가고, 배치 rm 은 root 라 `test -w` 가 늘 참이다 -- 사용자가 users/alice/data 를
+# ../bob(또는 /cephfs/dms 같은 마운트 안 다른 곳)으로 바꿔 두면 확인 창이 보인 「실제 경로」와 다른 트리가 지워졌다(스토리지
+# mount_path 전체가 잡 파드에 마운트된다). 마지막 성분은 심링크여도 된다 -- drm 은 대상을 lstat 해 링크 자체만 지운다.
+# managed_root 자신·그 위가 심링크인 것은 괜찮다(양쪽을 같은 realpath 로 본다). 끝이 「/」「.」「..」인 대상(DB 변조 행 --
+# validate_rm_target 은 정규화된 상대경로만 저장한다)과 상위 경로에 「.」「..」「//」가 낀 대상은 realpath 와 글자가 맞을
+# 수 없어 같은 사유로 막힌다(fail-closed). 값은 전부 positional·변수로만 쓴다(case 패턴의 "..." 는 글자 그대로 비교 --
+# 경로의 * [ 가 글롭이 되지 않는다). 같은 규칙의 러너 재확인: dms_job_runner.runner.rm_target_redirected.
+_RM_TARGET_REDIRECTED = 'echo DMS_PREFLIGHT_REASON=target_path_redirected; exit 1'
+_RM_CONTAINMENT_CHECK = (
+    'case "$1" in */|*/.|*/..) ' + _RM_TARGET_REDIRECTED + ';; esac; '
+    'case "$parent" in "$R"|"${R%/}") rel=;; "${R%/}"/*) rel=${parent#"${R%/}"/};; '
+    '*) ' + _RM_TARGET_REDIRECTED + ';; esac; '
+    'real_root=$(realpath -e -- "$R") && real_parent=$(realpath -e -- "$parent") || '
+    '{ ' + _RM_TARGET_REDIRECTED + '; }; '
+    'if [ -z "$rel" ]; then want=$real_root; else want=${real_root%/}/$rel; fi; '
+    '[ "$real_parent" = "$want" ] || { ' + _RM_TARGET_REDIRECTED + '; }; ')
+
+
+def _rm_managed_root(spec) -> str:
+    """rm spec 의 managed_root(stepper._build_spec 이 paths 에 싣는다). 없거나 빈 값이면 ValueError -- 봉쇄 검사 없이 root
+    drm 을 내보내지 않는다(어댑터가 submit_failed 로 접는다, fail-closed). 빌더는 입력을 믿지 않는다."""
+    root = (spec.paths or {}).get("managed_root")
+    if not isinstance(root, str) or root == "":
+        raise ValueError("rm spec without managed_root -- refusing to build an uncontained drm")
+    return root
+
 
 def _preflight_script(spec, *, role=None):
     """(script, path_args) — 경로는 positional 파라미터로 넘겨 셸 인젝션을 원천 차단.
@@ -522,7 +556,13 @@ def _preflight_script(spec, *, role=None):
     (rc 초기값 0 인 채 goto ERROR; dry-run 에선 경고만이라 미리보기는 멀쩡해 보인다).
     목적지가 있다고 부모 검사를 건너뛰면 "root 755 부모 아래 본인 디렉터리" sync 가 복사
     0건 Succeeded 로 끝난다(2026-09-30 d139 실증에서 잡음 -- 그 판에서 한때 건너뛰었다).
-    실행 모드("user"/"root")는 경로와 같이 positional 로 넘긴다(셸 인젝션 차단 관례)."""
+    실행 모드("user"/"root")는 경로와 같이 positional 로 넘긴다(셸 인젝션 차단 관례).
+
+    rm(2026-10-21 리뷰): 부모 쓰기 다음에 대상 봉쇄(_RM_CONTAINMENT_CHECK -- 상위 경로에 심링크 성분 없음)를 본다.
+    root 든 아니든, 단건이든 배치 자식이든, preflight·exec_preflight 모두 이 한 스크립트다(phase 무관) -- root 는 `test -w`
+    가 늘 참이라 봉쇄가 유일한 검사다. 부모 쓰기가 먼저인 이유: 부모가 없으면 realpath -e 도 실패하는데, 그 경우의 사유는
+    종전대로 parent_not_writable 이어야 한다(대상 오타를 「다른 곳을 가리킨다」로 말하지 않는다). managed_root 는 경로처럼
+    positional 로 넘긴다($2)."""
     ap = _abs_paths(spec)
     mode = "root" if (spec.identity or {}).get("privileged") else "user"
     if spec.operation == "sync":
@@ -540,11 +580,11 @@ def _preflight_script(spec, *, role=None):
                   + _DEST_TYPE_CHECK + _DEST_CHECK + 'echo DMS_PREFLIGHT_OK')
         return script, [ap["source"], ap["destination"], mode]
     if spec.operation == "rm":
-        script = ('set -e; '
+        script = ('set -e; R="$2"; '
                   'parent=$(dirname "$1"); '
                   'test -w "$parent" || { echo DMS_PREFLIGHT_REASON=parent_not_writable; exit 1; }; '
-                  'echo DMS_PREFLIGHT_OK')
-        return script, [ap["target"]]
+                  + _RM_CONTAINMENT_CHECK + 'echo DMS_PREFLIGHT_OK')
+        return script, [ap["target"], _rm_managed_root(spec)]
     script = ('set -e; '
               'test -r "$1" || { echo DMS_PREFLIGHT_REASON=target_not_readable; exit 1; }; '
               'echo DMS_PREFLIGHT_OK')
@@ -560,13 +600,15 @@ PREFLIGHT_REASON_MARKER = "DMS_PREFLIGHT_REASON="
 # 코드를 추가하면 frontend/src/lib/reasonCodes.json 과 api.ts REASON_MESSAGES 도
 # 같이 갱신해야 한다(양방향 계약 테스트). 2026-10-07 보조 그룹: identity_groups_not_applied
 # (_SUPP_GIDS_SELF_CHECK)·artifact_base_group_writable(_ARTIFACT_BASE_NOT_WRITABLE_CHECK -- 같은 코드를
-# 제어면 3홉·저장 검증도 낸다).
+# 제어면 3홉·저장 검증도 낸다). 2026-10-21 rm 대상 봉쇄: target_path_redirected(_RM_CONTAINMENT_CHECK -- 같은 코드를
+# 러너의 drm 직전 재확인도 낸다, EXECUTION_REASONS).
 PREFLIGHT_REASONS = frozenset({
     "source_not_readable", "destination_not_directory",
     "destination_parent_not_writable", "destination_not_writable",
     "destination_not_owned", "parent_not_writable",
     "target_not_readable", "artifact_base_not_traversable",
-    "identity_groups_not_applied", "artifact_base_group_writable"})
+    "identity_groups_not_applied", "artifact_base_group_writable",
+    "target_path_redirected"})
 
 
 # 실행·미리보기(mpirun 을 돌리는 launcher) 실패의 사유 마커(2026-10-02). 러너(dms_job_runner.runner)가 워커
@@ -578,8 +620,11 @@ PREFLIGHT_REASONS = frozenset({
 # 2026-10-07 보조 그룹: identity_groups_not_applied 는 러너가 아니라 **워커 셸**(_identity_materialize_stmt)이
 # 찍는다 -- 실패 워커 파드 → PodFailed AbortJob → 어댑터가 launcher 와 Failed 파드 로그를 함께 읽어 승격한다.
 # 러너 계약(WORKERS_UNREACHABLE ∈ 이 집합)은 부분집합이라 러너·잡 이미지는 바뀌지 않는다.
+# 2026-10-21 rm 대상 봉쇄: target_path_redirected 는 러너가 drm(미리보기·실행) 직전에 preflight 와 같은 규칙으로 다시
+# 봐서 찍는다(runner.rm_target_redirected, env DMS_JR_RM_ROOT -- _launcher_env). exec_preflight 파드와 vcjob 은 다른
+# 파드라 그 사이(Volcano 대기 포함) 바뀐 심링크를 여기서 잡는다 -- 잡 이미지가 바뀐다.
 EXECUTION_REASON_MARKER = "DMS_EXEC_REASON="
-EXECUTION_REASONS = frozenset({"workers_unreachable", "identity_groups_not_applied"})
+EXECUTION_REASONS = frozenset({"workers_unreachable", "identity_groups_not_applied", "target_path_redirected"})
 
 
 def _parse_marker(entries, marker, allowed):

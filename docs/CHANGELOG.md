@@ -133,6 +133,21 @@ design-1021 ①.
   돌리고 출력은 러너 파서로 읽는 어댑터(argv 는 실 빌더). 다른 연산은 종전 stub 그대로. 03-layout 에 rm 생성 화면 1280·375.
 - 테스트: 백엔드 배치 8파일 244 · `-k "batch or reason or option"` 598, vitest 1351, e2e 24 통과(Running 분기를 `== SYNC` 로
   되돌리면 rm 테스트 3건이 빨간불 — 변이 확인).
+- **리뷰 반영**(같은 날, 여전히 미배포):
+  - **rm 대상 봉쇄**(중간): root 배치 rm 은 `test -w "$(dirname 대상)"` 가 늘 참이라, 사용자가 상위 디렉터리를 심링크
+    (`users/alice/data -> ../bob`)로 바꿔 두면 확인 창의 「실제 경로」와 다른 트리를 drm 이 지웠다(스토리지 mount_path 전체가
+    마운트된다 — 스크래치 재현). rm preflight·exec_preflight 에 「realpath(상위) == realpath(managed_root) + 글자 그대로의 상대
+    상위 경로」(managed_root 는 positional `$2`, 마지막 성분 링크는 허용) — 아니면 새 사유 `target_path_redirected`(양쪽 등록).
+    stepper 가 target 을 조합한 같은 managed_root 를 `spec.paths` 에 싣는다(없으면 빌더 거부). 러너도 drm 직전에 같은 규칙으로
+    다시 본다(env `DMS_JR_RM_ROOT`, `DMS_EXEC_REASON=target_path_redirected`) — **잡 이미지(dms-mpifileutils)가 바뀐다**. 남은 창은
+    BACKLOG §4. 실 dash 로 셸·러너 두 판정을 같은 트리에 대조(`tests/test_rm_containment_sh.py`).
+  - **rm 확인의 「되돌릴 수 없음」을 서버도 본다**(중간): 롤링 배포 중 옛 포탈 탭은 rm 배치에도 sync 문구(「복사 대상」)의
+    확인 창을 그려 {preview_round} 한 번으로 root drm 을 시작했다. `ConfirmBatchBody.acknowledge_irreversible`(StrictBool) —
+    rm 은 명시 true 가 없으면 422 `batch_rm_confirm_ack_required`(양쪽 등록), 포탈은 체크했을 때만 싣는다, sync 는 그대로.
+  - **겹침·동질성 판정을 쓰기 트랜잭션 안으로**(낮음): 추가·수정·교체가 트랜잭션 밖 스냅샷으로 판정해 두 탭이 a 와 a/b 를
+    같이 넣을 수 있었다 — 저장소가 항목 행 → 배치 행 잠금 뒤 읽은 목록으로 콜백 판정(PG·sqlite), 끼어들기를 결정적으로 재현한
+    테스트.
+  - **자동 확인 감사 행에도 `files_total`·`files_unknown`**(낮음): 사람·자동 확인이 같은 `batch_orchestrator.preview_files`.
 
 ### ✅ 사용량 분석 스토리지별 탭 + 창 상한 1만 + UI 정리 / 비 UTF-8 파일 이름에 잡이 Failed 되던 문제 — **완료·실증**(2026-10-20, d182)
 

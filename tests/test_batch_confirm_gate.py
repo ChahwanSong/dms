@@ -25,6 +25,8 @@ TOKEN = {"Authorization": "Bearer tok-shared"}
 SYNC_ITEM = {"source_storage": "s1", "source": "a", "destination_storage": "s2", "destination": "b"}
 SCAN_ITEM = {"storage": "s1", "target": "a"}
 RM_ITEM = {"storage": "s1", "target": "a"}
+# rm 배치 확인 본문(2026-10-21): 회차 + 「되돌릴 수 없음」 동의(명시 true) -- 동의가 없으면 422 batch_rm_confirm_ack_required.
+RM_CONFIRM = {"preview_round": 0, "acknowledge_irreversible": True}
 
 
 def _app(db, **overrides):
@@ -708,7 +710,7 @@ def _rm_gated_cases(repos):
         ("post", "/items:rerun", {"seqs": [0]}, _batch(repos, op="rm", status="Completed", item_status="Failed")),
         ("post", ":rerun-failed", None, _batch(repos, op="rm", status="Completed", item_status="Failed")),
         ("post", ":rescan", None, _batch(repos, op="rm", status="Completed", item_status="Succeeded")),
-        ("post", ":confirm", {"preview_round": 0}, _ready_rm_batch(repos)),
+        ("post", ":confirm", RM_CONFIRM, _ready_rm_batch(repos)),
     ]
 
 
@@ -774,7 +776,7 @@ def test_confirmed_rm_batch_executes_only_stamped_previews(client, db):
     _, j0 = _confirmpending_child(repos, bid, 0, op="rm", fp="sha256:a")
     _, j1 = _confirmpending_child(repos, bid, 1, op="rm", fp="sha256:b")
     _, j2 = _confirmpending_child(repos, bid, 2, op="rm", fp="sha256:c", expires="2000-01-01T00:00:00Z")
-    assert client.post(f"/api/admin/batches/{bid}:confirm", json={"preview_round": 0}).status_code == 200
+    assert client.post(f"/api/admin/batches/{bid}:confirm", json=RM_CONFIRM).status_code == 200
     assert repos.data_jobs.get_job(j0)["confirmed_fingerprint"] == "sha256:a"
     BatchOrchestrator(repos, settings=_S()).run_once()
     assert repos.data_jobs.get_job(j0)["state"] == "Executing"
@@ -814,7 +816,7 @@ def test_confirm_audit_records_the_preview_file_total(client, db):
     _confirmpending_child(repos, bid, 3, op="rm", summary={"files": True, "bytes": None, "returncode": 0})
     _confirmpending_child(repos, bid, 4, op="rm", summary={"files": -5, "bytes": None, "returncode": 0})
     repos.batches.set_item_status(bid, 5, "Rejected")                     # 미리보기 없는 종단 항목은 세지 않는다
-    assert client.post(f"/api/admin/batches/{bid}:confirm", json={"preview_round": 0}).status_code == 200
+    assert client.post(f"/api/admin/batches/{bid}:confirm", json=RM_CONFIRM).status_code == 200
     row = db.query_one("SELECT after_state FROM audit_log WHERE operation = 'confirm' AND target_key = :b", {"b": bid})
     after = json.loads(row["after_state"])
     assert after["previewed"] == 5 and after["files_total"] == 1234 and after["files_unknown"] == 3
@@ -822,7 +824,7 @@ def test_confirm_audit_records_the_preview_file_total(client, db):
 
     bid = _batch(repos, op="rm", status="PreviewReady")
     _confirmpending_child(repos, bid, 0, op="rm", summary={"files": None, "bytes": None, "returncode": 0})
-    assert client.post(f"/api/admin/batches/{bid}:confirm", json={"preview_round": 0}).status_code == 200
+    assert client.post(f"/api/admin/batches/{bid}:confirm", json=RM_CONFIRM).status_code == 200
     row = db.query_one("SELECT after_state FROM audit_log WHERE operation = 'confirm' AND target_key = :b", {"b": bid})
     after = json.loads(row["after_state"])
     assert after["files_total"] is None and after["files_unknown"] == 1     # 모름 -- 0 으로 뭉개지 않는다
@@ -835,6 +837,94 @@ def test_confirm_rejects_an_rm_batch_whose_options_lost_recursive(client, db):
     repos = client.app.state.repos
     bid = _ready_rm_batch(repos)
     db.execute("UPDATE batches SET options = :o WHERE batch_id = :b", {"o": json.dumps({}), "b": bid})
-    r = client.post(f"/api/admin/batches/{bid}:confirm", json={"preview_round": 0})
+    r = client.post(f"/api/admin/batches/{bid}:confirm", json=RM_CONFIRM)
     assert r.status_code == 422 and r.json()["detail"] == "rm_recursive_required"
     assert repos.batches.get(bid)["status"] == "PreviewReady"
+
+
+# ---- rm 확인의 「되돌릴 수 없음」 동의(2026-10-21 리뷰 [7]) ----
+# 그 체크는 새 포탈에만 있었다 -- 롤링 배포 중 열려 있던 옛 포탈 탭은 rm 배치에도 sync 문구(「복사 대상」)의 확인 창을
+# 그리고 {preview_round} 만 보내, 삭제임을 보지 않은 클릭 한 번이 root drm 을 시작했다. 서버가 동의를 본다.
+
+def test_rm_confirm_requires_an_explicit_irreversible_ack(client, db):
+    import json
+    _admin(client)
+    repos = client.app.state.repos
+    bid = _ready_rm_batch(repos)
+    for body in ({"preview_round": 0}, {"preview_round": 0, "acknowledge_irreversible": False},
+                 {"preview_round": 0, "acknowledge_irreversible": None}):
+        r = client.post(f"/api/admin/batches/{bid}:confirm", json=body)
+        assert (r.status_code, r.json()["detail"]) == (422, "batch_rm_confirm_ack_required"), body
+    for loose in ("yes", 1, "true"):                                    # 명시 true 만(StrictBool)
+        r = client.post(f"/api/admin/batches/{bid}:confirm", json={"preview_round": 0, "acknowledge_irreversible": loose})
+        assert r.status_code == 422, loose
+    assert repos.batches.get(bid)["status"] == "PreviewReady"            # 아무것도 확인되지 않았다
+    assert db.query("SELECT 1 AS x FROM audit_log WHERE operation = 'confirm' AND target_key = :b", {"b": bid}) == []
+    r = client.post(f"/api/admin/batches/{bid}:confirm", json=RM_CONFIRM)
+    assert r.status_code == 200 and repos.batches.get(bid)["status"] == "Running"
+    row = db.query_one("SELECT after_state FROM audit_log WHERE operation = 'confirm' AND target_key = :b", {"b": bid})
+    assert json.loads(row["after_state"])["acknowledged_irreversible"] is True
+
+
+def test_sync_confirm_keeps_its_contract_without_the_ack(client, db):
+    # sync 확인 계약(옛 탭·스크립트의 {preview_round})은 그대로 -- 동의 키는 rm 만 본다(실어도 무시).
+    import json
+    _admin(client)
+    repos = client.app.state.repos
+    bid = _ready_batch(repos)
+    assert client.post(f"/api/admin/batches/{bid}:confirm", json={"preview_round": 0}).status_code == 200
+    row = db.query_one("SELECT after_state FROM audit_log WHERE operation = 'confirm' AND target_key = :b", {"b": bid})
+    assert "acknowledged_irreversible" not in json.loads(row["after_state"])
+    bid = _ready_batch(repos)
+    assert client.post(f"/api/admin/batches/{bid}:confirm",
+                       json={"preview_round": 0, "acknowledge_irreversible": True}).status_code == 200
+
+
+# ---- 배치 전체 규칙(rm 겹침·스토리지 동질성)은 쓰기와 같은 트랜잭션에서(2026-10-21 리뷰 [1]) ----
+# 라우트가 트랜잭션 밖 스냅샷으로 판정하면, 두 탭·두 세션의 추가·수정이 서로의 항목을 못 본 채 둘 다 통과해 proj/a 와
+# proj/a/b 가 한 rm 배치에 같이 들어갔다(확인 창 합계가 부풀고 하위 항목은 실패). 결정적 재현: 이 요청이 배치를 읽은
+# 뒤·자기 쓰기 트랜잭션 전에 다른 요청의 추가가 커밋된다(저장소 호출을 감싸 그 순간에 끼워 넣는다).
+
+def _interleave(monkeypatch, repo, method, other_payload):
+    real_add, real = repo.add_item, getattr(repo, method)
+    fired = []
+
+    def wrapped(batch_id, *a, **kw):
+        if not fired:
+            fired.append(1)
+            assert real_add(batch_id, other_payload) is not None        # 다른 요청의 추가가 먼저 커밋됐다
+        return real(batch_id, *a, **kw)
+    monkeypatch.setattr(repo, method, wrapped)
+    return fired
+
+
+def test_concurrent_add_cannot_slip_an_overlapping_rm_target_past_the_check(client, monkeypatch):
+    _admin(client)
+    repo = client.app.state.repos.batches
+    bid = _batch(client.app.state.repos, op="rm", status="Completed", item_status="Succeeded")
+    fired = _interleave(monkeypatch, repo, "add_item", dict(RM_ITEM, target="proj/a"))
+    r = client.post(f"/api/admin/batches/{bid}/items", json=dict(RM_ITEM, target="proj/a/b"))
+    assert fired and (r.status_code, r.json()["detail"]) == (422, "batch_rm_targets_overlap")
+    assert [it["payload"]["target"] for it in repo.list_items(bid)] == ["d0", "proj/a"]
+
+
+def test_concurrent_add_and_edit_cannot_both_pass_the_overlap_check(client, monkeypatch):
+    _admin(client)
+    repo = client.app.state.repos.batches
+    bid = _batch(client.app.state.repos, op="rm", status="Completed", item_status="Succeeded", n=2)
+    fired = _interleave(monkeypatch, repo, "update_item_payload", dict(RM_ITEM, target="proj/a"))
+    r = client.put(f"/api/admin/batches/{bid}/items/1", json=dict(RM_ITEM, target="proj/a/b"))
+    assert fired and (r.status_code, r.json()["detail"]) == (422, "batch_rm_targets_overlap")
+    assert [it["payload"]["target"] for it in repo.list_items(bid)] == ["d0", "d1", "proj/a"]   # 편집은 롤백
+
+
+def test_concurrent_adds_to_an_emptied_batch_cannot_mix_storages(client, monkeypatch):
+    # 스토리지 동질성(batch_storage_mixed)도 같은 창이 있었다 -- 항목을 다 지운 배치에 두 스토리지가 동시에 들어갔다.
+    _admin(client)
+    repo = client.app.state.repos.batches
+    bid = _batch(client.app.state.repos, op="rm", status="Completed", item_status="Succeeded")
+    assert repo.delete_item(bid, 0, only_queued=False)
+    fired = _interleave(monkeypatch, repo, "add_item", dict(RM_ITEM, storage="s1", target="x"))
+    r = client.post(f"/api/admin/batches/{bid}/items", json=dict(RM_ITEM, storage="s2", target="y"))
+    assert fired and (r.status_code, r.json()["detail"]) == (422, "batch_storage_mixed")
+    assert [it["payload"]["storage"] for it in repo.list_items(bid)] == ["s1"]

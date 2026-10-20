@@ -1803,7 +1803,7 @@ test("rm 배치 확인 대화상자: 삭제 문장·삭제 경고·삭제 대상
   expect(dlg).not.toHaveTextContent("delete 옵션");
 });
 
-test("rm 배치 확인: 「되돌릴 수 없음」 체크 전엔 「삭제 실행 확인」이 잠기고, 체크 뒤 {preview_round} 를 보낸다 — 다시 열면 체크가 풀린다", async () => {
+test("rm 배치 확인: 「되돌릴 수 없음」 체크 전엔 「삭제 실행 확인」이 잠기고, 체크 뒤 {preview_round, acknowledge_irreversible: true} 를 보낸다 — 다시 열면 체크가 풀린다", async () => {
   let confirmed: unknown = null;
   server.use(http.post("/api/admin/batches/b1:confirm", async ({ request }) => {
     confirmed = await request.json(); return HttpResponse.json({ status: "Running" }); }));
@@ -1822,7 +1822,18 @@ test("rm 배치 확인: 「되돌릴 수 없음」 체크 전엔 「삭제 실�
   expect(within(dlg).getByRole("button", { name: "삭제 실행 확인" })).toBeDisabled();
   await userEvent.click(within(dlg).getByLabelText("되돌릴 수 없는 삭제임을 확인했습니다"));
   await userEvent.click(within(dlg).getByRole("button", { name: "삭제 실행 확인" }));
-  await waitFor(() => expect(confirmed).toEqual({ preview_round: 2 }));
+  // 2026-10-21: 서버도 rm 확인에 동의를 요구한다(없으면 422 batch_rm_confirm_ack_required) -- 체크했을 때만 싣는다.
+  await waitFor(() => expect(confirmed).toEqual({ preview_round: 2, acknowledge_irreversible: true }));
+});
+
+test("rm 배치 확인: 서버가 동의 없음(422 batch_rm_confirm_ack_required)으로 거절하면 그 사유를 대화상자 안에 보인다", async () => {
+  server.use(http.post("/api/admin/batches/b1:confirm", () =>
+    HttpResponse.json({ detail: "batch_rm_confirm_ack_required" }, { status: 422 })));
+  renderItems(rmBatch());
+  const dlg = await openConfirmDialog();
+  await userEvent.click(within(dlg).getByLabelText("되돌릴 수 없는 삭제임을 확인했습니다"));
+  await userEvent.click(within(dlg).getByRole("button", { name: "삭제 실행 확인" }));
+  expect(await within(dlg).findByRole("alert")).toHaveTextContent("삭제 배치 확인에는 「되돌릴 수 없음」 확인이 필요합니다");
 });
 
 test("rm 배치 확인: dry-run 종료코드가 0 이 아니면 그 항목을 빨갛게 표시한다", async () => {

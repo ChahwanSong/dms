@@ -729,13 +729,15 @@ def test_replace_items_racing_a_batch_delete_is_404_and_leaves_no_orphan_items(c
     _admin(client)
     bid = _completed_scan_batch(client)
     repo = client.app.state.repos.batches
-    real = routes_batches.validate_batch
+    real = routes_batches._get_batch_or_404
 
-    def then_deleted(*a, **kw):
-        out = real(*a, **kw)
-        repo.delete(bid)                                       # 검증하는 사이 다른 관리자가 지웠다
-        return out
-    monkeypatch.setattr(routes_batches, "validate_batch", then_deleted)
+    # 2026-10-21: 검증은 이제 저장소 트랜잭션 안(배치 잠금 뒤)이라 「검증하는 사이」가 없다 -- 남은 창은 라우트의 읽기와
+    # 쓰기 트랜잭션 사이다(add_item 경합 테스트와 같은 자리).
+    def then_deleted(request, batch_id):
+        b = real(request, batch_id)
+        repo.delete(batch_id)                                  # 읽은 직후 다른 관리자가 지웠다
+        return b
+    monkeypatch.setattr(routes_batches, "_get_batch_or_404", then_deleted)
     r = client.put(f"/api/admin/batches/{bid}/items", json={"items": [
         {"storage": "s1", "target": "n0"}, {"storage": "s1", "target": "n1"}, {"storage": "s1", "target": "n2"}]})
     assert (r.status_code, r.json()["detail"]) == (404, "batch_not_found")
@@ -750,13 +752,13 @@ def test_replace_items_racing_a_rescan_is_409_and_keeps_the_items(client, monkey
     bid = _completed_scan_batch(client)
     repo = client.app.state.repos.batches
     before = [(it["seq"], it["status"], it["payload"]) for it in repo.list_items(bid)]
-    real = routes_batches.validate_batch
+    real = routes_batches._get_batch_or_404
 
-    def then_rescanned(*a, **kw):
-        out = real(*a, **kw)
-        repo.set_status(bid, "Running")
-        return out
-    monkeypatch.setattr(routes_batches, "validate_batch", then_rescanned)
+    def then_rescanned(request, batch_id):
+        b = real(request, batch_id)
+        repo.set_status(batch_id, "Running")                   # 읽은 직후 다시 돌기 시작했다
+        return b
+    monkeypatch.setattr(routes_batches, "_get_batch_or_404", then_rescanned)
     r = client.put(f"/api/admin/batches/{bid}/items", json={"items": [{"storage": "s1", "target": "n0"}]})
     assert (r.status_code, r.json()["detail"]) == (409, "batch_items_not_replaceable")
     assert [(it["seq"], it["status"], it["payload"]) for it in repo.list_items(bid)] == before
