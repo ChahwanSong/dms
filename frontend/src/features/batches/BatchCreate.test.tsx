@@ -723,9 +723,9 @@ test("sync 를 고르면 만든 뒤 「배치 확인」을 눌러야 실행된�
   expect(screen.getByText(/항목별 미리보기가 끝나면 배치 상세에서 「배치 확인」을 눌러야 실행됩니다\./)).toBeInTheDocument();
 });
 
-// ---- sync 자동 확인(2026-10-11 — 옵션, 기본 꺼짐) ---------------------------------------------------------
+// ---- 자동 확인(sync 2026-10-11, rm 2026-10-21 — 옵션, 기본 꺼짐) ----------------------------------------------
 
-test("자동 실행: sync 에만 보이고 기본 꺼짐 — 끈 채로 만들면 auto_confirm 키 부재, 요약은 「직접」", async () => {
+test("자동 실행: scan 엔 없고 sync 는 기본 꺼짐 — 끈 채로 만들면 auto_confirm 키 부재, 요약은 「직접」", async () => {
   renderPage();
   await screen.findByLabelText("스토리지");
   expect(screen.queryByLabelText("미리보기 후 자동 실행")).toBeNull();          // scan 에는 없다
@@ -770,7 +770,7 @@ test("자동 실행을 켠 뒤 scan 으로 바꾸면 싣지 않는다(서버 422
 
 
 // ---- rm 배치(2026-10-21 「배치작업에 rm도」) -------------------------------------------------------
-// 항목 모양은 scan(스토리지 하나 + 행당 경로), 확인 흐름은 sync(미리보기 → 「배치 확인」, 자동 실행 없음).
+// 항목 모양은 scan(스토리지 하나 + 행당 경로), 확인 흐름은 sync(미리보기 → 「배치 확인」, 자동 실행은 동의와 함께 켤 때만).
 const RM_POLICIES = [...POLICIES, policyRow("rm", 3, 2, "mid", "high")];
 
 async function fillRm(paths: string[] = ["old/a"]) {
@@ -782,7 +782,7 @@ async function fillRm(paths: string[] = ["old/a"]) {
   }
 }
 
-test("rm: 스토리지 하나 + 행당 경로, 바디는 {storage,target} 행 + options {recursive:true} 명시 — 소스·목적지·자동 실행 없음", async () => {
+test("rm: 스토리지 하나 + 행당 경로, 바디는 {storage,target} 행 + options {recursive:true} 명시 — 소스·목적지 없음, 자동 실행은 기본 꺼짐", async () => {
   const captured = captureCreate();
   renderPage(RM_POLICIES);
   await fillRm(["old/a", "old/b"]);
@@ -790,6 +790,7 @@ test("rm: 스토리지 하나 + 행당 경로, 바디는 {storage,target} 행 + 
   expect(screen.queryByLabelText("1행 목적지")).toBeNull();
   expect(screen.getByText("삭제할 경로")).toBeInTheDocument();
   expect(screen.getByLabelText("재귀 삭제(필수)")).toBeChecked();
+  expect(screen.getByLabelText("미리보기 후 자동 실행")).not.toBeChecked();
   expect(createButton()).toBeEnabled();
   await userEvent.click(createButton());
   await screen.findByRole("heading", { name: "배치 b9" });
@@ -797,21 +798,73 @@ test("rm: 스토리지 하나 + 행당 경로, 바디는 {storage,target} 행 + 
   expect(captured.body.items).toEqual([{ storage: "s1", target: "old/a" }, { storage: "s1", target: "old/b" }]);
   expect(captured.body.options).toEqual({ recursive: true });
   expect("auto_confirm" in captured.body).toBe(false);
+  expect("acknowledge_irreversible" in captured.body).toBe(false);
 });
 
-test("rm: 자동 실행 체크박스가 없다 — sync 에서 켠 뒤 rm 으로 바꿔도 auto_confirm 을 싣지 않는다", async () => {
+test("rm: sync 에서 켠 자동 실행은 물려받지 않는다 — rm 으로 바꾸면 꺼진 채 시작, 바디에 auto_confirm 없음, 요약 「직접」", async () => {
   const captured = captureCreate();
   renderPage(RM_POLICIES);
   await fillSync();
   await userEvent.click(screen.getByLabelText("미리보기 후 자동 실행"));
   await userEvent.selectOptions(screen.getByLabelText("연산"), "rm");
-  expect(screen.queryByLabelText("미리보기 후 자동 실행")).toBeNull();
+  expect(screen.getByLabelText("미리보기 후 자동 실행")).not.toBeChecked();
+  expect(screen.queryByRole("note", { name: "자동 삭제 경고" })).toBeNull();
   await pickStorage("스토리지", "s1");
-  expect(screen.getByText("실행 확인").closest("div")).toHaveTextContent("직접 — 미리보기 후 「배치 확인」(rm 은 자동 실행 없음)");
+  expect(screen.getByText("실행 확인").closest("div")).toHaveTextContent(/직접 — 미리보기 후 「배치 확인」$/);
   await userEvent.click(createButton());
   await screen.findByRole("heading", { name: "배치 b9" });
   expect("auto_confirm" in captured.body).toBe(false);
   expect(captured.body.items).toEqual([{ storage: "s1", target: "a" }]);   // 연산을 바꿔도 행(경로)은 유지
+});
+
+test("rm: 자동 실행을 켜면 빨간 경고 + 필수 동의 체크 — 체크 전엔 생성이 잠기고, 체크하면 auto_confirm·acknowledge_irreversible 을 싣는다", async () => {
+  const captured = captureCreate();
+  renderPage(RM_POLICIES);
+  await fillRm();
+  await userEvent.click(screen.getByLabelText("미리보기 후 자동 실행"));
+  const warn = screen.getByRole("note", { name: "자동 삭제 경고" });
+  expect(warn).toHaveTextContent("미리보기가 끝나면 사람 확인 없이 root 권한으로 삭제됩니다 — 되돌릴 수 없습니다");
+  expect(warn).toHaveClass("text-bad");
+  const ack = screen.getByLabelText("확인 없이 삭제되는 것에 동의");
+  expect(ack).not.toBeChecked();
+  expect(createButton()).toBeDisabled();
+  expect(screen.getByText("자동 실행으로 삭제하려면 경고를 읽고 동의를 체크하세요")).toBeInTheDocument();
+  // 켜진 동안 화면의 다른 문장도 「확인 없이 삭제」로 바뀐다 — 「배치 확인」을 눌러야 삭제된다는 문장은 거짓이 된다.
+  const row = screen.getByText("실행 확인").closest("div")!;
+  expect(row).toHaveTextContent("자동 — 미리보기가 끝나면 확인 없이 삭제");
+  expect(row.querySelector("dd")).toHaveClass("text-bad");
+  expect(screen.getByText(/「배치 확인」 없이 바로 삭제됩니다\(자동 실행 켜짐\)/)).toBeInTheDocument();
+  expect(screen.getByRole("note", { name: "삭제 범위" })).toHaveTextContent("자동 실행이 켜져 있습니다");
+  expect(screen.getByText(/자동 실행이 켜져 있어 항목별 미리보기가 끝나는 즉시 「배치 확인」 없이 삭제됩니다/)).toBeInTheDocument();
+  expect(screen.queryByText(/「배치 확인」을 눌러야 삭제됩니다/)).toBeNull();
+  await userEvent.click(ack);
+  expect(createButton()).toBeEnabled();
+  await userEvent.click(createButton());
+  await screen.findByRole("heading", { name: "배치 b9" });
+  expect(captured.body.auto_confirm).toBe(true);
+  expect(captured.body.acknowledge_irreversible).toBe(true);
+  expect(captured.body.operation).toBe("rm");
+});
+
+test("rm: 자동 실행을 껐다 켜거나 연산을 바꿨다 오면 동의를 다시 받는다(지난 동의가 이어지지 않는다)", async () => {
+  renderPage(RM_POLICIES);
+  await fillRm();
+  await userEvent.click(screen.getByLabelText("미리보기 후 자동 실행"));
+  await userEvent.click(screen.getByLabelText("확인 없이 삭제되는 것에 동의"));
+  expect(createButton()).toBeEnabled();
+  await userEvent.click(screen.getByLabelText("미리보기 후 자동 실행"));      // 끄면 동의 칸도 사라진다
+  expect(screen.queryByLabelText("확인 없이 삭제되는 것에 동의")).toBeNull();
+  expect(createButton()).toBeEnabled();                                     // 끈 rm 은 동의가 필요 없다
+  await userEvent.click(screen.getByLabelText("미리보기 후 자동 실행"));
+  expect(screen.getByLabelText("확인 없이 삭제되는 것에 동의")).not.toBeChecked();
+  expect(createButton()).toBeDisabled();
+  await userEvent.click(screen.getByLabelText("확인 없이 삭제되는 것에 동의"));
+  await userEvent.selectOptions(screen.getByLabelText("연산"), "scan");
+  await userEvent.selectOptions(screen.getByLabelText("연산"), "rm");
+  expect(screen.getByLabelText("미리보기 후 자동 실행")).not.toBeChecked();   // rm 으로 들어오면 꺼진 채
+  await userEvent.click(screen.getByLabelText("미리보기 후 자동 실행"));
+  expect(screen.getByLabelText("확인 없이 삭제되는 것에 동의")).not.toBeChecked();
+  expect(createButton()).toBeDisabled();
 });
 
 test("rm: 재귀 삭제(필수) 해제·stat+lite 는 즉답과 함께 생성이 잠긴다(SubmitJob 과 같은 문구)", async () => {

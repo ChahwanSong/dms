@@ -95,6 +95,49 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### 🚧 배치 rm 자동 확인(옵션, 기본 꺼짐) — **구현·미배포**(2026-10-21)
+
+사용자 요청: 「Rm 배치작업에서 sync와 마찬가지로 사용자 확인 버튼 없이 바로 rm 작업 수행하도록 (자동 확인) 하는 옵션 추가해줘.」 —
+같은 날 d183 의 결정 D1(「rm 배치는 자동 확인 없음 — 늘 사람이 「배치 확인」」)을 사용자가 뒤집었다. 단건 sync·rm 은 그대로
+사람이 컨펌한다(이 경로 밖).
+
+- **술어 하나**: `domain.auto_confirmable`(명시 집합 sync·rm) — 켜는 라우트(생성·실행 설정 PATCH)·orchestrator PreviewReady
+  분기·`auto_confirm_hold` 세 곳이 같이 쓴다(예전엔 셋이 각자 `== SYNC`). scan(확인 단계 없음)은 여전히 422
+  `auto_confirm_sync_only` — 이름은 옛 탭·스크립트 계약이라 그대로 두고 문구만 「sync·rm 배치에만」으로 고쳤다(양쪽). DB 변조
+  미지 연산은 자동 확인하지 않는다(`confirm_gated` 와 방향이 반대인 fail-closed).
+- **켤 때 「되돌릴 수 없음」 동의**: rm 은 생성 `auto_confirm: true` 와 실행 설정의 꺼짐 → 켜짐에 본문 `acknowledge_irreversible:
+  true`(StrictBool)가 있어야 한다 — 없으면 새 사유 422 `batch_rm_auto_confirm_ack_required`(reasonCodes.json·api.ts 양쪽). 사람의 rm
+  `:confirm` 이 매번 받던 동의(`batch_rm_confirm_ack_required`)를 켜는 순간 한 번 받는 것이다. 이미 켜진 배치에 true 를 다시 실은
+  저장은 아무것도 켜지 않아 묻지 않고, 끄기·sync 는 보지 않는다.
+- **감사**: 생성에서 켠 자동 확인도 감사 행 `batch/auto_confirm_on`(after = 켠 사람·연산, rm 은 `acknowledged_irreversible: true`)
+  — 예전엔 끄기(`auto_confirm_off`)·종단 배치에서 켜기(`execution_settings`)만 남고 생성에서 켠 것은 배치 행 말고 기록이 없었다
+  (sync 도 이제 남는다). 실행 설정 경로는 `execution_settings` after 에 같은 키. 새 DB 열은 없다 — 켠 사람 칸을 쓸 수 있는 손은
+  동의 칸도 쓰므로 동의 열은 방어가 아니라 기록일 뿐이고, 방어는 확인 직전 자격 재확인이다. 그래서 자동 확인의 `batch/confirm`
+  행(actor `system:auto-confirm`, `files_total`·`files_unknown` 은 사람 확인과 같은 `preview_files`)에는 동의를 쓰지 않는다 —
+  루프는 동의를 본 적이 없다(`auto_confirm_by` 가 켤 때의 행을 가리킨다).
+- **실행 경로는 그대로**: 같은 `BatchesRepository.confirm`(회차·Queued CAS + 도장 + 감사 + `expected_auto_confirm_by`), 도장 찍힌
+  미리보기만 실행, 만료된 미리보기는 실행하지 않음, 항목 추가·재실행은 Previewing 으로 돌아가 켜져 있고 보류가 없을 때만 다시 자동
+  확인, `target_path_redirected` 봉쇄(preflight·exec_preflight·러너)도 그대로. `auto_confirm_hold` 의 옵션 재검증을
+  `validate_options` → `validate_batch_options`(사람 확인의 `_reject_stale_options` 와 같은 함수 — rm 은 recursive 동의까지; sync 는
+  같은 결과).
+- **포탈**: 켜는 체크·「자동 실행 끄기」·자동 안내문이 같은 명시 집합(`useBatches.autoConfirmable`). 생성 화면 rm 에 「미리보기 후
+  자동 실행」(기본 꺼짐) — 켜면 빨간 「자동 삭제 경고」(「미리보기가 끝나면 사람 확인 없이 root 권한으로 삭제됩니다 — 되돌릴 수
+  없습니다」) + **필수** 동의 체크(체크 전 생성 잠금·힌트, 체크했을 때만 `acknowledge_irreversible` 을 싣는다; 자동 실행 체크나
+  연산을 바꾸면 풀리고, 다른 연산에서 rm 으로 들어오면 자동 실행도 꺼진 채 시작), 연산 안내·「삭제 범위」·요약 「실행 확인 = 자동 —
+  미리보기가 끝나면 확인 없이 삭제」(빨강)·제출 위 경고가 켜진 동안 「확인 없이 삭제」로 바뀐다. 실행 설정 변경 다이얼로그 rm 도
+  같은 체크 + 꺼짐 → 켜짐일 때만 경고·필수 동의. 배치 상세: 헤더 빨간 「자동 실행 — 미리보기가 끝나면 확인 없이 삭제 (켠 사람)」,
+  「자동 실행 끄기」, Previewing·PreviewReady·보류·끝난 배치·항목 추가 안내의 rm 문구, 실행 설정 행. 목록의 「자동」은 rm 이면 빨강.
+  sync 화면은 그대로다.
+- 문서: CLAUDE.md(「rm 배치에 자동 확인을 넣지 마라」 → 2026-10-21 사용자 결정), ARCHITECTURE 「배치 재검토·확인 게이트」.
+- **e2e E13**(`12-batch-rm-auto-confirm.spec.ts`): 생성 화면에서 rm + 자동 실행 → 경고·동의 체크 전엔 생성 잠김 → 체크 → 「배치
+  확인」을 누르지 않고 실 오케스트레이터가 미리보기 → 확인 대기 → 자동 확인 → 가짜 drm 실행으로 **하네스 스토리지의 그 경로가 실제로
+  지워지고**(walk 5·2) 목록 밖 형제는 남는다, 375 헤더 넘침 0. 동의 없는 API 켜기는 422 `batch_rm_auto_confirm_ack_required`, 끈 rm
+  배치는 확인 대기에서 멈추고(3초 더, 파일 그대로) 취소로 정리. E12 는 「자동 실행 칸 없음」 → 「기본 꺼짐」, 03-layout 에 rm 자동
+  실행 켠 생성 화면 1280·375.
+- 테스트: 백엔드 전체 3456(skip 7) — 그중 `-k "batch or auto_confirm or reason"` 572 · 마이그레이션·계약 117, vitest 1392 · tsc, e2e 26 통과.
+  `auto_confirmable` 에서 rm 을 빼면 rm 자동 확인 테스트 9건이 빨간불(변이 확인). 실 Playwright 캡처(1280·375): 생성 화면 경고·
+  동의, 실행 설정 다이얼로그, 진행 중·끝난 상세 헤더 — 가로 넘침 0.
+
 ### ✅ 배치 rm + 사용량 분석 파일 크기 분포·스토리지 합계 — **완료·실증**(2026-10-21, d183)
 
 사용자 요청: 「1. 배치작업에 rm도 할수있도록 추가해줘.」 근거: 슬라이스 26 §7 「대량 삭제는 항목별 미리보기·확인 흐름 설계가
@@ -107,6 +150,7 @@ design-1021 ①.
   ConfirmPending**(만료까지 정체)이었고 Running 중 Queued 는 사람 확인 없이 미리보기됐다(조사 탐침으로 재현).
 - **자동 확인 없음**(D1): 되돌릴 수 없는 root 삭제라 늘 사람이 「배치 확인」 — 생성·실행 설정 422 `auto_confirm_sync_only`
   (문구를 rm 문맥으로), PreviewReady 분기의 `== SYNC`, `auto_confirm_hold` 세 겹이 DB 변조 행까지 막는다(테스트로 고정).
+  → 같은 날 사용자 결정으로 뒤집혔다(위 「배치 rm 자동 확인」 — 켤 때 「되돌릴 수 없음」 동의를 붙여 옵션으로).
   실행 신원은 배치 정책 그대로(자격 있으면 root, D2).
 - **한 배치 안 겹침 422 `batch_rm_targets_overlap`**(D3, 새 사유 코드 — reasonCodes.json·api.ts 양쪽): 같은 경로 두 번·조상과
   자손(정규화 경로의 **성분** 단위 — a 와 ab·「a b」는 무관). `validate_batch` 한 곳이라 생성·항목 추가·수정·교체 모두, 판정

@@ -4,7 +4,7 @@ import { useBatch, useConfirmBatch, useRerunFailed, useRequestScanStats,
          useCancelBatch, useRescanBatch, useUpdateBatch, useDeleteBatch,
          useUpdateBatchItem, useDeleteBatchItem, useDeleteBatchItems,
          useAddBatchItem, useReplaceBatchItems, useRerunBatchItems,
-         useDisableAutoConfirm, needsBatchConfirm } from "./useBatches";
+         useDisableAutoConfirm, needsBatchConfirm, autoConfirmable } from "./useBatches";
 import { parseItemsCsv, serializeItemsCsv,
          type ItemsCsvOp, type ScanRow, type SyncRow } from "../../lib/csv";
 import { Card } from "../../components/ui/Card";
@@ -214,12 +214,13 @@ function BatchSettings({ b }: { b: Batch }) {
           <dt className="text-muted">실행 신원</dt>
           <dd>{b.owner_username}</dd>
         </>)}
-        {/* 실행 확인 방식(sync 2026-10-11 자동 확인, rm 2026-10-21 늘 직접) — scan 은 확인 단계가 없어 행 생략. */}
+        {/* 실행 확인 방식(자동 확인 sync 2026-10-11·rm 2026-10-21) — scan 은 확인 단계가 없어 행 생략. */}
         {needsBatchConfirm(b.operation) && (<>
           <dt className="text-muted">실행 확인</dt>
-          <dd>{b.operation === "rm" ? "직접 — 미리보기 후 「배치 확인」(rm 은 자동 실행 없음)"
-            : b.auto_confirm === true
-              ? `자동 — 미리보기가 끝나면 바로 실행${b.auto_confirm_by ? ` (켠 사람 ${b.auto_confirm_by})` : ""}`
+          <dd className={b.operation === "rm" && b.auto_confirm === true ? "text-bad" : undefined}>
+            {b.auto_confirm === true && autoConfirmable(b.operation)
+              ? `${b.operation === "rm" ? "자동 — 미리보기가 끝나면 확인 없이 삭제" : "자동 — 미리보기가 끝나면 바로 실행"}${
+                  b.auto_confirm_by ? ` (켠 사람 ${b.auto_confirm_by})` : ""}`
               : "직접 — 미리보기 후 「배치 확인」"}</dd>
         </>)}
       </dl>
@@ -573,8 +574,10 @@ function AddItemDialog({ batchId, isSync, firstPayload, chown, status, auto, con
           {/* 자동 확인(2026-10-11)이 켜진 배치는 새 항목도 미리보기가 끝나면 확인 없이 실행된다 -- 아래 「다시 눌러야」
               문구가 거짓이 되므로 대신 이 사실을 말한다. */}
           {auto && (
-            <p className="text-xs text-muted">
-              자동 실행이 켜진 배치입니다 — 추가한 항목도 미리보기가 끝나면 「배치 확인」 없이 실행(root)됩니다.
+            <p className={`text-xs ${rmExisting !== null ? "text-bad" : "text-muted"}`}>
+              {rmExisting !== null
+                ? "자동 실행이 켜진 배치입니다 — 추가한 경로도 미리보기가 끝나면 「배치 확인」 없이 삭제(root)됩니다. 되돌릴 수 없습니다."
+                : "자동 실행이 켜진 배치입니다 — 추가한 항목도 미리보기가 끝나면 「배치 확인」 없이 실행(root)됩니다."}
             </p>
           )}
           {!auto && status === "PreviewReady" && (
@@ -1008,13 +1011,18 @@ export function BatchDetail() {
             {b?.owner_username && (
               <span className="text-muted text-sm">{`실행 신원 ${b.owner_username}`}</span>
             )}
-            {/* 자동 확인(2026-10-11)은 어느 상태에서나 보인다 -- 끝난 배치에서도 재실행이 확인 없이 root 로 돈다는 뜻이라
-                접힌 「실행 설정」 안에만 두면 모른 채 재실행을 누른다(리뷰). */}
-            {b?.operation === "sync" && b.auto_confirm === true && (
+            {/* 자동 확인(sync 2026-10-11, rm 2026-10-21)은 어느 상태에서나 보인다 -- 끝난 배치에서도 재실행이 확인 없이
+                root 로 돈다는 뜻이라 접힌 「실행 설정」 안에만 두면 모른 채 재실행을 누른다(리뷰). rm 은 무엇이 생략되는지
+                (확인 없이 삭제)까지 빨강으로 말한다 -- 「자동 실행」만으로는 지우는 배치임이 헤더에서 보이지 않는다. */}
+            {autoConfirmable(b?.operation) && b?.auto_confirm === true && (b.operation === "rm" ? (
+              <span className="text-bad text-sm" title="미리보기가 끝나면 「배치 확인」 없이 root 로 삭제 — 되돌릴 수 없음">
+                {`자동 실행 — 미리보기가 끝나면 확인 없이 삭제${b.auto_confirm_by ? ` (켠 사람 ${b.auto_confirm_by})` : ""}`}
+              </span>
+            ) : (
               <span className="text-accent text-sm" title="미리보기가 끝나면 「배치 확인」 없이 실행">
                 {`자동 실행${b.auto_confirm_by ? ` (켠 사람 ${b.auto_confirm_by})` : ""}`}
               </span>
-            )}
+            ))}
           </div>
           <div className="flex flex-wrap gap-2">
             {/* 라벨은 짧게 「편집」 — 무엇을 편집하는지는 폼 안 입력 라벨("배치
@@ -1032,7 +1040,7 @@ export function BatchDetail() {
             {b && terminal && <BatchExecutionSettingsDialog b={b} />}
             {(b?.status === "Completed" || b?.status === "Cancelled") && <DeleteBatchButton batchId={batchId} />}
             {/* 자동 실행 끄기(2026-10-11): 진행 중 브레이크 — 미리보기를 보고 직접 확인하겠다. 종단 배치는 「실행 설정 변경」. */}
-            {b?.operation === "sync" && b.auto_confirm === true && !terminal && (
+            {autoConfirmable(b?.operation) && b?.auto_confirm === true && !terminal && (
               <Button variant="ghost" disabled={autoOff.isPending} onClick={() => autoOff.mutate()}>자동 실행 끄기</Button>
             )}
             {(b?.status === "Running" || b?.status === "Previewing" || b?.status === "PreviewReady") && <CancelButton disabled={cancel.isPending} onClick={() => cancel.mutate()}>취소</CancelButton>}
@@ -1054,10 +1062,13 @@ export function BatchDetail() {
             : <p key={i} role="alert" className="text-bad text-sm mt-2">{(m.error as ApiError).message}</p>
         ))}
         {/* 끝난 자동 배치: 재실행·항목 추가는 미리보기 뒤 확인 없이 root 로 돈다 -- 누르기 전에 말한다(리뷰). */}
-        {b?.operation === "sync" && b.auto_confirm === true && terminal && (
-          <p className="mt-2 text-sm text-muted">
-            자동 실행이 켜져 있어 재실행하거나 항목을 추가하면 미리보기가 끝나는 즉시 「배치 확인」 없이 실행(root)됩니다 —
-            끄려면 「실행 설정 변경」에서 끄세요.
+        {autoConfirmable(b?.operation) && b?.auto_confirm === true && terminal && (
+          <p className={`mt-2 text-sm ${b.operation === "rm" ? "text-bad" : "text-muted"}`}>
+            {b.operation === "rm"
+              ? "자동 실행이 켜져 있어 재실행하거나 항목을 추가하면 미리보기가 끝나는 즉시 「배치 확인」 없이 삭제(root)됩니다 — "
+                + "되돌릴 수 없습니다. 끄려면 「실행 설정 변경」에서 끄세요."
+              : "자동 실행이 켜져 있어 재실행하거나 항목을 추가하면 미리보기가 끝나는 즉시 「배치 확인」 없이 실행(root)됩니다 — "
+                + "끄려면 「실행 설정 변경」에서 끄세요."}
           </p>
         )}
         {b?.operation === "sync" && chownHasName(String(b?.options?.chown ?? "")) && (
@@ -1069,13 +1080,19 @@ export function BatchDetail() {
         )}
         {/* sync 확인 단계 안내(2026-10-07): 미리보기 중·확인 대기는 사람이 다음에 무엇을 해야 하는지가 상태 배지만으론
             보이지 않았다. 확인 전에는 어떤 항목도 실행되지 않는다는 사실까지 말한다. */}
-        {b?.operation === "sync" && b.status === "Previewing" && b.auto_confirm === true && (
+        {autoConfirmable(b?.operation) && b?.status === "Previewing" && b.auto_confirm === true && (
           <p className="mt-2 text-sm text-muted">
-            {b.auto_confirm_hold
-              ? `항목별 미리보기(dry-run) 중입니다 — 자동 실행이 켜져 있지만 지금은 보류될 상태라, 끝나면 「배치 확인」을 `
-                + `눌러야 실행됩니다: ${reasonText(b.auto_confirm_hold)}`
-              : "항목별 미리보기(dry-run) 중입니다 — 자동 실행이 켜져 있어 끝나면 「배치 확인」 없이 바로 실행(root)됩니다. "
-                + "미리보기를 보고 직접 확인하려면 「자동 실행 끄기」를 누르세요."}
+            {b.operation === "rm"
+              ? (b.auto_confirm_hold
+                  ? `항목별 미리보기(dry-run) 중입니다 — 자동 실행이 켜져 있지만 지금은 보류될 상태라, 끝나면 「배치 확인」을 `
+                    + `눌러야 삭제됩니다: ${reasonText(b.auto_confirm_hold)}`
+                  : "항목별 미리보기(dry-run) 중입니다 — 지울 항목을 세기만 합니다. 자동 실행이 켜져 있어 끝나면 「배치 확인」 "
+                    + "없이 바로 삭제(root)됩니다. 지울 대상을 보고 직접 확인하려면 「자동 실행 끄기」를 누르세요.")
+              : b.auto_confirm_hold
+                ? `항목별 미리보기(dry-run) 중입니다 — 자동 실행이 켜져 있지만 지금은 보류될 상태라, 끝나면 「배치 확인」을 `
+                  + `눌러야 실행됩니다: ${reasonText(b.auto_confirm_hold)}`
+                : "항목별 미리보기(dry-run) 중입니다 — 자동 실행이 켜져 있어 끝나면 「배치 확인」 없이 바로 실행(root)됩니다. "
+                  + "미리보기를 보고 직접 확인하려면 「자동 실행 끄기」를 누르세요."}
             {executing > 0 && ` 이미 실행 중인 항목 ${executing}개는 끝까지 실행(root)됩니다.`}
           </p>
         )}
@@ -1111,7 +1128,9 @@ export function BatchDetail() {
           <p className="mt-2 rounded-lg bg-infobg px-3 py-2 text-sm" role="status">
             {b.auto_confirm_hold
               ? `자동 실행이 보류됐습니다 — ${reasonText(b.auto_confirm_hold)}`
-              : "미리보기가 끝났습니다 — 자동 실행이 켜져 있어 곧 「배치 확인」 없이 실행됩니다."}
+              : b.operation === "rm"
+                ? "미리보기가 끝났습니다 — 자동 실행이 켜져 있어 곧 「배치 확인」 없이 삭제됩니다."
+                : "미리보기가 끝났습니다 — 자동 실행이 켜져 있어 곧 「배치 확인」 없이 실행됩니다."}
           </p>
         )}
         {b?.status === "PreviewReady" && b.auto_confirm !== true && (

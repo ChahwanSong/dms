@@ -226,9 +226,12 @@ export function BatchesList() {
                 <td>{b.name ?? "—"}</td>
                 {/* 배치 상태 전용 색(batchPillVariant) — 상세 헤더와 동일 계약.
                     공유 pillVariant 로는 배치 상태가 전부 neutral 로 죽는다. */}
-                {/* 자동 확인 sync 배치(2026-10-11)는 같은 줄에 짧게 표시 — 확인 대기 없이 실행될 배치를 목록에서 가린다. */}
+                {/* 자동 확인 배치(sync 2026-10-11, rm 2026-10-21)는 같은 줄에 짧게 표시 — 확인 대기 없이 실행될 배치를 목록에서
+                    가린다. rm 은 확인 없이 지우는 배치라 위험색(빨강). */}
                 <td>{b.operation}{b.auto_confirm === true && (
-                  <span className="ml-1 text-xs text-accent" title="미리보기가 끝나면 「배치 확인」 없이 실행">자동</span>
+                  <span className={`ml-1 text-xs ${b.operation === "rm" ? "text-bad" : "text-accent"}`}
+                        title={b.operation === "rm" ? "미리보기가 끝나면 「배치 확인」 없이 삭제"
+                          : "미리보기가 끝나면 「배치 확인」 없이 실행"}>자동</span>
                 )}</td><td><StatusPill state={b.status} variant={batchPillVariant(b.status)} label={batchStatusLabel(b.status)}
                                  help={batchStateHelp(b.status)} /></td>
                 <td className="text-muted">{b.succeeded_count}/{b.failed_count}/{b.item_count}</td>

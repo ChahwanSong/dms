@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, StrictBool
 from ..batch_orchestrator import auto_confirm_hold, preview_files
 from ..batch_cancel import mark_cancel_reached, record_item_terminal, settle_child
-from ..domain import (DataJobState, DomainValidationError, Operation, build_data_payload,
+from ..domain import (DataJobState, DomainValidationError, Operation, auto_confirmable, build_data_payload,
                       confirm_gated, validate_batch, validate_batch_controls,
                       validate_batch_options, validate_owner_username)
 from ..execution import ExecutionError
@@ -47,18 +47,39 @@ class BatchBody(BaseModel):
     procs_per_node: int | None = None
     # 배치 특권 실행: 단건 제출(routes_requests)의 owner_username 이식. None = 비특권.
     owner_username: str | None = None
-    # sync 자동 확인(2026-10-11 사용자 결정 -- 옵션, 기본 false): true 면 미리보기가 끝나는 순간(PreviewReady)
-    # orchestrator 가 「배치 확인」을 대신한다. **명시 true 만** 켠다(run_as_root 와 같은 StrictBool -- "yes"·1 은 422),
-    # 생략·false 는 종전대로 사람이 확인한다. scan(확인 단계 없음)·rm(늘 사람 확인)은 true 면 422(auto_confirm_sync_only).
+    # 자동 확인(sync 2026-10-11, rm 2026-10-21 사용자 결정 -- 옵션, 기본 false): true 면 미리보기가 끝나는 순간
+    # (PreviewReady) orchestrator 가 「배치 확인」을 대신한다. **명시 true 만** 켠다(run_as_root 와 같은 StrictBool --
+    # "yes"·1 은 422), 생략·false 는 종전대로 사람이 확인한다. scan(확인 단계 없음)은 true 면 422(auto_confirm_sync_only).
     auto_confirm: StrictBool = False
+    # rm 자동 확인의 「되돌릴 수 없음」 동의(2026-10-21): rm 배치에서 auto_confirm 을 켤 때만 본다 -- **명시 true 만**(StrictBool,
+    # 생략·false 는 422 batch_rm_auto_confirm_ack_required). 사람의 rm 확인이 :confirm 에서 받는 동의(ConfirmBatchBody)를
+    # 켜는 순간으로 당겨 받는다 -- 켜면 그 뒤 모든 회차의 삭제를 사람이 다시 보지 않기 때문이다. sync·끈 생성은 이 키를 보지
+    # 않는다(실어도 무시).
+    acknowledge_irreversible: StrictBool | None = None
 
 
-def _check_auto_confirm_operation(operation: str, auto_confirm: bool) -> None:
-    """자동 확인은 sync 만 -- scan 은 확인 단계가 없고(켜 둔 값이 아무 일도 안 하는 거짓 설정을 받지 않는다), rm 은
-    되돌릴 수 없는 root 삭제라 늘 사람이 「배치 확인」을 누른다(2026-10-21 결정 -- 「단건은 사람이 승인」과 같은 결).
-    orchestrator(PreviewReady 분기의 sync 검사·auto_confirm_hold)가 DB 변조 행까지 두 겹으로 더 거른다."""
-    if auto_confirm and operation != Operation.SYNC.value:
+def _check_auto_confirm_enable(operation: str, acknowledge_irreversible: bool | None) -> None:
+    """자동 확인을 **켜는** 요청(생성 auto_confirm true, 실행 설정 변경의 꺼짐 → 켜짐)의 연산 검사 -- 켜는 두 라우트가 이
+    함수 하나를 쓴다.
+
+    연산은 domain.auto_confirmable(sync·rm 명시 집합): scan 은 확인 단계가 없어 켜 둔 값이 아무 일도 안 하는 거짓 설정이라
+    422. 코드 이름 auto_confirm_sync_only 는 rm 추가(2026-10-21) 전의 이름이다 -- 롤링 배포 중 옛 포탈 탭·스크립트가 읽는
+    계약이라 바꾸지 않고 문구만 「sync·rm 만」으로 고쳤다.
+
+    rm(2026-10-21 사용자 요청 -- 같은 날 앞서 정한 「rm 은 늘 사람 확인」을 사용자가 뒤집었다): 「되돌릴 수 없음」 동의가 본문에
+    명시 true 로 있어야 켠다(422 batch_rm_auto_confirm_ack_required). 사람이 rm 배치를 확인할 때마다 받던 동의
+    (confirm_batch 의 batch_rm_confirm_ack_required)를 켜는 순간에 한 번 받는 것이다 -- 서버가 보는 이유도 같다: 그 체크는
+    새 포탈에만 있다. orchestrator(PreviewReady 분기·auto_confirm_hold)가 같은 술어로 DB 변조 행까지 더 거른다."""
+    if not auto_confirmable(operation):
         raise HTTPException(status_code=422, detail="auto_confirm_sync_only")
+    if operation == Operation.RM.value and acknowledge_irreversible is not True:
+        raise HTTPException(status_code=422, detail="batch_rm_auto_confirm_ack_required")
+
+
+def _auto_confirm_audit(operation: str) -> dict | None:
+    """켤 때 감사 행 after 에 덧붙일 사실 -- rm 은 「되돌릴 수 없음」 동의(_check_auto_confirm_enable 이 방금 True 를
+    확인했다). sync 는 덧붙일 것이 없다."""
+    return {"acknowledged_irreversible": True} if operation == Operation.RM.value else None
 
 
 def _require_batch_privilege(request: Request, identity: Identity) -> None:
@@ -102,7 +123,8 @@ def create_batch(body: BatchBody, request: Request, identity: Identity = Depends
             build_data_payload(body.operation, options=body.options, **item)
     except (DomainValidationError, TypeError) as e:
         raise HTTPException(status_code=422, detail=getattr(e, "reason_code", "invalid_batch"))
-    _check_auto_confirm_operation(body.operation, body.auto_confirm)
+    if body.auto_confirm:
+        _check_auto_confirm_enable(body.operation, body.acknowledge_irreversible)
     status = "Previewing" if confirm_gated(body.operation) else "Running"
     bid = request.app.state.repos.batches.create(
         operation=body.operation, requester_id=identity.actor, actor=identity.actor,
@@ -114,8 +136,9 @@ def create_batch(body: BatchBody, request: Request, identity: Identity = Depends
         # 자식 request 가 물려받는다(orchestrator._materialize).
         owner_username=owner, auth_method=identity.auth,
         # 자동 확인은 켠 사람으로 남긴다 -- 확인 직전 그 사람의 자격을 다시 본다(batch_orchestrator.auto_confirm_hold).
-        # 이 줄에 오기 전에 특권 3중 게이트(세션 포함)를 통과했다.
-        auto_confirm_by=identity.actor if body.auto_confirm else None)
+        # 이 줄에 오기 전에 특권 3중 게이트(세션 포함)를 통과했다. 켰으면 같은 트랜잭션에 감사 행(auto_confirm_on, rm 은 동의).
+        auto_confirm_by=identity.actor if body.auto_confirm else None,
+        auto_confirm_audit=_auto_confirm_audit(body.operation) if body.auto_confirm else None)
     return {"batch_id": bid, "status": status}
 
 
@@ -168,9 +191,12 @@ class BatchExecutionBody(BaseModel):
     node_count: int | None = None
     procs_per_node: int | None = None
     options: dict | None = None
-    # sync 자동 확인 켜기·끄기(2026-10-11). null 은 뜻이 없어 422(options 와 같다). 켜면 켠 사람이 이 요청의 관리자로
-    # 바뀌지 않고 처음 켠 사람이 남는다(이미 켜져 있으면 변경 없음).
+    # 자동 확인 켜기·끄기(sync 2026-10-11, rm 2026-10-21). null 은 뜻이 없어 422(options 와 같다). 이미 켜져 있으면 변경
+    # 없음(켠 사람이 이 요청의 관리자로 바뀌지 않고 처음 켠 사람이 남는다).
     auto_confirm: StrictBool | None = None
+    # rm 배치의 꺼짐 → 켜짐에만 필요한 「되돌릴 수 없음」 동의(BatchBody 와 같은 계약 -- 명시 true 만). 끄기·이미 켜짐·sync 는
+    # 보지 않는다.
+    acknowledge_irreversible: StrictBool | None = None
 
 
 @router.patch("/api/admin/batches/{batch_id}/execution")
@@ -184,8 +210,9 @@ def patch_batch_execution(batch_id: str, body: BatchExecutionBody, request: Requ
     자식부터 그대로 적용되고, 이미 끝난 항목의 기록(자식 요청 payload)은 옛값 그대로 남는다(기록 위조 아님).
     활성·PreviewReady(자식 ConfirmPending 이 옛 옵션으로 미리보기를 끝냈다)는 409 batch_settings_locked -- 취소 후
     바꾸는 것이 동선이다. 바꿀 수 없는 것: 실행 신원(owner_username)·연산·항목(항목은 항목 편집 라우트 몫).
-    sync 자동 확인(auto_confirm, 2026-10-11)도 여기서 켜고 끈다 -- 켜기는 이 특권 게이트를 통과한 관리자만(켠 사람으로
-    남는다), 진행 중에 끄기만은 :auto-confirm-off(어느 상태에서나).
+    자동 확인(auto_confirm -- sync 2026-10-11, rm 2026-10-21)도 여기서 켜고 끈다 -- 켜기는 이 특권 게이트를 통과한 관리자만
+    (켠 사람으로 남는다, rm 은 「되돌릴 수 없음」 동의까지 -- 감사 행 after 에 남는다), 진행 중에 끄기만은
+    :auto-confirm-off(어느 상태에서나).
 
     특권: 생성과 같은 3중 게이트(_require_batch_privilege). 검증: 생성과 같은 규칙(validate_batch_controls +
     validate_batch_options -- rm 은 recursive 동의까지) -- 옛 규칙의 옵션(이름 chown 등)이 남은 배치도 여기서 고치면
@@ -200,10 +227,15 @@ def patch_batch_execution(batch_id: str, body: BatchExecutionBody, request: Requ
     sent = body.model_dump(exclude_unset=True)
     if "options" in sent and sent["options"] is None:
         raise HTTPException(status_code=422, detail="invalid_option")
+    turning_on = False
     if "auto_confirm" in sent:
         if sent["auto_confirm"] is None:
             raise HTTPException(status_code=422, detail="invalid_option")
-        _check_auto_confirm_operation(b["operation"], sent["auto_confirm"])
+        # 검사는 실제로 켤 때(꺼짐 → 켜짐)만 한다: 이미 켜진 배치에 true 를 다시 실은 요청은 아무것도 켜지 않는다(아래
+        # changed 에도 들어가지 않는다) -- rm 은 켤 때 이미 동의를 받았다.
+        turning_on = sent["auto_confirm"] is True and b["auto_confirm"] is not True
+        if turning_on:
+            _check_auto_confirm_enable(b["operation"], body.acknowledge_irreversible)
     merged = {k: (sent[k] if k in sent else b[k]) for k in _EXECUTION_SETTINGS}
     try:
         # 보내지 않은 키도 DB 값으로 다시 검증한다(DB 가 신뢰 경계) -- 결과로 남을 설정 전체가 지금 규칙에 맞아야 한다.
@@ -218,7 +250,8 @@ def patch_batch_execution(batch_id: str, body: BatchExecutionBody, request: Requ
         # 켜면 켠 사람(특권 게이트를 통과한 이 세션 관리자 -- 확인 직전 이 사람의 자격을 다시 본다), 끄면 NULL.
         changed["auto_confirm_by"] = identity.actor if sent["auto_confirm"] else None
     if changed and not repo.update_execution_settings(
-            batch_id, changed, before={k: b[k] for k in changed}, actor=identity.actor):
+            batch_id, changed, before={k: b[k] for k in changed}, actor=identity.actor,
+            audit_extra=_auto_confirm_audit(b["operation"]) if turning_on else None):
         # 위에서 종단을 봤는데 가드가 0 행 = 그 사이 재실행이 시작됐다(또는 동시 삭제의 극소 창).
         raise HTTPException(status_code=409, detail="batch_settings_locked")
     return repo.get(batch_id)
@@ -254,7 +287,7 @@ def get_batch(batch_id: str, request: Request, identity: Identity = Depends(requ
     # 화면용 상세 조인(request_state/files_count/completed_at) — 실행 루프가 쓰는
     # list_items 와 분리돼 있다(repo docstring 참고).
     b["items"] = repo.list_items_detail(batch_id)
-    # 자동 확인이 켜진 진행 중 sync 배치가 지금 확인하면 보류될 사유(없으면 null) -- orchestrator 와 같은 술어라 화면이
+    # 자동 확인이 켜진 진행 중 sync·rm 배치가 지금 확인하면 보류될 사유(없으면 null) -- orchestrator 와 같은 술어라 화면이
     # 「곧 자동 실행」과 「보류 — 직접 확인 필요」를 실제 동작대로 말한다. 꺼졌거나 끝난 배치는 null(판정할 확인이 없다).
     b["auto_confirm_hold"] = (auto_confirm_hold(request.app.state.repos, request.app.state.settings, b)
                               if b["auto_confirm"] and b["status"] in ("Previewing", "PreviewReady") else None)
@@ -264,7 +297,7 @@ def get_batch(batch_id: str, request: Request, identity: Identity = Depends(requ
 @router.post("/api/admin/batches/{batch_id}:auto-confirm-off")
 def disable_batch_auto_confirm(batch_id: str, request: Request,
                                identity: Identity = Depends(require_admin)):
-    """sync 자동 확인 끄기(2026-10-11) -- 어느 상태에서나. 미리보기 중에 "결과를 보고 직접 확인하겠다" 는 브레이크라
+    """자동 확인 끄기(sync 2026-10-11, rm 2026-10-21) -- 어느 상태에서나. 미리보기 중에 "결과를 보고 직접 확인하겠다" 는 브레이크라
     진행 중에 쓸 수 있어야 한다(켜기는 생성·실행 설정 변경 -- 특권 게이트·종단 한정). 실행을 줄이기만 하는 라우트라
     require_admin 그대로다(항목 삭제·취소와 같은 블록 주석의 규칙). 유지보수 중에도 받는다 -- 취소처럼 멈추는 쪽의
     동작이다. 이미 꺼져 있으면 아무것도 쓰지 않고 지금 배치를 돌려준다(멱등). 이미 확인된 회차(Running)는 되돌리지

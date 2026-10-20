@@ -268,5 +268,6 @@
   "auto_confirm_sync_only",
   "auto_confirm_not_privileged",
   "auto_confirm_not_admin",
-  "auto_confirm_privileged_disabled"
+  "auto_confirm_privileged_disabled",
+  "batch_rm_auto_confirm_ack_required"
 ]

@@ -1,8 +1,10 @@
-"""sync 배치 자동 확인(2026-10-11 사용자 결정 -- "단일 sync 는 승인 필요, 배치 sync 는 자동 승인을 옵션으로(기본 false)",
-자격 = 특권 세션 관리자만).
+"""배치 자동 확인(2026-10-11 사용자 결정 -- "단일 sync 는 승인 필요, 배치 sync 는 자동 승인을 옵션으로(기본 false)",
+자격 = 특권 세션 관리자만; rm 은 2026-10-21 사용자 요청 「Rm 배치작업에서 sync와 마찬가지로 … 자동 확인 하는 옵션」).
 
-1) 켜기: 생성(특권 3중 게이트) 또는 종단 배치의 실행 설정 변경에서만 -- 명시 true 만(StrictBool), sync 만. 켠 사람이
-   auto_confirm_by 로 남는다. 끄기: :auto-confirm-off(어느 상태에서나, require_admin -- 실행을 줄이기만 한다).
+1) 켜기: 생성(특권 3중 게이트) 또는 종단 배치의 실행 설정 변경에서만 -- 명시 true 만(StrictBool), sync·rm 만
+   (domain.auto_confirmable). rm 은 「되돌릴 수 없음」 동의(acknowledge_irreversible: true)까지 -- 없으면 422
+   batch_rm_auto_confirm_ack_required. 켠 사람이 auto_confirm_by 로 남고 감사 행(생성: auto_confirm_on, 실행 설정:
+   execution_settings)에 rm 동의가 남는다. 끄기: :auto-confirm-off(어느 상태에서나, require_admin -- 실행을 줄이기만 한다).
 2) 동작: PreviewReady 에서 orchestrator 가 사람의 「배치 확인」과 **같은 저장소 함수**(회차·Queued CAS + 도장 + 감사)를
    부른다. 도장·Running 분기 규칙은 그대로라 확인은 여전히 그 회차의 미리보기 전부를 대표한다.
 3) 보류: 확인 직전 켠 사람이 특권 목록 밖·비관리자·비활성이거나 옵션이 지금 규칙에 어긋나면 확인 대기에 남는다(사람이
@@ -15,12 +17,14 @@ from fastapi.testclient import TestClient
 
 from dms.batch_orchestrator import AUTO_CONFIRM_ACTOR, BatchOrchestrator, auto_confirm_hold
 from dms.config import Settings
-from dms.domain import DataJobState, RequestState
+from dms.domain import DataJobState, RequestState, auto_confirmable
 from dms.repositories import Repositories
 
 TOKEN = {"Authorization": "Bearer tok-shared"}
 SYNC_ITEM = {"source_storage": "s1", "source": "a", "destination_storage": "s2", "destination": "b"}
 SCAN_ITEM = {"storage": "s1", "target": "a"}
+RM_ITEM = {"storage": "s1", "target": "old"}
+RM_OPTIONS = {"recursive": True}
 
 
 class _S:
@@ -55,10 +59,12 @@ def _ops(repos, role="admin"):
 
 
 def _batch(repos, *, status="PreviewReady", auto_by="ops", n=1, op="sync", options=None):
-    item = SYNC_ITEM if op == "sync" else SCAN_ITEM
+    item = {"sync": SYNC_ITEM, "rm": RM_ITEM}.get(op, SCAN_ITEM)
     items = [{**item, ("destination" if op == "sync" else "target"): f"d{i}"} for i in range(n)]
+    if options is None:
+        options = RM_OPTIONS if op == "rm" else {}
     return repos.batches.create(operation=op, requester_id="ops", actor="ops", max_concurrency=2,
-                                options=options or {}, items=items, note=None, status=status,
+                                options=options, items=items, note=None, status=status,
                                 auth_method="session", auto_confirm_by=auto_by)
 
 
@@ -74,6 +80,24 @@ def _confirmpending_child(repos, bid, seq=0, fp="sha256:fp", expires="2099-01-01
                                      tool="dsync", worker_pool={}, precondition={}, actor="planner")
     repos.data_jobs.set_preview(jid, fingerprint=fp, expires_at=expires, artifact_uri="x",
                                 summary={"files": 42, "bytes": None, "returncode": 0})
+    repos.data_jobs.set_job_state(jid, DataJobState.CONFIRM_PENDING, actor="stepper")
+    return rid, jid
+
+
+def _rm_confirmpending_child(repos, bid, seq=0, fp="sha256:rm", files=6, expires="2099-01-01T00:00:00Z"):
+    """rm 배치 항목 seq 의 자식을 drm --dryrun 미리보기 완료(ConfirmPending)로 만든다(files = 지울 항목 수)."""
+    target = repos.batches.get_item(bid, seq)["payload"]["target"]
+    rid = repos.requests.create(operation="rm", requester_id="ops", actor="ops", resource_key=f"k-{bid}-{seq}",
+                                payload={"storage": "s1", "target": target, "options": dict(RM_OPTIONS)},
+                                priority="mid", batch_id=bid, auth_method="session")
+    repos.batches.set_item_materialized(bid, seq, rid)
+    repos.requests.set_state(rid, RequestState.PLANNED, actor="planner")
+    plan = repos.data_jobs.create_plan(rid, actor="planner")
+    jid = repos.data_jobs.create_job(rid, plan, operation="rm", priority="mid", storage_name="s1", target=target,
+                                     options=dict(RM_OPTIONS), tool="drm", worker_pool={}, precondition={},
+                                     actor="planner")
+    repos.data_jobs.set_preview(jid, fingerprint=fp, expires_at=expires, artifact_uri="x",
+                                summary={"files": files, "bytes": None, "returncode": 0})
     repos.data_jobs.set_job_state(jid, DataJobState.CONFIRM_PENDING, actor="stepper")
     return rid, jid
 
@@ -446,60 +470,245 @@ def test_batch_detail_reports_the_hold_with_the_same_predicate(db):
     assert client.get(f"/api/admin/batches/{off}", headers=TOKEN).json()["auto_confirm_hold"] is None
 
 
-def test_rm_batches_never_turn_auto_confirm_on(db):
-    # rm 은 되돌릴 수 없는 root 삭제라 늘 사람이 「배치 확인」을 누른다(2026-10-21 결정) -- 생성·실행 설정 변경 모두 422.
+def test_auto_confirmable_is_an_explicit_set():
+    # 켜는 라우트·PreviewReady 분기·auto_confirm_hold 가 같은 술어를 쓴다. 명시 집합이라 미지 연산(DB 변조)은 자동 확인하지
+    # 않는다 -- 확인 게이트(confirm_gated, 미지 연산도 게이트 쪽)와 같은 fail-closed 결론: 모르는 것은 사람이 누른다.
+    assert auto_confirmable("sync") and auto_confirmable("rm")
+    for op in ("scan", "mv", "", None, "SYNC", "rm "):
+        assert not auto_confirmable(op), op
+
+
+def test_rm_create_needs_an_explicit_irreversible_ack_to_turn_auto_confirm_on(db):
+    # 2026-10-21 사용자 요청: rm 배치도 자동 확인을 켤 수 있다 -- 같은 특권 3중 게이트 + 「되돌릴 수 없음」 동의(명시 true 만).
+    client = TestClient(_app(db))
+    _login(client, "ops")
+    rm = {"operation": "rm", "max_concurrency": 1, "options": dict(RM_OPTIONS), "items": [RM_ITEM]}
+    for ack in ({}, {"acknowledge_irreversible": False}, {"acknowledge_irreversible": None}):
+        r = client.post("/api/admin/batches", json={**rm, "auto_confirm": True, **ack})
+        assert r.status_code == 422 and r.json()["detail"] == "batch_rm_auto_confirm_ack_required", (ack, r.text)
+    for bad in ("yes", 1, "true"):                                      # 모양 오류(StrictBool) -- 동의로 읽지 않는다
+        r = client.post("/api/admin/batches", json={**rm, "auto_confirm": True, "acknowledge_irreversible": bad})
+        assert r.status_code == 422, (bad, r.text)
+    assert db.query("SELECT COUNT(*) AS n FROM batches")[0]["n"] == 0
+    r = client.post("/api/admin/batches", json={**rm, "auto_confirm": True, "acknowledge_irreversible": True})
+    assert r.status_code == 202 and r.json()["status"] == "Previewing", r.text
+    b = client.get(f"/api/admin/batches/{r.json()['batch_id']}").json()
+    assert (b["auto_confirm"], b["auto_confirm_by"], b["auto_confirm_hold"]) == (True, "ops", None)
+    rows = _audit(db, "auto_confirm_on")
+    assert len(rows) == 1 and rows[0]["actor"] == "ops" and rows[0]["target_key"] == b["batch_id"]
+    assert json.loads(rows[0]["after_state"]) == {"auto_confirm_by": "ops", "operation": "rm",
+                                                  "acknowledged_irreversible": True}
+    # 끈 rm 생성은 동의를 보지 않는다(종전 본문 그대로), 감사 행도 없다
+    r = client.post("/api/admin/batches", json={**rm, "auto_confirm": False})
+    assert r.status_code == 202 and len(_audit(db, "auto_confirm_on")) == 1
+
+
+def test_sync_create_with_auto_confirm_is_audited_without_an_ack(db):
+    # 생성에서 켠 자동 확인도 감사 행으로 남는다(2026-10-21) -- sync 는 동의 키가 없다(동의를 받지 않는다).
+    client = TestClient(_app(db))
+    _login(client, "ops")
+    r = client.post("/api/admin/batches", json={"operation": "sync", "max_concurrency": 1, "items": [SYNC_ITEM],
+                                                 "auto_confirm": True})
+    assert r.status_code == 202, r.text
+    rows = _audit(db, "auto_confirm_on")
+    assert len(rows) == 1 and json.loads(rows[0]["after_state"]) == {"auto_confirm_by": "ops", "operation": "sync"}
+
+
+def test_rm_execution_settings_turn_auto_confirm_on_only_with_the_ack(db):
+    client = TestClient(_app(db))
+    _login(client, "ops")
+    repos = client.app.state.repos
+    bid = _batch(repos, op="rm", status="Completed", auto_by=None)
+    r = client.patch(f"/api/admin/batches/{bid}/execution", json={"auto_confirm": True})
+    assert r.status_code == 422 and r.json()["detail"] == "batch_rm_auto_confirm_ack_required"
+    r = client.patch(f"/api/admin/batches/{bid}/execution",
+                     json={"auto_confirm": True, "acknowledge_irreversible": False})
+    assert r.status_code == 422 and r.json()["detail"] == "batch_rm_auto_confirm_ack_required"
+    assert repos.batches.get(bid)["auto_confirm_by"] is None and _audit(db, "execution_settings") == []
+    r = client.patch(f"/api/admin/batches/{bid}/execution",
+                     json={"auto_confirm": True, "acknowledge_irreversible": True})
+    assert r.status_code == 200 and (r.json()["auto_confirm"], r.json()["auto_confirm_by"]) == (True, "ops")
+    rows = _audit(db, "execution_settings")
+    assert len(rows) == 1
+    assert json.loads(rows[0]["after_state"]) == {"auto_confirm_by": "ops", "acknowledged_irreversible": True}
+    assert json.loads(rows[0]["before_state"]) == {"auto_confirm_by": None}
+    # 이미 켜진 배치에 true 를 다시 실은 저장(다른 설정과 함께)은 아무것도 켜지 않는다 -- 동의를 다시 묻지 않는다.
+    r = client.patch(f"/api/admin/batches/{bid}/execution", json={"auto_confirm": True, "max_concurrency": 3})
+    assert r.status_code == 200 and r.json()["max_concurrency"] == 3 and r.json()["auto_confirm_by"] == "ops"
+    assert json.loads(_audit(db, "execution_settings")[1]["after_state"]) == {"max_concurrency": 3}
+    # 끄기는 동의가 필요 없다(실행을 줄이기만 한다)
+    r = client.patch(f"/api/admin/batches/{bid}/execution", json={"auto_confirm": False})
+    assert r.status_code == 200 and r.json()["auto_confirm"] is False
+    # 다시 켜는 것은 다시 동의가 필요하다(지난 동의는 그 켜짐에 묶였다)
+    r = client.patch(f"/api/admin/batches/{bid}/execution", json={"auto_confirm": True})
+    assert r.status_code == 422 and r.json()["detail"] == "batch_rm_auto_confirm_ack_required"
+
+
+def test_rm_auto_confirm_keeps_the_privilege_gate_and_the_off_switch(db):
     client = TestClient(_app(db))
     repos = client.app.state.repos
-    _login(client, "ops")
-    rm = {"operation": "rm", "max_concurrency": 1, "options": {"recursive": True},
-          "items": [{"storage": "s1", "target": "old"}]}
-    r = client.post("/api/admin/batches", json={**rm, "auto_confirm": True})
-    assert r.status_code == 422 and r.json()["detail"] == "auto_confirm_sync_only"
-    bid = client.post("/api/admin/batches", json={**rm, "auto_confirm": False}).json()["batch_id"]
-    repos.batches.set_item_status(bid, 0, "Succeeded")
-    repos.batches.set_status(bid, "Completed")
-    r = client.patch(f"/api/admin/batches/{bid}/execution", json={"auto_confirm": True})
-    assert r.status_code == 422 and r.json()["detail"] == "auto_confirm_sync_only"
-    assert db.query("SELECT COUNT(*) AS n FROM batches WHERE auto_confirm_by IS NOT NULL")[0]["n"] == 0
+    _ops(repos)
+    rm = {"operation": "rm", "max_concurrency": 1, "options": dict(RM_OPTIONS), "items": [RM_ITEM],
+          "auto_confirm": True, "acknowledge_irreversible": True}
+    r = client.post("/api/admin/batches", json=rm, headers=TOKEN)        # 공유 토큰은 켤 수 없다(세션 조건)
+    assert r.status_code == 403 and r.json()["detail"] == "privileged_not_authorized"
+    _login(client, "other")                                               # 관리자지만 특권 목록 밖
+    r = client.post("/api/admin/batches", json=rm)
+    assert r.status_code == 403 and r.json()["detail"] == "privileged_not_authorized"
+    assert db.query("SELECT COUNT(*) AS n FROM batches")[0]["n"] == 0
+    bid = _batch(repos, op="rm", status="Previewing")
+    r = client.post(f"/api/admin/batches/{bid}:auto-confirm-off", headers=TOKEN)   # 끄기는 누구든(require_admin)
+    assert r.status_code == 200 and r.json()["auto_confirm"] is False
+    assert json.loads(_audit(db, "auto_confirm_off")[0]["before_state"]) == {"auto_confirm_by": "ops"}
 
 
-def test_a_forged_rm_row_with_auto_confirm_is_not_confirmed_by_the_loop(db):
-    # DB 가 신뢰 경계 -- rm 배치 행에 auto_confirm_by 를 직접 써도 루프는 확인하지 않는다(PreviewReady 분기의 sync 검사 +
-    # auto_confirm_hold 두 겹). 확인 대기에 그대로 남고, 감사 행·도장·실행 없음.
+def test_previewready_rm_auto_batch_is_confirmed_by_the_same_gate_and_stamped(db):
+    # rm 자동 확인은 사람의 rm 확인과 같은 저장소 함수(회차·Queued CAS + 도장 + 감사) -- 감사 actor system:auto-confirm,
+    # 확인한 지울 항목 수(files_total)까지 같은 키. 동의는 루프가 본 적이 없어 싣지 않는다(켤 때의 감사 행에 있다).
     repos = Repositories(db)
     _ops(repos)
-    bid = repos.batches.create(operation="rm", requester_id="ops", actor="ops", max_concurrency=2,
-                               options={"recursive": True}, items=[{"storage": "s1", "target": "old"}], note=None,
-                               status="PreviewReady", auth_method="session", auto_confirm_by="ops")
-    rid = repos.requests.create(operation="rm", requester_id="ops", actor="ops", resource_key=f"k-{bid}",
-                                payload={"storage": "s1", "target": "old", "options": {"recursive": True}},
-                                priority="mid", batch_id=bid, auth_method="session")
-    repos.batches.set_item_materialized(bid, 0, rid)
-    plan = repos.data_jobs.create_plan(rid, actor="planner")
-    jid = repos.data_jobs.create_job(rid, plan, operation="rm", priority="mid", storage_name="s1", target="old",
-                                     options={"recursive": True}, tool="drm", worker_pool={}, precondition={},
-                                     actor="planner")
-    repos.data_jobs.set_preview(jid, fingerprint="sha256:rm", expires_at="2099-01-01T00:00:00Z", artifact_uri="x",
-                                summary={"files": 6, "bytes": None, "returncode": 0})
-    repos.data_jobs.set_job_state(jid, DataJobState.CONFIRM_PENDING, actor="stepper")
-    assert auto_confirm_hold(repos, _S(), repos.batches.get(bid)) == "auto_confirm_sync_only"
+    bid = _batch(repos, op="rm", n=2)
+    _rid, j0 = _rm_confirmpending_child(repos, bid, 0, files=5)
+    _rid, j1 = _rm_confirmpending_child(repos, bid, 1, fp="sha256:rm1", files=2)
+    orch = BatchOrchestrator(repos, settings=_S())
+    orch.run_once()
+    assert repos.batches.get(bid)["status"] == "Running"
+    assert repos.data_jobs.get_job(j0)["confirmed_fingerprint"] == "sha256:rm"
+    assert repos.data_jobs.get_job(j1)["confirmed_fingerprint"] == "sha256:rm1"
+    rows = _audit(db, "confirm")
+    assert len(rows) == 1 and rows[0]["actor"] == AUTO_CONFIRM_ACTOR and rows[0]["target_key"] == bid
+    after = json.loads(rows[0]["after_state"])
+    assert (after["files_total"], after["files_unknown"], after["stamped"]) == (7, 0, 2)
+    assert after["auto_confirm_by"] == "ops" and after["options"] == RM_OPTIONS
+    assert "acknowledged_irreversible" not in after
+    assert [e["severity"] for e in _events(db, "batch_auto_confirmed")] == ["info"]
+    orch.run_once()                                                     # 다음 틱: 확인 게이트 Running 분기가 실행
+    assert {repos.data_jobs.get_job(j)["state"] for j in (j0, j1)} == {DataJobState.EXECUTING.value}
+
+
+def test_rm_full_cycle_previewing_to_execution_without_a_human(db):
+    repos = Repositories(db)
+    _ops(repos)
+    bid = _batch(repos, op="rm", status="Previewing")
+    _rid, jid = _rm_confirmpending_child(repos, bid, 0)
+    orch = BatchOrchestrator(repos, settings=_S())
+    orch.run_once()
+    b = repos.batches.get(bid)
+    assert (b["status"], b["preview_round"]) == ("PreviewReady", 1)
+    orch.run_once()
+    assert repos.batches.get(bid)["status"] == "Running"
+    orch.run_once()
+    assert repos.data_jobs.get_job(jid)["state"] == DataJobState.EXECUTING.value
+
+
+def test_rm_batch_without_auto_confirm_still_waits_for_a_human(db):
+    # 끈 rm 배치(기본) -- auto_confirm_by 가 없는 행은 몇 틱이 지나도 확인 대기 그대로(도장·감사·실행 없음).
+    repos = Repositories(db)
+    _ops(repos)
+    bid = _batch(repos, op="rm", auto_by=None)
+    _rid, jid = _rm_confirmpending_child(repos, bid, 0)
     for _ in range(3):
         BatchOrchestrator(repos, settings=_S()).run_once()
     assert repos.batches.get(bid)["status"] == "PreviewReady"
     job = repos.data_jobs.get_job(jid)
-    assert job["state"] == "ConfirmPending" and job["confirmed_fingerprint"] is None
+    assert job["state"] == DataJobState.CONFIRM_PENDING.value and job["confirmed_fingerprint"] is None
     assert _audit(db, "confirm") == []
 
 
+def test_rm_auto_confirm_is_held_like_sync_and_a_human_can_still_confirm(db):
+    # 보류 의미는 sync 와 같다: 켠 사람이 특권 목록 밖이면 확인 대기에 남고, 사람은 여전히 rm 확인(동의 포함)으로 실행한다.
+    class Off(_S):
+        privileged_requesters = frozenset({"someone-else"})
+    client = TestClient(_app(db))
+    _login(client, "ops")
+    repos = client.app.state.repos
+    bid = _batch(repos, op="rm")
+    _rid, jid = _rm_confirmpending_child(repos, bid, 0)
+    for _ in range(2):
+        BatchOrchestrator(repos, settings=Off()).run_once()
+    assert repos.batches.get(bid)["status"] == "PreviewReady"
+    assert repos.data_jobs.get_job(jid)["confirmed_fingerprint"] is None
+    assert auto_confirm_hold(repos, Off(), repos.batches.get(bid)) == "auto_confirm_not_privileged"
+    assert len(_events(db, "batch_auto_confirm_held")) == 1
+    r = client.post(f"/api/admin/batches/{bid}:confirm", json={"preview_round": 0})      # 사람도 동의 없이는 안 된다
+    assert r.status_code == 422 and r.json()["detail"] == "batch_rm_confirm_ack_required"
+    r = client.post(f"/api/admin/batches/{bid}:confirm", json={"preview_round": 0, "acknowledge_irreversible": True})
+    assert r.status_code == 200, r.text
+    assert _audit(db, "confirm")[0]["actor"] == "ops"
+
+
+def test_rm_auto_confirm_is_held_when_the_recursive_consent_is_gone(db):
+    # 옵션 재검증은 사람의 확인(_reject_stale_options)과 같은 함수(validate_batch_options) -- rm 의 recursive 동의까지 본다.
+    repos = Repositories(db)
+    _ops(repos)
+    bid = _batch(repos, op="rm", options={})
+    _rm_confirmpending_child(repos, bid, 0)
+    for _ in range(2):
+        BatchOrchestrator(repos, settings=_S()).run_once()
+    assert repos.batches.get(bid)["status"] == "PreviewReady" and _audit(db, "confirm") == []
+    assert auto_confirm_hold(repos, _S(), repos.batches.get(bid)) == "rm_recursive_required"
+    assert len(_events(db, "batch_auto_confirm_held")) == 1
+
+
+def test_rm_re_review_after_adding_an_item_is_auto_confirmed_again(db):
+    # sync 와 같은 재검토: 항목 추가(특권 게이트)로 Previewing 에 돌아간 rm 자동 배치는 새 회차가 확인 대기가 되면 다시 자동
+    # 확인되고, 새 미리보기는 새 도장을 받아야 실행된다.
+    client = TestClient(_app(db))
+    _login(client, "ops")
+    repos = client.app.state.repos
+    bid = _batch(repos, op="rm")
+    _rm_confirmpending_child(repos, bid, 0)
+    orch = BatchOrchestrator(repos, settings=_S())
+    orch.run_once()
+    assert repos.batches.get(bid)["status"] == "Running"
+    r = client.post(f"/api/admin/batches/{bid}/items", json={"storage": "s1", "target": "other"})
+    assert r.status_code == 202 and r.json()["status"] == "Previewing", r.text
+    seq = max(i["seq"] for i in repos.batches.list_items(bid))
+    _rid2, jid2 = _rm_confirmpending_child(repos, bid, seq, fp="sha256:rm2")
+    orch.run_once()                                                     # Previewing → PreviewReady(회차 +1)
+    orch.run_once()                                                     # 자동 확인
+    assert repos.batches.get(bid)["status"] == "Running"
+    assert repos.data_jobs.get_job(jid2)["confirmed_fingerprint"] == "sha256:rm2"
+    assert [json.loads(r["after_state"])["preview_round"] for r in _audit(db, "confirm")] == [0, 1]
+
+
+def test_rm_auto_confirm_never_runs_an_expired_preview(db):
+    # 자동 확인은 도장만 찍는다 -- 만료된 미리보기는 Running 분기가 컨펌하지 않는다(사람 확인과 같은 규칙, stepper 가 거부).
+    repos = Repositories(db)
+    _ops(repos)
+    bid = _batch(repos, op="rm")
+    _rid, jid = _rm_confirmpending_child(repos, bid, 0, expires="2000-01-01T00:00:00Z")
+    orch = BatchOrchestrator(repos, settings=_S())
+    orch.run_once()
+    assert repos.batches.get(bid)["status"] == "Running"
+    orch.run_once()
+    assert repos.data_jobs.get_job(jid)["state"] == DataJobState.CONFIRM_PENDING.value
+
+
+def test_a_forged_unknown_operation_row_with_auto_confirm_is_never_confirmed(db):
+    # DB 가 신뢰 경계 -- 미지 연산 행에 auto_confirm_by 를 써 넣어도 PreviewReady 분기·auto_confirm_hold 둘 다 거른다.
+    repos = Repositories(db)
+    _ops(repos)
+    bid = repos.batches.create(operation="mv", requester_id="ops", actor="ops", max_concurrency=1, options={},
+                               items=[RM_ITEM], note=None, status="PreviewReady", auth_method="session",
+                               auto_confirm_by="ops")
+    _rm_confirmpending_child(repos, bid, 0)
+    assert auto_confirm_hold(repos, _S(), repos.batches.get(bid)) == "auto_confirm_sync_only"
+    for _ in range(3):
+        BatchOrchestrator(repos, settings=_S()).run_once()
+    assert repos.batches.get(bid)["status"] == "PreviewReady"
+    assert _audit(db, "confirm") == [] and _events(db, "batch_auto_confirmed") == []
+
+
 def test_a_forged_scan_row_with_auto_confirm_is_not_confirmed(db):
-    # DB 가 신뢰 경계 -- scan 배치 행에 auto_confirm_by 를 직접 써도 확인 경로가 없다(확인 단계 자체가 sync 만).
+    # DB 가 신뢰 경계 -- scan 배치 행에 auto_confirm_by 를 직접 써도 확인 경로가 없다(scan 은 확인 단계가 없다).
     repos = Repositories(db)
     _ops(repos)
     bid = _batch(repos, op="scan", status="Running")
     assert auto_confirm_hold(repos, _S(), repos.batches.get(bid)) == "auto_confirm_sync_only"
 
 
-# --- 4) 단건 sync 는 그대로 사람이 컨펌한다 ---------------------------------------------------------------------------
+# --- 4) 단건 sync·rm 은 그대로 사람이 컨펌한다 ------------------------------------------------------------------------
 
 def test_single_sync_job_is_never_auto_confirmed_by_the_orchestrator(db):
     repos = Repositories(db)

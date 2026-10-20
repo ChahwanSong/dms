@@ -111,7 +111,8 @@ def _apply_migrations(db: Database) -> None:
             -- 확인 대기 → 다시 미리보기 → 확인 대기(ABA) 사이에 생긴, 운영자가 보지 않은 항목까지 확인되지
             -- 않게. NULL(구형 행·한 번도 확인 대기가 안 된 배치) = 0회차(repo 가 읽을 때 0 으로 접는다).
             preview_round INTEGER,
-            -- sync 배치 자동 확인(2026-10-11): 켠 특권 세션 관리자 이름. NULL = 꺼짐(기본, 사람이 「배치 확인」).
+            -- 배치 자동 확인(sync 2026-10-11, rm 2026-10-21 -- domain.auto_confirmable): 켠 특권 세션 관리자 이름.
+            -- NULL = 꺼짐(기본, 사람이 「배치 확인」).
             -- 켜져 있으면 PreviewReady 에서 orchestrator 가 사람 대신 같은 확인(회차 CAS + 도장 + 감사)을 한다 --
             -- 그 직전에 이 사람의 자격을 다시 본다(batch_orchestrator.auto_confirm_hold).
             auto_confirm_by TEXT)""",

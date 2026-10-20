@@ -1039,7 +1039,10 @@ def test_create_rm_batch_rejects_unsafe_items(client):
          "invalid_option"),
         ({"options": {"recursive": True, "delete": True}}, [{"storage": "s1", "target": "a"}], "unknown_option"),
         ({}, [{"storage": "s1", "target": "a"}, {"storage": "s2", "target": "b"}], "batch_storage_mixed"),
-        ({"auto_confirm": True}, [{"storage": "s1", "target": "a"}], "auto_confirm_sync_only"),
+        # rm 자동 확인(2026-10-21)은 「되돌릴 수 없음」 동의가 있어야 켠다 -- 동의 없는 켜기는 아무것도 만들지 않는다.
+        ({"auto_confirm": True}, [{"storage": "s1", "target": "a"}], "batch_rm_auto_confirm_ack_required"),
+        ({"auto_confirm": True, "acknowledge_irreversible": False}, [{"storage": "s1", "target": "a"}],
+         "batch_rm_auto_confirm_ack_required"),
     ]
     repo = client.app.state.repos.batches
     before = len(repo.list())

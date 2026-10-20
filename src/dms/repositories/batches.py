@@ -15,7 +15,7 @@ _UNION_CHUNK = 100
 _ITEM_TERMINAL = ("Succeeded", "Failed", "Rejected", "Cancelled")
 _NO_QUEUED_ITEM = "NOT EXISTS (SELECT 1 FROM batch_items WHERE batch_id = :b AND status = 'Queued')"
 # 종단 배치에서 바꿀 수 있는 실행 설정(update_execution_settings). owner_username·operation·items·auth_method 는
-# 밖이다 -- 실행 신원·특권 재료와 대상은 생성 시점 사실이다(항목은 항목 편집 라우트 몫). auto_confirm_by(sync 자동
+# 밖이다 -- 실행 신원·특권 재료와 대상은 생성 시점 사실이다(항목은 항목 편집 라우트 몫). auto_confirm_by(sync·rm 자동
 # 확인을 켠 사람, NULL = 꺼짐)는 라우트가 본문 auto_confirm(bool)을 이 값으로 바꿔 넘긴다.
 _SETTINGS_COLUMNS = ("max_concurrency", "priority", "node_count", "procs_per_node", "options", "auto_confirm_by")
 
@@ -41,14 +41,15 @@ class BatchesRepository:
     def create(self, *, operation, requester_id, actor, max_concurrency, options,
                note, items, status, priority=None, node_count=None,
                procs_per_node=None, owner_username=None, auth_method=None,
-               name=None, auto_confirm_by=None) -> str:
+               name=None, auto_confirm_by=None, auto_confirm_audit=None) -> str:
         # priority/node_count/procs_per_node NULL = 미지정(정책 기본) — null≠0
         # (0은 유효값이 아님).
         # owner_username NULL = 비특권 현행. auth_method 기본 None(모름) — 라우트가
         # 늘 실값을 명시하고, 빠뜨린 새 호출자의 배치는 orchestrator 가 token 으로
         # 접는다(requests.create 의 "token" 기본과 같은 fail-closed 방향).
         # name NULL = 이름 없음 — 라우트가 trim·빈값 접기를 끝낸 값만 넘긴다.
-        # auto_confirm_by NULL = 자동 확인 꺼짐(기본) — 라우트가 특권 게이트를 통과한 sync 배치에만 켠 사람을 넘긴다.
+        # auto_confirm_by NULL = 자동 확인 꺼짐(기본) — 라우트가 특권 게이트를 통과한 sync·rm 배치에만 켠 사람을 넘긴다.
+        # auto_confirm_audit: 켤 때 감사 행 after 에 덧붙일 사실(rm 의 {"acknowledged_irreversible": True}) — 켰을 때만 본다.
         bid = uuid.uuid4().hex
         now = utc_now_iso()
         with self._db.transaction():
@@ -65,6 +66,18 @@ class BatchesRepository:
                  "pri": priority, "nc": node_count, "ppn": procs_per_node,
                  "own": owner_username, "auth": auth_method, "name": name,
                  "acb": auto_confirm_by})
+            if auto_confirm_by is not None:
+                # 생성에서 켠 자동 확인도 감사 행으로 남긴다(2026-10-21, rm 자동 확인과 함께) -- 끄기(auto_confirm_off)와
+                # 종단 배치에서 켜기(execution_settings)는 이미 남는데 생성에서 켠 것만 배치 행 말고는 기록이 없었다. rm 은 켠
+                # 사람이 「되돌릴 수 없음」에 동의했다는 사실(acknowledged_irreversible)이 여기 남는 유일한 자리다 -- 자동
+                # 확인 감사 행(actor system:auto-confirm)의 auto_confirm_by 가 이 행을 가리킨다.
+                self._db.execute(
+                    """INSERT INTO audit_log (mutation_class, operation, target_key, actor,
+                           before_state, after_state, at)
+                       VALUES ('batch', 'auto_confirm_on', :key, :actor, :b, :a, :at)""",
+                    {"key": bid, "actor": actor, "b": dump_json({"auto_confirm_by": None}),
+                     "a": dump_json({"auto_confirm_by": auto_confirm_by, "operation": operation,
+                                     **(auto_confirm_audit or {})}), "at": now})
             for seq, item in enumerate(items):
                 self._db.execute(
                     """INSERT INTO batch_items (batch_id, seq, payload, status, request_id,
@@ -585,7 +598,7 @@ class BatchesRepository:
         self._db.execute(f"UPDATE batches SET {sets} WHERE batch_id = :b",
                          {**fields, "b": batch_id})
 
-    def update_execution_settings(self, batch_id, fields, *, before, actor) -> bool:
+    def update_execution_settings(self, batch_id, fields, *, before, actor, audit_extra=None) -> bool:
         """종단 배치의 실행 설정(_SETTINGS_COLUMNS) 부분 갱신 + 감사 행, 한 트랜잭션.
 
         가드는 SQL 한 문장(WHERE status IN 종단)이다 -- 라우트가 읽은 뒤 :rescan·항목 추가가 배치를 다시 돌리기
@@ -593,7 +606,8 @@ class BatchesRepository:
         배치 행을 다시 읽지 않아 "일부 자식은 옛값, 일부는 새값"이 된다(patch_batch docstring 의 이유).
         감사: 메타(name/note) 수정과 달리 audit_log 에 남긴다(mutation_class 'batch') -- 옵션(delete·chown)·노드
         수는 root 로 도는 다음 재실행이 무엇을 하는지를 바꾸므로 누가 무엇을 바꿨는지가 남아야 한다. before/after 는
-        바뀐 키만 담는다(호출자가 실제로 달라진 키만 넘긴다)."""
+        바뀐 키만 담는다(호출자가 실제로 달라진 키만 넘긴다). audit_extra 는 열이 아닌 사실을 after 에만 덧붙인다(rm 자동
+        확인을 켤 때의 {"acknowledged_irreversible": True} -- 2026-10-21; SQL 에는 들어가지 않는다)."""
         unknown = set(fields) - set(_SETTINGS_COLUMNS)
         if unknown or not fields:
             # 컬럼명은 SQL 문자열로 조립되므로 허용 목록 밖 키는 여기서 끊는다(호출자 버그 = 조용한 무시 금지).
@@ -613,11 +627,11 @@ class BatchesRepository:
                        before_state, after_state, at)
                    VALUES ('batch', 'execution_settings', :key, :actor, :b, :a, :at)""",
                 {"key": batch_id, "actor": actor, "b": dump_json(before),
-                 "a": dump_json(fields), "at": now})
+                 "a": dump_json({**fields, **(audit_extra or {})}), "at": now})
         return True
 
     def disable_auto_confirm(self, batch_id, *, actor) -> bool:
-        """sync 자동 확인 끄기 -- **어느 상태에서나**(실행 설정 변경과 달리 종단 한정이 아니다), 감사 행과 한 트랜잭션.
+        """자동 확인(sync·rm) 끄기 -- **어느 상태에서나**(실행 설정 변경과 달리 종단 한정이 아니다), 감사 행과 한 트랜잭션.
 
         끄기는 실행을 줄이기만 한다(다음 확인을 사람이 한다) -- 미리보기 중에 "결과를 보고 직접 확인하겠다" 는 운영자의
         브레이크라 진행 중에 쓸 수 있어야 한다. 켜기는 여기 없다: 생성·실행 설정 변경(특권 게이트, 종단 한정)뿐이다.

@@ -1875,11 +1875,61 @@ test("rm 헤더 안내: 미리보기 중엔 「아무것도 지우지 않습니�
   expect(screen.queryByText(/^자동 실행/)).toBeNull();                 // 헤더 「자동 실행 (켠 사람 …)」 배지 없음
 });
 
-test("rm 실행 설정: 「실행 확인 = 직접 …(rm 은 자동 실행 없음)」·옵션 recursive=true", async () => {
-  renderItems(rmBatch());
+test("rm 실행 설정: 「실행 확인」 — 꺼짐이면 직접, 켜짐이면 「확인 없이 삭제 (켠 사람)」 빨강·옵션 recursive=true", async () => {
+  const view = renderItems(rmBatch());
   await userEvent.click(await screen.findByText("실행 설정"));
-  expect(screen.getByText("직접 — 미리보기 후 「배치 확인」(rm 은 자동 실행 없음)")).toBeInTheDocument();
+  expect(screen.getByText("실행 확인").nextElementSibling).toHaveTextContent(/^직접 — 미리보기 후 「배치 확인」$/);
   expect(screen.getByText("recursive=true")).toBeInTheDocument();
+  view.unmount();
+  renderItems(rmBatch({ status: "Running", auto_confirm: true, auto_confirm_by: "mason" }));
+  await userEvent.click(await screen.findByText("실행 설정"));
+  const dd = screen.getByText("실행 확인").nextElementSibling!;
+  expect(dd).toHaveTextContent("자동 — 미리보기가 끝나면 확인 없이 삭제 (켠 사람 mason)");
+  expect(dd).toHaveClass("text-bad");
+});
+
+// ---- rm 자동 확인(2026-10-21 사용자 요청 — sync 와 같은 옵션, 켤 때 「되돌릴 수 없음」 동의) -------------------------
+
+test("rm 자동 실행 Previewing: 헤더 빨간 배지 「확인 없이 삭제」 + 안내 「확인 없이 바로 삭제」 + 「자동 실행 끄기」가 :auto-confirm-off", async () => {
+  let off = 0;
+  server.use(http.post("/api/admin/batches/b1:auto-confirm-off", () => {
+    off += 1; return HttpResponse.json(batch(rmBatch({ status: "Previewing" }))); }));
+  renderItems(rmBatch({ status: "Previewing", auto_confirm: true, auto_confirm_by: "mason", auto_confirm_hold: null }));
+  const badge = await screen.findByText("자동 실행 — 미리보기가 끝나면 확인 없이 삭제 (켠 사람 mason)");
+  expect(badge).toHaveClass("text-bad");
+  expect(screen.getByText(/자동 실행이 켜져 있어 끝나면 「배치 확인」 없이 바로 삭제\(root\)됩니다/)).toBeInTheDocument();
+  expect(screen.queryByText(/끝나면 「배치 확인」을 눌러야 삭제됩니다/)).toBeNull();      // 거짓이 된 문장은 없다
+  await userEvent.click(screen.getByRole("button", { name: "자동 실행 끄기" }));
+  await waitFor(() => expect(off).toBe(1));
+});
+
+test("rm 자동 실행 PreviewReady: 「곧 … 없이 삭제됩니다」, 확인 버튼은 남고 사람 확인은 여전히 「되돌릴 수 없음」 체크", async () => {
+  renderItems(rmBatch({ auto_confirm: true, auto_confirm_by: "mason", auto_confirm_hold: null }));
+  expect(await screen.findByRole("status")).toHaveTextContent(
+    "미리보기가 끝났습니다 — 자동 실행이 켜져 있어 곧 「배치 확인」 없이 삭제됩니다.");
+  const dlg = await openConfirmDialog();
+  expect(dlg).toHaveTextContent("자동 실행이 켜져 있어 시스템이 곧 같은 확인을 합니다");
+  expect(within(dlg).getByRole("button", { name: "삭제 실행 확인" })).toBeDisabled();
+});
+
+test("rm 자동 실행 보류: 사유와 「눌러야 삭제됩니다」", async () => {
+  renderItems(rmBatch({ status: "Previewing", auto_confirm: true, auto_confirm_by: "mason",
+                        auto_confirm_hold: "auto_confirm_not_privileged" }));
+  const p = await screen.findByText(/자동 실행이 켜져 있지만 지금은 보류될 상태라/);
+  expect(p).toHaveTextContent("「배치 확인」을 눌러야 삭제됩니다");
+  expect(p).toHaveTextContent("특권 실행 목록에 없어");
+});
+
+test("끝난 rm 자동 배치: 재실행·추가가 확인 없이 삭제된다고 빨강으로 미리 말한다 — 항목 추가 창도 「확인 없이 삭제」", async () => {
+  renderItems(rmBatch({ status: "Completed", auto_confirm: true, auto_confirm_by: "mason",
+                        items: [rmItem(0, "old/a", { status: "Succeeded" })] }));
+  const warn = await screen.findByText(/재실행하거나 항목을 추가하면 미리보기가 끝나는 즉시 「배치 확인」 없이 삭제\(root\)됩니다/);
+  expect(warn).toHaveClass("text-bad");
+  expect(screen.queryByRole("button", { name: "자동 실행 끄기" })).toBeNull();          // 종단은 실행 설정 변경에서 끈다
+  await userEvent.click(screen.getByRole("button", { name: "항목 추가" }));
+  const dlg = await screen.findByRole("dialog", { name: "항목 추가" });
+  expect(dlg).toHaveTextContent("자동 실행이 켜진 배치입니다 — 추가한 경로도 미리보기가 끝나면 「배치 확인」 없이 삭제(root)됩니다.");
+  expect(dlg).not.toHaveTextContent("「배치 확인」을 다시 눌러야");
 });
 
 test("rm 항목 추가: 대상 경로 하나 + 진행 중엔 다시 확인 안내, 루트·겹침은 즉답으로 잠근다(종단 항목 포함)", async () => {
@@ -1948,7 +1998,7 @@ test("rm 현재 항목 CSV·CSV 교체: target 1열 왕복 + {storage,target} PU
   await waitFor(() => expect(sent).toEqual({ items: [{ storage: "s1", target: "x" }, { storage: "s1", target: "y" }] }));
 });
 
-test("rm 실행 설정 변경: recursive·stat·lite·quiet 칸 — recursive 해제·stat+lite 는 즉답 잠금, 자동 실행 칸 없음, recursive 가 옛 옵션으로 빠지지 않는다", async () => {
+test("rm 실행 설정 변경: recursive·stat·lite·quiet 칸 — recursive 해제·stat+lite 는 즉답 잠금, 자동 실행은 꺼진 채(손대지 않으면 싣지 않음), recursive 가 옛 옵션으로 빠지지 않는다", async () => {
   let sent: any = null;
   server.use(http.patch("/api/admin/batches/b1/execution", async ({ request }) => {
     sent = await request.json(); return HttpResponse.json(batch(rmBatch({ status: "Cancelled" }))); }));
@@ -1959,7 +2009,8 @@ test("rm 실행 설정 변경: recursive·stat·lite·quiet 칸 — recursive �
   expect(q.getByLabelText("recursive")).toBeChecked();
   expect(q.getByLabelText("quiet")).toBeChecked();
   for (const k of ["verbose", "batch_files", "broken_limit", "delete", "chown"]) expect(q.queryByLabelText(k)).toBeNull();
-  expect(q.queryByLabelText("미리보기 후 자동 실행")).toBeNull();
+  expect(q.getByLabelText("미리보기 후 자동 실행")).not.toBeChecked();
+  expect(q.queryByRole("note", { name: "자동 삭제 경고" })).toBeNull();               // 켜기 전엔 경고·동의 칸이 없다
   expect(q.queryByRole("note", { name: "지원하지 않는 옵션" })).toBeNull();
   expect(q.getByRole("button", { name: "변경 없음" })).toBeDisabled();
   await userEvent.click(q.getByLabelText("recursive"));
@@ -1974,4 +2025,62 @@ test("rm 실행 설정 변경: recursive·stat·lite·quiet 칸 — recursive �
   await userEvent.click(q.getByRole("button", { name: "저장" }));
   await waitFor(() => expect(sent?.options).toEqual({ recursive: true, stat: true, quiet: true }));
   expect("auto_confirm" in sent).toBe(false);
+});
+
+test("rm 실행 설정 변경: 자동 실행을 켜면 빨간 경고 + 필수 동의 — 체크 전엔 저장 잠금, 체크 뒤 {auto_confirm: true, acknowledge_irreversible: true}", async () => {
+  let sent: any = null;
+  server.use(http.patch("/api/admin/batches/b1/execution", async ({ request }) => {
+    sent = await request.json(); return HttpResponse.json(batch(rmBatch({ status: "Cancelled" }))); }));
+  renderExec(rmBatch({ status: "Cancelled" }));
+  await userEvent.click(await screen.findByRole("button", { name: "실행 설정 변경" }));
+  const q = within(await screen.findByRole("dialog", { name: "실행 설정 변경" }));
+  await userEvent.click(q.getByLabelText("미리보기 후 자동 실행"));
+  const warn = q.getByRole("note", { name: "자동 삭제 경고" });
+  expect(warn).toHaveTextContent("미리보기가 끝나면 사람 확인 없이 root 권한으로 삭제됩니다 — 되돌릴 수 없습니다");
+  expect(warn).toHaveClass("text-bad");
+  expect(q.getByText(/「배치 확인」 없이 삭제\(root\)됩니다/)).toBeInTheDocument();
+  const save = q.getByRole("button", { name: "저장" });
+  expect(save).toBeDisabled();
+  const ack = q.getByLabelText("확인 없이 삭제되는 것에 동의");
+  await userEvent.click(ack);
+  expect(save).toBeEnabled();
+  // 자동 실행 체크를 껐다 켜면 동의도 다시 받는다(지난 동의가 이어지지 않게)
+  await userEvent.click(q.getByLabelText("미리보기 후 자동 실행"));
+  await userEvent.click(q.getByLabelText("미리보기 후 자동 실행"));
+  expect(q.getByLabelText("확인 없이 삭제되는 것에 동의")).not.toBeChecked();
+  expect(q.getByRole("button", { name: "저장" })).toBeDisabled();
+  await userEvent.click(q.getByLabelText("확인 없이 삭제되는 것에 동의"));
+  await userEvent.click(q.getByRole("button", { name: "저장" }));
+  await waitFor(() => expect(sent).not.toBeNull());
+  expect(sent.auto_confirm).toBe(true);
+  expect(sent.acknowledge_irreversible).toBe(true);
+});
+
+test("rm 실행 설정 변경: 이미 켜진 rm 배치는 동의를 다시 묻지 않고, 끄면 auto_confirm: false 만 싣는다", async () => {
+  let sent: any = null;
+  server.use(http.patch("/api/admin/batches/b1/execution", async ({ request }) => {
+    sent = await request.json(); return HttpResponse.json(batch(rmBatch({ status: "Completed" }))); }));
+  renderExec(rmBatch({ status: "Completed", auto_confirm: true, auto_confirm_by: "mason" }));
+  await userEvent.click(await screen.findByRole("button", { name: "실행 설정 변경" }));
+  const q = within(await screen.findByRole("dialog", { name: "실행 설정 변경" }));
+  expect(q.getByLabelText("미리보기 후 자동 실행")).toBeChecked();
+  expect(q.queryByRole("note", { name: "자동 삭제 경고" })).toBeNull();
+  expect(q.getByRole("button", { name: "변경 없음" })).toBeDisabled();
+  await userEvent.click(q.getByLabelText("미리보기 후 자동 실행"));
+  await userEvent.click(q.getByRole("button", { name: "저장" }));
+  await waitFor(() => expect(sent).not.toBeNull());
+  expect(sent.auto_confirm).toBe(false);
+  expect("acknowledge_irreversible" in sent).toBe(false);
+});
+
+test("배치 목록: rm 자동 배치의 「자동」은 빨강 + 「없이 삭제」 제목", async () => {
+  server.use(http.get("/api/admin/batches", () => HttpResponse.json([
+    { ...batch(rmBatch({ status: "Previewing", auto_confirm: true, auto_confirm_by: "mason" })), batch_id: "b1" }])));
+  const qc = new QueryClient({ defaultOptions:{ queries:{ retry:false }}});
+  render(<QueryClientProvider client={qc}><MemoryRouter initialEntries={["/admin/batches"]}>
+    <Routes><Route path="/admin/batches" element={<BatchesList/>} /></Routes>
+  </MemoryRouter></QueryClientProvider>);
+  const mark = await screen.findByTitle("미리보기가 끝나면 「배치 확인」 없이 삭제");
+  expect(mark).toHaveTextContent("자동");
+  expect(mark).toHaveClass("text-bad");
 });
