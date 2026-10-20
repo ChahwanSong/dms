@@ -8,7 +8,7 @@ import {
 } from "../jobs/optionRules";
 import { ApiError } from "../../lib/api";
 import type { Batch } from "../../lib/types";
-import { useUpdateBatchExecution, type BatchExecutionBody } from "./useBatches";
+import { autoConfirmable, useUpdateBatchExecution, type BatchExecutionBody } from "./useBatches";
 
 // 종단(완료·취소) 배치의 실행 설정 변경(사용자 요청 2026-10-02: 배치를 취소한 뒤 재실행할 때 노드·프로세스 수·
 // 옵션 등을 바꿀 수 있어야 한다). 서버 PATCH /execution — 바뀐 값은 **다음 재실행**의 자식부터 적용되고 이미 끝난
@@ -34,8 +34,10 @@ const knownKeys = (op: Op): string[] => [...BOOLS[op], ...INTS[op], ...STRS[op]]
 interface Form {
   mc: string; priority: string; nodeCount: string; procsPerNode: string;
   bools: Record<string, boolean>; ints: Record<string, string>; strs: Record<string, string>;
-  // sync 자동 확인(2026-10-11) — 지금 배치 값에서 시작한다(부재 = 꺼짐).
+  // 자동 확인(sync 2026-10-11, rm 2026-10-21) — 지금 배치 값에서 시작한다(부재 = 꺼짐).
   auto: boolean;
+  // rm 을 꺼짐 → 켜짐으로 바꿀 때의 「되돌릴 수 없음」 동의(필수) — 열 때마다·자동 실행 체크를 바꿀 때마다 풀린다.
+  ack: boolean;
 }
 
 // 폼 초기값 = 지금 배치 행. 키가 없는 정수 옵션은 "" (= 서버 기본) — 생성 폼처럼 기본값을 프리필하지 않는다: 그
@@ -51,12 +53,16 @@ function initialForm(b: Batch): Form {
     ints: Object.fromEntries(INTS[op].map((k) => [k, str(o[k])])),
     strs: Object.fromEntries(STRS[op].map((k) => [k, str(o[k])])),
     auto: b.auto_confirm === true,
+    ack: false,
   };
 }
 
 // 서버가 거부하는 옛 옵션 키(저장하면 빠진다)
 const droppedKeys = (b: Batch): string[] =>
   Object.keys(b.options ?? {}).filter((k) => !knownKeys(opOf(b)).includes(k));
+
+// 이 저장이 자동 확인을 꺼짐 → 켜짐으로 바꾸는가(rm 동의가 필요한 유일한 경우 — 이미 켜진 배치는 켤 때 동의했다).
+const turningOn = (b: Batch, f: Form) => f.auto && b.auto_confirm !== true;
 
 function buildBody(b: Batch, f: Form): BatchExecutionBody {
   const op = opOf(b);
@@ -69,9 +75,11 @@ function buildBody(b: Batch, f: Form): BatchExecutionBody {
   return {
     max_concurrency: Number(f.mc.trim()), priority: f.priority === "" ? null : f.priority,
     node_count: intOrNull(f.nodeCount), procs_per_node: intOrNull(f.procsPerNode), options,
-    // 자동 확인은 sync 에서 **바꿨을 때만** 싣는다 — 켜면 저장한 관리자가 켠 사람으로 남으므로, 손대지 않은 저장이
+    // 자동 확인은 sync·rm 에서 **바꿨을 때만** 싣는다 — 켜면 저장한 관리자가 켠 사람으로 남으므로, 손대지 않은 저장이
     // 다른 설정과 함께 켠 사람을 바꾸지 않게(서버도 같은 값이면 쓰지 않는다).
-    ...(op === "sync" && f.auto !== (b.auto_confirm === true) && { auto_confirm: f.auto }),
+    ...(autoConfirmable(op) && f.auto !== (b.auto_confirm === true) && { auto_confirm: f.auto }),
+    // rm 을 켤 때만 동의를 싣는다(체크 전에는 아래 ackMissing 이 저장을 막는다 — 서버 422 batch_rm_auto_confirm_ack_required).
+    ...(op === "rm" && turningOn(b, f) && f.ack && { acknowledge_irreversible: true as const }),
   };
 }
 
@@ -115,9 +123,11 @@ export function BatchExecutionSettingsDialog({ b }: { b: Batch }) {
     ? [f.bools.recursive ? null : "재귀 옵션이 필요합니다",
        f.bools.stat && f.bools.lite ? "stat과 lite는 함께 쓸 수 없습니다" : null]
     : [];
+  // rm 자동 실행을 켜는 저장은 동의 체크가 있어야 한다(생성 화면과 같은 규칙 — 서버도 본다).
+  const ackMissing = op === "rm" && turningOn(b, f) && !f.ack;
   const errors = [mcError, nodeCountError, procsPerNodeError, ...intErrors, chmodError, chownError, verboseQuiet,
                   ...rmErrors];
-  const invalid = errors.some((e) => e !== null);
+  const invalid = errors.some((e) => e !== null) || ackMissing;
 
   // 바뀐 것이 없으면 저장을 잠근다(서버도 같은 값이면 쓰지 않지만, 누를 이유가 없는 버튼은 헛클릭이다).
   const body = invalid ? null : buildBody(b, f);
@@ -176,16 +186,32 @@ export function BatchExecutionSettingsDialog({ b }: { b: Batch }) {
         </div>
         <p className="text-muted text-xs">요청 값은 정책 상한을 넘지 못합니다(정책보다 줄이기만 가능).</p>
 
-        {op === "sync" && (
+        {autoConfirmable(op) && (
           <div className="space-y-1">
             <label className="flex items-center gap-2 text-sm">
               <input type="checkbox" aria-label="미리보기 후 자동 실행" checked={f.auto}
-                     onChange={(e) => setF({ ...f, auto: e.target.checked })} /> 미리보기 후 자동 실행
+                     onChange={(e) => setF({ ...f, auto: e.target.checked, ack: false })} /> 미리보기 후 자동 실행
             </label>
             <p className="text-muted text-xs">
-              켜면 다음 재실행부터 모든 항목의 미리보기가 끝나는 즉시 「배치 확인」 없이 실행(root)됩니다. 끄면 미리보기를
-              보고 직접 확인합니다.
+              {op === "rm"
+                ? "켜면 다음 재실행부터 모든 항목의 미리보기(지울 항목 수)가 끝나는 즉시 「배치 확인」 없이 삭제(root)됩니다. "
+                  + "끄면 지울 대상을 보고 직접 확인합니다."
+                : "켜면 다음 재실행부터 모든 항목의 미리보기가 끝나는 즉시 「배치 확인」 없이 실행(root)됩니다. 끄면 미리보기를 "
+                  + "보고 직접 확인합니다."}
             </p>
+            {/* rm 을 켜는 저장(2026-10-21): 생성 화면과 같은 경고 + 필수 동의 체크(이미 켜진 배치를 그대로 두는 저장은 묻지
+                않는다 — 켤 때 동의했다). */}
+            {op === "rm" && turningOn(b, f) && (
+              <div role="note" aria-label="자동 삭제 경고"
+                   className="rounded-lg border border-bad/30 bg-badbg px-3 py-2 text-sm text-bad">
+                <p className="font-medium">미리보기가 끝나면 사람 확인 없이 root 권한으로 삭제됩니다 — 되돌릴 수 없습니다</p>
+                <label className="mt-2 flex items-start gap-2 font-medium">
+                  <input type="checkbox" className="mt-0.5" aria-label="확인 없이 삭제되는 것에 동의" checked={f.ack}
+                         onChange={(e) => setF({ ...f, ack: e.target.checked })} />
+                  <span>확인 없이 root 로 삭제되며 되돌릴 수 없다는 것을 이해했습니다(필수)</span>
+                </label>
+              </div>
+            )}
           </div>
         )}
 

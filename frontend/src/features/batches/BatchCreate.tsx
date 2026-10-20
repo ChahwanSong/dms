@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ArrowRight, Download, Plus, X } from "lucide-react";
-import { useCreateBatch } from "./useBatches";
+import { autoConfirmable, useCreateBatch } from "./useBatches";
 import type { BatchOp, CreateBatchBody } from "./useBatches";
 import { parseItemsCsv, serializeItemsCsv } from "../../lib/csv";
 import type { ScanRow, SyncRow } from "../../lib/csv";
@@ -49,13 +49,17 @@ const OPERATION_HELP: Record<BatchOp, string> = {
   // 확인 단계(2026-10-07): sync 배치는 만들자마자 실행되지 않는다 -- 생성 화면 어디에도 이 사실이 없었다.
   sync: "소스 스토리지 → 목적지 스토리지 한 쌍 안에서 여러 경로를 sync 합니다. 행마다 잡 하나가 만들어지고, "
     + "항목별 미리보기가 끝나면 배치 상세에서 「배치 확인」을 눌러야 실행됩니다.",
-  // rm(2026-10-21): sync 와 같은 확인 단계. 자동 실행은 없다(서버 auto_confirm_sync_only — 되돌릴 수 없는 root 삭제).
+  // rm(2026-10-21): sync 와 같은 확인 단계. 자동 실행은 켤 때만(아래 AUTO_HELP — 켜려면 「되돌릴 수 없음」 동의가 따로 필요).
   rm: "한 스토리지의 여러 경로를 삭제합니다(경로와 그 아래 전부). 행마다 잡 하나가 만들어지고, 항목별 미리보기(지울 "
-    + "항목 수)가 끝나면 배치 상세에서 「배치 확인」을 눌러야 삭제됩니다 — 자동 실행은 없습니다.",
+    + "항목 수)가 끝나면 배치 상세에서 「배치 확인」을 눌러야 삭제됩니다.",
 };
-// 자동 실행(2026-10-11)을 켠 sync 는 위 「눌러야 실행」이 거짓이 된다 -- 켠 동안은 이 문장으로 바꿔 말한다.
-const SYNC_AUTO_HELP = "소스 스토리지 → 목적지 스토리지 한 쌍 안에서 여러 경로를 sync 합니다. 행마다 잡 하나가 "
-  + "만들어지고, 항목별 미리보기가 끝나면 「배치 확인」 없이 바로 실행됩니다(자동 실행 켜짐).";
+// 자동 실행(sync 2026-10-11, rm 2026-10-21)을 켜면 위 「눌러야 실행·삭제」가 거짓이 된다 -- 켠 동안은 이 문장으로 바꿔 말한다.
+const AUTO_HELP: Partial<Record<BatchOp, string>> = {
+  sync: "소스 스토리지 → 목적지 스토리지 한 쌍 안에서 여러 경로를 sync 합니다. 행마다 잡 하나가 "
+    + "만들어지고, 항목별 미리보기가 끝나면 「배치 확인」 없이 바로 실행됩니다(자동 실행 켜짐).",
+  rm: "한 스토리지의 여러 경로를 삭제합니다(경로와 그 아래 전부). 행마다 잡 하나가 만들어지고, 항목별 미리보기(지울 "
+    + "항목 수)가 끝나면 「배치 확인」 없이 바로 삭제됩니다(자동 실행 켜짐).",
+};
 
 const initial = {
   op: "scan" as BatchOp,
@@ -91,9 +95,12 @@ const initial = {
   // 실행 신원: 빈값 = 바디에서 생략 = 서버 NULL(기본: 생성자 본인). 특권 여부와
   // 무관하다 — 배치는 통일 게이트(routes_batches)로 항상 특권(root) 실행.
   ownerUsername: "",
-  // sync 자동 확인(사용자 결정 2026-10-11 — 옵션, 기본 꺼짐): 켜면 미리보기가 끝나는 순간 「배치 확인」 없이 실행된다.
-  // sync 에서 켰을 때만 바디에 true 를 싣는다(서버는 명시 true 만 켠다 — 생략 = 사람이 확인).
+  // 자동 확인(sync 2026-10-11, rm 2026-10-21 사용자 결정 — 옵션, 기본 꺼짐): 켜면 미리보기가 끝나는 순간 「배치 확인」 없이
+  // 실행된다. sync·rm 에서 켰을 때만 바디에 true 를 싣는다(서버는 명시 true 만 켠다 — 생략 = 사람이 확인).
   autoConfirm: false,
+  // rm 자동 실행의 「되돌릴 수 없음」 동의 체크(필수): 켜야 제출이 풀리고 acknowledge_irreversible: true 로 실린다(서버도 본다 —
+  // 422 batch_rm_auto_confirm_ack_required). 자동 실행 체크나 연산을 바꾸면 풀린다 — 지난 동의가 다른 설정으로 이어지지 않게.
+  autoConfirmAck: false,
 };
 
 export function BatchCreate() {
@@ -164,13 +171,15 @@ export function BatchCreate() {
   // rm 옵션 즉답(SubmitJob 과 같은 문구·규칙): recursive 해제는 서버 422 rm_recursive_required, stat+lite 는 invalid_option.
   const recursiveMissing = f.op === "rm" && !f.recursive;
   const statLiteConflict = f.op === "rm" && f.stat && f.lite;
+  // rm 자동 실행은 동의 체크가 있어야 만든다(서버 422 batch_rm_auto_confirm_ack_required 의 미러).
+  const rmAutoAckMissing = f.op === "rm" && f.autoConfirm && !f.autoConfirmAck;
   const controlsInvalid = verboseQuietConflict || scanBatchFilesError !== null
     || brokenLimitError !== null || advancedError !== null
     || nodeCountError !== null || procsPerNodeError !== null || mcError !== null
     || recursiveMissing || statLiteConflict;
 
   // 제출 게이트는 이 하나다(위저드 시절 스텝별 '다음' 게이트의 합집합 + 조회 실패·진행 중).
-  const blocked = create.isPending || !itemsValid || controlsInvalid || storagesQ.isError;
+  const blocked = create.isPending || !itemsValid || controlsInvalid || storagesQ.isError || rmAutoAckMissing;
 
   // --- 정책 기본값 캡션(백엔드 무변경 — 표시 배선만) ---
   // 도구→정책 키는 placement.py TOOL_TO_POLICY 의 미러: scan→"scan", rm→"rm", sync→공존
@@ -303,9 +312,10 @@ export function BatchCreate() {
       // 실행 신원: 빈값은 키 생략 = 서버 NULL(기본: 생성자 본인) — 특권 게이트는
       // owner 유무와 무관하게 항상 발동한다(통일 게이트).
       ...(f.ownerUsername.trim() !== "" && { owner_username: f.ownerUsername.trim() }),
-      // 자동 확인은 sync 만(scan 은 확인 단계가 없고 rm 은 늘 사람이 확인 — 서버 422) — 연산을 바꾸면 체크가 남아
-      // 있어도 싣지 않는다.
-      ...(f.op === "sync" && f.autoConfirm && { auto_confirm: true as const }),
+      // 자동 확인은 sync·rm 만(scan 은 확인 단계가 없다 — 서버 422) — 연산을 바꾸면 체크가 남아 있어도 싣지 않는다.
+      ...(autoConfirmable(f.op) && f.autoConfirm && { auto_confirm: true as const }),
+      // rm 은 동의 체크까지 켰을 때만 동의를 싣는다(체크 전에는 위 rmAutoAckMissing 이 제출을 막는다).
+      ...(f.op === "rm" && f.autoConfirm && f.autoConfirmAck && { acknowledge_irreversible: true as const }),
     };
   }
 
@@ -377,6 +387,7 @@ export function BatchCreate() {
   if (rmPathErrors.length > 0) hints.push(`삭제할 수 없는 경로 ${rmPathErrors.length}개를 고치세요`);
   if (rmOverlapErrors.length > 0) hints.push(`겹치는 삭제 경로 ${rmOverlapErrors.length}개를 정리하세요`);
   if (controlsInvalid) hints.push("빨간 안내가 붙은 옵션·실행 제어 값을 고치세요");
+  if (rmAutoAckMissing) hints.push("자동 실행으로 삭제하려면 경고를 읽고 동의를 체크하세요");
 
   const body = buildBody();   // 요약 = 제출 바디에서 파생(화면 거짓말 금지)
 
@@ -385,15 +396,21 @@ export function BatchCreate() {
       <FormSection step={1} title="작업 종류">
         <div className="grid gap-x-6 gap-y-1 sm:grid-cols-2">
           <label className="text-sm block">연산
+            {/* 연산을 바꾸면 rm 동의는 늘 풀리고, rm 으로 들어올 때는 자동 실행도 꺼진 채 시작한다 — 다른 연산에서 켠
+                자동 실행을 되돌릴 수 없는 삭제가 조용히 물려받지 않게(sync↔scan 은 종전대로 체크를 남기고 싣지만 않는다). */}
             <select aria-label="연산" className={field} value={f.op}
-                    onChange={(e) => setF({ ...f, op: e.target.value as BatchOp })}>
+                    onChange={(e) => {
+                      const op = e.target.value as BatchOp;
+                      setF({ ...f, op, autoConfirmAck: false,
+                             ...(op === "rm" && f.op !== "rm" && { autoConfirm: false }) });
+                    }}>
               <option value="scan">scan</option>
               <option value="sync">sync</option>
               <option value="rm">rm</option>
             </select>
           </label>
           <p className="text-sm text-muted sm:pt-8">
-            {f.op === "sync" && f.autoConfirm ? SYNC_AUTO_HELP : OPERATION_HELP[f.op]}
+            {f.autoConfirm && AUTO_HELP[f.op] !== undefined ? AUTO_HELP[f.op] : OPERATION_HELP[f.op]}
           </p>
         </div>
       </FormSection>
@@ -424,8 +441,11 @@ export function BatchCreate() {
                 <li>관리자 특권(root)으로 실행돼 파일 권한·소유와 관계없이 지워집니다.</li>
                 <li>관리 디렉토리 자신(.)·「..」·「/」로 시작하는 경로는 받지 않고, 한 배치 안에서 겹치는 경로(같은 경로·
                   한 경로 아래의 경로)도 받지 않습니다 — 상위 경로 하나만 남기세요.</li>
-                <li>만들기만 해서는 아무것도 지워지지 않습니다 — 항목별 미리보기(지울 항목 수)가 끝나면 배치 상세의
-                  「배치 확인」에서 검토하고 확인해야 삭제됩니다.</li>
+                {f.autoConfirm
+                  ? <li>자동 실행이 켜져 있습니다 — 항목별 미리보기(지울 항목 수)가 끝나는 즉시 「배치 확인」 없이
+                      삭제됩니다(아래 실행 제어).</li>
+                  : <li>만들기만 해서는 아무것도 지워지지 않습니다 — 항목별 미리보기(지울 항목 수)가 끝나면 배치 상세의
+                      「배치 확인」에서 검토하고 확인해야 삭제됩니다.</li>}
               </ul>
             </div>
           )}
@@ -803,18 +823,41 @@ export function BatchCreate() {
             {mcError && <p className="mt-1 text-bad text-sm">{mcError}</p>}
           </>}
           help="동시에 실행할 배치 항목(잡) 수 — 잡 하나가 쓰는 노드 수와 무관합니다." />
-        {/* sync 자동 확인(2026-10-11): 기본 꺼짐. 켜면 운영자가 미리보기를 보고 누르던 「배치 확인」을 시스템이 대신
-            누른다(서버 orchestrator — 같은 확인 함수라 확인 회차·도장 규칙은 그대로). 실행은 root 라 무엇을 생략하는지를
-            도움말이 그대로 말한다. 진행 중에도 배치 화면의 「자동 실행 끄기」로 되돌릴 수 있다. */}
-        {f.op === "sync" && (
+        {/* 자동 확인(sync 2026-10-11, rm 2026-10-21): 기본 꺼짐. 켜면 운영자가 미리보기를 보고 누르던 「배치 확인」을
+            시스템이 대신 누른다(서버 orchestrator — 같은 확인 함수라 확인 회차·도장 규칙은 그대로). 실행은 root 라 무엇을
+            생략하는지를 도움말이 그대로 말한다. 진행 중에도 배치 화면의 「자동 실행 끄기」로 되돌릴 수 있다. */}
+        {autoConfirmable(f.op) && (
           <FieldRow align="check"
             control={<label className="flex items-center gap-2 text-sm">
               <input type="checkbox" aria-label="미리보기 후 자동 실행" checked={f.autoConfirm}
-                     onChange={on("autoConfirm")} /> 미리보기 후 자동 실행
+                     onChange={(e) => setF({ ...f, autoConfirm: e.target.checked, autoConfirmAck: false })} />
+              미리보기 후 자동 실행
             </label>}
-            help={"켜면 모든 항목의 미리보기가 끝나는 즉시 「배치 확인」 없이 실행(root)됩니다 — 미리보기 결과를 보고 "
-              + "확인하는 단계를 건너뜁니다. 미리보기는 그대로 돌고 항목별로 남습니다. 진행 중에도 배치 화면에서 끌 수 "
-              + "있습니다."} />
+            help={f.op === "rm"
+              ? "켜면 모든 항목의 미리보기(지울 항목 수)가 끝나는 즉시 「배치 확인」 없이 삭제(root)됩니다 — 지울 대상을 "
+                + "보고 확인하는 단계를 건너뜁니다. 미리보기는 그대로 돌고 항목별로 남습니다. 진행 중에도 배치 화면에서 끌 수 "
+                + "있습니다."
+              : "켜면 모든 항목의 미리보기가 끝나는 즉시 「배치 확인」 없이 실행(root)됩니다 — 미리보기 결과를 보고 "
+                + "확인하는 단계를 건너뜁니다. 미리보기는 그대로 돌고 항목별로 남습니다. 진행 중에도 배치 화면에서 끌 수 "
+                + "있습니다."} />
+        )}
+        {/* rm 자동 실행(2026-10-21): 되돌릴 수 없는 root 삭제를 사람 확인 없이 하는 설정이라, 켜는 순간 경고와 **필수**
+            동의 체크를 둔다 — 사람의 rm 「배치 확인」이 매번 받던 「되돌릴 수 없음」 체크를 켜는 순간 한 번 받는다(서버도
+            acknowledge_irreversible 을 본다). 위험=빨강 의미 체계(삭제 범위·제출 경고와 같은 토큰). */}
+        {f.op === "rm" && f.autoConfirm && (
+          <div role="note" aria-label="자동 삭제 경고"
+               className="rounded-card border border-bad/30 bg-badbg p-3 text-sm text-bad">
+            <p className="font-medium">미리보기가 끝나면 사람 확인 없이 root 권한으로 삭제됩니다 — 되돌릴 수 없습니다</p>
+            <p className="mt-1 text-xs">
+              항목별 지울 대상을 검토하는 「배치 확인」 단계가 없습니다. 항목을 추가하거나 다시 실행해도 그 미리보기가 끝나는
+              즉시 삭제됩니다. 결과를 보고 지우려면 자동 실행을 끄세요.
+            </p>
+            <label className="mt-2 flex items-start gap-2 font-medium">
+              <input type="checkbox" className="mt-0.5" aria-label="확인 없이 삭제되는 것에 동의"
+                     checked={f.autoConfirmAck} onChange={on("autoConfirmAck")} />
+              <span>확인 없이 root 로 삭제되며 되돌릴 수 없다는 것을 이해했습니다(필수)</span>
+            </label>
+          </div>
         )}
       </FormSection>
 
@@ -843,7 +886,9 @@ export function BatchCreate() {
       {/* rm 경고는 제출 버튼 바로 위 한 곳(SubmitJob 관례) — 위험=빨강 의미 체계 유지. */}
       {body.operation === "rm" && (
         <p className="rounded-lg border border-bad/30 bg-badbg px-3 py-2 text-sm text-bad">
-          삭제는 되돌릴 수 없습니다. 항목별 미리보기에서 지울 대상을 본 뒤 배치 상세의 「배치 확인」에서 확인해야 삭제됩니다.
+          {body.auto_confirm === true
+            ? "삭제는 되돌릴 수 없습니다. 자동 실행이 켜져 있어 항목별 미리보기가 끝나는 즉시 「배치 확인」 없이 삭제됩니다."
+            : "삭제는 되돌릴 수 없습니다. 항목별 미리보기에서 지울 대상을 본 뒤 배치 상세의 「배치 확인」에서 확인해야 삭제됩니다."}
         </p>
       )}
       <SubmitHints id="batch-create-hints" items={hints} />
@@ -887,7 +932,9 @@ export function BatchCreate() {
           </SummaryRow>
         )}
         {body.operation === "rm" && (
-          <SummaryRow label="실행 확인">직접 — 미리보기 후 「배치 확인」(rm 은 자동 실행 없음)</SummaryRow>
+          <SummaryRow label="실행 확인" className={body.auto_confirm === true ? "text-bad" : ""}>
+            {body.auto_confirm === true ? "자동 — 미리보기가 끝나면 확인 없이 삭제" : "직접 — 미리보기 후 「배치 확인」"}
+          </SummaryRow>
         )}
         {/* 비운 동시 상한은 Number("")=0 이 아니라 "—"(제출은 그 상태로 막힌다) */}
         <SummaryRow label="동시 상한">{f.mc.trim() === "" ? "—" : body.max_concurrency}</SummaryRow>

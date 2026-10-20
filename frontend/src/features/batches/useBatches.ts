@@ -14,6 +14,11 @@ export const isBatchTerminal = (status: string) => BATCH_TERMINAL.has(status);
 export type BatchOp = "scan" | "sync" | "rm";
 const CONFIRM_OPS: ReadonlySet<string> = new Set(["sync", "rm"]);
 export const needsBatchConfirm = (op: string | undefined): boolean => op !== undefined && CONFIRM_OPS.has(op);
+// 자동 확인(미리보기 후 자동 실행)을 켤 수 있는 연산 = 서버 domain.auto_confirmable 의 거울(sync 2026-10-11, rm 2026-10-21).
+// 지금은 확인 흐름 집합과 같지만 따로 둔다 — 서버도 두 술어(confirm_gated·auto_confirmable)를 따로 두고, 다음 확인 흐름
+// 연산이 자동 확인까지 저절로 얻지 않게(켜는 체크박스·「자동 실행 끄기」·자동 안내문이 이 술어 하나를 본다).
+const AUTO_CONFIRM_OPS: ReadonlySet<string> = new Set(["sync", "rm"]);
+export const autoConfirmable = (op: string | undefined): boolean => op !== undefined && AUTO_CONFIRM_OPS.has(op);
 export const useBatches = () =>
   useQuery({ queryKey: ["batches"], queryFn: () => apiGet<Batch[]>("/api/admin/batches"),
             refetchInterval: 4000 });
@@ -32,8 +37,11 @@ export interface CreateBatchBody {
   // 실행 신원(기록용 이름): 빈값은 키 생략 = 서버 NULL(생성자 본인). 특권 스위치가 아니다 --
   // 배치는 통일 게이트(routes_batches)로 항상 특권(root) 실행이다.
   owner_username?: string;
-  // sync 자동 확인(2026-10-11, 기본 꺼짐): 켰을 때만 true 를 싣는다 -- 서버는 명시 true 만 켠다(생략 = 사람이 확인).
+  // 자동 확인(sync 2026-10-11, rm 2026-10-21 — 기본 꺼짐): 켰을 때만 true 를 싣는다 -- 서버는 명시 true 만 켠다(생략 = 사람이 확인).
   auto_confirm?: true;
+  // rm 자동 확인의 「되돌릴 수 없음」 동의 — rm 에서 자동 확인을 켜고 동의 체크를 켰을 때만 싣는다(없으면 서버 422
+  // batch_rm_auto_confirm_ack_required).
+  acknowledge_irreversible?: true;
 }
 export const useCreateBatch = () =>
   useMutation({ mutationFn: (b: CreateBatchBody) =>
@@ -88,8 +96,10 @@ export const useUpdateBatch = (id: string) => {
 export interface BatchExecutionBody {
   max_concurrency: number; priority: string | null; node_count: number | null;
   procs_per_node: number | null; options: Record<string, unknown>;
-  // sync 만, 바꿀 때만 싣는다(서버: 켜면 이 관리자가 켠 사람으로 남고, 이미 켜져 있으면 처음 켠 사람 그대로).
+  // sync·rm 만, 바꿀 때만 싣는다(서버: 켜면 이 관리자가 켠 사람으로 남고, 이미 켜져 있으면 처음 켠 사람 그대로).
   auto_confirm?: boolean;
+  // rm 을 꺼짐 → 켜짐으로 바꿀 때만(동의 체크를 켰을 때) 싣는다 — 서버 422 batch_rm_auto_confirm_ack_required 의 짝.
+  acknowledge_irreversible?: true;
 }
 export const useUpdateBatchExecution = (id: string) => {
   const qc = useQueryClient();
@@ -225,6 +235,6 @@ export const useConfirmBatch = (id: string) =>
   _action<{ preview_round: number; acknowledge_irreversible?: true }>(id, "confirm");
 export const useRerunFailed = (id: string) => _action(id, "rerun-failed");
 export const useCancelBatch = (id: string) => _action(id, "cancel");
-// sync 자동 확인 끄기(어느 상태에서나 -- 진행 중 브레이크). 켜기는 생성·실행 설정 변경(특권 게이트)뿐이다.
+// 자동 확인(sync·rm) 끄기(어느 상태에서나 -- 진행 중 브레이크). 켜기는 생성·실행 설정 변경(특권 게이트)뿐이다.
 export const useDisableAutoConfirm = (id: string) => _action(id, "auto-confirm-off");
 export const useRescanBatch = (id: string) => _action(id, "rescan");

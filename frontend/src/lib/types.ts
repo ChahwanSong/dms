@@ -246,11 +246,11 @@ export interface Batch {
   // 확인 회차(2026-10-07): 확인 대기(PreviewReady)가 될 때마다 +1. 「배치 확인」은 대화상자를 연 회차를 실어 보낸다.
   // 서버는 늘 정수로 보낸다(NULL 행은 0 으로 접는다) -- 옵션(?)은 기존 fixture 무수정 컴파일용, 부재는 0회차로 읽는다.
   preview_round?: number;
-  // sync 자동 확인(2026-10-11): 켜져 있으면 미리보기가 끝나는 순간 「배치 확인」 없이 실행된다. auto_confirm_by = 켠
+  // 자동 확인(sync 2026-10-11, rm 2026-10-21): 켜져 있으면 미리보기가 끝나는 순간 「배치 확인」 없이 실행된다. auto_confirm_by = 켠
   // 관리자. 부재(옛 서버·fixture)는 꺼짐으로 읽는다(=== true 로만 켜짐 판정).
   auto_confirm?: boolean;
   auto_confirm_by?: string | null;
-  // 상세 GET 만: 자동 확인이 켜진 진행 중 sync 배치가 지금 확인하면 보류될 사유 코드(null = 곧 자동 실행). 서버가
+  // 상세 GET 만: 자동 확인이 켜진 진행 중 sync·rm 배치가 지금 확인하면 보류될 사유 코드(null = 곧 자동 실행). 서버가
   // orchestrator 와 같은 술어로 판정한다(batch_orchestrator.auto_confirm_hold).
   auto_confirm_hold?: string | null;
 }

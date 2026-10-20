@@ -112,6 +112,10 @@ test.describe("E3 레이아웃 불변식", () => {
     // rm(2026-10-21): 「삭제 범위」 안내·rm 옵션 줄·요약 위 경고가 넘치지 않는다.
     await page.getByLabel("연산").selectOption("rm");
     await assertLayoutSane(page, { minTableCells: 0 });
+    // rm 자동 실행(2026-10-21): 켜면 빨간 경고 + 동의 체크가 실행 제어 안에 붙는다 — 그 상자도 넘치지 않는다.
+    await page.getByLabel("미리보기 후 자동 실행").check();
+    await expect(page.getByRole("note", { name: "자동 삭제 경고" })).toBeVisible();
+    await assertLayoutSane(page, { minTableCells: 0 });
 
     await visitUsage(page);
     await assertLayoutSane(page, { minTableCells: 0 });
@@ -139,6 +143,9 @@ test.describe("E3 레이아웃 불변식", () => {
     await visit(page, "/admin/batches/new", "배치 생성");
     await assertLayoutSane(page, { sidebarFixed: false, minTableCells: 0 });
     await page.getByLabel("연산").selectOption("rm");
+    await assertLayoutSane(page, { sidebarFixed: false, minTableCells: 0 });
+    await page.getByLabel("미리보기 후 자동 실행").check();
+    await expect(page.getByRole("note", { name: "자동 삭제 경고" })).toBeVisible();
     await assertLayoutSane(page, { sidebarFixed: false, minTableCells: 0 });
     await page.getByLabel("연산").selectOption("scan");
     // 입력 방식 세그먼트는 좁은 폭에서도 라벨이 음절 중간에서 접히지 않는다(통째로 다음 줄로).

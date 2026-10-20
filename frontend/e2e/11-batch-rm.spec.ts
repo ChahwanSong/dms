@@ -5,8 +5,8 @@ import { STORAGE_NAME } from "./harness/env";
 import { apiLogin } from "./helpers/session";
 
 // E12 — rm 배치(2026-10-21 사용자 요청 「배치작업에 rm도 할수있도록」). 단위 테스트가 못 보는 것을 여기서 본다:
-// 생성 화면 → 실 서버(rm 허용·겹침 422 미러) → 실 오케스트레이터가 미리보기 뒤 **확인 대기에서 멈추고**(rm 은 자동 실행
-// 없음 — 그동안 파일은 그대로) → 확인 대화상자가 실 조인(job_state·preview_summary)으로 항목별 삭제 대상을 그리고 →
+// 생성 화면 → 실 서버(rm 허용·겹침 422 미러) → 실 오케스트레이터가 미리보기 뒤 **확인 대기에서 멈추고**(자동 실행은 기본
+// 꺼짐 — 그동안 파일은 그대로; 켠 rm 배치는 E13) → 확인 대화상자가 실 조인(job_state·preview_summary)으로 항목별 삭제 대상을 그리고 →
 // 「되돌릴 수 없음」 체크 뒤에만 확인이 나가 → 실 오케스트레이터 Running 분기(확인 게이트)가 도장 자식만 실행해 →
 // **하네스 스토리지의 그 경로들이 실제로 지워진다**(목록에 없는 형제는 남는다).
 //
@@ -54,7 +54,7 @@ test.describe("E12 — rm 배치", () => {
 
     await page.goto("/admin/batches/new");
     await page.getByLabel("연산").selectOption("rm");
-    await expect(page.getByLabel("미리보기 후 자동 실행")).toHaveCount(0);            // rm 은 자동 실행 없음
+    await expect(page.getByLabel("미리보기 후 자동 실행")).not.toBeChecked();         // 기본 꺼짐(켠 rm 은 E13)
     await expect(page.getByRole("note", { name: "삭제 범위" })).toBeVisible();
     const st = page.getByLabel("스토리지");
     await expect(st.getByRole("option", { name: STORAGE_NAME })).toBeAttached();

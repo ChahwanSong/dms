@@ -53,9 +53,11 @@ PostgreSQL(제어면) + React 포탈 + 노드 에이전트 + Volcano gang-schedu
   확인 도장이 있는 미리보기만 실행된다(`docs/ARCHITECTURE.md` 「배치 재검토·확인 게이트」 — 확인 게이트 연산은
   `domain.confirm_gated` 하나로 가른다). 자동 확인을 켠 배치
   (`batches.auto_confirm_by`, 2026-10-11 — 기본 꺼짐, 켜기는 특권 세션 관리자만)도 orchestrator 가 **같은**
-  `BatchesRepository.confirm` 을 부를 뿐이다 — 도장·회차 CAS 를 건너뛰는 지름길을 만들지 말고, 단건 sync 에 자동
-  컨펌을 넣지 마라(사용자 결정: 단건은 사람이 승인). rm 배치에 자동 확인을 넣지 마라(2026-10-21 — 되돌릴 수 없는
-  root 삭제라 늘 사람이 「배치 확인」, 422 `auto_confirm_sync_only` 와 orchestrator 두 겹이 막는다).
+  `BatchesRepository.confirm` 을 부를 뿐이다 — 도장·회차 CAS 를 건너뛰는 지름길을 만들지 말고, 단건 sync·rm 에 자동
+  컨펌을 넣지 마라(사용자 결정: 단건은 사람이 승인). rm **배치**는 자동 확인을 켤 수 있다(2026-10-21 사용자 결정 — 같은
+  날의 「rm 은 늘 사람 확인」을 뒤집었다): sync 와 같은 게이트에 켤 때 「되돌릴 수 없음」 동의(`acknowledge_irreversible:
+  true`, 없으면 422 `batch_rm_auto_confirm_ack_required`, 감사 행에 남는다)가 더 붙는다. 연산 집합은 `domain.auto_confirmable`
+  하나(켜는 라우트·PreviewReady 분기·`auto_confirm_hold` 공용 — scan·미지 연산은 자동 확인 없음)다 — 세 곳에 따로 쓰지 마라.
 - **새 DB 컬럼은 CREATE TABLE 과 `_ensure_columns` 양쪽**(구형 DB 업그레이드 경로).
   전수 열거 그물(`test_migrations.py`)이 테이블·인덱스 추가·삭제를 잡는다.
 - **요청·잡을 가리키는 새 테이블·컬럼은 요청 삭제 목록에도**(2026-10-08). FK 가 0건이라 빠지면 지운 요청의 행이 조용히

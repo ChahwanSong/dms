@@ -25,19 +25,21 @@ confirm(`_confirm_child`)한다 -- 새 미리보기는 하나도 만들지 않�
 stepper 가 같은 컨트롤러 패스에서 먼저 돈다). 다시 미리보기는 자동으로 하지 않는다: 재실행은 :rerun-failed
 → Previewing → 재확인. Running 에선 만료된 미리보기를 컨펌하지 않는다(슬롯도 차지하지 않는다).
 
-자동 확인(2026-10-11 사용자 결정 -- "배치 sync 의 경우 자동 승인을 옵션으로, 기본 false"): 특권 세션 관리자가 생성
-(또는 종단 배치의 실행 설정 변경)에서 켠 sync 배치(batches.auto_confirm_by)는 PreviewReady 에서 루프가 **사람의 「배치
-확인」과 같은 저장소 함수**(BatchesRepository.confirm -- 회차·Queued 없음 CAS + 그 순간 ConfirmPending 자식 도장 +
-감사 행)를 대신 부른다. 새 경로는 없다: 도장·회차·Queued 둑과 Running 분기의 「도장 없는 미리보기면 Previewing 복귀」는
-그대로라, 확인은 여전히 한 회차의 미리보기 전부를 대표한다 -- 바뀐 것은 누르는 주체(켠 사람의 사전 동의)뿐이다. 확인
-직전에 켠 사람의 자격을 다시 보고(auto_confirm_hold), 안 되면 확인 대기에 남겨 사람이 누르게 한다(보류). 단건 sync 는
-여전히 사람이 컨펌한다(이 경로 밖 -- 배치 자식만 여기서 실행된다). rm 배치에는 자동 확인이 없다(2026-10-21 결정 --
-되돌릴 수 없는 root 삭제라 늘 사람이 「배치 확인」을 누른다): 켜는 라우트가 422(auto_confirm_sync_only)고, DB 에
-auto_confirm_by 를 써 넣어도 PreviewReady 분기의 sync 검사와 auto_confirm_hold 가 두 겹으로 거른다.
+자동 확인(2026-10-11 사용자 결정 -- "배치 sync 의 경우 자동 승인을 옵션으로, 기본 false"; rm 은 2026-10-21 사용자 요청
+「Rm 배치작업에서 sync와 마찬가지로 … 자동 확인 하는 옵션」 -- 같은 날 앞서 정한 「rm 은 늘 사람 확인」을 사용자가 뒤집었다):
+특권 세션 관리자가 생성(또는 종단 배치의 실행 설정 변경)에서 켠 sync·rm 배치(batches.auto_confirm_by, 연산 집합은
+domain.auto_confirmable 하나)는 PreviewReady 에서 루프가 **사람의 「배치 확인」과 같은 저장소 함수**(BatchesRepository.confirm
+-- 회차·Queued 없음 CAS + 그 순간 ConfirmPending 자식 도장 + 감사 행)를 대신 부른다. 새 경로는 없다: 도장·회차·Queued 둑과
+Running 분기의 「도장 없는 미리보기면 Previewing 복귀」는 그대로라, 확인은 여전히 한 회차의 미리보기 전부를 대표한다 --
+바뀐 것은 누르는 주체(켠 사람의 사전 동의)뿐이다. rm 은 그 사전 동의에 「되돌릴 수 없음」 확인이 하나 더 붙는다(켜는
+라우트가 acknowledge_irreversible: true 를 요구 -- 422 batch_rm_auto_confirm_ack_required, 감사 행에 남는다). 확인 직전에 켠
+사람의 자격을 다시 보고(auto_confirm_hold), 안 되면 확인 대기에 남겨 사람이 누르게 한다(보류). 단건 sync·rm 은 여전히
+사람이 컨펌한다(이 경로 밖 -- 배치 자식만 여기서 실행된다). scan 과 DB 변조 미지 연산은 자동 확인하지 않는다(켜는 라우트
+422 auto_confirm_sync_only, DB 에 auto_confirm_by 를 써 넣어도 PreviewReady 분기와 auto_confirm_hold 가 같은 술어로 거른다).
 """
 from .db import load_json, utc_now_iso
-from .domain import (DomainValidationError, Operation, TERMINAL_REQUEST_STATES, confirm_gated,
-                     DataJobState, build_data_payload, resolve_priority, validate_options)
+from .domain import (DomainValidationError, TERMINAL_REQUEST_STATES, auto_confirmable, confirm_gated,
+                     DataJobState, build_data_payload, resolve_priority, validate_batch_options)
 from .identity import privilege_eligible
 from .batch_cancel import record_item_terminal, sweep_cancelled
 from .privileged import privileged_names
@@ -102,16 +104,19 @@ def _hold(*, reason_code: str) -> str:
 
 
 def auto_confirm_hold(repos, settings, batch) -> str | None:
-    """자동 확인이 켜진 sync 배치를 지금 사람 대신 확인해도 되나 -- None 이면 된다, 아니면 보류 사유(확인 대기에 남고
+    """자동 확인이 켜진 sync·rm 배치를 지금 사람 대신 확인해도 되나 -- None 이면 된다, 아니면 보류 사유(확인 대기에 남고
     사람이 「배치 확인」을 누른다). orchestrator(확인 직전)와 배치 상세 GET(화면 안내)이 같은 술어를 쓴다 -- 두 곳이
     규칙을 따로 들면 한쪽만 바뀌는 순간 화면과 동작이 어긋난다.
 
     DB 가 신뢰 경계라 켜 둔 값을 그대로 믿지 않고 확인하는 순간 다시 본다(생성·확인 라우트의 특권 3중 게이트와 같은 결):
-    켠 사람이 지금도 특권 목록에 있고(허용 설정 포함), 계정이 활성 관리자다. 세션 조건은 켜는 라우트(생성·실행 설정
-    변경 -- _require_batch_privilege)가 그 순간 봤다 -- 토큰은 켤 수 없다. 옵션도 지금 규칙으로 다시 검증한다(사람의
-    확인 라우트 _reject_stale_options 와 같은 이유 -- 규칙이 바뀐 옛 배치를 실행 단계에서 하나씩 거부하지 않게)."""
+    연산이 자동 확인 집합(domain.auto_confirmable -- 미지 연산·scan 은 보류)이고, 켠 사람이 지금도 특권 목록에 있고(허용
+    설정 포함), 계정이 활성 관리자다. 세션 조건은 켜는 라우트(생성·실행 설정 변경 -- _require_batch_privilege)가 그 순간
+    봤다 -- 토큰은 켤 수 없다. rm 의 「되돌릴 수 없음」 동의도 켜는 라우트가 그 순간 봤다(감사 행) -- 여기서 다시 볼 DB
+    값은 없다(켠 사람 칸을 쓸 수 있는 손은 동의 표시도 쓸 수 있어, 동의 칸은 방어가 아니라 기록일 뿐이다 -- 방어는 아래
+    자격 재확인이다). 옵션도 지금 규칙으로 다시 검증한다(사람의 확인 라우트 _reject_stale_options 와 같은 함수 --
+    validate_batch_options, rm 은 recursive 동의까지. 규칙이 바뀐 옛 배치를 실행 단계에서 하나씩 거부하지 않게)."""
     by = batch.get("auto_confirm_by")
-    if batch.get("operation") != Operation.SYNC.value:
+    if not auto_confirmable(batch.get("operation")):
         return _hold(reason_code="auto_confirm_sync_only")
     if not settings.allow_privileged_requesters:
         # 사이트 전체 특권(root) 실행이 꺼졌다 -- 켠 사람 탓이 아니라 사람이 확인해도 root 로 돌지 못한다(문구가 다르다).
@@ -124,7 +129,7 @@ def auto_confirm_hold(repos, settings, batch) -> str | None:
     if account is None or account["disabled"] or account["role"] != "admin":
         return _hold(reason_code="auto_confirm_not_admin")
     try:
-        validate_options(batch["operation"], batch["options"])
+        validate_batch_options(batch["operation"], batch["options"])
     except DomainValidationError as exc:
         return exc.reason_code
     return None
@@ -267,9 +272,10 @@ class BatchOrchestrator:
             self._repos.batches.complete_if_all_terminal(bid, from_status=batch["status"])
             return
         if batch["status"] == "PreviewReady":
-            # 확인 대기: 위 기록·완료만(만들기·컨펌·전이 없음). 자동 확인이 켜진 sync 배치만 사람 대신 확인한다 -- rm 은
-            # 되돌릴 수 없는 삭제라 늘 사람이 확인한다(auto_confirm_by 를 DB 에 써 넣어도 여기서 제외, 모듈 docstring).
-            if batch.get("auto_confirm") is True and batch["operation"] == Operation.SYNC.value:
+            # 확인 대기: 위 기록·완료만(만들기·컨펌·전이 없음). 자동 확인이 켜진 sync·rm 배치만 사람 대신 확인한다 --
+            # 연산 판정은 켜는 라우트와 같은 술어(domain.auto_confirmable): scan·미지 연산은 auto_confirm_by 를 DB 에 써 넣어도
+            # 여기서 제외되고, auto_confirm_hold 가 같은 술어로 한 번 더 거른다(모듈 docstring).
+            if batch.get("auto_confirm") is True and auto_confirmable(batch["operation"]):
                 self._auto_confirm(batch, total=total, previewed=len(previewed))
             return
         now = utc_now_iso()
@@ -325,6 +331,8 @@ class BatchOrchestrator:
                              f"enabled by {batch.get('auto_confirm_by')}, waiting for a manual batch confirm")[:500])
             return
         # 확인한 미리보기의 대상 수 합계 -- 사람의 확인과 같은 함수·같은 입력(list_items_detail)이라 감사 행 모양이 같다.
+        # rm 의 acknowledged_irreversible 은 싣지 않는다: 루프는 동의를 본 적이 없다 -- 그 동의는 켤 때 켠 사람이 했고 그 감사
+        # 행(batch/auto_confirm_on·execution_settings 의 after)에 있다. 여기 True 를 쓰면 DB 행만으로 지어낸 주장이 된다.
         summary = {"previewed": previewed, "items": total, "options": batch["options"],
                    "auto_confirm_by": batch["auto_confirm_by"],
                    **preview_files(self._repos.batches.list_items_detail(bid))}

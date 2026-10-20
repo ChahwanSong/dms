@@ -156,7 +156,7 @@ controller.run_forever가 monotonic 스케줄로 루프별 리스(loop:<name>)�
 | `src/dms/planner.py` | planner(기본 10s): Pending 요청 50건을 conflict→계정→storage→identity→placement→fanout 게이트로 걸러 create_plan_and_job(plan·job INSERT + 조건부 Pending→Planned 한 트랜잭션 — 그 사이 취소·삭제된 요청엔 아무것도 남기지 않고 "gone") 으로 emit. 신원 전파 유예(_identity_grace_active, 기본 300s)면 상태 무변경 defer. 노드 선택 순서의 부하(노드별 DMS 예약 코어)는 틱마다 노드 선택까지 온 때 한 번 읽고(data_jobs.active_worker_pools → placement.dms_node_load) 그 틱에 계획한 잡을 더해 간다(같은 틱의 잡도 흩어진다). |
 | `src/dms/stepper.py` | job-stepper(기본 5s): drain 게이트 후 claim_steppable 잡을 상태기계(_dispatch, 273행)로 전진. 미지 tool·스토리지 결측은 _fail_closed로 종단, 실패 종단 전 diag 박제(_archive_diag), 취소 경합은 _reclaim_if_terminal이, 삭제 경합(행 부재)은 _record_ref/_reclaim_deleted 가 회수. |
 | `src/dms/reconciler.py` | storage-reconciler(기본 30s): 신선 에이전트 리포트만으로 storages.status를 Unknown/Ready/Degraded로 재계산, 값이 바뀔 때만 set_status. |
-| `src/dms/batch_orchestrator.py` | batch-orchestrator(기본 5s): 활성 배치의 Queued item을 max_concurrency 쓰로틀로 request로 materialize, 자식 종단 집계(counts bump), Previewing→PreviewReady / Running에서 ConfirmPending 자식 쓰로틀 confirm(확인 게이트 연산 sync·rm — `domain.confirm_gated`; 운영자의 배치 확인 1회가 자식 전부를 대표 -- 자식별 컨펌 없음; 자동 확인을 켠 배치는 PreviewReady 에서 루프가 같은 확인을 대신 — `auto_confirm_hold`). preview 만료는 stepper `expire_previews` 가 Rejected(preview_expired)로 끝내고 항목은 실패로 집계된다(자동 재미리보기 없음). Running 은 확인 도장이 지금 미리보기와 같은 자식만 컨펌한다. 상태 전이(Completed·PreviewReady)는 스냅샷 뒤 변경을 덮지 않는 CAS. |
+| `src/dms/batch_orchestrator.py` | batch-orchestrator(기본 5s): 활성 배치의 Queued item을 max_concurrency 쓰로틀로 request로 materialize, 자식 종단 집계(counts bump), Previewing→PreviewReady / Running에서 ConfirmPending 자식 쓰로틀 confirm(확인 게이트 연산 sync·rm — `domain.confirm_gated`; 운영자의 배치 확인 1회가 자식 전부를 대표 -- 자식별 컨펌 없음; 자동 확인을 켠 sync·rm 배치는 PreviewReady 에서 루프가 같은 확인을 대신 — `domain.auto_confirmable`·`auto_confirm_hold`). preview 만료는 stepper `expire_previews` 가 Rejected(preview_expired)로 끝내고 항목은 실패로 집계된다(자동 재미리보기 없음). Running 은 확인 도장이 지금 미리보기와 같은 자식만 컨펌한다. 상태 전이(Completed·PreviewReady)는 스냅샷 뒤 변경을 덮지 않는 CAS. |
 | `src/dms/pod_gc.py` | pod-gc(기본 600s, 창 86400s): 종단 잡의 pod/ 접두 phase_refs, Succeeded 가 **아닌** 종단 잡의 vcjob/ ref(2026-10-16 — Aborted vcjob 은 Volcano TTL 이 치우지 않는다; 창은 max(창, DMS_VCJOB_TTL_SECONDS), TTL 0 이면 vcjob 은 두고 Pod 만)와 종단 빌드의 빌드·프로브 파드만 terminate. ref별 예외 격리. 정리를 마친 잡엔 `data_jobs.pods_gc_at` 을 찍어 질의(부분 인덱스 `idx_data_jobs_gc`)에서 빠진다 — 예전엔 표시가 없어 오래된 순 LIMIT 200 이 같은 앞쪽 묶음만 되풀이했다. 지우기가 실패한 잡은 찍지 않고 1시간 뒤 다시(인스턴스 메모리, 그 사이 건너뛰고 더 읽는다). |
 | `src/dms/retention.py` | retention(기본 3600s): agent_reports·events를 보존일(기본 30d) 밖에서 배치 5000건 삭제. correctness 아닌 최적화. |
 | `src/dms/build_watcher.py` | build-watcher(기본 15s, build_runner 있을 때만): Pending 빌드는 프리플라이트 프로브 파드(멱등 제출)→OK 마커 확인 후 빌드 파드 제출, Running 빌드는 poll→finish. 나이 기반 회수(preflight 180s/build 7200s)와 I6 일시 오류 관용이 짝. |
@@ -464,14 +464,13 @@ FastAPI 앱(create_app) 하나가 세션 쿠키·공유 토큰 이중 인증 뒤
 - 사용자 sync 허용 스토리지 쌍(2026-09-30, `repositories/sync_pairs.py` 모듈 docstring)은 **기본 전부 불가**다: 비관리자 sync 는 `sync_pairs` 에 (소스, 목적지) 행이 있을 때만 허용되고(방향 있음 — A→B 와 B→A 는 별개, A→A 도 한 쌍), 판정은 `sync_pair_allowed` 하나로 제출(`routes_requests.submit` 403)·planner(`pair_exempt` 아니면 `sync_pair_not_allowed` 거부 — 관리자 계정·API 가 만드는 토큰 모양·**배치 자식**만 면제; 배치 면제는 쌍에만 쓰고 관리자 전용 스토리지 판정(`requester_is_admin`, 계정 역할 기준)으로 번지지 않는다)·컨펌(`routes_jobs.confirm_job`, ConfirmPending 중 해제된 쌍) 세 곳이 강제한다. 포탈 단일 작업 화면의 소스·목적지 상호 필터(`/api/user/sync-pairs` → `lib/syncPairs.syncChoices`)는 표시일 뿐이다. 스토리지 삭제는 같은 트랜잭션에서 그 스토리지가 낀 쌍을 지운다(같은 이름 재등록이 옛 허용을 물려받지 않게) — 사용자 sync 를 받는 새 경로를 만들면 같은 함수를 거쳐라. 이 테이블이 비어 있는 채로 올리면 사용자 sync 가 전부 거부된다(업그레이드 주의, deploy/README §6).
 - 배치 실행 설정(동시 실행 상한·우선순위·노드 수·노드당 프로세스 수·연산 옵션)은 **종단(Completed/Cancelled) 배치에서만** 바뀐다(2026-10-02, `routes_batches.patch_batch_execution` → `BatchesRepository.update_execution_settings` 의 SQL 가드 `WHERE status IN 종단` + 같은 트랜잭션의 audit_log `batch/execution_settings`). 활성·PreviewReady 는 409 `batch_settings_locked`: 자식은 materialize 시점에 배치 행을 읽어 payload 에 굳히므로(`BatchOrchestrator._materialize`) 도는 중에 바꾸면 "일부 옛값·일부 새값"이 된다 — 종단이면 살아 있는 자식이 없고 바뀐 값은 다음 재실행의 자식부터 적용된다. 이를 위해 orchestrator 는 틱 스냅샷이 아니라 **굴리기 직전에 다시 읽은 배치 행**으로 자식을 만든다(`_drive` 재확인 — 스냅샷 뒤 취소→설정 변경→재실행이 끝나면 옛 값으로 만들던 창, 적대적 리뷰 재현). 실행 설정 변경은 생성과 같은 특권 3중 게이트(`_require_batch_privilege`)·같은 검증(`validate_batch_controls`·`domain.validate_batch_options` — rm 은 recursive 동의까지, 2026-10-21)을 거친다. 실행 신원(owner_username)·연산·항목은 이 변경의 대상이 아니다(신원·특권 재료는 생성 시점 사실). options 는 통째 교체이고, 포탈 다이얼로그(`BatchExecutionSettingsDialog`)의 옵션 키 집합은 `domain._OPTION_SPECS` 와 같다(`test_batch_execution_dialog_contract`) — 그 밖의 저장 키는 서버가 거부하는 옛 옵션이라 "저장하면 빠진다"고 보여 주고 뺀다. 새 옵션을 추가하면 다이얼로그에도 넣어라.
 - 배치 재검토·확인 게이트(2026-10-07, rm 2026-10-21): **sync·rm 배치 자식은 운영자가 배치 확인으로 본 미리보기만
-  실행된다** — 예외는 하나, 자동 확인을 켠 sync 배치(아래)뿐이고 그것도 같은 확인 함수를 거친다. 「확인 게이트 연산」은
+  실행된다** — 예외는 하나, 자동 확인을 켠 sync·rm 배치(아래)뿐이고 그것도 같은 확인 함수를 거친다. 「확인 게이트 연산」은
   술어 하나(`domain.confirm_gated` — scan 밖 전부, DB 변조 미지 연산도 게이트 쪽)로 생성 상태·Queued 재생성 뒤 복귀·
   `:rescan`·orchestrator Running 분기를 가른다 — 두 벌이면 다음 연산을 더할 때 한쪽만 빠진다(rm 이 Running 분기의 scan
   가지로 떨어져 확인된 자식이 정체되던 2026-10-21 이전 모양).
   - rm 배치(2026-10-21 사용자 요청 「배치작업에 rm도」): 항목 모양은 scan(`{storage, target}`, 단일 스토리지), 확인 흐름은
-    sync(drm --dryrun 미리보기 → 「배치 확인」 → 도장 자식만 root drm). **자동 확인은 없다** — 되돌릴 수 없는 root 삭제라
-    늘 사람이 누른다: 생성·실행 설정 422 `auto_confirm_sync_only`, PreviewReady 분기의 `== SYNC`, `auto_confirm_hold` 세 겹이
-    DB 변조 행까지 막는다(열지 마라). 한 배치 안의 대상 겹침(같은 경로 두 번·조상과 자손 — 정규화 경로의 **성분** 단위)은
+    sync(drm --dryrun 미리보기 → 「배치 확인」 → 도장 자식만 root drm). 자동 확인은 sync 와 같은 옵션(아래, 2026-10-21 사용자
+    결정 — 같은 날 처음엔 「늘 사람 확인」이었다)이고, 켤 때 「되돌릴 수 없음」 동의가 하나 더 붙는다. 한 배치 안의 대상 겹침(같은 경로 두 번·조상과 자손 — 정규화 경로의 **성분** 단위)은
     422 `batch_rm_targets_overlap`(`domain._reject_overlapping_rm_targets`, `validate_batch` 한 곳이라 생성·추가·수정·교체
     모두, 판정 집합은 종단 항목 포함 전체): 자식 충돌 판정은 resource_key 가 정확히 같을 때만이라 a 와 a/b 가 둘 다 돌아
     확인 창 합계가 부풀고 a/b 는 실패 항목이 됐다. 추가·수정·교체의 배치 전체 판정(겹침·스토리지 동질성)은 **쓰기와 같은
@@ -486,17 +485,29 @@ FastAPI 앱(create_app) 하나가 세션 쿠키·공유 토큰 이중 인증 뒤
     만)가 없으면 422 `batch_rm_confirm_ack_required` — 체크가 없는 옛 포탈 탭(롤링 배포 중)이 rm 배치에 sync 문구의 확인 창을
     그려 {preview_round} 한 번으로 root drm 을 시작하던 길이다. 포탈은 체크했을 때만 싣고, sync 확인 계약은 그대로다(키 무시).
     감사 행 after 에 `acknowledged_irreversible: true`(rm 만). 이 검사를 포탈 쪽으로만 되돌리지 마라.
-  - 자동 확인(2026-10-11 사용자 결정 — "단일 sync 는 승인 필요, 배치 sync 는 자동 승인을 옵션으로, 기본 false"):
-    `batches.auto_confirm_by`(켠 사람, NULL = 꺼짐)가 있는 sync 배치는 PreviewReady 에서 orchestrator 가 사람 대신
+  - 자동 확인(2026-10-11 사용자 결정 — "단일 sync 는 승인 필요, 배치 sync 는 자동 승인을 옵션으로, 기본 false"; rm 배치는
+    2026-10-21 사용자 요청 「Rm 배치작업에서 sync와 마찬가지로 … 자동 확인 하는 옵션」): 연산은 **명시 집합**
+    `domain.auto_confirmable`(sync·rm) 하나로 켜는 라우트(422 `auto_confirm_sync_only` — 이름은 rm 이전 것, 옛 탭 계약이라
+    유지)·PreviewReady 분기·`auto_confirm_hold` 를 가른다 — scan(확인 단계 없음)과 DB 변조 미지 연산은 자동 확인하지 않는다
+    (`confirm_gated` 와 방향이 반대인 fail-closed: 모르는 것은 사람이 누른다). rm 은 켜는 순간(생성 `auto_confirm: true`,
+    실행 설정의 꺼짐 → 켜짐) 본문에 `acknowledge_irreversible: true`(StrictBool)가 있어야 한다 — 없으면 422
+    `batch_rm_auto_confirm_ack_required`. 사람의 rm `:confirm` 이 매번 받는 동의를 켜는 순간 한 번 받는 것이고, 그 사실은
+    감사 행(생성: `batch/auto_confirm_on` — sync 도 켠 사람·연산을 남긴다, 실행 설정: `batch/execution_settings` 의 after)에
+    남는다. 동의는 DB 열이 아니다(켠 사람 칸을 쓸 수 있는 손은 동의 칸도 쓴다 — 방어는 아래 자격 재확인이다), 그래서 자동
+    확인 감사 행에는 `acknowledged_irreversible` 을 쓰지 않는다(루프가 본 적 없는 동의를 지어내지 않는다 — `auto_confirm_by`
+    가 켤 때의 행을 가리킨다).
+    `batches.auto_confirm_by`(켠 사람, NULL = 꺼짐)가 있는 sync·rm 배치는 PreviewReady 에서 orchestrator 가 사람 대신
     **같은** `BatchesRepository.confirm`(회차·Queued CAS + 도장 + audit_log, actor `system:auto-confirm`·after 에 켠 사람)을
     부른다 — 아래 확인·실행 규칙(도장·Running 분기의 Previewing 복귀)은 그대로라, 바뀐 것은 누르는 주체(켠 사람의 사전
     동의)뿐이다. 켜기는 생성·종단 배치의 실행 설정 변경(특권 3중 게이트 — 토큰 불가), 끄기는 어느 상태에서나
     `:auto-confirm-off`(require_admin, 실행을 줄이기만 한다). 확인 직전 켠 사람이 지금도 특권 목록·활성 관리자이고 옵션이
-    유효한지 다시 보고(`batch_orchestrator.auto_confirm_hold` — 상세 GET 의 `auto_confirm_hold` 도 같은 술어), 아니면 확인
+    유효한지(`validate_batch_options` — 사람 확인의 `_reject_stale_options` 와 같은 함수, rm 은 recursive 동의까지) 다시 보고(`batch_orchestrator.auto_confirm_hold` — 상세 GET 의 `auto_confirm_hold` 도 같은 술어), 아니면 확인
     대기에 남는다(사람이 누름, 경고 이벤트는 회차마다 한 번 — 컨트롤러가 틱마다 orchestrator 를 새로 만들어 중복 방지는
     모듈 수준). 확인 UPDATE 자체도 그 동의에 묶인다(`confirm(expected_auto_confirm_by=…)` — 같은 문장에서 `auto_confirm_by`
     가 그 사람이고 계정이 활성 관리자): 틱이 읽은 뒤 「자동 실행 끄기」·강등이 커밋되면 0 행이다. **단건 sync·rm 은 여전히 사람이 컨펌한다**(스펙 「preview→confirm
-    은 root 도 우회 불가」의 단건 쪽은 그대로) — 서버 생략 기본값을 켜짐으로 바꾸지 마라. rm 배치는 이 자동 확인 밖이다(위).
+    은 root 도 우회 불가」의 단건 쪽은 그대로) — 서버 생략 기본값을 켜짐으로 바꾸지 마라. 포탈은 켜는 체크·「자동 실행 끄기」·
+    자동 안내문을 같은 명시 집합(`useBatches.autoConfirmable`)으로 그리고, rm 에서 켜면 빨간 경고 + **필수** 동의 체크(생성·실행
+    설정 변경 둘 다, 체크·연산을 바꾸면 풀린다)를 둔다 — 동의를 포탈에만 두지 마라(옛 탭·스크립트).
   - 재검토: 확인 게이트 배치(sync·rm)에 Queued 를 새로 만드는 모든 경로(전체·실패분·선택 재실행, 항목 추가, 활성 배치의 Queued 항목 수정)는 새 Queued 커밋 **뒤** 배치를 Previewing 으로 되돌린다(CAS — `routes_batches._reopen_after_new_queued`). 종단뿐 아니라 Running·PreviewReady 도. Running 에서 되돌리면 실행 중(Executing) 자식은 끝까지 돌고(슬롯은 차지하되 확인 대기 전이는 막지 않는다), 확인받고 슬롯을 기다리던 자식은 재확인까지 멈춘다.
   - 확인 대기: orchestrator 의 Previewing → PreviewReady 는 Queued·미리보기 단계 자식이 없고 확인할 미리보기가 있을 때만(`BatchesRepository.mark_preview_ready`, CAS) 이고 그때마다 **확인 회차**(`batches.preview_round`, NULL = 0)를 +1 한다. 확인할 것 없이 이미 확인된 실행 중 자식만 남았으면 Running 으로 돌린다. 확인 대기 배치도 루프가 **기록만** 하러 돈다(`list_awaiting_confirm` — 그 사이 끝난 자식을 항목에 남기고 전부 끝나면 완료; 만들기·컨펌·전이 없음).
   - 확인(`:confirm` → `BatchesRepository.confirm`): 본문의 회차(대화상자를 연 회차, 없으면 422 `preview_round_required`)·`status='PreviewReady'`·Queued 없음을 한 문장으로 CAS(다르면 409 `batch_preview_changed`/`batch_not_confirmable` — 확인 대기 → 다시 미리보기 → 확인 대기(ABA) 사이에 생긴 항목이 확인에 묻지 않게) + 같은 트랜잭션에서 그 순간 ConfirmPending 자식 잡에 **확인 도장**(`confirmed_fingerprint = preview_fingerprint`) + audit_log `batch/confirm`(확인자·회차·도장 수·옵션, 2026-10-21 부터 확인한 미리보기 대상 수 합계 `files_total`·모르는 항목 수 `files_unknown` — null≠0, 「누가 몇 개 삭제를 확인했나」; 사람의 `:confirm` 과 자동 확인이 **같은** `batch_orchestrator.preview_files` 로 같은 키를 남긴다 — 요약을 경로마다 따로 만들면 한쪽 감사 행만 키가 빠진다).

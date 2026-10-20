@@ -64,6 +64,20 @@ def confirm_gated(operation) -> bool:
     return operation != Operation.SCAN.value
 
 
+# 자동 확인(배치 확인을 orchestrator 가 대신 누름)을 켤 수 있는 연산 -- **명시 집합**이다(confirm_gated 와 방향이 반대).
+# sync(2026-10-11)와 rm(2026-10-21 사용자 요청 「Rm 배치작업에서 sync와 마찬가지로 … 자동 확인 하는 옵션」). scan 은 확인
+# 단계가 없어 켜 둔 값이 아무 일도 안 하는 거짓 설정이라 받지 않고, DB 변조로 들어온 미지 연산은 자동 확인하지 않는다
+# (fail-closed -- 게이트 쪽으로 읽는 confirm_gated 와 같은 결론: 모르는 연산은 사람이 누른다).
+AUTO_CONFIRMABLE_OPERATIONS = frozenset({Operation.SYNC.value, Operation.RM.value})
+
+
+def auto_confirmable(operation) -> bool:
+    """자동 확인을 켜고(생성·실행 설정 변경 422) 실제로 대신 확인하는(orchestrator PreviewReady 분기·auto_confirm_hold)
+    연산인가. 세 곳이 이 술어 하나를 쓴다 -- 두 벌이면 켜는 라우트와 확인하는 루프가 어긋나 「켰는데 영영 사람 대기」나
+    「막았는데 DB 행으로는 자동 확인」이 된다. 단건 sync·rm 은 이 경로 밖이다(배치 자식만 orchestrator 가 확인한다)."""
+    return operation in AUTO_CONFIRMABLE_OPERATIONS
+
+
 class Tool(StrEnum):
     DSCAN = "dscan"
     DSYNC = "dsync"
