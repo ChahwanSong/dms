@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiGet, apiSend } from "../../lib/api";
 import type { PurgeStorageHistoryResult, ScanTargetRow, UnregisteredStorage, UsageExport,
-              UsageHistory, UsageStorages } from "../../lib/types";
+              UsageHistory, UsageStorageTotals, UsageStorages } from "../../lib/types";
 import { DELETE_REQUESTS_INVALIDATES } from "../jobs/useJobs";
 
 // 타깃 필터(2026-10-02): storage = 스토리지 정확히 일치, path = 경로 부분 문자열 -- 둘이 함께 걸린다.
@@ -44,6 +44,25 @@ export const useScanTargets = (f: TargetFilter) =>
 export const useUsageStorages = () =>
   useQuery({ queryKey: ["usage-storages"],
              queryFn: () => apiGet<UsageStorages>("/api/admin/usage/storages"), staleTime: 30_000 });
+
+// 스토리지 합계(2026-10-21 사용자 요청 「스토리지별 사용량 및 정보들의 총합」): 스토리지 하나씩(서버가 그 스토리지 대상들의 요약을
+// 읽는다 -- 전 스토리지를 한 번에 부르면 탭을 열 때마다 모든 대상을 읽는다). 패널(StorageTotals)과 「스토리지별 비교」(UsageOverview)가
+// **같은 키**라 숫자 한 벌을 본다. 키를 ["usage-storages"] 아래에 두는 이유: 작업 삭제·미등록 정리(DELETE_REQUESTS_INVALIDATES)와
+// 스토리지 생성·수정·삭제(useStorages)가 그 접두를 무효화한다 -- 무효화 목록을 따로 고치지 않아도 합계가 함께 새로 고쳐진다.
+// 차가운 캐시: 서버는 한 호출에 요약을 정해진 수만큼만 읽고 나머지를 pending 으로 센다 -- 이번 호출이 진전했으면(progressed)
+// 1초 뒤 다시 불러 이어 읽게 하고, 진전이 없으면(전부 못 읽음) 멈춘다(같은 실패를 1초마다 되풀이하지 않게). 오류 중엔 멈춘다.
+// 빈 이름도 이름이다(encodeURIComponent("") = "" -- 서버는 실린 storage 를 빈 값이라도 정확 일치로 본다).
+export const useStorageTotals = (storage: string) =>
+  useQuery({
+    queryKey: ["usage-storages", "totals", storage],
+    queryFn: () => apiGet<UsageStorageTotals>(
+      `/api/admin/usage/storage-totals?storage=${encodeURIComponent(storage)}`),
+    staleTime: 30_000,
+    refetchInterval: (q) => {
+      const d = q.state.data;
+      return q.state.status !== "error" && d !== undefined && d.pending_count > 0 && d.progressed === true ? 1_000 : false;
+    },
+  });
 
 // 성공 scan 기록이 있는 스토리지 이름 -- 요약(useUsageStorages)을 못 받았을 때만 쓰는 대체 원천(enabled): 탭은 등록
 // 목록 ∪ 이 이름들로 그리고 대상 수는 모름으로 둔다.

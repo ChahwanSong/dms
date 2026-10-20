@@ -322,6 +322,27 @@ export interface UsageStorageSummary {
   target_count: number; succeeded_scan_count: number; last_scan_at: string | null;
 }
 export interface UsageStorages { window_limit: number; storages: UsageStorageSummary[] }
+// 스토리지 합계(GET /api/admin/usage/storage-totals?storage=, 2026-10-21 -- 서버 routes_usage.storage_totals 계약). 최상위 대상
+// (다른 대상 아래가 아닌 것)마다 최신 성공 scan 값의 합. 지표마다 known/unknown(대상 수) -- known 0 이면 sum null(기록 없음 ≠ 0).
+// pending = 이번 호출의 읽기 예산 밖이라 요약을 아직 안 읽은 대상(리포트 값은 모름으로 셈, 용량만 DB 값), progressed = 이번 호출이
+// 하나라도 새로 읽었다(포탈은 pending > 0 && progressed 동안 다시 부른다). filesystem = 그 스토리지가 Ready 마운트인 노드의 df.
+export interface UsageTotalMetric { sum: number | null; known: number; unknown: number }
+export interface UsageStorageFilesystem {
+  total_bytes: number; used_bytes: number; node_name: string; reported_at: string; fresh: boolean;
+  node_count: number; consistent: boolean;
+}
+export interface UsageStorageTotals {
+  storage_name: string; computed_at: string; truncated: boolean; window_limit: number;
+  target_count: number; summed_target_count: number; nested_target_count: number; invalid_target_count: number;
+  unreadable_count: number; pending_count: number; progressed: boolean;
+  total_bytes: UsageTotalMetric; total_files: UsageTotalMetric; total_directories: UsageTotalMetric;
+  total_symlinks: UsageTotalMetric; total_other: UsageTotalMetric; total_entries: UsageTotalMetric;
+  scan_errors: UsageTotalMetric; broken_paths_total: UsageTotalMetric;
+  hot_ratio: { value: number | null; hot_bytes: number | null; total_bytes: number | null; known: number; unknown: number };
+  file_size_histogram: { buckets: HistogramBucket[]; known: number; unknown: number };
+  oldest_scan_at: string | null; newest_scan_at: string | null;
+  filesystem: UsageStorageFilesystem | null;
+}
 // 사용량 분석의 미등록 스토리지(GET /api/admin/usage/unregistered-storages, 2026-10-12). target_count·succeeded_scan_count·
 // last_scan_at = 사용량 화면 기준(성공 scan -- 실패 scan 만 남은 이름은 0·null), request_count = 정리하면 지워질 작업 수
 // (단건 + batches 의 자식). mixed_batches = 다른 스토리지·다른 작업이 섞여 정리가 건너뛸 배치(수에 넣지 않는다).

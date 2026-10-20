@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, useLocation } from "react-router-dom";
@@ -6,7 +6,8 @@ import { setupServer } from "msw/node";
 import { delay, http, HttpResponse } from "msw";
 import { afterAll, afterEach, beforeAll, expect, test, vi } from "vitest";
 import { UsageAnalysis, hotRatio, pointEpoch, stackLayout, staleClass } from "./UsageAnalysis";
-import type { Storage, UnregisteredStorage, UsagePoint, UsageStorageSummary } from "../../lib/types";
+import type { HistogramBucket, Storage, UnregisteredStorage, UsagePoint, UsageStorageSummary,
+              UsageStorageTotals } from "../../lib/types";
 import { downloadCsv } from "../../lib/csvExport";
 
 // 다운로드(Blob·a.click)는 jsdom 밖 동작이라 가로챈다 -- 직렬화(toCsv)는 진짜를 쓴다.
@@ -102,6 +103,38 @@ const unreg = (name: string, over: Partial<UnregisteredStorage> = {}): Unregiste
   batches: [], request_count: 1, mixed_batches: [],
   last_known: { backend_type: "gpfs", mount_path: "/old", managed_root: "/old/m" }, ...over });
 
+// 파일 크기 구간(dscan 실측 10구간 모양 -- 마지막 구간은 upper_inclusive 키가 없다).
+const SIZE_LIMITS = [4096, 65536, 1048576, 16777216, 268435456, 1073741824, 17179869184, 274877906944, 4398046511104];
+const sizeHist = (counts: number[]): HistogramBucket[] => counts.map((c, i) => {
+  const lo = i === 0 ? 0 : SIZE_LIMITS[i - 1] + 1, hi = SIZE_LIMITS[i];
+  return { bucket: hi === undefined ? `[${lo},INF]` : `[${lo},${hi}]`, lower_inclusive: lo,
+           ...(hi === undefined ? {} : { upper_inclusive: hi }), count: c };
+});
+const pad10 = (head: number[]) => [...head, ...Array(10 - head.length).fill(0)] as number[];
+
+// 스토리지 합계 응답(design-1021 storage-totals 계약). 기본값 = 테스트베드 cephfs-dms 실측(최상위 4개 · 하위 5개).
+const m = (sum: number | null, known: number, unknown = 0) => ({ sum, known, unknown });
+const totalsOf = (name: string, over: Partial<UsageStorageTotals> = {}): UsageStorageTotals => ({
+  storage_name: name, computed_at: isoAgo(0), truncated: false, window_limit: 10000,
+  target_count: 9, summed_target_count: 4, nested_target_count: 5, invalid_target_count: 0,
+  unreadable_count: 0, pending_count: 0, progressed: false,
+  total_bytes: m(17786075, 4), total_files: m(662, 4), total_directories: m(243, 4), total_symlinks: m(0, 4),
+  total_other: m(0, 4), total_entries: m(905, 4), scan_errors: m(0, 4), broken_paths_total: m(0, 4),
+  hot_ratio: { value: 1, hot_bytes: 17786075, total_bytes: 17786075, known: 4, unknown: 0 },
+  file_size_histogram: { buckets: sizeHist(pad10([590, 66, 2, 4])), known: 4, unknown: 0 },
+  oldest_scan_at: isoAgo(65), newest_scan_at: isoAgo(18),
+  filesystem: { total_bytes: 24498929664, used_bytes: 37748736, node_name: "dms-w2", reported_at: isoAgo(0),
+                fresh: true, node_count: 5, consistent: true },
+  ...over });
+// 기록 없는 스토리지(대상 0) -- 값은 전부 모름(null), 히스토그램 빈 배열(「0 B」가 아니다).
+const emptyTotals = (name: string): UsageStorageTotals => totalsOf(name, {
+  target_count: 0, summed_target_count: 0, nested_target_count: 0,
+  total_bytes: m(null, 0), total_files: m(null, 0), total_directories: m(null, 0), total_symlinks: m(null, 0),
+  total_other: m(null, 0), total_entries: m(null, 0), scan_errors: m(null, 0), broken_paths_total: m(null, 0),
+  hot_ratio: { value: null, hot_bytes: null, total_bytes: null, known: 0, unknown: 0 },
+  file_size_histogram: { buckets: [], known: 0, unknown: 0 }, oldest_scan_at: null, newest_scan_at: null,
+  filesystem: null });
+
 // 지금 URL(검색 문자열)을 화면에 꺼내 둔다 -- 탭 전환·행 접기가 URL 에 무엇을 남기는지 단언한다.
 function LocationProbe() {
   const loc = useLocation();
@@ -124,10 +157,14 @@ interface Setup {
   history?: unknown;
   onHistory?: (u: URL) => void;
   onExport?: (u: URL) => unknown;
+  // 스토리지 합계(storage 파라미터로 고른다 -- 없으면 대상 0 응답). "error" = 500, "html" = 옛 API 의 SPA 200.
+  totals?: Record<string, UsageStorageTotals | "error" | "html"> | ((storage: string, call: number) => UsageStorageTotals);
+  onTotals?: (u: URL) => void;
 }
 
 function setup(o: Setup = {}) {
   const summary = o.summary ?? SUMMARY;
+  const totalsCalls: Record<string, number> = {};
   server.use(
     http.get("/api/admin/storages", () => HttpResponse.json(o.storages ?? STORAGES)),
     http.get("/api/admin/usage/storages", async () => {
@@ -156,6 +193,19 @@ function setup(o: Setup = {}) {
     }),
     http.get("/api/admin/usage/export", ({ request }) =>
       HttpResponse.json(o.onExport?.(new URL(request.url)) ?? { generated_at: "", count: 0, truncated: false, rows: [] })),
+    http.get("/api/admin/usage/storage-totals", ({ request }) => {
+      const u = new URL(request.url);
+      o.onTotals?.(u);
+      const s = u.searchParams.get("storage") ?? "";
+      totalsCalls[s] = (totalsCalls[s] ?? 0) + 1;
+      const t = typeof o.totals === "function" ? o.totals(s, totalsCalls[s])
+        : (o.totals ?? { "cephfs-dms": totalsOf("cephfs-dms") })[s] ?? emptyTotals(s);
+      if (t === "error") return HttpResponse.json({ detail: "internal" }, { status: 500 });
+      if (t === "html") {
+        return new HttpResponse("<!doctype html><html></html>", { status: 200, headers: { "content-type": "text/html" } });
+      }
+      return HttpResponse.json(t);
+    }),
   );
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
@@ -449,7 +499,8 @@ test("타깃 선택 → 한 줄 수치·추이 차트·미상 고지·접힌 스
   setup();
   await userEvent.click(await screen.findByRole("button", { name: "artifacts" }));
   // 수치 줄: 최신 3.0 KiB, 직전(1.0 KiB) 대비 +2.0 KiB, hot 100%(atime 첫 버킷 전부). 값은 dt 의 다음 형제 dd.
-  const stat = async (label: string) => (await screen.findByText(label, { selector: "dt" })).nextElementSibling;
+  const region = await screen.findByRole("region", { name: "cephfs-dms:artifacts 상세" });
+  const stat = async (label: string) => (await within(region).findByText(label, { selector: "dt" })).nextElementSibling;
   expect(await stat("최신 실 사용량")).toHaveTextContent("3.0 KiB");
   expect(await stat("직전 스캔 대비")).toHaveTextContent("+2.0 KiB");
   expect(await stat("hot 비율(180일)")).toHaveTextContent("100%");
@@ -476,18 +527,20 @@ test("펼침은 한 번에 하나: 재클릭 = 접기, 다른 행 클릭 = 펼�
   const artifacts = await screen.findByRole("button", { name: "artifacts" });
   const team = screen.getByRole("button", { name: "team" });
   expect(artifacts).toHaveAttribute("aria-expanded", "false");
-  expect(screen.queryByRole("region")).toBeNull();
+  // 펼친 상세 region 만 센다 -- 패널 맨 위의 「이 스토리지 합계」(2026-10-21)도 이름 붙은 구역이다.
+  const DETAIL = { name: / 상세$/ };
+  expect(screen.queryByRole("region", DETAIL)).toBeNull();
   await userEvent.click(artifacts);
   const region = await screen.findByRole("region", { name: "cephfs-dms:artifacts 상세" });
   expect(artifacts.closest("tr")!.nextElementSibling).toContainElement(region);
   expect(team).toHaveAttribute("aria-expanded", "false");
   await userEvent.click(team);
   await screen.findByRole("region", { name: "cephfs-dms:team 상세" });
-  expect(screen.getAllByRole("region")).toHaveLength(1);
+  expect(screen.getAllByRole("region", DETAIL)).toHaveLength(1);
   expect(screen.getByRole("button", { name: "artifacts" })).toHaveAttribute("aria-expanded", "false");
   expect(screen.getByRole("button", { name: "team" })).toHaveAttribute("aria-expanded", "true");
   await userEvent.click(screen.getByRole("button", { name: "team" }));
-  expect(screen.queryByRole("region")).toBeNull();
+  expect(screen.queryByRole("region", DETAIL)).toBeNull();
   expect(screen.getByRole("button", { name: "team" })).toHaveAttribute("aria-expanded", "false");
 });
 
@@ -791,4 +844,247 @@ test("CSV 내보내기는 지금 열 정렬(sort·order)과 경로 검색을 그
   expect(exportUrls[0].searchParams.get("path")).toBe("fr");
   expect(exportUrls[0].searchParams.get("sort")).toBe("hot");
   expect(exportUrls[0].searchParams.get("order")).toBe("desc");
+});
+
+// ---- 파일 크기 분포(2026-10-21 「최근 스캔 기준 파일의 사이즈별 정보」) ----
+
+const detailOf = (target: string) => screen.findByRole("region", { name: `cephfs-dms:${target} 상세` });
+// 상세의 분포: 이력의 다른 포인트(이전 scan)에 다른 분포를 심어, 기준이 무엇인지 가려낸다.
+const OLDER_SIZES = { ...HISTORY, points: HISTORY.points.map((p) => ({ ...p, file_size_histogram: sizeHist(pad10([1])) })) };
+
+test("펼친 상세: 「최신 scan」 블록 = 수치 줄 | 파일 크기 분포 -- 기준은 목록 행의 최신 scan(이력의 다른 포인트가 아님)", async () => {
+  setup({ targets: { "cephfs-dms": [{ ...TARGETS[0], latest: point({ file_size_histogram: sizeHist(pad10([22, 0, 0, 4])) }) },
+                                    TARGETS[1]] },
+          history: OLDER_SIZES });
+  await userEvent.click(await screen.findByRole("button", { name: "artifacts" }));
+  const region = await detailOf("artifacts");
+  const dist = await within(region).findByRole("list", { name: "파일 크기 분포" });
+  expect(within(dist).getAllByRole("listitem")).toHaveLength(10);              // 0개 구간도 줄로 남는다
+  expect(within(dist).getByText("4 KiB 이하 22개 85%")).toBeInTheDocument();
+  expect(within(dist).getByText("1–16 MiB 4개 15%")).toBeInTheDocument();
+  expect(within(dist).getByText("4 TiB 초과 0개 0%")).toBeInTheDocument();
+  expect(within(dist).queryByText(/4 KiB 이하 1개/)).toBeNull();               // 이력(이전 scan)의 분포가 아니다
+  expect(within(region).getByText("최신 scan · 파일 26개")).toBeInTheDocument();
+  expect(within(region).getByRole("button", { name: "파일 크기 분포 설명" })).toBeInTheDocument();
+  // 수치 줄은 그대로 같은 블록에 있다
+  expect(within(region).getByRole("list", { name: "파일 크기 분포" })).toBeInTheDocument();
+  expect(within(region).getByText("최신 실 사용량", { selector: "dt" })).toBeInTheDocument();
+});
+
+test("목록 행에 최신 정보가 없으면(딥링크 폴백 포함) 이력에서 시각이 가장 늦은 포인트의 분포(서버 순서가 아니다)", async () => {
+  const pts = [
+    point({ job_id: "j1", request_id: "r1", generated_at_epoch: 1787400000, file_size_histogram: sizeHist(pad10([1])) }),
+    point({ job_id: "j3", request_id: "r3", generated_at_epoch: 1787500000, file_size_histogram: sizeHist(pad10([5, 5])) }),
+    point({ job_id: "j2", request_id: "r2", generated_at_epoch: 1787450000, file_size_histogram: sizeHist(pad10([9])) }),
+  ];
+  setup({ path: "/admin/usage?storage=cephfs-dms&target=artifacts", history: { ...HISTORY, points: pts } });
+  const region = await detailOf("artifacts");
+  expect(await within(region).findByText("4 KiB 이하 5개 50%")).toBeInTheDocument();
+  expect(within(region).getByText("최신 scan · 파일 10개")).toBeInTheDocument();
+});
+
+test("분포 모름: 최신 scan 리포트를 못 읽었으면 그렇게 말하고(옛 scan 분포로 대신하지 않는다), 구형 리포트면 「기록 없음」", async () => {
+  setup({ targets: { "cephfs-dms": [
+            { ...TARGETS[0], latest: point({ report_readable: false, summary: {}, time_histograms: {}, file_size_histogram: [] }) },
+            { ...TARGETS[1], latest: point({ file_size_histogram: [] }) }] },
+          history: OLDER_SIZES });
+  await userEvent.click(await screen.findByRole("button", { name: "artifacts" }));
+  const region = await detailOf("artifacts");
+  expect(await within(region).findByText("최신 scan 의 리포트를 읽지 못해 크기 분포를 알 수 없습니다")).toBeInTheDocument();
+  expect(within(region).queryByRole("list", { name: "파일 크기 분포" })).toBeNull();
+  expect(within(region).queryByText(/최신 scan · 파일/)).toBeNull();
+  await userEvent.click(screen.getByRole("button", { name: "team" }));
+  const team = await detailOf("team");
+  expect(await within(team).findByText("크기 분포 기록이 없습니다(구형 리포트)")).toBeInTheDocument();
+  expect(within(team).queryByRole("list", { name: "파일 크기 분포" })).toBeNull();     // 0 막대 10줄로 그리지 않는다
+});
+
+// ---- 이 스토리지 합계(2026-10-21 「스토리지별 사용량 및 정보들의 총합」) ----
+
+const totalsBox = () => screen.findByRole("region", { name: "이 스토리지 합계" });
+const valueOf = (box: HTMLElement, label: string) => within(box).getByText(label, { selector: "dt" }).nextElementSibling;
+
+test("이 스토리지 합계: 실 사용량·파일·디렉터리·hot·df + 크기 분포 + 각주(최상위 기준 · 하위 제외 · scan 시점 범위)", async () => {
+  const seen: URL[] = [];
+  setup({ onTotals: (u) => seen.push(u) });
+  const box = await totalsBox();
+  expect(await within(box).findByText("17.0 MiB")).toBeInTheDocument();
+  expect(valueOf(box, "실 사용량")).toHaveTextContent(/^17\.0 MiB$/);
+  expect(valueOf(box, "실 사용량")).toHaveAttribute("title", "17,786,075 B");
+  expect(valueOf(box, "파일")).toHaveTextContent(/^662개$/);
+  expect(valueOf(box, "디렉터리")).toHaveTextContent(/^243개$/);
+  expect(valueOf(box, "hot 비율(180일)")).toHaveTextContent(/^100%$/);
+  expect(valueOf(box, "파일시스템 사용(df)")).toHaveTextContent("36.0 MiB/ 22.8 GiB0.2%");
+  const dist = within(box).getByRole("list", { name: "파일 크기 분포" });
+  expect(within(dist).getByText("4 KiB 이하 590개 89%")).toBeInTheDocument();
+  expect(within(dist).getByText("4–64 KiB 66개 10.0%")).toBeInTheDocument();
+  expect(box).toHaveTextContent("최상위 대상 4개 기준 · 하위 대상 5개 제외 · scan 시점 65일 전 ~ 18일 전");
+  expect(within(box).getByText("65일 전")).toHaveClass("text-attn");            // 오래된 쪽은 표의 경과 색(30일↑ 주의)
+  // 표·검색은 합계 아래에서 그대로
+  expect(await screen.findByRole("button", { name: "artifacts" })).toBeInTheDocument();
+  // 요청은 storage 하나만(경로 검색·정렬과 무관)
+  expect(seen.map((u) => u.search)).toEqual(["?storage=cephfs-dms"]);
+});
+
+test("합계 null ≠ 0: 모르는 값은 —, 0 은 「0개」, 모름을 뺀 합은 값 뒤 「이상」(hot 은 비율이라 붙이지 않는다) · df 모름이면 칸 없음", async () => {
+  setup({ totals: { "cephfs-dms": totalsOf("cephfs-dms", {
+    total_bytes: m(null, 0, 4), total_files: m(0, 4), total_directories: m(243, 3, 1),
+    hot_ratio: { value: 0.5, hot_bytes: 1, total_bytes: 2, known: 3, unknown: 1 }, filesystem: null }) } });
+  const box = await totalsBox();
+  await within(box).findByText("243개");
+  expect(valueOf(box, "실 사용량")).toHaveTextContent(/^—$/);
+  expect(valueOf(box, "파일")).toHaveTextContent(/^0개$/);
+  expect(valueOf(box, "디렉터리")).toHaveTextContent(/^243개 이상$/);
+  expect(valueOf(box, "hot 비율(180일)")).toHaveTextContent(/^50%$/);
+  expect(within(box).queryByText("파일시스템 사용(df)")).toBeNull();
+  expect(box).toHaveTextContent("값 모름 4개");
+});
+
+test("각주 조각은 해당할 때만: 형식 오류·값 모름·창(1만) -- 하위 0 이면 없음, 같은 날 scan 시점은 하나", async () => {
+  setup({ totals: { "cephfs-dms": totalsOf("cephfs-dms", {
+    nested_target_count: 0, invalid_target_count: 2, truncated: true, total_files: m(600, 1, 3),
+    oldest_scan_at: isoAgo(5), newest_scan_at: isoAgo(5) }) } });
+  const box = await totalsBox();
+  expect(await within(box).findByText(/형식이 잘못된 대상 2개 제외/)).toBeInTheDocument();
+  expect(box).toHaveTextContent(
+    "최상위 대상 4개 기준 · 형식이 잘못된 대상 2개 제외 · 값 모름 3개 · 최근 스캔된 10,000개 대상 기준 · scan 시점 5일 전");
+  expect(box).not.toHaveTextContent("하위 대상");
+  expect(box).not.toHaveTextContent("요약 읽는 중");
+  expect(box).not.toHaveTextContent("~");
+});
+
+test("요약 읽는 중(pending > 0 · progressed): 1초 뒤 다시 불러 이어 읽고, 다 읽으면 멈춘다", async () => {
+  const calls: number[] = [];
+  setup({ totals: (s, call) => {
+    calls.push(call);
+    return call === 1 ? totalsOf(s, { pending_count: 2, progressed: true, total_files: m(600, 2, 2) }) : totalsOf(s);
+  } });
+  const box = await totalsBox();
+  expect(await within(box).findByText(/요약 읽는 중 2개/)).toBeInTheDocument();
+  expect(box).not.toHaveTextContent("값 모름");                                // 읽는 중인 것은 따로 말한다
+  expect(valueOf(box, "파일")).toHaveTextContent(/^600개 이상$/);
+  await waitFor(() => expect(valueOf(box, "파일")).toHaveTextContent(/^662개$/), { timeout: 3000 });
+  expect(box).not.toHaveTextContent("요약 읽는 중");
+  await new Promise((r) => setTimeout(r, 1300));
+  expect(calls).toEqual([1, 2]);
+});
+
+test("진전 없는 pending(progressed false)은 다시 부르지 않고 「값 모름」으로 말한다", async () => {
+  const calls: number[] = [];
+  setup({ totals: (s, call) => {
+    calls.push(call);
+    return totalsOf(s, { pending_count: 2, progressed: false, total_files: m(600, 2, 2) });
+  } });
+  const box = await totalsBox();
+  expect(await within(box).findByText(/값 모름 2개/)).toBeInTheDocument();
+  expect(box).not.toHaveTextContent("요약 읽는 중");
+  await new Promise((r) => setTimeout(r, 1300));
+  expect(calls).toEqual([1]);
+});
+
+test("합계 실패여도 표는 그려진다 -- 서버 사유는 덧붙이고, 옛 API(SPA index.html 200)의 파서 문장은 띄우지 않는다", async () => {
+  setup({ totals: { "cephfs-dms": "error" } });
+  expect(await screen.findByText("합계를 불러오지 못했습니다 — internal")).toBeInTheDocument();
+  expect(await screen.findByRole("button", { name: "artifacts" })).toBeInTheDocument();
+  cleanup();
+  setup({ totals: { "cephfs-dms": "html" } });
+  expect(await screen.findByText("합계를 불러오지 못했습니다")).toBeInTheDocument();
+  expect(screen.queryByText(/Unexpected token|JSON/)).toBeNull();
+  expect(await screen.findByRole("button", { name: "artifacts" })).toBeInTheDocument();
+});
+
+test("기록 0개 탭(등록 빈 스토리지·실패 기록만 남은 미등록)엔 합계 블록도 요청도 없다", async () => {
+  const seen: string[] = [];
+  setup({ storages: [st("a-empty")],
+          summary: [sum("a-empty", { target_count: 0, succeeded_scan_count: 0, last_scan_at: null })],
+          unregistered: [unreg("ghost", { target_count: 0, succeeded_scan_count: 0, last_scan_at: null })],
+          onTotals: (u) => seen.push(u.searchParams.get("storage") ?? "") });
+  expect(await screen.findByText("이 스토리지에는 아직 성공한 scan 이 없습니다")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("tab", { name: /^ghost/ }));
+  expect(await screen.findByText("성공한 scan 기록이 없습니다")).toBeInTheDocument();
+  expect(screen.queryByRole("region", { name: "이 스토리지 합계" })).toBeNull();
+  expect(seen).toEqual([]);
+});
+
+test("합계는 경로 검색과 무관하고, 탭을 오가도 스토리지마다 한 번(같은 키 캐시)", async () => {
+  const seen: string[] = [];
+  setup({ storages: [st("cephfs-dms"), st("mirror")], summary: [sum("cephfs-dms"), sum("mirror")],
+          targets: { "cephfs-dms": TARGETS, mirror: TARGETS.map((r) => ({ ...r, storage_name: "mirror" })) },
+          totals: { "cephfs-dms": totalsOf("cephfs-dms"), mirror: totalsOf("mirror", { total_bytes: m(2048, 4) }) },
+          onTotals: (u) => seen.push(u.search) });
+  await within(await totalsBox()).findByText("17.0 MiB");
+  await userEvent.type(screen.getByLabelText("경로 검색"), "team");
+  await userEvent.click(screen.getByRole("tab", { name: /^mirror/ }));
+  expect(await within(await totalsBox()).findByText("2.0 KiB")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("tab", { name: /^cephfs-dms/ }));
+  expect(await within(await totalsBox()).findByText("17.0 MiB")).toBeInTheDocument();
+  expect(seen).toEqual(["?storage=cephfs-dms", "?storage=mirror"]);
+});
+
+test("빈 이름 탭의 합계는 storage= (빈 이름)로 부른다", async () => {
+  const seen: (string | null)[] = [];
+  setup({ storages: [st("cephfs-dms")],
+          summary: [sum("cephfs-dms"), sum("", { registered: false, source: null, backend_type: null, mount_path: null,
+                                                 target_count: 1 })],
+          targets: { "cephfs-dms": TARGETS, "": [{ ...TARGETS[0], storage_name: "", target: "blank-row" }] },
+          totals: { "cephfs-dms": totalsOf("cephfs-dms"), "": totalsOf("", { total_bytes: m(4096, 4) }) },
+          onTotals: (u) => seen.push(u.searchParams.get("storage")) });
+  await userEvent.click(await screen.findByRole("tab", { name: "(이름 없음) 미등록 대상 1개" }));
+  expect(await within(await totalsBox()).findByText("4.0 KiB")).toBeInTheDocument();
+  expect(seen).toContain("");
+});
+
+// ---- 스토리지별 비교(2026-10-21) ----
+
+test("스토리지별 비교: 스토리지가 하나면 없다", async () => {
+  setup();
+  await totalsBox();
+  expect(screen.queryByText("스토리지별 비교")).toBeNull();
+});
+
+test("스토리지별 비교: 기본 닫힘(그 동안 합계 요청은 지금 탭뿐) -- 열면 탭마다 같은 쿼리, 기록 없음·실패·미등록 행, 총계 행 없음, 행 = 그 탭", async () => {
+  const seen: string[] = [];
+  setup({ storages: [st("cephfs-dms"), st("empty"), st("zz-broken")],
+          summary: [sum("cephfs-dms"), sum("empty", { target_count: 0, succeeded_scan_count: 0, last_scan_at: null }),
+                    sum("zz-broken"), sum("old", { registered: false, source: "last_known" })],
+          unregistered: [unreg("old")],
+          totals: { "cephfs-dms": totalsOf("cephfs-dms"), "zz-broken": "error",
+                    old: totalsOf("old", { total_bytes: m(734003200, 4), filesystem: null }) },
+          onTotals: (u) => seen.push(u.searchParams.get("storage") ?? "") });
+  await within(await totalsBox()).findByText("17.0 MiB");
+  expect(seen).toEqual(["cephfs-dms"]);
+  const toggle = screen.getByText("스토리지별 비교");
+  const details = toggle.closest("details")!;
+  expect(details.open).toBe(false);
+  await userEvent.click(toggle);
+  expect(details.open).toBe(true);
+  const table = await within(details).findByRole("table");
+  const rowOf = (name: string) => within(table).getByRole("button", { name: `${name} 탭 열기` }).closest("tr")!;
+  expect(within(table).getAllByRole("columnheader").map((h) => h.textContent))
+    .toEqual(["스토리지", "실 사용량", "파일", "디렉터리", "hot 비율", "파일시스템(df)", "대상"]);
+  await waitFor(() => expect(rowOf("old")).toHaveTextContent("700.0 MiB"));
+  expect(rowOf("cephfs-dms")).toHaveTextContent("17.0 MiB");
+  expect(rowOf("cephfs-dms")).toHaveTextContent("36.0 MiB / 22.8 GiB");
+  expect(rowOf("cephfs-dms")).toHaveTextContent("662");
+  expect(rowOf("old")).toHaveTextContent("미등록");
+  await waitFor(() => expect(rowOf("zz-broken")).toHaveTextContent("불러오지 못함"));
+  await waitFor(() => expect(within(rowOf("empty")).getAllByText("—")).toHaveLength(5));   // 기록 없음 ≠ 0 B
+  // 행 = 탭(순서 그대로), 스토리지끼리 더한 총계 행은 없다
+  expect(within(table).getAllByRole("row")).toHaveLength(1 + 4);
+  expect(within(table).getAllByRole("button").map((b) => b.getAttribute("aria-label")))
+    .toEqual(["cephfs-dms 탭 열기", "empty 탭 열기", "zz-broken 탭 열기", "old 탭 열기"]);
+  expect(details).toHaveTextContent("스토리지끼리는 더하지 않습니다");
+  // 지금 탭(패널)과 같은 쿼리 -- cephfs-dms 는 다시 부르지 않는다
+  expect(seen.filter((x) => x === "cephfs-dms")).toHaveLength(1);
+  expect(new Set(seen)).toEqual(new Set(["cephfs-dms", "empty", "zz-broken", "old"]));
+  expect(within(rowOf("cephfs-dms")).getByRole("button")).toHaveAttribute("aria-current", "true");
+  // 행을 누르면 그 탭(비교 표는 열린 채)
+  await userEvent.click(rowOf("old"));
+  expect(loc().get("storage")).toBe("old");
+  expect(screen.getByRole("tab", { name: /^old/ })).toHaveAttribute("aria-selected", "true");
+  expect(details.open).toBe(true);
+  // 키보드: 이름 버튼(Enter)
+  within(table).getByRole("button", { name: "empty 탭 열기" }).focus();
+  await userEvent.keyboard("{Enter}");
+  expect(loc().get("storage")).toBe("empty");
 });

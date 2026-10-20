@@ -11,6 +11,7 @@ import {
 } from "./useUsage";
 import { buildStorageTabs, defaultStorage, storageLabel, type StorageTab } from "./usageTabs";
 import { StoragePanel } from "./StoragePanel";
+import { UsageOverview } from "./UsageOverview";
 import { PurgeResult } from "./UnregisteredStorages";
 
 // 순수 규칙은 usageStats(화면·CSV 공용 한 벌, 2026-10-02 분리) -- 기존 import 경로 호환을 위해 다시 내보낸다.
@@ -22,8 +23,9 @@ export { staleClass } from "./TargetTable";
 // 전 스토리지의 최근 스캔 5천 개 창에서 돌았다. 이제 처음부터 스토리지 탭 하나를 보고, 목록·정렬·CSV 요청에 늘 storage 가
 // 실린다(서버의 지표 정렬 창도 그 스토리지 안에서 -- routes_usage). 「전체」 탭은 없다.
 //
-// 구성: 머리말 → (정리 직후) 결과 줄 → 스토리지 탭(usageTabs: 등록 이름순 | 미등록 이름순) → 탭 패널 = 카드 하나
-// (StoragePanel). 미등록 스토리지는 따로 뜨던 칸 대신 「미등록」 표시 탭이 되고, 정리 버튼은 그 탭의 경고 띠에 있다.
+// 구성: 머리말 → 접힌 「스토리지별 비교」(2026-10-21, UsageOverview) → (정리 직후) 결과 줄 → 스토리지 탭(usageTabs: 등록
+// 이름순 | 미등록 이름순) → 탭 패널 = 카드 하나(StoragePanel -- 맨 위에 「이 스토리지 합계」). 미등록 스토리지는 따로 뜨던 칸
+// 대신 「미등록」 표시 탭이 되고, 정리 버튼은 그 탭의 경고 띠에 있다.
 //
 // URL 이 진실이다: ?storage= = 탭, &target= = 그 탭 안에서 펼친 행 -- 새로고침·딥링크에서 같은 화면이 나온다(옛 링크
 // ?storage=&target= 의 뜻 그대로). storage 가 없으면 기본 탭(usageTabs.defaultStorage)을 **파생**한다 -- URL 에 쓰지 않아
@@ -170,6 +172,9 @@ export function UsageAnalysis() {
           스토리지별 디렉터리 scan 이력 — 실 사용량과 데이터 온도(요청자와 무관한 모든 성공 scan).
         </p>
       </header>
+
+      {/* 스토리지별 비교(2026-10-21) -- 접힌 한 줄, 열면 스토리지마다의 합계 표(패널 합계와 같은 쿼리). 행 = 그 탭 선택. */}
+      {ready && <UsageOverview tabs={tabs} active={active} onSelect={selectTab} now={now} />}
 
       {(purge.data || orphanError || summaryQ.isError || unregQ.isError) && (
         <div className="space-y-2">

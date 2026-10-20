@@ -1,15 +1,17 @@
-import { Fragment, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { ChevronRight } from "lucide-react";
 import { Table } from "../../components/ui/Table";
 import { TimeSeriesChart } from "../../components/ui/TimeSeriesChart";
 import { Segmented } from "../../components/ui/Segmented";
-import { HelpTip } from "../../components/ui/HelpTip";
 import { HoverTip, placeBeside, useHoverAnchor, type Rect } from "../../components/ui/HoverTip";
+import { SizeDistribution } from "../../components/ui/SizeDistribution";
 import type { ApiError } from "../../lib/api";
 import type { HistogramBucket, UsagePoint } from "../../lib/types";
 import { kstStampEpoch, kstDay } from "../../lib/datetime";
+import { pctText, sizeDistribution } from "../../lib/sizeBuckets";
 import { useScanHistory } from "./useUsage";
+import { SIZE_HELP, SectionHead, Stat } from "./UsageParts";
 import {
   AXIS_MEANING, HOT_AGE_MAX_DAYS, ageLabel, hotRatio, humanBytes, pointEpoch, stackLayout, tempColorOf,
 } from "./usageStats";
@@ -30,9 +32,6 @@ const TEMP_CAPTIONS: Record<string, string> = {
   mtime: "각 열 = 스캔 1회. 위(빨강)=최근 수정, 아래(파랑)=오래됨 — mtime 기준 용량 비중. 열에 마우스를 올리면 구간별 용량",
   ctime: "각 열 = 스캔 1회. 위(빨강)=최근 변경, 아래(파랑)=오래됨 — ctime 기준 용량 비중. 열에 마우스를 올리면 구간별 용량",
 };
-
-export const pctText = (p: number) =>
-  p === 0 ? "0%" : p < 0.1 ? "<0.1%" : p < 10 ? `${p.toFixed(1)}%` : `${Math.round(p)}%`;
 
 // 온도 열 툴팁(2026-10-02). 예전엔 열 번호 비율(i/n)로 **차트 전체 폭** 위에 놓았는데, 열은 폭 상한(max-w-12)
 // 때문에 왼쪽에 몰려 있어 툴팁이 열에서 수백 px 떨어진 곳에 떴다(실측: 첫 열 x=299 인데 툴팁 x=407, 끝 열 x=515 인데
@@ -195,34 +194,25 @@ function TemperatureTrend({ points, tempKey }: {
   );
 }
 
-// 소제목 줄: 왼쪽 제목(+ 설명 HelpTip), 오른쪽 컨트롤. 좁은 폭에선 컨트롤이 다음 줄로 내려간다(flex-wrap).
-function SectionHead({ title, help, children }: { title: string; help?: string; children?: React.ReactNode }) {
-  return (
-    <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5">
-      <h3 className="flex items-center gap-0.5 text-sm font-medium text-ink">
-        {title}
-        {help && <HelpTip label={`${title} 설명`} head={title} help={help} />}
-      </h3>
-      {children && <div className="flex flex-wrap items-center gap-2">{children}</div>}
-    </div>
-  );
+// 이력에서 가장 늦은 포인트: 시각(pointEpoch)이 가장 늦은 것, 같으면 서버 순서(완료 시각 오름차순)의 뒤. 시각을 아는 포인트가
+// 하나도 없으면 서버 순서의 마지막.
+function newestPoint(points: UsagePoint[]): UsagePoint | null {
+  let best: UsagePoint | null = null, bestEpoch: number | null = null;
+  for (const p of points) {
+    const e = pointEpoch(p);
+    if (best === null || (e !== null ? bestEpoch === null || e >= bestEpoch : bestEpoch === null)) {
+      best = p; bestEpoch = e;
+    }
+  }
+  return best;
 }
 
-// 한 줄 수치(라벨 위, 값 아래). 값은 dt 의 다음 형제 dd -- 테스트가 라벨로 값을 찾는다.
-function Stat({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="min-w-0">
-      <dt className="text-xs text-muted">{label}</dt>
-      <dd className="mt-0.5 text-lg font-medium tabular-nums text-ink">{value}</dd>
-    </div>
-  );
-}
-
-// 타깃 1건의 상세(수치 줄·실 사용량 추이·온도 추이·스캔 이력). 목록의 **선택한 행 바로 아래에 펼쳐진다**(expand). 표시 창·
-// 온도 축 state 는 여기 국소라 타깃을 바꾸면 초기화된다 -- 다른 타깃의 잔류 선택이 새 타깃에 묻어 가지 않는다. showTitle 은
-// 목록 밖 폴백 칸(선택 타깃이 지금 목록에 없을 때)에서만 켠다 -- 펼침 행 안에서는 행 자체가 제목이다.
-export function TargetDetail({ storage, target, showTitle }: {
-  storage: string; target: string; showTitle: boolean;
+// 타깃 1건의 상세(「최신 scan」 블록 = 수치 줄 | 파일 크기 분포 → 실 사용량 추이 → 온도 추이 → 스캔 이력). 목록의 **선택한 행
+// 바로 아래에 펼쳐진다**(expand). 표시 창·온도 축 state 는 여기 국소라 타깃을 바꾸면 초기화된다 -- 다른 타깃의 잔류 선택이 새
+// 타깃에 묻어 가지 않는다. showTitle 은 목록 밖 폴백 칸(선택 타깃이 지금 목록에 없을 때)에서만 켠다 -- 펼침 행 안에서는 행
+// 자체가 제목이다. latest = 목록 행의 최신 성공 scan(크기 분포의 기준 -- 폴백 칸엔 행이 없어 undefined).
+export function TargetDetail({ storage, target, showTitle, latest }: {
+  storage: string; target: string; showTitle: boolean; latest?: UsagePoint | null;
 }) {
   const navigate = useNavigate();
   const [windowLimit, setWindowLimit] = useState<number>(HISTORY_WINDOWS[0].value);
@@ -242,11 +232,18 @@ export function TargetDetail({ storage, target, showTitle }: {
     [points]);
   const unknownCount = points.length - charted.length;
 
-  const latest = charted.length > 0 ? charted[charted.length - 1] : null;
+  const latestCharted = charted.length > 0 ? charted[charted.length - 1] : null;
   const prev = charted.length > 1 ? charted[charted.length - 2] : null;
-  const delta = latest !== null && prev !== null ? latest.bytes - prev.bytes : null;
-  const latestHot = latest !== null
-    ? hotRatio(latest.point.time_histograms["atime"]) : null;
+  const delta = latestCharted !== null && prev !== null ? latestCharted.bytes - prev.bytes : null;
+  const latestHot = latestCharted !== null
+    ? hotRatio(latestCharted.point.time_histograms["atime"]) : null;
+
+  // 파일 크기 분포(2026-10-21)의 기준 = 목록 행의 최신 성공 scan(표의 「파일 수」와 같은 scan -- 사용자 요청 「최근 스캔 기준」).
+  // 행이 없거나(목록 밖 폴백) 행에 최신 정보가 없으면 이력에서 가장 늦은 포인트(시각을 모르면 서버 순서의 마지막). 최신 scan 의
+  // 리포트를 못 읽었으면 더 오래된 scan 의 분포로 대신하지 않는다 -- 「최근」이라는 말이 거짓이 된다(표의 (DB) 표시와 같은 사실).
+  const snapshot = useMemo(() => latest ?? newestPoint(points), [latest, points]);
+  const sizeTotal = sizeDistribution(snapshot?.file_size_histogram)?.total ?? null;
+  const sizeHeadId = useId();
 
   const [tempKey, setTempKey] = useState("atime");
   const tempKeys = ["atime", "mtime", "ctime"].filter(
@@ -272,16 +269,32 @@ export function TargetDetail({ storage, target, showTitle }: {
           ? `성공 scan ${skipped}건의 리포트를 읽지 못해 표시할 이력이 없습니다`
           : "이 타깃의 성공 scan 이 없습니다"}</p>
       ) : (<>
-        {/* null ≠ 0: 모름은 "—" -- 0 B 로 그리면 "다 지워졌다"는 거짓이 된다 */}
-        <dl aria-label="최신 scan 요약" className="grid grid-cols-2 gap-x-6 gap-y-3 sm:grid-cols-4">
-          <Stat label="최신 실 사용량" value={latest !== null ? humanBytes(latest.bytes) : "—"} />
-          <Stat label="직전 스캔 대비"
-                value={delta === null ? "—" : `${delta >= 0 ? "+" : "−"}${humanBytes(Math.abs(delta))}`} />
-          {/* 라벨은 짧게(375 의 두 칸 배치에서 한 줄) -- atime 기준이라는 정의는 표 머리글 설명·온도 툴팁이 말한다. */}
-          <Stat label={`hot 비율(${HOT_AGE_MAX_DAYS}일)`}
-                value={latestHot === null ? "—" : `${Math.round(latestHot * 100)}%`} />
-          <Stat label="스캔 이력" value={`${points.length}건`} />
-        </dl>
+        {/* 「최신 scan」 블록(2026-10-21): 수치 줄 | 파일 크기 분포. lg 에선 나란히(수치 2×2) -- 상세가 늘어나는 높이를 분포
+            높이로 묶는다. sm~lg 는 수치 4칸 한 줄 + 분포 아래(지금까지의 모양), 그 아래 폭은 2칸. 스토리지 합계와 같은 문법. */}
+        <div className="grid gap-x-8 gap-y-5 lg:grid-cols-[18rem_minmax(0,1fr)]">
+          {/* null ≠ 0: 모름은 "—" -- 0 B 로 그리면 "다 지워졌다"는 거짓이 된다 */}
+          <dl aria-label="최신 scan 요약"
+              className="grid grid-cols-2 content-start gap-x-6 gap-y-3 sm:grid-cols-4 lg:grid-cols-2">
+            <Stat label="최신 실 사용량" value={latestCharted !== null ? humanBytes(latestCharted.bytes) : "—"} />
+            <Stat label="직전 스캔 대비"
+                  value={delta === null ? "—" : `${delta >= 0 ? "+" : "−"}${humanBytes(Math.abs(delta))}`} />
+            {/* 라벨은 짧게(375 의 두 칸 배치에서 한 줄) -- atime 기준이라는 정의는 표 머리글 설명·온도 툴팁이 말한다. */}
+            <Stat label={`hot 비율(${HOT_AGE_MAX_DAYS}일)`}
+                  value={latestHot === null ? "—" : `${Math.round(latestHot * 100)}%`} />
+            <Stat label="스캔 이력" value={`${points.length}건`} />
+          </dl>
+          <section aria-labelledby={sizeHeadId} className="min-w-0 space-y-2">
+            <SectionHead id={sizeHeadId} title="파일 크기 분포" help={SIZE_HELP}>
+              {sizeTotal !== null && sizeTotal > 0 && (
+                <span className="text-xs text-muted">{`최신 scan · 파일 ${sizeTotal.toLocaleString("ko-KR")}개`}</span>
+              )}
+            </SectionHead>
+            <SizeDistribution buckets={snapshot?.file_size_histogram} labelledBy={sizeHeadId}
+                              missingText={snapshot?.report_readable === false
+                                ? "최신 scan 의 리포트를 읽지 못해 크기 분포를 알 수 없습니다"
+                                : "크기 분포 기록이 없습니다(구형 리포트)"} />
+          </section>
+        </div>
 
         <section className="space-y-2">
           <SectionHead title="실 사용량 추이"
