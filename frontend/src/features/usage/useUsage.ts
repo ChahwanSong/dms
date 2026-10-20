@@ -50,7 +50,8 @@ export const useUsageStorages = () =>
 // **같은 키**라 숫자 한 벌을 본다. 키를 ["usage-storages"] 아래에 두는 이유: 작업 삭제·미등록 정리(DELETE_REQUESTS_INVALIDATES)와
 // 스토리지 생성·수정·삭제(useStorages)가 그 접두를 무효화한다 -- 무효화 목록을 따로 고치지 않아도 합계가 함께 새로 고쳐진다.
 // 차가운 캐시: 서버는 한 호출에 요약을 정해진 수만큼만 읽고 나머지를 pending 으로 센다 -- 이번 호출이 진전했으면(progressed)
-// 1초 뒤 다시 불러 이어 읽게 하고, 진전이 없으면(전부 못 읽음) 멈춘다(같은 실패를 1초마다 되풀이하지 않게). 오류 중엔 멈춘다.
+// 1초 뒤 다시 불러 이어 읽게 하고(서버는 못 읽은 리포트를 잠시 기억해 다음 호출이 그 뒤를 연다), 진전이 없으면 멈춘다(같은
+// 실패를 1초마다 되풀이하지 않게). 오류 중엔 멈춘다 -- 그때 패널은 「읽는 중」이라 말하지 않는다(StorageTotals.reading).
 // 빈 이름도 이름이다(encodeURIComponent("") = "" -- 서버는 실린 storage 를 빈 값이라도 정확 일치로 본다).
 export const useStorageTotals = (storage: string) =>
   useQuery({

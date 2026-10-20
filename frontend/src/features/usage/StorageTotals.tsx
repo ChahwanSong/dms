@@ -41,29 +41,31 @@ export const hotText = (t: UsageStorageTotals) => {
   const v = t.hot_ratio?.value;
   return typeof v === "number" && Number.isFinite(v) ? `${Math.round(v * 100)}%` : "—";
 };
-// 읽는 중 = 서버가 이번 호출에서 진전했고 남은 것이 있다(useStorageTotals 가 1초 뒤 다시 부른다).
+// 읽는 중 = 서버가 이번 호출에서 진전했고 남은 것이 있다(useStorageTotals 가 1초 뒤 다시 부른다). 응답 값만 보는 판정이다 --
+// 화면은 여기에 「재조회가 실패하지 않았다」를 더한다(StorageTotals 의 reading): 재조회가 실패하면 폴링이 멈추는데(useStorageTotals
+// -- 오류 중엔 멈춘다) 캐시에 남은 응답은 여전히 읽는 중이라 말해, 「요약 읽는 중 240개」가 아무것도 읽지 않는 동안 남았다(리뷰).
 export const isReading = (t: UsageStorageTotals) => count(t.pending_count) > 0 && t.progressed === true;
 
 // 「값 모름」 대상 수: 지표마다의 unknown 중 가장 큰 것. 읽는 중이면 아직 안 읽은 대상(pending -- 리포트 값 모름으로 세어 있다)을
-// 따로 「요약 읽는 중」으로 말하므로 뺀다. 진전이 멈추면 그것도 모름이다.
-function unknownTargets(t: UsageStorageTotals): number {
+// 따로 「요약 읽는 중」으로 말하므로 뺀다. 진전이 멈추면(재조회 실패 포함) 그것도 모름이다.
+function unknownTargets(t: UsageStorageTotals, reading: boolean): number {
   const max = Math.max(...[t.total_bytes, t.total_files, t.total_directories, t.hot_ratio, t.file_size_histogram]
     .map((m) => count(m?.unknown)));
-  return isReading(t) ? Math.max(0, max - count(t.pending_count)) : max;
+  return reading ? Math.max(0, max - count(t.pending_count)) : max;
 }
 
 const SEP = "\u00a0· ";
 
 // 각주 한 줄(해당하는 조각만). 조각은 줄바꿈 없는 공백 + 「· 」로 잇는다 -- 접힌 줄이 「·」로 시작하지 않는다(StoragePanel 관례).
-function Footnote({ t, now }: { t: UsageStorageTotals; now: number }) {
+function Footnote({ t, now, reading }: { t: UsageStorageTotals; now: number; reading: boolean }) {
   const n = (x: number) => x.toLocaleString("ko-KR");
-  const unknown = unknownTargets(t);
+  const unknown = unknownTargets(t, reading);
   const parts: React.ReactNode[] = [
     `최상위 대상 ${n(count(t.summed_target_count))}개 기준`,
     count(t.nested_target_count) > 0 && `하위 대상 ${n(count(t.nested_target_count))}개 제외`,
     count(t.invalid_target_count) > 0 && `형식이 잘못된 대상 ${n(count(t.invalid_target_count))}개 제외`,
     unknown > 0 && `값 모름 ${n(unknown)}개`,
-    isReading(t) && `요약 읽는 중 ${n(count(t.pending_count))}개`,
+    reading && `요약 읽는 중 ${n(count(t.pending_count))}개`,
     t.truncated === true && `최근 스캔된 ${n(count(t.window_limit))}개 대상 기준`,
   ];
   // scan 시점 범위: 오래된 쪽 글자색은 표의 경과 색(30일 주의 · 90일 빨강)과 같다. 같은 날이면 하나만.
@@ -139,6 +141,14 @@ export function FilesystemUse({ fs, now, compact = false }: { fs: UsageStorageFi
   );
 }
 
+// 수치 칸 배치(리뷰: 768~860px 에서 4칸 고정 칸이 ~93px 라 「123,456,789개」가 옆 칸 숫자에 붙거나 겹쳤다 -- 사이드바가 패널을
+// 좁히는 md 폭). sm~lg 는 칸 최소 폭(9.5rem -- 9자리 개수 + 「이상」이 한 줄)으로 칸 수를 정한다(auto-fit: 넓으면 4칸, 좁으면 3·2칸).
+// lg 의 왼쪽 열은 18rem 이상 + 내용 폭(max-content)이라 2×2 가 큰 수에서도 「이상」을 한 줄에 둔다(분포 열이 나머지를 쓴다).
+// 375 는 2칸 그대로(칸 사이를 좁혀 10자리 개수까지 말줄임 없이). 그래도 넘치는 값(13자리 등)은 Stat 이 칸 안에서 말줄임하고
+// title 이 정확한 값을 준다 -- 옆 칸을 덮지 않는다.
+const LAYOUT = "grid gap-x-8 gap-y-5 lg:grid-cols-[minmax(18rem,max-content)_minmax(0,1fr)]";
+const STATS = "grid grid-cols-2 content-start gap-x-4 gap-y-3 sm:grid-cols-[repeat(auto-fit,minmax(9.5rem,1fr))] sm:gap-x-6 lg:grid-cols-2";
+
 export function StorageTotals({ storage, now }: { storage: string; now: number }) {
   const q = useStorageTotals(storage);
   const headId = useId(), sizeId = useId();
@@ -157,9 +167,9 @@ export function StorageTotals({ storage, now }: { storage: string; now: number }
       return wrap(<p className="text-sm text-bad">{`합계를 불러오지 못했습니다${msg ? ` — ${msg}` : ""}`}</p>);
     }
     return wrap(
-      <div className="relative grid gap-x-8 gap-y-5 lg:grid-cols-[18rem_minmax(0,1fr)]">
+      <div className={`relative ${LAYOUT}`}>
         <span className="sr-only">합계 불러오는 중…</span>
-        <div className="grid grid-cols-2 content-start gap-x-6 gap-y-3 sm:grid-cols-4 lg:grid-cols-2">
+        <div className={STATS}>
           {[0, 1, 2, 3].map((i) => (
             <div key={i} className="space-y-1.5"><Skeleton className="h-3 w-14" /><Skeleton className="h-6 w-20" /></div>))}
         </div>
@@ -170,15 +180,17 @@ export function StorageTotals({ storage, now }: { storage: string; now: number }
   const bytes = sumOf(t.total_bytes), files = sumOf(t.total_files), dirs = sumOf(t.total_directories);
   const size = t.file_size_histogram;
   const fs = fsShape(t.filesystem);
+  const reading = isReading(t) && !q.isError;
+  const exact = (n: number | null) => (n === null ? undefined : countText(n));
   return wrap(<>
-    <div className="grid gap-x-8 gap-y-5 lg:grid-cols-[18rem_minmax(0,1fr)]">
-      <dl aria-label="이 스토리지 합계"
-          className="grid grid-cols-2 content-start gap-x-6 gap-y-3 sm:grid-cols-4 lg:grid-cols-2">
+    <div className={LAYOUT}>
+      <dl aria-label="이 스토리지 합계" className={STATS}>
         <Stat label="실 사용량" value={bytes === null ? "—" : humanBytes(bytes)}
               lowerBound={lowerBound(t.total_bytes, bytes)}
               title={bytes === null ? undefined : `${bytes.toLocaleString("ko-KR")} B`} />
-        <Stat label="파일" value={countText(files)} lowerBound={lowerBound(t.total_files, files)} />
-        <Stat label="디렉터리" value={countText(dirs)} lowerBound={lowerBound(t.total_directories, dirs)} />
+        <Stat label="파일" value={countText(files)} lowerBound={lowerBound(t.total_files, files)} title={exact(files)} />
+        <Stat label="디렉터리" value={countText(dirs)} lowerBound={lowerBound(t.total_directories, dirs)}
+              title={exact(dirs)} />
         {/* hot 은 비율이라 하한이 아니다(모름 대상은 분자·분모 모두에서 빠진다) -- 「이상」을 붙이지 않고 각주가 모름 수를 말한다. */}
         <Stat label={`hot 비율(${HOT_AGE_MAX_DAYS}일)`} value={hotText(t)} />
         {fs !== null && (
@@ -198,11 +210,19 @@ export function StorageTotals({ storage, now }: { storage: string; now: number }
           )}
         </SectionHead>
         <SizeDistribution buckets={size?.buckets} labelledBy={sizeId}
-                          missingText={isReading(t) && count(size?.known) === 0
+                          missingText={reading && count(size?.known) === 0
                             ? "요약을 읽는 중입니다…" : "크기 분포를 아는 대상이 없습니다"} />
       </section>
     </div>
-    <Footnote t={t} now={now} />
-    {q.isError && <p className="text-xs text-muted">합계를 새로 고치지 못했습니다</p>}
+    <Footnote t={t} now={now} reading={reading} />
+    {q.isError && (
+      // 재조회 실패로 이어 읽기가 멈췄을 수 있다(오류 중엔 폴링하지 않는다) -- 창 포커스·30초를 기다리지 않고 다시 부를 수 있게.
+      <p className="text-xs text-muted">
+        합계를 새로 고치지 못했습니다{" "}
+        <button type="button" onClick={() => { void q.refetch(); }}
+                className="rounded text-accent hover:underline focus-visible:outline-none focus-visible:ring-2
+                           focus-visible:ring-accent">다시 시도</button>
+      </p>
+    )}
   </>);
 }

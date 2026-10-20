@@ -325,7 +325,8 @@ export interface UsageStorages { window_limit: number; storages: UsageStorageSum
 // 스토리지 합계(GET /api/admin/usage/storage-totals?storage=, 2026-10-21 -- 서버 routes_usage.storage_totals 계약). 최상위 대상
 // (다른 대상 아래가 아닌 것)마다 최신 성공 scan 값의 합. 지표마다 known/unknown(대상 수) -- known 0 이면 sum null(기록 없음 ≠ 0).
 // pending = 이번 호출의 읽기 예산 밖이라 요약을 아직 안 읽은 대상(리포트 값은 모름으로 셈, 용량만 DB 값), progressed = 이번 호출이
-// 하나라도 새로 읽었다(포탈은 pending > 0 && progressed 동안 다시 부른다). filesystem = 그 스토리지가 Ready 마운트인 노드의 df.
+// 다음 호출의 출발점을 바꿨다(새로 읽었거나 못 읽은 것을 서버가 기억해 다음 호출이 그 뒤를 연다 -- 포탈은 pending > 0 && progressed
+// 동안 다시 부른다). filesystem = 그 스토리지가 Ready 마운트인 노드의 df.
 export interface UsageTotalMetric { sum: number | null; known: number; unknown: number }
 export interface UsageStorageFilesystem {
   total_bytes: number; used_bytes: number; node_name: string; reported_at: string; fresh: boolean;

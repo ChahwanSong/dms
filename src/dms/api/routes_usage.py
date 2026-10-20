@@ -25,6 +25,8 @@
 """
 import json
 import sys
+import threading
+import time
 from typing import Iterator
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -63,7 +65,59 @@ _CHUNK = 500
 # 다시 부르면 캐시가 찬 만큼 이어 간다. 탭을 열기만 해도 한 요청이 공유 스토리지 I/O 를 최대 1만 건(동기 스레드풀 점유,
 # artifacts.py 의 위험 기록) 붙잡지 않게 한 묶음으로 묶는다.
 _TOTALS_READ_BUDGET = 500
+# 스토리지 합계의 읽기 실패 기억(2026-10-21 리뷰): 못 읽은 리포트는 영구 캐시(scan_digests)에 두지 않으므로, 기억이 없으면
+# 다음 호출이 같은 순서(최근 스캔 순)로 같은 실패를 다시 열어 예산을 먼저 쓴다 -- 영구히 못 읽는 최상위가 예산만큼 앞에
+# 있으면 그 뒤의 읽을 수 있는 대상에 영영 닿지 못하고(pending 이 줄지 않고 progressed False -- 포탈이 멈춘다), 호출마다 같은
+# 아티팩트 500개(256KiB 씩)를 다시 연다. TTL = 일시 오류(마운트 흔들림·롤아웃 중)를 영구 「모름」으로 굳히지 않는 창.
+# 상한 = 창(_WINDOW_LIMIT) 둘 -- 한 스토리지의 실패 전부가 들어가고도 남는다(항목당 ~150B, 2만이면 ~3MiB).
+_FAILED_READ_TTL_SECONDS = 600
+_FAILED_READ_CAP = 20000
 _ORDER = "^(asc|desc)$"
+
+
+class ReportReadFailures:
+    """job_id -> 마지막 리포트 읽기 실패 시각(monotonic). 프로세스 메모리, 스레드 안전 -- 라우트가 동기 스레드풀에서 돌아
+    합계 호출이 겹친다(app.state.report_read_failures, create_app 이 만든다). 레플리카·재시작마다 비지만 목적(같은 실패를 예산
+    앞에서 되풀이하지 않기)에는 영향이 없다 -- 비면 한 번 더 열 뿐이다. 영구 캐시가 아니라 여기 두는 이유는 위 상수 주석.
+
+    상한이 차면 만료 항목을 걷고, 그래도 차 있으면 새 실패를 **기록하지 않는다**(오래된 것을 밀어내지 않는다): 밀어내면 여러
+    스토리지의 실패가 서로를 밀어내며 포탈이 1초마다 같은 실패를 끝없이 다시 부를 수 있다. 기록하지 못한 실패는 옛 동작(다음
+    호출이 다시 연다)으로 돌아갈 뿐이고, record 가 기록한 수를 돌려줘 호출자가 progressed 를 정직하게 말한다."""
+
+    def __init__(self, ttl_seconds: float = _FAILED_READ_TTL_SECONDS, cap: int = _FAILED_READ_CAP,
+                 clock=time.monotonic):
+        self.ttl_seconds = ttl_seconds
+        self.cap = cap
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._failed: dict[str, float] = {}
+
+    def split(self, job_ids) -> "tuple[set, set]":
+        """(TTL 안에 실패한 것, TTL 이 지난 옛 실패) -- 나머지는 아직 열어 본 적 없는(또는 기억이 걷힌) 잡이다."""
+        now = self._clock()
+        recent, expired = set(), set()
+        with self._lock:
+            for jid in job_ids:
+                at = self._failed.get(jid)
+                if at is not None:
+                    (recent if now - at < self.ttl_seconds else expired).add(jid)
+        return recent, expired
+
+    def record(self, job_ids) -> int:
+        """실패를 지금 시각으로 기록하고 실제로 기록한 수를 돌려준다(상한 규칙은 클래스 docstring)."""
+        now = self._clock()
+        noted, swept = 0, False
+        with self._lock:
+            for jid in job_ids:
+                if jid not in self._failed and len(self._failed) >= self.cap:
+                    if not swept:           # 한 호출에 한 번만 걷는다(차 있는 동안 id 마다 2만 개를 훑지 않게)
+                        self._failed = {j: at for j, at in self._failed.items() if now - at < self.ttl_seconds}
+                        swept = True
+                    if len(self._failed) >= self.cap:
+                        continue
+                self._failed[jid] = now
+                noted += 1
+        return noted
 
 
 def _project_report(report: dict) -> dict:
@@ -430,11 +484,16 @@ def storage_totals(request: Request, storage: str = Query(..., max_length=512)):
        리포트를 못 읽으면 러너가 남긴 bytes_count), 나머지는 리포트 요약(usage_metrics.StorageTotals -- 지표마다 sum·known·
        unknown, known 0 이면 sum null, hot 은 bytes 가중, 크기 분포는 가장 최근 리포트의 구간 서명과 같은 것만).
     4. 읽기 예산(_TOTALS_READ_BUDGET): 캐시에 없는 최상위 대상의 리포트는 한 호출에 그만큼만 연다(_read_and_cache --
-       owner_uid fail-closed). 넘은 대상은 pending_count, 열었는데 못 읽은 대상은 unreadable_count(캐시에 넣지 않는다 --
+       owner_uid fail-closed). 넘은 대상은 pending_count, 열었는데 못 읽은 대상은 unreadable_count(영구 캐시에 넣지 않는다 --
        일시 오류를 영구 모름으로 굳히지 않게), 둘 다 이번 응답에선 리포트 유래 값이 모름이다(실 사용량만 bytes_count 대체).
-       progressed = 이번 호출에서 하나라도 새로 읽어 캐시에 넣었는가 -- 포탈은 pending > 0 && progressed 동안 다시 부른다
-       (진전이 없으면 멈춘다). 못 읽은 최상위 대상을 그 하위 대상들로 대체하지 않는다 -- 하위가 상위를 덮는다는 보장이 없어
-       조용한 과소 보고가 된다.
+       못 읽은 잡은 프로세스 내 실패 기억(ReportReadFailures, TTL _FAILED_READ_TTL_SECONDS)에 둔다 -- TTL 안에선 열지 않고
+       unreadable 로 세며 예산에서 뺀다(2026-10-21 리뷰: 기억이 없으면 같은 실패가 호출마다 예산 앞자리를 먼저 써서, 영구히
+       못 읽는 최상위가 예산만큼 앞에 있으면 뒤의 읽을 수 있는 대상에 영영 닿지 못했다). 예산은 아직 열어 본 적 없는 잡이
+       먼저, TTL 이 지난 옛 실패가 그 뒤다(재시도). progressed = 이번 호출이 다음 호출의 출발점을 바꿨는가(새로 읽어 캐시에
+       넣었거나, 못 읽은 것을 실패 기억에 넣어 다음 호출이 그 뒤를 연다) -- 포탈은 pending > 0 && progressed 동안 다시
+       부른다(진전이 없으면 멈춘다 -- 기억이 상한이라 기록하지 못한 실패는 진전으로 세지 않는다, 같은 실패를 1초마다 되풀이
+       하지 않게). 못 읽은 최상위 대상을 그 하위 대상들로 대체하지 않는다 -- 하위가 상위를 덮는다는 보장이 없어 조용한 과소
+       보고가 된다.
     5. filesystem = 그 스토리지가 Ready 마운트포인트인 노드의 statvfs(metrics_series.storage_filesystem -- 신선 우선 → 최신).
        미등록 이름은 null(지운 스토리지의 마지막 사용량은 보이되 df 는 지금 값이 아니다). 스토리지끼리 더하지 않는다 -- 여러
        스토리지가 한 파일시스템일 수 있다. 스캔 합계와 기준이 달라(스캔 안 한 경로·할당 블록·예약 블록) 비율을 내지 않는다.
@@ -449,18 +508,25 @@ def storage_totals(request: Request, storage: str = Query(..., max_length=512)):
     top, nested, invalid = maximal_targets(heads)
     base = _base(request)
     acc = StorageTotals()
-    budget, pending, unreadable, read_ok = _TOTALS_READ_BUDGET, 0, 0, 0
+    failures: ReportReadFailures = request.app.state.report_read_failures
+    budget, pending, unreadable, read_ok, noted = _TOTALS_READ_BUDGET, 0, 0, 0, 0
     for i in range(0, len(top), _CHUNK):
         chunk = top[i:i + _CHUNK]
         digests = _cached_digests(repos, [h["job_id"] for h in chunk])
         missing = [h["job_id"] for h in chunk if h["job_id"] not in digests]
-        take, later = missing[:budget], missing[budget:]
+        recent, expired = failures.split(missing)
+        unreadable += len(recent)                  # 방금 못 읽은 잡 -- 열지 않고 센다(예산 밖)
+        untried = ([jid for jid in missing if jid not in recent and jid not in expired]
+                   + [jid for jid in missing if jid in expired])
+        take, later = untried[:budget], untried[budget:]
         budget -= len(take)
         pending += len(later)
         if take:
             fresh = _read_and_cache(repos, base, list(repos.data_jobs.jobs_by_ids(take).values()))
             read_ok += len(fresh)
-            unreadable += sum(1 for jid in take if jid not in fresh)      # 그 사이 지워진 잡도 못 읽은 것이다
+            failed = [jid for jid in take if jid not in fresh]      # 그 사이 지워진 잡도 못 읽은 것이다
+            unreadable += len(failed)
+            noted += failures.record(failed)
             digests.update(fresh)
         for h in chunk:
             d = digests.get(h["job_id"])           # 못 읽음·지연 = None -> 실 사용량은 bytes_count(목록 열과 같은 대체)
@@ -474,7 +540,7 @@ def storage_totals(request: Request, storage: str = Query(..., max_length=512)):
     return {"storage_name": storage, "computed_at": utc_now_iso(), "truncated": truncated,
             "window_limit": _WINDOW_LIMIT, "target_count": len(heads), "summed_target_count": len(top),
             "nested_target_count": nested, "invalid_target_count": invalid, "unreadable_count": unreadable,
-            "pending_count": pending, "progressed": read_ok > 0, **acc.result(), "filesystem": filesystem}
+            "pending_count": pending, "progressed": read_ok > 0 or noted > 0, **acc.result(), "filesystem": filesystem}
 
 
 @router.get("/api/admin/usage/unregistered-storages")

@@ -6,6 +6,7 @@ import { Table } from "../../components/ui/Table";
 import { useStorageTotals } from "./useUsage";
 import { humanBytes } from "./usageStats";
 import { storageLabel, type StorageTab } from "./usageTabs";
+import type { UsageStorageTotals, UsageTotalMetric } from "../../lib/types";
 import { FilesystemUse, fsShape, hotText, lowerBound, sumOf } from "./StorageTotals";
 
 // 스토리지별 비교(2026-10-21 사용자 요청 「스토리지별 사용량 및 정보들의 총합」의 전체 개요). 머리말 아래 접힌 한 줄(기본 닫힘 --
@@ -17,11 +18,32 @@ import { FilesystemUse, fsShape, hotText, lowerBound, sumOf } from "./StorageTot
 //
 // 375 폭: 표는 래퍼 안에서만 가로로 넘치고(Table overflow-x-auto) 이름 칸은 고정(sticky left-0, 불투명 바탕, z-index 없음 --
 // TargetTable 머리 주석의 결정 그대로). 카드 목록을 따로 두지 않는다(두 벌 DOM -- Tabs 머리 주석).
+//
+// 부분 합은 숫자 옆에서 말한다(2026-10-21 리뷰: 1만 넘는 스토리지의 행이 「최근 스캔된 1만 개」만 더한 값을 전체처럼 보였고, 대상 칸은
+// 창으로 잘린 10,000 이라 탭 배지(12,345)와 달랐다). 실 사용량·파일·디렉터리는 모름을 뺀 합(unknown > 0 -- 요약 읽는 중인 대상도
+// 서버가 리포트 값 모름으로 센다)이거나 창을 넘어 잘린 합(truncated)이면 하한이라 「이상」, 표 각주가 두 뜻을 말한다. hot 은 비율이라
+// 붙이지 않는다(패널과 같은 규칙). 대상 칸은 탭 배지와 같은 원천(요약 /storages 의 target_count -- 창으로 자르지 않은 수)이고,
+// 요약이 없으면 합계의 수(잘렸으면 「+」)다.
 
 const TH = "px-3 py-2 text-xs font-medium text-muted whitespace-nowrap";
 const TD = "whitespace-nowrap px-3 py-2 text-right tabular-nums";
 const SEP = "\u00a0· ";
 const MORE = <span className="ml-1 text-[11px] text-muted">이상</span>;
+
+const isCount = (x: unknown): x is number => typeof x === "number" && Number.isFinite(x) && x >= 0;
+
+// 대상 칸: 탭 배지와 같은 수(요약) -- 합계가 아직·실패여도 그 수는 안다. 요약이 없을 때만 합계의 수(창으로 잘렸으면 「+」).
+function TargetsCell({ tab, t }: { tab: StorageTab; t: UsageStorageTotals | undefined }) {
+  const truncated = t?.truncated === true;
+  const fallback = isCount(t?.target_count) ? t.target_count : null;
+  const n = tab.targetCount ?? fallback;
+  const text = n === null ? "—" : `${n.toLocaleString("ko-KR")}${tab.targetCount === null && truncated ? "+" : ""}`;
+  const title = [
+    truncated && isCount(t?.window_limit) && `합계는 최근 스캔된 ${t.window_limit.toLocaleString("ko-KR")}개 대상 기준 부분 합`,
+    isCount(t?.summed_target_count) && `최상위 ${t.summed_target_count.toLocaleString("ko-KR")}개 합계`,
+  ].filter(Boolean).join(" · ");
+  return <td className={`${TD} ${n === null ? "text-muted" : ""}`} title={title === "" ? undefined : title}>{text}</td>;
+}
 
 function CompareRow({ tab, selected, onSelect, now }: {
   tab: StorageTab; selected: boolean; onSelect: (name: string) => void; now: number;
@@ -36,23 +58,21 @@ function CompareRow({ tab, selected, onSelect, now }: {
       return q.isError
         ? [<td key="e" className={`${TD} text-xs text-bad`}>불러오지 못함</td>,
            ...[0, 1, 2].map((i) => <td key={i} className={`${TD} text-muted`}>—</td>),
-           <td key="fs" className="px-3 py-2 text-muted">—</td>, <td key="n" className={`${TD} text-muted`}>—</td>]
-        : [0, 1, 2, 3, 4, 5].map((i) => <td key={i} className="px-3 py-2"><Skeleton className="ml-auto h-4 w-14" /></td>);
+           <td key="fs" className="px-3 py-2 text-muted">—</td>]
+        : [0, 1, 2, 3, 4].map((i) => <td key={i} className="px-3 py-2"><Skeleton className="ml-auto h-4 w-14" /></td>);
     }
     const bytes = sumOf(t.total_bytes), files = sumOf(t.total_files), dirs = sumOf(t.total_directories);
     const fs = fsShape(t.filesystem);
+    const partial = (m: UsageTotalMetric | null | undefined, sum: number | null) =>
+      sum !== null && (t.truncated === true || lowerBound(m, sum));
     return [
       <td key="b" className={TD} title={bytes === null ? undefined : `${bytes.toLocaleString("ko-KR")} B`}>
-        {bytes === null ? "—" : humanBytes(bytes)}{lowerBound(t.total_bytes, bytes) && MORE}</td>,
-      <td key="f" className={TD}>{num(files)}{lowerBound(t.total_files, files) && MORE}</td>,
-      <td key="d" className={TD}>{num(dirs)}{lowerBound(t.total_directories, dirs) && MORE}</td>,
+        {bytes === null ? "—" : humanBytes(bytes)}{partial(t.total_bytes, bytes) && MORE}</td>,
+      <td key="f" className={TD}>{num(files)}{partial(t.total_files, files) && MORE}</td>,
+      <td key="d" className={TD}>{num(dirs)}{partial(t.total_directories, dirs) && MORE}</td>,
       <td key="h" className={TD}>{hotText(t)}</td>,
       <td key="fs" className="whitespace-nowrap px-3 py-2">
         {fs === null ? <span className="text-muted">—</span> : <FilesystemUse fs={fs} now={now} compact />}</td>,
-      <td key="n" className={TD}
-          title={typeof t.summed_target_count === "number"
-            ? `최상위 ${t.summed_target_count.toLocaleString("ko-KR")}개 합계` : undefined}>
-        {typeof t.target_count === "number" ? t.target_count.toLocaleString("ko-KR") : "—"}</td>,
     ];
   })();
   return (
@@ -74,13 +94,15 @@ function CompareRow({ tab, selected, onSelect, now }: {
         </span>
       </td>
       {cells}
+      <TargetsCell tab={tab} t={t} />
     </tr>
   );
 }
 
-function CompareTable({ tabs, active, onSelect, now }: {
-  tabs: StorageTab[]; active: string | null; onSelect: (name: string) => void; now: number;
+function CompareTable({ tabs, active, onSelect, now, windowLimit }: {
+  tabs: StorageTab[]; active: string | null; onSelect: (name: string) => void; now: number; windowLimit: number | null;
 }) {
+  const windowText = windowLimit === null ? "창 안의" : `${windowLimit.toLocaleString("ko-KR")}개`;
   return (
     <div className="space-y-3">
       <Table>
@@ -100,15 +122,17 @@ function CompareTable({ tabs, active, onSelect, now }: {
         </tbody>
       </Table>
       <p className="text-xs text-muted break-keep">
-        스토리지마다 최상위 대상의 최근 성공 scan 합계{SEP}df = 노드가 잰 파일시스템 전체 사용량(* 노드마다 다르거나 오래된
+        스토리지마다 최상위 대상의 최근 성공 scan 합계{SEP}「이상」 = 값을 모르는 대상(요약 읽는 중 포함)을 뺀 합이거나 대상이 많아
+        최근 스캔된 {windowText} 대상만 더한 부분 합{SEP}df = 노드가 잰 파일시스템 전체 사용량(* 노드마다 다르거나 오래된
         보고){SEP}스토리지끼리는 더하지 않습니다(한 파일시스템 공유·경로 중첩 가능)
       </p>
     </div>
   );
 }
 
-export function UsageOverview({ tabs, active, onSelect, now }: {
+export function UsageOverview({ tabs, active, onSelect, now, windowLimit }: {
   tabs: StorageTab[]; active: string | null; onSelect: (name: string) => void; now: number;
+  windowLimit: number | null;     // 요약(/storages)의 window_limit -- 각주의 창 크기(서버 값, 하드코딩하지 않는다)
 }) {
   const [open, setOpen] = useState(false);
   // 스토리지가 하나뿐이면 비교할 것이 없다(패널 합계와 같은 숫자의 반복).
@@ -122,7 +146,11 @@ export function UsageOverview({ tabs, active, onSelect, now }: {
         스토리지별 비교
       </summary>
       {/* 열려 있을 때만 그린다 -- 닫힌 동안 스토리지마다의 합계 요청이 나가지 않게. */}
-      {open && <Card className="mt-3"><CompareTable tabs={tabs} active={active} onSelect={onSelect} now={now} /></Card>}
+      {open && (
+        <Card className="mt-3">
+          <CompareTable tabs={tabs} active={active} onSelect={onSelect} now={now} windowLimit={windowLimit} />
+        </Card>
+      )}
     </details>
   );
 }
