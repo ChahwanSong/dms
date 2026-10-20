@@ -69,6 +69,7 @@
   "invalid_batch_operation",
   "invalid_max_concurrency",
   "batch_storage_mixed",
+  "batch_rm_targets_overlap",
   "invalid_node_count",
   "invalid_procs_per_node",
   "batch_not_rescannable",

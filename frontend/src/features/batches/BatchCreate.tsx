@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ArrowRight, Download, Plus, X } from "lucide-react";
 import { useCreateBatch } from "./useBatches";
-import type { CreateBatchBody } from "./useBatches";
+import type { BatchOp, CreateBatchBody } from "./useBatches";
 import { parseItemsCsv, serializeItemsCsv } from "../../lib/csv";
 import type { ScanRow, SyncRow } from "../../lib/csv";
 import { useUserStorages } from "../storages/useUserStorages";
@@ -20,6 +20,8 @@ import {
 } from "../../components/form/SubmitLayout";
 import { ApiError } from "../../lib/api";
 import { syncOwnership } from "../../lib/syncOwnership";
+import { relativePathProblem } from "../../lib/storagePaths";
+import { rmTargetOverlaps } from "../../lib/rmTargets";
 
 // 배치 생성(슬라이스 32): 단일 작업과 같은 한 장짜리 시트 + 오른쪽 제출 요약(2026-10-06 — 4스텝
 // 위저드를 걷었다. 「왜」는 components/form/SubmitLayout 주석). 구획 순서: 작업 종류 → 대상 스토리지와
@@ -35,26 +37,32 @@ const PRIORITY_RANK: Record<string, number> = { low: 0, mid: 1, high: 2 };
 // 미리보기·실행하는 항목(잡) 수이고, 자원이 모자라면 잡은 Volcano 큐에서 기다린다.
 export const DEFAULT_MAX_CONCURRENCY = 32;
 
-// 행은 경로만 나른다(스토리지는 배치 레벨 선택) — a = target(scan)/source(sync),
+// 행은 경로만 나른다(스토리지는 배치 레벨 선택) — a = target(scan·rm)/source(sync),
 // b = destination(sync 전용). CSV 파서(ScanRow/SyncRow)와 제출 바디 조립의 중간형.
 interface RowPair { a: string; b: string }
 
 // 항목 표의 입력 칸(촘촘한 변형 -- field 의 mt-1 이 행 정렬을 흔든다).
 const cell = "w-full rounded-lg border border-line px-3 py-1.5 text-sm";
 
-const OPERATION_HELP: Record<"scan" | "sync", string> = {
+const OPERATION_HELP: Record<BatchOp, string> = {
   scan: "한 스토리지의 여러 경로를 scan 합니다. 행마다 잡 하나가 만들어집니다.",
   // 확인 단계(2026-10-07): sync 배치는 만들자마자 실행되지 않는다 -- 생성 화면 어디에도 이 사실이 없었다.
   sync: "소스 스토리지 → 목적지 스토리지 한 쌍 안에서 여러 경로를 sync 합니다. 행마다 잡 하나가 만들어지고, "
     + "항목별 미리보기가 끝나면 배치 상세에서 「배치 확인」을 눌러야 실행됩니다.",
+  // rm(2026-10-21): sync 와 같은 확인 단계. 자동 실행은 없다(서버 auto_confirm_sync_only — 되돌릴 수 없는 root 삭제).
+  rm: "한 스토리지의 여러 경로를 삭제합니다(경로와 그 아래 전부). 행마다 잡 하나가 만들어지고, 항목별 미리보기(지울 "
+    + "항목 수)가 끝나면 배치 상세에서 「배치 확인」을 눌러야 삭제됩니다 — 자동 실행은 없습니다.",
 };
 // 자동 실행(2026-10-11)을 켠 sync 는 위 「눌러야 실행」이 거짓이 된다 -- 켠 동안은 이 문장으로 바꿔 말한다.
 const SYNC_AUTO_HELP = "소스 스토리지 → 목적지 스토리지 한 쌍 안에서 여러 경로를 sync 합니다. 행마다 잡 하나가 "
   + "만들어지고, 항목별 미리보기가 끝나면 「배치 확인」 없이 바로 실행됩니다(자동 실행 켜짐).";
 
 const initial = {
-  op: "scan" as "scan" | "sync",
+  op: "scan" as BatchOp,
   storage: "", srcStorage: "", dstStorage: "",
+  // rm 옵션(SubmitJob 미러). recursive 는 동의 게이트라 서버가 기본으로 박지 않는다(domain._OPTION_DEFAULTS rm 주석) —
+  // 화면이 켠 채 시작해 명시로 싣고, 끄면 즉답이 제출을 막는다(rm_recursive_required). quiet 는 scan·sync 와 같은 칸.
+  recursive: true, stat: false, lite: false,
   // scan 옵션(SubmitScan 미러 — dscan 1b93d54 실측 전부. top_k는 신버전에서
   // 기능 삭제라 함께 제거). scanBatchFiles는 sync의 batchFiles와 별도 상태 —
   // 같은 옵션명이지만 범위가 다르다(scan 0..10억, sync 0..1,000만). 2026-09-17 부터
@@ -109,13 +117,27 @@ export function BatchCreate() {
     setF({ ...f, [k]: e.target.type === "checkbox" ? e.target.checked : e.target.value });
 
   // --- 대상·항목 검증 ---
-  const storageChosen = f.op === "scan"
-    ? f.storage !== ""
-    : f.srcStorage !== "" && f.dstStorage !== "";
+  const storageChosen = f.op === "sync"
+    ? f.srcStorage !== "" && f.dstStorage !== ""
+    : f.storage !== "";                                   // scan·rm: 스토리지 하나
   const incompleteRows = rows.filter(
     (r) => r.a.trim() === "" || (f.op === "sync" && r.b.trim() === "")).length;
   const rowsComplete = rows.length >= 1 && incompleteRows === 0;
-  const itemsValid = storageChosen && rowsComplete && csvErrors.length === 0;
+  // rm 행 즉답(2026-10-21) — 보내는 값(trim)으로 본다. ① 경로 형식: 서버 validate_rm_target/validate_relative_path 의
+  // 미러(422 rm_root_forbidden·unsafe_path) — 관리 디렉토리 자신을 root 로 지우는 행은 서버까지 가기 전에 막는다.
+  // ② 한 배치 안 겹침(같은 경로·조상과 자손): 서버 422 batch_rm_targets_overlap 의 미러 — 어느 행끼리인지 말한다.
+  // scan·sync 는 서버 422 로 충분해 즉답하지 않는다(루트를 지우는 위험만 비대칭이다).
+  const rmPathErrors = f.op === "rm"
+    ? rows.flatMap((r, i) => {
+        const p = relativePathProblem(r.a.trim());
+        return p === null ? [] : [`${i + 1}행: ${p}`];
+      })
+    : [];
+  const rmOverlapErrors = f.op === "rm"
+    ? rmTargetOverlaps(rows.map((r, i) => ({ label: `${i + 1}행`, target: r.a.trim() })))
+    : [];
+  const itemsValid = storageChosen && rowsComplete && csvErrors.length === 0
+    && rmPathErrors.length === 0 && rmOverlapErrors.length === 0;
 
   // --- 옵션·실행 제어 검증(즉답 미러 — 최종 심판은 서버 422) ---
   const verboseQuietConflict = f.op === "scan" && f.verbose && f.quiet;
@@ -139,15 +161,19 @@ export function BatchCreate() {
   const mcError = f.mc.trim() === ""
     ? "동시 실행 상한은 1..64 범위의 정수여야 합니다"
     : intFieldError("동시 실행 상한", f.mc, 1, 64);
+  // rm 옵션 즉답(SubmitJob 과 같은 문구·규칙): recursive 해제는 서버 422 rm_recursive_required, stat+lite 는 invalid_option.
+  const recursiveMissing = f.op === "rm" && !f.recursive;
+  const statLiteConflict = f.op === "rm" && f.stat && f.lite;
   const controlsInvalid = verboseQuietConflict || scanBatchFilesError !== null
     || brokenLimitError !== null || advancedError !== null
-    || nodeCountError !== null || procsPerNodeError !== null || mcError !== null;
+    || nodeCountError !== null || procsPerNodeError !== null || mcError !== null
+    || recursiveMissing || statLiteConflict;
 
   // 제출 게이트는 이 하나다(위저드 시절 스텝별 '다음' 게이트의 합집합 + 조회 실패·진행 중).
   const blocked = create.isPending || !itemsValid || controlsInvalid || storagesQ.isError;
 
   // --- 정책 기본값 캡션(백엔드 무변경 — 표시 배선만) ---
-  // 도구→정책 키는 placement.py TOOL_TO_POLICY 의 미러: scan→"scan", sync→공존
+  // 도구→정책 키는 placement.py TOOL_TO_POLICY 의 미러: scan→"scan", rm→"rm", sync→공존
   // 노드가 있으면 "dsync", 없으면 "nsync" 폴백. 어느 쪽이 걸릴지는 런타임(노드
   // 상태)에야 갈리므로 sync 는 둘 다 실값으로 병기한다. 로딩·부재·비활성은
   // "—" 로 뭉개지 않고 그대로 말한다 — null(모름)≠0≠실패. 비활성 문구의 근거:
@@ -162,9 +188,9 @@ export function BatchCreate() {
   const policyCaption = (() => {
     if (policiesQ.isLoading) return "정책 조회 중…";
     if (byTool === undefined) return "정책 미조회 — 정책 목록을 불러오지 못했습니다";
-    if (f.op === "scan") {
-      const p = byTool.get("scan");
-      return p === undefined ? "정책 미조회 — scan 정책 행이 없습니다"
+    if (f.op !== "sync") {
+      const p = byTool.get(f.op);               // scan→"scan", rm→"rm" — 도구 하나라 실값 하나
+      return p === undefined ? `정책 미조회 — ${f.op} 정책 행이 없습니다`
         : `정책 기본: ${fmtPolicy(p)}`;
     }
     const dsync = byTool.get("dsync");
@@ -176,10 +202,10 @@ export function BatchCreate() {
   })();
 
   // --- 우선순위: 정책 기본값 실값 + 상한 캡션 ---
-  // 기본 라벨은 resolve_priority(domain.py) 미러 — scan→"scan" 정책, sync 는
+  // 기본 라벨은 resolve_priority(domain.py _OP_POLICY) 미러 — scan→"scan"·rm→"rm" 정책, sync 는
   // 제출 시점에 도구(dsync/nsync)가 정해지지 않으므로 dsync 정책을 대표로 읽는다.
   // 미조회·행 부재면 실값 없이 "(정책 기본)" — 거짓값 금지(null≠0).
-  const defaultPolicy = byTool?.get(f.op === "scan" ? "scan" : "dsync");
+  const defaultPolicy = byTool?.get(f.op === "sync" ? "dsync" : f.op);
   const priorityDefaultLabel = defaultPolicy === undefined
     ? "(정책 기본)" : `(정책 기본: ${defaultPolicy.default_priority})`;
 
@@ -193,7 +219,7 @@ export function BatchCreate() {
   // 대신 캡션 생략(null≠0).
   const priorityCapCaption = (() => {
     if (byTool === undefined) return null;
-    const tools = f.op === "scan" ? ["scan"] : ["dsync", "nsync"];
+    const tools = f.op === "sync" ? ["dsync", "nsync"] : [f.op];
     const rows = tools.flatMap((tool) => {
       const p = byTool.get(tool);
       return p === undefined ? []
@@ -211,7 +237,7 @@ export function BatchCreate() {
       // 정책으로만 일어나므로 넘는 도구만 정직하게 말한다.
       : `선택한 ${f.priority}는 배치 시 ${
           over.map((r) => `${r.tool} 상한 ${r.cap}`).join(" · ")}로 조정됩니다`;
-    if (f.op === "scan")
+    if (f.op !== "sync")
       return `정책 상한: ${rows[0].cap} — ${over.length === 0
         ? "상한을 넘는 선택은 배치 시 상한으로 조정됩니다" : overTail}`;
     // sync: 기본·상한이 전부 같으면 한 묶음으로 축약(같은 값 반복은 소음).
@@ -226,6 +252,14 @@ export function BatchCreate() {
 
   function buildOptions(): Record<string, unknown> {
     const options: Record<string, unknown> = {};
+    if (f.op === "rm") {
+      // recursive 는 늘 명시로 싣는다(서버 기본 없음 — 동의 게이트). 끄면 위 즉답이 제출을 막는다.
+      if (f.recursive) options.recursive = true;
+      if (f.stat) options.stat = true;
+      if (f.lite) options.lite = true;
+      if (f.quiet) options.quiet = true;
+      return options;
+    }
     if (f.op === "scan") {
       if (f.verbose) options.verbose = true;
       if (f.quiet) options.quiet = true;
@@ -252,10 +286,10 @@ export function BatchCreate() {
   // 제출 바디와 오른쪽 요약이 **같은 함수**에서 파생 — 화면 따로 바디 따로면
   // "요약과 다른 것이 제출되는" 화면 거짓말이 생긴다(SubmitJob 관례).
   function buildBody(): CreateBatchBody {
-    const items = f.op === "scan"
-      ? rows.map((r) => ({ storage: f.storage, target: r.a.trim() }))
-      : rows.map((r) => ({ source_storage: f.srcStorage, source: r.a.trim(),
-                           destination_storage: f.dstStorage, destination: r.b.trim() }));
+    const items = f.op === "sync"
+      ? rows.map((r) => ({ source_storage: f.srcStorage, source: r.a.trim(),
+                           destination_storage: f.dstStorage, destination: r.b.trim() }))
+      : rows.map((r) => ({ storage: f.storage, target: r.a.trim() }));        // scan·rm
     return {
       operation: f.op, max_concurrency: Number(f.mc), options: buildOptions(),
       note: f.note || null, items,
@@ -269,7 +303,8 @@ export function BatchCreate() {
       // 실행 신원: 빈값은 키 생략 = 서버 NULL(기본: 생성자 본인) — 특권 게이트는
       // owner 유무와 무관하게 항상 발동한다(통일 게이트).
       ...(f.ownerUsername.trim() !== "" && { owner_username: f.ownerUsername.trim() }),
-      // 자동 확인은 sync 만(scan 은 확인 단계가 없어 서버 422) — 연산을 scan 으로 바꾸면 체크가 남아 있어도 싣지 않는다.
+      // 자동 확인은 sync 만(scan 은 확인 단계가 없고 rm 은 늘 사람이 확인 — 서버 422) — 연산을 바꾸면 체크가 남아
+      // 있어도 싣지 않는다.
       ...(f.op === "sync" && f.autoConfirm && { auto_confirm: true as const }),
     };
   }
@@ -284,9 +319,9 @@ export function BatchCreate() {
     const { rows: parsed, errors } = parseItemsCsv(f.op, text);
     setCsvErrors(errors);
     if (errors.length > 0) return;   // 오류가 있으면 rows 를 덮지 않는다(부분 반영 금지)
-    setRows(parsed.map((r) => f.op === "scan"
-      ? { a: (r as ScanRow).target, b: "" }
-      : { a: (r as SyncRow).source, b: (r as SyncRow).destination }));
+    setRows(parsed.map((r) => f.op === "sync"
+      ? { a: (r as SyncRow).source, b: (r as SyncRow).destination }
+      : { a: (r as ScanRow).target, b: "" }));
     setTab("table");                 // 성공 반영 → 결과(테이블)를 바로 보인다
   }
 
@@ -301,9 +336,9 @@ export function BatchCreate() {
   function downloadCsv() {
     // 클립보드 API 금지: 운영 포탈은 http(비 localhost) 비보안 컨텍스트라
     // 브라우저 클립보드 API 가 부재한다 — Blob 다운로드는 어디서나 동작한다.
-    const text = serializeItemsCsv(f.op, f.op === "scan"
-      ? rows.map((r) => ({ target: r.a.trim() }))
-      : rows.map((r) => ({ source: r.a.trim(), destination: r.b.trim() })));
+    const text = serializeItemsCsv(f.op, f.op === "sync"
+      ? rows.map((r) => ({ source: r.a.trim(), destination: r.b.trim() }))
+      : rows.map((r) => ({ target: r.a.trim() })));
     const url = URL.createObjectURL(new Blob([text], { type: "text/csv" }));
     const anchor = document.createElement("a");
     anchor.href = url;
@@ -327,18 +362,20 @@ export function BatchCreate() {
     </button>
   );
 
-  const rowCols = f.op === "scan"
-    ? "grid-cols-[2rem_minmax(0,1fr)_2rem]"
-    : "grid-cols-[2rem_minmax(0,1fr)_minmax(0,1fr)_2rem]";
+  const rowCols = f.op === "sync"
+    ? "grid-cols-[2rem_minmax(0,1fr)_minmax(0,1fr)_2rem]"
+    : "grid-cols-[2rem_minmax(0,1fr)_2rem]";
 
   // 제출이 잠긴 이유(요약 패널, 버튼 위) -- 필드 옆 빨간 문구와 다른 문장으로 짧게(SubmitHints 주석).
   const hints: string[] = [];
   if (create.isPending) hints.push("생성 중…");
   if (storagesQ.isError) hints.push("스토리지 목록 조회 실패 — 새로고침 후 다시 시도하세요");
-  if (!storageChosen) hints.push(f.op === "scan" ? "스토리지를 고르세요" : "소스·목적지 스토리지를 고르세요");
+  if (!storageChosen) hints.push(f.op === "sync" ? "소스·목적지 스토리지를 고르세요" : "스토리지를 고르세요");
   if (rows.length === 0) hints.push("항목을 1개 이상 추가하세요");
   else if (incompleteRows > 0) hints.push(`경로가 빈 항목 ${incompleteRows}개를 채우거나 지우세요`);
   if (csvErrors.length > 0) hints.push("CSV 오류를 고친 뒤 다시 반영하세요");
+  if (rmPathErrors.length > 0) hints.push(`삭제할 수 없는 경로 ${rmPathErrors.length}개를 고치세요`);
+  if (rmOverlapErrors.length > 0) hints.push(`겹치는 삭제 경로 ${rmOverlapErrors.length}개를 정리하세요`);
   if (controlsInvalid) hints.push("빨간 안내가 붙은 옵션·실행 제어 값을 고치세요");
 
   const body = buildBody();   // 요약 = 제출 바디에서 파생(화면 거짓말 금지)
@@ -349,9 +386,10 @@ export function BatchCreate() {
         <div className="grid gap-x-6 gap-y-1 sm:grid-cols-2">
           <label className="text-sm block">연산
             <select aria-label="연산" className={field} value={f.op}
-                    onChange={(e) => setF({ ...f, op: e.target.value as "scan" | "sync" })}>
+                    onChange={(e) => setF({ ...f, op: e.target.value as BatchOp })}>
               <option value="scan">scan</option>
               <option value="sync">sync</option>
+              <option value="rm">rm</option>
             </select>
           </label>
           <p className="text-sm text-muted sm:pt-8">
@@ -361,19 +399,37 @@ export function BatchCreate() {
       </FormSection>
 
       <FormSection step={2} title="대상 스토리지와 항목"
-                   caption={f.op === "scan"
-                     ? "한 배치는 하나의 스토리지만 대상으로 합니다 — 행은 경로만 입력합니다."
-                     : "한 배치는 소스 → 목적지 스토리지 한 쌍만 대상으로 합니다 — 행은 경로만 입력합니다."}>
+                   caption={f.op === "sync"
+                     ? "한 배치는 소스 → 목적지 스토리지 한 쌍만 대상으로 합니다 — 행은 경로만 입력합니다."
+                     : f.op === "rm"
+                       ? "한 배치는 하나의 스토리지만 대상으로 합니다 — 행마다 지울 경로를 입력합니다."
+                       : "한 배치는 하나의 스토리지만 대상으로 합니다 — 행은 경로만 입력합니다."}>
         {storagesQ.isError && (
           <p className="text-bad text-sm">{(storagesQ.error as ApiError).message}</p>
         )}
-        {f.op === "scan" ? (
+        {f.op !== "sync" ? (<>
           <div className="grid gap-3 sm:grid-cols-2">
             <StoragePicker label="스토리지" value={f.storage}
               onChange={(v) => setF({ ...f, storage: v })}
               storages={storages} loading={loadingStorages} />
           </div>
-        ) : (
+          {f.op === "rm" && (
+            // 삭제 범위(2026-10-21): 무엇이·누구 권한으로·언제 지워지는지를 생성 화면이 먼저 말한다. 지우는 순간은
+            // 배치 상세의 「배치 확인」이라 강한 마찰(체크)은 거기 두고, 여기는 정보와 즉답만 둔다.
+            <div className="rounded-card border border-bad/30 bg-badbg p-3 text-xs text-bad" role="note"
+                 aria-label="삭제 범위">
+              <p className="text-sm font-medium">삭제 범위</p>
+              <ul className="mt-1 list-disc space-y-0.5 pl-5">
+                <li>각 행의 경로와 그 아래 파일·디렉토리를 모두 삭제합니다 — 되돌릴 수 없습니다.</li>
+                <li>관리자 특권(root)으로 실행돼 파일 권한·소유와 관계없이 지워집니다.</li>
+                <li>관리 디렉토리 자신(.)·「..」·「/」로 시작하는 경로는 받지 않고, 한 배치 안에서 겹치는 경로(같은 경로·
+                  한 경로 아래의 경로)도 받지 않습니다 — 상위 경로 하나만 남기세요.</li>
+                <li>만들기만 해서는 아무것도 지워지지 않습니다 — 항목별 미리보기(지울 항목 수)가 끝나면 배치 상세의
+                  「배치 확인」에서 검토하고 확인해야 삭제됩니다.</li>
+              </ul>
+            </div>
+          )}
+        </>) : (
           <>
             <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]">
               <StoragePicker label="소스 스토리지" value={f.srcStorage}
@@ -434,7 +490,7 @@ export function BatchCreate() {
               <div className="space-y-2">
                 <div className={`grid ${rowCols} gap-2 text-xs text-muted`} aria-hidden>
                   <span className="text-right">#</span>
-                  <span>{f.op === "scan" ? "경로" : "소스 경로"}</span>
+                  <span>{f.op === "sync" ? "소스 경로" : f.op === "rm" ? "삭제할 경로" : "경로"}</span>
                   {f.op === "sync" && <span>목적지 경로</span>}
                   <span />
                 </div>
@@ -445,8 +501,9 @@ export function BatchCreate() {
                       <span className="text-right text-xs tabular-nums text-muted">{i + 1}</span>
                       {/* placeholder 예시는 스토리지 기준 상대경로(선행 슬래시 없음) —
                           경로가 스토리지 루트 기준임을 힌트로 드러낸다 */}
-                      <input aria-label={`${i + 1}행 ${f.op === "scan" ? "경로" : "소스"}`}
-                             placeholder={f.op === "scan" ? "예: team/projects" : "예: team/dataset"}
+                      <input aria-label={`${i + 1}행 ${f.op === "sync" ? "소스" : "경로"}`}
+                             placeholder={f.op === "sync" ? "예: team/dataset"
+                               : f.op === "rm" ? "예: team/old-project" : "예: team/projects"}
                              className={cell} value={r.a}
                              onChange={(e) => setRow(i, "a", e.target.value)} />
                       {f.op === "sync" && (
@@ -472,11 +529,11 @@ export function BatchCreate() {
             {tab === "paste" && (
               <div className="space-y-2">
                 <label className="text-sm block">
-                  CSV ({f.op === "scan" ? "행당 경로 1개" : "행당 source,destination"})
+                  CSV ({f.op === "sync" ? "행당 source,destination" : "행당 경로 1개"})
                   <textarea aria-label="CSV" className={`${field} h-40 font-mono`}
-                            placeholder={f.op === "scan"
-                              ? "team\nprojects/alpha"
-                              : "team/dataset,backup/dataset\nprojects/alpha,backup/alpha"}
+                            placeholder={f.op === "sync"
+                              ? "team/dataset,backup/dataset\nprojects/alpha,backup/alpha"
+                              : "team\nprojects/alpha"}
                             value={csvText} onChange={(e) => setCsvText(e.target.value)} />
                 </label>
                 <p className="text-xs text-muted">반영하면 표의 행을 통째로 바꿉니다(이어 붙이지 않음).</p>
@@ -497,13 +554,44 @@ export function BatchCreate() {
                 {csvErrors.map((err, i) => <li key={i}>{err}</li>)}
               </ul>
             )}
+            {rmPathErrors.length > 0 && (
+              <ul aria-label="삭제할 수 없는 경로" className="mt-3 space-y-1 text-bad text-sm">
+                {rmPathErrors.map((err) => <li key={err}>{err}</li>)}
+              </ul>
+            )}
+            {rmOverlapErrors.length > 0 && (
+              <ul aria-label="겹치는 삭제 경로" className="mt-3 space-y-1 text-bad text-sm">
+                {rmOverlapErrors.map((err) => <li key={err}>{err}</li>)}
+              </ul>
+            )}
           </div>
           <div className="border-t border-line px-3 py-2 text-sm text-muted">행: {rows.length}</div>
         </div>
       </FormSection>
 
       <FormSection step={3} title="실행 옵션">
-        {f.op === "scan" ? (
+        {f.op === "rm" ? (
+          <>
+            {/* 단일 작업(SubmitJob) rm 옵션 미러 — 같은 라벨·같은 즉답(같은 옵션 = 같은 문구). */}
+            <div className="flex flex-wrap gap-x-6 gap-y-2">
+              <label className="flex items-center gap-2 text-sm">
+                <input type="checkbox" aria-label="재귀 삭제(필수)" checked={f.recursive}
+                       onChange={on("recursive")} /> 재귀 삭제(필수)
+              </label>
+              <label className="flex items-center gap-2 text-sm">
+                <input type="checkbox" aria-label="stat" checked={f.stat} onChange={on("stat")} /> stat
+              </label>
+              <label className="flex items-center gap-2 text-sm">
+                <input type="checkbox" aria-label="lite" checked={f.lite} onChange={on("lite")} /> lite
+              </label>
+              <label className="flex items-center gap-2 text-sm" title="실행 로그를 줄입니다 — 실행 결과 개수(삭제한 항목)도 「—」가 됩니다. 미리보기(dry-run)에는 적용하지 않습니다(대상 수를 세는 줄이 사라지므로)">
+                <input type="checkbox" aria-label="quiet" checked={f.quiet} onChange={on("quiet")} /> quiet
+              </label>
+            </div>
+            {recursiveMissing && <p className="text-bad text-sm">재귀 옵션이 필요합니다</p>}
+            {statLiteConflict && <p className="text-bad text-sm">stat과 lite는 함께 쓸 수 없습니다</p>}
+          </>
+        ) : f.op === "scan" ? (
           <>
             <div className="flex flex-wrap gap-x-6 gap-y-2">
               <label className="flex items-center gap-2 text-sm">
@@ -642,7 +730,9 @@ export function BatchCreate() {
           특권(root) 실행이다 — owner 입력은 특권 스위치가 아니므로 안내문은
           입력과 무관하게 고정이다. 인가의 최종 심판은 서버 게이트
           (403 privileged_not_authorized). */}
-      <FormSection step={4} title="실행 제어" caption="이 배치는 관리자 특권(root)으로 실행됩니다.">
+      <FormSection step={4} title="실행 제어" caption={f.op === "rm"
+        ? "이 배치는 관리자 특권(root)으로 삭제합니다 — 파일 권한·소유와 관계없이 지워집니다."
+        : "이 배치는 관리자 특권(root)으로 실행됩니다."}>
         <FieldRow
           control={<label className="text-sm block">우선순위
             <select aria-label="우선순위" className={field} value={f.priority} onChange={on("priority")}>
@@ -666,7 +756,9 @@ export function BatchCreate() {
                    className={field}
                    value={f.ownerUsername} onChange={on("ownerUsername")} />
           </label>}
-          help="배치는 관리자 이관·정리용이라 root 로 실행됩니다 — 실행 신원은 기록용 이름이며 파일 권한 검사는 적용되지 않고, sync 는 목적지(이미 있는 디렉토리 포함)의 소유자·권한을 소스와 같게 바꿉니다(chown·chmod 지정 시 그 값). 사용자 권한 그대로 실행하려면 단일 작업에서 실행 신원을 지정하세요." />
+          help={f.op === "rm"
+            ? "배치는 관리자 이관·정리용이라 root 로 실행됩니다 — 실행 신원은 기록용 이름이며 파일 권한 검사는 적용되지 않아, 실행 신원이 지울 수 없는 파일도 지웁니다. 사용자 권한 그대로 지우려면 단일 작업에서 실행 신원을 지정하세요."
+            : "배치는 관리자 이관·정리용이라 root 로 실행됩니다 — 실행 신원은 기록용 이름이며 파일 권한 검사는 적용되지 않고, sync 는 목적지(이미 있는 디렉토리 포함)의 소유자·권한을 소스와 같게 바꿉니다(chown·chmod 지정 시 그 값). 사용자 권한 그대로 실행하려면 단일 작업에서 실행 신원을 지정하세요."} />
         {/* 잡 하나의 폭(노드 수 × 노드당 프로세스) -- 정책 실값 캡션은 두 칸을 함께 설명한다.
             라벨 길이가 달라도 입력 상자가 한 줄에 서도록 아래 정렬(items-end), 오류는 그 아래. */}
         <div className="space-y-1">
@@ -743,11 +835,17 @@ export function BatchCreate() {
     </>
   );
 
-  const storageText = f.op === "scan" ? (f.storage === "" ? "—" : f.storage)
+  const storageText = f.op !== "sync" ? (f.storage === "" ? "—" : f.storage)
     : `${f.srcStorage === "" ? "—" : f.srcStorage} → ${f.dstStorage === "" ? "—" : f.dstStorage}`;
 
   const summary = (
     <SummaryPanel title="생성 요약" footer={<>
+      {/* rm 경고는 제출 버튼 바로 위 한 곳(SubmitJob 관례) — 위험=빨강 의미 체계 유지. */}
+      {body.operation === "rm" && (
+        <p className="rounded-lg border border-bad/30 bg-badbg px-3 py-2 text-sm text-bad">
+          삭제는 되돌릴 수 없습니다. 항목별 미리보기에서 지울 대상을 본 뒤 배치 상세의 「배치 확인」에서 확인해야 삭제됩니다.
+        </p>
+      )}
       <SubmitHints id="batch-create-hints" items={hints} />
       {create.isError && (
         <p className="text-bad text-sm">{(create.error as ApiError).message}</p>
@@ -772,7 +870,7 @@ export function BatchCreate() {
         <SummaryRow label="노드당 프로세스">{body.procs_per_node ?? "(정책 기본)"}</SummaryRow>
         {/* 특권 실행 표시는 고정 행(통일 게이트 — 입력과 무관), 실행 신원 행은 값이 있을 때만
             (빈값 = 생성자 본인) */}
-        <SummaryRow label="실행 권한">관리자 특권(root)</SummaryRow>
+        <SummaryRow label="실행 권한" className={body.operation === "rm" ? "text-bad" : ""}>관리자 특권(root)</SummaryRow>
         {/* sync 결과 소유(2026-10-01): 배치는 root 라 chown 미지정이면 소스 그대로. */}
         {body.operation === "sync" && (
           <SummaryRow label="목적지 소유">
@@ -782,11 +880,14 @@ export function BatchCreate() {
           </SummaryRow>
         )}
         {body.owner_username && <SummaryRow label="실행 신원">{body.owner_username}</SummaryRow>}
-        {/* 실행 확인 방식(sync 만 — scan 은 확인 단계가 없다). 바디에서 파생(화면 거짓말 금지). */}
+        {/* 실행 확인 방식(sync·rm — scan 은 확인 단계가 없다). 바디에서 파생(화면 거짓말 금지). */}
         {body.operation === "sync" && (
           <SummaryRow label="실행 확인">
             {body.auto_confirm === true ? "자동 — 미리보기가 끝나면 바로 실행" : "직접 — 미리보기 후 「배치 확인」"}
           </SummaryRow>
+        )}
+        {body.operation === "rm" && (
+          <SummaryRow label="실행 확인">직접 — 미리보기 후 「배치 확인」(rm 은 자동 실행 없음)</SummaryRow>
         )}
         {/* 비운 동시 상한은 Number("")=0 이 아니라 "—"(제출은 그 상태로 막힌다) */}
         <SummaryRow label="동시 상한">{f.mc.trim() === "" ? "—" : body.max_concurrency}</SummaryRow>
@@ -800,7 +901,7 @@ export function BatchCreate() {
     <section className="space-y-4">
       <div>
         <h1 className="text-2xl font-bold">배치 생성</h1>
-        <p className="mt-1 text-sm text-muted">여러 경로를 한 번에 scan·sync 합니다.</p>
+        <p className="mt-1 text-sm text-muted">여러 경로를 한 번에 scan·sync·rm 합니다.</p>
       </div>
       <SubmitLayout sheet={sheet} summary={summary} />
     </section>

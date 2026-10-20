@@ -420,6 +420,51 @@ def test_batch_detail_reports_the_hold_with_the_same_predicate(db):
     assert client.get(f"/api/admin/batches/{off}", headers=TOKEN).json()["auto_confirm_hold"] is None
 
 
+def test_rm_batches_never_turn_auto_confirm_on(db):
+    # rm 은 되돌릴 수 없는 root 삭제라 늘 사람이 「배치 확인」을 누른다(2026-10-21 결정) -- 생성·실행 설정 변경 모두 422.
+    client = TestClient(_app(db))
+    repos = client.app.state.repos
+    _login(client, "ops")
+    rm = {"operation": "rm", "max_concurrency": 1, "options": {"recursive": True},
+          "items": [{"storage": "s1", "target": "old"}]}
+    r = client.post("/api/admin/batches", json={**rm, "auto_confirm": True})
+    assert r.status_code == 422 and r.json()["detail"] == "auto_confirm_sync_only"
+    bid = client.post("/api/admin/batches", json={**rm, "auto_confirm": False}).json()["batch_id"]
+    repos.batches.set_item_status(bid, 0, "Succeeded")
+    repos.batches.set_status(bid, "Completed")
+    r = client.patch(f"/api/admin/batches/{bid}/execution", json={"auto_confirm": True})
+    assert r.status_code == 422 and r.json()["detail"] == "auto_confirm_sync_only"
+    assert db.query("SELECT COUNT(*) AS n FROM batches WHERE auto_confirm_by IS NOT NULL")[0]["n"] == 0
+
+
+def test_a_forged_rm_row_with_auto_confirm_is_not_confirmed_by_the_loop(db):
+    # DB 가 신뢰 경계 -- rm 배치 행에 auto_confirm_by 를 직접 써도 루프는 확인하지 않는다(PreviewReady 분기의 sync 검사 +
+    # auto_confirm_hold 두 겹). 확인 대기에 그대로 남고, 감사 행·도장·실행 없음.
+    repos = Repositories(db)
+    _ops(repos)
+    bid = repos.batches.create(operation="rm", requester_id="ops", actor="ops", max_concurrency=2,
+                               options={"recursive": True}, items=[{"storage": "s1", "target": "old"}], note=None,
+                               status="PreviewReady", auth_method="session", auto_confirm_by="ops")
+    rid = repos.requests.create(operation="rm", requester_id="ops", actor="ops", resource_key=f"k-{bid}",
+                                payload={"storage": "s1", "target": "old", "options": {"recursive": True}},
+                                priority="mid", batch_id=bid, auth_method="session")
+    repos.batches.set_item_materialized(bid, 0, rid)
+    plan = repos.data_jobs.create_plan(rid, actor="planner")
+    jid = repos.data_jobs.create_job(rid, plan, operation="rm", priority="mid", storage_name="s1", target="old",
+                                     options={"recursive": True}, tool="drm", worker_pool={}, precondition={},
+                                     actor="planner")
+    repos.data_jobs.set_preview(jid, fingerprint="sha256:rm", expires_at="2099-01-01T00:00:00Z", artifact_uri="x",
+                                summary={"files": 6, "bytes": None, "returncode": 0})
+    repos.data_jobs.set_job_state(jid, DataJobState.CONFIRM_PENDING, actor="stepper")
+    assert auto_confirm_hold(repos, _S(), repos.batches.get(bid)) == "auto_confirm_sync_only"
+    for _ in range(3):
+        BatchOrchestrator(repos, settings=_S()).run_once()
+    assert repos.batches.get(bid)["status"] == "PreviewReady"
+    job = repos.data_jobs.get_job(jid)
+    assert job["state"] == "ConfirmPending" and job["confirmed_fingerprint"] is None
+    assert _audit(db, "confirm") == []
+
+
 def test_a_forged_scan_row_with_auto_confirm_is_not_confirmed(db):
     # DB 가 신뢰 경계 -- scan 배치 행에 auto_confirm_by 를 직접 써도 확인 경로가 없다(확인 단계 자체가 sync 만).
     repos = Repositories(db)

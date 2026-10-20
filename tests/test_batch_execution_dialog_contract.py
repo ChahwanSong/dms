@@ -19,7 +19,7 @@ def _dialog_keys(const: str) -> dict[str, set[str]]:
     m = re.search(rf"const {const} = \{{(.*?)\}} as const;", src, re.S)
     assert m, f"{const} 정의를 못 찾음 -- 다이얼로그 구조가 바뀌면 이 테스트도 함께 고쳐라"
     out = {}
-    for op in ("scan", "sync"):
+    for op in ("scan", "sync", "rm"):
         mm = re.search(rf"{op}: \[(.*?)\]", m.group(1), re.S)
         assert mm, (const, op)
         out[op] = set(re.findall(r'"([a-z_]+)"', mm.group(1)))
@@ -28,7 +28,8 @@ def _dialog_keys(const: str) -> dict[str, set[str]]:
 
 def test_dialog_option_keys_equal_server_option_specs():
     bools, ints, strs = _dialog_keys("BOOLS"), _dialog_keys("INTS"), _dialog_keys("STRS")
-    for op, operation in (("scan", Operation.SCAN), ("sync", Operation.SYNC)):
+    # rm(2026-10-21 배치 rm): 빠지면 다이얼로그가 rm 을 scan 으로 접어 저장 때 recursive 를 「옛 옵션」으로 뺀다.
+    for op, operation in (("scan", Operation.SCAN), ("sync", Operation.SYNC), ("rm", Operation.RM)):
         dialog = bools[op] | ints[op] | strs[op]
         assert dialog == set(_OPTION_SPECS[operation]), op
         # 종류도 맞아야 한다(bool 칸에 정수 옵션이 들어가면 체크박스가 true 만 싣는다)

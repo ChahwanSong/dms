@@ -1761,3 +1761,206 @@ test("배치 목록: 자동 실행 sync 배치는 작업 칸에 「자동」", a
   expect(marks).toHaveLength(1);
   expect(marks[0]).toHaveTextContent("자동");
 });
+
+
+// --- rm 배치(2026-10-21 「배치작업에 rm도」): sync 와 같은 확인 흐름 + rm 문구·마찰 ---------------------------------
+const rmItem = (seq: number, target: string, over: any = {}) => ({
+  seq, payload: { storage: "s1", target }, status: "Materialized", request_id: `r${seq}`, reason_code: null,
+  job_state: "ConfirmPending", preview_summary: { files: 6, bytes: null, returncode: 0 },
+  preview_expires_at: "2099-10-08T03:00:00Z", ...over });
+const rmBatch = (over: any = {}) => ({ operation: "rm", status: "PreviewReady", options: { recursive: true },
+  item_count: 4, items: [
+    rmItem(0, "team/old-a", { preview_summary: { files: 1234, bytes: null, returncode: 0 } }),
+    rmItem(1, "team/typo", { preview_summary: { files: 0, bytes: null, returncode: 0 } }),
+    rmItem(2, "team/unknown", { preview_summary: { files: null, bytes: null, returncode: 0 } }),
+    rmItem(3, "team/gone", { status: "Rejected", job_state: "Rejected", preview_summary: null,
+                             reason_code: "parent_not_writable" })], ...over });
+
+test("rm 배치 확인 대화상자: 삭제 문장·삭제 경고·삭제 대상 합계(null≠0)·대상 경로 없음·항목별 목록·소유권 줄 없음", async () => {
+  server.use(storagesHandler(ROOTED));
+  renderItems(rmBatch());
+  const dlg = await openConfirmDialog();
+  expect(dlg).toHaveTextContent("확인하면 미리보기를 마친 항목 3개의 경로가 동시 실행 상한 2개씩 차례로 관리자 특권(root)으로 "
+    + "삭제됩니다 — 항목별 확인은 없고, 되돌릴 수 없습니다.");
+  expect(within(dlg).getByRole("note", { name: "삭제 경고" })).toHaveTextContent("root 로 실행돼 파일 권한·소유와 관계없이");
+  expect(within(dlg).getByText("삭제 대상")).toBeInTheDocument();
+  expect(within(dlg).queryByText("복사 대상")).toBeNull();
+  // 모름(null)은 합계에 더하지 않고 따로, 0(대상 없음)은 아는 값이라 합계에 들어간다
+  expect(within(dlg).getByText("1,234개(대상 경로 포함 파일·디렉터리, 항목별 미리보기 합계, 1개 항목은 모름)"))
+    .toBeInTheDocument();
+  expect(within(dlg).getByText("대상 경로 없음").nextSibling)
+    .toHaveTextContent("1개 항목 — 미리보기에서 찾지 못했습니다(오타·이미 삭제·권한). 확인해도 지울 것이 없습니다.");
+  const list = within(dlg).getByRole("list", { name: "항목별 삭제 대상" });
+  const rows = within(list).getAllByRole("listitem");
+  expect(rows).toHaveLength(3);                                      // 실행할 항목 전부(종단 #3 은 「실행되지 않는 항목」)
+  expect(rows[0]).toHaveTextContent("#0 s1:team/old-a — 1,234개");
+  await waitFor(() => expect(rows[0]).toHaveTextContent("실제 경로: /cephfs/dms/team/old-a"));
+  expect(rows[1]).toHaveTextContent("#1 s1:team/typo — 0개(대상 경로를 찾지 못함)");
+  expect(rows[1]).toHaveClass("text-bad");
+  expect(rows[2]).toHaveTextContent("#2 s1:team/unknown — 모름");
+  expect(rows[2]).not.toHaveClass("text-bad");
+  expect(within(dlg).queryByRole("note", { name: "목적지 소유" })).toBeNull();
+  expect(dlg).not.toHaveTextContent("delete 옵션");
+});
+
+test("rm 배치 확인: 「되돌릴 수 없음」 체크 전엔 「삭제 실행 확인」이 잠기고, 체크 뒤 {preview_round} 를 보낸다 — 다시 열면 체크가 풀린다", async () => {
+  let confirmed: unknown = null;
+  server.use(http.post("/api/admin/batches/b1:confirm", async ({ request }) => {
+    confirmed = await request.json(); return HttpResponse.json({ status: "Running" }); }));
+  renderItems(rmBatch({ preview_round: 2 }));
+  let dlg = await openConfirmDialog();
+  const go = within(dlg).getByRole("button", { name: "삭제 실행 확인" });
+  expect(within(dlg).queryByRole("button", { name: "실행 확인" })).toBeNull();
+  expect(go).toBeDisabled();
+  const ack = within(dlg).getByLabelText("되돌릴 수 없는 삭제임을 확인했습니다");
+  await userEvent.click(ack);
+  expect(go).toBeEnabled();
+  await userEvent.click(within(dlg).getByRole("button", { name: "취소" }));
+  expect(confirmed).toBeNull();
+  dlg = await openConfirmDialog();
+  expect(within(dlg).getByLabelText("되돌릴 수 없는 삭제임을 확인했습니다")).not.toBeChecked();
+  expect(within(dlg).getByRole("button", { name: "삭제 실행 확인" })).toBeDisabled();
+  await userEvent.click(within(dlg).getByLabelText("되돌릴 수 없는 삭제임을 확인했습니다"));
+  await userEvent.click(within(dlg).getByRole("button", { name: "삭제 실행 확인" }));
+  await waitFor(() => expect(confirmed).toEqual({ preview_round: 2 }));
+});
+
+test("rm 배치 확인: dry-run 종료코드가 0 이 아니면 그 항목을 빨갛게 표시한다", async () => {
+  renderItems(rmBatch({ items: [rmItem(0, "a", { preview_summary: { files: 3, bytes: null, returncode: 2 } })] }));
+  const dlg = await openConfirmDialog();
+  const row = within(within(dlg).getByRole("list", { name: "항목별 삭제 대상" })).getByRole("listitem");
+  expect(row).toHaveTextContent("#0 s1:a — 3개 · dry-run 종료코드 2");
+  expect(row).toHaveClass("text-bad");
+});
+
+test("rm 배치 확인: 회차가 바뀌면 체크와 무관하게 잠긴다(기존 ABA 계약 유지)", async () => {
+  let round = 1;
+  server.use(http.get("/api/admin/batches/b1", () => HttpResponse.json(batch(rmBatch({ preview_round: round })))));
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={qc}><MemoryRouter initialEntries={["/admin/batches/b1"]}>
+    <Routes><Route path="/admin/batches/:batchId" element={<BatchDetail/>} /></Routes>
+  </MemoryRouter></QueryClientProvider>);
+  const dlg = await openConfirmDialog();
+  await userEvent.click(within(dlg).getByLabelText("되돌릴 수 없는 삭제임을 확인했습니다"));
+  expect(within(dlg).getByRole("button", { name: "삭제 실행 확인" })).toBeEnabled();
+  round = 2;
+  await qc.invalidateQueries({ queryKey: ["batch", "b1"] });
+  expect(await within(dlg).findByRole("alert")).toHaveTextContent("이 대화상자를 연 뒤 배치 내용이 바뀌었습니다");
+  expect(within(dlg).getByRole("button", { name: "삭제 실행 확인" })).toBeDisabled();
+});
+
+test("rm 헤더 안내: 미리보기 중엔 「아무것도 지우지 않습니다」, 확인 대기엔 「확인 전에는 아무것도 지워지지 않습니다」, 자동 실행 표시 없음", async () => {
+  const r1 = renderItems(rmBatch({ status: "Previewing" }));
+  expect(await screen.findByText(/지울 항목을 세기만 하고 아무것도 지우지 않습니다/)).toHaveTextContent(
+    "끝나면 「배치 확인」을 눌러야 삭제됩니다.");
+  expect(screen.queryByRole("button", { name: "자동 실행 끄기" })).toBeNull();
+  r1.unmount();
+  const r2 = renderItems(rmBatch());
+  expect(await screen.findByRole("status")).toHaveTextContent(
+    "미리보기가 끝났습니다 — 「배치 확인」에서 항목별 삭제 대상을 검토하고 확인해야 삭제됩니다. 확인 전에는 아무것도 지워지지 않습니다.");
+  r2.unmount();
+  renderItems(rmBatch({ status: "Running" }));
+  expect(await screen.findByText("확인된 항목은 동시 실행 상한(2)만큼씩 차례로 실행됩니다.")).toBeInTheDocument();
+  expect(screen.queryByText(/^자동 실행/)).toBeNull();                 // 헤더 「자동 실행 (켠 사람 …)」 배지 없음
+});
+
+test("rm 실행 설정: 「실행 확인 = 직접 …(rm 은 자동 실행 없음)」·옵션 recursive=true", async () => {
+  renderItems(rmBatch());
+  await userEvent.click(await screen.findByText("실행 설정"));
+  expect(screen.getByText("직접 — 미리보기 후 「배치 확인」(rm 은 자동 실행 없음)")).toBeInTheDocument();
+  expect(screen.getByText("recursive=true")).toBeInTheDocument();
+});
+
+test("rm 항목 추가: 대상 경로 하나 + 진행 중엔 다시 확인 안내, 루트·겹침은 즉답으로 잠근다(종단 항목 포함)", async () => {
+  let sent: any = null;
+  server.use(http.post("/api/admin/batches/b1/items", async ({ request }) => {
+    sent = await request.json(); return HttpResponse.json({ seq: 4, status: "Previewing" }, { status: 202 }); }));
+  renderItems(rmBatch({ status: "Running" }));
+  await userEvent.click(await screen.findByRole("button", { name: "항목 추가" }));
+  const dlg = await screen.findByRole("dialog", { name: "항목 추가" });
+  expect(within(dlg).queryByLabelText("추가할 목적지 경로")).toBeNull();
+  expect(dlg).toHaveTextContent("진행 중인 배치에 추가하면 배치가 다시 미리보기 단계로 돌아갑니다");
+  const input = within(dlg).getByLabelText("추가할 대상 경로");
+  const add = within(dlg).getByRole("button", { name: "항목 추가" });
+  await userEvent.type(input, ".");
+  expect(within(dlg).getByRole("list", { name: "추가할 수 없는 삭제 경로" }))
+    .toHaveTextContent("관리 디렉토리 자신(.)은 지정할 수 없습니다");
+  expect(add).toBeDisabled();
+  await userEvent.clear(input);
+  await userEvent.type(input, "team");                                // 기존 항목 전부의 조상
+  expect(within(dlg).getByRole("list", { name: "추가할 수 없는 삭제 경로" })).toHaveTextContent(
+    "기존 #0: 추가할 경로의 경로(team) 아래입니다");
+  expect(add).toBeDisabled();
+  await userEvent.clear(input);
+  await userEvent.type(input, "team/gone/x");                         // 종단(거부) 항목의 자손도 같은 집합
+  expect(within(dlg).getByRole("list", { name: "추가할 수 없는 삭제 경로" })).toHaveTextContent(
+    "추가할 경로: 기존 #3의 경로(team/gone) 아래입니다");
+  await userEvent.clear(input);
+  await userEvent.type(input, "team/new");
+  expect(within(dlg).queryByRole("list", { name: "추가할 수 없는 삭제 경로" })).toBeNull();
+  await userEvent.click(add);
+  await waitFor(() => expect(sent).toEqual({ storage: "s1", target: "team/new" }));
+});
+
+test("rm 항목 펼침: 「삭제한 항목」 라벨 + 「삭제 대상(미리보기)」 행, 데이터 온도 섹션 없음", async () => {
+  renderItems(rmBatch({ status: "Completed", items: [
+    rmItem(0, "team/old-a", { status: "Succeeded", request_state: "Succeeded", job_state: "Succeeded", files_count: 1234 }),
+    rmItem(1, "team/typo", { status: "Succeeded", request_state: "Succeeded", job_state: "Succeeded", files_count: 0,
+                             preview_summary: { files: 0, bytes: null, returncode: 0 } })] }));
+  await userEvent.click(await screen.findByRole("button", { name: "항목 1 상세" }));
+  expect(screen.getByText("삭제한 항목").nextSibling).toHaveTextContent("0");
+  expect(screen.getByText("삭제 대상(미리보기)").nextSibling).toHaveTextContent("0개(대상 경로를 찾지 못함)");
+  expect(screen.queryByText("파일 수")).toBeNull();
+  expect(screen.queryByText("데이터 온도")).toBeNull();
+});
+
+test("rm 현재 항목 CSV·CSV 교체: target 1열 왕복 + {storage,target} PUT + 「교체만으로는 지워지지 않습니다」·겹침 즉답", async () => {
+  let sent: any = null;
+  server.use(http.put("/api/admin/batches/b1/items", async ({ request }) => {
+    sent = await request.json(); return HttpResponse.json({ replaced: 2 }); }));
+  renderItems(rmBatch({ status: "Completed", items: [rmItem(0, "old/a", { status: "Succeeded" })] }));
+  await userEvent.click(await screen.findByRole("button", { name: "현재 항목 CSV" }));
+  const cur = await screen.findByRole("dialog", { name: "현재 항목 CSV" });
+  expect(within(cur).getByLabelText("현재 항목 CSV")).toHaveValue("target\nold/a");
+  await userEvent.click(within(cur).getByRole("button", { name: "닫기" }));
+  await userEvent.click(screen.getByRole("button", { name: "CSV로 전체 교체" }));
+  const dlg = await screen.findByRole("dialog", { name: "CSV로 전체 교체" });
+  expect(within(dlg).getByRole("note", { name: "삭제 경로 교체" })).toHaveTextContent("교체만으로는 아무것도 지워지지 않습니다");
+  expect(within(dlg).queryByRole("note", { name: "목적지 조건과 소유권" })).toBeNull();
+  await userEvent.type(within(dlg).getByLabelText("교체 CSV"), "target{enter}x{enter}x/y");
+  expect(within(dlg).getByRole("list", { name: "교체할 수 없는 삭제 경로" })).toHaveTextContent(
+    "2행: 1행의 경로(x) 아래입니다");
+  expect(within(dlg).getByRole("button", { name: "교체" })).toBeDisabled();
+  await userEvent.clear(within(dlg).getByLabelText("교체 CSV"));
+  await userEvent.type(within(dlg).getByLabelText("교체 CSV"), "target{enter}x{enter}y");
+  await userEvent.click(within(dlg).getByRole("button", { name: "교체" }));
+  await waitFor(() => expect(sent).toEqual({ items: [{ storage: "s1", target: "x" }, { storage: "s1", target: "y" }] }));
+});
+
+test("rm 실행 설정 변경: recursive·stat·lite·quiet 칸 — recursive 해제·stat+lite 는 즉답 잠금, 자동 실행 칸 없음, recursive 가 옛 옵션으로 빠지지 않는다", async () => {
+  let sent: any = null;
+  server.use(http.patch("/api/admin/batches/b1/execution", async ({ request }) => {
+    sent = await request.json(); return HttpResponse.json(batch(rmBatch({ status: "Cancelled" }))); }));
+  renderExec(rmBatch({ status: "Cancelled", options: { recursive: true, quiet: true } }));
+  await userEvent.click(await screen.findByRole("button", { name: "실행 설정 변경" }));
+  const q = within(await screen.findByRole("dialog", { name: "실행 설정 변경" }));
+  expect(q.getByText("rm 옵션")).toBeInTheDocument();
+  expect(q.getByLabelText("recursive")).toBeChecked();
+  expect(q.getByLabelText("quiet")).toBeChecked();
+  for (const k of ["verbose", "batch_files", "broken_limit", "delete", "chown"]) expect(q.queryByLabelText(k)).toBeNull();
+  expect(q.queryByLabelText("미리보기 후 자동 실행")).toBeNull();
+  expect(q.queryByRole("note", { name: "지원하지 않는 옵션" })).toBeNull();
+  expect(q.getByRole("button", { name: "변경 없음" })).toBeDisabled();
+  await userEvent.click(q.getByLabelText("recursive"));
+  expect(q.getByText("재귀 옵션이 필요합니다")).toBeInTheDocument();
+  expect(q.getByRole("button", { name: "저장" })).toBeDisabled();
+  await userEvent.click(q.getByLabelText("recursive"));
+  await userEvent.click(q.getByLabelText("stat"));
+  await userEvent.click(q.getByLabelText("lite"));
+  expect(q.getByText("stat과 lite는 함께 쓸 수 없습니다")).toBeInTheDocument();
+  expect(q.getByRole("button", { name: "저장" })).toBeDisabled();
+  await userEvent.click(q.getByLabelText("lite"));
+  await userEvent.click(q.getByRole("button", { name: "저장" }));
+  await waitFor(() => expect(sent?.options).toEqual({ recursive: true, stat: true, quiet: true }));
+  expect("auto_confirm" in sent).toBe(false);
+});

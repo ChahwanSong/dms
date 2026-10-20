@@ -4,7 +4,7 @@ import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
 import { beforeAll, afterAll, afterEach, test, expect } from "vitest";
 import { useBatches, useUpdateBatch, useUpdateBatchItem,
-         useReplaceBatchItems, useRerunBatchItems } from "./useBatches";
+         useReplaceBatchItems, useRerunBatchItems, needsBatchConfirm } from "./useBatches";
 const server = setupServer();
 beforeAll(() => server.listen()); afterEach(() => server.resetHandlers()); afterAll(() => server.close());
 test("useUpdateBatch PATCHes and invalidates batch queries", async () => {
@@ -103,4 +103,10 @@ test("useBatches fetches list", async () => {
   const { result } = renderHook(() => useBatches(), { wrapper: ({children}) =>
     <QueryClientProvider client={qc}>{children}</QueryClientProvider> });
   await waitFor(() => expect(result.current.data?.[0].batch_id).toBe("b1"));
+});
+
+test("needsBatchConfirm: 확인 흐름은 sync·rm 명시 집합 — scan·모르는 연산·부재는 아니다(DB 신뢰 경계)", () => {
+  expect(needsBatchConfirm("sync")).toBe(true);
+  expect(needsBatchConfirm("rm")).toBe(true);
+  for (const op of ["scan", "bogus", "", undefined]) expect(needsBatchConfirm(op)).toBe(false);
 });

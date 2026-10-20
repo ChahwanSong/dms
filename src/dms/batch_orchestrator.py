@@ -5,9 +5,9 @@
 materialize하고, 자식 request가 종단이면 item을 종단화 + counts를 bump하며,
 전 item이 종단이면 배치를 Completed로 전이한다.
 
-sync 경로: Previewing 배치에서 Queued item을 쓰로틀 materialize해 preview를 진행시키고,
-Queued 도 미리보기 단계 자식도 없고 확인할 미리보기(ConfirmPending)가 하나라도 있으면 배치를
-PreviewReady로 전이한다(mark_preview_ready -- 한 문장 CAS + 확인 회차 +1). 이미 확인받아 실행 중인
+확인 게이트 경로(sync·rm -- domain.confirm_gated, rm 은 2026-10-21 부터): Previewing 배치에서 Queued item을 쓰로틀
+materialize해 preview를 진행시키고, Queued 도 미리보기 단계 자식도 없고 확인할 미리보기(ConfirmPending)가 하나라도
+있으면 배치를 PreviewReady로 전이한다(mark_preview_ready -- 한 문장 CAS + 확인 회차 +1). 이미 확인받아 실행 중인
 자식(Executing)은 PreviewReady 를 막지 않는다 -- Running 에서 항목 추가 등으로 Previewing 에 돌아온
 배치가 가장 긴 자식이 끝날 때까지 재확인조차 못 하던 정체(2026-10-07 리뷰). 확인할 미리보기 없이
 실행 중 자식만 남았으면(추가한 항목이 지워졌거나 미리보기가 거부됨) 확인 대기가 아니라 Running 으로
@@ -16,7 +16,7 @@ PreviewReady로 전이한다(mark_preview_ready -- 한 문장 CAS + 확인 회�
 끝났으면 완료한다 -- 확인 대기는 사람이 누를 때까지 길어서, 기록하지 않으면 실제로 돈 자식이 Materialized
 로 남아 실패분 재실행·완료가 막히고 취소가 "취소됨" 으로 덮었다. 운영자가 배치를 Running으로 confirm하면(확인 회차 CAS + 그 순간의
 ConfirmPending 자식에 확인 도장) 남은 슬롯만큼 **도장이 지금 미리보기와 같은** 자식을 쓰로틀
-confirm(`_confirm_child`)한다 -- 새 미리보기는 하나도 만들지 않는다: Running sync 배치에 Queued·미리보기
+confirm(`_confirm_child`)한다 -- 새 미리보기는 하나도 만들지 않는다: Running 확인 게이트 배치에 Queued·미리보기
 단계 자식·도장 없는 미리보기가 보이면(라우트의 Previewing 복귀를 놓친 경합, 업그레이드 전 옛 코드가 남긴
 행) 아무것도 컨펌하지 않고 배치를 Previewing 으로 되돌린다(사람이 보지 않은 미리보기의 자동 컨펌 차단).
 
@@ -31,10 +31,12 @@ stepper 가 같은 컨트롤러 패스에서 먼저 돈다). 다시 미리보기
 감사 행)를 대신 부른다. 새 경로는 없다: 도장·회차·Queued 둑과 Running 분기의 「도장 없는 미리보기면 Previewing 복귀」는
 그대로라, 확인은 여전히 한 회차의 미리보기 전부를 대표한다 -- 바뀐 것은 누르는 주체(켠 사람의 사전 동의)뿐이다. 확인
 직전에 켠 사람의 자격을 다시 보고(auto_confirm_hold), 안 되면 확인 대기에 남겨 사람이 누르게 한다(보류). 단건 sync 는
-여전히 사람이 컨펌한다(이 경로 밖 -- 배치 자식만 여기서 실행된다).
+여전히 사람이 컨펌한다(이 경로 밖 -- 배치 자식만 여기서 실행된다). rm 배치에는 자동 확인이 없다(2026-10-21 결정 --
+되돌릴 수 없는 root 삭제라 늘 사람이 「배치 확인」을 누른다): 켜는 라우트가 422(auto_confirm_sync_only)고, DB 에
+auto_confirm_by 를 써 넣어도 PreviewReady 분기의 sync 검사와 auto_confirm_hold 가 두 겹으로 거른다.
 """
 from .db import load_json, utc_now_iso
-from .domain import (DomainValidationError, Operation, TERMINAL_REQUEST_STATES,
+from .domain import (DomainValidationError, Operation, TERMINAL_REQUEST_STATES, confirm_gated,
                      DataJobState, build_data_payload, resolve_priority, validate_options)
 from .identity import privilege_eligible
 from .batch_cancel import record_item_terminal, sweep_cancelled
@@ -247,7 +249,8 @@ class BatchOrchestrator:
             self._repos.batches.complete_if_all_terminal(bid, from_status=batch["status"])
             return
         if batch["status"] == "PreviewReady":
-            # 확인 대기: 위 기록·완료만(만들기·컨펌·전이 없음). 자동 확인이 켜진 sync 배치만 사람 대신 확인한다.
+            # 확인 대기: 위 기록·완료만(만들기·컨펌·전이 없음). 자동 확인이 켜진 sync 배치만 사람 대신 확인한다 -- rm 은
+            # 되돌릴 수 없는 삭제라 늘 사람이 확인한다(auto_confirm_by 를 DB 에 써 넣어도 여기서 제외, 모듈 docstring).
             if batch.get("auto_confirm") is True and batch["operation"] == Operation.SYNC.value:
                 self._auto_confirm(batch, total=total, previewed=len(previewed))
             return
@@ -266,10 +269,13 @@ class BatchOrchestrator:
                 self._materialize(batch, item)
             return
         if batch["status"] == "Running":
-            if batch["operation"] == Operation.SYNC.value:
+            # 확인 게이트 연산(sync·rm -- domain.confirm_gated): 도장 찍힌 미리보기만 컨펌한다. 2026-10-21 전엔 sync 만
+            # 여기였다 -- rm 이 아래 scan 분기로 떨어지면 확인된 ConfirmPending 자식이 영영 실행되지 않고(만료까지 정체),
+            # Running 중 Queued 는 사람 확인 없이 미리보기됐다.
+            if confirm_gated(batch["operation"]):
                 unstamped = [job for _, job in previewed if not _stamped(job)]
                 if queued or previewing or unstamped:
-                    # 확인된 sync 배치에 Queued·미리보기 단계 자식·도장 없는 미리보기 = 아무도 보지 않은 경로. 컨펌하면
+                    # 확인된 배치에 Queued·미리보기 단계 자식·도장 없는 미리보기 = 아무도 보지 않은 경로. 컨펌하면
                     # root 로 돈다 -- 라우트가 이미 Previewing 으로 돌렸어야 하지만(_reopen_after_new_queued) 그 사이
                     # 경합·업그레이드 전 옛 행을 위해 루프가 마지막으로 되돌린다. 실행 중 자식은 그대로 끝까지 돈다.
                     self._repos.batches.set_status_if(bid, "Previewing", from_states=("Running",))
