@@ -95,14 +95,14 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
-### ✅ nsync 미리보기·실행 파드가 반대편 스토리지를 마운트하던 문제 — **완료·실증**(2026-10-22, k1)
+### ✅ nsync 미리보기·실행 파드가 반대편 스토리지를 마운트하던 문제 — **완료·실증**(2026-10-22, k1 · ssc d185)
 
 k8s 테스트베드 실증 중 발견: nsync 미리보기 vcjob 의 destination-worker(k8s-w2)가 `hostPath type check failed: /cephfs-third
 is not a directory` 로 ContainerCreating 에 묶였다(사용자 취소로 정리). `_build_nsync_job` 이 런처·source-worker·
 destination-worker **모두에** 소스와 목적지 스토리지를 hostPath(type Directory)로 붙였다 — nsync 는 정의상 두 스토리지를 함께
 마운트한 노드가 없을 때 고르는 도구라 반대편 경로는 그 노드에 없다. preflight 는 같은 이유로 이미 역할별 마운트였다(코드 안의
 불일치). 옛 ssc 테스트베드는 반대편 노드에 남은 **빈 마운트포인트 디렉터리**(dms-w1·w2 의 8월자 빈 `/cephfs-secondary` 등)가
-이걸 가렸다 — 테스트베드 분리로 dms-w3 의 `/cephfs-third` 가 사라져 ssc 도 같은 상태가 됐다(d185 로 복구 예정).
+이걸 가렸다 — 테스트베드 분리로 dms-w3 의 `/cephfs-third` 가 사라져 ssc 도 같은 상태가 됐다(d185 로 복구, 아래).
 
 - `execution_volcano._volumes(role=…)` 하나가 정한다: nsync vcjob 은 런처 = 아티팩트 base 만(`role="launcher"`), source-worker =
   소스 스토리지, destination-worker = 목적지 스토리지(+ 각 아티팩트 base). `build_volcano_job(role_volumes=…)` — nsync 에 없으면
@@ -115,6 +115,11 @@ destination-worker **모두에** 소스와 목적지 스토리지를 hostPath(ty
 - 실증(k1, dmsk8s): 실행 vcjob 의 task 별 hostPath = launcher `/cephfs/dms/artifacts` · source-worker `/cephfs-third` + base ·
   destination-worker `/cephfs-secondary` + base. nsync(root, cephfs-third → cephfs-secondary) 미리보기 files 6·bytes 38 → 확인 →
   Succeeded 6·38, 목적지 트리·md5 원본과 동일.
+- 실증(ssc d185 — dms-ssc 체크아웃을 dms-w1 이 빌드, api·controller 만 릴리스, 에이전트 d179·잡 이미지 d183 그대로): nsync(root,
+  cephfs-third(dms-w1·w2) → cephfs-secondary(dms-w3)) 미리보기 vcjob task 별 hostPath 가 k1 과 같은 모양 → 미리보기 files 6·
+  bytes 41 → Succeeded 6·41, 목적지 트리·md5 동일. **주의**: 릴리스가 Applied 를 보고한 직후 낸 첫 시도는 아직 종료 중이던 옛
+  d184 컨트롤러가 집어 옛 모양(전 task 양쪽)으로 vcjob 을 만들어 FailedMount — 취소 후 재시도에서 통과(롤링 업데이트 동안
+  두 컨트롤러가 겹친다; 롤아웃 뒤 ~30초 두고 실증한다).
 
 ### ✅ 테스트베드 분리 — k8s 테스트베드(LDAP 없음) 배포 자산·가드 컨텍스트 대조 — **완료·실증**(2026-10-21~22, k0 → k1)
 
