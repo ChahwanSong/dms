@@ -237,7 +237,7 @@ def test_base_manifests_carry_only_the_site_neutral_placeholder():
             seen += 1
             assert value.startswith(PLACEHOLDER_REGISTRY + "/") and value.endswith(":" + PLACEHOLDER_TAG), (
                 f"{path.name}: {value!r} -- base 에는 실 레지스트리·태그를 커밋하지 않는다. "
-                f"실 태그는 deploy/overlays/<site>(테스트베드는 overlays/testbed) 의 newTag 로")
+                f"실 태그는 deploy/overlays/<site> 의 newTag(테스트베드 오버레이) 또는 values.env(사이트 설치기)로")
     assert seen >= 7, seen          # api·controller 본체+migrate init, migrate job, agent, DMS_JOB_IMAGE
 
 
