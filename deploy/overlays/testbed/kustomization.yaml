@@ -5,7 +5,15 @@
 # 20-config.yaml 의 나머지 값(LDAP·레지스트리·간격 등)은 그 자체가 테스트베드 값이라
 # 여기서 덮을 것이 없다.
 #
-# 적용:  kubectl apply -k deploy/overlays/testbed      (raw `apply -f deploy/k8s` 금지)
+# 클러스터(2026-10-21 테스트베드 분리): 이 오버레이는 **ssc 테스트베드**(dms-cp1 + dms-w1~w3, kubeconfig 컨텍스트
+# `dms`, https://dms.local, 레지스트리 pkg-01:5000, 태그 dN, LDAP 사용) 전용이다. 두 번째 테스트베드(k8s-cp1,
+# 컨텍스트 dmsk8s, LDAP 없음)는 deploy/overlays/testbed-k8s — 두 클러스터가 같은 네임스페이스 이름(dms)을 쓰므로
+# 컨텍스트를 늘 명시한다. 가드는 kube-context 파일(dms)과 다른 컨텍스트를 겨누면 거부한다(exit 4).
+# 태그 bump 소유: ssc 클러스터의 빌드 소스(control_state.build_source_path)가 dms-ssc 체크아웃으로 넘어간 뒤로는
+# dms-ssc 쪽에서만 이 파일을 bump 한다(전환 전에는 지금처럼 main) — main 은 overlays/testbed-k8s 만 bump 한다.
+#
+# 적용:  sh deploy/overlays/guard-images.sh deploy/overlays/testbed --context dms
+#        kubectl --context dms apply -k deploy/overlays/testbed      (raw `apply -f deploy/k8s` 금지)
 # 확인:  kubectl kustomize deploy/overlays/testbed | grep image:
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization

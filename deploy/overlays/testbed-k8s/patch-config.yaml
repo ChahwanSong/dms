@@ -1,0 +1,33 @@
+# k8s 테스트베드 ConfigMap 패치(전략적 머지 — 명시한 키만 덮고, null 은 그 키를 **지운다**).
+#
+# 잡 이미지·빌드 레지스트리는 :5001(이 클러스터 전용). 라이브 잡 이미지는 포탈 릴리스의 DB 오버라이드
+# (control_state.job_image)가 이 값을 이긴다 — 여기 값은 "오버라이드가 없을 때의 기본" 이자 배지의 매니페스트 기준이다.
+# 빌더 이미지는 ssc 와 같은 :5000 미러를 공용으로 읽는다(노드 CRI-O 가 5000·5001 둘 다 신뢰).
+#
+# LDAP 키 7개 삭제(사용자 결정 2026-10-21, kustomization.yaml 머리말): 비어 있는 LDAP 설정 = 리졸버 없음
+# (identity_ldap.ldap_directory_config → None) = 비 root 잡 ldap_not_configured. base 에 LDAP 키가 새로 생기면
+# tests/test_testbed_k8s_overlay.py 가 여기에도 null 을 넣으라고 빨간불을 낸다.
+#
+# 특권 목록·허용은 base 와 같은 값이지만 명시한다 — 이 클러스터에서는 root 잡이 유일한 실행 경로라 base 가 바뀌어도
+# 조용히 따라가지 않게 한다. 보조 그룹 스위치 false 는 동작 차이가 없는 의도 표시(비 root 는 그 전에 거부, root 는
+# privileged 상태). 일반 사용자 제출을 API 에서 바로 막고 싶으면 DMS_USER_ALLOWED_OPERATIONS: "" 를 더한다(선택 —
+# 없으면 접수 뒤 planner 가 거부한다; 둘 다 fail-closed).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dms-config
+  namespace: dms
+data:
+  DMS_JOB_IMAGE: "pkg-01:5001/dms-mpifileutils:k0"
+  DMS_BUILD_REGISTRY: "pkg-01:5001"
+  DMS_BUILD_BUILDER_IMAGE: "pkg-01:5000/buildah:stable"
+  DMS_PRIVILEGED_REQUESTERS: "root,admin,mason"
+  DMS_ALLOW_PRIVILEGED_REQUESTERS: "true"
+  DMS_IDENTITY_SUPPLEMENTARY_GROUPS: "false"
+  DMS_LDAP_URI: null
+  DMS_LDAP_USER_BASE: null
+  DMS_LDAP_GROUP_BASE: null
+  DMS_LDAP_GROUP_MEMBER_ATTR: null
+  DMS_LDAP_USE_START_TLS: null
+  DMS_LDAP_BIND_DN: null
+  DMS_LDAP_REQUIRE_AUTH_BIND: null

@@ -68,12 +68,20 @@ PostgreSQL(제어면) + React 포탈 + 노드 에이전트 + Volcano gang-schedu
 - **base 매니페스트는 사이트 중립, 실 태그는 오버레이에**(2026-09-14). `deploy/k8s` 의
   `image:`·`DMS_JOB_IMAGE` 는 자리표시자(`set-by-overlay.invalid/<img>:set-by-overlay`)뿐이고 계약 테스트가
   고정한다 — 여기에 실 레지스트리·태그를 커밋하면 git pull 한 다른 사이트가 그 값을
-  배포한다(실사고). 태그 bump 는 테스트베드 `deploy/overlays/testbed/kustomization.yaml`
-  의 `newTag`(+`patch-config.yaml` 의 `DMS_JOB_IMAGE`), 사이트는 `values.env`. 적용은
-  항상 `kubectl apply -k deploy/overlays/<site>` — raw `kubectl apply -f deploy/k8s` 는
-  pull 에서 실패하도록 돼 있다. apply 전 `deploy/overlays/guard-images.sh` 가 "렌더 이미지
-  != 라이브" 면 거부한다(포탈 릴리스 뒤 오버레이 태그를 안 맞춘 재적용이 되돌리는 사고
-  방지; 의도한 변경은 `ALLOW_IMAGE_CHANGE=1`). 포탈 빌드는 이미지에 COPY 되는 사본만 스탬프하므로
+  배포한다(실사고). 태그 bump 는 테스트베드 오버레이의 `newTag`(+`patch-config.yaml` 의
+  `DMS_JOB_IMAGE`), 사이트는 `values.env`. **테스트베드는 둘이다**(2026-10-21, deploy/README.md 「테스트베드는 둘이다」):
+  `deploy/overlays/testbed` = **ssc 클러스터**(컨텍스트 `dms`, pkg-01:5000, 태그 `dN`, LDAP 사용) — ssc 빌드 소스가
+  dms-ssc 체크아웃으로 넘어간 뒤로는 **dms-ssc 쪽에서만** bump(전환 전에는 main); `deploy/overlays/testbed-k8s` =
+  **k8s 클러스터**(컨텍스트 `dmsk8s`, pkg-01:5001, 태그 `kN`, **LDAP 없음** — 사용자 결정) — **main(→ dms-k8s)에서만**
+  bump. 한 커밋에서 둘을 같이 올리지 마라. 두 클러스터가 같은 네임스페이스(dms)라 **kubectl 은 늘 `--context` 를
+  명시**한다(current-context 는 dms; dmsk8s 를 current 로 만들지 마라). 적용은
+  항상 `kubectl --context <ctx> apply -k deploy/overlays/<site>` — raw `kubectl apply -f deploy/k8s` 는
+  pull 에서 실패하도록 돼 있다(k8s 클러스터에 raw `20-config.yaml` 은 지운 LDAP 키를 되살린다). apply 전
+  `deploy/overlays/guard-images.sh <dir> --context <ctx>` 가 "렌더 이미지 != 라이브" 면 거부하고(exit 3 — 포탈 릴리스 뒤
+  오버레이 태그를 안 맞춘 재적용이 되돌리는 사고 방지; 의도한 변경은 `ALLOW_IMAGE_CHANGE=1`), 오버레이의
+  `kube-context` 파일과 다른 컨텍스트면 거부한다(exit 4). testbed-k8s 의 LDAP 삭제(ConfigMap 키 null·에이전트
+  `dms agent`·LDAP env 삭제)는 `tests/test_testbed_k8s_overlay.py` 가 고정한다 — base 에 LDAP 키·env 를 더하면 그
+  오버레이에도 삭제를 더하라. 포탈 빌드는 이미지에 COPY 되는 사본만 스탬프하므로
   (`build_manifests`) 포탈에서 태그를 지정해 빌드·릴리스하면 live == 동봉 매니페스트라
   드리프트 배지가 안 뜨고, 동봉값이 자리표시자·타 레지스트리면 배지는 "모름"(None) 이다.
 - **워크트리 공유 중 커밋은 `git commit -- <경로>`**(pathspec). `git add` 로 인덱스를

@@ -18,53 +18,77 @@
 #                                           (preflight 가 요청자 uid 로 test -r/-w).
 #   /cephfs/managed/ldap-e2e                LDAP e2e 픽스처(uid/gid 는 테스트베드 openldap 역할:
 #                                           alice 10001, bob 10002, cocoa.song 10003,
-#                                           dmsusers 10000, dmsproj 10010).
+#                                           dmsusers 10000, dmsproj 10010). LDAP 없는 클러스터는
+#                                           root 소유분만 /cephfs/managed/e2e 에(아래 「LDAP 픽스처」).
 #   /cephfs-third/managed, /cephfs-secondary/managed  (선택, make cephfs-nsync 뒤에만)
 #
+# 클러스터 선택(2026-10-21 — 테스트베드가 둘이다): `-e dms_cluster=<키>` 가 대상 인벤토리 그룹의 접두다(기본 dms).
+#   ssc 테스트베드(dms-cp1, 컨텍스트 dms)   : dms_workers[0] · dms_source_workers[0] · dms_destination_workers[0]
+#   k8s 테스트베드(k8s-cp1, 컨텍스트 dmsk8s): dmsk8s_workers[0] · dmsk8s_source_workers[0] · dmsk8s_destination_workers[0]
+#   k8s 워커는 CephFS dmsfs:/k8s 를 /cephfs 에(third·secondary 도 /k8s/third·/k8s/secondary 하위 트리를 /cephfs-third·
+#   /cephfs-secondary 에) 마운트하므로 경로 문자열은 위와 같고, 물리적으로는 /k8s 하위 트리 안에 생겨 ssc 데이터와
+#   섞이지 않는다. 인벤토리에 없는 nsync 그룹의 play 는 "no hosts matched" 로 건너뛴다.
+# LDAP 픽스처(dms_fs_ldap_fixtures — 기본은 dms_cluster 가 dms 일 때만 켬): k8s 테스트베드는 LDAP 을 쓰지 않으므로
+#   (사용자 결정 2026-10-21) LDAP uid/gid 소유 픽스처(alice·bob·cocoa.song·dmsusers·dmsproj)를 만들지 않고, root 소유
+#   픽스처(growth·victim-protected·dest)만 `<데이터 root>/e2e` 에 둔다(ssc 는 종전대로 ldap-e2e).
+#
 # 실행(테스트베드의 ansible.cfg/인벤토리를 그대로 쓴다 -- cfg 의 상대경로는 cfg 위치 기준):
-#   ANSIBLE_CONFIG=~/dms-dev/testbed/ansible.cfg ansible-playbook deploy/testbed/dms-shared-fs.yml
+#   ssc: ANSIBLE_CONFIG=~/dms-dev/testbed/ansible.cfg ansible-playbook deploy/testbed/dms-shared-fs.yml
+#   k8s: ANSIBLE_CONFIG=~/dms-dev/testbed/ansible.cfg ansible-playbook -e dms_cluster=dmsk8s deploy/testbed/dms-shared-fs.yml
+#   (대상만 확인: 같은 명령 끝에 --list-hosts -- 노드에 접속하지 않는다)
 # 테스트베드 Makefile 에 넣으려면:
 #   dms-shared-fs:
-#   > $(ANSIBLE) $(DMS_REPO)/deploy/testbed/dms-shared-fs.yml     # ceph: ... cephfs-dms dms-shared-fs
+#   > $(ANSIBLE) $(DMS_REPO)/deploy/testbed/dms-shared-fs.yml                       # ceph: ... cephfs-dms dms-shared-fs
+#   dms-shared-fs-dmsk8s:
+#   > $(ANSIBLE) -e dms_cluster=dmsk8s $(DMS_REPO)/deploy/testbed/dms-shared-fs.yml
 #
 # 파일 내용·소유권·mode 는 2026-09-09 시점 실물에서 옮겼다(find -printf). growth/*.bin 은
 # 사용량 분석 픽스처: old-* 는 고정 과거 mtime(항상 "오래됨"), fresh-* 는 생성 시각.
 
 - name: DMS shared-FS layout + e2e fixtures on the base CephFS (cephfs-dms)
-  hosts: dms_workers[0]
+  hosts: "{{ dms_cluster | default('dms') }}_workers[0]"
   become: true
   gather_facts: false
   vars:
+    dms_fs_cluster: "{{ dms_cluster | default('dms') }}"
+    # LDAP 없는 클러스터(dmsk8s)에는 LDAP uid/gid 소유 픽스처를 만들지 않는다(-e dms_fs_ldap_fixtures=… 로 덮을 수 있다).
+    dms_fs_ldap_fixtures: "{{ dms_fs_cluster == 'dms' }}"
     dms_common_dir: "{{ cephfs_mount_point | default('/cephfs') }}/dms"
     dms_common_mode: "0770"
     dms_artifact_base: "{{ dms_common_dir }}/artifacts"
     dms_data_root: "{{ cephfs_mount_point | default('/cephfs') }}/managed"
-    dms_fixture_root: "{{ dms_data_root }}/ldap-e2e"
+    dms_fixture_root: "{{ dms_data_root }}/{{ 'ldap-e2e' if dms_fs_ldap_fixtures | bool else 'e2e' }}"
     uid_alice: 10001
     uid_bob: 10002
     uid_cocoa: 10003
     gid_dmsusers: 10000
     gid_dmsproj: 10010
-    fixture_dirs:
+    # root 소유 -- 어느 클러스터에나. "" (픽스처 root)가 맨 앞이어야 하위보다 먼저 생긴다.
+    fixture_dirs_common:
       - { path: "",                      owner: 0,               group: 0,                mode: "0755" }
+      - { path: "growth",                owner: 0,               group: 0,                mode: "0755" }
+      - { path: "victim-protected",      owner: 0,               group: 0,                mode: "0755" }
+      - { path: "victim-protected/data", owner: 0,               group: 0,                mode: "0755" }
+      - { path: "dest",                  owner: 0,               group: 0,                mode: "0777" }   # sync 목적지(요청자가 하위 생성)
+    # LDAP uid/gid 소유 -- LDAP 이 있는 클러스터(dms)만.
+    fixture_dirs_ldap:
       - { path: "alice-private",         owner: "{{ uid_alice }}", group: "{{ gid_dmsusers }}", mode: "0700" }
       - { path: "bob-private",           owner: "{{ uid_bob }}",   group: "{{ gid_dmsusers }}", mode: "0700" }
       - { path: "group-shared",          owner: 0,               group: "{{ gid_dmsusers }}", mode: "0770" }
       - { path: "proj-shared",           owner: 0,               group: "{{ gid_dmsproj }}",  mode: "0770" }
-      - { path: "growth",                owner: 0,               group: 0,                mode: "0755" }
       - { path: "victim-cocoa",          owner: "{{ uid_cocoa }}", group: "{{ gid_dmsusers }}", mode: "0755" }
-      - { path: "victim-protected",      owner: 0,               group: 0,                mode: "0755" }
-      - { path: "victim-protected/data", owner: 0,               group: 0,                mode: "0755" }
-      - { path: "dest",                  owner: 0,               group: 0,                mode: "0777" }   # sync 목적지(요청자가 하위 생성)
-    fixture_files:
+    fixture_files_common:
+      - { path: "victim-protected/data/k1.txt", content: "protected-d\n",    owner: 0,               group: 0,                mode: "0644" }
+      - { path: "victim-protected/keep.txt",    content: "protected\n",      owner: 0,               group: 0,                mode: "0644" }
+    fixture_files_ldap:
       - { path: "alice-private/f1.txt",         content: "alice-secret-1\n", owner: "{{ uid_alice }}", group: "{{ gid_dmsusers }}", mode: "0600" }
       - { path: "alice-private/f2.txt",         content: "alice-secret-2\n", owner: "{{ uid_alice }}", group: "{{ gid_dmsusers }}", mode: "0600" }
       - { path: "bob-private/b1.txt",           content: "bob-secret\n",     owner: "{{ uid_bob }}",   group: "{{ gid_dmsusers }}", mode: "0600" }
       - { path: "group-shared/g1.txt",          content: "team-file\n",      owner: 0,               group: "{{ gid_dmsusers }}", mode: "0660" }
       - { path: "proj-shared/p1.txt",           content: "proj-file\n",      owner: 0,               group: "{{ gid_dmsproj }}",  mode: "0660" }
       - { path: "victim-cocoa/v1.txt",          content: "delete-me\n",      owner: "{{ uid_cocoa }}", group: "{{ gid_dmsusers }}", mode: "0644" }
-      - { path: "victim-protected/data/k1.txt", content: "protected-d\n",    owner: 0,               group: 0,                mode: "0644" }
-      - { path: "victim-protected/keep.txt",    content: "protected\n",      owner: 0,               group: 0,                mode: "0644" }
+    fixture_dirs: "{{ fixture_dirs_common + (fixture_dirs_ldap if dms_fs_ldap_fixtures | bool else []) }}"
+    fixture_files: "{{ fixture_files_common + (fixture_files_ldap if dms_fs_ldap_fixtures | bool else []) }}"
     growth_files:
       - { name: "fresh-1.bin", mib: 2, old: false }
       - { name: "fresh-3.bin", mib: 6, old: false }
@@ -146,7 +170,7 @@
         label: "{{ item.name }} old={{ item.old }}"
 
 - name: nsync SOURCE storage managed dir (only when make cephfs-nsync was applied)
-  hosts: dms_source_workers[0]
+  hosts: "{{ dms_cluster | default('dms') }}_source_workers[0]"
   become: true
   gather_facts: false
   tasks:
@@ -165,7 +189,7 @@
       when: src_fs.rc == 0 and src_fs.stdout.strip() == "ceph"
 
 - name: nsync DESTINATION storage managed dir (only when make cephfs-nsync was applied)
-  hosts: dms_destination_workers[0]
+  hosts: "{{ dms_cluster | default('dms') }}_destination_workers[0]"
   become: true
   gather_facts: false
   tasks:

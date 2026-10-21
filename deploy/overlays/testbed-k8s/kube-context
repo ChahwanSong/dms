@@ -1,0 +1,2 @@
+# guard-images.sh 가 대조하는 이 오버레이 전용 kubeconfig 컨텍스트(첫 비주석 줄). k8s 테스트베드(k8s-cp1).
+dmsk8s
