@@ -29,7 +29,9 @@ def _spec(**kw):
 
 
 def _build(**kw):
-    return build_volcano_job(_spec(**kw), job_image="i", namespace="dms", volumes=_VOL)
+    # role_volumes 는 nsync 만 쓴다(primary 는 무시) -- 여기선 볼륨 모양이 아니라 CPU 요청을 본다.
+    return build_volcano_job(_spec(**kw), job_image="i", namespace="dms", volumes=_VOL,
+                             role_volumes={"source": _VOL, "destination": _VOL})
 
 
 def _tasks(m):

@@ -117,6 +117,7 @@ def test_build_spec_no_policy_yields_none_timeout_for_all_phases(db):
 # --- Layer 2: manifest builders --------------------------------------------------
 
 _VOL = [{"name": "cephfs", "hostPath": {"path": "/cephfs"}, "mountPath": "/cephfs"}]
+_NSYNC_ROLE_VOL = {"source": _VOL, "destination": _VOL}
 
 
 def _spec(**kw):
@@ -166,14 +167,15 @@ def test_build_volcano_job_omits_active_deadline_seconds_when_none():
 
 def test_build_nsync_job_sets_active_deadline_on_every_task_pod_spec():
     m = build_volcano_job(_nsync_spec(timeout_seconds=259200), job_image="i",
-                          namespace="dms", volumes=_VOL)
+                          namespace="dms", volumes=_VOL, role_volumes=_NSYNC_ROLE_VOL)
     assert _deadlines(m) == {"launcher": 259200, "source-worker": 259200,
                              "destination-worker": 259200}
     assert "activeDeadlineSeconds" not in m["spec"]
 
 
 def test_build_nsync_job_omits_active_deadline_seconds_when_none():
-    m = build_volcano_job(_nsync_spec(), job_image="i", namespace="dms", volumes=_VOL)
+    m = build_volcano_job(_nsync_spec(), job_image="i", namespace="dms", volumes=_VOL,
+                          role_volumes=_NSYNC_ROLE_VOL)
     assert "activeDeadlineSeconds" not in m["spec"]
     for task in m["spec"]["tasks"]:
         assert "activeDeadlineSeconds" not in task["template"]["spec"], task["name"]

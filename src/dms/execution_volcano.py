@@ -144,10 +144,17 @@ class VolcanoExecutionAdapter:
 
     def _volumes(self, spec, *, role=None):
         # 데이터 스토리지 mount_path + 아티팩트 base 를 수집해 hostPath 볼륨으로.
-        # role: nsync preflight는 소스/목적지가 disjoint 노드라 각 role 파드에는 해당
-        # 스토리지만 마운트해야 한다 — 반대편 스토리지는 그 노드에 없어 type:Directory
-        # hostPath가 스케줄 실패한다. role=None은 양쪽(코로케이션 dsync/실행)을 마운트.
-        if spec.operation == "sync":
+        # role: nsync(preflight·미리보기·실행 전부)는 소스/목적지가 disjoint 노드라 각 role
+        # 파드에는 해당 스토리지만 마운트해야 한다 — 반대편 스토리지는 그 노드에 없어
+        # type:Directory hostPath 가 FailedMount 로 gang 을 못 세운다(2026-10-22 dmsk8s 실증:
+        # 실행 vcjob 이 양쪽을 붙여 ContainerCreating 에 묶였다 -- 옛 테스트베드는 반대편
+        # 마운트 루트가 빈 디렉터리로 남아 있어 가려졌다). role="launcher" 는 데이터 스토리지
+        # 없이 아티팩트 base 만(nsync 런처는 데이터 경로를 만지지 않는다 -- 런처의 데이터
+        # 접근은 drm 봉쇄 재확인뿐이고 그건 primary 런처다). role=None 은 양쪽(코로케이션
+        # dsync, scan·rm 의 primary)을 마운트.
+        if role == "launcher":
+            snames = []
+        elif spec.operation == "sync":
             if role == "source":
                 snames = [spec.paths.get("source_storage")]
             elif role == "destination":
@@ -214,6 +221,14 @@ class VolcanoExecutionAdapter:
                          or spec.candidates.get("source") or ["dms-w1"])
                 manifest = self._preflight_pod(spec, nodes[0], None)
                 prefix = "pod"
+            elif "primary" not in spec.candidates:
+                # nsync 미리보기·실행 vcjob: task 마다 자기 쪽 스토리지만(_volumes 주석).
+                manifest = build_volcano_job(
+                    spec, job_image=self._job_image_fn(), namespace=self._namespace,
+                    volumes=self._volumes(spec, role="launcher"),
+                    role_volumes={r: self._volumes(spec, role=r)
+                                  for r in ("source", "destination")})
+                prefix = "vcjob"
             else:
                 manifest = build_volcano_job(
                     spec, job_image=self._job_image_fn(), namespace=self._namespace,
