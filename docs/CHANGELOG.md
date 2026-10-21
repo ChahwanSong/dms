@@ -100,9 +100,16 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
 사용자 결정(2026-10-22): main 과 dms-ssc 는 같은 소스다 — 공용 개발은 main 에서 하고 같은 커밋을 dms-ssc 로 cherry-pick 하며,
 dms-ssc 는 SSC 사이트 설치기(`deploy/overlays/ssc`·`deploy/addons/ingress-nginx`·`tests/test_ssc_render_switch.py`)만 더 갖는다.
 dms-k8s 는 별도 개발 라인이다(LDAP 없음 — 「dms-k8s 브런치에서는 LDAP 을 사용 안할거야」). 그 전까지 dms-k8s 는 main 의
-미러였다(같이 push). 이제 main ↔ dms-k8s 는 건별로 골라 cherry-pick 만 하고, main 을 dms-k8s 로 push·merge 하지 않는다.
+미러였다(같이 push). 이제 main 을 dms-k8s 로 push·merge 하지 않고, dms-k8s 의 구현·테스트·브랜치 갱신은 **그 라인 전용 Claude
+세션**이 한다(사용자: 「이 세션에서는 dms-ssc만 다룰거야」) — 무엇을 골라 가져갈지도 그 라인이 정한다.
+- **main ≡ dms-ssc 복구**: main 의 보안 수정 f56467d(`deploy/overlays/prod/render.sh` live 태그 해석 eval 제거 — command-injection
+  지적, 2026-10-06)가 dms-ssc 에 빠져 있었다(리뷰가 찾음) — dms-ssc 로 cherry-pick. 이후 `git diff origin/main origin/dms-ssc --stat`
+  은 SSC 사이트 설치기 목록(CLAUDE.md 「브랜치 모델」)만.
+- **라인 전용 계약** `tests/test_testbed_overlay.py`(main·dms-ssc 만): 이 브랜치의 오버레이 ⊆ {testbed, prod, ssc}(testbed-k8s 재유입
+  빨간불), testbed 의 kube-context = dms, ssc 오버레이 렌더가 LDAP URI·nslcd 엔트리포인트를 유지하고 :5001 이미지가 없음(무 LDAP
+  라인에서 골라 온 커밋이 벗기면 빨간불 — 지운 `test_testbed_k8s_overlay.py` 에 있던 검사를 이 라인으로). 변이 2종 빨간불 확인.
 
-- **공용 계약 정리(M1 — 세 브랜치에 같은 커밋)**: `tests/overlay_render.py`(렌더 헬퍼 — `kubectl kustomize` 로컬 렌더·문서/
+- **공용 계약 정리(M1 — 공용 파일 커밋: main·dms-ssc 는 이 라인이 싣고, dms-k8s 는 그 라인이 골라 가져간다)**: `tests/overlay_render.py`(렌더 헬퍼 — `kubectl kustomize` 로컬 렌더·문서/
   ConfigMap/이미지 파서·`kube-context` 해석·`present_overlays`), `tests/test_overlay_render_contract.py`(그 브랜치에 **있는**
   오버레이 전부가 자리표시자 이미지 없이 렌더 — `test_testbed_k8s_overlay.py` 에서 옮김), `test_guard_images_context` 의 고정
   컨텍스트 표 `_PINS`(있는 오버레이만 대조·표에 없는 새 오버레이는 실패·테스트베드 오버레이 최소 하나), base `20-config`·
@@ -123,9 +130,9 @@ dms-k8s 는 별도 개발 라인이다(LDAP 없음 — 「dms-k8s 브런치에�
   dms-k8s 판 안내 4줄, 「Unresolved values」 의 k8s 비밀번호 줄. ARCHITECTURE: 오버레이 목록(testbed|prod, +ssc 는 dms-ssc),
   가드 불변식에 「각 브랜치는 자기 클러스터 오버레이만 — 브랜치 ↔ 클러스터 짝이 구조적」, testbed-k8s LDAP 삭제 불변식은
   dms-k8s 로(base 공용이라 LDAP 키·env 를 더하는 커밋은 그쪽 오버레이에도 삭제가 필요하다는 한 줄만). BACKLOG: k8s 후속 절 →
-  안내(prod 설치기 LDAP 필수 항목은 분리로 해소, 「LDAP 끔」 스위치·점검 스크립트 `--context` 는 dms-k8s BACKLOG), `kN` 태그
-  제안은 공용 프론트(BuildForm)라 여기에도 유지, 「포탈 빌드는 origin 에 push 된 커밋만(`--depth 1 --branch`)」 낡은 서술 정정
-  (슬라이스 33~ 빌드 노드 체크아웃).
+  안내(prod 설치기 LDAP 필수 항목은 이 라인에선 해당 없음 — 무 LDAP 설치기는 dms-k8s 라인 소관, 「LDAP 끔」 스위치·점검
+  스크립트 `--context`·`kN` 태그 제안은 그 라인 BACKLOG, nslcd 제거는 공용 `deploy/docker` 라 사용자 결정 필요), 「포탈 빌드는
+  origin 에 push 된 커밋만(`--depth 1 --branch`)」 낡은 서술 정정(슬라이스 33~ 빌드 노드 체크아웃).
 - 테스트: 이 브랜치에서 `test_overlay_render_contract`(testbed·prod 렌더, kubectl 실렌더)·`test_guard_images_context`·
   `test_release_manifest_contract`·`test_prod_render_switch` 54 통과. 변이 확인 — testbed `kube-context` 를 dmsk8s 로 →
   `_PINS` 대조 빨간불, testbed `images.name` 오타 → 자리표시자 렌더 계약·images.name 매핑 계약 빨간불, 표에 없는 오버레이
