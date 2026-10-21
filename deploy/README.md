@@ -6,23 +6,49 @@
 > 이 문서는 테스트베드(개별 파일 apply)·시나리오·HTTPS 원리의 상세 참고용입니다.
 
 Deploys the clean-slate DMS control plane (`dms api` / `dms controller` /
-`dms agent`, execution backend = Volcano) onto the `dms` testbed. All
+`dms agent`, execution backend = Volcano) onto the testbeds. All
 manifests here are written against the **new** CLI/config (`src/dms/cli.py`,
 `src/dms/config.py`). (The old implementation's `legacy/install/` was removed
 from the tree 2026-08-30 -- see git history if needed.)
 
-Testbed facts baked into these assets (see repo `CLAUDE.md` for the source of
+### 테스트베드는 둘이다 (2026-10-21)
+
+같은 호스트(luminous)·같은 dmsnet(10.10.10.0/24)·같은 pkg-01(레지스트리 VM·PostgreSQL·Ceph)을 쓰는 클러스터 두 개다.
+**네임스페이스 이름이 둘 다 `dms` 라 kubeconfig 컨텍스트가 유일한 구분이다 — kubectl 은 늘 `--context` 를 명시한다.**
+current-context 는 `dms`(ssc)로 둔다. 이 런북의 §0~§12 는 ssc 테스트베드 기준이고(컨텍스트 없는 예시 = `dms`),
+k8s 테스트베드는 §13 이 런북이다.
+
+| | **ssc 테스트베드** | **k8s 테스트베드** (§13) |
+|---|---|---|
+| 검증하는 브랜치 | dms-ssc(후보) — 빌드 소스 전환 전에는 main | main(= dms-k8s 후보) |
+| 노드 | dms-cp1 .10 + dms-w1~w3 .11–.13 | k8s-cp1 .20 + k8s-w1·k8s-w2 .21·.22 |
+| kube 컨텍스트 | `dms` (current) | `dmsk8s` (current 로 만들지 않는다) |
+| 오버레이 | `deploy/overlays/testbed` | `deploy/overlays/testbed-k8s` |
+| 포탈 | https://dms.local (VIP 10.20.20.100) | https://dms-k8s.local (VIP 10.20.20.101) |
+| 레지스트리 | `pkg-01:5000` (docker `registry`) | `pkg-01:5001` (docker `registry-k8s`); 빌더 `buildah:stable` 만 :5000 공용 |
+| 태그 관례 | `dN` | `kN` (첫 설치 시드 `k0`) |
+| PostgreSQL | `dmsdb` / `dmsapp` | `dmsdb_k8s` / `dmsapp_k8s` |
+| LDAP | 사용(pkg-01 slapd, 아래 표) | **없음**(사용자 결정) — root 잡만 돈다 |
+| `dms-secrets` | 5키(+ `DMS_LDAP_BIND_PW`) | **4키**(바인드 비밀번호 키 없음) |
+| CephFS | dmsfs:/ → `/cephfs`, `/third` → `/cephfs-third`(w1·w2), `/secondary` → `/cephfs-secondary`(w3) | dmsfs:/k8s → `/cephfs`, `/k8s/third` → `/cephfs-third`(k8s-w1), `/k8s/secondary` → `/cephfs-secondary`(k8s-w2) |
+| 빌드 노드 / `build_source_path` | dms-w1 / `/home/mason/dms-dev/dms-ssc`(전환 뒤; 전 `/home/mason/dms-dev/dms`) | k8s-w1 / `/home/mason/dms-dev/dms` |
+
+경로 문자열(`/cephfs`, artifact base, 스토리지 mount_path)은 두 클러스터가 같다 — k8s 쪽은 CephFS 의 `/k8s` 하위 트리를
+같은 이름에 마운트하므로 매니페스트·시드를 바꿀 필요가 없다. 인프라(VM·CephFS 마운트·레지스트리·DB·호스트 라우트·TLS CA)는
+testbed 저장소(`~/dms-dev/testbed`) 몫이다.
+
+Testbed facts baked into these assets — ssc 테스트베드 (see repo `CLAUDE.md` for the source of
 truth):
 
 | thing | value |
 |---|---|
-| build/registry node | `pkg-01` (10.10.10.30), has `podman` |
-| registry | `pkg-01:5000`, insecure |
+| build/registry node | `pkg-01` (10.10.10.30) |
+| registry | `pkg-01:5000`, insecure (k8s 테스트베드는 `pkg-01:5001`) |
 | PostgreSQL | `postgresql://dmsapp:<PW>@10.10.10.30:5432/dmsdb` — PW 는 testbed `secrets.yml`(gitignored, 2026-08-30 보안 정리) |
-| LDAP | `ldap://10.10.10.30:389`, base `dc=dms,dc=local` |
-| CephFS `cephfs-dms` | `/cephfs`, mounted on w1-5 |
-| CephFS `cephfs-third` | `/cephfs-third`, mounted on w1-3 |
-| CephFS `cephfs-secondary` | `/cephfs-secondary`, mounted on w4-5 |
+| LDAP | `ldap://10.10.10.30:389`, base `dc=dms,dc=local` (ssc 전용 — k8s 테스트베드는 LDAP 없음) |
+| CephFS `cephfs-dms` | `/cephfs`, mounted on w1-3 |
+| CephFS `cephfs-third` | `/cephfs-third`, mounted on w1-2 |
+| CephFS `cephfs-secondary` | `/cephfs-secondary`, mounted on w3 |
 | artifact base | `file:///cephfs/dms/artifacts` |
 | namespace | `dms`, PSA enforce=privileged |
 | Volcano | v1.15.0 installed; queue/priority classes NOT yet installed |
@@ -78,19 +104,28 @@ cd frontend && npm run test:e2e
 
 ## 0. Registry setup (once)
 
-On `pkg-01`, start the insecure registry and point every cluster node's
-CRI-O at it:
+레지스트리 자체는 **testbed 저장소가 만든다**(2026-10-21 — `registry_server` 롤, `cd ~/dms-dev/testbed && make registry`).
+`deploy/docker/registry-setup.sh registry` 는 더 이상 레지스트리를 만들지 않고 거부(exit 2)한다 — 예전 판은 podman·이름 볼륨·
+삭제 꺼짐으로 라이브와 **다른** 레지스트리를 만들었다(포탈 「이미지 관리」 삭제가 405). 라이브 모양:
+
+| 컨테이너 | 포트 | 데이터 | 쓰는 클러스터 |
+|---|---|---|---|
+| `registry` | 5000 | `/opt/dms-registry` | ssc 테스트베드(`dms`) + 공용 `buildah:stable`·애드온 미러 |
+| `registry-k8s` | 5001 | `/opt/dms-registry-k8s` | k8s 테스트베드(`dmsk8s`) |
+
+둘 다 docker `registry:2`, `--restart=always`, `REGISTRY_STORAGE_DELETE_ENABLED=true`. 노드 CRI-O 신뢰
+(`/etc/containers/registries.conf.d/99-pkg-01-insecure.conf`)도 testbed 의 crio 롤이 깔고, 손으로 고칠 때만 이 저장소의
+헬퍼를 쓴다 — 클러스터는 **반드시 명시**한다(기본 컨텍스트 없음):
 
 ```bash
-# on pkg-01:
-./deploy/docker/registry-setup.sh registry
-
-# from anywhere with ssh to the k8s nodes (or kubectl --context dms configured):
-./deploy/docker/registry-setup.sh nodes
+./deploy/docker/registry-setup.sh nodes --context dms      # ssc 노드: pkg-01:5000
+./deploy/docker/registry-setup.sh nodes --context dmsk8s   # k8s 노드: pkg-01:5000 + pkg-01:5001
+#   SSH_USER=ubuntu SSH_OPTS="-i ~/dms-dev/testbed/files/id_ed25519" 로 접속 옵션, NODES/REGISTRIES 로 대상 고정
 ```
 
-Verify: `crictl pull pkg-01:5000/dms:dev` from any cluster node should not
-error with "http: server gave HTTP response to HTTPS client".
+Verify: 노드에서 `sudo crictl pull pkg-01:5000/buildah:stable`(k8s 노드는 `pkg-01:5001/dms:k0` 도)이
+"http: server gave HTTP response to HTTPS client" 없이 받아져야 한다. 레지스트리 경로 접두(`pkg-01:5000/k8s`)는 코드가
+지원하지 않는다 — 클러스터마다 포트(프로세스)를 나눈 이유다(docs/BACKLOG.md).
 
 ## 1. Build and push images (비상용 — 평상시엔 §8 포탈 빌드를 쓴다)
 
@@ -133,17 +168,25 @@ If not already mounted (testbed IaC target):
 ```bash
 cd ~/dms-dev/testbed
 make cephfs-nsync   # or whatever combination of cephfs-* targets mounts
-                     # cephfs-dms/cephfs-third/cephfs-secondary on w1-5/w1-3/w4-5
+                     # cephfs-dms/cephfs-third/cephfs-secondary on w1-3/w1-2/w3
+                     # (k8s 테스트베드는 testbed 의 dmsk8s 타깃: /k8s 하위 트리를 같은 경로에)
 ```
 
 Then create the shared-FS layout the manifests/seed step below assume exist.
 On the testbed this is **codified** (idempotent Ansible, uses the testbed's
-inventory; the testbed's own `make ceph` only mounts CephFS):
+inventory; the testbed's own `make ceph` only mounts CephFS). 클러스터는
+`-e dms_cluster=<그룹 접두>` 로 고른다(기본 `dms`):
 
 ```bash
+# ssc 테스트베드(dms_workers[0] 등)
 ANSIBLE_CONFIG=~/dms-dev/testbed/ansible.cfg ansible-playbook \
   -e ansible_ssh_private_key_file=$HOME/dms-dev/testbed/files/id_ed25519 \
   deploy/testbed/dms-shared-fs.yml
+# k8s 테스트베드(dmsk8s_workers[0] 등 — k8s-w1 이 /k8s 하위 트리 안에 만든다; LDAP 픽스처 없음)
+ANSIBLE_CONFIG=~/dms-dev/testbed/ansible.cfg ansible-playbook \
+  -e ansible_ssh_private_key_file=$HOME/dms-dev/testbed/files/id_ed25519 \
+  -e dms_cluster=dmsk8s deploy/testbed/dms-shared-fs.yml
+# 대상만 보려면 끝에 --list-hosts(접속하지 않는다)
 ```
 
 which produces (see the playbook header for the rationale, §2b for the rules):
@@ -162,7 +205,8 @@ mkdir -p /cephfs-third/managed /cephfs-secondary/managed   # only with `make cep
 
 The playbook also lays down the LDAP e2e fixtures under `/cephfs/managed/ldap-e2e`
 (alice/bob/cocoa.song private/shared trees, growth files) that the portal
-verification scripts use.
+verification scripts use. k8s 테스트베드(LDAP 없음)에서는 LDAP uid/gid 소유 트리를 만들지 않고 root 소유분
+(growth·victim-protected·dest)만 `/cephfs/managed/e2e` 에 둔다.
 
 (`managed_root` for each registered storage below lives under its
 `mount_path` -- `StoragesRepository._validate` in
@@ -411,10 +455,10 @@ resolve 는 못 가 본 URI 부터 시작한다. 틱 예산의 남은 몫에 걸
 ## 3. Apply manifests, in order
 
 ```bash
-kubectl apply -f deploy/k8s/00-namespace.yaml
-kubectl apply -f deploy/k8s/05-volcano-queue-priorityclass.yaml
-kubectl apply -f deploy/k8s/10-rbac.yaml
-kubectl apply -f deploy/k8s/20-config.yaml
+kubectl --context dms apply -f deploy/k8s/00-namespace.yaml
+kubectl --context dms apply -f deploy/k8s/05-volcano-queue-priorityclass.yaml
+kubectl --context dms apply -f deploy/k8s/10-rbac.yaml
+kubectl --context dms apply -f deploy/k8s/20-config.yaml
 ```
 
 `20-config.yaml` holds only non-secret config, so it is safe to re-apply on a
@@ -423,19 +467,27 @@ placeholders, and applying it over a live `dms-secrets` replaces the real
 credentials (the api/controller then CrashLoopBackOff on
 `password authentication failed for user "dmsapp"`).
 
+**k8s 테스트베드(`dmsk8s`)에는 `00-namespace.yaml` 말고 raw apply 를 하지 않는다** — 특히 `20-config.yaml` 을 raw 로
+올리면 오버레이가 지운 LDAP 키(ssc 용 slapd 10.10.10.30)가 ConfigMap 에 되살아난다. 설정·RBAC·큐는 전부
+`kubectl --context dmsk8s apply -k deploy/overlays/testbed-k8s`(§13)로만 간다.
+
 ## 3b. Create the secret (once, out-of-band)
 
 `dms-secrets` is never committed. Create it directly, with the real DB
 password and freshly generated tokens:
 
 ```bash
-kubectl -n dms create secret generic dms-secrets \
+# ssc 테스트베드(LDAP 사용 — 5키)
+kubectl --context dms -n dms create secret generic dms-secrets \
   --from-literal=DMS_DATABASE_URL='postgresql://dmsapp:<DB_PASSWORD>@10.10.10.30:5432/dmsdb' \
   --from-literal=DMS_SHARED_TOKEN="$(openssl rand -hex 24)" \
   --from-literal=DMS_ADMIN_TOKEN="$(openssl rand -hex 24)" \
   --from-literal=DMS_SESSION_SECRET="$(openssl rand -base64 32)" \
   --from-literal=DMS_LDAP_BIND_PW='<LDAP_SEARCH_PASSWORD>'
 ```
+
+k8s 테스트베드는 LDAP 이 없어 **4키**다(`DMS_LDAP_BIND_PW` 를 넣지 않는다 — ssc 시크릿을 복사해 오면 안 된다) —
+명령은 §13-5.
 
 `DMS_SHARED_TOKEN` grants `role=admin` on every API call (`Bearer <token>`),
 so generate it — don't copy one from the repo. Startup rejects any value
@@ -446,7 +498,7 @@ coming up with a publicly known admin token.
 Read the value back later with:
 
 ```bash
-kubectl -n dms get secret dms-secrets \
+kubectl --context dms -n dms get secret dms-secrets \
   -o jsonpath='{.data.DMS_SHARED_TOKEN}' | base64 -d; echo
 ```
 
@@ -454,23 +506,28 @@ kubectl -n dms get secret dms-secrets \
 
 `deploy/k8s` 의 `image:`·`DMS_JOB_IMAGE` 는 **사이트 중립 자리표시자**
 (`set-by-overlay.invalid/<img>:set-by-overlay`, 2026-09-14)다 -- 실 레지스트리·태그는 오버레이가 넣는다.
-테스트베드는 `deploy/overlays/testbed`(newTag = 이 테스트베드의 태그, 태그 bump 는 이
-파일 커밋), 프로덕션은 `deploy/overlays/prod|ssc`(values.env). **base 를 raw 로
-`kubectl apply -f deploy/k8s/…` 하지 마라** -- 자리표시자 이미지라 pull 에서 즉시
+ssc 테스트베드는 `deploy/overlays/testbed`(newTag = 이 테스트베드의 태그, 태그 bump 는 이
+파일 커밋), k8s 테스트베드는 `deploy/overlays/testbed-k8s`(§13), 프로덕션은 `deploy/overlays/prod|ssc`(values.env).
+**base 를 raw 로 `kubectl apply -f deploy/k8s/…` 하지 마라** -- 자리표시자 이미지라 pull 에서 즉시
 실패한다(다른 사이트 값을 조용히 배포하던 사고를 막기 위한 의도된 실패).
 
+**컨텍스트(2026-10-21)**: 두 테스트베드가 같은 네임스페이스(`dms`)를 써서, 컨텍스트를 빠뜨리면 다른 클러스터에 apply 한다.
+오버레이 디렉터리의 `kube-context` 파일(testbed = `dms`, testbed-k8s = `dmsk8s`)이 짝을 고정하고, 가드는
+`--context`(또는 `KUBE_CONTEXT`, 둘 다 없으면 현재 컨텍스트)가 다르면 **exit 4** 로 거부한다. 가드는 뒤따르는 apply
+명령을 통제하지 못하므로 apply·wait·rollout 에도 같은 `--context` 를 쓴다(가드 통과 메시지가 apply 명령을 그대로 찍어 준다).
+
 ```bash
-kubectl -n dms delete job dms-migrate --ignore-not-found   # Job 은 불변이라 재실행 전 삭제
-sh deploy/overlays/guard-images.sh deploy/overlays/testbed # 렌더 이미지 != 라이브면 거부(포탈 릴리스 되돌림 방지)
-kubectl apply -k deploy/overlays/testbed                   # migrate + api + controller + agent (+ config/rbac/ingress)
-kubectl wait --for=condition=complete job/dms-migrate -n dms --timeout=120s
-kubectl logs job/dms-migrate -n dms   # expect: "migrated"
+kubectl --context dms -n dms delete job dms-migrate --ignore-not-found   # Job 은 불변이라 재실행 전 삭제
+sh deploy/overlays/guard-images.sh deploy/overlays/testbed --context dms # 렌더 이미지 != 라이브면 거부(포탈 릴리스 되돌림 방지)
+kubectl --context dms apply -k deploy/overlays/testbed                   # migrate + api + controller + agent (+ config/rbac/ingress)
+kubectl --context dms wait --for=condition=complete job/dms-migrate -n dms --timeout=120s
+kubectl --context dms logs job/dms-migrate -n dms   # expect: "migrated"
 
-kubectl -n dms rollout status deployment/dms-api
-kubectl -n dms rollout status deployment/dms-controller
-kubectl -n dms rollout status daemonset/dms-agent
+kubectl --context dms -n dms rollout status deployment/dms-api
+kubectl --context dms -n dms rollout status deployment/dms-controller
+kubectl --context dms -n dms rollout status daemonset/dms-agent
 
-kubectl -n dms port-forward svc/dms-api 8080:8080 &
+kubectl --context dms -n dms port-forward svc/dms-api 8080:8080 &
 curl -sf http://localhost:8080/healthz   # {"status":"ok"}
 ```
 
@@ -487,8 +544,8 @@ to `Identity(role="admin")`, no signup/login needed for scripted seeding.
 
 ```bash
 # Read the live token instead of pasting one -- never commit a real token.
-export DMS_SHARED_TOKEN=$(kubectl -n dms get secret dms-secrets \
-  -o jsonpath='{.data.DMS_SHARED_TOKEN}' | base64 -d)
+export DMS_SHARED_TOKEN=$(kubectl --context dms -n dms get secret dms-secrets \
+  -o jsonpath='{.data.DMS_SHARED_TOKEN}' | base64 -d)      # k8s 테스트베드는 --context dmsk8s
 export API=http://localhost:8080
 AUTH=(-H "Authorization: Bearer $DMS_SHARED_TOKEN" -H "x-dms-actor: seed-script")
 
@@ -595,9 +652,9 @@ curl -sf -X POST "$API/api/user/jobs/$JOB_ID:confirm" "${AUTH[@]}" -H 'content-t
 
 ### nsync (disjoint node pools -> tool=nsync, gang-scheduled)
 
-`cephfs-third` (w1-3) and `cephfs-secondary` (w4-5) share NO node, so
+`cephfs-third` (ssc: w1-2, k8s: k8s-w1) and `cephfs-secondary` (ssc: w3, k8s: k8s-w2) share NO node, so
 `select_tool_and_candidates` falls through to `nsync` with
-`candidates={"source": [...w1-3], "destination": [...w4-5]}` -- this is the
+`candidates={"source": [...w1-2], "destination": [...w3]}` -- this is the
 `_build_nsync_job` path in `execution_manifests.py` (separate
 source-worker/destination-worker Volcano tasks):
 
@@ -656,14 +713,26 @@ kubectl -n dms get vcjob,pods -l "dms.io/job-id=$JOB_ID"
 (`testbed` 저장소 `make storage`) — 실 클러스터에서는 빌드 노드의 로컬 체크아웃을
 그대로 지정하면 된다.
 
+빌드 코드에는 브랜치 개념이 없다 — **클러스터마다 자기 체크아웃을 가리킨다**(2026-10-21, control_state 는 DB 하나 = 클러스터
+하나라 서로 독립):
+
+| 클러스터 | build_node_name | build_source_path | 따라가는 브랜치 | 레지스트리 / 태그 |
+|---|---|---|---|---|
+| ssc(`dms`) | dms-w1 | `/home/mason/dms-dev/dms-ssc`(전체 clone — 전환 전엔 `/home/mason/dms-dev/dms`) | origin/dms-ssc | pkg-01:5000 / dN |
+| k8s(`dmsk8s`) | k8s-w1 | `/home/mason/dms-dev/dms` | origin/main(= dms-k8s 후보) | pkg-01:5001 / kN |
+
+체크아웃은 호스트 cron 이 ff-only 로 맞춘다. **git worktree 로 만들지 않는다** — 빌드 파드는 이 경로 하나만 마운트해서
+`.git` 파일이 가리키는 바깥 gitdir 를 못 따라가 SHA 가 `unknown` 이 된다. 컨트롤 상태 PUT 은 전체 치환이라(빠진 필드는
+NULL) GET 한 값에서 바꿀 필드만 고쳐 전 필드를 보낸다.
+
 **2) 태그는 지정하거나 파생된다(드리프트 방지 내장, 슬라이스 34).** 「빌드」 폼의
 (선택) 태그 입력에 관례 태그(예: `d75`)를 지정하면 그 태그로 push 된다. **빌드는
 빌드하는 이미지의 동봉 매니페스트(`deploy/k8s`) 태그를 이 빌드 태그로 자동
 스탬프**하므로(`build_manifests._SCRIPT`), 그 태그로 배포하면 **live == 동봉
 매니페스트가 되어 드리프트 배지가 안 뜬다** — 예전처럼 손으로 `deploy/k8s` 를 먼저
 bump 해 빌드하지 않아도 된다. 단 그 태그를 실제로 굴리려면 **사이트 오버레이의 태그**
-(테스트베드 `deploy/overlays/testbed/kustomization.yaml` 의 `newTag`, prod/ssc 는
-values.env 의 `DMS_TAG`)도 그 태그로 맞춰 `kubectl apply -k` 해야 새 태그가 배포된다
+(ssc 테스트베드 `deploy/overlays/testbed/kustomization.yaml`, k8s 테스트베드 `deploy/overlays/testbed-k8s/kustomization.yaml`
+의 `newTag`, prod/ssc 는 values.env 의 `DMS_TAG`)도 그 태그로 맞춰 `kubectl --context <ctx> apply -k` 해야 새 태그가 배포된다
 (이미지 안 스탬프는 드리프트 판정용, 오버레이 값은 apply 대상; base 는 자리표시자). 태그를 비우면 `b<build_id 앞 8자>`
 (`build_tag()`)가 파생된다 — 이 자동 태그도 스탬프되므로 릴리스 화면으로 굴리면
 드리프트가 없지만, 관례 태그(dNN)를 권한다. 주의: `30-migrate-job.yaml`/
@@ -856,9 +925,11 @@ RolloutWatcher가 그 seq 순서대로 하나씩 patch → 수렴 확인 → 다
 되돌아가지는 않는다 -- 의도한 이미지 변경은 `ALLOW_IMAGE_CHANGE=1`. 성공한 배치마다
 사이트 오버레이의 태그를 맞춘다(base `deploy/k8s` 는 자리표시자라 손대지 않는다):
 
-- 테스트베드: `deploy/overlays/testbed/kustomization.yaml` 의 `newTag`(dms 계보 = api·
+- 테스트베드: `deploy/overlays/<testbed|testbed-k8s>/kustomization.yaml` 의 `newTag`(dms 계보 = api·
   controller·migrate 가 한 항목, dms-agent 계보 = 다른 항목) + `patch-config.yaml` 의
-  `DMS_JOB_IMAGE`
+  `DMS_JOB_IMAGE`. **오버레이마다 bump 하는 브랜치가 다르다**(2026-10-21): `testbed-k8s`(k8s 클러스터, kN)는
+  main(→ dms-k8s)에서만, `testbed`(ssc 클러스터, dN)는 ssc 빌드 소스가 dms-ssc 체크아웃으로 넘어간 뒤로는 dms-ssc
+  쪽에서만(전환 전에는 main) — 한 커밋에서 둘을 같이 올리지 않는다(체리픽 충돌·남의 태그).
 - prod/ssc: `values.env` 의 `DMS_TAG`/`DMS_AGENT_TAG`/`MFU_TAG`
   - 설치 뒤로는 셋 중 무엇이든 `live` 로 둘 수 있다(2026-10-06): `render.sh` 가 지금 클러스터에서
     도는 태그를 읽어 채운다(DMS_TAG←deploy/dms-api, DMS_AGENT_TAG←ds/dms-agent,
@@ -965,8 +1036,9 @@ ingress-nginx v1.15.1(IngressClass `nginx`).
 
 1. TLS secret (git 밖 — 개인키). 리허설은 자체 CA, 프로덕션은 사내 PKI 발급분:
    `kubectl -n dms create secret tls dms-portal-tls --cert=tls.crt --key=tls.key`
-   (SAN: DNS dms.local + IP 10.20.20.100. 리허설 CA·인증서 사본:
-   luminous `~/.claude/jobs/b182a2ed/tmp/tls/`)
+   (SAN: DNS dms.local + IP 10.20.20.100. 리허설 CA 는 2026-10-21 부터 testbed 저장소
+   `files/tls/`(gitignore, 0600) — 그 전엔 세션 스크래치 `~/.claude/jobs/b182a2ed/tmp/tls/` 에만 있었다.
+   k8s 테스트베드(dms-k8s.local, 10.20.20.101)도 같은 CA 로 발급한다 — §13-5)
 2. `kubectl apply -f deploy/k8s/47-metallb-public-pool.yaml` (공인 풀
    autoAssign=false + L2Advertisement) + ingress svc 에 풀 지정:
    `kubectl -n ingress-nginx annotate svc ingress-nginx-controller metallb.io/address-pool=dms-public-pool`
@@ -997,9 +1069,9 @@ ingress-nginx v1.15.1(IngressClass `nginx`).
    `10.20.20.100 dms.local`. (테스트베드에선 luminous 가 상위 라우팅을 모사:
    `ip route replace 10.20.20.100/32 dev dmsbr0` — onlink 라우트라 dmsbr0 에서
    VIP 를 ARP 로 찾는다. 외부 PC·Tailscale 사용자의 옛 주소 호환용으로
-   luminous iptables 가 자기 IP 의 80/443/8080 을 VIP 로 DNAT 한다 — 재부팅
-   시 재적용 필요, 규칙은 `~/.claude/jobs/b182a2ed/tmp/setup-relay.sh`·
-   `relay-tailscale.sh`·`relay-8080.sh`.)
+   luminous iptables 가 자기 IP 의 80/443/8080 을 VIP 로 DNAT 한다. 2026-10-21 부터 라우트·릴레이(k8s VIP
+   10.20.20.101 과 그 :8443/:8081 릴레이 포함)는 testbed 저장소의 호스트 네트워크 스크립트와 systemd 유닛이 부팅마다
+   다시 깐다 — 옛 손작업 규칙은 세션 스크래치 `setup-relay.sh`·`relay-tailscale.sh`·`relay-8080.sh` 였다.)
 6. 검증(전부 실증됨): `curl --cacert ca.crt https://dms.local/` = 200(검증
    통과), `http://` = 308, 로그인 Set-Cookie 에 `Secure`, 로그인·admin API·SPA
    딥링크 https 로 200, `ip neigh show 10.20.20.100` = 선출 노드 MAC.
@@ -1204,6 +1276,135 @@ positional 인자(32자 hex 가 아니면 아무것도 지우지 않고 exit 2),
 `idx_requests_batch_order(batch_id, commit_order)` 로 바꾼다(새 것을 만든 뒤 옛 것을 지운다 — 한 배치만 거른 목록이 큰
 테이블에서 전체를 훑지 않게). 새 인덱스를 만드는 동안 `requests` 쓰기가 기다린다(테이블 크기에 비례 — 다른 인덱스
 추가와 같은 성질).
+
+---
+
+## 13. 두 번째 테스트베드 — k8s 클러스터(`dmsk8s`), LDAP 없음 (2026-10-21)
+
+dms-k8s 브랜치 후보(main)를 검증하는 테스트베드다. 오버레이는 `deploy/overlays/testbed-k8s`, 컨텍스트는 `dmsk8s`,
+포탈은 https://dms-k8s.local(VIP 10.20.20.101). 맨 위 「테스트베드는 둘이다」 표가 ssc 와의 차이 전부다.
+
+**LDAP 을 쓰지 않는다**(사용자 결정 2026-10-21: 「dms-k8s 브런치에서는 LDAP 을 사용 안할거야. 이점은 확실히해둬.」).
+코드에는 "LDAP 끔" 스위치가 없고 LDAP 설정이 비면 리졸버가 없는 것으로 동작한다 — 그런데 base 매니페스트는 ssc 의 LDAP 값
+(pkg-01 slapd, 같은 망에서 닿는다)과 nslcd 를 띄우는 에이전트 엔트리포인트를 싣는다. 그래서 오버레이가 **지운다**:
+ConfigMap 의 LDAP 키 7개 null 삭제, 에이전트는 `command: ["dms"] args: ["agent"]`(엔트리포인트 우회) + LDAP env 삭제,
+시크릿은 4키. `tests/test_testbed_k8s_overlay.py` 가 렌더 결과에 `ldap`(대소문자 무시) **0건**을 고정한다. 하나라도 빠지면
+결과는 기동 실패(시끄러움)이거나 **ssc 용 slapd 를 조용히 쓰는 것**(침묵)이다.
+
+LDAP 이 없으면 무엇이 되고 무엇이 막히는가(코드 경로 `identity.py`·`planner.py` — 조용히 uid 0·기본 신원으로 떨어지는
+경로는 없다):
+
+| 경로 | 결과 |
+|---|---|
+| 특권 세션 관리자(`DMS_PRIVILEGED_REQUESTERS` = root,admin,mason ∪ 계정 화면 부여) + `run_as_root: true` 단건 scan·sync·rm | **동작**(uid 0/gid 0, 보조 그룹 `privileged`, LDAP 호출 0) — 포탈은 자격 있는 관리자에게 root 를 기본으로 싣는다 |
+| 같은 관리자의 배치 scan·sync·rm(자동 확인 포함) | **동작**(자식은 자격 있으면 root) |
+| root 를 끈 단건, 실행 신원(owner_username) 지정 + 비 root, 일반 사용자 sync | `ldap_not_configured` 로 Rejected(fail-closed) |
+| Bearer 공유 토큰 + `run_as_root: true` | 403 `privileged_not_authorized`(root 는 세션 필요) — 자동화는 봉인 세션 로그인 |
+| 그룹 denylist 규칙이 1건이라도 있을 때 | **모든 잡**이 `ldap_not_configured` — 이 클러스터에는 그룹 규칙을 등록하지 않는다 |
+| 로그인·가입·재설정·`/me`·사용량 분석·아티팩트 | 동작(LDAP 무관) |
+
+보조 그룹·실행 신원의 LDAP uid/gid 같은 LDAP 기능은 **ssc 테스트베드에서** 검증한다. 일반 사용자 제출을 접수 단계에서 바로
+막고 싶으면 `patch-config.yaml` 에 `DMS_USER_ALLOWED_OPERATIONS: ""`(→ 403 `operation_admin_only`)를 더한다(선택 — 없으면
+접수 뒤 planner 가 거부한다; 둘 다 fail-closed).
+
+### 13-1. 인프라 전제 (testbed 저장소 몫 — 여기서는 확인만)
+
+- VM `k8s-cp1` 10.10.10.20 · `k8s-w1` .21 · `k8s-w2` .22(dmsnet), k8s·CRI-O·Cilium 은 ssc 와 같은 버전(pod 10.245.0.0/16,
+  svc 10.112.0.0/12), Volcano v1.15.0, MetalLB(자동 풀 10.10.10.220–.229 — ssc 의 .200–.210 과 겹치면 ARP 충돌) +
+  ingress-nginx 2 레플리카(`--default-ssl-certificate=dms/dms-portal-tls`, svc 어노테이션 `metallb.io/address-pool=dms-public-pool`),
+  `k8s-w1`·`k8s-w2` 둘 다 `network-zone=public`. kubeconfig 에 컨텍스트 `dmsk8s`(current 는 `dms` 유지).
+- 노드: **LDAP 클라이언트 없음**(sssd·nslcd 미설치, nsswitch 에 sss/ldap 없음, `getent passwd alice` 실패 — testbed validate 의
+  부정 검사), CRI-O 가 `pkg-01:5000`·`pkg-01:5001` 신뢰, `/etc/hosts`·CoreDNS hosts 에 pkg-01(api 파드가 레지스트리를 조회),
+  CephFS `dmsfs:/k8s` → `/cephfs`(둘 다), `/k8s/third` → `/cephfs-third`(k8s-w1), `/k8s/secondary` → `/cephfs-secondary`(k8s-w2),
+  빌드 노드 k8s-w1 에 `/home/mason/dms-dev` ro NFS.
+- pkg-01: `registry-k8s` :5001(§0), PostgreSQL `dmsdb_k8s` / 롤 `dmsapp_k8s`(scram — 기존 `10.10.10.0/24 scram` hba 가 덮는다).
+- 호스트: `10.20.20.101/32 dev dmsbr0` onlink 라우트, `/etc/hosts` 의 `10.20.20.101 dms-k8s.local`, (선택) 외부 릴레이
+  :8443 → .101:443, 테스트베드 CA(`~/dms-dev/testbed/files/tls/`, gitignore).
+
+```bash
+kubectl --context dmsk8s get nodes -o wide
+# 컨텍스트 인자가 없는 점검 스크립트는 그 컨텍스트만 담은 kubeconfig 로 돌린다(current-context 를 바꾸지 않는다):
+umask 077; kubectl config view --minify --flatten --context dmsk8s > ~/.kube/dmsk8s.only
+KUBECONFIG=~/.kube/dmsk8s.only PORTAL_VIP=10.20.20.101 sh deploy/preflight-cluster.sh
+```
+
+### 13-2. 레지스트리 시드 `k0`
+
+첫 설치는 포탈이 아직 없어 포탈 빌드를 못 한다 — ssc 레지스트리의 검증된 이미지를 :5001 에 **`k0`** 으로 복사한다(pkg-01 에서,
+testbed `make registry` 가 :5001 을 띄운 뒤):
+
+```bash
+for pair in dms:d184 dms-agent:d179 dms-mpifileutils:d183; do
+  repo=${pair%%:*}
+  sudo docker pull localhost:5000/$pair && sudo docker tag localhost:5000/$pair localhost:5001/$repo:k0 \
+    && sudo docker push localhost:5001/$repo:k0
+done
+curl -s http://localhost:5001/v2/_catalog
+```
+
+시드 이미지에 동봉된 매니페스트는 :5000 태그로 스탬프돼 있어 k8s 포탈의 드리프트 배지는 첫 포탈 빌드 전까지 「모름」이다(정상, §8-2).
+
+### 13-3. DB · 13-4. 공유 FS
+
+DB·롤은 testbed `postgresql_server` 롤이 만든다(`dmsdb_k8s`/`dmsapp_k8s`, 비밀번호는 testbed `secrets.yml`). 스키마는 migrate 가
+만든다. 공유 FS 레이아웃은 §2 의 플레이북을 `-e dms_cluster=dmsk8s` 로(k8s-w1 이 `/k8s` 하위 트리 안에 `/cephfs/dms`(770)·
+`/cephfs/dms/artifacts`(755)·`/cephfs/managed`·`/cephfs/managed/e2e` 를 만든다 — LDAP 픽스처 없음).
+
+### 13-5. 네임스페이스 · 시크릿(4키) · TLS
+
+```bash
+kubectl --context dmsk8s apply -f deploy/k8s/00-namespace.yaml        # 이미지 없는 유일한 raw apply
+kubectl --context dmsk8s -n dms create secret generic dms-secrets \
+  --from-literal=DMS_DATABASE_URL='postgresql://dmsapp_k8s:<DB_PASSWORD>@10.10.10.30:5432/dmsdb_k8s' \
+  --from-literal=DMS_SHARED_TOKEN="$(openssl rand -hex 24)" \
+  --from-literal=DMS_ADMIN_TOKEN="$(openssl rand -hex 24)" \
+  --from-literal=DMS_SESSION_SECRET="$(openssl rand -base64 32)"
+#   ↑ 바인드 비밀번호 키 없음(ssc 시크릿을 복사해 오지 않는다). 토큰은 ssc 와 공유하지 않고 새로 만든다.
+kubectl --context dmsk8s -n dms get secret dms-secrets -o go-template='{{range $k,$v := .data}}{{$k}}{{"\n"}}{{end}}'   # 정확히 4줄
+# TLS: 같은 테스트베드 CA 로 SAN DNS:dms-k8s.local + IP:10.20.20.101(+ 외부 릴레이 IP) 서버 인증서 → secret tls dms-portal-tls
+#      (testbed 의 portal-tls 스크립트: `<context> <dns> <vip> [extra-ip]` = dmsk8s dms-k8s.local 10.20.20.101 ...)
+```
+
+### 13-6. 오버레이 적용(항상 `--context dmsk8s`)
+
+```bash
+kubectl --context dmsk8s -n dms delete job dms-migrate --ignore-not-found
+sh deploy/overlays/guard-images.sh deploy/overlays/testbed-k8s --context dmsk8s   # 다른 컨텍스트면 exit 4
+kubectl --context dmsk8s apply -k deploy/overlays/testbed-k8s
+kubectl --context dmsk8s -n dms wait --for=condition=complete job/dms-migrate --timeout=180s
+kubectl --context dmsk8s -n dms rollout status deployment/dms-api
+kubectl --context dmsk8s -n dms rollout status deployment/dms-controller
+kubectl --context dmsk8s -n dms rollout status daemonset/dms-agent
+```
+
+LDAP 없음 확인(배포 게이트 — 하나라도 어긋나면 진행하지 않는다):
+
+```bash
+kubectl kustomize deploy/overlays/testbed-k8s | grep -ci ldap                          # 0
+kubectl --context dmsk8s -n dms get cm dms-config -o yaml | grep -ci ldap               # 0
+kubectl --context dmsk8s -n dms exec deploy/dms-api -- env | grep -c LDAP              # 0
+kubectl --context dmsk8s -n dms get ds dms-agent -o jsonpath='{.spec.template.spec.containers[0].command}'   # ["dms"]
+kubectl --context dmsk8s -n dms exec ds/dms-agent -- sh -c 'test -S /run/nslcd/socket && echo nslcd-up || echo no-nslcd'   # no-nslcd
+```
+
+### 13-7. 첫 관리자 · 시드 · 컨트롤 상태
+
+- 첫 관리자: `curl --cacert <CA> -H "x-admin-token: <ADMIN>" -H 'content-type: application/json'
+  -d '{"username":"mason","password":"<pw>"}' https://dms-k8s.local/api/admin/accounts` — mason 은 특권 목록에 있어 root 자격이
+  있다(LDAP 계정이 아니라 로컬 계정). 이후 자동화는 봉인 로그인(§10-7).
+- 시드: §6 과 같은 스토리지 이름·경로(`cephfs-dms` `/cephfs` → `/cephfs/managed`, `cephfs-third`, `cephfs-secondary`)·정책·쌍을
+  `API=https://dms-k8s.local`, 토큰은 `--context dmsk8s` 시크릿에서 읽어 넣는다. **그룹 denylist 규칙은 넣지 않는다.**
+- 컨트롤 상태(세션 관리자 전용, 전체 치환이라 GET 후 전 필드): `build_node_name=k8s-w1`, `build_source_path=/home/mason/dms-dev/dms`.
+  포탈 부제(`PUT /api/admin/portal-settings`)를 「K8S 테스트베드」 등으로 두면 두 포탈이 헷갈리지 않는다.
+- 쿠키: 두 포탈의 세션 쿠키 이름이 같다(`dms_session`) — 외부에서 같은 IP 의 다른 포트로 둘을 열면 서로 로그아웃시킨다.
+  호스트 이름(dms.local / dms-k8s.local)으로 구분해 연다.
+
+### 13-8. 빌드 → 릴리스 → 태그 bump(`kN`)
+
+포탈 「빌드」에서 images `[dms-mpifileutils, dms, dms-agent]`, 태그 **`k1`, `k2`, …를 직접 입력**한다 — 다음 태그 제안은 `dNN`
+만 읽어 엉뚱한 값을 낸다(docs/BACKLOG.md). 릴리스(agent → api → controller, 잡 이미지) 뒤 `deploy/overlays/testbed-k8s` 의
+`newTag`·`DMS_JOB_IMAGE` 를 맞추는 커밋을 **main 에서만** 만든다(ssc 오버레이 `testbed` 는 같이 건드리지 않는다). 포탈
+릴리스는 이미지만 패치하므로 에이전트의 `dms agent` 명령 오버라이드는 롤아웃 뒤에도 남는다.
 
 ## Unresolved values to fill in during live validation
 

@@ -95,6 +95,49 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ⏳ 테스트베드 분리 — k8s 테스트베드(LDAP 없음) 배포 자산·가드 컨텍스트 대조 — **커밋, 클러스터 미적용**(2026-10-21, 인프라·앱 코드 무변경)
+
+사용자 요청: 「dms-k8s 브런치에 대한 테스트베드가 추가로 필요해. 지금 w4,w5 워커노드를 없애고, dms-k8s 용 VM 테스트베드를 추가로
+구성하고 싶어 … 레지스트리 VM 은 dms-ssc 와 공유해도 될거같아. 테스트베드 다시 리부팅됬을때 재구축 가능해지도록 스크립트 및 파일들,
+문서들 전부 업데이트해줘.」 + 「참고로, dms-k8s 브런치에서는 LDAP 을 사용 안할거야. 이점은 확실히해둬.」 VM·CephFS·레지스트리·DB·
+호스트 네트워크는 testbed 저장소 몫이고, 이 저장소는 DMS 층만 바꿨다(이미지 입력 src·frontend·deploy/k8s·deploy/docker 무변경 —
+재빌드 불필요).
+
+- **신규 오버레이 `deploy/overlays/testbed-k8s`**(k8s-cp1 + k8s-w1·w2, 컨텍스트 `dmsk8s`): 이미지 `pkg-01:5001/dms`·`dms-agent`
+  `k0`, 잡 이미지 `pkg-01:5001/dms-mpifileutils:k0`, `DMS_BUILD_REGISTRY=pkg-01:5001`(빌더 `buildah:stable` 만 :5000 공용),
+  공인 풀 `10.20.20.101/32`, ingress tls `dms-k8s.local`, 특권 목록 root,admin,mason·허용 true·보조 그룹 false 명시. **LDAP 없음**:
+  ConfigMap 의 LDAP 키 7개 null 삭제(빈 값·"false" 가 아니라 삭제 — base 값은 같은 망의 ssc 용 slapd 를 가리킨다), 에이전트
+  `command: ["dms"] args: ["agent"]`(nslcd 엔트리포인트 우회) + LDAP env 6개 `$patch: delete`, 시크릿 4키. 결과 = root 잡만
+  동작, 비 root 는 `ldap_not_configured` fail-closed. api/controller Deployment 는 패치하지 않는다(securityContext 계약).
+  태그 관례 `kN`(k0 = :5000 의 d184·d179·d183 시드 복사), bump 는 main(→ dms-k8s)에서만 — ssc 오버레이 `testbed` 는
+  dms-ssc 쪽 소관(빌드 소스 전환 뒤).
+- **가드 컨텍스트 대조**(`deploy/overlays/guard-images.sh`): 두 클러스터가 같은 ns(dms)라 엉뚱한 클러스터 apply 가 새 사고
+  유형이다. `--context <ctx>`(또는 `KUBE_CONTEXT`) 지원 + 오버레이의 `kube-context` 파일(testbed = dms, testbed-k8s = dmsk8s)과
+  겨눈 컨텍스트(없으면 현재 컨텍스트)가 다르면 **exit 4**. kubeconfig 에 없는 컨텍스트는 exit 2(라이브 조회 실패가 "첫 설치"로
+  보여 통과하던 틈). 라이브 조회는 그 컨텍스트로 고정하고, 통과 메시지가 `kubectl --context <ctx> apply -k <dir>` 을 찍는다.
+  `kube-context` 가 없는 오버레이(prod·ssc 사이트, install.sh)는 종전 그대로 — 단 셸에 남은 `KUBE_CONTEXT` 가 현재 컨텍스트와
+  다르면 exit 4(install.sh 는 현재 컨텍스트로 apply 하므로 가드가 다른 클러스터의 라이브를 보고 통과시키면 안 된다; 명시
+  `--context` 는 존중).
+- **`deploy/testbed/dms-shared-fs.yml`**: 대상 그룹을 `-e dms_cluster=<접두>`(기본 dms)로 — `dmsk8s` 면 k8s-w1 이 `/k8s` 하위
+  트리(=/cephfs) 안에 같은 레이아웃을 만든다. LDAP 없는 클러스터에는 LDAP uid/gid 소유 픽스처를 만들지 않고 root 소유분만
+  `/cephfs/managed/e2e` 에(`dms_fs_ldap_fixtures`, 기본은 dms 일 때만 켬). `--list-hosts`·로컬 변수 평가로 두 클러스터 확인.
+- **`deploy/docker/registry-setup.sh`**: `registry` 단계는 라이브와 다른 레지스트리(podman·이름 볼륨·삭제 꺼짐)를 만들던 것을
+  거부(exit 2)하고 testbed 저장소의 `registry_server` 롤(`make registry`, docker registry:2·삭제 켬, :5000/:5001)로 안내.
+  `nodes` 단계(CRI-O 신뢰)는 **컨텍스트 필수**(`--context dms|dmsk8s`, 기본 컨텍스트 하드코딩 제거) + 컨텍스트별 레지스트리
+  목록(dmsk8s = 5000+5001) + `SSH_OPTS`.
+- 문서: deploy/README(맨 위 「테스트베드는 둘이다」 표, §0 레지스트리, §2 플레이북 두 클러스터, §3·§3b·§4/5 `--context`·
+  k8s 시크릿 4키, §8 클러스터별 build_source_path, §9-4 오버레이별 bump 브랜치, §10 CA·릴레이 영속 위치, **신규 §13 k8s 테스트베드
+  런북**(LDAP 없음이 뜻하는 것·배포 게이트 `grep -ci ldap == 0`)), ARCHITECTURE(오버레이 목록·가드 exit 4·testbed-k8s LDAP 삭제
+  불변식), CLAUDE.md(태그 bump 규칙: 오버레이 ↔ 클러스터 ↔ 브랜치, `--context` 상시), BACKLOG(overlays/prod 의 LDAP 필수 vs 무
+  LDAP dms-k8s — 사용자 결정 대기, "LDAP 끔" 명시 스위치, 태그 제안 kN 미인식, 점검 스크립트 컨텍스트, 레지스트리 경로 접두 미지원).
+- 테스트: 신규 `tests/test_testbed_k8s_overlay.py`(정적: base 의 LDAP 키·에이전트 LDAP env 가 전부 삭제되는지 — base 에 키가 생기면
+  빨간불; 렌더(`kubectl kustomize`, kubeconfig 무관): 'ldap' 0건·에이전트 `dms agent`·시크릿 참조 SHARED_TOKEN 뿐·이미지 전부
+  :5001·빌드 레지스트리·VIP·호스트·ssc 오버레이는 LDAP 유지·모든 오버레이가 자리표시자 없이 렌더) — LDAP null 한 줄·명령
+  오버라이드를 지우는 변이에 빨간불 확인. 신규 `tests/test_guard_images_context.py`(가짜 kubectl 로 실 스크립트: 교차 apply
+  exit 4·현재 컨텍스트 대조·KUBE_CONTEXT·인자 우선·빈 kube-context exit 2·없는 컨텍스트 exit 2·이미지 변경 exit 3 유지·고정 없는
+  오버레이 종전 동작·저장소 고정값) — 대조를 끄거나 `--context` 고정을 빼는 변이에 빨간불 확인.
+- **미적용**: 클러스터·pkg-01·호스트는 건드리지 않았다(testbed 저장소 작업과 함께 실증 예정 — §13 런북).
+
 ### ✅ 배치 rm 자동 확인(옵션, 기본 꺼짐) + drm 심링크 실증 — **완료·실증**(2026-10-21, d184)
 
 사용자 요청: 「Rm 배치작업에서 sync와 마찬가지로 사용자 확인 버튼 없이 바로 rm 작업 수행하도록 (자동 확인) 하는 옵션 추가해줘.」 —

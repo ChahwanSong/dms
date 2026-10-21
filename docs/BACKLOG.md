@@ -145,12 +145,41 @@
   그룹 없는 잡에 supplementalGroups·fsGroup 을 더하면 preflight 만 그 그룹으로 통과할 수 있다(기존
   성질). 처방: 모든 비 root preflight 에 `id -G == {주 gid}` 검사(매니페스트 바이트 동일성 포기).
 
+### 두 번째 테스트베드(k8s, LDAP 없음) 후속 — 2026-10-21
+
+- 🔧 **`overlays/prod` 설치기는 LDAP 을 필수로 요구한다 — 무 LDAP dms-k8s 사이트와 맞지 않음(사용자 결정 대기)**.
+  `deploy/overlays/prod/render.sh:57` 의 필수 `KEYS` 에 `LDAP_HOST`·`LDAP_USER_BASE`… 가 있고 `patch-config.yaml` 은
+  `DMS_LDAP_REQUIRE_AUTH_BIND "true"` 를, `deploy/install.sh:86` 은 시크릿 키 `DMS_LDAP_BIND_PW` 를 요구하며 에이전트
+  DaemonSet 은 nslcd 엔트리포인트 그대로다. 사용자 결정(「dms-k8s 브런치에서는 LDAP 을 사용 안할거야」)을 사이트 설치기에도
+  적용할지 정해야 한다. 후보: (1) values.env `IDENTITY_BACKEND=none`(키 생략 = 종전 LDAP) → render 가 LDAP 키 null·에이전트
+  `dms agent`·시크릿 4키 검사로 분기(테스트베드 오버레이 `testbed-k8s` 와 같은 모양 — 계약 테스트 재사용), (2) dms-k8s 브랜치
+  전용 무 LDAP 설치기. 지금은 테스트베드만 무 LDAP 이다(`deploy/overlays/testbed-k8s`).
+- 🔧 **"LDAP 끔" 명시 스위치(선택)** — 지금 LDAP 꺼짐은 "URI·BASE 가 비면 리졸버 None"(`identity_ldap.ldap_directory_config`)
+  뿐이라 부분 설정(URI 만 남김 등)도 경고 없이 꺼지거나 켜진다. 테스트베드는 오버레이 렌더 계약(`tests/test_testbed_k8s_overlay.py`,
+  'ldap' 0건)으로 막았다. 코드로 단언하려면 `DMS_IDENTITY_BACKEND=none` — 켜져 있는데 `DMS_LDAP_*` 가 하나라도 있으면
+  SettingsError, `/me` 로 내보내 포탈이 비 root 옵션·「LDAP 계정」 문구를 숨긴다. 에이전트 엔트리포인트는 URI 가 없으면 nslcd 를
+  건너뛰게(그러면 오버레이의 명령 오버라이드가 필요 없다), dms-k8s 이미지에서 nslcd·libnss-ldapd 제거(브랜치가 갈라질 때).
+- 🔧 **포탈 다음 태그 제안이 `kN` 을 모른다** — `frontend/src/features/builds/BuildForm.tsx:63` `nextTagSuggestion` 은 `dNN` 의
+  최댓값 + 1 만 본다. k8s 테스트베드(레지스트리 :5001, 태그 관례 `kN`)에서는 엉뚱한 `d1` 을 제안하므로 운영자가 `k<N>` 을 직접
+  입력한다(`deploy/README.md` §13-8). 처방: 레지스트리·이력 태그의 지배적 접두(문자 + 숫자)를 따라 제안.
+- 🔧 **점검 스크립트에 `--context` 가 없다** — `deploy/preflight-cluster.sh`·`deploy/verify.sh`·`deploy/overlays/prod/render.sh`
+  (`live` 해석)는 현재 컨텍스트로 붙는다. 테스트베드는 그 컨텍스트만 담은 kubeconfig(`kubectl config view --minify --flatten
+  --context dmsk8s`)를 `KUBECONFIG` 로 준다(`deploy/README.md` §13-1). 가드(`guard-images.sh`)만 `--context`·`kube-context`
+  대조가 있다. 또 가드는 뒤따르는 `kubectl apply` 를 통제하지 못한다 — 오버레이와 컨텍스트를 묶어 delete migrate → 가드 → apply →
+  wait → rollout 을 한 번에 하는 래퍼(`apply-overlay.sh <overlay>`)가 후보.
+
 ## 2. 의도적 보류 (결정 — "미구현"이 아님)
 
 - ⏸ **회원가입 메일 인증** — 더미(email 기록만, 검증 없음, `routes_auth.py::signup`).
 - ⏸ **Prometheus/Grafana** — 포탈 대시보드로 대체.
 - ⏸ **롤백 버튼** — 이력에서 옛 태그 재선택으로 갈음.
 - ⏸ **클러스터 내 registry** — 호스트 `pkg-01:5000` 사용(슬라이스 11 비목표: 독립 인프라 작업).
+- ⏸ **레지스트리 경로 접두 미지원**(2026-10-21 테스트베드 분리 때 확인) — `DMS_BUILD_REGISTRY` 는 `host:port` 만 된다:
+  `registry.py` 가 `http://{registry}/v2/{repo}/…` 로 URL 을 만들고(`pkg-01:5000/k8s` 면 `/k8s/v2/…` 로 깨진다)
+  `manifest_tags.image_registry` 는 첫 경로 조각만 레지스트리로 봐 `site_image` 가 늘 None(배지 「모름」)이 된다. 그래서 두
+  테스트베드는 같은 VM 에 **포트(프로세스)를 나눴다**(ssc :5000, k8s :5001) — 레지스트리를 같이 쓰면 「사용 중」 보호
+  (`routes_registry._in_use_tags`)가 자기 클러스터만 봐 상대의 라이브 태그를 지울 수 있고 태그 제안이 경합한다. 필요해지면
+  고칠 곳: `registry.py` URL 분해, `manifest_tags.image_registry`, 빌드 스탬프 정규식, `_registry_host`.
 - ⏸ **이미지 태그 동기화 템플릿 계층** — 5파일 수기(`deploy/README.md`). 슬라이스 16 이
   드리프트 배지 + initContainer/본체 이미지 계약 테스트로 완화. "매니페스트 안 고치고
   포탈 롤아웃만" 은 배지가 잡되 무시하면 다음 apply 가 되돌린다.
