@@ -168,6 +168,13 @@
   대조가 있다. 또 가드는 뒤따르는 `kubectl apply` 를 통제하지 못한다 — 오버레이와 컨텍스트를 묶어 delete migrate → 가드 → apply →
   wait → rollout 을 한 번에 하는 래퍼(`apply-overlay.sh <overlay>`)가 후보.
 
+- 🔧 **호스트 콜드부팅 리허설 미실증**(2026-10-22) — VM 단독 재부팅(k8s-w1·k8s-w2)과 hostnet 유닛 재시작은 실증했고, 그 과정에서
+  testbed 부팅 가드의 두 겹 마운트 경합을 고쳤다. 호스트 전체 재부팅(8 VM 동시 기동, pkg-01 Ceph 늦게 올라옴)은 세션에서 할 수
+  없다 — 다음 호스트 재부팅 뒤 testbed `make post-boot-check WAIT=900` 이 그 실증이다(testbed ARCHITECTURE §18).
+- 🔧 **ssc DB 에 제거된 dms-w4·w5 의 `nodes` 행이 남는다** — 노드 행 삭제 API·화면이 없다(에이전트 보고가 끊긴 노드는 오래된
+  보고로만 보인다). 배치 후보에서는 신선도로 빠지므로 동작 영향은 없고 노드 화면에 흔적만 남는다. 후보: 관리자 「노드 기록
+  삭제」(보고 끊긴 지 N분 넘고 k8s Node 가 없을 때만, 감사 행).
+
 ## 2. 의도적 보류 (결정 — "미구현"이 아님)
 
 - ⏸ **회원가입 메일 인증** — 더미(email 기록만, 검증 없음, `routes_auth.py::signup`).

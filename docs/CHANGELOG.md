@@ -95,7 +95,28 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
-### ⏳ 테스트베드 분리 — k8s 테스트베드(LDAP 없음) 배포 자산·가드 컨텍스트 대조 — **커밋, 클러스터 미적용**(2026-10-21, 인프라·앱 코드 무변경)
+### ✅ nsync 미리보기·실행 파드가 반대편 스토리지를 마운트하던 문제 — **완료·실증**(2026-10-22, k1)
+
+k8s 테스트베드 실증 중 발견: nsync 미리보기 vcjob 의 destination-worker(k8s-w2)가 `hostPath type check failed: /cephfs-third
+is not a directory` 로 ContainerCreating 에 묶였다(사용자 취소로 정리). `_build_nsync_job` 이 런처·source-worker·
+destination-worker **모두에** 소스와 목적지 스토리지를 hostPath(type Directory)로 붙였다 — nsync 는 정의상 두 스토리지를 함께
+마운트한 노드가 없을 때 고르는 도구라 반대편 경로는 그 노드에 없다. preflight 는 같은 이유로 이미 역할별 마운트였다(코드 안의
+불일치). 옛 ssc 테스트베드는 반대편 노드에 남은 **빈 마운트포인트 디렉터리**(dms-w1·w2 의 8월자 빈 `/cephfs-secondary` 등)가
+이걸 가렸다 — 테스트베드 분리로 dms-w3 의 `/cephfs-third` 가 사라져 ssc 도 같은 상태가 됐다(d185 로 복구 예정).
+
+- `execution_volcano._volumes(role=…)` 하나가 정한다: nsync vcjob 은 런처 = 아티팩트 base 만(`role="launcher"`), source-worker =
+  소스 스토리지, destination-worker = 목적지 스토리지(+ 각 아티팩트 base). `build_volcano_job(role_volumes=…)` — nsync 에 없으면
+  ValueError(→ submit_failed, 예전 모양으로 조용히 돌아가지 않는다). primary(dsync·scan·rm)는 그대로.
+- 근거: 러너가 nsync 에 `--role-mode map` 을 싣는다 — 고정 커밋 nsync.c 를 읽어 map 모드에선 rank 가 자기 역할 경로만 만진다는
+  것을 확인(auto 모드는 역할 판정에서 모든 rank 가 양쪽을 `access()`). 런처는 nsync 에서 데이터 경로를 만지지 않는다(런처의
+  데이터 접근은 drm 봉쇄 재확인뿐 — primary). ARCHITECTURE 불변식에 기록.
+- 테스트: task 별 hostPath·volumeMounts 집합(미리보기·실행), dsync 는 모든 task 양쪽, `role_volumes` 누락 4형태 fail-closed.
+  런처가 양쪽을 마운트한다고 고정하던 `test_volumes_sync_two_storages` 교체. 백엔드 3498 통과.
+- 실증(k1, dmsk8s): 실행 vcjob 의 task 별 hostPath = launcher `/cephfs/dms/artifacts` · source-worker `/cephfs-third` + base ·
+  destination-worker `/cephfs-secondary` + base. nsync(root, cephfs-third → cephfs-secondary) 미리보기 files 6·bytes 38 → 확인 →
+  Succeeded 6·38, 목적지 트리·md5 원본과 동일.
+
+### ✅ 테스트베드 분리 — k8s 테스트베드(LDAP 없음) 배포 자산·가드 컨텍스트 대조 — **완료·실증**(2026-10-21~22, k0 → k1)
 
 사용자 요청: 「dms-k8s 브런치에 대한 테스트베드가 추가로 필요해. 지금 w4,w5 워커노드를 없애고, dms-k8s 용 VM 테스트베드를 추가로
 구성하고 싶어 … 레지스트리 VM 은 dms-ssc 와 공유해도 될거같아. 테스트베드 다시 리부팅됬을때 재구축 가능해지도록 스크립트 및 파일들,
@@ -136,7 +157,19 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   오버라이드를 지우는 변이에 빨간불 확인. 신규 `tests/test_guard_images_context.py`(가짜 kubectl 로 실 스크립트: 교차 apply
   exit 4·현재 컨텍스트 대조·KUBE_CONTEXT·인자 우선·빈 kube-context exit 2·없는 컨텍스트 exit 2·이미지 변경 exit 3 유지·고정 없는
   오버레이 종전 동작·저장소 고정값) — 대조를 끄거나 `--context` 고정을 빼는 변이에 빨간불 확인.
-- **미적용**: 클러스터·pkg-01·호스트는 건드리지 않았다(testbed 저장소 작업과 함께 실증 예정 — §13 런북).
+- **라이브 적용(2026-10-21~22)**: testbed 저장소 순서(그 저장소 ARCHITECTURE §19.2)대로 — w4·w5 드레인·삭제, k8s-cp1·k8s-w1·
+  k8s-w2 신설, pkg-01 공유(:5001 레지스트리·`dmsdb_k8s`·CephFS `/k8s`), 두 클러스터 `READ_ONLY=1 make validate-<c>` PASS=105.
+  DMS(dmsk8s): k0 시드 → `dms-shared-fs.yml -e dms_cluster=dmsk8s` → 시크릿 4키 → 가드(`--context dms` 는 exit 4, `dmsk8s`
+  통과) → apply → 무 LDAP 게이트(ConfigMap·api/controller env 의 ldap 0, 에이전트 `dms agent`, nslcd 없음) → 관리자·시드
+  (스토리지·정책·sync 쌍 9, 빌드 노드 k8s-w1·소스 main 체크아웃). ssc 의 빌드 소스는 `/home/mason/dms-dev/dms-ssc` 로 전환.
+- **실증(dmsk8s)**: root scan(dscan 5파일 16 MiB)·dsync(미리보기 5 → 16 MiB)·rm(미리보기 walk 5 → 5) Succeeded, 비 root scan →
+  `ldap_not_configured` 거부(의도). nsync 는 FailedMount 로 멈춰 DMS 결함을 찾았다(아래 항목) — 고친 **k1**(첫 포탈 빌드:
+  k8s-w1 이 main 체크아웃 928b3c9 를 빌드해 :5001 에 dms·dms-agent·dms-mpifileutils push, 릴리스 에이전트 → api·controller·잡
+  이미지, live == 동봉 매니페스트로 드리프트 배지 없음)에서 nsync 미리보기 6 → Succeeded 6항목·38 B, 목적지 md5 원본과 동일.
+  오버레이 `testbed-k8s` newTag·`DMS_JOB_IMAGE` = k1 로 bump 후 가드 통과·재적용(재롤아웃 없음). 실증 데이터·요청 정리.
+- **재부팅 리허설**: hostnet 유닛 stop/start(포탈 불통 → 복구), k8s-w1(2회)·k8s-w2 재부팅 — 첫 재부팅에서 CephFS 가 **두 겹**
+  마운트되는 testbed 부팅 가드 경합을 찾아 고쳤다(testbed 저장소; `post-boot-check` 가 겹 수도 본다). 이후 한 겹·~40s Ready,
+  `make post-boot-check` PASS=72. **호스트 콜드부팅은 미실증**(세션에서 호스트 재부팅 불가 — BACKLOG).
 - **2026-10-22 testbed 보안·리뷰 반영(문서만)**: testbed 저장소가 빌드 소스 export 를 체크아웃별·워커 IP 한정으로 좁히고(부모
   `/home/mason/dms-dev` 에 testbed 의 SSH 키·CA 키·secrets 가 있었다), `client.dmsk8s` 를 OSD `namespace=k8s` 로도 가두고,
   PostgreSQL pg_hba 를 DB 별로(LDAP 로그인이 `dmsdb_k8s` 에 못 닿게) 바꾼 것에 맞춰 deploy/README §1-빌드 소스·§10·§13-1 갱신.
