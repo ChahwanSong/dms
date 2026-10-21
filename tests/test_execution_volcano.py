@@ -287,8 +287,10 @@ def test_volumes_include_artifact_base_when_independent():
     assert "/cephfs/dms/artifacts" in paths, f"/cephfs/dms/artifacts not in {paths}"
 
 
-def test_volumes_sync_two_storages():
-    """sync 작업은 source+destination 스토리지 모두 마운트."""
+def test_volumes_nsync_job_mounts_each_storage_only_on_its_own_task():
+    """nsync 미리보기·실행 vcjob 은 task 마다 자기 쪽 스토리지만 붙인다(2026-10-22 dmsk8s 실증 -- 예전엔 모든 task
+    에 양쪽을 붙여, 반대편 마운트 루트가 없는 노드에서 FailedMount 로 gang 이 영원히 안 섰다). 런처는 데이터
+    스토리지 없이 아티팩트 base 만(러너가 nsync 에선 데이터 경로를 만지지 않는다 -- --role-mode map)."""
     k8s = _FakeK8s()
     def storages_lookup(n):
         if n == "storage-third":
@@ -305,11 +307,33 @@ def test_volumes_sync_two_storages():
                  cand={"source": ["dms-src1"], "destination": ["dms-dst1"]},
                  paths={"source": "/cephfs-third/a", "source_storage": "storage-third",
                         "destination": "/cephfs-secondary/b", "destination_storage": "storage-secondary"})
-    ref = a.submit(spec)
-    volumes = k8s.created[0]["spec"]["tasks"][0]["template"]["spec"]["volumes"]
-    paths = {v["hostPath"]["path"] for v in volumes}
-    assert "/cephfs-third" in paths, f"/cephfs-third not in {paths}"
-    assert "/cephfs-secondary" in paths, f"/cephfs-secondary not in {paths}"
+    for phase in ("preview", "execution"):
+        k8s.created.clear()
+        a.submit(_spec(phase=phase, op="sync", tool="nsync", cand=spec.candidates, paths=spec.paths))
+        tasks = {t["name"]: t["template"]["spec"] for t in k8s.created[0]["spec"]["tasks"]}
+        paths = {n: {v["hostPath"]["path"] for v in s["volumes"]} for n, s in tasks.items()}
+        assert paths == {"launcher": {"/cephfs/dms/artifacts"},
+                         "source-worker": {"/cephfs-third", "/cephfs/dms/artifacts"},
+                         "destination-worker": {"/cephfs-secondary", "/cephfs/dms/artifacts"}}, (phase, paths)
+        for n, s in tasks.items():      # 컨테이너 마운트도 같은 볼륨 집합(이름 짝이 어긋나면 파드 생성 422)
+            assert ({m["name"] for m in s["containers"][0]["volumeMounts"]}
+                    == {v["name"] for v in s["volumes"]}), n
+
+
+def test_volumes_dsync_job_mounts_both_storages_on_every_task():
+    """코로케이션 dsync(primary)는 한 노드가 두 스토리지를 함께 마운트한다 -- 모든 task 에 양쪽."""
+    k8s = _FakeK8s()
+    def storages_lookup(n):
+        return {"s-a": {"mount_path": "/mnt-a"}, "s-b": {"mount_path": "/mnt-b"}}[n]
+    a = VolcanoExecutionAdapter(
+        k8s, job_image="reg/img:1", namespace="dms", storages_lookup=storages_lookup,
+        read_text=lambda path: None, artifact_base="file:///cephfs/dms/artifacts")
+    a.submit(_spec(phase="execution", op="sync", tool="dsync", cand={"primary": ["dms-w1"]},
+                   paths={"source": "/mnt-a/x", "source_storage": "s-a",
+                          "destination": "/mnt-b/y", "destination_storage": "s-b"}))
+    for t in k8s.created[0]["spec"]["tasks"]:
+        assert {v["hostPath"]["path"] for v in t["template"]["spec"]["volumes"]} == {
+            "/mnt-a", "/mnt-b", "/cephfs/dms/artifacts"}, t["name"]
 
 
 # ---- 슬라이스 24 §2.1 층2: raise 가 submit_failed 로 접히되 조용하지 않다 ----

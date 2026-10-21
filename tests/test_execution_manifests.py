@@ -98,6 +98,7 @@ def test_rm_argv():
 
 
 _VOL = [{"name": "cephfs", "hostPath": {"path": "/cephfs"}, "mountPath": "/cephfs"}]
+_NSYNC_ROLE_VOL = {"source": _VOL, "destination": _VOL}
 
 
 def test_build_volcano_job_scan_structure():
@@ -166,13 +167,53 @@ def test_nsync_three_tasks():
                  paths={"source": "/cephfs-third/a", "source_storage": "cephfs-third",
                         "destination": "/cephfs-secondary/b",
                         "destination_storage": "cephfs-secondary"})
-    m = build_volcano_job(spec, job_image="i", namespace="dms", volumes=_VOL)
+    m = build_volcano_job(spec, job_image="i", namespace="dms", volumes=_VOL,
+                          role_volumes=_NSYNC_ROLE_VOL)
     names = [t["name"] for t in m["spec"]["tasks"]]
     assert names == ["launcher", "source-worker", "destination-worker"]
     src = next(t for t in m["spec"]["tasks"] if t["name"] == "source-worker")
     dst = next(t for t in m["spec"]["tasks"] if t["name"] == "destination-worker")
     assert src["replicas"] == 2 and dst["replicas"] == 1
     assert m["spec"]["minAvailable"] == 4  # 2 + 1 + launcher
+
+
+def _task_host_paths(m, name):
+    task = next(t for t in m["spec"]["tasks"] if t["name"] == name)
+    pod = task["template"]["spec"]
+    mounts = {vm["mountPath"] for vm in pod["containers"][0]["volumeMounts"]}
+    return {v["hostPath"]["path"] for v in pod["volumes"]}, mounts
+
+
+def test_nsync_tasks_mount_only_their_own_storage():
+    # 2026-10-22 dmsk8s 실증: 소스·목적지 노드가 disjoint 라 반대편 hostPath(type Directory)는 그 노드에 없다 --
+    # 모든 task 에 양쪽을 붙이면 FailedMount 로 gang 이 안 선다(ContainerCreating 에 묶임). 런처는 아티팩트만.
+    base = {"name": "dms-artifact-base", "hostPath": {"path": "/cephfs/dms/artifacts"},
+            "mountPath": "/dms-artifact-base"}
+    third = {"name": "cephfs-third", "hostPath": {"path": "/cephfs-third"}, "mountPath": "/cephfs-third"}
+    secondary = {"name": "cephfs-secondary", "hostPath": {"path": "/cephfs-secondary"},
+                 "mountPath": "/cephfs-secondary"}
+    spec = _spec(operation="sync", tool="nsync",
+                 candidates={"source": ["dms-w1"], "destination": ["dms-w4"]},
+                 paths={"source": "/cephfs-third/a", "source_storage": "cephfs-third",
+                        "destination": "/cephfs-secondary/b", "destination_storage": "cephfs-secondary"})
+    m = build_volcano_job(spec, job_image="i", namespace="dms", volumes=[base],
+                          role_volumes={"source": [third, base], "destination": [secondary, base]})
+    assert _task_host_paths(m, "launcher") == ({"/cephfs/dms/artifacts"}, {"/dms-artifact-base"})
+    assert _task_host_paths(m, "source-worker") == ({"/cephfs-third", "/cephfs/dms/artifacts"},
+                                                    {"/cephfs-third", "/dms-artifact-base"})
+    assert _task_host_paths(m, "destination-worker") == ({"/cephfs-secondary", "/cephfs/dms/artifacts"},
+                                                         {"/cephfs-secondary", "/dms-artifact-base"})
+
+
+@pytest.mark.parametrize("role_volumes", [None, {}, {"source": _VOL}, {"destination": _VOL}])
+def test_nsync_without_role_volumes_fails_closed(role_volumes):
+    # 역할별 볼륨 없이 nsync 를 지으면 예전 모양(전 task 양쪽 마운트)으로 조용히 돌아가지 않는다 -- submit_failed.
+    spec = _spec(operation="sync", tool="nsync",
+                 candidates={"source": ["dms-w1"], "destination": ["dms-w4"]},
+                 paths={"source": "/cephfs-third/a", "source_storage": "cephfs-third",
+                        "destination": "/cephfs-secondary/b", "destination_storage": "cephfs-secondary"})
+    with pytest.raises(ValueError):
+        build_volcano_job(spec, job_image="i", namespace="dms", volumes=_VOL, role_volumes=role_volumes)
 
 
 def test_preflight_pod_runs_as_identity():
@@ -214,7 +255,8 @@ def test_nsync_three_tasks_node_affinity():
                  paths={"source": "/cephfs-third/a", "source_storage": "cephfs-third",
                         "destination": "/cephfs-secondary/b",
                         "destination_storage": "cephfs-secondary"})
-    m = build_volcano_job(spec, job_image="i", namespace="dms", volumes=_VOL)
+    m = build_volcano_job(spec, job_image="i", namespace="dms", volumes=_VOL,
+                          role_volumes=_NSYNC_ROLE_VOL)
     src = next(t for t in m["spec"]["tasks"] if t["name"] == "source-worker")
     dst = next(t for t in m["spec"]["tasks"] if t["name"] == "destination-worker")
     # 소스 워커는 source 노드에 affinity
@@ -318,7 +360,8 @@ def test_nsync_worker_containers_have_identity_and_sshd_command():
                  paths={"source": "/cephfs-third/a", "source_storage": "cephfs-third",
                         "destination": "/cephfs-secondary/b",
                         "destination_storage": "cephfs-secondary"})
-    m = build_volcano_job(spec, job_image="i", namespace="dms", volumes=_VOL)
+    m = build_volcano_job(spec, job_image="i", namespace="dms", volumes=_VOL,
+                          role_volumes=_NSYNC_ROLE_VOL)
     for name in ("source-worker", "destination-worker"):
         c = _worker_container(m, name)
         env = {e["name"]: e["value"] for e in c["env"]}
@@ -368,7 +411,8 @@ def test_nsync_workers_get_task_scoped_anti_affinity():
                  paths={"source": "/cephfs-third/a", "source_storage": "cephfs-third",
                         "destination": "/cephfs-secondary/b",
                         "destination_storage": "cephfs-secondary"})
-    m = build_volcano_job(spec, job_image="i", namespace="dms", volumes=_VOL)
+    m = build_volcano_job(spec, job_image="i", namespace="dms", volumes=_VOL,
+                          role_volumes=_NSYNC_ROLE_VOL)
     for task_name in ("source-worker", "destination-worker"):
         task = next(t for t in m["spec"]["tasks"] if t["name"] == task_name)
         # task 별 셀렉터 -- source 가 destination 을 밀어내면 각자 자기 풀 안에서
@@ -661,7 +705,7 @@ def test_preflight_and_worker_lists_identical():
         assert _gids_from_env(_env_of(p["spec"]["containers"][0])["DMS_JR_SUPP_GIDS"]) == want
     m = build_volcano_job(_spec(operation="sync", tool="nsync", identity=_GROUP_IDENT,
                                 candidates=nsync.candidates, paths=_NSYNC_PATHS),
-                          job_image="i", namespace="dms", volumes=_VOL)
+                          job_image="i", namespace="dms", volumes=_VOL, role_volumes=_NSYNC_ROLE_VOL)
     for name in ("source-worker", "destination-worker"):
         assert _gids_from_env(_env_of(_worker_container(m, name))["DMS_JR_SUPP_GIDS"]) == want
 
@@ -672,7 +716,8 @@ def test_worker_and_launcher_pods_have_no_supplemental_groups():
                                ("nsync", {"source": ["dms-w1"], "destination": ["dms-w4"]}, _NSYNC_PATHS)):
         op = "scan" if tool == "dscan" else "sync"
         m = build_volcano_job(_spec(operation=op, tool=tool, identity=_GROUP_IDENT, candidates=cands,
-                                    paths=paths), job_image="i", namespace="dms", volumes=_VOL)
+                                    paths=paths), job_image="i", namespace="dms", volumes=_VOL,
+                              role_volumes=_NSYNC_ROLE_VOL)
         for task in m["spec"]["tasks"]:
             pod_spec = task["template"]["spec"]
             assert "securityContext" not in pod_spec

@@ -387,6 +387,7 @@ controller.run_forever가 monotonic 스케줄로 루프별 리스(loop:<name>)�
 - ROLLOUT_REQUEST_TIMEOUT_SECONDS=10(execution_volcano.py:34)은 리더 리스 TTL(30s)과 맞물린 내부 불변식(틱 최악 2회 호출 20s<30s) — 설정 키로 노출 금지. get_queue/list_podgroups/list_pod_briefs/list_vcjob_briefs/patch/get_workload 전부 이 타임아웃 필수(urllib3 기본 무제한).
 - repo_host(build_manifests.py:58)는 라우트 검증(invalid_repo_url 422)과 프로브 매니페스트가 같은 함수를 써야 한다 — 갈라지면 "제출은 통과, 프로브 생성 실패" 창이 생긴다.
 - nsync hostfile 순서는 source 먼저(rank 0..N-1)→destination(runner.run_job 의 3단계, _wait_workers_ready 가 순서 보존) — commands.nsync_role_map의 rank 배정과 일치해야 role이 안 뒤집힌다.
+- **nsync 파드는 자기 쪽 스토리지만 마운트한다**(2026-10-22, `execution_volcano._volumes(role=…)` 하나가 정한다): preflight 파드 쌍뿐 아니라 미리보기·실행 vcjob 도 source-worker = 소스 스토리지, destination-worker = 목적지 스토리지, 런처 = 아티팩트 base 만(`build_volcano_job(role_volumes=…)` — nsync 에 없으면 ValueError → submit_failed). nsync 는 정의상 두 스토리지를 함께 마운트한 노드가 없을 때 고르는 도구라, 반대편 hostPath(type Directory)는 그 노드에 없다 — 예전엔 모든 task 에 양쪽을 붙여 FailedMount 로 gang 이 ContainerCreating 에 묶였다(dmsk8s 실증; 옛 테스트베드는 반대편 마운트 루트가 빈 디렉터리로 남아 가려졌다). 근거: 러너가 `--role-mode map` 을 싣는다 — 그 모드의 nsync 는 rank 가 자기 역할 경로만 만지고(auto 모드는 역할 판정에 모든 rank 가 양쪽을 `access()` 한다), 런처는 nsync 에서 데이터 경로를 만지지 않는다(런처의 데이터 접근은 drm 봉쇄 재확인뿐 — primary). auto 모드로 바꾸거나 런처에 데이터 검사를 넣으면 이 마운트 규칙부터 다시 봐라.
 
 ### 함정 (모르면 밟는다)
 

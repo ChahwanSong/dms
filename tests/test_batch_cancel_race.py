@@ -374,7 +374,8 @@ def test_job_pods_have_a_short_termination_grace():
     nsync = JobSpec(**{**nsync.__dict__, "tool": "nsync", "operation": "sync",
                        "paths": {"source": "a", "destination": "b"},
                        "candidates": {"source": ["n1"], "destination": ["n2"]}})
-    njob = build_volcano_job(nsync, job_image="img", namespace="dms", volumes=[])
+    njob = build_volcano_job(nsync, job_image="img", namespace="dms", volumes=[],
+                             role_volumes={"source": [], "destination": []})
     assert {t["template"]["spec"]["terminationGracePeriodSeconds"] for t in njob["spec"]["tasks"]} == {
         TASK_TERMINATION_GRACE_SECONDS}
     pod = build_preflight_pod(_spec("c" * 32, phase="preflight"), job_image="img", namespace="dms", volumes=[],

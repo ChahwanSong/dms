@@ -88,6 +88,7 @@ def test_build_spec_carries_configured_vcjob_ttl_seconds(db):
 # --- Layer 3: manifest builders -----------------------------------------------------
 
 _VOL = [{"name": "cephfs", "hostPath": {"path": "/cephfs"}, "mountPath": "/cephfs"}]
+_NSYNC_ROLE_VOL = {"source": _VOL, "destination": _VOL}
 
 
 def _spec(**kw):
@@ -131,14 +132,15 @@ def test_build_volcano_job_omits_ttl_key_when_zero():
 
 def test_build_nsync_job_sets_ttl_on_job_spec():
     m = build_volcano_job(_nsync_spec(ttl_seconds=7200), job_image="i",
-                          namespace="dms", volumes=_VOL)
+                          namespace="dms", volumes=_VOL, role_volumes=_NSYNC_ROLE_VOL)
     assert m["spec"]["ttlSecondsAfterFinished"] == 7200
     for task in m["spec"]["tasks"]:
         assert "ttlSecondsAfterFinished" not in task["template"]["spec"], task["name"]
 
 
 def test_build_nsync_job_omits_ttl_key_when_none():
-    m = build_volcano_job(_nsync_spec(), job_image="i", namespace="dms", volumes=_VOL)
+    m = build_volcano_job(_nsync_spec(), job_image="i", namespace="dms", volumes=_VOL,
+                          role_volumes=_NSYNC_ROLE_VOL)
     assert "ttlSecondsAfterFinished" not in m["spec"]
 
 

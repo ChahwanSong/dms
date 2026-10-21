@@ -717,7 +717,13 @@ def build_preflight_pod(spec, *, job_image, namespace, volumes, node, role=None)
         "spec": pod_spec}
 
 
-def _build_nsync_job(spec, *, job_image, namespace, volumes):
+def _build_nsync_job(spec, *, job_image, namespace, volumes, role_volumes):
+    # 볼륨은 task 별이다(2026-10-22): 소스·목적지 노드가 disjoint 라 반대편 hostPath(type Directory)는 그 노드에
+    # 없다 -- 모든 task 에 양쪽을 붙이면 FailedMount 로 gang 이 영원히 안 선다. volumes = 런처(아티팩트 base 만),
+    # role_volumes["source"/"destination"] = 각 워커(자기 스토리지 + 아티팩트 base). 없으면 fail-closed.
+    if not role_volumes or "source" not in role_volumes or "destination" not in role_volumes:
+        raise ValueError("nsync job needs per-role volumes (source/destination)")
+    src_volumes, dst_volumes = role_volumes["source"], role_volumes["destination"]
     src_nodes = spec.candidates["source"]
     dst_nodes = spec.candidates["destination"]
     env = _launcher_env(spec)
@@ -738,15 +744,15 @@ def _build_nsync_job(spec, *, job_image, namespace, volumes):
             "metadata": _worker_task_metadata(spec, "source-worker"),
             "spec": {"restartPolicy": "Never",
                 "affinity": _worker_affinity(spec, "source-worker", src_nodes),
-                "containers": [_worker_container("source-worker", job_image, spec, volumes)],
-                "volumes": _pod_volumes(volumes)}}}
+                "containers": [_worker_container("source-worker", job_image, spec, src_volumes)],
+                "volumes": _pod_volumes(src_volumes)}}}
     dst_worker = {"name": "destination-worker", "replicas": len(dst_nodes),
         "template": {
             "metadata": _worker_task_metadata(spec, "destination-worker"),
             "spec": {"restartPolicy": "Never",
                 "affinity": _worker_affinity(spec, "destination-worker", dst_nodes),
-                "containers": [_worker_container("destination-worker", job_image, spec, volumes)],
-                "volumes": _pod_volumes(volumes)}}}
+                "containers": [_worker_container("destination-worker", job_image, spec, dst_volumes)],
+                "volumes": _pod_volumes(dst_volumes)}}}
     job_spec = {"schedulerName": "volcano", "queue": spec.queue,
                 "minAvailable": len(src_nodes) + len(dst_nodes) + 1,
                 "priorityClassName": spec.priority_class,
@@ -765,10 +771,11 @@ def _build_nsync_job(spec, *, job_image, namespace, volumes):
         "spec": job_spec}
 
 
-def build_volcano_job(spec, *, job_image, namespace, volumes):
+def build_volcano_job(spec, *, job_image, namespace, volumes, role_volumes=None):
+    # nsync 는 role_volumes 가 필수다(_build_nsync_job) -- volumes 는 그 런처 몫. primary 잡은 volumes 하나를 모든 task 에.
     if "primary" not in spec.candidates:
         return _build_nsync_job(spec, job_image=job_image, namespace=namespace,
-                                volumes=volumes)
+                                volumes=volumes, role_volumes=role_volumes)
     workers = _worker_count(spec)
     nodes = spec.candidates.get("primary", [])
     launcher = {
