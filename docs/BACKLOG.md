@@ -147,15 +147,12 @@
 
 ### 테스트베드 분리 후속 — 2026-10-21 (2026-10-22 브랜치 분리로 정리)
 
-- **k8s 클러스터(`dmsk8s`) 후속은 dms-k8s 브랜치 BACKLOG 로 넘어갔다**(`git show origin/dms-k8s:docs/BACKLOG.md`).
-  「`overlays/prod` 설치기가 LDAP 을 필수로 요구 — 무 LDAP dms-k8s 사이트와 안 맞음」 은 브랜치 분리로 해소됐다: main·dms-ssc 는
-  LDAP 설치기(`deploy/overlays/prod`·`deploy/install.sh`·`deploy/verify.sh`)를 그대로 두고 dms-k8s 가 무 LDAP 설치기를 갖는다
-  (브랜치별 파일 — CLAUDE.md 「브랜치 모델」). 「"LDAP 끔" 명시 스위치·dms-k8s 이미지의 nslcd 제거」·「점검 스크립트에
-  `--context` 가 없다」 는 그쪽에서 이어 간다.
-- 🔧 **포탈 다음 태그 제안이 `kN` 을 모른다**(dms-k8s BACKLOG 에도 있다) — `frontend/src/features/builds/BuildForm.tsx:63`
-  `nextTagSuggestion` 은 `dNN` 의 최댓값 + 1 만 본다. 증상은 k8s 클러스터(`kN`)에서만 나지만 BuildForm 은 세 브랜치 공용
-  프론트라 고치면 main 에서 고쳐 cherry-pick 한다(dms-k8s 에서만 고치면 프론트가 갈라진다). 처방: 레지스트리·이력 태그의
-  지배적 접두(문자 + 숫자)를 따라 제안(`dN` 사이트에는 무해).
+- **k8s 클러스터(`dmsk8s`) 후속은 dms-k8s 라인(별도 Claude 세션)과 그 BACKLOG 소관이다**(`git show origin/dms-k8s:docs/BACKLOG.md`).
+  「`overlays/prod` 설치기가 LDAP 을 필수로 요구 — 무 LDAP dms-k8s 사이트와 안 맞음」 은 **이 라인에서는 해당 없음**: main·dms-ssc
+  의 prod 설치기(`deploy/overlays/prod`·`deploy/install.sh`·`deploy/verify.sh`)는 LDAP 라인이 맞다. 무 LDAP 설치기는 dms-k8s
+  라인 소관(브랜치별 파일 — CLAUDE.md 「브랜치 모델」). 「"LDAP 끔" 명시 스위치」·「점검 스크립트에 `--context` 가 없다」·「포탈
+  태그 제안이 `kN` 을 모른다」(증상은 k8s 클러스터만 — 범용 수정을 main 에 넣을지는 그 라인과 정한다)도 그쪽에서 이어 간다.
+  「dms-k8s 이미지에서 nslcd 제거」 는 **사용자 결정이 필요하다** — `deploy/docker/**` 는 공용 파일이라 한쪽만 바꾸면 갈라진다.
 
 - 🔧 **호스트 콜드부팅 리허설 미실증**(2026-10-22) — VM 단독 재부팅(k8s-w1·k8s-w2)과 hostnet 유닛 재시작은 실증했고, 그 과정에서
   testbed 부팅 가드의 두 겹 마운트 경합을 고쳤다. 호스트 전체 재부팅(8 VM 동시 기동, pkg-01 Ceph 늦게 올라옴)은 세션에서 할 수

@@ -28,28 +28,33 @@ PostgreSQL(제어면) + React 포탈 + 노드 에이전트 + Volcano gang-schedu
 ## 브랜치 모델 (2026-10-22 사용자 결정)
 
 이 파일은 **main·dms-ssc 라인**의 것이다(dms-k8s 는 자기 CLAUDE.md 를 갖는다). 원격 브랜치 셋 중 둘은 같은 소스,
-하나는 별도 라인이다:
+하나는 별도 라인이다. **dms-k8s 의 구현·테스트·브랜치 갱신은 그 라인 전용 Claude 세션이 한다** — 이 라인(main·dms-ssc)
+세션은 dms-k8s 브랜치·그 오버레이·k8s 클러스터 배포를 건드리지 않는다(사용자 2026-10-22).
 
 - **main ≡ dms-ssc.** 공용 개발은 main 에서 하고 `git push origin HEAD:main`, 같은 커밋을 dms-ssc 로
-  cherry-pick 해 push 한다(`git push origin HEAD:dms-ssc` — dms-ssc 를 체크아웃한 워크트리에서). dms-ssc 는 main 에
-  SSC 사이트 설치기(`deploy/overlays/ssc`·`deploy/addons/ingress-nginx`·`tests/test_ssc_render_switch.py` 와 그 안내 몇
-  줄)만 **더** 갖는다 — 그 밖의 차이를 만들지 마라. ssc 포탈은 dms-ssc 체크아웃을 빌드하므로 main 에만 push 한 변경은 어느
-  테스트베드에도 올라가지 않는다(실증 전에 dms-ssc 로 cherry-pick·push).
+  cherry-pick 해 push 한다(`git push origin HEAD:dms-ssc` — 이 저장소의 **임시 워크트리**에서. ssc 빌드 체크아웃
+  `/home/mason/dms-dev/dms-ssc` 안에서 커밋·cherry-pick 하지 마라: 로컬 커밋이 생기면 cron ff(testbed `dms-src-sync.sh`)가
+  멈춰 ssc 빌드가 조용히 낡는다). dms-ssc 가 main 보다 **더** 갖는 것은 SSC 사이트 설치기 — `deploy/overlays/ssc/**`·
+  `deploy/addons/ingress-nginx/**`·`tests/test_ssc_render_switch.py`·`.gitignore` 의 ssc 렌더 줄·`deploy/overlays/prod/README.md`
+  의 노출 모드 안내 — 뿐이다. 그 밖의 차이를 만들지 마라(점검: `git diff origin/main origin/dms-ssc --stat` 이 이 목록만).
+  ssc 포탈은 dms-ssc 체크아웃을 빌드하므로 main 에만 push 한 변경은 어느 테스트베드에도 올라가지 않는다(실증 전에 dms-ssc 로
+  cherry-pick·push).
 - **dms-k8s 는 별도 라인이다 — LDAP 없음**(사용자 결정 「dms-k8s 브런치에서는 LDAP 을 사용 안할거야」). main 을
-  dms-k8s 로 push·merge·ff 하지 마라 — main 에서 `git push origin HEAD:dms-k8s` 금지(갈라진 뒤라 어차피
-  non-fast-forward 로 거부된다). 두 라인 사이는 **골라서 하는 cherry-pick** 만, 방향은 건별로(LDAP 에 기대는 기능·ssc
-  오버레이 bump 는 dms-k8s 로 가져가지 않는다).
-- **공용 파일 — 세 브랜치 바이트 동일**: `deploy/k8s/**`(base — ssc 라인을 위해 LDAP 키·env 를 그대로 싣고, dms-k8s 는
+  dms-k8s 로 push·merge·ff 하지 마라 — main 에서 `git push origin HEAD:dms-k8s` 금지. **dms-k8s 라인이 자기 커밋을 push 하기
+  전까지는 main 이 그 조상이라 이 push 가 ff 로 통과한다** — 그래서 더 위험하다(k8s 라인의 testbed-k8s 오버레이를 지우고
+  k8s 빌드 체크아웃까지 cron 으로 따라간다). 두 라인 사이는 **골라서 하는 cherry-pick** 만이고, dms-k8s 로 무엇을 가져갈지는
+  그 라인(그 세션)이 정한다.
+- **공용 파일 — 바이트 동일로 두는 것이 목표**: `deploy/k8s/**`(base — ssc 라인을 위해 LDAP 키·env 를 그대로 싣고, dms-k8s 는
   오버레이에서 지운다), `deploy/overlays/guard-images.sh`, `deploy/docker/**`(`registry-setup.sh` 포함),
   `deploy/testbed/dms-shared-fs.yml`, `tests/overlay_render.py`, `tests/test_overlay_render_contract.py`,
-  `tests/test_guard_images_context.py`, `tests/test_release_manifest_contract.py`. 여기(main)서 고치고 dms-ssc·dms-k8s
-  양쪽으로 cherry-pick 한다 — 다른 브랜치에서 따로 고치지 마라. 점검: `git diff origin/main origin/dms-k8s -- <위 경로>`
-  가 비어야 한다(dms-ssc 도 같다). base 에 LDAP 키·env 를 더하는 커밋은 dms-k8s 쪽 오버레이에도 삭제가 필요하다.
+  `tests/test_guard_images_context.py`, `tests/test_release_manifest_contract.py`. 이 라인에서는 main 에서 고치고 dms-ssc 로
+  cherry-pick 한다. dms-k8s 는 그 라인이 골라 가져간다(이 라인이 dms-k8s 에 cherry-pick·push 하지 않는다) — base 에 LDAP
+  키·env 를 더하는 커밋은 커밋 메시지에 「dms-k8s 는 오버레이 삭제도 필요」 라고 적어 둔다.
 - **브랜치별 파일 — 손으로 옮긴다**(그대로 cherry-pick 하지 마라): `deploy/overlays/prod/*`·`deploy/install.sh`·
-  `deploy/verify.sh`·`deploy/preflight-cluster.sh`(여기는 LDAP 설치기, dms-k8s 는 무 LDAP 설치기), 테스트베드 오버레이
-  (여기는 `deploy/overlays/testbed` 만, dms-k8s 는 `deploy/overlays/testbed-k8s` 만 — 각 브랜치는 자기 클러스터
-  오버레이만 싣는다), 문서(`CLAUDE.md`·`deploy/README.md`·`docs/{ARCHITECTURE,BACKLOG,CHANGELOG}.md` — 각자 자기 라인을
-  서술한다).
+  `deploy/verify.sh`·`deploy/preflight-cluster.sh`·`tests/test_prod_render_switch.py`(여기는 LDAP 설치기 — 무 LDAP 설치기는
+  dms-k8s 라인 소관), 테스트베드 오버레이와 그 계약(여기는 `deploy/overlays/testbed` + `tests/test_testbed_overlay.py` 만 —
+  각 브랜치는 자기 클러스터 오버레이만 싣고, 이 라인의 테스트가 testbed-k8s 의 재유입을 막는다), dms-ssc 의 SSC 사이트
+  설치기(위), 문서(`CLAUDE.md`·`deploy/README.md`·`docs/{ARCHITECTURE,BACKLOG,CHANGELOG}.md` — 각자 자기 라인을 서술한다).
 
 ## 코드에서 반드시 지키는 규약 (위반하면 시스템이 깨진다)
 

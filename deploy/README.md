@@ -3,7 +3,7 @@
 > **프로덕션 설치는 이 파일(716줄, 테스트베드 런북)을 읽지 마세요.**
 > `deploy/overlays/prod/README.md` **하나**만 보면 됩니다 — 프리플라이트 →
 > `values.env` 채우기 → 시크릿/TLS → `deploy/install.sh` → `deploy/verify.sh`.
-> 이 문서는 테스트베드(개별 파일 apply)·시나리오·HTTPS 원리의 상세 참고용입니다.
+> 이 문서는 테스트베드(ssc 클러스터 — 오버레이 `deploy/overlays/testbed` apply)·시나리오·HTTPS 원리의 상세 참고용입니다.
 
 Deploys the clean-slate DMS control plane (`dms api` / `dms controller` /
 `dms agent`, execution backend = Volcano) onto the testbeds. All
@@ -703,9 +703,11 @@ kubectl -n dms get vcjob,pods -l "dms.io/job-id=$JOB_ID"
 트리도 그대로 빌드된다.** 커밋 SHA 는 마운트의 `.git` 에서 읽어 기록하고, 작업
 트리에 미커밋 변경이 있으면 `-dirty` 접미를 붙인다(워크트리 경로처럼 SHA 를 읽을
 수 없으면 `unknown`). 테스트베드에서 이 경로는 호스트 작업 트리의 NFS ro 마운트다
-(`testbed` 저장소 `make storage` — 체크아웃마다 따로 export, 그 부모는 testbed 저장소의 키·CA 가 있어
-export 하지 않는다. 새 체크아웃은 testbed `dms_src_checkouts` 에 넣고 `make storage`) — 실 클러스터에서는 빌드
-노드의 로컬 체크아웃을 그대로 지정하면 된다.
+(`testbed` 저장소 `make storage` — 클러스터의 `group_vars/<c>.yml` `dms_build_source_path` 하나가 **그 클러스터
+워커에만** ro export·마운트된다. 부모 `/home/mason/dms-dev` 와 main 체크아웃은 export 하지 않는다 — testbed 저장소의 키·CA,
+세션 워크트리가 있다. 체크아웃을 바꾸면 그 변수를 고치고 `make src-checkouts storage src-sync`, 옛 경로는
+`dms_src_retired_paths` 에 — testbed ARCHITECTURE §19.3) — 실 클러스터에서는 빌드 노드의 로컬 체크아웃을 그대로
+지정하면 된다. 빌드 체크아웃(`/home/mason/dms-dev/dms-ssc`) 안에서는 커밋·브랜치 전환을 하지 않는다(cron ff 가 멈춘다).
 
 빌드 코드에는 브랜치 개념이 없다 — **클러스터마다 자기 체크아웃을 가리킨다**(2026-10-21, control_state 는 DB 하나 = 클러스터
 하나라 서로 독립):
@@ -1007,8 +1009,8 @@ fail-open이라(설계 §7) 존재하지 않는 태그가 통과할 수 있다. 
 base 로 두고 사이트별 값(레지스트리·태그·공유 FS 경로·LDAP·이메일 도메인·포탈
 도메인·VIP)만 오버레이에서 덮는다 -- 자리표시자를 채우고 `kubectl apply -k`.
 전제조건·값 표·Secret/TLS 생성·적용 순서는 **`deploy/overlays/prod/README.md`**.
-이 §(테스트베드 개별 파일 apply)는 그대로 유효하다 -- 오버레이는 base 를 건드리지
-않는다.
+테스트베드도 같은 base 를 오버레이(`deploy/overlays/testbed`)로 적용한다(2026-09-14~ base 는 자리표시자라 raw
+apply 는 pull 에서 실패한다 -- 의도) -- 오버레이는 base 를 건드리지 않는다.
 
 ---
 
@@ -1036,7 +1038,7 @@ ingress-nginx v1.15.1(IngressClass `nginx`).
    (SAN: DNS dms.local + IP 10.20.20.100. 리허설 CA 는 2026-10-21 부터 testbed 저장소
    `files/tls/`(gitignore, 0600), 영구 사본 `/data/dms-testbed/backup-20261021/tls/` — 그 전엔 세션 스크래치에만
    있었다. 어느 NFS export 에도 들어가면 안 된다(testbed `portal-tls.sh` 가 거부). `INIT_CA=1` 은 새 CA 라 사용자 PC 가
-   다시 신뢰해야 한다 — 복구엔 사본을 쓴다. 같은 호스트의 k8s 클러스터(dms-k8s.local, 10.20.20.101)도 같은 CA 로 발급한다 — dms-k8s 브랜치 README §13-5)
+   다시 신뢰해야 한다 — 복구엔 사본을 쓴다. 같은 호스트의 k8s 클러스터(dms-k8s.local, 10.20.20.101)도 같은 CA 로 발급한다 — dms-k8s 브랜치 deploy/README)
 2. `kubectl apply -f deploy/k8s/47-metallb-public-pool.yaml` (공인 풀
    autoAssign=false + L2Advertisement) + ingress svc 에 풀 지정:
    `kubectl -n ingress-nginx annotate svc ingress-nginx-controller metallb.io/address-pool=dms-public-pool`
@@ -1067,11 +1069,10 @@ ingress-nginx v1.15.1(IngressClass `nginx`).
    `10.20.20.100 dms.local`. (테스트베드에선 luminous 가 상위 라우팅을 모사:
    `ip route replace 10.20.20.100/32 dev dmsbr0` — onlink 라우트라 dmsbr0 에서
    VIP 를 ARP 로 찾는다. 외부 PC·Tailscale 사용자의 옛 주소 호환용으로
-   luminous iptables 가 자기 IP 의 80/443/8080 을 VIP 로 DNAT 한다. 2026-10-21 부터 라우트·릴레이(k8s VIP
-   10.20.20.101 과 그 :8443 릴레이 포함)는 testbed 저장소의 호스트 네트워크 스크립트와 systemd 유닛이 부팅마다
-   다시 깐다 — 옛 손작업 규칙은 세션 스크래치 `setup-relay.sh`·`relay-tailscale.sh`·`relay-8080.sh` 였다.
-   k8s 포탈엔 평문 릴레이(:8081)를 두지 않는다(2026-10-22 제거): force-ssl-redirect 가 포트 없는 `https://<host>/`
-   = :443 = **ssc** VIP 로 보내 다른 포탈에 떨어졌다. k8s 포탈의 외부 입구는 `https://dms-k8s.local:8443` 하나.)
+   luminous iptables 가 자기 IP 의 80/443/8080 을 VIP 로 DNAT 한다. 2026-10-21 부터 라우트·릴레이는 testbed 저장소의
+   호스트 네트워크 스크립트와 systemd 유닛이 부팅마다 다시 깐다 — 옛 손작업 규칙은 세션 스크래치 `setup-relay.sh`·
+   `relay-tailscale.sh`·`relay-8080.sh` 였다. 같은 호스트 k8s 클러스터의 VIP·릴레이는 dms-k8s 브랜치 deploy/README·testbed
+   저장소 문서.)
 6. 검증(전부 실증됨): `curl --cacert ca.crt https://dms.local/` = 200(검증
    통과), `http://` = 308, 로그인 Set-Cookie 에 `Secure`, 로그인·admin API·SPA
    딥링크 https 로 200, `ip neigh show 10.20.20.100` = 선출 노드 MAC.
@@ -1283,8 +1284,8 @@ positional 인자(32자 hex 가 아니면 아무것도 지우지 않고 exit 2),
 
 같은 호스트의 k8s 클러스터(컨텍스트 `dmsk8s`, https://dms-k8s.local VIP 10.20.20.101, `pkg-01:5001`, 태그 `kN`, LDAP 없음)의
 런북(인프라 전제·`k0` 시드·4키 시크릿·오버레이 적용·LDAP 없음 게이트·빌드/릴리스)과 오버레이 `deploy/overlays/testbed-k8s` 는
-**origin/dms-k8s 에만 있다** — `git show origin/dms-k8s:deploy/README.md` 의 §13. 이 브랜치(main ≡ dms-ssc)는 그 클러스터에
-배포하지 않는다(raw 든 오버레이든). 절 번호 13 은 다른 문서의 참조(「§13-5」 등)가 dms-k8s 판을 가리키도록 남겨 둔다.
+**origin/dms-k8s 에만 있다** — `git show origin/dms-k8s:deploy/README.md`(그 라인 — 별도 Claude 세션 — 이 관리한다). 이
+브랜치(main ≡ dms-ssc)는 그 클러스터에 배포하지 않는다(raw 든 오버레이든).
 
 ## Unresolved values to fill in during live validation
 
