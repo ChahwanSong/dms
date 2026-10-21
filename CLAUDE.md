@@ -25,6 +25,32 @@ PostgreSQL(제어면) + React 포탈 + 노드 에이전트 + Volcano gang-schedu
 (`docs/ARCHITECTURE.md`의 「불변식」)이 걸리면 그 문서도 함께 갱신한다 — 나머지는
 코드가 스스로 말한다.
 
+## 브랜치 모델 (2026-10-22 사용자 결정)
+
+이 파일은 **main·dms-ssc 라인**의 것이다(dms-k8s 는 자기 CLAUDE.md 를 갖는다). 원격 브랜치 셋 중 둘은 같은 소스,
+하나는 별도 라인이다:
+
+- **main ≡ dms-ssc.** 공용 개발은 main 에서 하고 `git push origin HEAD:main`, 같은 커밋을 dms-ssc 로
+  cherry-pick 해 push 한다(`git push origin HEAD:dms-ssc` — dms-ssc 를 체크아웃한 워크트리에서). dms-ssc 는 main 에
+  SSC 사이트 설치기(`deploy/overlays/ssc`·`deploy/addons/ingress-nginx`·`tests/test_ssc_render_switch.py` 와 그 안내 몇
+  줄)만 **더** 갖는다 — 그 밖의 차이를 만들지 마라. ssc 포탈은 dms-ssc 체크아웃을 빌드하므로 main 에만 push 한 변경은 어느
+  테스트베드에도 올라가지 않는다(실증 전에 dms-ssc 로 cherry-pick·push).
+- **dms-k8s 는 별도 라인이다 — LDAP 없음**(사용자 결정 「dms-k8s 브런치에서는 LDAP 을 사용 안할거야」). main 을
+  dms-k8s 로 push·merge·ff 하지 마라 — main 에서 `git push origin HEAD:dms-k8s` 금지(갈라진 뒤라 어차피
+  non-fast-forward 로 거부된다). 두 라인 사이는 **골라서 하는 cherry-pick** 만, 방향은 건별로(LDAP 에 기대는 기능·ssc
+  오버레이 bump 는 dms-k8s 로 가져가지 않는다).
+- **공용 파일 — 세 브랜치 바이트 동일**: `deploy/k8s/**`(base — ssc 라인을 위해 LDAP 키·env 를 그대로 싣고, dms-k8s 는
+  오버레이에서 지운다), `deploy/overlays/guard-images.sh`, `deploy/docker/**`(`registry-setup.sh` 포함),
+  `deploy/testbed/dms-shared-fs.yml`, `tests/overlay_render.py`, `tests/test_overlay_render_contract.py`,
+  `tests/test_guard_images_context.py`, `tests/test_release_manifest_contract.py`. 여기(main)서 고치고 dms-ssc·dms-k8s
+  양쪽으로 cherry-pick 한다 — 다른 브랜치에서 따로 고치지 마라. 점검: `git diff origin/main origin/dms-k8s -- <위 경로>`
+  가 비어야 한다(dms-ssc 도 같다). base 에 LDAP 키·env 를 더하는 커밋은 dms-k8s 쪽 오버레이에도 삭제가 필요하다.
+- **브랜치별 파일 — 손으로 옮긴다**(그대로 cherry-pick 하지 마라): `deploy/overlays/prod/*`·`deploy/install.sh`·
+  `deploy/verify.sh`·`deploy/preflight-cluster.sh`(여기는 LDAP 설치기, dms-k8s 는 무 LDAP 설치기), 테스트베드 오버레이
+  (여기는 `deploy/overlays/testbed` 만, dms-k8s 는 `deploy/overlays/testbed-k8s` 만 — 각 브랜치는 자기 클러스터
+  오버레이만 싣는다), 문서(`CLAUDE.md`·`deploy/README.md`·`docs/{ARCHITECTURE,BACKLOG,CHANGELOG}.md` — 각자 자기 라인을
+  서술한다).
+
 ## 코드에서 반드시 지키는 규약 (위반하면 시스템이 깨진다)
 
 자세한 건 `ARCHITECTURE.md`에, 여기엔 가장 자주 밟는 것만:
@@ -69,19 +95,17 @@ PostgreSQL(제어면) + React 포탈 + 노드 에이전트 + Volcano gang-schedu
   `image:`·`DMS_JOB_IMAGE` 는 자리표시자(`set-by-overlay.invalid/<img>:set-by-overlay`)뿐이고 계약 테스트가
   고정한다 — 여기에 실 레지스트리·태그를 커밋하면 git pull 한 다른 사이트가 그 값을
   배포한다(실사고). 태그 bump 는 테스트베드 오버레이의 `newTag`(+`patch-config.yaml` 의
-  `DMS_JOB_IMAGE`), 사이트는 `values.env`. **테스트베드는 둘이다**(2026-10-21, deploy/README.md 「테스트베드는 둘이다」):
-  `deploy/overlays/testbed` = **ssc 클러스터**(컨텍스트 `dms`, pkg-01:5000, 태그 `dN`, LDAP 사용) — ssc 빌드 소스가
-  dms-ssc 체크아웃으로 넘어간 뒤로는 **dms-ssc 쪽에서만** bump(전환 전에는 main); `deploy/overlays/testbed-k8s` =
-  **k8s 클러스터**(컨텍스트 `dmsk8s`, pkg-01:5001, 태그 `kN`, **LDAP 없음** — 사용자 결정) — **main(→ dms-k8s)에서만**
-  bump. 한 커밋에서 둘을 같이 올리지 마라. 두 클러스터가 같은 네임스페이스(dms)라 **kubectl 은 늘 `--context` 를
+  `DMS_JOB_IMAGE`), 사이트는 `values.env`. **이 브랜치의 테스트베드는 ssc 클러스터 하나다**(2026-10-22 브랜치 분리,
+  deploy/README.md 맨 위): `deploy/overlays/testbed`(컨텍스트 `dms`, pkg-01:5000, 태그 `dN`, LDAP 사용, 빌드 소스 =
+  dms-ssc 체크아웃) — bump 는 main 에서 커밋하고 dms-ssc 로 cherry-pick. 같은 호스트의 k8s 클러스터(컨텍스트
+  `dmsk8s`, pkg-01:5001)는 **dms-k8s 브랜치 소관**이라 그 오버레이가 여기 없다 — 이 브랜치 매니페스트를 raw 든
+  오버레이든 거기에 적용하지 마라. 두 클러스터가 같은 네임스페이스(dms)라 **kubectl 은 늘 `--context` 를
   명시**한다(current-context 는 dms; dmsk8s 를 current 로 만들지 마라). 적용은
   항상 `kubectl --context <ctx> apply -k deploy/overlays/<site>` — raw `kubectl apply -f deploy/k8s` 는
-  pull 에서 실패하도록 돼 있다(k8s 클러스터에 raw `20-config.yaml` 은 지운 LDAP 키를 되살린다). apply 전
+  pull 에서 실패하도록 돼 있다. apply 전
   `deploy/overlays/guard-images.sh <dir> --context <ctx>` 가 "렌더 이미지 != 라이브" 면 거부하고(exit 3 — 포탈 릴리스 뒤
   오버레이 태그를 안 맞춘 재적용이 되돌리는 사고 방지; 의도한 변경은 `ALLOW_IMAGE_CHANGE=1`), 오버레이의
-  `kube-context` 파일과 다른 컨텍스트면 거부한다(exit 4). testbed-k8s 의 LDAP 삭제(ConfigMap 키 null·에이전트
-  `dms agent`·LDAP env 삭제)는 `tests/test_testbed_k8s_overlay.py` 가 고정한다 — base 에 LDAP 키·env 를 더하면 그
-  오버레이에도 삭제를 더하라. 포탈 빌드는 이미지에 COPY 되는 사본만 스탬프하므로
+  `kube-context` 파일과 다른 컨텍스트면 거부한다(exit 4). 포탈 빌드는 이미지에 COPY 되는 사본만 스탬프하므로
   (`build_manifests`) 포탈에서 태그를 지정해 빌드·릴리스하면 live == 동봉 매니페스트라
   드리프트 배지가 안 뜨고, 동봉값이 자리표시자·타 레지스트리면 배지는 "모름"(None) 이다.
 - **워크트리 공유 중 커밋은 `git commit -- <경로>`**(pathspec). `git add` 로 인덱스를

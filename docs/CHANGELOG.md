@@ -95,6 +95,43 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ✅ 브랜치 분리 — main ≡ dms-ssc(ssc 라인), dms-k8s 는 별도 무 LDAP 라인 — **완료**(2026-10-22)
+
+사용자 결정(2026-10-22): main 과 dms-ssc 는 같은 소스다 — 공용 개발은 main 에서 하고 같은 커밋을 dms-ssc 로 cherry-pick 하며,
+dms-ssc 는 SSC 사이트 설치기(`deploy/overlays/ssc`·`deploy/addons/ingress-nginx`·`tests/test_ssc_render_switch.py`)만 더 갖는다.
+dms-k8s 는 별도 개발 라인이다(LDAP 없음 — 「dms-k8s 브런치에서는 LDAP 을 사용 안할거야」). 그 전까지 dms-k8s 는 main 의
+미러였다(같이 push). 이제 main ↔ dms-k8s 는 건별로 골라 cherry-pick 만 하고, main 을 dms-k8s 로 push·merge 하지 않는다.
+
+- **공용 계약 정리(M1 — 세 브랜치에 같은 커밋)**: `tests/overlay_render.py`(렌더 헬퍼 — `kubectl kustomize` 로컬 렌더·문서/
+  ConfigMap/이미지 파서·`kube-context` 해석·`present_overlays`), `tests/test_overlay_render_contract.py`(그 브랜치에 **있는**
+  오버레이 전부가 자리표시자 이미지 없이 렌더 — `test_testbed_k8s_overlay.py` 에서 옮김), `test_guard_images_context` 의 고정
+  컨텍스트 표 `_PINS`(있는 오버레이만 대조·표에 없는 새 오버레이는 실패·테스트베드 오버레이 최소 하나), base `20-config`·
+  `40-api`·`kustomization.yaml`·`guard-images.sh`·`test_release_manifest_contract` 메시지의 주석 중립화(2026-09-14 이전의
+  「테스트베드는 개별 파일 apply」 서술 정정 포함). 공용 파일 목록은 CLAUDE.md 「브랜치 모델」.
+- **이 라인에서 걷어낸 것**: `deploy/overlays/testbed-k8s`(k8s 클러스터 오버레이)와 `tests/test_testbed_k8s_overlay.py` →
+  dms-k8s 에만 남는다. 각 브랜치는 자기 클러스터의 테스트베드 오버레이만 싣는다 — main·dms-ssc 체크아웃에는 dmsk8s 를 겨눌
+  오버레이가 없고, 잘못된 방향의 bump cherry-pick 은 modify/delete 충돌로 드러난다. 오버레이는 이미지에 COPY 되지 않아
+  (`Dockerfile.dms` 는 `deploy/k8s` 만) 빌드에는 영향이 없다.
+- **ssc 오버레이 `testbed` → dms `d185`**: dms-ssc 2003f81 과 같은 변경(ssc 클러스터가 이날부터 돌리는 태그)을 main 에도 —
+  dms-ssc 로 cherry-pick 할 때 그 hunk 는 no-op 이다. 이후 bump 는 main 에서 커밋해 dms-ssc 로 cherry-pick 한다. 머리말을 새
+  모델로(이 오버레이 = ssc 클러스터, k8s 클러스터 오버레이는 이 브랜치에 없음).
+- 문서: CLAUDE.md 새 절 「브랜치 모델」(main ≡ dms-ssc push 흐름, main 에서 `HEAD:dms-k8s` push 금지·선택 cherry-pick, 공용
+  파일 목록·동등성 `git diff` 점검, 브랜치별 파일 = prod 설치기·`install.sh`·`verify.sh`·`preflight-cluster.sh`·테스트베드
+  오버레이·문서) + 「base 매니페스트는 사이트 중립」 의 테스트베드 문장(이 브랜치 = ssc 클러스터 하나, dmsk8s 에 적용 금지).
+  deploy/README: 맨 위 표를 ssc 한 칸 + dmsk8s 클러스터 안내로, §0·§2·§3·§3b·§4/5·§6·§7 의 k8s 명령·문장 제거, §8 빌드 소스
+  표 ssc 행만(호스트의 main 체크아웃은 어느 클러스터의 빌드 소스도 아니다), §9-4 bump 규칙, §10 CA 참조, §13 은 번호만 남기고
+  dms-k8s 판 안내 4줄, 「Unresolved values」 의 k8s 비밀번호 줄. ARCHITECTURE: 오버레이 목록(testbed|prod, +ssc 는 dms-ssc),
+  가드 불변식에 「각 브랜치는 자기 클러스터 오버레이만 — 브랜치 ↔ 클러스터 짝이 구조적」, testbed-k8s LDAP 삭제 불변식은
+  dms-k8s 로(base 공용이라 LDAP 키·env 를 더하는 커밋은 그쪽 오버레이에도 삭제가 필요하다는 한 줄만). BACKLOG: k8s 후속 절 →
+  안내(prod 설치기 LDAP 필수 항목은 분리로 해소, 「LDAP 끔」 스위치·점검 스크립트 `--context` 는 dms-k8s BACKLOG), `kN` 태그
+  제안은 공용 프론트(BuildForm)라 여기에도 유지, 「포탈 빌드는 origin 에 push 된 커밋만(`--depth 1 --branch`)」 낡은 서술 정정
+  (슬라이스 33~ 빌드 노드 체크아웃).
+- 테스트: 이 브랜치에서 `test_overlay_render_contract`(testbed·prod 렌더, kubectl 실렌더)·`test_guard_images_context`·
+  `test_release_manifest_contract`·`test_prod_render_switch` 54 통과. 변이 확인 — testbed `kube-context` 를 dmsk8s 로 →
+  `_PINS` 대조 빨간불, testbed `images.name` 오타 → 자리표시자 렌더 계약·images.name 매핑 계약 빨간불, 표에 없는 오버레이
+  디렉터리 추가 → `_PINS`·렌더 계약 빨간불(원복 후 초록). `kubectl kustomize deploy/overlays/testbed` = dms d185·agent
+  d179·잡 이미지 d183.
+
 ### ✅ nsync 미리보기·실행 파드가 반대편 스토리지를 마운트하던 문제 — **완료·실증**(2026-10-22, k1 · ssc d185)
 
 k8s 테스트베드 실증 중 발견: nsync 미리보기 vcjob 의 destination-worker(k8s-w2)가 `hostPath type check failed: /cephfs-third
