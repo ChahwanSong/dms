@@ -11,14 +11,15 @@
 # 컨텍스트(2026-10-21, 테스트베드가 둘이 되며): 두 클러스터가 같은 네임스페이스(dms)를 쓰므로 엉뚱한 클러스터에
 # apply 하는 것이 새 사고 유형이다. 오버레이 디렉터리에 `kube-context` 파일(첫 비주석 줄 = 컨텍스트 이름)이 있으면
 # 그 오버레이는 그 컨텍스트 전용이다 -- 겨눈 컨텍스트(--context / KUBE_CONTEXT, 없으면 현재 컨텍스트)가 다르면
-# 거부(exit 4). 예: testbed-k8s(dmsk8s)를 dms 에, testbed(dms)를 dmsk8s 에. 파일이 없는 오버레이(prod·ssc 사이트)는
+# 거부(exit 4). 예: dmsk8s 전용 오버레이를 dms 에, dms 전용을 dmsk8s 에. 파일이 없는 오버레이(prod·ssc 사이트)는
 # 종전 그대로다(--context 를 주면 그 컨텍스트로 라이브를 읽을 뿐; 환경변수 KUBE_CONTEXT 만 있고 현재 컨텍스트와 다르면
 # 부르는 install.sh 의 apply 대상과 어긋나므로 거부). 가드는 뒤따르는 apply 명령을 통제하지 못한다 --
 # 통과 메시지가 출력하는 `kubectl --context <ctx> apply -k <dir>` 을 그대로 쓴다.
 #
 # 사용: sh deploy/overlays/guard-images.sh <오버레이 디렉터리> [--allow-image-change] [--context <ctx>]
 #       KUBE_CONTEXT=<ctx> 환경변수도 같다(인자가 이긴다).
-#       (install.sh 가 apply 직전에 부른다; 테스트베드는 deploy/README.md §4/§5·「두 번째 테스트베드」 절차)
+#       (install.sh 가 apply 직전에 부른다; 테스트베드는 deploy/README.md 의 테스트베드 적용 절차 — 브랜치마다
+#        싣는 테스트베드 오버레이가 다르다: main·dms-ssc = testbed(dms), dms-k8s = testbed-k8s(dmsk8s))
 # 종료: 0 통과 / 2 사용법·렌더 실패·없는 컨텍스트 / 3 이미지 변경 거부 / 4 컨텍스트 불일치 거부
 set -eu
 usage() { echo "usage: $0 <overlay-dir> [--allow-image-change] [--context <ctx>]" >&2; exit 2; }
