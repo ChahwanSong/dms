@@ -137,6 +137,12 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   exit 4·현재 컨텍스트 대조·KUBE_CONTEXT·인자 우선·빈 kube-context exit 2·없는 컨텍스트 exit 2·이미지 변경 exit 3 유지·고정 없는
   오버레이 종전 동작·저장소 고정값) — 대조를 끄거나 `--context` 고정을 빼는 변이에 빨간불 확인.
 - **미적용**: 클러스터·pkg-01·호스트는 건드리지 않았다(testbed 저장소 작업과 함께 실증 예정 — §13 런북).
+- **2026-10-22 testbed 보안·리뷰 반영(문서만)**: testbed 저장소가 빌드 소스 export 를 체크아웃별·워커 IP 한정으로 좁히고(부모
+  `/home/mason/dms-dev` 에 testbed 의 SSH 키·CA 키·secrets 가 있었다), `client.dmsk8s` 를 OSD `namespace=k8s` 로도 가두고,
+  PostgreSQL pg_hba 를 DB 별로(LDAP 로그인이 `dmsdb_k8s` 에 못 닿게) 바꾼 것에 맞춰 deploy/README §1-빌드 소스·§10·§13-1 갱신.
+  k8s 포탈의 평문 릴레이 :8081 삭제(force-ssl-redirect 가 포트 없는 :443 = ssc 포탈로 보냈다). 표·「Unresolved values」의
+  비밀번호 위치 정정: `dmsapp`·`search_dms` 비밀번호는 testbed `group_vars/all.yml` 인라인 데모값이고 `secrets.yml` 엔
+  `postgresql_app_password_k8s` 만 있다(2026-08-30 「CHANGEME 마커」 서술은 사실이 아니었다). 테스트베드 CA 영구 사본 위치 명기.
 
 ### ✅ 배치 rm 자동 확인(옵션, 기본 꺼짐) + drm 심링크 실증 — **완료·실증**(2026-10-21, d184)
 

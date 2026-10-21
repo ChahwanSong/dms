@@ -44,7 +44,7 @@ truth):
 |---|---|
 | build/registry node | `pkg-01` (10.10.10.30) |
 | registry | `pkg-01:5000`, insecure (k8s 테스트베드는 `pkg-01:5001`) |
-| PostgreSQL | `postgresql://dmsapp:<PW>@10.10.10.30:5432/dmsdb` — PW 는 testbed `secrets.yml`(gitignored, 2026-08-30 보안 정리) |
+| PostgreSQL | `postgresql://dmsapp:<PW>@10.10.10.30:5432/dmsdb` — PW 는 testbed `group_vars/all.yml` 의 `postgresql_app_password`(테스트베드 전용 데모값, 인라인). testbed `secrets.yml`(gitignored)엔 k8s 테스트베드의 `postgresql_app_password_k8s` 만 있다 |
 | LDAP | `ldap://10.10.10.30:389`, base `dc=dms,dc=local` (ssc 전용 — k8s 테스트베드는 LDAP 없음) |
 | CephFS `cephfs-dms` | `/cephfs`, mounted on w1-3 |
 | CephFS `cephfs-third` | `/cephfs-third`, mounted on w1-2 |
@@ -710,8 +710,9 @@ kubectl -n dms get vcjob,pods -l "dms.io/job-id=$JOB_ID"
 트리도 그대로 빌드된다.** 커밋 SHA 는 마운트의 `.git` 에서 읽어 기록하고, 작업
 트리에 미커밋 변경이 있으면 `-dirty` 접미를 붙인다(워크트리 경로처럼 SHA 를 읽을
 수 없으면 `unknown`). 테스트베드에서 이 경로는 호스트 작업 트리의 NFS ro 마운트다
-(`testbed` 저장소 `make storage`) — 실 클러스터에서는 빌드 노드의 로컬 체크아웃을
-그대로 지정하면 된다.
+(`testbed` 저장소 `make storage` — 체크아웃마다 따로 export, 그 부모는 testbed 저장소의 키·CA 가 있어
+export 하지 않는다. 새 체크아웃은 testbed `dms_src_checkouts` 에 넣고 `make storage`) — 실 클러스터에서는 빌드
+노드의 로컬 체크아웃을 그대로 지정하면 된다.
 
 빌드 코드에는 브랜치 개념이 없다 — **클러스터마다 자기 체크아웃을 가리킨다**(2026-10-21, control_state 는 DB 하나 = 클러스터
 하나라 서로 독립):
@@ -1037,8 +1038,9 @@ ingress-nginx v1.15.1(IngressClass `nginx`).
 1. TLS secret (git 밖 — 개인키). 리허설은 자체 CA, 프로덕션은 사내 PKI 발급분:
    `kubectl -n dms create secret tls dms-portal-tls --cert=tls.crt --key=tls.key`
    (SAN: DNS dms.local + IP 10.20.20.100. 리허설 CA 는 2026-10-21 부터 testbed 저장소
-   `files/tls/`(gitignore, 0600) — 그 전엔 세션 스크래치 `~/.claude/jobs/b182a2ed/tmp/tls/` 에만 있었다.
-   k8s 테스트베드(dms-k8s.local, 10.20.20.101)도 같은 CA 로 발급한다 — §13-5)
+   `files/tls/`(gitignore, 0600), 영구 사본 `/data/dms-testbed/backup-20261021/tls/` — 그 전엔 세션 스크래치에만
+   있었다. 어느 NFS export 에도 들어가면 안 된다(testbed `portal-tls.sh` 가 거부). `INIT_CA=1` 은 새 CA 라 사용자 PC 가
+   다시 신뢰해야 한다 — 복구엔 사본을 쓴다. k8s 테스트베드(dms-k8s.local, 10.20.20.101)도 같은 CA 로 발급한다 — §13-5)
 2. `kubectl apply -f deploy/k8s/47-metallb-public-pool.yaml` (공인 풀
    autoAssign=false + L2Advertisement) + ingress svc 에 풀 지정:
    `kubectl -n ingress-nginx annotate svc ingress-nginx-controller metallb.io/address-pool=dms-public-pool`
@@ -1070,8 +1072,10 @@ ingress-nginx v1.15.1(IngressClass `nginx`).
    `ip route replace 10.20.20.100/32 dev dmsbr0` — onlink 라우트라 dmsbr0 에서
    VIP 를 ARP 로 찾는다. 외부 PC·Tailscale 사용자의 옛 주소 호환용으로
    luminous iptables 가 자기 IP 의 80/443/8080 을 VIP 로 DNAT 한다. 2026-10-21 부터 라우트·릴레이(k8s VIP
-   10.20.20.101 과 그 :8443/:8081 릴레이 포함)는 testbed 저장소의 호스트 네트워크 스크립트와 systemd 유닛이 부팅마다
-   다시 깐다 — 옛 손작업 규칙은 세션 스크래치 `setup-relay.sh`·`relay-tailscale.sh`·`relay-8080.sh` 였다.)
+   10.20.20.101 과 그 :8443 릴레이 포함)는 testbed 저장소의 호스트 네트워크 스크립트와 systemd 유닛이 부팅마다
+   다시 깐다 — 옛 손작업 규칙은 세션 스크래치 `setup-relay.sh`·`relay-tailscale.sh`·`relay-8080.sh` 였다.
+   k8s 포탈엔 평문 릴레이(:8081)를 두지 않는다(2026-10-22 제거): force-ssl-redirect 가 포트 없는 `https://<host>/`
+   = :443 = **ssc** VIP 로 보내 다른 포탈에 떨어졌다. k8s 포탈의 외부 입구는 `https://dms-k8s.local:8443` 하나.)
 6. 검증(전부 실증됨): `curl --cacert ca.crt https://dms.local/` = 200(검증
    통과), `http://` = 308, 로그인 Set-Cookie 에 `Secure`, 로그인·admin API·SPA
    딥링크 https 로 200, `ip neigh show 10.20.20.100` = 선출 노드 MAC.
@@ -1315,11 +1319,14 @@ LDAP 이 없으면 무엇이 되고 무엇이 막히는가(코드 경로 `identi
   `k8s-w1`·`k8s-w2` 둘 다 `network-zone=public`. kubeconfig 에 컨텍스트 `dmsk8s`(current 는 `dms` 유지).
 - 노드: **LDAP 클라이언트 없음**(sssd·nslcd 미설치, nsswitch 에 sss/ldap 없음, `getent passwd alice` 실패 — testbed validate 의
   부정 검사), CRI-O 가 `pkg-01:5000`·`pkg-01:5001` 신뢰, `/etc/hosts`·CoreDNS hosts 에 pkg-01(api 파드가 레지스트리를 조회),
-  CephFS `dmsfs:/k8s` → `/cephfs`(둘 다), `/k8s/third` → `/cephfs-third`(k8s-w1), `/k8s/secondary` → `/cephfs-secondary`(k8s-w2),
-  빌드 노드 k8s-w1 에 `/home/mason/dms-dev` ro NFS.
-- pkg-01: `registry-k8s` :5001(§0), PostgreSQL `dmsdb_k8s` / 롤 `dmsapp_k8s`(scram — 기존 `10.10.10.0/24 scram` hba 가 덮는다).
+  CephFS `dmsfs:/k8s` → `/cephfs`(둘 다), `/k8s/third` → `/cephfs-third`(k8s-w1), `/k8s/secondary` → `/cephfs-secondary`(k8s-w2)
+  — cephx `client.dmsk8s` 는 MDS `path=/k8s` + OSD `namespace=k8s`(`/k8s` 레이아웃 `pool_namespace=k8s`)로 두 층에서 갇힌다,
+  빌드 소스 `/home/mason/dms-dev/dms` ro NFS(체크아웃별 export·워커 IP 만 — 부모 `/home/mason/dms-dev` 는 export 하지 않는다).
+- pkg-01: `registry-k8s` :5001(§0), PostgreSQL `dmsdb_k8s` / 롤 `dmsapp_k8s`(scram — pg_hba 는 DB 별: `dmsapp_k8s` 만
+  `dmsdb_k8s` 에, LDAP 사용자 로그인은 이 DB 에 닿지 않는다; PUBLIC CONNECT 회수).
 - 호스트: `10.20.20.101/32 dev dmsbr0` onlink 라우트, `/etc/hosts` 의 `10.20.20.101 dms-k8s.local`, (선택) 외부 릴레이
-  :8443 → .101:443, 테스트베드 CA(`~/dms-dev/testbed/files/tls/`, gitignore).
+  :8443 → .101:443(평문 릴레이 없음 — §10), 테스트베드 CA(`~/dms-dev/testbed/files/tls/`, gitignore; 영구 사본
+  `/data/dms-testbed/backup-20261021/tls/`).
 
 ```bash
 kubectl --context dmsk8s get nodes -o wide
@@ -1412,9 +1419,10 @@ kubectl --context dmsk8s -n dms exec ds/dms-agent -- sh -c 'test -S /run/nslcd/s
   `deploy/k8s/20-secret.example.yaml`): the LDAP search-account password
   (2026-08-23: auth bind is the default -- the DN lives in the ConfigMap as
   `DMS_LDAP_BIND_DN`, testbed account `search_dms` provisioned by
-  testbed/roles/openldap_server, password `ldap_search_password` in the
-  testbed repo's gitignored `secrets.yml` -- group_vars holds only a
-  CHANGEME marker since 2026-08-30). With
+  testbed/roles/openldap_server, password `ldap_search_password` inline in
+  the testbed repo's `group_vars/all.yml` -- a testbed-only demo value; the
+  gitignored `secrets.yml` holds only the k8s testbed's
+  `postgresql_app_password_k8s`). With
   `DMS_LDAP_REQUIRE_AUTH_BIND="true"` a missing/placeholder
   password fails LOUD at startup (SettingsError -> CrashLoopBackOff), so
   inject the secret before applying config. A wrong (but present) password
