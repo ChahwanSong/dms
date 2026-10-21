@@ -51,8 +51,9 @@
 # tests/test_release_manifest_contract.py pins all of the above.
 #
 # image: lines are SITE-NEUTRAL PLACEHOLDERS (set-by-overlay.invalid/<img>:set-by-overlay, 2026-09-14).
-# The real registry/tag is set by an overlay: deploy/overlays/testbed (this
-# testbed), deploy/overlays/prod|ssc (sites, via values.env). Applying this file
+# The real registry/tag is set by an overlay: deploy/overlays/<site> (testbed
+# overlays carry fixed tags, site installers render values.env; which overlays
+# exist differs per branch). Applying this file
 # raw (`kubectl apply -f`) deploys an unpullable image on purpose -- always
 # `kubectl apply -k deploy/overlays/<site>`. The portal build stamps the copy
 # baked into the image (build_manifests), never this checkout.

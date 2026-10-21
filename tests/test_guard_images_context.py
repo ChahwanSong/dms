@@ -248,8 +248,21 @@ def _pinned(overlay_dir: Path):
     return r.stdout.strip()
 
 
+# 오버레이 → 고정 컨텍스트(None = kube-context 없음). 브랜치마다 싣는 오버레이가 다르다(2026-10-22 브랜치 분리 —
+# main·dms-ssc = testbed·prod(+ssc), dms-k8s = testbed-k8s·prod) — 이 표는 공용이고 검사는 **있는** 오버레이만 본다.
+_PINS = {
+    "testbed": "dms",          # ssc 테스트베드(dms-cp1) — main·dms-ssc
+    "testbed-k8s": "dmsk8s",   # k8s 테스트베드(k8s-cp1), LDAP 없음 — dms-k8s
+    "prod": None,              # 사이트 설치기(install.sh)는 컨텍스트 없이 부른다
+    "ssc": None,               # SSC 사이트 설치기(dms-ssc) — 같은 이유
+}
+
+
 def test_repo_testbed_overlays_are_pinned_to_their_clusters():
     overlays = REPO_ROOT / "deploy" / "overlays"
-    assert _pinned(overlays / "testbed") == "dms"          # ssc 테스트베드(dms-cp1)
-    assert _pinned(overlays / "testbed-k8s") == "dmsk8s"   # k8s 테스트베드(k8s-cp1), LDAP 없음
-    assert _pinned(overlays / "prod") is None              # 사이트 설치기(install.sh)는 컨텍스트 없이 부른다
+    present = sorted(p.parent.name for p in overlays.glob("*/kustomization.yaml"))
+    unknown = [o for o in present if o not in _PINS]
+    assert unknown == [], f"새 오버레이 {unknown} — _PINS 에 고정 컨텍스트(또는 None)를 적어라"
+    assert any(_PINS[o] for o in present), f"테스트베드 오버레이(kube-context 고정)가 하나도 없다: {present}"
+    for o in present:
+        assert _pinned(overlays / o) == _PINS[o], o

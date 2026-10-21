@@ -9,25 +9,18 @@
   새로 생기면 여기서 빨간불(오버레이에 null/$patch: delete 를 더하라).
 - 렌더(`kubectl kustomize`, 클러스터·kubeconfig 를 쓰지 않는다): 렌더 결과 어디에도 'ldap'(대소문자 무시)이 없고,
   에이전트가 `dms agent` 로 직접 뜨고, 이미지·빌드 레지스트리가 이 클러스터의 :5001 이고, 공인 VIP·포탈 호스트가
-  k8s 값인지. 모든 오버레이가 렌더되고 자리표시자 이미지를 남기지 않는지도 함께 본다.
+  k8s 값인지. (모든 오버레이의 자리표시자 이미지 검사는 tests/test_overlay_render_contract.py — 공용.)
 
 렌더 파싱은 PyYAML 없이(저장소 의존성이 아니다 — manifest_tags 와 같은 방침) kustomize 출력의 고정된 모양
 (키 정렬·2칸 들여쓰기·시퀀스는 부모 키와 같은 들여쓰기)에 기대는 최소 정규식이다. 찾지 못하면 조용히 통과하지 않고
 assert 로 실패한다.
 """
-import functools
-import os
 import re
-import shutil
-import subprocess
 from pathlib import Path
 
-import pytest
+from overlay_render import (OVERLAYS, REPO_ROOT, config_data, doc, expected_context, images, needs_kubectl, render,
+                            seq)
 
-from dms.manifest_tags import PLACEHOLDER_REGISTRY, _unquote
-
-REPO_ROOT = Path(__file__).resolve().parent.parent
-OVERLAYS = REPO_ROOT / "deploy" / "overlays"
 K8S = OVERLAYS / "testbed-k8s"
 SSC = OVERLAYS / "testbed"
 BASE_CONFIG = REPO_ROOT / "deploy" / "k8s" / "20-config.yaml"
@@ -37,11 +30,6 @@ K8S_REGISTRY = "pkg-01:5001"
 SHARED_BUILDER = "pkg-01:5000/buildah:stable"   # 빌더 미러만 ssc 의 :5000 을 공용으로 읽는다
 K8S_VIP = "10.20.20.101/32"
 K8S_HOST = "dms-k8s.local"
-
-KUBECTL = shutil.which("kubectl")
-needs_kubectl = pytest.mark.skipif(
-    KUBECTL is None, reason="kubectl(내장 kustomize) 없음 -- 렌더 계약은 건너뛰고 정적 계약만 돈다")
-
 
 def _code(path: Path) -> str:
     return "\n".join(ln for ln in path.read_text(encoding="utf-8").splitlines()
@@ -104,83 +92,15 @@ def test_the_two_testbeds_do_not_share_registry_vip_host_or_context():
     assert K8S_VIP in _code(K8S / "patch-metallb.yaml")
     assert K8S_VIP not in _code(REPO_ROOT / "deploy" / "k8s" / "47-metallb-public-pool.yaml")
     assert K8S_HOST in _code(K8S / "patch-ingress.yaml")
-    ctx = {o: _expected_context(OVERLAYS / o) for o in ("testbed", "testbed-k8s")}
+    ctx = {o: expected_context(OVERLAYS / o) for o in ("testbed", "testbed-k8s")}
     assert ctx == {"testbed": "dms", "testbed-k8s": "dmsk8s"}, ctx
 
 
-def _expected_context(overlay: Path):
-    """guard-images.sh 와 같은 규칙: kube-context 의 첫 비주석·비공백 줄(공백 제거)."""
-    path = overlay / "kube-context"
-    if not path.is_file():
-        return None
-    for line in path.read_text(encoding="utf-8").splitlines():
-        value = re.sub(r"\s", "", line.split("#", 1)[0])
-        if value:
-            return value
-    return ""
-
-
-# --- 렌더 계약(kubectl kustomize -- 로컬 렌더만, 클러스터·kubeconfig 무관) ------------
-
-@functools.lru_cache(maxsize=None)
-def _render(overlay: str) -> str:
-    # KUBECONFIG 를 없는 경로로 -- kustomize 는 클러스터를 보지 않지만, 혹시라도 실 테스트베드를 건드리지 않게.
-    env = {**os.environ, "KUBECONFIG": os.devnull}
-    r = subprocess.run([KUBECTL, "kustomize", str(OVERLAYS / overlay)], capture_output=True, text=True,
-                       timeout=120, env=env)
-    assert r.returncode == 0, f"kubectl kustomize deploy/overlays/{overlay} 실패: {r.stderr}"
-    return r.stdout
-
-
-def _docs(text: str) -> list:
-    return [d for d in re.split(r"(?m)^---\s*$", text) if d.strip()]
-
-
-def _doc(text: str, kind: str, name: str) -> str:
-    for d in _docs(text):
-        k = re.search(r"(?m)^kind: (\S+)$", d)
-        meta = re.search(r"(?m)^metadata:\n((?:  .*(?:\n|$))*)", d)
-        if not (k and meta and k.group(1) == kind):
-            continue
-        n = re.search(r"(?m)^  name: (\S+)$", meta.group(1))
-        if n and n.group(1) == name:
-            return d
-    raise AssertionError(f"렌더 결과에 {kind}/{name} 이 없다")
-
-
-def _seq(doc: str, key: str) -> list:
-    """스칼라 블록 시퀀스. kustomize 는 `- ` 를 부모 키와 같은 열에 둔다(`  - hosts:` 처럼 키가 시퀀스 항목의 첫
-    키이면 그 키의 열 = `- ` 뒤)."""
-    lines = doc.splitlines()
-    for idx, line in enumerate(lines):
-        m = re.match(rf"^([ ]*(?:- )?){re.escape(key)}:\s*$", line)
-        if not m:
-            continue
-        col = " " * len(m.group(1))
-        items = []
-        for nxt in lines[idx + 1:]:
-            if not nxt.startswith(col + "- "):
-                break
-            items.append(_unquote(nxt[len(col) + 2:].strip()))
-        assert items, f"`{key}:` 아래 시퀀스 항목이 없다"
-        return items
-    raise AssertionError(f"`{key}:` 시퀀스를 못 찾았다")
-
-
-def _config_data(text: str) -> dict:
-    d = _doc(text, "ConfigMap", "dms-config")
-    m = re.search(r"(?m)^data:\n((?:  .*(?:\n|$))*)", d)
-    assert m, "dms-config 에 data 가 없다"
-    return {k: _unquote(v.strip()) for k, v in re.findall(r"(?m)^  ([A-Z0-9_]+):(.*)$", m.group(1))}
-
-
-def _images(text: str) -> list:
-    return re.findall(r"(?m)^\s*image: (\S+)\s*$", text)
-
+# --- 렌더 계약(kubectl kustomize -- 로컬 렌더만, 클러스터·kubeconfig 무관; 헬퍼는 tests/overlay_render.py) ----
 
 @needs_kubectl
 def test_render_mentions_ldap_nowhere():
-    text = _render("testbed-k8s")
+    text = render("testbed-k8s")
     offenders = [ln.strip() for ln in text.splitlines() if "ldap" in ln.lower()]
     assert offenders == [], (
         f"testbed-k8s 렌더에 LDAP 흔적이 있다(사용자 결정: dms-k8s 는 LDAP 없음): {offenders[:10]}")
@@ -188,9 +108,9 @@ def test_render_mentions_ldap_nowhere():
 
 @needs_kubectl
 def test_render_runs_the_agent_directly_without_ldap_env():
-    ds = _doc(_render("testbed-k8s"), "DaemonSet", "dms-agent")
-    assert _seq(ds, "command") == ["dms"]
-    assert _seq(ds, "args") == ["agent"]
+    ds = doc(render("testbed-k8s"), "DaemonSet", "dms-agent")
+    assert seq(ds, "command") == ["dms"]
+    assert seq(ds, "args") == ["agent"]
     assert "agent-entrypoint" not in ds and "nslcd" not in ds.lower()
     env_names = re.findall(r"(?m)^\s*- name: (DMS_\w+)$", ds)
     assert "DMS_SHARED_TOKEN" in env_names and "DMS_AGENT_HOST_ROOT" in env_names, env_names
@@ -200,11 +120,11 @@ def test_render_runs_the_agent_directly_without_ldap_env():
 
 @needs_kubectl
 def test_render_images_and_build_registry_are_the_k8s_registry():
-    text = _render("testbed-k8s")
-    images = _images(text)
-    assert len(images) >= 6, images      # api·controller 본체+migrate init, migrate job, agent
-    assert all(i.startswith(K8S_REGISTRY + "/") for i in images), images
-    data = _config_data(text)
+    text = render("testbed-k8s")
+    found = images(text)
+    assert len(found) >= 6, found        # api·controller 본체+migrate init, migrate job, agent
+    assert all(i.startswith(K8S_REGISTRY + "/") for i in found), found
+    data = config_data(text)
     assert data["DMS_BUILD_REGISTRY"] == K8S_REGISTRY
     assert data["DMS_JOB_IMAGE"].startswith(f"{K8S_REGISTRY}/dms-mpifileutils:"), data["DMS_JOB_IMAGE"]
     assert data["DMS_BUILD_BUILDER_IMAGE"] == SHARED_BUILDER
@@ -212,7 +132,7 @@ def test_render_images_and_build_registry_are_the_k8s_registry():
 
 @needs_kubectl
 def test_render_identity_is_root_only_by_privileged_list():
-    data = _config_data(_render("testbed-k8s"))
+    data = config_data(render("testbed-k8s"))
     assert not [k for k in data if k.startswith("DMS_LDAP_")]
     assert data["DMS_PRIVILEGED_REQUESTERS"] == "root,admin,mason"
     assert data["DMS_ALLOW_PRIVILEGED_REQUESTERS"] == "true"
@@ -221,28 +141,19 @@ def test_render_identity_is_root_only_by_privileged_list():
 
 @needs_kubectl
 def test_render_public_vip_and_portal_host():
-    text = _render("testbed-k8s")
-    pool = _doc(text, "IPAddressPool", "dms-public-pool")
-    assert _seq(pool, "addresses") == [K8S_VIP]
-    ingress = _doc(text, "Ingress", "dms-portal")
-    assert _seq(ingress, "hosts") == [K8S_HOST]
+    text = render("testbed-k8s")
+    pool = doc(text, "IPAddressPool", "dms-public-pool")
+    assert seq(pool, "addresses") == [K8S_VIP]
+    ingress = doc(text, "Ingress", "dms-portal")
+    assert seq(ingress, "hosts") == [K8S_HOST]
 
 
 @needs_kubectl
 def test_render_ssc_testbed_keeps_its_ldap_and_entrypoint():
     # LDAP 삭제가 testbed-k8s 오버레이 안에서만 일어나는지(base·ssc 오버레이로 새지 않았는지) — ssc 는 LDAP 을 쓴다.
-    text = _render("testbed")
-    data = _config_data(text)
+    text = render("testbed")
+    data = config_data(text)
     assert data["DMS_LDAP_URI"].startswith("ldap://"), data.get("DMS_LDAP_URI")
-    ds = _doc(text, "DaemonSet", "dms-agent")
-    assert _seq(ds, "command") == ["/usr/local/bin/agent-entrypoint.sh"]
-    assert not any(i.startswith(K8S_REGISTRY + "/") for i in _images(text))
-
-
-@needs_kubectl
-@pytest.mark.parametrize("overlay", sorted(p.parent.name for p in OVERLAYS.glob("*/kustomization.yaml")))
-def test_every_overlay_renders_without_placeholder_images(overlay):
-    text = _render(overlay)
-    images = _images(text) + [_config_data(text)["DMS_JOB_IMAGE"]]
-    leftover = [i for i in images if i.startswith(PLACEHOLDER_REGISTRY + "/")]
-    assert leftover == [], f"{overlay}: 자리표시자 이미지가 렌더에 남았다(images.name 매핑 누락) {leftover}"
+    ds = doc(text, "DaemonSet", "dms-agent")
+    assert seq(ds, "command") == ["/usr/local/bin/agent-entrypoint.sh"]
+    assert not any(i.startswith(K8S_REGISTRY + "/") for i in images(text))
