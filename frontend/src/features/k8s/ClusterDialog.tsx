@@ -128,8 +128,14 @@ export function ClusterDialog({ mode, cluster, trigger }: {
   // 편집에서 CA 칸을 비우면 저장된 CA 를 그대로 쓴다 -- 저장된 CA 가 없던 클러스터(기본 신뢰·검증 안 함)를 CA 로 바꿀 때는 필수.
   const caKept = editing && cluster!.tls_mode === "ca";
   const caMissing = tlsMode === "ca" && ca.trim() === "" && !caKept;
+  // 토큰은 「검증된 그 서버」에 묶인다(서버 규칙과 같음 — routes_k8s.update_cluster): 주소·TLS 서버 이름이 바뀌거나 검증을
+  // 끄는 쪽이면 토큰을 다시 받는다. CA 교체(인증서 갱신)와 검증을 다시 켜는 쪽은 묻지 않는다.
   const addressChanged = editing && apiServer.trim() !== cluster!.api_server;
-  const tokenRequired = addressChanged && token.trim() === "";
+  const serverNameChanged = editing && (tlsName.trim() || null) !== (cluster!.tls_server_name || null);
+  const verifyTurnedOff = editing && tlsMode === "insecure" && cluster!.tls_mode !== "insecure";
+  const tokenReason = addressChanged ? "API 서버 주소를 바꾸려면" : serverNameChanged ? "TLS 서버 이름을 바꾸려면"
+    : verifyTurnedOff ? "인증서 검증을 끄려면" : null;
+  const tokenRequired = tokenReason !== null && token.trim() === "";
   const missing = [
     name.trim() === "" ? "클러스터 이름" : null,
     apiServer.trim() === "" ? "API 서버 주소" : null,
@@ -263,7 +269,7 @@ export function ClusterDialog({ mode, cluster, trigger }: {
           </label>
           {tokenRequired && (
             <p id={tokenReqId} className="text-bad">
-              API 서버 주소를 바꾸려면 토큰을 다시 넣어야 합니다 — 저장된 토큰이 새 주소로 보내지지 않게 하려는 것입니다.
+              {tokenReason} 토큰을 다시 넣어야 합니다 — 저장된 토큰이 검증되지 않은 서버로 보내지지 않게 하려는 것입니다.
             </p>
           )}
           <p id={tokenHelpId} className="text-xs text-ink/70">

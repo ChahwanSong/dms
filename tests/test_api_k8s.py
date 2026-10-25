@@ -217,11 +217,20 @@ def test_changing_the_api_server_requires_the_token_again(admin, db):
     r = admin.put("/api/admin/k8s/clusters/c1", json={"api_server": "https://evil.example:6443"})
     assert r.status_code == 422 and r.json()["detail"] == "k8s_token_required"
     assert db.query_one("SELECT api_server FROM k8s_clusters")["api_server"] == "https://10.10.10.20:6443"
-    # 같은 주소(형식만 다름)는 바뀐 게 아니다 · TLS 칸은 토큰 없이 바꿀 수 있다(토큰 유지)
-    r = admin.put("/api/admin/k8s/clusters/c1", json={"api_server": "https://10.10.10.20:6443/",
-                                                      "tls_server_name": "k8s-cp1", "ca_pem": ""})
-    assert r.status_code == 200 and r.json()["tls_server_name"] == "k8s-cp1" and r.json()["tls_mode"] == "default"
-    assert r.json()["token"] == "set"
+    # 같은 주소(형식만 다름)는 바뀐 게 아니다 · CA 교체(인증서 갱신)는 토큰 없이 된다(토큰 유지)
+    r = admin.put("/api/admin/k8s/clusters/c1", json={"api_server": "https://10.10.10.20:6443/", "ca_pem": ""})
+    assert r.status_code == 200 and r.json()["tls_mode"] == "default" and r.json()["token"] == "set"
+    # 검증 대상 이름을 바꾸거나 검증을 끄는 쪽은 토큰을 다시 받는다(2026-10-26 보안 리뷰 — 같은 주소에서 가로채기)
+    for change in ({"tls_server_name": "k8s-cp1"}, {"insecure_skip_tls_verify": True}):
+        r = admin.put("/api/admin/k8s/clusters/c1", json=change)
+        assert r.status_code == 422 and r.json()["detail"] == "k8s_token_required", change
+    r = admin.put("/api/admin/k8s/clusters/c1", json={"tls_server_name": "k8s-cp1", "token": TOKEN})
+    assert r.status_code == 200 and r.json()["tls_server_name"] == "k8s-cp1"
+    r = admin.put("/api/admin/k8s/clusters/c1", json={"insecure_skip_tls_verify": True, "token": TOKEN})
+    assert r.status_code == 200 and r.json()["tls_mode"] == "insecure"
+    # 검증을 다시 켜는 쪽(더 안전해지는 쪽)은 토큰 없이 된다
+    r = admin.put("/api/admin/k8s/clusters/c1", json={"insecure_skip_tls_verify": False})
+    assert r.status_code == 200 and r.json()["tls_mode"] == "default" and r.json()["token"] == "set"
     rev = db.query_one("SELECT config_rev FROM k8s_clusters")["config_rev"]
     r = admin.put("/api/admin/k8s/clusters/c1", json={"api_server": "https://k8s-cp1:6443", "token": TOKEN + "x"})
     assert r.status_code == 200 and r.json()["api_server"] == "https://k8s-cp1:6443"

@@ -389,8 +389,16 @@ def update_cluster(name: str, body: ClusterBody, request: Request,
         changes["token_enc"] = _seal(request, token)
 
     def guard(before: dict) -> None:
-        # 주소가 실제로 바뀌는데 토큰을 같이 넣지 않았다 → 거절(토큰은 주소에 묶인다).
-        if "api_server" in changes and changes["api_server"] != before.get("api_server") and token is None:
+        # 토큰이 어디로 가는가(주소·검증 대상 이름)나 검증을 끄는 쪽으로 바뀌는데 토큰을 같이 넣지 않았다 → 거절(토큰은
+        # 「검증된 그 서버」에 묶인다 — 2026-10-26 보안 리뷰: 주소만 묶으면 검증 끄기·TLS 서버 이름 변경으로 같은 주소에서
+        # 가로채기를 열 수 있었다). CA 교체는 인증서 갱신 때 흔한 정상 작업이라 묻지 않는다(사용성 — 사용자 지시).
+        if token is not None:
+            return
+        if "api_server" in changes and changes["api_server"] != before.get("api_server"):
+            raise HTTPException(status_code=422, detail="k8s_token_required")
+        if "tls_server_name" in changes and (changes["tls_server_name"] or None) != (before.get("tls_server_name") or None):
+            raise HTTPException(status_code=422, detail="k8s_token_required")
+        if changes.get("insecure_skip_tls_verify") is True and not before.get("insecure_skip_tls_verify"):
             raise HTTPException(status_code=422, detail="k8s_token_required")
 
     try:

@@ -134,7 +134,19 @@ test("편집: 주소를 바꾸면 토큰을 다시 넣어야 저장된다, CA �
   expect(await openSealed(serverKey, sent!.body.token_enc as never, "k8s_cluster_token", "dmsk8s")).toBe("new-token");
 });
 
-test("편집: 주소 그대로면 토큰 없이 저장(토큰 유지 — token_enc 없음), 검증 안 함은 경고 + ca_pem null", async () => {
+test("편집: 주소·검증 그대로면 토큰 없이 저장(토큰 유지 — token_enc 없음)", async () => {
+  let sent: Record<string, unknown> | null = null;
+  server.use(http.put("/api/admin/k8s/clusters/:name", async ({ request }) => {
+    sent = await request.json() as Record<string, unknown>;
+    return HttpResponse.json(CLUSTER_OK);
+  }));
+  await openDialog("edit", CLUSTER_OK);
+  await userEvent.click(screen.getByRole("button", { name: "저장" }));
+  await waitFor(() => expect(sent).not.toBeNull());
+  expect("token_enc" in sent!).toBe(false);
+});
+
+test("편집: 검증을 끄거나 TLS 서버 이름을 바꾸면 토큰을 다시 넣어야 한다(서버와 같은 규칙 — 2026-10-26 보안 리뷰)", async () => {
   let sent: Record<string, unknown> | null = null;
   server.use(http.put("/api/admin/k8s/clusters/:name", async ({ request }) => {
     sent = await request.json() as Record<string, unknown>;
@@ -143,10 +155,13 @@ test("편집: 주소 그대로면 토큰 없이 저장(토큰 유지 — token_e
   await openDialog("edit", CLUSTER_OK);
   await userEvent.click(screen.getByLabelText("검증 안 함"));
   expect(screen.getByText(/인증서를 검증하지 않으면 같은 주소를 가로챈 쪽이/)).toBeInTheDocument();
+  expect(screen.getByText(/인증서 검증을 끄려면 토큰을 다시 넣어야 합니다/)).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "저장" })).toBeDisabled();
+  await userEvent.type(screen.getByLabelText("API 토큰"), "again");
   await userEvent.click(screen.getByRole("button", { name: "저장" }));
   await waitFor(() => expect(sent).not.toBeNull());
   expect(sent).toMatchObject({ insecure_skip_tls_verify: true, ca_pem: null });
-  expect("token_enc" in sent!).toBe(false);
+  expect("token_enc" in sent!).toBe(true);
 });
 
 test("편집 중에 개요 폴링으로 cluster 가 바뀌어도 입력칸을 되돌리지 않는다", async () => {
