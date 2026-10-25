@@ -508,3 +508,30 @@ describe("다듬기", () => {
     expect(v.state === "ok" && v.set[0].token.endsWith("…")).toBe(true);
   });
 });
+
+
+// ---- PV 주소 요청(dms-k8s 설계 §7) -------------------------------------------------------------------------------
+describe("PV 주소 요청: 대상은 PV 표기, PV 행(클러스터 · 볼륨 · StorageClass), 「대상 사용자」", () => {
+  const PV = { cluster: "dmsk8s", namespace: "team-a", pvc: "models", volume: "pvc-52c6", storage_class: "tb-gpfs",
+               root: "pvc-52c6/pvc-52c6-data", path: "sample" };
+  test("scan + 면제 관리자의 권한 기준 사용자", () => {
+    const s = spec({ operation: "scan", requester_id: "root",
+                     payload: { storage: "k8s-pv-gpfs", target: "pvc-52c6/pvc-52c6-data/sample", pv: PV,
+                                owner_username: "alice", run_as_root: true, options: {} } }, null);
+    expect(s.target).toEqual(["models — team-a (tb-gpfs) / sample"]);
+    expect(s.pv).toEqual([{ side: null, text: "dmsk8s · pvc-52c6 · tb-gpfs" }]);
+    expect(s.targetUser).toBe("alice");
+  });
+  test("sync PV ↔ 직접 경로 혼합: PV 쪽만 행이 있다, owner 없으면 대상 사용자 행 없음", () => {
+    const s = spec({ payload: { ...SYNC_PAYLOAD, source_storage: "k8s-pv-gpfs", source: "pvc-52c6/pvc-52c6-data",
+                                source_pv: { ...PV, path: "" }, run_as_root: true } }, null);
+    expect(s.target).toEqual(["models — team-a (tb-gpfs) / (PV 전체)", "cephfs-dms:dms_test/out"]);
+    expect(s.pv).toEqual([{ side: "소스", text: "dmsk8s · pvc-52c6 · tb-gpfs" }]);
+    expect(s.targetUser).toBeNull();
+  });
+  test("PV 주소가 아닌 요청은 PV 행·대상 사용자 행이 없다(ldap 모드 실행 신원 지정은 「실행 신원」 행이 말한다)", () => {
+    const s = spec({ payload: { ...SYNC_PAYLOAD, owner_username: "alice" } });
+    expect(s.pv).toEqual([]);
+    expect(s.targetUser).toBeNull();
+  });
+});

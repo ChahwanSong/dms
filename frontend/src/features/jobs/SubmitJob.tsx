@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { ArrowRight } from "lucide-react";
 import { useSubmitRequest } from "./useJobs";
 import type { SubmitBody } from "./useJobs";
@@ -28,6 +28,17 @@ import { CHMOD_RE, chownFieldError, OPEN_NOATIME_NON_ROOT, PRIV_ROOT_SYNC, PRIV_
 import { usePolicies } from "../policies/usePolicies";
 import type { Policy } from "../../lib/types";
 import { NODE_CPU_CAP_NOTE } from "../../lib/jobTool";
+// dms-k8s(설계 §7, 2026-10-25): k8s 모드의 PV 주소 고르기. ldap 모드 화면은 아래 k8sMode 가 거짓이라 그대로다.
+import { CatalogNotice, LocationField } from "../k8s/LocationField";
+import { usePvCatalog, useResolvedPv } from "../k8s/usePvCatalog";
+import type { Resolved } from "../k8s/usePvCatalog";
+import {
+  ACCOUNT_ID_RE, SIDE_LABELS, emptyLoc, normalizeSub, parsePvParam, pvAbsPath, pvDestParent, pvSubProblem, pvSummaryText,
+} from "../k8s/pvLocation";
+import type { Loc, Side } from "../k8s/pvLocation";
+import { storageKindOf } from "../k8s/k8sTerms";
+import { useK8sAccess } from "../k8s/useK8s";
+import { useSearchField } from "./searchField";
 
 // 슬라이스 37: 단일 작업(구 「작업 제출」) — 배치 작업과 같은 성격의 단일 항목
 // 제출이다. 운영자는 scan 까지 세 연산 전부(서버 게이트 미러: scan 제출은 admin
@@ -110,6 +121,8 @@ function PathFeedback({ root, rel }: { root: string | null | undefined; rel: str
 const loc = (storage: string, path: string) =>
   storage === "" && path.trim() === "" ? "—" : `${storage}:${path}`;
 
+const ALL_OPERATIONS: Operation[] = ["sync", "scan", "rm"];
+
 export function SubmitJob() {
   const nav = useNavigate();
   const submit = useSubmitRequest();
@@ -120,6 +133,42 @@ export function SubmitJob() {
   const [f, setF] = useState(initial);
   // 고급 옵션 펼침 상태. 오류가 있으면 항상 펼친다(아래 details open/onToggle).
   const [advancedOpen, setAdvancedOpen] = useState(false);
+
+  // ---- k8s 모드(dms-k8s 설계 D1·D2·D4·D15·§7) --------------------------------------------------------------
+  // 분기 키는 me.identity_mode === "k8s" 와 me.unrestricted(맵핑 면제 = 관리자 + 전체 PV·직접 경로 권한 + 세션). k8s 모드는 모든
+  // 작업이 root 이고(서버 D2 -- 바디 run_as_root:true), 대상은 쪽마다 PV 주소(namespace (StorageClass) → PV 이름 → PV 안 경로)다.
+  // 면제자만 쪽마다 「PV | 직접 경로」와 「권한 기준 사용자」를 쓴다. 쪽 위치는 연산을 바꿔도 남는다(f 와 같은 정책).
+  // ?pv=<cluster>/<ns>/<pvc>(관리자 PV 탐색 「이 PV로 단일 작업」)는 소스와 대상(scan·rm) 둘 다에 미리 고른다.
+  const [params] = useSearchParams();
+  const [locs, setLocs] = useState<Record<Side, Loc>>(() => {
+    const ref = parsePvParam(params.get("pv"));
+    return { source: emptyLoc(ref), destination: emptyLoc(), target: emptyLoc(ref) };
+  });
+  const setLoc = (side: Side) => (next: Loc) => setLocs((prev) => ({ ...prev, [side]: next }));
+  const k8sMode = me.data?.identity_mode === "k8s";
+  const unrestricted = k8sMode && me.data?.unrestricted === true;
+  // 「권한 기준 사용자」(면제자): 비우면 전체 PV 검색, 채우면 그 사용자의 범위(같은 고르기 흐름). 목록 조회는 디바운스된 값으로,
+  // 바디·요약은 보이는 값 그대로(보이는 것 = 보내는 것).
+  const scopeField = useSearchField("");
+  const scopeInput = unrestricted ? scopeField.bind.value.trim() : "";
+  const scopeInvalid = scopeInput !== "" && !ACCOUNT_ID_RE.test(scopeInput);
+  const scopeUser = unrestricted && !scopeInvalid ? scopeField.applied : "";
+  const accessQ = useK8sAccess("", unrestricted);
+  const scopeChoices = (accessQ.data?.users ?? []).map((u) => u.dms_user);
+  const { catalog, search } = usePvCatalog({ k8s: k8sMode, unrestricted, scopeUser });
+  // 쪽의 지정 방식: 면제자만 직접 경로를 고를 수 있다(비면제 = PV 주소만 -- 서버 raw_path_not_allowed).
+  const modeOf = (side: Side) => (unrestricted ? locs[side].mode : "pv");
+  const sideActive = (side: Side) => k8sMode && modeOf(side) === "pv"
+    && (side === "target" ? f.operation !== "sync" : f.operation === "sync");
+  const resolved: Record<Side, Resolved> = {
+    source: useResolvedPv({ active: sideActive("source"), ref: locs.source.ref, catalog, search }),
+    destination: useResolvedPv({ active: sideActive("destination"), ref: locs.destination.ref, catalog, search }),
+    target: useResolvedPv({ active: sideActive("target"), ref: locs.target.ref, catalog, search }),
+  };
+  const rowOf = (side: Side) => {
+    const r = resolved[side];
+    return r.status === "found" ? r.row : null;
+  };
 
   const storages = storagesQ.data ?? [];
   const loadingStorages = storagesQ.isLoading;
@@ -132,8 +181,17 @@ export function SubmitJob() {
   // "관리자는 기본 root"(사용자 결정 2026-09-30)의 **유일한 구현 지점**: 서버는 명시 true 만
   // root 로 받고 생략은 비 root 라(routes_requests.submit), 기본값 규칙(다른 실행 신원이 없으면
   // root)은 여기서 정해 확정값을 바디에 명시로 싣는다 -- 화면의 "실행 권한" 과 서버가 어긋날 수 없다.
-  const rootEffective = canRoot && (f.runAsRoot ?? !otherOwner);
+  // k8s 모드는 모든 작업이 root 다(설계 D2 -- 사용자·관리자 공통, 바디 run_as_root:true). open_noatime·소유권 문구·요약
+  // 「실행 권한」이 모두 이 한 값에서 나온다.
+  const rootEffective = k8sMode || (canRoot && (f.runAsRoot ?? !otherOwner));
+  // 연산 선택지: 관리자는 셋 다, 사용자는 서버 allowlist(k8s 모드 me.user_operations -- 설계 D15). ldap 모드·옛 서버는 sync 만.
+  const userOps = me.data?.user_operations;
+  const operations: Operation[] = isAdmin ? ALL_OPERATIONS
+    : k8sMode && Array.isArray(userOps) ? ALL_OPERATIONS.filter((o) => o === "sync" || userOps.includes(o))
+    : ["sync"];
   const rootOf = (name: string) => storages.find((s) => s.storage_name === name)?.managed_root;
+  // 직접 경로 선택지(면제자, k8s 모드): 파일시스템·둘 다 종류만(PV 전용 스토리지는 PV 주소로 -- 설계 D11).
+  const rawStorages = storages.filter((s) => storageKindOf(s) !== "pv");
   // 보조 그룹 주의문(2026-10-07 D15): 고른 소스·목적지의 등록 종류(backend_type)별 한 줄. 일반 주의문은 아래
   // 권한 안내 문장이 이미 말하므로 빼고, 종류별로 더 할 말이 있는 스토리지(NFS·Lustre)만 덧붙인다.
   const backends = useStorageBackends();
@@ -141,7 +199,12 @@ export function SubmitJob() {
     .filter((c) => c !== groupCaveat(undefined));
   // sync 목적지의 상위 디렉토리(쓰기 권한이 필요한 곳) -- 관리 디렉토리를 알면 절대경로로.
   const destRoot = rootOf(f.destStorage);
-  const destParentAbs = f.destPath.trim() === "" ? null : destinationParent(destRoot, f.destPath.trim());
+  // k8s 모드: PV 목적지면 서버가 해석한 PV 실제 경로 기준(하위경로가 비면 PV 루트의 부모), 직접 경로면 기존 규칙.
+  const destParentAbs = !k8sMode
+    ? (f.destPath.trim() === "" ? null : destinationParent(destRoot, f.destPath.trim()))
+    : modeOf("destination") === "pv" ? pvDestParent(rowOf("destination"), locs.destination.sub)
+    : locs.destination.path.trim() === "" ? null
+    : destinationParent(rootOf(locs.destination.storage), locs.destination.path.trim());
   // 결과(목적지) 소유권 안내 -- 바디와 같은 값(chown 옵션·rootEffective·실행 신원)에서 파생한다
   // (lib/syncOwnership = 서버 _auto_chown 미러). 사용자는 언제나 "요청자 본인 uid:gid". chown 칸은 관리자 전용
   // 고급 옵션이라 비관리자에겐 "chown 에 지정하세요" 대신 관리자에게 요청하라고 말한다(chownEditable).
@@ -152,7 +215,8 @@ export function SubmitJob() {
   // 관리자는 제한이 없어 조회하지 않는다. 선택지 필터는 표시일 뿐 -- 제출·계획·컨펌이 서버에서 다시
   // 본다(sync_pair_not_allowed). 신원·허용 목록을 알기 전에는 sync 선택지를 비운다: 거르기 전 목록이
   // 잠깐 보였다 사라지면 그 사이 고른 값이 허용 밖일 수 있다.
-  const needPairs = me.data !== undefined && !isAdmin;
+  // k8s 모드는 쌍 목록을 쓰지 않는다(설계 D14 -- 양쪽이 PV 주소인 sync 는 PV 권한으로 판정, 직접 경로는 면제자만).
+  const needPairs = me.data !== undefined && !isAdmin && !k8sMode;
   const pairsQ = useUserSyncPairs(needPairs);
   const pairsError = needPairs && pairsQ.data === undefined && pairsQ.isError;
   const pairsPending = me.data === undefined || (needPairs && pairsQ.data === undefined && !pairsQ.isError);
@@ -185,19 +249,48 @@ export function SubmitJob() {
   const advancedError = batchFilesError ?? bufsizeError ?? chmodError ?? chownError;
   // 대상 sanity(슬라이스 39, 사용자 결정): 스토리지 미선택·경로 공백이면 제출할 수 없다.
   // sync 는 소스·목적지 4필드, scan/rm 은 스토리지+대상. trim() 로 공백만 있는 입력도 미입력으로 본다.
-  const targetMissing = f.operation === "sync"
+  // k8s 모드의 쪽 판정(설계 §6 미러 -- 최종 판정은 서버): PV 쪽은 PV 를 골랐나·고를 수 있는 PV 인가·하위경로가 서버 규칙에
+  // 맞나(rm 은 PV 루트 금지 -- '', '.', './'), 직접 경로 쪽은 ldap 모드와 같은 규칙.
+  const activeSides: Side[] = f.operation === "sync" ? ["source", "destination"] : ["target"];
+  const sideCheck = (side: Side) => {
+    const l = locs[side];
+    if (modeOf(side) === "path") {
+      return { raw: true, missing: l.storage === "" || l.path.trim() === "", invalid: relativePathProblem(l.path) !== null,
+               pvBad: false, pvLoading: false, subBad: false, rmRoot: false };
+    }
+    const r = resolved[side];
+    const rmRoot = f.operation === "rm" && normalizeSub(l.sub) === "";
+    return { raw: false, missing: l.ref === null, invalid: false,
+             // 고른 PV 를 아직 확인하지 못했으면(목록·검색 응답 전) 잠그기만 하고 「쓸 수 없다」고 말하지 않는다.
+             pvLoading: l.ref !== null && r.status === "loading",
+             pvBad: l.ref !== null && (r.status === "missing" || r.status === "error"
+                                       || (r.status === "found" && !r.row.selectable)),
+             subBad: !rmRoot && pvSubProblem(l.sub, f.operation) !== null, rmRoot: l.ref !== null && rmRoot };
+  };
+  const checks = activeSides.map(sideCheck);
+  const anyRaw = k8sMode && checks.some((c) => c.raw);
+  const k8sPvBad = checks.some((c) => c.pvBad || c.pvLoading);
+  const k8sSubBad = checks.some((c) => c.subBad);
+  const k8sRmRoot = checks.some((c) => c.rmRoot);
+  const k8sCatalogError = catalog.status === "error";
+  const targetMissing = k8sMode ? checks.some((c) => c.missing)
+    : f.operation === "sync"
     ? (f.sourceStorage === "" || f.sourcePath.trim() === ""
        || f.destStorage === "" || f.destPath.trim() === "")
     : (f.storage === "" || f.target.trim() === "");
   // 서버가 422 unsafe_path 로 거부할 경로(relativePathProblem 미러) -- 보내기 전에 잠근다.
-  const pathInvalid = f.operation === "sync"
+  const pathInvalid = k8sMode ? checks.some((c) => c.invalid)
+    : f.operation === "sync"
     ? relativePathProblem(f.sourcePath) !== null || relativePathProblem(f.destPath) !== null
     : relativePathProblem(f.target) !== null;
-  const targetInvalid = targetMissing || pathInvalid || (f.operation === "sync" && pairBlocked);
+  const targetInvalid = targetMissing || pathInvalid || (f.operation === "sync" && pairBlocked)
+    || (k8sMode && (k8sPvBad || k8sSubBad || k8sRmRoot || k8sCatalogError || scopeInvalid));
   const optionsInvalid = recursiveMissing || statLiteConflict || verboseQuietConflict
     || advancedError !== null || scanBatchFilesError !== null || brokenLimitError !== null;
   // 제출 게이트는 이 하나다(위저드 시절 스텝별 '다음' 게이트의 합집합 + 조회 실패·진행 중).
-  const blocked = submit.isPending || storagesQ.isError
+  // k8s 모드의 스토리지 목록은 직접 경로 쪽에만 쓰인다 -- 그 조회 실패는 직접 경로를 고른 동안만 잠근다.
+  const storagesBlock = storagesQ.isError && (!k8sMode || anyRaw);
+  const blocked = submit.isPending || storagesBlock
     || (f.operation === "sync" && pairsError)
     || optionsInvalid || targetInvalid;
 
@@ -238,7 +331,8 @@ export function SubmitJob() {
       // 타인 소유 파일 O_NOATIME 은 EPERM 이라 부분 복사 뒤 Failed 가 된다. 예전엔
       // 운영자 단건 = 항상 root 라 isAdmin 만으로 충분했지만, 이제 root 는
       // 체크박스(rootEffective)가 정한다. 체크박스 값은 root 를 다시 켤 때를 위해 보존한다.
-      open_noatime: isAdmin && rootEffective && f.openNoatime,
+      // k8s 모드는 사용자도 root 라(설계 D2) 같은 기본(ON)이 실린다 -- 사용자 폼엔 고급 옵션이 없어 기본값 그대로다.
+      open_noatime: (isAdmin || k8sMode) && rootEffective && f.openNoatime,
     });
     // 빈 문자열일 때만 생략 — 빈 chmod/chown 을 그대로 실으면 서버 fullmatch 가
     // 422 invalid_option 으로 거부한다(빈 값은 "옵션 없음"이지 "빈 값 지정"이 아니다).
@@ -266,11 +360,56 @@ export function SubmitJob() {
   const currentOptions = () =>
     f.operation === "sync" ? syncOptions() : f.operation === "scan" ? scanOptions() : rmOptions();
 
+  // k8s 모드 바디(설계 §6): 쪽마다 PV 주소({cluster, namespace, pvc} + PV 안 하위경로) 또는 직접 경로(storage + 상대경로).
+  // 하위경로는 입력 그대로 싣는다(정규화·경로 해석·권한 재판정은 서버). run_as_root 는 늘 명시 true(D2 -- 생략·false 는 422).
+  // owner_username = 면제자의 「권한 기준 사용자」(요청 상세 「대상 사용자」 -- 실행 권한은 그래도 root).
+  function k8sBody(): SubmitBody {
+    const put = (side: Side, pvKey: "pv" | "source_pv" | "destination_pv",
+                 storageKey: "storage" | "source_storage" | "destination_storage",
+                 pathKey: "target" | "source" | "destination", body: SubmitBody) => {
+      const l = locs[side];
+      if (modeOf(side) === "pv" && l.ref !== null) {
+        body[pvKey] = { cluster: l.ref.cluster, namespace: l.ref.namespace, pvc: l.ref.pvc };
+        body[pathKey] = l.sub;
+      } else {
+        body[storageKey] = l.storage;
+        body[pathKey] = l.path;
+      }
+    };
+    const body: SubmitBody = { operation: f.operation, options: currentOptions() };
+    if (f.operation === "sync") {
+      put("source", "source_pv", "source_storage", "source", body);
+      put("destination", "destination_pv", "destination_storage", "destination", body);
+    } else {
+      put("target", "pv", "storage", "target", body);
+    }
+    if (f.priority !== "") body.priority = f.priority;
+    if (unrestricted && scopeInput !== "") body.owner_username = scopeInput;
+    body.run_as_root = true;
+    return body;
+  }
+
+  // 요약 한 쪽(k8s 모드): PV = 「PV 이름 — namespace (sc) / 하위경로」(요청 상세·목록과 같은 문법), 직접 경로 = storage:path.
+  const sideText = (side: Side) => {
+    const l = locs[side];
+    if (modeOf(side) === "path") return loc(l.storage, l.path);
+    return l.ref === null ? "—" : pvSummaryText(l.ref, rowOf(side), l.sub);
+  };
+  const sideAbs = (side: Side) => {
+    const l = locs[side];
+    if (modeOf(side) === "path") return null;
+    return pvSubProblem(l.sub, f.operation) !== null ? null : pvAbsPath(rowOf(side), l.sub);
+  };
+
   // 제출 버튼은 type="button" + onClick 이다(아래 form 주석) -- e 는 옵션으로 받고, form 경유
   // (강제 submit 등) 때만 기본 동작을 막는다.
   function handleSubmit(e?: React.SyntheticEvent) {
     e?.preventDefault();
     if (blocked) return;
+    if (k8sMode) {
+      submit.mutate(k8sBody(), { onSuccess: (r) => nav(`/jobs/${r.request_id}`) });
+      return;
+    }
     const body: SubmitBody = f.operation === "sync"
       ? {
           operation: "sync",
@@ -297,9 +436,26 @@ export function SubmitJob() {
   // 두 번 그리지 않는다(SubmitHints 주석). 대상 미입력 안내만은 원문이 여기 한 곳에 산다.
   const hints: string[] = [];
   if (submit.isPending) hints.push("제출 중…");
-  if (storagesQ.isError) hints.push("스토리지 목록 조회 실패 — 새로고침 후 다시 시도하세요");
+  if (storagesBlock) hints.push("스토리지 목록 조회 실패 — 새로고침 후 다시 시도하세요");
   if (f.operation === "sync" && pairsError) hints.push("허용 조합 조회 실패 — 새로고침 후 다시 시도하세요");
-  if (f.operation === "sync" && allowedPairs !== null && allowedPairs.length === 0)
+  if (k8sMode) {
+    // 필드·구획 머리의 문구와 다른, 짧은 「무엇을 하면 되나」(SubmitHints 계약).
+    if (scopeInvalid) hints.push("권한 기준 사용자를 계정 아이디 형식으로 고치세요");
+    if (k8sCatalogError) hints.push("PV 목록 조회 실패 — 새로고침 후 다시 시도하세요");
+    else if (catalog.status === "ready" && catalog.clusters.every((c) => c.synced_at === null))
+      hints.push("k8s 목록이 아직 동기화되지 않아 PV 를 고를 수 없습니다");
+    else if (catalog.status === "ready" && catalog.namespaces !== null && catalog.namespaces.length === 0
+             && checks.some((c) => !c.raw))
+      hints.push("권한 있는 namespace 가 없어 지금은 PV 를 고를 수 없습니다");
+    if (targetMissing)
+      hints.push(f.operation === "sync"
+        ? (anyRaw ? "소스·목적지를 모두 고르고 경로를 입력하세요" : "소스·목적지 PV 를 모두 고르세요")
+        : anyRaw ? "스토리지와 대상 경로를 입력하세요" : "대상 PV 를 고르세요");
+    if (checks.some((c) => c.pvBad)) hints.push("고른 PV 를 쓸 수 없습니다 — 다시 고르세요");
+    else if (checks.some((c) => c.pvLoading)) hints.push("고른 PV 정보를 불러오는 중…");
+    if (k8sRmRoot) hints.push("삭제할 PV 안 경로를 입력하세요 — PV 전체는 삭제할 수 없습니다");
+    if (k8sSubBad) hints.push("PV 안 경로를 PV 아래 상대경로로 고치세요");
+  } else if (f.operation === "sync" && allowedPairs !== null && allowedPairs.length === 0)
     hints.push("허용된 sync 조합이 없어 지금은 제출할 수 없습니다");
   else if (f.operation === "sync" && pairBlocked) hints.push("허용된 조합으로 소스·목적지를 다시 고르세요");
   else if (targetMissing)
@@ -311,6 +467,85 @@ export function SubmitJob() {
   const targetTitle = f.operation === "sync" ? "소스와 목적지"
     : f.operation === "scan" ? "스캔 대상" : "삭제 대상";
 
+  // k8s 모드의 한 쪽 입력. 직접 경로(면제자)는 ldap 모드와 같은 부품(StoragePicker + 상대경로 + PathFeedback)이고 라벨도 같다
+  // (「소스 스토리지」·「목적지 경로」·「스토리지」·「대상 경로」) -- 선택지만 파일시스템·둘 다 종류로 거른다.
+  const locationField = (side: Side) => {
+    const L = SIDE_LABELS[side];
+    const l = locs[side];
+    const raw = (
+      <>
+        <StoragePicker label={L.storage} value={l.storage} onChange={(v) => setLoc(side)({ ...l, storage: v })}
+                       storages={rawStorages} loading={loadingStorages} />
+        <div>
+          <label className="text-sm block">{L.path}
+            <input aria-label={L.path} className={field} value={l.path}
+                   placeholder={side === "destination" ? "예: backup/dataset" : side === "source" ? "예: team/dataset"
+                     : "예: team/projects"}
+                   onChange={(e) => setLoc(side)({ ...l, path: e.target.value })} />
+          </label>
+          <PathFeedback root={rootOf(l.storage)} rel={l.path} />
+        </div>
+      </>
+    );
+    return (
+      <LocationField side={side} operation={f.operation} loc={l} onChange={setLoc(side)} catalog={catalog}
+                     search={search} resolved={resolved[side]} allowRaw={unrestricted} rawSlot={raw} />
+    );
+  };
+
+  // sync 목적지 조건과 소유권 안내(ldap·k8s 공용 -- k8s 모드는 rootEffective 가 늘 참이라 root 문구가 나오고, LDAP 보조 그룹
+  // 문단은 빠진다).
+  const syncConditions = (
+    <InfoCard role="note" aria-label="목적지 조건과 소유권">
+      <p className="font-medium">
+        {k8sMode ? "목적지 조건과 소유권 — root 실행 기준"
+          : `목적지 조건과 소유권 — ${isAdmin ? "실행 신원" : "요청자 본인 계정"}(uid/gid) 기준`}
+      </p>
+      <ul className="mt-1 list-disc space-y-0.5 pl-5 text-xs">
+        <li>
+          <strong>목적지가 없는 경우</strong>: sync 가 목적지 디렉토리를 새로 만듭니다. 목적지의{" "}
+          {rootEffective
+            ? <><strong>상위 디렉토리는 이미 있어야</strong> 합니다(root 실행 — 쓰기 권한 검사 우회)</>
+            : <><strong>상위 디렉토리는 이미 있고 그 디렉토리에 쓰기 권한</strong>이 있어야 합니다</>}
+          {" "}— 중간 디렉토리는 만들지 않습니다.
+          {destParentAbs !== null && (rootEffective ? (
+            <> 이 요청에서는 <code className="rounded bg-surface px-1 break-all">{destParentAbs}</code> 가
+              이미 있어야 합니다.</>
+          ) : (
+            <> 이 요청에서는 <code className="rounded bg-surface px-1 break-all">{destParentAbs}</code> 에
+              쓰기 권한이 필요합니다.</>
+          ))}
+        </li>
+        <li>
+          <strong>목적지가 이미 있는 경우</strong>: 디렉토리여야 합니다(파일이면 거부).{" "}
+          {rootEffective
+            ? "root 실행이라 쓰기·소유 검사는 우회되고, 그 안의 같은 경로 항목은 소스의 소유·권한·시각으로 다시 맞춰집니다(chown·chmod 를 지정하면 그 값)."
+            : <>쓰기·진입할 수 있어야 하며,{" "}
+                {canRoot ? "root 실행이 아니면 실행 신원 소유여야" : isAdmin ? "실행 신원 소유여야" : "요청자 본인 소유여야"}{" "}
+                합니다(sync 가 최상위의 권한·시각을 소스에 맞추기 때문) — 그룹 쓰기 권한만으로는 부족합니다.
+                상위 디렉토리 쓰기 권한도 마찬가지로 필요합니다.</>}
+        </li>
+        <li><strong>소유권</strong>: {ownership.long}</li>
+        {/* 보조 그룹 인정(2026-10-07 D15 -- 조건부 문구): preflight·도구가 실행 uid + LDAP 주 gid + 계획
+            시점에 얼린 LDAP 보조 gid(supplementalGroups·워커 /etc/group)로 돈다. "인정된다" 를 무조건으로
+            말하지 않는다 -- 계획 시점 확정·gidNumber 그룹만·중첩 제외·스토리지 서버가 최종 판정(D10·D1). */}
+        {!k8sMode && <li>
+          {canRoot ? "root 가 아닌 실행에서 권한은" : "권한은"} {isAdmin ? "실행 신원" : "본인 계정"}의 uid·LDAP 주
+          그룹·LDAP 보조 그룹(적용된 경우 — 운영자가 기능을 껐거나 그룹이 256개를 넘으면 주 그룹만) 기준으로
+          판정됩니다. 보조 그룹은 신청이 계획될 때 한 번 확정되고(gidNumber 가 있는
+          그룹만, 중첩 그룹 제외), 그 뒤 그룹에서 빠지면 실행 전에 중단되며 새로 들어간 그룹은 다시 신청해야
+          반영됩니다. 실제 인정 여부는 스토리지 설정에 따라 다를 수 있습니다.
+          {syncGroupCaveats.map((c) => <span key={c} className="block">{c}</span>)}
+        </li>}
+        <li>조건이 맞지 않으면 미리보기 전에 거부되고 사유가 표시됩니다 — 아무것도 복사되지 않습니다.</li>
+        {canRoot && !k8sMode && (
+          <li>root 권한으로 실행하면 권한·소유 검사는 우회됩니다(아래 실행 설정에서 선택) — 상위 디렉토리는
+            그래도 이미 있어야 합니다.</li>
+        )}
+      </ul>
+    </InfoCard>
+  );
+
   const sheet = (
     <>
       <FormSection step={1} title="작업 종류">
@@ -318,23 +553,52 @@ export function SubmitJob() {
           <label className="text-sm block">연산
             <select aria-label="연산" className={field} value={f.operation}
                     onChange={(e) => setF({ ...f, operation: e.target.value as Operation })}>
-              <option value="sync">sync</option>
               {/* 사용자 연산 allowlist(2026-08-20, 사용자 결정): 비운영자는
                   sync 만. scan·rm 은 admin 전용 -- 표시 게이트일 뿐 진짜 차단은
-                  서버(routes_requests operation_admin_only 403). */}
-              {isAdmin && <option value="scan">scan</option>}
-              {isAdmin && <option value="rm">rm</option>}
+                  서버(routes_requests operation_admin_only 403). k8s 모드는 서버 allowlist
+                  (me.user_operations -- 설계 D15)를 그대로 그린다. */}
+              {operations.map((o) => <option key={o} value={o}>{o}</option>)}
             </select>
           </label>
           <p className="text-sm text-muted sm:pt-8">{OPERATION_HELP[f.operation]}</p>
         </div>
+        {/* k8s 모드(설계 D2·D4): 모든 작업은 root -- 체크박스 대신 사실 한 줄. 면제자는 「권한 기준 사용자」로 PV 범위를 정하고
+            (비우면 전체 PV 검색), 목록 밖 관리자는 자기 맵핑 범위만이라 무엇이 더 필요한지 한 줄로 말한다. */}
+        {k8sMode && (
+          <p className="text-sm text-ink/80">
+            모든 작업은 root 로 실행됩니다 — {unrestricted
+              ? "전체 PV·직접 경로 권한이 있어 모든 PV 와 직접 경로를 고를 수 있습니다."
+              : "고를 수 있는 PV 는 내 namespace 권한(rolebinding)으로 정해집니다."}
+          </p>
+        )}
+        {k8sMode && isAdmin && !unrestricted && (
+          <p className="text-xs text-ink/70">
+            직접 경로·사용자 지정은 계정 화면의 「전체 PV·직접 경로 권한」이 필요합니다 — 지금은 내 namespace 권한 안의 PV 만 고릅니다.
+          </p>
+        )}
+        {unrestricted && (
+          <FieldRow
+            control={<>
+              <label className="text-sm block">권한 기준 사용자
+                <input aria-label="권한 기준 사용자" className={field} list="k8s-scope-users"
+                       placeholder="비우면 전체 PV 검색 · 예: junwoo.song" autoComplete="off" {...scopeField.bind} />
+              </label>
+              <datalist id="k8s-scope-users">
+                {scopeChoices.map((u) => <option key={u} value={u} />)}
+              </datalist>
+              {scopeInvalid && (
+                <p className="mt-1 text-bad text-sm">계정 아이디 형식이 아닙니다(영소문자·숫자로 시작, 영소문자·숫자·. _ -)</p>
+              )}
+            </>}
+            help="적으면 그 사용자의 namespace 권한 안의 PV 만 보이고, 작업에 그 사용자가 「대상 사용자」로 기록됩니다(실행은 그래도 root). 비우면 모든 클러스터의 PV 를 검색합니다." />
+        )}
       </FormSection>
 
       {/* "경로는 관리 디렉토리 아래 상대경로" 는 스토리지 선택 아래 캡션(StoragePicker)이 이미 말하고,
           입력 아래 "실제 경로" 가 그 결과를 보여 준다 -- 구획 캡션으로 세 번째 반복하지 않는다. */}
       <FormSection step={2} title={targetTitle}>
         {/* 목록 로드 실패 문구는 스토리지를 고르는 이 구획에 -- 제출 차단은 blocked 가 맡는다 */}
-        {storagesQ.isError && (
+        {storagesBlock && (
           <p className="text-bad text-sm">{(storagesQ.error as ApiError).message}</p>
         )}
         {f.operation === "sync" && pairsError && (
@@ -342,7 +606,24 @@ export function SubmitJob() {
             {`허용된 스토리지 조합을 불러오지 못했습니다: ${(pairsQ.error as ApiError).message}`}
           </p>
         )}
-        {f.operation === "sync" ? (
+        {k8sMode ? (
+          /* k8s 모드(설계 §7): 쪽마다 LocationField -- namespace (StorageClass) → PV 이름 → PV 안 경로(면제자는 「PV | 직접
+             경로」·검색). 목록 상태(조회 실패·아직 동기화 안 됨·권한 namespace 0개)는 구획 머리에 한 번만. */
+          <>
+            <CatalogNotice catalog={catalog} search={search} actor={me.data?.actor ?? ""} scopeUser={scopeUser} />
+            {f.operation === "sync" ? (
+              <>
+                <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]">
+                  {locationField("source")}
+                  <ArrowRight aria-hidden
+                              className="h-5 w-5 rotate-90 justify-self-center text-muted md:mt-8 md:rotate-0" />
+                  {locationField("destination")}
+                </div>
+                {syncConditions}
+              </>
+            ) : locationField("target")}
+          </>
+        ) : f.operation === "sync" ? (
           <>
             {/* 경로 한 줄: 소스 → 목적지. 넓은 화면에선 좌우로 놓아 복사 방향이 그대로 읽힌다. */}
             <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]">
@@ -401,53 +682,7 @@ export function SubmitJob() {
                 목적지가 있으면 디렉토리여야 하고 쓰기·진입(비 root 는 소유) + 상위 쓰기. 소유권은
                 lib/syncOwnership(_auto_chown 미러). 권한이 필요한 상위 디렉토리는 실제 절대경로로.
                 사용자가 "분명히" 보이게 해 달라고 한 안내라 접지 않는다. */}
-            <InfoCard role="note" aria-label="목적지 조건과 소유권">
-              <p className="font-medium">
-                {`목적지 조건과 소유권 — ${isAdmin ? "실행 신원" : "요청자 본인 계정"}(uid/gid) 기준`}
-              </p>
-              <ul className="mt-1 list-disc space-y-0.5 pl-5 text-xs">
-                <li>
-                  <strong>목적지가 없는 경우</strong>: sync 가 목적지 디렉토리를 새로 만듭니다. 목적지의{" "}
-                  {rootEffective
-                    ? <><strong>상위 디렉토리는 이미 있어야</strong> 합니다(root 실행 — 쓰기 권한 검사 우회)</>
-                    : <><strong>상위 디렉토리는 이미 있고 그 디렉토리에 쓰기 권한</strong>이 있어야 합니다</>}
-                  {" "}— 중간 디렉토리는 만들지 않습니다.
-                  {destParentAbs !== null && (rootEffective ? (
-                    <> 이 요청에서는 <code className="rounded bg-surface px-1 break-all">{destParentAbs}</code> 가
-                      이미 있어야 합니다.</>
-                  ) : (
-                    <> 이 요청에서는 <code className="rounded bg-surface px-1 break-all">{destParentAbs}</code> 에
-                      쓰기 권한이 필요합니다.</>
-                  ))}
-                </li>
-                <li>
-                  <strong>목적지가 이미 있는 경우</strong>: 디렉토리여야 합니다(파일이면 거부).{" "}
-                  {rootEffective
-                    ? "root 실행이라 쓰기·소유 검사는 우회되고, 그 안의 같은 경로 항목은 소스의 소유·권한·시각으로 다시 맞춰집니다(chown·chmod 를 지정하면 그 값)."
-                    : <>쓰기·진입할 수 있어야 하며,{" "}
-                        {canRoot ? "root 실행이 아니면 실행 신원 소유여야" : isAdmin ? "실행 신원 소유여야" : "요청자 본인 소유여야"}{" "}
-                        합니다(sync 가 최상위의 권한·시각을 소스에 맞추기 때문) — 그룹 쓰기 권한만으로는 부족합니다.
-                        상위 디렉토리 쓰기 권한도 마찬가지로 필요합니다.</>}
-                </li>
-                <li><strong>소유권</strong>: {ownership.long}</li>
-                {/* 보조 그룹 인정(2026-10-07 D15 -- 조건부 문구): preflight·도구가 실행 uid + LDAP 주 gid + 계획
-                    시점에 얼린 LDAP 보조 gid(supplementalGroups·워커 /etc/group)로 돈다. "인정된다" 를 무조건으로
-                    말하지 않는다 -- 계획 시점 확정·gidNumber 그룹만·중첩 제외·스토리지 서버가 최종 판정(D10·D1). */}
-                <li>
-                  {canRoot ? "root 가 아닌 실행에서 권한은" : "권한은"} {isAdmin ? "실행 신원" : "본인 계정"}의 uid·LDAP 주
-                  그룹·LDAP 보조 그룹(적용된 경우 — 운영자가 기능을 껐거나 그룹이 256개를 넘으면 주 그룹만) 기준으로
-                  판정됩니다. 보조 그룹은 신청이 계획될 때 한 번 확정되고(gidNumber 가 있는
-                  그룹만, 중첩 그룹 제외), 그 뒤 그룹에서 빠지면 실행 전에 중단되며 새로 들어간 그룹은 다시 신청해야
-                  반영됩니다. 실제 인정 여부는 스토리지 설정에 따라 다를 수 있습니다.
-                  {syncGroupCaveats.map((c) => <span key={c} className="block">{c}</span>)}
-                </li>
-                <li>조건이 맞지 않으면 미리보기 전에 거부되고 사유가 표시됩니다 — 아무것도 복사되지 않습니다.</li>
-                {canRoot && (
-                  <li>root 권한으로 실행하면 권한·소유 검사는 우회됩니다(아래 실행 설정에서 선택) — 상위 디렉토리는
-                    그래도 이미 있어야 합니다.</li>
-                )}
-              </ul>
-            </InfoCard>
+            {syncConditions}
           </>
         ) : (
           /* scan·rm 공용: 스토리지 하나 + 대상 경로(상대). */
@@ -656,7 +891,9 @@ export function SubmitJob() {
               자격 있는 관리자 기본 root, 다른 실행 신원을 적으면 기본이 그 사용자
               uid/gid -- 캡션은 그 사실을 그대로 말한다. 서버 게이트: 다른 신원·root
               둘 다 특권 인가(403 privileged_not_authorized). */}
-          <FieldRow
+          {/* k8s 모드(설계 D2·D4)에는 실행 신원·root 체크박스가 없다 -- 모든 작업이 root 이고, 사용자 지정은 1구획의 「권한
+              기준 사용자」(면제자만)가 맡는다. */}
+          {!k8sMode && <FieldRow
             control={<label className="text-sm block">실행 신원(선택)
               <input aria-label="실행 신원(선택)" className={field}
                      placeholder="예: cocoa.song"
@@ -668,8 +905,8 @@ export function SubmitJob() {
               다른 사용자를 지정하면(특권 요청자만) 기본은{" "}
               <strong>그 사용자의 uid/gid</strong> 로 실행되어 그 사용자의 파일 권한이
               그대로 적용됩니다 — 그 사용자가 쓸 수 없는 목적지는 실패합니다.
-            </>} />
-          {canRoot && (
+            </>} />}
+          {canRoot && !k8sMode && (
             <FieldRow align="check"
               control={<label className="flex items-center gap-2 text-sm">
                 <input type="checkbox" aria-label="root 권한으로 실행"
@@ -687,11 +924,14 @@ export function SubmitJob() {
                 )}
               </>} />
           )}
-          {!canRoot && (
+          {!canRoot && !k8sMode && (
             <p className="text-muted text-xs">
               이 계정은 root 실행 자격이 없습니다 — 실행 신원의 권한으로 실행됩니다. admin 역할만으로는 생기지 않으며,
               root 자격이 있는 관리자가 「관리 → 계정」의 root 실행에서 줄 수 있습니다(세션 로그인 필요).
             </p>
+          )}
+          {k8sMode && f.operation === "rm" && (
+            <p className="text-xs text-bad">삭제가 root 권한으로 수행됩니다(k8s 모드의 모든 작업은 root)</p>
           )}
         </FormSection>
       )}
@@ -721,8 +961,14 @@ export function SubmitJob() {
         <SummaryRow label="연산">{f.operation}</SummaryRow>
         {f.operation === "sync" ? (
           <>
-            <SummaryRow label="소스">{loc(f.sourceStorage, f.sourcePath)}</SummaryRow>
-            <SummaryRow label="목적지">{loc(f.destStorage, f.destPath)}</SummaryRow>
+            <SummaryRow label="소스">{k8sMode ? sideText("source") : loc(f.sourceStorage, f.sourcePath)}</SummaryRow>
+            {k8sMode && sideAbs("source") !== null && (
+              <SummaryRow label="소스 실제 경로">{sideAbs("source")}</SummaryRow>
+            )}
+            <SummaryRow label="목적지">{k8sMode ? sideText("destination") : loc(f.destStorage, f.destPath)}</SummaryRow>
+            {k8sMode && sideAbs("destination") !== null && (
+              <SummaryRow label="목적지 실제 경로">{sideAbs("destination")}</SummaryRow>
+            )}
             {/* 목적지 조건과 소유권 카드의 요점. root 실행이면 권한 검사가 우회되지만 상위 디렉토리
                 존재는 여전히 필요하다(preflight test -w). */}
             <SummaryRow label="목적지 조건">{rootEffective
@@ -732,14 +978,22 @@ export function SubmitJob() {
             <SummaryRow label="목적지 소유">{ownership.short}</SummaryRow>
           </>
         ) : (
-          <SummaryRow label="대상">{loc(f.storage, f.target)}</SummaryRow>
+          <>
+            <SummaryRow label="대상">{k8sMode ? sideText("target") : loc(f.storage, f.target)}</SummaryRow>
+            {k8sMode && sideAbs("target") !== null && (
+              <SummaryRow label="실제 경로">{sideAbs("target")}</SummaryRow>
+            )}
+          </>
         )}
         <SummaryRow label="옵션"><OptionTokens options={currentOptions()} /></SummaryRow>
         <SummaryRow label="우선순위">{f.priority === "" ? priorityDefaultLabel : f.priority}</SummaryRow>
-        {isAdmin && f.ownerUsername.trim() !== "" && (
+        {!k8sMode && isAdmin && f.ownerUsername.trim() !== "" && (
           <SummaryRow label="실행 신원">{f.ownerUsername.trim()}</SummaryRow>
         )}
-        {isAdmin && (
+        {k8sMode && unrestricted && scopeInput !== "" && (
+          <SummaryRow label="대상 사용자">{scopeInput}</SummaryRow>
+        )}
+        {(isAdmin || k8sMode) && (
           <SummaryRow label="실행 권한" className={rootEffective ? "text-bad" : ""}>
             {rootEffective ? PRIV_ROOT_SYNC : PRIV_USER}
           </SummaryRow>
@@ -757,6 +1011,7 @@ export function SubmitJob() {
         {me.data !== undefined && (
           <p className="mt-1 text-sm text-muted">
             {isAdmin ? "경로 하나에 sync·scan·rm 을 실행합니다 — 여러 경로의 sync·scan·rm 은 배치 작업으로 묶어 요청하세요."
+              : k8sMode ? `권한 있는 PV 에서 ${operations.join("·")} 을 실행합니다 — namespace (StorageClass) → PV 이름 → PV 안 경로 순서로 고르세요.`
               : "스토리지 사이에서 디렉토리 하나를 sync 합니다."}
           </p>
         )}

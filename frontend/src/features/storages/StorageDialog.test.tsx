@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
 import { setupServer } from "msw/node";
@@ -140,4 +140,68 @@ test("수정: 관리자 전용 행은 그 라디오로 시작하고, 완전 비�
   await userEvent.click(screen.getByRole("button", { name: "저장" }));
   await screen.findByText(/./);
   expect(body).toEqual({ mount_path: "/s3", managed_root: "/s3", backend_type: "cephfs", enabled: false });
+});
+
+
+// ---- 스토리지 종류(dms-k8s 설계 D11 -- k8s 모드만) ----------------------------------------------------------------
+
+test("백엔드 선택지에 onefs·nfs 가 있다(서버 _BACKENDS 와 같은 셋 -- 공용 줄)", async () => {
+  wrap(<StorageDialog mode="create" trigger={<Button>등록</Button>} />);
+  await userEvent.click(screen.getByRole("button", { name: "등록" }));
+  const select = screen.getByLabelText("백엔드") as HTMLSelectElement;
+  expect(Array.from(select.options).map((o) => o.value)).toEqual(
+    ["", "cephfs", "gpfs", "wekafs", "lustre", "purestorage", "netapp", "onefs", "nfs"]);
+  // ldap 모드(기본)는 종류 라디오가 없다
+  expect(screen.queryByRole("group", { name: "종류" })).toBeNull();
+});
+
+test("k8s 모드 등록: 종류 라디오(파일시스템 / PV / 둘 다), PV·둘 다면 백엔드 프리셋을 읽기 전용으로, 바디에 kind", async () => {
+  let body: any = null;
+  server.use(http.post("/api/admin/storages", async ({ request }) => {
+    body = await request.json(); return HttpResponse.json(body, { status: 201 }); }));
+  wrap(<StorageDialog mode="create" k8s trigger={<Button>등록</Button>} />);
+  await userEvent.click(screen.getByRole("button", { name: "등록" }));
+  const kinds = screen.getByRole("group", { name: "종류" });
+  expect(within(kinds).getByLabelText("파일시스템")).toBeChecked();
+  expect(within(kinds).getByText(/직접 경로\(스토리지 \+ 관리 디렉토리 아래 상대경로\)로만 씁니다/)).toBeInTheDocument();
+  await userEvent.type(screen.getByLabelText("스토리지 이름"), "k8s-pv-gpfs");
+  await userEvent.type(screen.getByLabelText("마운트 경로"), "/k8s_pv/gpfs");
+  await userEvent.type(screen.getByLabelText("관리 루트"), "/k8s_pv/gpfs");
+  await userEvent.click(within(kinds).getByLabelText("둘 다"));
+  expect(within(kinds).getByText("백엔드를 고르면 PV 경로 규칙(프리셋)이 보입니다.")).toBeInTheDocument();
+  await userEvent.selectOptions(screen.getByLabelText("백엔드"), "gpfs");
+  expect(within(kinds).getByText("{volume}/{volume}-data", { selector: "code" })).toBeInTheDocument();
+  await userEvent.selectOptions(screen.getByLabelText("백엔드"), "onefs");
+  expect(within(kinds).getByText("data/csi/{volume}", { selector: "code" })).toBeInTheDocument();
+  await userEvent.selectOptions(screen.getByLabelText("백엔드"), "nfs");
+  expect(within(kinds).getByText("{subdir}", { selector: "code" })).toBeInTheDocument();
+  await userEvent.selectOptions(screen.getByLabelText("백엔드"), "wekafs");
+  expect(within(kinds).getByText(/StorageClass 화면에서 템플릿 지정 필요/)).toBeInTheDocument();
+  await userEvent.selectOptions(screen.getByLabelText("백엔드"), "gpfs");
+  await userEvent.click(screen.getByRole("button", { name: "저장" }));
+  await screen.findByText(/./);
+  await waitFor(() => expect(body).toEqual({ storage_name: "k8s-pv-gpfs", mount_path: "/k8s_pv/gpfs",
+    managed_root: "/k8s_pv/gpfs", backend_type: "gpfs", enabled: true, user_enabled: true, kind: "both" }));
+});
+
+test("k8s 모드 수정: 지금 종류로 시작하고 연결된 StorageClass 를 보이며, 바꾼 종류를 싣는다", async () => {
+  const S = { storage_name: "k8s-pv-nfs", mount_path: "/k8s_pv/nfs", managed_root: "/k8s_pv/nfs", backend_type: "nfs",
+              enabled: 1, status: "Ready", status_detail: null, kind: "pv" } as unknown as Storage;
+  let body: any = null;
+  server.use(
+    http.put("/api/admin/storages/:name", async ({ request }) => {
+      body = await request.json(); return HttpResponse.json(S); }),
+    http.get("/api/admin/k8s/storage-classes", () => HttpResponse.json([
+      { cluster: "dmsk8s", name: "tb-nfs", storage_name: "k8s-pv-nfs" },
+      { cluster: "dmsk8s", name: "tb-gpfs", storage_name: "k8s-pv-gpfs" }])),
+  );
+  wrap(<StorageDialog mode="edit" storage={S} k8s trigger={<Button>수정</Button>} />);
+  await userEvent.click(screen.getByRole("button", { name: "수정" }));
+  const kinds = screen.getByRole("group", { name: "종류" });
+  expect(within(kinds).getByLabelText("PV")).toBeChecked();
+  expect(await within(kinds).findByText("연결된 StorageClass: tb-nfs (dmsk8s)")).toBeInTheDocument();
+  await userEvent.click(within(kinds).getByLabelText("둘 다"));
+  await userEvent.click(screen.getByRole("button", { name: "저장" }));
+  await waitFor(() => expect(body).toEqual({ mount_path: "/k8s_pv/nfs", managed_root: "/k8s_pv/nfs", backend_type: "nfs",
+    enabled: true, user_enabled: true, kind: "both" }));
 });

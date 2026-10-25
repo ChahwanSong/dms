@@ -13,7 +13,7 @@
 //     숫자가 갈리지 않게. 화면 테스트는 공백을 정규화해 비교한다.
 import type { DataJob, RequestDetail, WorkerPool, WorkerPoolIdentity } from "../../lib/types";
 import { REQUEST_TERMINAL_STATES, isTerminal } from "../../lib/jobState";
-import { absParts, pathParts, type StorageRoots } from "../../lib/storagePaths";
+import { absParts, hasPvAddress, pathParts, pvDetailParts, type StorageRoots } from "../../lib/storagePaths";
 import { toolSummary } from "../../lib/jobTool";
 import { groupCaveatsFor, supplementaryGroupsText } from "../../lib/groupCaveats";
 import { syncOwnership } from "../../lib/syncOwnership";
@@ -43,6 +43,10 @@ export type PrivBasis = "plan" | "request";
 export interface RequestSpec {
   target: string[];                    // pathParts(sync = [출발, 도착], 그 밖 = [대상]) -- 카드가 「 → 」로 잇는다
   abs: string[] | null;                // absParts. null = 행 생략
+  // PV 주소 요청(dms-k8s 설계 §7)의 「PV」 행 -- 쪽마다 클러스터 · 볼륨 · StorageClass. PV 주소가 아닌 쪽은 없다(빈 배열 = 행 없음).
+  pv: { side: "소스" | "목적지" | null; text: string }[];
+  // 「대상 사용자」 -- PV 주소 요청에서 면제 관리자가 지정한 권한 기준 사용자(owner_username). null = 행 생략.
+  targetUser: string | null;
   options: OptionsView;
   priority: string;
   nodeRequest: string | null;          // 「노드 지정」(배치 자식 payload). null = 행 생략
@@ -439,6 +443,8 @@ export function deriveRequestSpec(req: RequestDetail, jobs: DataJob[] | null,
   return {
     target: pathParts(op, p),
     abs: absParts(op, p, roots),
+    pv: pvDetailParts(op, p),
+    targetUser: hasPvAddress(p) ? name(p.owner_username) : null,
     options,
     priority: priorityText(r.priority, wp?.priority_class),
     nodeRequest,

@@ -145,6 +145,13 @@ export function RequestSpecCard({ spec }: { spec: RequestSpec }) {
             {spec.abs !== null && (
               <SpecRow label="절대경로" ddClass={`${pathClass(spec.abs)} text-ink/70`}>{showPath(spec.abs)}</SpecRow>
             )}
+            {/* PV 주소 요청(dms-k8s 설계 §7): 대상 행은 사람이 읽는 「PV 이름 — namespace (sc) / 하위경로」이고, 경로를 만든 값
+                (클러스터 · 볼륨 · StorageClass)은 여기 -- 절대경로 행과 함께 「어느 PV 의 어디」를 확정한다. */}
+            {spec.pv.map((r) => (
+              <SpecRow key={r.side ?? "pv"} label={r.side === null ? "PV" : `${r.side} PV`}
+                       ddClass="font-mono text-xs">{r.text}</SpecRow>
+            ))}
+            {spec.targetUser !== null && <SpecRow label="대상 사용자">{spec.targetUser}</SpecRow>}
             <SpecRow label="옵션"><OptionsCell v={spec.options} /></SpecRow>
             <SpecRow label="우선순위">{spec.priority}</SpecRow>
             {spec.nodeRequest !== null && <SpecRow label="노드 지정">{spec.nodeRequest}</SpecRow>}

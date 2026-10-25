@@ -117,3 +117,12 @@ test("토글 뒤 재조회가 실패해도 매트릭스는 직전 값으로 남�
   expect(screen.getByRole("checkbox", { name: "ceph-a → ceph-b 허용" })).toBeChecked();
   expect(screen.getAllByRole("checkbox")).toHaveLength(16);
 });
+
+
+test("k8s 모드: 「k8s 모드에서는 PV 권한으로 판정」을 표기하고, 허용 쌍 0개 경보(사용자 sync 불가)를 내지 않는다", async () => {
+  server.use(http.get("/api/auth/me", () => HttpResponse.json({ actor: "root", role: "admin", identity_mode: "k8s" })));
+  wrap();
+  expect(await screen.findByText(/k8s 모드에서는 PV 권한으로 판정/)).toBeInTheDocument();
+  await cell("ceph-a", "ceph-b");
+  expect(screen.queryByText(/지금은 사용자가 sync 를 제출할 수 없습니다/)).toBeNull();
+});

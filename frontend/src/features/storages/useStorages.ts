@@ -1,16 +1,18 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiGet, apiSend } from "../../lib/api";
 import type { Storage } from "../../lib/types";
+import type { StorageKind } from "../k8s/types";
 export const useStorages = () =>
   useQuery({ queryKey: ["storages"], queryFn: () => apiGet<Storage[]>("/api/admin/storages") });
 // 사용 범위 플래그(storageScope.flagsFor). user_enabled 생략 = 서버가 현재 값 유지.
+// kind(dms-k8s 설계 D11 — filesystem | pv | both)는 k8s 모드 화면만 싣는다(ldap 모드 바디는 그대로 -- 생략 = 서버가 현재 값 유지).
 export interface StorageCreateBody {
   storage_name: string; mount_path: string; managed_root: string; backend_type: string;
-  enabled?: boolean; user_enabled?: boolean;
+  enabled?: boolean; user_enabled?: boolean; kind?: StorageKind;
 }
 export interface StorageUpdateBody {
   mount_path: string; managed_root: string; backend_type: string; enabled: boolean;
-  user_enabled?: boolean;
+  user_enabled?: boolean; kind?: StorageKind;
 }
 export const useCreateStorage = () => {
   const qc = useQueryClient();

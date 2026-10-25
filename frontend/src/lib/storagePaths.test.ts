@@ -1,5 +1,9 @@
 import { test, expect } from "vitest";
-import { absolutePath, absParts, absSummary, destinationParent, pathParts, pathSummary, relativePathProblem } from "./storagePaths";
+import {
+  absolutePath, absParts, absSummary, destinationParent, hasPvAddress, pathParts, pathSummary, pvDetailParts,
+  pvLocationText, relativePathProblem,
+} from "./storagePaths";
+import { nsLabel } from "../features/k8s/k8sTerms";
 
 test("destinationParent: sync 목적지의 상위 디렉토리 절대경로(쓰기 권한이 필요한 곳)", () => {
   expect(destinationParent("/cephfs/managed", "dms_test/dst")).toBe("/cephfs/managed/dms_test");
@@ -87,4 +91,52 @@ test("relativePathProblem: domain.validate_relative_path(422 unsafe_path) 의 �
   expect(relativePathProblem(".")).toMatch(/관리 디렉토리 자신/);
   expect(relativePathProblem("./")).toMatch(/관리 디렉토리 자신/);
   expect(relativePathProblem("./.")).toMatch(/관리 디렉토리 자신/);
+});
+
+
+// ---- PV 주소 표기(dms-k8s 설계 D8·D17·§7) ----------------------------------------------------------------------
+const PV_A = { cluster: "dmsk8s", namespace: "team-a", pvc: "models", volume: "pvc-52c6", storage_class: "tb-gpfs",
+               root: "pvc-52c6/pvc-52c6-data", path: "sample/nested" };
+const PV_B = { cluster: "dmsk8s", namespace: "team-b", pvc: "scratch", volume: "pvc-aa3d", storage_class: "tb-nfs",
+               root: "team-b/scratch", path: "" };
+
+test("pathParts PV: 「PV 이름 — namespace (sc) / 하위경로」, 빈 하위경로 = (PV 전체), sync 는 쪽마다", () => {
+  expect(pathParts("scan", { storage: "k8s-pv-gpfs", target: "pvc-52c6/pvc-52c6-data/sample/nested", pv: PV_A }))
+    .toEqual(["models — team-a (tb-gpfs) / sample/nested"]);
+  expect(pathParts("sync", { source_storage: "k8s-pv-gpfs", source: "x", source_pv: PV_A,
+                             destination_storage: "k8s-pv-nfs", destination: "team-b/scratch", destination_pv: PV_B }))
+    .toEqual(["models — team-a (tb-gpfs) / sample/nested", "scratch — team-b (tb-nfs) / (PV 전체)"]);
+  // PV ↔ 직접 경로 혼합(면제 관리자): PV 가 아닌 쪽은 옛 문법 그대로
+  expect(pathSummary("sync", { source_storage: "k8s-pv-gpfs", source: "x", source_pv: PV_A,
+                               destination_storage: "cephfs-dms", destination: "backup/a" }))
+    .toBe("models — team-a (tb-gpfs) / sample/nested → cephfs-dms:backup/a");
+  // '.'·'./' 도 PV 전체
+  expect(pathParts("scan", { pv: { ...PV_A, path: "./" } })).toEqual(["models — team-a (tb-gpfs) / (PV 전체)"]);
+});
+
+test("pathParts PV: path 가 없으면 물리 target 에서 root 를 떼고, 변조 블록은 옛 문법·「?」로", () => {
+  const noPath: Record<string, unknown> = { ...PV_A };
+  delete noPath.path;
+  expect(pathParts("rm", { storage: "k8s-pv-gpfs", target: "pvc-52c6/pvc-52c6-data/old", pv: noPath }))
+    .toEqual(["models — team-a (tb-gpfs) / old"]);
+  expect(pathParts("rm", { storage: "k8s-pv-gpfs", target: "pvc-52c6/pvc-52c6-data", pv: noPath }))
+    .toEqual(["models — team-a (tb-gpfs) / (PV 전체)"]);
+  expect(pathParts("scan", { storage: "s", target: "t", pv: "models" })).toEqual(["s:t"]);
+  expect(pathParts("scan", { storage: "s", target: "t", pv: ["x"] })).toEqual(["s:t"]);
+  expect(pathParts("scan", { pv: { pvc: 7, namespace: "team-a", storage_class: null, path: {} } }))
+    .toEqual(["? — team-a (StorageClass 없음) / ?"]);
+  // namespace (sc) 문법은 k8sTerms.nsLabel 과 같다(lib 가 features 를 가져오지 않아 한 줄 사본 -- 이 대조가 고정한다)
+  expect(pvLocationText(PV_A, undefined)).toBe(`models — ${nsLabel("team-a", "tb-gpfs")} / sample/nested`);
+  expect(pvLocationText({ ...PV_A, storage_class: null }, undefined))
+    .toBe(`models — ${nsLabel("team-a", null)} / sample/nested`);
+});
+
+test("pvDetailParts·hasPvAddress: 요청 상세 PV 행(클러스터 · 볼륨 · StorageClass)", () => {
+  expect(pvDetailParts("scan", { pv: PV_A })).toEqual([{ side: null, text: "dmsk8s · pvc-52c6 · tb-gpfs" }]);
+  expect(pvDetailParts("sync", { source_pv: PV_A, destination_storage: "cephfs-dms" }))
+    .toEqual([{ side: "소스", text: "dmsk8s · pvc-52c6 · tb-gpfs" }]);
+  expect(pvDetailParts("scan", { storage: "s", target: "t" })).toEqual([]);
+  expect(hasPvAddress({ destination_pv: PV_B })).toBe(true);
+  expect(hasPvAddress({ storage: "s" })).toBe(false);
+  expect(hasPvAddress(undefined)).toBe(false);
 });

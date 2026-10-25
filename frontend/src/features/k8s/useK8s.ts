@@ -3,7 +3,7 @@ import { apiGet, apiSend } from "../../lib/api";
 import { sendWithSealedSecret } from "../../lib/passwordTransport";
 import type {
   AccessResponse, ClusterBody, ClusterSummary, K8sOverview, K8sSettings, K8sSettingsBody, RunsFilter, ScMapBody,
-  StorageClassRow, SyncRun, VolumesQuery, VolumesResponse,
+  StorageClassRow, SyncRun, UserVolumesResponse, VolumesQuery, VolumesResponse,
 } from "./types";
 
 // k8s 연동 관리자 화면의 react-query 훅(설계 §5). 조회는 require_admin, 등록·토큰·주소·호출 노드·주기 변경은 세션 관리자
@@ -110,8 +110,9 @@ export const useSyncAllClusters = () => {
   });
 };
 
-export const useStorageClasses = () =>
-  useQuery({ queryKey: ["k8s", "storage-classes"],
+/** enabled = false 면 묻지 않는다(스토리지 수정 창의 「연결된 StorageClass」 — k8s 모드에서 창을 열었을 때만). */
+export const useStorageClasses = (enabled = true) =>
+  useQuery({ queryKey: ["k8s", "storage-classes"], enabled,
              queryFn: () => apiGet<StorageClassRow[]>("/api/admin/k8s/storage-classes") });
 
 export const useSaveScMap = () => {
@@ -136,17 +137,25 @@ export function volumesUrl(q: VolumesQuery): string {
   return `/api/admin/k8s/volumes?${p.toString()}`;
 }
 
-export const useK8sVolumes = (q: VolumesQuery) =>
+/** enabled = false 면 묻지 않는다(단일 작업 화면 -- 면제 관리자의 검색·사용자 지정에서만 부른다). */
+export const useK8sVolumes = (q: VolumesQuery, enabled = true) =>
   useQuery({ queryKey: ["k8s", "volumes", q], queryFn: () => apiGet<VolumesResponse>(volumesUrl(q)),
-             placeholderData: (prev) => prev });
+             placeholderData: (prev) => prev, enabled });
 
-export const useK8sAccess = (q: string) =>
+export const useK8sAccess = (q: string, enabled = true) =>
   useQuery({
-    queryKey: ["k8s", "access", q],
+    queryKey: ["k8s", "access", q], enabled,
     queryFn: () => apiGet<AccessResponse>(
       q === "" ? "/api/admin/k8s/access" : `/api/admin/k8s/access?${new URLSearchParams({ q }).toString()}`),
     placeholderData: (prev) => prev,
   });
+
+/** 단일 작업 화면의 PV 고르기(설계 §5 GET /api/user/k8s/volumes, require_user) -- 자기 맵핑 범위(면제자는 전체). 서버가
+ *  namespaces(권한 namespace, PVC 0개 포함)를 함께 줘서 「권한 namespace 없음」과 「PV 없음」을 가른다. k8s 모드에서만 부른다. */
+export const USER_VOLUMES_KEY = ["k8s", "user-volumes"] as const;
+export const useUserK8sVolumes = (enabled: boolean) =>
+  useQuery({ queryKey: USER_VOLUMES_KEY, enabled,
+             queryFn: () => apiGet<UserVolumesResponse>("/api/user/k8s/volumes") });
 
 /** 동기화 이력 한 쪽 — 다음 쪽은 마지막 행의 seq 를 before 로(키셋 커서: 보는 동안 새 run 이 위에 쌓여도 경계가 밀리지 않는다). */
 export const RUNS_PAGE_SIZE = 50;
