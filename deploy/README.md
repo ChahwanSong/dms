@@ -926,8 +926,8 @@ RolloutWatcher가 그 seq 순서대로 하나씩 patch → 수렴 확인 → 다
 
 - 테스트베드: `deploy/overlays/testbed/kustomization.yaml` 의 `newTag`(dms 계보 = api·
   controller·migrate 가 한 항목, dms-agent 계보 = 다른 항목) + `patch-config.yaml` 의
-  `DMS_JOB_IMAGE`. **bump 는 main 에서 커밋하고 같은 커밋을 dms-ssc 로 cherry-pick 한다**(2026-10-22 브랜치 분리 —
-  main ≡ dms-ssc 라 이 파일도 같다). 같은 호스트 k8s 클러스터(kN)의 오버레이 bump 는 dms-k8s 브랜치의 일이다
+  `DMS_JOB_IMAGE`. **bump 는 dms-ssc 에서 직접 커밋한다**(2026-10-25~ 이 라인은 dms-ssc 에서 직접 개발 — 2026-10-22~24 는
+  main 커밋 → dms-ssc cherry-pick 이었다). 같은 호스트 k8s 클러스터(kN)의 오버레이 bump 는 dms-k8s 브랜치의 일이다
   (이 브랜치엔 그 오버레이가 없다).
 - prod/ssc: `values.env` 의 `DMS_TAG`/`DMS_AGENT_TAG`/`MFU_TAG`
   - 설치 뒤로는 셋 중 무엇이든 `live` 로 둘 수 있다(2026-10-06): `render.sh` 가 지금 클러스터에서

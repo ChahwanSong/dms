@@ -179,7 +179,7 @@ test("검색 결과는 늘 있는 숨은 라이브 리전이 말한다(비관리
   expect(searchStatus()).toBeEmptyDOMElement();
 });
 
-test("한글 조합 중엔 확정하지 않는다 -- 「뱇」(ㅊ 이 아직 받침)에서 멈춰도 묻지 않고, 조합이 끝나면 디바운스 뒤 q=배치 · 요청자 칸도 같다", async () => {
+test("한글 조합 중엔 300ms 로 확정하지 않는다 -- 「뱇」(ㅊ 이 아직 받침)에서 잠깐 멈춰도 묻지 않고, 조합이 끝나면 디바운스 뒤 q=배치 · 요청자 칸도 같다", async () => {
   const urls: string[] = [];
   server.use(http.get("/api/user/requests", ({ request }) => {
     urls.push(request.url); return HttpResponse.json([row("r1")]);
@@ -214,6 +214,44 @@ test("한글 조합 중엔 확정하지 않는다 -- 「뱇」(ㅊ 이 아직 �
   await waitFor(() => expect(lastParam(urls, "requester")).toBe("김"));
   expect(sent("requester")).toEqual(["김"]);
   expect(lastParam(urls, "q")).toBe("배치");
+});
+
+test("조합이 남아 있어도 1초 멈추면 확정한다 -- 마지막 글자가 Enter 전까지 조합 중이라도 「배치」를 치고 멈추면 검색된다", async () => {
+  const urls: string[] = [];
+  server.use(http.get("/api/user/requests", ({ request }) => {
+    urls.push(request.url); return HttpResponse.json([row("r1")]);
+  }));
+  wrap(meAdmin);
+  await screen.findByText("r1", { exact: false });
+  const box = searchBox();
+  fireEvent.compositionStart(box);
+  fireEvent.change(box, { target: { value: "배치" } });
+  await act(() => new Promise((r) => setTimeout(r, 650)));        // 300ms 는 넘겼지만 1초 전 -- 아직
+  expect(paramsOf(urls, "q").filter((v) => v !== null)).toEqual([]);
+  await waitFor(() => expect(lastParam(urls, "q")).toBe("배치"), { timeout: 2500 });   // compositionend 없이도
+});
+
+test("compositionend 가 빠져도 표식이 걸린 채 남지 않는다 -- 조합이 아닌 입력(isComposing=false)·blur 가 표식을 내려 300ms 확정으로 돌아온다", async () => {
+  const urls: string[] = [];
+  server.use(http.get("/api/user/requests", ({ request }) => {
+    urls.push(request.url); return HttpResponse.json([row("r1")]);
+  }));
+  wrap(meAdmin);
+  const requester = await screen.findByLabelText("요청자 필터");
+  await screen.findByText("r1", { exact: false });
+  const box = searchBox();
+  fireEvent.compositionStart(box);
+  fireEvent.change(box, { target: { value: "가" } });
+  // compositionend 없이 조합이 아닌 입력이 온다(Chrome 이 조합을 끝내고 이벤트를 빠뜨린 경로).
+  fireEvent.input(box, { target: { value: "가a" }, isComposing: false });
+  await act(() => new Promise((r) => setTimeout(r, 650)));        // 300ms 디바운스면 확정됐어야 한다(1초 전)
+  expect(lastParam(urls, "q")).toBe("가a");
+  // blur 도 표식을 내린다(요청자 칸).
+  fireEvent.compositionStart(requester);
+  fireEvent.change(requester, { target: { value: "김" } });
+  fireEvent.blur(requester);
+  await act(() => new Promise((r) => setTimeout(r, 650)));
+  expect(lastParam(urls, "requester")).toBe("김");
 });
 
 test("검색·요청자 필터 중엔 목록 폴링이 10초(드문 낱말 = 표 전수 훑기 × 불러온 쪽 수), 아니면 3초", async () => {

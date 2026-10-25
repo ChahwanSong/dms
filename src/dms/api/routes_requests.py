@@ -183,9 +183,11 @@ def _blank_to_none(value: str | None) -> str | None:
 def _search_terms(text: str, repos, *, is_admin: bool) -> list[str]:
     """검색어 → 저장소 토큰 목록(공백 분리, 소문자로 접어 중복 제거, 순서 유지, 펼친 뒤 MAX_SEARCH_TERMS 개까지).
 
-    '/' 로 시작하는 토큰은 원래 토큰을 남긴 채 등록 스토리지마다 그 managed_root 아래인지 보고 「이름:상대경로」 를
-    덧붙인다(뿌리와 같으면 「이름:」 -- 그 스토리지의 작업 전부). 뿌리 비교는 대소문자를 가린다(경로라서). 절대경로 하나가
-    토큰 둘을 먹으니 상한(4) 안에서 한 번에 붙여 넣는 절대경로는 둘까지다.
+    '/' 로 시작하는 토큰은 등록 스토리지마다 그 managed_root 아래인지 보고 「이름:상대경로」 로 **바꾼다**(뿌리와 같으면
+    「이름:」 -- 그 스토리지의 작업 전부; 둘 이상의 뿌리 아래면 모두). 뿌리 비교는 대소문자를 가린다(경로라서). 원래 토큰은
+    어느 뿌리에도 속하지 않을 때만 남긴다(2026-10-25 검증 지적): 검색 대상 문자열(요청자·「스토리지:상대경로」)엔 '/'로 시작하는
+    절대경로가 없어 원래 토큰은 배치 이름에 그 경로가 통째로 든 경우에만 맞는다 -- 펼쳐진 경로까지 원래 토큰을 함께 두면 상한(4)
+    의 절반을 거의 쓸모없는 토큰이 먹어 한 번에 붙여 넣는 절대경로가 둘에서 잘렸다. 이제 넷까지 들어간다.
 
     뿌리는 **managed_root 하나뿐이다 -- 누구에게나**(2026-10-25 리뷰): 요청 payload·resource_key 는 managed_root 기준
     상대경로만 저장한다(stepper._abs·domain.managed_abs_path 가 managed_root 와 잇고, 포탈의 절대경로 표시
@@ -201,9 +203,10 @@ def _search_terms(text: str, repos, *, is_admin: bool) -> list[str]:
     storages = repos.storages.list() if any(t.startswith("/") for t in tokens) else []
     out: list[str] = []
     for token in tokens:
-        out.append(token)
         if not token.startswith("/"):
+            out.append(token)
             continue
+        expanded: list[str] = []
         for row in storages:
             if not is_admin and not storage_open_to_users(row):
                 continue
@@ -212,7 +215,8 @@ def _search_terms(text: str, repos, *, is_admin: bool) -> list[str]:
             if not isinstance(root, str) or root == "":
                 continue
             if token == root or token.startswith(root.rstrip("/") + "/"):
-                out.append(f"{row['storage_name']}:{token[len(root):].strip('/')}")
+                expanded.append(f"{row['storage_name']}:{token[len(root):].strip('/')}")
+        out += expanded or [token]
     return list(dict.fromkeys(t.lower() for t in out))[:MAX_SEARCH_TERMS]
 
 

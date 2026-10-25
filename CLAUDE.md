@@ -25,13 +25,16 @@ PostgreSQL(제어면) + React 포탈 + 노드 에이전트 + Volcano gang-schedu
 (`docs/ARCHITECTURE.md`의 「불변식」)이 걸리면 그 문서도 함께 갱신한다 — 나머지는
 코드가 스스로 말한다.
 
-## 브랜치 모델 (2026-10-22 사용자 결정)
+## 브랜치 모델 (2026-10-22 사용자 결정, 2026-10-25 갱신)
 
-이 파일은 **main·dms-ssc 라인**의 것이다(dms-k8s 는 자기 CLAUDE.md 를 갖는다). 원격 브랜치 셋 중 둘은 같은 소스,
-하나는 별도 라인이다. **dms-k8s 의 구현·테스트·브랜치 갱신은 그 라인 전용 Claude 세션이 한다** — 이 라인(main·dms-ssc)
-세션은 dms-k8s 브랜치·그 오버레이·k8s 클러스터 배포를 건드리지 않는다(사용자 2026-10-22).
+이 파일은 **dms-ssc 라인**의 것이다(dms-k8s 는 자기 CLAUDE.md 를 갖는다). **dms-k8s 의 구현·테스트·브랜치 갱신은 그 라인
+전용 Claude 세션이 한다** — 이 라인 세션은 dms-k8s 브랜치·그 오버레이·k8s 클러스터 배포를 건드리지 않는다(사용자 2026-10-22).
 
-- **main ≡ dms-ssc.** 공용 개발은 main 에서 하고 `git push origin HEAD:main`, 같은 커밋을 dms-ssc 로
+- **2026-10-25 부터 이 라인은 dms-ssc 에서 직접 개발한다**(사용자: 「이 세션에서는 이제부터 dms-ssc branch 만 구현 업데이트
+  하는거야. main 및 dms-k8s 는 코드 업데이트 하지마.」). origin/dms-ssc 기반 작업 브랜치에서 커밋하고 `git push origin
+  HEAD:dms-ssc` 만 한다 — main 으로 push·cherry-pick 하지 않는다. 그래서 아래 「main ≡ dms-ssc」(2026-10-22~24 의 흐름)는 더
+  성립하지 않는다(main 은 2026-10-22 의 ec81606 에 멈춰 있다). 공용 파일 목록은 dms-k8s 세션이 골라 가져갈 때의 참고로 남긴다.
+- **main ≡ dms-ssc(2026-10-22~24).** 공용 개발은 main 에서 하고 `git push origin HEAD:main`, 같은 커밋을 dms-ssc 로
   cherry-pick 해 push 한다(`git push origin HEAD:dms-ssc` — 이 저장소의 **임시 워크트리**에서. ssc 빌드 체크아웃
   `/home/mason/dms-dev/dms-ssc` 안에서 커밋·cherry-pick 하지 마라: 로컬 커밋이 생기면 cron ff(testbed `dms-src-sync.sh`)가
   멈춰 ssc 빌드가 조용히 낡는다). dms-ssc 가 main 보다 **더** 갖는 것은 SSC 사이트 설치기 — `deploy/overlays/ssc/**`·
@@ -102,7 +105,7 @@ PostgreSQL(제어면) + React 포탈 + 노드 에이전트 + Volcano gang-schedu
   배포한다(실사고). 태그 bump 는 테스트베드 오버레이의 `newTag`(+`patch-config.yaml` 의
   `DMS_JOB_IMAGE`), 사이트는 `values.env`. **이 브랜치의 테스트베드는 ssc 클러스터 하나다**(2026-10-22 브랜치 분리,
   deploy/README.md 맨 위): `deploy/overlays/testbed`(컨텍스트 `dms`, pkg-01:5000, 태그 `dN`, LDAP 사용, 빌드 소스 =
-  dms-ssc 체크아웃) — bump 는 main 에서 커밋하고 dms-ssc 로 cherry-pick. 같은 호스트의 k8s 클러스터(컨텍스트
+  dms-ssc 체크아웃) — bump 는 dms-ssc 에서 직접 커밋한다(2026-10-25~; 그 전엔 main 커밋 → cherry-pick). 같은 호스트의 k8s 클러스터(컨텍스트
   `dmsk8s`, pkg-01:5001)는 **dms-k8s 브랜치 소관**이라 그 오버레이가 여기 없다 — 이 브랜치 매니페스트를 raw 든
   오버레이든 거기에 적용하지 마라. 두 클러스터가 같은 네임스페이스(dms)라 **kubectl 은 늘 `--context` 를
   명시**한다(current-context 는 dms; dmsk8s 를 current 로 만들지 마라). 적용은

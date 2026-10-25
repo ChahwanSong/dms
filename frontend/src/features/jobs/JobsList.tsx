@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { ChangeEvent } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { Search } from "lucide-react";
 import { batchJobsPath, useDeleteRequests, useInfiniteRequests, usePurgeStatus } from "./useJobs";
@@ -46,8 +47,9 @@ const searchHelp = (ids: string) =>
 const SEARCH_HELP_ADMIN = searchHelp("요청/배치 ID");
 const SEARCH_HELP_USER = searchHelp("요청 ID");
 // 타이핑마다 쿼리 키가 바뀌면 글자마다 요청(드문 낱말이면 표 전수 훑기)과 선택 비우기가 일어난다 -- 멈춘 뒤에 확정한다
-// (UsageAnalysis 경로 검색과 같은 300ms).
+// (UsageAnalysis 경로 검색과 같은 300ms). 한글 IME 조합 중이면 더 오래(1초) 멈춰야 확정한다 -- 아래 composing 주석.
 const TEXT_FILTER_DEBOUNCE_MS = 300;
+const COMPOSING_DEBOUNCE_MS = 1000;
 
 // 작업(요청) 선택 삭제(2026-10-08, 관리자 전용 -- 일반 사용자에게는 체크 열·툴바를 그리지 않는다).
 // 한 번에 지울 수 있는 수 = 서버 MAX_DELETE(목록 API 상한 le=200 과 같다).
@@ -163,21 +165,28 @@ export function JobsList() {
   const [requester, setRequester] = useState("");
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
-  // 한글 IME 조합 중엔 확정하지 않는다(2026-10-25 리뷰): onChange 는 조합 도중에도 불려, 두벌식으로 「배치」를 치다
-  // 「뱇」(ㅊ 이 아직 받침)에서 멈추면 그 글자로 서버를 묻고(드문 낱말 = 표 전수 훑기) 선택을 비우고 「‘뱇’에 맞는 작업이
-  // 없습니다」가 깜빡였다. 조합이 끝나면(compositionend -- 다음 글자·스페이스·Enter·포커스 이동) 같은 디바운스로 확정한다.
-  // 마지막 글자는 Enter·스페이스 전까지 조합 중이라 그 키가 곧 「검색」이다(모바일 키보드는 라틴 낱말도 스페이스까지 조합으로
-  // 묶는다 -- 같은 규칙, 키보드의 검색 키가 끝낸다). 칸 둘이 한 표식을 나눈다 -- 조합은 포커스를
-  // 쥔 칸 하나에서만 일어나고, 포커스가 떠나면 브라우저가 조합을 끝낸다(compositionend). 조합 시작이 effect 를 다시 돌려
-  // 직전 입력의 대기 타이머도 지운다(라틴 글자 뒤에 곧바로 한글을 치기 시작한 경우).
+  // 한글 IME 조합 중엔 더 오래 멈춰야 확정한다(2026-10-25 리뷰): onChange 는 조합 도중에도 불려, 두벌식으로 「배치」를
+  // 치다 「뱇」(ㅊ 이 아직 받침)에서 300ms 만 멈춰도 그 글자로 서버를 묻고(드문 낱말 = 표 전수 훑기) 선택을 비우고 「‘뱇’에
+  // 맞는 작업이 없습니다」가 깜빡였다. 그렇다고 조합 중엔 아예 확정하지 않으면 마지막 글자는 Enter·스페이스·포커스 이동 전까지
+  // 조합 중이라 「배치」를 치고 멈춰도 검색되지 않는다(배치 이름 검색이 고장 난 것처럼 보였다 -- 검증 지적). 그래서 조합 중엔
+  // 1초, 아니면 300ms -- 빠른 타이핑 중의 중간 글자는 거르고, 멈추면 조합이 남아 있어도 확정한다. compositionend 는 표식을
+  // 내리지만 Chrome 이 그것을 빠뜨리는 경로가 있어(조합 중 블러·IME 전환 등) 표식이 걸린 채 남으면 1초 확정만 남는다 --
+  // 조합이 아닌 입력(InputEvent.isComposing === false -- 명시적 false 만; 값이 없으면 모름)과 blur 에서도 내린다. 칸 둘이 한
+  // 표식을 나눈다 -- 조합은 포커스를 쥔 칸 하나에서만 일어난다. 표식이 바뀌면 effect 가 다시 돌아 대기 타이머도 새로 건다.
   const [composing, setComposing] = useState(false);
-  const imeProps = { onCompositionStart: () => setComposing(true), onCompositionEnd: () => setComposing(false) };
+  const imeProps = {
+    onCompositionStart: () => setComposing(true),
+    onCompositionEnd: () => setComposing(false),
+    onBlur: () => setComposing(false),
+  };
+  const endIfNotComposing = (e: ChangeEvent<HTMLInputElement>) => {
+    if ((e.nativeEvent as InputEvent).isComposing === false) setComposing(false);
+  };
   useEffect(() => {
-    if (composing) return;
     const t = setTimeout(() => {
       setSearch(searchInput.trim());
       setRequester(requesterInput.trim());
-    }, TEXT_FILTER_DEBOUNCE_MS);
+    }, composing ? COMPOSING_DEBOUNCE_MS : TEXT_FILTER_DEBOUNCE_MS);
     return () => clearTimeout(t);
   }, [searchInput, requesterInput, composing]);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -393,7 +402,7 @@ export function JobsList() {
           <input ref={searchRef} type="search" aria-label="작업 검색" maxLength={200}
                  title={isAdmin ? SEARCH_HELP_ADMIN : SEARCH_HELP_USER}
                  placeholder={isAdmin ? SEARCH_PLACEHOLDER_ADMIN : SEARCH_PLACEHOLDER_USER}
-                 value={searchInput} onChange={(e) => setSearchInput(e.target.value)} {...imeProps}
+                 value={searchInput} onChange={(e) => { setSearchInput(e.target.value); endIfNotComposing(e); }} {...imeProps}
                  className="h-10 w-full rounded-lg border border-line bg-surface py-2 pl-8 pr-3 text-sm
                             placeholder:text-muted focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/20" />
         </label>
@@ -410,7 +419,7 @@ export function JobsList() {
         {/* 요청자: 부분 일치(서버가 관리자에게만 -- 비관리자의 목록은 늘 정확히 자기 것). 검색과 함께 디바운스된다. */}
         {isAdmin && (
           <input aria-label="요청자 필터" className={field} placeholder="요청자 아이디(일부)"
-                 value={requesterInput} onChange={(e) => setRequesterInput(e.target.value)} {...imeProps} />
+                 value={requesterInput} onChange={(e) => { setRequesterInput(e.target.value); endIfNotComposing(e); }} {...imeProps} />
         )}
         {/* 한 배치의 작업만 보는 중(주소 ?batch=) -- 무엇으로 걸렀는지와 푸는 길을 늘 보인다(필터가 숨어 있으면 「작업이
             사라졌다」로 읽힌다). 이름은 불러온 행의 배치 이름, 없으면 id 앞 12자. 좁은 폭에선 이름이 말줄임으로 잘리므로

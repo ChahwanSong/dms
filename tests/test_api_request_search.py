@@ -221,15 +221,27 @@ def test_absolute_paths_expand_to_storage_relative_tokens(client, repos):
 
 
 def test_absolute_paths_share_the_term_cap(client, repos):
-    # 절대경로 하나는 토큰 둘(원래 토큰 + 펼친 「이름:상대경로」)을 먹는다 -- 상한(MAX_SEARCH_TERMS) 안에서 한 번에 붙여 넣는
-    # 절대경로는 둘까지고 그 뒤는 버려진다. mount_path 펼침이 있던 동안은 하나가 셋을 먹어 상한이 더 빨리 찼다(리뷰 실측).
-    rows = [_scan(repos, f"multi/{i}") for i in range(3)]
+    # 펼쳐진 절대경로는 펼친 「이름:상대경로」 하나만 상한(MAX_SEARCH_TERMS) 자리를 먹는다 -- 원래 토큰을 함께 두던 동안은
+    # 하나가 둘을 먹어 한 번에 붙여 넣는 절대경로가 둘에서 잘렸다(2026-10-25 검증 지적). 이제 넷까지, 다섯째부터 버려진다.
+    rows = [_scan(repos, f"multi/{i}") for i in range(5)]
     _as(client, "opadm")
-    paths = [f"/mnt/ceph/managed/multi/{i}" for i in range(3)]
+    paths = [f"/mnt/ceph/managed/multi/{i}" for i in range(5)]
     assert MAX_SEARCH_TERMS == 4
-    assert _ids(client, q=" ".join(paths[:2])) == rows[1::-1]
-    assert _ids(client, q=" ".join(paths)) == rows[1::-1]           # 셋째 경로의 두 토큰은 상한 밖
-    assert _ids(client, q=paths[2]) == [rows[2]]
+    assert _ids(client, q=" ".join(paths[:4])) == rows[3::-1]
+    assert _ids(client, q=" ".join(paths)) == rows[3::-1]           # 다섯째 경로는 상한 밖
+    assert _ids(client, q=paths[4]) == [rows[4]]
+
+
+def test_unexpanded_absolute_path_stays_a_token_for_batch_names(client, repos):
+    # 어느 managed_root 에도 속하지 않는 절대경로는 원래 토큰 그대로 남는다 -- 검색 대상 중 '/'로 시작하는 절대경로를 담을 수
+    # 있는 것은 배치 이름뿐이라, 그런 이름의 배치는 여전히 찾힌다. 펼쳐진 경로는 원래 토큰을 버리므로 같은 이름이라도
+    # 펼침 결과(그 스토리지의 그 경로)만 본다.
+    bid = _batch(repos, "nightly /scratch/in copy")
+    child = _req(repos, "scan", batch_id=bid, storage="ceph", target="elsewhere")
+    other = _scan(repos, "unrelated")
+    _as(client, "opadm")
+    assert _ids(client, q="/scratch/in") == [child]
+    assert other not in _ids(client, q="/scratch/in")
 
 
 def test_non_admin_path_expansion_uses_only_what_the_storage_picker_shows(client, repos):
