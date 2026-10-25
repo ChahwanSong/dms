@@ -107,11 +107,12 @@ test("BATCH_BLOCK_LABEL: live 는 그 배치의 다른 작업 얘기다 -- 「�
   expect(groupBatches([r("1", { batch_status: "PreviewReady" })]).get(BID)!.block).toBe("awaiting");
 });
 
-test("BATCH_BLOCK_LABEL: 모든 사유가 6rem·text-xs 한 줄에 든다(두 줄로 접히면 상태가 바뀔 때 행 높이가 바뀐다)", () => {
-  // text-xs(12px)에서 한글 1자 ≈ 12px, 공백 ≈ 4px, 그 밖 ≈ 7px -- 96px 안. 실 기하(말줄임 없음)는 e2e E7 이 잰다.
+test("BATCH_BLOCK_LABEL: 모든 사유가 8rem·text-xs 한 줄에 든다(두 줄로 접히면 상태가 바뀔 때 행 높이가 바뀐다)", () => {
+  // text-xs(12px)에서 한글 1자 ≈ 12px, 공백 ≈ 4px, 그 밖 ≈ 7px -- 배치 칸 8rem(128px, 2026-10-25 -- JobsList BATCH_W) 안.
+  // 실 기하(말줄임 없음)는 e2e E7 이 잰다.
   for (const v of Object.values(BATCH_BLOCK_LABEL)) {
     const px = [...v].reduce((n, ch) => n + (/[가-힣]/u.test(ch) ? 12 : /\s/u.test(ch) ? 4 : 7), 0);
-    expect(px, v).toBeLessThanOrEqual(96);
+    expect(px, v).toBeLessThanOrEqual(128);
   }
 });
 
@@ -124,10 +125,15 @@ test("splitBatchName: 짧은 이름은 그대로, 긴 이름은 끝(가르는 �
   expect([a.head, a.tail]).toEqual(["2026-10 프로젝트 A 아카이브", "이관(1차)"]);
   expect(b.tail).toBe("이관(2차)");
   expect(splitBatchName("d161 실행 중 추가 실증 1007c")!.tail).toBe("실증 1007c");
-  // 한 줄 폭(한글 ~5자)을 넘으면 두 줄 -- 이름 전부가 앞·뒤 조각으로 보인다.
-  expect(splitBatchName("성장 모니터링")).toEqual({ head: "성장", tail: "모니터링" });
-  // 띄어쓰기 없는 긴 이름은 글자 경계에서 끝 10 폭.
+  // 한 줄 폭은 8rem(2026-10-25)에서 14 단위(한글 ~7자) -- 6rem(11 단위) 시절 두 줄로 갈리던 「성장 모니터링」(13)이
+  // 이제 한 줄이다. 경계: 14 는 한 줄, 15 부터 두 줄.
+  expect(splitBatchName("성장 모니터링")).toBeNull();
+  expect(splitBatchName("성장 모니터링1")).toBeNull();
+  expect(splitBatchName("성장 모니터링 1")).toEqual({ head: "성장", tail: "모니터링 1" });
+  // 한 줄 폭을 넘으면 두 줄 -- 이름 전부가 앞·뒤 조각으로 보인다(뒤 조각은 끝 13 폭 안에서 낱말 경계부터).
+  expect(splitBatchName("성장 모니터링 결과")).toEqual({ head: "성장", tail: "모니터링 결과" });
+  // 띄어쓰기 없는 긴 이름은 글자 경계에서 끝 13 폭.
   const solid = splitBatchName("monthly-report-2026-10-archive")!;
-  expect(solid.tail).toBe("10-archive");
+  expect(solid.tail).toBe("26-10-archive");
   expect(solid.head + solid.tail).toBe("monthly-report-2026-10-archive");
 });

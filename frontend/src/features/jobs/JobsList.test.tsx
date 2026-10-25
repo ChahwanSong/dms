@@ -6,6 +6,7 @@ import { setupServer } from "msw/node";
 import { http, HttpResponse, delay } from "msw";
 import { beforeAll, afterAll, afterEach, test, expect, vi } from "vitest";
 import { JobsList } from "./JobsList";
+import { requestsPollMs } from "./useJobs";
 import type { Me } from "../../lib/types";
 
 // 관리자 화면은 정리 현황(usePurgeStatus)도 부른다 -- 기본은 대기 0건(MSW 미처리 경고 방지).
@@ -44,18 +45,33 @@ test("전체 작업: 요청자·대상 요약 등 풍부한 정보를 표시한�
   expect(within(r).getByText("s1:a → s1:b")).toBeInTheDocument();    // 대상 요약(pathSummary)
 });
 
-test("요청자 필터는 운영자에게만 보인다", async () => {
-  server.use(http.get("/api/user/requests", () => HttpResponse.json([row("r1")])));
-  const { unmount } = wrap(meUser);
+const searchBox = () => screen.getByRole("searchbox", { name: "작업 검색" }) as HTMLInputElement;
+const SEARCH_HELP = "여러 단어는 하나라도 맞으면 표시합니다(부분 일치, 대소문자 무시)";
+/** 받은 목록 요청 주소들의 한 파라미터 값(없으면 null). */
+const paramsOf = (urls: string[], key: string) => urls.map((u) => new URL(u).searchParams.get(key));
+const lastParam = (urls: string[], key: string) => new URL(urls[urls.length - 1]).searchParams.get(key);
+
+test("요청자 필터는 운영자에게만, 검색 칸은 누구에게나 -- 비관리자 안내엔 배치가 없다(그들 목록엔 배치 칸이 없다)", async () => {
+  server.use(http.get("/api/user/requests", () => HttpResponse.json([row("r1")])),
+             http.get("/api/auth/me", () => HttpResponse.json(meUser)));
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const { unmount } = render(
+    <QueryClientProvider client={qc}><MemoryRouter><JobsList /></MemoryRouter></QueryClientProvider>);
   await screen.findByText("r1", { exact: false });
+  await waitFor(() => expect(qc.getQueryState(["auth", "me"])?.status).toBe("success"));   // 역할이 정해진 뒤에 본다
   expect(screen.queryByLabelText("요청자 필터")).not.toBeInTheDocument();
   expect(screen.getByLabelText("연산 필터")).toBeInTheDocument();     // 연산·상태는 공용
+  expect(searchBox().placeholder).toBe("경로·요청 ID 검색");
+  expect(searchBox().maxLength).toBe(200);                            // 서버 q 상한(max_length=200)과 같다
+  expect(searchBox()).toHaveAccessibleDescription(SEARCH_HELP);      // 여러 단어 = 하나라도(title -- 설명으로도 읽힌다)
   unmount();
   wrap(meAdmin);
-  expect(await screen.findByLabelText("요청자 필터")).toBeInTheDocument();
+  const requester = await screen.findByLabelText("요청자 필터") as HTMLInputElement;
+  expect(requester.placeholder).toBe("요청자 아이디(일부)");
+  expect(searchBox().placeholder).toBe("요청자·배치 이름·경로·요청 ID 검색");
 });
 
-test("필터를 바꾸면 서버 쿼리에 operation·state·requester 가 실린다", async () => {
+test("필터를 바꾸면 서버 쿼리에 operation·state·requester 가 실린다 -- 요청자는 디바운스·trim(글자마다 묻지 않는다)", async () => {
   const urls: string[] = [];
   server.use(http.get("/api/user/requests", ({ request }) => {
     urls.push(request.url); return HttpResponse.json([row("r1")]);
@@ -64,13 +80,73 @@ test("필터를 바꾸면 서버 쿼리에 operation·state·requester 가 실�
   await screen.findByText("r1", { exact: false });
   await userEvent.selectOptions(screen.getByLabelText("연산 필터"), "rm");
   await userEvent.selectOptions(screen.getByLabelText("상태 필터"), "Failed");
-  await userEvent.type(screen.getByLabelText("요청자 필터"), "bob");
-  // 마지막 요청이 세 필터를 모두 반영한다.
-  await screen.findByText(/조건에 맞는 작업이 없습니다|r1/);
+  await userEvent.type(await screen.findByLabelText("요청자 필터"), " bob ");
+  // 마지막 요청이 세 필터를 모두 반영한다(요청자는 멈춘 뒤 확정 -- 그때까지 기다린다).
+  await waitFor(() => expect(lastParam(urls, "requester")).toBe("bob"));
   const last = urls[urls.length - 1];
   expect(last).toContain("operation=rm");
   expect(last).toContain("state=Failed");
-  expect(last).toContain("requester=bob");
+  expect(paramsOf(urls, "requester").filter((v) => v !== null)).toEqual(["bob"]);   // 「b」「bo」는 가지 않았다
+});
+
+test("검색어는 디바운스 뒤 q 로 실린다 -- trim, 다른 필터와 함께, 비우거나 공백만이면 q 자체를 싣지 않는다", async () => {
+  const urls: string[] = [];
+  server.use(http.get("/api/user/requests", ({ request }) => {
+    urls.push(request.url); return HttpResponse.json([row("r1")]);
+  }));
+  wrap(meUser);
+  await screen.findByText("r1", { exact: false });
+  expect(new URL(urls[0]).searchParams.has("q")).toBe(false);          // 검색 없는 첫 요청엔 q 가 없다
+  await userEvent.type(searchBox(), "  proj/a ");
+  await waitFor(() => expect(lastParam(urls, "q")).toBe("proj/a"));
+  expect(paramsOf(urls, "q").filter((v) => v !== null)).toEqual(["proj/a"]);        // 글자마다 묻지 않는다
+  await userEvent.selectOptions(screen.getByLabelText("연산 필터"), "sync");
+  await waitFor(() => expect(lastParam(urls, "operation")).toBe("sync"));
+  expect(lastParam(urls, "q")).toBe("proj/a");
+  await userEvent.clear(searchBox());
+  await userEvent.type(searchBox(), "   ");
+  await waitFor(() => expect(new URL(urls[urls.length - 1]).searchParams.has("q")).toBe(false));
+  expect(lastParam(urls, "operation")).toBe("sync");
+  expect(urls.some((u) => /[?&]q=(&|$)/.test(u))).toBe(false);        // 빈 q= 도 보내지 않았다
+});
+
+test("검색 결과가 없으면 「‘검색어’에 맞는 작업이 없습니다」 + 「검색 지우기」 -- 누르면 입력·확정값이 바로 비고 목록이 돌아온다", async () => {
+  const urls: string[] = [];
+  server.use(http.get("/api/user/requests", ({ request }) => {
+    urls.push(request.url);
+    return HttpResponse.json(new URL(request.url).searchParams.has("q") ? [] : [row("r1")]);
+  }));
+  wrap(meUser);
+  await screen.findByText("r1", { exact: false });
+  await userEvent.type(searchBox(), " 없는경로 ");
+  expect(await screen.findByText("‘없는경로’에 맞는 작업이 없습니다")).toBeInTheDocument();
+  expect(screen.queryByText("조건에 맞는 작업이 없습니다")).toBeNull();     // 검색이 없을 때의 문구가 아니다
+  await userEvent.click(screen.getByRole("button", { name: "검색 지우기" }));
+  // 디바운스(300ms)를 기다리지 않는다 -- 누른 즉시 확정값까지 비어 안내가 사라진다.
+  expect(screen.queryByText("‘없는경로’에 맞는 작업이 없습니다")).toBeNull();
+  expect(searchBox().value).toBe("");
+  expect(document.activeElement).toBe(searchBox());                   // 사라진 버튼 대신 검색 칸(<body> 아님)
+  await screen.findByText("r1", { exact: false });
+  expect(new URL(urls[urls.length - 1]).searchParams.has("q")).toBe(false);
+});
+
+test("검색·요청자 필터 중엔 목록 폴링이 10초(드문 낱말 = 표 전수 훑기 × 불러온 쪽 수), 아니면 3초", async () => {
+  expect(requestsPollMs({})).toBe(3000);
+  expect(requestsPollMs({ operation: "rm", state: "Failed", batch: "b".repeat(32) })).toBe(3000);
+  expect(requestsPollMs({ search: "proj" })).toBe(10_000);
+  expect(requestsPollMs({ requester: "bob" })).toBe(10_000);
+  expect(requestsPollMs({ search: "  ", requester: "" })).toBe(3000);
+  // 배선: 화면의 목록 쿼리가 실제로 이 주기를 쓴다(검색이 확정되면 10초로).
+  server.use(http.get("/api/user/requests", () => HttpResponse.json([row("r1")])),
+             http.get("/api/auth/me", () => HttpResponse.json(meUser)));
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={qc}><MemoryRouter><JobsList /></MemoryRouter></QueryClientProvider>);
+  await screen.findByText("r1", { exact: false });
+  const intervals = () => qc.getQueryCache().findAll({ queryKey: ["requests", "infinite"] })
+    .filter((q) => q.getObserversCount() > 0).map((q) => q.observers[0].options.refetchInterval);
+  expect(intervals()).toEqual([3000]);
+  await userEvent.type(searchBox(), "proj");
+  await waitFor(() => expect(intervals()).toEqual([10_000]));
 });
 
 test("빈 결과는 전용 문구를 보인다", async () => {
@@ -497,15 +573,15 @@ test("배치 열(관리자): 이름 링크·이름 없으면 id 12자 링크·�
   const named = within(rowOf(B)).getByRole("link", { name: "e7 배치" });
   expect(named).toHaveAttribute("href", `/admin/batches/${BX}`);
   expect(named.title).toBe(`e7 배치 · ${BX}`);
-  // 폭: 모든 폭에서 6rem 고정(1280 예산 -- 1440px 이상의 12rem 은 대상 열을 HEAD 보다 120px 깎았다, 2026-10-11 검증
-  // 지적). 짧은 이름은 한 줄.
-  for (const cls of ["w-[6rem]", "min-w-[6rem]", "truncate"]) expect(named.className).toContain(cls);
+  // 폭: 모든 폭에서 8rem 고정(2026-10-25 6rem 에서 넓힘 -- 1440px 이상의 12rem 은 대상 열을 HEAD 보다 120px 깎았다,
+  // 2026-10-11 검증 지적). 짧은 이름은 한 줄.
+  for (const cls of ["w-[8rem]", "min-w-[8rem]", "truncate"]) expect(named.className).toContain(cls);
   expect(named.className).not.toMatch(/min-\[1440px\]/);
   // 열 폭은 머리칸이 예약한다(내용과 무관 -- 첫 배치 행이 폴링으로 들어와도 표가 다시 배치되지 않는다). 예약 폭 =
-  // 칸 내용 6rem + pr-2 + UA 왼쪽 여백 1px(2026-10-11 검증 지적: 1px 을 빼먹은 6.5rem 은 링크 칸보다 짧아 첫 배치 행이
+  // 칸 내용 8rem + pr-2 + UA 왼쪽 여백 1px(2026-10-11 검증 지적: 1px 을 빼먹은 예약 폭은 링크 칸보다 짧아 첫 배치 행이
   // 열을 1px 넓혔다 -- 실폭 동일성은 e2e E7 이 잰다).
   const th = within(screen.getByRole("table")).getAllByRole("columnheader")[2];
-  for (const cls of ["w-[calc(6.5rem_+_1px)]", "min-w-[calc(6.5rem_+_1px)]", "pr-2"]) expect(th.className).toContain(cls);
+  for (const cls of ["w-[calc(8.5rem_+_1px)]", "min-w-[calc(8.5rem_+_1px)]", "pr-2"]) expect(th.className).toContain(cls);
   const unnamed = within(rowOf(C)).getByRole("link", { name: BY.slice(0, 12) });
   expect(unnamed).toHaveAttribute("href", `/admin/batches/${BY}`);
   expect(unnamed.className).toContain("font-mono");
@@ -645,18 +721,30 @@ test("비관리자: 배치 열이 없다(머리줄 8칸)", async () => {
   const heads = within(screen.getByRole("table")).getAllByRole("columnheader").map((th) => th.textContent);
   expect(heads).toEqual(["요청", "요청자", "작업", "대상", "우선순위", "상태", "생성(KST)", "갱신(KST)"]);
   expect(screen.queryByRole("link", { name: "e7 배치" })).toBeNull();
-  // 요청 id 칸은 배치 열에 2rem 을 내준 관리자만 8rem -- 배치 열이 없는 일반 사용자는 예전 10rem(2026-10-11 검증 지적).
+  // 요청 id 칸은 배치 열에 자리를 내준 관리자만 5rem -- 배치 열이 없는 일반 사용자는 예전 10rem(2026-10-11 검증 지적).
+  // 머리칸 w-px 는 같다(내용에 맞춤 -- 남는 폭을 받지 않는다).
   expect(screen.getByRole("link", { name: A }).className).toContain("max-w-[10rem]");
+  expect(screen.getByRole("columnheader", { name: "요청" }).className.split(" ")).toContain("w-px");
 });
 
-test("관리자의 요청 id 칸은 6.5rem(배치 열 자리 -- 1280 에서 대상 열이 HEAD 이상)", async () => {
+test("관리자의 요청 id 칸은 5rem(배치 열 8rem 자리) · 요청·생성·갱신 머리칸은 내용에 맞춤(w-px)", async () => {
   wrapRows([row(A)]);
   await ready(A);
-  expect(screen.getByRole("link", { name: A }).className).toContain("max-w-[6.5rem]");
+  const link = screen.getByRole("link", { name: A });
+  expect(link.className).toContain("max-w-[5rem]");
+  expect(link.className).not.toContain("max-w-[6.5rem]");
   // 배치 행이 없어도 배치 열 폭은 예약돼 있다(머리칸 고정 폭).
-  const th = within(screen.getByRole("table")).getAllByRole("columnheader")[2];
+  const heads = within(screen.getByRole("table")).getAllByRole("columnheader");
+  const th = heads[2];
   expect(th).toHaveTextContent("배치");
-  expect(th.className).toContain("w-[calc(6.5rem_+_1px)]");
+  expect(th.className).toContain("w-[calc(8.5rem_+_1px)]");
+  // 요청·생성·갱신은 내용 폭(링크 max-w · nowrap 시각 19자)에 붙는다 -- 넓은 화면의 남는 폭이 그 칸들의 빈칸으로 새지
+  // 않는다(2026-10-25). 생성 칸 오른쪽 여백(pr-2)은 두 시각의 구분자라 그대로다.
+  const byName = (name: string) => heads.find((h) => h.textContent === name)!;
+  expect(byName("요청").className.split(" ")).toContain("w-px");
+  expect(byName("생성(KST)").className.split(" ")).toEqual(expect.arrayContaining(["w-px", "pr-2"]));
+  expect(byName("갱신(KST)").className.split(" ")).toContain("w-px");
+  for (const name of ["요청자", "대상", "상태"]) expect(byName(name).className).not.toContain("w-px");
 });
 
 test("?batch=<id> 이면 그 배치의 작업만 서버에 묻고, 무엇으로 걸렀는지·푸는 버튼을 보인다 -- 바뀌면 선택을 비운다", async () => {
@@ -950,6 +1038,35 @@ test("필터를 바꾸면 배치 선택도 비워진다", async () => {
   await userEvent.selectOptions(screen.getByLabelText("연산 필터"), "sync");
   await waitFor(() => expect(status()).toHaveTextContent(IDLE));
   expect(anyBox(A)).not.toBeChecked();
+});
+
+test("검색어·요청자가 **확정되면** 단건·배치 선택이 비워진다 -- 타이핑 도중(아직 같은 목록)엔 그대로", async () => {
+  wrapRows([row(A), child(B, BX), child(C, BX)]);
+  await readyAny(B);
+  const pick = async () => {
+    await userEvent.click(box(A));
+    await userEvent.click(anyBox(B));
+    expect(status()).toHaveTextContent("1개 + 배치 1개(작업 7개) 선택됨");
+  };
+  // 끝난 모습을 한 번에 본다: 새 목록이 와서(행이 다시 있다) 체크가 풀렸고 상태 줄이 안내 문구다. 따로 기다리면 확정 직후
+  // 한 렌더(새 키 로딩 -- 행이 비어 파생 선택도 비고 IDLE)가 통과시킨다 -- 그 뒤 유령 정리가 「…사라져 선택에서 뺐습니다」를
+  // 띄우는 회귀(선택 비우기 effect 가 검색을 안 볼 때)를 못 잡았다(변이 검사).
+  const cleared = () => waitFor(() => {
+    expect(box(A)).not.toBeChecked();
+    expect(anyBox(B)).not.toBeChecked();
+    expect(status()).toHaveTextContent(IDLE);
+  });
+  await pick();
+  await userEvent.type(searchBox(), "e7");
+  // 디바운스 전: 목록이 아직 바뀌지 않았다 -- 고른 것을 글자마다 버리지 않는다.
+  expect(status()).toHaveTextContent("1개 + 배치 1개(작업 7개) 선택됨");
+  await cleared();
+  // 관리자 요청자 필터도 같다.
+  await pick();
+  await userEvent.type(screen.getByLabelText("요청자 필터"), "ali");
+  expect(status()).toHaveTextContent("1개 + 배치 1개(작업 7개) 선택됨");
+  await cleared();
+  expect(status()).not.toHaveTextContent("사라져");
 });
 
 test("배치 11개를 고르면 삭제 버튼이 잠기고 「배치는 10개까지」를 말한다", async () => {

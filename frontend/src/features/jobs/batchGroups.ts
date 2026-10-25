@@ -47,7 +47,7 @@ export function batchBlock(r: RequestRow): BatchBlock {
   return "ok";
 }
 
-/** 고를 수 없는 배치 묶음의 **보이는** 사유(배치 칸 둘째 줄 -- 6rem·text-xs **한 줄**에 들어가게 짧게: 이 줄이 두 줄로
+/** 고를 수 없는 배치 묶음의 **보이는** 사유(배치 칸 둘째 줄 -- 8rem·text-xs **한 줄**에 들어가게 짧게: 이 줄이 두 줄로
  *  접히면 배치가 끝나거나 다시 돌 때 행 높이가 바뀐다). 마우스 hover 의 title 만으론 키보드(disabled 는 Tab 이
  *  건너뛴다)·터치(375px) 사용자가 왜 못 고르는지 알 길이 없었다(2026-10-11 검증 지적). 긴 말(처방)은 JobsList 가 같은 줄의
  *  화면 낭독기 전용 글자로 덧붙인다(체크박스 설명). live 는 **이 행이 아니라** 그 배치의 다른 작업 얘기다 -- 「작업 진행
@@ -130,16 +130,18 @@ export function groupBatches(rows: RequestRow[]): Map<string, BatchGroup> {
 // 대략의 표시 폭(한글·한자·전각 = 2, 그 밖 = 1). text-sm 에서 한글은 ~1em, 숫자·라틴은 ~0.55em 이라 이 비율이 맞다.
 const WIDE = /[ᄀ-ᅟ⺀-〾ぁ-㏿㐀-䶿一-鿿가-힣豈-﫿︰-﹏＀-｠￠-￦]/u;
 const unitsOf = (s: string): number => [...s].reduce((n, ch) => n + (WIDE.test(ch) ? 2 : 1), 0);
-/** 6rem(96px)·text-sm 한 줄에 확실히 들어가는 폭(한글 ~5자) -- 이보다 길면 앞(text-sm)·뒤(text-xs) 두 줄로 나눈다. */
-export const NAME_LINE_UNITS = 11;
-const TAIL_UNITS = 10;
+/** 8rem(128px)·text-sm 한 줄에 확실히 들어가는 폭(한글 ~7자) -- 이보다 길면 앞(text-sm)·뒤(text-xs) 두 줄로 나눈다.
+ *  단위당 ~8.7px 의 여유는 6rem(96px)·11 시절과 같다(대문자 W 류가 ~13px/단위라 꽉 채우지 않는다). 배치 칸 폭(JobsList
+ *  BATCH_W)을 바꾸면 이 둘도 함께 다시 맞춘다(2026-10-25 6rem → 8rem: 11 → 14, 10 → 13). */
+export const NAME_LINE_UNITS = 14;
+const TAIL_UNITS = 13;
 
 /** 배치 이름 → 표시용 앞·뒤 조각(짧아 한 줄에 들어가면 null). 뒤 조각은 이름의 **끝** TAIL_UNITS 폭(가능하면 낱말
  *  경계에서 시작) -- 접두가 같은 배치(「…이관(1차)」·「…이관(2차)」, 「d161 … 1007c」)를 가르는 것은 대개 끝이다. 한 줄
  *  truncate 는 이름 앞 5~6자만, 두 줄 line-clamp 도 앞 ~12자만 보여 끝이 늘 잘렸다(2026-10-10·10-11 검증 지적). 앞 조각은
- *  나머지 전부(화면이 한 줄 말줄임). 화면은 두 조각을 두 줄로 그린다(배치 칸은 모든 폭에서 6rem -- JobsList BATCH_W):
+ *  나머지 전부(화면이 한 줄 말줄임). 화면은 두 조각을 두 줄로 그린다(배치 칸은 모든 폭에서 8rem -- JobsList BATCH_W):
  *  앞 조각은 text-sm, 뒤 조각은 text-xs 이고, 고를 수 없는 묶음이면 뒤 조각 줄 자리에 사유 줄이 선다(칸이 상태와 무관하게
- *  두 줄 -- JobsList BatchCell). text-xs 라 TAIL_UNITS 폭은 6rem 에 여유 있게 들어간다(끝이 말줄임으로 잘리지 않는다). */
+ *  두 줄 -- JobsList BatchCell). text-xs 라 TAIL_UNITS 폭은 8rem 에 여유 있게 들어간다(끝이 말줄임으로 잘리지 않는다). */
 export function splitBatchName(name: string): { head: string; tail: string } | null {
   if (unitsOf(name) <= NAME_LINE_UNITS) return null;
   const chars = [...name];

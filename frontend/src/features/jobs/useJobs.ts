@@ -8,11 +8,13 @@ export const useRequests = () =>
             refetchInterval: 3000 });
 
 // 전체 작업 화면(슬라이스 39): 커서 무한 스크롤 + 필터. 한 쪽 PAGE_SIZE 건,
-// 다음 쪽은 마지막 행의 commit_order 를 before 로 넘긴다. refetchInterval 3s 는
+// 다음 쪽은 마지막 행의 commit_order 를 before 로 넘긴다. refetchInterval 3s(검색 중엔 10s -- requestsPollMs)는
 // 구 useRequests 의 목록 폴링 계약을 잇는다(e2e E5) -- 첫 쪽이 재조회되어 새
 // 제출이 위에 나타난다. 필터는 쿼리 키에 들어가 바뀌면 캐시가 갈린다.
 // batch = 한 배치의 작업만(2026-10-11, 서버 batch_id 필터) -- 화면 주소의 ?batch=<id> 가 정한다(batchJobsPath).
-export interface RequestFilters { operation?: string; state?: string; requester?: string; batch?: string }
+// search = 검색어(2026-10-25, 서버 q -- 낱말마다 부분 일치·대소문자 무시, 낱말 중 하나라도 맞으면 그 행). requester 는
+// 관리자의 요청자 부분 일치(비관리자는 서버가 자기 것으로 강제하고 무시한다). 둘 다 화면이 디바운스·trim 한 확정값이다.
+export interface RequestFilters { operation?: string; state?: string; requester?: string; search?: string; batch?: string }
 export const REQUESTS_PAGE_SIZE = 50;
 
 /** 한 배치의 작업만 거른 전체 작업 목록 주소 -- 배치 상세·배치 기록만 지워진 묶음 칸이 쓴다. 오래된 배치의 작업은
@@ -24,10 +26,19 @@ function requestsUrl(f: RequestFilters, before?: number): string {
   if (f.operation) p.set("operation", f.operation);
   if (f.state) p.set("state", f.state);
   if (f.requester && f.requester.trim() !== "") p.set("requester", f.requester.trim());
+  // 빈 검색어는 싣지 않는다(빈 q= 는 서버에서도 필터 없음이지만, 검색 없는 요청의 주소·SQL 을 예전과 같게 둔다).
+  if (f.search !== undefined && f.search.trim() !== "") p.set("q", f.search.trim());
   if (f.batch) p.set("batch_id", f.batch);
   if (before !== undefined) p.set("before", String(before));
   return `/api/user/requests?${p.toString()}`;
 }
+
+/** 목록 폴링 주기. 검색어·요청자(부분 일치)가 있으면 10초, 없으면 3초(E5 의 목록 폴링 계약).
+ *  왜 늦추나(2026-10-25): 서버의 '%낱말%' LIKE 는 색인을 못 타 드문 낱말이면 요청 표 전체를 훑고, 그동안 단일 연결
+ *  DB 잠금을 쥐어 API 전체(/readyz 포함)를 세운다. react-query 는 폴링마다 불러온 **모든 쪽**을 다시 읽으므로 3초면
+ *  검색 화면 하나가 그 전수 훑기를 상시 반복한다. 검색 중엔 새 제출이 바로 위에 나타나는 즉시성보다 DB 를 아낀다. */
+export const requestsPollMs = (f: RequestFilters): number =>
+  (f.search ?? "").trim() !== "" || (f.requester ?? "").trim() !== "" ? 10_000 : 3000;
 
 export const useInfiniteRequests = (filters: RequestFilters) =>
   useInfiniteQuery({
@@ -39,7 +50,7 @@ export const useInfiniteRequests = (filters: RequestFilters) =>
     getNextPageParam: (lastPage) =>
       lastPage.length === REQUESTS_PAGE_SIZE
         ? lastPage[lastPage.length - 1].commit_order : undefined,
-    refetchInterval: 3000,
+    refetchInterval: requestsPollMs(filters),
   });
 
 // 「최근 작업」(대시보드) 전용이던 useRecentRequests 는 그 카드와 함께 제거됐다
