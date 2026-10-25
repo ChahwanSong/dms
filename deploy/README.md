@@ -929,7 +929,7 @@ RolloutWatcher가 그 seq 순서대로 하나씩 patch → 수렴 확인 → 다
 - 테스트베드: `deploy/overlays/<testbed|testbed-k8s>/kustomization.yaml` 의 `newTag`(dms 계보 = api·
   controller·migrate 가 한 항목, dms-agent 계보 = 다른 항목) + `patch-config.yaml` 의
   `DMS_JOB_IMAGE`. **오버레이마다 bump 하는 브랜치가 다르다**(2026-10-21): `testbed-k8s`(k8s 클러스터, kN)는
-  main(→ dms-k8s)에서만, `testbed`(ssc 클러스터, dN)는 ssc 빌드 소스가 dms-ssc 체크아웃으로 넘어간 뒤로는 dms-ssc
+  dms-k8s 에서만(2026-10-22 분리 전엔 main(→ dms-k8s)), `testbed`(ssc 클러스터, dN)는 ssc 빌드 소스가 dms-ssc 체크아웃으로 넘어간 뒤로는 dms-ssc
   쪽에서만(전환 전에는 main) — 한 커밋에서 둘을 같이 올리지 않는다(체리픽 충돌·남의 태그).
 - prod/ssc: `values.env` 의 `DMS_TAG`/`DMS_AGENT_TAG`/`MFU_TAG`
   - 설치 뒤로는 셋 중 무엇이든 `live` 로 둘 수 있다(2026-10-06): `render.sh` 가 지금 클러스터에서

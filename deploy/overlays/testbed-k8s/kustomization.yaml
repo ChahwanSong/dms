@@ -1,4 +1,4 @@
-# DMS k8s 테스트베드 오버레이(2026-10-21) — 두 번째 테스트베드(dms-k8s 브랜치 후보 = main 을 검증한다).
+# DMS k8s 테스트베드 오버레이(2026-10-21) — 두 번째 테스트베드(dms-k8s 브랜치를 검증한다 — 2026-10-22 부터 main 과 별도 라인).
 #
 # 클러스터·컨텍스트: k8s-cp1(10.10.10.20) + k8s-w1·k8s-w2(.21·.22), kubeconfig 컨텍스트 **dmsk8s**.
 #   current-context 는 ssc 테스트베드(`dms`, deploy/overlays/testbed)로 남겨 두므로 이 오버레이는 **항상
@@ -22,7 +22,9 @@
 #   않게 분리; 빌더 buildah:stable 만 :5000 미러를 공용으로 읽는다). 태그 관례 **kN**(ssc 는 dN):
 #   k0 = 첫 설치 시드(:5000 의 dms:d184·dms-agent:d179·dms-mpifileutils:d183 을 :5001 에 k0 으로 복사).
 #   k1 = 첫 포탈 빌드(빌드 노드 k8s-w1, 소스 main 체크아웃 928b3c9 — nsync 역할별 볼륨; 이미지 3종 + 잡 이미지).
-#   태그 bump = 아래 newTag(+ patch-config.yaml 의 DMS_JOB_IMAGE) 커밋 — **main(→ dms-k8s) 에서만** 한다.
+#   k2 = 전체 작업 검색·열 폭(2026-10-25, 소스 dms-k8s 체크아웃 1b0febe; 이미지 3종 + 잡 이미지).
+#   태그 bump = 아래 newTag(+ patch-config.yaml 의 DMS_JOB_IMAGE) 커밋 — **dms-k8s 에서만** 한다(2026-10-22 브랜치 분리 뒤
+#   빌드 소스는 /home/mason/dms-dev/dms-k8s 체크아웃 = origin/dms-k8s, main 은 이 클러스터와 무관).
 #   overlays/testbed(ssc 클러스터) 는 dms-ssc 쪽 소관이라 여기서 같이 건드리지 않는다(체리픽 충돌·엉뚱한 태그 방지).
 #   포탈의 다음 태그 제안은 dNN 만 읽으므로 kN 을 직접 입력한다(docs/BACKLOG.md).
 #
@@ -39,10 +41,10 @@ resources:
 images:
   - name: set-by-overlay.invalid/dms
     newName: pkg-01:5001/dms
-    newTag: k1
+    newTag: k2
   - name: set-by-overlay.invalid/dms-agent
     newName: pkg-01:5001/dms-agent
-    newTag: k1
+    newTag: k2
 
 patches:
   - path: patch-config.yaml

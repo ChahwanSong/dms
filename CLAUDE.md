@@ -72,7 +72,7 @@ PostgreSQL(제어면) + React 포탈 + 노드 에이전트 + Volcano gang-schedu
   `DMS_JOB_IMAGE`), 사이트는 `values.env`. **테스트베드는 둘이다**(2026-10-21, deploy/README.md 「테스트베드는 둘이다」):
   `deploy/overlays/testbed` = **ssc 클러스터**(컨텍스트 `dms`, pkg-01:5000, 태그 `dN`, LDAP 사용) — ssc 빌드 소스가
   dms-ssc 체크아웃으로 넘어간 뒤로는 **dms-ssc 쪽에서만** bump(전환 전에는 main); `deploy/overlays/testbed-k8s` =
-  **k8s 클러스터**(컨텍스트 `dmsk8s`, pkg-01:5001, 태그 `kN`, **LDAP 없음** — 사용자 결정) — **main(→ dms-k8s)에서만**
+  **k8s 클러스터**(컨텍스트 `dmsk8s`, pkg-01:5001, 태그 `kN`, **LDAP 없음** — 사용자 결정) — **dms-k8s 에서만**(2026-10-22 분리 뒤 이 클러스터의 빌드 소스는 dms-k8s 체크아웃)
   bump. 한 커밋에서 둘을 같이 올리지 마라. 두 클러스터가 같은 네임스페이스(dms)라 **kubectl 은 늘 `--context` 를
   명시**한다(current-context 는 dms; dmsk8s 를 current 로 만들지 마라). 적용은
   항상 `kubectl --context <ctx> apply -k deploy/overlays/<site>` — raw `kubectl apply -f deploy/k8s` 는
