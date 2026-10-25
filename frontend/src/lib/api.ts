@@ -36,7 +36,7 @@ export const REASON_MESSAGES: Record<string, string> = {
   artifact_base_not_traversable: "작업 기록(artifact) 저장소에 실행 신원이 들어갈 수 없습니다 — 관리자에게 문의하세요(artifact base 디렉토리에 다른 사용자 실행(x) 권한이 필요합니다: 711 또는 755)",
   parent_not_writable: "대상의 상위 디렉토리에 쓸 수 없습니다",
   // rm 대상 봉쇄(2026-10-21): preflight·exec_preflight 와 러너의 drm 직전 재확인이 같은 코드를 낸다.
-  target_path_redirected: "삭제 대상의 상위 경로가 심볼릭 링크로 다른 곳을 가리킵니다 — 실제 경로를 확인하세요(관리 디렉토리 아래 상위 경로에 심볼릭 링크가 끼면 삭제하지 않습니다. 대상 자신이 링크면 링크만 지웁니다)",
+  target_path_redirected: "작업 경로(또는 그 상위)가 심볼릭 링크로 다른 곳을 가리킵니다 — 실제 경로를 확인하세요(관리 디렉토리·PV 안 경로에 심볼릭 링크가 끼면 작업하지 않습니다. PV 경로는 마지막 성분이 링크여도 막고, 삭제는 대상 자신이 링크면 링크만 지웁니다)",
   target_not_readable: "대상 경로를 읽을 수 없습니다 — 경로와 권한을 확인하세요",
   // 복합 접두 (stepper.py 가 f"{prefix}:{ExecutionError.reason_code}" 형태로 발생시킨다)
   preflight_submit_failed: "사전 점검을 시작하지 못했습니다",

@@ -23,6 +23,22 @@ async function visitUsage(page: Page): Promise<void> {
   await expect(panel.locator("table").first().or(panel.getByText("이 스토리지에는 아직 성공한 scan 이 없습니다"))).toBeVisible();
 }
 
+// k8s 연동(dms-k8s 설계 §7) 개요 + 하위 넷. e2e 하네스엔 클러스터가 없어 다섯 화면 모두 빈 상태(안내·빈 표)로 그려진다 -- 표
+// 하한은 0, 머리의 동작 버튼 줄·탭 줄(가로 스크롤)·필터 줄이 L1 위험이다. 로딩 문구가 사라진 뒤에 잰다(개요는 「클러스터」 h2).
+const K8S_PAGES: Array<[string, string]> = [
+  ["/admin/k8s", "k8s 연동"],
+  ["/admin/k8s/storageclasses", "StorageClass"],
+  ["/admin/k8s/volumes", "PV 탐색"],
+  ["/admin/k8s/access", "사용자 권한"],
+  ["/admin/k8s/history", "동기화 이력"],
+];
+
+async function visitK8s(page: Page, path: string, heading: string): Promise<void> {
+  await visit(page, path, heading);
+  await expect(page.getByText("불러오는 중…", { exact: true })).toHaveCount(0);
+  if (path === "/admin/k8s") await expect(page.getByRole("heading", { name: "클러스터", level: 2 })).toBeVisible();
+}
+
 // 단일 작업 화면에 200자 무공백 경로를 넣는다(제출하지 않음 -- resource_key·검증과 무관).
 // 긴 토큰이 1fr 열을 밀어내던 유형(6bc2ecb)의 재현 재료다: minmax(0,1fr) 이 빠지면 문서가 넘치고(L1),
 // 요약 dd·"실제 경로" 줄의 overflow-wrap 이 빠지면 그 칸만 넘친다 -- xl 의 요약 본문은 자기 스크롤
@@ -119,6 +135,11 @@ test.describe("E3 레이아웃 불변식", () => {
 
     await visitUsage(page);
     await assertLayoutSane(page, { minTableCells: 0 });
+
+    for (const [path, heading] of K8S_PAGES) {
+      await visitK8s(page, path, heading);
+      await assertLayoutSane(page, { minTableCells: 0 });
+    }
   });
 
   test("375x667 모바일 spot check", async ({ page }) => {
@@ -164,5 +185,11 @@ test.describe("E3 레이아웃 불변식", () => {
     await visit(page, "/admin/dashboard", "대시보드");
     await expect(page.getByRole("group", { name: / CPU 사용률$/ }).first()).toBeVisible();
     await assertLayoutSane(page, { sidebarFixed: false, minTableCells: 0 });
+
+    // k8s 연동: 머리 동작 버튼(클러스터 등록 등)은 375 에서 제목 아래로 접히고, 하위 메뉴 탭 줄은 자기 안에서 가로 스크롤한다.
+    for (const [path, heading] of K8S_PAGES) {
+      await visitK8s(page, path, heading);
+      await assertLayoutSane(page, { sidebarFixed: false, minTableCells: 0 });
+    }
   });
 });

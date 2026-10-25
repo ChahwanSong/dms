@@ -145,7 +145,17 @@ primary·secondary, 동기화 상태 UI. 설계 `docs/history/specs/2026-10-25-d
   - 테스트: `tests/test_k8s_submit.py`(테스트베드 실데이터 위 수용 — 일반 사용자 PV→PV sync 제출 → 계획 → 미리보기 대기 → 컨펌,
     게이트·재확인·면제·me·검색), `test_storage_kind.py`, `test_prod_k8s_overlay.py`, 기존 테스트 갱신(백엔드 8종·me 필드·사용자
     스토리지 필드).
-- **실증**: 다음 단계(설계 §9 슬라이스 3·4 — 포탈 제출 화면 + 테스트베드 dmsk8s 실증·적대적 리뷰)가 여기에 덧붙인다.
+- **포탈 제출 화면(슬라이스 3, ceaebcc)**: 단일 작업의 k8s 모드 — `LocationField`(쪽마다 「PV 주소 | 직접 경로」, 비면제는 PV 주소만,
+  PV 고르기는 내 권한 PV 목록 `usePvCatalog`·하위 경로·실제 경로 미리보기), 스토리지 화면의 「종류」, 작업 목록·상세의 PV 표기
+  (`pathParts`), 계정 라벨·`?create=` 바로가기. vitest 1519.
+- **PV 주소 봉쇄(2026-10-26 보안 리뷰 HIGH)**: 모든 잡이 root 라 커널 DAC 가 없어, 사용자 파드가 자기 PV 안에 남의 PV 를 가리키는
+  심링크를 심으면 PV A 권한만으로 root dsync·dscan 이 PV B 를 읽거나 덮어쓸 수 있었다(재확인은 글자로 「경로 ⊆ PV 루트」만 본다).
+  stepper 가 PV 쪽의 PV 루트를 `paths["contain"]` 로 싣고, preflight(sync·nsync 역할별·scan)가 `dms_contain` 으로 「PV 루트 아래
+  심링크 성분 없음 — 마지막 성분 포함」을, 러너가 dsync·dscan mpirun 직전에 같은 규칙(`pv_path_redirected`, env `DMS_JR_CONTAIN`)을
+  본다. PV 주소 rm 은 rm 봉쇄 기준을 PV 루트로 좁힌다. 사유 `target_path_redirected`(문구 일반화). 블록 root 가 `..` 로 managed_root
+  밖이 되는 변조 행은 빈 루트로 막는다. PV 가 아닌 잡의 매니페스트는 바이트 단위로 그대로. `tests/test_pv_containment_sh.py`(실 sh 와
+  러너를 같은 트리로 대조)·`test_stepper_enrich`(stepper 가 싣는 값).
+- **실증**: 다음 단계(설계 §9 슬라이스 4 — 테스트베드 dmsk8s 실증·적대적 리뷰)가 여기에 덧붙인다.
 
 ### ✅ 전체 작업: 요청자 부분 일치 + 배치 이름·대상 경로 검색 + 열 폭(요청 ↓ · 배치 ↑ · 시각 = 글자 폭) — **완료·실증**(2026-10-25, k2)
 

@@ -69,6 +69,36 @@ def rm_target_redirected(target, root, *, realpath=_realpath_strict) -> bool:
     return real_parent != want
 
 
+def pv_path_redirected(path, root, *, realpath=_realpath_strict, lexists=os.path.lexists) -> bool:
+    """PV 주소 경로가 PV 루트 아래 **심링크 성분 없이** 그 자리에 있는가의 반대(True = 막는다, 2026-10-26).
+
+    execution_manifests._PV_CONTAIN_FN(preflight 셸)과 **같은 규칙**이다(tests/test_pv_containment_sh.py 가 같은 트리로 대조):
+    경로가 있으면 realpath(경로) == realpath(루트) + 글자 그대로의 상대경로(마지막 성분이 링크여도 막는다 — dsync 소스·dscan
+    대상은 도구가 따라가고, 목적지가 링크면 그 너머에 쓴다), 없으면 부모로 같은 판정. 왜 러너도 보나: preflight 파드와 실행
+    vcjob 은 다른 파드라 그 사이에 사용자가 경로 성분을 링크로 바꿀 수 있다(rm_target_redirected 와 같은 이유). 실제 경로를
+    못 구하면(없는 상위·고리) 막는다(fail-closed)."""
+    if not isinstance(path, str) or not isinstance(root, str) or root == "":
+        return True
+    if path.endswith("/") or path.endswith("/.") or path.endswith("/..") or "/" not in path:
+        return True
+    base = root[:-1] if root.endswith("/") else root
+    if path in (root, base):
+        rel = ""
+    elif path.startswith(base + "/"):
+        rel = path[len(base) + 1:]
+    else:
+        return True
+    try:
+        real_root = realpath(root)
+        stem = real_root[:-1] if real_root.endswith("/") else real_root
+        want = real_root if rel == "" else f"{stem}/{rel}"
+        if lexists(path):
+            return realpath(path) != want
+        return realpath(os.path.dirname(path)) != os.path.dirname(want)
+    except (OSError, ValueError):
+        return True
+
+
 def run_job(env, *, run, write_text, read_text, sleep, wait_hostfile,
             make_executable=lambda path: None, clock=None) -> int:
     username = env["DMS_JR_USERNAME"]
@@ -159,6 +189,24 @@ def run_job(env, *, run, write_text, read_text, sleep, wait_hostfile,
     # 6c. rm 대상 봉쇄 재확인(rm_target_redirected docstring) -- mpirun 바로 앞(워커 준비 대기 뒤)이라 가장 늦은 자리다.
     #     env 키 부재 = 이 검사 전의 제어면이 만든 매니페스트(롤링 업그레이드) -- 그 제어면의 preflight 도 보지 않았으니
     #     종전대로 둔다. 키가 있으면(빈 값 포함) 판정한다.
+    # 6d. PV 주소 봉쇄 재확인(pv_path_redirected docstring) -- dsync·dscan 만(nsync 런처는 데이터 경로를 마운트하지 않는다).
+    #     env 키 부재 = PV 가 아닌 잡 또는 이 검사 전의 제어면 -- 종전대로 둔다. 값이 JSON 이 아니면 막는다(fail-closed).
+    if tool in ("dsync", "dscan") and "DMS_JR_CONTAIN" in env:
+        try:
+            pairs = json.loads(env["DMS_JR_CONTAIN"])
+            bad = [(p, r) for p, r in pairs if pv_path_redirected(p, r)]
+        except (ValueError, TypeError):
+            bad = [("?", "?")]
+        if bad:
+            p, r = bad[0]
+            lines = (f"{EXECUTION_REASON_MARKER}{TARGET_PATH_REDIRECTED}\n"
+                     f"DMS_JR_PV_PATH_REDIRECTED path={p!r} root={r!r}\n")
+            sys.stdout.write(lines)
+            sys.stdout.flush()
+            write_text(f"{artifact_dir}/stderr.log", lines)
+            write_text(f"{artifact_dir}/summary.json",
+                       json.dumps({"returncode": None, "files": None, "bytes": None}))
+            return 1
     if tool == "drm" and "DMS_JR_RM_ROOT" in env:
         target = argv[-1] if argv else None
         if rm_target_redirected(target, env["DMS_JR_RM_ROOT"]):

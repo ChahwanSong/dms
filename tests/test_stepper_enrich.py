@@ -81,3 +81,48 @@ def test_sync_recheck_preflight_before_execution(db):
     exec_spec = [s for s in adapter.submitted_specs() if s.phase == "execution"][0]
     assert exec_spec.paths["source"] == "/cephfs-third/a"
     assert exec_spec.paths["destination"] == "/cephfs-secondary/b"
+
+
+def _pv_job(repos, key, operation, payload, **job):
+    rid = repos.requests.create(operation=operation, requester_id="alice", actor="alice",
+        resource_key=key, payload=payload, priority="mid")
+    repos.requests.set_state(rid, RequestState.PLANNED, actor="planner")
+    repos.requests.set_state(rid, RequestState.RUNNING, actor="planner")
+    plan_id = repos.data_jobs.create_plan(rid, actor="planner")
+    return repos.data_jobs.create_job(rid, plan_id, operation=operation, priority="mid",
+        options=job.pop("options", {}),
+        worker_pool={"identity": {"uid": 10001, "gid": 10000, "username": "alice", "groups": [], "privileged": False},
+            "candidates": {"primary": ["dms-w1"]}, "process_count": 8, "queue": "dms-data",
+            "priority_class": "dms-mid"},
+        precondition={}, actor="planner", **job)
+
+
+def test_pv_containment_roots_follow_payload_blocks(db):
+    """PV 주소 쪽만 paths["contain"] 에 PV 루트 절대경로(2026-10-26 봉쇄) -- 직접 경로 쪽은 키가 없다. 블록 root 의 '..' 가
+    managed_root 밖으로 나가면 빈 루트(봉쇄가 막는다), PV 주소 rm 은 봉쇄 기준(containment_root)이 PV 루트로 좁혀진다."""
+    repos = Repositories(db)
+    repos.storages.create(storage_name="pv-gpfs", mount_path="/k8s_pv/gpfs", managed_root="/k8s_pv/gpfs",
+                          backend_type="gpfs", actor="admin")
+    repos.storages.create(storage_name="cephfs-dms", mount_path="/cephfs", managed_root="/cephfs/dms",
+                          backend_type="cephfs", actor="admin")
+    vol = "pvc-52c6/pvc-52c6-data"
+    blk = {"cluster": "c", "namespace": "team-a", "pvc": "models", "volume": "pvc-52c6", "root": vol, "path": "x"}
+    # sync: 소스는 PV, 목적지는 직접 경로
+    _pv_job(repos, "k1", "sync", {"source_storage": "pv-gpfs", "source": f"{vol}/x", "source_pv": blk,
+            "destination_storage": "cephfs-dms", "destination": "team/b"},
+            source_storage="pv-gpfs", source=f"{vol}/x", destination_storage="cephfs-dms", destination="team/b",
+            tool="dsync")
+    # scan: 블록 root 가 managed_root 밖으로 정규화된다(변조 행)
+    _pv_job(repos, "k2", "scan", {"storage": "pv-gpfs", "target": f"{vol}/x", "pv": {**blk, "root": "a/../../.."}},
+            storage_name="pv-gpfs", target=f"{vol}/x", tool="dscan")
+    # rm: PV 안 하위 경로
+    _pv_job(repos, "k3", "rm", {"storage": "pv-gpfs", "target": f"{vol}/x", "pv": blk},
+            storage_name="pv-gpfs", target=f"{vol}/x", tool="drm", options={"recursive": True})
+    adapter = StubExecutionAdapter()
+    JobStepper(repos, adapter, settings=_Settings()).run_once()
+    specs = {s.operation: s for s in adapter.submitted_specs()}
+    assert specs["sync"].paths["contain"] == {"source": "/k8s_pv/gpfs/pvc-52c6/pvc-52c6-data"}
+    assert specs["scan"].paths["contain"] == {"target": ""}
+    assert specs["rm"].paths["contain"] == {"target": "/k8s_pv/gpfs/pvc-52c6/pvc-52c6-data"}
+    assert specs["rm"].paths["containment_root"] == "/k8s_pv/gpfs/pvc-52c6/pvc-52c6-data"
+    assert specs["rm"].paths["managed_root"] == "/k8s_pv/gpfs"
