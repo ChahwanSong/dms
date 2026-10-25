@@ -158,10 +158,8 @@
   `<id>-clusterrole-admin|edit` 만; KFAM 꼴 `user-…-example-com` 은 「계정 없음·subject 불일치」 경고로만 보인다), (b) kubeflow-view 를
   읽기 전용 권한으로 볼지(지금 인식 안 함), (c) 동기화가 오래 실패할 때 판정을 막을 시점(지금은 마지막 성공 스냅숏으로 계속 판정 —
   「n분 전 기준」 표시), (d) LDAP 코드(identity_ldap·agent/directory·nslcd)를 dms-k8s 에서 지울지, (e) 배치(BatchCreate)의 PV 주소
-  (지금 배치는 직접 경로만 — 운영자 전용이라 맵핑 면제), (f) 심링크 봉쇄를 sync·scan 으로 확장할지(모든 잡이 root 라 사용자 파드가
-  자기 PV 안에 남의 PV 를 가리키는 심링크를 만들면 root dsync·dscan 이 따라간다 — 지금 부모 realpath 봉쇄는 rm 뿐, 기준도 managed_root
-  전체; 처방 후보: preflight·러너에 `_RM_CONTAINMENT_CHECK` 모양을 PV 루트 기준으로 sync 소스·목적지·scan 대상에, 또는 hostPath 를
-  PV 루트로 좁히기), (g) 사용자 스캔 경로의 PV 주소화(지금 k8s 모드에서 면제자 전용 — 422 `scan_path_unrestricted_only`),
+  (지금 배치는 직접 경로만 — 운영자 전용이라 맵핑 면제), ~~(f) 심링크 봉쇄를 sync·scan 으로 확장할지~~ — **해소**(2026-10-26 보안
+  리뷰 HIGH → 구현: PV 주소 봉쇄 — preflight `dms_contain` + 런처·nsync rank 재확인, 기준점 managed_root, ARCHITECTURE §7), (g) 사용자 스캔 경로의 PV 주소화(지금 k8s 모드에서 면제자 전용 — 422 `scan_path_unrestricted_only`),
   (h) Pure FlashBlade(PV 마다 별도 export)는 「스토리지 + 상대경로」 모델 밖 — PV 별 스토리지 등록이 대안, (i) 멀티 클러스터 라이브
   실증용 두 번째 VM(지금은 단위 테스트 + 같은 클러스터 이중 등록), (j) 「운영자」 = 특권 목록·부여 관리자 해석 확인,
   (k) 운영자가 「사용자 지정」(owner_username)으로 낸 작업을 그 사용자 본인 목록에도 보일지(지금은 requester_id 격리 — 요청자 목록만),
@@ -181,7 +179,14 @@
   낮추거나 스트리밍 파서로.
 - 🔧 **PostgreSQL 실 DB 미실행(슬라이스 1·2)** — k8s 테이블·적용 루프·제출 판정은 sqlite 로만 테스트했다. PG 방언 차이는 코드에서
   갈랐다(FOR UPDATE, ctid 묶음 삭제, IS NULL 분기 CAS, LIKE ESCAPE·`COALESCE(target_label, '')`). 실증(슬라이스 4)이 테스트베드 PG 로 확인.
-- 🔧 **e2e 03 순회에 k8s 화면 추가·계정 화면 `?create=`·SubmitJob `?pv=` 소비(슬라이스 1 포탈 열린 항목)** — 수기 게이트.
+- 🔧 **e2e: 계정 화면 `?create=`·SubmitJob `?pv=` 소비 흐름(슬라이스 1 포탈 열린 항목)** — 수기 게이트. (03 레이아웃 순회의 k8s 5화면
+  1280·375 는 2026-10-26 추가 — 해소.)
+- 📝 **PV 탐색 「이 PV로 단일 작업」 버튼을 권한 밖 PV 에서 미리 막을지(2026-10-26 정확성 리뷰 — 기각했지만 UX 여지)** — 목록 밖
+  관리자(면제 아님)에게도 PV 탐색은 전체 PV 를 보이고 버튼이 열린다. 제출 화면은 자기 맵핑 범위에서 PV 를 찾지 못해 「권한이
+  회수됐거나 PV 가 지워졌을 수 있습니다」로 막는다(설계대로 — 잘못 실행되지 않음). 버튼을 그 관리자의 맵핑(access)으로 비활성화하거나
+  문구를 「이 PV 에 대한 권한이 없습니다」로 가르는 것이 후보.
+- 📝 **PV 봉쇄의 남는 창** — 러너·rank 재확인 뒤 도구가 경로를 열 때까지의 창은 rm 봉쇄와 같다(§4 「rm 대상 봉쇄의 남은 TOCTOU 창」과 같은 성격 —
+  근본 처방은 hostPath 를 PV 루트로 좁히거나 도구가 openat2(RESOLVE_BENEATH) 로 걷는 것).
 - 🔧 **숫자만으로 된 계정 아이디의 실행 신원** — k8s 모드의 owner_username 은 계정 아이디 규칙(`[a-z0-9][a-z0-9._-]{0,63}`)이라
   `1234` 같은 이름이 통과한다. 잡 셸의 `getent passwd 1234`·`id 1234` 는 숫자를 uid 로 읽어 다른 계정과 맞물리면 preflight 가
   「account exists with a different uid/gid」로 실패한다(fail-closed — 권한 상승은 아님). 처방 후보: 실행 신원 이름에 숫자만인 값 거부.
