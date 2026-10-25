@@ -1316,7 +1316,7 @@ ConfigMap 의 LDAP 키 7개 null 삭제, 에이전트는 `command: ["dms"] args:
 | 로그인·가입·재설정·`/me`·사용량 분석·아티팩트 | 동작(LDAP 무관) |
 
 보조 그룹·실행 신원의 LDAP uid/gid 같은 LDAP 기능은 **ssc 테스트베드에서** 검증한다. 대상 클러스터 등록(API 서버·읽기 전용
-리더 토큰)·호출 노드·StorageClass 매핑 런북은 실증 단계(설계 §9 슬라이스 4)에서 이 절에 더한다.
+리더 토큰)·호출 노드·StorageClass 매핑 런북은 아래 **13-9**(k3 실증 2026-10-26).
 
 ### 13-1. 인프라 전제 (testbed 저장소 몫 — 여기서는 확인만)
 
@@ -1417,8 +1417,60 @@ kubectl --context dmsk8s -n dms exec ds/dms-agent -- sh -c 'test -S /run/nslcd/s
 
 포탈 「빌드」에서 images `[dms-mpifileutils, dms, dms-agent]`, 태그 **`k1`, `k2`, …를 직접 입력**한다 — 다음 태그 제안은 `dNN`
 만 읽어 엉뚱한 값을 낸다(docs/BACKLOG.md). 릴리스(agent → api → controller, 잡 이미지) 뒤 `deploy/overlays/testbed-k8s` 의
-`newTag`·`DMS_JOB_IMAGE` 를 맞추는 커밋을 **main 에서만** 만든다(ssc 오버레이 `testbed` 는 같이 건드리지 않는다). 포탈
-릴리스는 이미지만 패치하므로 에이전트의 `dms agent` 명령 오버라이드는 롤아웃 뒤에도 남는다.
+`newTag`·`DMS_JOB_IMAGE` 를 맞추는 커밋을 **dms-k8s 에서만** 만든다(2026-10-22 브랜치 분리 — ssc 오버레이 `testbed` 는 같이
+건드리지 않는다). 포탈 릴리스는 이미지만 패치하므로 에이전트의 `dms agent` 명령 오버라이드는 롤아웃 뒤에도 남는다.
+
+**ConfigMap 만 바뀐 apply 는 파드를 다시 띄우지 않는다**(k3 실증): `dms-config` 는 `envFrom` 이라 값이 기동 때만 읽히고, 이미지는
+포탈 릴리스가 이미 바꿔 둬서 `apply -k` 가 파드 템플릿을 바꾸지 않는다. 신원 모드처럼 env 를 바꾼 apply 뒤에는
+`kubectl --context dmsk8s -n dms rollout restart deploy/dms-api deploy/dms-controller` 로 다시 띄우고 `/api/auth/me` 의
+`identity_mode` 로 확인한다(에이전트는 신원 모드를 읽지 않는다).
+
+### 13-9. k8s 연동 — 대상 클러스터·호출 노드·스토리지·StorageClass 등록 (k3 실증 2026-10-26)
+
+전제(먼저 확인):
+- **호출 노드의 에이전트가 대상 API 서버에 닿는다** — 에이전트 파드 안에서 `getent hosts k8s-cp1`·6443 TCP(테스트베드: 클러스터
+  DNS 가 `k8s-cp1` → 10.10.10.20 을 푼다). 대상 방화벽에는 개요 화면의 「주·보조 호출 노드 IP」만 열면 된다.
+- **PV 경로를 담은 스토리지가 DMS 워커에 마운트돼 있다** — 테스트베드 `/k8s_pv/{nfs,gpfs,onefs}`(testbed `group_vars/all.yml`
+  `k8s_pv_mount_options`). **NFS 기반 스토리지(OneFS 포함)는 `lookupcache=positive`** 로 마운트한다: 다중 노드 dsync 에서 rank 0
+  이 만든 목적지 디렉터리 아래를 다른 노드의 rank 가 음성 dentry 캐시 때문에 ENOENT 로 실패했다(k3 실증 — 기본 `lookupcache=all`).
+  remount 로는 못 바꾼다(umount → mount). CephFS·GPFS 는 캐시가 일관돼 해당 없다.
+- **PV 로 보내는 sync 는 두 스토리지를 함께 마운트한 노드가 있어야 한다**(root nsync 금지 — `pv_sync_needs_shared_node`, nsync
+  목적지의 링크 추종 때문, docs/BACKLOG.md). PV 스토리지는 모든 DMS 워커에 마운트하는 것이 기본이다.
+- **가입 인증 메일이 신원 증명이다** — 권한이 「DMS 계정 아이디 == RoleBinding 의 ID」로 묶이므로, 메일러가 stub(코드 에코)이거나
+  인증이 꺼져 있으면 아직 계정이 없는 사람의 아이디로 누구나 먼저 가입해 그 사람의 PV 권한을 가져간다. 운영 사이트는 관리 →
+  메일 설정에서 Knox 릴레이를 켠다(개요 화면이 stub·꺼짐을 경고한다 — 테스트베드는 stub 라 경고가 뜨는 것이 정상).
+
+절차(포탈 — 전부 **세션 관리자**만, 공유 토큰으로는 조회만):
+1. **리더 계정**: 「클러스터 등록」 창의 「대상 클러스터에 만들 읽기 전용 계정」 YAML(ClusterRole: rolebindings·persistentvolumeclaims·
+   persistentvolumes·storageclasses list + namespaces/kube-system get, ServiceAccount, 장기 토큰 Secret)을 대상 클러스터에 apply
+   하고 Secret 의 `data.token`(base64 그대로 붙여도 된다)과 CA 를 받는다. 테스트베드는 testbed `scripts/k8s-pv-reader-creds.sh` 가
+   만든 `dms-reader/dms-inventory` 를 쓴다 — 토큰 파일은 0600, 화면·로그에 출력하지 않는다(포탈이 봉인해 보내고 서버는 암호화해 저장).
+2. **스토리지**(스토리지 화면, 「종류」): 테스트베드 값 —
+
+   | 이름 | mount_path = managed_root | backend | 종류 |
+   |---|---|---|---|
+   | `k8s-pv-nfs` | `/k8s_pv/nfs` | nfs | PV |
+   | `k8s-pv-gpfs` | `/k8s_pv/gpfs` | gpfs | PV·파일시스템(both) |
+   | `k8s-pv-onefs` | `/k8s_pv/onefs` | onefs | PV |
+   | `cephfs-dms`(기존) | `/cephfs` · `/cephfs/managed` | cephfs | 파일시스템 |
+
+   에이전트 보고 한 주기 뒤 상태가 Ready 가 된다.
+3. **호출 노드·주기**(k8s 연동 개요): 주 `k8s-w1`, 보조 `k8s-w2`, 5분.
+4. **클러스터 등록**: 이름 `dmsk8s`, API 서버 `https://k8s-cp1:6443`, TLS 「지정한 CA」, 토큰 → 「지금 동기화」. 첫 run 은 노드 확인
+   주기(15초) 안에 가져가 수십 ms 에 적용된다 — 지문 = kube-system uid(`ca1f5a86-…`). 같은 클러스터를 다른 주소로 또 등록하면 카드가
+   「같은 클러스터로 보입니다」로 경고하고 사용자 고르기에 같은 PVC 가 두 번 보인다(권한도 클러스터마다 따로 판정된다).
+5. **StorageClass 매핑**(StorageClass 탭): 동기화로 SC 가 보인 **뒤에만** 된다(전에는 404 `storage_class_not_found`). `tb-nfs →
+   k8s-pv-nfs`, `tb-gpfs → k8s-pv-gpfs`, `tb-onefs → k8s-pv-onefs`(템플릿 비움 = 백엔드 프리셋 `{subdir}`·`{volume}/{volume}-data`·
+   `data/csi/{volume}`). 「예시 경로」가 워커의 실제 디렉터리와 같은지 확인한다(`ssh k8s-w1 ls -d <예시 경로>`).
+6. **계정**: RoleBinding 이름에서 뽑은 ID(`junwoo-song-clusterrole-admin` → `junwoo.song`)와 **같은 아이디**로 가입하거나 관리자가
+   만든다. 사용자 권한 탭의 「계정 없음」·「subject 불일치」로 빠진 사람을 찾는다.
+7. **확인**: PV 탐색(PVC 7 · Bound 6), 사용자 권한(인식 바인딩 5 · 사용자 4), 일반 사용자 로그인 → 단일 작업에서 자기 namespace
+   PV 만 보이는지, scan 이 실제 파일 수·바이트를 내는지.
+
+장애 표시(실증): 토큰 거부 → 카드 「실패 · API 서버가 토큰을 거부했습니다(401)」, TLS 서버 이름 불일치 → 「API 서버 인증서를 검증하지
+못했습니다」 + 원문(호스트 이름 불일치), 둘 다 노드 탓이 아니라 보조 노드로 넘기지 않는다. 주 노드 에이전트가 멈추면 요청 90초 뒤
+보조 노드가 가져간다(SIGSTOP 실증: 93초). 권한 회수(RoleBinding 삭제)는 다음 동기화에 반영되고 컨펌 대기 중이던 작업은 컨펌 때
+409 `k8s_access_denied` 로 끝난다.
 
 ## Unresolved values to fill in during live validation
 

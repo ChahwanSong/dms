@@ -364,9 +364,27 @@ def test_failed_result_with_a_node_reason_schedules_secondary(admin, repos, db):
     assert db.query_one("SELECT COUNT(*) AS n FROM events WHERE event_type = 'k8s_sync_failover'")["n"] == 1
 
 
+def test_signup_guard_tells_whether_signup_proves_the_id(db, settings, repos):
+    """k8s 모드는 「계정 이름 == RoleBinding 의 ID」라, 인증 메일이 실제로 가야 남의 ID 선점을 막는다 -- 개요가 그 상태를 싣는다."""
+    for kw, want in (({"account_verification_required": True, "mailer_backend": "stub"}, "stub"),
+                     ({"account_verification_required": True, "mailer_backend": "knox_relay"}, "mail"),
+                     ({"account_verification_required": False, "mailer_backend": "knox_relay"}, "open")):
+        c = TestClient(create_app(replace(settings, **kw), db))
+        _session(c, repos, "ops.admin", "admin")
+        assert c.get("/api/admin/k8s/overview").json()["signup_guard"] == want, kw
+
+
 def test_result_body_cap(db, settings, repos):
     small = TestClient(create_app(replace(settings, k8s_sync_max_bytes=10), db))
     r = small.post("/api/agent/k8s-sync/runs/x", content=b"x" * (1048576 + 100),
+                   headers={**_agent("k8s-w1"), "content-type": "application/json"})
+    assert r.status_code == 413 and r.json()["detail"] == "k8s_sync_too_large"
+
+    # 길이 머리 없는 chunked 본문도 상한까지만 받고 끊는다(다 받아 둔 뒤 재지 않는다 -- 2026-10-26 리뷰)
+    def chunked():
+        for _ in range(40):
+            yield b"x" * 65536
+    r = small.post("/api/agent/k8s-sync/runs/x", content=chunked(),
                    headers={**_agent("k8s-w1"), "content-type": "application/json"})
     assert r.status_code == 413 and r.json()["detail"] == "k8s_sync_too_large"
 
@@ -403,6 +421,8 @@ def test_end_to_end_overview_runs_and_freshness(admin, repos, db):
     assert c["status"] == "ok" and c["counts"]["pvcs"] == 7 and c["counts"]["users"] == 4
     assert c["last_run"]["status"] == "applied" and c["server_version"] == "v1.34.6" and c["fingerprint"] == "ks-uid"
     assert ov["totals"] == {"clusters": 1, "namespaces": 3, "pvcs": 7, "bindings": 9, "users": 4}
+    # 가입이 신원을 증명하는가(화면 경고의 근거) -- 이 픽스처는 무인증 가입(open), ldap 모드
+    assert ov["signup_guard"] == "open" and ov["identity_mode"] == "ldap"
     nodes = {n["node_name"]: n for n in ov["nodes"]}
     assert nodes["k8s-w1"]["role"] == "primary" and nodes["k8s-w1"]["capable"] and nodes["k8s-w1"]["serving"] == ["c1"]
     assert nodes["k8s-w1"]["last_ok_at"] and nodes["k8s-w2"]["role"] == "secondary" and nodes["k8s-w2"]["serving"] == []

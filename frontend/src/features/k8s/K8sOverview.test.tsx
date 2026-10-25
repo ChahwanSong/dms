@@ -173,6 +173,23 @@ test("설정 저장이 403(세션 관리자 전용)이면 사유를 보인다", 
   expect(screen.queryByText("저장했습니다")).not.toBeInTheDocument();
 });
 
+test("가입 신원 경고: k8s 모드에서 인증 메일이 stub·꺼짐이면 보이고, 실제 메일이거나 ldap 모드면 없다", async () => {
+  const view = wrap(overview({ identity_mode: "k8s", signup_guard: "stub" }));
+  const note = await screen.findByRole("note", { name: "가입 신원 경고" });
+  expect(note).toHaveTextContent("stub");
+  expect(within(note).getByRole("link", { name: "메일 설정" })).toHaveAttribute("href", "/admin/mail");
+  view.unmount();
+  for (const [mode, guard] of [["k8s", "mail"], ["ldap", "stub"], [undefined, undefined]] as const) {
+    const v = wrap(overview({ identity_mode: mode, signup_guard: guard }));
+    await ready();
+    expect(screen.queryByRole("note", { name: "가입 신원 경고" })).toBeNull();
+    v.unmount();
+  }
+  const v = wrap(overview({ identity_mode: "k8s", signup_guard: "open" }));
+  expect(await screen.findByRole("note", { name: "가입 신원 경고" })).toHaveTextContent("가입 인증이 꺼져 있습니다");
+  v.unmount();
+});
+
 test("빈 상태: 클러스터가 없으면 등록 안내와 등록 버튼", async () => {
   wrap(overview({ clusters: [], settings: { primary_node: null, secondary_node: null, interval_seconds: 300, poll_seconds: 15 },
                   totals: { clusters: 0, namespaces: null, pvcs: null, bindings: null, users: null } }));

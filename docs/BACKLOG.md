@@ -169,7 +169,10 @@
   노드>` 로 행세해 `POST /api/agent/k8s-sync/claim` 에서 대상 클러스터의 리더 토큰을 받을 수 있다(`api/routes_agent.py` — 설계가
   받아들인 위험, 완화는 **읽기 전용** 리더 SA: rolebindings·pvc·pv·sc list + namespaces/kube-system get). 처방 후보: 노드별 토큰
   (에이전트 Secret 을 노드마다 — DaemonSet 이라 projected SA 토큰 + TokenReview 로 노드 신원 확인), 또는 claim 응답 토큰을 노드 공개키로
-  봉인. 에이전트 채널의 TLS(CNI 암호화 포함 — 「방안 A」 항목의 근본 처방)와 함께 본다.
+  봉인. 에이전트 채널의 TLS(CNI 암호화 포함 — 「방안 A」 항목의 근본 처방)와 함께 본다. 같은 행세로 **결과 POST 에 위조
+  인벤토리**를 올려 맵핑(RoleBinding → 권한)을 지어낼 수도 있다(2026-10-26 push 보안 리뷰) — 노드별 자격이 오면 claim·result 둘
+  다 그 자격에 묶고, 서버가 스스로 확인할 수 있는 것(클러스터 지문 = kube-system uid, 직전 스냅숏과의 큰 차이 경고)을 더한다.
+  지금 공유 토큰 보유 = 노드 root 수준(같은 Secret 을 읽는 주체)이라 데이터 직접 접근과 같은 신뢰 경계다.
 - 🔧 **테스트베드 `/data/k8s_pv` export 의 no_root_squash 노출 완화(보안 리뷰)** — testbed 저장소 `scripts/nfs-pv-export.sh` 가
   10.10.10.20-22 에 rw·no_root_squash 로 연다(root 잡이 PV 디렉터리를 만지는 실증 전제). 같은 망의 그 세 IP 에서 root 로 마운트하면
   모든 PV 데이터를 읽고 쓸 수 있다. 처방 후보: 실증 기간에만 켜는 make 타깃, export 를 워커(.21·.22)로만 좁히기(cp1 제외), 실증 데이터

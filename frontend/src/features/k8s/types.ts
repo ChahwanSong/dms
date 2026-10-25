@@ -56,8 +56,14 @@ export interface K8sTotals {
   clusters: number | null; namespaces: number | null; pvcs: number | null; bindings: number | null; users: number | null;
 }
 
+/** 가입이 신원을 증명하는가(routes_k8s._signup_guard): mail = 인증번호 메일 실제 발송, stub = 코드 에코(개발·테스트베드),
+ *  open = 인증 꺼짐. k8s 모드는 계정 아이디가 곧 RoleBinding 의 ID 라 stub·open 이면 남의 ID 선점이 가능하다. */
+export type SignupGuard = "mail" | "stub" | "open";
+
 export interface K8sOverview {
   now: string; settings: K8sSettings; nodes: CallerNode[]; clusters: ClusterSummary[]; totals: K8sTotals;
+  // 옵션 = 옛 응답(k3 이전 API)
+  identity_mode?: string; signup_guard?: SignupGuard | string;
 }
 
 /** 클러스터 등록·편집 바디(토큰은 여기 없다 — 봉인해 token_enc 로만 싣는다, useK8s.useSaveCluster).

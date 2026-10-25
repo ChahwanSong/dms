@@ -95,7 +95,7 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
-### 🔧 dms-k8s RBAC·PV — 인벤토리(슬라이스 1)·관리자 화면·제출·권한·스토리지(슬라이스 2) — **구현 완료, 실증 대기**(2026-10-25~26)
+### ✅ dms-k8s RBAC·PV — 인벤토리·관리자 화면·제출·권한·스토리지·PV 봉쇄 — **완료·실증**(2026-10-25~26, k3)
 
 사용자 지시(「DMS-k8s 개발」 세션, 2026-10-25): dms-k8s 는 LDAP 대신 **k8s RoleBinding·PVC 맵핑**으로 권한을 판정하고 **모든 잡을
 root** 로 돌린다. `rolebindings -A` 의 `<user>-clusterrole-admin|edit`(ClusterRole `kubeflow-admin|edit`) → 그 namespace 의 모든
@@ -179,7 +179,30 @@ primary·secondary, 동기화 상태 UI. 설계 `docs/history/specs/2026-10-25-d
   - 런처의 nsync 마커 끌어올리기를 줄 전체 일치 + mpirun 실패일 때만(경로에 마커 글자가 든 정상 nsync 를 오인하던 것).
   - `delete_cluster` 의 잠금 순서를 run → 클러스터로(apply_run·expire_overdue 와 반대라 PG 교착 — 실 PG 재현).
   - 면제 관리자의 PV 고르기 경로(관리자 볼륨 API)에도 비활성 스토리지 표시.
-- **실증**: 다음 단계(설계 §9 슬라이스 4 — 테스트베드 dmsk8s 실증·적대적 리뷰)가 여기에 덧붙인다.
+- **push 보안 리뷰 후속(k4)**: k8s 모드의 신원 = 「계정 아이디 == RoleBinding ID」라 인증 메일이 stub·꺼짐이면 남의 ID 선점이
+  가능 — 개요 응답 `signup_guard`(mail·stub·open) + 화면 경고(기동은 막지 않는다 — 테스트베드는 stub). 에이전트 결과 본문을 스트리밍
+  카운트로 받아 상한에서 끊는다(chunked 본문을 다 버퍼링한 뒤 재던 것). 에이전트 공유 토큰의 노드 행세(위조 인벤토리 포함)는 BACKLOG.
+- **실증(k3 = 소스 3e9aae6, 테스트베드 dmsk8s, 2026-10-26)** — 빌드 210초, 릴리스 agent → api(migrate) → controller + 잡 이미지,
+  오버레이 c0ae3ca, `apply -k` 뒤 api·controller `rollout restart` 로 `identity_mode: k8s`(ConfigMap 만 바뀐 apply 는 재시작하지
+  않는다 — 런북 13-8). 등록(런북 13-9): 스토리지 3종 + cephfs 종류, 호출 노드 k8s-w1/w2 5분, 클러스터 `https://k8s-cp1:6443`(CA ·
+  봉인 토큰) 첫 동기화 ~30초 — SC 3 · PV 6 · PVC 7(Bound 6) · 바인딩 36(인식 5) · 사용자 4, 지문 = kube-system uid. SC 매핑 3개의
+  예시 경로 6개가 워커 실디렉터리와 일치(NFS subDir · GPFS `{vol}/{vol}-data` · OneFS `data/csi/{vol}`).
+  - **역할**: alice = team-a edit + team-b admin, junwoo.song = team-a admin, cocoa.song = team-b edit, 목록 밖 관리자 ops.k8s = 0개,
+    특권 관리자 mason = 면제 전체 7개. 거부: 직접 경로 403 `raw_path_not_allowed`, 권한 밖 PV 403 `k8s_access_denied`, 명시 비 root
+    422, Pending PVC 422 `pv_not_bound`, `..` 422 `unsafe_path`, PV 루트 rm(`''`·`.`·`./`) 422 `pv_root_rm_forbidden`.
+  - **세 벤더 scan**(root, PV 주소): 마커 4파일 — 63·67·71 바이트가 정확히 나왔다(봉쇄 env `DMS_JR_CONTAIN` = [쪽, 경로, PV 루트,
+    managed_root] 실림).
+  - **심링크 봉쇄**: alice PV 안 `escape → ../../team-c/archive` 로 scan 2·sync 소스·sync 목적지 부모·rm 상위 다섯 시도 모두 preflight
+    `target_path_redirected`. 미리보기 뒤 컨펌 전 바꿔치기 → exec_preflight 가 Rejected. 실행 vcjob 이 뜬 1초 뒤 바꿔치기 → 런처 6d
+    (`DMS_JR_PV_PATH_REDIRECTED side='source'`) 가 mpirun 전에 Failed. team-c 데이터 무손상·유출 0. 링크 자체 rm 은 링크만 지웠다.
+  - **sync**: PV→PV(nfs→nfs, gpfs→gpfs) 컨펌·실행 성공, cephfs→PV·PV→cephfs(면제 관리자 혼합) 성공. 첫 nfs 다중 노드 dsync 가 다른
+    노드 NFS 클라이언트의 음성 dentry 캐시로 ENOENT 실패 → 테스트베드 PV 마운트에 `lookupcache=positive`(testbed group_vars, 런북 전제).
+  - **동기화 장애·대체**: 잘못된 토큰 = `k8s_sync_unauthorized`(401), TLS 서버 이름 불일치 = `k8s_sync_tls_failed`(원문 표시), 같은
+    클러스터 IP 이중 등록 = 「같은 클러스터로 보입니다」. 주 노드 에이전트 SIGSTOP → 요청 93초 뒤 보조 k8s-w2 가 가져가 적용.
+  - **권한 회수**: cocoa.song 의 sync 를 컨펌 대기로 둔 채 RoleBinding 삭제 → 동기화 13초 → 컨펌 409 `k8s_access_denied`(Rejected),
+    새 제출 403. 복구 → 12초 뒤 권한 복귀.
+  - **화면(실 Chrome, 1440·375)**: 5탭·상세 창·alice 단일 작업 PV 고르기(직접 경로 토글 없음, 실제 경로 미리보기)·작업 목록 PV 표기 —
+    콘솔 오류 0, 가로 넘침 0.
 
 ### ✅ 전체 작업: 요청자 부분 일치 + 배치 이름·대상 경로 검색 + 열 폭(요청 ↓ · 배치 ↑ · 시각 = 글자 폭) — **완료·실증**(2026-10-25, k2)
 

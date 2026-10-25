@@ -190,9 +190,14 @@ async def k8s_sync_result(run_id: str, request: Request, identity: Identity = De
     declared = request.headers.get("content-length")
     if declared is not None and declared.isdigit() and int(declared) > limit:
         raise HTTPException(status_code=413, detail="k8s_sync_too_large")
-    raw = await request.body()
-    if len(raw) > limit:
-        raise HTTPException(status_code=413, detail="k8s_sync_too_large")
+    # 길이 머리가 없거나(chunked) 틀려도 상한까지만 받는다 -- 다 받아 둔 뒤 재면 그 사이 메모리를 상한 넘게 쓴다(2026-10-26 리뷰).
+    chunks, size = [], 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > limit:
+            raise HTTPException(status_code=413, detail="k8s_sync_too_large")
+        chunks.append(chunk)
+    raw = b"".join(chunks)
     try:
         body = await run_in_threadpool(json.loads, raw)
     except (ValueError, UnicodeDecodeError, RecursionError):

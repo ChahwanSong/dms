@@ -414,6 +414,27 @@ function ClusterCard({ c, offsetMs }: { c: ClusterSummary; offsetMs: number }) {
   );
 }
 
+/** k8s 모드의 가입 신원 경고(2026-10-26 보안 리뷰): 권한이 「계정 아이디 == RoleBinding 의 ID」로 묶여, 인증 메일이 실제로 가지
+ *  않으면(stub — 코드를 화면에 보여 줌, open — 인증 꺼짐) 아직 계정이 없는 사람의 아이디로 누구나 먼저 가입해 그 사람의 PV 권한을
+ *  가져갈 수 있다. 기동을 막지는 않는다(테스트베드는 stub 로 돈다) — 운영자가 보게만 한다. */
+export function SignupGuardNote({ mode, guard }: { mode: string | undefined; guard: string | undefined }) {
+  if (mode !== "k8s" || (guard !== "stub" && guard !== "open")) return null;
+  return (
+    <div role="note" aria-label="가입 신원 경고" className="rounded-lg border border-attn/40 bg-attnbg/50 px-4 py-3 text-sm text-attn">
+      <p className="font-medium">
+        {guard === "stub"
+          ? "가입 인증 메일이 실제로 발송되지 않습니다(stub — 인증번호를 화면에 보여 줍니다)"
+          : "가입 인증이 꺼져 있습니다(DMS_ACCOUNT_VERIFICATION_REQUIRED=false)"}
+      </p>
+      <p className="mt-1 text-ink/80">
+        k8s 연동에서는 계정 아이디가 곧 RoleBinding 의 ID 라, 아직 DMS 계정이 없는 사람의 아이디로 누구나 먼저 가입하면 그 사람의 PV
+        권한을 가져갑니다. 운영에서는 <Link to="/admin/mail" className="text-accent hover:underline">메일 설정</Link>에서 Knox 릴레이를
+        켜 <span className="font-mono">아이디@회사 도메인</span> 메일로 본인을 확인하게 하세요(테스트베드라면 무시해도 됩니다).
+      </p>
+    </div>
+  );
+}
+
 function EmptyClusters() {
   return (
     <InfoCard className="space-y-3">
@@ -456,6 +477,8 @@ export function K8sOverview() {
           )}
           <ClusterDialog mode="create" trigger={<Button className="whitespace-nowrap">클러스터 등록</Button>} />
         </>} />
+
+      <SignupGuardNote mode={ov?.identity_mode} guard={ov?.signup_guard} />
 
       {q.isError && (
         <p role="alert" className="text-sm text-bad">

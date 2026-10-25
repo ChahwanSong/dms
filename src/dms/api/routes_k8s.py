@@ -27,9 +27,10 @@ from urllib.parse import urlsplit
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
-from .. import k8s_sync
+from .. import k8s_access, k8s_sync
 from ..db import load_json, utc_now_iso
 from ..domain import DomainValidationError
+from ..mail_config import resolve_mail_config
 from ..pv_paths import effective_template, validate_template
 from ..repositories.k8s import storage_kind
 from ..repositories.storages import storage_open_to_users
@@ -313,7 +314,22 @@ def _cluster_or_404(repos, name):
 def overview(request: Request):
     state = _State(request)
     return {"now": state.now, "settings": _settings_view(state), "nodes": _nodes(request, state),
-            "clusters": _cluster_summaries(state), "totals": state.repos.k8s.totals()}
+            "clusters": _cluster_summaries(state), "totals": state.repos.k8s.totals(),
+            "identity_mode": k8s_access.identity_mode(state.settings), "signup_guard": _signup_guard(state)}
+
+
+def _signup_guard(state) -> str:
+    """가입이 신원을 증명하는가(2026-10-26 보안 리뷰): k8s 모드의 권한은 「DMS 계정 이름 == RoleBinding 에서 뽑은 ID」로 묶여, 아직
+    계정이 없는 사람의 ID 로 누가 먼저 가입하면 그 사람의 namespace PV 권한을 가져간다. 인증번호 메일(`<ID>@회사 도메인`)이 그
+    증명이다 -- "mail"(실제 발송), "stub"(코드를 응답에 에코 — 개발·테스트베드), "open"(인증 꺼짐). 화면이 stub·open 을 경고한다
+    (기동 거부는 하지 않는다 — 테스트베드는 stub 로 돈다). 메일 설정은 포탈(DB)이 env 를 이겨 런타임에 정한다."""
+    if not state.settings.account_verification_required:
+        return "open"
+    try:
+        backend = resolve_mail_config(state.repos, state.settings).backend
+    except Exception:  # noqa: BLE001 -- 표시용 -- 해석 실패는 모름(경고 쪽으로)
+        return "stub"
+    return "stub" if backend == "stub" else "mail"
 
 
 @router.put("/api/admin/k8s/settings")
