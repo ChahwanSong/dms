@@ -171,6 +171,14 @@ primary·secondary, 동기화 상태 UI. 설계 `docs/history/specs/2026-10-25-d
   - 면제 관리자의 고른 PV 재해석을 이름 정확 일치(`pvc=`)로 — 부분 일치 + 상한 50 에 잘려 「찾을 수 없음」으로 제출이 잠기던 것.
   - 경로 템플릿 검증이 `{namespace}.{pvc}` 처럼 자리표시자 사이의 `.` 를 성분으로 오인해 거부하던 것(렌더 성분으로 판정).
   - 클러스터 등록 창: 토큰 필수(서버 계약과 같게), StorageClass 예시 경로의 사유를 한국어 문구로(영문 진단은 보조 줄).
+- **2차 리뷰(같은 날, 07d3695..4c2f529 — 3관점 + 반박 검증, 실결함 5건 반영·기각 3건)**:
+  - **nsync 도구의 트리 안쪽 링크 추종**(high): nsync 목적지 쪽은 상위 디렉터리를 stat 로 확인하고 파일을 O_NOFOLLOW 없이 연다 —
+    목적지 PV 안에 사용자가 심은 `sub → 남의 PV` 링크 너머에 root 로 써졌다(실 이미지 재현, `--batch-files 1` 에서 200개 중 128개).
+    root 잡의 PV 주소 목적지는 nsync 로 계획하지 않는다(planner — `k8s_access.check_nsync_destination`, 새 사유
+    `pv_sync_needs_shared_node`; 두 스토리지를 함께 마운트한 노드의 dsync 만). 도구 수정(dms-mpifileutils)은 BACKLOG.
+  - 런처의 nsync 마커 끌어올리기를 줄 전체 일치 + mpirun 실패일 때만(경로에 마커 글자가 든 정상 nsync 를 오인하던 것).
+  - `delete_cluster` 의 잠금 순서를 run → 클러스터로(apply_run·expire_overdue 와 반대라 PG 교착 — 실 PG 재현).
+  - 면제 관리자의 PV 고르기 경로(관리자 볼륨 API)에도 비활성 스토리지 표시.
 - **실증**: 다음 단계(설계 §9 슬라이스 4 — 테스트베드 dmsk8s 실증·적대적 리뷰)가 여기에 덧붙인다.
 
 ### ✅ 전체 작업: 요청자 부분 일치 + 배치 이름·대상 경로 검색 + 열 폭(요청 ↓ · 배치 ↑ · 시각 = 글자 폭) — **완료·실증**(2026-10-25, k2)

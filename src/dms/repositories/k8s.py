@@ -267,14 +267,15 @@ class K8sRepository:
             before = self.get_cluster(name)
             if before is None:
                 raise KeyError(name)
-            self._db.execute("DELETE FROM k8s_clusters WHERE name = :n", {"n": name})
             # 진행 중 run 도 같이 닫는다(2026-10-26 리뷰): 같은 이름으로 다시 등록하면 config_rev 가 0 부터라 옛 run 의 결과가
             # 새 클러스터에 적용·실패 기록되고, 활성 run 판정(이름 기준)이 새 클러스터의 첫 동기화를 늦췄다. 늦게 온 결과는
-            # receive 가 RunClosed(409)로, 적용은 skipped 로 버린다.
+            # receive 가 RunClosed(409)로, 적용은 skipped 로 버린다. **run 행을 클러스터 행보다 먼저** 잠근다 -- receive·
+            # apply_run·expire_overdue·fail_apply 가 「run → 클러스터」 순서라, 반대로 잠그면 PG 에서 교착이 났다(2차 리뷰 실측).
             self._db.execute(
                 """UPDATE k8s_sync_runs SET status = 'discarded', payload = NULL, error = 'cluster was deleted',
                        finished_at = COALESCE(finished_at, :now)
                    WHERE cluster_name = :n AND status IN ('claimed', 'received')""", {"n": name, "now": utc_now_iso()})
+            self._db.execute("DELETE FROM k8s_clusters WHERE name = :n", {"n": name})
             self._audit("k8s_cluster", "delete", name, self.redacted(before), None, actor)
         return before
 

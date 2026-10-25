@@ -384,6 +384,13 @@ class Planner:
         #     (함께 마운트한 노드가 없을 때)는 소스·목적지가 서로 다른 노드의 다른 파일시스템이라 문자열이 같아도 다른 곳이다
         #     (검증 지적 -- CPU 노드의 /home 과 GPU 노드의 /home/gpu1). 그래서 도구가 정해진 **뒤**, dsync 에서만 본다. 같은
         #     스토리지의 상대경로 검사는 제출 시점(build_data_payload)이 이미 했다.
+        # 5a'. root nsync 로 PV 주소 목적지에 쓰지 않는다(k8s_access.check_nsync_destination -- 도구의 링크 추종, 2차 보안 리뷰).
+        #      도구가 정해진 뒤에만 안다 -- 같은 요청도 노드 마운트에 따라 dsync 면 통과한다. 기다려도 풀리지 않는 사유라 유예 없음.
+        if req["operation"] == Operation.SYNC.value:
+            try:
+                k8s_access.check_nsync_destination(payload, tool=placement["tool"], privileged=identity.privileged)
+            except DomainValidationError as exc:
+                return self._reject(rid, exc.reason_code)
         if req["operation"] == Operation.SYNC.value and placement["tool"] == "dsync":
             src_row = storage_rows.get(payload.get("source_storage"))
             dst_row = storage_rows.get(payload.get("destination_storage"))

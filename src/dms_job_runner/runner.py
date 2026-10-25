@@ -204,11 +204,12 @@ def run_job(env, *, run, write_text, read_text, sleep, wait_hostfile,
     # 7b. nsync rank 의 봉쇄 마커(6e) 끌어올리기 -- rank 출력은 mpirun 이 런처로 모을 뿐 파드 로그에 찍히지 않는다. stepper 는
     #     런처 파드 로그에서 마커를 읽으므로(parse_execution_reason) 여기서 다시 찍는다. 도구는 데이터를 만지기 전에 끊겼다 --
     #     returncode 는 모름(null), 3키 계약 유지(6c·6d 와 같은 모양).
-    if tool == "nsync" and "DMS_JR_CONTAIN" in env:
-        seen = [ln.strip() for ln in f"{proc.stdout or ''}\n{proc.stderr or ''}".split("\n")
-                if REDIRECTED_LINE in ln or "DMS_JR_PV_PATH_REDIRECTED" in ln]
-        if any(REDIRECTED_LINE in ln for ln in seen):
-            details = list(dict.fromkeys(ln for ln in seen if REDIRECTED_LINE not in ln))[:4]
+    #     줄 **전체**가 마커여야 하고 mpirun 이 실패해야 한다(rank 는 마커를 찍고 exit 1) -- 경로 이름에 마커 글자가 든 정상 nsync
+    #     (도구가 「Requested target: …」 등으로 경로를 찍는다)를 봉쇄로 오인하지 않게(2차 리뷰).
+    if tool == "nsync" and "DMS_JR_CONTAIN" in env and proc.returncode != 0:
+        lines = [ln.strip() for ln in f"{proc.stdout or ''}\n{proc.stderr or ''}".split("\n")]
+        if REDIRECTED_LINE in lines:
+            details = list(dict.fromkeys(ln for ln in lines if ln.startswith("DMS_JR_PV_PATH_REDIRECTED ")))[:4]
             sys.stdout.write("".join(f"{ln}\n" for ln in [REDIRECTED_LINE, *details]))
             sys.stdout.flush()
             write_text(f"{artifact_dir}/summary.json",

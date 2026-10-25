@@ -185,6 +185,14 @@
   관리자(면제 아님)에게도 PV 탐색은 전체 PV 를 보이고 버튼이 열린다. 제출 화면은 자기 맵핑 범위에서 PV 를 찾지 못해 「권한이
   회수됐거나 PV 가 지워졌을 수 있습니다」로 막는다(설계대로 — 잘못 실행되지 않음). 버튼을 그 관리자의 맵핑(access)으로 비활성화하거나
   문구를 「이 PV 에 대한 권한이 없습니다」로 가르는 것이 후보.
+- 🔧 **nsync 목적지 걷기가 링크를 따라간다(dms-mpifileutils, 2026-10-26 2차 보안 리뷰)** — `nsync.c` 의 `nsync_ensure_parent_dirs`·
+  MKDIR(`nsync_mkdir_one` 이 EEXIST 를 stat 로 받음)과 COPY 의 `nsync_open_writeonly_create_trunc`(O_NOFOLLOW 없음)가 목적지
+  트리 안의 링크를 따라가, 목적지에 미리 있는 `sub → 남의 경로` 링크 너머에 쓴다(배치 순서·목적지 rank 간 경쟁 둘 다로 재현 — rank 1개·
+  `--batch-files 1` 에서도). DMS 는 root 잡의 PV 주소 목적지를 nsync 로 계획하지 않는 것으로 막았다(`pv_sync_needs_shared_node`) —
+  그래서 PV 스토리지를 노드마다 따로 마운트한 사이트의 PV→PV sync 는 지금 불가. 처방: 목적지 쪽 상위 디렉터리 확인·생성을
+  (dst_root, relpath) 성분 걷기로 바꿔 dst_root **아래** 성분은 mkdir → EEXIST 면 lstat 이 S_ISDIR 일 때만 통과(링크면 그 액션 오류),
+  파일 생성은 O_NOFOLLOW(마지막 성분), COPY·MKDIR·SYMLINK_UPDATE 가 같은 걷기를 쓴다 — 그 뒤 dms-mpifileutils 태그를 올리고
+  `check_nsync_destination` 을 푼다. 같은 성질은 비 PV root nsync(ldap 모드 배치 등)에도 있다(사용자 쓰기 가능한 목적지 트리).
 - 📝 **PV 봉쇄의 남는 창** — 러너·rank 재확인 뒤 도구가 경로를 열 때까지의 창은 rm 봉쇄와 같다(§4 「rm 대상 봉쇄의 남은 TOCTOU 창」과 같은 성격 —
   근본 처방은 hostPath 를 PV 루트로 좁히거나 도구가 openat2(RESOLVE_BENEATH) 로 걷는 것).
 - 🔧 **숫자만으로 된 계정 아이디의 실행 신원** — k8s 모드의 owner_username 은 계정 아이디 규칙(`[a-z0-9][a-z0-9._-]{0,63}`)이라

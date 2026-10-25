@@ -206,9 +206,10 @@ def test_pv_rm_keeps_the_managed_root_anchor_and_adds_the_pv_bound(tree):
 
 
 class _Rec:
-    def __init__(self, mpirun_stdout="ok\n"):
+    def __init__(self, mpirun_stdout="ok\n", mpirun_rc=None):
         self.writes, self.ran = {}, []
         self.mpirun_stdout = mpirun_stdout
+        self.mpirun_rc = mpirun_rc
 
     def write_text(self, path, content, *, append=False):
         self.writes[path] = content
@@ -217,8 +218,11 @@ class _Rec:
         self.ran.append(command)
         out = "10.0.0.1 w\n" if command[0] == "getent" else self.mpirun_stdout if "mpirun" in command else "ok\n"
 
+        rc = self.mpirun_rc if "mpirun" in command and self.mpirun_rc is not None else (
+            1 if "mpirun" in command and _EXEC_REDIRECTED in out else 0)
+
         class R:
-            returncode = 1 if "mpirun" in command and _EXEC_REDIRECTED in out else 0
+            returncode = rc
             stdout = out
             stderr = ""
         return R()
@@ -325,6 +329,13 @@ def test_runner_lifts_the_rank_marker_into_the_pod_log(tree, capsys):
     # PV 가 아닌 nsync 는 같은 출력이 와도 끌어올리지 않는다(rank 가 마커를 낼 일이 없다 -- 종전 요약 경로)
     rc, rec = _run_tool(_nsync_env(tree, None), _Rec(mpirun_stdout=f"{_EXEC_REDIRECTED}\n"))
     assert _EXEC_REDIRECTED not in capsys.readouterr().out
+    # 성공한 nsync 의 출력 경로에 마커 글자가 들어 있어도(줄 전체가 아님·rc 0) 봉쇄로 오인하지 않는다(2차 리뷰)
+    ok_out = f"Requested target: /k8s_pv/nfs/team-a/d/{_EXEC_REDIRECTED}\nExecution completed successfully\n"
+    rc, rec = _run_tool(_nsync_env(tree, entries), _Rec(mpirun_stdout=ok_out, mpirun_rc=0))
+    assert rc == 0 and _EXEC_REDIRECTED not in capsys.readouterr().out.split("\n")
+    # rc 가 0 이 아니어도 마커가 줄 전체가 아니면 끌어올리지 않는다(도구 자체의 실패 -- 종전 요약 경로)
+    rc, rec = _run_tool(_nsync_env(tree, entries), _Rec(mpirun_stdout=ok_out, mpirun_rc=2))
+    assert rc == 2 and _EXEC_REDIRECTED not in capsys.readouterr().out.split("\n")
 
 
 def test_non_pv_jobs_are_byte_identical(tree):

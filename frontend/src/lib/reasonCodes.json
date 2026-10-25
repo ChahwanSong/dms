@@ -306,6 +306,7 @@
   "pv_storageclass_unmapped",
   "pv_path_unresolved",
   "pv_root_rm_forbidden",
+  "pv_sync_needs_shared_node",
   "raw_path_not_allowed",
   "k8s_access_denied",
   "pv_moved",

@@ -680,3 +680,48 @@ def test_unrestricted_request_matches_can_run_as_root(world):
     assert k8s_access.unrestricted_request({**row, "requester_id": "alice", "batch_id": "b"},
                                            settings=s, repos=world) is True
     assert k8s_access.unrestricted_request({**row, "requester_id": "ghost"}, settings=s, repos=world) is False
+
+
+# --- root nsync 로 PV 목적지 금지(2026-10-26 2차 보안 리뷰) ----------------------------------------------------------
+
+def _split_mounts(repos):
+    """nfs·cephfs 는 k8s-w1 에만, gpfs 는 k8s-w2 에만 -- 두 스토리지를 함께 마운트한 노드가 없어 nsync 가 골라진다."""
+    for node, names in (("k8s-w1", ("k8s-pv-nfs", "cephfs-dms")), ("k8s-w2", ("k8s-pv-gpfs",))):
+        repos.agents.ingest(node, {
+            "node_name": node,
+            "mounts": [{"storage_name": n, "mount_path": m, "status": "Ready", "writable": True}
+                       for n, m, _, _ in STORAGES if n in names],
+            "tools": [{"name": t, "status": "Ready"} for t in ("dscan", "dsync", "nsync", "drm")]},
+            reported_at=utc_now_iso())
+
+
+def test_root_nsync_into_a_pv_destination_is_refused(kclient, world):
+    """nsync 목적지 쪽은 상위 디렉터리·파일을 링크를 따라 열어, 목적지 PV 안의 `sub → 남의 PV` 링크 너머에 root 로 쓸 수 있다 --
+    PV 목적지는 두 스토리지를 함께 마운트한 노드(dsync)가 있어야 한다(k8s_access.check_nsync_destination)."""
+    repos = world
+    _split_mounts(repos)
+    _login(kclient, "alice")
+    r = kclient.post("/api/user/requests", json=_pv_sync(src=("team-a", "datasets"), dst=("team-a", "models")))
+    assert r.status_code == 202, r.text
+    rid = r.json()["request_id"]
+    _plan(repos)
+    assert _state(repos, rid) == ("Rejected", "pv_sync_needs_shared_node")
+    # 목적지가 직접 경로(면제 관리자)면 nsync 그대로 -- PV 소스는 읽기만 한다
+    _login(kclient, "ops")
+    r = kclient.post("/api/user/requests", json={
+        "operation": "sync", "source_pv": _pv("team-a", "datasets"), "source": "",
+        "destination_storage": "k8s-pv-gpfs", "destination": "admin-copy", "run_as_root": True})
+    assert r.status_code == 202, r.text
+    rid2 = r.json()["request_id"]
+    assert _plan(repos)[rid2] == "planned"
+    assert repos.data_jobs.list_jobs(request_id=rid2)[0]["tool"] == "nsync"
+
+
+def test_check_nsync_destination_predicate():
+    pv = {"destination_pv": {"cluster": "c", "namespace": "n", "pvc": "p"}}
+    with pytest.raises(DomainValidationError) as e:
+        k8s_access.check_nsync_destination(pv, tool="nsync", privileged=True)
+    assert e.value.reason_code == "pv_sync_needs_shared_node"
+    k8s_access.check_nsync_destination(pv, tool="dsync", privileged=True)          # 함께 마운트한 노드 -- 통과
+    k8s_access.check_nsync_destination(pv, tool="nsync", privileged=False)         # 비 root -- 커널 DAC
+    k8s_access.check_nsync_destination({"source_pv": pv["destination_pv"]}, tool="nsync", privileged=True)

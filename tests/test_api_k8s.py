@@ -518,11 +518,13 @@ def test_pv_picker_marks_unusable_storages_and_finds_a_pvc_exactly(client, repos
         False, "storage_admin_only")
     assert (rows[("team-a", "datasets")]["selectable"], rows[("team-a", "datasets")]["reason"]) == (
         False, "storage_disabled")
-    # 관리자(면제)는 관리자 전용 스토리지를 그대로 고른다 -- 비활성은 누구도 못 고른다
+    # 관리자(면제)는 관리자 전용 스토리지를 그대로 고른다 -- 비활성은 누구도 못 고른다. 면제 관리자의 실제 고르기 경로(관리자
+    # 볼륨 API — 검색·권한 기준 사용자)도 같다(2차 리뷰).
     _session(client, repos, "admin", "admin")
-    rows = {(x["namespace"], x["pvc"]): x for x in client.get("/api/user/k8s/volumes").json()["volumes"]}
-    assert rows[("team-a", "models")]["selectable"] is True
-    assert rows[("team-a", "datasets")]["reason"] == "storage_disabled"
+    for url in ("/api/user/k8s/volumes", "/api/admin/k8s/volumes?q=team-a", "/api/admin/k8s/volumes?user=alice"):
+        rows = {(x["namespace"], x["pvc"]): x for x in client.get(url).json()["volumes"]}
+        assert rows[("team-a", "models")]["selectable"] is True, url
+        assert rows[("team-a", "datasets")]["reason"] == "storage_disabled", url
 
 
 def test_never_synced_cluster_is_unknown_not_empty(admin, repos):

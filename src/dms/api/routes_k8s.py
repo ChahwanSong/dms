@@ -547,6 +547,8 @@ def admin_volumes(request: Request, cluster: "str | None" = None, namespace: "st
     users = state.repos.k8s.users_by_namespace()
     for r in rows:
         r["users"] = users.get((r["cluster"], r["namespace"]), [])
+    # 면제 관리자의 PV 고르기(검색·권한 기준 사용자)도 이 경로다 -- 비활성 스토리지의 PV 는 고를 수 없게(관리자라 관리자 전용은 통과).
+    _mark_unusable_storages(state.repos, rows, is_admin=True)
     return {"clusters": state.freshness(), "truncated": truncated, "volumes": rows}
 
 
