@@ -18,8 +18,13 @@ def batch_match(param: str) -> str:
 
 
 # 작업 목록 검색(2026-10-25)의 상한·모양 -- 쓰는 곳은 RequestsRepository.list(search_terms=) 와 그 라우트.
-# 검색어 토큰 수 상한(절대경로 펼침 뒤): 토큰마다 OR 갈래가 셋(16진이면 다섯)씩 붙고, 드문 검색어는 갈래 전부를 표 전체에 건다.
-MAX_SEARCH_TERMS = 8
+# 검색어 토큰 수 상한(절대경로 펼침 뒤 -- 라우트와 저장소가 같은 값으로 자른다): 드문 검색어는 표 전체를 훑고 토큰마다 행당 LIKE 가
+# 하나씩 는다(실측은 list docstring). 8 이던 것을 리뷰(2026-10-25 -- 최악 비용 상한)로 4 로 내렸다. 절대경로 하나는 원래 토큰 +
+# 펼친 「이름:상대경로」로 둘을 먹어(routes_requests._search_terms) 한 번에 붙여 넣는 절대경로는 둘까지다.
+MAX_SEARCH_TERMS = 4
+# 검색 건초더미 열(sqlite 만) -- list 의 펜스 부분 질의가 행마다 한 번 만들어 붙이고, 결과 행에서 다시 뗀다(응답 모양은 검색 전과
+# 같다). PG 는 열 없이 LIKE ANY 로 같은 일을 한다(list docstring).
+_SEARCH_HAY = "search_hay"
 # 요청·배치 id 접두 매치를 켜는 토큰 모양(소문자로 접은 뒤) -- 16진 4~32자. 접두만 본다: 32자리 16진 id 의 부분 문자열은
 # '2024'·'01' 같은 숫자 검색어가 아무 행에나 걸리는 잡음이다(설계 조사 실측). 배치 id 접두는 배치 기록이 지워진 묶음
 # (화면 「기록 없음 <id 12자>」 -- 이름이 없다)을 그 12자로 찾는 유일한 길이다.
@@ -33,6 +38,39 @@ _HEX_ID_TOKEN = re.compile(r"[0-9a-f]{4,32}")
 _KEY_BODY = ("CASE WHEN operation = 'scan' AND LENGTH(resource_key) > LENGTH(operation) + 71"
              " THEN SUBSTR(resource_key, LENGTH(operation) + 7, LENGTH(resource_key) - LENGTH(operation) - 71)"
              " ELSE SUBSTR(resource_key, LENGTH(operation) + 7) END")
+
+
+def _search_condition(search_terms, params: dict, *, hay: str, dialect: str) -> "str | None":
+    r"""RequestsRepository.list 의 검색 조건 -- hay 는 소문자 건초더미 SQL(PG 는 LOWER(...) 식, sqlite 는 펜스가 만든 열).
+    패턴은 params 에 q<i>(부분 문자열)·h<i>(16진 id 접두)로 싣는다(바인딩 값만: SQL 본문의 '%' 는 PG pyformat 에서 자리표시자로
+    읽혀 깨진다). 토큰이 하나도 안 남으면 None(검색 없음 -- SQL 이 검색 전과 같다). 토큰을 **공백으로 다시 나누는** 이유는
+    list docstring(건초더미의 ' ' 구분자). 갈래는 칸별로 묶는다 -- 전부 OR 라 토큰별로 묶은 것과 답이 같고, 배치 이름 부분
+    질의가 하나라 PG 해시 부분 계획도 하나다(토큰마다 하나면 행마다 해시 조회가 토큰 수만큼).
+
+    PG 는 `칸 LIKE ANY (ARRAY[:q0, …])`: ScalarArrayOpExpr 는 왼쪽 식을 **한 번** 계산하고 배열 원소마다 비교한다 -- 건초더미를
+    행마다 한 번 만드는 것이 펜스 없이 된다. ANY 형은 ESCAPE 절을 못 받지만 PG LIKE 의 기본 이스케이프 문자가 '\' 라
+    `ESCAPE '\'` 와 같다(와일드카드 테스트가 PG 에서도 돈다). sqlite 는 배열이 없어 토큰마다 `LIKE … ESCAPE '\'` 를 OR 로
+    잇는다(그쪽 건초더미는 펜스 열이라 다시 계산되지 않는다)."""
+    terms = list(dict.fromkeys(w for t in search_terms for w in t.lower().split()))[:MAX_SEARCH_TERMS]
+    if not terms:
+        return None
+    subs, ids = [], []
+    for i, term in enumerate(terms):
+        params[f"q{i}"] = like_contains(term)
+        subs.append(f":q{i}")
+        if _HEX_ID_TOKEN.fullmatch(term):
+            # 16진 글자뿐이라 와일드카드도 '\' 도 끼지 않는다 -- 이스케이프 없이 접두 패턴이다.
+            params[f"h{i}"] = term + "%"
+            ids.append(f":h{i}")
+
+    def like_any(col, pats):
+        if dialect == "postgresql":
+            return f"{col} LIKE ANY (ARRAY[{', '.join(pats)}])"
+        return " OR ".join(rf"{col} LIKE {p} ESCAPE '\'" for p in pats)
+    arms = [like_any(hay, subs), f"batch_id IN (SELECT batch_id FROM batches WHERE {like_any('LOWER(name)', subs)})"]
+    if ids:
+        arms += [like_any("request_id", ids), like_any("batch_id", ids)]
+    return "(" + " OR ".join(arms) + ")"
 
 
 class RequestsRepository:
@@ -124,16 +162,43 @@ class RequestsRepository:
         비 ASCII 대문자(Ä 등)는 PG 에서만 맞는다 -- 한글은 대소문자가 없어 두 방언이 같다):
           - requester_like: 요청자 id 부분 문자열. **requester_id(정확히 일치)와 별개의 인자다** -- 비관리자 격리는
             requester_id 가 지고, 그 자리에 LIKE 가 끼면 alice 가 alice2 의 행을, j_kim 이 jxkim 의 행을 본다.
-          - search_terms: 토큰 목록(소문자로 접어 중복을 빼고 MAX_SEARCH_TERMS 개까지). 토큰 **하나라도** 어느 칸에든
-            걸리면 그 행을 낸다(토큰끼리 OR -- 단어를 더하면 넓어진다). 칸 = 요청자 id, resource_key 의 몸통(_KEY_BODY
-            -- 화면 「대상」 열 글자: 스토리지 이름·상대경로), 배치 이름(batches.name -- requests 엔 이름 칸이 없다),
-            그리고 16진 4~32자 토큰이면 요청 id·배치 id **접두**(_HEX_ID_TOKEN).
+          - search_terms: 토큰 목록(소문자로 접고 공백으로 다시 나눠 중복을 빼고 MAX_SEARCH_TERMS 개까지). 토큰
+            **하나라도** 어느 칸에든 걸리면 그 행을 낸다(토큰끼리 OR -- 단어를 더하면 넓어진다). 칸 = resource_key 의
+            몸통(_KEY_BODY -- 화면 「대상」 열 글자: 스토리지 이름·상대경로), 배치 이름(batches.name -- requests 엔 이름
+            칸이 없다), 16진 4~32자 토큰이면 요청 id·배치 id **접두**(_HEX_ID_TOKEN), 그리고 목록이 한 요청자로 묶이지
+            **않았을 때만**(requester_id 없음 = 관리자 전체 목록) 요청자 id. 묶인 목록(비관리자 -- requester_id = 자기
+            자신)에서 요청자 칸은 모든 행에 참이거나 모든 행에 거짓이라 거르는 힘이 없고, 토큰끼리 OR 이라 자기 id 의
+            부분 문자열('ali')만 쳐도 경로와 무관하게 자기 작업 전부가 나왔다(자기 이름이 곧 홈·프로젝트 디렉터리 이름인
+            경로 검색이 흔하다 -- 2026-10-25 리뷰). 격리와는 무관하다(어느 쪽이든 자기 행 안이다).
         두 인자 모두 None 이면 SQL 이 검색 전과 바이트 단위로 같다(배치 필터의 계획 테스트가 그 모양을 고정한다).
 
-        비용(설계 조사, PG16 32만 행·웜 캐시): '%x%' 는 btree 를 못 타서 commit_order 역방향 스캔에 필터로 걸린다 --
-        흔한 검색어는 LIMIT 만큼 찾으면 멈춰 1ms 미만이지만, 드물거나 없는 검색어는 표 전체를 훑는다(약 0.4초). 그동안
-        단일 연결 DB 잠금을 쥐어 다른 API 가 기다린다. 그래서 포탈이 입력을 디바운스하고 검색 중엔 폴링을 늦춘다
-        (useJobs.useInfiniteRequests). 비관리자는 requester_id 정확 일치가 idx_requests_requester 로 자기 행만 훑어 짧다."""
+        행마다 소문자 건초더미를 **한 번만** 만든다(2026-10-25 리뷰 -- 최악 비용): 요청자 칸(위 조건일 때만)과 대상 몸통을
+        ' ' 로 이어 LOWER 한 문자열 하나에 토큰마다 LIKE 한다. 칸마다·토큰마다 `LOWER(...) LIKE` 로 쓰던 동안은 PG 가 OR
+        갈래끼리 식을 공유하지 않아 행마다 LOWER·SUBSTR 를 토큰 수 x 2 번 계산했다(드문 토큰 하나에 표 전체 ~0.28초씩 선형).
+        이어 붙인 문자열에서 찾아도 답이 같은 이유: 토큰에는 ' ' 가 없다(_search_condition 이 공백으로 다시 나눈다 -- 라우트의
+        토큰은 이미 공백 분리지만 다른 호출자도 이 성질을 깨지 못하게) -- 그러니 ' ' 를 사이에 둔 두 칸에 걸쳐 맞을 수 없고,
+        이은 문자열의 부분 문자열 매치 = 어느 한 칸의 부분 문자열 매치다(LIKE 패턴은 이스케이프돼 글자 그대로고, LOWER 는 글자
+        단위라 이어서 접어도 따로 접은 것과 같다). 방언마다 「한 번」을 얻는 길이 다르다:
+          - PG: `LOWER(건초더미) LIKE ANY (ARRAY[:q0, …])` 를 WHERE 에 그대로 붙인다(_search_condition) -- 문장 모양이 검색
+            전과 같아(필터 + ORDER BY + LIMIT) 플래너가 같은 인덱스를 같은 순서로 읽고 흔한 검색어는 LIMIT 만큼 찾으면 멈춘다.
+            펜스 부분 질의(`SELECT …, LOWER(…) AS hay … OFFSET 0`)는 쓰지 않는다: 바깥에 ORDER BY 가 있으면 PG 는 부분 질의에
+            바깥 LIMIT 을 내려 주지 않고 「전부 읽기」로 계획해(set_subquery_pathlist) 좁힌 목록에서 Seq/Bitmap Scan + Sort 를
+            골랐다 -- 흔한 검색어의 조기 종료가 사라져 실측(아래 비용 문단의 표에 요청자 하나 6.4만 행·배치 하나 2만 행을 섞은 것)
+            요청자 목록 1.6→52ms, 배치 목록 1.3→28ms, operation=rm 1.9→46ms. 최악(드문 4개, 표 전체)은 두 모양이 같았다(0.40초
+            대 0.41초).
+          - sqlite: 배열이 없어 펜스다 -- 부분 질의가 `LOWER(건초더미) AS search_hay` 열을 내고(`LIMIT -1 OFFSET 0` 이 펼침과 바깥
+            조건 밀어 넣기를 막는다 -- 둘 다 열을 식으로 되돌려 갈래마다 계산하게 만든다) 바깥이 그 열에 토큰마다 LIKE 한다. 다른
+            필터·정렬·커서는 부분 질의 안이라 같은 인덱스를 탄다. 바깥 ORDER BY 는 임시 B-tree 정렬이라 sqlite 에선 흔한 검색어도
+            (좁힌) 행 전부를 본다 -- sqlite 는 개발·테스트 DB 라 감수한다. 열은 결과 행에서 뗀다(응답 모양은 검색 전과 같다).
+
+        비용(2026-10-25 실측, PG16·32만 행·배치 3000·요청자 200·웜 캐시·jit off): '%x%' 는 btree 를 못 타서 commit_order
+        역방향 스캔에 필터로 걸린다(계획은 검색 전과 같다) -- 흔한 검색어는 LIMIT 만큼 찾으면 멈춰 1~5ms, 드물거나 없는
+        검색어는 표 전체를 훑는다: 토큰 1개 0.30초, 상한 4개 0.35초, 16진 4개 0.39초(칸마다·토큰마다 식을 다시 계산하던 동안은
+        토큰마다 ~0.28초씩 늘어 4개 1.1초·8개 2.1초). 갱신으로 물리 순서가 흐트러진 표(commit_order 상관 0.69)에서 4개 0.41초
+        (전 1.17초), 상관 0 인 표에서 0.45초(전 1.23초). 그동안 단일 연결 DB 잠금을 쥐어 다른 API(/readyz 포함)가 기다린다 --
+        그래서 상한(MAX_SEARCH_TERMS)과 포탈의 입력 디바운스·검색 중 폴링 완화(useJobs.useInfiniteRequests). 비관리자는
+        requester_id 정확 일치가 idx_requests_requester 로 자기 행만 훑어 짧다(드문 4개: 요청자 하나 1600행 3ms, 6.4만 행
+        73ms -- 전 235ms)."""
         where = []
         params: dict = {"n": limit}
         order = "commit_order DESC"
@@ -151,27 +216,28 @@ class RequestsRepository:
         if requester_like is not None:
             where.append(r"LOWER(requester_id) LIKE :req_like ESCAPE '\'")
             params["req_like"] = like_contains(requester_like.lower())
-        if search_terms is not None:
-            terms = list(dict.fromkeys(t.lower() for t in search_terms))[:MAX_SEARCH_TERMS]
-            groups = []
-            for i, term in enumerate(terms):
-                q = f"q{i}"
-                params[q] = like_contains(term)
-                arms = [rf"LOWER(requester_id) LIKE :{q} ESCAPE '\'",
-                        rf"LOWER({_KEY_BODY}) LIKE :{q} ESCAPE '\'",
-                        rf"batch_id IN (SELECT batch_id FROM batches WHERE LOWER(name) LIKE :{q} ESCAPE '\')"]
-                if _HEX_ID_TOKEN.fullmatch(term):
-                    # 16진 글자뿐이라 와일드카드가 끼지 않는다 -- 이스케이프 없이 접두 패턴이다.
-                    h = f"h{i}"
-                    params[h] = term + "%"
-                    arms += [f"request_id LIKE :{h}", f"batch_id LIKE :{h}"]
-                groups.append(" OR ".join(arms))
-            if groups:
-                where.append("(" + " OR ".join(groups) + ")")   # 토큰끼리도 OR -- 하나라도 맞으면
+        # 건초더미(docstring) -- 요청자 칸은 한 요청자로 묶이지 않은 목록에서만.
+        hay = f"requester_id || ' ' || {_KEY_BODY}" if requester_id is None else _KEY_BODY
+        fenced = None
+        if search_terms is not None and self._db.dialect == "postgresql":
+            search = _search_condition(search_terms, params, hay=f"LOWER({hay})", dialect="postgresql")
+            if search is not None:
+                where.append(search)
+        elif search_terms is not None:
+            fenced = _search_condition(search_terms, params, hay=_SEARCH_HAY, dialect=self._db.dialect)
         clause = (" WHERE " + " AND ".join(where)) if where else ""
-        rows = self._db.query(
-            f"SELECT * FROM requests{clause} ORDER BY {order} LIMIT :n",
-            params)
+        if fenced is None:
+            rows = self._db.query(
+                f"SELECT * FROM requests{clause} ORDER BY {order} LIMIT :n",
+                params)
+        else:
+            # sqlite 펜스(docstring): 부분 질의가 건초더미 열을 행마다 한 번 만들고, 바깥은 그 열만 본다.
+            rows = self._db.query(
+                f"SELECT * FROM (SELECT requests.*, LOWER({hay}) AS {_SEARCH_HAY} FROM requests{clause}"
+                f" ORDER BY {order} LIMIT -1 OFFSET 0) AS requests WHERE {fenced} ORDER BY {order} LIMIT :n",
+                params)
+            for row in rows:
+                del row[_SEARCH_HAY]   # 응답 모양은 검색 전과 같다
         for row in rows:
             row["payload"] = load_json(row["payload"])
         return rows

@@ -183,13 +183,20 @@ def _blank_to_none(value: str | None) -> str | None:
 def _search_terms(text: str, repos, *, is_admin: bool) -> list[str]:
     """검색어 → 저장소 토큰 목록(공백 분리, 소문자로 접어 중복 제거, 순서 유지, 펼친 뒤 MAX_SEARCH_TERMS 개까지).
 
-    '/' 로 시작하는 토큰은 원래 토큰을 남긴 채 등록 스토리지마다 그 뿌리 아래인지 보고 「이름:상대경로」 를 덧붙인다
-    (뿌리와 같으면 「이름:」 -- 그 스토리지의 작업 전부). 요청 payload·resource_key 는 managed_root 기준 상대경로만
-    저장한다(stepper._abs 가 managed_root 와 잇는다). 뿌리 비교는 대소문자를 가린다(경로라서).
+    '/' 로 시작하는 토큰은 원래 토큰을 남긴 채 등록 스토리지마다 그 managed_root 아래인지 보고 「이름:상대경로」 를
+    덧붙인다(뿌리와 같으면 「이름:」 -- 그 스토리지의 작업 전부). 뿌리 비교는 대소문자를 가린다(경로라서). 절대경로 하나가
+    토큰 둘을 먹으니 상한(4) 안에서 한 번에 붙여 넣는 절대경로는 둘까지다.
 
-    펼침에 쓰는 뿌리는 그 사람이 볼 수 있는 것만: 관리자는 등록 스토리지 전부의 managed_root·mount_path, 비관리자는
-    /api/user/storages 가 보여 주는 스토리지(사용자에게 열린 활성 스토리지)의 managed_root 만. 결과 유무로 숨긴 값을
-    맞혀 보는 오라클이 되지 않게 -- mount_path 와 관리자 전용 스토리지는 그 목록이 일부러 숨긴다(routes_storages)."""
+    뿌리는 **managed_root 하나뿐이다 -- 누구에게나**(2026-10-25 리뷰): 요청 payload·resource_key 는 managed_root 기준
+    상대경로만 저장한다(stepper._abs·domain.managed_abs_path 가 managed_root 와 잇고, 포탈의 절대경로 표시
+    lib/storagePaths 도 그 뿌리로 만든다). 관리자에게 mount_path 기준 펼침도 하던 동안은 managed_root 가 mount_path 아래
+    디렉터리인 보통 모양(storages._validate)에서 그 상대경로가 늘 **다른 디렉터리**를 가리켰다 -- '/lus/z' 가 실제로는
+    /lus/dms/z 에서 돈 잡을, '/mnt/ceph/managed/proj/x' 가 …/managed/managed/proj/x 의 잡을 잡았고(누가 그 경로를 지웠나를
+    좇는 관리자에게 거짓 단서) 그 엉뚱한 토큰이 상한 자리까지 먹었다. 둘이 같은 스토리지에선 같은 토큰이라 더하는 것이 없다.
+
+    펼침에 쓰는 스토리지는 그 사람이 볼 수 있는 것만: 관리자는 등록 스토리지 전부, 비관리자는 /api/user/storages 가
+    보여 주는 스토리지(사용자에게 열린 활성 스토리지). 결과 유무로 숨긴 스토리지의 뿌리를 맞혀 보는 오라클이 되지 않게 --
+    관리자 전용 스토리지는 그 목록이 일부러 숨긴다(routes_storages)."""
     tokens = text.split()
     storages = repos.storages.list() if any(t.startswith("/") for t in tokens) else []
     out: list[str] = []
@@ -200,13 +207,12 @@ def _search_terms(text: str, repos, *, is_admin: bool) -> list[str]:
         for row in storages:
             if not is_admin and not storage_open_to_users(row):
                 continue
-            roots = (row["managed_root"], row["mount_path"]) if is_admin else (row["managed_root"],)
-            for root in roots:
-                # DB 는 신뢰 경계 -- 문자열이 아닌·빈 뿌리는 펼치지 않는다(빈 뿌리면 모든 절대경로가 「그 아래」가 된다).
-                if not isinstance(root, str) or root == "":
-                    continue
-                if token == root or token.startswith(root.rstrip("/") + "/"):
-                    out.append(f"{row['storage_name']}:{token[len(root):].strip('/')}")
+            root = row["managed_root"]
+            # DB 는 신뢰 경계 -- 문자열이 아닌·빈 뿌리는 펼치지 않는다(빈 뿌리면 모든 절대경로가 「그 아래」가 된다).
+            if not isinstance(root, str) or root == "":
+                continue
+            if token == root or token.startswith(root.rstrip("/") + "/"):
+                out.append(f"{row['storage_name']}:{token[len(root):].strip('/')}")
     return list(dict.fromkeys(t.lower() for t in out))[:MAX_SEARCH_TERMS]
 
 
@@ -234,10 +240,11 @@ def list_requests(request: Request, identity: Identity = Depends(require_user),
     """작업 목록(전체 작업 화면). 필터는 전부 AND 로 좁히기만 하고 정렬·커서(before)는 필터와 무관하다.
 
     검색(2026-10-25 사용자 요청 -- 「배치 이름, 대상 경로 등으로 검색·필터, 일부 단어라도 포함하거나 매치되면 보여주도록」):
-      - q: 공백으로 나눈 토큰 중 **하나라도** 요청자 id·대상(스토리지 이름·상대경로)·배치 이름에 부분 일치(대소문자
-        무시)하거나, 16진 4~32자 토큰이 요청 id·배치 id 의 접두면 그 행을 낸다(RequestsRepository.list docstring).
-        '/' 로 시작하는 토큰은 절대경로로도 읽어 「스토리지 이름:상대경로」 토큰을 덧붙인다(_search_terms) -- 요청은
-        managed_root 기준 상대경로만 저장해서, 셸에서 복사한 절대경로는 그대로는 어디에도 안 걸린다.
+      - q: 공백으로 나눈 토큰(펼친 뒤 MAX_SEARCH_TERMS 개까지) 중 **하나라도** 대상(스토리지 이름·상대경로)·배치 이름·
+        요청자 id(관리자 전체 목록에서만 -- 비관리자의 목록은 이미 자기 자신이라 그 칸은 거르는 힘 없이 자기 작업 전부를 냈다)에
+        부분 일치(대소문자 무시)하거나, 16진 4~32자 토큰이 요청 id·배치 id 의 접두면 그 행을 낸다(RequestsRepository.list
+        docstring). '/' 로 시작하는 토큰은 절대경로로도 읽어 managed_root 기준 「스토리지 이름:상대경로」 토큰을 덧붙인다
+        (_search_terms) -- 요청은 managed_root 기준 상대경로만 저장해서, 셸에서 복사한 절대경로는 그대로는 어디에도 안 걸린다.
       - requester: 관리자에게만 부분 일치(alice 가 alice2 도 잡는다 -- 관리자가 일부만 쳐도 찾게).
       - 공백뿐인 값은 필터 없음. 둘 다 없으면 저장소 SQL 이 검색 전과 같다.
 
@@ -246,9 +253,10 @@ def list_requests(request: Request, identity: Identity = Depends(require_user),
     일치는 저장소의 별도 인자(requester_like)로만 간다: 격리 값(requester_id)에 LIKE 가 끼면 alice 가 alice2 의 작업을,
     이스케이프 없는 '_' 로 j_kim 이 jxkim 의 작업을 본다.
 
-    비용: 드문 검색어는 requests 표 전체를 훑고(PG16 32만 행에서 약 0.4초) 그동안 단일 연결 DB 잠금을 쥔다 -- 화면이
-    입력을 300ms 디바운스하고 검색 중엔 폴링 간격을 3초에서 10초로 늘린다(useJobs.useInfiniteRequests). 비관리자는
-    자기 행만 인덱스로 훑어 짧다."""
+    비용: 드물거나 없는 검색어는 requests 표 전체를 훑고 그동안 단일 연결 DB 잠금을 쥔다(/readyz 도 기다린다) -- PG16 32만
+    행 실측 토큰 1개 0.30초, 상한 4개 0.35초(행마다 건초더미를 한 번만 만든다 -- 그 전엔 토큰마다 ~0.28초씩 늘어 8개 2.1초,
+    RequestsRepository.list docstring). 흔한 검색어는 LIMIT 만큼 찾고 멈춰 수 ms. 화면이 입력을 300ms 디바운스하고 검색
+    중엔 폴링 간격을 3초에서 10초로 늘린다(useJobs.useInfiniteRequests). 비관리자는 자기 행만 인덱스로 훑어 짧다."""
     repos = request.app.state.repos
     is_admin = identity.role == "admin"
     # 비운영자는 requester 를 자기 자신으로 **강제**한다 -- requester 파라미터로

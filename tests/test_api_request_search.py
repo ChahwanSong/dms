@@ -2,10 +2,12 @@
 그것도 보여주도록」): GET /api/user/requests 의 q(부분 일치, 토큰 OR)와 관리자 requester 부분 일치. 계약의 몸통은
 RequestsRepository.list·routes_requests.list_requests docstring.
 
-여기서 고정하는 것: 매치 칸(요청자·대상 몸통·배치 이름·16진 id 접두)과 **매치하지 않는 것**(키 머리 'data.<op>:'·scan
-옵션 지문·id 의 중간), 대소문자 무시, LIKE 와일드카드의 글자 그대로, 토큰 OR·상한, 절대경로 펼침과 그 은닉 범위, 비관리자
-격리(정확히 일치 requester 위에서만 좁힌다), 다른 필터·커서와의 AND, 검색이 없을 때 SQL 이 검색 전과 바이트 단위로 같음,
-변조된 짧은 키가 목록을 500 으로 만들지 않음, 그리고 _KEY_BODY 가 기대는 domain.build_resource_key 의 모양.
+여기서 고정하는 것: 매치 칸(요청자 -- 관리자 전체 목록에서만·대상 몸통·배치 이름·16진 id 접두)과 **매치하지 않는 것**(키
+머리 'data.<op>:'·scan 옵션 지문·id 의 중간·비관리자 목록의 요청자 칸), 대소문자 무시, LIKE 와일드카드의 글자 그대로, 토큰
+OR·상한(절대경로 펼침 몫 포함), 절대경로 펼침(managed_root 만 -- mount_path 기준은 다른 디렉터리다)과 그 은닉 범위, 비관리자
+격리(정확히 일치 requester 위에서만 좁힌다), 다른 필터·커서와의 AND, 검색이 없을 때 SQL 이 검색 전과 바이트 단위로 같음, 검색
+SQL 이 토큰 수와 무관하게 건초더미 식을 한 번만 싣고 응답 행 모양이 검색 전과 같음, 변조된 짧은 키가 목록을 500 으로 만들지
+않음, 그리고 _KEY_BODY 가 기대는 domain.build_resource_key 의 모양.
 
 PostgreSQL: DMS_TEST_PG_URL(일회용 서버)을 주면 모든 테스트가 PG 에서도 돈다(db 픽스처를 두 방언으로 덮는다 --
 tests/test_usage_equivalence.py 와 같은 스키마 격리). sqlite 의 LIKE 는 ASCII 대소문자를 접고 PG 는 가리며, PG 는 음수
@@ -53,7 +55,7 @@ USERS = {"opadm": "admin", "alice": "user", "alice2": "user", "j_kim": "user", "
 @pytest.fixture
 def repos(client):
     repos = client.app.state.repos
-    # ceph: 뿌리가 마운트 아래(일반형), gpfs: 뿌리 = 마운트, lus: mount_path 펼침 확인용, adm: 관리자 전용(사용자 비공개).
+    # ceph: 뿌리가 마운트 아래(일반형), gpfs: 뿌리 = 마운트, lus: mount_path 로는 펼치지 않음 확인용, adm: 관리자 전용(사용자 비공개).
     for name, mount, root, user_enabled in (("ceph", "/mnt/ceph", "/mnt/ceph/managed", True),
                                             ("gpfs", "/gpfs", "/gpfs", True),
                                             ("lus", "/lus", "/lus/dms", True),
@@ -196,26 +198,43 @@ def test_hex_tokens_prefix_match_request_and_batch_ids(client, repos, db):
 
 
 def test_absolute_paths_expand_to_storage_relative_tokens(client, repos):
+    # 저장값은 managed_root 기준 상대경로라(stepper._abs) 펼침도 managed_root 로만 -- 관리자에게도. mount_path 기준 펼침은
+    # managed_root 가 마운트 아래인 보통 모양에서 늘 다른 디렉터리를 가리켰다(2026-10-25 리뷰): 아래 wrong 의 실제 경로는
+    # /mnt/ceph/managed/managed/proj/x 인데 '/mnt/ceph/managed/proj/x' 가 「ceph:managed/proj/x」 로도 펼쳐져 그것을 잡았다.
     a = _scan(repos, "proj/x")
+    wrong = _scan(repos, "managed/proj/x")
     b = _scan(repos, "proj/x", storage="gpfs")
     c = _scan(repos, "z", storage="lus")
     e = _scan(repos, "q1", storage="adm")
     _as(client, "opadm")
-    assert _ids(client, q="/mnt/ceph/managed/proj/x") == [a]        # managed_root 아래
+    assert _ids(client, q="/mnt/ceph/managed/proj/x") == [a]        # managed_root 아래 -- wrong 은 안 나온다
     assert _ids(client, q="/mnt/ceph/managed/proj/x/") == [a]
-    assert _ids(client, q="/mnt/ceph/managed") == [a]               # 뿌리 자체 = 그 스토리지 전부
+    assert _ids(client, q="/mnt/ceph/managed/managed/proj/x") == [wrong]
+    assert _ids(client, q="/mnt/ceph/managed") == [wrong, a]        # 뿌리 자체 = 그 스토리지 전부
     assert _ids(client, q="/mnt/ceph/managedX/proj/x") == []        # 이름만 같은 형제 디렉터리는 아래가 아니다
     assert _ids(client, q="/mnt/ceph/managedproj/x") == []          # (접두 글자 비교면 「ceph:proj/x」로 샌다)
     assert _ids(client, q="/gpfs/proj/x") == [b]                    # 뿌리 = 마운트
-    assert _ids(client, q="/lus/z") == [c]                          # 관리자는 mount_path 로도 펼친다
     assert _ids(client, q="/lus/dms/z") == [c]
+    assert _ids(client, q="/lus/z") == []                           # 뿌리 밖 -- 그 잡은 /lus/dms/z 에서 돌았다
     assert _ids(client, q="/adm/dms/q1") == [e]
     assert _ids(client, q="nothing /mnt/ceph/managed/proj/x") == [a]  # 다른 토큰과 함께여도
 
 
+def test_absolute_paths_share_the_term_cap(client, repos):
+    # 절대경로 하나는 토큰 둘(원래 토큰 + 펼친 「이름:상대경로」)을 먹는다 -- 상한(MAX_SEARCH_TERMS) 안에서 한 번에 붙여 넣는
+    # 절대경로는 둘까지고 그 뒤는 버려진다. mount_path 펼침이 있던 동안은 하나가 셋을 먹어 상한이 더 빨리 찼다(리뷰 실측).
+    rows = [_scan(repos, f"multi/{i}") for i in range(3)]
+    _as(client, "opadm")
+    paths = [f"/mnt/ceph/managed/multi/{i}" for i in range(3)]
+    assert MAX_SEARCH_TERMS == 4
+    assert _ids(client, q=" ".join(paths[:2])) == rows[1::-1]
+    assert _ids(client, q=" ".join(paths)) == rows[1::-1]           # 셋째 경로의 두 토큰은 상한 밖
+    assert _ids(client, q=paths[2]) == [rows[2]]
+
+
 def test_non_admin_path_expansion_uses_only_what_the_storage_picker_shows(client, repos):
-    # 비관리자에게 /api/user/storages 는 mount_path 와 관리자 전용 스토리지를 숨긴다 -- 펼침이 그 값을 쓰면 「내 작업이
-    # 나오나」로 숨긴 경로를 맞혀 보는 오라클이 된다. 상대경로 토큰은 그대로 걸린다.
+    # 비관리자에게 /api/user/storages 는 관리자 전용 스토리지를 숨긴다 -- 펼침이 그 뿌리를 쓰면 「내 작업이 나오나」로 숨긴
+    # 경로를 맞혀 보는 오라클이 된다. mount_path 기준 펼침은 이제 누구에게도 없다. 상대경로 토큰은 그대로 걸린다.
     c = _scan(repos, "z", storage="lus", requester="alice")
     e = _scan(repos, "q1", storage="adm", requester="alice")
     _as(client, "alice")
@@ -243,22 +262,42 @@ def test_non_admin_stays_isolated_with_q_and_requester(client, repos):
     _scan(repos, "bobonly", requester="bob")
     bid = _batch(repos, "성장 모니터링")
     kid = _scan(repos, "b1", batch_id=bid)
-    jk = _scan(repos, "jk", requester="j_kim")
-    jx = _scan(repos, "jx", requester="jxkim")
+    jk = _scan(repos, "home/j_kim/x", requester="j_kim")
+    jx = _scan(repos, "home/jxkim/y", requester="jxkim")
     _as(client, "alice")
     assert _ids(client) == [mine]
     assert _ids(client, requester="alice2") == [mine]              # 비관리자의 requester 는 무시(격리)
     assert _ids(client, requester="ali") == [mine]
-    assert _ids(client, q="alice") == [mine]                       # 요청자 칸 매치도 자기 행 안에서만
-    for term in ("a2-secret", "bobonly", "모니터", "b1", other[:8], kid[:8], bid[:12], "/mnt/ceph/managed/a2-secret"):
-        assert _ids(client, q=term) == [], term                    # 남의 경로·배치 이름·id 는 0건(유무 오라클 없음)
+    assert _ids(client, q="a1") == [mine]
+    for term in ("a2-secret", "bobonly", "모니터", "b1", other[:8], kid[:8], bid[:12], "/mnt/ceph/managed/a2-secret",
+                 "alice2"):
+        assert _ids(client, q=term) == [], term                    # 남의 경로·배치 이름·id·이름은 0건(유무 오라클 없음)
     _as(client, "j_kim")
     assert _ids(client, q="kim") == [jk]
     assert _ids(client, requester="jxkim") == [jk]
     assert _ids(client, q="jx") == []
     _as(client, "jxkim")
-    assert _ids(client, q="j_kim") == []                           # 이스케이프 -- 자기 'jxkim' 도 '_' 로 걸리지 않는다
+    assert _ids(client, q="j_kim") == []                           # 이스케이프 -- 자기 경로 'jxkim' 도 '_' 로 걸리지 않는다
     assert _ids(client, q="jxkim") == [jx]
+
+
+def test_requester_arm_only_on_the_admin_wide_list(client, repos):
+    # 비관리자의 목록은 이미 requester_id = 자기 자신이라 요청자 칸은 모든 행에 참이다 -- 토큰 OR 라 자기 id 의 부분
+    # 문자열('ali')만 쳐도 경로와 무관하게 자기 작업 전부가 나왔다(2026-10-25 리뷰). 경로·배치 이름에 맞는 행만 나온다.
+    plain = _scan(repos, "proj/a", requester="alice")
+    home = _scan(repos, "home/alice/b", requester="alice")
+    kid = _scan(repos, "proj/c", requester="alice", batch_id=_batch(repos, "alice 주간"))
+    _as(client, "alice")
+    for term in ("ali", "alice", "ALI", "alice nothing-here"):
+        assert _ids(client, q=term) == [kid, home], term
+    assert _ids(client, q="proj") == [kid, plain]
+    # 관리자 전체 목록(requester_id 없음)에선 요청자 칸이 산다 -- requester 부분 일치로 좁혀도 여전히 전체 목록이다.
+    _as(client, "opadm")
+    assert _ids(client, q="ali") == [kid, home, plain]
+    assert _ids(client, q="ali", requester="alice") == [kid, home, plain]
+    # 저장소 직접 호출도 같다(라우트가 아니라 저장소의 규칙이다).
+    assert [r["request_id"] for r in repos.requests.list("alice", search_terms=["ali"])] == [kid, home]
+    assert [r["request_id"] for r in repos.requests.list(search_terms=["ali"])] == [kid, home, plain]
 
 
 def test_q_combines_with_batch_id_operation_and_state(client, repos):
@@ -393,3 +432,49 @@ def test_sql_without_search_is_byte_identical_and_patterns_are_bound(client, rep
     ((sql, params),) = captured[n:]
     assert "%" not in sql and sql.endswith(" ORDER BY commit_order DESC LIMIT :n"), sql
     assert params["req_like"] == "%a\\%%" and params["q0"] == "%100\\%%" and params["q1"] == "%a\\_b%"
+
+
+def test_search_sql_builds_the_haystack_once_and_rows_keep_their_shape(client, repos, db):
+    # 최악 비용의 상한(2026-10-25 리뷰): 건초더미 식(_KEY_BODY)은 토큰 수와 무관하게 SQL 에 **한 번** -- 칸마다·토큰마다
+    # LOWER(...) LIKE 로 되돌아가면 드문 검색어가 토큰마다 표 전체 비용을 한 번씩 더 낸다(PG 실측 4개 1.1초 대 0.36초).
+    # PG 는 LIKE ANY(왼쪽 식 한 번) -- 문장 모양이 검색 전과 같아 LIMIT 을 아는 계획 그대로; sqlite 는 펜스 부분 질의.
+    # 펜스의 열(search_hay)은 응답에 새지 않는다.
+    _scan(repos, "deadbeef/x")
+    captured = []
+    orig = db.query
+
+    def spy(sql, params=None):
+        if "FROM requests" in sql and "ORDER BY" in sql:
+            captured.append(sql)
+        return orig(sql, params)
+
+    _as(client, "opadm")
+    plain = client.get("/api/user/requests").json()
+    db.query = spy
+    try:
+        for q in ("deadbeef", "deadbeef x zz1 zz2", "deadbeef x zz1 zz2 zz3 zz4 zz5"):
+            got = client.get("/api/user/requests", params={"q": q}).json()
+            assert [sorted(r) for r in got] == [sorted(r) for r in plain], q
+        repos.requests.list("alice", search_terms=["a", "b", "c", "d"])
+    finally:
+        db.query = orig
+    assert len(captured) == 4
+    for sql in captured:
+        assert sql.count(_KEY_BODY) == 1, sql
+        if db.dialect == "postgresql":
+            assert sql.startswith("SELECT * FROM requests WHERE ") and "OFFSET" not in sql and "LIKE ANY (ARRAY[" in sql
+        else:
+            assert sql.count("LIMIT -1 OFFSET 0") == 1, sql
+    assert all("requester_id || ' ' ||" in sql for sql in captured[:3])     # 관리자 전체 목록 -- 요청자 칸 포함
+    assert "requester_id || ' ' ||" not in captured[3]                      # 한 요청자로 묶인 목록 -- 요청자 칸 없음
+
+
+def test_repository_resplits_tokens_on_whitespace(repos):
+    # 건초더미는 「요청자 + ' ' + 대상 몸통」이라 토큰에 ' ' 가 없어야 두 칸에 걸친 매치가 생기지 않는다 -- 라우트는 이미
+    # 공백으로 나누지만 저장소를 직접 부르는 쪽도 같은 의미(낱말 OR)가 되게 저장소가 다시 나눈다.
+    a = _scan(repos, "t1")
+    b = _scan(repos, "t2", storage="gpfs", requester="bob")
+    _scan(repos, "t3", storage="gpfs", requester="bob")
+    assert [r["request_id"] for r in repos.requests.list(search_terms=["t2 opadm"])] == [b, a]
+    assert [r["request_id"] for r in repos.requests.list(search_terms=["   "])] == \
+        [r["request_id"] for r in repos.requests.list()]                     # 공백뿐 = 검색 없음
