@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 from ..db import Database, dump_json, load_json, utc_now_iso
 from ..domain import DataJobState, RequestState, TERMINAL_REQUEST_STATES
+from .text_search import BATCH_ID_PREFIX_RE, contains_pattern, prefix_pattern
 
 
 def batch_match(param: str) -> str:
@@ -14,6 +15,21 @@ def batch_match(param: str) -> str:
     (PG16, 32만 행·자식 2만 배치: 목록 23ms·LIMIT 세기 6ms → 둘 다 0.3ms 미만, 2026-10-11 검증 지적). 쓰는 곳:
     RequestsRepository.list(?batch_id=), BatchesRepository.list_summaries(배치 요약), request_purges.delete_batch(상한 세기)."""
     return f"batch_id >= :{param} AND batch_id <= :{param}"
+
+
+# 화면 「대상」 열(pathSummary: scan·rm = 「스토리지:경로」, sync = 「출발:경로 → 도착:경로」)과 같은 문자열을 resource_key 에서
+# 꺼내는 SQL 식(2026-10-25 작업 목록 경로 검색). resource_key = `data.<op>:<스토리지:경로…>` 이고 scan 은 끝에 `:<옵션 지문
+# sha256 hex 64자>` 가 붙는다(domain.build_resource_key). 원문에 그대로 LIKE 를 걸면 접두 때문에 「data」·「sync」·「scan」이
+# 그 연산 전체에, 지문 때문에 숫자·hex 짧은 검색어가 무관한 scan 행에 걸린다(32만 행 실측: '%data%' 전부, hex 4자 99건 --
+# 이 식으로는 0건). payload(JSON 텍스트)는 키 이름·옵션 값까지 걸려 더 나쁘다('%100%' 가 28만 행). sqlite·PG 공용 함수만
+# 쓰고(substr·length 는 양쪽 모두 문자 단위 -- 한글 안전), 모양이 다른 키(구형·테스트 픽스처)는 원문 그대로 본다.
+# sync 는 「출발:경로:도착:경로」라 화살표가 없다 -- 검색어의 「→」는 구분자로 지운다(text_search.search_tokens).
+_TARGET_TEXT_SQL = (
+    "CASE WHEN substr(resource_key, 1, length(operation) + 6) <> 'data.' || operation || ':' THEN resource_key"
+    " WHEN operation = 'scan' AND length(resource_key) > length(operation) + 71"
+    " AND substr(resource_key, length(resource_key) - 64, 1) = ':'"
+    " THEN substr(resource_key, length(operation) + 7, length(resource_key) - length(operation) - 71)"
+    " ELSE substr(resource_key, length(operation) + 7) END")
 
 
 class RequestsRepository:
@@ -81,7 +97,8 @@ class RequestsRepository:
             row["payload"] = load_json(row["payload"])
         return row
 
-    def list(self, requester_id=None, *, operation=None, state=None, batch_id=None,
+    def list(self, requester_id=None, *, requester_like=None, batch_like=None, path_like=None,
+             operation=None, state=None, batch_id=None,
              before=None, limit: int = 50) -> list[dict]:
         """요청 목록(commit_order DESC). 필터·커서(슬라이스 39): operation·state·
         requester_id·batch_id(2026-10-11 -- 한 배치의 작업만) 는
@@ -96,12 +113,52 @@ class RequestsRepository:
         (테이블의 몇 %)에서 UNIQUE(commit_order) 역방향 스캔 + batch_id 필터를 고른다 -- 오래된 배치면 그보다 새로운 요청
         전부(32만 행 중 25만)를 방문했다. 그래서 batch_match(범위 표기) + `ORDER BY batch_id DESC, commit_order DESC` 로
         쓴다(이유는 batch_match docstring): idx_requests_batch_order 를 LIMIT 만큼만 거꾸로 읽는다(PG16 실측: 자식 2만 배치
-        23ms → 0.02ms, 일반 계획(prepare)도 같다). sqlite 도 같은 인덱스로 정렬 없이 읽는다."""
+        23ms → 0.02ms, 일반 계획(prepare)도 같다). sqlite 도 같은 인덱스로 정렬 없이 읽는다.
+
+        검색(2026-10-25, 「전체 작업」 검색칸): requester_like·batch_like·path_like 는 text_search.search_tokens 의 토큰
+        목록이다(빈 목록·None = 조건 없음). 토큰마다 대소문자를 무시한 **부분** 일치이고, 토큰끼리·칸끼리 모두 AND 다 --
+        행을 좁히기만 한다. requester_like = 요청자 아이디. path_like = 화면 「대상」 표기(_TARGET_TEXT_SQL -- 스토리지 이름·
+        sync 출발·도착 양쪽 포함). batch_like = 배치 이름(batches.name, 조회 시점의 서브쿼리 -- 이름은 PATCH 로 바뀐다)
+        또는 6자 이상 hex 토큰이면 batch_id 앞부분(화면이 이름 없는 배치·기록 없는 묶음을 id 앞 12자로 보인다). 배치 행이
+        없는 단건은 batch_like 가 있으면 빠진다.
+
+        **격리는 requester_id 의 정확 일치가 집행한다**(비관리자 = 라우트가 자기 자신으로 강제). 부분 일치를 이 kwarg 로
+        넣지 마라 -- 강제된 값까지 LIKE 를 타면 'al' 사용자가 'alice'·'sal' 의 작업을 본다. requester_like·batch_like 는
+        관리자 검색 전용이다(라우트가 비관리자에겐 넘기지 않는다 -- batch_like 는 응답에 없는 배치 이름을 캐 보는 오라클이
+        된다). path_like 는 자기 행 안에서만 좁히므로 누구에게나 열려 있다.
+
+        비용: 앞에 와일드카드가 붙는 LIKE 는 인덱스를 못 탄다. 맞는 행이 흔하면 commit_order 역방향 스캔이 LIMIT 에서
+        멈추지만(PG16 32만 행 0.6ms), 드물거나 없으면 범위 전체를 한 번 훑는다(같은 규모 0.25~0.34s -- 단일 커넥션
+        RLock 을 그동안 잡는다). 배치 이름 조건의 모양(COALESCE)은 아래 반복문 주석. 그래서 화면은 검색어가 있는 동안
+        폴링을 늦춘다(useJobs SEARCH_REFETCH_MS). 정확
+        requester_id(비관리자)·batch_id 와 함께 걸리면 그 인덱스 범위로 상한이 준다. 규모가 커져 느려지면
+        pg_trgm 인덱스가 후속(BACKLOG)."""
         where = []
         params: dict = {"n": limit}
         order = "commit_order DESC"
         if requester_id is not None:
             where.append("requester_id = :req"); params["req"] = requester_id
+        # 패턴도 컬럼과 **같은** SQL lower() 로 낮춘다(text_search 모듈 docstring -- 파이썬 lower 와 DB lower 는 다르다).
+        for i, tok in enumerate(requester_like or ()):
+            where.append(rf"lower(requester_id) LIKE lower(:rq{i}) ESCAPE '\'"); params[f"rq{i}"] = contains_pattern(tok)
+        for i, tok in enumerate(path_like or ()):
+            where.append(rf"lower({_TARGET_TEXT_SQL}) LIKE lower(:pq{i}) ESCAPE '\'")
+            params[f"pq{i}"] = contains_pattern(tok)
+        for i, tok in enumerate(batch_like or ()):
+            # COALESCE 로 감싼다(2026-10-25 리뷰, PG16 32만 행 실측): 맨 IN 이면 PG 가 semi-join 으로 끌어올리고
+            # lower(name) LIKE 를 1행으로 잘못 추정해 Materialize 중첩 루프(훑은 행 × 일치한 배치 수)를 골랐다 -- 이름이
+            # 겹치는 배치 100~300개에서 0.94~2.75s 동안 단일 커넥션 RLock 을 잡았다. COALESCE 안의 IN 은 끌어올려지지
+            # 않아 hashed SubPlan(행마다 해시 조회, 50ms 이하)이 된다. 행마다 batches 를 묻는 스칼라 서브쿼리는 batches 가
+            # 작으면 행마다 Seq Scan 을 골라 더 느리다(1.85s) -- 쓰지 마라. batch_id NULL(단건)은 IN 이 NULL → FALSE 로
+            # 빠진다(전과 같다).
+            cond = (rf"COALESCE(batch_id IN (SELECT batch_id FROM batches"
+                    rf" WHERE lower(name) LIKE lower(:bq{i}) ESCAPE '\'), FALSE)")
+            params[f"bq{i}"] = contains_pattern(tok)
+            low = tok.lower()   # 배치 id 는 소문자 hex(uuid4().hex) -- 접두는 파이썬에서 낮춰도 같다(ASCII)
+            if BATCH_ID_PREFIX_RE.fullmatch(low):
+                cond = rf"({cond} OR batch_id LIKE :bp{i} ESCAPE '\')"
+                params[f"bp{i}"] = prefix_pattern(low)
+            where.append(cond)
         if operation is not None:
             where.append("operation = :op"); params["op"] = operation
         if state is not None:

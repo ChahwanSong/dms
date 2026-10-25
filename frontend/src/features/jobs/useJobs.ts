@@ -12,8 +12,21 @@ export const useRequests = () =>
 // 구 useRequests 의 목록 폴링 계약을 잇는다(e2e E5) -- 첫 쪽이 재조회되어 새
 // 제출이 위에 나타난다. 필터는 쿼리 키에 들어가 바뀌면 캐시가 갈린다.
 // batch = 한 배치의 작업만(2026-10-11, 서버 batch_id 필터) -- 화면 주소의 ?batch=<id> 가 정한다(batchJobsPath).
-export interface RequestFilters { operation?: string; state?: string; requester?: string; batch?: string }
+// 검색칸(2026-10-25): requester·batchName·path 는 서버가 대소문자를 무시한 부분 일치(공백으로 나눈 단어는 AND)로
+// 거른다 -- requester·batchName 은 관리자 전용(서버가 비관리자에겐 무시), path 는 누구나(화면 「대상」 표기).
+export interface RequestFilters {
+  operation?: string; state?: string; requester?: string; batch?: string; batchName?: string; path?: string;
+}
 export const REQUESTS_PAGE_SIZE = 50;
+// 검색어가 있는 동안의 폴링 주기(2026-10-25). 부분 일치는 인덱스를 못 타 드문 검색어면 서버가 범위 전체를 한 번 훑는다
+// (32만 행에서 0.3s 안팎 -- API 의 단일 DB 커넥션을 그동안 잡는다, RequestsRepository.list docstring). 3초마다 그
+// 비용을 내지 않게 늦춘다. 검색어가 없으면 예전 3초 그대로(e2e E5 의 새 제출 반영 계약).
+export const REQUESTS_REFETCH_MS = 3000;
+export const SEARCH_REFETCH_MS = 10000;
+
+const filled = (v: string | undefined): v is string => v !== undefined && v.trim() !== "";
+/** 검색칸 중 하나라도 값이 있는가(폴링 주기를 가른다). */
+export const hasSearch = (f: RequestFilters): boolean => filled(f.requester) || filled(f.batchName) || filled(f.path);
 
 /** 한 배치의 작업만 거른 전체 작업 목록 주소 -- 배치 상세·배치 기록만 지워진 묶음 칸이 쓴다. 오래된 배치의 작업은
  *  무한 스크롤 수십 쪽 아래라 이 길이 없으면 배치 단위 삭제를 시작할 행을 찾을 수 없었다(2026-10-11 검증 지적). */
@@ -23,7 +36,9 @@ function requestsUrl(f: RequestFilters, before?: number): string {
   const p = new URLSearchParams({ limit: String(REQUESTS_PAGE_SIZE) });
   if (f.operation) p.set("operation", f.operation);
   if (f.state) p.set("state", f.state);
-  if (f.requester && f.requester.trim() !== "") p.set("requester", f.requester.trim());
+  if (filled(f.requester)) p.set("requester", f.requester.trim());
+  if (filled(f.batchName)) p.set("batch_name", f.batchName.trim());
+  if (filled(f.path)) p.set("path", f.path.trim());
   if (f.batch) p.set("batch_id", f.batch);
   if (before !== undefined) p.set("before", String(before));
   return `/api/user/requests?${p.toString()}`;
@@ -39,7 +54,7 @@ export const useInfiniteRequests = (filters: RequestFilters) =>
     getNextPageParam: (lastPage) =>
       lastPage.length === REQUESTS_PAGE_SIZE
         ? lastPage[lastPage.length - 1].commit_order : undefined,
-    refetchInterval: 3000,
+    refetchInterval: hasSearch(filters) ? SEARCH_REFETCH_MS : REQUESTS_REFETCH_MS,
   });
 
 // 「최근 작업」(대시보드) 전용이던 useRecentRequests 는 그 카드와 함께 제거됐다

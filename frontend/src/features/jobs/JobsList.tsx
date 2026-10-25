@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { batchJobsPath, useDeleteRequests, useInfiniteRequests, usePurgeStatus } from "./useJobs";
 import type { RequestFilters } from "./useJobs";
+import { useSearchField } from "./searchField";
 import { DeleteRequestsDialog, isSucceededScan } from "./DeleteRequestsDialog";
 import { useMe } from "../auth/useAuth";
 import { Table } from "../../components/ui/Table";
@@ -18,6 +19,9 @@ import { BATCH_BLOCK_LABEL, BATCH_ID_RE, MAX_DELETE_BATCHES, groupBatches, split
 import type { BatchGroup, BatchSummary } from "./batchGroups";
 
 const field = "rounded-lg border border-line px-3 py-2 text-sm";
+// 검색칸(2026-10-25) -- 고정 폭. 클래스는 리터럴로 둔다(tailwind 는 조합 문자열을 만들지 않는다).
+const SEARCH_FIELD = "w-40 rounded-lg border border-line px-3 py-2 text-sm";
+const SEARCH_RULE = "대소문자는 가리지 않고, 띄어 쓴 단어는 모두 들어 있어야 합니다";
 
 // 필터 select 값(빈 문자열 = 전체). 연산·상태는 도메인 열거의 미러 -- 서버는
 // 미지 값에 0건을 주므로 여기 목록이 곧 사용자에게 유효한 값 집합이다. 상태는 **요청** 상태(domain.RequestState
@@ -133,7 +137,14 @@ export function JobsList() {
   const isAdmin = me.data?.role === "admin";
   const [operation, setOperation] = useState("");
   const [state, setState] = useState("");
-  const [requester, setRequester] = useState("");
+  // 검색칸(2026-10-25): 요청자(관리자)·배치 이름(관리자)·대상 경로(누구나). 서버가 대소문자를 무시한 부분 일치로 거른다
+  // (띄어 쓴 단어는 모두 들어 있어야 한다). 쿼리는 **적용된** 값으로만 -- 타이핑이 멈춘 뒤(searchField).
+  const requesterSearch = useSearchField();
+  const batchSearch = useSearchField();
+  const pathSearch = useSearchField();
+  const requester = requesterSearch.applied;
+  const batchName = batchSearch.applied;
+  const path = pathSearch.applied;
   // 한 배치의 작업만(?batch=<id>) -- 주소가 상태다(배치 상세·「기록 없음」 칸의 링크가 그대로 들어온다).
   const [params, setParams] = useSearchParams();
   const batch = params.get("batch") ?? "";
@@ -141,8 +152,9 @@ export function JobsList() {
   // 값이 실제로 바뀔 때만 새 객체를 만든다(useMemo).
   const filters: RequestFilters = useMemo(
     () => ({ operation: operation || undefined, state: state || undefined,
-             requester: requester || undefined, batch: batch || undefined }),
-    [operation, state, requester, batch]);
+             requester: requester || undefined, batch: batch || undefined,
+             batchName: batchName || undefined, path: path || undefined }),
+    [operation, state, requester, batch, batchName, path]);
   const q = useInfiniteRequests(filters);
   // q.data 를 그대로 dep 에 쓴다(react-query 구조적 공유 -- 내용이 같은 리페치는 같은 참조). 매 렌더 새 배열이면
   // 아래 유령 선택 정리 effect 가 무한 루프가 된다(BatchesList 관례).
@@ -275,20 +287,32 @@ export function JobsList() {
     clearAll();
     disarm();
   }, [batch]);  // eslint-disable-line react-hooks/exhaustive-deps
+  // 검색칸도 같다(2026-10-25) -- **적용된** 검색어가 바뀌는 순간 비운다(키 입력마다가 아니다: 디바운스 창 안에서 고른
+  // 행은 아직 보이는 결과의 행이다). 위 유령 정리 effect 보다 뒤에 둔다 -- 같은 렌더에서 새 쿼리 키로 rows 가 비면 유령
+  // 정리가 「N개는 목록에서 사라져…」를 세는데, 이 effect 의 clearAll 이 그 알림까지 지운다(필터를 바꾼 것은 사용자다).
+  const searchKey = JSON.stringify([requester, batchName, path]);
+  const seenSearch = useRef(searchKey);
+  useEffect(() => {
+    if (seenSearch.current === searchKey) return;
+    seenSearch.current = searchKey;
+    clearAll();
+    disarm();
+  }, [searchKey]);  // eslint-disable-line react-hooks/exhaustive-deps
   // 「필터 해제」는 자기가 든 칩째 사라진다 -- 그대로 두면 포커스가 <body> 로 떨어져 키보드·화면 낭독기 사용자가 자리를
   // 잃었다(다음 Tab 이 우연히 표 머리 체크박스로 -- 2026-10-11 검증 지적). **키보드로 눌렀을 때만**(click 의 detail 0 --
-  // Enter·Space, 보조기기의 기본 동작) 늘 있는 바로 앞 필터(상태 필터)로 옮긴다. 마우스로 누른 경우는 옮기지 않는다:
+  // Enter·Space, 보조기기의 기본 동작) 늘 있는 바로 앞 필터로 옮긴다 -- 2026-10-25 부터 대상 경로 검색칸(누구에게나 늘 있고 칩
+  // 바로 앞이다; 예전엔 상태 필터였는데 그 사이에 검색칸이 끼어 관리자는 세 칸 앞에 떨어졌다 -- 리뷰). 마우스로 누른 경우는 옮기지 않는다:
   // Chrome 은 프로그램 포커스를 받은 select 에 직전 입력과 무관하게 :focus-visible 링을 그려, 마우스 사용자에게도 상태
   // 필터에 굵은 링이 남았다(2026-10-11 검증 지적 -- 「select 는 키보드로 왔을 때만 링」이라던 예전 주석은 사실과 달랐다).
   // 마우스면 사라지는 버튼에서 <body> 로 떨어져도 다음 클릭이 자리를 정하므로 해가 없다.
-  const stateFilterRef = useRef<HTMLSelectElement>(null);
+  const pathFilterRef = useRef<HTMLInputElement>(null);
   const clearBatchFilter = (byKeyboard: boolean) => {
     setParams((p) => {
       const next = new URLSearchParams(p);
       next.delete("batch");
       return next;
     });
-    if (byKeyboard) stateFilterRef.current?.focus({ preventScroll: true });
+    if (byKeyboard) pathFilterRef.current?.focus({ preventScroll: true });
   };
   const batchFilterLabel = batch === "" ? null : (batchGroups.get(batch)?.label ?? batch.slice(0, 12));
 
@@ -313,23 +337,32 @@ export function JobsList() {
         <Link to="/jobs/new"><Button>작업 제출</Button></Link>
       </div>
 
-      {/* 필터: 연산·상태는 누구나, 요청자는 운영자만(사용자는 서버가 자기 것으로
-          강제하므로 요청자 필터가 무의미하다). */}
+      {/* 필터: 연산·상태·대상 경로는 누구나, 요청자·배치 이름은 운영자만(사용자는 서버가 자기 것으로 강제하므로 요청자
+          검색이 무의미하고, 배치 열·배치 정보는 운영자 화면이다 -- 서버도 비운영자에겐 둘을 무시한다). 검색칸 셋은 부분
+          일치(2026-10-25 -- 「일부 단어라도 포함하거나 매치되면」): 대소문자 무시, 띄어 쓴 단어는 모두 들어 있어야 한다.
+          폭은 w-40 고정 -- 기본 폭(226px)이면 375px 에서 필터가 네 줄로 늘어 표가 그만큼 밀렸다(실측). */}
       <div className="flex flex-wrap items-center gap-2">
         <select aria-label="연산 필터" className={field} value={operation}
                 onChange={(e) => onFilter(setOperation, e.target.value)}>
           <option value="">연산 전체</option>
           {OPERATIONS.map((o) => <option key={o} value={o}>{o}</option>)}
         </select>
-        <select aria-label="상태 필터" ref={stateFilterRef} className={field} value={state}
+        <select aria-label="상태 필터" className={field} value={state}
                 onChange={(e) => onFilter(setState, e.target.value)}>
           <option value="">상태 전체</option>
           {STATES.map((s) => <option key={s} value={s}>{s}</option>)}
         </select>
         {isAdmin && (
-          <input aria-label="요청자 필터" className={field} placeholder="요청자 아이디"
-                 value={requester} onChange={(e) => onFilter(setRequester, e.target.value)} />
+          <input type="search" aria-label="요청자 필터" className={SEARCH_FIELD} placeholder="요청자(일부)"
+                 title={`요청자 아이디의 일부로 찾습니다 — ${SEARCH_RULE}`} {...requesterSearch.bind} />
         )}
+        {isAdmin && (
+          <input type="search" aria-label="배치 이름 필터" className={SEARCH_FIELD} placeholder="배치 이름·ID(일부)"
+                 title={`배치 이름의 일부, 또는 배치 ID 앞 6자 이상으로 찾습니다(배치 작업만) — ${SEARCH_RULE}`}
+                 {...batchSearch.bind} />
+        )}
+        <input type="search" aria-label="대상 경로 필터" ref={pathFilterRef} className={SEARCH_FIELD} placeholder="대상 경로(일부)"
+               title={`대상 열(스토리지:경로)의 일부로 찾습니다 — ${SEARCH_RULE}`} {...pathSearch.bind} />
         {/* 한 배치의 작업만 보는 중(주소 ?batch=) -- 무엇으로 걸렀는지와 푸는 길을 늘 보인다(필터가 숨어 있으면 「작업이
             사라졌다」로 읽힌다). 이름은 불러온 행의 배치 이름, 없으면 id 앞 12자. 좁은 폭에선 이름이 말줄임으로 잘리므로
             title 은 전체 이름 + id 다(id 만이면 hover 로도 이름을 볼 수 없었다 -- 2026-10-11 검증 지적). */}
@@ -366,7 +399,9 @@ export function JobsList() {
                       checked={allChecked} disabled={deletableIds.length === 0 || del.isPending}
                       onChange={toggleAll} /></th>
                 )}
-                <th className="py-2">요청</th>
+                {/* w-px(2026-10-25): 열이 링크 폭(관리자 5rem)만큼만 -- auto 표가 넓은 화면에서 남는 폭을 이 열에 나눠
+                    주던 것(1920 에서 129px)을 대상 열로 돌린다. */}
+                <th className="py-2 w-px">요청</th>
                 {/* 배치 열(관리자만 -- 비관리자 목록엔 배치 자식이 사실상 나타나지 않고 배치 상세는 관리자 화면이다).
                     폭은 머리칸이 **예약**한다(BATCH_TH -- 내용과 무관): 예전엔 배치 행이 없으면 「—」 폭(35px)으로 줄어
                     폴링으로 첫 배치 자식이 들어오는 순간 표 전체가 다시 배치돼 단일 작업 행이 포인터 밑에서 ~240px
@@ -377,8 +412,10 @@ export function JobsList() {
                 {/* 시간대는 머리줄이 한 번 말한다 -- 칸마다 붙던 「 KST」 4글자를 배치 열 폭으로 돌려줬다(2026-10-10).
                     이 표엔 칸 여백이 없어 그 접미사가 두 시각 사이의 구분자 노릇을 했다 -- 빼고 나니 생성·갱신이 2px 로
                     붙어 한 문자열로 읽혔다(2026-10-11 검증 지적). 생성 칸 오른쪽 여백(pr-2, 8px)이 그 자리다(12px 는 1280
-                    에서 대상 열 폭을 더 깎았다 -- 2026-10-11 검증 지적). */}
-                <th className="pr-2">생성(KST)</th><th>갱신(KST)</th>
+                    에서 대상 열 폭을 더 깎았다 -- 2026-10-11 검증 지적).
+                    w-px(2026-10-25, 「생성/갱신 칸을 텍스트에 맞게」): 시각 칸은 nowrap 이라 열이 글자 폭(「YYYY-MM-DD
+                    HH:MM:SS」 130px)으로 붙는다 -- 예전엔 1920 에서 남는 폭을 나눠 받아 170·161px 로 벌어졌다. */}
+                <th className="pr-2 w-px">생성(KST)</th><th className="w-px">갱신(KST)</th>
               </tr>
             </thead>
             <tbody>
@@ -424,11 +461,12 @@ export function JobsList() {
                   <td className="py-2">
                     {/* 전체 request_id 를 DOM 에 둔다(textContent) -- e2e 가 전체 id 로
                         행을 찾고, 표시는 CSS truncate 로만 줄인다(잘라 렌더하면 e2e
-                        의 hasText 전체-id 매칭이 깨진다). 관리자는 6.5rem(앞 13자 + 말줄임 -- 확인 창·결과 줄이 쓰는
-                        12자는 늘 보인다): 배치 열에 자리를 내줬다(1280 에서 대상 열이 HEAD(배치 열 없음)의 208px 이상 --
-                        단일 sync 행이 HEAD 보다 높아지지 않는다, 2026-10-11 실측. 아래 BATCH_W 주석).
-                        배치 열이 없는 일반 사용자는 예전 10rem 그대로(2026-10-11 검증 지적 -- 이유 없이 줄었다). */}
-                    <Link className={`text-accent font-mono text-xs block ${isAdmin ? "max-w-[6.5rem]" : "max-w-[10rem]"} truncate`}
+                        의 hasText 전체-id 매칭이 깨진다). 관리자는 5rem(앞 10자 + 말줄임, 2026-10-25 사용자 요청 「요청ID 칸
+                        줄이고 … 배치 칸을 조금 키워줘」): 줄인 24px 를 배치 열(7.5rem)에 그대로 넘겨 1280 의 대상 열 폭이
+                        예전과 같다(181px, 실측 -- 아래 BATCH_W 주석). 확인 창·결과 줄·체크박스 이름은 12자를 쓰므로 표는
+                        그 앞 10자를 보인다(같은 접두라 대조할 수 있다; 전체 id 는 title·DOM). 배치 열이 없는 일반 사용자는
+                        예전 10rem 그대로(2026-10-11 검증 지적 -- 이유 없이 줄었다). */}
+                    <Link className={`text-accent font-mono text-xs block ${isAdmin ? "max-w-[5rem]" : "max-w-[10rem]"} truncate`}
                           ref={(el) => {
                             if (el !== null) rowLinks.current.set(r.request_id, el);
                             else rowLinks.current.delete(r.request_id);
@@ -473,6 +511,11 @@ export function JobsList() {
 // id 앞 12자), 배치 기록만 지워진 묶음은 「기록 없음 xxxxxxxxxxxx」(상세는 404 라 보내지 않는다 -- 대신 그 묶음의 작업만
 // 거른 이 목록으로 간다), id 형식 이상값은 그 사실을 그대로. 버튼 금지(e2e L4 표 버튼 한 줄 -- 링크·글자만).
 //
+// 폭(2026-10-25 사용자 요청 「배치 column 이 너무 좁은데 요청ID 칸 줄이고 생성/갱신 칸을 텍스트에 맞게 조절해서 배치 칸을
+// 조금 키워줘」): **모든 폭에서 7.5rem 고정**. 요청 열을 6.5 → 5rem 으로 줄인 24px 를 그대로 받아 1280 의 대상 열은 예전과
+// 같고(181px, 실 Chrome 실측 -- 배치 열 105 → 129px, 요청 열 106 → 82px), 시각 칸 둘(w-px)은 넓은 화면에서도 글자 폭이라
+// 남는 폭은 대상 열로 간다. 아래 2026-10-11 주석의 원칙(머리칸 예약·두 줄 이하·모든 폭 같은 폭)은 그대로다 -- 숫자만
+// 6 → 7.5rem 으로 읽어라. 이름 두 줄 분할의 폭(batchGroups NAME_LINE_UNITS·TAIL_UNITS)도 7.5rem 에 맞췄다.
 // 폭(실측 예산, 2026-10-11 다시 맞춤): **모든 폭에서 6rem 고정**이고 그 폭은 머리칸(BATCH_TH)이 예약한다 -- 배치 행이
 // 있든 없든 열 폭이 같아 폴링으로 첫 배치 행이 들어오거나 마지막 배치를 지워도 표가 다시 배치되지 않는다. 1280 예산:
 // 요청 열 6.5rem·시각 칸 「 KST」 제거·생성 칸 여백 8px 과 한 묶음으로 대상 열이 1280~1920 모든 폭에서 HEAD(배치 열 없음)
@@ -494,12 +537,13 @@ export function JobsList() {
 // 지우려고 기다리는 바로 그 순간) 다시 돌 때 그 배치의 모든 행이 59 ↔ 43px 로 바뀌어 표가 포인터 밑에서 수백 px 움직였다.
 // 두 줄(text-sm 20 + text-xs 16)은 체크박스 행 높이(39px) 안이라 상태가 바뀌어도 행 높이가 그대로다(e2e E7 이 잰다).
 // 막힌 동안 가려지는 뒤 조각·id 는 title·링크 이름에 그대로 있다.
-const BATCH_W = "w-[6rem] min-w-[6rem]";
-/** 배치 머리칸 -- 칸 내용 6rem(BATCH_W) + 오른쪽 여백 pr-2(0.5rem) + **UA 기본 왼쪽 여백 1px**(boxed 아닌 표의 td·th 는
- *  padding 1px 이 남는다)을 border-box 폭으로 예약한다(위 주석). 1px 을 빼먹은 6.5rem(104px)은 링크 칸(1 + 96 + 8 = 105px)
- *  보다 짧아, 첫 배치 행이 들어오는 순간 열이 104 → 105px 로 넓어지고 대상 열이 줄어 경계 길이의 대상이 한 줄 늘었다
- *  (2026-10-11 검증 지적 -- 「표가 다시 배치되지 않는다」가 1px 차이로 거짓이었다). */
-const BATCH_TH = "pr-2 w-[calc(6.5rem_+_1px)] min-w-[calc(6.5rem_+_1px)]";
+const BATCH_W = "w-[7.5rem] min-w-[7.5rem]";
+/** 배치 머리칸 -- 칸 내용 7.5rem(BATCH_W) + 오른쪽 여백 pr-2(0.5rem) + **UA 기본 왼쪽 여백 1px**(boxed 아닌 표의 td·th 는
+ *  padding 1px 이 남는다)을 border-box 폭으로 예약한다(위 주석). **늘 BATCH_W + 0.5rem + 1px** 이어야 한다 -- 1px 을
+ *  빼먹은 예전 6.5rem(104px)은 링크 칸(1 + 96 + 8 = 105px)보다 짧아, 첫 배치 행이 들어오는 순간 열이 104 → 105px 로
+ *  넓어지고 대상 열이 줄어 경계 길이의 대상이 한 줄 늘었다(2026-10-11 검증 지적 -- 「표가 다시 배치되지 않는다」가 1px
+ *  차이로 거짓이었다). 지금 값: 1 + 120 + 8 = 129px. */
+const BATCH_TH = "pr-2 w-[calc(8rem_+_1px)] min-w-[calc(8rem_+_1px)]";
 /** 배치 칸 사유 줄의 id(행마다 하나 -- 체크박스의 aria-describedby). */
 const batchWhyId = (requestId: string) => `batch-why-${requestId}`;
 /** 사유 줄 안의 화면 낭독기 전용 처방(위 주석) -- 보이는 줄의 높이는 그대로다(sr-only 는 흐름 밖). */

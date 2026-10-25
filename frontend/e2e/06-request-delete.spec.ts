@@ -279,7 +279,7 @@ test.describe("E7 작업 삭제", () => {
     //  - 막힌 배치 칸에 사유 줄을 **덧붙이자** 긴 이름 배치가 세 줄(59px) ↔ 두 줄(43px)을 오가, Running → Completed(관리자가
     //    지우려고 기다리는 순간) 폴링 한 번에 그 배치의 모든 행이 줄어 표가 포인터 밑에서 최대 수백 px 움직였다. 이제 사유
     //    줄이 뒤 조각·id 줄을 **대신**한다(칸은 늘 두 줄 이하).
-    //  - 배치 머리칸 예약 폭(6.5rem = 104px)이 링크 칸(UA 왼쪽 여백 1px + 96 + pr-2 8 = 105px)보다 1px 짧아 첫 배치 행이
+    //  - 배치 머리칸 예약 폭(그때 6.5rem = 104px)이 링크 칸(UA 왼쪽 여백 1px + 96 + pr-2 8 = 105px)보다 1px 짧아 첫 배치 행이
     //    들어오는 순간 열이 넓어지고 경계 길이의 대상이 한 줄 늘었다(예전 단언 「≤ 1px」은 바로 그 1px 을 통과시켰다).
     //  - 늘 있는 규칙 줄이 375 에서 세 줄로 접혀 툴바가 HEAD 보다 32px 높았다.
     test.setTimeout(90_000);
@@ -338,7 +338,7 @@ test.describe("E7 작업 삭제", () => {
       await expect(rowOf(80)).toContainText("미완료 작업 있음");
       const thBatch = await batchTh.evaluate((el) => el.getBoundingClientRect().width);
       expect(thBatch, `w=${width} 배치 열 폭이 배치 행 유무로 바뀌었다(표 재배치)`).toBe(thNone);
-      // 사유 줄은 6rem 한 줄에 다 보인다(말줄임으로 잘리지 않는다).
+      // 사유 줄은 배치 칸(7.5rem) 한 줄에 다 보인다(말줄임으로 잘리지 않는다).
       for (const why of await page.locator("main tbody [id^='batch-why-']").all()) {
         const [sw, cw] = await why.evaluate((el) => [el.scrollWidth, el.clientWidth]);
         expect(sw, `w=${width} 사유 줄이 잘렸다`).toBeLessThanOrEqual(cw);
@@ -428,23 +428,25 @@ test.describe("E7 작업 삭제", () => {
     await expect(batchRows.first().getByRole("checkbox")).toBeEnabled();
 
     // 배치 행이 있는 표의 기하(L1~L4) -- 1280 에서는 표 래퍼 자체도 넘치지 않아야 한다(L1 은 래퍼 안 가로 스크롤을
-    // 허용하므로 열 폭 회귀를 못 잡는다 -- 배치 열은 요청 열 6.5rem·시각 칸 「 KST」 제거로 폭을 마련했다).
+    // 허용하므로 열 폭 회귀를 못 잡는다 -- 배치 열은 요청 열 6.5rem·시각 칸 「 KST」 제거로 폭을 마련했다. 2026-10-25 에
+    // 요청 열을 5rem 으로 더 줄이고 그만큼 배치 열을 7.5rem 으로 넓혔다 -- 1280 순변화 0 이라 이 단언은 그대로 성립해야 한다).
     await assertLayoutSane(page, { minTableCells: 18 });
     const wrapper = page.locator("main .overflow-x-auto").filter({ has: page.locator("table") }).first();
     const [scrollW, clientW] = await wrapper.evaluate((el) => [el.scrollWidth, el.clientWidth]);
     expect(scrollW, `1280 에서 작업 표가 래퍼를 넘친다(${scrollW} > ${clientW}) -- 배치 열 폭 예산 회귀`)
       .toBeLessThanOrEqual(clientW);
     // 배치 열 폭은 머리칸이 예약한다(2026-10-11 검증 지적: 배치 행이 없으면 「—」 폭으로 줄었다가 폴링으로 첫 배치 행이
-    // 들어오는 순간 표 전체가 다시 배치돼 단일 작업 행이 포인터 밑에서 ~240px 내려갔다). 6.5rem + 1px(105px -- UA 왼쪽 여백
-    // 1px 까지, 1px 을 빼먹은 104px 은 첫 배치 행이 열을 넓혔다 -- 2026-10-11 검증 지적)이고 넓은 화면에서도
+    // 들어오는 순간 표 전체가 다시 배치돼 단일 작업 행이 포인터 밑에서 ~240px 내려갔다). 8rem + 1px(129px = UA 왼쪽 여백
+    // 1px + 칸 7.5rem 120 + pr-2 8, 2026-10-25 -- 예전 6.5rem + 1px(105px). 1px 을 빼먹은 예약은 첫 배치 행이 열을 넓혔다 --
+    // 2026-10-11 검증 지적)이고 넓은 화면에서도
     // 넓어지지 않는다(1440px 이상의 12rem 은 짧은 이름에도 대상 열을 HEAD 보다 120px 깎았다). 대상 열의 절대 폭은 이 DB 의
     // 내용(짧은 대상·긴 상태값)에 따라 auto 표 배치가 정하므로 여기서 재지 않는다 -- HEAD 대비 밀도는 검증 스크립트가 같은
     // 내용으로 쟀다(CHANGELOG 검증 3차).
     const thWidth = (name: string) => page.getByRole("columnheader", { name, exact: true })
       .evaluate((el) => el.getBoundingClientRect().width);
     const batchCol = await thWidth("배치");
-    expect(batchCol, "배치 열은 6.5rem + 1px(105px) 예약").toBeGreaterThanOrEqual(104.5);
-    expect(batchCol).toBeLessThanOrEqual(105.5);
+    expect(batchCol, "배치 열은 8rem + 1px(129px) 예약").toBeGreaterThanOrEqual(128.5);
+    expect(batchCol).toBeLessThanOrEqual(129.5);
     await page.setViewportSize({ width: 1920, height: 900 });
     expect(await thWidth("배치"), "넓은 화면에서 배치 열이 넓어졌다").toBe(batchCol);
     await page.setViewportSize({ width: 1280, height: 800 });
@@ -517,7 +519,7 @@ test.describe("E7 작업 삭제", () => {
     await expect(row).toHaveCount(1);
     // 지워진 배치의 상세는 404 라 그리로 보내지 않는다 -- 「기록 없음 + id 12자」는 그 묶음의 작업만 거른 이 목록으로 가는
     // 링크다(2026-10-11 검증 지적: 「삭제됨」은 작업 자체가 지워졌다는 말로 읽혔고, 묶음의 작업을 한자리에서 볼 길이
-    // 없었다). id 는 확인 창·결과 줄과 같은 12자이고 6rem 칸에 **다 보인다**(가로로 잘리지 않는다).
+    // 없었다). id 는 확인 창·결과 줄과 같은 12자이고 배치 칸(7.5rem)에 **다 보인다**(가로로 잘리지 않는다).
     const gone = row.getByRole("link", { name: `기록 없음 ${bid.slice(0, 12)}` });
     await expect(gone).toBeVisible();
     await expect(gone).toHaveAttribute("href", `/jobs?batch=${bid}`);

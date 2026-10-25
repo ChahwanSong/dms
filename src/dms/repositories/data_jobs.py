@@ -4,6 +4,7 @@ from ..db import Database, dump_json, iso_epoch, iso_plus, load_json, utc_now_is
 from ..domain import (DataJobState, RequestState, TERMINAL_DATA_JOB_STATES,
                       TERMINAL_REQUEST_STATES)
 from .observability import ObservabilityRepository
+from .text_search import contains_pattern
 
 _JSON_COLUMNS = ("options", "worker_pool", "precondition", "result_summary",
                  "preview_summary", "volcano_job_ref", "phase_refs")
@@ -202,9 +203,7 @@ class DataJobsRepository:
         리뷰: 사용량 탭 요약이 변조·구형 행의 빈 이름을 탭으로 내는데 truthy 검사가 그 탭을 전 스토리지로 접었다)."""
         params["s"] = DataJobState.SUCCEEDED.value
         where = "operation = 'scan' AND state = :s AND target IS NOT NULL"
-
-        def like(v):
-            return "%" + v.replace("\\", r"\\").replace("%", r"\%").replace("_", r"\_") + "%"
+        like = contains_pattern   # 작업 목록 검색과 같은 이스케이프 한 벌(text_search)
         if q:
             where += r" AND (target LIKE :q ESCAPE '\' OR storage_name LIKE :q ESCAPE '\')"
             params["q"] = like(q)

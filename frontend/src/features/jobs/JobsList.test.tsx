@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
@@ -44,18 +44,26 @@ test("전체 작업: 요청자·대상 요약 등 풍부한 정보를 표시한�
   expect(within(r).getByText("s1:a → s1:b")).toBeInTheDocument();    // 대상 요약(pathSummary)
 });
 
-test("요청자 필터는 운영자에게만 보인다", async () => {
+test("요청자·배치 이름 검색은 운영자에게만, 대상 경로 검색은 누구나", async () => {
   server.use(http.get("/api/user/requests", () => HttpResponse.json([row("r1")])));
   const { unmount } = wrap(meUser);
   await screen.findByText("r1", { exact: false });
   expect(screen.queryByLabelText("요청자 필터")).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("배치 이름 필터")).not.toBeInTheDocument();
   expect(screen.getByLabelText("연산 필터")).toBeInTheDocument();     // 연산·상태는 공용
+  expect(screen.getByLabelText("대상 경로 필터")).toBeInTheDocument(); // 자기 작업 안에서만 좁힌다(서버)
   unmount();
   wrap(meAdmin);
-  expect(await screen.findByLabelText("요청자 필터")).toBeInTheDocument();
+  for (const name of ["요청자 필터", "배치 이름 필터", "대상 경로 필터"]) {
+    const box = await screen.findByLabelText(name);
+    // 부분 일치라는 것을 칸이 말한다(2026-10-25 「exact match 완화」) -- 고정 폭 w-40(375px 에서 필터 줄 수를 줄인다).
+    expect(box).toHaveAttribute("placeholder", expect.stringContaining("(일부)"));
+    expect(box).toHaveAttribute("type", "search");
+    expect(box.className).toContain("w-40");
+  }
 });
 
-test("필터를 바꾸면 서버 쿼리에 operation·state·requester 가 실린다", async () => {
+test("필터를 바꾸면 서버 쿼리에 operation·state·requester·batch_name·path 가 실린다(검색어는 앞뒤 공백 제거)", async () => {
   const urls: string[] = [];
   server.use(http.get("/api/user/requests", ({ request }) => {
     urls.push(request.url); return HttpResponse.json([row("r1")]);
@@ -65,12 +73,54 @@ test("필터를 바꾸면 서버 쿼리에 operation·state·requester 가 실�
   await userEvent.selectOptions(screen.getByLabelText("연산 필터"), "rm");
   await userEvent.selectOptions(screen.getByLabelText("상태 필터"), "Failed");
   await userEvent.type(screen.getByLabelText("요청자 필터"), "bob");
-  // 마지막 요청이 세 필터를 모두 반영한다.
-  await screen.findByText(/조건에 맞는 작업이 없습니다|r1/);
-  const last = urls[urls.length - 1];
-  expect(last).toContain("operation=rm");
-  expect(last).toContain("state=Failed");
-  expect(last).toContain("requester=bob");
+  await userEvent.type(screen.getByLabelText("배치 이름 필터"), " 이관 1차 ");
+  await userEvent.type(screen.getByLabelText("대상 경로 필터"), "growth");
+  // 검색어는 타이핑이 멈춘 뒤 적용된다(디바운스) -- 마지막 요청이 다섯 필터를 모두 반영할 때까지 기다린다.
+  await waitFor(() => {
+    const last = new URL(urls[urls.length - 1]);
+    expect(last.searchParams.get("operation")).toBe("rm");
+    expect(last.searchParams.get("state")).toBe("Failed");
+    expect(last.searchParams.get("requester")).toBe("bob");
+    expect(last.searchParams.get("batch_name")).toBe("이관 1차");
+    expect(last.searchParams.get("path")).toBe("growth");
+  });
+});
+
+test("검색칸은 타이핑이 멈춘 뒤 한 번만 묻는다 -- 글자마다 서버를 부르지 않는다", async () => {
+  // 부분 일치는 인덱스를 못 타 드문 검색어면 서버가 범위 전체를 훑는다 -- 「growth」 를 치는 동안 g·gr·gro… 여섯 번
+  // 부르면 그 비용을 여섯 번 낸다(예전 요청자 칸이 그랬다).
+  const urls: string[] = [];
+  server.use(http.get("/api/user/requests", ({ request }) => {
+    urls.push(request.url); return HttpResponse.json([row("r1")]);
+  }));
+  wrap(meAdmin);
+  await screen.findByText("r1", { exact: false });
+  await userEvent.type(screen.getByLabelText("대상 경로 필터"), "growth");
+  await waitFor(() => expect(urls.some((u) => new URL(u).searchParams.get("path") === "growth")).toBe(true));
+  const paths = urls.map((u) => new URL(u).searchParams.get("path")).filter((p) => p !== null);
+  expect(paths).toEqual(["growth"]);
+});
+
+test("한글 조합 중에도 멈추면 묻는다 — 끝의 미완성 자모만 떼고(「이ㄱ」 → 「이」), 마지막 음절이 조합 중이어도(「이관」)", async () => {
+  // 2026-10-25 리뷰(실 Chrome 재현): 한국어 IME 는 마지막 음절을 Space·Enter·blur 전까지 조합 상태로 둔다 -- 조합 중엔
+  // 아예 묻지 않던 예전 가드는 「이관」을 치고 멈춰도 목록을 그대로 뒀다. 여기서는 compositionend 없이 멈춘다.
+  const names: (string | null)[] = [];
+  server.use(http.get("/api/user/requests", ({ request }) => {
+    const p = new URL(request.url).searchParams;
+    if (p.has("batch_name")) names.push(p.get("batch_name"));
+    return HttpResponse.json([row("r1")]);
+  }));
+  wrap(meAdmin);
+  await screen.findByText("r1", { exact: false });
+  const box = screen.getByLabelText("배치 이름 필터");
+  fireEvent.compositionStart(box);
+  fireEvent.change(box, { target: { value: "이ㄱ" } });
+  await waitFor(() => expect(names).toContain("이"));
+  expect(names).not.toContain("이ㄱ");                       // 미완성 자모로는 묻지 않는다(0건 깜빡임)
+  fireEvent.change(box, { target: { value: "이관" } });       // 「관」 은 아직 조합 중 -- compositionend 없음
+  await waitFor(() => expect(names).toContain("이관"));
+  fireEvent.compositionEnd(box);                             // 끝나도 값이 같으면 다시 물을 일이 없다
+  expect(names.filter((n) => n !== "이" && n !== "이관")).toEqual([]);
 });
 
 test("빈 결과는 전용 문구를 보인다", async () => {
@@ -199,6 +249,16 @@ test("필터를 바꾸면 선택이 비워진다(안 보이는 행을 지우는 
   await userEvent.click(box(B));
   expect(bar()).toHaveTextContent("1개 선택됨");
   await userEvent.selectOptions(screen.getByLabelText("연산 필터"), "sync");
+  await waitFor(() => expect(bar()).toHaveTextContent(IDLE));
+});
+
+test("검색어가 적용되면 선택이 비워진다(보이는 결과가 바뀌는 순간 -- 안 보이는 행을 지우는 사고 방지)", async () => {
+  wrapRows(mixed());
+  await ready(B);
+  await userEvent.click(box(B));
+  expect(bar()).toHaveTextContent("1개 선택됨");
+  await userEvent.type(screen.getByLabelText("대상 경로 필터"), "a");
+  // 「목록에서 사라져 뺐습니다」 알림이 아니라 깨끗한 미선택 안내 -- 필터를 바꾼 것은 사용자다.
   await waitFor(() => expect(bar()).toHaveTextContent(IDLE));
 });
 
@@ -497,15 +557,15 @@ test("배치 열(관리자): 이름 링크·이름 없으면 id 12자 링크·�
   const named = within(rowOf(B)).getByRole("link", { name: "e7 배치" });
   expect(named).toHaveAttribute("href", `/admin/batches/${BX}`);
   expect(named.title).toBe(`e7 배치 · ${BX}`);
-  // 폭: 모든 폭에서 6rem 고정(1280 예산 -- 1440px 이상의 12rem 은 대상 열을 HEAD 보다 120px 깎았다, 2026-10-11 검증
-  // 지적). 짧은 이름은 한 줄.
-  for (const cls of ["w-[6rem]", "min-w-[6rem]", "truncate"]) expect(named.className).toContain(cls);
+  // 폭: 모든 폭에서 7.5rem 고정(2026-10-25 사용자 요청 -- 요청 열을 줄인 만큼 넓혔다. 예전 6rem 은 1280 예산이었고,
+  // 1440px 이상의 12rem 은 대상 열을 HEAD 보다 120px 깎았다, 2026-10-11 검증 지적). 짧은 이름은 한 줄.
+  for (const cls of ["w-[7.5rem]", "min-w-[7.5rem]", "truncate"]) expect(named.className).toContain(cls);
   expect(named.className).not.toMatch(/min-\[1440px\]/);
   // 열 폭은 머리칸이 예약한다(내용과 무관 -- 첫 배치 행이 폴링으로 들어와도 표가 다시 배치되지 않는다). 예약 폭 =
-  // 칸 내용 6rem + pr-2 + UA 왼쪽 여백 1px(2026-10-11 검증 지적: 1px 을 빼먹은 6.5rem 은 링크 칸보다 짧아 첫 배치 행이
+  // 칸 내용 7.5rem + pr-2 + UA 왼쪽 여백 1px(2026-10-11 검증 지적: 1px 을 빼먹은 예약은 링크 칸보다 짧아 첫 배치 행이
   // 열을 1px 넓혔다 -- 실폭 동일성은 e2e E7 이 잰다).
   const th = within(screen.getByRole("table")).getAllByRole("columnheader")[2];
-  for (const cls of ["w-[calc(6.5rem_+_1px)]", "min-w-[calc(6.5rem_+_1px)]", "pr-2"]) expect(th.className).toContain(cls);
+  for (const cls of ["w-[calc(8rem_+_1px)]", "min-w-[calc(8rem_+_1px)]", "pr-2"]) expect(th.className).toContain(cls);
   const unnamed = within(rowOf(C)).getByRole("link", { name: BY.slice(0, 12) });
   expect(unnamed).toHaveAttribute("href", `/admin/batches/${BY}`);
   expect(unnamed.className).toContain("font-mono");
@@ -528,7 +588,7 @@ test("배치 열(관리자): 이름 링크·이름 없으면 id 12자 링크·�
 test("긴 배치 이름은 끝(가르는 부분)을 늘 보인다 -- 앞 조각 말줄임 + 뒤 조각의 두 줄(모든 폭)", async () => {
   // 2026-10-11 검증 지적: 두 줄 line-clamp 는 「2026-10 프로젝트 A 아카이브 이관(1차)」·「…(2차)」를 둘 다 「2026-10 /
   // 프로젝트 A…」로 보여 구별하지 못했다(그 열의 목적이 식별이다). 넓은 화면의 한 줄(12rem flex)은 대상 열을 깎아 단일
-  // 작업 행을 HEAD 보다 높였다(같은 날 검증 지적) -- 모든 폭에서 6rem 두 줄이다.
+  // 작업 행을 HEAD 보다 높였다(같은 날 검증 지적) -- 모든 폭에서 고정 폭(지금 7.5rem) 두 줄이다.
   wrapRows([row(A), child(B, BX, { batch_name: "2026-10 프로젝트 A 아카이브 이관(1차)" }),
             child(C, BY, { batch_name: "2026-10 프로젝트 A 아카이브 이관(2차)" })]);
   await ready(A);
@@ -645,18 +705,27 @@ test("비관리자: 배치 열이 없다(머리줄 8칸)", async () => {
   const heads = within(screen.getByRole("table")).getAllByRole("columnheader").map((th) => th.textContent);
   expect(heads).toEqual(["요청", "요청자", "작업", "대상", "우선순위", "상태", "생성(KST)", "갱신(KST)"]);
   expect(screen.queryByRole("link", { name: "e7 배치" })).toBeNull();
-  // 요청 id 칸은 배치 열에 2rem 을 내준 관리자만 8rem -- 배치 열이 없는 일반 사용자는 예전 10rem(2026-10-11 검증 지적).
+  // 요청 id 칸은 배치 열에 자리를 내준 관리자만 좁다(5rem) -- 배치 열이 없는 일반 사용자는 예전 10rem(2026-10-11 검증 지적).
   expect(screen.getByRole("link", { name: A }).className).toContain("max-w-[10rem]");
 });
 
-test("관리자의 요청 id 칸은 6.5rem(배치 열 자리 -- 1280 에서 대상 열이 HEAD 이상)", async () => {
+test("관리자의 요청 id 칸은 5rem -- 줄인 폭을 배치 열(7.5rem)이 받는다(2026-10-25 사용자 요청)", async () => {
   wrapRows([row(A)]);
   await ready(A);
-  expect(screen.getByRole("link", { name: A }).className).toContain("max-w-[6.5rem]");
+  const link = screen.getByRole("link", { name: A });
+  expect(link.className).toContain("max-w-[5rem]");
+  // 보이는 글자는 CSS 로만 자른다 -- DOM 엔 전체 id(e2e 의 hasText 전체-id 매칭), title 도 전체 id.
+  expect(link).toHaveTextContent(A);
+  expect(link.title).toBe(A);
   // 배치 행이 없어도 배치 열 폭은 예약돼 있다(머리칸 고정 폭).
-  const th = within(screen.getByRole("table")).getAllByRole("columnheader")[2];
-  expect(th).toHaveTextContent("배치");
-  expect(th.className).toContain("w-[calc(6.5rem_+_1px)]");
+  const heads = within(screen.getByRole("table")).getAllByRole("columnheader");
+  expect(heads[2]).toHaveTextContent("배치");
+  expect(heads[2].className).toContain("w-[calc(8rem_+_1px)]");
+  // 요청·생성·갱신 머리칸은 w-px -- 열이 내용(링크·시각 글자) 폭에 붙고 남는 폭은 대상 열로 간다(넓은 화면에서 시각
+  // 칸이 170px 로 벌어지던 것, 「생성/갱신 칸을 텍스트에 맞게」).
+  expect(heads[1]).toHaveTextContent("요청");
+  for (const h of [heads[1], heads[heads.length - 2], heads[heads.length - 1]]) expect(h.className).toContain("w-px");
+  expect(heads[heads.length - 2]).toHaveTextContent("생성(KST)");
 });
 
 test("?batch=<id> 이면 그 배치의 작업만 서버에 묻고, 무엇으로 걸렀는지·푸는 버튼을 보인다 -- 바뀌면 선택을 비운다", async () => {
@@ -683,11 +752,12 @@ test("?batch=<id> 이면 그 배치의 작업만 서버에 묻고, 무엇으로 
   // 칩의 잘린 이름은 hover 로 전체를 볼 수 있다(title = 이름 + id -- 2026-10-11 검증 지적: id 만이었다).
   expect(screen.getByText("배치 e7 배치의 작업만").title).toBe(`e7 배치 · ${BX}`);
   // 키보드로 누르면(click detail 0) 칩째 사라진 버튼의 포커스는 <body> 가 아니라 늘 있는 바로 앞 필터로 간다(2026-10-11
-  // 검증 지적 -- 키보드·화면 낭독기 사용자가 자리를 잃었다).
+  // 검증 지적 -- 키보드·화면 낭독기 사용자가 자리를 잃었다). 2026-10-25 부터 칩 바로 앞은 대상 경로 검색칸이다(리뷰 -- 상태
+  // 필터로 보내면 그 사이 검색칸 셋을 다시 지나야 했다).
   screen.getByRole("button", { name: "배치 필터 해제" }).focus();
   await userEvent.keyboard("{Enter}");
   expect(screen.queryByRole("button", { name: "배치 필터 해제" })).toBeNull();
-  expect(document.activeElement).toBe(screen.getByLabelText("상태 필터"));
+  expect(document.activeElement).toBe(screen.getByLabelText("대상 경로 필터"));
   await screen.findByText(A);
   expect(new URL(urls[urls.length - 1]).searchParams.get("batch_id")).toBeNull();
   expect(screen.queryByText("배치 e7 배치의 작업만")).toBeNull();
@@ -701,11 +771,11 @@ test("?batch=<id> 이면 그 배치의 작업만 서버에 묻고, 무엇으로 
   expect(screen.getByText(`배치 ${BZ.slice(0, 12)}의 작업만`).title).toBe(`${BZ.slice(0, 12)} · ${BZ}`);
   // 마우스로 누르면(click detail ≥ 1) 포커스를 옮기지 않는다 -- Chrome 은 프로그램 포커스를 받은 select 에 직전 입력과
   // 무관하게 :focus-visible 링을 그려, 마우스 사용자에게도 상태 필터에 굵은 링이 남았다(2026-10-11 검증 지적).
-  const stateFocus = vi.spyOn(screen.getByLabelText("상태 필터"), "focus");
+  const pathFocus = vi.spyOn(screen.getByLabelText("대상 경로 필터"), "focus");
   await userEvent.click(screen.getByRole("button", { name: "배치 필터 해제" }));
   await waitFor(() => expect(screen.queryByRole("button", { name: "배치 필터 해제" })).toBeNull());
-  expect(document.activeElement).not.toBe(screen.getByLabelText("상태 필터"));
-  expect(stateFocus).not.toHaveBeenCalled();
+  expect(document.activeElement).not.toBe(screen.getByLabelText("대상 경로 필터"));
+  expect(pathFocus).not.toHaveBeenCalled();
 });
 
 test("키보드로 고른 배치가 폴링으로 잠기면 포커스는 <body> 가 아니라 그 행의 요청 링크로 -- 스크롤하지 않는다", async () => {

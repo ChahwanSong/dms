@@ -14,6 +14,7 @@ from ..privileged import privileged_names
 from ..repositories.request_purges import MAX_BATCH_DELETE_CHILDREN
 from ..repositories.storages import storage_open_to_users
 from ..repositories.sync_pairs import sync_pair_allowed
+from ..repositories.text_search import search_tokens
 from .artifacts import ArtifactError, job_owner_uid, read_artifact, strip_scheme
 from .auth import Identity, can_run_as_root, require_admin, require_user
 from .cancel import sweep_after_cancel, terminate_job
@@ -25,6 +26,9 @@ from .routes_scan_paths import (_buckets, _is_number, _numbers,
                                 _time_histograms, _total_bytes)
 
 router = APIRouter()
+
+# 작업 목록 검색칸 한 칸의 길이 상한(2026-10-25) -- 사용량 분석 검색(routes_usage)과 같은 512.
+SEARCH_MAX_LENGTH = 512
 
 
 def reject_when_maintenance(request: Request) -> None:
@@ -183,7 +187,13 @@ def list_requests(request: Request, identity: Identity = Depends(require_user),
                   # enum 강제는 화면 select 가 이미 한다. before 는 무한 스크롤 커서.
                   operation: str | None = Query(None),
                   state: str | None = Query(None),
-                  requester: str | None = Query(None),
+                  # 검색칸(2026-10-25, 「전체 작업」): 셋 다 대소문자를 무시한 부분 일치, 공백으로 나눈 토큰은 AND
+                  # (text_search.search_tokens, RequestsRepository.list docstring). requester(관리자 -- 예전엔 정확 일치,
+                  # 결과는 그 상위집합이라 하위 호환)·batch_name(관리자 -- 배치 이름 또는 6자 이상 id 앞부분)·path(누구나 --
+                  # 화면 「대상」 표기). 길이 상한은 SQL 크기를 묶는다(넘으면 프레임워크 422 -- 사유 코드 흉내 없음, 위 limit 주석).
+                  requester: str | None = Query(None, max_length=SEARCH_MAX_LENGTH),
+                  batch_name: str | None = Query(None, max_length=SEARCH_MAX_LENGTH),
+                  path: str | None = Query(None, max_length=SEARCH_MAX_LENGTH),
                   # 한 배치의 작업만(2026-10-11) -- 배치 상세의 「전체 작업에서 이 배치의 작업 보기」와 배치 기록만
                   # 지워진 묶음 칸이 여기로 온다. 오래된 배치의 작업은 무한 스크롤 수십 쪽 아래라, 배치 단위 삭제가
                   # 불러온 행에서만 시작되는 화면에선 찾을 길이 없었다(검증 지적). 좁히기만 하므로 누구에게나 열어도
@@ -192,10 +202,18 @@ def list_requests(request: Request, identity: Identity = Depends(require_user),
                   before: int | None = Query(None, ge=1)):
     # 비운영자는 requester 를 자기 자신으로 **강제**한다 -- requester 파라미터로
     # 남의 작업을 넓혀 볼 수 없다(격리). 운영자만 requester 필터를 존중한다.
-    req = (requester or None) if identity.role == "admin" else identity.actor
+    # 격리 값은 정확 일치 kwarg(requester_id)로만 넘긴다 -- 부분 일치(requester_like)는 운영자 검색 전용이다. 강제된 값이
+    # LIKE 를 타면 'al' 이 'alice' 의 작업을 본다(RequestsRepository.list docstring). 배치 이름 검색도 운영자만: 비운영자
+    # 응답엔 배치 요약이 없으니(아래) 검색 결과의 있고 없음으로 배치 이름을 캐 보는 길이 된다. 경로 검색은 자기 행 안에서만
+    # 좁히므로 누구에게나 연다.
+    admin = identity.role == "admin"
     repos = request.app.state.repos
     rows = repos.requests.list(
-        requester_id=req, operation=operation, state=state, batch_id=batch_id or None,
+        requester_id=None if admin else identity.actor,
+        requester_like=search_tokens(requester) if admin else None,
+        batch_like=search_tokens(batch_name) if admin else None,
+        path_like=search_tokens(path),
+        operation=operation, state=state, batch_id=batch_id or None,
         before=before, limit=limit)
     # 사용량 분석 지점(성공 scan 잡)을 가진 요청인가(2026-10-09) -- 작업 삭제 확인 창의 사용량 경고가 쓴다. 요청
     # 상태로는 판정할 수 없다: 취소 경합으로 「요청 Cancelled · 잡 Succeeded」가 생기고 사용량 분석은 잡 상태를 본다.
