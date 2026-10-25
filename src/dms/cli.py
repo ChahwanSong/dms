@@ -1,8 +1,18 @@
 import argparse
 import os
+import socket
 import sys
 
 from .config import AgentSettings, Settings, SettingsError
+
+
+def controller_holder(environ=None) -> str:
+    """컨트롤러 루프 리스의 holder(2026-10-25). 파드 이름(HOSTNAME)을 넣는다 -- 이미지 ENTRYPOINT 가 exec 형이라 모든 컨트롤러
+    파드에서 PID 가 1 이고, 예전 holder(f"controller-{pid}")는 롤아웃 중 겹친 두 파드가 같은 holder 라 리스가 서로를 막지 못해
+    같은 루프가 두 벌 돌았다(k8s-inventory 적용은 run 상태 CAS 로 멱등하지만, 리스가 제 역할을 해야 한다)."""
+    env = os.environ if environ is None else environ
+    host = (env.get("HOSTNAME") or "").strip() or socket.gethostname()
+    return f"controller-{host}-{os.getpid()}"
 
 
 def main(argv=None) -> int:
@@ -62,7 +72,7 @@ def main(argv=None) -> int:
         # 모듈 속성으로 호출한다 -- 테스트가 monkeypatch 로 배선을 스파이할 수
         # 있어야 하고, from-import 로 묶으면 그 시점에 이름이 고정돼 안 통한다.
         wiring.wire_reconnect_event(db, repos)
-        holder = f"controller-{os.getpid()}"
+        holder = controller_holder()
         identity_resolver = build_identity_resolver(settings)
         execution_adapter = build_execution_adapter(settings, repos)
         build_runner = build_build_runner(settings, repos)

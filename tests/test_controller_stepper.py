@@ -21,6 +21,9 @@ class _Settings:
     vcjob_ttl_seconds = 86400
     pod_gc_after_seconds = 3600
     pod_gc_interval_seconds = 600
+    # 2026-10-25 k8s-inventory 루프·동기화 이력 보존(build_loops 가 읽는다).
+    k8s_inventory_interval_seconds = 10
+    k8s_sync_run_retention_days = 30
 
 
 def _seed_storage(repos, name):
@@ -36,7 +39,7 @@ def test_stepper_loop_registered_second(db):
     loops = build_loops(_Settings(), Repositories(db))
     assert [l.name for l in loops] == [
         "planner", "job-stepper", "storage-reconciler", "retention",
-        "batch-orchestrator", "pod-gc", "artifact-base-check"]
+        "batch-orchestrator", "pod-gc", "artifact-base-check", "k8s-inventory"]
     assert loops[1].interval_seconds == 5
 
 

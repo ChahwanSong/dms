@@ -15,7 +15,8 @@ def test_build_loops_names_and_intervals(db, settings):
         ("retention", settings.retention_interval_seconds),
         ("batch-orchestrator", settings.batch_orchestrator_interval_seconds),
         ("pod-gc", settings.pod_gc_interval_seconds),
-        ("artifact-base-check", settings.reconcile_interval_seconds)]
+        ("artifact-base-check", settings.reconcile_interval_seconds),
+        ("k8s-inventory", settings.k8s_inventory_interval_seconds)]
 
 
 def test_artifact_base_check_loop_actually_writes_the_check_row(db, settings):

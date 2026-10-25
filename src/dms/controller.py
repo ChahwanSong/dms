@@ -11,6 +11,7 @@ from .config import Settings
 from .db import utc_now_iso
 from .domain import DataJobState
 from .execution import StubExecutionAdapter
+from .k8s_inventory import prune_runs_once, run_inventory_once
 from .planner import Planner
 from .pod_gc import PodGarbageCollector
 from .reconciler import reconcile_storages_once
@@ -71,6 +72,8 @@ def build_loops(settings: Settings, repos: Repositories, *, identity_resolver=No
         # (새 루프를 만들지 않는다).
         prune_agent_reports_once(repos, retention_days=settings.agent_report_retention_days)
         prune_events_once(repos, retention_days=settings.event_retention_days)
+        # k8s 동기화 이력(2026-10-25): 보존일보다 오래된 종단 run. 클러스터별 최근 50건·마지막 성공 run 은 남긴다.
+        prune_runs_once(repos, retention_days=settings.k8s_sync_run_retention_days)
 
     loops = [
         Loop("planner", settings.planner_interval_seconds,
@@ -88,6 +91,10 @@ def build_loops(settings: Settings, repos: Repositories, *, identity_resolver=No
         # "증거 신선도" 계열이고 운영자가 따로 튜닝할 값이 아니다.
         Loop("artifact-base-check", settings.reconcile_interval_seconds,
              lambda: controller_check_once(repos, settings)),
+        # k8s 인벤토리(2026-10-25 dms-k8s 설계 §4.5, k8s_inventory.py): 에이전트가 올린 동기화 결과의 적용·기한 만료·지운
+        # 클러스터 정리. DB 전용(외부 API 를 부르지 않는다) -- 틱 예산 10초 < 리스 max(10*3, 30)=30초.
+        Loop("k8s-inventory", settings.k8s_inventory_interval_seconds,
+             lambda: run_inventory_once(repos, settings)),
     ]
     # build_runner가 없으면(stub조차 배선되지 않은 기존 호출자) 루프를 아예 넣지 않는다 --
     # None을 넘겨 매 틱마다 AttributeError로 죽게 두지 않기 위해서다.

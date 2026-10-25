@@ -1,5 +1,11 @@
-"""에이전트 러너: 프로브 → POST → 응답으로 설정 갱신. DB를 모르는 순수 HTTP 클라이언트."""
+"""에이전트 러너: 프로브 → POST → 응답으로 설정 갱신. DB를 모르는 순수 HTTP 클라이언트.
+
+k8s 인벤토리 워커(2026-10-25 dms-k8s 설계 §4): 보고 루프와 **분리된** 데몬 스레드(K8sSyncWorker). 보고 응답의 k8s_sync.role 이
+primary·secondary 인 동안만 claim 을 폴링해 외부 k8s API 를 부르고(agent/k8s_fetch.py) 결과를 올린다. 수십 초짜리 목록 조회가
+보고 루프 안에 있으면 노드 보고가 늦어져 stale 이 되고 storages.status·페일오버 판정까지 오염된다(reconciler).
+"""
 import sys
+import threading
 import time
 from typing import Callable, Optional
 
@@ -8,6 +14,7 @@ import httpx
 from ..config import AGENT_TOOL_NAMES, AgentSettings
 from ..db import utc_now_iso
 from .directory import NslcdDirectory
+from .k8s_fetch import fetch_inventory
 from .probes import (CPU_COUNTER_KEYS, probe_artifact_base, probe_identities, probe_k8s_node,
                      probe_mounts, probe_os_metrics, probe_tools)
 
@@ -89,7 +96,7 @@ def build_report(node_name, storages, probe_targets, *, mountinfo_text,
                  net_dev_path="/proc/net/dev", virtual_net_path="",
                  artifact_base_path=None, artifact_base_fn=None,
                  host_root="", self_mountinfo_text="", directory_status=None,
-                 k8s_node_fn=None) -> dict:
+                 k8s_node_fn=None, k8s_sync_status=None) -> dict:
     mounts_fn = mounts_fn or probe_mounts
     tools_fn = tools_fn or probe_tools
     identities_fn = identities_fn or probe_identities
@@ -127,15 +134,131 @@ def build_report(node_name, storages, probe_targets, *, mountinfo_text,
     # 값은 비밀 없는 적용 상태(해시·출처·bind 모드·오류)다.
     if directory_status is not None:
         report["directory"] = directory_status
+    # k8s 인벤토리 워커(2026-10-25): 워커 스레드가 있는 에이전트만 싣는다 -- {"v": 1} 이 곧 능력 선언이다(서버는 선언한
+    # 노드에게만 run·클러스터 토큰을 준다). 값은 비밀 없는 워커 상태(idle/running, 진행 중 run, 마지막 결과).
+    if k8s_sync_status is not None:
+        report["k8s_sync"] = k8s_sync_status
     return report
+
+
+class K8sSyncWorker:
+    """k8s 인벤토리 동기화 워커(데몬 스레드). 역할(role)은 보고 응답이 정한다 -- None 이면 쉬고, primary·secondary 면
+    poll_seconds 마다 POST /api/agent/k8s-sync/claim. run 을 받으면 fetch_inventory 로 처리해 결과를 올리고 **바로 다시**
+    claim 한다(여러 클러스터는 직렬). 토큰은 run 처리 동안만 메모리에 있다 -- 로그에는 예외 유형만 남긴다."""
+
+    CLAIM_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
+    RESULT_TIMEOUT = httpx.Timeout(60.0, connect=5.0)
+
+    def __init__(self, settings: AgentSettings, *, client_factory: Optional[Callable[[], httpx.Client]] = None,
+                 fetch=fetch_inventory):
+        self._settings = settings
+        self._client_factory = client_factory or (lambda: httpx.Client(base_url=settings.api_url))
+        self._fetch = fetch
+        self._lock = threading.Lock()
+        self._role: Optional[str] = None
+        self._poll = 15
+        self._wake = threading.Event()
+        self._stop = threading.Event()
+        self._state = "idle"
+        self._run_id: Optional[str] = None
+        self._last: Optional[dict] = None
+        self._thread: Optional[threading.Thread] = None
+
+    @property
+    def role(self) -> Optional[str]:
+        with self._lock:
+            return self._role
+
+    def configure(self, block) -> None:
+        """보고·claim 응답의 k8s_sync({role, poll_seconds}) 반영. 모양이 틀리면 역할 없음(쉰다 -- 더 좁은 쪽)."""
+        role = block.get("role") if isinstance(block, dict) else None
+        poll = block.get("poll_seconds") if isinstance(block, dict) else None
+        with self._lock:
+            was = self._role
+            self._role = role if role in ("primary", "secondary") else None
+            if isinstance(poll, int) and not isinstance(poll, bool) and poll >= 1:
+                self._poll = poll
+            now_role = self._role
+        if now_role is not None and was is None:
+            self._wake.set()          # 방금 지정됐다 -- 다음 폴 주기를 기다리지 않는다
+
+    def status(self) -> dict:
+        with self._lock:
+            return {"v": 1, "worker": self._state, "role": self._role, "run_id": self._run_id,
+                    "last": dict(self._last) if self._last else None}
+
+    def _headers(self) -> dict:
+        return {"Authorization": f"Bearer {self._settings.shared_token}",
+                "x-dms-actor": f"node:{self._settings.node_name}"}
+
+    def run_cycle(self, client: httpx.Client) -> bool:
+        """claim 한 번 → run 이 있으면 처리·결과 POST. 처리했으면 True(곧바로 다음 claim)."""
+        resp = client.post("/api/agent/k8s-sync/claim", json={"node_name": self._settings.node_name},
+                           headers=self._headers(), timeout=self.CLAIM_TIMEOUT)
+        resp.raise_for_status()
+        body = resp.json()
+        if not isinstance(body, dict):
+            raise ValueError("non-dict claim response")
+        self.configure(body)
+        run = body.get("run")
+        if not isinstance(run, dict) or not isinstance(run.get("run_id"), str):
+            return False
+        run_id = run["run_id"]
+        with self._lock:
+            self._state, self._run_id = "running", run_id
+        try:
+            result = self._fetch(run)
+            result["node_name"] = self._settings.node_name
+            posted = client.post(f"/api/agent/k8s-sync/runs/{run_id}", json=result, headers=self._headers(),
+                                 timeout=self.RESULT_TIMEOUT)
+            delivered = posted.status_code
+            with self._lock:
+                self._last = {"run_id": run_id, "cluster": run.get("cluster"), "ok": bool(result.get("ok")),
+                              "reason": result.get("reason"), "at": utc_now_iso(), "delivered": delivered}
+            if delivered >= 400:
+                print(f"k8s sync result rejected run={run_id} status={delivered}", file=sys.stderr)
+        finally:
+            run.clear()                # 토큰을 들고 있지 않는다
+            with self._lock:
+                self._state, self._run_id = "idle", None
+        return True
+
+    def _loop(self) -> None:
+        with self._client_factory() as client:
+            while not self._stop.is_set():
+                if self.role is None:
+                    self._wake.wait(self._poll)
+                    self._wake.clear()
+                    continue
+                try:
+                    processed = self.run_cycle(client)
+                except Exception as exc:  # noqa: BLE001 -- 워커는 죽지 않는다; 메시지는 찍지 않는다(토큰 노출 방지)
+                    print(f"k8s sync worker cycle failed: {type(exc).__name__}", file=sys.stderr)
+                    processed = False
+                if not processed:
+                    self._wake.wait(self._poll)
+                    self._wake.clear()
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._loop, name="dms-k8s-sync", daemon=True)
+        self._thread.start()
+
+    def stop(self, timeout: float = 5.0) -> None:
+        self._stop.set()
+        self._wake.set()
+        if self._thread is not None:
+            self._thread.join(timeout)
 
 
 class AgentRunner:
     def __init__(self, settings: AgentSettings, client: httpx.Client,
-                 directory: Optional[NslcdDirectory] = None):
+                 directory: Optional[NslcdDirectory] = None,
+                 k8s_worker: Optional[K8sSyncWorker] = None):
         self._settings = settings
         self._client = client
         self._directory = directory or NslcdDirectory(managed=settings.nslcd_managed)
+        # k8s 인벤토리 워커(2026-10-25) -- run_loop 가 상주 모드에서만 만든다(--once 엔 없다 = 능력 미선언).
+        self._k8s_worker = k8s_worker
         # 직전 /proc/stat 카운터(cpu_utilisation 의 prev). 프로세스 메모리에만 둔다 -- 재시작 직후 첫 보고는
         # 사용률 None(모름)이고 다음 보고부터 채워진다. state(응답에서 다시 짓는 설정 묶음)에 섞지 않는 이유:
         # 보고 실패 시 run_once 가 옛 state 를 그대로 돌려주므로 거기 두면 표본이 갱신되지 않는다.
@@ -174,7 +297,9 @@ class AgentRunner:
                               artifact_base_path=state.get("artifact_base_path"),
                               host_root=self._settings.host_root,
                               self_mountinfo_text=self_mountinfo_text,
-                              directory_status=self._directory.report())
+                              directory_status=self._directory.report(),
+                              k8s_sync_status=(self._k8s_worker.status()
+                                               if self._k8s_worker is not None else None))
         self._attach_cpu_utilisation(report)
         report["k8s_node"], self._node_cpu_last = carry_node_cpu(self._node_cpu_last, report.get("k8s_node"))
         try:
@@ -215,21 +340,29 @@ class AgentRunner:
                 self._directory.apply(body["directory"])
             except Exception as exc:  # noqa: BLE001 -- apply 는 원래 안 던진다; 최후 방어
                 print(f"agent directory apply failed: {type(exc).__name__}", file=sys.stderr)
+        # k8s 동기화 역할(2026-10-25): 응답에 키가 없으면(옛 서버) 역할 없음 -- 지정되지 않은 것으로 본다.
+        if self._k8s_worker is not None:
+            self._k8s_worker.configure(body.get("k8s_sync"))
         return new_state
 
 
 def run_loop(settings: AgentSettings, *, once: bool = False,
-            client_factory: Optional[Callable[[], httpx.Client]] = None) -> None:
+            client_factory: Optional[Callable[[], httpx.Client]] = None,
+            worker_client_factory: Optional[Callable[[], httpx.Client]] = None) -> None:
     state = {"storages": [], "probe_targets": [],
              "interval": settings.interval_seconds, "artifact_base_path": None}
     if client_factory is None:
         client_factory = lambda: httpx.Client(base_url=settings.api_url, timeout=10.0)
     with client_factory() as client:
-        runner = AgentRunner(settings, client)
         if once:
+            runner = AgentRunner(settings, client)
             state = runner.run_once(state)   # 부트스트랩 사이클: 빈 상태로 설정(storages) 수신
             runner.run_once(state)           # 본 사이클: 받은 storages로 실제 프로브
             return
+        # 상주 모드에서만 k8s 동기화 워커를 띄운다(자기 HTTP 클라이언트 -- 보고 클라이언트의 10초 타임아웃과 분리).
+        worker = K8sSyncWorker(settings, client_factory=worker_client_factory)
+        worker.start()
+        runner = AgentRunner(settings, client, k8s_worker=worker)
         while True:
             state = runner.run_once(state)
             time.sleep(max(1, int(state["interval"])))

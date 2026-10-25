@@ -17,6 +17,9 @@ class _Settings:
     pod_gc_after_seconds = 3600
     vcjob_ttl_seconds = 86400
     pod_gc_interval_seconds = 600
+    # 2026-10-25 k8s-inventory 루프·동기화 이력 보존(build_loops 가 읽는다).
+    k8s_inventory_interval_seconds = 10
+    k8s_sync_run_retention_days = 30
     # 슬라이스 18: artifact-base-check 루프가 이 값을 읽는다. 없으면 루프가 매 틱
     # AttributeError 로 죽는데 run_all_once 가 루프별로 격리하므로 테스트는 조용히
     # 초록을 유지한다 -- 그래서 여기에 명시한다.
@@ -29,7 +32,7 @@ def test_planner_loop_registered_first(db):
     assert loops[0].interval_seconds == 10
     assert {l.name for l in loops} == {"planner", "job-stepper", "storage-reconciler",
                                        "retention", "batch-orchestrator", "pod-gc",
-                                       "artifact-base-check"}
+                                       "artifact-base-check", "k8s-inventory"}
 
 
 def test_planner_loop_runs_end_to_end(db):

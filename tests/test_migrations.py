@@ -587,12 +587,16 @@ def test_migrate_creates_exactly_the_expected_tables(tmp_path):
     # scan_report_digests(2026-10-02): 사용량 분석의 scan 리포트 요약 캐시(잡 단위, 불변 리포트의 투영).
     # node_exclusions(2026-10-02): 관리자 노드 배치 제외 목록(행 = 제외 중).
     # request_purges(2026-10-08): 요청 삭제의 정리 아웃박스(행 = k8s·아티팩트 정리 대기).
+    # k8s_*(2026-10-25 dms-k8s RBAC·PV 설계 §3): 외부 k8s 클러스터 등록·동기화 이력·스냅숏 4표·SC 매핑 + 호출 노드 설정.
     assert actual == set(ALL_TABLES) | {"batches", "batch_items",
                                         "schema_migrations",
                                         "verification_codes", "sync_pairs",
                                         "mail_settings", "verification_failures",
                                         "scan_report_digests", "node_exclusions",
-                                        "request_purges"}
+                                        "request_purges",
+                                        "k8s_sync_settings", "k8s_clusters", "k8s_sync_runs",
+                                        "k8s_storage_classes", "k8s_pvs", "k8s_pvcs",
+                                        "k8s_role_bindings", "k8s_storage_class_maps"}
 
 
 def test_migrate_creates_exactly_the_expected_indexes(tmp_path):
@@ -621,6 +625,9 @@ def test_migrate_creates_exactly_the_expected_indexes(tmp_path):
         "idx_data_jobs_gc",
         # 2026-10-20 사용량 분석 스토리지별 조회(storage_name, state, operation, target, updated_at).
         "idx_data_jobs_scan_target",
+        # 2026-10-25 k8s 인벤토리: 동기화 이력(클러스터·상태·노드별)·PVC 의 볼륨 역조회·사용자별 바인딩.
+        "idx_k8s_sync_runs_cluster", "idx_k8s_sync_runs_status", "idx_k8s_sync_runs_node",
+        "idx_k8s_pvcs_volume", "idx_k8s_role_bindings_user",
     }
 
 
@@ -729,6 +736,10 @@ _V1_COLUMNS = {
                "finished_at"},
     "releases": {"id", "component", "image", "tag", "digest", "state", "actor",
                  "applied_at"},
+    # 2026-10-25 편입(dms-k8s 설계 §3 -- storages.kind 추가 때): v1 storages 는 user_enabled 이전 모양이다(그 컬럼은
+    # 2026-09-30 에 이중 경로로 태어났다 -- ensure 목록에 있다).
+    "storages": {"storage_name", "mount_path", "managed_root", "backend_type", "enabled",
+                 "status", "status_detail", "created_at", "updated_at", "updated_by"},
 }
 
 
@@ -742,7 +753,7 @@ def test_every_post_v1_column_rides_both_migration_paths(tmp_path):
     db = Database.connect(f"sqlite:///{tmp_path}/t.db")
     migrate(db)
     pairs = _ensure_pairs()
-    assert len(pairs) == 44      # 추출 자기 검증 -- 0 매치면 등식이 공허해진다(프록시 3 + 호스트 네트워크 1 + CA 1 + storages.user_enabled 1 + portal_subtitle 1 + batches.preview_round 1 + batches.auto_confirm_by 1 + accounts.root_granted 1 + data_jobs.pods_gc_at 1)
+    assert len(pairs) == 46      # 추출 자기 검증 -- 0 매치면 등식이 공허해진다(프록시 3 + 호스트 네트워크 1 + CA 1 + storages.user_enabled 1 + portal_subtitle 1 + batches.preview_round 1 + batches.auto_confirm_by 1 + accounts.root_granted 1 + data_jobs.pods_gc_at 1 + storages.kind 1 + requests.target_label 1)
     for table, v1 in _V1_COLUMNS.items():
         cols = {r["name"] for r in db.query(f"PRAGMA table_info({table})")}
         ensured = {c for t, c, _ in pairs if t == table}
@@ -759,7 +770,7 @@ def test_ensure_columns_types_match_create_declarations(tmp_path):
     pairs = _ensure_pairs()
     # 추출 자기 검증을 이 테스트에도 둔다 -- 위 등식 테스트가 지워지거나 홀로
     # 실행될 때 정규식이 0 매치면 아래 루프가 공허하게 통과하기 때문이다.
-    assert len(pairs) == 44
+    assert len(pairs) == 46
     for table, column, coltype in pairs:
         assert _declared_type(db, table, column) == coltype, (table, column)
 
@@ -824,3 +835,53 @@ def test_preview_summary_is_declared_in_the_create_table_block():
     assert block is not None
     sql = re.sub(r"--[^\n]*", "", block.group(0))
     assert re.search(r"^\s*preview_summary\s+TEXT\s*,\s*$", sql, re.M)
+
+
+def test_migrate_adds_k8s_columns_to_existing_storages_and_requests(db):
+    # dms-k8s(2026-10-25 설계 §3): storages.kind(D11)·requests.target_label(D17) -- 기배포 DB 는 CREATE 를 다시 안 타므로
+    # _ensure_columns 가 보태야 한다(슬라이스 14 의 실 500 교훈). 기존 행은 NULL(= filesystem / 표기 없음)로 남는다.
+    db.execute("DROP TABLE storages")
+    db.execute("""CREATE TABLE storages (storage_name TEXT PRIMARY KEY, mount_path TEXT NOT NULL,
+        managed_root TEXT NOT NULL, backend_type TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
+        user_enabled INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL DEFAULT 'Unknown', status_detail TEXT,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL, updated_by TEXT NOT NULL)""")
+    db.execute("""INSERT INTO storages (storage_name, mount_path, managed_root, backend_type, created_at,
+        updated_at, updated_by) VALUES ('s1', '/m', '/m/d', 'cephfs', 't', 't', 'x')""")
+    db.execute("DROP TABLE requests")
+    db.execute("""CREATE TABLE requests (request_id TEXT PRIMARY KEY,
+        commit_order INTEGER NOT NULL UNIQUE, operation TEXT NOT NULL,
+        requester_id TEXT NOT NULL, actor TEXT NOT NULL, resource_key TEXT NOT NULL,
+        priority TEXT NOT NULL DEFAULT 'mid', payload TEXT NOT NULL, state TEXT NOT NULL,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL, batch_id TEXT, auth_method TEXT)""")
+    from dms.migrations import _column_exists, migrate
+    migrate(db)
+    migrate(db)                                     # 멱등
+    assert _column_exists(db, "storages", "kind") and _column_exists(db, "requests", "target_label")
+    assert _declared_type(db, "storages", "kind") == "TEXT"
+    assert _declared_type(db, "requests", "target_label") == "TEXT"
+    assert db.query_one("SELECT kind FROM storages WHERE storage_name = 's1'")["kind"] is None
+
+
+def test_k8s_columns_are_declared_in_the_create_table_blocks():
+    # 신규 DB 에선 CREATE 누락을 _ensure_columns 가 흡수해 PRAGMA 로는 두 경로를 구분할 수 없다(diag_logs 와 같은 이유) --
+    # CREATE 쪽 선언은 소스로 고정한다.
+    import inspect
+    import re
+    from dms import migrations
+    src = inspect.getsource(migrations._apply_migrations)
+    for table, column in (("storages", "kind"), ("requests", "target_label")):
+        block = re.search(rf'CREATE TABLE IF NOT EXISTS {table} \(.*?"""', src, re.S)
+        assert block is not None, table
+        sql = re.sub(r"--[^\n]*", "", block.group(0))
+        assert re.search(rf"^\s*{column}\s+TEXT\)", sql, re.M), (table, column)
+
+
+def test_k8s_tables_carry_no_request_or_job_reference_columns(tmp_path):
+    # 요청 삭제 그물(test_request_delete_covers_every_reference_table)은 request_id·job_id·entity_id 이름의 컬럼만 본다 --
+    # k8s 인벤토리는 요청·잡을 가리키지 않으므로 그 이름을 쓰지 않는다(쓰면 삭제 목록 결정이 필요해진다).
+    db = Database.connect(f"sqlite:///{tmp_path}/t.db")
+    migrate(db)
+    for table in ("k8s_sync_settings", "k8s_clusters", "k8s_sync_runs", "k8s_storage_classes", "k8s_pvs",
+                  "k8s_pvcs", "k8s_role_bindings", "k8s_storage_class_maps"):
+        cols = {r["name"] for r in db.query(f"PRAGMA table_info({table})")}
+        assert cols and not cols & {"request_id", "job_id", "entity_id"}, table

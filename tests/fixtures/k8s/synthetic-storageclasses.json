@@ -1,0 +1,18 @@
+{
+  "kind": "StorageClassList",
+  "apiVersion": "storage.k8s.io/v1",
+  "metadata": {"resourceVersion": "4714"},
+  "items": [
+    {"metadata": {"name": "tb-nfs"}, "provisioner": "nfs.csi.k8s.io",
+     "parameters": {"server": "10.10.10.1", "share": "/data/k8s_pv/nfs",
+                    "subDir": "${pvc.metadata.namespace}/${pvc.metadata.name}", "onDelete": "retain"},
+     "reclaimPolicy": "Retain", "volumeBindingMode": "Immediate", "mountOptions": ["nfsvers=4.2"]},
+    {"metadata": {"name": "tb-gpfs"}, "provisioner": "nfs.csi.k8s.io",
+     "parameters": {"server": "10.10.10.1", "share": "/data/k8s_pv/gpfs",
+                    "subDir": "${pv.metadata.name}/${pv.metadata.name}-data", "onDelete": "retain"},
+     "reclaimPolicy": "Retain", "volumeBindingMode": "Immediate", "mountOptions": ["nfsvers=4.2"]},
+    {"metadata": {"name": "tb-onefs"}, "provisioner": "nfs.csi.k8s.io",
+     "parameters": {"server": "10.10.10.1", "share": "/data/k8s_pv/onefs/data/csi", "onDelete": "retain"},
+     "reclaimPolicy": "Retain", "volumeBindingMode": "Immediate"}
+  ]
+}

@@ -387,6 +387,36 @@ export const REASON_MESSAGES: Record<string, string> = {
   purge_target_still_present: "삭제한 요청의 기록이 DB 에 다시 있어 정리를 멈췄습니다 — 운영자 확인이 필요합니다",
   purge_row_invalid: "정리 대기 기록의 내용이 올바르지 않아 정리를 멈췄습니다 — 운영자 확인이 필요합니다",
   purge_failed: "결과 정리 중 예기치 못한 오류가 났습니다 — 자동으로 다시 시도합니다",
+  // k8s 연동(2026-10-25 dms-k8s 설계 §4.2): 동기화 실패 사유(에이전트가 보고 -- 동기화 이력·클러스터 카드)·상태 사유와
+  // 관리 라우트(/api/admin/k8s/*)의 거절 사유. storage_has_sc_mappings·denylist_group_unsupported 는 다음 슬라이스(스토리지
+  // 종류 변경·그룹 규칙)가 낸다. reasonCodes.json 과 같은 커밋.
+  k8s_sync_dns_failed: "API 서버 이름을 찾지 못했습니다(DNS) — 에이전트 파드는 노드의 /etc/hosts 를 보지 못합니다. API 서버 주소를 IP 로 넣고 「TLS 서버 이름」에 인증서의 도메인을 적으세요",
+  k8s_sync_unreachable: "호출 노드에서 API 서버에 연결하지 못했습니다 — 대상 API 서버 방화벽에 호출 노드 IP 가 허용됐는지, 주소·포트가 맞는지 확인하세요",
+  k8s_sync_tls_failed: "API 서버 인증서를 검증하지 못했습니다 — 클러스터 CA(PEM)를 붙여 넣거나, IP 로 접속한다면 「TLS 서버 이름」에 인증서의 이름을 적으세요(「검증 안 함」은 마지막 수단)",
+  k8s_sync_unauthorized: "API 서버가 토큰을 거부했습니다(401) — 토큰이 만료됐거나 지워졌습니다. 장기 토큰을 다시 발급해 클러스터 편집에서 넣으세요",
+  k8s_sync_forbidden: "토큰에 목록 조회 권한이 없습니다(403) — 대상 클러스터의 읽기 전용 ClusterRole(rolebindings·persistentvolumeclaims·persistentvolumes·storageclasses list)과 그 바인딩을 확인하세요",
+  k8s_sync_timeout: "동기화가 제한 시간 안에 끝나지 않았습니다 — API 서버 응답이 느리거나 목록이 너무 큽니다. 잠시 뒤 다시 시도하고, 계속되면 API 서버 상태를 확인하세요",
+  k8s_sync_list_expired: "목록을 받는 동안 API 서버의 이어받기 토큰이 만료됐습니다(410) — 다음 주기에 자동으로 다시 받습니다. 계속되면 API 서버(etcd) 부하를 확인하세요",
+  k8s_sync_too_large: "가져온 인벤토리가 크기 상한을 넘었습니다 — 운영자가 DMS_K8S_SYNC_MAX_BYTES(기본 32MiB)를 늘려야 합니다",
+  k8s_sync_bad_response: "API 서버 응답을 해석하지 못했습니다 — 주소가 k8s API 서버인지(프록시·로그인 페이지가 아닌지) 확인하세요",
+  k8s_sync_expired: "호출 노드가 기한 안에 결과를 올리지 못했습니다 — 그 노드의 DMS 에이전트 상태를 확인하세요(primary 였다면 secondary 가 대신 시도합니다)",
+  k8s_sync_no_node: "k8s API 를 부를 호출 노드가 지정되지 않았습니다 — k8s 연동 → 개요에서 primary·secondary 노드를 고르세요",
+  k8s_sync_token_missing: "API 토큰이 없습니다 — 클러스터 편집에서 토큰을 넣으세요",
+  k8s_sync_token_unreadable: "저장된 토큰을 열 수 없습니다(세션 시크릿이 바뀜) — 클러스터 편집에서 토큰을 다시 넣으세요",
+  k8s_sync_apply_failed: "가져온 인벤토리를 저장하지 못했습니다 — 이전 정보가 그대로 쓰입니다. 다음 주기에 다시 시도하며, 계속되면 컨트롤러 로그를 확인하세요",
+  k8s_cluster_exists: "같은 이름의 클러스터가 이미 있습니다 — 다른 이름을 쓰세요",
+  k8s_cluster_not_found: "클러스터를 찾을 수 없습니다 — 목록을 새로 고친 뒤 다시 시도하세요",
+  invalid_k8s_cluster_name: "클러스터 이름은 영문 소문자·숫자·하이픈 1~63자여야 합니다(처음과 끝은 영문 소문자·숫자)",
+  invalid_k8s_api_server: "API 서버 주소는 https://호스트[:포트] 꼴이어야 합니다(경로·쿼리 없이) — 「TLS 서버 이름」도 도메인 또는 IP 만 적으세요",
+  k8s_ca_invalid: "CA 인증서를 읽을 수 없습니다 — PEM(-----BEGIN CERTIFICATE-----) 또는 kubeconfig 의 certificate-authority-data(base64) 값을 그대로 붙여 넣으세요",
+  k8s_token_required: "API 토큰을 입력하세요 — API 서버 주소를 바꿀 때도 토큰을 다시 넣어야 합니다(공백·줄바꿈이 섞인 값은 받지 않습니다)",
+  invalid_k8s_sync_settings: "호출 노드·주기 설정이 올바르지 않습니다 — 주기는 60초 이상이고, primary 와 secondary 는 서로 다른 노드여야 합니다",
+  k8s_node_unknown: "보고된 적 없는 노드입니다 — 그 노드의 DMS 에이전트가 동작하는지 노드 화면에서 확인한 뒤 고르세요",
+  storage_class_not_found: "가져온 인벤토리에 없는 StorageClass 입니다 — 클러스터를 동기화한 뒤 다시 시도하세요",
+  storage_not_pv_capable: "이 스토리지는 PV 를 담는 종류(PV·둘 다)가 아닙니다 — 스토리지 화면에서 종류를 바꾸거나 다른 스토리지를 고르세요",
+  invalid_pv_path_template: "경로 템플릿이 올바르지 않습니다 — managed_root 기준 상대 경로에 {volume}·{pvc}·{namespace}·{storageclass}·{subdir}·{attr:키}·{handle:구분자:번호} 중 하나 이상을 쓰세요(백엔드에 기본 템플릿이 없으면 꼭 적어야 합니다)",
+  storage_has_sc_mappings: "이 스토리지에 StorageClass 가 매핑돼 있어 파일시스템 전용으로 바꿀 수 없습니다 — k8s 연동 → StorageClass 에서 매핑을 먼저 해제하세요",
+  denylist_group_unsupported: "k8s 모드에서는 그룹 규칙을 쓸 수 없습니다(LDAP 그룹이 없습니다) — 사용자 이름 규칙을 쓰세요",
 };
 
 /** 사유 코드를 사용자에게 보일 문구로. 매핑이 없으면 원시 코드를 그대로 돌려준다

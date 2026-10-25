@@ -73,6 +73,32 @@ _SERVER_INT_KEYS = (
     # 어느 하나라도 0 이면 명시적 비활성(api/login_limiter.py).
     ("DMS_LOGIN_RATE_LIMIT_ATTEMPTS", "login_rate_limit_attempts", 10),
     ("DMS_LOGIN_RATE_LIMIT_WINDOW_SECONDS", "login_rate_limit_window_seconds", 60),
+    # k8s 인벤토리 동기화(2026-10-25 dms-k8s 설계 §4·§5). 주기는 env 기본값이고 포탈(k8s 연동 → 개요)에서 바꾼 DB 값
+    # (k8s_sync_settings.interval_seconds)이 이긴다. 매번 전체 list 다(watch 없음). 하한 60.
+    ("DMS_K8S_SYNC_INTERVAL_SECONDS", "k8s_sync_interval_seconds", 300),
+    # 지정 노드 에이전트의 claim 폴링 간격(보고 응답 k8s_sync.poll_seconds 로 내려간다). 「지금 동기화」의 지연 상한이다. 하한 5.
+    ("DMS_K8S_SYNC_POLL_SECONDS", "k8s_sync_poll_seconds", 15),
+    # run 하나의 에이전트 측 기한(claim 응답 deadline_seconds). 서버는 여기에 업로드 유예 30초를 더해 expired 를 판정한다. 하한 10.
+    ("DMS_K8S_SYNC_RUN_DEADLINE_SECONDS", "k8s_sync_run_deadline_seconds", 120),
+    # 목록 한 쪽 크기(?limit=) -- 1..5000.
+    ("DMS_K8S_SYNC_PAGE_LIMIT", "k8s_sync_page_limit", 500),
+    # 투영한 인벤토리 상한(바이트) = 결과 POST 본문 상한. 넘으면 k8s_sync_too_large(에이전트 메모리 256Mi 보호). 하한 1MiB.
+    ("DMS_K8S_SYNC_MAX_BYTES", "k8s_sync_max_bytes", 33554432),
+    # 컨트롤러 k8s-inventory 루프 간격(적용·만료·정리 -- DB 전용). 1 이상.
+    ("DMS_K8S_INVENTORY_INTERVAL_SECONDS", "k8s_inventory_interval_seconds", 10),
+    # 동기화 이력 보존일(클러스터별 최근 50건·마지막 성공 run 은 보존일과 무관하게 남는다). 1 이상.
+    ("DMS_K8S_SYNC_RUN_RETENTION_DAYS", "k8s_sync_run_retention_days", 30),
+)
+
+# k8s 동기화 정수 키의 하한(기동 거부) -- 아래 from_env 가 한 곳에서 검사한다.
+_K8S_INT_FLOORS = (
+    ("DMS_K8S_SYNC_INTERVAL_SECONDS", "k8s_sync_interval_seconds", 60),
+    ("DMS_K8S_SYNC_POLL_SECONDS", "k8s_sync_poll_seconds", 5),
+    ("DMS_K8S_SYNC_RUN_DEADLINE_SECONDS", "k8s_sync_run_deadline_seconds", 10),
+    ("DMS_K8S_SYNC_PAGE_LIMIT", "k8s_sync_page_limit", 1),
+    ("DMS_K8S_SYNC_MAX_BYTES", "k8s_sync_max_bytes", 1048576),
+    ("DMS_K8S_INVENTORY_INTERVAL_SECONDS", "k8s_inventory_interval_seconds", 1),
+    ("DMS_K8S_SYNC_RUN_RETENTION_DAYS", "k8s_sync_run_retention_days", 1),
 )
 # 재시도 설정은 두지 않는다: 상위 스펙에 재시도 요구가 없고, 실패한 rm/sync 를 자동으로
 # 재실행하는 것은 파괴적이다. 재실행은 배치 :rerun-failed 와 사용자 재제출로 한다.
@@ -274,6 +300,14 @@ class Settings:
     # 로그인 감속(2026-09-07): 사용자명·IP 별 창 안 실패 상한. 0 은 명시적 비활성.
     login_rate_limit_attempts: int = 10
     login_rate_limit_window_seconds: int = 60
+    # k8s 인벤토리 동기화(2026-10-25) -- _SERVER_INT_KEYS 의 주석 참고.
+    k8s_sync_interval_seconds: int = 300
+    k8s_sync_poll_seconds: int = 15
+    k8s_sync_run_deadline_seconds: int = 120
+    k8s_sync_page_limit: int = 500
+    k8s_sync_max_bytes: int = 33554432
+    k8s_inventory_interval_seconds: int = 10
+    k8s_sync_run_retention_days: int = 30
 
     @classmethod
     def from_env(cls, environ: Mapping) -> "Settings":
@@ -303,6 +337,12 @@ class Settings:
         if extra["request_purge_interval_seconds"] < 1:
             problems.append("DMS_REQUEST_PURGE_INTERVAL_SECONDS must be >= 1: "
                             f"{environ.get('DMS_REQUEST_PURGE_INTERVAL_SECONDS')!r}")
+        for env_key, field, floor in _K8S_INT_FLOORS:
+            if extra[field] < floor:
+                problems.append(f"{env_key} must be >= {floor}: {environ.get(env_key)!r}")
+        if extra["k8s_sync_page_limit"] > 5000:
+            problems.append("DMS_K8S_SYNC_PAGE_LIMIT must be <= 5000: "
+                            f"{environ.get('DMS_K8S_SYNC_PAGE_LIMIT')!r}")
         artifact_base_allowed_prefixes = _parse_path_prefixes(
             environ, "DMS_ARTIFACT_BASE_ALLOWED_PREFIXES", problems)
         # if problems 검사보다 앞에서 파싱해야 잘못된 값이 조용히 기본값으로 바뀌지 않는다.

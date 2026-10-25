@@ -31,6 +31,7 @@ from .routes_request_purge import router as request_purge_router
 from .routes_jobs import router as jobs_router
 from .routes_artifacts import router as artifacts_router
 from .routes_agent import router as agent_router
+from .routes_k8s import router as k8s_router
 from .routes_nodes import router as nodes_router
 from .routes_policies import router as policies_router
 from .routes_denylist import router as denylist_router
@@ -156,6 +157,7 @@ def create_app(settings: Settings, db: Database, exit_fn=None) -> FastAPI:
     app.include_router(jobs_router)
     app.include_router(artifacts_router)
     app.include_router(agent_router)
+    app.include_router(k8s_router)
     app.include_router(nodes_router)
     app.include_router(policies_router)
     app.include_router(denylist_router)

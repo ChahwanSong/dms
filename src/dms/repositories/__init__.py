@@ -16,6 +16,7 @@ from .mail_settings import MailSettingsRepository
 from .scan_digests import ScanDigestsRepository
 from .node_exclusions import NodeExclusionsRepository
 from .request_purges import RequestPurgesRepository
+from .k8s import K8sRepository
 
 
 class Repositories:
@@ -39,3 +40,4 @@ class Repositories:
         self.scan_digests = ScanDigestsRepository(db)
         self.node_exclusions = NodeExclusionsRepository(db)
         self.request_purges = RequestPurgesRepository(db)
+        self.k8s = K8sRepository(db)

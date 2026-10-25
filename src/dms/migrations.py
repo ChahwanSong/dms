@@ -68,7 +68,10 @@ def _apply_migrations(db: Database) -> None:
             -- 슬라이스 19: 요청을 만든 인증 방식(session/token). planner 가 특권 승격을
             -- session 요청에만 허용하는 심층 방어에 쓴다(설계 §2.2-2). 기존 행/기본은
             -- token(비특권) -- 승격은 명시적으로 session 일 때만.
-            auth_method TEXT)""",
+            auth_method TEXT,
+            -- 사람이 읽는 대상 표기(2026-10-25 dms-k8s D17). PV 주소로 낸 요청이면 「PV 이름 — ns (sc) / 하위경로」,
+            -- 직접 경로(raw)면 NULL -- 표시·작업 목록 경로 검색용일 뿐 실행 경로(resource_key·payload)와 무관하다.
+            target_label TEXT)""",
         "CREATE INDEX IF NOT EXISTS idx_requests_resource ON requests (resource_key, commit_order)",
         "CREATE INDEX IF NOT EXISTS idx_requests_requester ON requests (requester_id, commit_order)",
         "CREATE INDEX IF NOT EXISTS idx_requests_state ON requests (state, commit_order)",
@@ -274,7 +277,9 @@ def _apply_migrations(db: Database) -> None:
             status_detail TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
-            updated_by TEXT NOT NULL)""",
+            updated_by TEXT NOT NULL,
+            -- 스토리지 종류(2026-10-25 dms-k8s D11): 'filesystem' | 'pv' | 'both'. NULL = filesystem(종전 동작).
+            kind TEXT)""",
         """CREATE TABLE IF NOT EXISTS policies (
             tool TEXT PRIMARY KEY,
             max_nodes INTEGER NOT NULL,
@@ -407,6 +412,136 @@ def _apply_migrations(db: Database) -> None:
             reason TEXT,
             created_by TEXT NOT NULL,
             created_at TEXT NOT NULL)""",
+        # --- k8s 인벤토리(2026-10-25 dms-k8s RBAC·PV 설계 §3, repositories/k8s.py) ---
+        # 외부 k8s 클러스터의 RoleBinding·PVC·PV·StorageClass 스냅숏과 그것을 가져오는 동기화 실행 이력. 새 테이블이라
+        # _ensure_columns 불필요(CREATE IF NOT EXISTS 가 기배포 DB 에도 그대로 만든다). 요청·잡을 가리키는 열이 없다
+        # (request_id/job_id/entity_id 이름을 쓰지 않는다 -- 요청 삭제 그물 밖이 정상). JSON 칸은 dump_json 텍스트, 시각은
+        # ISO TEXT.
+        # k8s_sync_settings: 단일 행(id=1). 호출 노드(primary·secondary)와 주기. interval_seconds NULL = env 기본값
+        # (DMS_K8S_SYNC_INTERVAL_SECONDS) -- DB 값이 env 를 이긴다(mail_settings 와 같은 규칙). 행이 없으면 전부 기본값.
+        """CREATE TABLE IF NOT EXISTS k8s_sync_settings (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            primary_node TEXT,
+            secondary_node TEXT,
+            interval_seconds INTEGER,
+            updated_by TEXT,
+            updated_at TEXT)""",
+        # k8s_clusters: 등록한 외부 클러스터. 토큰은 secret_box 봉인(token_enc)으로만. config_rev 는 주소·토큰·TLS 가 바뀔 때
+        # +1 -- 바뀌기 전에 가져온 결과(run.config_rev 가 다름)는 적용하지 않고 버린다(discarded). applied_run_seq 는 마지막으로
+        # 적용한 run 의 seq(그보다 오래된 run 은 superseded). failover_after 는 primary 의 노드성 실패 뒤 secondary 1회 대체 시각.
+        """CREATE TABLE IF NOT EXISTS k8s_clusters (
+            name TEXT PRIMARY KEY,
+            api_server TEXT NOT NULL,
+            tls_server_name TEXT,
+            ca_pem TEXT,
+            insecure_skip_tls_verify INTEGER NOT NULL DEFAULT 0,
+            token_enc TEXT,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            fingerprint TEXT,
+            sync_requested_at TEXT,
+            last_attempt_at TEXT,
+            last_success_at TEXT,
+            last_reason TEXT,
+            last_error TEXT,
+            consecutive_failures INTEGER NOT NULL DEFAULT 0,
+            server_version TEXT,
+            failover_after TEXT,
+            config_rev INTEGER NOT NULL DEFAULT 0,
+            applied_run_seq INTEGER,
+            created_by TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_by TEXT NOT NULL,
+            updated_at TEXT NOT NULL)""",
+        # k8s_sync_runs: 동기화 시도 1건 = 1행. status = claimed|received|applied|failed|expired|superseded|discarded.
+        # payload 는 받은 결과(투영 목록)이고 종단(applied·superseded·discarded·failed)에서 NULL 로 비운다.
+        f"""CREATE TABLE IF NOT EXISTS k8s_sync_runs (
+            seq {auto_pk},
+            run_id TEXT NOT NULL UNIQUE,
+            cluster_name TEXT NOT NULL,
+            node_name TEXT NOT NULL,
+            role TEXT NOT NULL,
+            trigger TEXT NOT NULL,
+            status TEXT NOT NULL,
+            claimed_at TEXT NOT NULL,
+            deadline_at TEXT NOT NULL,
+            finished_at TEXT,
+            applied_at TEXT,
+            config_rev INTEGER NOT NULL,
+            reason TEXT,
+            phase TEXT,
+            http_status INTEGER,
+            error TEXT,
+            server_version TEXT,
+            duration_ms INTEGER,
+            counts TEXT,
+            warnings TEXT,
+            changes TEXT,
+            payload TEXT)""",
+        "CREATE INDEX IF NOT EXISTS idx_k8s_sync_runs_cluster ON k8s_sync_runs (cluster_name, seq)",
+        "CREATE INDEX IF NOT EXISTS idx_k8s_sync_runs_status ON k8s_sync_runs (status)",
+        "CREATE INDEX IF NOT EXISTS idx_k8s_sync_runs_node ON k8s_sync_runs (node_name, seq)",
+        # 스냅숏 4표: 키는 늘 (cluster_name, ...) -- namespace 는 클러스터마다만 유일하다. 컨트롤러 k8s-inventory 루프가
+        # 성공 run 을 diff 로 적용한다(바뀐 행만). 지운 클러스터의 행은 같은 루프가 묶음 단위로 정리한다.
+        """CREATE TABLE IF NOT EXISTS k8s_storage_classes (
+            cluster_name TEXT NOT NULL,
+            name TEXT NOT NULL,
+            provisioner TEXT,
+            parameters TEXT,
+            reclaim_policy TEXT,
+            volume_binding_mode TEXT,
+            PRIMARY KEY (cluster_name, name))""",
+        """CREATE TABLE IF NOT EXISTS k8s_pvs (
+            cluster_name TEXT NOT NULL,
+            name TEXT NOT NULL,
+            driver TEXT,
+            volume_handle TEXT,
+            volume_attributes TEXT,
+            nfs_server TEXT,
+            nfs_path TEXT,
+            storage_class TEXT,
+            claim_namespace TEXT,
+            claim_name TEXT,
+            capacity TEXT,
+            access_modes TEXT,
+            phase TEXT,
+            reclaim_policy TEXT,
+            volume_mode TEXT,
+            PRIMARY KEY (cluster_name, name))""",
+        """CREATE TABLE IF NOT EXISTS k8s_pvcs (
+            cluster_name TEXT NOT NULL,
+            namespace TEXT NOT NULL,
+            name TEXT NOT NULL,
+            uid TEXT,
+            storage_class TEXT,
+            volume_name TEXT,
+            phase TEXT,
+            capacity TEXT,
+            access_modes TEXT,
+            created_at TEXT,
+            PRIMARY KEY (cluster_name, namespace, name))""",
+        "CREATE INDEX IF NOT EXISTS idx_k8s_pvcs_volume ON k8s_pvcs (cluster_name, volume_name)",
+        # dms_user·access·subject_mismatch 는 적용 시점에 k8s_rbac.derive_binding 이 계산한 값(인식하지 않은 바인딩은 NULL).
+        # subject_mismatch NULL = 해당 없음(User subject 가 없거나 인식하지 않은 바인딩).
+        """CREATE TABLE IF NOT EXISTS k8s_role_bindings (
+            cluster_name TEXT NOT NULL,
+            namespace TEXT NOT NULL,
+            name TEXT NOT NULL,
+            role_kind TEXT,
+            role_name TEXT,
+            subjects TEXT,
+            dms_user TEXT,
+            access TEXT,
+            subject_mismatch INTEGER,
+            PRIMARY KEY (cluster_name, namespace, name))""",
+        "CREATE INDEX IF NOT EXISTS idx_k8s_role_bindings_user ON k8s_role_bindings (dms_user)",
+        # StorageClass → DMS 스토리지(+경로 템플릿 덮어쓰기). 키가 SC 이름 하나인 이유: SC 이름은 전 클러스터에서 유일하다는
+        # 사이트 전제(설계 D10) -- 두 클러스터에 같은 이름이 보이면 화면이 경고한다. path_template NULL = 백엔드 프리셋.
+        """CREATE TABLE IF NOT EXISTS k8s_storage_class_maps (
+            storage_class TEXT PRIMARY KEY,
+            storage_name TEXT NOT NULL,
+            path_template TEXT,
+            updated_by TEXT NOT NULL,
+            updated_at TEXT NOT NULL)""",
         f"""CREATE TABLE IF NOT EXISTS user_scan_paths (
             id {auto_pk},
             username TEXT NOT NULL,
@@ -753,6 +888,10 @@ def _ensure_columns(db):
         ("storages", "user_enabled", "INTEGER"),
         # root 실행 자격 부여(2026-10-12) -- 이중 경로 규약. 기배포 행은 NULL = 부여 없음(종전 동작: env 목록만).
         ("accounts", "root_granted", "INTEGER"),
+        # dms-k8s(2026-10-25) 스토리지 종류 D11 · 요청 대상 표기 D17 -- 이중 경로 규약. 기배포 행은 NULL
+        # (= filesystem / 표기 없음, 종전 동작). 백필하지 않는다(NULL 이 곧 종전 의미).
+        ("storages", "kind", "TEXT"),
+        ("requests", "target_label", "TEXT"),
     ):
         if not _column_exists(db, table, column):
             db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")

@@ -19,6 +19,9 @@ class _Settings:
     pod_gc_after_seconds = 3600
     vcjob_ttl_seconds = 86400
     pod_gc_interval_seconds = 600
+    # 2026-10-25 k8s-inventory 루프·동기화 이력 보존(build_loops 가 읽는다).
+    k8s_inventory_interval_seconds = 10
+    k8s_sync_run_retention_days = 30
 
 
 def _orphan(repos, key="k"):
