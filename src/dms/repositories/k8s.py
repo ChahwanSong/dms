@@ -202,6 +202,11 @@ class K8sRepository:
         with self._db.transaction():
             if self.get_cluster(name) is not None:
                 raise DomainValidationError("k8s_cluster_exists", name)
+            # 같은 이름의 지운 클러스터가 남긴 스냅숏 행(컨트롤러 cleanup_orphans 가 묶음으로 지우는 중일 수 있다)을 여기서 마저
+            # 지운다(2026-10-26 리뷰) -- 새 클러스터가 생기면 그 행들은 더는 고아가 아니라 정리가 멈추고, SC·PV 목록이 403 인
+            # 토큰이면 diff 가 덮지 못해 옛 클러스터의 PV 가 경로 렌더에 쓰였다. 등록은 드문 일이라 한 번의 큰 DELETE 를 감수한다.
+            for table in SNAPSHOT_TABLES:
+                self._db.execute(f"DELETE FROM {table} WHERE cluster_name = :n", {"n": name})
             self._db.execute(
                 """INSERT INTO k8s_clusters (name, api_server, tls_server_name, ca_pem, insecure_skip_tls_verify,
                        token_enc, enabled, consecutive_failures, config_rev, created_by, created_at, updated_by,
@@ -263,6 +268,13 @@ class K8sRepository:
             if before is None:
                 raise KeyError(name)
             self._db.execute("DELETE FROM k8s_clusters WHERE name = :n", {"n": name})
+            # 진행 중 run 도 같이 닫는다(2026-10-26 리뷰): 같은 이름으로 다시 등록하면 config_rev 가 0 부터라 옛 run 의 결과가
+            # 새 클러스터에 적용·실패 기록되고, 활성 run 판정(이름 기준)이 새 클러스터의 첫 동기화를 늦췄다. 늦게 온 결과는
+            # receive 가 RunClosed(409)로, 적용은 skipped 로 버린다.
+            self._db.execute(
+                """UPDATE k8s_sync_runs SET status = 'discarded', payload = NULL, error = 'cluster was deleted',
+                       finished_at = COALESCE(finished_at, :now)
+                   WHERE cluster_name = :n AND status IN ('claimed', 'received')""", {"n": name, "now": utc_now_iso()})
             self._audit("k8s_cluster", "delete", name, self.redacted(before), None, actor)
         return before
 
@@ -633,6 +645,17 @@ class K8sRepository:
                  (SELECT cluster_name, namespace FROM k8s_pvcs
                   UNION SELECT cluster_name, namespace FROM k8s_role_bindings) ns
                GROUP BY cluster_name""", {"namespaces": "n"})
+        # 선택 목록(SC·PV)을 한 번도 받지 못한 클러스터(토큰에 list 권한 없음)는 0 이 아니라 None(모름 -- null ≠ 0, 2026-10-26
+        # 리뷰): 마지막 적용 run 이 그 목록을 못 받았고(counts 의 값 None) 표에도 행이 없을 때. 한 번 받은 뒤 403 이 된 것은 설계대로
+        # 이전 값(행 수)을 보인다.
+        for r in self._db.query("""SELECT c.name, r.counts FROM k8s_clusters c
+                                   JOIN k8s_sync_runs r ON r.cluster_name = c.name AND r.seq = c.applied_run_seq"""):
+            counts = load_json(r["counts"]) if isinstance(r["counts"], str) else r["counts"]
+            if not isinstance(counts, dict) or r["name"] not in out:
+                continue
+            for key in ("storage_classes", "pvs"):
+                if key in counts and counts[key] is None and out[r["name"]][key] == 0:
+                    out[r["name"]][key] = None
         return out
 
     def totals(self) -> dict:
@@ -766,11 +789,11 @@ class K8sRepository:
                                          {"n": sc_map["storage_name"]})
         return resolve_volume(row, pv, sc_map, storage)
 
-    def volumes(self, *, cluster=None, namespace=None, storage_class=None, q=None, dms_user=None,
+    def volumes(self, *, cluster=None, namespace=None, storage_class=None, q=None, dms_user=None, pvc=None,
                 limit=None) -> "tuple[list, bool]":
         """PVC 목록(해석 포함) → (rows, truncated). dms_user 를 주면 그 사용자가 인식된 바인딩을 가진 namespace 만(권한 범위)
         이고 행마다 access(admin 이 edit 보다 우선)를 싣는다. q 는 공백으로 나눈 토큰마다 PVC 이름·namespace·볼륨·SC 부분 일치
-        (토큰 사이 AND, 대소문자 무시)."""
+        (토큰 사이 AND, 대소문자 무시). pvc 는 PVC 이름 정확 일치(고른 PV 재해석 -- 부분 일치는 상한에 잘릴 수 있다)."""
         where, params = [], {}
         if cluster:
             where.append("p.cluster_name = :c")
@@ -778,6 +801,9 @@ class K8sRepository:
         if namespace:
             where.append("p.namespace = :ns")
             params["ns"] = namespace
+        if pvc:
+            where.append("p.name = :pvc")
+            params["pvc"] = pvc
         if storage_class:
             where.append("p.storage_class = :sc")
             params["sc"] = storage_class

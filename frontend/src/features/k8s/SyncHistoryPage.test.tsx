@@ -113,6 +113,29 @@ test("상세: 추가·삭제 개수와 이름, 받은 개수, 실패의 단계·
   expect(within(dialog).getByText("변경 정보가 없습니다(적용되지 않은 run)")).toBeInTheDocument();
 });
 
+test("서버 모양 그대로(2026-10-26 리뷰): SC·PV 목록을 못 받은 run(null)도 그려지고, 내용만 바뀐 항목(changed)·경고 {phase, reason}", async () => {
+  // repositories.k8s._diff_apply + routes_agent._warnings 의 와이어 모양 — 예전엔 null 항목에서 화면 전체가 죽었다.
+  wrap(() => [
+    run(13, {
+      changes: {
+        storage_classes: null, pvs: null,
+        pvcs: { added: 0, removed: 0, changed: 1, names: { added: [], removed: [], changed: ["team-a/checkpoints"] } },
+        bindings: { added: 0, removed: 0, changed: 0, names: { added: [], removed: [], changed: [] } },
+      },
+      warnings: [{ phase: "storageclasses", reason: "k8s_sync_forbidden", http_status: 403 }],
+      counts: { storage_classes: null, pvs: null, pvcs: 7 },
+    }),
+  ]);
+  await screen.findByText("PVC ~1");
+  await userEvent.click(screen.getByRole("button", { name: "상세" }));
+  const dialog = await screen.findByRole("dialog", { name: "동기화 #13 — dmsk8s" });
+  expect(within(dialog).getByText("추가 0 · 삭제 0 · 바뀜 1")).toBeInTheDocument();
+  expect(within(dialog).getByText("team-a/checkpoints")).toBeInTheDocument();
+  expect(within(dialog).getAllByText("이번에 받지 못함(목록 권한 없음 등 — 이전 값 유지)")).toHaveLength(2);
+  expect(within(dialog).getByText(`경고: StorageClass 목록: ${reasonText("k8s_sync_forbidden")}`)).toBeInTheDocument();
+  expect(changeSummary({ pvcs: { added: 1, removed: 0, changed: 2 }, pvs: null })).toBe("PVC +1 ~2");
+});
+
 test("빈 상태와 필터 빈 상태를 다른 문구로", async () => {
   wrap(() => []);
   expect(await screen.findByText(/아직 동기화 기록이 없습니다/)).toBeInTheDocument();

@@ -229,6 +229,17 @@ def test_normalize_snapshot_rejects_malformed(bad):
         ks.normalize_snapshot(bad)
 
 
+def test_big_role_binding_does_not_reject_the_snapshot():
+    """팀 바인딩 하나에 subjects 가 많아도 스냅숏 전체를 거부하지 않는다(2026-10-26 리뷰 — 65명에서 동기화가 멈췄다).
+    상한(_MAX_SUBJECTS)을 넘는 몫은 잘라 낸다 -- subjects 는 불일치 경고·표시에만 쓰인다."""
+    many = [{"kind": "User", "name": f"u{i}@example.com"} for i in range(ks._MAX_SUBJECTS + 10)]
+    out = ks.normalize_snapshot(_data(role_bindings=[{"namespace": "n", "name": "alice-clusterrole-edit",
+                                                     "role_kind": "ClusterRole", "role_name": "kubeflow-edit",
+                                                     "subjects": many}]))
+    assert len(out["role_bindings"][0]["subjects"]) == ks._MAX_SUBJECTS
+    assert ks.normalize_snapshot(_data(role_bindings=[{"namespace": "n", "name": "b", "subjects": many[:65]}]))
+
+
 def test_snapshot_counts():
     counts = ks.snapshot_counts(ks.normalize_snapshot(_data(pvs=None)))
     assert counts == {"storage_classes": 1, "pvs": None, "pvcs": 1, "pvcs_bound": 1, "namespaces": 1,

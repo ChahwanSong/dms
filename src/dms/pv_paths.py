@@ -96,17 +96,16 @@ def validate_template(template) -> str:
     tokens = _tokens(text)
     if not any(kind == "ph" for kind, _ in tokens):
         raise DomainValidationError("invalid_pv_path_template", "needs at least one placeholder")
-    for kind, value in tokens:
-        if kind == "lit" and any(part in (".", "..") for part in value.split("/")):
-            raise DomainValidationError("invalid_pv_path_template", "'.'/'..' segment")
-    # 견본 렌더: 자리표시자 자리를 안전한 값으로 채워 리터럴 조합이 상대 경로가 되는지 본다.
+    # 견본 렌더: 자리표시자 자리를 안전한 값으로 채워 리터럴 조합이 상대 경로가 되는지 본다. '.'·'..' 판정도 **렌더된 성분**으로
+    # 한다(2026-10-26 리뷰) -- 리터럴 조각만 쪼개 보면 {namespace}.{pvc} 처럼 자리표시자 사이의 '.' 이 성분으로 오인돼 거부됐다.
+    # 자리표시자 값은 비거나 '.'·'..' 일 수 없고(_check_simple·_check_multi), render() 가 최종 결과를 한 번 더 검증한다.
     sample = "".join(value if kind == "lit" else "x" for kind, value in tokens)
+    if any(part in ("", ".", "..") for part in sample.split("/")):
+        raise DomainValidationError("invalid_pv_path_template", "'.'/'..' or empty path segment")
     try:
         validate_relative_path(sample)
     except DomainValidationError:
         raise DomainValidationError("invalid_pv_path_template", "renders to an unsafe path")
-    if any(part == "" for part in sample.split("/")):
-        raise DomainValidationError("invalid_pv_path_template", "empty path segment")
     return text
 
 

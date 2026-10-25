@@ -29,7 +29,7 @@ type Filter = "all" | "todo" | "mapped";
 
 /** 손볼 것: 매핑이 없거나, 매핑은 있는데 예시 경로가 풀리지 않는(problem) StorageClass. PVC 가 없어 예시가 없는 것은 손볼 것이 아니다. */
 export function needsAttention(r: StorageClassRow): boolean {
-  return r.storage_name === null || (r.sample !== null && r.sample.problem !== null)
+  return r.storage_name === null || (r.sample !== null && (r.sample.reason ?? r.sample.problem) != null)
     || (r.storage_name !== null && r.effective_template === null);
 }
 
@@ -43,8 +43,11 @@ function SampleCell({ r }: { r: StorageClassRow }) {
   if (r.storage_name === null) return <span className="text-ink/70">매핑하면 계산됩니다</span>;
   if (r.sample === null) return <span className="text-ink/70">PVC 없음 — 예시 없음</span>;
   const who = `${r.sample.namespace}/${r.sample.pvc}`;
-  if (r.sample.problem !== null) {
-    return <div className="min-w-0"><span className="text-bad">{reasonText(r.sample.problem)}</span>
+  // reason = 사유 코드(사람 말로), problem = 영문 진단(보조 — 템플릿·PV 값 어디가 비었는지). 옛 응답은 reason 이 없다.
+  const reason = r.sample.reason ?? null;
+  if (reason !== null || r.sample.problem !== null) {
+    return <div className="min-w-0"><span className="text-bad">{reasonText(reason ?? "pv_path_unresolved")}</span>
+      {r.sample.problem !== null && <Mono className="block text-xs text-ink/70">{r.sample.problem}</Mono>}
       <span className="block text-xs text-ink/70">{`예: ${who}`}</span></div>;
   }
   return (

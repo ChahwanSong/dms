@@ -70,7 +70,8 @@ def test_unresolvable_values(template, kw):
 @pytest.mark.parametrize("bad", [
     "", "   ", None, 42, "/abs/{volume}", "{unknown}", "{volume", "volume}", "{volume}/{", "a/../{volume}",
     "./{volume}", "{attr:}", "{attr:bad key}", "{handle:#}", "{handle::}", "{handle:#:x}",
-    "plain/path", "a//{volume}", "{volume}\x00", "x" * 600,
+    "plain/path", "a//{volume}", "{volume}\x00", "x" * 600, "{volume}/../x", "{volume}/./x", "{volume}/.",
+    "{volume}/..",
 ])
 def test_validate_template_rejects(bad):
     with pytest.raises(DomainValidationError) as e:
@@ -83,6 +84,10 @@ def test_validate_template_accepts_and_trims():
     assert validate_template("{handle:;:6}") == "{handle:;:6}"
     assert validate_template("{handle:/:3+}") == "{handle:/:3+}"
     assert validate_template("data/{attr:internalName}") == "data/{attr:internalName}"
+    # 자리표시자 사이의 '.'·'..' 는 성분이 아니라 이름의 일부다(2026-10-26 리뷰) -- 렌더 결과도 안전한 한 성분
+    assert validate_template("{namespace}.{pvc}") == "{namespace}.{pvc}"
+    assert validate_template("{namespace}..{pvc}") == "{namespace}..{pvc}"
+    assert render("{namespace}.{pvc}", volume="v", pvc="datasets", namespace="team-a") == "team-a.datasets"
 
 
 def test_effective_template_storageclass_override_beats_preset():

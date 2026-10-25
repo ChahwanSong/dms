@@ -32,6 +32,7 @@ from ..db import load_json, utc_now_iso
 from ..domain import DomainValidationError
 from ..pv_paths import effective_template, validate_template
 from ..repositories.k8s import storage_kind
+from ..repositories.storages import storage_open_to_users
 from ..secret_box import seal_at_rest
 from .auth import Identity, audit_actor, can_run_as_root, require_admin, require_session_admin, require_user
 from .password_transport import PasswordTransportError
@@ -509,21 +510,40 @@ def put_storage_class(storage_class: str, body: StorageClassMapBody, request: Re
 
 # --- 볼륨·권한 --------------------------------------------------------------------------------------
 
-def _volume_query(request, *, dms_user, cluster, namespace, storage_class, q, limit):
+def _volume_query(request, *, dms_user, cluster, namespace, storage_class, q, limit, pvc=None):
     rows, truncated = request.app.state.repos.k8s.volumes(
-        cluster=cluster, namespace=namespace, storage_class=storage_class, q=q, dms_user=dms_user, limit=limit)
+        cluster=cluster, namespace=namespace, storage_class=storage_class, q=q, dms_user=dms_user, pvc=pvc,
+        limit=limit)
     return rows, truncated
+
+
+def _mark_unusable_storages(repos, rows, *, is_admin) -> None:
+    """PV 고르기에서 매핑 스토리지를 지금 쓸 수 없는 행은 고를 수 없게(2026-10-26 리뷰): 완전 비활성(enabled≠1)은 누구에게나
+    storage_disabled(planner 가 거부), 관리자 전용(storage_open_to_users 거짓)은 비관리자에게 storage_admin_only(제출이 403) --
+    직접 경로 피커(/api/user/storages)가 같은 두 상태를 빼는 것과 같은 술어. 해석(resolve_volume)은 그대로 둔다 -- 제출·재확인이
+    같은 함수를 쓰고 그 사유 순서를 바꾸지 않는다."""
+    storages = {r["storage_name"]: r for r in repos.storages.list()}
+    for r in rows:
+        row = storages.get(r.get("storage_name")) if r.get("selectable") else None
+        if row is None:
+            continue
+        if row["enabled"] != 1:
+            r.update(selectable=False, reason="storage_disabled")
+        elif not is_admin and not storage_open_to_users(row):
+            r.update(selectable=False, reason="storage_admin_only")
 
 
 @router.get("/api/admin/k8s/volumes", dependencies=[Depends(require_admin)])
 def admin_volumes(request: Request, cluster: "str | None" = None, namespace: "str | None" = None,
                   storage_class: "str | None" = None, q: "str | None" = Query(default=None, max_length=200),
                   user: "str | None" = Query(default=None, max_length=64),
+                  pvc: "str | None" = Query(default=None, max_length=253),
                   limit: int = Query(default=VOLUME_LIMIT_DEFAULT, ge=1, le=VOLUME_LIMIT_MAX)):
-    """PV 탐색(관리자). user 를 주면 그 사용자의 맵핑 범위만(행마다 access). 행마다 권한 사용자 목록(users)."""
+    """PV 탐색(관리자). user 를 주면 그 사용자의 맵핑 범위만(행마다 access). 행마다 권한 사용자 목록(users). pvc = 이름 정확
+    일치(제출 화면이 고른 PV 를 다시 찾을 때)."""
     state = _State(request)
     rows, truncated = _volume_query(request, dms_user=(user or "").strip() or None, cluster=cluster,
-                                    namespace=namespace, storage_class=storage_class, q=q, limit=limit)
+                                    namespace=namespace, storage_class=storage_class, q=q, limit=limit, pvc=pvc)
     users = state.repos.k8s.users_by_namespace()
     for r in rows:
         r["users"] = users.get((r["cluster"], r["namespace"]), [])
@@ -562,6 +582,7 @@ def admin_access(request: Request, q: "str | None" = Query(default=None, max_len
 def user_volumes(request: Request, identity: Identity = Depends(require_user),
                  cluster: "str | None" = None, namespace: "str | None" = None,
                  storage_class: "str | None" = None, q: "str | None" = Query(default=None, max_length=200),
+                 pvc: "str | None" = Query(default=None, max_length=253),
                  limit: int = Query(default=VOLUME_LIMIT_MAX, ge=1, le=VOLUME_LIMIT_MAX)):
     """제출 화면의 PV 고르기. 자기 맵핑 범위(인식된 RoleBinding 이 있는 namespace)의 PVC 만 -- 면제자(can_run_as_root)는 전체.
     namespaces = 권한이 있는 namespace(PVC 가 0개여도) -- 「권한 namespace 없음」과 「PVC 없음」을 화면이 가른다. clusters 의
@@ -570,7 +591,8 @@ def user_volumes(request: Request, identity: Identity = Depends(require_user),
     unrestricted = can_run_as_root(identity, state.settings, state.repos)
     dms_user = None if unrestricted else identity.actor
     rows, truncated = _volume_query(request, dms_user=dms_user, cluster=cluster, namespace=namespace,
-                                    storage_class=storage_class, q=q, limit=limit)
+                                    storage_class=storage_class, q=q, limit=limit, pvc=pvc)
+    _mark_unusable_storages(state.repos, rows, is_admin=identity.role == "admin")
     if unrestricted:
         namespaces = None
     else:

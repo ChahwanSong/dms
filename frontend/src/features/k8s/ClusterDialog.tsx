@@ -136,10 +136,12 @@ export function ClusterDialog({ mode, cluster, trigger }: {
   const tokenReason = addressChanged ? "API 서버 주소를 바꾸려면" : serverNameChanged ? "TLS 서버 이름을 바꾸려면"
     : verifyTurnedOff ? "인증서 검증을 끄려면" : null;
   const tokenRequired = tokenReason !== null && token.trim() === "";
+  // 등록은 토큰 필수(서버 create_cluster 422 k8s_token_required) — 편집의 빈 칸은 「저장된 토큰 유지」다.
   const missing = [
     name.trim() === "" ? "클러스터 이름" : null,
     apiServer.trim() === "" ? "API 서버 주소" : null,
     caMissing ? "CA 인증서" : null,
+    !editing && token.trim() === "" ? "API 토큰" : null,
   ].filter((x): x is string => x !== null);
   const blocked = missing.length > 0 || nameErr !== null || apiErr !== null || caErr !== null || tokenRequired;
 
@@ -275,7 +277,7 @@ export function ClusterDialog({ mode, cluster, trigger }: {
           <p id={tokenHelpId} className="text-xs text-ink/70">
             브라우저에서 봉인돼 전송되고 서버에는 암호화해 저장됩니다 — 저장 뒤에는 화면·로그 어디에서도 다시 볼 수 없습니다.
             Secret 의 data.token(base64) 을 그대로 붙여넣어도 됩니다.
-            {!editing && " 토큰 없이 등록하면 「토큰 없음」 상태로 동기화하지 않습니다."}
+            {editing && " 비워 두면 저장된 토큰을 그대로 씁니다."}
           </p>
         </Section>
 

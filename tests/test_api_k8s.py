@@ -500,6 +500,31 @@ def test_admin_volumes_access_and_user_volumes(client, repos, db):
     assert client.get("/api/user/k8s/volumes", headers=BEARER).json()["unrestricted"] is False
 
 
+def test_pv_picker_marks_unusable_storages_and_finds_a_pvc_exactly(client, repos, db):
+    """PV 고르기(2026-10-26 리뷰): 매핑 스토리지가 관리자 전용이면 비관리자에게, 비활성이면 누구에게나 고를 수 없게 보인다(제출·
+    planner 가 어차피 거부한다 -- 직접 경로 피커와 같은 술어). pvc 는 이름 정확 일치(부분 일치 q 는 상한에 잘릴 수 있다)."""
+    admin = _session(client, repos, "ops.admin", "admin")
+    _full_sync(admin, repos)
+    _storages(db)
+    for sc, st in (("tb-nfs", "k8s-pv-nfs"), ("tb-gpfs", "k8s-pv-gpfs"), ("tb-onefs", "k8s-pv-onefs")):
+        assert admin.put(f"/api/admin/k8s/storage-classes/{sc}", json={"storage_name": st}).status_code == 200
+    exact = admin.get("/api/admin/k8s/volumes?cluster=c1&namespace=team-a&pvc=models").json()["volumes"]
+    assert [(x["namespace"], x["pvc"]) for x in exact] == [("team-a", "models")]
+    db.execute("UPDATE storages SET user_enabled = 0 WHERE storage_name = 'k8s-pv-gpfs'")
+    db.execute("UPDATE storages SET enabled = 0 WHERE storage_name = 'k8s-pv-nfs'")
+    _session(client, repos, "alice", "user")
+    rows = {(x["namespace"], x["pvc"]): x for x in client.get("/api/user/k8s/volumes").json()["volumes"]}
+    assert (rows[("team-a", "models")]["selectable"], rows[("team-a", "models")]["reason"]) == (
+        False, "storage_admin_only")
+    assert (rows[("team-a", "datasets")]["selectable"], rows[("team-a", "datasets")]["reason"]) == (
+        False, "storage_disabled")
+    # 관리자(면제)는 관리자 전용 스토리지를 그대로 고른다 -- 비활성은 누구도 못 고른다
+    _session(client, repos, "admin", "admin")
+    rows = {(x["namespace"], x["pvc"]): x for x in client.get("/api/user/k8s/volumes").json()["volumes"]}
+    assert rows[("team-a", "models")]["selectable"] is True
+    assert rows[("team-a", "datasets")]["reason"] == "storage_disabled"
+
+
 def test_never_synced_cluster_is_unknown_not_empty(admin, repos):
     _setup(admin, repos)
     _session(admin, repos, "alice", "user")

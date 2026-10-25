@@ -83,28 +83,32 @@ test("등록: 필수 칸이 비면 잠기고 무엇이 필요한지 말한다, �
   await openDialog("create");
   const submit = screen.getByRole("button", { name: "등록" });
   expect(submit).toBeDisabled();
-  expect(screen.getByText("필요: 클러스터 이름 · API 서버 주소 · CA 인증서")).toBeInTheDocument();
+  expect(screen.getByText("필요: 클러스터 이름 · API 서버 주소 · CA 인증서 · API 토큰")).toBeInTheDocument();
   await userEvent.type(screen.getByLabelText("API 서버 주소"), "http://10.10.10.20:6443/x");
   expect(screen.getByLabelText("API 서버 주소")).toHaveAttribute("aria-invalid", "true");
   expect(screen.getByLabelText("API 서버 주소")).toHaveAccessibleDescription(/https:\/\/주소\[:포트\] 형식/);
 });
 
-test("등록: 토큰 없이 시스템 기본 신뢰로 내면 token_enc 없이, ca_pem 은 null", async () => {
+test("등록: 토큰은 필수(서버 422 k8s_token_required 와 같은 계약), 시스템 기본 신뢰로 내면 ca_pem 은 null", async () => {
   let sent: Record<string, unknown> | null = null;
   server.use(http.post("/api/admin/k8s/clusters", async ({ request }) => {
     sent = await request.json() as Record<string, unknown>;
     return HttpResponse.json(CLUSTER_OK);
   }));
   await openDialog("create");
-  expect(screen.getByText(/토큰 없이 등록하면 「토큰 없음」 상태로 동기화하지 않습니다/)).toBeInTheDocument();
   await userEvent.type(screen.getByLabelText("클러스터 이름"), "pub");
   await userEvent.type(screen.getByLabelText("API 서버 주소"), "https://k8s.example.com");
   await userEvent.click(screen.getByLabelText("시스템 기본 신뢰"));
   expect(screen.queryByLabelText("CA 인증서(PEM)")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "등록" })).toBeDisabled();
+  expect(screen.getByText("필요: API 토큰")).toBeInTheDocument();
+  await userEvent.type(screen.getByLabelText("API 토큰"), "pub-token");
   await userEvent.click(screen.getByRole("button", { name: "등록" }));
   await waitFor(() => expect(sent).not.toBeNull());
-  expect(sent).toEqual({ name: "pub", api_server: "https://k8s.example.com", tls_server_name: null,
+  const { token_enc: tokenEnc, ...rest } = sent!;
+  expect(rest).toEqual({ name: "pub", api_server: "https://k8s.example.com", tls_server_name: null,
                          insecure_skip_tls_verify: false, enabled: true, ca_pem: null });
+  expect(await openSealed(serverKey, tokenEnc as never, "k8s_cluster_token", "pub")).toBe("pub-token");
 });
 
 test("편집: 주소를 바꾸면 토큰을 다시 넣어야 저장된다, CA 칸을 비우면 저장된 CA 유지(ca_pem 생략)", async () => {
@@ -189,6 +193,7 @@ test("서버 거절은 창 안 role=alert 하나로(사유 문구)", async () =>
   await userEvent.type(screen.getByLabelText("클러스터 이름"), "dmsk8s");
   await userEvent.type(screen.getByLabelText("API 서버 주소"), "https://10.10.10.20:6443");
   await userEvent.click(screen.getByLabelText("검증 안 함"));
+  await userEvent.type(screen.getByLabelText("API 토큰"), "tok");
   await userEvent.click(screen.getByRole("button", { name: "등록" }));
   const alerts = await screen.findAllByRole("alert");
   expect(alerts).toHaveLength(1);

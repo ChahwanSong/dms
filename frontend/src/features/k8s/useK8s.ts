@@ -129,7 +129,7 @@ export const VOLUMES_LIMIT = 200;
 
 export function volumesUrl(q: VolumesQuery): string {
   const p = new URLSearchParams();
-  for (const k of ["cluster", "namespace", "storage_class", "q", "user"] as const) {
+  for (const k of ["cluster", "namespace", "storage_class", "q", "pvc", "user"] as const) {
     const v = q[k];
     if (typeof v === "string" && v !== "") p.set(k, v);
   }

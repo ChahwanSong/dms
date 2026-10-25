@@ -262,6 +262,18 @@ def test_partial_lists_keep_previous_values(repos, db):
     assert outcome["changes"]["pvs"] is None and outcome["changes"]["storage_classes"] is None
     assert db.query_one("SELECT COUNT(*) AS n FROM k8s_pvs")["n"] == 7
     assert db.query_one("SELECT COUNT(*) AS n FROM k8s_storage_classes")["n"] == 3
+    counts = repos.k8s.cluster_counts()["c1"]                       # 이전 값을 보인다(한 번 받은 적이 있다)
+    assert (counts["storage_classes"], counts["pvs"]) == (3, 7)
+
+
+def test_never_received_optional_lists_count_as_unknown(repos, db):
+    """토큰에 SC·PV list 권한이 처음부터 없으면 개수는 0 이 아니라 None(모름 -- 개요의 「목록 권한 없음·모름」, 2026-10-26)."""
+    data = fixture_data()
+    data["pvs"] = None
+    data["storage_classes"] = None
+    _sync(repos, data)
+    counts = repos.k8s.cluster_counts()["c1"]
+    assert counts["storage_classes"] is None and counts["pvs"] is None and counts["pvcs"] == 7
 
 
 def test_empty_lists_are_applied_as_zero(repos, db):
@@ -310,7 +322,28 @@ def test_config_change_discards_and_deleted_cluster_discards(repos, db):
     assert repos.k8s.get_run(run2)["trigger"] == "manual"
     k8s.receive(run2, node_name="k8s-w1", now=later, ok=True, data=fixture_data())
     k8s.delete_cluster("c1", actor="ops")
-    assert k8s.apply_run(run2)["outcome"] == "discarded"
+    # 삭제가 진행 중 run 을 그 자리에서 닫는다(2026-10-26 리뷰) -- 적용은 무동작, payload 도 지운다
+    run = k8s.get_run(run2, with_payload=True)
+    assert run["status"] == "discarded" and run["payload"] is None and run["error"] == "cluster was deleted"
+    assert k8s.apply_run(run2)["outcome"] == "skipped"
+
+
+def test_recreated_cluster_does_not_inherit_the_deleted_ones_runs(repos, db):
+    """같은 이름으로 다시 등록해도(config_rev 가 다시 0) 옛 클러스터의 진행 중 run 결과가 새 클러스터에 적용·실패 기록되지
+    않고, 활성 run 판정이 새 클러스터의 첫 동기화를 막지 않는다(2026-10-26 리뷰 재현 시나리오)."""
+    k8s = repos.k8s
+    old = _claim(repos)["run"]["run_id"]
+    k8s.delete_cluster("c1", actor="ops")
+    k8s.create_cluster(name="c1", api_server="https://new:6443", tls_server_name=None, ca_pem=None,
+                       insecure_skip_tls_verify=False, token_enc="v1:new", enabled=True, actor="ops")
+    with pytest.raises(RunClosed):
+        k8s.receive(old, node_name="k8s-w1", now=T0, ok=True, data=fixture_data())
+    with pytest.raises(RunClosed):
+        k8s.receive(old, node_name="k8s-w1", now=T0, ok=False, reason="k8s_sync_unauthorized")
+    c = k8s.get_cluster("c1")
+    assert c["consecutive_failures"] == 0 and c["last_reason"] is None
+    assert "c1" not in k8s.active_cluster_names(T0)
+    assert db.query_one("SELECT COUNT(*) AS n FROM k8s_pvcs")["n"] == 0
 
 
 def test_apply_failure_rolls_back_and_marks_the_run_failed(repos, db, monkeypatch):
@@ -386,11 +419,6 @@ def test_deleted_cluster_snapshot_is_hidden_then_cleaned(repos, db):
     _sync(repos)
     repos.k8s.delete_cluster("c1", actor="ops")
     assert repos.k8s.volumes()[0] == [] and repos.k8s.totals()["pvcs"] == 0          # 지운 순간부터 안 보인다
-    # 같은 이름으로 다시 만든 클러스터도 첫 적용 전에는 옛 행을 물려받지 않는다
-    repos.k8s.create_cluster(name="c1", api_server="https://10.10.10.20:6443", tls_server_name=None, ca_pem=None,
-                             insecure_skip_tls_verify=False, token_enc="v1:x", enabled=True, actor="ops")
-    assert repos.k8s.volumes()[0] == [] and repos.k8s.cluster_synced("c1") is False
-    repos.k8s.delete_cluster("c1", actor="ops")
     total = 0
     for _ in range(10):
         n = repos.k8s.cleanup_orphans(batch=5)
@@ -400,6 +428,27 @@ def test_deleted_cluster_snapshot_is_hidden_then_cleaned(repos, db):
     assert total == 3 + 7 + 7 + 9
     for table in ("k8s_storage_classes", "k8s_pvs", "k8s_pvcs", "k8s_role_bindings"):
         assert db.query_one(f"SELECT COUNT(*) AS n FROM {table}")["n"] == 0
+
+
+def test_recreating_a_cluster_purges_the_leftover_snapshot_rows(repos, db):
+    """정리(cleanup_orphans)가 끝나기 전에 같은 이름으로 다시 등록하면 남은 행이 더는 고아가 아니라 정리가 멈춘다 -- 등록이
+    그 자리에서 지운다(SC·PV 목록이 403 인 토큰이면 diff 가 덮지 못해 옛 PV 가 경로 렌더에 쓰였다, 2026-10-26 리뷰)."""
+    _sync(repos)
+    repos.k8s.delete_cluster("c1", actor="ops")
+    repos.k8s.create_cluster(name="c1", api_server="https://10.10.10.20:6443", tls_server_name=None, ca_pem=None,
+                             insecure_skip_tls_verify=False, token_enc="v1:x", enabled=True, actor="ops")
+    assert repos.k8s.volumes()[0] == [] and repos.k8s.cluster_synced("c1") is False
+    for table in ("k8s_storage_classes", "k8s_pvs", "k8s_pvcs", "k8s_role_bindings"):
+        assert db.query_one(f"SELECT COUNT(*) AS n FROM {table}")["n"] == 0
+    # 새 클러스터의 첫 동기화가 SC·PV 를 못 받아도(403) 옛 PV 가 남지 않는다
+    data = fixture_data()
+    data["storage_classes"] = None
+    data["pvs"] = None
+    later = iso_plus(utc_now_iso(), 1)
+    run_id = _claim(repos, now=later)["run"]["run_id"]
+    repos.k8s.receive(run_id, node_name="k8s-w1", now=later, ok=True, data=data)
+    assert repos.k8s.apply_run(run_id, now=later)["outcome"] == "applied"
+    assert db.query_one("SELECT COUNT(*) AS n FROM k8s_pvs")["n"] == 0
 
 
 def test_prune_runs_keeps_recent_and_last_success(repos, db):

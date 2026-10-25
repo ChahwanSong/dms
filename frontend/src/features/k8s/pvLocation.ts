@@ -93,6 +93,9 @@ export function unselectableText(r: Pick<VolumeRow, "reason" | "phase">): string
   if (r.reason === "pv_not_bound") return "Bound 아님";
   if (r.reason === "pv_storageclass_unmapped") return "StorageClass 매핑 없음";
   if (r.reason === "pv_path_unresolved") return "경로를 알 수 없음";
+  // 매핑 스토리지의 사용 범위(routes_k8s._mark_unusable_storages — 직접 경로 피커와 같은 술어).
+  if (r.reason === "storage_disabled") return "비활성 스토리지";
+  if (r.reason === "storage_admin_only") return "관리자 전용 스토리지";
   return "고를 수 없음";
 }
 

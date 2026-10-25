@@ -212,20 +212,27 @@ export function callerNodeState(n: CallerNode | undefined): { label: string; var
   return { label: "대기", variant: "neutral" };
 }
 
-/** run 경고 한 줄 — 사유 코드면 사람 말로, 객체면 「목록: 사유」. */
+/** 경고의 phase(에이전트 k8s_fetch.LISTS 의 화면 이름) → 목록 라벨. 모르는 phase 는 원문. */
+export const PHASE_LABEL: Record<string, string> = {
+  storageclasses: "StorageClass 목록", persistentvolumes: "볼륨(PV) 목록",
+  persistentvolumeclaims: "PVC 목록", rolebindings: "RoleBinding 목록",
+};
+
+/** run 경고 한 줄 — 사유 코드면 사람 말로, 서버 모양 {phase, reason, http_status} 면 「목록: 사유」(옛 모양 list 키도 읽는다). */
 export function warningText(w: RunWarning): string {
   if (typeof w === "string") return reasonText(w);
-  const list = typeof w.list === "string" ? w.list : null;
+  const phase = typeof w.phase === "string" ? w.phase : typeof w.list === "string" ? w.list : null;
   const reason = typeof w.reason === "string" ? reasonText(w.reason) : null;
-  if (list && reason) return `${list}: ${reason}`;
+  if (phase && reason) return `${PHASE_LABEL[phase] ?? phase}: ${reason}`;
+  if (reason) return reason;
   return Object.entries(w).map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`).join(" · ");
 }
 
-/** 변경 요약의 이름 목록 — 추가·삭제로 나뉘었으면 각각, 하나뿐이면 전부 「바뀐 이름」으로. */
-export function changeNames(e: ChangeEntry): { added: string[]; removed: string[]; other: string[] } {
-  const n = e.names;
+/** 변경 요약의 이름 목록 — 추가·삭제·바뀜으로 나뉘었으면 각각, 하나뿐이면 전부 「바뀐 이름」으로. null(목록을 못 받음)은 빈 목록. */
+export function changeNames(e: ChangeEntry | null | undefined): { added: string[]; removed: string[]; other: string[] } {
+  const n = e?.names;
   if (Array.isArray(n)) return { added: [], removed: [], other: n };
-  if (n && typeof n === "object") return { added: n.added ?? [], removed: n.removed ?? [], other: [] };
+  if (n && typeof n === "object") return { added: n.added ?? [], removed: n.removed ?? [], other: n.changed ?? [] };
   return { added: [], removed: [], other: [] };
 }
 

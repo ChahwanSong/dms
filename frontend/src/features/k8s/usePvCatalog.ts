@@ -71,7 +71,8 @@ export function useResolvedPv({ active, ref, catalog, search }: {
   active: boolean; ref: PvRef | null; catalog: PvCatalog; search: boolean;
 }): Resolved {
   const searching = active && search && ref !== null;
-  const q = useK8sVolumes(ref === null ? {} : { cluster: ref.cluster, namespace: ref.namespace, q: ref.pvc,
+  // PVC 이름 정확 일치(pvc) — 부분 일치 q 는 같은 namespace 에 이름이 겹치는 PVC 가 많으면 상한에 잘려 「찾을 수 없음」이 됐다.
+  const q = useK8sVolumes(ref === null ? {} : { cluster: ref.cluster, namespace: ref.namespace, pvc: ref.pvc,
                                                 limit: SEARCH_LIMIT }, searching);
   if (!active || ref === null) return { status: "none" };
   if (search) {

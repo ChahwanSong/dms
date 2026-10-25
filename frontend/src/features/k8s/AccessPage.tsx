@@ -29,7 +29,10 @@ function AccessTag({ access }: { access: string }) {
 }
 
 function BindingCell({ g }: { g: AccessGrant }) {
-  const b = bindingParts(g.binding);
+  // 서버(routes_k8s.admin_access)는 binding 을 이름으로, 역할·subjects 를 grant 바로 아래에 싣는다 — 인식된 바인딩은 늘 ClusterRole.
+  const b = bindingParts(typeof g.binding === "string"
+    ? { name: g.binding, role_kind: "ClusterRole", role_name: g.role_name ?? null, subjects: g.subjects ?? [] }
+    : g.binding);
   return (
     <div className="min-w-[14rem]">
       <Mono>{b.name}</Mono>

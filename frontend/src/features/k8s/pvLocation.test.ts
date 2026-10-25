@@ -1,7 +1,7 @@
 import { beforeEach, expect, test } from "vitest";
 import {
   SIDE_LABELS, bindingNameFor, buildGroups, effectiveGroup, emptyLoc, groupKey, normalizeSub, parsePvParam, pvAbsPath,
-  pvDestParent, pvOptionText, pvSubProblem, pvSummaryText, readLastGroup, writeLastGroup,
+  pvDestParent, pvOptionText, pvSubProblem, pvSummaryText, readLastGroup, unselectableText, writeLastGroup,
 } from "./pvLocation";
 import { pvJobLink } from "./k8sTerms";
 import { VOLUME_MODELS, VOLUME_PENDING } from "./k8sFixtures";
@@ -111,4 +111,11 @@ test("bindingNameFor·pvSummaryText·라벨: 서로 부분 문자열이 아닌 �
     labels.push("권한 기준 사용자", "연산", "우선순위");
     for (const a of labels) for (const b of labels) if (a !== b) expect(b.includes(a)).toBe(false);
   }
+});
+
+test("고를 수 없는 이유: 서버 사유를 짧은 말로(매핑 스토리지의 사용 범위 포함 — 2026-10-26)", () => {
+  expect(unselectableText({ reason: "pv_not_bound", phase: "Pending" })).toBe("Bound 아님");
+  expect(unselectableText({ reason: "storage_disabled", phase: "Bound" })).toBe("비활성 스토리지");
+  expect(unselectableText({ reason: "storage_admin_only", phase: "Bound" })).toBe("관리자 전용 스토리지");
+  expect(unselectableText({ reason: "zz", phase: "Bound" })).toBe("고를 수 없음");
 });

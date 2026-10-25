@@ -273,6 +273,10 @@ _MAX_NAME = 253
 _MAX_TEXT = 4096
 _MAX_MAP = 256
 _MAX_LIST = 64
+# RoleBinding subjects 는 팀 바인딩 하나에 수백 명이 묶일 수 있다(2026-10-26 리뷰 — 64 를 넘는 바인딩 하나가 스냅숏 전체를
+# 거부해 클러스터 동기화가 멈췄다). 전체 크기는 k8s_sync_max_bytes 가 막으므로 개수는 넉넉히 두고, 넘으면 거부하지 않고 앞부분만
+# 남긴다 -- subjects 는 불일치 경고(k8s_rbac.derive_binding)와 표시에만 쓰인다(권한은 바인딩 이름·roleRef 가 정한다).
+_MAX_SUBJECTS = 4096
 
 
 def _s(value, *, required=False, limit=_MAX_TEXT):
@@ -392,10 +396,10 @@ def normalize_snapshot(data) -> dict:
         subjects = it.get("subjects")
         if subjects is None:
             subjects = []
-        if not isinstance(subjects, list) or len(subjects) > _MAX_LIST:
+        if not isinstance(subjects, list):
             raise ValueError("bad subjects")
         subs = []
-        for s in subjects:
+        for s in subjects[:_MAX_SUBJECTS]:
             if not isinstance(s, dict):
                 raise ValueError("subject must be an object")
             subs.append({"kind": _s(s.get("kind"), limit=64), "name": _s(s.get("name"), limit=_MAX_NAME),

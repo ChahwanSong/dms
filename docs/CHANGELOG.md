@@ -159,6 +159,18 @@ primary·secondary, 동기화 상태 UI. 설계 `docs/history/specs/2026-10-25-d
   `target_path_redirected`(문구 일반화). 블록 root 가 `..` 로 managed_root 밖이 되는 변조 행은 빈 루트로 막는다. PV 가 아닌 잡의
   매니페스트·rank.sh 는 바이트 단위로 그대로. `tests/test_pv_containment_sh.py`(실 sh·러너·rank.sh 를 같은 트리로 대조)·
   `test_stepper_enrich`(stepper 가 싣는 값).
+- **정확성·사용성 리뷰(2026-10-26, 5관점 + 관점별 반박 검증 — 실결함 12건 반영, 기각 5건은 그대로)**:
+  - 동기화 이력이 SC·PV 목록을 못 받은 run(`changes` 값 null)에서 화면 전체가 렌더 예외로 죽던 것(high) — null 항목은 「이번에 받지
+    못함 — 이전 값 유지」, 내용만 바뀐 항목(`changed` — PVC Pending→Bound·재생성, 바인딩 subjects)을 「~N」·「바뀜」 목록으로.
+  - run 경고 `{phase, reason, http_status}` 를 「StorageClass 목록: <사유 문구>」로(프런트가 옛 `list` 키만 읽어 원문 노출).
+  - RoleBinding 하나의 subjects 가 64개를 넘으면 스냅숏 전체가 거부돼 동기화가 멈추던 것 — 상한 4096, 넘는 몫은 잘라 낸다.
+  - 사용자 권한 화면의 근거 바인딩 역할·subject 가 서버 모양(grant 수준 `role_name`·`subjects`)과 달라 표시되지 않던 것.
+  - 클러스터 삭제가 진행 중 run 을 닫고(재등록한 같은 이름이 옛 run 결과·실패를 물려받던 것), 재등록이 남은 스냅숏 행을 지운다.
+  - SC·PV 목록을 한 번도 받지 못한 클러스터의 개수를 0 이 아니라 null(「목록 권한 없음·모름」).
+  - PV 고르기가 매핑 스토리지의 비활성·관리자 전용을 반영(`storage_disabled`·`storage_admin_only` — 직접 경로 피커와 같은 술어).
+  - 면제 관리자의 고른 PV 재해석을 이름 정확 일치(`pvc=`)로 — 부분 일치 + 상한 50 에 잘려 「찾을 수 없음」으로 제출이 잠기던 것.
+  - 경로 템플릿 검증이 `{namespace}.{pvc}` 처럼 자리표시자 사이의 `.` 를 성분으로 오인해 거부하던 것(렌더 성분으로 판정).
+  - 클러스터 등록 창: 토큰 필수(서버 계약과 같게), StorageClass 예시 경로의 사유를 한국어 문구로(영문 진단은 보조 줄).
 - **실증**: 다음 단계(설계 §9 슬라이스 4 — 테스트베드 dmsk8s 실증·적대적 리뷰)가 여기에 덧붙인다.
 
 ### ✅ 전체 작업: 요청자 부분 일치 + 배치 이름·대상 경로 검색 + 열 폭(요청 ↓ · 배치 ↑ · 시각 = 글자 폭) — **완료·실증**(2026-10-25, k2)

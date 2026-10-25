@@ -59,11 +59,14 @@ test("손볼 것 필터: 매핑 없음·예시 경로 문제·규칙 없음만",
   expect(needsAttention(SC_ROWS[0])).toBe(false);
   expect(needsAttention(SC_ROWS[1])).toBe(true);
   const broken: StorageClassRow = { ...SC_ROWS[0], name: "tb-x",
-    sample: { ...SC_ROWS[0].sample!, abs_root: null, problem: "pv_path_unresolved" } };
+    // 서버 모양(routes_k8s._sample_view): reason = 사유 코드, problem = 영문 진단.
+    sample: { ...SC_ROWS[0].sample!, abs_root: null, reason: "pv_path_unresolved",
+              problem: "PV claimRef is team-b/other" } };
   expect(needsAttention(broken)).toBe(true);
   wrap([...SC_ROWS, broken]);
   await screen.findByText("tb-gpfs");
   expect(within(rowOf("tb-x")).getByText(reasonText("pv_path_unresolved"))).toBeInTheDocument();
+  expect(within(rowOf("tb-x")).getByText("PV claimRef is team-b/other")).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "손볼 것 2" }));
   expect(screen.queryByText("tb-gpfs")).not.toBeInTheDocument();
   expect(screen.getByText("tb-nfs")).toBeInTheDocument();

@@ -35,7 +35,8 @@ export interface ClusterCounts {
   namespaces: number | null; bindings: number | null; recognized_bindings: number | null; users: number | null;
 }
 
-/** run 경고: 서버는 사유 코드 문자열을 주지만, 목록 이름 등을 담은 객체가 와도 화면이 죽지 않게 넓게 받는다. */
+/** run 경고: 서버(routes_agent._warnings)는 {phase, reason, http_status} — phase 는 목록의 화면 이름(storageclasses·
+ *  persistentvolumes …). 사유 코드 문자열·다른 객체가 와도 화면이 죽지 않게 넓게 받는다. */
 export type RunWarning = string | Record<string, unknown>;
 
 export interface ClusterLastRun {
@@ -66,10 +67,11 @@ export interface ClusterBody {
   insecure_skip_tls_verify: boolean; enabled: boolean;
 }
 
-/** run 변경 요약 한 목록(pvcs·bindings …): 개수 + 이름 상위 50. names 는 목록 하나이거나 추가·삭제로 나뉜 객체다. */
+/** run 변경 요약 한 목록(pvcs·bindings …): 개수 + 이름 상위 50(repositories.k8s._diff_apply). changed = 키는 같고 내용만 바뀐
+ *  행(PVC Pending→Bound·재생성, 바인딩 subjects 등). names 는 목록 하나이거나 추가·삭제·바뀜으로 나뉜 객체다. */
 export interface ChangeEntry {
-  added: number | null; removed: number | null;
-  names?: string[] | { added?: string[] | null; removed?: string[] | null } | null;
+  added: number | null; removed: number | null; changed?: number | null;
+  names?: string[] | { added?: string[] | null; removed?: string[] | null; changed?: string[] | null } | null;
 }
 
 export interface SyncRun {
@@ -78,12 +80,14 @@ export interface SyncRun {
   duration_ms: number | null; reason: string | null; phase: string | null; http_status: number | null;
   error: string | null; server_version: string | null;
   counts: Record<string, number | null> | null; warnings: RunWarning[] | null;
-  changes: Record<string, ChangeEntry> | null;
+  // 목록 값 null = 이번 run 이 그 선택 목록(SC·PV)을 받지 못함(403 등 — 이전 값 유지).
+  changes: Record<string, ChangeEntry | null> | null;
 }
 
+/** StorageClass 예시 경로(routes_k8s._sample_view): reason = 사유 코드(화면 문구), problem = 영문 진단(보조 표시). */
 export interface ScSample {
   namespace: string; pvc: string; volume: string | null;
-  root: string | null; abs_root: string | null; problem: string | null;
+  root: string | null; abs_root: string | null; reason?: string | null; problem: string | null;
 }
 
 export interface StorageClassRow {
@@ -125,8 +129,9 @@ export interface UserVolumesResponse {
  *  target | source | destination 에 싣는다('' = PV 전체 — rm 은 서버가 pv_root_rm_forbidden). 같은 쪽에 storage 와 함께 주면 422. */
 export interface PvRef { cluster: string; namespace: string; pvc: string }
 
+/** pvc = PVC 이름 정확 일치(고른 PV 재해석 — 부분 일치 q 는 상한에 잘릴 수 있다). */
 export interface VolumesQuery {
-  cluster?: string; namespace?: string; storage_class?: string; q?: string; user?: string; limit?: number;
+  cluster?: string; namespace?: string; storage_class?: string; q?: string; pvc?: string; user?: string; limit?: number;
 }
 
 export interface BindingSubject { kind: string; name: string; namespace?: string | null }
@@ -136,8 +141,10 @@ export interface BindingRef {
   name: string; role_kind?: string | null; role_name?: string | null; subjects?: BindingSubject[] | null;
 }
 
+/** 서버(routes_k8s.admin_access)는 binding 을 이름 문자열로, 역할 이름·subjects 를 grant 바로 아래에 싣는다. */
 export interface AccessGrant {
   cluster: string; namespace: string; access: K8sAccess | string; binding: string | BindingRef;
+  role_name?: string | null; subjects?: BindingSubject[] | null;
   subject_mismatch: boolean | null;
 }
 

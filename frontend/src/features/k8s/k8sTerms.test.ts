@@ -85,9 +85,15 @@ describe("callerNodeState", () => {
 test("warningText·changeNames·phaseVariant·storageKindOf", () => {
   expect(warningText("k8s_sync_forbidden")).not.toBe("");
   expect(warningText({ list: "pvs", reason: "zz_unknown" })).toBe("pvs: zz_unknown");
+  // 서버 와이어 모양(routes_agent._warnings): {phase, reason, http_status} — phase 는 목록 라벨로
+  expect(warningText({ phase: "persistentvolumes", reason: "zz_unknown", http_status: 403 })).toBe("볼륨(PV) 목록: zz_unknown");
+  expect(warningText({ reason: "zz_unknown", http_status: null })).toBe("zz_unknown");
   expect(changeNames({ added: 2, removed: 0, names: ["a", "b"] })).toEqual({ added: [], removed: [], other: ["a", "b"] });
   expect(changeNames({ added: 1, removed: 1, names: { added: ["a"], removed: ["b"] } }))
     .toEqual({ added: ["a"], removed: ["b"], other: [] });
+  expect(changeNames({ added: 0, removed: 0, changed: 1, names: { added: [], removed: [], changed: ["c"] } }))
+    .toEqual({ added: [], removed: [], other: ["c"] });
+  expect(changeNames(null)).toEqual({ added: [], removed: [], other: [] });
   expect(phaseVariant("Bound")).toBe("ok");
   expect(phaseVariant("Pending")).toBe("action");
   expect(phaseVariant(null)).toBe("neutral");

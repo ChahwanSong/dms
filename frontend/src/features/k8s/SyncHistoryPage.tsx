@@ -24,17 +24,20 @@ const errText = (e: unknown): string =>
 
 const SELECT_FIELD = "max-w-[14rem] rounded-lg border border-line bg-surface px-2 py-1.5 text-sm";
 
-/** 표 「변경」 칸 한 줄 — 「PVC +2 −1 · 바인딩 +1」. 변경이 없으면 「변경 없음」, 정보가 없으면(실패·진행 중) null. */
-export function changeSummary(changes: Record<string, ChangeEntry> | null | undefined): string | null {
+/** 표 「변경」 칸 한 줄 — 「PVC +2 −1 ~1 · 바인딩 +1」(~ = 내용만 바뀜: Pending→Bound 등). 변경이 없으면 「변경 없음」, 정보가
+ *  없으면(실패·진행 중) null. 목록 값 null(그 선택 목록을 못 받음)은 건너뛴다 — 상세가 따로 알린다. */
+export function changeSummary(changes: Record<string, ChangeEntry | null> | null | undefined): string | null {
   if (!changes) return null;
   const parts: string[] = [];
   for (const [k, e] of Object.entries(changes)) {
     if (!e || typeof e !== "object") continue;
     const add = typeof e.added === "number" ? e.added : 0;
     const rem = typeof e.removed === "number" ? e.removed : 0;
-    if (add === 0 && rem === 0) continue;
+    const chg = typeof e.changed === "number" ? e.changed : 0;
+    if (add === 0 && rem === 0 && chg === 0) continue;
     const label = k === "pvcs" ? "PVC" : k === "bindings" || k === "role_bindings" ? "바인딩" : (CHANGE_LABEL[k] ?? k);
-    parts.push(`${label} ${add > 0 ? `+${add}` : ""}${add > 0 && rem > 0 ? " " : ""}${rem > 0 ? `−${rem}` : ""}`);
+    const marks = [add > 0 ? `+${add}` : null, rem > 0 ? `−${rem}` : null, chg > 0 ? `~${chg}` : null].filter(Boolean);
+    parts.push(`${label} ${marks.join(" ")}`);
   }
   return parts.length === 0 ? "변경 없음" : parts.join(" · ");
 }
@@ -100,23 +103,35 @@ function RunDetail({ r }: { r: SyncRun }) {
             : changes.length === 0 ? <p className="text-ink/70">변경 없음</p> : (
               <div className="space-y-3">
                 {changes.map(([k, e]) => {
+                  // null = 이번 run 이 그 선택 목록(SC·PV)을 받지 못함 — 이전 값을 그대로 둔다(경고 줄이 사유를 말한다).
+                  if (!e || typeof e !== "object") {
+                    return (
+                      <div key={k} className="rounded-lg border border-line px-3 py-2">
+                        <p className="font-medium">
+                          {CHANGE_LABEL[k] ?? k}
+                          <span className="ml-2 font-normal text-ink/70">이번에 받지 못함(목록 권한 없음 등 — 이전 값 유지)</span>
+                        </p>
+                      </div>
+                    );
+                  }
                   const names = changeNames(e);
+                  const listed = names.added.length + names.removed.length + names.other.length;
                   return (
                     <div key={k} className="rounded-lg border border-line px-3 py-2">
                       <p className="font-medium">
                         {CHANGE_LABEL[k] ?? k}
                         <span className="ml-2 font-normal tabular-nums text-ink/80">
                           {`추가 ${countText(e.added)} · 삭제 ${countText(e.removed)}`}
+                          {e.changed !== undefined && ` · 바뀜 ${countText(e.changed)}`}
                         </span>
                       </p>
                       <div className="mt-1.5 space-y-2">
                         <NameList title="추가" names={names.added} tone="ok" />
                         <NameList title="삭제" names={names.removed} tone="bad" />
-                        <NameList title="바뀐 이름" names={names.other} tone="neutral" />
+                        <NameList title="바뀜(내용만 — 상태·바인딩 대상 등)" names={names.other} tone="neutral" />
                       </div>
-                      {((e.added ?? 0) + (e.removed ?? 0)) > names.added.length + names.removed.length + names.other.length
-                        && names.added.length + names.removed.length + names.other.length > 0 && (
-                        <p className="mt-1 text-xs text-ink/70">이름은 상위 50개까지만 기록합니다</p>
+                      {(e.added ?? 0) + (e.removed ?? 0) + (e.changed ?? 0) > listed && listed > 0 && (
+                        <p className="mt-1 text-xs text-ink/70">이름은 종류마다 상위 50개까지만 기록합니다</p>
                       )}
                     </div>
                   );

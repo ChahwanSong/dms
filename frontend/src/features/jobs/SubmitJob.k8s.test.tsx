@@ -77,12 +77,14 @@ function adminVolumes(url: URL): VolumesResponse {
   const q = (url.searchParams.get("q") ?? "").toLowerCase();
   const cluster = url.searchParams.get("cluster");
   const namespace = url.searchParams.get("namespace");
+  const pvc = url.searchParams.get("pvc");                     // 이름 정확 일치(서버 repositories.k8s.volumes 의 pvc)
   let rows = [A_DATASETS, A_MODELS, A_PENDING, B_MODELS, B_SCRATCH, C_ARCHIVE];
   if (user === "alice") rows = rows.filter((r) => r.namespace === "team-a" || r.namespace === "team-b");
   else if (user === "cocoa.song") rows = rows.filter((r) => r.namespace === "team-b");
   else if (user !== null) rows = [];
   if (cluster) rows = rows.filter((r) => r.cluster === cluster);
   if (namespace) rows = rows.filter((r) => r.namespace === namespace);
+  if (pvc) rows = rows.filter((r) => r.pvc === pvc);
   if (q) rows = rows.filter((r) => [r.pvc, r.namespace, r.volume ?? "", r.storage_class ?? ""].some((v) => v.includes(q)));
   return { clusters: FRESH, truncated: false, volumes: rows.map((r) => ({ ...r, users: ["alice"] })) };
 }
@@ -345,7 +347,8 @@ test("면제 관리자: 권한 기준 사용자 비움 = 전체 PV 검색(상한
   const results = await screen.findByRole("radiogroup", { name: "소스 검색 결과 목록" });
   await waitFor(() => expect(within(results).getAllByRole("radio")).toHaveLength(1));
   await userEvent.click(within(results).getByRole("radio"));
-  await waitFor(() => expect(adminVolumeUrls.some((u) => u.includes("namespace=team-c") && u.includes("q=archive")))
+  // 고른 PV 재해석은 이름 정확 일치(pvc=) — 부분 일치 q 는 같은 namespace 에 겹치는 이름이 많으면 상한에 잘렸다(2026-10-26).
+  await waitFor(() => expect(adminVolumeUrls.some((u) => u.includes("namespace=team-c") && u.includes("pvc=archive")))
     .toBe(true));
   expect(await screen.findByText("실제 경로: /k8s_pv/nfs/team-c/archive (PV 전체)")).toBeInTheDocument();
   const mode = screen.getByRole("group", { name: "목적지 지정 방식" });

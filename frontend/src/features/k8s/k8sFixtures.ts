@@ -84,14 +84,15 @@ export const ACCESS: AccessResponse = {
       { cluster: "dmsk8s", namespace: "team-b", access: "admin", binding: "alice-clusterrole-admin", subject_mismatch: null },
     ] },
     { dms_user: "junwoo.song", account_exists: true, volume_count: 3, namespaces: [
+      // 서버 모양(routes_k8s.admin_access): binding 은 이름, role_name·subjects 는 grant 바로 아래.
       { cluster: "dmsk8s", namespace: "team-a", access: "admin", subject_mismatch: false,
-        binding: { name: "junwoo-song-clusterrole-admin", role_kind: "ClusterRole", role_name: "kubeflow-admin",
-                   subjects: [{ kind: "User", name: "junwoo.song@example.com" }] } },
+        binding: "junwoo-song-clusterrole-admin", role_name: "kubeflow-admin",
+        subjects: [{ kind: "User", name: "junwoo.song@example.com" }] },
     ] },
     { dms_user: "user.yo.hong.example.com", account_exists: false, volume_count: 3, namespaces: [
       { cluster: "dmsk8s", namespace: "team-a", access: "edit", subject_mismatch: true,
-        binding: { name: "user-yo-hong-example-com-clusterrole-edit", role_kind: "ClusterRole", role_name: "kubeflow-edit",
-                   subjects: [{ kind: "User", name: "yo.hong@example.com" }] } },
+        binding: "user-yo-hong-example-com-clusterrole-edit", role_name: "kubeflow-edit",
+        subjects: [{ kind: "User", name: "yo.hong@example.com" }] },
     ] },
   ],
   unrecognized: [
