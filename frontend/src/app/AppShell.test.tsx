@@ -41,7 +41,7 @@ function renderShell(role: "user" | "admin", at = "/jobs") {
 
 // 구 AppShell 실측 16링크(작업4+스토리지3+운영5+관리4). 라벨은 기존 문구 그대로.
 const ADMIN_ONLY_LABELS = [
-  "스토리지", "노드", "아티팩트 경로", "대시보드", "배치 작업",
+  "스토리지", "k8s 연동", "노드", "아티팩트 경로", "대시보드", "배치 작업",
   "빌드", "릴리스", "컨트롤 상태", "계정", "정책", "denylist", "감사 로그",
 ];
 const USER_LABELS = ["전체 작업", "단일 작업"];

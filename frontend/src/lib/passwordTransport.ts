@@ -23,7 +23,7 @@ export const SESSION_KEY_INFO = "dms-password-transport-v1/aes-256-gcm";
 export const AAD_PREFIX = "dms-password-transport-v1";
 
 /** 비밀번호를 받는 엔드포인트마다 하나 -- 서버 PURPOSES 와 같은 값. */
-export type Purpose = "login" | "signup" | "password_reset" | "admin_create" | "mail_relay_token";
+export type Purpose = "login" | "signup" | "password_reset" | "admin_create" | "mail_relay_token" | "k8s_cluster_token";
 
 export interface TransportKey { version: number; kid: string; public_key: string }
 export interface EncryptedPassword {

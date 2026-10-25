@@ -16,9 +16,10 @@ export const SEARCH_DEBOUNCE_MS = 300;
  *  - 앞뒤 공백만 바뀐 입력(끝에 띄어쓰기)은 적용값이 같아 다시 묻지 않는다. */
 // 호환 자모(ㄱ~ㆎ) -- 조합 중 끝에 홀로 남은 자음·모음. 완성 음절(가~힣)은 건드리지 않는다.
 const TRAILING_JAMO = /[ㄱ-ㆎ]+$/u;
-export function useSearchField() {
-  const [input, setInput] = useState("");
-  const [applied, setApplied] = useState("");
+// initial(2026-10-25 k8s 연동 「사용자 권한」의 ?q=): 주소로 들어온 검색어는 디바운스 없이 첫 조회부터 적용한다.
+export function useSearchField(initial = "") {
+  const [input, setInput] = useState(initial);
+  const [applied, setApplied] = useState(() => initial.trim());
   const composing = useRef(false);
   // 조합이 끝날 때마다 올린다 -- 조합 중 마지막 onChange 와 끝 값이 같으면 input 이 안 바뀌어 디바운스가 다시 걸리지 않는다
   // (조합 중에 적용한 값은 자모를 뗀 값이라, 끝난 뒤 전체 값으로 다시 맞춰야 한다).

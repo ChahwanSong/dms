@@ -16,14 +16,21 @@ function dmsItems(): { group: string; groupAdminOnly: boolean; item: NavItem }[]
     g.items.map((item) => ({ group: g.label, groupAdminOnly: g.adminOnly === true, item })));
 }
 
-test("현행 사이드바 17링크가 전부 데이터에 있다(전수 -- 초과도 누락도 없다)", () => {
+// 2026-10-25(dms-k8s): 스토리지 그룹에 「k8s 연동」(/admin/k8s) -- 하위 넷은 화면 안 탭이라 링크 수엔 하나만 더한다.
+test("현행 사이드바 18링크가 전부 데이터에 있다(전수 -- 초과도 누락도 없다)", () => {
   const paths = dmsItems().map((x) => x.item.path).sort();
   expect(paths).toEqual([
     "/admin/accounts", "/admin/artifact-base", "/admin/audit", "/admin/batches",
-    "/admin/builds", "/admin/control", "/admin/dashboard", "/admin/denylist", "/admin/mail",
+    "/admin/builds", "/admin/control", "/admin/dashboard", "/admin/denylist", "/admin/k8s", "/admin/mail",
     "/admin/nodes", "/admin/policies", "/admin/portal", "/admin/releases",
     "/admin/storages", "/admin/usage", "/jobs", "/jobs/new",
   ].sort());
+});
+
+test("k8s 연동은 스토리지 그룹(관리자 전용)의 스토리지와 노드 사이다", () => {
+  const storage = (NAVIGATION[0].groups ?? []).find((g) => g.label === "스토리지")!;
+  expect(storage.adminOnly).toBe(true);
+  expect(storage.items.map((i) => i.label)).toEqual(["스토리지", "k8s 연동", "노드"]);
 });
 
 test("adminOnly 표시가 기존 isAdmin 게이트와 일치한다", () => {
@@ -103,6 +110,22 @@ describe("breadcrumbFor", () => {
     };
     expect(last("/admin/builds/history")).toBe("빌드 이력");
     expect(last("/admin/builds/abc123")).toBe("빌드 상세");
+  });
+});
+
+describe("k8s 연동 하위 화면(탭)", () => {
+  // 하위 넷은 사이드바 항목이 아니라 DETAIL_ROUTES 를 탄다 -- 크럼 끝 라벨 = 탭 라벨 = h1(router.test), 사이드바는 「k8s 연동」.
+  const SUB: [string, string][] = [
+    ["/admin/k8s/storageclasses", "StorageClass"], ["/admin/k8s/volumes", "PV 탐색"],
+    ["/admin/k8s/access", "사용자 권한"], ["/admin/k8s/history", "동기화 이력"],
+  ];
+  test("개요는 사이드바 항목 크럼", () => {
+    expect(breadcrumbFor("/admin/k8s").map((c) => c.label)).toEqual(["HOME", "DMS", "스토리지", "k8s 연동"]);
+    expect(activeNavPath("/admin/k8s")).toBe("/admin/k8s");
+  });
+  test.each(SUB)("%s = 「k8s 연동」 아래 「%s」, 사이드바는 k8s 연동이 켜진다", (path, label) => {
+    expect(breadcrumbFor(path).map((c) => c.label)).toEqual(["HOME", "DMS", "스토리지", "k8s 연동", label]);
+    expect(activeNavPath(path)).toBe("/admin/k8s");
   });
 });
 
