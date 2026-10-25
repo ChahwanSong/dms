@@ -30,6 +30,11 @@ import { BuildHistory } from "../features/builds/BuildHistory";
 import { RegistryImages } from "../features/builds/RegistryImages";
 import { BuildDetail } from "../features/builds/BuildDetail";
 import { ReleasesPage } from "../features/releases/ReleasesPage";
+import { K8sOverview } from "../features/k8s/K8sOverview";
+import { StorageClassesPage } from "../features/k8s/StorageClassesPage";
+import { VolumesPage } from "../features/k8s/VolumesPage";
+import { AccessPage } from "../features/k8s/AccessPage";
+import { SyncHistoryPage } from "../features/k8s/SyncHistoryPage";
 
 function Home() {
   const me = useMe();
@@ -84,6 +89,12 @@ export function AppRouter() {
           <Route path="/admin/artifact-base" element={<RequireRole role="admin"><AppShell><ArtifactBasePage /></AppShell></RequireRole>} />
           <Route path="/admin/accounts" element={<RequireRole role="admin"><AppShell><AccountsList /></AppShell></RequireRole>} />
           <Route path="/admin/nodes" element={<RequireRole role="admin"><AppShell><NodesList /></AppShell></RequireRole>} />
+          {/* k8s 연동(dms-k8s 설계 §7): 개요 + 하위 넷(탭 K8sTabs). 정적 경로뿐이라 순서 함정은 없다. */}
+          <Route path="/admin/k8s" element={<RequireRole role="admin"><AppShell><K8sOverview /></AppShell></RequireRole>} />
+          <Route path="/admin/k8s/storageclasses" element={<RequireRole role="admin"><AppShell><StorageClassesPage /></AppShell></RequireRole>} />
+          <Route path="/admin/k8s/volumes" element={<RequireRole role="admin"><AppShell><VolumesPage /></AppShell></RequireRole>} />
+          <Route path="/admin/k8s/access" element={<RequireRole role="admin"><AppShell><AccessPage /></AppShell></RequireRole>} />
+          <Route path="/admin/k8s/history" element={<RequireRole role="admin"><AppShell><SyncHistoryPage /></AppShell></RequireRole>} />
           {/* 빌드는 하위 페이지 셋: 기본(/admin/builds)이 빌드하기, /history 가 이력,
               /images 가 이미지 관리. 「history」·「images」는 :buildId 패턴에도
               매칭되므로 **먼저** 와야 한다(/admin/batches/new vs :batchId 와 같은

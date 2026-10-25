@@ -167,6 +167,49 @@ test("admin can open releases screen", async () => {
   expect(await screen.findByRole("heading", { name: "릴리스" })).toBeInTheDocument();
 });
 
+// k8s 연동(dms-k8s 설계 §7): 개요 h1 = 사이드바 라벨 「k8s 연동」, 하위 넷 h1 = 탭·크럼 라벨(빌드 이력 선례).
+const K8S_OVERVIEW = {
+  now: "2026-10-25T00:00:00Z",
+  settings: { primary_node: null, secondary_node: null, interval_seconds: 300, poll_seconds: 15 },
+  nodes: [], clusters: [], totals: { clusters: 0, namespaces: 0, pvcs: 0, bindings: 0, users: 0 },
+};
+const k8sHandlers = () => [
+  http.get("/api/auth/me", () => HttpResponse.json({ actor: "admin", role: "admin" })),
+  http.get("/api/admin/k8s/overview", () => HttpResponse.json(K8S_OVERVIEW)),
+  http.get("/api/admin/nodes", () => HttpResponse.json([])),
+  http.get("/api/admin/storages", () => HttpResponse.json([])),
+  http.get("/api/admin/k8s/storage-classes", () => HttpResponse.json([])),
+  http.get("/api/admin/k8s/volumes", () => HttpResponse.json({ clusters: [], truncated: false, volumes: [] })),
+  http.get("/api/admin/k8s/access", () => HttpResponse.json({ clusters: [], users: [], unrecognized: [] })),
+  http.get("/api/admin/k8s/runs", () => HttpResponse.json([])),
+  http.get("/api/admin/k8s/clusters", () => HttpResponse.json([])),
+];
+
+test.each([
+  ["/admin/k8s", "k8s 연동"],
+  ["/admin/k8s/storageclasses", "StorageClass"],
+  ["/admin/k8s/volumes", "PV 탐색"],
+  ["/admin/k8s/access", "사용자 권한"],
+  ["/admin/k8s/history", "동기화 이력"],
+])("admin can open %s (h1 %s)", async (path, heading) => {
+  server.use(...k8sHandlers());
+  renderAt(path);
+  expect(await screen.findByRole("heading", { name: heading, level: 1 })).toBeInTheDocument();
+  // 하위 내비는 다섯 탭 -- 지금 화면이 aria-current 로 켜진다.
+  const nav = screen.getByRole("navigation", { name: "k8s 연동 하위 메뉴" });
+  expect(nav.querySelectorAll("a")).toHaveLength(5);
+  expect(nav.querySelector('[aria-current="page"]')).not.toBeNull();
+});
+
+test("user visiting /admin/k8s is redirected to /jobs", async () => {
+  server.use(
+    http.get("/api/auth/me", () => HttpResponse.json({ actor: "alice", role: "user" })),
+    http.get("/api/user/requests", () => HttpResponse.json([])),
+  );
+  renderAt("/admin/k8s/access");
+  expect(await screen.findByRole("heading", { name: "전체 작업" })).toBeInTheDocument();
+});
+
 test("me 500 이면 / 는 오류 문구 + 재시도를 렌더하고 어디로도 리다이렉트하지 않는다", async () => {
   // §2.4-5: /api/auth/me 의 일시 500/네트워크 오류를 /login 으로 보내면 로그인된
   // 관리자가 "세션 만료"로 오독하고 재로그인한다 -- 오류 화면 + 재시도가 정직하다.
