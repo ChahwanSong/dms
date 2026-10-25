@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
@@ -46,7 +46,16 @@ test("전체 작업: 요청자·대상 요약 등 풍부한 정보를 표시한�
 });
 
 const searchBox = () => screen.getByRole("searchbox", { name: "작업 검색" }) as HTMLInputElement;
-const SEARCH_HELP = "여러 단어는 하나라도 맞으면 표시합니다(부분 일치, 대소문자 무시)";
+// 설명(title): 낱말 OR · 부분 일치 · 대소문자 무시 · id 는 **앞부분** 일치(2026-10-25 리뷰 -- 「부분 일치」만이면 id 끝을
+// 붙여 넣고 0건에 당황한다) · 절대경로. 비관리자 문구엔 배치 id 가 없다(그들 화면엔 배치 id 가 없다).
+const SEARCH_HELP_USER =
+  "여러 단어는 하나라도 맞으면 표시 · 부분 일치 · 대소문자 무시 · 요청 ID 는 앞부분 일치 · 경로는 /로 시작하는 전체 경로도 가능";
+const SEARCH_HELP_ADMIN =
+  "여러 단어는 하나라도 맞으면 표시 · 부분 일치 · 대소문자 무시 · 요청/배치 ID 는 앞부분 일치 · 경로는 /로 시작하는 전체 경로도 가능";
+/** 검색 결과 알림(숨은 라이브 리전 -- 필터 줄 search 랜드마크 안의 status). 관리자 툴바의 status 와 구별한다. */
+const searchStatus = () => within(screen.getByRole("search", { name: "작업 검색·필터" })).getByRole("status");
+/** 보이는 빈 결과 안내(같은 글자를 숨은 알림 줄도 말한다 -- 라이브 리전이 아닌 쪽). */
+const VISIBLE = { selector: ":not([role=status])" };
 /** 받은 목록 요청 주소들의 한 파라미터 값(없으면 null). */
 const paramsOf = (urls: string[], key: string) => urls.map((u) => new URL(u).searchParams.get(key));
 const lastParam = (urls: string[], key: string) => new URL(urls[urls.length - 1]).searchParams.get(key);
@@ -63,12 +72,16 @@ test("요청자 필터는 운영자에게만, 검색 칸은 누구에게나 -- �
   expect(screen.getByLabelText("연산 필터")).toBeInTheDocument();     // 연산·상태는 공용
   expect(searchBox().placeholder).toBe("경로·요청 ID 검색");
   expect(searchBox().maxLength).toBe(200);                            // 서버 q 상한(max_length=200)과 같다
-  expect(searchBox()).toHaveAccessibleDescription(SEARCH_HELP);      // 여러 단어 = 하나라도(title -- 설명으로도 읽힌다)
+  expect(searchBox()).toHaveAccessibleDescription(SEARCH_HELP_USER);  // 여러 단어 = 하나라도(title -- 설명으로도 읽힌다)
+  expect(searchStatus()).toBeEmptyDOMElement();                      // 검색 결과 알림 줄은 비관리자에게도 늘 있다
   unmount();
   wrap(meAdmin);
   const requester = await screen.findByLabelText("요청자 필터") as HTMLInputElement;
   expect(requester.placeholder).toBe("요청자 아이디(일부)");
-  expect(searchBox().placeholder).toBe("요청자·배치 이름·경로·요청 ID 검색");
+  // 「ID」 = 요청·배치 id(「요청 ID」는 768 에서 끝 글자가 잘렸다 -- 폭은 e2e E14 가 잰다).
+  expect(searchBox().placeholder).toBe("요청자·배치 이름·경로·ID 검색");
+  expect(searchBox()).toHaveAccessibleDescription(SEARCH_HELP_ADMIN);
+  expect(searchStatus()).toBeEmptyDOMElement();
 });
 
 test("필터를 바꾸면 서버 쿼리에 operation·state·requester 가 실린다 -- 요청자는 디바운스·trim(글자마다 묻지 않는다)", async () => {
@@ -119,15 +132,88 @@ test("검색 결과가 없으면 「‘검색어’에 맞는 작업이 없습�
   wrap(meUser);
   await screen.findByText("r1", { exact: false });
   await userEvent.type(searchBox(), " 없는경로 ");
-  expect(await screen.findByText("‘없는경로’에 맞는 작업이 없습니다")).toBeInTheDocument();
+  expect(await screen.findByText("‘없는경로’에 맞는 작업이 없습니다", VISIBLE)).toBeInTheDocument();
   expect(screen.queryByText("조건에 맞는 작업이 없습니다")).toBeNull();     // 검색이 없을 때의 문구가 아니다
   await userEvent.click(screen.getByRole("button", { name: "검색 지우기" }));
-  // 디바운스(300ms)를 기다리지 않는다 -- 누른 즉시 확정값까지 비어 안내가 사라진다.
+  // 디바운스(300ms)를 기다리지 않는다 -- 누른 즉시 확정값까지 비어 안내가 사라진다(숨은 알림 줄도 비는 것까지 --
+  // queryByText 는 둘 중 어느 것이 남아도 잡는다).
   expect(screen.queryByText("‘없는경로’에 맞는 작업이 없습니다")).toBeNull();
   expect(searchBox().value).toBe("");
   expect(document.activeElement).toBe(searchBox());                   // 사라진 버튼 대신 검색 칸(<body> 아님)
   await screen.findByText("r1", { exact: false });
   expect(new URL(urls[urls.length - 1]).searchParams.has("q")).toBe(false);
+});
+
+test("검색 결과는 늘 있는 숨은 라이브 리전이 말한다(비관리자도) -- 「‘x’ 검색 결과 N건(이상)」·「‘x’에 맞는 작업이 없습니다」, 로딩 중·검색 없음은 빈 줄", async () => {
+  // 2026-10-25 리뷰(WCAG 4.1.3): 보이는 빈 결과 안내는 새로 생기는 노드라 읽히지 않고, 비관리자 화면엔 라이브 리전이 아예
+  // 없었다. 한 쪽(50건)이 꽉 차면 다음 쪽이 있다 -- 불러온 수 + 「이상」(전체 수를 서버에 세게 하지 않는다).
+  const fifty = Array.from({ length: 50 }, (_, i) => row(`m${String(i + 1).padStart(3, "0")}`));
+  const urls: string[] = [];
+  server.use(http.get("/api/user/requests", async ({ request }) => {
+    urls.push(request.url);
+    const q = new URL(request.url).searchParams.get("q");
+    if (q === "many") { await delay(300); return HttpResponse.json(fifty); }   // 로딩 동안을 본다(아래)
+    if (q === "proj") return HttpResponse.json([row("r1"), row("r2")]);
+    return HttpResponse.json(q === null ? [row("r1"), row("r2"), row("r3")] : []);
+  }));
+  wrap(meUser);
+  await screen.findByText("r3");
+  // 늘 있다 -- 검색 전에도 노드가 있고 비어 있다(라이브 리전은 내용이 바뀌기 전부터 DOM 에 있어야 읽힌다).
+  expect(searchStatus()).toBeEmptyDOMElement();
+  await userEvent.type(searchBox(), "proj");
+  await waitFor(() => expect(searchStatus().textContent).toBe("‘proj’ 검색 결과 2건"));   // 다음 쪽 없음 -- 「이상」 없이
+  // 로딩 중(새 검색어의 첫 결과 전)엔 비운다 -- 아직 없는 결과를 「없습니다」로 말하지 않는다(isPending 가드 변이 검사).
+  await userEvent.clear(searchBox());
+  await userEvent.type(searchBox(), "many");
+  await waitFor(() => expect(lastParam(urls, "q")).toBe("many"));
+  expect(searchStatus()).toBeEmptyDOMElement();
+  await waitFor(() => expect(searchStatus().textContent).toBe("‘many’ 검색 결과 50건 이상"));
+  await userEvent.clear(searchBox());
+  await userEvent.type(searchBox(), "없는경로");
+  await waitFor(() => expect(searchStatus().textContent).toBe("‘없는경로’에 맞는 작업이 없습니다"));
+  expect(screen.getByText("‘없는경로’에 맞는 작업이 없습니다", VISIBLE)).toBeVisible();     // 보이는 안내는 그대로
+  // 검색을 지우면 빈 줄(연산·상태만의 목록까지 세어 읽지 않는다).
+  await userEvent.click(screen.getByRole("button", { name: "검색 지우기" }));
+  expect(searchStatus()).toBeEmptyDOMElement();
+  await screen.findByText("r3");
+  expect(searchStatus()).toBeEmptyDOMElement();
+});
+
+test("한글 조합 중엔 확정하지 않는다 -- 「뱇」(ㅊ 이 아직 받침)에서 멈춰도 묻지 않고, 조합이 끝나면 디바운스 뒤 q=배치 · 요청자 칸도 같다", async () => {
+  const urls: string[] = [];
+  server.use(http.get("/api/user/requests", ({ request }) => {
+    urls.push(request.url); return HttpResponse.json([row("r1")]);
+  }));
+  wrap(meAdmin);
+  const requester = await screen.findByLabelText("요청자 필터");
+  await screen.findByText("r1", { exact: false });
+  const sent = (key: string) => paramsOf(urls, key).filter((v) => v !== null);
+  const pause = () => act(() => new Promise((r) => setTimeout(r, 650)));   // 디바운스(300ms)의 두 배를 넘겨 멈춘다
+  const box = searchBox();
+  fireEvent.compositionStart(box);
+  fireEvent.change(box, { target: { value: "뱇" } });
+  await pause();
+  expect(sent("q")).toEqual([]);
+  // 다음 모음(ㅣ)이 「배」를 끝내고 곧바로 「치」 조합을 연다(같은 키 입력) -- 그 틈에도 확정하지 않는다.
+  fireEvent.compositionEnd(box, { data: "배" });
+  fireEvent.compositionStart(box);
+  fireEvent.change(box, { target: { value: "배치" } });
+  await pause();
+  expect(sent("q")).toEqual([]);
+  // 조합이 끝나면(Enter·스페이스·포커스 이동) 같은 디바운스로 확정한다.
+  fireEvent.compositionEnd(box, { data: "치" });
+  await waitFor(() => expect(lastParam(urls, "q")).toBe("배치"));
+  expect(sent("q")).toEqual(["배치"]);
+  // 요청자 칸(관리자)도 같은 표식을 쓴다.
+  fireEvent.compositionStart(requester);
+  fireEvent.change(requester, { target: { value: "긺" } });
+  await pause();
+  expect(sent("requester")).toEqual([]);
+  fireEvent.change(requester, { target: { value: "김" } });
+  fireEvent.compositionEnd(requester, { data: "김" });
+  await waitFor(() => expect(lastParam(urls, "requester")).toBe("김"));
+  expect(sent("requester")).toEqual(["김"]);
+  expect(lastParam(urls, "q")).toBe("배치");
 });
 
 test("검색·요청자 필터 중엔 목록 폴링이 10초(드문 낱말 = 표 전수 훑기 × 불러온 쪽 수), 아니면 3초", async () => {
@@ -1067,6 +1153,36 @@ test("검색어·요청자가 **확정되면** 단건·배치 선택이 비워�
   expect(status()).toHaveTextContent("1개 + 배치 1개(작업 7개) 선택됨");
   await cleared();
   expect(status()).not.toHaveTextContent("사라져");
+});
+
+test("검색어·요청자가 확정되면 직전 삭제 결과(「1개 삭제됨」)도 지운다(disarm) -- 걸러진 새 목록 위에 낡은 결과를 남기지 않는다", async () => {
+  // 2026-10-25 리뷰: 위 테스트는 선택만 보아 선택 비우기 effect 의 disarm() 을 지워도 초록이었다(결과 문구가 없는 상태에서
+  // 시작하므로). 여기선 먼저 하나를 지워 결과 문구를 띄운다.
+  let rows = mixed();
+  server.use(http.post("/api/admin/requests:delete", async ({ request }) => {
+    const ids = ((await request.json()) as { request_ids: string[] }).request_ids;
+    rows = rows.filter((r) => !ids.includes(r.request_id));
+    return HttpResponse.json({ deleted: ids.map((id) => ({ request_id: id, job_ids: [] })), skipped: [], purge_pending: 1 });
+  }));
+  wrapRows(() => rows);
+  await ready(B);
+  const deleteOne = async (id: string) => {
+    await userEvent.click(box(id));
+    await userEvent.click(screen.getByRole("button", { name: "선택 삭제" }));
+    const dlg = await screen.findByRole("dialog");
+    await userEvent.click(within(dlg).getByLabelText("되돌릴 수 없음을 확인했습니다"));
+    await userEvent.click(within(dlg).getByRole("button", { name: "1개 영구 삭제" }));
+    await waitFor(() => expect(status()).toHaveTextContent("1개 삭제됨"));
+  };
+  await deleteOne(B);
+  await userEvent.type(searchBox(), "s1");
+  expect(status()).toHaveTextContent("1개 삭제됨");                  // 타이핑 도중(아직 같은 목록)엔 그대로
+  await waitFor(() => expect(status()).toHaveTextContent(IDLE));
+  // 관리자 요청자 필터도 같다.
+  await deleteOne(E);
+  await userEvent.type(screen.getByLabelText("요청자 필터"), "ali");
+  expect(status()).toHaveTextContent("1개 삭제됨");
+  await waitFor(() => expect(status()).toHaveTextContent(IDLE));
 });
 
 test("배치 11개를 고르면 삭제 버튼이 잠기고 「배치는 10개까지」를 말한다", async () => {

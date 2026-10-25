@@ -18,7 +18,8 @@ import type { DeleteRequestsResult, PurgeStatus, RequestRow } from "../../lib/ty
 import { BATCH_BLOCK_LABEL, BATCH_ID_RE, MAX_DELETE_BATCHES, groupBatches, splitBatchName } from "./batchGroups";
 import type { BatchGroup, BatchSummary } from "./batchGroups";
 
-const field = "rounded-lg border border-line px-3 py-2 text-sm";
+// h-10: select(40px)·글 칸(py-2 만이면 38px)·검색 칸을 한 높이로(2026-10-25 리뷰 -- 한 줄의 칸 높이가 2px 어긋났다).
+const field = "h-10 rounded-lg border border-line px-3 py-2 text-sm";
 
 // 필터 select 값(빈 문자열 = 전체). 연산·상태는 도메인 열거의 미러 -- 서버는
 // 미지 값에 0건을 주므로 여기 목록이 곧 사용자에게 유효한 값 집합이다. 상태는 **요청** 상태(domain.RequestState
@@ -30,9 +31,20 @@ const STATES = ["Pending", "Planned", "Running", "Succeeded", "Failed", "Rejecte
 // (대소문자 무시)로 요청자·대상 경로·배치 이름·요청/배치 id 앞부분을 보고, 낱말 중 **하나라도** 맞으면 보인다. 서버
 // 검색인 이유: 목록은 커서 무한 스크롤이라 불러온 쪽만 거르면 아래 쪽의 맞는 행이 숨고 「마지막입니다」가 거짓이 된다.
 // 배치 이름은 비관리자 placeholder 에 적지 않는다 -- 그들의 목록엔 배치 칸이 없어 이름으로 맞은 이유가 보이지 않는다.
-const SEARCH_PLACEHOLDER_ADMIN = "요청자·배치 이름·경로·요청 ID 검색";
+// 관리자 안내의 「ID」 = 요청·배치 id 둘 다. 「요청 ID」로 두던 문구(214px)는 검색 칸 안쪽이 좁은 폭(768 -- 사이드바 고정 --
+// 208px, 가장 좁은 ~754 는 칸의 고유 폭 바닥 200px)에서 끝 글자가 잘렸다(2026-10-25 리뷰, 340~1600px 실측). 지금 문구는
+// 185px -- 늘리면 e2e E14 의 잘림 검사가 문다.
+const SEARCH_PLACEHOLDER_ADMIN = "요청자·배치 이름·경로·ID 검색";
 const SEARCH_PLACEHOLDER_USER = "경로·요청 ID 검색";
-const SEARCH_HELP = "여러 단어는 하나라도 맞으면 표시합니다(부분 일치, 대소문자 무시)";
+// 설명(title -- 접근 가능한 설명으로도 읽힌다). id 는 **앞부분**만 맞는다(서버: 4~32자 16진 낱말만 request_id·batch_id 를
+// '낱말%' 로 본다) -- 「부분 일치」만 적어 두면 상세에서 본 id 의 끝을 붙여 넣고 0건에 당황한다(2026-10-25 리뷰). /로 시작하는
+// 낱말은 서버가 그 스토리지의 managed_root 기준 「스토리지:상대경로」로도 펼친다(routes_requests._search_terms -- 화면이
+// 보이는 전체 경로(lib/storagePaths)와 같은 뿌리라 셸·화면에서 복사한 경로가 그대로 맞는다). 비관리자에겐 배치 id 를 말하지
+// 않는다(위 placeholder 와 같은 이유 -- 그들 화면엔 배치 id 가 없다).
+const searchHelp = (ids: string) =>
+  `여러 단어는 하나라도 맞으면 표시 · 부분 일치 · 대소문자 무시 · ${ids} 는 앞부분 일치 · 경로는 /로 시작하는 전체 경로도 가능`;
+const SEARCH_HELP_ADMIN = searchHelp("요청/배치 ID");
+const SEARCH_HELP_USER = searchHelp("요청 ID");
 // 타이핑마다 쿼리 키가 바뀌면 글자마다 요청(드문 낱말이면 표 전수 훑기)과 선택 비우기가 일어난다 -- 멈춘 뒤에 확정한다
 // (UsageAnalysis 경로 검색과 같은 300ms).
 const TEXT_FILTER_DEBOUNCE_MS = 300;
@@ -151,13 +163,23 @@ export function JobsList() {
   const [requester, setRequester] = useState("");
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
+  // 한글 IME 조합 중엔 확정하지 않는다(2026-10-25 리뷰): onChange 는 조합 도중에도 불려, 두벌식으로 「배치」를 치다
+  // 「뱇」(ㅊ 이 아직 받침)에서 멈추면 그 글자로 서버를 묻고(드문 낱말 = 표 전수 훑기) 선택을 비우고 「‘뱇’에 맞는 작업이
+  // 없습니다」가 깜빡였다. 조합이 끝나면(compositionend -- 다음 글자·스페이스·Enter·포커스 이동) 같은 디바운스로 확정한다.
+  // 마지막 글자는 Enter·스페이스 전까지 조합 중이라 그 키가 곧 「검색」이다(모바일 키보드는 라틴 낱말도 스페이스까지 조합으로
+  // 묶는다 -- 같은 규칙, 키보드의 검색 키가 끝낸다). 칸 둘이 한 표식을 나눈다 -- 조합은 포커스를
+  // 쥔 칸 하나에서만 일어나고, 포커스가 떠나면 브라우저가 조합을 끝낸다(compositionend). 조합 시작이 effect 를 다시 돌려
+  // 직전 입력의 대기 타이머도 지운다(라틴 글자 뒤에 곧바로 한글을 치기 시작한 경우).
+  const [composing, setComposing] = useState(false);
+  const imeProps = { onCompositionStart: () => setComposing(true), onCompositionEnd: () => setComposing(false) };
   useEffect(() => {
+    if (composing) return;
     const t = setTimeout(() => {
       setSearch(searchInput.trim());
       setRequester(requesterInput.trim());
     }, TEXT_FILTER_DEBOUNCE_MS);
     return () => clearTimeout(t);
-  }, [searchInput, requesterInput]);
+  }, [searchInput, requesterInput, composing]);
   const searchRef = useRef<HTMLInputElement>(null);
   // 「검색 지우기」(빈 결과 안내) -- 디바운스를 기다리지 않고 확정값까지 바로 비운다. 버튼은 안내와 함께 사라지므로
   // 포커스를 검색 칸으로 옮긴다(<body> 로 떨어지지 않게 -- 다음 입력 자리다).
@@ -180,6 +202,16 @@ export function JobsList() {
   // q.data 를 그대로 dep 에 쓴다(react-query 구조적 공유 -- 내용이 같은 리페치는 같은 참조). 매 렌더 새 배열이면
   // 아래 유령 선택 정리 effect 가 무한 루프가 된다(BatchesList 관례).
   const rows = useMemo(() => q.data?.pages.flat() ?? [], [q.data]);
+  // 검색 결과 알림(화면 낭독기 -- WCAG 4.1.3 상태 메시지, 2026-10-25 리뷰). 보이는 빈 결과 안내는 결과가 비어야 **새로
+  // 생기는** 노드라 라이브 리전이 될 수 없고(내용이 바뀌기 전부터 DOM 에 있어야 읽힌다 -- 툴바 상태 줄 주석), 툴바 상태 줄은
+  // 관리자 전용인 데다 검색 뒤에도 안내 문구 그대로라 비관리자에겐 들을 것이 아예 없었다. 그래서 누구에게나 **늘 있는** 숨은
+  // 줄(필터 줄 안)이 확정된 검색어의 첫 결과가 정해지면 말한다. N 은 불러온 행 수다(다음 쪽이 있으면 「이상」 -- 전체 수를
+  // 서버에 세게 하지 않는다: 드문 낱말의 COUNT 는 표 전수 훑기다). 폴링이 같은 결과를 다시 가져오면(구조적 공유 -- 같은
+  // rows) 글자가 같아 다시 읽지 않는다. 결과가 아직 없으면(isPending -- isLoading 은 멈춘(오프라인) 쿼리에서 거짓이라 빈
+  // rows 를 「없습니다」로 말한다) 비운다. 검색이 없으면 비운다(연산·상태만 바꾼 목록까지 매번 세어 읽지 않는다).
+  const searchAnnounce = search === "" || q.isPending || q.isError ? ""
+    : rows.length === 0 ? `‘${search}’에 맞는 작업이 없습니다`
+    : `‘${search}’ 검색 결과 ${rows.length}건${q.hasNextPage ? " 이상" : ""}`;
 
   // --- 선택 삭제(관리자) ---
   const del = useDeleteRequests();
@@ -349,17 +381,20 @@ export function JobsList() {
       </div>
 
       {/* 필터: 검색·연산·상태는 누구나, 요청자는 운영자만(사용자는 서버가 자기 것으로
-          강제하므로 요청자 필터가 무의미하다). */}
-      <div className="flex flex-wrap items-center gap-2">
+          강제하므로 요청자 필터가 무의미하다). 검색 칸이 있는 줄이라 search 랜드마크다(랜드마크로 바로 온다 -- 아래 숨은
+          결과 알림 줄도 이 안에 있다). */}
+      <div role="search" aria-label="작업 검색·필터" className="flex flex-wrap items-center gap-2">
         {/* 검색 칸은 줄 맨 앞(StoragePanel 경로 검색 모양 -- 좁은 폭에선 자기 행, sm 이상은 최대 24rem). 맨 앞이라
-            배치 칩의 「필터 해제」가 포커스를 돌려주는 「늘 있는 바로 앞 필터」는 그대로 상태 필터다. py-2 는 select 와
-            높이를 맞춘다. 설명(여러 단어 = 하나라도)은 title -- 접근 가능한 설명으로도 읽힌다. */}
+            배치 칩의 「필터 해제」가 포커스를 돌려주는 「늘 있는 바로 앞 필터」는 그대로 상태 필터다. 높이는 h-10 으로
+            select 와 같다(py-2 만으론 글 칸 38px 이 select 40px 보다 낮았다 -- 2026-10-25 리뷰 실측, e2e E14 가 잰다).
+            설명(여러 단어 = 하나라도 · id 는 앞부분)은 title -- 접근 가능한 설명으로도 읽힌다. */}
         <label className="relative min-w-0 flex-1 basis-full sm:max-w-sm sm:basis-auto">
           <Search aria-hidden className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
-          <input ref={searchRef} type="search" aria-label="작업 검색" maxLength={200} title={SEARCH_HELP}
+          <input ref={searchRef} type="search" aria-label="작업 검색" maxLength={200}
+                 title={isAdmin ? SEARCH_HELP_ADMIN : SEARCH_HELP_USER}
                  placeholder={isAdmin ? SEARCH_PLACEHOLDER_ADMIN : SEARCH_PLACEHOLDER_USER}
-                 value={searchInput} onChange={(e) => setSearchInput(e.target.value)}
-                 className="w-full rounded-lg border border-line bg-surface py-2 pl-8 pr-3 text-sm
+                 value={searchInput} onChange={(e) => setSearchInput(e.target.value)} {...imeProps}
+                 className="h-10 w-full rounded-lg border border-line bg-surface py-2 pl-8 pr-3 text-sm
                             placeholder:text-muted focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/20" />
         </label>
         <select aria-label="연산 필터" className={field} value={operation}
@@ -375,7 +410,7 @@ export function JobsList() {
         {/* 요청자: 부분 일치(서버가 관리자에게만 -- 비관리자의 목록은 늘 정확히 자기 것). 검색과 함께 디바운스된다. */}
         {isAdmin && (
           <input aria-label="요청자 필터" className={field} placeholder="요청자 아이디(일부)"
-                 value={requesterInput} onChange={(e) => setRequesterInput(e.target.value)} />
+                 value={requesterInput} onChange={(e) => setRequesterInput(e.target.value)} {...imeProps} />
         )}
         {/* 한 배치의 작업만 보는 중(주소 ?batch=) -- 무엇으로 걸렀는지와 푸는 길을 늘 보인다(필터가 숨어 있으면 「작업이
             사라졌다」로 읽힌다). 이름은 불러온 행의 배치 이름, 없으면 id 앞 12자. 좁은 폭에선 이름이 말줄임으로 잘리므로
@@ -387,6 +422,8 @@ export function JobsList() {
                     aria-label="배치 필터 해제" onClick={(e) => clearBatchFilter(e.detail === 0)}>필터 해제</button>
           </span>
         )}
+        {/* 검색 결과 알림(위 searchAnnounce) -- 늘 있다. sr-only(absolute)라 flex 항목이 아니어서 줄 배치·간격이 그대로다. */}
+        <p role="status" aria-live="polite" className="sr-only">{searchAnnounce}</p>
       </div>
 
       {isAdmin && (
@@ -506,7 +543,8 @@ export function JobsList() {
             </tbody>
           </Table>
           {/* 빈 결과: 검색 중이면 무엇으로 찾았는지와 푸는 길(「검색 지우기」 -- 표 **밖**이라 e2e L4 와 무관)을, 아니면
-              예전 문구 그대로. 말하는 검색어는 결과를 낸 확정값이다(입력 중인 글자가 아니다). */}
+              예전 문구 그대로. 말하는 검색어는 결과를 낸 확정값이다(입력 중인 글자가 아니다). 같은 글자를 필터 줄의 숨은
+              알림 줄(searchAnnounce)이 화면 낭독기에 읽어 준다 -- 여기는 새로 생기는 노드라 읽히지 않는다. */}
           {q.isLoading ? <p className="text-muted pt-3">불러오는 중…</p>
            : rows.length === 0 ? (search !== "" ? (
             <div className="flex flex-wrap items-center gap-2 pt-3">
