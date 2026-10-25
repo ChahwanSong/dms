@@ -71,9 +71,30 @@ export const TOKEN_LABEL: Record<string, string> = { set: "설정됨", missing: 
 export const KIND_LABEL: Record<StorageKind, string> = { filesystem: "파일시스템", pv: "PV", both: "PV·파일시스템" };
 export const ACCESS_LABEL: Record<string, string> = { admin: "admin", edit: "edit" };
 
+/** 스토리지 종류 라디오의 짧은 라벨(스토리지 등록 창) — 목록 배지는 KIND_LABEL. */
+export const KIND_CHOICES: { value: StorageKind; label: string; help: string }[] = [
+  { value: "filesystem", label: "파일시스템",
+    help: "직접 경로(스토리지 + 관리 디렉토리 아래 상대경로)로만 씁니다 — StorageClass 매핑 대상이 아닙니다." },
+  { value: "pv", label: "PV",
+    help: "k8s PV 의 실제 위치로만 씁니다 — StorageClass 를 이 스토리지에 매핑하면 PV 주소가 이 관리 디렉토리 아래로 해석됩니다. 직접 경로 선택지에는 보이지 않습니다." },
+  { value: "both", label: "둘 다",
+    help: "PV 와 직접 경로 둘 다 — 같은 파일시스템을 k8s PV 와 일반 디렉토리로 함께 씁니다(예: GPFS)." },
+];
+
+/** PV 경로 프리셋(설계 D9 — 서버 pv_paths.PRESETS 의 미러, 표시 전용). 관리 디렉토리 기준 상대 템플릿. 여기 없는 백엔드는
+ *  StorageClass 화면에서 템플릿을 지정해야 PV 를 해석할 수 있다(서버가 최종 판정 — invalid_pv_path_template). */
+export const PV_PATH_PRESETS: Record<string, string> = {
+  gpfs: "{volume}/{volume}-data",
+  onefs: "data/csi/{volume}",
+  nfs: "{subdir}",
+};
+
 /** 스토리지 응답의 kind(설계 D11) — 없거나 null 이면 filesystem(옛 행·옛 서버). */
-export function storageKindOf(s: { kind?: string | null }): StorageKind {
-  return s.kind === "pv" || s.kind === "both" ? s.kind : "filesystem";
+// 인자는 아무 스토리지 행(object) -- lib/types 의 Storage·UserStorage 는 kind 칸을 선언하지 않는다(공용 타입 파일을 브랜치마다
+// 고치지 않게). 서버가 kind 를 실으면 읽고, 없으면 filesystem.
+export function storageKindOf(s: object): StorageKind {
+  const kind = (s as { kind?: unknown }).kind;
+  return kind === "pv" || kind === "both" ? kind : "filesystem";
 }
 
 /** PVC phase 배지. Bound 만 고를 수 있다(제출 pv_not_bound). */

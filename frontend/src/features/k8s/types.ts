@@ -104,9 +104,26 @@ export interface VolumeRow {
   storage_name: string | null; root: string | null; abs_root: string | null;
   selectable: boolean; reason: string | null; access: K8sAccess | null;
   users?: string[];
+  // 1단계 백엔드가 더 싣는 칸(routes_k8s → repositories.k8s.resolve_volume). 옵션 = 옛 응답·픽스처.
+  uid?: string | null; storage_kind?: StorageKind | null; template?: string | null;
+  template_source?: "storageclass" | "preset" | null; problem?: string | null;
 }
 
 export interface VolumesResponse { clusters: ClusterFreshness[]; truncated: boolean; volumes: VolumeRow[] }
+
+/** 권한 namespace 한 줄(사용자 응답) -- PVC 가 0개여도 실린다(「권한 namespace 없음」과 「PV 없음」을 가른다). */
+export interface UserNamespace { cluster: string; namespace: string; access: K8sAccess | string | null }
+
+/** GET /api/user/k8s/volumes(routes_k8s.user_volumes). unrestricted = 맵핑 면제(관리자 + 전체 PV 권한 + 세션) -- 면제자면
+ *  namespaces 는 null(전체), volumes 는 전체. clusters 의 synced_at null = 아직 동기화 안 됨(권한 없음과 다르다). */
+export interface UserVolumesResponse {
+  clusters: ClusterFreshness[]; unrestricted: boolean; namespaces: UserNamespace[] | null;
+  truncated: boolean; volumes: VolumeRow[];
+}
+
+/** 제출 바디의 PV 주소(설계 §6): pv | source_pv | destination_pv = {cluster, namespace, pvc}. PV 안 하위경로는 같은 쪽의
+ *  target | source | destination 에 싣는다('' = PV 전체 — rm 은 서버가 pv_root_rm_forbidden). 같은 쪽에 storage 와 함께 주면 422. */
+export interface PvRef { cluster: string; namespace: string; pvc: string }
 
 export interface VolumesQuery {
   cluster?: string; namespace?: string; storage_class?: string; q?: string; user?: string; limit?: number;

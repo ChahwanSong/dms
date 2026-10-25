@@ -1,7 +1,7 @@
 export type Role = "user" | "admin";
 // can_run_as_root(2026-09-30): 이 로그인이 잡을 root 로 낼 자격(관리자 + 특권 목록 + 세션).
 // 포탈이 'root 권한으로 실행' 을 보이고 관리자 기본값(root)을 켤지 정한다 -- 표시용, 서버가 재판정.
-export interface Me { actor: string; role: Role; can_run_as_root?: boolean }
+export interface Me { actor: string; role: Role; can_run_as_root?: boolean; identity_mode?: "ldap" | "k8s"; unrestricted?: boolean; user_operations?: string[]; }
 export interface Transition {
   from_state: string | null; to_state: string;
   reason_code?: string | null; actor?: string; at: string;

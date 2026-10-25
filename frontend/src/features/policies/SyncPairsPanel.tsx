@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { useStorages } from "../storages/useStorages";
+import { useMe } from "../auth/useAuth";
 import { scopeMeta, scopeOf } from "../storages/storageScope";
 import { useAddSyncPair, useRemoveSyncPair, useSyncPairs } from "./useSyncPairs";
 import { Card } from "../../components/ui/Card";
@@ -29,6 +30,9 @@ function ScopeTag({ s }: { s: Storage }) {
 
 export function SyncPairsPanel() {
   const storagesQ = useStorages();
+  // k8s 모드(dms-k8s 설계 D14): 양쪽이 PV 주소인 sync 는 이 목록이 아니라 PV 권한(k8s rolebinding)으로 판정한다(제출·계획·컨펌이
+  // 같은 술어로 면제) -- 비면제 사용자는 PV 주소만 쓸 수 있어 사실상 이 목록이 적용되지 않는다.
+  const k8s = useMe().data?.identity_mode === "k8s";
   const pairsQ = useSyncPairs();
   const add = useAddSyncPair();
   const remove = useRemoveSyncPair();
@@ -80,6 +84,12 @@ export function SyncPairsPanel() {
           쌍입니다. 관리자와 배치 작업은 이 목록과 관계없이 모든 조합을 쓸 수 있습니다. 체크하면 바로 저장되고,
           사용자 단일 작업 화면에는 허용된 조합만 선택지로 보입니다.
         </p>
+        {k8s && (
+          <p className="mt-1 text-sm font-medium text-ink">
+            k8s 모드에서는 PV 권한으로 판정 — 양쪽이 PV 주소인 sync 는 이 목록을 보지 않고, 요청자의 namespace 권한(rolebinding
+            &lt;ID&gt;-clusterrole-edit|admin)으로 판정합니다.
+          </p>
+        )}
       </div>
       <Card className="space-y-4">
         {loading ? <p className="text-muted">불러오는 중…</p> : loadError ? (
@@ -94,7 +104,7 @@ export function SyncPairsPanel() {
                 <span className="text-muted"> · 사용자에게 적용 중 {effectiveCount}개</span>
               )}
             </p>
-            {effectiveCount === 0 && (
+            {effectiveCount === 0 && !k8s && (
               <p className="rounded-lg bg-badbg px-3 py-2 text-sm text-bad">
                 사용자에게 적용되는 허용 쌍이 없습니다 — 지금은 사용자가 sync 를 제출할 수 없습니다.
               </p>

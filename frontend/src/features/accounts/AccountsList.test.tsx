@@ -1,6 +1,7 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
 import { beforeAll, beforeEach, afterAll, afterEach, test, expect } from "vitest";
@@ -319,4 +320,52 @@ test("배포 설정 이름에 저장된 부여가 겹치면 보이고 뺄 수 �
   expect(rowOf("cfgadm")).toHaveTextContent("있음 · 배포 설정 + 부여");
   expect(within(rowOf("cfgadm")).getByRole("button", { name: "cfgadm root 실행 자격 빼기" })).toBeInTheDocument();
   expect(within(rowOf("cfgadm")).queryByRole("button", { name: /자격 주기/ })).toBeNull();
+});
+
+
+// ---- k8s 모드(dms-k8s 설계 D4·D5) -------------------------------------------------------------------------------
+
+test("k8s 모드: root 자격 열·확인 창 문구가 「전체 PV·직접 경로 권한」이다(같은 서버 경로)", async () => {
+  server.use(
+    http.get("/api/auth/me", () => HttpResponse.json({ actor: "admin", role: "admin", can_run_as_root: true,
+                                                       identity_mode: "k8s", unrestricted: true })),
+    http.get("/api/admin/accounts", () => HttpResponse.json(ROOT_ROWS)),
+  );
+  wrap();
+  await screen.findByText("newadm", { selector: "td" });
+  expect(await screen.findByRole("columnheader", { name: "전체 PV·직접 경로 권한" })).toBeInTheDocument();
+  expect(screen.queryByRole("columnheader", { name: "root 실행" })).toBeNull();
+  await userEvent.click(within(rowOf("newadm")).getByRole("button", { name: "newadm 전체 PV·직접 경로 권한 주기" }));
+  const dlg = await screen.findByRole("dialog", { name: "전체 PV·직접 경로 권한 주기" });
+  expect(dlg).toHaveTextContent("newadm 에게 전체 PV·직접 경로 권한을 줍니다.");
+  expect(dlg).toHaveTextContent("k8s 권한(namespace 의 rolebinding)과 관계없이 모든 클러스터의 PV 와 직접 경로");
+  expect(dlg).toHaveTextContent("이 계정의 비밀번호를 아는 사람은 누구나 모든 PV 와 직접 경로를 읽고 쓰고 지울 수 있게 됩니다");
+  expect(dlg).not.toHaveTextContent("root 권한으로 실행");
+  expect(screen.getByText(/전체 PV·직접 경로 권한은 admin 역할과 따로입니다/)).toBeInTheDocument();
+});
+
+function LocationProbe() {
+  const loc = useLocation();
+  return <output aria-label="현재 주소">{`${loc.pathname}${loc.search}`}</output>;
+}
+
+test("?create=<id>(k8s 연동 「사용자 권한」의 「계정 만들기」): 그 아이디를 채운 생성 창이 열리고 주소에서 create 를 지운다", async () => {
+  stubMe("admin");
+  server.use(http.get("/api/admin/accounts", () => HttpResponse.json(ACCOUNTS)));
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(
+    <QueryClientProvider client={qc}>
+      <MemoryRouter initialEntries={["/admin/accounts?create=user.yo.hong.example.com"]}>
+        <Routes><Route path="/admin/accounts" element={<><AccountsList /><LocationProbe /></>} /></Routes>
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+  const dlg = await screen.findByRole("dialog", { name: "계정 생성" });
+  expect(within(dlg).getByLabelText("회사 아이디")).toHaveValue("user.yo.hong.example.com");
+  expect(within(dlg).getByLabelText("역할")).toHaveValue("user");
+  await waitFor(() => expect(screen.getByLabelText("현재 주소")).toHaveTextContent(/^\/admin\/accounts$/));
+  // 닫았다 다시 열면 빈 창(프리셋은 한 번만)
+  await userEvent.click(within(dlg).getByRole("button", { name: "취소" }));
+  await userEvent.click(screen.getByRole("button", { name: "계정 생성" }));
+  expect(within(await screen.findByRole("dialog", { name: "계정 생성" })).getByLabelText("회사 아이디")).toHaveValue("");
 });

@@ -371,3 +371,24 @@ test("n 공유 토큰 배치 자식, 계획 전: 비 root 확정 -- 「자격이
   expect(priv.textContent).not.toMatch(/자격이 있으면/);
   expect(screen.queryByText(/^root\(특권\) (실행|요청)$/)).toBeNull();
 });
+
+
+test("PV 주소 요청(dms-k8s 설계 §7): 대상 = PV 표기, PV 행(클러스터 · 볼륨 · StorageClass), 대상 사용자 행", async () => {
+  const pv = { cluster: "dmsk8s", namespace: "team-a", pvc: "models", volume: "pvc-52c6132d", storage_class: "tb-gpfs",
+               root: "pvc-52c6132d/pvc-52c6132d-data", path: "sample" };
+  const payload = { storage: "k8s-pv-gpfs", target: "pvc-52c6132d/pvc-52c6132d-data/sample", pv,
+                    options: { batch_files: 1000000, broken_limit: 100 }, owner_username: "alice", run_as_root: true };
+  serve({ ...REQ, operation: "scan", requester_id: "root", payload },
+        [{ ...JOB, operation: "scan", tool: "scan", storage_name: "k8s-pv-gpfs", source_storage: null,
+           destination_storage: null, options: payload.options,
+           worker_pool: { ...WP_A, tool: "scan", identity: { ...ROOT_IDENT, username: "alice" } } }],
+        [{ storage_name: "k8s-pv-gpfs", backend_type: "gpfs", status: "Ready", managed_root: "/k8s_pv/gpfs" }]);
+  renderAt();
+  const region = await specRegion();
+  expect(norm(cell(region, "대상").textContent)).toBe("models — team-a (tb-gpfs) / sample");
+  await waitFor(() => expect(norm(cell(region, "절대경로").textContent))
+    .toBe("/k8s_pv/gpfs/pvc-52c6132d/pvc-52c6132d-data/sample"));
+  expect(cell(region, "PV").textContent).toBe("dmsk8s · pvc-52c6132d · tb-gpfs");
+  expect(cell(region, "PV")).toHaveClass("[overflow-wrap:anywhere]");
+  expect(cell(region, "대상 사용자").textContent).toBe("alice");
+});

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
+import { useInRouterContext, useSearchParams } from "react-router-dom";
 import { useAccounts, useCreateAccount, useSetRole, useSetDisabled, useSetRootGrant } from "./useAccounts";
-import { RootGrantCell } from "./RootGrantCell";
+import { K8S_GRANT_LABEL, RootGrantCell } from "./RootGrantCell";
 import { useMe } from "../auth/useAuth";
 import { useMailInfo } from "../mail/useMailSettings";
 import { Table } from "../../components/ui/Table";
@@ -14,9 +15,32 @@ import type { Account } from "../../lib/types";
 
 const dlgField = "mt-1 w-full rounded-lg border border-black/10 px-3 py-2";
 
+// 「계정 만들기」 바로가기(dms-k8s 설계 D5 -- k8s 연동 「사용자 권한」 화면이 /admin/accounts?create=<맵핑 ID> 로 보낸다): 맵핑 ID 는
+// DMS 계정 username 과 정확히 같아야 권한이 생기므로, 그 아이디를 채운 생성 창을 바로 연다. 창을 열고 나면 주소에서 create 를
+// 지운다(새로고침·뒤로 가기로 창이 다시 뜨지 않게). 라우터 밖(단위 테스트의 맨 렌더)에서는 읽지 않는다.
+const CREATE_PARAM = "create";
+function CreateFromQuery({ onPreset }: { onPreset: (id: string) => void }) {
+  const [params, setParams] = useSearchParams();
+  const raw = params.get(CREATE_PARAM);
+  useEffect(() => {
+    if (raw === null) return;
+    const id = raw.trim();
+    // 계정 아이디 길이 상한(서버 규칙 [a-z0-9][a-z0-9._-]{0,63} 의 64자) 안의 값만 채운다 -- 형식 판정은 서버 몫(422 사유).
+    if (id !== "" && id.length <= 64) onPreset(id);
+    const next = new URLSearchParams(params);
+    next.delete(CREATE_PARAM);
+    setParams(next, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [raw]);
+  return null;
+}
+
 // 운영자 계정 생성(2026-08-20, 사용자 결정): 인증번호 없이 즉시 생성(관리자
 // 권한이 곧 승인) -- 셀프서비스 생성(로그인 화면)과 달리 역할도 고를 수 있다.
-function CreateAccountDialog() {
+// preset(?create=<id>)이 오면 그 아이디를 채워 창을 연다 -- 값은 한 번 쓰고 비운다(onPresetUsed).
+function CreateAccountDialog({ preset = null, onPresetUsed }: {
+  preset?: string | null; onPresetUsed?: () => void;
+}) {
   const [open, setOpen] = useState(false);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -24,8 +48,14 @@ function CreateAccountDialog() {
   const create = useCreateAccount();
   const mailInfo = useMailInfo();   // 받는 도메인은 서버 설정(DMS_ACCOUNT_EMAIL_DOMAIN) -- 하드코딩하지 않는다
   useEffect(() => {
+    if (preset === null) return;
+    setOpen(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [preset]);
+  useEffect(() => {
     if (!open) { create.reset(); return; }
-    setUsername(""); setPassword(""); setRole("user");
+    setUsername(preset ?? ""); setPassword(""); setRole("user");
+    if (preset !== null) onPresetUsed?.();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
   return (
@@ -69,6 +99,10 @@ export function AccountsList() {
   const setRole = useSetRole();
   const setDisabled = useSetDisabled();
   const rootGrant = useSetRootGrant();
+  const inRouter = useInRouterContext();
+  const [createPreset, setCreatePreset] = useState<string | null>(null);
+  // k8s 모드(dms-k8s 설계 D4): 같은 자격이 「k8s 권한 맵핑 면제」라 라벨만 바꾼다(모든 작업이 root 라 「root 실행」은 거짓).
+  const k8s = me.data?.identity_mode === "k8s";
   // root 실행 자격을 줄 수 있는 관리자인가(이미 root 자격이 있는 세션 관리자 -- 서버가 다시 강제한다).
   const canGrant = me.data?.can_run_as_root === true;
   // 아이디 검색(사용자 요청 2026-08-19): 서버가 전체 목록을 주므로(페이징 없음)
@@ -105,7 +139,8 @@ export function AccountsList() {
           <input aria-label="아이디 검색" placeholder="아이디 검색"
                  className="w-56 rounded-lg border border-black/10 px-3 py-2 text-sm"
                  value={search} onChange={(e) => setSearch(e.target.value)} />
-          <CreateAccountDialog />
+          {inRouter && <CreateFromQuery onPreset={setCreatePreset} />}
+          <CreateAccountDialog preset={createPreset} onPresetUsed={() => setCreatePreset(null)} />
         </div>
       </div>
       {/* Card 구획(2026-08-19): 운영 화면들과 같은 서피스 — 관리 그룹 일관화 */}
@@ -121,7 +156,7 @@ export function AccountsList() {
         <Table>
           <thead>
             <tr className="text-muted whitespace-nowrap">
-              <th className="py-2">사용자명</th><th>역할</th><th>root 실행</th><th>이메일</th><th>상태</th><th>등록일</th><th>작업</th>
+              <th className="py-2">사용자명</th><th>역할</th><th>{k8s ? K8S_GRANT_LABEL : "root 실행"}</th><th>이메일</th><th>상태</th><th>등록일</th><th>작업</th>
             </tr>
           </thead>
           <tbody>
@@ -144,7 +179,7 @@ export function AccountsList() {
                     </select>
                   </td>
                   <td className="pr-3">
-                    <RootGrantCell a={a} canGrant={canGrant} isSelf={isSelf} grant={rootGrant} />
+                    <RootGrantCell a={a} canGrant={canGrant} isSelf={isSelf} grant={rootGrant} k8s={k8s} />
                   </td>
                   <td className="text-muted">{a.email ?? "—"}</td>
                   <td className="whitespace-nowrap">{a.disabled === 1 ? "비활성" : "활성"}</td>
@@ -181,7 +216,11 @@ export function AccountsList() {
       {mutationError && <p className="text-bad text-sm mt-2">{mutationError}</p>}
       {/* admin 역할 ≠ root 실행 자격(2026-10-12 사용자 보고) -- 역할을 올린 뒤 무엇을 더 해야 하는지 표 아래에서 말한다. */}
       <p className="mt-3 text-xs text-ink/70 break-keep">
-        {canGrant
+        {k8s
+          ? (canGrant
+            ? `${K8S_GRANT_LABEL}은 admin 역할과 따로입니다 — admin 계정의 「자격 주기」로 줍니다(배포 설정 계정은 화면에서 바꿀 수 없습니다). 권한이 없는 관리자는 자기 k8s 권한(namespace 의 rolebinding) 안의 PV 만 고릅니다.`
+            : `${K8S_GRANT_LABEL}은 admin 역할과 따로이며, 이 권한이 있는 관리자만 주거나 뺄 수 있습니다.`)
+          : canGrant
           ? "root 실행 자격은 admin 역할과 따로입니다 — admin 계정의 「자격 주기」로 줍니다(배포 설정 계정은 화면에서 바꿀 수 없습니다)."
           : "root 실행 자격은 admin 역할과 따로이며, root 자격이 있는 관리자만 주거나 뺄 수 있습니다."}
       </p>

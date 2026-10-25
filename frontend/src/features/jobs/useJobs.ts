@@ -2,6 +2,7 @@ import { useQuery, useMutation, useQueryClient, useInfiniteQuery } from "@tansta
 import { ApiError, apiGet, apiSend } from "../../lib/api";
 import { REQUEST_TERMINAL_STATES, isTerminal } from "../../lib/jobState";
 import type { RequestRow, RequestDetail, DataJob, DeleteRequestsResult, PurgeStatus } from "../../lib/types";
+import type { PvRef } from "../k8s/types";
 
 export const useRequests = () =>
   useQuery({ queryKey: ["requests"], queryFn: () => apiGet<RequestRow[]>("/api/user/requests"),
@@ -122,6 +123,8 @@ export interface SubmitBody {
   // root 실행(2026-09-30). 서버는 true 만 root(자격 없으면 403), false/생략 = 실행 신원의
   // uid/gid. "관리자 기본 root" 는 SubmitJob 이 정해 관리자에겐 항상 확정값을 싣는다.
   run_as_root?: boolean;
+  // PV 주소(dms-k8s 설계 §6, k8s 모드만): 쪽마다 storage 대신 PV(cluster·namespace·pvc) -- 하위경로는 target·source·destination.
+  pv?: PvRef; source_pv?: PvRef; destination_pv?: PvRef;
 }
 export const useSubmitRequest = () =>
   useMutation({

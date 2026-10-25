@@ -71,17 +71,87 @@ export function pathSummary(operation: string | undefined,
   return pathParts(operation, payload).join(" → ");
 }
 
+// ---- PV 주소 표기(dms-k8s 설계 D8·D17, 2026-10-25) ----------------------------------------------------------------
+// PV 주소로 낸 요청은 payload 에 pv | source_pv | destination_pv 블록 {cluster, namespace, pvc, volume, storage_class, root, path}
+// 이 실리고, storage/target 은 서버가 해석한 물리 위치(관리 디렉토리 기준 root[/하위경로])다. 사람은 pvc-uuid 경로가 아니라
+// 「PV 이름 — namespace (StorageClass) / 하위경로」로 읽는다(서버 requests.target_label 과 같은 문법). 블록은 DB 신뢰 경계
+// 밖이라 모양을 믿지 않는다: 객체가 아니면 PV 표기를 하지 않고(옛 문법으로), 칸이 문자열이 아니면 「?」.
+// path = PV 안 하위경로(제출 바디의 target/source/destination 그대로). 없으면 payload 의 물리 target 에서 root 를 떼어 짓는다.
+
+/** 「PV 전체」 -- 하위경로가 비었거나 '.'·'./' 처럼 정규화하면 PV 루트 자신인 경우. */
+export const PV_WHOLE = "(PV 전체)";
+
+const _pvField = (v: unknown) => (typeof v === "string" ? v : v === null || v === undefined ? "—" : "?");
+
+function _isObj(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+/** payload 의 PV 블록 하나(객체가 아니면 null -- PV 주소 요청이 아니거나 변조 행). */
+export function pvBlockOf(v: unknown): Record<string, unknown> | null {
+  return _isObj(v) ? v : null;
+}
+
+/** PV 안 하위경로 표시값: 앞의 './'·끝의 '/' 를 떼고 비면(또는 '.') PV_WHOLE. 문자열이 아니면 「?」. */
+export function pvSubpathText(sub: unknown): string {
+  if (typeof sub !== "string") return sub === null || sub === undefined ? PV_WHOLE : "?";
+  const parts = sub.split("/").filter((p) => p !== "" && p !== ".");
+  return parts.length === 0 ? PV_WHOLE : parts.join("/");
+}
+
+/** 블록의 하위경로 -- path 가 있으면 그것, 없으면 물리 target 에서 root 접두를 뗀 값(root 와 같으면 ""). 모르면 undefined. */
+function _pvSub(block: Record<string, unknown>, target: unknown): unknown {
+  if ("path" in block) return block.path;
+  const root = block.root;
+  if (typeof root !== "string" || typeof target !== "string") return undefined;
+  const r = root.replace(/\/+$/, "");
+  if (target === r || target === `${r}/`) return "";
+  return target.startsWith(`${r}/`) ? target.slice(r.length + 1) : undefined;
+}
+
+/** 「PV 이름 — namespace (StorageClass) / 하위경로」. namespace (sc) 문법은 features/k8s/k8sTerms.nsLabel 과 같다(테스트가
+ *  둘을 대조한다 -- lib 가 features 를 가져오지 않게 여기 한 줄로 둔다). */
+export function pvLocationText(block: Record<string, unknown>, target: unknown): string {
+  const sc = block.storage_class;
+  const scText = typeof sc === "string" && sc !== "" ? sc : sc === null || sc === undefined || sc === "" ? "StorageClass 없음" : "?";
+  return `${_pvField(block.pvc)} — ${_pvField(block.namespace)} (${scText}) / ${pvSubpathText(_pvSub(block, target))}`;
+}
+
 /** pathSummary 의 조각(sync = [출발, 도착], 그 밖 = [대상]). 화면이 출발·도착 사이에서 줄을 바꿀 때 **구조로**
  *  가른다 -- 합친 문자열에서 " → " 를 찾으면 경로 이름에 든 " → " 에서 갈린다(validate_relative_path 는 그 문자를
- *  막지 않는다). 문자열이 아닌 값(DB 변조)은 "?" -- String({}) 의 "[object Object]" 를 화면에 내지 않는다. */
+ *  막지 않는다). 문자열이 아닌 값(DB 변조)은 "?" -- String({}) 의 "[object Object]" 를 화면에 내지 않는다.
+ *  PV 주소로 낸 쪽(pv | source_pv | destination_pv 블록)은 pvLocationText -- 쪽마다 따로라 PV ↔ 직접 경로 혼합도 그대로 읽힌다. */
 export function pathParts(operation: string | undefined,
                           payload: Record<string, unknown> | undefined): string[] {
   const p = payload ?? {};
   // null·undefined 만 「—」로 접는다 — truthy 검사는 ""(빈 경로 = 뿌리)를 "모름"으로 뭉갠다.
   const part = (v: unknown) => (typeof v === "string" ? v : v === null || v === undefined ? "—" : "?");
+  const side = (block: unknown, storage: unknown, path: unknown) => {
+    const b = pvBlockOf(block);
+    return b !== null ? pvLocationText(b, path) : `${part(storage)}:${part(path)}`;
+  };
   return operation === "sync"
-    ? [`${part(p.source_storage)}:${part(p.source)}`, `${part(p.destination_storage)}:${part(p.destination)}`]
-    : [`${part(p.storage)}:${part(p.target)}`];
+    ? [side(p.source_pv, p.source_storage, p.source), side(p.destination_pv, p.destination_storage, p.destination)]
+    : [side(p.pv, p.storage, p.target)];
+}
+
+/** 요청 상세 「PV」 행(설계 §7): 클러스터 · 볼륨 · StorageClass. PV 주소가 아닌 쪽은 없다(행 생략). */
+export function pvDetailParts(operation: string | undefined,
+                              payload: Record<string, unknown> | undefined): { side: "소스" | "목적지" | null; text: string }[] {
+  const p = payload ?? {};
+  const one = (side: "소스" | "목적지" | null, v: unknown) => {
+    const b = pvBlockOf(v);
+    return b === null ? null
+      : { side, text: `${_pvField(b.cluster)} · ${_pvField(b.volume)} · ${_pvField(b.storage_class)}` };
+  };
+  const rows = operation === "sync" ? [one("소스", p.source_pv), one("목적지", p.destination_pv)] : [one(null, p.pv)];
+  return rows.filter((r): r is { side: "소스" | "목적지" | null; text: string } => r !== null);
+}
+
+/** PV 주소 블록이 하나라도 있나(요청 상세 「대상 사용자」 행 등). */
+export function hasPvAddress(payload: Record<string, unknown> | undefined): boolean {
+  const p = payload ?? {};
+  return [p.pv, p.source_pv, p.destination_pv].some((v) => pvBlockOf(v) !== null);
 }
 
 /** 절대경로 표기. 하나라도 조합할 수 없으면 null(그 줄을 안 그린다) — sync 는
