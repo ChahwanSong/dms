@@ -12,6 +12,7 @@ from ..execution import ExecutionError
 from ..identity import owner_override_allowed
 from ..privileged import privileged_names
 from ..repositories.request_purges import MAX_BATCH_DELETE_CHILDREN
+from ..repositories.requests import MAX_SEARCH_TERMS
 from ..repositories.storages import storage_open_to_users
 from ..repositories.sync_pairs import sync_pair_allowed
 from .artifacts import ArtifactError, job_owner_uid, read_artifact, strip_scheme
@@ -171,6 +172,44 @@ def submit(body: RequestBody, request: Request,
     return {"request_id": rid, "state": "Pending"}
 
 
+def _blank_to_none(value: str | None) -> str | None:
+    """앞뒤 공백을 떼고, 빈 값은 None(필터 없음) -- 화면이 trim 해 보내지만 API 를 직접 부르는 쪽도 같게."""
+    if value is None:
+        return None
+    value = value.strip()
+    return value if value != "" else None
+
+
+def _search_terms(text: str, repos, *, is_admin: bool) -> list[str]:
+    """검색어 → 저장소 토큰 목록(공백 분리, 소문자로 접어 중복 제거, 순서 유지, 펼친 뒤 MAX_SEARCH_TERMS 개까지).
+
+    '/' 로 시작하는 토큰은 원래 토큰을 남긴 채 등록 스토리지마다 그 뿌리 아래인지 보고 「이름:상대경로」 를 덧붙인다
+    (뿌리와 같으면 「이름:」 -- 그 스토리지의 작업 전부). 요청 payload·resource_key 는 managed_root 기준 상대경로만
+    저장한다(stepper._abs 가 managed_root 와 잇는다). 뿌리 비교는 대소문자를 가린다(경로라서).
+
+    펼침에 쓰는 뿌리는 그 사람이 볼 수 있는 것만: 관리자는 등록 스토리지 전부의 managed_root·mount_path, 비관리자는
+    /api/user/storages 가 보여 주는 스토리지(사용자에게 열린 활성 스토리지)의 managed_root 만. 결과 유무로 숨긴 값을
+    맞혀 보는 오라클이 되지 않게 -- mount_path 와 관리자 전용 스토리지는 그 목록이 일부러 숨긴다(routes_storages)."""
+    tokens = text.split()
+    storages = repos.storages.list() if any(t.startswith("/") for t in tokens) else []
+    out: list[str] = []
+    for token in tokens:
+        out.append(token)
+        if not token.startswith("/"):
+            continue
+        for row in storages:
+            if not is_admin and not storage_open_to_users(row):
+                continue
+            roots = (row["managed_root"], row["mount_path"]) if is_admin else (row["managed_root"],)
+            for root in roots:
+                # DB 는 신뢰 경계 -- 문자열이 아닌·빈 뿌리는 펼치지 않는다(빈 뿌리면 모든 절대경로가 「그 아래」가 된다).
+                if not isinstance(root, str) or root == "":
+                    continue
+                if token == root or token.startswith(root.rstrip("/") + "/"):
+                    out.append(f"{row['storage_name']}:{token[len(root):].strip('/')}")
+    return list(dict.fromkeys(t.lower() for t in out))[:MAX_SEARCH_TERMS]
+
+
 @router.get("/api/user/requests")
 def list_requests(request: Request, identity: Identity = Depends(require_user),
                   # 대시보드 「최근 작업」이 200을 요청한다. 서버가 1..200으로 캡한다
@@ -189,14 +228,38 @@ def list_requests(request: Request, identity: Identity = Depends(require_user),
                   # 불러온 행에서만 시작되는 화면에선 찾을 길이 없었다(검증 지적). 좁히기만 하므로 누구에게나 열어도
                   # 격리는 그대로다(비운영자는 아래에서 requester 가 자기 자신으로 강제된다). 빈 값은 필터 없음.
                   batch_id: str | None = Query(None),
-                  before: int | None = Query(None, ge=1)):
-    # 비운영자는 requester 를 자기 자신으로 **강제**한다 -- requester 파라미터로
-    # 남의 작업을 넓혀 볼 수 없다(격리). 운영자만 requester 필터를 존중한다.
-    req = (requester or None) if identity.role == "admin" else identity.actor
+                  before: int | None = Query(None, ge=1),
+                  # 부분 일치 검색어(2026-10-25). 길이 상한은 프레임워크 422(limit 과 같은 이유로 사유 코드 없음).
+                  q: str | None = Query(None, max_length=200)):
+    """작업 목록(전체 작업 화면). 필터는 전부 AND 로 좁히기만 하고 정렬·커서(before)는 필터와 무관하다.
+
+    검색(2026-10-25 사용자 요청 -- 「배치 이름, 대상 경로 등으로 검색·필터, 일부 단어라도 포함하거나 매치되면 보여주도록」):
+      - q: 공백으로 나눈 토큰 중 **하나라도** 요청자 id·대상(스토리지 이름·상대경로)·배치 이름에 부분 일치(대소문자
+        무시)하거나, 16진 4~32자 토큰이 요청 id·배치 id 의 접두면 그 행을 낸다(RequestsRepository.list docstring).
+        '/' 로 시작하는 토큰은 절대경로로도 읽어 「스토리지 이름:상대경로」 토큰을 덧붙인다(_search_terms) -- 요청은
+        managed_root 기준 상대경로만 저장해서, 셸에서 복사한 절대경로는 그대로는 어디에도 안 걸린다.
+      - requester: 관리자에게만 부분 일치(alice 가 alice2 도 잡는다 -- 관리자가 일부만 쳐도 찾게).
+      - 공백뿐인 값은 필터 없음. 둘 다 없으면 저장소 SQL 이 검색 전과 같다.
+
+    격리: 비관리자는 requester_id = 자기 자신(**정확히 일치**)이 늘 AND 로 붙고 requester 파라미터는 무시된다. 검색은
+    그 위에서만 좁힌다 -- 남의 경로·배치 이름을 쳐도 결과는 0건이라 남의 작업 유무를 알아낼 길이 없다. 요청자 부분
+    일치는 저장소의 별도 인자(requester_like)로만 간다: 격리 값(requester_id)에 LIKE 가 끼면 alice 가 alice2 의 작업을,
+    이스케이프 없는 '_' 로 j_kim 이 jxkim 의 작업을 본다.
+
+    비용: 드문 검색어는 requests 표 전체를 훑고(PG16 32만 행에서 약 0.4초) 그동안 단일 연결 DB 잠금을 쥔다 -- 화면이
+    입력을 300ms 디바운스하고 검색 중엔 폴링 간격을 3초에서 10초로 늘린다(useJobs.useInfiniteRequests). 비관리자는
+    자기 행만 인덱스로 훑어 짧다."""
     repos = request.app.state.repos
+    is_admin = identity.role == "admin"
+    # 비운영자는 requester 를 자기 자신으로 **강제**한다 -- requester 파라미터로
+    # 남의 작업을 넓혀 볼 수 없다(격리). 운영자만 requester 필터를 존중한다(부분 일치).
+    req = None if is_admin else identity.actor
+    requester_like = _blank_to_none(requester) if is_admin else None
+    text = _blank_to_none(q)
+    terms = _search_terms(text, repos, is_admin=is_admin) if text is not None else None
     rows = repos.requests.list(
         requester_id=req, operation=operation, state=state, batch_id=batch_id or None,
-        before=before, limit=limit)
+        before=before, limit=limit, requester_like=requester_like, search_terms=terms)
     # 사용량 분석 지점(성공 scan 잡)을 가진 요청인가(2026-10-09) -- 작업 삭제 확인 창의 사용량 경고가 쓴다. 요청
     # 상태로는 판정할 수 없다: 취소 경합으로 「요청 Cancelled · 잡 Succeeded」가 생기고 사용량 분석은 잡 상태를 본다.
     # 비 scan 은 false(모름이 아니라 「지점 없음」이 확정값이다).

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import re
 import uuid
-from ..db import Database, dump_json, load_json, utc_now_iso
+from ..db import Database, dump_json, like_contains, load_json, utc_now_iso
 from ..domain import DataJobState, RequestState, TERMINAL_REQUEST_STATES
 
 
@@ -14,6 +15,24 @@ def batch_match(param: str) -> str:
     (PG16, 32만 행·자식 2만 배치: 목록 23ms·LIMIT 세기 6ms → 둘 다 0.3ms 미만, 2026-10-11 검증 지적). 쓰는 곳:
     RequestsRepository.list(?batch_id=), BatchesRepository.list_summaries(배치 요약), request_purges.delete_batch(상한 세기)."""
     return f"batch_id >= :{param} AND batch_id <= :{param}"
+
+
+# 작업 목록 검색(2026-10-25)의 상한·모양 -- 쓰는 곳은 RequestsRepository.list(search_terms=) 와 그 라우트.
+# 검색어 토큰 수 상한(절대경로 펼침 뒤): 토큰마다 OR 갈래가 셋(16진이면 다섯)씩 붙고, 드문 검색어는 갈래 전부를 표 전체에 건다.
+MAX_SEARCH_TERMS = 8
+# 요청·배치 id 접두 매치를 켜는 토큰 모양(소문자로 접은 뒤) -- 16진 4~32자. 접두만 본다: 32자리 16진 id 의 부분 문자열은
+# '2024'·'01' 같은 숫자 검색어가 아무 행에나 걸리는 잡음이다(설계 조사 실측). 배치 id 접두는 배치 기록이 지워진 묶음
+# (화면 「기록 없음 <id 12자>」 -- 이름이 없다)을 그 12자로 찾는 유일한 길이다.
+_HEX_ID_TOKEN = re.compile(r"[0-9a-f]{4,32}")
+# resource_key 에서 화면 「대상」 열이 보여 주는 몸통만 -- 'data.<op>:' 머리(len(op)+6자)를 떼고, scan 이면 꼬리
+# ':<옵션 지문 64자리 16진>'(65자)도 뗀다(키 모양은 domain.build_resource_key, 계약 테스트가 고정한다). 원문 키에
+# 걸면 머리 때문에 경로 단어 'data'·'sync'·'scan' 이 모든 행에, 지문 때문에 숫자 검색어가 scan 행에 아무렇게나 걸린다.
+# payload JSON 원문은 키 이름(options·storage·target …)이 다 걸려 더 나쁘고, json 함수는 방언마다 달라 쓰지 않는다
+# (metrics 의 양 방언 규칙). SUBSTR 길이를 CASE 로 감싸는 이유: DB 는 신뢰 경계라 키가 짧은 변조 행이 올 수 있는데,
+# PG 는 음수 길이 SUBSTR 에서 오류를 던진다(목록 전체가 500) -- 감싼 식은 PG16·sqlite 둘 다 오류도 엉뚱한 값도 없다.
+_KEY_BODY = ("CASE WHEN operation = 'scan' AND LENGTH(resource_key) > LENGTH(operation) + 71"
+             " THEN SUBSTR(resource_key, LENGTH(operation) + 7, LENGTH(resource_key) - LENGTH(operation) - 71)"
+             " ELSE SUBSTR(resource_key, LENGTH(operation) + 7) END")
 
 
 class RequestsRepository:
@@ -82,7 +101,7 @@ class RequestsRepository:
         return row
 
     def list(self, requester_id=None, *, operation=None, state=None, batch_id=None,
-             before=None, limit: int = 50) -> list[dict]:
+             before=None, limit: int = 50, requester_like=None, search_terms=None) -> list[dict]:
         """요청 목록(commit_order DESC). 필터·커서(슬라이스 39): operation·state·
         requester_id·batch_id(2026-10-11 -- 한 배치의 작업만) 는
         AND 로 좁히고, before(commit_order)면 그보다 오래된 것만
@@ -96,7 +115,25 @@ class RequestsRepository:
         (테이블의 몇 %)에서 UNIQUE(commit_order) 역방향 스캔 + batch_id 필터를 고른다 -- 오래된 배치면 그보다 새로운 요청
         전부(32만 행 중 25만)를 방문했다. 그래서 batch_match(범위 표기) + `ORDER BY batch_id DESC, commit_order DESC` 로
         쓴다(이유는 batch_match docstring): idx_requests_batch_order 를 LIMIT 만큼만 거꾸로 읽는다(PG16 실측: 자식 2만 배치
-        23ms → 0.02ms, 일반 계획(prepare)도 같다). sqlite 도 같은 인덱스로 정렬 없이 읽는다."""
+        23ms → 0.02ms, 일반 계획(prepare)도 같다). sqlite 도 같은 인덱스로 정렬 없이 읽는다.
+
+        부분 일치 검색(2026-10-25 사용자 요청 「일부 단어라도 포함하거나 매치되면 그것도 보여주도록」) -- 둘 다 WHERE 에만
+        붙어 정렬·커서는 그대로다(검색 중에도 before 쪽 넘김에 중복·누락이 없다). 둘 다 대소문자를 접은 부분 문자열
+        (`LOWER(col) LIKE 접은 패턴 ESCAPE '\\'` -- PG 의 LIKE 는 대소문자를 가리고 sqlite 는 ASCII 를 접어 테스트가 차이를
+        못 본다; 와일드카드는 db.like_escape 로 글자 그대로. 패턴은 파이썬이 접고, sqlite 의 LOWER 는 ASCII 만 접어
+        비 ASCII 대문자(Ä 등)는 PG 에서만 맞는다 -- 한글은 대소문자가 없어 두 방언이 같다):
+          - requester_like: 요청자 id 부분 문자열. **requester_id(정확히 일치)와 별개의 인자다** -- 비관리자 격리는
+            requester_id 가 지고, 그 자리에 LIKE 가 끼면 alice 가 alice2 의 행을, j_kim 이 jxkim 의 행을 본다.
+          - search_terms: 토큰 목록(소문자로 접어 중복을 빼고 MAX_SEARCH_TERMS 개까지). 토큰 **하나라도** 어느 칸에든
+            걸리면 그 행을 낸다(토큰끼리 OR -- 단어를 더하면 넓어진다). 칸 = 요청자 id, resource_key 의 몸통(_KEY_BODY
+            -- 화면 「대상」 열 글자: 스토리지 이름·상대경로), 배치 이름(batches.name -- requests 엔 이름 칸이 없다),
+            그리고 16진 4~32자 토큰이면 요청 id·배치 id **접두**(_HEX_ID_TOKEN).
+        두 인자 모두 None 이면 SQL 이 검색 전과 바이트 단위로 같다(배치 필터의 계획 테스트가 그 모양을 고정한다).
+
+        비용(설계 조사, PG16 32만 행·웜 캐시): '%x%' 는 btree 를 못 타서 commit_order 역방향 스캔에 필터로 걸린다 --
+        흔한 검색어는 LIMIT 만큼 찾으면 멈춰 1ms 미만이지만, 드물거나 없는 검색어는 표 전체를 훑는다(약 0.4초). 그동안
+        단일 연결 DB 잠금을 쥐어 다른 API 가 기다린다. 그래서 포탈이 입력을 디바운스하고 검색 중엔 폴링을 늦춘다
+        (useJobs.useInfiniteRequests). 비관리자는 requester_id 정확 일치가 idx_requests_requester 로 자기 행만 훑어 짧다."""
         where = []
         params: dict = {"n": limit}
         order = "commit_order DESC"
@@ -111,6 +148,26 @@ class RequestsRepository:
             order = "batch_id DESC, commit_order DESC"
         if before is not None:
             where.append("commit_order < :before"); params["before"] = before
+        if requester_like is not None:
+            where.append(r"LOWER(requester_id) LIKE :req_like ESCAPE '\'")
+            params["req_like"] = like_contains(requester_like.lower())
+        if search_terms is not None:
+            terms = list(dict.fromkeys(t.lower() for t in search_terms))[:MAX_SEARCH_TERMS]
+            groups = []
+            for i, term in enumerate(terms):
+                q = f"q{i}"
+                params[q] = like_contains(term)
+                arms = [rf"LOWER(requester_id) LIKE :{q} ESCAPE '\'",
+                        rf"LOWER({_KEY_BODY}) LIKE :{q} ESCAPE '\'",
+                        rf"batch_id IN (SELECT batch_id FROM batches WHERE LOWER(name) LIKE :{q} ESCAPE '\')"]
+                if _HEX_ID_TOKEN.fullmatch(term):
+                    # 16진 글자뿐이라 와일드카드가 끼지 않는다 -- 이스케이프 없이 접두 패턴이다.
+                    h = f"h{i}"
+                    params[h] = term + "%"
+                    arms += [f"request_id LIKE :{h}", f"batch_id LIKE :{h}"]
+                groups.append(" OR ".join(arms))
+            if groups:
+                where.append("(" + " OR ".join(groups) + ")")   # 토큰끼리도 OR -- 하나라도 맞으면
         clause = (" WHERE " + " AND ".join(where)) if where else ""
         rows = self._db.query(
             f"SELECT * FROM requests{clause} ORDER BY {order} LIMIT :n",

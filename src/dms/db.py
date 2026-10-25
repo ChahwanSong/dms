@@ -279,3 +279,18 @@ def dump_json(value) -> str:
 
 def load_json(text):
     return json.loads(text) if text else None
+
+
+def like_escape(term: str) -> str:
+    r"""LIKE 패턴 안의 검색어를 글자 그대로로 -- `\`·`%`·`_` 를 `\` 로 이스케이프한다. 반드시 SQL 쪽 `ESCAPE '\'` 와
+    짝으로 쓰고(sqlite 는 기본 이스케이프 문자가 없다), 패턴은 **바인딩 값**으로만 넘긴다: SQL 본문의 '%' 는 PG(psycopg
+    pyformat, _adapt)에서 자리표시자로 읽혀 깨진다. 이스케이프가 없으면 검색어 '100%' 가 전부 매치로 새고 'j_kim' 이
+    'jxkim' 을 잡는다(검색이 거짓말이 되고, 요청자 검색이면 남의 행이 섞인다). 대소문자는 건드리지 않는다 -- 접는 것은
+    호출자 몫이다(사용량 분석은 접지 않고, 작업 목록 검색은 LOWER 와 짝으로 접는다)."""
+    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def like_contains(term: str) -> str:
+    """부분 문자열 LIKE 패턴('%' + like_escape(term) + '%'). 쓰는 곳: 사용량 분석 타깃 검색(data_jobs._scan_target_where),
+    작업 목록 검색(RequestsRepository.list)."""
+    return "%" + like_escape(term) + "%"

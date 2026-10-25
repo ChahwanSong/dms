@@ -1,6 +1,6 @@
 """data_jobs + plans 저장소: planner가 emit하고 stepper(3b)가 전진시키는 잡 레코드."""
 import uuid
-from ..db import Database, dump_json, iso_epoch, iso_plus, load_json, utc_now_iso
+from ..db import Database, dump_json, iso_epoch, iso_plus, like_contains, load_json, utc_now_iso
 from ..domain import (DataJobState, RequestState, TERMINAL_DATA_JOB_STATES,
                       TERMINAL_REQUEST_STATES)
 from .observability import ObservabilityRepository
@@ -202,18 +202,16 @@ class DataJobsRepository:
         리뷰: 사용량 탭 요약이 변조·구형 행의 빈 이름을 탭으로 내는데 truthy 검사가 그 탭을 전 스토리지로 접었다)."""
         params["s"] = DataJobState.SUCCEEDED.value
         where = "operation = 'scan' AND state = :s AND target IS NOT NULL"
-
-        def like(v):
-            return "%" + v.replace("\\", r"\\").replace("%", r"\%").replace("_", r"\_") + "%"
+        # 이스케이프는 db.like_contains 한 벌(작업 목록 검색과 공용) -- 대소문자는 접지 않는다(종전 동작 그대로).
         if q:
             where += r" AND (target LIKE :q ESCAPE '\' OR storage_name LIKE :q ESCAPE '\')"
-            params["q"] = like(q)
+            params["q"] = like_contains(q)
         if storage is not None:
             where += " AND storage_name = :sn"
             params["sn"] = storage
         if path:
             where += r" AND target LIKE :p ESCAPE '\'"
-            params["p"] = like(path)
+            params["p"] = like_contains(path)
         return where
 
     def scan_target_heads(self, *, q: "str | None" = None, storage: "str | None" = None,
