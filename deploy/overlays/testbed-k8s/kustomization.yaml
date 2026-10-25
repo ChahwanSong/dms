@@ -25,6 +25,8 @@
 #   k1 = 첫 포탈 빌드(빌드 노드 k8s-w1, 소스 main 체크아웃 928b3c9 — nsync 역할별 볼륨; 이미지 3종 + 잡 이미지).
 #   k2 = 전체 작업 검색·열 폭(2026-10-25, 소스 dms-k8s 체크아웃 1b0febe; 이미지 3종 + 잡 이미지).
 #   k3 = k8s RBAC·PV 재설계(2026-10-26, 소스 dms-k8s 체크아웃 3e9aae6 — k8s 신원 모드·PV 주소·인벤토리·관리자 화면·PV 봉쇄; 이미지 3종 + 잡 이미지).
+#   k4 = 가입 신원 경고·결과 본문 상한(2026-10-26, 소스 a58d897; **dms 이미지만** — dms-agent·잡 이미지는 k3 그대로. 그래서 k4 dms
+#        이미지에 동봉된 매니페스트의 에이전트·잡 이미지는 자리표시자라 릴리스 화면의 그 둘 드리프트 배지는 「모름」 — 다음 3종 빌드에서 돌아온다).
 #   태그 bump = 아래 newTag(+ patch-config.yaml 의 DMS_JOB_IMAGE) 커밋 — **dms-k8s 에서만** 한다(2026-10-22 브랜치 분리 뒤
 #   빌드 소스는 /home/mason/dms-dev/dms-k8s 체크아웃 = origin/dms-k8s, main 은 이 클러스터와 무관).
 #   overlays/testbed(ssc 클러스터) 는 dms-ssc 쪽 소관이라 여기서 같이 건드리지 않는다(체리픽 충돌·엉뚱한 태그 방지).
@@ -43,7 +45,7 @@ resources:
 images:
   - name: set-by-overlay.invalid/dms
     newName: pkg-01:5001/dms
-    newTag: k3
+    newTag: k4
   - name: set-by-overlay.invalid/dms-agent
     newName: pkg-01:5001/dms-agent
     newTag: k3
