@@ -150,20 +150,56 @@
   그룹 없는 잡에 supplementalGroups·fsGroup 을 더하면 preflight 만 그 그룹으로 통과할 수 있다(기존
   성질). 처방: 모든 비 root preflight 에 `id -G == {주 gid}` 검사(매니페스트 바이트 동일성 포기).
 
+### dms-k8s RBAC·PV(k8s 신원 모드) 후속 — 2026-10-25
+
+설계 `docs/history/specs/2026-10-25-dms-k8s-rbac-pv-design.md`(§10 사용자 결정 대기 + 슬라이스 1·2 구현의 열린 항목 + 보안 리뷰).
+
+- ⏸ **사용자 결정 대기(설계 §10)** — (a) namespaceAdmin(소유자)·이메일 subject 기반 ID 를 맵핑에 넣을지(지금은 RoleBinding 이름
+  `<id>-clusterrole-admin|edit` 만; KFAM 꼴 `user-…-example-com` 은 「계정 없음·subject 불일치」 경고로만 보인다), (b) kubeflow-view 를
+  읽기 전용 권한으로 볼지(지금 인식 안 함), (c) 동기화가 오래 실패할 때 판정을 막을 시점(지금은 마지막 성공 스냅숏으로 계속 판정 —
+  「n분 전 기준」 표시), (d) LDAP 코드(identity_ldap·agent/directory·nslcd)를 dms-k8s 에서 지울지, (e) 배치(BatchCreate)의 PV 주소
+  (지금 배치는 직접 경로만 — 운영자 전용이라 맵핑 면제), (f) 심링크 봉쇄를 sync·scan 으로 확장할지(모든 잡이 root 라 사용자 파드가
+  자기 PV 안에 남의 PV 를 가리키는 심링크를 만들면 root dsync·dscan 이 따라간다 — 지금 부모 realpath 봉쇄는 rm 뿐, 기준도 managed_root
+  전체; 처방 후보: preflight·러너에 `_RM_CONTAINMENT_CHECK` 모양을 PV 루트 기준으로 sync 소스·목적지·scan 대상에, 또는 hostPath 를
+  PV 루트로 좁히기), (g) 사용자 스캔 경로의 PV 주소화(지금 k8s 모드에서 면제자 전용 — 422 `scan_path_unrestricted_only`),
+  (h) Pure FlashBlade(PV 마다 별도 export)는 「스토리지 + 상대경로」 모델 밖 — PV 별 스토리지 등록이 대안, (i) 멀티 클러스터 라이브
+  실증용 두 번째 VM(지금은 단위 테스트 + 같은 클러스터 이중 등록), (j) 「운영자」 = 특권 목록·부여 관리자 해석 확인,
+  (k) 운영자가 「사용자 지정」(owner_username)으로 낸 작업을 그 사용자 본인 목록에도 보일지(지금은 requester_id 격리 — 요청자 목록만),
+  (l) root sync 의 결과 소유권(소스 보존 vs 목적지 PV 소유자에 맞추는 자동 chown — 다른 namespace 파드의 uid/fsGroup 과 안 맞으면 그
+  파드가 못 읽을 수 있다).
+- 🔧 **에이전트 채널의 노드별 자격(보안 리뷰)** — 공유 토큰(모든 노드 에이전트 보유, role admin) 보유자는 `x-dms-actor: node:<지정
+  노드>` 로 행세해 `POST /api/agent/k8s-sync/claim` 에서 대상 클러스터의 리더 토큰을 받을 수 있다(`api/routes_agent.py` — 설계가
+  받아들인 위험, 완화는 **읽기 전용** 리더 SA: rolebindings·pvc·pv·sc list + namespaces/kube-system get). 처방 후보: 노드별 토큰
+  (에이전트 Secret 을 노드마다 — DaemonSet 이라 projected SA 토큰 + TokenReview 로 노드 신원 확인), 또는 claim 응답 토큰을 노드 공개키로
+  봉인. 에이전트 채널의 TLS(CNI 암호화 포함 — 「방안 A」 항목의 근본 처방)와 함께 본다.
+- 🔧 **테스트베드 `/data/k8s_pv` export 의 no_root_squash 노출 완화(보안 리뷰)** — testbed 저장소 `scripts/nfs-pv-export.sh` 가
+  10.10.10.20-22 에 rw·no_root_squash 로 연다(root 잡이 PV 디렉터리를 만지는 실증 전제). 같은 망의 그 세 IP 에서 root 로 마운트하면
+  모든 PV 데이터를 읽고 쓸 수 있다. 처방 후보: 실증 기간에만 켜는 make 타깃, export 를 워커(.21·.22)로만 좁히기(cp1 제외), 실증 데이터
+  상한(1GiB) 유지. 프로덕션 GPFS·OneFS 는 사이트 스토리지 정책 소관(DMS 노드만 root 마운트).
+- 🔧 **결과 POST 의 API 메모리(슬라이스 1 열린 항목)** — `POST /api/agent/k8s-sync/runs/{id}` 를 API 프로세스에서 JSON 파싱·정규화하므로
+  상한(`DMS_K8S_SYNC_MAX_BYTES` 32MiB) 가까운 본문이면 API 메모리를 수백 MB 쓸 수 있다. 일반 인벤토리는 훨씬 작다 — 큰 사이트는 상한을
+  낮추거나 스트리밍 파서로.
+- 🔧 **PostgreSQL 실 DB 미실행(슬라이스 1·2)** — k8s 테이블·적용 루프·제출 판정은 sqlite 로만 테스트했다. PG 방언 차이는 코드에서
+  갈랐다(FOR UPDATE, ctid 묶음 삭제, IS NULL 분기 CAS, LIKE ESCAPE·`COALESCE(target_label, '')`). 실증(슬라이스 4)이 테스트베드 PG 로 확인.
+- 🔧 **e2e 03 순회에 k8s 화면 추가·계정 화면 `?create=`·SubmitJob `?pv=` 소비(슬라이스 1 포탈 열린 항목)** — 수기 게이트.
+- 🔧 **숫자만으로 된 계정 아이디의 실행 신원** — k8s 모드의 owner_username 은 계정 아이디 규칙(`[a-z0-9][a-z0-9._-]{0,63}`)이라
+  `1234` 같은 이름이 통과한다. 잡 셸의 `getent passwd 1234`·`id 1234` 는 숫자를 uid 로 읽어 다른 계정과 맞물리면 preflight 가
+  「account exists with a different uid/gid」로 실패한다(fail-closed — 권한 상승은 아님). 처방 후보: 실행 신원 이름에 숫자만인 값 거부.
+- 📝 **동적 PV 의 VOLUME 은 PVC 를 다시 만들면 바뀐다** — 테스트베드 실데이터 픽스처(`tests/fixtures/k8s/testbed-*.json`)는 그 시점
+  사본이라 라이브와 달라질 수 있다(테스트는 사본만 본다). 경로 맵 다시 뽑기: testbed `scripts/tbinfo_pv.py pv-node-paths`.
+- 📝 **csi-snapshotter 사이드카의 watch 오류 로그(테스트베드)** — VolumeSnapshot CRD 를 일부러 설치하지 않아 csi-nfs-controller 가
+  로그를 계속 낸다(재시작 0, DMS 는 스냅숏을 쓰지 않는다).
+
 ### 두 번째 테스트베드(k8s, LDAP 없음) 후속 — 2026-10-21
 
-- 🔧 **`overlays/prod` 설치기는 LDAP 을 필수로 요구한다 — 무 LDAP dms-k8s 사이트와 맞지 않음(사용자 결정 대기)**.
-  `deploy/overlays/prod/render.sh:57` 의 필수 `KEYS` 에 `LDAP_HOST`·`LDAP_USER_BASE`… 가 있고 `patch-config.yaml` 은
-  `DMS_LDAP_REQUIRE_AUTH_BIND "true"` 를, `deploy/install.sh:86` 은 시크릿 키 `DMS_LDAP_BIND_PW` 를 요구하며 에이전트
-  DaemonSet 은 nslcd 엔트리포인트 그대로다. 사용자 결정(「dms-k8s 브런치에서는 LDAP 을 사용 안할거야」)을 사이트 설치기에도
-  적용할지 정해야 한다. 후보: (1) values.env `IDENTITY_BACKEND=none`(키 생략 = 종전 LDAP) → render 가 LDAP 키 null·에이전트
-  `dms agent`·시크릿 4키 검사로 분기(테스트베드 오버레이 `testbed-k8s` 와 같은 모양 — 계약 테스트 재사용), (2) dms-k8s 브랜치
-  전용 무 LDAP 설치기. 지금은 테스트베드만 무 LDAP 이다(`deploy/overlays/testbed-k8s`).
-- 🔧 **"LDAP 끔" 명시 스위치(선택)** — 지금 LDAP 꺼짐은 "URI·BASE 가 비면 리졸버 None"(`identity_ldap.ldap_directory_config`)
-  뿐이라 부분 설정(URI 만 남김 등)도 경고 없이 꺼지거나 켜진다. 테스트베드는 오버레이 렌더 계약(`tests/test_testbed_k8s_overlay.py`,
-  'ldap' 0건)으로 막았다. 코드로 단언하려면 `DMS_IDENTITY_BACKEND=none` — 켜져 있는데 `DMS_LDAP_*` 가 하나라도 있으면
-  SettingsError, `/me` 로 내보내 포탈이 비 root 옵션·「LDAP 계정」 문구를 숨긴다. 에이전트 엔트리포인트는 URI 가 없으면 nslcd 를
-  건너뛰게(그러면 오버레이의 명령 오버라이드가 필요 없다), dms-k8s 이미지에서 nslcd·libnss-ldapd 제거(브랜치가 갈라질 때).
+- ~~**`overlays/prod` 설치기는 LDAP 을 필수로 요구한다 — 무 LDAP dms-k8s 사이트와 맞지 않음**~~ — **해소**(2026-10-25,
+  CHANGELOG 「dms-k8s RBAC·PV 슬라이스 2」): dms-k8s 의 `overlays/prod` 가 testbed-k8s 와 같은 모양이 됐다 — LDAP 키 null 삭제,
+  `DMS_IDENTITY_MODE: "k8s"`·`DMS_USER_ALLOWED_OPERATIONS: "sync,scan,rm"`, `patch-agent.yaml`(`dms agent` + LDAP env 삭제),
+  render.sh 필수 키에서 LDAP_* 제거(옛 values.env 의 LDAP_* 는 무시 + 알림), install.sh 시크릿 4키. `tests/test_prod_k8s_overlay.py`.
+- 🔧 **"LDAP 끔" 명시 스위치 — 일부 해소**(2026-10-25): `DMS_IDENTITY_MODE=k8s` 가 그 스위치다 — 켜져 있는데 `DMS_LDAP_URI` 가
+  남아 있으면 SettingsError, `/me` 의 `identity_mode` 로 포탈이 root 체크박스·LDAP 문구를 걷는다. 남은 것: 에이전트 엔트리포인트가
+  URI 가 없으면 nslcd 를 건너뛰게(그러면 오버레이의 명령 오버라이드가 필요 없다), dms-k8s 이미지에서 nslcd·libnss-ldapd 제거,
+  LDAP 코드 자체의 삭제 여부(아래 「RBAC·PV 사용자 결정 대기」).
 - 🔧 **포탈 다음 태그 제안이 `kN` 을 모른다** — `frontend/src/features/builds/BuildForm.tsx:63` `nextTagSuggestion` 은 `dNN` 의
   최댓값 + 1 만 본다. k8s 테스트베드(레지스트리 :5001, 태그 관례 `kN`)에서는 엉뚱한 `d1` 을 제안하므로 운영자가 `k<N>` 을 직접
   입력한다(`deploy/README.md` §13-8). 처방: 레지스트리·이력 태그의 지배적 접두(문자 + 숫자)를 따라 제안.

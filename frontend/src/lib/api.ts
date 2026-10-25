@@ -86,7 +86,7 @@ export const REASON_MESSAGES: Record<string, string> = {
   batch_item_not_rerunnable: "재실행할 수 없는 항목입니다 — 완료·실패·취소된 항목만 가능합니다",
   empty_selection: "선택된 항목이 없습니다",
   invalid_batch_name: "배치 이름이 올바르지 않습니다 — 120자 이하로 입력하세요",
-  invalid_storage: "스토리지 설정이 올바르지 않습니다 — 이름은 소문자·숫자·하이픈(63자), 경로는 절대 경로(루트 / 불가), 관리 루트는 마운트 경로 자신 또는 그 아래, 백엔드는 cephfs·gpfs·wekafs·lustre·purestorage·netapp 중 하나",
+  invalid_storage: "스토리지 설정이 올바르지 않습니다 — 이름은 소문자·숫자·하이픈(63자), 경로는 절대 경로(루트 / 불가), 관리 루트는 마운트 경로 자신 또는 그 아래, 백엔드는 cephfs·gpfs·wekafs·lustre·purestorage·netapp·onefs·nfs 중 하나",
   invalid_node_name: "노드 이름이 올바르지 않습니다",
   agent_node_identity_mismatch: "에이전트 노드 신원이 일치하지 않습니다",
   terminate_failed: "종료 요청에 실패했습니다",
@@ -388,8 +388,8 @@ export const REASON_MESSAGES: Record<string, string> = {
   purge_row_invalid: "정리 대기 기록의 내용이 올바르지 않아 정리를 멈췄습니다 — 운영자 확인이 필요합니다",
   purge_failed: "결과 정리 중 예기치 못한 오류가 났습니다 — 자동으로 다시 시도합니다",
   // k8s 연동(2026-10-25 dms-k8s 설계 §4.2): 동기화 실패 사유(에이전트가 보고 -- 동기화 이력·클러스터 카드)·상태 사유와
-  // 관리 라우트(/api/admin/k8s/*)의 거절 사유. storage_has_sc_mappings·denylist_group_unsupported 는 다음 슬라이스(스토리지
-  // 종류 변경·그룹 규칙)가 낸다. reasonCodes.json 과 같은 커밋.
+  // 관리 라우트(/api/admin/k8s/*)의 거절 사유. storage_has_sc_mappings(스토리지 종류 변경)·denylist_group_unsupported(그룹
+  // 규칙)는 슬라이스 2 가 낸다. reasonCodes.json 과 같은 커밋.
   k8s_sync_dns_failed: "API 서버 이름을 찾지 못했습니다(DNS) — 에이전트 파드는 노드의 /etc/hosts 를 보지 못합니다. API 서버 주소를 IP 로 넣고 「TLS 서버 이름」에 인증서의 도메인을 적으세요",
   k8s_sync_unreachable: "호출 노드에서 API 서버에 연결하지 못했습니다 — 대상 API 서버 방화벽에 호출 노드 IP 가 허용됐는지, 주소·포트가 맞는지 확인하세요",
   k8s_sync_tls_failed: "API 서버 인증서를 검증하지 못했습니다 — 클러스터 CA(PEM)를 붙여 넣거나, IP 로 접속한다면 「TLS 서버 이름」에 인증서의 이름을 적으세요(「검증 안 함」은 마지막 수단)",
@@ -417,6 +417,22 @@ export const REASON_MESSAGES: Record<string, string> = {
   invalid_pv_path_template: "경로 템플릿이 올바르지 않습니다 — managed_root 기준 상대 경로에 {volume}·{pvc}·{namespace}·{storageclass}·{subdir}·{attr:키}·{handle:구분자:번호} 중 하나 이상을 쓰세요(백엔드에 기본 템플릿이 없으면 꼭 적어야 합니다)",
   storage_has_sc_mappings: "이 스토리지에 StorageClass 가 매핑돼 있어 파일시스템 전용으로 바꿀 수 없습니다 — k8s 연동 → StorageClass 에서 매핑을 먼저 해제하세요",
   denylist_group_unsupported: "k8s 모드에서는 그룹 규칙을 쓸 수 없습니다(LDAP 그룹이 없습니다) — 사용자 이름 규칙을 쓰세요",
+  // 제출·권한(2026-10-25 dms-k8s 설계 §6·D11~D13): PV 주소 해석·맵핑 판정(제출), 계획·컨펌 재확인(요청 결과 사유),
+  // 스토리지 종류. 문구는 사용자가 다음에 할 일까지. reasonCodes.json 과 같은 커밋.
+  invalid_storage_kind: "스토리지 종류는 파일시스템·PV·둘 다 중 하나여야 합니다 — 등록 화면에서 종류를 다시 고르세요",
+  run_as_root_required: "이 시스템(k8s 모드)에서는 모든 작업이 root 로 실행됩니다 — 화면을 새로 고친 뒤 다시 제출하세요(「root 아님」으로는 보낼 수 없습니다)",
+  pv_and_storage_conflict: "한 쪽에 PV 와 직접 경로(스토리지)를 함께 지정했습니다 — 둘 중 하나만 고르세요",
+  k8s_mapping_unknown: "이 클러스터의 k8s 권한 정보가 아직 없습니다(등록되지 않았거나 한 번도 동기화되지 않음) — 잠시 뒤 다시 시도하고, 계속되면 관리자에게 k8s 연동 → 개요의 동기화 상태 확인을 요청하세요",
+  pv_not_found: "그 PV 를 찾을 수 없습니다 — 삭제됐거나 이름이 바뀌었을 수 있습니다. 목록을 새로 고쳐 다시 고르세요(새로 만든 PV 는 다음 동기화 뒤에 보입니다)",
+  pv_not_bound: "PV 가 아직 볼륨에 연결(Bound)되지 않았습니다 — 연결된 뒤(다음 동기화 이후) 다시 시도하거나 다른 PV 를 고르세요",
+  pv_storageclass_unmapped: "이 PV 의 StorageClass 가 DMS 스토리지에 매핑돼 있지 않습니다 — 관리자에게 k8s 연동 → StorageClass 에서 매핑을 요청하세요",
+  pv_path_unresolved: "이 PV 의 실제 경로를 계산할 수 없습니다(경로 템플릿·PV 정보 부족) — 관리자에게 k8s 연동 → StorageClass 의 경로 템플릿 확인을 요청하세요",
+  pv_root_rm_forbidden: "PV 전체(루트)는 삭제할 수 없습니다 — PV 안의 하위 경로를 지정하세요",
+  raw_path_not_allowed: "직접 경로로는 작업할 수 없습니다 — PV 를 골라 그 안의 경로를 지정하세요(직접 경로는 「전체 PV·직접 경로 권한」이 있는 관리자만 씁니다)",
+  k8s_access_denied: "이 PV 의 namespace 에 권한이 없습니다 — 그 namespace 에 rolebinding <아이디>-clusterrole-edit(또는 -admin)이 있어야 합니다. 관리자에게 요청하세요(권한 변경은 다음 동기화 뒤 반영됩니다)",
+  pv_moved: "제출한 뒤 PV 의 실제 경로가 바뀌었습니다(PVC 를 다시 만들었거나 StorageClass 매핑·경로 템플릿이 바뀜) — 작업을 다시 제출하세요",
+  pv_target_outside: "작업 경로가 PV 바깥을 가리킵니다 — PV 를 다시 골라 새로 제출하세요",
+  scan_path_unrestricted_only: "k8s 모드에서 스캔 경로 등록·통계는 「전체 PV·직접 경로 권한」이 있는 관리자만 씁니다 — PV 는 단일 작업의 scan 으로 확인하세요",
 };
 
 /** 사유 코드를 사용자에게 보일 문구로. 매핑이 없으면 원시 코드를 그대로 돌려준다

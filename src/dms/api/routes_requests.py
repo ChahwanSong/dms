@@ -9,7 +9,8 @@ from ..domain import (
     resolve_priority, validate_owner_username,
 )
 from ..execution import ExecutionError
-from ..identity import owner_override_allowed
+from ..identity import owner_override_allowed, root_allowed
+from .. import k8s_access
 from ..privileged import privileged_names
 from ..repositories.request_purges import MAX_BATCH_DELETE_CHILDREN
 from ..repositories.storages import storage_open_to_users
@@ -39,6 +40,13 @@ def reject_when_maintenance(request: Request) -> None:
         raise HTTPException(status_code=503, detail="maintenance_mode")
 
 
+class PvRef(BaseModel):
+    """PV 주소(dms-k8s 설계 §6) -- (클러스터, namespace, PVC 이름). 하위 경로는 그 쪽의 target/source/destination 칸이다."""
+    cluster: str
+    namespace: str
+    pvc: str
+
+
 class RequestBody(BaseModel):
     operation: str
     storage: str | None = None
@@ -55,7 +63,15 @@ class RequestBody(BaseModel):
     # rootEffective) -- 서버의 생략 기본값을 root 로 두면 옛 포탈 탭(생략 = 비 root 라고
     # 표시)·me 판정이 어긋난 화면이 표시와 다른 root 로 돈다(적대적 리뷰). StrictBool --
     # "yes"·1 같은 값이 root 로 승격되지 않게.
+    # **k8s 신원 모드는 예외**(2026-10-25 설계 D2): 모든 단건 잡이 root 라 서버가 True 를 싣는다(생략 = root). 명시 False 는
+    # 화면이 「비 root」라고 믿고 보낸 값이라 조용히 root 로 바꾸지 않고 422 run_as_root_required 로 끊는다.
     run_as_root: StrictBool | None = None
+    # PV 주소(k8s, 설계 §6): scan·rm 은 pv + target(PV 안 하위 경로, '' = PV 전체 -- rm 은 D12 로 거부), sync 는 쪽마다
+    # source_pv + source / destination_pv + destination(쪽마다 선택 -- 면제자는 PV ↔ 직접 경로 혼합). 같은 쪽에 storage 와
+    # pv 를 함께 주면 422 pv_and_storage_conflict.
+    pv: PvRef | None = None
+    source_pv: PvRef | None = None
+    destination_pv: PvRef | None = None
 
 
 def _require(value: str | None, reason: str) -> str:
@@ -64,13 +80,33 @@ def _require(value: str | None, reason: str) -> str:
     return value
 
 
+def _resolve_locations(body: RequestBody, repos) -> tuple[dict, dict]:
+    """바디의 쪽마다 스토리지·경로를 정한다(PV 주소면 k8s_access.resolve_side 로 해석). 반환 (위치, pv 블록들) -- 위치는
+    storage·target·source_storage·source·destination_storage·destination 여섯 칸(PV 주소가 아닌 쪽은 바디 값 그대로).
+    충돌 검사(pv_and_storage_conflict)를 모든 쪽에 먼저 한 뒤 해석한다 -- 해석의 409·422 가 바디 모양 오류를 가리지 않게."""
+    loc = {"storage": body.storage, "target": body.target, "source_storage": body.source_storage,
+           "source": body.source, "destination_storage": body.destination_storage, "destination": body.destination}
+    present = [(pv_key, storage_key, path_key) for pv_key, storage_key, path_key in k8s_access.sides(body.operation)
+               if getattr(body, pv_key) is not None]
+    for pv_key, storage_key, _ in present:
+        if getattr(body, storage_key) not in (None, ""):
+            raise DomainValidationError("pv_and_storage_conflict", pv_key)
+    blocks = {}
+    for pv_key, storage_key, path_key in present:
+        side = k8s_access.resolve_side(repos, getattr(body, pv_key).model_dump(), getattr(body, path_key),
+                                       operation=body.operation)
+        loc[storage_key], loc[path_key] = side["storage"], side["target"]
+        blocks[pv_key] = side["block"]
+    return loc, blocks
+
+
 def _validated_payload(body: RequestBody, priority: str,
-                       run_as_root: bool) -> tuple[dict, str]:
+                       run_as_root: bool, loc: dict, identity_mode: str = "ldap") -> tuple[dict, str]:
     op = Operation(body.operation)
     if priority not in PRIORITIES:
         raise DomainValidationError("invalid_priority", priority)
     if body.owner_username is not None:
-        validate_owner_username(body.owner_username)
+        validate_owner_username(body.owner_username, identity_mode=identity_mode)
     # storage 필드 존재 검증은 여기서 구체적 reason_code로 먼저 수행한다
     # (build_data_payload는 sync에 대해 "missing_storage" 하나로 뭉뚱그리므로,
     #  source/destination을 구분하는 기존 API 계약(422 reason_code)을 유지하려면
@@ -79,20 +115,20 @@ def _validated_payload(body: RequestBody, priority: str,
     #  수행하고 그 결과를 payload["options"]에 담아 반환하므로 여기서 다시
     #  validate_options를 호출하지 않는다).
     if op is Operation.SYNC:
-        src_storage = _require(body.source_storage, "missing_source_storage")
-        dst_storage = _require(body.destination_storage, "missing_destination_storage")
+        src_storage = _require(loc["source_storage"], "missing_source_storage")
+        dst_storage = _require(loc["destination_storage"], "missing_destination_storage")
         payload, key = build_data_payload(
-            "sync", source_storage=src_storage, source=body.source,
-            destination_storage=dst_storage, destination=body.destination,
+            "sync", source_storage=src_storage, source=loc["source"],
+            destination_storage=dst_storage, destination=loc["destination"],
             options=body.options)
     elif op is Operation.RM:
-        storage = _require(body.storage, "missing_storage")
+        storage = _require(loc["storage"], "missing_storage")
         payload, key = build_data_payload(
-            "rm", storage=storage, target=body.target, options=body.options)
+            "rm", storage=storage, target=loc["target"], options=body.options)
     else:
-        storage = _require(body.storage, "missing_storage")
+        storage = _require(loc["storage"], "missing_storage")
         payload, key = build_data_payload(
-            "scan", storage=storage, target=body.target, options=body.options)
+            "scan", storage=storage, target=loc["target"], options=body.options)
     payload["owner_username"] = body.owner_username
     # 확정된 root 일 때만 키를 싣는다 -- 키 부재는 "root 아님" 이고 planner 는 `is True`
     # 로만 승격한다(모름을 특권 쪽으로 읽지 않는다).
@@ -118,22 +154,49 @@ def submit(body: RequestBody, request: Request,
     if (identity.role != "admin" and body.operation in known_ops
             and body.operation not in settings.user_allowed_operations):
         raise HTTPException(status_code=403, detail="operation_admin_only")
+    repos = request.app.state.repos
+    mode = k8s_access.identity_mode(settings)
+    k8s = mode == "k8s"
+    # k8s 신원 모드(2026-10-25 설계 D2·D3): 모든 잡이 root 이고 root 는 세션 인증 요청만이다 -- 공유 토큰 제출은 어떤 경로로도
+    # 통과할 수 없으니 정확한 사유로 먼저 끊는다(뒤의 raw·맵핑 게이트가 엉뚱한 사유를 내지 않게). 아래 root 게이트가 같은
+    # 술어(identity.root_allowed)로 다시 본다.
+    if k8s and identity.auth != "session":
+        raise HTTPException(status_code=403, detail="privileged_not_authorized")
+    # PV 주소 해석(설계 §6 게이트 순서: 유지보수 → 연산 → 클러스터 존재·동기화(409) → PV 해석(422) → 해석된 스토리지로
+    # storage_admin_only → 맵핑·raw(403) → sync 쌍 → owner·root → build_data_payload). 이후의 스토리지 게이트는 전부 **해석된**
+    # 스토리지 이름(loc)을 본다 -- PV 주소 제출은 바디의 storage 칸이 비어 있어 예전 게이트를 조용히 건너뛰었다(리뷰).
+    try:
+        loc, pv_blocks = _resolve_locations(body, repos)
+    except DomainValidationError as e:
+        raise HTTPException(status_code=k8s_access.SUBMIT_STATUS.get(e.reason_code, 422), detail=e.reason_code)
     # 관리자 전용 스토리지(2026-09-30 사용 범위, storage_open_to_users): 비관리자 피커에서
     # 빠지는 건 표시일 뿐이라 여기서 막는다(planner 가 계획 시점에 다시 본다 -- 대기 중
     # 관리자 전용으로 바뀐 요청). 완전 비활성(enabled=0)은 종전대로 planner storage_disabled.
     if identity.role != "admin":
-        for storage_name in (body.storage, body.source_storage, body.destination_storage):
-            row = request.app.state.repos.storages.get(storage_name) if storage_name else None
+        for storage_name in (loc["storage"], loc["source_storage"], loc["destination_storage"]):
+            row = repos.storages.get(storage_name) if storage_name else None
             if row is not None and row["enabled"] == 1 and not storage_open_to_users(row):
                 raise HTTPException(status_code=403, detail="storage_admin_only")
+    # 맵핑·raw 게이트(k8s, 설계 D4): 면제자(can_run_as_root -- 관리자 + 특권 목록/부여 + 세션)만 직접 경로·전체 PV. 그 밖은
+    # 쪽마다 PV 주소여야 하고(raw_path_not_allowed) 요청자 ID 의 인식된 RoleBinding 이 그 (클러스터, namespace)에 있어야
+    # 한다(k8s_access_denied). 스토리지 칸도 PV 도 없는 쪽은 아래 검증의 정확한 422(missing_*)로 흘린다. planner·컨펌이 요청
+    # 행으로 다시 본다(k8s_access.recheck_request -- 대기 중 권한 회수·DB 직접 삽입).
+    if k8s and not can_run_as_root(identity, settings, repos):
+        for pv_key, storage_key, _ in k8s_access.sides(body.operation):
+            if pv_key not in pv_blocks and getattr(body, storage_key) not in (None, ""):
+                raise HTTPException(status_code=403, detail="raw_path_not_allowed")
+        for block in pv_blocks.values():
+            if repos.k8s.access_for(identity.actor, block["cluster"], block["namespace"]) is None:
+                raise HTTPException(status_code=403, detail="k8s_access_denied")
     # 사용자 sync 허용 스토리지 쌍(2026-09-30, repositories/sync_pairs.py): 기본 전부 불가 --
     # 관리자가 허용한 (소스 -> 목적지) 쌍만. 포탈의 후보 필터는 표시일 뿐이라 여기서 막는다
     # (planner·컨펌이 다시 본다 -- 대기 중 허용이 빠진 요청). 스토리지 필드가 빠진 요청은
-    # 아래 검증이 정확한 422(missing_*)를 내도록 쌍 검사를 건너뛴다.
+    # 아래 검증이 정확한 422(missing_*)를 내도록 쌍 검사를 건너뛴다. k8s 모드에서 양쪽이 PV 주소면 면제다(설계 D14 --
+    # PV 권한이 판정한다; planner 3b·컨펌이 같은 술어 k8s_access.pair_gate_exempt).
     if (identity.role != "admin" and body.operation == Operation.SYNC.value
-            and body.source_storage and body.destination_storage
-            and not sync_pair_allowed(request.app.state.repos, body.source_storage,
-                                      body.destination_storage)):
+            and loc["source_storage"] and loc["destination_storage"]
+            and not k8s_access.pair_gate_exempt(pv_blocks, settings)
+            and not sync_pair_allowed(repos, loc["source_storage"], loc["destination_storage"])):
         raise HTTPException(status_code=403, detail="sync_pair_not_allowed")
     # 특권 게이트 (스펙 §5): owner_username이 요청자와 다르면 특권 의도 → 인가 필요.
     # 다른 사용자로 실행하는 것 자체가 특권이다 -- 2026-09-30 부터 그 실행은 기본이
@@ -141,10 +204,11 @@ def submit(body: RequestBody, request: Request,
     # 술어는 identity.owner_override_allowed 하나 -- planner 가 계획 시점에 같은 함수로 다시 본다(DB 직접 쓰기
     # 방어, 2026-10-07). 원문 비교라 ' alice' 같은 값은 여기서 403(모양 422 는 그 뒤 _validated_payload).
     owner = body.owner_username
+    names = privileged_names(settings, repos)
     if not owner_override_allowed(owner_username=owner, requester_id=identity.actor,
                                   requester_is_admin=(identity.role == "admin"),
                                   allow_privileged=settings.allow_privileged_requesters,
-                                  privileged_requesters=privileged_names(settings, request.app.state.repos)):
+                                  privileged_requesters=names):
         raise HTTPException(status_code=403, detail="privileged_not_authorized")
     # root 실행 게이트: planner 와 같은 자격(세션 인증 포함)을 제출 시점에 즉시 확인한다
     # -- 통과 못 할 요청을 Pending 으로 받아 뒀다가 계획 때 거부하지 않는다. planner 도
@@ -153,25 +217,39 @@ def submit(body: RequestBody, request: Request,
     # 기본 root"(사용자 결정 2026-09-30)와 "다른 실행 신원이면 기본 그 사용자 권한"은 포탈이
     # 정해 확정값을 명시로 싣는다(SubmitJob rootEffective). 생략을 root 로 읽으면 옛 포탈 탭·
     # 판정이 어긋난 화면이 "비 root" 라고 표시한 채 root 로 돈다.
-    run_as_root = body.run_as_root is True
-    if run_as_root and not can_run_as_root(identity, settings, request.app.state.repos):
-        raise HTTPException(status_code=403, detail="privileged_not_authorized")
+    # k8s 신원 모드만 예외(설계 D2): 모든 단건 잡이 root 다 -- 서버가 True 를 싣고(생략 = root), 명시 False 는 422. 허용은
+    # identity.root_allowed(세션 인증) -- 계획(resolve_job_identity)·컨펌(confirm_job)이 같은 술어다. 권한 판정은 위 맵핑 게이트.
+    if k8s:
+        if body.run_as_root is False:
+            raise HTTPException(status_code=422, detail="run_as_root_required")
+        run_as_root = True
+        if not root_allowed(identity_mode=mode, requester_id=identity.actor,
+                            allow_privileged=settings.allow_privileged_requesters,
+                            privileged_requesters=names, session_authenticated=(identity.auth == "session")):
+            raise HTTPException(status_code=403, detail="privileged_not_authorized")
+    else:
+        run_as_root = body.run_as_root is True
+        if run_as_root and not can_run_as_root(identity, settings, repos):
+            raise HTTPException(status_code=403, detail="privileged_not_authorized")
 
-    repos = request.app.state.repos
     priority = resolve_priority(repos, body.operation, body.priority)
     try:
         # sync 경로 겹침: 같은 스토리지는 여기서(build_data_payload, 상대경로), 다른 스토리지는 실제 경로로 planner 가 도구를
         # 정한 뒤 본다(dsync -- 두 스토리지가 한 노드의 같은 이름 공간일 때만 뜻이 있다, 2026-10-12).
-        payload, resource_key = _validated_payload(body, priority, run_as_root)
+        payload, resource_key = _validated_payload(body, priority, run_as_root, loc, identity_mode=mode)
     except (DomainValidationError, ValueError) as e:
         reason = getattr(e, "reason_code", "invalid_operation")
         raise HTTPException(status_code=422, detail=reason)
+    # PV 블록은 build_data_payload 반환 **뒤에** 덧붙인다(그 반환은 단건 계약 -- tests/test_domain_batch.py). planner·컨펌이
+    # 이 블록으로 재확인한다(k8s_access.recheck_request). target_label 은 작업 목록 경로 검색용 사람 표기(설계 D17).
+    payload.update(pv_blocks)
     rid = repos.requests.create(
         operation=body.operation, requester_id=identity.actor, actor=identity.actor,
         resource_key=resource_key, payload=payload, priority=priority,
         # 특권 승격을 session 요청에만 허용하기 위해 인증 방식을 요청에 실어 둔다
         # (planner 가 plan 시점에 읽는다, 설계 §2.2-2).
-        auth_method=identity.auth)
+        auth_method=identity.auth,
+        target_label=k8s_access.target_label(body.operation, payload))
     return {"request_id": rid, "state": "Pending"}
 
 

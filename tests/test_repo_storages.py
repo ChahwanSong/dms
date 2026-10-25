@@ -17,7 +17,7 @@ def test_create_get_list(db):
 
 @pytest.mark.parametrize("bad", [
     {"managed_root": "/other/root"},          # mount_path 밖
-    {"backend_type": "nfs"},                  # 미지원 백엔드
+    {"backend_type": "isilon"},               # 미지원 백엔드(nfs·onefs 는 2026-10-25 dms-k8s 부터 지원)
     {"mount_path": "relative/path"},          # 상대 경로
     {"storage_name": "Bad_Name"},             # 이름 규칙 위반
     {"mount_path": "/", "managed_root": "/"},  # 노드 루트(슬라이스 24 §2.2) -- 현행 ACCEPTED

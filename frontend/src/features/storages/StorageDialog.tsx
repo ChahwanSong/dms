@@ -15,6 +15,8 @@ export const BACKENDS = [
   { value: "lustre", label: "DDN Lustre (EXAScaler)" },
   { value: "purestorage", label: "Pure Storage (FlashBlade)" },
   { value: "netapp", label: "NetApp (ONTAP)" },
+  { value: "onefs", label: "Dell PowerScale (OneFS)" },
+  { value: "nfs", label: "NFS (csi-driver-nfs)" },
 ];
 
 const field = "mt-1 w-full rounded-lg border border-black/10 px-3 py-2";

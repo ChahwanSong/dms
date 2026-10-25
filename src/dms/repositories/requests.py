@@ -47,7 +47,7 @@ class RequestsRepository:
 
     def create(self, *, operation, requester_id, actor, resource_key,
                payload: dict, priority: str, batch_id=None,
-               auth_method="token") -> str:
+               auth_method="token", target_label=None) -> str:
         # auth_method 기본값이 "token" 인 이유(슬라이스 19, 설계 §2.2-2): 이 값을
         # 빠뜨린 호출자는 특권 승격을 못 얻는다 -- 기본이 "session" 이면 새 생성
         # 지점이 하나 생길 때마다 조용히 uid 0 경로가 열린다. fail-closed 가 기본.
@@ -55,13 +55,16 @@ class RequestsRepository:
             return self.insert_pending(
                 operation=operation, requester_id=requester_id, actor=actor,
                 resource_key=resource_key, payload=payload, priority=priority,
-                batch_id=batch_id, auth_method=auth_method)
+                batch_id=batch_id, auth_method=auth_method, target_label=target_label)
 
     def insert_pending(self, *, operation, requester_id, actor, resource_key,
                        payload: dict, priority: str, batch_id=None,
-                       auth_method="token") -> str:
+                       auth_method="token", target_label=None) -> str:
         """create 의 본문 -- **호출자 트랜잭션 안에서만** 부른다(Database.transaction 은 중첩이 없다). 배치
-        orchestrator 가 자식 요청 INSERT 와 항목 claim 을 한 트랜잭션으로 묶으려고 나눴다(claim 실패 = 롤백)."""
+        orchestrator 가 자식 요청 INSERT 와 항목 claim 을 한 트랜잭션으로 묶으려고 나눴다(claim 실패 = 롤백).
+
+        target_label(2026-10-25 dms-k8s 설계 D17): PV 주소 제출의 사람 표기(「PV 이름 — ns (sc) / 하위경로」, sync 는 「 → 」)
+        -- 직접 경로 요청은 NULL(검색은 resource_key 표기로 된다). 표시용이자 검색용일 뿐 판정에 쓰지 않는다."""
         request_id = uuid.uuid4().hex
         now = utc_now_iso()
         row = self._db.query_one("SELECT COALESCE(MAX(commit_order), 0) AS m FROM requests")
@@ -69,13 +72,13 @@ class RequestsRepository:
         self._db.execute(
             """INSERT INTO requests (request_id, commit_order, operation, requester_id,
                    actor, resource_key, priority, payload, state, created_at, updated_at,
-                   batch_id, auth_method)
+                   batch_id, auth_method, target_label)
                VALUES (:id, :o, :op, :req, :actor, :key, :pri, :payload, :state, :now, :now,
-                   :bid, :auth)""",
+                   :bid, :auth, :label)""",
             {"id": request_id, "o": order, "op": operation, "req": requester_id,
              "actor": actor, "key": resource_key, "pri": priority,
              "payload": dump_json(payload), "state": RequestState.PENDING.value,
-             "now": now, "bid": batch_id, "auth": auth_method},
+             "now": now, "bid": batch_id, "auth": auth_method, "label": target_label},
         )
         self._record_transition(request_id, None, RequestState.PENDING, None, actor, now)
         return request_id
@@ -118,7 +121,7 @@ class RequestsRepository:
         검색(2026-10-25, 「전체 작업」 검색칸): requester_like·batch_like·path_like 는 text_search.search_tokens 의 토큰
         목록이다(빈 목록·None = 조건 없음). 토큰마다 대소문자를 무시한 **부분** 일치이고, 토큰끼리·칸끼리 모두 AND 다 --
         행을 좁히기만 한다. requester_like = 요청자 아이디. path_like = 화면 「대상」 표기(_TARGET_TEXT_SQL -- 스토리지 이름·
-        sync 출발·도착 양쪽 포함). batch_like = 배치 이름(batches.name, 조회 시점의 서브쿼리 -- 이름은 PATCH 로 바뀐다)
+        sync 출발·도착 양쪽 포함) 또는 PV 표기(target_label, 2026-10-25 dms-k8s D17). batch_like = 배치 이름(batches.name, 조회 시점의 서브쿼리 -- 이름은 PATCH 로 바뀐다)
         또는 6자 이상 hex 토큰이면 batch_id 앞부분(화면이 이름 없는 배치·기록 없는 묶음을 id 앞 12자로 보인다). 배치 행이
         없는 단건은 batch_like 가 있으면 빠진다.
 
@@ -142,7 +145,11 @@ class RequestsRepository:
         for i, tok in enumerate(requester_like or ()):
             where.append(rf"lower(requester_id) LIKE lower(:rq{i}) ESCAPE '\'"); params[f"rq{i}"] = contains_pattern(tok)
         for i, tok in enumerate(path_like or ()):
-            where.append(rf"lower({_TARGET_TEXT_SQL}) LIKE lower(:pq{i}) ESCAPE '\'")
+            # 토큰마다 화면 「대상」 표기(resource_key 에서 꺼낸 스토리지:경로) **또는** PV 표기(target_label -- PV 이름·
+            # namespace·StorageClass, dms-k8s 설계 D17). PV 잡의 resource_key 에는 VOLUME 경로(pvc-uuid…)만 있어 화면에 보이는
+            # PV 이름으로는 걸리지 않았다. 직접 경로 요청의 target_label 은 NULL 이라 COALESCE 로 빈 문자열과 비교한다.
+            where.append(rf"(lower({_TARGET_TEXT_SQL}) LIKE lower(:pq{i}) ESCAPE '\'"
+                         rf" OR lower(COALESCE(target_label, '')) LIKE lower(:pq{i}) ESCAPE '\')")
             params[f"pq{i}"] = contains_pattern(tok)
         for i, tok in enumerate(batch_like or ()):
             # COALESCE 로 감싼다(2026-10-25 리뷰, PG16 32만 행 실측): 맨 IN 이면 PG 가 semi-join 으로 끌어올리고

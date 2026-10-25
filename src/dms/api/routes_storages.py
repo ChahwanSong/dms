@@ -2,6 +2,7 @@ import posixpath
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from ..domain import DomainValidationError
+from ..repositories.k8s import storage_kind
 from ..repositories.storages import storage_open_to_users
 from .auth import Identity, audit_actor, require_admin, require_user
 
@@ -17,6 +18,9 @@ class StorageCreate(BaseModel):
     # (enabled=False). repositories.storages.storage_open_to_users 가 세 상태의 정의다.
     enabled: bool = True
     user_enabled: bool = True
+    # 스토리지 종류(2026-10-25 dms-k8s 설계 D11): filesystem(직접 경로) | pv(k8s PV 전용 -- StorageClass 매핑 대상) | both.
+    # 생략 = filesystem(종전 등록과 같다). 그 밖의 값은 422 invalid_storage_kind.
+    kind: str = "filesystem"
 
 
 class StorageUpdate(BaseModel):
@@ -26,22 +30,29 @@ class StorageUpdate(BaseModel):
     enabled: bool
     # None = 현재 값 유지(필드를 모르는 옛 클라이언트의 PUT 이 관리자 전용을 풀지 않게).
     user_enabled: bool | None = None
+    # None = 현재 값 유지(같은 이유). 매핑이 걸린 스토리지를 filesystem 으로 바꾸면 422 storage_has_sc_mappings(D10).
+    kind: str | None = None
+
+
+def _with_kind(row: dict) -> dict:
+    """응답 행의 kind 를 정규화한다(NULL·알 수 없는 값 = filesystem -- repositories.k8s.storage_kind 와 같은 규칙)."""
+    return {**row, "kind": storage_kind(row)}
 
 
 @router.get("/api/admin/storages")
 def list_storages(request: Request):
-    return request.app.state.repos.storages.list()
+    return [_with_kind(r) for r in request.app.state.repos.storages.list()]
 
 
 @router.post("/api/admin/storages", status_code=201)
 def create_storage(body: StorageCreate, request: Request,
                    identity: Identity = Depends(require_admin)):
     try:
-        return request.app.state.repos.storages.create(
+        return _with_kind(request.app.state.repos.storages.create(
             storage_name=body.storage_name, mount_path=body.mount_path,
             managed_root=body.managed_root, backend_type=body.backend_type,
-            enabled=body.enabled, user_enabled=body.user_enabled,
-            actor=audit_actor(identity))
+            enabled=body.enabled, user_enabled=body.user_enabled, kind=body.kind,
+            actor=audit_actor(identity)))
     except DomainValidationError as e:
         raise HTTPException(
             status_code=409 if e.reason_code == "storage_exists" else 422,
@@ -68,10 +79,10 @@ def update_storage(name: str, body: StorageUpdate, request: Request,
     if changed and repos.requests.active_referencing_storage(name):
         raise HTTPException(status_code=409, detail="storage_in_use")
     try:
-        return repos.storages.update(
+        return _with_kind(repos.storages.update(
             name, mount_path=body.mount_path, managed_root=body.managed_root,
             backend_type=body.backend_type, enabled=body.enabled,
-            user_enabled=body.user_enabled, actor=audit_actor(identity))
+            user_enabled=body.user_enabled, kind=body.kind, actor=audit_actor(identity)))
     except DomainValidationError as e:
         raise HTTPException(status_code=422, detail=e.reason_code)
     except KeyError:
@@ -130,7 +141,8 @@ def list_user_storages(request: Request, identity: Identity = Depends(require_us
             continue
         if not is_admin and not storage_open_to_users(r):
             continue
+        # kind(2026-10-25 dms-k8s 설계 D11): 포탈의 직접 경로 피커는 filesystem·both 만 보인다(pv 전용은 PV 주소로만).
         out.append({"storage_name": r["storage_name"], "backend_type": r["backend_type"],
                     "status": r["status"], "managed_root": r["managed_root"],
-                    "admin_only": not storage_open_to_users(r)})
+                    "admin_only": not storage_open_to_users(r), "kind": storage_kind(r)})
     return out

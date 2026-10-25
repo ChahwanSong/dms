@@ -95,6 +95,58 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### 🔧 dms-k8s RBAC·PV — 인벤토리(슬라이스 1)·관리자 화면·제출·권한·스토리지(슬라이스 2) — **구현 완료, 실증 대기**(2026-10-25~26)
+
+사용자 지시(「DMS-k8s 개발」 세션, 2026-10-25): dms-k8s 는 LDAP 대신 **k8s RoleBinding·PVC 맵핑**으로 권한을 판정하고 **모든 잡을
+root** 로 돌린다. `rolebindings -A` 의 `<user>-clusterrole-admin|edit`(ClusterRole `kubeflow-admin|edit`) → 그 namespace 의 모든
+PVC 읽기·쓰기(ID = 이름 앞부분의 `-` → `.`), 사용자는 PV 이름(= PVC NAME 열)을 고르고 경로는 VOLUME 열로 만든다(GPFS
+`{volume}/{volume}-data`, OneFS `data/csi/{volume}`, 테스트베드 NFS + csi-driver-nfs). 여러 클러스터의 API 서버·토큰 등록, 호출 노드
+primary·secondary, 동기화 상태 UI. 설계 `docs/history/specs/2026-10-25-dms-k8s-rbac-pv-design.md`(v2 — 적대적 검토 3관점 반영).
+
+- **테스트베드(슬라이스 0, testbed 저장소 7729b50)**: 호스트 export `/data/k8s_pv` → 워커 `/k8s_pv/{nfs,gpfs,onefs}`, csi-driver-nfs
+  v4.13.5, SC tb-nfs·tb-gpfs·tb-onefs(정적 PV `k8s-3fa9c2d71e`), ns team-a·b·c 와 인식 바인딩 5 + 대조군, 읽기 전용 리더 SA·장기 토큰.
+  실데이터 목록 JSON 을 `tests/fixtures/k8s/testbed-*.json` 으로(토큰 없음). validate PASS 219·post-boot-check PASS 89.
+- **인벤토리 백엔드(슬라이스 1, c2655ae)**: 마이그레이션(§3 — k8s_* 8표, `storages.kind`, `requests.target_label`), `k8s_rbac`(D5
+  맵핑 규칙)·`k8s_sync`(D16 배정 — 정규 run 은 primary, 90초 미 claim 이면 secondary, 노드성 실패는 30초 뒤 secondary 1회 대체)·
+  `pv_paths`(D9 템플릿 — `{volume}`·`{pvc}`·`{namespace}`·`{storageclass}`·`{subdir}`·`{attr:키}`·`{handle:구분자:i[+]}`, 우선순위 SC
+  덮어쓰기 > backend 프리셋), `repositories/k8s`, 에이전트 `k8s_fetch` 워커 스레드(httpx, CA·SNI·검증 안 함, 410 재시작, 크기 상한),
+  `routes_agent` claim·결과, `routes_k8s`(관리 §5 + 사용자 볼륨), 컨트롤러 `k8s-inventory` 루프(diff 적용·CAS·expired·정리)·보존,
+  봉인 용도 `k8s_cluster_token`, 컨트롤러 리스 holder 에 HOSTNAME. 보안 리뷰 반영(ce2a9ef): 클러스터 토큰은 검증된 그 서버에 묶는다
+  (TLS 서버 이름 변경·검증 끄기도 토큰 재입력).
+- **관리자 화면(1482542)**: 「k8s 연동」 5탭(개요·StorageClass·PV 탐색·사용자 권한·동기화 이력), 클러스터 등록 Dialog(리더 SA·토큰
+  Secret YAML 복사).
+- **제출·권한·스토리지(슬라이스 2)**:
+  - **k8s 신원 모드**(D1) `DMS_IDENTITY_MODE ∈ {ldap, k8s}`(코드 기본 ldap) — k8s 인데 `DMS_LDAP_URI` 가 있거나 특권 허용이 false 면
+    기동 거부. **root 강제**(D2): 단건 제출에 서버가 `run_as_root: true` 를 싣고 명시 false 는 422 `run_as_root_required`. **root 허용
+    술어 하나**(D3) `identity.root_allowed` — k8s = 세션 인증, ldap = 종전 privilege_eligible — 를 제출·`resolve_job_identity`
+    (REQUESTED)·`confirm_job` 세 지점이 쓴다(일반 사용자 sync·rm 이 컨펌에서 409 로 끊기던 결합 — 리뷰). 배치 자식(IF_ELIGIBLE)은 그대로.
+    k8s 모드는 그룹 denylist 를 평가하지 않고(groups=[]) 그룹 규칙 추가는 422 `denylist_group_unsupported`. 공유 토큰 제출은 403
+    `privileged_not_authorized`.
+  - **맵핑 면제**(D4) = `can_run_as_root`(관리자 + 특권 목록/부여 + 세션, 의미 불변) — 면제자는 직접 경로·전체 PV·PV ↔ 직접 경로 혼합,
+    그 밖은 PV 주소만(403 `raw_path_not_allowed`) + 요청자 ID 의 맵핑(403 `k8s_access_denied`). 요청 행 기반 동등 술어
+    `k8s_access.unrestricted_request`(planner·컨펌). `/api/auth/me` 에 `identity_mode`·`unrestricted`·`user_operations`.
+  - **PV 주소 제출**(§6): 바디 `pv`·`source_pv`·`destination_pv` + 하위 경로. 게이트 순서 유지보수 → 연산 → 클러스터 동기화(409
+    `k8s_mapping_unknown`) → PV 해석(422 `pv_not_found`·`pv_not_bound`·`pv_storageclass_unmapped`·`pv_path_unresolved`·
+    `pv_root_rm_forbidden`·`pv_and_storage_conflict`) → 해석된 스토리지로 `storage_admin_only` → 맵핑·raw → sync 쌍 → owner·root →
+    `build_data_payload` + pv 블록 `{cluster, namespace, pvc, volume, storage_class, root, path}` + `requests.target_label`(「PV 이름 —
+    ns (sc) / 하위경로」, sync 는 「 → 」). PV 루트 rm 은 **정규화한 최종 target == 루트**로 판정(D12 — `''`·`'.'`·`'./'`).
+  - **재확인**(D13) `k8s_access.recheck_request` — planner 3a·컨펌이 같은 함수: `pv_moved`·`pv_not_found`·`pv_target_outside`·
+    `raw_path_not_allowed`(pv 블록 없는 비면제 행)·`k8s_access_denied`(권한 회수), 컨펌은 종단 + 409. **sync 쌍 면제**(D14)
+    `k8s_access.pair_gate_exempt`(k8s 모드 ∧ 양쪽 PV) — 제출·planner 3b·컨펌.
+  - 작업 목록 경로 검색에 `target_label` OR(PV 이름·namespace·StorageClass 로 걸린다). k8s 모드 owner_username = 계정 아이디 규칙.
+    사용자 스캔 경로 등록·통계는 k8s 모드에서 면제자 전용(422 `scan_path_unrestricted_only`).
+  - **스토리지**(D10·D11): `kind`(filesystem·pv·both, 422 `invalid_storage_kind`)를 등록·수정·목록·사용자 목록에, 매핑된 스토리지의
+    filesystem 전환 422 `storage_has_sc_mappings`, 스토리지 삭제 시 같은 트랜잭션에서 SC 매핑 정리 + 감사. 백엔드 라벨 `onefs`·`nfs`
+    추가(backend_type 은 PV 경로 프리셋 키이기도 하다).
+  - **배포**: testbed-k8s 오버레이에 `DMS_IDENTITY_MODE: "k8s"`·`DMS_USER_ALLOWED_OPERATIONS: "sync,scan,rm"`. dms-k8s 의
+    `overlays/prod` 를 무 LDAP 으로(LDAP 키 null·`patch-agent.yaml`·render 필수 키에서 LDAP 제거·install 시크릿 4키 —
+    `tests/test_prod_k8s_overlay.py`; BACKLOG 「overlays/prod 의 LDAP 필수」 해소).
+  - 사유 코드 14개 양쪽 등록(슬라이스 1 이 남긴 `pv_not_bound`·`pv_storageclass_unmapped`·`pv_path_unresolved` 포함).
+  - 테스트: `tests/test_k8s_submit.py`(테스트베드 실데이터 위 수용 — 일반 사용자 PV→PV sync 제출 → 계획 → 미리보기 대기 → 컨펌,
+    게이트·재확인·면제·me·검색), `test_storage_kind.py`, `test_prod_k8s_overlay.py`, 기존 테스트 갱신(백엔드 8종·me 필드·사용자
+    스토리지 필드).
+- **실증**: 다음 단계(설계 §9 슬라이스 3·4 — 포탈 제출 화면 + 테스트베드 dmsk8s 실증·적대적 리뷰)가 여기에 덧붙인다.
+
 ### ✅ 전체 작업: 요청자 부분 일치 + 배치 이름·대상 경로 검색 + 열 폭(요청 ↓ · 배치 ↑ · 시각 = 글자 폭) — **완료·실증**(2026-10-25, k2)
 
 사용자 요청(「DMS-k8s 개발」 세션): 「포탈의 전체 작업에서 지금 요청자 아이디로만 필터를 걸수 있는데 배치 이름, 대상 (경로)

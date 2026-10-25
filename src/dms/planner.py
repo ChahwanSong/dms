@@ -3,8 +3,9 @@ import sys
 import time
 from dataclasses import asdict
 
+from . import k8s_access
 from .db import iso_plus, utc_now_iso
-from .domain import Operation, RequestState, sync_overlap_problem, valid_owner_username
+from .domain import DomainValidationError, Operation, RequestState, sync_overlap_problem, valid_owner_username
 from .identity import (LDAP_TICK_BUDGET_SECONDS, MAX_SUPPLEMENTARY_GROUPS, SUPP_OVER_LIMIT,
                        IdentityDeadlineExceeded, IdentityLookupInvalid, IdentityRejected, IdentityUnavailable,
                        LdapCircuitOpen, check_chown_group, owner_override_allowed, privilege_policy,
@@ -267,6 +268,7 @@ class Planner:
         # 바뀌어도 이미 만든 배치 항목이 사용자 규칙에 걸리지 않게. 관리자 전용 스토리지 판정은
         # 이 면제를 쓰지 않는다(d142 불변식: 계정 역할 기준 -- 강등된 생성자의 배치는 거부).
         pair_exempt = requester_is_admin or bool(req.get("batch_id"))
+        mode = k8s_access.identity_mode(self._settings)
         # 3. storage admission
         storage_rows = {}
         for name in _required_storages(req["operation"], payload):
@@ -283,9 +285,19 @@ class Planner:
                 return self._reject(rid, "storage_admin_only")
             if storage["status"] not in ("Ready", "Degraded"):
                 return self._reject(rid, "storage_not_ready")
+        # 3a. PV 주소·k8s 맵핑 재확인(2026-10-25 dms-k8s 설계 D13, k8s_access.recheck_request -- 컨펌과 같은 함수): pv 블록을
+        #     지금 스냅숏으로 다시 해석해 (스토리지, 루트)가 바뀌었으면 pv_moved, PVC·클러스터가 사라졌으면 pv_not_found, target 이
+        #     PV 루트 밖이면 pv_target_outside. k8s 모드의 비면제 요청은 모든 쪽이 PV 주소여야 하고(raw_path_not_allowed) 요청자의
+        #     맵핑을 다시 본다(k8s_access_denied -- 대기 중 권한 회수). DB 가 신뢰 경계다(create_job 무검증 INSERT).
+        try:
+            k8s_access.recheck_request(self._repos, req, settings=self._settings)
+        except DomainValidationError as exc:
+            return self._reject(rid, reason=exc.reason_code)
         # 3b. 사용자 sync 허용 스토리지 쌍(2026-09-30, repositories/sync_pairs.py): 기본 전부 불가.
-        #     제출 게이트를 통과한 뒤 대기 중에 허용이 빠진 요청·DB 직접 삽입을 계획 시점에 거부.
+        #     제출 게이트를 통과한 뒤 대기 중에 허용이 빠진 요청·DB 직접 삽입을 계획 시점에 거부. k8s 모드에서 양쪽이 PV 주소면
+        #     면제(설계 D14 -- 제출·컨펌과 같은 술어; 3a 가 그 pv 블록을 방금 확인했다).
         if (req["operation"] == Operation.SYNC.value and not pair_exempt
+                and not k8s_access.pair_gate_exempt(payload, self._settings)
                 and not sync_pair_allowed(self._repos, payload.get("source_storage"),
                                           payload.get("destination_storage"))):
             return self._reject(rid, "sync_pair_not_allowed")
@@ -296,7 +308,7 @@ class Planner:
         #     그룹까지 얻는 경로를 막는다. 배치 자식은 생성자(관리자, 세션·목록 게이트 통과)가 요청자라 통과하고,
         #     생성자가 강등·목록에서 빠지면 자식도 거부된다(storage_admin_only 와 같은 방향).
         owner = payload.get("owner_username")
-        if owner is not None and not valid_owner_username(owner):
+        if owner is not None and not valid_owner_username(owner, identity_mode=mode):
             return self._reject(rid, "invalid_owner_username")
         if not owner_override_allowed(owner_username=owner, requester_id=req["requester_id"],
                                       requester_is_admin=requester_is_admin,
@@ -325,7 +337,9 @@ class Planner:
                 privilege=privilege,
                 # 보조 그룹(D9, 계획 시점 전용 스위치). 설정 스텁에 필드가 없으면 꺼짐(fail-closed) -- 실
                 # Settings 의 기본은 켬이다.
-                supplementary_groups=getattr(self._settings, "identity_supplementary_groups", False))
+                supplementary_groups=getattr(self._settings, "identity_supplementary_groups", False),
+                # k8s 신원 모드(설계 D3): REQUESTED 는 세션 인증이면 root(identity.root_allowed), 그룹 denylist 는 평가하지 않는다.
+                identity_mode=mode)
             # D7: 명시 chown 의 gid 는 실행 신원이 속한 그룹(주 gid ∪ 적용된 보조 gid)이어야 한다 -- 예전엔 비소속
             # gid 면 dsync 가 데이터를 다 복사한 뒤 EPERM 으로 Failed 였다. 자동 chown(uid:주 gid)은 그대로다.
             if req["operation"] == Operation.SYNC.value:

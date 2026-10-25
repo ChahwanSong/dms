@@ -1,7 +1,9 @@
 """k8s 테스트베드 오버레이(deploy/overlays/testbed-k8s) 계약(2026-10-21).
 
-사용자 결정: 「dms-k8s 브런치에서는 LDAP 을 사용 안할거야. 이점은 확실히해둬.」 — 코드에는 "LDAP 끔" 스위치가 없고
-(값이 비면 리졸버 None = 비 root 잡 ldap_not_configured), base(deploy/k8s)는 ssc 테스트베드의 LDAP 값
+사용자 결정: 「dms-k8s 브런치에서는 LDAP 을 사용 안할거야. 이점은 확실히해둬.」 — LDAP 을 끄는 것은 값을 지우는 것이고
+(값이 비면 리졸버 None), 2026-10-25 부터는 k8s 신원 모드(DMS_IDENTITY_MODE "k8s" — 모든 단건 잡 root + 권한 = k8s
+RoleBinding 맵핑, dms-k8s RBAC·PV 설계 D1)가 그 위에 켜진다(이 모드는 DMS_LDAP_URI 가 남아 있으면 기동을 거부한다).
+base(deploy/k8s)는 ssc 테스트베드의 LDAP 값
 (pkg-01 slapd)과 nslcd 를 띄우는 에이전트 엔트리포인트를 싣는다. 오버레이가 한 줄이라도 놓치면 결과는 기동 실패
 (시끄러움)이거나 **같은 망의 ssc 용 slapd 를 조용히 쓰는 것**(침묵)이다. 그래서 여기서 두 층으로 고정한다:
 
@@ -17,6 +19,8 @@ assert 로 실패한다.
 """
 import re
 from pathlib import Path
+
+from dms.config import Settings
 
 from overlay_render import (OVERLAYS, REPO_ROOT, config_data, doc, expected_context, images, needs_kubectl, render,
                             seq)
@@ -72,6 +76,19 @@ def test_patch_agent_bypasses_nslcd_and_deletes_every_base_ldap_env():
     assert missing == set(), (
         f"base 에이전트 env {sorted(missing)} 가 testbed-k8s 에서 지워지지 않는다 -- patch-agent.yaml 에 "
         f"`$patch: delete` 항목을 더하라(지운 ConfigMap 키를 참조하면 CreateContainerConfigError)")
+
+
+def _config_values(path: Path) -> dict:
+    return dict(re.findall(r'^  (DMS_[A-Z0-9_]+): "([^"]*)"\s*$', _code(path), re.M))
+
+
+def test_patch_config_turns_on_the_k8s_identity_mode_and_user_operations():
+    # 설계 D1·D15(2026-10-25): 코드 기본은 ldap·{sync} -- 이 오버레이가 켠다. 빠지면 사용자 scan·rm 이 403
+    # operation_admin_only 이고, 모드가 ldap 이면 모든 사용자 잡이 ldap_not_configured 로 멈춘다(조용한 회귀).
+    values = _config_values(K8S / "patch-config.yaml")
+    assert values["DMS_IDENTITY_MODE"] == "k8s"
+    assert values["DMS_USER_ALLOWED_OPERATIONS"] == "sync,scan,rm"
+    assert values["DMS_ALLOW_PRIVILEGED_REQUESTERS"] == "true"      # k8s 모드는 false 면 기동 거부
 
 
 def test_k8s_overlay_kustomization_wires_every_patch_and_the_k8s_registry():
@@ -131,12 +148,20 @@ def test_render_images_and_build_registry_are_the_k8s_registry():
 
 
 @needs_kubectl
-def test_render_identity_is_root_only_by_privileged_list():
+def test_render_identity_is_the_k8s_mode_with_the_privileged_list_as_the_exemption():
+    # k8s 신원 모드(2026-10-25 설계 D1·D4·D15): 모든 단건 잡 root + 권한 = RoleBinding 맵핑. 특권 목록은 「맵핑 면제(전체 PV·
+    # 직접 경로)」의 기준이다(root 자격이 아니라 -- 모두 root 다). 렌더 결과가 실제로 서버 설정으로 기동되는지도 본다.
     data = config_data(render("testbed-k8s"))
     assert not [k for k in data if k.startswith("DMS_LDAP_")]
+    assert data["DMS_IDENTITY_MODE"] == "k8s"
+    assert data["DMS_USER_ALLOWED_OPERATIONS"] == "sync,scan,rm"
     assert data["DMS_PRIVILEGED_REQUESTERS"] == "root,admin,mason"
     assert data["DMS_ALLOW_PRIVILEGED_REQUESTERS"] == "true"
     assert data["DMS_IDENTITY_SUPPLEMENTARY_GROUPS"] == "false"
+    settings = Settings.from_env({**data, "DMS_DATABASE_URL": "postgresql://u:p@h/d", "DMS_SHARED_TOKEN": "s",
+                                  "DMS_ADMIN_TOKEN": "a", "DMS_SESSION_SECRET": "x"})
+    assert settings.identity_mode == "k8s" and settings.ldap_uri == ""
+    assert settings.user_allowed_operations == frozenset({"sync", "scan", "rm"})
 
 
 @needs_kubectl

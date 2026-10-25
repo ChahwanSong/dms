@@ -26,26 +26,27 @@ data:
   # (api/controller 가 root 라 파일시스템이 경로를 걸러 주지 않는다, 2026-09-09).
   DMS_ARTIFACT_BASE_ALLOWED_PREFIXES: "/REPLACE_SHARED_FS"
 
-  # LDAP: 사내 디렉터리 엔드포인트·베이스 DN·검색 계정 DN. 값들은 노드
-  # sssd.conf 에서 그대로 옮기면 된다(ldap_uri/ldap_search_base/
-  # ldap_default_bind_dn). URI 는 sssd 처럼 콤마 목록(순서대로 페일오버).
-  # 그룹 스키마(uniqueMember)·StartTLS 는 코드 기본값이 이미 프로덕션 sssd 값
-  # (ldap_schema=rfc2307bis + ldap_group_member=uniqueMember,
-  # ldap_id_use_start_tls=true 미러)이라 여기서 덮을 게 없다 -- rfc2307-only·
-  # 평문 사이트만 DMS_LDAP_GROUP_MEMBER_ATTR: "memberUid" /
-  # DMS_LDAP_USE_START_TLS: "false" 로 명시해 내린다.
-  DMS_LDAP_URI: "ldap://REPLACE_LDAP_HOST:389"     # 예: ldap://ldap_p1/, ldap://ldap_r3/, ldap://ldaps/
-  DMS_LDAP_USER_BASE: "REPLACE_LDAP_USER_BASE"     # 예: dc=supercom,dc=samsung
-  DMS_LDAP_GROUP_BASE: "REPLACE_LDAP_GROUP_BASE"   # 예: dc=supercom,dc=samsung
-  # 검색 계정 DN(sssd ldap_default_bind_dn 대응 -- 비밀이 아니라 ConfigMap).
-  # 비밀번호(sssd ldap_default_authtok)만 dms-secrets 의 DMS_LDAP_BIND_PW 로.
-  # 주의: envFrom 순서상 Secret 이 ConfigMap 을 덮으니 DN 키를 Secret 에 두지 마라.
-  DMS_LDAP_BIND_DN: "REPLACE_LDAP_BIND_DN"         # 예: uid=search_sc,ou=user,ou=ldap_user,dc=supercom,dc=samsung
-  # 인증 바인드 fail-closed(기본). PW 결측·자리표시자면 기동 거부 --
-  # dms-secrets 주입이 먼저다. 익명 바인드 사이트만 "false"(위 DN 도 "" 로).
-  DMS_LDAP_REQUIRE_AUTH_BIND: "true"
+  # LDAP 없음(dms-k8s 브랜치, 사용자 결정 2026-10-21 「dms-k8s 브런치에서는 LDAP 을 사용 안할거야」): base 20-config 의
+  # LDAP 키를 전부 **지운다**(null). 빈 값·"false" 로 남기지 않는다 -- base 값은 테스트베드 slapd 를 가리킨다. k8s 신원
+  # 모드는 DMS_LDAP_URI 가 남아 있으면 기동을 거부한다(config). tests/test_prod_k8s_overlay.py 가 base 의 LDAP 키 전부가
+  # 여기서 지워지는지 고정한다(base 에 키가 새로 생기면 여기에도 null 을 더하라).
+  DMS_LDAP_URI: null
+  DMS_LDAP_USER_BASE: null
+  DMS_LDAP_GROUP_BASE: null
+  DMS_LDAP_GROUP_MEMBER_ATTR: null
+  DMS_LDAP_USE_START_TLS: null
+  DMS_LDAP_BIND_DN: null
+  DMS_LDAP_REQUIRE_AUTH_BIND: null
 
-  # 계정 셀프서비스 이메일 도메인(<아이디>@도메인). 인증 메일 발송(2026-10-01, deploy/README §11)은 포탈
+  # k8s 신원 모드(2026-10-25 dms-k8s RBAC·PV 설계 D1·D15): 모든 단건 잡이 root 이고 권한은 k8s RoleBinding 맵핑
+  # (<id>-clusterrole-admin|edit → 그 namespace 의 모든 PVC)으로 판정한다. 사용자는 PV 주소로 sync·scan·rm 을 낸다(코드 기본
+  # 연산은 sync 뿐이라 여기서 넓힌다 -- rm 안전은 PV 루트 rm 금지 + 본인 컨펌). 등록 절차는 deploy/README.md 런북.
+  DMS_IDENTITY_MODE: "k8s"
+  DMS_USER_ALLOWED_OPERATIONS: "sync,scan,rm"
+  DMS_ALLOW_PRIVILEGED_REQUESTERS: "true"          # k8s 모드는 false 면 기동 거부(모든 잡이 root)
+
+  # 계정 셀프서비스 이메일 도메인(<아이디>@도메인). k8s 모드에서는 이 인증이 「DMS 계정 junwoo.song = 그 메일함 주인」을
+  # 보증하는 장치다(맵핑 ID = 계정 아이디 -- 인증을 끄면 누구나 남의 ID 로 가입해 그 사람의 PV 권한을 얻는다). 인증 메일 발송(2026-10-01, deploy/README §11)은 포탈
   # 관리 → 메일 설정에서 Knox 릴레이(knox_relay)의 IP·포트·인증 키를 넣는다(포탈 값이 env 를 이긴다).
   # 발송 방식 env 기본값(DMS_MAILER_BACKEND)은 코드 기본 stub -- stub 은 인증번호를 화면에 돌려줘 아이디만
   # 알면 누구나 가입·비밀번호 재설정을 할 수 있으니, 릴레이 연결을 확인한 뒤에는 여기에도
@@ -53,10 +54,11 @@ data:
   DMS_ACCOUNT_EMAIL_DOMAIN: "REPLACE_EMAIL_DOMAIN"     # 예: corp.example
   DMS_ACCOUNT_VERIFICATION_REQUIRED: "true"
 
-  # 특권 요청자: 로컬 admin 계정(LDAP 밖)을 넣는다. 테스트베드의 mason 은 예시 --
-  # 프로덕션 로컬 운영자 계정으로 교체(root/admin 은 관례상 유지).
+  # 특권 요청자: 로컬 운영자 계정. k8s 모드에서는 「맵핑 면제(전체 PV·직접 경로·사용자 지정)」의 기준이다(모든 잡이
+  # root 라 root 자격이 아니다). 계정 화면의 「전체 PV·직접 경로 권한」 부여로도 넓힌다(root/admin 은 관례상 유지).
   DMS_PRIVILEGED_REQUESTERS: "root,admin,REPLACE_LOCAL_ADMIN"
 
   # 보조 그룹 인정 스위치(2026-10-07, values.env 의 선택 키 IDENTITY_SUPPLEMENTARY_GROUPS -- 생략이면 "true" =
   # 코드 기본과 같다). 계획 시점 전용 -- 바꾸면 dms-controller 재시작. 덮는 범위는 deploy/README §2c 표.
+  # k8s 모드에서는 효과가 없다(모든 잡이 root 라 보조 그룹 상태는 privileged) -- 옛 values.env 호환으로만 남긴다.
   DMS_IDENTITY_SUPPLEMENTARY_GROUPS: "REPLACE_IDENTITY_SUPPLEMENTARY_GROUPS"

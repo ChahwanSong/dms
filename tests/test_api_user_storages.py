@@ -4,7 +4,8 @@ ADMIN = {"Authorization": "Bearer tok-shared"}
 FORBIDDEN_FIELDS = ("mount_path", "status_detail")
 # admin_only(2026-09-30 사용 범위): 비관리자에겐 관리자 전용이 아예 빠지므로 항상 false 다 --
 # 관리자 피커가 "(관리자 전용)" 을 구분해 보이는 표식(test_storage_user_scope).
-USER_FIELDS = {"storage_name", "backend_type", "status", "managed_root", "admin_only"}
+# kind(2026-10-25 dms-k8s 설계 D11): filesystem·pv·both -- 포탈의 직접 경로 피커가 filesystem·both 만 보인다.
+USER_FIELDS = {"storage_name", "backend_type", "status", "managed_root", "admin_only", "kind"}
 
 
 def _login_user(client):

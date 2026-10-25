@@ -15,8 +15,9 @@
 #   - patch-agent.yaml 이 에이전트를 `dms agent` 로 직접 띄운다(nslcd 를 띄우는 엔트리포인트 우회) + LDAP env 삭제.
 #   - dms-secrets 는 4키(DMS_DATABASE_URL·DMS_SHARED_TOKEN·DMS_ADMIN_TOKEN·DMS_SESSION_SECRET)만 — 바인드 비밀번호 키를
 #     넣지 않는다(deploy/README.md 「두 번째 테스트베드」).
-#   결과: root 잡만 돈다(특권 세션 관리자 + run_as_root:true). 비 root 잡은 ldap_not_configured 로 fail-closed 거부.
-#   tests/test_testbed_k8s_overlay.py 가 렌더 결과에 'ldap'(대소문자 무시) 0건·에이전트 명령·레지스트리를 고정한다.
+#   결과(2026-10-25 k8s 신원 모드, patch-config.yaml 의 DMS_IDENTITY_MODE "k8s"): 모든 단건 잡이 root 이고 권한은 k8s
+#   RoleBinding 맵핑으로 판정한다(일반 사용자는 PV 주소만, 특권 세션 관리자는 직접 경로·전체 PV).
+#   tests/test_testbed_k8s_overlay.py 가 렌더 결과에 'ldap'(대소문자 무시) 0건·에이전트 명령·레지스트리·신원 모드를 고정한다.
 #
 # 레지스트리·태그: pkg-01:5001(같은 VM 의 두 번째 registry:2 — ssc 의 :5000 과 태그·삭제·「사용 중」 판정이 섞이지
 #   않게 분리; 빌더 buildah:stable 만 :5000 미러를 공용으로 읽는다). 태그 관례 **kN**(ssc 는 dN):

@@ -159,14 +159,24 @@ def validate_rm_target(target: str, options: dict) -> str:
     return normalized
 
 
-def valid_owner_username(username) -> bool:
+# k8s 신원 모드의 owner_username 모양(2026-10-25 dms-k8s 설계 §6): DMS 계정 아이디 규칙과 **같은** 규칙
+# (repositories/accounts._USERNAME_RE -- tests/test_k8s_submit.py 가 두 패턴의 일치를 고정한다). k8s 모드에서 실행 신원은
+# 맵핑 ID(= DMS 계정 아이디, RoleBinding 이름 앞부분의 '-' → '.')라 숫자로 시작할 수 있다 -- LDAP 시절 규칙
+# ([A-Za-z_] 시작)이면 운영자의 「사용자 지정」이 그런 사용자에게 422 였다. 문자 집합은 러너 passwd 줄 검사
+# (execution_manifests 의 [A-Za-z0-9._-])의 부분집합이다.
+_ACCOUNT_ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}$")
+
+
+def valid_owner_username(username, *, identity_mode: str = "ldap") -> bool:
     """owner_username 모양 판정(bool). API(validate_owner_username)와 planner 의 계획 시점 선검사가 같은 규칙을
-    쓴다 -- planner 는 API 를 거치지 않은 DB 직접 쓰기(신뢰 경계)도 보므로 비문자열이 올 수 있어 isinstance 먼저."""
-    return isinstance(username, str) and _USERNAME_RE.fullmatch(username) is not None
+    쓴다 -- planner 는 API 를 거치지 않은 DB 직접 쓰기(신뢰 경계)도 보므로 비문자열이 올 수 있어 isinstance 먼저.
+    identity_mode "k8s" 는 계정 아이디 규칙(_ACCOUNT_ID_RE)."""
+    rule = _ACCOUNT_ID_RE if identity_mode == "k8s" else _USERNAME_RE
+    return isinstance(username, str) and rule.fullmatch(username) is not None
 
 
-def validate_owner_username(username: str) -> str:
-    if not valid_owner_username(username):
+def validate_owner_username(username: str, *, identity_mode: str = "ldap") -> str:
+    if not valid_owner_username(username, identity_mode=identity_mode):
         raise DomainValidationError("invalid_owner_username", repr(username))
     return username
 

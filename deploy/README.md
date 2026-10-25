@@ -28,7 +28,7 @@ k8s 테스트베드는 §13 이 런북이다.
 | 레지스트리 | `pkg-01:5000` (docker `registry`) | `pkg-01:5001` (docker `registry-k8s`); 빌더 `buildah:stable` 만 :5000 공용 |
 | 태그 관례 | `dN` | `kN` (첫 설치 시드 `k0`) |
 | PostgreSQL | `dmsdb` / `dmsapp` | `dmsdb_k8s` / `dmsapp_k8s` |
-| LDAP | 사용(pkg-01 slapd, 아래 표) | **없음**(사용자 결정) — root 잡만 돈다 |
+| LDAP | 사용(pkg-01 slapd, 아래 표) | **없음**(사용자 결정) — k8s 신원 모드(모든 잡 root + 권한 = RoleBinding 맵핑, §13) |
 | `dms-secrets` | 5키(+ `DMS_LDAP_BIND_PW`) | **4키**(바인드 비밀번호 키 없음) |
 | CephFS | dmsfs:/ → `/cephfs`, `/third` → `/cephfs-third`(w1·w2), `/secondary` → `/cephfs-secondary`(w3) | dmsfs:/k8s → `/cephfs`, `/k8s/third` → `/cephfs-third`(k8s-w1), `/k8s/secondary` → `/cephfs-secondary`(k8s-w2) |
 | 빌드 노드 / `build_source_path` | dms-w1 / `/home/mason/dms-dev/dms-ssc`(전환 뒤; 전 `/home/mason/dms-dev/dms`) | k8s-w1 / `/home/mason/dms-dev/dms` |
@@ -1295,21 +1295,28 @@ ConfigMap 의 LDAP 키 7개 null 삭제, 에이전트는 `command: ["dms"] args:
 시크릿은 4키. `tests/test_testbed_k8s_overlay.py` 가 렌더 결과에 `ldap`(대소문자 무시) **0건**을 고정한다. 하나라도 빠지면
 결과는 기동 실패(시끄러움)이거나 **ssc 용 slapd 를 조용히 쓰는 것**(침묵)이다.
 
-LDAP 이 없으면 무엇이 되고 무엇이 막히는가(코드 경로 `identity.py`·`planner.py` — 조용히 uid 0·기본 신원으로 떨어지는
-경로는 없다):
+2026-10-25 부터 이 클러스터는 **k8s 신원 모드**다(`patch-config.yaml` 의 `DMS_IDENTITY_MODE: "k8s"` +
+`DMS_USER_ALLOWED_OPERATIONS: "sync,scan,rm"`, dms-k8s RBAC·PV 설계 `docs/history/specs/2026-10-25-dms-k8s-rbac-pv-design.md`).
+모든 단건 잡이 root 이고 권한은 대상 클러스터의 RoleBinding 맵핑(`<id>-clusterrole-admin|edit` + ClusterRole
+`kubeflow-admin|edit` → 그 namespace 의 모든 PVC 읽기·쓰기, `<id>` 의 `-` → `.` = DMS 계정 아이디)으로 판정한다(코드 경로
+`k8s_access`·`identity.root_allowed` — 조용히 다른 신원으로 떨어지는 경로는 없다):
 
 | 경로 | 결과 |
 |---|---|
-| 특권 세션 관리자(`DMS_PRIVILEGED_REQUESTERS` = root,admin,mason ∪ 계정 화면 부여) + `run_as_root: true` 단건 scan·sync·rm | **동작**(uid 0/gid 0, 보조 그룹 `privileged`, LDAP 호출 0) — 포탈은 자격 있는 관리자에게 root 를 기본으로 싣는다 |
-| 같은 관리자의 배치 scan·sync·rm(자동 확인 포함) | **동작**(자식은 자격 있으면 root) |
-| root 를 끈 단건, 실행 신원(owner_username) 지정 + 비 root, 일반 사용자 sync | `ldap_not_configured` 로 Rejected(fail-closed) |
-| Bearer 공유 토큰 + `run_as_root: true` | 403 `privileged_not_authorized`(root 는 세션 필요) — 자동화는 봉인 세션 로그인 |
-| 그룹 denylist 규칙이 1건이라도 있을 때 | **모든 잡**이 `ldap_not_configured` — 이 클러스터에는 그룹 규칙을 등록하지 않는다 |
+| 일반 사용자(세션) + PV 주소(`pv`/`source_pv`/`destination_pv`)로 scan·sync·rm — 맵핑이 있는 namespace | **동작**(서버가 `run_as_root: true` 를 싣는다 — uid 0/gid 0, sync 허용 쌍 면제, 컨펌은 본인) |
+| 일반 사용자·특권 목록 밖 관리자의 직접 경로(storage + 경로) | 403 `raw_path_not_allowed` |
+| 맵핑이 없는 namespace / 한 번도 동기화 안 된 클러스터 | 403 `k8s_access_denied` / 409 `k8s_mapping_unknown` |
+| PV 루트 rm(하위 경로 `''`·`'.'`·`'./'`) | 422 `pv_root_rm_forbidden` |
+| 특권 세션 관리자(`DMS_PRIVILEGED_REQUESTERS` = root,admin,mason ∪ 계정 화면 부여) | 맵핑 면제 — 직접 경로·전체 PV·PV ↔ 직접 경로 혼합 |
+| 대기·컨펌 대기 중 권한 회수·PVC 재생성 | 계획 Rejected / 컨펌 409(`k8s_access_denied`·`pv_moved`·`pv_not_found`) |
+| `run_as_root: false` 명시 | 422 `run_as_root_required` |
+| Bearer 공유 토큰 제출 | 403 `privileged_not_authorized`(root 는 세션 필요) — 자동화는 봉인 세션 로그인 |
+| 그룹 denylist 규칙 추가 | 422 `denylist_group_unsupported`(평가하지 않는다 — 이름 규칙만) |
+| 사용자 스캔 경로 등록·통계 | 면제자 전용(비면제 422 `scan_path_unrestricted_only`) |
 | 로그인·가입·재설정·`/me`·사용량 분석·아티팩트 | 동작(LDAP 무관) |
 
-보조 그룹·실행 신원의 LDAP uid/gid 같은 LDAP 기능은 **ssc 테스트베드에서** 검증한다. 일반 사용자 제출을 접수 단계에서 바로
-막고 싶으면 `patch-config.yaml` 에 `DMS_USER_ALLOWED_OPERATIONS: ""`(→ 403 `operation_admin_only`)를 더한다(선택 — 없으면
-접수 뒤 planner 가 거부한다; 둘 다 fail-closed).
+보조 그룹·실행 신원의 LDAP uid/gid 같은 LDAP 기능은 **ssc 테스트베드에서** 검증한다. 대상 클러스터 등록(API 서버·읽기 전용
+리더 토큰)·호출 노드·StorageClass 매핑 런북은 실증 단계(설계 §9 슬라이스 4)에서 이 절에 더한다.
 
 ### 13-1. 인프라 전제 (testbed 저장소 몫 — 여기서는 확인만)
 

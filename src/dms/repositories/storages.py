@@ -3,13 +3,24 @@ import re
 from ..artifact_base import ARTIFACT_MOUNT
 from ..db import Database, dump_json, load_json, utc_now_iso
 from ..domain import DomainValidationError
+from .k8s import PV_CAPABLE_KINDS, STORAGE_KINDS, delete_maps_for_storage_in_txn, storage_kind
 
 _NAME_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,62}$")
 # 백엔드 식별자는 검증·저장·표시용 라벨이다 -- 마운트 프로브·잡 볼륨·경로 해석은 전부
 # mount_path/managed_root 만 보고 백엔드별 분기가 없다(2026-09-15 확인). 값을 더할 때는
 # 프런트 StorageDialog.BACKENDS(표시명)와 api.ts invalid_storage 문구도 같이 --
 # tests/test_storage_backends.py 가 두 셋의 일치를 고정한다.
-_BACKENDS = ("cephfs", "gpfs", "wekafs", "lustre", "purestorage", "netapp")
+# dms-k8s(2026-10-25 설계 D9·D11): backend_type 은 **PV 경로 프리셋 키**이기도 하다(pv_paths.PRESETS -- gpfs·onefs·nfs).
+# 직접 경로 해석은 여전히 managed_root 만 본다. onefs = Dell PowerScale, nfs = 일반 NFS(테스트베드 csi-driver-nfs).
+_BACKENDS = ("cephfs", "gpfs", "wekafs", "lustre", "purestorage", "netapp", "onefs", "nfs")
+# 스토리지 종류(D11): filesystem(직접 경로) · pv(k8s PV 만 -- StorageClass 매핑 대상) · both. NULL = filesystem(컬럼 이전 행).
+# 집합의 정의는 repositories.k8s(STORAGE_KINDS·PV_CAPABLE_KINDS·storage_kind) 한 곳이다.
+
+
+def _validate_kind(kind) -> str:
+    if kind not in STORAGE_KINDS:
+        raise DomainValidationError("invalid_storage_kind", f"bad kind {kind!r}")
+    return kind
 
 
 def _validate(storage_name, mount_path, managed_root, backend_type):
@@ -68,8 +79,9 @@ class StoragesRepository:
              "a": dump_json(after) if after else None, "at": utc_now_iso()})
 
     def create(self, *, storage_name, mount_path, managed_root, backend_type, actor,
-               enabled: bool = True, user_enabled: bool = True):
+               enabled: bool = True, user_enabled: bool = True, kind: str = "filesystem"):
         _validate(storage_name, mount_path, managed_root, backend_type)
+        _validate_kind(kind)
         mount_path = posixpath.normpath(mount_path)
         managed_root = posixpath.normpath(managed_root)
         now = utc_now_iso()
@@ -79,20 +91,27 @@ class StoragesRepository:
             self._db.execute(
                 """INSERT INTO storages (storage_name, mount_path, managed_root,
                        backend_type, enabled, user_enabled, status, created_at,
-                       updated_at, updated_by)
-                   VALUES (:n, :m, :r, :b, :e, :u, 'Unknown', :now, :now, :actor)""",
+                       updated_at, updated_by, kind)
+                   VALUES (:n, :m, :r, :b, :e, :u, 'Unknown', :now, :now, :actor, :k)""",
                 {"n": storage_name, "m": mount_path, "r": managed_root,
                  "b": backend_type, "e": 1 if enabled else 0,
-                 "u": 1 if user_enabled else 0, "now": now, "actor": actor})
+                 "u": 1 if user_enabled else 0, "now": now, "actor": actor, "k": kind})
             after = self.get(storage_name)
             self._audit("create", storage_name, None, after, actor)
         return after
 
     def update(self, storage_name, *, mount_path, managed_root, backend_type,
-               enabled: bool, actor, user_enabled: bool | None = None):
+               enabled: bool, actor, user_enabled: bool | None = None, kind: str | None = None):
         """user_enabled=None 은 "건드리지 않음"(현재 값 유지) -- 필드를 모르는 옛 클라이언트가
-        경로만 고치는 PUT 이 관리자 전용 스토리지를 조용히 사용자에게 다시 열지 않게 한다."""
+        경로만 고치는 PUT 이 관리자 전용 스토리지를 조용히 사용자에게 다시 열지 않게 한다. kind=None 도 같다(유지).
+
+        종류 전환(dms-k8s 설계 D10): StorageClass 매핑이 걸린 스토리지를 PV 를 담지 않는 종류(filesystem)로 바꾸면
+        storage_has_sc_mappings -- 매핑이 「PV 를 담지 않는 스토리지」를 가리킨 채 매달리지 않게(해석은 그 매핑을 unmapped 로
+        읽는다). 판정은 스토리지 행을 잠근 같은 트랜잭션에서 한다(repositories.k8s.set_sc_map 이 같은 행을 잠그고 종류를
+        본다 -- 둘이 엇갈려 「filesystem 인데 매핑 있음」이 생기지 않게)."""
         _validate(storage_name, mount_path, managed_root, backend_type)
+        if kind is not None:
+            _validate_kind(kind)
         mount_path = posixpath.normpath(mount_path)
         managed_root = posixpath.normpath(managed_root)
         before = self.get(storage_name)
@@ -102,14 +121,23 @@ class StoragesRepository:
             user_flag = 0 if before.get("user_enabled") == 0 else 1
         else:
             user_flag = 1 if user_enabled else 0
+        lock = " FOR UPDATE" if self._db.dialect == "postgresql" else ""
         with self._db.transaction():
+            current = self._db.query_one(f"SELECT * FROM storages WHERE storage_name = :n{lock}",
+                                         {"n": storage_name})
+            if current is None:
+                raise KeyError(storage_name)
+            new_kind = kind if kind is not None else storage_kind(current)
+            if new_kind not in PV_CAPABLE_KINDS and self._db.query_one(
+                    "SELECT 1 AS x FROM k8s_storage_class_maps WHERE storage_name = :n", {"n": storage_name}):
+                raise DomainValidationError("storage_has_sc_mappings", storage_name)
             self._db.execute(
                 """UPDATE storages SET mount_path = :m, managed_root = :r,
-                       backend_type = :b, enabled = :e, user_enabled = :u,
+                       backend_type = :b, enabled = :e, user_enabled = :u, kind = :k,
                        updated_at = :now, updated_by = :actor
                    WHERE storage_name = :n""",
                 {"m": mount_path, "r": managed_root, "b": backend_type,
-                 "e": 1 if enabled else 0, "u": user_flag, "now": utc_now_iso(),
+                 "e": 1 if enabled else 0, "u": user_flag, "k": new_kind, "now": utc_now_iso(),
                  "actor": actor, "n": storage_name})
             after = self.get(storage_name)
             self._audit("update", storage_name, before, after, actor)
@@ -136,6 +164,9 @@ class StoragesRepository:
                        VALUES ('sync_pair', 'remove', :key, :actor, :b, NULL, :at)""",
                     {"key": f"{p['source_storage']}->{p['destination_storage']}",
                      "actor": actor, "b": dump_json(p), "at": utc_now_iso()})
+            # StorageClass → 스토리지 매핑(dms-k8s 설계 D10)도 같은 트랜잭션에서 지우고 감사를 남긴다 -- 같은 이름으로 다시
+            # 등록한 스토리지가 옛 매핑을 조용히 물려받지 않게(sync_pairs 와 같은 이유).
+            delete_maps_for_storage_in_txn(self._db, storage_name, actor)
             self._db.execute("DELETE FROM storages WHERE storage_name = :n",
                              {"n": storage_name})
             self._audit("delete", storage_name, before, None, actor)

@@ -83,7 +83,8 @@ kubectl -n "$NS" get secret dms-secrets >/dev/null 2>&1 \
   || die "dms-secrets 없음 — overlays/prod/README.md §Secret 로 먼저 생성"
 SEC=$(kubectl -n "$NS" get secret dms-secrets \
   -o go-template='{{range $k,$v := .data}}{{$k}}={{$v|base64decode}}{{"\n"}}{{end}}' 2>/dev/null || true)
-for k in DMS_DATABASE_URL DMS_SHARED_TOKEN DMS_ADMIN_TOKEN DMS_SESSION_SECRET DMS_LDAP_BIND_PW; do
+# dms-k8s(2026-10-25): 무 LDAP k8s 신원 모드 -- 시크릿은 4키(바인드 비밀번호 키 없음; 에이전트 패치가 그 키를 참조하지 않는다).
+for k in DMS_DATABASE_URL DMS_SHARED_TOKEN DMS_ADMIN_TOKEN DMS_SESSION_SECRET; do
   printf '%s\n' "$SEC" | grep -q "^$k=" || die "dms-secrets 에 $k 없음"
 done
 printf '%s\n' "$SEC" | grep -Eq 'CHANGE_ME|REPLACE_WITH_' \

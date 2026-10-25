@@ -2,8 +2,9 @@
 
 Guidance for Claude Code (claude.ai/code) working in this repository.
 
-DMS: 여러 스토리지 백엔드(CephFS/GPFS/WekaFS/DDN Lustre/Pure Storage/NetApp — 등록
-라벨일 뿐 런타임은 mount_path 만 본다)와 Kubernetes 클러스터에 걸친
+DMS: 여러 스토리지 백엔드(CephFS/GPFS/WekaFS/DDN Lustre/Pure Storage/NetApp/Dell OneFS/NFS — 등록
+라벨일 뿐 직접 경로 해석은 mount_path·managed_root 만 본다. **dms-k8s 예외**: backend_type 은 PV 경로 프리셋 키이기도
+하다 — `pv_paths.PRESETS`(gpfs·onefs·nfs), 2026-10-25)와 Kubernetes 클러스터에 걸친
 **스토리지 인벤토리**와 **데이터 잡**(scan/sync/rm)을 관리하는 시스템. FastAPI +
 PostgreSQL(제어면) + React 포탈 + 노드 에이전트 + Volcano gang-scheduled 잡 러너.
 
@@ -116,7 +117,15 @@ PostgreSQL(제어면) + React 포탈 + 노드 에이전트 + Volcano gang-schedu
     지정하면 기본은 그 사용자의 LDAP uid/gid. "관리자 + 실행 신원 = 일반 사용자" 가 무조건
     root 로 돌아 남의 디렉터리 소유권을 소스 소유로 덮어쓴 프로덕션 사고가 이 규칙의 이유다 —
     그 경로를 기본 root 로 되돌리지 말고, 서버의 생략 기본값을 root 로 바꾸지 마라(옛 포탈
-    탭·me 판정 불일치가 화면에 없던 root 로 돈다).
+    탭·me 판정 불일치가 화면에 없던 root 로 돈다). **dms-k8s 예외 — k8s 신원 모드**(`DMS_IDENTITY_MODE=k8s`,
+    2026-10-25 설계 D1~D4, `k8s_access` 모듈 docstring): LDAP 이 없어 **모든 단건 잡이 root** 이고 서버가
+    `run_as_root: true` 를 싣는다(생략 = root, 명시 false = 422 `run_as_root_required`). 이 모드에서 root 허용은
+    `identity.root_allowed`(세션 인증 요청인가) 하나를 제출·계획(`resolve_job_identity` REQUESTED)·컨펌 세 지점이
+    쓰고, 권한은 root 자격이 아니라 **k8s RoleBinding 맵핑**(`k8s_access`·`repositories.k8s.access_for` — 일반
+    사용자는 PV 주소만, 면제 = `can_run_as_root` 의 관리자 + 특권 목록/부여 + 세션)이 판정한다 — 모드 스위치를
+    둘로 쪼개지 마라(「root 인데 권한 판정 없음」). 세션 조건은 빼지 마라(공유 토큰 → 모든 경로 root). ldap 모드(코드
+    기본)는 위 규칙 그대로다. 배치 자식(IF_ELIGIBLE)은 두 모드 모두 특권 목록 판정. k8s 모드는 그룹 denylist 를
+    평가하지 않는다(그룹 규칙 추가 422 `denylist_group_unsupported`).
   - root 는 매니페스트 **컨테이너 수준**(40-api/41-controller)에만 — Dockerfile `USER
     65532`·migrate 는 유지하고 `test_release_manifest_contract.py` 가 모양을 고정한다.
     "강화" 한답시고 runAsNonRoot/65532 를 넣으면 운영 base 에서 즉시 회귀한다.

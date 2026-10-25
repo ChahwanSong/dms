@@ -242,11 +242,35 @@ def privilege_eligible(*, requester_id, allow_privileged, privileged_requesters,
                 and requester_id in privileged_requesters)
 
 
+IDENTITY_MODE_K8S = "k8s"
+
+
+def root_allowed(*, identity_mode, requester_id, allow_privileged, privileged_requesters,
+                 session_authenticated) -> bool:
+    """「run_as_root 를 명시한(REQUESTED) 요청이 root 로 돌 수 있나」의 **단일 술어**(dms-k8s 설계 D3, 2026-10-25). 세 지점이
+    같은 함수를 쓴다 -- 제출(routes_requests.submit, k8s 모드), 계획(resolve_job_identity 의 REQUESTED 경로), 컨펌
+    (routes_jobs.confirm_job 의 REQUESTED 재검사). 한쪽만 바뀌면 「제출은 됐는데 컨펌에서 영원히 409」 같은 틈이 생긴다.
+
+      - k8s 모드: 모든 단건 잡이 root 다(D2 -- 서버가 run_as_root 를 강제한다). 권한 판정은 root 자격이 아니라 k8s 맵핑
+        (k8s_access)이 맡고, 여기서는 **세션 인증 요청인가**만 본다(+ 특권 허용 스위치 -- 끄면 k8s 모드는 아무것도 돌지
+        않는다, config 가 기동에서 막는다). 세션 조건은 빼지 마라: 공유 토큰(모든 노드 에이전트 보유, role admin)이 모든
+        경로에 root 잡을 내는 길이 된다.
+      - ldap 모드(기본): 종전 privilege_eligible(허용·세션·특권 목록) 그대로.
+    배치 자식(IF_ELIGIBLE)은 이 술어가 아니라 privilege_eligible 이다(설계 D3 -- 세션만 보도록 넓히면 목록에서 빠진 생성자의
+    scan 자식이 root 로 돈다)."""
+    if identity_mode == IDENTITY_MODE_K8S:
+        return bool(allow_privileged and session_authenticated)
+    return privilege_eligible(requester_id=requester_id, allow_privileged=allow_privileged,
+                              privileged_requesters=privileged_requesters,
+                              session_authenticated=session_authenticated)
+
+
 def resolve_job_identity(control, resolver, *, requester_id, owner_username,
                          allow_privileged, privileged_requesters,
                          session_authenticated: bool = False,
                          privilege: str = PRIVILEGE_NEVER,
-                         supplementary_groups: bool = False) -> ResolvedIdentity:
+                         supplementary_groups: bool = False,
+                         identity_mode: str = "ldap") -> ResolvedIdentity:
     """잡 실행 신원.
 
     privilege(2026-09-30 프로덕션 사고): 예전엔 요청자가 특권 목록에 있기만 하면 어느
@@ -269,14 +293,24 @@ def resolve_job_identity(control, resolver, *, requester_id, owner_username,
     limit_supplementary_gids 로 걸러 스냅숏 4키(supplementary_gids·_status·_excluded·_found)를 채운다. 기본값은
     session_authenticated 와 같은 이유로 **False**(fail-closed) -- 인자를 빠뜨린 미래 호출자가 권한을 넓히지 못하게.
     꺼짐은 status disabled·found None(보지 않았다), 그룹 없음은 none·found 0(없음 확정), root 는 privileged·목록 ()
-    (DAC override 라 그룹이 무의미하고, 실려 있으면 변조 신호다). group_gids(리졸버 원시값)는 출력에서 항상 ()."""
+    (DAC override 라 그룹이 무의미하고, 실려 있으면 변조 신호다). group_gids(리졸버 원시값)는 출력에서 항상 ().
+
+    identity_mode(2026-10-25 dms-k8s 설계 D3): REQUESTED 의 자격은 root_allowed(k8s 모드 = 세션 인증이면 root, ldap = 종전
+    privilege_eligible). IF_ELIGIBLE(배치 자식)은 두 모드 모두 privilege_eligible 그대로다. k8s 모드는 LDAP 이 없어 그룹
+    denylist 를 평가하지 않는다(groups=[] -- 이름 규칙만; 그룹 규칙 추가는 routes_denylist 가 422 로 막는다). 예전 모양
+    그대로 두면 그룹 규칙 한 줄이 리졸버 None → ldap_not_configured 로 k8s 모드의 **모든** 잡을 막았다. 기본값 "ldap" 은
+    인자를 빠뜨린 호출자가 종전 동작을 얻게 한다(k8s 쪽이 더 넓은 root 경로라 fail-closed 방향)."""
     owner = (owner_username or requester_id).strip()
     eligible = privilege_eligible(requester_id=requester_id,
                                   allow_privileged=allow_privileged,
                                   privileged_requesters=privileged_requesters,
                                   session_authenticated=session_authenticated)
-    if privilege == PRIVILEGE_REQUESTED and not eligible:
-        raise IdentityRejected("privileged_not_authorized", requester_id)
+    if privilege == PRIVILEGE_REQUESTED:
+        if not root_allowed(identity_mode=identity_mode, requester_id=requester_id,
+                            allow_privileged=allow_privileged, privileged_requesters=privileged_requesters,
+                            session_authenticated=session_authenticated):
+            raise IdentityRejected("privileged_not_authorized", requester_id)
+        eligible = True                  # REQUESTED 는 위 술어가 자격이다(ldap 모드에선 privilege_eligible 과 같은 값)
     # denylist는 최우선 kill-switch이고 특권 경로보다 먼저 평가된다 (스펙 §5).
     # group 규칙이 등재돼 있을 때만 특권 경로에서도 그룹을 해석한다 — 규칙이 없으면
     # 특권 경로는 지금처럼 LDAP 없이 통과한다.
@@ -292,7 +326,7 @@ def resolve_job_identity(control, resolver, *, requester_id, owner_username,
     # 막으려는 바로 그 결함). 빠뜨리면 특권이 안 붙는 쪽이 안전하다 -- 그 실수는
     # "권한이 부족하다"로 시끄럽게 드러나지 보안 구멍으로 잠복하지 않는다.
     privileged = eligible and privilege in (PRIVILEGE_REQUESTED, PRIVILEGE_IF_ELIGIBLE)
-    if privileged and control.has_group_denies():
+    if privileged and identity_mode != IDENTITY_MODE_K8S and control.has_group_denies():
         if resolver is None:
             raise IdentityRejected("ldap_not_configured")
         try:

@@ -296,5 +296,19 @@
   "storage_not_pv_capable",
   "invalid_pv_path_template",
   "storage_has_sc_mappings",
-  "denylist_group_unsupported"
+  "denylist_group_unsupported",
+  "invalid_storage_kind",
+  "run_as_root_required",
+  "pv_and_storage_conflict",
+  "k8s_mapping_unknown",
+  "pv_not_found",
+  "pv_not_bound",
+  "pv_storageclass_unmapped",
+  "pv_path_unresolved",
+  "pv_root_rm_forbidden",
+  "raw_path_not_allowed",
+  "k8s_access_denied",
+  "pv_moved",
+  "pv_target_outside",
+  "scan_path_unrestricted_only"
 ]
