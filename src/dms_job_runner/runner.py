@@ -7,6 +7,10 @@ import sys
 from .commands import (
     getent_hosts_command, mpirun_command, nsync_role_map, passwd_line,
     ssh_key_copy_command, ssh_probe_command)
+# 마커 상수와 PV 주소 봉쇄 판정은 contain 모듈 하나(nsync rank 도 같은 판정을 부른다) -- 이 모듈 이름으로도 그대로 쓴다.
+from .contain import (  # noqa: F401 -- pv_path_redirected 는 재내보내기(테스트·문서가 runner 경로로 부른다)
+    EXECUTION_REASON_MARKER, REDIRECTED_LINE, TARGET_PATH_REDIRECTED, first_blocked, parse_entries,
+    pv_path_redirected, report_lines)
 from .parsers import (parse_nsync_counts, parse_rm_counts, parse_rm_dryrun_counts, parse_scan_counts,
                       parse_sync_counts, parse_sync_dryrun_counts)
 
@@ -17,13 +21,11 @@ from .parsers import (parse_nsync_counts, parse_rm_counts, parse_rm_dryrun_count
 # 잡의 hostfile 에도 이름이 섞여 있었다). 이미지 pull 이 느린 노드를 감안해 넉넉히 -- 넘기면 mpirun 없이 사유
 # 마커를 남기고 끝낸다(WORKERS_UNREACHABLE).
 WORKER_READY_TIMEOUT_SECONDS = 300
-# 제어면(stepper)이 실행 실패 사유로 승격하는 마커(execution_manifests.EXECUTION_REASON_MARKER 와 같은 값 --
-# dms_job_runner 는 dms 를 import 하지 않는 독립 패키지라 중복 정의, 계약 테스트가 둘을 잇는다).
-EXECUTION_REASON_MARKER = "DMS_EXEC_REASON="
+# 제어면(stepper)이 실행 실패 사유로 승격하는 마커 EXECUTION_REASON_MARKER(execution_manifests.EXECUTION_REASON_MARKER 와 같은
+# 값 -- dms_job_runner 는 dms 를 import 하지 않는 독립 패키지라 contain 모듈에 중복 정의, 계약 테스트가 둘을 잇는다).
 WORKERS_UNREACHABLE = "workers_unreachable"
-# rm 대상 봉쇄 재확인(2026-10-21 리뷰, rm_target_redirected) -- preflight 마커와 같은 코드(execution_manifests 의
-# PREFLIGHT_REASONS·EXECUTION_REASONS 양쪽, 계약 테스트가 잇는다).
-TARGET_PATH_REDIRECTED = "target_path_redirected"
+# rm 대상 봉쇄 재확인(2026-10-21 리뷰, rm_target_redirected)의 사유 TARGET_PATH_REDIRECTED 도 contain 모듈 값 -- preflight
+# 마커와 같은 코드(execution_manifests 의 PREFLIGHT_REASONS·EXECUTION_REASONS 양쪽, 계약 테스트가 잇는다).
 
 # 슬라이스 24 §2.1 층3: 러너가 exec 할 수 있는 도구의 최종 allowlist.
 # dms 패키지의 config.AGENT_TOOL_NAMES 와 같은 값이어야 하지만 dms_job_runner 는
@@ -67,36 +69,6 @@ def rm_target_redirected(target, root, *, realpath=_realpath_strict) -> bool:
         return True
     want = real_root if rel == "" else f"{real_root[:-1] if real_root.endswith('/') else real_root}/{rel}"
     return real_parent != want
-
-
-def pv_path_redirected(path, root, *, realpath=_realpath_strict, lexists=os.path.lexists) -> bool:
-    """PV 주소 경로가 PV 루트 아래 **심링크 성분 없이** 그 자리에 있는가의 반대(True = 막는다, 2026-10-26).
-
-    execution_manifests._PV_CONTAIN_FN(preflight 셸)과 **같은 규칙**이다(tests/test_pv_containment_sh.py 가 같은 트리로 대조):
-    경로가 있으면 realpath(경로) == realpath(루트) + 글자 그대로의 상대경로(마지막 성분이 링크여도 막는다 — dsync 소스·dscan
-    대상은 도구가 따라가고, 목적지가 링크면 그 너머에 쓴다), 없으면 부모로 같은 판정. 왜 러너도 보나: preflight 파드와 실행
-    vcjob 은 다른 파드라 그 사이에 사용자가 경로 성분을 링크로 바꿀 수 있다(rm_target_redirected 와 같은 이유). 실제 경로를
-    못 구하면(없는 상위·고리) 막는다(fail-closed)."""
-    if not isinstance(path, str) or not isinstance(root, str) or root == "":
-        return True
-    if path.endswith("/") or path.endswith("/.") or path.endswith("/..") or "/" not in path:
-        return True
-    base = root[:-1] if root.endswith("/") else root
-    if path in (root, base):
-        rel = ""
-    elif path.startswith(base + "/"):
-        rel = path[len(base) + 1:]
-    else:
-        return True
-    try:
-        real_root = realpath(root)
-        stem = real_root[:-1] if real_root.endswith("/") else real_root
-        want = real_root if rel == "" else f"{stem}/{rel}"
-        if lexists(path):
-            return realpath(path) != want
-        return realpath(os.path.dirname(path)) != os.path.dirname(want)
-    except (OSError, ValueError):
-        return True
 
 
 def run_job(env, *, run, write_text, read_text, sleep, wait_hostfile,
@@ -169,14 +141,20 @@ def run_job(env, *, run, write_text, read_text, sleep, wait_hostfile,
     #    개수만 필요하므로 hostfile의 실제 SSH 호스트명과 무관하다(commands.nsync_role_map).
     report_path = _scan_report_path(artifact_dir)
     rendered = [report_path if a == "$DMS_SCAN_REPORT" else a for a in argv]
+    rank_check = ""
     if tool == "nsync":
         src_nodes = json.loads(env.get("DMS_JR_SOURCE_NODES", "[]"))
         dst_nodes = json.loads(env.get("DMS_JR_DEST_NODES", "[]"))
         role_map = nsync_role_map(src_nodes, dst_nodes, slots_per_host=procs_per_node)
         rendered = ["--role-mode", "map", "--role-map", role_map, *rendered]
+        # 6e. PV 주소 봉쇄 재확인(nsync) -- 각 rank 가 도구 exec 직전에 자기 역할 쪽만 본다(dms_job_runner.contain docstring).
+        #     소스 rank 수는 role_map 과 같은 식(소스 노드 수 × 노드당 slot). 값은 전부 따옴표로 묶은 인자다.
+        if "DMS_JR_CONTAIN" in env:
+            rank_check = (f"python3 -m dms_job_runner.contain {len(src_nodes) * procs_per_node} "
+                          f"{_shquote(env['DMS_JR_CONTAIN'])} || exit 1\n")
     rank_body = " ".join(_shquote(a) for a in [tool, *rendered])
     rank_path = f"{artifact_dir}/rank.sh"
-    write_text(rank_path, f"#!/bin/sh\nexec {rank_body}\n")
+    write_text(rank_path, f"#!/bin/sh\n{rank_check}exec {rank_body}\n")
     make_executable(rank_path)
 
     # 6b. mpirun은 runuser로 요청자 신원으로 도구를 돌린다. 도구(dscan/dsync/…)가
@@ -189,18 +167,15 @@ def run_job(env, *, run, write_text, read_text, sleep, wait_hostfile,
     # 6c. rm 대상 봉쇄 재확인(rm_target_redirected docstring) -- mpirun 바로 앞(워커 준비 대기 뒤)이라 가장 늦은 자리다.
     #     env 키 부재 = 이 검사 전의 제어면이 만든 매니페스트(롤링 업그레이드) -- 그 제어면의 preflight 도 보지 않았으니
     #     종전대로 둔다. 키가 있으면(빈 값 포함) 판정한다.
-    # 6d. PV 주소 봉쇄 재확인(pv_path_redirected docstring) -- dsync·dscan 만(nsync 런처는 데이터 경로를 마운트하지 않는다).
-    #     env 키 부재 = PV 가 아닌 잡 또는 이 검사 전의 제어면 -- 종전대로 둔다. 값이 JSON 이 아니면 막는다(fail-closed).
+    # 6d. PV 주소 봉쇄 재확인(dms_job_runner.contain docstring) -- dsync·dscan 은 런처가 여기서 모든 쪽을(nsync 는 6e 의 rank 가
+    #     자기 쪽을). env 키 부재 = PV 가 아닌 잡 또는 이 검사 전의 제어면 -- 종전대로 둔다. 모양이 틀리면 막는다(fail-closed).
     if tool in ("dsync", "dscan") and "DMS_JR_CONTAIN" in env:
         try:
-            pairs = json.loads(env["DMS_JR_CONTAIN"])
-            bad = [(p, r) for p, r in pairs if pv_path_redirected(p, r)]
+            bad = first_blocked(parse_entries(env["DMS_JR_CONTAIN"]))
         except (ValueError, TypeError):
-            bad = [("?", "?")]
-        if bad:
-            p, r = bad[0]
-            lines = (f"{EXECUTION_REASON_MARKER}{TARGET_PATH_REDIRECTED}\n"
-                     f"DMS_JR_PV_PATH_REDIRECTED path={p!r} root={r!r}\n")
+            bad = ("?", "?", "?", "?")
+        if bad is not None:
+            lines = report_lines(bad)
             sys.stdout.write(lines)
             sys.stdout.flush()
             write_text(f"{artifact_dir}/stderr.log", lines)
@@ -225,6 +200,20 @@ def run_job(env, *, run, write_text, read_text, sleep, wait_hostfile,
                               username=username, rank_script=rank_path))
     write_text(f"{artifact_dir}/stdout.log", proc.stdout or "")
     write_text(f"{artifact_dir}/stderr.log", proc.stderr or "")
+
+    # 7b. nsync rank 의 봉쇄 마커(6e) 끌어올리기 -- rank 출력은 mpirun 이 런처로 모을 뿐 파드 로그에 찍히지 않는다. stepper 는
+    #     런처 파드 로그에서 마커를 읽으므로(parse_execution_reason) 여기서 다시 찍는다. 도구는 데이터를 만지기 전에 끊겼다 --
+    #     returncode 는 모름(null), 3키 계약 유지(6c·6d 와 같은 모양).
+    if tool == "nsync" and "DMS_JR_CONTAIN" in env:
+        seen = [ln.strip() for ln in f"{proc.stdout or ''}\n{proc.stderr or ''}".split("\n")
+                if REDIRECTED_LINE in ln or "DMS_JR_PV_PATH_REDIRECTED" in ln]
+        if any(REDIRECTED_LINE in ln for ln in seen):
+            details = list(dict.fromkeys(ln for ln in seen if REDIRECTED_LINE not in ln))[:4]
+            sys.stdout.write("".join(f"{ln}\n" for ln in [REDIRECTED_LINE, *details]))
+            sys.stdout.flush()
+            write_text(f"{artifact_dir}/summary.json",
+                       json.dumps({"returncode": None, "files": None, "bytes": None}))
+            return 1
 
     # 8. summary — 도구별 파싱(설계 §3). preview/execution 공통 계약(3키)이되,
     #    dsync·drm --dryrun 은 복사·삭제 요약을 찍지 않아 walk 항목 수로 대신한다(parsers

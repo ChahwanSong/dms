@@ -150,11 +150,15 @@ primary·secondary, 동기화 상태 UI. 설계 `docs/history/specs/2026-10-25-d
   (`pathParts`), 계정 라벨·`?create=` 바로가기. vitest 1519.
 - **PV 주소 봉쇄(2026-10-26 보안 리뷰 HIGH)**: 모든 잡이 root 라 커널 DAC 가 없어, 사용자 파드가 자기 PV 안에 남의 PV 를 가리키는
   심링크를 심으면 PV A 권한만으로 root dsync·dscan 이 PV B 를 읽거나 덮어쓸 수 있었다(재확인은 글자로 「경로 ⊆ PV 루트」만 본다).
-  stepper 가 PV 쪽의 PV 루트를 `paths["contain"]` 로 싣고, preflight(sync·nsync 역할별·scan)가 `dms_contain` 으로 「PV 루트 아래
-  심링크 성분 없음 — 마지막 성분 포함」을, 러너가 dsync·dscan mpirun 직전에 같은 규칙(`pv_path_redirected`, env `DMS_JR_CONTAIN`)을
-  본다. PV 주소 rm 은 rm 봉쇄 기준을 PV 루트로 좁힌다. 사유 `target_path_redirected`(문구 일반화). 블록 root 가 `..` 로 managed_root
-  밖이 되는 변조 행은 빈 루트로 막는다. PV 가 아닌 잡의 매니페스트는 바이트 단위로 그대로. `tests/test_pv_containment_sh.py`(실 sh 와
-  러너를 같은 트리로 대조)·`test_stepper_enrich`(stepper 가 싣는 값).
+  stepper 가 PV 쪽의 {PV 루트, 기준 managed_root} 를 `paths["contain"]` 로 싣고, preflight(sync·nsync 역할별·scan)가 `dms_contain`
+  으로 「PV 루트 안(글자) + managed_root 부터 심링크 성분 없음 — 마지막 성분 포함」을, 러너가 실행 직전에 같은 규칙(`dms_job_runner.
+  contain.pv_path_redirected`, env `DMS_JR_CONTAIN`)을 본다 — dsync·dscan 은 런처가, nsync 는 **각 rank 가 도구 exec 직전에 자기 역할
+  쪽만**(rank.sh 첫 줄, 런처가 mpirun 출력의 마커를 파드 로그로 끌어올린다). PV 주소 rm 은 기존 rm 봉쇄(기준 managed_root) + PV 루트
+  글자 경계. 2차 보안 리뷰(같은 날, 9e666b1 대상) 반영: 처음엔 PV 루트를 realpath 기준점으로 써서 PV 루트 자신·그 위 성분이 링크면
+  통과했고(PV rm 도 기준을 PV 루트로 좁혀 같은 후퇴), nsync 는 실행 시점 재확인이 없었다(Volcano 대기 동안의 창). 사유
+  `target_path_redirected`(문구 일반화). 블록 root 가 `..` 로 managed_root 밖이 되는 변조 행은 빈 루트로 막는다. PV 가 아닌 잡의
+  매니페스트·rank.sh 는 바이트 단위로 그대로. `tests/test_pv_containment_sh.py`(실 sh·러너·rank.sh 를 같은 트리로 대조)·
+  `test_stepper_enrich`(stepper 가 싣는 값).
 - **실증**: 다음 단계(설계 §9 슬라이스 4 — 테스트베드 dmsk8s 실증·적대적 리뷰)가 여기에 덧붙인다.
 
 ### ✅ 전체 작업: 요청자 부분 일치 + 배치 이름·대상 경로 검색 + 열 폭(요청 ↓ · 배치 ↑ · 시각 = 글자 폭) — **완료·실증**(2026-10-25, k2)

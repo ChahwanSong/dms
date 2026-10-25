@@ -487,13 +487,16 @@ class JobStepper:
         return root
 
     def _pv_containment(self, job, sides) -> dict:
-        """PV 주소 쪽의 봉쇄 기준(2026-10-26 보안 리뷰 — execution_manifests._PV_CONTAIN_FN 의 $2): {쪽: PV 루트 절대경로}.
+        """PV 주소 쪽의 봉쇄 값(2026-10-26 보안 리뷰 — execution_manifests._PV_CONTAIN_FN): {쪽: {"root": PV 루트 절대경로,
+        "anchor": 그 쪽 managed_root}}.
 
         요청 payload 의 pv 블록(source_pv·destination_pv·pv)이 있는 쪽만 — 블록의 root 는 managed_root 기준 상대경로라 그 쪽
-        스토리지의 managed_root(경로를 조합한 바로 그 값)와 같은 규칙으로 잇는다. 블록이 있는데 root 가 문자열이 아니면 빈
-        루트로 실어 봉쇄가 막게 한다(DB 신뢰 경계 — fail-closed). PV 가 아닌 잡은 {}(매니페스트가 이 기능 이전과 같다).
-        planner·컨펌의 재확인(k8s_access.recheck_request)이 「경로 ⊆ PV 루트」를 글자로 보고, 이것은 실행 직전 파일시스템에서
-        「그 사이에 심링크가 없다」를 본다 — 모든 잡이 root 인 k8s 모드에서 namespace 단위 권한의 마지막 관문이다."""
+        스토리지의 managed_root(경로를 조합한 바로 그 값)와 같은 규칙으로 잇는다. root 는 글자 경계, anchor 는 심링크 검사의
+        기준점이다(PV 루트를 기준점으로 쓰면 managed_root 와 PV 루트 사이의 링크를 놓친다 — 같은 날 2차 리뷰). 블록이 있는데
+        root 가 문자열이 아니거나 '..' 로 managed_root 밖이 되면 빈 루트로 실어 봉쇄가 막게 한다(DB 신뢰 경계 — fail-closed).
+        PV 가 아닌 잡은 {}(매니페스트가 이 기능 이전과 같다). planner·컨펌의 재확인(k8s_access.recheck_request)이 「경로 ⊆ PV
+        루트」를 글자로 보고, 이것은 실행 직전 파일시스템에서 「그 사이에 심링크가 없다」를 본다 — 모든 잡이 root 인 k8s 모드에서
+        namespace 단위 권한의 마지막 관문이다."""
         req = self._repos.requests.get(job["request_id"]) or {}
         payload = req.get("payload") if isinstance(req.get("payload"), dict) else {}
         contain = {}
@@ -502,13 +505,13 @@ class JobStepper:
             if blk is None:
                 continue
             rel = blk.get("root") if isinstance(blk, dict) else None
-            if not isinstance(rel, str) or rel == "":
-                contain[side] = ""
-                continue
-            # 블록 root 의 '..' 가 기준을 managed_root 밖(최악 「/」)으로 넓히면 봉쇄가 무의미해진다 -- 빈 루트로 접어 막는다.
-            root = posixpath.normpath(managed_abs_path(managed_root, rel))
-            base = posixpath.normpath(managed_root)
-            contain[side] = root if root == base or root.startswith(base.rstrip("/") + "/") else ""
+            root = ""
+            if isinstance(rel, str) and rel != "":
+                cand = posixpath.normpath(managed_abs_path(managed_root, rel))
+                base = posixpath.normpath(managed_root)
+                if cand == base or cand.startswith(base.rstrip("/") + "/"):
+                    root = cand
+            contain[side] = {"root": root, "anchor": managed_root}
         return contain
 
     def _abs(self, storage_name, rel):
@@ -597,8 +600,6 @@ class JobStepper:
             contain = self._pv_containment(job, {"target": ("pv", root)})
             if contain:
                 paths["contain"] = contain
-                # PV 주소 rm 은 봉쇄 기준을 managed_root 전체가 아니라 그 PV 루트로 좁힌다(_rm_managed_root).
-                paths["containment_root"] = contain["target"]
         # job["tool"]은 실행 파일 이름(dscan/dsync/nsync/drm)이지 정책 키(scan/dsync/
         # nsync/rm)가 아니다 -- planner.py가 policy를 조회할 때 쓰는 것과 동일한
         # TOOL_TO_POLICY 매핑을 거쳐야 scan/rm 잡의 정책을 정확히 찾는다.
