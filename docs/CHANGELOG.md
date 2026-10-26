@@ -95,6 +95,26 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ✅ mpifileutils 고정 커밋 5958e4e → ae781bd(포크 main HEAD) + 케이스 실증 — **완료·실증**(2026-10-26, d188, dms-ssc)
+
+사용자 요청: 「가장 최신 push 버전으로 mpifileutils 빌드 및 릴리즈하고 케이스 실증을 통해 어떤 문제가 잇는지 자세하게 설명 및
+정리해줘. 너의 답변을 다른 에이전트에게 들고가서 구현 업데이트 및 이슈해결을 요청할거야.」 5958e4e 다음 네 커밋: 8cd72f3(nsync 메타데이터
+최종 성분 심링크 TOCTOU) · 2a10a18(없는 목적지 루트 생성) · 3c041e0(dsync/nsync `--chown` 이 setuid/setgid 제거) · ae781bd(dscan 요약
+`total_bytes`·`invalid_name_entries`).
+
+- **배포(d188)**: dms-ssc 1e1dedb 를 ssc 포탈이 `dms-mpifileutils`·`dms`·`dms-agent` d188 로 빌드 → 릴리스 에이전트 → api·controller·잡
+  이미지(전부 live == 동봉), 오버레이 e0e5a7b(가드 「이미지 변경 없음」).
+- **d187 의 라이브 결함 실측(기준선)**: 새 목적지로의 nsync 가 전부 Failed(`Cannot open destination root … ENOENT`, exec=36 — DMS preflight 는
+  목적지 부재를 허용하므로 정상 경우); `chown 0:0` sync 가 uid 4242 의 4755 파일을 **4755 root:root(setuid-root)** 로 복사.
+- **실증(root, 일회용 데이터 21 케이스 — nsync third→secondary src 2/dst 1, secondary→third src 1/dst 2, dsync cephfs-dms→third 2 rank, dscan)**:
+  | 결과 | 케이스 |
+  |---|---|
+  | 해결 | 새 목적지 기본·`batch_files 1`·재실행 멱등(C1·C2·C3), setuid/setgid 제거·디렉터리 2775 유지(nsync C9·dsync D2), 심링크 → 파일 교체에서 목적지 밖 파일 무손상(C5), dscan `total_bytes` 1075745949(손 계산·히스토그램 합 일치)·`invalid_name_entries` 4(S1) |
+  | 정상 | dsync 심링크 → 디렉터리 `batch_files 1`(D1 — 전역 삭제 단계가 복사보다 먼저) |
+  | **남은 결함** | nsync 디렉터리 → 파일 교체가 `--delete` 없이 목적지 전용 7항목을 재귀 삭제하고 계획은 「skipped-dst-only=7」(C8); 심링크·파일 → 디렉터리가 배치 ≥2 면 결정적 실패(C4·C7 `Stopping after batch 1/203`); 목적지 rank 2 면 배치 1개여도 경합 실패(C10 199/200 — 재실행 C10b 로 수렴); `--batch-files 0` 미리보기 실패(C6); 목적지 루트 심링크를 따라가 다른 사용자 디렉터리에 쓰고 그 디렉터리를 0:0 755 로(C12, DMS 봉쇄 부재와 공동); dsync 디렉터리 → 파일 실패 뒤 디렉터리 모드 644(D3) |
+  남은 결함은 BACKLOG(포크 7 + DMS 4)로, 원인 코드 행·수정 제안·수용 기준·재현 픽스처는 포크 이슈 보고
+  (https://claude.ai/artifact/85MidcfKYB5zqqiPFHyhwR, 비공개 — 공유는 소유자). 실증 데이터·요청 정리.
+
 ### ✅ mpifileutils 고정 커밋 1b93d54 → 5958e4e(포크 main HEAD) — **완료·실증**(2026-10-26, d187, dms-ssc)
 
 사용자 요청: 「Mpifileutils 태그 최신걸로 업데이트해서 푸시해줘.」 포크(chahwansong/mpifileutils)에는 태그가 없어 커밋 SHA 로 고정한다
