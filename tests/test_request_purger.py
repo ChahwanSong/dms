@@ -272,7 +272,10 @@ def test_waiting_backoff_is_capped(env):
     e.tick()
     row = _row(e, rid)
     assert row["last_error"] == "purge_waiting_pods"
-    assert iso_epoch(row["next_attempt_at"]) - iso_epoch(e.clock()) == WAITING_BACKOFF_MAX_SECONDS
+    # Clock 은 실시간 + 오프셋이라 틱과 이 줄 사이에 초가 넘어가면 1초 짧게 보인다(부하 중 플레이크, 2026-10-26) -- 상한에
+    # 걸렸는지만 본다(상한이 없으면 하루짜리 대기에서 훨씬 큰 값이다).
+    gap = iso_epoch(row["next_attempt_at"]) - iso_epoch(e.clock())
+    assert WAITING_BACKOFF_MAX_SECONDS - 2 <= gap <= WAITING_BACKOFF_MAX_SECONDS
 
 
 def test_a_row_that_queued_long_is_not_a_false_stall_on_its_first_sweep(env):
