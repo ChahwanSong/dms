@@ -519,7 +519,7 @@ def test_admin_volumes_access_and_user_volumes(client, repos, db):
                                   {"cluster": "c1", "namespace": "team-b", "access": "admin"}]
     assert "users" not in mine["volumes"][0]
     # 바인딩이 없는 사용자: 0개(아직 동기화 안 됨과 다르다 -- clusters.synced_at 이 있다)
-    _session(client, repos, "nobody", "user")
+    _session(client, repos, "nomap.user", "user")
     none = client.get("/api/user/k8s/volumes").json()
     assert none["volumes"] == [] and none["namespaces"] == [] and none["clusters"][0]["synced_at"]
     # 특권 목록 밖 관리자는 일반 사용자처럼 자기 맵핑만, 목록 안 세션 관리자(admin)는 전체(면제)
