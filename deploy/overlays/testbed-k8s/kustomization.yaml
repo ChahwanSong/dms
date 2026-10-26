@@ -20,17 +20,20 @@
 #   tests/test_testbed_k8s_overlay.py 가 렌더 결과에 'ldap'(대소문자 무시) 0건·에이전트 명령·레지스트리·신원 모드를 고정한다.
 #
 # 레지스트리·태그: pkg-01:5001(같은 VM 의 두 번째 registry:2 — ssc 의 :5000 과 태그·삭제·「사용 중」 판정이 섞이지
-#   않게 분리; 빌더 buildah:stable 만 :5000 미러를 공용으로 읽는다). 태그 관례 **kN**(ssc 는 dN):
+#   않게 분리; 빌더 buildah:stable 만 :5000 미러를 공용으로 읽는다). 태그 관례 **dN — d1 부터**(2026-10-26 사용자 결정 「예전
+#   dms-ssc 때처럼 d1 부터」 — 포탈의 다음 태그 제안(BuildForm.nextTagSuggestion = 라이브·이 레지스트리·빌드 이력의 dN 최댓값 + 1)이
+#   그대로 맞는다. 레지스트리가 :5001 로 갈려 ssc 의 dN 과 번호가 섞이지 않는다). 그 전의 옛 kN 이력:
 #   k0 = 첫 설치 시드(:5000 의 dms:d184·dms-agent:d179·dms-mpifileutils:d183 을 :5001 에 k0 으로 복사).
 #   k1 = 첫 포탈 빌드(빌드 노드 k8s-w1, 소스 main 체크아웃 928b3c9 — nsync 역할별 볼륨; 이미지 3종 + 잡 이미지).
 #   k2 = 전체 작업 검색·열 폭(2026-10-25, 소스 dms-k8s 체크아웃 1b0febe; 이미지 3종 + 잡 이미지).
 #   k3 = k8s RBAC·PV 재설계(2026-10-26, 소스 dms-k8s 체크아웃 3e9aae6 — k8s 신원 모드·PV 주소·인벤토리·관리자 화면·PV 봉쇄; 이미지 3종 + 잡 이미지).
 #   k4 = 가입 신원 경고·결과 본문 상한(2026-10-26, 소스 a58d897; **dms 이미지만** — dms-agent·잡 이미지는 k3 그대로. 그래서 k4 dms
 #        이미지에 동봉된 매니페스트의 에이전트·잡 이미지는 자리표시자라 릴리스 화면의 그 둘 드리프트 배지는 「모름」 — 다음 3종 빌드에서 돌아온다).
+#   d1 = dN 관례 첫 태그(2026-10-26, 소스 744e3e5 — nsync 목적지 링크 미추종 dms-mpifileutils 8cd72f3 + root nsync PV 목적지 허용;
+#        이미지 3종 + 잡 이미지, 드리프트 배지 셋 다 일치).
 #   태그 bump = 아래 newTag(+ patch-config.yaml 의 DMS_JOB_IMAGE) 커밋 — **dms-k8s 에서만** 한다(2026-10-22 브랜치 분리 뒤
 #   빌드 소스는 /home/mason/dms-dev/dms-k8s 체크아웃 = origin/dms-k8s, main 은 이 클러스터와 무관).
 #   overlays/testbed(ssc 클러스터) 는 dms-ssc 쪽 소관이라 여기서 같이 건드리지 않는다(체리픽 충돌·엉뚱한 태그 방지).
-#   포탈의 다음 태그 제안은 dNN 만 읽으므로 kN 을 직접 입력한다(docs/BACKLOG.md).
 #
 # Deployment(api/controller) 는 패치하지 않는다 — securityContext 는 base 가 유일한 진실
 #   (tests/test_release_manifest_contract.py::test_overlays_do_not_patch_control_plane_deployments).
@@ -45,10 +48,10 @@ resources:
 images:
   - name: set-by-overlay.invalid/dms
     newName: pkg-01:5001/dms
-    newTag: k4
+    newTag: d1
   - name: set-by-overlay.invalid/dms-agent
     newName: pkg-01:5001/dms-agent
-    newTag: k3
+    newTag: d1
 
 patches:
   - path: patch-config.yaml

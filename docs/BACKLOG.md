@@ -214,9 +214,10 @@
   남아 있으면 SettingsError, `/me` 의 `identity_mode` 로 포탈이 root 체크박스·LDAP 문구를 걷는다. 남은 것: 에이전트 엔트리포인트가
   URI 가 없으면 nslcd 를 건너뛰게(그러면 오버레이의 명령 오버라이드가 필요 없다), dms-k8s 이미지에서 nslcd·libnss-ldapd 제거,
   LDAP 코드 자체의 삭제 여부(아래 「RBAC·PV 사용자 결정 대기」).
-- 🔧 **포탈 다음 태그 제안이 `kN` 을 모른다** — `frontend/src/features/builds/BuildForm.tsx:63` `nextTagSuggestion` 은 `dNN` 의
-  최댓값 + 1 만 본다. k8s 테스트베드(레지스트리 :5001, 태그 관례 `kN`)에서는 엉뚱한 `d1` 을 제안하므로 운영자가 `k<N>` 을 직접
-  입력한다(`deploy/README.md` §13-8). 처방: 레지스트리·이력 태그의 지배적 접두(문자 + 숫자)를 따라 제안.
+- ~~**포탈 다음 태그 제안이 `kN` 을 모른다**~~ — **해소**(2026-10-26, 관례 전환): 사용자 결정 「예전 dms-ssc 때처럼 d1 부터」로 k8s
+  테스트베드도 `dN` 을 쓴다(d1 = 첫 태그). 제안(`BuildForm.nextTagSuggestion`)은 그 사이트의 라이브 태그·자기 레지스트리·빌드 이력의
+  `dN` 최댓값 + 1 이라 코드는 그대로다 — git 의 오버레이 태그를 읽지 않으므로 프로덕션도 자기 번호의 다음을 제안한다. 「지배적 접두를
+  따라 제안」 처방은 하지 않는다(프로덕션 제안이 접두 판정에 흔들린다).
 - 🔧 **점검 스크립트에 `--context` 가 없다** — `deploy/preflight-cluster.sh`·`deploy/verify.sh`·`deploy/overlays/prod/render.sh`
   (`live` 해석)는 현재 컨텍스트로 붙는다. 테스트베드는 그 컨텍스트만 담은 kubeconfig(`kubectl config view --minify --flatten
   --context dmsk8s`)를 `KUBECONFIG` 로 준다(`deploy/README.md` §13-1). 가드(`guard-images.sh`)만 `--context`·`kube-context`

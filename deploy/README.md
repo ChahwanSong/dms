@@ -26,7 +26,7 @@ k8s 테스트베드는 §13 이 런북이다.
 | 오버레이 | `deploy/overlays/testbed` | `deploy/overlays/testbed-k8s` |
 | 포탈 | https://dms.local (VIP 10.20.20.100) | https://dms-k8s.local (VIP 10.20.20.101) |
 | 레지스트리 | `pkg-01:5000` (docker `registry`) | `pkg-01:5001` (docker `registry-k8s`); 빌더 `buildah:stable` 만 :5000 공용 |
-| 태그 관례 | `dN` | `kN` (첫 설치 시드 `k0`) |
+| 태그 관례 | `dN` | `dN` — d1 부터(2026-10-26; 그 전 k0~k4 는 옛 kN, 첫 설치 시드는 `d0`) |
 | PostgreSQL | `dmsdb` / `dmsapp` | `dmsdb_k8s` / `dmsapp_k8s` |
 | LDAP | 사용(pkg-01 slapd, 아래 표) | **없음**(사용자 결정) — k8s 신원 모드(모든 잡 root + 권한 = RoleBinding 맵핑, §13) |
 | `dms-secrets` | 5키(+ `DMS_LDAP_BIND_PW`) | **4키**(바인드 비밀번호 키 없음) |
@@ -123,7 +123,7 @@ cd frontend && npm run test:e2e
 #   SSH_USER=ubuntu SSH_OPTS="-i ~/dms-dev/testbed/files/id_ed25519" 로 접속 옵션, NODES/REGISTRIES 로 대상 고정
 ```
 
-Verify: 노드에서 `sudo crictl pull pkg-01:5000/buildah:stable`(k8s 노드는 `pkg-01:5001/dms:k0` 도)이
+Verify: 노드에서 `sudo crictl pull pkg-01:5000/buildah:stable`(k8s 노드는 `pkg-01:5001/dms:d0` 도)이
 "http: server gave HTTP response to HTTPS client" 없이 받아져야 한다. 레지스트리 경로 접두(`pkg-01:5000/k8s`)는 코드가
 지원하지 않는다 — 클러스터마다 포트(프로세스)를 나눈 이유다(docs/BACKLOG.md).
 
@@ -720,7 +720,7 @@ export 하지 않는다. 새 체크아웃은 testbed `dms_src_checkouts` 에 넣
 | 클러스터 | build_node_name | build_source_path | 따라가는 브랜치 | 레지스트리 / 태그 |
 |---|---|---|---|---|
 | ssc(`dms`) | dms-w1 | `/home/mason/dms-dev/dms-ssc`(전체 clone — 전환 전엔 `/home/mason/dms-dev/dms`) | origin/dms-ssc | pkg-01:5000 / dN |
-| k8s(`dmsk8s`) | k8s-w1 | `/home/mason/dms-dev/dms` | origin/main(= dms-k8s 후보) | pkg-01:5001 / kN |
+| k8s(`dmsk8s`) | k8s-w1 | `/home/mason/dms-dev/dms` | origin/dms-k8s(`/home/mason/dms-dev/dms-k8s`) | pkg-01:5001 / dN |
 
 체크아웃은 호스트 cron 이 ff-only 로 맞춘다. **git worktree 로 만들지 않는다** — 빌드 파드는 이 경로 하나만 마운트해서
 `.git` 파일이 가리키는 바깥 gitdir 를 못 따라가 SHA 가 `unknown` 이 된다. 컨트롤 상태 PUT 은 전체 치환이라(빠진 필드는
@@ -928,7 +928,7 @@ RolloutWatcher가 그 seq 순서대로 하나씩 patch → 수렴 확인 → 다
 
 - 테스트베드: `deploy/overlays/<testbed|testbed-k8s>/kustomization.yaml` 의 `newTag`(dms 계보 = api·
   controller·migrate 가 한 항목, dms-agent 계보 = 다른 항목) + `patch-config.yaml` 의
-  `DMS_JOB_IMAGE`. **오버레이마다 bump 하는 브랜치가 다르다**(2026-10-21): `testbed-k8s`(k8s 클러스터, kN)는
+  `DMS_JOB_IMAGE`. **오버레이마다 bump 하는 브랜치가 다르다**(2026-10-21): `testbed-k8s`(k8s 클러스터, dN — 2026-10-26 전엔 kN)는
   dms-k8s 에서만(2026-10-22 분리 전엔 main(→ dms-k8s)), `testbed`(ssc 클러스터, dN)는 ssc 빌드 소스가 dms-ssc 체크아웃으로 넘어간 뒤로는 dms-ssc
   쪽에서만(전환 전에는 main) — 한 커밋에서 둘을 같이 올리지 않는다(체리픽 충돌·남의 태그).
 - prod/ssc: `values.env` 의 `DMS_TAG`/`DMS_AGENT_TAG`/`MFU_TAG`
@@ -1342,16 +1342,17 @@ umask 077; kubectl config view --minify --flatten --context dmsk8s > ~/.kube/dms
 KUBECONFIG=~/.kube/dmsk8s.only PORTAL_VIP=10.20.20.101 sh deploy/preflight-cluster.sh
 ```
 
-### 13-2. 레지스트리 시드 `k0`
+### 13-2. 레지스트리 시드 `d0`
 
-첫 설치는 포탈이 아직 없어 포탈 빌드를 못 한다 — ssc 레지스트리의 검증된 이미지를 :5001 에 **`k0`** 으로 복사한다(pkg-01 에서,
-testbed `make registry` 가 :5001 을 띄운 뒤):
+첫 설치는 포탈이 아직 없어 포탈 빌드를 못 한다 — ssc 레지스트리의 검증된 이미지를 :5001 에 **`d0`** 으로 복사한다(pkg-01 에서,
+testbed `make registry` 가 :5001 을 띄운 뒤). `d0` 은 숫자 태그라 포탈의 다음 태그 제안이 곧바로 `d1` 이 된다(2026-10-21 첫 설치는
+옛 관례로 `k0` 이었다):
 
 ```bash
 for pair in dms:d184 dms-agent:d179 dms-mpifileutils:d183; do
   repo=${pair%%:*}
-  sudo docker pull localhost:5000/$pair && sudo docker tag localhost:5000/$pair localhost:5001/$repo:k0 \
-    && sudo docker push localhost:5001/$repo:k0
+  sudo docker pull localhost:5000/$pair && sudo docker tag localhost:5000/$pair localhost:5001/$repo:d0 \
+    && sudo docker push localhost:5001/$repo:d0
 done
 curl -s http://localhost:5001/v2/_catalog
 ```
@@ -1413,10 +1414,12 @@ kubectl --context dmsk8s -n dms exec ds/dms-agent -- sh -c 'test -S /run/nslcd/s
 - 쿠키: 두 포탈의 세션 쿠키 이름이 같다(`dms_session`) — 외부에서 같은 IP 의 다른 포트로 둘을 열면 서로 로그아웃시킨다.
   호스트 이름(dms.local / dms-k8s.local)으로 구분해 연다.
 
-### 13-8. 빌드 → 릴리스 → 태그 bump(`kN`)
+### 13-8. 빌드 → 릴리스 → 태그 bump(`dN`)
 
-포탈 「빌드」에서 images `[dms-mpifileutils, dms, dms-agent]`, 태그 **`k1`, `k2`, …를 직접 입력**한다 — 다음 태그 제안은 `dNN`
-만 읽어 엉뚱한 값을 낸다(docs/BACKLOG.md). 릴리스(agent → api → controller, 잡 이미지) 뒤 `deploy/overlays/testbed-k8s` 의
+포탈 「빌드」에서 images `[dms-mpifileutils, dms, dms-agent]`, 태그는 **제안 칩(`d<다음 번호>`)을 그대로** 쓴다 — 제안은 이 사이트의
+라이브 태그·이 레지스트리(:5001)·빌드 이력의 `dN` 최댓값 + 1 이라 git 에 커밋된 오버레이 태그와 무관하다(프로덕션도 같은 코드로
+자기 레지스트리·이력의 다음 번호를 제안한다). 2026-10-26 에 옛 `kN`(k0~k4)에서 `dN` 으로 바꿨다 — d1 부터. 릴리스(agent → api →
+controller, 잡 이미지) 뒤 `deploy/overlays/testbed-k8s` 의
 `newTag`·`DMS_JOB_IMAGE` 를 맞추는 커밋을 **dms-k8s 에서만** 만든다(2026-10-22 브랜치 분리 — ssc 오버레이 `testbed` 는 같이
 건드리지 않는다). 포탈 릴리스는 이미지만 패치하므로 에이전트의 `dms agent` 명령 오버라이드는 롤아웃 뒤에도 남는다.
 
