@@ -33,8 +33,9 @@ def _job_count(repos) -> int:
     # 지울 때까지 **이 base 아래**에 있다. force 없이 base 가 바뀌면 루프는 옛 base 의 파일을 지우지 않고 남긴다
     # (artifact_left_at_old_base 경고 -- DB 값만 믿고 다른 경로를 지우지 않는다). force 의 의미("옛 산출물을 옛
     # base 에 남김을 수용")는 그대로이고 affected_jobs 에 이 건수도 들어간다.
+    # 결과 파일 만료 정리 대기(kind 'expiry', 2026-10-26)는 더하지 않는다 -- 그 잡 행은 살아 있어 위 잡 수에 이미 있다.
     jobs = repos.db.query_one("SELECT COUNT(*) AS n FROM data_jobs")["n"]
-    return jobs + repos.request_purges.pending_count()
+    return jobs + repos.request_purges.pending_count(include_expiry=False)
 
 
 def _controller_check(row, effective) -> dict:
@@ -96,6 +97,10 @@ def _payload(request: Request) -> dict:
         "db_value": db_value,
         "env_value": settings.artifact_base_uri,
         "locked_by_jobs": _job_count(repos),
+        # 결과 파일 자동 만료(2026-10-26, artifact_expiry): 보존일(0 = 끔)과 만료 정리 현황(정리 대기·지연·사유·누적 만료
+        # 잡 수). 관리자 화면이 보존 정책을 볼 수 있는 유일한 자리다 -- 결과 파일이 이 base 아래에 있으니 여기 둔다.
+        "artifact_retention": {"days": settings.artifact_retention_days,
+                               **repos.request_purges.expiry_status()},
         "checks": {
             "api": {"ok": api_reason is None, "reason": api_reason},
             "controller": _controller_check(row, effective),

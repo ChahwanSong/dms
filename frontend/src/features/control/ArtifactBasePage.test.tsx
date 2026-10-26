@@ -198,3 +198,34 @@ test("경로 변경 주의점은 경고 툴팁 -- 트리거가 aria-describedby 
   expect(trigger).toHaveAttribute("aria-expanded", "false");
   expect(tip.className).toMatch(/\bhidden\b/);
 });
+
+test("결과 파일 보존일과 만료 정리 현황(대기·지연 사유)을 한 줄로 보인다", async () => {
+  server.use(http.get("/api/admin/artifact-base", () => HttpResponse.json({
+    ...BASE, artifact_retention: { days: 1500, pending: 3, stalled: 1, oldest_requested_at: "t",
+                                   last_error: "purge_no_node", expired_jobs: 42 } })));
+  wrap();
+  const line = (await screen.findByText("결과 파일 보존:")).closest("p")!;
+  expect(line).toHaveTextContent("종단 후 1500일");
+  expect(line).toHaveTextContent("결과 파일(로그·요약·리포트)만 지웁니다");
+  expect(line).toHaveTextContent("만료됨 42건");
+  expect(line).toHaveTextContent("정리 대기 3건");
+  expect(line).toHaveTextContent(/지연 1건\(.+\)/);                       // 사유는 번역 문구
+  expect(line).not.toHaveTextContent("purge_no_node");
+});
+
+test("보존 0 = 자동 만료 꺼짐, 대기·지연 0 은 소음 없이 생략한다; 구버전 서버(필드 없음)는 줄 자체가 없다", async () => {
+  server.use(http.get("/api/admin/artifact-base", () => HttpResponse.json({
+    ...BASE, artifact_retention: { days: 0, pending: 0, stalled: 0, oldest_requested_at: null,
+                                   last_error: null, expired_jobs: 0 } })));
+  const view = wrap();
+  const line = (await screen.findByText("결과 파일 보존:")).closest("p")!;
+  expect(line).toHaveTextContent("자동 만료 꺼짐");
+  expect(line).toHaveTextContent("만료됨 0건");
+  expect(line).not.toHaveTextContent("정리 대기");
+  expect(line).not.toHaveTextContent("지연");
+  view.unmount();
+  server.use(http.get("/api/admin/artifact-base", () => HttpResponse.json(BASE)));
+  wrap();
+  await screen.findByText("env 기본");
+  expect(screen.queryByText("결과 파일 보존:")).toBeNull();
+});

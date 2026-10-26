@@ -39,8 +39,8 @@ from .artifacts import ArtifactError, job_owner_uid, read_artifact, strip_scheme
 from .auth import Identity, audit_actor, require_admin, require_session_admin
 from .routes_request_purge import MAX_DELETE, MAX_DELETE_BATCHES
 from .routes_requests import reject_when_maintenance
-from .routes_scan_paths import (_buckets, _is_number, _numbers, _time_histograms,
-                                _total_bytes)
+from .routes_scan_paths import (_buckets, _is_number, _numbers, _report_total_bytes,
+                                _summary_count, _time_histograms)
 from ..metrics_series import storage_filesystem
 from ..usage_metrics import METRIC_SORTS, SORT_PATTERN, StorageTotals, maximal_targets, metric_value, sort_keyed
 
@@ -125,19 +125,24 @@ def _project_report(report: dict) -> dict:
     DB 가 신뢰 경계라 저장된 모양도 믿지 않는다(경로 문자열이 끼어들 자리가 없게)."""
     epoch = report.get("generated_at_epoch")
     hists = _time_histograms(report.get("time_histograms"))
+    summary = _numbers(report.get("summary"))
     broken_total = report.get("broken_paths_total")
     broken_limit = report.get("broken_paths_limit")
     return {
         "generated_at_epoch": epoch if _is_number(epoch) else None,
         # 실 사용량: null == 모름(구형·오염 리포트) ≠ 0(빈 트리) — 화면이 그
-        # 포인트를 0 으로 그리면 "그날 다 지워졌다"는 거짓 절벽이 된다.
-        "total_bytes": _total_bytes(hists),
-        "summary": _numbers(report.get("summary")),
+        # 포인트를 0 으로 그리면 "그날 다 지워졌다"는 거짓 절벽이 된다. summary.total_bytes(포크 ae781bd~) 우선, 없으면
+        # 히스토그램 합(_report_total_bytes) -- 캐시 값도 summary 를 그대로 품고 있어 재투영이 같은 값을 낸다(멱등).
+        "total_bytes": _report_total_bytes(summary, hists),
+        "summary": summary,
         "time_histograms": hists,
         "file_size_histogram": _buckets(report.get("file_size_histogram")),
         # null≠0: 0 은 "파손 없음"의 정상값, None 은 구형 리포트(키 부재).
         "broken_paths_total": broken_total if _is_number(broken_total) else None,
         "broken_paths_limit": broken_limit if _is_number(broken_limit) else None,
+        # 이름이 엄격 UTF-8 이 아닌 항목 수(2026-10-26 -- 사용자 결정 「카운터만 둠」, broken 에 더하지 않는다). 값은 summary
+        # 에서 다시 뽑는다(최상위 키를 믿지 않는다 -- 옛 캐시엔 이 키가 없고, 있어도 재투영이 같은 값을 낸다). None = 구형 리포트.
+        "invalid_name_entries": _summary_count(summary, "invalid_name_entries"),
     }
 
 
@@ -199,7 +204,7 @@ def _digests(repos, base: str, jobs: list, *, skip=frozenset()) -> dict:
 def _point(job: dict, digest: "dict | None") -> dict:
     """잡 1건 + 리포트 요약 -> 포인트(이력·목록·내보내기 공용 모양). digest 가 없으면(리포트를 못 읽음)
     report_readable=False 이고 리포트 유래 값은 모름(null/빈 값)이다 -- 실 사용량만은 러너가 같은 규칙으로 DB 에
-    남긴 bytes_count 로 대신한다(parsers.parse_scan_counts == _total_bytes 규칙)."""
+    남긴 bytes_count 로 대신한다(parsers.parse_scan_counts == _report_total_bytes 규칙)."""
     identity = (job.get("worker_pool") or {}).get("identity") or {}
     requester = identity.get("username")
     d = digest or {}
@@ -216,6 +221,7 @@ def _point(job: dict, digest: "dict | None") -> dict:
         "file_size_histogram": d.get("file_size_histogram") or [],
         "broken_paths_total": d.get("broken_paths_total"),
         "broken_paths_limit": d.get("broken_paths_limit"),
+        "invalid_name_entries": d.get("invalid_name_entries"),
         # 요청자: 잡 스냅샷(worker_pool.identity)의 실행 신원 — 문자열일 때만
         # 노출(모양 투영 원칙: dict 가 오염돼도 경로류가 새지 않는다).
         "requester": requester if isinstance(requester, str) else None,

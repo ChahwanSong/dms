@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { TriangleAlert } from "lucide-react";
-import type { RequestRow } from "../../lib/types";
+import type { DeleteRequestsResult, RequestRow } from "../../lib/types";
 import type { useDeleteRequests } from "./useJobs";
 import type { BatchSummary } from "./batchGroups";
 import { Dialog } from "../../components/ui/Dialog";
@@ -61,7 +61,8 @@ export function deleteHeadline(n: number, batches: number, children: number): st
   return `선택한 작업 ${n}개와 배치 ${batches}개의 작업 ${children}개를 영구 삭제합니다. 되돌릴 수 없습니다.`;
 }
 
-export function DeleteRequestsDialog({ rows, batches = [], disabled, del, onDeleted, focusAfterDelete }: {
+export function DeleteRequestsDialog({ rows, batches = [], disabled, del, onDeleted, focusAfterDelete,
+                                      triggerLabel = "선택 삭제" }: {
   /** 지금 선택된 단건 행(연 순간 스냅숏한다). */
   rows: RequestRow[];
   /** 지금 선택된 배치 묶음(연 순간 스냅숏한다 -- 수는 서버 요약). */
@@ -70,11 +71,13 @@ export function DeleteRequestsDialog({ rows, batches = [], disabled, del, onDele
   disabled: boolean;
   /** 목록이 소유한 삭제 mutation -- 결과(부분 성공)는 목록 툴바가 그린다. */
   del: ReturnType<typeof useDeleteRequests>;
-  /** 성공(부분 성공 포함) 후 -- 목록이 선택을 비운다. */
-  onDeleted: () => void;
+  /** 성공(부분 성공 포함) 후 -- 목록이 선택을 비운다. 결과(r)는 요청 상세(단건)가 제외 사유를 보일 때 쓴다. */
+  onDeleted: (r: DeleteRequestsResult) => void;
   /** 닫힌 뒤 트리거가 포커스를 받을 수 없을 때(성공 · 선택이 비어 잠김) 포커스를 둘 곳(늘 렌더되는 자리). 없으면
    *  Radix 기본(트리거). */
   focusAfterDelete?: () => void;
+  /** 트리거 글자(2026-10-26 — 요청 상세의 단건 삭제는 「작업 삭제」). 창의 문구·결과는 같다. */
+  triggerLabel?: string;
 }) {
   const [open, setOpen] = useState(false);
   const [snap, setSnap] = useState<RequestRow[]>([]);
@@ -109,7 +112,7 @@ export function DeleteRequestsDialog({ rows, batches = [], disabled, del, onDele
       request_ids: snap.map((r) => r.request_id),
       batches: snapBatches.map((b) => ({ batch_id: b.batch_id, expected_request_count: b.request_count })),
     }, {
-      onSuccess: () => { succeeded.current = true; setOpen(false); onDeleted(); },
+      onSuccess: (r) => { succeeded.current = true; setOpen(false); onDeleted(r); },
       onSettled: () => { sending.current = false; },
     });
   };
@@ -120,7 +123,7 @@ export function DeleteRequestsDialog({ rows, batches = [], disabled, del, onDele
   return (
     <Dialog open={open} onOpenChange={onOpenChange} size="lg" title="작업 영구 삭제" onCloseAutoFocus={onCloseAutoFocus}
             busy={del.isPending}
-            trigger={<Button variant="outline" disabled={disabled}>선택 삭제</Button>}>
+            trigger={<Button variant="outline" disabled={disabled}>{triggerLabel}</Button>}>
       <div className="space-y-3 text-sm text-ink/70 break-keep">
         <p className="font-medium text-ink">{deleteHeadline(n, nb, children)}</p>
         {/* 연산별 수는 배치 자식까지 함께 센다(배치 묶음 = 그 배치의 연산 × 서버가 센 자식 수). */}

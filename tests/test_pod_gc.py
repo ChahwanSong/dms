@@ -366,3 +366,86 @@ def test_build_pod_terminate_failure_still_reclaims_the_probe_pod(db):
         f"{BUILD_REF_PREFIX}/{build_pod_name(bid)}",
         f"{BUILD_REF_PREFIX}/{build_probe_pod_name(bid)}",
     ]
+    # 하나라도 실패했으면 완료 표시를 찍지 않는다(2026-10-26) -- 대기 뒤 다시 본다.
+    assert repos.builds.get(bid)["pods_gc_at"] is None
+
+
+
+def _finished_builds(repos, db, n, *, start="2026-01-01T00:00:00Z"):
+    """종단 빌드 n 개(seq 순 = 완료 순). 활성 빌드 1개 가드 때문에 하나씩 끝내고 다음을 만든다."""
+    bids = []
+    for i in range(n):
+        bid = _make_build(repos)
+        repos.builds.finish(bid, state="Succeeded" if i % 2 == 0 else "Failed")
+        db.execute("UPDATE builds SET finished_at = :t WHERE build_id = :id",
+                   {"t": iso_plus(start, i), "id": bid})
+        bids.append(bid)
+    return bids
+
+
+def test_more_than_200_terminal_builds_are_all_collected_over_ticks(db):
+    """11. 빌드 완료 표시(builds.pods_gc_at, 2026-10-26 BACKLOG 「빌드 파드 GC 도 200건 창 고착」): 예전엔 표시가 없어
+    종단 빌드가 limit(200)을 넘으면 매 틱 같은 앞쪽 200건만 다시 지우고 그 뒤 빌드의 파드에 영영 닿지 못했다. 이제 치운
+    빌드는 빠지고 다음 틱이 다음 묶음을 본다 -- 250건이 두 틱에 전부, 셋째 틱은 아무것도 다시 지우지 않는다."""
+    repos = Repositories(db)
+    build_runner = _BuildRunnerSpy()
+    bids = _finished_builds(repos, db, 250)
+    gc = PodGarbageCollector(repos, _TerminateRecordingAdapter(), after_seconds=3600,
+                             build_runner=build_runner)
+    now = "2026-02-01T00:00:00Z"
+    assert gc.run_once(now_iso=now) == {"deleted": 400}            # 200 빌드 × (빌드 + 프로브)
+    assert gc.run_once(now_iso=now) == {"deleted": 100}            # 나머지 50 빌드 -- 예전엔 앞 200 을 되풀이
+    assert gc.run_once(now_iso=now) == {"deleted": 0}              # 다 치웠다
+    pods = {r.split("/", 1)[1] for r in build_runner.terminated}
+    assert len(build_runner.terminated) == 500 and len(pods) == 500  # 빠짐도 중복도 없다
+    assert all(build_pod_name(b) in pods and build_probe_pod_name(b) in pods for b in bids)
+    assert {repos.builds.get(b)["pods_gc_at"] for b in bids} == {now}
+    assert repos.builds.terminal_older_than(3600, now_iso=now) == []
+
+
+def test_failed_build_cleanup_backs_off_and_does_not_hold_the_window(db):
+    """12. 파드 지우기가 실패한 빌드는 표시하지 않고 RETRY_BACKOFF_SECONDS 뒤에 다시 -- 그 사이 묶음에서 건너뛰고 더 읽어
+    뒤의 빌드에 닿는다(잡 파드 GC 와 같은 규칙). 한 파드만 실패해도 표시하지 않는다(다른 파드는 지운다)."""
+    from dms.pod_gc import RETRY_BACKOFF_SECONDS
+    repos = Repositories(db)
+    b0, b1, b2 = _finished_builds(repos, db, 3)
+    bad = {f"{BUILD_REF_PREFIX}/{build_probe_pod_name(b0)}", f"{BUILD_REF_PREFIX}/{build_pod_name(b1)}"}
+
+    class _Flaky:
+        def __init__(self):
+            self.terminated = []
+            self.broken = set(bad)
+
+        def terminate(self, ref):
+            self.terminated.append(ref)
+            if ref in self.broken:
+                raise RuntimeError("apiserver down")
+
+    runner = _Flaky()
+    gc = PodGarbageCollector(repos, _TerminateRecordingAdapter(), after_seconds=3600, limit=2,
+                             build_runner=runner)
+    now = "2026-02-01T00:00:00Z"
+    assert gc.run_once(now_iso=now) == {"deleted": 2}               # b0·b1 각 한 파드만 성공
+    assert [repos.builds.get(b)["pods_gc_at"] for b in (b0, b1)] == [None, None]
+    runner.terminated.clear()
+    assert gc.run_once(now_iso=now) == {"deleted": 2}               # 둘 다 대기 -- 건너뛰고 b2
+    assert runner.terminated == [f"{BUILD_REF_PREFIX}/{build_pod_name(b2)}",
+                                 f"{BUILD_REF_PREFIX}/{build_probe_pod_name(b2)}"]
+    assert repos.builds.get(b2)["pods_gc_at"] == now
+    runner.broken.clear()
+    runner.terminated.clear()
+    later = iso_plus(now, RETRY_BACKOFF_SECONDS + 1)
+    assert gc.run_once(now_iso=later) == {"deleted": 4}             # 대기가 끝나면 다시 -- 이번엔 성공해 표시
+    assert [repos.builds.get(b)["pods_gc_at"] for b in (b0, b1)] == [later, later]
+
+
+def test_build_retry_memory_is_separate_from_the_job_one(db):
+    """13. 잡 재시도 기억과 빌드 재시도 기억은 따로다 -- 잡 쪽에 같은 id 가 대기 중이어도 빌드 정리는 막히지 않는다."""
+    repos = Repositories(db)
+    (bid,) = _finished_builds(repos, db, 1)
+    gc = PodGarbageCollector(repos, _TerminateRecordingAdapter(), after_seconds=3600,
+                             build_runner=_BuildRunnerSpy())
+    gc._retry_at[bid] = 10 ** 12
+    now = "2026-02-01T00:00:00Z"
+    assert gc.run_once(now_iso=now) == {"deleted": 2}
+    assert repos.builds.get(bid)["pods_gc_at"] == now

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from .artifact_base import controller_check_once
+from .artifact_expiry import INTERVAL_SECONDS as ARTIFACT_EXPIRY_INTERVAL_SECONDS, ArtifactExpirer
 from .batch_orchestrator import BatchOrchestrator
 from .build_watcher import BuildWatcher
 from .config import Settings
@@ -118,6 +119,11 @@ def build_loops(settings: Settings, repos: Repositories, *,
     if purge_runner is not None:
         loops.append(Loop("request-purge", settings.request_purge_interval_seconds,
                           lambda: RequestPurger(repos, purge_runner, settings=settings).run_once()))
+        # 결과 파일 자동 만료(2026-10-26, artifact_expiry.py): 고르고 표시하고 정리 아웃박스에 맡기기만 한다 -- 실제 정리는
+        # 위 request-purge 루프다. 그래서 같은 조건(purge_runner)에서만 넣는다(정리 루프 없이 표시만 찍으면 열람은 410 인데
+        # 파일은 영원히 남는다). DB 전용 -- 리스 max(300*3, 30)=900s.
+        loops.append(Loop("artifact-expiry", ARTIFACT_EXPIRY_INTERVAL_SECONDS,
+                          lambda: ArtifactExpirer(repos, settings=settings).run_once()))
     return loops
 
 

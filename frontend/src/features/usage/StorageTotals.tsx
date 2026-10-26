@@ -6,6 +6,7 @@ import { ApiError } from "../../lib/api";
 import type { UsageStorageFilesystem, UsageStorageTotals, UsageTotalMetric } from "../../lib/types";
 import { agoText, ageDays, kstStampOrDash } from "../../lib/datetime";
 import { pctText } from "../../lib/sizeBuckets";
+import { INVALID_NAMES_HELP, INVALID_NAMES_LABEL } from "../../lib/scanCounters";
 import { useStorageTotals } from "./useUsage";
 import { HOT_AGE_MAX_DAYS, humanBytes } from "./usageStats";
 import { SIZE_HELP, SectionHead, Stat } from "./UsageParts";
@@ -68,6 +69,14 @@ function Footnote({ t, now, reading }: { t: UsageStorageTotals; now: number; rea
     reading && `요약 읽는 중 ${n(count(t.pending_count))}개`,
     t.truncated === true && `최근 스캔된 ${n(count(t.window_limit))}개 대상 기준`,
   ];
+  // 잘못된 인코딩 이름(2026-10-26, 사용자 결정 「카운터만 둠」 -- 파손 경로와 따로 센다): 합이 1개 이상일 때만 주의색 한 조각.
+  // 구형 리포트 대상은 모름이라 아는 대상만 더한 값이면 「이상」(다른 지표와 같은 하한 표기). 0·모름은 말하지 않는다(각주가
+  // 늘 길어진다 -- 대상별 값은 CSV 의 invalid_name_entries 열).
+  const invalid = sumOf(t.invalid_name_entries);
+  if (invalid !== null && invalid > 0) {
+    parts.push(<span className="text-attn" title={INVALID_NAMES_HELP}>
+      {`${INVALID_NAMES_LABEL} ${n(invalid)}개${lowerBound(t.invalid_name_entries, invalid) ? " 이상" : ""}`}</span>);
+  }
   // scan 시점 범위: 오래된 쪽 글자색은 표의 경과 색(30일 주의 · 90일 빨강)과 같다. 같은 날이면 하나만.
   const when = (iso: string) => (
     <span className={staleClass(ageDays(iso, now))} title={kstStampOrDash(iso)}>{agoText(iso, now)}</span>);

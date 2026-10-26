@@ -4,9 +4,9 @@ import { useBatch, useConfirmBatch, useRerunFailed, useRequestScanStats,
          useCancelBatch, useRescanBatch, useUpdateBatch, useDeleteBatch,
          useUpdateBatchItem, useDeleteBatchItem, useDeleteBatchItems,
          useAddBatchItem, useReplaceBatchItems, useRerunBatchItems,
-         useDisableAutoConfirm, needsBatchConfirm, autoConfirmable } from "./useBatches";
-import { parseItemsCsv, serializeItemsCsv,
-         type ItemsCsvOp, type ScanRow, type SyncRow } from "../../lib/csv";
+         useDisableAutoConfirm, needsBatchConfirm, autoConfirmable, useParseBatchCsv } from "./useBatches";
+import { batchItemsCsvUrl, csvErrorLines, serializeItemsCsv,
+         type CsvParseResult, type ItemsCsvOp } from "../../lib/csv";
 import { Card } from "../../components/ui/Card";
 import { Dialog } from "../../components/ui/Dialog";
 import { StatusPill } from "../../components/ui/StatusPill";
@@ -25,6 +25,9 @@ import { useStorageRoots } from "../storages/useUserStorages";
 import { batchPillVariant, batchStatusLabel } from "../../lib/jobState";
 import { chownHasName, syncOwnership } from "../../lib/syncOwnership";
 import { kstStampEpoch, kstStampOrDash } from "../../lib/datetime";
+import { HelpTip } from "../../components/ui/HelpTip";
+import { exactBytes, INVALID_NAMES_HELP, INVALID_NAMES_LABEL, invalidNamesText, scanCount,
+         SUMMARY_KEYS_SHOWN_ELSEWHERE } from "../../lib/scanCounters";
 import type { Batch, BatchDetail as BatchDetailData, BatchItem, HistogramBucket } from "../../lib/types";
 
 // NodesList/JobStats/NodeMetrics 의 humanBytes 국소 사본 관례 -- 값이 bytes 대
@@ -289,11 +292,13 @@ function ItemScanStats({ requestId, succeeded }: {
       {/* 실 사용량(2026-08-23): 서버가 온도 히스토그램에서 투영한 파일 크기 합.
           클라이언트 재합산(cumTotal)과 출처는 같지만 서버 한 값을 믿는다 --
           화면마다 다시 더하면 규칙(mtime 우선·오염 부적격)이 흩어진다.
-          null/부재는 모름(구형 서버·오염 리포트)이라 "—"(null≠0). */}
+          null/부재는 모름(구형 서버·오염 리포트)이라 "—"(null≠0).
+          2026-10-26: 새 dscan(포크 ae781bd)이면 서버가 summary.total_bytes(정확값)를 싣는다 -- 사람 표기는 반올림이라
+          정확한 바이트는 마우스를 올리면(title). */}
       <p className="text-sm mb-2">
         실 사용량(파일 크기 합):{" "}
-        <strong>{typeof stats.total_bytes === "number"
-          ? humanBytes(stats.total_bytes) : "—"}</strong>
+        <strong title={typeof stats.total_bytes === "number" ? exactBytes(stats.total_bytes) : undefined}>
+          {typeof stats.total_bytes === "number" ? humanBytes(stats.total_bytes) : "—"}</strong>
       </p>
       <div className="flex gap-2 mb-2">
         {tempKeys.map((k) => (
@@ -350,7 +355,8 @@ function ItemScanStats({ requestId, succeeded }: {
     <section className={PANEL_SECTION}>
       <h3 className={PANEL_TITLE}>요약</h3>
       <dl className={PANEL_DL}>
-        {Object.entries(stats.summary).map(([k, v]) => (
+        {/* 실 사용량·잘못된 인코딩 이름은 위·아래에서 사람 말로 보인다 -- 원 키로 한 번 더 찍지 않는다 */}
+        {Object.entries(stats.summary).filter(([k]) => !SUMMARY_KEYS_SHOWN_ELSEWHERE.includes(k)).map(([k, v]) => (
           <Fragment key={k}>
             <dt className="text-muted">{k}</dt>
             <dd className="tabular-nums">{v}</dd>
@@ -362,6 +368,12 @@ function ItemScanStats({ requestId, succeeded }: {
         {typeof stats.broken_paths_total === "number"
           ? `파손 경로 ${stats.broken_paths_total}건`
           : "파손 경로: 기록 없음(구형 리포트)"}
+      </p>
+      {/* 잘못된 인코딩 이름(2026-10-26, 사용자 결정 「카운터만 둠」): 파손 경로와 따로 센다(더하지 않는다). 1개 이상이면
+          주의색 -- 레거시 트리의 CP949 이름 같은 것이라 운영자가 알아야 하는 사실이지만 실패는 아니다. null = 구형 리포트. */}
+      <p className={`flex items-center gap-0.5 text-sm ${(scanCount(stats.invalid_name_entries) ?? 0) > 0 ? "text-attn" : "text-muted"}`}>
+        {invalidNamesText(stats.invalid_name_entries)}
+        <HelpTip label={`${INVALID_NAMES_LABEL} 설명`} head={INVALID_NAMES_LABEL} help={INVALID_NAMES_HELP} />
       </p>
     </section>
   </>);
@@ -379,10 +391,12 @@ function ItemScanStats({ requestId, succeeded }: {
 // 실행은 아니다(재실행은 기존 「전체 재실행」 버튼 몫). 파일 업로드가 아니라
 // textarea 붙여넣기인 이유: 운영 환경 브라우저는 파일 업로드가 불가하다(환경
 // 제약) — 배치 생성(BatchCreate)의 CSV 붙여넣기 패턴을 미러한다. 동선:
-// 붙여넣기 → parseItemsCsv 파싱(입력에서 즉시 파생) → 미리보기(행 수·오류) →
-// 「교체」 확인 클릭 → PUT → 팝업 닫힘. 오류가 하나라도 있으면 교체 버튼 잠금
+// 붙여넣기 → 서버 해석(2026-10-26 POST :parse-csv — 입력이 멈추고 0.4초 뒤, 생성과 같은 줄 판정) → 미리보기(행 수·줄별
+// 오류) → 「교체」 확인 클릭 → PUT(서버가 돌려준 항목 그대로) → 팝업 닫힘. 오류가 하나라도 있으면 교체 버튼 잠금
 // (부분 반영 금지 — BatchCreate applyParsed 와 같은 계약). 빈 입력(초기 상태)은
 // 미리보기·버튼 자체를 안 그린다 — "아직 안 붙여넣음"과 "0행 파싱"(헤더만)의 구분.
+// 예전의 화면 쪽 rm 즉답(경로 형식·겹침)은 서버 줄 판정이 대신한다(같은 규칙 — 두 벌이면 어긋난다). 「CSV 내보내기」 파일을
+// 고쳐 그대로 붙여넣어도 된다(정보 열은 서버가 버린다).
 // 배치 레벨 스토리지: 배치 행엔 스토리지 메타가 없다(실측 — batches 테이블은
 // 실행 제어·옵션만). 종단 배치는 항목이 반드시 있으므로 첫 항목 payload 에서
 // 물려받는다(항목 추가와 같은 동질성 계약) — 항목 0개면 호출측이 이 컴포넌트
@@ -395,29 +409,35 @@ function ReplaceItemsCsvDialog({ batchId, operation, firstPayload, chown, auto =
 }) {
   const [open, setOpen] = useState(false);
   const replace = useReplaceBatchItems(batchId);
+  const parse = useParseBatchCsv();
   const [text, setText] = useState("");
+  // 서버 해석 결과는 **그 결과를 낸 입력과 함께** 둔다 — 입력이 바뀌면(같은 글자로 되돌아오기 전까지) 미리보기가 아니다.
+  const [checked, setChecked] = useState<{ text: string; r: CsvParseResult } | null>(null);
   // 닫힐 때마다 드래프트·오류를 비운다(DeleteBatchButton 선례) — "닫기"는
   // setOpen(false) 를 직접 불러 Radix onOpenChange 가 발화하지 않는다. 재오픈이
   // 지난 시도의 잔상(붙여넣은 CSV·실패 사유)으로 시작하면 오조작을 부른다.
-  useEffect(() => { if (!open) { setText(""); replace.reset(); } }, [open]);
-  // 상태가 아니라 파생: 입력이 곧 진실이라 파싱 결과를 별도 상태로 들고 있으면
-  // 둘이 어긋날 수 있다. null = 빈 입력(미리보기 없음).
-  const parsed = text.trim() === "" ? null : parseItemsCsv(operation, text);
-  const rows = parsed?.rows ?? [];
-  const errors = parsed?.errors ?? [];
-  const items = rows.map((r) => operation === "sync"
-    ? { source_storage: firstPayload.source_storage, source: (r as SyncRow).source,
-        destination_storage: firstPayload.destination_storage,
-        destination: (r as SyncRow).destination }
-    : { storage: firstPayload.storage, target: (r as ScanRow).target });
-  // rm 교체 즉답(생성 화면과 같은 규칙 — 서버 422 batch_rm_targets_overlap·rm_root_forbidden 의 미러).
-  const rmProblems = operation === "rm"
-    ? [...rows.flatMap((r, i) => {
-        const p = relativePathProblem((r as ScanRow).target);
-        return p === null ? [] : [`${i + 1}행: ${p}`];
-      }),
-       ...rmTargetOverlaps(rows.map((r, i) => ({ label: `${i + 1}행`, target: (r as ScanRow).target })))]
-    : [];
+  useEffect(() => { if (!open) { setText(""); setChecked(null); replace.reset(); parse.reset(); } }, [open]);
+  // 입력이 멈추고 0.4초 뒤 서버 해석. 배치 스토리지(첫 항목에서 물려받음)를 함께 보내 그 기준으로 판정받는다 — CSV 의 스토리지
+  // 열이 다르면 그 줄이 batch_storage_mixed. mutate 의 호출별 콜백은 **마지막 호출만** 불리므로 늦게 온 옛 응답이 새 입력을
+  // 덮지 않는다(그리고 위의 text 비교가 한 번 더 막는다).
+  useEffect(() => {
+    if (!open || text.trim() === "") return;
+    const sent = text;
+    const t = setTimeout(() => {
+      parse.mutate({ operation, csv: sent,
+        ...(operation === "sync"
+          ? { source_storage: String(firstPayload.source_storage ?? ""),
+              destination_storage: String(firstPayload.destination_storage ?? "") }
+          : { storage: String(firstPayload.storage ?? "") }) },
+        { onSuccess: (r) => setChecked({ text: sent, r }) });
+    }, 400);
+    return () => clearTimeout(t);
+  }, [open, text]);  // eslint-disable-line react-hooks/exhaustive-deps
+  // null = 빈 입력(미리보기 없음) 또는 아직 지금 입력의 결과가 없음(검사 중).
+  const parsed = text.trim() === "" ? null : checked !== null && checked.text === text ? checked.r : null;
+  const checking = text.trim() !== "" && parsed === null && !parse.isError;
+  const errors = parsed === null ? [] : csvErrorLines(parsed);
+  const items = parsed?.items ?? [];
   return (
     <Dialog open={open} onOpenChange={setOpen} title="CSV로 전체 교체"
             trigger={<Button variant="ghost">CSV로 전체 교체</Button>}>
@@ -441,31 +461,30 @@ function ReplaceItemsCsvDialog({ batchId, operation, firstPayload, chown, auto =
                       : "team\nprojects/alpha"}
                     value={text}
                     onChange={(e) => { setText(e.target.value);
-                                       replace.reset(); /* 이전 시도 잔상 제거 */ }} />
+                                       replace.reset(); parse.reset(); /* 이전 시도 잔상 제거 */ }} />
         </label>
         {/* 미리보기(행 수)와 확인 버튼은 입력이 있을 때만 — 무엇으로 바꾸는지
-            보여주기 전의 교체 버튼은 오클릭 유도다. 0행(헤더만)도 잠금 — 서버
-            empty_batch 재확인 전에 화면에서 정직하게 막는다. */}
+            보여주기 전의 교체 버튼은 오클릭 유도다. 0행(헤더만)은 서버가 empty_batch 로 말한다. 검사 중엔 버튼 자리에
+            잠긴 「교체」를 둔다(결과가 오는 순간 버튼이 생겨 포인터 밑으로 끼어들지 않게). */}
+        {checking && <p role="status" className="text-sm text-muted">CSV 검사 중…</p>}
         {parsed !== null && (
-          <p className="text-sm text-muted">{`${rows.length}행 파싱됨`}</p>
+          <p className="text-sm text-muted">{`${parsed.rows}행 파싱됨`}</p>
         )}
         {errors.length > 0 && (
-          <ul className="text-bad text-sm space-y-1">
+          <ul aria-label="교체할 수 없는 줄" className="text-bad text-sm space-y-1">
             {errors.map((err, i) => <li key={i}>{err}</li>)}
           </ul>
         )}
-        {rmProblems.length > 0 && (
-          <ul aria-label="교체할 수 없는 삭제 경로" className="text-bad text-sm space-y-1">
-            {rmProblems.map((err) => <li key={err}>{err}</li>)}
-          </ul>
+        {parse.isError && (
+          <p className="text-bad text-sm">{(parse.error as ApiError).message}</p>
         )}
         {replace.isError && (
           <p className="text-bad text-sm">{(replace.error as ApiError).message}</p>
         )}
         <div className="flex justify-end gap-2 pt-1">
           <Button variant="ghost" onClick={() => setOpen(false)}>닫기</Button>
-          {parsed !== null && (
-            <Button disabled={errors.length > 0 || rmProblems.length > 0 || rows.length === 0 || replace.isPending}
+          {text.trim() !== "" && (
+            <Button disabled={parsed === null || parsed.error_count > 0 || items.length === 0 || replace.isPending}
                     onClick={() => replace.mutate(items,
                       { onSuccess: () => setOpen(false) })}>교체</Button>
           )}
@@ -514,7 +533,7 @@ function SyncDestHint({ chown }: { chown: string }) {
   return (
     <p className="text-xs text-muted" role="note" aria-label="목적지 조건과 소유권">
       목적지가 없으면 새로 만듭니다(상위 디렉토리는 이미 있어야 하고, 중간 디렉토리는 만들지 않음) · 소유:{" "}
-      {syncOwnership({ chown, root: true, runAs: null, self: true }).short}
+      {syncOwnership({ chown, root: true, runAs: null, self: true, directDest: { rule: "varies" } }).short}
     </p>
   );
 }
@@ -685,8 +704,10 @@ function ConfirmBatchDialog({ b, confirm, absOf }: {
   const del = b.options?.delete === true;
   // 소유권은 chown 지정 여부와 관계없이 늘 말한다: 비워 두면 root sync 가 목적지에 이미 있던 같은 경로 항목(최상위
   // 포함)의 소유·권한·시각을 소스 것으로 바꾼다 -- 2026-09-30 프로덕션 사고와 같은 종류라 승인 화면이 침묵하면 안 된다.
+  // 직접 경로 목적지가 PV 를 담는 스토리지면 결과는 그 스토리지 기본 소유자다(2026-10-26 사용자 결정 (4) -- 자식 생성 때 항목마다
+  // 서버가 정해 얼리고, 이 확인 뒤 실행으로 넘기기 직전에 다시 대조한다). 이 창은 항목별 스토리지 종류를 모르니 규칙을 말한다(varies).
   const ownership = syncOwnership({ chown: String(b.options?.chown ?? ""), chmod: String(b.options?.chmod ?? ""),
-                                    root: true, runAs: null, self: true }).long;
+                                    root: true, runAs: null, self: true, directDest: { rule: "varies" } }).long;
   return (
     // rm 은 넓은 창(lg): 항목별 실제 경로 목록까지 실으면 md 폭에선 1280×900 에서도 버튼이 창 아래로 밀렸다(캡처 실측).
     <Dialog open={open} onOpenChange={onOpenChange} title="배치 확인" size={isRm ? "lg" : "md"}
@@ -1203,6 +1224,14 @@ export function BatchDetail() {
             {b && hasItems && (
               <CurrentItemsCsvDialog operation={csvOp(b.operation)}
                                      items={b.items ?? []} />
+            )}
+            {/* 「CSV 내보내기」(2026-10-26): 서버가 항목마다 경로·스토리지 + 상태 열(상태·요청·사유·처리 파일 수·완료 시각)을
+                내린다(엑셀용 BOM·수식 방어). 고친 파일은 「CSV로 전체 교체」·배치 생성에 그대로 쓸 수 있다. */}
+            {b && hasItems && (
+              <a href={batchItemsCsvUrl(batchId)} download
+                 className="inline-flex items-center justify-center rounded-lg border border-line bg-surface px-3 py-2 text-sm font-medium text-ink">
+                CSV 내보내기
+              </a>
             )}
             {b && firstPayload && (
               <AddItemDialog batchId={batchId} isSync={isSync} status={b.status}

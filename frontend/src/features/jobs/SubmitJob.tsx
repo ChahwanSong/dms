@@ -16,12 +16,12 @@ import { ApiError } from "../../lib/api";
 import { StoragePicker, field } from "./formFields";
 import { absolutePath, destinationParent, relativePathProblem } from "../../lib/storagePaths";
 import { ownerText, syncOwnership, validOwner } from "../../lib/syncOwnership";
-import type { PvOwnerRule } from "../../lib/syncOwnership";
+import type { DirectDestOwner, PvOwnerRule } from "../../lib/syncOwnership";
 // 옵션 미러(CHMOD_RE·chownFieldError·intFieldError, sync 숫자 범위·프리필 SYNC_INT_FIELDS)는
 // optionRules.ts 로 이사(슬라이스 32 T8) -- BatchCreate 옵션과 공유한다
 // (사본이면 미러가 발산한다).
-import { CHMOD_RE, chownFieldError, PRIV_ROOT_SYNC, PRIV_ROOT_SYNC_PV, PRIV_ROOT_SYNC_PV_ROOT, SCAN_INT_FIELDS,
-         SYNC_INT_FIELDS, SYNC_OPTION_HELP, scanIntFieldError, syncIntFieldError } from "./optionRules";
+import { CHMOD_RE, chownFieldError, PRIV_ROOT_SYNC, PRIV_ROOT_SYNC_DIRECT_BOTH, PRIV_ROOT_SYNC_PV, PRIV_ROOT_SYNC_PV_ROOT,
+         SCAN_INT_FIELDS, SYNC_INT_FIELDS, SYNC_OPTION_HELP, scanIntFieldError, syncIntFieldError } from "./optionRules";
 // 정책 기본값 캡션(슬라이스 37: 배치 생성과 같은 표시 배선 — 백엔드 무변경).
 import { usePolicies } from "../policies/usePolicies";
 import type { Policy } from "../../lib/types";
@@ -37,7 +37,7 @@ import {
   isAccountId, SIDE_LABELS, emptyLoc, normalizeSub, parsePvParam, pvAbsPath, pvDestParent, pvSubProblem, pvSummaryText,
 } from "../k8s/pvLocation";
 import type { Loc, Side } from "../k8s/pvLocation";
-import { storageKindOf } from "../k8s/k8sTerms";
+import { storageKindOf, storageOwnerOf } from "../k8s/k8sTerms";
 import { useK8sAccess } from "../k8s/useK8s";
 import { useSearchField } from "./searchField";
 
@@ -201,11 +201,26 @@ export function SubmitJob() {
   const storageOwnerRaw = destRow?.storage_owner;
   const storageOwner = validOwner(storageOwnerRaw);
   const storageOwnerLabel = storageOwner !== null ? ownerText(storageOwner) : null;
-  const storageOwnerBad = pvOwnerRule === "storage" && destRow !== null && destRow.selectable
-    && storageOwnerRaw !== undefined && storageOwner === null;
+  // 직접 경로 목적지(면제자)의 결과 소유(2026-10-26 사용자 결정 (4) -- 서버 k8s_access.direct_dest_owner 미러): 고른 스토리지가 pv
+  // 종류면 늘 그 스토리지 기본 소유자, both 면 경로가 그 스토리지의 PV 루트 아래일 때만(화면은 인벤토리의 PV 루트를 모른다 -- 조건을
+  // 그대로 말하고, 제출 때 서버가 정한 값은 요청 상세에 보인다), filesystem 은 종전(소스 소유 보존). chown 을 지정하면 그 값이 이긴다.
+  const rawDestRow = f.operation === "sync" && modeOf("destination") === "path"
+    ? storages.find((s) => s.storage_name === locs.destination.storage) : undefined;
+  const rawDestKind = rawDestRow !== undefined ? storageKindOf(rawDestRow) : null;
+  const rawDestOwnerRaw = rawDestRow !== undefined ? storageOwnerOf(rawDestRow) : undefined;
+  const rawDestOwner = rawDestOwnerRaw ?? null;
+  const directDest: DirectDestOwner | null = chownSet || rawDestKind === null || rawDestKind === "filesystem" ? null
+    : rawDestKind === "pv" ? { rule: "storage", owner: rawDestOwner }
+    : { rule: "storage_if_under_pv", owner: rawDestOwner };
+  const directOwnerLabel = rawDestOwner !== null ? ownerText(rawDestOwner) : null;
+  // pv 종류 스토리지의 저장값이 무효면 서버가 409 invalid_storage_owner -- 보내기 전에 잠근다. both 는 경로가 PV 루트 아래일 때만
+  // 거부되므로(화면은 모른다) 잠그지 않는다. 생략(undefined) = 옛 응답(모름) -- 잠그지 않는다.
+  const storageOwnerBad = (pvOwnerRule === "storage" && destRow !== null && destRow.selectable
+    && storageOwnerRaw !== undefined && storageOwner === null)
+    || (directDest?.rule === "storage" && rawDestOwnerRaw === null);
   const ownership = syncOwnership({
     chown: f.chown, chmod: f.chmod, root: true, runAs: null, self: true, chownEditable: ownerModeEditable,
-    pvDestination: pvDest, pvOwnerRule, storageOwner });
+    pvDestination: pvDest, pvOwnerRule, storageOwner, directDest });
   // 목적지 PV 루트 경고(LocationField)가 읽는 결과 소유 -- chown 지정 > 운영자 「PV 루트 소유자」 > 스토리지 기본 소유자.
   const destOwner: DestOwner = chownSet ? { rule: "chown", value: f.chown.trim() } : { rule: pvOwnerRule };
 
@@ -450,7 +465,11 @@ export function SubmitJob() {
         </li>
         <li>
           <strong>목적지가 이미 있는 경우</strong>: 디렉토리여야 합니다(파일이면 거부).{" "}
-          {!pvDest
+          {!pvDest && directDest?.rule === "storage"
+            ? "root 실행이라 쓰기·소유 검사는 우회되고, 그 안의 같은 경로 항목은 목적지 스토리지 기본 소유자와 소스의 권한·시각으로 다시 맞춰집니다(chown·chmod 를 지정하면 그 값)."
+            : !pvDest && directDest?.rule === "storage_if_under_pv"
+            ? "root 실행이라 쓰기·소유 검사는 우회되고, 그 안의 같은 경로 항목은 소스의 권한·시각과 결과 소유(PV 루트 아래면 목적지 스토리지 기본 소유자, 아니면 소스 소유)로 다시 맞춰집니다(chown·chmod 를 지정하면 그 값)."
+            : !pvDest
             ? "root 실행이라 쓰기·소유 검사는 우회되고, 그 안의 같은 경로 항목은 소스의 소유·권한·시각으로 다시 맞춰집니다(chown·chmod 를 지정하면 그 값)."
             : pvOwnerRule === "pv_root"
             ? "root 실행이라 쓰기·소유 검사는 우회되고, 그 안의 같은 경로 항목은 목적지 PV 루트의 소유자·그룹과 소스의 권한·시각으로 다시 맞춰집니다(chown·chmod 를 지정하면 그 값)."
@@ -459,7 +478,7 @@ export function SubmitJob() {
         <li><strong>소유권</strong>: {ownership.long}</li>
         {storageOwnerBad && (
           <li className="text-bad">
-            이 PV 의 스토리지에 저장된 기본 소유 값이 올바르지 않아 제출할 수 없습니다 — 관리자가 스토리지 화면에서 기본 소유 uid·gid 를 다시 저장해야 합니다.
+            {pvDest ? "이 PV 의 스토리지" : "목적지 스토리지"}에 저장된 기본 소유 값이 올바르지 않아 제출할 수 없습니다 — 관리자가 스토리지 화면에서 기본 소유 uid·gid 를 다시 저장해야 합니다.
           </li>
         )}
         <li>조건이 맞지 않으면 미리보기 전에 거부되고 사유가 표시됩니다 — 아무것도 복사되지 않습니다.</li>
@@ -650,6 +669,10 @@ export function SubmitJob() {
                         ? `비우면 ${unrestricted && pvOwnerChoice === "pv_root"
                             ? "목적지 PV 루트의 소유자·그룹으로 자동 chown 됩니다(PV 목적지 · 결과 소유 「PV 루트 소유자」 — 실제 값은 점검 뒤 확인 창에 보입니다)"
                             : `목적지 스토리지 기본 소유자${storageOwnerLabel !== null ? ` ${storageOwnerLabel} 로` : "(uid:gid)로"} 자동 chown 됩니다(PV 목적지)`}${ownerModeEditable ? ". chown 을 지정하면 그 값으로 셋업됩니다." : " — chown 지정은 특권 운영자만 할 수 있습니다."}`
+                        : rawDestKind === "pv"
+                        ? `비우면 목적지 스토리지 기본 소유자${directOwnerLabel !== null ? ` ${directOwnerLabel} 로` : "(uid:gid)로"} 자동 chown 됩니다(PV 를 담는 스토리지의 직접 경로). chown 을 지정하면 그 값으로 셋업됩니다.`
+                        : rawDestKind === "both"
+                        ? `비우면 목적지 경로가 그 스토리지의 PV 루트 아래일 때 목적지 스토리지 기본 소유자${directOwnerLabel !== null ? ` ${directOwnerLabel} 로` : "(uid:gid)로"} 자동 chown 되고, 아니면 원래(소스) 소유권을 보존합니다(root 실행). chown 을 지정하면 그 값으로 셋업됩니다.`
                         : "비우면 원래(소스) 소유권을 보존합니다(root 실행). chown 을 지정하면 목적지와 복사본이 그 값으로 셋업됩니다."}
                       {" "}uid·gid 는 둘 다 숫자로 적으세요 — 한쪽을 비우면 그쪽은 소스 값이 유지됩니다.
                     </>} />
@@ -790,7 +813,9 @@ export function SubmitJob() {
           <SummaryRow label="대상 사용자">{scopeInput}</SummaryRow>
         )}
         <SummaryRow label="실행 권한" className="text-bad">
-          {!pvDest ? PRIV_ROOT_SYNC : pvOwnerRule === "pv_root" ? PRIV_ROOT_SYNC_PV_ROOT : PRIV_ROOT_SYNC_PV}
+          {pvDest ? (pvOwnerRule === "pv_root" ? PRIV_ROOT_SYNC_PV_ROOT : PRIV_ROOT_SYNC_PV)
+            : directDest?.rule === "storage" ? PRIV_ROOT_SYNC_PV
+            : directDest?.rule === "storage_if_under_pv" ? PRIV_ROOT_SYNC_DIRECT_BOTH : PRIV_ROOT_SYNC}
         </SummaryRow>
       </SummaryList>
     </SummaryPanel>

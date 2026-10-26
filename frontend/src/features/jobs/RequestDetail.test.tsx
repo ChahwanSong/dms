@@ -9,8 +9,11 @@ import { RequestDetail } from "./RequestDetail";
 
 // 기본 스토리지 목록은 빈 배열(= 뿌리 모름 = 절대경로 표시 없음) — 화면이
 // useStorageRoots 로 이 목록을 부르므로 기본이 없으면 MSW 미처리 경고가 난다.
+// 요청 상세는 관리자에게 단건 삭제 버튼을 그린다(2026-10-26) -- 역할을 /api/auth/me 로 읽으므로 기본은 일반 사용자(버튼 없음).
+// 삭제 동선은 RequestDetail.delete.test.tsx.
 const server = setupServer(
-  http.get("/api/user/storages", () => HttpResponse.json([])));
+  http.get("/api/user/storages", () => HttpResponse.json([])),
+  http.get("/api/auth/me", () => HttpResponse.json({ actor: "alice", role: "user" })));
 beforeAll(() => server.listen());
 afterEach(() => server.resetHandlers());
 afterAll(() => server.close());

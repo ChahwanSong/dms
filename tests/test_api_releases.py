@@ -8,8 +8,10 @@ ADMIN = {"Authorization": "Bearer tok-shared"}
 class _FakeRunner:
     """observe만 쓰인다(읽기 전용) -- api는 patch를 부르면 안 된다(patch RBAC은
     컨트롤러에만 있다, 설계 §5)."""
-    def __init__(self, images=None):
+    def __init__(self, images=None, security=None):
         self._images = images or {}   # (kind, workload) -> {container: image}
+        # (kind, workload) -> {container: 정규화 securityContext}. 없으면 관측에 축 자체가 없다(구 스텁처럼).
+        self._security = security or {}
         self.fail_observe = False
 
     def observe(self, *, kind, name):
@@ -18,8 +20,11 @@ class _FakeRunner:
         images = self._images.get((kind, name))
         if images is None:
             return None
-        return {"kind": kind, "generation": 1, "observed_generation": 1,
-                "images": dict(images)}
+        obs = {"kind": kind, "generation": 1, "observed_generation": 1,
+               "images": dict(images)}
+        if (kind, name) in self._security:
+            obs["security_contexts"] = dict(self._security[(kind, name)])
+        return obs
 
     def patch_image(self, **kw):
         raise AssertionError("api must never patch")
@@ -364,3 +369,57 @@ def test_rejected_submit_leaves_no_unverified_event(rollout_client, db,
     assert r.status_code == 422
     assert db.query("SELECT id FROM events"
                     " WHERE event_type = 'release_tag_unverified'") == []
+
+
+
+# --- securityContext 드리프트(2026-10-26, BACKLOG 「securityContext 드리프트는 배지가 못 본다」) -------------------------
+
+def _sc(**over):
+    from dms.rollout_status import security_context_view
+    base = {"runAsUser": 0, "runAsGroup": 0, "allowPrivilegeEscalation": False,
+            "readOnlyRootFilesystem": True, "capabilities": {"drop": ["ALL"]}}
+    base.update(over)
+    return security_context_view({k: v for k, v in base.items() if v is not None})
+
+
+def _with_security(client, api_sc, controller_sc):
+    runner = client.app.state.rollout_runner
+    runner._security = {("Deployment", "dms-api"): {"api": api_sc},
+                        ("Deployment", "dms-controller"): {"controller": controller_sc}}
+
+
+def test_targets_report_no_security_drift_when_live_matches_the_bundled_manifest(rollout_client):
+    # 동봉 매니페스트(이 체크아웃의 deploy/k8s 40/41) = root 계약. 라이브가 같으면 [](같음) -- None(모름)과 다르다.
+    _with_security(rollout_client, _sc(), _sc())
+    by = {t["component"]: t for t in rollout_client.get("/api/admin/releases/targets", headers=ADMIN).json()["targets"]}
+    assert by["dms-api"]["security_drift"] == [] and by["dms-controller"]["security_drift"] == []
+    # 비교 대상 밖: 에이전트(privileged 파드)·job-image(워크로드 아님)는 늘 None.
+    assert by["dms-agent"]["security_drift"] is None and by["job-image"]["security_drift"] is None
+
+
+def test_targets_report_the_differing_fields_of_a_65532_site(rollout_client):
+    # BACKLOG 의 그 사고: 40/41 을 apply 하지 않아 새(root) 이미지를 옛 65532 securityContext 로 굴리는 사이트.
+    _with_security(rollout_client, _sc(runAsUser=65532, runAsGroup=None, runAsNonRoot=True), _sc())
+    by = {t["component"]: t for t in rollout_client.get("/api/admin/releases/targets", headers=ADMIN).json()["targets"]}
+    assert by["dms-api"]["security_drift"] == [
+        {"field": "runAsUser", "live": 65532, "manifest": 0},
+        {"field": "runAsGroup", "live": None, "manifest": 0},
+        {"field": "runAsNonRoot", "live": True, "manifest": None},
+    ]
+    assert by["dms-controller"]["security_drift"] == []
+
+
+def test_security_drift_is_unknown_never_a_false_alarm(rollout_client, monkeypatch):
+    # 모름은 None: 관측에 축이 없음(구 스텁·구 서버)·관측 실패·라이브 값을 못 읽음·동봉본을 못 읽음.
+    def _targets():
+        return {t["component"]: t["security_drift"]
+                for t in rollout_client.get("/api/admin/releases/targets", headers=ADMIN).json()["targets"]}
+    assert _targets()["dms-api"] is None                              # 관측에 security_contexts 축 없음
+    _with_security(rollout_client, None, _sc())                        # 라이브를 정규화 못 함(None)
+    assert _targets()["dms-api"] is None and _targets()["dms-controller"] == []
+    monkeypatch.setattr("dms.api.routes_releases.manifest_security_contexts",
+                        lambda: {"dms-api": None, "dms-controller": None})
+    _with_security(rollout_client, _sc(runAsUser=65532), _sc(runAsUser=65532))
+    assert _targets()["dms-api"] is None and _targets()["dms-controller"] is None
+    rollout_client.app.state.rollout_runner.fail_observe = True
+    assert all(v is None for v in _targets().values())

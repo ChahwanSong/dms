@@ -156,8 +156,11 @@ class BuildsRepository:
     def delete(self, build_id, actor) -> bool:
         """종단 빌드 행을 이력에서 지운다(슬라이스 34). 활성 빌드는 지우지 않는다 --
         라우트가 종단 검사 후에만 부른다(active() 가 읽는 행을 지우면 파드가 도는
-        중에 두 번째 빌드가 시작될 수 있다). 파드는 pod-gc 가 따로 수거하므로 여기선
-        DB 행만 지운다. 없으면 False(멱등 -- 라우트는 이미 404 로 걸렀다)."""
+        중에 두 번째 빌드가 시작될 수 있다). 여기선 DB 행만 지운다 -- **파드 정리는
+        호출자(라우트)가 먼저 끝내야 한다**: pod-gc 는 이 행(terminal_older_than)으로
+        파드 이름을 만들므로 행이 사라지면 그 빌드·프로브 파드는 pod-gc 시야 밖으로
+        영영 남는다(2026-10-26 BACKLOG 「빌드 삭제 docstring 의 거짓 전제」 -- 예전 문구는
+        「파드는 pod-gc 가 따로 수거한다」였다). 없으면 False(멱등 -- 라우트는 이미 404 로 걸렀다)."""
         before = self.get(build_id)
         if before is None:
             return False
@@ -167,12 +170,22 @@ class BuildsRepository:
         return True
 
     def terminal_older_than(self, seconds: int, *, limit: int = 200, now_iso=None):
+        """pod-gc 대상: 종단이 된 지 seconds 넘은 빌드 중 **아직 치우지 않은 것**(pods_gc_at IS NULL, 2026-10-26)을
+        오래된 순(seq)으로 최대 limit 건. 표시가 없던 예전엔 종단 빌드가 limit 을 넘으면 매 틱 같은 앞쪽 묶음만 다시
+        지우고 그 뒤 빌드의 파드에 영영 닿지 못했다(data_jobs.terminal_jobs_older_than 의 2026-10-16 고침과 같은 결함).
+        pod-gc 는 build_id 만 쓰므로 log_text(행마다 최대 64KB)를 싣지 않는다 -- list() 의 I2 와 같은 이유."""
         now = now_iso or utc_now_iso()
         cutoff = iso_plus(now, -seconds)
         rows = self._db.query(
-            """SELECT * FROM builds
-               WHERE state IN ('Succeeded', 'Failed') AND finished_at IS NOT NULL
+            """SELECT build_id, seq, state, finished_at, pods_gc_at FROM builds
+               WHERE pods_gc_at IS NULL
+                 AND state IN ('Succeeded', 'Failed') AND finished_at IS NOT NULL
                  AND finished_at < :cutoff
                ORDER BY seq ASC LIMIT :n""",
             {"cutoff": cutoff, "n": limit})
-        return [_row(r) for r in rows]
+        return [dict(r) for r in rows]
+
+    def mark_pods_gc(self, build_id, *, now_iso: str | None = None) -> None:
+        """pod-gc 가 이 빌드의 빌드·프로브 파드 정리를 마쳤다(다시 보지 않는다). data_jobs.mark_pods_gc 와 같은 계약."""
+        self._db.execute("UPDATE builds SET pods_gc_at = :t WHERE build_id = :id",
+                         {"t": now_iso or utc_now_iso(), "id": build_id})

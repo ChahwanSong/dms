@@ -163,7 +163,13 @@ def list_user_storages(request: Request, identity: Identity = Depends(require_us
         if not is_admin and not storage_open_to_users(r):
             continue
         # kind(2026-10-25 dms-k8s 설계 D11): 포탈의 직접 경로 피커는 filesystem·both 만 보인다(pv 전용은 PV 주소로만).
-        out.append({"storage_name": r["storage_name"], "backend_type": r["backend_type"],
-                    "status": r["status"], "managed_root": r["managed_root"],
-                    "admin_only": not storage_open_to_users(r), "kind": storage_kind(r)})
+        row = {"storage_name": r["storage_name"], "backend_type": r["backend_type"],
+               "status": r["status"], "managed_root": r["managed_root"],
+               "admin_only": not storage_open_to_users(r), "kind": storage_kind(r)}
+        # 기본 소유(2026-10-26 사용자 결정 (4)): 직접 경로 sync 목적지가 PV 를 담는 스토리지면 결과가 이 값이다 -- 직접 경로를 고르는
+        # 화면(면제 관리자의 단건·배치 생성)이 안내에 쓴다. 직접 경로는 관리자만이라 관리자 응답에만 싣는다(필요한 만큼만 연다).
+        # None = 저장값이 무효(storage_default_owner -- 그 목적지는 409 invalid_storage_owner).
+        if is_admin:
+            row["default_owner"] = storage_default_owner(r)
+        out.append(row)
     return out

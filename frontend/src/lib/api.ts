@@ -103,6 +103,9 @@ export const REASON_MESSAGES: Record<string, string> = {
   already_terminal: "이미 처리된 작업입니다",
   privileged_not_authorized: "권한 있는 요청자가 아닙니다",
   resource_conflict: "동일 대상에 진행 중인 작업이 있습니다",
+  // 2026-10-27 경로 겹침(planner 1b): 같은 스토리지에서 경로가 같거나 조상·자손이고 한쪽이 rm 인 진행 중 작업이 먼저 있다.
+  // 어느 요청과 겹쳤는지는 요청 상세 전이 이력의 링크(RequestActivity — path_conflict 이벤트의 conflict_request_id).
+  path_conflict: "진행 중인 다른 작업과 경로가 겹칩니다(한쪽이 rm) — 그 작업이 끝난 뒤 다시 제출하세요",
   no_eligible_nodes: "실행 가능한 노드가 없습니다",
   // sync 전용 -- "후보 0"의 이유가 다르다: 노드는 있는데 **한 노드가 소스와 목적지를
   // 동시에** 만족하지 못한 것이다(placement.select_tool_and_candidates). 두 코드에
@@ -120,6 +123,8 @@ export const REASON_MESSAGES: Record<string, string> = {
   policy_not_found: "정책을 찾을 수 없습니다",
   artifact_not_found: "아티팩트를 찾을 수 없습니다",
   artifact_too_large: "파일이 다운로드 상한을 넘습니다 — 관리자에게 문의하세요",
+  // 결과 파일 자동 만료(2026-10-26, DMS_ARTIFACT_RETENTION_DAYS) -- 410. 요청·잡 기록과 결과 수치는 남는다.
+  artifact_expired: "결과 파일이 보존 기간이 지나 만료(삭제)되었습니다 — 작업 기록과 결과 수치는 그대로 남아 있습니다",
   invalid_phase: "알 수 없는 실행 단계입니다",
   log_ref_not_found: "이 단계의 로그 참조가 없습니다",
   log_not_available: "이 단계는 파드 로그를 제공하지 않습니다 — 아티팩트를 확인하세요",
@@ -180,7 +185,7 @@ export const REASON_MESSAGES: Record<string, string> = {
   accounts_session_required: "계정 생성·삭제·역할·비활성화 변경은 포탈에 로그인한 관리자만 할 수 있습니다(토큰 인증 불가)",
   privileged_account_protected: "특권 실행 목록에 있는 이름의 계정은 특권 실행 자격이 있는 관리자만 관리합니다(만들기·역할·비활성화·삭제) — 이 계정은 셀프 비밀번호 재설정도 쓸 수 없으니 특권 관리자에게 요청하세요",
   confirm_session_required: "작업 실행 확인(컨펌)은 포탈에 로그인한 사용자만 할 수 있습니다(토큰 인증 불가)",
-  admin_session_required: "빌드·릴리스·컨트롤 상태·레지스트리 삭제·결과 폴더(artifact base) 변경·작업 삭제는 포탈에 로그인한 관리자만 할 수 있습니다(토큰 인증 불가)",
+  admin_session_required: "빌드·릴리스·컨트롤 상태·레지스트리 삭제·결과 폴더(artifact base) 변경·배치 기록 삭제·작업 삭제는 포탈에 로그인한 관리자만 할 수 있습니다(토큰 인증 불가)",
   preview_round_required: "배치 확인에는 확인한 미리보기 회차가 필요합니다 — 화면을 새로고침한 뒤 「배치 확인」을 다시 여세요",
   batch_preview_changed: "확인 대화상자를 연 뒤 배치 내용이 바뀌었습니다(항목 추가·재실행으로 다시 미리보기됨) — 대화상자를 닫고 다시 열어 바뀐 내용을 검토하세요",
   // rm 배치 확인은 「되돌릴 수 없음」 동의를 본문에 실어야 한다(2026-10-21 -- 그 체크가 없는 옛 포탈 탭의 확인을 막는다).
@@ -249,6 +254,8 @@ export const REASON_MESSAGES: Record<string, string> = {
   build_node_report_stale: "빌드 노드의 에이전트 리포트가 오래되었습니다 — 노드가 내려갔을 수 있습니다",
   build_not_found: "빌드를 찾을 수 없습니다",
   build_not_deletable: "진행 중인 빌드는 삭제할 수 없습니다 — 종료된 뒤에 삭제하세요",
+  // 2026-10-26: 빌드 삭제는 빌드·프로브 파드를 먼저 지운다(행이 먼저 사라지면 pod-gc 시야 밖으로 누수) -- 실패면 행을 남긴다.
+  build_pod_cleanup_failed: "빌드 파드를 정리하지 못해 기록을 지우지 않았습니다 — 잠시 뒤 다시 시도하세요",
   // 레지스트리 이미지 관리(슬라이스 34). reasonCodes.json 과 같은 커밋.
   unknown_registry_repo: "알 수 없는 이미지 저장소입니다",
   registry_tag_in_use: "지금 배포돼 사용 중인 태그는 삭제할 수 없습니다",
@@ -341,8 +348,15 @@ export const REASON_MESSAGES: Record<string, string> = {
   delete_selection_too_large: "한 번에 200개까지 삭제할 수 있습니다",
   // 「한 번에」는 나눠 지울 길이 있는 듯 읽혔다(자식 개별 삭제 불가·청크 삭제는 BACKLOG -- 2026-10-10 검증 지적).
   // 항목 상한(10000)도 같은 사유다(2026-10-11 -- 큰 CSV 배치를 일찍 취소하면 작업은 적고 항목만 많다).
-  batch_delete_too_large: "작업이 1000개 또는 항목이 10000개를 넘는 배치는 아직 삭제할 수 없습니다",
+  batch_delete_too_large: "작업이 2000개 또는 항목이 10000개를 넘는 배치는 아직 삭제할 수 없습니다",
   batch_changed: "확인 창을 연 뒤 배치의 작업이 바뀌었습니다(재실행 등) — 목록을 다시 보고 다시 시도하세요",
+  // 배치 기록 삭제의 CAS 패배(2026-10-26) -- 화면이 종단을 본 뒤 그 사이 재실행·항목 추가로 배치가 다시 돌기 시작했다.
+  batch_record_changed: "그 사이 배치가 다시 실행돼 기록을 지우지 않았습니다 — 화면을 새로 고친 뒤 끝나면 다시 삭제하세요",
+  // 배치 CSV 해석(2026-10-26, POST /api/admin/batches:parse-csv -- 서버 batch_csv). 줄 오류는 「N번째 줄: …」로 붙는다.
+  batch_csv_too_large: "CSV 가 너무 큽니다(최대 2 MiB) — 나눠서 올리세요",
+  batch_csv_too_many_rows: "CSV 행이 너무 많습니다(최대 10000행 — 배치 단위 삭제의 항목 상한) — 나눠서 올리세요",
+  batch_csv_malformed: "CSV 를 읽을 수 없습니다 — 따옴표(\")가 닫히지 않았는지 확인하세요",
+  batch_csv_bad_row: "열 수가 맞지 않거나 경로 칸이 비었습니다 — scan·rm 은 경로 1열(target), sync 는 source,destination 2열입니다(콤마가 든 경로는 \"…\" 로 감싸세요)",
   batch_delete_failed: "삭제 중 오류가 나 이 배치는 지우지 못했습니다(변경 없음) — 다시 시도하세요",
   delete_batch_selection_too_large: "한 번에 배치 10개까지 삭제할 수 있습니다",
   // 배치 단위 삭제에서 자식을 **다른** 배치의 항목이 가리킨다(비정상 DB). batch_child_not_deletable(「배치 단위로 선택해
@@ -376,6 +390,8 @@ export const REASON_MESSAGES: Record<string, string> = {
   purge_pod_stuck: "결과 파일 정리 파드가 끝나지 않고 있습니다 — 그 파드의 노드 상태를 확인하세요",
   purge_target_still_present: "삭제한 요청의 기록이 DB 에 다시 있어 정리를 멈췄습니다 — 운영자 확인이 필요합니다",
   purge_row_invalid: "정리 대기 기록의 내용이 올바르지 않아 정리를 멈췄습니다 — 운영자 확인이 필요합니다",
+  // 결과 파일 만료 정리(kind expiry) 행의 안전 확인 실패 -- 잡 기록이 사라졌거나 만료 표시가 없다(DB 복원 등). 파일은 무접촉.
+  artifact_expiry_target_invalid: "만료 대상 작업의 기록이 바뀌어(만료 표시 없음·작업 없음) 결과 파일 정리를 멈췄습니다 — 운영자 확인이 필요합니다",
   purge_failed: "결과 정리 중 예기치 못한 오류가 났습니다 — 자동으로 다시 시도합니다",
   // k8s 연동(2026-10-25 dms-k8s 설계 §4.2): 동기화 실패 사유(에이전트가 보고 -- 동기화 이력·클러스터 카드)·상태 사유와
   // 관리 라우트(/api/admin/k8s/*)의 거절 사유. storage_has_sc_mappings(스토리지 종류 변경)·denylist_group_unsupported(그룹
@@ -425,10 +441,10 @@ export const REASON_MESSAGES: Record<string, string> = {
   pv_owner_unknown: "목적지 PV 의 소유자(uid:gid)를 확인하지 못했습니다 — 결과 소유를 PV 루트 소유자로 고른 sync 라 진행하지 않았습니다. PV 루트가 디렉터리인지 확인한 뒤 다시 제출하세요(계속되면 관리자에게 점검 로그 확인을 요청하세요)",
   pv_owner_changed: "미리보기 뒤에 목적지 PV 의 소유자(uid:gid)가 바뀌었습니다 — 결과 소유를 PV 루트 소유자로 고른 sync 라 확인 창에 보인 소유자와 실행이 달라지지 않도록 멈췄습니다. 다시 제출하세요",
   // 스토리지 기본 소유(2026-10-26): 등록·수정 422(범위 밖)와 제출 409(저장값이 올바르지 않음)가 같은 코드다.
-  invalid_storage_owner: "스토리지 기본 소유 uid·gid 는 0~4294967294 정수여야 합니다 — 목적지 스토리지에 저장된 값이 올바르지 않으면 그 PV 로의 sync 를 받지 않으니, 관리자에게 스토리지 화면에서 기본 소유를 다시 저장하도록 요청하세요",
-  pv_owner_not_applicable: "결과 소유 선택은 목적지가 PV 인 sync 에만, chown 을 지정하지 않았을 때만 쓸 수 있습니다(요청 기록의 결과 소유 규칙이 올바르지 않아도 이 사유로 멈춥니다) — 화면을 새로 고친 뒤 다시 제출하세요",
+  invalid_storage_owner: "스토리지 기본 소유 uid·gid 는 0~4294967294 정수여야 합니다 — 목적지 스토리지에 저장된 값이 올바르지 않으면 그 스토리지로의 sync(PV 목적지, 그 스토리지가 PV 를 담는 직접 경로 목적지)를 받지 않으니, 관리자에게 스토리지 화면에서 기본 소유를 다시 저장하도록 요청하세요",
+  pv_owner_not_applicable: "결과 소유 선택은 목적지가 PV 인 sync 에만, chown 을 지정하지 않았을 때만 쓸 수 있습니다(요청 기록의 결과 소유 규칙·직접 경로 목적지 소유 기록이 올바르지 않아도 이 사유로 멈춥니다) — 화면을 새로 고친 뒤 다시 제출하세요",
   pv_owner_root_not_allowed: "결과 소유를 PV 루트 소유자로 고르는 것은 특권 운영자만 할 수 있습니다 — 기본(목적지 스토리지 기본 소유자)으로 다시 제출하세요",
-  storage_owner_changed: "제출 뒤 목적지 스토리지의 기본 소유자(uid:gid)가 바뀌어 멈췄습니다 — 다시 제출하면 바뀐 값으로 맞춰집니다",
+  storage_owner_changed: "제출 뒤 목적지 스토리지의 기본 소유자(uid:gid)나 그 적용 여부(스토리지 종류·직접 경로를 덮는 PV)가 바뀌어 멈췄습니다 — 다시 제출하면 지금 규칙으로 맞춰집니다",
   scan_unrestricted_only: "scan(용량 분석)은 특권 운영자만 실행할 수 있습니다 — 필요하면 관리자에게 요청하세요",
   username_reserved: "시스템 계정 이름(daemon·nobody·sys 등)은 아이디로 쓸 수 없습니다 — 작업 실행 환경의 같은 이름 계정과 충돌합니다",
   username_numeric_only: "숫자만으로 된 아이디는 쓸 수 없습니다 — 영문 소문자를 하나 이상 넣어 주세요(작업 실행 시 숫자 아이디는 사용자 번호로 잘못 읽힙니다)",

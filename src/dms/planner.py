@@ -7,7 +7,8 @@ dms-k8s 는 k8s 신원 모드 전용이다(2026-10-26 LDAP 코드 삭제): 계�
 import sys
 
 from . import k8s_access
-from .domain import DomainValidationError, Operation, RequestState, sync_overlap_problem, valid_owner_username
+from .domain import (DomainValidationError, Operation, RequestState, destructive_operation, overlap_sides,
+                     path_conflict, sync_overlap_problem, valid_owner_username)
 from .identity import IdentityRejected, owner_override_allowed, privilege_policy, resolve_job_identity
 from .repositories.storages import storage_open_to_users
 from .privileged import privileged_names
@@ -21,6 +22,16 @@ def _required_storages(operation, payload):
     if operation == Operation.SYNC.value:
         return [payload["source_storage"], payload["destination_storage"]]
     return [payload["storage"]]
+
+
+def _payload_sides(operation, payload) -> tuple:
+    """요청 payload 의 겹침 판정 쪽들(domain.overlap_sides). dict 가 아니면(깨진 행) 빈 목록 -- 판정할 경로가 없다."""
+    if not isinstance(payload, dict):
+        return ()
+    return overlap_sides(operation, storage=payload.get("storage"), target=payload.get("target"),
+                         source_storage=payload.get("source_storage"), source=payload.get("source"),
+                         destination_storage=payload.get("destination_storage"),
+                         destination=payload.get("destination"))
 
 
 class Planner:
@@ -77,6 +88,23 @@ class Planner:
             rid, RequestState.REJECTED, reason_code=reason, actor="planner")
         return f"rejected:{reason}"
 
+    def _path_conflict(self, req):
+        """1b 의 판정 -- 겹치는 상대가 없으면 None, 있으면 (상대 요청 행, (내 쪽, 상대 쪽)). 상대는 commit_order 순으로 보므로
+        가장 앞선 것이 먼저 걸린다. 상대 payload 가 깨진 행은 건너뛴다: 그 행이 실제로 돌고 있다면 stepper 실행 관문이 **잡
+        행**(실행이 쓰는 경로)으로 보고 보류한다 -- 계획 시점의 종단 Conflict 를 변조 행 때문에 내지 않는다. 내 경로가 깨졌으면
+        (overlap_path 가 루트로 본다) 같은 스토리지의 모든 활성 작업과 겹친다(fail-closed -- 어차피 실행 전에 거부될 행이다)."""
+        mine = _payload_sides(req["operation"], req.get("payload"))
+        if not mine:
+            return None
+        destructive = destructive_operation(req["operation"])
+        for other in self._repos.requests.overlap_candidates(
+                request_id=req["request_id"], commit_order=req["commit_order"], destructive_only=not destructive):
+            theirs = _payload_sides(other["operation"], other["payload"])
+            hit = path_conflict(destructive, mine, destructive_operation(other["operation"]), theirs)
+            if hit is not None:
+                return other, hit
+        return None
+
     def _plan_one(self, rid, now_iso):
         # "gone" = 요청이 계획 도중 Pending 을 떠났다(취소·관리자 삭제) -- 아무것도 남기지 않았고 이벤트도 쓰지 않는다
         # (삭제된 id 로 쓴 이벤트는 어디서도 안 보이는 고아다).
@@ -108,6 +136,27 @@ class Planner:
                 rid, RequestState.CONFLICT, reason_code="resource_conflict",
                 actor="planner")
             return "conflict"
+        # 1b. 경로 겹침(2026-10-27, domain.path_conflict 주석): 앞선 비종단 요청(또는 이미 계획된 요청)과 같은 스토리지에서
+        #     경로가 같거나 조상·자손이고 한쪽이 rm 이면 늦게 온 이 요청을 Conflict 로 끝낸다(배치 자식도 같다 -- 항목은
+        #     Failed path_conflict 로 보인다). 대기열에 두지 않는 이유: 앞선 작업은 확인 대기(ConfirmPending)로 미리보기 TTL
+        #     동안 머물 수 있고, 사람이 본 미리보기가 그 사이의 rm·sync 로 무효가 된다 -- 「끝난 뒤 다시 제출」이 정직하다.
+        clash = self._path_conflict(req)
+        if clash is not None:
+            other, (mine, theirs) = clash
+            self._repos.requests.set_state_with_result(
+                rid, RequestState.CONFLICT, reason_code="path_conflict", actor="planner")
+            # 상대 요청 id 는 이벤트에만 남는다(전이 행엔 상세 칸이 없다) -- 요청 상세가 이 이벤트로 그 요청 링크를 그린다
+            # (RequestActivity.conflictRequestId). 상대의 경로는 싣지 않는다: 남의 요청 경로(내 PV 위 조상 디렉터리)를
+            # 보이지 않고, 내 쪽 경로·상대의 연산·쪽 이름만으로 무엇이 겹쳤는지 말한다. record_event 는 예외를 삼킨다 --
+            # 실패해도 종단 사유는 남는다(링크만 빠진다).
+            self._repos.observability.record_event(
+                component="planner", severity="warning", event_type="path_conflict",
+                message=(f"다른 작업(요청 {other['request_id'][:8]})과 경로가 겹칩니다 — 겹치는 작업이 끝난 뒤 다시 "
+                         f"제출하세요 ({mine[1]}:{mine[2] or '/'} ↔ {other['operation']} {theirs[0]})"),
+                payload={"conflict_request_id": other["request_id"], "conflict_operation": other["operation"],
+                         "conflict_side": theirs[0], "side": mine[0], "storage": mine[1], "path": mine[2]},
+                request_id=rid)
+            return "conflict:path_conflict"
         # 2. requester 계정 admission: 계정 row가 존재 & disabled일 때만 거부한다.
         #    row가 없으면 "무판정"(맵핑 면제는 아니다 -- 3a 의 k8s_access.unrestricted_request 는 계정 행을 본다).
         account = self._repos.accounts.get(req["requester_id"])

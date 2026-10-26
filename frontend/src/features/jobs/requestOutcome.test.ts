@@ -248,6 +248,18 @@ test("KPI: 결과 수치는 단위를 붙이고, 0 은 「0개」, 미리보기 
   expect(kpi({}, [{ ...done, result_summary: { files: 0, bytes: 0 } }])[0].value).toBe("0개");
 });
 
+test("KPI 크기 칸은 title 에 정확한 바이트(2026-10-26 -- scan 「사용량」은 새 dscan 의 summary.total_bytes 정확값)", () => {
+  const scan = job({ operation: "scan", state: "Succeeded", transitions: SYNC_OK_TR,
+                     result_summary: { files: 38, bytes: 1074750158, returncode: 0 } });
+  const tiles = kpi({ operation: "scan" }, [scan]);
+  expect(tiles.find((x) => x.key === "bytes")).toMatchObject({ label: "사용량", value: "1.0 GiB", title: "1,074,750,158 B" });
+  expect(tiles.find((x) => x.key === "files")?.title).toBeUndefined();     // 개수는 값이 곧 정확값
+  // 모르면 title 도 없다(지어내지 않는다)
+  const unknown = kpi({ operation: "scan" }, [{ ...scan, result_summary: { files: 38, bytes: null } }]);
+  expect(unknown.find((x) => x.key === "bytes")).toMatchObject({ value: "—" });
+  expect(unknown.find((x) => x.key === "bytes")?.title).toBeUndefined();
+});
+
 test("KPI null 전파: 한 잡이라도 모르면 합계를 지어내지 않는다", () => {
   const a = job({ job_id: "a", state: "Succeeded", result_summary: { files: 1, bytes: 1 } });
   const b = job({ job_id: "b", state: "Succeeded", result_summary: { files: null, bytes: 2 } });

@@ -106,6 +106,22 @@ def pv_owner_measured(spec) -> bool:
     return pv_dest_owner_applies(spec) and getattr(spec, "result_owner_rule", None) != "storage"
 
 
+def direct_dest_owner_applies(spec) -> bool:
+    """직접 경로 목적지의 스토리지 기본 소유자 규칙이 적용되는 잡인가(2026-10-26 사용자 결정 (4) 「직접 경로의 스토리지가 PV 를
+    담는 종류면 그 스토리지의 기본 uid:gid 로 자동 chown」): sync ∧ root ∧ 명시 chown 없음 ∧ 목적지가 PV 주소가 아님(contain 에
+    destination 이 없다 -- PV 목적지는 pv_dest_owner_applies 가 먼저다) ∧ spec.result_owner_direct is True ∧ 규칙 "storage"(stepper 가
+    요청 payload.dest_owner 의 rule "storage" 일 때만 이 짝을 싣는다). 측정은 없다 -- pv_owner_measured 는 이 잡에서 늘 False 다
+    (contain 의 destination 이 없어 적용 술어가 거짓)."""
+    if spec.operation != "sync" or not (spec.identity or {}).get("privileged"):
+        return False
+    if "chown" in (spec.options or {}):
+        return False
+    if getattr(spec, "result_owner_direct", False) is not True or getattr(spec, "result_owner_rule", None) != "storage":
+        return False
+    contain = (spec.paths or {}).get("contain")
+    return not (isinstance(contain, dict) and "destination" in contain)
+
+
 def _auto_chown(spec) -> list[str]:
     """비 root(비특권) 실행의 sync는 목적지를 **실행 신원**(스냅숏의 uid:gid) 소유로 강제한다(--chown). dms-k8s 는 모든 잡이
     root 라(설계 D2) stepper 는 비 root 신원을 제출 전에 끊는다(2026-10-26, stepper.identity_problem) -- 이 갈래는 빌더를
@@ -128,19 +144,23 @@ def _auto_chown(spec) -> list[str]:
       - "storage"(기본 — 일반 사용자는 늘 이것): 목적지 스토리지 기본 소유자(스토리지 항목의 default_uid:default_gid, 기본
         0:0). 제출이 요청 destination_pv 블록에 기록하고 planner·컨펌이 현재 값과 대조한다(storage_owner_changed).
       - "pv_root"(특권 운영자 옵션)·None(규칙 이전 옛 행): 목적지 쪽 preflight 가 봉쇄 확인 뒤 잰 PV 루트의 uid:gid.
-    우선순위: 명시 chown > PV 목적지: 스토리지 기본 소유자 | 운영자 옵션 시 잰 PV 루트 소유자 > root 면 개입 없음 > 비 root 면
-    실행 신원. 그 값이 없거나 형식이 틀리면 ValueError — 소스 소유 보존으로 조용히 접지 않는다(어댑터가 submit_failed 로
-    접는다, fail-closed). 0:0 이어도 --chown 0:0 을 싣는다(「개입 없음」과 다르다): dms-mpifileutils 포크는 --chown 이 있으면
+    직접 경로 목적지(2026-10-26 사용자 결정 (4), direct_dest_owner_applies): 목적지 스토리지가 pv 종류이거나 both 이고 경로가 PV
+    루트 아래면 제출(배치는 자식 생성)이 요청 payload.dest_owner 에 얼린 그 스토리지 기본 소유자 -- "storage" 규칙과 같은 값·같은
+    재확인(storage_owner_changed), 측정 없음.
+    우선순위: 명시 chown > PV 목적지: 스토리지 기본 소유자 | 운영자 옵션 시 잰 PV 루트 소유자 > 직접 경로 목적지가 PV 를 담는
+    스토리지(pv 늘, both 는 PV 루트 아래)면 스토리지 기본 소유자 > root 면 개입 없음 > 비 root 면 실행 신원. 그 값이 없거나
+    형식이 틀리면 ValueError — 소스 소유 보존으로 조용히 접지 않는다(어댑터가 submit_failed 로 접는다, fail-closed). 0:0 이어도 --chown 0:0 을 싣는다(「개입 없음」과 다르다): dms-mpifileutils 포크는 --chown 이 있으면
     일반 파일의 setuid/setgid 를 지운다 — 소스의 setuid-root 실행 파일이 그대로 PV 에 떨어지지 않게. nsync 는 이 값을 소스 쪽
     스캔 기록에 덮어써 비교·적용하므로 소스·목적지 rank 가 같은 argv 를 받는 이 방식이어야 한다(rank 마다 따로 재는 방식은
     소스 rank 가 목적지를 못 본다)."""
     ident = spec.identity or {}
     if "chown" in (spec.options or {}):
         return []
-    if pv_dest_owner_applies(spec):
+    if pv_dest_owner_applies(spec) or direct_dest_owner_applies(spec):
         if not valid_owner(spec.result_owner):
-            raise ValueError(f"PV destination sync without a valid result owner "
-                             f"(rule {getattr(spec, 'result_owner_rule', None)!r}): {spec.result_owner!r}")
+            raise ValueError(f"{'direct-path' if direct_dest_owner_applies(spec) else 'PV'} destination sync without "
+                             f"a valid result owner (rule {getattr(spec, 'result_owner_rule', None)!r}): "
+                             f"{spec.result_owner!r}")
         return ["--chown", spec.result_owner]
     if ident.get("privileged"):
         return []

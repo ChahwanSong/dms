@@ -19,6 +19,7 @@
 이름으로 다시 만든 클러스터가 정리 전의 옛 행을 물려받지 않게. 한 번도 성공하지 않은 클러스터는 모름(k8s_mapping_unknown)이지
 「권한 없음」이 아니다(null ≠ 0).
 """
+import time
 import uuid
 
 from .. import k8s_sync
@@ -35,6 +36,9 @@ STORAGE_KINDS = ("filesystem", "pv", "both")
 # chown 의 「바꾸지 않음」 표식이라 소유자 값이 아니다). 저장 검증(repositories.storages)과 읽기 정규화(storage_default_owner)가
 # 같은 상한을 쓴다.
 OWNER_ID_MAX = 4294967294
+# pv_roots 메모의 수명(초). 입력 지문이 스냅숏 적용·매핑·스토리지 변경을 잡지만, 그 밖의 경로로 고친 행(DB 직접 수정 -- 신뢰
+# 경계)도 이 시간 안에는 반영되게 짧게 둔다(같은 틱의 배치 자식 수십 건이 한 번만 계산하면 충분하다).
+PV_ROOTS_MEMO_SECONDS = 30.0
 CHANGE_NAMES_MAX = 50
 _RUN_LIST_COLUMNS = ("seq, run_id, cluster_name, node_name, role, trigger, status, claimed_at, deadline_at, finished_at, "
                      "applied_at, config_rev, reason, phase, http_status, error, server_version, duration_ms, counts, "
@@ -178,9 +182,25 @@ def delete_maps_for_storage_in_txn(db: Database, storage_name: str, actor: str) 
     return rows
 
 
+def _joined_pv(r: dict):
+    """volumes()·pv_roots() 의 PVC ⟕ PV 조인 행 → resolve_volume 의 pv 인자(조인된 PV 가 없으면 None)."""
+    if not r.get("pv_name"):
+        return None
+    return {"name": r["pv_name"], "volume_handle": r["pv_volume_handle"], "volume_attributes": r["pv_volume_attributes"],
+            "claim_namespace": r["pv_claim_namespace"], "claim_name": r["pv_claim_name"],
+            "storage_class": r["pv_storage_class"]}
+
+
+_PV_JOIN_COLUMNS = ("v.name AS pv_name, v.volume_handle AS pv_volume_handle, v.volume_attributes AS pv_volume_attributes, "
+                    "v.claim_namespace AS pv_claim_namespace, v.claim_name AS pv_claim_name, "
+                    "v.storage_class AS pv_storage_class")
+
+
 class K8sRepository:
     def __init__(self, db: Database):
         self._db = db
+        # pv_roots 의 메모(스토리지 이름 → (입력 지문, 루트들)). 지문이 같을 때만 재사용한다(pv_roots docstring).
+        self._pv_roots_memo: dict = {}
 
     @property
     def _lock(self) -> str:
@@ -826,6 +846,67 @@ class K8sRepository:
                                          {"n": sc_map["storage_name"]})
         return resolve_volume(row, pv, sc_map, storage)
 
+    def pv_roots(self, storage_name) -> tuple:
+        """지금 인벤토리가 그 스토리지에 매핑하는 PV 루트들(managed_root 기준 상대경로 -- 정렬, 중복 없음): 적용된 모든 클러스터의
+        Bound PVC 중 StorageClass 매핑이 이 스토리지를 가리키고 resolve_volume 이 루트를 낸(선택 가능) 것. 직접 경로 sync 목적지의
+        결과 소유 판정(k8s_access.direct_dest_owner -- PV·파일시스템(both) 스토리지는 경로가 이 루트 중 하나 아래일 때만 스토리지
+        기본 소유자로)이 쓴다. 스토리지가 없거나 PV 를 담는 종류(pv·both)가 아니거나 매핑이 없으면 ().
+
+        메모(PV_ROOTS_MEMO_SECONDS): 계산은 매핑된 PVC 전부를 해석한다 -- 배치 자식마다 생성·계획·컨펌에서 불려, 큰 인벤토리 ×
+        큰 배치면 틱이 그 계산으로 찬다. 입력 지문(스토리지 종류·백엔드 = 프리셋 템플릿, 이 스토리지를 가리키는 SC 매핑과 템플릿,
+        적용된 클러스터마다 applied_run_seq -- 스냅숏 행은 apply_run 이 같은 트랜잭션에서 그 값을 올릴 때만 바뀐다)이 같고 수명
+        안이면 앞 결과를 쓴다. 지문을 행보다 **먼저** 읽는다: 그 사이 적용이 커밋되면 (옛 지문, 새 루트)가 남고 다음 호출의 지문이
+        달라 다시 계산된다 -- 옛 루트가 새 지문에 붙는 순서는 없다."""
+        storage = self._db.query_one("SELECT * FROM storages WHERE storage_name = :n", {"n": storage_name})
+        if storage is None or storage_kind(storage) not in PV_CAPABLE_KINDS:
+            return ()
+        maps = self.maps_for_storage(storage_name)
+        if not maps:
+            return ()
+        clusters = self._db.query(
+            "SELECT name, applied_run_seq FROM k8s_clusters WHERE applied_run_seq IS NOT NULL ORDER BY name")
+        key = (storage_kind(storage), storage.get("backend_type"),
+               tuple((m["storage_class"], m.get("path_template")) for m in maps),
+               tuple((c["name"], c["applied_run_seq"]) for c in clusters))
+        now = time.monotonic()
+        hit = self._pv_roots_memo.get(storage_name)
+        if hit is not None and hit[0] == key and 0 <= now - hit[1] < PV_ROOTS_MEMO_SECONDS:
+            return hit[2]
+        by_sc = {m["storage_class"]: m for m in maps}
+        params = {f"sc{i}": sc for i, sc in enumerate(by_sc)}
+        # SC 는 resolve_volume 과 같은 규칙(PVC 의 storageClassName, 비었으면 PV 의 것)으로 거른다 -- NULLIF 가 '' 를 파이썬 `or`
+        # 처럼 비운다. 거른 뒤에도 행마다 resolve_volume 이 다시 판정한다(매핑·종류·claimRef·템플릿).
+        rows = self._db.query(
+            f"""SELECT p.*, {_PV_JOIN_COLUMNS}
+                FROM k8s_pvcs p {_clusters_join('p')}
+                LEFT JOIN k8s_pvs v ON v.cluster_name = p.cluster_name AND v.name = p.volume_name
+                WHERE p.phase = 'Bound'
+                  AND COALESCE(NULLIF(p.storage_class, ''), v.storage_class) IN ({', '.join(':' + k for k in params)})""",
+            params)
+        roots = set()
+        for r in rows:
+            pv = _joined_pv(r)
+            sc = r.get("storage_class") or (pv or {}).get("storage_class")
+            item = resolve_volume(r, pv, by_sc.get(sc), storage)
+            if item["selectable"] and item["storage_name"] == storage_name and isinstance(item["root"], str) \
+                    and item["root"] != "":
+                roots.add(item["root"])
+        out = tuple(sorted(roots))
+        self._pv_roots_memo[storage_name] = (key, now, out)
+        return out
+
+    def pv_root_covering(self, storage_name, rel_path) -> "str | None":
+        """rel_path(managed_root 기준 **정규화된** 상대경로 -- 호출자가 validate_relative_path 로 맞춘다)와 같거나 그 위인 그
+        스토리지의 PV 루트(pv_roots 중 가장 깊은 것), 없으면 None. 글자 경계로 본다(k8s_access.recheck_request 의 pv_target_outside
+        와 같은 규칙: root 와 같거나 root + '/' 로 시작)."""
+        if not isinstance(rel_path, str) or rel_path == "":
+            return None
+        best = None
+        for root in self.pv_roots(storage_name):
+            if (rel_path == root or rel_path.startswith(root + "/")) and (best is None or len(root) > len(best)):
+                best = root
+        return best
+
     def volumes(self, *, cluster=None, namespace=None, storage_class=None, q=None, dms_user=None, pvc=None,
                 limit=None) -> "tuple[list, bool]":
         """PVC 목록(해석 포함) → (rows, truncated). dms_user 를 주면 그 사용자가 인식된 바인딩을 가진 namespace 만(권한 범위)
@@ -860,9 +941,7 @@ class K8sRepository:
             lim = " LIMIT :lim"
             params["lim"] = int(limit) + 1
         rows = self._db.query(
-            f"""SELECT p.*, v.name AS pv_name, v.volume_handle AS pv_volume_handle,
-                       v.volume_attributes AS pv_volume_attributes, v.claim_namespace AS pv_claim_namespace,
-                       v.claim_name AS pv_claim_name, v.storage_class AS pv_storage_class
+            f"""SELECT p.*, {_PV_JOIN_COLUMNS}
                 FROM k8s_pvcs p {_clusters_join('p')}
                 LEFT JOIN k8s_pvs v ON v.cluster_name = p.cluster_name AND v.name = p.volume_name
                 {clause}
@@ -873,11 +952,7 @@ class K8sRepository:
         access = self.namespace_access(dms_user) if dms_user is not None else {}
         out = []
         for r in rows:
-            pv = None
-            if r.get("pv_name"):
-                pv = {"name": r["pv_name"], "volume_handle": r["pv_volume_handle"],
-                      "volume_attributes": r["pv_volume_attributes"], "claim_namespace": r["pv_claim_namespace"],
-                      "claim_name": r["pv_claim_name"], "storage_class": r["pv_storage_class"]}
+            pv = _joined_pv(r)
             sc = r.get("storage_class") or (pv or {}).get("storage_class")
             sc_map = maps.get(sc) if sc else None
             storage = storages.get(sc_map["storage_name"]) if sc_map else None

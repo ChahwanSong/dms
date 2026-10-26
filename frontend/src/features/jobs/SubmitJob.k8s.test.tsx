@@ -7,7 +7,7 @@ import { http, HttpResponse } from "msw";
 import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from "vitest";
 import { SubmitJob } from "./SubmitJob";
 import { SYNC_INT_FIELDS } from "./optionRules";
-import { PRIV_ROOT_SYNC_PV, PRIV_ROOT_SYNC_PV_ROOT } from "./optionRules";
+import { PRIV_ROOT_SYNC_DIRECT_BOTH, PRIV_ROOT_SYNC_PV, PRIV_ROOT_SYNC_PV_ROOT } from "./optionRules";
 import type { Me, UserStorage } from "../../lib/types";
 import type { ClusterFreshness, UserVolumesResponse, VolumeRow, VolumesResponse } from "../k8s/types";
 
@@ -552,4 +552,47 @@ test("운영자: 목적지가 직접 경로면 결과 소유 선택이 없다(�
   await userEvent.click(within(mode).getByRole("button", { name: "직접 경로" }));
   expect(screen.queryByRole("group", { name: "결과 소유" })).toBeNull();
   expect(summaryValue("목적지 소유")).toHaveTextContent("소스의 소유자·그룹 그대로(root 실행)");
+});
+
+// 2026-10-26 사용자 결정 (4): 직접 경로 목적지의 스토리지가 PV 를 담는 종류면 그 스토리지 기본 소유자(서버 k8s_access.direct_dest_owner
+// -- both 는 경로가 그 스토리지의 PV 루트 아래일 때만, 화면은 PV 루트를 모른다). 기본 소유는 관리자 응답의 default_owner.
+test("운영자: 직접 경로 목적지가 PV·파일시스템 겸용 스토리지면 「PV 루트 아래면 스토리지 기본 소유자」, 파일시스템이면 소스 그대로", async () => {
+  server.use(http.get("/api/user/storages", () => HttpResponse.json(STORAGES.map((s) => ({
+    ...s, default_owner: s.storage_name === "k8s-pv-gpfs" ? "2500:2600" : "0:0" })))));
+  renderAs(meExempt);
+  await exemptPick("소스", "archive");
+  const mode = screen.getByRole("group", { name: "목적지 지정 방식" });
+  await userEvent.click(within(mode).getByRole("button", { name: "직접 경로" }));
+  const storage = screen.getByLabelText("목적지 스토리지");
+  await within(storage).findByRole("option", { name: "k8s-pv-gpfs" });
+  await userEvent.selectOptions(storage, "k8s-pv-gpfs");
+  await userEvent.type(screen.getByLabelText("목적지 경로"), "backup/x");
+  expect(summaryValue("목적지 소유"))
+    .toHaveTextContent("PV 루트 아래면 목적지 스토리지 기본 소유자 2500:2600, 아니면 소스 그대로");
+  expect(summaryValue("실행 권한")).toHaveTextContent(PRIV_ROOT_SYNC_DIRECT_BOTH);
+  expect(ownerCard()).toHaveTextContent("어느 쪽인지는 제출 때 서버가 정해 요청 상세의 「목적지 소유」에 보입니다");
+  expect(ownerCard()).toHaveTextContent("결과 소유(PV 루트 아래면 목적지 스토리지 기본 소유자, 아니면 소스 소유)로 다시 맞춰집니다");
+  // 파일시스템 스토리지로 바꾸면 종전(소스 소유 보존)
+  await userEvent.selectOptions(storage, "cephfs-dms");
+  expect(summaryValue("목적지 소유")).toHaveTextContent("소스의 소유자·그룹 그대로(root 실행)");
+  expect(summaryValue("실행 권한")).not.toHaveTextContent("PV 루트 아래면");
+  // 바디는 그대로다(판정은 서버가 제출 때 한다)
+  expect(await submitAndBody()).toEqual({
+    operation: "sync", source_pv: { cluster: "dmsk8s", namespace: "team-c", pvc: "archive" }, source: "",
+    destination_storage: "cephfs-dms", destination: "backup/x", options: SYNC_DEFAULTS, run_as_root: true,
+  });
+});
+
+test("운영자: 겸용 스토리지의 기본 소유 값이 올바르지 않아도 직접 경로는 잠그지 않는다(PV 루트 밖이면 서버가 받는다), 문구는 값 없이", async () => {
+  server.use(http.get("/api/user/storages", () => HttpResponse.json(STORAGES.map((s) => ({ ...s, default_owner: null })))));
+  renderAs(meExempt);
+  await exemptPick("소스", "archive");
+  await userEvent.click(within(screen.getByRole("group", { name: "목적지 지정 방식" })).getByRole("button", { name: "직접 경로" }));
+  const storage = screen.getByLabelText("목적지 스토리지");
+  await within(storage).findByRole("option", { name: "k8s-pv-gpfs" });
+  await userEvent.selectOptions(storage, "k8s-pv-gpfs");
+  await userEvent.type(screen.getByLabelText("목적지 경로"), "backup/x");
+  expect(summaryValue("목적지 소유"))
+    .toHaveTextContent("PV 루트 아래면 목적지 스토리지 기본 소유자(uid:gid), 아니면 소스 그대로");
+  await waitFor(() => expect(submitButton()).toBeEnabled());
 });

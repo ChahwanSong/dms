@@ -660,11 +660,11 @@ test("배치 칸은 상태와 무관하게 두 줄 이하 -- 막히면 사유 �
 
 test("고를 수 없는 배치는 배치 칸 둘째 줄에 사유가 **보이고** 체크박스가 그 줄을 가리킨다(aria-describedby)", async () => {
   // 2026-10-11 검증 지적: 사유가 비활성 체크박스의 title(마우스 hover)뿐이라 키보드(disabled 는 Tab 이 건너뛴다)·터치
-  // 사용자는 Succeeded 행의 체크박스가 왜 잠겼는지 알 수 없었다(1000개 초과·다른 쪽에 Pending 자식이 남은 Cancelled).
+  // 사용자는 Succeeded 행의 체크박스가 왜 잠겼는지 알 수 없었다(상한 초과·다른 쪽에 Pending 자식이 남은 Cancelled).
   wrapRows([
     child(A, BX, { batch_status: "Running" }),
     child(B, BY, { batch_status: "Cancelled", batch_live_request_count: 1 }),
-    child(C, BZ, { batch_request_count: 1001, batch_request_count_capped: true, batch_live_request_count: null,
+    child(C, BZ, { batch_request_count: 2001, batch_request_count_capped: true, batch_live_request_count: null,
                    batch_succeeded_scan_count: null }),
     child(D, "e".repeat(32)),
     // 자식은 1개뿐인데 항목이 상한(10000)을 넘는 배치(큰 CSV 를 일찍 취소) -- 서버만 거부하던 것을 미리 잠근다(2026-10-11).
@@ -677,7 +677,7 @@ test("고를 수 없는 배치는 배치 칸 둘째 줄에 사유가 **보이고
   // live 는 「미완료 작업 있음」 -- 「작업 진행 중」은 같은 줄의 초록 Succeeded 와 모순돼 「이 작업이 진행 중」으로 읽혔다
   // (2026-10-11 검증 지적). 상한 초과는 자식·항목 어느 쪽이든 「삭제 상한 초과」(긴 말은 title).
   expect([A, B, C, E].map(label)).toEqual(["배치 진행 중", "미완료 작업 있음", "삭제 상한 초과", "삭제 상한 초과"]);
-  expect(why(E).title).toBe("작업이 1000개 또는 항목이 10000개를 넘는 배치는 아직 삭제할 수 없습니다");
+  expect(why(E).title).toBe("작업이 2000개 또는 항목이 10000개를 넘는 배치는 아직 삭제할 수 없습니다");
   for (const id of [A, B, C, E]) {
     expect(box(id)).toBeDisabled();
     expect(rowOf(id)).toContainElement(why(id));
@@ -689,10 +689,10 @@ test("고를 수 없는 배치는 배치 칸 둘째 줄에 사유가 **보이고
     expect(why(id).querySelector(".sr-only")).toHaveTextContent(why(id).title);
   }
   expect(box(C)).toHaveAccessibleDescription(
-    "삭제 상한 초과 — 작업이 1000개 또는 항목이 10000개를 넘는 배치는 아직 삭제할 수 없습니다");
+    "삭제 상한 초과 — 작업이 2000개 또는 항목이 10000개를 넘는 배치는 아직 삭제할 수 없습니다");
   expect(box(A)).toHaveAccessibleDescription(
     "배치 진행 중 — 진행 중인 배치입니다 — 배치가 끝난 뒤에(필요하면 배치 상세에서 먼저 취소) 배치 단위로 삭제하세요");
-  expect(why(C).title).toBe("작업이 1000개 또는 항목이 10000개를 넘는 배치는 아직 삭제할 수 없습니다");
+  expect(why(C).title).toBe("작업이 2000개 또는 항목이 10000개를 넘는 배치는 아직 삭제할 수 없습니다");
   // 고를 수 있는 배치엔 사유 줄이 없다.
   expect(document.getElementById(`batch-why-${D}`)).toBeNull();
   expect(anyBox(D)).toBeEnabled();
@@ -893,11 +893,11 @@ test("배치 묶음의 성공 scan 수(서버 수)가 툴바 문구에 더해진
   expect(status()).toHaveTextContent("1개 + 배치 1개(작업 4개) 선택됨 · 성공 scan 5개");
 });
 
-test("고를 수 없는 배치 묶음: 진행 중·끝나지 않은 작업·1000개 초과·요약 없음 -- disabled + 상태별 사유 title", async () => {
+test("고를 수 없는 배치 묶음: 진행 중·끝나지 않은 작업·2000개 초과·요약 없음 -- disabled + 상태별 사유 title", async () => {
   wrapRows([
     child(A, BX, { batch_status: "Running" }),
     child(B, BY, { batch_status: "Cancelled", batch_live_request_count: 1 }),     // 취소 경합으로 남은 Pending 자식
-    child(C, BZ, { batch_request_count: 1001 }),
+    child(C, BZ, { batch_request_count: 2001 }),                                 // 상한 2000(2026-10-26) 초과
     row(D, { batch_id: "e".repeat(32) }),                                         // 요약 없음(구형 응답)
     child(E, "f".repeat(32), { batch_status: "PreviewReady" }),
   ]);
@@ -913,7 +913,7 @@ test("고를 수 없는 배치 묶음: 진행 중·끝나지 않은 작업·1000
   expect(document.getElementById(`batch-why-${E}`)!.childNodes[0].textContent).toBe("배치 확인 대기");
   expect(document.getElementById(`batch-why-${A}`)!.childNodes[0].textContent).toBe("배치 진행 중");
   expect(box(B).title).toBe("끝나지 않은 작업이 남은 배치입니다 — 모두 끝난 뒤 배치 단위로 삭제하세요");
-  expect(box(C).title).toBe("작업이 1000개 또는 항목이 10000개를 넘는 배치는 아직 삭제할 수 없습니다");
+  expect(box(C).title).toBe("작업이 2000개 또는 항목이 10000개를 넘는 배치는 아직 삭제할 수 없습니다");
   expect(box(D).title).toBe("배치 정보를 확인할 수 없어 선택할 수 없습니다");
 });
 

@@ -274,4 +274,57 @@ describe("태그 목록 순서·최근 빌드·새로고침", () => {
     expect(optionLabel("d1", null, null as unknown as Record<string, string>)).toBe("d1");
     expect(optionLabel("0", null, ["x"] as unknown as Record<string, string>)).toBe("0");
   });
+  // securityContext 드리프트(2026-10-26, BACKLOG 「securityContext 드리프트는 배지가 못 본다」).
+  const withDrift = (api: unknown, controller: unknown) => ({
+    ...TARGETS,
+    targets: TARGETS.targets.map((t) =>
+      t.component === "dms-api" ? { ...t, security_drift: api }
+        : t.component === "dms-controller" ? { ...t, security_drift: controller }
+        : { ...t, security_drift: null }),
+  });
+
+  it("보안 설정 드리프트: 다른 필드를 라이브·매니페스트 값과 함께 보인다", async () => {
+    server.use(http.get("/api/admin/releases/targets", () => HttpResponse.json(withDrift([
+      { field: "runAsUser", live: 65532, manifest: 0 },
+      { field: "runAsNonRoot", live: true, manifest: null },
+      { field: "capabilities.drop", live: null, manifest: ["ALL"] },
+    ], []))));
+    wrap(<ReleasesPage />);
+    await screen.findByLabelText("dms-api");
+    // 이미지 드리프트와 다른 배지 -- 행 하나(dms-api)에만. dms-controller 는 [](같음)이라 없다.
+    expect(screen.getAllByText("보안 설정 드리프트")).toHaveLength(1);
+    expect(screen.getByText("runAsUser: 라이브 65532 · 매니페스트 0")).toBeInTheDocument();
+    expect(screen.getByText("runAsNonRoot: 라이브 true · 매니페스트 없음")).toBeInTheDocument();
+    expect(screen.getByText("capabilities.drop: 라이브 없음 · 매니페스트 ALL")).toBeInTheDocument();
+    expect(screen.getByText(/포탈 롤아웃은 이미지만 바꿉니다/)).toBeInTheDocument();
+    // 배지는 dms-api 행 안에 있다
+    const row = screen.getByLabelText("dms-api").closest("tr")!;
+    expect(row.textContent).toContain("보안 설정 드리프트");
+  });
+
+  it("보안 설정 드리프트: 모름(null)·같음([])·구 서버(필드 없음)는 아무것도 띄우지 않는다", async () => {
+    server.use(http.get("/api/admin/releases/targets", () => HttpResponse.json(withDrift(null, []))));
+    wrap(<ReleasesPage />);
+    await screen.findByLabelText("dms-api");
+    expect(screen.queryByText("보안 설정 드리프트")).not.toBeInTheDocument();
+    expect(screen.queryByText(/포탈 롤아웃은 이미지만 바꿉니다/)).not.toBeInTheDocument();
+  });
+
+  it("보안 설정 드리프트: 어긋난 페이로드에도 화면이 죽지 않는다", async () => {
+    server.use(http.get("/api/admin/releases/targets", () => HttpResponse.json(withDrift(
+      [null, "x", { live: 1 }, { field: "runAsGroup", live: null, manifest: 0 }], { field: "x" }))));
+    wrap(<ReleasesPage />);
+    await screen.findByLabelText("dms-api");
+    expect(screen.getAllByText("보안 설정 드리프트")).toHaveLength(1);   // 모양이 맞는 항목만 남는다
+    expect(screen.getByText("runAsGroup: 라이브 없음 · 매니페스트 0")).toBeInTheDocument();
+  });
+
+  it("scValue: null·빈 목록은 「없음」, 목록은 쉼표로 잇는다", async () => {
+    const { scValue } = await import("./ReleasesPage");
+    expect(scValue(null)).toBe("없음");
+    expect(scValue([])).toBe("없음");
+    expect(scValue(["ALL", "NET_RAW"])).toBe("ALL,NET_RAW");
+    expect(scValue(false)).toBe("false");
+    expect(scValue(0)).toBe("0");                 // 0 은 정상값(root) -- 「없음」으로 뭉개지 않는다
+  });
 });

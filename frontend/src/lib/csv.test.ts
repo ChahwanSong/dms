@@ -1,107 +1,58 @@
-// 슬라이스 32: 스토리지가 배치 레벨로 올라가 CSV 는 경로만 나른다.
-// scan = 행당 1열(target), sync = 행당 2열(source,destination).
-import { parseItemsCsv, serializeItemsCsv } from "./csv";
+// 배치 항목 CSV 의 얇은 클라이언트(2026-10-26 — 해석은 서버 batch_csv, 여기는 오류 문구·직렬화·주소만).
 import { test, expect } from "vitest";
+import {
+  batchCsvTemplateUrl, batchItemsCsvUrl, csvErrorLines, csvErrorText, itemsToRows, serializeItemsCsv,
+} from "./csv";
+import { reasonText } from "./api";
 
-test("scan: 헤더 없는 경로 목록", () => {
-  const { rows, errors } = parseItemsCsv("scan", "a/b\nc");
-  expect(errors).toEqual([]);
-  expect(rows).toEqual([{ target: "a/b" }, { target: "c" }]);
+const err = (over: Partial<Parameters<typeof csvErrorText>[0]> = {}) => ({
+  line: 3, row: 2, reason_code: "unsafe_path", message: "unsafe_path: '/x'", related_line: null, ...over });
+
+test("오류 문구: 물리 줄 번호 + 사유 코드 문구(reasonText) — 서버 message(기술 상세)는 쓰지 않는다", () => {
+  expect(csvErrorText(err())).toBe(`3번째 줄: ${reasonText("unsafe_path")}`);
 });
 
-test("scan: 헤더(target) 있는 경우 스킵", () => {
-  const { rows, errors } = parseItemsCsv("scan", "target\na/b");
-  expect(errors).toEqual([]);
-  expect(rows).toEqual([{ target: "a/b" }]);
+test("rm 겹침은 상대 줄까지", () => {
+  expect(csvErrorText(err({ reason_code: "batch_rm_targets_overlap", related_line: 2 })))
+    .toBe(`3번째 줄: ${reasonText("batch_rm_targets_overlap")} (2번째 줄과 겹침)`);
 });
 
-test("scan: path 헤더 토큰도 인정", () => {
-  const { rows } = parseItemsCsv("scan", "path\na");
-  expect(rows).toEqual([{ target: "a" }]);
+test("파일 단위 사유(줄 없음)는 접두 없이", () => {
+  expect(csvErrorText(err({ line: null, row: null, reason_code: "empty_batch" }))).toBe(reasonText("empty_batch"));
 });
 
-test("sync: 2열 파싱(헤더 유/무)", () => {
-  expect(parseItemsCsv("sync", "a,b\nc,d").rows).toEqual([
-    { source: "a", destination: "b" },
-    { source: "c", destination: "d" },
-  ]);
-  expect(parseItemsCsv("sync", "source,destination\na,b").rows).toEqual([
-    { source: "a", destination: "b" },
-  ]);
+test("서버가 상한까지만 실은 오류는 「외 N개」로 말한다(조용한 절단 금지)", () => {
+  expect(csvErrorLines({ errors: [err()], error_count: 1 })).toHaveLength(1);
+  const lines = csvErrorLines({ errors: [err(), err({ line: 4 })], error_count: 250 });
+  expect(lines).toHaveLength(3);
+  expect(lines[2]).toBe("외 248개 오류");
 });
 
-test("헤더 토큰은 대소문자 무시", () => {
-  expect(parseItemsCsv("scan", "Target\na").rows).toEqual([{ target: "a" }]);
-  expect(parseItemsCsv("sync", "SOURCE,Destination\na,b").rows).toEqual([
-    { source: "a", destination: "b" },
-  ]);
+test("새 CSV 사유 코드는 전부 문구가 있다(원시 코드가 보이지 않는다)", () => {
+  for (const code of ["batch_csv_bad_row", "batch_csv_malformed", "batch_csv_too_large", "batch_csv_too_many_rows"])
+    expect(reasonText(code)).not.toBe(code);
 });
 
-test("헤더가 아닌 첫 줄은 데이터로 취급", () => {
-  // "target" 이 아닌 일반 경로면 스킵하지 않는다
-  const { rows } = parseItemsCsv("scan", "data/target1\nb");
-  expect(rows).toEqual([{ target: "data/target1" }, { target: "b" }]);
+test("항목 → 표의 경로 짝", () => {
+  expect(itemsToRows("scan", [{ storage: "s1", target: "a" }])).toEqual([{ target: "a" }]);
+  expect(itemsToRows("rm", [{ target: "x" }])).toEqual([{ target: "x" }]);
+  expect(itemsToRows("sync", [{ source_storage: "s1", source: "a", destination_storage: "s2", destination: "b" }]))
+    .toEqual([{ source: "a", destination: "b" }]);
 });
 
-test("빈 줄 무시·셀 trim", () => {
-  const { rows, errors } = parseItemsCsv("sync", "\n a , b \n\nc,d\n");
-  expect(errors).toEqual([]);
-  expect(rows).toEqual([
-    { source: "a", destination: "b" },
-    { source: "c", destination: "d" },
-  ]);
+test("직렬화: 헤더 포함, 평범한 경로는 그대로(예전 모양)", () => {
+  expect(serializeItemsCsv("scan", [{ target: "a/b" }, { target: "c" }])).toBe("target\na/b\nc");
+  expect(serializeItemsCsv("rm", [{ target: "old/a" }, { target: "old/b" }])).toBe("target\nold/a\nold/b");
+  expect(serializeItemsCsv("sync", [{ source: "a", destination: "b" }])).toBe("source,destination\na,b");
 });
 
-test("열 수 불일치는 행 번호와 함께 오류(조용한 드랍 금지)", () => {
-  const { rows, errors } = parseItemsCsv("sync", "a,b\nc\ne,f");
-  expect(rows).toEqual([
-    { source: "a", destination: "b" },
-    { source: "e", destination: "f" },
-  ]);
-  expect(errors.length).toBe(1);
-  expect(errors[0]).toMatch(/^2행:/);
+test("직렬화: 콤마·따옴표는 RFC 4180 따옴표, 수식 시작 문자는 ' 방어(서버 해석이 걷는다)", () => {
+  expect(serializeItemsCsv("scan", [{ target: "a,b" }, { target: 'q"t' }, { target: "=x" }]))
+    .toBe('target\n"a,b"\n"q""t"\n\'=x');
+  expect(serializeItemsCsv("sync", [{ source: "-a", destination: "b,c" }])).toBe("source,destination\n'-a,\"b,c\"");
 });
 
-test("빈 셀은 오류", () => {
-  const { errors } = parseItemsCsv("sync", "a,\n,b");
-  expect(errors.length).toBe(2);
-  expect(errors[0]).toMatch(/^1행:/);
-  expect(errors[1]).toMatch(/^2행:/);
-});
-
-test("빈 입력은 오류", () => {
-  const { rows, errors } = parseItemsCsv("scan", "  \n ");
-  expect(rows).toEqual([]);
-  expect(errors.length).toBeGreaterThan(0);
-});
-
-test("scan: 경로에 콤마가 든 행은 오류(1열 계약 — 침묵 분할 금지)", () => {
-  const { rows, errors } = parseItemsCsv("scan", "a,b");
-  expect(rows).toEqual([]);
-  expect(errors.length).toBe(1);
-  expect(errors[0]).toMatch(/^1행:/);
-});
-
-test("왕복: parse(serialize(rows)) == rows", () => {
-  const scanRows = [{ target: "a/b" }, { target: "c" }];
-  const scanText = serializeItemsCsv("scan", scanRows);
-  expect(scanText.split(/\r?\n/)[0]).toBe("target"); // 헤더 포함 내보내기
-  expect(parseItemsCsv("scan", scanText).rows).toEqual(scanRows);
-
-  const syncRows = [
-    { source: "a", destination: "b" },
-    { source: "c/d", destination: "e" },
-  ];
-  const syncText = serializeItemsCsv("sync", syncRows);
-  expect(syncText.split(/\r?\n/)[0]).toBe("source,destination");
-  expect(parseItemsCsv("sync", syncText).rows).toEqual(syncRows);
-});
-
-test("rm(2026-10-21): scan 과 같은 1열 계약 — target/path 헤더 스킵, 콤마 행은 오류, 직렬화 왕복", () => {
-  expect(parseItemsCsv("rm", "target\nold/a\nold/b")).toEqual({ rows: [{ target: "old/a" }, { target: "old/b" }], errors: [] });
-  expect(parseItemsCsv("rm", "path\nx").rows).toEqual([{ target: "x" }]);
-  expect(parseItemsCsv("rm", "a,b").errors).toEqual(["1행: 경로 1개(콤마 없이)여야 합니다"]);
-  const text = serializeItemsCsv("rm", [{ target: "old/a" }, { target: "old/b" }]);
-  expect(text).toBe("target\nold/a\nold/b");
-  expect(parseItemsCsv("rm", text).rows).toEqual([{ target: "old/a" }, { target: "old/b" }]);
+test("다운로드 주소", () => {
+  expect(batchCsvTemplateUrl("sync")).toBe("/api/admin/batches/csv-template?operation=sync");
+  expect(batchItemsCsvUrl("b1")).toBe("/api/admin/batches/b1/items.csv");
 });

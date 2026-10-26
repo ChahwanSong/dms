@@ -131,7 +131,7 @@ def test_storage_totals_null_is_not_zero():
     from dms.usage_metrics import StorageTotals
     empty = StorageTotals().result()
     for k in ("total_bytes", "total_files", "total_directories", "total_symlinks", "total_other", "total_entries",
-              "scan_errors", "broken_paths_total"):
+              "scan_errors", "invalid_name_entries", "broken_paths_total"):
         assert empty[k] == {"sum": None, "known": 0, "unknown": 0}, k   # 기록 없음 ≠ 0 B
     assert empty["hot_ratio"] == {"value": None, "hot_bytes": None, "total_bytes": None, "known": 0, "unknown": 0}
     assert empty["file_size_histogram"] == {"buckets": [], "known": 0, "unknown": 0}
@@ -236,3 +236,19 @@ def test_storage_totals_scan_age_range_is_of_the_summed_set():
     r = acc.result()
     assert nested == 1
     assert (r["oldest_scan_at"], r["newest_scan_at"]) == ("2026-08-16T00:00:00Z", "2026-10-02T00:00:00Z")
+
+
+def test_storage_totals_invalid_name_entries_is_its_own_counter():
+    # 2026-10-26(포크 ae781bd, 사용자 결정 「카운터만 둠」): 이름이 엄격 UTF-8 이 아닌 항목 수는 broken 과 따로 더한다. 구형
+    # 요약(키 없음)·수상한 값은 unknown -- 0 으로 접지 않는다. summary.total_bytes 는 합계의 실 사용량 원천이 아니다(호출자 값).
+    from dms.usage_metrics import StorageTotals
+    acc = StorageTotals()
+    acc.add({}, 100, _digest(files=1, broken=2, summary_extra={"invalid_name_entries": 5, "total_bytes": 999}))
+    acc.add({}, 0, _digest(files=0, broken=0, summary_extra={"invalid_name_entries": 0}))
+    acc.add({}, 7, _digest(files=1))                                                  # 구형 리포트
+    for bad in (-1, 1.5, True):
+        acc.add({}, 1, _digest(files=1, summary_extra={"invalid_name_entries": bad}))
+    r = acc.result()
+    assert r["invalid_name_entries"] == {"sum": 5, "known": 2, "unknown": 4}
+    assert r["broken_paths_total"] == {"sum": 2, "known": 2, "unknown": 4}
+    assert r["total_bytes"] == {"sum": 100 + 0 + 7 + 3, "known": 6, "unknown": 0}

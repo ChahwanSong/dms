@@ -247,9 +247,10 @@ def test_terminating_pods_block_files_and_surface_after_ten_minutes(env):
     assert row["outcomes"]["k8s_waiting_since"] == first["outcomes"]["k8s_waiting_since"]    # 스윕마다 새로 찍지 않는다
     assert (e.base / jid).is_dir()
     # 지연이 된 대기 행은 매 틱 k8s 를 두드리지 않는다 -- 재확인 간격 = 기다린 시간의 1/10(상한 300초, 2026-10-09)
+    # Clock 은 실시간 + 오프셋이라 틱과 이 줄 사이에 초가 넘어가면 1초씩 어긋난다(부하 중 플레이크, 2026-10-27) -- 2초 안이면 같다.
     waited = iso_epoch(e.clock()) - iso_epoch(first["outcomes"]["k8s_waiting_since"])
-    assert iso_epoch(row["next_attempt_at"]) - iso_epoch(e.clock()) == min(int(waited) // 10,
-                                                                           WAITING_BACKOFF_MAX_SECONDS)
+    gap = iso_epoch(row["next_attempt_at"]) - iso_epoch(e.clock())
+    assert abs(gap - min(int(waited) // 10, WAITING_BACKOFF_MAX_SECONDS)) <= 2
     calls = len(e.k8s.calls)
     _later(e)
     e.tick()
@@ -291,7 +292,7 @@ def test_a_row_that_queued_long_is_not_a_false_stall_on_its_first_sweep(env):
     row = _row(e, rid)
     assert row["stage"] == "k8s" and row["last_error"] is None              # 지연이 아니다 -- 정상 대기
     assert _events(e, "purge_failed") == []
-    assert iso_epoch(row["next_attempt_at"]) - iso_epoch(e.clock()) == INTERVAL
+    assert abs(iso_epoch(row["next_attempt_at"]) - iso_epoch(e.clock()) - INTERVAL) <= 2     # 초 경계(위와 같은 이유)
     e.k8s.release()
     _later(e)
     e.tick()

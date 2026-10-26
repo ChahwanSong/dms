@@ -6,7 +6,7 @@ import { Table } from "../../components/ui/Table";
 import { StatusPill } from "../../components/ui/StatusPill";
 import { WarnTooltip } from "../../components/ui/WarnTooltip";
 import { ApiError, reasonText } from "../../lib/api";
-import type { ArtifactBaseInfo, ArtifactBaseNodeCheck } from "../../lib/types";
+import type { ArtifactBaseInfo, ArtifactBaseNodeCheck, ArtifactRetention } from "../../lib/types";
 import { relTime } from "./ControlStatePage";
 import { kstStamp } from "../../lib/datetime";
 import { useArtifactBase, useArtifactBaseHistory, useSetArtifactBase,
@@ -67,6 +67,29 @@ function NodeRow({ n, now }: { n: ArtifactBaseNodeCheck; now: number }) {
   );
 }
 
+/** 결과 파일 자동 만료(2026-10-26, DMS_ARTIFACT_RETENTION_DAYS) 한 줄 -- 보존일과 만료 정리 현황. 정리는 요청 삭제와 같은
+    컨트롤러 정리 루프가 하므로 지연 사유도 같은 사유 코드다(reasonText). 0 = 꺼짐(이미 만료된 건수는 그대로 보인다). */
+function RetentionLine({ r }: { r: ArtifactRetention }) {
+  return (
+    <p className="text-sm mt-2 break-keep">
+      <span className="text-muted">결과 파일 보존: </span>
+      {r.days > 0 ? (
+        <>
+          <span className="font-medium">{`종단 후 ${r.days}일`}</span>
+          <span className="text-muted"> — 지나면 결과 파일(로그·요약·리포트)만 지웁니다. 작업 기록과 결과 수치는 남습니다</span>
+        </>
+      ) : (
+        <span className="font-medium">자동 만료 꺼짐</span>
+      )}
+      <span className="text-muted">{` · 만료됨 ${r.expired_jobs}건`}</span>
+      {r.pending > 0 && <span className="text-muted">{` · 정리 대기 ${r.pending}건`}</span>}
+      {r.stalled > 0 && (
+        <span className="text-attn">{` · 지연 ${r.stalled}건${r.last_error ? `(${reasonText(r.last_error)})` : ""}`}</span>
+      )}
+    </p>
+  );
+}
+
 export function ArtifactBasePage() {
   const q = useArtifactBase();
   const historyQ = useArtifactBaseHistory();
@@ -123,6 +146,7 @@ export function ArtifactBasePage() {
                 <span className="text-muted">참조하는 잡이 없어 잠금 없이 변경할 수 있습니다</span>
               )}
             </p>
+            {d.artifact_retention && <RetentionLine r={d.artifact_retention} />}
           </Card>
           <Card>
             <div className="flex items-center gap-2 mb-1">

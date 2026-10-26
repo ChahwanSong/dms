@@ -1174,3 +1174,51 @@ test("스토리지별 비교: 요약이 없으면 대상 칸은 합계의 수 --
   expect(within(rowOf("cephfs-dms")).getAllByRole("cell")[6]).toHaveTextContent(/^9$/);
   expect(toggle.closest("details")!).toHaveTextContent("최근 스캔된 창 안의 대상만 더한 부분 합");
 });
+
+// ---- 2026-10-26 dscan 포크 ae781bd: 실 사용량 정확값(summary.total_bytes)·잘못된 인코딩 이름(카운터만) ----
+
+test("펼친 상세: 최신 실 사용량·이력 표의 용량은 title 에 정확한 바이트, 잘못된 인코딩 이름은 1개 이상일 때만 한 줄", async () => {
+  setup({ targets: { "cephfs-dms": [
+            { ...TARGETS[0], latest: point({ total_bytes: 3072, invalid_name_entries: 15 }) },
+            { ...TARGETS[1], latest: point({ invalid_name_entries: 0 }) }] } });
+  await userEvent.click(await screen.findByRole("button", { name: "artifacts" }));
+  const region = await detailOf("artifacts");
+  const latest = (await within(region).findByText("최신 실 사용량", { selector: "dt" })).nextElementSibling;
+  expect(latest).toHaveTextContent("3.0 KiB");
+  expect(latest).toHaveAttribute("title", "3,072 B");
+  expect(within(region).getByText("최신 scan: 잘못된 인코딩 이름 15개")).toHaveClass("text-attn");
+  expect(within(region).getByRole("button", { name: "잘못된 인코딩 이름 설명" })).toBeInTheDocument();
+  const details = within(region).getByText("스캔 이력 3건").closest("details")!;
+  expect(within(details).getByText("3.0 KiB").closest("td")).toHaveAttribute("title", "3,072 B");
+  // 0 은 말하지 않는다(펼침마다 줄이 늘지 않게 -- 전수 값은 CSV)
+  await userEvent.click(screen.getByRole("button", { name: "team" }));
+  const team = await detailOf("team");
+  await within(team).findByText("최신 실 사용량", { selector: "dt" });
+  expect(within(team).queryByText(/잘못된 인코딩 이름/)).toBeNull();
+});
+
+test("펼친 상세: 잘못된 인코딩 이름을 모르면(구형 리포트·구형 서버) 아무 말도 하지 않는다 -- 0 으로 지어내지 않는다", async () => {
+  setup({ targets: { "cephfs-dms": [{ ...TARGETS[0], latest: point({ invalid_name_entries: null }) }, TARGETS[1]] } });
+  await userEvent.click(await screen.findByRole("button", { name: "artifacts" }));
+  const region = await detailOf("artifacts");
+  await within(region).findByText("최신 실 사용량", { selector: "dt" });
+  expect(within(region).queryByText(/잘못된 인코딩 이름/)).toBeNull();
+});
+
+test("이 스토리지 합계: 잘못된 인코딩 이름 합은 1개 이상일 때만 각주 한 조각(주의색) -- 모르는 대상이 있으면 「이상」", async () => {
+  setup({ totals: { "cephfs-dms": totalsOf("cephfs-dms", { invalid_name_entries: m(15, 3, 1) }) } });
+  const box = await totalsBox();
+  const part = await within(box).findByText("잘못된 인코딩 이름 15개 이상");
+  expect(part).toHaveClass("text-attn");
+  expect(box).not.toHaveTextContent("파손");                                       // 파손 경로에 더하지 않는다
+  cleanup();
+  setup({ totals: { "cephfs-dms": totalsOf("cephfs-dms", { invalid_name_entries: m(0, 4) }) } });
+  const zero = await totalsBox();
+  await within(zero).findByText("17.0 MiB");
+  expect(zero).not.toHaveTextContent("잘못된 인코딩 이름");
+  cleanup();
+  setup();                                                                           // 구형 서버(키 없음)
+  const old = await totalsBox();
+  await within(old).findByText("17.0 MiB");
+  expect(old).not.toHaveTextContent("잘못된 인코딩 이름");
+});

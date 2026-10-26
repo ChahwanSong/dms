@@ -5,7 +5,7 @@ import { Table } from "../../components/ui/Table";
 import { StatusPill } from "../../components/ui/StatusPill";
 import { ApiError, reasonText } from "../../lib/api";
 import { kstStamp, kstStampOrDash } from "../../lib/datetime";
-import type { Release, ReleaseTarget } from "../../lib/types";
+import type { Release, ReleaseTarget, SecurityDriftItem } from "../../lib/types";
 import { RELEASE_ACTIVE_STATES, releasePillVariant, useRefreshTargetsOnSettle,
          useReleases, useReleaseTargets, useSubmitReleases } from "./useReleases";
 
@@ -43,6 +43,37 @@ export function optionLabel(tag: string, curTag: string | null, built: Record<st
   const at = ok && Object.prototype.hasOwnProperty.call(built, tag) ? built[tag] : undefined;
   if (typeof at !== "string") return base;
   return Number.isNaN(Date.parse(at)) ? `${base} · 최근 빌드` : `${base} · 최근 빌드 ${kstStamp(at).slice(5, 16)}`;
+}
+
+/** securityContext 값 표기: null = 「없음」(선언 안 함), 목록 = 쉼표로 잇는다. */
+export function scValue(v: unknown): string {
+  if (v === null || v === undefined) return "없음";
+  if (Array.isArray(v)) return v.length > 0 ? v.join(",") : "없음";
+  return String(v);
+}
+
+/** 보안 설정(securityContext) 드리프트 배지 + 다른 필드(2026-10-26, BACKLOG 「securityContext 드리프트는 배지가 못 본다」).
+ *  이미지 드리프트와 다르다: 포탈 롤아웃은 이미지만 patch 하므로 롤아웃 직후에도 생기지 않는다 -- 뜨면 이 사이트가 40/41 을
+ *  apply 하지 않았거나 누가 손으로 바꿨다는 뜻이라(예: 옛 65532 로 굴러 3홉 쓰기 실패) 운영자 행동색(action)이다. 서버가
+ *  모른다(null)·같다([])고 하면 아무것도 그리지 않는다 -- 모름을 경보로 꾸미지 않는다. 항목 모양이 어긋나면 그 항목만 버린다. */
+export function SecurityDrift({ drift }: { drift: SecurityDriftItem[] | null | undefined }) {
+  const items = Array.isArray(drift)
+    ? drift.filter((d) => d !== null && typeof d === "object" && typeof d.field === "string") : [];
+  if (items.length === 0) return null;
+  return (
+    <div className="mt-1 space-y-1">
+      <StatusPill state="보안 설정 드리프트" variant="action" />
+      <ul className="text-xs text-attn">
+        {items.map((d) => (
+          // 한 항목 = 한 텍스트 노드(테스트·스크린리더가 한 줄로 읽는다).
+          <li key={d.field}>{`${d.field}: 라이브 ${scValue(d.live)} · 매니페스트 ${scValue(d.manifest)}`}</li>
+        ))}
+      </ul>
+      <p className="text-xs text-muted">
+        포탈 롤아웃은 이미지만 바꿉니다 — 매니페스트(40-api·41-controller)를 kubectl apply 해야 맞춰집니다
+      </p>
+    </div>
+  );
 }
 
 export function ReleasesPage() {
@@ -142,7 +173,10 @@ export function ReleasesPage() {
                   return (
                     <tr key={t.component} className="border-t border-black/5">
                       <td className="py-2">{t.component}</td>
-                      <td className="text-muted">{t.current_image ?? "—"}</td>
+                      <td className="text-muted">
+                        {t.current_image ?? "—"}
+                        <SecurityDrift drift={t.security_drift} />
+                      </td>
                       <td className="py-2">
                         {/* 순서를 고르는 UI는 없다 -- 서버가 강제하므로 고르게 하면
                             지켜지지 않는 약속을 화면이 하는 셈이 된다. */}

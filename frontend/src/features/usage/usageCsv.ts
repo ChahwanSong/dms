@@ -16,6 +16,7 @@ import { absolutePath } from "../../lib/storagePaths";
 import { ageDays, kstStamp, kstStampEpoch } from "../../lib/datetime";
 import type { CsvCell } from "../../lib/csvExport";
 import { bucketKey, hotRatio, humanBytes } from "./usageStats";
+import { scanCount, SUMMARY_KEYS_SHOWN_ELSEWHERE } from "../../lib/scanCounters";
 
 const AXES_FIRST = ["atime", "mtime", "ctime"];
 const SUMMARY_FIRST = ["total_entries", "total_files", "total_directories", "total_symlinks",
@@ -54,7 +55,10 @@ export function buildUsageCsv(rows: UsageExportRow[], storages: Storage[] | unde
     { columns: string[]; records: Record<string, CsvCell>[] } {
   const byName = new Map((storages ?? []).map((s) => [s.storage_name, s]));
   const latest = rows.map((r) => r.latest).filter((p): p is UsagePoint => p !== null && p !== undefined);
-  const summaryKeys = ordered([...new Set(latest.flatMap((p) => Object.keys(p.summary ?? {})))], SUMMARY_FIRST);
+  // summary.total_bytes·invalid_name_entries(2026-10-26 dscan 포크 ae781bd)는 고정 열(total_bytes -- 서버가 summary 값을 우선한
+  // 실 사용량, invalid_name_entries)이 싣는다 -- 요약 열로 한 번 더 내면 summary_total_bytes 같은 같은 값의 열이 생긴다.
+  const summaryKeys = ordered([...new Set(latest.flatMap((p) => Object.keys(p.summary ?? {})))]
+    .filter((k) => !SUMMARY_KEYS_SHOWN_ELSEWHERE.includes(k)), SUMMARY_FIRST);
   const axes = ordered([...new Set(latest.flatMap((p) => Object.keys(p.time_histograms ?? {})))], AXES_FIRST);
   const axisKeys = new Map(axes.map((a) => [a, unionKeys(latest.map((p) => p.time_histograms?.[a]))]));
   const sizeKeys = unionKeys(latest.map((p) => p.file_size_histogram));
@@ -69,7 +73,8 @@ export function buildUsageCsv(rows: UsageExportRow[], storages: Storage[] | unde
     "previous_scan_at_kst", "previous_total_bytes", "delta_bytes_vs_previous", "delta_pct_vs_previous",
     ...AXES_FIRST.map((a) => `hot_ratio_${a}_180d_pct`),
   ];
-  const broken = ["broken_paths_total", "broken_paths_limit"];
+  // invalid_name_entries = 이름이 엄격 UTF-8 이 아닌 항목 수(카운터만 -- 파손 경로에 더하지 않는다). 빈 칸 = 모름(구형 리포트).
+  const broken = ["broken_paths_total", "broken_paths_limit", "invalid_name_entries"];
   const histCols = axes.flatMap((a) => axisKeys.get(a)!.map((k) => `${a}_bytes_${k}`));
   const sizeCols = sizeKeys.flatMap((k) => (sizeHasBytes
     ? [`size_count_${k}`, `size_bytes_${k}`] : [`size_count_${k}`]));
@@ -104,6 +109,7 @@ export function buildUsageCsv(rows: UsageExportRow[], storages: Storage[] | unde
       delta_pct_vs_previous: delta !== null && prevTotal !== null && prevTotal > 0
         ? Math.round((delta / prevTotal) * 1000) / 10 : null,
       broken_paths_total: p?.broken_paths_total ?? null, broken_paths_limit: p?.broken_paths_limit ?? null,
+      invalid_name_entries: scanCount(p?.invalid_name_entries),
     };
     for (const a of AXES_FIRST) rec[`hot_ratio_${a}_180d_pct`] = pct1(hotRatio(p?.time_histograms?.[a]));
     summaryKeys.forEach((k, i) => { rec[summaryCols[i]] = p?.summary?.[k] ?? null; });

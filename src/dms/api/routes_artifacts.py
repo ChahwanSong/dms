@@ -33,10 +33,32 @@ def _owner_uid(job) -> int:
     return uid
 
 
+def _expired_at(job) -> "str | None":
+    """결과 파일 자동 만료(2026-10-26, artifact_expiry) 표시. 값이 있으면 파일은 정리 루프가 지웠거나 지우는 중이다 --
+    열지 않는다(떼어냄 도중의 반쯤 남은 트리를 보이지 않는다). 소유 확인(_owned_job) **뒤에만** 본다: 남의 잡에 410 을
+    주면 존재 오라클이 된다."""
+    value = job.get("artifacts_expired_at")
+    return value if isinstance(value, str) and value else None
+
+
+def _reject_expired(job) -> None:
+    if _expired_at(job) is not None:
+        # 410 Gone -- 404(없음·봉쇄 실패와 같은 몸통)와 다른 사실이다: 있었는데 보존 기간이 지나 지웠다.
+        raise HTTPException(status_code=410, detail="artifact_expired")
+
+
 @router.get("/api/user/jobs/{job_id}/artifacts")
 def list_job_artifacts(job_id: str, request: Request,
                        identity: Identity = Depends(require_user)):
     job = _owned_job(request, job_id, identity)
+    expired = _expired_at(job)
+    if expired is not None:
+        # 목록은 410 이 아니라 빈 목록 + 만료 표시다 -- 상세 화면은 이 목록 하나로 출력 칩을 그리므로, 오류로 주면
+        # 「출력 파일 목록을 불러오지 못했습니다」가 뜬다. retention_days 는 **지금** 설정값(0 = 끔이면 None -- 만료 당시
+        # 값은 따로 남기지 않는다).
+        days = request.app.state.settings.artifact_retention_days
+        return {"entries": [], "truncated": False, "expired_at": expired,
+                "retention_days": days if isinstance(days, int) and days > 0 else None}
     try:
         # {"entries": [...], "truncated": bool} — 사용자가 phase 디렉터리 소유자라
         # 항목 수를 묶어야 한다(MAX_ENTRIES). 잘렸는지는 호출자가 알 수 있어야 한다.
@@ -50,6 +72,7 @@ def get_job_artifact(job_id: str, phase: str, name: str, request: Request,
                      tail: int | None = Query(default=None, ge=1),
                      identity: Identity = Depends(require_user)):
     job = _owned_job(request, job_id, identity)
+    _reject_expired(job)
     try:
         return read_artifact(_base(request), job_id, phase, name, tail=tail,
                              owner_uid=_owner_uid(job))
@@ -66,6 +89,7 @@ def get_job_artifact(job_id: str, phase: str, name: str, request: Request,
 def download_job_artifact(job_id: str, phase: str, name: str, request: Request,
                           identity: Identity = Depends(require_user)):
     job = _owned_job(request, job_id, identity)
+    _reject_expired(job)
     try:
         # 봉쇄 사슬은 뷰(read_artifact)와 같은 함수 하나다 — 검사를 통과한 fd 를
         # 그대로 스트림해야 TOCTOU 가 없다(경로 문자열을 두 번 해석하지 않는다).

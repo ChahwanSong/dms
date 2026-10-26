@@ -626,6 +626,10 @@ def test_migrate_creates_exactly_the_expected_indexes(tmp_path):
         "idx_data_jobs_request", "idx_plans_request", "idx_batch_items_request",
         # 2026-10-16 pod-gc 미완료 잡 부분 인덱스(pods_gc_at IS NULL).
         "idx_data_jobs_gc",
+        # 2026-10-26 빌드 pod-gc 미완료 빌드 부분 인덱스(builds.pods_gc_at IS NULL).
+        "idx_builds_gc",
+        # 2026-10-26 결과 파일 자동 만료 미만료 잡 부분 인덱스(artifacts_expired_at IS NULL).
+        "idx_data_jobs_expiry",
         # 2026-10-20 사용량 분석 스토리지별 조회(storage_name, state, operation, target, updated_at).
         "idx_data_jobs_scan_target",
         # 2026-10-25 k8s 인벤토리: 동기화 이력(클러스터·상태·노드별)·PVC 의 볼륨 역조회·사용자별 바인딩.
@@ -756,7 +760,7 @@ def test_every_post_v1_column_rides_both_migration_paths(tmp_path):
     db = Database.connect(f"sqlite:///{tmp_path}/t.db")
     migrate(db)
     pairs = _ensure_pairs()
-    assert len(pairs) == 48      # 추출 자기 검증 -- 0 매치면 등식이 공허해진다(프록시 3 + 호스트 네트워크 1 + CA 1 + storages.user_enabled 1 + portal_subtitle 1 + batches.preview_round 1 + batches.auto_confirm_by 1 + accounts.root_granted 1 + data_jobs.pods_gc_at 1 + storages.kind 1 + requests.target_label 1 + storages.default_uid·default_gid 2)
+    assert len(pairs) == 51      # 추출 자기 검증 -- 0 매치면 등식이 공허해진다(프록시 3 + 호스트 네트워크 1 + CA 1 + storages.user_enabled 1 + portal_subtitle 1 + batches.preview_round 1 + batches.auto_confirm_by 1 + accounts.root_granted 1 + data_jobs.pods_gc_at 1 + storages.kind 1 + requests.target_label 1 + storages.default_uid·default_gid 2 + builds.pods_gc_at 1 + data_jobs.artifacts_expired_at·request_purges.kind 2)
     for table, v1 in _V1_COLUMNS.items():
         cols = {r["name"] for r in db.query(f"PRAGMA table_info({table})")}
         ensured = {c for t, c, _ in pairs if t == table}
@@ -773,7 +777,7 @@ def test_ensure_columns_types_match_create_declarations(tmp_path):
     pairs = _ensure_pairs()
     # 추출 자기 검증을 이 테스트에도 둔다 -- 위 등식 테스트가 지워지거나 홀로
     # 실행될 때 정규식이 0 매치면 아래 루프가 공허하게 통과하기 때문이다.
-    assert len(pairs) == 48
+    assert len(pairs) == 51
     for table, column, coltype in pairs:
         assert _declared_type(db, table, column) == coltype, (table, column)
 
@@ -825,6 +829,42 @@ def test_migrate_adds_preview_summary_to_existing_data_jobs(db):
     migrate(db)
     assert _column_exists(db, "data_jobs", "preview_summary")
     assert _declared_type(db, "data_jobs", "preview_summary") == "TEXT"
+
+
+def test_migrate_adds_artifact_expiry_columns_to_existing_tables(db):
+    # 2026-10-26 결과 파일 자동 만료: data_jobs.artifacts_expired_at·request_purges.kind -- 기배포 DB 는 CREATE 를 다시 안
+    # 타므로 _ensure_columns 가 보태야 한다(슬라이스 14 의 실 500 교훈). 기존 행은 NULL(= 만료 전 / 요청 삭제 행)로 남고,
+    # 미만료 부분 인덱스는 컬럼 보강 뒤에 생긴다.
+    db.execute("DROP INDEX IF EXISTS idx_data_jobs_expiry")
+    db.execute("ALTER TABLE data_jobs DROP COLUMN artifacts_expired_at")
+    db.execute("DROP TABLE request_purges")
+    db.execute("""CREATE TABLE request_purges (request_id TEXT PRIMARY KEY, jobs TEXT NOT NULL, artifact_base TEXT,
+        stage TEXT NOT NULL, outcomes TEXT, attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT,
+        next_attempt_at TEXT NOT NULL, requested_by TEXT NOT NULL, requested_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL)""")
+    db.execute("""INSERT INTO request_purges (request_id, jobs, artifact_base, stage, attempts, next_attempt_at,
+        requested_by, requested_at, updated_at) VALUES ('r1', '[]', '/b', 'k8s', 0, 't', 'op', 't', 't')""")
+    from dms.migrations import _column_exists, migrate
+    assert not _column_exists(db, "data_jobs", "artifacts_expired_at")
+    migrate(db)
+    assert _column_exists(db, "data_jobs", "artifacts_expired_at")
+    assert _column_exists(db, "request_purges", "kind")
+    assert _declared_type(db, "data_jobs", "artifacts_expired_at") == "TEXT"
+    assert _declared_type(db, "request_purges", "kind") == "TEXT"
+    assert db.query_one("SELECT kind FROM request_purges WHERE request_id = 'r1'")["kind"] is None
+    assert db.query_one("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_data_jobs_expiry'")
+
+
+def test_artifact_expiry_columns_are_declared_in_the_create_table_blocks():
+    import inspect
+    import re
+    from dms import migrations
+    src = inspect.getsource(migrations._apply_migrations)
+    for table, line in (("data_jobs", r"^\s*artifacts_expired_at\s+TEXT\s*,\s*$"),
+                        ("request_purges", r"^\s*kind\s+TEXT\)\s*\"\"\",?\s*$")):
+        block = re.search(rf'CREATE TABLE IF NOT EXISTS {table} .*?"""', src, re.S)
+        assert block is not None, table
+        assert re.search(line, re.sub(r"--[^\n]*", "", block.group(0)), re.M), table
 
 
 def test_preview_summary_is_declared_in_the_create_table_block():

@@ -10,8 +10,9 @@ import { isBatchTerminal } from "../batches/useBatches";
 /** 서버 MAX_DELETE_BATCHES 의 거울(routes_request_purge) -- 넘으면 툴바가 잠근다(진짜 차단은 서버 422). */
 export const MAX_DELETE_BATCHES = 10;
 /** 서버 MAX_BATCH_DELETE_CHILDREN 의 거울(request_purges) -- 넘는 배치는 선택 불가(진짜 차단은 서버
- *  batch_delete_too_large). 목록 요약도 이 수 + 1 에서 세기를 멈춘다(batch_request_count_capped). */
-export const MAX_BATCH_CHILDREN = 1000;
+ *  batch_delete_too_large). 목록 요약도 이 수 + 1 에서 세기를 멈춘다(batch_request_count_capped). 2026-10-26 사용자 결정으로
+ *  1000 → 2000(tests/test_batch_delete_limits_mirror.py 가 서버 상수·api.ts 문구와 대조한다). */
+export const MAX_BATCH_CHILDREN = 2000;
 /** 서버 MAX_BATCH_DELETE_ITEMS 의 거울(request_purges) -- 항목이 이보다 많은 배치도 선택 불가(자식은 적고 항목만 많은
  *  배치: 큰 CSV 를 일찍 취소). 목록 요약의 batch_item_count 로 판정한다(2026-10-11 검증 지적 -- 예전엔 선택 가능으로
  *  보였다가 서버만 batch_delete_too_large 를 냈다). */

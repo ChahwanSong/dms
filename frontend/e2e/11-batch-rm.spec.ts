@@ -61,16 +61,20 @@ test.describe("E12 — rm 배치", () => {
     await st.selectOption(STORAGE_NAME);
     await expect(page.getByLabel("재귀 삭제(필수)")).toBeChecked();
     const create = page.getByRole("button", { name: "배치 생성" });
-    // 한 배치 안 겹침은 제출 전에 행끼리 말하고 잠근다(서버 422 batch_rm_targets_overlap 의 미러)
+    // 한 배치 안 겹침은 제출 전에 줄끼리 말하고 잠근다 -- 2026-10-26 부터 CSV 는 서버가 해석하고(POST :parse-csv, 생성과 같은
+    // 판정) 오류가 있으면 표에 반영하지 않는다(물리 줄 3 = 데이터 2행, 상대 줄 2).
     await page.getByRole("button", { name: "CSV 붙여넣기" }).click();
-    await page.getByLabel("CSV").fill(`target\n${base}/a\n${base}/a/sub`);
+    await page.getByLabel("CSV", { exact: true }).fill(`target\n${base}/a\n${base}/a/sub`);
     await page.getByRole("button", { name: "테이블에 반영" }).click();
-    await expect(page.getByRole("list", { name: "겹치는 삭제 경로" }))
-      .toContainText(`2행: 1행의 경로(${base}/a) 아래입니다`);
+    const csvErrs = page.getByRole("list", { name: "반영할 수 없는 줄" });
+    await expect(csvErrs).toContainText("3번째 줄: 한 rm 배치에 같은 경로가 두 번 있거나");
+    await expect(csvErrs).toContainText("(2번째 줄과 겹침)");
     await expect(create).toBeDisabled();
     await page.getByRole("button", { name: "CSV 붙여넣기" }).click();
-    await page.getByLabel("CSV").fill(`target\n${base}/a\n${base}/b\n${base}/typo`);
+    await page.getByLabel("CSV", { exact: true }).fill(`target\n${base}/a\n${base}/b\n${base}/typo`);
     await page.getByRole("button", { name: "테이블에 반영" }).click();
+    await expect(page.getByLabel("1행 경로")).toHaveValue(`${base}/a`);           // 서버 해석 → 표 반영
+    await expect(page.getByRole("list", { name: "반영할 수 없는 줄" })).toHaveCount(0);
     await expect(page.getByRole("list", { name: "겹치는 삭제 경로" })).toHaveCount(0);
     await create.click();
     await page.waitForURL(/\/admin\/batches\/[0-9a-f]{32}$/);

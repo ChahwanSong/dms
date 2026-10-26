@@ -48,7 +48,7 @@ function KpiDl({ tiles }: { tiles: KpiTile[] }) {
           <dt className="text-xs text-ink/70">{t.label}</dt>
           {/* 값은 「120개」·「456 B」처럼 단위를 붙인다. 아래 「실행 결과」 타일의 원값은 "120" 이고, bytes 는 1 KiB
               미만이면 같은 「456 B」다(괄호 원값은 1 KiB 이상에서만) -- 테스트는 칸(dt 다음 dd)으로 집어 단언한다. */}
-          <dd className="mt-0.5 text-lg font-semibold tabular-nums [overflow-wrap:anywhere]">
+          <dd className="mt-0.5 text-lg font-semibold tabular-nums [overflow-wrap:anywhere]" title={t.title}>
             {t.elapsedFrom ? <Elapsed from={t.elapsedFrom} fallback="—" /> : t.value}
           </dd>
           {t.sub && <dd className="text-xs text-ink/70 break-keep">{t.sub}</dd>}

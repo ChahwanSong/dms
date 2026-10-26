@@ -4,6 +4,7 @@ import { batchJobsPath, useDeleteRequests, useInfiniteRequests, usePurgeStatus }
 import type { RequestFilters } from "./useJobs";
 import { useSearchField } from "./searchField";
 import { DeleteRequestsDialog, isSucceededScan } from "./DeleteRequestsDialog";
+import { NavNotice } from "./NavNotice";
 import { useMe } from "../auth/useAuth";
 import { Table } from "../../components/ui/Table";
 import { Card } from "../../components/ui/Card";
@@ -336,6 +337,8 @@ export function JobsList() {
         <h1 className="text-2xl font-bold">전체 작업</h1>
         <Link to="/jobs/new"><Button>작업 제출</Button></Link>
       </div>
+      {/* 요청 상세의 단건 삭제가 이동하며 남긴 알림(2026-10-26 — NavNotice). */}
+      <NavNotice />
 
       {/* 필터: 연산·상태·대상 경로는 누구나, 요청자·배치 이름은 운영자만(사용자는 서버가 자기 것으로 강제하므로 요청자
           검색이 무의미하고, 배치 열·배치 정보는 운영자 화면이다 -- 서버도 비운영자에겐 둘을 무시한다). 검색칸 셋은 부분
@@ -529,7 +532,7 @@ export function JobsList() {
 // 작업 있음」·「삭제 상한 초과」)를 보인다: 묶음의 상태·수는 행의 상태 열에 없어 Succeeded 행의 잠긴 체크박스가 왜
 // 잠겼는지 키보드·터치로는 알 길이 없었다(2026-10-11 검증 지적). 체크박스가 aria-describedby 로 이 줄을 가리키고, 줄
 // 안의 화면 낭독기 전용 글자(sr-only)가 처방(긴 말)까지 읽힌다 -- describedby 가 있으면 title 은 설명으로 쓰이지 않아 「삭제
-// 상한 초과」만 들리고 어떤 상한인지(작업 1000·항목 10000)는 마우스 전용이었다(2026-10-11 검증 지적). 읽혀야 하는 글자라
+// 상한 초과」만 들리고 어떤 상한인지(작업 2000·항목 10000 -- batchGroups 상수)는 마우스 전용이었다(2026-10-11 검증 지적). 읽혀야 하는 글자라
 // ink/70(AA).
 //
 // **칸은 상태와 무관하게 두 줄 이하**(2026-10-11 검증 지적): 첫 줄 = 이름(짧으면 전체, 길면 앞 조각)·「기록 없음」, 둘째

@@ -1,5 +1,8 @@
-from fastapi import APIRouter, Depends, HTTPException, Request
+import re
+
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, StrictBool
+from ..batch_csv import MAX_CSV_BYTES, export_items_csv, parse_items_csv, template_csv
 from ..batch_orchestrator import auto_confirm_hold, preview_files
 from ..batch_cancel import mark_cancel_reached, record_item_terminal, settle_child
 from ..domain import (DataJobState, DomainValidationError, Operation, auto_confirmable, build_data_payload,
@@ -7,7 +10,7 @@ from ..domain import (DataJobState, DomainValidationError, Operation, auto_confi
                       validate_batch_options, validate_owner_username)
 from ..execution import ExecutionError
 from ..privileged import privileged_names
-from .auth import Identity, require_admin
+from .auth import Identity, audit_actor, require_admin, require_session_admin
 from .cancel import terminate_job
 from .routes_requests import reject_when_maintenance
 
@@ -148,6 +151,56 @@ def list_batches(request: Request, identity: Identity = Depends(require_admin)):
     return request.app.state.repos.batches.list()
 
 
+# --- 항목 CSV(2026-10-26 BACKLOG C -- 해석·검증은 batch_csv 모듈 docstring) -------------------------------------------
+# 셋 다 읽기만 한다(배치 행·항목을 바꾸지 않는다) -- require_admin 이고 유지보수 중에도 받는다. 만드는 것은 여전히 생성
+# 라우트(특권 3중 게이트)다. 다운로드 둘(템플릿·내보내기)은 포탈이 <a href download> 로 부른다(세션 쿠키 -- 로그 다운로드
+# 라우트와 같은 길). 본문 앞의 UTF-8 BOM 은 엑셀이 한글 경로를 시스템 코드페이지로 읽지 않게(포탈 csvExport 와 같은 이유).
+_BOM = "\ufeff"
+
+
+def _csv_response(text: str, filename: str) -> Response:
+    return Response(content=_BOM + text, media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+class ParseCsvBody(BaseModel):
+    operation: str
+    csv: str
+    # 화면이 이미 고른 배치 스토리지(없으면 null) -- 줄 판정에 쓰고, CSV 의 스토리지 열이 다르면 그 줄이 batch_storage_mixed.
+    # 연산과 무관한 키는 버린다(scan·rm = storage, sync = source_storage·destination_storage).
+    storage: str | None = None
+    source_storage: str | None = None
+    destination_storage: str | None = None
+
+
+@router.post("/api/admin/batches:parse-csv")
+def parse_batch_csv(body: ParseCsvBody, request: Request, identity: Identity = Depends(require_admin)):
+    """CSV 본문 → 항목 + 줄별 오류(batch_csv.parse_items_csv). 생성과 **같은** 검증(build_data_payload · validate_batch ·
+    rm_target_overlaps)을 줄 단위로 돌려 「몇 번째 줄이 왜」를 말한다 -- 생성 422 는 배치 단위 한 문장이라 수백 행 CSV 에서
+    찾을 수 없었다. 이 응답은 미리 보기다: 오류가 없어도 생성이 같은 규칙으로 다시 판정한다(DB·권한 판정도 거기서).
+    상한: 본문 2 MiB(413 batch_csv_too_large) · 데이터 행 MAX_CSV_ROWS(422 batch_csv_too_many_rows)."""
+    if len(body.csv.encode("utf-8")) > MAX_CSV_BYTES:
+        raise HTTPException(status_code=413, detail="batch_csv_too_large")
+    try:
+        return parse_items_csv(body.operation, body.csv, storages={
+            "storage": body.storage, "source_storage": body.source_storage,
+            "destination_storage": body.destination_storage})
+    except DomainValidationError as e:
+        raise HTTPException(status_code=422, detail=e.reason_code)
+
+
+# 경로가 /api/admin/batches/{batch_id} GET 과 겹친다 -- 그 라우트보다 **먼저** 등록돼야 csv-template 가 배치 id 로 읽히지
+# 않는다(starlette 는 등록 순서로 맞춘다; test_csv_template_route_is_not_shadowed_by_get_batch 가 고정).
+@router.get("/api/admin/batches/csv-template")
+def batch_csv_template(operation: str, request: Request, identity: Identity = Depends(require_admin)):
+    """연산별 템플릿 = 경로 열 헤더 + 예시 한 줄(batch_csv.template_csv). 모르는 연산은 422 invalid_batch_operation."""
+    try:
+        text = template_csv(operation)
+    except DomainValidationError as e:
+        raise HTTPException(status_code=422, detail=e.reason_code)
+    return _csv_response(text, f"dms-batch-template-{operation}.csv")
+
+
 class BatchPatchBody(BaseModel):
     # 부분 갱신 계약: 키 부재 = 무접촉(exclude_unset 으로 판별), 명시적 null·빈
     # 문자열 = 지우기(NULL 저장으로 단순화). 두 키 밖의 입력은 pydantic 이 버린다.
@@ -260,7 +313,7 @@ def patch_batch_execution(batch_id: str, body: BatchExecutionBody, request: Requ
 
 @router.delete("/api/admin/batches/{batch_id}")
 def delete_batch(batch_id: str, request: Request,
-                 identity: Identity = Depends(require_admin)):
+                 identity: Identity = Depends(require_session_admin)):
     """배치 삭제 — **종단(Completed/Cancelled) 배치만**. 활성 배치는 409: 실행면
     정리 없는 삭제는 살아있는 자식(요청·잡)을 고아로 만들고 orchestrator 가
     사라진 배치의 자식을 계속 굴리게 된다 — "취소 먼저"가 동선이다(cancel 이
@@ -269,14 +322,36 @@ def delete_batch(batch_id: str, request: Request,
     작업 목록의 배치 기록 없는 묶음(배치 칸 「기록 없음 xxxxxxxxxxxx」)으로 배치 단위 삭제할 수 있다(POST
     /api/admin/requests:delete 의 batches, 세션 관리자 — request_purges.delete_batch).
     유지보수 거부는 patch(메타 수정)와 같은 배치
-    mutation 관례를 미러한다(cancel 만 예외 — 취소는 언제나 가능해야 한다)."""
+    mutation 관례를 미러한다(cancel 만 예외 — 취소는 언제나 가능해야 한다).
+
+    2026-10-26(BACKLOG C 「배치 기록 삭제의 감사·CAS」): **세션 관리자만**(공유 토큰 403 admin_session_required) -- 배치
+    기록(항목 목록·이름·옵션·실행 설정)은 작업(요청) 삭제와 같은 증거 부류라 같은 경계다(routes_request_purge). 삭제는
+    저장소의 CAS(같은 트랜잭션에서 종단을 다시 본 뒤 DELETE ... AND status IN 종단)라, 아래 판정 뒤 그 사이 재실행·항목 추가가
+    배치를 되살렸으면 409 batch_record_changed 로 아무것도 지우지 않는다(예전엔 읽고-지우기라 막 다시 돌기 시작한 배치의
+    기록을 지웠다). 그 사이 다른 관리자가 지웠으면 404. 지우면 감사 행('batch','delete_record')이 같은 트랜잭션에 남는다."""
     reject_when_maintenance(request)
     repo = request.app.state.repos.batches
     b = _get_batch_or_404(request, batch_id)
     if b["status"] not in _TERMINAL_BATCH:
         raise HTTPException(status_code=409, detail="batch_not_deletable")
-    repo.delete(batch_id)
+    done = repo.delete(batch_id, actor=audit_actor(identity))
+    if done is None:
+        raise HTTPException(status_code=404, detail="batch_not_found")
+    if done is False:
+        raise HTTPException(status_code=409, detail="batch_record_changed")
     return {"deleted": batch_id}
+
+
+@router.get("/api/admin/batches/{batch_id}/items.csv")
+def export_batch_items_csv(batch_id: str, request: Request, identity: Identity = Depends(require_admin)):
+    """배치 항목 내보내기(batch_csv.export_items_csv) -- 항목마다 한 줄, 경로·스토리지 열 + 상태 열(status·request_id·
+    request_state·reason_code·files_count·completed_at). 경로·스토리지 열 이름이 해석기와 같아 고친 파일을 「CSV로 전체
+    교체」·배치 생성에 그대로 올릴 수 있다. 수식 주입 방어(= + - @ … 앞에 ')는 해석이 걷는다."""
+    repo = request.app.state.repos.batches
+    b = _get_batch_or_404(request, batch_id)
+    text = export_items_csv(b["operation"], repo.list_items_detail(batch_id))
+    # 파일 이름은 헤더에 들어간다 -- 배치 id 는 DB 값(신뢰 경계)이라 이름에 쓸 글자만 남긴다(따옴표·줄바꿈이 헤더를 깨지 않게).
+    return _csv_response(text, f"dms-batch-{re.sub(r'[^0-9A-Za-z_-]', '_', batch_id[:12])}-items.csv")
 
 
 @router.get("/api/admin/batches/{batch_id}")

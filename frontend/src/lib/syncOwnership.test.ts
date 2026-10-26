@@ -181,3 +181,47 @@ test("PV 목적지 pv_root 규칙(운영자 옵션): 잰 PV 루트 소유자 + �
   expect(syncOwnership({ chown: "", root: true, runAs: null, self: true, pvDestination: true, pvOwnerRule: null }).short)
     .toBe("목적지 PV 루트의 소유자·그룹(점검 뒤 확정)");
 });
+
+// 2026-10-26 사용자 결정 (4): 직접 경로 목적지의 스토리지가 PV 를 담는 종류면 그 스토리지 기본 소유자(pv 늘, both 는 PV 루트 아래만)
+// -- 서버 payload.dest_owner(k8s_access.direct_dest_owner) 미러.
+const ROOT_BASE = { chown: "", root: true, runAs: null, self: true } as const;
+
+test("직접 경로 storage(확정): 「목적지 스토리지 기본 소유자 <v>(직접 경로)」 -- 0:0 은 root 로, 모르면 (uid:gid)", () => {
+  const o = syncOwnership({ ...ROOT_BASE, directDest: { rule: "storage", owner: "1500:1500" } });
+  expect(o.short).toBe("목적지 스토리지 기본 소유자 1500:1500(직접 경로)");
+  expect(o.long).toContain("결과는 목적지 스토리지 기본 소유자 1500:1500 로 맞춰집니다");
+  expect(o.long).toContain("직접 경로여도 목적지 스토리지가 PV 를 담는 종류라 PV 목적지와 같은 규칙입니다");
+  expect(o.long).toContain("일반 파일의 setuid·setgid 비트는 지워집니다");          // --chown 이 넘어간다(0:0 도)
+  expect(o.long).toContain("스토리지 종류·PV 를 바꿔 결과 소유가 달라지면 실행하지 않고 멈춥니다");
+  expect(syncOwnership({ ...ROOT_BASE, directDest: { rule: "storage", owner: "0:0" } }).short)
+    .toBe("목적지 스토리지 기본 소유자 0:0(root)(직접 경로)");
+  for (const owner of [null, "-1:0", "x"])                                          // 모름·형식 오류는 값으로 보이지 않는다
+    expect(syncOwnership({ ...ROOT_BASE, directDest: { rule: "storage", owner } }).short)
+      .toBe("목적지 스토리지 기본 소유자(uid:gid)(직접 경로)");
+});
+
+test("직접 경로 both(폼): PV 루트 아래면 스토리지 기본 소유자, 아니면 소스 그대로 -- 화면은 PV 루트를 모른다고 정직하게", () => {
+  const o = syncOwnership({ ...ROOT_BASE, directDest: { rule: "storage_if_under_pv", owner: "2500:2600" } });
+  expect(o.short).toBe("PV 루트 아래면 목적지 스토리지 기본 소유자 2500:2600, 아니면 소스 그대로");
+  expect(o.long).toContain("PV·파일시스템 겸용이라 결과 소유는 목적지 경로에 따라 갈립니다");
+  expect(o.long).toContain("그 밖이면 root 실행이라 소스의 소유자·그룹을 그대로 유지합니다");
+  expect(o.long).toContain("어느 쪽인지는 제출 때 서버가 정해 요청 상세의 「목적지 소유」에 보입니다");
+});
+
+test("배치 화면(varies): 기본(소스 그대로 + 2026-09-30 경고)은 그대로 말하고 PV 스토리지 예외를 덧붙인다", () => {
+  const o = syncOwnership({ ...ROOT_BASE, directDest: { rule: "varies" } });
+  expect(o.short).toBe("소스의 소유자·그룹 그대로(root 실행) — 단 목적지 스토리지가 PV 종류(겸용이면 PV 루트 아래)면 그 스토리지 기본 소유자");
+  expect(o.long).toContain("목적지에 이미 있던 같은 경로의 항목(최상위 디렉토리 포함)도 소유자·그룹·권한·시각이 소스 것으로 바뀝니다.");
+  expect(o.long).toContain("그 스토리지의 기본 소유자(uid:gid)로 맞춰지고 일반 파일의 setuid·setgid 비트는 지워집니다");
+  expect(o.long).toContain("항목마다의 값은 자식 작업의 요청 상세 「목적지 소유」에 보입니다");
+});
+
+test("직접 경로 규칙의 우선순위: 명시 chown > PV 목적지 > 직접 경로 > root 보존, 비 root 옛 행은 그대로", () => {
+  const direct = { rule: "storage", owner: "1500:1500" } as const;
+  expect(syncOwnership({ ...ROOT_BASE, chown: "7:7", directDest: direct }).short).toBe("chown 지정값 7:7");
+  expect(syncOwnership({ ...ROOT_BASE, pvDestination: true, pvOwnerRule: "storage", storageOwner: "9:9",
+                         directDest: direct }).short).toBe("목적지 스토리지 기본 소유자 9:9");
+  expect(syncOwnership({ ...ROOT_BASE, directDest: null }).short).toBe("소스의 소유자·그룹 그대로(root 실행)");
+  expect(syncOwnership({ chown: "", root: false, runAs: "alice", self: true, directDest: direct }).short)
+    .toBe("요청자 본인(alice)의 uid:gid(주 그룹)");
+});

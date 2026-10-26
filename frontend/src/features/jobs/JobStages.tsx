@@ -2,7 +2,7 @@ import { Fragment, useEffect, useMemo, useRef, type ReactNode } from "react";
 import { HelpTip } from "../../components/ui/HelpTip";
 import { stageHelp } from "../../lib/stateHelp";
 import {
-  Ban, CircleAlert, CircleCheck, CircleDashed, CircleHelp, CircleMinus, CirclePause, CircleX, Hourglass,
+  Archive, Ban, CircleAlert, CircleCheck, CircleDashed, CircleHelp, CircleMinus, CirclePause, CircleX, Hourglass,
   Info, LoaderCircle, OctagonAlert, TimerOff, TriangleAlert, type LucideIcon,
 } from "lucide-react";
 import { reasonText } from "../../lib/api";
@@ -221,11 +221,20 @@ function OutputChips({ label, items, slot, selectedKey, live, onSelect, chipRef,
   );
 }
 
+/** 결과 파일 자동 만료(2026-10-26) 한 줄: 「결과 파일 만료됨(보존 N일, YYYY-MM-DD)」. days 가 없으면(지금 보존 정책이 꺼짐·
+    구버전 서버) 날짜만 -- 지어내지 않는다. 날짜는 KST(kstStamp 의 날짜 부분, 못 읽으면 원문 그대로). */
+export function expiryText(expiredAt: string, days: number | null | undefined): string {
+  const date = kstStamp(expiredAt).slice(0, 10);
+  return typeof days === "number" && days > 0 ? `결과 파일 만료됨(보존 ${days}일, ${date})` : `결과 파일 만료됨(${date})`;
+}
+
 interface RowCtx {
   job: DataJob; model: JobStagesModel; refIso?: string | null;
   selectedKey: string | null; slot: NavSlot; viewerId: string;
   entrySize: (item: OutputItem) => number | null;
   listLoading: boolean;
+  /** 결과 파일이 보존 기간이 지나 지워졌다 -- 출력 칩이 없는 끝난 단계에 「출력 없음」 대신 「결과 파일 만료됨」. */
+  expired: boolean;
   onSelect: (slot: NavSlot, key: string) => void;
   onClose: (slot: NavSlot) => void;
   chipRef: (key: string, el: HTMLButtonElement | null) => void;
@@ -262,7 +271,8 @@ function StepRow({ step, items, notes, last, ctx }: {
           <OutputChips label={STEP_COPY[step.id]} items={items} slot={ctx.slot} selectedKey={ctx.selectedKey}
                        live={live} onSelect={ctx.onSelect} chipRef={ctx.chipRef} viewerId={ctx.viewerId} />
         ) : ended && !ctx.listLoading ? (
-          <p className="mt-1 text-xs text-ink/70">출력 없음</p>
+          // 만료된 잡의 빈 단계는 「출력 없음」이 아니다 -- 출력이 있었는데 보존 기간이 지나 지웠다(전체 사유는 카드 아래 줄).
+          <p className="mt-1 text-xs text-ink/70">{ctx.expired ? "결과 파일 만료됨" : "출력 없음"}</p>
         ) : null}
       </div>
       {selected && (
@@ -441,6 +451,9 @@ export function JobStages({ job, events, jobCount = 1, refIso, batchChild = fals
     return e && typeof e.size === "number" && Number.isFinite(e.size) ? e.size : null;
   };
   const listLoading = artifacts.isLoading;
+  // 결과 파일 자동 만료(2026-10-26): 목록 응답(만료 표시 + 지금 보존일)이 우선, 아직 안 왔으면 잡 행의 표시. 잡의 나머지
+  // (단계·요약·사유·로그 칩)는 그대로 그린다 -- 지운 것은 파일뿐이다.
+  const expiredAt = artifacts.data?.expired_at ?? job.artifacts_expired_at ?? null;
   const onClose = (slot: NavSlot) => {
     const key = nav.selected[slot];
     nav.close(slot);
@@ -449,7 +462,7 @@ export function JobStages({ job, events, jobCount = 1, refIso, batchChild = fals
   };
   const ctxFor = (slot: NavSlot): RowCtx => ({
     job, model, refIso, slot, selectedKey: nav.selected[slot], viewerId: viewerId(slot),
-    entrySize, listLoading, onSelect: nav.select, onClose, chipRef,
+    entrySize, listLoading, expired: expiredAt !== null, onSelect: nav.select, onClose, chipRef,
   });
 
   const renderSteps = (stage: StageModel) => {
@@ -540,6 +553,15 @@ export function JobStages({ job, events, jobCount = 1, refIso, batchChild = fals
         </div>
       )}
       {truncated && <p className="mt-2 text-xs text-ink/70">일부 항목만 표시됩니다</p>}
+      {expiredAt !== null && (
+        <p className="mt-3 flex items-start gap-1.5 text-sm text-ink/70 break-keep">
+          <Archive className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
+          <span>
+            {expiryText(expiredAt, artifacts.data?.retention_days)}
+            <span className="text-xs">{" — 작업 기록과 결과 수치는 그대로 남아 있습니다"}</span>
+          </span>
+        </p>
+      )}
     </div>
   );
 }

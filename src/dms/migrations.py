@@ -251,6 +251,10 @@ def _apply_migrations(db: Database) -> None:
             -- 2026-10-16 pod-gc 완료 시각: 종단 잡의 preflight Pod·(실패) vcjob 을 지운 뒤 찍는다(pod_gc). NULL = 아직
             -- (또는 이 컬럼 이전 잡 -- 첫 패스가 한 번 훑고 찍는다). 예전엔 표시가 없어 GC 가 같은 앞쪽 200건만 되풀이했다.
             pods_gc_at TEXT,
+            -- 2026-10-26 결과 파일 자동 만료(artifact_expiry). 종단 후 보존일(DMS_ARTIFACT_RETENTION_DAYS)이 지나 결과
+            -- 파일 정리를 맡긴 시각(정리 아웃박스 request_purges 의 kind expiry 행과 같은 트랜잭션에서 찍는다). NULL = 만료
+            -- 전. 값이 있으면 열람 API 가 410 artifact_expired 를 준다 -- 행·전이·요약·지문은 남고 파일만 지운다.
+            artifacts_expired_at TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL)""",
         "CREATE INDEX IF NOT EXISTS idx_data_jobs_state ON data_jobs (state, updated_at)",
@@ -400,6 +404,9 @@ def _apply_migrations(db: Database) -> None:
         #                 진행 판정에 안 쓴다(request_purger 가 쓰고 request_purged 이벤트에 싣는다)
         #   last_error    마지막 실패·지연 사유 코드(진행하면 NULL 로 리셋) -- NOT NULL 이면 「지연」으로 보인다
         #   requested_by  audit_actor(identity)
+        #   kind          NULL = 요청 삭제(원래 의미 -- 기배포 행도 NULL), 'expiry' = 결과 파일 자동 만료(2026-10-26,
+        #                 artifact_expiry -- 원 요청·잡 행이 **살아 있다**, 파일만 지운다). 그 밖의 값 = 변조(루프가 멈춘다).
+        #                 만료 중인 요청을 삭제하면 그 행이 요청 삭제 행으로 바뀐다(_enqueue 가 kind 를 NULL 로).
         """CREATE TABLE IF NOT EXISTS request_purges (
             request_id TEXT PRIMARY KEY,
             jobs TEXT NOT NULL,
@@ -411,7 +418,8 @@ def _apply_migrations(db: Database) -> None:
             next_attempt_at TEXT NOT NULL,
             requested_by TEXT NOT NULL,
             requested_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL)""",
+            updated_at TEXT NOT NULL,
+            kind TEXT)""",
         # 노드 배치 제외(2026-10-02, repositories/node_exclusions.py): 관리자가 고른 노드를 DMS 잡 배치 후보에서 뺀다.
         # 행 = 제외 중. 빈 테이블 = 제외 없음(업그레이드 무해 -- sync_pairs 의 "빈 테이블 = 전부 거부"와 반대 방향).
         # agent_nodes 에 플래그를 두지 않는 이유: 그 행은 보고마다 지우고 다시 넣는다(agents.ingest). 새 테이블이라
@@ -586,7 +594,11 @@ def _apply_migrations(db: Database) -> None:
             log_uri TEXT,
             log_text TEXT,
             created_at TEXT NOT NULL,
-            finished_at TEXT)""",
+            finished_at TEXT,
+            -- 2026-10-26 pod-gc 완료 시각: 종단 빌드의 빌드·프로브 파드를 지운 뒤 찍는다(pod_gc, data_jobs.pods_gc_at 과 같은
+            -- 규칙). NULL = 아직(또는 이 컬럼 이전 빌드 -- 첫 패스가 한 번 훑고 찍는다). 예전엔 표시가 없어 종단 빌드가 200건을
+            -- 넘으면 GC 가 같은 앞쪽 200건만 되풀이하고 그 뒤 빌드의 파드는 남았다.
+            pods_gc_at TEXT)""",
         f"""CREATE TABLE IF NOT EXISTS releases (
             id {auto_pk},
             component TEXT NOT NULL,
@@ -739,6 +751,15 @@ def _apply_migrations(db: Database) -> None:
     # 훑지 않는다. pods_gc_at 이 _ensure_columns 로 보강된 뒤라 여기다(위 인덱스들과 같은 순서 규칙).
     db.execute("CREATE INDEX IF NOT EXISTS idx_data_jobs_gc"
                " ON data_jobs (updated_at) WHERE pods_gc_at IS NULL")
+    # 2026-10-26 빌드 pod-gc: 같은 이유의 부분 인덱스(builds.terminal_older_than 이 seq 순으로 아직 치우지 않은 빌드만 본다).
+    # builds.pods_gc_at 도 _ensure_columns 로 보강된 뒤라 여기다.
+    db.execute("CREATE INDEX IF NOT EXISTS idx_builds_gc"
+               " ON builds (seq) WHERE pods_gc_at IS NULL")
+    # 2026-10-26 결과 파일 자동 만료: 아직 만료하지 않은 잡만 담는 부분 인덱스 -- 만료 대상 고르기(request_purges.
+    # expire_artifacts, updated_at 이 기준일보다 오래된 순)가 만료 이력 전체를 훑지 않는다. artifacts_expired_at 이
+    # _ensure_columns 로 보강된 뒤라 여기다(위 인덱스들과 같은 순서 규칙).
+    db.execute("CREATE INDEX IF NOT EXISTS idx_data_jobs_expiry"
+               " ON data_jobs (updated_at) WHERE artifacts_expired_at IS NULL")
     db.execute(
         """INSERT INTO schema_migrations (version, applied_at)
            SELECT :v, :at WHERE NOT EXISTS
@@ -842,6 +863,9 @@ def _ensure_columns(db):
         ("data_jobs", "diag_logs", "TEXT"),
         # 2026-10-16 pod-gc 완료 표시 -- 이중 경로 규약(기배포 DB 는 CREATE 를 다시 안 탄다).
         ("data_jobs", "pods_gc_at", "TEXT"),
+        # 2026-10-26 결과 파일 자동 만료 -- 이중 경로 규약(기배포 DB 는 CREATE 를 다시 안 탄다).
+        ("data_jobs", "artifacts_expired_at", "TEXT"),
+        ("request_purges", "kind", "TEXT"),
         # 2026-09-17 미리보기 요약 사본 -- 같은 이유로 양쪽 선언.
         ("data_jobs", "preview_summary", "TEXT"),
         ("requests", "batch_id", "TEXT"),
@@ -872,6 +896,8 @@ def _ensure_columns(db):
         ("control_state", "portal_subtitle", "TEXT"),
         ("builds", "log_text", "TEXT"),
         ("builds", "seq", "INTEGER"),
+        # 2026-10-26 빌드 pod-gc 완료 표시 -- data_jobs.pods_gc_at 과 같은 이중 경로 규약.
+        ("builds", "pods_gc_at", "TEXT"),
         ("releases", "reason_code", "TEXT"),
         ("releases", "seq", "INTEGER"),
         ("releases", "progress", "INTEGER"),

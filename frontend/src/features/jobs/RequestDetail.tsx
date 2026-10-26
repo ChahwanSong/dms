@@ -1,14 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { CircleAlert, FileX, LoaderCircle, TriangleAlert } from "lucide-react";
-import { requestGone, useRequest, useRequestJobs, useCancelJob, useCancelRequest } from "./useJobs";
+import { batchJobsPath, requestGone, useDeleteRequests, useRequest, useRequestJobs, useCancelJob,
+         useCancelRequest } from "./useJobs";
+import { useMe } from "../auth/useAuth";
+import { DeleteRequestsDialog } from "./DeleteRequestsDialog";
+import type { NavNoticeState } from "./NavNotice";
 import { reasonText } from "../../lib/api";
 import { Card } from "../../components/ui/Card";
 import { Skeleton } from "../../components/ui/Skeleton";
 import { REQUEST_TERMINAL_STATES, isTerminal } from "../../lib/jobState";
 import { kstStamp } from "../../lib/datetime";
 import { useStorageRoots } from "../storages/useUserStorages";
-import type { DataJob } from "../../lib/types";
+import type { DataJob, RequestDetail as RequestDetailData } from "../../lib/types";
 import { StageNavProvider } from "./stageNav";
 import { OutcomeCard } from "./OutcomeCard";
 import { deriveRequestSpec } from "./requestSpec";
@@ -62,6 +66,46 @@ function LoadingView({ requestId }: { requestId: string }) {
   );
 }
 
+// 요청 상세의 단건 삭제(2026-10-26 BACKLOG C — 예전엔 작업 목록의 일괄 선택뿐이었다). 같은 엔드포인트(POST
+// /api/admin/requests:delete, 세션 관리자)·같은 확인 창(DeleteRequestsDialog — 함께 지워지는 것·사용량 경고·「되돌릴 수
+// 없음」 체크)에 id 1개를 싣는다. 보이는 규칙도 목록과 같다: 관리자에게만(목록의 체크 열과 같은 판정 — 서버는 세션 관리자만
+// 받는다), 끝난 요청만(진행 중이면 그리지 않는다 — 지금 할 수 있는 일이 아니다). 배치 작업은 하나씩 지우지 않는다(서버
+// batch_child_not_deletable — 살아 있는 배치의 자식을 빼면 배치 집계가 영구 정체한다) — 버튼을 잠그고 **왜**와 갈 곳(그 배치의
+// 작업 목록 → 배치 단위 삭제)을 말한다. 판정은 서버가 다시 한다(조용한 창 60초 등): 제외되면 여기서 사유를 보인다.
+// 성공하면 지운 요청의 상세는 404 라 목록으로 옮기며 알린다(useDeleteRequests 의 onDeleted — 캐시를 지우기 전에 이동한다).
+function DeleteRequestControl({ req, jobs, del }: {
+  req: RequestDetailData; jobs: DataJob[] | null; del: ReturnType<typeof useDeleteRequests>;
+}) {
+  // 배치 자식 판정은 목록(JobsList.deletable)과 같은 `!= null` -- 빈 문자열 같은 이상값도 배치 자식으로 본다(fail-closed).
+  const batchChild = req.batch_id != null;
+  const jobsLive = (jobs ?? []).some((j) => !isTerminal(j.state));
+  const why = batchChild ? "배치 작업은 하나씩 삭제하지 않습니다 — 배치가 끝난 뒤 전체 작업에서 배치 단위로 삭제하세요"
+    : jobsLive ? "아직 끝나지 않은 데이터 작업이 있습니다 — 모두 끝난 뒤 삭제하세요"
+    : null;
+  // 사용량 경고(성공 scan)는 잡 상태가 먼저다(목록의 has_succeeded_scan 과 같은 뜻) -- 잡을 모르면 요청 상태로 근사한다.
+  const row = jobs === null ? req
+    : { ...req, has_succeeded_scan: jobs.some((j) => j.operation === "scan" && j.state === "Succeeded") };
+  const skipped = del.data?.skipped.find((x) => x.request_id === req.request_id);
+  return (
+    <div className="flex max-w-xs flex-col items-end gap-1 text-right">
+      <DeleteRequestsDialog rows={why === null ? [row] : []} disabled={why !== null || del.isPending} del={del}
+                            onDeleted={() => undefined} triggerLabel="작업 삭제" />
+      {why !== null && (
+        <p className="text-xs text-ink/70 break-keep">
+          {why}
+          {batchChild && typeof req.batch_id === "string" && req.batch_id !== "" && (<>
+            {" "}<Link className={`text-accent underline ${FOCUS_RING}`} to={batchJobsPath(req.batch_id)}>이 배치의 작업 보기</Link>
+          </>)}
+        </p>
+      )}
+      {/* 전체 실패(403·503 등)는 확인 창 안에서 말한다 -- 여기는 「서버가 이 요청을 제외했다」(부분 성공의 한 줄)뿐이다. */}
+      {skipped && (
+        <p role="alert" className="text-xs text-bad break-keep">{`삭제하지 않았습니다 — ${reasonText(skipped.reason)}`}</p>
+      )}
+    </div>
+  );
+}
+
 function RetryButton({ onClick }: { onClick: () => void }) {
   return <button type="button" className={SMALL_BTN} onClick={onClick}>다시 시도</button>;
 }
@@ -88,6 +132,18 @@ function NotFoundView({ requestId }: { requestId: string }) {
 export function RequestDetail() {
   const { requestId = "" } = useParams();
   const req = useRequest(requestId);
+  // 단건 삭제(관리자 -- 목록의 체크 열과 같은 판정). 지웠으면 캐시를 지우기 전에 목록으로 옮기며 알린다(DeleteRequestControl).
+  const me = useMe();
+  const isAdmin = me.data?.role === "admin";
+  const nav = useNavigate();
+  const del = useDeleteRequests({
+    onDeleted: (r) => {
+      if (!r.deleted.some((d) => d.request_id === requestId)) return;
+      const state: NavNoticeState = { notice: `작업 ${requestId.slice(0, 12)}을(를) 삭제했습니다 — 결과 파일·남은 파드 정리는 `
+        + "백그라운드에서 진행됩니다(툴바의 정리 현황)." };
+      nav("/jobs", { state });
+    },
+  });
   // 404 = 삭제됐거나 볼 수 없는 요청. **데이터 유무와 관계없이**(캐시된 화면을 보다가 재조회가 404 여도) 「없는
   // 요청」 화면이다 -- 낡은 화면에 「자동 갱신 실패」 띠만 뜨면 지워진 요청을 살아 있는 것처럼 보인다. 그동안 잡
   // 조회는 끈다(지워진 요청의 잡은 404 뿐이고, 비종단 잡 캐시가 있으면 2초 폴링이 계속 404 를 두드린다). 요청 쿼리
@@ -194,6 +250,9 @@ export function RequestDetail() {
               </>)}
             </div>
           </div>
+          {isAdmin && REQUEST_TERMINAL_STATES.has(data.state) && (
+            <DeleteRequestControl req={data} jobs={jobList} del={del} />
+          )}
           {live && (
             <span className="inline-flex items-center gap-1.5 pt-1 text-xs text-ink/70">
               <span className="relative inline-flex h-2 w-2" aria-hidden>

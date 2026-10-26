@@ -98,6 +98,24 @@ def _total_bytes(time_histograms: dict) -> "int | None":
     return None
 
 
+def _summary_count(summary, key: str) -> "int | None":
+    """투영된 summary 의 정수 카운터(int·bool 아님·≥0), 아니면 None(모름). _numbers 는 유한 float·음수도 통과시키므로
+    화면·합계에 실을 카운터는 여기서 한 번 더 거른다(_total_bytes 와 같은 엄격함). 키 부재(구형 리포트)도 None -- null≠0."""
+    v = summary.get(key) if isinstance(summary, dict) else None
+    return v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else None
+
+
+def _report_total_bytes(summary, time_histograms: dict) -> "int | None":
+    """실 사용량 -- 화면들(요청·배치 항목·스캔 경로·사용량 분석)이 쓰는 한 값.
+
+    dscan(포크 ae781bd~, 2026-10-26)이 summary.total_bytes(일반 파일 st_size 합, 정확값)를 쓰면 그것, 없거나(구형 리포트·
+    옛 잡 이미지) 수상하면 히스토그램 합(_total_bytes)으로 물러난다 -- 저장된 옛 리포트·요약 캐시가 그대로 값을 낸다. 러너
+    파서(parsers.parse_scan_counts)와 같은 우선순위라, 리포트를 못 읽어 DB bytes_count 로 대신한 포인트와 리포트에서 낸
+    포인트가 같은 출처다. 두 출처는 포크가 매 실행 대조하는 같은 수다."""
+    exact = _summary_count(summary, "total_bytes")
+    return exact if exact is not None else _total_bytes(time_histograms)
+
+
 class ScanPathBody(BaseModel):
     storage_name: str
     path: str
@@ -197,14 +215,17 @@ def scan_path_stats(path_id: int, request: Request,
         broken_total = report.get("broken_paths_total")
         broken_limit = report.get("broken_paths_limit")
         hists = _time_histograms(report.get("time_histograms"))
+        summary = _numbers(report.get("summary"))
         return {
             # 세 필드는 절대 null이 되지 않는다 — 클라이언트 타입이 non-nullable이라
             # null 하나가 렌더 도중 예외가 되고, ErrorBoundary가 없어 화면 전체가 죽는다.
-            "summary": _numbers(report.get("summary")),
+            "summary": summary,
             "file_size_histogram": _buckets(report.get("file_size_histogram")),
             "time_histograms": hists,
-            # 실 사용량(2026-08-23): null == 모름(구형·오염 리포트) ≠ 0(빈 트리).
-            "total_bytes": _total_bytes(hists),
+            # 실 사용량(2026-08-23): null == 모름(구형·오염 리포트) ≠ 0(빈 트리). summary.total_bytes 우선(2026-10-26).
+            "total_bytes": _report_total_bytes(summary, hists),
+            # 이름이 엄격 UTF-8 이 아닌 항목 수(2026-10-26 포크 ae781bd -- 카운터만, broken 에 더하지 않는다). None = 구형 리포트.
+            "invalid_name_entries": _summary_count(summary, "invalid_name_entries"),
             "generated_at_epoch": epoch if _is_number(epoch) else None,
             # 신 dscan(1b93d54)의 파손 경로 정확 총계·보관 상한 — 숫자만 통과
             # (모양 투영: 문자열이 오면 경로일 수 있다). 구형 리포트(키 부재)는

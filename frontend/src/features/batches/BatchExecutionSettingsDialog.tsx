@@ -245,7 +245,7 @@ export function BatchExecutionSettingsDialog({ b }: { b: Batch }) {
               {err(chmodError)}
             </label>
             <label className="text-sm block">chown (숫자 uid:gid)
-              <input aria-label="chown" className={field} placeholder="비우면 소스 소유권 보존"
+              <input aria-label="chown" className={field} placeholder="비우면 자동(PV 스토리지 경로는 그 기본 소유자, 그 밖은 소스 소유 보존)"
                      value={f.strs.chown} onChange={setStr("chown")} />
               {err(chownError)}
             </label>

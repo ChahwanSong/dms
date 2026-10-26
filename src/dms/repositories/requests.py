@@ -268,6 +268,57 @@ class RequestsRepository:
                 AND state NOT IN ({placeholders})
                 ORDER BY commit_order LIMIT 1""", params)
 
+    # 비종단 요청 상태를 **긍정형**으로 -- idx_requests_state(state, commit_order)의 범위 읽기가 된다(NOT IN 은 전체를 훑는다).
+    _ACTIVE_REQUEST_STATES = tuple(s.value for s in RequestState if s not in TERMINAL_REQUEST_STATES)
+
+    def overlap_candidates(self, *, request_id, commit_order, destructive_only: bool) -> list[dict]:
+        """planner 경로 겹침 판정(Planner._path_conflict, domain.path_conflict)의 상대 후보 -- 이 요청을 뺀 **비종단** 요청 중
+        commit_order 가 앞서거나(find_active 와 같은 「먼저 온 쪽이 이긴다」) 이미 계획된(Pending 이 아닌 -- 잠금을 쥔) 것,
+        commit_order 순. 뒤의 갈래는 정상 흐름에선 비어 있다(뒤에 온 요청은 앞의 Pending 을 보고 Conflict 가 된다) -- 계획
+        오류로 Pending 에 남은 요청·이 기능 전에 계획된 행을 덮는 그물이다. destructive_only=True(비파괴 요청 R 의 후보)면
+        scan·sync 를 뺀다 -- 겹침은 한쪽이 rm(·미지 연산)일 때만 충돌이라 대부분의 sync·scan 계획은 rm 몇 건만 읽는다.
+        비종단 수는 배치 max_concurrency·사람의 제출이 묶는다(전체 요청 수와 무관). payload 가 깨진 행은 None 으로 싣는다 --
+        판정은 호출자 몫(planner 는 건너뛰고 stepper 실행 관문이 잡 행으로 본다)."""
+        placeholders = ", ".join(f":a{i}" for i in range(len(self._ACTIVE_REQUEST_STATES)))
+        params = {f"a{i}": v for i, v in enumerate(self._ACTIVE_REQUEST_STATES)}
+        params.update(rid=request_id, o=commit_order, pending=RequestState.PENDING.value)
+        only = " AND operation NOT IN ('scan', 'sync')" if destructive_only else ""
+        rows = self._db.query(
+            f"""SELECT request_id, commit_order, operation, state, batch_id, payload FROM requests
+                WHERE state IN ({placeholders}) AND request_id <> :rid
+                  AND (commit_order < :o OR state <> :pending){only}
+                ORDER BY commit_order""", params)
+        for row in rows:
+            try:
+                row["payload"] = load_json(row["payload"])
+            except (ValueError, TypeError):
+                row["payload"] = None
+        return rows
+
+    # 실행 관문(stepper._overlap_hold)이 보는 잡 상태: 실행 측 단계를 냈거나 곧 낼 수 있는 잡 -- sync·rm 의 Executing(확인 뒤),
+    # scan 의 Preflight(통과하면 곧 실행), 실행 중(Running). 미리보기 이전·확인 대기(ConfirmPending)는 실행 측과 무관하다.
+    _GATE_JOB_STATES = (DataJobState.PREFLIGHT.value, DataJobState.EXECUTING.value, DataJobState.RUNNING.value)
+
+    def overlap_gate_jobs(self) -> list[dict]:
+        """실행 관문의 상대 후보 -- 위 상태의 잡(경로·연산·도구·phase_refs)과 그 요청의 commit_order(보류 순서의 동률 깨기),
+        요청 commit_order 순. 요청 행이 없으면(LEFT JOIN -- 정상 흐름엔 없다) commit_order 는 None 이다(호출자가 가장 앞선
+        것으로 본다 -- fail-closed). idx_data_jobs_state 로 읽어 종단 잡이 쌓여도 비용이 늘지 않는다. phase_refs 가 깨진
+        행은 문자열 "corrupt" 로 싣는다(호출자가 「돌고 있을 수 있다」로 본다)."""
+        placeholders = ", ".join(f":g{i}" for i in range(len(self._GATE_JOB_STATES)))
+        params = {f"g{i}": v for i, v in enumerate(self._GATE_JOB_STATES)}
+        rows = self._db.query(
+            f"""SELECT d.job_id, d.request_id, d.operation, d.tool, d.state, d.storage_name, d.source_storage,
+                       d.destination_storage, d.source, d.destination, d.target, d.phase_refs, r.commit_order
+                FROM data_jobs d LEFT JOIN requests r ON r.request_id = d.request_id
+                WHERE d.state IN ({placeholders})
+                ORDER BY r.commit_order, d.job_id""", params)
+        for row in rows:
+            try:
+                row["phase_refs"] = load_json(row["phase_refs"])
+            except (ValueError, TypeError):
+                row["phase_refs"] = "corrupt"
+        return rows
+
     def active_referencing_storage(self, storage_name) -> bool:
         terminal = tuple(s.value for s in TERMINAL_REQUEST_STATES)
         placeholders = ", ".join(f":t{i}" for i in range(len(terminal)))

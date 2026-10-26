@@ -150,16 +150,24 @@ def parse_rm_dryrun_counts(stdout: str) -> "tuple[int | None, None]":
 def parse_scan_counts(report_path: str) -> "tuple[int | None, int | None]":
     """dscan-report.json -> (summary.total_entries, 총 바이트=실 사용량).
 
-    리포트에 총 바이트 필드는 없지만 time_histograms 의 각 히스토그램(atime/
+    총 바이트(2026-10-26, 포크 ae781bd~): dscan 이 `summary.total_bytes`(일반 파일 st_size 합 -- 디렉터리·링크·FIFO 제외,
+    sparse 는 겉보기 크기, 하드 링크는 경로마다, 단일 MPI_Reduce 라 rank 수와 무관한 정확값)를 쓴다. 엄격 정수(int·
+    bool 아님·≥0)일 때만 그 값을 쓰고, 없거나(구형 리포트·옛 잡 이미지) 수상하면 아래 히스토그램 합으로 물러난다 --
+    두 출처는 같은 수다(포크가 매 실행 대조, 포크 픽스처 실측 1,074,750,158 = 세 히스토그램 합). 서버 투영
+    (routes_scan_paths._report_total_bytes)도 같은 우선순위라 DB bytes_count 대체와 화면 값이 갈라지지 않는다.
+
+    물러남(구형 리포트): time_histograms 의 각 히스토그램(atime/
     mtime/ctime)은 **버킷별 bytes** 를 담고, 파일마다 타임스탬프가 정확히 한
     버킷에 떨어지므로 한 히스토그램의 bytes 합 == 스캔 트리의 파일 크기 합이다
-    (2026-08-23 실측: atime/mtime/ctime 세 합이 모두 일치). dscan 스키마를
-    바꾸지 않고 실 사용량을 얻는 경로라 mtime -> atime -> ctime 순으로 첫
+    (2026-08-23 실측: atime/mtime/ctime 세 합이 모두 일치). mtime -> atime -> ctime 순으로 첫
     "온전한" 히스토그램을 쓴다 -- 버킷 하나라도 bytes 가 수상하면(비정수·bool·
     음수) 그 히스토그램은 총량 출처로 부적격이라 다음 후보로 넘어간다(부분합은
     nsync 미지 단위와 같은 이유로 금지: 조용한 과소 보고). 파일 없음/JSON 깨짐/
     키 없음/타입 이상 -> 해당 값 None. bool·음수 배제는 승격 경로 _as_count와
-    같은 원칙 -- 여기서 먼저 걸러 summary 자체를 깨끗하게 유지한다."""
+    같은 원칙 -- 여기서 먼저 걸러 summary 자체를 깨끗하게 유지한다.
+
+    summary.invalid_name_entries(같은 포크 커밋 -- 이름이 엄격 UTF-8 이 아닌 항목 수, 사용자 결정 「카운터만 둠」)는 여기서
+    읽지 않는다: summary.json 은 3키 계약({returncode, files, bytes})이고, 그 카운터는 서버가 리포트를 투영해 보인다."""
     try:
         # encoding 명시: 로케일 기본 인코딩(비 UTF-8 컨테이너)에서 한글 경로가
         # 든 리포트가 UnicodeDecodeError로 터지면 fail-soft가 삼켜 조용히 NULL이 된다.
@@ -174,9 +182,17 @@ def parse_scan_counts(report_path: str) -> "tuple[int | None, int | None]":
         return None, None
     summary = report.get("summary")
     entries = summary.get("total_entries") if isinstance(summary, dict) else None
-    if isinstance(entries, bool) or not isinstance(entries, int) or entries < 0:
+    if not _is_count(entries):
         entries = None
+    exact = summary.get("total_bytes") if isinstance(summary, dict) else None
+    if _is_count(exact):
+        return entries, exact
     return entries, _scan_total_bytes(report.get("time_histograms"))
+
+
+def _is_count(v) -> bool:
+    """dscan 요약 정수인가(int·bool 아님·≥0) -- 승격 경로 _as_count·서버 투영과 같은 엄격함."""
+    return isinstance(v, int) and not isinstance(v, bool) and v >= 0
 
 
 def _scan_total_bytes(time_histograms) -> "int | None":

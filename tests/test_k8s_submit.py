@@ -813,6 +813,9 @@ _NSYNC_FOLLOWS_DST_LINKS = {"faefdaf05b8da9386671c2cee00db75efc0e9cd7", "1b93d54
 _NSYNC_BREAKS_NEW_DESTINATIONS = {"8cd72f30a7bfb075795b2128f4a3dbb74c8b31f8"}
 # --chown 뒤 권한 복사가 setuid/setgid 를 되살리던 고정값(목적지 PV 루트 소유자 chown 이 setuid-root 를 만들 수 있었다 -- 3c041e0 이 고침).
 _CHOWN_KEEPS_SETID = {"2a10a18269f1879d91f750106a4406218853bb6f"} | _NSYNC_BREAKS_NEW_DESTINATIONS | _NSYNC_FOLLOWS_DST_LINKS
+# dscan 리포트에 summary.total_bytes·invalid_name_entries 가 없던 고정값(2026-10-26 -- ae781bd 가 더함). DMS 는 그 키가 없으면
+# 히스토그램 합·모름으로 물러나므로 안전 문제는 아니지만, 포탈의 「잘못된 인코딩 이름」 카운터가 영영 「모름」이 된다.
+_DSCAN_LACKS_TOTAL_BYTES = {"3c041e059e32593b1fdf7fffdc29212dd2ae560e"} | _CHOWN_KEEPS_SETID
 
 
 def test_explicit_chown_is_for_privileged_operators_only(kclient, world):
@@ -855,13 +858,14 @@ def test_operator_chown_does_not_freeze_the_storage_owner(kclient, world, db):
 def test_job_image_pins_an_nsync_that_does_not_follow_destination_links():
     """root nsync 의 PV 목적지를 허용하는 것(planner 에 가드 없음)과 잡 이미지의 mpifileutils 고정값은 짝이다 -- 고정값을 옛 커밋으로
     되돌리면 그 짝이 깨진다. 새 커밋으로 올릴 때는 그 커밋이 nsync 목적지 걷기(5958e4e·8cd72f3)·새 목적지 루트 만들기(2a10a18)·
-    --chown 의 setuid/setgid 지우기(3c041e0)를 포함하는지 확인한다."""
+    --chown 의 setuid/setgid 지우기(3c041e0)·dscan 의 summary.total_bytes·invalid_name_entries(ae781bd)를 포함하는지 확인한다."""
     text = (Path(__file__).resolve().parent.parent / "deploy" / "docker" / "Dockerfile.mpifileutils").read_text()
     refs = re.findall(r"^ARG MPIFILEUTILS_REF=([0-9a-f]{40})$", text, flags=re.M)
     assert len(refs) == 1, refs
     assert refs[0] not in _NSYNC_FOLLOWS_DST_LINKS
     assert refs[0] not in _NSYNC_BREAKS_NEW_DESTINATIONS
     assert refs[0] not in _CHOWN_KEEPS_SETID
+    assert refs[0] not in _DSCAN_LACKS_TOTAL_BYTES
 
 
 # --- PV 목적지 결과 소유(2026-10-26 사용자 지시 -- 스토리지 기본 uid:gid, 운영자 옵션 PV 루트 소유자) ------------------------

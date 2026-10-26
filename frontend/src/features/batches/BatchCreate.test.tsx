@@ -11,6 +11,7 @@ import { beforeAll, afterAll, afterEach, test, expect } from "vitest";
 import { BatchCreate } from "./BatchCreate";
 import { SYNC_INT_FIELDS } from "../jobs/optionRules";
 import { NODE_CPU_CAP_NOTE } from "../../lib/jobTool";
+import { parseCsvHandler } from "../../test/batchCsvFake";
 
 // sync 고급 숫자 옵션의 프리필 기본값(사용자 조정 2026-08-16) — 단건 폼과 **같은**
 // 단일 출처(optionRules)를 읽는다. 프리필이라 sync 배치 바디엔 항상 실린다.
@@ -44,6 +45,8 @@ const POLICIES = [
 function renderPage(policies: object[] = POLICIES) {
   server.use(http.get("/api/user/storages", () => HttpResponse.json(STORAGES)));
   server.use(http.get("/api/admin/policies", () => HttpResponse.json(policies)));
+  // CSV 해석은 서버(2026-10-26) -- 시험용 축소판(test/batchCsvFake). 테스트가 server.use 로 덮을 수 있다.
+  server.use(parseCsvHandler());
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={qc}>
@@ -72,7 +75,8 @@ const createButton = () => screen.getByRole("button", { name: "배치 생성" })
 // 벌어 주던 시간이 없다(로딩 중 select 는 disabled 라 user-event 가 조용히 무시한다).
 async function pickStorage(label: string, value: string) {
   const sel = await screen.findByLabelText(label);
-  await within(sel).findByRole("option", { name: value });
+  // 옵션 글자 = 「이름 (백엔드)」(2026-10-26 BatchStoragePicker) -- 이름 앞부분으로 찾고 값(이름)으로 고른다.
+  await within(sel).findByRole("option", { name: new RegExp(`^${value}( |$)`) });
   await userEvent.selectOptions(sel, value);
 }
 
@@ -221,6 +225,7 @@ test("sync: CSV 붙여넣기 반영 → 소스/목적지 짝 조립", async () =
   await userEvent.click(screen.getByRole("button", { name: "CSV 붙여넣기" }));
   await userEvent.type(screen.getByLabelText("CSV"), "source,destination\na,b");
   await userEvent.click(screen.getByRole("button", { name: "테이블에 반영" }));
+  expect(await screen.findByDisplayValue("b")).toBeInTheDocument();      // 서버 해석 → 표 반영
   await userEvent.click(createButton());
   await screen.findByRole("heading", { name: "배치 b9" });
   expect(captured.body.items).toEqual([{
@@ -236,7 +241,8 @@ test("CSV 오류 행이 있으면 생성 비활성 + 행 번호 문구", async (
   await userEvent.click(screen.getByRole("button", { name: "CSV 붙여넣기" }));
   await userEvent.type(screen.getByLabelText("CSV"), "a,b\nc");
   await userEvent.click(screen.getByRole("button", { name: "테이블에 반영" }));
-  expect(await screen.findByText(/2행:/)).toBeInTheDocument();
+  // 서버 해석의 줄별 사유 -- 물리 줄 번호 + 사유 코드 문구
+  expect(await screen.findByText(/^2번째 줄: 열 수가 맞지 않거나/)).toBeInTheDocument();
   expect(createButton()).toBeDisabled();
   expect(screen.getByText("CSV 오류를 고친 뒤 다시 반영하세요")).toBeInTheDocument();
 });
@@ -953,11 +959,135 @@ test("rm: CSV 붙여넣기는 1열(target 헤더 스킵) — 2열은 오류, 반
   expect(screen.getByText(/행당 경로 1개/)).toBeInTheDocument();
   await userEvent.type(screen.getByLabelText("CSV"), "a,b");
   await userEvent.click(screen.getByRole("button", { name: "테이블에 반영" }));
-  expect(screen.getByText("1행: 경로 1개(콤마 없이)여야 합니다")).toBeInTheDocument();
+  expect(await screen.findByText(/^1번째 줄: 열 수가 맞지 않거나/)).toBeInTheDocument();
   await userEvent.clear(screen.getByLabelText("CSV"));
   await userEvent.type(screen.getByLabelText("CSV"), "target{enter}old/a{enter}old/b");
   await userEvent.click(screen.getByRole("button", { name: "테이블에 반영" }));
-  expect(screen.getByLabelText("1행 경로")).toHaveValue("old/a");
+  expect(await screen.findByDisplayValue("old/a")).toBe(screen.getByLabelText("1행 경로"));
   expect(screen.getByLabelText("2행 경로")).toHaveValue("old/b");
   expect(createButton()).toBeEnabled();
+});
+
+// ---- 서버 CSV 해석·템플릿·스토리지 드롭다운(2026-10-26 BACKLOG C) -----------------------------------------------
+
+test("CSV 반영은 서버 해석을 부른다 -- 고른 배치 스토리지를 함께 보내고, rm 겹침은 줄 번호로 말하며 표를 덮지 않는다", async () => {
+  const bodies: any[] = [];
+  renderPage(RM_POLICIES);
+  server.use(parseCsvHandler((b) => bodies.push(b)));
+  await userEvent.selectOptions(screen.getByLabelText("연산"), "rm");
+  await pickStorage("스토리지", "s1");
+  await userEvent.click(screen.getByRole("button", { name: "CSV 붙여넣기" }));
+  await userEvent.type(screen.getByLabelText("CSV"), "target{enter}old/a{enter}old/a/sub");
+  await userEvent.click(screen.getByRole("button", { name: "테이블에 반영" }));
+  const errs = await screen.findByRole("list", { name: "반영할 수 없는 줄" });
+  expect(errs).toHaveTextContent("3번째 줄: 한 rm 배치에 같은 경로가 두 번 있거나");
+  expect(errs).toHaveTextContent("(2번째 줄과 겹침)");
+  expect(bodies).toEqual([{ operation: "rm", csv: "target\nold/a\nold/a/sub", storage: "s1" }]);
+  // 부분 반영 금지 -- 표는 그대로(빈 1행), 생성은 잠긴다
+  await userEvent.click(screen.getByRole("button", { name: "테이블 편집" }));
+  expect(screen.getByLabelText("1행 경로")).toHaveValue("");
+  expect(screen.queryByLabelText("2행 경로")).toBeNull();
+  expect(createButton()).toBeDisabled();
+});
+
+test("스토리지를 아직 고르지 않았으면 CSV 의 스토리지 열(서버가 돌려준 storages)로 채운다", async () => {
+  renderPage();
+  server.use(http.post("/api/admin/batches:parse-csv", () => HttpResponse.json({
+    items: [{ storage: "s2", target: "x" }], errors: [], error_count: 0, rows: 1,
+    header: ["storage", "target"], storages: { storage: "s2" } })));
+  await screen.findByRole("option", { name: /^s2 / });
+  await userEvent.click(screen.getByRole("button", { name: "CSV 붙여넣기" }));
+  await userEvent.type(screen.getByLabelText("CSV"), "storage,target{enter}s2,x");
+  await userEvent.click(screen.getByRole("button", { name: "테이블에 반영" }));
+  expect(await screen.findByDisplayValue("x")).toBe(screen.getByLabelText("1행 경로"));
+  expect(screen.getByLabelText("스토리지")).toHaveValue("s2");
+});
+
+test("서버 해석 요청이 통째로 실패하면(413) 사유 문구를 오류 줄에 보이고 생성은 잠긴다", async () => {
+  renderPage();
+  server.use(http.post("/api/admin/batches:parse-csv", () =>
+    HttpResponse.json({ detail: "batch_csv_too_large" }, { status: 413 })));
+  await pickStorage("스토리지", "s1");
+  await userEvent.click(screen.getByRole("button", { name: "CSV 붙여넣기" }));
+  await userEvent.type(screen.getByLabelText("CSV"), "a");
+  await userEvent.click(screen.getByRole("button", { name: "테이블에 반영" }));
+  expect(await screen.findByText("CSV 가 너무 큽니다(최대 2 MiB) — 나눠서 올리세요")).toBeInTheDocument();
+  expect(createButton()).toBeDisabled();
+});
+
+test("「템플릿 받기」는 지금 연산의 서버 템플릿으로 가는 다운로드 링크다", async () => {
+  renderPage();
+  const link = await screen.findByRole("link", { name: "템플릿 받기" });
+  expect(link).toHaveAttribute("href", "/api/admin/batches/csv-template?operation=scan");
+  expect(link).toHaveAttribute("download");
+  await userEvent.selectOptions(screen.getByLabelText("연산"), "sync");
+  expect(screen.getByRole("link", { name: "템플릿 받기" }))
+    .toHaveAttribute("href", "/api/admin/batches/csv-template?operation=sync");
+});
+
+test("스토리지 드롭다운: 종류별 묶음 + 「이름 (백엔드)」, 고르면 백엔드·종류·관리 디렉토리 캡션", async () => {
+  server.use(http.get("/api/user/storages", () => HttpResponse.json([
+    { storage_name: "s1", backend_type: "cephfs", status: "Ready", managed_root: "/cephfs/managed", kind: "filesystem" },
+    { storage_name: "g1", backend_type: "gpfs", status: "Ready", kind: "both", admin_only: true },
+    { storage_name: "n1", backend_type: "nfs", status: "Ready", kind: "pv" },
+  ])));
+  server.use(http.get("/api/admin/policies", () => HttpResponse.json(POLICIES)));
+  server.use(parseCsvHandler());
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={qc}><MemoryRouter initialEntries={["/admin/batches/new"]}>
+    <Routes><Route path="/admin/batches/new" element={<BatchCreate />} /></Routes>
+  </MemoryRouter></QueryClientProvider>);
+  const sel = await screen.findByLabelText("스토리지");
+  await within(sel).findByRole("option", { name: "s1 (cephfs)" });
+  const groups = within(sel).getAllByRole("group");
+  expect(groups.map((g) => g.getAttribute("label"))).toEqual(["파일시스템", "PV·파일시스템", "PV"]);
+  expect(within(groups[1]).getByRole("option", { name: "g1 (gpfs) · 관리자 전용" })).toBeInTheDocument();
+  expect(within(groups[2]).getByRole("option", { name: "n1 (nfs)" })).toBeInTheDocument();
+  await userEvent.selectOptions(sel, "s1");
+  expect(screen.getByText("cephfs · 파일시스템 · 관리 디렉토리: /cephfs/managed — 입력 경로는 이 아래 상대경로입니다"))
+    .toBeInTheDocument();
+});
+
+test("스토리지 목록이 비면 스토리지 관리로 가는 길을 말한다", async () => {
+  server.use(http.get("/api/user/storages", () => HttpResponse.json([])));
+  server.use(http.get("/api/admin/policies", () => HttpResponse.json(POLICIES)));
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={qc}><MemoryRouter initialEntries={["/admin/batches/new"]}>
+    <Routes><Route path="/admin/batches/new" element={<BatchCreate />} /></Routes>
+  </MemoryRouter></QueryClientProvider>);
+  expect(await screen.findByRole("option", { name: "등록된 스토리지가 없습니다" })).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "스토리지 관리" })).toHaveAttribute("href", "/admin/storages");
+});
+
+// 2026-10-26 사용자 결정 (4): 직접 경로 목적지의 스토리지가 PV 를 담는 종류면 그 스토리지 기본 소유자(서버가 자식 생성 때 항목마다
+// 정해 얼린다 -- pv 는 늘, both 는 항목 경로가 PV 루트 아래일 때만). 목적지 스토리지 종류에 따라 안내·요약이 바뀐다.
+test("sync 배치 목적지 소유: pv 종류는 스토리지 기본 소유자, 겸용은 「PV 루트 아래면」, 파일시스템은 소스 그대로", async () => {
+  server.use(http.get("/api/user/storages", () => HttpResponse.json([
+    { storage_name: "s1", backend_type: "cephfs", status: "Ready", managed_root: "/cephfs/managed", kind: "filesystem",
+      default_owner: "0:0" },
+    { storage_name: "g1", backend_type: "gpfs", status: "Ready", kind: "both", default_owner: "2500:2600" },
+    { storage_name: "n1", backend_type: "nfs", status: "Ready", kind: "pv", default_owner: "1500:1500" },
+  ])));
+  server.use(http.get("/api/admin/policies", () => HttpResponse.json(POLICIES)));
+  server.use(parseCsvHandler());
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={qc}><MemoryRouter initialEntries={["/admin/batches/new"]}>
+    <Routes><Route path="/admin/batches/new" element={<BatchCreate />} /></Routes>
+  </MemoryRouter></QueryClientProvider>);
+  await userEvent.selectOptions(await screen.findByLabelText("연산"), "sync");
+  await pickStorage("소스 스토리지", "s1");
+  const note = () => screen.getByRole("note", { name: "목적지 조건과 소유권" });
+  const row = () => screen.getByText("목적지 소유", { selector: "dt" }).closest("div") as HTMLElement;
+  await pickStorage("목적지 스토리지", "n1");
+  expect(row()).toHaveTextContent("목적지 스토리지 기본 소유자 1500:1500(직접 경로)");
+  expect(note()).toHaveTextContent("결과는 목적지 스토리지 기본 소유자 1500:1500 로 맞춰집니다");
+  await pickStorage("목적지 스토리지", "g1");
+  expect(row()).toHaveTextContent("PV 루트 아래면 목적지 스토리지 기본 소유자 2500:2600, 아니면 소스 그대로");
+  await userEvent.selectOptions(screen.getByLabelText("목적지 스토리지"), "s1");
+  expect(row()).toHaveTextContent("소스의 소유자·그룹 그대로(root 실행)");
+  // 명시 chown 이 이긴다
+  await pickStorage("목적지 스토리지", "n1");
+  await userEvent.click(screen.getByText("고급 옵션"));
+  await userEvent.type(screen.getByLabelText("chown"), "7:7");
+  expect(row()).toHaveTextContent("chown 지정값 7:7");
 });

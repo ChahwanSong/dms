@@ -108,7 +108,7 @@ class BatchesRepository:
           batch_request_count        재실행 이력을 포함한 전체 자식 수(requests.batch_id -- 항목 참조가 아니다). **cap 을
                                      넘으면 cap + 1 에서 멈춘다**(아래 batch_request_count_capped)
           batch_request_count_capped 자식이 cap 을 넘어 세기를 멈췄다 -- 그 배치는 어차피 배치 단위로 지울 수 없다
-                                     (delete_batch 의 batch_delete_too_large). 화면은 「1000개 초과」로 보인다
+                                     (delete_batch 의 batch_delete_too_large). 화면은 「삭제 상한 초과」로 보인다
           batch_live_request_count   비종단 자식 수(0 은 정상값). capped 면 None(세지 않았다 -- 모름)
           batch_succeeded_scan_count 성공 scan 잡(사용량 분석 지점 -- data_jobs._scan_target_where)을 가진 자식 수.
                                      비 scan 배치는 0(모름이 아니라 확정값). capped 면 None(세지 않았다)
@@ -657,7 +657,7 @@ class BatchesRepository:
                  "a": dump_json({"auto_confirm_by": None}), "at": now})
         return True
 
-    def delete(self, batch_id):
+    def delete(self, batch_id, *, actor: str = "system") -> "bool | None":
         """배치 삭제: batches 행 + batch_items 행만, 한 트랜잭션. 자식
         requests/data_jobs/results 는 **보존**한다 — 실행 감사 이력이고,
         requests.batch_id 는 역사적 표식으로 남는다(배치 역참조가 404 가 되는
@@ -670,12 +670,40 @@ class BatchesRepository:
         정체한다). 이 메서드로 배치 기록을 지운 뒤 남는 자식(배치 행이 없는 batch_id)은
         작업 목록의 배치 기록 없는 묶음(배치 칸 「기록 없음 xxxxxxxxxxxx」)으로 **배치 단위** 삭제할 수 있다
         (request_purges.delete_batch, 2026-10-10 -- 자식 전부 + 남은 항목을 한 트랜잭션).
-        그래서 이 메서드는 「배치 기록만 정리하고 실행 이력은 남긴다」는 쓰임새로 남는다."""
+        그래서 이 메서드는 「배치 기록만 정리하고 실행 이력은 남긴다」는 쓰임새로 남는다.
+
+        CAS + 감사(2026-10-26, BACKLOG C): 반환 True = 지움, None = 배치 행이 없다(라우트 404), False = 종단
+        (Completed/Cancelled)이 아니다(아무것도 지우지 않았다 -- 라우트 409 batch_record_changed). 예전엔 라우트가 읽고
+        종단을 본 뒤 이 메서드가 무조건 지워, 그 사이 :rescan·항목 추가로 다시 돌기 시작한 배치의 기록이 지워졌다(자식만
+        남아 orchestrator 가 굴릴 배치가 사라진다). 이제 종단 판정을 같은 트랜잭션의 잠근 행으로 하고 DELETE 자체도
+        `AND status IN 종단` 이다(PG: batch_items → batches 순으로 잠근다 -- _lock_items_then_batch, 오케스트레이터
+        _record_terminal 과 같은 방향이라 교착이 없다). 감사 행 ('batch','delete_record') 의 before = 지운 기록의 요약(이름·상태·
+        연산·항목 수·성공/실패 수·요청자·생성 시각) -- 배치 단위 삭제(request_purges.delete_batch 의 ('batch','delete'))와
+        구별한다: 이쪽은 작업을 남기고 기록만 지웠다. actor 기본값 "system" 은 테스트 픽스처용이다 -- 라우트는 늘 세션 관리자를
+        넘긴다."""
+        now = utc_now_iso()
         with self._db.transaction():
+            batch, _ = self._lock_items_then_batch(batch_id, with_items=False)
+            if batch is None:
+                return None
+            if batch["status"] not in ("Completed", "Cancelled"):
+                return False
+            n = self._db.execute_count(
+                "DELETE FROM batches WHERE batch_id = :b AND status IN ('Completed', 'Cancelled')",
+                {"b": batch_id})
+            if n != 1:
+                return False
             self._db.execute("DELETE FROM batch_items WHERE batch_id = :b",
                              {"b": batch_id})
-            self._db.execute("DELETE FROM batches WHERE batch_id = :b",
-                             {"b": batch_id})
+            self._db.execute(
+                """INSERT INTO audit_log (mutation_class, operation, target_key, actor,
+                       before_state, after_state, at)
+                   VALUES ('batch', 'delete_record', :key, :actor, :b, NULL, :at)""",
+                {"key": batch_id, "actor": actor, "at": now,
+                 "b": dump_json({k: batch.get(k) for k in (
+                     "name", "status", "operation", "item_count", "succeeded_count", "failed_count",
+                     "requester_id", "created_at")})})
+        return True
 
     def set_status(self, batch_id, status):
         self._db.execute(

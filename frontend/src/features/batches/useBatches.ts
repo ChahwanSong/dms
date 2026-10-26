@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient,
          type QueryClient } from "@tanstack/react-query";
 import { ApiError, apiGet, apiSend } from "../../lib/api";
 import type { Batch, BatchDetail, RequestScanStats } from "../../lib/types";
+import type { CsvParseResult } from "../../lib/csv";
 
 // 서버 routes_batches._TERMINAL_BATCH 의 거울. 상세 폴링 중지와 목록의 "삭제 가능"
 // 판정이 같은 한 벌을 쓴다 — 두 벌로 갈라지면 화면이 지우지 못할 배치를 지울 수
@@ -46,6 +47,15 @@ export interface CreateBatchBody {
 export const useCreateBatch = () =>
   useMutation({ mutationFn: (b: CreateBatchBody) =>
     apiSend<{ batch_id: string; status: string }>("POST", "/api/admin/batches", b) });
+// CSV 해석(2026-10-26 — 서버 batch_csv): 생성·「CSV로 전체 교체」가 같은 해석을 쓴다. 읽기 전용(배치를 바꾸지 않는다)이라
+// 무효화할 쿼리가 없다. 스토리지는 화면이 이미 고른 값(없으면 생략 — 서버가 CSV 의 스토리지 열에서 찾는다).
+export interface ParseBatchCsvBody {
+  operation: string; csv: string;
+  storage?: string; source_storage?: string; destination_storage?: string;
+}
+export const useParseBatchCsv = () =>
+  useMutation({ mutationFn: (b: ParseBatchCsvBody) =>
+    apiSend<CsvParseResult>("POST", "/api/admin/batches:parse-csv", b) });
 // 배치 mutation 뒤 화면 갱신 계약(사용자 보고 2026-08-15: "삭제 후 새로고침이
 // 안되고 화면에 남아있다"). 실측 결론: 무효화 **키**는 네 삭제 경로 모두 맞았고
 // (상세 ["batch", id] + 목록 ["batches"]) 어긋난 건 **시점**이다 — 콜백이
@@ -173,7 +183,8 @@ export const useAddBatchItem = (id: string) =>
 export const useReplaceBatchItems = (id: string) =>
   _itemMutation(id, (items: Record<string, unknown>[]) =>
     apiSend("PUT", `/api/admin/batches/${id}/items`, { items }));
-// 배치 삭제(종단 배치만 — 서버 batch_not_deletable 가드). 성공 시 상세 쿼리는
+// 배치 삭제(종단 배치만 — 서버 batch_not_deletable 가드, 2026-10-26 부터 세션 관리자·CAS — 그 사이 다시 돌기 시작했으면
+// 409 batch_record_changed, 감사 행 ('batch','delete_record')). 성공 시 상세 쿼리는
 // invalidate 가 아니라 **제거**한다: 삭제된 배치의 상세를 다시 조회하면 404 를
 // 새로 받아 오류 화면이 되는데, 화면은 목록으로 떠난 뒤다(리페치가 소음).
 //

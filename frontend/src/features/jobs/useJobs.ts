@@ -196,7 +196,9 @@ export interface DeleteSelection {
   request_ids: string[];
   batches: { batch_id: string; expected_request_count: number }[];
 }
-export function useDeleteRequests() {
+// onDeleted(2026-10-26, 요청 상세의 단건 삭제): 캐시를 지우기 **전에** 결과를 받는 자리. 상세 화면은 지운 요청의 쿼리가 제거되는
+// 순간 다시 조회해 404(「없는 요청」)를 그렸다가 이동했다 — 먼저 이동(navigate)하면 화면이 사라진 뒤에 지운다. 목록은 쓰지 않는다.
+export function useDeleteRequests(opts: { onDeleted?: (r: DeleteRequestsResult) => void } = {}) {
   const qc = useQueryClient();
   // 지운 요청 하나의 캐시(상세·잡 목록·scan 통계)와 그 잡들의 캐시(아티팩트 목록·파일·로그)를 제거한다.
   const dropRequest = (rid: string) => {
@@ -210,6 +212,7 @@ export function useDeleteRequests() {
     mutationFn: (sel: DeleteSelection) =>
       apiSend<DeleteRequestsResult>("POST", "/api/admin/requests:delete", sel),
     onSuccess: (r) => {
+      opts.onDeleted?.(r);
       for (const d of r.deleted) {
         dropRequest(d.request_id);
         d.job_ids.forEach(dropJob);

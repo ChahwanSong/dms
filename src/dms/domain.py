@@ -156,6 +156,61 @@ def validate_rm_target(target: str, options: dict) -> str:
     return normalized
 
 
+# 요청 사이 경로 겹침(2026-10-27 사용자 결정 -- BACKLOG 「rm 경로의 다른 요청·배치와의 겹침 판정」, 배치 rm 의 열린 결정 D4).
+# 두 작업이 **같은 스토리지 이름** 위에서 같은 경로이거나 한쪽이 다른 쪽의 조상이면 겹친다(정규화 경로의 **성분** 단위 --
+# a/b 와 a/bc 는 안 겹친다). 겹침이 충돌인 것은 한쪽이라도 파괴적(rm)일 때뿐이다: rm↔rm·rm↔sync(소스·목적지 둘 다)·
+# rm↔scan. sync↔sync(resource_key 정확 일치만 resource_conflict)·scan↔비 rm 은 전과 같다. 집행은 두 층이 이 함수들 하나를
+# 쓴다 -- planner(계획 시점에 늦게 온 쪽을 Conflict path_conflict 로 끝낸다)와 stepper 실행 관문(실행 측 단계를 내기 직전
+# 보류 -- 이 기능 전에 계획된 행·DB 직접 쓰기·경합의 그물, stepper._overlap_hold).
+def overlap_path(path) -> str:
+    """겹침 판정용 정규화 상대경로 -- "" 는 스토리지 루트(무엇과도 겹친다). 실행이 경로를 잇는 규칙(managed_abs_path -- 앞 '/'
+    를 떼고 managed_root 에 join)과 같은 곳을 같은 문자열로 읽는다: 앞뒤 '/'·'//'·'.' 성분은 같은 경로다. 해석할 수 없는 값
+    (비문자열·NUL·'..' 성분)은 루트로 본다 -- 무엇을 건드릴지 모르면 전부를 건드린다고 본다(fail-closed, DB 가 신뢰 경계다.
+    그런 행의 실행은 stepper._abs·러너 봉쇄가 따로 끊는다 -- 겹침 판정이 그 거부를 대신하지 않는다)."""
+    if not isinstance(path, str) or "\x00" in path or any(p == ".." for p in path.split("/")):
+        return ""
+    norm = posixpath.normpath(path.lstrip("/") or ".")
+    return "" if norm == "." else norm
+
+
+def overlap_sides(operation, *, storage=None, target=None, source_storage=None, source=None,
+                  destination_storage=None, destination=None) -> tuple:
+    """한 작업이 건드리는 쪽들 -- ((쪽 이름, 스토리지, overlap_path), ...). sync = 소스·목적지 두 쪽, 그 밖(rm·scan·미지 연산)
+    = (storage, target) 한 쪽: stepper._build_spec 이 실행 경로를 고르는 분기(op == "sync")와 같다. 스토리지 이름이 비문자열·
+    빈 값인 쪽은 뺀다(그 이름으로는 실행되지 않는다 -- stepper._managed_root 가 storage_missing_at_step 으로 끊는다). PV 주소
+    요청은 제출이 이미 (스토리지, PV 루트 아래 경로)로 풀어 payload·잡 행의 같은 키에 실었다(k8s_access 모듈 docstring)."""
+    if operation == Operation.SYNC.value:
+        raw = (("source", source_storage, source), ("destination", destination_storage, destination))
+    else:
+        raw = (("target", storage, target),)
+    return tuple((role, name, overlap_path(path)) for role, name, path in raw if isinstance(name, str) and name)
+
+
+def destructive_operation(operation) -> bool:
+    """겹침 충돌의 「파괴적인 쪽」인가 -- rm, 그리고 DB 변조로 들어온 미지 연산(fail-closed, confirm_gated 와 같은 방향).
+    scan(읽기)·sync 는 아니다(sync↔sync 는 resource_key 정확 일치만 본다). 잡 행은 실행 파일(tool)이 drm 이면 연산과 무관하게
+    파괴적이다 -- stepper 가 그 조건을 더한다."""
+    return operation not in (Operation.SCAN.value, Operation.SYNC.value)
+
+
+def _overlap_paths(a: str, b: str) -> bool:
+    return a == "" or b == "" or a == b or a.startswith(b + "/") or b.startswith(a + "/")
+
+
+def path_conflict(a_destructive, a_sides, b_destructive, b_sides) -> "tuple | None":
+    """두 작업의 경로 겹침 충돌 -- 없으면 None, 있으면 처음 찾은 (a 의 쪽, b 의 쪽) 짝(overlap_sides 의 원소). 한쪽이라도
+    파괴적이어야 충돌이다. 같은 스토리지 **이름**끼리만 비교한다 -- 루트가 포개진 서로 다른 스토리지(/c/m 과 /c/m/t)는 보지
+    않는다(두 작업이 한 노드의 같은 이름 공간에서 도는지 알 수 없다; sync_overlap_problem 이 dsync 에서만 실제 경로를 보는 것과
+    같은 이유)."""
+    if not (a_destructive or b_destructive):
+        return None
+    for side_a in a_sides:
+        for side_b in b_sides:
+            if side_a[1] == side_b[1] and _overlap_paths(side_a[2], side_b[2]):
+                return side_a, side_b
+    return None
+
+
 # owner_username 모양(2026-10-25 dms-k8s 설계 §6): DMS 계정 아이디 규칙과 **같은** 규칙
 # (repositories/accounts._USERNAME_RE -- tests/test_k8s_submit.py 가 두 패턴의 일치를 고정한다). 실행 신원은 맵핑 ID(= DMS
 # 계정 아이디, RoleBinding 이름 앞부분의 '-' → '.')라 숫자로 시작할 수 있다 -- LDAP 시절 규칙([A-Za-z_] 시작)이면 운영자의
@@ -465,22 +520,49 @@ def _reject_overlapping_rm_targets(items) -> None:
     비교는 validate_relative_path 정규화 뒤 경로 **성분** 단위다(a 와 ab·「a b」는 겹치지 않는다). 형식이 틀린 대상은
     건너뛴다 -- 정확한 사유(unsafe_path·rm_root_forbidden)는 뒤이은 build_data_payload 가 낸다. 판정 집합은 항목 전체
     (종단 항목 포함 -- 단일 스토리지 판정과 같은 집합이고, 생성·추가·수정·교체가 모두 이 함수를 지난다). 포탈
-    (lib/rmTargets.ts)이 같은 규칙으로 제출 전에 즉답한다. 다른 요청·배치와의 겹침은 여기서 보지 않는다(BACKLOG)."""
-    seen: set[str] = set()
-    for i in items:
-        t = i.get("target") if isinstance(i, dict) else None
+    (lib/rmTargets.ts)이 같은 규칙으로 제출 전에 즉답한다. 다른 요청·배치와의 겹침은 여기서 보지 않는다 -- 계획 시점의
+    planner 1b(path_conflict)와 stepper 실행 관문이 본다(2026-10-27, path_conflict 주석).
+    판정은 rm_target_overlaps 하나다 -- CSV 해석(batch_csv)이 같은 함수로 줄마다 사유를 단다(두 벌이면 어긋난다)."""
+    found = rm_target_overlaps([i.get("target") if isinstance(i, dict) else None for i in items])
+    if found:
+        subject, _other, other_norm, kind = found[0]
+        raise DomainValidationError("batch_rm_targets_overlap", f"item {subject}: {kind} {other_norm!r}")
+
+
+def rm_target_overlaps(targets) -> "list[tuple[int, int, str, str]]":
+    """rm 대상 목록(입력 순서)의 겹침 -- (주어 index, 상대 index, 상대의 정규화 경로, "duplicate" | "inside") 목록, 주어
+    index 순. 겹침이 없으면 빈 목록. 주어는 「그 항목을 지우거나 고치면 풀리는 쪽」이다: 같은 경로 두 번이면 뒤에 나온 쪽,
+    조상·자손이면 자손 쪽(상위 경로가 하위를 함께 지운다) -- 포탈 lib/rmTargets.ts rmTargetOverlaps 와 같은 규칙이고, 자손이
+    여러 조상 아래면 가장 짧은 조상 하나만 말한다. 정규화는 validate_relative_path(성분 단위 -- a 와 ab 는 겹치지 않는다),
+    형식이 틀리거나 문자열이 아닌 대상은 건너뛴다(그 사유는 build_data_payload 가 따로 낸다).
+
+    _reject_overlapping_rm_targets(배치 생성·항목 편집의 422)와 batch_csv(CSV 해석의 줄별 사유)가 이 함수 하나를 쓴다."""
+    norms: list[str | None] = []
+    for t in targets:
         if not isinstance(t, str):
+            norms.append(None)
             continue
         try:
-            n = validate_relative_path(t)
+            norms.append(validate_relative_path(t))
         except DomainValidationError:
+            norms.append(None)
+    first_at: dict[str, int] = {}
+    for i, n in enumerate(norms):
+        if n is not None and n not in first_at:
+            first_at[n] = i
+    out: list[tuple[int, int, str, str]] = []
+    for i, n in enumerate(norms):
+        if n is None:
             continue
-        if n in seen:
-            raise DomainValidationError("batch_rm_targets_overlap", f"duplicate {n!r}")
-        seen.add(n)
-    for n in sorted(seen):
+        seen = first_at[n]
+        if seen != i:
+            out.append((i, seen, n, "duplicate"))
+            continue
         parts = n.split("/")
         for k in range(1, len(parts)):
             anc = "/".join(parts[:k])
-            if anc in seen:
-                raise DomainValidationError("batch_rm_targets_overlap", f"{anc!r} contains {n!r}")
+            owner = first_at.get(anc)
+            if owner is not None:
+                out.append((i, owner, anc, "inside"))
+                break
+    return out

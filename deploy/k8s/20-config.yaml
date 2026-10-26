@@ -121,6 +121,11 @@ data:
   # 간격(초, 실패 백오프의 기준 단위 -- 상한 900초). 둘 다 기본값과 같다.
   DMS_REQUEST_DELETE_QUIET_SECONDS: "60"
   DMS_REQUEST_PURGE_INTERVAL_SECONDS: "15"
+  # 결과 파일 자동 만료(2026-10-26, 컨트롤러 artifact-expiry 루프): 종단 뒤 이 일수가 지난 잡의 결과 파일(아티팩트 base 의
+  # <job_id> 디렉터리 -- stdout·stderr·summary·scan 리포트)을 위 request-purge 루프(떼어냄 + purge 파드)가 지운다. 요청·잡
+  # 기록과 결과 수치는 남고 포탈엔 「결과 파일 만료됨」이 뜬다(열람 API 410 artifact_expired). 0 = 끔. 바꾸면 dms-controller
+  # 재시작(api 는 화면 표시용으로 읽는다 -- dms-api 도 재시작). 기본값과 같다(사이트 중립).
+  DMS_ARTIFACT_RETENTION_DAYS: "1500"
 
   # --- agent report cadence (AgentSettings.from_env; consumed via
   #     configMapKeyRef in 50-agent-daemonset.yaml, NOT envFrom, since the

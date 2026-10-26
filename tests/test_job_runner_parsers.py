@@ -469,3 +469,43 @@ def test_scan_counts_survive_non_utf8_report_path(tmp_path):
     p.write_bytes(head.encode() + b', "broken_paths": [{"path": "/x/\xb4\xd9\xbf\xee/a.exe",'
                   b' "reasons": ["abnormal_time"]}]}')
     assert parse_scan_counts(str(p)) == (510971, 123)
+
+
+# ---- 2026-10-26: dscan 포크 ae781bd 의 summary.total_bytes ----
+# 실측 모양(포크 테스트 픽스처 -- 0/1/4096/1000000 B 파일, 1 GiB sparse, 하드 링크, 심링크, FIFO, 비 UTF-8 이름들): summary 의
+# scan_errors 뒤에 total_bytes·invalid_name_entries 두 키가 붙고 나머지 키·순서는 그대로. total_bytes == 세 히스토그램 합.
+NEW_SUMMARY = {"total_entries": 38, "total_files": 31, "total_directories": 4, "total_symlinks": 2, "total_other": 1,
+               "scan_errors": 0, "total_bytes": 1074750158, "invalid_name_entries": 15}
+
+
+def test_scan_bytes_prefer_summary_total_bytes(tmp_path):
+    hist = _age_buckets([1074750158, 0, 0])
+    report = {**DSCAN_REPORT, "summary": NEW_SUMMARY,
+              "time_histograms": {"atime": hist, "mtime": hist, "ctime": hist}}
+    assert parse_scan_counts(_write_report(tmp_path, report)) == (38, 1074750158)
+    # 두 출처가 갈라지면(포크는 매 실행 대조하지만) summary 의 정확값이 이긴다
+    report = {**DSCAN_REPORT, "summary": {**NEW_SUMMARY, "total_bytes": 7}}
+    assert parse_scan_counts(_write_report(tmp_path, report)) == (38, 7)
+    # 0 은 값이다(빈 트리) -- 히스토그램으로 물러나지 않는다
+    report = {**DSCAN_REPORT, "summary": {**NEW_SUMMARY, "total_bytes": 0}}
+    assert parse_scan_counts(_write_report(tmp_path, report)) == (38, 0)
+
+
+def test_scan_bytes_fall_back_to_histograms_for_old_or_bad_total_bytes(tmp_path):
+    # 구형 리포트·옛 잡 이미지(키 없음)는 히스토그램 합 그대로(저장된 리포트가 계속 값을 낸다)
+    assert parse_scan_counts(_write_report(tmp_path, DSCAN_REPORT)) == (10, 50)
+    # 수상한 값(음수·실수·bool·문자열·null)은 쓰지 않고 히스토그램 합으로 물러난다(fail-soft)
+    for bad in (-1, 1.5, True, "1074750158", None, [1]):
+        report = {**DSCAN_REPORT, "summary": {**DSCAN_REPORT["summary"], "total_bytes": bad}}
+        assert parse_scan_counts(_write_report(tmp_path, report)) == (10, 50), bad
+    # 둘 다 없으면 모름
+    report = {**DSCAN_REPORT, "summary": {**DSCAN_REPORT["summary"], "total_bytes": -1}, "time_histograms": {}}
+    assert parse_scan_counts(_write_report(tmp_path, report)) == (10, None)
+
+
+def test_scan_summary_total_bytes_survives_non_utf8_names(tmp_path):
+    # 새 리포트도 broken_paths 에 이름 바이트를 그대로 쓴다 -- replace 로 읽어 숫자를 지킨다
+    head = json.dumps({"summary": NEW_SUMMARY, "time_histograms": {}, "broken_paths_total": 1})[:-1]
+    p = tmp_path / "dscan-report.json"
+    p.write_bytes(head.encode() + b', "broken_paths": [{"path": "/x/\xc0\xaf/\xed\xa0\x80", "reasons": ["missing"]}]}')
+    assert parse_scan_counts(str(p)) == (38, 1074750158)

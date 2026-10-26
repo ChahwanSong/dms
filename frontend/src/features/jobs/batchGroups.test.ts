@@ -66,7 +66,7 @@ test("groupBatches: 불러온 행이 하나라도 끝나지 않았으면 서버 
     r("7", { batch_id: "f".repeat(32), state: "Conflict" }),                    // Conflict 는 요청 종단
   ]);
   expect(g.get(BID)!.block).toBe("live");
-  // 1000개 초과가 끝나지 않은 작업보다 앞선 사유다 -- 서버(delete_batch)의 판정 순서와 같다(2026-10-11: 상한을 넘는 배치는
+  // 상한(MAX_BATCH_CHILDREN) 초과가 끝나지 않은 작업보다 앞선 사유다 -- 서버(delete_batch)의 판정 순서와 같다(2026-10-11: 상한을 넘는 배치는
   // 서버가 세기를 멈춰 끝나지 않은 자식 수를 모른다).
   expect(g.get(big)!.block).toBe("too_large");
   expect(g.get(act)!.block).toBe("active");

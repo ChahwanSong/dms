@@ -6,6 +6,7 @@ CRD처럼) dict 그대로 온 객체는 camelCase 키를 준다. 여기서 한 �
 보고한다(설계 §4). 판정 함수는 정규화된 dict만 받는다.
 
 판정 함수는 순수하다 -- I/O도 전역 상태도 없다. 기준 시각(since)은 인자로 받는다."""
+import re
 from datetime import datetime, timezone
 
 _TS_FMT = "%Y-%m-%dT%H:%M:%SZ"      # db.utc_now_iso()와 같은 포맷
@@ -21,6 +22,111 @@ def _images(obj):
     template = spec.get("template") or {}
     pod_spec = template.get("spec") or {}
     return {c.get("name"): c.get("image")
+            for c in (pod_spec.get("containers") or []) if c.get("name")}
+
+
+# --- securityContext 관측(2026-10-26, BACKLOG 「securityContext 드리프트는 배지가 못 본다」) -------------------------
+# 포탈 롤아웃(rollout_runner.image_patch_body)은 이미지만 patch 한다 -- 40/41 을 kubectl apply 하지 않은 사이트는 새 이미지를
+# 옛 securityContext(예: d128 이전 65532)로 굴리고 3홉 artifact_base_not_writable 로만 드러났다. 그래서 라이브 파드 템플릿의
+# 실효 securityContext 를 이 축으로 접어 동봉 매니페스트 값(manifest_tags.manifest_security_contexts)과 비교한다.
+# 필드명은 k8s 원문(camelCase)이 화면 어휘다. run_as_* 셋은 파드 수준(PodSecurityContext)에도 있어 **실효값** = 컨테이너 값,
+# 없으면 파드 값(k8s 의 우선순위)으로 접는다 -- 한쪽만 컨테이너로 옮겨도 거짓 드리프트가 나지 않게.
+SECURITY_FIELDS = ("runAsUser", "runAsGroup", "runAsNonRoot", "allowPrivilegeEscalation",
+                   "readOnlyRootFilesystem", "privileged", "capabilities.add", "capabilities.drop")
+_SC_KEYS = {  # 화면 이름 -> (snake, camel)
+    "runAsUser": ("run_as_user", "runAsUser"),
+    "runAsGroup": ("run_as_group", "runAsGroup"),
+    "runAsNonRoot": ("run_as_non_root", "runAsNonRoot"),
+    "allowPrivilegeEscalation": ("allow_privilege_escalation", "allowPrivilegeEscalation"),
+    "readOnlyRootFilesystem": ("read_only_root_filesystem", "readOnlyRootFilesystem"),
+    "privileged": ("privileged", "privileged"),
+}
+_POD_LEVEL = ("runAsUser", "runAsGroup", "runAsNonRoot")
+_INT_FIELDS = ("runAsUser", "runAsGroup")
+_INT_RE = re.compile(r"-?[0-9]{1,19}")       # ASCII 숫자만(유니코드 숫자 「²」는 int() 가 터진다)
+
+
+class _Unreadable(ValueError):
+    """값을 정규화할 수 없다 -- 그 컨테이너의 관측 전체가 None(모름)이 된다(거짓 경보보다 침묵)."""
+
+
+def _coerce(field, value):
+    """int/bool 필드를 한 형으로 접는다. 매니페스트 파서는 '0'·'false' 같은 문자열을, to_dict()·원시 dict 는 원래 형을
+    준다. bool 은 int 의 하위형이라 runAsUser 에 True 가 오면 1 로 읽히지 않게 막는다."""
+    if value is None:
+        return None
+    if field in _INT_FIELDS:
+        if isinstance(value, bool):
+            raise _Unreadable(field)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and _INT_RE.fullmatch(value.strip()):
+            return int(value.strip())
+        raise _Unreadable(field)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.strip().lower() in ("true", "false"):
+        return value.strip().lower() == "true"
+    raise _Unreadable(field)
+
+
+def _caps(value):
+    """capabilities.add/drop -> 정렬된 이름 목록. 빈 목록은 None(부재)과 같은 뜻이라 None 으로 접는다."""
+    if value is None:
+        return None
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        raise _Unreadable("capabilities")
+    return sorted(value) or None
+
+
+def _pick(mapping, field):
+    snake, camel = _SC_KEYS[field]
+    value = mapping.get(snake)
+    return mapping.get(camel) if value is None else value
+
+
+def security_context_view(container_sc, pod_sc=None) -> "dict | None":
+    """컨테이너(+파드) securityContext -> {SECURITY_FIELDS 이름: 정규화 값 | None}. 순수 함수.
+
+    snake(to_dict)·camel(원시 dict·매니페스트 파서) 둘 다 받는다. 값을 정규화할 수 없으면(형이 이상함) None -- 그
+    컨테이너는 비교하지 않는다. 블록 부재(None)는 「아무것도 선언하지 않음」이라 전 필드 None 의 정상 관측이다."""
+    if container_sc is not None and not isinstance(container_sc, dict):
+        return None
+    csc = container_sc or {}
+    psc = pod_sc if isinstance(pod_sc, dict) else {}
+    try:
+        out = {}
+        for field in _SC_KEYS:
+            value = _coerce(field, _pick(csc, field))
+            if value is None and field in _POD_LEVEL:
+                value = _coerce(field, _pick(psc, field))
+            out[field] = value
+        caps = csc.get("capabilities")
+        if caps is not None and not isinstance(caps, dict):
+            raise _Unreadable("capabilities")
+        caps = caps or {}
+        out["capabilities.add"] = _caps(caps.get("add"))
+        out["capabilities.drop"] = _caps(caps.get("drop"))
+        return out
+    except _Unreadable:
+        return None
+
+
+def security_drift(live, manifest) -> "list[dict] | None":
+    """라이브 vs 동봉 매니페스트의 실효 securityContext 차이. 둘 중 하나라도 모르면 None(모름 -- 배지 없음, 거짓 경보
+    금지), 같으면 [], 다르면 [{"field", "live", "manifest"}] (SECURITY_FIELDS 순서)."""
+    if live is None or manifest is None:
+        return None
+    return [{"field": f, "live": live.get(f), "manifest": manifest.get(f)}
+            for f in SECURITY_FIELDS if live.get(f) != manifest.get(f)]
+
+
+def _security_contexts(obj):
+    """파드 템플릿의 컨테이너별 실효 securityContext(security_context_view). 못 읽는 컨테이너는 None."""
+    spec = obj.get("spec") or {}
+    pod_spec = (spec.get("template") or {}).get("spec") or {}
+    pod_sc = pod_spec.get("security_context", pod_spec.get("securityContext"))
+    return {c.get("name"): security_context_view(c.get("security_context", c.get("securityContext")), pod_sc)
             for c in (pod_spec.get("containers") or []) if c.get("name")}
 
 
@@ -74,6 +180,7 @@ def normalize_deployment(obj: dict) -> dict:
         "ready_replicas": _num(status, "ready_replicas", "readyReplicas"),
         "conditions": _conditions(status),
         "images": _images(obj),
+        "security_contexts": _security_contexts(obj),
     }
 
 
@@ -94,6 +201,7 @@ def normalize_daemonset(obj: dict) -> dict:
         "number_misscheduled": _num(status, "number_misscheduled",
                                     "numberMisscheduled"),
         "images": _images(obj),
+        "security_contexts": _security_contexts(obj),
     }
 
 

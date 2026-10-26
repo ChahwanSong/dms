@@ -7,16 +7,19 @@ import { http, HttpResponse, delay } from "msw";
 import { beforeAll, afterAll, afterEach, test, expect } from "vitest";
 import { BatchDetail } from "./BatchDetail";
 import { BatchesList } from "./BatchesList";
-import { parseItemsCsv } from "../../lib/csv";
+import { fakeParseCsv, parseCsvHandler } from "../../test/batchCsvFake";
 // 기본 스토리지 목록은 **빈 배열**이다: 화면이 절대경로 조합용으로 이 목록을
 // 부르는데(useStorageRoots), 기본이 없으면 모든 테스트가 MSW 미처리 경고를 뿜는다.
 // 빈 배열 = 뿌리 모름 = 절대경로 표시 없음이라 기존 단언에는 영향이 없다.
 // 자식 요청의 잡 목록도 기본은 **빈 배열**(= 도구 모름 = 도구 행 없음)이다: 펼친
 // 항목이 실행 도구를 이 엔드포인트에서 읽으므로(배치 API 엔 tool 이 없다) 기본이
 // 없으면 펼침 테스트마다 MSW 미처리 경고가 난다. 기존 단언에는 영향이 없다.
+// CSV 해석은 서버다(2026-10-26 — POST :parse-csv). 기본 핸들러는 시험용 축소판(test/batchCsvFake — 응답 모양·사유 코드·줄
+// 번호만 서버와 같다; 진짜 규칙은 tests/test_batch_csv.py).
 const server = setupServer(
   http.get("/api/user/storages", () => HttpResponse.json([])),
-  http.get("/api/user/requests/:rid/jobs", () => HttpResponse.json([])));
+  http.get("/api/user/requests/:rid/jobs", () => HttpResponse.json([])),
+  parseCsvHandler());
 beforeAll(() => server.listen()); afterEach(() => server.resetHandlers()); afterAll(() => server.close());
 const batch = (over: any = {}) => ({ batch_id:"b1", operation:"sync", status:"PreviewReady",
   max_concurrency:2, item_count:1, succeeded_count:0, failed_count:0, note:null, created_at:"",
@@ -102,6 +105,10 @@ test("배치 확인 대화상자: chown 을 비운 root sync 도 목적지 소�
   expect(within(dlg).getByRole("note", { name: "목적지 소유" })).toHaveTextContent(
     "소유권: root 실행이라 목적지와 복사된 파일·디렉토리는 소스의 소유자·그룹을 그대로 유지합니다 — 목적지에 이미 있던 "
     + "같은 경로의 항목(최상위 디렉토리 포함)도 소유자·그룹·권한·시각이 소스 것으로 바뀝니다.");
+  // 직접 경로 목적지가 PV 를 담는 스토리지면 그 스토리지 기본 소유자(2026-10-26 사용자 결정 (4)) -- 항목마다 다를 수 있어 규칙을 말한다
+  expect(within(dlg).getByRole("note", { name: "목적지 소유" })).toHaveTextContent(
+    "단 항목의 목적지 스토리지가 PV 종류이거나, PV·파일시스템 겸용이고 경로가 그 스토리지에 등록된 PV 의 루트 아래면 "
+    + "결과(이미 있던 같은 경로의 항목 포함)는 그 스토리지의 기본 소유자(uid:gid)로 맞춰지고");
 });
 
 test("배치 확인 대화상자: 만료된 미리보기·이미 성공한 항목을 따로 세어 행이 전체와 맞는다(만료는 서버 판정만)", async () => {
@@ -445,6 +452,39 @@ test("실 사용량: total_bytes 부재(구형 서버)·null(모름)은 — 로 
   await screen.findByText("데이터 온도(hot/cold)");
   const label = screen.getByText(/실 사용량\(파일 크기 합\):/);
   expect(label).toHaveTextContent("—");
+});
+
+// 2026-10-26 dscan 포크 ae781bd: summary.total_bytes(정확값)·invalid_name_entries(카운터만 -- 파손과 따로).
+test("새 dscan 카운터: 실 사용량 정확값은 title, 잘못된 인코딩 이름은 파손과 따로 한 줄, 원 키는 요약 목록에 두 번 안 나온다", async () => {
+  server.use(statsHandler("r1", { calls: 0 }, requestStats({
+    summary: { total_files: 12, total_entries: 20, total_bytes: 1074750158, invalid_name_entries: 15 },
+    total_bytes: 1074750158, invalid_name_entries: 15 })));
+  renderDetailed();
+  await userEvent.click(await screen.findByRole("button", { name: "항목 0 상세" }));
+  await screen.findByText("데이터 온도(hot/cold)");
+  const value = screen.getByText("1.0 GiB");
+  expect(value).toHaveAttribute("title", "1,074,750,158 B");
+  const invalid = screen.getByText("잘못된 인코딩 이름 15개");
+  expect(invalid.className).toContain("text-attn");
+  expect(screen.getByRole("button", { name: "잘못된 인코딩 이름 설명" })).toBeInTheDocument();
+  expect(screen.getByText(/파손 경로 4건/)).toBeInTheDocument();          // 더하지 않는다(19 가 아니다)
+  expect(screen.queryByText("total_bytes")).toBeNull();
+  expect(screen.queryByText("invalid_name_entries")).toBeNull();
+  expect(screen.getByText("total_files")).toBeInTheDocument();
+});
+
+test("잘못된 인코딩 이름: 0 은 값(「0개」·주의색 아님), 부재(구형 리포트·구형 서버)는 「기록 없음」", async () => {
+  server.use(statsHandler("r1", { calls: 0 }, requestStats({ invalid_name_entries: 0 })));
+  const { unmount } = renderDetailed();
+  await userEvent.click(await screen.findByRole("button", { name: "항목 0 상세" }));
+  await screen.findByText("데이터 온도(hot/cold)");
+  expect(screen.getByText("잘못된 인코딩 이름 0개").className).not.toContain("text-attn");
+  unmount();
+  server.use(statsHandler("r1", { calls: 0 }, requestStats()));
+  renderDetailed();
+  await userEvent.click(await screen.findByRole("button", { name: "항목 0 상세" }));
+  await screen.findByText("데이터 온도(hot/cold)");
+  expect(screen.getByText("잘못된 인코딩 이름: 기록 없음(구형 리포트)")).toBeInTheDocument();
 });
 
 test("mtime 토글: 펼친 항목의 atime 차트가 mtime 으로 바뀐다", async () => {
@@ -967,8 +1007,47 @@ test("파스 오류가 있으면 교체 버튼 잠금 + 오류 나열", async ()
   const ta = d.getByLabelText("교체 CSV");
   await userEvent.click(ta);
   await userEvent.paste("a,b\nokpath");
-  expect(await screen.findByText(/1행: 경로 1개/)).toBeInTheDocument();
+  // 서버 해석의 줄별 사유(물리 줄 번호 + 사유 코드 문구)
+  expect(await screen.findByText(/^1번째 줄: 열 수가 맞지 않거나/)).toBeInTheDocument();
   expect(d.getByRole("button", { name: "교체" })).toBeDisabled();
+});
+
+test("CSV 교체: 입력이 멈춘 뒤 서버 해석을 부르고(배치 스토리지 동봉) 결과가 올 때까지 「교체」는 잠겨 있다", async () => {
+  const bodies: any[] = [];
+  server.use(parseCsvHandler((b) => bodies.push(b)));
+  renderDetailed();                              // scan 배치, storage s1
+  const d = await openDialog("CSV로 전체 교체");
+  await userEvent.click(d.getByLabelText("교체 CSV"));
+  await userEvent.paste("target\nx");
+  // 결과 전: 검사 중 + 잠긴 교체(버튼이 결과와 함께 포인터 밑으로 끼어들지 않는다)
+  expect(d.getByRole("status")).toHaveTextContent("CSV 검사 중…");
+  expect(d.getByRole("button", { name: "교체" })).toBeDisabled();
+  await d.findByText("1행 파싱됨");
+  expect(bodies).toEqual([{ operation: "scan", csv: "target\nx", storage: "s1" }]);
+  expect(d.getByRole("button", { name: "교체" })).toBeEnabled();
+  // 입력을 바꾸면 그 결과는 더 이상 미리보기가 아니다 -- 새 결과까지 다시 잠긴다
+  await userEvent.paste("\ny");
+  expect(d.getByRole("button", { name: "교체" })).toBeDisabled();
+  await d.findByText("2행 파싱됨");
+});
+
+test("CSV 교체: 해석 요청 자체가 실패하면(413 등) 사유 문구를 보이고 교체는 잠긴다", async () => {
+  server.use(http.post("/api/admin/batches:parse-csv", () =>
+    HttpResponse.json({ detail: "batch_csv_too_large" }, { status: 413 })));
+  renderDetailed();
+  const d = await openDialog("CSV로 전체 교체");
+  await userEvent.click(d.getByLabelText("교체 CSV"));
+  await userEvent.paste("target\nx");
+  expect(await d.findByText("CSV 가 너무 큽니다(최대 2 MiB) — 나눠서 올리세요")).toBeInTheDocument();
+  expect(d.getByRole("button", { name: "교체" })).toBeDisabled();
+  expect(d.queryByText("CSV 검사 중…")).toBeNull();
+});
+
+test("「CSV 내보내기」는 서버 내보내기 주소로 가는 다운로드 링크다(항목이 있을 때)", async () => {
+  renderDetailed();
+  const a = await screen.findByRole("link", { name: "CSV 내보내기" });
+  expect(a).toHaveAttribute("href", "/api/admin/batches/b1/items.csv");
+  expect(a).toHaveAttribute("download");
 });
 
 test("빈 입력(초기 상태)엔 미리보기·교체 버튼 없음 — 파일 input 도 없다", async () => {
@@ -997,8 +1076,8 @@ test("현재 항목 CSV 팝업: serializeItemsCsv 텍스트를 읽기 전용으�
   const ta = d.getByLabelText("현재 항목 CSV");
   expect(ta).toHaveValue("target\nteam\nproj");
   expect(ta).toHaveAttribute("readonly");
-  // 왕복 계약: 이 텍스트를 교체 textarea 에 넣으면 같은 항목이 복원된다
-  expect(parseItemsCsv("scan", "target\nteam\nproj").rows)
+  // 왕복 계약: 이 텍스트를 교체 textarea 에 넣으면 같은 항목이 복원된다(서버 해석 — 진짜 왕복은 tests/test_batch_csv.py)
+  expect(fakeParseCsv({ operation: "scan", csv: "target\nteam\nproj" }).items)
     .toEqual([{ target: "team" }, { target: "proj" }]);
 });
 
@@ -1009,7 +1088,7 @@ test("sync 배치의 현재 항목 CSV: source,destination 2열 — 왕복 계�
       request_id: "r1", reason_code: null }] });
   const d = await openDialog("현재 항목 CSV");
   expect(d.getByLabelText("현재 항목 CSV")).toHaveValue("source,destination\na,b");
-  expect(parseItemsCsv("sync", "source,destination\na,b").rows)
+  expect(fakeParseCsv({ operation: "sync", csv: "source,destination\na,b" }).items)
     .toEqual([{ source: "a", destination: "b" }]);
 });
 
@@ -1999,11 +2078,14 @@ test("rm 현재 항목 CSV·CSV 교체: target 1열 왕복 + {storage,target} PU
   expect(within(dlg).getByRole("note", { name: "삭제 경로 교체" })).toHaveTextContent("교체만으로는 아무것도 지워지지 않습니다");
   expect(within(dlg).queryByRole("note", { name: "목적지 조건과 소유권" })).toBeNull();
   await userEvent.type(within(dlg).getByLabelText("교체 CSV"), "target{enter}x{enter}x/y");
-  expect(within(dlg).getByRole("list", { name: "교체할 수 없는 삭제 경로" })).toHaveTextContent(
-    "2행: 1행의 경로(x) 아래입니다");
+  // 겹침은 서버 줄 판정이 말한다(물리 줄 3 = 데이터 2행, 상대 줄 2) -- 예전의 화면 쪽 즉답을 대신한다
+  const errs = await within(dlg).findByRole("list", { name: "교체할 수 없는 줄" });
+  expect(errs).toHaveTextContent("3번째 줄: 한 rm 배치에 같은 경로가 두 번 있거나");
+  expect(errs).toHaveTextContent("(2번째 줄과 겹침)");
   expect(within(dlg).getByRole("button", { name: "교체" })).toBeDisabled();
   await userEvent.clear(within(dlg).getByLabelText("교체 CSV"));
   await userEvent.type(within(dlg).getByLabelText("교체 CSV"), "target{enter}x{enter}y");
+  await within(dlg).findByText("2행 파싱됨");
   await userEvent.click(within(dlg).getByRole("button", { name: "교체" }));
   await waitFor(() => expect(sent).toEqual({ items: [{ storage: "s1", target: "x" }, { storage: "s1", target: "y" }] }));
 });

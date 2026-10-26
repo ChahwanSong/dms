@@ -6,9 +6,11 @@ from pydantic import BaseModel
 from ..domain import DomainValidationError
 from ..execution import ExecutionError
 from ..job_image import resolve_job_image
+from ..manifest_tags import SECURITY_COMPONENTS, manifest_security_contexts
 from ..registry import fetch_repo_tags
 from ..repositories.builds import effective_tag
 from ..repositories.releases import COMPONENTS, ROLLOUT_ORDER
+from ..rollout_status import security_drift
 from .auth import Identity, audit_actor, require_admin, require_session_admin
 from .routes_requests import reject_when_maintenance
 
@@ -49,18 +51,34 @@ def _public(row) -> dict:
     return out
 
 
-def _current_image(runner, spec) -> "str | None":
+def _observe(runner, spec) -> "dict | None":
     # 설계 §5(1f5f4e5): api Role에 읽기 전용 apps get이 있다(세 워크로드 한정) --
-    # 컨트롤러와 같은 get_workload(observe)로 "현재 선언된" spec 이미지를 읽는다.
+    # 컨트롤러와 같은 get_workload(observe)로 "현재 선언된" spec 을 읽는다.
     # 파드에서 유도하는 대안은 롤링 중 옛/새 파드가 섞여 부정확해 설계가 기각했다.
     try:
-        obs = runner.observe(kind=spec["kind"], name=spec["workload"])
+        return runner.observe(kind=spec["kind"], name=spec["workload"])
     except ExecutionError:
         # 읽기 실패로 화면 전체가 죽으면 안 된다 -- 레지스트리와 같은 강등 원칙.
         return None
+
+
+def _current_image(runner, spec) -> "str | None":
+    obs = _observe(runner, spec)
     if obs is None:
         return None
     return (obs.get("images") or {}).get(spec["container"])
+
+
+def _security_drift(component, spec, obs, manifest) -> "list | None":
+    """securityContext 드리프트(2026-10-26, BACKLOG 「securityContext 드리프트는 배지가 못 본다」): 라이브 파드 템플릿의
+    실효 securityContext 와 동봉 매니페스트 값의 차이. None = 모름(관측 실패·관측에 축 없음·동봉본 못 읽음·비교 대상
+    밖 컴포넌트) -- 화면은 아무것도 띄우지 않는다(거짓 경보 금지). [] = 같음, 목록 = 다른 필드들.
+    이미지 드리프트와 달리 포탈 롤아웃 직후에도 **생기지 않는다**(롤아웃은 이미지만 patch) -- 뜨면 그 사이트가 40/41 을
+    apply 하지 않았거나 누가 손으로 바꿨다는 뜻이다(예: d128 이전 65532 로 굴러 3홉 쓰기 실패)."""
+    if component not in SECURITY_COMPONENTS or obs is None:
+        return None
+    live = (obs.get("security_contexts") or {}).get(spec["container"])
+    return security_drift(live, manifest.get(component))
 
 
 def _tags_for(cache: dict, registry: str, repository: str) -> "list[str] | None":
@@ -146,8 +164,11 @@ def release_targets(request: Request):
     tags_cache: dict = {}
     targets = []
     builds = _recent_builds(request.app.state.repos)
+    # 동봉 매니페스트는 요청마다 읽는다(수 KB, fail-soft -- routes_metrics.metrics_infra 와 같은 판단).
+    manifest_sc = manifest_security_contexts()
     for component in ROLLOUT_ORDER:
         spec = COMPONENTS[component]
+        obs = _observe(runner, spec)
         tags = _tags_for(tags_cache, settings.build_registry, spec["repository"])
         if tags is None:
             # 화면은 살리되 "태그 목록이 비어 보이는 것"이 레지스트리 장애 때문임을
@@ -159,9 +180,10 @@ def release_targets(request: Request):
             "component": component, "kind": spec["kind"],
             "workload": spec["workload"], "container": spec["container"],
             "repository": spec["repository"],
-            "current_image": _current_image(runner, spec),
+            "current_image": (obs.get("images") or {}).get(spec["container"]) if obs else None,
             "tags": ordered, "built": built,
             "tags_truncated": getattr(tags, "truncated", False) is True,
+            "security_drift": _security_drift(component, spec, obs, manifest_sc),
         })
     # 넷째 행: 잡 이미지(슬라이스 35). current 는 유효값(DB→env) -- 화면의 "현재"가
     # 실제 다음 잡이 쓸 이미지와 갈리면 same_tag 검사가 거짓말을 한다.
@@ -180,6 +202,7 @@ def release_targets(request: Request):
                                            settings) or None,
         "tags": ji_ordered, "built": ji_built,
         "tags_truncated": getattr(ji_tags, "truncated", False) is True,
+        "security_drift": None,          # 워크로드가 아니다(DB 오버라이드) -- 비교할 securityContext 가 없다
     })
     return {"targets": targets, "registry_ok": registry_ok}
 

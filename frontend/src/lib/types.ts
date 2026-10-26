@@ -149,10 +149,17 @@ export interface DataJob {
   exec_submitted_at?: string | null;
   sched_wait_seconds?: number | null;
   submit_wait_seconds?: number | null;
+  // 결과 파일 자동 만료(2026-10-26, DMS_ARTIFACT_RETENTION_DAYS): 결과 파일 정리를 맡긴 시각. null = 만료 전. 값이 있으면
+  // 파일 열람은 410 artifact_expired 이고 목록은 빈 목록 + expired_at 이다 -- 잡의 나머지(상태·요약·전이)는 그대로다.
+  artifacts_expired_at?: string | null;
 }
 export interface ArtifactEntry { phase: string; name: string; size: number; modified_at: number }
 // 목록은 상한(MAX_ENTRIES)이 있어 배열이 아니라 truncated 플래그를 동반한 객체다.
-export interface ArtifactList { entries: ArtifactEntry[]; truncated: boolean }
+// expired_at·retention_days: 만료된 잡에만 실린다(2026-10-26). retention_days = 지금 보존일(0 = 끔이면 null).
+export interface ArtifactList {
+  entries: ArtifactEntry[]; truncated: boolean;
+  expired_at?: string | null; retention_days?: number | null;
+}
 export interface ArtifactFile {
   phase: string; name: string; size: number; truncated: boolean; content: string;
 }
@@ -281,6 +288,9 @@ export interface RequestScanStats {
   // null = 구형 리포트(총계 미기록) — 0(파손 없음)과 다르다(null≠0).
   broken_paths_total: number | null;
   broken_paths_limit: number | null;
+  // 이름이 엄격 UTF-8 이 아닌 항목 수(2026-10-26 dscan 포크 ae781bd -- 카운터만, 파손 경로에 더하지 않는다). null = 구형
+  // 리포트(모름 ≠ 0). 옵션(?) = 구형 서버 호환.
+  invalid_name_entries?: number | null;
 }
 // 사용량 분석(2026-08-23): 전 요청자 통합 scan 이력. 서버 routes_usage.py 계약.
 export interface ScanTargetRow {
@@ -332,6 +342,8 @@ export interface UsageStorageTotals {
   total_bytes: UsageTotalMetric; total_files: UsageTotalMetric; total_directories: UsageTotalMetric;
   total_symlinks: UsageTotalMetric; total_other: UsageTotalMetric; total_entries: UsageTotalMetric;
   scan_errors: UsageTotalMetric; broken_paths_total: UsageTotalMetric;
+  // 잘못된 인코딩 이름 수의 합(2026-10-26 -- 구형 리포트 대상은 unknown). 옵션(?) = 구형 서버 호환.
+  invalid_name_entries?: UsageTotalMetric;
   hot_ratio: { value: number | null; hot_bytes: number | null; total_bytes: number | null; known: number; unknown: number };
   file_size_histogram: { buckets: HistogramBucket[]; known: number; unknown: number };
   oldest_scan_at: string | null; newest_scan_at: string | null;
@@ -375,6 +387,8 @@ export interface UsagePoint {
   file_size_histogram?: HistogramBucket[];
   broken_paths_total?: number | null;
   broken_paths_limit?: number | null;
+  // 잘못된 인코딩 이름 수(2026-10-26, RequestScanStats 와 같은 계약 -- null = 구형 리포트·못 읽음).
+  invalid_name_entries?: number | null;
   report_readable?: boolean;
 }
 export interface UsageHistory {
@@ -461,9 +475,16 @@ export interface ArtifactBaseControllerCheck {
   pending: boolean; ok: boolean | null; reason: string | null;
   checked_at: string | null;
 }
+// 결과 파일 자동 만료 현황(2026-10-26). days 0 = 끔. pending·stalled = 만료 정리 대기·지연 행, last_error = 가장 오래된
+// 지연 행의 사유, expired_jobs = 지금까지 만료된 잡 수(행은 남는다). 옵션(?) = 구버전 서버.
+export interface ArtifactRetention {
+  days: number; pending: number; stalled: number; oldest_requested_at: string | null;
+  last_error: string | null; expired_jobs: number;
+}
 export interface ArtifactBaseInfo {
   effective: string; source: "db" | "env"; db_value: string | null; env_value: string;
   locked_by_jobs: number;
+  artifact_retention?: ArtifactRetention;
   checks: {
     api: { ok: boolean; reason: string | null };
     controller: ArtifactBaseControllerCheck;
@@ -503,6 +524,8 @@ export interface ScanPathStats {
   // "기록 없음"(null≠0 — 0은 파손 없음의 정상값), 옵션(?) = 구형 서버 호환.
   broken_paths_total?: number | null;
   broken_paths_limit?: number | null;
+  // 잘못된 인코딩 이름 수(2026-10-26, RequestScanStats 와 같은 계약).
+  invalid_name_entries?: number | null;
 }
 
 // 릴리스(롤아웃). 상태는 Pending → Applying → Applied/Failed 이고 잡/빌드의 종단
@@ -527,6 +550,15 @@ export interface ReleaseTarget {
   built?: Record<string, string>;
   // 레지스트리 페이지 상한에 걸려 목록이 잘렸다(여기 없는 태그도 제출은 검증 안 됨으로 통과).
   tags_truncated?: boolean;
+  // securityContext 드리프트(2026-10-26): 라이브 파드 템플릿 vs 동봉 매니페스트(dms-api·dms-controller 만). null/부재 = 모름
+  // (배지 없음 -- 거짓 경보 금지), [] = 같음, 항목 = 다른 필드. 옵셔널 = 구 서버 호환.
+  security_drift?: SecurityDriftItem[] | null;
+}
+// 값은 k8s 원문 형(int·bool·문자열 목록) 또는 null(선언 없음).
+export interface SecurityDriftItem {
+  field: string;
+  live: number | boolean | string[] | null;
+  manifest: number | boolean | string[] | null;
 }
 // registry_ok=false면 tags가 전부 비어 있고 서버의 태그 존재 검증도 꺼진 상태다.
 export interface ReleaseTargets { targets: ReleaseTarget[]; registry_ok: boolean }

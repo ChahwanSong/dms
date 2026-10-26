@@ -117,13 +117,15 @@ def maximal_targets(heads: list) -> tuple:
     return top, len(plain) - len(top), len(heads) - len(plain)
 
 
-# 합계가 더하는 리포트 요약 정수(summary 의 키). 응답의 지표 순서이기도 하다.
+# 합계가 더하는 리포트 요약 정수(summary 의 키). 응답의 지표 순서이기도 하다. invalid_name_entries(2026-10-26, 포크 ae781bd --
+# 이름이 엄격 UTF-8 이 아닌 항목 수)는 카운터만이라(사용자 결정) broken_paths_total 과 따로 더한다 -- 구형 리포트는 키가 없어
+# unknown 으로 센다(0 으로 접지 않는다). summary.total_bytes 는 여기 없다: 실 사용량은 호출자가 목록 열과 같은 값으로 넘긴다.
 TOTAL_SUMMARY_KEYS = ("total_files", "total_directories", "total_symlinks", "total_other", "total_entries",
-                      "scan_errors")
+                      "scan_errors", "invalid_name_entries")
 
 
 def _count(v) -> bool:
-    """더할 수 있는 개수·용량인가(int, bool 아님, ≥0) -- 실 사용량 규칙(routes_scan_paths._total_bytes)과 같은 엄격함.
+    """더할 수 있는 개수·용량인가(int, bool 아님, ≥0) -- 실 사용량 규칙(routes_scan_paths._report_total_bytes)과 같은 엄격함.
     투영은 유한 float·음수도 통과시키므로(_numbers) 여기서 한 번 더 거른다: 음수 하나가 합을 조용히 깎으면 안 된다."""
     return isinstance(v, int) and not isinstance(v, bool) and v >= 0
 

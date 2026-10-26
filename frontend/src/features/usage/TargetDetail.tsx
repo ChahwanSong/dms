@@ -10,6 +10,8 @@ import type { ApiError } from "../../lib/api";
 import type { HistogramBucket, UsagePoint } from "../../lib/types";
 import { kstStampEpoch, kstDay } from "../../lib/datetime";
 import { pctText, sizeDistribution } from "../../lib/sizeBuckets";
+import { HelpTip } from "../../components/ui/HelpTip";
+import { exactBytes, INVALID_NAMES_HELP, INVALID_NAMES_LABEL, invalidNamesText, scanCount } from "../../lib/scanCounters";
 import { useScanHistory } from "./useUsage";
 import { SIZE_HELP, SectionHead, Stat } from "./UsageParts";
 import {
@@ -275,7 +277,8 @@ export function TargetDetail({ storage, target, showTitle, latest }: {
           {/* null ≠ 0: 모름은 "—" -- 0 B 로 그리면 "다 지워졌다"는 거짓이 된다 */}
           <dl aria-label="최신 scan 요약"
               className="grid grid-cols-2 content-start gap-x-6 gap-y-3 sm:grid-cols-4 lg:grid-cols-2">
-            <Stat label="최신 실 사용량" value={latestCharted !== null ? humanBytes(latestCharted.bytes) : "—"} />
+            <Stat label="최신 실 사용량" value={latestCharted !== null ? humanBytes(latestCharted.bytes) : "—"}
+                  title={latestCharted !== null ? exactBytes(latestCharted.bytes) : undefined} />
             <Stat label="직전 스캔 대비"
                   value={delta === null ? "—" : `${delta >= 0 ? "+" : "−"}${humanBytes(Math.abs(delta))}`} />
             {/* 라벨은 짧게(375 의 두 칸 배치에서 한 줄) -- atime 기준이라는 정의는 표 머리글 설명·온도 툴팁이 말한다. */}
@@ -295,6 +298,14 @@ export function TargetDetail({ storage, target, showTitle, latest }: {
                                 : "크기 분포 기록이 없습니다(구형 리포트)"} />
           </section>
         </div>
+        {/* 잘못된 인코딩 이름(2026-10-26, 사용자 결정 「카운터만 둠」): 크기 분포와 같은 기준(최신 scan)의 카운터. 1개 이상일 때만
+            한 줄로 말한다 -- 0·모름(구형 리포트)까지 펼침마다 줄을 두면 상세가 길어진다(전수 값은 CSV 의 invalid_name_entries 열). */}
+        {(scanCount(snapshot?.invalid_name_entries) ?? 0) > 0 && (
+          <p className="flex items-center gap-0.5 text-sm text-attn">
+            {`최신 scan: ${invalidNamesText(snapshot?.invalid_name_entries)}`}
+            <HelpTip label={`${INVALID_NAMES_LABEL} 설명`} head={INVALID_NAMES_LABEL} help={INVALID_NAMES_HELP} />
+          </p>
+        )}
 
         <section className="space-y-2">
           <SectionHead title="실 사용량 추이"
@@ -367,7 +378,8 @@ export function TargetDetail({ storage, target, showTitle, latest }: {
                       <td className="py-1.5 pr-4 whitespace-nowrap tabular-nums">
                         {epoch === null ? "—" : kstStampEpoch(epoch)}
                       </td>
-                      <td className="pr-4 text-right whitespace-nowrap tabular-nums">
+                      <td className="pr-4 text-right whitespace-nowrap tabular-nums"
+                          title={p.total_bytes === null ? undefined : exactBytes(p.total_bytes)}>
                         {p.total_bytes === null ? "—" : humanBytes(p.total_bytes)}
                       </td>
                       <td className="pr-4 text-right tabular-nums">

@@ -8,6 +8,8 @@
 //       pv_root  **목적지 PV 루트의 소유자·그룹**(특권 운영자 옵션 -- 점검(preflight)이 재서 잡 worker_pool.dest_pv_owner 에
 //                남긴 값; 미리보기 뒤 바뀌면 실행을 멈춘다)
 //       없음     이 규칙 전에 제출된 옛 행 -- 서버가 pv_root 와 같은 잰 값으로 돌린다(부재를 거부로 강화하지 않는다)
+//   - root 실행 + 목적지가 직접 경로인데 그 스토리지가 PV 를 담는 종류면(2026-10-26 사용자 결정 (4), payload.dest_owner) 그 스토리지의
+//     기본 소유자 -- pv 종류는 늘, both 는 경로가 그 스토리지의 PV 루트 아래일 때만(서버가 제출 때 정해 얼리고 계획·컨펌 때 대조)
 //   - root 실행이면 개입하지 않는다 → 소스의 소유자·그룹이 그대로
 //   - 그 외(비 root)엔 `--chown <실행 신원 uid>:<주 그룹 gid>` → 새로 만든 목적지·복사본 전부 실행 신원 소유
 // 2026-10-26 LDAP 정리 뒤로 새 작업은 전부 root 다(k8s 신원 모드) -- 비 root 갈래는 옛 행(계획 스냅숏이 비 root)의 표시용으로만
@@ -47,10 +49,25 @@ export interface OwnershipInput {
   pvOwnerRule?: PvOwnerRule | null;
   storageOwner?: string | null; // 목적지 스토리지 기본 소유자 "uid:gid"(storage 규칙 -- 모르면 null: PV 를 아직 안 고름)
   pvOwner?: string | null; // 점검이 잰 목적지 PV 루트 소유자 "uid:gid"(pv_root·옛 행 -- 모르면 null: 아직 점검 전)
+  // 직접 경로 목적지(PV 주소가 아닐 때만 -- pvDestination 이 먼저다)의 결과 소유(아래 DirectDestOwner). null·생략 = 해당 없음·옛 행
+  // (root 면 소스 그대로 -- 종전 문구).
+  directDest?: DirectDestOwner | null;
 }
 
 /** PV 목적지 sync 의 결과 소유 규칙(서버 payload.destination_pv.owner_rule 의 값 집합). */
 export type PvOwnerRule = "storage" | "pv_root";
+
+/** 직접 경로 sync 목적지의 결과 소유(2026-10-26 사용자 결정 (4) -- 서버 k8s_access.direct_dest_owner 미러: 목적지 스토리지가 pv
+    종류면 늘, both(PV·파일시스템) 종류면 경로가 그 스토리지의 PV 루트 아래일 때만 그 스토리지의 기본 소유자로 chown).
+      storage     적용이 확정됨 -- 서버가 얼린 payload.dest_owner(rule "storage")이거나, 폼에서 고른 스토리지가 pv 종류. owner =
+                  기본 소유자 "uid:gid"(모르면 null)
+      storage_if_under_pv  폼에서 고른 스토리지가 both 종류 -- 화면은 인벤토리의 PV 루트를 모른다. 제출 때 서버가 정해 요청 상세에 보인다
+      varies      배치 화면처럼 항목마다 목적지 스토리지가 다를 수 있는 곳의 일반 규칙
+    「해당 없음」(filesystem·PV 밖 -- 서버 rule "none")은 이 값을 주지 않는다(null). */
+export type DirectDestOwner =
+  | { rule: "storage"; owner: string | null }
+  | { rule: "storage_if_under_pv"; owner: string | null }
+  | { rule: "varies" };
 
 // uid·gid 상한(서버 execution_manifests valid_owner·스토리지 기본 소유 검증과 같은 범위 -- 4294967295 = (uid_t)-1 은
 // 「바꾸지 않음」 표식이라 값이 아니다).
@@ -94,8 +111,18 @@ export const CHOWN_NAME_ERROR =
 const NON_ROOT_CHOWN_EPERM =
   "dsync(같은 노드) 는 데이터를 복사한 뒤 작업이 실패하고, nsync(노드 간) 는 소유 변경이 적용되지 않아 실행 신원 소유로 남습니다";
 
+// root 실행 + 자동 소유 규칙 없음(소스 소유 보존) -- 2026-09-30 프로덕션 사고(이미 있던 남의 디렉터리 소유가 소스 것으로 바뀜)의
+// 경고 문장을 늘 함께 말한다. 직접 경로 「varies」(배치 화면) 문구가 이 문장 뒤에 예외를 덧붙인다.
+const ROOT_PRESERVE_SHORT = "소스의 소유자·그룹 그대로(root 실행)";
+function rootPreserveLong(m: string): string {
+  return "root 실행이라 목적지와 복사된 파일·디렉토리는 소스의 소유자·그룹을 그대로 유지합니다 — "
+    + "목적지에 이미 있던 같은 경로의 항목(최상위 디렉토리 포함)도 소유자·그룹·권한·시각이 소스 것으로 "
+    + `바뀝니다${m !== "" ? `(권한 비트는 chmod 지정값 ${m})` : ""}.`;
+}
+
 export function syncOwnership({ chown, chmod = "", root, runAs, self, chownEditable = true, pvDestination = false,
-                                pvOwnerRule = null, storageOwner = null, pvOwner = null }: OwnershipInput):
+                                pvOwnerRule = null, storageOwner = null, pvOwner = null,
+                                directDest = null }: OwnershipInput):
                                 { short: string; long: string } {
   const c = chown.trim();
   const m = chmod.trim();
@@ -140,11 +167,33 @@ export function syncOwnership({ chown, chmod = "", root, runAs, self, chownEdita
                  + (owner !== null ? `점검에서 확인한 값은 ${owner} 입니다. ` : "실제 값은 점검(preflight)에서 확인돼 확인 창에 보입니다. ")
                  + `미리보기 뒤 그 소유자가 바뀌면 실행하지 않고 멈춥니다. ${pvTail}` };
   }
+  // 직접 경로 목적지가 PV 를 담는 스토리지(서버 direct_dest_owner -- PV 목적지가 아닐 때만): 값은 PV 목적지 기본 규칙과 같은 스토리지
+  // 기본 소유자, --chown 이라 setuid·setgid 도 같이 지워진다(pvTail). 적용 여부가 경로에 달린 both 는 조건을 그대로 말한다.
+  if (root && !pvDestination && directDest !== null) {
+    const owner = directDest.rule === "varies" ? null : validOwner(directDest.owner);
+    const v = owner !== null ? ownerText(owner) : null;
+    const valueText = v !== null ? `목적지 스토리지 기본 소유자 ${v}` : "목적지 스토리지 기본 소유자(uid:gid)";
+    const changed = "컨펌 전에 관리자가 그 값이나 스토리지 종류·PV 를 바꿔 결과 소유가 달라지면 실행하지 않고 멈춥니다(이미 컨펌한 "
+      + "작업은 확인 창에 보인 값으로 실행됩니다).";
+    if (directDest.rule === "storage")
+      return { short: `${valueText}(직접 경로)`,
+               long: `결과는 ${valueText} 로 맞춰집니다(목적지와 복사된 파일·디렉토리 전부) — 직접 경로여도 목적지 스토리지가 PV 를 `
+                   + "담는 종류라 PV 목적지와 같은 규칙입니다(관리자가 그 스토리지에 등록한 기본 소유자, 등록하지 않았으면 0:0 = root). "
+                   + `${changed} ${pvTail}` };
+    if (directDest.rule === "storage_if_under_pv")
+      return { short: `PV 루트 아래면 ${valueText}, 아니면 소스 그대로`,
+               long: "목적지 스토리지가 PV·파일시스템 겸용이라 결과 소유는 목적지 경로에 따라 갈립니다 — 그 스토리지에 등록된 PV 의 "
+                   + `루트(인벤토리) 아래면 ${valueText} 로 맞춰지고(일반 파일의 setuid·setgid 비트는 지워집니다), 그 밖이면 root `
+                   + "실행이라 소스의 소유자·그룹을 그대로 유지합니다. 어느 쪽인지는 제출 때 서버가 정해 요청 상세의 「목적지 소유」에 "
+                   + `보입니다. 목적지에 이미 있던 같은 경로의 항목도 그 결과 소유로 다시 맞춰집니다. ${changed} ${modeText}` };
+    // varies(배치 화면): 기본(root -- 소스 그대로, 2026-09-30 사고 경고 문장 포함)을 그대로 말하고 예외를 덧붙인다.
+    return { short: `${ROOT_PRESERVE_SHORT} — 단 목적지 스토리지가 PV 종류(겸용이면 PV 루트 아래)면 그 스토리지 기본 소유자`,
+             long: `${rootPreserveLong(m)} 단 항목의 목적지 스토리지가 PV 종류이거나, PV·파일시스템 겸용이고 경로가 그 스토리지에 `
+                 + "등록된 PV 의 루트 아래면 결과(이미 있던 같은 경로의 항목 포함)는 그 스토리지의 기본 소유자(uid:gid)로 맞춰지고 일반 "
+                 + "파일의 setuid·setgid 비트는 지워집니다. 항목마다의 값은 자식 작업의 요청 상세 「목적지 소유」에 보입니다." };
+  }
   if (root)
-    return { short: "소스의 소유자·그룹 그대로(root 실행)",
-             long: "root 실행이라 목적지와 복사된 파일·디렉토리는 소스의 소유자·그룹을 그대로 유지합니다 — "
-                 + "목적지에 이미 있던 같은 경로의 항목(최상위 디렉토리 포함)도 소유자·그룹·권한·시각이 소스 것으로 "
-                 + `바뀝니다${m !== "" ? `(권한 비트는 chmod 지정값 ${m})` : ""}.` };
+    return { short: ROOT_PRESERVE_SHORT, long: rootPreserveLong(m) };
   const who = self ? `요청자 본인${runAs ? `(${runAs})` : ""}` : `실행 신원 ${runAs ?? ""}`.trim();
   return { short: `${who}의 uid:gid(주 그룹)`,
            long: `기본적으로 목적지(새로 만드는 경우 포함)와 복사된 파일·디렉토리는 ${who}의 uid:gid`

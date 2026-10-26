@@ -1,3 +1,4 @@
+import logging
 import re
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -5,10 +6,13 @@ from pydantic import BaseModel
 
 from ..build_runner import BUILD_REF_PREFIX
 from ..domain import DomainValidationError
-from ..repositories.builds import (BUILD_IMAGES, build_pod_name, effective_tag)
+from ..repositories.builds import (BUILD_IMAGES, build_pod_name, build_probe_pod_name,
+                                   effective_tag)
 from .artifacts import tail_lines
 from .auth import Identity, audit_actor, require_admin, require_session_admin
 from .routes_requests import reject_when_maintenance
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(dependencies=[Depends(require_admin)])
 
@@ -48,6 +52,7 @@ def _detail(row):
     # seq도 내부 정렬용 컬럼이라 밖으로 새면 안 된다.
     out.pop("log_text", None)
     out.pop("seq", None)
+    out.pop("pods_gc_at", None)     # pod-gc 내부 장부(2026-10-26) -- seq 와 같은 이유로 밖에 내지 않는다
     out["tag"] = effective_tag(row)
     # 화면 이름은 source_path 다 -- 컬럼명(repo_url)은 스키마 수렴 제약의 산물이라
     # (repositories.builds.create 주석) API 경계에서 이름을 바로잡는다. 옛 git
@@ -128,8 +133,24 @@ def get_build(build_id: str, request: Request):
 
 # 종단 빌드만 지운다(슬라이스 34). 활성(Pending/Running) 빌드는 409 -- active() 가
 # 읽는 행을 지우면 파드가 도는 중에 두 번째 빌드가 시작될 수 있다("취소가 아니라
-# 삭제"라 실행면 정리 경로도 없다). 파드는 pod-gc 가 따로 수거하므로 DB 행만 지운다.
+# 삭제"라 실행면 정리 경로도 없다).
 _TERMINAL_BUILD = ("Succeeded", "Failed")
+
+
+def _terminate_build_pods(runner, build_id) -> bool:
+    """빌드·프로브 파드를 지운다(2026-10-26). 행을 지우기 **전에** 해야 한다 -- pod-gc 는 행으로 파드 이름을 만들므로
+    (builds.terminal_older_than) 행이 먼저 사라지면 두 파드는 시야 밖으로 영영 남았다(예전 「파드는 pod-gc 가 따로
+    수거한다」는 거짓 전제). terminate 는 404 를 삼킨다(이미 없음 = 성공). ref 별 격리: 하나가 실패해도 다른 하나는
+    지우고, 하나라도 실패했으면 False -- 호출자는 행을 남겨 다음 삭제·pod-gc 가 다시 볼 수 있게 한다."""
+    ok = True
+    for pod in (build_pod_name(build_id), build_probe_pod_name(build_id)):
+        ref = f"{BUILD_REF_PREFIX}/{pod}"
+        try:
+            runner.terminate(ref)
+        except Exception as exc:
+            ok = False
+            logger.warning("build delete: pod cleanup failed ref=%s: %s", ref, exc)
+    return ok
 
 
 @router.delete("/api/admin/builds/{build_id}")
@@ -141,6 +162,13 @@ def delete_build(build_id: str, request: Request,
         raise HTTPException(status_code=404, detail="build_not_found")
     if row["state"] not in _TERMINAL_BUILD:
         raise HTTPException(status_code=409, detail="build_not_deletable")
+    # pod-gc 가 이미 치운 빌드(pods_gc_at)는 클러스터에 다시 묻지 않는다 -- apiserver 가 잠시 안 닿아도 오래된 기록은
+    # 지울 수 있게. 러너가 없는 앱(테스트 조립)은 만든 파드도 없다.
+    runner = getattr(request.app.state, "build_runner", None)
+    if row.get("pods_gc_at") is None and runner is not None:
+        if not _terminate_build_pods(runner, build_id):
+            # 행을 남긴다 -- 지우면 파드가 누수된다(위 docstring). 502: 상류(apiserver) 실패.
+            raise HTTPException(status_code=502, detail="build_pod_cleanup_failed")
     repos.builds.delete(build_id, actor=audit_actor(identity))
     return {"deleted": build_id}
 

@@ -4,7 +4,7 @@ import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
 import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
 import { beforeAll, afterAll, afterEach, test, expect, vi } from "vitest";
-import { JobStages, StageBadge } from "./JobStages";
+import { JobStages, StageBadge, expiryText } from "./JobStages";
 import type { DataJob } from "../../lib/types";
 
 // 옛 JobViewer.test(17건)를 하네스만 바꿔 옮겼다(2026-10-08 요청 상세 재설계). 칩의 접근성 이름은 옛 탭 이름 그대로
@@ -673,4 +673,39 @@ test("주석: 이 잡의 phase 이벤트만 그 단계 행에(행마다 3건 + �
   renderStages({ phase_refs: ALL_REFS }, { events, jobCount: 2 });
   expect(screen.queryByText(/no job id msg/)).toBeNull();
   expect(screen.getByText(/^p1 msg · /)).toBeInTheDocument();
+});
+
+// ---- 결과 파일 자동 만료(2026-10-26) ----
+
+test("expiryText: 보존일이 있으면 「보존 N일, 날짜(KST)」, 없으면 날짜만", () => {
+  // 15:30Z + 9h = 다음 날 00:30 KST -- 날짜는 KST 기준이다.
+  expect(expiryText("2030-12-03T15:30:00Z", 1500)).toBe("결과 파일 만료됨(보존 1500일, 2030-12-04)");
+  expect(expiryText("2030-12-03T15:30:00Z", null)).toBe("결과 파일 만료됨(2030-12-04)");
+  expect(expiryText("2030-12-03T15:30:00Z", 0)).toBe("결과 파일 만료됨(2030-12-04)");
+  expect(expiryText("garbage", 30)).toBe("결과 파일 만료됨(보존 30일, garbage)");     // 못 읽으면 원문 -- 지어내지 않는다
+});
+
+test("만료된 잡: 출력 자리에 「결과 파일 만료됨(보존 N일, 날짜)」, 빈 단계는 「출력 없음」이 아니다, 로그 칩·단계는 그대로", async () => {
+  server.use(http.get("/api/user/jobs/j1/artifacts", () => HttpResponse.json({
+    entries: [], truncated: false, expired_at: "2030-12-03T15:30:00Z", retention_days: 1500 })));
+  renderStages({ artifacts_expired_at: "2030-12-03T15:30:00Z" });
+  expect(await screen.findByText("결과 파일 만료됨(보존 1500일, 2030-12-04)")).toBeInTheDocument();
+  expect(screen.getByText(/작업 기록과 결과 수치는 그대로 남아 있습니다/)).toBeInTheDocument();
+  expect(screen.queryByText("출력 없음")).toBeNull();
+  expect(screen.getAllByText("결과 파일 만료됨").length).toBeGreaterThan(0);
+  expect(screen.getByRole("button", { name: "preflight 로그" })).toBeInTheDocument();
+  expect(screen.queryByText(/출력 파일 목록을 불러오지 못했습니다/)).toBeNull();
+});
+
+test("잡 행에만 만료 표시가 있고 목록이 보존일을 싣지 않으면(구버전·꺼짐) 날짜만", async () => {
+  server.use(http.get("/api/user/jobs/j1/artifacts", () => HttpResponse.json({ entries: [], truncated: false })));
+  renderStages({ artifacts_expired_at: "2030-12-03T15:30:00Z" });
+  expect(await screen.findByText("결과 파일 만료됨(2030-12-04)")).toBeInTheDocument();
+});
+
+test("만료 전 잡은 만료 문구가 없고 빈 단계는 여전히 「출력 없음」", async () => {
+  server.use(http.get("/api/user/jobs/j1/artifacts", () => HttpResponse.json({ entries: [], truncated: false })));
+  renderStages({ artifacts_expired_at: null });
+  expect((await screen.findAllByText("출력 없음")).length).toBeGreaterThan(0);
+  expect(screen.queryByText(/결과 파일 만료됨/)).toBeNull();
 });

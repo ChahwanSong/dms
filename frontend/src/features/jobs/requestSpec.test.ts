@@ -558,3 +558,35 @@ describe("목적지 소유 -- 결과 소유 규칙(owner_rule)", () => {
       expect(spec(pvReq(dest), [measured]).ownership).toBeNull();
   });
 });
+
+// ---- 8c 목적지 소유 -- 직접 경로 목적지(2026-10-26 사용자 결정 (4): payload.dest_owner) ----------------------------------
+describe("목적지 소유 -- 직접 경로 목적지(dest_owner)", () => {
+  const rootJob = JOB({ worker_pool: { identity: ROOT_IDENT } });
+  const rawReq = (destOwner: unknown, extra: Record<string, unknown> = {}) => ({
+    requester_id: "mason", payload: { ...SYNC_PAYLOAD, run_as_root: true, dest_owner: destOwner, ...extra } });
+  test("storage: 「목적지 스토리지 기본 소유자 <v>(직접 경로)」, 0:0 은 root 로", () => {
+    expect(spec(rawReq({ rule: "storage", owner: "1500:1500", storage: "k8s-pv-nfs", pv_root: null }), [rootJob]).ownership)
+      .toBe("목적지 스토리지 기본 소유자 1500:1500(직접 경로)");
+    expect(spec(rawReq({ rule: "storage", owner: "0:0", storage: "k8s-pv-gpfs", pv_root: "pvc-1/pvc-1-data" }), [rootJob])
+      .ownership).toBe("목적지 스토리지 기본 소유자 0:0(root)(직접 경로)");
+  });
+  test("none·키 없음(옛 행): 종전 -- root 면 소스 그대로", () => {
+    expect(spec(rawReq({ rule: "none", storage: "cephfs-dms" }), [rootJob]).ownership)
+      .toBe("소스의 소유자·그룹 그대로(root 실행)");
+    expect(spec({ requester_id: "mason", payload: { ...SYNC_PAYLOAD, run_as_root: true } }, [rootJob]).ownership)
+      .toBe("소스의 소유자·그룹 그대로(root 실행)");
+  });
+  test("명시 chown 이 이긴다", () => {
+    expect(spec(rawReq({ rule: "storage", owner: "1500:1500" }, { options: { chown: "7:7" } }), [rootJob]).ownership)
+      .toBe("chown 지정값 7:7");
+  });
+  test("변조·비정상 기록(블록 아님·null·모르는 규칙·storage 인데 owner 형식 오류·PV 목적지에 함께 실림)은 행을 생략한다", () => {
+    for (const d of [null, "storage", ["storage"], { rule: "bogus" }, { rule: "storage" }, { rule: "storage", owner: "x:y" },
+                     { rule: "storage", owner: 1500 }])
+      expect(spec(rawReq(d), [rootJob]).ownership).toBeNull();
+    const withPv = rawReq({ rule: "none" }, {
+      destination_pv: { cluster: "dmsk8s", namespace: "team-a", pvc: "models", storage: "k8s-pv-nfs", root: "pv",
+                        owner_rule: "storage", owner: "1500:1500" } });
+    expect(spec(withPv, [rootJob]).ownership).toBeNull();
+  });
+});

@@ -13,6 +13,8 @@ import { RequestDetail } from "./RequestDetail";
 
 const server = setupServer(
   http.get("/api/user/storages", () => HttpResponse.json([])),
+  // 단건 삭제 버튼(2026-10-26)은 관리자에게만 -- 기본은 일반 사용자(RequestDetail.delete.test.tsx 가 동선을 본다).
+  http.get("/api/auth/me", () => HttpResponse.json({ actor: "alice", role: "user" })),
   // 단계 구획은 잡마다 아티팩트 목록을 읽는다 -- 기본은 빈 목록(시나리오가 필요하면 덮어쓴다).
   http.get("/api/user/jobs/:jid/artifacts", () => HttpResponse.json({ entries: [], truncated: false })),
 );

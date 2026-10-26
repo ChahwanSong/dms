@@ -144,7 +144,7 @@ def test_response_is_whitelisted_and_never_leaks_paths(tmp_path):
     assert set(body.keys()) == {"covered_by", "generated_at_epoch", "summary",
                                 "file_size_histogram", "time_histograms",
                                 "broken_paths_total", "broken_paths_limit",
-                                "total_bytes"}
+                                "total_bytes", "invalid_name_entries"}
     # 실 사용량(2026-08-23): mtime 이 비어 atime 합(50)으로 폴백 -- 숫자 하나라
     # 화이트리스트("집계 통계뿐") 안이다
     assert body["total_bytes"] == 50
@@ -193,6 +193,7 @@ def test_old_schema_report_still_serves_stats_with_broken_none(tmp_path):
     assert body["summary"]["total_entries"] == 10
     assert body["broken_paths_total"] is None
     assert body["broken_paths_limit"] is None
+    assert body["invalid_name_entries"] is None          # 구형 리포트(키 부재) = 모름 -- 0 이 아니다
     for forbidden_key in ("oldest", "broken_paths", "top_k"):
         assert forbidden_key not in body
     raw = r.text
@@ -438,3 +439,21 @@ def test_scan_on_different_storage_does_not_cover(tmp_path):
     r = client.get(f"/api/user/scan-paths/{path_id}/stats")
     assert r.status_code == 404
     assert r.json()["detail"] == "no_covering_scan"
+
+
+def test_new_dscan_counters_total_bytes_and_invalid_names(tmp_path):
+    """포크 ae781bd(2026-10-26)의 summary.total_bytes(정확 실 사용량)·summary.invalid_name_entries(이름이 엄격 UTF-8 이
+    아닌 항목 수 -- 카운터만). 실 사용량은 summary 값이 히스토그램 합보다 우선이고, 카운터는 숫자라 노출 계약 안이다.
+    broken_paths_total 에 더하지 않는다(사용자 결정 「카운터만 둠」)."""
+    art_base = tmp_path / "artifacts"
+    client, db = _client(tmp_path, art_base)
+    repos = client.app.state.repos
+    _login(client, "alice")
+    path_id = _register(client, "ceph-a", "team")
+    report = json.loads(json.dumps(REPORT))
+    report["summary"].update({"total_bytes": 1074750158, "invalid_name_entries": 15})
+    _scan_job(repos, db, storage_name="ceph-a", target="team", art_base=art_base, report=report)
+    body = client.get(f"/api/user/scan-paths/{path_id}/stats").json()
+    assert body["total_bytes"] == 1074750158            # 히스토그램 합(50)이 아니라 summary 의 정확값
+    assert body["invalid_name_entries"] == 15
+    assert body["broken_paths_total"] == 3              # 더하지 않는다

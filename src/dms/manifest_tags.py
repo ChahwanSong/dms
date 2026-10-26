@@ -18,6 +18,7 @@ tests/test_release_manifest_contract.py 에 있던 파서를 승격했다. PyYAM
 from pathlib import Path
 
 from .repositories.releases import COMPONENTS
+from .rollout_status import security_context_view
 
 # 롤아웃 대상 3종의 매니페스트 파일. kind/workload/container 좌표는 COMPONENTS 가
 # 단일 진실이다 -- 여기 중복 정의하면 계약 테스트가 지키는 표와 어긋날 수 있다.
@@ -227,7 +228,8 @@ def init_container_image(doc: "list[str]", container: str) -> "str | None":
     return _image_in(doc, "initContainers", container)
 
 
-# --- securityContext 리더(2026-09-09, 제어면 root 전환의 계약 테스트 전용) --------
+# --- securityContext 리더(2026-09-09, 제어면 root 전환의 계약 테스트용 -- 2026-10-26 부터 드리프트 배지도 쓴다:
+# manifest_security_contexts 가 _READ_ERRORS 로 감싸 fail-soft 로 부른다) --------
 # 매니페스트의 컨테이너별 securityContext 를 읽는다. **bare _find(doc, "securityContext")
 # 금지**: 첫 등장만 잡아 블록이 여럿(파드 수준 + 컨테이너 수준, 50-agent 처럼)이면
 # 엉뚱한 것을 집는다. _image_in 처럼 containers 블록을 `- name:` 항목 단위로 걷고
@@ -352,6 +354,39 @@ def manifest_images(root=None) -> "dict[str, str | None]":
                                      spec["workload"], spec["container"])
     filename, kind, name, container = _MIGRATE
     out["dms-migrate"] = _image_from(base / filename, kind, name, container)
+    return out
+
+
+# securityContext 드리프트 배지(2026-10-26, BACKLOG 「securityContext 드리프트는 배지가 못 본다」)의 비교 대상 -- 제어면
+# root 계약(40-api/41-controller 컨테이너 수준)이 걸린 둘만 본다. 에이전트는 privileged 파드라 이 배지의 목적(65532 로
+# 굴러 3홉 쓰기 실패)과 무관하다.
+SECURITY_COMPONENTS = ("dms-api", "dms-controller")
+
+
+def manifest_security_contexts(root=None) -> "dict[str, dict | None]":
+    """동봉 매니페스트의 실효 securityContext(rollout_status.security_context_view) -- 런타임 경로라 전면 fail-soft.
+
+    못 읽으면(동봉본 없음·문서/컨테이너 없음·깨진 파일) 그 컴포넌트만 None(모름). 컨테이너 항목에 securityContext
+    블록이 **없는** 것도 None 이다 -- 40/41 은 늘 블록을 갖는 계약(test_release_manifest_contract)이라 부재는 「아무것도
+    선언 안 함」보다 「파서가 빗나감」일 공산이 크고, 그때 전 필드 None 과 비교하면 거짓 드리프트가 난다. 이미지의
+    자리표시자 규칙(site_image)은 여기 해당하지 않는다: securityContext 는 base 가 유일한 진실이고(오버레이는 Deployment 를
+    패치하지 않는다) 동봉본은 그 이미지가 기대하는 값이다."""
+    out = {c: None for c in SECURITY_COMPONENTS}
+    base = _root(root)
+    if base is None:
+        return out
+    for component in SECURITY_COMPONENTS:
+        spec = COMPONENTS[component]
+        try:
+            doc = workload_doc(base / MANIFEST_FILES[component], spec["kind"], spec["workload"])
+            if doc is None:
+                continue
+            csc = container_security_context(doc, spec["container"])
+            if not isinstance(csc, dict):
+                continue
+            out[component] = security_context_view(csc, pod_security_context(doc))
+        except _READ_ERRORS:
+            continue                   # 그 항목만 None(설계 §4)
     return out
 
 

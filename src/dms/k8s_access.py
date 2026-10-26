@@ -24,6 +24,10 @@ path}). resource_key·planner 스토리지 어드미션·노드 배치·stepper.
 PV 목적지 sync 의 결과 소유(2026-10-26 사용자 지시): 제출이 destination_pv 블록에 owner_rule(OWNER_RULES -- 기본 "storage" =
 목적지 스토리지 기본 소유자를 owner 로 기록, 특권 운영자 옵션 "pv_root" = 잰 PV 루트 소유자)을 싣고 recheck_request 가 다시 본다.
 실행은 stepper._build_spec → execution_manifests._auto_chown(--chown).
+직접 경로 sync 목적지의 결과 소유(2026-10-26 사용자 결정 (4) + 권장 다듬기): 목적지 스토리지가 PV 를 담는 종류면 그 스토리지의
+기본 소유자로 -- pv 는 늘, both 는 경로가 지금 인벤토리의 그 스토리지 PV 루트 아래일 때만(direct_dest_owner). 단건 제출
+(routes_requests.submit)과 배치 자식 생성(batch_orchestrator._materialize)이 payload["dest_owner"] 에 얼리고, recheck_request 가
+다시 계산해 대조한다(planner 3a·단건 컨펌·배치 자식 컨펌 batch_orchestrator._confirm_child).
 사유 코드는 DomainValidationError("<리터럴>") 로 낸다 -- 사유 코드 AST 그물(tests/test_reason_codes_coverage.py)이 읽는 모양이다.
 """
 import posixpath
@@ -31,6 +35,7 @@ import posixpath
 from .domain import DomainValidationError, validate_relative_path
 from .identity import privilege_eligible
 from .privileged import privileged_names
+from .repositories.k8s import storage_default_owner, storage_kind
 
 # 연산 → 쪽마다 (pv 블록 키, 스토리지 키, 경로 키). 단건 payload 의 모양(domain.build_data_payload)과 같다.
 _SIDES = {
@@ -44,6 +49,10 @@ PV_KEYS = ("pv", "source_pv", "destination_pv")
 # 옵션). 제출(routes_requests.submit)·재확인(recheck_request)이 이 목록 하나를 본다. 튜플인 이유: 변조된 비해시 값(리스트)도
 # 멤버십 검사가 TypeError 없이 「목록 밖」으로 끝나게.
 OWNER_RULES = ("storage", "pv_root")
+# 직접 경로 sync 목적지의 결과 소유 규칙(payload["dest_owner"]["rule"], 2026-10-26 사용자 결정 (4)): "storage" = 목적지 스토리지
+# 기본 소유자로 chown(블록 owner 에 그 값), "none" = 해당 없음(root 실행이라 소스 소유 보존 -- 판정을 했다는 기록이다: 키 자체가
+# 없는 옛 행과 달라야 「제출 뒤 적용 대상이 됨」을 재확인이 잡는다). 튜플인 이유는 OWNER_RULES 와 같다.
+DEST_OWNER_RULES = ("storage", "none")
 # 제출 라우트의 HTTP 상태(나머지 사유는 422). 모름(스냅숏 없음)은 409, 권한은 403.
 SUBMIT_STATUS = {"k8s_mapping_unknown": 409, "raw_path_not_allowed": 403, "k8s_access_denied": 403}
 
@@ -179,7 +188,13 @@ def recheck_request(repos, req, *, settings) -> None:
         특권 상실·DB 직접 삽입), "storage" 면 기록된 owner 가 목적지 스토리지의 **현재** 기본 소유자와 같아야 한다(아니면
         storage_owner_changed -- 제출 뒤 관리자가 기본값을 바꿈·변조; 확인 창에 보인 소유자와 실행이 갈라지지 않게. 현재 값이
         무효면 invalid_storage_owner). 명시 chown 이 있는 요청은 결과가 chown 값이라 대조하지 않는다. 규칙이 **없는** 블록은 이 기능 전에 제출된 옛 행이라 새 검사를 하지 않는다(종전처럼
-        PV 루트 소유자를 잰다 -- 부재를 거부로 "강화" 하면 배포 순간 진행 중인 요청이 전부 끊긴다)."""
+        PV 루트 소유자를 잰다 -- 부재를 거부로 "강화" 하면 배포 순간 진행 중인 요청이 전부 끊긴다).
+      - 직접 경로 sync 목적지의 결과 소유 블록(payload["dest_owner"], 2026-10-26 사용자 결정 (4))이 있으면 지금 값으로 다시
+        계산해(direct_dest_owner) 규칙·소유자가 같아야 한다 -- 다르면 storage_owner_changed(기본 소유자 변경, 스토리지 종류 변경,
+        both 의 PV 루트가 생기거나 사라져 적용 여부가 바뀜), 지금 적용인데 저장값이 무효면 invalid_storage_owner, 블록 모양·자리가
+        틀리면 pv_owner_not_applicable(변조). 키가 없는 행(이 기능 전 제출·PV 목적지·명시 chown)은 새 검사가 없고, 명시 chown 이
+        있으면 대조하지 않는다(PV 규칙과 같은 이유). 배치 자식은 이 함수를 planner 3a 와 배치 컨펌(batch_orchestrator._confirm_child)
+        에서 지난다."""
     payload = req.get("payload") if isinstance(req, dict) else None
     if not isinstance(payload, dict):
         return
@@ -239,6 +254,8 @@ def recheck_request(repos, req, *, settings) -> None:
         # 않는 스토리지 값의 변경으로 운영자 요청을 거부하지 않게(리뷰; 제출도 chown 이면 규칙을 기록하지 않는다).
         if operation == "sync" and pv_key == "destination_pv" and "owner_rule" in block and "chown" not in options:
             _recheck_owner_rule(block, resolved, exempt=exempt)
+    if "dest_owner" in payload and "chown" not in options:
+        _recheck_dest_owner(repos, operation, payload)
 
 
 def _recheck_owner_rule(block: dict, resolved: dict, *, exempt: bool) -> None:
@@ -256,3 +273,68 @@ def _recheck_owner_rule(block: dict, resolved: dict, *, exempt: bool) -> None:
         raise DomainValidationError("invalid_storage_owner", f"storage {resolved.get('storage_name')}")
     if block.get("owner") != current:
         raise DomainValidationError("storage_owner_changed", f"{block.get('owner')!r} -> {current}")
+
+
+def direct_dest_owner(repos, operation, payload) -> "dict | None":
+    """직접 경로 sync 목적지의 결과 소유 블록 -- payload["dest_owner"] 에 얼릴 값(2026-10-26 사용자 결정 (4) 「직접 경로의
+    스토리지가 PV 를 담는 종류(pv·both)면 그 스토리지의 기본 uid:gid 로 자동 chown」 + 권장 다듬기 「both 는 경로가 인벤토리의 PV
+    루트 아래일 때만」 -- both 스토리지의 PV 밖 일반 디렉터리까지 같은 값이 되지 않게). 제출(routes_requests.submit)·배치 자식
+    생성(batch_orchestrator._materialize)이 얼리고 재확인(_recheck_dest_owner)이 지금 값으로 다시 부른다 -- 셋이 이 함수 하나다.
+
+    None = 기록하지 않는다: sync 가 아님, 목적지가 PV 주소(destination_pv 블록 -- 그쪽 규칙 owner_rule 이 먼저다), 명시 chown(특권
+    운영자 -- 결과가 chown 값이라 쓰이지 않는 스토리지 값을 얼려 거짓 거부하지 않는다, PV 규칙의 리뷰 결론과 같다), 목적지
+    스토리지 행이 없음(planner storage_missing 이 끊는다 -- 모름을 「해당 없음」으로 기록하지 않는다).
+    블록:
+      {"rule": "storage", "owner": "uid:gid", "storage": 이름, "pv_root": 덮는 PV 루트 | None}
+          목적지 스토리지 종류가 pv(pv_root None -- 스토리지 전체가 PV 용)이거나, both 이고 정규화한 목적지 경로가 그 스토리지의
+          **지금** PV 루트(repositories.k8s.pv_root_covering -- 적용된 모든 클러스터) 와 같거나 그 아래. owner 는
+          storage_default_owner(PV 주소 목적지의 기본 규칙과 같은 값 -- 측정 없음).
+      {"rule": "none", "storage": 이름}
+          그 밖(filesystem·NULL·알 수 없는 종류, both 의 PV 밖 경로·형식이 틀린 경로) -- root 실행의 종전 규칙(소스 소유 보존).
+    적용인데 저장된 기본 소유자가 무효(변조)면 DomainValidationError("invalid_storage_owner") -- root·소스 소유로 뭉개지 않는다
+    (제출 409, 배치 자식은 그 항목만 Rejected, 재확인은 그 사유로 종단)."""
+    if operation != "sync" or not isinstance(payload, dict) or payload.get("destination_pv") is not None:
+        return None
+    options = payload.get("options") if isinstance(payload.get("options"), dict) else {}
+    if "chown" in options:
+        return None
+    name = payload.get("destination_storage")
+    row = repos.storages.get(name) if isinstance(name, str) and name else None
+    if row is None:
+        return None
+    kind = storage_kind(row)
+    pv_root = None
+    if kind == "both":
+        dest = payload.get("destination")
+        try:
+            norm = validate_relative_path(dest) if isinstance(dest, str) else None
+        except DomainValidationError:
+            norm = None
+        pv_root = repos.k8s.pv_root_covering(name, norm) if norm is not None else None
+        if pv_root is None:
+            return {"rule": "none", "storage": name}
+    elif kind != "pv":
+        return {"rule": "none", "storage": name}
+    owner = storage_default_owner(row)
+    if owner is None:
+        raise DomainValidationError("invalid_storage_owner", f"storage {name}")
+    return {"rule": "storage", "owner": owner, "storage": name, "pv_root": pv_root}
+
+
+def _recheck_dest_owner(repos, operation, payload: dict) -> None:
+    """직접 경로 sync 목적지의 결과 소유 재확인(recheck_request docstring 의 마지막 항목) -- 키가 있을 때만 불린다.
+    대조는 (규칙, 소유자) 둘이다: storage·pv_root 칸은 표시용 기록이라, both 에서 경로를 덮는 PV 가 다른 PV 로 바뀌어도 결과
+    (같은 스토리지의 같은 기본 소유자)가 같으면 막지 않는다."""
+    frozen = payload.get("dest_owner")
+    if not isinstance(frozen, dict) or frozen.get("rule") not in DEST_OWNER_RULES:
+        raise DomainValidationError("pv_owner_not_applicable", f"dest_owner {frozen!r}")
+    # 제출·배치 생성은 sync 의 직접 경로 목적지에만 싣는다 -- 다른 자리의 블록은 변조다(실행은 읽지 않지만 증거를 삼키지 않는다).
+    if operation != "sync" or payload.get("destination_pv") is not None:
+        raise DomainValidationError("pv_owner_not_applicable", "dest_owner on a request without a direct-path destination")
+    now = direct_dest_owner(repos, operation, payload)
+    if now is None:
+        return          # 목적지 스토리지 행이 없다 -- planner storage_missing·stepper StorageMissingAtStep 이 끊는다
+    if (frozen.get("rule"), frozen.get("owner")) != (now["rule"], now.get("owner")):
+        raise DomainValidationError(
+            "storage_owner_changed",
+            f"{frozen.get('rule')}:{frozen.get('owner')!r} -> {now['rule']}:{now.get('owner')!r} ({now['storage']})")

@@ -29,7 +29,7 @@ _ROW_COLUMNS_SANS_DIAG = (
     "reason_code, preview_fingerprint, preview_expires_at, preview_summary, volcano_job_ref, "
     "artifact_uri, result_summary, files_count, bytes_count, worker_pool, "
     "precondition, confirmed_fingerprint, phase_refs, submit_wait_seconds, "
-    "exec_submitted_at, sched_wait_seconds, pods_gc_at, created_at, updated_at")
+    "exec_submitted_at, sched_wait_seconds, pods_gc_at, artifacts_expired_at, created_at, updated_at")
 
 
 # 사용량 분석의 IN 목록 한 문장 상한(recent_scans_for_targets·jobs_by_ids) -- scan_digests._CHUNK 와 같은 값. 라우트도
@@ -532,6 +532,15 @@ class DataJobsRepository:
             "UPDATE data_jobs SET worker_pool = :wp WHERE job_id = :j AND state = :s",
             {"wp": dump_json(worker_pool), "j": job_id, "s": expected_state}) == 1
 
+    def touch_held(self, job_id, *, expected_state) -> bool:
+        """실행 관문에서 보류한 잡(2026-10-27, stepper._overlap_hold)의 updated_at 만 지금으로 -- claim_steppable 이
+        updated_at 오름차순 LIMIT 이라, 시각이 그대로인 보류 잡이 앞자리를 차지하면 그 보류를 풀어 줄 잡(실행 중인 상대)이
+        클레임되지 못해 영영 풀리지 않는다(보류 잡 10건이면 교착). 조건부(state = expected_state) -- 그 사이 취소·종단된 잡은
+        no-op. 비종단 잡의 updated_at 은 클레임 순서 말고 쓰는 곳이 없다(GC·만료·삭제의 나이는 종단 뒤 값이다)."""
+        return self._db.execute_count(
+            "UPDATE data_jobs SET updated_at = :now WHERE job_id = :j AND state = :s",
+            {"now": utc_now_iso(), "j": job_id, "s": expected_state}) == 1
+
     def mark_exec_submitted(self, job_id) -> None:
         """execution vcjob 제출 직후의 앵커 시각(슬라이스 20 설계 §2.2, 플랜 D1).
         write-once 는 SQL 술어(IS NULL)가 강제한다 -- 재제출·중복 호출이 앵커를
@@ -619,7 +628,7 @@ class DataJobsRepository:
         # files는 "항목(items)" 의미로 통일했고(dsync/nsync Items, drm Removed N
         # items, dscan summary.total_entries). bytes 의 의미는 도구별로 다르다
         # (2026-08-23): sync 는 "옮긴 바이트", scan 은 "관측한 트리의 총 용량"
-        # (실 사용량 -- 시간 히스토그램 합, parsers.parse_scan_counts), rm 은
+        # (실 사용량 -- summary.total_bytes, 구형 리포트는 시간 히스토그램 합, parsers.parse_scan_counts), rm 은
         # 도구가 미보고라 NULL 이다. 그래서 처리량 지표(metrics job_stats)는
         # scan 을 SUM 에서 제외한다 -- 파싱 실패는 여전히 fail-soft NULL.
         files_count = bytes_count = None

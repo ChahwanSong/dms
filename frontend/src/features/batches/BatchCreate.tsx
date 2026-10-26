@@ -1,15 +1,16 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { ArrowRight, Download, Plus, X } from "lucide-react";
-import { autoConfirmable, useCreateBatch } from "./useBatches";
-import type { BatchOp, CreateBatchBody } from "./useBatches";
-import { parseItemsCsv, serializeItemsCsv } from "../../lib/csv";
+import { ArrowRight, Download, FileDown, Plus, X } from "lucide-react";
+import { autoConfirmable, useCreateBatch, useParseBatchCsv } from "./useBatches";
+import type { BatchOp, CreateBatchBody, ParseBatchCsvBody } from "./useBatches";
+import { batchCsvTemplateUrl, csvErrorLines, itemsToRows, serializeItemsCsv } from "../../lib/csv";
 import type { ScanRow, SyncRow } from "../../lib/csv";
+import { BatchStoragePicker } from "./BatchStoragePicker";
 import { useUserStorages } from "../storages/useUserStorages";
 import { usePolicies } from "../policies/usePolicies";
 import type { Policy } from "../../lib/types";
 import { NODE_CPU_CAP_NOTE } from "../../lib/jobTool";
-import { StoragePicker, field } from "../jobs/formFields";
+import { field } from "../jobs/formFields";
 import {
   CHMOD_RE, chownFieldError, SCAN_INT_FIELDS, SYNC_INT_FIELDS, SYNC_OPTION_HELP, intFieldError,
   scanIntFieldError, syncIntFieldError,
@@ -19,7 +20,9 @@ import {
   FieldRow, FormSection, OptionTokens, SubmitHints, SubmitLayout, SummaryList, SummaryPanel, SummaryRow,
 } from "../../components/form/SubmitLayout";
 import { ApiError } from "../../lib/api";
-import { syncOwnership } from "../../lib/syncOwnership";
+import { ownerText, syncOwnership } from "../../lib/syncOwnership";
+import type { DirectDestOwner } from "../../lib/syncOwnership";
+import { storageKindOf, storageOwnerOf } from "../k8s/k8sTerms";
 import { relativePathProblem } from "../../lib/storagePaths";
 import { rmTargetOverlaps } from "../../lib/rmTargets";
 import { PvPathPicker } from "../k8s/PvPathPicker";
@@ -108,10 +111,15 @@ const initial = {
 export function BatchCreate() {
   const nav = useNavigate();
   const create = useCreateBatch();
+  // CSV 해석은 서버(2026-10-26 — POST /api/admin/batches:parse-csv, 생성과 같은 검증으로 줄마다 사유). 결과가 오기 전에
+  // 연산을 바꿨으면 그 결과는 버린다(모양이 다른 행을 표에 넣지 않게) — 마지막 연산은 ref 로 본다.
+  const parse = useParseBatchCsv();
   const storagesQ = useUserStorages();
   const policiesQ = usePolicies();          // 정책 기본값 캡션(표시 전용 배선)
   // 폼 값은 단일 useState(SubmitJob 관례). 연산을 바꿔도 행·CSV 상태는 초기화하지 않는다(현행).
   const [f, setF] = useState(initial);
+  const opRef = useRef(f.op);
+  opRef.current = f.op;
   // 고급 옵션 펼침 상태. 안의 오류로 제출이 잠기면 항상 펼친다(아래 details open/onToggle).
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [rows, setRows] = useState<RowPair[]>([{ a: "", b: "" }]);
@@ -123,6 +131,16 @@ export function BatchCreate() {
 
   const storages = storagesQ.data ?? [];
   const loadingStorages = storagesQ.isLoading;
+  // 직접 경로 목적지의 결과 소유(2026-10-26 사용자 결정 (4) -- 서버 k8s_access.direct_dest_owner 를 자식 생성 때 같은 함수로): 배치
+  // 항목은 모두 목적지 스토리지 하나(f.dstStorage)를 쓴다 -- pv 종류면 늘 그 스토리지 기본 소유자, both 면 항목 경로가 그 스토리지의 PV
+  // 루트 아래일 때만(화면은 PV 루트를 모른다 -- 조건을 그대로 말한다), filesystem 은 종전(소스 소유 보존). 항목마다 정해진 값은 자식
+  // 작업의 요청 상세 「목적지 소유」에 보인다.
+  const dstRow = storages.find((s) => s.storage_name === f.dstStorage);
+  const dstKind = dstRow !== undefined ? storageKindOf(dstRow) : null;
+  const dstOwner = dstRow !== undefined ? storageOwnerOf(dstRow) ?? null : null;
+  const directDest: DirectDestOwner | null = dstKind === "pv" ? { rule: "storage", owner: dstOwner }
+    : dstKind === "both" ? { rule: "storage_if_under_pv", owner: dstOwner } : null;
+  const dstOwnerLabel = dstOwner !== null ? ownerText(dstOwner) : "(uid:gid)";
 
   const on = (k: keyof typeof initial) => (e: any) =>
     setF({ ...f, [k]: e.target.type === "checkbox" ? e.target.checked : e.target.value });
@@ -183,7 +201,8 @@ export function BatchCreate() {
     || recursiveMissing || statLiteConflict;
 
   // 제출 게이트는 이 하나다(위저드 시절 스텝별 '다음' 게이트의 합집합 + 조회 실패·진행 중).
-  const blocked = create.isPending || !itemsValid || controlsInvalid || storagesQ.isError || rmAutoAckMissing;
+  const blocked = create.isPending || parse.isPending || !itemsValid || controlsInvalid || storagesQ.isError
+    || rmAutoAckMissing;
 
   // --- 정책 기본값 캡션(백엔드 무변경 — 표시 배선만) ---
   // 도구→정책 키는 placement.py TOOL_TO_POLICY 의 미러: scan→"scan", rm→"rm", sync→공존
@@ -329,14 +348,34 @@ export function BatchCreate() {
     create.mutate(buildBody(), { onSuccess: (r) => nav(`/admin/batches/${r.batch_id}`) });
   }
 
+  // CSV 반영(붙여넣기·파일 공용): 서버가 해석·줄 판정(생성과 같은 규칙)을 하고, 오류가 하나라도 있으면 표를 덮지 않는다
+  // (부분 반영 금지 — 예전 계약 그대로). 이미 고른 배치 스토리지를 함께 보내 그 스토리지 기준으로 판정받고(sync 의 같은
+  // 스토리지 포함 규칙 등), 아직 고르지 않았으면 CSV 의 스토리지 열(내보내기 파일)로 채운다 — PV 패널의 「넣기」와 같은 규칙.
   function applyParsed(text: string) {
-    const { rows: parsed, errors } = parseItemsCsv(f.op, text);
-    setCsvErrors(errors);
-    if (errors.length > 0) return;   // 오류가 있으면 rows 를 덮지 않는다(부분 반영 금지)
-    setRows(parsed.map((r) => f.op === "sync"
-      ? { a: (r as SyncRow).source, b: (r as SyncRow).destination }
-      : { a: (r as ScanRow).target, b: "" }));
-    setTab("table");                 // 성공 반영 → 결과(테이블)를 바로 보인다
+    const op = f.op;
+    const body: ParseBatchCsvBody = { operation: op, csv: text,
+      ...(op === "sync"
+        ? { ...(f.srcStorage !== "" && { source_storage: f.srcStorage }),
+            ...(f.dstStorage !== "" && { destination_storage: f.dstStorage }) }
+        : f.storage !== "" && { storage: f.storage }) };
+    setCsvErrors([]);
+    parse.mutate(body, {
+      onSuccess: (r) => {
+        if (opRef.current !== op) return;          // 그 사이 연산을 바꿨다 — 다른 모양의 결과다
+        if (r.error_count > 0) { setCsvErrors(csvErrorLines(r)); return; }
+        setRows(itemsToRows(op, r.items).map((x) => op === "sync"
+          ? { a: (x as SyncRow).source, b: (x as SyncRow).destination }
+          : { a: (x as ScanRow).target, b: "" }));
+        const st = r.storages ?? {};
+        setF((prev) => op === "sync"
+          ? { ...prev, srcStorage: prev.srcStorage || (st.source_storage ?? ""),
+              dstStorage: prev.dstStorage || (st.destination_storage ?? "") }
+          : { ...prev, storage: prev.storage || (st.storage ?? "") });
+        setTab("table");             // 성공 반영 → 결과(테이블)를 바로 보인다
+      },
+      // 전체 실패(413 너무 큼·422 행 수 초과·네트워크) — 사유 문구는 ApiError 가 이미 reasonText 를 거쳤다.
+      onError: (e) => { if (opRef.current === op) setCsvErrors([(e as Error).message]); },
+    });
   }
 
   function handleFile(file: File | undefined) {
@@ -404,6 +443,7 @@ export function BatchCreate() {
   if (!storageChosen) hints.push(f.op === "sync" ? "소스·목적지 스토리지를 고르세요" : "스토리지를 고르세요");
   if (rows.length === 0) hints.push("항목을 1개 이상 추가하세요");
   else if (incompleteRows > 0) hints.push(`경로가 빈 항목 ${incompleteRows}개를 채우거나 지우세요`);
+  if (parse.isPending) hints.push("CSV 검사 중…");
   if (csvErrors.length > 0) hints.push("CSV 오류를 고친 뒤 다시 반영하세요");
   if (rmPathErrors.length > 0) hints.push(`삭제할 수 없는 경로 ${rmPathErrors.length}개를 고치세요`);
   if (rmOverlapErrors.length > 0) hints.push(`겹치는 삭제 경로 ${rmOverlapErrors.length}개를 정리하세요`);
@@ -447,7 +487,7 @@ export function BatchCreate() {
         )}
         {f.op !== "sync" ? (<>
           <div className="grid gap-3 sm:grid-cols-2">
-            <StoragePicker label="스토리지" value={f.storage}
+            <BatchStoragePicker label="스토리지" value={f.storage}
               onChange={(v) => setF({ ...f, storage: v })}
               storages={storages} loading={loadingStorages} />
           </div>
@@ -473,12 +513,12 @@ export function BatchCreate() {
         </>) : (
           <>
             <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]">
-              <StoragePicker label="소스 스토리지" value={f.srcStorage}
+              <BatchStoragePicker label="소스 스토리지" value={f.srcStorage}
                 onChange={(v) => setF({ ...f, srcStorage: v })}
                 storages={storages} loading={loadingStorages} />
               <ArrowRight aria-hidden
                           className="h-5 w-5 rotate-90 justify-self-center text-muted md:mt-8 md:rotate-0" />
-              <StoragePicker label="목적지 스토리지" value={f.dstStorage}
+              <BatchStoragePicker label="목적지 스토리지" value={f.dstStorage}
                 onChange={(v) => setF({ ...f, dstStorage: v })}
                 storages={storages} loading={loadingStorages} />
             </div>
@@ -496,7 +536,8 @@ export function BatchCreate() {
                 <li><strong>목적지가 없는 경우</strong>: sync 가 목적지 디렉토리를 새로 만듭니다 — 각 목적지의
                   상위 디렉토리는 이미 있어야 합니다(중간 디렉토리는 만들지 않습니다).</li>
                 <li><strong>목적지가 이미 있는 경우</strong>: 디렉토리여야 합니다(파일이면 그 항목은 거부).</li>
-                <li><strong>소유권</strong>: {syncOwnership({ chown: f.chown, chmod: f.chmod, root: true, runAs: null, self: true }).long}
+                <li><strong>소유권</strong>: {syncOwnership({ chown: f.chown, chmod: f.chmod, root: true, runAs: null, self: true,
+                                                              directDest }).long}
                   {f.chown.trim() === "" && " 특정 사용자 소유로 맞추려면 아래 실행 옵션의 고급 옵션 chown 에 숫자 uid:gid 를 지정하세요."}</li>
                 <li>계획 시점에 만든 관리자의 특권 자격이 빠져 있으면 항목은 root 로 돌지 않고 거부됩니다(비 root 로 낮춰
                   실행하지 않습니다).</li>
@@ -515,10 +556,17 @@ export function BatchCreate() {
               {segment("paste", "CSV 붙여넣기")}
               {segment("upload", "파일 업로드")}
             </div>
-            <Button type="button" variant="ghost" className="gap-1.5"
-                    onClick={downloadCsv}>
-              <Download className="h-4 w-4" aria-hidden />CSV 다운로드
-            </Button>
+            <div className="flex flex-wrap gap-2">
+              {/* 템플릿(경로 열 헤더 + 예시 한 줄)은 서버가 내린다 — 세션 쿠키로 받는 <a download>(로그 다운로드와 같은 길). */}
+              <a href={batchCsvTemplateUrl(f.op)} download
+                 className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-line bg-surface px-3 py-2 text-sm font-medium text-ink">
+                <FileDown className="h-4 w-4" aria-hidden />템플릿 받기
+              </a>
+              <Button type="button" variant="ghost" className="gap-1.5"
+                      onClick={downloadCsv}>
+                <Download className="h-4 w-4" aria-hidden />CSV 다운로드
+              </Button>
+            </div>
           </div>
           <div className="p-3">
             {tab === "table" && (
@@ -571,9 +619,13 @@ export function BatchCreate() {
                               : "team\nprojects/alpha"}
                             value={csvText} onChange={(e) => setCsvText(e.target.value)} />
                 </label>
-                <p className="text-xs text-muted">반영하면 표의 행을 통째로 바꿉니다(이어 붙이지 않음).</p>
-                <Button type="button" variant="outline"
-                        onClick={() => applyParsed(csvText)}>테이블에 반영</Button>
+                <p className="text-xs text-muted">
+                  반영하면 표의 행을 통째로 바꿉니다(이어 붙이지 않음). 서버가 생성과 같은 규칙으로 줄마다 검사하고, 오류가
+                  있으면 반영하지 않습니다. 첫 줄이 헤더(target·path / source,destination)면 열 이름으로 읽어 「CSV 내보내기」
+                  파일도 그대로 쓸 수 있고, 콤마가 든 경로는 "…" 로 감쌉니다.
+                </p>
+                <Button type="button" variant="outline" disabled={parse.isPending}
+                        onClick={() => applyParsed(csvText)}>{parse.isPending ? "검사 중…" : "테이블에 반영"}</Button>
               </div>
             )}
 
@@ -585,7 +637,7 @@ export function BatchCreate() {
             )}
 
             {csvErrors.length > 0 && (
-              <ul className="mt-3 space-y-1 text-bad text-sm">
+              <ul aria-label="반영할 수 없는 줄" className="mt-3 space-y-1 text-bad text-sm">
                 {csvErrors.map((err, i) => <li key={i}>{err}</li>)}
               </ul>
             )}
@@ -754,7 +806,11 @@ export function BatchCreate() {
                     </label>
                     {chownError && <p className="mt-1 text-bad text-sm">{chownError}</p>}
                   </>}
-                  help="비우면 원래(소스) 소유권을 보존합니다(root 실행). 지정하면 목적지와 복사본이 그 소유로 셋업됩니다 — 숫자 uid:gid 로 지정하세요." />
+                  help={`${dstKind === "pv"
+                    ? `비우면 목적지 스토리지 기본 소유자 ${dstOwnerLabel} 로 자동 chown 됩니다(PV 를 담는 스토리지의 직접 경로).`
+                    : dstKind === "both"
+                    ? `비우면 항목의 목적지 경로가 그 스토리지의 PV 루트 아래일 때 목적지 스토리지 기본 소유자 ${dstOwnerLabel} 로 자동 chown 되고, 아니면 원래(소스) 소유권을 보존합니다(root 실행).`
+                    : "비우면 원래(소스) 소유권을 보존합니다(root 실행)."} 지정하면 목적지와 복사본이 그 소유로 셋업됩니다 — 숫자 uid:gid 로 지정하세요.`} />
               </div>
             </details>
           </>
@@ -931,12 +987,13 @@ export function BatchCreate() {
         {/* 특권 실행 표시는 고정 행(통일 게이트 — 입력과 무관), 실행 신원 행은 값이 있을 때만
             (빈값 = 생성자 본인) */}
         <SummaryRow label="실행 권한" className={body.operation === "rm" ? "text-bad" : ""}>관리자 특권(root)</SummaryRow>
-        {/* sync 결과 소유(2026-10-01): 배치는 root 라 chown 미지정이면 소스 그대로. */}
+        {/* sync 결과 소유(2026-10-01): 배치는 root 라 chown 미지정이면 소스 그대로 -- 목적지 스토리지가 PV 를 담는 종류면 그
+            스토리지 기본 소유자(2026-10-26 사용자 결정 (4), 위 directDest). */}
         {body.operation === "sync" && (
           <SummaryRow label="목적지 소유">
             {syncOwnership({ chown: String(body.options?.chown ?? ""),
                              chmod: String(body.options?.chmod ?? ""), root: true,
-                             runAs: null, self: true }).short}
+                             runAs: null, self: true, directDest }).short}
           </SummaryRow>
         )}
         {body.owner_username && <SummaryRow label="실행 신원">{body.owner_username}</SummaryRow>}

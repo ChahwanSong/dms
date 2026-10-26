@@ -236,3 +236,106 @@ def test_daemonset_snake_case_status_normalizes_too():
                         "updated_number_scheduled": 5, "number_ready": 5,
                         "number_misscheduled": 0}}
     assert assess_daemonset(normalize_daemonset(snake)) == ("applied", None)
+
+
+
+# --- securityContext 관측(2026-10-26, BACKLOG 「securityContext 드리프트는 배지가 못 본다」) ---------------------------
+
+from dms.rollout_status import SECURITY_FIELDS, security_context_view, security_drift  # noqa: E402
+
+_ROOT_SC_CAMEL = {"runAsUser": 0, "runAsGroup": 0, "allowPrivilegeEscalation": False,
+                  "readOnlyRootFilesystem": True, "capabilities": {"drop": ["ALL"]}}
+# kubernetes 클라이언트 to_dict() 모양: snake_case, 선언 안 한 필드도 키는 있고 값이 None.
+_ROOT_SC_SNAKE = {"run_as_user": 0, "run_as_group": 0, "run_as_non_root": None,
+                  "allow_privilege_escalation": False, "read_only_root_filesystem": True,
+                  "privileged": None, "capabilities": {"add": None, "drop": ["ALL"]},
+                  "se_linux_options": None, "seccomp_profile": None}
+
+
+def _deploy(container_sc, *, pod_sc=None, snake=False):
+    key = "security_context" if snake else "securityContext"
+    pod_spec = {"containers": [{"name": "api", "image": "r/dms:d1", key: container_sc}]}
+    if pod_sc is not None:
+        pod_spec[key] = pod_sc
+    return {"metadata": {"generation": 1}, "spec": {"replicas": 1, "template": {"spec": pod_spec}},
+            "status": {"observedGeneration": 1}}
+
+
+def test_security_context_snake_and_camel_normalize_identically():
+    camel = normalize_deployment(_deploy(_ROOT_SC_CAMEL))["security_contexts"]["api"]
+    snake = normalize_deployment(_deploy(_ROOT_SC_SNAKE, snake=True))["security_contexts"]["api"]
+    assert camel == snake
+    assert camel == {"runAsUser": 0, "runAsGroup": 0, "runAsNonRoot": None,
+                     "allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True,
+                     "privileged": None, "capabilities.add": None, "capabilities.drop": ["ALL"]}
+    assert list(camel) == [f for f in SECURITY_FIELDS if f in camel] and set(camel) == set(SECURITY_FIELDS)
+
+
+def test_daemonset_also_carries_security_contexts():
+    ds = {"metadata": {"generation": 1}, "status": {},
+          "spec": {"template": {"spec": {"containers": [{"name": "agent", "image": "x",
+                                                          "securityContext": {"privileged": True}}]}}}}
+    assert normalize_daemonset(ds)["security_contexts"]["agent"]["privileged"] is True
+
+
+def test_pod_level_run_as_fields_fold_into_the_effective_value():
+    # k8s 우선순위: 컨테이너 값 > 파드 값. 파드 수준에만 있는 runAsUser 도 실효값이다(그것만 보고 「없음」이라 하면 거짓 일치).
+    eff = normalize_deployment(_deploy({"readOnlyRootFilesystem": True},
+                                       pod_sc={"runAsUser": 65532, "runAsNonRoot": True}))["security_contexts"]["api"]
+    assert eff["runAsUser"] == 65532 and eff["runAsNonRoot"] is True
+    over = normalize_deployment(_deploy({"runAsUser": 0}, pod_sc={"runAsUser": 65532}))["security_contexts"]["api"]
+    assert over["runAsUser"] == 0
+
+
+def test_manifest_strings_coerce_to_the_live_types():
+    # 매니페스트 파서는 문자열을 준다('0'·'false'·['ALL']) -- 라이브(int·bool)와 같은 형으로 접혀야 거짓 드리프트가 없다.
+    manifest = security_context_view({"runAsUser": "0", "runAsGroup": "0", "allowPrivilegeEscalation": "false",
+                                      "readOnlyRootFilesystem": "true", "capabilities": {"drop": ["ALL"]}})
+    live = security_context_view(_ROOT_SC_SNAKE)
+    assert manifest == live
+    assert security_drift(live, manifest) == []
+
+
+def test_absent_block_is_a_normal_all_none_observation_and_empty_caps_equal_absent():
+    assert security_context_view(None) == {f: None for f in SECURITY_FIELDS}
+    assert security_context_view({"capabilities": {"drop": [], "add": []}}) == {f: None for f in SECURITY_FIELDS}
+
+
+@pytest.mark.parametrize("bad", [
+    {"runAsUser": "root"}, {"runAsUser": True}, {"runAsUser": "²"}, {"runAsUser": "--1"},
+    {"readOnlyRootFilesystem": "yes"}, {"capabilities": {"drop": "ALL"}}, {"capabilities": ["ALL"]},
+    "not-a-mapping",
+])
+def test_unreadable_values_become_unknown_never_a_guess(bad):
+    # 형이 이상한 값은 추측하지 않는다 -- 그 컨테이너 관측 전체가 None(모름)이고 배지는 뜨지 않는다.
+    assert security_context_view(bad) is None
+    assert security_drift(security_context_view(bad), security_context_view(_ROOT_SC_CAMEL)) is None
+
+
+def test_drift_lists_each_differing_field_in_field_order():
+    # BACKLOG 의 그 사고: 40/41 을 apply 하지 않은 사이트가 새(root) 이미지를 옛 65532 securityContext 로 굴린다.
+    old = security_context_view({"runAsUser": 65532, "runAsNonRoot": True, "allowPrivilegeEscalation": False,
+                                 "readOnlyRootFilesystem": True, "capabilities": {"drop": ["ALL"]}})
+    manifest = security_context_view(_ROOT_SC_CAMEL)
+    assert security_drift(old, manifest) == [
+        {"field": "runAsUser", "live": 65532, "manifest": 0},
+        {"field": "runAsGroup", "live": None, "manifest": 0},
+        {"field": "runAsNonRoot", "live": True, "manifest": None},
+    ]
+
+
+def test_capability_order_is_not_a_drift_but_content_is():
+    a = security_context_view({"capabilities": {"drop": ["NET_RAW", "ALL"]}})
+    b = security_context_view({"capabilities": {"drop": ["ALL", "NET_RAW"]}})
+    assert security_drift(a, b) == []
+    added = security_context_view({**_ROOT_SC_CAMEL, "capabilities": {"drop": ["ALL"], "add": ["DAC_OVERRIDE"]}})
+    assert security_drift(added, security_context_view(_ROOT_SC_CAMEL)) == [
+        {"field": "capabilities.add", "live": ["DAC_OVERRIDE"], "manifest": None}]
+
+
+def test_unknown_side_is_none_not_empty():
+    # None(모름) 과 [](같음) 을 뭉개지 않는다 -- 화면은 None 이면 아무것도, [] 이면 「같음」으로 읽는다.
+    view = security_context_view(_ROOT_SC_CAMEL)
+    assert security_drift(None, view) is None
+    assert security_drift(view, None) is None
+    assert security_drift(view, view) == []

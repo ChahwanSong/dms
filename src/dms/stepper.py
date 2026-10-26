@@ -14,7 +14,8 @@ import time
 from .artifact_base import resolve_artifact_base
 from .batch_cancel import CANCEL_MARK_EVENT, CANCEL_REASON
 from .db import iso_plus, utc_now_iso
-from .domain import DataJobState, TERMINAL_DATA_JOB_STATES, chown_problem, managed_abs_path
+from .domain import (DataJobState, TERMINAL_DATA_JOB_STATES, chown_problem, destructive_operation, managed_abs_path,
+                     overlap_sides, path_conflict)
 from .execution import ExecStatus, ExecutionError, JobSpec
 from .execution_manifests import (parse_execution_reason, parse_preflight_reason, parse_pv_owner, processes_per_node,
                                   valid_owner, worker_pod_count)
@@ -190,6 +191,69 @@ def identity_problem(ident) -> "str | None":
     return None
 
 
+# 실행 관문의 경로 겹침 보류(2026-10-27, JobStepper._overlap_hold). 판정의 「겹침」은 planner 와 같은 domain.path_conflict 다 --
+# 여기서 정하는 것은 **누가 기다리는가**(교착 없는 순서)뿐이다. 상대 잡의 단계(overlap_level):
+#   2 = 실행 vcjob 을 냈다(지금 돈다 -- 멈출 수 없다), 1 = exec_preflight 를 냈다(sync·rm 의 첫 관문을 지남),
+#   0 = 첫 관문 앞(확인 뒤 Executing 인데 아직 아무것도 안 냄 / scan 의 Preflight -- 통과하면 곧 실행), None = 실행 측과 무관.
+# 관문(gate): 0 = 첫 관문(sync·rm 의 exec_preflight 제출 전, scan 의 실행 제출 전), 1 = 둘째 관문(sync·rm 의 실행 제출 전).
+# 기다림의 방향이 늘 「더 진행한 쪽」 또는 「같은 단계에서 commit_order 가 앞선 쪽」이라 기다림 그래프에 고리가 없다:
+#   - 단계 2 는 누구도 기다리지 않는다(이미 돈다) -- 모두가 기다린다.
+#   - 단계 1(둘째 관문의 잡)은 단계 2 와 **앞선** 단계 1 만 기다린다(단계 0 은 기다리지 않는다).
+#   - 단계 0(첫 관문의 잡)은 단계 2·단계 1 전부와 **앞선** 단계 0 을 기다린다.
+# 한 틱 안에서 잡은 차례로 처리되므로 같은 틱에 첫 관문을 지난 잡(exec_preflight ref 를 남김)은 뒤 잡에게 단계 1 로 보인다.
+GATE_START = 0
+GATE_EXECUTION = 1
+
+
+def overlap_level(row) -> "int | None":
+    """실행 관문 후보 행(RequestsRepository.overlap_gate_jobs)의 단계 -- 위 주석. phase_refs 가 깨졌으면(dict 아님) 2 로 본다
+    (돌고 있을 수 있다 -- fail-closed)."""
+    refs = row.get("phase_refs")
+    if refs is not None and not isinstance(refs, dict):
+        return 2
+    refs = refs or {}
+    state = row.get("state")
+    if "execution" in refs or state == DataJobState.RUNNING.value:
+        return 2
+    if row.get("operation") == "scan":
+        return 0 if state == DataJobState.PREFLIGHT.value else None
+    if "exec_preflight" in refs:
+        return 1
+    return 0 if state == DataJobState.EXECUTING.value else None
+
+
+def overlap_blocks(gate, level, other_earlier: bool) -> bool:
+    """관문 gate 의 잡이 단계 level 인 겹치는 상대 때문에 이번 틱에 기다려야 하는가(위 주석의 표)."""
+    if level is None:
+        return False
+    if level == 2:
+        return True
+    if level == 1:
+        return gate == GATE_START or other_earlier
+    return gate == GATE_START and other_earlier
+
+
+def _job_sides(row) -> tuple:
+    """잡 행(실행이 쓰는 경로)의 겹침 판정 쪽들 -- planner 는 요청 payload, 여기는 잡 행이다(create_job 무검증 INSERT -- 실행은
+    잡 행을 읽는다)."""
+    return overlap_sides(row.get("operation"), storage=row.get("storage_name"), target=row.get("target"),
+                         source_storage=row.get("source_storage"), source=row.get("source"),
+                         destination_storage=row.get("destination_storage"), destination=row.get("destination"))
+
+
+def _job_destructive(row) -> bool:
+    """잡의 파괴성 -- 연산(rm·미지)이거나 실행 파일이 drm 이면(연산과 도구가 어긋난 변조 행도 drm 꼴로 지운다)."""
+    return destructive_operation(row.get("operation")) or row.get("tool") == "drm"
+
+
+def _order_key(commit_order, request_id) -> tuple:
+    """보류 순서의 동률 깨기 키. commit_order 가 없으면(요청 행 없음 -- 정상 흐름엔 없다) 가장 앞선 것으로 본다(fail-closed:
+    그 잡을 기다린다). commit_order 는 UNIQUE 라 request_id 는 방어용 둘째 키다."""
+    if isinstance(commit_order, bool) or not isinstance(commit_order, int):
+        return (0, -1, str(request_id))
+    return (1, commit_order, str(request_id))
+
+
 class JobStepper:
     def __init__(self, repos, execution_adapter, *, settings, monotonic=None):
         self._repos = repos
@@ -347,11 +411,19 @@ class JobStepper:
         # (기본)면 제출이 기록한 목적지 스토리지 기본 소유자(블록 owner -- planner·컨펌이 현재 값과 대조했다), 그 밖(운영자 옵션
         # "pv_root"·규칙 이전 옛 행)이면 preflight 에서 잰 PV 루트 소유자(_record_pv_owner -- worker_pool.dest_pv_owner). 형식이
         # 틀린 값은 None 으로 실어 빌더가 막게 한다(fail-closed). 규칙은 _pv_owner_required 와 같은 함수(_owner_rule)로 읽는다.
-        result_owner, owner_rule = wp.get("dest_pv_owner"), None
+        # 직접 경로 목적지(PV 목적지 블록이 없을 때만, 2026-10-26 사용자 결정 (4)): 요청 payload.dest_owner 의 rule 이 "storage" 면
+        # 제출·배치 생성이 얼린 목적지 스토리지 기본 소유자(planner·컨펌이 지금 값과 대조했다)로 --chown(result_owner_direct --
+        # execution_manifests.direct_dest_owner_applies, 측정 없음). "none"·키 없음(옛 행)은 종전(root 면 소스 소유 보존).
+        result_owner, owner_rule, owner_direct = wp.get("dest_pv_owner"), None, False
         if op == "sync":
-            owner_rule, recorded = self._owner_rule(self._dest_pv(job))
+            dest_pv = self._dest_pv(job)
+            owner_rule, recorded = self._owner_rule(dest_pv)
             if owner_rule == "storage":
                 result_owner = recorded
+            elif dest_pv is None:
+                direct = self._dest_owner(job)
+                if direct.get("rule") == "storage":
+                    result_owner, owner_rule, owner_direct = direct.get("owner"), "storage", True
         # job["tool"]은 실행 파일 이름(dscan/dsync/nsync/drm)이지 정책 키(scan/dsync/
         # nsync/rm)가 아니다 -- planner.py가 policy를 조회할 때 쓰는 것과 동일한
         # TOOL_TO_POLICY 매핑을 거쳐야 scan/rm 잡의 정책을 정확히 찾는다.
@@ -374,7 +446,8 @@ class JobStepper:
             priority_class=wp.get("priority_class", "dms-mid"),
             artifact_base=self._artifact_base(), timeout_seconds=timeout,
             ttl_seconds=self._settings.vcjob_ttl_seconds,
-            result_owner=result_owner if valid_owner(result_owner) else None, result_owner_rule=owner_rule)
+            result_owner=result_owner if valid_owner(result_owner) else None, result_owner_rule=owner_rule,
+            result_owner_direct=owner_direct)
 
     def _node_cpu_caps(self, names) -> dict:
         """배정 노드 -> {노드: 상한 | None}(node_cpu.node_cpu_cap). 노드 상태는 마지막 보고 기준(신선도 무관 -- blocked_nodes
@@ -809,6 +882,77 @@ class JobStepper:
         self._repos.data_jobs.set_job_state(jid, DataJobState.PREFLIGHT, actor="stepper")
         return "Preflight"
 
+    def _overlap_hold(self, job, gate, phase) -> bool:
+        """실행 관문(2026-10-27, BACKLOG 「rm 경로의 다른 요청·배치와의 겹침 판정」의 둘째 층): 실행 측 단계(phase =
+        exec_preflight·execution)를 내기 직전, 경로가 겹치는(domain.path_conflict -- 한쪽이 rm) 다른 잡이 실행 중이거나 앞서
+        있으면 이번 틱엔 내지 않는다(True). 실패시키지 않는다 -- 상대가 끝나면 다음 틱에 이어진다. 위험한 순간은 확인 뒤 실행
+        직전이라 planner 1회 판정(1b path_conflict)만으로는 부족하다: 이 기능 전에 계획된 행, DB 직접 쓰기, planner 경합이
+        여기서 걸린다. 누가 기다리는지는 모듈의 overlap_level·overlap_blocks(교착 없는 순서).
+
+        보류하면 worker_pool.overlap_hold 에 상대(요청 id·단계)를 남겨 상대가 바뀔 때만 이벤트(path_overlap_hold, 상대 요청 id)를
+        한 번 쓰고, 풀리면 표식을 지우고 path_overlap_released 를 쓴다. 보류하는 틱마다 updated_at 을 지금으로 민다
+        (data_jobs.touch_held docstring -- 보류 잡이 클레임 앞자리를 차지해 상대가 폴링되지 못하는 교착 방지). worker_pool 이
+        dict 가 아닌 행(변조)은 보지 않는다 -- 곧 _build_spec 이 identity_missing_at_step 으로 끊는다(보류가 그 거부를 미루지
+        않게)."""
+        wp = job["worker_pool"]
+        if not isinstance(wp, dict):
+            return False
+        mine = _job_sides(job)
+        if not mine:
+            return False
+        destructive = _job_destructive(job)
+        rows = self._repos.requests.overlap_gate_jobs()
+        own = next((r for r in rows if r["job_id"] == job["job_id"]), None)
+        if own is not None:
+            my_key = _order_key(own["commit_order"], job["request_id"])
+        else:
+            req = self._repos.requests.get(job["request_id"])
+            if req is None:
+                return False         # 요청이 지워졌다 -- 제출 경로의 set_phase_ref False 가 회수한다
+            my_key = _order_key(req["commit_order"], job["request_id"])
+        blocker = None
+        for row in sorted(rows, key=lambda r: _order_key(r["commit_order"], r["request_id"])):
+            if row["request_id"] == job["request_id"]:
+                continue
+            hit = path_conflict(destructive, mine, _job_destructive(row), _job_sides(row))
+            if hit is None:
+                continue
+            earlier = _order_key(row["commit_order"], row["request_id"]) < my_key
+            if overlap_blocks(gate, overlap_level(row), earlier):
+                blocker = (row, hit)
+                break
+        held = wp.get("overlap_hold")
+        if blocker is None:
+            if held is not None:
+                new_wp = {k: v for k, v in wp.items() if k != "overlap_hold"}
+                if self._repos.data_jobs.set_worker_pool(job["job_id"], new_wp, expected_state=job["state"]):
+                    job["worker_pool"] = new_wp
+                self._repos.observability.record_event(
+                    component="stepper", severity="info", event_type="path_overlap_released",
+                    message=f"경로가 겹치던 작업이 끝나 이어서 진행합니다({phase} 제출)",
+                    payload={"job_id": job["job_id"], "phase": phase,
+                             "conflict_request_id": held.get("request_id") if isinstance(held, dict) else None},
+                    request_id=job.get("request_id"))
+            return False
+        row, (mine_side, theirs_side) = blocker
+        marker = {"request_id": row["request_id"], "phase": phase}
+        if held != marker:
+            new_wp = {**wp, "overlap_hold": marker}
+            if self._repos.data_jobs.set_worker_pool(job["job_id"], new_wp, expected_state=job["state"]):
+                job["worker_pool"] = new_wp
+            self._repos.observability.record_event(
+                component="stepper", severity="warning", event_type="path_overlap_hold",
+                message=(f"실행 보류 — 다른 작업(요청 {str(row['request_id'])[:8]})과 경로가 겹칩니다. 그 작업이 끝나면 "
+                         f"자동으로 이어집니다({phase} 제출 전, {mine_side[1]}:{mine_side[2] or '/'} ↔ "
+                         f"{row['operation']} {theirs_side[0]})"),
+                payload={"job_id": job["job_id"], "phase": phase, "conflict_request_id": row["request_id"],
+                         "conflict_job_id": row["job_id"], "conflict_operation": row["operation"],
+                         "conflict_side": theirs_side[0], "conflict_level": overlap_level(row),
+                         "side": mine_side[0], "storage": mine_side[1], "path": mine_side[2]},
+                request_id=job.get("request_id"))
+        self._repos.data_jobs.touch_held(job["job_id"], expected_state=job["state"])
+        return True
+
     def _raise_if_blocked(self, job):
         """제출됐지만 아직 스케줄되지 않은(PENDING) 단계의 노드 재검사(2026-10-02 적대적 리뷰). 제출 직전 검사만으로는
         Volcano 큐·gang 대기 중에 막힌 노드를 못 본다 -- cordon 이면 gang 이 안 서서 영원히 멈추고, 배치 제외만이면
@@ -824,6 +968,14 @@ class JobStepper:
         req = self._repos.requests.get(job["request_id"]) or {}
         payload = req.get("payload") if isinstance(req.get("payload"), dict) else {}
         return payload.get("destination_pv")
+
+    def _dest_owner(self, job) -> dict:
+        """sync 잡 요청 payload 의 직접 경로 목적지 결과 소유 블록(dest_owner -- k8s_access.direct_dest_owner 가 얼린 값). dict 가
+        아니면(옛 행·변조) {} -- 규칙 없음으로 읽는다(모양이 틀린 블록은 planner·컨펌이 pv_owner_not_applicable 로 이미 끊었다)."""
+        req = self._repos.requests.get(job["request_id"]) or {}
+        payload = req.get("payload") if isinstance(req.get("payload"), dict) else {}
+        block = payload.get("dest_owner")
+        return block if isinstance(block, dict) else {}
 
     @staticmethod
     def _owner_rule(block) -> tuple:
@@ -924,6 +1076,10 @@ class JobStepper:
                 return "Cancelled"
             # scan: 바로 execution. (sync/rm preview는 Task 7)
             if job["operation"] == "scan":
+                # 실행 관문(_overlap_hold) -- 겹치는 rm 이 돌거나 앞서 있으면 Preflight 에 머문다(preflight 파드는 성공 상태로
+                # 남아 다음 틱도 SUCCEEDED 로 읽힌다).
+                if self._overlap_hold(job, GATE_START, "execution"):
+                    return "held"
                 return self._submit_execution(job, DataJobState.RUNNING)
             stop = self._record_pv_owner(job, "preflight", ref)
             if stop is not None:
@@ -1070,6 +1226,9 @@ class JobStepper:
         if "exec_preflight" not in refs:
             if self._stop_for_batch_cancel(job):
                 return "Cancelled"
+            # 첫 실행 관문(_overlap_hold) -- 겹치는 작업이 돌거나 앞서 있으면 아무것도 내지 않고 Executing 에 머문다.
+            if self._overlap_hold(job, GATE_START, "exec_preflight"):
+                return "held"
             try:
                 ref = self._exec.submit(self._build_spec(job, "exec_preflight", dryrun=False))
             except ExecutionError as exc:
@@ -1091,6 +1250,12 @@ class JobStepper:
         if status == ExecStatus.SUCCEEDED:
             if self._stop_for_batch_cancel(job):
                 return "Cancelled"
+            # 둘째 실행 관문 -- 함께 exec_preflight 를 지난 두 잡(이 기능 전에 계획된 행·경합)은 commit_order 가 앞선 쪽만 간다.
+            # 여기서 오래 기다린 잡의 exec_preflight 재검증은 보류 전 시점의 것이다(정상 흐름에선 첫 관문이 이 상황을 만들지
+            # 않는다 -- 남는 한계). 소유자 측정(_record_pv_owner -- 파드 로그 읽기)보다 먼저 본다: 보류 중 매 틱 로그를 다시
+            # 읽지 않게.
+            if self._overlap_hold(job, GATE_EXECUTION, "execution"):
+                return "held"
             stop = self._record_pv_owner(job, "exec_preflight", refs["exec_preflight"])
             if stop is not None:
                 return stop

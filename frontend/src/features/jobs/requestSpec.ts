@@ -398,15 +398,27 @@ export function deriveRequestSpec(req: RequestDetail, jobs: DataJob[] | null, ro
       const storageOwner = rule === "storage" ? validOwner(destPv?.owner) : null;
       const ruleOk = destPv === null || rule === undefined || rule === null || rule === "pv_root"
         || (rule === "storage" && storageOwner !== null);
+      // 직접 경로 목적지의 결과 소유(payload.dest_owner, 2026-10-26 사용자 결정 (4) -- 서버 k8s_access.direct_dest_owner 가 제출·배치
+      // 자식 생성 때 얼린다): rule storage + 형식 맞는 owner = 「목적지 스토리지 기본 소유자 <v>(직접 경로)」, none = 종전(소스 그대로),
+      // 키 없음 = 옛 행·PV 목적지·chown(종전). 키는 있는데 블록이 아니거나·목록 밖 규칙·storage 인데 owner 가 틀림·PV 목적지에 함께
+      // 실림은 변조(서버가 계획·컨펌에서 pv_owner_not_applicable·storage_owner_changed 로 멈춘다) -- 행을 생략한다.
+      const hasDirect = Object.prototype.hasOwnProperty.call(p, "dest_owner");
+      const direct = obj(p.dest_owner);
+      const dRule = direct?.rule;
+      const directOwner = dRule === "storage" ? validOwner(direct?.owner) : null;
+      const directOk = !hasDirect
+        || (direct !== null && destPv === null && (dRule === "none" || (dRule === "storage" && directOwner !== null)));
       const s = syncOwnership({ chown, chmod, root: kind === "root", runAs: runAsName, self,
                                 pvDestination: destPv !== null,
                                 pvOwnerRule: rule === "storage" || rule === "pv_root" ? rule : null,
-                                storageOwner, pvOwner }).short;
+                                storageOwner, pvOwner,
+                                directDest: dRule === "storage" && directOwner !== null
+                                  ? { rule: "storage", owner: directOwner } : null }).short;
       // 자동 chown(uid:주 gid)은 「실행 신원」 행의 이름을 되풀이하지 않고 결과 숫자만 -- 같은 사실을 두 번 말하지 않는다.
       // 규칙 기록이 이상하면 chown 이 있어도 행을 생략한다 -- 서버가 그 요청을 계획·컨펌에서 멈추므로 「chown 값으로 셋업」을
       // 단정할 수 없다.
       ownership = kind === "user" && chown.trim() === "" && uid !== null && gid !== null
-        ? `실행 신원 소유 — ${uid}:${gid}(주${NB}그룹)` : ruleOk ? s : null;
+        ? `실행 신원 소유 — ${uid}:${gid}(주${NB}그룹)` : ruleOk && directOk ? s : null;
     }
   }
 

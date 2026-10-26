@@ -267,3 +267,39 @@ def test_batch_level_aggregate_route_removed(tmp_path):
     _admin(client)
     r = client.get("/api/admin/batches/whatever/scan-stats")
     assert r.status_code == 404 and r.json()["detail"] == "Not Found"
+
+
+def test_new_dscan_counters_total_bytes_and_invalid_names(tmp_path):
+    """포크 ae781bd(2026-10-26): summary.total_bytes 가 실 사용량(히스토그램 합보다 우선 -- 정확값), invalid_name_entries 는
+    카운터만(broken_paths_total 에 더하지 않는다). 구형 리포트(키 부재)는 카운터 None·실 사용량 히스토그램 합."""
+    art_base = tmp_path / "artifacts"
+    client = _client(tmp_path, art_base)
+    _admin(client)
+    report = _report()
+    report["summary"].update({"total_bytes": 1074750158, "invalid_name_entries": 15})
+    rid = _request(client)
+    _succeed_job(client, rid, art_base=art_base, report=report)
+    body = client.get(f"/api/admin/requests/{rid}/scan-stats").json()
+    assert body["total_bytes"] == 1074750158
+    assert body["invalid_name_entries"] == 15
+    assert body["broken_paths_total"] == 3
+    assert body["summary"]["invalid_name_entries"] == 15            # 투영된 summary 에도 숫자로 남는다
+    rid2 = _request(client, target="old")
+    _succeed_job(client, rid2, art_base=art_base, report=_report(), target="old")
+    old = client.get(f"/api/admin/requests/{rid2}/scan-stats").json()
+    assert old["invalid_name_entries"] is None and old["total_bytes"] == 50
+    # 수상한 값: 카운터는 None, 실 사용량은 히스토그램 합으로 물러난다(0 으로 접지 않는다)
+    for i, bad in enumerate((-1, 1.5, True, "15")):
+        bad_report = _report()
+        bad_report["summary"].update({"total_bytes": bad, "invalid_name_entries": bad})
+        r = _request(client, target=f"bad{i}")
+        _succeed_job(client, r, art_base=art_base, report=bad_report, target=f"bad{i}")
+        b = client.get(f"/api/admin/requests/{r}/scan-stats").json()
+        assert (b["total_bytes"], b["invalid_name_entries"]) == (50, None), bad
+    # 0 은 값이다(그런 이름 없음 · 빈 트리)
+    zero = _report(atime_bytes=0)
+    zero["summary"].update({"total_bytes": 0, "invalid_name_entries": 0})
+    r = _request(client, target="zero")
+    _succeed_job(client, r, art_base=art_base, report=zero, target="zero")
+    b = client.get(f"/api/admin/requests/{r}/scan-stats").json()
+    assert (b["total_bytes"], b["invalid_name_entries"]) == (0, 0)

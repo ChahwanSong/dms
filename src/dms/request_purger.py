@@ -28,6 +28,14 @@ API 는 요청·잡 행을 한 트랜잭션으로 지우면서 정리 열쇠(job
   - 포기 상태는 없다: 실패는 min(interval × 2^min(attempts,6), 900s) 백오프로 계속 재시도하고 지연(stalled)으로 보인다
     (GET /api/admin/request-purges 가 유일한 운영 표면).
   - drain 이면 아무것도 하지 않는다(stepper 와 같은 규칙 -- 새 파드를 띄우지 않는다). 틱 예산 20초(리스 45초 안).
+
+결과 파일 자동 만료(kind 'expiry' 행, 2026-10-26 -- artifact_expiry 가 넣는다): 단계·purge 파드·실패 귀속은 위와 **같은 길**
+이다(ARCHITECTURE §7 규칙 13 -- 「보존 정책을 넣으면 같은 길」). 다른 것은 셋뿐이다:
+  - 안전 확인이 거꾸로다: 원 행이 **있어야** 한다(잡이 그대로·종단·만료 표시 -- request_purges.invalid_expiry_targets).
+    아니면 k8s·FS 무접촉 + artifact_expiry_target_invalid(DB 복원으로 표시가 사라진 요청의 파일을 지우지 않는다).
+  - 끝(finish_expiry)은 아웃박스 행만 지운다 -- 살아 있는 요청의 이벤트·전이를 scrub 하지 않는다.
+  - 완료 이벤트 artifacts_expired 는 component artifact-expiry 로 **request_id 를 단다**(요청이 살아 있다 -- 요청 상세의
+    이벤트에 보인다). 실패 이벤트는 위 규약대로 request_id=NULL 이다.
 """
 import posixpath
 import sys
@@ -40,7 +48,7 @@ from .artifact_trash import TrashError
 from .db import iso_epoch, utc_now_iso
 from .purge_runner import MAX_PURGE_NAMES, PurgeError
 from .repositories.node_exclusions import blocked_nodes, k8s_unschedulable
-from .repositories.request_purges import STAGES
+from .repositories.request_purges import EXPIRY_KIND, STAGES
 
 COMPONENT = "request-purge"
 TICK_BUDGET_SECONDS = 20           # 리스 = max(15*3, 30) = 45s(controller.run_all_once) 안에서 끝난다
@@ -57,7 +65,13 @@ ISOLATED_TURN_SECONDS = 300
 # 끝난 상태(phase)로 끝난 파드 -- 스크립트가 돌았다(대기 중 회수된 Pending 파드는 한 이름도 시도하지 않았다).
 _RAN_PHASES = frozenset({"Succeeded", "Failed"})
 # 운영자 확인이 필요한(재시도로 풀리지 않는) 실패 -- 이벤트 severity error.
-_ERROR_CODES = frozenset({"purge_target_still_present", "purge_row_invalid"})
+_ERROR_CODES = frozenset({"purge_target_still_present", "purge_row_invalid", "artifact_expiry_target_invalid"})
+# 만료 행 완료 이벤트의 component(artifact_expiry.COMPONENT 와 같은 값 -- 순환 import 를 피해 리터럴로 둔다).
+EXPIRY_COMPONENT = "artifact-expiry"
+
+
+def _is_expiry(row) -> bool:
+    return row.get("kind") == EXPIRY_KIND
 
 
 def _uri_matches(uri: str, base: str, job_id: str) -> bool:
@@ -113,7 +127,12 @@ class RequestPurger:
         problem = self._row_problem(row)
         if problem is not None:
             raise PurgeError("purge_row_invalid", problem)
-        if self._purges.target_still_present(row["request_id"], row["job_ids"]):
+        if _is_expiry(row):
+            if self._purges.invalid_expiry_targets([row]):
+                # 만료 표시가 없는(DB 복원) · 비종단 · 사라진 잡의 파일은 지우지 않는다 -- k8s·FS 무접촉.
+                self._fail(row, reason_code="artifact_expiry_target_invalid")
+                return "failed:artifact_expiry_target_invalid"
+        elif self._purges.target_still_present(row["request_id"], row["job_ids"]):
             # 살아 있는 행의 파드·아티팩트를 아웃박스가 지우게 두지 않는다 -- k8s·FS 무접촉.
             self._fail(row, reason_code="purge_target_still_present")
             return "failed:purge_target_still_present"
@@ -131,6 +150,9 @@ class RequestPurger:
         """아웃박스 행 모양(DB 신뢰 경계). None = 진행 가능."""
         if row["stage"] not in STAGES:
             return f"unknown stage {row['stage']!r}"[:200]
+        kind = row.get("kind")
+        if kind is not None and kind != EXPIRY_KIND:
+            return f"unknown kind {str(kind)[:50]!r}"
         jobs = row["jobs"]
         if not isinstance(jobs, list):
             return "jobs unreadable"
@@ -248,8 +270,8 @@ class RequestPurger:
             for jid in job_ids:
                 jobs_out[jid] = "left_old_base"
             self._event("artifact_left_at_old_base", "warning",
-                        f"request {rid}: artifact base changed since delete -- {len(job_ids)} job dir(s) left at "
-                        f"{base}",
+                        f"request {rid}: artifact base changed since the purge was queued -- {len(job_ids)} job dir(s) "
+                        f"left at {base}",
                         {"request_id": rid, "artifact_base": base, "current_base": base_now, "job_ids": job_ids})
             self._purges.advance(rid, "purging", outcomes={**outcomes, "jobs": jobs_out}, now=self._clock())
             return "purging"
@@ -297,8 +319,9 @@ class RequestPurger:
         purging = []
         in_purging, in_files = self._purges.in_stage("purging"), self._purges.in_stage("files")
         # 원 행 재등장 확인은 묶음 한 번(present_targets) -- 행마다 두 문장이면 큰 배치 삭제의 대기열(수천 행)에서 틱이
-        # 행 수에 비례해 느려져 같은 프로세스의 다른 루프 틱까지 밀렸다(2026-10-11 검증 지적).
-        present = self._purges.present_targets([*in_purging, *in_files])
+        # 행 수에 비례해 느려져 같은 프로세스의 다른 루프 틱까지 밀렸다(2026-10-11 검증 지적). 만료 행은 거울 판정
+        # (invalid_expiry_targets -- 원 행이 그대로 있어야 한다)도 묶음 한 번.
+        present = self._blocked([*in_purging, *in_files])
         for row in in_purging:
             due = row["next_attempt_at"] <= now
             problem = self._row_problem(row)
@@ -313,11 +336,22 @@ class RequestPurger:
                 continue
             if row["request_id"] in present:
                 if report and due:
-                    self._fail(row, reason_code="purge_target_still_present")
+                    if _is_expiry(row):
+                        self._fail(row, reason_code="artifact_expiry_target_invalid")
+                    else:
+                        self._fail(row, reason_code="purge_target_still_present")
                 continue
             purging.append(row)
         files = [r for r in in_files if self._row_problem(r) is None and r["request_id"] not in present]
         return purging, files
+
+    def _blocked(self, rows) -> set:
+        """지금 정리하면 안 되는 행의 request_id -- 요청 삭제 행은 원 행 재등장(present_targets), 만료 행은 대상 무효
+        (invalid_expiry_targets). 모양이 깨진 행(kind 변조 등)은 _row_problem 이 따로 거른다."""
+        rows = list(rows)
+        expiry = [r for r in rows if _is_expiry(r)]
+        deletion = [r for r in rows if not _is_expiry(r)]
+        return self._purges.present_targets(deletion) | self._purges.invalid_expiry_targets(expiry)
 
     @staticmethod
     def _carriers(rows, base_now) -> list:
@@ -578,6 +612,8 @@ class RequestPurger:
 
     def _finish(self, row, outcomes) -> "str | None":
         rid = row["request_id"]
+        if _is_expiry(row):
+            return self._finish_expiry(row, outcomes)
         if not self._purges.finish(rid, row["job_ids"]):
             return None                    # 그 사이 원 행이 되살아났다 -- due 때 purge_target_still_present
         jobs = outcomes.get("jobs") if isinstance(outcomes.get("jobs"), dict) else {}
@@ -586,3 +622,21 @@ class RequestPurger:
                     {"request_id": rid, "job_ids": row["job_ids"], "outcomes": jobs,
                      "k8s_deleted": k8s_deleted if isinstance(k8s_deleted, int) else None})
         return "purged"
+
+    def _finish_expiry(self, row, outcomes) -> "str | None":
+        """만료 행의 끝: 아웃박스 행만 지우고(finish_expiry) 요청에 단 완료 이벤트 1건. 그 사이 대상이 무효가 됐거나 요청
+        삭제로 행이 바뀌었으면 None -- 다음 틱이 바뀐 모양(무효 표면화·요청 삭제 finish)으로 다시 본다."""
+        rid = row["request_id"]
+        if not self._purges.finish_expiry(rid, row["job_ids"]):
+            return None
+        jobs = outcomes.get("jobs") if isinstance(outcomes.get("jobs"), dict) else {}
+        k8s_deleted = outcomes.get("k8s_deleted")
+        # 요청이 살아 있다 -- request_id 를 단다(요청 상세의 이벤트에 「결과 파일 만료」가 보인다). 요청이 나중에 삭제되면
+        # 이 이벤트도 요청 삭제와 함께 지워진다.
+        self._repos.observability.record_event(
+            component=EXPIRY_COMPONENT, severity="info", event_type="artifacts_expired",
+            message=f"artifacts of {len(row['job_ids'])} job(s) expired and removed"[:500],
+            payload={"request_id": rid, "job_ids": row["job_ids"], "outcomes": jobs,
+                     "k8s_deleted": k8s_deleted if isinstance(k8s_deleted, int) else None},
+            request_id=rid)
+        return "expired"

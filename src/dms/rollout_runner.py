@@ -88,14 +88,18 @@ class StubRolloutRunner:
         images = self._images.get((kind, name))
         if images is None:
             return None
+        # security_contexts 는 빈 사전 -- 스텁은 securityContext 를 모른다(정규화 키 집합만 맞추고, 드리프트 배지는
+        # 컨테이너 항목이 없으니 None(모름)이다 -- 클러스터 없는 경로에 거짓 배지가 뜨지 않게).
         if kind == "DaemonSet":
             return {"kind": "DaemonSet", "generation": 1, "observed_generation": 1,
                     "desired_number_scheduled": 1, "updated_number_scheduled": 1,
                     "number_ready": 1, "number_unavailable": 0,
-                    "number_misscheduled": 0, "images": dict(images)}
+                    "number_misscheduled": 0, "images": dict(images),
+                    "security_contexts": {}}
         return {"kind": "Deployment", "generation": 1, "observed_generation": 1,
                 "replicas": 1, "status_replicas": 1, "updated_replicas": 1,
-                "ready_replicas": 1, "conditions": [], "images": dict(images)}
+                "ready_replicas": 1, "conditions": [], "images": dict(images),
+                "security_contexts": {}}
 
     def pod_briefs(self, *, selector) -> list[dict]:
         return []

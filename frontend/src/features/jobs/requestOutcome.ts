@@ -7,6 +7,7 @@ import { REQUEST_TERMINAL_STATES, isTerminal } from "../../lib/jobState";
 import { kstStamp } from "../../lib/datetime";
 import type { DataJob, RequestDetail } from "../../lib/types";
 import { countText, finiteOrNull, humanBytes, isPlainObject, msText, spanText } from "./format";
+import { exactBytes } from "../../lib/scanCounters";
 import { STEP_COPY, isEstimated, normTransitions, type JobStagesModel, type StageId, type StepId } from "./stageModel";
 
 export type Tone = "ok" | "bad" | "busy" | "action" | "neutral";
@@ -268,6 +269,9 @@ export interface KpiTile {
   key: string; label: string; value: string; sub: string | null;
   // 비종단 수행시간: 컴포넌트가 이 시각부터 1초 틱으로 다시 센다(value 는 nowMs 기준 첫 값).
   elapsedFrom?: string;
+  // 정확한 값(마우스를 올리면 -- 2026-10-26: 크기 칸은 사람 표기가 반올림이라 바이트 원값을 함께 둔다. scan 의 「사용량」은
+  // 새 dscan 의 summary.total_bytes 정확값이다).
+  title?: string;
 }
 
 // 실행 결과(result_summary)의 수치. 결과가 ② 실행 구획 몫일 때만 센다 -- 미리보기 실패 때의 result_summary 는
@@ -301,7 +305,8 @@ export function deriveKpi(req: RequestDetail, jobs: DataJob[] | null, models: Jo
       const pAll = pvals.every((v) => v !== null) ? sum(pvals as number[]) : null;
       if (known.length === vals.length) {
         tiles.push({ key, label: labels[key], value: fmt[key](sum(known)),
-          sub: pAll !== null && op !== "scan" ? `미리보기 ${fmt[key](pAll)}` : null });
+          sub: pAll !== null && op !== "scan" ? `미리보기 ${fmt[key](pAll)}` : null,
+          ...(key === "bytes" ? { title: exactBytes(sum(known)) } : {}) });
         continue;
       }
       // 실행 전 단건: 미리보기 값을 "대상" 라벨로(실행 결과인 척하지 않는다).

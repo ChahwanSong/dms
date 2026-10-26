@@ -14,6 +14,10 @@ ttlSecondsAfterFinished 는 Completed 만 치운다 -- Aborted(PodFailed → Abo
 가르지 않고, 실패한 잡은 그 사이 묶음에서 건너뛰고 그만큼 더 읽어 뒤의 잡에 닿는다(독 행이 앞자리를 차지하지 않게).
 배포 직후 첫 패스는 표시 없는 옛 종단 잡을 한 번 훑는다(틱당 limit 건).
 
+**빌드도 같은 완료 표시**(builds.pods_gc_at, 2026-10-26): 빌드·프로브 파드 둘 다 지워지면(404 = 이미 없음 = 성공) 찍고,
+하나라도 실패하면 찍지 않고 같은 RETRY_BACKOFF_SECONDS 뒤에 다시(잡과 따로 기억 -- build_id 와 job_id 는 둘 다 uuid hex 라 한
+사전에 섞으면 구분이 흐려진다). 예전엔 표시가 없어 종단 빌드가 limit 을 넘으면 앞쪽 200건만 되풀이했다.
+
 **종단 잡만** 대상으로 한다 — 비종단 잡의 파드를 지우면 stepper 가 그것을 실패로 오인한다.
 빌드 파드·프리플라이트 프로브 파드도 같은 이유로 **종단 빌드만** 대상이다 --
 비종단 빌드의 빌드 파드가 사라지면 BuildRunner.poll 이 객체 없음을 FAILED 로
@@ -44,6 +48,7 @@ class PodGarbageCollector:
         self._build_runner = build_runner
         self._vcjob_ttl = vcjob_ttl_seconds        # 0 = vcjob 을 지우지 않는다(모듈 docstring)
         self._retry_at = {}                        # job_id -> 다시 볼 epoch 초(모듈 docstring 「완료 표시」)
+        self._build_retry_at = {}                  # build_id -> 다시 볼 epoch 초(같은 규칙, 빌드 전용)
 
     def _targets(self, job) -> list[str]:
         out = []
@@ -81,9 +86,7 @@ class PodGarbageCollector:
                     failed = True
                     logger.warning("pod gc failed ref=%s: %s", ref, exc)
             if failed:
-                self._retry_at[jid] = now + RETRY_BACKOFF_SECONDS
-                if len(self._retry_at) > _RETRY_MAX:
-                    del self._retry_at[min(self._retry_at, key=self._retry_at.get)]
+                _back_off(self._retry_at, jid, now)
             else:
                 self._retry_at.pop(jid, None)
                 self._repos.data_jobs.mark_pods_gc(jid, now_iso=now_iso)
@@ -94,15 +97,39 @@ class PodGarbageCollector:
         # 워처 pending 루프가 프로브 실패로 오인해 멀쩡한 빌드를
         # build_preflight_failed 로 죽인다. terminate 는 ref 별로 격리한다 --
         # 한 파드의 실패가 나머지 수거를 막으면 안 된다(잡 파드 GC 와 같은 계약).
+        # 완료 표시(builds.pods_gc_at)와 재시도 대기는 잡과 같은 규칙이다(모듈 docstring) -- 표시한 빌드는 질의에서 빠지고,
+        # 대기 중인 빌드는 건너뛰는 만큼 더 읽어 뒤의 빌드가 굶지 않는다.
         if self._build_runner is not None:
+            b_waiting = {b for b, t in self._build_retry_at.items() if t > now}
+            b_done = 0
             for build in self._repos.builds.terminal_older_than(
-                    self._after, limit=self._limit, now_iso=now_iso):
-                for pod in (build_pod_name(build["build_id"]),
-                            build_probe_pod_name(build["build_id"])):
+                    self._after, limit=self._limit + len(b_waiting), now_iso=now_iso):
+                bid = build["build_id"]
+                if bid in b_waiting:
+                    continue
+                if b_done >= self._limit:
+                    break
+                b_done += 1
+                failed = False
+                for pod in (build_pod_name(bid), build_probe_pod_name(bid)):
                     ref = f"{BUILD_REF_PREFIX}/{pod}"
                     try:
                         self._build_runner.terminate(ref)
                         deleted += 1
                     except Exception as exc:
+                        failed = True
                         logger.warning("build pod gc failed ref=%s: %s", ref, exc)
+                if failed:
+                    _back_off(self._build_retry_at, bid, now)
+                else:
+                    self._build_retry_at.pop(bid, None)
+                    self._repos.builds.mark_pods_gc(bid, now_iso=now_iso)
         return {"deleted": deleted}
+
+
+def _back_off(retry_at: dict, key: str, now: float) -> None:
+    """key 를 RETRY_BACKOFF_SECONDS 뒤에 다시 보게 기억한다. 상한(_RETRY_MAX)을 넘으면 가장 먼저 다시 볼 것부터 잊는다
+    (그것은 곧바로 다시 시도될 뿐이다)."""
+    retry_at[key] = now + RETRY_BACKOFF_SECONDS
+    if len(retry_at) > _RETRY_MAX:
+        del retry_at[min(retry_at, key=retry_at.get)]

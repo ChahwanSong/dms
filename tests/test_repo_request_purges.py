@@ -868,7 +868,7 @@ def test_batch_delete_refuses_more_children_than_the_cap(repos, db):
 def test_batch_delete_removes_a_dangling_group(repos, db):
     # 배치 화면의 「배치 삭제」(기록만)가 남긴 자식 묶음 + 고아 항목(배치 GET 과 INSERT 사이에 낀 add_item 의 잔재).
     bid, children = _rescanned_batch(repos)
-    repos.batches.delete(bid)
+    repos.batches.delete(bid)               # 배치 기록만 -- 감사 행 ('batch','delete_record')가 남는다(2026-10-26)
     db.execute("""INSERT INTO batch_items (batch_id, seq, payload, status, request_id, created_at, updated_at)
                   VALUES (:b, 7, '{"storage": "s1", "target": "z"}', 'Queued', NULL, :at, :at)""",
                {"b": bid, "at": OLD})
@@ -876,8 +876,8 @@ def test_batch_delete_removes_a_dangling_group(repos, db):
     assert r["deleted"] is True and r["dangling"] is True
     assert r["request_ids"] == sorted(rid for rid, _ in children)
     assert _batch_rows(db, bid) == {"batches": 0, "batch_items": 0, "requests": 0}
-    snap = json.loads(db.query_one("SELECT before_state FROM audit_log WHERE mutation_class = 'batch'")
-                      ["before_state"])
+    snap = json.loads(db.query_one("SELECT before_state FROM audit_log WHERE mutation_class = 'batch' "
+                                   "AND operation = 'delete'")["before_state"])
     assert snap["batch"] is None and snap["dangling"] is True and snap["child_count"] == 4
     assert [it["seq"] for it in snap["items"]] == [7]
 

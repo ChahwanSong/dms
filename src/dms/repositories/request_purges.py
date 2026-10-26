@@ -23,6 +23,14 @@ dangling)도 같은 메서드로 묶음째 지운다. 잠금 순서는 batch_ite
 지키는 방향이다. 역순으로 함께 잠그는 경로를 새로 만들면 교착이다. 감사는 자식마다 기존 ('request','delete') 행(스냅숏에
 batch_id) + 배치마다 ('batch','delete') 행 1개(_batch_bounded -- 배치 이름·옵션·실행 신원·항목은 다른 어디에도 남지 않는다).
 
+**결과 파일 자동 만료**(kind 'expiry', 2026-10-26 -- 사용자 결정 「파일만 만료하고 행은 남김」, artifact_expiry 루프): 같은
+아웃박스·같은 정리 루프(k8s → files → purging, 전역 purge 파드 하나)를 쓰되 **원 요청·잡 행은 지우지 않는다**.
+expire_artifacts 가 한 트랜잭션에서 잡에 artifacts_expired_at 을 찍고(열람 API 가 그 즉시 410) kind 'expiry' 행을 넣는다.
+요청 삭제 행과 거꾸로, 루프의 안전 확인은 「원 행이 없다」가 아니라 「잡이 그대로 있고 종단이며 만료 표시가 있다」
+(invalid_expiry_targets -- DB 복원으로 표시가 사라졌으면 파일을 건드리지 않는다)이고, 끝(finish_expiry)은 아웃박스 행만
+지운다(scrub 없음). 만료 정리 중인 요청을 삭제하면 _enqueue 가 그 행을 요청 삭제 행으로 바꾼다(kind NULL -- 잡 열쇠
+합집합·단계 처음부터). 아웃박스 PK 가 request_id 라 요청 하나에 행 하나다.
+
 **삭제 목록이 곧 일관성의 전부다** -- 저장소 전체에 FK 가 0건이라, request_id·job_id 를 담는 테이블을 새로 만들고 여기
 (PURGED_TABLES·_purge_locked·finish)에 넣지 않으면 그 행은 조용히 고아가 된다. tests/test_repo_request_purges.py 가
 스키마의 request_id/job_id/entity_id 컬럼 전수를 열거해 PURGED_TABLES ∪ PURGE_EXEMPT_TABLES 와 대조한다.
@@ -54,15 +62,19 @@ _TERMINAL_BATCH = ("Completed", "Cancelled")
 # 배치 단위 삭제(delete_batch) 한 트랜잭션의 크기 상한. API 는 프로세스 하나·커넥션 하나라 트랜잭션 동안 DB RLock 이
 # /readyz 를 포함한 모든 요청을 멈춘다(db.py) -- 배치 하나 = 트랜잭션 하나의 크기를 묶어야 readiness(10초 주기, 1초
 # 타임아웃)를 넘기지 않는다.
-#   자식: 1000개(잡 각 1개) ≈ 문장 6000개 ≈ 0.3-1초(로컬 PG 실측 ~0.33초, 테스트베드 PG 왕복 0.06-0.2ms -- 문장 수 상한은
-#         test_batch_delete_statement_budget 이 고정한다).
+#   자식: 2000개(잡 각 1개) ≈ 문장 12000개 ≈ 0.7-2초(1000개 로컬 PG 실측 ~0.33초의 두 배 -- 테스트베드 PG 왕복 0.06-0.2ms,
+#         문장 수 상한은 test_batch_delete_statement_budget 이 고정한다). 2026-10-26 사용자 결정으로 1000 → 2000: 성장
+#         모니터링 배치(항목 × 재스캔 횟수)가 1000 을 넘어 지울 수 없던 것을 풀었다. 그 대가로 최대 크기 배치 하나를 지우는
+#         동안 readiness 프로브(1초 타임아웃) 한 번이 실패할 수 있다 -- 연속 실패 3회(기본 failureThreshold)가 아니면 파드가
+#         빠지지 않고, 배치와 배치 사이에는 RLock 이 풀린다.
 #   항목: 자식이 적어도 항목은 많을 수 있다(큰 CSV 배치를 일찍 취소 -- validate_batch 엔 항목 수 상한이 없다). 항목은
 #         전부 잠그고(1단계) 감사 스냅숏 단계마다 직렬화하고 전부 DELETE 한다 -- 자식 500 기준 항목 1만 ≈ 0.2초, 5만 ≈
 #         0.5초(PG 실측, 2026-10-11 검증 지적). 그래서 항목도 묶는다.
 # 넘는 배치는 batch_delete_too_large(청크 삭제는 BACKLOG). 목록 API 의 배치 요약(BatchesRepository.list_summaries)도 자식
-# 수를 이 상한 + 1 에서 멈춘다. 지운 뒤의 파일·파드 정리는 컨트롤러가 비동기로 한다 -- 자식 1000개면 30분 안팎
-# (deploy/README 「배치 단위 삭제」).
-MAX_BATCH_DELETE_CHILDREN = 1000
+# 수를 이 상한 + 1 에서 멈춘다. 지운 뒤의 파일·파드 정리는 컨트롤러가 비동기로 한다 -- 자식 1000개면 30분 안팎, 2000개면
+# 1시간 안팎(deploy/README 「배치 단위 삭제」). 포탈 거울: features/jobs/batchGroups.ts MAX_BATCH_CHILDREN·MAX_BATCH_ITEMS 와
+# api.ts 의 batch_delete_too_large 문구(tests/test_batch_delete_limits_mirror.py 가 대조한다).
+MAX_BATCH_DELETE_CHILDREN = 2000
 MAX_BATCH_DELETE_ITEMS = 10000
 
 STAGES = ("k8s", "files", "purging")
@@ -80,7 +92,10 @@ _JOB_COLUMNS = ("job_id, request_id, tool, operation, state, reason_code, storag
                 "destination_storage, source, destination, target, worker_pool, files_count, bytes_count, "
                 "artifact_uri, phase_refs, created_at, updated_at")
 _ROW_COLUMNS = ("request_id, jobs, artifact_base, stage, outcomes, attempts, last_error, next_attempt_at, "
-                "requested_by, requested_at, updated_at")
+                "requested_by, requested_at, updated_at, kind")
+# 아웃박스 행 종류(request_purges.kind): NULL = 요청 삭제(원래 의미), EXPIRY_KIND = 결과 파일 자동 만료(모듈 docstring).
+EXPIRY_KIND = "expiry"
+EXPIRY_ACTOR = "artifact-expiry"
 # 배치 감사 스냅숏의 배치 행 키(_batch_bounded). 변조로 거대해진 값을 접을 때 남기는 골격 키.
 _BATCH_KEYS = ("batch_id", "name", "note", "operation", "status", "requester_id", "actor", "owner_username",
                "auth_method", "options", "max_concurrency", "priority", "node_count", "procs_per_node",
@@ -576,11 +591,15 @@ class RequestPurgesRepository:
         purge_target_still_present 로 멈춰 있던 것을 다시 지움) PK 충돌로 삭제 전체가 500 이 되지 않게 그 행을 새 삭제로
         갱신한다: 잡 목록은 합집합(옛 행만 아는 잡의 열쇠를 잃지 않는다), 단계·실패 이력은 처음부터, base 는 지금 값.
         old = 호출자가 같은 트랜잭션에서 (PG 는 잠가) 읽은 기존 행({"jobs"}) 또는 None(행 없음) -- _purge_locked 가 묶음째
-        한 번에 읽는다."""
+        한 번에 읽는다.
+
+        결과 파일 만료 정리 중(kind 'expiry')인 요청을 지우면 그 행도 여기로 온다 -- 같은 규칙으로 요청 삭제 행이 된다
+        (kind NULL). 정리 루프가 그 틱에 옛 모양(만료)으로 읽은 행을 이어서 단계만 바꿔 써도(advance) 잡 집합이 같고 진행
+        판정은 FS·k8s 실상태라 결론이 같다 -- 끝은 kind 를 다시 보고(finish_expiry 의 kind 조건) 요청 삭제의 finish 로 간다."""
         if old is None:
             self._db.execute(
                 f"""INSERT INTO request_purges ({_ROW_COLUMNS})
-                    VALUES (:r, :jobs, :base, 'k8s', NULL, 0, NULL, :now, :by, :now, :now)""",
+                    VALUES (:r, :jobs, :base, 'k8s', NULL, 0, NULL, :now, :by, :now, :now, NULL)""",
                 {"r": request_id, "jobs": dump_json(out_jobs), "base": artifact_base, "now": now, "by": actor})
             return
         seen = {j["job_id"] for j in out_jobs}
@@ -591,7 +610,7 @@ class RequestPurgesRepository:
         self._db.execute(
             """UPDATE request_purges SET jobs = :jobs, artifact_base = :base, stage = 'k8s', outcomes = NULL,
                    attempts = 0, last_error = NULL, next_attempt_at = :now, requested_by = :by,
-                   requested_at = :now, updated_at = :now
+                   requested_at = :now, updated_at = :now, kind = NULL
                WHERE request_id = :r""",
             {"r": request_id, "jobs": dump_json(merged), "base": artifact_base, "now": now, "by": actor})
 
@@ -954,20 +973,157 @@ class RequestPurgesRepository:
                 "DELETE FROM request_purges WHERE request_id = :r", {"r": request_id})
         return removed == 1
 
-    def pending_count(self) -> int:
-        return self._db.query_one("SELECT COUNT(*) AS n FROM request_purges")["n"]
+    def pending_count(self, *, include_expiry: bool = True) -> int:
+        """정리 대기 행 수. include_expiry=False 면 요청 삭제 행만(만료 행의 잡은 data_jobs 에 살아 있어 잡 수와 이중으로
+        세지 않으려는 호출자 -- routes_artifact_base._job_count)."""
+        if include_expiry:
+            return self._db.query_one("SELECT COUNT(*) AS n FROM request_purges")["n"]
+        return self._db.query_one(
+            "SELECT COUNT(*) AS n FROM request_purges WHERE kind IS NULL OR kind <> :k", {"k": EXPIRY_KIND})["n"]
 
     def status(self, *, limit: int = 50) -> dict:
         """GET /api/admin/request-purges 의 원천 -- 정리의 유일한 운영 표면(전역 이벤트 뷰어가 없다). stalled =
-        last_error 가 있는 행(실패 백오프 중이거나 오래 대기 중). items 는 오래된 순."""
+        last_error 가 있는 행(실패 백오프 중이거나 오래 대기 중). items 는 오래된 순.
+
+        결과 파일 만료 행(kind 'expiry')은 세지 않는다(2026-10-26) -- 작업 목록의 삭제 툴바가 읽는 표면이라, 아무것도
+        지우지 않은 관리자에게 「정리 중 N건」을 보이지 않는다. 만료 정리 현황은 expiry_status(아티팩트 경로 화면)다.
+        모르는 kind(변조)는 여기 남는다 -- 루프가 purge_row_invalid 로 멈춘 그 행이 어디서도 안 보이면 안 된다."""
         agg = self._db.query_one(
             """SELECT COUNT(*) AS pending,
                       SUM(CASE WHEN last_error IS NOT NULL THEN 1 ELSE 0 END) AS stalled,
-                      MIN(requested_at) AS oldest FROM request_purges""")
+                      MIN(requested_at) AS oldest FROM request_purges WHERE kind IS NULL OR kind <> :k""",
+            {"k": EXPIRY_KIND})
         items = self._db.query(
             """SELECT request_id, stage, attempts, last_error, requested_at, requested_by, next_attempt_at
-               FROM request_purges ORDER BY requested_at, request_id LIMIT :n""", {"n": limit})
+               FROM request_purges WHERE kind IS NULL OR kind <> :k
+               ORDER BY requested_at, request_id LIMIT :n""", {"n": limit, "k": EXPIRY_KIND})
         # SUM 은 행 0개면 NULL -- 그때의 지연 건수는 0 이 맞다(행이 없다는 사실이지 모름이 아니다).
         stalled = 0 if agg["stalled"] is None else int(agg["stalled"])
         return {"pending": agg["pending"], "stalled": stalled,
                 "oldest_requested_at": agg["oldest"], "items": items}
+
+    # ---- 결과 파일 자동 만료(2026-10-26 -- artifact_expiry 루프가 넣고, request_purger 가 정리한다) ----
+
+    def expire_artifacts(self, *, cutoff, artifact_base, limit, now=None, actor=EXPIRY_ACTOR) -> list[dict]:
+        """종단 뒤 cutoff 보다 오래된(updated_at < cutoff) 잡의 결과 파일 정리를 맡긴다 -- **한 트랜잭션**에서 잡에
+        artifacts_expired_at 을 찍고 kind 'expiry' 아웃박스 행(요청마다 1개)을 넣는다(찍힌 잡 = 아웃박스 행이 있는 잡 --
+        크래시해도 한쪽만 남지 않는다). 반환 = 넣은 행 [{"request_id", "job_ids"}].
+
+        고르는 잡(전부 SQL 술어, 오래된 순 limit 건):
+          - 아직 만료 전(artifacts_expired_at IS NULL) -- 찍힌 잡은 빠진다. 표시가 없으면 같은 앞쪽 묶음을 매 틱
+            되풀이한다(pod-gc pods_gc_at 교훈, 2026-10-16)
+          - 잡 종단 **그리고** 요청 종단 -- 비종단은 절대 고르지 않는다(도는 잡의 `<job_id>` 를 떼어내면 러너가 다시
+            만든다). 집합 밖 상태 문자열(변조) = 비종단(fail-closed)
+          - updated_at < cutoff: 종단 시각의 근사. updated_at 은 잡마다 단조 비감소라(terminal_jobs_older_than 의 근거)
+            만료를 늦출 뿐 일찍 발동시키지 않는다. 경계(정확히 N일)는 아직 아니다
+          - 그 요청의 아웃박스 행이 없다 -- 아웃박스는 request_id 가 열쇠라 요청 하나에 행 하나다. 삭제 정리 중(DB
+            복원으로 되살아나 purge_target_still_present 로 멈춘 요청 포함)이거나 이미 만료 정리 중인 요청은 빼고, 그 행이
+            끝난 뒤의 틱이 본다(빼지 않으면 같은 잡을 매 틱 다시 골라 상한을 채운다)
+        PG 는 고른 잡을 `FOR UPDATE OF d SKIP LOCKED` 로 잠근다 -- 어떤 잠금도 기다리지 않는다(retention prune_events 와
+        같은 규칙): 요청 삭제는 requests → data_jobs 순으로 잠그고 이 경로는 data_jobs 만 잠그므로, 기다리면 배치 삭제와
+        잠금 순환(교착)이 생길 수 있다. 남이 쥔 잡은 다음 틱이 본다. 요청 행은 잠그지 않고 읽기만 한다. 잡을 잠근 동안엔
+        삭제가 그 잡을 지울 수 없고 삭제의 아웃박스 INSERT 는 잡 잠금 뒤라 PK 경합이 없지만, 그래도 ON CONFLICT DO
+        NOTHING 으로 받고 못 넣은 요청의 잡은 찍지 않는다.
+
+        artifact_base 는 지금 base(strip_scheme). 강제 base 변경 이전에 쓴 잡은 파일이 옛 base 에 있다 -- 정리 루프의
+        파일 단계가 지금 base 에서 그 이름을 못 찾고 artifact_left_at_old_base 로 남긴다(옛 base 는 열지도 지우지도
+        않는다, 설계 D11). 열람 API 는 원래도 지금 base 로만 경로를 조립하므로(routes_artifacts._base) 만료 표시로 새로
+        잃는 열람은 없다."""
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+            return []
+        now = now or utc_now_iso()
+        jt, rt = sorted(_TERMINAL_JOB), sorted(_TERMINAL_REQ)
+        params = {"cutoff": cutoff, "n": limit,
+                  **{f"j{i}": s for i, s in enumerate(jt)}, **{f"q{i}": s for i, s in enumerate(rt)}}
+        lock = " FOR UPDATE OF d SKIP LOCKED" if self._db.dialect == "postgresql" else ""
+        queued: list[dict] = []
+        with self._db.transaction():
+            rows = self._db.query(
+                f"""SELECT d.job_id, d.request_id, d.phase_refs, d.artifact_uri FROM data_jobs d
+                    WHERE d.artifacts_expired_at IS NULL AND d.updated_at < :cutoff
+                      AND d.state IN ({", ".join(f":j{i}" for i in range(len(jt)))})
+                      AND EXISTS (SELECT 1 FROM requests r WHERE r.request_id = d.request_id
+                                  AND r.state IN ({", ".join(f":q{i}" for i in range(len(rt)))}))
+                      AND NOT EXISTS (SELECT 1 FROM request_purges p WHERE p.request_id = d.request_id)
+                    ORDER BY d.updated_at, d.job_id LIMIT :n{lock}""", params)
+            by_rid: dict = {}
+            for r in rows:
+                by_rid.setdefault(r["request_id"], []).append(r)
+            for rid, jobs in by_rid.items():
+                inserted = self._db.execute_count(
+                    f"""INSERT INTO request_purges ({_ROW_COLUMNS})
+                        VALUES (:r, :jobs, :base, 'k8s', NULL, 0, NULL, :now, :by, :now, :now, :kind)
+                        ON CONFLICT (request_id) DO NOTHING""",
+                    {"r": rid, "jobs": dump_json([self._outbox_job(j) for j in jobs]), "base": artifact_base,
+                     "now": now, "by": actor, "kind": EXPIRY_KIND})
+                if inserted != 1:
+                    continue
+                ids = [j["job_id"] for j in jobs]
+                self._in("UPDATE data_jobs SET artifacts_expired_at = :now "
+                         "WHERE artifacts_expired_at IS NULL AND job_id IN ({})", ids, {"now": now})
+                queued.append({"request_id": rid, "job_ids": ids})
+        return queued
+
+    def expiry_backlog(self) -> int:
+        """정리 대기 중인 만료 행 수 -- artifact_expiry 루프가 이 수를 상한 아래로 묶는다(요청 삭제 정리를 굶기지 않게)."""
+        return self._db.query_one(
+            "SELECT COUNT(*) AS n FROM request_purges WHERE kind = :k", {"k": EXPIRY_KIND})["n"]
+
+    def invalid_expiry_targets(self, rows) -> set:
+        """만료 행 중 **지금 파일을 지워도 되지 않는** 행의 request_id 집합(present_targets 의 거울 -- 요청 삭제 행은 원
+        행이 없어야 안전하고, 만료 행은 원 행이 그대로 있어야 안전하다). 행의 잡 전부가 data_jobs 에 있고, 그 요청의
+        잡이며, 종단이고, artifacts_expired_at 이 찍혀 있어야 한다 -- DB 복원으로 표시가 사라졌거나(파일을 다시 열람할 수
+        있다고 믿는 상태), 잡이 비종단이거나(변조), 다른 요청의 잡이거나, 잡이 없거나, job_ids 가 깨졌으면(None·빈 목록)
+        지우지 않는다(fail-closed). 묶음(_CHUNK)마다 한 문장."""
+        rows = list(rows)
+        owner: dict = {}
+        bad: set = set()
+        for r in rows:
+            ids = r.get("job_ids")
+            if not ids:
+                bad.add(r["request_id"])
+                continue
+            for jid in ids:
+                owner.setdefault(jid, set()).add(r["request_id"])
+        found = {x["job_id"]: x for x in self._query_in(
+            "SELECT job_id, request_id, state, artifacts_expired_at FROM data_jobs WHERE job_id IN ({})",
+            list(owner))}
+        for jid, rids in owner.items():
+            x = found.get(jid)
+            for rid in rids:
+                if (x is None or x["request_id"] != rid or x["state"] not in _TERMINAL_JOB
+                        or x["artifacts_expired_at"] is None):
+                    bad.add(rid)
+        return bad
+
+    def finish_expiry(self, request_id, job_ids) -> bool:
+        """만료 정리 완료: 만료 아웃박스 행만 지운다(요청·잡·전이·이벤트는 살아 있는 요청의 것이라 scrub 하지 않는다).
+        그 사이 대상이 무효가 됐으면(invalid_expiry_targets -- 표시가 지워진 DB 복원 등) 아무것도 지우지 않고 False.
+        kind 조건: 같은 순간 요청이 삭제돼 행이 요청 삭제 행으로 바뀌었으면(_enqueue) 지우지 않는다 -- 그 행은 요청
+        삭제의 finish(scrub 포함)로 끝나야 한다. 반환 = 행을 지웠나."""
+        with self._db.transaction():
+            if self.invalid_expiry_targets([{"request_id": request_id, "job_ids": list(job_ids or [])}]):
+                return False
+            removed = self._db.execute_count(
+                "DELETE FROM request_purges WHERE request_id = :r AND kind = :k",
+                {"r": request_id, "k": EXPIRY_KIND})
+        return removed == 1
+
+    def expiry_status(self) -> dict:
+        """결과 파일 만료 정리 현황(아티팩트 경로 화면 -- GET /api/admin/artifact-base 의 artifact_retention). pending =
+        정리 대기 행, stalled = last_error 가 있는 행, last_error = 가장 오래된 지연 행의 사유(없으면 None),
+        expired_jobs = 지금까지 만료된 잡 수(행은 남는다 -- 화면이 「만료됨 N건」으로 보인다)."""
+        agg = self._db.query_one(
+            """SELECT COUNT(*) AS pending,
+                      SUM(CASE WHEN last_error IS NOT NULL THEN 1 ELSE 0 END) AS stalled,
+                      MIN(requested_at) AS oldest FROM request_purges WHERE kind = :k""", {"k": EXPIRY_KIND})
+        stalled_row = self._db.query_one(
+            """SELECT last_error FROM request_purges WHERE kind = :k AND last_error IS NOT NULL
+               ORDER BY requested_at, request_id LIMIT 1""", {"k": EXPIRY_KIND})
+        expired = self._db.query_one(
+            "SELECT COUNT(*) AS n FROM data_jobs WHERE artifacts_expired_at IS NOT NULL")["n"]
+        # SUM 은 행 0개면 NULL -- 그때의 지연 건수는 0 이 맞다(status 와 같은 규칙).
+        return {"pending": agg["pending"], "stalled": 0 if agg["stalled"] is None else int(agg["stalled"]),
+                "oldest_requested_at": agg["oldest"],
+                "last_error": stalled_row["last_error"] if stalled_row else None,
+                "expired_jobs": expired}

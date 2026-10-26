@@ -797,7 +797,8 @@ TOTALS = "/api/admin/usage/storage-totals"
 _TOTAL_KEYS = ["storage_name", "computed_at", "truncated", "window_limit", "target_count", "summed_target_count",
                "nested_target_count", "invalid_target_count", "unreadable_count", "pending_count", "progressed",
                "total_bytes", "total_files", "total_directories", "total_symlinks", "total_other", "total_entries",
-               "scan_errors", "broken_paths_total", "hot_ratio", "file_size_histogram", "oldest_scan_at",
+               "scan_errors", "invalid_name_entries", "broken_paths_total", "hot_ratio", "file_size_histogram",
+               "oldest_scan_at",
                "newest_scan_at", "filesystem"]
 
 
@@ -1095,3 +1096,80 @@ def test_storage_totals_filesystem_from_agent_reports(tmp_path):
         "consistent": True}
     assert isinstance(fs["reported_at"], str)
     assert _totals(client, "gone")["filesystem"] is None
+
+
+# ---- 2026-10-26: dscan 포크 ae781bd 의 summary.total_bytes·summary.invalid_name_entries ----
+
+def _new_report(*, total_bytes, invalid, mtime_bytes=(30, 20), files=7):
+    r = _report(mtime_bytes=mtime_bytes, atime_bytes=mtime_bytes, files=files)
+    r["summary"].update({"total_bytes": total_bytes, "invalid_name_entries": invalid})
+    return r
+
+
+def test_new_counters_flow_through_list_history_export_and_cache(tmp_path):
+    """새 리포트: 실 사용량 = summary.total_bytes(히스토그램 합보다 우선), invalid_name_entries 는 포인트의 숫자(카운터만 --
+    broken_paths_total 에 더하지 않는다). 구형 리포트(키 부재): 실 사용량은 히스토그램 합 그대로, 카운터는 None(0 이 아니다).
+    값은 캐시(scan_report_digests)를 거친 두 번째 조회에서도 같다(재투영 멱등)."""
+    art = tmp_path / "artifacts"
+    client = _client(tmp_path, art)
+    _login(client, "admin", "admin")
+    old, _ = _scan_job(client, target="team", art_base=art, report=_report(mtime_bytes=(10,), atime_bytes=(10,)))
+    new, _ = _scan_job(client, target="team", art_base=art, report=_new_report(total_bytes=1074750158, invalid=15))
+    legacy, _ = _scan_job(client, target="legacy", art_base=art)
+    _at(client, old, "2026-09-01T00:00:00Z")
+    _at(client, new, "2026-09-20T00:00:00Z")
+    _at(client, legacy, "2026-08-01T00:00:00Z")
+    for _ in range(2):                                             # 빈 캐시(리포트 투영) → 데운 캐시(재투영)
+        rows = {r["target"]: r for r in client.get("/api/admin/usage/scan-targets").json()}
+        assert rows["team"]["latest"]["total_bytes"] == 1074750158
+        assert rows["team"]["latest"]["invalid_name_entries"] == 15
+        assert rows["team"]["latest"]["broken_paths_total"] == 0
+        assert rows["legacy"]["latest"]["total_bytes"] == 50
+        assert rows["legacy"]["latest"]["invalid_name_entries"] is None
+        hist = client.get("/api/admin/usage/scan-history", params={"storage": "s1", "target": "team"}).json()
+        assert [(p["total_bytes"], p["invalid_name_entries"]) for p in hist["points"]] == [(10, None), (1074750158, 15)]
+        exp = {r["target"]: r for r in client.get("/api/admin/usage/export").json()["rows"]}
+        assert exp["team"]["latest"]["invalid_name_entries"] == 15
+        assert exp["team"]["previous"]["total_bytes"] == 10
+    # 지표 정렬(실 사용량)도 같은 값으로 정렬한다
+    ranked = client.get("/api/admin/usage/scan-targets", params={"sort": "bytes", "order": "desc"}).json()
+    assert [r["target"] for r in ranked] == ["team", "legacy"]
+
+
+def test_new_counters_fail_soft_and_old_cache_rows_reproject(tmp_path):
+    """DB 가 신뢰 경계: 캐시 행의 최상위 키는 믿지 않고 summary 에서 다시 뽑는다(옛 캐시 행엔 최상위 키가 없다). 수상한
+    값(음수·실수·bool·문자열)은 None(카운터) / 히스토그램 합 물러남(실 사용량)."""
+    art = tmp_path / "artifacts"
+    client = _client(tmp_path, art)
+    _login(client, "admin", "admin")
+    repos = client.app.state.repos
+    cases = {"neg": (-1, -1), "float": (1.5, 2.0), "bool": (True, True), "str": ("9", "9")}
+    for name, (tb, inv) in cases.items():
+        jid, _ = _scan_job(client, target=name, art_base=art, write_report=False)
+        repos.scan_digests.put(jid, {
+            "summary": {"total_files": 1, "total_bytes": tb, "invalid_name_entries": inv},
+            "time_histograms": {"mtime": [{"bucket": "[0d,1d]", "bytes": 77}]},
+            "invalid_name_entries": 99, "total_bytes": 12345})       # 최상위 키는 무시된다
+    plain, _ = _scan_job(client, target="oldcache", art_base=art, write_report=False)
+    repos.scan_digests.put(plain, {"summary": {"total_files": 1, "total_bytes": 4096, "invalid_name_entries": 3},
+                                   "time_histograms": {}})
+    rows = {r["target"]: r["latest"] for r in client.get("/api/admin/usage/scan-targets").json()}
+    for name in cases:
+        assert rows[name]["total_bytes"] == 77, name                # 히스토그램 합으로 물러난다
+        assert rows[name]["invalid_name_entries"] is None, name
+    assert rows["oldcache"]["total_bytes"] == 4096 and rows["oldcache"]["invalid_name_entries"] == 3
+
+
+def test_storage_totals_sum_invalid_names_separately_from_broken(tmp_path):
+    """스토리지 합계의 invalid_name_entries: 아는 대상만 더하고 구형 리포트는 unknown(0 으로 접지 않는다). broken 합에는
+    들지 않는다. 실 사용량 합은 summary.total_bytes 를 쓴다."""
+    art = tmp_path / "artifacts"
+    client = _client(tmp_path, art)
+    _login(client, "admin", "admin")
+    _scan_job(client, target="a", art_base=art, report=_new_report(total_bytes=1000, invalid=4))
+    _scan_job(client, target="b", art_base=art, report=_new_report(total_bytes=24, invalid=0))
+    _scan_job(client, target="c", art_base=art)                               # 구형 리포트
+    t = _totals(client)
+    assert t["invalid_name_entries"] == {"sum": 4, "known": 2, "unknown": 1}
+    assert t["broken_paths_total"] == {"sum": 0, "known": 3, "unknown": 0}
+    assert t["total_bytes"] == {"sum": 1000 + 24 + 50, "known": 3, "unknown": 0}

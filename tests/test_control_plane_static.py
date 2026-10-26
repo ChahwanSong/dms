@@ -18,7 +18,8 @@ _FORBIDDEN_OS = {"access", "chown", "fchown", "lchown", "chmod", "fchmod", "lchm
                  "execlpe", "execvp", "execvpe", "spawnl", "spawnle", "spawnlp", "spawnlpe", "spawnv", "spawnve",
                  "spawnvp", "spawnvpe", "startfile"}
 _DELETE_OS = {"unlink", "remove", "rmdir", "removedirs", "truncate", "ftruncate"}
-_PURGE_MODULES = ("artifact_trash.py", "request_purger.py", "purge_runner.py")
+# artifact_expiry(2026-10-26 결과 파일 자동 만료): 고르고 표시만 한다 -- 지우는 것은 같은 정리 루프(떼어냄 + purge 파드)다.
+_PURGE_MODULES = ("artifact_trash.py", "request_purger.py", "purge_runner.py", "artifact_expiry.py")
 
 
 def _control_plane_files():

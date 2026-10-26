@@ -37,6 +37,10 @@ class JobSpec:
     # 결과 소유 규칙(요청 destination_pv 블록의 owner_rule 그대로 -- "storage" | "pv_root" | None(옛 행)). "storage" 만 측정을
     # 건너뛴다(execution_manifests.pv_owner_measured) -- 나머지는 종전처럼 PV 루트 소유자를 잰다.
     result_owner_rule: str | None = None
+    # 직접 경로 목적지의 스토리지 기본 소유자 규칙인가(2026-10-26 사용자 결정 (4) -- 요청 payload.dest_owner 의 rule "storage",
+    # stepper 가 PV 목적지 블록이 없을 때만 True 로 싣는다). True 면 result_owner_rule 은 "storage"·result_owner 는 그 블록 owner 이고,
+    # paths["contain"] 에 목적지가 없어도 --chown 을 싣는다(execution_manifests.direct_dest_owner_applies -- 측정은 없다).
+    result_owner_direct: bool = False
 
 
 class ExecutionError(Exception):

@@ -11,13 +11,30 @@ import { FOCUS_RING } from "./ui";
 
 // 「전이 이력」 h2 는 Card div 의 직계 자식이다 -- RequestDetail.test 가 heading.closest("div") 로 이 카드를 찾고
 // 그 안의 listitem 수를 요청 전이 수와 맞춘다. 사이에 div 를 끼우지 않는다.
-export function TransitionsCard({ transitions }: { transitions: unknown }) {
+export function TransitionsCard({ transitions, conflictRequestId = null }: {
+  transitions: unknown; conflictRequestId?: string | null;
+}) {
   return (
     <Card>
       <h2 className="text-sm font-semibold mb-2">전이 이력</h2>
-      <Timeline transitions={transitions} />
+      <Timeline transitions={transitions} conflictRequestId={conflictRequestId} />
     </Card>
   );
+}
+
+// 경로 겹침(path_conflict, 2026-10-27)의 상대 요청 id -- planner 가 Conflict 와 함께 남긴 path_conflict 이벤트의
+// payload.conflict_request_id(가장 최근 것). 전이 행엔 상세 칸이 없어 이벤트가 그 자리다. DB 가 신뢰 경계라 모양이 틀리면
+// (배열 아님·문자열 아님·빈 값·지나치게 긺) null -- 링크를 그리지 않는다(사유 문구는 그대로 보인다).
+export function conflictRequestId(events: unknown): string | null {
+  if (!Array.isArray(events)) return null;
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const e: unknown = events[i];
+    if (!e || typeof e !== "object" || (e as { event_type?: unknown }).event_type !== "path_conflict") continue;
+    const payload = (e as { payload?: unknown }).payload;
+    const id = payload && typeof payload === "object" ? (payload as { conflict_request_id?: unknown }).conflict_request_id : null;
+    if (typeof id === "string" && id.length > 0 && id.length <= 128) return id;
+  }
+  return null;
 }
 
 // I3: stepper.py의 summary_unreadable은 message가 아예 없이 payload={"ref": ref}만
@@ -111,7 +128,7 @@ export function ActivitySection({ req }: { req: RequestDetail }) {
   const hasEvents = Array.isArray(req.events) && req.events.length > 0;
   return (
     <div className={hasEvents ? "grid gap-5 xl:grid-cols-2 xl:items-start" : ""}>
-      <TransitionsCard transitions={req.transitions} />
+      <TransitionsCard transitions={req.transitions} conflictRequestId={conflictRequestId(req.events)} />
       <DiagnosticEvents req={req} />
     </div>
   );

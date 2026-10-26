@@ -34,6 +34,10 @@ _SERVER_INT_KEYS = (
     ("DMS_REQUEST_DELETE_QUIET_SECONDS", "request_delete_quiet_seconds", 60),
     # 컨트롤러 request-purge 루프 간격(삭제한 요청의 남은 파드·결과 파일 정리, 실패 백오프의 기준 단위). 1 이상.
     ("DMS_REQUEST_PURGE_INTERVAL_SECONDS", "request_purge_interval_seconds", 15),
+    # 결과 파일 자동 만료(2026-10-26 사용자 결정 「파일만 만료하고 행은 남김, N 기본 1500일」 -- artifact_expiry.py): 종단 후
+    # 이 일수가 지난 잡의 결과 파일(<base>/<job_id>)을 요청 삭제와 같은 정리 루프(떼어냄 + purge 파드)가 지운다. 요청·잡·전이·
+    # 요약 행은 남는다. 0 = 끔(만료하지 않는다). 음수는 기동 거부. 컨트롤러가 읽고(만료 대상 고르기), api 는 화면 표시만.
+    ("DMS_ARTIFACT_RETENTION_DAYS", "artifact_retention_days", 1500),
     ("DMS_BUILD_WATCHER_INTERVAL_SECONDS", "build_watcher_interval_seconds", 15),
     # 빌드 파드 activeDeadlineSeconds + BuildWatcher 나이 기반 회수 창(C2). 기본
     # 7200(2h) -- mpifileutils를 소스에서 컴파일하는 빌드가 가장 오래 걸린다.
@@ -256,6 +260,7 @@ class Settings:
     pod_gc_interval_seconds: int = 600
     request_delete_quiet_seconds: int = 60
     request_purge_interval_seconds: int = 15
+    artifact_retention_days: int = 1500
     build_registry: str = "pkg-01:5000"
     build_builder_image: str = "quay.io/buildah/stable:latest"
     build_watcher_interval_seconds: int = 15
@@ -303,6 +308,9 @@ class Settings:
         if extra["node_cpu_reserve_millicores"] < 0:
             problems.append("DMS_NODE_CPU_RESERVE_MILLICORES must be >= 0: "
                             f"{environ.get('DMS_NODE_CPU_RESERVE_MILLICORES')!r}")
+        if extra["artifact_retention_days"] < 0:
+            problems.append("DMS_ARTIFACT_RETENTION_DAYS must be >= 0 (0 = never expire): "
+                            f"{environ.get('DMS_ARTIFACT_RETENTION_DAYS')!r}")
         if extra["request_purge_interval_seconds"] < 1:
             problems.append("DMS_REQUEST_PURGE_INTERVAL_SECONDS must be >= 1: "
                             f"{environ.get('DMS_REQUEST_PURGE_INTERVAL_SECONDS')!r}")

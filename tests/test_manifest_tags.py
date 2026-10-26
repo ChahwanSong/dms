@@ -108,3 +108,40 @@ def test_init_container_image_does_not_leak_into_lookup(tmp_path):
     assert container_image(doc, "api") == "pkg-01:5000/dms:d99"
     assert container_image(doc, "sidecar") == "pkg-01:5000/dms-SIDECAR:s1"
     assert container_image(doc, "wait-migrate") is None
+
+
+
+# --- securityContext 드리프트 배지의 동봉 기준값(2026-10-26) ------------------------------------------------------------
+
+def test_manifest_security_contexts_read_the_bundled_root_contract():
+    from dms.manifest_tags import manifest_security_contexts
+    got = manifest_security_contexts()
+    assert set(got) == {"dms-api", "dms-controller"}       # 에이전트는 비교 대상 밖(privileged 파드)
+    for view in got.values():
+        assert view["runAsUser"] == 0 and view["runAsGroup"] == 0
+        assert view["allowPrivilegeEscalation"] is False and view["readOnlyRootFilesystem"] is True
+        assert view["capabilities.drop"] == ["ALL"] and view["runAsNonRoot"] is None
+
+
+def test_manifest_security_contexts_fail_soft_to_unknown(tmp_path):
+    # 동봉본 없음·문서 없음·깨진 파일·securityContext 블록 없음은 전부 None(모름) -- 거짓 드리프트를 만들지 않는다.
+    from dms.manifest_tags import manifest_security_contexts
+    assert manifest_security_contexts(tmp_path / "nope") == {"dms-api": None, "dms-controller": None}
+    (tmp_path / "40-api.yaml").write_bytes(b"\xff\xfe\x00\x01")
+    (tmp_path / "41-controller.yaml").write_text(
+        "kind: Deployment\nmetadata:\n  name: dms-controller\nspec:\n  template:\n    spec:\n"
+        "      containers:\n        - name: controller\n          image: x\n")
+    assert manifest_security_contexts(tmp_path) == {"dms-api": None, "dms-controller": None}
+
+
+def test_manifest_security_contexts_block_sequence_and_pod_level(tmp_path):
+    # kubectl 이 내보내는 블록 시퀀스(drop:\n - ALL)도 같은 값, 파드 수준 runAsUser 는 컨테이너 값이 없을 때만 실효값.
+    from dms.manifest_tags import manifest_security_contexts
+    (tmp_path / "41-controller.yaml").write_text(
+        "kind: Deployment\nmetadata:\n  name: dms-controller\nspec:\n  template:\n    spec:\n"
+        "      securityContext:\n        runAsUser: 65532\n        runAsNonRoot: true\n"
+        "      containers:\n        - name: controller\n          image: x\n"
+        "          securityContext:\n            runAsUser: 0\n            capabilities:\n"
+        "              drop:\n                - ALL\n")
+    view = manifest_security_contexts(tmp_path)["dms-controller"]
+    assert view["runAsUser"] == 0 and view["runAsNonRoot"] is True and view["capabilities.drop"] == ["ALL"]

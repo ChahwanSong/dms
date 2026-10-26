@@ -228,6 +228,19 @@ describe("BuildHistory — 빌드 이력", () => {
     expect(await screen.findByText(/진행 중인 빌드는 삭제할 수 없습니다/)).toBeInTheDocument();
   });
 
+  it("파드 정리 실패(502)는 기록을 지우지 않았다는 사유를 남기고 행은 표에 남는다", async () => {
+    // 2026-10-26: 서버는 빌드·프로브 파드를 먼저 지우고, 못 지우면 행을 남긴다(지우면 pod-gc 시야 밖으로 누수).
+    server.use(http.delete("/api/admin/builds/:id", () =>
+      HttpResponse.json({ detail: "build_pod_cleanup_failed" }, { status: 502 })));
+    wrap();
+    await userEvent.click(await screen.findByLabelText("빌드 0123456789ab 선택"));
+    await userEvent.click(screen.getByRole("button", { name: "선택 삭제" }));
+    await userEvent.click(screen.getByRole("button", { name: "1개 삭제 확인" }));
+    expect(await screen.findByText(new RegExp(reasonText("build_pod_cleanup_failed")))).toBeInTheDocument();
+    expect(reasonText("build_pod_cleanup_failed")).toMatch(/빌드 파드를 정리하지 못해/);
+    expect(screen.getByText("0개 삭제됨 · 1개 실패")).toBeInTheDocument();
+  });
+
   // ── 분리 계약: 폼은 이 화면의 것이 아니다 ───────────────────────────────────
   it("제출 폼은 여기 없다 — 빌드하기 탭으로 나갔다", async () => {
     wrap();

@@ -49,6 +49,8 @@ def test_controller_once(tmp_path, monkeypatch, capsys):
     # 요청 삭제 정리(2026-10-08): cli.py 가 build_purge_runner 를 build_loops 에 넘기지 않으면 request-purge 루프가
     # 없어 삭제한 요청의 파드·결과 파일이 영원히 남는다.
     assert "request-purge=ok" in out
+    # 결과 파일 자동 만료(2026-10-26): purge_runner 가 있을 때만 조립된다 -- 같은 배선이 빠지면 보존 정책이 조용히 꺼진다.
+    assert "artifact-expiry=ok" in out
     # k8s 인벤토리(2026-10-25): 에이전트가 올린 동기화 결과를 적용하는 루프 -- 빠지면 결과가 received 로 영원히 쌓인다.
     assert "k8s-inventory=ok" in out
 

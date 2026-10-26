@@ -24,8 +24,8 @@ from .routes_jobs import _owned_request
 # 모양 투영은 scan_path_stats 와 **한 벌**을 공유한다(routes_scan_paths.py:19-73 의
 # 「왜」: 키 화이트리스트만으로는 리포트 값 안의 경로 유출을 못 막는다 — 숫자와
 # 구간 라벨만 통과시킨다). 두 벌이 되면 한쪽만 고치는 드리프트가 생긴다.
-from .routes_scan_paths import (_buckets, _is_number, _numbers,
-                                _time_histograms, _total_bytes)
+from .routes_scan_paths import (_buckets, _is_number, _numbers, _report_total_bytes,
+                                _summary_count, _time_histograms)
 
 router = APIRouter()
 
@@ -173,7 +173,8 @@ def submit(body: RequestBody, request: Request,
                                       or "chown" in (body.options or {})):
         raise HTTPException(status_code=422, detail="pv_owner_not_applicable")
     # PV 주소 해석(설계 §6 게이트 순서: 유지보수 → 연산 → 클러스터 존재·동기화(409) → PV 해석(422) → 해석된 스토리지로
-    # storage_admin_only → 맵핑·raw(403) → PV 목적지 결과 소유(409) → sync 쌍 → owner·root → build_data_payload). 이후의
+    # storage_admin_only → 맵핑·raw(403) → PV 목적지 결과 소유(409) → sync 쌍 → owner·root → build_data_payload → 직접 경로
+    # 목적지 결과 소유(409)). 이후의
     # 스토리지 게이트는 전부 **해석된** 스토리지 이름(loc)을 본다 -- PV 주소 제출은 바디의 storage 칸이 비어 있어 예전 게이트를
     # 조용히 건너뛰었다(리뷰).
     try:
@@ -266,6 +267,17 @@ def submit(body: RequestBody, request: Request,
     # PV 블록은 build_data_payload 반환 **뒤에** 덧붙인다(그 반환은 단건 계약 -- tests/test_domain_batch.py). planner·컨펌이
     # 이 블록으로 재확인한다(k8s_access.recheck_request). target_label 은 작업 목록 경로 검색용 사람 표기(설계 D17).
     payload.update(pv_blocks)
+    # 직접 경로 sync 목적지의 결과 소유(2026-10-26 사용자 결정 (4), k8s_access.direct_dest_owner): 목적지 스토리지가 pv 면 늘,
+    # both 면 경로가 지금 인벤토리의 PV 루트 아래일 때만 그 스토리지 기본 소유자로 -- 판정 결과(적용 아님 "none" 포함)를
+    # dest_owner 로 얼려 확인 창·요청 상세가 보이고 planner·컨펌이 대조한다(storage_owner_changed). 정규화된 목적지 경로가 필요해
+    # build_data_payload 뒤, PV 목적지 블록을 보도록 그 블록을 붙인 뒤에 본다. 저장값이 무효면 PV 목적지와 같은 409(root·소스
+    # 소유로 뭉개지 않는다). PV 목적지·명시 chown 에는 싣지 않는다(함수가 None).
+    try:
+        dest_owner = k8s_access.direct_dest_owner(repos, body.operation, payload)
+    except DomainValidationError:
+        raise HTTPException(status_code=409, detail="invalid_storage_owner")
+    if dest_owner is not None:
+        payload["dest_owner"] = dest_owner
     rid = repos.requests.create(
         operation=body.operation, requester_id=identity.actor, actor=identity.actor,
         resource_key=resource_key, payload=payload, priority=priority,
@@ -450,12 +462,17 @@ def request_scan_stats(request_id: str, request: Request,
     broken_total = report.get("broken_paths_total")
     broken_limit = report.get("broken_paths_limit")
     hists = _time_histograms(report.get("time_histograms"))
+    summary = _numbers(report.get("summary"))
     return {
-        "summary": _numbers(report.get("summary")),
+        "summary": summary,
         "file_size_histogram": _buckets(report.get("file_size_histogram")),
         "time_histograms": hists,
-        # 실 사용량(2026-08-23): null == 모름(구형·오염 리포트) ≠ 0(빈 트리).
-        "total_bytes": _total_bytes(hists),
+        # 실 사용량(2026-08-23): null == 모름(구형·오염 리포트) ≠ 0(빈 트리). summary.total_bytes 우선(2026-10-26 --
+        # routes_scan_paths._report_total_bytes, 없으면 히스토그램 합).
+        "total_bytes": _report_total_bytes(summary, hists),
+        # 이름이 엄격 UTF-8 이 아닌 항목 수(포크 ae781bd -- 사용자 결정 「카운터만 둠」: broken_paths_total 에 더하지 않는다).
+        # None = 구형 리포트(키 부재) -- 0(그런 이름 없음)과 다르다.
+        "invalid_name_entries": _summary_count(summary, "invalid_name_entries"),
         "generated_at_epoch": epoch if _is_number(epoch) else None,
         # 숫자만 통과(모양 투영: 문자열이 오면 경로일 수 있다). 구형 리포트(키
         # 부재)는 None(미기록) — null≠0: 0 은 "파손 없음"의 정상값이다.

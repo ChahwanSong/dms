@@ -86,7 +86,7 @@ def delete_requests(body: DeleteRequestsBody, request: Request,
     **배치 단위**(본문 batches -- [{batch_id, expected_request_count}], 2026-10-10): 같은 세션 관리자 전용 경계 안에서
     배치 하나 = 트랜잭션 하나 = 자식 요청 전부 + 항목 + 배치 행, 전부 아니면 전무(request_purges.delete_batch -- 판정
     순서·잠금 순서는 그 docstring). 배치 id 는 접는다(첫 항목의 expected 를 쓰고 순서 유지). 호출당 배치 ≤ 10, 배치당
-    자식 ≤ 1000·항목 ≤ 10000(request_purges 모듈 상수). 배치 하나의 DB 오류는 그 배치만 batch_delete_failed 로
+    자식 ≤ 2000·항목 ≤ 10000(request_purges 모듈 상수 -- 2026-10-26 자식 상한 1000 → 2000). 배치 하나의 DB 오류는 그 배치만 batch_delete_failed 로
     제외한다(단건과 같은 이유).
     응답의 deleted_batches·skipped_batches 는 본문에 batches 키를 실은 호출에만 싣는다(빈 목록이어도) -- batches 를
     모르는 옛 호출자(단건만 보내는 스크립트)의 응답 모양은 그대로다.

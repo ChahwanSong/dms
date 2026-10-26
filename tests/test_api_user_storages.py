@@ -6,6 +6,8 @@ FORBIDDEN_FIELDS = ("mount_path", "status_detail")
 # 관리자 피커가 "(관리자 전용)" 을 구분해 보이는 표식(test_storage_user_scope).
 # kind(2026-10-25 dms-k8s 설계 D11): filesystem·pv·both -- 포탈의 직접 경로 피커가 filesystem·both 만 보인다.
 USER_FIELDS = {"storage_name", "backend_type", "status", "managed_root", "admin_only", "kind"}
+# default_owner(2026-10-26 사용자 결정 (4) -- 직접 경로 목적지가 PV 를 담는 스토리지면 결과 소유): 직접 경로를 고르는 관리자 응답에만.
+ADMIN_FIELDS = USER_FIELDS | {"default_owner"}
 
 
 def _login_user(client):
@@ -92,9 +94,19 @@ def test_admin_sees_managed_root(client, db):
     _make_storage(client)
     rows = client.get("/api/user/storages", headers=ADMIN).json()
     assert [r["managed_root"] for r in rows] == ["/mnt/ceph/dms"]
-    # 나머지 내부 경로·운영 정보는 관리자에게도 이 목록으로는 주지 않는다
+    # 나머지 내부 경로·운영 정보는 관리자에게도 이 목록으로는 주지 않는다(기본 소유만 더 -- 등록 생략 = 0:0)
     for r in rows:
-        assert set(r) == USER_FIELDS
+        assert set(r) == ADMIN_FIELDS and r["default_owner"] == "0:0"
+
+
+def test_default_owner_is_admin_only_and_null_when_invalid(client, db):
+    _make_storage(client)
+    db.execute("UPDATE storages SET default_uid = 1500, default_gid = 1600 WHERE storage_name = 'ceph-a'")
+    assert [r["default_owner"] for r in client.get("/api/user/storages", headers=ADMIN).json()] == ["1500:1600"]
+    db.execute("UPDATE storages SET default_uid = -1 WHERE storage_name = 'ceph-a'")
+    assert [r["default_owner"] for r in client.get("/api/user/storages", headers=ADMIN).json()] == [None]
+    _login_user(client)
+    assert all("default_owner" not in r for r in client.get("/api/user/storages").json())
 
 
 def test_non_admin_sees_managed_root_but_not_mount_path(client, db):

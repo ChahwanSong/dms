@@ -73,8 +73,27 @@ test("buildUsageCsv: 최신 리포트를 못 읽음·직전 없음·스토리지
 });
 
 test("buildUsageCsv: 요약 키가 기본 열 이름과 겹치면 summary_ 접두", () => {
-  const { columns } = buildUsageCsv([row({ latest: pt({ summary: { total_bytes: 5 } }) })], ST, NOW);
-  expect(columns).toContain("summary_total_bytes");
+  // (summary.total_bytes 는 2026-10-26 부터 고정 total_bytes 열이 싣는 같은 값이라 요약 열에서 빠진다 -- 아래 테스트)
+  const { columns } = buildUsageCsv([row({ latest: pt({ summary: { scan_count: 5 } }) })], ST, NOW);
+  expect(columns).toContain("summary_scan_count");
+});
+
+// 2026-10-26 dscan 포크 ae781bd: summary.total_bytes(정확 실 사용량 -- 서버가 고정 total_bytes 로 싣는다)·invalid_name_entries.
+test("buildUsageCsv: invalid_name_entries 는 파손 열 옆 고정 열(빈 칸 = 모름) · summary 의 같은 값 열은 만들지 않는다", () => {
+  const { columns, records } = buildUsageCsv([
+    row({ latest: pt({ total_bytes: 1074750158, invalid_name_entries: 15,
+                       summary: { total_files: 4, total_bytes: 1074750158, invalid_name_entries: 15 } }) }),
+    row({ target: "zero", latest: pt({ invalid_name_entries: 0 }) }),
+    row({ target: "old", latest: pt({ invalid_name_entries: null }) }),
+    row({ target: "older-server", latest: pt({}) }),
+    row({ target: "unreadable", latest: null }),
+  ], ST, NOW);
+  expect(columns.indexOf("invalid_name_entries")).toBe(columns.indexOf("broken_paths_limit") + 1);
+  expect(columns.filter((c) => c.includes("total_bytes"))).toEqual(["total_bytes", "previous_total_bytes"]);
+  expect(columns.filter((c) => c.includes("invalid_name_entries"))).toEqual(["invalid_name_entries"]);
+  expect(records.map((r) => r.invalid_name_entries)).toEqual([15, 0, null, null, null]);
+  expect(records[0].total_bytes).toBe(1074750158);
+  expect(records[0].broken_paths_total).toBe(0);                         // 더하지 않는다
 });
 
 // 2026-10-12 사용자 보고: 「사용량 csv 로 추출하니까 두번째 행부터는 backend type, mount path 등 몇몇 column 들이 누락」 --

@@ -111,6 +111,23 @@ def test_terminal_older_than_excludes_running(repos):
     assert [r["build_id"] for r in got] == [a]
 
 
+def test_terminal_older_than_skips_builds_already_collected(repos):
+    # 2026-10-26 빌드 pod-gc 완료 표시: 찍은 빌드는 질의에서 빠진다(그래야 limit 창이 앞쪽에 고착되지 않는다). pod-gc 는
+    # build_id 만 쓰므로 log_text(행마다 최대 64KB)를 싣지 않는다.
+    a = repos.builds.create(source_path="/src/dms", images=["dms"], node_name="dms-w1", actor="x")
+    repos.builds.finish(a, state="Failed", log_text="x" * 1000)
+    b = repos.builds.create(source_path="/src/dms", images=["dms"], node_name="dms-w1", actor="x")
+    repos.builds.finish(b, state="Succeeded")
+    far = "2999-01-01T00:00:00Z"
+    got = repos.builds.terminal_older_than(0, now_iso=far)
+    assert [r["build_id"] for r in got] == [a, b]
+    assert all("log_text" not in r for r in got)
+    repos.builds.mark_pods_gc(a, now_iso="2026-10-26T00:00:00Z")
+    assert [r["build_id"] for r in repos.builds.terminal_older_than(0, now_iso=far)] == [b]
+    assert repos.builds.get(a)["pods_gc_at"] == "2026-10-26T00:00:00Z"
+    assert repos.builds.get(b)["pods_gc_at"] is None
+
+
 def test_control_state_carries_build_node(repos):
     repos.control.set_control_state(maintenance=False, drain=False, reason=None,
                                     build_node_name="dms-w1", actor="ops")

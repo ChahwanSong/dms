@@ -37,6 +37,7 @@ Running 분기의 「도장 없는 미리보기면 Previewing 복귀」는 그�
 사람이 컨펌한다(이 경로 밖 -- 배치 자식만 여기서 실행된다). scan 과 DB 변조 미지 연산은 자동 확인하지 않는다(켜는 라우트
 422 auto_confirm_sync_only, DB 에 auto_confirm_by 를 써 넣어도 PreviewReady 분기와 auto_confirm_hold 가 같은 술어로 거른다).
 """
+from . import k8s_access
 from .db import load_json, utc_now_iso
 from .domain import (DomainValidationError, TERMINAL_REQUEST_STATES, auto_confirmable, confirm_gated,
                      DataJobState, build_data_payload, resolve_priority, validate_batch_options)
@@ -181,6 +182,11 @@ class BatchOrchestrator:
         try:
             payload, key = build_data_payload(batch["operation"], options=batch["options"],
                                               **item["payload"])
+            # 직접 경로 sync 목적지의 결과 소유(2026-10-26 사용자 결정 (4) -- 배치는 직접 경로만): 단건 제출과 같은 함수로
+            # 판정해 자식 payload 에 얼린다(k8s_access.direct_dest_owner -- pv 종류는 늘, both 는 경로가 PV 루트 아래일 때만
+            # 스토리지 기본 소유자). 저장값이 무효면 이 항목만 invalid_storage_owner 로 Rejected(아래 갈래) -- 소스 소유로 조용히
+            # 돌리지 않는다. build 뒤에 덧붙이는 이유는 node_count 와 같다(단건 payload 계약·resource_key 무영향).
+            dest_owner = k8s_access.direct_dest_owner(self._repos, batch["operation"], payload)
         except DomainValidationError as exc:
             if not self._repos.batches.reject_queued_item(batch["batch_id"], item["seq"],
                                                           reason_code=exc.reason_code,
@@ -206,6 +212,8 @@ class BatchOrchestrator:
         # 자체를 싣지 않는다 -- null(모름) ≠ 0, 기존 자식 payload 모양 그대로.
         if batch.get("owner_username") is not None:
             payload["owner_username"] = batch["owner_username"]
+        if dest_owner is not None:
+            payload["dest_owner"] = dest_owner
         priority = resolve_priority(self._repos, batch["operation"], batch.get("priority"))
         # 자식의 auth_method 는 배치 생성 시점의 인증 방식(batches.auth_method)을
         # 물려받는다 -- 기계 고정 "token" 은 세션 배치의 자식까지 비특권으로 눌러
@@ -353,5 +361,24 @@ class BatchOrchestrator:
         # 운영자의 배치 확인이 찍은 도장(BatchesRepository.confirm)이 지금 미리보기와 같은 자식만 실행한다 -- 지문을
         # 여기서 새로 찍지 않는다(예전엔 지금 지문을 그대로 찍어 "본 적 없는 미리보기" 와 구별이 없었다).
         if _preview_expired(job, now) or not _stamped(job):
+            return
+        # 배치 자식의 컨펌 관문 재확인(2026-10-26): 단건 컨펌(routes_jobs.confirm_job)·planner 3a 와 같은 함수
+        # k8s_access.recheck_request -- 배치 자식은 단건 컨펌 라우트를 지나지 않아(batch_child_confirm_via_batch), 미리보기 뒤
+        # 바뀐 것(직접 경로 목적지 결과 소유 dest_owner -- 스토리지 기본 소유자·종류·PV 루트 변경)이 여기서 걸리지 않으면 확인
+        # 창이 보인 소유자와 다른 값으로 실행된다. 걸리면 단건 컨펌과 같은 모양(잡 종단 + 요청 화해)으로 끝내고 다음 틱의
+        # _record_terminal 이 항목을 Rejected 로 센다. 요청 행이 없으면(삭제 경합) 실행하지 않는다.
+        req = self._repos.requests.get(item["request_id"])
+        if req is None:
+            return
+        try:
+            k8s_access.recheck_request(self._repos, req, settings=self._settings)
+        except DomainValidationError as exc:
+            self._repos.data_jobs.set_job_state(job["job_id"], DataJobState.REJECTED, reason_code=exc.reason_code,
+                                                actor="batch-orchestrator")
+            self._repos.requests.finalize_from_job(item["request_id"], DataJobState.REJECTED,
+                                                   reason_code=exc.reason_code, actor="batch-orchestrator")
+            self._repos.observability.record_event(
+                component="batch-orchestrator", severity="warning", event_type="batch_child_recheck_rejected",
+                message=f"item {item['seq']}: {exc.reason_code} -- {exc}"[:500], request_id=item["request_id"])
             return
         self._repos.data_jobs.set_job_state(job["job_id"], DataJobState.EXECUTING, actor="batch-orchestrator")

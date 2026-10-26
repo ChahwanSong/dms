@@ -23,9 +23,13 @@ ARG MPIFILEUTILS_REPO=https://github.com/chahwansong/mpifileutils.git
 # fd 기준 성분별 openat(O_NOFOLLOW)로 걷고 파일 생성·삭제·메타데이터도 그 fd 기준. 2a10a18 은 없는 목적지 루트를 먼저 만든다
 # (8cd72f3 은 새 목적지로의 sync 가 전부 실패 — d1 라이브 실증에서 발견). dms-k8s 의 root nsync PV 목적지 허용의 전제 —
 # tests/test_k8s_submit.py 의 고정값 테스트. 3c041e0: dsync·nsync 의 --chown 이 일반 파일의 setuid/setgid 를 지운다(chown(2)
-# 규칙 — PV 목적지 결과를 PV 루트 소유자로 chown 할 때 setuid-root 실행 파일이 생기지 않게, 2026-10-26 보안 리뷰). dscan·drm 은
-# 1b93d54 와 같다.
-ARG MPIFILEUTILS_REF=3c041e059e32593b1fdf7fffdc29212dd2ae560e
+# 규칙 — PV 목적지 결과를 PV 루트 소유자로 chown 할 때 setuid-root 실행 파일이 생기지 않게, 2026-10-26 보안 리뷰).
+# ae781bd(3c041e0 의 직계 후손 — nsync·--chown 수정 포함, 2026-10-26): dscan 리포트 summary 에 total_bytes(일반 파일 st_size
+# 합, 정확값 — 세 시간 히스토그램 bytes 합과 같다)·invalid_name_entries(이름 d_name 이 엄격 UTF-8 이 아닌 항목 수 — 카운터만,
+# broken 사유·broken_paths_total 에 더하지 않는다, 사용자 결정 「카운터만 둠」)를 scan_errors 뒤에 덧붙인다(기존 키·순서 불변).
+# DMS 는 total_bytes 가 없으면(옛 이미지·저장된 리포트) 히스토그램 합으로, invalid_name_entries 가 없으면 모름(None)으로 읽는다
+# (dms_job_runner/parsers.parse_scan_counts, api/routes_scan_paths._report_total_bytes). drm 은 1b93d54 와 같다.
+ARG MPIFILEUTILS_REF=ae781bdbeb9f26a34a0cc5e6a072bfc7d4d7e89d
 ARG LWGRP_REF=v1.0.6
 ARG DTCMP_REF=v1.1.5
 ARG LIBCIRCLE_REF=v0.3

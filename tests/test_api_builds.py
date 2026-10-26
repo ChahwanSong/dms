@@ -142,6 +142,103 @@ def test_delete_terminal_build_removes_the_row(client):
     assert client.get("/api/admin/builds", headers=ADMIN).json() == []
 
 
+class _K8sFake:
+    """BuildRunner 가 쓰는 k8s 클라이언트 페어 -- delete 는 실 KubernetesClient 처럼 없는 객체(404)를 삼킨다."""
+    def __init__(self, existing=(), broken=()):
+        self.pods = set(existing)
+        self.broken = set(broken)
+        self.deleted = []
+
+    def delete(self, kind, name, namespace):
+        self.deleted.append((kind, name))
+        if name in self.broken:
+            raise RuntimeError("apiserver unavailable")
+        self.pods.discard(name)        # 없으면 조용히 -- 404 삼킴(멱등 종료 계약)
+
+
+def _real_runner(k8s):
+    from dms.build_runner import BuildRunner
+    return BuildRunner(k8s, namespace="dms", registry="r:5000", builder_image="b", timeout_seconds=60)
+
+
+def _terminal_build(client, state="Succeeded"):
+    _set_build_node(client)
+    bid = client.post("/api/admin/builds", json={"images": ["dms"]}).json()["build_id"]
+    client.app.state.repos.builds.finish(bid, state=state, log_text="ok")
+    return bid
+
+
+def test_delete_terminates_build_and_probe_pods_before_the_row(client):
+    # 2026-10-26 BACKLOG 「빌드 삭제 docstring 의 거짓 전제」: pod-gc 는 행으로 파드 이름을 만든다 -- 행을 먼저 지우면 두
+    # 파드는 시야 밖으로 영영 남았다. 삭제는 빌드·프로브 파드를 먼저 지우고(실 BuildRunner 경로) 그 다음에 행을 지운다.
+    from dms.repositories.builds import build_pod_name, build_probe_pod_name
+    bid = _terminal_build(client)
+    k8s = _K8sFake(existing={build_pod_name(bid), build_probe_pod_name(bid)})
+    client.app.state.build_runner = _real_runner(k8s)
+    r = client.delete(f"/api/admin/builds/{bid}")
+    assert r.status_code == 200 and r.json()["deleted"] == bid
+    assert k8s.deleted == [("Pod", build_pod_name(bid)), ("Pod", build_probe_pod_name(bid))]
+    assert k8s.pods == set()
+    assert client.get(f"/api/admin/builds/{bid}", headers=ADMIN).status_code == 404
+
+
+def test_delete_succeeds_when_the_pods_are_already_gone(client):
+    # 404(이미 없음)는 성공이다 -- 예전에 pod-gc 가 치웠거나 애초에 프로브 단계에서 끝난 빌드.
+    bid = _terminal_build(client, state="Failed")
+    k8s = _K8sFake()
+    client.app.state.build_runner = _real_runner(k8s)
+    assert client.delete(f"/api/admin/builds/{bid}").status_code == 200
+    assert len(k8s.deleted) == 2
+
+
+def test_delete_keeps_the_row_when_pod_cleanup_fails(client):
+    # 파드를 못 지우면 행을 남긴다(지우면 누수) -- 502 build_pod_cleanup_failed. ref 별 격리: 빌드 파드가 실패해도 프로브
+    # 파드는 지운다. 다시 누르면(apiserver 회복) 지워진다.
+    from dms.repositories.builds import build_pod_name, build_probe_pod_name
+    bid = _terminal_build(client)
+    k8s = _K8sFake(existing={build_pod_name(bid), build_probe_pod_name(bid)},
+                   broken={build_pod_name(bid)})
+    client.app.state.build_runner = _real_runner(k8s)
+    r = client.delete(f"/api/admin/builds/{bid}")
+    assert r.status_code == 502 and r.json()["detail"] == "build_pod_cleanup_failed"
+    assert k8s.pods == {build_pod_name(bid)}                     # 프로브는 지웠다
+    assert client.get(f"/api/admin/builds/{bid}", headers=ADMIN).status_code == 200
+    audit = client.app.state.repos.db.query(
+        "SELECT operation FROM audit_log WHERE mutation_class = 'build' AND target_key = :k", {"k": bid})
+    assert [a["operation"] for a in audit] == ["create"]         # 삭제 감사도 남지 않는다
+    k8s.broken.clear()
+    assert client.delete(f"/api/admin/builds/{bid}").status_code == 200
+    assert k8s.pods == set()
+
+
+def test_pod_gc_bookkeeping_never_leaves_the_api(client):
+    bid = _terminal_build(client)
+    client.app.state.repos.builds.mark_pods_gc(bid)
+    assert "pods_gc_at" not in client.get(f"/api/admin/builds/{bid}", headers=ADMIN).json()
+    assert all("pods_gc_at" not in b for b in client.get("/api/admin/builds", headers=ADMIN).json())
+
+
+def test_delete_skips_the_cluster_for_builds_pod_gc_already_collected(client):
+    # pod-gc 가 이미 치운 빌드(pods_gc_at)는 클러스터에 다시 묻지 않는다 -- apiserver 가 안 닿아도 오래된 기록은 지운다.
+    bid = _terminal_build(client)
+    client.app.state.repos.builds.mark_pods_gc(bid)
+
+    class _Down:
+        def terminate(self, ref):
+            raise AssertionError("pod-gc 가 치운 빌드인데 terminate 를 불렀다")
+
+    client.app.state.build_runner = _Down()
+    assert client.delete(f"/api/admin/builds/{bid}").status_code == 200
+
+
+def test_delete_with_the_stub_runner_still_works(client):
+    # 기본 조립(스텁 백엔드)의 StubBuildRunner 도 같은 경로를 탄다 -- 로컬·e2e 에서 삭제가 막히지 않는다.
+    from dms.build_runner import StubBuildRunner
+    assert isinstance(client.app.state.build_runner, StubBuildRunner)
+    bid = _terminal_build(client)
+    assert client.delete(f"/api/admin/builds/{bid}").status_code == 200
+
+
 def test_delete_active_build_is_409(client):
     # 활성(Pending) 빌드를 지우면 active() 가 읽는 행이 사라져 두 번째 빌드가
     # 파드가 도는 중에 시작될 수 있다 -- 종단 전에는 거절한다.

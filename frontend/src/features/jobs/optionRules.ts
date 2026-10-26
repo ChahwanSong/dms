@@ -92,4 +92,7 @@ export const PRIV_ROOT_SYNC = `${PRIV_ROOT_HEAD}, sync 는 목적지 소유·권
 // 「PV 루트 소유자」를 고르면 잰 PV 루트 소유자. 권한 비트는 둘 다 소스(서버 _auto_chown).
 export const PRIV_ROOT_SYNC_PV = `${PRIV_ROOT_HEAD}, sync 결과 소유는 목적지 스토리지 기본 소유자로·권한은 소스대로(chown·chmod 지정 시 그 값)`;
 export const PRIV_ROOT_SYNC_PV_ROOT = `${PRIV_ROOT_HEAD}, sync 결과 소유는 목적지 PV 루트 소유자로(운영자 지정)·권한은 소스대로(chown·chmod 지정 시 그 값)`;
+// 직접 경로 목적지가 PV·파일시스템 겸용(both) 스토리지(2026-10-26 사용자 결정 (4)): 경로가 그 스토리지의 PV 루트 아래면 스토리지 기본
+// 소유자, 아니면 소스 소유 그대로(서버 k8s_access.direct_dest_owner). pv 종류 스토리지의 직접 경로는 PRIV_ROOT_SYNC_PV 와 같은 말이다.
+export const PRIV_ROOT_SYNC_DIRECT_BOTH = `${PRIV_ROOT_HEAD}, sync 결과 소유는 목적지가 PV 루트 아래면 목적지 스토리지 기본 소유자로, 아니면 소스에 맞춤·권한은 소스대로(chown·chmod 지정 시 그 값)`;
 export const PRIV_USER = "실행 신원의 uid/gid(권한 그대로 적용)";
