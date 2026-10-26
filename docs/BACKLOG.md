@@ -190,8 +190,11 @@
 - 🔧 **결과 POST 의 API 메모리(슬라이스 1 열린 항목)** — `POST /api/agent/k8s-sync/runs/{id}` 를 API 프로세스에서 JSON 파싱·정규화하므로
   상한(`DMS_K8S_SYNC_MAX_BYTES` 32MiB) 가까운 본문이면 API 메모리를 수백 MB 쓸 수 있다. 일반 인벤토리는 훨씬 작다 — 큰 사이트는 상한을
   낮추거나 스트리밍 파서로.
-- 🔧 **PostgreSQL 실 DB 미실행(슬라이스 1·2)** — k8s 테이블·적용 루프·제출 판정은 sqlite 로만 테스트했다. PG 방언 차이는 코드에서
-  갈랐다(FOR UPDATE, ctid 묶음 삭제, IS NULL 분기 CAS, LIKE ESCAPE·`COALESCE(target_label, '')`). 실증(슬라이스 4)이 테스트베드 PG 로 확인.
+- ~~**PostgreSQL 실 DB 미실행(슬라이스 1·2)**~~ — **해소**(2026-10-26 사용자 「어 해결해」): k3 라이브 실증이 테스트베드 PG 로 돌았고,
+  conftest `db` 픽스처에 PG 갈래를 더해(`DMS_TEST_DB=postgresql` + `DMS_TEST_PG_URL` — 테스트마다 새 스키마) k8s 테스트 238개(저장소·실데이터
+  픽스처·맵핑·동기화·API·제출·PV 소유자·에이전트 워커)를 일회용 PostgreSQL 16 에서 통과시켰다. 그 실행이 찾은 것: PG 자리표시자 변환이 작은따옴표
+  리터럴 안의 콜론(`'v1:sealed'`)까지 `%(…)s` 로 바꿔 PG 에서만 「query parameter missing」 — `db._NAMED` 가 리터럴을 건너뛰게 고쳤다(제품 SQL
+  엔 아직 없었고 테스트의 날 SQL 3곳에서 드러남).
 - 🔧 **e2e: 계정 화면 `?create=`·SubmitJob `?pv=` 소비 흐름(슬라이스 1 포탈 열린 항목)** — 수기 게이트. (03 레이아웃 순회의 k8s 5화면
   1280·375 는 2026-10-26 추가 — 해소.)
 - ~~**PV 탐색 「이 PV로 단일 작업」 버튼을 권한 밖 PV 에서 미리 막을지**~~ — **해소**(2026-10-26): 전체 PV 권한이 없는 관리자가 자기

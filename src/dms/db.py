@@ -9,7 +9,10 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from urllib.parse import unquote, urlsplit
 
-_NAMED = re.compile(r"(?<!:):([A-Za-z_][A-Za-z0-9_]*)")
+# :name → %(name)s(psycopg). 작은따옴표 문자열 리터럴('…', '' 이스케이프 포함)은 통째로 건너뛴다 -- 리터럴 안의 콜론
+# ('v1:sealed', 'sha256:…')을 자리표시자로 바꾸면 PostgreSQL 에서만 「query parameter missing」으로 터진다(2026-10-26 PG
+# 실행에서 테스트의 날 SQL 로 드러남; 제품 SQL 엔 아직 없다). `::type` 캐스트는 앞 콜론 덕에 그대로다.
+_NAMED = re.compile(r"('(?:[^']|'')*')|(?<!:):([A-Za-z_][A-Za-z0-9_]*)")
 
 _STALE_PLAN_TEXT = "cached plan must not change result type"
 
@@ -134,7 +137,7 @@ class Database:
 
     def _adapt(self, sql: str) -> str:
         if self.dialect == "postgresql":
-            return _NAMED.sub(r"%(\1)s", sql)
+            return _NAMED.sub(lambda m: m.group(1) if m.group(1) is not None else f"%({m.group(2)})s", sql)
         return sql
 
     def _connection_is_dead(self, exc) -> bool:

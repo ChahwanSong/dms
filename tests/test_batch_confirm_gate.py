@@ -553,7 +553,7 @@ def test_a_re_previewed_child_needs_a_new_confirm(client, db):
     bid = _batch(repos, status="PreviewReady")
     _, jid = _confirmpending_child(repos, bid, 0, fp="sha256:old")
     assert repos.batches.confirm(bid, actor="ops", summary={}, expected_round=0)
-    db.execute("UPDATE data_jobs SET preview_fingerprint = 'sha256:new' WHERE job_id = :j", {"j": jid})
+    db.execute("UPDATE data_jobs SET preview_fingerprint = :fp WHERE job_id = :j", {"fp": "sha256:new", "j": jid})
     BatchOrchestrator(repos, settings=_S()).run_once()
     assert repos.batches.get(bid)["status"] == "Previewing"
     assert repos.data_jobs.get_job(jid)["state"] == "ConfirmPending"
@@ -787,7 +787,7 @@ def test_confirmed_rm_batch_executes_only_stamped_previews(client, db):
     bid = _batch(repos, op="rm", status="PreviewReady")
     _, jid = _confirmpending_child(repos, bid, 0, op="rm", fp="sha256:old")
     assert repos.batches.confirm(bid, actor="ops", summary={}, expected_round=0)
-    db.execute("UPDATE data_jobs SET preview_fingerprint = 'sha256:new' WHERE job_id = :j", {"j": jid})
+    db.execute("UPDATE data_jobs SET preview_fingerprint = :fp WHERE job_id = :j", {"fp": "sha256:new", "j": jid})
     BatchOrchestrator(repos, settings=_S()).run_once()
     assert repos.batches.get(bid)["status"] == "Previewing"
     assert repos.data_jobs.get_job(jid)["state"] == "ConfirmPending"

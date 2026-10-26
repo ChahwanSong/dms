@@ -140,7 +140,7 @@ def test_claim_skips_disabled_and_unopenable_tokens_and_orders_failover_first(re
     assert _claim(repos, token_ok=lambda enc: False) is None
     db.execute("UPDATE k8s_clusters SET token_enc = NULL")
     assert _claim(repos) is None
-    db.execute("UPDATE k8s_clusters SET token_enc = 'v1:sealed', enabled = 0")
+    db.execute("UPDATE k8s_clusters SET token_enc = :t, enabled = 0", {"t": "v1:sealed"})
     assert _claim(repos) is None
     db.execute("UPDATE k8s_clusters SET enabled = 1")
     repos.k8s.create_cluster(name="c0", api_server="https://a:6443", tls_server_name=None, ca_pem=None,

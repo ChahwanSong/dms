@@ -58,3 +58,14 @@ def test_transaction_excludes_other_threads(tmp_path):
     worker.join(timeout=5)
     rows = db.query("SELECT a FROM t ORDER BY a")
     assert rows == [{"a": "survivor"}]
+
+
+def test_postgres_placeholders_skip_quoted_literals_and_casts():
+    """:name → %(name)s 는 작은따옴표 리터럴 안의 콜론('v1:sealed')과 `::type` 캐스트를 건드리지 않는다(2026-10-26 PG 실행 --
+    리터럴을 자리표시자로 바꾸면 PostgreSQL 에서만 「query parameter missing」)."""
+    pg = Database(None, "postgresql")
+    assert pg._adapt("UPDATE t SET a = 'v1:sealed', b = :b WHERE c = :c") == \
+        "UPDATE t SET a = 'v1:sealed', b = %(b)s WHERE c = %(c)s"
+    assert pg._adapt("SELECT 'it''s :x' AS s, :y::text") == "SELECT 'it''s :x' AS s, %(y)s::text"
+    assert pg._adapt("SELECT x::int FROM t WHERE k = :k") == "SELECT x::int FROM t WHERE k = %(k)s"
+    assert Database(None, "sqlite")._adapt("SELECT :a") == "SELECT :a"

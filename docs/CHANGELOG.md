@@ -95,6 +95,14 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ✅ PostgreSQL 로 k8s 테스트 실행 + 자리표시자 리터럴 결함 — **완료**(2026-10-26)
+
+- conftest `db`: `DMS_TEST_DB=postgresql` + `DMS_TEST_PG_URL` 이면 테스트마다 새 스키마의 PostgreSQL(기본은 종전 sqlite).
+- 일회용 PostgreSQL 16(job tmp, 유닉스 소켓)에서 k8s 테스트 238개 통과 — test_repo_k8s·test_k8s_testbed_fixtures·test_k8s_rbac·test_k8s_sync·
+  test_api_k8s·test_k8s_submit·test_pv_owner_chown·test_agent_k8s_worker(+ 기존 PG 비교 test_usage_equivalence).
+- 찾은 결함: `db._NAMED`(`:name` → `%(name)s`)가 작은따옴표 리터럴 안의 콜론을 자리표시자로 바꿔 PG 에서만 실패 — 리터럴(`''` 이스케이프 포함)을
+  통째로 건너뛰게(`::type` 캐스트는 종전대로). 테스트의 날 SQL 3곳(`'v1:sealed'`·`'v1:AAAA'`·`'sha256:new'`)은 파라미터로.
+
 ### ✅ dms-k8s 결정 항목 반영 — namespaceAdmin 맵핑·동기화 실패는 경고만·배치 PV 검색·scan 특권 운영자·숫자 아이디·PV 버튼 — **구현**(2026-10-26, 라이브 실증은 d3)
 
 사용자가 BACKLOG 설계 §10 결정 대기 항목을 정했다(BACKLOG 「설계 §10 결정」).

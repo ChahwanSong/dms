@@ -188,7 +188,7 @@ def test_token_rules_and_no_leak(admin, repos, db):
                        db.query("SELECT before_state, after_state FROM audit_log")])
     assert TOKEN not in blob and wrapped not in blob and stored not in blob
     # 열 수 없는 봉인(세션 시크릿 교체) → token unreadable
-    db.execute("UPDATE k8s_clusters SET token_enc = 'v1:AAAA'")
+    db.execute("UPDATE k8s_clusters SET token_enc = :t", {"t": "v1:AAAA"})
     c = admin.get("/api/admin/k8s/clusters").json()[0]
     assert c["token"] == "unreadable" and c["status"] == "token_unreadable"
     assert c["status_reason"] == "k8s_sync_token_unreadable"
