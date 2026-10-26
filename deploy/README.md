@@ -1438,7 +1438,7 @@ controller, 잡 이미지) 뒤 `deploy/overlays/testbed-k8s` 의
   이 만든 목적지 디렉터리 아래를 다른 노드의 rank 가 음성 dentry 캐시 때문에 ENOENT 로 실패했다(k3 실증 — 기본 `lookupcache=all`).
   remount 로는 못 바꾼다(umount → mount). CephFS·GPFS 는 캐시가 일관돼 해당 없다.
 - **PV 스토리지를 노드마다 따로 마운트해도 된다** — 두 스토리지를 함께 마운트한 노드가 없으면 PV 로 보내는 sync 도 nsync 로
-  돈다(2026-10-26, d1 — 잡 이미지의 dms-mpifileutils 8cd72f3 이 목적지 안 링크를 따라가지 않는다. 그 전 k1~k4 는
+  돈다(2026-10-26, d2 — 잡 이미지의 dms-mpifileutils 2a10a18 이 목적지 안 링크를 따라가지 않는다. 그 전 k1~k4 는
   `pv_sync_needs_shared_node` 로 막았다). 함께 마운트한 노드가 있으면 종전대로 dsync 가 우선이다.
 - **가입 인증 메일이 신원 증명이다** — 권한이 「DMS 계정 아이디 == RoleBinding 의 ID」로 묶이므로, 메일러가 stub(코드 에코)이거나
   인증이 꺼져 있으면 아직 계정이 없는 사람의 아이디로 누구나 먼저 가입해 그 사람의 PV 권한을 가져간다. 운영 사이트는 관리 →

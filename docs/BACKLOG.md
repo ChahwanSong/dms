@@ -189,9 +189,9 @@
   회수됐거나 PV 가 지워졌을 수 있습니다」로 막는다(설계대로 — 잘못 실행되지 않음). 버튼을 그 관리자의 맵핑(access)으로 비활성화하거나
   문구를 「이 PV 에 대한 권한이 없습니다」로 가르는 것이 후보.
 - ~~**nsync 목적지 걷기가 링크를 따라간다(dms-mpifileutils, 2026-10-26 2차 보안 리뷰)**~~ — **해소**(2026-10-26, d1 — k8s 테스트베드 dN 관례 첫 태그, CHANGELOG
-  「nsync 목적지 링크 추종 수정 반영」): chahwansong/mpifileutils `5958e4e`·`8cd72f3` 이 목적지 루트 아래를 루트 fd 기준 성분별
+  「nsync 목적지 링크 추종 수정 반영」): chahwansong/mpifileutils `5958e4e`·`8cd72f3`(·`2a10a18` 새 목적지 루트) 이 목적지 루트 아래를 루트 fd 기준 성분별
   `openat(O_NOFOLLOW)` 로 걷게 고쳤고(파일 생성·삭제·심링크·chmod/chown/utimes 도 그 fd 기준), `Dockerfile.mpifileutils` 의
-  `MPIFILEUTILS_REF` 를 8cd72f3 으로 올린 뒤 planner 가드(`check_nsync_destination`·`pv_sync_needs_shared_node`)를 풀었다 — PV 스토리지를
+  `MPIFILEUTILS_REF` 를 2a10a18 로 올린 뒤 planner 가드(`check_nsync_destination`·`pv_sync_needs_shared_node`)를 풀었다 — PV 스토리지를
   노드마다 따로 마운트한 사이트의 PV→PV sync 도 nsync 로 돈다. 비 PV root nsync(ldap 모드 배치 등)도 같은 수정을 받는다. 고정값을
   옛 커밋으로 되돌리면 `tests/test_k8s_submit.py` 의 고정값 테스트가 빨간불이다.
 - 📝 **PV 봉쇄의 남는 창** — 러너·rank 재확인 뒤 도구가 경로를 열 때까지의 창은 rm 봉쇄와 같다(§4 「rm 대상 봉쇄의 남은 TOCTOU 창」과 같은 성격 —

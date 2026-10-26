@@ -19,10 +19,11 @@ FROM debian:bookworm AS build
 ARG MPIFILEUTILS_REPO=https://github.com/chahwansong/mpifileutils.git
 # 1b93d54: dscan top-K 수집 제거·스트리밍 재작성, --batch-files/--broken-limit 신설
 # (리포트에 broken_paths_total/limit 추가, top_k/oldest 키 삭제).
-# 8cd72f3(5958e4e 포함, 2026-10-26): nsync 목적지 쪽이 목적지 루트 아래 링크를 따라가지 않는다 — 상위 디렉터리를 루트 fd 기준
-# 성분별 openat(O_NOFOLLOW)로 걷고 파일 생성·삭제·메타데이터도 그 fd 기준(dms-k8s 의 root nsync PV 목적지 허용의 전제 —
-# tests/test_k8s_submit.py 의 고정값 테스트). dscan·dsync·drm 은 1b93d54 와 같다(nsync.c 만 바뀜).
-ARG MPIFILEUTILS_REF=8cd72f30a7bfb075795b2128f4a3dbb74c8b31f8
+# 2a10a18(5958e4e·8cd72f3 포함, 2026-10-26): nsync 목적지 쪽이 목적지 루트 아래 링크를 따라가지 않는다 — 상위 디렉터리를 루트
+# fd 기준 성분별 openat(O_NOFOLLOW)로 걷고 파일 생성·삭제·메타데이터도 그 fd 기준. 2a10a18 은 없는 목적지 루트를 먼저 만든다
+# (8cd72f3 은 새 목적지로의 sync 가 전부 실패 — d1 라이브 실증에서 발견). dms-k8s 의 root nsync PV 목적지 허용의 전제 —
+# tests/test_k8s_submit.py 의 고정값 테스트. dscan·dsync·drm 은 1b93d54 와 같다(nsync.c 만 바뀜).
+ARG MPIFILEUTILS_REF=2a10a18269f1879d91f750106a4406218853bb6f
 ARG LWGRP_REF=v1.0.6
 ARG DTCMP_REF=v1.1.5
 ARG LIBCIRCLE_REF=v0.3

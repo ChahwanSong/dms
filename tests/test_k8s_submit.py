@@ -683,7 +683,7 @@ def test_unrestricted_request_matches_can_run_as_root(world):
     assert k8s_access.unrestricted_request({**row, "requester_id": "ghost"}, settings=s, repos=world) is False
 
 
-# --- root nsync 의 PV 목적지(2026-10-26 — 2차 보안 리뷰로 막았다가 dms-mpifileutils 8cd72f3 로 풀었다) ----------------------
+# --- root nsync 의 PV 목적지(2026-10-26 — 2차 보안 리뷰로 막았다가 dms-mpifileutils 2a10a18 로 풀었다) ----------------------
 
 def _split_mounts(repos):
     """nfs·cephfs 는 k8s-w1 에만, gpfs 는 k8s-w2 에만 -- 두 스토리지를 함께 마운트한 노드가 없어 nsync 가 골라진다."""
@@ -699,7 +699,7 @@ def _split_mounts(repos):
 def test_root_nsync_into_a_pv_destination_is_planned(kclient, world):
     """두 스토리지를 함께 마운트한 노드가 없으면 PV 목적지 sync 도 nsync 로 계획된다(2026-10-26). 한때 `pv_sync_needs_shared_node`
     로 막았던 경로다 -- nsync 목적지 쪽이 상위 디렉터리·파일을 링크를 따라 열어 목적지 PV 안의 `sub → 남의 PV` 링크 너머에 root
-    로 썼다. dms-mpifileutils 8cd72f3 이 목적지 루트 아래를 성분별 O_NOFOLLOW 로 걷게 고쳐 가드를 풀었다(아래 REF 고정 테스트)."""
+    로 썼다. dms-mpifileutils 2a10a18 이 목적지 루트 아래를 성분별 O_NOFOLLOW 로 걷게 고쳐 가드를 풀었다(아래 REF 고정 테스트)."""
     repos = world
     _split_mounts(repos)
     _login(kclient, "alice")
@@ -721,12 +721,16 @@ def test_root_nsync_into_a_pv_destination_is_planned(kclient, world):
 
 # 목적지 링크를 따라가던 nsync 의 고정값들 -- 위 계획이 안전한 전제는 잡 이미지의 nsync 가 고쳐진 커밋 이후라는 것이다.
 _NSYNC_FOLLOWS_DST_LINKS = {"faefdaf05b8da9386671c2cee00db75efc0e9cd7", "1b93d5404d078c55b46194cdd02732417ed856dc"}
+# 링크는 따라가지 않지만 없는 목적지 루트를 못 만들어 새 목적지로의 sync 가 전부 실패하던 고정값(d1 라이브 실증 -- 2a10a18 이 고침).
+_NSYNC_BREAKS_NEW_DESTINATIONS = {"8cd72f30a7bfb075795b2128f4a3dbb74c8b31f8"}
 
 
 def test_job_image_pins_an_nsync_that_does_not_follow_destination_links():
     """root nsync 의 PV 목적지를 허용하는 것(planner 에 가드 없음)과 잡 이미지의 mpifileutils 고정값은 짝이다 -- 고정값을 옛 커밋으로
-    되돌리면 그 짝이 깨진다. 새 커밋으로 올릴 때는 그 커밋이 nsync 목적지 걷기(5958e4e·8cd72f3)를 포함하는지 확인한다."""
+    되돌리면 그 짝이 깨진다. 새 커밋으로 올릴 때는 그 커밋이 nsync 목적지 걷기(5958e4e·8cd72f3)와 새 목적지 루트 만들기(2a10a18)를
+    포함하는지 확인한다."""
     text = (Path(__file__).resolve().parent.parent / "deploy" / "docker" / "Dockerfile.mpifileutils").read_text()
     refs = re.findall(r"^ARG MPIFILEUTILS_REF=([0-9a-f]{40})$", text, flags=re.M)
     assert len(refs) == 1, refs
     assert refs[0] not in _NSYNC_FOLLOWS_DST_LINKS
+    assert refs[0] not in _NSYNC_BREAKS_NEW_DESTINATIONS
