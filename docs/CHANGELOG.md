@@ -95,7 +95,7 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
-### ✅ LDAP 코드 삭제·정리(dms-k8s) — k8s 신원 모드 전용 — **완료**(2026-10-26, 테스트베드 미적용)
+### ✅ LDAP 코드 삭제·정리(dms-k8s) — k8s 신원 모드 전용 — **완료·실증**(2026-10-26, d4)
 
 사용자 결정 (d) 「LDAP 코드 삭제 및 정리」(BACKLOG 설계 §10). dms-k8s 는 2026-10-21 부터 LDAP 을 쓰지 않았지만 코드에는 ldap 모드
 (기본값)·리졸버·노드 신원 프로브·nslcd·보조 그룹이 그대로 있었다. 일곱 커밋, 합계 약 +2.2k / −11.0k 줄(브랜치 `k8s/rbac-pv`, push 안 함):
@@ -144,8 +144,28 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
 `identities`·`directory` 는 읽지 않는다(저장만). dms-ssc 의 LDAP 라인과 `deploy/testbed/dms-shared-fs.yml`·`docs/history/` 는 손대지 않았다.
 
 검증: 백엔드 전체(병렬 6분할) 통과 — 단계별 3,821 → 3,628 → 3,580 → 3,534(9 skip; 지운 테스트만큼 감소), vitest 101 파일 1,483 통과,
-`tsc -b` 통과, e2e 27 통과(실 브라우저). 테스트베드(dmsk8s)에는 적용하지 않았다 — 적용하면 에이전트 명령·ConfigMap 키가 바뀌므로 이미지와
-함께 다음 태그에서(라이브 실증 필요).
+`tsc -b` 통과, e2e 27 통과(실 브라우저). 리뷰 반영 뒤 최종(46c1264): 백엔드 전체 3,533 통과 + 수정한 픽스처 파일 43 통과(전체 실행이 찾은
+회귀 — `test_api_k8s` 의 「바인딩 없는 사용자」 계정 이름 `nobody` 가 예약어에 걸림 → `nomap.user`), 부하 플레이크 `test_request_purger` 의
+1초 경계 단언 수정, PG 모드 200 통과, vitest 1,484·tsc·e2e 27 통과(부하 중 한 번 SQLite 잠금으로 하네스 컨트롤러가 죽어 1건 실패 → 단독 재실행
+통과).
+
+**테스트베드 적용 — d4**(2026-10-26, 소스 46c1264): 포탈 빌드 d4(이미지 3종 + 잡 이미지, 195초) → 릴리스(agent → job-image·controller·api,
+라이브 = 동봉 d4) → guard(변경 없음) → apply -k(렌더 차이는 ConfigMap 키 3개 삭제뿐 — `DMS_IDENTITY_PROBE_TTL_SECONDS`·
+`DMS_IDENTITY_SUPPLEMENTARY_GROUPS`·`DMS_PLANNER_IDENTITY_GRACE_SECONDS`; 에이전트 `dms agent`·LDAP env 삭제는 d3 오버레이 패치로 이미 라이브)
+→ migrate → rollout restart api·controller. 회귀 실증(전부 통과):
+- **기동·보고**: 파드 전부 d4·재시작 0·로그 오류 0, ConfigMap 의 신원 키는 `DMS_IDENTITY_MODE` 하나, 두 노드 보고 신선(보고에 신원·디렉터리
+  키 없음), 두 클러스터 첫 동기화 ok(06:09:20), 노드 화면 신원 열 없음, `verify.sh --context dmsk8s` PASS 4.
+- **토큰 컨펌 거부**: alice 의 클러스터 간 PV→PV sync(dmsk8s team-a datasets → dmsk8s2 lab-x results, dsync)가 ConfirmPending — 공유 토큰
+  컨펌 403 `confirm_session_required`·잡 그대로 → alice 세션 컨펌 200 → Succeeded 12항목. 결과 12항목 전부 1500:1500(PV 루트), setuid
+  4755 → 755·setgid 파일 2755 → 755·setgid 디렉터리 2775 유지, 내용 일치(d3 와 같음).
+- **rm·scan 게이트**: alice PV rm(drm) Succeeded(대상만 삭제, PV 루트·marker 유지), alice scan 403 `scan_unrestricted_only`, mason 의
+  dmsk8s2 lab-y scan Succeeded.
+- **배치 자식(IF_ELIGIBLE 우선)**: mason sync 배치 1항목(직접 경로) Previewing → PreviewReady → 배치 확인 → Completed, 자식 Succeeded·내용
+  일치(직접 경로라 소스 소유 보존 — BACKLOG 의 열린 질문).
+- **시스템 계정명**: 가입 인증번호 `daemon`·`nobody` 422 `username_reserved`, `root.test` 200. 라이브 계정 5개 중 예약어 0.
+- **실 Chrome**: alice 요청 상세 「목적지 PV 소유자 1500:1500(PV 루트 기준)」, mason 「권한 기준 사용자」에 `daemon` → 형식 안내·`alice` → 안내
+  없음, 노드·PV 탐색·사용자 권한·k8s 연동·배치 생성·계정·denylist·단일 작업(375 포함) 9화면 가로 넘침 0px·「LDAP/보조 그룹」 문구 0·콘솔 오류 0.
+실증 데이터는 지웠다(PV 루트 소유는 픽스처 값 그대로).
 
 ### ✅ d3 라이브 실증 — PV 소유자 chown·setuid·namespaceAdmin·scan·경고·숫자 아이디·배치 PV·멀티 클러스터 — **완료·실증**(2026-10-26, d3)
 
