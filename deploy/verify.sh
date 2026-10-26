@@ -3,9 +3,27 @@
 # 설치 에이전트가 kubectl 을 여러 번 탐색하는 대신 한 번 돌려 컴팩트한 판정을
 # 읽게 한다. rc 는 FAIL 0 일 때만 0.
 #
-# 사용:  PORTAL_DOMAIN=dms.corp.example CACERT=/path/ca.crt sh deploy/verify.sh
+# 사용:  PORTAL_DOMAIN=dms.corp.example CACERT=/path/ca.crt sh deploy/verify.sh [--context <ctx>]
 #   PORTAL_DOMAIN 없으면 HTTPS 검사는 건너뛴다(클러스터 워크로드만 검증).
 set -u
+# --context(2026-10-26): 대상 클러스터를 현재 컨텍스트 대신 이름으로 고른다(guard-images.sh 와 같은 문법 — --context <ctx> /
+# --context=<ctx> / 환경변수 KUBE_CONTEXT, 플래그가 이긴다). 두 테스트베드가 같은 네임스페이스라 current-context 에 기대지 않는다.
+CTX="${KUBE_CONTEXT:-}"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --context) [ $# -ge 2 ] && [ -n "$2" ] || { echo "usage: $0 [--context <ctx>]" >&2; exit 2; }; CTX="$2"; shift ;;
+    --context=*) CTX="${1#--context=}"; [ -n "$CTX" ] || { echo "usage: $0 [--context <ctx>]" >&2; exit 2; } ;;
+    *) echo "usage: $0 [--context <ctx>]" >&2; exit 2 ;;
+  esac
+  shift
+done
+if [ -n "$CTX" ]; then
+  command kubectl config get-contexts "$CTX" >/dev/null 2>&1 \
+    || { echo "컨텍스트 '$CTX' 가 kubeconfig 에 없습니다" >&2; exit 2; }
+  # 이 스크립트의 모든 kubectl 호출이 그 컨텍스트로 간다(호출 지점은 그대로).
+  kubectl() { command kubectl --context "$CTX" "$@"; }
+fi
+
 NS="${DMS_NS:-dms}"
 PORTAL="${PORTAL_DOMAIN:-}"
 CACERT="${CACERT:-}"

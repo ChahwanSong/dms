@@ -9,6 +9,17 @@
 #
 # 성공 시 마지막 줄에 `RENDERED: <경로>` 를 찍는다(install.sh 가 파싱).
 set -eu
+# --context(2026-10-26): 'live' 태그를 읽을 클러스터(guard-images.sh 와 같은 문법 — --context <ctx> / --context=<ctx> /
+# KUBE_CONTEXT, 플래그가 이긴다). 명시 태그만이면 kubectl 을 부르지 않는다(컨텍스트 존재 확인도 'live' 일 때만).
+CTX="${KUBE_CONTEXT:-}"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --context) [ $# -ge 2 ] && [ -n "$2" ] || { echo "usage: $0 [--context <ctx>]" >&2; exit 2; }; CTX="$2"; shift ;;
+    --context=*) CTX="${1#--context=}"; [ -n "$CTX" ] || { echo "usage: $0 [--context <ctx>]" >&2; exit 2; } ;;
+    *) echo "usage: $0 [--context <ctx>]" >&2; exit 2 ;;
+  esac
+  shift
+done
 HERE=$(CDPATH= cd "$(dirname "$0")" && pwd)     # deploy/overlays/prod
 OUT="$HERE/../.prod-rendered"                    # deploy/overlays/.prod-rendered
 VALS="${VALUES_ENV:-$HERE/values.env}"
@@ -30,7 +41,13 @@ NS="${DMS_NS:-dms}"
 # 되는 경로가 없다; 적대적 태그 주입 실측으로 확인). 태그당 if 블록이라 간접 변수 접근도 필요 없다.
 _live_tag() {   # $1=사람이 읽는 이름  $2..=kubectl get 인자(이미지 ref 하나를 출력)
   _human=$1; shift
-  _img=$(kubectl -n "$NS" get "$@" 2>/dev/null || true)
+  if [ -n "$CTX" ]; then
+    command kubectl config get-contexts "$CTX" >/dev/null 2>&1 \
+      || { echo "FAIL: 컨텍스트 '$CTX' 가 kubeconfig 에 없습니다" >&2; return 1; }
+    _img=$(kubectl --context "$CTX" -n "$NS" get "$@" 2>/dev/null || true)
+  else
+    _img=$(kubectl -n "$NS" get "$@" 2>/dev/null || true)
+  fi
   case "$_img" in
     "") echo "FAIL: $_human 태그가 'live' 인데 클러스터에서 라이브 이미지를 읽지 못했습니다" >&2
         echo "  (첫 설치면 명시 태그(예: d118)를 쓰세요; 아니면 kubectl 접근과 네임스페이스 '$NS' 를 확인)" >&2

@@ -2,7 +2,8 @@
 
 > **프로덕션 설치는 이 파일(716줄, 테스트베드 런북)을 읽지 마세요.**
 > `deploy/overlays/prod/README.md` **하나**만 보면 됩니다 — 프리플라이트 →
-> `values.env` 채우기 → 시크릿/TLS → `deploy/install.sh` → `deploy/verify.sh`.
+> `values.env` 채우기 → 시크릿/TLS → `deploy/install.sh` → `deploy/verify.sh`(클러스터가 여럿이면 `--context <ctx>` —
+> `preflight-cluster.sh`·`verify.sh`·`overlays/prod/render.sh` 의 live 태그 해석이 받는다).
 > 이 문서는 테스트베드(개별 파일 apply)·시나리오·HTTPS 원리의 상세 참고용입니다.
 
 Deploys the clean-slate DMS control plane (`dms api` / `dms controller` /
@@ -1337,9 +1338,9 @@ ConfigMap 의 LDAP 키 7개 null 삭제, 에이전트는 `command: ["dms"] args:
 
 ```bash
 kubectl --context dmsk8s get nodes -o wide
-# 컨텍스트 인자가 없는 점검 스크립트는 그 컨텍스트만 담은 kubeconfig 로 돌린다(current-context 를 바꾸지 않는다):
-umask 077; kubectl config view --minify --flatten --context dmsk8s > ~/.kube/dmsk8s.only
-KUBECONFIG=~/.kube/dmsk8s.only PORTAL_VIP=10.20.20.101 sh deploy/preflight-cluster.sh
+# 점검 스크립트도 --context 로 대상을 고른다(2026-10-26 — current-context 를 바꾸지 않는다; KUBE_CONTEXT 환경변수도 같다):
+PORTAL_VIP=10.20.20.101 sh deploy/preflight-cluster.sh --context dmsk8s
+sh deploy/verify.sh --context dmsk8s
 ```
 
 ### 13-2. 레지스트리 시드 `d0`

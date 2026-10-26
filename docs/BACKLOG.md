@@ -227,12 +227,12 @@
   테스트베드도 `dN` 을 쓴다(d1 = 첫 태그). 제안(`BuildForm.nextTagSuggestion`)은 그 사이트의 라이브 태그·자기 레지스트리·빌드 이력의
   `dN` 최댓값 + 1 이라 코드는 그대로다 — git 의 오버레이 태그를 읽지 않으므로 프로덕션도 자기 번호의 다음을 제안한다. 「지배적 접두를
   따라 제안」 처방은 하지 않는다(프로덕션 제안이 접두 판정에 흔들린다).
-- 🔧 **점검 스크립트에 `--context` 가 없다** — `deploy/preflight-cluster.sh`·`deploy/verify.sh`·`deploy/overlays/prod/render.sh`
-  (`live` 해석)는 현재 컨텍스트로 붙는다. 테스트베드는 그 컨텍스트만 담은 kubeconfig(`kubectl config view --minify --flatten
-  --context dmsk8s`)를 `KUBECONFIG` 로 준다(`deploy/README.md` §13-1). 가드(`guard-images.sh`)만 `--context`·`kube-context`
-  대조가 있다. 또 가드는 뒤따르는 `kubectl apply` 를 통제하지 못한다 — 오버레이와 컨텍스트를 묶어 delete migrate → 가드 → apply →
-  wait → rollout 을 한 번에 하는 래퍼(`apply-overlay.sh <overlay>`)가 후보.
-
+- ~~**점검 스크립트에 `--context` 가 없다**~~ — **해소**(2026-10-26 사용자 지시): `deploy/preflight-cluster.sh`·`deploy/verify.sh`·
+  `deploy/overlays/prod/render.sh`(live 태그 해석)가 guard-images.sh 와 같은 문법(`--context <ctx>`/`--context=<ctx>`/`KUBE_CONTEXT`,
+  플래그 우선, 없는 컨텍스트 exit 2)을 받는다 — 모든 kubectl 호출이 그 컨텍스트로 간다(`tests/test_check_scripts_context.py`, 테스트베드
+  실측: current-context `dms` 인 채 `--context dmsk8s` 로 k8s 테스트베드 점검). 남은 것: `install.sh` 는 여전히 현재 컨텍스트로 kubectl 을
+  부르고 render·가드에 컨텍스트를 넘기지 않는다(가드가 KUBE_CONTEXT ≠ 현재 컨텍스트면 exit 4 로 막는다), delete migrate → 가드 → apply →
+  wait → rollout 을 한 번에 하는 래퍼(`apply-overlay.sh <overlay>`)는 후보.
 - 🔧 **호스트 콜드부팅 리허설 미실증**(2026-10-22) — VM 단독 재부팅(k8s-w1·k8s-w2)과 hostnet 유닛 재시작은 실증했고, 그 과정에서
   testbed 부팅 가드의 두 겹 마운트 경합을 고쳤다. 호스트 전체 재부팅(8 VM 동시 기동, pkg-01 Ceph 늦게 올라옴)은 세션에서 할 수
   없다 — 다음 호스트 재부팅 뒤 testbed `make post-boot-check WAIT=900` 이 그 실증이다(testbed ARCHITECTURE §18).

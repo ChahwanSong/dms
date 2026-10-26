@@ -3,12 +3,29 @@
 # 만 쓰고 클러스터를 절대 변경하지 않는다. 앞선 검토(Volcano/MetalLB/ingress-nginx
 # 가 이미 설치된 경우의 확인 항목)를 자동 점검해 PASS/WARN/FAIL 로 보고한다.
 #
-# 사용:  sh deploy/preflight-cluster.sh
-# 전제:  대상 클러스터를 가리키는 kubeconfig (kubectl 이 현재 컨텍스트로 붙는 곳).
+# 사용:  sh deploy/preflight-cluster.sh [--context <ctx>]
+# 전제:  대상 클러스터를 가리키는 kubeconfig (--context 가 없으면 kubectl 의 현재 컨텍스트).
 #
 # 판정: [PASS] 그대로 진행 가능 · [WARN] 조정/확인 필요(치명 아님) · [FAIL] 막힘
 #       [INFO] 참고 · [MANUAL] 스크립트로 못 보는 항목(노드 접근 필요 등)
 set -u
+# --context(2026-10-26): 대상 클러스터를 현재 컨텍스트 대신 이름으로 고른다(guard-images.sh 와 같은 문법 — --context <ctx> /
+# --context=<ctx> / 환경변수 KUBE_CONTEXT, 플래그가 이긴다). 두 테스트베드가 같은 네임스페이스라 current-context 에 기대지 않는다.
+CTX="${KUBE_CONTEXT:-}"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --context) [ $# -ge 2 ] && [ -n "$2" ] || { echo "usage: $0 [--context <ctx>]" >&2; exit 2; }; CTX="$2"; shift ;;
+    --context=*) CTX="${1#--context=}"; [ -n "$CTX" ] || { echo "usage: $0 [--context <ctx>]" >&2; exit 2; } ;;
+    *) echo "usage: $0 [--context <ctx>]" >&2; exit 2 ;;
+  esac
+  shift
+done
+if [ -n "$CTX" ]; then
+  command kubectl config get-contexts "$CTX" >/dev/null 2>&1 \
+    || { echo "컨텍스트 '$CTX' 가 kubeconfig 에 없습니다" >&2; exit 2; }
+  # 이 스크립트의 모든 kubectl 호출이 그 컨텍스트로 간다(호출 지점은 그대로).
+  kubectl() { command kubectl --context "$CTX" "$@"; }
+fi
 
 # --- 채워두면 더 정확히 검사(비워도 동작) ---
 DMS_NS="${DMS_NS:-dms}"
@@ -28,8 +45,9 @@ crd(){ kubectl get crd "$1" >/dev/null 2>&1; }
 kubectl version >/dev/null 2>&1 || { echo "kubectl 이 클러스터에 붙지 못했습니다 -- kubeconfig 확인"; exit 2; }
 
 H "0. 클러스터 / 컨텍스트"
-CTX=$(kubectl config current-context 2>/dev/null || echo "?")
-I "current-context: $CTX"
+# --context 를 주면 그 이름을 그대로 보인다(셰임 아래 `config current-context` 는 kubeconfig 의 현재 값을 낸다 — 실측).
+if [ -n "$CTX" ]; then I "context: $CTX (--context)"
+else I "current-context: $(kubectl config current-context 2>/dev/null || echo "?")"; fi
 SVER=$(kubectl version -o json 2>/dev/null | python3 -c "import json,sys;print(json.load(sys.stdin)['serverVersion']['gitVersion'])" 2>/dev/null || echo "?")
 I "server version: $SVER  (이미지 kubectl 은 v1.34.x)"
 case "$SVER" in v1.3[0-9]*|v1.4*) P "k8s 버전 호환 범위";; *) W "k8s 버전 $SVER -- 1.30+ 권장, CRD apiVersion 확인 필요";; esac
