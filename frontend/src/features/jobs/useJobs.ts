@@ -212,17 +212,23 @@ export function useDeleteRequests(opts: { onDeleted?: (r: DeleteRequestsResult) 
     mutationFn: (sel: DeleteSelection) =>
       apiSend<DeleteRequestsResult>("POST", "/api/admin/requests:delete", sel),
     onSuccess: (r) => {
+      const drop = () => {
+        for (const d of r.deleted) {
+          dropRequest(d.request_id);
+          d.job_ids.forEach(dropJob);
+        }
+        // 배치 단위: 배치 상세(지워져 404)와 자식 전부의 요청·잡 캐시. 옛 응답(키 없음)은 빈 목록이다.
+        for (const b of r.deleted_batches ?? []) {
+          qc.removeQueries({ queryKey: ["batch", b.batch_id] });
+          b.request_ids.forEach(dropRequest);
+          b.job_ids.forEach(dropJob);
+        }
+      };
       opts.onDeleted?.(r);
-      for (const d of r.deleted) {
-        dropRequest(d.request_id);
-        d.job_ids.forEach(dropJob);
-      }
-      // 배치 단위: 배치 상세(지워져 404)와 자식 전부의 요청·잡 캐시. 옛 응답(키 없음)은 빈 목록이다.
-      for (const b of r.deleted_batches ?? []) {
-        qc.removeQueries({ queryKey: ["batch", b.batch_id] });
-        b.request_ids.forEach(dropRequest);
-        b.job_ids.forEach(dropJob);
-      }
+      // onDeleted 가 화면을 옮기면(요청 상세) 제거는 그 렌더 **뒤**에 -- 같은 틱에 지우면 아직 붙어 있는 상세 화면의 쿼리가
+      // 다시 렌더되며 지운 요청·잡을 재조회해 404 두 건이 콘솔에 남았다(d6 실 Chrome 실증).
+      if (opts.onDeleted) setTimeout(drop, 0);
+      else drop();
     },
     onSettled: () => Promise.all(
       DELETE_REQUESTS_INVALIDATES.map((k) => qc.invalidateQueries({ queryKey: [...k] }))),
