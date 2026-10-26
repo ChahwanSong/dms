@@ -19,7 +19,11 @@ FROM debian:bookworm AS build
 ARG MPIFILEUTILS_REPO=https://github.com/chahwansong/mpifileutils.git
 # 1b93d54: dscan top-K 수집 제거·스트리밍 재작성, --batch-files/--broken-limit 신설
 # (리포트에 broken_paths_total/limit 추가, top_k/oldest 키 삭제).
-ARG MPIFILEUTILS_REF=1b93d5404d078c55b46194cdd02732417ed856dc
+# 5958e4e(2026-10-26, 포크 main HEAD): nsync 가 목적지 루트 아래 심링크를 따라가지 않는다 -- 목적지 변경을 전부 루트
+# dirfd + 구성요소마다 O_NOFOLLOW(openat/mkdirat/unlinkat/fchownat…)로. 타입이 바뀐 항목(심링크 → 디렉터리)의 「지우고
+# 만들고 자식 복사」가 다른 rank·배치로 갈려 순서 없이 돌 때 옛 경로 문자열 생성이 남은 심링크를 타고 목적지 밖에 썼다
+# (포크 실측 --batch-files 1 에서 200 중 130). nsync.c 만 바뀜 -- 옵션·출력(Planned actions 등 DMS 파서가 읽는 줄)은 같다.
+ARG MPIFILEUTILS_REF=5958e4eeeadce52cb6498cb0051ed967110930bd
 ARG LWGRP_REF=v1.0.6
 ARG DTCMP_REF=v1.1.5
 ARG LIBCIRCLE_REF=v0.3

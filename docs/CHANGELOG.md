@@ -95,6 +95,16 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ⏳ mpifileutils 고정 커밋 1b93d54 → 5958e4e(포크 main HEAD) — **커밋, 이미지 미빌드**(2026-10-26, dms-ssc)
+
+사용자 요청: 「Mpifileutils 태그 최신걸로 업데이트해서 푸시해줘.」 포크(chahwansong/mpifileutils)에는 태그가 없어 커밋 SHA 로 고정한다
+(`deploy/docker/Dockerfile.mpifileutils` `MPIFILEUTILS_REF` — 포탈 빌드는 이 값을 넘기지 않아 늘 Dockerfile 기본값). 5958e4e 는
+1b93d54 의 바로 다음 한 커밋이다: nsync 가 목적지 루트 아래 심링크를 따라가지 않는다(목적지 변경을 전부 루트 dirfd + 구성요소마다
+O_NOFOLLOW — 타입이 바뀐 항목의 지우기·만들기·복사가 다른 rank·배치로 갈려 남은 심링크를 타고 목적지 밖에 쓰던 경합, 포크 실측
+`--batch-files 1` 에서 200 중 130). `nsync.c` 만 바뀌고 옵션·출력(DMS 파서가 읽는 Planned actions 등)은 같다 — dscan·dsync·drm
+은 그대로. 반영하려면 ssc 포탈에서 `dms-mpifileutils`·`dms`·`dms-agent` 를 같은 새 태그로 빌드(에이전트가 같은 태그의 mpifileutils
+를 FROM)하고 에이전트·잡 이미지 릴리스.
+
 ### ✅ 전체 작업 검색(배치 이름·경로·ID·요청자, 부분 일치·낱말 OR) + 열 폭 재조정 — **완료·실증**(2026-10-25, d186, dms-ssc)
 
 사용자 요청: 「포탈의 전체 작업에서 지금 요청자 아이디로만 필터를 걸수 있는데 배치 이름, 대상 (경로) 등으로도 검색 및 필터링 할수
