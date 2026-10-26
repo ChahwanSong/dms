@@ -40,7 +40,7 @@ FP = "sha256:preview"
 
 def _k8s_settings(**kw):
     base = dict(database_url="unused", shared_token="tok-shared", admin_token="tok-admin", session_secret="sess-secret",
-                account_verification_required=False, identity_mode="k8s",
+                account_verification_required=False,
                 user_allowed_operations=frozenset({"sync", "scan", "rm"}),
                 privileged_requesters=frozenset({"root", "admin", "ops"}))
     base.update(kw)
@@ -129,7 +129,7 @@ def _rm(pv=None, target="x", **extra):
 
 
 def _plan(repos, settings=None):
-    return Planner(repos, None, settings=settings or _k8s_settings()).run_once()
+    return Planner(repos, settings=settings or _k8s_settings()).run_once()
 
 
 def _to_confirm_pending(repos, rid):
@@ -151,16 +151,20 @@ _ENV = {"DMS_DATABASE_URL": "postgresql://u:p@h/d", "DMS_SHARED_TOKEN": "s", "DM
         "DMS_SESSION_SECRET": "x"}
 
 
-def test_identity_mode_defaults_to_ldap_and_accepts_k8s():
-    assert Settings.from_env(_ENV).identity_mode == "ldap"
-    assert Settings.from_env({**_ENV, "DMS_IDENTITY_MODE": "k8s"}).identity_mode == "k8s"
+def test_identity_mode_is_k8s_only():
+    # dms-k8s 는 k8s 신원 모드 전용(2026-10-26) -- 값이 없거나 k8s 면 기동한다.
+    for env in ({}, {"DMS_IDENTITY_MODE": "k8s"}, {"DMS_IDENTITY_MODE": ""}):
+        Settings.from_env({**_ENV, **env})
 
 
 @pytest.mark.parametrize("env,needle", [
-    ({"DMS_IDENTITY_MODE": "K8S"}, "DMS_IDENTITY_MODE must be one of"),
-    ({"DMS_IDENTITY_MODE": "kubernetes"}, "DMS_IDENTITY_MODE must be one of"),
+    # 안전장치: dms-ssc(LDAP 라인)의 설정을 잘못 적용했을 때 조용히 다른 권한 모델로 돌지 않는다.
+    ({"DMS_IDENTITY_MODE": "ldap"}, "DMS_IDENTITY_MODE=ldap is not supported by dms-k8s"),
+    ({"DMS_IDENTITY_MODE": "K8S"}, "DMS_IDENTITY_MODE must be k8s (or unset)"),
+    ({"DMS_IDENTITY_MODE": "kubernetes"}, "DMS_IDENTITY_MODE must be k8s (or unset)"),
+    ({"DMS_LDAP_URI": "ldap://10.10.10.30:389"}, "remove DMS_LDAP_URI"),
     ({"DMS_IDENTITY_MODE": "k8s", "DMS_LDAP_URI": "ldap://10.10.10.30:389"}, "remove DMS_LDAP_URI"),
-    ({"DMS_IDENTITY_MODE": "k8s", "DMS_ALLOW_PRIVILEGED_REQUESTERS": "false"}, "must not be false"),
+    ({"DMS_ALLOW_PRIVILEGED_REQUESTERS": "false"}, "must not be false"),
 ])
 def test_identity_mode_misconfigurations_refuse_to_start(env, needle):
     with pytest.raises(SettingsError) as e:
@@ -168,76 +172,67 @@ def test_identity_mode_misconfigurations_refuse_to_start(env, needle):
     assert any(needle in p for p in e.value.problems), e.value.problems
 
 
-def test_ldap_mode_keeps_its_ldap_uri():
-    assert Settings.from_env({**_ENV, "DMS_LDAP_URI": "ldap://h"}).ldap_uri == "ldap://h"
-
-
 # --- 단일 술어(D3) ------------------------------------------------------------------------------------
 
-def test_root_allowed_is_session_in_k8s_mode_and_privilege_eligible_in_ldap_mode():
-    kw = dict(requester_id="alice", allow_privileged=True, privileged_requesters=frozenset({"ops"}))
-    assert root_allowed(identity_mode="k8s", session_authenticated=True, **kw) is True
-    assert root_allowed(identity_mode="k8s", session_authenticated=False, **kw) is False      # 공유 토큰
-    assert root_allowed(identity_mode="k8s", session_authenticated=True,
-                        **{**kw, "allow_privileged": False}) is False                        # 특권 허용 스위치
-    assert root_allowed(identity_mode="ldap", session_authenticated=True, **kw) is False     # 목록 밖
-    assert root_allowed(identity_mode="ldap", session_authenticated=True,
-                        **{**kw, "requester_id": "ops"}) is True
+def test_root_allowed_is_a_session_request_with_the_privilege_switch_on():
+    assert root_allowed(allow_privileged=True, session_authenticated=True) is True
+    assert root_allowed(allow_privileged=True, session_authenticated=False) is False      # 공유 토큰
+    assert root_allowed(allow_privileged=False, session_authenticated=True) is False      # 특권 허용 스위치
 
 
 class _Control:
+    """denylist 스텁 -- 이름 규칙만(그룹 규칙은 resolve_job_identity 가 보지 않는다: is_denied 에 groups 가 없다)."""
     def __init__(self, groups=(), names=()):
         self._groups, self._names = set(groups), set(names)
 
-    def has_group_denies(self):
-        return bool(self._groups)
-
-    def is_denied(self, *, requester, owner, groups):
+    def is_denied(self, *, requester, owner):
         for n in (requester, owner):
             if n in self._names:
                 return n
-        return next((g for g in groups if g in self._groups), None)
-
-    def register_probe_target(self, owner):
-        raise AssertionError("root 경로는 프로브 대상을 등록하지 않는다")
+        return None
 
 
 def test_resolve_k8s_requested_is_root_for_any_session_user_and_ignores_group_rules():
-    ident = resolve_job_identity(_Control(groups={"dmsusers"}), None, requester_id="alice", owner_username=None,
-                                 allow_privileged=True, privileged_requesters=frozenset({"ops"}),
-                                 session_authenticated=True, privilege=PRIVILEGE_REQUESTED, identity_mode="k8s")
-    assert (ident.username, ident.uid, ident.gid, ident.privileged) == ("alice", 0, 0, True)
-    # 같은 그룹 규칙이 ldap 모드에선 리졸버 없이 ldap_not_configured -- k8s 모드에서 모든 잡을 막던 결합(리뷰)
-    with pytest.raises(IdentityRejected) as e:
-        resolve_job_identity(_Control(groups={"dmsusers"}), None, requester_id="ops", owner_username=None,
-                             allow_privileged=True, privileged_requesters=frozenset({"ops"}),
-                             session_authenticated=True, privilege=PRIVILEGE_REQUESTED)
-    assert e.value.reason_code == "ldap_not_configured"
+    # 그룹 규칙은 평가하지 않는다(LDAP 이 없다) -- 예전엔 그룹 규칙 한 줄이 리졸버 없음(ldap_not_configured)으로 모든 잡을 막았다.
+    for who in ("alice", "ops"):
+        ident = resolve_job_identity(_Control(groups={"dmsusers"}), requester_id=who, owner_username=None,
+                                     allow_privileged=True, privileged_requesters=frozenset({"ops"}),
+                                     session_authenticated=True, privilege=PRIVILEGE_REQUESTED)
+        assert (ident.username, ident.uid, ident.gid, ident.privileged) == (who, 0, 0, True)
 
 
 def test_resolve_k8s_still_refuses_tokens_and_honours_name_rules():
     common = dict(owner_username=None, allow_privileged=True, privileged_requesters=frozenset({"ops"}),
-                  privilege=PRIVILEGE_REQUESTED, identity_mode="k8s")
+                  privilege=PRIVILEGE_REQUESTED)
     with pytest.raises(IdentityRejected) as e:
-        resolve_job_identity(_Control(), None, requester_id="shared-token", session_authenticated=False, **common)
+        resolve_job_identity(_Control(), requester_id="shared-token", session_authenticated=False, **common)
     assert e.value.reason_code == "privileged_not_authorized"
     with pytest.raises(IdentityRejected) as e:
-        resolve_job_identity(_Control(names={"alice"}), None, requester_id="alice", session_authenticated=True,
+        resolve_job_identity(_Control(names={"alice"}), requester_id="alice", session_authenticated=True,
                              **common)
     assert e.value.reason_code == "identity_denied"
 
 
 def test_resolve_k8s_batch_children_still_need_the_privileged_list():
-    # IF_ELIGIBLE(배치 자식)은 세션만으로 root 가 되지 않는다 -- 목록에서 빠진 생성자의 자식은 비 root 경로 → 리졸버 없음.
+    # IF_ELIGIBLE(배치 자식)은 세션만으로 root 가 되지 않는다 -- 목록에서 빠진 생성자의 자식은 거부(예전엔 비 root 경로로
+    # 낮췄다 -- LDAP 이 없어 낮출 신원이 없고, root 로 올리면 근거 없는 uid 0 이다).
     with pytest.raises(IdentityRejected) as e:
-        resolve_job_identity(_Control(), None, requester_id="gone", owner_username=None, allow_privileged=True,
+        resolve_job_identity(_Control(), requester_id="gone", owner_username=None, allow_privileged=True,
                              privileged_requesters=frozenset({"ops"}), session_authenticated=True,
-                             privilege=PRIVILEGE_IF_ELIGIBLE, identity_mode="k8s")
-    assert e.value.reason_code == "ldap_not_configured"
-    ident = resolve_job_identity(_Control(), None, requester_id="ops", owner_username=None, allow_privileged=True,
+                             privilege=PRIVILEGE_IF_ELIGIBLE)
+    assert e.value.reason_code == "privileged_not_authorized"
+    ident = resolve_job_identity(_Control(), requester_id="ops", owner_username=None, allow_privileged=True,
                                  privileged_requesters=frozenset({"ops"}), session_authenticated=True,
-                                 privilege=PRIVILEGE_IF_ELIGIBLE, identity_mode="k8s")
+                                 privilege=PRIVILEGE_IF_ELIGIBLE)
     assert ident.privileged is True
+
+
+def test_resolve_without_a_root_basis_is_refused_not_downgraded():
+    # PRIVILEGE_NEVER(run_as_root 없는 행 -- DB 직접 삽입·옛 행): 자격이 있어도 거부한다(비 root 실행 경로가 없다).
+    with pytest.raises(IdentityRejected) as e:
+        resolve_job_identity(_Control(), requester_id="ops", owner_username=None, allow_privileged=True,
+                             privileged_requesters=frozenset({"ops"}), session_authenticated=True)
+    assert e.value.reason_code == "privileged_not_authorized"
 
 
 # --- 수용: 일반 사용자 PV→PV sync 제출 → 계획 → 미리보기 대기 → 컨펌 ---------------------------------------
@@ -310,7 +305,7 @@ def test_neither_storage_nor_pv_still_gets_the_precise_validation_error(kclient,
     assert r.status_code == 422 and r.json()["detail"] == "missing_storage"
 
 
-def test_shared_token_submissions_are_refused_in_k8s_mode(kclient, world):
+def test_shared_token_submissions_are_refused(kclient, world):
     for body in (_rm(storage="cephfs-dms", run_as_root=True), _rm(_pv("team-a", "datasets"))):
         r = kclient.post("/api/user/requests", json=body, headers=TOKEN)
         assert r.status_code == 403 and r.json()["detail"] == "privileged_not_authorized", body
@@ -414,9 +409,9 @@ def test_unrestricted_admin_mixes_raw_and_pv_and_any_namespace(kclient, world):
 
 def test_k8s_owner_username_follows_the_account_id_rule(kclient, world):
     assert _ACCOUNT_ID_RE.pattern == ACCOUNT_USERNAME_RE.pattern
-    assert valid_owner_username("1user", identity_mode="k8s") and not valid_owner_username("1user")
-    assert not valid_owner_username("1234", identity_mode="k8s")        # 숫자만은 거부(잡 셸이 uid 로 읽는다)
-    assert not valid_owner_username("Alice", identity_mode="k8s") and valid_owner_username("Alice")
+    assert valid_owner_username("1user")
+    assert not valid_owner_username("1234")        # 숫자만은 거부(잡 셸이 uid 로 읽는다)
+    assert not valid_owner_username("Alice")
     _login(kclient, "ops")
     r = kclient.post("/api/user/requests", json={"operation": "scan", "pv": _pv("team-a", "datasets"), "target": "",
                                                  "owner_username": "1user"})
@@ -429,6 +424,22 @@ def test_k8s_owner_username_follows_the_account_id_rule(kclient, world):
     r = kclient.post("/api/user/requests", json={"operation": "scan", "pv": _pv("team-a", "datasets"), "target": "",
                                                  "owner_username": "1234"})
     assert r.status_code == 422 and r.json()["detail"] == "invalid_owner_username"
+
+
+def test_user_owner_gate_self_is_allowed(kclient, world):
+    # owner_username 없음 → 자기 자신, == 자신 → 202(다른 실행 신원 지정만 특권이다 -- identity.owner_override_allowed).
+    _login(kclient, "alice")
+    assert kclient.post("/api/user/requests", json=_rm(_pv("team-a", "datasets"))).status_code == 202
+    r = kclient.post("/api/user/requests", json=_rm(_pv("team-a", "datasets"), target="y", owner_username="alice"))
+    assert r.status_code == 202
+
+
+def test_user_owner_gate_refuses_another_owner_and_unstripped_names(kclient, world):
+    # 원문 비교(strip 없음) -- ' alice' 는 자신이 아니라 403(특권 게이트)이 먼저다. strip 비교였다면 422(모양)였을 것이다.
+    _login(kclient, "alice")
+    for owner in ("victim", " alice", "alice ", ""):
+        r = kclient.post("/api/user/requests", json=_rm(_pv("team-a", "datasets"), owner_username=owner))
+        assert r.status_code == 403 and r.json()["detail"] == "privileged_not_authorized", owner
 
 
 # --- 그룹 denylist(D3) ------------------------------------------------------------------------------
@@ -446,11 +457,6 @@ def test_group_denylist_rules_are_refused_and_existing_ones_are_harmless(kclient
     rid = kclient.post("/api/user/requests", json=_pv_sync(src_path="other")).json()["request_id"]
     _plan(world)
     assert _state(world, rid) == ("Rejected", "identity_denied")
-
-
-def test_group_rules_are_still_accepted_in_ldap_mode(client):
-    r = client.put("/api/admin/identity-denylist/group/dmsusers", json={}, headers=TOKEN)
-    assert r.status_code == 201
 
 
 # --- 계획·컨펌 재확인(D13) ------------------------------------------------------------------------------
@@ -607,26 +613,23 @@ def test_confirm_of_a_planned_root_job_needs_a_session_request(kclient, world, d
 # --- sync 허용 쌍 면제(D14) 세 지점 --------------------------------------------------------------------
 
 def test_pair_gate_exempt_predicate():
-    k8s, ldap = _k8s_settings(), _k8s_settings(identity_mode="ldap")
     both = {"source_pv": {"cluster": "c"}, "destination_pv": {"cluster": "c"}}
-    assert k8s_access.pair_gate_exempt(both, k8s) is True
-    assert k8s_access.pair_gate_exempt(both, ldap) is False
-    assert k8s_access.pair_gate_exempt({"source_pv": {"cluster": "c"}}, k8s) is False
-    assert k8s_access.pair_gate_exempt(None, k8s) is False
+    assert k8s_access.pair_gate_exempt(both) is True
+    assert k8s_access.pair_gate_exempt({"source_pv": {"cluster": "c"}}) is False
+    assert k8s_access.pair_gate_exempt(None) is False
 
 
-def test_pv_sync_in_ldap_mode_still_needs_a_pair_at_submit_plan_and_confirm(db, world):
-    ldap = _k8s_settings(identity_mode="ldap")
-    client = TestClient(create_app(ldap, db))
-    _login(client, "alice")
-    r = client.post("/api/user/requests", json=_pv_sync())
-    assert r.status_code == 403 and r.json()["detail"] == "sync_pair_not_allowed"
-    world.sync_pairs.add("k8s-pv-nfs", "k8s-pv-nfs", actor="ops")
-    r = client.post("/api/user/requests", json=_pv_sync())
-    assert r.status_code == 202
-    world.sync_pairs.remove("k8s-pv-nfs", "k8s-pv-nfs", actor="ops")
-    _plan(world, ldap)
-    assert _state(world, r.json()["request_id"]) == ("Rejected", "sync_pair_not_allowed")
+def test_user_cannot_confirm_a_job_whose_storage_became_admin_only(kclient, world, db, submitted):
+    # 미리보기까지 끝난(ConfirmPending) 사용자 잡 -- 그 사이 해석된 스토리지가 관리자 전용이 되면 컨펌(실행 시작)을 막는다.
+    # 관리자는 컨펌할 수 있다(리뷰 발견: 제출·계획 게이트만으로는 TTL 동안 샌다). 판정은 맵핑 재확인 뒤다.
+    assert _plan(world)[submitted] == "planned"
+    jid = _to_confirm_pending(world, submitted)
+    db.execute("UPDATE storages SET user_enabled = 0 WHERE storage_name = 'k8s-pv-nfs'")
+    r = _login(kclient, "alice").post(f"/api/user/jobs/{jid}:confirm", json={"fingerprint": FP})
+    assert r.status_code == 403 and r.json()["detail"] == "storage_admin_only"
+    assert world.data_jobs.get_job(jid)["state"] == "ConfirmPending"      # 상태 불변
+    r = _login(kclient, "ops").post(f"/api/user/jobs/{jid}:confirm", json={"fingerprint": FP})
+    assert r.status_code == 200 and r.json()["state"] == "Executing"
 
 
 def test_k8s_confirm_is_not_blocked_by_a_missing_pair(kclient, world, submitted):
@@ -650,11 +653,12 @@ def test_me_tells_the_portal_the_mode_the_exemption_and_the_operations(kclient, 
     assert (me["unrestricted"], me["role"], me["user_operations"]) == (False, "admin", ["sync", "rm"])
 
 
-def test_me_in_ldap_mode_lists_the_default_user_operations(client):
+def test_me_lists_the_default_user_operations(client):
+    # 기본 설정(DMS_USER_ALLOWED_OPERATIONS 기본 {sync}) -- identity_mode 는 늘 "k8s"(옛 포탈 탭용 상수).
     client.post("/api/auth/signup", json={"username": "bob", "password": "p"})
     client.post("/api/auth/login", json={"username": "bob", "password": "p"})
     me = client.get("/api/auth/me").json()
-    assert (me["identity_mode"], me["unrestricted"], me["user_operations"]) == ("ldap", False, ["sync"])
+    assert (me["identity_mode"], me["unrestricted"], me["user_operations"]) == ("k8s", False, ["sync"])
 
 
 # --- 경로 검색(D17) -------------------------------------------------------------------------------
@@ -670,7 +674,7 @@ def test_path_search_matches_the_pv_label(kclient, world):
 
 # --- 스캔 경로(§6) ---------------------------------------------------------------------------------
 
-def test_scan_paths_are_for_unrestricted_users_in_k8s_mode(kclient, world):
+def test_scan_paths_are_for_unrestricted_users(kclient, world):
     _login(kclient, "alice")
     r = kclient.post("/api/user/scan-paths", json={"storage_name": "k8s-pv-nfs", "path": "team-c/archive"})
     assert r.status_code == 422 and r.json()["detail"] == "scan_path_unrestricted_only"
@@ -701,9 +705,8 @@ def test_side_label_and_subpath_normalization():
         assert e.value.reason_code == "unsafe_path"
 
 
-def test_recheck_is_a_noop_for_raw_requests_in_ldap_mode(world):
+def test_recheck_refuses_raw_requests_of_restricted_requesters(world):
     req = {"operation": "rm", "requester_id": "alice", "payload": {"storage": "cephfs-dms", "target": "x"}}
-    assert k8s_access.recheck_request(world, req, settings=_k8s_settings(identity_mode="ldap")) is None
     with pytest.raises(DomainValidationError) as e:
         k8s_access.recheck_request(world, req, settings=_k8s_settings())
     assert e.value.reason_code == "raw_path_not_allowed"

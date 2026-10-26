@@ -1,5 +1,15 @@
+import pytest
+
+from dms import k8s_access
 from dms.domain import DataJobState, RequestState
 from dms.execution import StubExecutionAdapter
+
+
+@pytest.fixture
+def no_mapping_recheck(monkeypatch):
+    # 이 파일은 컨펌 기계(지문·전이·격리)가 관심사다 -- 사용자 잡은 k8s 신원 모드에서 PV 주소라야 컨펌의 맵핑 재확인
+    # (k8s_access.recheck_request)을 통과하는데, 그 재확인은 tests/test_k8s_submit.py 가 끝에서 끝으로 고정한다.
+    monkeypatch.setattr(k8s_access, "recheck_request", lambda *a, **k: None)
 
 
 def _login(client, name="alice"):
@@ -44,7 +54,7 @@ def test_list_jobs_isolation(client):
     assert jobs[0]["job_id"] == jid and jobs[0]["state"] == "ConfirmPending"
 
 
-def test_confirm_happy_and_mismatch(client):
+def test_confirm_happy_and_mismatch(client, no_mapping_recheck):
     repos = client.app.state.repos
     rid, jid = _confirmpending_job(repos)
     _login(client, "alice")
@@ -127,7 +137,7 @@ def test_cancel_terminal_job_409(client):
 ADMIN = {"Authorization": "Bearer tok-shared"}
 
 
-def test_admin_bearer_can_access_others_jobs(client):
+def test_admin_bearer_can_access_others_jobs(client, no_mapping_recheck):
     repos = client.app.state.repos
     rid, jid = _confirmpending_job(repos, requester="alice")
     # admin bearer token (세션 로그인 없이) 로 남의 요청 잡 조회

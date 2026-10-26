@@ -391,9 +391,10 @@ def test_fanout_nsync_uses_both_sides_and_splits_a_node_on_both_sides():
 # ---- ⑤ planner ----
 
 class _PSettings:
+    # 요청자는 특권 세션 관리자(ops) -- scan 은 특권 운영자만이고 모든 잡은 root 다(k8s 신원 모드). 관심사는 노드 CPU 상한이다.
     agent_report_stale_seconds = 300
-    allow_privileged_requesters = False
-    privileged_requesters = frozenset()
+    allow_privileged_requesters = True
+    privileged_requesters = frozenset({"ops"})
     planner_identity_grace_seconds = 300
 
 
@@ -407,9 +408,10 @@ def _planner_world(db, allocs, *, max_nodes=3, procs_per_node=2, settings=None):
                                 execution_timeout_seconds=3600, enabled=True, actor="admin")
     for n, alloc in allocs.items():
         repos.agents.ingest(n, _report(n, alloc=alloc), reported_at="2026-08-02T09:59:00Z")
-    rid = repos.requests.create(operation="scan", requester_id="alice", actor="alice", resource_key="k",
-                                payload={"storage": "s1", "target": "t"}, priority="mid")
-    planner = Planner(repos, StubIdentityResolver({"alice": ALICE}), settings=settings or _PSettings())
+    rid = repos.requests.create(operation="scan", requester_id="ops", actor="ops", auth_method="session", resource_key="k",
+                                payload={"storage": "s1", "target": "t", "run_as_root": True}, priority="mid")
+    repos.accounts.create("ops", "pw", "admin")
+    planner = Planner(repos, settings=settings or _PSettings())
     return repos, rid, planner
 
 
@@ -456,8 +458,8 @@ def test_planner_skips_small_nodes_and_rejects_when_none_fit(db):
     assert job["worker_pool"]["candidates"] == {"primary": ["n1"]}
     assert job["worker_pool"]["rejections"] == {"n2": "insufficient_cpu"}
 
-    rid2 = repos.requests.create(operation="scan", requester_id="alice", actor="alice", resource_key="k2",
-                                 payload={"storage": "s1", "target": "u"}, priority="mid")
+    rid2 = repos.requests.create(operation="scan", requester_id="ops", actor="ops", auth_method="session", resource_key="k2",
+                                 payload={"storage": "s1", "target": "u", "run_as_root": True}, priority="mid")
     repos.agents.ingest("n1", _report("n1", alloc=1000), reported_at="2026-08-02T09:59:30Z")
     planner.run_once(now_iso=NOW)
     # 유예 없이 즉시 거부(allocatable 은 기다려도 늘지 않는다)
@@ -484,8 +486,8 @@ def test_planner_reads_the_reserve_setting(db):
 
 
 def _more_scans(repos, n):
-    return [repos.requests.create(operation="scan", requester_id="alice", actor="alice", resource_key=f"k{i}",
-                                  payload={"storage": "s1", "target": f"t{i}"}, priority="mid")
+    return [repos.requests.create(operation="scan", requester_id="ops", actor="ops", auth_method="session", resource_key=f"k{i}",
+                                  payload={"storage": "s1", "target": f"t{i}", "run_as_root": True}, priority="mid")
             for i in range(2, 2 + n)]
 
 
@@ -502,8 +504,8 @@ def test_planner_spreads_jobs_over_idle_nodes(db):
     assert all(out[r] == "planned" for r in rids)
     assert [_picked(repos, r) for r in rids] == [["n1"], ["n2"], ["n3"]]
     # 다음 틱: 셋 다 1코어씩 예약 중 -- 동률은 이름순(결정적)
-    r4 = repos.requests.create(operation="scan", requester_id="alice", actor="alice", resource_key="k-x",
-                               payload={"storage": "s1", "target": "x"}, priority="mid")
+    r4 = repos.requests.create(operation="scan", requester_id="ops", actor="ops", auth_method="session", resource_key="k-x",
+                               payload={"storage": "s1", "target": "x", "run_as_root": True}, priority="mid")
     planner.run_once(now_iso=NOW)
     assert _picked(repos, r4) == ["n1"]
 

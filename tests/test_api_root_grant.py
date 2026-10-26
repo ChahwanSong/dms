@@ -11,7 +11,6 @@ from fastapi.testclient import TestClient
 
 from dms.api.app import create_app
 from dms.config import Settings
-from dms.identity import ResolvedIdentity, StubIdentityResolver
 from dms.planner import Planner
 from dms.privileged import privileged_names
 from dms.repositories import Repositories
@@ -210,7 +209,11 @@ def test_global_switch_off_disables_granted_accounts_too(tmp_path):
     from dms.migrations import migrate
     db = Database.connect(f"sqlite:///{tmp_path}/off.db")
     migrate(db)
-    app = _app(db, DMS_ALLOW_PRIVILEGED_REQUESTERS="false")
+    # dms-k8s 는 허용 스위치 false 를 기동 거부한다(모든 잡 root) -- 판정 함수들이 스위치를 따로 보는지는 기동 검증을 건너뛴
+    # 설정(dataclass 교체)으로 본다.
+    import dataclasses
+    app = _app(db)
+    app.state.settings = dataclasses.replace(app.state.settings, allow_privileged_requesters=False)
     app.state.repos.accounts.set_root_granted("newadm", True, actor="t")
     assert _me(app, "newadm") is False
     rows = {a["username"]: a for a in TestClient(app).get("/api/admin/accounts", headers=TOKEN).json()}
@@ -233,9 +236,6 @@ def test_grant_and_revoke_are_audited(db):
 
 # ---- 컨트롤러 쪽(planner·자동 확인)도 같은 집합 ----
 
-ALICE = ResolvedIdentity("alice", 10001, 10000, ("dmsusers",), False)
-
-
 class _Settings:
     agent_report_stale_seconds = 300
     allow_privileged_requesters = True
@@ -255,8 +255,8 @@ def _plan_root_request(db, *, grant: bool):
     repos.agents.ingest("n1", {
         "node_name": "n1",
         "mounts": [{"storage_name": "s1", "mount_path": "/mnt/s1", "status": "Ready", "writable": True}],
-        "tools": [{"name": t, "status": "Ready"} for t in ("dscan", "dsync", "nsync", "drm")],
-        "identities": [{"username": "alice", "status": "Ready"}]}, reported_at="2026-08-02T09:59:00Z")
+        "tools": [{"name": t, "status": "Ready"} for t in ("dscan", "dsync", "nsync", "drm")]},
+        reported_at="2026-08-02T09:59:00Z")
     repos.accounts.create("newadm", "pw", "admin")
     if grant:
         repos.accounts.set_root_granted("newadm", True, actor="ops")
@@ -264,7 +264,7 @@ def _plan_root_request(db, *, grant: bool):
                                 payload={"storage": "s1", "target": "a", "options": {}, "owner_username": "alice",
                                          "run_as_root": True},
                                 priority="mid", auth_method="session")
-    Planner(repos, StubIdentityResolver({"alice": ALICE}), settings=_Settings()).run_once(
+    Planner(repos, settings=_Settings()).run_once(
         now_iso="2026-08-02T10:00:00Z")
     jobs = repos.data_jobs.list_jobs(request_id=rid)
     return repos.requests.get(rid), (jobs[0]["worker_pool"]["identity"] if jobs else None)
@@ -372,8 +372,9 @@ def _root_confirm_pending(app):
 
 
 def test_revoked_admin_cannot_confirm_an_already_planned_root_job(db):
-    """신원은 계획 때 얼어 stepper 는 자격을 다시 보지 않는다 -- 「자격 빼기」 뒤 컨펌 대기 root 잡의 컨펌을 여기서 막는다
-    (Rejected privileged_not_authorized + 요청 화해). 자격이 있는 동안은 컨펌된다(대조)."""
+    """신원은 계획 때 얼어 stepper 는 자격을 다시 보지 않는다 -- 「자격 빼기」 뒤 컨펌 대기 잡의 컨펌을 여기서 막는다
+    (Rejected + 요청 화해). 자격이 있는 동안은 컨펌된다(대조). k8s 신원 모드에서 자격 = 맵핑 면제라, 회수된 관리자의 직접 경로
+    잡은 컨펌의 재확인(k8s_access.recheck_request)이 raw_path_not_allowed 로 끊는다(root 자체는 세션 요청이면 허용 -- D3)."""
     app = _app(db)
     ops = _as(app, "ops")
     _grant(ops, "newadm")
@@ -385,7 +386,7 @@ def test_revoked_admin_cannot_confirm_an_already_planned_root_job(db):
     rid, jid = _root_confirm_pending(app)
     _grant(ops, "newadm", granted=False)
     r = c.post(f"/api/user/jobs/{jid}:confirm", json={"fingerprint": "sha256:abc"})
-    assert (r.status_code, r.json()["detail"]) == (409, "privileged_not_authorized")
+    assert (r.status_code, r.json()["detail"]) == (409, "raw_path_not_allowed")
     job = app.state.repos.data_jobs.get_job(jid)
-    assert (job["state"], job["reason_code"]) == ("Rejected", "privileged_not_authorized")
+    assert (job["state"], job["reason_code"]) == ("Rejected", "raw_path_not_allowed")
     assert app.state.repos.requests.get(rid)["state"] == "Rejected"

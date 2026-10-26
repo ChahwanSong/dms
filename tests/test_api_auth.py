@@ -25,7 +25,7 @@ def test_shared_token_grants_admin(client):
     r = client.get("/api/auth/me", headers={"Authorization": "Bearer tok-shared"})
     assert r.status_code == 200
     assert r.json() == {"actor": "shared-token", "role": "admin", "can_run_as_root": False,
-                        "identity_mode": "ldap", "unrestricted": False, "user_operations": ["scan", "sync", "rm"]}
+                        "identity_mode": "k8s", "unrestricted": False, "user_operations": ["sync", "rm"]}
 
 
 def test_wrong_token_rejected(client):

@@ -27,7 +27,8 @@ from urllib.parse import urlsplit
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
-from .. import k8s_access, k8s_sync
+from .. import k8s_sync
+from ..identity import IDENTITY_MODE_K8S
 from ..db import load_json, utc_now_iso
 from ..domain import DomainValidationError
 from ..mail_config import resolve_mail_config
@@ -315,7 +316,7 @@ def overview(request: Request):
     state = _State(request)
     return {"now": state.now, "settings": _settings_view(state), "nodes": _nodes(request, state),
             "clusters": _cluster_summaries(state), "totals": state.repos.k8s.totals(),
-            "identity_mode": k8s_access.identity_mode(state.settings), "signup_guard": _signup_guard(state)}
+            "identity_mode": IDENTITY_MODE_K8S, "signup_guard": _signup_guard(state)}
 
 
 def _signup_guard(state) -> str:

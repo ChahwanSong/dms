@@ -14,7 +14,6 @@ import posixpath
 import sys
 import time
 
-from . import k8s_access
 from .artifact_base import resolve_artifact_base, static_base_problem, strip_scheme
 from .batch_cancel import CANCEL_MARK_EVENT, CANCEL_REASON
 from .db import iso_epoch, iso_plus, utc_now_iso
@@ -128,7 +127,7 @@ PV_OWNER_READ_ATTEMPTS = 20
 
 
 class ChownMismatchAtStep(Exception):
-    """k8s 모드에서 잡 행의 chown·chmod 가 요청 행(제출·planner·컨펌이 판정한 값)과 다르다(2026-10-26 리뷰) -- create_job 은
+    """잡 행의 chown·chmod 가 요청 행(제출·planner·컨펌이 판정한 값)과 다르다(2026-10-26 리뷰) -- create_job 은
     무검증 INSERT 라 잡 행만 변조하면 chown_not_allowed·PV 소유자 규칙을 함께 건너뛴다. _build_spec 이 끊는다(fail-closed)."""
 
     def __init__(self, key):
@@ -593,7 +592,7 @@ class JobStepper:
             problem = chown_problem(options["chown"])
             if problem is not None:
                 raise ChownNameAtStep(problem)
-        if job["tool"] in ("dsync", "nsync") and k8s_access.k8s_mode(self._settings):
+        if job["tool"] in ("dsync", "nsync"):
             req = self._repos.requests.get(job["request_id"]) or {}
             payload = req.get("payload") if isinstance(req.get("payload"), dict) else {}
             req_opts = payload.get("options") if isinstance(payload.get("options"), dict) else {}

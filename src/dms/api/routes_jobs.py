@@ -5,7 +5,6 @@ from ..domain import DataJobState, DomainValidationError, TERMINAL_DATA_JOB_STAT
 from ..db import utc_now_iso
 from ..execution import ExecutionError
 from ..identity import PRIVILEGE_REQUESTED, privilege_policy, root_allowed
-from ..privileged import privileged_names
 from ..repositories.node_exclusions import blocked_nodes
 from ..repositories.storages import storage_open_to_users
 from ..repositories.sync_pairs import sync_pair_allowed
@@ -92,15 +91,12 @@ def confirm_job(job_id: str, body: ConfirmBody, request: Request,
     # 다시 볼 뿐 자격은 보지 않는다 -- 여기서 안 막으면 회수된 관리자가 미리보기 유효기간(최대 24h) 동안 uid 0 실행을
     # 시작할 수 있다(리뷰). 배치 자식은 위에서 배치 확인으로 보냈다(_require_batch_privilege·auto_confirm_hold 가 같은 집합을
     # 다시 본다). 모양은 node_excluded 와 같다(이 자리에서 종단 + 요청 화해 + 409).
-    # k8s 신원 모드(2026-10-25 설계 D3): 같은 자리에서 같은 술어 identity.root_allowed 를 본다 -- k8s 모드는 「세션 인증
-    # 요청인가」(모든 잡이 root 라 특권 목록으로 보면 일반 사용자의 sync·rm 이 전부 여기서 끊겼다 -- 리뷰), ldap 모드는 종전
-    # privilege_eligible.
+    # k8s 신원 모드(2026-10-25 설계 D3): 같은 자리에서 같은 술어 identity.root_allowed 를 본다 -- 「세션 인증 요청인가」(모든
+    # 잡이 root 라 특권 목록으로 보면 일반 사용자의 sync·rm 이 전부 여기서 끊겼다 -- 리뷰).
     ident = wp.get("identity") if isinstance(wp.get("identity"), dict) else {}
     settings = request.app.state.settings
     if ident.get("privileged") is True and privilege_policy(req) == PRIVILEGE_REQUESTED:
-        if not root_allowed(identity_mode=k8s_access.identity_mode(settings), requester_id=req["requester_id"],
-                            allow_privileged=settings.allow_privileged_requesters,
-                            privileged_requesters=privileged_names(settings, repos),
+        if not root_allowed(allow_privileged=settings.allow_privileged_requesters,
                             session_authenticated=(req.get("auth_method") == "session")):
             repos.data_jobs.set_job_state(job_id, DataJobState.REJECTED,
                                           reason_code="privileged_not_authorized", actor=identity.actor)
@@ -132,9 +128,9 @@ def confirm_job(job_id: str, body: ConfirmBody, request: Request,
                 raise HTTPException(status_code=403, detail="storage_admin_only")
         # 사용자 sync 허용 쌍(repositories/sync_pairs.py): 컨펌 대기 중 허용이 빠진 사용자 sync 도
         # 실행 시작을 막는다(같은 이유 -- 제출·계획 게이트만으로는 preview TTL 동안 샌다).
-        # k8s 모드에서 양쪽이 PV 주소면 면제(설계 D14 -- 제출·planner 3b 와 같은 술어; 위 재확인이 그 pv 블록을 방금 봤다).
+        # 양쪽이 PV 주소면 면제(설계 D14 -- 제출·planner 3b 와 같은 술어; 위 재확인이 그 pv 블록을 방금 봤다).
         if (job["operation"] == "sync"
-                and not k8s_access.pair_gate_exempt((req or {}).get("payload"), settings)
+                and not k8s_access.pair_gate_exempt((req or {}).get("payload"))
                 and not sync_pair_allowed(repos, job.get("source_storage"), job.get("destination_storage"))):
             raise HTTPException(status_code=403, detail="sync_pair_not_allowed")
     repos.data_jobs.set_confirmed(job_id, body.fingerprint)

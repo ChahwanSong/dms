@@ -34,13 +34,13 @@ def _client(db):
 
 def test_privileged_requester_synthesizes_root_uid_zero(db):
     # (1) 승격은 실재한다: root 는 privileged_requesters 기본값 멤버(config.py:114)이고
-    # group deny 가 없으면 LDAP 없이 uid 0 으로 합성된다(identity.py:49,:62-63).
+    # uid 0 으로 합성된다(identity.resolve_job_identity).
     control = ControlRepository(db)
     # session_authenticated=True 는 "세션 로그인한 관리자가 root 를 requester 로
     # 쓰는" 정상 경로를 뜻한다 -- 승격 자체는 살아 있고(이 슬라이스가 없애는 것이
     # 아니다), 토큰 경로가 그 이름을 고를 수 없게 된 것이 차단의 본질이다.
     ident = resolve_job_identity(
-        control, None, requester_id="root", owner_username=None,
+        control, requester_id="root", owner_username=None,
         allow_privileged=True,
         privileged_requesters=frozenset({"root", "admin"}),
         session_authenticated=True,
@@ -68,7 +68,7 @@ def test_token_actor_node_form_is_accepted(db):
     assert r.status_code == 200
     # 토큰 인증은 root 자격이 없다(세션만) -- can_run_as_root 도 여기서 함께 고정한다.
     assert r.json() == {"actor": "node:n1", "role": "admin", "can_run_as_root": False,
-                        "identity_mode": "ldap", "unrestricted": False, "user_operations": ["scan", "sync", "rm"]}
+                        "identity_mode": "k8s", "unrestricted": False, "user_operations": ["sync", "rm"]}
 
 
 def test_token_actor_empty_normalizes_to_shared_token(db):
@@ -80,7 +80,7 @@ def test_token_actor_empty_normalizes_to_shared_token(db):
             headers["x-dms-actor"] = value
         assert client.get("/api/auth/me", headers=headers).json() == {
             "actor": "shared-token", "role": "admin", "can_run_as_root": False,
-            "identity_mode": "ldap", "unrestricted": False, "user_operations": ["scan", "sync", "rm"]}
+            "identity_mode": "k8s", "unrestricted": False, "user_operations": ["sync", "rm"]}
 
 
 def test_node_regex_has_single_source_of_truth():

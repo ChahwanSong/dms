@@ -77,7 +77,7 @@ def build_loops(settings: Settings, repos: Repositories, *, identity_resolver=No
 
     loops = [
         Loop("planner", settings.planner_interval_seconds,
-             lambda: Planner(repos, identity_resolver, settings=settings).run_once()),
+             lambda: Planner(repos, settings=settings).run_once()),
         Loop("job-stepper", settings.stepper_interval_seconds, _stepper_step),
         Loop("storage-reconciler", settings.reconcile_interval_seconds,
              lambda: reconcile_storages_once(

@@ -22,39 +22,8 @@ def _client_with(db, **overrides):
 
 
 SCAN = {"operation": "scan", "storage": "s1", "target": "a"}
-# scan은 관리자 전용 제출이므로(별도 게이트), non-admin으로 특권 게이트만 단독 검증하는
-# 아래 테스트들은 scan 대신 rm을 사용한다.
-RM = {"operation": "rm", "storage": "s1", "target": "a", "options": {"recursive": True}}
-
-
-def test_owner_self_is_allowed(db):
-    client = _client_with(db)
-    client.post("/api/auth/signup", json={"username": "alice", "password": "p"})
-    client.post("/api/auth/login", json={"username": "alice", "password": "p"})
-    # owner_username 없음 → 자기 데이터 → 202
-    assert client.post("/api/user/requests", json=RM).status_code == 202
-    # owner_username == 자신 → 202
-    assert client.post("/api/user/requests",
-                       json={**RM, "owner_username": "alice"}).status_code == 202
-
-
-def test_user_cannot_submit_for_other_owner(db):
-    client = _client_with(db)
-    client.post("/api/auth/signup", json={"username": "mallory", "password": "p"})
-    client.post("/api/auth/login", json={"username": "mallory", "password": "p"})
-    r = client.post("/api/user/requests", json={**RM, "owner_username": "victim"})
-    assert r.status_code == 403 and r.json()["detail"] == "privileged_not_authorized"
-
-
-def test_whitespace_owner_still_403_for_non_admin(db):
-    # 술어 단일화(identity.owner_override_allowed, 2026-10-07) 뒤에도 원문 비교 -- ' alice' 는 자신이 아니라
-    # 403(특권 게이트)이 먼저다. strip 비교였다면 422(모양)로 바뀌었을 것이다.
-    client = _client_with(db)
-    client.post("/api/auth/signup", json={"username": "alice", "password": "p"})
-    client.post("/api/auth/login", json={"username": "alice", "password": "p"})
-    for owner in (" alice", "alice ", ""):
-        r = client.post("/api/user/requests", json={**RM, "owner_username": owner})
-        assert r.status_code == 403 and r.json()["detail"] == "privileged_not_authorized", owner
+# 일반 사용자의 owner 게이트(자기 자신·남·공백)는 PV 주소 제출로 본다 -- 직접 경로는 그 전에 raw_path_not_allowed 라
+# (k8s 신원 모드) tests/test_k8s_submit.py 의 test_user_owner_gate_* 로 옮겼다.
 
 
 def test_admin_operator_with_flag_can_submit_for_other(db):

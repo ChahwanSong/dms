@@ -55,14 +55,20 @@ def _client(tmp_path, artifact_base):
     from dms.api.app import create_app
     db = Database.connect(f"sqlite:///{tmp_path}/test.db")
     migrate(db)
+    # 스캔 경로 등록·통계는 면제자(관리자 + 특권 목록 + 세션) 전용(routes_scan_paths._require_unrestricted) -- 이 파일의
+    # 사용자(alice·eve)를 면제자로 둔다(사용자별 격리는 그대로 본다).
     settings = Settings(database_url="unused", shared_token="tok-shared",
                         admin_token="tok-admin", session_secret="sess-secret",
-                        artifact_base_uri=f"file://{artifact_base}")
+                        artifact_base_uri=f"file://{artifact_base}",
+                        privileged_requesters=frozenset({"root", "admin", "alice", "eve"}))
     return TestClient(create_app(settings, db)), db
 
 
 def _login(client, name="alice"):
-    client.post("/api/auth/signup", json={"username": name, "password": "p"})
+    accounts = client.app.state.repos.accounts
+    if accounts.get(name) is None:
+        accounts.create(name, "p", "admin")
+    client.cookies.clear()
     client.post("/api/auth/login", json={"username": name, "password": "p"})
 
 

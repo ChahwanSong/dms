@@ -1,6 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, StrictBool
-from .. import k8s_access
 from ..batch_orchestrator import auto_confirm_hold, preview_files
 from ..batch_cancel import mark_cancel_reached, record_item_terminal, settle_child
 from ..domain import (DataJobState, DomainValidationError, Operation, auto_confirmable, build_data_payload,
@@ -101,8 +100,8 @@ def create_batch(body: BatchBody, request: Request, identity: Identity = Depends
     # 왜 **모든** 배치 생성에 특권 게이트인가: 배치 메뉴는 관리자 운영 메뉴고,
     # 사용자 결정은 "배치(scan/sync/rm)는 전부 기본 관리자 특권(root) 실행"이다.
     # 이전에는 owner_username 이 있을 때만 게이트를 열고 나머지는 조용히 비특권으로
-    # 강등했는데, allowlist 밖 admin·토큰 생성 배치가 LDAP 밖 계정이면 자식이
-    # ldap_identity_not_found 로 조용히 죽었다 — 강등 대신 여기서 명시 거부한다.
+    # 강등했는데, allowlist 밖 admin·토큰 생성 배치의 자식이 비 root 신원 해석에서
+    # 조용히 죽었다 — 강등 대신 여기서 명시 거부한다.
     # 운영자 계정은 DMS_PRIVILEGED_REQUESTERS 로 관리한다. 게이트는 3중(기능 플래그
     # + allowlist + 세션, admin 역할은 require_admin 이 이미 보장). 세션 조건이
     # 필요한 이유: 배치는 생성 시점 인증 방식을 행에 박제해 자식이 물려받으므로
@@ -116,8 +115,8 @@ def create_batch(body: BatchBody, request: Request, identity: Identity = Depends
     name = normalized_batch_name(body.name)
     try:
         if owner is not None:
-            # 단건 _validated_payload 와 같은 검증(k8s 신원 모드는 계정 아이디 규칙 -- planner 3c 와 같다)
-            validate_owner_username(owner, identity_mode=k8s_access.identity_mode(request.app.state.settings))
+            # 단건 _validated_payload 와 같은 검증(계정 아이디 규칙 -- planner 3c 와 같다)
+            validate_owner_username(owner)
         validate_batch(body.operation, body.max_concurrency, body.items,
                        priority=body.priority, node_count=body.node_count,
                        procs_per_node=body.procs_per_node)

@@ -100,9 +100,10 @@ def test_sync_excluding_the_only_colocated_node_falls_back_to_nsync():
 # ---- ② planner ----
 
 class _PSettings:
+    # 요청자는 특권 세션 관리자(ops) -- scan 은 특권 운영자만이고 모든 잡은 root 다(k8s 신원 모드).
     agent_report_stale_seconds = 300
-    allow_privileged_requesters = False
-    privileged_requesters = frozenset()
+    allow_privileged_requesters = True
+    privileged_requesters = frozenset({"ops"})
     planner_identity_grace_seconds = 300
 
 
@@ -116,9 +117,11 @@ def _planner_world(db, nodes=("n1", "n2", "n3")):
                                 execution_timeout_seconds=3600, enabled=True, actor="admin")
     for n in nodes:
         repos.agents.ingest(n, _report(n), reported_at="2026-08-02T09:59:00Z")
-    rid = repos.requests.create(operation="scan", requester_id="alice", actor="alice", resource_key="k",
-                                payload={"storage": "s1", "target": "t"}, priority="mid")
-    planner = Planner(repos, StubIdentityResolver({"alice": ALICE}), settings=_PSettings())
+    repos.accounts.create("ops", "pw", "admin")
+    rid = repos.requests.create(operation="scan", requester_id="ops", actor="ops", resource_key="k",
+                                payload={"storage": "s1", "target": "t", "run_as_root": True}, priority="mid",
+                                auth_method="session")
+    planner = Planner(repos, settings=_PSettings())
     return repos, rid, planner
 
 

@@ -9,7 +9,6 @@ from dms.migrations import migrate
 from dms.planner import Planner
 from dms.repositories import Repositories
 from dms.repositories.storages import storage_open_to_users
-from dms.identity import ResolvedIdentity, StubIdentityResolver
 
 ADMIN = {"Authorization": "Bearer tok-shared"}
 BODY = {"storage_name": "ceph-a", "mount_path": "/mnt/ceph",
@@ -20,6 +19,12 @@ PUT = {"mount_path": "/mnt/ceph", "managed_root": "/mnt/ceph/dms", "backend_type
 def _login_user(client, name="u1"):
     client.post("/api/auth/signup", json={"username": name, "password": "p"})
     client.post("/api/auth/login", json={"username": name, "password": "p"})
+
+
+def _login_ops(client):
+    # 특권 세션 관리자(기본 특권 목록의 admin) -- 직접 경로 제출은 면제자만이다(k8s 신원 모드).
+    client.app.state.repos.accounts.create("admin", "p", "admin")
+    client.post("/api/auth/login", json={"username": "admin", "password": "p"})
 
 
 def _admin_only(client):
@@ -112,26 +117,26 @@ def test_user_submit_to_admin_only_storage_is_refused(client):
 
 def test_admin_submit_to_admin_only_storage_is_accepted(client):
     _admin_only(client)
-    assert client.post("/api/user/requests", json={**SYNC, "run_as_root": False},
-                       headers=ADMIN).status_code == 202
+    _login_ops(client)
+    assert client.post("/api/user/requests", json=SYNC).status_code == 202
 
 
 def test_fully_disabled_storage_keeps_the_planner_rejection_path(client):
     # 완전 비활성은 종전대로 제출은 받고 planner 가 storage_disabled 로 거부한다(제출 게이트는
-    # 관리자 전용만 본다 -- 두 사유가 섞이지 않게).
+    # 관리자 전용만 본다 -- 두 사유가 섞이지 않게). 직접 경로 제출은 면제자만이라 특권 관리자로 낸다.
     assert client.post("/api/admin/storages", json=BODY, headers=ADMIN).status_code == 201
     client.put("/api/admin/storages/ceph-a", json={**PUT, "enabled": False,
                                                    "user_enabled": False}, headers=ADMIN)
-    client.app.state.repos.sync_pairs.add("ceph-a", "ceph-a", actor="test")   # 쌍 게이트는 통과
-    _login_user(client)
+    _login_ops(client)
     assert client.post("/api/user/requests", json=SYNC).status_code == 202
 
 
 def test_user_cannot_register_a_scan_path_on_an_admin_only_storage(client):
+    # 스캔 경로 등록은 면제자 전용이라(k8s 신원 모드) 일반 사용자는 관리자 전용 스토리지 판정 전에 막힌다.
     _admin_only(client)
     _login_user(client)
     r = client.post("/api/user/scan-paths", json={"storage_name": "ceph-a", "path": "x"})
-    assert r.status_code == 422 and r.json()["detail"] == "storage_missing"
+    assert r.status_code == 422 and r.json()["detail"] == "scan_path_unrestricted_only"
 
 
 # --- planner(계획 시점 재확인) ---------------------------------------------------------
@@ -143,9 +148,6 @@ class _Settings:
     # 술어(owner_override_allowed, 2026-10-07)로 다시 보므로, 토큰 요청이 그렇게 할 수 있는 형상(목록에 있음)으로 둔다.
     privileged_requesters = frozenset({"ops", "shared-token"})
     planner_identity_grace_seconds = 300
-
-
-ALICE = ResolvedIdentity("alice", 10001, 10000, ("dmsusers",), False)
 
 
 def _plan(db, *, requester, role, auth="session", batch_id=None):
@@ -161,19 +163,18 @@ def _plan(db, *, requester, role, auth="session", batch_id=None):
         "node_name": "n1",
         "mounts": [{"storage_name": "s1", "mount_path": "/mnt/s1", "status": "Ready",
                     "writable": True}],
-        "tools": [{"name": t, "status": "Ready"} for t in ("dscan", "dsync", "nsync", "drm")],
-        "identities": [{"username": "alice", "status": "Ready"}]},
+        "tools": [{"name": t, "status": "Ready"} for t in ("dscan", "dsync", "nsync", "drm")]},
         reported_at="2026-08-02T09:59:00Z")
     if role is not None:
         repos.accounts.create(requester, "pw", role)
     kw = {"batch_id": batch_id} if batch_id else {}
+    payload = {"storage": "s1", "target": "a", "options": {}, "owner_username": "alice"}
+    if not batch_id:
+        payload["run_as_root"] = True               # 단건은 제출이 늘 싣는다(설계 D2) -- 배치 자식은 IF_ELIGIBLE
     rid = repos.requests.create(operation="scan", requester_id=requester, actor=requester,
-                                resource_key=f"k-{requester}",
-                                payload={"storage": "s1", "target": "a", "options": {},
-                                         "owner_username": "alice"},
+                                resource_key=f"k-{requester}", payload=payload,
                                 priority="mid", auth_method=auth, **kw)
-    Planner(repos, StubIdentityResolver({"alice": ALICE}),
-            settings=_Settings()).run_once(now_iso="2026-08-02T10:00:00Z")
+    Planner(repos, settings=_Settings()).run_once(now_iso="2026-08-02T10:00:00Z")
     return repos.requests.get(rid)["state"], repos.requests.last_reason_code(rid)
 
 
@@ -191,10 +192,11 @@ def test_planner_lets_an_admin_request_through(db):
 
 
 def test_planner_token_admin_only_for_the_shapes_the_api_creates(db):
-    # 토큰 요청의 실제 모양(shared-token)은 관리자 -- 통과. "token" 표식 + 사람 이름(API 가 만들
-    # 수 없는 조합, DB 직접 삽입)은 표식만으로 통과시키지 않는다(리뷰 발견).
+    # 토큰 요청의 실제 모양(shared-token)은 관리자 -- 관리자 전용 판정은 통과. "token" 표식 + 사람 이름(API 가 만들
+    # 수 없는 조합, DB 직접 삽입)은 표식만으로 통과시키지 않는다(리뷰 발견). 토큰 요청은 그 뒤 k8s 게이트(면제 = 세션
+    # 관리자)에서 끊긴다(k8s 신원 모드 -- API 는 토큰 제출 자체를 403 으로 막는다).
     state, reason = _plan(db, requester="shared-token", role=None, auth="token")
-    assert reason != "storage_admin_only" and state == "Planned"
+    assert (state, reason) == ("Rejected", "scan_unrestricted_only")
 
 
 def test_planner_does_not_trust_the_token_mark_on_a_human_requester(db):
@@ -222,30 +224,5 @@ def test_submit_gate_checks_the_destination_storage_too(client):
     assert r.status_code == 403 and r.json()["detail"] == "storage_admin_only"
 
 
-def test_user_cannot_confirm_a_job_whose_storage_became_admin_only(client):
-    # 미리보기까지 끝난(ConfirmPending) 사용자 잡 -- 그 사이 관리자 전용이 되면 컨펌(실행 시작)을
-    # 막는다. 관리자는 컨펌할 수 있다(리뷰 발견: 제출·계획 게이트만으로는 TTL 동안 샌다).
-    from dms.domain import DataJobState, RequestState
-    assert client.post("/api/admin/storages", json=BODY, headers=ADMIN).status_code == 201
-    _login_user(client, "alice")
-    repos = client.app.state.repos
-    rid = repos.requests.create(operation="sync", requester_id="alice", actor="alice",
-        resource_key="k-conf", payload={"source_storage": "ceph-a", "source": "a",
-        "destination_storage": "ceph-a", "destination": "b"}, priority="mid")
-    repos.requests.set_state(rid, RequestState.PLANNED, actor="planner")
-    repos.requests.set_state(rid, RequestState.RUNNING, actor="planner")
-    plan_id = repos.data_jobs.create_plan(rid, actor="planner")
-    jid = repos.data_jobs.create_job(rid, plan_id, operation="sync", priority="mid",
-        source_storage="ceph-a", source="a", destination_storage="ceph-a", destination="b",
-        options={}, tool="dsync", worker_pool={}, precondition={}, actor="planner")
-    repos.data_jobs.set_preview(jid, fingerprint="sha256:abc",
-        expires_at="2099-01-01T00:00:00Z", artifact_uri="file:///art/j")
-    repos.data_jobs.set_job_state(jid, DataJobState.CONFIRM_PENDING, actor="stepper")
-    client.put("/api/admin/storages/ceph-a", json={**PUT, "enabled": True, "user_enabled": False},
-               headers=ADMIN)
-    r = client.post(f"/api/user/jobs/{jid}:confirm", json={"fingerprint": "sha256:abc"})
-    assert r.status_code == 403 and r.json()["detail"] == "storage_admin_only"
-    assert repos.data_jobs.get_job(jid)["state"] == "ConfirmPending"      # 상태 불변
-    r = client.post(f"/api/user/jobs/{jid}:confirm", json={"fingerprint": "sha256:abc"},
-                    headers=ADMIN)
-    assert r.status_code == 200 and r.json()["state"] == "Executing"
+# (컨펌 시점의 관리자 전용 재확인은 사용자 잡이 PV 주소라 tests/test_k8s_submit.py 의
+#  test_user_cannot_confirm_a_job_whose_storage_became_admin_only 가 고정한다.)

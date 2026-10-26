@@ -1,16 +1,20 @@
-"""실행 신원 모델. LDAP 조회는 주입된 resolver 뒤에 있고, 이 모듈은 오케스트레이션만 한다.
+"""실행 신원 모델(dms-k8s -- k8s 신원 모드 전용).
 
-보조 그룹(2026-10-07, LDAP posixGroup gidNumber 인정): 비 root 잡은 계획 시점에 실행 신원이 속한 posixGroup 의
-gidNumber 를 **숫자로만** 스냅숏에 얼린다(worker_pool.identity 의 4키 -- supplementary_gids·supplementary_gids_status·
-supplementary_gids_excluded·supplementary_gids_found). 규칙은 이 모듈의 순수 함수 하나씩이다 --
-valid_supplementary_gids(무엇이 유효한가)·limit_supplementary_gids(상한)·supplementary_gids_problem(스냅숏 모양) 를
-planner·stepper·execution_manifests 가 공유해, 규칙이 한쪽만 바뀌어 단계 사이에 그룹이 갈라지는 일을 막는다.
-cn·DN 은 denylist 이름 매칭 전용이고 실행으로 흐르지 않는다. 키 부재·None 은 [](더 좁은 권한)이지 실패가 아니다.
+모든 잡은 root(uid 0·gid 0)로 돈다(dms-k8s 설계 D2). 실행 신원 이름(username)은 owner_username 또는 요청자이고, 러너가
+uid 0 별칭 계정으로 passwd 에 물질화해 runuser·sshd 가 쓴다(execution_manifests._identity_materialize_stmt). 권한 판정은 이
+모듈이 아니라 k8s RoleBinding 맵핑(k8s_access)이 맡는다 -- 이 모듈은 「root 로 돌아도 되는 요청인가」(root_allowed·
+privilege_eligible)와 denylist(이름 규칙)만 본다.
+
+LDAP 리졸버·보조 그룹(posixGroup gidNumber)·비 root 실행 경로는 2026-10-26 사용자 결정 (d) 로 지웠다(dms-ssc 라인은 LDAP 을
+계속 쓴다 -- 근거는 docs/history·git 히스토리). 그래서 root 근거가 없는 요청(PRIVILEGE_NEVER·자격 없는 배치 자식)은 예전처럼
+「실행 신원의 LDAP uid/gid」로 낮추지 않고 privileged_not_authorized 로 **거부**한다 -- 낮출 비 root 신원이 없고, root 로
+올리면 근거 없는 uid 0 실행이다.
+
+아래 LDAP 리졸버 도우미(예외·틱 예산·StubIdentityResolver)와 보조 gid 스냅숏 모양 함수는 아직 그것을 import 하는 모듈
+(identity_ldap·stepper·execution_manifests)과 함께 지운다 -- 판정 경로(resolve_job_identity)는 이미 쓰지 않는다.
 """
 from dataclasses import dataclass
 from typing import Protocol
-
-from .domain import chown_gid_part
 
 
 # D3 "기술적으로 무효한 값"의 이 시스템 경계: k8s apiserver 는 PodSecurityContext.supplementalGroups 원소를
@@ -190,19 +194,6 @@ def owner_override_allowed(*, owner_username, requester_id, requester_is_admin,
     return bool(requester_is_admin and allow_privileged and requester_id in privileged_requesters)
 
 
-def check_chown_group(chown, *, identity: "ResolvedIdentity") -> None:
-    """D7: 명시 chown 의 gid 가 실행 신원이 속한 그룹이 아니면 IdentityRejected("chown_group_not_member").
-    - identity.privileged 면 검사 안 함(root 는 어떤 그룹으로도 chown 가능).
-    - domain.chown_gid_part(chown) 가 None 이면(uid 만·이름·형식 오류) 대상 아님 -- 그 거부는 기존 chown_problem 경로.
-    - 허용 집합 = {identity.gid} ∪ identity.supplementary_gids(= **적용된** 목록; over_limit/disabled/none 이면 주 gid 만).
-    없애는 함정: 예전엔 비소속 gid 를 지정하면 dsync 가 데이터를 다 복사한 뒤 EPERM 으로 Failed 였다."""
-    gid = chown_gid_part(chown)
-    if identity.privileged or gid is None:
-        return
-    if gid != identity.gid and gid not in identity.supplementary_gids:
-        raise IdentityRejected("chown_group_not_member", str(chown))
-
-
 class IdentityRejected(Exception):
     def __init__(self, reason_code: str, detail: str = ""):
         self.reason_code = reason_code
@@ -210,9 +201,9 @@ class IdentityRejected(Exception):
         super().__init__(f"{reason_code}: {detail}" if detail else reason_code)
 
 
-PRIVILEGE_NEVER = "never"            # payload 에 root 근거 없음(fail-closed): 실행 신원의 LDAP uid/gid
-PRIVILEGE_REQUESTED = "requested"    # payload run_as_root is True(포탈의 관리자 기본 root 도 명시로 온다)
-PRIVILEGE_IF_ELIGIBLE = "if_eligible"  # 배치 자식(관리자 전용 화면): 자격 있으면 root
+PRIVILEGE_NEVER = "never"            # payload 에 root 근거 없음(fail-closed): 거부(privileged_not_authorized)
+PRIVILEGE_REQUESTED = "requested"    # payload run_as_root is True(제출이 늘 싣는다 -- 설계 D2)
+PRIVILEGE_IF_ELIGIBLE = "if_eligible"  # 배치 자식(관리자 전용 화면): 자격 있으면 root, 없으면 거부
 
 
 def privilege_policy(req) -> str:
@@ -235,140 +226,64 @@ def privilege_policy(req) -> str:
 
 def privilege_eligible(*, requester_id, allow_privileged, privileged_requesters,
                        session_authenticated) -> bool:
-    """root 실행 자격(스펙 §5): 설정이 허용하고, 세션 인증이고, 요청자가 목록에 있다.
-    **자격 ≠ 사용**(2026-09-30): 자격만으로 root 가 되지 않는다 -- privilege 정책이
-    정한다(resolve_job_identity)."""
+    """root 실행 자격(스펙 §5): 설정이 허용하고, 세션 인증이고, 요청자가 목록에 있다. 배치 자식(IF_ELIGIBLE)·맵핑 면제
+    (k8s_access.unrestricted_request)가 쓴다. **자격 ≠ 사용**(2026-09-30): 자격만으로 root 가 되지 않는다 -- privilege
+    정책이 정한다(resolve_job_identity)."""
     return bool(allow_privileged and session_authenticated
                 and requester_id in privileged_requesters)
 
 
+# /api/auth/me·k8s 개요의 identity_mode 값(2026-10-26 -- dms-k8s 는 k8s 모드 전용이라 상수다). 옛 포탈 탭이 이 키로 화면을
+# 가르므로 키를 지우지 않는다.
 IDENTITY_MODE_K8S = "k8s"
 
 
-def root_allowed(*, identity_mode, requester_id, allow_privileged, privileged_requesters,
-                 session_authenticated) -> bool:
+def root_allowed(*, allow_privileged, session_authenticated) -> bool:
     """「run_as_root 를 명시한(REQUESTED) 요청이 root 로 돌 수 있나」의 **단일 술어**(dms-k8s 설계 D3, 2026-10-25). 세 지점이
-    같은 함수를 쓴다 -- 제출(routes_requests.submit, k8s 모드), 계획(resolve_job_identity 의 REQUESTED 경로), 컨펌
+    같은 함수를 쓴다 -- 제출(routes_requests.submit), 계획(resolve_job_identity 의 REQUESTED 경로), 컨펌
     (routes_jobs.confirm_job 의 REQUESTED 재검사). 한쪽만 바뀌면 「제출은 됐는데 컨펌에서 영원히 409」 같은 틈이 생긴다.
 
-      - k8s 모드: 모든 단건 잡이 root 다(D2 -- 서버가 run_as_root 를 강제한다). 권한 판정은 root 자격이 아니라 k8s 맵핑
-        (k8s_access)이 맡고, 여기서는 **세션 인증 요청인가**만 본다(+ 특권 허용 스위치 -- 끄면 k8s 모드는 아무것도 돌지
-        않는다, config 가 기동에서 막는다). 세션 조건은 빼지 마라: 공유 토큰(모든 노드 에이전트 보유, role admin)이 모든
-        경로에 root 잡을 내는 길이 된다.
-      - ldap 모드(기본): 종전 privilege_eligible(허용·세션·특권 목록) 그대로.
+    모든 단건 잡이 root 다(D2 -- 서버가 run_as_root 를 강제한다). 권한 판정은 root 자격이 아니라 k8s 맵핑(k8s_access)이
+    맡고, 여기서는 **세션 인증 요청인가**만 본다(+ 특권 허용 스위치 -- 끄면 아무것도 돌지 않는다, config 가 기동에서 막는다).
+    세션 조건은 빼지 마라: 공유 토큰(모든 노드 에이전트 보유, role admin)이 모든 경로에 root 잡을 내는 길이 된다.
     배치 자식(IF_ELIGIBLE)은 이 술어가 아니라 privilege_eligible 이다(설계 D3 -- 세션만 보도록 넓히면 목록에서 빠진 생성자의
     scan 자식이 root 로 돈다)."""
-    if identity_mode == IDENTITY_MODE_K8S:
-        return bool(allow_privileged and session_authenticated)
-    return privilege_eligible(requester_id=requester_id, allow_privileged=allow_privileged,
-                              privileged_requesters=privileged_requesters,
-                              session_authenticated=session_authenticated)
+    return bool(allow_privileged and session_authenticated)
 
 
-def resolve_job_identity(control, resolver, *, requester_id, owner_username,
+def resolve_job_identity(control, *, requester_id, owner_username,
                          allow_privileged, privileged_requesters,
                          session_authenticated: bool = False,
-                         privilege: str = PRIVILEGE_NEVER,
-                         supplementary_groups: bool = False,
-                         identity_mode: str = "ldap") -> ResolvedIdentity:
-    """잡 실행 신원.
+                         privilege: str = PRIVILEGE_NEVER) -> ResolvedIdentity:
+    """잡 실행 신원 -- 통과하면 늘 root(uid 0·gid 0, privileged=True), 아니면 IdentityRejected.
 
-    privilege(2026-09-30 프로덕션 사고): 예전엔 요청자가 특권 목록에 있기만 하면 어느
-    화면에서 무엇을 제출하든 uid 0 이었다 -- 관리자 계정이 작업 신청 화면에서 "실행
-    신원 = 일반 사용자" 로 sync 를 내도 root 로 돌아, 그 사용자가 쓸 수 없는 남의 700
-    디렉터리를 소스 소유권으로 덮어쓰며 성공했다(dsync 는 소스 최상위의 소유·권한을
-    기존 목적지에 적용한다). 이제 root 는 **명시적**일 때만이다:
-      - PRIVILEGE_NEVER(기본, fail-closed): 자격이 있어도 실행 신원(owner_username 또는
-        요청자)의 LDAP uid/gid -- 그 사용자의 파일 권한이 그대로 적용된다.
-      - PRIVILEGE_REQUESTED: 요청이 run_as_root 를 명시. 자격이 없으면 거부
-        (privileged_not_authorized) -- 명시한 요청을 조용히 비특권으로 낮추지 않는다.
-      - PRIVILEGE_IF_ELIGIBLE: 배치 자식(관리자 전용 화면, 스펙 §5 "관리자 인터페이스에서만")
-        -- 자격이 있으면 root(종전 동작 유지).
+      - PRIVILEGE_REQUESTED: root_allowed(세션 인증)가 아니면 privileged_not_authorized(denylist 보다 먼저 -- 종전 순서).
+      - PRIVILEGE_IF_ELIGIBLE(배치 자식): privilege_eligible(허용·세션·특권 목록)이 아니면 privileged_not_authorized.
+      - PRIVILEGE_NEVER(근거 없음 -- DB 직접 삽입·run_as_root 없는 옛 행): privileged_not_authorized.
+    뒤 둘은 예전엔 「실행 신원의 LDAP uid/gid」로 돌던 경로다(2026-09-30 프로덕션 사고 뒤 root 는 명시일 때만) -- LDAP 이 없는
+    이 라인에선 낮출 신원이 없고 root 로 올리면 근거 없는 uid 0 이라 거부한다(2026-10-26).
 
-    비 root 경로의 주 gid 0 도 거부한다(D5, identity_root_group_without_privilege): uid 만 보던 때는 디렉터리가
-    gidNumber=0 을 주면 비 root 잡이 root 그룹 권한(테스트베드 /cephfs/dms root:root 770 등)을 얻었다. stepper 의
-    identity_problem 이 변조 행용 백스톱이다.
+    denylist 는 최우선 kill-switch 다(스펙 §5): 요청자·실행 신원 이름 규칙을 자격 판정(위 둘째·셋째)보다 먼저 본다 --
+    막힌 사용자는 자격과 무관하게 identity_denied. 그룹 규칙은 평가하지 않는다(LDAP 이 없다 -- 추가는 routes_denylist 가
+    422 denylist_group_unsupported 로 막는다).
 
-    supplementary_groups(보조 그룹, 2026-10-07): True 면 리졸버가 준 posixGroup gidNumber 를 valid_supplementary_gids →
-    limit_supplementary_gids 로 걸러 스냅숏 4키(supplementary_gids·_status·_excluded·_found)를 채운다. 기본값은
-    session_authenticated 와 같은 이유로 **False**(fail-closed) -- 인자를 빠뜨린 미래 호출자가 권한을 넓히지 못하게.
-    꺼짐은 status disabled·found None(보지 않았다), 그룹 없음은 none·found 0(없음 확정), root 는 privileged·목록 ()
-    (DAC override 라 그룹이 무의미하고, 실려 있으면 변조 신호다). group_gids(리졸버 원시값)는 출력에서 항상 ().
-
-    identity_mode(2026-10-25 dms-k8s 설계 D3): REQUESTED 의 자격은 root_allowed(k8s 모드 = 세션 인증이면 root, ldap = 종전
-    privilege_eligible). IF_ELIGIBLE(배치 자식)은 두 모드 모두 privilege_eligible 그대로다. k8s 모드는 LDAP 이 없어 그룹
-    denylist 를 평가하지 않는다(groups=[] -- 이름 규칙만; 그룹 규칙 추가는 routes_denylist 가 422 로 막는다). 예전 모양
-    그대로 두면 그룹 규칙 한 줄이 리졸버 None → ldap_not_configured 로 k8s 모드의 **모든** 잡을 막았다. 기본값 "ldap" 은
-    인자를 빠뜨린 호출자가 종전 동작을 얻게 한다(k8s 쪽이 더 넓은 root 경로라 fail-closed 방향)."""
+    session_authenticated 기본값은 **fail-closed(False)** 다: 인자를 빠뜨린 미래 호출자가 조용히 uid 0 경로를 얻지 않게
+    (슬라이스 19 심층 방어 -- 공유 토큰 요청은 특권을 못 얻는다). 지금 호출자는 planner 한 곳이고 요청의 auth_method 로
+    명시해 넘긴다."""
     owner = (owner_username or requester_id).strip()
-    eligible = privilege_eligible(requester_id=requester_id,
-                                  allow_privileged=allow_privileged,
-                                  privileged_requesters=privileged_requesters,
-                                  session_authenticated=session_authenticated)
     if privilege == PRIVILEGE_REQUESTED:
-        if not root_allowed(identity_mode=identity_mode, requester_id=requester_id,
-                            allow_privileged=allow_privileged, privileged_requesters=privileged_requesters,
-                            session_authenticated=session_authenticated):
+        if not root_allowed(allow_privileged=allow_privileged, session_authenticated=session_authenticated):
             raise IdentityRejected("privileged_not_authorized", requester_id)
-        eligible = True                  # REQUESTED 는 위 술어가 자격이다(ldap 모드에선 privilege_eligible 과 같은 값)
-    # denylist는 최우선 kill-switch이고 특권 경로보다 먼저 평가된다 (스펙 §5).
-    # group 규칙이 등재돼 있을 때만 특권 경로에서도 그룹을 해석한다 — 규칙이 없으면
-    # 특권 경로는 지금처럼 LDAP 없이 통과한다.
-    groups: list[str] = []
-    # 특권 승격은 session 인증 요청에만 허용한다(슬라이스 19 심층 방어, 설계 §2.2-2):
-    # 공유 토큰 경로는 requester_id 를 자유 지정할 수 없게 이미 좁혔지만(Task 1),
-    # 토큰으로 들어온 요청은 여기서도 특권을 못 얻는다.
-    #
-    # 기본값은 **fail-closed(False)** 다. 지금 프로덕션 호출자는 planner 한 곳뿐이고
-    # 그곳은 요청의 auth_method 로 실제 값을 명시해 넘긴다 -- 기본값이 쓰이는 정상
-    # 경로는 없다. 그래도 False 인 이유는 미래의 두 번째 호출자다: 기본이 True 면
-    # 인자를 빠뜨린 새 호출자가 **조용히 uid 0 승격 경로를 되살린다**(이 슬라이스가
-    # 막으려는 바로 그 결함). 빠뜨리면 특권이 안 붙는 쪽이 안전하다 -- 그 실수는
-    # "권한이 부족하다"로 시끄럽게 드러나지 보안 구멍으로 잠복하지 않는다.
-    privileged = eligible and privilege in (PRIVILEGE_REQUESTED, PRIVILEGE_IF_ELIGIBLE)
-    if privileged and identity_mode != IDENTITY_MODE_K8S and control.has_group_denies():
-        if resolver is None:
-            raise IdentityRejected("ldap_not_configured")
-        try:
-            probe = resolver.resolve(owner)
-        except IdentityUnavailable as exc:
-            raise IdentityRejected("ldap_unavailable", str(exc)[:200])
-        if probe is not None:
-            groups = list(probe.groups)
-    denied = control.is_denied(requester=requester_id, owner=owner, groups=groups)
-    if denied:
-        raise IdentityRejected("identity_denied", denied)
-    if privileged:
-        return ResolvedIdentity(owner, 0, 0, (), True, supplementary_gids_status=SUPP_PRIVILEGED)
-    if resolver is None:
-        raise IdentityRejected("ldap_not_configured")
-    try:
-        resolved = resolver.resolve(owner)
-    except IdentityUnavailable as exc:
-        raise IdentityRejected("ldap_unavailable", str(exc)[:200])
-    if resolved is None:
-        raise IdentityRejected("ldap_identity_not_found", owner)
-    denied = control.is_denied(requester=requester_id, owner=owner,
-                               groups=list(resolved.groups))
-    if denied:
-        raise IdentityRejected("identity_denied", denied)
-    if resolved.uid == 0:
-        # 비특권 경로가 uid 0 을 얻는 유일한 방법은 디렉터리의 uidNumber=0 항목이다
-        # (예: posix root 를 LDAP 에 실은 사이트). root 실행은 특권 요청자 게이트
-        # (privileged) 만의 권한이라 계획 시점에 정확한 사유로 거부한다 -- stepper 의
-        # identity_problem(privileged_flag_mismatch) 은 변조 행용 백스톱이다.
-        raise IdentityRejected("identity_root_without_privilege", owner)
-    if resolved.gid == 0:
-        # D5: 비특권 주 gid 0 -- uid 검사만으로는 root 그룹 권한이 비 root 잡에 실렸다. uid 0 거부가 먼저다
-        # (둘 다 0 이면 더 정확한 사유). 보조 gid 0 은 D3 로 인정한다(여기가 아니라 valid_supplementary_gids).
-        raise IdentityRejected("identity_root_group_without_privilege", owner)
-    control.register_probe_target(owner)
-    if supplementary_groups:
-        valid, excluded = valid_supplementary_gids(resolved.group_gids, primary_gid=resolved.gid)
-        applied, status = limit_supplementary_gids(valid)
-        found = len(valid)                      # 0 은 정상값("없음 확정")
+        allowed = True
+    elif privilege == PRIVILEGE_IF_ELIGIBLE:
+        allowed = privilege_eligible(requester_id=requester_id, allow_privileged=allow_privileged,
+                                     privileged_requesters=privileged_requesters,
+                                     session_authenticated=session_authenticated)
     else:
-        applied, excluded, status, found = (), (), SUPP_DISABLED, None   # None = 보지 않았다(모름)
-    return ResolvedIdentity(owner, resolved.uid, resolved.gid, tuple(resolved.groups), False,
-                            supplementary_gids=applied, supplementary_gids_status=status,
-                            supplementary_gids_excluded=excluded, supplementary_gids_found=found)
+        allowed = False
+    denied = control.is_denied(requester=requester_id, owner=owner)
+    if denied:
+        raise IdentityRejected("identity_denied", denied)
+    if not allowed:
+        raise IdentityRejected("privileged_not_authorized", requester_id)
+    return ResolvedIdentity(owner, 0, 0, (), True)

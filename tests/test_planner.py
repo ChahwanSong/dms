@@ -1,17 +1,19 @@
 import pytest
-from dms.domain import ROLE_USER, RequestState
-from dms.identity import ResolvedIdentity, StubIdentityResolver
+from dms.domain import ROLE_ADMIN, ROLE_USER, RequestState
 from dms.planner import Planner
 from dms.repositories import Repositories
 
 NOW = "2026-08-02T10:00:00Z"
-ALICE = ResolvedIdentity("alice", 10001, 10000, ("dmsusers",), False)
+# 요청자 기본값 = 특권 세션 관리자(dms-k8s 는 k8s 신원 모드 전용 -- 2026-10-26 LDAP 코드 삭제). 맵핑 면제
+# (k8s_access.unrestricted_request: admin 계정 + 특권 목록 + 세션)라 직접 경로·scan 이 열리고, 요청은 제출이 늘 싣는
+# run_as_root: true 를 가진다. 이 파일은 어드미션·배치·fan-out 이 관심사다 -- 맵핑·PV 재확인은 test_k8s_submit 이 고정한다.
+OPS = "ops"
 
 
 class _Settings:
     agent_report_stale_seconds = 300
-    allow_privileged_requesters = False
-    privileged_requesters = frozenset()
+    allow_privileged_requesters = True
+    privileged_requesters = frozenset({OPS})
     planner_identity_grace_seconds = 300
 
 
@@ -23,11 +25,7 @@ def _seed_storage(repos, name="s1", status="Ready"):
 
 
 def _seed_sync_storages(repos):
-    # alice(비관리자)의 src -> dst sync 가 계획되려면 그 쌍이 허용돼 있어야 한다(2026-09-30 사용자
-    # sync 허용 쌍, 기본 전부 불가). 이 파일의 sync 테스트는 배치·신원 대기가 관심사라 허용해 둔다
-    # -- 게이트 자체는 test_sync_pairs 가 고정한다.
     _seed_storage(repos, "src"); _seed_storage(repos, "dst")
-    repos.sync_pairs.add("src", "dst", actor="admin")
 
 
 def _seed_policy(repos, tool="scan"):
@@ -38,87 +36,50 @@ def _seed_policy(repos, tool="scan"):
                                 actor="admin")
 
 
-def _seed_report(repos, node="n1", storage="s1", user="alice"):
+def _seed_report(repos, node="n1", storage="s1", tools=("dscan", "dsync", "nsync", "drm")):
     repos.agents.ingest(node, {
         "node_name": node,
         "mounts": [{"storage_name": storage, "mount_path": f"/mnt/{storage}",
                     "status": "Ready", "writable": True}],
-        "tools": [{"name": t, "status": "Ready"}
-                  for t in ("dscan", "dsync", "nsync", "drm")],
-        "identities": [{"username": user, "status": "Ready"}]},
-        reported_at="2026-08-02T09:59:00Z")
-
-
-def _seed_identity_pending_report(repos, node="n1", storage="s1"):
-    # 마운트·도구는 전부 Ready, 신원만 미전파 -- 유예 대상의 정확한 형태(설계 §2.3).
-    # identities 빈 목록 = 에이전트가 아직 alice 를 프로브 대상으로 못 받은 상태.
-    repos.agents.ingest(node, {
-        "node_name": node,
-        "mounts": [{"storage_name": storage, "mount_path": f"/mnt/{storage}",
-                    "status": "Ready", "writable": True}],
-        "tools": [{"name": t, "status": "Ready"}
-                  for t in ("dscan", "dsync", "nsync", "drm")],
-        "identities": []},
-        reported_at="2026-08-02T09:59:00Z")
-
-
-def _seed_sync_reports(repos, identities):
-    # n1 은 src 만, n2 는 dst 만 마운트 -- 실 테스트베드처럼 노드별 사유가 섞인다.
-    # 한쪽 role 에서 신원 대기인 노드가 반대쪽에서는 미마운트로 잡힌다.
-    for node, storage in (("n1", "src"), ("n2", "dst")):
-        repos.agents.ingest(node, {"node_name": node,
-            "mounts": [{"storage_name": storage, "mount_path": f"/mnt/{storage}",
-                        "status": "Ready", "writable": True}],
-            "tools": [{"name": t, "status": "Ready"} for t in ("dsync", "nsync")],
-            "identities": identities},
-            reported_at="2026-08-02T09:59:00Z")
-
-
-def _seed_sync_node(repos, node, storage, *, identity_ready):
-    # 노드별로 신원 전파 여부를 따로 준다 -- 합집합의 한쪽 절반에만 신원 대기 노드를
-    # 두는 비대칭 형상을 만들기 위한 것(아래 destination-only/source-only 테스트).
-    repos.agents.ingest(node, {"node_name": node,
-        "mounts": [{"storage_name": storage, "mount_path": f"/mnt/{storage}",
-                    "status": "Ready", "writable": True}],
-        "tools": [{"name": t, "status": "Ready"} for t in ("dsync", "nsync")],
-        "identities": ([{"username": "alice", "status": "Ready"}]
-                       if identity_ready else [])},
+        "tools": [{"name": t, "status": "Ready"} for t in tools]},
         reported_at="2026-08-02T09:59:00Z")
 
 
 def _seed_unmounted_report(repos, node, tool="dscan"):
     repos.agents.ingest(node, {"node_name": node, "mounts": [],
-        "tools": [{"name": tool, "status": "Ready"}], "identities": []},
+        "tools": [{"name": tool, "status": "Ready"}]},
         reported_at="2026-08-02T09:59:00Z")
 
 
-def _sync_request(repos):
+def _request(repos, operation, payload, *, requester=OPS, key=None, auth_method="session",
+             run_as_root=True, batch_id=None):
+    body = {"options": {}, "owner_username": None, **payload}
+    if run_as_root:
+        body["run_as_root"] = True
     return repos.requests.create(
-        operation="sync", requester_id="alice", actor="alice",
-        resource_key="data.sync:src:a:dst:b:ff",
-        payload={"source_storage": "src", "source": "a",
-                 "destination_storage": "dst", "destination": "b",
-                 "options": {}, "owner_username": None}, priority="mid")
+        operation=operation, requester_id=requester, actor=requester,
+        resource_key=key or f"data.{operation}:{sorted(payload.items())}", payload=body,
+        priority="mid", auth_method=auth_method, batch_id=batch_id)
 
 
-def _backdate(db, rid, created_at):
-    # repos.requests.create 는 created_at 을 벽시계로 넣는다 -- grace 판정을
-    # 결정적으로 만들려면 NOW(고정 시각) 기준으로 나이를 직접 심어야 한다.
-    db.execute("UPDATE requests SET created_at = :c WHERE request_id = :id",
-               {"c": created_at, "id": rid})
+def _scan_request(repos, requester=OPS, key="data.scan:s1:a:ff", **extra):
+    return _request(repos, "scan", {"storage": "s1", "target": "a", **extra}, requester=requester, key=key)
 
 
-def _scan_request(repos, requester="alice", key="data.scan:s1:a:ff"):
-    return repos.requests.create(
-        operation="scan", requester_id=requester, actor=requester,
-        resource_key=key, payload={"storage": "s1", "target": "a",
-                                   "options": {}, "owner_username": None},
-        priority="mid")
+def _sync_request(repos, requester=OPS, key="data.sync:src:a:dst:b:ff", **extra):
+    return _request(repos, "sync", {"source_storage": "src", "source": "a", "destination_storage": "dst",
+                                    "destination": "b", **extra}, requester=requester, key=key)
 
 
-def _planner(repos, resolver=None):
-    return Planner(repos, resolver or StubIdentityResolver({"alice": ALICE}),
-                   settings=_Settings())
+def _planner(repos, settings=None):
+    # 면제 판정(unrestricted_request)은 **계정 행**을 본다 -- 특권 관리자 계정이 없으면 직접 경로가 raw_path_not_allowed 다.
+    if repos.accounts.get(OPS) is None:
+        repos.accounts.create(OPS, "pw", ROLE_ADMIN)
+    return Planner(repos, settings=settings or _Settings())
+
+
+def _snapshot(repos, rid):
+    return repos.data_jobs.list_jobs(request_id=rid)[0]["worker_pool"]["identity"]
 
 
 def test_happy_path_plans_scan(db):
@@ -133,7 +94,10 @@ def test_happy_path_plans_scan(db):
     job = jobs[0]
     assert job["tool"] == "dscan" and job["state"] == "Pending"
     assert job["worker_pool"]["candidates"]["primary"] == ["n1"]
-    assert job["worker_pool"]["identity"]["uid"] == 10001
+    # 모든 잡은 root(설계 D2) -- 실행 신원 이름은 요청자(owner_username 이 없으면).
+    ident = job["worker_pool"]["identity"]
+    assert {k: ident[k] for k in ("username", "uid", "gid", "groups", "privileged")} == {
+        "username": OPS, "uid": 0, "gid": 0, "groups": [], "privileged": True}
     assert job["worker_pool"]["process_count"] == 8
 
 
@@ -161,14 +125,6 @@ def test_conflict_on_prior_active(db):
     assert repos.requests.get(second)["state"] == "Conflict"
 
 
-def test_identity_rejection(db):
-    repos = Repositories(db)
-    _seed_storage(repos); _seed_policy(repos); _seed_report(repos)
-    rid = _scan_request(repos)
-    planner = _planner(repos, resolver=StubIdentityResolver({}))  # alice 없음
-    assert planner.run_once(now_iso=NOW)[rid] == "rejected:ldap_identity_not_found"
-
-
 def test_missing_policy_rejects(db):
     repos = Repositories(db)
     _seed_storage(repos); _seed_report(repos)
@@ -184,29 +140,23 @@ def test_no_candidates_when_no_fresh_report(db):
     assert _planner(repos).run_once(now_iso=NOW)[rid] == "rejected:no_eligible_nodes"
 
 
+def test_unmounted_nodes_reject_immediately(db):
+    # 노드별 탈락(미마운트)은 기다려도 풀리지 않는다 -- 신원 전파 유예(LDAP 시절, 2026-10-26 삭제) 없이 즉시 거부.
+    repos = Repositories(db)
+    _seed_storage(repos); _seed_policy(repos)
+    _seed_unmounted_report(repos, "n1")
+    rid = _scan_request(repos)
+    assert _planner(repos).run_once(now_iso=NOW)[rid] == "rejected:no_eligible_nodes"
+    assert repos.requests.get(rid)["state"] == "Rejected"
+
+
 def test_sync_selects_nsync(db):
     repos = Repositories(db)
     _seed_sync_storages(repos)
     _seed_policy(repos, "nsync")
-    repos.agents.ingest("n1", {"node_name": "n1",
-        "mounts": [{"storage_name": "src", "mount_path": "/mnt/src",
-                    "status": "Ready", "writable": True}],
-        "tools": [{"name": "nsync", "status": "Ready"},
-                  {"name": "dsync", "status": "Ready"}],
-        "identities": [{"username": "alice", "status": "Ready"}]},
-        reported_at="2026-08-02T09:59:00Z")
-    repos.agents.ingest("n2", {"node_name": "n2",
-        "mounts": [{"storage_name": "dst", "mount_path": "/mnt/dst",
-                    "status": "Ready", "writable": True}],
-        "tools": [{"name": "nsync", "status": "Ready"},
-                  {"name": "dsync", "status": "Ready"}],
-        "identities": [{"username": "alice", "status": "Ready"}]},
-        reported_at="2026-08-02T09:59:00Z")
-    rid = repos.requests.create(operation="sync", requester_id="alice", actor="alice",
-        resource_key="data.sync:src:a:dst:b:ff",
-        payload={"source_storage": "src", "source": "a",
-                 "destination_storage": "dst", "destination": "b",
-                 "options": {}, "owner_username": None}, priority="mid")
+    _seed_report(repos, "n1", "src", tools=("nsync", "dsync"))
+    _seed_report(repos, "n2", "dst", tools=("nsync", "dsync"))
+    rid = _sync_request(repos)
     assert _planner(repos).run_once(now_iso=NOW)[rid] == "planned"
     job = repos.data_jobs.list_jobs(request_id=rid)[0]
     assert job["tool"] == "nsync"
@@ -245,24 +195,10 @@ def test_policy_max_nodes_trims_sync_candidates(db):
     _seed_sync_storages(repos)
     _seed_policy(repos, "nsync")  # max_nodes=3, procs_per_node=8
     for node in ("s1", "s2", "s3", "s4"):
-        repos.agents.ingest(node, {"node_name": node,
-            "mounts": [{"storage_name": "src", "mount_path": "/mnt/src",
-                        "status": "Ready", "writable": True}],
-            "tools": [{"name": "nsync", "status": "Ready"}],
-            "identities": [{"username": "alice", "status": "Ready"}]},
-            reported_at="2026-08-02T09:59:00Z")
+        _seed_report(repos, node, "src", tools=("nsync",))
     for node in ("d1", "d2"):
-        repos.agents.ingest(node, {"node_name": node,
-            "mounts": [{"storage_name": "dst", "mount_path": "/mnt/dst",
-                        "status": "Ready", "writable": True}],
-            "tools": [{"name": "nsync", "status": "Ready"}],
-            "identities": [{"username": "alice", "status": "Ready"}]},
-            reported_at="2026-08-02T09:59:00Z")
-    rid = repos.requests.create(operation="sync", requester_id="alice", actor="alice",
-        resource_key="data.sync:src:a:dst:b:ff",
-        payload={"source_storage": "src", "source": "a",
-                 "destination_storage": "dst", "destination": "b",
-                 "options": {}, "owner_username": None}, priority="mid")
+        _seed_report(repos, node, "dst", tools=("nsync",))
+    rid = _sync_request(repos)
     assert _planner(repos).run_once(now_iso=NOW)[rid] == "planned"
     wp = repos.data_jobs.list_jobs(request_id=rid)[0]["worker_pool"]
     assert wp["candidates"]["source"] == ["s1", "s2", "s3"]
@@ -279,12 +215,7 @@ def test_payload_node_count_caps_candidates(db):
     _seed_policy(repos)  # max_nodes=3
     for node in ("n1", "n2", "n3", "n4", "n5"):
         _seed_report(repos, node=node)
-    rid = repos.requests.create(
-        operation="scan", requester_id="alice", actor="alice",
-        resource_key="data.scan:s1:a:ff",
-        payload={"storage": "s1", "target": "a", "options": {},
-                 "owner_username": None, "node_count": 2},
-        priority="mid")
+    rid = _scan_request(repos, node_count=2)
     assert _planner(repos).run_once(now_iso=NOW)[rid] == "planned"
     wp = repos.data_jobs.list_jobs(request_id=rid)[0]["worker_pool"]
     assert wp["node_count"] == 2                      # min(정책 3, 요청 2)
@@ -292,17 +223,26 @@ def test_payload_node_count_caps_candidates(db):
     assert wp["process_count"] == 16
 
 
+def test_requested_node_count_beyond_eligible_plans_with_available(db):
+    # 요청 2대인데 적격 1대(나머지는 미마운트) -- 있는 만큼으로 즉시 계획한다(LDAP 신원 전파 대기 시절의 「요청 수 대기」는
+    # 2026-10-26 삭제 -- 기다려서 늘어날 노드가 없다).
+    repos = Repositories(db)
+    _seed_storage(repos); _seed_policy(repos)
+    _seed_report(repos, node="n1")
+    _seed_unmounted_report(repos, "n2")
+    rid = _scan_request(repos, node_count=2)
+    assert _planner(repos).run_once(now_iso=NOW)[rid] == "planned"
+    wp = repos.data_jobs.list_jobs(request_id=rid)[0]["worker_pool"]
+    assert wp["node_count"] == 1
+    assert wp["candidates"]["primary"] == ["n1"]
+
+
 def test_payload_node_count_tampered_rejects(db):
     # DB 는 신뢰 경계 — payload 는 무검증 INSERT 로 변조될 수 있다. 값이 있는데
     # 비정상(str)이면 fail-closed 거부(stepper 층1 unknown_tool 관례).
     repos = Repositories(db)
     _seed_storage(repos); _seed_policy(repos); _seed_report(repos)
-    rid = repos.requests.create(
-        operation="scan", requester_id="alice", actor="alice",
-        resource_key="data.scan:s1:a:ff",
-        payload={"storage": "s1", "target": "a", "options": {},
-                 "owner_username": None, "node_count": "8"},
-        priority="mid")
+    rid = _scan_request(repos, node_count="8")
     assert _planner(repos).run_once(now_iso=NOW)[rid] == "rejected:invalid_node_count"
     assert repos.requests.get(rid)["state"] == "Rejected"
     # _reject 는 set_state_with_result 경로 — results 행이 함께 남는다.
@@ -320,12 +260,7 @@ def test_payload_procs_per_node_caps_process_count(db):
     _seed_policy(repos)  # procs_per_node=8
     for node in ("n1", "n2", "n3", "n4", "n5"):
         _seed_report(repos, node=node)
-    rid = repos.requests.create(
-        operation="scan", requester_id="alice", actor="alice",
-        resource_key="data.scan:s1:a:ff",
-        payload={"storage": "s1", "target": "a", "options": {},
-                 "owner_username": None, "procs_per_node": 2},
-        priority="mid")
+    rid = _scan_request(repos, procs_per_node=2)
     assert _planner(repos).run_once(now_iso=NOW)[rid] == "planned"
     wp = repos.data_jobs.list_jobs(request_id=rid)[0]["worker_pool"]
     assert wp["node_count"] == 3                      # 노드 수는 불변(정책 max_nodes)
@@ -337,12 +272,7 @@ def test_payload_procs_per_node_tampered_rejects(db):
     # 비정상(str)이면 fail-closed 거부(stepper 층1 unknown_tool 관례).
     repos = Repositories(db)
     _seed_storage(repos); _seed_policy(repos); _seed_report(repos)
-    rid = repos.requests.create(
-        operation="scan", requester_id="alice", actor="alice",
-        resource_key="data.scan:s1:a:ff",
-        payload={"storage": "s1", "target": "a", "options": {},
-                 "owner_username": None, "procs_per_node": "8"},
-        priority="mid")
+    rid = _scan_request(repos, procs_per_node="8")
     assert _planner(repos).run_once(now_iso=NOW)[rid] == "rejected:invalid_procs_per_node"
     assert repos.requests.get(rid)["state"] == "Rejected"
     # _reject 는 set_state_with_result 경로 — results 행이 함께 남는다.
@@ -357,7 +287,7 @@ def test_requester_disabled_account_rejects(db):
     _seed_storage(repos); _seed_policy(repos); _seed_report(repos)
     repos.accounts.create("alice", "pw", ROLE_USER, actor="admin")
     repos.accounts.set_disabled("alice", True, actor="admin")
-    rid = _scan_request(repos)
+    rid = _scan_request(repos, requester="alice")
     assert _planner(repos).run_once(now_iso=NOW)[rid] == "rejected:requester_disabled"
     assert repos.requests.get(rid)["state"] == "Rejected"
 
@@ -365,19 +295,21 @@ def test_requester_disabled_account_rejects(db):
 def test_requester_enabled_account_plans_normally(db):
     repos = Repositories(db)
     _seed_storage(repos); _seed_policy(repos); _seed_report(repos)
-    repos.accounts.create("alice", "pw", ROLE_USER, actor="admin")
     rid = _scan_request(repos)
-    assert _planner(repos).run_once(now_iso=NOW)[rid] == "planned"
+    planner = _planner(repos)                 # 활성 admin 계정(OPS)
+    assert repos.accounts.get(OPS)["disabled"] in (0, False)
+    assert planner.run_once(now_iso=NOW)[rid] == "planned"
 
 
-def test_requester_without_account_row_plans_normally(db):
-    # 회귀 가드: 포탈 계정이 없는 요청자(대부분의 기존 테스트가 이 형태)는
-    # "무판정"이어야 한다 — account row가 없다고 해서 거부되면 안 된다.
+def test_requester_without_account_row_is_not_exempt(db):
+    # 포탈 계정이 없는 요청자(DB 직접 삽입·지워진 계정)는 「무판정」으로 통과하지만(requester_disabled 아님) 맵핑 면제는
+    # 아니다(fail-closed -- k8s_access.unrestricted_request 는 계정 행을 본다): 직접 경로 sync 는 raw_path_not_allowed.
     repos = Repositories(db)
-    _seed_storage(repos); _seed_policy(repos); _seed_report(repos)
-    assert repos.accounts.get("alice") is None
-    rid = _scan_request(repos)
-    assert _planner(repos).run_once(now_iso=NOW)[rid] == "planned"
+    _seed_sync_storages(repos); _seed_policy(repos, "nsync")
+    _seed_report(repos, "n1", "src", tools=("nsync",)); _seed_report(repos, "n2", "dst", tools=("nsync",))
+    assert repos.accounts.get("ghost") is None
+    rid = _sync_request(repos, requester="ghost")
+    assert _planner(repos).run_once(now_iso=NOW)[rid] == "rejected:raw_path_not_allowed"
 
 
 def test_unexpected_exception_records_plan_error_event(db, monkeypatch):
@@ -386,12 +318,13 @@ def test_unexpected_exception_records_plan_error_event(db, monkeypatch):
     repos = Repositories(db)
     _seed_storage(repos); _seed_policy(repos); _seed_report(repos)
     rid = _scan_request(repos)
+    planner = _planner(repos)
 
     def _boom(*a, **k):
         raise RuntimeError("boom")
     monkeypatch.setattr(repos.accounts, "get", _boom)
 
-    result = _planner(repos).run_once(now_iso=NOW)
+    result = planner.run_once(now_iso=NOW)
     assert rid not in result  # 예외 분기는 results에 아무 것도 안 남긴다
     events = repos.observability.events_for_request(rid)
     assert len(events) == 1
@@ -405,419 +338,35 @@ def test_worker_pool_records_rejections(db):
     repos = Repositories(db)
     _seed_storage(repos); _seed_policy(repos)
     _seed_report(repos, node="n1")  # 적격
-    # n2는 도구 없음 → 탈락 사유 기록돼야
-    repos.agents.ingest("n2", {"node_name": "n2",
-        "mounts": [{"storage_name": "s1", "mount_path": "/mnt/s1",
-                    "status": "Ready", "writable": True}],
-        "tools": [{"name": "dsync", "status": "Ready"}],  # dscan 없음
-        "identities": [{"username": "alice", "status": "Ready"}]},
-        reported_at="2026-08-02T09:59:00Z")
+    _seed_report(repos, node="n2", tools=("dsync",))  # dscan 없음 → 탈락 사유 기록돼야
     rid = _scan_request(repos)
     _planner(repos).run_once(now_iso=NOW)
     wp = repos.data_jobs.list_jobs(request_id=rid)[0]["worker_pool"]
-    assert wp["rejections"]  # 비어있지 않음
+    assert wp["rejections"] == {"n2": "missing_tool:dscan"}
 
 
-def test_identity_only_rejection_defers_within_grace(db):
+def test_token_request_is_never_planned(db):
+    # 설계 §2.2-2 심층 방어: 토큰 인증 요청(DB 직접 삽입 -- API 는 k8s 모드에서 토큰 제출을 403 으로 끊는다)은 맵핑 면제도
+    # root 도 아니다. 면제가 먼저 끊고(scan 은 특권 운영자만), 신원 게이트(root_allowed = 세션)가 백스톱이다(test_identity).
     repos = Repositories(db)
-    _seed_storage(repos); _seed_policy(repos); _seed_identity_pending_report(repos)
-    rid = _scan_request(repos)
-    _backdate(db, rid, "2026-08-02T09:58:00Z")        # 나이 120s < grace 300s
-    result = _planner(repos).run_once(now_iso=NOW)
-    assert result[rid] == "deferred:identity_propagating"
-    # 아무 상태도 바꾸지 않는다(설계 §2.3) -- Pending 으로 남아 다음 틱의
-    # list_pending 에 다시 걸린다. results 행(종단)도 물론 없다.
-    assert repos.requests.get(rid)["state"] == "Pending"
+    _seed_storage(repos); _seed_policy(repos); _seed_report(repos)
+    rid = _request(repos, "scan", {"storage": "s1", "target": "a"}, auth_method="token", key="k-token")
+    assert _planner(repos).run_once(now_iso=NOW)[rid] == "rejected:scan_unrestricted_only"
     assert repos.data_jobs.list_jobs(request_id=rid) == []
-    # 유예는 관측 가능해야 한다 -- 매 유예마다 이벤트(설계 §2.3)
-    events = repos.observability.events_for_request(rid)
-    assert [e["event_type"] for e in events] == ["identity_propagating"]
-    assert events[0]["severity"] == "info"
-    assert events[0]["payload"] == {
-        "rejections": {"n1": "identity_not_ready_on_node"}}
 
 
-def test_identity_grace_expired_rejects(db):
-    repos = Repositories(db)
-    _seed_storage(repos); _seed_policy(repos); _seed_identity_pending_report(repos)
-    rid = _scan_request(repos)
-    _backdate(db, rid, "2026-08-02T09:54:00Z")        # 나이 360s > grace 300s
-    assert _planner(repos).run_once(now_iso=NOW)[rid] == "rejected:no_eligible_nodes"
-    assert repos.requests.get(rid)["state"] == "Rejected"
-
-
-def test_mixed_rejections_defer_within_grace(db):
-    # 실 테스트베드 형상(설계 §2.3 정정): cephfs-third 처럼 일부 노드는 미마운트,
-    # 일부는 신원만 대기다. "모든 노드가 신원 대기" 규칙이었다면 이 형상은 유예되지
-    # 못했다 -- 고치겠다고 한 바로 그 케이스를 못 고치는 규칙이었다.
-    repos = Repositories(db)
-    _seed_storage(repos); _seed_policy(repos)
-    _seed_identity_pending_report(repos, node="n1")
-    _seed_unmounted_report(repos, "n2")
-    rid = _scan_request(repos)
-    _backdate(db, rid, "2026-08-02T09:58:00Z")
-    assert _planner(repos).run_once(now_iso=NOW)[rid] == "deferred:identity_propagating"
-    assert repos.requests.get(rid)["state"] == "Pending"
-    assert repos.data_jobs.list_jobs(request_id=rid) == []
-    events = repos.observability.events_for_request(rid)
-    assert [e["event_type"] for e in events] == ["identity_propagating"]
-    # 페이로드는 섞인 사유를 그대로 남긴다 -- 운영자가 "왜 0대인가"를 봐야 한다.
-    assert events[0]["payload"]["rejections"] == {
-        "n1": "identity_not_ready_on_node", "n2": "missing_target_mount"}
-
-
-def test_non_identity_rejections_reject_immediately(db):
-    # 신원 사유 노드가 하나도 없으면(전 노드 미마운트) 전파돼도 적격이 될 노드가
-    # 없다 -- grace 안이어도 즉시 거부. "증명되면 유예, 아니면 거부".
-    repos = Repositories(db)
-    _seed_storage(repos); _seed_policy(repos)
-    _seed_unmounted_report(repos, "n1")
-    rid = _scan_request(repos)
-    _backdate(db, rid, "2026-08-02T09:58:00Z")
-    assert _planner(repos).run_once(now_iso=NOW)[rid] == "rejected:no_eligible_nodes"
-    assert repos.requests.get(rid)["state"] == "Rejected"
-
-
-def test_deferred_request_plans_after_identity_propagates(db):
-    # 슬라이스 15 실증에서 실패했던 바로 그 시나리오(설계 §6-4): 첫 요청이 전파를
-    # 기다렸다가 자동 성공해야 한다.
-    repos = Repositories(db)
-    _seed_storage(repos); _seed_policy(repos); _seed_identity_pending_report(repos)
-    rid = _scan_request(repos)
-    _backdate(db, rid, "2026-08-02T09:58:00Z")
-    planner = _planner(repos)
-    assert planner.run_once(now_iso=NOW)[rid] == "deferred:identity_propagating"
-    _seed_report(repos)                                # 신원 전파 완료(alice Ready)
-    assert planner.run_once(now_iso=NOW)[rid] == "planned"
-    assert repos.requests.get(rid)["state"] == "Planned"
-
-
-def test_sync_identity_pending_defers_and_plans_after_propagation(db):
-    # 슬라이스 15 실증에서 실제로 났던 전이(Rejected / no_ready_sync_candidate)가
-    # 이 형상이다 -- sync 도 유예 대상이어야 한다(설계 §2.3 정정).
-    repos = Repositories(db)
-    _seed_sync_storages(repos)
-    _seed_policy(repos, "nsync")
-    _seed_sync_reports(repos, identities=[])          # 신원 미전파
-    rid = _sync_request(repos)
-    _backdate(db, rid, "2026-08-02T09:58:00Z")
-    planner = _planner(repos)
-    assert planner.run_once(now_iso=NOW)[rid] == "deferred:identity_propagating"
-    assert repos.requests.get(rid)["state"] == "Pending"
-    events = repos.observability.events_for_request(rid)
-    assert [e["event_type"] for e in events] == ["identity_propagating"]
-    # 합집합 판정의 증거: source 쪽 신원 대기는 n1, destination 쪽은 n2 이고 각각
-    # 반대쪽에서는 미마운트다. 한쪽 dict 만 봤다면 이 형상도 놓쳤을 것이다.
-    assert events[0]["payload"]["rejections"] == {
-        "source": {"n1": "identity_not_ready_on_node", "n2": "missing_target_mount"},
-        "destination": {"n1": "missing_target_mount",
-                        "n2": "identity_not_ready_on_node"}}
-    _seed_sync_reports(repos, identities=[{"username": "alice", "status": "Ready"}])
-    assert planner.run_once(now_iso=NOW)[rid] == "planned"
-    job = repos.data_jobs.list_jobs(request_id=rid)[0]
-    assert job["tool"] == "nsync"
-    assert job["worker_pool"]["candidates"] == {"source": ["n1"], "destination": ["n2"]}
-
-
-def test_sync_defers_when_only_destination_has_identity_pending(db):
-    # 합집합의 destination 절반을 고정한다. source 쪽 사유에는 identity 가 하나도
-    # 없고(n1 은 이미 적격, n2 는 src 미마운트) destination 쪽 n2 만 신원 대기다 --
-    # _identity_pending_nodes 가 source dict 만 훑도록 좁아지면 이 요청은 즉시
-    # 거부되고, 그게 이 태스크가 없애려던 과잉 거부다.
-    repos = Repositories(db)
-    _seed_sync_storages(repos)
-    _seed_policy(repos, "nsync")
-    _seed_sync_node(repos, "n1", "src", identity_ready=True)
-    _seed_sync_node(repos, "n2", "dst", identity_ready=False)
-    rid = _sync_request(repos)
-    _backdate(db, rid, "2026-08-02T09:58:00Z")
-    planner = _planner(repos)
-    assert planner.run_once(now_iso=NOW)[rid] == "deferred:identity_propagating"
-    assert repos.requests.get(rid)["state"] == "Pending"
-    events = repos.observability.events_for_request(rid)
-    assert events[0]["payload"]["rejections"] == {
-        "source": {"n2": "missing_target_mount"},
-        "destination": {"n1": "missing_target_mount",
-                        "n2": "identity_not_ready_on_node"}}
-    # 유예 사유가 destination 쪽에만 있어도 전파되면 정상 수렴한다.
-    _seed_sync_node(repos, "n2", "dst", identity_ready=True)
-    assert planner.run_once(now_iso=NOW)[rid] == "planned"
-    job = repos.data_jobs.list_jobs(request_id=rid)[0]
-    assert job["worker_pool"]["candidates"] == {"source": ["n1"], "destination": ["n2"]}
-
-
-def test_sync_defers_when_only_source_has_identity_pending(db):
-    # 위의 거울상 -- 합집합의 source 절반을 고정한다(destination 쪽만 훑는 회귀를 잡는다).
-    repos = Repositories(db)
-    _seed_sync_storages(repos)
-    _seed_policy(repos, "nsync")
-    _seed_sync_node(repos, "n1", "src", identity_ready=False)
-    _seed_sync_node(repos, "n2", "dst", identity_ready=True)
-    rid = _sync_request(repos)
-    _backdate(db, rid, "2026-08-02T09:58:00Z")
-    planner = _planner(repos)
-    assert planner.run_once(now_iso=NOW)[rid] == "deferred:identity_propagating"
-    assert repos.requests.get(rid)["state"] == "Pending"
-    events = repos.observability.events_for_request(rid)
-    assert events[0]["payload"]["rejections"] == {
-        "source": {"n1": "identity_not_ready_on_node",
-                   "n2": "missing_target_mount"},
-        "destination": {"n1": "missing_target_mount"}}
-    _seed_sync_node(repos, "n1", "src", identity_ready=True)
-    assert planner.run_once(now_iso=NOW)[rid] == "planned"
-    job = repos.data_jobs.list_jobs(request_id=rid)[0]
-    assert job["worker_pool"]["candidates"] == {"source": ["n1"], "destination": ["n2"]}
-
-
-def test_sync_without_identity_pending_rejects_immediately(db):
-    # 양쪽 합집합에 신원 사유 노드가 0 -- 전파돼도 적격이 될 노드가 없으므로 즉시 거부.
-    repos = Repositories(db)
-    _seed_sync_storages(repos)
-    _seed_policy(repos, "nsync")
-    _seed_unmounted_report(repos, "n1", tool="nsync")
-    _seed_unmounted_report(repos, "n2", tool="nsync")
-    rid = _sync_request(repos)
-    _backdate(db, rid, "2026-08-02T09:58:00Z")        # grace 안이어도
-    assert _planner(repos).run_once(now_iso=NOW)[rid] == "rejected:no_ready_sync_candidate"
-    assert repos.requests.get(rid)["state"] == "Rejected"
-
-
-def test_sync_identity_grace_expired_rejects(db):
-    repos = Repositories(db)
-    _seed_sync_storages(repos)
-    _seed_policy(repos, "nsync")
-    _seed_sync_reports(repos, identities=[])
-    rid = _sync_request(repos)
-    _backdate(db, rid, "2026-08-02T09:54:00Z")        # 나이 360s > grace 300s
-    assert _planner(repos).run_once(now_iso=NOW)[rid] == "rejected:no_ready_sync_candidate"
-    assert repos.requests.get(rid)["state"] == "Rejected"
-
-
-def test_repeated_defer_records_event_once_until_reason_changes(db):
-    # 유예는 매 틱(기본 10s) 재평가된다 -- 틱마다 남기면 grace 300s 동안 요청 하나에
-    # 30건이 쌓여 요청 상세의 이벤트 목록(limit 100)을 유예 잡음으로 덮는다.
-    # 사유가 바뀔 때만(첫 유예 포함) 남긴다.
-    repos = Repositories(db)
-    _seed_storage(repos); _seed_policy(repos); _seed_identity_pending_report(repos)
-    rid = _scan_request(repos)
-    _backdate(db, rid, "2026-08-02T09:58:00Z")
-    planner = _planner(repos)
-    for _ in range(3):
-        assert planner.run_once(now_iso=NOW)[rid] == "deferred:identity_propagating"
-    assert len(repos.observability.events_for_request(rid)) == 1
-    # 사유가 바뀌면 다시 남긴다 -- 억제는 "같은 사유의 연속"에만 적용된다.
-    _seed_unmounted_report(repos, "n2")
-    assert planner.run_once(now_iso=NOW)[rid] == "deferred:identity_propagating"
-    events = repos.observability.events_for_request(rid)
-    assert len(events) == 2
-    assert events[1]["payload"]["rejections"]["n2"] == "missing_target_mount"
-
-
-# --- 슬라이스 33(A'): node_count 명시 요청은 유예 창 안에서 요청 수를 기다린다 ---
-
-def _scan_request_with_count(repos, count, key="data.scan:s1:a:ff"):
-    return repos.requests.create(
-        operation="scan", requester_id="alice", actor="alice",
-        resource_key=key, payload={"storage": "s1", "target": "a", "options": {},
-                                   "owner_username": None, "node_count": count},
-        priority="mid")
-
-
-def test_requested_node_count_waits_within_grace(db):
-    # 적격 1 < 목표 2 인데 부족 사유가 신원 전파 대기 -- 유예 창 안에서는 있는
-    # 만큼으로 계획하지 않고 다음 틱을 기다린다(실측 사고: 전파 중 1대만 준비된
-    # 틱에 계획돼 요청 2대가 1대로 박제).
-    repos = Repositories(db)
-    _seed_storage(repos); _seed_policy(repos)
-    _seed_report(repos, node="n1")                     # 적격
-    _seed_identity_pending_report(repos, node="n2")    # 신원만 대기
-    rid = _scan_request_with_count(repos, 2)
-    _backdate(db, rid, "2026-08-02T09:58:00Z")         # 나이 120s < grace 300s
-    planner = _planner(repos)
-    assert planner.run_once(now_iso=NOW)[rid] == "deferred:awaiting_requested_nodes"
-    assert repos.requests.get(rid)["state"] == "Pending"
-    assert repos.data_jobs.list_jobs(request_id=rid) == []
-    events = repos.observability.events_for_request(rid)
-    assert [e["event_type"] for e in events] == ["awaiting_requested_nodes"]
-    assert events[0]["severity"] == "info"
-    assert events[0]["payload"] == {"eligible": 1, "target": 2,
-                                    "not_ready_nodes": ["n2"]}
-    # identity_propagating 과 같은 중복 억제 관례 -- 같은 사유의 연속 유예는 1건만.
-    assert planner.run_once(now_iso=NOW)[rid] == "deferred:awaiting_requested_nodes"
-    assert len(repos.observability.events_for_request(rid)) == 1
-
-
-def test_requested_node_count_grace_expired_plans_with_available(db):
-    # 마감 있는 최선: 유예 만료 후 첫 틱엔 있는 만큼으로 계획한다.
-    repos = Repositories(db)
-    _seed_storage(repos); _seed_policy(repos)
-    _seed_report(repos, node="n1")
-    _seed_identity_pending_report(repos, node="n2")
-    rid = _scan_request_with_count(repos, 2)
-    _backdate(db, rid, "2026-08-02T09:54:00Z")         # 나이 360s > grace 300s
-    assert _planner(repos).run_once(now_iso=NOW)[rid] == "planned"
-    wp = repos.data_jobs.list_jobs(request_id=rid)[0]["worker_pool"]
-    assert wp["node_count"] == 1
-    assert wp["candidates"]["primary"] == ["n1"]
-
-
-def test_requested_node_count_non_identity_shortage_plans_immediately(db):
-    # 부족하지만 신원 사유 노드가 0(미마운트만) -- 기다려도 늘어나지 않으므로
-    # grace 안이어도 즉시 계획한다.
-    repos = Repositories(db)
-    _seed_storage(repos); _seed_policy(repos)
-    _seed_report(repos, node="n1")
-    _seed_unmounted_report(repos, "n2")
-    rid = _scan_request_with_count(repos, 2)
-    _backdate(db, rid, "2026-08-02T09:58:00Z")
-    assert _planner(repos).run_once(now_iso=NOW)[rid] == "planned"
-    wp = repos.data_jobs.list_jobs(request_id=rid)[0]["worker_pool"]
-    assert wp["node_count"] == 1
-
-
-def test_unspecified_node_count_plans_immediately_despite_identity_pending(db):
-    # 회귀 금지: node_count 미지정이면 현행대로 적격 >= 1 에서 즉시 계획한다 --
-    # A' 분기는 요청이 수를 명시했을 때만 발동한다(null != 0).
-    repos = Repositories(db)
-    _seed_storage(repos); _seed_policy(repos)
-    _seed_report(repos, node="n1")
-    _seed_identity_pending_report(repos, node="n2")
-    rid = _scan_request(repos)
-    _backdate(db, rid, "2026-08-02T09:58:00Z")
-    assert _planner(repos).run_once(now_iso=NOW)[rid] == "planned"
-    wp = repos.data_jobs.list_jobs(request_id=rid)[0]["worker_pool"]
-    assert wp["node_count"] == 1
-
-
-def test_requested_node_count_target_is_policy_capped(db):
-    # 목표는 min(요청, 정책 max_nodes) -- 정책이 허용 안 하는 수(요청 8)를
-    # 기다리지 않는다. 적격 4 = 정책 캡 4 이므로 신원 대기 노드가 있어도 즉시 계획.
-    repos = Repositories(db)
-    _seed_storage(repos)
-    repos.control.upsert_policy("scan", max_nodes=4, procs_per_node=8,
-                                queue="dms-data", default_priority="mid",
-                                max_priority="high", preview_timeout_seconds=3600,
-                                execution_timeout_seconds=3600, enabled=True,
-                                actor="admin")
-    for node in ("n1", "n2", "n3", "n4"):
-        _seed_report(repos, node=node)
-    _seed_identity_pending_report(repos, node="n5")
-    rid = _scan_request_with_count(repos, 8)
-    _backdate(db, rid, "2026-08-02T09:58:00Z")         # grace 안이어도
-    assert _planner(repos).run_once(now_iso=NOW)[rid] == "planned"
-    wp = repos.data_jobs.list_jobs(request_id=rid)[0]["worker_pool"]
-    assert wp["node_count"] == 4
-    assert wp["candidates"]["primary"] == ["n1", "n2", "n3", "n4"]
-
-
-def test_requested_node_count_plans_when_target_reached(db):
-    # 정상 종료 경로: 전파가 완료돼 적격이 목표에 도달하면 요청한 수로 계획한다.
-    repos = Repositories(db)
-    _seed_storage(repos); _seed_policy(repos)
-    _seed_report(repos, node="n1")
-    _seed_identity_pending_report(repos, node="n2")
-    rid = _scan_request_with_count(repos, 2)
-    _backdate(db, rid, "2026-08-02T09:58:00Z")
-    planner = _planner(repos)
-    assert planner.run_once(now_iso=NOW)[rid] == "deferred:awaiting_requested_nodes"
-    _seed_report(repos, node="n2")                     # 전파 완료
-    assert planner.run_once(now_iso=NOW)[rid] == "planned"
-    wp = repos.data_jobs.list_jobs(request_id=rid)[0]["worker_pool"]
-    assert wp["node_count"] == 2
-    assert wp["candidates"]["primary"] == ["n1", "n2"]
-
-
-def test_sync_requested_node_count_waits_per_side(db):
-    # sync 는 max_nodes 가 면당 상한이므로 목표도 면당 동일 규칙 -- source 는
-    # 충족(2)이어도 destination 이 부족(1<2)이고 그 사유가 신원 대기면 기다린다.
-    repos = Repositories(db)
-    _seed_sync_storages(repos)
-    _seed_policy(repos, "nsync")
-    _seed_sync_node(repos, "s1", "src", identity_ready=True)
-    _seed_sync_node(repos, "s2", "src", identity_ready=True)
-    _seed_sync_node(repos, "d1", "dst", identity_ready=True)
-    _seed_sync_node(repos, "d2", "dst", identity_ready=False)
-    rid = repos.requests.create(
-        operation="sync", requester_id="alice", actor="alice",
-        resource_key="data.sync:src:a:dst:b:ff",
-        payload={"source_storage": "src", "source": "a",
-                 "destination_storage": "dst", "destination": "b",
-                 "options": {}, "owner_username": None, "node_count": 2},
-        priority="mid")
-    _backdate(db, rid, "2026-08-02T09:58:00Z")
-    planner = _planner(repos)
-    assert planner.run_once(now_iso=NOW)[rid] == "deferred:awaiting_requested_nodes"
-    assert repos.requests.get(rid)["state"] == "Pending"
-    events = repos.observability.events_for_request(rid)
-    assert [e["event_type"] for e in events] == ["awaiting_requested_nodes"]
-    assert events[0]["payload"] == {
-        "eligible": {"source": 2, "destination": 1}, "target": 2,
-        "not_ready_nodes": ["d2"]}
-    _seed_sync_node(repos, "d2", "dst", identity_ready=True)  # 전파 완료
-    assert planner.run_once(now_iso=NOW)[rid] == "planned"
-    wp = repos.data_jobs.list_jobs(request_id=rid)[0]["worker_pool"]
-    assert wp["source_count"] == 2 and wp["destination_count"] == 2
-
-
-class _PrivSettings:
-    agent_report_stale_seconds = 300
-    allow_privileged_requesters = True
-    privileged_requesters = frozenset({"root"})
-    planner_identity_grace_seconds = 300
-
-
-def _root_request(repos, key, auth_method, run_as_root=False):
-    payload = {"storage": "s1", "target": "a", "options": {}, "owner_username": None}
-    if run_as_root:
-        payload["run_as_root"] = True
-    return repos.requests.create(
-        operation="scan", requester_id="root", actor="root", resource_key=key,
-        payload=payload,
-        priority="mid", auth_method=auth_method)
-
-
-def test_session_auth_root_request_runs_privileged(db):
-    repos = Repositories(db)
-    _seed_storage(repos); _seed_policy(repos); _seed_report(repos, user="root")
-    rid = _root_request(repos, "k-session", "session", run_as_root=True)
-    resolver = StubIdentityResolver(
-        {"root": ResolvedIdentity("root", 5000, 5000, (), False)})
-    Planner(repos, resolver, settings=_PrivSettings()).run_once(now_iso=NOW)
-    ident = repos.data_jobs.list_jobs(request_id=rid)[0]["worker_pool"]["identity"]
-    assert ident["uid"] == 0 and ident["privileged"] is True
-
-
-def test_token_auth_root_request_never_runs_privileged(db):
-    # 설계 §2.2-2 심층 방어: 토큰 인증이면 requester_id 가 root 라도 uid 0 이 아니라
-    # LDAP 로 해석된 실제 uid 로 돈다. (Task 1 이 애초에 token 으로 requester_id=root
-    # 를 못 만들게 막지만, 다른 경로로 들어와도 여기서 다시 끊긴다.)
-    repos = Repositories(db)
-    _seed_storage(repos); _seed_policy(repos); _seed_report(repos, user="root")
-    rid = _root_request(repos, "k-token", "token")
-    resolver = StubIdentityResolver(
-        {"root": ResolvedIdentity("root", 5000, 5000, (), False)})
-    Planner(repos, resolver, settings=_PrivSettings()).run_once(now_iso=NOW)
-    ident = repos.data_jobs.list_jobs(request_id=rid)[0]["worker_pool"]["identity"]
-    assert ident["uid"] == 5000 and ident["privileged"] is False
-
-
-def test_privileged_batch_child_plans_for_non_ldap_requester(db):
-    """배치 특권 실행의 종단 통합: LDAP 밖 로컬 admin 이 만든 세션 배치의 자식이
-    (a) 상속된 auth_method="session" + allowlist 로 특권을 얻어 root 로 계획되고
-    (b) placement 신원 게이트를 건너뛴다(placement.py -- privileged 는 노드 신원
-    전파와 무관). 이 성질이 없으면 실사고 그대로 ldap_identity_not_found 즉시
-    Rejected 다(배치 자식 token 고정 시절의 그 경로)."""
+def test_privileged_batch_child_plans_for_a_creator_without_a_listed_owner(db):
+    """배치 특권 실행의 종단 통합: 로컬 admin 이 만든 세션 배치의 자식이 상속된 auth_method="session" + allowlist 로
+    root(IF_ELIGIBLE)로 계획되고, 자식의 실행 신원 지정(owner alice)이 스냅숏 이름이 된다."""
     from dms.batch_orchestrator import BatchOrchestrator
 
-    class _AdminPrivSettings(_PrivSettings):
+    class _AdminPrivSettings(_Settings):
         privileged_requesters = frozenset({"admin"})
 
     repos = Repositories(db)
-    _seed_storage(repos); _seed_policy(repos)
-    # 신원 미전파 리포트(identities: []) -- 특권이 아니면 후보 0 이 되는 형상.
-    _seed_identity_pending_report(repos)
-    # 배치는 관리자 전용 라우트에서만 생긴다 -- 생성자 admin 은 로컬 관리자 계정(LDAP 밖)이다. 자식의 실행 신원
-    # 지정(owner alice)은 planner 가 API 와 같은 술어(계정 역할 + 목록)로 다시 본다(2026-10-07).
+    _seed_storage(repos); _seed_policy(repos); _seed_report(repos)
+    # 배치는 관리자 전용 라우트에서만 생긴다 -- 자식의 실행 신원 지정(owner alice)은 planner 가 API 와 같은 술어(계정 역할 +
+    # 목록)로 다시 본다(2026-10-07).
     repos.accounts.create("admin", "pw", "admin")
     bid = repos.batches.create(
         operation="scan", requester_id="admin", actor="admin", max_concurrency=1,
@@ -825,11 +374,9 @@ def test_privileged_batch_child_plans_for_non_ldap_requester(db):
         status="Running", owner_username="alice", auth_method="session")
     BatchOrchestrator(repos, settings=_AdminPrivSettings()).run_once()
     rid = repos.batches.list_items(bid)[0]["request_id"]
-    resolver = StubIdentityResolver({})       # LDAP 에 admin 도 alice 도 없다
-    result = Planner(repos, resolver,
-                     settings=_AdminPrivSettings()).run_once(now_iso=NOW)
+    result = _planner(repos, settings=_AdminPrivSettings()).run_once(now_iso=NOW)
     assert result[rid] == "planned"
-    ident = repos.data_jobs.list_jobs(request_id=rid)[0]["worker_pool"]["identity"]
+    ident = _snapshot(repos, rid)
     assert (ident["username"], ident["uid"], ident["privileged"]) == ("alice", 0, True)
 
 
@@ -890,185 +437,17 @@ def test_conflict_crash_between_writes_leaves_request_pending(db):
                                                            "resource_conflict")
 
 
-class _CountingDownResolver:
-    def __init__(self):
-        self.calls = 0
-
-    def resolve(self, username, *, deadline=None):
-        from dms.identity import IdentityUnavailable
-        self.calls += 1
-        raise IdentityUnavailable("ldap down")
-
-
-def test_ldap_outage_trips_the_tick_circuit_and_leaves_the_rest_pending(db):
-    # LDAP 가 죽은 틱: 첫 요청만 LDAP 에 가서 ldap_unavailable 로 거부되고(기존 의미), 나머지는 LDAP 에 다시 가지
-    # 않고 Pending 으로 남는다 -- 틱마다 대기 요청 수 × 타임아웃만큼 단일 스레드 컨트롤러가 멈추던 것을 막는다.
-    repos = Repositories(db)
-    _seed_storage(repos); _seed_policy(repos); _seed_report(repos)
-    rids = [_scan_request(repos, key=f"data.scan:s1:a{i}:ff") for i in range(3)]
-    down = _CountingDownResolver()
-    result = _planner(repos, resolver=down).run_once(now_iso=NOW)
-    assert down.calls == 1
-    assert result[rids[0]] == "rejected:ldap_unavailable"
-    assert [result[r] for r in rids[1:]] == ["deferred:ldap_circuit_open"] * 2
-    assert [repos.requests.get(r)["state"] for r in rids[1:]] == ["Pending", "Pending"]
-    # 다음 틱은 다시 LDAP 를 시도한다(LDAP 가 돌아오면 바로 이어진다).
-    result = _planner(repos).run_once(now_iso=NOW)
-    assert [result[r] for r in rids[1:]] == ["planned", "planned"]
-
-
-# --- 보조 그룹(2026-10-07): 스냅숏 4키·D5·D7·이벤트·owner 자격 재확인·틱 예산 ------------------------------
-
-class _GroupSettings(_Settings):
-    identity_supplementary_groups = True
-
-
-def _alice_with(gids, gid=10000):
-    return ResolvedIdentity("alice", 10001, gid, ("dmsusers", "proj"), False, group_gids=tuple(gids))
-
-
-def _plan_scan_with(repos, ident, *, settings=None):
-    _seed_storage(repos); _seed_policy(repos); _seed_report(repos)
-    rid = _scan_request(repos)
-    result = Planner(repos, StubIdentityResolver({"alice": ident}),
-                     settings=settings or _GroupSettings()).run_once(now_iso=NOW)
-    return rid, result[rid]
-
-
-def _snapshot(repos, rid):
-    return repos.data_jobs.list_jobs(request_id=rid)[0]["worker_pool"]["identity"]
-
-
-def _events(repos, rid, event_type):
-    return [e for e in repos.observability.events_for_request(rid) if e["event_type"] == event_type]
-
-
-def test_snapshot_records_supplementary_groups(db):
-    repos = Repositories(db)
-    rid, outcome = _plan_scan_with(repos, _alice_with((10000, 20002, 20001)))
-    assert outcome == "planned"
-    ident = _snapshot(repos, rid)
-    # 4키 값과 **타입**(JSON 그대로의 list·str·int) -- stepper·매니페스트·포탈이 이 모양을 읽는다.
-    assert ident["supplementary_gids"] == [20001, 20002] and type(ident["supplementary_gids"]) is list
-    assert ident["supplementary_gids_status"] == "applied" and type(ident["supplementary_gids_status"]) is str
-    assert ident["supplementary_gids_excluded"] == [] and type(ident["supplementary_gids_excluded"]) is list
-    assert ident["supplementary_gids_found"] == 2 and type(ident["supplementary_gids_found"]) is int
-    assert "group_gids" not in ident                  # 리졸버 원시값은 싣지 않는다
-    assert (ident["uid"], ident["gid"], ident["groups"]) == (10001, 10000, ["dmsusers", "proj"])
-    assert _events(repos, rid, "identity_groups_filtered") == []
-
-
-def test_snapshot_without_groups_is_none(db):
-    repos = Repositories(db)
-    rid, _ = _plan_scan_with(repos, ALICE)
-    ident = _snapshot(repos, rid)
-    assert (ident["supplementary_gids"], ident["supplementary_gids_status"],
-            ident["supplementary_gids_excluded"], ident["supplementary_gids_found"]) == ([], "none", [], 0)
-
-
-def test_switch_off_records_disabled(db):
-    # 설정 스텁에 스위치가 없으면 꺼짐(fail-closed) -- 실 Settings 의 기본은 켬(D9).
-    repos = Repositories(db)
-    rid, _ = _plan_scan_with(repos, _alice_with((20001,)), settings=_Settings())
-    ident = _snapshot(repos, rid)
-    assert ident["supplementary_gids"] == [] and ident["supplementary_gids_status"] == "disabled"
-    assert ident["supplementary_gids_found"] is None   # 모름(보지 않았다) ≠ 0
-
-
-def test_over_limit_records_status_and_one_event(db):
-    from dms.identity import MAX_SUPPLEMENTARY_GROUPS
-    repos = Repositories(db)
-    rid, outcome = _plan_scan_with(repos, _alice_with(range(30000, 30000 + MAX_SUPPLEMENTARY_GROUPS + 1)))
-    assert outcome == "planned"                        # D4: 거부가 아니라 통째로 미적용(오늘 동작)
-    ident = _snapshot(repos, rid)
-    assert ident["supplementary_gids"] == [] and ident["supplementary_gids_status"] == "over_limit"
-    assert ident["supplementary_gids_found"] == MAX_SUPPLEMENTARY_GROUPS + 1
-    events = _events(repos, rid, "identity_groups_filtered")
-    assert len(events) == 1 and events[0]["severity"] == "info"
-    assert events[0]["payload"] == {"status": "over_limit", "found": MAX_SUPPLEMENTARY_GROUPS + 1,
-                                    "limit": MAX_SUPPLEMENTARY_GROUPS, "excluded": []}
-
-
-def test_excluded_gids_recorded_with_event(db):
-    repos = Repositories(db)
-    rid, _ = _plan_scan_with(repos, _alice_with((20001, -1, 2147483648)))
-    ident = _snapshot(repos, rid)
-    assert ident["supplementary_gids"] == [20001] and ident["supplementary_gids_status"] == "applied"
-    assert ident["supplementary_gids_excluded"] == [-1, 2147483648]
-    events = _events(repos, rid, "identity_groups_filtered")
-    assert len(events) == 1
-    assert events[0]["payload"]["excluded"] == [-1, 2147483648]
-    assert events[0]["payload"]["status"] == "applied"
-
-
-def test_gid_zero_group_emits_root_group_warning(db):
-    repos = Repositories(db)
-    rid, outcome = _plan_scan_with(repos, _alice_with((0, 20001)))
-    assert outcome == "planned"                        # D3: 인정(거부 안 함) -- 가시성만
-    assert _snapshot(repos, rid)["supplementary_gids"] == [0, 20001]
-    events = _events(repos, rid, "identity_groups_root_group")
-    assert len(events) == 1 and events[0]["severity"] == "warning"
-    assert events[0]["payload"] == {"gids": [0, 20001]}
-
-
-def test_filtered_event_not_emitted_on_grace_ticks(db):
-    from dms.identity import MAX_SUPPLEMENTARY_GROUPS
-    many = _alice_with(range(30000, 30000 + MAX_SUPPLEMENTARY_GROUPS + 1))
-    # (a) 신원 전파 유예(identity_propagating)
-    repos = Repositories(db)
-    _seed_storage(repos); _seed_policy(repos); _seed_identity_pending_report(repos)
-    rid = _scan_request(repos)
-    _backdate(db, rid, "2026-08-02T09:58:00Z")
-    planner = Planner(repos, StubIdentityResolver({"alice": many}), settings=_GroupSettings())
-    for _ in range(2):
-        assert planner.run_once(now_iso=NOW)[rid] == "deferred:identity_propagating"
-    assert _events(repos, rid, "identity_groups_filtered") == []
-    _seed_report(repos)
-    assert planner.run_once(now_iso=NOW)[rid] == "planned"
-    assert len(_events(repos, rid, "identity_groups_filtered")) == 1
-    # (b) 요청 노드 수 대기(awaiting_requested_nodes)
-    rid2 = repos.requests.create(
-        operation="scan", requester_id="alice", actor="alice", resource_key="data.scan:s1:b:ff",
-        payload={"storage": "s1", "target": "b", "options": {}, "owner_username": None, "node_count": 2},
-        priority="mid")
-    _backdate(db, rid2, "2026-08-02T09:58:00Z")
-    _seed_identity_pending_report(repos, node="n2")
-    assert planner.run_once(now_iso=NOW)[rid2] == "deferred:awaiting_requested_nodes"
-    assert _events(repos, rid2, "identity_groups_filtered") == []
-    _seed_report(repos, node="n2")
-    assert planner.run_once(now_iso=NOW)[rid2] == "planned"
-    assert len(_events(repos, rid2, "identity_groups_filtered")) == 1
-
-
-def test_primary_gid_zero_rejected_at_plan(db):
-    repos = Repositories(db)
-    rid, outcome = _plan_scan_with(repos, _alice_with((20001,), gid=0))
-    assert outcome == "rejected:identity_root_group_without_privilege"
-    assert repos.data_jobs.list_jobs(request_id=rid) == []
-
-
 # owner_username 자격 재확인(API 와 같은 술어) -- DB 직접 쓰기 방어
 
-def _owner_request(repos, *, requester, owner, key="data.scan:s1:a:ff"):
-    return repos.requests.create(
-        operation="scan", requester_id=requester, actor=requester, resource_key=key,
-        payload={"storage": "s1", "target": "a", "options": {}, "owner_username": owner},
-        priority="mid", auth_method="session")
-
-
-class _OpsSettings(_Settings):
-    allow_privileged_requesters = True
-    privileged_requesters = frozenset({"ops"})
-
-
-def test_owner_override_by_non_privileged_requester_rejected(db):
-    # DB 직접 쓰기: bob 의 요청 payload 만 owner=alice -- alice 의 uid(이제 보조 그룹까지)를 얻지 못한다.
+def test_owner_override_by_a_non_admin_creator_is_rejected(db):
+    # DB 직접 쓰기: 비관리자 bob 의 배치 자식(배치는 맵핑 면제)의 payload 만 owner=alice -- 다른 실행 신원 지정은 관리자 +
+    # 특권 목록만이다(identity.owner_override_allowed, API 와 같은 술어).
     repos = Repositories(db)
     _seed_storage(repos); _seed_policy(repos); _seed_report(repos)
     repos.accounts.create("bob", "pw", ROLE_USER)
-    rid = _owner_request(repos, requester="bob", owner="alice")
-    result = Planner(repos, StubIdentityResolver({"alice": ALICE}),
-                     settings=_OpsSettings()).run_once(now_iso=NOW)
+    rid = _request(repos, "scan", {"storage": "s1", "target": "a", "owner_username": "alice"},
+                   requester="bob", key="k-owner", batch_id="b" * 32, run_as_root=False)
+    result = _planner(repos).run_once(now_iso=NOW)
     assert result[rid] == "rejected:privileged_not_authorized"
     assert repos.requests.get(rid)["state"] == "Rejected"
     assert repos.data_jobs.list_jobs(request_id=rid) == []
@@ -1077,318 +456,57 @@ def test_owner_override_by_non_privileged_requester_rejected(db):
 def test_owner_override_by_eligible_admin_plans(db):
     repos = Repositories(db)
     _seed_storage(repos); _seed_policy(repos); _seed_report(repos)
-    repos.accounts.create("ops", "pw", "admin")
-    rid = _owner_request(repos, requester="ops", owner="alice")
-    result = Planner(repos, StubIdentityResolver({"alice": ALICE}),
-                     settings=_OpsSettings()).run_once(now_iso=NOW)
+    rid = _scan_request(repos, owner_username="alice")
+    result = _planner(repos).run_once(now_iso=NOW)
     assert result[rid] == "planned"
     assert _snapshot(repos, rid)["username"] == "alice"
+    assert _snapshot(repos, rid)["uid"] == 0
 
 
-@pytest.mark.parametrize("owner", ["", " alice", 123, ["x"], "bad name"])
+@pytest.mark.parametrize("owner", ["", " alice", 123, ["x"], "bad name", "Alice", "1234"])
 def test_malformed_owner_rejected_invalid_owner_username(db, owner):
     # 예전: "" 는 resolve 가 '본인'으로 읽었고, 비문자열은 .strip() AttributeError 로 매 틱 plan_error·영구 Pending.
+    # 모양은 계정 아이디 규칙(domain._ACCOUNT_ID_RE -- 대문자·숫자만 거부).
     repos = Repositories(db)
     _seed_storage(repos); _seed_policy(repos); _seed_report(repos)
-    rid = _owner_request(repos, requester="alice", owner=owner)
+    rid = _scan_request(repos, owner_username=owner)
     result = _planner(repos).run_once(now_iso=NOW)
     assert result[rid] == "rejected:invalid_owner_username"
 
 
-# D7 chown gid 멤버십(계획 시점)
-
-def _sync_chown_request(repos, chown, *, run_as_root=False, requester="alice"):
-    payload = {"source_storage": "src", "source": "a", "destination_storage": "dst", "destination": "b",
-               "options": {"chown": chown}, "owner_username": None}
-    if run_as_root:
-        payload["run_as_root"] = True
-    return repos.requests.create(operation="sync", requester_id=requester, actor=requester,
-                                 resource_key="data.sync:src:a:dst:b:ff", payload=payload,
-                                 priority="mid", auth_method="session")
-
-
-def _seed_sync_ready(repos, user="alice"):
+def test_explicit_chown_by_an_operator_plans(db):
+    # 명시 chown 은 특권 운영자만(k8s_access.recheck_request -- chown_not_allowed) -- 운영자의 root sync 는 그대로 계획된다.
+    repos = Repositories(db)
     _seed_sync_storages(repos)
     _seed_policy(repos, "dsync")
-    _seed_sync_reports(repos, [{"username": user, "status": "Ready"}])
-
-
-def test_chown_gid_not_member_rejected(db):
-    repos = Repositories(db)
-    _seed_sync_ready(repos)
-    rid = _sync_chown_request(repos, "10001:30000")
-    result = Planner(repos, StubIdentityResolver({"alice": _alice_with((20001,))}),
-                     settings=_GroupSettings()).run_once(now_iso=NOW)
-    assert result[rid] == "rejected:chown_group_not_member"
-    assert repos.data_jobs.list_jobs(request_id=rid) == []
-
-
-def test_chown_supplementary_gid_member_plans(db):
-    repos = Repositories(db)
-    _seed_sync_ready(repos)
-    rid = _sync_chown_request(repos, "10001:20001")
-    result = Planner(repos, StubIdentityResolver({"alice": _alice_with((20001,))}),
-                     settings=_GroupSettings()).run_once(now_iso=NOW)
-    assert result[rid] == "planned"
-    # 스위치가 꺼져 있으면 적용 목록이 비어 주 gid 만 -- 같은 gid 가 거부된다.
-    rid2 = repos.requests.create(
-        operation="sync", requester_id="alice", actor="alice", resource_key="data.sync:src:c:dst:d:ff",
-        payload={"source_storage": "src", "source": "c", "destination_storage": "dst", "destination": "d",
-                 "options": {"chown": ":20001"}, "owner_username": None},
-        priority="mid", auth_method="session")
-    result = Planner(repos, StubIdentityResolver({"alice": _alice_with((20001,))}),
-                     settings=_Settings()).run_once(now_iso=NOW)
-    assert result[rid2] == "rejected:chown_group_not_member"
-
-
-def test_chown_check_skipped_for_root(db):
-    repos = Repositories(db)
-    _seed_sync_ready(repos, user="root")
-    rid = _sync_chown_request(repos, "0:30000", run_as_root=True, requester="root")
-    result = Planner(repos, StubIdentityResolver({}), settings=_PrivSettings()).run_once(now_iso=NOW)
+    repos.agents.ingest("n1", {"node_name": "n1",
+        "mounts": [{"storage_name": s, "mount_path": f"/mnt/{s}", "status": "Ready", "writable": True}
+                   for s in ("src", "dst")],
+        "tools": [{"name": "dsync", "status": "Ready"}]}, reported_at="2026-08-02T09:59:00Z")
+    rid = _sync_request(repos, options={"chown": "0:30000"})
+    result = _planner(repos).run_once(now_iso=NOW)
     assert result[rid] == "planned"
     assert _snapshot(repos, rid)["privileged"] is True
 
 
-# 틱 LDAP 예산·IdentityLookupInvalid(서킷 비개방)
-
-class _ClockResolver:
-    """resolve 마다 가짜 monotonic 을 step 초 전진시키고 받은 deadline 을 기록한다."""
-    def __init__(self, users, clock, step):
-        self._inner = StubIdentityResolver(users)
-        self._clock, self._step = clock, step
-        self.calls = []
-
-    def resolve(self, username, *, deadline=None):
-        self.calls.append((username, deadline, self._clock[0]))
-        self._clock[0] += self._step
-        return self._inner.resolve(username)
-
-
-def test_tick_budget_defers_remaining_requests(db):
-    from dms.identity import LDAP_TICK_BUDGET_SECONDS
-    repos = Repositories(db)
-    _seed_storage(repos); _seed_policy(repos); _seed_report(repos)
-    rids = [_scan_request(repos, key=f"data.scan:s1:a{i}:ff") for i in range(2)]
-    clock = [1000.0]
-    slow = _ClockResolver({"alice": ALICE}, clock, step=LDAP_TICK_BUDGET_SECONDS + 1)
-    result = Planner(repos, slow, settings=_Settings(),
-                     monotonic=lambda: clock[0]).run_once(now_iso=NOW)
-    assert result[rids[0]] == "planned"
-    assert result[rids[1]] == "deferred:ldap_circuit_open"    # 예산 소진 -- LDAP 를 부르지 않고 Pending
-    assert len(slow.calls) == 1
-    _, deadline, started = slow.calls[0]
-    # 틱 첫 resolve 는 남은 몫 = 예산 = 자체 마감이라 deadline 을 넘기지 않는다(identity.tick_resolve_deadline -- 그
-    # 마감의 중단은 진짜 판정). 남은 몫이 더 짧아진 뒤의 전달은 test_tick_budget_passes_remaining_as_deadline.
-    assert deadline is None
-    assert repos.requests.get(rids[1])["state"] == "Pending"
-    # 다음 틱은 새 예산으로 이어간다.
-    result = Planner(repos, StubIdentityResolver({"alice": ALICE}), settings=_Settings()).run_once(now_iso=NOW)
-    assert result[rids[1]] == "planned"
-
-
-def test_lookup_invalid_does_not_open_circuit(db):
-    from dms.identity import IdentityLookupInvalid
-
-    class _DupResolver:
-        def __init__(self):
-            self.calls = []
-
-        def resolve(self, username, *, deadline=None):
-            self.calls.append(username)
-            if username == "dup":
-                raise IdentityLookupInvalid("duplicate user entries: 2")
-            return StubIdentityResolver({"alice": ALICE}).resolve(username)
-    repos = Repositories(db)
-    _seed_storage(repos); _seed_policy(repos); _seed_report(repos)
-    rid_dup = _scan_request(repos, requester="dup", key="data.scan:s1:d:ff")
-    rid_ok = _scan_request(repos, key="data.scan:s1:a:ff")
-    resolver = _DupResolver()
-    result = _planner(repos, resolver=resolver).run_once(now_iso=NOW)
-    assert result[rid_dup] == "rejected:ldap_unavailable"     # 그 요청만(계획 시점 의미는 그대로)
-    assert result[rid_ok] == "planned"                        # 같은 틱의 다른 사용자는 계속
-    assert resolver.calls == ["dup", "alice"]
-
-
-def test_lookup_invalid_cause_goes_to_stderr_only(db, capsys):
-    # G6(2026-10-08 리뷰): 같은 ldap_unavailable 로 접히는 원인(중복 엔트리·결과 코드·페이지 상한·URI 오류)을 운영자가
-    # 가를 근거 -- stderr 한 줄. LDAP 원문은 요청 결과·이벤트에 싣지 않는다(비관리자 요청자에게도 반환된다).
-    from dms.identity import IdentityLookupInvalid
-
-    class _DupResolver:
-        def resolve(self, username, *, deadline=None):
-            raise IdentityLookupInvalid("duplicate user entries: 2")
-    repos = Repositories(db)
-    _seed_storage(repos); _seed_policy(repos); _seed_report(repos)
-    rid_dup = _scan_request(repos, key="data.scan:s1:d:ff")
-    assert _planner(repos, resolver=_DupResolver()).run_once(now_iso=NOW)[rid_dup] == "rejected:ldap_unavailable"
-    err = capsys.readouterr().err
-    assert f"planner: {rid_dup} rejected ldap_unavailable: duplicate user entries: 2" in err
-    events = repos.observability.events_for_request(rid_dup)
-    assert all("duplicate" not in (e["message"] or "") and "duplicate" not in str(e["payload"]) for e in events)
-
-
-# ---- G0/G3/G4(2026-10-08 리뷰): 틱 예산 경계 -- 실 LdapIdentityResolver + 실 connect_first + 가짜 시계 ----
-# 예전 _ClockResolver 는 deadline 을 무시하는 페이크라, 예산에 '걸쳐 넘는' resolve 가 plain IdentityUnavailable 로
-# 종단 거부되던 경로를 보지 못했다.
-
-class _LAttr:
-    def __init__(self, v):
-        self.value = v
-
-
-class _LEntry:
-    def __init__(self, attrs):
-        self._a, self.entry_dn = attrs, "uid=alice,ou=p,dc=x"
-
-    def __getitem__(self, k):
-        return _LAttr(self._a[k])
-
-
-class _HealthyConn:
-    """건강한 LDAP: 검색마다 clock 을 search_cost 초 전진(사용자 alice 1건, posixGroup 1건)."""
-    def __init__(self, clock, search_cost):
-        self._clock, self._cost = clock, search_cost
-        self.entries, self.result = [], {"result": 0}
-
-    def search(self, base, flt, attributes=None, paged_size=None, paged_cookie=None):
-        self._clock[0] += self._cost
-        if flt.startswith("(uid="):
-            self.entries = [_LEntry({"uidNumber": 10001, "gidNumber": 10000})]
-        else:
-            self.entries = [_LEntry({"cn": "dmsusers", "gidNumber": 20000, "objectClass": ["posixGroup"]})]
-        self.result = {"result": 0}
-
-    def unbind(self):
-        pass
-
-
-def _real_ldap(clock, uris, *, dead=(), connect_cost=0.05, search_cost=0.05, dead_cost=5.0, rotation=None,
-               tried=None):
-    from dms.identity_ldap import LdapIdentityResolver, connect_first
-    tried = [] if tried is None else tried
-
-    def open_one(uri):
-        tried.append(uri)
-        if uri in dead:
-            clock[0] += dead_cost                 # 타임아웃형 장애(방화벽 drop): connect_timeout 만큼 기다린 뒤 실패
-            raise OSError("timed out")
-        clock[0] += connect_cost
-        return _HealthyConn(clock, search_cost)
-    return LdapIdentityResolver(
-        connect=lambda deadline=None: connect_first(uris, open_one, deadline=deadline,
-                                                    monotonic=lambda: clock[0], rotation=rotation),
-        user_base="ou=p", group_base="ou=g", group_member_attr="memberUid", monotonic=lambda: clock[0])
-
-
-def _states(repos, rids):
-    return [repos.requests.get(r)["state"] for r in rids]
-
-
-def test_budget_straddle_on_healthy_ldap_stays_pending(db):
-    # G0: 건강하지만 느린 LDAP(resolve 1.1s) + 대기 12건 -- 9건 계획 뒤 10번째는 남은 몫 0.1s 로 시작해 그 마감에 걸린다.
-    # 예전엔 rejected:ldap_unavailable(정상 요청의 종단 거부), 이제 Pending 으로 다음 틱.
-    repos = Repositories(db)
-    _seed_storage(repos); _seed_policy(repos); _seed_report(repos)
-    rids = [_scan_request(repos, key=f"data.scan:s1:a{i}:ff") for i in range(12)]
-    clock = [1000.0]
-    res = _real_ldap(clock, ["ldap://b"], connect_cost=0.3, search_cost=0.4)
-    result = Planner(repos, res, settings=_Settings(), monotonic=lambda: clock[0]).run_once(now_iso=NOW)
-    assert [result[r] for r in rids[:9]] == ["planned"] * 9
-    assert [result[r] for r in rids[9:]] == ["deferred:ldap_circuit_open"] * 3
-    assert "Rejected" not in _states(repos, rids)
-    # 다음 틱은 온전한 예산으로 이어 간다.
-    result = Planner(repos, res, settings=_Settings(), monotonic=lambda: clock[0]).run_once(now_iso=NOW)
-    assert [result[r] for r in rids[9:]] == ["planned"] * 3
-
-
-def test_budget_straddle_many_requests_never_rejects(db):
-    # G3: 40건 × 0.4s -- 예전엔 틱마다 정확히 한 건이 ldap_unavailable 로 종단 거부됐다.
-    repos = Repositories(db)
-    _seed_storage(repos); _seed_policy(repos); _seed_report(repos)
-    rids = [_scan_request(repos, key=f"data.scan:s1:m{i}:ff") for i in range(40)]
-    clock = [1000.0]
-    res = _real_ldap(clock, ["ldap://b"], connect_cost=0.3, search_cost=0.05)
-    for _ in range(3):
-        Planner(repos, res, settings=_Settings(), monotonic=lambda: clock[0]).run_once(now_iso=NOW)
-    assert set(_states(repos, rids)) == {"Planned"}
-
-
-def test_dead_primary_uri_with_healthy_secondary_never_rejects(db):
-    # G3/G4 페일오버 형상: p1 이 타임아웃형으로 죽고(5s) r3 는 정상, 대기 3건. 예전 ['Planned','Rejected','Pending'].
-    # (a) 시작 URI 기억(운영 형상 -- build_ldap_resolver): 첫 resolve 가 r3 에 붙은 뒤로는 p1 을 다시 기다리지 않는다.
-    repos = Repositories(db)
-    _seed_storage(repos); _seed_policy(repos); _seed_report(repos)
-    rids = [_scan_request(repos, key=f"data.scan:s1:f{i}:ff") for i in range(3)]
-    clock, tried = [1000.0], []
-    res = _real_ldap(clock, ["ldap://p1", "ldap://r3"], dead={"ldap://p1"}, rotation={"start": 0}, tried=tried)
-    result = Planner(repos, res, settings=_Settings(), monotonic=lambda: clock[0]).run_once(now_iso=NOW)
-    assert [result[r] for r in rids] == ["planned"] * 3
-    assert tried == ["ldap://p1", "ldap://r3", "ldap://r3", "ldap://r3"]
-
-
-def test_dead_primary_without_rotation_defers_instead_of_rejecting(db):
-    # G3 (b) 기억 없이(매 resolve 가 p1 부터): 두 번째 요청은 남은 몫 ~4.8s 로 p1 의 5s 타임아웃에 걸려 r3 를 못 가
-    # 본다 -- 호출자 마감의 중단이라 Pending(다음 틱 계획), 거부가 아니다.
-    repos = Repositories(db)
-    _seed_storage(repos); _seed_policy(repos); _seed_report(repos)
-    rids = [_scan_request(repos, key=f"data.scan:s1:g{i}:ff") for i in range(3)]
-    clock = [1000.0]
-    res = _real_ldap(clock, ["ldap://p1", "ldap://r3"], dead={"ldap://p1"})
-    result = Planner(repos, res, settings=_Settings(), monotonic=lambda: clock[0]).run_once(now_iso=NOW)
-    assert [result[r] for r in rids] == ["planned", "deferred:ldap_circuit_open", "deferred:ldap_circuit_open"]
-    result = Planner(repos, res, settings=_Settings(), monotonic=lambda: clock[0]).run_once(now_iso=NOW)
-    assert result[rids[1]] == "planned"
-    for _ in range(2):
-        Planner(repos, res, settings=_Settings(), monotonic=lambda: clock[0]).run_once(now_iso=NOW)
-    assert _states(repos, rids) == ["Planned"] * 3
-
-
-def test_first_resolve_of_tick_hitting_own_deadline_is_still_rejected(db):
-    # 진행 보장: 틱 첫 resolve 는 deadline 없이(자체 마감 10s) 돌아 그 마감의 중단은 진짜 판정 -- 느린 LDAP(검색 11s)
-    # 에서 첫 요청은 ldap_unavailable 로 거부되고 나머지는 서킷으로 Pending(예산 소진으로 영구 Pending 이 되지 않는다).
-    repos = Repositories(db)
-    _seed_storage(repos); _seed_policy(repos); _seed_report(repos)
-    rids = [_scan_request(repos, key=f"data.scan:s1:h{i}:ff") for i in range(3)]
-    clock = [1000.0]
-    res = _real_ldap(clock, ["ldap://b"], search_cost=11.0)
-    result = Planner(repos, res, settings=_Settings(), monotonic=lambda: clock[0]).run_once(now_iso=NOW)
-    assert result[rids[0]] == "rejected:ldap_unavailable"
-    assert [result[r] for r in rids[1:]] == ["deferred:ldap_circuit_open"] * 2
-
-
-def test_tick_budget_passes_remaining_as_deadline(db):
-    # 남은 몫이 자체 마감보다 짧아진 뒤의 resolve 는 그 몫을 deadline 으로 받는다(첫 resolve 는 None).
-    from dms.identity import LDAP_TICK_BUDGET_SECONDS
-    repos = Repositories(db)
-    _seed_storage(repos); _seed_policy(repos); _seed_report(repos)
-    rids = [_scan_request(repos, key=f"data.scan:s1:k{i}:ff") for i in range(2)]
-    clock = [1000.0]
-    slow = _ClockResolver({"alice": ALICE}, clock, step=3.0)
-    Planner(repos, slow, settings=_Settings(), monotonic=lambda: clock[0]).run_once(now_iso=NOW)
-    assert [d for _u, d, _t in slow.calls] == [None, 1000.0 + LDAP_TICK_BUDGET_SECONDS]
-    assert _states(repos, rids) == ["Planned", "Planned"]
-
-
 # ---- 2026-10-08 요청 삭제 선행 보강(작업 삭제 스펙 §6.2): emit = 한 트랜잭션 + 조건부 Pending→Planned ----
-# planner 는 Pending 요청을 읽은 뒤 LDAP 해석을 거쳐 emit 한다. 그 창에서 취소된 요청을 Planned 로 되살리거나(예전
+# planner 는 Pending 요청을 읽은 뒤 어드미션·노드 선택을 거쳐 emit 한다. 그 창에서 취소된 요청을 Planned 로 되살리거나(예전
 # set_state 에 종단 가드 없음), 지워진 요청에 실행될 Pending 잡을 남기면 안 된다.
 
 _EMIT = dict(operation="scan", priority="mid", storage_name="s1", target="a", options={},
              tool="dscan", worker_pool={}, precondition={}, actor="planner")
 
 
-class _HookResolver:
-    """첫 resolve 도중에 hook 을 한 번 부른다 -- planner 가 요청을 읽은 뒤 emit 하기 전의 창(LDAP 해석)을 흉내."""
-    def __init__(self, hook):
-        self._inner = StubIdentityResolver({"alice": ALICE})
-        self._hook = hook
+def _hook_mid_plan(repos, hook):
+    """계획 도중(요청을 읽은 뒤, emit 전 -- 노드 보고 조회) hook 을 한 번 부른다."""
+    real = repos.agents.fresh_reports
+    pending = [hook]
 
-    def resolve(self, username, *, deadline=None):
-        hook, self._hook = self._hook, None
-        if hook is not None:
-            hook()
-        return self._inner.resolve(username, deadline=deadline)
+    def wrapped(*a, **k):
+        if pending:
+            pending.pop()()
+        return real(*a, **k)
+    repos.agents.fresh_reports = wrapped
 
 
 def _rows(db, table, rid):
@@ -1398,15 +516,16 @@ def _rows(db, table, rid):
 def _cancel(repos, rid):
     from dms.domain import DataJobState
     repos.requests.finalize_from_job(rid, DataJobState.CANCELLED, reason_code="cancelled_by_user",
-                                     actor="alice")
+                                     actor=OPS)
 
 
-def test_cancel_during_ldap_resolution_neither_resurrects_nor_emits(db):
+def test_cancel_during_planning_neither_resurrects_nor_emits(db):
     repos = Repositories(db)
     _seed_storage(repos); _seed_policy(repos); _seed_report(repos)
     rid = _scan_request(repos)
-    result = Planner(repos, _HookResolver(lambda: _cancel(repos, rid)),
-                     settings=_Settings()).run_once(now_iso=NOW)
+    planner = _planner(repos)
+    _hook_mid_plan(repos, lambda: _cancel(repos, rid))
+    result = planner.run_once(now_iso=NOW)
     assert result[rid] == "gone"
     assert repos.requests.get(rid)["state"] == "Cancelled"                 # 부활 없음
     assert [t["to_state"] for t in repos.requests.transitions(rid)] == ["Pending", "Cancelled"]
@@ -1415,10 +534,11 @@ def test_cancel_during_ldap_resolution_neither_resurrects_nor_emits(db):
     assert _rows(db, "results", rid)[0]["terminal_state"] == "Cancelled"
 
 
-def test_delete_during_ldap_resolution_leaves_no_runnable_job(db):
+def test_delete_during_planning_leaves_no_runnable_job(db):
     repos = Repositories(db)
     _seed_storage(repos); _seed_policy(repos); _seed_report(repos)
     rid = _scan_request(repos)
+    planner = _planner(repos)
 
     def cancel_then_delete():
         _cancel(repos, rid)
@@ -1428,7 +548,8 @@ def test_delete_during_ldap_resolution_leaves_no_runnable_job(db):
             for table in ("results", "requests"):
                 db.execute(f"DELETE FROM {table} WHERE request_id = :r", {"r": rid})
 
-    result = Planner(repos, _HookResolver(cancel_then_delete), settings=_Settings()).run_once(now_iso=NOW)
+    _hook_mid_plan(repos, cancel_then_delete)
+    result = planner.run_once(now_iso=NOW)
     assert result[rid] == "gone"
     for table in ("requests", "plans", "data_jobs", "results", "events"):
         assert _rows(db, table, rid) == [], table
@@ -1463,10 +584,11 @@ def test_emit_keeps_transition_order_and_actor(db):
     repos = Repositories(db)
     _seed_storage(repos); _seed_policy(repos); _seed_report(repos)
     rid = _scan_request(repos)
-    assert _planner(repos).run_once(now_iso=NOW)[rid] == "planned"
+    planner = _planner(repos)
+    assert planner.run_once(now_iso=NOW)[rid] == "planned"
     rows = db.query("SELECT entity_kind, from_state, to_state, actor FROM state_transitions ORDER BY id")
     assert [(r["entity_kind"], r["from_state"], r["to_state"], r["actor"]) for r in rows] == [
-        ("request", None, "Pending", "alice"),
+        ("request", None, "Pending", OPS),
         ("plan", None, "Planned", "planner"),
         ("data_job", None, "Pending", "planner"),
         ("request", "Pending", "Planned", "planner")]

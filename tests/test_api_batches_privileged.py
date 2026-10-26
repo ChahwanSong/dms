@@ -2,8 +2,8 @@
 
 배치 메뉴는 관리자 운영 메뉴고 사용자 결정은 "배치(scan/sync)는 전부 기본 관리자
 특권(root) 실행"이다. 이전 계약(owner_username 이 있을 때만 게이트)은 allowlist 밖
-admin·토큰 생성 배치를 조용히 비특권으로 강등시켰고, LDAP 밖 계정이면 자식이
-ldap_identity_not_found 로 죽었다 — 강등 대신 생성 시점 403 으로 명시 거부한다.
+admin·토큰 생성 배치를 조용히 비특권으로 강등시켰고, 그 자식은 비 root 신원 해석에서
+죽었다 — 강등 대신 생성 시점 403 으로 명시 거부한다.
 
 게이트는 3중: 기능 플래그(allow_privileged_requesters) + allowlist
 (privileged_requesters) + 세션 인증. admin 역할은 require_admin 이 이미 보장한다.
@@ -97,8 +97,15 @@ def test_token_created_batch_denied(db):
 
 
 def test_feature_flag_off_denied(db):
-    client = _client_with(db, DMS_ALLOW_PRIVILEGED_REQUESTERS="false",
-                          DMS_PRIVILEGED_REQUESTERS="ops")
+    # dms-k8s 는 DMS_ALLOW_PRIVILEGED_REQUESTERS=false 를 기동 거부한다(모든 잡이 root -- config) -- 라우트 게이트는 그래도
+    # 스위치를 따로 본다(이중 봉인). 기동 검증을 건너뛴 설정(dataclass 교체)으로 라우트만 본다.
+    import dataclasses
+    from fastapi.testclient import TestClient
+    from dms.api.app import create_app
+    settings = dataclasses.replace(Settings.from_env({
+        "DMS_DATABASE_URL": "unused", "DMS_SHARED_TOKEN": "tok-shared", "DMS_ADMIN_TOKEN": "tok-admin",
+        "DMS_SESSION_SECRET": "sess", "DMS_PRIVILEGED_REQUESTERS": "ops"}), allow_privileged_requesters=False)
+    client = TestClient(create_app(settings, db))
     _admin_login(client)
     r = client.post("/api/admin/batches", json=BATCH)
     assert r.status_code == 403

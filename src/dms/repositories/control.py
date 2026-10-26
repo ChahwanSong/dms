@@ -68,9 +68,10 @@ class ControlRepository:
             self._audit("denylist", "allow", f"{subject_type}:{subject}",
                         {"subject_type": subject_type, "subject": subject}, None, actor)
 
-    def is_denied(self, *, requester, owner, groups):
+    def is_denied(self, *, requester, owner):
+        """이름 규칙(requester·owner)만 본다. group 행은 평가하지 않는다(k8s 신원 모드 -- LDAP 그룹이 없다; 새 group 규칙은
+        routes_denylist 가 422 denylist_group_unsupported 로 막고, 모드 전환 전의 행은 목록·삭제로 정리한다)."""
         rows = self._db.query("SELECT subject_type, subject FROM identity_denylist")
-        lowered_groups = {g.lower() for g in groups}
         for row in rows:
             subject = row["subject"]
             kind = row["subject_type"]
@@ -78,19 +79,12 @@ class ControlRepository:
                 return subject
             if kind == "owner" and subject.lower() == owner.lower():
                 return subject
-            if kind == "group" and subject.lower() in lowered_groups:
-                return subject
         return None
 
     def list_denylist(self):
         return self._db.query(
             """SELECT subject_type, subject, reason FROM identity_denylist
                ORDER BY subject_type, subject""")
-
-    def has_group_denies(self) -> bool:
-        row = self._db.query_one(
-            "SELECT COUNT(*) AS n FROM identity_denylist WHERE subject_type = 'group'")
-        return bool(row and row["n"])
 
     # --- control state ---
     def control_state(self):

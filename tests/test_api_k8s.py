@@ -435,7 +435,7 @@ def test_end_to_end_overview_runs_and_freshness(admin, repos, db):
     assert c["last_run"]["status"] == "applied" and c["server_version"] == "v1.34.6" and c["fingerprint"] == "ks-uid"
     assert ov["totals"] == {"clusters": 1, "namespaces": 3, "pvcs": 7, "bindings": 9, "users": 4}
     # 가입이 신원을 증명하는가(화면 경고의 근거) -- 이 픽스처는 무인증 가입(open), ldap 모드
-    assert ov["signup_guard"] == "open" and ov["identity_mode"] == "ldap"
+    assert ov["signup_guard"] == "open" and ov["identity_mode"] == "k8s"
     nodes = {n["node_name"]: n for n in ov["nodes"]}
     assert nodes["k8s-w1"]["role"] == "primary" and nodes["k8s-w1"]["capable"] and nodes["k8s-w1"]["serving"] == ["c1"]
     assert nodes["k8s-w1"]["last_ok_at"] and nodes["k8s-w2"]["role"] == "secondary" and nodes["k8s-w2"]["serving"] == []

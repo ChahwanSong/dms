@@ -23,6 +23,27 @@ def _login(client, name):
     client.post("/api/auth/login", json={"username": name, "password": "p"})
 
 
+def _login_ops(client):
+    # 특권 세션 관리자(기본 특권 목록의 admin, role admin, 세션) -- k8s 신원 모드의 면제자라 직접 경로·scan 을 낸다. 공유
+    # 토큰(Bearer)은 제출할 수 없다(root 는 세션 요청만 -- identity.root_allowed).
+    accounts = client.app.state.repos.accounts
+    if accounts.get("admin") is None:
+        accounts.create("admin", "p", "admin")
+    client.cookies.clear()
+    client.post("/api/auth/login", json={"username": "admin", "password": "p"})
+
+
+def _sync_row(client, requester, source="a", destination="b"):
+    # 사용자 요청은 PV 주소로만 제출된다(직접 경로는 면제자만 -- raw_path_not_allowed). 목록·격리·필터가 관심사인 테스트는
+    # 요청 행을 직접 만든다(제출 게이트는 test_k8s_submit 이 고정한다).
+    return client.app.state.repos.requests.create(
+        operation="sync", requester_id=requester, actor=requester,
+        resource_key=f"data.sync:s1:{source}:s1:{destination}",
+        payload={"source_storage": "s1", "source": source, "destination_storage": "s1",
+                 "destination": destination, "options": {}, "owner_username": None, "run_as_root": True},
+        priority="mid", auth_method="session")
+
+
 def _pending_request(repos, requester="alice"):
     # test_api_request_cancel.py의 동명 헬퍼와 동일한 모양 -- 두 파일이 별개의
     # 테스트 모듈이라 공유하지 않고 그대로 복제한다.
@@ -32,13 +53,14 @@ def _pending_request(repos, requester="alice"):
 
 
 def test_submit_scan_and_poll(client):
-    # scan은 관리자 전용 제출이다 (test_scan_submission_is_admin_only 참고) — Bearer로 인증한다.
-    r = client.post("/api/user/requests", headers=ADMIN, json={
+    # scan은 특권 운영자 전용 제출이다 (test_scan_submission_is_admin_only 참고) — 특권 세션 관리자로 낸다.
+    _login_ops(client)
+    r = client.post("/api/user/requests", json={
         "operation": "scan", "storage": "ceph-a", "target": "team/data",
         "options": {"broken_limit": 500}, "priority": "high"})
     assert r.status_code == 202
     rid = r.json()["request_id"]
-    detail = client.get(f"/api/user/requests/{rid}", headers=ADMIN).json()
+    detail = client.get(f"/api/user/requests/{rid}").json()
     assert detail["state"] == "Pending"
     assert detail["operation"] == "scan"
     assert detail["transitions"][0]["to_state"] == "Pending"
@@ -46,23 +68,15 @@ def test_submit_scan_and_poll(client):
 
 
 def test_validation_maps_to_422(client):
-    _login(client, "bob")
-    # 사용자 sync 허용 쌍(2026-09-30): 정책 게이트(403 sync_pair_not_allowed)는 다른 게이트들처럼
-    # 형식 검증보다 앞이라, 검증 경로는 파일 픽스처가 허용해 둔 s -> s 로 본다.
-    # 사용자 allowlist(2026-08-20): 사용자는 sync 만 -- sync 검증 오류만 여기서.
-    cases = [
+    # 직접 경로 검증 오류는 면제자(특권 세션 관리자)의 제출에서 본다 -- 일반 사용자의 직접 경로는 검증 전에
+    # 403 raw_path_not_allowed 다(맵핑 게이트가 형식 검증보다 앞).
+    _login_ops(client)
+    admin_cases = [
         ({"operation": "sync", "source_storage": "s", "source": "a",
           "destination_storage": "s", "destination": "a/b"},
          "sync_destination_inside_source"),
         ({"operation": "sync", "source_storage": "s", "source": "a",
           "destination": "b"}, "missing_destination_storage"),
-    ]
-    for body, reason in cases:
-        r = client.post("/api/user/requests", json=body)
-        assert r.status_code == 422 and r.json()["detail"] == reason, body
-
-    # scan·rm 은 관리자 전용 제출이라 admin 인증으로 검증 오류를 확인한다.
-    admin_cases = [
         ({"operation": "rm", "storage": "s", "target": "a", "options": {}},
          "rm_recursive_required"),
         ({"operation": "rm", "storage": None, "target": "a",
@@ -75,18 +89,13 @@ def test_validation_maps_to_422(client):
           "priority": "urgent"}, "invalid_priority"),
     ]
     for body, reason in admin_cases:
-        r = client.post("/api/user/requests", json=body, headers=ADMIN)
+        r = client.post("/api/user/requests", json=body)
         assert r.status_code == 422 and r.json()["detail"] == reason, body
 
 
 def test_isolation_between_users_and_admin_sees_all(client):
-    _login(client, "alice")
-    # sync 로 요청 생성 -- 사용자 allowlist 는 sync 만(rm 은 403). 이 테스트의
-    # 관심사는 소유권 격리이지 연산 종류가 아니다.
-    rid = client.post("/api/user/requests", json={
-        "operation": "sync", "source_storage": "s1", "source": "a",
-        "destination_storage": "s1", "destination": "b"}).json()["request_id"]
-    client.post("/api/auth/logout")
+    # 이 테스트의 관심사는 소유권 격리이지 제출 경로가 아니다.
+    rid = _sync_row(client, "alice")
     _login(client, "eve")
     assert client.get(f"/api/user/requests/{rid}").status_code == 404
     assert client.get("/api/user/requests").json() == []
@@ -103,26 +112,27 @@ def test_unknown_operation_is_422_not_500(client):
 
 
 def test_scan_submission_is_admin_only(client):
-    # 사용자 연산 allowlist(2026-08-20): 비운영자는 sync 만. scan·rm 은 403.
+    # scan 은 특권 운영자만(2026-10-26 (g) -- scan_unrestricted_only 가 allowlist 보다 먼저), rm 은 사용자 연산
+    # allowlist(2026-08-20, 기본 sync 만) 밖이라 403.
     _login(client, "carol")
-    for op, payload in (("scan", {"operation": "scan", "storage": "s1", "target": "a"}),
-                        ("rm", {"operation": "rm", "storage": "s1", "target": "a",
-                                "options": {"recursive": True}})):
-        r = client.post("/api/user/requests", json=payload)
-        assert (r.status_code, r.json()["detail"]) == (403, "operation_admin_only"), op
+    r = client.post("/api/user/requests", json={"operation": "scan", "storage": "s1", "target": "a"})
+    assert (r.status_code, r.json()["detail"]) == (403, "scan_unrestricted_only")
+    r = client.post("/api/user/requests", json={"operation": "rm", "storage": "s1", "target": "a",
+                                                "options": {"recursive": True}})
+    assert (r.status_code, r.json()["detail"]) == (403, "operation_admin_only")
 
-    # admin 은 allowlist 와 무관하게 scan·rm 모두 가능
-    r = client.post("/api/user/requests", headers=ADMIN, json={
-        "operation": "scan", "storage": "s1", "target": "a"})
-    assert r.status_code == 202
-    r = client.post("/api/user/requests", headers=ADMIN, json={
-        "operation": "rm", "storage": "s1", "target": "b", "options": {"recursive": True}})
-    assert r.status_code == 202
-
-    # sync 는 non-admin 에게 그대로 열려 있다(allowlist 기본값).
+    # sync 는 non-admin 에게 allowlist 로 열려 있다 -- 다음 게이트(직접 경로는 면제자만)가 판정한다.
     r = client.post("/api/user/requests", json={
         "operation": "sync", "source_storage": "s1", "source": "a",
         "destination_storage": "s2", "destination": "b"})
+    assert (r.status_code, r.json()["detail"]) == (403, "raw_path_not_allowed")
+
+    # 특권 운영자는 allowlist 와 무관하게 scan·rm 모두 가능
+    _login_ops(client)
+    r = client.post("/api/user/requests", json={"operation": "scan", "storage": "s1", "target": "a"})
+    assert r.status_code == 202
+    r = client.post("/api/user/requests", json={
+        "operation": "rm", "storage": "s1", "target": "b", "options": {"recursive": True}})
     assert r.status_code == 202
 
 
@@ -254,13 +264,9 @@ def test_request_detail_falls_back_to_the_terminal_transition_when_results_is_mi
 
 def test_request_detail_reason_does_not_leak_to_another_user(client):
     # 사유가 새 필드로 늘었어도 소유권 게이트는 그대로다(타인 요청은 404).
-    _login(client, "alice")
-    rid = client.post("/api/user/requests", json={
-        "operation": "sync", "source_storage": "s1", "source": "a",
-        "destination_storage": "s1", "destination": "b"}).json()["request_id"]
+    rid = _sync_row(client, "alice")
     client.app.state.repos.requests.set_state_with_result(
         rid, RequestState.REJECTED, reason_code="identity_denied", actor="planner")
-    client.post("/api/auth/logout")
     _login(client, "eve")
     assert client.get(f"/api/user/requests/{rid}").status_code == 404
 
@@ -269,12 +275,8 @@ def test_list_limit_param_is_honored_and_capped(client):
     # 대시보드 「최근 작업」(2026-08-13 조정): 최근 200건을 요청한다. limit 은
     # 쿼리 파라미터로 열되 서버가 1..200 으로 캡한다 -- 무제한이면 전량 SELECT 가
     # 화면 하나에 끌려 나온다. 정렬은 commit_order DESC(최신 요청순, 기존 계약).
+    rids = [_sync_row(client, "alice", f"t{i}", f"d{i}") for i in range(3)]
     _login(client, "alice")
-    rids = []
-    for i in range(3):
-        rids.append(client.post("/api/user/requests", json={
-            "operation": "sync", "source_storage": "s1", "source": f"t{i}",
-            "destination_storage": "s1", "destination": f"d{i}"}).json()["request_id"])
     rows = client.get("/api/user/requests", params={"limit": 2}).json()
     assert [r["request_id"] for r in rows] == [rids[2], rids[1]]  # 최신순 + limit
     assert client.get("/api/user/requests", params={"limit": 0}).status_code == 422
@@ -289,12 +291,8 @@ def test_list_limit_param_is_honored_and_capped(client):
 
 def test_list_before_cursor_paginates_without_overlap(client):
     # 무한 스크롤(슬라이스 39): before=commit_order 로 그보다 오래된 것만.
+    rids = [_sync_row(client, "alice", f"t{i}", f"d{i}") for i in range(5)]
     _login(client, "alice")
-    rids = []
-    for i in range(5):
-        rids.append(client.post("/api/user/requests", json={
-            "operation": "sync", "source_storage": "s1", "source": f"t{i}",
-            "destination_storage": "s1", "destination": f"d{i}"}).json()["request_id"])
     page1 = client.get("/api/user/requests", params={"limit": 2}).json()
     assert [r["request_id"] for r in page1] == [rids[4], rids[3]]
     cursor = page1[-1]["commit_order"]
@@ -308,13 +306,9 @@ def test_list_before_cursor_paginates_without_overlap(client):
 
 def test_list_filters_by_operation_and_state(client, db):
     from dms.domain import RequestState
+    sync_rid = _sync_row(client, "alice")
+    _sync_row(client, "alice", "c", "d")
     _login(client, "alice")
-    sync_rid = client.post("/api/user/requests", json={
-        "operation": "sync", "source_storage": "s1", "source": "a",
-        "destination_storage": "s1", "destination": "b"}).json()["request_id"]
-    client.post("/api/user/requests", json={
-        "operation": "sync", "source_storage": "s1", "source": "c",
-        "destination_storage": "s1", "destination": "d"})
     # operation 필터
     rows = client.get("/api/user/requests", params={"operation": "sync"}).json()
     assert len(rows) == 2 and all(r["operation"] == "sync" for r in rows)
@@ -329,15 +323,9 @@ def test_list_filters_by_operation_and_state(client, db):
 def test_list_requester_filter_is_admin_only(client):
     # 운영자만 requester 로 남의 작업을 필터할 수 있다. 사용자는 파라미터를 줘도
     # 자기 것만 본다(격리).
-    _login(client, "alice")
-    a_rid = client.post("/api/user/requests", json={
-        "operation": "sync", "source_storage": "s1", "source": "a",
-        "destination_storage": "s1", "destination": "b"}).json()["request_id"]
-    client.post("/api/auth/logout")
+    a_rid = _sync_row(client, "alice")
+    b_rid = _sync_row(client, "bob", "c", "d")
     _login(client, "bob")
-    b_rid = client.post("/api/user/requests", json={
-        "operation": "sync", "source_storage": "s1", "source": "c",
-        "destination_storage": "s1", "destination": "d"}).json()["request_id"]
     # bob 이 requester=alice 를 줘도 자기 것만(격리)
     rows = client.get("/api/user/requests", params={"requester": "alice"}).json()
     assert [r["request_id"] for r in rows] == [b_rid]

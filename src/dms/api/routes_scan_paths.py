@@ -8,7 +8,6 @@ import re
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
-from .. import k8s_access
 from ..artifact_base import resolve_artifact_base
 from ..domain import DomainValidationError, validate_relative_path
 from ..repositories.scan_paths import covers
@@ -104,13 +103,12 @@ class ScanPathBody(BaseModel):
     path: str
 
 
-def _require_unrestricted_in_k8s_mode(request: Request, identity: Identity) -> None:
+def _require_unrestricted(request: Request, identity: Identity) -> None:
     """k8s 신원 모드(2026-10-25 dms-k8s 설계 §6): 스캔 경로는 스토리지 + 직접 경로라 맵핑 판정이 없다 -- 비면제자가 남의
-    namespace PV 서브트리의 scan 통계(숫자)를 보는 길이 된다. 그래서 k8s 모드에서는 면제자(can_run_as_root -- 전체 PV·직접
-    경로 권한) 전용이다. 등록과 통계 조회를 막고, 목록·삭제는 둔다(모드 전환 전 등록분을 지울 수 있게). PV 주소 기반 스캔
-    경로는 후속(BACKLOG)."""
-    if k8s_access.k8s_mode(request.app.state.settings) and not can_run_as_root(
-            identity, request.app.state.settings, request.app.state.repos):
+    namespace PV 서브트리의 scan 통계(숫자)를 보는 길이 된다. 그래서 면제자(can_run_as_root -- 전체 PV·직접 경로 권한)
+    전용이다. 등록과 통계 조회를 막고, 목록·삭제는 둔다(k8s 모드 전환 전 등록분을 지울 수 있게). PV 주소 기반 스캔 경로는
+    후속(BACKLOG)."""
+    if not can_run_as_root(identity, request.app.state.settings, request.app.state.repos):
         raise HTTPException(status_code=422, detail="scan_path_unrestricted_only")
 
 
@@ -130,7 +128,7 @@ def list_scan_paths(request: Request, identity: Identity = Depends(require_user)
 @router.post("/api/user/scan-paths", status_code=201)
 def add_scan_path(body: ScanPathBody, request: Request,
                   identity: Identity = Depends(require_user)):
-    _require_unrestricted_in_k8s_mode(request, identity)
+    _require_unrestricted(request, identity)
     try:
         path = validate_relative_path(body.path)
     except DomainValidationError as e:
@@ -164,7 +162,7 @@ def scan_path_stats(path_id: int, request: Request,
     row = repos.scan_paths.get_owned(path_id, identity.actor)
     if row is None:
         raise HTTPException(status_code=404, detail="scan_path_not_found")
-    _require_unrestricted_in_k8s_mode(request, identity)
+    _require_unrestricted(request, identity)
     # 슬라이스 18: DB 우선 해석(설계 §2.1) -- routes_artifacts._base 와 같은 이유.
     base = strip_scheme(resolve_artifact_base(repos.control,
                                               request.app.state.settings))

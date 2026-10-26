@@ -25,11 +25,14 @@ def test_denylist_matching(db):
     repo = ControlRepository(db)
     repo.deny("requester", "Mallory", reason="incident", actor="admin")
     repo.deny("group", "blocked-team", reason=None, actor="admin")
-    assert repo.is_denied(requester="mallory", owner="x", groups=[]) == "mallory"
-    assert repo.is_denied(requester="a", owner="b", groups=["Blocked-Team"]) == "blocked-team"
-    assert repo.is_denied(requester="a", owner="b", groups=["ok"]) is None
+    assert repo.is_denied(requester="mallory", owner="x") == "mallory"
+    # group 행은 평가하지 않는다(k8s 신원 모드 -- LDAP 그룹이 없다). 행은 남아 목록·삭제로 정리한다.
+    assert repo.is_denied(requester="blocked-team", owner="b") is None
+    assert {r["subject_type"] for r in repo.list_denylist()} == {"requester", "group"}
     repo.allow("requester", "Mallory", actor="admin")
-    assert repo.is_denied(requester="mallory", owner="x", groups=[]) is None
+    assert repo.is_denied(requester="mallory", owner="x") is None
+    repo.deny("owner", "Victim", reason=None, actor="admin")
+    assert repo.is_denied(requester="a", owner="victim") == "victim"
 
 
 def test_control_state_roundtrip(db):
@@ -55,7 +58,7 @@ def test_denylist_case_insensitive_write_paths(db):
     rows = db.query("SELECT subject FROM identity_denylist WHERE subject_type = 'requester'")
     assert rows == [{"subject": "mallory"}]
     repo.allow("requester", "mAlLoRy", actor="admin")  # 케이스 달라도 삭제됨
-    assert repo.is_denied(requester="Mallory", owner="x", groups=[]) is None
+    assert repo.is_denied(requester="Mallory", owner="x") is None
 
 
 def test_audit_entries_returns_latest_first(db):

@@ -99,9 +99,6 @@ class DomainValidationError(Exception):
         super().__init__(f"{reason_code}: {detail}" if detail else reason_code)
 
 
-_USERNAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9._-]{0,63}$")
-
-
 def validate_relative_path(path: str) -> str:
     if not path or path.startswith("/") or "\x00" in path:
         raise DomainValidationError("unsafe_path", repr(path))
@@ -159,24 +156,23 @@ def validate_rm_target(target: str, options: dict) -> str:
     return normalized
 
 
-# k8s 신원 모드의 owner_username 모양(2026-10-25 dms-k8s 설계 §6): DMS 계정 아이디 규칙과 **같은** 규칙
-# (repositories/accounts._USERNAME_RE -- tests/test_k8s_submit.py 가 두 패턴의 일치를 고정한다). k8s 모드에서 실행 신원은
-# 맵핑 ID(= DMS 계정 아이디, RoleBinding 이름 앞부분의 '-' → '.')라 숫자로 시작할 수 있다 -- LDAP 시절 규칙
-# ([A-Za-z_] 시작)이면 운영자의 「사용자 지정」이 그런 사용자에게 422 였다. 문자 집합은 러너 passwd 줄 검사
-# (execution_manifests 의 [A-Za-z0-9._-])의 부분집합이다.
+# owner_username 모양(2026-10-25 dms-k8s 설계 §6): DMS 계정 아이디 규칙과 **같은** 규칙
+# (repositories/accounts._USERNAME_RE -- tests/test_k8s_submit.py 가 두 패턴의 일치를 고정한다). 실행 신원은 맵핑 ID(= DMS
+# 계정 아이디, RoleBinding 이름 앞부분의 '-' → '.')라 숫자로 시작할 수 있다 -- LDAP 시절 규칙([A-Za-z_] 시작)이면 운영자의
+# 「사용자 지정」이 그런 사용자에게 422 였다. 문자 집합은 러너 passwd 줄 검사(execution_manifests 의 [A-Za-z0-9._-])의
+# 부분집합이다.
 _ACCOUNT_ID_RE = re.compile(r"(?![0-9]+$)[a-z0-9][a-z0-9._-]{0,63}$")   # 숫자만은 거부(2026-10-26 -- getent·id 가 uid 로 읽음)
 
 
-def valid_owner_username(username, *, identity_mode: str = "ldap") -> bool:
-    """owner_username 모양 판정(bool). API(validate_owner_username)와 planner 의 계획 시점 선검사가 같은 규칙을
-    쓴다 -- planner 는 API 를 거치지 않은 DB 직접 쓰기(신뢰 경계)도 보므로 비문자열이 올 수 있어 isinstance 먼저.
-    identity_mode "k8s" 는 계정 아이디 규칙(_ACCOUNT_ID_RE)."""
-    rule = _ACCOUNT_ID_RE if identity_mode == "k8s" else _USERNAME_RE
-    return isinstance(username, str) and rule.fullmatch(username) is not None
+def valid_owner_username(username) -> bool:
+    """owner_username 모양 판정(bool, 계정 아이디 규칙 _ACCOUNT_ID_RE). API(validate_owner_username)와 planner 의 계획 시점
+    선검사가 같은 규칙을 쓴다 -- planner 는 API 를 거치지 않은 DB 직접 쓰기(신뢰 경계)도 보므로 비문자열이 올 수 있어
+    isinstance 먼저."""
+    return isinstance(username, str) and _ACCOUNT_ID_RE.fullmatch(username) is not None
 
 
-def validate_owner_username(username: str, *, identity_mode: str = "ldap") -> str:
-    if not valid_owner_username(username, identity_mode=identity_mode):
+def validate_owner_username(username: str) -> str:
+    if not valid_owner_username(username):
         raise DomainValidationError("invalid_owner_username", repr(username))
     return username
 
@@ -210,16 +206,6 @@ def chown_problem(value) -> "str | None":
         return "chown_name_not_supported"
     return "invalid_option"
 
-
-def chown_gid_part(value) -> "int | None":
-    """정상 chown 값(chown_problem 이 None)의 gid 파트(":NNN") -> int. uid 만·이름·형식 오류는 None -- 그 거부는
-    chown_problem 경로의 몫이고, 여기는 계획 시점 그룹 멤버십 검사(identity.check_chown_group, D7)의 입력만 만든다."""
-    if chown_problem(value) is not None:
-        return None
-    m = _CHOWN_RE.fullmatch(value)
-    if m is None or m.group(2) is None:
-        return None
-    return int(m.group(2)[1:])
 
 _BOOL = ("bool",)
 _OPTION_SPECS: dict[Operation, dict[str, tuple]] = {

@@ -35,12 +35,14 @@ def _admin_session(client):
 # --- 제출 검증 ----------------------------------------------------------------------------
 
 def test_single_submit_rejects_a_name_and_accepts_numbers(client):
+    # 명시 chown 은 특권 운영자만(k8s 신원 모드) -- 특권 세션 관리자로 낸다.
+    _admin_session(client)
     _storages(client.app.state.repos)
-    base = {"operation": "sync", **SYNC_ITEM, "run_as_root": False}
+    base = {"operation": "sync", **SYNC_ITEM}
     for chown in ("alice:users", "alice", "10003:mig", "root"):
-        r = client.post("/api/user/requests", json={**base, "options": {"chown": chown}}, headers=ADMIN)
+        r = client.post("/api/user/requests", json={**base, "options": {"chown": chown}})
         assert r.status_code == 422 and r.json()["detail"] == "chown_name_not_supported", chown
-    r = client.post("/api/user/requests", json={**base, "options": {"chown": "10003:10000"}}, headers=ADMIN)
+    r = client.post("/api/user/requests", json={**base, "options": {"chown": "10003:10000"}})
     assert r.status_code == 202, r.text
 
 
@@ -133,8 +135,9 @@ class _StepSettings:
 
 def _sync_job(repos, *, chown, key, tool="dsync"):
     _storages(repos)
+    # 요청 행도 같은 chown 을 싣는다 -- stepper 는 잡 행의 chown 이 요청 행(판정받은 값)과 다르면 끊는다(ChownMismatchAtStep).
     rid = repos.requests.create(operation="sync", requester_id="alice", actor="alice", resource_key=key,
-                                payload=dict(SYNC_ITEM), priority="mid")
+                                payload={**SYNC_ITEM, "options": {"chown": chown}}, priority="mid")
     repos.requests.set_state(rid, RequestState.PLANNED, actor="planner")
     repos.requests.set_state(rid, RequestState.RUNNING, actor="planner")
     plan_id = repos.data_jobs.create_plan(rid, actor="planner")

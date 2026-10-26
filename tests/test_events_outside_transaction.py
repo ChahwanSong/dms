@@ -16,7 +16,6 @@ import pytest
 from dms.db import Database
 from dms.domain import DataJobState, RequestState
 from dms.execution import ExecStatus, ExecutionError, StubExecutionAdapter
-from dms.identity import StubIdentityResolver
 from dms.migrations import migrate
 from dms.planner import Planner
 from dms.repositories import Repositories
@@ -131,7 +130,7 @@ def test_plan_error_event_is_recorded_outside_any_open_transaction(spy, monkeypa
         raise RuntimeError("boom")
     monkeypatch.setattr(repos.accounts, "get", _boom)
 
-    Planner(repos, StubIdentityResolver({}), settings=_PlannerSettings()).run_once(
+    Planner(repos, settings=_PlannerSettings()).run_once(
         now_iso="2026-08-02T10:00:00Z")
 
     events = repos.observability.events_for_request(rid)

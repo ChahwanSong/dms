@@ -7,10 +7,10 @@ SCAN = {"operation": "scan", "storage": "s1", "target": "data", "priority": "mid
 @pytest.fixture
 def session_admin(client):
     # 컨트롤 상태 PUT 은 세션 관리자만(admin_session_required, 2026-10-07) -- 공유 토큰은 모든 노드
-    # 에이전트가 쥔 자격이다. 유지보수 토글(_set)은 이 세션으로, 제출 경로 검증은 기존대로 토큰 헤더로
-    # 부른다(Bearer 헤더가 세션 쿠키보다 우선하므로 두 신원이 한 클라이언트에서 섞이지 않는다).
-    client.app.state.repos.accounts.create("opadm", "p", "admin", actor="t")
-    assert client.post("/api/auth/login", json={"username": "opadm", "password": "p"}).status_code == 200
+    # 에이전트가 쥔 자격이다. 제출도 세션 요청만이다(k8s 신원 모드 -- 공유 토큰 제출은 403). 기본 특권 목록의 admin 이라
+    # 맵핑 면제(scan·직접 경로)다.
+    client.app.state.repos.accounts.create("admin", "p", "admin", actor="t")
+    assert client.post("/api/auth/login", json={"username": "admin", "password": "p"}).status_code == 200
 
 
 def _set(client, *, maintenance, drain=False):
@@ -22,23 +22,23 @@ def _set(client, *, maintenance, drain=False):
 
 
 def test_submit_blocked_during_maintenance(client, session_admin):
-    assert client.post("/api/user/requests", json=SCAN, headers=ADMIN).status_code == 202
+    assert client.post("/api/user/requests", json=SCAN).status_code == 202
     _set(client, maintenance=True)
-    res = client.post("/api/user/requests", json=SCAN, headers=ADMIN)
+    res = client.post("/api/user/requests", json=SCAN)
     assert res.status_code == 503
     assert res.json()["detail"] == "maintenance_mode"
 
 
 def test_submit_allowed_after_maintenance_off(client, session_admin):
     _set(client, maintenance=True)
-    assert client.post("/api/user/requests", json=SCAN, headers=ADMIN).status_code == 503
+    assert client.post("/api/user/requests", json=SCAN).status_code == 503
     _set(client, maintenance=False)
-    assert client.post("/api/user/requests", json=SCAN, headers=ADMIN).status_code == 202
+    assert client.post("/api/user/requests", json=SCAN).status_code == 202
 
 
 def test_drain_does_not_block_submission(client, session_admin):
     _set(client, maintenance=False, drain=True)
-    assert client.post("/api/user/requests", json=SCAN, headers=ADMIN).status_code == 202
+    assert client.post("/api/user/requests", json=SCAN).status_code == 202
 
 
 def test_batch_create_blocked_during_maintenance(client, session_admin):

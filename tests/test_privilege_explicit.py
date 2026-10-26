@@ -10,6 +10,10 @@ src → dst_fail(다른 사용자 903333 소유, 700) sync 를 냈다. 잡은 ui
 목적지는 통과시켜, 데이터를 복사한 뒤 chmod()/utime() EPERM 으로 Failed(부분 복사)가 됐다(실측).
 부모 쓰기 검사 자체는 목적지가 있어도 유지한다 -- dsync 가 부모 W_OK 를 요구하고 실패하면 복사
 0건·종료 코드 0 이다(d139 실증에서 한때 건너뛰었다가 "아무것도 안 한 Succeeded" 로 잡음).
+
+dms-k8s(k8s 신원 모드 전용, 2026-10-26 LDAP 코드 삭제): 모든 단건 잡이 root 이고 서버가 run_as_root 를 싣는다(생략 = root,
+명시 false = 422). 사고의 교훈은 「root 근거(run_as_root·배치 자식)가 없는 신원을 root 로 올리지 않는다」로 남는다 -- 근거
+없는 행은 낮출 비 root 신원이 없어 거부(privileged_not_authorized)이고, 얼린 root 신원은 stepper 가 근거를 다시 본다.
 """
 import os
 import subprocess
@@ -21,14 +25,12 @@ from dms.domain import RequestState
 from dms.execution import JobSpec, StubExecutionAdapter
 from dms.execution_manifests import build_preflight_pod
 from dms.identity import (PRIVILEGE_IF_ELIGIBLE, PRIVILEGE_NEVER, PRIVILEGE_REQUESTED,
-                          IdentityRejected, ResolvedIdentity, StubIdentityResolver,
-                          privilege_policy, resolve_job_identity)
+                          IdentityRejected, privilege_policy, resolve_job_identity)
 from dms.planner import Planner
 from dms.repositories import Repositories
 from dms.repositories.control import ControlRepository
 from dms.stepper import JobStepper
 
-ALICE = ResolvedIdentity("alice", 10001, 10000, ("dmsusers",), False)
 OPS = frozenset({"ops"})
 
 
@@ -36,36 +38,36 @@ OPS = frozenset({"ops"})
 
 def _resolve(db, *, privilege=None, session=True, requester="ops", owner="alice"):
     kw = {} if privilege is None else {"privilege": privilege}
-    return resolve_job_identity(ControlRepository(db), StubIdentityResolver({"alice": ALICE}),
+    return resolve_job_identity(ControlRepository(db),
                                 requester_id=requester, owner_username=owner,
                                 allow_privileged=True, privileged_requesters=OPS,
                                 session_authenticated=session, **kw)
 
 
-def test_eligible_admin_runs_as_the_run_identity_by_default(db):
-    # 사고의 핵심: 자격이 있어도 root 를 요청하지 않았으면 실행 신원의 LDAP uid/gid.
-    out = _resolve(db)
-    assert (out.uid, out.gid, out.privileged) == (10001, 10000, False)
-    out = _resolve(db, privilege=PRIVILEGE_NEVER)
-    assert (out.uid, out.privileged) == (10001, False)
+def test_no_root_basis_is_refused_even_for_an_eligible_admin(db):
+    # 사고의 핵심(root 는 명시일 때만) -- 근거가 없으면 자격이 있어도 root 로 올리지 않고, 낮출 비 root 신원도 없어 거부한다.
+    for kw in ({}, {"privilege": PRIVILEGE_NEVER}):
+        with pytest.raises(IdentityRejected) as e:
+            _resolve(db, **kw)
+        assert e.value.reason_code == "privileged_not_authorized"
 
 
-def test_explicit_root_request_by_eligible_admin_is_root(db):
+def test_explicit_root_request_is_root_with_the_run_identity_name(db):
     out = _resolve(db, privilege=PRIVILEGE_REQUESTED)
     assert (out.uid, out.gid, out.privileged, out.username) == (0, 0, True, "alice")
 
 
-def test_explicit_root_request_without_eligibility_is_rejected_not_downgraded(db):
-    for kw in ({"session": False}, {"requester": "mallory"}):
-        with pytest.raises(IdentityRejected) as e:
-            _resolve(db, privilege=PRIVILEGE_REQUESTED, **kw)
-        assert e.value.reason_code == "privileged_not_authorized"
+def test_explicit_root_request_without_a_session_is_rejected(db):
+    with pytest.raises(IdentityRejected) as e:
+        _resolve(db, privilege=PRIVILEGE_REQUESTED, session=False)
+    assert e.value.reason_code == "privileged_not_authorized"
 
 
-def test_batch_children_keep_the_legacy_if_eligible_semantics(db):
+def test_batch_children_are_root_only_when_eligible(db):
     assert _resolve(db, privilege=PRIVILEGE_IF_ELIGIBLE).privileged is True
-    out = _resolve(db, privilege=PRIVILEGE_IF_ELIGIBLE, session=False)
-    assert (out.uid, out.privileged) == (10001, False)
+    with pytest.raises(IdentityRejected) as e:
+        _resolve(db, privilege=PRIVILEGE_IF_ELIGIBLE, session=False)
+    assert e.value.reason_code == "privileged_not_authorized"
 
 
 # --- API 게이트 ------------------------------------------------------------------
@@ -80,13 +82,10 @@ def _client_with(db, **overrides):
             "DMS_ALLOW_PRIVILEGED_REQUESTERS": "true", "DMS_PRIVILEGED_REQUESTERS": "ops",
             **overrides}
     client = TestClient(create_app(Settings.from_env(base), db))
-    # 사용자 sync 허용 쌍(2026-09-30, 기본 전부 불가): 이 파일은 root 게이트가 관심사라 SYNC 가 쓰는
-    # s1 -> s1 을 허용해 둔다(쌍 게이트 자체는 test_sync_pairs 가 고정한다; 쌍은 등록된 스토리지끼리만).
     repos = client.app.state.repos
     if repos.storages.get("s1") is None:
         repos.storages.create(storage_name="s1", mount_path="/mnt/s1", managed_root="/mnt/s1/dms",
                               backend_type="cephfs", actor="test")
-    repos.sync_pairs.add("s1", "s1", actor="test")
     return client
 
 
@@ -106,41 +105,15 @@ def _stored_payload(db):
     return json.loads(row["payload"])
 
 
-def test_eligible_admin_without_flag_submits_a_non_root_request(db):
-    client = _client_with(db)
-    _login_admin(client)
-    r = client.post("/api/user/requests", json={**SYNC, "owner_username": "alice"})
-    assert r.status_code == 202
-    assert "run_as_root" not in _stored_payload(db)
-
-
-def test_eligible_admin_with_flag_stores_the_explicit_request(db):
-    client = _client_with(db)
-    _login_admin(client)
-    r = client.post("/api/user/requests", json={**SYNC, "run_as_root": True})
-    assert r.status_code == 202 and _stored_payload(db)["run_as_root"] is True
-
-
-@pytest.mark.parametrize("who", ["user", "admin_not_listed"])
-def test_run_as_root_needs_eligibility(db, who):
-    client = _client_with(db)
-    if who == "user":
-        client.post("/api/auth/signup", json={"username": "mallory", "password": "p"})
-        client.post("/api/auth/login", json={"username": "mallory", "password": "p"})
-    else:
-        _login_admin(client, name="ops2")
-    r = client.post("/api/user/requests", json={**SYNC, "run_as_root": True})
-    assert r.status_code == 403 and r.json()["detail"] == "privileged_not_authorized"
-
-
 def test_run_as_root_over_the_shared_token_is_refused(db):
-    # 특권 승격은 세션 인증만(슬라이스 19) -- 토큰(관리자 역할)으로도 root 요청 불가.
+    # 특권 승격은 세션 인증만(슬라이스 19) -- 토큰(관리자 역할)으로는 어떤 제출도 root 가 될 수 없어 제출 자체가 403.
     # (x-dms-actor 로 "ops" 를 사칭하는 것은 actor 게이트가 이미 400 으로 막는다 --
     #  여기선 그 게이트를 통과한 토큰 요청(actor=shared-token, role admin)을 본다.)
     client = _client_with(db, DMS_PRIVILEGED_REQUESTERS="ops,shared-token")
-    r = client.post("/api/user/requests", json={**SYNC, "run_as_root": True},
-                    headers={"Authorization": "Bearer tok-shared"})
-    assert r.status_code == 403 and r.json()["detail"] == "privileged_not_authorized"
+    for extra in ({}, {"run_as_root": True}):
+        r = client.post("/api/user/requests", json={**SYNC, **extra},
+                        headers={"Authorization": "Bearer tok-shared"})
+        assert r.status_code == 403 and r.json()["detail"] == "privileged_not_authorized", extra
 
 
 @pytest.mark.parametrize("value", ["yes", "true", 1])
@@ -151,49 +124,35 @@ def test_run_as_root_must_be_a_real_boolean(db, value):
     assert r.status_code == 422
 
 
-# --- 관리자 기본 root(사용자 결정 2026-09-30)는 포탈이 명시로 싣는다 ------------------------
-# 서버는 **명시 True 만** root(자격 필요). 생략·False = 비 root -- 생략을 root 로 읽으면 옛 포탈
-# 탭(생략 = 비 root 라고 표시)이나 me 판정이 어긋난 화면이 표시와 다른 root 로 돈다(적대적 리뷰).
-# "관리자 기본 root / 다른 실행 신원이면 기본 그 사용자 권한" 은 SubmitJob 테스트가 고정한다.
+# --- 모든 단건 잡은 root(설계 D2) -- 서버가 run_as_root 를 싣는다 ------------------------------------
 
-@pytest.mark.parametrize("extra, expect_root", [
-    ({}, False),                                        # 생략 = 비 root(자격 있는 관리자라도)
-    ({"owner_username": "ops"}, False),
-    ({"owner_username": "alice"}, False),
-    ({"run_as_root": True}, True),                      # 포탈의 관리자 기본값(명시)
-    ({"owner_username": "alice", "run_as_root": True}, True),
-    ({"run_as_root": False}, False),
+@pytest.mark.parametrize("extra", [
+    {},                                                 # 생략 = root
+    {"owner_username": "ops"},
+    {"owner_username": "alice"},                        # 다른 실행 신원(이름)이어도 root -- 권한 판정은 k8s 맵핑
+    {"run_as_root": True},
+    {"owner_username": "alice", "run_as_root": True},
 ])
-def test_eligible_admin_is_root_only_when_the_body_says_true(db, extra, expect_root):
+def test_every_single_request_is_stored_as_an_explicit_root_request(db, extra):
     client = _client_with(db)
     _login_admin(client)
     r = client.post("/api/user/requests", json={**SYNC, **extra})
     assert r.status_code == 202, r.text
-    assert (_stored_payload(db).get("run_as_root") is True) is expect_root
+    assert _stored_payload(db)["run_as_root"] is True
 
 
-@pytest.mark.parametrize("who", ["user", "admin_not_listed", "token"])
-def test_default_is_silently_non_root_without_eligibility(db, who):
-    # 자격 없는 로그인의 **생략**은 403 이 아니라 비 root -- 명시 True 만 거부한다.
-    client = _client_with(db, DMS_PRIVILEGED_REQUESTERS="ops,shared-token")
-    headers = {}
-    if who == "user":
-        client.post("/api/auth/signup", json={"username": "mallory", "password": "p"})
-        client.post("/api/auth/login", json={"username": "mallory", "password": "p"})
-    elif who == "admin_not_listed":
-        _login_admin(client, name="ops2")
-    else:
-        headers = {"Authorization": "Bearer tok-shared"}
-    r = client.post("/api/user/requests", json=SYNC, headers=headers)
-    assert r.status_code == 202, r.text
-    assert "run_as_root" not in _stored_payload(db)
+def test_explicit_non_root_is_refused_not_silently_promoted(db):
+    # 명시 false 는 화면이 「비 root」라고 믿고 보낸 값 -- 조용히 root 로 바꾸지 않는다.
+    client = _client_with(db)
+    _login_admin(client)
+    r = client.post("/api/user/requests", json={**SYNC, "run_as_root": False})
+    assert r.status_code == 422 and r.json()["detail"] == "run_as_root_required"
 
 
 @pytest.mark.parametrize("who, expected", [
     ("ops", True), ("ops2", False), ("user", False), ("token", False)])
 def test_me_tells_the_portal_whether_root_is_available(db, who, expected):
-    # 포탈은 이 값으로 체크박스를 보이고 기본으로 켠다 -- 자격 없는 관리자에게 기본 root 를
-    # 켜 두면 제출이 403 이 된다. 판정은 제출 게이트와 같은 함수(api.auth.can_run_as_root).
+    # can_run_as_root(= 맵핑 면제 unrestricted, 같은 함수 api.auth.can_run_as_root) -- 포탈이 직접 경로·전체 PV 를 여는 근거.
     client = _client_with(db, DMS_PRIVILEGED_REQUESTERS="ops,shared-token")
     headers = {}
     if who == "user":
@@ -203,7 +162,8 @@ def test_me_tells_the_portal_whether_root_is_available(db, who, expected):
         headers = {"Authorization": "Bearer tok-shared"}
     else:
         _login_admin(client, name=who)
-    assert client.get("/api/auth/me", headers=headers).json()["can_run_as_root"] is expected
+    me = client.get("/api/auth/me", headers=headers).json()
+    assert (me["can_run_as_root"], me["unrestricted"]) == (expected, expected)
 
 
 # --- planner ---------------------------------------------------------------------
@@ -230,8 +190,7 @@ def _seed(repos):
         "node_name": "n1",
         "mounts": [{"storage_name": "s1", "mount_path": "/mnt/s1", "status": "Ready",
                     "writable": True}],
-        "tools": [{"name": t, "status": "Ready"} for t in ("dscan", "dsync", "nsync", "drm")],
-        "identities": [{"username": "alice", "status": "Ready"}]},
+        "tools": [{"name": t, "status": "Ready"} for t in ("dscan", "dsync", "nsync", "drm")]},
         reported_at="2026-08-02T09:59:00Z")
 
 
@@ -247,31 +206,29 @@ def _plan(db, payload_extra=None, batch_id=None, key="k"):
     rid = repos.requests.create(operation="scan", requester_id="ops", actor="ops",
                                 resource_key=key, payload=payload, priority="mid",
                                 auth_method="session", **kw)
-    Planner(repos, StubIdentityResolver({"alice": ALICE}),
-            settings=_PrivSettings()).run_once(now_iso=NOW)
+    result = Planner(repos, settings=_PrivSettings()).run_once(now_iso=NOW)
     jobs = repos.data_jobs.list_jobs(request_id=rid)
-    return repos, rid, (jobs[0]["worker_pool"]["identity"] if jobs else None)
+    return result[rid], (jobs[0]["worker_pool"]["identity"] if jobs else None)
 
 
-def test_planner_runs_an_eligible_admins_request_as_the_run_identity(db):
-    _, _, ident = _plan(db)
-    assert (ident["uid"], ident["gid"], ident["privileged"]) == (10001, 10000, False)
+def test_planner_refuses_a_request_without_a_root_basis(db):
+    # DB 직접 삽입·옛 행(run_as_root 없음) -- 자격 있는 관리자의 요청이어도 근거가 없으면 계획하지 않는다.
+    assert _plan(db) == ("rejected:privileged_not_authorized", None)
 
 
 def test_planner_honours_an_explicit_root_request(db):
-    _, _, ident = _plan(db, {"run_as_root": True})
-    assert (ident["uid"], ident["privileged"]) == (0, True)
+    outcome, ident = _plan(db, {"run_as_root": True})
+    assert outcome == "planned" and (ident["uid"], ident["privileged"], ident["username"]) == (0, True, "alice")
 
 
 def test_planner_never_escalates_on_a_tampered_non_boolean_flag(db):
-    # payload 는 DB 신뢰 경계 밖 -- `is True` 만 승격한다.
-    _, _, ident = _plan(db, {"run_as_root": "true"})
-    assert (ident["uid"], ident["privileged"]) == (10001, False)
+    # payload 는 DB 신뢰 경계 밖 -- `is True` 만 승격한다(그 밖은 근거 없음 = 거부).
+    assert _plan(db, {"run_as_root": "true"}) == ("rejected:privileged_not_authorized", None)
 
 
-def test_planner_keeps_batch_children_on_the_legacy_semantics(db):
-    _, _, ident = _plan(db, batch_id="b-1")
-    assert (ident["uid"], ident["privileged"]) == (0, True)
+def test_planner_keeps_batch_children_on_the_if_eligible_semantics(db):
+    outcome, ident = _plan(db, batch_id="b-1")
+    assert outcome == "planned" and (ident["uid"], ident["privileged"]) == (0, True)
 
 
 # --- preflight: 목적지 자체 권한(실제 셸로) -----------------------------------------

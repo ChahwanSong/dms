@@ -8,8 +8,6 @@ from .node_cpu import DEFAULT_NODE_CPU_RESERVE_MILLICORES
 
 
 AGENT_TOOL_NAMES = ("dscan", "dsync", "nsync", "drm")
-# DMS_IDENTITY_MODE 의 값(dms-k8s 설계 D1) -- Settings.identity_mode 주석.
-IDENTITY_MODES = ("ldap", "k8s")
 
 _SERVER_INT_KEYS = (
     ("DMS_AGENT_REPORT_STALE_SECONDS", "agent_report_stale_seconds", 300),
@@ -219,10 +217,6 @@ class Settings:
     # 전부 가능. "일단"이라 나중에 rm/scan 을 풀 때는 env 로 목록만 넓히면 된다
     # (DMS_USER_ALLOWED_OPERATIONS="sync,rm" 등). routes_requests.submit 이 강제한다.
     user_allowed_operations: frozenset = frozenset({"sync"})
-    # 신원 모드(2026-10-25 dms-k8s 설계 D1). "ldap"(코드 기본 -- 공용 코드·기존 테스트 보존) | "k8s". k8s 는 「모든 잡
-    # root」와 「권한 = k8s RoleBinding 맵핑」을 **한 스위치**로 묶는다(k8s_access 모듈 docstring) -- 둘을 따로 켜면 root 인데
-    # 권한 판정이 없는 중간 상태가 생긴다. testbed-k8s·dms-k8s prod 오버레이가 켜고 렌더 계약 테스트가 고정한다.
-    identity_mode: str = "ldap"
     ldap_uri: str = ""
     ldap_user_base: str = ""
     ldap_group_base: str = ""
@@ -375,22 +369,26 @@ class Settings:
                     problems.append(
                         f"DMS_LDAP_REQUIRE_AUTH_BIND is true but {env_key}"
                         " is missing or a placeholder")
-        # 신원 모드(D1). 오타는 기동 거부 -- 조용히 ldap 으로 떨어지면 k8s 사이트가 「비 root 잡 ldap_not_configured」로
-        # 전부 멈추는데 원인이 설정 한 줄이라는 게 화면 어디에도 안 보인다.
-        identity_mode = (environ.get("DMS_IDENTITY_MODE") or "ldap").strip()
-        if identity_mode not in IDENTITY_MODES:
-            problems.append(f"DMS_IDENTITY_MODE must be one of {'|'.join(IDENTITY_MODES)}: "
-                            f"{environ.get('DMS_IDENTITY_MODE')!r}")
-        elif identity_mode == "k8s":
-            # 무 LDAP 모드인데 LDAP URI 가 남아 있으면 반쯤 켜진 상태다(사용자 결정 2026-10-21 「dms-k8s 는 LDAP 을 쓰지
-            # 않는다」 -- 남은 base 값은 같은 망의 다른 사이트 slapd 를 가리킨다). 오버레이가 키를 지웠는지 기동이 확인한다.
-            if (environ.get("DMS_LDAP_URI") or "").strip():
-                problems.append("DMS_IDENTITY_MODE=k8s does not use LDAP -- remove DMS_LDAP_URI")
-            # k8s 모드는 모든 잡이 root 다(D2). 특권 허용을 끄면 어떤 잡도 돌 수 없다 -- 그 상태를 「제출마다 403」 으로
-            # 늦게 알리지 않고 기동에서 알린다(root_allowed 도 이 스위치를 본다 -- 이중 봉인).
-            if not _parse_bool(environ, "DMS_ALLOW_PRIVILEGED_REQUESTERS", default=True):
-                problems.append("DMS_IDENTITY_MODE=k8s runs every job as root -- "
-                                "DMS_ALLOW_PRIVILEGED_REQUESTERS must not be false")
+        # 신원 모드(dms-k8s 설계 D1 → 2026-10-26 k8s 전용). dms-k8s 는 「모든 잡 root + 권한 = k8s RoleBinding 맵핑」 하나뿐이다
+        # (k8s_access 모듈 docstring) -- 값이 없거나 k8s 면 그 모드다. 아래 셋은 **안전장치**다: dms-ssc(LDAP 라인)의 설정·
+        # 오버레이를 이 이미지에 잘못 적용했을 때 조용히 다른 권한 모델로 돌지 않고 기동에서 멈춘다.
+        identity_mode = (environ.get("DMS_IDENTITY_MODE") or "").strip()
+        if identity_mode == "ldap":
+            # 예전 ldap 모드(LDAP uid/gid 로 비 root 실행)는 이 라인에 없다 -- 받아 주면 운영자는 LDAP 권한을 기대하는데
+            # 실제로는 모든 잡이 root 로 돈다.
+            problems.append("DMS_IDENTITY_MODE=ldap is not supported by dms-k8s (k8s identity mode only) -- "
+                            "remove DMS_IDENTITY_MODE or set it to k8s")
+        elif identity_mode not in ("", "k8s"):
+            problems.append(f"DMS_IDENTITY_MODE must be k8s (or unset): {environ.get('DMS_IDENTITY_MODE')!r}")
+        # LDAP URI 가 남아 있으면 ssc 설정이 섞인 것이다(사용자 결정 2026-10-21 「dms-k8s 는 LDAP 을 쓰지 않는다」 -- 남은 값은
+        # 같은 망의 다른 사이트 slapd 를 가리킨다). 오버레이가 키를 지웠는지 기동이 확인한다.
+        if (environ.get("DMS_LDAP_URI") or "").strip():
+            problems.append("dms-k8s does not use LDAP -- remove DMS_LDAP_URI")
+        # 모든 잡이 root 다(D2). 특권 허용을 끄면 어떤 잡도 돌 수 없다 -- 그 상태를 「제출마다 403」 으로 늦게 알리지 않고
+        # 기동에서 알린다(root_allowed 도 이 스위치를 본다 -- 이중 봉인).
+        if not _parse_bool(environ, "DMS_ALLOW_PRIVILEGED_REQUESTERS", default=True):
+            problems.append("dms-k8s runs every job as root -- "
+                            "DMS_ALLOW_PRIVILEGED_REQUESTERS must not be false")
         if problems:
             raise SettingsError(problems)
         return cls(
@@ -415,7 +413,6 @@ class Settings:
             user_allowed_operations=_parse_csv_set(
                 environ, "DMS_USER_ALLOWED_OPERATIONS",
                 default=frozenset({"sync"})),
-            identity_mode=identity_mode,
             ldap_uri=environ.get("DMS_LDAP_URI", ""),
             ldap_user_base=environ.get("DMS_LDAP_USER_BASE", ""),
             ldap_group_base=environ.get("DMS_LDAP_GROUP_BASE", ""),

@@ -2,11 +2,14 @@
 
 방향이 있는 (소스 -> 목적지) 쌍만 비관리자 sync 를 허용한다. 관리자·배치는 제한 없음. 강제 지점은
 제출·계획·컨펌 세 곳(repositories/sync_pairs.sync_pair_allowed 하나)이고, 포탈 후보 필터는 표시다.
+
+k8s 신원 모드 전용(2026-10-26 LDAP 코드 삭제) 뒤로: 비면제 사용자는 쪽마다 PV 주소여야 하고(직접 경로는 raw_path_not_allowed
+-- 쌍 게이트보다 앞) PV↔PV sync 는 쌍 면제(k8s_access.pair_gate_exempt, 설계 D14)라 사용자 제출이 쌍 게이트에 닿지 않는다.
+저장소·관리 API·조회와 관리자·배치 면제는 그대로 고정하고, 게이트 순서는 아래 사용자 테스트가 고정한다.
 """
 import pytest
 
-from dms.domain import DataJobState, DomainValidationError, RequestState
-from dms.identity import ResolvedIdentity, StubIdentityResolver
+from dms.domain import DomainValidationError
 from dms.planner import Planner
 from dms.repositories import Repositories
 
@@ -22,6 +25,12 @@ def _storage(client, name, **extra):
 def _login_user(client, name="u1"):
     client.post("/api/auth/signup", json={"username": name, "password": "p"})
     client.post("/api/auth/login", json={"username": name, "password": "p"})
+
+
+def _login_ops(client):
+    # 특권 세션 관리자(기본 특권 목록의 admin) -- 직접 경로 제출은 면제자만이다.
+    client.app.state.repos.accounts.create("admin", "p", "admin")
+    client.post("/api/auth/login", json={"username": "admin", "password": "p"})
 
 
 def _sync(src, dst):
@@ -124,27 +133,23 @@ def test_user_sees_only_pairs_between_storages_they_can_pick(client):
 
 # --- 제출 게이트 ------------------------------------------------------------------------
 
-def test_user_sync_needs_an_allowed_pair_and_pairs_are_directional(client):
+def test_user_raw_sync_is_refused_before_the_pair_gate(client):
+    # 허용 쌍이 있어도 사용자 직접 경로 sync 는 맵핑 게이트(raw_path_not_allowed)가 먼저 끊는다 -- 쌍은 사용자 제출을 열지 못한다.
     _storage(client, "a"); _storage(client, "b")
     _login_user(client)
-    r = client.post("/api/user/requests", json=_sync("a", "b"))
-    assert r.status_code == 403 and r.json()["detail"] == "sync_pair_not_allowed"   # 기본 전부 불가
     client.app.state.repos.sync_pairs.add("a", "b", actor="ops")
-    assert client.post("/api/user/requests", json=_sync("a", "b")).status_code == 202
-    r = client.post("/api/user/requests", json=_sync("b", "a"))                      # 반대 방향은 별개
-    assert r.status_code == 403 and r.json()["detail"] == "sync_pair_not_allowed"
-    r = client.post("/api/user/requests", json=_sync("a", "a"))                      # 같은 스토리지도 쌍
-    assert r.status_code == 403 and r.json()["detail"] == "sync_pair_not_allowed"
+    r = client.post("/api/user/requests", json=_sync("a", "b"))
+    assert r.status_code == 403 and r.json()["detail"] == "raw_path_not_allowed"
 
 
 def test_admin_sync_is_not_restricted_by_pairs(client):
     _storage(client, "a"); _storage(client, "b")
-    assert client.post("/api/user/requests", json={**_sync("a", "b"), "run_as_root": False},
-                       headers=ADMIN).status_code == 202
+    _login_ops(client)
+    assert client.post("/api/user/requests", json=_sync("a", "b")).status_code == 202
 
 
 def test_missing_storage_field_still_gets_the_precise_validation_error(client):
-    _login_user(client)
+    _login_ops(client)
     body = {"operation": "sync", "source_storage": "a", "source": "x", "destination": "y"}
     r = client.post("/api/user/requests", json=body)
     assert r.status_code == 422 and r.json()["detail"] == "missing_destination_storage"
@@ -157,9 +162,6 @@ class _Settings:
     allow_privileged_requesters = True
     privileged_requesters = frozenset({"ops"})
     planner_identity_grace_seconds = 300
-
-
-ALICE = ResolvedIdentity("alice", 10001, 10000, ("dmsusers",), False)
 
 
 def _plan_sync(db, *, requester, role, batch_id=None, allow=False, owner="alice"):
@@ -179,29 +181,25 @@ def _plan_sync(db, *, requester, role, batch_id=None, allow=False, owner="alice"
         "node_name": "n1",
         "mounts": [{"storage_name": n, "mount_path": f"/mnt/{n}", "status": "Ready", "writable": True}
                    for n in ("src", "dst")],
-        "tools": [{"name": t, "status": "Ready"} for t in ("dscan", "dsync", "nsync", "drm")],
-        "identities": [{"username": "alice", "status": "Ready"}]},
+        "tools": [{"name": t, "status": "Ready"} for t in ("dscan", "dsync", "nsync", "drm")]},
         reported_at="2026-08-02T09:59:00Z")
     if role is not None:
         repos.accounts.create(requester, "pw", role)
     kw = {"batch_id": batch_id} if batch_id else {}
+    payload = {"source_storage": "src", "source": "a", "destination_storage": "dst", "destination": "b",
+               "options": {}, "owner_username": owner}
+    if not batch_id:
+        payload["run_as_root"] = True               # 단건은 제출이 늘 싣는다(설계 D2) -- 배치 자식은 IF_ELIGIBLE
     rid = repos.requests.create(operation="sync", requester_id=requester, actor=requester,
-                                resource_key=f"k-{requester}",
-                                payload={"source_storage": "src", "source": "a",
-                                         "destination_storage": "dst", "destination": "b",
-                                         "options": {}, "owner_username": owner},
+                                resource_key=f"k-{requester}", payload=payload,
                                 priority="mid", auth_method="session", **kw)
-    Planner(repos, StubIdentityResolver({"alice": ALICE}),
-            settings=_Settings()).run_once(now_iso="2026-08-02T10:00:00Z")
+    Planner(repos, settings=_Settings()).run_once(now_iso="2026-08-02T10:00:00Z")
     return repos.requests.get(rid)["state"], repos.requests.last_reason_code(rid)
 
 
-def test_planner_rejects_a_user_sync_without_an_allowed_pair(db):
-    assert _plan_sync(db, requester="alice", role="user") == ("Rejected", "sync_pair_not_allowed")
-
-
-def test_planner_plans_a_user_sync_with_an_allowed_pair(db):
-    assert _plan_sync(db, requester="alice", role="user", allow=True)[0] == "Planned"
+def test_planner_refuses_a_user_raw_sync_before_the_pair_gate(db):
+    # 대기 중 DB 직접 삽입된 사용자 직접 경로 sync -- 허용 쌍이 있어도 재확인(raw_path_not_allowed)이 먼저다.
+    assert _plan_sync(db, requester="alice", role="user", allow=True) == ("Rejected", "raw_path_not_allowed")
 
 
 def test_planner_does_not_restrict_admins_or_batch_children(db):
@@ -210,8 +208,8 @@ def test_planner_does_not_restrict_admins_or_batch_children(db):
 
 def test_planner_treats_batch_children_as_admin_requests(db):
     # 배치는 관리자 전용 라우트에서만 생긴다 -- 생성자 계정 행이 없어도 사용자 규칙(허용 쌍)에 걸리지 않는다.
-    # 실행 신원이 생성자 자신이면(owner 생략) 그대로 계획된다.
-    assert _plan_sync(db, requester="alice", role=None, batch_id="b-1", owner=None)[0] == "Planned"
+    # 실행 신원이 생성자 자신이면(owner 생략) 그대로 계획된다(목록에 있는 생성자 -- IF_ELIGIBLE root).
+    assert _plan_sync(db, requester="ops", role=None, batch_id="b-1", owner=None)[0] == "Planned"
 
 
 def test_planner_batch_child_owner_override_needs_a_current_admin_creator(db):
@@ -220,28 +218,5 @@ def test_planner_batch_child_owner_override_needs_a_current_admin_creator(db):
     assert _plan_sync(db, requester="gone-admin", role=None, batch_id="b-1") ==         ("Rejected", "privileged_not_authorized")
 
 
-# --- 컨펌 게이트 ------------------------------------------------------------------------
-
-def test_user_cannot_confirm_after_the_pair_is_removed(client):
-    _storage(client, "a"); _storage(client, "b")
-    repos = client.app.state.repos
-    repos.sync_pairs.add("a", "b", actor="ops")
-    _login_user(client, "alice")
-    rid = repos.requests.create(operation="sync", requester_id="alice", actor="alice",
-        resource_key="k-c", payload={"source_storage": "a", "source": "x",
-        "destination_storage": "b", "destination": "y"}, priority="mid")
-    repos.requests.set_state(rid, RequestState.PLANNED, actor="planner")
-    repos.requests.set_state(rid, RequestState.RUNNING, actor="planner")
-    plan_id = repos.data_jobs.create_plan(rid, actor="planner")
-    jid = repos.data_jobs.create_job(rid, plan_id, operation="sync", priority="mid",
-        source_storage="a", source="x", destination_storage="b", destination="y",
-        options={}, tool="dsync", worker_pool={}, precondition={}, actor="planner")
-    repos.data_jobs.set_preview(jid, fingerprint="sha256:abc",
-        expires_at="2099-01-01T00:00:00Z", artifact_uri="file:///art/j")
-    repos.data_jobs.set_job_state(jid, DataJobState.CONFIRM_PENDING, actor="stepper")
-    repos.sync_pairs.remove("a", "b", actor="ops")
-    r = client.post(f"/api/user/jobs/{jid}:confirm", json={"fingerprint": "sha256:abc"})
-    assert r.status_code == 403 and r.json()["detail"] == "sync_pair_not_allowed"
-    assert repos.data_jobs.get_job(jid)["state"] == "ConfirmPending"
-    r = client.post(f"/api/user/jobs/{jid}:confirm", json={"fingerprint": "sha256:abc"}, headers=ADMIN)
-    assert r.status_code == 200
+# (컨펌 게이트의 쌍 재확인은 사용자 PV↔PV 잡이 면제라 사용자 흐름으로 닿지 않는다 -- 컨펌의 맵핑 재확인은
+#  tests/test_k8s_submit.py 의 test_confirm_* 가 고정한다.)

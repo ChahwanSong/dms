@@ -1,6 +1,6 @@
 """k8s 신원 모드의 권한 판정과 PV 주소 층(dms-k8s 설계 D2~D4·D8·D12~D14·D17, 2026-10-25).
 
-**한 스위치**(Settings.identity_mode == "k8s"):
+dms-k8s 는 **k8s 신원 모드 전용**이다(2026-10-26 사용자 결정 (d) -- LDAP 코드·ldap 모드 분기를 지웠다; LDAP 은 dms-ssc 라인만):
   - 모든 단건 잡이 root 다(D2). 서버가 payload.run_as_root=True 를 싣고(routes_requests.submit), root 허용은
     identity.root_allowed(세션 인증 요청인가)가 제출·계획·컨펌 세 지점에서 같은 술어로 본다(D3).
   - 권한 = k8s RoleBinding 맵핑(repositories.k8s.access_for -- 인식된 `<id>-clusterrole-admin|edit` 바인딩이 있는 (클러스터,
@@ -9,25 +9,24 @@
   - 면제(unrestricted, D4) = 기존 api.auth.can_run_as_root(관리자 + 특권 목록/계정 부여 + 세션). 면제자는 직접 경로(raw)와
     전체 PV. 그 밖(일반 사용자·목록 밖 관리자)은 **PV 주소만** + 맵핑 판정. 요청 행만 보는 planner·컨펌은 같은 의미의
     unrestricted_request 를 쓴다(배치 자식은 면제 -- 배치는 특권 세션 관리자 전용 화면에서만 생긴다).
-둘을 따로 켜는 스위치를 만들지 마라 -- 「root 인데 권한 판정이 없는」 중간 상태가 생긴다.
+「root 실행」과 「맵핑 판정」을 따로 끄는 스위치를 만들지 마라 -- 「root 인데 권한 판정이 없는」 중간 상태가 생긴다(예전 ldap
+모드 스위치가 그 둘을 한 번에 껐다 -- config 는 DMS_IDENTITY_MODE=ldap 을 기동 거부한다).
 
 PV 주소 층(D8): 제출 때 (cluster, namespace, pvc[, 하위 경로]) → (storage_name, target = root[/하위 경로]) 로 바꿔 **기존**
 build_data_payload 를 그대로 부르고 PV 메타를 payload 에 덧붙인다(PV 블록 {cluster, namespace, pvc, volume, storage_class, root,
-path}). resource_key·planner 스토리지 어드미션·노드 배치·stepper._abs·실행·사용량 키는 무변경이다. 주소 층 자체는 모드와
-무관하다(ldap 모드에서도 해석된다 -- 그때는 LDAP 파일 권한과 sync 쌍이 판정한다). 맵핑·raw 게이트와 sync 쌍 면제는 k8s
-모드에서만이다.
+path}). resource_key·planner 스토리지 어드미션·노드 배치·stepper._abs·실행·사용량 키는 무변경이다.
 
 집행 지점(한 함수, 여러 지점):
   - resolve_side      : 제출의 PV 한 쪽 해석(클러스터 동기화 → PVC → 경로 → D12 PV 루트 rm 금지).
   - recheck_request   : planner·컨펌의 재확인(D13). DB 가 신뢰 경계라(create_job 무검증 INSERT) 요청 행의 pv 블록을 현재
                         스냅숏으로 다시 해석하고, 비면제 요청은 모든 쪽에 pv 블록이 있어야 하며 맵핑을 다시 판정한다.
-  - pair_gate_exempt  : 제출·planner 3b·컨펌의 sync 허용 쌍 면제(D14 -- k8s 모드에서 PV↔PV 는 PV 권한이 판정한다).
+  - pair_gate_exempt  : 제출·planner 3b·컨펌의 sync 허용 쌍 면제(D14 -- PV↔PV 는 PV 권한이 판정한다).
 사유 코드는 DomainValidationError("<리터럴>") 로 낸다 -- 사유 코드 AST 그물(tests/test_reason_codes_coverage.py)이 읽는 모양이다.
 """
 import posixpath
 
 from .domain import DomainValidationError, validate_relative_path
-from .identity import IDENTITY_MODE_K8S, privilege_eligible
+from .identity import privilege_eligible
 from .privileged import privileged_names
 
 # 연산 → 쪽마다 (pv 블록 키, 스토리지 키, 경로 키). 단건 payload 의 모양(domain.build_data_payload)과 같다.
@@ -39,16 +38,6 @@ _SIDES = {
 PV_KEYS = ("pv", "source_pv", "destination_pv")
 # 제출 라우트의 HTTP 상태(나머지 사유는 422). 모름(스냅숏 없음)은 409, 권한은 403.
 SUBMIT_STATUS = {"k8s_mapping_unknown": 409, "raw_path_not_allowed": 403, "k8s_access_denied": 403}
-
-
-def identity_mode(settings) -> str:
-    """설정의 신원 모드("ldap"|"k8s"). 필드가 없는 설정 스텁(단위 시험의 _Settings)은 ldap -- 종전 동작."""
-    mode = getattr(settings, "identity_mode", "ldap")
-    return IDENTITY_MODE_K8S if mode == IDENTITY_MODE_K8S else "ldap"
-
-
-def k8s_mode(settings) -> bool:
-    return identity_mode(settings) == IDENTITY_MODE_K8S
 
 
 def sides(operation) -> tuple:
@@ -73,18 +62,18 @@ def unrestricted_request(req, *, settings, repos) -> bool:
                               session_authenticated=(req.get("auth_method") == "session"))
 
 
-def scan_allowed(*, unrestricted: bool, settings) -> bool:
-    """scan 은 특권 운영자만(2026-10-26 사용자 결정 (g)): k8s 모드에서는 면제자(can_run_as_root -- 관리자 + 특권 목록·부여 +
-    세션 = 특권 운영자)만 scan 을 낸다. ldap 모드는 종전(연산 allowlist). 제출(routes_requests, 403 scan_unrestricted_only)·
-    /me(user_operations)·planner·컨펌(recheck_request)이 이 술어 하나를 쓴다 -- 배치 자식은 unrestricted_request 가 면제다."""
-    return not k8s_mode(settings) or unrestricted
+def scan_allowed(*, unrestricted: bool) -> bool:
+    """scan 은 특권 운영자만(2026-10-26 사용자 결정 (g)): 면제자(can_run_as_root -- 관리자 + 특권 목록·부여 + 세션 = 특권
+    운영자)만 scan 을 낸다. 제출(routes_requests, 403 scan_unrestricted_only)·/me(user_operations)·planner·컨펌
+    (recheck_request)이 이 술어 하나를 쓴다 -- 배치 자식은 unrestricted_request 가 면제다. 규칙이 바뀌면 여기 한 곳만 고친다."""
+    return bool(unrestricted)
 
 
-def pair_gate_exempt(payload, settings) -> bool:
-    """sync 허용 쌍 면제(D14): k8s 모드 ∧ 모든 쪽이 PV 주소(pv 블록). 제출·planner 3b·컨펌이 같은 술어를 쓴다 -- planner·
-    컨펌은 recheck_request 가 pv 블록을 현재 스냅숏으로 확인한 **뒤에** 부른다. 관리자 전용 스토리지 판정(storage_admin_only)은
+def pair_gate_exempt(payload) -> bool:
+    """sync 허용 쌍 면제(D14): 모든 쪽이 PV 주소(pv 블록). 제출·planner 3b·컨펌이 같은 술어를 쓴다 -- planner·컨펌은
+    recheck_request 가 pv 블록을 현재 스냅숏으로 확인한 **뒤에** 부른다. 관리자 전용 스토리지 판정(storage_admin_only)은
     면제하지 않는다(해석된 storage_name 에 그대로 적용)."""
-    if not k8s_mode(settings) or not isinstance(payload, dict):
+    if not isinstance(payload, dict):
         return False
     return all(isinstance(payload.get(key), dict) for key, _, _ in _SIDES["sync"])
 
@@ -167,44 +156,42 @@ def recheck_request(repos, req, *, settings) -> None:
     """planner·컨펌의 재확인(D13) -- 통과하면 None, 아니면 DomainValidationError(사유 코드). 두 곳이 이 함수 하나를 쓴다.
 
     쪽마다:
-      - pv 블록이 없다(직접 경로): k8s 모드의 비면제 요청이면 raw_path_not_allowed(DB 직접 삽입·대기 중 면제 상실).
+      - pv 블록이 없다(직접 경로): 비면제 요청이면 raw_path_not_allowed(DB 직접 삽입·대기 중 면제 상실).
       - pv 블록이 있다: 모양이 틀렸거나 그 PVC·클러스터가 지금 스냅숏에 없으면 pv_not_found(삭제된 클러스터도 -- 모름
         k8s_mapping_unknown 으로 유예하지 않는다, 종단). 선택 불가가 됐으면 그 사유(pv_not_bound·pv_storageclass_unmapped·
         pv_path_unresolved). 해석한 (storage, root) 가 payload 의 것과 다르면 pv_moved(PVC 재생성으로 VOLUME 이 바뀜·SC 매핑·
         템플릿 변경 -- 확인 창이 보인 경로와 실행 경로가 갈라지지 않게). 그 쪽 target 이 root 와 같거나 root+'/' 아래가
         아니면 pv_target_outside(자기 PV 블록 + 남의 target 인 변조 행). rm 이 PV 루트면 pv_root_rm_forbidden(D12 재확인).
-        k8s 모드의 비면제 요청이면 요청자의 맵핑을 다시 판정한다(k8s_access_denied -- 권한 회수 반영)."""
+        비면제 요청이면 요청자의 맵핑을 다시 판정한다(k8s_access_denied -- 권한 회수 반영)."""
     payload = req.get("payload") if isinstance(req, dict) else None
     if not isinstance(payload, dict):
         return
     operation = req.get("operation")
-    k8s = k8s_mode(settings)
     exempt = None
     # 명시 chown 은 특권 운영자만(2026-10-26 -- 결과 소유자는 목적지 PV 루트 소유자로 자동, 제출 게이트와 같은 규칙).
     options = payload.get("options") if isinstance(payload.get("options"), dict) else {}
-    if k8s and "chown" in options:
+    if "chown" in options:
         exempt = unrestricted_request(req, settings=settings, repos=repos)
         if not exempt:
             raise DomainValidationError("chown_not_allowed", "explicit chown by a non-privileged requester")
-    if k8s and "chmod" in options:
+    if "chmod" in options:
         if exempt is None:
             exempt = unrestricted_request(req, settings=settings, repos=repos)
         if not exempt:
             raise DomainValidationError("chmod_not_allowed", "explicit chmod by a non-privileged requester")
     # scan 은 특권 운영자만(2026-10-26 (g), scan_allowed) -- DB 직접 삽입·대기 중 특권 상실.
-    if k8s and operation == "scan":
+    if operation == "scan":
         if exempt is None:
             exempt = unrestricted_request(req, settings=settings, repos=repos)
-        if not scan_allowed(unrestricted=exempt, settings=settings):
+        if not scan_allowed(unrestricted=exempt):
             raise DomainValidationError("scan_unrestricted_only", "scan by a non-privileged requester")
     for pv_key, storage_key, path_key in sides(operation):
         block = payload.get(pv_key)
         if block is None:
-            if k8s:
-                if exempt is None:
-                    exempt = unrestricted_request(req, settings=settings, repos=repos)
-                if not exempt:
-                    raise DomainValidationError("raw_path_not_allowed", pv_key)
+            if exempt is None:
+                exempt = unrestricted_request(req, settings=settings, repos=repos)
+            if not exempt:
+                raise DomainValidationError("raw_path_not_allowed", pv_key)
             continue
         ref = _block_ref(block)
         if ref is None:
@@ -227,8 +214,7 @@ def recheck_request(repos, req, *, settings) -> None:
             raise DomainValidationError("pv_target_outside", f"{pv_key}: {target!r} not under {root}")
         if operation == "rm" and norm == root:
             raise DomainValidationError("pv_root_rm_forbidden", "/".join(ref))
-        if k8s:
-            if exempt is None:
-                exempt = unrestricted_request(req, settings=settings, repos=repos)
-            if not exempt and repos.k8s.access_for(req.get("requester_id"), ref[0], ref[1]) is None:
-                raise DomainValidationError("k8s_access_denied", f"{req.get('requester_id')} @ {ref[0]}/{ref[1]}")
+        if exempt is None:
+            exempt = unrestricted_request(req, settings=settings, repos=repos)
+        if not exempt and repos.k8s.access_for(req.get("requester_id"), ref[0], ref[1]) is None:
+            raise DomainValidationError("k8s_access_denied", f"{req.get('requester_id')} @ {ref[0]}/{ref[1]}")

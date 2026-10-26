@@ -29,8 +29,12 @@ POLICY_BODY = {"max_nodes": 3, "procs_per_node": 8, "queue": "dms-data",
                "execution_timeout_seconds": 3600, "enabled": True}
 
 
-def _login(client, name):
-    client.post("/api/auth/signup", json={"username": name, "password": "p"})
+def _login(client, name="admin"):
+    # 제출은 세션 요청만이고(k8s 신원 모드) 직접 경로·scan 은 면제자만이다 -- 기본 특권 목록의 admin(관리자 계정)으로 낸다.
+    # 이 파일의 관심사는 우선순위 해석이다.
+    accounts = client.app.state.repos.accounts
+    if accounts.get(name) is None:
+        accounts.create(name, "p", "admin")
     client.post("/api/auth/login", json={"username": name, "password": "p"})
 
 
@@ -42,26 +46,26 @@ def _set_default_priority(client, tool, priority):
 
 def test_omitted_priority_uses_policy_default(client):
     _set_default_priority(client, "scan", "low")
-    r = client.post("/api/user/requests", headers=ADMIN, json={
+    _login(client)
+    r = client.post("/api/user/requests", json={
         "operation": "scan", "storage": "s1", "target": "a"})
     assert r.status_code == 202
-    detail = client.get(f"/api/user/requests/{r.json()['request_id']}",
-                        headers=ADMIN).json()
+    detail = client.get(f"/api/user/requests/{r.json()['request_id']}").json()
     assert detail["priority"] == "low"
 
 
 def test_explicit_priority_overrides_policy_default(client):
     _set_default_priority(client, "scan", "low")
-    r = client.post("/api/user/requests", headers=ADMIN, json={
+    _login(client)
+    r = client.post("/api/user/requests", json={
         "operation": "scan", "storage": "s1", "target": "a", "priority": "high"})
     assert r.status_code == 202
-    detail = client.get(f"/api/user/requests/{r.json()['request_id']}",
-                        headers=ADMIN).json()
+    detail = client.get(f"/api/user/requests/{r.json()['request_id']}").json()
     assert detail["priority"] == "high"
 
 
 def test_missing_policy_falls_back_to_mid(client, db):
-    _login(client, "carol")
+    _login(client)
     # rm 정책 행 자체를 지워서 "정책이 없다"를 시뮬레이션한다.
     db.execute("DELETE FROM policies WHERE tool = 'rm'")
     r = client.post("/api/user/requests", json={
@@ -80,7 +84,7 @@ def test_rm_uses_rm_policy_and_sync_uses_dsync_policy(client):
         repos.storages.create(storage_name=name, mount_path=f"/mnt/{name}",
                               managed_root=f"/mnt/{name}/dms", backend_type="cephfs", actor="test")
     repos.sync_pairs.add("s1", "s2", actor="test")
-    _login(client, "dave")
+    _login(client)
     _set_default_priority(client, "rm", "low")
     _set_default_priority(client, "dsync", "high")
     # nsync 정책은 손대지 않는다(기본 mid) — sync 제출이 nsync가 아니라 dsync를

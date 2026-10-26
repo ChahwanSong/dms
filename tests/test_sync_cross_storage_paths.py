@@ -13,9 +13,6 @@ from dms.domain import (DomainValidationError, build_data_payload, managed_abs_p
                         validate_sync_paths)
 from dms.repositories import Repositories
 
-TOKEN = {"Authorization": "Bearer tok-shared"}
-
-
 # --- 순수 판정 ---------------------------------------------------------------------------------------------------
 
 def test_different_storages_do_not_compare_relative_paths():
@@ -64,12 +61,18 @@ def _sync(src_storage, src, dst_storage, dst):
             "destination_storage": dst_storage, "destination": dst, "options": {}, "priority": "mid"}
 
 
+def _admin_session(client):
+    # 직접 경로 제출은 면제자(특권 세션 관리자 -- 기본 특권 목록의 admin)만이다(k8s 신원 모드).
+    client.app.state.repos.accounts.create("admin", "pw", "admin", actor="t")
+    client.post("/api/auth/login", json={"username": "admin", "password": "pw"})
+
+
 def test_submit_user_case_is_accepted(client):
     repos = client.app.state.repos
+    _admin_session(client)
     _storage(repos, "gpu1-home", "/home/gpu1", "/home/gpu1")
     _storage(repos, "gpu1-mirr", "/mirr24/gpu1", "/mirr24/gpu1")
-    r = client.post("/api/user/requests", headers=TOKEN,
-                    json=_sync("gpu1-home", "cocoa.song", "gpu1-mirr", "cocoa.song"))
+    r = client.post("/api/user/requests", json=_sync("gpu1-home", "cocoa.song", "gpu1-mirr", "cocoa.song"))
     assert r.status_code == 202, r.text
 
 
@@ -77,15 +80,11 @@ def test_submit_leaves_cross_storage_overlap_to_the_planner(client):
     # 다른 스토리지의 실제 경로 겹침은 같은 이름 공간(dsync -- 한 노드가 둘 다 마운트)일 때만 뜻이 있어, 도구가 정해지는
     # planner 가 본다(nsync 는 서로 다른 노드의 다른 파일시스템 -- 검증 지적). 제출은 받는다.
     repos = client.app.state.repos
+    _admin_session(client)
     _storage(repos, "outer", "/c", "/c/m")
     _storage(repos, "inner", "/c", "/c/m/t")
-    r = client.post("/api/user/requests", headers=TOKEN, json=_sync("outer", "t/x", "inner", "x"))
+    r = client.post("/api/user/requests", json=_sync("outer", "t/x", "inner", "x"))
     assert r.status_code == 202, r.text
-
-
-def _admin_session(client):
-    client.app.state.repos.accounts.create("admin", "pw", "admin", actor="t")
-    client.post("/api/auth/login", json={"username": "admin", "password": "pw"})
 
 
 def test_batch_with_the_user_case_is_accepted(client):
@@ -101,18 +100,23 @@ def test_batch_with_the_user_case_is_accepted(client):
 
 # --- planner(도구가 정해진 뒤 -- dsync 에서만 실제 경로 판정) ---------------------------------------------------------
 
-from dms.identity import ResolvedIdentity, StubIdentityResolver  # noqa: E402
 from dms.planner import Planner  # noqa: E402
 
 NOW = "2026-10-12T00:00:00Z"
-ALICE = ResolvedIdentity("alice", 10001, 10000, ("dmsusers",), False)
 
 
 class _S:
+    # 요청자는 특권 세션 관리자(ops) -- 직접 경로는 면제자만이고 모든 잡은 root 다(k8s 신원 모드).
     agent_report_stale_seconds = 300
-    allow_privileged_requesters = False
-    privileged_requesters = frozenset()
+    allow_privileged_requesters = True
+    privileged_requesters = frozenset({"ops"})
     planner_identity_grace_seconds = 300
+
+
+def _planner(repos):
+    if repos.accounts.get("ops") is None:
+        repos.accounts.create("ops", "pw", "admin")
+    return Planner(repos, settings=_S())
 
 
 def _ready(repos, name, mount, root):
@@ -123,8 +127,7 @@ def _ready(repos, name, mount, root):
 def _report(repos, node, storages):
     repos.agents.ingest(node, {"node_name": node,
         "mounts": [{"storage_name": n, "mount_path": m, "status": "Ready", "writable": True} for n, m in storages],
-        "tools": [{"name": t, "status": "Ready"} for t in ("dsync", "nsync")],
-        "identities": [{"username": "alice", "status": "Ready"}]}, reported_at="2026-10-11T23:59:00Z")
+        "tools": [{"name": t, "status": "Ready"} for t in ("dsync", "nsync")]}, reported_at="2026-10-11T23:59:00Z")
 
 
 def _policies(repos):
@@ -135,11 +138,11 @@ def _policies(repos):
 
 
 def _sync_request(repos, src, s_rel, dst, d_rel, key):
-    repos.sync_pairs.add(src, dst, actor="admin")
-    return repos.requests.create(operation="sync", requester_id="alice", actor="alice", resource_key=key,
+    return repos.requests.create(operation="sync", requester_id="ops", actor="ops", resource_key=key,
                                  payload={"source_storage": src, "source": s_rel, "destination_storage": dst,
-                                          "destination": d_rel, "options": {}, "owner_username": None},
-                                 priority="mid")
+                                          "destination": d_rel, "options": {}, "owner_username": None,
+                                          "run_as_root": True},
+                                 priority="mid", auth_method="session")
 
 
 def test_planner_rejects_overlap_when_one_node_mounts_both(db):
@@ -148,7 +151,7 @@ def test_planner_rejects_overlap_when_one_node_mounts_both(db):
     _ready(repos, "outer", "/c", "/c/m"); _ready(repos, "inner", "/c", "/c/m/t"); _policies(repos)
     _report(repos, "n1", [("outer", "/c"), ("inner", "/c")])
     rid = _sync_request(repos, "outer", "t/x", "inner", "x", "k-dsync")
-    result = Planner(repos, StubIdentityResolver({"alice": ALICE}), settings=_S()).run_once(now_iso=NOW)
+    result = _planner(repos).run_once(now_iso=NOW)
     assert result[rid] != "planned"
     assert repos.requests.get(rid)["state"] == "Rejected"
     assert repos.requests.last_reason_code(rid) == "sync_destination_inside_source"
@@ -160,7 +163,7 @@ def test_planner_does_not_compare_paths_across_separate_nodes(db):
     _ready(repos, "outer", "/c", "/c/m"); _ready(repos, "inner", "/c", "/c/m/t"); _policies(repos)
     _report(repos, "n1", [("outer", "/c")]); _report(repos, "n2", [("inner", "/c")])
     rid = _sync_request(repos, "outer", "t/x", "inner", "x", "k-nsync")
-    assert Planner(repos, StubIdentityResolver({"alice": ALICE}), settings=_S()).run_once(now_iso=NOW)[rid] == "planned"
+    assert _planner(repos).run_once(now_iso=NOW)[rid] == "planned"
     assert repos.data_jobs.list_jobs(request_id=rid)[0]["tool"] == "nsync"
 
 
@@ -170,5 +173,5 @@ def test_planner_plans_the_user_case_on_one_node(db):
     _policies(repos)
     _report(repos, "n1", [("gpu1-home", "/home/gpu1"), ("gpu1-mirr", "/mirr24/gpu1")])
     rid = _sync_request(repos, "gpu1-home", "cocoa.song", "gpu1-mirr", "cocoa.song", "k-user")
-    assert Planner(repos, StubIdentityResolver({"alice": ALICE}), settings=_S()).run_once(now_iso=NOW)[rid] == "planned"
+    assert _planner(repos).run_once(now_iso=NOW)[rid] == "planned"
     assert repos.data_jobs.list_jobs(request_id=rid)[0]["tool"] == "dsync"

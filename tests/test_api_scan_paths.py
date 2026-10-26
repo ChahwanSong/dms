@@ -1,9 +1,35 @@
+import pytest
+from dms.config import Settings
+
 ADMIN = {"Authorization": "Bearer tok-shared"}
+# 스캔 경로 등록·통계는 면제자(관리자 + 특권 목록 + 세션) 전용이다(k8s 신원 모드, routes_scan_paths._require_unrestricted)
+# -- 사용자별 격리를 보는 이 파일의 사용자들을 면제자로 둔다.
+USERS = ("u1", "u2")
+
+
+@pytest.fixture
+def settings():
+    return Settings(database_url="unused", shared_token="tok-shared", admin_token="tok-admin",
+                    session_secret="sess-secret", account_verification_required=False,
+                    privileged_requesters=frozenset({"root", "admin", *USERS}))
 
 
 def _signup_login(client, username):
-    client.post("/api/auth/signup", json={"username": username, "password": "p"})
+    accounts = client.app.state.repos.accounts
+    if accounts.get(username) is None:
+        accounts.create(username, "p", "admin")
+    client.cookies.clear()
     client.post("/api/auth/login", json={"username": username, "password": "p"})
+
+
+def test_restricted_users_cannot_register_or_read_stats(client):
+    # 비면제자(일반 사용자·목록 밖 관리자)는 등록·통계 조회가 422 scan_path_unrestricted_only -- 목록은 본다.
+    assert _make_storage(client).status_code == 201
+    client.post("/api/auth/signup", json={"username": "plain", "password": "p"})
+    client.post("/api/auth/login", json={"username": "plain", "password": "p"})
+    r = client.post("/api/user/scan-paths", json={"storage_name": "ceph-a", "path": "data"})
+    assert r.status_code == 422 and r.json()["detail"] == "scan_path_unrestricted_only"
+    assert client.get("/api/user/scan-paths").status_code == 200
 
 
 def _make_storage(client, name="ceph-a"):

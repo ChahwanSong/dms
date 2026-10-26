@@ -28,13 +28,6 @@ def test_volcano_backend_builds_adapter(db):
     assert isinstance(adapter, VolcanoExecutionAdapter)
 
 
-def test_ldap_resolver_built_when_configured(db):
-    settings = Settings.from_env({**BASE, "DMS_LDAP_URI": "ldap://x:389",
-        "DMS_LDAP_USER_BASE": "ou=People", "DMS_LDAP_GROUP_BASE": "ou=Groups"})
-    r = build_identity_resolver(settings)
-    assert r is not None and hasattr(r, "resolve")
-
-
 def test_build_runner_is_stub_when_backend_is_not_volcano(db):
     settings = Settings.from_env(BASE)
     assert isinstance(build_build_runner(settings, Repositories(db)), StubBuildRunner)

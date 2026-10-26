@@ -155,18 +155,19 @@ def test_scan_path_stats_reads_under_db_base(client, db, tmp_path):
     client.post("/api/admin/storages", json={
         "storage_name": "ceph-a", "mount_path": "/mnt/ceph",
         "managed_root": "/mnt/ceph/dms", "backend_type": "cephfs"}, headers=admin)
-    client.post("/api/auth/signup", json={"username": "alice", "password": "p"})
-    client.post("/api/auth/login", json={"username": "alice", "password": "p"})
+    # 스캔 경로는 면제자(관리자 + 특권 목록 + 세션) 전용 -- 기본 특권 목록의 admin 계정으로 본다.
+    repos.accounts.create("admin", "p", "admin")
+    client.post("/api/auth/login", json={"username": "admin", "password": "p"})
     path_id = client.post("/api/user/scan-paths",
                           json={"storage_name": "ceph-a", "path": "team"}).json()["id"]
-    rid = repos.requests.create(operation="scan", requester_id="alice", actor="alice",
+    rid = repos.requests.create(operation="scan", requester_id="admin", actor="admin",
         resource_key="rk", payload={"storage": "ceph-a", "target": "team"},
         priority="mid")
     plan_id = repos.data_jobs.create_plan(rid, actor="planner")
     jid = repos.data_jobs.create_job(rid, plan_id, operation="scan", priority="mid",
         storage_name="ceph-a", target="team", options={}, tool="dscan",
         worker_pool={"identity": {"uid": os.getuid(), "gid": os.getgid(),
-                                  "username": "alice"}},
+                                  "username": "admin"}},
         precondition={}, actor="planner")
     repos.data_jobs.set_job_state(jid, DataJobState.SUCCEEDED, actor="stepper")
     d = tmp_path / jid / "execution"

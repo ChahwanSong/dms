@@ -13,12 +13,8 @@ def test_phase3c_defaults():
 
 def test_phase3c_overrides():
     s = Settings.from_env({**VALID,
-        "DMS_LDAP_URI": "ldap://10.10.10.30:389",
-        "DMS_LDAP_USER_BASE": "ou=People,dc=dms,dc=local",
-        "DMS_LDAP_GROUP_BASE": "ou=Groups,dc=dms,dc=local",
         "DMS_EXECUTION_BACKEND": "volcano",
         "DMS_JOB_IMAGE": "pkg-01:5000/dms-mpifileutils:latest"})
-    assert s.ldap_uri == "ldap://10.10.10.30:389"
     assert s.execution_backend == "volcano"
     assert s.job_image == "pkg-01:5000/dms-mpifileutils:latest"
 

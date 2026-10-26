@@ -1,5 +1,4 @@
 from dms.controller import build_loops, run_all_once
-from dms.identity import ResolvedIdentity, StubIdentityResolver
 from dms.repositories import Repositories
 
 
@@ -11,8 +10,8 @@ class _Settings:
     stepper_interval_seconds = 5
     agent_report_retention_days = 30
     event_retention_days = 30
-    allow_privileged_requesters = False
-    privileged_requesters = frozenset()
+    allow_privileged_requesters = True
+    privileged_requesters = frozenset({"ops"})
     batch_orchestrator_interval_seconds = 5
     pod_gc_after_seconds = 3600
     vcjob_ttl_seconds = 86400
@@ -49,15 +48,14 @@ def test_planner_loop_runs_end_to_end(db):
     repos.agents.ingest("n1", {"node_name": "n1",
         "mounts": [{"storage_name": "s1", "mount_path": "/mnt/s1",
                     "status": "Ready", "writable": True}],
-        "tools": [{"name": "dscan", "status": "Ready"}],
-        "identities": [{"username": "alice", "status": "Ready"}]})
-    rid = repos.requests.create(operation="scan", requester_id="alice", actor="alice",
+        "tools": [{"name": "dscan", "status": "Ready"}]})
+    # scan 은 특권 운영자(관리자 + 특권 목록 + 세션)만, 모든 잡은 root(run_as_root -- 제출이 늘 싣는다).
+    repos.accounts.create("ops", "pw", "admin")
+    rid = repos.requests.create(operation="scan", requester_id="ops", actor="ops",
         resource_key="data.scan:s1:a:ff",
         payload={"storage": "s1", "target": "a", "options": {},
-                 "owner_username": None}, priority="mid")
-    resolver = StubIdentityResolver(
-        {"alice": ResolvedIdentity("alice", 10001, 10000, ("dmsusers",), False)})
-    loops = build_loops(_Settings(), repos, identity_resolver=resolver)
+                 "owner_username": None, "run_as_root": True}, priority="mid", auth_method="session")
+    loops = build_loops(_Settings(), repos)
     run_all_once(loops, repos, holder="h1")
     assert repos.requests.get(rid)["state"] == "Planned"
     assert repos.data_jobs.list_jobs(request_id=rid)[0]["tool"] == "dscan"

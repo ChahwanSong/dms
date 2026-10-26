@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from .. import k8s_access
 from ..domain import DomainValidationError, Operation, ROLE_ADMIN, ROLE_USER
+from ..identity import IDENTITY_MODE_K8S
 from ..privileged import protected_names
 from ..repositories.accounts import (VERIFICATION_FAILURE_LIMIT, VERIFICATION_FAILURE_WINDOW_SECONDS,
                                      VERIFICATION_PURPOSES, VERIFICATION_TTL_SECONDS,
@@ -428,19 +429,19 @@ def me(request: Request, identity: Identity = Depends(require_user)):
     # can_run_as_root: 포탈이 'root 권한으로 실행' 을 보여 주고 관리자 기본값(root)을 켤지
     # 정하는 근거(2026-09-30). 자격 없는 관리자에게 기본 root 를 켜 두면 제출이 403 이 된다.
     # dms-k8s 설계 D4·D15(2026-10-25) -- 포탈이 제출 화면을 가르는 세 값(표시일 뿐, 서버가 제출·계획·컨펌에서 다시 본다):
-    #   identity_mode  "ldap"|"k8s" -- k8s 면 모든 작업이 root 라 root 체크박스·LDAP 그룹 안내·sync 쌍 필터를 걷는다.
+    #   identity_mode  늘 "k8s"(2026-10-26 -- dms-k8s 는 k8s 모드 전용; 옛 포탈 탭이 이 키로 화면을 가르므로 남긴다).
     #   unrestricted   맵핑 면제(= can_run_as_root -- 의미 불변, 계정 관리 경계). 면제자만 직접 경로·전체 PV·사용자 지정.
     #   user_operations 이 로그인이 제출할 수 있는 연산(관리자 = 전부, 그 밖 = DMS_USER_ALLOWED_OPERATIONS ∩ 알려진 연산 --
     #                   제출 게이트 operation_admin_only 와 같은 규칙). Operation 순서(scan·sync·rm).
     settings = request.app.state.settings
     can_root = can_run_as_root(identity, settings, request.app.state.repos)
-    # scan 은 특권 운영자만(k8s 모드 -- k8s_access.scan_allowed, 제출 게이트와 같은 술어).
+    # scan 은 특권 운영자만(k8s_access.scan_allowed, 제출 게이트와 같은 술어).
     ops = [o.value for o in Operation
            if (identity.role == ROLE_ADMIN or o.value in settings.user_allowed_operations)
-           and (o.value != "scan" or k8s_access.scan_allowed(unrestricted=can_root, settings=settings))]
+           and (o.value != "scan" or k8s_access.scan_allowed(unrestricted=can_root))]
     return {"actor": identity.actor, "role": identity.role,
             "can_run_as_root": can_root,
-            "identity_mode": k8s_access.identity_mode(settings),
+            "identity_mode": IDENTITY_MODE_K8S,
             "unrestricted": can_root,
             "user_operations": ops}
 

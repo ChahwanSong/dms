@@ -314,7 +314,7 @@ def test_planner_ends_pending_children_of_a_cancelled_batch(db, status):
     rid = repos.requests.create(operation="scan", requester_id="admin", actor="admin", resource_key="k:pl",
                                 payload={"storage": "s1", "target": "a"}, priority="mid", batch_id=bid,
                                 auth_method="session")
-    out = Planner(repos, None, settings=_S()).run_once()
+    out = Planner(repos, settings=_S()).run_once()
     assert out[rid] == "cancelled:cancelled_by_batch"
     assert repos.requests.get(rid)["state"] == "Cancelled"
     assert repos.data_jobs.list_jobs(request_id=rid) == []
