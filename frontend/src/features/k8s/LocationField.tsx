@@ -14,7 +14,7 @@ import type { Loc, LocMode, Side } from "./pvLocation";
 import { nsLabel } from "./k8sTerms";
 import type { VolumeRow } from "./types";
 
-// 단일 작업 화면의 한 쪽(소스·목적지·대상) 위치 입력(dms-k8s 설계 §7, k8s 모드).
+// 단일 작업 화면의 한 쪽(소스·목적지·대상) 위치 입력(dms-k8s 설계 §7).
 //   - 맵핑 범위(일반 사용자·목록 밖 관리자, 면제 관리자의 「권한 기준 사용자」 지정): namespace (StorageClass) → PV 이름 → PV 안 경로
 //   - 면제 관리자 + 권한 기준 사용자 비움: PV 검색(상한 50) → PV 안 경로
 //   - 면제 관리자는 쪽마다 「PV | 직접 경로」(직접 경로 = 기존 스토리지 + 관리 디렉토리 아래 상대경로 -- rawSlot 으로 받는다)

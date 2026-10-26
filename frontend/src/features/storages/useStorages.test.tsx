@@ -22,11 +22,10 @@ test("useDeleteStorage 는 sync 허용 쌍 캐시도 무효화한다(서버가 �
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   qc.setQueryData(["storages"], []);
   qc.setQueryData(["sync-pairs"], [{ source_storage: "s1", destination_storage: "s1" }]);
-  qc.setQueryData(["user-sync-pairs"], { restricted: true, pairs: [] });
   const { result } = renderHook(() => useDeleteStorage(), { wrapper: ({ children }) =>
     <QueryClientProvider client={qc}>{children}</QueryClientProvider> });
   result.current.mutate("s1");
   await waitFor(() => expect(result.current.isSuccess).toBe(true));
-  for (const key of [["storages"], ["sync-pairs"], ["user-sync-pairs"]])
+  for (const key of [["storages"], ["sync-pairs"]])
     expect(qc.getQueryState(key)?.isInvalidated).toBe(true);
 });

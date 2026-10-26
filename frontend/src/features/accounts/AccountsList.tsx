@@ -101,9 +101,8 @@ export function AccountsList() {
   const rootGrant = useSetRootGrant();
   const inRouter = useInRouterContext();
   const [createPreset, setCreatePreset] = useState<string | null>(null);
-  // k8s 모드(dms-k8s 설계 D4): 같은 자격이 「k8s 권한 맵핑 면제」라 라벨만 바꾼다(모든 작업이 root 라 「root 실행」은 거짓).
-  const k8s = me.data?.identity_mode === "k8s";
-  // root 실행 자격을 줄 수 있는 관리자인가(이미 root 자격이 있는 세션 관리자 -- 서버가 다시 강제한다).
+  // 「전체 PV·직접 경로 권한」(can_run_as_root -- dms-k8s 설계 D4: 모든 작업이 root 라 같은 자격이 「k8s 권한 맵핑 면제」다)을
+  // 줄 수 있는 관리자인가(이미 그 권한이 있는 세션 관리자 -- 서버가 다시 강제한다).
   const canGrant = me.data?.can_run_as_root === true;
   // 아이디 검색(사용자 요청 2026-08-19): 서버가 전체 목록을 주므로(페이징 없음)
   // 클라이언트 필터가 맞다 — 즉답이고 API 무변경. 대소문자 무시 부분 일치.
@@ -156,7 +155,7 @@ export function AccountsList() {
         <Table>
           <thead>
             <tr className="text-muted whitespace-nowrap">
-              <th className="py-2">사용자명</th><th>역할</th><th>{k8s ? K8S_GRANT_LABEL : "root 실행"}</th><th>이메일</th><th>상태</th><th>등록일</th><th>작업</th>
+              <th className="py-2">사용자명</th><th>역할</th><th>{K8S_GRANT_LABEL}</th><th>이메일</th><th>상태</th><th>등록일</th><th>작업</th>
             </tr>
           </thead>
           <tbody>
@@ -179,7 +178,7 @@ export function AccountsList() {
                     </select>
                   </td>
                   <td className="pr-3">
-                    <RootGrantCell a={a} canGrant={canGrant} isSelf={isSelf} grant={rootGrant} k8s={k8s} />
+                    <RootGrantCell a={a} canGrant={canGrant} isSelf={isSelf} grant={rootGrant} />
                   </td>
                   <td className="text-muted">{a.email ?? "—"}</td>
                   <td className="whitespace-nowrap">{a.disabled === 1 ? "비활성" : "활성"}</td>
@@ -214,15 +213,11 @@ export function AccountsList() {
         </Table>
       )}
       {mutationError && <p className="text-bad text-sm mt-2">{mutationError}</p>}
-      {/* admin 역할 ≠ root 실행 자격(2026-10-12 사용자 보고) -- 역할을 올린 뒤 무엇을 더 해야 하는지 표 아래에서 말한다. */}
+      {/* admin 역할 ≠ 이 권한(2026-10-12 사용자 보고) -- 역할을 올린 뒤 무엇을 더 해야 하는지 표 아래에서 말한다. */}
       <p className="mt-3 text-xs text-ink/70 break-keep">
-        {k8s
-          ? (canGrant
-            ? `${K8S_GRANT_LABEL}은 admin 역할과 따로입니다 — admin 계정의 「자격 주기」로 줍니다(배포 설정 계정은 화면에서 바꿀 수 없습니다). 권한이 없는 관리자는 자기 k8s 권한(namespace 의 rolebinding) 안의 PV 만 고릅니다.`
-            : `${K8S_GRANT_LABEL}은 admin 역할과 따로이며, 이 권한이 있는 관리자만 주거나 뺄 수 있습니다.`)
-          : canGrant
-          ? "root 실행 자격은 admin 역할과 따로입니다 — admin 계정의 「자격 주기」로 줍니다(배포 설정 계정은 화면에서 바꿀 수 없습니다)."
-          : "root 실행 자격은 admin 역할과 따로이며, root 자격이 있는 관리자만 주거나 뺄 수 있습니다."}
+        {canGrant
+          ? `${K8S_GRANT_LABEL}은 admin 역할과 따로입니다 — admin 계정의 「자격 주기」로 줍니다(배포 설정 계정은 화면에서 바꿀 수 없습니다). 권한이 없는 관리자는 자기 k8s 권한(namespace 의 rolebinding) 안의 PV 만 고릅니다.`
+          : `${K8S_GRANT_LABEL}은 admin 역할과 따로이며, 이 권한이 있는 관리자만 주거나 뺄 수 있습니다.`}
       </p>
       </Card>
     </section>

@@ -400,41 +400,39 @@ test("손대지 않은 채 폴링으로 실패가 되면 실패 단계 로그가
 });
 
 test("3차 자동 열림은 손대지 않은 동안 모델을 따른다: 판정이 고쳐져 자동 열림이 거둬지면 자동으로 연 뷰어도 닫힌다", async () => {
-  // round3/stage/skew.test.tsx: 잡 폴링이 base 거부를 먼저 보면 마커(사전 점검 실패)로 읽어 로그를 자동으로 열고, 요청 폴링이
-  // 관문 이벤트를 가져와 판정이 「사전 점검 완료 → 미리보기 시작 전 거부」로 고쳐진 뒤에도 그 뷰어가 「완료」 행 아래 남았다.
+  // round3/stage/skew.test.tsx: 잡 판정이 바뀌어 자동 열림이 거둬진 뒤에도 자동으로 연 뷰어가 「완료」 행 아래 남았다. 판정을
+  // 바꾸는 입력은 잡 행이다(옛 계기였던 base 관문 이벤트는 2026-10-26 LDAP 정리로 사라졌다) -- 같은 잡이 마커 사유(사전 점검
+  // 실패, 로그 자동 열림)에서 제출 직전 관문 사유(미리보기 시작 전 거부, 자동 열림 없음)로 바뀌는 렌더로 고정한다.
   server.use(
     http.get("/api/user/jobs/j1/artifacts", () => HttpResponse.json({ entries: [], truncated: false })),
     http.get("/api/user/jobs/j1/logs", () => HttpResponse.json({ phase: "preflight", ref: "pod/p1", source: "archived",
       entries: [{ pod: "p1", log: "preflight ok" }] })),
   );
-  const job: DataJob = { ...BASE, state: "Rejected", reason_code: "artifact_base_not_traversable", phase_refs: { preflight: "pod/p1" },
+  const marker: DataJob = { ...BASE, state: "Rejected", reason_code: "artifact_base_not_traversable", phase_refs: { preflight: "pod/p1" },
     transitions: [{ from_state: "Pending", to_state: "Preflight", at: "2026-10-08T00:00:00Z" },
                   { from_state: "Preflight", to_state: "Rejected", at: "2026-10-08T00:00:30Z" }] };
-  const GATE = [{ id: 7, component: "stepper", severity: "error", event_type: "artifact_base_unsafe_at_step",
-    message: "artifact_base_not_traversable job=j1", at: "2026-10-08T00:00:30Z",
-    payload: { job_id: "j1", problem: "artifact_base_not_traversable" } }];
-  const NONE: unknown[] = [];
+  const gate: DataJob = { ...marker, reason_code: "node_cpu_insufficient_at_step" };
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  const ui = (events: unknown) => (
-    <QueryClientProvider client={qc}><JobStages job={job} events={events} /></QueryClientProvider>
+  const ui = (job: DataJob) => (
+    <QueryClientProvider client={qc}><JobStages job={job} events={[]} /></QueryClientProvider>
   );
-  const view = render(ui(NONE));
+  const view = render(ui(marker));
   expect(await screen.findByText("preflight ok")).toBeInTheDocument();          // 마커 판정 → 자동 열림
   const chip = screen.getByRole("button", { name: "preflight 로그" });
   expect(chip).toHaveAttribute("aria-pressed", "true");
-  view.rerender(ui(GATE));                                                     // 관문 이벤트 도착 → 판정 수정
+  view.rerender(ui(gate));                                                     // 판정 수정(관문) → 자동 열림 거둠
   await waitFor(() => expect(screen.queryByText("preflight ok")).toBeNull());
   expect(screen.getByRole("button", { name: "preflight 로그" })).toHaveAttribute("aria-pressed", "false");
   expect(screen.queryByRole("region", { name: "preflight 로그 내용" })).toBeNull();
   view.unmount();
 
   // 사용자가 직접 연 것은 판정이 바뀌어도 닫지 않는다(touched)
-  const view2 = render(ui(NONE));
+  const view2 = render(ui(marker));
   expect(await screen.findByText("preflight ok")).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "출력 닫기" }));
   await userEvent.click(screen.getByRole("button", { name: "preflight 로그" }));
   expect(await screen.findByText("preflight ok")).toBeInTheDocument();
-  view2.rerender(ui(GATE));
+  view2.rerender(ui(gate));
   await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
   expect(screen.getByText("preflight ok")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "preflight 로그" })).toHaveAttribute("aria-pressed", "true");
@@ -645,26 +643,10 @@ test("V8 스케줄 대기 중인 실행: 실행 행은 「진행 중」이 아�
   expect(rows[1]).not.toHaveTextContent("시작 ·");
 });
 
-test("V9 제출 보류 중: 끝난 사전 점검은 완료, 미리보기 행이 「제출 보류 — LDAP 재확인 불가 2/4」, 라이브 로그 대상 없음", () => {
-  server.use(http.get("/api/user/jobs/j1/artifacts", () => HttpResponse.json({ entries: [], truncated: false })));
-  const deferred = (attempt: number, sec: number) => ({ id: attempt, component: "stepper", severity: "warning",
-    event_type: "identity_recheck_deferred", message: `LDAP 재확인 불가 -- preview 제출 보류 ${attempt}/4`,
-    at: `2026-10-08T03:16:${sec}Z`, payload: { job_id: "j1", phase: "preview", attempt, max_attempts: 4 } });
-  renderStages({ state: "Preflight", transitions: [{ from_state: "Pending", to_state: "Preflight", at: "2026-10-08T03:15:02Z" }] as never },
-    { events: [deferred(1, 10), deferred(2, 20)] });
-  const pre = screen.getByRole("region", { name: "사전 점검·미리보기" });
-  const rows = within(within(pre).getByRole("list", { name: "사전 점검·미리보기 단계" })).getAllByRole("listitem");
-  expect(rows[0]).toHaveTextContent("사전 점검: 완료");
-  expect(rows[1]).toHaveTextContent("제출 보류 — LDAP 재확인 불가 2/4");
-  // 끝난 사전 점검 행에 경과(「…째」)·진행 중 표시가 없다(구획 배지는 ① 전체가 아직 안 끝났다는 뜻이라 「진행 중」이다)
-  expect(rows[0]).not.toHaveTextContent("진행 중");
-  expect(rows[0]).not.toHaveTextContent("째");
-});
-
 test("주석: 이 잡의 phase 이벤트만 그 단계 행에(행마다 3건 + 「외 N건」), job_id 없는 이벤트는 잡이 1개일 때만", async () => {
   server.use(http.get("/api/user/jobs/j1/artifacts", () => HttpResponse.json({ entries: [], truncated: false })));
   const ev = (id: number, payload: unknown, message: string) => ({
-    id, component: "stepper", severity: "info", event_type: "identity_groups_checked", message, payload,
+    id, component: "stepper", severity: "info", event_type: "node_cpu_clamped", message, payload,
     at: "2026-10-08T00:00:0" + (id % 10) + "Z",
   });
   const events = [

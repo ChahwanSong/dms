@@ -1,6 +1,6 @@
 import { Link } from "react-router-dom";
 import {
-  Ban, BellRing, CircleCheck, CircleHelp, CircleX, Clock, Hourglass, LoaderCircle, TriangleAlert, type LucideIcon,
+  Ban, BellRing, CircleCheck, CircleHelp, CircleX, Clock, Hourglass, LoaderCircle, type LucideIcon,
 } from "lucide-react";
 import { Card } from "../../components/ui/Card";
 import { StatusPill } from "../../components/ui/StatusPill";
@@ -126,12 +126,6 @@ export function OutcomeCard({ req, jobs, models, cancelRequest, cancelJob, jobsL
             </p>
           ) : n.text ? <p className="mt-1 break-keep">{n.text}</p> : null}
           {n.expiry && focus && <ExpiryLine job={focus} />}
-          {n.groupWarning && (
-            <p className="mt-2 flex items-start gap-1.5 text-bad break-keep">
-              <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
-              보조 그룹으로 쓰기 권한을 받은 디렉토리에서는 다른 사용자의 파일도 지워질 수 있습니다.
-            </p>
-          )}
           {actions.length > 0 && (
             <div className="mt-3 flex flex-wrap gap-2">
               {actions.map((a) => {

@@ -24,7 +24,6 @@ export interface Outcome {
     text: string | null;
     batchNotice: boolean;     // 배치 자식 ConfirmPending: 기존 배치 안내 <p> 그대로(스펙 C10)
     expiry: boolean;          // 단건 ConfirmPending: 유효기간 줄(지금 시각이 필요해 컴포넌트가 그린다)
-    groupWarning: boolean;    // 보조 그룹 삭제 경고(ConfirmDialog.groupDeleteWarning 과 같은 판정)
     actions: NextAction[];
   } | null;
   // 「작업 컨펌」 버튼(ConfirmDialog)을 누가 갖나: 비배치 ConfirmPending 잡이 하나라도 있으면 **늘 각 잡의 관문 줄**
@@ -73,11 +72,6 @@ const lastTerminalAt = (job: DataJob): string | null => {
   return t && typeof t.at === "string" ? t.at : null;
 };
 
-function groupWarningOf(job: DataJob): boolean {
-  if (job.worker_pool?.identity?.supplementary_gids_status !== "applied") return false;
-  return job.operation === "rm" || job.options?.delete === true;
-}
-
 // jobsLoading: 잡 목록을 아직 모르는데 실패 문구도 없다(캐시에 데이터 없는 실패가 남은 채 다시 들어와 재조회 중 --
 // RequestDetail 의 잡 구획이 중립 골격 「작업 정보를 불러오는 중…」을 그리는 바로 그 경우). 이때 배너가 「불러오지
 // 못해…」라고 하면 한 화면이 실패와 로딩을 동시에 말한다(리뷰 3차) -- 중립 문구로 바꾼다.
@@ -95,7 +89,7 @@ export function deriveOutcome(req: RequestDetail, jobs: DataJob[] | null, models
     return { ...base, tone: "bad", icon: "x", title: `요청이 ${VERB[req.state] ?? "끝났습니다"}`, subtitle };
   }
   const next = (text: string | null, actions: NextAction[], extra: Partial<NonNullable<Outcome["next"]>> = {}) =>
-    ({ text, actions, batchNotice: false, expiry: false, groupWarning: false, ...extra });
+    ({ text, actions, batchNotice: false, expiry: false, ...extra });
 
   if (jobs.length === 0) {
     if (!isRequestTerminal(req.state)) {
@@ -142,14 +136,6 @@ export function deriveOutcome(req: RequestDetail, jobs: DataJob[] | null, models
   if (!m.known) {
     return { ...o, tone: "neutral", icon: "help", title: `알 수 없는 상태입니다${tail}` };
   }
-  // 다음 단계 제출 보류(D2, LDAP 재확인 불가). 상태는 그대로라 "사전 점검 중" 처럼 끝난 단계가 도는 것으로 말하면
-  // 거짓이다(리뷰 V9). 진행 중인 로그도 없다(앞 파드는 끝났고 다음 파드는 아직 없다).
-  if (m.hold) {
-    const n = m.hold.attempt !== null && m.hold.max !== null ? ` (LDAP 재확인 불가 ${m.hold.attempt}/${m.hold.max})` : "";
-    return { ...o, tone: "busy", icon: "clock", title: `${STEP_COPY[m.hold.phase]} 제출을 보류하고 있습니다${n}${tail}`,
-      next: next("LDAP 에 연결되지 않아 보조 그룹 권한을 다시 확인하지 못했습니다 — 약 1분 간격으로 다시 시도하며, "
-        + "모두 실패하면 작업이 중단됩니다. 이 화면은 자동으로 갱신됩니다.", []) };
-  }
   switch (job.state) {
     case "Pending":
       return { ...o, tone: "busy", icon: "loader", title: `작업이 실행을 기다리고 있습니다${tail}`,
@@ -183,7 +169,7 @@ export function deriveOutcome(req: RequestDetail, jobs: DataJob[] | null, models
       // "confirm" = 「컨펌하러 가기」(관문 줄의 「작업 컨펌」으로 이동). 창은 관문 줄에만 있다(confirmOwner 참고).
       return { ...o, tone: "action", icon: "bell", title: `컨펌을 기다리고 있습니다${tail}`,
         next: next("미리보기 결과를 검토한 뒤 컨펌하면 실제 실행이 시작됩니다. 실행하지 않으려면 컨펌하지 않고 취소하세요.",
-          ["confirm", "showPreview", "cancelJob"], { expiry: true, groupWarning: groupWarningOf(job) }) };
+          ["confirm", "showPreview", "cancelJob"], { expiry: true }) };
     }
     case "Succeeded":
       return { ...o, tone: "ok", icon: "check", title: `작업이 완료되었습니다${tail}`,
@@ -226,13 +212,6 @@ export function deriveOutcome(req: RequestDetail, jobs: DataJob[] | null, models
   if (f?.evidence === "gate_ambiguous") {
     // 노드 제외는 앞 파드의 스케줄 대기 재검사에서도, 다음 제출 직전에서도 나온다 -- 단계를 단정하지 않는다.
     return bad(`작업이 ${verb}`, `실행 노드 점검에서 막혀 중단되었습니다 — ${gateNext}`, ["newJob"]);
-  }
-  if (f?.evidence === "base_ambiguous") {
-    // 그룹 잡의 작업 기록 저장소(base) 권한 거부 -- 사전 점검 파드 마커인지 다음 제출 직전 관문인지 기록만으로 모른다
-    // (관문 이벤트가 아직 안 왔거나 보존 기한에 지워졌다). 단계·로그를 가리키지 않고, 고칠 사람(관리자)을 말한다.
-    return bad(`작업이 ${verb}`,
-      "작업 기록(artifact) 저장소 권한 점검에서 막혀 중단되었습니다 — 사유를 관리자에게 전달한 뒤 다시 제출하세요. 데이터는 변경되지 않았습니다.",
-      ["newJob"]);
   }
   if (!f || isEstimated(f.evidence)) {
     // 추정이면 단계를 단정하지 않는다(전이 기록이 없어 "OO 단계에서 중단" 이 거짓일 수 있다).

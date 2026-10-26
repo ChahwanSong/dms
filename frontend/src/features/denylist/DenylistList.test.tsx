@@ -31,15 +31,15 @@ test("adding an entry sends the correct PUT body", async () => {
   let body: any = null;
   server.use(
     http.get("/api/admin/identity-denylist", () => HttpResponse.json([])),
-    http.put("/api/admin/identity-denylist/group/wheel", async ({ request }) => {
+    http.put("/api/admin/identity-denylist/owner/wheel", async ({ request }) => {
       body = await request.json();
-      return HttpResponse.json({ subject_type: "group", subject: "wheel", reason: "spam" });
+      return HttpResponse.json({ subject_type: "owner", subject: "wheel", reason: "spam" });
     }));
   wrap();
   await screen.findByText("등재된 대상이 없습니다");
   await userEvent.click(screen.getByRole("button", { name: "대상 추가" }));
 
-  await userEvent.selectOptions(screen.getByRole("combobox", { name: "대상 유형" }), "group");
+  await userEvent.selectOptions(screen.getByRole("combobox", { name: "대상 유형" }), "owner");
   await userEvent.type(screen.getByRole("textbox", { name: "대상" }), "wheel");
   await userEvent.type(screen.getByRole("textbox", { name: "사유" }), "spam");
   await userEvent.click(screen.getByRole("button", { name: "저장" }));
@@ -65,7 +65,7 @@ test("releasing an entry issues DELETE for the right subject", async () => {
 });
 
 test("subject 의 # 는 인코딩되어 정확한 대상에 PUT 된다 -- fragment 절단 금지", async () => {
-  // 미인코딩이면 fetch 가 "#1" 을 fragment 로 버려 ".../group/grp" 에 PUT 된다
+  // 미인코딩이면 fetch 가 "#1" 을 fragment 로 버려 ".../owner/grp" 에 PUT 된다
   // (wrong-target). 공백·비ASCII 는 URL 파서가 자동 인코딩해 재료가 못 된다 --
   // # 만이 현행과 수정본을 가른다.
   let seenSubject = "";
@@ -75,16 +75,16 @@ test("subject 의 # 는 인코딩되어 정확한 대상에 PUT 된다 -- fragme
     http.put("/api/admin/identity-denylist/:type/:subject", ({ params, request }) => {
       seenSubject = String(params.subject);
       seenPath = new URL(request.url).pathname;
-      return HttpResponse.json({ subject_type: "group", subject: "grp#1", reason: null });
+      return HttpResponse.json({ subject_type: "owner", subject: "grp#1", reason: null });
     }));
   wrap();
   await screen.findByText("등재된 대상이 없습니다");
   await userEvent.click(screen.getByRole("button", { name: "대상 추가" }));
-  await userEvent.selectOptions(screen.getByRole("combobox", { name: "대상 유형" }), "group");
+  await userEvent.selectOptions(screen.getByRole("combobox", { name: "대상 유형" }), "owner");
   await userEvent.type(screen.getByRole("textbox", { name: "대상" }), "grp#1");
   await userEvent.click(screen.getByRole("button", { name: "저장" }));
   await waitFor(() => expect(seenSubject).toBe("grp#1"));
-  expect(seenPath).toBe("/api/admin/identity-denylist/group/grp%231");
+  expect(seenPath).toBe("/api/admin/identity-denylist/owner/grp%231");
 });
 
 test("subject 의 ? 는 인코딩되어 정확한 대상에 DELETE 된다 -- 쿼리 흡수 금지", async () => {
@@ -106,16 +106,28 @@ test("subject 의 ? 는 인코딩되어 정확한 대상에 DELETE 된다 -- 쿼
   await waitFor(() => expect(seenSubject).toBe("x?y"));
 });
 
-test("유형 의미 설명: 목록 상단 패널에 3유형 전부 + kill-switch 특성", async () => {
+test("유형 의미 설명: 목록 상단 패널에 2유형(requester·owner) + kill-switch 특성, LDAP 그룹 유형 없음", async () => {
   server.use(http.get("/api/admin/identity-denylist", () => HttpResponse.json([])));
   wrap();
   await screen.findByText("등재된 대상이 없습니다");
   // 판정 시점·우선순위(identity.resolve_job_identity 의 미러)
   expect(screen.getByText(/제출 시점에 판정하며, 특권 실행 경로보다 먼저/)).toBeInTheDocument();
-  // 세 유형의 구분(제출 계정 vs 실행 신원 vs LDAP 그룹)이 화면에 있다
+  // 두 유형의 구분(제출 계정 vs 실행 신원)이 화면에 있다 -- group(LDAP) 유형은 2026-10-26 에 없어졌다
   expect(screen.getByText(/작업을 제출한 계정 기준/)).toBeInTheDocument();
-  expect(screen.getByText(/파일을 다루는 실행 신원 기준/)).toBeInTheDocument();
-  expect(screen.getByText(/실행 신원이 속한 LDAP 그룹 기준/)).toBeInTheDocument();
+  expect(screen.getByText(/실행 신원\(권한 기준 사용자\) 기준/)).toBeInTheDocument();
+  expect(screen.queryByText(/LDAP 그룹 기준/)).toBeNull();
+});
+
+test("옛 group 행은 「평가 안 됨」으로 남아 해제할 수 있고, 추가 다이얼로그엔 group 유형이 없다", async () => {
+  server.use(http.get("/api/admin/identity-denylist", () => HttpResponse.json(
+    [{ subject_type: "group", subject: "wheel", reason: null }])));
+  wrap();
+  const row = (await screen.findByText("wheel")).closest("tr")!;
+  expect(within(row).getByText(/평가 안 됨 — 이전 버전의 LDAP 그룹 규칙/)).toBeInTheDocument();
+  expect(within(row).getByRole("button", { name: "해제" })).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "대상 추가" }));
+  const dialog = await screen.findByRole("dialog");
+  expect(within(within(dialog).getByLabelText("대상 유형")).queryByRole("option", { name: "group" })).toBeNull();
 });
 
 test("추가 다이얼로그: 유형 선택을 바꾸면 설명 캡션이 따라 바뀐다", async () => {
@@ -126,7 +138,7 @@ test("추가 다이얼로그: 유형 선택을 바꾸면 설명 캡션이 따라
   const dialog = await screen.findByRole("dialog");
   // 기본 requester 의 설명이 떠 있다
   expect(within(dialog).getByText(/작업을 제출한 계정 기준/)).toBeInTheDocument();
-  await userEvent.selectOptions(within(dialog).getByLabelText("대상 유형"), "group");
-  expect(within(dialog).getByText(/실행 신원이 속한 LDAP 그룹 기준/)).toBeInTheDocument();
+  await userEvent.selectOptions(within(dialog).getByLabelText("대상 유형"), "owner");
+  expect(within(dialog).getByText(/실행 신원\(권한 기준 사용자\) 기준/)).toBeInTheDocument();
   expect(within(dialog).queryByText(/작업을 제출한 계정 기준/)).not.toBeInTheDocument();
 });

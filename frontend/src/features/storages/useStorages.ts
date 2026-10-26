@@ -5,7 +5,7 @@ import type { StorageKind } from "../k8s/types";
 export const useStorages = () =>
   useQuery({ queryKey: ["storages"], queryFn: () => apiGet<Storage[]>("/api/admin/storages") });
 // 사용 범위 플래그(storageScope.flagsFor). user_enabled 생략 = 서버가 현재 값 유지.
-// kind(dms-k8s 설계 D11 — filesystem | pv | both)는 k8s 모드 화면만 싣는다(ldap 모드 바디는 그대로 -- 생략 = 서버가 현재 값 유지).
+// kind(dms-k8s 설계 D11 — filesystem | pv | both)는 포탈이 늘 싣는다(생략 = 서버가 현재 값 유지 -- 옛 클라이언트 호환).
 export interface StorageCreateBody {
   storage_name: string; mount_path: string; managed_root: string; backend_type: string;
   enabled?: boolean; user_enabled?: boolean; kind?: StorageKind;
@@ -39,7 +39,6 @@ export const useDeleteStorage = () => {
     onSuccess: () => Promise.all([
       qc.invalidateQueries({ queryKey: ["storages"] }),
       qc.invalidateQueries({ queryKey: ["sync-pairs"] }),
-      qc.invalidateQueries({ queryKey: ["user-sync-pairs"] }),
       qc.invalidateQueries({ queryKey: ["usage-unregistered"] }),   // 지운 스토리지의 scan 기록이 「미등록」이 된다
       qc.invalidateQueries({ queryKey: ["usage-storages"] }),       // 그 탭이 미등록 탭으로 옮겨 가거나(기록 있음) 사라진다
     ]) });

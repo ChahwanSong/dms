@@ -11,11 +11,10 @@
 //     그 밖 → 절대 아님). uid 0 은 root 의 근거로 쓰지 않는다.
 //   - 고정 단위(「uid 10001」·「gid 10000(주 그룹)」)는 줄바꿈 없는 공백(U+00A0)으로 묶는다 -- 좁은 폭에서 「gid」와
 //     숫자가 갈리지 않게. 화면 테스트는 공백을 정규화해 비교한다.
-import type { DataJob, RequestDetail, WorkerPool, WorkerPoolIdentity } from "../../lib/types";
+import type { DataJob, RequestDetail, WorkerPool } from "../../lib/types";
 import { REQUEST_TERMINAL_STATES, isTerminal } from "../../lib/jobState";
 import { absParts, hasPvAddress, pathParts, pvDetailParts, type StorageRoots } from "../../lib/storagePaths";
 import { toolSummary } from "../../lib/jobTool";
-import { groupCaveatsFor, supplementaryGroupsText } from "../../lib/groupCaveats";
 import { syncOwnership } from "../../lib/syncOwnership";
 import { countText, humanBytes, isPlainObject } from "./format";
 import { PRIV_ROOT_HEAD, PRIV_USER, SCAN_INT_FIELDS, SYNC_INT_FIELDS, SYNC_OPTION_HELP } from "./optionRules";
@@ -52,7 +51,6 @@ export interface RequestSpec {
   nodeRequest: string | null;          // 「노드 지정」(배치 자식 payload). null = 행 생략
   privilege: { head: Line; subs: Line[] };
   runAs: { name: string; relation: string; tail: string };
-  groups: { text: string; caveats: string[] } | null;
   ownership: string | null;            // 「목적지 소유」(sync). null = 행 생략
   // 「실행 도구」. null = 행 생략. summary 와 fallback 중 하나만 non-null.
   tool: { summary: string | null; tail: string | null; fallback: string | null; nodes: NodeGroup[] | null } | null;
@@ -306,8 +304,7 @@ export function nodesText(groups: NodeGroup[]): string {
     `${g.side !== null ? `${g.side} ` : ""}${g.names.join(", ")}${g.more > 0 ? ` 외 ${g.more}대` : ""}`).join(" · ")}`;
 }
 
-export function deriveRequestSpec(req: RequestDetail, jobs: DataJob[] | null,
-                                  roots: StorageRoots, backends: Record<string, string>): RequestSpec {
+export function deriveRequestSpec(req: RequestDetail, jobs: DataJob[] | null, roots: StorageRoots): RequestSpec {
   const r = (obj(req) ?? {}) as Record<string, unknown>;
   const p = obj(r.payload) ?? {};
   const op = typeof r.operation === "string" ? r.operation : "";
@@ -374,18 +371,7 @@ export function deriveRequestSpec(req: RequestDetail, jobs: DataJob[] | null,
     : `${[nc !== null ? `노드 ${nc}${ncNote}` : null, ppn !== null ? `노드당 프로세스 ${ppn}` : null]
       .filter((x) => x !== null).join(" · ")} — 정책 상한까지만 적용`;
 
-  // 보조 그룹 -- root 는 그룹 개념이 없다(행을 그리지 않는다). 상태 키가 없으면 모름(행 없음).
-  let groups: RequestSpec["groups"] = null;
-  if (kind !== "root" && ident !== null && ident.supplementary_gids_status !== "privileged") {
-    const text = supplementaryGroupsText(ident as WorkerPoolIdentity);
-    if (text !== null) {
-      const caveats = ident.supplementary_gids_status === "applied" && job0 !== null
-        ? groupCaveatsFor([job0.storage_name, job0.source_storage, job0.destination_storage] as (string | null | undefined)[],
-                          backends)
-        : [];
-      groups = { text, caveats };
-    }
-  }
+  // 보조 그룹 행은 없다(2026-10-26 LDAP 정리 -- 이 라인은 LDAP 보조 그룹을 싣지 않는다; 옛 스냅숏의 supplementary 키는 읽지 않는다).
 
   // 목적지 소유(sync) -- execution_manifests._auto_chown 미러(lib/syncOwnership). 실행 규칙을 단정하는 줄이라 그 규칙이
   // 정해지지 않았거나 실행이 없었던 요청엔 그리지 않는다:
@@ -453,7 +439,6 @@ export function deriveRequestSpec(req: RequestDetail, jobs: DataJob[] | null,
     nodeRequest,
     privilege: pv.privilege,
     runAs: { name: runAsName ?? "—", relation, tail },
-    groups,
     ownership,
     tool,
     multiJob,

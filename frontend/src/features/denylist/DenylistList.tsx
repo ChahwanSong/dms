@@ -63,7 +63,12 @@ export function DenylistList() {
           <tbody>
             {(q.data ?? []).map((e) => (
               <tr key={`${e.subject_type}:${e.subject}`} className="border-t border-black/5">
-                <td className="py-2">{e.subject_type}</td>
+                <td className="py-2">{e.subject_type}
+                  {/* 옛 LDAP 그룹 규칙 -- 서버가 평가하지 않는다(DenyDialog.SUBJECT_TYPES 주석). 해제만 남긴다. */}
+                  {e.subject_type === "group" && (
+                    <span className="block text-xs text-muted">평가 안 됨 — 이전 버전의 LDAP 그룹 규칙(해제하세요)</span>
+                  )}
+                </td>
                 <td>{e.subject}</td>
                 <td className="text-muted">{e.reason ?? "—"}</td>
                 <td className="py-2"><ReleaseButton e={e} /></td>

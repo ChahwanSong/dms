@@ -7,7 +7,7 @@ import { Card } from "../../components/ui/Card";
 import { Skeleton } from "../../components/ui/Skeleton";
 import { REQUEST_TERMINAL_STATES, isTerminal } from "../../lib/jobState";
 import { kstStamp } from "../../lib/datetime";
-import { useStorageBackends, useStorageRoots } from "../storages/useUserStorages";
+import { useStorageRoots } from "../storages/useUserStorages";
 import type { DataJob } from "../../lib/types";
 import { StageNavProvider } from "./stageNav";
 import { OutcomeCard } from "./OutcomeCard";
@@ -102,18 +102,12 @@ export function RequestDetail() {
   // 스토리지 뿌리 맵. managed_root 는 역할 무관(2026-09-29~). 비관리자 응답엔 관리자 전용 스토리지가, 모두의 응답엔
   // 비활성 스토리지가 빠져 그 경로는 모름(절대경로 행 생략)
   const roots = useStorageRoots();
-  // 이름 → backend_type(같은 쿼리 -- 요청 추가 없음). 「요청 내용」의 보조 그룹 주의문용.
-  const backends = useStorageBackends();
 
   // 잡 목록 방어적 정규화(배열이 아니면 모름 취급) + 단계 모델. 잡 조회 실패면 null(모름) -- 0개와 다르다.
   const jobList: DataJob[] | null = jobs.isError && !jobs.data ? null
     : Array.isArray(jobs.data) ? jobs.data : jobs.data === undefined ? null : [];
-  // 요청 이벤트도 모델에 넘긴다(제출 보류 판정) -- 잡 카드(JobStages)가 같은 입력으로 같은 모델을 만든다.
-  // requestTerminal 은 이벤트와 **같은 응답**의 요청 상태다(관문 이벤트 부재를 믿는 조건 -- stageModel ALSO_POD_MARKER).
-  const events = req.data?.events;
-  const evTerminal = reqTerminal === true;
-  const models = useMemo(() => (jobList ?? []).map((j) => deriveJobStages(j, events, { requestTerminal: evTerminal })),
-    [jobList, events, evTerminal]);
+  // 잡 카드(JobStages)가 같은 입력(잡 하나)으로 같은 모델을 만든다.
+  const models = useMemo(() => (jobList ?? []).map((j) => deriveJobStages(j)), [jobList]);
   // 잡 조회 실패를 한 번이라도 봤으면 그 뒤의 재조회(「다시 시도」)는 첫 로딩이 아니다 -- TanStack v5 는 데이터 없는
   // 쿼리의 재조회마다 status 를 pending 으로 되돌려 isLoading 이 다시 참이 되는데, 그때 화면 전체를 골격으로 바꾸면
   // 배너·오류 상자·「다시 시도」(포커스)가 통째로 사라졌다 나타난다(리뷰 V1). 재조회 중엔 error 가 null 이 되므로
@@ -165,7 +159,7 @@ export function RequestDetail() {
   const data = req.data;
   if (!data) return null;
   // 「요청 내용」 카드와 머리말 root 배지가 읽는 한 모델(훅이 아니다 -- 조기 return 뒤에 둬도 된다).
-  const spec = deriveRequestSpec(data, jobList, roots, backends);
+  const spec = deriveRequestSpec(data, jobList, roots);
   const live = !REQUEST_TERMINAL_STATES.has(data.state) || (jobList ?? []).some((j) => !isTerminal(j.state));
   // 폴링 중 한 번 실패했다고 화면 전체를 오류로 바꾸지 않는다 -- 보던 화면은 남기고 "언제 기준인지" 만 말한다.
   const refetchErr = req.isRefetchError || jobs.isRefetchError;
@@ -261,7 +255,7 @@ export function RequestDetail() {
           ) : (
             jobList.map((j, i) => (
               <JobCard key={j.job_id} job={j} model={models[i]} cancel={cancel}
-                       events={data.events} requestTerminal={evTerminal} jobCount={jobList.length} refIso={data.created_at}
+                       events={data.events} jobCount={jobList.length} refIso={data.created_at}
                        batchChild={batchChild} confirmOnGate={outcome.confirmOwner === "gate"} />
             ))
           )}

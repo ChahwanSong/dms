@@ -63,7 +63,7 @@ export type SignupGuard = "mail" | "stub" | "open";
 export interface K8sOverview {
   now: string; settings: K8sSettings; nodes: CallerNode[]; clusters: ClusterSummary[]; totals: K8sTotals;
   // 옵션 = 옛 응답(k3 이전 API)
-  identity_mode?: string; signup_guard?: SignupGuard | string;
+  signup_guard?: SignupGuard | string;
 }
 
 /** 클러스터 등록·편집 바디(토큰은 여기 없다 — 봉인해 token_enc 로만 싣는다, useK8s.useSaveCluster).

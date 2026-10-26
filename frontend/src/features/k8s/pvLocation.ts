@@ -26,7 +26,7 @@ export const emptyLoc = (ref: PvRef | null = null): Loc =>
   ({ mode: "pv", group: "", ref, sub: "", storage: "", path: "" });
 
 /** 쪽별 라벨 -- 한 화면 안에서 서로 부분 문자열이 되지 않게 짓는다(e2e getByLabel 은 부분 일치). sync 화면은 소스·목적지만,
- *  scan·rm 화면은 대상만 그려진다. 직접 경로 라벨은 ldap 모드와 같은 글자(기존 테스트·e2e 접점). */
+ *  scan·rm 화면은 대상만 그려진다. 직접 경로 라벨(「소스 스토리지」·「대상 경로」 등)은 e2e 접점이라 바꾸지 않는다. */
 export const SIDE_LABELS: Record<Side, {
   title: string; group: string; pvc: string; sub: string; search: string; mode: string; storage: string; path: string;
 }> = {

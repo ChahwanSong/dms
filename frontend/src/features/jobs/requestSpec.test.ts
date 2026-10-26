@@ -26,8 +26,7 @@ const JOB = (over: Record<string, unknown> = {}) => ({
     candidates: { primary: ["dms-w2", "dms-w3", "dms-w4", "dms-w5"] }, identity: ALICE },
   ...over,
 }) as unknown as DataJob;
-const spec = (req: Record<string, unknown> = {}, jobs: DataJob[] | null = [JOB()],
-              backends: Record<string, string> = {}) => deriveRequestSpec(REQ(req), jobs, {}, backends);
+const spec = (req: Record<string, unknown> = {}, jobs: DataJob[] | null = [JOB()]) => deriveRequestSpec(REQ(req), jobs, {});
 // 고정 단위는 줄바꿈 없는 공백(U+00A0)으로 묶여 있다 -- 글자 비교는 보통 공백으로 접어서 한다.
 const sp = (s: string) => s.replace(/ /g, " ");
 const USER_HEAD = `root 아님 — ${PRIV_USER}`;
@@ -376,7 +375,7 @@ describe("목적지 소유", () => {
     expect(sp(spec({ requester_id: "mason", payload: { ...SYNC_PAYLOAD, owner_username: "alice" } }).ownership ?? ""))
       .toBe("실행 신원 소유 — 10001:10000(주 그룹)");
     expect(spec({ payload: { ...SYNC_PAYLOAD, options: { chown: "10001:10010" } } }).ownership)
-      .toBe("chown 지정값 10001:10010 — 비 root: uid 는 본인, gid 는 주·적용된 보조 그룹만(아니면 거부·실패)");
+      .toBe("chown 지정값 10001:10010 — 비 root: uid 는 본인, gid 는 주 그룹만(아니면 실패)");
   });
   test("배치 계획 전·scan·옵션 기록 없음·chown 이 문자열 아님이면 행 없음", () => {
     expect(spec({ batch_id: "b1" }, []).ownership).toBeNull();
@@ -397,24 +396,6 @@ describe("목적지 소유", () => {
     expect(spec({ state: "Failed" }, null).ownership).toBeNull();
     // 비 root 계획 전(비종단) -- 규칙은 확정이라 보인다(숫자는 계획 뒤에)
     expect(spec({ state: "Pending" }, []).ownership).toBe("요청자 본인(alice)의 uid:gid(주 그룹)");
-  });
-});
-
-// ---- 9 보조 그룹 --------------------------------------------------------------------------------------------------
-describe("보조 그룹", () => {
-  test("비 root applied: 값 + 스토리지 종류별 주의문", () => {
-    expect(spec({}, [JOB()], { "cephfs-dms": "netapp" }).groups).toEqual({ text: "10010",
-      caveats: ["NFS 스토리지(등록 종류 기준): 보조 그룹은 최대 16개까지만 전달되거나, 서버가 그룹을 자체 조회하면 인정되지 않을 수 있습니다."] });
-  });
-  test("root·status privileged·상태 키 부재면 행 없음", () => {
-    expect(spec({ payload: { ...SYNC_PAYLOAD, run_as_root: true } }, [JOB({ worker_pool: { identity: ROOT_IDENT } })]).groups).toBeNull();
-    expect(spec({}, [JOB({ worker_pool: { identity: { ...ALICE, supplementary_gids_status: "privileged" } } })]).groups).toBeNull();
-    expect(spec({}, [JOB({ worker_pool: { identity: { username: "mason", uid: 0, gid: 0, privileged: true } } })]).groups).toBeNull();
-    expect(spec({}, [JOB({ worker_pool: { identity: { username: "alice", uid: 1, gid: 1, privileged: false } } })]).groups).toBeNull();
-  });
-  test("none 은 주의문 없이 「없음」", () => {
-    expect(spec({}, [JOB({ worker_pool: { identity: { ...ALICE, supplementary_gids: [], supplementary_gids_status: "none" } } })]).groups)
-      .toEqual({ text: "없음", caveats: [] });
   });
 });
 
@@ -450,7 +431,7 @@ test("노드 지정: nsync 는 출발·목적지 각각(총 최대 2배), 도구
 describe("대상·절대경로 조각", () => {
   test("sync 는 [출발, 도착], scan 은 [대상] -- 경로 이름의 「 → 」에서 갈리지 않는다", () => {
     const s = deriveRequestSpec(REQ({ payload: { source_storage: "a", source: "dir → x", destination_storage: "b", destination: "y" } }),
-      [], { a: "/A", b: "/B" }, {});
+      [], { a: "/A", b: "/B" });
     expect(s.target).toEqual(["a:dir → x", "b:y"]);
     expect(s.abs).toEqual(["/A/dir → x", "/B/y"]);
     expect(spec({ operation: "scan", payload: { storage: "s", target: "t" } }, []).target).toEqual(["s:t"]);
@@ -475,7 +456,6 @@ describe("변조 입력(DB 신뢰 경계)", () => {
     const m = spec({ payload: { ...SYNC_PAYLOAD, options: [1] } }, [JOB({ worker_pool: { identity: [], candidates: "x" } })]);
     expect(m.options).toEqual({ state: "malformed" });
     expect(m.tool?.nodes).toBeNull();
-    expect(m.groups).toBeNull();
   });
 
   test("precondition 숫자·잡 원소 null·우선순위 숫자에도 죽지 않는다", () => {
@@ -538,7 +518,7 @@ describe("PV 주소 요청: 대상은 PV 표기, PV 행(클러스터 · 볼륨 �
     expect(s.pv).toEqual([{ side: "소스", text: "dmsk8s · pvc-52c6 · tb-gpfs" }]);
     expect(s.targetUser).toBeNull();
   });
-  test("PV 주소가 아닌 요청은 PV 행·대상 사용자 행이 없다(ldap 모드 실행 신원 지정은 「실행 신원」 행이 말한다)", () => {
+  test("PV 주소가 아닌 요청은 PV 행·대상 사용자 행이 없다(옛 행의 실행 신원 지정은 「실행 신원」 행이 말한다)", () => {
     const s = spec({ payload: { ...SYNC_PAYLOAD, owner_username: "alice" } });
     expect(s.pv).toEqual([]);
     expect(s.targetUser).toBeNull();

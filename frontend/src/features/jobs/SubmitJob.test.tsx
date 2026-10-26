@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { QueryClientProvider, QueryClient, focusManager } from "@tanstack/react-query";
+import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
@@ -12,18 +12,20 @@ import type { UserStorage } from "../../lib/types";
 import type { Me } from "../../lib/types";
 
 // 2026-10-06: SubmitJob 이 4스텝 위저드에서 한 장짜리 시트(번호 구획) + 오른쪽 제출 요약이 됐다.
-// "다음"·"이전" 동선은 사라지고, 스텝별 '다음' 잠금 단언은 **제출 버튼** 잠금으로 옮겼다. 제출 바디
-// toEqual 단언은 원문 보존 -- 레이아웃 개편이 전송 계약(서버·e2e 접점)을 안 건드렸다는 증거다.
+// 2026-10-26 LDAP 정리: 이 라인은 k8s 신원 모드 전용이다 -- 옛 ldap 모드 화면(스토리지 직접 고르기·실행 신원·root
+// 체크박스·sync 허용 쌍 필터)은 지웠다. 여기서는 **면제 관리자(전체 PV·직접 경로 권한)의 직접 경로 흐름**으로 경로 즉답·
+// 옵션·제출 바디 계약을 고정한다(모든 바디에 run_as_root: true). 역할별 PV 주소 흐름(일반 사용자·목록 밖 관리자·면제
+// 관리자의 PV 검색·권한 기준 사용자)은 SubmitJob.k8s.test.tsx 가 맡는다.
 
 const storageRows: UserStorage[] = [
   { storage_name: "cephfs", backend_type: "cephfs", status: "Ready" },
   { storage_name: "cephfs-secondary", backend_type: "cephfs", status: "Ready" },
 ];
-const meUser: Me = { actor: "alice", role: "user" };
-// 관리자 기본 = root 자격 있음(특권 목록 + 세션) -- 서버 me.can_run_as_root. 자격 없는 관리자는
-// meAdminNoRoot 로 따로 고정한다.
-const meAdmin: Me = { actor: "root", role: "admin", can_run_as_root: true };
-const meAdminNoRoot: Me = { actor: "ops2", role: "admin", can_run_as_root: false };
+// 서버 /me 그대로(identity_mode 는 상수 "k8s" -- 화면은 그 값으로 가르지 않는다).
+const meUser: Me = { actor: "alice", role: "user", identity_mode: "k8s", unrestricted: false, user_operations: ["sync"] };
+// 면제 관리자 = 관리자 + 특권 목록/계정 부여 + 세션(me.can_run_as_root = me.unrestricted).
+const meAdmin: Me = { actor: "root", role: "admin", can_run_as_root: true, identity_mode: "k8s", unrestricted: true,
+                      user_operations: ["scan", "sync", "rm"] };
 
 // sync 고급 숫자 옵션의 프리필 기본값(사용자 조정 2026-08-16) — 폼이 값을 미리
 // 채우므로 바디에 **항상** 실린다. 리터럴이 아니라 단일 출처를 읽어 폼과 테스트가
@@ -32,25 +34,21 @@ const SYNC_NUM_DEFAULTS = {
   batch_files: Number(SYNC_INT_FIELDS.batch_files.prefill),
   bufsize: Number(SYNC_INT_FIELDS.bufsize.prefill),
 };
-// pristine 관리자 sync 폼이 싣는 옵션: open_noatime(기본 ON) + 숫자 프리필. open_noatime 은
-// root 실행일 때만 실리는데 관리자 기본이 root 다(2026-09-30 사용자 결정) -- 비 root 실행의
-// O_NOATIME 은 타인 소유 파일에서 EPERM 이라 root 를 끄면 빠진다(아래 open_noatime 테스트).
+// pristine sync 폼이 싣는 옵션: open_noatime(기본 ON -- 모든 작업이 root) + 숫자 프리필.
 const SYNC_DEFAULT_OPTS = { open_noatime: true, ...SYNC_NUM_DEFAULTS };
 
-// 기본 me = admin(2026-08-20): rm·scan·고급옵션·우선순위·실행신원은 운영자
-// 전용이라, 그 기능들을 다루는 대다수 테스트는 admin 컨텍스트여야 한다. 사용자
-// 제약(sync 만·옵션 단순화)은 meUser 를 명시한 테스트가 따로 고정한다.
-// 사용자 sync 허용 쌍(2026-09-30, 기본 전부 불가): 사용자 테스트의 fillSyncTarget 조합
-// (cephfs → cephfs-secondary)을 허용해 둔다. 관리자는 조회하지 않는다(제한 없음).
-const userPairs = { restricted: true, pairs: [
-  { source_storage: "cephfs", destination_storage: "cephfs-secondary" }] };
+let pairsAsked = 0;
 const server = setupServer(
   http.get("/api/auth/me", () => HttpResponse.json(meAdmin)),
   http.get("/api/user/storages", () => HttpResponse.json(storageRows)),
-  http.get("/api/user/sync-pairs", () => HttpResponse.json(userPairs)),
+  http.get("/api/user/sync-pairs", () => { pairsAsked += 1; return HttpResponse.json({ restricted: false, pairs: [] }); }),
+  http.get("/api/user/k8s/volumes", () => HttpResponse.json({
+    clusters: [], unrestricted: false, truncated: false, namespaces: [], volumes: [] })),
+  http.get("/api/admin/k8s/volumes", () => HttpResponse.json({ clusters: [], truncated: false, volumes: [] })),
+  http.get("/api/admin/k8s/access", () => HttpResponse.json({ clusters: [], unrecognized: [], users: [] })),
 );
 beforeAll(() => server.listen());
-afterEach(() => server.resetHandlers());
+afterEach(() => { server.resetHandlers(); pairsAsked = 0; });
 afterAll(() => server.close());
 
 function renderPage() {
@@ -68,18 +66,22 @@ function renderPage() {
 }
 
 // ---- 입력 헬퍼 ---------------------------------------------------------------
-// 한 화면이라 이동 단계가 없다. 대신 스토리지 목록 로드를 option 등장으로 기다린다 -- 위저드의
-// "다음" 클릭이 벌어 주던 시간이 사라져, 기다리지 않고 selectOptions 하면 user-event 가
-// "Value not found in options" 로 던진다.
+// 한 화면이라 이동 단계가 없다. 면제 관리자의 쪽은 기본이 「PV」(전체 PV 검색)라, 직접 경로 칸을 쓰려면 그 쪽의 「지정 방식」을
+// 「직접 경로」로 바꾼다(me 로드 뒤에야 전환이 보인다). 스토리지 목록 로드는 option 등장으로 기다린다.
 
 const submitButton = () => screen.getByRole("button", { name: "제출" });
 
-// sync(초기 연산)의 소스·목적지 4필드를 채운다.
+async function rawMode(side: "소스" | "목적지" | "대상") {
+  const group = await screen.findByRole("group", { name: `${side} 지정 방식` });
+  await userEvent.click(within(group).getByRole("button", { name: "직접 경로" }));
+}
+
+// sync(초기 연산)의 소스·목적지를 직접 경로로 채운다.
 async function fillSyncTarget() {
-  await screen.findByLabelText("연산");
-  const sourceSelect = await screen.findByLabelText("소스 스토리지");
-  // 옵션 텍스트는 이름만(상태 접미 제거, 2026-08-22) -- 정확 매칭으로 기다린다
-  // (cephfs 는 cephfs-secondary 의 부분 문자열이라 exact 필수).
+  await rawMode("소스");
+  await rawMode("목적지");
+  const sourceSelect = screen.getByLabelText("소스 스토리지");
+  // 옵션 텍스트는 이름만 -- 정확 매칭으로 기다린다(cephfs 는 cephfs-secondary 의 부분 문자열이라 exact 필수).
   await within(sourceSelect).findByRole("option", { name: "cephfs" });
   await userEvent.selectOptions(sourceSelect, "cephfs");
   await userEvent.type(screen.getByLabelText("소스 경로"), "a/b");
@@ -87,10 +89,11 @@ async function fillSyncTarget() {
   await userEvent.type(screen.getByLabelText("목적지 경로"), "c/d");
 }
 
-// 연산을 바꾸고(scan·rm 은 admin 전용이라 me 로드 후에야 옵션이 생긴다) 스토리지 목록 로드를 기다린다.
+// 연산을 바꾸고(scan·rm 은 me 로드 후에야 옵션이 생긴다) 대상을 직접 경로로 바꾼 뒤 스토리지 목록 로드를 기다린다.
 async function chooseOperation(op: "scan" | "rm") {
   await screen.findByRole("option", { name: op });
   await userEvent.selectOptions(screen.getByLabelText("연산"), op);
+  await rawMode("대상");
   const storageSelect = screen.getByLabelText("스토리지");
   await within(storageSelect).findByRole("option", { name: "cephfs" });
   return storageSelect;
@@ -108,6 +111,15 @@ async function fillRmTarget() {
 const fieldBox = (label: string) =>
   screen.getByLabelText(label).closest("label")!.parentElement as HTMLElement;
 
+function captureSubmit() {
+  const captured: { body: any } = { body: null };
+  server.use(http.post("/api/user/requests", async ({ request }) => {
+    captured.body = await request.json();
+    return HttpResponse.json({ request_id: "rX", state: "Pending" }, { status: 202 });
+  }));
+  return captured;
+}
+
 // ---- 한 화면 구조 -------------------------------------------------------------
 
 test("한 화면에 구획이 모두 보이고 위저드 동선(다음·이전)이 없다 — 관리자 4구획·사용자 3구획", async () => {
@@ -118,16 +130,16 @@ test("한 화면에 구획이 모두 보이고 위저드 동선(다음·이전)�
   expect(screen.getByRole("heading", { level: 2, name: "제출 요약" })).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "다음" })).toBeNull();
   expect(screen.queryByRole("button", { name: "이전" })).toBeNull();
-  // 입력 필드가 한 화면에 동시에 있다(연산·대상·옵션·실행 신원)
+  // 입력 필드가 한 화면에 동시에 있다(연산·대상·옵션·권한 기준 사용자)
   expect(screen.getByLabelText("연산")).toBeInTheDocument();
-  expect(screen.getByLabelText("소스 경로")).toBeInTheDocument();
+  expect(screen.getByRole("group", { name: "소스 지정 방식" })).toBeInTheDocument();
   expect(screen.getByLabelText("delete")).toBeInTheDocument();
-  expect(screen.getByLabelText("실행 신원(선택)")).toBeInTheDocument();
+  expect(screen.getByLabelText("권한 기준 사용자")).toBeInTheDocument();
   unmount();
 
   server.use(http.get("/api/auth/me", () => HttpResponse.json(meUser)));
   renderPage();
-  await screen.findByText("스토리지 사이에서 디렉토리 하나를 sync 합니다.");   // me(user) 로드
+  await screen.findByText(/권한 있는 PV 에서 sync 을 실행합니다/);   // me(user) 로드
   expect(screen.queryByRole("heading", { level: 2, name: "실행 설정" })).toBeNull();
   expect(screen.getByRole("heading", { level: 2, name: "실행 옵션" })).toBeInTheDocument();
 });
@@ -149,7 +161,7 @@ test("사용자 화면은 관리자 전용 정책 API 를 부르지 않는다(40
     http.get("/api/auth/me", () => HttpResponse.json(meUser)),
     http.get("/api/admin/policies", () => { asked += 1; return HttpResponse.json({ detail: "forbidden" }, { status: 403 }); }));
   renderPage();
-  await fillSyncTarget();
+  await screen.findByText(/권한 있는 PV 에서 sync 을 실행합니다/);
   expect(screen.getByText("우선순위").closest("div")).toHaveTextContent("(정책 기본)");
   expect(asked).toBe(0);
 });
@@ -169,8 +181,39 @@ test("관리자 화면은 정책을 조회해 우선순위 기본값 실값을 �
   expect(screen.getByText(NODE_CPU_CAP_NOTE)).toBeInTheDocument();
 });
 
+test("실행 신원 칸·root 체크박스가 없다 -- 모든 작업은 root, 사용자 지정은 면제자의 「권한 기준 사용자」뿐", async () => {
+  // 2026-10-26 LDAP 정리: 옛 ldap 모드의 「실행 신원(선택)」·「root 권한으로 실행」은 지웠다(서버가 run_as_root 를 강제).
+  const { unmount } = renderPage();
+  await fillSyncTarget();
+  expect(screen.queryByLabelText("실행 신원(선택)")).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("root 권한으로 실행")).not.toBeInTheDocument();
+  expect(screen.getByText(/모든 작업은 root 로 실행됩니다 — 전체 PV·직접 경로 권한이 있어/)).toBeInTheDocument();
+  const priv = screen.getByText(/^root\(특권\) — 권한 검사 우회, sync 는 목적지 소유·권한을 소스에 맞춤\(chown·chmod 지정 시 그 값\)$/);
+  expect(priv).toHaveClass("text-bad");
+  unmount();
+
+  server.use(http.get("/api/auth/me", () => HttpResponse.json(meUser)));
+  renderPage();
+  await screen.findByLabelText("delete");
+  expect(screen.queryByLabelText("실행 신원(선택)")).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("권한 기준 사용자")).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("root 권한으로 실행")).not.toBeInTheDocument();
+});
+
+test("sync 허용 쌍을 조회하지 않는다(설계 D14 -- 양쪽이 PV 주소인 sync 는 PV 권한이 판정, 직접 경로는 면제자만)", async () => {
+  const { unmount } = renderPage();
+  await fillSyncTarget();
+  expect(screen.queryByRole("note", { name: "허용된 스토리지 조합" })).not.toBeInTheDocument();
+  unmount();
+  server.use(http.get("/api/auth/me", () => HttpResponse.json(meUser)));
+  renderPage();
+  await screen.findByLabelText("delete");
+  await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
+  expect(pairsAsked).toBe(0);
+});
+
 test("입력 칸에서 Enter 를 눌러도 제출되지 않는다(요약을 보기 전 조기 제출 방지)", async () => {
-  // 관리자 기본이 root 이고 rm 도 있다 -- 경로 입력 중 Enter 한 번에 요청이 나가면 안 된다.
+  // 모든 작업이 root 이고 rm 도 있다 -- 경로 입력 중 Enter 한 번에 요청이 나가면 안 된다.
   // 제출 버튼은 type="button" + onClick 이라 form 에 submit 버튼이 없다.
   let received: any = null;
   server.use(http.post("/api/user/requests", async ({ request }) => {
@@ -182,7 +225,7 @@ test("입력 칸에서 Enter 를 눌러도 제출되지 않는다(요약을 보�
   expect(submitButton()).toBeEnabled();
   expect(submitButton()).toHaveAttribute("type", "button");
   await userEvent.type(screen.getByLabelText("목적지 경로"), "{enter}");
-  await userEvent.type(screen.getByLabelText("실행 신원(선택)"), "{enter}");
+  await userEvent.type(screen.getByLabelText("권한 기준 사용자"), "{enter}");
   await new Promise((r) => setTimeout(r, 150));
   expect(received).toBeNull();
   expect(screen.queryByRole("heading", { name: "요청 상세" })).not.toBeInTheDocument();
@@ -261,16 +304,16 @@ test("앞뒤 공백은 다듬지 않고 그대로 보낸다 — 화면도 그 �
 
 test("제출 요약은 빈 폼에선 '—' 와 남은 입력을, 다 채우면 값을 보이고 버튼이 풀린다", async () => {
   renderPage();
-  await screen.findByLabelText("소스 스토리지");
+  await screen.findByRole("group", { name: "소스 지정 방식" });
   const summary = screen.getByRole("heading", { level: 2, name: "제출 요약" }).parentElement!;
   expect(within(summary).getAllByText("—")).toHaveLength(2);                // 소스·목적지
-  expect(within(summary).getByText("소스·목적지 스토리지와 경로를 모두 입력하세요")).toBeInTheDocument();
+  expect(within(summary).getByText("소스·목적지 PV 를 모두 고르세요")).toBeInTheDocument();
   expect(submitButton()).toBeDisabled();
-  expect(submitButton()).toHaveAccessibleDescription("소스·목적지 스토리지와 경로를 모두 입력하세요");
+  expect(submitButton()).toHaveAccessibleDescription("소스·목적지 PV 를 모두 고르세요");
   await fillSyncTarget();
   expect(within(summary).getByText("cephfs:a/b")).toBeInTheDocument();
   expect(within(summary).getByText("cephfs-secondary:c/d")).toBeInTheDocument();
-  expect(within(summary).queryByText("소스·목적지 스토리지와 경로를 모두 입력하세요")).toBeNull();
+  expect(within(summary).queryByText("소스·목적지 PV 를 모두 고르세요")).toBeNull();
   // 옵션은 JSON 한 줄이 아니라 값 토큰(제출 바디와 같은 함수에서)
   for (const t of ["open_noatime", "batch_files=1000000", "bufsize=4194304"])
     expect(within(summary).getByText(t)).toBeInTheDocument();
@@ -279,20 +322,21 @@ test("제출 요약은 빈 폼에선 '—' 와 남은 입력을, 다 채우면 �
 
 // ---- 대상 sanity -------------------------------------------------------------
 
-test("대상 sanity: sync 경로가 비면 제출이 잠기고 문구가 뜬다(운영자/사용자 공통)", async () => {
+test("대상 sanity: sync 경로가 비면 제출이 잠기고 문구가 뜬다", async () => {
   // 사용자 결정(2026-08-22): 스토리지·경로 미입력이면 제출할 수 없다.
   renderPage();
-  await screen.findByLabelText("소스 스토리지");
+  await rawMode("소스");
+  await rawMode("목적지");
   // 아무것도 안 채운 상태: 제출 비활성 + 안내
   expect(submitButton()).toBeDisabled();
-  expect(screen.getByText("소스·목적지 스토리지와 경로를 모두 입력하세요")).toBeInTheDocument();
+  expect(screen.getByText("소스·목적지를 모두 고르고 경로를 입력하세요")).toBeInTheDocument();
   // 스토리지만 고르고 경로는 비움 → 여전히 잠김
   const srcSel = screen.getByLabelText("소스 스토리지");
   await within(srcSel).findByRole("option", { name: "cephfs" });   // 목록 로드 대기(스코프)
   await userEvent.selectOptions(srcSel, "cephfs");
   await userEvent.selectOptions(screen.getByLabelText("목적지 스토리지"), "cephfs-secondary");
   expect(submitButton()).toBeDisabled();
-  // 경로까지 채우면 풀린다(관리자 기본 옵션은 유효하다)
+  // 경로까지 채우면 풀린다(기본 옵션은 유효하다)
   await userEvent.type(screen.getByLabelText("소스 경로"), "a");
   await userEvent.type(screen.getByLabelText("목적지 경로"), "b");
   expect(submitButton()).toBeEnabled();
@@ -310,97 +354,13 @@ test("대상 sanity: rm 은 대상 경로가 비면 제출이 잠긴다", async 
 
 test("스토리지 드롭다운이 API 목록으로 채워진다", async () => {
   renderPage();
-  const sourceSelect = await screen.findByLabelText("소스 스토리지");
+  await rawMode("소스");
+  const sourceSelect = screen.getByLabelText("소스 스토리지");
   // 이름만(상태 접미 없음). 정확 매칭으로 두 옵션을 구분.
   expect(await within(sourceSelect).findByRole("option", { name: "cephfs" })).toBeInTheDocument();
   expect(within(sourceSelect).getByRole("option", { name: "cephfs-secondary" })).toBeInTheDocument();
   // 상태 접미(Ready/Degraded)는 더 이상 노출되지 않는다.
   expect(within(sourceSelect).queryByText(/\(Ready\)|\(Degraded\)/)).not.toBeInTheDocument();
-});
-
-test("sync 는 목적지 조건(없는 경우·있는 경우)과 소유권을 보이고, 제출 요약이 요점을 함께 보인다(사용자)", async () => {
-  // 2026-09-30 사용자 요청: "목적지의 상위 디렉토리에 쓰기 권한이 있어야 하는 조건을 분명히".
-  // 2026-10-01 사용자 요청: "목적지가 없는 경우" + "기본적으로 목적지는 요청자 본인 uid:gid 로 셋업".
-  server.use(
-    http.get("/api/auth/me", () => HttpResponse.json(meUser)),
-    http.get("/api/user/storages", () => HttpResponse.json([
-      { storage_name: "cephfs", backend_type: "cephfs", status: "Ready", managed_root: "/cephfs/managed" },
-      { storage_name: "cephfs-secondary", backend_type: "cephfs", status: "Ready",
-        managed_root: "/cephfs2/managed" }])));
-  renderPage();
-  await fillSyncTarget();                     // 목적지 cephfs-secondary : c/d
-  const card = screen.getByLabelText("목적지 조건과 소유권");
-  expect(card).toHaveAttribute("role", "note");
-  expect(card).toHaveTextContent("목적지가 없는 경우: sync 가 목적지 디렉토리를 새로 만듭니다");
-  expect(card).toHaveTextContent("상위 디렉토리는 이미 있고 그 디렉토리에 쓰기 권한");
-  expect(card).toHaveTextContent("중간 디렉토리는 만들지 않습니다");
-  expect(card).toHaveTextContent("목적지가 이미 있는 경우: 디렉토리여야 합니다(파일이면 거부). 쓰기·진입할 수 있어야 하며");
-  expect(card).toHaveTextContent("목적지 조건과 소유권 — 요청자 본인 계정(uid/gid) 기준");
-  expect(card).toHaveTextContent("요청자 본인 소유여야 합니다");
-  // 보조 그룹 인정(2026-10-07 D15): 조건부 문구 -- 계획 시점 확정·gidNumber 그룹만·중첩 제외·스토리지에 따라 다름
-  expect(card).toHaveTextContent("권한은 본인 계정의 uid·LDAP 주 그룹·LDAP 보조 그룹(적용된 경우 — 운영자가 기능을 껐거나 "
-    + "그룹이 256개를 넘으면 주 그룹만) 기준으로 판정됩니다");
-  // G8(2026-10-08 리뷰): chown 칸은 관리자 전용 -- 사용자에겐 할 수 없는 "chown 에 지정하세요" 대신 관리자에게 요청
-  expect(card).not.toHaveTextContent("chown 에 uid:<그룹 gid> 를 지정하세요");
-  expect(card).toHaveTextContent("프로젝트(보조) 그룹 소유가 필요하면 관리자에게 chown uid:<그룹 gid> 지정을 요청하세요");
-  expect(screen.queryByLabelText("chown")).not.toBeInTheDocument();
-  expect(card).toHaveTextContent("보조 그룹은 신청이 계획될 때 한 번 확정되고(gidNumber 가 있는 그룹만, 중첩 그룹 제외)");
-  expect(card).toHaveTextContent("그 뒤 그룹에서 빠지면 실행 전에 중단되며 새로 들어간 그룹은 다시 신청해야 반영됩니다");
-  expect(card).toHaveTextContent("실제 인정 여부는 스토리지 설정에 따라 다를 수 있습니다.");
-  expect(card).not.toHaveTextContent("보조 그룹으로 받은 권한은 인정되지 않습니다");
-  expect(card).toHaveTextContent("요청자 본인 소유여야 합니다(sync 가 최상위의 권한·시각을 소스에 맞추기 때문) — 그룹 쓰기 권한만으로는 부족합니다.");
-  expect(card).toHaveTextContent("권한 비트·수정 시각은 소스 그대로라 소스의 그룹 권한이 이 주 그룹에 적용");
-  // 검증 2차(2026-10-01): 이미 있던 남의 소유 항목은 못 바꾼다 -- dsync 실패 / nsync 건너뜀(도구별로 다르다)
-  expect(card).toHaveTextContent("그 안에 다른 사용자 소유 항목이 있으면 작업이 실패하거나 일부 항목의 소유·권한이 바뀌지 않을 수 있습니다");
-  expect(card).not.toHaveTextContent("실행 신원");                             // 사용자에겐 없는 개념
-  expect(card).toHaveTextContent("상위 디렉토리 쓰기 권한도 마찬가지로 필요");
-  expect(within(card).getByText("/cephfs2/managed/c")).toBeInTheDocument();   // c/d 의 상위
-  // 소유권: 사용자는 언제나 요청자 본인 uid:gid(_auto_chown) -- 소스 소유자와 무관
-  expect(card).toHaveTextContent(
-    "소유권: 기본적으로 목적지(새로 만드는 경우 포함)와 복사된 파일·디렉토리는 요청자 본인(alice)의 uid:gid");
-  expect(card).toHaveTextContent("소스 소유자와 관계없습니다");
-  expect(card).not.toHaveTextContent("root");                                  // 사용자에겐 root 안내 없음
-  expect(screen.getByText("상위 디렉토리 /cephfs2/managed/c 가 있어야 하고 요청자 본인의 쓰기 권한 필요. "
-    + "목적지가 없으면 새로 만들고, 이미 있으면 요청자 본인 소유·쓰기 가능해야 함")).toBeInTheDocument();
-  expect(screen.getByText("요청자 본인(alice)의 uid:gid(주 그룹)")).toBeInTheDocument();
-});
-
-// 보조 그룹 주의문(2026-10-07 D15): 고른 소스·목적지의 등록 종류별 한 줄. 일반 주의문은 권한 문장이 이미 말한다.
-const NFS_CAVEAT = "NFS 스토리지(등록 종류 기준): 보조 그룹은 최대 16개까지만 전달되거나, 서버가 그룹을 자체 조회하면 인정되지 않을 수 있습니다.";
-const LUSTRE_CAVEAT = "Lustre(등록 종류 기준): 서버(MDS) 설정에 따라 서버가 그룹을 다시 판정하므로 보조 그룹이 인정되지 않을 수 있습니다.";
-const GENERIC_CAVEAT = "실제 인정 여부는 스토리지 설정에 따라 다를 수 있습니다(등록된 스토리지 종류 기준 안내).";
-
-async function pickSync(source: string, dest: string) {
-  const sourceSelect = await screen.findByLabelText("소스 스토리지");
-  await within(sourceSelect).findByRole("option", { name: source });
-  await userEvent.selectOptions(sourceSelect, source);
-  await userEvent.selectOptions(screen.getByLabelText("목적지 스토리지"), dest);
-}
-
-test("sync 권한 안내에 고른 스토리지 종류별 보조 그룹 주의문이 붙는다(netapp·lustre·cephfs)", async () => {
-  server.use(http.get("/api/user/storages", () => HttpResponse.json([
-    { storage_name: "nas", backend_type: "netapp", status: "Ready" },
-    { storage_name: "exa", backend_type: "lustre", status: "Ready" },
-    { storage_name: "ceph", backend_type: "cephfs", status: "Ready" },
-    { storage_name: "ceph2", backend_type: "cephfs", status: "Ready" }])));
-  renderPage();
-  // 아직 아무것도 안 골랐으면 종류별 줄이 없다(일반 문장만)
-  await screen.findByLabelText("소스 스토리지");
-  expect(ownershipCard()).toHaveTextContent("실제 인정 여부는 스토리지 설정에 따라 다를 수 있습니다.");
-  expect(within(ownershipCard()).queryByText(NFS_CAVEAT)).toBeNull();
-
-  await pickSync("nas", "exa");
-  expect(within(ownershipCard()).getByText(NFS_CAVEAT)).toBeInTheDocument();
-  expect(within(ownershipCard()).getByText(LUSTRE_CAVEAT)).toBeInTheDocument();
-
-  await pickSync("ceph", "ceph2");
-  // cephfs 는 일반 주의문뿐이고 권한 문장이 이미 그 말을 한다 -- 같은 말을 두 번 하지 않는다
-  expect(within(ownershipCard()).queryByText(NFS_CAVEAT)).toBeNull();
-  expect(within(ownershipCard()).queryByText(LUSTRE_CAVEAT)).toBeNull();
-  expect(ownershipCard()).not.toHaveTextContent(GENERIC_CAVEAT);
-
-  await pickSync("ceph", "nas");
-  expect(within(ownershipCard()).getAllByText(NFS_CAVEAT)).toHaveLength(1);
 });
 
 test("관리자 전용 스토리지는 관리자 피커에 (관리자 전용) 으로 구분된다", async () => {
@@ -409,7 +369,8 @@ test("관리자 전용 스토리지는 관리자 피커에 (관리자 전용) �
     ...storageRows, { storage_name: "adm-only", backend_type: "cephfs", status: "Ready",
                       admin_only: true }])));
   renderPage();
-  const sourceSelect = await screen.findByLabelText("소스 스토리지");
+  await rawMode("소스");
+  const sourceSelect = screen.getByLabelText("소스 스토리지");
   expect(await within(sourceSelect).findByRole("option", { name: "adm-only (관리자 전용)" }))
     .toBeInTheDocument();
   expect(within(sourceSelect).getByRole("option", { name: "cephfs" })).toBeInTheDocument();
@@ -417,12 +378,12 @@ test("관리자 전용 스토리지는 관리자 피커에 (관리자 전용) �
 
 test("연산을 rm으로 바꾸면 대상 필드 구성이 바뀌고 rm 경고가 한 번 뜬다", async () => {
   renderPage();
-  expect(await screen.findByLabelText("목적지 스토리지")).toBeInTheDocument();
+  await rawMode("소스");
+  await rawMode("목적지");
+  expect(screen.getByLabelText("목적지 스토리지")).toBeInTheDocument();
   expect(screen.getByLabelText("목적지 경로")).toBeInTheDocument();
   expect(screen.queryByLabelText("대상 경로")).not.toBeInTheDocument();
 
-  // 값 상태는 단일 useState 라 전환 정책(현행 유지 -- 초기화하지 않음)이 그대로 적용된다.
-  await screen.findByRole("option", { name: "rm" });   // rm 은 admin 로드 후 등장
   await userEvent.selectOptions(screen.getByLabelText("연산"), "rm");
   // 경고는 한 곳(제출 버튼 위) -- getByText 는 둘 이상이면 던진다
   expect(screen.getByText(
@@ -430,67 +391,44 @@ test("연산을 rm으로 바꾸면 대상 필드 구성이 바뀌고 rm 경고�
   )).toBeInTheDocument();
   expect(screen.queryByLabelText("목적지 스토리지")).not.toBeInTheDocument();
   expect(screen.queryByLabelText("목적지 경로")).not.toBeInTheDocument();
+  await rawMode("대상");
   expect(screen.getByLabelText("대상 경로")).toBeInTheDocument();
+  // 삭제가 root 로 수행된다는 사실(실행 설정 구획)
+  expect(screen.getByText("삭제가 root 권한으로 수행됩니다(모든 작업은 root)")).toBeInTheDocument();
 });
 
 test("sync 제출 바디가 정확하다", async () => {
-  let received: any = null;
-  server.use(http.post("/api/user/requests", async ({ request }) => {
-    received = await request.json();
-    return HttpResponse.json({ request_id: "r1", state: "Pending" }, { status: 202 });
-  }));
-  renderPage();
-  await fillSyncTarget();
-  await userEvent.click(submitButton());
-
-  expect(await screen.findByRole("heading", { name: "요청 상세" })).toBeInTheDocument();
-  expect(received).toEqual({
-    operation: "sync",
-    source_storage: "cephfs", source: "a/b",
-    destination_storage: "cephfs-secondary", destination: "c/d",
-    // 계약: batch_files·bufsize 프리필이 항상 실린다(지우면 빠진다 -- 아래 테스트).
-    // open_noatime 은 root 실행에서만 실린다(관리자 기본 root, 2026-09-30).
-    options: SYNC_DEFAULT_OPTS,
-    // priority 생략 = (정책 기본) — 슬라이스 37, resolve_priority 가 정책값 해석
-    // run_as_root: 자격 있는 관리자는 확정값을 명시로 싣는다(기본 root).
-    run_as_root: true,
-  });
-});
-
-test("사용자 sync 제출 바디 전체 모양 — run_as_root·priority·owner_username 키가 없다", async () => {
-  // 서버는 생략 = 비 root 다. 사용자 바디에 run_as_root 를 실으면(false 라도) 계약이 흔들린다.
-  server.use(http.get("/api/auth/me", () => HttpResponse.json(meUser)));
   const captured = captureSubmit();
   renderPage();
   await fillSyncTarget();
   await userEvent.click(submitButton());
+
   expect(await screen.findByRole("heading", { name: "요청 상세" })).toBeInTheDocument();
   expect(captured.body).toEqual({
     operation: "sync",
     source_storage: "cephfs", source: "a/b",
     destination_storage: "cephfs-secondary", destination: "c/d",
-    options: SYNC_NUM_DEFAULTS,
+    // 계약: batch_files·bufsize 프리필이 항상 실린다(지우면 빠진다 -- 아래 테스트). open_noatime 기본 ON(root).
+    options: SYNC_DEFAULT_OPTS,
+    // priority 생략 = (정책 기본) — 슬라이스 37, resolve_priority 가 정책값 해석
+    // run_as_root: 늘 명시 true(설계 D2 -- 서버는 생략도 root 로 읽고 명시 false 는 422 run_as_root_required).
+    run_as_root: true,
   });
 });
 
 test("rm 제출 바디에 options.recursive가 true로 들어간다", async () => {
-  let received: any = null;
-  server.use(http.post("/api/user/requests", async ({ request }) => {
-    received = await request.json();
-    return HttpResponse.json({ request_id: "r2", state: "Pending" }, { status: 202 });
-  }));
+  const captured = captureSubmit();
   renderPage();
   await fillRmTarget();
   await userEvent.click(submitButton());
 
   expect(await screen.findByRole("heading", { name: "요청 상세" })).toBeInTheDocument();
-  expect(received.options.recursive).toBe(true);
-  expect(received).toEqual({
+  expect(captured.body.options.recursive).toBe(true);
+  expect(captured.body).toEqual({
     operation: "rm",
     storage: "cephfs", target: "a/b",
     options: { recursive: true },
-    // priority 생략 = (정책 기본) — 슬라이스 37, resolve_priority 가 정책값 해석
-    run_as_root: true,   // 관리자 기본 root(2026-09-30) — 요약·체크박스가 경고한다
+    run_as_root: true,
   });
 });
 
@@ -504,11 +442,7 @@ async function forceSubmitAndSettle(form: HTMLFormElement) {
 }
 
 test("recursive를 해제하면 제출이 비활성이고 강제 submit도 차단된다", async () => {
-  let received: any = null;
-  server.use(http.post("/api/user/requests", async ({ request }) => {
-    received = await request.json();
-    return HttpResponse.json({ request_id: "rG", state: "Pending" }, { status: 202 });
-  }));
+  const captured = captureSubmit();
   const { container } = renderPage();
   await fillRmTarget();
   expect(submitButton()).toBeEnabled();
@@ -519,16 +453,12 @@ test("recursive를 해제하면 제출이 비활성이고 강제 submit도 차�
   expect(screen.getByText("재귀 옵션이 필요합니다")).toBeInTheDocument();
 
   await forceSubmitAndSettle(container.querySelector("form")!);
-  expect(received).toBeNull();
+  expect(captured.body).toBeNull();
   expect(screen.queryByRole("heading", { name: "요청 상세" })).not.toBeInTheDocument();
 });
 
 test("stat과 lite를 동시에 체크하면 제출이 비활성이고 강제 submit도 차단된다", async () => {
-  let received: any = null;
-  server.use(http.post("/api/user/requests", async ({ request }) => {
-    received = await request.json();
-    return HttpResponse.json({ request_id: "rG", state: "Pending" }, { status: 202 });
-  }));
+  const captured = captureSubmit();
   const { container } = renderPage();
   await fillRmTarget();
   await userEvent.click(screen.getByLabelText("stat"));
@@ -540,31 +470,8 @@ test("stat과 lite를 동시에 체크하면 제출이 비활성이고 강제 su
   expect(screen.getByText("빨간 안내가 붙은 옵션 값을 고치세요")).toBeInTheDocument();
 
   await forceSubmitAndSettle(container.querySelector("form")!);
-  expect(received).toBeNull();
+  expect(captured.body).toBeNull();
   expect(screen.queryByRole("heading", { name: "요청 상세" })).not.toBeInTheDocument();
-});
-
-// 라벨 정정(사용자 결정 2026-08-16): 이 값(owner_username)은 아티팩트 소유자가
-// 아니라 **잡의 실행 신원**을 정한다(identity.resolve_job_identity — owner =
-// owner_username or requester_id). 필드는 그대로, 라벨·캡션만 사실에 맞춘다.
-test("실행 신원 필드는 실행 설정 구획에서 관리자에게만 보인다", async () => {
-  server.use(http.get("/api/auth/me", () => HttpResponse.json(meUser)));
-  const { unmount } = renderPage();
-  await fillSyncTarget();
-  await screen.findByLabelText("delete");   // 사용자 옵션의 앵커(우선순위는 숨김)
-  expect(screen.queryByLabelText("실행 신원(선택)")).not.toBeInTheDocument();
-  unmount();
-
-  server.use(http.get("/api/auth/me", () => HttpResponse.json(meAdmin)));
-  renderPage();
-  await fillSyncTarget();
-  expect(await screen.findByLabelText("실행 신원(선택)")).toBeInTheDocument();
-  // 캡션은 "소유자 기록"이 아니라 실행 신원을 말한다 — 비우면 root(자격 있는 관리자 기본),
-  // 지정하면 기본은 그 사용자의 uid/gid(2026-09-30 정정: 예전 "root 로 실행되고 지정한 사용자
-  // 신원으로 파일을 다룹니다" 는 사실이 아니었다 -- 실제론 무조건 root 였다).
-  expect(screen.getByText((_, el) => el?.tagName === "P"
-    && (el.textContent ?? "").startsWith("비우면 root 로 실행됩니다(관리자 기본")
-    && (el.textContent ?? "").includes("기본은 그 사용자의 uid/gid 로 실행되어"))).toBeInTheDocument();
 });
 
 // 선택 필드 표기 통일(사용자 지시 2026-08-16): 비워도 되는 입력은 라벨에 (선택).
@@ -578,11 +485,11 @@ test("비워도 되는 sync 옵션 입력은 라벨에 (선택) 이 붙는다", 
   expect(screen.getByText("chown (선택 · 숫자 uid:gid)")).toBeInTheDocument();
 });
 
-test("스토리지 목록 로드가 실패하면 대상 구획에 오류가 뜨고 제출이 비활성이다", async () => {
+test("스토리지 목록 로드가 실패하면 직접 경로를 고른 동안 대상 구획에 오류가 뜨고 제출이 비활성이다", async () => {
   server.use(http.get("/api/user/storages", () =>
     HttpResponse.json({ detail: "storage_list_failed" }, { status: 500 })));
   renderPage();
-  await screen.findByLabelText("소스 스토리지");
+  await rawMode("소스");
   expect(await screen.findByText("storage_list_failed")).toBeInTheDocument();
   // 스토리지를 못 고르니 대상 sanity(스토리지·경로 필수)가 제출을 잠근다 -- 목록 실패가 곧 진행 불가
   expect(submitButton()).toBeDisabled();
@@ -605,15 +512,6 @@ test("제출 요약에 rm 경고와 대상이 노출된다", async () => {
 // msw 로 request body 를 캡처해 "무엇이 실제로 전송되는가"를 단언한다 — 빈 값
 // 생략(truthy 검사 금지)과 number 변환이 계약이다.
 
-function captureSubmit() {
-  const captured: { body: any } = { body: null };
-  server.use(http.post("/api/user/requests", async ({ request }) => {
-    captured.body = await request.json();
-    return HttpResponse.json({ request_id: "rX", state: "Pending" }, { status: 202 });
-  }));
-  return captured;
-}
-
 // sync 대상을 채우고 <details> 고급 옵션을 펼친다(기본 접힘 확인 겸).
 async function fillAndOpenAdvanced() {
   await fillSyncTarget();
@@ -624,8 +522,6 @@ async function fillAndOpenAdvanced() {
 
 // 프리필 계약(사용자 조정 2026-08-16): batch_files·bufsize 는 placeholder 가 아니라
 // **실제 값**으로 미리 채워져 있고, 그래서 손대지 않아도 바디에 실린다.
-// batch_files 1,000,000 은 도구 기본(0 = 배칭 안 함)과 **다른 동작**이라 이건
-// 의도된 정책이고, bufsize 4194304 는 도구 기본(4 MiB)과 같은 값의 명시다.
 test("고급 숫자 옵션은 실제 값으로 프리필돼 있다(placeholder 아님)", async () => {
   renderPage();
   await fillAndOpenAdvanced();
@@ -654,40 +550,20 @@ test("고급 숫자 옵션을 지우면 그 키가 바디에서 빠진다(도구
   await userEvent.clear(screen.getByLabelText("bufsize"));
   await userEvent.click(submitButton());
   expect(await screen.findByRole("heading", { name: "요청 상세" })).toBeInTheDocument();
-  // 빈 문자열은 "미입력"이라 batch_files·bufsize 는 통째로 생략된다. open_noatime
-  // 은 관리자 기본 root 라 남는다 -- 숫자 생략과 독립.
+  // 빈 문자열은 "미입력"이라 batch_files·bufsize 는 통째로 생략된다. open_noatime 은 root 기본이라 남는다.
   expect(captured.body.options).toEqual({ open_noatime: true });
 });
 
-test("open_noatime 은 root 실행 전용 — root 를 끄면 잠기고 싣지 않는다", async () => {
-  // 비 root 의 O_NOATIME 은 타인 소유 파일에서 EPERM(mpifileutils 폴백 없음 → 부분 복사 뒤
-  // Failed)이라 잠근다. 관리자 기본은 root 라 여기선 명시로 끈다.
-  const captured = captureSubmit();
-  renderPage();
-  await fillAndOpenAdvanced();
-  await userEvent.click(screen.getByLabelText("root 권한으로 실행"));   // 끔
-  expect(screen.getByLabelText("open_noatime")).toBeDisabled();
-  expect(screen.getByLabelText("open_noatime")).not.toBeChecked();
-  expect(screen.getByText(/open_noatime 은 root 실행에서만 적용됩니다/)).toBeInTheDocument();
-  // chown 캡션도 지금 모드를 말한다(root 아님 → 실행 신원 소유로 자동 chown).
-  expect(screen.getByText(/비우면 실행 신원의 uid:주 그룹 gid 소유로 자동 chown 됩니다\(지금 root 아님\)/))
-    .toBeInTheDocument();
-  await userEvent.click(submitButton());
-  expect(await screen.findByRole("heading", { name: "요청 상세" })).toBeInTheDocument();
-  expect(captured.body.options).toEqual(SYNC_NUM_DEFAULTS);
-  expect(captured.body.run_as_root).toBe(false);
-});
-
-test("root 실행(관리자 기본)이면 open_noatime 이 기본 ON 으로 실리고, 해제하면 빠진다", async () => {
-  // 사용자 결정(2026-08-22)의 root 실행 기본 ON 은 유지 — 끄면 checkedOptions 가
-  // false 를 생략한다.
+test("open_noatime 은 늘 켤 수 있다(모든 작업이 root) — 기본 ON 으로 실리고, 해제하면 빠진다", async () => {
+  // 사용자 결정(2026-08-22)의 root 실행 기본 ON. 끄면 checkedOptions 가 false 를 생략한다.
   const rootOn = captureSubmit();
   const first = renderPage();
   await fillAndOpenAdvanced();
-  expect(screen.getByLabelText("root 권한으로 실행")).toBeChecked();
   expect(screen.getByLabelText("open_noatime")).toBeEnabled();
   expect(screen.getByLabelText("open_noatime")).toBeChecked();
-  expect(screen.getByText(/비우면 원래\(소스\) 소유권을 보존합니다\(지금 root 실행\)/)).toBeInTheDocument();
+  expect(screen.queryByText(/open_noatime 은 root 실행에서만 적용됩니다/)).toBeNull();
+  // chown 캡션: 직접 경로 목적지는 root 라 소스 소유 보존
+  expect(screen.getByText(/비우면 원래\(소스\) 소유권을 보존합니다\(root 실행\)/)).toBeInTheDocument();
   await userEvent.click(submitButton());
   expect(await screen.findByRole("heading", { name: "요청 상세" })).toBeInTheDocument();
   expect(rootOn.body.options).toEqual({ open_noatime: true, ...SYNC_NUM_DEFAULTS });
@@ -773,14 +649,13 @@ test("범위 밖 bufsize는 제출을 비활성으로 막는다", async () => {
   expect(screen.getByText("bufsize는 4096..1073741824 범위의 정수여야 합니다")).toBeInTheDocument();
 });
 
-// ---- 슬라이스 37: scan 연산(운영자 전용) ------------------------------------
+// ---- 슬라이스 37: scan 연산 ----------------------------------------------------
 
-test("비관리자에겐 sync 만 — scan·rm 은 숨김(표시 게이트 · 서버 403 이 진짜 차단)", async () => {
-  // 사용자 연산 allowlist(2026-08-20, 사용자 결정): 사용자는 sync 만. scan·rm 은
-  // 운영자 전용이라 드롭다운에서 빠진다.
+test("연산 선택지는 me.user_operations 그대로 — 사용자는 sync 만(표시 게이트 · 서버 403 이 진짜 차단)", async () => {
   server.use(http.get("/api/auth/me", () => HttpResponse.json(meUser)));
   renderPage();
-  const select = (await screen.findByLabelText("연산")) as HTMLSelectElement;
+  await screen.findByText(/권한 있는 PV 에서 sync 을 실행합니다/);
+  const select = screen.getByLabelText("연산") as HTMLSelectElement;
   expect(Array.from(select.options).map((o) => o.value)).toEqual(["sync"]);
 });
 
@@ -788,40 +663,19 @@ test("비관리자 sync 옵션은 delete·contents 만 — direct·quiet·고급
   // 사용자 결정(2026-08-20): 사용자 단일작업 sync 폼은 최소만 노출한다.
   server.use(http.get("/api/auth/me", () => HttpResponse.json(meUser)));
   renderPage();
-  await fillSyncTarget();
-  expect(screen.getByLabelText("delete")).toBeInTheDocument();
+  expect(await screen.findByLabelText("delete")).toBeInTheDocument();
   expect(screen.getByLabelText("contents")).toBeInTheDocument();
   expect(screen.queryByLabelText("direct")).not.toBeInTheDocument();
   expect(screen.queryByLabelText("quiet")).not.toBeInTheDocument();
   expect(screen.queryByText("고급 옵션")).not.toBeInTheDocument();
   expect(screen.queryByLabelText("우선순위")).not.toBeInTheDocument();
-  expect(screen.queryByLabelText("실행 신원(선택)")).not.toBeInTheDocument();
-});
-
-test("사용자 sync 제출은 open_noatime 을 싣지 않는다(기본 OFF — 운영자만 ON)", async () => {
-  // 사용자 결정(2026-08-22): 사용자 요청은 open_noatime 기본 OFF(비특권 실행의
-  // EPERM 회피). 사용자 폼엔 이 옵션이 숨겨져 있고 제출 시 isAdmin 으로 끊긴다.
-  server.use(http.get("/api/auth/me", () => HttpResponse.json(meUser)));
-  const captured = captureSubmit();
-  renderPage();
-  await fillSyncTarget();
-  await userEvent.click(submitButton());
-  expect(await screen.findByRole("heading", { name: "요청 상세" })).toBeInTheDocument();
-  // 숫자 프리필(batch_files·bufsize)은 실리되 open_noatime 은 빠진다.
-  expect(captured.body.options).toEqual(SYNC_NUM_DEFAULTS);
-  expect(captured.body.options.open_noatime).toBeUndefined();
 });
 
 test("admin scan 제출 바디가 정확하다(프리필 batch_files + 입력 broken_limit)", async () => {
-  server.use(http.get("/api/auth/me", () => HttpResponse.json(meAdmin)));
-  let posted: unknown = null;
-  server.use(http.post("/api/user/requests", async ({ request }) => {
-    posted = await request.json();
-    return HttpResponse.json({ request_id: "r1", state: "Pending" }, { status: 202 });
-  }));
+  const captured = captureSubmit();
   renderPage();
   const select = (await screen.findByLabelText("연산")) as HTMLSelectElement;
-  // admin 은 세 연산 전부 -- scan 은 sync 와 rm 사이.
+  // 면제 관리자는 세 연산 전부 -- scan 은 sync 와 rm 사이(서버 user_operations 순서와 무관하게 화면 순서).
   await screen.findByRole("option", { name: "scan" });
   expect(Array.from(select.options).map((o) => o.value)).toEqual(["sync", "scan", "rm"]);
   const storageSelect = await chooseOperation("scan");
@@ -831,15 +685,14 @@ test("admin scan 제출 바디가 정확하다(프리필 batch_files + 입력 br
   await userEvent.type(screen.getByLabelText("broken_limit"), "500");
   await userEvent.click(submitButton());
   expect(await screen.findByRole("heading", { name: "요청 상세" })).toBeInTheDocument();
-  expect(posted).toEqual({
+  expect(captured.body).toEqual({
     operation: "scan", storage: "cephfs", target: "team/data",
     options: { batch_files: 1000000, broken_limit: 500 },   // batch_files 는 프리필(서버 기본과 같은 값)
-    run_as_root: true,   // 관리자 기본 root(2026-09-30)
+    run_as_root: true,
   });
 });
 
 test("scan 의 verbose·quiet 동시는 제출을 잠근다", async () => {
-  server.use(http.get("/api/auth/me", () => HttpResponse.json(meAdmin)));
   renderPage();
   const storageSelect = await chooseOperation("scan");
   await userEvent.selectOptions(storageSelect, "cephfs");
@@ -851,19 +704,11 @@ test("scan 의 verbose·quiet 동시는 제출을 잠근다", async () => {
   expect(screen.getByText("verbose와 quiet는 함께 쓸 수 없습니다")).toBeInTheDocument();
 });
 
-
 // scan 프리필 계약(사용자 결정 2026-09-17): batch_files 1,000,000·broken_limit 100 이
 // 미리 채워져 있고 손대지 않으면 그대로 전송된다 — 같은 값이 서버 기본
 // (domain._OPTION_DEFAULTS)이라 비워도 결과는 같지만, 요청 상세에 명시적으로 남는다.
 test("scan 옵션은 batch_files 1,000,000·broken_limit 100 이 프리필돼 그대로 전송된다", async () => {
-  let posted: any = null;
-  server.use(
-    http.get("/api/auth/me", () => HttpResponse.json(meAdmin)),
-    http.post("/api/user/requests", async ({ request }) => {
-      posted = await request.json();
-      return HttpResponse.json({ request_id: "r-scan-prefill", state: "Pending" }, { status: 202 });
-    }),
-  );
+  const captured = captureSubmit();
   renderPage();
   const storageSelect = await chooseOperation("scan");
   await userEvent.selectOptions(storageSelect, "cephfs");
@@ -872,223 +717,25 @@ test("scan 옵션은 batch_files 1,000,000·broken_limit 100 이 프리필돼 �
   expect(screen.getByLabelText("broken_limit")).toHaveValue(SCAN_INT_FIELDS.broken_limit.prefill);
   await userEvent.click(submitButton());
   expect(await screen.findByRole("heading", { name: "요청 상세" })).toBeInTheDocument();
-  expect(posted.options).toEqual({ batch_files: 1000000, broken_limit: 100 });
+  expect(captured.body.options).toEqual({ batch_files: 1000000, broken_limit: 100 });
 });
 
-
-// ---- root 실행 체크박스(2026-09-30) ------------------------------------------------
-// 프로덕션 사고: 관리자 계정이 "실행 신원 = 일반 사용자" 로 낸 sync 가 무조건 root 로 돌아, 그
-// 사용자가 쓸 수 없는 남의 700 목적지를 소스 소유로 덮어쓰며 성공했다. 사용자 결정(같은 날):
-// 관리자는 **기본 root**. 단 실행 신원에 다른 사용자를 적으면 기본이 그 사용자 권한(사고 경로를
-// 기본값으로 되살리지 않는다). 자격 있으면 확정값을 run_as_root 로 명시해 싣는다.
-
-test("root 체크박스는 관리자에게 기본 켜짐 — run_as_root: true, 요약이 경고한다", async () => {
-  server.use(http.get("/api/auth/me", () => HttpResponse.json(meUser)));
-  const { unmount } = renderPage();
-  await fillSyncTarget();
-  await screen.findByLabelText("delete");
-  expect(screen.queryByLabelText("root 권한으로 실행")).not.toBeInTheDocument();
-  unmount();
-
-  server.use(http.get("/api/auth/me", () => HttpResponse.json(meAdmin)));
-  const captured = captureSubmit();
-  renderPage();
-  await fillSyncTarget();
-  const box = await screen.findByLabelText("root 권한으로 실행") as HTMLInputElement;
-  expect(box.checked).toBe(true);
-  expect(screen.getByText(/^root\(특권\) — 권한 검사 우회, sync 는 목적지 소유·권한을 소스에 맞춤\(chown·chmod 지정 시 그 값\)$/))
-    .toBeInTheDocument();
-  await userEvent.click(submitButton());
-  await screen.findByRole("heading", { name: "요청 상세" }).catch(() => null);
-  expect(captured.body.run_as_root).toBe(true);
-});
-
-test("실행 신원에 다른 사용자를 적으면 root 가 기본으로 꺼진다(사고 경로) — 다시 켤 수 있다", async () => {
-  server.use(http.get("/api/auth/me", () => HttpResponse.json(meAdmin)));
-  const captured = captureSubmit();
-  const first = renderPage();
-  await fillSyncTarget();
-  await userEvent.type(screen.getByLabelText("실행 신원(선택)"), "alice");
-  expect(screen.getByLabelText("root 권한으로 실행")).not.toBeChecked();
-  expect(screen.getByText("실행 신원의 uid/gid(권한 그대로 적용)")).toBeInTheDocument();
-  await userEvent.click(submitButton());
-  await screen.findByRole("heading", { name: "요청 상세" }).catch(() => null);
-  expect(captured.body.owner_username).toBe("alice");
-  expect(captured.body.run_as_root).toBe(false);
-  expect(captured.body.options.open_noatime).toBeUndefined();
-  first.unmount();
-
-  // 본인 이름을 적는 건 생략과 같다(root 기본 유지).
-  const second = renderPage();
-  await fillSyncTarget();
-  await userEvent.type(screen.getByLabelText("실행 신원(선택)"), "root");
-  expect(screen.getByLabelText("root 권한으로 실행")).toBeChecked();
-  second.unmount();
-
-  // 명시로 다시 켜면 다른 실행 신원이어도 root(그 이름은 기록용).
-  const again = captureSubmit();
-  renderPage();
-  await fillSyncTarget();
-  await userEvent.type(screen.getByLabelText("실행 신원(선택)"), "alice");
-  await userEvent.click(screen.getByLabelText("root 권한으로 실행"));
-  await userEvent.click(submitButton());
-  await screen.findByRole("heading", { name: "요청 상세" }).catch(() => null);
-  expect(again.body.run_as_root).toBe(true);
-});
-
-test("root 자격 없는 관리자에겐 체크박스 대신 안내 — run_as_root: false 를 명시한다", async () => {
-  // 특권 목록 밖 관리자에게 기본 root 를 켜 두면 제출이 403 privileged_not_authorized 가 된다.
-  server.use(http.get("/api/auth/me", () => HttpResponse.json(meAdminNoRoot)));
-  const captured = captureSubmit();
-  renderPage();
-  await fillSyncTarget();
-  expect(await screen.findByText(/이 계정은 root 실행 자격이 없습니다/)).toBeInTheDocument();
-  // admin 역할만으로는 안 되고 어디서 받는지를 말한다(2026-10-12 사용자 보고 -- 역할을 올렸는데 체크박스가 없었다)
-  expect(screen.getByText(/「관리 → 계정」의 root 실행에서 줄 수 있습니다/)).toBeInTheDocument();
-  expect(screen.queryByLabelText("root 권한으로 실행")).not.toBeInTheDocument();
-  expect(screen.getByText("실행 신원의 uid/gid(권한 그대로 적용)")).toBeInTheDocument();
-  await userEvent.click(submitButton());
-  await screen.findByRole("heading", { name: "요청 상세" }).catch(() => null);
-  // 관리자는 확정값을 항상 명시 -- 서버의 생략 기본값(비 root)이나 me 판정 시점에 기대지 않는다.
-  expect(captured.body.run_as_root).toBe(false);
-  expect(captured.body.options.open_noatime).toBeUndefined();
-});
-
-// ---- 사용자 sync 허용 쌍(2026-09-30): 소스·목적지 상호 필터 ------------------------------
-
-const threeStorages: UserStorage[] = [
-  { storage_name: "ceph-a", backend_type: "cephfs", status: "Ready" },
-  { storage_name: "ceph-b", backend_type: "cephfs", status: "Ready" },
-  { storage_name: "ceph-c", backend_type: "cephfs", status: "Ready" },
-];
-const optionNames = (label: string) =>
-  Array.from((screen.getByLabelText(label) as HTMLSelectElement).options).map((o) => o.value);
-
-async function openUserTarget(pairs: { source_storage: string; destination_storage: string }[]) {
-  server.use(
-    http.get("/api/auth/me", () => HttpResponse.json(meUser)),
-    http.get("/api/user/storages", () => HttpResponse.json(threeStorages)),
-    http.get("/api/user/sync-pairs", () => HttpResponse.json({ restricted: true, pairs })),
-  );
-  renderPage();
-  await screen.findByRole("note", { name: "허용된 스토리지 조합" });
-}
-
-test("사용자: 한쪽을 고르면 다른 쪽 선택지에서 허용되지 않은 스토리지가 빠진다(양방향)", async () => {
-  await openUserTarget([
-    { source_storage: "ceph-a", destination_storage: "ceph-b" },
-    { source_storage: "ceph-a", destination_storage: "ceph-c" },
-    { source_storage: "ceph-c", destination_storage: "ceph-c" },
-  ]);
-  // 아무것도 안 골랐을 때: 쌍에 나오는 스토리지만(ceph-b 는 소스로 허용된 적이 없다)
-  expect(optionNames("소스 스토리지")).toEqual(["", "ceph-a", "ceph-c"]);
-  expect(optionNames("목적지 스토리지")).toEqual(["", "ceph-b", "ceph-c"]);
-  expect(screen.getByRole("note", { name: "허용된 스토리지 조합" })).toHaveTextContent("(3개)");
-  // 소스 ceph-c → 목적지는 ceph-c 만
-  await userEvent.selectOptions(screen.getByLabelText("소스 스토리지"), "ceph-c");
-  expect(optionNames("목적지 스토리지")).toEqual(["", "ceph-c"]);
-  // 소스를 비우고 목적지 ceph-b → 소스는 ceph-a 만
-  await userEvent.selectOptions(screen.getByLabelText("소스 스토리지"), "");
-  await userEvent.selectOptions(screen.getByLabelText("목적지 스토리지"), "ceph-b");
-  expect(optionNames("소스 스토리지")).toEqual(["", "ceph-a"]);
-});
-
-test("사용자: 허용 쌍이 없으면 선택지가 비고 안내가 뜨며 제출이 잠긴다", async () => {
-  await openUserTarget([]);
-  expect(screen.getByRole("note", { name: "허용된 스토리지 조합" }))
-    .toHaveTextContent("관리자가 허용한 sync 스토리지 조합이 없어");
-  expect(optionNames("소스 스토리지")).toEqual([""]);
-  expect(optionNames("목적지 스토리지")).toEqual([""]);
-  expect(submitButton()).toBeDisabled();
-  expect(screen.getByText("허용된 sync 조합이 없어 지금은 제출할 수 없습니다")).toBeInTheDocument();
-});
-
-test("사용자: 허용 목록에 없는 조합으로 남으면(일부 해제) 다시 고르라고 한다", async () => {
-  let pairs = [{ source_storage: "ceph-b", destination_storage: "ceph-a" },
-               { source_storage: "ceph-c", destination_storage: "ceph-c" }];
-  await openUserTarget(pairs);
-  server.use(http.get("/api/user/sync-pairs", () => HttpResponse.json({ restricted: true, pairs })));
-  await userEvent.selectOptions(screen.getByLabelText("소스 스토리지"), "ceph-b");
-  await userEvent.selectOptions(screen.getByLabelText("목적지 스토리지"), "ceph-a");
-  pairs = [{ source_storage: "ceph-c", destination_storage: "ceph-c" }];
-  act(() => { focusManager.setFocused(false); focusManager.setFocused(true); });
-  expect(await screen.findByRole("alert")).toHaveTextContent("허용되지 않은 소스 → 목적지 조합입니다");
-  expect(screen.getByText("허용된 조합으로 소스·목적지를 다시 고르세요")).toBeInTheDocument();
-  expect(submitButton()).toBeDisabled();
-  act(() => { focusManager.setFocused(undefined); });
-});
-
-test("사용자: 허용 조합을 고르면 제출 바디가 그대로 나간다", async () => {
-  const captured = captureSubmit();
-  await openUserTarget([{ source_storage: "ceph-b", destination_storage: "ceph-a" }]);
-  await userEvent.selectOptions(screen.getByLabelText("소스 스토리지"), "ceph-b");
-  await userEvent.type(screen.getByLabelText("소스 경로"), "x");
-  await userEvent.selectOptions(screen.getByLabelText("목적지 스토리지"), "ceph-a");
-  await userEvent.type(screen.getByLabelText("목적지 경로"), "y");
-  await userEvent.click(submitButton());
-  expect(await screen.findByRole("heading", { name: "요청 상세" })).toBeInTheDocument();
-  expect(captured.body).toMatchObject({ operation: "sync", source_storage: "ceph-b",
-                                        destination_storage: "ceph-a" });
-});
-
-test("사용자: 허용 목록 조회가 실패하면 sync 선택지를 비우고 사유를 보인다", async () => {
-  server.use(
-    http.get("/api/auth/me", () => HttpResponse.json(meUser)),
-    http.get("/api/user/sync-pairs", () => HttpResponse.json({ detail: "boom" }, { status: 500 })),
-  );
-  renderPage();
-  expect(await screen.findByText(/허용된 스토리지 조합을 불러오지 못했습니다/)).toBeInTheDocument();
-  expect(optionNames("소스 스토리지")).toEqual([""]);
-  expect(submitButton()).toBeDisabled();
-});
-
-test("관리자는 허용 쌍과 무관하게 모든 스토리지가 양쪽에 보인다(조회도 하지 않는다)", async () => {
-  let asked = false;
-  server.use(http.get("/api/user/sync-pairs", () => { asked = true; return HttpResponse.json(userPairs); }));
-  renderPage();
-  const src = await screen.findByLabelText("소스 스토리지");
-  await within(src).findByRole("option", { name: "cephfs" });
-  await userEvent.selectOptions(src, "cephfs");
-  expect(optionNames("목적지 스토리지")).toEqual(["", "cephfs", "cephfs-secondary"]);
-  expect(screen.queryByRole("note", { name: "허용된 스토리지 조합" })).not.toBeInTheDocument();
-  expect(asked).toBe(false);
-});
-
-test("사용자: 화면에 있는 동안 허용이 해제되면 그 자리에서 이유를 보이고 제출이 잠긴다", async () => {
-  let pairs = [{ source_storage: "ceph-b", destination_storage: "ceph-a" }];
-  server.use(http.get("/api/user/sync-pairs", () => HttpResponse.json({ restricted: true, pairs })));
-  await openUserTarget(pairs);
-  server.use(http.get("/api/user/sync-pairs", () => HttpResponse.json({ restricted: true, pairs })));
-  await userEvent.selectOptions(screen.getByLabelText("소스 스토리지"), "ceph-b");
-  await userEvent.type(screen.getByLabelText("소스 경로"), "x");
-  await userEvent.selectOptions(screen.getByLabelText("목적지 스토리지"), "ceph-a");
-  await userEvent.type(screen.getByLabelText("목적지 경로"), "y");
-  expect(submitButton()).toBeEnabled();
-  expect(screen.queryByRole("alert")).toBeNull();
-  // 관리자가 쌍을 해제 -- 창 포커스 재조회(react-query refetchOnWindowFocus)로 도착한다
-  pairs = [];
-  act(() => { focusManager.setFocused(false); focusManager.setFocused(true); });
-  // 경보는 페이지에 하나(대상 구획) -- findByRole 은 둘 이상이면 던진다
-  expect(await screen.findByRole("alert")).toHaveTextContent("허용되지 않은 소스 → 목적지 조합입니다");
-  expect(submitButton()).toBeDisabled();
-  // 허용이 전부 사라졌으니 요약의 잠김 이유도 "조합이 없다" 쪽이다
-  expect(screen.getByText("허용된 sync 조합이 없어 지금은 제출할 수 없습니다")).toBeInTheDocument();
-  act(() => { focusManager.setFocused(undefined); });
-});
-
-// ---- 목적지 소유권 안내(2026-10-01): 관리자는 실제 설정(root·실행 신원·chown)대로 ---------------
+// ---- 목적지 소유권 안내(2026-10-01): root 실행 기준 ---------------------------------
 
 const ownershipCard = () => screen.getByLabelText("목적지 조건과 소유권");
 
-test("관리자 기본(root 실행): 소유권은 소스 그대로 -- 상위 디렉토리는 그래도 있어야 한다", async () => {
+test("직접 경로 목적지(root 실행): 소유권은 소스 그대로 -- 상위 디렉토리는 그래도 있어야 한다", async () => {
   server.use(http.get("/api/user/storages", () => HttpResponse.json([
     { storage_name: "cephfs", backend_type: "cephfs", status: "Ready", managed_root: "/cephfs/managed" },
     { storage_name: "cephfs-secondary", backend_type: "cephfs", status: "Ready", managed_root: "/cephfs2/managed" }])));
   renderPage();
   await fillSyncTarget();
+  expect(ownershipCard()).toHaveAttribute("role", "note");
+  expect(ownershipCard()).toHaveTextContent("목적지 조건과 소유권 — root 실행 기준");
+  expect(ownershipCard()).toHaveTextContent("목적지가 없는 경우: sync 가 목적지 디렉토리를 새로 만듭니다");
+  expect(ownershipCard()).toHaveTextContent("중간 디렉토리는 만들지 않습니다");
   expect(ownershipCard()).toHaveTextContent(
     "소유권: root 실행이라 목적지와 복사된 파일·디렉토리는 소스의 소유자·그룹을 그대로 유지합니다");
-  expect(ownershipCard()).toHaveTextContent("상위 디렉토리는 그래도 이미 있어야 합니다");
   // root 실행엔 "쓰기 권한이 필요" 가 아니라 "이미 있어야" -- 요약 문구와 같은 사실
   expect(ownershipCard()).toHaveTextContent("상위 디렉토리는 이미 있어야 합니다(root 실행 — 쓰기 권한 검사 우회)");
   expect(ownershipCard()).toHaveTextContent("/cephfs2/managed/c 가 이미 있어야 합니다");
@@ -1096,30 +743,12 @@ test("관리자 기본(root 실행): 소유권은 소스 그대로 -- 상위 디
   // root 는 최상위뿐 아니라 이미 있던 같은 경로 항목 전부를 소스 소유로(dsync 기본 비교) -- 범위를 축소하지 않는다
   expect(ownershipCard()).toHaveTextContent("그 안의 같은 경로 항목은 소스의 소유·권한·시각으로 다시 맞춰집니다(chown·chmod 를 지정하면 그 값)");
   expect(ownershipCard()).toHaveTextContent("목적지에 이미 있던 같은 경로의 항목(최상위 디렉토리 포함)도 소유자·그룹·권한·시각이 소스 것으로");
-  expect(ownershipCard()).toHaveTextContent("root 가 아닌 실행에서 권한은 실행 신원의 uid·LDAP 주 그룹·LDAP 보조 그룹(적용된 경우");
-  expect(ownershipCard()).toHaveTextContent("root 권한으로 실행하면 권한·소유 검사는 우회됩니다(아래 실행 설정에서 선택)");
+  // 옛 ldap 모드의 비 root·LDAP 보조 그룹 문단은 없다
+  expect(ownershipCard()).not.toHaveTextContent("LDAP");
+  expect(ownershipCard()).not.toHaveTextContent("보조 그룹");
+  expect(ownershipCard()).toHaveTextContent("조건이 맞지 않으면 미리보기 전에 거부되고 사유가 표시됩니다");
   expect(screen.getByText("소스의 소유자·그룹 그대로(root 실행)")).toBeInTheDocument();
   expect(screen.getByText(/상위 디렉토리 .* 가 있어야 함\(root 실행 — 권한 검사 우회\)/)).toBeInTheDocument();
-});
-
-test("관리자가 root 를 끄면 카드가 그 자리에서 비 root 기준으로 바뀌고, 다른 실행 신원은 그 사용자 uid:gid", async () => {
-  const first = renderPage();
-  await fillSyncTarget();
-  await userEvent.click(screen.getByLabelText("root 권한으로 실행"));          // 끔
-  // 같은 화면의 카드가 즉시 비 root 기준(쓰기 권한·실행 신원 소유)으로 바뀐다
-  expect(ownershipCard()).toHaveTextContent("root 실행이 아니면 실행 신원 소유여야 합니다");
-  expect(ownershipCard()).toHaveTextContent(/쓰기 권한이 있어야 합니다/);
-  expect(ownershipCard()).toHaveTextContent("root 가 아닌 실행에서 권한은 실행 신원의 uid·LDAP 주 그룹·LDAP 보조 그룹(적용된 경우");
-  // G8: 관리자는 chown 칸이 있으니(고급 옵션) 직접 지정하라고 말한다
-  expect(ownershipCard()).toHaveTextContent("프로젝트(보조) 그룹 소유로 남기려면 chown 에 uid:<그룹 gid> 를 지정하세요(자동 지정은 주 그룹).");
-  expect(ownershipCard()).not.toHaveTextContent("관리자에게 chown");
-  expect(screen.getByText("요청자 본인(root)의 uid:gid(주 그룹)")).toBeInTheDocument();   // meAdmin.actor
-  first.unmount();
-
-  renderPage();
-  await fillSyncTarget();
-  await userEvent.type(screen.getByLabelText("실행 신원(선택)"), "cocoa.song");  // root 기본 꺼짐
-  expect(screen.getByText("실행 신원 cocoa.song의 uid:gid(주 그룹)")).toBeInTheDocument();
 });
 
 test("chown 을 지정하면 소유권 안내가 그 값으로 바뀐다", async () => {
@@ -1127,33 +756,6 @@ test("chown 을 지정하면 소유권 안내가 그 값으로 바뀐다", async
   await fillAndOpenAdvanced();
   await userEvent.type(screen.getByLabelText("chown"), "10003:10000");
   expect(screen.getByText("chown 지정값 10003:10000")).toBeInTheDocument();
-});
-
-test("root 자격 없는 관리자: root 언급 없이 실행 신원 기준, 소유는 본인 uid:gid", async () => {
-  server.use(http.get("/api/auth/me", () => HttpResponse.json(meAdminNoRoot)));
-  renderPage();
-  await fillSyncTarget();
-  expect(ownershipCard()).toHaveTextContent("목적지 조건과 소유권 — 실행 신원(uid/gid) 기준");
-  expect(ownershipCard()).toHaveTextContent("실행 신원 소유여야 합니다");
-  expect(ownershipCard()).not.toHaveTextContent("root");
-  expect(screen.getByText("요청자 본인(ops2)의 uid:gid(주 그룹)")).toBeInTheDocument();
-});
-
-test("비 root 에서 chown 을 지정하면 uid 는 본인, gid 는 소속 그룹만이라고 경고한다", async () => {
-  renderPage();
-  await fillAndOpenAdvanced();
-  await userEvent.click(screen.getByLabelText("root 권한으로 실행"));          // 끔
-  // chown 캡션: 자동은 주 그룹, 프로젝트(보조) 그룹 소유는 명시 chown -- gid 는 계획 시점 멤버십 검증(D7)
-  const help = screen.getByText(/비우면 실행 신원의 uid:주 그룹 gid 소유로 자동 chown/);   // FieldRow 도움말 <p>
-  expect(help).toHaveTextContent("비우면 실행 신원의 uid:주 그룹 gid 소유로 자동 chown 됩니다(지금 root 아님) — "
-    + "프로젝트(보조) 그룹 소유로 남기려면 uid:<그룹 gid> 를 지정하세요.");
-  // G9: '소속' 이 아니라 '이 작업에 적용된' 그룹 -- 스위치 꺼짐·256 초과면 주 그룹만
-  expect(help).toHaveTextContent("gid 가 실행 신원의 주 그룹 또는 이 작업에 적용된 보조 그룹이 아니면(보조 그룹이 적용되지 않으면 "
-    + "주 그룹만) 계획 단계에서 거부되고(chown_group_not_member)");
-  expect(help).toHaveTextContent("uid 가 본인이 아니면 도구에 권한이 없어 dsync 는 데이터를 복사한 뒤 Failed 로 끝나고, nsync 는 소유 변경이 적용되지 않습니다");
-  await userEvent.type(screen.getByLabelText("chown"), "10003:10000");
-  expect(screen.getByText("chown 지정값 10003:10000 — 비 root: uid 는 본인, gid 는 주·적용된 보조 그룹만(아니면 거부·실패)"))
-    .toBeInTheDocument();
 });
 
 test("고급 옵션에 오류가 있으면 펼쳐진 채 접히지 않는다(잠긴 제출의 이유가 숨지 않게)", async () => {
@@ -1175,7 +777,7 @@ test("고급 옵션에 오류가 있으면 펼쳐진 채 접히지 않는다(잠
   expect(details.open).toBe(false);
 });
 
-test("chown 에 이름을 쓰면 오류로 막는다(잡 컨테이너엔 LDAP 이 없다 -- 서버 chown_name_not_supported)", async () => {
+test("chown 에 이름을 쓰면 오류로 막는다(잡 컨테이너엔 디렉터리 NSS 가 없다 -- 서버 chown_name_not_supported)", async () => {
   renderPage();
   await fillAndOpenAdvanced();
   await userEvent.type(screen.getByLabelText("chown"), "cocoa.song:mig");

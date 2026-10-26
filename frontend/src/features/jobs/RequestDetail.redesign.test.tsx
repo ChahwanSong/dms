@@ -416,47 +416,6 @@ test("N2 잡 조회 실패가 캐시에 남은 채 다시 들어오면: 재조�
   expect(screen.queryByText("작업 정보를 불러오는 중입니다")).toBeNull();
 });
 
-test("3차 N3 그룹 잡의 base 거부를 잡 폴링이 먼저 보면(관문 이벤트 전): 사전 점검 로그를 열지 않고, 이벤트가 오면 관문으로", async () => {
-  // round3/stage/skew.test.tsx: stepper 는 이벤트 → 잡·요청 종단을 한 틱에 남기지만 화면은 잡(2초)·요청(3초)을 따로 읽는다.
-  vi.useFakeTimers({ shouldAdvanceTime: true });
-  const asked: string[] = [];
-  server.use(http.get("/api/user/jobs/j1/logs", ({ request }) => {
-    asked.push(new URL(request.url).searchParams.get("phase") ?? "");
-    return HttpResponse.json({ phase: "preflight", ref: "pod/a", source: "live", entries: [{ pod: "p", log: "ok\n" }] });
-  }));
-  const PRE = [tr(null, "Pending", 0), tr("Pending", "Preflight", 2)];
-  const running = { ...JOB, state: "Preflight", result_summary: null, preview_summary: null, phase_refs: { preflight: "pod/a" },
-    transitions: PRE, worker_pool: { identity: { username: "alice", uid: 1000, gid: 1000, supplementary_gids: [10010],
-      supplementary_gids_status: "applied" } } };
-  const gated = { ...running, state: "Rejected", reason_code: "artifact_base_not_traversable",
-    transitions: [...PRE, tr("Preflight", "Rejected", 30)] };
-  const reqRow = (state: string, events: object[]) => ({ ...REQ, state, events,
-    transitions: [tr(null, "Pending", 0), tr("Pending", "Planned", 1)] });
-  const GATE_EV = { id: 7, component: "stepper", severity: "error", event_type: "artifact_base_unsafe_at_step",
-    message: "artifact_base_not_traversable job=j1", at: at(30), payload: { job_id: "j1", problem: "artifact_base_not_traversable" } };
-  let job: object = running;
-  let req: object = reqRow("Planned", []);
-  server.use(
-    http.get("/api/user/requests/r1", () => HttpResponse.json(req)),
-    http.get("/api/user/requests/r1/jobs", () => HttpResponse.json([job])),
-  );
-  renderAt();
-  expect(await screen.findByRole("heading", { level: 2, name: "사전 점검 중입니다" })).toBeInTheDocument();
-  job = gated;                                               // 잡 폴링(2초)이 먼저 종단을 본다
-  await act(async () => { await vi.advanceTimersByTimeAsync(2200); });
-  expect(await screen.findByRole("heading", { level: 2, name: "작업이 거부되었습니다" })).toBeInTheDocument();
-  const { pre } = await regions();
-  expect(within(pre).getByText("위치 추정")).toBeInTheDocument();
-  expect(screen.queryByRole("button", { name: "실패 지점 로그 보기" })).toBeNull();
-  req = reqRow("Rejected", [GATE_EV]);                       // 요청 폴링(3초)이 이벤트를 가져온다
-  await act(async () => { await vi.advanceTimersByTimeAsync(3200); });
-  expect(await screen.findByRole("heading", { level: 2, name: "미리보기를 시작하기 전에 거부되었습니다" })).toBeInTheDocument();
-  const rows = within(within(pre).getByRole("list", { name: "사전 점검·미리보기 단계" })).getAllByRole("listitem");
-  expect(rows[0]).toHaveTextContent("사전 점검: 완료");
-  expect(pre.querySelector("[id^='viewer-j1-']")).toBeNull();      // 통과한 단계 로그가 열린 채 남지 않는다
-  expect(asked).toEqual([]);                                 // 한 번도 자동으로 열지 않았다
-});
-
 test("3차 라이브 로그의 마지막 읽기: 첫 조회 중에 단계가 끝나도 뷰어 본문이 빈 채로 커밋되지 않는다(「불러오는 중」 → 마지막 내용)", async () => {
   // round3/query: 취소의 동기 되돌림(pending/idle) 뒤 `.then(refetch)` 를 기다리는 사이, 같은 flush 의 다른 setState(구획
   // 상태 낭독 announce)가 그린 렌더에서 뷰어 본문이 비었다(isLoading false · 데이터 없음). 취소 바로 뒤 같은 틱에 다시 읽는다.
@@ -499,9 +458,9 @@ test("3차 라이브 로그의 마지막 읽기: 첫 조회 중에 단계가 끝
 });
 
 test("3차 대비: 잡 카드·결과 타일·컨펌 창의 의미 있는 글자는 text-muted(#888, 3.54:1)를 쓰지 않는다(장식 코드 라벨만 예외)", async () => {
-  // round3/a11y/contrast-sweep.mjs: ToolLabel·「보조 그룹(gid)」 dt·스토리지 주의문·「실행 결과」 원 키 dt·컨펌 창 본문이
-  // 흰 카드 위 3.54:1 이었다(스펙 §9: muted 는 장식 전용). 요청 pill(StatusPill neutral)은 이 화면 범위 밖이라 보지 않는다.
-  const ident = { username: "alice", uid: 1000, gid: 1000, supplementary_gids: [10010], supplementary_gids_status: "applied" };
+  // round3/a11y/contrast-sweep.mjs: ToolLabel·「실행 결과」 원 키 dt·컨펌 창 본문이 흰 카드 위 3.54:1 이었다(스펙 §9: muted 는
+  // 장식 전용). 요청 pill(StatusPill neutral)은 이 화면 범위 밖이라 보지 않는다.
+  const ident = { username: "alice", uid: 1000, gid: 1000 };
   const done = { ...JOB, tool: "dsync", worker_pool: { node_count: 4, identity: ident }, source_storage: "s1",
     destination_storage: "s2" };
   const cp = { ...done, job_id: "j2", state: "ConfirmPending", result_summary: null, preview_fingerprint: "sha256:abc",
@@ -509,7 +468,7 @@ test("3차 대비: 잡 카드·결과 타일·컨펌 창의 의미 있는 글자
   serve({ ...REQ, state: "Planned", transitions: [tr(null, "Pending", 0), tr("Pending", "Planned", 2)] }, [done, cp]);
   renderAt();
   const jobs = await screen.findByRole("region", { name: /^데이터 작업/ });
-  // 보조 그룹 행은 2026-10-08 부터 「요청 내용」 카드에 있다(잡 2개라 도구 라벨은 잡 카드에 남는다).
+  // 잡 2개라 도구 라벨은 잡 카드에 남는다.
   const spec = screen.getByRole("region", { name: "요청 내용" });
   await within(jobs).findAllByText("dsync · 4 노드");
   await userEvent.click(within(jobs).getByRole("button", { name: "작업 컨펌" }));
@@ -520,7 +479,6 @@ test("3차 대비: 잡 카드·결과 타일·컨펌 창의 의미 있는 글자
     .map((el) => el.textContent);
   expect(offenders).toEqual([]);
   expect(within(jobs).getAllByText("dsync · 4 노드")[0]).toHaveClass("text-ink/70");
-  expect(within(spec).getByText("보조 그룹(gid)")).toHaveClass("text-ink/70");
   expect(within(jobs).getByText("bytes")).toHaveClass("text-ink/70");
   expect(within(dlg).getByText(/^지문\(fingerprint\)/)).toHaveClass("text-ink/70");
   expect(within(dlg).getByText(/^만료: /)).toHaveClass("text-ink/70");
@@ -575,30 +533,21 @@ test("18 배너 제목 표", async () => {
   }
 });
 
-test("리뷰 4차: 그룹 잡의 artifact_base_* 마커 거부는 종단 요청 응답이면 사전 점검 실패로 확정하고 그 로그를 연다", async () => {
-  // requestTerminal 이 RequestDetail → JobCard → JobStages 까지 같은 값으로 흘러야 배너와 단계 카드가 같은 말을 한다.
+test("리뷰 4차(2026-10-26 갱신): artifact_base_* 마커 거부는 요청 응답의 종단 여부와 무관하게 사전 점검 실패로 그 로그를 연다", async () => {
+  // 보조 그룹 잡의 base 관문이 사라져(LDAP 정리) 이 사유는 사전 점검 파드 마커로만 나온다 -- 요청 응답이 아직 비종단이어도(잡
+  // 폴링이 먼저 종단을 봤다) 단정한다. 옛 스냅숏의 supplementary 키는 판정에 쓰지 않는다.
   const asked: string[] = [];
   server.use(http.get("/api/user/jobs/j1/logs", ({ request }) => {
     asked.push(new URL(request.url).searchParams.get("phase") ?? "");
     return HttpResponse.json({ phase: "preflight", ref: "pod/a", source: "archived",
       entries: [{ pod: "p-preflight", log: "DMS_PREFLIGHT_REASON=artifact_base_group_writable" }] });
   }));
-  const groupJob = { ...JOB, state: "Rejected", reason_code: "artifact_base_group_writable", result_summary: null,
+  const oldGroupJob = { ...JOB, state: "Rejected", reason_code: "artifact_base_group_writable", result_summary: null,
     preview_summary: null, phase_refs: { preflight: "pod/a" },
     worker_pool: { identity: { username: "alice", uid: 10001, gid: 10000, supplementary_gids: [10010],
       supplementary_gids_status: "applied" } },
     transitions: [tr(null, "Pending", 0), tr("Pending", "Preflight", 2), tr("Preflight", "Rejected", 9)] };
-  const events = [{ id: 1, component: "stepper", severity: "info", event_type: "identity_groups_checked", message: null,
-    at: at(2), payload: { job_id: "j1", gids: [10010], phase: "preflight" } }];
-  // 요청 응답이 아직 비종단(잡 폴링이 먼저 종단을 봤다) -- 추정, 로그를 열지 않는다
-  serve({ ...REQ, state: "Planned", events }, [groupJob]);
-  const first = renderAt();
-  expect(await screen.findByRole("heading", { level: 2, name: "작업이 거부되었습니다" })).toBeInTheDocument();
-  await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
-  expect(asked).toEqual([]);
-  first.unmount();
-  // 종단 응답 -- 확정
-  serve({ ...REQ, state: "Rejected", reason_code: "artifact_base_group_writable", events }, [groupJob]);
+  serve({ ...REQ, state: "Planned", events: [] }, [oldGroupJob]);
   renderAt();
   expect(await screen.findByText("DMS_PREFLIGHT_REASON=artifact_base_group_writable")).toBeInTheDocument();
   expect(screen.getByRole("heading", { level: 2, name: "사전 점검 단계에서 거부되었습니다" })).toBeInTheDocument();

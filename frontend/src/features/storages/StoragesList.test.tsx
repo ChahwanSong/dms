@@ -72,7 +72,8 @@ test("사용 범위 셀렉트: 관리자 전용·완전 비활성을 고르면 �
   expect(sel.value).toBe("all");
   await userEvent.selectOptions(sel, "관리자 전용");
   await userEvent.selectOptions(sel, "완전 비활성");
-  const base = { mount_path: S.mount_path, managed_root: S.managed_root, backend_type: S.backend_type };
+  // 지금 종류도 함께 싣는다(종류 키가 없는 행 = 파일시스템).
+  const base = { mount_path: S.mount_path, managed_root: S.managed_root, backend_type: S.backend_type, kind: "filesystem" };
   await screen.findByLabelText("cephfs 사용 범위");
   expect(bodies).toEqual([
     { ...base, enabled: true, user_enabled: false },
@@ -122,11 +123,10 @@ test("cancelling the delete dialog clears the stale 409 error", async () => {
 });
 
 
-// ---- 스토리지 종류 배지(dms-k8s 설계 D11 -- k8s 모드만) -----------------------------------------------------------
-test("k8s 모드: 종류 열에 글자 배지(점 없음), 범위를 바꿔도 지금 종류를 함께 싣는다", async () => {
+// ---- 스토리지 종류 배지(dms-k8s 설계 D11) -----------------------------------------------------------
+test("종류 열에 글자 배지(점 없음), 범위를 바꿔도 지금 종류를 함께 싣는다", async () => {
   const bodies: unknown[] = [];
   server.use(
-    http.get("/api/auth/me", () => HttpResponse.json({ actor: "root", role: "admin", identity_mode: "k8s" })),
     http.get("/api/admin/storages", () => HttpResponse.json([
       S, { ...S, storage_name: "k8s-pv-nfs", kind: "pv" }, { ...S, storage_name: "k8s-pv-gpfs", kind: "both" }])),
     http.put("/api/admin/storages/:name", async ({ request }) => {
@@ -143,13 +143,4 @@ test("k8s 모드: 종류 열에 글자 배지(점 없음), 범위를 바꿔도 �
   await userEvent.selectOptions(screen.getByLabelText("k8s-pv-nfs 사용 범위"), "관리자 전용");
   await waitFor(() => expect(bodies).toEqual([{ mount_path: S.mount_path, managed_root: S.managed_root,
     backend_type: S.backend_type, enabled: true, user_enabled: false, kind: "pv" }]));
-});
-
-test("ldap 모드는 종류 열이 없다", async () => {
-  server.use(
-    http.get("/api/auth/me", () => HttpResponse.json({ actor: "root", role: "admin" })),
-    http.get("/api/admin/storages", () => HttpResponse.json([S])));
-  wrap();
-  await screen.findByText("cephfs");
-  expect(screen.queryByRole("columnheader", { name: "종류" })).toBeNull();
 });

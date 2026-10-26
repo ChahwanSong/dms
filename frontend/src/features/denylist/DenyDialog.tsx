@@ -6,15 +6,14 @@ import { useDeny } from "./useDenylist";
 
 const field = "mt-1 w-full rounded-lg border border-black/10 px-3 py-2";
 // 유형 의미(사용자 요청 2026-08-19): identity.resolve_job_identity 판정의 미러 —
-// requester=제출 계정, owner=실행 신원(지정 없으면 제출자 본인), group=실행
-// 신원의 LDAP 그룹. 목록 화면(DenylistList)의 설명 패널과 같은 문구를 쓴다.
+// requester=제출 계정, owner=실행 신원(지정 없으면 제출자 본인). 목록 화면(DenylistList)의 설명 패널과 같은 문구를 쓴다.
+// group(LDAP 그룹) 유형은 없다(2026-10-26 LDAP 정리 -- 그룹을 풀 디렉터리가 없어 서버가 추가를 422 denylist_group_unsupported
+// 로 거부하고 평가하지도 않는다). 옛 group 행은 목록에 「평가 안 됨」으로 남아 해제만 할 수 있다.
 export const SUBJECT_TYPES = [
   { value: "requester",
     desc: "작업을 제출한 계정 기준 — 이 계정의 모든 제출을 차단합니다." },
   { value: "owner",
-    desc: "파일을 다루는 실행 신원 기준 — 실행 신원을 지정한 작업은 제출자와 다를 수 있습니다." },
-  { value: "group",
-    desc: "실행 신원이 속한 LDAP 그룹 기준 — 그룹 구성원 전체를 한 번에 차단합니다." },
+    desc: "실행 신원(권한 기준 사용자) 기준 — 사용자를 지정한 작업은 제출자와 다를 수 있습니다." },
 ] as const;
 
 export function DenyDialog({ trigger }: { trigger: React.ReactNode }) {
@@ -40,8 +39,8 @@ export function DenyDialog({ trigger }: { trigger: React.ReactNode }) {
             {SUBJECT_TYPES.map((t) => <option key={t.value} value={t.value}>{t.value}</option>)}
           </select>
         </label>
-        {/* 선택된 유형의 의미를 그 자리에서 — 셋의 차이(제출자 vs 실행 신원 vs
-            그룹)를 모르면 엉뚱한 유형에 등재해 차단이 새는 사고가 된다 */}
+        {/* 선택된 유형의 의미를 그 자리에서 — 둘의 차이(제출자 vs 실행 신원)를 모르면 엉뚱한 유형에 등재해 차단이 새는
+            사고가 된다 */}
         <p className="text-xs text-muted">
           {SUBJECT_TYPES.find((t) => t.value === subjectType)?.desc}
         </p>

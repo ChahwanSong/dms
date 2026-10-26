@@ -1,17 +1,11 @@
 export const REASON_MESSAGES: Record<string, string> = {
   // planner / identity / placement
   identity_denied: "차단 목록에 있는 신원입니다",
-  ldap_not_configured: "LDAP이 설정되지 않았습니다",
-  // 보조 그룹 재확인(2026-10-07 D2): 제출 직전·큐 대기 재확인의 LDAP 장애는 상태를 바꾸지 않고 보류한 뒤 60초 이상
-  // 간격으로 3번 더 시도하고, 그래도 안 되면 이 사유로 끝난다(stepper). 계획 단계 거부도 같은 코드라 괄호로만 덧붙인다.
-  // '연결 불가' 만이 아니다(2026-10-08 리뷰): 같은 코드로 접히는 이 계정의 디렉터리 문제(같은 uid 엔트리 중복·결과 코드
-  // sizeLimit/adminLimit·그룹 페이지 상한 -- identity_ldap 의 IdentityLookupInvalid)는 LDAP 가 멀쩡해도 결정적으로
-  // 반복된다 -- 재신청으로 풀리지 않으니 관리자에게 보내야 한다. 원인 원문은 컨트롤러 stderr 에만 남는다(README §2c).
-  ldap_unavailable: "LDAP 조회에 실패했습니다 — 연결 불가, 또는 이 계정의 디렉터리 문제(같은 uid 항목 중복·조회 한도 초과·그룹 1만 개 초과 등 — 다시 신청해도 풀리지 않으니 관리자에게 문의하세요). 보조 그룹 재확인은 약 3분간 3번 재시도 뒤 중단",
-  // 이 셋은 계획 단계 거부라 잡이 없다 -- 요청 상세의 「사유」가 생기기 전엔 화면
-  // 어디에도 안 나왔다(2026-08-16). 이제 사용자가 직접 읽으므로 "무엇을 하면 되는가"
-  // 까지 말한다: 코드 이름을 한국어로 옮기기만 한 문구는 운영자에게만 통한다.
-  ldap_identity_not_found: "LDAP에서 실행 신원 계정을 찾을 수 없습니다 — 노드에 그 계정이 없어 실행할 수 없습니다(LDAP 에 없는 관리자 계정이면 '실행 신원'을 지정하거나 'root 권한으로 실행'을 선택하세요)",
+  // 은퇴한 사유(2026-10-26 LDAP 정리 -- 이 라인은 k8s 신원 모드 전용이라 서버가 더 내지 않는다). reasonCodes.json 에서 지우지
+  // 않는다: 옛 요청·잡 행이 이 코드를 그대로 들고 있어 화면이 원시 코드를 보이지 않게 「이전 버전…」 문구로 남긴다.
+  ldap_not_configured: "이전 버전(LDAP 신원)에서 기록된 사유입니다 — 그때 LDAP 이 설정되지 않아 root 가 아닌 작업을 실행할 수 없었습니다. 지금은 모든 작업이 root 로 실행되니 다시 신청하세요",
+  ldap_unavailable: "이전 버전(LDAP 신원)에서 기록된 사유입니다 — 그때 LDAP 조회(또는 보조 그룹 재확인)에 실패했습니다. 지금은 LDAP 을 쓰지 않으니 다시 신청하세요",
+  ldap_identity_not_found: "이전 버전(LDAP 신원)에서 기록된 사유입니다 — 그때 LDAP 에서 실행 신원 계정을 찾지 못했습니다. 지금은 LDAP 을 쓰지 않으니 다시 신청하세요",
   missing_policy: "해당 도구의 정책이 없습니다",
   policy_disabled: "해당 도구의 정책이 비활성 상태입니다",
   // stepper / controller
@@ -30,8 +24,8 @@ export const REASON_MESSAGES: Record<string, string> = {
   source_not_readable: "원본 경로를 읽을 수 없습니다 — 경로와 권한을 확인하세요",
   destination_not_directory: "목적지에 이미 파일이 있습니다 — sync 목적지는 디렉토리여야 합니다",
   // 세 문구는 사용자·운영자 공용이다 -- "실행 신원"(운영자 전용 개념) 대신 실행하는 계정으로 쓴다(2026-10-01).
-  destination_parent_not_writable: "목적지의 상위 디렉토리가 없거나 작업을 실행하는 계정(요청자 본인 또는 지정된 실행 신원)이 쓸 수 없습니다 — DMS 는 목적지가 이미 있어도 상위 디렉토리 쓰기 권한을 요구합니다(같은 노드 sync 도구 dsync 는 권한이 없으면 아무것도 복사하지 않습니다). 권한은 실행 계정의 uid·주 그룹·이 작업에 적용된 LDAP 보조 그룹(작업 계획 시점 기준 — 운영자가 기능을 껐거나 그룹이 256개를 넘으면 주 그룹만, 요청 상세의 '보조 그룹(gid)' 참고)으로 판정하며, 스토리지 설정에 따라 보조 그룹이 인정되지 않을 수 있습니다",
-  destination_not_writable: "목적지 디렉토리에 쓸 수 없습니다 — 작업을 실행하는 계정(요청자 본인 또는 지정된 실행 신원)에게 목적지의 쓰기·진입 권한이 없습니다(uid·주 그룹·이 작업에 적용된 계획 시점 LDAP 보조 그룹 기준 — 기능 off·그룹 256개 초과면 주 그룹만, 요청 상세의 '보조 그룹(gid)' 참고. 스토리지에 따라 보조 그룹이 인정되지 않을 수 있음)",
+  destination_parent_not_writable: "목적지의 상위 디렉토리가 없거나 작업을 실행하는 계정(요청자 본인 또는 지정된 실행 신원)이 쓸 수 없습니다 — DMS 는 목적지가 이미 있어도 상위 디렉토리 쓰기 권한을 요구합니다(같은 노드 sync 도구 dsync 는 권한이 없으면 아무것도 복사하지 않습니다). root 실행이면 상위 디렉토리가 없다는 뜻입니다 — 먼저 만들어 두세요",
+  destination_not_writable: "목적지 디렉토리에 쓸 수 없습니다 — 작업을 실행하는 계정(요청자 본인 또는 지정된 실행 신원)에게 목적지의 쓰기·진입 권한이 없습니다(uid·주 그룹 기준)",
   destination_not_owned: "목적지 디렉토리가 작업을 실행하는 계정(요청자 본인 또는 지정된 실행 신원)의 소유가 아닙니다 — sync 는 목적지 최상위의 소유·권한·시각을 맞추는데 남의 디렉토리에는 그럴 수 없어(dsync 는 부분 복사 뒤 실패) 미리 거부합니다. 그룹 쓰기 권한이 있어도 소유자가 아니면 거부합니다. 본인 소유 디렉토리나 새 경로를 지정하세요",
   artifact_base_not_traversable: "작업 기록(artifact) 저장소에 실행 신원이 들어갈 수 없습니다 — 관리자에게 문의하세요(artifact base 디렉토리에 다른 사용자 실행(x) 권한이 필요합니다: 711 또는 755)",
   parent_not_writable: "대상의 상위 디렉토리에 쓸 수 없습니다",
@@ -209,18 +203,14 @@ export const REASON_MESSAGES: Record<string, string> = {
   // 계약(reasonCodes.test.ts / test_reason_codes_coverage.py) 조건이다.
   unknown_tool: "허용되지 않은 도구입니다 — 관리자에게 문의하세요",
   storage_missing_at_step: "잡 진행 중 스토리지 정의가 사라졌습니다 — 관리자에게 문의하세요",
-  identity_missing_at_step: "잡의 실행 신원(uid/gid/보조 그룹)이 없거나 올바르지 않습니다 — 관리자에게 문의하세요",
-  privilege_not_requested: "root 로 계획됐지만 요청에 root 실행 근거가 없어 실행 전에 중단했습니다 — 규칙 변경 전에 계획된 잡일 수 있습니다. 필요하면 'root 권한으로 실행'을 명시해 다시 신청하세요",
-  identity_root_without_privilege: "디렉터리가 이 사용자에게 uid 0 을 줍니다 — root 실행은 특권 요청자만 가능합니다",
-  // 보조 그룹 인정(2026-10-07, identity.resolve_job_identity·check_chown_group). reasonCodes.json 과 같은 커밋.
-  identity_root_group_without_privilege: "실행 계정의 LDAP 주 그룹이 root(gid 0)라 root 가 아닌 실행을 할 수 없습니다 — 관리자에게 문의하세요",
-  // 허용 집합은 '소속' 이 아니라 '이 작업에 적용된' 그룹이다(identity.check_chown_group: 주 gid ∪ 스냅숏의 적용 목록) --
-  // 운영자가 기능을 껐거나(disabled) 그룹이 256개를 넘으면(over_limit) 실제 멤버여도 주 그룹만 통과한다(2026-10-08 리뷰).
-  chown_group_not_member: "chown 의 그룹(gid)이 이 작업에 적용된 그룹이 아닙니다 — 실행 계정의 주 그룹 또는 작업 계획 시점에 이 작업에 실제로 적용된 LDAP 보조 그룹의 gid 만 지정할 수 있습니다(프로젝트 그룹 소유로 남기려면 그 그룹에 속한 계정으로 uid:<프로젝트 gid>). 보조 그룹이 적용되지 않은 경우(운영자가 기능을 꺼 두었거나 그룹이 256개를 넘음)에는 주 그룹만 가능합니다 — 관리자에게 확인하세요",
-  // 보조 그룹 적용 지점(2026-10-07): preflight·워커 셸의 그룹 자기검증 마커(execution_manifests PREFLIGHT_REASONS·
-  // EXECUTION_REASONS)와 stepper 의 제출 직전·큐 대기 LDAP 재확인. reasonCodes.json 과 같은 커밋.
-  identity_groups_not_applied: "작업 컨테이너의 그룹이 계획된 보조 그룹과 일치하지 않아 중단했습니다(클러스터 정책이 그룹을 바꾸거나 무시함, 또는 작업 컨테이너의 그룹 물질화 실패·값 변조) — 관리자에게 문의하세요",
-  identity_changed_at_step: "작업을 계획한 뒤 실행 계정의 LDAP 정보(uid·주 그룹 또는 보조 그룹 소속)가 바뀌어 실행 전에 중단했습니다 — 다시 신청하세요(새로 들어간 그룹도 다시 신청해야 반영됩니다)",
+  identity_missing_at_step: "잡의 실행 신원이 없거나 올바르지 않아 실행 전에 중단했습니다(root 가 아닌 신원·이전 버전의 보조 그룹 목록이 실린 잡 포함 — 지금은 모든 작업이 root 로 실행됩니다). 다시 신청하거나 관리자에게 문의하세요",
+  privilege_not_requested: "root 로 계획됐지만 요청에 root 실행 근거가 없어 실행 전에 중단했습니다 — 규칙 변경 전에 계획된 잡일 수 있습니다. 다시 신청하세요(지금은 모든 단건 작업이 root 로 실행됩니다)",
+  // 이하 다섯은 은퇴한 사유(2026-10-26 LDAP 정리 -- 위 ldap_* 와 같은 이유로 문구만 남긴다).
+  identity_root_without_privilege: "이전 버전(LDAP 신원)에서 기록된 사유입니다 — 그때 디렉터리가 이 사용자에게 uid 0 을 줘 root 가 아닌 실행을 거부했습니다",
+  identity_root_group_without_privilege: "이전 버전(LDAP 신원)에서 기록된 사유입니다 — 그때 실행 계정의 LDAP 주 그룹이 root(gid 0)라 root 가 아닌 실행을 거부했습니다",
+  chown_group_not_member: "이전 버전(LDAP 보조 그룹)에서 기록된 사유입니다 — 그때 chown 의 그룹(gid)이 실행 계정에 적용된 그룹이 아니라 거부했습니다. 지금은 이 검사가 없습니다(chown 지정은 특권 운영자만)",
+  identity_groups_not_applied: "이전 버전(LDAP 보조 그룹)에서 기록된 사유입니다 — 그때 작업 컨테이너의 그룹이 계획된 보조 그룹과 일치하지 않아 중단했습니다",
+  identity_changed_at_step: "이전 버전(LDAP 신원)에서 기록된 사유입니다 — 그때 작업을 계획한 뒤 실행 계정의 LDAP 정보가 바뀌어 실행 전에 중단했습니다. 다시 신청하세요",
   cancel_failed: "취소에 실패했습니다 — 실행 중인 작업을 종료하지 못했습니다",
   batch_not_cancelable: "취소할 수 없는 상태의 배치입니다",
   // 남의 요청에도 쓰이는 404 라 「삭제됐거나 볼 수 없는」 둘 다 말한다 — 두 경우 문구가 같아 존재 오라클이 없다.
@@ -318,9 +308,8 @@ export const REASON_MESSAGES: Record<string, string> = {
   artifact_base_outside_allowlist: "허용된 공유 FS 경로(DMS_ARTIFACT_BASE_ALLOWED_PREFIXES) 밖입니다",
   artifact_base_not_owned: "아티팩트 경로의 소유자가 제어면 프로세스(root)가 아닙니다 — chown root:root",
   artifact_base_world_writable: "아티팩트 경로가 world-writable 입니다 — chmod 755 (요청자가 잡 디렉터리를 바꿔치기할 수 있음)",
-  // 보조 그룹(2026-10-07 D6): 잡이 LDAP 보조 그룹을 달고 돌므로 g+w·ACL 쓰기 항목은 world-writable 과
-  // 같은 위험이다(gid 와 무관 -- 보조 gid 0 도 인정). 3홉 검증·저장, 그리고 그룹이 실린 잡의 preflight(base 를 실행
-  // 계정이 쓸 수 있음 -- NFSv4/GPFS ACL 포함)에서 나온다. 어느 쪽이든 고칠 사람은 관리자라 처방을 관리자 몫으로 적는다.
+  // g+w·ACL 쓰기 항목은 world-writable 과 같은 위험이다(그 그룹 사용자가 다른 작업의 기록을 바꿔치기 -- 2026-10-07 D6). 3홉
+  // 검증·저장에서 나온다(옛 보조 그룹 잡의 preflight 마커도 같은 코드). 고칠 사람은 관리자라 처방을 관리자 몫으로 적는다.
   artifact_base_group_writable: "아티팩트 경로(base)에 그룹 쓰기 권한(또는 ACL 쓰기 항목·기본 ACL)이 있어 작업 계정이 쓸 수 있습니다 — 관리자: chmod g-w, setfacl -b -k (root:root 755 또는 711)",
   // 빌드 실패 세분화(슬라이스 21 잔여). 지금까지 전부 build_failed 로 뭉개져
   // 운영자가 로그 단절만 보고 OOM 을 추측해야 했다 — 대응이 서로 다르다.
@@ -416,11 +405,11 @@ export const REASON_MESSAGES: Record<string, string> = {
   storage_not_pv_capable: "이 스토리지는 PV 를 담는 종류(PV·둘 다)가 아닙니다 — 스토리지 화면에서 종류를 바꾸거나 다른 스토리지를 고르세요",
   invalid_pv_path_template: "경로 템플릿이 올바르지 않습니다 — managed_root 기준 상대 경로에 {volume}·{pvc}·{namespace}·{storageclass}·{subdir}·{attr:키}·{handle:구분자:번호} 중 하나 이상을 쓰세요(백엔드에 기본 템플릿이 없으면 꼭 적어야 합니다)",
   storage_has_sc_mappings: "이 스토리지에 StorageClass 가 매핑돼 있어 파일시스템 전용으로 바꿀 수 없습니다 — k8s 연동 → StorageClass 에서 매핑을 먼저 해제하세요",
-  denylist_group_unsupported: "k8s 모드에서는 그룹 규칙을 쓸 수 없습니다(LDAP 그룹이 없습니다) — 사용자 이름 규칙을 쓰세요",
+  denylist_group_unsupported: "그룹 규칙은 쓸 수 없습니다(LDAP 그룹이 없습니다) — requester·owner(사용자 이름) 규칙을 쓰세요",
   // 제출·권한(2026-10-25 dms-k8s 설계 §6·D11~D13): PV 주소 해석·맵핑 판정(제출), 계획·컨펌 재확인(요청 결과 사유),
   // 스토리지 종류. 문구는 사용자가 다음에 할 일까지. reasonCodes.json 과 같은 커밋.
   invalid_storage_kind: "스토리지 종류는 파일시스템·PV·둘 다 중 하나여야 합니다 — 등록 화면에서 종류를 다시 고르세요",
-  run_as_root_required: "이 시스템(k8s 모드)에서는 모든 작업이 root 로 실행됩니다 — 화면을 새로 고친 뒤 다시 제출하세요(「root 아님」으로는 보낼 수 없습니다)",
+  run_as_root_required: "이 시스템에서는 모든 작업이 root 로 실행됩니다 — 화면을 새로 고친 뒤 다시 제출하세요(「root 아님」으로는 보낼 수 없습니다)",
   pv_and_storage_conflict: "한 쪽에 PV 와 직접 경로(스토리지)를 함께 지정했습니다 — 둘 중 하나만 고르세요",
   k8s_mapping_unknown: "이 클러스터의 k8s 권한 정보가 아직 없습니다(등록되지 않았거나 한 번도 동기화되지 않음) — 잠시 뒤 다시 시도하고, 계속되면 관리자에게 k8s 연동 → 개요의 동기화 상태 확인을 요청하세요",
   pv_not_found: "그 PV 를 찾을 수 없습니다 — 삭제됐거나 이름이 바뀌었을 수 있습니다. 목록을 새로 고쳐 다시 고르세요(새로 만든 PV 는 다음 동기화 뒤에 보입니다)",
@@ -440,7 +429,7 @@ export const REASON_MESSAGES: Record<string, string> = {
   k8s_access_denied: "이 PV 의 namespace 에 권한이 없습니다 — 그 namespace 에 rolebinding <아이디>-clusterrole-edit(또는 -admin)이 있어야 합니다. 관리자에게 요청하세요(권한 변경은 다음 동기화 뒤 반영됩니다)",
   pv_moved: "제출한 뒤 PV 의 실제 경로가 바뀌었습니다(PVC 를 다시 만들었거나 StorageClass 매핑·경로 템플릿이 바뀜) — 작업을 다시 제출하세요",
   pv_target_outside: "작업 경로가 PV 바깥을 가리킵니다 — PV 를 다시 골라 새로 제출하세요",
-  scan_path_unrestricted_only: "k8s 모드에서 스캔 경로 등록·통계는 「전체 PV·직접 경로 권한」이 있는 관리자만 씁니다 — PV 는 단일 작업의 scan 으로 확인하세요",
+  scan_path_unrestricted_only: "스캔 경로 등록·통계는 「전체 PV·직접 경로 권한」이 있는 관리자만 씁니다 — PV 는 단일 작업의 scan 으로 확인하세요",
 };
 
 /** 사유 코드를 사용자에게 보일 문구로. 매핑이 없으면 원시 코드를 그대로 돌려준다

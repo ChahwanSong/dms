@@ -9,27 +9,27 @@ test("사용자(비 root·chown 없음): 요청자 본인 uid:gid(주 그룹), �
   const o = syncOwnership({ chown: "", root: false, runAs: "alice", self: true });
   expect(o.short).toBe("요청자 본인(alice)의 uid:gid(주 그룹)");
   expect(o.long).toContain("기본적으로 목적지(새로 만드는 경우 포함)와 복사된 파일·디렉토리는 요청자 본인(alice)의 "
-    + "uid:gid(LDAP 계정의 주 그룹)로 셋업됩니다 — 소스 소유자와 관계없습니다.");
+    + "uid:gid(주 그룹)로 셋업됩니다 — 소스 소유자와 관계없습니다.");
   expect(o.long).toContain("권한 비트·수정 시각은 소스 그대로라 소스의 그룹 권한이 이 주 그룹에 적용됩니다");
   // 이미 있던 남의 소유 항목: 도구·항목별로 결과가 갈려(검증 3차) "실패하거나 일부가 안 바뀔 수 있다" 로만 말한다
   expect(o.long).toContain("목적지에 이미 있던 같은 경로의 항목도 이 소유로 다시 맞춰지므로, 그 안에 다른 사용자 소유 항목이 "
     + "있으면 작업이 실패하거나 일부 항목의 소유·권한이 바뀌지 않을 수 있습니다.");
   expect(o.long).not.toContain("실행 신원");
-  // 자동 지정은 주 그룹 -- 프로젝트(보조) 그룹 소유는 명시 chown(2026-10-07 D7)
-  expect(o.long).toContain("프로젝트(보조) 그룹 소유로 남기려면 chown 에 uid:<그룹 gid> 를 지정하세요(자동 지정은 주 그룹).");
+  // 자동 지정은 주 그룹 -- 다른 소유는 명시 chown(LDAP 보조 그룹 안내는 2026-10-26 에 지웠다)
+  expect(o.long).toContain("다른 소유로 남기려면 chown 에 숫자 uid:gid 를 지정하세요(자동 지정은 주 그룹).");
+  expect(o.long).not.toContain("보조");
 });
 
 test("chown 칸이 없는 화면(비관리자, chownEditable=false): 지정하라는 대신 관리자에게 요청하라고 말한다", () => {
   // G8(2026-10-08 리뷰): SubmitJob 의 chown 칸은 관리자 전용 고급 옵션 -- 사용자가 할 수 없는 지시를 내보내지 않는다.
   const o = syncOwnership({ chown: "", root: false, runAs: "alice", self: true, chownEditable: false });
-  expect(o.long).not.toContain("chown 에 uid:<그룹 gid> 를 지정하세요");
-  expect(o.long).toContain("자동 지정은 주 그룹입니다 — 프로젝트(보조) 그룹 소유가 필요하면 관리자에게 chown uid:<그룹 gid> "
-    + "지정을 요청하세요(uid 는 본인 것, gid 는 본인이 속하고 이 작업에 적용된 그룹이어야 합니다).");
+  expect(o.long).not.toContain("chown 에 숫자 uid:gid 를 지정하세요");
+  expect(o.long).toContain("자동 지정은 주 그룹입니다 — 다른 소유가 필요하면 관리자에게 chown 지정을 요청하세요.");
   expect(o.long).not.toContain("실행 신원");                              // 사용자 화면 용어(본인)를 지킨다
   expect(o.short).toBe("요청자 본인(alice)의 uid:gid(주 그룹)");            // 요약은 같다
   // 기본값(생략)은 true -- 관리자 전용 화면(배치 생성·상세)은 그대로
   expect(syncOwnership({ chown: "", root: false, runAs: "alice", self: true }).long)
-    .toContain("프로젝트(보조) 그룹 소유로 남기려면 chown 에 uid:<그룹 gid> 를 지정하세요(자동 지정은 주 그룹).");
+    .toContain("다른 소유로 남기려면 chown 에 숫자 uid:gid 를 지정하세요(자동 지정은 주 그룹).");
   // root·chown 지정 갈래엔 영향 없음
   expect(syncOwnership({ chown: "", root: true, runAs: null, self: true, chownEditable: false }).long)
     .not.toContain("관리자에게");
@@ -55,7 +55,7 @@ test("root 실행: 소스 소유 보존 -- 이미 있던 같은 경로 항목 �
   const o = syncOwnership({ chown: "", root: true, runAs: "mason", self: true });
   expect(o.short).toBe("소스의 소유자·그룹 그대로(root 실행)");
   expect(o.long).toContain("목적지에 이미 있던 같은 경로의 항목(최상위 디렉토리 포함)도 소유자·그룹·권한·시각이 소스 것으로 바뀝니다");
-  expect(o.long).not.toContain("프로젝트(보조) 그룹");                  // root 는 소스 그룹을 보존 -- 안내 불필요
+  expect(o.long).not.toContain("다른 소유로 남기려면");                 // root 는 소스 그룹을 보존 -- 안내 불필요
   expect(syncOwnership({ chown: "", chmod: "F640", root: true, runAs: null, self: true }).long)
     .toContain("(권한 비트는 chmod 지정값 F640)");
 });
@@ -69,16 +69,14 @@ test("chown(숫자) + root: 그 값으로 셋업, 기존 같은 경로 항목도
     .toBe("요청자 본인(alice)의 uid:gid(주 그룹)");
 });
 
-test("chown + 비 root: gid 는 소속 그룹(주·보조)만(계획 단계 거부), uid 가 본인이 아니면 dsync 는 실패, nsync 는 건너뜀", () => {
+test("chown + 비 root(옛 행): uid 는 본인, gid 는 주 그룹만, 아니면 dsync 는 실패, nsync 는 건너뜀", () => {
   const o = syncOwnership({ chown: "10003:10000", root: false, runAs: "alice", self: true });
-  expect(o.short).toBe("chown 지정값 10003:10000 — 비 root: uid 는 본인, gid 는 주·적용된 보조 그룹만(아니면 거부·실패)");
+  expect(o.short).toBe("chown 지정값 10003:10000 — 비 root: uid 는 본인, gid 는 주 그룹만(아니면 실패)");
   expect(o.long).toContain("(자동 소유 지정은 꺼집니다)");
-  // G9: '소속' 이 아니라 '이 작업에 적용된' 그룹(스위치 꺼짐·256 초과면 주 그룹만)
-  expect(o.long).toContain("root 실행이 아니면 gid 는 실행 신원의 주 그룹 또는 이 작업에 적용된 보조 그룹이어야 하고(보조 그룹이 "
-    + "적용되지 않으면 주 그룹만 — 아니면 계획 단계에서 거부), uid 가 실행 신원 본인이 아니면 바꿀 권한이 없어 ");
-  expect(o.long).not.toContain("주 그룹 gid 외의 값");
-  // 프로젝트 그룹 안내는 기본(자동 지정) 문구의 몫 -- chown 을 이미 적었으면 붙지 않는다
-  expect(o.long).not.toContain("프로젝트(보조) 그룹 소유로 남기려면");
+  expect(o.long).toContain("root 실행이 아니면 uid 는 실행 신원 본인, gid 는 실행 신원의 주 그룹이어야 하고, 아니면 바꿀 권한이 없어 ");
+  expect(o.long).not.toContain("보조");
+  // 다른 소유 안내는 기본(자동 지정) 문구의 몫 -- chown 을 이미 적었으면 붙지 않는다
+  expect(o.long).not.toContain("다른 소유로 남기려면");
   expect(o.long).toContain("dsync(같은 노드) 는 데이터를 복사한 뒤 작업이 실패하고, nsync(노드 간) 는 소유 변경이 적용되지 않아 실행 신원 소유로 남습니다");
 });
 

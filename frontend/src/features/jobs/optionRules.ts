@@ -3,7 +3,7 @@ import { CHOWN_NAME_ERROR } from "../../lib/syncOwnership";
 // SubmitJob(단건 sync)과 BatchCreate(배치 옵션 스텝)가 공유한다(슬라이스 32 T8) —
 // 파일별 사본이면 미러가 발산한다(슬라이스 31 T3 formFields 이사와 같은 이유).
 // domain.py 의 _CHMOD_ITEM_RE(콤마 항목별 fullmatch)·_CHOWN_RE 의 미러.
-// chown 은 **숫자 uid/gid 만**(2026-10-01 사용자 결정 -- 이름은 잡 컨테이너에서 LDAP 으로 풀리지 않아 미리보기
+// chown 은 **숫자 uid/gid 만**(2026-10-01 사용자 결정 -- 이름은 잡 컨테이너에서 디렉터리로 풀리지 않아 미리보기
 // 실패·엉뚱한 gid·root 실행 시 uid 0 이 됐다; domain.chown_problem 주석). 빈 파트 규칙(":gid" 허용, "user:" 거부) 동일.
 export const CHMOD_RE = /^[DF]?[0-7]{1,4}(,[DF]?[0-7]{1,4})*$/;
 export const CHOWN_RE = /^(?:[0-9]{1,10})?(?::[0-9]{1,10})?$/;
@@ -83,10 +83,8 @@ export const SYNC_OPTION_HELP = {
   delete: "원본에 없는 파일을 대상에서도 삭제해 완전히 동일하게 맞춥니다(미러 동기화).",
   contents: "크기·수정시각 대신 파일 내용을 바이트 단위로 비교합니다(더 느리지만 정확).",
 } as const;
-export const OPEN_NOATIME_NON_ROOT =
-  "open_noatime 은 root 실행에서만 적용됩니다 — 일반 실행 신원은 남의 파일을 O_NOATIME 으로 열 수 없어(EPERM) 복사가 실패합니다.";
 // 실행 권한 문구(제출 요약 「실행 권한」 ↔ 요청 상세 「요청 내용」의 「실행 권한」). root 의 어휘·색(text-bad)은 포탈 전체가 같다.
-// 요청 상세는 PRIV_ROOT_HEAD·PRIV_USER 만 쓴다 -- sync 의 소유 결과는 같은 카드의 「목적지 소유」 행이 말하므로
+// 요청 상세는 PRIV_ROOT_HEAD·PRIV_USER(옛 비 root 행 표시) 만 쓴다 -- sync 의 소유 결과는 같은 카드의 「목적지 소유」 행이 말하므로
 // PRIV_ROOT_SYNC(소유 결과를 덧붙인 꼬리)는 제출 요약 전용이다(한 화면에서 같은 사실을 두 번 말하지 않는다).
 export const PRIV_ROOT_HEAD = "root(특권) — 권한 검사 우회";
 export const PRIV_ROOT_SYNC = `${PRIV_ROOT_HEAD}, sync 는 목적지 소유·권한을 소스에 맞춤(chown·chmod 지정 시 그 값)`;

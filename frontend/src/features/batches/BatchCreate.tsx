@@ -22,7 +22,6 @@ import { ApiError } from "../../lib/api";
 import { syncOwnership } from "../../lib/syncOwnership";
 import { relativePathProblem } from "../../lib/storagePaths";
 import { rmTargetOverlaps } from "../../lib/rmTargets";
-import { useMe } from "../auth/useAuth";
 import { PvPathPicker } from "../k8s/PvPathPicker";
 import type { PvSlot } from "../k8s/PvPathPicker";
 
@@ -119,9 +118,7 @@ export function BatchCreate() {
   const [tab, setTab] = useState<InputTab>("table");
   const [csvText, setCsvText] = useState("");
   const [csvErrors, setCsvErrors] = useState<string[]>([]);
-  // 「PV 에서 경로 찾기」(k8s 모드, 2026-10-26 (e)): 마지막으로 포커스한 칸 -- 넣기는 그 칸, 없으면 첫 빈 칸, 없으면 새 행.
-  const me = useMe();
-  const k8sMode = me.data?.identity_mode === "k8s";
+  // 「PV 에서 경로 찾기」(2026-10-26 (e)): 마지막으로 포커스한 칸 -- 넣기는 그 칸, 없으면 첫 빈 칸, 없으면 새 행.
   const [lastFocus, setLastFocus] = useState<{ row: number; slot: PvSlot } | null>(null);
 
   const storages = storagesQ.data ?? [];
@@ -489,7 +486,8 @@ export function BatchCreate() {
                 소유권 추가 -- SubmitJob 과 같은 규칙: preflight _DEST_TYPE_CHECK·_DEST_CHECK, 소유권은
                 lib/syncOwnership). 배치는 생성 게이트(routes_batches: 특권 목록 + 세션)를 통과한
                 관리자만 만들고 자식은 자격이 있으면 root(identity.PRIVILEGE_IF_ELIGIBLE) -- 그래서
-                소유권 기본은 "소스 그대로"다. 자격이 계획 시점에 빠진 드문 경우만 비 root 로 돈다.
+                소유권 기본은 "소스 그대로"다. 자격이 계획 시점에 빠진 자식은 비 root 로 내리지 않고 거부된다
+                (privileged_not_authorized -- 2026-10-26 LDAP 정리로 비 root 실행 경로가 없다).
                 BatchDetail SyncDestHint 가 "상세 규칙은 배치 생성 화면의 안내" 로 이 노트를 가리킨다. */}
             <div className="rounded-card bg-infobg p-3 text-xs" role="note"
                  aria-label="목적지 조건과 소유권">
@@ -500,15 +498,8 @@ export function BatchCreate() {
                 <li><strong>목적지가 이미 있는 경우</strong>: 디렉토리여야 합니다(파일이면 그 항목은 거부).</li>
                 <li><strong>소유권</strong>: {syncOwnership({ chown: f.chown, chmod: f.chmod, root: true, runAs: null, self: true }).long}
                   {f.chown.trim() === "" && " 특정 사용자 소유로 맞추려면 아래 실행 옵션의 고급 옵션 chown 에 숫자 uid:gid 를 지정하세요."}</li>
-                {/* 자격이 계획 시점에 빠진 드문 비 root 폴백 -- 결과 소유는 chown 유무로 갈린다
-                    (_auto_chown: chown 이 있으면 자동 주입 없음). chown 의 gid 는 계획 시점 멤버십 검증
-                    (chown_group_not_member)이 먼저 거른다. */}
-                <li>관리자 특권 자격이 빠져 비 root 로 실행되면 단일 작업과 같은 권한 조건(상위 디렉토리 쓰기,
-                  이미 있는 목적지는 실행 신원 소유 — 그룹 쓰기 권한만으로는 부족, 권한은 uid·주 그룹·계획 시점
-                  LDAP 보조 그룹(적용된 경우 — 운영자가 기능을 껐거나 그룹이 256개를 넘으면 주 그룹만))이 적용되고,{" "}
-                  {f.chown.trim() === ""
-                    ? "결과는 실행 신원의 uid:gid(주 그룹) 소유가 됩니다."
-                    : "chown 의 gid 가 실행 신원의 주 그룹 또는 이 작업에 적용된 보조 그룹이 아니면(보조 그룹이 적용되지 않으면 주 그룹만) 계획 단계에서 거부되고, uid 가 본인이 아니면 적용되지 않습니다(dsync 는 그 항목 실패, nsync 는 소유 변경이 적용되지 않음)."}</li>
+                <li>계획 시점에 만든 관리자의 특권 자격이 빠져 있으면 항목은 root 로 돌지 않고 거부됩니다(비 root 로 낮춰
+                  실행하지 않습니다).</li>
                 <li>조건이 맞지 않는 항목은 미리보기 전에 거부됩니다 — 그 항목은 아무것도 복사되지 않습니다.</li>
               </ul>
             </div>
@@ -801,8 +792,8 @@ export function BatchCreate() {
                    value={f.ownerUsername} onChange={on("ownerUsername")} />
           </label>}
           help={f.op === "rm"
-            ? "배치는 관리자 이관·정리용이라 root 로 실행됩니다 — 실행 신원은 기록용 이름이며 파일 권한 검사는 적용되지 않아, 실행 신원이 지울 수 없는 파일도 지웁니다. 사용자 권한 그대로 지우려면 단일 작업에서 실행 신원을 지정하세요."
-            : "배치는 관리자 이관·정리용이라 root 로 실행됩니다 — 실행 신원은 기록용 이름이며 파일 권한 검사는 적용되지 않고, sync 는 목적지(이미 있는 디렉토리 포함)의 소유자·권한을 소스와 같게 바꿉니다(chown·chmod 지정 시 그 값). 사용자 권한 그대로 실행하려면 단일 작업에서 실행 신원을 지정하세요."} />
+            ? "배치는 관리자 이관·정리용이라 root 로 실행됩니다 — 실행 신원은 기록용 이름이며 파일 권한 검사는 적용되지 않아, 실행 신원이 지울 수 없는 파일도 지웁니다."
+            : "배치는 관리자 이관·정리용이라 root 로 실행됩니다 — 실행 신원은 기록용 이름이며 파일 권한 검사는 적용되지 않고, sync 는 목적지(이미 있는 디렉토리 포함)의 소유자·권한을 소스와 같게 바꿉니다(chown·chmod 지정 시 그 값)."} />
         {/* 잡 하나의 폭(노드 수 × 노드당 프로세스) -- 정책 실값 캡션은 두 칸을 함께 설명한다.
             라벨 길이가 달라도 입력 상자가 한 줄에 서도록 아래 정렬(items-end), 오류는 그 아래. */}
         <div className="space-y-1">
@@ -974,7 +965,7 @@ export function BatchCreate() {
         <h1 className="text-2xl font-bold">배치 생성</h1>
         <p className="mt-1 text-sm text-muted">여러 경로를 한 번에 scan·sync·rm 합니다.</p>
       </div>
-      <SubmitLayout sheet={sheet} summary={k8sMode ? (
+      <SubmitLayout sheet={sheet} summary={
         // 사이드바: PV 검색으로 직접 경로를 찾아 표에 넣는다(배치는 여전히 직접 경로만 -- 2026-10-26 (e)).
         <div className="min-w-0 space-y-5">
           <PvPathPicker op={f.op}
@@ -982,7 +973,7 @@ export function BatchCreate() {
                         onInsert={insertFromPv} />
           {summary}
         </div>
-      ) : summary} />
+      } />
     </section>
   );
 }

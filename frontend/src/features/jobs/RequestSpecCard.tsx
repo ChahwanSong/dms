@@ -7,7 +7,7 @@ import type { Line, LineTone, NodeGroup, OptionsView, RequestSpec } from "./requ
 // 한 장에 펼친다(접지 않는다 -- 행이 적다). 판정·문구는 전부 requestSpec(순수)에 있고 여기는 그리기만 한다.
 //
 // 구조 계약(테스트가 기댄다): 행은 dt·dd **형제**(dt.nextElementSibling = dd, div 래퍼는 WHATWG 허용). 대상·절대경로 dd 는
-// 텍스트 노드 하나, 「실행 도구」의 도구 요약은 자기만의 span(정확 일치), 「보조 그룹(gid)」 dd 는 값 + 주의문 span 뿐.
+// 텍스트 노드 하나, 「실행 도구」의 도구 요약은 자기만의 span(정확 일치).
 // 의미 있는 글자는 ink/70 이상(흰 카드 4.94:1) -- text-muted(3.54:1)는 쓰지 않는다. 버튼·표·aside 없음.
 //
 // 두 묶음 2열은 xl(1280)부터다 -- 사이드바(240px)가 폭을 먹어 lg(1024)에서 2열이면 값 칸이 약 200px 로 768 의 1열보다
@@ -23,8 +23,8 @@ const split = (parts: string[]) => parts.length > 1 && parts.some((p) => p !== "
 const showPath = (parts: string[]) =>
   parts.map((s) => s.replace(/\r\n|[\r\n]/g, "⏎")).join(split(parts) ? "\n→ " : " → ");
 const pathClass = (parts: string[]) => (split(parts) ? "whitespace-pre-line font-mono text-xs" : "font-mono text-xs");
-// 요청 상세 전용 문구 -- 제출 폼의 OPEN_NOATIME_NON_ROOT(「root 실행에서만 적용됩니다」)는 앞으로의 안내라, 이미 비 root 로
-// 실린 기록에는 맞지 않는다(execution_manifests 는 실행 신원과 무관하게 --open-noatime 을 렌더한다).
+// 요청 상세 전용 문구 -- 옛 비 root 행에 open_noatime 이 실린 기록(execution_manifests 는 실행 신원과 무관하게 --open-noatime 을
+// 렌더한다). 2026-10-26 뒤로 새 작업은 전부 root 라 이 문구는 옛 행에만 나온다.
 const NOATIME_DETAIL =
   "open_noatime 이 비 root 실행에 실렸습니다 — 실행 신원 소유가 아닌 파일은 O_NOATIME 으로 열 수 없어(EPERM) 복사가 실패할 수 있습니다.";
 // head 는 첫 「 — 」 앞(lead)만 굵게. bad = 전부 빨강(root 로 계획됨), badLead = lead 만 빨강(「요청됨 — 실행되지
@@ -54,7 +54,7 @@ const DD_COLOR = (ddClass: string) => (/(^|\s)text-(ink|bad|attn)/.test(ddClass)
 function SpecRow({ label, ddClass = "", children }: { label: string; ddClass?: string; children: ReactNode }) {
   return (
     // items-baseline: 작은 고정폭 글자(경로) dd 와 dt 가 같은 줄에 앉는다.
-    // 라벨 칸 6rem: 가장 긴 dt(「보조 그룹(gid)」 약 85px)가 들어가고 값 칸이 넓어진다(경로가 이름 중간에서 덜 갈린다).
+    // 라벨 칸 6rem: 가장 긴 dt 가 들어가고 값 칸이 넓어진다(경로가 이름 중간에서 덜 갈린다).
     // 글자색은 ddClass 가 정하면 그것만 -- 같은 요소에 text-ink 와 text-ink/70 을 함께 두면 CSS 순서에 기대게 된다.
     <div className="min-w-0 sm:grid sm:grid-cols-[6rem_minmax(0,1fr)] sm:items-baseline sm:gap-x-3">
       <dt className="text-ink/70">{label}</dt>
@@ -167,12 +167,6 @@ export function RequestSpecCard({ spec }: { spec: RequestSpec }) {
               <span className="font-medium">{runAs.name}</span>{runAs.relation}
               {runAs.tail !== "" && <span className="text-ink/70">{runAs.tail}</span>}
             </SpecRow>
-            {spec.groups !== null && (
-              <SpecRow label="보조 그룹(gid)">
-                {spec.groups.text}
-                {spec.groups.caveats.map((c) => <span key={c} className="block text-xs text-ink/70">{c}</span>)}
-              </SpecRow>
-            )}
             {spec.ownership !== null && <SpecRow label="목적지 소유">{spec.ownership}</SpecRow>}
             {tool !== null && (
               <SpecRow label="실행 도구">
@@ -186,7 +180,7 @@ export function RequestSpecCard({ spec }: { spec: RequestSpec }) {
         </div>
         {spec.multiJob && (
           <p className="mt-4 text-xs text-ink/70 break-keep">
-            작업이 여러 개입니다 — 실행 권한·신원·보조 그룹은 가장 최근 작업 기준이고, 실행 도구는 각 작업 카드에 있습니다.
+            작업이 여러 개입니다 — 실행 권한·신원은 가장 최근 작업 기준이고, 실행 도구는 각 작업 카드에 있습니다.
           </p>
         )}
       </Card>

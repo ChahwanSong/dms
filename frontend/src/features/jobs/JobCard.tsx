@@ -54,11 +54,11 @@ function JobTransitionsDisclosure({ job, trailing = null }: { job: DataJob; trai
   );
 }
 
-export function JobCard({ job, model, cancel, events, requestTerminal = false, jobCount, refIso, batchChild,
+export function JobCard({ job, model, cancel, events, jobCount, refIso, batchChild,
                           confirmOnGate }: {
   job: DataJob; model: JobStagesModel;
   cancel: ReturnType<typeof useCancelJob>;
-  events: unknown; requestTerminal?: boolean; jobCount: number; refIso?: string | null; batchChild: boolean;
+  events: unknown; jobCount: number; refIso?: string | null; batchChild: boolean;
   confirmOnGate: boolean;
 }) {
   // 끝나지 않은 잡은 모두 「취소」(2026-10-12 사용자 요청 -- 「Pending 과 ConfirmPending 에 취소 버튼이 필요해」): 예전엔
@@ -102,7 +102,7 @@ export function JobCard({ job, model, cancel, events, requestTerminal = false, j
       {!model.known && (
         <p className="mt-2 text-sm text-ink/70 break-keep">{`알 수 없는 상태 ${job.state} — 단계 표시는 대략적입니다.`}</p>
       )}
-      <JobStages job={job} events={events} requestTerminal={requestTerminal} jobCount={jobCount} refIso={refIso}
+      <JobStages job={job} events={events} jobCount={jobCount} refIso={refIso}
                  batchChild={batchChild} confirmOnGate={confirmOnGate} />
       {/* 아티팩트 경로는 잡별 사실이라 잡 카드 맨 아래 줄에(스킴 없는 경로가 실 값이다 -- stepper). px-2 = 버튼의 안쪽
           여백 -- 좁은 폭에서 버튼 아래로 접혀도 버튼 아이콘과 같은 세로선에서 시작한다. sm 이상은 왼쪽 구분선 -- 같은

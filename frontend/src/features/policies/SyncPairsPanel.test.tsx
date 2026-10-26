@@ -88,7 +88,7 @@ test("저장 실패는 사유를 알리고 칸을 서버 값으로 되돌린다"
   expect(screen.getByRole("checkbox", { name: "ceph-a → ceph-b 허용" })).not.toBeChecked();
 });
 
-test("관리자 전용·비활성이 낀 칸은 사용자에게 적용되지 않음을 설명하고, 적용 쌍 0개면 경고한다", async () => {
+test("관리자 전용·비활성이 낀 칸은 사용자에게 적용되지 않음을 설명한다(적용 쌍 0개여도 경보 없음 -- PV 권한이 판정)", async () => {
   pairs = [{ source_storage: "ceph-a", destination_storage: "adm" }];
   wrap();
   const inert = await cell("ceph-a", "adm");
@@ -96,7 +96,7 @@ test("관리자 전용·비활성이 낀 칸은 사용자에게 적용되지 않
   expect(inert).toHaveAccessibleDescription(/사용자에게는 적용되지 않습니다/);
   expect(await cell("ceph-a", "ceph-b")).not.toHaveAccessibleDescription();
   expect(screen.getByText(/사용자에게 적용 중 0개/)).toBeInTheDocument();
-  expect(screen.getByText(/지금은 사용자가 sync 를 제출할 수 없습니다/)).toBeInTheDocument();
+  expect(screen.queryByText(/지금은 사용자가 sync 를 제출할 수 없습니다/)).toBeNull();
   expect(screen.getByText("ceph-a → adm (사용자 미적용)")).toBeInTheDocument();
 });
 
@@ -119,10 +119,9 @@ test("토글 뒤 재조회가 실패해도 매트릭스는 직전 값으로 남�
 });
 
 
-test("k8s 모드: 「k8s 모드에서는 PV 권한으로 판정」을 표기하고, 허용 쌍 0개 경보(사용자 sync 불가)를 내지 않는다", async () => {
-  server.use(http.get("/api/auth/me", () => HttpResponse.json({ actor: "root", role: "admin", identity_mode: "k8s" })));
+test("「PV 주소는 PV 권한으로 판정」을 늘 표기하고, 허용 쌍 0개 경보(사용자 sync 불가)를 내지 않는다", async () => {
   wrap();
-  expect(await screen.findByText(/k8s 모드에서는 PV 권한으로 판정/)).toBeInTheDocument();
+  expect(await screen.findByText(/PV 주소는 PV 권한으로 판정/)).toBeInTheDocument();
   await cell("ceph-a", "ceph-b");
   expect(screen.queryByText(/지금은 사용자가 sync 를 제출할 수 없습니다/)).toBeNull();
 });

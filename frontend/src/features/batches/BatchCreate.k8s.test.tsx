@@ -9,7 +9,7 @@ import { BatchCreate } from "./BatchCreate";
 import { VOLUME_MODELS, VOLUME_PENDING, volumes } from "../k8s/k8sFixtures";
 import { pvBatchPath } from "../k8s/PvPathPicker";
 
-// 배치 생성의 「PV 에서 경로 찾기」(2026-10-26 사용자 결정 (e)): k8s 모드에서만 사이드바에 보이고, PV 를 검색해 그 PV 의
+// 배치 생성의 「PV 에서 경로 찾기」(2026-10-26 사용자 결정 (e)): 사이드바에 늘 보이고(LDAP 정리 -- k8s 신원 모드 전용), PV 를 검색해 그 PV 의
 // 직접 경로(관리 디렉토리 기준 root + 하위경로)를 표의 칸에 넣는다. 배치 바디는 그대로 직접 경로(스토리지 + 경로)다.
 
 const server = setupServer();
@@ -23,11 +23,11 @@ const STORAGES = [
 const NFS_ROW = { ...VOLUME_MODELS, storage_class: "tb-nfs", pvc: "datasets", volume: "pvc-nfs-1",
                   storage_name: "k8s-pv-nfs", root: "team-a/datasets", abs_root: "/k8s_pv/nfs/team-a/datasets" };
 
-function renderPage(identityMode: "k8s" | "ldap" = "k8s") {
+function renderPage() {
   server.use(http.get("/api/user/storages", () => HttpResponse.json(STORAGES)));
   server.use(http.get("/api/admin/policies", () => HttpResponse.json([])));
   server.use(http.get("/api/auth/me", () => HttpResponse.json({
-    actor: "root", role: "admin", can_run_as_root: true, identity_mode: identityMode, unrestricted: true })));
+    actor: "root", role: "admin", can_run_as_root: true, identity_mode: "k8s", unrestricted: true })));
   server.use(http.get("/api/admin/k8s/volumes", () =>
     HttpResponse.json(volumes({ volumes: [VOLUME_MODELS, NFS_ROW, VOLUME_PENDING] }))));
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -102,8 +102,8 @@ test("rm: PV 전체(루트)는 넣지 않는다(PV 안 하위경로가 필요)",
   expect(within(panel).getByRole("button", { name: "경로 칸에 넣기" })).toBeEnabled();
 });
 
-test("ldap 모드에는 패널이 없다", async () => {
-  renderPage("ldap");
+test("패널은 늘 있다(옛 ldap 모드 분기 삭제 -- 배치 생성은 me 를 읽지 않는다)", async () => {
+  renderPage();
   await screen.findByLabelText("스토리지");
-  expect(screen.queryByRole("region", { name: "PV 에서 경로 찾기" })).toBeNull();
+  expect(screen.getByRole("region", { name: "PV 에서 경로 찾기" })).toBeInTheDocument();
 });

@@ -414,11 +414,11 @@ function ClusterCard({ c, offsetMs }: { c: ClusterSummary; offsetMs: number }) {
   );
 }
 
-/** k8s 모드의 가입 신원 경고(2026-10-26 보안 리뷰): 권한이 「계정 아이디 == RoleBinding 의 ID」로 묶여, 인증 메일이 실제로 가지
+/** 가입 신원 경고(2026-10-26 보안 리뷰): 권한이 「계정 아이디 == RoleBinding 의 ID」로 묶여, 인증 메일이 실제로 가지
  *  않으면(stub — 코드를 화면에 보여 줌, open — 인증 꺼짐) 아직 계정이 없는 사람의 아이디로 누구나 먼저 가입해 그 사람의 PV 권한을
  *  가져갈 수 있다. 기동을 막지는 않는다(테스트베드는 stub 로 돈다) — 운영자가 보게만 한다. */
-export function SignupGuardNote({ mode, guard }: { mode: string | undefined; guard: string | undefined }) {
-  if (mode !== "k8s" || (guard !== "stub" && guard !== "open")) return null;
+export function SignupGuardNote({ guard }: { guard: string | undefined }) {
+  if (guard !== "stub" && guard !== "open") return null;
   return (
     <div role="note" aria-label="가입 신원 경고" className="rounded-lg border border-attn/40 bg-attnbg/50 px-4 py-3 text-sm text-attn">
       <p className="font-medium">
@@ -478,7 +478,7 @@ export function K8sOverview() {
           <ClusterDialog mode="create" trigger={<Button className="whitespace-nowrap">클러스터 등록</Button>} />
         </>} />
 
-      <SignupGuardNote mode={ov?.identity_mode} guard={ov?.signup_guard} />
+      <SignupGuardNote guard={ov?.signup_guard} />
 
       {q.isError && (
         <p role="alert" className="text-sm text-bad">

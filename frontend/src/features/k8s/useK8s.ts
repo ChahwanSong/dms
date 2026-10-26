@@ -110,7 +110,7 @@ export const useSyncAllClusters = () => {
   });
 };
 
-/** enabled = false 면 묻지 않는다(스토리지 수정 창의 「연결된 StorageClass」 — k8s 모드에서 창을 열었을 때만). */
+/** enabled = false 면 묻지 않는다(스토리지 수정 창의 「연결된 StorageClass」 — 창을 열었을 때만). */
 export const useStorageClasses = (enabled = true) =>
   useQuery({ queryKey: ["k8s", "storage-classes"], enabled,
              queryFn: () => apiGet<StorageClassRow[]>("/api/admin/k8s/storage-classes") });
@@ -151,7 +151,7 @@ export const useK8sAccess = (q: string, enabled = true) =>
   });
 
 /** 단일 작업 화면의 PV 고르기(설계 §5 GET /api/user/k8s/volumes, require_user) -- 자기 맵핑 범위(면제자는 전체). 서버가
- *  namespaces(권한 namespace, PVC 0개 포함)를 함께 줘서 「권한 namespace 없음」과 「PV 없음」을 가른다. k8s 모드에서만 부른다. */
+ *  namespaces(권한 namespace, PVC 0개 포함)를 함께 줘서 「권한 namespace 없음」과 「PV 없음」을 가른다. */
 export const USER_VOLUMES_KEY = ["k8s", "user-volumes"] as const;
 export const useUserK8sVolumes = (enabled: boolean) =>
   useQuery({ queryKey: USER_VOLUMES_KEY, enabled,

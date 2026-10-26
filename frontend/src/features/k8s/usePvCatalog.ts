@@ -15,7 +15,7 @@ export const SCOPED_LIMIT = 2000;
 export const SEARCH_LIMIT = 50;
 
 export type PvCatalog =
-  | { status: "off" }                                   // ldap 모드 또는 검색 모드(목록을 쓰지 않는다)
+  | { status: "off" }                                   // me 를 아직 모름 또는 검색 모드(목록을 쓰지 않는다)
   | { status: "loading" }
   | { status: "error"; message: string }
   | { status: "ready"; rows: VolumeRow[]; groups: PvGroup[]; clusters: ClusterFreshness[];
@@ -24,15 +24,16 @@ export type PvCatalog =
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
-export function usePvCatalog({ k8s, unrestricted, scopeUser }: {
-  k8s: boolean; unrestricted: boolean; scopeUser: string;
+/** enabled = 역할(me)을 안다 -- 모르는 동안은 어느 목록도 묻지 않는다(면제 관리자 화면이 사용자 목록을 헛되이 부르지 않게). */
+export function usePvCatalog({ enabled, unrestricted, scopeUser }: {
+  enabled: boolean; unrestricted: boolean; scopeUser: string;
 }): { catalog: PvCatalog; search: boolean } {
-  const search = k8s && unrestricted && scopeUser === "";
-  const scoped = k8s && unrestricted && scopeUser !== "";
-  const own = k8s && !unrestricted;
+  const search = enabled && unrestricted && scopeUser === "";
+  const scoped = enabled && unrestricted && scopeUser !== "";
+  const own = enabled && !unrestricted;
   const userQ = useUserK8sVolumes(own);
   const scopedQ = useK8sVolumes({ user: scopeUser, limit: SCOPED_LIMIT }, scoped);
-  if (!k8s || search) return { catalog: { status: "off" }, search };
+  if (!enabled || search) return { catalog: { status: "off" }, search };
   if (own) {
     if (userQ.data !== undefined) {
       const d = userQ.data;

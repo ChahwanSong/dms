@@ -260,16 +260,16 @@ test("root 실행 열: 출처·효력을 보이고, root 자격 있는 관리자
   );
   wrap();
   await screen.findByText("newadm", { selector: "td" });
-  expect(screen.getByRole("columnheader", { name: "root 실행" })).toBeInTheDocument();
+  expect(screen.getByRole("columnheader", { name: "전체 PV·직접 경로 권한" })).toBeInTheDocument();
   expect(rowOf("admin")).toHaveTextContent("있음 · 배포 설정");
   expect(within(rowOf("admin")).queryByRole("button", { name: /자격/ })).toBeNull();     // 자기 자신·배포 설정
   expect(within(rowOf("plain")).queryByRole("button", { name: /자격/ })).toBeNull();     // user 역할엔 줄 수 없다
   expect(rowOf("newadm")).toHaveTextContent("없음");
-  await userEvent.click(within(rowOf("newadm")).getByRole("button", { name: "newadm root 실행 자격 주기" }));
-  const dlg = await screen.findByRole("dialog", { name: "root 실행 자격 주기" });
-  expect(dlg).toHaveTextContent("newadm 에게 root 실행 자격을 줍니다.");
-  expect(dlg).toHaveTextContent("root 자격이 있는 관리자만 역할 변경·비활성화·삭제할 수 있고");
-  expect(dlg).toHaveTextContent("이 계정의 비밀번호를 아는 사람은 누구나 root 로 실행할 수 있게 됩니다");
+  await userEvent.click(within(rowOf("newadm")).getByRole("button", { name: "newadm 전체 PV·직접 경로 권한 주기" }));
+  const dlg = await screen.findByRole("dialog", { name: "전체 PV·직접 경로 권한 주기" });
+  expect(dlg).toHaveTextContent("newadm 에게 전체 PV·직접 경로 권한을 줍니다.");
+  expect(dlg).toHaveTextContent("이 권한이 있는 관리자만 역할 변경·비활성화·삭제할 수 있고");
+  expect(dlg).toHaveTextContent("이 계정의 비밀번호를 아는 사람은 누구나 모든 PV 와 직접 경로를 읽고 쓰고 지울 수 있게 됩니다");
   await userEvent.click(within(dlg).getByRole("button", { name: "자격 주기" }));
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   expect(puts).toEqual([{ u: "newadm", body: { granted: true } }]);
@@ -277,7 +277,7 @@ test("root 실행 열: 출처·효력을 보이고, root 자격 있는 관리자
   // 누른 자리(주기 버튼)가 빼기 버튼으로 바뀌었다 -- 포커스는 <body> 가 아니라 그 행의 상태 글자(리뷰)
   await waitFor(() => expect(within(rowOf("newadm")).getByText("있음 · 부여")).toHaveFocus());
   // 빼기는 바로(권한을 줄이기만 한다)
-  await userEvent.click(within(rowOf("newadm")).getByRole("button", { name: "newadm root 실행 자격 빼기" }));
+  await userEvent.click(within(rowOf("newadm")).getByRole("button", { name: "newadm 전체 PV·직접 경로 권한 빼기" }));
   await waitFor(() => expect(puts[1]).toEqual({ u: "newadm", body: { granted: false } }));
   await waitFor(() => expect(rowOf("newadm")).toHaveTextContent("없음"));
   await waitFor(() => expect(within(rowOf("newadm")).getByText("없음")).toHaveFocus());
@@ -288,8 +288,8 @@ test("root 자격 없는 관리자는 상태만 본다 -- 버튼 없음 + 누가
   server.use(http.get("/api/admin/accounts", () => HttpResponse.json(ROOT_ROWS)));
   wrap();
   await screen.findByText("newadm", { selector: "td" });
-  expect(screen.queryByRole("button", { name: /root 실행 자격/ })).toBeNull();
-  expect(screen.getByText(/root 자격이 있는 관리자만 주거나 뺄 수 있습니다/)).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /전체 PV·직접 경로 권한/ })).toBeNull();
+  expect(screen.getByText(/이 권한이 있는 관리자만 주거나 뺄 수 있습니다/)).toBeInTheDocument();
 });
 
 test("자격 주기 실패(403)는 확인 창 안에서 말하고, 효력 없는 부여는 이유를 보인다", async () => {
@@ -304,7 +304,7 @@ test("자격 주기 실패(403)는 확인 창 안에서 말하고, 효력 없는
   await screen.findByText("sleepy", { selector: "td" });
   const status = within(rowOf("sleepy")).getByText("부여됨 · 지금 효력 없음");
   expect(status).toHaveAttribute("title", "비활성 계정이라 효력이 없습니다(다시 켜면 돌아옵니다)");
-  await userEvent.click(within(rowOf("newadm")).getByRole("button", { name: "newadm root 실행 자격 주기" }));
+  await userEvent.click(within(rowOf("newadm")).getByRole("button", { name: "newadm 전체 PV·직접 경로 권한 주기" }));
   const dlg = await screen.findByRole("dialog");
   await userEvent.click(within(dlg).getByRole("button", { name: "자격 주기" }));
   expect(await within(dlg).findByRole("alert")).toHaveTextContent("이미 root 실행 자격이 있는 관리자만");
@@ -318,14 +318,14 @@ test("배포 설정 이름에 저장된 부여가 겹치면 보이고 뺄 수 �
   wrap();
   await screen.findByText("cfgadm", { selector: "td" });
   expect(rowOf("cfgadm")).toHaveTextContent("있음 · 배포 설정 + 부여");
-  expect(within(rowOf("cfgadm")).getByRole("button", { name: "cfgadm root 실행 자격 빼기" })).toBeInTheDocument();
+  expect(within(rowOf("cfgadm")).getByRole("button", { name: "cfgadm 전체 PV·직접 경로 권한 빼기" })).toBeInTheDocument();
   expect(within(rowOf("cfgadm")).queryByRole("button", { name: /자격 주기/ })).toBeNull();
 });
 
 
-// ---- k8s 모드(dms-k8s 설계 D4·D5) -------------------------------------------------------------------------------
+// ---- dms-k8s 설계 D4·D5 ------------------------------------------------------------------------------------------
 
-test("k8s 모드: root 자격 열·확인 창 문구가 「전체 PV·직접 경로 권한」이다(같은 서버 경로)", async () => {
+test("열·확인 창 문구는 「전체 PV·직접 경로 권한」이다(같은 서버 경로 -- 옛 「root 실행」 문구 없음)", async () => {
   server.use(
     http.get("/api/auth/me", () => HttpResponse.json({ actor: "admin", role: "admin", can_run_as_root: true,
                                                        identity_mode: "k8s", unrestricted: true })),

@@ -10,7 +10,7 @@ import { apiLogin } from "./helpers/session";
 // 멈춘 뒤 한 번 묻는가(디바운스). 같은 DB 를 다른 시나리오와 나눠 쓰므로 대상·배치 이름에 실행마다 다른 꼬리표를 단다.
 
 async function submitScan(page: Page, target: string): Promise<string> {
-  // run_as_root: LDAP 없는 하네스에서 서버는 명시 true 만 root(E5/E6/E7 관례).
+  // run_as_root: 모든 단건 작업이 root(k8s 신원 모드 -- E5/E6/E7 관례대로 포탈과 같은 명시 true 바디).
   const response = await page.request.post("/api/user/requests", {
     data: { operation: "scan", storage: STORAGE_NAME, target, options: {}, priority: "mid", run_as_root: true },
   });

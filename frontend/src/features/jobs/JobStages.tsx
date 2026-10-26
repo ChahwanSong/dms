@@ -94,7 +94,6 @@ function joinParts(parts: (ReactNode | null)[]): ReactNode {
 // 「위치 추정」 꼬리표의 설명(근거마다 왜 추정인지가 다르다).
 const ESTIMATE_WHY: Partial<Record<string, string>> = {
   gate_ambiguous: "실행 노드 점검은 이 단계 파드가 스케줄을 기다리는 동안에도, 다음 단계를 제출하기 직전에도 일어나 기록만으로는 어느 쪽인지 알 수 없습니다",
-  base_ambiguous: "작업 기록(artifact) 저장소 권한 점검은 사전 점검 파드 안에서도, 다음 단계를 제출하기 직전에도 일어나 기록만으로는 어느 쪽인지 알 수 없습니다",
 };
 const ESTIMATE_DEFAULT = "전이 기록이 없어 마지막으로 시작된 단계로 추정했습니다";
 
@@ -112,11 +111,7 @@ function StepMeta({ step, refIso, hasRef, estimate }: {
   const schedPart = sched !== null ? `스케줄 대기 ${sched}` : null;
   const cls = "text-xs text-ink/70 tabular-nums";
   let text: ReactNode = null;
-  if (step.held) {
-    // 제출 보류(D2) -- 끝난 앞 단계의 경과를 세지 않고, 무엇을 왜 기다리는지 말한다. 횟수를 모르면 생략(지어내지 않는다).
-    const n = step.held.attempt !== null && step.held.max !== null ? ` ${step.held.attempt}/${step.held.max}` : "";
-    text = `제출 보류 — LDAP 재확인 불가${n}`;
-  } else switch (step.status) {
+  switch (step.status) {
     case "done":
       text = joinParts([time(step.start), dur !== null ? `소요 ${dur}` : null, schedPart]);
       break;
@@ -320,8 +315,8 @@ function StageSection({ n, stage, model, op, children, titleId, refIso }: {
         <StageTime stage={stage} refIso={refIso} />
       </div>
       <div className="space-y-3 px-3 py-3 sm:px-4">
-        {/* 보류·스케줄 대기 행이 있으면 그 행이 무엇을 기다리는지 말한다 -- 「사전 점검이 끝나면…」은 이미 끝난 일이라 뺀다. */}
-        {stage.id === "exec" && stage.status === "waiting" && !stage.steps.some((s) => s.held || s.queued) && (
+        {/* 스케줄 대기 행이 있으면 그 행이 무엇을 기다리는지 말한다 -- 「사전 점검이 끝나면…」은 이미 끝난 일이라 뺀다. */}
+        {stage.id === "exec" && stage.status === "waiting" && !stage.steps.some((s) => s.queued) && (
           <p className="text-sm text-ink/70 break-keep">{model.flow === "scan"
             ? "사전 점검이 끝나면 바로 실행됩니다." : "작업 컨펌 후 실행 직전 재점검을 거쳐 실행됩니다."}</p>
         )}
@@ -385,14 +380,13 @@ function GateRow({ job, model, refIso, batchChild, showConfirm, rowId }: {
   );
 }
 
-export function JobStages({ job, events, requestTerminal = false, jobCount = 1, refIso, batchChild = false,
+export function JobStages({ job, events, jobCount = 1, refIso, batchChild = false,
                             confirmOnGate = false }: {
-  job: DataJob; events?: unknown; requestTerminal?: boolean; jobCount?: number; refIso?: string | null;
+  job: DataJob; events?: unknown; jobCount?: number; refIso?: string | null;
   batchChild?: boolean; confirmOnGate?: boolean;
 }) {
-  // 이벤트도 넘긴다 -- 제출 보류(identity_recheck_deferred)·관문 모호성 해소가 이 잡의 이벤트를 본다(RequestDetail 의
-  // 배너용 모델과 같은 입력이라 둘이 같은 이야기를 한다).
-  const model = useMemo(() => deriveJobStages(job, events, { requestTerminal }), [job, events, requestTerminal]);
+  // 이벤트는 단계 행 주석(annotationsFor)이 읽는다.
+  const model = useMemo(() => deriveJobStages(job), [job]);
   // 러너는 phase 가 끝날 때 파일을 쓴다 -- 상태나 ref 가 바뀌면 목록을 다시 읽는다(폴링 없음).
   const refreshKey = `${job.state}|${Object.keys(model.refs).sort().join(",")}`;
   const artifacts = useArtifacts(job.job_id, refreshKey);

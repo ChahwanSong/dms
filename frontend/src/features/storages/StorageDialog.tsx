@@ -44,7 +44,7 @@ function PvPresetNote({ backend }: { backend: string }) {
   );
 }
 
-/** 수정 창의 「연결된 StorageClass」(k8s 모드) -- 매핑이 있는 스토리지를 파일시스템으로 바꾸면 서버가 거부한다
+/** 수정 창의 「연결된 StorageClass」 -- 매핑이 있는 스토리지를 파일시스템으로 바꾸면 서버가 거부한다
  *  (storage_has_sc_mappings) -- 무엇이 걸려 있는지 창 안에서 보인다. */
 function MappedClasses({ name, enabled }: { name: string; enabled: boolean }) {
   const q = useStorageClasses(enabled);
@@ -59,11 +59,10 @@ function MappedClasses({ name, enabled }: { name: string; enabled: boolean }) {
   );
 }
 
-export function StorageDialog({ mode, storage, trigger, k8s = false }: {
+/** 종류(파일시스템 / PV / 둘 다) 라디오를 늘 보이고 바디에 kind 를 싣는다(dms-k8s 설계 D11 -- 2026-10-26 LDAP 정리로 이 라인은 k8s
+ *  신원 모드 전용이라 옛 ldap 모드의 「kind 없는 바디」 갈래는 지웠다). */
+export function StorageDialog({ mode, storage, trigger }: {
   mode: "create" | "edit"; storage?: Storage; trigger: React.ReactNode;
-  /** k8s 모드(me.identity_mode === "k8s") -- 종류(파일시스템 / PV / 둘 다) 라디오를 보이고 바디에 kind 를 싣는다. ldap 모드
-   *  화면·바디는 그대로다(종류는 dms-k8s 의 PV 주소 층에서만 뜻이 있다). */
-  k8s?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState(storage?.storage_name ?? "");
@@ -81,8 +80,8 @@ export function StorageDialog({ mode, storage, trigger, k8s = false }: {
     setKind(storage ? storageKindOf(storage) : "filesystem");
   }, [open, storage]);
   const m = mode === "create" ? create : update;
-  // kind 는 k8s 모드에서만 싣는다(ldap 바디 불변 -- 생략 = 서버가 현재 값 유지).
-  const kindBody = k8s ? { kind } : {};
+  // 수정에서도 지금 종류를 함께 싣는다 -- 서버가 생략을 「유지」로 읽든 「파일시스템」으로 읽든 종류가 바뀌지 않게.
+  const kindBody = { kind };
   const submit = () => {
     if (mode === "create")
       create.mutate({ storage_name: name, mount_path: mount, managed_root: root, backend_type: backend,
@@ -122,33 +121,31 @@ export function StorageDialog({ mode, storage, trigger, k8s = false }: {
           <span className="block text-muted text-xs">
             onefs · nfs 도 받습니다 — Dell PowerScale 은 onefs, csi-driver-nfs 로 붙는 NFS 서버는 nfs
           </span></label>
-        {/* 스토리지 종류(dms-k8s 설계 D11, k8s 모드만): PV 주소가 해석되는 곳(pv·both)과 직접 경로 피커에 보이는 곳
+        {/* 스토리지 종류(dms-k8s 설계 D11): PV 주소가 해석되는 곳(pv·both)과 직접 경로 피커에 보이는 곳
             (filesystem·both)을 가른다. 등록 정보 요구는 종류별 안내가 말한다 -- PV·둘 다면 경로 규칙(백엔드 프리셋)을
             읽기 전용으로 보이고, 프리셋이 없는 백엔드는 StorageClass 화면의 템플릿이 필요하다는 사실을 말한다. */}
-        {k8s && (
-          <fieldset className="space-y-1.5">
-            <legend className="mb-1">종류</legend>
-            <div className="grid gap-1.5 sm:grid-cols-3">
-              {KIND_CHOICES.map((o) => (
-                <label key={o.value}
-                       className={`flex items-center gap-2 rounded-lg border px-3 py-2 cursor-pointer ${
-                         kind === o.value ? "border-accent/40 bg-infobg" : "border-line"}`}>
-                  <input type="radio" name="storage-kind" value={o.value} aria-label={o.label}
-                         aria-describedby="storage-kind-help" checked={kind === o.value}
-                         onChange={() => setKind(o.value)} />
-                  <span className="font-medium">{o.label}</span>
-                </label>
-              ))}
-            </div>
-            <p id="storage-kind-help" className="text-xs text-ink/70">
-              {KIND_CHOICES.find((o) => o.value === kind)?.help}
-            </p>
-            {kind !== "filesystem" && <PvPresetNote backend={backend} />}
-            {mode === "edit" && storage !== undefined && (
-              <MappedClasses name={storage.storage_name} enabled={open} />
-            )}
-          </fieldset>
-        )}
+        <fieldset className="space-y-1.5">
+          <legend className="mb-1">종류</legend>
+          <div className="grid gap-1.5 sm:grid-cols-3">
+            {KIND_CHOICES.map((o) => (
+              <label key={o.value}
+                     className={`flex items-center gap-2 rounded-lg border px-3 py-2 cursor-pointer ${
+                       kind === o.value ? "border-accent/40 bg-infobg" : "border-line"}`}>
+                <input type="radio" name="storage-kind" value={o.value} aria-label={o.label}
+                       aria-describedby="storage-kind-help" checked={kind === o.value}
+                       onChange={() => setKind(o.value)} />
+                <span className="font-medium">{o.label}</span>
+              </label>
+            ))}
+          </div>
+          <p id="storage-kind-help" className="text-xs text-ink/70">
+            {KIND_CHOICES.find((o) => o.value === kind)?.help}
+          </p>
+          {kind !== "filesystem" && <PvPresetNote backend={backend} />}
+          {mode === "edit" && storage !== undefined && (
+            <MappedClasses name={storage.storage_name} enabled={open} />
+          )}
+        </fieldset>
         {/* 사용 범위(2026-09-30): 옛 "활성" 체크박스의 자리 -- 비활성이 두 종류(완전 /
             사용자에게만)라 세 상태 라디오다. 등록 때도 고른다(관리자 전용으로 먼저 열어
             점검한 뒤 사용자에게 여는 흐름). */}

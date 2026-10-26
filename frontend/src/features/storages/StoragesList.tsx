@@ -11,12 +11,11 @@ import { storagePillVariant } from "../../lib/jobState";
 import type { Storage } from "../../lib/types";
 import { SCOPES, flagsFor, scopeMeta, scopeOf } from "./storageScope";
 import type { StorageScope } from "./storageScope";
-import { useMe } from "../auth/useAuth";
 import { KIND_LABEL, storageKindOf } from "../k8s/k8sTerms";
 import { Tag } from "../k8s/parts";
 import type { StorageKind } from "../k8s/types";
 
-// 종류 배지(dms-k8s 설계 D11, k8s 모드만) -- 글자 배지(점 없음, 디자인 규약). PV 를 담는 종류(pv·both)는 파랑, 파일시스템은 중립.
+// 종류 배지(dms-k8s 설계 D11) -- 글자 배지(점 없음, 디자인 규약). PV 를 담는 종류(pv·both)는 파랑, 파일시스템은 중립.
 const KIND_TONE: Record<StorageKind, "neutral" | "info"> = { filesystem: "neutral", pv: "info", both: "info" };
 
 function DeleteButton({ s }: { s: Storage }) {
@@ -63,19 +62,17 @@ function ScopeSelect({ s, onChange, pending }: {
 
 export function StoragesList() {
   const q = useStorages(); const update = useUpdateStorage();
-  const me = useMe();
-  const k8s = me.data?.identity_mode === "k8s";
-  // k8s 모드는 범위만 바꿔도 지금 종류를 함께 싣는다 -- 서버가 생략을 「유지」로 읽든 「파일시스템」으로 읽든 종류가 바뀌지 않게.
+  // 범위만 바꿔도 지금 종류를 함께 싣는다 -- 서버가 생략을 「유지」로 읽든 「파일시스템」으로 읽든 종류가 바뀌지 않게.
   const setScope = (s: Storage, scope: StorageScope) => update.mutate({ name: s.storage_name,
     body: { mount_path: s.mount_path, managed_root: s.managed_root, backend_type: s.backend_type,
-            ...flagsFor(scope), ...(k8s ? { kind: storageKindOf(s) } : {}) } });
+            ...flagsFor(scope), kind: storageKindOf(s) } });
   const rows = q.data ?? [];
   const count = (scope: StorageScope) => rows.filter((s) => scopeOf(s) === scope).length;
   return (
     <section className="space-y-4">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold">스토리지</h1>
-        <StorageDialog mode="create" k8s={k8s} trigger={<Button>스토리지 등록</Button>} />
+        <StorageDialog mode="create" trigger={<Button>스토리지 등록</Button>} />
       </div>
       {/* 사용 범위 범례 = 요약: 세 상태의 뜻과 지금 개수를 한눈에(표 안 셀렉트와 같은 색). */}
       <div className="grid gap-3 sm:grid-cols-3" role="region" aria-label="사용 범위 안내">
@@ -98,14 +95,12 @@ export function StoragesList() {
           {/* 관리 디렉토리(managed_root)는 마운트 옆에 둔다: 잡이 실제로 도는 뿌리는
               마운트가 아니라 이쪽이고(입력 경로는 이 아래 상대경로다), 운영자가
               스토리지↔경로 매핑을 이 표 한 줄에서 읽는 기준점이 된다. */}
-          <thead><tr className="text-muted"><th className="py-2">이름</th>{k8s && <th>종류</th>}<th>백엔드</th><th>마운트</th><th>관리 디렉토리</th><th>상태</th><th>사용 범위</th><th>작업</th></tr></thead>
+          <thead><tr className="text-muted"><th className="py-2">이름</th><th>종류</th><th>백엔드</th><th>마운트</th><th>관리 디렉토리</th><th>상태</th><th>사용 범위</th><th>작업</th></tr></thead>
           <tbody>
             {rows.map((s) => (
               <tr key={s.storage_name} className={`border-t border-line ${scopeOf(s) === "off" ? "opacity-60" : ""}`}>
                 <td className="py-2 font-medium">{s.storage_name}</td>
-                {k8s && (
-                  <td><Tag tone={KIND_TONE[storageKindOf(s)]}>{KIND_LABEL[storageKindOf(s)]}</Tag></td>
-                )}
+                <td><Tag tone={KIND_TONE[storageKindOf(s)]}>{KIND_LABEL[storageKindOf(s)]}</Tag></td>
                 <td>{s.backend_type}</td>
                 {/* 스토리지 전용 storagePillVariant: Ready=ok, Degraded=busy(주의 --
                     planner 가 Degraded 에도 잡을 보낸다), Unknown 등=neutral. */}
@@ -121,7 +116,7 @@ export function StoragesList() {
                     구조 -- e2e L2 가 감시). flex 는 td 안 div 가 진다. */}
                 <td className="py-2">
                   <div className="flex items-center gap-2 whitespace-nowrap">
-                    <StorageDialog mode="edit" storage={s} k8s={k8s} trigger={<Button variant="ghost">수정</Button>} />
+                    <StorageDialog mode="edit" storage={s} trigger={<Button variant="ghost">수정</Button>} />
                     <DeleteButton s={s} />
                   </div>
                 </td>

@@ -1,7 +1,8 @@
 export type Role = "user" | "admin";
 // can_run_as_root(2026-09-30): 이 로그인이 잡을 root 로 낼 자격(관리자 + 특권 목록 + 세션).
 // 포탈이 'root 권한으로 실행' 을 보이고 관리자 기본값(root)을 켤지 정한다 -- 표시용, 서버가 재판정.
-export interface Me { actor: string; role: Role; can_run_as_root?: boolean; identity_mode?: "ldap" | "k8s"; unrestricted?: boolean; user_operations?: string[]; }
+// identity_mode 는 서버가 상수 "k8s" 로 보낸다(옛 포탈 탭용 -- 이 포탈은 그 값으로 화면을 가르지 않는다).
+export interface Me { actor: string; role: Role; can_run_as_root?: boolean; identity_mode?: string; unrestricted?: boolean; user_operations?: string[]; }
 export interface Transition {
   from_state: string | null; to_state: string;
   reason_code?: string | null; actor?: string; at: string;
@@ -88,8 +89,7 @@ export interface PurgeStatus {
   pending: number; stalled: number; oldest_requested_at: string | null; items: PurgeStatusItem[];
 }
 // 플래너가 배치 시점에 확정한 워커 배치(planner.py: resolve_fanout 결과 + 후보·
-// 신원). 화면이 읽는 건 수치 몇 개와 identity(요청 상세 「요청 내용」의 실행 권한·신원·
-// 보조 그룹)다. candidates·priority_class 는 요청 내용 카드가 읽는다(requestSpec 이 정규화 --
+// 신원). 화면이 읽는 건 수치 몇 개와 identity(요청 상세 「요청 내용」의 실행 권한·신원)다. candidates·priority_class 는 요청 내용 카드가 읽는다(requestSpec 이 정규화 --
 // 모양을 믿지 않아 unknown). rejections·queue 는 표시하지 않는다(BACKLOG).
 // node_count 는 전 도구 공통(총 노드), source_count/destination_count 는 양면
 // 배치(nsync)에서만 실린다 — resolve_fanout 의 두 분기가 그대로 모양이 된다.
@@ -110,17 +110,10 @@ export interface WorkerPool {
   priority_class?: unknown;
   candidates?: unknown;
 }
-// 계획 시점 보조 그룹 판정(identity.resolve_job_identity 의 SUPP_* -- 서버 어휘 그대로).
-// string 도 받는 이유: 서버가 어휘를 넓혀도 화면이 타입 오류로 죽지 않게(모르는 값은 행을 숨긴다).
-export type SupplementaryGidsStatus = "applied" | "none" | "over_limit" | "disabled" | "privileged";
+// 계획 시점 실행 신원(planner 의 ResolvedIdentity). 옛 스냅숏엔 LDAP 보조 그룹 키(supplementary_gids*)가 남아 있을 수 있지만
+// 화면은 읽지 않는다(2026-10-26 LDAP 정리).
 export interface WorkerPoolIdentity {
   username?: string; uid?: number; gid?: number; privileged?: boolean;
-  // 보조 그룹 기능 배포(2026-10-07) 전에 계획된 잡은 이 키들이 없다(행을 숨긴다) -- 없음(모름)과
-  // [](없음 확정)은 다른 사실이다. found 는 null(보지 않았다 -- 기능 꺼짐·root)과 0(없음 확정)이 다르다.
-  supplementary_gids?: number[] | null;
-  supplementary_gids_status?: SupplementaryGidsStatus | string | null;
-  supplementary_gids_excluded?: number[] | null;
-  supplementary_gids_found?: number | null;
 }
 export interface DataJob {
   job_id: string; request_id: string; operation: string; state: string;
@@ -213,7 +206,7 @@ export interface NodeReportBody {
   node_name?: string; probed_at?: string;
   mounts?: NodeMount[]; tools?: NodeTool[];
   os?: { disks?: NodeDisk[] } & Record<string, unknown>;
-  identities?: unknown[];
+  identities?: unknown[];   // 옛 에이전트의 LDAP 신원 프로브 결과 -- 화면은 읽지 않는다(2026-10-26 LDAP 정리)
 }
 export interface NodeInfo {
   node_name: string; reported_at: string; fresh: boolean; report: NodeReportBody;
@@ -412,13 +405,6 @@ export interface SyncPair {
   source_storage: string; destination_storage: string;
   created_at?: string; created_by?: string;
 }
-// /api/user/sync-pairs: restricted=false 면 제한 없음(관리자 -- 화면은 거르지 않는다).
-// 사용자에겐 자기가 고를 수 있는 스토리지(활성 + 사용자 공개)끼리의 쌍만 온다.
-export interface UserSyncPairs {
-  restricted: boolean;
-  pairs: { source_storage: string; destination_storage: string }[];
-}
-
 export interface DenyEntry {
   subject_type: string;
   subject: string;

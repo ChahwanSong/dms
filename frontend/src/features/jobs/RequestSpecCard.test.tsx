@@ -29,7 +29,7 @@ const SYNC_TR = [
   tr("PreviewRunning", "ConfirmPending", 17), tr("ConfirmPending", "Executing", 18, { actor: "alice" }),
   tr("Executing", "Executing", 27), tr("Executing", "Succeeded", 37),
 ];
-// 테스트베드 표본 그대로(alice sync, 비 root, 보조 그룹 적용).
+// 테스트베드 표본 그대로(alice sync, 비 root -- 옛 LDAP 시절 행이라 보조 그룹 키가 남아 있다; 화면은 그 키를 읽지 않는다).
 const PAYLOAD_A = { source_storage: "cephfs-dms", source: "ldap-e2e/proj-shared", destination_storage: "cephfs-dms",
   destination: "dms_test/suppgrp/rw/alice-out-1008a", options: { batch_files: 1000000, bufsize: 4194304 }, owner_username: null };
 const ALICE = { username: "alice", uid: 10001, gid: 10000, groups: ["dmsproj", "dmsusers"], privileged: false,
@@ -51,7 +51,6 @@ const JOB = {
 };
 const ROOT_IDENT = { username: "mason", uid: 0, gid: 0, groups: [], privileged: true, supplementary_gids: [],
   supplementary_gids_status: "privileged", supplementary_gids_excluded: [], supplementary_gids_found: null };
-const GENERIC_CAVEAT = "실제 인정 여부는 스토리지 설정에 따라 다를 수 있습니다(등록된 스토리지 종류 기준 안내).";
 
 function renderAt() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -121,7 +120,8 @@ test("b 시나리오 A(테스트베드 표본): 카드의 각 칸 문구, 머리
   const who = cell(region, "실행 신원");
   expect(norm(who.textContent)).toBe("alice (요청자 본인) · uid 10001 · gid 10000(주 그룹)");
   expect(who.textContent).toContain("gid\u00a010000(주\u00a0그룹)");   // 고정 단위는 줄바꿈 없이
-  expect(cell(region, "보조 그룹(gid)").textContent).toBe(`10010${GENERIC_CAVEAT}`);
+  // 옛 스냅숏의 supplementary 키는 읽지 않는다(2026-10-26 LDAP 정리 -- 보조 그룹 행 없음)
+  expect(within(region).queryByText("보조 그룹(gid)")).toBeNull();
   // 「실행 신원」 행의 이름을 되풀이하지 않고 결과 숫자만
   expect(norm(cell(region, "목적지 소유").textContent)).toBe("실행 신원 소유 — 10001:10000(주 그룹)");
   expect(cell(region, "실행 도구").textContent)
@@ -252,7 +252,7 @@ test("e 잡 2개: 각 잡 카드에 도구 라벨, 카드엔 실행 도구 행 �
     expect(within(card).getByText("dsync · 4 노드")).toBeInTheDocument();
   }
   expect(within(region).queryByText("실행 도구")).toBeNull();
-  expect(within(region).getByText("작업이 여러 개입니다 — 실행 권한·신원·보조 그룹은 가장 최근 작업 기준이고, 실행 도구는 각 작업 카드에 있습니다."))
+  expect(within(region).getByText("작업이 여러 개입니다 — 실행 권한·신원은 가장 최근 작업 기준이고, 실행 도구는 각 작업 카드에 있습니다."))
     .toBeInTheDocument();
   expect(screen.getByRole("heading", { level: 2, name: /^데이터 작업/ }).textContent).toBe("데이터 작업2개");
 });

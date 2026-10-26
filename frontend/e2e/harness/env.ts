@@ -15,10 +15,11 @@ export const SHARED_TOKEN = "e2e-shared-token";
 export const ADMIN_TOKEN = "e2e-admin-token";
 export const SESSION_SECRET = "e2e-session-secret";
 
-// username 은 반드시 "admin" 이다 -- 기본 privileged_requesters={root,admin} 에
-// 들어야 E4~E6 의 특권 경로(LDAP 없이 신원 검사 생략)가 성립한다. 자격만으론 root 가
-// 아니다(2026-09-30 -- root 여부는 제출 때 확정): 시나리오가 root 를 보장한다(E4 체크박스
-// check(), E5/E6 바디 run_as_root: true).
+// username 은 반드시 "admin" 이다 -- 기본 privileged_requesters={root,admin} 에 들어야 세션 관리자가 면제자(전체 PV·
+// 직접 경로 권한, me.unrestricted)가 되어 하네스의 시드 스토리지에 직접 경로로 scan·sync·rm 을 낼 수 있다. 백엔드는 k8s 신원
+// 모드 전용(2026-10-26 LDAP 정리 -- DMS_IDENTITY_MODE 미설정 = k8s): 모든 단건 작업이 root 이고(서버가 run_as_root 를 강제,
+// 명시 false 는 422), 공유 토큰 제출은 403 이며, k8s 클러스터가 없는 하네스라 PV 주소는 쓰지 않는다. 바디의
+// run_as_root: true(E5/E6 등)는 생략과 같은 뜻이지만 「명시 = 화면과 같은 바디」라 남긴다.
 export const ADMIN = { username: "admin", password: "e2e-admin-pw" };
 
 // 시드 스토리지 이름. 시드(global-setup)와 시나리오가 같은 값을 봐야 한다.

@@ -45,6 +45,8 @@ async function visitK8s(page: Page, path: string, heading: string): Promise<void
 // 상자라 문서 L1 엔 안 보이므로 아래 assertTextContained 가 칸 단위로 잰다.
 async function fillLongScanTarget(page: Page): Promise<void> {
   await page.getByLabel("연산", { exact: true }).selectOption("scan");
+  // 면제자(하네스 admin)의 대상은 기본이 「PV」라 「직접 경로」로 바꾼다(2026-10-26 -- k8s 신원 모드 전용 화면).
+  await page.getByRole("group", { name: "대상 지정 방식" }).getByRole("button", { name: "직접 경로", exact: true }).click();
   const storage = page.getByLabel("스토리지", { exact: true });
   await expect(storage.locator(`option[value="${STORAGE_NAME}"]`)).toHaveCount(1);
   await storage.selectOption(STORAGE_NAME);

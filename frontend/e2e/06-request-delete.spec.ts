@@ -16,7 +16,7 @@ import { assertLayoutSane } from "./helpers/layout";
 // 하네스 전제(global-setup): api 조용한 창 0초(방금 끝난 요청도 바로 지운다), controller request-purge 1초 틱,
 // api·controller 공통 artifact base = tmp 아래 실디렉터리(정리 루프가 실제로 연다).
 
-// run_as_root: LDAP 없는 하네스에서 잡이 끝까지 가려면 root 여야 한다(E5/E6 관례 -- 서버는 명시 true 만 root).
+// run_as_root: 모든 단건 작업이 root(k8s 신원 모드 -- E5/E6 관례대로 포탈과 같은 명시 true 바디).
 // target 은 시나리오마다 다르다(같은 resource_key 의 활성 요청이 있으면 Conflict).
 // rm 은 options.recursive=true 가 필수다(domain rm_recursive_required).
 async function submit(page: Page, operation: "scan" | "rm", target: string): Promise<string> {

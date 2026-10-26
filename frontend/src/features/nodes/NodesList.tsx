@@ -87,7 +87,7 @@ export function ageText(iso: string, nowMs: number): string | null {
 
 /** 노드 시각 차이(초): 에이전트가 찍은 probed_at(노드 시계, **프로브 시작 전**) - 서버가 받은
     reported_at(서버 시계). "시간이 현재와 많이 다르면" 경고의 두 번째 축(첫째는 리포트 지연).
-    정직한 한계(리뷰): probed_at 은 프로브(LDAP 그룹 열거·마운트 statvfs 등) 전에 찍혀 음수 차이는
+    정직한 한계(리뷰): probed_at 은 프로브(마운트 statvfs 등) 전에 찍혀 음수 차이는
     노드 시계가 늦은 것일 수도, 프로브가 오래 걸린 것일 수도 있다 -- 화면은 둘을 단정하지 않고
     "시계 또는 프로브 지연"으로 표기한다(양수 = 노드 시계가 빠름, 프로브 지연으로는 생기지 않는다). */
 export const CLOCK_SKEW_WARN_SECONDS = 120;
@@ -198,9 +198,8 @@ function NodeDetail({ node }: { node: NodeInfo }) {
   const tools = asArray<NodeTool>(report.tools);
   const os = asObject(report.os);
   const disks = asArray<NodeDisk>(os.disks);
-  const identities = asArray<unknown>(report.identities);
+  // 옛 에이전트 보고의 identities·directory(LDAP 신원 프로브·nslcd 설정)는 읽지 않는다(2026-10-26 LDAP 정리).
   const artifact = asObject((report as Record<string, unknown>).artifact_base);
-  const directory = asObject((report as Record<string, unknown>).directory);
   const probeMode = (report as Record<string, unknown>).probe_mode;
   const nowMs = Date.now();
   const memPct = memoryPct(os);
@@ -319,45 +318,15 @@ function NodeDetail({ node }: { node: NodeInfo }) {
           )}
         </Section>
 
-        <Section title="아티팩트 · LDAP 디렉터리">
+        <Section title="아티팩트">
           <dl className="grid grid-cols-[8rem_1fr] gap-x-3 gap-y-1.5">
             <dt className="text-muted">아티팩트 base</dt>
             <dd className="break-all">{typeof artifact.path === "string" ? artifact.path : "—"}</dd>
             <dt className="text-muted">존재 · 쓰기</dt>
             <dd>{`${yesNo(artifact.exists)} · ${yesNo(artifact.writable)}`}</dd>
-            <dt className="text-muted">디렉터리 설정</dt>
-            <dd>{typeof directory.source === "string" ? directory.source : "—"}
-              {directory.start_tls === true && <span className="text-muted"> · StartTLS</span>}</dd>
-            <dt className="text-muted">적용 시각</dt>
-            <dd>{typeof directory.applied_at === "string" ? kstStamp(directory.applied_at) : "—"}</dd>
-            <dt className="text-muted">오류</dt>
-            <dd className={typeof directory.error === "string" && directory.error ? "text-bad" : ""}>
-              {typeof directory.error === "string" && directory.error ? directory.error : "없음"}</dd>
           </dl>
         </Section>
       </div>
-
-      {identities.length > 0 && (
-        <Section title="신원" caption="에이전트가 노드에서 확인한 실행 신원(LDAP 조회 결과).">
-          <Table>
-            <thead><tr className="text-muted"><th className="py-2">사용자</th><th>uid</th><th>gid</th><th>상태</th></tr></thead>
-            <tbody>
-              {identities.map((raw, i) => {
-                const id = asObject(raw);
-                return (
-                  <tr key={i} className="border-t border-line">
-                    <td className="py-2">{String(id.username ?? JSON.stringify(raw))}</td>
-                    <td className="tabular-nums">{String(id.uid ?? "—")}</td>
-                    <td className="tabular-nums">{String(id.gid ?? "—")}</td>
-                    <td>{typeof id.status === "string"
-                      ? <Pill tone={id.status === "Ready" ? "ok" : "bad"}>{id.status}</Pill> : "—"}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </Table>
-        </Section>
-      )}
 
       <Section title="최근 리포트">
         {!showHistory ? (

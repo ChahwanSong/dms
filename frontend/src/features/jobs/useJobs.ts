@@ -120,10 +120,10 @@ export interface SubmitBody {
   // 생략 = (정책 기본) — resolve_priority 가 정책 default_priority 로 해석(슬라이스 37).
   priority?: string;
   owner_username?: string;
-  // root 실행(2026-09-30). 서버는 true 만 root(자격 없으면 403), false/생략 = 실행 신원의
-  // uid/gid. "관리자 기본 root" 는 SubmitJob 이 정해 관리자에겐 항상 확정값을 싣는다.
+  // root 실행(설계 D2): 모든 단건 작업이 root 라 SubmitJob 이 늘 명시 true 를 싣는다(서버는 생략도 root, 명시 false 는
+  // 422 run_as_root_required -- 「root 아님」이라고 믿은 화면을 조용히 root 로 돌리지 않는다).
   run_as_root?: boolean;
-  // PV 주소(dms-k8s 설계 §6, k8s 모드만): 쪽마다 storage 대신 PV(cluster·namespace·pvc) -- 하위경로는 target·source·destination.
+  // PV 주소(dms-k8s 설계 §6): 쪽마다 storage 대신 PV(cluster·namespace·pvc) -- 하위경로는 target·source·destination.
   pv?: PvRef; source_pv?: PvRef; destination_pv?: PvRef;
 }
 export const useSubmitRequest = () =>
