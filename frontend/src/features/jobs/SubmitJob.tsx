@@ -176,6 +176,9 @@ export function SubmitJob() {
   // root 자격은 서버가 알려 준다(me.can_run_as_root = 제출 게이트와 같은 판정) -- 특권 목록 밖
   // 관리자에게 기본 root 를 켜 두면 제출이 403 이 된다. 표시일 뿐 서버가 다시 본다.
   const canRoot = isAdmin && me.data?.can_run_as_root === true;
+  // chown·chmod 지정: k8s 모드는 특권 운영자만(2026-10-26 -- 결과 소유는 목적지 PV 루트 소유자로 자동, 서버 chown_not_allowed·
+  // chmod_not_allowed). ldap 모드는 종전(고급 옵션 = 관리자).
+  const ownerModeEditable = !k8sMode || canRoot;
   const ownerTrim = f.ownerUsername.trim();
   const otherOwner = ownerTrim !== "" && ownerTrim !== me.data?.actor;
   // "관리자는 기본 root"(사용자 결정 2026-09-30)의 **유일한 구현 지점**: 서버는 명시 true 만
@@ -184,11 +187,12 @@ export function SubmitJob() {
   // k8s 모드는 모든 작업이 root 다(설계 D2 -- 사용자·관리자 공통, 바디 run_as_root:true). open_noatime·소유권 문구·요약
   // 「실행 권한」이 모두 이 한 값에서 나온다.
   const rootEffective = k8sMode || (canRoot && (f.runAsRoot ?? !otherOwner));
-  // 연산 선택지: 관리자는 셋 다, 사용자는 서버 allowlist(k8s 모드 me.user_operations -- 설계 D15). ldap 모드·옛 서버는 sync 만.
+  // 연산 선택지: k8s 모드는 관리자도 서버가 준 me.user_operations(설계 D15 -- scan 은 특권 운영자만, 2026-10-26 (g)), ldap
+  // 모드는 관리자 셋 다·사용자 sync 만(옛 서버도).
   const userOps = me.data?.user_operations;
-  const operations: Operation[] = isAdmin ? ALL_OPERATIONS
-    : k8sMode && Array.isArray(userOps) ? ALL_OPERATIONS.filter((o) => o === "sync" || userOps.includes(o))
-    : ["sync"];
+  const operations: Operation[] = k8sMode && Array.isArray(userOps)
+    ? ALL_OPERATIONS.filter((o) => o === "sync" || userOps.includes(o))
+    : isAdmin ? ALL_OPERATIONS : ["sync"];
   const rootOf = (name: string) => storages.find((s) => s.storage_name === name)?.managed_root;
   // 직접 경로 선택지(면제자, k8s 모드): 파일시스템·둘 다 종류만(PV 전용 스토리지는 PV 주소로 -- 설계 D11).
   const rawStorages = storages.filter((s) => storageKindOf(s) !== "pv");
@@ -342,8 +346,8 @@ export function SubmitJob() {
     // 422 invalid_option 으로 거부한다(빈 값은 "옵션 없음"이지 "빈 값 지정"이 아니다).
     if (f.batchFiles.trim() !== "") options.batch_files = Number(f.batchFiles.trim());
     if (f.bufsize.trim() !== "") options.bufsize = Number(f.bufsize.trim());
-    if (f.chmod.trim() !== "") options.chmod = f.chmod.trim();
-    if (f.chown.trim() !== "") options.chown = f.chown.trim();
+    if (ownerModeEditable && f.chmod.trim() !== "") options.chmod = f.chmod.trim();
+    if (ownerModeEditable && f.chown.trim() !== "") options.chown = f.chown.trim();
     return options;
   }
 
@@ -783,10 +787,12 @@ export function SubmitJob() {
                   <FieldRow
                     control={<>
                       <label className="text-sm block">chmod (선택 · 예: D770,F660 — 콤마 구분, D=디렉터리 F=파일)
-                        <input aria-label="chmod" className={field} value={f.chmod} onChange={on("chmod")} />
+                        <input aria-label="chmod" className={field} value={ownerModeEditable ? f.chmod : ""}
+                               disabled={!ownerModeEditable} onChange={on("chmod")} />
                       </label>
                       {chmodError && <p className="mt-1 text-bad text-sm">{chmodError}</p>}
-                    </>} />
+                    </>}
+                    help={!ownerModeEditable && "특권 운영자만 지정할 수 있습니다 — 결과의 권한 비트는 소스 그대로입니다."} />
                   {/* 함정 캡션(설계 §2.5): chown 명시 시 auto-chown 억제는
                       execution_manifests.py("chown" in spec.options) — 실패는
                       서버가 아니라 도구 실행 단계에서 나므로 여기서 미리 경고한다.
@@ -796,14 +802,16 @@ export function SubmitJob() {
                   <FieldRow
                     control={<>
                       <label className="text-sm block">chown (선택 · 숫자 uid:gid)
-                        <input aria-label="chown" className={field} value={f.chown}
-                               placeholder="예: 10003:10000"
-                               onChange={on("chown")} />
+                        <input aria-label="chown" className={field} value={ownerModeEditable ? f.chown : ""}
+                               placeholder={ownerModeEditable ? "예: 10003:10000" : "특권 운영자만"}
+                               disabled={!ownerModeEditable} onChange={on("chown")} />
                       </label>
                       {chownError && <p className="mt-1 text-bad text-sm">{chownError}</p>}
                     </>}
                     help={<>
-                      {rootEffective
+                      {rootEffective && pvDest
+                        ? `비우면 목적지 PV 루트의 소유자·그룹으로 자동 chown 됩니다(PV 목적지 — 실제 값은 점검 뒤 확인 창에 보입니다)${ownerModeEditable ? ". chown 을 지정하면 그 값으로 셋업됩니다." : " — chown 지정은 특권 운영자만 할 수 있습니다."}`
+                        : rootEffective
                         ? "비우면 원래(소스) 소유권을 보존합니다(지금 root 실행). chown 을 지정하면 목적지와 복사본이 그 값으로 셋업됩니다."
                         : <>비우면 실행 신원의 uid:주 그룹 gid 소유로 자동 chown 됩니다(지금 root 아님) — 프로젝트(보조)
                             그룹 소유로 남기려면 uid:&lt;그룹 gid&gt; 를 지정하세요. gid 가 실행 신원의 주 그룹 또는 이 작업에

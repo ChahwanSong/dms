@@ -10,7 +10,7 @@
 #
 # k8s 신원 모드(2026-10-25 dms-k8s RBAC·PV 설계 D1·D15): DMS_IDENTITY_MODE "k8s" 가 「모든 단건 잡 root」와 「권한 = k8s
 # RoleBinding 맵핑(<id>-clusterrole-admin|edit → 그 namespace 의 모든 PVC)」을 한 스위치로 켠다. 일반 사용자는 PV 주소로
-# sync·scan·rm 을 내고(DMS_USER_ALLOWED_OPERATIONS — 코드 기본은 sync 뿐), 직접 경로·전체 PV 는 아래 특권 목록(또는 계정
+# sync·rm 을 내고(DMS_USER_ALLOWED_OPERATIONS — 코드 기본은 sync 뿐; scan 은 특권 운영자만, 2026-10-26), 직접 경로·전체 PV 는 아래 특권 목록(또는 계정
 # 화면 부여)의 세션 관리자만이다. 비 root 잡은 생기지 않는다(서버가 run_as_root 를 강제 — 명시 false 는 422).
 #
 # 특권 목록·허용은 base 와 같은 값이지만 명시한다 — 이 클러스터에서는 특권 목록이 「맵핑 면제(전체 PV·직접 경로)」의
@@ -29,7 +29,7 @@ data:
   DMS_ALLOW_PRIVILEGED_REQUESTERS: "true"
   DMS_IDENTITY_SUPPLEMENTARY_GROUPS: "false"
   DMS_IDENTITY_MODE: "k8s"
-  DMS_USER_ALLOWED_OPERATIONS: "sync,scan,rm"
+  DMS_USER_ALLOWED_OPERATIONS: "sync,rm"
   DMS_LDAP_URI: null
   DMS_LDAP_USER_BASE: null
   DMS_LDAP_GROUP_BASE: null

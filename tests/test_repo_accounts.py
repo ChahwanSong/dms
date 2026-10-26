@@ -22,6 +22,13 @@ def test_duplicate_and_invalid_username(db):
     with pytest.raises(DomainValidationError) as e:
         repo.create("Bad User!", "pw", ROLE_USER)
     assert e.value.reason_code == "invalid_username"
+    # 숫자만은 거부(2026-10-26 -- 잡 셸의 getent·id 가 uid 로 읽는다), 숫자로 시작만 하는 것은 된다
+    for numeric in ("1234", "0", "0000000000"):
+        with pytest.raises(DomainValidationError) as e:
+            repo.create(numeric, "pw", ROLE_USER)
+        assert e.value.reason_code == "username_numeric_only"
+    repo.create("1user", "pw", ROLE_USER)
+    repo.create("12.34", "pw", ROLE_USER)
 
 
 def test_set_password(db):

@@ -314,5 +314,8 @@
   "scan_path_unrestricted_only",
   "pv_owner_unknown",
   "pv_owner_changed",
-  "chown_not_allowed"
+  "chown_not_allowed",
+  "username_numeric_only",
+  "scan_unrestricted_only",
+  "chmod_not_allowed"
 ]

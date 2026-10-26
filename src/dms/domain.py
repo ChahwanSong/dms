@@ -164,7 +164,7 @@ def validate_rm_target(target: str, options: dict) -> str:
 # 맵핑 ID(= DMS 계정 아이디, RoleBinding 이름 앞부분의 '-' → '.')라 숫자로 시작할 수 있다 -- LDAP 시절 규칙
 # ([A-Za-z_] 시작)이면 운영자의 「사용자 지정」이 그런 사용자에게 422 였다. 문자 집합은 러너 passwd 줄 검사
 # (execution_manifests 의 [A-Za-z0-9._-])의 부분집합이다.
-_ACCOUNT_ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}$")
+_ACCOUNT_ID_RE = re.compile(r"(?![0-9]+$)[a-z0-9][a-z0-9._-]{0,63}$")   # 숫자만은 거부(2026-10-26 -- getent·id 가 uid 로 읽음)
 
 
 def valid_owner_username(username, *, identity_mode: str = "ldap") -> bool:

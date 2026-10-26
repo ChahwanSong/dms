@@ -39,10 +39,10 @@ data:
   DMS_LDAP_REQUIRE_AUTH_BIND: null
 
   # k8s 신원 모드(2026-10-25 dms-k8s RBAC·PV 설계 D1·D15): 모든 단건 잡이 root 이고 권한은 k8s RoleBinding 맵핑
-  # (<id>-clusterrole-admin|edit → 그 namespace 의 모든 PVC)으로 판정한다. 사용자는 PV 주소로 sync·scan·rm 을 낸다(코드 기본
+  # (<id>-clusterrole-admin|edit → 그 namespace 의 모든 PVC)으로 판정한다. 사용자는 PV 주소로 sync·rm 을 낸다(scan 은 특권 운영자만 — 2026-10-26; 코드 기본
   # 연산은 sync 뿐이라 여기서 넓힌다 -- rm 안전은 PV 루트 rm 금지 + 본인 컨펌). 등록 절차는 deploy/README.md 런북.
   DMS_IDENTITY_MODE: "k8s"
-  DMS_USER_ALLOWED_OPERATIONS: "sync,scan,rm"
+  DMS_USER_ALLOWED_OPERATIONS: "sync,rm"
   DMS_ALLOW_PRIVILEGED_REQUESTERS: "true"          # k8s 모드는 false 면 기동 거부(모든 잡이 root)
 
   # 계정 셀프서비스 이메일 도메인(<아이디>@도메인). k8s 모드에서는 이 인증이 「DMS 계정 junwoo.song = 그 메일함 주인」을

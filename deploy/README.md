@@ -1296,7 +1296,7 @@ ConfigMap 의 LDAP 키 7개 null 삭제, 에이전트는 `command: ["dms"] args:
 결과는 기동 실패(시끄러움)이거나 **ssc 용 slapd 를 조용히 쓰는 것**(침묵)이다.
 
 2026-10-25 부터 이 클러스터는 **k8s 신원 모드**다(`patch-config.yaml` 의 `DMS_IDENTITY_MODE: "k8s"` +
-`DMS_USER_ALLOWED_OPERATIONS: "sync,scan,rm"`, dms-k8s RBAC·PV 설계 `docs/history/specs/2026-10-25-dms-k8s-rbac-pv-design.md`).
+`DMS_USER_ALLOWED_OPERATIONS: "sync,rm"` — scan 은 특권 운영자만(2026-10-26), dms-k8s RBAC·PV 설계 `docs/history/specs/2026-10-25-dms-k8s-rbac-pv-design.md`).
 모든 단건 잡이 root 이고 권한은 대상 클러스터의 RoleBinding 맵핑(`<id>-clusterrole-admin|edit` + ClusterRole
 `kubeflow-admin|edit` → 그 namespace 의 모든 PVC 읽기·쓰기, `<id>` 의 `-` → `.` = DMS 계정 아이디)으로 판정한다(코드 경로
 `k8s_access`·`identity.root_allowed` — 조용히 다른 신원으로 떨어지는 경로는 없다):

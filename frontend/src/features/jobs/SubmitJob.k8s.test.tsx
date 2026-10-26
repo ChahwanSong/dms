@@ -59,12 +59,14 @@ const STORAGES = [
   { storage_name: "k8s-pv-nfs", backend_type: "nfs", status: "Ready", managed_root: "/k8s_pv/nfs", kind: "pv" },
 ] as unknown as UserStorage[];
 
-const OPS = ["sync", "scan", "rm"];
+// 서버 /me 의 user_operations 그대로: scan 은 특권 운영자(면제자)만(2026-10-26 (g) -- k8s_access.scan_allowed).
+const OPS = ["sync", "rm"];
+const OPS_EXEMPT = ["scan", "sync", "rm"];
 const meUser: Me = { actor: "junwoo.song", role: "user", identity_mode: "k8s", unrestricted: false, user_operations: OPS };
 const meAdminListed: Me = { actor: "ops2", role: "admin", can_run_as_root: false, identity_mode: "k8s", unrestricted: false,
                             user_operations: OPS };
 const meExempt: Me = { actor: "root", role: "admin", can_run_as_root: true, identity_mode: "k8s", unrestricted: true,
-                       user_operations: OPS };
+                       user_operations: OPS_EXEMPT };
 
 const SYNC_DEFAULTS = { open_noatime: true, batch_files: Number(SYNC_INT_FIELDS.batch_files.prefill),
                         bufsize: Number(SYNC_INT_FIELDS.bufsize.prefill) };
@@ -187,16 +189,11 @@ test("사용자 sync: namespace (StorageClass) → PV 이름 → PV 안 경로, 
   });
 });
 
-test("사용자 scan·rm: 연산 선택지는 me.user_operations, PV 전체 scan 은 빈 하위경로 그대로", async () => {
+test("사용자 연산 선택지는 me.user_operations -- scan 은 특권 운영자만이라 보이지 않는다(2026-10-26 (g))", async () => {
   renderAs(meUser);
-  await choose("scan");
-  await pick("namespace (StorageClass)", "PV 이름", "team-a (tb-nfs)", "datasets — 2Gi · Bound");
-  expect(screen.getByText("실제 경로: /k8s_pv/nfs/team-a/datasets (PV 전체)")).toBeInTheDocument();
-  expect(screen.getByText("datasets — team-a (tb-nfs) / (PV 전체)")).toBeInTheDocument();
-  expect(await submitAndBody()).toEqual({
-    operation: "scan", pv: { cluster: "dmsk8s", namespace: "team-a", pvc: "datasets" }, target: "",
-    options: { batch_files: 1000000, broken_limit: 100 }, run_as_root: true,
-  });
+  await screen.findByRole("option", { name: "rm" });
+  const options = within(screen.getByLabelText("연산")).getAllByRole("option").map((o) => o.textContent);
+  expect(options).toEqual(["sync", "rm"]);
 });
 
 test("사용자 rm: 하위경로를 적어야 제출된다 -- 바디는 pv + target + run_as_root", async () => {
@@ -241,7 +238,7 @@ test("Bound 아닌 PV 는 고를 수 없다(「용량 · 상태」 + 이유), na
     volumes: [A_MODELS, { ...A_PENDING, storage_class: "tb-gpfs" }],
   }))));
   renderAs(meUser);
-  await choose("scan");
+  await choose("rm");
   const group = await screen.findByLabelText("namespace (StorageClass)");
   await waitFor(() => expect(group).toHaveValue(JSON.stringify(["dmsk8s", "team-a", "tb-gpfs"])));
   const pv = screen.getByLabelText("PV 이름");
@@ -282,21 +279,21 @@ test("빈 상태 3 -- 조회 실패: 실패 문구(권한 없음·미동기화�
   expect(hints()).toHaveTextContent("PV 목록 조회 실패 — 새로고침 후 다시 시도하세요");
 });
 
-test("?pv=<cluster>/<ns>/<pvc> 프리필: 소스와 대상(scan·rm)에 그 PV 가 골라져 있다", async () => {
+test("?pv=<cluster>/<ns>/<pvc> 프리필: 소스와 대상(rm)에 그 PV 가 골라져 있다", async () => {
   renderAs(meUser, "/jobs/new?pv=dmsk8s/team-b/scratch");
   const pv = await screen.findByLabelText("소스 PV 이름");
   await waitFor(() => expect((pv as HTMLSelectElement).selectedOptions[0]?.textContent).toBe("scratch — 5Gi · Bound"));
   expect(screen.getByLabelText("소스 namespace (StorageClass)")).toHaveValue(
     JSON.stringify(["dmsk8s", "team-b", "tb-nfs"]));
   expect(screen.getByText("실제 경로: /k8s_pv/nfs/team-b/scratch (PV 전체)")).toBeInTheDocument();
-  await choose("scan");
+  await choose("rm");
   await waitFor(() => expect((screen.getByLabelText("PV 이름") as HTMLSelectElement).selectedOptions[0]?.textContent)
     .toBe("scratch — 5Gi · Bound"));
 });
 
 test("?pv= 가 권한 목록 밖이면 고른 것처럼 보이지 않고 이유를 말한다", async () => {
   renderAs(meUser, "/jobs/new?pv=dmsk8s/team-c/archive");
-  await choose("scan");
+  await choose("rm");
   expect(await screen.findByText(/고른 PV\(team-c\/archive · dmsk8s\)를 목록에서 찾을 수 없습니다/)).toBeInTheDocument();
   expect(submitButton()).toBeDisabled();
   expect(hints()).toHaveTextContent("고른 PV 를 쓸 수 없습니다 — 다시 고르세요");
@@ -323,8 +320,12 @@ test("목록 밖 관리자: 사용자 흐름 + 안내 한 줄, 직접 경로·�
   });
 });
 
-test("목록 밖 관리자 scan·rm 바디(우선순위 지정 포함)", async () => {
-  for (const op of ["scan", "rm"] as const) {
+test("목록 밖 관리자 rm 바디(우선순위 지정 포함) -- scan 은 선택지에 없다(특권 운영자만)", async () => {
+  const probe = renderAs(meAdminListed);
+  await screen.findByRole("option", { name: "rm" });
+  expect(within(screen.getByLabelText("연산")).queryByRole("option", { name: "scan" })).toBeNull();
+  probe.unmount();
+  for (const op of ["rm"] as const) {
     posted = [];
     const view = renderAs(meAdminListed);
     await choose(op);
@@ -334,7 +335,7 @@ test("목록 밖 관리자 scan·rm 바디(우선순위 지정 포함)", async (
     const body = await submitAndBody();
     expect(body).toEqual({
       operation: op, pv: { cluster: "dmsk8s", namespace: "team-a", pvc: "datasets" }, target: "x",
-      options: op === "scan" ? { batch_files: 1000000, broken_limit: 100 } : { recursive: true },
+      options: { recursive: true },
       priority: "high", run_as_root: true,
     });
     view.unmount();

@@ -115,6 +115,19 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
 - 테스트: `tests/test_pv_owner_chown.py`(술어·argv·형식 거부 10종·파서·실 sh 측정(소유 = os.stat, nsync 역할별, 봉쇄가 먼저, 루트가
   파일·링크·없음이면 거부)·stepper 흐름(기록→미리보기 spec, 모름 3종 거부, exec 같음·바뀜·채택, 규칙 밖 잡은 로그를 읽지 않음)),
   k8s 제출 chown 403·planner·컨펌 변조 행, 마커 화이트리스트 그물에 PV 목적지 spec, 프런트 syncOwnership·requestSpec·SubmitJob.k8s.
+- **리뷰 반영(자동 보안 리뷰 HIGH + 적대적 리뷰)**:
+  - **setuid/setgid(높음)**: 두 도구는 chown 뒤 권한을 복사해 커널이 지운 비트를 되살린다 — PV 루트가 0:0 이면 사용자의 setuid
+    파일이 **setuid-root** 가 됐다(로컬 재현: 2a10a18 `--chown 0:0` → 4755 0:0). mpifileutils `3c041e0` 「--chown clears setuid/
+    setgid on regular files」(chown(2) 규칙, 디렉터리 setgid 유지, --chown 없으면 종전 보존) → 4755·2755 가 755 로, 2775 디렉터리 유지,
+    재-sync 도 지움(dsync·nsync 6/6, 기존 시나리오 전부 그대로). REF → 3c041e0, 고정값 테스트에 2a10a18 금지.
+  - chmod 도 k8s 모드에서 특권 운영자만(`chmod_not_allowed` — 제출·planner·컨펌), 포탈의 chown·chmod 칸은 특권 운영자에게만 열린다
+    (고급 옵션의 direct·quiet·batch_files 는 관리자 그대로).
+  - 마커를 **못 읽은** 것(apiserver 순간 오류 — read_log 의 log None)은 거부하지 않고 다음 틱에 다시 읽는다(상한 20틱), 읽었는데 마커가
+    없거나 여럿일 때만 `pv_owner_unknown`.
+  - 잡 행의 chown·chmod 만 변조(무검증 INSERT)되면 `_build_spec` 이 요청 행과 비교해 끊는다(`chown_not_allowed`, 이벤트
+    `chown_mismatch_at_step`).
+  - 포탈 chown 칸 도움말이 PV 목적지에도 「소스 소유 보존」이던 것, 「결과를 고칠 수 있게」 과장 문구 정정. stepper spec → 실제 argv
+    `--chown` 통합 테스트 추가.
 
 ### ✅ nsync 목적지 링크 추종 수정 반영 — root nsync 의 PV 목적지 허용 — **완료·실증**(2026-10-26, d1 → d2)
 

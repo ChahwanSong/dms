@@ -119,6 +119,15 @@ def _pv_sync(src=("team-a", "datasets"), src_path="sample", dst=("team-b", "scra
             "destination": dst_path, **extra}
 
 
+def _rm(pv=None, target="x", **extra):
+    """PV(또는 직접 경로) 한쪽 연산 -- rm(PV 안 하위경로, 동의 recursive). 게이트·해석 시험의 기본 연산이다(scan 은 2026-10-26
+    부터 특권 운영자만 -- scan_unrestricted_only)."""
+    body = {"operation": "rm", "target": target, "options": {"recursive": True}, **extra}
+    if pv is not None:
+        body["pv"] = pv
+    return body
+
+
 def _plan(repos, settings=None):
     return Planner(repos, None, settings=settings or _k8s_settings()).run_once()
 
@@ -271,12 +280,12 @@ def test_pv_addresses_resolve_to_the_testbed_worker_paths(kclient, world):
             "models": ("k8s-pv-gpfs", lambda v: f"{v}/{v}-data"),
             "datasets": ("k8s-pv-nfs", lambda v: "team-a/datasets"),
             "kraken-kv-cache": ("k8s-pv-onefs", lambda v: f"data/csi/{v}")}.items():
-        r = kclient.post("/api/user/requests", json={"operation": "scan", "pv": _pv("team-a", pvc), "target": ""})
+        r = kclient.post("/api/user/requests", json=_rm(_pv("team-a", pvc), "sample"))
         assert r.status_code == 202, (pvc, r.text)
         p = world.requests.get(r.json()["request_id"])["payload"]
         expect[pvc] = (p["storage"], p["target"], root_fn(p["pv"]["volume"]))
-        assert p["storage"] == storage and p["target"] == root_fn(p["pv"]["volume"]), pvc
-    assert expect["kraken-kv-cache"][1] == "data/csi/k8s-3fa9c2d71e"
+        assert p["storage"] == storage and p["target"] == root_fn(p["pv"]["volume"]) + "/sample", pvc
+    assert expect["kraken-kv-cache"][1] == "data/csi/k8s-3fa9c2d71e/sample"
 
 
 # --- 제출 게이트 -------------------------------------------------------------------------------------
@@ -285,7 +294,7 @@ def test_raw_paths_are_refused_for_users_and_unlisted_admins(kclient, world):
     for who in ("alice", "ops.admin"):
         _login(kclient, who)
         for storage in ("cephfs-dms", "k8s-pv-nfs"):
-            r = kclient.post("/api/user/requests", json={"operation": "scan", "storage": storage, "target": "x"})
+            r = kclient.post("/api/user/requests", json=_rm(storage=storage))
             assert r.status_code == 403 and r.json()["detail"] == "raw_path_not_allowed", (who, storage)
         # 한쪽만 직접 경로인 sync 도
         body = _pv_sync()
@@ -297,13 +306,12 @@ def test_raw_paths_are_refused_for_users_and_unlisted_admins(kclient, world):
 
 def test_neither_storage_nor_pv_still_gets_the_precise_validation_error(kclient, world):
     _login(kclient, "alice")
-    r = kclient.post("/api/user/requests", json={"operation": "scan", "target": "x"})
+    r = kclient.post("/api/user/requests", json=_rm())
     assert r.status_code == 422 and r.json()["detail"] == "missing_storage"
 
 
 def test_shared_token_submissions_are_refused_in_k8s_mode(kclient, world):
-    for body in ({"operation": "scan", "storage": "cephfs-dms", "target": "x", "run_as_root": True},
-                 {"operation": "scan", "pv": _pv("team-a", "datasets"), "target": "x"}):
+    for body in (_rm(storage="cephfs-dms", run_as_root=True), _rm(_pv("team-a", "datasets"))):
         r = kclient.post("/api/user/requests", json=body, headers=TOKEN)
         assert r.status_code == 403 and r.json()["detail"] == "privileged_not_authorized", body
 
@@ -319,17 +327,16 @@ def test_explicit_non_root_is_refused_and_omitted_or_true_is_root(kclient, world
 
 def test_no_mapping_is_403_and_no_snapshot_is_409(kclient, world, db):
     _login(kclient, "cocoa.song")                     # cocoa.song 은 team-b 만
-    r = kclient.post("/api/user/requests", json={"operation": "scan", "pv": _pv("team-a", "datasets"), "target": ""})
+    r = kclient.post("/api/user/requests", json=_rm(_pv("team-a", "datasets")))
     assert r.status_code == 403 and r.json()["detail"] == "k8s_access_denied"
     _login(kclient, "alice")                          # team-c 에는 사용자 바인딩이 없다
-    r = kclient.post("/api/user/requests", json={"operation": "scan", "pv": _pv("team-c", "archive"), "target": ""})
+    r = kclient.post("/api/user/requests", json=_rm(_pv("team-c", "archive")))
     assert r.status_code == 403 and r.json()["detail"] == "k8s_access_denied"
     # 등록 안 된 클러스터·등록만 되고 한 번도 동기화되지 않은 클러스터 = 모름(409) -- 「없음」(pv_not_found)이 아니다
     world.k8s.create_cluster(name="fresh", api_server="https://10.0.0.9:6443", tls_server_name=None, ca_pem=None,
                              insecure_skip_tls_verify=False, token_enc="v1:x", enabled=True, actor="ops")
     for cluster in ("nope", "fresh"):
-        r = kclient.post("/api/user/requests",
-                         json={"operation": "scan", "pv": _pv("team-a", "datasets", cluster=cluster), "target": ""})
+        r = kclient.post("/api/user/requests", json=_rm(_pv("team-a", "datasets", cluster=cluster)))
         assert r.status_code == 409 and r.json()["detail"] == "k8s_mapping_unknown", cluster
 
 
@@ -354,11 +361,10 @@ def test_rm_inside_a_pv_is_accepted(kclient, world):
 
 
 @pytest.mark.parametrize("body,detail", [
-    ({"operation": "scan", "pv": _pv("team-a", "datasets"), "storage": "k8s-pv-nfs", "target": ""},
-     "pv_and_storage_conflict"),
-    ({"operation": "scan", "pv": _pv("team-a", "ghost"), "target": ""}, "pv_not_found"),
-    ({"operation": "scan", "pv": _pv("team-a", "checkpoints"), "target": ""}, "pv_not_bound"),
-    ({"operation": "scan", "pv": _pv("team-a", "datasets"), "target": "/etc"}, "unsafe_path"),
+    (_rm(_pv("team-a", "datasets"), storage="k8s-pv-nfs"), "pv_and_storage_conflict"),
+    (_rm(_pv("team-a", "ghost")), "pv_not_found"),
+    (_rm(_pv("team-a", "checkpoints")), "pv_not_bound"),
+    (_rm(_pv("team-a", "datasets"), "/etc"), "unsafe_path"),
 ])
 def test_pv_resolution_errors_are_422(kclient, world, body, detail):
     _login(kclient, "alice")
@@ -369,25 +375,24 @@ def test_pv_resolution_errors_are_422(kclient, world, body, detail):
 def test_unmapped_or_unresolvable_storage_class_is_422(kclient, world):
     _login(kclient, "junwoo.song")
     world.k8s.delete_sc_map("tb-onefs", actor="ops")
-    r = kclient.post("/api/user/requests", json={"operation": "scan", "pv": _pv("team-a", "kraken-kv-cache"),
-                                                 "target": ""})
+    r = kclient.post("/api/user/requests", json=_rm(_pv("team-a", "kraken-kv-cache")))
     assert r.status_code == 422 and r.json()["detail"] == "pv_storageclass_unmapped"
     world.k8s.set_sc_map("tb-gpfs", storage_name="k8s-pv-gpfs", path_template="{attr:nope}", actor="ops")
-    r = kclient.post("/api/user/requests", json={"operation": "scan", "pv": _pv("team-a", "models"), "target": ""})
+    r = kclient.post("/api/user/requests", json=_rm(_pv("team-a", "models")))
     assert r.status_code == 422 and r.json()["detail"] == "pv_path_unresolved"
 
 
 def test_admin_only_storage_applies_to_the_resolved_storage(kclient, world, db):
     db.execute("UPDATE storages SET user_enabled = 0 WHERE storage_name = 'k8s-pv-nfs'")
     _login(kclient, "alice")
-    r = kclient.post("/api/user/requests", json={"operation": "scan", "pv": _pv("team-a", "datasets"), "target": ""})
+    r = kclient.post("/api/user/requests", json=_rm(_pv("team-a", "datasets")))
     assert r.status_code == 403 and r.json()["detail"] == "storage_admin_only"
 
 
 def test_operation_allowlist_still_applies(db, world):
     client = TestClient(create_app(_k8s_settings(user_allowed_operations=frozenset({"sync"})), db))
     _login(client, "alice")
-    r = client.post("/api/user/requests", json={"operation": "scan", "pv": _pv("team-a", "datasets"), "target": ""})
+    r = client.post("/api/user/requests", json=_rm(_pv("team-a", "datasets")))
     assert r.status_code == 403 and r.json()["detail"] == "operation_admin_only"
 
 
@@ -410,6 +415,7 @@ def test_unrestricted_admin_mixes_raw_and_pv_and_any_namespace(kclient, world):
 def test_k8s_owner_username_follows_the_account_id_rule(kclient, world):
     assert _ACCOUNT_ID_RE.pattern == ACCOUNT_USERNAME_RE.pattern
     assert valid_owner_username("1user", identity_mode="k8s") and not valid_owner_username("1user")
+    assert not valid_owner_username("1234", identity_mode="k8s")        # 숫자만은 거부(잡 셸이 uid 로 읽는다)
     assert not valid_owner_username("Alice", identity_mode="k8s") and valid_owner_username("Alice")
     _login(kclient, "ops")
     r = kclient.post("/api/user/requests", json={"operation": "scan", "pv": _pv("team-a", "datasets"), "target": "",
@@ -419,6 +425,9 @@ def test_k8s_owner_username_follows_the_account_id_rule(kclient, world):
     assert _plan(world)[rid] == "planned"             # planner 3c 도 같은 규칙
     r = kclient.post("/api/user/requests", json={"operation": "scan", "pv": _pv("team-a", "datasets"), "target": "",
                                                  "owner_username": "Alice"})
+    assert r.status_code == 422 and r.json()["detail"] == "invalid_owner_username"
+    r = kclient.post("/api/user/requests", json={"operation": "scan", "pv": _pv("team-a", "datasets"), "target": "",
+                                                 "owner_username": "1234"})
     assert r.status_code == 422 and r.json()["detail"] == "invalid_owner_username"
 
 
@@ -496,6 +505,7 @@ def _tamper_payload(db, rid, mutate):
     (lambda p: p["destination_pv"].update(root="team-c/archive"), "pv_moved"),
     # 비 특권 운영자 행에 명시 chown(결과는 목적지 PV 소유자로 자동 -- 2026-10-26)
     (lambda p: p.setdefault("options", {}).update(chown="0:0"), "chown_not_allowed"),
+    (lambda p: p.setdefault("options", {}).update(chmod="F4755"), "chmod_not_allowed"),
 ])
 def test_planner_treats_the_request_row_as_untrusted(world, db, submitted, mutate, reason):
     _tamper_payload(db, submitted, mutate)
@@ -504,11 +514,36 @@ def test_planner_treats_the_request_row_as_untrusted(world, db, submitted, mutat
 
 
 def test_planner_refuses_a_block_less_row_inserted_for_a_user(world):
-    rid = world.requests.create(operation="scan", requester_id="alice", actor="alice", resource_key="k-raw",
-                                payload={"storage": "cephfs-dms", "target": "x", "options": {}, "run_as_root": True},
+    rid = world.requests.create(operation="rm", requester_id="alice", actor="alice", resource_key="k-raw",
+                                payload={"storage": "cephfs-dms", "target": "x", "options": {"recursive": True},
+                                         "run_as_root": True},
                                 priority="mid", auth_method="session")
     _plan(world)
     assert _state(world, rid) == ("Rejected", "raw_path_not_allowed")
+
+
+def test_scan_is_for_privileged_operators_only(kclient, world, db):
+    """scan 은 특권 운영자만(2026-10-26 사용자 결정 (g) -- k8s_access.scan_allowed): 일반 사용자·목록 밖 관리자는 403
+    scan_unrestricted_only(연산 allowlist 보다 먼저 -- 정확한 사유), 특권 운영자는 PV·직접 경로 모두. /me 의 user_operations 도
+    같은 술어, planner 는 DB 직접 삽입 행을 같은 사유로 막는다."""
+    for who in ("alice", "ops.admin"):
+        _login(kclient, who)
+        r = kclient.post("/api/user/requests", json={"operation": "scan", "pv": _pv("team-a", "datasets"), "target": ""})
+        assert r.status_code == 403 and r.json()["detail"] == "scan_unrestricted_only", who
+    _login(kclient, "ops")
+    r = kclient.post("/api/user/requests", json={"operation": "scan", "pv": _pv("team-a", "datasets"), "target": "",
+                                                 "run_as_root": True})
+    assert r.status_code == 202, r.text
+    rid = r.json()["request_id"]
+    assert _plan(world)[rid] == "planned"
+    # DB 직접 삽입(일반 사용자 scan, PV 블록까지 갖춘 행)도 planner 가 막는다
+    _login(kclient, "ops")
+    r = kclient.post("/api/user/requests", json={"operation": "scan", "pv": _pv("team-b", "scratch"), "target": "",
+                                                 "run_as_root": True})
+    rid2 = r.json()["request_id"]
+    db.execute("UPDATE requests SET requester_id = 'alice' WHERE request_id = :r", {"r": rid2})
+    _plan(world)
+    assert _state(world, rid2) == ("Rejected", "scan_unrestricted_only")
 
 
 def test_planner_rm_root_recheck(world, db, kclient):
@@ -608,11 +643,11 @@ def test_k8s_confirm_is_not_blocked_by_a_missing_pair(kclient, world, submitted)
 def test_me_tells_the_portal_the_mode_the_exemption_and_the_operations(kclient, world):
     assert _login(kclient, "alice").get("/api/auth/me").json() == {
         "actor": "alice", "role": "user", "can_run_as_root": False, "identity_mode": "k8s", "unrestricted": False,
-        "user_operations": ["scan", "sync", "rm"]}
+        "user_operations": ["sync", "rm"]}                       # scan 은 특권 운영자만(2026-10-26 (g))
     me = _login(kclient, "ops").get("/api/auth/me").json()
     assert (me["unrestricted"], me["can_run_as_root"], me["user_operations"]) == (True, True, ["scan", "sync", "rm"])
     me = _login(kclient, "ops.admin").get("/api/auth/me").json()
-    assert (me["unrestricted"], me["role"]) == (False, "admin")
+    assert (me["unrestricted"], me["role"], me["user_operations"]) == (False, "admin", ["sync", "rm"])
 
 
 def test_me_in_ldap_mode_lists_the_default_user_operations(client):
@@ -667,7 +702,7 @@ def test_side_label_and_subpath_normalization():
 
 
 def test_recheck_is_a_noop_for_raw_requests_in_ldap_mode(world):
-    req = {"operation": "scan", "requester_id": "alice", "payload": {"storage": "cephfs-dms", "target": "x"}}
+    req = {"operation": "rm", "requester_id": "alice", "payload": {"storage": "cephfs-dms", "target": "x"}}
     assert k8s_access.recheck_request(world, req, settings=_k8s_settings(identity_mode="ldap")) is None
     with pytest.raises(DomainValidationError) as e:
         k8s_access.recheck_request(world, req, settings=_k8s_settings())
@@ -726,6 +761,8 @@ def test_root_nsync_into_a_pv_destination_is_planned(kclient, world):
 _NSYNC_FOLLOWS_DST_LINKS = {"faefdaf05b8da9386671c2cee00db75efc0e9cd7", "1b93d5404d078c55b46194cdd02732417ed856dc"}
 # 링크는 따라가지 않지만 없는 목적지 루트를 못 만들어 새 목적지로의 sync 가 전부 실패하던 고정값(d1 라이브 실증 -- 2a10a18 이 고침).
 _NSYNC_BREAKS_NEW_DESTINATIONS = {"8cd72f30a7bfb075795b2128f4a3dbb74c8b31f8"}
+# --chown 뒤 권한 복사가 setuid/setgid 를 되살리던 고정값(목적지 PV 루트 소유자 chown 이 setuid-root 를 만들 수 있었다 -- 3c041e0 이 고침).
+_CHOWN_KEEPS_SETID = {"2a10a18269f1879d91f750106a4406218853bb6f"} | _NSYNC_BREAKS_NEW_DESTINATIONS | _NSYNC_FOLLOWS_DST_LINKS
 
 
 def test_explicit_chown_is_for_privileged_operators_only(kclient, world):
@@ -734,6 +771,8 @@ def test_explicit_chown_is_for_privileged_operators_only(kclient, world):
     _login(kclient, "alice")
     r = kclient.post("/api/user/requests", json=_pv_sync(options={"chown": "0:0"}))
     assert r.status_code == 403 and r.json()["detail"] == "chown_not_allowed"
+    r = kclient.post("/api/user/requests", json=_pv_sync(options={"chmod": "F4755"}))    # chmod 도(setuid 비트 결과 방지)
+    assert r.status_code == 403 and r.json()["detail"] == "chmod_not_allowed"
     r = kclient.post("/api/user/requests", json=_pv_sync())
     assert r.status_code == 202, r.text
     _login(kclient, "ops")
@@ -746,10 +785,11 @@ def test_explicit_chown_is_for_privileged_operators_only(kclient, world):
 
 def test_job_image_pins_an_nsync_that_does_not_follow_destination_links():
     """root nsync 의 PV 목적지를 허용하는 것(planner 에 가드 없음)과 잡 이미지의 mpifileutils 고정값은 짝이다 -- 고정값을 옛 커밋으로
-    되돌리면 그 짝이 깨진다. 새 커밋으로 올릴 때는 그 커밋이 nsync 목적지 걷기(5958e4e·8cd72f3)와 새 목적지 루트 만들기(2a10a18)를
-    포함하는지 확인한다."""
+    되돌리면 그 짝이 깨진다. 새 커밋으로 올릴 때는 그 커밋이 nsync 목적지 걷기(5958e4e·8cd72f3)·새 목적지 루트 만들기(2a10a18)·
+    --chown 의 setuid/setgid 지우기(3c041e0)를 포함하는지 확인한다."""
     text = (Path(__file__).resolve().parent.parent / "deploy" / "docker" / "Dockerfile.mpifileutils").read_text()
     refs = re.findall(r"^ARG MPIFILEUTILS_REF=([0-9a-f]{40})$", text, flags=re.M)
     assert len(refs) == 1, refs
     assert refs[0] not in _NSYNC_FOLLOWS_DST_LINKS
     assert refs[0] not in _NSYNC_BREAKS_NEW_DESTINATIONS
+    assert refs[0] not in _CHOWN_KEEPS_SETID

@@ -94,10 +94,10 @@ export function syncOwnership({ chown, chmod = "", root, runAs, self, chownEdita
     const owner = pvOwner !== null && /^[0-9]+:[0-9]+$/.test(pvOwner) ? pvOwner : null;
     return { short: owner !== null ? `목적지 PV 소유자 ${owner}(PV 루트 기준)` : "목적지 PV 루트의 소유자·그룹(점검 뒤 확정)",
              long: "결과(목적지와 복사된 파일·디렉토리)는 목적지 PV 루트의 소유자·그룹(uid:gid)으로 맞춰집니다 — 소스 소유자와 "
-                 + "관계없이, 그 PV 를 쓰는 파드가 결과를 읽고 고칠 수 있게 합니다. "
+                 + "관계없이 그 PV 의 소유자 기준입니다(PV 루트가 root 소유면 결과도 root 소유). "
                  + (owner !== null ? `점검에서 확인한 값은 ${owner} 입니다. ` : "실제 값은 점검(preflight)에서 확인돼 확인 창에 보입니다. ")
                  + "미리보기 뒤 그 소유자가 바뀌면 실행하지 않고 멈춥니다. 목적지에 이미 있던 같은 경로의 항목도 이 소유로 다시 "
-                 + `맞춰집니다. ${modeText}` };
+                 + `맞춰지고, 일반 파일의 setuid·setgid 비트는 지워집니다(소유자를 바꾸는 chown 과 같은 규칙). ${modeText}` };
   }
   if (root)
     return { short: "소스의 소유자·그룹 그대로(root 실행)",

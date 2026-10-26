@@ -151,10 +151,14 @@ def submit(body: RequestBody, request: Request,
     # 통과시켜 아래 try 의 422 invalid_operation 으로 흘린다("bogus 는 admin 전용"이
     # 아니라 "그런 연산이 없다"가 맞다). 알려진 집합은 Operation enum 이 단일 진실.
     known_ops = {o.value for o in Operation}
+    repos = request.app.state.repos
+    # scan 은 특권 운영자만(k8s 모드, 2026-10-26 (g)) -- allowlist 보다 먼저 정확한 사유로(목록 밖 관리자도 여기서 막힌다).
+    if body.operation == Operation.SCAN.value and not k8s_access.scan_allowed(
+            unrestricted=can_run_as_root(identity, settings, repos), settings=settings):
+        raise HTTPException(status_code=403, detail="scan_unrestricted_only")
     if (identity.role != "admin" and body.operation in known_ops
             and body.operation not in settings.user_allowed_operations):
         raise HTTPException(status_code=403, detail="operation_admin_only")
-    repos = request.app.state.repos
     mode = k8s_access.identity_mode(settings)
     k8s = mode == "k8s"
     # k8s 신원 모드(2026-10-25 설계 D2·D3): 모든 잡이 root 이고 root 는 세션 인증 요청만이다 -- 공유 토큰 제출은 어떤 경로로도
@@ -186,6 +190,9 @@ def submit(body: RequestBody, request: Request,
         # 사용자가 API 로 그 규칙을 덮지 못하게). planner·컨펌이 요청 행으로 다시 본다(k8s_access.recheck_request).
         if "chown" in (body.options or {}):
             raise HTTPException(status_code=403, detail="chown_not_allowed")
+        # chmod 도 같은 원칙(2026-10-26 보안 리뷰 -- setuid/setgid 비트를 실은 결과 파일을 못 만들게)
+        if "chmod" in (body.options or {}):
+            raise HTTPException(status_code=403, detail="chmod_not_allowed")
         for pv_key, storage_key, _ in k8s_access.sides(body.operation):
             if pv_key not in pv_blocks and getattr(body, storage_key) not in (None, ""):
                 raise HTTPException(status_code=403, detail="raw_path_not_allowed")

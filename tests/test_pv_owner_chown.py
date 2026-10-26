@@ -5,6 +5,7 @@ chown」, execution_manifests.pv_owner_measured·_auto_chown, stepper._record_pv
 에 남기고 → 미리보기·실행 argv 에 --chown 으로 싣는다. exec_preflight 가 다시 재서 바뀌었으면 거부한다(확인 창과 실행이 갈라지지
 않게). 마커가 없거나 틀리면 「모름」을 소스 소유 보존으로 접지 않고 거부한다.
 """
+import json
 import os
 import subprocess
 
@@ -225,8 +226,9 @@ def test_preflight_owner_is_recorded_and_reaches_the_preview(db):
     assert events and events[0]["payload"]["owner"] == "1000:100"
 
 
-@pytest.mark.parametrize("log", [[("dst", "DMS_PREFLIGHT_OK", None)], [("dst", None, None)],
-                                 [("dst", "DMS_PV_OWNER=1:1\nDMS_PV_OWNER=2:2", None)]])
+@pytest.mark.parametrize("log", [[("dst", "DMS_PREFLIGHT_OK", None)],
+                                 [("dst", "DMS_PV_OWNER=1:1\nDMS_PV_OWNER=2:2", None)],
+                                 [("src", "DMS_PREFLIGHT_OK", None), ("dst", "DMS_PV_OWNER=root:root", None)]])
 def test_unknown_owner_rejects_instead_of_preserving_the_source_owner(db, log):
     repos = Repositories(db)
     adapter = StubExecutionAdapter()
@@ -235,6 +237,58 @@ def test_unknown_owner_rejects_instead_of_preserving_the_source_owner(db, log):
     job = repos.data_jobs.get_job(jid)
     assert (job["state"], job["reason_code"]) == (DataJobState.REJECTED.value, "pv_owner_unknown")
     assert _specs(adapter, "preview") == []
+
+
+def test_unreadable_log_is_retried_before_giving_up(db):
+    """로그를 못 읽은 것(apiserver 순간 오류 -- read_log 의 log None)은 「마커 없음」과 다르다: 상태를 그대로 두고 다음 틱에 다시
+    읽고(성공한 preflight 파드는 잡 종단까지 남는다), 상한(PV_OWNER_READ_ATTEMPTS)을 넘기면 그때 모름으로 거부한다."""
+    from dms.stepper import PV_OWNER_READ_ATTEMPTS
+    repos = Repositories(db)
+    adapter = StubExecutionAdapter()
+    _, jid = _job(repos)
+    stepper = _through_preflight(repos, adapter, jid, [("src", "DMS_PREFLIGHT_OK", None), ("dst", None, None)])
+    job = repos.data_jobs.get_job(jid)
+    assert job["state"] == DataJobState.PREFLIGHT.value and job["worker_pool"]["dest_pv_owner_read_misses"] == 1
+    adapter.set_log(f"stub-preflight-{jid}", _owner_log("1000:100"))   # 다음 틱에 읽힌다
+    stepper.run_once()
+    job = repos.data_jobs.get_job(jid)
+    assert job["state"] == DataJobState.PREVIEW_RUNNING.value and job["worker_pool"]["dest_pv_owner"] == "1000:100"
+    # 끝내 못 읽으면 상한에서 거부
+    _, jid2 = _job(repos, key="k2")
+    stepper = _through_preflight(repos, adapter, jid2, [("dst", None, None)])
+    for _ in range(PV_OWNER_READ_ATTEMPTS):
+        stepper.run_once()
+    job2 = repos.data_jobs.get_job(jid2)
+    assert (job2["state"], job2["reason_code"]) == (DataJobState.REJECTED.value, "pv_owner_unknown")
+
+
+def test_preview_argv_built_from_the_stepper_spec_carries_the_owner(db):
+    """stepper 가 만든 spec 그대로 argv 를 만들면 --chown <잰 값> 이 실린다(스텁은 argv 를 안 만들어 따로 묶는다)."""
+    repos = Repositories(db)
+    adapter = StubExecutionAdapter()
+    _, jid = _job(repos)
+    _through_preflight(repos, adapter, jid, _owner_log("1000:100"))
+    spec = _specs(adapter, "preview")[0]
+    argv = tool_argv(spec, abs_paths=spec.paths)
+    assert argv[argv.index("--chown") + 1] == "1000:100" and "--dryrun" in argv
+
+
+class _K8sSettings(_Settings):
+    identity_mode = "k8s"
+
+
+def test_job_row_chown_or_chmod_differing_from_the_request_row_fails_closed(db):
+    """k8s 모드: 잡 행의 chown·chmod 만 변조(create_job 무검증 INSERT)하면 chown_not_allowed·PV 소유자 규칙을 함께 건너뛴다 --
+    _build_spec 이 요청 행(판정받은 값)과 다르면 끊는다."""
+    for key, value in (("chown", "0:0"), ("chmod", "F4755")):
+        repos = Repositories(db)
+        adapter = StubExecutionAdapter()
+        _, jid = _job(repos, key=f"k-{key}")
+        db.execute("UPDATE data_jobs SET options = :o WHERE job_id = :j", {"o": json.dumps({key: value}), "j": jid})
+        JobStepper(repos, adapter, settings=_K8sSettings()).run_once()
+        job = repos.data_jobs.get_job(jid)
+        assert (job["state"], job["reason_code"]) == (DataJobState.REJECTED.value, "chown_not_allowed"), key
+        assert adapter.submitted_specs() == []
 
 
 def _to_exec_preflight(repos, adapter, jid, stored_owner, log):

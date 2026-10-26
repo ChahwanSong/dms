@@ -14,6 +14,7 @@ import posixpath
 import sys
 import time
 
+from . import k8s_access
 from .artifact_base import resolve_artifact_base, static_base_problem, strip_scheme
 from .batch_cancel import CANCEL_MARK_EVENT, CANCEL_REASON
 from .db import iso_epoch, iso_plus, utc_now_iso
@@ -120,6 +121,19 @@ class PrivilegeNotRequestedAtStep(Exception):
     def __init__(self, request_id):
         self.request_id = request_id
         super().__init__(f"privileged identity without run_as_root/batch (request {request_id})")
+
+
+# 목적지 PV 루트 소유자 마커를 못 읽을 때(로그 조회 실패) 다시 읽는 틱 수(_record_pv_owner) -- 넘기면 pv_owner_unknown.
+PV_OWNER_READ_ATTEMPTS = 20
+
+
+class ChownMismatchAtStep(Exception):
+    """k8s 모드에서 잡 행의 chown·chmod 가 요청 행(제출·planner·컨펌이 판정한 값)과 다르다(2026-10-26 리뷰) -- create_job 은
+    무검증 INSERT 라 잡 행만 변조하면 chown_not_allowed·PV 소유자 규칙을 함께 건너뛴다. _build_spec 이 끊는다(fail-closed)."""
+
+    def __init__(self, key):
+        self.key = key
+        super().__init__(key)
 
 
 class ChownNameAtStep(Exception):
@@ -579,6 +593,13 @@ class JobStepper:
             problem = chown_problem(options["chown"])
             if problem is not None:
                 raise ChownNameAtStep(problem)
+        if job["tool"] in ("dsync", "nsync") and k8s_access.k8s_mode(self._settings):
+            req = self._repos.requests.get(job["request_id"]) or {}
+            payload = req.get("payload") if isinstance(req.get("payload"), dict) else {}
+            req_opts = payload.get("options") if isinstance(payload.get("options"), dict) else {}
+            for key in ("chown", "chmod"):
+                if options.get(key) != req_opts.get(key):
+                    raise ChownMismatchAtStep(key)
         op = job["operation"]
         if op == "sync":
             src_root = self._managed_root(job["source_storage"])
@@ -1005,6 +1026,12 @@ class JobStepper:
                 message=f"{exc.problem} job={job['job_id']}",
                 request_id=job.get("request_id"))
             return self._fail_closed(job, reason_code="identity_missing_at_step")
+        except ChownMismatchAtStep as exc:
+            # 잡 행의 chown·chmod 만 바뀐 행(DB 직접 변조) -- 요청 행이 판정받은 값과 다르면 실행하지 않는다.
+            self._repos.observability.record_event(
+                component="stepper", severity="error", event_type="chown_mismatch_at_step",
+                message=f"{exc.key} job={job['job_id']}", request_id=job.get("request_id"))
+            return self._fail_closed(job, reason_code="chown_not_allowed")
         except ChownNameAtStep as exc:
             # 규칙(숫자 uid:gid 만) 전에 만들어진 잡 -- root 로 이름이 uid 0 으로 풀리기 전에 끊는다.
             self._repos.observability.record_event(
@@ -1166,12 +1193,23 @@ class JobStepper:
             return None
         try:
             raw = self._exec.read_log(ref)
-        except Exception as exc:     # 로그를 못 읽음 = 모름(아래에서 막는다)
+        except Exception as exc:     # 로그를 못 읽음 -- 아래에서 재시도
             logger.warning("pv owner log read failed job=%s: %s", job["job_id"], exc)
             raw = None
         owner = parse_pv_owner(raw)
         wp = job["worker_pool"] if isinstance(job["worker_pool"], dict) else {}
         stored = wp.get("dest_pv_owner")
+        if owner is None and (raw is None or any(entry[1] is None for entry in raw)):
+            # 로그를 못 읽었다(apiserver 순간 오류·노드 NotReady -- read_log 는 파드별 실패를 log None 으로 접는다) -- 성공한
+            # preflight 파드는 잡이 종단될 때까지 남으므로 다음 틱에 다시 읽는다. 상한을 넘기면 모름으로 거부한다.
+            misses = wp.get("dest_pv_owner_read_misses")
+            misses = (misses if isinstance(misses, int) and not isinstance(misses, bool) else 0) + 1
+            if misses < PV_OWNER_READ_ATTEMPTS:
+                new_wp = {**wp, "dest_pv_owner_read_misses": misses}
+                if not self._repos.data_jobs.set_worker_pool(job["job_id"], new_wp, expected_state=job["state"]):
+                    return "gone"
+                job["worker_pool"] = new_wp
+                return job["state"]
         if owner is None:
             self._archive_diag(job, phase, ref)
             self._finalize(job, DataJobState.REJECTED, reason_code="pv_owner_unknown", polled=True)

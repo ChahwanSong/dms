@@ -73,6 +73,13 @@ def unrestricted_request(req, *, settings, repos) -> bool:
                               session_authenticated=(req.get("auth_method") == "session"))
 
 
+def scan_allowed(*, unrestricted: bool, settings) -> bool:
+    """scan 은 특권 운영자만(2026-10-26 사용자 결정 (g)): k8s 모드에서는 면제자(can_run_as_root -- 관리자 + 특권 목록·부여 +
+    세션 = 특권 운영자)만 scan 을 낸다. ldap 모드는 종전(연산 allowlist). 제출(routes_requests, 403 scan_unrestricted_only)·
+    /me(user_operations)·planner·컨펌(recheck_request)이 이 술어 하나를 쓴다 -- 배치 자식은 unrestricted_request 가 면제다."""
+    return not k8s_mode(settings) or unrestricted
+
+
 def pair_gate_exempt(payload, settings) -> bool:
     """sync 허용 쌍 면제(D14): k8s 모드 ∧ 모든 쪽이 PV 주소(pv 블록). 제출·planner 3b·컨펌이 같은 술어를 쓴다 -- planner·
     컨펌은 recheck_request 가 pv 블록을 현재 스냅숏으로 확인한 **뒤에** 부른다. 관리자 전용 스토리지 판정(storage_admin_only)은
@@ -179,6 +186,17 @@ def recheck_request(repos, req, *, settings) -> None:
         exempt = unrestricted_request(req, settings=settings, repos=repos)
         if not exempt:
             raise DomainValidationError("chown_not_allowed", "explicit chown by a non-privileged requester")
+    if k8s and "chmod" in options:
+        if exempt is None:
+            exempt = unrestricted_request(req, settings=settings, repos=repos)
+        if not exempt:
+            raise DomainValidationError("chmod_not_allowed", "explicit chmod by a non-privileged requester")
+    # scan 은 특권 운영자만(2026-10-26 (g), scan_allowed) -- DB 직접 삽입·대기 중 특권 상실.
+    if k8s and operation == "scan":
+        if exempt is None:
+            exempt = unrestricted_request(req, settings=settings, repos=repos)
+        if not scan_allowed(unrestricted=exempt, settings=settings):
+            raise DomainValidationError("scan_unrestricted_only", "scan by a non-privileged requester")
     for pv_key, storage_key, path_key in sides(operation):
         block = payload.get(pv_key)
         if block is None:

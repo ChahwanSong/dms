@@ -6,7 +6,11 @@ import secrets
 from ..db import Database, dump_json, iso_epoch, iso_plus, utc_now_iso
 from ..domain import DomainValidationError, ROLE_ADMIN, ROLE_USER
 
-_USERNAME_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}$")
+# 숫자만으로 된 아이디는 새로 만들지 않는다(2026-10-26 사용자 결정): 잡 셸의 `getent passwd 1234`·`id 1234` 가 숫자를
+# uid 로 읽어 다른 계정과 맞물린다. 로그인·비밀번호 재설정은 형식을 보지 않으므로 그런 옛 계정도 계속 쓸 수 있다.
+# domain._ACCOUNT_ID_RE(k8s 모드 「사용자 지정」)와 같은 패턴이다(tests/test_k8s_submit 대조), 프런트 미러 pvLocation.ACCOUNT_ID_RE.
+_USERNAME_RE = re.compile(r"(?![0-9]+$)[a-z0-9][a-z0-9._-]{0,63}$")
+_NUMERIC_ONLY_RE = re.compile(r"[0-9]+$")
 _N, _R, _P = 16384, 8, 1
 
 # 계정 셀프서비스 인증번호(2026-08-20): 4자리·5분. 4자리는 사용자 결정(사내
@@ -37,6 +41,11 @@ def _lock_remaining(row, now: str) -> "int | None":
     return max(1, int(remaining)) if remaining > 0 else None
 
 
+def numeric_only_username(username) -> bool:
+    """숫자만으로 된 아이디인가(가입·생성 거부 사유 username_numeric_only)."""
+    return isinstance(username, str) and _NUMERIC_ONLY_RE.fullmatch(username) is not None
+
+
 def valid_username(username: str) -> bool:
     """회사 아이디 형식(cocoa.song 류). 라우트가 이메일 파생 전에 재사용한다."""
     return _USERNAME_RE.fullmatch(username) is not None
@@ -63,6 +72,8 @@ class AccountsRepository:
         self._db = db
 
     def create(self, username, password, role, email=None, *, actor="self"):
+        if numeric_only_username(username):
+            raise DomainValidationError("username_numeric_only", repr(username))
         if not _USERNAME_RE.fullmatch(username):
             raise DomainValidationError("invalid_username", repr(username))
         with self._db.transaction():

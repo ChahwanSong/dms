@@ -17,7 +17,7 @@ from ..domain import DomainValidationError, Operation, ROLE_ADMIN, ROLE_USER
 from ..privileged import protected_names
 from ..repositories.accounts import (VERIFICATION_FAILURE_LIMIT, VERIFICATION_FAILURE_WINDOW_SECONDS,
                                      VERIFICATION_PURPOSES, VERIFICATION_TTL_SECONDS,
-                                     new_verification_code, valid_username)
+                                     new_verification_code, numeric_only_username, valid_username)
 from .auth import (Identity, can_run_as_root, client_ip, require_admin, require_user,
                    tokens_match)
 from .password_transport import PasswordTransportError
@@ -161,7 +161,11 @@ def request_verification_code(body: VerificationBody, request: Request):
         raise HTTPException(status_code=500, detail="mailer_misconfigured")
     if body.purpose not in VERIFICATION_PURPOSES:
         raise HTTPException(status_code=422, detail="invalid_verification_purpose")
-    if not valid_username(body.username):
+    # 숫자만인 아이디(2026-10-26): 새 가입만 막는다 -- 그런 옛 계정의 비밀번호 재설정은 그대로 된다.
+    if numeric_only_username(body.username):
+        if body.purpose == "signup":
+            raise HTTPException(status_code=422, detail="username_numeric_only")
+    elif not valid_username(body.username):
         raise HTTPException(status_code=422, detail="invalid_username")
     if body.purpose == "password_reset":
         _refuse_privileged_reset(request, body.username)
@@ -430,8 +434,10 @@ def me(request: Request, identity: Identity = Depends(require_user)):
     #                   제출 게이트 operation_admin_only 와 같은 규칙). Operation 순서(scan·sync·rm).
     settings = request.app.state.settings
     can_root = can_run_as_root(identity, settings, request.app.state.repos)
+    # scan 은 특권 운영자만(k8s 모드 -- k8s_access.scan_allowed, 제출 게이트와 같은 술어).
     ops = [o.value for o in Operation
-           if identity.role == ROLE_ADMIN or o.value in settings.user_allowed_operations]
+           if (identity.role == ROLE_ADMIN or o.value in settings.user_allowed_operations)
+           and (o.value != "scan" or k8s_access.scan_allowed(unrestricted=can_root, settings=settings))]
     return {"actor": identity.actor, "role": identity.role,
             "can_run_as_root": can_root,
             "identity_mode": k8s_access.identity_mode(settings),

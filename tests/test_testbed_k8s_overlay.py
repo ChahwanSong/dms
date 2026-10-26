@@ -87,7 +87,7 @@ def test_patch_config_turns_on_the_k8s_identity_mode_and_user_operations():
     # operation_admin_only 이고, 모드가 ldap 이면 모든 사용자 잡이 ldap_not_configured 로 멈춘다(조용한 회귀).
     values = _config_values(K8S / "patch-config.yaml")
     assert values["DMS_IDENTITY_MODE"] == "k8s"
-    assert values["DMS_USER_ALLOWED_OPERATIONS"] == "sync,scan,rm"
+    assert values["DMS_USER_ALLOWED_OPERATIONS"] == "sync,rm"   # scan 은 특권 운영자만(2026-10-26)
     assert values["DMS_ALLOW_PRIVILEGED_REQUESTERS"] == "true"      # k8s 모드는 false 면 기동 거부
 
 
@@ -154,14 +154,14 @@ def test_render_identity_is_the_k8s_mode_with_the_privileged_list_as_the_exempti
     data = config_data(render("testbed-k8s"))
     assert not [k for k in data if k.startswith("DMS_LDAP_")]
     assert data["DMS_IDENTITY_MODE"] == "k8s"
-    assert data["DMS_USER_ALLOWED_OPERATIONS"] == "sync,scan,rm"
+    assert data["DMS_USER_ALLOWED_OPERATIONS"] == "sync,rm"
     assert data["DMS_PRIVILEGED_REQUESTERS"] == "root,admin,mason"
     assert data["DMS_ALLOW_PRIVILEGED_REQUESTERS"] == "true"
     assert data["DMS_IDENTITY_SUPPLEMENTARY_GROUPS"] == "false"
     settings = Settings.from_env({**data, "DMS_DATABASE_URL": "postgresql://u:p@h/d", "DMS_SHARED_TOKEN": "s",
                                   "DMS_ADMIN_TOKEN": "a", "DMS_SESSION_SECRET": "x"})
     assert settings.identity_mode == "k8s" and settings.ldap_uri == ""
-    assert settings.user_allowed_operations == frozenset({"sync", "scan", "rm"})
+    assert settings.user_allowed_operations == frozenset({"sync", "rm"})
 
 
 @needs_kubectl

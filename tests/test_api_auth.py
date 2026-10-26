@@ -247,6 +247,11 @@ def test_verification_code_issue_guards(client, db, settings):
                    json={"username": "Bad:Name", "purpose": "signup"}).status_code == 422
     assert vc.post("/api/auth/verification-codes",
                    json={"username": "ok.name", "purpose": "hack"}).status_code == 422
+    # 숫자만인 아이디는 새 가입만 막는다(2026-10-26 -- 잡 셸이 uid 로 읽는다). 그런 옛 계정의 재설정은 형식 탓에 막지 않는다
+    r = vc.post("/api/auth/verification-codes", json={"username": "1234", "purpose": "signup"})
+    assert r.status_code == 422 and r.json()["detail"] == "username_numeric_only"
+    assert vc.post("/api/auth/verification-codes",
+                   json={"username": "1234", "purpose": "password_reset"}).status_code == 404   # 형식이 아니라 「없음」
 
 
 def test_verification_wrong_code_attempts_and_expiry(client, db, settings):

@@ -53,7 +53,7 @@ def test_patch_config_deletes_every_base_ldap_key_and_turns_on_the_k8s_mode():
     assert valued == [], f"LDAP 키에 값을 두지 않는다(삭제만): {valued}"
     values = dict(re.findall(r'^  (DMS_[A-Z0-9_]+): "([^"]*)"', text, re.M))
     assert values["DMS_IDENTITY_MODE"] == "k8s"
-    assert values["DMS_USER_ALLOWED_OPERATIONS"] == "sync,scan,rm"
+    assert values["DMS_USER_ALLOWED_OPERATIONS"] == "sync,rm"   # scan 은 특권 운영자만(2026-10-26)
     assert values["DMS_ALLOW_PRIVILEGED_REQUESTERS"] == "true"
     assert values["DMS_ACCOUNT_VERIFICATION_REQUIRED"] == "true"   # 맵핑 ID = 계정 아이디의 결속 장치
 
@@ -145,7 +145,7 @@ def test_rendered_overlay_has_no_ldap_and_boots_in_k8s_mode(tmp_path):
     assert seq(ds, "command") == ["dms"] and seq(ds, "args") == ["agent"]
     assert re.findall(r"secretKeyRef:\n\s*key: (\w+)", ds) == ["DMS_SHARED_TOKEN"]
     data = config_data(text)
-    assert (data["DMS_IDENTITY_MODE"], data["DMS_USER_ALLOWED_OPERATIONS"]) == ("k8s", "sync,scan,rm")
+    assert (data["DMS_IDENTITY_MODE"], data["DMS_USER_ALLOWED_OPERATIONS"]) == ("k8s", "sync,rm")
     assert data["DMS_PRIVILEGED_REQUESTERS"] == "root,admin,v-local-admin"
     settings = Settings.from_env({**data, "DMS_DATABASE_URL": "postgresql://u:p@h/d", "DMS_SHARED_TOKEN": "s",
                                   "DMS_ADMIN_TOKEN": "a", "DMS_SESSION_SECRET": "x"})
