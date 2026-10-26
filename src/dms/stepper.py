@@ -343,6 +343,15 @@ class JobStepper:
             contain = self._pv_containment(job, {"target": ("pv", root)})
             if contain:
                 paths["contain"] = contain
+        # 결과 소유자(execution_manifests._auto_chown, 2026-10-26): 규칙(요청 destination_pv 블록의 owner_rule)이 "storage"
+        # (기본)면 제출이 기록한 목적지 스토리지 기본 소유자(블록 owner -- planner·컨펌이 현재 값과 대조했다), 그 밖(운영자 옵션
+        # "pv_root"·규칙 이전 옛 행)이면 preflight 에서 잰 PV 루트 소유자(_record_pv_owner -- worker_pool.dest_pv_owner). 형식이
+        # 틀린 값은 None 으로 실어 빌더가 막게 한다(fail-closed). 규칙은 _pv_owner_required 와 같은 함수(_owner_rule)로 읽는다.
+        result_owner, owner_rule = wp.get("dest_pv_owner"), None
+        if op == "sync":
+            owner_rule, recorded = self._owner_rule(self._dest_pv(job))
+            if owner_rule == "storage":
+                result_owner = recorded
         # job["tool"]은 실행 파일 이름(dscan/dsync/nsync/drm)이지 정책 키(scan/dsync/
         # nsync/rm)가 아니다 -- planner.py가 policy를 조회할 때 쓰는 것과 동일한
         # TOOL_TO_POLICY 매핑을 거쳐야 scan/rm 잡의 정책을 정확히 찾는다.
@@ -365,8 +374,7 @@ class JobStepper:
             priority_class=wp.get("priority_class", "dms-mid"),
             artifact_base=self._artifact_base(), timeout_seconds=timeout,
             ttl_seconds=self._settings.vcjob_ttl_seconds,
-            # 목적지 PV 루트 소유자(_record_pv_owner) -- 형식이 틀린 행은 None 으로 실어 빌더가 막게 한다(fail-closed).
-            result_owner=wp.get("dest_pv_owner") if valid_owner(wp.get("dest_pv_owner")) else None)
+            result_owner=result_owner if valid_owner(result_owner) else None, result_owner_rule=owner_rule)
 
     def _node_cpu_caps(self, names) -> dict:
         """배정 노드 -> {노드: 상한 | None}(node_cpu.node_cpu_cap). 노드 상태는 마지막 보고 기준(신선도 무관 -- blocked_nodes
@@ -811,10 +819,30 @@ class JobStepper:
         if blocked:
             raise NodeBlockedAtStep(blocked)
 
+    def _dest_pv(self, job):
+        """sync 잡 요청 payload 의 destination_pv 블록 값 그대로(없으면 None -- 모양은 호출자가 본다)."""
+        req = self._repos.requests.get(job["request_id"]) or {}
+        payload = req.get("payload") if isinstance(req.get("payload"), dict) else {}
+        return payload.get("destination_pv")
+
+    @staticmethod
+    def _owner_rule(block) -> tuple:
+        """destination_pv 블록 → (결과 소유 규칙, 기록된 소유자). 규칙 = 블록의 owner_rule("storage" | "pv_root" -- 제출이 PV
+        목적지 sync 마다 싣는다, routes_requests.submit). 블록이 dict 가 아니거나 규칙이 문자열이 아니면(규칙 이전 옛 행·변조)
+        None -- 측정 갈래다(옛 행은 종전 동작을 유지한다; 모양이 틀린 규칙은 planner·컨펌이 pv_owner_not_applicable 로 이미
+        끊었다). 기록된 소유자 = 블록 owner(규칙 "storage" 일 때 목적지 스토리지 기본 소유자). _build_spec·_pv_owner_required
+        가 이 함수 하나로 읽는다 -- 둘이 갈라지면 재지 않은 잡이 마커를 기다리거나 잰 값을 버린다."""
+        if not isinstance(block, dict):
+            return None, None
+        rule = block.get("owner_rule")
+        return (rule if isinstance(rule, str) else None), block.get("owner")
+
     def _pv_owner_required(self, job) -> bool:
-        """목적지 PV 루트 소유자로 결과를 맞추는 잡인가 -- execution_manifests.pv_owner_measured 와 같은 판정을 잡 행·요청
-        payload 로 한다(sync ∧ root ∧ 명시 chown 없음 ∧ 요청에 destination_pv 블록 -- _pv_containment 가 contain 의
-        destination 을 싣는 조건과 같다). 그 밖의 잡은 요청 행을 읽지 않는다."""
+        """결과 소유를 **잰** 목적지 PV 루트 소유자로 맞추는 잡인가 -- execution_manifests.pv_owner_measured 와 같은 판정을 잡
+        행·요청 payload 로 한다(sync ∧ root ∧ 명시 chown 없음 ∧ 요청에 destination_pv 블록 -- _pv_containment 가 contain 의
+        destination 을 싣는 조건과 같다 -- ∧ 규칙이 "storage" 아님). 기본 규칙 "storage" 는 값이 요청에 기록돼 있어 재지 않는다
+        (preflight 에 마커가 없으니 여기서 기다리면 pv_owner_unknown 으로 끝난다 -- 두 술어는 짝이다). 그 밖의 잡은 요청 행을
+        읽지 않는다."""
         if job["operation"] != "sync" or job["tool"] not in ("dsync", "nsync"):
             return False
         wp = job["worker_pool"] if isinstance(job["worker_pool"], dict) else {}
@@ -823,14 +851,14 @@ class JobStepper:
             return False
         if "chown" in (job["options"] if isinstance(job["options"], dict) else {}):
             return False
-        req = self._repos.requests.get(job["request_id"]) or {}
-        payload = req.get("payload") if isinstance(req.get("payload"), dict) else {}
-        return payload.get("destination_pv") is not None
+        block = self._dest_pv(job)
+        return block is not None and self._owner_rule(block)[0] != "storage"
 
     def _record_pv_owner(self, job, phase, ref):
-        """PV 목적지 root sync 의 결과 소유자(2026-10-26 사용자 결정 「목적지 PV 소유자로 자동 chown」)를 preflight 파드
-        로그에서 읽어 잡에 남긴다(worker_pool.dest_pv_owner -- 미리보기·실행의 --chown, _build_spec → JobSpec.result_owner).
-        None = 계속, 문자열 = 종단(그 상태 이름).
+        """결과 소유를 PV 루트 소유자로 고른 PV 목적지 root sync(운영자 옵션 "pv_root"·규칙 이전 옛 행 -- _pv_owner_required)의
+        결과 소유자를 preflight 파드 로그에서 읽어 잡에 남긴다(worker_pool.dest_pv_owner -- 미리보기·실행의 --chown, _build_spec
+        → JobSpec.result_owner). 기본 규칙 "storage"(목적지 스토리지 기본 소유자)는 재지 않는다. None = 계속, 문자열 = 종단(그
+        상태 이름).
 
         - 마커가 없거나 틀리면 pv_owner_unknown 으로 거부한다 -- 「모름」을 소스 소유 보존으로 접지 않는다(배포 순간
           Preflight 이던 옛 파드도 여기서 끝난다 -- 다시 제출하면 된다).

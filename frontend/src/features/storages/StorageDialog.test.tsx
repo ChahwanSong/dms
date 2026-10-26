@@ -181,8 +181,10 @@ test("등록: 종류 라디오(파일시스템 / PV / 둘 다), PV·둘 다면 �
   await userEvent.selectOptions(screen.getByLabelText("백엔드"), "gpfs");
   await userEvent.click(screen.getByRole("button", { name: "저장" }));
   await screen.findByText(/./);
+  // PV·둘 다 종류면 기본 소유(기본 0:0)도 싣는다(2026-10-26).
   await waitFor(() => expect(body).toEqual({ storage_name: "k8s-pv-gpfs", mount_path: "/k8s_pv/gpfs",
-    managed_root: "/k8s_pv/gpfs", backend_type: "gpfs", enabled: true, user_enabled: true, kind: "both" }));
+    managed_root: "/k8s_pv/gpfs", backend_type: "gpfs", enabled: true, user_enabled: true, kind: "both",
+    default_uid: 0, default_gid: 0 }));
 });
 
 test("수정: 지금 종류로 시작하고 연결된 StorageClass 를 보이며, 바꾼 종류를 싣는다", async () => {
@@ -203,6 +205,84 @@ test("수정: 지금 종류로 시작하고 연결된 StorageClass 를 보이며
   expect(await within(kinds).findByText("연결된 StorageClass: tb-nfs (dmsk8s)")).toBeInTheDocument();
   await userEvent.click(within(kinds).getByLabelText("둘 다"));
   await userEvent.click(screen.getByRole("button", { name: "저장" }));
+  // 기본 소유 키가 없는 응답(옛 서버)은 0:0 으로 시작한다(서버가 NULL 을 0 = root 로 읽는다).
   await waitFor(() => expect(body).toEqual({ mount_path: "/k8s_pv/nfs", managed_root: "/k8s_pv/nfs", backend_type: "nfs",
-    enabled: true, user_enabled: true, kind: "both" }));
+    enabled: true, user_enabled: true, kind: "both", default_uid: 0, default_gid: 0 }));
+});
+
+
+// ---- 기본 소유 uid·gid(2026-10-26 -- PV 목적지 sync 결과 소유) -----------------------------------------------------------
+
+test("기본 소유 칸은 PV·둘 다 종류에만 보이고, 파일시스템이면 바디에 싣지 않는다", async () => {
+  let body: any = null;
+  server.use(http.post("/api/admin/storages", async ({ request }) => {
+    body = await request.json(); return HttpResponse.json(body, { status: 201 }); }));
+  wrap(<StorageDialog mode="create" trigger={<Button>등록</Button>} />);
+  await userEvent.click(screen.getByRole("button", { name: "등록" }));
+  const kinds = screen.getByRole("group", { name: "종류" });
+  expect(screen.queryByLabelText("기본 소유 uid")).toBeNull();          // 파일시스템(기본)
+  await userEvent.click(within(kinds).getByLabelText("PV"));
+  // 종류 구획이 아니라 자기 구획(기본 소유)에 산다
+  const owner = screen.getByRole("group", { name: "기본 소유(uid:gid)" });
+  expect(within(owner).getByLabelText("기본 소유 uid")).toHaveValue("0");      // 기본 0:0 = root:root
+  expect(within(owner).getByLabelText("기본 소유 gid")).toHaveValue("0");
+  expect(within(kinds).queryByLabelText("기본 소유 uid")).toBeNull();
+  await userEvent.click(within(kinds).getByLabelText("파일시스템"));
+  expect(screen.queryByLabelText("기본 소유 uid")).toBeNull();
+  await userEvent.type(screen.getByLabelText("스토리지 이름"), "fs1");
+  await userEvent.type(screen.getByLabelText("마운트 경로"), "/fs1");
+  await userEvent.type(screen.getByLabelText("관리 루트"), "/fs1");
+  await userEvent.selectOptions(screen.getByLabelText("백엔드"), "cephfs");
+  await userEvent.click(screen.getByRole("button", { name: "저장" }));
+  await waitFor(() => expect(body).not.toBeNull());
+  expect(body).not.toHaveProperty("default_uid");
+  expect(body).not.toHaveProperty("default_gid");
+});
+
+test("PV 등록: 기본 소유를 적으면 숫자로 싣고, 0..4294967294 정수가 아니면 오류 문구와 함께 저장을 잠근다", async () => {
+  let body: any = null;
+  server.use(http.post("/api/admin/storages", async ({ request }) => {
+    body = await request.json(); return HttpResponse.json(body, { status: 201 }); }));
+  wrap(<StorageDialog mode="create" trigger={<Button>등록</Button>} />);
+  await userEvent.click(screen.getByRole("button", { name: "등록" }));
+  await userEvent.click(within(screen.getByRole("group", { name: "종류" })).getByLabelText("PV"));
+  await userEvent.type(screen.getByLabelText("스토리지 이름"), "k8s-pv-nfs");
+  await userEvent.type(screen.getByLabelText("마운트 경로"), "/k8s_pv/nfs");
+  await userEvent.type(screen.getByLabelText("관리 루트"), "/k8s_pv/nfs");
+  await userEvent.selectOptions(screen.getByLabelText("백엔드"), "nfs");
+  const uid = screen.getByLabelText("기본 소유 uid");
+  const gid = screen.getByLabelText("기본 소유 gid");
+  for (const bad of ["-1", "4294967295", "1.5", "abc", ""]) {
+    await userEvent.clear(uid);
+    if (bad !== "") await userEvent.type(uid, bad);
+    expect(screen.getByText("uid·gid 는 0~4294967294 정수여야 합니다")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "저장" })).toBeDisabled();
+  }
+  await userEvent.clear(uid); await userEvent.type(uid, "1500");
+  await userEvent.clear(gid); await userEvent.type(gid, "4294967294");
+  expect(screen.queryByText("uid·gid 는 0~4294967294 정수여야 합니다")).toBeNull();
+  await userEvent.click(screen.getByRole("button", { name: "저장" }));
+  await waitFor(() => expect(body).toEqual({ storage_name: "k8s-pv-nfs", mount_path: "/k8s_pv/nfs", managed_root: "/k8s_pv/nfs",
+    backend_type: "nfs", enabled: true, user_enabled: true, kind: "pv", default_uid: 1500, default_gid: 4294967294 }));
+});
+
+test("PV 수정: 지금 기본 소유로 시작하고(0 도 값), 바꾼 값을 싣는다", async () => {
+  const S = { storage_name: "k8s-pv-gpfs", mount_path: "/k8s_pv/gpfs", managed_root: "/k8s_pv/gpfs", backend_type: "gpfs",
+              enabled: 1, status: "Ready", status_detail: null, kind: "both", default_uid: 0, default_gid: 1500,
+              default_owner: "0:1500" } as unknown as Storage;
+  let body: any = null;
+  server.use(
+    http.put("/api/admin/storages/:name", async ({ request }) => {
+      body = await request.json(); return HttpResponse.json(S); }),
+    http.get("/api/admin/k8s/storage-classes", () => HttpResponse.json([])),
+  );
+  wrap(<StorageDialog mode="edit" storage={S} trigger={<Button>수정</Button>} />);
+  await userEvent.click(screen.getByRole("button", { name: "수정" }));
+  expect(screen.getByLabelText("기본 소유 uid")).toHaveValue("0");
+  expect(screen.getByLabelText("기본 소유 gid")).toHaveValue("1500");
+  await userEvent.clear(screen.getByLabelText("기본 소유 uid"));
+  await userEvent.type(screen.getByLabelText("기본 소유 uid"), "2000");
+  await userEvent.click(screen.getByRole("button", { name: "저장" }));
+  await waitFor(() => expect(body).toEqual({ mount_path: "/k8s_pv/gpfs", managed_root: "/k8s_pv/gpfs", backend_type: "gpfs",
+    enabled: true, user_enabled: true, kind: "both", default_uid: 2000, default_gid: 1500 }));
 });

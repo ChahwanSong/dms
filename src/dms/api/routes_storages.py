@@ -1,8 +1,8 @@
 import posixpath
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictInt
 from ..domain import DomainValidationError
-from ..repositories.k8s import storage_kind
+from ..repositories.k8s import storage_default_owner, storage_kind
 from ..repositories.storages import storage_open_to_users
 from .auth import Identity, audit_actor, require_admin, require_user
 
@@ -21,6 +21,10 @@ class StorageCreate(BaseModel):
     # 스토리지 종류(2026-10-25 dms-k8s 설계 D11): filesystem(직접 경로) | pv(k8s PV 전용 -- StorageClass 매핑 대상) | both.
     # 생략 = filesystem(종전 등록과 같다). 그 밖의 값은 422 invalid_storage_kind.
     kind: str = "filesystem"
+    # PV 목적지 sync 결과의 기본 소유자(2026-10-26 사용자 지시 -- 생략 = 0:0 = root:root). StrictInt: "1500"·true 를 정수로
+    # 강제 변환하지 않는다(true → 1 은 의도와 다른 uid 다). 범위 밖은 422 invalid_storage_owner(저장소 검증).
+    default_uid: StrictInt = 0
+    default_gid: StrictInt = 0
 
 
 class StorageUpdate(BaseModel):
@@ -32,11 +36,26 @@ class StorageUpdate(BaseModel):
     user_enabled: bool | None = None
     # None = 현재 값 유지(같은 이유). 매핑이 걸린 스토리지를 filesystem 으로 바꾸면 422 storage_has_sc_mappings(D10).
     kind: str | None = None
+    # None = 현재 값 유지(같은 이유 -- 목록 화면의 사용 범위 PUT 도 보내지 않는다).
+    default_uid: StrictInt | None = None
+    default_gid: StrictInt | None = None
+
+
+def _owner_id_view(value) -> "int | None":
+    """응답의 default_uid·default_gid 한 칸: NULL(기배포 ALTER 직후) = 0(storage_default_owner 와 같은 정의). 정수 아닌 저장값
+    (변조)은 None -- 0 으로 뭉개 보이면 무효 값이 root 로 읽힌다. 범위 밖 정수는 그대로 보인다(관리자가 무엇이 틀렸는지 보게;
+    default_owner 가 None 이라 무효임은 함께 드러난다)."""
+    if value is None:
+        return 0
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 def _with_kind(row: dict) -> dict:
-    """응답 행의 kind 를 정규화한다(NULL·알 수 없는 값 = filesystem -- repositories.k8s.storage_kind 와 같은 규칙)."""
-    return {**row, "kind": storage_kind(row)}
+    """응답 행의 kind 를 정규화한다(NULL·알 수 없는 값 = filesystem -- repositories.k8s.storage_kind 와 같은 규칙).
+    기본 소유자도 함께 싣는다(2026-10-26): default_uid·default_gid(NULL = 0) + default_owner "uid:gid"(무효 값이면 None --
+    storage_default_owner 한 곳의 정규화)."""
+    return {**row, "kind": storage_kind(row), "default_uid": _owner_id_view(row.get("default_uid")),
+            "default_gid": _owner_id_view(row.get("default_gid")), "default_owner": storage_default_owner(row)}
 
 
 @router.get("/api/admin/storages")
@@ -52,6 +71,7 @@ def create_storage(body: StorageCreate, request: Request,
             storage_name=body.storage_name, mount_path=body.mount_path,
             managed_root=body.managed_root, backend_type=body.backend_type,
             enabled=body.enabled, user_enabled=body.user_enabled, kind=body.kind,
+            default_uid=body.default_uid, default_gid=body.default_gid,
             actor=audit_actor(identity)))
     except DomainValidationError as e:
         raise HTTPException(
@@ -82,7 +102,8 @@ def update_storage(name: str, body: StorageUpdate, request: Request,
         return _with_kind(repos.storages.update(
             name, mount_path=body.mount_path, managed_root=body.managed_root,
             backend_type=body.backend_type, enabled=body.enabled,
-            user_enabled=body.user_enabled, kind=body.kind, actor=audit_actor(identity)))
+            user_enabled=body.user_enabled, kind=body.kind, default_uid=body.default_uid,
+            default_gid=body.default_gid, actor=audit_actor(identity)))
     except DomainValidationError as e:
         raise HTTPException(status_code=422, detail=e.reason_code)
     except KeyError:

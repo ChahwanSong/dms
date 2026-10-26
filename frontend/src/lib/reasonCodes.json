@@ -319,5 +319,9 @@
   "username_numeric_only",
   "username_reserved",
   "scan_unrestricted_only",
-  "chmod_not_allowed"
+  "chmod_not_allowed",
+  "invalid_storage_owner",
+  "pv_owner_not_applicable",
+  "pv_owner_root_not_allowed",
+  "storage_owner_changed"
 ]

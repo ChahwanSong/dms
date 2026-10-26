@@ -41,7 +41,10 @@ export function previewSummaryText(job: Pick<DataJob, "preview_summary" | "opera
   return `${head}${tail}${rc}`;
 }
 
-export function ConfirmDialog({ job }: { job: DataJob }) {
+// resultOwner(2026-10-26): sync 의 결과 소유 한 줄 -- 요청 상세 「목적지 소유」와 같은 값(requestSpec.ownership: 목적지 스토리지
+// 기본 소유자 | 운영자가 고른 PV 루트 소유자(잰 값) | chown 지정값 | 옛 행 문구). 컨펌은 실행 승인이라 「결과가 누구 소유가 되나」를
+// 승인하는 자리에서 보인다. 모르면(null·생략) 줄을 그리지 않는다(지어내지 않는다).
+export function ConfirmDialog({ job, resultOwner = null }: { job: DataJob; resultOwner?: string | null }) {
   const [open, setOpen] = useState(false);
   const confirm = useConfirmJob(job.request_id);
   // 닫힐 때마다 에러를 비운다. onOpenChange만으로는 부족하다 — "닫기"는 setOpen(false)를
@@ -60,6 +63,9 @@ export function ConfirmDialog({ job }: { job: DataJob }) {
           미리보기(dry-run)가 끝났습니다. 아래 결과를 확인하고 컨펌하면 실제 실행이 시작됩니다.
         </p>
         <pre className="bg-canvas rounded-lg p-3 whitespace-pre-wrap">{previewSummaryText(job)}</pre>
+        {job.operation === "sync" && resultOwner !== null && (
+          <p className="text-ink/70">결과 소유: <span className="font-medium text-ink">{resultOwner}</span></p>
+        )}
         <p className="text-ink/70">지문(fingerprint): <code>{job.preview_fingerprint}</code></p>
         <p className="text-ink/70">만료: {kstStampOrDash(job.preview_expires_at)}</p>
         {confirm.isError && <p className="text-bad">{(confirm.error as ApiError).message}</p>}

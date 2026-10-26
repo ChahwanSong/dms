@@ -13,6 +13,7 @@ import {
 import type { Loc, LocMode, Side } from "./pvLocation";
 import { nsLabel } from "./k8sTerms";
 import type { VolumeRow } from "./types";
+import { ownerText, validOwner } from "../../lib/syncOwnership";
 
 // 단일 작업 화면의 한 쪽(소스·목적지·대상) 위치 입력(dms-k8s 설계 §7).
 //   - 맵핑 범위(일반 사용자·목록 밖 관리자, 면제 관리자의 「권한 기준 사용자」 지정): namespace (StorageClass) → PV 이름 → PV 안 경로
@@ -25,7 +26,25 @@ const MODE_OPTIONS: readonly { value: LocMode; label: string }[] = [
   { value: "pv", label: "PV" }, { value: "path", label: "직접 경로" },
 ];
 
-export function LocationField({ side, operation, loc, onChange, catalog, search, resolved, allowRaw, rawSlot }: {
+/** PV 목적지 sync 의 결과 소유(제출 화면이 정한다 -- 서버 _auto_chown 우선순위): chown 지정 > 운영자 「PV 루트 소유자」 > 목적지
+ *  스토리지 기본 소유자(기본·사용자). 목적지가 PV 전체(루트)일 때의 경고 문장이 읽는다. */
+export type DestOwner = { rule: "storage" } | { rule: "pv_root" } | { rule: "chown"; value: string };
+
+/** 목적지가 PV 전체(루트)일 때의 경고 -- 막지 않는다(제출은 된다). PV 루트 디렉터리 **자체**가 결과 소유로 바뀐다는 사실을 말한다:
+ *  스토리지 기본 소유자 규칙이면 PV 루트가 그 uid:gid 로 chown 된다(2026-10-26 -- 그 PV 를 쓰는 다른 사용자·파드에 영향). */
+export function pvRootDestNote(owner: DestOwner, row: Pick<VolumeRow, "storage_owner">): string {
+  const tail = " — 하위 디렉터리로 받으려면 경로를 적으세요.";
+  if (owner.rule === "pv_root")
+    return `목적지가 PV 전체(루트)라 PV 루트 디렉터리의 권한·시각이 소스에 맞춰 바뀝니다(소유자는 PV 루트 소유자 그대로)${tail}`;
+  if (owner.rule === "chown")
+    return `목적지가 PV 전체(루트)라 PV 루트 디렉터리 자체가 chown 지정값 ${owner.value} 소유로 바뀌고, 권한·시각은 소스에 맞춰 바뀝니다${tail}`;
+  const v = validOwner(row.storage_owner);
+  return `목적지가 PV 전체(루트)라 PV 루트 디렉터리 자체가 스토리지 기본 소유자${v !== null ? ` ${ownerText(v)} 로` : "(uid:gid)로"} chown 되고, `
+    + `권한·시각은 소스에 맞춰 바뀝니다${tail}`;
+}
+
+export function LocationField({ side, operation, loc, onChange, catalog, search, resolved, allowRaw, rawSlot,
+                               destOwner = { rule: "storage" } }: {
   side: Side;
   operation: string;
   loc: Loc;
@@ -37,6 +56,8 @@ export function LocationField({ side, operation, loc, onChange, catalog, search,
   allowRaw: boolean;
   /** 직접 경로 입력(스토리지 피커 + 상대경로 + 즉답) -- 제출 화면의 기존 부품을 그대로 받는다. */
   rawSlot: ReactNode;
+  /** 목적지 쪽의 결과 소유(생략 = 스토리지 기본 소유자 -- 사용자 기본). 목적지 PV 루트 경고만 읽는다. */
+  destOwner?: DestOwner;
 }) {
   const L = SIDE_LABELS[side];
   const mode: LocMode = allowRaw ? loc.mode : "pv";
@@ -55,7 +76,8 @@ export function LocationField({ side, operation, loc, onChange, catalog, search,
           {search
             ? <SearchPicker side={side} loc={loc} onChange={onChange} row={row} />
             : <GroupPicker side={side} loc={loc} onChange={onChange} catalog={catalog} row={row} />}
-          <SubField side={side} operation={operation} loc={loc} onChange={onChange} resolved={resolved} />
+          <SubField side={side} operation={operation} loc={loc} onChange={onChange} resolved={resolved}
+                    destOwner={destOwner} />
         </>
       )}
     </div>
@@ -169,8 +191,8 @@ function SearchPicker({ side, loc, onChange, row }: {
 }
 
 /** PV 안 경로 + 「실제 경로」·「n분 전 기준」·경고. */
-function SubField({ side, operation, loc, onChange, resolved }: {
-  side: Side; operation: string; loc: Loc; onChange: (next: Loc) => void; resolved: Resolved;
+function SubField({ side, operation, loc, onChange, resolved, destOwner }: {
+  side: Side; operation: string; loc: Loc; onChange: (next: Loc) => void; resolved: Resolved; destOwner: DestOwner;
 }) {
   const L = SIDE_LABELS[side];
   const rm = operation === "rm";
@@ -224,9 +246,7 @@ function SubField({ side, operation, loc, onChange, resolved }: {
         </p>
       )}
       {side === "destination" && row !== null && whole && problem === null && (
-        <p className="mt-1 text-xs text-attn">
-          목적지가 PV 전체(루트)라 PV 루트 디렉터리의 권한·시각이 소스에 맞춰 바뀝니다(소유자는 PV 루트 소유자 그대로) — 하위 디렉터리로 받으려면 경로를 적으세요.
-        </p>
+        <p className="mt-1 text-xs text-attn">{pvRootDestNote(destOwner, row)}</p>
       )}
     </div>
   );

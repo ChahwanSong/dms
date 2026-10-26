@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { CHOWN_NAME_ERROR, chownHasName, chownIsPartial, syncOwnership } from "./syncOwnership";
+import { CHOWN_NAME_ERROR, chownHasName, chownIsPartial, ownerText, syncOwnership, validOwner } from "./syncOwnership";
 import { chownFieldError } from "../features/jobs/optionRules";
 
 // 서버 execution_manifests._auto_chown 의 세 갈래 미러(chown 명시 > root 보존 > 실행 신원 uid:gid) +
@@ -131,4 +131,53 @@ test("PV 목적지여도 명시 chown 이 이기고, 직접 경로 목적지 roo
     .toBe("chown 지정값 7:7");
   expect(syncOwnership({ chown: "", root: true, runAs: "ops", self: true, pvDestination: false }).short)
     .toBe("소스의 소유자·그룹 그대로(root 실행)");
+});
+
+// 2026-10-26 사용자 결정(2차): 「각 k8s 스토리지 항목마다 기본 uid,gid … sync 목적지가 pv 일 때 그 스토리지 기본 uid gid 로 chown.
+// 사용자는 항상 자동, 운영자는 옵션으로 PV 루트 소유자」 -- 요청의 destination_pv.owner_rule(storage | pv_root | 없음 = 옛 행).
+test("validOwner·ownerText: 숫자 uid:gid(각 0..4294967294)만 값, 0:0 은 「0:0(root)」 -- 0 은 정상값", () => {
+  for (const ok of ["0:0", "1500:1500", "4294967294:0"]) expect(validOwner(ok)).toBe(ok);
+  for (const bad of [null, undefined, 7, "", "x:y", "1500", "1500:", ":1500", "-1:0", "4294967295:0", "1:2:3", " 1:2"])
+    expect(validOwner(bad)).toBeNull();
+  expect(ownerText("0:0")).toBe("0:0(root)");
+  expect(ownerText("0:100")).toBe("0:100");
+  expect(ownerText("1500:1500")).toBe("1500:1500");
+});
+
+test("PV 목적지 storage 규칙: 목적지 스토리지 기본 소유자 -- 값을 알면 그 값(0:0 은 root 로), 모르면 「(uid:gid)」", () => {
+  const o = syncOwnership({ chown: "", root: true, runAs: null, self: true, pvDestination: true, pvOwnerRule: "storage",
+                            storageOwner: "1500:1500" });
+  expect(o.short).toBe("목적지 스토리지 기본 소유자 1500:1500");
+  expect(o.long).toContain("결과는 목적지 스토리지 기본 소유자 1500:1500 로 맞춰집니다");
+  expect(o.long).toContain("컨펌 전에 관리자가 그 값을 바꾸면 실행하지 않고 멈춥니다(이미 컨펌한 작업은 확인 창에 보인 값으로 실행됩니다)");
+  expect(o.long).toContain("일반 파일의 setuid·setgid 비트는 지워집니다");
+  expect(o.long).not.toContain("PV 루트");
+  const root = syncOwnership({ chown: "", root: true, runAs: null, self: true, pvDestination: true, pvOwnerRule: "storage",
+                               storageOwner: "0:0" });
+  expect(root.short).toBe("목적지 스토리지 기본 소유자 0:0(root)");
+  expect(root.long).toContain("결과는 목적지 스토리지 기본 소유자 0:0(root) 로 맞춰집니다");
+  const unknown = syncOwnership({ chown: "", root: true, runAs: null, self: true, pvDestination: true, pvOwnerRule: "storage" });
+  expect(unknown.short).toBe("목적지 스토리지 기본 소유자(uid:gid)");
+  expect(unknown.long).toContain("실제 값은 목적지 PV 를 고르면 보입니다");
+  // 형식이 틀린 값(DB·응답 신뢰 경계)은 모름으로 -- 0 으로 뭉개지 않는다
+  expect(syncOwnership({ chown: "", root: true, runAs: null, self: true, pvDestination: true, pvOwnerRule: "storage",
+                         storageOwner: "-1:0" }).short).toBe("목적지 스토리지 기본 소유자(uid:gid)");
+  // 명시 chown 이 이긴다
+  expect(syncOwnership({ chown: "7:7", root: true, runAs: null, self: true, pvDestination: true, pvOwnerRule: "storage",
+                         storageOwner: "1500:1500" }).short).toBe("chown 지정값 7:7");
+});
+
+test("PV 목적지 pv_root 규칙(운영자 옵션): 잰 PV 루트 소유자 + 「운영자 지정」, 옛 행(규칙 없음)은 종전 문구 그대로", () => {
+  const before = syncOwnership({ chown: "", root: true, runAs: null, self: true, pvDestination: true, pvOwnerRule: "pv_root" });
+  expect(before.short).toBe("목적지 PV 루트의 소유자·그룹(점검 뒤 확정 — 운영자 지정)");
+  expect(before.long).toContain("결과 소유를 PV 루트 소유자로 골랐습니다(특권 운영자 옵션 — 기본은 목적지 스토리지 기본 소유자)");
+  const after = syncOwnership({ chown: "", root: true, runAs: null, self: true, pvDestination: true, pvOwnerRule: "pv_root",
+                                pvOwner: "1000:100", storageOwner: "1500:1500" });
+  expect(after.short).toBe("목적지 PV 소유자 1000:100(PV 루트 기준 — 운영자 지정)");
+  expect(after.long).not.toContain("1500:1500");                 // 스토리지 기본 소유자는 이 규칙에서 쓰이지 않는다
+  const legacy = syncOwnership({ chown: "", root: true, runAs: null, self: true, pvDestination: true, pvOwner: "1000:100" });
+  expect(legacy.short).toBe("목적지 PV 소유자 1000:100(PV 루트 기준)");
+  expect(legacy.long).not.toContain("운영자");
+  expect(syncOwnership({ chown: "", root: true, runAs: null, self: true, pvDestination: true, pvOwnerRule: null }).short)
+    .toBe("목적지 PV 루트의 소유자·그룹(점검 뒤 확정)");
 });

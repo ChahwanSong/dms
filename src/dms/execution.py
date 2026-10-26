@@ -29,9 +29,14 @@ class JobSpec:
     artifact_base: str
     timeout_seconds: int | None = None
     ttl_seconds: int | None = None
-    # PV 목적지 root sync 의 결과 소유자 "uid:gid"(2026-10-26 사용자 결정 — 목적지 PV 루트 소유자로 자동 chown).
-    # stepper 가 preflight 에서 잰 값(worker_pool.dest_pv_owner)을 싣는다. 그 밖의 잡은 None.
+    # PV 목적지 root sync 의 결과 소유자 "uid:gid"(2026-10-26 사용자 결정 -- execution_manifests._auto_chown). 규칙
+    # (result_owner_rule)이 "storage" 면 제출이 요청의 destination_pv 블록에 기록한 목적지 스토리지 기본 소유자(블록 owner),
+    # 그 밖(운영자 옵션 "pv_root"·규칙 이전 옛 행 None)이면 stepper 가 preflight 에서 잰 PV 루트 소유자(worker_pool.dest_pv_owner)
+    # 다. 그 밖의 잡은 None.
     result_owner: str | None = None
+    # 결과 소유 규칙(요청 destination_pv 블록의 owner_rule 그대로 -- "storage" | "pv_root" | None(옛 행)). "storage" 만 측정을
+    # 건너뛴다(execution_manifests.pv_owner_measured) -- 나머지는 종전처럼 PV 루트 소유자를 잰다.
+    result_owner_rule: str | None = None
 
 
 class ExecutionError(Exception):

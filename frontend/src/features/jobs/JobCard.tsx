@@ -55,11 +55,13 @@ function JobTransitionsDisclosure({ job, trailing = null }: { job: DataJob; trai
 }
 
 export function JobCard({ job, model, cancel, events, jobCount, refIso, batchChild,
-                          confirmOnGate }: {
+                          confirmOnGate, resultOwner = null }: {
   job: DataJob; model: JobStagesModel;
   cancel: ReturnType<typeof useCancelJob>;
   events: unknown; jobCount: number; refIso?: string | null; batchChild: boolean;
   confirmOnGate: boolean;
+  /** 컨펌 창의 「결과 소유」 줄(sync) -- 요청 상세 「목적지 소유」와 같은 값. null = 생략. */
+  resultOwner?: string | null;
 }) {
   // 끝나지 않은 잡은 모두 「취소」(2026-10-12 사용자 요청 -- 「Pending 과 ConfirmPending 에 취소 버튼이 필요해」): 예전엔
   // 컨펌 대기를 숨겨 미리보기를 보고 「안 하겠다」를 화면에서 할 길이 없었다(만료 24시간 동안 같은 대상은 Conflict). 서버는
@@ -103,7 +105,7 @@ export function JobCard({ job, model, cancel, events, jobCount, refIso, batchChi
         <p className="mt-2 text-sm text-ink/70 break-keep">{`알 수 없는 상태 ${job.state} — 단계 표시는 대략적입니다.`}</p>
       )}
       <JobStages job={job} events={events} jobCount={jobCount} refIso={refIso}
-                 batchChild={batchChild} confirmOnGate={confirmOnGate} />
+                 batchChild={batchChild} confirmOnGate={confirmOnGate} resultOwner={resultOwner} />
       {/* 아티팩트 경로는 잡별 사실이라 잡 카드 맨 아래 줄에(스킴 없는 경로가 실 값이다 -- stepper). px-2 = 버튼의 안쪽
           여백 -- 좁은 폭에서 버튼 아래로 접혀도 버튼 아이콘과 같은 세로선에서 시작한다. sm 이상은 왼쪽 구분선 -- 같은
           크기·색의 글자가 버튼 옆에 붙으면 버튼의 일부로 읽힌다. */}

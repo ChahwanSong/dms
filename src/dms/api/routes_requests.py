@@ -1,4 +1,5 @@
 import json
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, StrictBool
@@ -68,6 +69,10 @@ class RequestBody(BaseModel):
     pv: PvRef | None = None
     source_pv: PvRef | None = None
     destination_pv: PvRef | None = None
+    # PV 목적지 sync 의 결과 소유(2026-10-26 사용자 지시): 생략 = "storage"(목적지 스토리지 기본 소유자 -- 일반 사용자는 늘
+    # 이것), "pv_root" = 목적지 PV 루트 소유자(특권 운영자 옵션). Literal 은 강제 변환하지 않는다(대소문자·공백·다른 형은 422).
+    # 서버는 PV 목적지 sync 마다 destination_pv 블록에 owner_rule(+ storage 면 owner)을 기록한다(submit, k8s_access.OWNER_RULES).
+    pv_owner: Literal["storage", "pv_root"] | None = None
 
 
 def _require(value: str | None, reason: str) -> str:
@@ -76,9 +81,10 @@ def _require(value: str | None, reason: str) -> str:
     return value
 
 
-def _resolve_locations(body: RequestBody, repos) -> tuple[dict, dict]:
-    """바디의 쪽마다 스토리지·경로를 정한다(PV 주소면 k8s_access.resolve_side 로 해석). 반환 (위치, pv 블록들) -- 위치는
-    storage·target·source_storage·source·destination_storage·destination 여섯 칸(PV 주소가 아닌 쪽은 바디 값 그대로).
+def _resolve_locations(body: RequestBody, repos) -> tuple[dict, dict, dict]:
+    """바디의 쪽마다 스토리지·경로를 정한다(PV 주소면 k8s_access.resolve_side 로 해석). 반환 (위치, pv 블록들, 쪽별 스토리지
+    기본 소유자) -- 위치는 storage·target·source_storage·source·destination_storage·destination 여섯 칸(PV 주소가 아닌 쪽은
+    바디 값 그대로), 기본 소유자는 {pv 키: "uid:gid" | None(무효)}(PV 목적지 sync 의 결과 소유 기록용).
     충돌 검사(pv_and_storage_conflict)를 모든 쪽에 먼저 한 뒤 해석한다 -- 해석의 409·422 가 바디 모양 오류를 가리지 않게."""
     loc = {"storage": body.storage, "target": body.target, "source_storage": body.source_storage,
            "source": body.source, "destination_storage": body.destination_storage, "destination": body.destination}
@@ -87,13 +93,14 @@ def _resolve_locations(body: RequestBody, repos) -> tuple[dict, dict]:
     for pv_key, storage_key, _ in present:
         if getattr(body, storage_key) not in (None, ""):
             raise DomainValidationError("pv_and_storage_conflict", pv_key)
-    blocks = {}
+    blocks, owners = {}, {}
     for pv_key, storage_key, path_key in present:
         side = k8s_access.resolve_side(repos, getattr(body, pv_key).model_dump(), getattr(body, path_key),
                                        operation=body.operation)
         loc[storage_key], loc[path_key] = side["storage"], side["target"]
         blocks[pv_key] = side["block"]
-    return loc, blocks
+        owners[pv_key] = side["storage_owner"]
+    return loc, blocks, owners
 
 
 def _validated_payload(body: RequestBody, priority: str,
@@ -160,11 +167,17 @@ def submit(body: RequestBody, request: Request,
     # 술어(identity.root_allowed)로 다시 본다.
     if identity.auth != "session":
         raise HTTPException(status_code=403, detail="privileged_not_authorized")
+    # 결과 소유 선택(pv_owner, 2026-10-26 사용자 지시)은 목적지가 PV 인 sync 에만, 명시 chown 이 없을 때만 뜻이 있다(chown 이
+    # 이긴다) -- 그 밖은 화면이 잘못 보낸 값이라 조용히 버리지 않고 422. 바디 모양 오류라 PV 해석(409·422)보다 먼저 본다.
+    if body.pv_owner is not None and (body.operation != Operation.SYNC.value or body.destination_pv is None
+                                      or "chown" in (body.options or {})):
+        raise HTTPException(status_code=422, detail="pv_owner_not_applicable")
     # PV 주소 해석(설계 §6 게이트 순서: 유지보수 → 연산 → 클러스터 존재·동기화(409) → PV 해석(422) → 해석된 스토리지로
-    # storage_admin_only → 맵핑·raw(403) → sync 쌍 → owner·root → build_data_payload). 이후의 스토리지 게이트는 전부 **해석된**
-    # 스토리지 이름(loc)을 본다 -- PV 주소 제출은 바디의 storage 칸이 비어 있어 예전 게이트를 조용히 건너뛰었다(리뷰).
+    # storage_admin_only → 맵핑·raw(403) → PV 목적지 결과 소유(409) → sync 쌍 → owner·root → build_data_payload). 이후의
+    # 스토리지 게이트는 전부 **해석된** 스토리지 이름(loc)을 본다 -- PV 주소 제출은 바디의 storage 칸이 비어 있어 예전 게이트를
+    # 조용히 건너뛰었다(리뷰).
     try:
-        loc, pv_blocks = _resolve_locations(body, repos)
+        loc, pv_blocks, pv_owners = _resolve_locations(body, repos)
     except DomainValidationError as e:
         raise HTTPException(status_code=k8s_access.SUBMIT_STATUS.get(e.reason_code, 422), detail=e.reason_code)
     # 관리자 전용 스토리지(2026-09-30 사용 범위, storage_open_to_users): 비관리자 피커에서
@@ -180,19 +193,37 @@ def submit(body: RequestBody, request: Request,
     # 한다(k8s_access_denied). 스토리지 칸도 PV 도 없는 쪽은 아래 검증의 정확한 422(missing_*)로 흘린다. planner·컨펌이 요청
     # 행으로 다시 본다(k8s_access.recheck_request -- 대기 중 권한 회수·DB 직접 삽입).
     if not can_run_as_root(identity, settings, repos):
-        # 결과 소유자는 목적지 PV 루트 소유자로 자동으로 맞춘다(2026-10-26 사용자 결정) -- 명시 chown 은 특권 운영자만(일반
-        # 사용자가 API 로 그 규칙을 덮지 못하게). planner·컨펌이 요청 행으로 다시 본다(k8s_access.recheck_request).
+        # PV 목적지 결과 소유자는 목적지 스토리지 기본 소유자로 자동으로 맞춘다(2026-10-26 사용자 지시 「사용자는 항상 자동으로」)
+        # -- 명시 chown 은 특권 운영자만(일반 사용자가 API 로 그 규칙을 덮지 못하게). planner·컨펌이 요청 행으로 다시 본다
+        # (k8s_access.recheck_request).
         if "chown" in (body.options or {}):
             raise HTTPException(status_code=403, detail="chown_not_allowed")
         # chmod 도 같은 원칙(2026-10-26 보안 리뷰 -- setuid/setgid 비트를 실은 결과 파일을 못 만들게)
         if "chmod" in (body.options or {}):
             raise HTTPException(status_code=403, detail="chmod_not_allowed")
+        # 결과 소유를 PV 루트 소유자로 고르는 것은 특권 운영자 옵션이다(같은 날 사용자 지시) -- "storage"(기본)는 누구나.
+        if body.pv_owner == "pv_root":
+            raise HTTPException(status_code=403, detail="pv_owner_root_not_allowed")
         for pv_key, storage_key, _ in k8s_access.sides(body.operation):
             if pv_key not in pv_blocks and getattr(body, storage_key) not in (None, ""):
                 raise HTTPException(status_code=403, detail="raw_path_not_allowed")
         for block in pv_blocks.values():
             if repos.k8s.access_for(identity.actor, block["cluster"], block["namespace"]) is None:
                 raise HTTPException(status_code=403, detail="k8s_access_denied")
+    # PV 목적지 sync 의 결과 소유 규칙(2026-10-26 사용자 지시): 모든 PV 목적지 sync 의 destination_pv 블록에 owner_rule 을
+    # 기록한다(생략 = "storage"). "storage" 면 목적지 스토리지의 기본 소유자(repositories.k8s.storage_default_owner)를 owner 로
+    # 남긴다 -- 확인 창·요청 상세가 이 값을 보이고, planner·컨펌이 현재 값과 대조하며(storage_owner_changed), stepper 가 이 값으로
+    # --chown 한다(execution_manifests._auto_chown). 저장된 값이 무효(변조)면 root 등으로 뭉개지 않고 409. 명시 chown(특권 운영자)이
+    # 있으면 기록하지 않는다(리뷰) -- 결과는 chown 값이라(_auto_chown 우선순위, 측정도 없다) 쓰이지 않는 스토리지 값을 동결하면
+    # 그 값의 변경·무효로 운영자 요청이 거짓 거부(storage_owner_changed·invalid_storage_owner)된다. 소스 블록에는 싣지 않는다.
+    if (body.operation == Operation.SYNC.value and "destination_pv" in pv_blocks
+            and "chown" not in (body.options or {})):
+        rule = body.pv_owner if body.pv_owner is not None else "storage"
+        pv_blocks["destination_pv"]["owner_rule"] = rule
+        if rule == "storage":
+            if pv_owners.get("destination_pv") is None:
+                raise HTTPException(status_code=409, detail="invalid_storage_owner")
+            pv_blocks["destination_pv"]["owner"] = pv_owners["destination_pv"]
     # 사용자 sync 허용 스토리지 쌍(2026-09-30, repositories/sync_pairs.py): 기본 전부 불가 --
     # 관리자가 허용한 (소스 -> 목적지) 쌍만. 포탈의 후보 필터는 표시일 뿐이라 여기서 막는다
     # (planner·컨펌이 다시 본다 -- 대기 중 허용이 빠진 요청). 스토리지 필드가 빠진 요청은

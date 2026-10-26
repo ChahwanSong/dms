@@ -7,6 +7,7 @@ import type { Storage } from "../../lib/types";
 import { SCOPES, flagsFor, scopeOf } from "./storageScope";
 import type { StorageScope } from "./storageScope";
 import { KIND_CHOICES, PV_PATH_PRESETS, storageKindOf } from "../k8s/k8sTerms";
+import { OWNER_ID_MAX } from "../../lib/syncOwnership";
 import { useStorageClasses } from "../k8s/useK8s";
 import type { StorageKind } from "../k8s/types";
 // 서버 식별자 ↔ 표시명(src/dms/repositories/storages.py _BACKENDS 와 같은 셋 --
@@ -44,6 +45,21 @@ function PvPresetNote({ backend }: { backend: string }) {
   );
 }
 
+/** 기본 소유 uid·gid 칸의 시작값: 정수면 그 값(범위 밖이어도 그대로 -- 아래 검증이 고치라고 말한다), 없음·null 은 "0"(서버가 NULL
+ *  을 0 = root 로 읽는다 -- storage_default_owner), 그 밖의 모양(DB 신뢰 경계 밖)은 빈 칸(관리자가 다시 적어야 저장된다). */
+function ownerSeed(v: unknown): string {
+  if (v === undefined || v === null) return "0";
+  return typeof v === "number" && Number.isInteger(v) ? String(v) : "";
+}
+
+/** 기본 소유 uid·gid 즉답 검증(서버 StoragesRepository 의 invalid_storage_owner 미러): 숫자만, 0..4294967294. 빈 칸도 오류다
+ *  (「모름」으로 저장할 수 없다 -- 0 은 root 라는 정상값이라 0 을 적어야 한다). */
+export function ownerIdError(raw: string): string | null {
+  const v = raw.trim();
+  if (/^[0-9]{1,10}$/.test(v) && Number(v) <= OWNER_ID_MAX) return null;
+  return `uid·gid 는 0~${OWNER_ID_MAX} 정수여야 합니다`;
+}
+
 /** 수정 창의 「연결된 StorageClass」 -- 매핑이 있는 스토리지를 파일시스템으로 바꾸면 서버가 거부한다
  *  (storage_has_sc_mappings) -- 무엇이 걸려 있는지 창 안에서 보인다. */
 function MappedClasses({ name, enabled }: { name: string; enabled: boolean }) {
@@ -71,6 +87,12 @@ export function StorageDialog({ mode, storage, trigger }: {
   const [backend, setBackend] = useState(storage?.backend_type ?? "");
   const [scope, setScope] = useState<StorageScope>(storage ? scopeOf(storage) : "all");
   const [kind, setKind] = useState<StorageKind>(storage ? storageKindOf(storage) : "filesystem");
+  // 기본 소유(2026-10-26): PV·둘 다 종류의 PV 목적지 sync 결과 소유. 응답 키는 lib/types 의 Storage 에 선언하지 않는다(kind 와 같은
+  // 이유 -- 공용 타입 파일을 브랜치마다 고치지 않게).
+  const seedUid = () => ownerSeed((storage as { default_uid?: unknown } | undefined)?.default_uid);
+  const seedGid = () => ownerSeed((storage as { default_gid?: unknown } | undefined)?.default_gid);
+  const [uid, setUid] = useState(seedUid);
+  const [gid, setGid] = useState(seedGid);
   const create = useCreateStorage(); const update = useUpdateStorage();
   useEffect(() => {
     if (!open) { create.reset(); update.reset(); return; }
@@ -78,11 +100,18 @@ export function StorageDialog({ mode, storage, trigger }: {
     setRoot(storage?.managed_root ?? ""); setBackend(storage?.backend_type ?? "");
     setScope(storage ? scopeOf(storage) : "all");
     setKind(storage ? storageKindOf(storage) : "filesystem");
+    setUid(seedUid()); setGid(seedGid());
   }, [open, storage]);
   const m = mode === "create" ? create : update;
   // 수정에서도 지금 종류를 함께 싣는다 -- 서버가 생략을 「유지」로 읽든 「파일시스템」으로 읽든 종류가 바뀌지 않게.
-  const kindBody = { kind };
+  // 기본 소유는 PV 를 담는 종류(pv·both)에서만 보이고 싣는다 -- 파일시스템이면 쓰이지 않는 값이라 생략(서버 = 현재 값 유지).
+  const pvKind = kind !== "filesystem";
+  const uidError = pvKind ? ownerIdError(uid) : null;
+  const gidError = pvKind ? ownerIdError(gid) : null;
+  const ownerInvalid = uidError !== null || gidError !== null;
+  const kindBody = pvKind ? { kind, default_uid: Number(uid.trim()), default_gid: Number(gid.trim()) } : { kind };
   const submit = () => {
+    if (ownerInvalid) return;
     if (mode === "create")
       create.mutate({ storage_name: name, mount_path: mount, managed_root: root, backend_type: backend,
                       ...flagsFor(scope), ...kindBody },
@@ -146,6 +175,28 @@ export function StorageDialog({ mode, storage, trigger }: {
             <MappedClasses name={storage.storage_name} enabled={open} />
           )}
         </fieldset>
+        {/* 기본 소유(2026-10-26 사용자 결정): 이 스토리지의 PV 를 목적지로 하는 sync 의 결과(목적지와 복사본)를 이 uid:gid 로
+            맞춘다 -- 사용자 작업은 늘 이 값, 특권 운영자만 「PV 루트 소유자」를 고를 수 있다. 기본 0:0(root:root). PV 를 담는 종류
+            (PV·둘 다)에만 뜻이 있어 그때만 보인다. */}
+        {pvKind && (
+          <fieldset className="space-y-1">
+            <legend className="mb-1">기본 소유(uid:gid)</legend>
+            <div className="grid grid-cols-2 gap-2">
+              <label className="block">기본 소유 uid
+                <input aria-label="기본 소유 uid" className={field} inputMode="numeric" value={uid}
+                       onChange={(e) => setUid(e.target.value)} /></label>
+              <label className="block">기본 소유 gid
+                <input aria-label="기본 소유 gid" className={field} inputMode="numeric" value={gid}
+                       onChange={(e) => setGid(e.target.value)} /></label>
+            </div>
+            {(uidError ?? gidError) !== null && <p className="text-bad text-xs">{uidError ?? gidError}</p>}
+            <p className="text-xs text-ink/70">
+              이 스토리지의 PV 를 목적지로 하는 sync 결과(목적지와 복사된 파일·디렉토리)가 이 uid:gid 소유로 맞춰집니다(기본 0:0 = root:root).
+              바꾸면 제출됐지만 아직 컨펌하지 않은 sync 는 계획·컨펌 단계에서 멈춥니다(다시 제출하면 새 값으로 맞춰집니다) — 이미 컨펌한
+              sync 는 확인 창에 보인 값으로 실행됩니다.
+            </p>
+          </fieldset>
+        )}
         {/* 사용 범위(2026-09-30): 옛 "활성" 체크박스의 자리 -- 비활성이 두 종류(완전 /
             사용자에게만)라 세 상태 라디오다. 등록 때도 고른다(관리자 전용으로 먼저 열어
             점검한 뒤 사용자에게 여는 흐름). */}
@@ -168,7 +219,7 @@ export function StorageDialog({ mode, storage, trigger }: {
         {m.isError && <p className="text-bad">{(m.error as ApiError).message}</p>}
         <div className="flex justify-end gap-2 pt-2">
           <Button variant="ghost" type="button" onClick={() => setOpen(false)}>취소</Button>
-          <Button type="submit" disabled={m.isPending}>저장</Button>
+          <Button type="submit" disabled={m.isPending || ownerInvalid}>저장</Button>
         </div>
       </form>
     </Dialog>

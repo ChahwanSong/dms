@@ -15,7 +15,7 @@ import type { DataJob, RequestDetail, WorkerPool } from "../../lib/types";
 import { REQUEST_TERMINAL_STATES, isTerminal } from "../../lib/jobState";
 import { absParts, hasPvAddress, pathParts, pvDetailParts, type StorageRoots } from "../../lib/storagePaths";
 import { toolSummary } from "../../lib/jobTool";
-import { syncOwnership } from "../../lib/syncOwnership";
+import { syncOwnership, validOwner } from "../../lib/syncOwnership";
 import { countText, humanBytes, isPlainObject } from "./format";
 import { PRIV_ROOT_HEAD, PRIV_USER, SCAN_INT_FIELDS, SYNC_INT_FIELDS, SYNC_OPTION_HELP } from "./optionRules";
 
@@ -386,13 +386,27 @@ export function deriveRequestSpec(req: RequestDetail, jobs: DataJob[] | null, ro
     if (chownOk && chmodOk) {
       const chown = typeof rawOpts.chown === "string" ? rawOpts.chown : "";
       const chmod = typeof rawOpts.chmod === "string" ? rawOpts.chmod : "";
-      // PV 목적지 root sync 는 점검이 잰 목적지 PV 루트 소유자(worker_pool.dest_pv_owner, 2026-10-26)를 보인다.
+      // PV 목적지 root sync 의 결과 소유는 요청에 박힌 규칙(destination_pv.owner_rule, 2026-10-26)을 따른다:
+      //   storage  서버가 제출 때 박은 목적지 스토리지 기본 소유자(destination_pv.owner) -- 「목적지 스토리지 기본 소유자 <v>」
+      //   pv_root  운영자 옵션 -- 점검이 잰 목적지 PV 루트 소유자(worker_pool.dest_pv_owner)
+      //   없음     이 규칙 전에 제출된 옛 행 -- 종전 문구(잰 PV 루트 소유자) 그대로(부재를 오류로 읽지 않는다)
+      // 그 밖의 규칙 값·storage 인데 owner 가 형식에 안 맞음은 변조/비정상 기록이다(서버가 계획·컨펌에서 멈춘다) -- 소유를 단정하지
+      // 않고 행을 생략한다(chown 이 문자열이 아닐 때와 같은 처리).
+      const destPv = obj(p.destination_pv);
+      const rule = destPv?.owner_rule;
       const pvOwner = wp !== null && typeof wp.dest_pv_owner === "string" ? wp.dest_pv_owner : null;
+      const storageOwner = rule === "storage" ? validOwner(destPv?.owner) : null;
+      const ruleOk = destPv === null || rule === undefined || rule === null || rule === "pv_root"
+        || (rule === "storage" && storageOwner !== null);
       const s = syncOwnership({ chown, chmod, root: kind === "root", runAs: runAsName, self,
-                                pvDestination: obj(p.destination_pv) !== null, pvOwner }).short;
+                                pvDestination: destPv !== null,
+                                pvOwnerRule: rule === "storage" || rule === "pv_root" ? rule : null,
+                                storageOwner, pvOwner }).short;
       // 자동 chown(uid:주 gid)은 「실행 신원」 행의 이름을 되풀이하지 않고 결과 숫자만 -- 같은 사실을 두 번 말하지 않는다.
+      // 규칙 기록이 이상하면 chown 이 있어도 행을 생략한다 -- 서버가 그 요청을 계획·컨펌에서 멈추므로 「chown 값으로 셋업」을
+      // 단정할 수 없다.
       ownership = kind === "user" && chown.trim() === "" && uid !== null && gid !== null
-        ? `실행 신원 소유 — ${uid}:${gid}(주${NB}그룹)` : s;
+        ? `실행 신원 소유 — ${uid}:${gid}(주${NB}그룹)` : ruleOk ? s : null;
     }
   }
 

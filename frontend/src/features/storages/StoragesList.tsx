@@ -11,12 +11,22 @@ import { storagePillVariant } from "../../lib/jobState";
 import type { Storage } from "../../lib/types";
 import { SCOPES, flagsFor, scopeMeta, scopeOf } from "./storageScope";
 import type { StorageScope } from "./storageScope";
-import { KIND_LABEL, storageKindOf } from "../k8s/k8sTerms";
+import { KIND_LABEL, storageKindOf, storageOwnerOf } from "../k8s/k8sTerms";
+import { ownerText } from "../../lib/syncOwnership";
 import { Tag } from "../k8s/parts";
 import type { StorageKind } from "../k8s/types";
 
 // 종류 배지(dms-k8s 설계 D11) -- 글자 배지(점 없음, 디자인 규약). PV 를 담는 종류(pv·both)는 파랑, 파일시스템은 중립.
 const KIND_TONE: Record<StorageKind, "neutral" | "info"> = { filesystem: "neutral", pv: "info", both: "info" };
+
+/** 종류 배지 아래 둘째 줄(PV·둘 다만): 기본 소유 uid:gid(2026-10-26 -- PV 목적지 sync 결과 소유). 0:0 은 「0:0(root)」, 저장값이
+ *  올바르지 않으면 그 사실(그 PV 로의 sync 가 409 invalid_storage_owner), 옛 응답(키 없음)은 모름. */
+function OwnerLine({ s }: { s: Storage }) {
+  const owner = storageOwnerOf(s);
+  if (owner === undefined) return <span className="mt-0.5 block text-xs text-muted">기본 소유 모름</span>;
+  if (owner === null) return <span className="mt-0.5 block text-xs text-bad">기본 소유 값 오류 — 수정에서 다시 저장</span>;
+  return <span className="mt-0.5 block whitespace-nowrap text-xs text-ink/70">{`기본 소유 ${ownerText(owner)}`}</span>;
+}
 
 function DeleteButton({ s }: { s: Storage }) {
   const [open, setOpen] = useState(false);
@@ -100,7 +110,10 @@ export function StoragesList() {
             {rows.map((s) => (
               <tr key={s.storage_name} className={`border-t border-line ${scopeOf(s) === "off" ? "opacity-60" : ""}`}>
                 <td className="py-2 font-medium">{s.storage_name}</td>
-                <td><Tag tone={KIND_TONE[storageKindOf(s)]}>{KIND_LABEL[storageKindOf(s)]}</Tag></td>
+                <td>
+                  <Tag tone={KIND_TONE[storageKindOf(s)]}>{KIND_LABEL[storageKindOf(s)]}</Tag>
+                  {storageKindOf(s) !== "filesystem" && <OwnerLine s={s} />}
+                </td>
                 <td>{s.backend_type}</td>
                 {/* 스토리지 전용 storagePillVariant: Ready=ok, Degraded=busy(주의 --
                     planner 가 Degraded 에도 잡을 보낸다), Unknown 등=neutral. */}

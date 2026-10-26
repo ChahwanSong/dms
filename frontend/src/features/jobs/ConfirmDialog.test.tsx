@@ -103,3 +103,26 @@ test("옛 행의 supplementary_gids 키는 읽지 않는다 -- rm 확인 창에 
   expect(await screen.findByText("rm 작업 컨펌")).toBeInTheDocument();
   expect(screen.queryByText(/보조 그룹/)).toBeNull();
 });
+
+// ---- 결과 소유 줄(2026-10-26): sync 컨펌은 「결과가 누구 소유가 되나」를 승인하는 자리 -- 요청 상세 「목적지 소유」와 같은 값 ----
+test("sync: 결과 소유를 알면 한 줄로 보이고(0:0 도 실제 값), 모르면(null·생략) 줄을 그리지 않는다", async () => {
+  const view = wrap(<ConfirmDialog job={job as any} resultOwner="목적지 스토리지 기본 소유자 0:0(root)" />);
+  await userEvent.click(screen.getByRole("button", { name: "작업 컨펌" }));
+  const line = await screen.findByText("결과 소유:", { exact: false, selector: "p" });
+  expect(line.textContent).toBe("결과 소유: 목적지 스토리지 기본 소유자 0:0(root)");
+  view.unmount();
+  for (const owner of [null, undefined]) {
+    const v = wrap(<ConfirmDialog job={job as any} resultOwner={owner} />);
+    await userEvent.click(screen.getByRole("button", { name: "작업 컨펌" }));
+    expect(await screen.findByText(/abc123/)).toBeInTheDocument();
+    expect(screen.queryByText(/^결과 소유:/)).toBeNull();
+    v.unmount();
+  }
+});
+
+test("rm: 결과 소유 줄이 없다(소유를 만드는 연산이 아니다)", async () => {
+  wrap(<ConfirmDialog job={{ ...job, operation: "rm" } as any} resultOwner="목적지 스토리지 기본 소유자 1500:1500" />);
+  await userEvent.click(screen.getByRole("button", { name: "작업 컨펌" }));
+  expect(await screen.findByText("rm 작업 컨펌")).toBeInTheDocument();
+  expect(screen.queryByText(/^결과 소유:/)).toBeNull();
+});

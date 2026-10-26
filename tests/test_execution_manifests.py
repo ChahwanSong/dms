@@ -596,10 +596,12 @@ def _emitted_markers():
     # traversable)도 긁힌다 -- execution_volcano._volumes 는 항상 그것을 붙인다.
     vols = _VOL + [{"name": "dms-artifact-base", "hostPath": {"path": "/cephfs/dms/artifacts"},
                     "mountPath": "/dms-artifact-base"}]
-    # root + PV 목적지 sync(2026-10-26) -- 목적지 PV 루트 소유자 측정(pv_owner_unknown)이 붙는다(dsync 단일·nsync 목적지 역할).
+    # root + PV 목적지 sync 의 운영자 옵션 「PV 루트 소유자」(2026-10-26, 결과 소유 규칙 pv_root) -- 목적지 PV 루트 소유자
+    # 측정(pv_owner_unknown)이 붙는다(dsync 단일·nsync 목적지 역할). 기본 규칙 storage 는 재지 않는다(봉쇄만).
     pv_dest = _spec(operation="sync", tool="dsync", phase="preflight", identity={"uid": 0, "gid": 0, "privileged": True},
                     paths={"source": "/s", "source_storage": "s1", "destination": "/d/pv/out", "destination_storage": "s2",
-                           "contain": {"destination": {"root": "/d/pv", "anchor": "/d"}}})
+                           "contain": {"destination": {"root": "/d/pv", "anchor": "/d"}}},
+                    result_owner_rule="pv_root")
     specs += [(pv_dest, None), (pv_dest, "destination")]
     found = set()
     for spec, role in specs:

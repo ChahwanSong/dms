@@ -279,7 +279,14 @@ def _apply_migrations(db: Database) -> None:
             updated_at TEXT NOT NULL,
             updated_by TEXT NOT NULL,
             -- 스토리지 종류(2026-10-25 dms-k8s D11): 'filesystem' | 'pv' | 'both'. NULL = filesystem(종전 동작).
-            kind TEXT)""",
+            kind TEXT,
+            -- PV 목적지 sync 결과의 기본 소유자 uid·gid(2026-10-26 사용자 지시 -- 기본 0·0 = root). pv·both 에서만 쓰인다
+            -- (filesystem 은 저장만 하고 무시). BIGINT: 유효 범위가 0..4294967294(execution_manifests.valid_owner)라
+            -- PostgreSQL INTEGER(int4, 최대 2147483647)면 큰 uid 가 22003 으로 터진다(files_count 와 같은 규약). NULL(기배포
+            -- ALTER 직후)은 migrate 의 _backfill_storage_default_owner 가 0 으로 채우고, 코드도 0 으로 읽는다
+            -- (repositories.k8s.storage_default_owner 하나로만 읽는다).
+            default_uid BIGINT NOT NULL DEFAULT 0,
+            default_gid BIGINT NOT NULL DEFAULT 0)""",
         """CREATE TABLE IF NOT EXISTS policies (
             tool TEXT PRIMARY KEY,
             max_nodes INTEGER NOT NULL,
@@ -697,6 +704,7 @@ def _apply_migrations(db: Database) -> None:
     db.execute("DROP TABLE IF EXISTS runs")
     _ensure_columns(db)
     _backfill_storage_user_enabled(db)
+    _backfill_storage_default_owner(db)
     _widen_count_columns(db)
     # requests.batch_id는 CREATE TABLE(신규 DB) 또는 _ensure_columns의 ALTER(구형 DB)로
     # 보강된 뒤에만 존재가 보장되므로, 이 인덱스는 그 이후에 생성한다.
@@ -894,6 +902,10 @@ def _ensure_columns(db):
         # (= filesystem / 표기 없음, 종전 동작). 백필하지 않는다(NULL 이 곧 종전 의미).
         ("storages", "kind", "TEXT"),
         ("requests", "target_label", "TEXT"),
+        # 스토리지 기본 소유 uid:gid(2026-10-26) -- 이중 경로 규약. BIGINT 는 CREATE 선언과 같은 형(int4 천장). 기배포 행은
+        # ALTER 로 NULL 이 되므로 migrate 가 _backfill_storage_default_owner 로 0(= root:root, 사용자 지정 기본값)을 채운다.
+        ("storages", "default_uid", "BIGINT"),
+        ("storages", "default_gid", "BIGINT"),
     ):
         if not _column_exists(db, table, column):
             db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
@@ -904,6 +916,14 @@ def _backfill_storage_user_enabled(db):
     누구나 썼으므로 그 동작을 그대로 옮긴다. NULL 행만 건드려 멱등이다(0 = 관리자가
     정한 관리자 전용은 절대 덮지 않는다)."""
     db.execute("UPDATE storages SET user_enabled = 1 WHERE user_enabled IS NULL")
+
+
+def _backfill_storage_default_owner(db):
+    """기배포 storages 행의 default_uid·default_gid NULL(ALTER 직후) → 0(root:root -- 2026-10-26 사용자 지정 기본값). NULL
+    칸만 건드려 멱등이다(관리자가 정한 값은 절대 덮지 않는다 -- 0 도 정한 값이라 필터가 IS NULL 이다). 두 칸을 따로 채운다
+    (한쪽만 NULL 인 행도 다른 쪽 값을 보존한다)."""
+    db.execute("UPDATE storages SET default_uid = 0 WHERE default_uid IS NULL")
+    db.execute("UPDATE storages SET default_gid = 0 WHERE default_gid IS NULL")
 
 
 def _backfill_submit_wait(db):

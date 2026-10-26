@@ -19,12 +19,15 @@ from dms.config import Settings, SettingsError
 from dms.db import utc_now_iso
 from dms.domain import (DataJobState, DomainValidationError, RESERVED_ACCOUNT_IDS, _ACCOUNT_ID_RE,
                         valid_owner_username)
+from dms.execution import StubExecutionAdapter
+from dms.execution_manifests import _preflight_script, tool_argv
 from dms.identity import (PRIVILEGE_IF_ELIGIBLE, PRIVILEGE_REQUESTED, IdentityRejected, resolve_job_identity,
                           root_allowed)
 from dms.k8s_sync import normalize_snapshot
 from dms.planner import Planner
 from dms.repositories import Repositories
 from dms.repositories.accounts import _USERNAME_RE as ACCOUNT_USERNAME_RE
+from dms.stepper import JobStepper
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "k8s"
 _FILES = {"storage_classes": ("testbed-storageclasses.json", project_storage_class),
@@ -35,6 +38,10 @@ CLUSTER = "dmsk8s"
 STORAGES = (("k8s-pv-nfs", "/k8s_pv/nfs", "nfs", "pv"), ("k8s-pv-gpfs", "/k8s_pv/gpfs", "gpfs", "both"),
             ("k8s-pv-onefs", "/k8s_pv/onefs", "onefs", "pv"), ("cephfs-dms", "/cephfs/dms", "cephfs", "filesystem"))
 SC_TO_STORAGE = {"tb-nfs": "k8s-pv-nfs", "tb-gpfs": "k8s-pv-gpfs", "tb-onefs": "k8s-pv-onefs"}
+# 스토리지 기본 소유(2026-10-26 -- PV 목적지 sync 결과 소유자, (default_uid, default_gid)): nfs 는 0 이 아닌 값, gpfs 는 명시
+# 0:0, onefs·cephfs 는 생략(기본 0:0 = root:root).
+STORAGE_OWNERS = {"k8s-pv-nfs": (1500, 1500), "k8s-pv-gpfs": (0, 0)}
+NFS_OWNER = "1500:1500"
 TOKEN = {"Authorization": "Bearer tok-shared"}
 FP = "sha256:preview"
 
@@ -83,8 +90,9 @@ def world(db):
     repos.k8s.update_settings(primary_node="k8s-w1", secondary_node="k8s-w2", interval_seconds=None, actor="ops")
     _sync_cluster(repos, db)
     for name, root, backend, kind in STORAGES:
+        owner = dict(zip(("default_uid", "default_gid"), STORAGE_OWNERS[name])) if name in STORAGE_OWNERS else {}
         repos.storages.create(storage_name=name, mount_path=root, managed_root=root, backend_type=backend,
-                              kind=kind, actor="ops")
+                              kind=kind, actor="ops", **owner)
         repos.storages.set_status(name, "Ready", "ready_nodes=1")
     for sc, storage in SC_TO_STORAGE.items():
         repos.k8s.set_sc_map(sc, storage_name=storage, path_template=None, actor="ops")
@@ -254,7 +262,11 @@ def test_user_pv_to_pv_sync_runs_end_to_end_without_any_sync_pair(kclient, world
     assert p["source_pv"] == {"cluster": CLUSTER, "namespace": "team-a", "pvc": "datasets", "volume": src_vol,
                               "storage_class": "tb-nfs", "root": "team-a/datasets", "path": "sample"}
     assert src_vol.startswith("pvc-")
-    assert p["destination_pv"]["root"] == "team-b/scratch" and p["destination_pv"]["path"] == "copy"
+    # 목적지 블록만 결과 소유 규칙을 싣는다(2026-10-26): 생략 = "storage" + 목적지 스토리지(k8s-pv-nfs) 기본 소유자
+    dst_vol = p["destination_pv"]["volume"]
+    assert p["destination_pv"] == {"cluster": CLUSTER, "namespace": "team-b", "pvc": "scratch", "volume": dst_vol,
+                                   "storage_class": "tb-nfs", "root": "team-b/scratch", "path": "copy",
+                                   "owner_rule": "storage", "owner": NFS_OWNER}
     assert req["target_label"] == "datasets — team-a (tb-nfs) / sample → scratch — team-b (tb-nfs) / copy"
     assert req["auth_method"] == "session"
     # 계획: 맵핑 재확인(3a) 통과, 쌍 게이트(3b) 면제, root 신원(세션)
@@ -401,6 +413,9 @@ def test_unrestricted_admin_mixes_raw_and_pv_and_any_namespace(kclient, world):
     rid = r.json()["request_id"]
     req = world.requests.get(rid)
     assert "source_pv" not in req["payload"] and req["payload"]["destination_pv"]["namespace"] == "team-c"
+    # 면제 운영자도 기본은 목적지 스토리지 기본 소유자(team-c/archive 는 tb-nfs → k8s-pv-nfs)
+    assert (req["payload"]["destination_pv"]["owner_rule"], req["payload"]["destination_pv"]["owner"]) == (
+        "storage", NFS_OWNER)
     assert req["target_label"] == "cephfs-dms:src → archive — team-c (tb-nfs) / in"
     assert _plan(world)[rid] == "planned"
     # 직접 경로만인 요청은 target_label 이 없다(검색은 resource_key 표기로)
@@ -489,11 +504,23 @@ def _move_scratch(db):
     db.execute("UPDATE k8s_storage_class_maps SET path_template = '{volume}' WHERE storage_class = 'tb-nfs'")
 
 
+def _change_nfs_owner(db):
+    # 제출 뒤 관리자가 목적지 스토리지(scratch = tb-nfs → k8s-pv-nfs)의 기본 소유자를 바꾼 모양(2026-10-26)
+    db.execute("UPDATE storages SET default_gid = 2000 WHERE storage_name = 'k8s-pv-nfs'")
+
+
+def _break_nfs_owner(db):
+    # 저장된 기본 소유자가 무효(변조) -- 재확인은 root 등으로 뭉개지 않고 거부한다
+    db.execute("UPDATE storages SET default_uid = -5 WHERE storage_name = 'k8s-pv-nfs'")
+
+
 @pytest.mark.parametrize("tamper,reason", [
     (_revoke_alice_on_team_b, "k8s_access_denied"),
     (_move_scratch, "pv_moved"),
     (lambda db: db.execute("DELETE FROM k8s_pvcs WHERE namespace = 'team-b' AND name = 'scratch'"), "pv_not_found"),
     (lambda db: db.execute("DELETE FROM k8s_clusters"), "pv_not_found"),
+    (_change_nfs_owner, "storage_owner_changed"),
+    (_break_nfs_owner, "invalid_storage_owner"),
 ])
 def test_planner_rechecks_mapping_and_location(world, db, submitted, tamper, reason):
     tamper(db)
@@ -518,9 +545,16 @@ def _tamper_payload(db, rid, mutate):
     (lambda p: p.update(destination_pv={"cluster": CLUSTER}), "pv_not_found"),
     # 블록의 root 만 바꾼 행
     (lambda p: p["destination_pv"].update(root="team-c/archive"), "pv_moved"),
-    # 비 특권 운영자 행에 명시 chown(결과는 목적지 PV 소유자로 자동 -- 2026-10-26)
+    # 비 특권 운영자 행에 명시 chown(결과는 목적지 스토리지 기본 소유자로 자동 -- 2026-10-26)
     (lambda p: p.setdefault("options", {}).update(chown="0:0"), "chown_not_allowed"),
     (lambda p: p.setdefault("options", {}).update(chmod="F4755"), "chmod_not_allowed"),
+    # 결과 소유 규칙 변조(2026-10-26): 비면제 행의 pv_root·목록 밖 규칙·기록된 소유자 바꿔치기·지우기
+    (lambda p: p["destination_pv"].update(owner_rule="pv_root"), "pv_owner_root_not_allowed"),
+    (lambda p: p["destination_pv"].update(owner_rule="bogus"), "pv_owner_not_applicable"),
+    (lambda p: p["destination_pv"].update(owner_rule=None), "pv_owner_not_applicable"),
+    (lambda p: p["destination_pv"].update(owner_rule=["storage"]), "pv_owner_not_applicable"),
+    (lambda p: p["destination_pv"].update(owner="0:0"), "storage_owner_changed"),
+    (lambda p: p["destination_pv"].pop("owner"), "storage_owner_changed"),
 ])
 def test_planner_treats_the_request_row_as_untrusted(world, db, submitted, mutate, reason):
     _tamper_payload(db, submitted, mutate)
@@ -574,6 +608,8 @@ def test_planner_rm_root_recheck(world, db, kclient):
 @pytest.mark.parametrize("tamper,reason", [
     (_revoke_alice_on_team_b, "k8s_access_denied"),
     (_move_scratch, "pv_moved"),
+    # 미리보기 뒤 관리자가 목적지 스토리지 기본 소유자를 바꿈 -- 확인 창에 보인 소유자와 실행이 갈라지지 않게(2026-10-26)
+    (_change_nfs_owner, "storage_owner_changed"),
 ])
 def test_confirm_rechecks_and_terminates(kclient, world, db, submitted, tamper, reason):
     assert _plan(world)[submitted] == "planned"
@@ -589,6 +625,8 @@ def test_confirm_rechecks_and_terminates(kclient, world, db, submitted, tamper, 
     (lambda p: p.update(destination="team-a/models"), "pv_target_outside"),
     (lambda p: p.pop("destination_pv"), "raw_path_not_allowed"),
     (lambda p: p.setdefault("options", {}).update(chown="0:0"), "chown_not_allowed"),
+    (lambda p: p["destination_pv"].update(owner_rule="pv_root"), "pv_owner_root_not_allowed"),
+    (lambda p: p["destination_pv"].update(owner="0:0"), "storage_owner_changed"),
 ])
 def test_confirm_treats_the_request_row_as_untrusted(kclient, world, db, submitted, mutate, reason):
     # 계획 뒤(ConfirmPending 동안) 요청 행이 변조돼도 컨펌이 planner 와 같은 함수로 다시 본다.
@@ -778,8 +816,9 @@ _CHOWN_KEEPS_SETID = {"2a10a18269f1879d91f750106a4406218853bb6f"} | _NSYNC_BREAK
 
 
 def test_explicit_chown_is_for_privileged_operators_only(kclient, world):
-    """결과 소유자는 목적지 PV 루트 소유자로 자동으로 맞춘다(2026-10-26 사용자 결정) -- 일반 사용자가 API 로 chown 을 실어 그
-    규칙을 덮지 못한다. 특권 운영자(면제)는 종전대로 명시값이 이긴다."""
+    """PV 목적지 결과 소유자는 목적지 스토리지 기본 소유자로 자동으로 맞춘다(2026-10-26 사용자 지시) -- 일반 사용자가 API 로
+    chown 을 실어 그 규칙을 덮지 못한다. 특권 운영자(면제)는 종전대로 명시값이 이긴다 -- 결과는 chown 값이라 결과 소유 규칙을
+    기록하지 않는다(리뷰: 쓰이지 않는 스토리지 값을 동결하면 그 값의 변경·무효로 거짓 거부된다)."""
     _login(kclient, "alice")
     r = kclient.post("/api/user/requests", json=_pv_sync(options={"chown": "0:0"}))
     assert r.status_code == 403 and r.json()["detail"] == "chown_not_allowed"
@@ -792,7 +831,25 @@ def test_explicit_chown_is_for_privileged_operators_only(kclient, world):
                                                  "run_as_root": True})
     assert r.status_code == 202, r.text
     rid = r.json()["request_id"]
+    block = world.requests.get(rid)["payload"]["destination_pv"]
+    assert "owner_rule" not in block and "owner" not in block
     assert _plan(world)[rid] == "planned"
+
+
+def test_operator_chown_does_not_freeze_the_storage_owner(kclient, world, db):
+    """명시 chown(특권 운영자)이 있으면 결과는 그 값이라 스토리지 기본 소유자를 기록·대조하지 않는다(2026-10-26 리뷰) -- 저장값이
+    무효여도 제출은 409 가 아니고, 계획 뒤 관리자가 기본값을 바꿔도 컨펌은 storage_owner_changed 로 끊기지 않는다."""
+    _login(kclient, "ops")
+    _break_nfs_owner(db)
+    r = kclient.post("/api/user/requests", json={**_pv_sync(dst_path="copy-ops", options={"chown": "1000:100"}),
+                                                 "run_as_root": True})
+    assert r.status_code == 202, r.text
+    rid = r.json()["request_id"]
+    assert _plan(world)[rid] == "planned"
+    jid = _to_confirm_pending(world, rid)
+    _change_nfs_owner(db)
+    r = kclient.post(f"/api/user/jobs/{jid}:confirm", json={"fingerprint": FP})
+    assert r.status_code == 200, r.text
 
 
 def test_job_image_pins_an_nsync_that_does_not_follow_destination_links():
@@ -805,3 +862,133 @@ def test_job_image_pins_an_nsync_that_does_not_follow_destination_links():
     assert refs[0] not in _NSYNC_FOLLOWS_DST_LINKS
     assert refs[0] not in _NSYNC_BREAKS_NEW_DESTINATIONS
     assert refs[0] not in _CHOWN_KEEPS_SETID
+
+
+# --- PV 목적지 결과 소유(2026-10-26 사용자 지시 -- 스토리지 기본 uid:gid, 운영자 옵션 PV 루트 소유자) ------------------------
+
+def test_user_cannot_choose_the_pv_root_owner(kclient, world):
+    """사용자는 늘 목적지 스토리지 기본 소유자(자동) -- 「PV 루트 소유자」는 특권 운영자 옵션이다(목록 밖 관리자도 403).
+    "storage" 를 명시하는 것은 누구나(기본값과 같다)."""
+    for who in ("alice", "ops.admin"):
+        _login(kclient, who)
+        r = kclient.post("/api/user/requests", json=_pv_sync(pv_owner="pv_root"))
+        assert r.status_code == 403 and r.json()["detail"] == "pv_owner_root_not_allowed", who
+    _login(kclient, "alice")
+    r = kclient.post("/api/user/requests", json=_pv_sync(pv_owner="storage"))
+    assert r.status_code == 202, r.text
+    block = world.requests.get(r.json()["request_id"])["payload"]["destination_pv"]
+    assert (block["owner_rule"], block["owner"]) == ("storage", NFS_OWNER)
+
+
+def test_operator_can_choose_the_pv_root_owner(kclient, world):
+    """특권 운영자의 pv_owner=pv_root: 블록에 규칙만 싣고(owner 없음 -- 값은 preflight 가 잰다) 소스 블록은 그대로다."""
+    _login(kclient, "ops")
+    r = kclient.post("/api/user/requests", json=_pv_sync(pv_owner="pv_root", run_as_root=True))
+    assert r.status_code == 202, r.text
+    rid = r.json()["request_id"]
+    p = world.requests.get(rid)["payload"]
+    assert p["destination_pv"]["owner_rule"] == "pv_root" and "owner" not in p["destination_pv"]
+    assert "owner_rule" not in p["source_pv"] and "owner" not in p["source_pv"]
+    assert _plan(world)[rid] == "planned"
+
+
+@pytest.mark.parametrize("who,body", [
+    ("alice", _rm(_pv("team-a", "datasets"), pv_owner="storage")),                          # rm
+    ("ops", {"operation": "scan", "pv": _pv("team-a", "datasets"), "target": "",            # scan
+             "pv_owner": "storage", "run_as_root": True}),
+    ("ops", {"operation": "sync", "source_pv": _pv("team-a", "datasets"), "source": "",     # 직접 경로 목적지
+             "destination_storage": "cephfs-dms", "destination": "x", "pv_owner": "pv_root", "run_as_root": True}),
+    ("ops", {"operation": "sync", "source_storage": "cephfs-dms", "source": "a",            # 목적지 없음(소스만 직접 경로)
+             "destination_storage": "cephfs-dms", "destination": "b", "pv_owner": "storage", "run_as_root": True}),
+    ("ops", _pv_sync(options={"chown": "1000:100"}, pv_owner="pv_root", run_as_root=True)),  # 명시 chown 과 함께
+    ("ops", _pv_sync(options={"chown": "1000:100"}, pv_owner="storage", run_as_root=True)),
+    ("alice", _pv_sync(options={"chown": "0:0"}, pv_owner="storage")),
+])
+def test_pv_owner_where_it_does_not_apply_is_422(kclient, world, who, body):
+    _login(kclient, who)
+    r = kclient.post("/api/user/requests", json=body)
+    assert r.status_code == 422 and r.json()["detail"] == "pv_owner_not_applicable", r.text
+
+
+@pytest.mark.parametrize("value", ["PV_ROOT", "pv-root", " storage", "", 1, True, ["pv_root"]])
+def test_pv_owner_is_not_coerced(kclient, world, value):
+    _login(kclient, "ops")
+    r = kclient.post("/api/user/requests", json=_pv_sync(pv_owner=value, run_as_root=True))
+    assert r.status_code == 422, r.text
+
+
+def test_invalid_stored_destination_owner_is_409_not_root(kclient, world, db):
+    """목적지 스토리지에 저장된 기본 소유자가 무효(변조)면 root 등으로 뭉개지 않고 409 -- 그 스토리지는 원본으로는 그대로 쓸 수
+    있고, 운영자의 pv_root 는 그 값을 쓰지 않으니 받는다."""
+    db.execute("UPDATE storages SET default_uid = -1 WHERE storage_name = 'k8s-pv-nfs'")
+    _login(kclient, "alice")
+    r = kclient.post("/api/user/requests", json=_pv_sync())                                   # 목적지 scratch(nfs)
+    assert r.status_code == 409 and r.json()["detail"] == "invalid_storage_owner"
+    r = kclient.post("/api/user/requests", json=_pv_sync(dst=("team-a", "models")))           # nfs 원본 → gpfs(명시 0:0)
+    assert r.status_code == 202, r.text
+    assert world.requests.get(r.json()["request_id"])["payload"]["destination_pv"]["owner"] == "0:0"
+    _login(kclient, "ops")
+    r = kclient.post("/api/user/requests", json=_pv_sync(dst_path="ops", pv_owner="pv_root", run_as_root=True))
+    assert r.status_code == 202, r.text
+
+
+def test_storage_owner_defaults_to_root_when_not_registered(kclient, world):
+    """기본 소유를 주지 않고 등록한 스토리지(onefs)는 0:0(사용자 지정 기본 root:root)으로 기록된다."""
+    _login(kclient, "junwoo.song")                    # team-a admin
+    r = kclient.post("/api/user/requests", json=_pv_sync(src=("team-a", "datasets"), dst=("team-a", "kraken-kv-cache")))
+    assert r.status_code == 202, r.text
+    block = world.requests.get(r.json()["request_id"])["payload"]["destination_pv"]
+    assert (block["owner_rule"], block["owner"]) == ("storage", "0:0")
+
+
+def test_legacy_destination_block_without_an_owner_rule_still_runs(kclient, world, db, submitted):
+    """이 기능 전에 제출된 행(destination_pv 에 owner_rule 이 없다)은 새 검사를 받지 않는다 -- 기본 소유자가 바뀌어도 계획·컨펌을
+    통과하고 실행은 종전처럼 PV 루트 소유자를 잰다(tests/test_pv_owner_chown.py MEASURED). 부재를 거부로 「강화」하지 않는다."""
+    _tamper_payload(db, submitted, lambda p: [p["destination_pv"].pop(k) for k in ("owner_rule", "owner")])
+    _change_nfs_owner(db)
+    assert _plan(world)[submitted] == "planned"
+    jid = _to_confirm_pending(world, submitted)
+    _change_nfs_owner(db)
+    r = kclient.post(f"/api/user/jobs/{jid}:confirm", json={"fingerprint": FP})
+    assert r.status_code == 200, r.text
+
+
+def _stepper_through_preview(world, rid):
+    """계획된 잡 하나를 스텁 어댑터로 preflight → 미리보기 제출까지(preflight 로그는 비어 있다 -- 측정 마커 없음)."""
+    adapter = StubExecutionAdapter()
+    stepper = JobStepper(world, adapter, settings=_k8s_settings())
+    stepper.run_once()                                       # preflight 제출
+    stepper.run_once()                                       # preflight 성공 → 미리보기 제출(또는 측정 실패로 거부)
+    jid = world.data_jobs.list_jobs(request_id=rid)[0]["job_id"]
+    return adapter, world.data_jobs.get_job(jid)
+
+
+def test_user_pv_sync_chowns_to_the_storage_default_without_measuring(kclient, world):
+    """끝에서 끝: 일반 사용자의 PV→PV sync 를 계획하면 stepper 의 spec 결과 소유자 = 목적지 스토리지 기본 소유자, preflight 에는
+    측정 마커(DMS_PV_OWNER)가 없고(봉쇄만) 로그를 기다리지 않고 미리보기로 간다 -- 미리보기 argv 에 --chown 1500:1500."""
+    _login(kclient, "alice")
+    rid = kclient.post("/api/user/requests", json=_pv_sync()).json()["request_id"]
+    assert _plan(world)[rid] == "planned"
+    adapter, job = _stepper_through_preview(world, rid)
+    assert job["state"] == DataJobState.PREVIEW_RUNNING.value, job
+    pre = [s for s in adapter.submitted_specs() if s.phase == "preflight"][0]
+    assert (pre.result_owner_rule, pre.result_owner) == ("storage", NFS_OWNER)
+    assert "destination" in pre.paths["contain"]
+    for role in (None, "source", "destination"):
+        assert "DMS_PV_OWNER" not in _preflight_script(pre, role=role)[0]
+    preview = [s for s in adapter.submitted_specs() if s.phase == "preview"][0]
+    argv = tool_argv(preview, abs_paths=preview.paths)
+    assert argv[argv.index("--chown"):argv.index("--chown") + 2] == ["--chown", NFS_OWNER]
+
+
+def test_operator_pv_root_sync_measures_the_pv_root_owner(kclient, world):
+    """운영자 옵션 pv_root 는 종전 측정 경로다: preflight 에 마커가 붙고, 마커가 없으면(스텁 로그 비어 있음) 모름으로 거부한다."""
+    _login(kclient, "ops")
+    rid = kclient.post("/api/user/requests",
+                       json=_pv_sync(pv_owner="pv_root", run_as_root=True)).json()["request_id"]
+    assert _plan(world)[rid] == "planned"
+    adapter, job = _stepper_through_preview(world, rid)
+    pre = [s for s in adapter.submitted_specs() if s.phase == "preflight"][0]
+    assert (pre.result_owner_rule, pre.result_owner) == ("pv_root", None)
+    assert "DMS_PV_OWNER" in _preflight_script(pre, role="destination")[0]
+    assert (job["state"], job["reason_code"]) == (DataJobState.REJECTED.value, "pv_owner_unknown")

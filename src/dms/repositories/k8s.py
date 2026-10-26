@@ -31,6 +31,10 @@ from .text_search import contains_pattern, search_tokens
 RUN_STATUSES = ("claimed", "received", "applied", "failed", "expired", "superseded", "discarded")
 PV_CAPABLE_KINDS = ("pv", "both")
 STORAGE_KINDS = ("filesystem", "pv", "both")
+# 스토리지 기본 소유 uid·gid 의 유효 범위(2026-10-26) -- execution_manifests.valid_owner 와 같은 상한(4294967295 = (uid_t)-1 은
+# chown 의 「바꾸지 않음」 표식이라 소유자 값이 아니다). 저장 검증(repositories.storages)과 읽기 정규화(storage_default_owner)가
+# 같은 상한을 쓴다.
+OWNER_ID_MAX = 4294967294
 CHANGE_NAMES_MAX = 50
 _RUN_LIST_COLUMNS = ("seq, run_id, cluster_name, node_name, role, trigger, status, claimed_at, deadline_at, finished_at, "
                      "applied_at, config_rev, reason, phase, http_status, error, server_version, duration_ms, counts, "
@@ -69,6 +73,29 @@ def storage_kind(row) -> str:
     return kind if kind in STORAGE_KINDS else "filesystem"
 
 
+def _owner_id(value) -> "int | None":
+    """uid·gid 칸 하나 → 정수 또는 None(무효). NULL 은 0(기배포 ALTER 직후 -- 백필 전 창도 사용자 기본값 root 로 읽는다).
+    bool·정수 아닌 값·음수·상한 초과는 None -- DB 가 신뢰 경계라 변조 값을 0(root)으로 뭉개지 않는다(null(모름)과 0 은 다르다:
+    여기서 NULL 이 0 인 것은 「컬럼 이전 행 = 사용자 지정 기본값」이라는 정의이지 truthy 축약이 아니다)."""
+    if value is None:
+        return 0
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if 0 <= value <= OWNER_ID_MAX else None
+
+
+def storage_default_owner(row) -> "str | None":
+    """스토리지 행 → PV 목적지 sync 결과의 기본 소유자 "uid:gid"(2026-10-26 사용자 지시 -- 기본 root:root). 무효 값(변조)이면
+    None -- 호출자가 fail-closed 로 거부한다(제출 409 invalid_storage_owner 등). 이 값을 읽는 곳은 모두 이 함수를 거친다(화면·
+    해석·제출·재확인이 같은 정규화를 쓰게). 행 자체가 없으면 None(모름)."""
+    if row is None:
+        return None
+    uid, gid = _owner_id(row.get("default_uid")), _owner_id(row.get("default_gid"))
+    if uid is None or gid is None:
+        return None
+    return f"{uid}:{gid}"
+
+
 def _clusters_join(alias: str) -> str:
     return f"JOIN k8s_clusters kc ON kc.name = {alias}.cluster_name AND kc.applied_run_seq IS NOT NULL"
 
@@ -80,6 +107,9 @@ def resolve_volume(pvc: dict, pv, sc_map, storage) -> dict:
       pv_not_bound             PVC 가 Bound 가 아니거나 볼륨 이름이 없다
       pv_storageclass_unmapped StorageClass 매핑이 없다(또는 매핑된 스토리지가 없거나 PV 를 담는 종류가 아니다)
       pv_path_unresolved       경로 템플릿이 없거나 값이 없어 렌더할 수 없다(PV 정보 없음·claimRef 불일치 포함)
+
+    storage_owner(2026-10-26): PV 를 담는 스토리지에 매핑됐으면 그 스토리지의 기본 소유자 "uid:gid"(storage_default_owner --
+    무효 값이면 None), 아니면 None. PV 목적지 sync 의 결과 소유자이고 제출·재확인(resolve_pvc)과 고르기 화면이 같은 값을 본다.
     """
     sc = pvc.get("storage_class") or (pv or {}).get("storage_class")
     access_modes = pvc.get("access_modes")
@@ -88,8 +118,9 @@ def resolve_volume(pvc: dict, pv, sc_map, storage) -> dict:
     out = {"cluster": pvc["cluster_name"], "namespace": pvc["namespace"], "pvc": pvc["name"],
            "volume": pvc.get("volume_name") or None, "storage_class": sc, "phase": pvc.get("phase"),
            "capacity": pvc.get("capacity"), "access_modes": access_modes or [], "created_at": pvc.get("created_at"),
-           "uid": pvc.get("uid"), "storage_name": None, "storage_kind": None, "root": None, "abs_root": None,
-           "template": None, "template_source": None, "selectable": False, "reason": None, "problem": None}
+           "uid": pvc.get("uid"), "storage_name": None, "storage_kind": None, "storage_owner": None, "root": None,
+           "abs_root": None, "template": None, "template_source": None, "selectable": False, "reason": None,
+           "problem": None}
     if pvc.get("phase") != "Bound" or not out["volume"]:
         out.update(reason="pv_not_bound", problem=f"PVC phase is {pvc.get('phase') or 'unknown'}")
         return out
@@ -104,6 +135,9 @@ def resolve_volume(pvc: dict, pv, sc_map, storage) -> dict:
     if out["storage_kind"] not in PV_CAPABLE_KINDS:
         out.update(reason="pv_storageclass_unmapped", problem=f"storage {storage['storage_name']} is not a PV storage")
         return out
+    # 목적지로 쓰일 때 결과 소유자(2026-10-26). 무효(변조) 값은 None 으로 남긴다 -- 고르기를 막지는 않는다(원본으로는 쓸 수
+    # 있다); 목적지 제출이 409 invalid_storage_owner 로 거부한다.
+    out["storage_owner"] = storage_default_owner(storage)
     template, source = effective_template(sc_template=sc_map.get("path_template"),
                                           backend_type=storage.get("backend_type"))
     out.update(template=template, template_source=source)

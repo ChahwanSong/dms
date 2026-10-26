@@ -1,4 +1,5 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { setupServer } from "msw/node";
@@ -391,4 +392,55 @@ test("PV 주소 요청(dms-k8s 설계 §7): 대상 = PV 표기, PV 행(클러스
   expect(cell(region, "PV").textContent).toBe("dmsk8s · pvc-52c6132d · tb-gpfs");
   expect(cell(region, "PV")).toHaveClass("[overflow-wrap:anywhere]");
   expect(cell(region, "대상 사용자").textContent).toBe("alice");
+});
+
+// ---- 결과 소유 규칙(2026-10-26: 스토리지 기본 uid:gid -- destination_pv.owner_rule) ------------------------------------
+// 「목적지 소유」 행과 컨펌 창의 「결과 소유」 줄이 같은 값(requestSpec.ownership)을 말한다.
+const PV_SRC = { cluster: "dmsk8s", namespace: "team-a", pvc: "models", volume: "pvc-52c6132d", storage_class: "tb-gpfs",
+                 root: "pvc-52c6132d/pvc-52c6132d-data", path: "" };
+const pvSync = (dest: object) => ({
+  source_storage: "k8s-pv-gpfs", source: "pvc-52c6132d/pvc-52c6132d-data", source_pv: PV_SRC,
+  destination_storage: "k8s-pv-nfs", destination: "team-b/scratch/in",
+  destination_pv: { cluster: "dmsk8s", namespace: "team-b", pvc: "scratch", volume: "pvc-aa3d0bd2", storage_class: "tb-nfs",
+                    root: "team-b/scratch", path: "in", ...dest },
+  options: { batch_files: 1000000, bufsize: 4194304 }, run_as_root: true, owner_username: null,
+});
+const cpJob = (wp: object) => ({ ...JOB, state: "ConfirmPending", result_summary: null, preview_fingerprint: "sha256:fp",
+  preview_expires_at: "2099-01-01T00:00:00Z", phase_refs: { preflight: "a", preview: "b" }, transitions: SYNC_TR.slice(0, 4),
+  source_storage: "k8s-pv-gpfs", destination_storage: "k8s-pv-nfs", options: { batch_files: 1000000, bufsize: 4194304 },
+  worker_pool: { ...WP_A, identity: ROOT_IDENT, ...wp } });
+
+test("결과 소유 storage: 「목적지 소유」 = 목적지 스토리지 기본 소유자, 컨펌 창에 같은 값의 「결과 소유」 줄", async () => {
+  serve({ ...REQ, state: "Planned", requester_id: "mason", payload: pvSync({ owner_rule: "storage", owner: "1500:1500" }) },
+        [cpJob({})]);
+  renderAt();
+  const region = await specRegion();
+  expect(cell(region, "목적지 소유").textContent).toBe("목적지 스토리지 기본 소유자 1500:1500");
+  await userEvent.click(screen.getByRole("button", { name: "작업 컨펌" }));
+  expect(await screen.findByText("sync 작업 컨펌")).toBeInTheDocument();
+  const line = screen.getByText("결과 소유:", { exact: false, selector: "p" });
+  expect(line.textContent).toBe("결과 소유: 목적지 스토리지 기본 소유자 1500:1500");
+});
+
+test("결과 소유 pv_root(운영자 지정): 잰 PV 루트 소유자 + 「운영자 지정」 -- 0:0 기본 소유는 「0:0(root)」", async () => {
+  serve({ ...REQ, state: "Planned", requester_id: "mason", payload: pvSync({ owner_rule: "pv_root" }) },
+        [cpJob({ dest_pv_owner: "1000:100" })]);
+  const view = renderAt();
+  const region = await specRegion();
+  expect(cell(region, "목적지 소유").textContent).toBe("목적지 PV 소유자 1000:100(PV 루트 기준 — 운영자 지정)");
+  await userEvent.click(screen.getByRole("button", { name: "작업 컨펌" }));
+  expect((await screen.findByText("결과 소유:", { exact: false, selector: "p" })).textContent)
+    .toBe("결과 소유: 목적지 PV 소유자 1000:100(PV 루트 기준 — 운영자 지정)");
+  view.unmount();
+  serve({ ...REQ, requester_id: "mason", payload: pvSync({ owner_rule: "storage", owner: "0:0" }) },
+        [{ ...JOB, worker_pool: { ...WP_A, identity: ROOT_IDENT } }]);
+  renderAt();
+  expect(cell(await specRegion(), "목적지 소유").textContent).toBe("목적지 스토리지 기본 소유자 0:0(root)");
+});
+
+test("결과 소유 규칙이 없는 옛 PV 행: 종전 문구(잰 PV 루트 소유자) 그대로", async () => {
+  serve({ ...REQ, requester_id: "mason", payload: pvSync({}) },
+        [{ ...JOB, worker_pool: { ...WP_A, identity: ROOT_IDENT, dest_pv_owner: "1000:100" } }]);
+  renderAt();
+  expect(cell(await specRegion(), "목적지 소유").textContent).toBe("목적지 PV 소유자 1000:100(PV 루트 기준)");
 });

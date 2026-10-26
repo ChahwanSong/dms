@@ -84,17 +84,26 @@ def valid_owner(value) -> bool:
     return m is not None and int(m.group(1)) <= _OWNER_ID_MAX and int(m.group(2)) <= _OWNER_ID_MAX
 
 
-def pv_owner_measured(spec) -> bool:
-    """목적지 PV 루트 소유자로 결과를 맞추는 잡인가(2026-10-26 사용자 결정 「root sync 의 결과 소유권 — 목적지 PV
-    소유자로 자동 chown」): sync ∧ root ∧ 목적지가 PV 주소(stepper 가 paths["contain"]["destination"] 을 실었다) ∧ 명시
-    chown 없음. preflight(측정 마커)·미리보기·실행(--chown)이 이 술어 하나를 쓴다 — stepper._pv_owner_required 가 요청
-    payload 로 같은 판정을 한다(destination_pv 블록 = contain 의 destination 키)."""
+def pv_dest_owner_applies(spec) -> bool:
+    """PV 목적지 결과 소유자 규칙이 적용되는 잡인가(2026-10-26 사용자 결정): sync ∧ root ∧ 목적지가 PV 주소(stepper 가
+    paths["contain"]["destination"] 을 실었다) ∧ 명시 chown 없음. 규칙(spec.result_owner_rule)과 무관하게 이 잡은 늘
+    --chown <spec.result_owner> 를 받는다(_auto_chown) — 값을 어디서 얻는지(측정 여부)는 pv_owner_measured 가 가른다."""
     if spec.operation != "sync" or not (spec.identity or {}).get("privileged"):
         return False
     if "chown" in (spec.options or {}):
         return False
     contain = (spec.paths or {}).get("contain")
     return isinstance(contain, dict) and "destination" in contain
+
+
+def pv_owner_measured(spec) -> bool:
+    """결과 소유자를 preflight 에서 **잰** 목적지 PV 루트 소유자로 맞추는 잡인가(측정 술어): pv_dest_owner_applies ∧ 규칙이
+    "storage" 가 아님(운영자 옵션 "pv_root"·규칙 이전에 제출된 옛 행 None). 기본 규칙 "storage"(2026-10-26 사용자 지시 「각 k8s
+    스토리지 항목의 기본 uid,gid 로 chown」)는 값이 요청에 이미 기록돼 있어 재지 않는다 — preflight 가 측정 전과 바이트 동일
+    (봉쇄만)이다. preflight(측정 마커, _with_pv_owner)가 이 술어를 쓰고 stepper._pv_owner_required 가 요청 payload 로 같은
+    판정을 한다(destination_pv 블록 = contain 의 destination 키, 블록 owner_rule = spec.result_owner_rule) — 두 쪽이 갈라지면
+    재지 않은 잡이 마커를 기다리거나(pv_owner_unknown) 잰 값을 버린다."""
+    return pv_dest_owner_applies(spec) and getattr(spec, "result_owner_rule", None) != "storage"
 
 
 def _auto_chown(spec) -> list[str]:
@@ -113,18 +122,25 @@ def _auto_chown(spec) -> list[str]:
     명시했으면 그 값이 우선(중복 주입 안 함). 어느 경우든 dsync/nsync 의 기본 비교(UID·GID·PERM·
     MTIME)가 목적지에 이미 있던 같은 경로 항목의 메타데이터도 이 값(root 면 소스 값)으로 다시 맞춘다.
 
-    PV 목적지(2026-10-26 사용자 결정): root sync 라도 목적지가 PV 주소면 결과를 **목적지 PV 루트 소유자**로 맞춘다 —
-    소스 소유를 그대로 두면 다른 namespace 파드(그 PV 의 uid/fsGroup)가 결과를 못 읽거나 못 고친다. 값은 목적지 쪽
-    preflight 가 봉쇄 확인 뒤 잰 PV 루트의 uid:gid(spec.result_owner)다. 우선순위: 명시 chown > PV 루트 소유자 > root 면
-    개입 없음 > 비 root 면 실행 신원. 그 값이 없거나 형식이 틀리면 ValueError — 소스 소유 보존으로 조용히 접지 않는다
-    (어댑터가 submit_failed 로 접는다, fail-closed). nsync 는 이 값을 소스 쪽 스캔 기록에 덮어써 비교·적용하므로 소스·목적지
-    rank 가 같은 argv 를 받는 이 방식이어야 한다(rank 마다 따로 재는 방식은 소스 rank 가 목적지를 못 본다)."""
+    PV 목적지(2026-10-26 사용자 결정): root sync 라도 목적지가 PV 주소면(pv_dest_owner_applies) 결과 소유자를 정해 맞춘다 —
+    소스 소유를 그대로 두면 다른 namespace 파드(그 PV 의 uid/fsGroup)가 결과를 못 읽거나 못 고친다. 값(spec.result_owner)은
+    규칙(spec.result_owner_rule)마다:
+      - "storage"(기본 — 일반 사용자는 늘 이것): 목적지 스토리지 기본 소유자(스토리지 항목의 default_uid:default_gid, 기본
+        0:0). 제출이 요청 destination_pv 블록에 기록하고 planner·컨펌이 현재 값과 대조한다(storage_owner_changed).
+      - "pv_root"(특권 운영자 옵션)·None(규칙 이전 옛 행): 목적지 쪽 preflight 가 봉쇄 확인 뒤 잰 PV 루트의 uid:gid.
+    우선순위: 명시 chown > PV 목적지: 스토리지 기본 소유자 | 운영자 옵션 시 잰 PV 루트 소유자 > root 면 개입 없음 > 비 root 면
+    실행 신원. 그 값이 없거나 형식이 틀리면 ValueError — 소스 소유 보존으로 조용히 접지 않는다(어댑터가 submit_failed 로
+    접는다, fail-closed). 0:0 이어도 --chown 0:0 을 싣는다(「개입 없음」과 다르다): dms-mpifileutils 포크는 --chown 이 있으면
+    일반 파일의 setuid/setgid 를 지운다 — 소스의 setuid-root 실행 파일이 그대로 PV 에 떨어지지 않게. nsync 는 이 값을 소스 쪽
+    스캔 기록에 덮어써 비교·적용하므로 소스·목적지 rank 가 같은 argv 를 받는 이 방식이어야 한다(rank 마다 따로 재는 방식은
+    소스 rank 가 목적지를 못 본다)."""
     ident = spec.identity or {}
     if "chown" in (spec.options or {}):
         return []
-    if pv_owner_measured(spec):
+    if pv_dest_owner_applies(spec):
         if not valid_owner(spec.result_owner):
-            raise ValueError(f"PV destination sync without a measured owner: {spec.result_owner!r}")
+            raise ValueError(f"PV destination sync without a valid result owner "
+                             f"(rule {getattr(spec, 'result_owner_rule', None)!r}): {spec.result_owner!r}")
         return ["--chown", spec.result_owner]
     if ident.get("privileged"):
         return []
@@ -502,7 +518,8 @@ _PV_WITHIN_FN = (
     'case "$1" in "${2%/}"/*) ;; *) ' + _RM_TARGET_REDIRECTED + ';; esac; }; ')
 
 
-# 목적지 PV 루트의 소유자 측정(2026-10-26 사용자 결정 — 결과를 목적지 PV 소유자로 chown): $1 = PV 루트. 봉쇄(dms_contain)가
+# 목적지 PV 루트의 소유자 측정(2026-10-26 — 결과 소유를 PV 루트 소유자로 고른 운영자 옵션 "pv_root"·규칙 이전 옛 행만,
+# pv_owner_measured; 기본 규칙 "storage" 는 재지 않는다): $1 = PV 루트. 봉쇄(dms_contain)가
 # 경로 사슬에 링크가 없음을 확인한 **뒤에** 부른다. PV 루트가 링크가 아닌 디렉터리여야 하고(아니면 pv_owner_unknown — 모름을
 # 소스 소유 보존으로 접지 않는다), stat 은 GNU 기본이 lstat 이다. 마커 한 줄을 stepper 가 parse_pv_owner 로 읽어 잡에 기록한다.
 _PV_OWNER_FN = (
@@ -575,8 +592,9 @@ def _with_containment(script: str, args: list, entries: list) -> tuple:
 
 
 def _with_pv_owner(spec, script: str, args: list) -> tuple:
-    """PV 목적지 root sync 의 preflight 에 목적지 PV 루트 소유자 측정을 덧붙인다(_PV_OWNER_FN — 봉쇄 호출 **뒤**). 그 밖의
-    잡은 그대로(바이트 동일)."""
+    """결과 소유를 잰 PV 루트 소유자로 맞추는 잡(pv_owner_measured — 운영자 옵션 "pv_root"·규칙 이전 옛 행)의 preflight 에
+    목적지 PV 루트 소유자 측정을 덧붙인다(_PV_OWNER_FN — 봉쇄 호출 **뒤**). 그 밖의 잡(기본 규칙 "storage" 포함 — 값이 요청에
+    기록돼 있다)은 그대로(바이트 동일, 봉쇄만)."""
     if not pv_owner_measured(spec):
         return script, args
     entries = contain_entries(spec, ("destination",))
@@ -679,7 +697,7 @@ PREFLIGHT_REASON_MARKER = "DMS_PREFLIGHT_REASON="
 # identity_groups_not_applied·artifact_base_group_writable 은 스크립트에서 사라져 이 집합에서도 뺐다(계약 테스트가 스크립트
 # 실물과 대조한다 -- 사유 코드 목록·포탈 문구는 옛 행 표시용으로 남는다).
 PREFLIGHT_REASONS = frozenset({
-    "pv_owner_unknown",     # 2026-10-26 목적지 PV 루트 소유자 측정(_PV_OWNER_FN)
+    "pv_owner_unknown",     # 2026-10-26 목적지 PV 루트 소유자 측정(_PV_OWNER_FN — 운영자 옵션 pv_root·옛 행만)
     "source_not_readable", "destination_not_directory",
     "destination_parent_not_writable", "destination_not_writable",
     "destination_not_owned", "parent_not_writable",

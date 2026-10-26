@@ -21,6 +21,9 @@ path}). resource_key·planner 스토리지 어드미션·노드 배치·stepper.
   - recheck_request   : planner·컨펌의 재확인(D13). DB 가 신뢰 경계라(create_job 무검증 INSERT) 요청 행의 pv 블록을 현재
                         스냅숏으로 다시 해석하고, 비면제 요청은 모든 쪽에 pv 블록이 있어야 하며 맵핑을 다시 판정한다.
   - pair_gate_exempt  : 제출·planner 3b·컨펌의 sync 허용 쌍 면제(D14 -- PV↔PV 는 PV 권한이 판정한다).
+PV 목적지 sync 의 결과 소유(2026-10-26 사용자 지시): 제출이 destination_pv 블록에 owner_rule(OWNER_RULES -- 기본 "storage" =
+목적지 스토리지 기본 소유자를 owner 로 기록, 특권 운영자 옵션 "pv_root" = 잰 PV 루트 소유자)을 싣고 recheck_request 가 다시 본다.
+실행은 stepper._build_spec → execution_manifests._auto_chown(--chown).
 사유 코드는 DomainValidationError("<리터럴>") 로 낸다 -- 사유 코드 AST 그물(tests/test_reason_codes_coverage.py)이 읽는 모양이다.
 """
 import posixpath
@@ -36,6 +39,11 @@ _SIDES = {
     "sync": (("source_pv", "source_storage", "source"), ("destination_pv", "destination_storage", "destination")),
 }
 PV_KEYS = ("pv", "source_pv", "destination_pv")
+# PV 목적지 sync 의 결과 소유 규칙(2026-10-26 사용자 지시 -- destination_pv 블록의 owner_rule): "storage" = 목적지 스토리지 기본
+# 소유자(기본, 일반 사용자는 늘 이것 -- 블록 owner 에 그 값을 기록한다), "pv_root" = preflight 가 잰 PV 루트 소유자(특권 운영자
+# 옵션). 제출(routes_requests.submit)·재확인(recheck_request)이 이 목록 하나를 본다. 튜플인 이유: 변조된 비해시 값(리스트)도
+# 멤버십 검사가 TypeError 없이 「목록 밖」으로 끝나게.
+OWNER_RULES = ("storage", "pv_root")
 # 제출 라우트의 HTTP 상태(나머지 사유는 422). 모름(스냅숏 없음)은 409, 권한은 403.
 SUBMIT_STATUS = {"k8s_mapping_unknown": 409, "raw_path_not_allowed": 403, "k8s_access_denied": 403}
 
@@ -121,7 +129,10 @@ def resolve_side(repos, ref: dict, subpath, *, operation) -> dict:
         raise DomainValidationError("pv_root_rm_forbidden", f"{cluster}/{namespace}/{pvc}")
     block = {"cluster": cluster, "namespace": namespace, "pvc": pvc, "volume": resolved.get("volume"),
              "storage_class": resolved.get("storage_class"), "root": root, "path": sub}
-    return {"storage": resolved["storage_name"], "target": target, "block": block}
+    # storage_owner: 해석된 스토리지의 기본 소유자 "uid:gid"(repositories.k8s.storage_default_owner -- 무효면 None). 블록에는
+    # 싣지 않는다 -- 목적지 sync 일 때만 제출이 owner_rule 과 함께 기록한다(소스 블록은 이 기능 전과 같은 모양).
+    return {"storage": resolved["storage_name"], "target": target, "block": block,
+            "storage_owner": resolved.get("storage_owner")}
 
 
 def side_label(block: dict) -> str:
@@ -162,13 +173,19 @@ def recheck_request(repos, req, *, settings) -> None:
         pv_path_unresolved). 해석한 (storage, root) 가 payload 의 것과 다르면 pv_moved(PVC 재생성으로 VOLUME 이 바뀜·SC 매핑·
         템플릿 변경 -- 확인 창이 보인 경로와 실행 경로가 갈라지지 않게). 그 쪽 target 이 root 와 같거나 root+'/' 아래가
         아니면 pv_target_outside(자기 PV 블록 + 남의 target 인 변조 행). rm 이 PV 루트면 pv_root_rm_forbidden(D12 재확인).
-        비면제 요청이면 요청자의 맵핑을 다시 판정한다(k8s_access_denied -- 권한 회수 반영)."""
+        비면제 요청이면 요청자의 맵핑을 다시 판정한다(k8s_access_denied -- 권한 회수 반영).
+      - sync 의 destination_pv 블록에 결과 소유 규칙(owner_rule, 2026-10-26)이 있으면: 목록(OWNER_RULES) 밖이면
+        pv_owner_not_applicable(변조), "pv_root" 인데 비면제 요청이면 pv_owner_root_not_allowed(제출 403 과 같은 술어 -- 대기 중
+        특권 상실·DB 직접 삽입), "storage" 면 기록된 owner 가 목적지 스토리지의 **현재** 기본 소유자와 같아야 한다(아니면
+        storage_owner_changed -- 제출 뒤 관리자가 기본값을 바꿈·변조; 확인 창에 보인 소유자와 실행이 갈라지지 않게. 현재 값이
+        무효면 invalid_storage_owner). 명시 chown 이 있는 요청은 결과가 chown 값이라 대조하지 않는다. 규칙이 **없는** 블록은 이 기능 전에 제출된 옛 행이라 새 검사를 하지 않는다(종전처럼
+        PV 루트 소유자를 잰다 -- 부재를 거부로 "강화" 하면 배포 순간 진행 중인 요청이 전부 끊긴다)."""
     payload = req.get("payload") if isinstance(req, dict) else None
     if not isinstance(payload, dict):
         return
     operation = req.get("operation")
     exempt = None
-    # 명시 chown 은 특권 운영자만(2026-10-26 -- 결과 소유자는 목적지 PV 루트 소유자로 자동, 제출 게이트와 같은 규칙).
+    # 명시 chown 은 특권 운영자만(2026-10-26 -- PV 목적지 결과 소유자는 목적지 스토리지 기본 소유자로 자동, 제출 게이트와 같은 규칙).
     options = payload.get("options") if isinstance(payload.get("options"), dict) else {}
     if "chown" in options:
         exempt = unrestricted_request(req, settings=settings, repos=repos)
@@ -218,3 +235,24 @@ def recheck_request(repos, req, *, settings) -> None:
             exempt = unrestricted_request(req, settings=settings, repos=repos)
         if not exempt and repos.k8s.access_for(req.get("requester_id"), ref[0], ref[1]) is None:
             raise DomainValidationError("k8s_access_denied", f"{req.get('requester_id')} @ {ref[0]}/{ref[1]}")
+        # 명시 chown 이 있으면 결과는 그 값이라(위 chown 분기가 면제를 이미 확인했다) 기록된 규칙을 대조하지 않는다 -- 쓰이지
+        # 않는 스토리지 값의 변경으로 운영자 요청을 거부하지 않게(리뷰; 제출도 chown 이면 규칙을 기록하지 않는다).
+        if operation == "sync" and pv_key == "destination_pv" and "owner_rule" in block and "chown" not in options:
+            _recheck_owner_rule(block, resolved, exempt=exempt)
+
+
+def _recheck_owner_rule(block: dict, resolved: dict, *, exempt: bool) -> None:
+    """PV 목적지 sync 의 결과 소유 규칙 재확인(recheck_request docstring 의 마지막 항목). resolved = 그 목적지 PVC 의 현재 해석
+    (repositories.k8s.resolve_pvc -- storage_owner 는 storage_default_owner 로 정규화된 값)."""
+    rule = block.get("owner_rule")
+    if rule not in OWNER_RULES:
+        raise DomainValidationError("pv_owner_not_applicable", f"owner_rule {rule!r}")
+    if rule == "pv_root":
+        if not exempt:
+            raise DomainValidationError("pv_owner_root_not_allowed", "pv_root owner rule by a non-privileged requester")
+        return
+    current = resolved.get("storage_owner")
+    if current is None:
+        raise DomainValidationError("invalid_storage_owner", f"storage {resolved.get('storage_name')}")
+    if block.get("owner") != current:
+        raise DomainValidationError("storage_owner_changed", f"{block.get('owner')!r} -> {current}")

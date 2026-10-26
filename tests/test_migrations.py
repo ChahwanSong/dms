@@ -756,7 +756,7 @@ def test_every_post_v1_column_rides_both_migration_paths(tmp_path):
     db = Database.connect(f"sqlite:///{tmp_path}/t.db")
     migrate(db)
     pairs = _ensure_pairs()
-    assert len(pairs) == 46      # 추출 자기 검증 -- 0 매치면 등식이 공허해진다(프록시 3 + 호스트 네트워크 1 + CA 1 + storages.user_enabled 1 + portal_subtitle 1 + batches.preview_round 1 + batches.auto_confirm_by 1 + accounts.root_granted 1 + data_jobs.pods_gc_at 1 + storages.kind 1 + requests.target_label 1)
+    assert len(pairs) == 48      # 추출 자기 검증 -- 0 매치면 등식이 공허해진다(프록시 3 + 호스트 네트워크 1 + CA 1 + storages.user_enabled 1 + portal_subtitle 1 + batches.preview_round 1 + batches.auto_confirm_by 1 + accounts.root_granted 1 + data_jobs.pods_gc_at 1 + storages.kind 1 + requests.target_label 1 + storages.default_uid·default_gid 2)
     for table, v1 in _V1_COLUMNS.items():
         cols = {r["name"] for r in db.query(f"PRAGMA table_info({table})")}
         ensured = {c for t, c, _ in pairs if t == table}
@@ -773,7 +773,7 @@ def test_ensure_columns_types_match_create_declarations(tmp_path):
     pairs = _ensure_pairs()
     # 추출 자기 검증을 이 테스트에도 둔다 -- 위 등식 테스트가 지워지거나 홀로
     # 실행될 때 정규식이 0 매치면 아래 루프가 공허하게 통과하기 때문이다.
-    assert len(pairs) == 46
+    assert len(pairs) == 48
     for table, column, coltype in pairs:
         assert _declared_type(db, table, column) == coltype, (table, column)
 
@@ -872,11 +872,62 @@ def test_k8s_columns_are_declared_in_the_create_table_blocks():
     import re
     from dms import migrations
     src = inspect.getsource(migrations._apply_migrations)
+    # storages.kind 뒤에는 2026-10-26 기본 소유 칸이 이어진다 -- 마지막 칸(「)」)이든 중간 칸(「,」)이든 선언만 고정한다.
     for table, column in (("storages", "kind"), ("requests", "target_label")):
         block = re.search(rf'CREATE TABLE IF NOT EXISTS {table} \(.*?"""', src, re.S)
         assert block is not None, table
         sql = re.sub(r"--[^\n]*", "", block.group(0))
-        assert re.search(rf"^\s*{column}\s+TEXT\)", sql, re.M), (table, column)
+        assert re.search(rf"^\s*{column}\s+TEXT\s*[,)]", sql, re.M), (table, column)
+
+
+def test_storage_default_owner_columns_are_declared_bigint_in_the_create_table_block():
+    # 2026-10-26 스토리지 기본 소유 uid·gid: 신규 DB 의 CREATE 누락은 _ensure_columns 가 흡수해 PRAGMA 로 못 가른다(위와 같은
+    # 이유) -- CREATE 쪽 선언을 소스로 고정한다. BIGINT 는 int4 천장(2147483647 < 4294967294) 때문이고, NOT NULL DEFAULT 0 은
+    # 「생략 = root:root」(사용자 지정 기본값)를 신규 DB 의 모양으로 둔다.
+    import inspect
+    import re
+    from dms import migrations
+    src = inspect.getsource(migrations._apply_migrations)
+    block = re.search(r'CREATE TABLE IF NOT EXISTS storages \(.*?"""', src, re.S)
+    assert block is not None
+    sql = re.sub(r"--[^\n]*", "", block.group(0))
+    for column in ("default_uid", "default_gid"):
+        assert re.search(rf"^\s*{column}\s+BIGINT\s+NOT NULL\s+DEFAULT 0\s*[,)]", sql, re.M), column
+
+
+def test_migrate_adds_and_backfills_storage_default_owner_on_an_existing_db(db):
+    # 기배포 DB(kind 까지 있는 2026-10-25 모양의 storages)는 CREATE 를 다시 안 탄다 -- _ensure_columns 가 ALTER 로 보태고
+    # _backfill_storage_default_owner 가 NULL 을 0(root:root)으로 채운다. 관리자가 정한 값(0 포함)은 두 번째 migrate 가 덮지
+    # 않는다(멱등 -- 필터가 IS NULL). 한쪽 칸만 NULL 인 행도 다른 칸을 보존한다.
+    db.execute("DROP TABLE storages")
+    db.execute("""CREATE TABLE storages (storage_name TEXT PRIMARY KEY, mount_path TEXT NOT NULL,
+        managed_root TEXT NOT NULL, backend_type TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
+        user_enabled INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL DEFAULT 'Unknown', status_detail TEXT,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL, updated_by TEXT NOT NULL, kind TEXT)""")
+    for name in ("old-a", "old-b"):
+        db.execute("""INSERT INTO storages (storage_name, mount_path, managed_root, backend_type, created_at,
+            updated_at, updated_by, kind) VALUES (:n, '/m', '/m/d', 'nfs', 't', 't', 'x', 'pv')""", {"n": name})
+    from dms.migrations import _column_exists, migrate
+    from dms.repositories.k8s import storage_default_owner
+    migrate(db)
+    assert _column_exists(db, "storages", "default_uid") and _column_exists(db, "storages", "default_gid")
+    # 형 대조는 방언별로(이 테스트는 DMS_TEST_DB=postgresql 갈래에서도 돈다 -- ALTER 경로의 int4 천장은 PG 에서만 드러난다).
+    if db.dialect == "postgresql":
+        types = {r["column_name"]: r["data_type"] for r in db.query(
+            """SELECT column_name, data_type FROM information_schema.columns
+               WHERE table_schema = current_schema() AND table_name = 'storages'""")}
+        assert (types["default_uid"], types["default_gid"]) == ("bigint", "bigint")
+    else:
+        assert _declared_type(db, "storages", "default_uid") == "BIGINT"
+        assert _declared_type(db, "storages", "default_gid") == "BIGINT"
+    rows = {r["storage_name"]: r for r in db.query("SELECT * FROM storages")}
+    assert {n: (r["default_uid"], r["default_gid"]) for n, r in rows.items()} == {"old-a": (0, 0), "old-b": (0, 0)}
+    assert storage_default_owner(rows["old-a"]) == "0:0"
+    db.execute("UPDATE storages SET default_uid = 4294967294, default_gid = 0 WHERE storage_name = 'old-a'")
+    db.execute("UPDATE storages SET default_uid = 2000, default_gid = NULL WHERE storage_name = 'old-b'")
+    migrate(db)                                     # 멱등 -- 정한 값(0 포함)은 그대로, NULL 칸만 채운다
+    rows = {r["storage_name"]: (r["default_uid"], r["default_gid"]) for r in db.query("SELECT * FROM storages")}
+    assert rows == {"old-a": (4294967294, 0), "old-b": (2000, 0)}
 
 
 def test_k8s_tables_carry_no_request_or_job_reference_columns(tmp_path):

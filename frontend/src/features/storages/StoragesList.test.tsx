@@ -144,3 +144,32 @@ test("종류 열에 글자 배지(점 없음), 범위를 바꿔도 지금 종류
   await waitFor(() => expect(bodies).toEqual([{ mount_path: S.mount_path, managed_root: S.managed_root,
     backend_type: S.backend_type, enabled: true, user_enabled: false, kind: "pv" }]));
 });
+
+
+// ---- 기본 소유(2026-10-26 -- PV 목적지 sync 결과 소유) ----------------------------------------------------------------
+test("PV·둘 다 행은 종류 배지 아래 「기본 소유 uid:gid」(0:0 은 root), 파일시스템 행엔 없고, 범위 PUT 은 기본 소유를 싣지 않는다", async () => {
+  const bodies: unknown[] = [];
+  server.use(
+    http.get("/api/admin/storages", () => HttpResponse.json([
+      S,
+      { ...S, storage_name: "k8s-pv-nfs", kind: "pv", default_uid: 1500, default_gid: 1500, default_owner: "1500:1500" },
+      { ...S, storage_name: "k8s-pv-gpfs", kind: "both", default_uid: 0, default_gid: 0, default_owner: "0:0" },
+      { ...S, storage_name: "k8s-pv-bad", kind: "pv", default_uid: -1, default_gid: 0, default_owner: null },
+      { ...S, storage_name: "k8s-pv-old", kind: "pv" }])),
+    http.put("/api/admin/storages/:name", async ({ request }) => {
+      bodies.push(await request.json()); return HttpResponse.json(S); }),
+  );
+  wrap();
+  const row = async (name: string) => (await screen.findByText(name)).closest("tr")!;
+  expect(within(await row("k8s-pv-nfs")).getByText("기본 소유 1500:1500")).toBeInTheDocument();
+  expect(within(await row("k8s-pv-gpfs")).getByText("기본 소유 0:0(root)")).toBeInTheDocument();
+  expect(within(await row("k8s-pv-bad")).getByText("기본 소유 값 오류 — 수정에서 다시 저장")).toHaveClass("text-bad");
+  expect(within(await row("k8s-pv-old")).getByText("기본 소유 모름")).toBeInTheDocument();     // 옛 응답(키 없음)
+  expect(within(await row("cephfs")).queryByText(/기본 소유/)).toBeNull();
+  // 종류 배지와 같은 칸의 둘째 줄이다(열을 늘리지 않는다 -- e2e 03 의 표 셀 수 하한)
+  const kindCell = within(await row("k8s-pv-nfs")).getByText("PV").closest("td")!;
+  expect(within(kindCell).getByText("기본 소유 1500:1500")).toBeInTheDocument();
+  await userEvent.selectOptions(screen.getByLabelText("k8s-pv-nfs 사용 범위"), "관리자 전용");
+  await waitFor(() => expect(bodies).toEqual([{ mount_path: S.mount_path, managed_root: S.managed_root,
+    backend_type: S.backend_type, enabled: true, user_enabled: false, kind: "pv" }]));
+});

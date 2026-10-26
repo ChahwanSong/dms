@@ -33,7 +33,7 @@ from ..db import load_json, utc_now_iso
 from ..domain import DomainValidationError
 from ..mail_config import resolve_mail_config
 from ..pv_paths import effective_template, validate_template
-from ..repositories.k8s import storage_kind
+from ..repositories.k8s import PV_CAPABLE_KINDS, storage_default_owner, storage_kind
 from ..repositories.storages import storage_open_to_users
 from ..secret_box import seal_at_rest
 from .auth import Identity, audit_actor, can_run_as_root, require_admin, require_session_admin, require_user
@@ -479,6 +479,8 @@ def list_storage_classes(request: Request):
         sample = repos.k8s.sample_volume(row["cluster"], row["name"]) if row["cluster"] else None
         return {**row, "storage_name": (m or {}).get("storage_name"),
                 "storage_kind": storage_kind(storage) if storage else None,
+                # PV 목적지 결과 기본 소유자(2026-10-26) -- resolve_volume 의 storage_owner 와 같은 규칙(PV 를 담는 종류만).
+                "storage_owner": storage_default_owner(storage) if storage_kind(storage) in PV_CAPABLE_KINDS else None,
                 "storage_backend": (storage or {}).get("backend_type"),
                 "path_template": (m or {}).get("path_template"),
                 "effective_template": template if m else None, "template_source": source if m else None,

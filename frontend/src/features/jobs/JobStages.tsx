@@ -335,8 +335,9 @@ function StageSection({ n, stage, model, op, children, titleId, refIso }: {
 // 컨펌 창(ConfirmDialog)은 컨펌 대기 중인 비배치 잡의 **이 줄에만** 있다(리뷰 N5) -- 다른 잡의 상태(배너 초점)가 바뀌어도
 // 자리가 옮겨 가지 않아 열어 둔 창이 폴링 중에 사라지지 않는다. 배너 「컨펌하러 가기」는 id 로 이 줄을 찾아
 // data-confirm-trigger 안의 버튼에 포커스한다.
-function GateRow({ job, model, refIso, batchChild, showConfirm, rowId }: {
+function GateRow({ job, model, refIso, batchChild, showConfirm, rowId, resultOwner }: {
   job: DataJob; model: JobStagesModel; refIso?: string | null; batchChild: boolean; showConfirm: boolean; rowId: string;
+  resultOwner?: string | null;
 }) {
   const gate = model.gate!;
   const now = useNow(30_000, gate.status === "awaiting");
@@ -374,16 +375,18 @@ function GateRow({ job, model, refIso, batchChild, showConfirm, rowId }: {
       <span className={`min-w-0 flex-1 break-keep ${gate.status === "awaiting" ? "font-medium text-attn" : "text-ink/70"}`}>{text}</span>
       <HelpTip label="작업 컨펌 단계 설명" head="작업 컨펌" help={stageHelp("gate", model.flow, { batchChild })} />
       {showConfirm && gate.status === "awaiting" && (
-        <span data-confirm-trigger className="shrink-0"><ConfirmDialog job={job} /></span>
+        <span data-confirm-trigger className="shrink-0"><ConfirmDialog job={job} resultOwner={resultOwner} /></span>
       )}
     </div>
   );
 }
 
 export function JobStages({ job, events, jobCount = 1, refIso, batchChild = false,
-                            confirmOnGate = false }: {
+                            confirmOnGate = false, resultOwner = null }: {
   job: DataJob; events?: unknown; jobCount?: number; refIso?: string | null;
   batchChild?: boolean; confirmOnGate?: boolean;
+  /** sync 결과 소유 한 줄(요청 상세 「목적지 소유」와 같은 값 -- requestSpec.ownership). 컨펌 창이 그대로 보인다. null = 모름(생략). */
+  resultOwner?: string | null;
 }) {
   // 이벤트는 단계 행 주석(annotationsFor)이 읽는다.
   const model = useMemo(() => deriveJobStages(job), [job]);
@@ -491,7 +494,7 @@ export function JobStages({ job, events, jobCount = 1, refIso, batchChild = fals
       </StageSection>
       {model.flow === "previewed" && model.gate ? (
         <GateRow job={job} model={model} refIso={refIso} batchChild={batchChild}
-                 showConfirm={confirmOnGate && !batchChild} rowId={gateRowId} />
+                 showConfirm={confirmOnGate && !batchChild} rowId={gateRowId} resultOwner={resultOwner} />
       ) : (
         <div className="ml-3 border-l-2 border-dotted border-line py-2 pl-4 text-xs text-ink/70">
           미리보기·컨펌 없이 바로 실행됩니다

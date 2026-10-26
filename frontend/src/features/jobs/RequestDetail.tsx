@@ -256,7 +256,8 @@ export function RequestDetail() {
             jobList.map((j, i) => (
               <JobCard key={j.job_id} job={j} model={models[i]} cancel={cancel}
                        events={data.events} jobCount={jobList.length} refIso={data.created_at}
-                       batchChild={batchChild} confirmOnGate={outcome.confirmOwner === "gate"} />
+                       batchChild={batchChild} confirmOnGate={outcome.confirmOwner === "gate"}
+                       resultOwner={spec.ownership} />
             ))
           )}
         </section>

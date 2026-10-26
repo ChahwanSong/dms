@@ -7,7 +7,7 @@ import { http, HttpResponse } from "msw";
 import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from "vitest";
 import { SubmitJob } from "./SubmitJob";
 import { SYNC_INT_FIELDS } from "./optionRules";
-import { PRIV_ROOT_SYNC_PV } from "./optionRules";
+import { PRIV_ROOT_SYNC_PV, PRIV_ROOT_SYNC_PV_ROOT } from "./optionRules";
 import type { Me, UserStorage } from "../../lib/types";
 import type { ClusterFreshness, UserVolumesResponse, VolumeRow, VolumesResponse } from "../k8s/types";
 
@@ -25,22 +25,25 @@ function vol(over: Partial<VolumeRow>): VolumeRow {
     cluster: "dmsk8s", namespace: "team-a", storage_class: "tb-gpfs", pvc: "models", volume: GPFS_A, phase: "Bound",
     capacity: "1Gi", access_modes: ["ReadWriteMany"], created_at: "2026-10-25T01:00:00Z", storage_name: "k8s-pv-gpfs",
     root: `${GPFS_A}/${GPFS_A}-data`, abs_root: `/k8s_pv/gpfs/${GPFS_A}/${GPFS_A}-data`, selectable: true, reason: null,
-    access: "admin", ...over,
+    // 목적지 스토리지 기본 소유자(2026-10-26 -- 서버 storage_default_owner). k8s-pv-gpfs 는 기본 0:0, k8s-pv-nfs 는 1500:1500.
+    access: "admin", storage_owner: "0:0", ...over,
   };
 }
 const A_MODELS = vol({});
 const A_DATASETS = vol({ pvc: "datasets", storage_class: "tb-nfs", volume: "pvc-814fe02b", capacity: "2Gi",
-                         storage_name: "k8s-pv-nfs", root: "team-a/datasets", abs_root: "/k8s_pv/nfs/team-a/datasets" });
+                         storage_name: "k8s-pv-nfs", root: "team-a/datasets", abs_root: "/k8s_pv/nfs/team-a/datasets",
+                         storage_owner: "1500:1500" });
 const A_PENDING = vol({ pvc: "checkpoints", storage_class: "tb-missing", volume: null, phase: "Pending", capacity: null,
-                        storage_name: null, root: null, abs_root: null, selectable: false, reason: "pv_not_bound" });
+                        storage_name: null, root: null, abs_root: null, selectable: false, reason: "pv_not_bound",
+                        storage_owner: null });
 const B_SCRATCH = vol({ namespace: "team-b", pvc: "scratch", storage_class: "tb-nfs", volume: "pvc-aa3d0bd2",
                         capacity: "5Gi", storage_name: "k8s-pv-nfs", root: "team-b/scratch",
-                        abs_root: "/k8s_pv/nfs/team-b/scratch", access: "edit" });
+                        abs_root: "/k8s_pv/nfs/team-b/scratch", access: "edit", storage_owner: "1500:1500" });
 const B_MODELS = vol({ namespace: "team-b", volume: GPFS_B, root: `${GPFS_B}/${GPFS_B}-data`,
                        abs_root: `/k8s_pv/gpfs/${GPFS_B}/${GPFS_B}-data`, access: "edit" });
 const C_ARCHIVE = vol({ namespace: "team-c", pvc: "archive", storage_class: "tb-nfs", volume: "pvc-5e5969a1",
                         storage_name: "k8s-pv-nfs", root: "team-c/archive", abs_root: "/k8s_pv/nfs/team-c/archive",
-                        access: null });
+                        access: null, storage_owner: "1500:1500" });
 
 const FRESH: ClusterFreshness[] = [{ name: "dmsk8s", synced_at: ago(3), stale: false, status: "ok" }];
 
@@ -172,10 +175,13 @@ test("사용자 sync: namespace (StorageClass) → PV 이름 → PV 안 경로, 
   // 요약: 사람이 읽는 표기 + 실제 경로 + 실행 권한 root
   expect(screen.getByText("models — team-a (tb-gpfs) / sample")).toBeInTheDocument();
   expect(screen.getByText("scratch — team-b (tb-nfs) / in")).toBeInTheDocument();
-  // PV 목적지 root sync: 결과 소유 = 목적지 PV 루트 소유자(2026-10-26 사용자 결정) -- 요약·소유권 안내 둘 다
+  // PV 목적지 root sync: 결과 소유 = 목적지 스토리지 기본 소유자(2026-10-26 사용자 결정 -- 사용자는 늘 자동) -- 요약·소유권 안내
+  // 둘 다 그 값(서버가 해석한 VolumeRow.storage_owner)을 말하고, 사용자에겐 결과 소유 조작이 없다.
   expect(screen.getByText(PRIV_ROOT_SYNC_PV)).toBeInTheDocument();
   expect(screen.getByRole("note", { name: "목적지 조건과 소유권" }).textContent)
-    .toContain("목적지 PV 루트의 소유자·그룹(uid:gid)으로 맞춰집니다");
+    .toContain("결과는 목적지 스토리지 기본 소유자 1500:1500 로 맞춰집니다");
+  expect(screen.getByText("목적지 스토리지 기본 소유자 1500:1500", { selector: "dd" })).toBeInTheDocument();
+  expect(screen.queryByRole("group", { name: "결과 소유" })).toBeNull();
   // LDAP·root 선택 흔적이 없다
   expect(screen.queryByLabelText("root 권한으로 실행")).toBeNull();
   expect(screen.queryByText(/LDAP 보조 그룹/)).toBeNull();
@@ -431,4 +437,119 @@ test("면제 관리자 검색 결과가 상한을 넘으면 좁히라고 말한�
   renderAs(meExempt);
   await choose("scan");
   expect(await screen.findByText("결과가 50개를 넘어 앞의 50개만 보입니다 — 검색어를 좁히세요.")).toBeInTheDocument();
+});
+
+// ---- 결과 소유(2026-10-26 사용자 결정: 스토리지 기본 uid:gid -- 사용자는 늘 자동, 운영자는 옵션으로 PV 루트 소유자) ----------
+
+const ownerCard = () => screen.getByRole("note", { name: "목적지 조건과 소유권" });
+const summaryValue = (label: string) => screen.getByText(label, { selector: "dt" }).nextElementSibling as HTMLElement;
+
+test("사용자: 기본 소유 0:0 은 「0:0(root)」로 실제 값을 말하고, PV 루트 목적지면 PV 루트 자체가 그 소유로 chown 된다고 경고한다", async () => {
+  renderAs(meUser);
+  await pick("소스 namespace (StorageClass)", "소스 PV 이름", "team-a (tb-nfs)", "datasets — 2Gi · Bound");
+  await pick("목적지 namespace (StorageClass)", "목적지 PV 이름", "team-b (tb-gpfs)", "models — 1Gi · Bound");
+  // 하위경로를 비우면 PV 루트 -- 막지 않고 경고만(제출은 된다)
+  expect(screen.getByText(
+    "목적지가 PV 전체(루트)라 PV 루트 디렉터리 자체가 스토리지 기본 소유자 0:0(root) 로 chown 되고, 권한·시각은 소스에 맞춰 바뀝니다 — 하위 디렉터리로 받으려면 경로를 적으세요."))
+    .toBeInTheDocument();
+  expect(summaryValue("목적지 소유")).toHaveTextContent("목적지 스토리지 기본 소유자 0:0(root)");
+  expect(ownerCard()).toHaveTextContent("결과는 목적지 스토리지 기본 소유자 0:0(root) 로 맞춰집니다");
+  expect(ownerCard()).toHaveTextContent("그 안의 같은 경로 항목은 목적지 스토리지 기본 소유자와 소스의 권한·시각으로 다시 맞춰집니다");
+  expect(screen.queryByRole("group", { name: "결과 소유" })).toBeNull();
+  // 기본 바디는 이 기능 전과 같다 -- pv_owner 를 싣지 않는다(서버가 owner_rule:"storage" 를 박는다)
+  expect(await submitAndBody()).toEqual({
+    operation: "sync",
+    source_pv: { cluster: "dmsk8s", namespace: "team-a", pvc: "datasets" }, source: "",
+    destination_pv: { cluster: "dmsk8s", namespace: "team-b", pvc: "models" }, destination: "",
+    options: SYNC_DEFAULTS, run_as_root: true,
+  });
+});
+
+test("목적지 스토리지의 기본 소유 값이 올바르지 않으면(storage_owner null) 보내기 전에 잠근다(서버 409 invalid_storage_owner)", async () => {
+  server.use(http.get("/api/user/k8s/volumes", () => HttpResponse.json(userVolumes({
+    volumes: [A_DATASETS, A_MODELS, { ...B_SCRATCH, storage_owner: null }],
+  }))));
+  renderAs(meUser);
+  await pick("소스 namespace (StorageClass)", "소스 PV 이름", "team-a (tb-gpfs)", "models — 1Gi · Bound");
+  await pick("목적지 namespace (StorageClass)", "목적지 PV 이름", "team-b (tb-nfs)", "scratch — 5Gi · Bound");
+  await userEvent.type(screen.getByLabelText("목적지 PV 안 경로"), "in");
+  expect(submitButton()).toBeDisabled();
+  expect(hints()).toHaveTextContent("목적지 스토리지의 기본 소유 값이 올바르지 않습니다 — 관리자에게 스토리지 설정 확인을 요청하세요");
+  expect(ownerCard()).toHaveTextContent("이 PV 의 스토리지에 저장된 기본 소유 값이 올바르지 않아 제출할 수 없습니다");
+  expect(summaryValue("목적지 소유")).toHaveTextContent("목적지 스토리지 기본 소유자(uid:gid)");
+});
+
+async function exemptPick(side: "소스" | "목적지", q: string) {
+  await userEvent.type(await screen.findByLabelText(`${side} PV 검색`), q);
+  const results = await screen.findByRole("radiogroup", { name: `${side} 검색 결과 목록` });
+  await waitFor(() => expect(within(results).getAllByRole("radio")).toHaveLength(1));
+  await userEvent.click(within(results).getByRole("radio"));
+}
+
+test("운영자(면제자): 「결과 소유」 기본은 스토리지 기본 -- 「PV 루트 소유자」를 고르면 문구·요약·경고가 바뀌고 바디에 pv_owner:\"pv_root\"", async () => {
+  renderAs(meExempt);
+  await exemptPick("소스", "archive");
+  await exemptPick("목적지", "scratch");
+  const group = await screen.findByRole("group", { name: "결과 소유" });
+  const storageBtn = await within(group).findByRole("button", { name: "스토리지 기본" });
+  // 값은 버튼이 아니라 도움말에(Segmented 는 한 줄 -- 값이 길면 반폭 열을 넘쳐 도움말과 겹쳤다, 리뷰)
+  expect(screen.getByText(/기본은 목적지 스토리지 기본 소유자 1500:1500입니다/)).toBeInTheDocument();
+  const rootBtn = within(group).getByRole("button", { name: "PV 루트 소유자" });
+  expect(storageBtn).toHaveAttribute("aria-pressed", "true");
+  expect(summaryValue("목적지 소유")).toHaveTextContent("목적지 스토리지 기본 소유자 1500:1500");
+  expect(screen.getByText(PRIV_ROOT_SYNC_PV)).toBeInTheDocument();
+  await userEvent.click(rootBtn);
+  expect(rootBtn).toHaveAttribute("aria-pressed", "true");
+  expect(summaryValue("목적지 소유")).toHaveTextContent("목적지 PV 루트의 소유자·그룹(점검 뒤 확정 — 운영자 지정)");
+  expect(screen.getByText(PRIV_ROOT_SYNC_PV_ROOT)).toBeInTheDocument();
+  expect(ownerCard()).toHaveTextContent("결과 소유를 PV 루트 소유자로 골랐습니다(특권 운영자 옵션 — 기본은 목적지 스토리지 기본 소유자)");
+  expect(ownerCard()).toHaveTextContent("그 안의 같은 경로 항목은 목적지 PV 루트의 소유자·그룹과 소스의 권한·시각으로 다시 맞춰집니다");
+  // PV 루트 목적지(하위경로 비움) 경고도 그 규칙: PV 루트 소유자는 그대로
+  expect(screen.getByText(/PV 루트 디렉터리의 권한·시각이 소스에 맞춰 바뀝니다\(소유자는 PV 루트 소유자 그대로\)/)).toBeInTheDocument();
+  await userEvent.type(screen.getByLabelText("목적지 PV 안 경로"), "in");
+  expect(await submitAndBody()).toEqual({
+    operation: "sync",
+    source_pv: { cluster: "dmsk8s", namespace: "team-c", pvc: "archive" }, source: "",
+    destination_pv: { cluster: "dmsk8s", namespace: "team-b", pvc: "scratch" }, destination: "in",
+    options: SYNC_DEFAULTS, pv_owner: "pv_root", run_as_root: true,
+  });
+});
+
+test("운영자: 스토리지 기본을 그대로 두면 바디는 기본 바디와 같다(pv_owner 없음)", async () => {
+  renderAs(meExempt);
+  await exemptPick("소스", "archive");
+  await exemptPick("목적지", "scratch");
+  await screen.findByRole("group", { name: "결과 소유" });
+  await userEvent.type(screen.getByLabelText("목적지 PV 안 경로"), "in");
+  const body = await submitAndBody() as Record<string, unknown>;
+  expect(body).not.toHaveProperty("pv_owner");
+  expect(body.destination_pv).toEqual({ cluster: "dmsk8s", namespace: "team-b", pvc: "scratch" });
+});
+
+test("운영자: chown 을 지정하면 결과 소유 선택이 잠기고 이유를 말하며, PV 루트를 골라 뒀어도 pv_owner 를 싣지 않는다", async () => {
+  renderAs(meExempt);
+  await exemptPick("소스", "archive");
+  await exemptPick("목적지", "scratch");
+  const group = await screen.findByRole("group", { name: "결과 소유" });
+  await userEvent.click(within(group).getByRole("button", { name: "PV 루트 소유자" }));
+  await userEvent.type(screen.getByLabelText("chown"), "7:7");
+  for (const b of within(group).getAllByRole("button")) expect(b).toBeDisabled();
+  expect(screen.getByText("chown 을 지정해 결과는 chown 지정값(7:7)으로 셋업됩니다 — 결과 소유 선택은 쓰이지 않습니다.")).toBeInTheDocument();
+  expect(summaryValue("목적지 소유")).toHaveTextContent("chown 지정값 7:7");
+  // PV 루트 목적지 경고도 chown 값으로
+  expect(screen.getByText(/PV 루트 디렉터리 자체가 chown 지정값 7:7 소유로 바뀌고/)).toBeInTheDocument();
+  await userEvent.type(screen.getByLabelText("목적지 PV 안 경로"), "in");
+  const body = await submitAndBody() as Record<string, unknown>;
+  expect(body).not.toHaveProperty("pv_owner");
+  expect(body.options).toEqual({ ...SYNC_DEFAULTS, chown: "7:7" });
+});
+
+test("운영자: 목적지가 직접 경로면 결과 소유 선택이 없다(소스 소유 보존 -- 범위 밖)", async () => {
+  renderAs(meExempt);
+  await exemptPick("소스", "archive");
+  expect(await screen.findByRole("group", { name: "결과 소유" })).toBeInTheDocument();   // PV 목적지(기본)면 보인다
+  const mode = screen.getByRole("group", { name: "목적지 지정 방식" });
+  await userEvent.click(within(mode).getByRole("button", { name: "직접 경로" }));
+  expect(screen.queryByRole("group", { name: "결과 소유" })).toBeNull();
+  expect(summaryValue("목적지 소유")).toHaveTextContent("소스의 소유자·그룹 그대로(root 실행)");
 });

@@ -1,8 +1,13 @@
 // sync 결과(목적지) 소유권 안내(2026-10-01 사용자 요청: "기본적으로 목적지는 요청자 본인 uid:gid 로
 // 셋업된다"를 사용자·운영자 안내에). 서버 규칙의 미러 -- execution_manifests._auto_chown:
 //   - chown 옵션을 지정했으면 그 값(자동 지정은 꺼진다)
-//   - root 실행 + 목적지가 PV 주소면 **목적지 PV 루트의 소유자·그룹**(2026-10-26 사용자 결정 -- 점검(preflight)이 재서
-//     잡 worker_pool.dest_pv_owner 에 남긴 값; 미리보기 뒤 바뀌면 실행을 멈춘다)
+//   - root 실행 + 목적지가 PV 주소면 그 요청의 결과 소유 규칙(payload.destination_pv.owner_rule, 2026-10-26 사용자 결정
+//     「각 k8s 스토리지 항목마다 기본 uid,gid … 사용자는 항상 자동, 운영자는 옵션으로 PV 루트 소유자」):
+//       storage  **목적지 스토리지의 기본 소유자**(스토리지 등록 화면의 기본 소유 uid:gid, 기본 0:0 = root:root) -- 서버가
+//                제출 때 그 값을 destination_pv.owner 에 박고, 계획·컨펌 때 지금 값과 다르면 storage_owner_changed 로 멈춘다
+//       pv_root  **목적지 PV 루트의 소유자·그룹**(특권 운영자 옵션 -- 점검(preflight)이 재서 잡 worker_pool.dest_pv_owner 에
+//                남긴 값; 미리보기 뒤 바뀌면 실행을 멈춘다)
+//       없음     이 규칙 전에 제출된 옛 행 -- 서버가 pv_root 와 같은 잰 값으로 돌린다(부재를 거부로 강화하지 않는다)
 //   - root 실행이면 개입하지 않는다 → 소스의 소유자·그룹이 그대로
 //   - 그 외(비 root)엔 `--chown <실행 신원 uid>:<주 그룹 gid>` → 새로 만든 목적지·복사본 전부 실행 신원 소유
 // 2026-10-26 LDAP 정리 뒤로 새 작업은 전부 root 다(k8s 신원 모드) -- 비 root 갈래는 옛 행(계획 스냅숏이 비 root)의 표시용으로만
@@ -37,8 +42,30 @@ export interface OwnershipInput {
   runAs: string | null;   // 실행 신원 이름(모르면 null)
   self: boolean;          // 실행 신원이 요청자 본인인가
   chownEditable?: boolean; // 이 화면에서 chown 을 직접 지정할 수 있나(기본 true -- 관리자 전용 화면들). 사용자 신청 화면은 false
-  pvDestination?: boolean; // 목적지가 PV 주소인가(k8s 모드) -- root 면 결과를 목적지 PV 루트 소유자로 맞춘다
-  pvOwner?: string | null; // 점검이 잰 목적지 PV 루트 소유자 "uid:gid"(모르면 null -- 아직 점검 전)
+  pvDestination?: boolean; // 목적지가 PV 주소인가(k8s 모드) -- root 면 아래 규칙으로 결과 소유를 맞춘다
+  // PV 목적지의 결과 소유 규칙(위 주석). null·생략 = 옛 행(규칙 이전 -- 잰 PV 루트 소유자, 문구도 그때 그대로).
+  pvOwnerRule?: PvOwnerRule | null;
+  storageOwner?: string | null; // 목적지 스토리지 기본 소유자 "uid:gid"(storage 규칙 -- 모르면 null: PV 를 아직 안 고름)
+  pvOwner?: string | null; // 점검이 잰 목적지 PV 루트 소유자 "uid:gid"(pv_root·옛 행 -- 모르면 null: 아직 점검 전)
+}
+
+/** PV 목적지 sync 의 결과 소유 규칙(서버 payload.destination_pv.owner_rule 의 값 집합). */
+export type PvOwnerRule = "storage" | "pv_root";
+
+// uid·gid 상한(서버 execution_manifests valid_owner·스토리지 기본 소유 검증과 같은 범위 -- 4294967295 = (uid_t)-1 은
+// 「바꾸지 않음」 표식이라 값이 아니다).
+export const OWNER_ID_MAX = 4294967294;
+
+/** "uid:gid" 꼴(숫자 둘, 각 0..OWNER_ID_MAX)만 값으로 받는다 -- 그 밖(문자열 아님·이름·범위 밖)은 null(모름). DB·응답은 신뢰
+    경계 밖이라 모양이 틀린 값을 그럴듯하게 보이지 않는다(0 은 정상값 -- root:root). */
+export function validOwner(v: unknown): string | null {
+  if (typeof v !== "string" || !/^[0-9]{1,10}:[0-9]{1,10}$/.test(v)) return null;
+  return v.split(":").every((p) => Number(p) <= OWNER_ID_MAX) ? v : null;
+}
+
+/** 소유 표기: "uid:gid" 그대로, root:root(0:0)만 「0:0(root)」 -- 0 은 「없음」이 아니라 root 라는 실제 값이다. */
+export function ownerText(owner: string): string {
+  return owner === "0:0" ? "0:0(root)" : owner;
 }
 
 /** chown 값에 이름(숫자가 아닌 파트)이 있나 -- 잡 컨테이너에서 해석되지 않아 서버가 거부한다(위 주석,
@@ -68,7 +95,8 @@ const NON_ROOT_CHOWN_EPERM =
   "dsync(같은 노드) 는 데이터를 복사한 뒤 작업이 실패하고, nsync(노드 간) 는 소유 변경이 적용되지 않아 실행 신원 소유로 남습니다";
 
 export function syncOwnership({ chown, chmod = "", root, runAs, self, chownEditable = true, pvDestination = false,
-                                pvOwner = null }: OwnershipInput): { short: string; long: string } {
+                                pvOwnerRule = null, storageOwner = null, pvOwner = null }: OwnershipInput):
+                                { short: string; long: string } {
   const c = chown.trim();
   const m = chmod.trim();
   const modeText = m !== "" ? `권한 비트는 chmod 지정값(${m}), 수정 시각은 소스 그대로입니다.`
@@ -86,14 +114,31 @@ export function syncOwnership({ chown, chmod = "", root, runAs, self, chownEdita
       long: `${lead}${partial}${nonRoot} ${modeText}`,
     };
   }
+  // 이미 있던 같은 경로 항목·setuid 비트(PV 목적지 두 규칙 공통 -- 서버가 둘 다 --chown 을 넘기고, 포크는 --chown 이 있으면
+  // 일반 파일의 setuid·setgid 를 지운다. 0:0 이어도 --chown 0:0 이 넘어가므로 같다).
+  const pvTail = "목적지에 이미 있던 같은 경로의 항목도 이 소유로 다시 맞춰지고, 일반 파일의 setuid·setgid 비트는 지워집니다"
+    + `(소유자를 바꾸는 chown 과 같은 규칙). ${modeText}`;
+  if (root && pvDestination && pvOwnerRule === "storage") {
+    const owner = validOwner(storageOwner);
+    const v = owner !== null ? ownerText(owner) : null;
+    return { short: v !== null ? `목적지 스토리지 기본 소유자 ${v}` : "목적지 스토리지 기본 소유자(uid:gid)",
+             long: (v !== null ? `결과는 목적지 스토리지 기본 소유자 ${v} 로 맞춰집니다` : "결과는 목적지 스토리지의 기본 소유자(uid:gid)로 맞춰집니다")
+                 + "(목적지와 복사된 파일·디렉토리 전부) — 소스 소유자와 관계없이 관리자가 그 스토리지에 등록한 기본 소유자입니다"
+                 + "(등록하지 않았으면 0:0 = root). "
+                 + (v !== null ? "" : "실제 값은 목적지 PV 를 고르면 보입니다. ")
+                 + `컨펌 전에 관리자가 그 값을 바꾸면 실행하지 않고 멈춥니다(이미 컨펌한 작업은 확인 창에 보인 값으로 실행됩니다). ${pvTail}` };
+  }
   if (root && pvDestination) {
-    const owner = pvOwner !== null && /^[0-9]+:[0-9]+$/.test(pvOwner) ? pvOwner : null;
-    return { short: owner !== null ? `목적지 PV 소유자 ${owner}(PV 루트 기준)` : "목적지 PV 루트의 소유자·그룹(점검 뒤 확정)",
-             long: "결과(목적지와 복사된 파일·디렉토리)는 목적지 PV 루트의 소유자·그룹(uid:gid)으로 맞춰집니다 — 소스 소유자와 "
+    // pv_root(운영자 옵션) 와 옛 행(규칙 없음)은 같은 동작(잰 PV 루트 소유자) -- 운영자 옵션이면 그 사실만 덧붙인다.
+    const owner = validOwner(pvOwner);
+    const chosen = pvOwnerRule === "pv_root";
+    return { short: owner !== null ? `목적지 PV 소유자 ${owner}(PV 루트 기준${chosen ? " — 운영자 지정" : ""})`
+                      : `목적지 PV 루트의 소유자·그룹(점검 뒤 확정${chosen ? " — 운영자 지정" : ""})`,
+             long: (chosen ? "결과 소유를 PV 루트 소유자로 골랐습니다(특권 운영자 옵션 — 기본은 목적지 스토리지 기본 소유자). " : "")
+                 + "결과(목적지와 복사된 파일·디렉토리)는 목적지 PV 루트의 소유자·그룹(uid:gid)으로 맞춰집니다 — 소스 소유자와 "
                  + "관계없이 그 PV 의 소유자 기준입니다(PV 루트가 root 소유면 결과도 root 소유). "
                  + (owner !== null ? `점검에서 확인한 값은 ${owner} 입니다. ` : "실제 값은 점검(preflight)에서 확인돼 확인 창에 보입니다. ")
-                 + "미리보기 뒤 그 소유자가 바뀌면 실행하지 않고 멈춥니다. 목적지에 이미 있던 같은 경로의 항목도 이 소유로 다시 "
-                 + `맞춰지고, 일반 파일의 setuid·setgid 비트는 지워집니다(소유자를 바꾸는 chown 과 같은 규칙). ${modeText}` };
+                 + `미리보기 뒤 그 소유자가 바뀌면 실행하지 않고 멈춥니다. ${pvTail}` };
   }
   if (root)
     return { short: "소스의 소유자·그룹 그대로(root 실행)",

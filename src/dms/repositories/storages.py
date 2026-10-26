@@ -3,7 +3,7 @@ import re
 from ..artifact_base import ARTIFACT_MOUNT
 from ..db import Database, dump_json, load_json, utc_now_iso
 from ..domain import DomainValidationError
-from .k8s import PV_CAPABLE_KINDS, STORAGE_KINDS, delete_maps_for_storage_in_txn, storage_kind
+from .k8s import OWNER_ID_MAX, PV_CAPABLE_KINDS, STORAGE_KINDS, delete_maps_for_storage_in_txn, storage_kind
 
 _NAME_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,62}$")
 # 백엔드 식별자는 검증·저장·표시용 라벨이다 -- 마운트 프로브·잡 볼륨·경로 해석은 전부
@@ -21,6 +21,15 @@ def _validate_kind(kind) -> str:
     if kind not in STORAGE_KINDS:
         raise DomainValidationError("invalid_storage_kind", f"bad kind {kind!r}")
     return kind
+
+
+def _validate_owner_id(value, field) -> int:
+    """기본 소유 uid·gid 하나(2026-10-26). 정수(bool 아님)이고 0..OWNER_ID_MAX 여야 한다 -- 실행의 --chown 검사
+    (execution_manifests.valid_owner)와 같은 상한이라 여기서 통과한 값이 실행에서 거부되지 않는다. 종류와 무관하게 검증·저장한다
+    (filesystem 은 쓰지 않을 뿐이다 -- 종류를 pv 로 바꾸는 순간 무효 값이 살아나지 않게)."""
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= OWNER_ID_MAX:
+        raise DomainValidationError("invalid_storage_owner", f"bad {field} {value!r}")
+    return value
 
 
 def _validate(storage_name, mount_path, managed_root, backend_type):
@@ -79,9 +88,14 @@ class StoragesRepository:
              "a": dump_json(after) if after else None, "at": utc_now_iso()})
 
     def create(self, *, storage_name, mount_path, managed_root, backend_type, actor,
-               enabled: bool = True, user_enabled: bool = True, kind: str = "filesystem"):
+               enabled: bool = True, user_enabled: bool = True, kind: str = "filesystem",
+               default_uid: int = 0, default_gid: int = 0):
+        """default_uid·default_gid = PV 목적지 sync 결과의 기본 소유자(2026-10-26, 생략 = 0:0 = root:root). 늘 명시 정수로
+        쓴다(NULL 은 기배포 ALTER 직후 행만의 모양이다)."""
         _validate(storage_name, mount_path, managed_root, backend_type)
         _validate_kind(kind)
+        _validate_owner_id(default_uid, "default_uid")
+        _validate_owner_id(default_gid, "default_gid")
         mount_path = posixpath.normpath(mount_path)
         managed_root = posixpath.normpath(managed_root)
         now = utc_now_iso()
@@ -91,19 +105,24 @@ class StoragesRepository:
             self._db.execute(
                 """INSERT INTO storages (storage_name, mount_path, managed_root,
                        backend_type, enabled, user_enabled, status, created_at,
-                       updated_at, updated_by, kind)
-                   VALUES (:n, :m, :r, :b, :e, :u, 'Unknown', :now, :now, :actor, :k)""",
+                       updated_at, updated_by, kind, default_uid, default_gid)
+                   VALUES (:n, :m, :r, :b, :e, :u, 'Unknown', :now, :now, :actor, :k, :du, :dg)""",
                 {"n": storage_name, "m": mount_path, "r": managed_root,
                  "b": backend_type, "e": 1 if enabled else 0,
-                 "u": 1 if user_enabled else 0, "now": now, "actor": actor, "k": kind})
+                 "u": 1 if user_enabled else 0, "now": now, "actor": actor, "k": kind,
+                 "du": default_uid, "dg": default_gid})
             after = self.get(storage_name)
             self._audit("create", storage_name, None, after, actor)
         return after
 
     def update(self, storage_name, *, mount_path, managed_root, backend_type,
-               enabled: bool, actor, user_enabled: bool | None = None, kind: str | None = None):
+               enabled: bool, actor, user_enabled: bool | None = None, kind: str | None = None,
+               default_uid: int | None = None, default_gid: int | None = None):
         """user_enabled=None 은 "건드리지 않음"(현재 값 유지) -- 필드를 모르는 옛 클라이언트가
         경로만 고치는 PUT 이 관리자 전용 스토리지를 조용히 사용자에게 다시 열지 않게 한다. kind=None 도 같다(유지).
+        default_uid·default_gid=None 도 같다(유지 -- 옛 클라이언트와 목록 화면의 사용 범위 PUT 이 보내지 않는다; 칸마다 따로).
+        유지할 때는 저장값을 그대로 다시 쓴다(NULL 이면 NULL -- 정규화는 읽는 쪽 storage_default_owner 의 몫이고, 무효 값을
+        여기서 고쳐 쓰지 않는다: 관리자가 새 값을 줄 때까지 제출이 409 로 드러낸다).
 
         종류 전환(dms-k8s 설계 D10): StorageClass 매핑이 걸린 스토리지를 PV 를 담지 않는 종류(filesystem)로 바꾸면
         storage_has_sc_mappings -- 매핑이 「PV 를 담지 않는 스토리지」를 가리킨 채 매달리지 않게(해석은 그 매핑을 unmapped 로
@@ -112,6 +131,10 @@ class StoragesRepository:
         _validate(storage_name, mount_path, managed_root, backend_type)
         if kind is not None:
             _validate_kind(kind)
+        if default_uid is not None:
+            _validate_owner_id(default_uid, "default_uid")
+        if default_gid is not None:
+            _validate_owner_id(default_gid, "default_gid")
         mount_path = posixpath.normpath(mount_path)
         managed_root = posixpath.normpath(managed_root)
         before = self.get(storage_name)
@@ -131,14 +154,18 @@ class StoragesRepository:
             if new_kind not in PV_CAPABLE_KINDS and self._db.query_one(
                     "SELECT 1 AS x FROM k8s_storage_class_maps WHERE storage_name = :n", {"n": storage_name}):
                 raise DomainValidationError("storage_has_sc_mappings", storage_name)
+            # 유지(None)는 잠근 행의 현재 값 -- 미리 읽은 before 가 아니라(그 사이 다른 PUT 이 바꾼 소유자를 되돌리지 않게).
+            new_uid = default_uid if default_uid is not None else current.get("default_uid")
+            new_gid = default_gid if default_gid is not None else current.get("default_gid")
             self._db.execute(
                 """UPDATE storages SET mount_path = :m, managed_root = :r,
                        backend_type = :b, enabled = :e, user_enabled = :u, kind = :k,
+                       default_uid = :du, default_gid = :dg,
                        updated_at = :now, updated_by = :actor
                    WHERE storage_name = :n""",
                 {"m": mount_path, "r": managed_root, "b": backend_type,
-                 "e": 1 if enabled else 0, "u": user_flag, "k": new_kind, "now": utc_now_iso(),
-                 "actor": actor, "n": storage_name})
+                 "e": 1 if enabled else 0, "u": user_flag, "k": new_kind, "du": new_uid, "dg": new_gid,
+                 "now": utc_now_iso(), "actor": actor, "n": storage_name})
             after = self.get(storage_name)
             self._audit("update", storage_name, before, after, actor)
         return after

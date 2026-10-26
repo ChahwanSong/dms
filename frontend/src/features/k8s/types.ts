@@ -117,6 +117,9 @@ export interface VolumeRow {
   // 1단계 백엔드가 더 싣는 칸(routes_k8s → repositories.k8s.resolve_volume). 옵션 = 옛 응답·픽스처.
   uid?: string | null; storage_kind?: StorageKind | null; template?: string | null;
   template_source?: "storageclass" | "preset" | null; problem?: string | null;
+  // 목적지 스토리지 기본 소유자 "uid:gid"(2026-10-26 -- repositories.k8s.storage_default_owner). PV 목적지 sync 의 결과 소유
+  // (사용자는 늘 이 값). null = 스토리지 없음·PV 종류 아님·저장값이 올바르지 않음(제출하면 409 invalid_storage_owner), 생략 = 옛 응답.
+  storage_owner?: string | null;
 }
 
 export interface VolumesResponse { clusters: ClusterFreshness[]; truncated: boolean; volumes: VolumeRow[] }

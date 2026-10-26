@@ -1,5 +1,6 @@
 import { reasonText } from "../../lib/api";
 import { ageDays } from "../../lib/datetime";
+import { validOwner } from "../../lib/syncOwnership";
 import type { PillVariant } from "../../lib/jobState";
 import type {
   BindingRef, BindingSubject, CallerNode, ChangeEntry, RunWarning, StorageKind, UnrecognizedBinding,
@@ -95,6 +96,19 @@ export const PV_PATH_PRESETS: Record<string, string> = {
 export function storageKindOf(s: object): StorageKind {
   const kind = (s as { kind?: unknown }).kind;
   return kind === "pv" || kind === "both" ? kind : "filesystem";
+}
+
+/** 스토리지 응답의 기본 소유(2026-10-26 -- PV 목적지 sync 결과 소유) "uid:gid". 서버가 default_owner 를 실으면 그 값(null =
+ *  저장값이 올바르지 않음 -- 서버 storage_default_owner 가 None), 없으면(옛 응답) default_uid·default_gid 로 짓는다. 둘 다 없으면
+ *  undefined(모름). storageKindOf 와 같은 이유로 인자는 아무 스토리지 행(object)이다(공용 lib/types 를 고치지 않는다). */
+export function storageOwnerOf(s: object): string | null | undefined {
+  const r = s as { default_owner?: unknown; default_uid?: unknown; default_gid?: unknown };
+  if ("default_owner" in r && r.default_owner !== undefined) return validOwner(r.default_owner);
+  if (r.default_uid === undefined && r.default_gid === undefined) return undefined;
+  // NULL 은 0 으로 읽는다(서버 storage_default_owner 미러 -- 컬럼 이전 행의 기본 root:root). 그 밖의 모양은 값 오류(null).
+  const id = (v: unknown) => v === null ? 0 : typeof v === "number" && Number.isInteger(v) && v >= 0 ? v : null;
+  const uid = id(r.default_uid); const gid = id(r.default_gid);
+  return uid === null || gid === null ? null : validOwner(`${uid}:${gid}`);
 }
 
 /** PVC phase 배지. Bound 만 고를 수 있다(제출 pv_not_bound). */

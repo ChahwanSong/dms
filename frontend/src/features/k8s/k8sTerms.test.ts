@@ -1,8 +1,9 @@
 import { describe, expect, test } from "vitest";
 import {
   BINDING_NAME_RE, bindingParts, callerNodeState, changeNames, clusterStatusMeta, countText, durationText, intervalText,
-  nsLabel, phaseVariant, pvJobLink, runStatusMeta, storageKindOf, unrecognizedWhy, untilText, warningText,
+  nsLabel, phaseVariant, pvJobLink, runStatusMeta, storageKindOf, storageOwnerOf, unrecognizedWhy, untilText, warningText,
 } from "./k8sTerms";
+import { pvRootDestNote } from "./LocationField";
 import type { CallerNode } from "./types";
 
 // 용어·표기 단일 출처(설계 §1). 화면 라벨이 이 파일 밖에서 지어지면 「PV 이름」과 「볼륨」이 화면마다 뒤바뀐다.
@@ -103,4 +104,30 @@ test("warningText·changeNames·phaseVariant·storageKindOf", () => {
   expect(storageKindOf({})).toBe("filesystem");
   expect(storageKindOf({ kind: null })).toBe("filesystem");
   expect(storageKindOf({ kind: "both" })).toBe("both");
+});
+
+// 기본 소유(2026-10-26): default_owner 가 있으면 그것(null = 저장값 오류), 없으면 default_uid·gid 로(NULL = 0, 서버 미러),
+// 둘 다 없으면 모름(undefined). 0 은 정상값이다.
+test("storageOwnerOf: 서버 default_owner 우선, 옛 응답은 uid·gid 로, 아무것도 없으면 모름", () => {
+  expect(storageOwnerOf({ default_owner: "1500:1500", default_uid: 1, default_gid: 1 })).toBe("1500:1500");
+  expect(storageOwnerOf({ default_owner: "0:0" })).toBe("0:0");
+  expect(storageOwnerOf({ default_owner: null, default_uid: -1, default_gid: 0 })).toBeNull();
+  expect(storageOwnerOf({ default_owner: "x" })).toBeNull();
+  expect(storageOwnerOf({ default_uid: 1500, default_gid: 100 })).toBe("1500:100");
+  expect(storageOwnerOf({ default_uid: 0, default_gid: 0 })).toBe("0:0");
+  expect(storageOwnerOf({ default_uid: null, default_gid: null })).toBe("0:0");          // NULL = 0(root)
+  expect(storageOwnerOf({ default_uid: 4294967295, default_gid: 0 })).toBeNull();
+  expect(storageOwnerOf({ default_uid: true, default_gid: 0 })).toBeNull();
+  expect(storageOwnerOf({ default_uid: "1500", default_gid: 0 })).toBeNull();
+  expect(storageOwnerOf({})).toBeUndefined();
+});
+
+test("pvRootDestNote: PV 루트 목적지 경고는 결과 소유 규칙을 따른다(스토리지 기본 · 운영자 PV 루트 · chown)", () => {
+  expect(pvRootDestNote({ rule: "storage" }, { storage_owner: "0:0" }))
+    .toBe("목적지가 PV 전체(루트)라 PV 루트 디렉터리 자체가 스토리지 기본 소유자 0:0(root) 로 chown 되고, 권한·시각은 소스에 맞춰 바뀝니다 — 하위 디렉터리로 받으려면 경로를 적으세요.");
+  expect(pvRootDestNote({ rule: "storage" }, {})).toContain("스토리지 기본 소유자(uid:gid)로 chown 되고");
+  expect(pvRootDestNote({ rule: "pv_root" }, { storage_owner: "1500:1500" }))
+    .toBe("목적지가 PV 전체(루트)라 PV 루트 디렉터리의 권한·시각이 소스에 맞춰 바뀝니다(소유자는 PV 루트 소유자 그대로) — 하위 디렉터리로 받으려면 경로를 적으세요.");
+  expect(pvRootDestNote({ rule: "chown", value: "7:7" }, { storage_owner: "1500:1500" }))
+    .toContain("PV 루트 디렉터리 자체가 chown 지정값 7:7 소유로 바뀌고");
 });

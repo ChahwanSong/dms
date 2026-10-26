@@ -125,6 +125,10 @@ export interface SubmitBody {
   run_as_root?: boolean;
   // PV 주소(dms-k8s 설계 §6): 쪽마다 storage 대신 PV(cluster·namespace·pvc) -- 하위경로는 target·source·destination.
   pv?: PvRef; source_pv?: PvRef; destination_pv?: PvRef;
+  // PV 목적지 sync 의 결과 소유(2026-10-26): 특권 운영자가 「PV 루트 소유자」를 고른 때만 "pv_root" 를 싣는다. 생략 = 서버 기본
+  // (목적지 스토리지 기본 소유자 -- 서버가 destination_pv.owner_rule:"storage" 를 박는다). 그 밖(scan·rm·직접 경로 목적지·chown
+  // 지정)에 실으면 422 pv_owner_not_applicable, 면제자가 아니면 403 pv_owner_root_not_allowed.
+  pv_owner?: "pv_root";
 }
 export const useSubmitRequest = () =>
   useMutation({

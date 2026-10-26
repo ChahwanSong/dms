@@ -15,11 +15,12 @@ import { ApiError } from "../../lib/api";
 // 다른 임포터가 흔들리지 않게 결합을 끊어 둔 것.
 import { StoragePicker, field } from "./formFields";
 import { absolutePath, destinationParent, relativePathProblem } from "../../lib/storagePaths";
-import { syncOwnership } from "../../lib/syncOwnership";
+import { ownerText, syncOwnership, validOwner } from "../../lib/syncOwnership";
+import type { PvOwnerRule } from "../../lib/syncOwnership";
 // 옵션 미러(CHMOD_RE·chownFieldError·intFieldError, sync 숫자 범위·프리필 SYNC_INT_FIELDS)는
 // optionRules.ts 로 이사(슬라이스 32 T8) -- BatchCreate 옵션과 공유한다
 // (사본이면 미러가 발산한다).
-import { CHMOD_RE, chownFieldError, PRIV_ROOT_SYNC, PRIV_ROOT_SYNC_PV, SCAN_INT_FIELDS,
+import { CHMOD_RE, chownFieldError, PRIV_ROOT_SYNC, PRIV_ROOT_SYNC_PV, PRIV_ROOT_SYNC_PV_ROOT, SCAN_INT_FIELDS,
          SYNC_INT_FIELDS, SYNC_OPTION_HELP, scanIntFieldError, syncIntFieldError } from "./optionRules";
 // 정책 기본값 캡션(슬라이스 37: 배치 생성과 같은 표시 배선 — 백엔드 무변경).
 import { usePolicies } from "../policies/usePolicies";
@@ -28,6 +29,8 @@ import { NODE_CPU_CAP_NOTE } from "../../lib/jobTool";
 // dms-k8s(설계 §7, 2026-10-25): PV 주소 고르기. 2026-10-26 LDAP 정리로 이 라인은 k8s 신원 모드 전용이다 -- 옛 ldap 모드
 // 화면(스토리지 직접 고르기·실행 신원·root 체크박스·sync 허용 쌍 필터)은 지웠다.
 import { CatalogNotice, LocationField } from "../k8s/LocationField";
+import type { DestOwner } from "../k8s/LocationField";
+import { Segmented } from "../../components/ui/Segmented";
 import { usePvCatalog, useResolvedPv } from "../k8s/usePvCatalog";
 import type { Resolved } from "../k8s/usePvCatalog";
 import {
@@ -118,6 +121,10 @@ export function SubmitJob() {
   const [f, setF] = useState(initial);
   // 고급 옵션 펼침 상태. 오류가 있으면 항상 펼친다(아래 details open/onToggle).
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  // PV 목적지 sync 의 결과 소유(2026-10-26 사용자 결정 「사용자는 항상 자동으로 셋업, 운영자는 옵션으로 PV 루트 소유자」): 기본은
+  // 목적지 스토리지 기본 소유자. 「PV 루트 소유자」는 특권 운영자(면제자)만 고른다(서버 pv_owner_root_not_allowed). 연산·목적지를
+  // 바꿔도 남지만(f 와 같은 정책) 바디에는 쓰일 때(아래 pvRootChosen)만 실린다.
+  const [pvOwnerChoice, setPvOwnerChoice] = useState<PvOwnerRule>("storage");
 
   // ---- k8s 신원 모드(dms-k8s 설계 D1·D2·D4·D15·§7) ----------------------------------------------------------
   // 분기 키는 me.unrestricted(맵핑 면제 = 관리자 + 전체 PV·직접 경로 권한 + 세션) 하나다. 모든 작업이 root 이고(서버 D2 -- 바디
@@ -159,7 +166,7 @@ export function SubmitJob() {
   const isAdmin = me.data?.role === "admin";
   // 특권 운영자(me.can_run_as_root = 관리자 + 특권 목록/계정 부여 + 세션 -- 서버 판정, 표시일 뿐 서버가 다시 본다).
   const canRoot = isAdmin && me.data?.can_run_as_root === true;
-  // chown·chmod 지정은 특권 운영자만(2026-10-26 -- 결과 소유는 목적지 PV 루트 소유자로 자동, 서버 chown_not_allowed·
+  // chown·chmod 지정은 특권 운영자만(2026-10-26 -- 결과 소유는 목적지 스토리지 기본 소유자로 자동, 서버 chown_not_allowed·
   // chmod_not_allowed).
   const ownerModeEditable = canRoot;
   // 연산 선택지: 서버가 준 me.user_operations(설계 D15 -- scan 은 특권 운영자만, 2026-10-26 (g)). 필드가 없는 응답(옛 서버)은
@@ -176,14 +183,31 @@ export function SubmitJob() {
   const destParentAbs = modeOf("destination") === "pv" ? pvDestParent(rowOf("destination"), locs.destination.sub)
     : locs.destination.path.trim() === "" ? null
     : destinationParent(rootOf(locs.destination.storage), locs.destination.path.trim());
-  // 결과(목적지) 소유권 안내 -- 바디와 같은 값(chown 옵션·목적지 종류)에서 파생한다(lib/syncOwnership = 서버 _auto_chown
-  // 미러). PV 목적지 sync 면 결과는 목적지 PV 루트 소유자로(2026-10-26 사용자 결정) -- 소유권 문구·「목적지가 이미 있는 경우」·
-  // 요약 「실행 권한」이 이 한 값을 쓴다. 모든 작업이 root 라 root 갈래만 쓴다(sync 허용 쌍 필터도 없다 -- 설계 D14: 양쪽이 PV
-  // 주소인 sync 는 PV 권한으로 판정, 직접 경로는 면제자만).
+  // 결과(목적지) 소유권 안내 -- 바디와 같은 값(chown 옵션·목적지 종류·결과 소유 선택)에서 파생한다(lib/syncOwnership = 서버
+  // _auto_chown 미러). PV 목적지 sync 면 결과는 목적지 스토리지 기본 소유자(서버가 해석한 VolumeRow.storage_owner -- 사용자는 늘
+  // 이것), 운영자가 「PV 루트 소유자」를 고르면 점검이 잰 PV 루트 소유자(2026-10-26 사용자 결정) -- 소유권 문구·「목적지가 이미
+  // 있는 경우」·요약 「실행 권한」·목적지 PV 루트 경고가 이 한 규칙을 쓴다. 모든 작업이 root 라 root 갈래만 쓴다(sync 허용 쌍 필터도
+  // 없다 -- 설계 D14: 양쪽이 PV 주소인 sync 는 PV 권한으로 판정, 직접 경로는 면제자만).
   const pvDest = f.operation === "sync" && modeOf("destination") === "pv";
+  // 바디에 chown 이 실리나(syncOptions 와 같은 조건) -- 실리면 결과 소유 선택은 쓰이지 않는다(명시 chown 이 이긴다).
+  const chownSet = ownerModeEditable && f.chown.trim() !== "";
+  // 「PV 루트 소유자」 선택이 실제로 쓰이나: 면제자 + PV 목적지 sync + chown 없음. 이때만 바디에 pv_owner:"pv_root" 를 싣는다 --
+  // chown 과 함께 실으면 서버가 422 pv_owner_not_applicable 로 거부한다.
+  const pvRootChosen = unrestricted && pvDest && !chownSet && pvOwnerChoice === "pv_root";
+  const pvOwnerRule: PvOwnerRule = pvRootChosen ? "pv_root" : "storage";
+  const destRow = pvDest ? rowOf("destination") : null;
+  // 서버가 해석한 목적지 스토리지 기본 소유자. undefined = 옛 응답(모름), null·형식 오류 = 저장값이 올바르지 않음(서버 409
+  // invalid_storage_owner -- 아래 storageOwnerBad 로 보내기 전에 잠근다).
+  const storageOwnerRaw = destRow?.storage_owner;
+  const storageOwner = validOwner(storageOwnerRaw);
+  const storageOwnerLabel = storageOwner !== null ? ownerText(storageOwner) : null;
+  const storageOwnerBad = pvOwnerRule === "storage" && destRow !== null && destRow.selectable
+    && storageOwnerRaw !== undefined && storageOwner === null;
   const ownership = syncOwnership({
     chown: f.chown, chmod: f.chmod, root: true, runAs: null, self: true, chownEditable: ownerModeEditable,
-    pvDestination: pvDest });
+    pvDestination: pvDest, pvOwnerRule, storageOwner });
+  // 목적지 PV 루트 경고(LocationField)가 읽는 결과 소유 -- chown 지정 > 운영자 「PV 루트 소유자」 > 스토리지 기본 소유자.
+  const destOwner: DestOwner = chownSet ? { rule: "chown", value: f.chown.trim() } : { rule: pvOwnerRule };
 
   const recursiveMissing = f.operation === "rm" && !f.recursive;
   const statLiteConflict = f.operation === "rm" && f.stat && f.lite;
@@ -232,7 +256,7 @@ export function SubmitJob() {
   // 서버가 422 unsafe_path 로 거부할 경로(relativePathProblem 미러) -- 보내기 전에 잠근다.
   const pathInvalid = checks.some((c) => c.invalid);
   const targetInvalid = targetMissing || pathInvalid
-    || k8sPvBad || k8sSubBad || k8sRmRoot || k8sCatalogError || scopeInvalid;
+    || k8sPvBad || k8sSubBad || k8sRmRoot || k8sCatalogError || scopeInvalid || storageOwnerBad;
   const optionsInvalid = recursiveMissing || statLiteConflict || verboseQuietConflict
     || advancedError !== null || scanBatchFilesError !== null || brokenLimitError !== null;
   // 제출 게이트는 이 하나다(위저드 시절 스텝별 '다음' 게이트의 합집합 + 조회 실패·진행 중).
@@ -328,6 +352,8 @@ export function SubmitJob() {
     }
     if (f.priority !== "") body.priority = f.priority;
     if (unrestricted && scopeInput !== "") body.owner_username = scopeInput;
+    // 결과 소유: 운영자가 「PV 루트 소유자」를 고른 때만(pvRootChosen) -- 기본 바디는 이 기능 전과 같다(서버가 storage 규칙을 박는다).
+    if (pvRootChosen) body.pv_owner = "pv_root";
     body.run_as_root = true;
     return body;
   }
@@ -373,6 +399,7 @@ export function SubmitJob() {
   else if (checks.some((c) => c.pvLoading)) hints.push("고른 PV 정보를 불러오는 중…");
   if (k8sRmRoot) hints.push("삭제할 PV 안 경로를 입력하세요 — PV 전체는 삭제할 수 없습니다");
   if (k8sSubBad) hints.push("PV 안 경로를 PV 아래 상대경로로 고치세요");
+  if (storageOwnerBad) hints.push("목적지 스토리지의 기본 소유 값이 올바르지 않습니다 — 관리자에게 스토리지 설정 확인을 요청하세요");
   if (pathInvalid) hints.push("경로를 관리 디렉토리 아래 상대경로로 고치세요");
   if (optionsInvalid) hints.push("빨간 안내가 붙은 옵션 값을 고치세요");
 
@@ -401,7 +428,8 @@ export function SubmitJob() {
     );
     return (
       <LocationField side={side} operation={f.operation} loc={l} onChange={setLoc(side)} catalog={catalog}
-                     search={search} resolved={resolved[side]} allowRaw={unrestricted} rawSlot={raw} />
+                     search={search} resolved={resolved[side]} allowRaw={unrestricted} rawSlot={raw}
+                     destOwner={side === "destination" ? destOwner : undefined} />
     );
   };
 
@@ -422,11 +450,18 @@ export function SubmitJob() {
         </li>
         <li>
           <strong>목적지가 이미 있는 경우</strong>: 디렉토리여야 합니다(파일이면 거부).{" "}
-          {pvDest
+          {!pvDest
+            ? "root 실행이라 쓰기·소유 검사는 우회되고, 그 안의 같은 경로 항목은 소스의 소유·권한·시각으로 다시 맞춰집니다(chown·chmod 를 지정하면 그 값)."
+            : pvOwnerRule === "pv_root"
             ? "root 실행이라 쓰기·소유 검사는 우회되고, 그 안의 같은 경로 항목은 목적지 PV 루트의 소유자·그룹과 소스의 권한·시각으로 다시 맞춰집니다(chown·chmod 를 지정하면 그 값)."
-            : "root 실행이라 쓰기·소유 검사는 우회되고, 그 안의 같은 경로 항목은 소스의 소유·권한·시각으로 다시 맞춰집니다(chown·chmod 를 지정하면 그 값)."}
+            : "root 실행이라 쓰기·소유 검사는 우회되고, 그 안의 같은 경로 항목은 목적지 스토리지 기본 소유자와 소스의 권한·시각으로 다시 맞춰집니다(chown·chmod 를 지정하면 그 값)."}
         </li>
         <li><strong>소유권</strong>: {ownership.long}</li>
+        {storageOwnerBad && (
+          <li className="text-bad">
+            이 PV 의 스토리지에 저장된 기본 소유 값이 올바르지 않아 제출할 수 없습니다 — 관리자가 스토리지 화면에서 기본 소유 uid·gid 를 다시 저장해야 합니다.
+          </li>
+        )}
         <li>조건이 맞지 않으면 미리보기 전에 거부되고 사유가 표시됩니다 — 아무것도 복사되지 않습니다.</li>
       </ul>
     </InfoCard>
@@ -496,6 +531,21 @@ export function SubmitJob() {
                           className="h-5 w-5 rotate-90 justify-self-center text-muted md:mt-8 md:rotate-0" />
               {locationField("destination")}
             </div>
+            {/* 결과 소유(2026-10-26): 특권 운영자(면제자)만, PV 목적지 sync 에만 -- 기본은 스토리지 기본 소유자, 옵션으로 PV 루트
+                소유자. 사용자에겐 조작이 없다(늘 스토리지 기본 -- 아래 안내 카드가 그 값을 말한다). chown 을 지정하면 그 값이
+                이겨 선택은 잠기고 이유를 옆에 말한다. */}
+            {unrestricted && pvDest && (
+              <FieldRow
+                control={<div className="flex flex-wrap items-center gap-2">
+                  <span className="text-sm">결과 소유</span>
+                  <Segmented label="결과 소유" value={pvOwnerChoice} onChange={setPvOwnerChoice} disabled={chownSet}
+                             options={[{ value: "storage", label: "스토리지 기본" },
+                                       { value: "pv_root", label: "PV 루트 소유자" }]} />
+                </div>}
+                help={chownSet
+                  ? `chown 을 지정해 결과는 chown 지정값(${f.chown.trim()})으로 셋업됩니다 — 결과 소유 선택은 쓰이지 않습니다.`
+                  : `기본은 목적지 스토리지 기본 소유자${storageOwnerLabel !== null ? ` ${storageOwnerLabel}` : "(uid:gid)"}입니다(사용자 작업은 늘 이 규칙). 「PV 루트 소유자」는 점검이 잰 목적지 PV 루트의 소유자·그룹으로 맞추며 특권 운영자만 고를 수 있습니다.`} />
+            )}
             {/* 목적지 조건과 소유권(2026-09-30 "상위 디렉토리 조건을 분명히") -- 사용자가 "분명히" 보이게 해 달라고 한
                 안내라 접지 않는다. */}
             {syncConditions}
@@ -584,8 +634,8 @@ export function SubmitJob() {
                       {chmodError && <p className="mt-1 text-bad text-sm">{chmodError}</p>}
                     </>}
                     help={!ownerModeEditable && "특권 운영자만 지정할 수 있습니다 — 결과의 권한 비트는 소스 그대로입니다."} />
-                  {/* 「비우면」의 기본(_auto_chown): PV 목적지면 목적지 PV 루트 소유자로 자동 chown, 아니면 root 실행이라
-                      소스 소유권 보존 -- 정직하게 병기한다. */}
+                  {/* 「비우면」의 기본(_auto_chown): PV 목적지면 결과 소유 규칙(스토리지 기본 소유자 | 운영자가 고른 PV 루트
+                      소유자)으로 자동 chown, 아니면 root 실행이라 소스 소유권 보존 -- 정직하게 병기한다. */}
                   <FieldRow
                     control={<>
                       <label className="text-sm block">chown (선택 · 숫자 uid:gid)
@@ -597,7 +647,9 @@ export function SubmitJob() {
                     </>}
                     help={<>
                       {pvDest
-                        ? `비우면 목적지 PV 루트의 소유자·그룹으로 자동 chown 됩니다(PV 목적지 — 실제 값은 점검 뒤 확인 창에 보입니다)${ownerModeEditable ? ". chown 을 지정하면 그 값으로 셋업됩니다." : " — chown 지정은 특권 운영자만 할 수 있습니다."}`
+                        ? `비우면 ${unrestricted && pvOwnerChoice === "pv_root"
+                            ? "목적지 PV 루트의 소유자·그룹으로 자동 chown 됩니다(PV 목적지 · 결과 소유 「PV 루트 소유자」 — 실제 값은 점검 뒤 확인 창에 보입니다)"
+                            : `목적지 스토리지 기본 소유자${storageOwnerLabel !== null ? ` ${storageOwnerLabel} 로` : "(uid:gid)로"} 자동 chown 됩니다(PV 목적지)`}${ownerModeEditable ? ". chown 을 지정하면 그 값으로 셋업됩니다." : " — chown 지정은 특권 운영자만 할 수 있습니다."}`
                         : "비우면 원래(소스) 소유권을 보존합니다(root 실행). chown 을 지정하면 목적지와 복사본이 그 값으로 셋업됩니다."}
                       {" "}uid·gid 는 둘 다 숫자로 적으세요 — 한쪽을 비우면 그쪽은 소스 값이 유지됩니다.
                     </>} />
@@ -737,7 +789,9 @@ export function SubmitJob() {
         {unrestricted && scopeInput !== "" && (
           <SummaryRow label="대상 사용자">{scopeInput}</SummaryRow>
         )}
-        <SummaryRow label="실행 권한" className="text-bad">{pvDest ? PRIV_ROOT_SYNC_PV : PRIV_ROOT_SYNC}</SummaryRow>
+        <SummaryRow label="실행 권한" className="text-bad">
+          {!pvDest ? PRIV_ROOT_SYNC : pvOwnerRule === "pv_root" ? PRIV_ROOT_SYNC_PV_ROOT : PRIV_ROOT_SYNC_PV}
+        </SummaryRow>
       </SummaryList>
     </SummaryPanel>
   );

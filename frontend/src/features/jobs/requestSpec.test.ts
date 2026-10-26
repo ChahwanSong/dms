@@ -524,3 +524,37 @@ describe("PV 주소 요청: 대상은 PV 표기, PV 행(클러스터 · 볼륨 �
     expect(s.targetUser).toBeNull();
   });
 });
+
+// ---- 8b 목적지 소유 -- 결과 소유 규칙(2026-10-26: destination_pv.owner_rule) -----------------------------------------
+describe("목적지 소유 -- 결과 소유 규칙(owner_rule)", () => {
+  const rootJob = JOB({ worker_pool: { identity: ROOT_IDENT } });
+  const measured = JOB({ worker_pool: { identity: ROOT_IDENT, dest_pv_owner: "1000:100" } });
+  const pvReq = (dest: Record<string, unknown>, options: Record<string, unknown> = SYNC_PAYLOAD.options) => ({
+    requester_id: "mason", payload: { ...SYNC_PAYLOAD, run_as_root: true, options,
+      destination_pv: { cluster: "dmsk8s", namespace: "team-a", pvc: "models", storage: "k8s-pv-nfs", root: "pv", ...dest } } });
+  test("storage: 제출 때 박힌 목적지 스토리지 기본 소유자(0:0 은 「0:0(root)」 -- 실제 값), 잰 PV 루트 소유자는 쓰지 않는다", () => {
+    expect(spec(pvReq({ owner_rule: "storage", owner: "1500:1500" }), [measured]).ownership)
+      .toBe("목적지 스토리지 기본 소유자 1500:1500");
+    expect(spec(pvReq({ owner_rule: "storage", owner: "0:0" }), [rootJob]).ownership)
+      .toBe("목적지 스토리지 기본 소유자 0:0(root)");
+    // 운영자 chown 이 있으면 그 값이 이긴다(storage 규칙 + owner 는 함께 기록돼 있다)
+    expect(spec(pvReq({ owner_rule: "storage", owner: "1500:1500" }, { chown: "7:7" }), [rootJob]).ownership)
+      .toBe("chown 지정값 7:7");
+  });
+  test("pv_root(운영자 지정): 잰 PV 루트 소유자 + 「운영자 지정」, 재기 전에는 「점검 뒤 확정」", () => {
+    expect(spec(pvReq({ owner_rule: "pv_root" }), [measured]).ownership)
+      .toBe("목적지 PV 소유자 1000:100(PV 루트 기준 — 운영자 지정)");
+    expect(spec(pvReq({ owner_rule: "pv_root" }), [rootJob]).ownership)
+      .toBe("목적지 PV 루트의 소유자·그룹(점검 뒤 확정 — 운영자 지정)");
+  });
+  test("옛 행(owner_rule 없음·null): 종전 문구 그대로 -- 부재를 오류로 읽지 않는다", () => {
+    expect(spec(pvReq({}), [measured]).ownership).toBe("목적지 PV 소유자 1000:100(PV 루트 기준)");
+    expect(spec(pvReq({ owner_rule: null }), [measured]).ownership).toBe("목적지 PV 소유자 1000:100(PV 루트 기준)");
+  });
+  test("변조·비정상 기록(모르는 규칙 값, storage 인데 owner 형식 오류)은 소유를 단정하지 않는다(행 생략)", () => {
+    for (const dest of [{ owner_rule: "nobody" }, { owner_rule: 1 }, { owner_rule: "storage" },
+                        { owner_rule: "storage", owner: "x:y" }, { owner_rule: "storage", owner: 1500 },
+                        { owner_rule: "storage", owner: "4294967295:0" }])
+      expect(spec(pvReq(dest), [measured]).ownership).toBeNull();
+  });
+});
