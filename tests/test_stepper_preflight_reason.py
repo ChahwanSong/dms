@@ -38,8 +38,8 @@ def _seed_storage(repos, name):
 
 
 def _pool(tool):
-    return {"tool": tool, "identity": {"uid": 10001, "gid": 10000,
-            "username": "alice", "groups": [], "privileged": False},
+    return {"tool": tool, "identity": {"uid": 0, "gid": 0,
+            "username": "alice", "groups": [], "privileged": True},
             "candidates": {"primary": ["n1"]}, "process_count": 8,
             "queue": "dms-data", "priority_class": "dms-mid"}
 
@@ -48,7 +48,7 @@ def _sync_job(repos, key="k-sync"):
     _seed_storage(repos, "src")
     _seed_storage(repos, "dst")
     rid = repos.requests.create(operation="sync", requester_id="alice", actor="alice",
-        resource_key=key, payload={"source_storage": "src", "source": "a",
+        resource_key=key, payload={"run_as_root": True, "source_storage": "src", "source": "a",
         "destination_storage": "dst", "destination": "b"}, priority="mid")
     repos.requests.set_state(rid, RequestState.PLANNED, actor="planner")
     repos.requests.set_state(rid, RequestState.RUNNING, actor="planner")

@@ -1,4 +1,6 @@
 """Tests for controller job-stepper loop integration."""
+import pytest
+
 from dms.controller import build_loops, run_all_once
 from dms.execution import StubExecutionAdapter
 from dms.domain import RequestState
@@ -46,14 +48,14 @@ def test_stepper_loop_registered_second(db):
 def test_stepper_loop_advances_pending_job(db):
     repos = Repositories(db)
     rid = repos.requests.create(operation="scan", requester_id="alice", actor="alice",
-        resource_key="k", payload={"storage": "s1", "target": "a"}, priority="mid")
+        resource_key="k", payload={"run_as_root": True, "storage": "s1", "target": "a"}, priority="mid")
     repos.requests.set_state(rid, RequestState.PLANNED, actor="planner")
     repos.requests.set_state(rid, RequestState.RUNNING, actor="planner")
     plan_id = repos.data_jobs.create_plan(rid, actor="planner")
     _seed_storage(repos, "s1")
     jid = repos.data_jobs.create_job(rid, plan_id, operation="scan", priority="mid",
         storage_name="s1", target="a", options={}, tool="dscan",
-        worker_pool={"identity": {"uid": 1, "gid": 1, "username": "alice"},
+        worker_pool={"identity": {"uid": 0, "gid": 0, "username": "alice", "privileged": True},
                      "candidates": {"primary": ["n1"]},
                      "process_count": 8, "queue": "dms-data",
                      "priority_class": "dms-mid"},
@@ -68,7 +70,7 @@ def test_expired_preview_sweep_finalizes_request(db):
     from dms.execution import StubExecutionAdapter
     repos = Repositories(db)
     rid = repos.requests.create(operation="sync", requester_id="alice", actor="alice",
-        resource_key="k", payload={"source_storage": "src", "source": "a",
+        resource_key="k", payload={"run_as_root": True, "source_storage": "src", "source": "a",
         "destination_storage": "dst", "destination": "b"}, priority="mid")
     repos.requests.set_state(rid, RequestState.PLANNED, actor="planner")
     plan_id = repos.data_jobs.create_plan(rid, actor="planner")
@@ -97,9 +99,10 @@ def test_expired_preview_sweep_finalizes_request(db):
 def test_stepper_rejects_jobs_without_a_usable_identity(db):
     """신원 가드(stepper.IdentityMissingAtStep, 2026-09-09): 어댑터가 uid/gid 부재를
     0 으로 기본값 처리하기 전에 종단시킨다 -- DB 가 신뢰 경계라 unknown_tool 과
-    같은 층이다. uid 0 자체는 privileged 플래그와 짝이 맞으면 정당하다."""
+    같은 층이다. uid 0 자체는 privileged 플래그와 짝이 맞으면 정당하다. 2026-10-26(k8s 신원 모드 전용): privileged 가
+    아닌 신원과 보조 gid 목록이 실린 스냅숏도 끊는다(아래 test_stepper_rejects_non_root_and_group_snapshots)."""
     from dms.stepper import identity_problem
-    assert identity_problem({"uid": 1, "gid": 1, "username": "alice"}) is None
+    assert identity_problem({"uid": 1, "gid": 1, "username": "alice"}) == "non_privileged_identity"
     assert identity_problem({"uid": 0, "gid": 0, "username": "root",
                              "privileged": True}) is None
     assert identity_problem(None) == "identity_missing"
@@ -115,7 +118,7 @@ def test_stepper_rejects_jobs_without_a_usable_identity(db):
 
     repos = Repositories(db)
     rid = repos.requests.create(operation="scan", requester_id="alice", actor="alice",
-        resource_key="k-noident", payload={"storage": "s1", "target": "a"}, priority="mid")
+        resource_key="k-noident", payload={"run_as_root": True, "storage": "s1", "target": "a"}, priority="mid")
     repos.requests.set_state(rid, RequestState.PLANNED, actor="planner")
     repos.requests.set_state(rid, RequestState.RUNNING, actor="planner")
     plan_id = repos.data_jobs.create_plan(rid, actor="planner")
@@ -139,7 +142,7 @@ def test_stepper_rejects_jobs_without_a_usable_identity(db):
 
     # 비-dict worker_pool(변조 행)도 step_error 루프가 아니라 같은 fail-closed 경로
     rid2 = repos.requests.create(operation="scan", requester_id="alice", actor="alice",
-        resource_key="k-badwp", payload={"storage": "s1", "target": "a"}, priority="mid")
+        resource_key="k-badwp", payload={"run_as_root": True, "storage": "s1", "target": "a"}, priority="mid")
     repos.requests.set_state(rid2, RequestState.PLANNED, actor="planner")
     repos.requests.set_state(rid2, RequestState.RUNNING, actor="planner")
     plan2 = repos.data_jobs.create_plan(rid2, actor="planner")
@@ -148,3 +151,52 @@ def test_stepper_rejects_jobs_without_a_usable_identity(db):
         worker_pool=["not", "a", "dict"], precondition={}, actor="planner")
     run_all_once(loops, repos, holder="h1")
     assert repos.data_jobs.get_job(jid2)["state"] == "Rejected"
+
+
+def test_identity_problem_rejects_non_root_and_group_snapshots():
+    # 2026-10-26 보안 리뷰(LDAP 재확인 삭제 뒤의 fail-open): 비 root 신원·보조 gid 목록은 끊고, root 행의 빈 목록·키 부재는
+    # 통과(배포 전에 계획된 root 행의 모양 -- 진행 중 잡을 끊지 않는다).
+    from dms.stepper import identity_problem
+    root = {"uid": 0, "gid": 0, "username": "alice", "privileged": True}
+    assert identity_problem({"uid": 10001, "gid": 10000, "username": "alice", "privileged": False}) \
+        == "non_privileged_identity"
+    assert identity_problem({"uid": 10001, "gid": 0, "username": "alice"}) == "non_privileged_identity"
+    for gids in ([10010], [0], "10010", [True], {"x": 1}):
+        assert identity_problem({**root, "supplementary_gids": gids}) == "supplementary_gids_unsupported", gids
+    assert identity_problem({**root, "supplementary_gids": [10010], "supplementary_gids_status": "applied",
+                             "privileged": True}) == "supplementary_gids_unsupported"
+    for ok in (root, {**root, "supplementary_gids": []}, {**root, "supplementary_gids": None},
+               {**root, "supplementary_gids": [], "supplementary_gids_status": "privileged"}):
+        assert identity_problem(ok) is None, ok
+
+
+@pytest.mark.parametrize("identity, expected", [
+    ({"uid": 10001, "gid": 10000, "username": "alice", "groups": [], "privileged": False}, "Rejected"),
+    ({"uid": 0, "gid": 0, "username": "alice", "groups": [], "privileged": True,
+      "supplementary_gids": [10010], "supplementary_gids_status": "applied"}, "Rejected"),
+    ({"uid": 0, "gid": 0, "username": "alice", "groups": [], "privileged": True,
+      "supplementary_gids": [], "supplementary_gids_status": "privileged"}, "Preflight"),
+    ({"uid": 0, "gid": 0, "username": "alice", "groups": [], "privileged": True}, "Preflight"),
+])
+def test_stepper_rejects_non_root_and_group_snapshots(db, identity, expected):
+    # 끝에서 끝으로: 끊긴 행은 제출 전에 identity_missing_at_step 으로 종단(제출 0건), 통과 행은 preflight 를 낸다.
+    repos = Repositories(db)
+    _seed_storage(repos, "s1")
+    rid = repos.requests.create(operation="scan", requester_id="alice", actor="alice", resource_key="k-snap",
+        payload={"run_as_root": True, "storage": "s1", "target": "a"}, priority="mid")
+    repos.requests.set_state(rid, RequestState.PLANNED, actor="planner")
+    repos.requests.set_state(rid, RequestState.RUNNING, actor="planner")
+    plan_id = repos.data_jobs.create_plan(rid, actor="planner")
+    jid = repos.data_jobs.create_job(rid, plan_id, operation="scan", priority="mid",
+        storage_name="s1", target="a", options={}, tool="dscan",
+        worker_pool={"identity": identity, "candidates": {"primary": ["n1"]}, "process_count": 1,
+                     "queue": "dms-data", "priority_class": "dms-mid"},
+        precondition={}, actor="planner")
+    adapter = StubExecutionAdapter()
+    run_all_once(build_loops(_Settings(), repos, execution_adapter=adapter), repos, holder="h1")
+    job = repos.data_jobs.get_job(jid)
+    assert job["state"] == expected
+    if expected == "Rejected":
+        assert job["reason_code"] == "identity_missing_at_step" and adapter.submitted_specs() == []
+    else:
+        assert [s.identity.get("supplementary_gids") for s in adapter.submitted_specs()] in ([[]], [None])

@@ -137,15 +137,15 @@ def _sync_job(repos, *, chown, key, tool="dsync"):
     _storages(repos)
     # 요청 행도 같은 chown 을 싣는다 -- stepper 는 잡 행의 chown 이 요청 행(판정받은 값)과 다르면 끊는다(ChownMismatchAtStep).
     rid = repos.requests.create(operation="sync", requester_id="alice", actor="alice", resource_key=key,
-                                payload={**SYNC_ITEM, "options": {"chown": chown}}, priority="mid")
+                                payload={"run_as_root": True, **SYNC_ITEM, "options": {"chown": chown}}, priority="mid")
     repos.requests.set_state(rid, RequestState.PLANNED, actor="planner")
     repos.requests.set_state(rid, RequestState.RUNNING, actor="planner")
     plan_id = repos.data_jobs.create_plan(rid, actor="planner")
     jid = repos.data_jobs.create_job(
         rid, plan_id, operation="sync", priority="mid", source_storage="s1", source="a",
         destination_storage="s2", destination="b", options={"chown": chown}, tool=tool,
-        worker_pool={"tool": tool, "identity": {"uid": 10001, "gid": 10000, "username": "alice",
-                                                "groups": [], "privileged": False},
+        worker_pool={"tool": tool, "identity": {"uid": 0, "gid": 0, "username": "alice",
+                                                "groups": [], "privileged": True},
                      # nsync(노드 간)은 소스·목적지 후보를 따로 받는다(planner 모양)
                      "candidates": ({"primary": ["n1"]} if tool == "dsync"
                                     else {"source": ["n1"], "destination": ["n2"]}),

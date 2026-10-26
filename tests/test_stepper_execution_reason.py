@@ -32,8 +32,8 @@ def _seed_storage(repos, name):
 
 
 def _pool(tool):
-    return {"tool": tool, "identity": {"uid": 10001, "gid": 10000, "username": "alice", "groups": [],
-                                       "privileged": False},
+    return {"tool": tool, "identity": {"uid": 0, "gid": 0, "username": "alice", "groups": [],
+                                       "privileged": True},
             "candidates": {"primary": ["n1"]}, "process_count": 8, "queue": "dms-data",
             "priority_class": "dms-mid"}
 
@@ -41,7 +41,7 @@ def _pool(tool):
 def _scan_job(repos, key="k-scan"):
     _seed_storage(repos, "s1")
     rid = repos.requests.create(operation="scan", requester_id="alice", actor="alice", resource_key=key,
-                                payload={"storage": "s1", "target": "a"}, priority="mid")
+                                payload={"run_as_root": True, "storage": "s1", "target": "a"}, priority="mid")
     repos.requests.set_state(rid, RequestState.PLANNED, actor="planner")
     repos.requests.set_state(rid, RequestState.RUNNING, actor="planner")
     plan_id = repos.data_jobs.create_plan(rid, actor="planner")
@@ -55,7 +55,7 @@ def _sync_job(repos):
     _seed_storage(repos, "src")
     _seed_storage(repos, "dst")
     rid = repos.requests.create(operation="sync", requester_id="alice", actor="alice", resource_key="k-sync",
-                                payload={"source_storage": "src", "source": "a", "destination_storage": "dst",
+                                payload={"run_as_root": True, "source_storage": "src", "source": "a", "destination_storage": "dst",
                                          "destination": "b"}, priority="mid")
     repos.requests.set_state(rid, RequestState.PLANNED, actor="planner")
     repos.requests.set_state(rid, RequestState.RUNNING, actor="planner")
@@ -143,10 +143,10 @@ def test_preview_failure_without_marker_keeps_preview_failed(db):
     assert repos.data_jobs.job_transitions(jid)[-1]["reason_code"] == "preview_failed"
 
 
-def test_failed_worker_pod_group_marker_becomes_the_reason(db):
-    # 2026-10-07 보조 그룹: 워커 셸(_identity_materialize_stmt)이 그룹 물질화·자기검증 실패에 마커를 찍고 exit 1
-    # → PodFailed AbortJob. 어댑터는 launcher 와 **실패 워커** 파드 로그를 함께 돌려준다 -- launcher 로그엔 마커가
-    # 없어도(워커가 안 떠 mpirun 자체가 실패) 워커 항목에서 승격돼야 한다.
+def test_failed_worker_pod_marker_becomes_the_reason(db):
+    # 워커 파드(nsync 의 역할별 rank 봉쇄 재확인 등)가 마커를 찍고 exit 1 → PodFailed AbortJob. 어댑터는 launcher 와
+    # **실패 워커** 파드 로그를 함께 돌려준다 -- launcher 로그엔 마커가 없어도 워커 항목에서 승격돼야 한다. 2026-10-26: 워커
+    # 셸이 찍던 LDAP 보조 그룹 마커(identity_groups_not_applied)는 화이트리스트 밖이라 승격되지 않는다(폴백).
     repos = Repositories(db)
     rid, jid = _scan_job(repos)
     adapter = StubExecutionAdapter()
@@ -156,17 +156,18 @@ def test_failed_worker_pod_group_marker_becomes_the_reason(db):
     ref = f"stub-execution-{jid}"
     adapter.script(ref, [ExecStatus.FAILED])
     adapter.set_log(ref, [("j-launcher-0", "ORTE was unable to reliably start one or more daemons\n", None),
-                          ("j-worker-0", "dms: groups= 10000  expected= 10000 10010 \n"
-                                         "DMS_EXEC_REASON=identity_groups_not_applied\n", None)])
+                          ("j-worker-0", "DMS_EXEC_REASON=identity_groups_not_applied\n"
+                                         "DMS_EXEC_REASON=target_path_redirected\n", None)])
     stepper.run_once()
     assert repos.data_jobs.get_job(jid)["state"] == "Failed"
-    assert repos.data_jobs.job_transitions(jid)[-1]["reason_code"] == "identity_groups_not_applied"
-    assert repos.requests.last_reason_code(rid) == "identity_groups_not_applied"
+    assert repos.data_jobs.job_transitions(jid)[-1]["reason_code"] == "target_path_redirected"
+    assert repos.requests.last_reason_code(rid) == "target_path_redirected"
 
 
 def test_parse_execution_reason_whitelist_and_shape():
     # target_path_redirected(2026-10-21): 러너의 drm 직전 rm 대상 봉쇄 재확인(runner.rm_target_redirected).
-    assert EXECUTION_REASONS == frozenset({"workers_unreachable", "identity_groups_not_applied", "target_path_redirected"})
+    assert EXECUTION_REASONS == frozenset({"workers_unreachable", "target_path_redirected"})
+    assert parse_execution_reason([("w", "DMS_EXEC_REASON=identity_groups_not_applied", None)]) is None   # 은퇴(2026-10-26)
     assert parse_execution_reason([("launcher", "DMS_EXEC_REASON=target_path_redirected\n", None)]) == "target_path_redirected"
     assert parse_execution_reason([("p", "x\n  DMS_EXEC_REASON=workers_unreachable  \n", None)]) == "workers_unreachable"
     assert parse_execution_reason([("p", None, "ImagePullBackOff"), ("w", "DMS_EXEC_REASON=workers_unreachable", None)]) \

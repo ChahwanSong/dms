@@ -39,7 +39,7 @@ def _dsync_job(repos):
     _seed_storage(repos, "src")
     _seed_storage(repos, "dst")
     rid = repos.requests.create(operation="sync", requester_id="alice", actor="alice",
-        resource_key="k", payload={"source_storage": "src", "source": "a",
+        resource_key="k", payload={"run_as_root": True, "source_storage": "src", "source": "a",
         "destination_storage": "dst", "destination": "b"}, priority="mid")
     repos.requests.set_state(rid, RequestState.PLANNED, actor="planner")
     repos.requests.set_state(rid, RequestState.RUNNING, actor="planner")
@@ -47,8 +47,8 @@ def _dsync_job(repos):
     jid = repos.data_jobs.create_job(rid, plan_id, operation="sync", priority="mid",
         source_storage="src", source="a", destination_storage="dst", destination="b",
         options={}, tool="dsync",
-        worker_pool={"tool": "dsync", "identity": {"uid": 10001, "gid": 10000,
-            "username": "alice", "groups": [], "privileged": False},
+        worker_pool={"tool": "dsync", "identity": {"uid": 0, "gid": 0,
+            "username": "alice", "groups": [], "privileged": True},
             "candidates": {"primary": ["n1"]}, "process_count": 8,
             "queue": "dms-data", "priority_class": "dms-mid"},
         precondition={}, actor="planner")
@@ -58,14 +58,14 @@ def _dsync_job(repos):
 def _scan_job(repos):
     _seed_storage(repos, "s1")
     rid = repos.requests.create(operation="scan", requester_id="alice", actor="alice",
-        resource_key="k", payload={"storage": "s1", "target": "a"}, priority="mid")
+        resource_key="k", payload={"run_as_root": True, "storage": "s1", "target": "a"}, priority="mid")
     repos.requests.set_state(rid, RequestState.PLANNED, actor="planner")
     repos.requests.set_state(rid, RequestState.RUNNING, actor="planner")
     plan_id = repos.data_jobs.create_plan(rid, actor="planner")
     jid = repos.data_jobs.create_job(rid, plan_id, operation="scan", priority="mid",
         storage_name="s1", target="a", options={}, tool="dscan",
-        worker_pool={"tool": "dscan", "identity": {"uid": 10001, "gid": 10000,
-            "username": "alice", "groups": [], "privileged": False},
+        worker_pool={"tool": "dscan", "identity": {"uid": 0, "gid": 0,
+            "username": "alice", "groups": [], "privileged": True},
             "candidates": {"primary": ["n1"]}, "process_count": 8,
             "queue": "dms-data", "priority_class": "dms-mid"},
         precondition={}, actor="planner")

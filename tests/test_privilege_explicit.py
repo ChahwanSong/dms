@@ -463,8 +463,12 @@ def test_root_identity_with_a_basis_is_submitted(db, payload_extra, batch_id):
     assert [s.identity["uid"] for s in adapter.submitted_specs()] == [0]
 
 
-def test_non_root_identity_does_not_need_a_basis(db):
-    repos, _, jid = _frozen_sync_job(db, identity=_USER)
+def test_non_root_identity_is_stopped_before_any_submission(db):
+    # dms-k8s(k8s 신원 모드 전용, 2026-10-26): 비 root 신원은 정상 producer 가 없다(LDAP 시절의 옛 행·변조 행) -- 근거와
+    # 무관하게 제출 전에 identity_missing_at_step 으로 끊는다(권한 판정이 k8s 맵핑뿐인 라인에서 비 root 경로를 열지 않는다).
+    repos, rid, jid = _frozen_sync_job(db, identity=_USER, payload_extra={"run_as_root": True})
     adapter = StubExecutionAdapter()
     result = JobStepper(repos, adapter, settings=_StepSettings()).run_once()
-    assert result[jid] == "Preflight"
+    assert result[jid] == "Rejected"
+    assert repos.requests.last_reason_code(rid) == "identity_missing_at_step"
+    assert adapter.submitted_specs() == []

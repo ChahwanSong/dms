@@ -25,6 +25,16 @@ class _Recorder(StubExecutionAdapter):
     def __init__(self):
         super().__init__()
         self.terminated = []
+        self.on_submit = None
+
+    def submit(self, spec):
+        # 경합 흉내: 제출 관문(_build_spec -- root 잡은 요청 행으로 근거를 다시 본다)을 지난 **뒤** 요청이 지워진다. 그
+        # 전에 지워지면 관문이 먼저 끊는다(PrivilegeNotRequestedAtStep -- 아래 test_deleted_before_the_gate_is_never_submitted).
+        ref = super().submit(spec)
+        hook, self.on_submit = self.on_submit, None
+        if hook is not None:
+            hook()
+        return ref
 
     def terminate(self, ref):
         self.terminated.append(ref)
@@ -38,8 +48,8 @@ def _seed_storage(repos, name):
                               actor="test")
 
 
-_WP = {"identity": {"uid": 10001, "gid": 10000, "username": "alice", "groups": [],
-                    "privileged": False},
+_WP = {"identity": {"uid": 0, "gid": 0, "username": "alice", "groups": [],
+                    "privileged": True},
        "candidates": {"primary": ["n1"]}, "process_count": 8,
        "queue": "dms-data", "priority_class": "dms-mid"}
 
@@ -57,7 +67,7 @@ def _job(repos, op):
         cols = {"source_storage": "src", "source": "a", "destination_storage": "dst",
                 "destination": "b", "tool": "dsync"}
     rid = repos.requests.create(operation=op, requester_id="alice", actor="alice",
-                                resource_key=f"k-{op}", payload=payload, priority="mid")
+                                resource_key=f"k-{op}", payload={**payload, "run_as_root": True}, priority="mid")
     repos.requests.set_state(rid, RequestState.PLANNED, actor="planner")
     repos.requests.set_state(rid, RequestState.RUNNING, actor="planner")
     plan_id = repos.data_jobs.create_plan(rid, actor="planner")
@@ -112,7 +122,7 @@ def test_submit_after_row_deleted_reclaims_the_ref(db, op, phase):
     stepper = JobStepper(repos, adapter, settings=_Settings())
     _advance_to(repos, adapter, stepper, rid, jid, phase)
     job = _snapshot(repos, jid)                          # 잠금 없는 스냅숏
-    _delete_request(db, rid)                             # 그 사이 취소 + 삭제
+    adapter.on_submit = lambda: _delete_request(db, rid)  # 제출 순간 취소 + 삭제
 
     result = stepper._step_one(job)                      # 낡은 스냅숏으로 제출까지 간다 -- TypeError 없음
 
@@ -136,12 +146,12 @@ def test_submit_after_row_deleted_reclaims_the_ref(db, op, phase):
 def test_terminate_failure_on_deleted_job_is_still_recorded(db):
     repos = Repositories(db)
     rid, jid = _job(repos, "scan")
-    adapter = StubExecutionAdapter()
+    adapter = _Recorder()
     ref = f"stub-preflight-{jid}"
     adapter.fail_terminate(ref)
     stepper = JobStepper(repos, adapter, settings=_Settings())
     job = _snapshot(repos, jid)
-    _delete_request(db, rid)
+    adapter.on_submit = lambda: _delete_request(db, rid)
 
     assert stepper._step_one(job) == "gone"
 
@@ -170,6 +180,21 @@ def test_reclaim_if_terminal_with_missing_row_terminates_instead_of_snapshot_fal
 
     assert adapter.terminated == [f"stub-preflight-{jid}"]
     assert len(_orphan_events(db)) == 1
+
+
+def test_deleted_before_the_gate_is_never_submitted(db):
+    # 요청이 제출 관문 **전에** 지워졌다 -- root 잡의 근거 재확인(요청 행 없음 = 근거 없음)이 제출 전에 끊는다. 종단 전이는
+    # 행이 없어 KeyError(run_once 가 step_error 로 남긴다 -- test_step_error_for_deleted_job_is_recorded_without_request_id)이고,
+    # 아무것도 제출되지 않아 회수할 ref 도 없다.
+    repos = Repositories(db)
+    rid, jid = _job(repos, "scan")
+    adapter = _Recorder()
+    stepper = JobStepper(repos, adapter, settings=_Settings())
+    job = _snapshot(repos, jid)
+    _delete_request(db, rid)
+    with pytest.raises(KeyError):
+        stepper._step_one(job)
+    assert adapter.submitted_specs() == [] and adapter.terminated == []
 
 
 def test_set_phase_ref_reports_missing_row(db):

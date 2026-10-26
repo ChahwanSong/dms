@@ -103,7 +103,7 @@ def _scan_job(repos):
     _seed_storage(repos, "s1")
     rid = repos.requests.create(
         operation="scan", requester_id="alice", actor="alice", resource_key="k",
-        payload={"storage": "s1", "target": "a"}, priority="mid")
+        payload={"run_as_root": True, "storage": "s1", "target": "a"}, priority="mid")
     repos.requests.set_state(rid, RequestState.PLANNED, actor="planner")
     repos.requests.set_state(rid, RequestState.RUNNING, actor="planner")
     plan_id = repos.data_jobs.create_plan(rid, actor="planner")
@@ -111,8 +111,8 @@ def _scan_job(repos):
         rid, plan_id, operation="scan", priority="mid", storage_name="s1", target="a",
         options={}, tool="dscan",
         worker_pool={"tool": "dscan",
-                     "identity": {"uid": 10001, "gid": 10000, "username": "alice",
-                                  "groups": [], "privileged": False},
+                     "identity": {"uid": 0, "gid": 0, "username": "alice",
+                                  "groups": [], "privileged": True},
                      "candidates": {"primary": ["n1"]}, "process_count": 8,
                      "queue": "dms-data", "priority_class": "dms-mid"},
         precondition={}, actor="planner")
@@ -123,7 +123,7 @@ def test_plan_error_event_is_recorded_outside_any_open_transaction(spy, monkeypa
     repos = Repositories(spy)
     rid = repos.requests.create(
         operation="scan", requester_id="alice", actor="alice", resource_key="k",
-        payload={"storage": "s1", "target": "a", "options": {}, "owner_username": None},
+        payload={"run_as_root": True, "storage": "s1", "target": "a", "options": {}, "owner_username": None},
         priority="mid")
 
     def _boom(*a, **k):

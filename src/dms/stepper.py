@@ -11,14 +11,14 @@ import posixpath
 import sys
 import time
 
-from .artifact_base import resolve_artifact_base, static_base_problem, strip_scheme
+from .artifact_base import resolve_artifact_base
 from .batch_cancel import CANCEL_MARK_EVENT, CANCEL_REASON
 from .db import iso_plus, utc_now_iso
 from .domain import DataJobState, TERMINAL_DATA_JOB_STATES, chown_problem, managed_abs_path
 from .execution import ExecStatus, ExecutionError, JobSpec
 from .execution_manifests import (parse_execution_reason, parse_preflight_reason, parse_pv_owner, processes_per_node,
                                   valid_owner, worker_pod_count)
-from .identity import PRIVILEGE_NEVER, privilege_policy, supplementary_gids_problem
+from .identity import PRIVILEGE_NEVER, privilege_policy
 from .node_cpu import DEFAULT_NODE_CPU_RESERVE_MILLICORES, node_cpu_cap, per_node_limit
 from .placement import TOOL_TO_POLICY
 from .repositories.node_exclusions import blocked_nodes, candidate_nodes
@@ -88,9 +88,10 @@ class IdentityMissingAtStep(Exception):
     항상 채우므로 도달 경로는 DB 직접 쓰기뿐이지만 unknown_tool/_abs 와 같은 위협
     클래스(DB 가 신뢰 경계)라 같은 층에서 종단시킨다. **uid 0 자체는 거부하지
     않는다** -- 특권 요청자(identity.py, privileged=True)는 정당한 0 이다.
-    2026-10-07: 비특권 주 gid 0(D5 백스톱 -- 규칙 전에 계획된 잡·변조 행)과 보조 gid 스냅숏의 모양(하드 상수·
-    상태 키 결속, identity.supplementary_gids_problem)도 같은 사유로 끊는다 -- 위조된 목록이 pod
-    supplementalGroups·/etc/group 으로 흐르기 전에."""
+    2026-10-26(dms-k8s 는 k8s 신원 모드 전용 -- 모든 잡이 root): **privileged 가 아닌 신원**(LDAP 시절의 옛 행·변조 행 --
+    정상 producer 가 없다)과 보조 gid 목록이 실린 스냅숏(그룹 물질화를 지웠으니 조용히 버리고 돌리면 스냅숏과 다른
+    권한이다)도 같은 사유로 끊는다(fail-closed, identity_problem). 권한 판정이 k8s 맵핑뿐인 라인에서 비 root 실행 경로를
+    열어 두지 않는다."""
 
     def __init__(self, problem):
         self.problem = problem
@@ -160,26 +161,14 @@ class NodeCpuInsufficientAtStep(Exception):
         super().__init__(", ".join(f"{n}={c}" for n, c in sorted(caps.items())))
 
 
-class ArtifactBaseUnsafeAtStep(Exception):
-    """보조 그룹이 실린 비 root 잡의 제출 직전 base 정적 관문(2026-10-08 리뷰, artifact_base.static_base_problem):
-    base 에 g+w·POSIX ACL 쓰기 항목·**default ACL**·other-x 없음이 있으면 제출 전에 끊는다. preflight 의
-    `test -w` 는 base **자체**의 쓰기만 보므로, base 엔 쓰기가 없고 default ACL 만 있는 경우(러너가 root 로 만드는
-    <job_id>/<phase> 가 그 ACL 을 상속)를 통과시켰다 -- 그 그룹의 다른 사용자가 남의 rank.sh 를 바꿔치기해 mpirun 이
-    피해자 신원으로 실행하는 교차 사용자 코드 실행이었다(불변식 5). 제어면 판정(3홉·PUT)은 표시·저장용이라 잡을
-    막지 않고, env 로 준 base·저장 뒤 바뀐 mode 도 있어 컨트롤러(root, base 마운트)가 직접 본다. problem 은 사유 코드
-    (artifact_base_group_writable·artifact_base_not_traversable) -- _step_one 이 키워드 리터럴로 종단한다."""
-
-    def __init__(self, problem):
-        self.problem = problem
-        super().__init__(f"artifact base {problem} at step time")
-
-
 def identity_problem(ident) -> "str | None":
     """실행 신원의 모양 검사 -- 단일 장소. 정상 = planner 가 ResolvedIdentity 를 asdict 한 것:
     uid/gid 는 int(bool 제외), username 은 비어 있지 않은 str, privileged 는
-    uid == 0 과 일치. 2026-10-07: 비특권 gid 0(D5 백스톱)과 보조 gid 모양(하드 상수·상태 키 결속,
-    identity.supplementary_gids_problem -- 키 부재·None 은 [] 로 통과)도 본다. 문제가 있으면 짧은 설명(이벤트
-    메시지), 없으면 None."""
+    uid == 0 과 일치. 2026-10-26(dms-k8s 는 k8s 신원 모드 전용 -- 모든 잡이 root): privileged 가 아닌 신원은
+    non_privileged_identity(정상 producer 가 없다 -- LDAP 시절의 옛 행·변조 행. 예전 D5 의 「비특권 gid 0」 백스톱을
+    포함한다), 보조 gid 목록(supplementary_gids)이 비어 있지 않으면 supplementary_gids_unsupported(그룹 물질화를 지웠다 --
+    조용히 버리고 돌리면 스냅숏과 다른 권한이다). 키 부재·None·[] 는 정상(배포 전에 계획된 root 행의 모양) -- 옛 행의
+    다른 supplementary_* 키는 읽지 않는다. 문제가 있으면 짧은 설명(이벤트 메시지), 없으면 None."""
     if not isinstance(ident, dict):
         return "identity_missing"
     for key in ("uid", "gid"):
@@ -193,11 +182,12 @@ def identity_problem(ident) -> "str | None":
         return "username_missing"
     if bool(ident.get("privileged")) != (ident["uid"] == 0):
         return "privileged_flag_mismatch"
-    if ident["gid"] == 0 and not ident.get("privileged"):
-        # D5 백스톱: planner 는 identity_root_group_without_privilege 로 거부하지만, 규칙 전에 계획된 잡·변조 행은
-        # 비 root 잡에 root 그룹 권한을 싣는다(runAsGroup 0).
-        return "root_group_without_privilege"
-    return supplementary_gids_problem(ident)
+    if ident.get("privileged") is not True:
+        return "non_privileged_identity"
+    supp = ident.get("supplementary_gids")
+    if supp is not None and supp != []:
+        return "supplementary_gids_unsupported"
+    return None
 
 
 class JobStepper:
@@ -297,19 +287,6 @@ class JobStepper:
         # 않는다(설계 §1-7).
         return resolve_artifact_base(self._repos.control, self._settings)
 
-    def _raise_if_base_unsafe_for_groups(self, job):
-        path = strip_scheme(self._artifact_base())
-        try:
-            problem = static_base_problem(path)
-        except OSError as exc:
-            # 컨트롤러가 base 를 못 봤다(마운트 없음 등) -- '모름' 을 통과로 접는 게 아니라 판정을 preflight 에 넘긴다:
-            # 잡 파드의 hostPath(type Directory)·test -x·other-x 비트·test -w 가 그대로 돈다. 여기서 종단하면 컨트롤러
-            # 쪽 마운트 문제 하나로 모든 그룹 잡이 끝난다(3홉 화면의 컨트롤러 홉이 그 사실을 따로 보인다).
-            logger.warning("artifact base static check skipped job=%s: %s", job["job_id"], exc)
-            return
-        if problem is not None:
-            raise ArtifactBaseUnsafeAtStep(problem)
-
     def _build_spec(self, job, phase, dryrun):
         # 비-dict worker_pool(변조 행)도 identity_missing 경로로 -- AttributeError 로
         # 새면 run_once 의 step_error 루프(매 틱 재시도)에 영구히 낀다.
@@ -379,15 +356,10 @@ class JobStepper:
             timeout = policy["execution_timeout_seconds"]
         else:
             timeout = policy["preview_timeout_seconds"]
-        # 보조 gid 가 실린 스냅숏은 base 정적 관문(ArtifactBaseUnsafeAtStep docstring)을 거친다.
-        v = wp["identity"].get("supplementary_gids")
-        gids = [] if v is None else list(v)
-        if gids:
-            self._raise_if_base_unsafe_for_groups(job)
         return JobSpec(
             job_id=job["job_id"], phase=phase, operation=op, tool=job["tool"],
-            # 키를 항상 싣는 정규화 사본 -- 빌더는 **스냅숏**만 본다.
-            dryrun=dryrun, identity={**wp["identity"], "supplementary_gids": gids}, paths=paths,
+            # 사본 -- 빌더는 **스냅숏**만 본다.
+            dryrun=dryrun, identity=dict(wp["identity"]), paths=paths,
             options=job["options"] or {}, candidates=wp.get("candidates", {}),
             process_count=wp.get("process_count", 1), queue=wp.get("queue", "dms-data"),
             priority_class=wp.get("priority_class", "dms-mid"),
@@ -795,16 +767,6 @@ class JobStepper:
                 message=f"privileged identity without run_as_root/batch job={job['job_id']}",
                 request_id=job.get("request_id"))
             return self._fail_closed(job, reason_code="privilege_not_requested")
-        except ArtifactBaseUnsafeAtStep as exc:
-            # 그룹 잡의 base 정적 관문 -- 어느 판정이었는지는 사유 코드가 말한다(경로는 싣지 않는다: 관리자 설정).
-            self._repos.observability.record_event(
-                component="stepper", severity="error", event_type="artifact_base_unsafe_at_step",
-                message=f"{exc.problem} job={job['job_id']}",
-                payload={"job_id": job["job_id"], "problem": exc.problem},
-                request_id=job.get("request_id"))
-            if exc.problem == "artifact_base_not_traversable":
-                return self._fail_closed(job, reason_code="artifact_base_not_traversable")
-            return self._fail_closed(job, reason_code="artifact_base_group_writable")
 
     def _dispatch(self, job) -> str:
         state = job["state"]

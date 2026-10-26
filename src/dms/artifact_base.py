@@ -16,9 +16,8 @@ from .domain import DomainValidationError
 
 
 # 잡 파드 **안**에서 아티팩트 base 가 보이는 고정 경로(2026-09-09). 공용 디렉터리(base 의
-# 부모, 예 /cephfs/dms)를 root:root 로 잠가도 잡이 돌아야 한다 -- 잠금은 **그룹 쓰기·other 통과 금지(750, gidNumber 0
-# LDAP 그룹이 있으면 700)**: 2026-10-07 부터 잡이 LDAP 보조 그룹을 달고 돌고 보조 gid 0 도 인정하므로(D3), 770 은
-# gidNumber 0 그룹 멤버의 잡에 root 그룹 쓰기를 연다(ARCHITECTURE §7). 부모의 711·755 는 금지다 -- other-x 가 있으면
+# 부모, 예 /cephfs/dms)를 root:root 로 잠가도 잡이 돌아야 한다 -- 잠금은 **그룹 쓰기·other 통과 금지(750)**(ARCHITECTURE
+# §7; LDAP 보조 그룹 시절(2026-10-07~25)의 gid 0 그룹 우려는 dms-k8s 에서 사라졌지만 잠금 규칙은 그대로 둔다). 부모의 711·755 는 금지다 -- other-x 가 있으면
 # 모든 uid 가 base(755)와 0755 잡 디렉터리·0644 아티팩트를 직접 읽어 API 의 소유자 검사(artifact_files)를 우회한다
 # (711/755 는 base **자체**의 선택지다). 러너(launcher)는
 # root 지만 도구(dscan/dsync)와 rank.sh 는 요청자 uid 로 돌아 <base>/<job>/<phase> 까지의
@@ -116,8 +115,8 @@ def _posix_acl_problem(path: str) -> "str | None":
     NFSv4/GPFS 고유 ACL 은 이 표현이 아니라 보지 못한다. preflight 의 `test -w` 는 access(2) 라 base **자체**에
     걸린 그런 ACL 은 요청자 관점에서 반영하지만, **상속**(default POSIX ACL·NFSv4/GPFS inheritable ACE)이
     <job_id>·<phase> 에 주는 쓰기는 보지 못한다(base 자체엔 쓰기가 없을 수 있다) -- POSIX default ACL 은 이 함수가
-    막는다: 저장·3홉에서, 그리고 **보조 그룹이 실린 잡**은 컨트롤러 정적 관문(static_base_problem)으로 제출 전에도.
-    그룹 없는 비 root 잡은 잡 단위로 보지 않고, NFSv4/GPFS 상속 ACE 는 남는 위험이다(README §2b-1)."""
+    저장·3홉에서 막는다(잡 단위로는 보지 않는다 -- 2026-10-26 LDAP 보조 그룹 잡의 컨트롤러 정적 관문을 지웠다). NFSv4/GPFS
+    상속 ACE 는 남는 위험이다(README §2b-1)."""
     try:
         os.getxattr(path, _ACL_DEFAULT)
         return "artifact_base_group_writable"      # 있다는 사실만으로 거부(내용 무관)
@@ -141,14 +140,14 @@ def _posix_acl_problem(path: str) -> "str | None":
 
 
 def static_base_problem(path: str) -> "str | None":
-    """base 의 요청자 관점 mode·POSIX ACL 판정(쓰기 프로브 없음) -- roundtrip_artifact_base(저장·3홉)와 stepper 의
-    그룹 잡 제출 관문(_build_spec)이 공유하는 단일 규칙. 순서: 쓰기 노출(g+w → ACL) 먼저, 통과(o+x) 다음 -- 둘 다
+    """base 의 요청자 관점 mode·POSIX ACL 판정(쓰기 프로브 없음) -- roundtrip_artifact_base(저장·3홉)의 규칙(2026-10-26
+    까지는 stepper 의 보조 그룹 잡 제출 관문도 공유했다). 순서: 쓰기 노출(g+w → ACL) 먼저, 통과(o+x) 다음 -- 둘 다
     어기면 더 위험한 쪽(요청자 쓰기)을 보여 준다.
       - S_IWGRP(gid 무관) → artifact_base_group_writable (보조 gid 0 도 인정하므로 root 그룹 g+w 도 안전하지 않다)
       - _posix_acl_problem(named 쓰기 항목·default ACL·읽기 실패) → artifact_base_group_writable
-      - S_IXOTH 없음 → artifact_base_not_traversable (launcher 는 보조 그룹 없이 hostfile 을 읽는다, D12)
-    stat 실패(OSError)는 **올린다** -- '모름' 을 통과로 접지 않도록 호출자가 정한다(roundtrip 은 빨간불, stepper 는
-    preflight 에 맡김). 소유자·o+w 는 roundtrip 몫이다(o+w 는 모든 잡의 preflight test -w 가 잡는다)."""
+      - S_IXOTH 없음 → artifact_base_not_traversable (D12)
+    stat 실패(OSError)는 **올린다** -- '모름' 을 통과로 접지 않도록 호출자가 정한다(roundtrip 은 빨간불). 소유자·o+w 는
+    roundtrip 몫이다."""
     st = os.stat(path)
     if st.st_mode & stat.S_IWGRP:
         return "artifact_base_group_writable"
@@ -174,11 +173,9 @@ def roundtrip_artifact_base(path: str) -> "str | None":
     증명하지 않는다 -- 노드 홉(에이전트 os.access, root)도 마찬가지다. 그래서 요청자
     관점의 조건은 mode 비트·ACL 로 **직접** 본다(아래): g+w·POSIX ACL 쓰기 항목·default
     ACL·other-x 없음은 여기서 빨간불이다. 이 함수는 저장(PUT/validate 422)과 3홉 표시용 --
-    잡 제출을 막지 않는다(stepper·planner 는 artifact_base_check_ok 를 읽지 않는다). 잡
-    단위 차단은 둘이다: 보조 그룹이 실린 비 root 잡은 컨트롤러가 제출 직전에 같은 규칙
-    (static_base_problem)을 base 에 직접 적용하고(stepper._build_spec -- default ACL 처럼 preflight
-    가 못 보는 상속 경로), 모든 비 root 잡은 preflight 가 요청자 uid 로 base 를 시험한다
-    (execution_manifests -- base 자체의 access(2)).
+    잡 제출을 막지 않는다(stepper·planner 는 artifact_base_check_ok 를 읽지 않는다). 잡 단위로는
+    preflight 가 base 통과(test -x)만 본다(execution_manifests._ARTIFACT_BASE_CHECK -- dms-k8s 는 모든 잡이 root 라
+    요청자 uid 관점의 시험이 없다; LDAP 보조 그룹 잡의 컨트롤러 정적 관문은 2026-10-26 에 지웠다).
 
     소유권·mode 전제(2026-09-09 리뷰): base 는 **이 프로세스의 euid 소유**(운영은
     root)이고 world-writable 이 아니어야 한다 -- artifact_files.assert_contained 의
@@ -187,16 +184,13 @@ def roundtrip_artifact_base(path: str) -> "str | None":
     통과하므로 여기서 거른다. 개발·테스트(비root)에선 tmp 디렉터리가 자기 소유라
     같은 규칙이 그대로 성립한다.
 
-    그룹 쓰기 금지(2026-10-07, 보조 그룹 D6): 잡 파드가 LDAP 보조 그룹을 달고 돌면 base 의
-    g+w 는 **그 그룹의 모든 요청자**에게 base 쓰기를 준다 -- <job_id> 를 미리 만들어 봉쇄
-    기준을 옮기는 world-writable 과 같은 공격이다. 보조 gid 0 도 인정하므로(D3) root 그룹
-    g+w 도 안전하지 않아 gid 와 무관하게 거부하고, mode 비트에 드러나지 않는 POSIX ACL
-    쓰기 항목·default ACL 도 같은 사유로 거부한다(_posix_acl_problem).
+    그룹 쓰기 금지(2026-10-07, 보조 그룹 D6): base 의 g+w 는 **그 그룹의 모든 사용자**에게 base 쓰기를 준다 --
+    <job_id> 를 미리 만들어 봉쇄 기준을 옮기는 world-writable 과 같은 공격이다. gid 와 무관하게 거부하고, mode 비트에
+    드러나지 않는 POSIX ACL 쓰기 항목·default ACL 도 같은 사유로 거부한다(_posix_acl_problem). (도입 이유였던 LDAP
+    보조 그룹 잡은 2026-10-26 dms-k8s 에서 사라졌지만, 공용 파일시스템의 다른 사용자에 대한 봉쇄라 규칙은 남긴다.)
 
-    other-x 필수(2026-10-07, D12 대체): 러너(launcher)의 mpirun 은 보조 그룹 없이 base 아래의
-    hostfile 을 읽는다 -- 그룹으로 여는 750/710 은 그룹을 가진 preflight 는 통과하고
-    launcher 쪽에서 "unable to open the hostfile" 로 죽는다. 그래서 base 는 other 실행(x)이
-    있어야 하고(755 또는 711), 없으면 artifact_base_not_traversable(preflight 와 같은 코드)."""
+    other-x 필수(2026-10-07, D12 대체): base 는 other 실행(x)이 있어야 하고(755 또는 711), 없으면
+    artifact_base_not_traversable(preflight 와 같은 코드)."""
     if not os.path.exists(path):
         return "artifact_base_missing"
     if not os.path.isdir(path):
@@ -209,7 +203,7 @@ def roundtrip_artifact_base(path: str) -> "str | None":
         return "artifact_base_not_owned"
     if st.st_mode & stat.S_IWOTH:
         return "artifact_base_world_writable"
-    # g+w·ACL·o+x(static_base_problem -- stepper 관문과 같은 규칙). 프로브 **앞**이라 거부된 경로에는 프로브
+    # g+w·ACL·o+x(static_base_problem). 프로브 **앞**이라 거부된 경로에는 프로브
     # 파일을 만들지 않는다.
     try:
         problem = static_base_problem(path)

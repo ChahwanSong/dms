@@ -9,24 +9,8 @@ LDAP 리졸버·보조 그룹(posixGroup gidNumber)·비 root 실행 경로는 2
 계속 쓴다 -- 근거는 docs/history·git 히스토리). 그래서 root 근거가 없는 요청(PRIVILEGE_NEVER·자격 없는 배치 자식)은 예전처럼
 「실행 신원의 LDAP uid/gid」로 낮추지 않고 privileged_not_authorized 로 **거부**한다 -- 낮출 비 root 신원이 없고, root 로
 올리면 근거 없는 uid 0 실행이다.
-
-아래 보조 gid 스냅숏 모양 함수(supplementary_gids_problem)는 아직 그것을 쓰는 실행 계층(stepper.identity_problem·
-execution_manifests)과 함께 지운다 -- 판정 경로(resolve_job_identity)는 쓰지 않는다.
 """
 from dataclasses import dataclass
-
-
-# D3 "기술적으로 무효한 값"의 이 시스템 경계: k8s apiserver 는 PodSecurityContext.supplementalGroups 원소를
-# IsValidGroupID(0..math.MaxInt32)로 검증한다(runAsUser·runAsGroup 과 같은 규칙). 2147483648..4294967295 가 하나라도
-# 실리면 preflight Pod 생성이 422 → submit_failed 로 그 사용자의 비 root 잡이 전부 깨진다 -- 그래서 제외(화면 '제외').
-# 주 uid·gid 가 MaxInt32 를 넘는 경우는 지금도 runAsUser/runAsGroup 에서 422 다(변경 없음).
-GID_MAX = 2147483647
-# D4: 넘으면 통째로 미적용(over_limit -- 자르면 어느 그룹이 빠지는지 드러나지 않는 권한 축소, 거부하면 지금 돌던
-# 사용자가 회귀). 스냅숏 모양 검사의 길이 상한도 이 상수다(하드 -- 설정 키가 아니라 설정 변경이 위조로 보이지 않는다).
-MAX_SUPPLEMENTARY_GROUPS = 256
-SUPP_APPLIED, SUPP_NONE, SUPP_OVER_LIMIT, SUPP_DISABLED, SUPP_PRIVILEGED = (
-    "applied", "none", "over_limit", "disabled", "privileged")
-SUPP_STATUSES = frozenset({SUPP_APPLIED, SUPP_NONE, SUPP_OVER_LIMIT, SUPP_DISABLED, SUPP_PRIVILEGED})
 
 
 @dataclass(frozen=True)
@@ -40,52 +24,11 @@ class ResolvedIdentity:
     privileged: bool
 
 
-def _is_int(value) -> bool:
-    # bool 은 int 의 하위라 따로 뺀다 -- True 가 gid 1 로 승격되지 않게(DB 신뢰 경계).
-    return isinstance(value, int) and not isinstance(value, bool)
-
-
-def supplementary_gids_problem(ident: dict) -> "str | None":
-    """스냅숏 모양 검사 -- **하드 상수만** 본다(정책값·설정을 보지 않아 설정 변경이 위조로 표시되지 않는다). 반환은
-    이벤트 메시지용 문제 문자열이다(사유 코드 아님 -- 호출자가 identity_missing_at_step 으로 접는다). uid·gid·
-    username 검사는 stepper.identity_problem 몫이라 여기선 gid 가 int 일 때만 '주 gid 와 같음'을 본다(빌더 테스트의
-    빈 identity 허용).
-
-    순서는 값싼 것 먼저 -- 위조된 거대 목록이 매 틱 O(n) 순회가 되지 않게 길이를 원소보다 먼저 본다. 키 부재·None
-    은 [](배포 전에 계획된 잡 = 더 좁은 권한, 실패 아님). 상태 키 결속은 키가 **있을 때만**(배포 전 잡은 키가 없다)."""
-    v = ident.get("supplementary_gids")
-    if v is not None:
-        if not isinstance(v, list):
-            return "supplementary_gids_not_list"
-        if len(v) > MAX_SUPPLEMENTARY_GROUPS:
-            return "supplementary_gids_too_many"
-        for g in v:
-            if not _is_int(g) or g < 0 or g > GID_MAX:
-                return "supplementary_gid_invalid"
-        primary = ident.get("gid")
-        if _is_int(primary) and primary in v:
-            return "supplementary_gid_is_primary"
-        if any(a >= b for a, b in zip(v, v[1:])):
-            return "supplementary_gids_unsorted"      # 중복도 여기 걸린다(엄격 오름차순)
-        if ident.get("privileged") and v:
-            return "supplementary_gids_on_privileged"
-    if "supplementary_gids_status" in ident:
-        status = ident["supplementary_gids_status"]
-        # isinstance 먼저: 리스트 같은 비해시 값이 frozenset 멤버십에서 TypeError 를 내지 않게.
-        if not isinstance(status, str) or status not in SUPP_STATUSES:
-            return "supplementary_gids_status_mismatch"
-        if (len(v or []) > 0) != (status == SUPP_APPLIED):          # 비어 있지 않음 ⇔ applied
-            return "supplementary_gids_status_mismatch"
-        if (status == SUPP_PRIVILEGED) != bool(ident.get("privileged")):
-            return "supplementary_gids_status_mismatch"
-    return None
-
-
 def owner_override_allowed(*, owner_username, requester_id, requester_is_admin,
                            allow_privileged, privileged_requesters) -> bool:
     """다른 실행 신원 지정(owner_username ≠ 요청자)은 특권이다 -- API(routes_requests.submit)와 planner 가 **같은
-    술어**를 쓴다(planner 는 API 를 거치지 않은 DB 직접 쓰기 방어 -- 그 경로가 남의 uid 와 이제 보조 그룹까지
-    얻는다). 비교는 **원문 그대로**(strip 없음): API 의 기존 `owner != identity.actor` 와 같아 ' alice' 같은 값의
+    술어**를 쓴다(planner 는 API 를 거치지 않은 DB 직접 쓰기 방어 -- 그 경로가 남의 이름을 실행 신원으로 얻는다).
+    비교는 **원문 그대로**(strip 없음): API 의 기존 `owner != identity.actor` 와 같아 ' alice' 같은 값의
     403 이 유지된다(validate_owner_username 의 422 는 그 뒤). 세션 요구 없음(API 와 맞춤)."""
     if owner_username is None:
         return True

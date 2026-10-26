@@ -567,12 +567,12 @@ def _planned_scan(repos, nodes=("n1", "n2"), *, process_count=16, state=None, ex
                               backend_type="cephfs", actor="test")
     rid = repos.requests.create(operation="scan", requester_id="alice", actor="alice",
                                 resource_key=f"k-{len(repos.requests.list_pending())}",
-                                payload={"storage": "s1", "target": "a"}, priority="mid")
+                                payload={"run_as_root": True, "storage": "s1", "target": "a"}, priority="mid")
     repos.requests.set_state(rid, RequestState.PLANNED, actor="planner")
     repos.requests.set_state(rid, RequestState.RUNNING, actor="planner")
     plan_id = repos.data_jobs.create_plan(rid, actor="planner")
-    wp = {"tool": "dscan", "identity": {"uid": 10001, "gid": 10000, "username": "alice",
-                                        "groups": [], "privileged": False},
+    wp = {"tool": "dscan", "identity": {"uid": 0, "gid": 0, "username": "alice",
+                                        "groups": [], "privileged": True},
           "candidates": {"primary": list(nodes)}, "node_count": len(nodes), "process_count": process_count,
           "queue": "dms-data", "priority_class": "dms-mid", **(extra_wp or {})}
     jid = repos.data_jobs.create_job(rid, plan_id, operation="scan", priority="mid", storage_name="s1",
@@ -734,13 +734,13 @@ def _planned_sync(repos, *, nodes=("n1",), process_count=2, extra_wp=None):
             repos.storages.create(storage_name=name, mount_path=f"/{name}", managed_root=f"/{name}/dms",
                                   backend_type="cephfs", actor="test")
     rid = repos.requests.create(operation="sync", requester_id="alice", actor="alice", resource_key="ks",
-                                payload={"source_storage": "src", "source": "a", "destination_storage": "dst",
+                                payload={"run_as_root": True, "source_storage": "src", "source": "a", "destination_storage": "dst",
                                          "destination": "b"}, priority="mid")
     repos.requests.set_state(rid, RequestState.PLANNED, actor="planner")
     repos.requests.set_state(rid, RequestState.RUNNING, actor="planner")
     plan_id = repos.data_jobs.create_plan(rid, actor="planner")
-    wp = {"tool": "dsync", "identity": {"uid": 10001, "gid": 10000, "username": "alice", "groups": [],
-                                        "privileged": False},
+    wp = {"tool": "dsync", "identity": {"uid": 0, "gid": 0, "username": "alice", "groups": [],
+                                        "privileged": True},
           "candidates": {"primary": list(nodes)}, "node_count": len(nodes), "process_count": process_count,
           "queue": "dms-data", "priority_class": "dms-mid", **(extra_wp or {})}
     jid = repos.data_jobs.create_job(rid, plan_id, operation="sync", priority="mid", source_storage="src",
