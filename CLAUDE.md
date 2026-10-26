@@ -45,7 +45,7 @@ PostgreSQL(제어면) + React 포탈 + 노드 에이전트 + Volcano gang-schedu
   `passwordTransport.ts` 가 바이트 단위로 같아야 한다(대조 테스트 있음).
 - **공유 토큰은 계정·배포 경로를 못 만진다**(2026-10-07). 모든 노드 에이전트가 가진 Bearer 토큰(role admin,
   auth=token)으로 계정을 다시 만들거나 릴리스로 옛 이미지에 롤백하면 특권 게이트가 통째로 무효가 된다 — 계정 변경은
-  `accounts_session_required`, 빌드·릴리스·컨트롤 상태·레지스트리 삭제·artifact base 변경·작업(요청) 삭제는
+  `accounts_session_required`, 빌드·릴리스·컨트롤 상태·레지스트리 삭제·artifact base 변경·작업(요청) 삭제·배치 기록 삭제(2026-10-26)는
   `auth.require_session_admin`(`admin_session_required`). 그런 새 변경 라우트를 만들면 `require_admin` 이 아니라
   이 의존성을 쓴다. 특권 목록(env `DMS_PRIVILEGED_REQUESTERS` ∪ 계정 화면 부여, 2026-10-12 — 자격 판정은 `privileged.privileged_names`,
   계정 보호는 `privileged.protected_names`(비활성 부여 계정 포함)를 거친다) 이름 계정은 특권 세션 관리자만
@@ -128,6 +128,9 @@ PostgreSQL(제어면) + React 포탈 + 노드 에이전트 + Volcano gang-schedu
     스토리지 기본 소유자**(스토리지 항목의 `default_uid:default_gid`, 기본 0:0 — 제출이 요청에 얼리고 바뀌면
     `storage_owner_changed`)로 맞추는 것(`execution_manifests._auto_chown`)으로 막는다(2026-10-26). 일반 사용자는 늘 이 자동
     규칙이고, 잰 PV 루트 소유자로 맞추는 `pv_owner: "pv_root"` 는 특권 운영자 옵션뿐이다 — 사용자에게 열지 마라.
+    **직접 경로** 목적지도 그 스토리지가 PV 를 담으면(pv 늘, both 는 지금 인벤토리의 PV 루트 아래) 같은 기본 소유자로
+    맞춘다(2026-10-26 결정 (4) — `k8s_access.direct_dest_owner` 가 payload `dest_owner` 에 얼리고 재확인·배치 자식 컨펌이
+    대조); filesystem·PV 밖은 소스 소유 보존 그대로.
   - root 는 매니페스트 **컨테이너 수준**(40-api/41-controller)에만 — Dockerfile `USER
     65532`·migrate 는 유지하고 `test_release_manifest_contract.py` 가 모양을 고정한다.
     "강화" 한답시고 runAsNonRoot/65532 를 넣으면 운영 base 에서 즉시 회귀한다.

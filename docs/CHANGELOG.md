@@ -95,6 +95,112 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ✅ BACKLOG 결정 묶음 구현 — 직접 경로 결과 소유·rm 경로 겹침 잠금·결과 파일 자동 만료·배치 삭제 상한 2000·dscan 카운터 + 보류 기능 5건 + 결함 3건 — **완료**(2026-10-26~27)
+
+사용자 결정(원문): 「A 결정 필요한 것들 1. 권장안대로 구현. 2. 권장안대로 구현하되, 구현 후 다양한 케이스들에 대해 검증을 하여
+제대로 작동하는지 꼼꼼히 체크 필요. 3. 권장안대로 파일만 만료하고 행은 남김. N일의 N 기본값 1500일로 하자. 4. 큰 배치 삭제 숫자를
+늘려줘: 작업 2000개 또는 항목 10000개 초과. 5. 카운터만 둠 6. Pure flashblade : 백로그에 남겨둠」, 「C 보류된 기능 - 요청 상세의
+단건 삭제 버튼 구현 - 배치 기록 삭제의 감사 행 CAS 구현 - 배치 csv 백엔드화 구현 - 배치 생성의 스토리지 드롭다운 구현 - dscan
+총바이트 집계 구현」, 「D 고쳐야 할 결함: - 빌드 파드 gc가 200건 창에 고착 - 빌드 삭제 시 파드 누수 - securitycontext 드리프트를
+배지가 못븀」, 「위 내용들 구현 및 해결하고 실증및 푸시까지 마무리해.」 A 의 번호는 결정 목록 순서다 — 1 직접 경로 목적지의 결과 소유,
+2 rm 경로의 다른 요청·배치와의 겹침, 3 아티팩트 보존 정책, 4 큰 배치 삭제, 5 비 UTF-8 이름, 6 Pure FlashBlade. 현재 동작의 지도는
+ARCHITECTURE(각 항목의 절), 운영은 deploy/README §8-2b·§9-8·§12·§12b·§12c.
+
+- **A1 직접 경로 목적지의 결과 소유**(권장안 (4) + 다듬기 「both 는 경로가 인벤토리의 PV 루트 아래일 때만」): 특권 운영자의 직접 경로
+  sync(단건·배치 자식)에서 목적지 스토리지가 pv 종류면 늘, both 면 정규화한 경로가 **지금** 인벤토리의 그 스토리지 PV 루트
+  (`repositories.k8s.pv_roots`·`pv_root_covering` — 적용된 모든 클러스터, 글자 경계, 입력 지문 + 30초 메모) 아래일 때 그 스토리지
+  기본 소유자로 `--chown`(측정 없음, 0:0 도 넣는다 — setuid/setgid 제거). 판정 `k8s_access.direct_dest_owner` 하나를 단건 제출
+  (`routes_requests.submit` — 무효 저장값 409 `invalid_storage_owner`)과 배치 자식 생성(`batch_orchestrator._materialize` — 그 항목만
+  Rejected)이 payload `dest_owner`(`{"rule":"storage",…}` | `{"rule":"none",…}` — "none" 은 키 없는 옛 행과 구별하려는 기록)로 얼리고,
+  `recheck_request`(`_recheck_dest_owner`)가 다시 계산해 (규칙, 소유자)가 다르면 `storage_owner_changed`. 배치 자식은 단건 컨펌을 지나지
+  않으므로 `BatchOrchestrator._confirm_child` 가 실행으로 넘기기 직전 `recheck_request` 를 부른다(실패 = 잡 Rejected + 요청 화해 +
+  `batch_child_recheck_rejected`). 실행은 `JobSpec.result_owner_direct` + `execution_manifests.direct_dest_owner_applies`. 포탈:
+  `lib/syncOwnership` 의 `directDest`(storage / storage_if_under_pv / varies), SubmitJob·BatchCreate·BatchDetail·requestSpec
+  「목적지 소유」, `/api/user/storages` 관리자 응답의 `default_owner`. 새 사유 코드·컬럼 없음.
+- **A2 rm 경로 겹침 잠금**(권장안 「경로 접두 잠금」, 2026-10-27): 한쪽이 rm(·미지 연산)인 두 작업이 같은 스토리지 이름에서 경로
+  성분 단위로 겹치면 늦은 쪽이 기다린다 — 술어 `domain.overlap_path`·`overlap_sides`·`destructive_operation`·`path_conflict`. 층1
+  planner 1b(resource_conflict 다음, `requests.overlap_candidates`) = Conflict `path_conflict` + 이벤트 `path_conflict`(상대 요청 id·내
+  쪽 경로만), 배치 자식도 같다(항목 Failed). 층2 stepper `_overlap_hold`(sync·rm 의 exec_preflight·실행 제출 전, scan 의 실행 제출 전;
+  `requests.overlap_gate_jobs`·`overlap_level`·`overlap_blocks`) = 보류(실패 아님, `path_overlap_hold`/`path_overlap_released`,
+  `worker_pool.overlap_hold`) + 보류 틱마다 `data_jobs.touch_held`(claim_steppable 이 updated_at 순 LIMIT 10 이라 보류 잡이 클레임
+  자리를 채우는 교착 방지). 포탈: `RequestActivity.conflictRequestId` → 전이 이력의 「겹친 요청 <앞8>」 링크(`TransitionsCard`·
+  `Timeline`). 계약은 ARCHITECTURE §4 「rm 경로 겹침 잠금」(새 경로가 exec_preflight·실행을 내면 `_overlap_hold` 필수).
+- **A3 결과 파일 자동 만료**(파일만, 행은 남김, 기본 1500일): 새 테이블 없이 아웃박스 `request_purges.kind`(NULL = 요청 삭제,
+  'expiry' = 만료, 그 밖 = 변조 → purge_row_invalid)와 `data_jobs.artifacts_expired_at`(+ 부분 인덱스 `idx_data_jobs_expiry`). 컨트롤러
+  `artifact-expiry` 루프(`artifact_expiry.ArtifactExpirer`, 300초, purge_runner 있을 때만, 대기 만료 행 ≤ 50 = `BACKLOG_MAX`)가
+  `RequestPurgesRepository.expire_artifacts`(잡·요청 둘 다 종단 ∧ updated_at < now − N일, PG `FOR UPDATE OF d SKIP LOCKED`)로 표시만
+  하고, 지우기는 request-purge 의 같은 길(안전 확인 `invalid_expiry_targets` — 요청 삭제의 거울, 끝 `finish_expiry`; 실패 사유
+  `artifact_expiry_target_invalid`). 완료 이벤트 `artifacts_expired`(component `artifact-expiry`, request_id = 그 요청 — 요청이 살아
+  있다), 고르기 요약 `artifact_expiry_queued`(request_id NULL). 만료 정리 중인 요청을 지우면 `_enqueue` 가 요청 삭제 행으로 바꾼다.
+  API: 목록 200 `{entries:[], truncated:false, expired_at, retention_days}`, 뷰·다운로드 410 `artifact_expired`(소유 확인 뒤 — 남의 잡은
+  404), `GET /api/admin/artifact-base` 의 `artifact_retention`, 삭제 툴바 `status()` 는 만료 행 제외, base 잠금은
+  `pending_count(include_expiry=False)`. 설정 `DMS_ARTIFACT_RETENTION_DAYS`(`_SERVER_INT_KEYS`, 기본 1500, 0 = 끔, 음수 기동 거부,
+  20-config.yaml "1500"). 포탈: 요청 상세(JobStages) 「결과 파일 만료됨(보존 N일, 날짜 KST)」(`expiryText`)·아티팩트 경로 화면 보존 줄.
+  과제 문구의 「하루 한 번」 대신 5분 간격 + 작은 상한으로 바꿨다(인덱스로 싸게 고르고, 첫 배포의 오래된 이력을 하루 ~1.4만 건씩 따라잡는다).
+- **A4 배치 단위 삭제 상한**: `request_purges.MAX_BATCH_DELETE_CHILDREN` 1000 → 2000(`MAX_BATCH_DELETE_ITEMS` 10000 그대로 — 목록
+  요약의 cap 도 따라 2001 에서 멈춘다). 포탈 거울 `batchGroups.MAX_BATCH_CHILDREN`·api.ts `batch_delete_too_large` 문구, 세 곳 대조
+  `tests/test_batch_delete_limits_mirror.py`. 대가: 최대 배치 하나가 RLock 을 ~0.7–2초 쥐어 readiness 한 번을 놓칠 수 있다(연속 3회가
+  아니면 파드는 빠지지 않는다 — request_purges 주석·ARCHITECTURE §5). 청크 삭제는 BACKLOG 에 남김.
+- **A5 비 UTF-8 이름 = 카운터만 + C 「dscan 총바이트 집계」**: 포크 `chahwansong/mpifileutils` ae781bd(3c041e0 직계 후손 — nsync·
+  `--chown` 수정 유지)의 dscan 이 `summary` 에 `total_bytes`(일반 파일 st_size 합, 정확값 — 시간 히스토그램 bytes 합과 같다)·
+  `invalid_name_entries`(이름 d_name 이 엄격 UTF-8 이 아닌 항목 수, broken 사유·`broken_paths_total` 에 더하지 않음)를 쓴다.
+  `Dockerfile.mpifileutils` `MPIFILEUTILS_REF` = ae781bd(`tests/test_k8s_submit.py` 의 고정값 집합에 3c041e0 = 총바이트 없음).
+  실 사용량 우선순위 = `summary.total_bytes`(엄격 정수) → 시간 히스토그램 합 — 러너 `parsers.parse_scan_counts`(→ bytes_count)와 서버
+  `routes_scan_paths._report_total_bytes`·`_summary_count`(scan_path_stats·request_scan_stats·`routes_usage._project_report` 공용)가 짝.
+  새 응답 필드 `invalid_name_entries: int | null`(키 부재 = null), storage-totals 에 `{sum, known, unknown}`(`TOTAL_SUMMARY_KEYS`).
+  요약 캐시는 스키마 그대로 — summary 에서 다시 뽑아 옛 캐시 행도 새 값을 낸다. 포탈 `lib/scanCounters.ts`(배치 항목 scan 리포트·
+  사용량 상세·합계 각주·CSV 고정 열, 크기 칸의 정확 바이트 title — `KpiTile.title`).
+- **A6 Pure FlashBlade**: 백로그 유지(BACKLOG (h)).
+- **C1 요청 상세의 단건 삭제**: 「작업 삭제」(관리자·종단 요청만 — 배치 자식·비종단 잡이면 잠기고 이유, 배치 자식은 「이 배치의 작업
+  보기」). `DeleteRequestsDialog` 재사용(`triggerLabel`, `onDeleted(r)`), `useDeleteRequests({onDeleted})` 의 onDeleted 는 캐시 제거
+  **전에** 불려 404 화면을 거치지 않고 `navigate('/jobs', {state: {notice}})` → 작업 목록 `NavNotice`(role=status). 서버가 제외하면
+  상세에 머물러 「삭제하지 않았습니다 — <사유>」.
+- **C2 배치 기록 삭제의 감사·CAS**: `BatchesRepository.delete(batch_id, *, actor)` — 한 트랜잭션에서 batch_items → batches 잠금
+  (`_lock_items_then_batch`) → 종단 재확인 → `DELETE … AND status IN ('Completed','Cancelled')` + 감사 `('batch','delete_record')`
+  (before = 이름·상태·연산·항목·집계·요청자·생성 시각). 라우트 `DELETE /api/admin/batches/{id}` 는 `require_session_admin`(토큰 403
+  `admin_session_required`), CAS 패배 409 `batch_record_changed`, 그 사이 삭제 404 `batch_not_found`.
+- **C3 배치 CSV 백엔드화**: 순수 모듈 `src/dms/batch_csv.py` + 라우트 셋(require_admin, 읽기 전용, 유지보수 무관) —
+  `POST /api/admin/batches:parse-csv`(생성과 **같은** 줄 판정: `build_data_payload`·`batch_storage_mixed`·새 `domain.rm_target_overlaps`
+  (+ `related_line`) → 오류 없으면 `validate_batch`; 오류 `{line, row, reason_code, message, related_line}` 최대 200 + `error_count`;
+  413 `batch_csv_too_large`(2 MiB)·422 `batch_csv_too_many_rows`·줄 사유 `batch_csv_bad_row`·`batch_csv_malformed`),
+  `GET /api/admin/batches/csv-template`(get_batch 보다 먼저 등록 — 순서 테스트), `GET /api/admin/batches/{id}/items.csv`(BOM·수식 방어
+  `'` — 해석이 같은 집합을 걷어 왕복). `_reject_overlapping_rm_targets` 는 `rm_target_overlaps` 를 쓴다(422 동작 그대로). 포탈
+  `lib/csv.ts` 는 얇은 클라이언트(`parseItemsCsv` 삭제, `useParseBatchCsv`), BatchCreate 「테이블에 반영」·파일·「템플릿 받기」,
+  BatchDetail 「CSV로 전체 교체」(0.4초 디바운스, 서버 items 를 그대로 PUT)·「CSV 내보내기」.
+- **C4 배치 생성의 스토리지 드롭다운**: `features/batches/BatchStoragePicker.tsx`(파일시스템 / PV·파일시스템 / PV optgroup, 「이름
+  (backend)」·관리자 전용 표시, 고른 뒤 백엔드·종류·관리 디렉토리 캡션, 목록 밖 값 「(목록에 없음)」 경고, 빈 목록이면 스토리지
+  화면 링크). aria-label 은 그대로(e2e 무수정).
+- **D1 빌드 파드 GC 200건 창 고착**: `builds.pods_gc_at`(CREATE + `_ensure_columns`) + 부분 인덱스 `idx_builds_gc`;
+  `BuildsRepository.terminal_older_than` 은 표시 없는 것만·좁은 SELECT(log_text 제외), `mark_pods_gc`; `pod_gc` 는 잡과 같은 규칙(두 파드
+  terminate 성공(404 = 성공)이면 찍고, 실패면 1시간 뒤 — 빌드 재시도 기억은 잡과 따로, 공용 `_back_off`).
+- **D2 빌드 삭제 시 파드 누수**: `routes_builds.delete_build` 가 404·409 검사 뒤 `pods_gc_at` 이 없고 build_runner 가 있으면
+  `_terminate_build_pods`(ref 별 격리)로 빌드·프로브 파드를 먼저 지우고, 하나라도 실패면 502 `build_pod_cleanup_failed`(행·감사 그대로).
+  `BuildsRepository.delete` docstring 정정, `_detail` 은 `pods_gc_at` 을 싣지 않는다. RBAC 무변경(api Role pods delete).
+- **D3 securityContext 드리프트 배지**: `rollout_status.security_context_view`·`security_drift`(SECURITY_FIELDS 8개, 형 이상 = 그
+  컨테이너 None), `normalize_*` 의 `security_contexts`(스텁 {}), `manifest_tags.manifest_security_contexts`(SECURITY_COMPONENTS =
+  dms-api·dms-controller, fail-soft — 블록 부재도 None), `GET /api/admin/releases/targets` 의 `security_drift`(None / [] / 목록, 컴포넌트당
+  observe 1회). 포탈 `ReleasesPage` 「보안 설정 드리프트」 배지 + 필드별 「라이브 X · 매니페스트 Y」 + 「포탈 롤아웃은 이미지만 바꿉니다」
+  안내(null·[]·구 서버는 아무것도 안 그림). 대시보드에는 넣지 않았다.
+- **사유 코드**(reasonCodes.json·api.ts 양쪽): `path_conflict`, `artifact_expired`, `artifact_expiry_target_invalid`,
+  `build_pod_cleanup_failed`, `batch_record_changed`, `batch_csv_too_large`, `batch_csv_too_many_rows`, `batch_csv_malformed`,
+  `batch_csv_bad_row`. 문구 보강: `admin_session_required`(배치 기록 삭제), `batch_delete_too_large`(2000),
+  `invalid_storage_owner`·`storage_owner_changed`·`pv_owner_not_applicable`(직접 경로).
+- **스키마**: `builds.pods_gc_at`, `request_purges.kind`, `data_jobs.artifacts_expired_at`(+ `_ROW_COLUMNS_SANS_DIAG`), 인덱스
+  `idx_builds_gc`·`idx_data_jobs_expiry` — `test_migrations` 의 ensure 쌍 수·인덱스 집합 갱신. 새 테이블 없음 → 요청 삭제 목록 무변경.
+- **테스트**: 새 파일 `test_path_overlap`·`test_planner_path_conflict`·`test_stepper_overlap_hold`(2~4잡 기다림 그래프 소진 — 고리
+  없음·진행 보장)·`test_artifact_expiry`·`test_api_artifact_expiry`·`test_batch_csv`·`test_api_batch_csv`(기록 삭제 세션·감사·CAS 포함)·
+  `test_batch_delete_limits_mirror`·`test_direct_dest_owner`, 보강 `test_api_builds`·`test_builds_repo`·`test_pod_gc`·`test_rollout_status`·
+  `test_api_releases`·`test_manifest_tags`·`test_job_runner_parsers`·`test_api_request_scan_stats`·`test_api_scan_path_stats`·
+  `test_api_usage_analysis`·`test_usage_metrics`·`test_k8s_submit`·`test_migrations`·`test_repo_request_purges`·`test_cli`
+  (`artifact-expiry=ok`)·`test_control_plane_static`(만료 모듈도 FS 무접촉 그물)·`test_api_user_storages`. 포탈 vitest
+  `RequestDetail.delete`·`RequestActivity.pathConflict`·`scanCounters` 새 파일 + 각 화면 테스트 보강, e2e `14-detail-delete-batch-csv`
+  (상세 단건 삭제 → 목록 알림 → 404; 템플릿 → 서버 해석 오류 → 수정 반영 → 생성 → 내보내기 → 재해석 왕복; 토큰 기록 삭제 403 → 세션
+  200 + 감사 행)·`11-batch-rm`(겹침 오류는 「반영할 수 없는 줄」 목록).
+- **구현 중 발견 → BACKLOG**: claim_steppable 의 클레임 굶주림(단순 폴링이 updated_at 을 밀지 않는다), 깨진 JSON 행 하나가 stepper
+  틱 전체를 멈춤, 만료된 scan 리포트를 읽으려는 화면(스캔 경로 통계·사용량), 단건 scan 요청 상세엔 잘못된 인코딩 이름 수가 안 보임,
+  포개진 다른 이름 스토리지의 겹침·둘째 관문의 오래된 판정.
+- **라이브 실증(d6)**: 아래에 덧붙인다.
+
 ### ✅ 스토리지 기본 소유자(uid:gid) — PV 목적지 sync 결과 소유 — **완료·실증**(2026-10-26, d5)
 
 사용자 결정(BACKLOG (l) 의 후속, 원문): 「각 k8s 스토리지 항목마다 기본 uid,gid 값을 같이 등록하도록 해 (기본 root:root). 그래서 sync

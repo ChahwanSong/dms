@@ -289,7 +289,8 @@ destroy` 로 Ceph 를 새로 만들 때뿐**이며 그때는 `deploy/testbed/dms
 
 **적용 방법 주의**: securityContext 는 매니페스트 필드라 포탈 릴리스(이미지 patch)만으로는
 실리지 않는다 — d128 이상으로 올릴 때 사이트 오버레이 `kubectl apply -k
-deploy/overlays/<site>` 를 한 번 반드시 거친다(드리프트 배지는 이미지만 비교한다).
+deploy/overlays/<site>` 를 한 번 반드시 거친다(이미지 드리프트 배지는 이미지만 비교한다 — 2026-10-26 부터 릴리스 화면의
+「보안 설정 드리프트」 배지가 api·controller 의 securityContext 어긋남을 따로 보인다, §9-8).
 
 배포 후 확인:
 
@@ -609,7 +610,11 @@ bump 해 빌드하지 않아도 된다. 단 그 태그를 실제로 굴리려면
 garbage-collect`)와 노드 pull 캐시(`crictl rmi`)는 별개의 운영자 작업이고, 시간
 기반 자동 GC 는 두지 않는다. 레지스트리 삭제가 `405` 면 pkg-01 의 registry 에
 `storage.delete.enabled`(env `REGISTRY_STORAGE_DELETE_ENABLED=true`)가 꺼진
-것이다. 빌드 이력 행은 「빌드 이력」 화면에서 다중 선택 삭제(종단 빌드만).
+것이다. 빌드 이력 행은 「빌드 이력」 화면에서 다중 선택 삭제(종단 빌드만). 지울 때 그 빌드의 빌드·프로브 파드를 먼저
+지운다(2026-10-26 — 예전엔 행만 지워 파드가 pod-gc 시야 밖으로 영영 남았다): apiserver 에 닿지 않아 파드를 못 지우면
+502 `build_pod_cleanup_failed` 로 기록을 남긴다(잠시 뒤 다시). pod-gc 가 이미 치운 빌드는 클러스터에 묻지 않고 지운다.
+pod-gc 는 빌드도 치운 것에 `builds.pods_gc_at` 을 찍어 다음부터 건너뛴다 — 이 표시가 생긴 첫 배포 뒤 첫 pod-gc 틱(기본
+600초)은 표시 없는 옛 종단 빌드를 한 번 훑는다(틱당 200건, 대부분 이미 없는 파드 404). RBAC 변경 없음(api Role 의 pods delete).
 
 **3) 빌드 노드는 인터넷 egress가 필요하다.** 빌드가 hermetic하지 않다 — Buildah
 빌드(privileged 컨테이너) 안에서 npm install(포탈 프론트엔드), `dl.k8s.io`(kubectl 등
@@ -843,6 +848,14 @@ fail-open이라(설계 §7) 존재하지 않는 태그가 통과할 수 있다. 
 컴포넌트는 `rollout_aborted`로 닫히고 반쯤 섞인 버전 조합이 생기지 않는다 — 복구는
 이력에서 옛 태그를 골라 다시 롤아웃하면 된다(별도 롤백 버튼이 없는 이유).
 
+**8) 보안 설정 드리프트 배지(2026-10-26).** 「릴리스」 화면의 dms-api·dms-controller 「현재 이미지」 칸은 라이브 컨테이너의
+실효 securityContext(runAsUser·runAsGroup·runAsNonRoot·allowPrivilegeEscalation·readOnlyRootFilesystem·privileged·
+capabilities add/drop — 컨테이너 값이 없으면 파드 수준)를 이미지에 동봉된 `40-api.yaml`·`41-controller.yaml` 과 비교해, 다르면
+「보안 설정 드리프트」와 필드별 「라이브 X · 매니페스트 Y」를 보인다(응답 `GET /api/admin/releases/targets` 의
+`security_drift` — null 모름 / [] 같음 / 목록). 포탈 롤아웃은 이미지만 바꾸므로 배지는 롤아웃으로 사라지지 않는다 — 사이트
+오버레이를 `kubectl --context <ctx> apply -k deploy/overlays/<site>` 해야 맞춰진다(§2b). 동봉 매니페스트가 없거나 그 블록을
+못 읽으면 표시하지 않는다(거짓 경보보다 모름). dms-agent·잡 이미지는 비교하지 않는다.
+
 ### 실증 체크리스트 (설계 §11 — 테스트베드에서 수행)
 
 - [ ] 1. `GET /api/admin/releases/targets`가 세 컴포넌트의 **현재 이미지**와 레지스트리
@@ -1029,7 +1042,8 @@ IP 별 20통/10분, 전체 300통/10분, 동시 발송 8건(모두 api 프로세
 
 관리자가 포탈 **작업 목록**에서 끝난 작업(종단 요청)을 골라 지운다(세션으로 로그인한 관리자만 — 공유 토큰은 403
 `admin_session_required`; 진행 중인 작업은 선택 불가, 서버도 다시 거부한다). 배치 항목의 작업은 하나씩은 못 지우고
-**배치 단위**로만 지운다(아래 「배치 단위 삭제」). 삭제는 두 단계다:
+**배치 단위**로만 지운다(아래 「배치 단위 삭제」). 한 건은 요청 상세의 「작업 삭제」로도 지운다(2026-10-26 — 같은 API·같은
+확인 창, 배치 자식·진행 중 잡이 있으면 버튼이 잠기고 이유를 보인다; 지우면 작업 목록으로 돌아가 결과를 알린다). 삭제는 두 단계다:
 
 1. **DB — 즉시**(api, `POST /api/admin/requests:delete`): 요청·결과·plan·잡·상태 이력·진단 이벤트·사용량 요약을 한
    트랜잭션으로 지우고, 같은 트랜잭션에서 감사 1행(`audit_log` 'request'/'delete' — 누가·언제·무엇을, 컨펌·취소 actor·
@@ -1113,15 +1127,17 @@ positional 인자(32자 hex 가 아니면 아무것도 지우지 않고 exit 2),
   작업이 남아 있으면(`request_not_deletable` + 그 작업 id) 그 작업의 상세에서 취소한 뒤 다시 지운다.
 - 오래된 배치의 작업 찾기: 배치 상세 머리줄의 「전체 작업에서 이 배치의 작업 보기」(또는 「기록 없음」 칸)가 그 배치의 작업만
   거른 목록(`/jobs?batch=<id>`, API `GET /api/user/requests?batch_id=`)을 연다 — 재실행 이력까지 한자리에 보인다.
-- 상한: 한 번에 배치 10개(`delete_batch_selection_too_large`), 배치 하나에 작업 1000개·항목 10000개(`batch_delete_too_large`
+- 상한: 한 번에 배치 10개(`delete_batch_selection_too_large`), 배치 하나에 작업 2000개(2026-10-26 1000 → 2000)·항목 10000개(`batch_delete_too_large`
   — 배치 하나가 한 트랜잭션이라 그동안 api 가 멈춘다; 넘는 배치를 지우는 청크 삭제는 BACKLOG). 확인 창을 연 뒤 재실행 등으로
   작업 수가 바뀌었으면 `batch_changed`(무변화 — 목록을 다시 보고 다시 시도).
 - 큰 배치의 파일·파드 정리는 오래 걸린다 — 정리 루프는 틱(15초)마다 20행을 진행하고, 파드가 남은 작업은 지운 파드가 끝났는지
-  한 번 더 봐야 해서(작업마다 k8s 스윕 두 번) 작업 1000개면 **30분 안팎**(가짜 k8s 실측 27분), 한 번에 고를 수 있는 최대(배치
-  10개 × 1000)면 4~5시간이다. 그동안 다른 삭제의 정리도 같은 줄에 선다. 툴바 「정리 중 N건」이 줄어드는 것으로 본다. 줄을
+  한 번 더 봐야 해서(작업마다 k8s 스윕 두 번) 작업 1000개면 **30분 안팎**(가짜 k8s 실측 27분), 2000개면 1시간 안팎, 한 번에 고를
+  수 있는 최대(배치 10개 × 2000)면 9~10시간이다. 그동안 다른 삭제의 정리도 같은 줄에 선다. 툴바 「정리 중 N건」이 줄어드는 것으로 본다. 줄을
   서 기다린 시간은 지연이 아니다 — 「지연」(`purge_waiting_pods`)은 그 작업의 첫 k8s 스윕부터 10분이 지나도 파드가 남을
   때만이다.
-- 배치 화면의 「배치 삭제」(`DELETE /api/admin/batches/{id}`)는 그대로 **배치 기록만** 지운다(작업은 남는다). 그렇게 남은
+- 배치 화면의 「배치 삭제」(`DELETE /api/admin/batches/{id}`)는 그대로 **배치 기록만** 지운다(작업은 남는다). 2026-10-26 부터
+  세션 관리자만(공유 토큰 403 `admin_session_required`)이고, 확인한 뒤 그 사이 배치가 다시 돌기 시작했으면 409
+  `batch_record_changed`(무변화), 지우면 감사 로그에 `batch / delete_record` 1행이 남는다. 그렇게 남은
   작업은 작업 목록 배치 열에 「기록 없음 xxxxxxxxxxxx」(배치 id 앞 12자 — 누르면 그 묶음만 거른 목록)로 보이고, 같은
   방식(배치 단위)으로 지운다. 배치 행도 작업도 없이 항목만 남은 묶음(옛 경합·롤링 업데이트 잔재 — 화면엔 안 보인다)은
   `POST /api/admin/requests:delete` 에 `{"batches":[{"batch_id":"<id>","expected_request_count":0}]}` 로 지운다.
@@ -1129,18 +1145,72 @@ positional 인자(32자 hex 가 아니면 아무것도 지우지 않고 exit 2),
   지운다. 두 배치를 한 번에 함께 고르면 서버가 그 배치를 지운 뒤 이 배치를 다시 시도하므로 선택 순서와 무관하게 둘 다
   지워진다.
 
-**env(둘 다 `deploy/k8s/20-config.yaml`, 기본값과 같은 값):**
+**env(셋 다 `deploy/k8s/20-config.yaml`, 기본값과 같은 값):**
 
 | env | 기본 | 소비자 | 뜻 |
 |---|---|---|---|
 | `DMS_REQUEST_DELETE_QUIET_SECONDS` | 60 | api | 요청·잡의 마지막 갱신 후 이 초가 지나야 지울 수 있다(`request_recently_finished`). 음수는 기동 거부, 0 은 e2e 전용 |
 | `DMS_REQUEST_PURGE_INTERVAL_SECONDS` | 15 | controller | request-purge 루프 간격 = 실패 백오프의 기준 단위. 1 미만은 기동 거부 |
+| `DMS_ARTIFACT_RETENTION_DAYS` | 1500 | controller(고르기)·api(표시) | 결과 파일 자동 만료의 보존일(2026-10-26, 0 = 끔, 음수는 기동 거부) — 아래 §12b |
 
 마이그레이션은 자동이다(`migrate` 가 `request_purges` 테이블과 `idx_data_jobs_request`·`idx_plans_request`·
 `idx_batch_items_request` 인덱스를 만든다). 배치 단위 삭제(2026-10-11)는 `idx_requests_batch(batch_id)` 를
 `idx_requests_batch_order(batch_id, commit_order)` 로 바꾼다(새 것을 만든 뒤 옛 것을 지운다 — 한 배치만 거른 목록이 큰
 테이블에서 전체를 훑지 않게). 새 인덱스를 만드는 동안 `requests` 쓰기가 기다린다(테이블 크기에 비례 — 다른 인덱스
 추가와 같은 성질).
+
+---
+
+## 12b. 결과 파일 자동 만료(보존 정책, 2026-10-26)
+
+`DMS_ARTIFACT_RETENTION_DAYS`(기본 **1500**, `0` = 끔, 20-config.yaml)일이 지난 종단 작업의 **결과 파일만** 지운다
+(사용자 결정 「파일만 만료하고 행은 남김」). 요청·잡·상태 이력·결과 수치는 그대로 남고, 포탈 요청 상세의 출력 자리에
+「결과 파일 만료됨(보존 N일, 날짜)」이 뜬다(파일 열람·다운로드 API 는 410 `artifact_expired`).
+
+- controller `artifact-expiry` 루프(5분 — `request-purge` 와 같은 조건에서만 조립)가 대상(잡·요청 둘 다 종단, 종단 시각
+  ≈ `data_jobs.updated_at` 이 N일 전보다 오래됨)을 골라 `data_jobs.artifacts_expired_at` 을 찍고 정리 아웃박스에
+  `kind='expiry'` 행을 넣는다. 지우는 것은 위 2단계와 **같은 정리 루프**(파드 0 확인 → `.dms-trash` 떼어냄 → purge 파드)다.
+- 정리 대기 중인 만료 행은 50개까지만 넣는다(작업 삭제 정리가 그 뒤에 오래 서지 않게) — 오래된 이력이 많아도 하루
+  최대 ~1.4만 건씩 따라잡는다.
+- 현황: 포탈 **아티팩트 경로** 화면의 「결과 파일 보존: … · 만료됨 N건 · 정리 대기 · 지연(사유)」 한 줄
+  (`GET /api/admin/artifact-base` 의 `artifact_retention`). 작업 목록의 삭제 툴바 「정리 중 N건」에는 만료 행을 세지 않는다.
+- 지연 사유는 위 표와 같다. 만료 전용 사유 `artifact_expiry_target_invalid` = 만료 표시가 사라졌거나(DB 복원) 잡 기록이
+  비종단·없음 — 파일을 건드리지 않고 멈춘다(표시를 확인하고 되돌리면 이어서 끝난다).
+- 강제 base 변경 이전에 쓴 결과 파일은 옛 base 에 남는다(`artifact_left_at_old_base` 경고 — 수동 정리).
+- 값을 바꾸면 dms-controller·dms-api 재시작(ConfigMap). 만료는 되돌릴 수 없다 — 보존일을 크게 줄이기 전에 영향 범위를
+  확인한다(`SELECT COUNT(*) FROM data_jobs WHERE artifacts_expired_at IS NULL AND updated_at < '<날짜>'`).
+- 마이그레이션은 자동이다(`request_purges.kind`·`data_jobs.artifacts_expired_at`·부분 인덱스 `idx_data_jobs_expiry`). api 와
+  controller 가 둘 다 새 이미지여야 한다(옛 api 는 만료 표시를 모르고 404 를 낸다). 첫 배포 뒤 오래된 이력이 많으면 며칠에 걸쳐
+  따라잡고, 그동안 요청 삭제 정리는 만료 행 뒤에 최대 50행만큼만 선다.
+
+---
+
+## 12c. 2026-10-26 결정 묶음 — 운영자가 알아야 할 것
+
+BACKLOG 결정 묶음(CHANGELOG 「BACKLOG 결정 묶음 구현」)에서 운영 표면이 바뀐 것만 모았다. 동작의 지도는 `docs/ARCHITECTURE.md`.
+
+- **rm 경로 겹침 잠금**(ARCHITECTURE §4 「rm 경로 겹침 잠금」): rm 과 같은 스토리지에서 경로가 같거나 조상·자손인 작업(다른 rm,
+  sync 의 소스·목적지, scan)은 늦게 온 쪽이 계획 단계에서 Conflict `path_conflict` 로 끝난다(요청 상세 「전이 이력」에 「겹친 요청」
+  링크) — 겹친 작업이 끝난 뒤 다시 제출한다. 배치 자식도 같다(항목 실패 `path_conflict`, 「실패분 재실행」으로 다시). 이미 계획된
+  잡은 실행 직전에 **보류**된다(실패가 아니다 — 이벤트 `path_overlap_hold`, 풀리면 `path_overlap_released`, 상태는 Executing·
+  Preflight 그대로). 보류가 길면 상대 작업(이벤트의 요청 id)을 본다. 서로 다른 이름으로 등록한 포개진 스토리지끼리는 보지 않는다.
+- **배치 CSV 는 서버가 해석한다**: 포탈 배치 생성의 「테이블에 반영」·파일 올리기와 배치 상세 「CSV로 전체 교체」는
+  `POST /api/admin/batches:parse-csv`(본문 `{operation, csv, storage?, source_storage?, destination_storage?}`, 2 MiB 413
+  `batch_csv_too_large`·데이터 행 10000 초과 422 `batch_csv_too_many_rows`)를 부르고, 오류가 있는 줄(물리 줄 번호·사유)이 하나라도
+  있으면 반영하지 않는다. 템플릿 `GET /api/admin/batches/csv-template?operation=scan|sync|rm`, 항목 내보내기
+  `GET /api/admin/batches/<id>/items.csv`(BOM·수식 방어 `'` — 그대로 다시 올리면 같은 항목). 셋 다 조회라 공유 토큰도 된다(생성은
+  그대로 특권 세션). 배치 생성의 스토리지 칸은 등록된 스토리지 드롭다운이다.
+- **dscan 총바이트·잘못된 인코딩 이름 수 — 잡 이미지 재빌드 필요**: `Dockerfile.mpifileutils` 의 `MPIFILEUTILS_REF` 가 ae781bd 다.
+  포탈 빌드에서 `dms-mpifileutils` 를 체크해(§8-5 — 기본 선택이 아니다) 같은 태그로 `dms-agent` 까지 빌드하고 잡 이미지를 올려야
+  새 scan 리포트에 `summary.total_bytes`·`summary.invalid_name_entries` 가 생긴다. 옛 이미지·저장된 리포트는 총바이트 = 시간
+  히스토그램 합(같은 값), 이름 수 = 「기록 없음」. 이름 수는 카운터일 뿐 broken 사유가 아니다(사용량 분석 상세·합계 각주·CSV 열).
+- **직접 경로 목적지의 결과 소유**: 특권 운영자의 직접 경로 sync(배치 포함)도 목적지 스토리지가 PV 종류면 늘, 둘 다(both) 종류면
+  지금 인벤토리의 PV 루트 아래일 때 그 스토리지의 기본 소유자로 `--chown` 된다(§13 표). 제출 뒤 기본 소유자·종류·PV 루트가
+  바뀌면 컨펌(배치는 자식 실행 직전 — 그 자식만 Rejected)에서 `storage_owner_changed` 로 멈춘다 — 다시 제출(재실행).
+- **배치 기록 삭제·배치 단위 삭제 상한·요청 상세 삭제·빌드 삭제·보안 설정 배지**: §12(세션 관리자·409 `batch_record_changed`·
+  감사 `batch / delete_record`, 작업 2000개), §8-2b, §9-8.
+- **마이그레이션**(자동): `builds.pods_gc_at` + `idx_builds_gc`, `request_purges.kind`, `data_jobs.artifacts_expired_at` +
+  `idx_data_jobs_expiry`. RBAC·ConfigMap 키 추가는 `DMS_ARTIFACT_RETENTION_DAYS`(기본값과 같음) 하나.
 
 ---
 
@@ -1168,7 +1238,7 @@ dms-k8s 브랜치 후보(main)를 검증하는 테스트베드다. 오버레이�
 | 일반 사용자·특권 목록 밖 관리자의 직접 경로(storage + 경로) | 403 `raw_path_not_allowed` |
 | 맵핑이 없는 namespace / 한 번도 동기화 안 된 클러스터 | 403 `k8s_access_denied` / 409 `k8s_mapping_unknown` |
 | PV 루트 rm(하위 경로 `''`·`'.'`·`'./'`) | 422 `pv_root_rm_forbidden` |
-| PV 목적지 sync 의 결과 소유(2026-10-26) | 목적지 스토리지의 기본 소유자(스토리지 화면 「기본 소유 uid:gid」, 기본 0:0)로 `--chown` — 일반 사용자는 늘 이것(선택 없음). 특권 운영자만 「결과 소유: PV 루트 소유자」(`pv_owner: "pv_root"` — 비면제 403 `pv_owner_root_not_allowed`)나 chown 지정. 제출 뒤 기본값이 바뀌면 계획 Rejected / 컨펌 409 `storage_owner_changed`(다시 제출), 저장값이 무효면 409 `invalid_storage_owner`. 직접 경로 목적지(배치 포함)는 소스 소유 보존 |
+| PV 목적지 sync 의 결과 소유(2026-10-26) | 목적지 스토리지의 기본 소유자(스토리지 화면 「기본 소유 uid:gid」, 기본 0:0)로 `--chown` — 일반 사용자는 늘 이것(선택 없음). 특권 운영자만 「결과 소유: PV 루트 소유자」(`pv_owner: "pv_root"` — 비면제 403 `pv_owner_root_not_allowed`)나 chown 지정. 제출 뒤 기본값이 바뀌면 계획 Rejected / 컨펌 409 `storage_owner_changed`(다시 제출), 저장값이 무효면 409 `invalid_storage_owner`. 직접 경로 목적지(배치 포함)는 그 스토리지가 PV 종류면 늘, 둘 다(both)면 PV 루트 아래일 때 같은 기본 소유자로(2026-10-26 결정 (4)), 그 밖(파일시스템·PV 밖)은 소스 소유 보존 |
 | 특권 세션 관리자(`DMS_PRIVILEGED_REQUESTERS` = root,admin,mason ∪ 계정 화면 부여) | 맵핑 면제 — 직접 경로·전체 PV·PV ↔ 직접 경로 혼합 |
 | 대기·컨펌 대기 중 권한 회수·PVC 재생성 | 계획 Rejected / 컨펌 409(`k8s_access_denied`·`pv_moved`·`pv_not_found`) |
 | `run_as_root: false` 명시 | 422 `run_as_root_required` |
@@ -1322,7 +1392,8 @@ controller, 잡 이미지) 뒤 `deploy/overlays/testbed-k8s` 의
    | `cephfs-dms`(기존) | `/cephfs` · `/cephfs/managed` | cephfs | 파일시스템 | —(쓰이지 않아 칸이 없다) |
 
    에이전트 보고 한 주기 뒤 상태가 Ready 가 된다. **기본 소유자**(2026-10-26)는 PV·둘 다 종류에서만 보이고, 그 스토리지의 PV 를
-   목적지로 하는 sync 결과(목적지와 복사본 전부)가 이 uid:gid 로 맞춰진다 — 일반 사용자는 늘 이 값, 특권 운영자만 「PV 루트 소유자」를
+   목적지로 하는 sync 결과(목적지와 복사본 전부 — 직접 경로 목적지도 PV 종류면 늘, 둘 다 종류면 PV 루트 아래일 때, 2026-10-26)가
+   이 uid:gid 로 맞춰진다 — 일반 사용자는 늘 이 값, 특권 운영자만 「PV 루트 소유자」를
    고를 수 있다. 생략·기배포 행(migrate 가 0 으로 채운다) = 0:0(root:root), 범위는 0..4294967294. 바꾸면 이미 제출됐지만 아직 실행되지
    않은 그 PV 목적지 sync 는 계획·컨펌에서 `storage_owner_changed` 로 멈춘다(다시 제출하면 새 값). PV 를 실제로 쓰는 파드의
    uid/fsGroup 과 맞추려면 여기서 바꾼다.

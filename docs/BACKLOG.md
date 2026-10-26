@@ -18,31 +18,38 @@
 
 포탈 기능면에서 슬라이스 26 이 범위를 자른 것들. 결함이 아니라 아직 안 만든 기능이다.
 
-- 🔧 **아티팩트 보존 정책(자동 만료)** — 결과 파일 **삭제**는 작업(요청) 선택 삭제(2026-10-08, CHANGELOG)로
-  해소됐다: 관리자가 종단 요청을 지우면 DB 행과 함께 결과 파일·남은 파드·로그까지 정리된다. 남은 것은 시간
-  기반 자동 만료(N일 지난 종단 잡의 산출물). 넣으면 같은 길이어야 한다 — 컨트롤러는 `<base>/<job_id>` 떼어냄
-  (`artifact_trash.detach`, renameat)까지, 실제 삭제는 purge 파드(`purge_runner.build_purge_pod`, ARCHITECTURE
-  §7 규칙 13). 정할 것: DB 행을 남기고 파일만 만료할지(그러면 아티팩트 열람 404 를 「만료됨」으로 보일 문구와
-  `artifact_uri` 처리 필요), 아웃박스(`request_purges`)를 잡 단위로 넓힐지.
+- ~~**아티팩트 보존 정책(자동 만료)**~~ — **해소**(2026-10-26 사용자 결정 「파일만 만료하고 행은 남김. N일의 N 기본값
+  1500일」, CHANGELOG 「BACKLOG 결정 묶음 구현」): controller `artifact-expiry` 루프(`artifact_expiry.py`)가 종단 뒤 `DMS_ARTIFACT_RETENTION_DAYS`
+  (기본 1500, 0 = 끔)일 지난 잡에 `data_jobs.artifacts_expired_at` 을 찍고 아웃박스에 kind 'expiry' 행을 넣으면, 요청 삭제와
+  같은 길(떼어냄 + purge 파드, ARCHITECTURE §7 규칙 13)이 결과 파일만 지운다 — 요청·잡 행과 결과 수치는 남고 열람은 410
+  `artifact_expired`(포탈 「결과 파일 만료됨」). 남은 후속:
+  - 🔧 **만료된 scan 리포트를 읽으려는 화면** — 사용자 스캔 경로 통계(`routes_scan_paths`)는 만료된 scan 잡에도 읽기 예산
+    (`_MAX_READ_ATTEMPTS`)을 쓰고, 사용량 분석(`routes_usage`)은 요약 캐시(`scan_report_digests`)에 없는 만료 리포트를 매번
+    읽으려다 「못 읽음」으로 센다(ENOENT 라 싸다; 이미 캐시된 이력은 그대로 보인다). `artifacts_expired_at` 이 있으면 건너뛰기를
+    권장. 관리자 scan-stats 는 만료 뒤 자연스럽게 404 `no_scan_report`.
 - 🔧 **작업(요청) 삭제 후속**(2026-10-08 범위 밖):
-  - **단건 삭제 버튼(요청 상세)** — 지금은 작업 목록의 일괄 선택뿐(`POST /api/admin/requests:delete`). 같은
-    저장소 메서드(`RequestPurgesRepository.delete_terminal`)를 쓰므로 버튼 + 같은 엔드포인트에 id 1개면 된다.
+  - ~~**단건 삭제 버튼(요청 상세)**~~ — **해소**(2026-10-26, CHANGELOG 「BACKLOG 결정 묶음 구현」): 요청 상세의 「작업 삭제」(관리자·종단
+    요청만, 같은 `POST /api/admin/requests:delete` 에 id 1개 — 목록과 같은 `DeleteRequestsDialog`). 배치 자식은 잠기고 「이 배치의
+    작업 보기」로 배치 단위 삭제를 안내한다. 지우면 작업 목록으로 가서 결과를 알린다(`NavNotice`).
   - ~~**삭제된 배치의 자식**~~ — **해소**(2026-10-10, CHANGELOG 「전체 작업: 배치 단위 삭제 + 배치 열」): 배치 행이
     없는 자식 묶음(dangling batch_id)도 작업 목록에서 「기록 없음 xxxxxxxxxxxx」 묶음으로 **배치 단위** 삭제된다
     (`request_purges.delete_batch`). 개별 삭제 거부(`batch_child_not_deletable`)는 그대로다. 배치 행·자식 없이 **항목만**
     남은 묶음(옛 add_item·replace_items 경합, 롤링 업데이트 겹침 동안 옛 api 파드의 add_item 잔재)도 같은 메서드가
     expected 0 으로 지운다(2026-10-11) — 다만 화면엔 보이지 않으므로(자식 행이 없다) API 로 batch_id 를 지정해야 한다.
-  - **작업 1000개(또는 항목 10000개)를 넘는 배치의 삭제**(2026-10-10 범위 밖) — 배치 하나 = 트랜잭션 하나이고 그동안 api
-    전체가 DB RLock 으로 멈춰(replicas 1·커넥션 1) 상한 `MAX_BATCH_DELETE_CHILDREN = 1000`·`MAX_BATCH_DELETE_ITEMS = 10000`
-    (`repositories/request_purges.py`)을 넘는 배치는 `batch_delete_too_large` 로 거부한다(목록 요약도 자식 수를 1001 에서
+  - **작업 2000개(또는 항목 10000개)를 넘는 배치의 삭제**(2026-10-10 범위 밖; 2026-10-26 사용자 결정 「큰 배치 삭제 숫자를
+    늘려줘: 작업 2000개 또는 항목 10000개 초과」로 자식 상한 1000 → 2000 — 최대 배치 하나가 RLock 을 ~0.7–2초 쥐어 readiness
+    한 번을 놓칠 수 있다, 연속 3회가 아니면 파드는 빠지지 않는다) — 배치 하나 = 트랜잭션 하나이고 그동안 api
+    전체가 DB RLock 으로 멈춰(replicas 1·커넥션 1) 상한 `MAX_BATCH_DELETE_CHILDREN = 2000`·`MAX_BATCH_DELETE_ITEMS = 10000`
+    (`repositories/request_purges.py`)을 넘는 배치는 `batch_delete_too_large` 로 거부한다(목록 요약도 자식 수를 2001 에서
     멈추고, 항목 수는 batches.item_count 로 실어 포탈은 둘 다 「삭제 상한 초과」로 보인다 — 거부 판정은 상한 + 1 행까지만
     읽는다). 운영 배치 규모(항목 수 × 재스캔 횟수) 확인 필요. 후보: 묘비 상태 `Deleting`
     (배치를 먼저 그 상태로 CAS — 재실행·항목 추가가 되살리지 못하게) + 자식 청크 트랜잭션 + 마지막에 배치 행 삭제, 재개
     의미(중간에 api 가 죽으면 다음 호출이 이어서). 함께: `:rescan` 의 무조건 `set_status`(`api/routes_batches.py`
     `rescan_batch`)를 상태 CAS 로(지금은 삭제 직후 거짓 200 이 가능 — `update_meta` 도 같은 성질), 포탈 상태 라벨.
-  - **배치 기록 삭제(배치 화면)의 감사·CAS** — `DELETE /api/admin/batches/{id}`(`repositories/batches.py` `delete`)는
-    읽고-지우기라 CAS 가 없고, 감사 행이 없고, 공유 토큰으로도 된다(require_admin). 배치 기록만 지우므로 증거 손실은
-    적지만(자식의 감사는 배치 단위 삭제 때 남는다) 일관성을 위해 `('batch','delete_record')` 감사 행 검토.
+  - ~~**배치 기록 삭제(배치 화면)의 감사·CAS**~~ — **해소**(2026-10-26, CHANGELOG 「BACKLOG 결정 묶음 구현」): `BatchesRepository.delete`
+    가 한 트랜잭션에서 batch_items → batches 를 잠그고 종단을 다시 본 뒤 `DELETE … AND status IN 종단`(그 사이 재실행이
+    되살렸으면 409 `batch_record_changed`), 감사 `('batch','delete_record')`, 라우트는 세션 관리자만(`require_session_admin` —
+    공유 토큰 403).
   - ~~**작업 목록의 배치 필터 / 배치 상세의 「이 배치의 작업 보기」**~~ — **해소**(2026-10-11 검증 2차 수정): 목록 API
     `GET /api/user/requests?batch_id=`(좁히기만 -- 비관리자는 여전히 자기 작업만), 포탈 `/jobs?batch=<id>`(필터 표시 +
     「필터 해제」), 배치 상세 머리줄·「배치 삭제」 창의 링크, 「기록 없음」 칸의 링크. 배치 열의 긴 이름은 끝(가르는 부분)을
@@ -58,8 +65,8 @@
     상세 응답에도 실어 같은 규칙(작업 목록 `BatchCell`)으로 그리면 된다.
   - **정리 루프 처리량** — 틱(15초)당 20행(`request_purger.py` `ROW_LIMIT`)이고, 파드가 남은 행은 첫 스윕(삭제 →
     Terminating)과 둘째 스윕(사라짐 확인) 두 번이 필요해 실처리량은 틱당 ~10행이다 — 작업 1000개 배치는 ~27분(2026-10-10
-    검증 실측, 가짜 k8s), 한 호출의 최대(배치 10 × 1000)는 4~5시간이고 그동안 다른 삭제의 정리도 같은 줄(재시도 시각 순)에
-    선다. 순서를 바꿔도(스윕한 행 먼저) 총 스윕 수가 같아 총 시간은 그대로다 — 줄이려면 상한을 올리거나(50, 틱 예산
+    검증 실측, 가짜 k8s), 2000개(2026-10-26 상한)면 ~1시간, 한 호출의 최대(배치 10 × 2000)는 9~10시간이고 그동안 다른 삭제의 정리도 같은 줄(재시도 시각 순)에
+    선다(결과 파일 만료 행도 같은 줄이지만 대기 50행 상한 — `artifact_expiry.BACKLOG_MAX`, 2026-10-26). 순서를 바꿔도(스윕한 행 먼저) 총 스윕 수가 같아 총 시간은 그대로다 — 줄이려면 상한을 올리거나(50, 틱 예산
     `TICK_BUDGET_SECONDS` 안에서 실 apiserver 지연 실측 후) 같은 틱 끝에 방금 스윕한 행을 한 번 더 세는 것. 거짓 지연은
     해소됐다(대기를 첫 k8s 스윕부터 잰다 — 예전엔 requested_at 부터 재서 줄 선 시간이 `purge_waiting_pods` 로 찍혔다).
   - **정리 루프 틱 비용이 대기열 크기에 비례**(2026-10-11 검증 지적, 일부 해소) — purge 파드를 못 띄우는 동안(purge_no_node
@@ -79,20 +86,25 @@
     항목이 끝날 때까지 함께 실린 행이 매번 같이 기다린다. 실측 필요. 후보: 파드 종료 사유(DeadlineExceeded) 노출로 귀속,
     실패 행에 한해 데드라인 연장, 파드 2개(새 행 전용) 허용.
   - **정리 이벤트 뷰어** — 정리 실패의 상세(`purge_failed`·`purge_ref_rejected`·`artifact_left_at_old_base`·
-    `request_purged`, 전부 request_id=NULL)는 events 에만 있고 포탈엔 전역 이벤트 화면이 없다. 지금 표면은
+    `request_purged`·만료 요약 `artifact_expiry_queued`, 전부 request_id=NULL — 만료 완료 `artifacts_expired` 만 그 요청에 붙는다)는 events 에만 있고 포탈엔 전역 이벤트 화면이 없다. 지금 표면은
     작업 목록 툴바의 정리 현황(`GET /api/admin/request-purges` — 대기·지연 건수와 첫 지연 사유)뿐이다.
-- 🔧 **배치 CSV 업로드/내보내기·템플릿** — CSV 는 프론트 파싱(`lib/csv.ts`). 백엔드화는 미착수. (rm 배치는
-  2026-10-21 완료 — CHANGELOG.)
-- 🔧 **rm 경로의 다른 요청·배치와의 겹침 판정**(2026-10-21 배치 rm 의 열린 결정 D4) — 한 rm 배치 **안**의 겹침만 422
-  `batch_rm_targets_overlap` 이고, 다른 요청과는 「정확히 같은 대상의 rm」(resource_key 같음 → `resource_conflict`)만 막는다.
-  진행 중 sync 의 소스·목적지, 다른 rm 의 조상·자손, scan 대상과 겹치는 rm 은 둘 다 계획·실행된다(단건 rm 도 같다).
-  대칭 판정(sync 계획 때도 rm 을 보는)이 없으면 반쪽이고, 위험한 순간은 확인 뒤 실행 직전이라 planner 1회 판정으로는
-  부족하다 — 경로 접두 잠금 같은 별도 설계감.
-- 🔧 **배치 생성 폼의 스토리지 드롭다운** — 현재 자유 입력.
+- ~~**배치 CSV 업로드/내보내기·템플릿**~~ — **해소**(2026-10-26, CHANGELOG 「BACKLOG 결정 묶음 구현」): 해석은 서버(`batch_csv.py` +
+  `POST /api/admin/batches:parse-csv` — 생성과 같은 줄 판정, 오류는 줄 번호·사유 코드), 템플릿(`GET …/csv-template`)·항목
+  내보내기(`GET …/{id}/items.csv` — 다시 올리면 같은 항목). 포탈 `lib/csv.ts` 는 얇은 클라이언트.
+- ~~**rm 경로의 다른 요청·배치와의 겹침 판정**~~ — **해소**(2026-10-27 사용자 결정 「권장안대로 구현하되, 구현 후 다양한
+  케이스들에 대해 검증」, CHANGELOG 「BACKLOG 결정 묶음 구현」): 경로 접두 잠금 두 층 — planner 1b(늦게 온 쪽을 Conflict `path_conflict`,
+  대칭 — sync·scan 계획 때도 rm 을 본다)와 stepper 실행 관문(`_overlap_hold` — exec_preflight·실행 제출 직전 보류, 실패 아님)
+  (ARCHITECTURE §4 「rm 경로 겹침 잠금」). 남은 한계:
+  - 📝 **루트가 포개진 다른 이름의 스토리지**(`/c/m` 과 `/c/m/t` 를 따로 등록)끼리는 비교하지 않는다(`domain.path_conflict`
+    docstring — 두 작업이 한 노드의 같은 이름 공간에서 도는지 모른다). 필요하면 managed_root 를 붙인 실제 경로로.
+  - 📝 **둘째 관문(GATE_EXECUTION)에서 오래 기다린 잡**은 기다리기 전의 exec_preflight 판정으로 실행한다 — 이 배포 전에
+    계획된 행·경합에서만 생긴다. 처방 후보: 보류가 길면 exec_preflight 부터 다시.
+- ~~**배치 생성 폼의 스토리지 드롭다운**~~ — **해소**(2026-10-26): `features/batches/BatchStoragePicker.tsx`(종류별 묶음·
+  백엔드·관리 디렉토리 캡션, 목록 밖 값 경고, 목록이 비면 스토리지 화면 링크). 공용 `StoragePicker` 는 그대로.
 - 🔧 **에이전트 설정 푸시** — 에이전트 설정은 배포 시 고정.
 - 🔧 **알림/경보** — 슬라이스 14 비목표("대시보드는 표시만"). 임계 초과 알림 없음.
-- 🔧 **러너 카운트 확장**(§러너) — dscan 총바이트 없음(리포트 스키마에 크기 히스토그램뿐,
-  `bytes_total` 은 sync 전용), 슬라이스 15 이전 잡 소급 백필 없음, 프리뷰 카운트 DB
+- 🔧 **러너 카운트 확장**(§러너) — ~~dscan 총바이트 없음~~(해소 2026-10-26 — 포크 ae781bd 의 `summary.total_bytes` 를
+  러너·서버가 1순위로 읽고 없으면 시간 히스토그램 합), 슬라이스 15 이전 잡 소급 백필 없음, 프리뷰 카운트 DB
   미승격, 파일별 상세·에러 카운트·전송률 없음.
 - ~~**보조 그룹(2026-10-07) 후속 — 포탈 chown 그룹 선택·자동 chown 그룹 정책**(D7 범위 밖)~~ — **dms-k8s 해당 없음**(2026-10-26 LDAP 코드 삭제 — 비 root 실행·보조 그룹·LDAP 이 없다; dms-ssc 의 항목). 기록:
   자동 chown 은 uid:**주 gid** 고정(`execution_manifests._auto_chown`)이고, 프로젝트 그룹 소유는 명시
@@ -169,7 +181,7 @@
   - ~~(f) 심링크 봉쇄 확장~~ — 해소(PV 주소 봉쇄, ARCHITECTURE §7).
   - (g) **scan 은 특권 운영자만** — 구현: `k8s_access.scan_allowed`(제출 403 `scan_unrestricted_only`·/me·planner·컨펌), 오버레이
     사용자 연산 `sync,rm`. 사용자 스캔 경로(`scan_path_unrestricted_only`)도 특권 운영자 전용 그대로.
-  - (h) **Pure FlashBlade 는 보류**(사용자) — PV 마다 별도 파일시스템(export)이라 「스토리지 한 번 마운트 + 하위 폴더」 모델 밖이다.
+  - (h) **Pure FlashBlade 는 보류**(사용자 — 2026-10-26 결정 묶음에서 다시 「백로그에 남겨둠」) — PV 마다 별도 파일시스템(export)이라 「스토리지 한 번 마운트 + 하위 폴더」 모델 밖이다.
     대안: PV 마다 스토리지로 등록하거나 에이전트가 필요할 때 그 export 를 마운트.
   - (i) **멀티 클러스터 라이브 확인** — 테스트베드에 두 번째 클러스터를 더해 확인(별도 항목).
   - (j) **「운영자」 = 특권 목록·부여 관리자** — 확인(사용자). 문서·화면의 「면제자」는 같은 뜻(특권 운영자).
@@ -183,7 +195,11 @@
     0:0 — 제출이 요청에 얼리고 planner·컨펌이 대조해 바뀌면 `storage_owner_changed`, 측정 없음)로 바뀌었고, 위의 PV 루트 측정은 특권
     운영자 옵션(`pv_owner: "pv_root"`)과 이 규칙 전에 제출된 옛 행에만 남았다(CHANGELOG 「스토리지 기본 소유자(uid:gid) — PV 목적지
     sync 결과 소유」). d5 로 테스트베드 적용·라이브 실증 완료.
-  - ❓ **직접 경로 목적지가 PV 루트 아래일 때의 결과 소유**(2026-10-26 d4 실증에서 확인 — 사용자 결정 필요): (l) 은 **PV 주소** 목적지만
+  - ✅ **직접 경로 목적지가 PV 루트 아래일 때의 결과 소유 — 결정·구현**(2026-10-26 사용자 결정 (4) + 권장 다듬기 「both 는 경로가
+    인벤토리의 PV 루트 아래일 때만」): 직접 경로 목적지의 스토리지가 pv 종류면 늘, both 면 지금 인벤토리의 그 스토리지 PV 루트 아래일
+    때만 그 스토리지 기본 소유자로 자동 chown(측정 없음 — 요청 payload `dest_owner` 에 얼리고 planner·단건 컨펌·배치 자식 컨펌이 대조,
+    ARCHITECTURE §7 「PV 목적지 root sync 의 결과 소유」의 직접 경로 문단). 아래는 결정 전 기록.
+    ❓(당시) **직접 경로 목적지가 PV 루트 아래일 때의 결과 소유**(2026-10-26 d4 실증에서 확인 — 사용자 결정 필요): (l) 은 **PV 주소** 목적지만
     결과 소유를 맞춘다(기본 = 목적지 스토리지 기본 소유자, 운영자 옵션 = PV 루트 소유자). 특권 운영자의 직접 경로 sync(배치는 직접 경로만
     — (e))가 PV 디렉터리 안을 가리키면 root 실행의 종전 규칙대로 **소스 소유를 보존**한다(d4: 배치 `team-a/datasets/…` →
     `c2/lab-x/results/x4b` 결과 1000:1000, PV 루트 1500:1500 — 스토리지 기본 소유자 이후에도 그대로, 범위 밖으로 남겼다). 운영자는 chown
@@ -332,7 +348,13 @@
   경로로 등록한 스토리지들의 df 가 같은 값으로 나란히 보인다(테스트베드 cephfs 셋). 그래서 스토리지별 비교는 df 를 더하지 않고
   각주로만 말한다. 해법: probes 가 fsid 를 함께 보내고 화면이 같은 fsid 를 묶어 표시.
 
-- 📝 **비 UTF-8 이름은 broken 사유가 아니다 — 보이게 할지는 결정 대기**(2026-10-20, d182 러너 수정과 함께 조사).
+- ~~**비 UTF-8 이름은 broken 사유가 아니다 — 보이게 할지는 결정 대기**~~ — **결정·구현**(2026-10-26 사용자 「카운터만 둠」,
+  CHANGELOG 「BACKLOG 결정 묶음 구현」): 포크 ae781bd 의 dscan 이 `summary.invalid_name_entries`(이름 d_name 이 엄격 UTF-8 이 아닌
+  항목 수 — 나쁜 이름의 디렉터리는 한 번, 그 자손은 세지 않는다)를 쓰고 broken 사유·`broken_paths_total` 에는 더하지 않는다.
+  포탈은 배치 항목 scan 리포트·사용량 분석(상세 줄·스토리지 합계 각주·CSV 열)에 보이고, 키가 없는 옛 리포트는 「기록 없음」(null).
+  남은 것: 단건 scan 요청 상세에는 dscan 리포트 칸이 없어 이 수가 안 보인다(관리자 전용 `useRequestScanStats` 를 붙이는 후속),
+  `path_hex` 표기는 하지 않았다(broken_paths 는 원시 바이트 그대로 — replace 로 읽는다). 아래는 결정 전 기록
+  (2026-10-20, d182 러너 수정과 함께 조사).
   러너는 이제 그런 이름에 죽지 않지만(ARCHITECTURE 「파일 이름은 바이트다」), dscan(포크 1b93d54)에는 이름 인코딩 사유가
   없어 운영자가 그런 이름이 있는지 리포트로 알 수 없다(사고 경로가 broken 이었던 건 `abnormal_time` — 10년보다 오래된
   시각 — 때문이다). 선택지: 포크 `dscan.c` 에 `invalid_name_encoding`(d_name 만 엄격 UTF-8 검증 — 전체 경로를 보면
@@ -370,7 +392,8 @@
   dms-k8s 는 모든 잡이 root, 의도·경고됨). root preflight 는 소유 검사를 하지 않고 dsync 는 소스 최상위 메타데이터를
   기존 목적지에 적용한다. PV 주소 목적지는 결과를 목적지 스토리지 기본 소유자(특권 운영자 옵션이면 잰 PV 루트 소유자)로
   맞추므로(`execution_manifests._auto_chown`, 2026-10-26 — 소유는 그 값, 권한·시각은 여전히 소스) 남는 경우는 면제 관리자의
-  **직접 경로** 목적지(배치 포함 — 위 ❓ 「직접 경로 목적지가 PV 루트 아래일 때」)다 — 확인 스텝·배치 캡션이 경고한다. (예전 비 root 실행의 자동
+  **직접 경로** 목적지(배치 포함) 중 PV 를 담지 않는 스토리지(filesystem, both 의 PV 루트 밖)다 — PV 를 담는 스토리지의 직접 경로는
+  같은 날 결정 (4)로 스토리지 기본 소유자로 맞춘다(위 ✅ 「직접 경로 목적지가 PV 루트 아래일 때」) — 확인 스텝·배치 캡션이 경고한다. (예전 비 root 실행의 자동
   `--chown uid:주 gid` 와 보조 그룹 이야기는 2026-10-26 LDAP 코드 삭제로 해당 없음.)
 
 - 📝 **에이전트↔API 채널이 클러스터 내부 평문 HTTP**(`http://dms-api:8080`, 2026-09-29 기록).
@@ -424,7 +447,10 @@
   재실행 성공). 리스는 틱 시작에만 확인되고 TTL 30s 라 구조적으로 남는 창이다. 처방
   후보: 컨트롤러 preStop 에서 루프 중단 후 대기, 또는 리스 재확인 뒤 제출. 파드 스펙을
   바꾸는 릴리스 직후 첫 잡은 재실행이 필요할 수 있음을 운영 절차에 적어 둔다.
-- 🔧 **securityContext 드리프트는 배지가 못 본다** — 포탈 롤아웃(`rollout_runner.
+- ~~**securityContext 드리프트는 배지가 못 본다**~~ — **해소**(2026-10-26, CHANGELOG 「BACKLOG 결정 묶음 구현」): 릴리스 화면의
+  dms-api·dms-controller 에 「보안 설정 드리프트」 배지(`routes_releases` 의 `security_drift` — 라이브
+  `rollout_status.security_context_view` ↔ 동봉 `manifest_tags.manifest_security_contexts`, runAsUser 등 8필드, 모름은 표시 없음).
+  대시보드(`/api/admin/metrics/infra`)에는 아직 없다 — 필요하면 같은 계산을 재사용. 결정 전 기록: 포탈 롤아웃(`rollout_runner.
   image_patch_body`)은 name/image 만 patch 하고 드리프트 배지(`manifest_tags.manifest_images`
   ↔ `rollout_status._images`)도 이미지만 비교한다. 40/41 을 `kubectl apply` 하지 않은
   사이트는 d128 이미지를 65532 로 굴리게 되고(3홉 `artifact_base_not_writable` 로만 드러남)
@@ -440,14 +466,25 @@
   아닌 잡의 vcjob ref 도 max(이 창, DMS_VCJOB_TTL_SECONDS) 뒤에 지운다 -- Aborted vcjob 은 Volcano TTL 이 치우지 않았다.
   TTL 0 이면 vcjob 은 두고 Pod 만).
   실패 잡은 슬라이스 25 가 `diag_logs` 로 박제해 시한부가 아니다(부분 완화).
-- 🔧 **빌드 파드 GC 도 200건 창 고착**(2026-10-16 검토 지적, 기존 결함) — 잡 파드는 `data_jobs.pods_gc_at` 완료 표시로
+- ~~**빌드 파드 GC 도 200건 창 고착**~~ — **해소**(2026-10-26, CHANGELOG 「BACKLOG 결정 묶음 구현」): `builds.pods_gc_at` 완료 표시
+  (+ 부분 인덱스 `idx_builds_gc`, 잡과 같은 규칙 — 지우기가 실패한 빌드는 표시 없이 1시간 뒤 다시). 기록(2026-10-16 검토 지적): 잡 파드는 `data_jobs.pods_gc_at` 완료 표시로
   고쳤지만 빌드 쪽(`pod_gc.py` 의 `builds.terminal_older_than`, seq 오래된 순 LIMIT 200)은 표시가 없어 종단 빌드가 200건을
   넘으면 같은 앞쪽 200건의 빌드·프로브 파드만 매 틱 다시 지우고 그 뒤 빌드의 파드는 남는다. 처방: builds 에도 완료 표시
   (CREATE + `_ensure_columns` + 부분 인덱스) 또는 seq 커서.
-- 🔧 **빌드 삭제 docstring 의 거짓 전제** — `BuildsRepository.delete`(`repositories/builds.py` 156행)는 「파드는
+- ~~**빌드 삭제 docstring 의 거짓 전제**~~ — **해소**(2026-10-26): 빌드 삭제 라우트(`routes_builds.delete_build`)가 행을
+  지우기 전에 빌드·프로브 파드를 terminate 한다(하나라도 실패면 502 `build_pod_cleanup_failed`, 행 유지; pod-gc 가 이미 치운
+  빌드는 클러스터에 묻지 않는다), docstring 정정. 기록: `BuildsRepository.delete`(`repositories/builds.py` 156행)는 「파드는
   pod-gc 가 따로 수거하므로 DB 행만 지운다」고 하지만 pod-gc 는 `builds.terminal_older_than` 의 **행**으로 파드 이름을
   만든다(`pod_gc.py` 46-56행) — 행을 지우면 그 빌드·프로브 파드는 pod-gc 시야 밖으로 영영 남는다. 처방: 삭제
   라우트가 파드를 먼저 terminate(빌드 러너, 404 삼킴)하거나 빌드 삭제에도 아웃박스.
+- 🔧 **claim_steppable 의 클레임 굶주림**(2026-10-27 경로 겹침 작업 중 코드 읽기로 발견, 기존 결함 — 재현 테스트부터) —
+  `data_jobs.claim_steppable` 은 updated_at 오래된 순 LIMIT 10 인데 상태가 바뀌지 않는 단순 폴링은 updated_at 을 밀지 않는다 —
+  오래 도는·Volcano 대기 잡이 10개를 넘으면 그보다 새 잡은 틱마다 클레임되지 못한다(배치 max_concurrency 는 64까지). 지금은 실행
+  관문 보류만 `touch_held` 로 민다. 처방 후보: 클레임 순서를 별도 칼럼(last_polled_at)으로, 또는 폴링마다 민다(updated_at 을
+  나이·GC 기준으로 쓰는 곳 — `mark_exec_submitted` 가 일부러 안 건드리는 이유 — 을 먼저 본다).
+- 🔧 **깨진 JSON 행 하나가 stepper 틱 전체를 멈춘다**(같은 발견) — steppable 행의 `phase_refs`·`worker_pool`·`options` 가
+  깨진 JSON 이면 `claim_steppable` 안의 `_hydrate` 가 예외를 올려 매 틱 모든 잡이 멈춘다. 처방: 행 단위 격리(그 행만 이벤트를
+  남기고 건너뛰거나 fail-closed 종단 — DB 가 신뢰 경계).
 - 🔧 **pod-gc·취소의 ref 미검증 terminate**(DB 신뢰 경계) — 요청 삭제 정리는 ref 가 **그 잡의 DMS 명명**일 때만
   지운다(`purge_runner.parse_ref` — `pod/dms-preflight-<job12>-…`·`vcjob/dms-<op>-<phase>-<job12>`, 거른 ref 는
   `purge_ref_rejected`). 그러나 pod-gc(`pod_gc.py` 34행)와 취소(`api/cancel.py` `terminate_job`)는 phase_refs 값을
