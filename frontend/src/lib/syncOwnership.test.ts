@@ -112,3 +112,25 @@ test("chownFieldError: 숫자는 통과, 이름은 이름 문구, 그 밖의 모
   for (const bad of ["10003:", "1.5:10", "a b", "1:2:3"])
     expect(chownFieldError(bad)).toContain("형식이 올바르지 않습니다");
 });
+
+// 2026-10-26 사용자 결정: PV 목적지 root sync 의 결과는 목적지 PV 루트 소유자(서버 _auto_chown 의 pv_owner_measured 갈래).
+test("root + PV 목적지: 목적지 PV 루트 소유자 -- 점검 전에는 「점검 뒤 확정」, 잰 뒤에는 그 값", () => {
+  const before = syncOwnership({ chown: "", root: true, runAs: "ops", self: true, pvDestination: true });
+  expect(before.short).toBe("목적지 PV 루트의 소유자·그룹(점검 뒤 확정)");
+  expect(before.long).toContain("목적지 PV 루트의 소유자·그룹(uid:gid)으로 맞춰집니다");
+  expect(before.long).toContain("실제 값은 점검(preflight)에서 확인돼 확인 창에 보입니다");
+  expect(before.long).toContain("미리보기 뒤 그 소유자가 바뀌면 실행하지 않고 멈춥니다");
+  const after = syncOwnership({ chown: "", root: true, runAs: "ops", self: true, pvDestination: true, pvOwner: "1000:100" });
+  expect(after.short).toBe("목적지 PV 소유자 1000:100(PV 루트 기준)");
+  expect(after.long).toContain("점검에서 확인한 값은 1000:100 입니다");
+  // 형식이 틀린 값(DB 신뢰 경계)은 모름으로
+  expect(syncOwnership({ chown: "", root: true, runAs: null, self: true, pvDestination: true, pvOwner: "x:y" }).short)
+    .toBe("목적지 PV 루트의 소유자·그룹(점검 뒤 확정)");
+});
+
+test("PV 목적지여도 명시 chown 이 이기고, 직접 경로 목적지 root 는 종전대로 소스 소유 보존", () => {
+  expect(syncOwnership({ chown: "7:7", root: true, runAs: "ops", self: true, pvDestination: true }).short)
+    .toBe("chown 지정값 7:7");
+  expect(syncOwnership({ chown: "", root: true, runAs: "ops", self: true, pvDestination: false }).short)
+    .toBe("소스의 소유자·그룹 그대로(root 실행)");
+});

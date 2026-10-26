@@ -7,7 +7,7 @@ import { http, HttpResponse } from "msw";
 import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from "vitest";
 import { SubmitJob } from "./SubmitJob";
 import { SYNC_INT_FIELDS } from "./optionRules";
-import { PRIV_ROOT_SYNC } from "./optionRules";
+import { PRIV_ROOT_SYNC_PV } from "./optionRules";
 import type { Me, UserStorage } from "../../lib/types";
 import type { ClusterFreshness, UserVolumesResponse, VolumeRow, VolumesResponse } from "../k8s/types";
 
@@ -170,7 +170,10 @@ test("사용자 sync: namespace (StorageClass) → PV 이름 → PV 안 경로, 
   // 요약: 사람이 읽는 표기 + 실제 경로 + 실행 권한 root
   expect(screen.getByText("models — team-a (tb-gpfs) / sample")).toBeInTheDocument();
   expect(screen.getByText("scratch — team-b (tb-nfs) / in")).toBeInTheDocument();
-  expect(screen.getByText(PRIV_ROOT_SYNC)).toBeInTheDocument();
+  // PV 목적지 root sync: 결과 소유 = 목적지 PV 루트 소유자(2026-10-26 사용자 결정) -- 요약·소유권 안내 둘 다
+  expect(screen.getByText(PRIV_ROOT_SYNC_PV)).toBeInTheDocument();
+  expect(screen.getByRole("note", { name: "목적지 조건과 소유권" }).textContent)
+    .toContain("목적지 PV 루트의 소유자·그룹(uid:gid)으로 맞춰집니다");
   // LDAP·root 선택 흔적이 없다
   expect(screen.queryByLabelText("root 권한으로 실행")).toBeNull();
   expect(screen.queryByText(/LDAP 보조 그룹/)).toBeNull();

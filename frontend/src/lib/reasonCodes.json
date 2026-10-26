@@ -311,5 +311,8 @@
   "k8s_access_denied",
   "pv_moved",
   "pv_target_outside",
-  "scan_path_unrestricted_only"
+  "scan_path_unrestricted_only",
+  "pv_owner_unknown",
+  "pv_owner_changed",
+  "chown_not_allowed"
 ]

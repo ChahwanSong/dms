@@ -428,8 +428,11 @@ export const REASON_MESSAGES: Record<string, string> = {
   pv_storageclass_unmapped: "이 PV 의 StorageClass 가 DMS 스토리지에 매핑돼 있지 않습니다 — 관리자에게 k8s 연동 → StorageClass 에서 매핑을 요청하세요",
   pv_path_unresolved: "이 PV 의 실제 경로를 계산할 수 없습니다(경로 템플릿·PV 정보 부족) — 관리자에게 k8s 연동 → StorageClass 의 경로 템플릿 확인을 요청하세요",
   pv_root_rm_forbidden: "PV 전체(루트)는 삭제할 수 없습니다 — PV 안의 하위 경로를 지정하세요",
-  // 2026-10-26 가드를 풀어(dms-mpifileutils 8cd72f3) 더 이상 내지 않는다 -- 그 전에 거부된 요청 행을 읽히게 남긴다.
+  // 2026-10-26 가드를 풀어(dms-mpifileutils 2a10a18) 더 이상 내지 않는다 -- 그 전에 거부된 요청 행을 읽히게 남긴다.
   pv_sync_needs_shared_node: "이 sync 는 예전 버전에서 막혔습니다(노드를 나눠 쓰는 nsync 가 목적지 PV 안의 심볼릭 링크를 따라갈 수 있었음) — 도구를 고쳐 지금은 허용되니 같은 내용으로 다시 제출하세요",
+  pv_owner_unknown: "목적지 PV 의 소유자(uid:gid)를 확인하지 못했습니다 — 결과를 그 소유자로 맞추는 sync 라 진행하지 않았습니다. PV 루트가 디렉터리인지 확인한 뒤 다시 제출하세요(계속되면 관리자에게 점검 로그 확인을 요청하세요)",
+  pv_owner_changed: "미리보기 뒤에 목적지 PV 의 소유자(uid:gid)가 바뀌었습니다 — 확인 창에 보인 소유자와 실행이 달라지지 않도록 멈췄습니다. 다시 제출하세요",
+  chown_not_allowed: "결과 소유자 지정(chown)은 특권 운영자만 할 수 있습니다 — 결과는 목적지 PV 소유자로 자동으로 맞춰집니다",
   raw_path_not_allowed: "직접 경로로는 작업할 수 없습니다 — PV 를 골라 그 안의 경로를 지정하세요(직접 경로는 「전체 PV·직접 경로 권한」이 있는 관리자만 씁니다)",
   k8s_access_denied: "이 PV 의 namespace 에 권한이 없습니다 — 그 namespace 에 rolebinding <아이디>-clusterrole-edit(또는 -admin)이 있어야 합니다. 관리자에게 요청하세요(권한 변경은 다음 동기화 뒤 반영됩니다)",
   pv_moved: "제출한 뒤 PV 의 실제 경로가 바뀌었습니다(PVC 를 다시 만들었거나 StorageClass 매핑·경로 템플릿이 바뀜) — 작업을 다시 제출하세요",

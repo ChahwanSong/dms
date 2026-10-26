@@ -163,8 +163,8 @@
   (h) Pure FlashBlade(PV 마다 별도 export)는 「스토리지 + 상대경로」 모델 밖 — PV 별 스토리지 등록이 대안, (i) 멀티 클러스터 라이브
   실증용 두 번째 VM(지금은 단위 테스트 + 같은 클러스터 이중 등록), (j) 「운영자」 = 특권 목록·부여 관리자 해석 확인,
   (k) 운영자가 「사용자 지정」(owner_username)으로 낸 작업을 그 사용자 본인 목록에도 보일지(지금은 requester_id 격리 — 요청자 목록만),
-  (l) root sync 의 결과 소유권(소스 보존 vs 목적지 PV 소유자에 맞추는 자동 chown — 다른 namespace 파드의 uid/fsGroup 과 안 맞으면 그
-  파드가 못 읽을 수 있다).
+  ~~(l) root sync 의 결과 소유권~~ — **결정·구현**(2026-10-26 사용자: 「아주아주 중요 — 목적지 PV 소유자로 자동 chown」): PV 목적지면
+  결과를 목적지 PV 루트 uid:gid 로(preflight 측정 → --chown, 바뀌면 거부 — ARCHITECTURE 「PV 목적지 root sync 의 결과 소유」).
 - 🔧 **에이전트 채널의 노드별 자격(보안 리뷰)** — 공유 토큰(모든 노드 에이전트 보유, role admin) 보유자는 `x-dms-actor: node:<지정
   노드>` 로 행세해 `POST /api/agent/k8s-sync/claim` 에서 대상 클러스터의 리더 토큰을 받을 수 있다(`api/routes_agent.py` — 설계가
   받아들인 위험, 완화는 **읽기 전용** 리더 SA: rolebindings·pvc·pv·sc list + namespaces/kube-system get). 처방 후보: 노드별 토큰

@@ -1,6 +1,7 @@
 """Volcano 매니페스트 + 도구 명령 빌더. 전부 순수 함수 — 실제 제출은 어댑터(Task 6)."""
 
 import json
+import re
 
 from .artifact_base import ARTIFACT_MOUNT
 from .identity import supplementary_gids_problem
@@ -72,6 +73,31 @@ def tool_argv(spec, *, abs_paths: dict) -> list[str]:
     raise ValueError(f"unknown tool for argv: {spec.tool!r}")
 
 
+_OWNER_RE = re.compile(r"^([0-9]{1,10}):([0-9]{1,10})$")
+_OWNER_ID_MAX = 2**32 - 2      # uid/gid 상한(4294967295 = (uid_t)-1 은 「바꾸지 않음」 뜻이라 못 쓴다)
+
+
+def valid_owner(value) -> bool:
+    """결과 소유자 "uid:gid"(숫자 둘) 형식인가 — 파드 로그·DB 행 어느 쪽에서 왔든 같은 검사(신뢰 경계)."""
+    if not isinstance(value, str):
+        return False
+    m = _OWNER_RE.match(value)
+    return m is not None and int(m.group(1)) <= _OWNER_ID_MAX and int(m.group(2)) <= _OWNER_ID_MAX
+
+
+def pv_owner_measured(spec) -> bool:
+    """목적지 PV 루트 소유자로 결과를 맞추는 잡인가(2026-10-26 사용자 결정 「root sync 의 결과 소유권 — 목적지 PV
+    소유자로 자동 chown」): sync ∧ root ∧ 목적지가 PV 주소(stepper 가 paths["contain"]["destination"] 을 실었다) ∧ 명시
+    chown 없음. preflight(측정 마커)·미리보기·실행(--chown)이 이 술어 하나를 쓴다 — stepper._pv_owner_required 가 요청
+    payload 로 같은 판정을 한다(destination_pv 블록 = contain 의 destination 키)."""
+    if spec.operation != "sync" or not (spec.identity or {}).get("privileged"):
+        return False
+    if "chown" in (spec.options or {}):
+        return False
+    contain = (spec.paths or {}).get("contain")
+    return isinstance(contain, dict) and "destination" in contain
+
+
 def _auto_chown(spec) -> list[str]:
     """비 root(비특권) 실행의 sync는 목적지를 **실행 신원**(owner_username 이 있으면 그 사용자, 없으면
     요청자)의 uid:LDAP 주 gid 소유로 강제한다(--chown). 포탈 안내 lib/syncOwnership.ts 가 이 규칙의 미러다.
@@ -89,9 +115,22 @@ def _auto_chown(spec) -> list[str]:
     보조 그룹(2026-10-07 D7 v1): 자동 주입은 여전히 uid:**주 gid** 다 -- 잡이 LDAP 보조 그룹을 달고 돌아도 결과
     소유 그룹을 어느 보조 그룹으로 할지 정할 근거가 없다. 프로젝트 그룹 소유로 남기려면 사용자가 명시 chown
     uid:<프로젝트 gid> 를 준다 -- 그 gid 는 계획 시점에 실행 신원의 {주 gid} ∪ 적용된 보조 gid 에 드는지 검증된다
-    (identity.check_chown_group, 아니면 chown_group_not_member). 비소속 gid 가 실행 단계에서야 EPERM 으로 터지지 않게."""
+    (identity.check_chown_group, 아니면 chown_group_not_member). 비소속 gid 가 실행 단계에서야 EPERM 으로 터지지 않게.
+
+    PV 목적지(2026-10-26 사용자 결정): root sync 라도 목적지가 PV 주소면 결과를 **목적지 PV 루트 소유자**로 맞춘다 —
+    소스 소유를 그대로 두면 다른 namespace 파드(그 PV 의 uid/fsGroup)가 결과를 못 읽거나 못 고친다. 값은 목적지 쪽
+    preflight 가 봉쇄 확인 뒤 잰 PV 루트의 uid:gid(spec.result_owner)다. 우선순위: 명시 chown > PV 루트 소유자 > root 면
+    개입 없음 > 비 root 면 실행 신원. 그 값이 없거나 형식이 틀리면 ValueError — 소스 소유 보존으로 조용히 접지 않는다
+    (어댑터가 submit_failed 로 접는다, fail-closed). nsync 는 이 값을 소스 쪽 스캔 기록에 덮어써 비교·적용하므로 소스·목적지
+    rank 가 같은 argv 를 받는 이 방식이어야 한다(rank 마다 따로 재는 방식은 소스 rank 가 목적지를 못 본다)."""
     ident = spec.identity or {}
-    if ident.get("privileged") or "chown" in (spec.options or {}):
+    if "chown" in (spec.options or {}):
+        return []
+    if pv_owner_measured(spec):
+        if not valid_owner(spec.result_owner):
+            raise ValueError(f"PV destination sync without a measured owner: {spec.result_owner!r}")
+        return ["--chown", spec.result_owner]
+    if ident.get("privileged"):
         return []
     return ["--chown", f"{ident.get('uid', 0)}:{ident.get('gid', 0)}"]
 
@@ -559,6 +598,36 @@ _PV_WITHIN_FN = (
     'case "$1" in "${2%/}"/*) ;; *) ' + _RM_TARGET_REDIRECTED + ';; esac; }; ')
 
 
+# 목적지 PV 루트의 소유자 측정(2026-10-26 사용자 결정 — 결과를 목적지 PV 소유자로 chown): $1 = PV 루트. 봉쇄(dms_contain)가
+# 경로 사슬에 링크가 없음을 확인한 **뒤에** 부른다. PV 루트가 링크가 아닌 디렉터리여야 하고(아니면 pv_owner_unknown — 모름을
+# 소스 소유 보존으로 접지 않는다), stat 은 GNU 기본이 lstat 이다. 마커 한 줄을 stepper 가 parse_pv_owner 로 읽어 잡에 기록한다.
+_PV_OWNER_FN = (
+    'dms_pv_owner() { '
+    'if [ -L "$1" ] || [ ! -d "$1" ]; then echo DMS_PREFLIGHT_REASON=pv_owner_unknown; exit 1; fi; '
+    'o=$(stat -c %u:%g -- "$1") || { echo DMS_PREFLIGHT_REASON=pv_owner_unknown; exit 1; }; '
+    'echo "DMS_PV_OWNER=$o"; }; ')
+
+PV_OWNER_MARKER = "DMS_PV_OWNER="
+
+
+def parse_pv_owner(entries):
+    """preflight 파드 로그(read_log 계약 [(pod, log|None, waiting)])에서 목적지 PV 루트 소유자 "uid:gid" 를 뽑는다.
+    마커 줄이 **정확히 하나**이고 형식이 맞을 때만 — 0개(옛 파드·로그 못 읽음)·여럿(경로 문자열의 개행 등 위조 의심)·형식
+    오류는 None(호출자가 pv_owner_unknown 으로 막는다). nsync 는 목적지 파드만 찍는다."""
+    found = []
+    for entry in entries or ():
+        log = entry[1]
+        if log is None:
+            continue
+        for line in log.split("\n"):
+            line = line.strip()
+            if line.startswith(PV_OWNER_MARKER):
+                found.append(line[len(PV_OWNER_MARKER):].strip())
+    if len(found) != 1 or not valid_owner(found[0]):
+        return None
+    return found[0]
+
+
 def contain_entries(spec, sides) -> list:
     """PV 주소 쪽의 [쪽, 경로, PV 루트, 기준 managed_root] — stepper 가 paths["contain"] = {쪽: {"root", "anchor"}} 로 싣는다.
     키가 없으면 [](PV 가 아닌 잡). 값이 문자열이 아니면 빈 값으로 실어 봉쇄가 막게 한다(fail-closed — 빌더는 입력을 믿지
@@ -599,6 +668,16 @@ def _with_checks(script: str, args: list, fn: str, calls: list) -> tuple:
 
 def _with_containment(script: str, args: list, entries: list) -> tuple:
     return _with_checks(script, args, _PV_CONTAIN_FN, [[path, root, anchor] for _, path, root, anchor in entries])
+
+
+def _with_pv_owner(spec, script: str, args: list) -> tuple:
+    """PV 목적지 root sync 의 preflight 에 목적지 PV 루트 소유자 측정을 덧붙인다(_PV_OWNER_FN — 봉쇄 호출 **뒤**). 그 밖의
+    잡은 그대로(바이트 동일)."""
+    if not pv_owner_measured(spec):
+        return script, args
+    entries = contain_entries(spec, ("destination",))
+    root = entries[0][2] if entries else ""
+    return _with_checks(script, args, _PV_OWNER_FN, [[root]])
 
 
 def _rm_managed_root(spec) -> str:
@@ -663,12 +742,13 @@ def _preflight_script(spec, *, role=None):
         if role == "destination":
             script = ('set -e; D="$1"; M="$2"; ' + _DEST_TYPE_CHECK + _DEST_CHECK
                       + 'echo DMS_PREFLIGHT_OK')
-            return _with_containment(script, [ap["destination"], mode], contain_entries(spec, ("destination",)))
+            return _with_pv_owner(spec, *_with_containment(script, [ap["destination"], mode],
+                                                           contain_entries(spec, ("destination",))))
         script = ('set -e; D="$2"; M="$3"; '
                   'test -r "$1" || { echo DMS_PREFLIGHT_REASON=source_not_readable; exit 1; }; '
                   + _DEST_TYPE_CHECK + _DEST_CHECK + 'echo DMS_PREFLIGHT_OK')
-        return _with_containment(script, [ap["source"], ap["destination"], mode],
-                                 contain_entries(spec, ("source", "destination")))
+        return _with_pv_owner(spec, *_with_containment(script, [ap["source"], ap["destination"], mode],
+                                                       contain_entries(spec, ("source", "destination"))))
     if spec.operation == "rm":
         script = ('set -e; R="$2"; '
                   'parent=$(dirname "$1"); '
@@ -695,6 +775,7 @@ PREFLIGHT_REASON_MARKER = "DMS_PREFLIGHT_REASON="
 # 제어면 3홉·저장 검증도 낸다). 2026-10-21 rm 대상 봉쇄: target_path_redirected(_RM_CONTAINMENT_CHECK -- 같은 코드를
 # 러너의 drm 직전 재확인도 낸다, EXECUTION_REASONS).
 PREFLIGHT_REASONS = frozenset({
+    "pv_owner_unknown",     # 2026-10-26 목적지 PV 루트 소유자 측정(_PV_OWNER_FN)
     "source_not_readable", "destination_not_directory",
     "destination_parent_not_writable", "destination_not_writable",
     "destination_not_owned", "parent_not_writable",

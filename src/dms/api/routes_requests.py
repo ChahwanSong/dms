@@ -182,6 +182,10 @@ def submit(body: RequestBody, request: Request,
     # 한다(k8s_access_denied). 스토리지 칸도 PV 도 없는 쪽은 아래 검증의 정확한 422(missing_*)로 흘린다. planner·컨펌이 요청
     # 행으로 다시 본다(k8s_access.recheck_request -- 대기 중 권한 회수·DB 직접 삽입).
     if k8s and not can_run_as_root(identity, settings, repos):
+        # 결과 소유자는 목적지 PV 루트 소유자로 자동으로 맞춘다(2026-10-26 사용자 결정) -- 명시 chown 은 특권 운영자만(일반
+        # 사용자가 API 로 그 규칙을 덮지 못하게). planner·컨펌이 요청 행으로 다시 본다(k8s_access.recheck_request).
+        if "chown" in (body.options or {}):
+            raise HTTPException(status_code=403, detail="chown_not_allowed")
         for pv_key, storage_key, _ in k8s_access.sides(body.operation):
             if pv_key not in pv_blocks and getattr(body, storage_key) not in (None, ""):
                 raise HTTPException(status_code=403, detail="raw_path_not_allowed")

@@ -494,6 +494,8 @@ def _tamper_payload(db, rid, mutate):
     (lambda p: p.update(destination_pv={"cluster": CLUSTER}), "pv_not_found"),
     # 블록의 root 만 바꾼 행
     (lambda p: p["destination_pv"].update(root="team-c/archive"), "pv_moved"),
+    # 비 특권 운영자 행에 명시 chown(결과는 목적지 PV 소유자로 자동 -- 2026-10-26)
+    (lambda p: p.setdefault("options", {}).update(chown="0:0"), "chown_not_allowed"),
 ])
 def test_planner_treats_the_request_row_as_untrusted(world, db, submitted, mutate, reason):
     _tamper_payload(db, submitted, mutate)
@@ -536,6 +538,7 @@ def test_confirm_rechecks_and_terminates(kclient, world, db, submitted, tamper, 
 @pytest.mark.parametrize("mutate,reason", [
     (lambda p: p.update(destination="team-a/models"), "pv_target_outside"),
     (lambda p: p.pop("destination_pv"), "raw_path_not_allowed"),
+    (lambda p: p.setdefault("options", {}).update(chown="0:0"), "chown_not_allowed"),
 ])
 def test_confirm_treats_the_request_row_as_untrusted(kclient, world, db, submitted, mutate, reason):
     # 계획 뒤(ConfirmPending 동안) 요청 행이 변조돼도 컨펌이 planner 와 같은 함수로 다시 본다.
@@ -723,6 +726,22 @@ def test_root_nsync_into_a_pv_destination_is_planned(kclient, world):
 _NSYNC_FOLLOWS_DST_LINKS = {"faefdaf05b8da9386671c2cee00db75efc0e9cd7", "1b93d5404d078c55b46194cdd02732417ed856dc"}
 # 링크는 따라가지 않지만 없는 목적지 루트를 못 만들어 새 목적지로의 sync 가 전부 실패하던 고정값(d1 라이브 실증 -- 2a10a18 이 고침).
 _NSYNC_BREAKS_NEW_DESTINATIONS = {"8cd72f30a7bfb075795b2128f4a3dbb74c8b31f8"}
+
+
+def test_explicit_chown_is_for_privileged_operators_only(kclient, world):
+    """결과 소유자는 목적지 PV 루트 소유자로 자동으로 맞춘다(2026-10-26 사용자 결정) -- 일반 사용자가 API 로 chown 을 실어 그
+    규칙을 덮지 못한다. 특권 운영자(면제)는 종전대로 명시값이 이긴다."""
+    _login(kclient, "alice")
+    r = kclient.post("/api/user/requests", json=_pv_sync(options={"chown": "0:0"}))
+    assert r.status_code == 403 and r.json()["detail"] == "chown_not_allowed"
+    r = kclient.post("/api/user/requests", json=_pv_sync())
+    assert r.status_code == 202, r.text
+    _login(kclient, "ops")
+    r = kclient.post("/api/user/requests", json={**_pv_sync(dst_path="copy-ops", options={"chown": "1000:100"}),
+                                                 "run_as_root": True})
+    assert r.status_code == 202, r.text
+    rid = r.json()["request_id"]
+    assert _plan(world)[rid] == "planned"
 
 
 def test_job_image_pins_an_nsync_that_does_not_follow_destination_links():

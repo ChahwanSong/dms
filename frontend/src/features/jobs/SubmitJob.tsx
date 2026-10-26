@@ -22,7 +22,7 @@ import { groupCaveat, groupCaveatsFor } from "../../lib/groupCaveats";
 // 옵션 미러(CHMOD_RE·chownFieldError·intFieldError, sync 숫자 범위·프리필 SYNC_INT_FIELDS)는
 // optionRules.ts 로 이사(슬라이스 32 T8) -- BatchCreate 옵션과 공유한다
 // (사본이면 미러가 발산한다).
-import { CHMOD_RE, chownFieldError, OPEN_NOATIME_NON_ROOT, PRIV_ROOT_SYNC, PRIV_USER, SCAN_INT_FIELDS,
+import { CHMOD_RE, chownFieldError, OPEN_NOATIME_NON_ROOT, PRIV_ROOT_SYNC, PRIV_ROOT_SYNC_PV, PRIV_USER, SCAN_INT_FIELDS,
          SYNC_INT_FIELDS, SYNC_OPTION_HELP, scanIntFieldError, syncIntFieldError } from "./optionRules";
 // 정책 기본값 캡션(슬라이스 37: 배치 생성과 같은 표시 배선 — 백엔드 무변경).
 import { usePolicies } from "../policies/usePolicies";
@@ -208,9 +208,13 @@ export function SubmitJob() {
   // 결과(목적지) 소유권 안내 -- 바디와 같은 값(chown 옵션·rootEffective·실행 신원)에서 파생한다
   // (lib/syncOwnership = 서버 _auto_chown 미러). 사용자는 언제나 "요청자 본인 uid:gid". chown 칸은 관리자 전용
   // 고급 옵션이라 비관리자에겐 "chown 에 지정하세요" 대신 관리자에게 요청하라고 말한다(chownEditable).
+  // PV 목적지 sync(k8s 모드)면 결과는 목적지 PV 루트 소유자로(2026-10-26 사용자 결정, 서버 _auto_chown) -- 소유권 문구·
+  // 「목적지가 이미 있는 경우」·요약 「실행 권한」이 이 한 값을 쓴다.
+  const pvDest = k8sMode && f.operation === "sync" && modeOf("destination") === "pv";
   const ownership = syncOwnership({
     chown: f.chown, chmod: f.chmod, root: rootEffective,
-    runAs: otherOwner ? ownerTrim : (me.data?.actor ?? null), self: !otherOwner, chownEditable: isAdmin });
+    runAs: otherOwner ? ownerTrim : (me.data?.actor ?? null), self: !otherOwner, chownEditable: isAdmin,
+    pvDestination: pvDest });
   // 사용자 sync 허용 쌍(2026-09-30 사용자 결정: 기본 전부 불가 + 관리자가 허용한 소스 → 목적지 쌍).
   // 관리자는 제한이 없어 조회하지 않는다. 선택지 필터는 표시일 뿐 -- 제출·계획·컨펌이 서버에서 다시
   // 본다(sync_pair_not_allowed). 신원·허용 목록을 알기 전에는 sync 선택지를 비운다: 거르기 전 목록이
@@ -518,7 +522,9 @@ export function SubmitJob() {
         </li>
         <li>
           <strong>목적지가 이미 있는 경우</strong>: 디렉토리여야 합니다(파일이면 거부).{" "}
-          {rootEffective
+          {rootEffective && pvDest
+            ? "root 실행이라 쓰기·소유 검사는 우회되고, 그 안의 같은 경로 항목은 목적지 PV 루트의 소유자·그룹과 소스의 권한·시각으로 다시 맞춰집니다(chown·chmod 를 지정하면 그 값)."
+            : rootEffective
             ? "root 실행이라 쓰기·소유 검사는 우회되고, 그 안의 같은 경로 항목은 소스의 소유·권한·시각으로 다시 맞춰집니다(chown·chmod 를 지정하면 그 값)."
             : <>쓰기·진입할 수 있어야 하며,{" "}
                 {canRoot ? "root 실행이 아니면 실행 신원 소유여야" : isAdmin ? "실행 신원 소유여야" : "요청자 본인 소유여야"}{" "}
@@ -995,7 +1001,7 @@ export function SubmitJob() {
         )}
         {(isAdmin || k8sMode) && (
           <SummaryRow label="실행 권한" className={rootEffective ? "text-bad" : ""}>
-            {rootEffective ? PRIV_ROOT_SYNC : PRIV_USER}
+            {rootEffective ? (pvDest ? PRIV_ROOT_SYNC_PV : PRIV_ROOT_SYNC) : PRIV_USER}
           </SummaryRow>
         )}
       </SummaryList>

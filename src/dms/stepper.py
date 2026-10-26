@@ -19,8 +19,8 @@ from .batch_cancel import CANCEL_MARK_EVENT, CANCEL_REASON
 from .db import iso_epoch, iso_plus, utc_now_iso
 from .domain import DataJobState, TERMINAL_DATA_JOB_STATES, chown_problem, managed_abs_path
 from .execution import ExecStatus, ExecutionError, JobSpec
-from .execution_manifests import (parse_execution_reason, parse_preflight_reason, processes_per_node,
-                                  worker_pod_count)
+from .execution_manifests import (parse_execution_reason, parse_preflight_reason, parse_pv_owner, processes_per_node,
+                                  valid_owner, worker_pod_count)
 from .identity import (LDAP_TICK_BUDGET_SECONDS, PRIVILEGE_NEVER, IdentityDeadlineExceeded,
                        IdentityLookupInvalid, IdentityUnavailable, privilege_policy,
                        supplementary_gids_problem, tick_resolve_deadline, valid_supplementary_gids)
@@ -630,7 +630,9 @@ class JobStepper:
             process_count=wp.get("process_count", 1), queue=wp.get("queue", "dms-data"),
             priority_class=wp.get("priority_class", "dms-mid"),
             artifact_base=self._artifact_base(), timeout_seconds=timeout,
-            ttl_seconds=self._settings.vcjob_ttl_seconds)
+            ttl_seconds=self._settings.vcjob_ttl_seconds,
+            # 목적지 PV 루트 소유자(_record_pv_owner) -- 형식이 틀린 행은 None 으로 실어 빌더가 막게 한다(fail-closed).
+            result_owner=wp.get("dest_pv_owner") if valid_owner(wp.get("dest_pv_owner")) else None)
 
     def _node_cpu_caps(self, names) -> dict:
         """배정 노드 -> {노드: 상한 | None}(node_cpu.node_cpu_cap). 노드 상태는 마지막 보고 기준(신선도 무관 -- blocked_nodes
@@ -1133,6 +1135,67 @@ class JobStepper:
         if blocked:
             raise NodeBlockedAtStep(blocked)
 
+    def _pv_owner_required(self, job) -> bool:
+        """목적지 PV 루트 소유자로 결과를 맞추는 잡인가 -- execution_manifests.pv_owner_measured 와 같은 판정을 잡 행·요청
+        payload 로 한다(sync ∧ root ∧ 명시 chown 없음 ∧ 요청에 destination_pv 블록 -- _pv_containment 가 contain 의
+        destination 을 싣는 조건과 같다). 그 밖의 잡은 요청 행을 읽지 않는다."""
+        if job["operation"] != "sync" or job["tool"] not in ("dsync", "nsync"):
+            return False
+        wp = job["worker_pool"] if isinstance(job["worker_pool"], dict) else {}
+        ident = wp.get("identity") if isinstance(wp.get("identity"), dict) else {}
+        if not ident.get("privileged"):
+            return False
+        if "chown" in (job["options"] if isinstance(job["options"], dict) else {}):
+            return False
+        req = self._repos.requests.get(job["request_id"]) or {}
+        payload = req.get("payload") if isinstance(req.get("payload"), dict) else {}
+        return payload.get("destination_pv") is not None
+
+    def _record_pv_owner(self, job, phase, ref):
+        """PV 목적지 root sync 의 결과 소유자(2026-10-26 사용자 결정 「목적지 PV 소유자로 자동 chown」)를 preflight 파드
+        로그에서 읽어 잡에 남긴다(worker_pool.dest_pv_owner -- 미리보기·실행의 --chown, _build_spec → JobSpec.result_owner).
+        None = 계속, 문자열 = 종단(그 상태 이름).
+
+        - 마커가 없거나 틀리면 pv_owner_unknown 으로 거부한다 -- 「모름」을 소스 소유 보존으로 접지 않는다(배포 순간
+          Preflight 이던 옛 파드도 여기서 끝난다 -- 다시 제출하면 된다).
+        - exec_preflight 는 다시 잰다: 미리보기 때와 다르면 pv_owner_changed 로 거부한다(확인 창에 보인 소유자와 실행이 갈라지지
+          않게 -- pv_moved 와 같은 원칙). 저장값이 없으면(배포 전에 미리보기까지 간 잡) 그 값을 채택한다 -- 진행 중인 잡을
+          끊지 않는다.
+        - 남는 창은 exec_preflight 와 실행 사이(Volcano 대기)뿐이다."""
+        if not self._pv_owner_required(job):
+            return None
+        try:
+            raw = self._exec.read_log(ref)
+        except Exception as exc:     # 로그를 못 읽음 = 모름(아래에서 막는다)
+            logger.warning("pv owner log read failed job=%s: %s", job["job_id"], exc)
+            raw = None
+        owner = parse_pv_owner(raw)
+        wp = job["worker_pool"] if isinstance(job["worker_pool"], dict) else {}
+        stored = wp.get("dest_pv_owner")
+        if owner is None:
+            self._archive_diag(job, phase, ref)
+            self._finalize(job, DataJobState.REJECTED, reason_code="pv_owner_unknown", polled=True)
+            return "Rejected"
+        if phase == "exec_preflight" and valid_owner(stored) and stored != owner:
+            self._repos.observability.record_event(
+                component="stepper", severity="warning", event_type="pv_owner_changed",
+                message=f"목적지 PV 루트 소유자가 미리보기 뒤 바뀜 {stored} -> {owner}",
+                payload={"job_id": job["job_id"], "before": stored, "after": owner},
+                request_id=job.get("request_id"))
+            self._finalize(job, DataJobState.REJECTED, reason_code="pv_owner_changed", polled=True)
+            return "Rejected"
+        if stored != owner:
+            new_wp = {**wp, "dest_pv_owner": owner}
+            if not self._repos.data_jobs.set_worker_pool(job["job_id"], new_wp, expected_state=job["state"]):
+                return "gone"
+            job["worker_pool"] = new_wp
+            self._repos.observability.record_event(
+                component="stepper", severity="info", event_type="pv_owner_measured",
+                message=f"결과 소유자 = 목적지 PV 루트 소유자 {owner}",
+                payload={"job_id": job["job_id"], "phase": phase, "owner": owner},
+                request_id=job.get("request_id"))
+        return None
+
     def _poll_preflight(self, job):
         jid = job["job_id"]
         ref = (job["phase_refs"] or {}).get("preflight")
@@ -1147,6 +1210,9 @@ class JobStepper:
             # scan: 바로 execution. (sync/rm preview는 Task 7)
             if job["operation"] == "scan":
                 return self._submit_execution(job, DataJobState.RUNNING)
+            stop = self._record_pv_owner(job, "preflight", ref)
+            if stop is not None:
+                return stop
             return self._submit_preview(job)  # Task 7에서 구현
         # diag= 를 넘기지 않는 이유: _preflight_reason 이 이미 박제했다(전이 전).
         reason = self._preflight_reason(job, "preflight", ref,
@@ -1314,6 +1380,9 @@ class JobStepper:
         if status == ExecStatus.SUCCEEDED:
             if self._stop_for_batch_cancel(job):
                 return "Cancelled"
+            stop = self._record_pv_owner(job, "exec_preflight", refs["exec_preflight"])
+            if stop is not None:
+                return stop
             return self._submit_execution(job, DataJobState.EXECUTING)
         # 재검증도 같은 preflight 스크립트다 -- 미리보기와 confirm 사이에 목적지가
         # 파일로 바뀌는 TOCTOU 가 여기서 잡히므로 사유를 뭉개지 않는다.

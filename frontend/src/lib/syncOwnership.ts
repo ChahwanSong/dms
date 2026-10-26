@@ -1,6 +1,8 @@
 // sync 결과(목적지) 소유권 안내(2026-10-01 사용자 요청: "기본적으로 목적지는 요청자 본인 uid:gid 로
 // 셋업된다"를 사용자·운영자 안내에). 서버 규칙의 미러 -- execution_manifests._auto_chown:
 //   - chown 옵션을 지정했으면 그 값(자동 지정은 꺼진다)
+//   - root 실행 + 목적지가 PV 주소면 **목적지 PV 루트의 소유자·그룹**(2026-10-26 사용자 결정 -- 점검(preflight)이 재서
+//     잡 worker_pool.dest_pv_owner 에 남긴 값; 미리보기 뒤 바뀌면 실행을 멈춘다)
 //   - root 실행이면 개입하지 않는다 → 소스의 소유자·그룹이 그대로
 //   - 그 외엔 `--chown <실행 신원 uid>:<주 그룹 gid>` → 새로 만든 목적지·복사본 전부 실행 신원 소유
 // 실행 신원 = 운영자가 실행 신원(owner_username)을 지정했으면 그 사용자, 아니면 요청자 본인
@@ -39,6 +41,8 @@ export interface OwnershipInput {
   runAs: string | null;   // 실행 신원 이름(모르면 null)
   self: boolean;          // 실행 신원이 요청자 본인인가
   chownEditable?: boolean; // 이 화면에서 chown 을 직접 지정할 수 있나(기본 true -- 관리자 전용 화면들). 사용자 신청 화면은 false
+  pvDestination?: boolean; // 목적지가 PV 주소인가(k8s 모드) -- root 면 결과를 목적지 PV 루트 소유자로 맞춘다
+  pvOwner?: string | null; // 점검이 잰 목적지 PV 루트 소유자 "uid:gid"(모르면 null -- 아직 점검 전)
 }
 
 /** chown 값에 이름(숫자가 아닌 파트)이 있나 -- 잡 컨테이너에서 해석되지 않아 서버가 거부한다(위 주석,
@@ -67,8 +71,8 @@ export const CHOWN_NAME_ERROR =
 const NON_ROOT_CHOWN_EPERM =
   "dsync(같은 노드) 는 데이터를 복사한 뒤 작업이 실패하고, nsync(노드 간) 는 소유 변경이 적용되지 않아 실행 신원 소유로 남습니다";
 
-export function syncOwnership({ chown, chmod = "", root, runAs, self, chownEditable = true }: OwnershipInput):
-    { short: string; long: string } {
+export function syncOwnership({ chown, chmod = "", root, runAs, self, chownEditable = true, pvDestination = false,
+                                pvOwner = null }: OwnershipInput): { short: string; long: string } {
   const c = chown.trim();
   const m = chmod.trim();
   const modeText = m !== "" ? `권한 비트는 chmod 지정값(${m}), 수정 시각은 소스 그대로입니다.`
@@ -85,6 +89,15 @@ export function syncOwnership({ chown, chmod = "", root, runAs, self, chownEdita
       short: `chown 지정값 ${c}${root ? "" : " — 비 root: uid 는 본인, gid 는 주·적용된 보조 그룹만(아니면 거부·실패)"}`,
       long: `${lead}${partial}${nonRoot} ${modeText}`,
     };
+  }
+  if (root && pvDestination) {
+    const owner = pvOwner !== null && /^[0-9]+:[0-9]+$/.test(pvOwner) ? pvOwner : null;
+    return { short: owner !== null ? `목적지 PV 소유자 ${owner}(PV 루트 기준)` : "목적지 PV 루트의 소유자·그룹(점검 뒤 확정)",
+             long: "결과(목적지와 복사된 파일·디렉토리)는 목적지 PV 루트의 소유자·그룹(uid:gid)으로 맞춰집니다 — 소스 소유자와 "
+                 + "관계없이, 그 PV 를 쓰는 파드가 결과를 읽고 고칠 수 있게 합니다. "
+                 + (owner !== null ? `점검에서 확인한 값은 ${owner} 입니다. ` : "실제 값은 점검(preflight)에서 확인돼 확인 창에 보입니다. ")
+                 + "미리보기 뒤 그 소유자가 바뀌면 실행하지 않고 멈춥니다. 목적지에 이미 있던 같은 경로의 항목도 이 소유로 다시 "
+                 + `맞춰집니다. ${modeText}` };
   }
   if (root)
     return { short: "소스의 소유자·그룹 그대로(root 실행)",

@@ -95,6 +95,27 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ✅ PV 목적지 sync 의 결과 소유 = 목적지 PV 루트 소유자(자동 chown) — **구현**(2026-10-26, 라이브 실증은 d3)
+
+사용자 결정(BACKLOG (l) 「아주아주 중요」): root sync 의 결과를 소스 소유로 두면 다른 namespace 파드(그 PV 의 uid/fsGroup)가 결과를 못
+읽거나 못 고친다 → 목적지가 PV 주소면 결과를 **목적지 PV 루트의 uid:gid** 로 맞춘다(dsync·nsync 둘 다 이미 `--chown` 지원).
+
+- 측정: 목적지 쪽 preflight 가 봉쇄(dms_contain) 확인 **뒤** `_PV_OWNER_FN` 으로 PV 루트(링크가 아닌 디렉터리 — 아니면
+  `pv_owner_unknown`)의 `stat -c %u:%g` 를 마커 `DMS_PV_OWNER=` 로 찍는다(dsync 단일 파드·nsync 목적지 역할 파드). 술어
+  `execution_manifests.pv_owner_measured` 하나(sync ∧ root ∧ contain 의 destination ∧ 명시 chown 없음) — 그 밖의 잡은 스크립트가
+  바이트 그대로.
+- 기록·전달: stepper `_record_pv_owner` 가 preflight 성공 때 `parse_pv_owner`(마커 **정확히 하나**·숫자 uid:gid ≤ 2^32−2)로 읽어
+  `worker_pool.dest_pv_owner` 에 남기고(이벤트 `pv_owner_measured`), `_build_spec` → `JobSpec.result_owner` → `_auto_chown` 이
+  미리보기·실행 argv 에 `--chown`. 값이 없거나 틀리면 거부(`pv_owner_unknown`)·빌더 ValueError — 「모름」을 소스 소유 보존으로 접지
+  않는다. exec_preflight 가 다시 재서 다르면 `pv_owner_changed`(이벤트에 전·후), 저장값이 없으면(배포 전 미리보기까지 간 잡) 채택.
+- 명시 chown: k8s 모드에서 특권 운영자만(제출 403·planner·컨펌 재확인 `chown_not_allowed`) — 일반 사용자가 API 로 규칙을 덮지 못하게.
+  특권 운영자의 명시값은 종전처럼 이긴다. PV 소스 → 직접 경로 목적지는 종전(소스 소유 보존).
+- 포탈: 소유권 안내(lib/syncOwnership `pvDestination`·`pvOwner`) 「목적지 PV 루트의 소유자·그룹(점검 뒤 확정)」 → 잰 뒤 「목적지 PV
+  소유자 1000:100(PV 루트 기준)」, 요약 실행 권한 `PRIV_ROOT_SYNC_PV`, 「목적지가 이미 있는 경우」 문장, 요청 상세의 목적지 소유.
+- 테스트: `tests/test_pv_owner_chown.py`(술어·argv·형식 거부 10종·파서·실 sh 측정(소유 = os.stat, nsync 역할별, 봉쇄가 먼저, 루트가
+  파일·링크·없음이면 거부)·stepper 흐름(기록→미리보기 spec, 모름 3종 거부, exec 같음·바뀜·채택, 규칙 밖 잡은 로그를 읽지 않음)),
+  k8s 제출 chown 403·planner·컨펌 변조 행, 마커 화이트리스트 그물에 PV 목적지 spec, 프런트 syncOwnership·requestSpec·SubmitJob.k8s.
+
 ### ✅ nsync 목적지 링크 추종 수정 반영 — root nsync 의 PV 목적지 허용 — **완료·실증**(2026-10-26, d1 → d2)
 
 k3 2차 보안 리뷰가 찾은 nsync(dms-mpifileutils) 목적지 쪽 링크 추종을 도구에서 고치고, 그동안 DMS 가 막아 둔 가드를 풀었다.

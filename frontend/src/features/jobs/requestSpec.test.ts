@@ -362,6 +362,15 @@ describe("목적지 소유", () => {
     expect(spec({ ...rootReq, payload: { ...SYNC_PAYLOAD, run_as_root: true, options: { chown: "10001:10010" } } }, [rootJob]).ownership)
       .toBe("chown 지정값 10001:10010");
   });
+  test("root + PV 목적지: 점검이 잰 목적지 PV 루트 소유자(worker_pool.dest_pv_owner), 재기 전에는 「점검 뒤 확정」", () => {
+    const pvReq = { ...rootReq, payload: { ...SYNC_PAYLOAD, run_as_root: true,
+      destination_pv: { cluster: "dmsk8s", namespace: "team-a", pvc: "models", storage: "cephfs-dms", root: "pv" } } };
+    expect(spec(pvReq, [rootJob]).ownership).toBe("목적지 PV 루트의 소유자·그룹(점검 뒤 확정)");
+    const measured = JOB({ worker_pool: { identity: ROOT_IDENT, dest_pv_owner: "1000:100" } });
+    expect(spec(pvReq, [measured]).ownership).toBe("목적지 PV 소유자 1000:100(PV 루트 기준)");
+    const tampered = JOB({ worker_pool: { identity: ROOT_IDENT, dest_pv_owner: 7 } });   // DB 신뢰 경계 -- 문자열만
+    expect(spec(pvReq, [tampered]).ownership).toBe("목적지 PV 루트의 소유자·그룹(점검 뒤 확정)");
+  });
   test("비 root 자동 chown 은 「실행 신원 소유 — uid:gid」(이름을 되풀이하지 않는다), 비 root chown 은 비 root 꼬리", () => {
     expect(sp(spec().ownership ?? "")).toBe("실행 신원 소유 — 10001:10000(주 그룹)");
     expect(sp(spec({ requester_id: "mason", payload: { ...SYNC_PAYLOAD, owner_username: "alice" } }).ownership ?? ""))

@@ -29,6 +29,9 @@ class JobSpec:
     artifact_base: str
     timeout_seconds: int | None = None
     ttl_seconds: int | None = None
+    # PV 목적지 root sync 의 결과 소유자 "uid:gid"(2026-10-26 사용자 결정 — 목적지 PV 루트 소유자로 자동 chown).
+    # stepper 가 preflight 에서 잰 값(worker_pool.dest_pv_owner)을 싣는다. 그 밖의 잡은 None.
+    result_owner: str | None = None
 
 
 class ExecutionError(Exception):

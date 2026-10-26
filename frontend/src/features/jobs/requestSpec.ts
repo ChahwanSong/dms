@@ -400,7 +400,10 @@ export function deriveRequestSpec(req: RequestDetail, jobs: DataJob[] | null,
     if (chownOk && chmodOk) {
       const chown = typeof rawOpts.chown === "string" ? rawOpts.chown : "";
       const chmod = typeof rawOpts.chmod === "string" ? rawOpts.chmod : "";
-      const s = syncOwnership({ chown, chmod, root: kind === "root", runAs: runAsName, self }).short;
+      // PV 목적지 root sync 는 점검이 잰 목적지 PV 루트 소유자(worker_pool.dest_pv_owner, 2026-10-26)를 보인다.
+      const pvOwner = wp !== null && typeof wp.dest_pv_owner === "string" ? wp.dest_pv_owner : null;
+      const s = syncOwnership({ chown, chmod, root: kind === "root", runAs: runAsName, self,
+                                pvDestination: obj(p.destination_pv) !== null, pvOwner }).short;
       // 자동 chown(uid:주 gid)은 「실행 신원」 행의 이름을 되풀이하지 않고 결과 숫자만 -- 같은 사실을 두 번 말하지 않는다.
       ownership = kind === "user" && chown.trim() === "" && uid !== null && gid !== null
         ? `실행 신원 소유 — ${uid}:${gid}(주${NB}그룹)` : s;

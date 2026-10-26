@@ -173,6 +173,12 @@ def recheck_request(repos, req, *, settings) -> None:
     operation = req.get("operation")
     k8s = k8s_mode(settings)
     exempt = None
+    # 명시 chown 은 특권 운영자만(2026-10-26 -- 결과 소유자는 목적지 PV 루트 소유자로 자동, 제출 게이트와 같은 규칙).
+    options = payload.get("options") if isinstance(payload.get("options"), dict) else {}
+    if k8s and "chown" in options:
+        exempt = unrestricted_request(req, settings=settings, repos=repos)
+        if not exempt:
+            raise DomainValidationError("chown_not_allowed", "explicit chown by a non-privileged requester")
     for pv_key, storage_key, path_key in sides(operation):
         block = payload.get(pv_key)
         if block is None:

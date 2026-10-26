@@ -600,6 +600,11 @@ def _emitted_markers():
     # (artifact_base_group_writable) 조각이 붙는다 -- 그룹 없는 spec 만 긁으면 두 마커가 그물 밖이다.
     specs.append((_spec(operation="scan", tool="dscan", paths={"target": "/x"},
                         identity=_GROUP_IDENT), None))
+    # root + PV 목적지 sync(2026-10-26) -- 목적지 PV 루트 소유자 측정(pv_owner_unknown)이 붙는다(dsync 단일·nsync 목적지 역할).
+    pv_dest = _spec(operation="sync", tool="dsync", phase="preflight", identity={"uid": 0, "gid": 0, "privileged": True},
+                    paths={"source": "/s", "source_storage": "s1", "destination": "/d/pv/out", "destination_storage": "s2",
+                           "contain": {"destination": {"root": "/d/pv", "anchor": "/d"}}})
+    specs += [(pv_dest, None), (pv_dest, "destination")]
     found = set()
     for spec, role in specs:
         for chunk in _preflight_command(spec, role=role, volumes=vols)[2].split(

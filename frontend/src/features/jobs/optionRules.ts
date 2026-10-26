@@ -90,4 +90,6 @@ export const OPEN_NOATIME_NON_ROOT =
 // PRIV_ROOT_SYNC(소유 결과를 덧붙인 꼬리)는 제출 요약 전용이다(한 화면에서 같은 사실을 두 번 말하지 않는다).
 export const PRIV_ROOT_HEAD = "root(특권) — 권한 검사 우회";
 export const PRIV_ROOT_SYNC = `${PRIV_ROOT_HEAD}, sync 는 목적지 소유·권한을 소스에 맞춤(chown·chmod 지정 시 그 값)`;
+// PV 목적지 root sync(2026-10-26 사용자 결정): 결과 소유는 목적지 PV 루트 소유자, 권한 비트는 소스(서버 _auto_chown).
+export const PRIV_ROOT_SYNC_PV = `${PRIV_ROOT_HEAD}, sync 결과 소유는 목적지 PV 루트 소유자로·권한은 소스대로(chown·chmod 지정 시 그 값)`;
 export const PRIV_USER = "실행 신원의 uid/gid(권한 그대로 적용)";
