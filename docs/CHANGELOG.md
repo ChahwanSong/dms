@@ -95,15 +95,29 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
-### ⏳ mpifileutils 고정 커밋 1b93d54 → 5958e4e(포크 main HEAD) — **커밋, 이미지 미빌드**(2026-10-26, dms-ssc)
+### ✅ mpifileutils 고정 커밋 1b93d54 → 5958e4e(포크 main HEAD) — **완료·실증**(2026-10-26, d187, dms-ssc)
 
 사용자 요청: 「Mpifileutils 태그 최신걸로 업데이트해서 푸시해줘.」 포크(chahwansong/mpifileutils)에는 태그가 없어 커밋 SHA 로 고정한다
 (`deploy/docker/Dockerfile.mpifileutils` `MPIFILEUTILS_REF` — 포탈 빌드는 이 값을 넘기지 않아 늘 Dockerfile 기본값). 5958e4e 는
 1b93d54 의 바로 다음 한 커밋이다: nsync 가 목적지 루트 아래 심링크를 따라가지 않는다(목적지 변경을 전부 루트 dirfd + 구성요소마다
 O_NOFOLLOW — 타입이 바뀐 항목의 지우기·만들기·복사가 다른 rank·배치로 갈려 남은 심링크를 타고 목적지 밖에 쓰던 경합, 포크 실측
 `--batch-files 1` 에서 200 중 130). `nsync.c` 만 바뀌고 옵션·출력(DMS 파서가 읽는 Planned actions 등)은 같다 — dscan·dsync·drm
-은 그대로. 반영하려면 ssc 포탈에서 `dms-mpifileutils`·`dms`·`dms-agent` 를 같은 새 태그로 빌드(에이전트가 같은 태그의 mpifileutils
-를 FROM)하고 에이전트·잡 이미지 릴리스.
+은 그대로.
+
+- **배포(d187)**: 사용자 「포탈에서 이미지 빌드 및 배포해줘」 + 「릴리즈 및 nsync 심링크 실증까지 해줘」. ssc 포탈이 dms-ssc 98cdf61 을
+  `dms-mpifileutils`·`dms`·`dms-agent` 같은 태그 d187 로 빌드(dms-w1, :5000) → 릴리스 에이전트 → api·controller·잡 이미지(전부
+  live == 동봉 매니페스트). 오버레이 `testbed` dms·dms-agent·`DMS_JOB_IMAGE` = d187(dms-ssc).
+- **실증(ssc, root nsync cephfs-third(dms-w1·w2) → cephfs-secondary(dms-w3), 같은 모양의 일회용 데이터)**: 소스 `d/`(파일 200) +
+  `top.txt`, 목적지 `d` = 목적지 **밖** 빈 디렉터리를 가리키는 심링크(타입이 바뀐 항목 — 포크 커밋이 겨눈 경우).
+  | 잡 이미지 | 옵션 | 결과 | 목적지 `d` | 목적지 **밖**에 쓰인 파일 |
+  |---|---|---|---|---|
+  | d183(1b93d54, 옛) | `batch_files: 1` | **Succeeded**(204) | 디렉터리, 파일 161 | **39** — 성공으로 보고되며 데이터가 엉뚱한 곳에 |
+  | d187(5958e4e) | `batch_files: 1` | **Failed** `execution_failed`(rc 1) | 심링크 그대로, 아무것도 안 씀 | **0** |
+  | d187(5958e4e) | 기본(`batch_files` 1,000,000) | **Succeeded**(204) | 진짜 디렉터리, 파일 200 + `top.txt` | **0** |
+  새 nsync 는 남은 심링크 아래로의 생성을 O_NOFOLLOW 로 거부한다(첫 배치의 `d/` 자식 복사 2건 → `exec=2` 오류). 그런데 nsync 는
+  배치에 오류가 나면 「Stopping after batch 1/203 due to errors」로 **전체를 멈춰** 작은 배치에선 타입 변경(심링크 → 디렉터리)을
+  끝내지 못한다(밖에 쓰지는 않는다 — 안전하지만 수렴하지 않음, BACKLOG). 한 배치 안에서는 지우기 → 만들기 → 복사 순서가 지켜져
+  DMS 기본 옵션에서는 바르게 바뀐다. 실증 데이터·요청 정리.
 
 ### ✅ 전체 작업 검색(배치 이름·경로·ID·요청자, 부분 일치·낱말 OR) + 열 폭 재조정 — **완료·실증**(2026-10-25, d186, dms-ssc)
 
