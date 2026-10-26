@@ -25,7 +25,7 @@ k8s 테스트베드는 §13 이 런북이다.
 
 | | **ssc 테스트베드** | **k8s 테스트베드** (§13) |
 |---|---|---|
-| 검증하는 브랜치 | dms-ssc(후보) — 빌드 소스 전환 전에는 main | main(= dms-k8s 후보) |
+| 검증하는 브랜치 | dms-ssc(후보) — 빌드 소스 전환 전에는 main | dms-k8s(2026-10-22 분리 뒤 직접 개발) |
 | 노드 | dms-cp1 .10 + dms-w1~w3 .11–.13 | k8s-cp1 .20 + k8s-w1·k8s-w2 .21·.22 |
 | kube 컨텍스트 | `dms` (current) | `dmsk8s` (current 로 만들지 않는다) |
 | 오버레이 | `deploy/overlays/testbed`(dms-ssc 에만) | `deploy/overlays/testbed-k8s` |
@@ -36,7 +36,7 @@ k8s 테스트베드는 §13 이 런북이다.
 | LDAP | 사용(pkg-01 slapd, 아래 표) | **없음**(사용자 결정) — k8s 신원 모드(모든 잡 root + 권한 = RoleBinding 맵핑, §13) |
 | `dms-secrets` | 5키(+ `DMS_LDAP_BIND_PW`) | **4키**(바인드 비밀번호 키 없음) |
 | CephFS | dmsfs:/ → `/cephfs`, `/third` → `/cephfs-third`(w1·w2), `/secondary` → `/cephfs-secondary`(w3) | dmsfs:/k8s → `/cephfs`, `/k8s/third` → `/cephfs-third`(k8s-w1), `/k8s/secondary` → `/cephfs-secondary`(k8s-w2) |
-| 빌드 노드 / `build_source_path` | dms-w1 / `/home/mason/dms-dev/dms-ssc`(전환 뒤; 전 `/home/mason/dms-dev/dms`) | k8s-w1 / `/home/mason/dms-dev/dms` |
+| 빌드 노드 / `build_source_path` | dms-w1 / `/home/mason/dms-dev/dms-ssc`(전환 뒤; 전 `/home/mason/dms-dev/dms`) | k8s-w1 / `/home/mason/dms-dev/dms-k8s`(origin/dms-k8s 체크아웃, cron 이 ff) |
 
 경로 문자열(`/cephfs`, artifact base, 스토리지 mount_path)은 두 클러스터가 같다 — k8s 쪽은 CephFS 의 `/k8s` 하위 트리를
 같은 이름에 마운트하므로 매니페스트·시드를 바꿀 필요가 없다. 인프라(VM·CephFS 마운트·레지스트리·DB·호스트 라우트·TLS CA)는

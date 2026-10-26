@@ -229,6 +229,7 @@
   "accounts_session_required",
   "privileged_account_protected",
   "admin_session_required",
+  "confirm_session_required",
   "preview_round_required",
   "batch_preview_changed",
   "batch_rm_confirm_ack_required",
@@ -316,6 +317,7 @@
   "pv_owner_changed",
   "chown_not_allowed",
   "username_numeric_only",
+  "username_reserved",
   "scan_unrestricted_only",
   "chmod_not_allowed"
 ]

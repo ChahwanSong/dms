@@ -31,7 +31,7 @@ import { CatalogNotice, LocationField } from "../k8s/LocationField";
 import { usePvCatalog, useResolvedPv } from "../k8s/usePvCatalog";
 import type { Resolved } from "../k8s/usePvCatalog";
 import {
-  ACCOUNT_ID_RE, SIDE_LABELS, emptyLoc, normalizeSub, parsePvParam, pvAbsPath, pvDestParent, pvSubProblem, pvSummaryText,
+  isAccountId, SIDE_LABELS, emptyLoc, normalizeSub, parsePvParam, pvAbsPath, pvDestParent, pvSubProblem, pvSummaryText,
 } from "../k8s/pvLocation";
 import type { Loc, Side } from "../k8s/pvLocation";
 import { storageKindOf } from "../k8s/k8sTerms";
@@ -135,7 +135,7 @@ export function SubmitJob() {
   // 바디·요약은 보이는 값 그대로(보이는 것 = 보내는 것).
   const scopeField = useSearchField("");
   const scopeInput = unrestricted ? scopeField.bind.value.trim() : "";
-  const scopeInvalid = scopeInput !== "" && !ACCOUNT_ID_RE.test(scopeInput);
+  const scopeInvalid = scopeInput !== "" && !isAccountId(scopeInput);
   const scopeUser = unrestricted && !scopeInvalid ? scopeField.applied : "";
   const accessQ = useK8sAccess("", unrestricted);
   const scopeChoices = (accessQ.data?.users ?? []).map((u) => u.dms_user);

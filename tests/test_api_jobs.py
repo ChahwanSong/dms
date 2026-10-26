@@ -143,9 +143,14 @@ def test_admin_bearer_can_access_others_jobs(client, no_mapping_recheck):
     # admin bearer token (세션 로그인 없이) 로 남의 요청 잡 조회
     jobs = client.get(f"/api/user/requests/{rid}/jobs", headers=ADMIN).json()
     assert jobs[0]["job_id"] == jid
-    # admin이 confirm도 가능
+    # 컨펌은 사람의 승인이라 토큰은 못 한다(2026-10-26 -- 모든 단건 잡이 root): 403, 잡은 ConfirmPending 그대로
     r = client.post(f"/api/user/jobs/{jid}:confirm",
                     json={"fingerprint": "sha256:abc"}, headers=ADMIN)
+    assert r.status_code == 403 and r.json()["detail"] == "confirm_session_required"
+    assert repos.data_jobs.get_job(jid)["state"] == "ConfirmPending"
+    # 요청자 본인이 세션으로는 컨펌한다
+    _login(client, "alice")
+    r = client.post(f"/api/user/jobs/{jid}:confirm", json={"fingerprint": "sha256:abc"})
     assert r.status_code == 200 and r.json()["state"] == "Executing"
 
 

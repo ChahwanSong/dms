@@ -17,7 +17,8 @@ from dms.agent.k8s_fetch import project_pv, project_pvc, project_role_binding, p
 from dms.api.app import create_app
 from dms.config import Settings, SettingsError
 from dms.db import utc_now_iso
-from dms.domain import DataJobState, DomainValidationError, _ACCOUNT_ID_RE, valid_owner_username
+from dms.domain import (DataJobState, DomainValidationError, RESERVED_ACCOUNT_IDS, _ACCOUNT_ID_RE,
+                        valid_owner_username)
 from dms.identity import (PRIVILEGE_IF_ELIGIBLE, PRIVILEGE_REQUESTED, IdentityRejected, resolve_job_identity,
                           root_allowed)
 from dms.k8s_sync import normalize_snapshot
@@ -412,6 +413,11 @@ def test_k8s_owner_username_follows_the_account_id_rule(kclient, world):
     assert valid_owner_username("1user")
     assert not valid_owner_username("1234")        # 숫자만은 거부(잡 셸이 uid 로 읽는다)
     assert not valid_owner_username("Alice")
+    assert not valid_owner_username("daemon")      # 잡 이미지 시스템 계정(실행 신원 별칭과 충돌)
+    # 프런트 미러(pvLocation.RESERVED_ACCOUNT_IDS)는 서버 목록과 같다
+    ts = (Path(__file__).resolve().parents[1] / "frontend/src/features/k8s/pvLocation.ts").read_text()
+    block = ts.split("RESERVED_ACCOUNT_IDS: ReadonlySet<string> = new Set([", 1)[1].split("]);", 1)[0]
+    assert set(re.findall(r'"([^"]+)"', block)) == set(RESERVED_ACCOUNT_IDS)
     _login(kclient, "ops")
     r = kclient.post("/api/user/requests", json={"operation": "scan", "pv": _pv("team-a", "datasets"), "target": "",
                                                  "owner_username": "1user"})
@@ -424,6 +430,9 @@ def test_k8s_owner_username_follows_the_account_id_rule(kclient, world):
     r = kclient.post("/api/user/requests", json={"operation": "scan", "pv": _pv("team-a", "datasets"), "target": "",
                                                  "owner_username": "1234"})
     assert r.status_code == 422 and r.json()["detail"] == "invalid_owner_username"
+    r = kclient.post("/api/user/requests", json={"operation": "scan", "pv": _pv("team-a", "datasets"), "target": "",
+                                                 "owner_username": "nobody"})
+    assert r.status_code == 422 and r.json()["detail"] == "username_reserved"
 
 
 def test_user_owner_gate_self_is_allowed(kclient, world):

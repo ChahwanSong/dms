@@ -154,6 +154,18 @@ export function bindingNameFor(actor: string): string {
 /** 계정 아이디 규칙(설계 §6 -- k8s 모드 owner_username 검증과 같다). 숫자만은 거부(2026-10-26 -- 잡 셸이 uid 로 읽는다). */
 export const ACCOUNT_ID_RE = /^(?![0-9]+$)[a-z0-9][a-z0-9._-]{0,63}$/;
 
+/** 잡 이미지 시스템 계정 이름(서버 domain.RESERVED_ACCOUNT_IDS 미러 -- 대조 테스트 test_k8s_submit). 실행 신원 별칭과 충돌한다
+ *  (root 는 이미지에서도 0:0 이라 충돌하지 않아 제외). */
+export const RESERVED_ACCOUNT_IDS: ReadonlySet<string> = new Set([
+  "daemon", "bin", "sys", "sync", "games", "man", "lp", "mail", "news", "uucp", "proxy", "www-data",
+  "backup", "list", "irc", "nobody", "sshd",
+]);
+
+/** 계정 아이디로 쓸 수 있나(형식 + 예약어 제외 -- 서버 domain.valid_owner_username 과 같은 판정). */
+export function isAccountId(name: string): boolean {
+  return ACCOUNT_ID_RE.test(name) && !RESERVED_ACCOUNT_IDS.has(name);
+}
+
 /** ?pv=<cluster>/<ns>/<pvc>(관리자 PV 탐색 「이 PV로 단일 작업」, k8sTerms.pvJobLink) → PvRef. 모양이 틀리면 null. */
 export function parsePvParam(raw: string | null): PvRef | null {
   if (raw === null) return null;

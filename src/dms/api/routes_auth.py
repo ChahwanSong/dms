@@ -13,7 +13,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from .. import k8s_access
-from ..domain import DomainValidationError, Operation, ROLE_ADMIN, ROLE_USER
+from ..domain import DomainValidationError, Operation, ROLE_ADMIN, ROLE_USER, reserved_account_id
 from ..identity import IDENTITY_MODE_K8S
 from ..privileged import protected_names
 from ..repositories.accounts import (VERIFICATION_FAILURE_LIMIT, VERIFICATION_FAILURE_WINDOW_SECONDS,
@@ -162,10 +162,13 @@ def request_verification_code(body: VerificationBody, request: Request):
         raise HTTPException(status_code=500, detail="mailer_misconfigured")
     if body.purpose not in VERIFICATION_PURPOSES:
         raise HTTPException(status_code=422, detail="invalid_verification_purpose")
-    # 숫자만인 아이디(2026-10-26): 새 가입만 막는다 -- 그런 옛 계정의 비밀번호 재설정은 그대로 된다.
+    # 숫자만인 아이디·잡 이미지 시스템 계정 이름(2026-10-26): 새 가입만 막는다 -- 그런 옛 계정의 비밀번호 재설정은 그대로 된다.
     if numeric_only_username(body.username):
         if body.purpose == "signup":
             raise HTTPException(status_code=422, detail="username_numeric_only")
+    elif reserved_account_id(body.username):
+        if body.purpose == "signup":
+            raise HTTPException(status_code=422, detail="username_reserved")
     elif not valid_username(body.username):
         raise HTTPException(status_code=422, detail="invalid_username")
     if body.purpose == "password_reset":

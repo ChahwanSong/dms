@@ -374,7 +374,8 @@ def test_mode_is_passed_positionally_never_inlined(tmp_path):
     ({"payload": {"run_as_root": False}}, PRIVILEGE_NEVER),
     ({"payload": {"run_as_root": True}}, PRIVILEGE_REQUESTED),
     ({"payload": {}, "batch_id": "b-1"}, PRIVILEGE_IF_ELIGIBLE),
-    ({"payload": {"run_as_root": True}, "batch_id": "b-1"}, PRIVILEGE_REQUESTED),
+    # 배치 자식 payload 의 run_as_root 는 변조다 -- 세션만 보는 REQUESTED 가 아니라 특권 목록 판정(IF_ELIGIBLE)으로
+    ({"payload": {"run_as_root": True}, "batch_id": "b-1"}, PRIVILEGE_IF_ELIGIBLE),
     ({"payload": {}, "batch_id": ""}, PRIVILEGE_NEVER),
 ])
 def test_privilege_policy_is_fail_closed(req, expected):

@@ -55,17 +55,19 @@ def privilege_policy(req) -> str:
     """요청 행 → privilege 정책(단일 규칙, 2026-09-30). planner 가 신원을 정할 때와
     stepper 가 매 제출 직전에 "이 root 잡에 근거가 있나"를 재확인할 때 같은 함수를
     쓴다 -- 두 곳이 규칙을 따로 들면 한쪽만 바뀌는 순간 재확인이 뚫린다.
+      - batch_id 가 있음(배치 자식) → IF_ELIGIBLE. **run_as_root 보다 먼저** 본다(2026-10-26 리뷰): orchestrator 는 자식
+        payload 에 run_as_root 를 싣지 않는다 -- 실려 있으면 DB 변조다. REQUESTED 의 술어(root_allowed)는 세션만 보므로
+        변조된 자식이 특권 목록 판정(privilege_eligible)을 건너뛰게 두지 않는다.
       - payload.run_as_root 가 **정확히 True** → REQUESTED. `is True` 인 이유: payload 는
         DB 신뢰 경계 밖이라 "yes"·1 같은 값으로 승격되지 않게 한다.
-      - batch_id 가 있음(배치 자식) → IF_ELIGIBLE.
       - 그 외(행 없음·모양 틀림 포함) → NEVER(fail-closed)."""
     if not isinstance(req, dict):
         return PRIVILEGE_NEVER
+    if req.get("batch_id"):
+        return PRIVILEGE_IF_ELIGIBLE
     payload = req.get("payload")
     if isinstance(payload, dict) and payload.get("run_as_root") is True:
         return PRIVILEGE_REQUESTED
-    if req.get("batch_id"):
-        return PRIVILEGE_IF_ELIGIBLE
     return PRIVILEGE_NEVER
 
 

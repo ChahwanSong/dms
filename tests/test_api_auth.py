@@ -198,6 +198,11 @@ def test_verification_code_issue_guards(client, db, settings):
     assert r.status_code == 422 and r.json()["detail"] == "username_numeric_only"
     assert vc.post("/api/auth/verification-codes",
                    json={"username": "1234", "purpose": "password_reset"}).status_code == 404   # 형식이 아니라 「없음」
+    # 잡 이미지 시스템 계정 이름도 새 가입만 막는다(재설정은 「없음」으로)
+    r = vc.post("/api/auth/verification-codes", json={"username": "daemon", "purpose": "signup"})
+    assert r.status_code == 422 and r.json()["detail"] == "username_reserved"
+    assert vc.post("/api/auth/verification-codes",
+                   json={"username": "daemon", "purpose": "password_reset"}).status_code == 404
 
 
 def test_verification_wrong_code_attempts_and_expiry(client, db, settings):

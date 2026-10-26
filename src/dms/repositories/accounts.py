@@ -4,7 +4,7 @@ import os
 import re
 import secrets
 from ..db import Database, dump_json, iso_epoch, iso_plus, utc_now_iso
-from ..domain import DomainValidationError, ROLE_ADMIN, ROLE_USER
+from ..domain import DomainValidationError, ROLE_ADMIN, ROLE_USER, reserved_account_id
 
 # 숫자만으로 된 아이디는 새로 만들지 않는다(2026-10-26 사용자 결정): 잡 셸의 `getent passwd 1234`·`id 1234` 가 숫자를
 # uid 로 읽어 다른 계정과 맞물린다. 로그인·비밀번호 재설정은 형식을 보지 않으므로 그런 옛 계정도 계속 쓸 수 있다.
@@ -74,6 +74,8 @@ class AccountsRepository:
     def create(self, username, password, role, email=None, *, actor="self"):
         if numeric_only_username(username):
             raise DomainValidationError("username_numeric_only", repr(username))
+        if reserved_account_id(username):
+            raise DomainValidationError("username_reserved", repr(username))
         if not _USERNAME_RE.fullmatch(username):
             raise DomainValidationError("invalid_username", repr(username))
         with self._db.transaction():

@@ -126,6 +126,17 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
 - 문서(이 커밋): ARCHITECTURE(불변식 12·신원 가드·§7 함정·§8 에이전트·신원), CLAUDE.md(k8s 신원 모드를 본문 규칙으로, 보조 gid 예외 축소),
   deploy/README(§2b·§2c·§13·스크립트 예시), BACKLOG(LDAP·보조 그룹 항목 「dms-k8s 해당 없음」). `_auto_chown` docstring 정정(비 root 갈래는
   빌더 방어 기본값).
+- **삭제 뒤 리뷰 반영**(독립 리뷰 — 「모든 잡이 root」가 된 뒤 남은 틈):
+  - **컨펌은 세션 로그인만**: `routes_jobs.confirm_job` 이 토큰 인증을 403 `confirm_session_required` 로 거부. 공유 토큰(모든 노드
+    에이전트 보유, role admin)은 `_owned_job` 을 통과해 남의 미리보기를 사람 확인 없이 uid 0 실행으로 넘길 수 있었다 — 요청 행의
+    `root_allowed` 재검사는 **요청자**의 인증만 본다. 조회(GET)는 토큰도 된다.
+  - **배치 자식 판정 우선**: `identity.privilege_policy` 가 batch_id 를 run_as_root 보다 먼저 본다 — orchestrator 는 자식 payload 에
+    run_as_root 를 싣지 않으므로 실려 있으면 변조이고, 세션만 보는 REQUESTED 로 특권 목록 판정을 건너뛰게 두지 않는다.
+  - **잡 이미지 시스템 계정 이름 예약**(`domain.RESERVED_ACCOUNT_IDS` — daemon·bin·sys·sync·games·man·lp·mail·news·uucp·proxy·
+    www-data·backup·list·irc·nobody·sshd): 실행 신원은 passwd 에 「이름 → 0:0」 별칭으로 물질화되는데 같은 이름이 이미지에 다른 uid 로
+    있으면 러너가 exit 1 — 새 계정·가입 인증번호·`owner_username` 에서 422 `username_reserved`(로그인·재설정은 형식을 보지 않는다).
+    root 는 이미지에서도 0:0 이고 특권 목록 기본 이름이라 제외. 포탈 「권한 기준 사용자」는 `pvLocation.isAccountId`(대조 테스트).
+  - 문서: ARCHITECTURE 불변식 5·9·10(보조 그룹·비 root 잡 전제 서술 정리)·배선(리졸버 주입 삭제), deploy/README 테스트베드 표.
 
 남긴 것: 러너 passwd 물질화·`getent hosts`, `PrivilegeNotRequestedAtStep`, owner_override/privilege_eligible/can_run_as_root, denylist 이름
 규칙, chown_problem, artifact base 저장·3홉 검증(g+w·ACL·o+x), 설정 안전장치, 빈 `identity_probe_targets` 테이블, 은퇴 사유 코드(옛 행

@@ -29,6 +29,13 @@ def test_duplicate_and_invalid_username(db):
         assert e.value.reason_code == "username_numeric_only"
     repo.create("1user", "pw", ROLE_USER)
     repo.create("12.34", "pw", ROLE_USER)
+    # 잡 이미지 시스템 계정 이름은 거부(2026-10-26 -- 실행 신원 0:0 별칭이 daemon=1:1 같은 기존 계정과 충돌), 비슷한 이름은 된다
+    for reserved in ("daemon", "nobody", "www-data", "sshd"):
+        with pytest.raises(DomainValidationError) as e:
+            repo.create(reserved, "pw", ROLE_USER)
+        assert e.value.reason_code == "username_reserved"
+    repo.create("root", "pw", ROLE_USER)          # root 는 이미지에서도 0:0 -- 별칭과 충돌하지 않는다(특권 목록 기본 이름)
+    repo.create("daemons", "pw", ROLE_USER)
 
 
 def test_set_password(db):

@@ -52,6 +52,11 @@ def list_jobs(request_id: str, request: Request,
 @router.post("/api/user/jobs/{job_id}:confirm")
 def confirm_job(job_id: str, body: ConfirmBody, request: Request,
                 identity: Identity = Depends(require_user)):
+    # 컨펌은 사람의 승인이다(2026-10-26 리뷰): k8s 신원 모드에선 모든 단건 잡이 root 라, 공유 토큰(모든 노드 에이전트 보유,
+    # role admin -- _owned_job 을 통과한다)으로 컨펌할 수 있으면 남의 미리보기를 사람 확인 없이 uid 0 실행으로 넘긴다.
+    # 요청 행의 auth_method 재검사(아래 root_allowed)는 **요청자**의 인증만 본다 -- 컨펌하는 쪽은 여기서 막는다.
+    if identity.auth != "session":
+        raise HTTPException(status_code=403, detail="confirm_session_required")
     repos = request.app.state.repos
     job = _owned_job(request, job_id, identity)
     # 배치 항목은 배치 단위로만 확인한다(2026-10-07): 배치 자식은 배치 행의 세션 인증·요청자를 물려받아 root 로

@@ -162,16 +162,33 @@ def validate_rm_target(target: str, options: dict) -> str:
 # 「사용자 지정」이 그런 사용자에게 422 였다. 문자 집합은 러너 passwd 줄 검사(execution_manifests 의 [A-Za-z0-9._-])의
 # 부분집합이다.
 _ACCOUNT_ID_RE = re.compile(r"(?![0-9]+$)[a-z0-9][a-z0-9._-]{0,63}$")   # 숫자만은 거부(2026-10-26 -- getent·id 가 uid 로 읽음)
+# 잡 이미지(debian 기반 deploy/docker/Dockerfile.mpifileutils)가 이미 가진 시스템 계정 이름(2026-10-26 리뷰). 실행 신원은 passwd 에
+# 「이름 → 0:0」 별칭으로 물질화되는데(execution_manifests._identity_materialize_stmt), 같은 이름이 이미 다른 uid 로 있으면
+# (daemon=1:1 …) 러너가 「account exists with a different uid/gid」로 exit 1 한다 -- 가입·생성·사용자 지정에서 미리 막는다.
+# 로그인·재설정은 형식을 보지 않으므로(숫자만 규칙과 같다) 옛 계정은 그대로 쓴다. 프런트 미러 pvLocation.RESERVED_ACCOUNT_IDS.
+# root 는 넣지 않는다: 이미지의 root 도 0:0 이라 별칭과 일치하고, 특권 목록 기본값(DMS_PRIVILEGED_REQUESTERS=root,admin,…)의 이름이다.
+RESERVED_ACCOUNT_IDS = frozenset({
+    "daemon", "bin", "sys", "sync", "games", "man", "lp", "mail", "news", "uucp", "proxy", "www-data",
+    "backup", "list", "irc", "nobody", "sshd",
+})
+
+
+def reserved_account_id(username) -> bool:
+    """잡 이미지 시스템 계정 이름인가(가입·생성·owner_username 거부 사유 username_reserved)."""
+    return isinstance(username, str) and username in RESERVED_ACCOUNT_IDS
 
 
 def valid_owner_username(username) -> bool:
-    """owner_username 모양 판정(bool, 계정 아이디 규칙 _ACCOUNT_ID_RE). API(validate_owner_username)와 planner 의 계획 시점
-    선검사가 같은 규칙을 쓴다 -- planner 는 API 를 거치지 않은 DB 직접 쓰기(신뢰 경계)도 보므로 비문자열이 올 수 있어
-    isinstance 먼저."""
-    return isinstance(username, str) and _ACCOUNT_ID_RE.fullmatch(username) is not None
+    """owner_username 모양 판정(bool, 계정 아이디 규칙 _ACCOUNT_ID_RE + 예약어 제외). API(validate_owner_username)와 planner
+    의 계획 시점 선검사가 같은 규칙을 쓴다 -- planner 는 API 를 거치지 않은 DB 직접 쓰기(신뢰 경계)도 보므로 비문자열이 올
+    수 있어 isinstance 먼저."""
+    return (isinstance(username, str) and _ACCOUNT_ID_RE.fullmatch(username) is not None
+            and not reserved_account_id(username))
 
 
 def validate_owner_username(username: str) -> str:
+    if reserved_account_id(username):
+        raise DomainValidationError("username_reserved", repr(username))
     if not valid_owner_username(username):
         raise DomainValidationError("invalid_owner_username", repr(username))
     return username

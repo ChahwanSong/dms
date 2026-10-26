@@ -1,6 +1,7 @@
 import { beforeEach, expect, test } from "vitest";
 import {
-  SIDE_LABELS, bindingNameFor, buildGroups, effectiveGroup, emptyLoc, freshnessWarns, groupKey, normalizeSub, parsePvParam,
+  SIDE_LABELS, bindingNameFor, buildGroups, effectiveGroup, emptyLoc, freshnessWarns, groupKey, isAccountId, normalizeSub,
+  parsePvParam,
   pvAbsPath,
   pvDestParent, pvOptionText, pvSubProblem, pvSummaryText, readLastGroup, unselectableText, writeLastGroup,
 } from "./pvLocation";
@@ -129,4 +130,16 @@ test("freshnessWarns: 오래됨(stale)·지연·실패면 경고, 정상·한 �
   expect(freshnessWarns({ name: "c", synced_at: at, stale: false, status: "delayed" })).toBe(true);
   expect(freshnessWarns({ name: "c", synced_at: null, stale: false, status: "never" })).toBe(false);
   expect(freshnessWarns(null)).toBe(false);
+});
+
+test("isAccountId: 계정 아이디 형식 + 잡 이미지 시스템 계정 이름 제외(root 는 0:0 이라 허용, 2026-10-26)", () => {
+  expect(isAccountId("alice")).toBe(true);
+  expect(isAccountId("1user")).toBe(true);
+  expect(isAccountId("root")).toBe(true);
+  expect(isAccountId("daemons")).toBe(true);
+  expect(isAccountId("1234")).toBe(false);
+  expect(isAccountId("Alice")).toBe(false);
+  expect(isAccountId("daemon")).toBe(false);
+  expect(isAccountId("nobody")).toBe(false);
+  expect(isAccountId("www-data")).toBe(false);
 });
