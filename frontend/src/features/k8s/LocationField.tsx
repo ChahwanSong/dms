@@ -7,7 +7,7 @@ import { useK8sVolumes } from "./useK8s";
 import { SEARCH_LIMIT } from "./usePvCatalog";
 import type { PvCatalog, Resolved } from "./usePvCatalog";
 import {
-  SIDE_LABELS, bindingNameFor, effectiveGroup, freshnessOf, groupKey, normalizeSub, pvAbsPath, pvMetaText, pvOptionText, pvSubProblem, readLastGroup,
+  SIDE_LABELS, bindingNameFor, effectiveGroup, freshnessOf, freshnessWarns, groupKey, normalizeSub, pvAbsPath, pvMetaText, pvOptionText, pvSubProblem, readLastGroup,
   refOf, rowKey, sameRef, writeLastGroup,
 } from "./pvLocation";
 import type { Loc, LocMode, Side } from "./pvLocation";
@@ -215,12 +215,17 @@ function SubField({ side, operation, loc, onChange, resolved }: {
           {fresh === null || fresh.synced_at === null
             ? "동기화 시각 모름"
             : <><Ago iso={fresh.synced_at} /> 기준</>}
-          {fresh?.stale === true && <span className="text-attn"> · 목록이 오래됐습니다(동기화 지연)</span>}
+          {freshnessWarns(fresh) && (
+            <span className="text-attn">
+              {` · 목록이 오래됐을 수 있습니다(동기화 ${fresh?.status === "failing" ? "실패 중" : "지연"}) — 그 뒤의 권한·PV 변경은 `
+                + "반영되지 않았을 수 있습니다. 제출은 그대로 됩니다"}
+            </span>
+          )}
         </p>
       )}
       {side === "destination" && row !== null && whole && problem === null && (
         <p className="mt-1 text-xs text-attn">
-          목적지가 PV 전체(루트)라 PV 루트 디렉터리의 소유·권한·시각이 소스에 맞춰 바뀝니다 — 하위 디렉터리로 받으려면 경로를 적으세요.
+          목적지가 PV 전체(루트)라 PV 루트 디렉터리의 권한·시각이 소스에 맞춰 바뀝니다(소유자는 PV 루트 소유자 그대로) — 하위 디렉터리로 받으려면 경로를 적으세요.
         </p>
       )}
     </div>
@@ -258,7 +263,7 @@ export function CatalogNotice({ catalog, search, actor, scopeUser }: {
     <div className="space-y-1">
       {namespaces !== null && namespaces.length === 0 ? (
         <p className="text-sm text-bad [overflow-wrap:anywhere]">
-          {`rolebinding ${bindingNameFor(actor)} 이 있는 namespace 가 없습니다 — 관리자에게 요청하세요`}
+          {`rolebinding ${bindingNameFor(actor)}(또는 namespace 소유자 namespaceAdmin)이 있는 namespace 가 없습니다 — 관리자에게 요청하세요`}
         </p>
       ) : namespaces === null && rows.length === 0 ? (
         <p className="text-sm text-bad [overflow-wrap:anywhere]">

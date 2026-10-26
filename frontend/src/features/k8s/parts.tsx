@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { agoText, kstStamp } from "../../lib/datetime";
 import { useNow } from "../../lib/useNow";
 import { clusterStatusMeta } from "./k8sTerms";
+import { freshnessWarns } from "./pvLocation";
 import type { ClusterFreshness } from "./types";
 
 // k8s 연동 화면들이 함께 쓰는 작은 잎 부품. 화면 파일마다 같은 표기를 다시 짓지 않게 한 곳에 둔다.
@@ -48,13 +49,14 @@ export function FreshnessLine({ clusters }: { clusters: ClusterFreshness[] }) {
     <p className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-ink/70">
       <span className="font-medium text-ink/80">스냅숏 기준</span>
       {clusters.map((c) => {
-        const tone = c.synced_at === null ? "text-bad" : c.stale ? "text-attn" : "text-ink/80";
+        // 오래됐거나 지연·실패면 경고색(2026-10-26 (c) -- 막지 않고 경고만, pvLocation.freshnessWarns 와 같은 조건)
+        const tone = c.synced_at === null ? "text-bad" : freshnessWarns(c) ? "text-attn" : "text-ink/80";
         return (
           <span key={c.name} className={`whitespace-nowrap ${tone}`}>
             <span className="font-medium">{c.name}</span>{" "}
             {c.synced_at === null
               ? "아직 동기화 안 됨(모름)"
-              : <><Ago iso={c.synced_at} /> 성공{c.stale ? " · 오래됨" : ""}</>}
+              : <><Ago iso={c.synced_at} /> 성공{c.stale ? " · 오래됨" : ""}{freshnessWarns(c) ? " · 이후 변경은 반영 안 됐을 수 있음" : ""}</>}
             {c.status !== "ok" && c.synced_at !== null && ` · ${clusterStatusMeta(c.status).label}`}
           </span>
         );

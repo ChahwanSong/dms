@@ -129,3 +129,27 @@ def test_testbed_inventory_through_the_agent_fetch_and_the_repository(db):
     # team-c 에는 사용자 바인딩이 없다(namespaceAdmin 은 인식하지 않는다) -- 아무에게도 안 보인다
     assert repos.k8s.access_for("ops.lead", "dmsk8s", "team-c") is None
     assert repos.k8s.cluster_counts()["dmsk8s"]["users"] == 4
+
+
+def test_testbed_namespace_admin_owners_are_mapped_with_the_account_email_domain(db):
+    """namespaceAdmin(소유자) 인식(2026-10-26 (a)): 테스트베드 바인딩의 소유자 이메일 도메인(example.com)이 계정 메일 도메인과
+    같으면 로컬파트가 그 namespace 의 admin 이 된다 -- team-c 의 ops.lead 가 새로 보인다(이름 규칙 바인딩이 없던 namespace)."""
+    derived = {(p["namespace"], p["name"]): derive_binding(p, email_domain="example.com")
+               for p in (project_role_binding(i) for i in _raw("role_bindings")["items"])}
+    owners = {k[0]: (v["dms_user"], v["access"]) for k, v in derived.items() if k[1] == "namespaceAdmin"}
+    assert owners == {"team-a": ("junwoo.song", "admin"), "team-b": ("alice", "admin"), "team-c": ("ops.lead", "admin")}
+    # 적용 루프가 같은 도메인을 넘기면 권한 조회에 그대로 반영된다
+    repos = Repositories(db)
+    repos.k8s.update_settings(primary_node="k8s-w1", secondary_node="k8s-w2", interval_seconds=None, actor="ops")
+    repos.k8s.create_cluster(name="dmsk8s", api_server="https://10.10.10.20:6443", tls_server_name=None, ca_pem=None,
+                             insecure_skip_tls_verify=False, token_enc="v1:x", enabled=True, actor="ops")
+    db.execute("UPDATE k8s_clusters SET created_at = '2026-10-25T00:00:00Z'")
+    got = repos.k8s.claim(node_name="k8s-w1", role="primary", now="2026-10-25T13:50:00Z", interval=300,
+                          primary_configured=True, token_ok=lambda e: True, deadline_seconds=120)
+    run_id = got["run"]["run_id"]
+    repos.k8s.receive(run_id, node_name="k8s-w1", now="2026-10-25T13:50:05Z", ok=True, data=_data(),
+                      email_domain="example.com")
+    assert repos.k8s.apply_run(run_id, email_domain="example.com")["outcome"] == "applied"
+    assert repos.k8s.access_for("ops.lead", "dmsk8s", "team-c") == "admin"
+    assert repos.k8s.access_for("junwoo.song", "dmsk8s", "team-a") == "admin"
+    assert repos.k8s.cluster_counts()["dmsk8s"]["users"] == 5

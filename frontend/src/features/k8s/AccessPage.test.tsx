@@ -87,7 +87,7 @@ test("인식하지 않은 바인딩은 접혀 있고 펼치면 이유를 보인�
   await userEvent.click(summary);
   expect(details).toHaveAttribute("open");
   expect(within(details).getByText("namespaceAdmin")).toBeInTheDocument();
-  expect(within(details).getByText(/역할은 맞지만 이름이 <ID>-clusterrole-admin\|edit 꼴이 아님/)).toBeInTheDocument();
+  expect(within(details).getByText(/namespace 소유자\(namespaceAdmin\)이지만 이메일 도메인이/)).toBeInTheDocument();
   expect(within(details).getByText(/이름은 맞지만 역할이 ClusterRole kubeflow-admin·kubeflow-edit 가 아님/)).toBeInTheDocument();
 });
 

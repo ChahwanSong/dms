@@ -7,9 +7,11 @@ import { StatusPill } from "../../components/ui/StatusPill";
 import { Table } from "../../components/ui/Table";
 import { reasonText } from "../../lib/api";
 import { kstStampOrDash } from "../../lib/datetime";
+import { useMe } from "../auth/useAuth";
 import { useSearchField } from "../jobs/searchField";
 import { K8sHeader } from "./K8sTabs";
 import { ACCESS_LABEL, TERMS, nsLabel, phaseVariant, pvJobLink } from "./k8sTerms";
+import { bindingNameFor } from "./pvLocation";
 import { DefList, DefRow, FreshnessLine, Mono, Tag } from "./parts";
 import { VOLUMES_LIMIT, useK8sVolumes } from "./useK8s";
 import type { VolumeRow, VolumesQuery } from "./types";
@@ -44,8 +46,19 @@ function UsersCell({ users }: { users: string[] | undefined }) {
   );
 }
 
+/** 이 관리자가 이 PV 로 단일 작업을 낼 수 있나(2026-10-26 -- 권한 밖 PV 의 「이 PV로 단일 작업」이 제출 화면의 막다른 길이던 것).
+ *  전체 PV 권한(unrestricted)이면 늘, 아니면 그 namespace 에 자기 맵핑(users)이 있을 때만. 모르면(users·me 없음) 열어 둔다 --
+ *  제출 화면·서버가 다시 본다(모름 ≠ 없음). */
+export function canUsePv(v: Pick<VolumeRow, "users">, me: { actor?: string; unrestricted?: boolean } | undefined): boolean {
+  if (me === undefined || me.unrestricted === true) return true;
+  if (v.users === undefined || me.actor === undefined) return true;
+  return v.users.includes(me.actor);
+}
+
 function VolumeDetail({ v }: { v: VolumeRow }) {
   const [open, setOpen] = useState(false);
+  const me = useMe();
+  const usable = canUsePv(v, me.data);
   return (
     <Dialog open={open} onOpenChange={setOpen} size="lg" title={`${TERMS.pvc} ${v.pvc}`}
             trigger={<Button variant="ghost" className="whitespace-nowrap px-2.5 py-1 text-xs">상세</Button>}>
@@ -73,7 +86,7 @@ function VolumeDetail({ v }: { v: VolumeRow }) {
           {v.users === undefined ? <p className="text-ink/70">이 응답에는 권한 사용자 정보가 없습니다</p>
             : v.users.length === 0 ? (
               <p className="text-ink/70">
-                {`이 namespace 에 <ID>-clusterrole-admin|edit 바인딩이 없습니다 — 일반 사용자는 이 PV 를 고를 수 없습니다(전체 PV 권한 관리자만).`}
+                {`이 namespace 에 <ID>-clusterrole-admin|edit·namespaceAdmin(소유자) 바인딩이 없습니다 — 일반 사용자는 이 PV 를 고를 수 없습니다(전체 PV 권한 관리자만).`}
               </p>
             ) : (
               <div className="flex flex-wrap gap-1.5">
@@ -89,13 +102,18 @@ function VolumeDetail({ v }: { v: VolumeRow }) {
         <div className="flex flex-wrap items-center justify-end gap-2 border-t border-line pt-3">
           {!v.selectable && <span className="mr-auto text-xs text-bad">{v.reason ? reasonText(v.reason) : "지금은 작업 대상으로 고를 수 없습니다"}</span>}
           <Button variant="ghost" onClick={() => setOpen(false)}>닫기</Button>
-          {v.selectable ? (
+          {v.selectable && !usable && (
+            <span className="mr-auto text-xs text-attn">
+              {`이 PV 에 대한 권한이 없습니다 — ${v.namespace} 에 ${bindingNameFor(me.data?.actor ?? "<ID>")} 또는 namespaceAdmin(소유자)이 필요합니다`}
+            </span>
+          )}
+          {v.selectable && usable ? (
             <Link to={pvJobLink(v.cluster, v.namespace, v.pvc)}
                   className="inline-flex items-center justify-center whitespace-nowrap rounded-lg bg-accent px-3 py-2 text-sm font-medium text-white hover:bg-accenthover">
               이 PV로 단일 작업
             </Link>
           ) : (
-            <Button disabled title="고를 수 없는 PV 입니다">이 PV로 단일 작업</Button>
+            <Button disabled title={v.selectable ? "이 PV 에 대한 권한이 없습니다" : "고를 수 없는 PV 입니다"}>이 PV로 단일 작업</Button>
           )}
         </div>
       </div>
@@ -212,7 +230,7 @@ export function VolumesPage() {
             : filtered ? <p className="pt-3 text-ink/70">조건에 맞는 PV 가 없습니다</p>
             : <p className="pt-3 text-ink/70">동기화된 PVC 가 0개입니다</p>}
           <p className="mt-3 text-xs text-ink/70">
-            {`권한: namespace 의 <ID>-clusterrole-admin|edit 바인딩(${Object.keys(ACCESS_LABEL).join("·")})이면 그 namespace 의 모든 PV 에 읽기·쓰기. Bound 가 아닌 PV·StorageClass 매핑이 없는 PV 는 작업 대상으로 고를 수 없습니다.`}
+            {`권한: namespace 의 <ID>-clusterrole-admin|edit 바인딩 또는 소유자 namespaceAdmin(이메일 로컬파트 = 아이디)(${Object.keys(ACCESS_LABEL).join("·")})이면 그 namespace 의 모든 PV 에 읽기·쓰기. Bound 가 아닌 PV·StorageClass 매핑이 없는 PV 는 작업 대상으로 고를 수 없습니다.`}
           </p>
         </Card>
       )}

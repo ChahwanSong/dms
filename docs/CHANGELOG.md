@@ -95,6 +95,34 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ✅ dms-k8s 결정 항목 반영 — namespaceAdmin 맵핑·동기화 실패는 경고만·배치 PV 검색·scan 특권 운영자·숫자 아이디·PV 버튼 — **구현**(2026-10-26, 라이브 실증은 d3)
+
+사용자가 BACKLOG 설계 §10 결정 대기 항목을 정했다(BACKLOG 「설계 §10 결정」).
+
+- **(a) namespace 소유자 맵핑**: `k8s_rbac.namespace_admin_user` — 이름 `namespaceAdmin` + ClusterRole kubeflow-admin + User subject
+  하나 + 이메일 도메인 = `account_email_domain` 이면 로컬파트(소문자, 계정 아이디 규칙)가 그 namespace 의 admin. 도메인이 다르거나
+  모르면 인식하지 않는다(남의 회사 같은 로컬파트·설정 없는 호출 — fail-closed). 적용 루프·run 개수가 도메인을 넘긴다
+  (`apply_run`·`receive`·`snapshot_counts` 의 `email_domain`). 테스트베드 오버레이 `DMS_ACCOUNT_EMAIL_DOMAIN: example.com`
+  (테스트베드 바인딩 이메일 — team-c 의 ops.lead 가 새로 보인다). 포탈 문구(인식 안 됨 이유·권한 안내·「또는 namespaceAdmin」).
+- **(b)** kubeflow-view 는 권한 아님 — 그대로, 테스트로 고정. **(j)** 「운영자」 = 특권 목록·부여 관리자, **(k)** 사용자 지정 작업은
+  그 사용자 목록에 보이지 않음 — 그대로. **(h)** FlashBlade 보류.
+- **(c) 동기화가 오래 실패해도 막지 않고 경고만**: `pvLocation.freshnessWarns`(오래됨·지연·실패) → PV 고르기 줄 「목록이 오래됐을 수
+  있습니다(동기화 실패 중) — … 제출은 그대로 됩니다」, 스냅숏 기준 줄 경고색. 서버 판정은 마지막 성공 스냅숏 그대로(불변식 12).
+- **(e) 배치 생성 「PV 에서 경로 찾기」 사이드바**(k8s 모드): `features/k8s/PvPathPicker` — PV 검색(관리자 PV API, 상한 50) → PV 안
+  경로 → 넣을 경로(관리 디렉토리 기준)·실제 경로 표시 → 「경로 칸에 넣기」(scan·rm)·「소스/목적지 칸에 넣기」(sync). 배치 스토리지가
+  비면 그 PV 의 스토리지로 채우고, 다르면 잠그고 이유를 보인다, rm 은 PV 루트를 넣지 않는다. 마지막 포커스 칸 → 첫 빈 칸 → 새 행.
+  배치 바디는 그대로 직접 경로다.
+- **(g) scan 은 특권 운영자만**: `k8s_access.scan_allowed` — 제출(403 `scan_unrestricted_only`, 연산 allowlist 보다 먼저)·/me
+  `user_operations`·planner·컨펌(`recheck_request`). 오버레이(testbed-k8s·prod) `DMS_USER_ALLOWED_OPERATIONS: "sync,rm"`. 포탈은 k8s
+  모드에서 관리자도 /me 의 연산 목록으로 선택지를 그린다.
+- **숫자만으로 된 아이디 거부**: 계정 생성·가입 인증번호 `username_numeric_only`(재설정은 옛 계정용으로 막지 않음), k8s 「사용자 지정」·
+  프런트 미러 같은 패턴.
+- **PV 탐색 「이 PV로 단일 작업」**: 전체 PV 권한이 없는 관리자의 맵핑 밖 PV 는 버튼 잠금 + 필요한 바인딩 안내(`canUsePv`).
+- **ssc DB 정리(운영)**: 제거된 dms-w4·w5 의 agent_nodes 2행·agent_reports 73,865행 삭제(ssc 클러스터 api 파드에서, 읽기 확인 뒤).
+- 테스트: k8s_rbac namespaceAdmin 12종·테스트베드 실데이터 소유자 3명·적용 루프 도메인 전달, scan 게이트(사용자·목록 밖 관리자 403,
+  특권 운영자 202, DB 변조 행 planner 거부, /me), 게이트 시험의 기본 연산을 rm 으로(`_rm`), 숫자 아이디(저장소·가입·사용자 지정), 프런트
+  freshnessWarns·실패 중 경고 + 제출 가능·VolumesPage 3경우·BatchCreate.k8s 6경우.
+
 ### ✅ PV 목적지 sync 의 결과 소유 = 목적지 PV 루트 소유자(자동 chown) — **구현**(2026-10-26, 라이브 실증은 d3)
 
 사용자 결정(BACKLOG (l) 「아주아주 중요」): root sync 의 결과를 소스 소유로 두면 다른 namespace 파드(그 PV 의 uid/fsGroup)가 결과를 못

@@ -232,6 +232,18 @@ test("PV 루트 rm 차단: '', '.', './' 는 PV 루트라 잠기고 이유를 �
   expect(submitButton()).toBeEnabled();
 });
 
+test("동기화가 실패 중이면 고른 PV 줄에 경고만 띄우고 제출은 막지 않는다(2026-10-26 (c))", async () => {
+  server.use(http.get("/api/user/k8s/volumes", () => HttpResponse.json(userVolumes({
+    clusters: [{ name: "dmsk8s", synced_at: ago(40), stale: false, status: "failing" }],
+  }))));
+  renderAs(meUser);
+  await choose("rm");
+  await pick("namespace (StorageClass)", "PV 이름", "team-a (tb-nfs)", "datasets — 2Gi · Bound");
+  await userEvent.type(screen.getByLabelText("PV 안 경로"), "old");
+  expect(screen.getByText(/목록이 오래됐을 수 있습니다\(동기화 실패 중\)/)).toBeInTheDocument();
+  await waitFor(() => expect(submitButton()).toBeEnabled());
+});
+
 test("Bound 아닌 PV 는 고를 수 없다(「용량 · 상태」 + 이유), namespace 가 하나면 자동으로 골라진다", async () => {
   server.use(http.get("/api/user/k8s/volumes", () => HttpResponse.json(userVolumes({
     namespaces: [{ cluster: "dmsk8s", namespace: "team-a", access: "admin" }],
@@ -250,7 +262,8 @@ test("빈 상태 1 -- 권한 namespace 0개: rolebinding <ID>-clusterrole-edit|a
   server.use(http.get("/api/user/k8s/volumes", () => HttpResponse.json(userVolumes({ namespaces: [], volumes: [] }))));
   renderAs(meUser);
   expect(await screen.findByText(
-    "rolebinding junwoo-song-clusterrole-edit|admin 이 있는 namespace 가 없습니다 — 관리자에게 요청하세요")).toBeInTheDocument();
+    "rolebinding junwoo-song-clusterrole-edit|admin(또는 namespace 소유자 namespaceAdmin)이 있는 namespace 가 없습니다 — 관리자에게 요청하세요"))
+    .toBeInTheDocument();
   expect(screen.queryByText(/아직 k8s 권한·PV 목록이 동기화되지 않았습니다/)).toBeNull();
   expect(screen.queryByText(/PV 목록을 불러오지 못했습니다/)).toBeNull();
   expect(screen.getByLabelText("소스 namespace (StorageClass)")).toBeDisabled();

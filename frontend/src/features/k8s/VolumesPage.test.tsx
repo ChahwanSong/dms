@@ -94,6 +94,38 @@ test("상세: 고를 수 없는 PV 는 단일 작업 버튼이 잠기고 사유�
   expect(within(dialog).getByText("아직 없음(바인딩 전)")).toBeInTheDocument();
 });
 
+const meAs = (actor: string, unrestricted: boolean) =>
+  server.use(http.get("/api/auth/me", () => HttpResponse.json({ actor, role: "admin", identity_mode: "k8s", unrestricted })));
+
+async function openModels() {
+  await screen.findByText("models", { selector: "span.font-medium" });
+  await userEvent.click(within(rowOf("models")).getByRole("button", { name: "상세" }));
+  return screen.findByRole("dialog", { name: "PV 이름 models" });
+}
+
+test("상세: 전체 PV 권한이 없는 관리자는 자기 맵핑이 없는 PV 에서 단일 작업이 잠기고 이유를 보인다(2026-10-26)", async () => {
+  meAs("ops2", false);
+  wrap();
+  const dialog = await openModels();
+  await waitFor(() => expect(within(dialog).getByRole("button", { name: "이 PV로 단일 작업" })).toBeDisabled());
+  expect(within(dialog).getByText(/이 PV 에 대한 권한이 없습니다 — team-a 에 ops2-clusterrole-edit\|admin 또는 namespaceAdmin/))
+    .toBeInTheDocument();
+});
+
+test("상세: 그 namespace 에 맵핑이 있는 관리자는 단일 작업 링크가 열린다", async () => {
+  meAs("junwoo.song", false);
+  wrap();
+  const dialog = await openModels();
+  expect(await within(dialog).findByRole("link", { name: "이 PV로 단일 작업" })).toBeInTheDocument();
+});
+
+test("상세: 전체 PV 권한 관리자는 맵핑과 무관하게 단일 작업 링크가 열린다", async () => {
+  meAs("root", true);
+  wrap();
+  const dialog = await openModels();
+  expect(await within(dialog).findByRole("link", { name: "이 PV로 단일 작업" })).toBeInTheDocument();
+});
+
 test("상한에 걸리면(truncated) 좁히라고 안내", async () => {
   wrap(volumes({ truncated: true }));
   expect(await screen.findByText(/결과가 많아 처음 200건만 보입니다/)).toBeInTheDocument();

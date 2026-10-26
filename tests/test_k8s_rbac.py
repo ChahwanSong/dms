@@ -97,3 +97,40 @@ def test_synthetic_fixture_rolebindings_end_to_end():
     }
     unrecognized = sorted(k[1] for k, v in derived.items() if not v["dms_user"])
     assert unrecognized == ["bob-clusterrole-edit", "bob-clusterrole-view", "default-editor", "namespaceAdmin"]
+
+
+# --- namespace 소유자(namespaceAdmin) -- 2026-10-26 사용자 결정 (a) ----------------------------------------------
+
+def test_namespace_admin_owner_maps_to_the_email_local_part_as_admin_when_the_domain_matches():
+    owner = _rb("namespaceAdmin", "kubeflow-admin", subjects=[_user("Yo.Hong@Example.com")])
+    assert derive_binding(owner, email_domain="example.com") == {"dms_user": "yo.hong", "access": "admin",
+                                                                 "subject_mismatch": 0}
+    assert derive_binding(owner, email_domain="@EXAMPLE.com")["dms_user"] == "yo.hong"     # 앞 @·대소문자 관용
+    assert is_recognized(owner, email_domain="example.com") is True
+    # 도메인을 모르면(설정 없는 호출) 인식하지 않는다 -- fail-closed(종전 동작)
+    assert derive_binding(owner)["dms_user"] is None
+
+
+@pytest.mark.parametrize("binding", [
+    _rb("namespaceAdmin", "kubeflow-admin", subjects=[_user("yo.hong@other.com")]),            # 다른 도메인 -- 남의 사람
+    _rb("namespaceAdmin", "kubeflow-admin", subjects=[_user("yo.hong")]),                      # 이메일이 아니다
+    _rb("namespaceAdmin", "kubeflow-admin", subjects=[_user("a@b@example.com")]),              # @ 둘
+    _rb("namespaceAdmin", "kubeflow-admin", subjects=[_user("1234@example.com")]),             # 숫자만 아이디(거부 규칙)
+    _rb("namespaceAdmin", "kubeflow-admin", subjects=[_user("Bad Name@example.com")]),         # 계정 아이디 규칙 밖
+    _rb("namespaceAdmin", "kubeflow-admin",
+        subjects=[_user("a@example.com"), _user("b@example.com")]),                            # User 둘 -- 한 칸에 못 담는다
+    _rb("namespaceAdmin", "kubeflow-admin",
+        subjects=[{"kind": "ServiceAccount", "name": "x", "namespace": "ns1"}]),               # SA
+    _rb("namespaceAdmin", "kubeflow-edit", subjects=[_user("yo.hong@example.com")]),           # roleRef 가 admin 이 아니다
+    _rb("namespaceAdmin", "kubeflow-admin", role_kind="Role", subjects=[_user("yo.hong@example.com")]),
+    _rb("namespaceadmin", "kubeflow-admin", subjects=[_user("yo.hong@example.com")]),          # 이름은 정확히
+])
+def test_namespace_admin_outside_the_rule_stays_unrecognized(binding):
+    assert derive_binding(binding, email_domain="example.com") == {"dms_user": None, "access": None,
+                                                                   "subject_mismatch": None}
+
+
+def test_view_bindings_stay_unrecognized_even_with_the_email_domain():
+    # kubeflow-view(읽기)는 권한으로 보지 않는다(2026-10-26 사용자 결정 (b))
+    assert derive_binding(_rb("bob-clusterrole-view", "kubeflow-view", subjects=[_user("bob@example.com")]),
+                          email_domain="example.com")["dms_user"] is None

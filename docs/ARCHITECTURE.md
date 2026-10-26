@@ -158,6 +158,14 @@ API POST /api/user/requests
     모든 잡이 root 라 커널 DAC 가 없어서, 이것이 빠지면 자기 PV 안 링크 하나로 남의 PV 를 읽고 덮어쓴다. 권한의 **신원**은
     「DMS 계정 아이디 == RoleBinding 에서 뽑은 ID」라 가입 인증 메일(`<ID>@회사 도메인`)이 그 증명이다 — 메일러 stub·인증 꺼짐이면
     아직 계정이 없는 사람의 ID 를 누구나 선점할 수 있다(개요 응답 `signup_guard` → 화면 경고, 기동은 막지 않는다 — 테스트베드는 stub).
+    **맵핑 규칙은 `k8s_rbac.derive_binding` 하나**(2026-10-26 사용자 결정 (a)·(b)): 이름 규칙 `<ID>-clusterrole-admin|edit` +
+    ClusterRole kubeflow-admin|edit, 그리고 namespace 소유자 `namespaceAdmin`(ClusterRole kubeflow-admin, User subject 하나,
+    이메일 도메인 = `account_email_domain` 일 때 로컬파트 = 아이디, admin) — 도메인을 모르면 인식하지 않는다(적용 루프가
+    `apply_run(email_domain=)` 로 넘긴다). kubeflow-view 는 권한이 아니다. **동기화가 계속 실패해도 막지 않는다**(같은 날 (c)):
+    판정은 마지막 성공 스냅숏 그대로이고 화면만 경고한다(`k8s_sync.freshness` → 포탈 `pvLocation.freshnessWarns` — 오래됨·
+    지연·실패); 막는 것은 한 번도 성공하지 않은 클러스터(모름 409)뿐이다. **scan 은 특권 운영자만**(같은 날 (g)):
+    `k8s_access.scan_allowed` 를 제출(403 `scan_unrestricted_only`)·/me·planner·컨펌이 쓴다. 명시 chown·chmod 도 특권
+    운영자만(§7 「PV 목적지 root sync 의 결과 소유」).
 
 ---
 ## 4. 제어면 루프 (Control-plane loops)

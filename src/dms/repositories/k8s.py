@@ -351,7 +351,8 @@ class K8sRepository:
         return cluster["consecutive_failures"] or 0
 
     def receive(self, run_id, *, node_name, now, ok, data=None, fingerprint=None, reason=None, phase=None,
-                http_status=None, error=None, server_version=None, duration_ms=None, warnings=None) -> dict:
+                http_status=None, error=None, server_version=None, duration_ms=None, warnings=None,
+                email_domain=None) -> dict:
         """에이전트 결과 수용. run 이 그 노드의 claimed 이고 기한(업로드 유예 포함) 안일 때만 -- 아니면 RunClosed.
         성공은 정규화된 data 를 payload 로 저장(received -- 적용은 컨트롤러). 실패는 run failed + 클러스터 요약(사유·연속 실패·
         대체 예약)까지 즉시. 반환 {"status", "cluster", "previous_failures"}."""
@@ -367,7 +368,7 @@ class K8sRepository:
                     """UPDATE k8s_sync_runs SET status = 'received', finished_at = :now, duration_ms = :dur,
                            server_version = :sv, warnings = :w, counts = :counts, payload = :payload
                        WHERE run_id = :r AND status = 'claimed'""",
-                    {**common, "counts": dump_json(k8s_sync.snapshot_counts(data)),
+                    {**common, "counts": dump_json(k8s_sync.snapshot_counts(data, email_domain=email_domain)),
                      "payload": dump_json({"fingerprint": fingerprint, "data": data})})
                 return {"status": "received", "cluster": run["cluster_name"], "previous_failures": None}
             if reason not in k8s_sync.SYNC_REASONS:
@@ -415,7 +416,7 @@ class K8sRepository:
             """UPDATE k8s_sync_runs SET status = 'superseded', payload = NULL, applied_at = :now
                WHERE run_id = :r AND status = 'received'""", {"r": run_id, "now": utc_now_iso()}) == 1
 
-    def apply_run(self, run_id, *, now=None) -> dict:
+    def apply_run(self, run_id, *, now=None, email_domain=None) -> dict:
         """received run 하나를 스냅숏에 diff 로 적용한다(한 트랜잭션). 반환 {"outcome": applied|discarded|superseded|skipped,
         "cluster", "previous_failures", "changes"}. 예외는 그대로 올린다(트랜잭션 롤백 -- 호출자가 fail_apply 로 닫는다)."""
         now = now or utc_now_iso()
@@ -441,7 +442,7 @@ class K8sRepository:
             data = payload.get("data")
             if not isinstance(data, dict):
                 raise ValueError("received run has no data")
-            changes = self._apply_snapshot(name, data)
+            changes = self._apply_snapshot(name, data, email_domain=email_domain)
             self._db.execute(
                 "UPDATE k8s_sync_runs SET changes = :ch, payload = NULL WHERE run_id = :r",
                 {"r": run_id, "ch": dump_json(changes)})
@@ -471,7 +472,7 @@ class K8sRepository:
 
     # --- 스냅숏 diff 적용 ---------------------------------------------------------------------------
 
-    def _apply_snapshot(self, cluster: str, data: dict) -> dict:
+    def _apply_snapshot(self, cluster: str, data: dict, *, email_domain=None) -> dict:
         changes = {}
         for table, keys, cols, json_cols, data_key, change_name in _SNAPSHOT:
             items = data.get(data_key)
@@ -479,7 +480,8 @@ class K8sRepository:
                 changes[change_name] = None        # 그 목록은 이번에 못 가져왔다(403) -- 이전 값 유지
                 continue
             if table == "k8s_role_bindings":
-                items = [{**it, **derive_binding(it)} for it in items]
+                # namespaceAdmin(소유자) 인식은 계정 메일 도메인이 필요하다(k8s_rbac -- 없으면 인식 안 함, fail-closed)
+                items = [{**it, **derive_binding(it, email_domain=email_domain)} for it in items]
             changes[change_name] = self._diff_apply(table, cluster, items, keys, cols, json_cols)
         return changes
 

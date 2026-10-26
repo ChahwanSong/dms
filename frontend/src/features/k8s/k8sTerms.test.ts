@@ -51,8 +51,11 @@ test("인식 규칙 표시: 역할·이름 중 무엇이 어긋났는지 한 줄
   expect(BINDING_NAME_RE.test("junwoo-song-clusterrole-admin")).toBe(true);
   expect(unrecognizedWhy({ name: "bob-clusterrole-edit", role_kind: "ClusterRole", role_name: "edit" }))
     .toContain("역할이 ClusterRole kubeflow-admin·kubeflow-edit 가 아님");
+  // namespaceAdmin(소유자, 2026-10-26 (a)) -- 서버가 인식하지 않았다면 도메인·subject 조건 탓
   expect(unrecognizedWhy({ name: "namespaceAdmin", role_kind: "ClusterRole", role_name: "kubeflow-admin" }))
-    .toContain("이름이 <ID>-clusterrole-admin|edit 꼴이 아님");
+    .toContain("이메일 도메인이 DMS 계정 메일 도메인과 다르거나 User subject 가 하나가 아님");
+  expect(unrecognizedWhy({ name: "namespaceAdmin", role_kind: "ClusterRole", role_name: "kubeflow-edit" }))
+    .toContain("역할이 ClusterRole kubeflow-admin 이 아님");
   expect(unrecognizedWhy({ name: "bob-clusterrole-view", role_kind: "ClusterRole", role_name: "kubeflow-view" }))
     .toContain("이름도");
 });

@@ -176,6 +176,11 @@ export const BINDING_NAME_RE = /^(.+)-clusterrole-(admin|edit)$/;
 
 /** 인식하지 않은 바인딩의 이유(표시용 — 판정은 서버). */
 export function unrecognizedWhy(b: Pick<UnrecognizedBinding, "name" | "role_kind" | "role_name">): string {
+  // namespace 소유자(KFAM namespaceAdmin, 2026-10-26 (a)) -- 서버는 User subject 하나 + 이메일 도메인 = 계정 메일 도메인일 때만 인식
+  if (b.name === "namespaceAdmin")
+    return b.role_kind === "ClusterRole" && b.role_name === "kubeflow-admin"
+      ? "namespace 소유자(namespaceAdmin)이지만 이메일 도메인이 DMS 계정 메일 도메인과 다르거나 User subject 가 하나가 아님"
+      : "이름은 namespaceAdmin 이지만 역할이 ClusterRole kubeflow-admin 이 아님";
   const roleOk = b.role_kind === "ClusterRole" && (RECOGNIZED_ROLES as readonly string[]).includes(b.role_name ?? "");
   const nameOk = BINDING_NAME_RE.test(b.name);
   if (!roleOk && !nameOk) return "역할이 ClusterRole kubeflow-admin·kubeflow-edit 가 아니고 이름도 <ID>-clusterrole-admin|edit 꼴이 아님";

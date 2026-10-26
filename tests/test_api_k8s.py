@@ -414,6 +414,19 @@ def _full_sync(admin, repos):
     return run_id
 
 
+def test_inventory_loop_maps_namespace_admin_owners_with_the_account_email_domain(admin, repos):
+    """적용 루프는 설정의 계정 메일 도메인을 넘긴다(2026-10-26 (a)) -- 합성 픽스처의 team-a namespaceAdmin owner@example.com
+    이 owner 의 admin 이 된다. 설정이 없으면(종전 호출) 인식하지 않는다."""
+    from types import SimpleNamespace
+    _setup(admin, repos)
+    run_id = _claim(admin, "k8s-w1").json()["run"]["run_id"]
+    admin.post(f"/api/agent/k8s-sync/runs/{run_id}", json={"node_name": "k8s-w1", "ok": True, "data": _data()},
+               headers=_agent("k8s-w1"))
+    assert run_inventory_once(repos, SimpleNamespace(account_email_domain="example.com"))["applied"] == 1
+    cluster = repos.k8s.list_clusters()[0]["name"]
+    assert repos.k8s.access_for("owner", cluster, "team-a") == "admin"
+
+
 def test_end_to_end_overview_runs_and_freshness(admin, repos, db):
     run_id = _full_sync(admin, repos)
     ov = admin.get("/api/admin/k8s/overview").json()

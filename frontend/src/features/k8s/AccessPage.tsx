@@ -201,7 +201,7 @@ export function AccessPage() {
   return (
     <section className="space-y-4">
       <K8sHeader title="사용자 권한"
-                 description="RoleBinding <ID>-clusterrole-admin|edit(역할 ClusterRole kubeflow-admin|kubeflow-edit)이 있는 namespace 의 모든 PV 에 그 ID 가 읽기·쓰기 권한을 가집니다. ID 는 이름 앞부분의 - 를 . 으로 바꾼 값이고 DMS 계정 아이디와 정확히 같아야 합니다." />
+                 description="RoleBinding <ID>-clusterrole-admin|edit(역할 ClusterRole kubeflow-admin|kubeflow-edit) 또는 namespace 소유자 namespaceAdmin(이메일 로컬파트, 계정 메일 도메인과 같을 때)이 있는 namespace 의 모든 PV 에 그 ID 가 읽기·쓰기 권한을 가집니다. ID 는 이름 앞부분의 - 를 . 으로 바꾼 값이고 DMS 계정 아이디와 정확히 같아야 합니다." />
       <FreshnessLine clusters={clusters} />
       <div className="flex flex-wrap items-center gap-2">
         <Segmented label="보기 기준" value={view} onChange={setView}

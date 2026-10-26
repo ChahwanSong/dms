@@ -171,7 +171,8 @@ def _receive(request: Request, run_id: str, node_name: str, body: dict) -> dict:
             http_status=_int_or_none(body.get("http_status")), error=error,
             server_version=_short_str(body.get("server_version"), 64),
             duration_ms=duration if duration is not None and duration >= 0 else None,
-            warnings=_warnings(body.get("warnings")))
+            warnings=_warnings(body.get("warnings")),
+            email_domain=getattr(request.app.state.settings, "account_email_domain", None))
     except RunClosed:
         raise HTTPException(status_code=409, detail="k8s_sync_expired")
     if res["status"] == "failed":

@@ -1,6 +1,7 @@
 import { beforeEach, expect, test } from "vitest";
 import {
-  SIDE_LABELS, bindingNameFor, buildGroups, effectiveGroup, emptyLoc, groupKey, normalizeSub, parsePvParam, pvAbsPath,
+  SIDE_LABELS, bindingNameFor, buildGroups, effectiveGroup, emptyLoc, freshnessWarns, groupKey, normalizeSub, parsePvParam,
+  pvAbsPath,
   pvDestParent, pvOptionText, pvSubProblem, pvSummaryText, readLastGroup, unselectableText, writeLastGroup,
 } from "./pvLocation";
 import { pvJobLink } from "./k8sTerms";
@@ -118,4 +119,14 @@ test("고를 수 없는 이유: 서버 사유를 짧은 말로(매핑 스토리�
   expect(unselectableText({ reason: "storage_disabled", phase: "Bound" })).toBe("비활성 스토리지");
   expect(unselectableText({ reason: "storage_admin_only", phase: "Bound" })).toBe("관리자 전용 스토리지");
   expect(unselectableText({ reason: "zz", phase: "Bound" })).toBe("고를 수 없음");
+});
+
+test("freshnessWarns: 오래됨(stale)·지연·실패면 경고, 정상·한 번도 성공 안 함(모름 -- 서버 409)은 경고 아님(2026-10-26 (c))", () => {
+  const at = "2026-10-26T00:00:00Z";
+  expect(freshnessWarns({ name: "c", synced_at: at, stale: false, status: "ok" })).toBe(false);
+  expect(freshnessWarns({ name: "c", synced_at: at, stale: true, status: "ok" })).toBe(true);
+  expect(freshnessWarns({ name: "c", synced_at: at, stale: false, status: "failing" })).toBe(true);
+  expect(freshnessWarns({ name: "c", synced_at: at, stale: false, status: "delayed" })).toBe(true);
+  expect(freshnessWarns({ name: "c", synced_at: null, stale: false, status: "never" })).toBe(false);
+  expect(freshnessWarns(null)).toBe(false);
 });

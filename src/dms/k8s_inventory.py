@@ -45,7 +45,8 @@ def run_inventory_once(repos, settings, *, now=None, budget_seconds=TICK_BUDGET_
             if k8s.supersede(old["run_id"]):
                 stats["superseded"] += 1
         try:
-            outcome = k8s.apply_run(newest["run_id"], now=now)
+            outcome = k8s.apply_run(newest["run_id"], now=now,
+                                    email_domain=getattr(settings, "account_email_domain", None))
         except Exception as exc:  # noqa: BLE001 -- 한 클러스터의 적용 실패가 루프를 멈추지 않는다
             print(f"k8s-inventory apply failed cluster={cluster}: {type(exc).__name__}: {exc}", file=sys.stderr)
             failed = k8s.fail_apply(newest["run_id"], error=f"{type(exc).__name__}: {exc}", now=now)

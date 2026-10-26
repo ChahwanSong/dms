@@ -173,6 +173,12 @@ export function freshnessOf(clusters: ClusterFreshness[] | undefined, name: stri
   return (clusters ?? []).find((c) => c.name === name) ?? null;
 }
 
+/** 스냅숏이 오래됐을 수 있어 경고할 클러스터인가(2026-10-26 사용자 결정 (c) 「막지 않고 경고만」) -- 마지막 성공이 2×주기보다
+ *  오래됐거나(stale) 상태가 지연·실패. 한 번도 성공하지 않은 클러스터(synced_at null)는 「모름」이라 서버가 409 로 막는 다른 경우다. */
+export function freshnessWarns(c: ClusterFreshness | null): boolean {
+  return c !== null && c.synced_at !== null && (c.stale === true || c.status === "failing" || c.status === "delayed");
+}
+
 // ---- 최근 고른 namespace (StorageClass) 기억(브라우저별 편의 -- 실패해도 화면은 그대로) ----------------------------------
 const LAST_GROUP_KEY = (side: Side) => `dms.submit.k8s.group.${side}`;
 

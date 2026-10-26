@@ -22,6 +22,9 @@ import { ApiError } from "../../lib/api";
 import { syncOwnership } from "../../lib/syncOwnership";
 import { relativePathProblem } from "../../lib/storagePaths";
 import { rmTargetOverlaps } from "../../lib/rmTargets";
+import { useMe } from "../auth/useAuth";
+import { PvPathPicker } from "../k8s/PvPathPicker";
+import type { PvSlot } from "../k8s/PvPathPicker";
 
 // 배치 생성(슬라이스 32): 단일 작업과 같은 한 장짜리 시트 + 오른쪽 제출 요약(2026-10-06 — 4스텝
 // 위저드를 걷었다. 「왜」는 components/form/SubmitLayout 주석). 구획 순서: 작업 종류 → 대상 스토리지와
@@ -116,6 +119,10 @@ export function BatchCreate() {
   const [tab, setTab] = useState<InputTab>("table");
   const [csvText, setCsvText] = useState("");
   const [csvErrors, setCsvErrors] = useState<string[]>([]);
+  // 「PV 에서 경로 찾기」(k8s 모드, 2026-10-26 (e)): 마지막으로 포커스한 칸 -- 넣기는 그 칸, 없으면 첫 빈 칸, 없으면 새 행.
+  const me = useMe();
+  const k8sMode = me.data?.identity_mode === "k8s";
+  const [lastFocus, setLastFocus] = useState<{ row: number; slot: PvSlot } | null>(null);
 
   const storages = storagesQ.data ?? [];
   const loadingStorages = storagesQ.isLoading;
@@ -362,6 +369,23 @@ export function BatchCreate() {
     setCsvErrors([]);                // 수동 편집 = 사용자가 인수 — 파스 오류는 무효
   };
 
+  // PV 검색 패널의 「넣기」: 배치 스토리지가 비어 있으면 그 PV 의 스토리지로 채우고(다르면 패널이 버튼을 잠근다), 경로는
+  // 마지막 포커스 칸 → 첫 빈 칸 → 새 행 순서로 넣는다. 결과를 바로 보이게 표 입력으로 돌아간다.
+  const insertFromPv = (slot: PvSlot, storage: string, path: string) => {
+    if (f.op === "sync") {
+      if (slot === "a" && f.srcStorage === "") setF({ ...f, srcStorage: storage });
+      if (slot === "b" && f.dstStorage === "") setF({ ...f, dstStorage: storage });
+    } else if (f.storage === "") {
+      setF({ ...f, storage });
+    }
+    const focused = lastFocus !== null && lastFocus.slot === slot && lastFocus.row < rows.length ? lastFocus.row : -1;
+    const idx = focused >= 0 ? focused : rows.findIndex((r) => r[slot].trim() === "");
+    setRows(idx === -1 ? [...rows, slot === "a" ? { a: path, b: "" } : { a: "", b: path }]
+      : rows.map((r, j) => (j === idx ? { ...r, [slot]: path } : r)));
+    setCsvErrors([]);
+    setTab("table");
+  };
+
   // 입력 방식 전환(세그먼트). 역할은 버튼 그대로(aria-pressed) -- 세 방식은 같은 rows 를 고치는
   // 도구라 탭 패널 구조가 아니고, CSV 반영 성공이 표로 돌아오는 동선(applyParsed)이 있다.
   const segment = (t: InputTab, label: string) => (
@@ -524,11 +548,11 @@ export function BatchCreate() {
                       <input aria-label={`${i + 1}행 ${f.op === "sync" ? "소스" : "경로"}`}
                              placeholder={f.op === "sync" ? "예: team/dataset"
                                : f.op === "rm" ? "예: team/old-project" : "예: team/projects"}
-                             className={cell} value={r.a}
+                             className={cell} value={r.a} onFocus={() => setLastFocus({ row: i, slot: "a" })}
                              onChange={(e) => setRow(i, "a", e.target.value)} />
                       {f.op === "sync" && (
                         <input aria-label={`${i + 1}행 목적지`} placeholder="예: backup/dataset"
-                               className={cell} value={r.b}
+                               className={cell} value={r.b} onFocus={() => setLastFocus({ row: i, slot: "b" })}
                                onChange={(e) => setRow(i, "b", e.target.value)} />
                       )}
                       <button type="button" aria-label={`${i + 1}행 삭제`}
@@ -950,7 +974,15 @@ export function BatchCreate() {
         <h1 className="text-2xl font-bold">배치 생성</h1>
         <p className="mt-1 text-sm text-muted">여러 경로를 한 번에 scan·sync·rm 합니다.</p>
       </div>
-      <SubmitLayout sheet={sheet} summary={summary} />
+      <SubmitLayout sheet={sheet} summary={k8sMode ? (
+        // 사이드바: PV 검색으로 직접 경로를 찾아 표에 넣는다(배치는 여전히 직접 경로만 -- 2026-10-26 (e)).
+        <div className="min-w-0 space-y-5">
+          <PvPathPicker op={f.op}
+                        storages={f.op === "sync" ? { a: f.srcStorage, b: f.dstStorage } : { a: f.storage, b: "" }}
+                        onInsert={insertFromPv} />
+          {summary}
+        </div>
+      ) : summary} />
     </section>
   );
 }

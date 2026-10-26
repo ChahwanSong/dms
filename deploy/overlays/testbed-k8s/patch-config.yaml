@@ -30,6 +30,9 @@ data:
   DMS_IDENTITY_SUPPLEMENTARY_GROUPS: "false"
   DMS_IDENTITY_MODE: "k8s"
   DMS_USER_ALLOWED_OPERATIONS: "sync,rm"
+  # 계정 메일 도메인 = 테스트베드 RoleBinding subject 의 이메일 도메인(namespaceAdmin 소유자 인식 — k8s_rbac, 2026-10-26 (a)).
+  # 가입 인증 메일 주소도 <아이디>@이 도메인이 된다(테스트베드는 stub 메일러).
+  DMS_ACCOUNT_EMAIL_DOMAIN: "example.com"
   DMS_LDAP_URI: null
   DMS_LDAP_USER_BASE: null
   DMS_LDAP_GROUP_BASE: null

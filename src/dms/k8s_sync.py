@@ -417,12 +417,13 @@ def normalize_snapshot(data) -> dict:
     return out
 
 
-def snapshot_counts(data: dict) -> dict:
-    """정규화된 data 의 개수(run 이력 표시용). 선택 목록이 None 이면 그 개수도 None(모름 ≠ 0)."""
+def snapshot_counts(data: dict, *, email_domain=None) -> dict:
+    """정규화된 data 의 개수(run 이력 표시용). 선택 목록이 None 이면 그 개수도 None(모름 ≠ 0). email_domain 은 namespaceAdmin
+    인식(k8s_rbac.derive_binding)에 -- 적용 루프와 같은 값."""
     from .k8s_rbac import derive_binding
     pvcs = data.get("pvcs") or []
     rbs = data.get("role_bindings") or []
-    derived = [derive_binding(rb) for rb in rbs]
+    derived = [derive_binding(rb, email_domain=email_domain) for rb in rbs]
     namespaces = {p["namespace"] for p in pvcs} | {rb["namespace"] for rb in rbs}
     return {
         "storage_classes": None if data.get("storage_classes") is None else len(data["storage_classes"]),
