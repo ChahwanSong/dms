@@ -71,18 +71,19 @@ PostgreSQL(제어면) + React 포탈 + 노드 에이전트 + Volcano gang-schedu
   고정한다 — 여기에 실 레지스트리·태그를 커밋하면 git pull 한 다른 사이트가 그 값을
   배포한다(실사고). 태그 bump 는 테스트베드 오버레이의 `newTag`(+`patch-config.yaml` 의
   `DMS_JOB_IMAGE`), 사이트는 `values.env`. **테스트베드는 둘이다**(2026-10-21, deploy/README.md 「테스트베드는 둘이다」):
-  `deploy/overlays/testbed` = **ssc 클러스터**(컨텍스트 `dms`, pkg-01:5000, 태그 `dN`, LDAP 사용) — ssc 빌드 소스가
-  dms-ssc 체크아웃으로 넘어간 뒤로는 **dms-ssc 쪽에서만** bump(전환 전에는 main); `deploy/overlays/testbed-k8s` =
-  **k8s 클러스터**(컨텍스트 `dmsk8s`, pkg-01:5001, 태그 `dN` — d1 부터, 2026-10-26 전엔 `kN`, **LDAP 없음** — 사용자 결정) — **dms-k8s 에서만**(2026-10-22 분리 뒤 이 클러스터의 빌드 소스는 dms-k8s 체크아웃)
-  bump. 한 커밋에서 둘을 같이 올리지 마라. 두 클러스터가 같은 네임스페이스(dms)라 **kubectl 은 늘 `--context` 를
+  ssc 클러스터(컨텍스트 `dms`, pkg-01:5000, LDAP 사용)의 오버레이 `deploy/overlays/testbed` 는 **dms-ssc 에만** 있다
+  (이 브랜치에선 2026-10-26 LDAP 코드 삭제 때 지웠다 — 되살리지 마라); 이 브랜치의 테스트베드 오버레이는
+  `deploy/overlays/testbed-k8s` = **k8s 클러스터**(컨텍스트 `dmsk8s`, pkg-01:5001, 태그 `dN` — d1 부터, 2026-10-26 전엔 `kN`,
+  **LDAP 없음** — 사용자 결정) 하나고 **dms-k8s 에서만**(2026-10-22 분리 뒤 이 클러스터의 빌드 소스는 dms-k8s 체크아웃)
+  bump. 두 클러스터가 같은 네임스페이스(dms)라 **kubectl 은 늘 `--context` 를
   명시**한다(current-context 는 dms; dmsk8s 를 current 로 만들지 마라). 적용은
   항상 `kubectl --context <ctx> apply -k deploy/overlays/<site>` — raw `kubectl apply -f deploy/k8s` 는
-  pull 에서 실패하도록 돼 있다(k8s 클러스터에 raw `20-config.yaml` 은 지운 LDAP 키를 되살린다). apply 전
+  pull 에서 실패하도록 돼 있다(base 이미지는 자리표시자다). apply 전
   `deploy/overlays/guard-images.sh <dir> --context <ctx>` 가 "렌더 이미지 != 라이브" 면 거부하고(exit 3 — 포탈 릴리스 뒤
   오버레이 태그를 안 맞춘 재적용이 되돌리는 사고 방지; 의도한 변경은 `ALLOW_IMAGE_CHANGE=1`), 오버레이의
-  `kube-context` 파일과 다른 컨텍스트면 거부한다(exit 4). testbed-k8s 의 LDAP 삭제(ConfigMap 키 null·에이전트
-  `dms agent`·LDAP env 삭제)는 `tests/test_testbed_k8s_overlay.py` 가 고정한다 — base 에 LDAP 키·env 를 더하면 그
-  오버레이에도 삭제를 더하라. 포탈 빌드는 이미지에 COPY 되는 사본만 스탬프하므로
+  `kube-context` 파일과 다른 컨텍스트면 거부한다(exit 4). base·testbed-k8s·prod 렌더에 LDAP 이 0건이고 에이전트가
+  `dms agent`(root, nslcd 없음)로 뜨는 것을 `tests/test_testbed_k8s_overlay.py`·`test_prod_k8s_overlay.py` 가 고정한다 —
+  LDAP 키·env 를 다시 더하지 마라. 포탈 빌드는 이미지에 COPY 되는 사본만 스탬프하므로
   (`build_manifests`) 포탈에서 태그를 지정해 빌드·릴리스하면 live == 동봉 매니페스트라
   드리프트 배지가 안 뜨고, 동봉값이 자리표시자·타 레지스트리면 배지는 "모름"(None) 이다.
 - **워크트리 공유 중 커밋은 `git commit -- <경로>`**(pathspec). `git add` 로 인덱스를
@@ -105,27 +106,26 @@ PostgreSQL(제어면) + React 포탈 + 노드 에이전트 + Volcano gang-schedu
   - 관리자가 주는 경로는 역할 게이트 + prefix allowlist(`DMS_ARTIFACT_BASE_ALLOWED_PREFIXES`,
     `artifact_base.allowlist_reason`) + realpath 검사 셋 다.
   - uid/gid 부재를 0 으로 기본값 처리하지 않는다 — 부재는 거부(`stepper.identity_problem`,
-    `identity_missing_at_step`). uid 0 자체는 privileged 짝이 맞으면 정당. **예외: 보조 gid 키 부재 = `[]`**
-    (2026-10-08 — 배포 전에 계획된 잡의 정상 모양이고 더 좁은 권한이다, ARCHITECTURE §7-9). 부재를 거부로
-    "강화" 하지 마라 — 진행 중 잡이 배포 순간 전부 끊긴다.
-  - **잡의 root 여부는 제출 시점에 확정돼 payload `run_as_root` 로만 흐른다**(2026-09-30):
-    planner·stepper 는 `identity.privilege_policy`(`run_as_root is True` 또는 배치 자식)만
-    본다 — 특권 목록에 있다는 것만으로 root 가 되지 않는다. 서버(`routes_requests.submit`)는
-    **명시 `run_as_root: true` 만** root(자격 필요, 없으면 403), 생략·false 는 비 root 다.
-    "관리자 기본 root" 는 **포탈**(SubmitJob `rootEffective`)이 정해 관리자에겐 확정값을 항상
-    명시로 싣는다: 자격 있는 관리자는 기본 root, 단 **다른 실행 신원**(owner_username)을
-    지정하면 기본은 그 사용자의 LDAP uid/gid. "관리자 + 실행 신원 = 일반 사용자" 가 무조건
-    root 로 돌아 남의 디렉터리 소유권을 소스 소유로 덮어쓴 프로덕션 사고가 이 규칙의 이유다 —
-    그 경로를 기본 root 로 되돌리지 말고, 서버의 생략 기본값을 root 로 바꾸지 마라(옛 포탈
-    탭·me 판정 불일치가 화면에 없던 root 로 돈다). **dms-k8s 예외 — k8s 신원 모드**(`DMS_IDENTITY_MODE=k8s`,
-    2026-10-25 설계 D1~D4, `k8s_access` 모듈 docstring): LDAP 이 없어 **모든 단건 잡이 root** 이고 서버가
-    `run_as_root: true` 를 싣는다(생략 = root, 명시 false = 422 `run_as_root_required`). 이 모드에서 root 허용은
-    `identity.root_allowed`(세션 인증 요청인가) 하나를 제출·계획(`resolve_job_identity` REQUESTED)·컨펌 세 지점이
-    쓰고, 권한은 root 자격이 아니라 **k8s RoleBinding 맵핑**(`k8s_access`·`repositories.k8s.access_for` — 일반
-    사용자는 PV 주소만, 면제 = `can_run_as_root` 의 관리자 + 특권 목록/부여 + 세션)이 판정한다 — 모드 스위치를
-    둘로 쪼개지 마라(「root 인데 권한 판정 없음」). 세션 조건은 빼지 마라(공유 토큰 → 모든 경로 root). ldap 모드(코드
-    기본)는 위 규칙 그대로다. 배치 자식(IF_ELIGIBLE)은 두 모드 모두 특권 목록 판정. k8s 모드는 그룹 denylist 를
-    평가하지 않는다(그룹 규칙 추가 422 `denylist_group_unsupported`).
+    `identity_missing_at_step`). uid 0 자체는 privileged 짝이 맞으면 정당. 2026-10-26(LDAP 코드 삭제)부터 **privileged 가
+    아닌 신원과 비어 있지 않은 보조 gid 목록도 같은 사유로 거부**한다(정상 producer 가 없고, 그룹 물질화를 지웠으니
+    조용히 버리고 돌리면 스냅숏과 다른 권한이다). **단 root 행의 보조 gid 키 부재·None·`[]` 는 통과**(배포 전에 계획된
+    잡의 정상 모양) — 부재를 거부로 "강화" 하지 마라, 진행 중 잡이 배포 순간 전부 끊긴다.
+  - **dms-k8s 는 k8s 신원 모드 전용 — 모든 잡이 root 이고 근거는 payload `run_as_root` 로만 흐른다**(2026-09-30 →
+    2026-10-25 설계 D1~D4 → 2026-10-26 LDAP 코드 삭제, `k8s_access`·`identity` 모듈 docstring): 서버(`routes_requests.submit`)가
+    단건에 `run_as_root: true` 를 싣는다(생략 = root, 명시 false = 422 `run_as_root_required`). root 허용은
+    `identity.root_allowed`(세션 인증 요청인가 + 특권 허용 스위치) 하나를 제출·계획(`resolve_job_identity` REQUESTED)·컨펌
+    세 지점이 쓰고, 권한은 root 자격이 아니라 **k8s RoleBinding 맵핑**(`k8s_access`·`repositories.k8s.access_for` — 일반
+    사용자는 PV 주소만, 면제 = `can_run_as_root` 의 관리자 + 특권 목록/부여 + 세션)이 판정한다 — 「모든 잡 root」와
+    「맵핑 판정」을 둘로 쪼개는 스위치를 만들지 마라(「root 인데 권한 판정 없음」). 세션 조건은 빼지 마라(공유 토큰 →
+    모든 경로 root). 배치 자식(IF_ELIGIBLE)은 특권 목록 판정. planner·stepper 는 `identity.privilege_policy`
+    (`run_as_root is True` 또는 배치 자식)만 본다 — 특권 목록에 있다는 것만으로 root 가 되지 않는다. **근거가 없는 행
+    (run_as_root 없는 옛 행·목록 밖 생성자의 배치 자식)은 낮추지 않고 `privileged_not_authorized` 로 거부**한다 — 낮출
+    비 root 신원(LDAP uid/gid)이 없다. LDAP 리졸버·보조 그룹·노드 신원 프로브는 없고 되살리지 않는다(dms-ssc 라인의 몫).
+    설정 안전장치(`DMS_IDENTITY_MODE` 가 k8s 가 아님·`DMS_LDAP_URI` 있음·`DMS_ALLOW_PRIVILEGED_REQUESTERS=false` → 기동
+    거부)는 dms-ssc 설정을 잘못 적용한 경우를 막는다 — 지우지 마라. 그룹 denylist 는 평가하지 않는다(그룹 규칙 추가 422
+    `denylist_group_unsupported`). 출발점인 2026-09-30 프로덕션 사고(특권 목록이면 어느 화면이든 root → 남의 디렉터리
+    소유권을 소스 소유로 덮어씀)는 일반 사용자를 맵핑된 PV 안에 가두고(직접 경로는 면제 관리자만) PV 목적지 결과를 PV 루트
+    소유자로 맞추는 것(`execution_manifests._auto_chown`)으로 막는다.
   - root 는 매니페스트 **컨테이너 수준**(40-api/41-controller)에만 — Dockerfile `USER
     65532`·migrate 는 유지하고 `test_release_manifest_contract.py` 가 모양을 고정한다.
     "강화" 한답시고 runAsNonRoot/65532 를 넣으면 운영 base 에서 즉시 회귀한다.

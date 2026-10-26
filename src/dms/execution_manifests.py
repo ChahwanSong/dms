@@ -99,7 +99,8 @@ def pv_owner_measured(spec) -> bool:
 
 def _auto_chown(spec) -> list[str]:
     """비 root(비특권) 실행의 sync는 목적지를 **실행 신원**(스냅숏의 uid:gid) 소유로 강제한다(--chown). dms-k8s 는 모든 잡이
-    root 라(설계 D2) 이 갈래는 root 가 아닌 옛 행·변조 행에서만 쓰인다(더 좁은 권한 -- 막지 않는다). 포탈 안내
+    root 라(설계 D2) stepper 는 비 root 신원을 제출 전에 끊는다(2026-10-26, stepper.identity_problem) -- 이 갈래는 빌더를
+    직접 부르는 경로(테스트)에서만 닿는 방어 기본값이다(더 좁은 권한). 포탈 안내
     lib/syncOwnership.ts 가 이 규칙의 미러다.
 
     dsync/nsync는 기본적으로 소스의 소유권을 목적지에 재현(chown)하려 하는데, 도구는

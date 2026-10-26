@@ -19,12 +19,16 @@ from the tree 2026-08-30 -- see git history if needed.)
 current-context 는 `dms`(ssc)로 둔다. 이 런북의 §0~§12 는 ssc 테스트베드 기준이고(컨텍스트 없는 예시 = `dms`),
 k8s 테스트베드는 §13 이 런북이다.
 
+> **이 체크아웃(dms-k8s)에는 ssc 오버레이(`deploy/overlays/testbed`)와 LDAP 코드가 없다**(2026-10-26 LDAP 코드 삭제 —
+> k8s 신원 모드 전용, `docs/ARCHITECTURE.md` §3 불변식 12). §0~§12 의 ssc 전용 절차(컨텍스트 `dms` 예시·LDAP·보조 그룹)는
+> dms-ssc 체크아웃의 이 파일이 진실이다 — 여기 남은 ssc 문구는 두 테스트베드의 공용 사실(인프라·경로)을 위한 참고다.
+
 | | **ssc 테스트베드** | **k8s 테스트베드** (§13) |
 |---|---|---|
 | 검증하는 브랜치 | dms-ssc(후보) — 빌드 소스 전환 전에는 main | main(= dms-k8s 후보) |
 | 노드 | dms-cp1 .10 + dms-w1~w3 .11–.13 | k8s-cp1 .20 + k8s-w1·k8s-w2 .21·.22 |
 | kube 컨텍스트 | `dms` (current) | `dmsk8s` (current 로 만들지 않는다) |
-| 오버레이 | `deploy/overlays/testbed` | `deploy/overlays/testbed-k8s` |
+| 오버레이 | `deploy/overlays/testbed`(dms-ssc 에만) | `deploy/overlays/testbed-k8s` |
 | 포탈 | https://dms.local (VIP 10.20.20.100) | https://dms-k8s.local (VIP 10.20.20.101) |
 | 레지스트리 | `pkg-01:5000` (docker `registry`) | `pkg-01:5001` (docker `registry-k8s`); 빌더 `buildah:stable` 만 :5000 공용 |
 | 태그 관례 | `dN` | `dN` — d1 부터(2026-10-26; 그 전 k0~k4 는 옛 kN, 첫 설치 시드는 `d0`) |
@@ -197,8 +201,7 @@ which produces (see the playbook header for the rationale, §2b for the rules):
 mkdir -p /cephfs/dms/artifacts /cephfs/managed
 chown root:root /cephfs/dms /cephfs/dms/artifacts /cephfs/managed
 chmod 770 /cephfs/dms            # DMS common dir -- requesters must NOT traverse it (§2b-3)
-                                 #   (testbed only: no gidNumber-0 LDAP group; elsewhere 750, or 700
-                                 #    with a gidNumber-0 LDAP group -- never 711/755, §2b-3)
+                                 #   (testbed only; elsewhere 750 or 700 -- never 711/755, §2b-3)
 chmod 755 /cephfs/dms/artifacts  # artifact base -- 3-hop rejects o+w / non-root owner (§2b-1)
 chmod 755 /cephfs/managed        # data root (managed_root of cephfs-dms) -- OUTSIDE the common dir
 mkdir -p /cephfs-third/managed /cephfs-secondary/managed   # only with `make cephfs-nsync`
@@ -226,16 +229,11 @@ readable -- see `DMS_ARTIFACT_BASE_URI`.)
 1. **base 와 `<base>/<job_id>` 는 root:root · 요청자 쓰기 불가(비-world-writable ·
    비-group-writable · POSIX ACL 쓰기 항목/default ACL 없음), 단 base 는 other 실행(x)
    필수** (`chmod 755` 또는 `711`; **700/710/750/770 · g+w · ACL 금지** — 2026-09-30 감사
-   정정(예전 "권장 700" 은 틀렸다) + 2026-10-07 보조 그룹(§2c)). 러너가 `<job_id>` 를 root 로
-   만들고 `<phase>` 만 요청자에게 chown 한다. 비 root 잡의 도구(preflight·워커 rank)는 요청자
-   uid·주 gid **와 계획 시점 LDAP 보조 그룹**으로 돌지만, launcher 의 mpirun 은 **보조 그룹
-   없이** `<phase>` 의 mpi-hostfile 을 읽는다 — base 를 other-x 로 통과하지 못하면 비 root
-   잡(일반 사용자 전부, 실행 신원을 지정한 관리자 잡)이 preview/execution 에서 "unable to
-   open the hostfile" 로 죽는다. 그래서 그룹으로 여는 750/710 은 이제 통하지 않는다(그룹을
-   가진 preflight 는 통과하고 launcher 가 죽는다). 또 잡이 보조 그룹을 달고 돌므로 base 의
-   `g+w` 는 그 그룹의 **모든 요청자**에게 base 쓰기를 준다 — 보조 gid 0 도 인정하므로(§2c)
-   root 그룹 `g+w` 도 마찬가지다.
-   **강제 위치 두 곳**:
+   정정(예전 "권장 700" 은 틀렸다) + 2026-10-07). 러너가 `<job_id>` 를 root 로 만들고 `<phase>` 만 실행 신원에게
+   chown 한다. dms-k8s 는 모든 잡이 root 라(2026-10-26 LDAP 코드 삭제 — 보조 그룹·비 root 실행 경로 없음) 잡 안의
+   도구가 이 권한에 막히지는 않는다. 그래도 base 가 쓰기 가능하면 공유 FS 를 마운트한 다른 호스트의 사용자가
+   `<job_id>` 를 미리 만들어 봉쇄 기준을 옮기거나 `<phase>` 의 rank.sh 를 바꿔치기할 수 있어 제어면 판정은 그대로다.
+   **강제 위치**:
    - **제어면**(3홉 API·컨트롤러 홉 + base 저장 PUT/validate 422,
      `artifact_base.roundtrip_artifact_base`): 소유자가 제어면 euid(root)가 아니면
      `artifact_base_not_owned`, `o+w` 면 `artifact_base_world_writable`(sticky 여도),
@@ -243,21 +241,10 @@ readable -- see `DMS_ARTIFACT_BASE_URI`.)
      `artifact_base_group_writable`, other-x 가 없으면 `artifact_base_not_traversable`.
      **예전 이 문서가 허용하던 750/710(및 770) base 도 이제 거부된다** — 저장이 막히고 3홉
      화면이 빨갛다. 이 판정 자체는 표시·저장용이라 잡 제출을 막지 않는다.
-   - **잡 단위(컨트롤러 정적 관문, 보조 그룹이 실린 비 root 잡)**: 매 제출 직전(stepper
-     `_build_spec`) 컨트롤러가 base 에 위와 같은 g+w·POSIX ACL(default ACL 포함)·other-x 판정
-     (`artifact_base.static_base_problem`)을 직접 적용해, 걸리면 `artifact_base_group_writable`·
-     `artifact_base_not_traversable` 로 종단한다(이벤트 `artifact_base_unsafe_at_step`). 컨트롤러가
-     base 를 stat 하지 못하면 이 판정은 preflight 에 맡긴다(통과로 치지 않는다).
-   - **잡 단위(preflight)**: 모든 비 root 잡은 실행 신원으로 `test -x`
-     (`artifact_base_not_traversable`), 보조 그룹이 있는 잡은 base 의 other-x **비트**와
-     `test -w`(쓰기 가능하면 `artifact_base_group_writable`)까지 본다. `test -w` 는 access(2)
-     라 base **자체**에 걸린 NFSv4/GPFS ACL 까지 반영하지만 **상속은 못 본다** — base 엔 쓰기가
-     없고 default POSIX ACL·NFSv4/GPFS inheritable ACE 만 있으면 통과하고, 러너가 root 로 만드는
-     `<job_id>/<phase>` 가 그것을 물려받아 그 그룹의 다른 사용자가 남의 rank.sh 를 바꿔치기할 수
-     있다. POSIX default ACL 은 **보조 그룹이 실린 잡에 한해** 위 컨트롤러 관문이 제출 전에 막는다.
-     보조 그룹이 없는 비 root 잡(그룹 없는 사용자·스위치 off·256개 초과)은 잡 단위로 default ACL 을 보지
-     않고(3홉 화면만 빨개진다), **NFSv4/GPFS 상속 ACE 는 어느 잡에도 남는 위험**이다(그런 스토리지에 base 를
-     두면 상속 ACE 가 없는지 직접 확인할 것).
+   - (2026-10-07~25 의 잡 단위 관문 — 보조 그룹이 실린 비 root 잡의 컨트롤러 정적 관문 `artifact_base_unsafe_at_step`·
+     preflight 의 other-x 비트·`test -w`(`artifact_base_group_writable`) — 는 비 root 실행 경로와 함께 지웠다.) 제어면 판정은
+     base 자체만 보므로 **NFSv4/GPFS 상속 ACE 는 남는 위험**이다(그런 스토리지에 base 를 두면 상속 ACE 가 없는지 직접
+     확인할 것 — 러너가 root 로 만드는 `<job_id>/<phase>` 가 그것을 물려받는다).
    고치는 법: `chown root:root <base>; chmod 755 <base>`(g+w 제거), POSIX ACL 은 **재귀로**
    `setfacl -R -b -k <base>` — base 만 지우면 그 사이 만들어진 `<job_id>` 디렉터리에 상속된 ACL 이 남는다
    (`getfacl -R -s <base>` 로 남은 항목이 없는지 확인). 상속 default ACL(POSIX/GPFS/NFSv4)이 `<job_id>`·`<phase>` 를 좁히면
@@ -272,22 +259,18 @@ readable -- see `DMS_ARTIFACT_BASE_URI`.)
    코드는 nlink>1·남의 소유 파일을 404 로 거르지만(`src/dms/artifact_files.py`) 이
    sysctl 이 근본 방어다.
 3. **공용 디렉터리(base 의 부모, 예 `/cephfs/dms`)는 root:root 로 잠그되 그룹 쓰기·other
-   통과는 금지 — `750`(gidNumber 0 LDAP 그룹이 있으면 `700`)**(2026-09-09 d129 에 "770 까지" 로
-   시작, 2026-10-07 보조 그룹으로 정정, 2026-10-08 리뷰로 711 제거). **요청자는 이 디렉터리를
+   통과는 금지 — `750` 또는 `700`**(2026-09-09 d129 에 "770 까지" 로
+   시작, 2026-10-07 정정, 2026-10-08 리뷰로 711 제거). **요청자는 이 디렉터리를
    통과하지 못해야 한다** — other-x(`711`·`755`)를 주면 모든 uid 가 base(755)를 지나 0755 잡
    디렉터리와 0644 아티팩트(stdout/stderr 로그·rank.sh·summary.json·dscan 리포트 — 남의 데이터
    경로·파일 통계)를 직접 읽어 API 의 소유자 검사(`artifact_files.open_artifact_fd`)를 우회한다
-   (711/755 는 base **자체**의 선택지다, 위 1). 제어면·에이전트·러너(launcher)는 root 라 통과하고, 요청자 uid 로
-   도는 도구(dscan/dsync)·rank.sh 는 잡 파드가 base 를 **전용 hostPath 볼륨**
-   (`/dms-artifact-base`, `artifact_base.ARTIFACT_MOUNT`)으로 받아 그 부모를 지나가지
-   않는다. **770 은 더 이상 잠금이 아니다**: 보조 gid 0 을 인정하므로(§2c) gidNumber 0 인
-   LDAP posixGroup 의 멤버는 잡 안에서 root 그룹 권한을 가져 770 부모 아래에 base 옆
-   디렉터리를 만들 수 있다 — 그런 그룹이 있는 사이트는 `700`(planner 가 그런 잡에 warning
-   이벤트 `identity_groups_root_group` 을 남긴다). 테스트베드 `/cephfs/dms` 는 770 그대로다
-   (테스트베드 LDAP 에 gidNumber 0 그룹이 없다 — 750 으로 조일지는 사용자 결정 사항).
+   (711/755 는 base **자체**의 선택지다, 위 1). 제어면·에이전트·러너(launcher)·잡 도구는 root 라 통과하고, 잡 파드는
+   base 를 **전용 hostPath 볼륨**(`/dms-artifact-base`, `artifact_base.ARTIFACT_MOUNT`)으로 받아 그 부모를 지나가지
+   않는다. 테스트베드 `/cephfs/dms` 는 770 그대로다(dms-k8s 에는 잡이
+   그룹 권한으로 도는 경로가 없다 — 750 으로 조일지는 사용자 결정 사항).
    단 **스토리지의 `managed_root`(사용자 데이터 root)는 공용 디렉터리 아래에
-   두지 마라** -- preflight 가 요청자 uid 로 `test -r/-w` 하므로 `source_not_readable`
-   류로 거부된다(테스트베드는 §6 시드대로 `cephfs-dms` 의 managed_root 가
+   두지 마라** -- 비 root 잡이 있던 시절 preflight 가 요청자 uid 로 `test -r/-w` 해 `source_not_readable`
+   류로 거부됐다(dms-k8s 의 root 잡은 막히지 않지만 레이아웃은 그대로 둔다; 테스트베드는 §6 시드대로 `cephfs-dms` 의 managed_root 가
    `/cephfs/managed` 여야 한다; `/cephfs/dms` 로 드리프트해 있던 것을 d129 실증에서
    되돌렸다). 실증: `/cephfs/dms` 770 + 데이터 `/cephfs/managed` 에서 alice sync Succeeded.
 4. **`DMS_ARTIFACT_BASE_ALLOWED_PREFIXES`**(`20-config.yaml`, 기본 `/cephfs`; 오버레이는
@@ -321,137 +304,14 @@ kubectl -n dms get pod -l app.kubernetes.io/name=dms-api \
 바꾸고 40/41 의 컨테이너 securityContext 를 제거한다(계약 테스트도 함께 뒤집어야
 한다). 그 상태에선 root:root base 마다 `artifact_base_not_writable` 이 난다.
 
-## 2c. 보조 그룹(LDAP gidNumber) 인정 (2026-10-07)
+## 2c. 보조 그룹(LDAP gidNumber) — dms-k8s 에는 없다 (2026-10-07 → 2026-10-26 삭제)
 
-비 root 잡(일반 사용자 전부, 실행 신원을 지정한 관리자 잡)은 실행 신원의 **LDAP 보조 그룹**
-(posixGroup 의 gidNumber)을 달고 돈다 — "프로젝트 그룹에 쓰기 권한이 있는 디렉터리" 로의
-sync·scan 이 된다. root 잡은 무관하다(root 는 그룹이 의미 없다). 규칙의 진실은
-`src/dms/identity.py`·`identity_ldap.py`·`stepper.py` 모듈 docstring 과 `docs/ARCHITECTURE.md`
-(§4 보조 그룹 재확인, §6, §7 불변식 5·9·10, §8)이다. 운영자가 알아야 할 것만:
-
-**동작 요약**
-- **계획 시점에 확정된다**: planner 가 요청을 계획할 때 LDAP 에서 그룹을 읽어 잡에 얼린다
-  (`worker_pool.identity` 의 `supplementary_gids`·`_status`·`_excluded`·`_found`, 잡 상세의
-  '보조 그룹(gid)' 행). 그 뒤 LDAP 에 새로 들어간 그룹은 그 잡에 **늘지 않는다**(재신청).
-- **무엇이 실리나**: objectClass `posixGroup` 이고 gidNumber 가 숫자 하나인 그룹의 gid 만.
-  gidNumber 가 없는 그룹(앱 그룹 등)·중첩 그룹(그룹 안의 그룹)은 제외한다. 그룹 이름은 실행에
-  쓰지 않는다(denylist 이름 매칭 전용). 그룹 검색 멤버 속성은 `DMS_LDAP_GROUP_MEMBER_ATTR`
-  (기본 uniqueMember) 그대로다.
-- **범위**: 하한 없음(gid 0·65534 도 인정 — 사용자 결정). gid > 2147483647 은 k8s 가 파드를
-  거부하므로 **제외**(화면·이벤트 `identity_groups_filtered` 에 보인다). 주 gid 와 같은 값은 뺀다.
-- **256개 초과면 통째로 미적용**(status `over_limit` — 주 gid 만, 이 기능 이전과 같음) + 잡 상세·
-  이벤트 표시.
-- **실행 직전 재확인**: 그룹이 실린 잡은 매 제출 직전(preflight·preview·exec_preflight·execution)
-  과 Volcano 큐 대기(PENDING) 중에 LDAP 를 다시 본다. 스냅숏의 그룹에서 탈퇴했거나 uid/gid 가
-  바뀌었거나 계정이 지워졌으면 `identity_changed_at_step` 으로 종단(이벤트에 빠진 gid).
-  LDAP 장애면 **상태를 바꾸지 않고 보류**해 60초 이상 간격으로 **3번 재시도**하고(이벤트
-  `identity_recheck_deferred` 가 시도 횟수), 그래도 안 되면 `ldap_unavailable` 로 종단한다.
-- **자동 chown 은 여전히 uid:주 gid**. 결과를 프로젝트 그룹 소유로 남기려면 sync 옵션에 chown
-  `uid:<프로젝트 gid>` 를 명시한다 — 그 gid 가 실행 신원의 주 gid 또는 적용된 보조 gid 가
-  아니면 계획 시점에 `chown_group_not_member`(예전엔 복사 뒤 EPERM 실패).
-- **같이 들어간 fail-closed**(스위치로 안 꺼진다 — 아래 표): LDAP 주 gid 가 0 인 비 root 실행
-  거부(`identity_root_group_without_privilege`), LDAP 사용자 엔트리 중복·비성공 결과 코드
-  (sizelimit·noSuchObject(32, base DN 오구성 포함) 등)·그룹 1만 개 초과는 `ldap_unavailable`
-  (예전엔 첫 엔트리·부분 결과를 조용히 썼다), 실행 신원 지정 자격의 계획 시점 재확인.
-
-**스위치 범위표** — `DMS_IDENTITY_SUPPLEMENTARY_GROUPS`(코드 기본 `true`, 오타는 꺼짐 쪽):
-
-| 변경 | `DMS_IDENTITY_SUPPLEMENTARY_GROUPS=false` 로 꺼지나 | 되돌리는 법 |
-|---|---|---|
-| 새 계획의 보조 gid 스냅숏(status disabled, 목록 []) | **예**(계획 시점만; 진행 중 잡은 스냅숏대로) | 스위치 |
-| 진행 중 잡의 재확인·적용(스냅숏이 이미 있는 잡) | 아니오 | drain 후 취소 또는 이미지 롤백 |
-| 리졸버 fail-closed(중복 엔트리·비성공 결과 코드·base 오구성 32·페이지 상한·posixGroup 만) | 아니오 | 이미지 롤백 |
-| 비특권 주 gid 0 거부 | 아니오 | 이미지 롤백 |
-| planner owner_username 선검사·자격 재확인 | 아니오 | 이미지 롤백 |
-| chown_group_not_member(스위치 off 면 주 gid 만 허용) | 아니오(더 좁아짐) | 이미지 롤백 |
-| artifact base 3홉·PUT 판정(g+w·ACL·o+x, §2b-1) | 아니오 | base 를 고치거나 이미지 롤백 |
-| resolve 마감·틱 LDAP 예산 | 아니오 | 이미지 롤백 |
-
-**비상 끄기**(이미지 유지): 테스트베드는 `deploy/overlays/testbed/patch-config.yaml` 에
-`DMS_IDENTITY_SUPPLEMENTARY_GROUPS: "false"` 를 넣고 `kubectl apply -k deploy/overlays/testbed`(§4 의 가드·migrate
-순서대로), 프로덕션은 `values.env` 의
-`IDENTITY_SUPPLEMENTARY_GROUPS=false` → `sh deploy/install.sh`(render.sh 렌더 + apply; 미리보기는
-`sh deploy/overlays/prod/render.sh`) — 그다음 `kubectl -n dms rollout restart deploy/dms-controller`(planner 만 읽는다). 이미 계획된
-잡을 멈추는 kill switch 는 없다(BACKLOG) — 멈추려면 그 잡을 취소한다.
-
-**이미지 롤백 절차**(이 기능 이전 이미지로): 옛 controller 는 스냅숏 키를 무시해 주 gid 로만
-돈다 — 새 controller 가 그룹을 실어 preflight 를 통과시킨 잡을 옛 controller 가 그룹 없이
-실행하면 단계 사이가 갈라진다. 그래서 ① 포탈 관리 → 컨트롤 상태에서 **drain** 켬 ② 위험군 잡을
-취소(또는 완료 대기) — (a) 보조 gid ≠ [] 이고 `exec_preflight` ref 는 있으나 `execution` ref 가
-없는 Executing sync/rm, (b) 보조 gid ≠ [] 인 Preflight scan ③ 이미지 롤백(포탈 릴리스) ④ 새
-파드로 완전히 교체됐는지 확인 ⑤ drain 끔. ConfirmPending 잡은 옛 exec_preflight 가 그룹 없이
-다시 검사하므로 안전하다.
-
-**스토리지별 조건** — DMS 가 그룹을 실어도 **인정 여부는 스토리지가 정한다**(포탈은 등록
-`backend_type` 라벨 기준 주의문만 보인다). preflight 의 `test -r/-w` 는 access(2) 라 도구와
-같은 판정을 받으므로, 스토리지가 그룹을 무시하면 대개 preflight 가 `source_not_readable`·
-`target_not_readable`·`destination_*` 로 먼저 거부한다(조용한 실행 실패가 아니다).
-
-| 스토리지 | 확인할 것 |
-|---|---|
-| CephFS | 커널 클라이언트는 클라이언트 커널이 판정(테스트베드 caps `rwp`). caps 에 `uid=`/`gids=` 제한이 있으면 MDS 가 gid 목록을 검사한다. ceph-fuse 면 `client_permissions`·`fuse_set_user_groups` 확인 |
-| GPFS(Spectrum Scale) | 클라이언트가 프로세스 자격으로 판정. NFSv4 ACL 모드, 멀티클러스터 원격 마운트의 uid/gid 재매핑 확인 |
-| WekaFS | **미검증** — 판정 위치(클라이언트/백엔드)·그룹 수 상한을 벤더 문서·실측으로 확인 |
-| DDN Lustre | MDS 가 그룹을 다시 계산할 수 있다: `lctl get_param mdt.*.identity_upcall` — `l_getidentity` 면 MDS 의 NSS(같은 LDAP 를 보면 그 멤버십, 모르면 그룹 소실), `NONE` 이면 RPC suppgid 만. nodemap squash/idmap 도 영향 |
-| NFS(Pure Storage·NetApp) | AUTH_SYS 는 보조 gid 를 **16개까지만** 싣는다(넘치면 조용히 잘림). 서버 측 확장 그룹(ONTAP `-auth-sys-extended-groups`, knfsd `manage-gids`)이 켜져 있으면 클라이언트 목록을 버리고 서버 name-service 가 정한다(서버가 같은 LDAP 를 못 보면 그룹 전부 소실). `sec=krb5`·볼륨 security style(ntfs/mixed)도 결과를 바꾼다. 음성 사례: 테스트베드 luminous(manage-gids=y, 서버에서 `getent passwd alice` 실패) |
-
-**진단**
-- 잡 상세 '보조 그룹(gid)' 행 / 요청 이벤트 `identity_groups_filtered`(제외·초과),
-  `identity_groups_root_group`(gid 0 포함 — warning), `identity_recheck_deferred`·
-  `identity_recheck_failed`·`identity_changed_at_step`(재확인).
-- **DMS 가 실었나**: preflight 파드 `kubectl -n dms get pod <dms-preflight-…> -o
-  jsonpath='{.spec.securityContext.supplementalGroups}{"\n"}{.status.containerStatuses[0].user.linux.supplementalGroups}'`
-  (k8s 가 실제 적용한 목록), 워커 로그의 `dms: groups=…` 줄.
-- `identity_groups_not_applied`: 컨테이너의 실제 그룹(`id -G`)이 {주 gid} ∪ 스냅숏과 **같은
-  집합**이 아니다 — 어드미션 웹훅(Kyverno 류)이 supplementalGroups·fsGroup·runAsUser 를 바꿨거나,
-  사이트 커스텀 잡 이미지의 계정이 이미지 그룹에 속해 있다(그 이미지는 정리 필요).
-- 워커 stderr `dms: account <user> exists with a different uid/gid` + exit 1(→ preview_failed/
-  execution_failed, 전용 사유 코드 없음): 잡 이미지에 같은 이름의 계정이 다른 uid/gid 로 있다 —
-  예전엔 조용히 **이미지 계정의 신원**으로 돌았다. 이미지에서 그 계정을 지우거나 이름을 바꾼다.
-  root 잡이어도 owner 이름이 겹치면 같다.
-- 스토리지가 그룹을 무시: preflight 가 그룹을 실었는데(위 jsonpath) `*_not_readable`/
-  `destination_*` 면 위 스토리지 표를 본다.
-- 느린 LDAP: 컨트롤러 stderr `stepper: tick …s ldap …s/10s circuit=…`(느린 틱·서킷·예산 소진만).
-
-**`DMS_LDAP_TIMEOUT_SECONDS` 는 6 이하 권장**(기본 5): 한 틱의 LDAP 시간 최악 = 예산 10s + 진행
-중 한 URI 시도(연결·StartTLS·bind = 3 × 타임아웃 — bind 뒤 서버 정보(스키마) 읽기는 끈다)라 루프
-리스 30s 안에 들어야 한다(ARCHITECTURE §4 틱 LDAP 시간). 넘기면 리스가 넘어가 두 번째 컨트롤러가
-같은 루프를 동시에 돌 수 있다. 다중 URI 는 sssd 처럼 **마지막으로 붙은 URI 부터** 시도한다(프로세스
-수명 동안 기억) — 앞쪽 URI 가 타임아웃형으로 죽어도 resolve 마다 그 타임아웃을 다시 내지 않는다.
-resolve 하나의 자체 마감(10s)에 걸려 뒤쪽 URI 를 못 가 본 resolve 는 `ldap_unavailable` 이지만, 다음
-resolve 는 못 가 본 URI 부터 시작한다. 틱 예산의 남은 몫에 걸려 멈춘 resolve 는 장애로 치지 않는다
-(planner 는 요청을 Pending 으로 다음 틱에, stepper 는 미계수 보류).
-
-**배포 직후 확인**(프로덕션 사전 점검을 하지 않기로 했으므로 사후 확인으로 대신):
-1. 릴리스 직후 몇 틱 동안 planner `ldap_unavailable` 거부·`identity_recheck_deferred`·
-   `stepper: tick … ldap …` 줄이 급증하지 않는지(새 fail-closed: 중복 엔트리·비성공 결과 코드·
-   base DN 오구성 32·페이지 상한). 원인은 컨트롤러 stderr 의 `planner: <rid> rejected
-   ldap_unavailable: <원인>` 줄로 가른다(`duplicate user entries: N`·`ldap user/group search result
-   <코드> …`·`ldap group search exceeded page cap`·URI 연결 오류 — LDAP 원문이라 요청 이벤트·결과엔
-   싣지 않는다; stepper 쪽은 `identity recheck failed job=… phase=…: <원인>` 경고 로그). 급증하면
-   스위치로는 안 꺼진다(위 표) → 원인 수정 또는 이미지 롤백.
-2. 프로젝트 그룹이 있는 대표 사용자로 비 root 요청 1건 → 잡 상세 '보조 그룹(gid)'
-   (`/api/user/requests/{rid}/jobs` 의 `worker_pool.identity.supplementary_gids_status`).
-   `none` 이면 그 그룹에 objectClass posixGroup 이 없을 가능성부터.
-3. 3홉 화면(포탈 관리 → 아티팩트 경로): API·컨트롤러 홉이 g+w/ACL/o+x 로 빨간지 — 775/770 만이
-   아니라 **750/710 base 도 이제 빨간불**이다. 잡은 계속 돌지만 base 저장이 막히고 그룹이 실린
-   잡은 제출 직전에 종단된다(컨트롤러 정적 관문·preflight) → §2b-1 대로 chmod/setfacl.
-
-**남는 위험**(의도적 범위 밖 — 상세는 BACKLOG):
-- **gidNumber 0 LDAP 그룹**은 인정된다(사용자 결정) — 그 멤버의 잡은 root 그룹 권한을 가져 root:root
-  770 디렉터리(예: 테스트베드 `/cephfs/dms`)가 열리고, 스토리지 mount_path 아래면 사용자 심링크를
-  거쳐 닿을 수 있다. 로그인 노드 SSSD 는 기본(min_id=1, filter_groups=root)으로 gid 0 을 주지 않아
-  **DMS 가 로그인 노드보다 넓게 준다**. 완화: 부모 디렉터리 그룹 쓰기 금지(§2b-3), warning 이벤트.
-- StartTLS 인증서 검증 안 함(sssd `ldap_tls_reqcert = never` 미러) — LDAP 중간자는 그룹 멤버십도
-  주입할 수 있고 재확인도 같은 채널이다.
-- NFSv4/GPFS 고유 ACL 은 제어면 base 검사 밖이다. preflight `test -w` 는 base **자체**의 쓰기만
-  잡 단위로 막고, 그런 ACL 의 **상속**(inheritable ACE 가 `<job_id>/<phase>` 에 주는 쓰기)은 어디서도
-  보지 않는다. POSIX default ACL 은 보조 그룹이 실린 잡만 컨트롤러 관문이 막고, 그룹 없는 비 root 잡은
-  잡 단위로 보지 않는다(3홉 화면만 빨갛다 — §2b-1).
-- LDAP 사용자가 스스로 그룹에 가입할 수 있는 selfwrite ACL 은 점검하지 않았다.
-- 큐 대기 재확인이 LDAP 장애로 건너뛴 사이 탈퇴하고 그대로 RUNNING 이 되면 반영되지 않는다(실행
-  중 잡은 재확인하지 않는다). nsync 의 preflight 파드 쌍 대기는 큐 재확인 대상이 아니다.
-- dscan/dsync 출력의 그룹 이름이 `dmsg<gid>` 로 보일 수 있다(사소).
+LDAP 보조 그룹(계획 시점 스냅숏·큐 대기 재확인·`DMS_IDENTITY_SUPPLEMENTARY_GROUPS` 스위치·preflight/워커 그룹 물질화)은
+2026-10-26 LDAP 코드 삭제(사용자 결정 (d))로 이 라인에서 지웠다 — 운영 절차·스위치 범위표·스토리지별 주의는 dms-ssc 의
+이 절이 진실이다. dms-k8s 에 남은 것: 보조 gid 목록이 실린 잡 행(옛 스냅숏·변조)은 제출 전에 `identity_missing_at_step`
+으로 끊기고(빌더도 거부 — 조용히 버리고 돌리지 않는다), 옛 사유 코드(`identity_groups_not_applied`·`identity_changed_at_step`·
+`ldap_unavailable` 등)는 옛 행 표시용으로 포탈 문구에만 남는다. 옛 values.env 의 `IDENTITY_SUPPLEMENTARY_GROUPS`·`LDAP_*` 는
+`render.sh` 가 무시한다(알림 한 줄).
 
 ## 3. Apply manifests, in order
 
@@ -468,8 +328,8 @@ placeholders, and applying it over a live `dms-secrets` replaces the real
 credentials (the api/controller then CrashLoopBackOff on
 `password authentication failed for user "dmsapp"`).
 
-**k8s 테스트베드(`dmsk8s`)에는 `00-namespace.yaml` 말고 raw apply 를 하지 않는다** — 특히 `20-config.yaml` 을 raw 로
-올리면 오버레이가 지운 LDAP 키(ssc 용 slapd 10.10.10.30)가 ConfigMap 에 되살아난다. 설정·RBAC·큐는 전부
+**k8s 테스트베드(`dmsk8s`)에는 `00-namespace.yaml` 말고 raw apply 를 하지 않는다** — `20-config.yaml` 을 raw 로
+올리면 오버레이의 사이트 값(`DMS_USER_ALLOWED_OPERATIONS`·`DMS_JOB_IMAGE` 등)이 base 값으로 되돌아간다. 설정·RBAC·큐는 전부
 `kubectl --context dmsk8s apply -k deploy/overlays/testbed-k8s`(§13)로만 간다.
 
 ## 3b. Create the secret (once, out-of-band)
@@ -615,8 +475,8 @@ terminal state.
 preflight가 `target_not_readable`로 잡을 Rejected 시킨다(슬라이스 18 실증에서
 `managed`가 실재하지 않아 한 번 밟았다). 현재 `cephfs-dms`(`/cephfs/dms`) 아래에
 있는 것: `team`, `artifacts`, `s16-verify`, `s17-live` 등 -- `ls`로 먼저 확인할 것.
-그리고 `x-dms-actor`는 **LDAP에 있는 사용자**여야 한다(`alice` 등); 임의 문자열이면
-플래너가 `ldap_identity_not_found`로 거절한다.
+dms-k8s 에선 모든 단건 잡이 root 이고 root 허용은 세션 인증 요청뿐이라(`identity.root_allowed`) 이 절의 Bearer
+공유 토큰 제출은 403 `privileged_not_authorized` 다 — k8s 테스트베드는 봉인 로그인 세션(§10-7)으로 낸다(§13 표).
 
 ```bash
 RID=$(curl -sf -X POST "$API/api/user/requests" "${AUTH[@]}" -H 'content-type: application/json' -d '{
@@ -1009,7 +869,7 @@ fail-open이라(설계 §7) 존재하지 않는 태그가 통과할 수 있다. 
 ## 프로덕션 배포 — kustomize 오버레이
 
 사내 클러스터 배포는 **`deploy/overlays/prod`** 를 쓴다. 테스트베드 매니페스트를
-base 로 두고 사이트별 값(레지스트리·태그·공유 FS 경로·LDAP·이메일 도메인·포탈
+base 로 두고 사이트별 값(레지스트리·태그·공유 FS 경로·이메일 도메인·포탈
 도메인·VIP)만 오버레이에서 덮는다 -- 자리표시자를 채우고 `kubectl apply -k`.
 전제조건·값 표·Secret/TLS 생성·적용 순서는 **`deploy/overlays/prod/README.md`**.
 이 §(테스트베드 개별 파일 apply)는 그대로 유효하다 -- 오버레이는 base 를 건드리지
@@ -1290,14 +1150,14 @@ dms-k8s 브랜치 후보(main)를 검증하는 테스트베드다. 오버레이�
 포탈은 https://dms-k8s.local(VIP 10.20.20.101). 맨 위 「테스트베드는 둘이다」 표가 ssc 와의 차이 전부다.
 
 **LDAP 을 쓰지 않는다**(사용자 결정 2026-10-21: 「dms-k8s 브런치에서는 LDAP 을 사용 안할거야. 이점은 확실히해둬.」).
-코드에는 "LDAP 끔" 스위치가 없고 LDAP 설정이 비면 리졸버가 없는 것으로 동작한다 — 그런데 base 매니페스트는 ssc 의 LDAP 값
-(pkg-01 slapd, 같은 망에서 닿는다)과 nslcd 를 띄우는 에이전트 엔트리포인트를 싣는다. 그래서 오버레이가 **지운다**:
-ConfigMap 의 LDAP 키 7개 null 삭제, 에이전트는 `command: ["dms"] args: ["agent"]`(엔트리포인트 우회) + LDAP env 삭제,
-시크릿은 4키. `tests/test_testbed_k8s_overlay.py` 가 렌더 결과에 `ldap`(대소문자 무시) **0건**을 고정한다. 하나라도 빠지면
-결과는 기동 실패(시끄러움)이거나 **ssc 용 slapd 를 조용히 쓰는 것**(침묵)이다.
+2026-10-26 부터 **코드에 LDAP 이 없다**(사용자 결정 (d) 「LDAP 코드 삭제 및 정리」): 리졸버·노드 신원 프로브·nslcd·보조 그룹이
+지워졌고, base 매니페스트에도 LDAP 키·에이전트 LDAP env·nslcd 엔트리포인트가 없다(에이전트는 `dms agent` 로 직접, 시크릿
+4키). 그래서 오버레이는 사이트 값만 덮는다(예전의 LDAP null 패치·`patch-agent.yaml` 은 지웠다). `DMS_IDENTITY_MODE` 가 k8s 가
+아니거나 `DMS_LDAP_URI` 가 있으면 api·controller 가 **기동을 거부**한다 — ssc 설정·시크릿을 잘못 섞으면 시끄럽게 실패한다.
+`tests/test_testbed_k8s_overlay.py` 가 렌더 결과에 `ldap`(대소문자 무시) **0건**을 고정한다.
 
-2026-10-25 부터 이 클러스터는 **k8s 신원 모드**다(`patch-config.yaml` 의 `DMS_IDENTITY_MODE: "k8s"` +
-`DMS_USER_ALLOWED_OPERATIONS: "sync,rm"` — scan 은 특권 운영자만(2026-10-26), dms-k8s RBAC·PV 설계 `docs/history/specs/2026-10-25-dms-k8s-rbac-pv-design.md`).
+2026-10-25 부터 이 클러스터는 **k8s 신원 모드**다(2026-10-26 부터 유일한 모드 — base 의 `DMS_IDENTITY_MODE: "k8s"` +
+`patch-config.yaml` 의 `DMS_USER_ALLOWED_OPERATIONS: "sync,rm"` — scan 은 특권 운영자만(2026-10-26), dms-k8s RBAC·PV 설계 `docs/history/specs/2026-10-25-dms-k8s-rbac-pv-design.md`).
 모든 단건 잡이 root 이고 권한은 대상 클러스터의 RoleBinding 맵핑(`<id>-clusterrole-admin|edit` + ClusterRole
 `kubeflow-admin|edit` → 그 namespace 의 모든 PVC 읽기·쓰기, `<id>` 의 `-` → `.` = DMS 계정 아이디)으로 판정한다(코드 경로
 `k8s_access`·`identity.root_allowed` — 조용히 다른 신원으로 떨어지는 경로는 없다):
@@ -1312,11 +1172,12 @@ ConfigMap 의 LDAP 키 7개 null 삭제, 에이전트는 `command: ["dms"] args:
 | 대기·컨펌 대기 중 권한 회수·PVC 재생성 | 계획 Rejected / 컨펌 409(`k8s_access_denied`·`pv_moved`·`pv_not_found`) |
 | `run_as_root: false` 명시 | 422 `run_as_root_required` |
 | Bearer 공유 토큰 제출 | 403 `privileged_not_authorized`(root 는 세션 필요) — 자동화는 봉인 세션 로그인 |
-| 그룹 denylist 규칙 추가 | 422 `denylist_group_unsupported`(평가하지 않는다 — 이름 규칙만) |
+| 그룹 denylist 규칙 추가 | 422 `denylist_group_unsupported`(평가하지 않는다 — 이름 규칙만, 옛 group 행은 「평가 안 됨」·해제만) |
+| `run_as_root` 없는 옛 요청 행·목록 밖 생성자의 배치 자식 | 계획 Rejected `privileged_not_authorized`(비 root 로 낮추지 않는다) |
 | 사용자 스캔 경로 등록·통계 | 면제자 전용(비면제 422 `scan_path_unrestricted_only`) |
 | 로그인·가입·재설정·`/me`·사용량 분석·아티팩트 | 동작(LDAP 무관) |
 
-보조 그룹·실행 신원의 LDAP uid/gid 같은 LDAP 기능은 **ssc 테스트베드에서** 검증한다. 대상 클러스터 등록(API 서버·읽기 전용
+보조 그룹·실행 신원의 LDAP uid/gid 같은 LDAP 기능은 dms-ssc 라인의 것이고 **ssc 테스트베드에서**(dms-ssc 체크아웃으로) 검증한다. 대상 클러스터 등록(API 서버·읽기 전용
 리더 토큰)·호출 노드·StorageClass 매핑 런북은 아래 **13-9**(k3 실증 2026-10-26).
 
 ### 13-1. 인프라 전제 (testbed 저장소 몫 — 여기서는 확인만)
@@ -1407,7 +1268,7 @@ kubectl --context dmsk8s -n dms exec ds/dms-agent -- sh -c 'test -S /run/nslcd/s
 
 - 첫 관리자: `curl --cacert <CA> -H "x-admin-token: <ADMIN>" -H 'content-type: application/json'
   -d '{"username":"mason","password":"<pw>"}' https://dms-k8s.local/api/admin/accounts` — mason 은 특권 목록에 있어 root 자격이
-  있다(LDAP 계정이 아니라 로컬 계정). 이후 자동화는 봉인 로그인(§10-7).
+  있다(로컬 계정 — dms-k8s 에는 LDAP 이 없다). 이후 자동화는 봉인 로그인(§10-7).
 - 시드: §6 과 같은 스토리지 이름·경로(`cephfs-dms` `/cephfs` → `/cephfs/managed`, `cephfs-third`, `cephfs-secondary`)·정책·쌍을
   `API=https://dms-k8s.local`, 토큰은 `--context dmsk8s` 시크릿에서 읽어 넣는다. **그룹 denylist 규칙은 넣지 않는다.**
 - 컨트롤 상태(세션 관리자 전용, 전체 치환이라 GET 후 전 필드): `build_node_name=k8s-w1`, `build_source_path=/home/mason/dms-dev/dms`.
@@ -1479,52 +1340,31 @@ controller, 잡 이미지) 뒤 `deploy/overlays/testbed-k8s` 의
 
 ## Unresolved values to fill in during live validation
 
-- **`DMS_LDAP_BIND_PW`** (Secret `dms-secrets`, shape in
-  `deploy/k8s/20-secret.example.yaml`): the LDAP search-account password
-  (2026-08-23: auth bind is the default -- the DN lives in the ConfigMap as
-  `DMS_LDAP_BIND_DN`, testbed account `search_dms` provisioned by
-  testbed/roles/openldap_server, password `ldap_search_password` inline in
-  the testbed repo's `group_vars/all.yml` -- a testbed-only demo value; the
-  gitignored `secrets.yml` holds only the k8s testbed's
-  `postgresql_app_password_k8s`). With
-  `DMS_LDAP_REQUIRE_AUTH_BIND="true"` a missing/placeholder
-  password fails LOUD at startup (SettingsError -> CrashLoopBackOff), so
-  inject the secret before applying config. A wrong (but present) password
-  fails soft at plan time (`IdentityUnavailable`), fixable without
-  redeploying anything else.
+- (`DMS_LDAP_BIND_PW` is gone on dms-k8s -- 2026-10-26 LDAP code removal; `dms-secrets` has 4 keys, and a
+  `DMS_LDAP_URI` left in the ConfigMap refuses startup. The ssc testbed's LDAP secret lives in dms-ssc's runbook.)
 - **`DMS_ALLOW_PRIVILEGED_REQUESTERS` / `DMS_PRIVILEGED_REQUESTERS`**
   (`deploy/k8s/20-config.yaml`, ConfigMap): **default is `true` /
   `root,admin`** (also the code default in `src/dms/config.py`). Being in the
   list is **eligibility only** (2026-09-30 incident: an admin's sync with
   "실행 신원 = a user" ran as root and rewrote another user's 700 destination
-  to the source owner). A single request runs as **uid 0/gid 0 (root)** --
-  skipping the LDAP node-identity check -- only when the body says
-  `run_as_root: true` AND the authenticated requester is eligible (admin +
-  session auth + in the list; otherwise 403 `privileged_not_authorized`). An
-  omitted or false `run_as_root` is non-root on the server. The "admins run as
-  root by default" rule lives in the **portal**: for an eligible admin the
-  'root 권한으로 실행' checkbox starts ticked, EXCEPT when 실행 신원
-  (`owner_username`) names another user -- then it starts unticked and the job
-  runs as that user's LDAP uid/gid (the incident path); the portal always sends
-  the resolved value explicitly for admins. `GET /api/auth/me` returns
-  `can_run_as_root` so the portal only offers/defaults root to eligible admins.
-  API scripts that want root must send `run_as_root: true` over a session.
-  Batch children keep "root if the batch creator is eligible". The stepper
-  re-checks every root job against its request before each submission and
-  fails it closed (`privilege_not_requested`) if neither `run_as_root` nor a
-  batch is behind it (jobs planned before the rule change). The gate keys on
-  the authenticated `requester_id`, NOT the client-supplied `owner_username`,
-  so a normal user cannot escalate (owner_username != actor -> 403
-  `privileged_not_authorized`). Token-authenticated requests are never
-  root -- use session-based actors in production, and keep the allowlist
-  minimal. To disable entirely: `DMS_ALLOW_PRIVILEGED_REQUESTERS: "false"`
-  (or `DMS_PRIVILEGED_REQUESTERS: ""` -- an explicit empty string overrides
-  the default to no privileged requesters).
+  to the source owner). **On dms-k8s every job runs as uid 0/gid 0 (root)** (k8s identity mode, the only mode
+  since 2026-10-26): the server stamps `run_as_root: true` on single requests (omitted = root, explicit false = 422
+  `run_as_root_required`) and allows it only for session-authenticated requests (`identity.root_allowed`) -- Bearer
+  shared-token submissions get 403 `privileged_not_authorized`. What a user may touch is decided by the k8s
+  RoleBinding mapping (PV addresses only), not by root eligibility; the list (env ∪ granted accounts) is the
+  **exemption** from the mapping (raw paths, every PV) for session admins, and decides batch children ("root if the
+  batch creator is eligible" -- otherwise the child is rejected `privileged_not_authorized`, never downgraded).
+  Rows with no root basis (an old request without `run_as_root`) are rejected the same way. The stepper re-checks
+  every root job against its request before each submission and fails it closed (`privilege_not_requested`).
+  The gate keys on the authenticated `requester_id`, NOT the client-supplied `owner_username`
+  (owner_username != actor needs the same eligibility -> otherwise 403 `privileged_not_authorized`).
+  `DMS_ALLOW_PRIVILEGED_REQUESTERS: "false"` refuses startup on dms-k8s (it would stop every job); an empty
+  `DMS_PRIVILEGED_REQUESTERS: ""` leaves only the mapping (no exempt admins, no batch children).
   **Granting eligibility without a redeploy (2026-10-12)**: the admin role
   alone never grants root (the list is the boundary between admins -- an
   unlisted admin must not be able to promote any account and get root). An
   admin who is already eligible (session) can grant/revoke root eligibility
-  to another **active admin** account in 관리 → 계정 (「root 실행」 column,
+  to another **active admin** account in 관리 → 계정 (「전체 PV·직접 경로 권한」 column,
   `PUT /api/admin/accounts/{u}/root`, audited as `account/root_grant` and
   `root_revoke`). The effective list is env ∪ granted accounts
   (`src/dms/privileged.py`); granted accounts get the same protection as

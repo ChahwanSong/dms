@@ -95,6 +95,47 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ✅ LDAP 코드 삭제·정리(dms-k8s) — k8s 신원 모드 전용 — **완료**(2026-10-26, 테스트베드 미적용)
+
+사용자 결정 (d) 「LDAP 코드 삭제 및 정리」(BACKLOG 설계 §10). dms-k8s 는 2026-10-21 부터 LDAP 을 쓰지 않았지만 코드에는 ldap 모드
+(기본값)·리졸버·노드 신원 프로브·nslcd·보조 그룹이 그대로 있었다. 일곱 커밋, 합계 약 +2.2k / −11.0k 줄(브랜치 `k8s/rbac-pv`, push 안 함):
+
+- `7fe2497` **모드 단일화**: `Settings.identity_mode`·`k8s_access.identity_mode/k8s_mode` 삭제, 안전장치는 무조건(`DMS_IDENTITY_MODE` 가
+  k8s 아님·`DMS_LDAP_URI` 있음·`DMS_ALLOW_PRIVILEGED_REQUESTERS=false` → 기동 거부). `identity.resolve_job_identity` 는 리졸버 없이
+  통과 = 늘 root, **근거 없는 행(`PRIVILEGE_NEVER`)·목록 밖 생성자의 배치 자식은 낮추지 않고 `privileged_not_authorized`**. denylist 는
+  이름 규칙만(`control.is_denied(requester, owner)`, 그룹 추가는 늘 422). planner 는 서킷·유예·노드 신원 대기·그룹 이벤트 없이 다시
+  썼다(스냅숏 5키). 라우트(제출·잡·스캔 경로·배치·/me·k8s 개요)의 모드 분기를 상수화.
+- `16c69c9` 7171b28 뒤 깨져 있던 `test_no_migration_statement_smuggles_a_named_placeholder_in_comments` 수정(리터럴 그룹 튜플을 이름으로 셈).
+- `216b76b` **LDAP 신원 백엔드 삭제**: `identity_ldap.py`·`agent_directory.py`·`agent/directory.py`, stepper 의 LDAP 재확인 기계(큐 대기 재확인·
+  보류 재시도), 로그인 신원 프로브, 노드 신원 프로브(`identities`·`identity_probe_targets` 하달)·nslcd 디렉터리 하달, placement 의 신원
+  준비 검사, LDAP 설정 필드·`identity_supplementary_groups`·`identity_probe_ttl_seconds`·`planner_identity_grace_seconds`, pyproject `ldap`
+  extra. `identity_probe_targets` 테이블은 빈 채로 남긴다(마이그레이션 주석).
+- `68a9b31` **실행 계층 보조 그룹 삭제 + fail-closed**: preflight supplementalGroups·`DMS_JR_SUPP_GIDS`·그룹 물질화·자기검증·그룹 preflight 의
+  base 검사·컨트롤러 정적 관문(`ArtifactBaseUnsafeAtStep`) 삭제. 러너 passwd 물질화(root 별칭 계정 — runuser·sshd 로그인)는 유지.
+  **보안 리뷰(216b76b 의 MEDIUM fail-open)**: 재확인을 지운 뒤 비 root 신원·보조 gid 목록이 실린 옛/변조 행이 조용히 돌 수 있었다 —
+  `stepper.identity_problem` 이 `non_privileged_identity`·`supplementary_gids_unsupported` 로 끊고(`identity_missing_at_step`, 제출 전),
+  빌더도 `_reject_supplementary_gids` 로 거부(백스톱). root 행의 키 부재·None·[] 는 통과(진행 중 잡 보호).
+- `a83ab2b` **배포**: Dockerfile.agent 에서 nslcd·libnss-ldapd·엔트리포인트 삭제(`ENTRYPOINT ["dms"] CMD ["agent"]`, root 유지), base
+  `20-config` 의 LDAP 키·`DMS_IDENTITY_PROBE_TTL_SECONDS`·`DMS_PLANNER_IDENTITY_GRACE_SECONDS` 삭제 + `DMS_IDENTITY_MODE: "k8s"` 를 base 로,
+  DaemonSet `dms agent` 직접 기동, 시크릿 예시 4키, testbed-k8s·prod 오버레이의 LDAP null 패치·`patch-agent.yaml` 삭제, prod render.sh 의
+  `IDENTITY_SUPPLEMENTARY_GROUPS` 처리 삭제(옛 키는 알림 한 줄), ssc 오버레이 `deploy/overlays/testbed` 삭제(dms-ssc 소관). 태그 무변경.
+- `439419b` **포탈**: SubmitJob·BatchCreate·k8s·스토리지·sync 쌍 화면의 ldap 분기, 보조 그룹 화면(`lib/groupCaveats`·잡 상세 행·단계 모델의
+  재확인 보류), 노드 화면 identities·directory, denylist 그룹 추가(옛 group 행은 「평가 안 됨」·해제만), 사용자 sync 쌍 조회(`lib/syncPairs`)
+  삭제. 계정 화면 「전체 PV·직접 경로 권한」. 은퇴 사유 코드 8개는 reasonCodes.json 에 남기고 문구를 「이전 버전…」으로(옛 행 표시).
+  e2e 하네스는 k8s 전제(E3·E4 직접 경로 모드, E11 부여 = 맵핑 면제).
+- 문서(이 커밋): ARCHITECTURE(불변식 12·신원 가드·§7 함정·§8 에이전트·신원), CLAUDE.md(k8s 신원 모드를 본문 규칙으로, 보조 gid 예외 축소),
+  deploy/README(§2b·§2c·§13·스크립트 예시), BACKLOG(LDAP·보조 그룹 항목 「dms-k8s 해당 없음」). `_auto_chown` docstring 정정(비 root 갈래는
+  빌더 방어 기본값).
+
+남긴 것: 러너 passwd 물질화·`getent hosts`, `PrivilegeNotRequestedAtStep`, owner_override/privilege_eligible/can_run_as_root, denylist 이름
+규칙, chown_problem, artifact base 저장·3홉 검증(g+w·ACL·o+x), 설정 안전장치, 빈 `identity_probe_targets` 테이블, 은퇴 사유 코드(옛 행
+표시), /me·개요의 `identity_mode: "k8s"` 상수(API 계약), 관리자 sync 쌍 화면. 옛 스냅숏의 `supplementary_*` 키·옛 에이전트 보고의
+`identities`·`directory` 는 읽지 않는다(저장만). dms-ssc 의 LDAP 라인과 `deploy/testbed/dms-shared-fs.yml`·`docs/history/` 는 손대지 않았다.
+
+검증: 백엔드 전체(병렬 6분할) 통과 — 단계별 3,821 → 3,628 → 3,580 → 3,534(9 skip; 지운 테스트만큼 감소), vitest 101 파일 1,483 통과,
+`tsc -b` 통과, e2e 27 통과(실 브라우저). 테스트베드(dmsk8s)에는 적용하지 않았다 — 적용하면 에이전트 명령·ConfigMap 키가 바뀌므로 이미지와
+함께 다음 태그에서(라이브 실증 필요).
+
 ### ✅ PostgreSQL 로 k8s 테스트 실행 + 자리표시자 리터럴 결함 — **완료**(2026-10-26)
 
 - conftest `db`: `DMS_TEST_DB=postgresql` + `DMS_TEST_PG_URL` 이면 테스트마다 새 스키마의 PostgreSQL(기본은 종전 sqlite).

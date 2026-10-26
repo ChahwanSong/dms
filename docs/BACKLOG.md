@@ -94,7 +94,7 @@
 - 🔧 **러너 카운트 확장**(§러너) — dscan 총바이트 없음(리포트 스키마에 크기 히스토그램뿐,
   `bytes_total` 은 sync 전용), 슬라이스 15 이전 잡 소급 백필 없음, 프리뷰 카운트 DB
   미승격, 파일별 상세·에러 카운트·전송률 없음.
-- 🔧 **보조 그룹(2026-10-07) 후속 — 포탈 chown 그룹 선택·자동 chown 그룹 정책**(D7 범위 밖).
+- ~~**보조 그룹(2026-10-07) 후속 — 포탈 chown 그룹 선택·자동 chown 그룹 정책**(D7 범위 밖)~~ — **dms-k8s 해당 없음**(2026-10-26 LDAP 코드 삭제 — 비 root 실행·보조 그룹·LDAP 이 없다; dms-ssc 의 항목). 기록:
   자동 chown 은 uid:**주 gid** 고정(`execution_manifests._auto_chown`)이고, 프로젝트 그룹 소유는 명시
   chown `uid:<gid>` 뿐인데 포탈의 chown 칸은 관리자 전용 고급 옵션이다 — 비관리자 화면은 이제 "관리자에게
   chown 지정을 요청하세요" 로 안내한다(`frontend/src/lib/syncOwnership.ts` chownEditable=false, 2026-10-08 리뷰;
@@ -109,8 +109,8 @@
 - 🔧 **요청 상세 「요청 내용」(2026-10-08) 범위 밖 후보** — 노드 탈락 사유(worker_pool.rejections) 표시 — 노드 사유
   어휘(missing_target_mount·missing_tool:<t>·identity_not_ready_on_node…)를 reasonCodes 양쪽에 등록하는 일과 nsync
   오독(rejections 는 dsync 판정) 해소가 먼저. 그 밖에 큐·우선순위 클래스 원문(worker_pool.queue·priority_class —
-  지금은 상한으로 깎였을 때만 「high 요청 → mid 적용(정책 상한)」), LDAP 그룹 이름(identity.groups — cn 과 gid 를
-  짝지을 수 없다)은 표시하지 않는다.
+  지금은 상한으로 깎였을 때만 「high 요청 → mid 적용(정책 상한)」)은 표시하지 않는다(`identity_not_ready_on_node` 는 2026-10-26 노드
+  신원 프로브와 함께 지웠다).
 - 🔧 **모바일(375) 사이드바 접기** — 좁은 폭에서 관리자 사이드바가 본문 위 블록(약 1,060px)이라 첫 화면이 전부 사이드바다.
   요청 상세의 root 배지는 본문 첫 줄이지만 첫 화면 안은 아니다(2026-10-08 실측 y≈1127/667). 셸(`frontend/src/app/AppShell.tsx`)에서
   햄버거·접힘으로 바꾸면 본문이 첫 화면에 온다 — 셸 전역 변경이라 요청 상세 작업 범위 밖.
@@ -131,7 +131,7 @@
   토큰까지만 한다(`registry._anonymous_token`). (a) 다른 호스트의 토큰 서버(GitLab `…/jwt/auth` 형태)는 요청 위조 방지로
   realm 을 레지스트리와 같은 호스트로 묶어 거부된다 — 필요하면 운영자 허용 목록(설정)으로 연다. (b) Basic·로봇 계정 자격
   증명은 다루지 않는다(비밀 저장·전달 경로가 필요 — 평문 금지 규약).
-- 🔧 **진행 중 잡 kill switch**(보조 그룹) — `DMS_IDENTITY_SUPPLEMENTARY_GROUPS=false` 는 계획 시점
+- ~~**진행 중 잡 kill switch**(보조 그룹)~~ — **dms-k8s 해당 없음**(2026-10-26 LDAP 코드 삭제 — 비 root 실행·보조 그룹·LDAP 이 없다; dms-ssc 의 항목). 기록: `DMS_IDENTITY_SUPPLEMENTARY_GROUPS=false` 는 계획 시점
   전용이라 이미 스냅숏이 있는 잡의 재확인·적용은 끄지 못한다(`deploy/README.md` §2c 스위치 범위표).
   지금은 drain 후 취소 또는 이미지 롤백뿐이다. 처방 후보: stepper 가 읽는 control_state 플래그로
   "보조 그룹 잡은 제출 보류" 또는 "목록을 비워 주 gid 로" (후자는 단계 사이 drift 를 만들지 않도록
@@ -141,11 +141,11 @@
   preview_failed/execution_failed 만 보인다(`execution_manifests._identity_materialize_stmt` (2)).
   `DMS_EXEC_REASON=` 마커 + EXECUTION_REASONS·reasonCodes 등록으로 승격하면 운영자가 로그를 안 봐도 된다.
 - 🔧 **3홉 '경고' 등급** — 3홉 검증은 base 자체만 본다. base 의 **부모**(공용 디렉터리)가 g+w·o+w 이면
-  (보조 gid 0 인정으로 770 도 잠금이 아니다 — `deploy/README.md` §2b-3) 잡이 base 옆에 디렉터리를 만들 수
+  (`deploy/README.md` §2b-3) 공유 FS 를 마운트한 다른 호스트의 사용자가 base 옆에 디렉터리를 만들 수
   있는데 화면엔 초록이다. 부모에 o+x(711·755)가 있어도 초록인데, 그러면 모든 uid 가 base 아래 0644 아티팩트를
   직접 읽는다(§2b-3, 2026-10-08 리뷰로 문서의 711 권고 제거). 처방: 부모 mode 를 읽어 빨강이 아닌 '경고'로
   표시(저장은 막지 않음).
-- 🔧 **보조 그룹 없는 잡의 preflight 그룹 자기검증** — `_SUPP_GIDS_SELF_CHECK` 는 그룹이 실린 파드에만
+- ~~**보조 그룹 없는 잡의 preflight 그룹 자기검증**~~ — **dms-k8s 해당 없음**(2026-10-26 LDAP 코드 삭제 — 비 root 실행·보조 그룹·LDAP 이 없다; dms-ssc 의 항목). 기록: `_SUPP_GIDS_SELF_CHECK` 는 그룹이 실린 파드에만
   붙는다(빈 목록 잡의 매니페스트를 이 기능 이전과 바이트 단위로 같게 두려는 결정). 어드미션 웹훅이
   그룹 없는 잡에 supplementalGroups·fsGroup 을 더하면 preflight 만 그 그룹으로 통과할 수 있다(기존
   성질). 처방: 모든 비 root preflight 에 `id -G == {주 gid}` 검사(매니페스트 바이트 동일성 포기).
@@ -161,7 +161,8 @@
   - (b) **kubeflow-view 는 권한 아님**(무시) — 종전 그대로, 테스트로 고정.
   - (c) **동기화가 오래 실패해도 막지 않고 경고만** — 판정은 마지막 성공 스냅숏 그대로, 포탈이 오래됨·지연·실패면 PV 줄·스냅숏 기준
     줄에 경고(`pvLocation.freshnessWarns`). 한 번도 성공하지 않은 클러스터만 모름(409).
-  - (d) **LDAP 코드 삭제·정리** — 별도 슬라이스로 진행(아래 항목).
+  - (d) **LDAP 코드 삭제·정리** — ✅ 완료(2026-10-26, CHANGELOG 「LDAP 코드 삭제·정리(dms-k8s)」 — 리졸버·노드 신원 프로브·
+    nslcd·보조 그룹·ldap 모드 분기 삭제, 근거 없는 root 는 거부, 설정 안전장치는 유지).
   - (e) **배치는 직접 경로만, 등록 화면에 PV 검색 사이드바** — 구현: 배치 생성의 「PV 에서 경로 찾기」(k8s 모드)가 PV 를 검색해 그
     직접 경로를 표의 칸에 넣는다(배치 스토리지 자동 채움·불일치 잠금·rm PV 루트 잠금). 바디는 그대로 직접 경로.
   - ~~(f) 심링크 봉쇄 확장~~ — 해소(PV 주소 봉쇄, ARCHITECTURE §7).
@@ -204,7 +205,7 @@
   「nsync 목적지 링크 추종 수정 반영」): chahwansong/mpifileutils `5958e4e`·`8cd72f3`(·`2a10a18` 새 목적지 루트) 이 목적지 루트 아래를 루트 fd 기준 성분별
   `openat(O_NOFOLLOW)` 로 걷게 고쳤고(파일 생성·삭제·심링크·chmod/chown/utimes 도 그 fd 기준), `Dockerfile.mpifileutils` 의
   `MPIFILEUTILS_REF` 를 2a10a18 로 올린 뒤 planner 가드(`check_nsync_destination`·`pv_sync_needs_shared_node`)를 풀었다 — PV 스토리지를
-  노드마다 따로 마운트한 사이트의 PV→PV sync 도 nsync 로 돈다. 비 PV root nsync(ldap 모드 배치 등)도 같은 수정을 받는다. 고정값을
+  노드마다 따로 마운트한 사이트의 PV→PV sync 도 nsync 로 돈다. 비 PV root nsync(배치 등)도 같은 수정을 받는다. 고정값을
   옛 커밋으로 되돌리면 `tests/test_k8s_submit.py` 의 고정값 테스트가 빨간불이다.
 - 📝 **PV 봉쇄의 남는 창** — 러너·rank 재확인 뒤 도구가 경로를 열 때까지의 창은 rm 봉쇄와 같다(§4 「rm 대상 봉쇄의 남은 TOCTOU 창」과 같은 성격 —
   근본 처방은 hostPath 를 PV 루트로 좁히거나 도구가 openat2(RESOLVE_BENEATH) 로 걷는 것).
@@ -222,10 +223,9 @@
   CHANGELOG 「dms-k8s RBAC·PV 슬라이스 2」): dms-k8s 의 `overlays/prod` 가 testbed-k8s 와 같은 모양이 됐다 — LDAP 키 null 삭제,
   `DMS_IDENTITY_MODE: "k8s"`·`DMS_USER_ALLOWED_OPERATIONS: "sync,scan,rm"`, `patch-agent.yaml`(`dms agent` + LDAP env 삭제),
   render.sh 필수 키에서 LDAP_* 제거(옛 values.env 의 LDAP_* 는 무시 + 알림), install.sh 시크릿 4키. `tests/test_prod_k8s_overlay.py`.
-- 🔧 **"LDAP 끔" 명시 스위치 — 일부 해소**(2026-10-25): `DMS_IDENTITY_MODE=k8s` 가 그 스위치다 — 켜져 있는데 `DMS_LDAP_URI` 가
-  남아 있으면 SettingsError, `/me` 의 `identity_mode` 로 포탈이 root 체크박스·LDAP 문구를 걷는다. 남은 것: 에이전트 엔트리포인트가
-  URI 가 없으면 nslcd 를 건너뛰게(그러면 오버레이의 명령 오버라이드가 필요 없다), dms-k8s 이미지에서 nslcd·libnss-ldapd 제거,
-  LDAP 코드 자체의 삭제 여부(아래 「RBAC·PV 사용자 결정 대기」).
+- ~~**"LDAP 끔" 명시 스위치**~~ — **해소**(2026-10-25 → 2026-10-26 LDAP 코드 삭제): LDAP 코드·nslcd·libnss-ldapd 가 없어 끌 것이
+  없다. k8s 신원 모드가 유일한 모드이고 `DMS_IDENTITY_MODE=ldap`(이나 다른 값)·`DMS_LDAP_URI` 는 기동 거부(dms-ssc 설정이 섞인
+  경우의 안전장치). 에이전트는 base 에서 `dms agent` 로 직접 뜬다(오버레이의 명령 오버라이드 삭제).
 - ~~**포탈 다음 태그 제안이 `kN` 을 모른다**~~ — **해소**(2026-10-26, 관례 전환): 사용자 결정 「예전 dms-ssc 때처럼 d1 부터」로 k8s
   테스트베드도 `dN` 을 쓴다(d1 = 첫 태그). 제안(`BuildForm.nextTagSuggestion`)은 그 사이트의 라이브 태그·자기 레지스트리·빌드 이력의
   `dN` 최댓값 + 1 이라 코드는 그대로다 — git 의 오버레이 태그를 읽지 않으므로 프로덕션도 자기 번호의 다음을 제안한다. 「지배적 접두를
@@ -261,13 +261,13 @@
 - ⏸ **빌드 레이어 캐시·멀티아치** — 슬라이스 11 비목표.
 - ⏸ **`DMS_JOB_IMAGE` 포탈 롤아웃** — ConfigMap 갱신 + 소비자 재시작이라 슬라이스 13
   범위 밖. `20-config.yaml` 수기 편집.
-- ⏸ **보조 그룹의 중첩 그룹 해석**(D10, 2026-10-07) — DMS 리졸버는 1단계 멤버십만 본다
+- ~~**보조 그룹의 중첩 그룹 해석**(D10, 2026-10-07)~~ — **dms-k8s 해당 없음**(2026-10-26 LDAP 코드 삭제 — 비 root 실행·보조 그룹·LDAP 이 없다; dms-ssc 의 항목). 기록: DMS 리졸버는 1단계 멤버십만 본다
   (`identity_ldap.py` 모듈 docstring). 노드 SSSD(`ldap_group_nesting_level` 기본 2)보다 덜 줄 수
   있다(안전한 방향 — "로그인 노드 `id` ⊋ DMS 그룹"). 필요해지면 깊이 상한·순환 방지와 함께.
-- ⏸ **launcher /etc/group 대칭**(D12) — launcher 의 mpirun 은 보조 그룹 없이 hostfile 을 읽는다.
+- ~~**launcher /etc/group 대칭**(D12)~~ — **dms-k8s 해당 없음**(2026-10-26 LDAP 코드 삭제 — 비 root 실행·보조 그룹·LDAP 이 없다; dms-ssc 의 항목). 기록: launcher 의 mpirun 은 보조 그룹 없이 hostfile 을 읽는다.
   대칭(launcher 에도 dmsg<gid> 물질화) 대신 base other-x 강제(제어면 `roundtrip_artifact_base` +
   preflight `_ARTIFACT_BASE_OTHER_X_CHECK`)로 막았다 — 그래서 750/710 base 는 거부된다.
-- ⏸ **LDAP StartTLS 인증서 검증**(D16 — 안 함, 기록만) — 제어면 리졸버·에이전트 nslcd 모두 sssd
+- ~~**LDAP StartTLS 인증서 검증**(D16 — 안 함, 기록만)~~ — **dms-k8s 해당 없음**(2026-10-26 LDAP 코드 삭제 — 비 root 실행·보조 그룹·LDAP 이 없다; dms-ssc 의 항목). 기록: 제어면 리졸버·에이전트 nslcd 모두 sssd
   `ldap_tls_reqcert = never` 미러(`identity_ldap.py` 모듈 docstring). 보조 그룹 이후엔 LDAP 중간자가
   그룹 멤버십까지 주입할 수 있고 제출 전 재확인도 같은 채널이다. 사내 CA 번들 + verify 옵션이 처방.
 - ⏸ **요청 삭제의 옛 base 사본은 지우지 않는다**(사용자 결정 2026-10-09) — 삭제 시점 base 와 지금 base 가 다르거나
@@ -282,7 +282,9 @@
   메일 재설정이 막히고(`_refuse_privileged_reset`) 로그인 상태의 비밀번호 변경 라우트도 없다 — 바꾸려면 특권 관리자가
   지우고 다시 만든다(부여도 사라져 다시 줘야 한다). 그래서 부여 확인 창이 「비밀번호를 아는 사람은 모두 root」를 말한다.
   처방: 세션 인증 셀프 변경(현재 비밀번호 확인 + 봉인 통로 `postWithSealedPassword`/`_password_from`).
-- ⏸ **자격을 잃은 생성자의 진행 중 배치는 남은 자식을 비 root 로 계획한다**(2026-10-12 리뷰, 종전 의미 유지) — 배치
+- ~~**자격을 잃은 생성자의 진행 중 배치는 남은 자식을 비 root 로 계획한다**(2026-10-12 리뷰, 종전 의미 유지)~~ — **바뀜**
+  (2026-10-26 LDAP 코드 삭제): 낮출 비 root 신원이 없어 남은 자식은 계획 때 `privileged_not_authorized` 로 **거부**된다(한 배치
+  안에서 root 결과와 거부가 섞일 수 있다 — 필요하면 그 배치를 취소). 옛 기록: 배치
   자식은 `PRIVILEGE_IF_ELIGIBLE`(생성자가 자격 있으면 root, 없으면 실행 신원의 LDAP uid/gid)이라, 「자격 빼기」·강등 뒤
   계획되는 자식은 거부되지 않고 비 root 로 돈다(권한은 줄어드는 방향). 한 배치 안에서 root·비 root 결과가 섞일 수 있다 —
   필요하면 그 배치를 취소한다. 세션으로 만든 배치 자식을 거부로 바꾸는 것은 옛(토큰·NULL) 배치의 동작까지 바꿔 보류.
@@ -292,7 +294,7 @@
 
 ## 3. 외부 자원에 막힘
 
-- 🔒 **LDAP 인증 바인드 전환** — 코드 강화는 슬라이스 28 이 끝냈다
+- ~~**LDAP 인증 바인드 전환**~~ — **dms-k8s 해당 없음**(2026-10-26 LDAP 코드 삭제 — 비 root 실행·보조 그룹·LDAP 이 없다; dms-ssc 의 항목). 기록: 코드 강화는 슬라이스 28 이 끝냈다
   (`DMS_LDAP_REQUIRE_AUTH_BIND` fail-closed, 실 파드 env 발화 실증). **막는 것**: 실제
   전환은 ① OpenLDAP(10.10.10.30) 바인드 서비스 계정(DN+PW) 발급 ② `dms-secrets` 에 주입
   ③ 플래그 `"false"→"true"`(순서 엄수 — ③ 먼저면 CrashLoopBackOff). 절차는
@@ -348,23 +350,20 @@
   2026-09-30 아티팩트 쓰기 감사). mkdir 은 되고 chown 만 거부되는 드문 FS(NFSv4 idmap 등)에서
   비 root scan 이 원인 표시 없이 dscan "Failed to write output file" 로 죽는다(root_squash 면 그
   전에 makedirs 가 실패). 진단성 문제 — 반환코드 검사 + 마커. 잡 이미지 재빌드가 필요해 보류.
-- 📝 **root 실행(관리자 포탈 기본 — 실행 신원 미지정 시)은 기존 목적지의 소유·권한을 소스에
-  맞춘다**(2026-09-30 사용자 결정 "관리자는 기본 root", 의도·경고됨). root preflight 는 소유
-  검사를 하지 않고 dsync 는 소스 최상위 메타데이터를 기존 목적지에 적용한다 — 'root 권한으로
-  실행' 체크박스(기본 켜짐)·확인 스텝·배치 캡션이 이를 경고한다. 실행 신원에 다른 사용자를
-  적으면 기본은 그 사용자 권한이라 사고 경로(남의 700 목적지 소유 덮어쓰기)는 기본값이 아니다. 비 root 실행의
-  자동 `--chown uid:gid` 는 본인 디렉터리의 그룹을 실행 신원의 주 gid 로 바꿀 수 있다(보조 그룹이
-  실려도 자동은 주 gid — 프로젝트 그룹 소유는 명시 chown, 위 §1 포탈 chown 그룹 선택 항목).
+- 📝 **root 실행은 기존 목적지의 소유·권한을 소스에 맞춘다**(2026-09-30 사용자 결정 "관리자는 기본 root" →
+  dms-k8s 는 모든 잡이 root, 의도·경고됨). root preflight 는 소유 검사를 하지 않고 dsync 는 소스 최상위 메타데이터를
+  기존 목적지에 적용한다. PV 주소 목적지는 결과를 목적지 PV 루트 소유자로 맞추므로(`execution_manifests._auto_chown`)
+  남는 경우는 면제 관리자의 **직접 경로** 목적지다 — 확인 스텝·배치 캡션이 경고한다. (예전 비 root 실행의 자동
+  `--chown uid:주 gid` 와 보조 그룹 이야기는 2026-10-26 LDAP 코드 삭제로 해당 없음.)
 
 - 📝 **에이전트↔API 채널이 클러스터 내부 평문 HTTP**(`http://dms-api:8080`, 2026-09-29 기록).
-  관리자급 공유 토큰이 매 보고 주기마다, LDAP 검색 계정 비밀번호가 (`agent_directory` 해시
-  게이트로 줄였지만) 노드마다 에이전트 (재)시작 시 1회·설정/session_secret 변경 시·적용이 계속
-  실패하는 동안 매 주기 평문으로 지난다. 파드 네트워크 스니핑이 가능한 공격자는 이미 공유 토큰을
+  관리자급 공유 토큰이 매 보고 주기마다 평문으로 지난다(LDAP 검색 계정 비밀번호의 하달은 2026-10-26
+  LDAP 코드 삭제로 없어졌다). 파드 네트워크 스니핑이 가능한 공격자는 이미 공유 토큰을
   얻으므로 방안 A 가 경계를 넓히진 않았지만, 채널 TLS(또는 CNI 암호화)는 둘 다에 대한 근본
   해법이다. 실패 지속 시 재전송을 줄이려면 에이전트가 받은 블록을 메모리에 들고 로컬 백오프로
   재시도하고 서버엔 "보류 해시" 만 알리는 방식이 있다(현재는 실패가 로그·directory.error 로
   즉시 보이는 쪽을 택함).
-- 📝 **nslcd 그룹 멤버 속성 미러 안 함** — 에이전트 nslcd 는 기본(memberUid + member)으로
+- ~~**nslcd 그룹 멤버 속성 미러 안 함**~~ — **dms-k8s 해당 없음**(2026-10-26 LDAP 코드 삭제 — 비 root 실행·보조 그룹·LDAP 이 없다; dms-ssc 의 항목). 기록: 에이전트 nslcd 는 기본(memberUid + member)으로
   그룹을 푼다. 제어면은 `DMS_LDAP_GROUP_MEMBER_ATTR`(기본 uniqueMember)로 푼다. 신원 준비
   판정은 **이름 해석만** 보고(`placement._identity_ready`), 잡 파드의 보조 그룹(2026-10-07~)은
   **플래너 리졸버의 posixGroup gidNumber 값**(계획 시점 스냅숏 → preflight supplementalGroups·
@@ -372,16 +371,15 @@
   그룹 한정**(uniqueMember 전용 디렉터리에서 비어 보일 수 있다). 필요하면 `map group member
   uniqueMember` 를 렌더러·하달 블록에 함께 추가.
 - 📝 **NFSv4/GPFS 고유 ACL 은 제어면 base 검사 밖**(보조 그룹 D6) — `artifact_base._posix_acl_problem`
-  은 POSIX ACL xattr 만 읽는다. 그런 ACL 이 base **자체**에 쓰기를 주면 3홉은 초록이고, 보조 그룹이 실린
-  잡만 preflight `test -w`(`_ARTIFACT_BASE_NOT_WRITABLE_CHECK`)가 base 자체의 쓰기를 잡 단위로 막는다.
-  **상속**(NFSv4/GPFS inheritable ACE 가 `<job_id>/<phase>` 에 주는 쓰기)은 preflight `test -w` 도 컨트롤러
-  관문(static_base_problem — POSIX xattr 만)도 보지 못한다 — 남는 위험(운영 base 는 root:root 755 에 상속 ACE
-  없음을 직접 확인, `deploy/README.md` §2b-1). POSIX default ACL 도 그룹 없는 비 root 잡은 잡 단위로 보지 않는다.
+  은 POSIX ACL xattr 만 읽는다. 그런 ACL 이 base **자체**나 **상속**(NFSv4/GPFS inheritable ACE 가 `<job_id>/<phase>` 에
+  주는 쓰기)으로 쓰기를 주면 3홉은 초록이다 — 남는 위험(운영 base 는 root:root 755 에 상속 ACE 없음을 직접 확인,
+  `deploy/README.md` §2b-1). 2026-10-26 LDAP 코드 삭제로 잡 단위 관문(보조 그룹 잡의 preflight `test -w`·컨트롤러
+  static_base_problem)은 없어졌다 — dms-k8s 의 잡은 root 라 그 관문이 막던 「같은 그룹의 다른 요청자」가 없다.
 - 📝 **nsync 복합 preflight 는 PENDING 을 보고하지 않는다**(`execution_volcano.poll` 의 `pods/a,b`
   결합 — 한쪽이 대기 중이면 RUNNING). 그래서 stepper 의 PENDING 분기(`_raise_if_blocked` — 계획 뒤
   배치 제외·cordon 된 노드의 대기 단계 종단)가 nsync preflight 파드 쌍에는 걸리지 않는다 — 스케줄 전
-  파드는 activeDeadlineSeconds 도 발화하지 않아(스케줄 뒤에만) cordon 된 노드의 쪽은 그대로 멈춘다. 보조 그룹 큐 대기 재확인은 파드 단계를 의도적으로 제외하므로(바로 뒤 제출 재확인)
-  지금은 영향이 없지만, 재확인을 파드 단계로 넓히면 같은 구멍에 빠진다. 처방: 복합 결합에
+  파드는 activeDeadlineSeconds 도 발화하지 않아(스케줄 뒤에만) cordon 된 노드의 쪽은 그대로 멈춘다. (예전 보조 그룹 큐 대기 재확인은 2026-10-26 에 지웠다 — 대기 단계 재확인을 다시
+  만들면 같은 구멍에 빠진다.) 처방: 복합 결합에
   "하나라도 PENDING 이면 PENDING"(RUNNING 보다 낮은 우선) 추가.
 
 - 📝 **`by_storage` 가 `COALESCE(storage_name, destination_storage)`** — sync 를 도착지
