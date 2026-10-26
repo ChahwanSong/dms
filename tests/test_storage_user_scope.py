@@ -147,7 +147,6 @@ class _Settings:
     # shared-token: _plan 의 요청은 실행 신원 alice 를 지정한다 -- 다른 실행 신원 지정은 planner 도 API 와 같은
     # 술어(owner_override_allowed, 2026-10-07)로 다시 보므로, 토큰 요청이 그렇게 할 수 있는 형상(목록에 있음)으로 둔다.
     privileged_requesters = frozenset({"ops", "shared-token"})
-    planner_identity_grace_seconds = 300
 
 
 def _plan(db, *, requester, role, auth="session", batch_id=None):

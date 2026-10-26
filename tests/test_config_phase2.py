@@ -16,7 +16,6 @@ def test_server_phase2_defaults_and_overrides():
     assert s.reconcile_interval_seconds == 30
     assert s.retention_interval_seconds == 3600
     assert s.agent_report_retention_days == 30
-    assert s.identity_probe_ttl_seconds == 3600
     s2 = Settings.from_env({**VALID, "DMS_RECONCILE_INTERVAL_SECONDS": "5"})
     assert s2.reconcile_interval_seconds == 5
     with pytest.raises(SettingsError) as e:

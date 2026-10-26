@@ -16,15 +16,14 @@ def _client(handler):
 
 
 def _report_kw():
-    return dict(mountinfo_text="", mounts_fn=lambda s, **k: [], tools_fn=lambda n, **k: [],
-                identities_fn=lambda u, **k: [], os_fn=lambda s, **k: {}, k8s_node_fn=lambda n: None)
+    return dict(mountinfo_text="", mounts_fn=lambda s, **k: [], tools_fn=lambda n, **k: [], os_fn=lambda s, **k: {}, k8s_node_fn=lambda n: None)
 
 
 def test_capability_is_declared_only_with_a_worker():
-    plain = build_report("k8s-w1", [], [], **_report_kw())
+    plain = build_report("k8s-w1", [], **_report_kw())
     assert "k8s_sync" not in plain                           # --once·옛 에이전트: 선언 없음 → 서버가 run 을 주지 않는다
     worker = K8sSyncWorker(SETTINGS, fetch=lambda run: {})
-    report = build_report("k8s-w1", [], [], k8s_sync_status=worker.status(), **_report_kw())
+    report = build_report("k8s-w1", [], k8s_sync_status=worker.status(), **_report_kw())
     assert report["k8s_sync"] == {"v": 1, "worker": "idle", "role": None, "run_id": None, "last": None}
 
 
@@ -35,18 +34,18 @@ def test_report_response_sets_the_role():
     def handler(request):
         import json
         seen["report"] = json.loads(request.content)
-        return httpx.Response(200, json={"storages": [], "identity_probe_targets": [], "report_interval_seconds": 60,
+        return httpx.Response(200, json={"storages": [], "report_interval_seconds": 60,
                                          "artifact_base_path": None,
                                          "k8s_sync": {"role": "primary", "poll_seconds": 7}})
     runner = AgentRunner(SETTINGS, _client(handler), k8s_worker=worker)
-    runner.run_once({"storages": [], "probe_targets": [], "interval": 60, "artifact_base_path": None})
+    runner.run_once({"storages": [], "interval": 60, "artifact_base_path": None})
     assert seen["report"]["k8s_sync"]["v"] == 1
     assert worker.role == "primary" and worker._poll == 7
 
     def old_server(request):        # 응답에 k8s_sync 가 없으면(옛 서버) 역할 없음
-        return httpx.Response(200, json={"storages": [], "identity_probe_targets": [], "report_interval_seconds": 60})
+        return httpx.Response(200, json={"storages": [], "report_interval_seconds": 60})
     AgentRunner(SETTINGS, _client(old_server), k8s_worker=worker).run_once(
-        {"storages": [], "probe_targets": [], "interval": 60, "artifact_base_path": None})
+        {"storages": [], "interval": 60, "artifact_base_path": None})
     assert worker.role is None
     # 보고가 실패하면 역할을 그대로 둔다(직전 state 유지 규칙과 같다)
     worker.configure({"role": "secondary", "poll_seconds": 15})
@@ -54,7 +53,7 @@ def test_report_response_sets_the_role():
     def broken(request):
         return httpx.Response(500)
     AgentRunner(SETTINGS, _client(broken), k8s_worker=worker).run_once(
-        {"storages": [], "probe_targets": [], "interval": 60, "artifact_base_path": None})
+        {"storages": [], "interval": 60, "artifact_base_path": None})
     assert worker.role == "secondary"
     worker.configure({"role": "boss"})
     assert worker.role is None

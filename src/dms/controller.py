@@ -29,7 +29,7 @@ class Loop:
     fn: Callable[[], object]
 
 
-def build_loops(settings: Settings, repos: Repositories, *, identity_resolver=None,
+def build_loops(settings: Settings, repos: Repositories, *,
                 execution_adapter=None, build_runner=None,
                 rollout_runner=None, purge_runner=None) -> list[Loop]:
     adapter = execution_adapter if execution_adapter is not None else StubExecutionAdapter()
@@ -37,10 +37,7 @@ def build_loops(settings: Settings, repos: Repositories, *, identity_resolver=No
                                  build_runner=build_runner, vcjob_ttl_seconds=settings.vcjob_ttl_seconds)
 
     def _stepper_step():
-        # resolver 는 보조 그룹 재확인(stepper 모듈 docstring, D1)용 -- planner 와 같은 원시 리졸버를 넘긴다
-        # (stepper 의 틱 서킷·예산은 JobStepper 가 직접 든다).
-        JobStepper(repos, adapter, settings=settings,
-                   identity_resolver=identity_resolver).run_once()
+        JobStepper(repos, adapter, settings=settings).run_once()
         for job_id in repos.data_jobs.expire_previews(now_iso=utc_now_iso()):
             job = repos.data_jobs.get_job(job_id)
             repos.requests.finalize_from_job(
@@ -152,9 +149,9 @@ def run_all_once(loops: list[Loop], repos: Repositories, holder: str) -> dict[st
 
 
 def run_forever(settings: Settings, repos: Repositories, holder: str,
-                *, sleep=time.sleep, identity_resolver=None, execution_adapter=None,
+                *, sleep=time.sleep, execution_adapter=None,
                 build_runner=None, rollout_runner=None, purge_runner=None) -> None:
-    loops = build_loops(settings, repos, identity_resolver=identity_resolver,
+    loops = build_loops(settings, repos,
                         execution_adapter=execution_adapter, build_runner=build_runner,
                         rollout_runner=rollout_runner, purge_runner=purge_runner)
     next_due = {loop.name: 0.0 for loop in loops}

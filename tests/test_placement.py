@@ -2,13 +2,11 @@ import pytest
 from dms.placement import PlacementError, eligible_nodes, select_tool_and_candidates
 
 
-def _report(node, *, mounts, tools=("dscan", "dsync", "nsync", "drm"),
-            identities=("alice",)):
+def _report(node, *, mounts, tools=("dscan", "dsync", "nsync", "drm")):
     return {"node_name": node,
             "report": {
                 "mounts": mounts,
-                "tools": [{"name": t, "status": "Ready"} for t in tools],
-                "identities": [{"username": u, "status": "Ready"} for u in identities]}}
+                "tools": [{"name": t, "status": "Ready"} for t in tools]}}
 
 
 def _mount(name, *, status="Ready", writable=True):
@@ -21,45 +19,39 @@ def test_eligible_nodes_filters_and_reasons():
         _report("n1", mounts=[_mount("s1")]),
         _report("n2", mounts=[_mount("s1", status="Missing")]),
         _report("n3", mounts=[_mount("s1")], tools=("dsync",)),      # dscan 없음
-        _report("n4", mounts=[_mount("s1")], identities=("bob",)),   # alice identity 없음
     ]
-    ok, reasons = eligible_nodes(reports, "s1", tool="dscan", owner="alice",
-                                 privileged=False, require_writable=False)
+    ok, reasons = eligible_nodes(reports, "s1", tool="dscan", require_writable=False)
     assert ok == ["n1"]
-    assert reasons["n2"] == "missing_target_mount"
-    assert reasons["n3"] == "missing_tool:dscan"
-    assert reasons["n4"] == "identity_not_ready_on_node"
+    assert reasons == {"n2": "missing_target_mount", "n3": "missing_tool:dscan"}
 
 
 def test_require_writable_rejects_ro_mount():
     reports = [_report("n1", mounts=[_mount("s1", writable=False)])]
-    ok, reasons = eligible_nodes(reports, "s1", tool="drm", owner="alice",
-                                 privileged=False, require_writable=True)
+    ok, reasons = eligible_nodes(reports, "s1", tool="drm", require_writable=True)
     assert ok == [] and reasons["n1"] == "target_mount_read_only"
 
 
-def test_privileged_skips_identity_check():
-    reports = [_report("n1", mounts=[_mount("s1")], identities=())]
-    ok, _ = eligible_nodes(reports, "s1", tool="dscan", owner="root",
-                           privileged=True, require_writable=False)
-    assert ok == ["n1"]
+def test_node_identity_is_not_checked():
+    # 모든 잡이 root 라(dms-k8s, 2026-10-26) 노드에 실행 신원이 전파됐는지 보지 않는다 -- 옛 에이전트의 identities 가
+    # 비어 있어도 적격이다(예전 identity_not_ready_on_node 사유는 없다).
+    report = _report("n1", mounts=[_mount("s1")])
+    report["report"]["identities"] = []
+    ok, reasons = eligible_nodes([report], "s1", tool="dscan", require_writable=False)
+    assert ok == ["n1"] and reasons == {}
 
 
 def test_select_scan_and_rm():
     reports = [_report("n1", mounts=[_mount("s1")])]
-    scan = select_tool_and_candidates("scan", reports, storage_name="s1",
-                                      owner="alice", privileged=False)
+    scan = select_tool_and_candidates("scan", reports, storage_name="s1")
     assert scan["tool"] == "dscan" and scan["candidates"]["primary"] == ["n1"]
-    rm = select_tool_and_candidates("rm", reports, storage_name="s1",
-                                    owner="alice", privileged=False)
+    rm = select_tool_and_candidates("rm", reports, storage_name="s1")
     assert rm["tool"] == "drm"
 
 
 def test_select_sync_dsync_when_colocated():
     reports = [_report("n1", mounts=[_mount("src"), _mount("dst")])]
     out = select_tool_and_candidates("sync", reports, source_storage="src",
-                                     destination_storage="dst", owner="alice",
-                                     privileged=False)
+                                     destination_storage="dst")
     assert out["tool"] == "dsync" and out["candidates"]["primary"] == ["n1"]
 
 
@@ -69,8 +61,7 @@ def test_select_sync_nsync_when_disjoint():
         _report("n2", mounts=[_mount("dst")]),
     ]
     out = select_tool_and_candidates("sync", reports, source_storage="src",
-                                     destination_storage="dst", owner="alice",
-                                     privileged=False)
+                                     destination_storage="dst")
     assert out["tool"] == "nsync"
     assert out["candidates"]["source"] == ["n1"]
     assert out["candidates"]["destination"] == ["n2"]
@@ -78,44 +69,35 @@ def test_select_sync_nsync_when_disjoint():
 
 def test_no_candidates_raise():
     with pytest.raises(PlacementError) as e:
-        select_tool_and_candidates("scan", [], storage_name="s1", owner="alice",
-                                   privileged=False)
+        select_tool_and_candidates("scan", [], storage_name="s1")
     assert e.value.reason_code == "no_eligible_nodes"
     reports = [_report("n1", mounts=[_mount("src")])]  # dst 없음
     with pytest.raises(PlacementError) as e:
         select_tool_and_candidates("sync", reports, source_storage="src",
-                                   destination_storage="dst", owner="alice",
-                                   privileged=False)
+                                   destination_storage="dst")
     assert e.value.reason_code == "no_ready_sync_candidate"
 
 
 def test_no_eligible_nodes_error_carries_rejections():
-    # 플래너 유예(설계 §2.3)가 "신원 대기 노드가 있는가"를 예외에서 직접 읽는다 --
-    # rejections 가 안 실리면 신원 지연과 진짜 결격(미마운트)을 가를 수 없다.
-    reports = [_report("n1", mounts=[_mount("s1")], identities=("bob",))]
+    # 노드별 탈락 사유는 예외에 실린다(nodes_excluded·node_cpu_insufficient 판정이 읽는다).
+    reports = [_report("n1", mounts=[_mount("s1")], tools=("dsync",))]
     with pytest.raises(PlacementError) as e:
-        select_tool_and_candidates("scan", reports, storage_name="s1",
-                                   owner="alice", privileged=False)
+        select_tool_and_candidates("scan", reports, storage_name="s1")
     assert e.value.reason_code == "no_eligible_nodes"
-    assert e.value.rejections == {"n1": "identity_not_ready_on_node"}
+    assert e.value.rejections == {"n1": "missing_tool:dscan"}
 
 
 def test_sync_no_candidate_error_carries_nested_rejections():
-    # sync 도 유예 대상이다(설계 §2.3 정정 -- 슬라이스 15 실패에 sync 가 포함됐다).
-    # rejections 는 {"source": {...}, "destination": {...}} 중첩이고, 플래너는 두 쪽을
-    # 합집합으로 본다. 그러니 양쪽 사유가 모두 실려야 한다 -- 한쪽만 실으면 반대쪽에만
-    # 신원 대기 노드가 있는 형상에서 유예가 증발한다.
-    reports = [_report("n1", mounts=[_mount("src")], identities=("bob",)),
-               _report("n2", mounts=[_mount("dst")], identities=("bob",))]
+    # sync 의 rejections 는 {"source": {...}, "destination": {...}} 중첩 -- 양쪽 사유가 모두 실려야 한다.
+    reports = [_report("n1", mounts=[_mount("src")], tools=("dscan",)),
+               _report("n2", mounts=[_mount("dst")], tools=("dscan",))]
     with pytest.raises(PlacementError) as e:
         select_tool_and_candidates("sync", reports, source_storage="src",
-                                   destination_storage="dst", owner="alice",
-                                   privileged=False)
+                                   destination_storage="dst")
     assert e.value.reason_code == "no_ready_sync_candidate"
     assert e.value.rejections == {
-        "source": {"n1": "identity_not_ready_on_node", "n2": "missing_target_mount"},
-        "destination": {"n1": "missing_target_mount",
-                        "n2": "identity_not_ready_on_node"}}
+        "source": {"n1": "missing_tool:dsync", "n2": "missing_target_mount"},
+        "destination": {"n1": "missing_target_mount", "n2": "missing_tool:dsync"}}
 
 
 # Task 5: 정책 fan-out 산정

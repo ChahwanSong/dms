@@ -60,10 +60,10 @@ COPY --from=web /web/dist /app/static
 ENV DMS_STATIC_DIR=/app/static
 
 # postgres: psycopg driver for DMS_DATABASE_URL (db.py Database.connect).
-# ldap: ldap3 for the LDAP identity resolver (identity_ldap.py).
 # kubernetes: python kubernetes client for the Volcano execution adapter
 #   (execution_volcano.py KubernetesClient, in-cluster config).
-RUN pip install --no-cache-dir '.[postgres,ldap,kubernetes]'
+# (no ldap extra: dms-k8s is k8s-identity-mode only since 2026-10-26 -- the LDAP resolver was removed.)
+RUN pip install --no-cache-dir '.[postgres,kubernetes]'
 
 USER 65532:65532
 ENTRYPOINT ["dms"]

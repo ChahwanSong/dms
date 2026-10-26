@@ -13,9 +13,8 @@ import httpx
 
 from ..config import AGENT_TOOL_NAMES, AgentSettings
 from ..db import utc_now_iso
-from .directory import NslcdDirectory
 from .k8s_fetch import fetch_inventory
-from .probes import (CPU_COUNTER_KEYS, probe_artifact_base, probe_identities, probe_k8s_node,
+from .probes import (CPU_COUNTER_KEYS, probe_artifact_base, probe_k8s_node,
                      probe_mounts, probe_os_metrics, probe_tools)
 
 
@@ -90,16 +89,17 @@ def carry_node_cpu(last, k8s_node) -> tuple:
     return {**k8s_node, **last, "allocatable_stale": True}, last
 
 
-def build_report(node_name, storages, probe_targets, *, mountinfo_text,
+def build_report(node_name, storages, *, mountinfo_text,
                  tool_names=AGENT_TOOL_NAMES, mounts_fn=None, tools_fn=None,
-                 identities_fn=None, os_fn=None, read_text=None,
+                 os_fn=None, read_text=None,
                  net_dev_path="/proc/net/dev", virtual_net_path="",
                  artifact_base_path=None, artifact_base_fn=None,
-                 host_root="", self_mountinfo_text="", directory_status=None,
+                 host_root="", self_mountinfo_text="",
                  k8s_node_fn=None, k8s_sync_status=None) -> dict:
+    """노드 보고 한 건. (2026-10-26 dms-k8s LDAP 코드 삭제: 노드 신원 프로브(identities -- getpwnam)와 nslcd 디렉터리 상태
+    (directory)는 싣지 않는다 -- 모든 잡이 root 라 노드의 LDAP 신원 전파를 기다릴 일이 없다.)"""
     mounts_fn = mounts_fn or probe_mounts
     tools_fn = tools_fn or probe_tools
-    identities_fn = identities_fn or probe_identities
     os_fn = os_fn or probe_os_metrics
     artifact_base_fn = artifact_base_fn or probe_artifact_base
     k8s_node_fn = k8s_node_fn or probe_k8s_node
@@ -116,7 +116,6 @@ def build_report(node_name, storages, probe_targets, *, mountinfo_text,
         "mounts": mounts_fn(storages, mountinfo_text=mountinfo_text,
                             host_root=host_root, self_mountinfo_text=self_mountinfo_text),
         "tools": tools_fn(list(tool_names)),
-        "identities": identities_fn(probe_targets),
         "os": os_fn(storages, read_text=read_text, net_dev_path=net_dev_path,
                     virtual_net_path=virtual_net_path, host_root=host_root),
         # 슬라이스 18: mounts 와 **별도** 최상위 필드 -- reconciler 가 mounts 를
@@ -129,11 +128,6 @@ def build_report(node_name, storages, probe_targets, *, mountinfo_text,
         # null 은 모름(조회 실패) -- 막지 않는다.
         "k8s_node": k8s_node_fn(node_name),
     }
-    # 2026-09-29: nslcd 를 관리하는 에이전트만 싣는다 -- 이 키가 곧 "디렉터리 설정을
-    # 받아 적용할 수 있다"는 능력 선언이고(서버는 키가 없으면 비밀번호를 보내지 않는다),
-    # 값은 비밀 없는 적용 상태(해시·출처·bind 모드·오류)다.
-    if directory_status is not None:
-        report["directory"] = directory_status
     # k8s 인벤토리 워커(2026-10-25): 워커 스레드가 있는 에이전트만 싣는다 -- {"v": 1} 이 곧 능력 선언이다(서버는 선언한
     # 노드에게만 run·클러스터 토큰을 준다). 값은 비밀 없는 워커 상태(idle/running, 진행 중 run, 마지막 결과).
     if k8s_sync_status is not None:
@@ -252,11 +246,9 @@ class K8sSyncWorker:
 
 class AgentRunner:
     def __init__(self, settings: AgentSettings, client: httpx.Client,
-                 directory: Optional[NslcdDirectory] = None,
                  k8s_worker: Optional[K8sSyncWorker] = None):
         self._settings = settings
         self._client = client
-        self._directory = directory or NslcdDirectory(managed=settings.nslcd_managed)
         # k8s 인벤토리 워커(2026-10-25) -- run_loop 가 상주 모드에서만 만든다(--once 엔 없다 = 능력 미선언).
         self._k8s_worker = k8s_worker
         # 직전 /proc/stat 카운터(cpu_utilisation 의 prev). 프로세스 메모리에만 둔다 -- 재시작 직후 첫 보고는
@@ -291,13 +283,12 @@ class AgentRunner:
             except OSError:
                 self_mountinfo_text = ""
         report = build_report(self._settings.node_name, state["storages"],
-                              state["probe_targets"], mountinfo_text=mountinfo_text,
+                              mountinfo_text=mountinfo_text,
                               net_dev_path=self._settings.net_dev_path,
                               virtual_net_path=self._settings.virtual_net_path,
                               artifact_base_path=state.get("artifact_base_path"),
                               host_root=self._settings.host_root,
                               self_mountinfo_text=self_mountinfo_text,
-                              directory_status=self._directory.report(),
                               k8s_sync_status=(self._k8s_worker.status()
                                                if self._k8s_worker is not None else None))
         self._attach_cpu_utilisation(report)
@@ -314,7 +305,6 @@ class AgentRunner:
             if not isinstance(body, dict):
                 raise ValueError(f"non-dict response: {type(body).__name__}")
             storages = body.get("storages", state["storages"])
-            probe_targets = body.get("identity_probe_targets", state["probe_targets"])
             interval = body.get("report_interval_seconds", state["interval"])
             # 에이전트는 ConfigMap 을 envFrom 으로 받지 않는다(50-agent-daemonset
             # .yaml 머리 주석) -- base 를 아는 유일한 경로가 이 응답 필드다(설계
@@ -322,24 +312,16 @@ class AgentRunner:
             # 다음 리포트부터 프로브가 사라져 화면이 영구 "확인 대기 중"이 된다).
             artifact_base_path = body.get("artifact_base_path",
                                           state.get("artifact_base_path"))
-            if (not isinstance(storages, list) or not isinstance(probe_targets, list)
+            if (not isinstance(storages, list)
                     or not isinstance(interval, int) or isinstance(interval, bool)
                     or not isinstance(artifact_base_path, (str, type(None)))):
                 raise ValueError("malformed response fields")
-            new_state = {"storages": storages, "probe_targets": probe_targets,
+            new_state = {"storages": storages,
                          "interval": interval,
                          "artifact_base_path": artifact_base_path}
         except Exception as exc:
             print(f"agent report failed: {type(exc).__name__}: {exc}", file=sys.stderr)
             return state
-        # 디렉터리 설정(2026-09-29): 나머지 응답 처리와 독립 -- 적용 실패는 directory.
-        # status.error 로 다음 보고에 실리고 스토리지·프로브 대상 갱신을 막지 않는다.
-        # 예외 메시지는 찍지 않는다(블록에 비밀번호가 있다 -- 유형만).
-        if "directory" in body:
-            try:
-                self._directory.apply(body["directory"])
-            except Exception as exc:  # noqa: BLE001 -- apply 는 원래 안 던진다; 최후 방어
-                print(f"agent directory apply failed: {type(exc).__name__}", file=sys.stderr)
         # k8s 동기화 역할(2026-10-25): 응답에 키가 없으면(옛 서버) 역할 없음 -- 지정되지 않은 것으로 본다.
         if self._k8s_worker is not None:
             self._k8s_worker.configure(body.get("k8s_sync"))
@@ -349,7 +331,7 @@ class AgentRunner:
 def run_loop(settings: AgentSettings, *, once: bool = False,
             client_factory: Optional[Callable[[], httpx.Client]] = None,
             worker_client_factory: Optional[Callable[[], httpx.Client]] = None) -> None:
-    state = {"storages": [], "probe_targets": [],
+    state = {"storages": [],
              "interval": settings.interval_seconds, "artifact_base_path": None}
     if client_factory is None:
         client_factory = lambda: httpx.Client(base_url=settings.api_url, timeout=10.0)

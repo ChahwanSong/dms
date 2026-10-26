@@ -110,53 +110,14 @@ def test_request_delete_settings_reject_bad_values(env):
     assert next(iter(env)) in str(e.value)
 
 
-def test_require_auth_bind_refuses_startup_without_credentials():
-    # 슬라이스 28(BACKLOG §2.3): 인증 바인드를 의도(플래그 true)했는데 자격증명이
-    # 없으면 익명으로 조용히 떨어지는 대신 기동을 거부한다 -- 운영자가 "인증
-    # 바인드로 돌고 있다"고 믿는 채 익명으로 도는 상태가 이 항목의 실체다.
+def test_ldap_settings_are_gone_and_an_ldap_uri_refuses_to_start():
+    # 2026-10-26 dms-k8s LDAP 코드 삭제: LDAP 리졸버 설정 필드가 없다. DMS_LDAP_URI 가 남아 있으면(ssc 설정이 섞임) 기동
+    # 거부 -- 나머지 DMS_LDAP_* 키는 읽지 않는다(무시).
+    s = Settings.from_env({**VALID, "DMS_LDAP_REQUIRE_AUTH_BIND": "true", "DMS_LDAP_BIND_DN": "cn=x"})
+    assert not [f for f in vars(s) if f.startswith("ldap_")]
     with pytest.raises(SettingsError) as e:
-        Settings.from_env({**VALID, "DMS_LDAP_REQUIRE_AUTH_BIND": "true"})
-    text = str(e.value)
-    assert "DMS_LDAP_BIND_DN" in text
-    assert "DMS_LDAP_BIND_PW" in text
-
-
-def test_require_auth_bind_rejects_placeholder_credentials():
-    # 빈 값만 걸면 20-secret.example.yaml 의 CHANGE_ME 류가 실 DN 으로 흘러간다 --
-    # _is_placeholder 를 재사용해 결측과 자리표시자를 같은 구멍으로 본다(기존 규약).
-    with pytest.raises(SettingsError):
-        Settings.from_env({**VALID, "DMS_LDAP_REQUIRE_AUTH_BIND": "1",
-                           "DMS_LDAP_BIND_DN": "cn=CHANGE_ME_BIND_DN,dc=dms,dc=local",
-                           "DMS_LDAP_BIND_PW": "REPLACE_WITH_BIND_PW"})
-
-
-def test_require_auth_bind_passes_with_real_credentials():
-    s = Settings.from_env({**VALID, "DMS_LDAP_REQUIRE_AUTH_BIND": "true",
-                           "DMS_LDAP_BIND_DN": "cn=dms-svc,ou=People,dc=dms,dc=local",
-                           "DMS_LDAP_BIND_PW": "s3cret"})
-    assert s.ldap_require_auth_bind is True
-    assert s.ldap_bind_dn == "cn=dms-svc,ou=People,dc=dms,dc=local"
-
-
-def test_anonymous_bind_remains_the_default():
-    # 플래그 미설정이면 현행 유지 -- 테스트베드는 익명 바인드가 실 구성이다
-    # (20-secret.example.yaml). 기본값을 true 로 하면 이 배포 자체가 못 뜬다.
-    s = Settings.from_env(VALID)
-    assert s.ldap_require_auth_bind is False
-    assert s.ldap_bind_dn == ""
-
-
-def test_ldap_prod_compat_defaults_and_override():
-    # 기본값이 곧 프로덕션 sssd.conf 값(2026-08-23 승격): rfc2307bis + StartTLS.
-    s = Settings.from_env(VALID)
-    assert s.ldap_group_member_attr == "uniqueMember"
-    assert s.ldap_use_start_tls is True
-    # rfc2307-only·평문 사이트는 env 로 명시해서 내린다(예외 쪽이 opt-in).
-    s = Settings.from_env({**VALID,
-        "DMS_LDAP_GROUP_MEMBER_ATTR": "memberUid",
-        "DMS_LDAP_USE_START_TLS": "false"})
-    assert s.ldap_group_member_attr == "memberUid"
-    assert s.ldap_use_start_tls is False
+        Settings.from_env({**VALID, "DMS_LDAP_URI": "ldap://10.10.10.30:389"})
+    assert "remove DMS_LDAP_URI" in str(e.value)
 
 
 def test_user_allowed_operations_default_and_override():
@@ -165,20 +126,6 @@ def test_user_allowed_operations_default_and_override():
     # env 로 넓히면 잠금 해제(예: rm 도 허용)
     s = Settings.from_env({**VALID, "DMS_USER_ALLOWED_OPERATIONS": "sync,rm"})
     assert s.user_allowed_operations == frozenset({"sync", "rm"})
-
-
-def test_identity_supplementary_groups_switch_defaults_on():
-    # D9(2026-10-07): 기본 켬(포탈 릴리스만으로 동작), values.env 로 끈다. true/1 외 전부 False -- 오타는
-    # 꺼지는 쪽(더 좁은 권한)이라 안전하다. dataclass 직접 생성도 True(실 Settings 의 기본이 곧 D9).
-    assert Settings.from_env(VALID).identity_supplementary_groups is True
-    for value in ("true", "1", "TRUE", " true "):
-        assert Settings.from_env({**VALID, "DMS_IDENTITY_SUPPLEMENTARY_GROUPS": value}
-                                 ).identity_supplementary_groups is True
-    for value in ("false", "0", "", "flase", "yes"):
-        assert Settings.from_env({**VALID, "DMS_IDENTITY_SUPPLEMENTARY_GROUPS": value}
-                                 ).identity_supplementary_groups is False
-    assert Settings(database_url="u", shared_token="s", admin_token="a",
-                    session_secret="x").identity_supplementary_groups is True
 
 
 def test_account_verification_env_defaults_on():

@@ -27,10 +27,10 @@ _SUBMITTED_JOB_STATES = tuple(sorted((
 # 배치 오케스트레이터가 굴리는(또는 기록하러 도는) 배치 상태 = batch_orchestrator._BATCH_DRIVEN 의 거울. 취소·완료된 배치에
 # 남은 Queued 항목은 아무도 집지 않으므로 「기다리는」 것이 아니다 -- 세지 않는다.
 _DRIVEN_BATCH_STATES = ("PreviewReady", "Previewing", "Running")
-# 계획 유예·오류 이벤트(planner._record_defer_event · run_once 의 plan_error) -- 요청이 Pending 에 머무는 이유를 남기는 유일한
-# 흔적이다. 고르는 것은 요청마다 가장 최근 하나(MAX(id)).
+# 계획 유예·오류 이벤트(run_once 의 plan_error -- 앞 둘은 LDAP 시절 planner 의 유예 이벤트로 2026-10-26 부터 새로 생기지 않지만
+# 옛 행을 그대로 읽는다) -- 요청이 Pending 에 머무는 이유를 남기는 유일한 흔적이다. 고르는 것은 요청마다 가장 최근 하나(MAX(id)).
 _PLANNING_NOTE_EVENTS = ("awaiting_requested_nodes", "identity_propagating", "plan_error")
-# 「지금 상태에 들어온 시각」. updated_at 은 상태 밖의 쓰기(set_phase_ref·LDAP 보류 touch·배치 확인 도장)로도 움직여 대기
+# 「지금 상태에 들어온 시각」. updated_at 은 상태 밖의 쓰기(set_phase_ref·배치 확인 도장)로도 움직여 대기
 # 시작점이 될 수 없다 -- 그 상태로의 마지막 전이 시각이 정답이다(Executing 의 실행 제출 자기 전이도 그대로 따른다:
 # 「실행 중」의 나이는 실행 vcjob 제출부터다). 전이 행이 없는 행(직접 INSERT·옛 데이터)만 updated_at 으로 접는다.
 # idx_transitions_entity (entity_kind, entity_id, id) 가 잡마다의 탐색을 인덱스 범위로 만든다.

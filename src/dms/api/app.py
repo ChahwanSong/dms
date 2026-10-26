@@ -11,7 +11,7 @@ from ..config import Settings
 from ..db import Database
 from ..repositories import Repositories
 from ..wiring import (build_build_runner, build_execution_adapter,
-                     build_identity_resolver, build_node_lister, build_queue_reader,
+                     build_node_lister, build_queue_reader,
                      build_rollout_runner, wire_reconnect_event)
 from .login_limiter import LoginRateLimiter
 from .password_transport import PasswordTransport
@@ -55,7 +55,6 @@ def create_app(settings: Settings, db: Database, exit_fn=None) -> FastAPI:
     app = FastAPI(title="dms")
     app.state.settings = settings
     app.state.repos = Repositories(db)
-    app.state.identity_resolver = build_identity_resolver(settings)
     app.state.execution_adapter = build_execution_adapter(settings, app.state.repos)
     app.state.build_runner = build_build_runner(settings, app.state.repos)
     # targets/same_tag 엔드포인트가 클러스터 현재 이미지를 읽기 전용으로 관찰하는 데

@@ -4,7 +4,6 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from starlette.concurrency import run_in_threadpool
 
 from .. import k8s_sync
-from ..agent_directory import directory_block
 from ..artifact_base import resolve_artifact_base, strip_scheme
 from ..db import utc_now_iso
 from ..k8s_inventory import COMPONENT as K8S_COMPONENT, record_failure_transition
@@ -60,8 +59,6 @@ def ingest_report(body: dict, request: Request,
                 for s in repos.storages.list() if s["enabled"]]
     response = {
         "storages": storages,
-        "identity_probe_targets": repos.control.probe_targets(
-            ttl_seconds=settings.identity_probe_ttl_seconds),
         "report_interval_seconds": settings.agent_report_interval_seconds,
         # 슬라이스 18(설계 §2.4b): 에이전트는 ConfigMap 을 envFrom 으로 받지 않아
         # (50-agent-daemonset.yaml) base 를 아는 유일한 경로가 이 응답이다.
@@ -72,14 +69,8 @@ def ingest_report(body: dict, request: Request,
         # 비밀이 없다 -- 토큰은 claim 응답에만 run 단위로 실린다.
         "k8s_sync": k8s_sync_block(repos, settings, node_name),
     }
-    # 2026-09-29: LDAP 디렉터리 설정(agent_directory 모듈 docstring). 보고 본문에
-    # "directory" 객체를 실은 에이전트(nslcd 를 관리하는 새 에이전트)에게만 준다 --
-    # 옛 에이전트에겐 키 자체가 없어 비밀번호가 가지 않는다. 해시가 같으면 {"hash"} 만.
-    reported = body.get("directory")
-    if isinstance(reported, dict):
-        reported_hash = reported.get("hash")
-        response["directory"] = directory_block(
-            settings, reported_hash if isinstance(reported_hash, str) else None)
+    # (2026-10-26 dms-k8s LDAP 코드 삭제: 노드 신원 프로브 대상(identity_probe_targets)·nslcd 디렉터리 설정(directory)은
+    #  내려주지 않는다. 옛 에이전트의 보고에 실린 identities·directory 는 그대로 저장될 뿐 아무도 읽지 않는다.)
     return response
 
 

@@ -197,12 +197,11 @@ class Planner:
         try:
             # 노드 배치 제외(repositories/node_exclusions.py): 관리자가 막은 노드는 후보에서 빠진다(k8s 스케줄 불가는
             # 보고의 k8s_node 에서 placement 가 직접 읽는다). 일부만 남으면 남은 노드로 바로 계획하고, 0대면
-            # nodes_excluded 로 즉시 거부한다 -- 기다려도 풀리지 않는 사유라 유예하지 않는다(_GRACE_REASONS 밖).
+            # nodes_excluded 로 즉시 거부한다.
             placement = select_tool_and_candidates(
                 req["operation"], fresh, storage_name=payload.get("storage"),
                 source_storage=payload.get("source_storage"),
                 destination_storage=payload.get("destination_storage"),
-                owner=identity.username, privileged=identity.privileged,
                 excluded_nodes=self._repos.node_exclusions.excluded_names(),
                 # 노드 CPU 상한(node_cpu): 1코어도 못 담는 노드는 빠지고, 0대면 node_cpu_insufficient 로 즉시 거부한다
                 # (유예하지 않는다 -- allocatable 은 기다려도 늘지 않는다). 설정 스텁에 필드가 없으면 코드 기본값.

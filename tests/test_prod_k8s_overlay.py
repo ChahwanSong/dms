@@ -149,4 +149,4 @@ def test_rendered_overlay_has_no_ldap_and_boots_in_k8s_mode(tmp_path):
     assert data["DMS_PRIVILEGED_REQUESTERS"] == "root,admin,v-local-admin"
     settings = Settings.from_env({**data, "DMS_DATABASE_URL": "postgresql://u:p@h/d", "DMS_SHARED_TOKEN": "s",
                                   "DMS_ADMIN_TOKEN": "a", "DMS_SESSION_SECRET": "x"})
-    assert settings.ldap_uri == ""                       # 기동 = k8s 신원 모드(유일한 모드)
+    assert settings.allow_privileged_requesters is True  # 기동 = k8s 신원 모드(모든 잡 root -- 끄면 기동 거부)

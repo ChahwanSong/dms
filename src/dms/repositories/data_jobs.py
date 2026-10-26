@@ -131,7 +131,7 @@ class DataJobsRepository:
         """planner 의 emit -- plan·job INSERT 와 요청 Pending→Planned 를 **한 트랜잭션 + CAS** 로 묶는다(2026-10-08,
         요청 삭제 선행 보강). 반환 = job_id, 또는 None(요청이 없거나 더는 Pending 이 아니다 -- 아무것도 남기지 않았다).
 
-        왜: planner 는 Pending 요청을 읽은 뒤 LDAP 해석(틱 예산까지)을 거쳐 emit 한다. 그 사이 사용자가 취소하면
+        왜: planner 는 Pending 요청을 읽은 뒤 어드미션·노드 선택을 거쳐 emit 한다. 그 사이 사용자가 취소하면
         예전의 create_plan + create_job(무검증 INSERT) + set_state(PLANNED)(_apply_state 에 종단 가드 없음)는
         Cancelled → Planned 로 요청을 **되살리고**(results PK 가 이미 있어 영구 Planned + 매 틱 orphan_recovery 실패),
         관리자가 그 사이 요청을 지웠으면 요청 없는 Pending 잡을 남겨 stepper 가 **실행**했다. 여기서는 요청 행을 먼저
@@ -522,16 +522,6 @@ class DataJobsRepository:
                 "UPDATE data_jobs SET phase_refs = :p, updated_at = :now WHERE job_id = :j",
                 {"p": dump_json(refs), "now": now, "j": job_id})
         return changed == 1
-
-    def touch(self, job_id, *, expected_state) -> bool:
-        """LDAP 재확인 보류(stepper D2, 2026-10-07): 상태·전이는 그대로 두고 updated_at 만 now 로 민다 --
-        claim_steppable(ORDER BY updated_at LIMIT n)의 큐 뒤로 가서 보류 중인 잡이 매 틱 앞자리를 차지해 다른 잡을
-        굶기지 않게 한다. 조건부 UPDATE(state = expected_state)라 그 사이 취소·종단된 잡은 no-op 이다. state_transitions
-        행을 남기지 않는다 -- 일어나지 않은 전이다(보류 사실은 stepper 가 events 로 남긴다). 비종단 잡의 updated_at
-        소비자(metrics 수행시간·pod-gc·retention)는 종단 잡만 보므로 무해하다."""
-        return self._db.execute_count(
-            "UPDATE data_jobs SET updated_at = :now WHERE job_id = :j AND state = :s",
-            {"now": utc_now_iso(), "j": job_id, "s": expected_state}) == 1
 
     def set_worker_pool(self, job_id, worker_pool: dict, *, expected_state) -> bool:
         """stepper 의 노드 CPU 재클램프(2026-10-16, stepper._clamp_to_node_cpu)가 줄인 worker_pool 을 다시 쓴다. 조건부

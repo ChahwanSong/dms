@@ -6,7 +6,7 @@ def _agent_headers(node="node-a"):
 
 
 ADMIN = {"Authorization": "Bearer tok-shared"}
-REPORT = {"node_name": "node-a", "mounts": [], "tools": [], "identities": [], "os": {}}
+REPORT = {"node_name": "node-a", "mounts": [], "tools": [], "os": {}}
 
 
 def test_report_roundtrip_returns_config(client):
@@ -18,7 +18,8 @@ def test_report_roundtrip_returns_config(client):
     body = r.json()
     assert body["storages"] == [{"storage_name": "ceph-a", "mount_path": "/mnt/ceph",
                                  "managed_root": "/mnt/ceph/dms"}]
-    assert body["identity_probe_targets"] == []
+    # LDAP 노드 신원 프로브 대상·nslcd 디렉터리 설정은 내려주지 않는다(2026-10-26 dms-k8s LDAP 코드 삭제)
+    assert "identity_probe_targets" not in body and "directory" not in body
     assert body["report_interval_seconds"] == 60
 
 

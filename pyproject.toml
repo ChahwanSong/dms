@@ -21,7 +21,6 @@ dependencies = [
 [project.optional-dependencies]
 test = ["pytest>=8", "httpx>=0.27"]
 postgres = ["psycopg[binary]>=3.1"]
-ldap = ["ldap3>=2.9"]
 # 하한 36 은 임의가 아니다: KubernetesClient.patch_workload 가 넘기는 `_content_type`
 # kwarg 가 36.0.0 에서 도입됐다. 이 머신의 실 패키지 두 벌로 실증했다 --
 # 35.0.0 의 patch_namespaced_deployment/daemon_set 은 all_params 에 `_content_type`

@@ -65,7 +65,7 @@ def main(argv=None) -> int:
         from .repositories import Repositories
         from . import wiring
         from .wiring import (build_build_runner, build_execution_adapter,
-                             build_identity_resolver, build_purge_runner,
+                             build_purge_runner,
                              build_rollout_runner)
         repos = Repositories(db)
         # 슬라이스 22 §2.6: 컨트롤러도 재연결 흔적을 남긴다(api 와 같은 훅).
@@ -73,7 +73,6 @@ def main(argv=None) -> int:
         # 있어야 하고, from-import 로 묶으면 그 시점에 이름이 고정돼 안 통한다.
         wiring.wire_reconnect_event(db, repos)
         holder = controller_holder()
-        identity_resolver = build_identity_resolver(settings)
         execution_adapter = build_execution_adapter(settings, repos)
         build_runner = build_build_runner(settings, repos)
         rollout_runner = build_rollout_runner(settings)
@@ -81,7 +80,7 @@ def main(argv=None) -> int:
         # 결과 파일이 영원히 남는다(test_cli 가 request-purge=ok 로 고정).
         purge_runner = build_purge_runner(settings, repos)
         if args.once:
-            loops = build_loops(settings, repos, identity_resolver=identity_resolver,
+            loops = build_loops(settings, repos,
                                 execution_adapter=execution_adapter,
                                 build_runner=build_runner,
                                 rollout_runner=rollout_runner,
@@ -89,7 +88,7 @@ def main(argv=None) -> int:
             results = run_all_once(loops, repos, holder)
             print(" ".join(f"{k}={v}" for k, v in results.items()))
             return 0
-        run_forever(settings, repos, holder, identity_resolver=identity_resolver,
+        run_forever(settings, repos, holder,
                     execution_adapter=execution_adapter, build_runner=build_runner,
                     rollout_runner=rollout_runner, purge_runner=purge_runner)
         return 0

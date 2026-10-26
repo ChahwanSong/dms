@@ -110,7 +110,6 @@ class _S:
     agent_report_stale_seconds = 300
     allow_privileged_requesters = True
     privileged_requesters = frozenset({"ops"})
-    planner_identity_grace_seconds = 300
 
 
 def _planner(repos):

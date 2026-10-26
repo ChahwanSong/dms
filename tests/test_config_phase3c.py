@@ -6,7 +6,6 @@ VALID = {"DMS_DATABASE_URL": "sqlite:///tmp/dms.db", "DMS_SHARED_TOKEN": "tok",
 
 def test_phase3c_defaults():
     s = Settings.from_env(VALID)
-    assert s.ldap_uri == "" and s.ldap_user_base == "" and s.ldap_group_base == ""
     assert s.execution_backend == "stub"
     assert s.k8s_namespace == "dms"
 
@@ -43,11 +42,3 @@ def test_build_settings_overrides_from_env():
     assert s.build_builder_image == "quay.io/buildah/stable:v2"
     assert s.build_watcher_interval_seconds == 5
     assert s.build_timeout_seconds == 600
-
-
-def test_planner_identity_grace_default_and_override():
-    # _SERVER_INT_KEYS 등록이 빠지면 기본값만 계속 쓰이는 조용한 회귀 --
-    # DMS_BUILD_* 와 같은 이유로 from_env 경유를 고정한다.
-    assert Settings.from_env(VALID).planner_identity_grace_seconds == 300
-    s = Settings.from_env({**VALID, "DMS_PLANNER_IDENTITY_GRACE_SECONDS": "60"})
-    assert s.planner_identity_grace_seconds == 60

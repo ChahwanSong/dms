@@ -10,11 +10,10 @@ LDAP 리졸버·보조 그룹(posixGroup gidNumber)·비 root 실행 경로는 2
 「실행 신원의 LDAP uid/gid」로 낮추지 않고 privileged_not_authorized 로 **거부**한다 -- 낮출 비 root 신원이 없고, root 로
 올리면 근거 없는 uid 0 실행이다.
 
-아래 LDAP 리졸버 도우미(예외·틱 예산·StubIdentityResolver)와 보조 gid 스냅숏 모양 함수는 아직 그것을 import 하는 모듈
-(identity_ldap·stepper·execution_manifests)과 함께 지운다 -- 판정 경로(resolve_job_identity)는 이미 쓰지 않는다.
+아래 보조 gid 스냅숏 모양 함수(supplementary_gids_problem)는 아직 그것을 쓰는 실행 계층(stepper.identity_problem·
+execution_manifests)과 함께 지운다 -- 판정 경로(resolve_job_identity)는 쓰지 않는다.
 """
 from dataclasses import dataclass
-from typing import Protocol
 
 
 # D3 "기술적으로 무효한 값"의 이 시스템 경계: k8s apiserver 는 PodSecurityContext.supplementalGroups 원소를
@@ -28,119 +27,22 @@ MAX_SUPPLEMENTARY_GROUPS = 256
 SUPP_APPLIED, SUPP_NONE, SUPP_OVER_LIMIT, SUPP_DISABLED, SUPP_PRIVILEGED = (
     "applied", "none", "over_limit", "disabled", "privileged")
 SUPP_STATUSES = frozenset({SUPP_APPLIED, SUPP_NONE, SUPP_OVER_LIMIT, SUPP_DISABLED, SUPP_PRIVILEGED})
-# planner·stepper 공유: 한 틱에서 resolve 에 쓰는 누적 시간 상한(초). 넘으면 새 resolve 를 하지 않는다(서킷과 같은 보류).
-# 루프 리스 max(interval*3, 30)=30s 와 맞물린 내부 불변식이다 -- 틱 LDAP 시간 ≤ 예산 + 진행 중 한 단계(한 URI 의
-# 연결·StartTLS·bind = 3 × DMS_LDAP_TIMEOUT_SECONDS) = 10 + 15 < 30. 설정 키로 빼지 않는다(키우면 리스를 넘어 두 번째
-# 컨트롤러가 같은 루프를 동시에 돈다). '3T' 는 bind 뒤 서버 정보(rootDSE·subschema 검색 2회)를 읽지 않을 때만 참이다
-# -- identity_ldap.build_ldap_resolver 가 ldap3.Server(get_info=NONE)로 끈다(기본 SCHEMA 면 5T 라 T=6 에서 40s).
-LDAP_TICK_BUDGET_SECONDS = 10
-# resolve 하나의 자체 마감(초) -- deadline 없는 호출자(API 로그인 예열 등)도 유한하게. planner·stepper 는 이 값과
-# 틱 예산의 남은 몫을 비교해 '누구의 마감이 묶나' 를 정한다(tick_resolve_deadline).
-LDAP_RESOLVE_DEADLINE_SECONDS = 10
 
 
 @dataclass(frozen=True)
 class ResolvedIdentity:
+    """planner 가 worker_pool.identity 에 asdict 로 얼리는 스냅숏. groups 는 늘 ()(예전 LDAP 그룹 이름 칸 -- 스냅숏 모양을
+    유지한다). stepper.identity_problem 이 이 모양을 다시 본다."""
     username: str
     uid: int
     gid: int
     groups: tuple[str, ...]
     privileged: bool
-    # 리졸버 출력 전용: posixGroup 엔트리의 gidNumber 원시값(정렬·중복 제거, 범위 검사 전, 주 gid 포함 가능).
-    # resolve_job_identity 출력에선 항상 () -- 스냅숏에 싣지 않는다(planner 가 dict 에서 뺀다).
-    group_gids: tuple[int, ...] = ()
-    # resolve_job_identity 출력(= 잡 스냅숏) 전용. found 는 None(보지 않았다 -- 스위치 꺼짐·root)과 0(없음 확정)이 다르다.
-    supplementary_gids: tuple[int, ...] = ()
-    supplementary_gids_status: str = SUPP_NONE
-    supplementary_gids_excluded: tuple[int, ...] = ()
-    supplementary_gids_found: "int | None" = None
-
-
-class IdentityUnavailable(Exception):
-    """resolver 백엔드(LDAP)가 조회 불가 — fail-closed 대상."""
-
-
-class IdentityLookupInvalid(IdentityUnavailable):
-    """LDAP 는 응답했지만 이 사용자의 결과를 쓸 수 없다(사용자 엔트리 중복, 결과 코드 sizeLimitExceeded(4)·
-    adminLimitExceeded(11), 그룹 페이지 상한 초과). 사용자별·결정적 데이터 문제라 **틱 서킷을 열지 않는다**(다른
-    사용자의 요청·잡이 같은 틱에 계속 진행). 상위 클래스라 resolve_job_identity 의 ldap_unavailable 의미는 그대로(D14)."""
-
-
-class IdentityDeadlineExceeded(IdentityUnavailable):
-    """**호출자의** deadline(틱 예산의 남은 몫)이 resolve 를 멈췄다 -- 리졸버 자체 마감(LDAP_RESOLVE_DEADLINE_SECONDS)
-    이 아니다. 시도하지 못한 URI 가 남은 채 연결 단계에서 멈춘 경우도 포함한다. LDAP 장애 판정이 아니라 예산 소진이라
-    planner 는 LdapCircuitOpen(요청 Pending, 다음 틱), stepper 는 미계수 보류(ldap_budget)로 받는다. 예전엔 plain
-    IdentityUnavailable 이라 LDAP 가 멀쩡해도 예산 경계에 걸친 요청이 ldap_unavailable 로 종단 거부(planner)되거나
-    D2 실패로 계수(stepper)됐다. 하위 클래스인 이유: 이 구분을 모르는 호출자에겐 종전대로 '불가'(fail-closed)다.
-    틱의 첫 resolve 는 남은 몫 = 예산 = 자체 마감이라 deadline 을 넘기지 않는다(tick_resolve_deadline) -- 그래서
-    진짜 장애·느림은 매 틱 첫 요청에서 여전히 ldap_unavailable 로 판정되고(진행 보장), 영구 Pending 이 생기지 않는다."""
-
-
-class LdapCircuitOpen(Exception):
-    """같은 틱에서 LDAP 불가가 이미 한 번 났다(또는 틱 LDAP 예산을 다 썼다·남은 몫이 resolve 를 멈췄다) -- 이번 틱엔
-    LDAP 에 다시 가지 않는다(planner 의 틱 서킷). IdentityUnavailable 의 하위가 **아니다**: resolve_job_identity 가
-    ldap_unavailable 로 거부하지 않고 그대로 올려, 호출자가 요청을 Pending 으로 두고 다음 틱에 다시 보게 한다."""
-
-
-def tick_resolve_deadline(start: float, remaining: float) -> "float | None":
-    """틱 예산의 남은 몫 → 리졸버 deadline(planner _TickCircuit·stepper _resolve_fresh 공용). 남은 몫이 리졸버 자체
-    마감 이상이면 **None** -- 자체 마감이 묶으므로 그 마감에 걸린 중단은 진짜 판정(IdentityUnavailable)이다. 더 짧을
-    때만 start + remaining 을 넘겨, 그 시각에 걸린 중단이 IdentityDeadlineExceeded(예산 소진)가 된다. 실시간에서
-    '첫 resolve 의 deadline(t0+10) < 리졸버가 잰 자체 마감(t0+ε+10)' 이라는 ε 차이로 첫 resolve 까지 예산 소진으로
-    접히면(영구 Pending) 안 되므로, 비교를 리졸버 안의 시각 대신 여기서 남은 몫으로 한다."""
-    if remaining >= LDAP_RESOLVE_DEADLINE_SECONDS:
-        return None
-    return start + remaining
-
-
-class IdentityResolver(Protocol):
-    def resolve(self, username: str, *, deadline: "float | None" = None) -> "ResolvedIdentity | None":
-        """deadline = time.monotonic() 기준 절대 시각. 리졸버는 이 시각을 넘기면 새 LDAP 연산을 시작하지 않는다
-        (틱 예산의 남은 몫 -- planner·stepper 가 넘긴다). None 이면 리졸버 자체 마감만."""
-        ...
-
-
-class StubIdentityResolver:
-    def __init__(self, users: dict, *, unavailable: bool = False):
-        self._users = users
-        self._unavailable = unavailable
-
-    def resolve(self, username: str, *, deadline: "float | None" = None):
-        # deadline 은 무시한다(조회가 즉시라 마감이 의미 없다) -- 시그니처만 실 리졸버와 맞춘다.
-        if self._unavailable:
-            raise IdentityUnavailable(username)
-        return self._users.get(username)
 
 
 def _is_int(value) -> bool:
     # bool 은 int 의 하위라 따로 뺀다 -- True 가 gid 1 로 승격되지 않게(DB 신뢰 경계).
     return isinstance(value, int) and not isinstance(value, bool)
-
-
-def valid_supplementary_gids(raw, *, primary_gid) -> "tuple[tuple[int, ...], tuple[int, ...]]":
-    """(유효, 제외). D3: 범위 필터 없음 -- 0·65534 도 유효(사용자가 위험을 알고 승인). bool·비int 는 조용히 버린다
-    (리졸버는 int 만 낸다 -- 방어). g < 0 또는 g > GID_MAX 는 '제외'(화면에 보인다 -- 조용한 권한 축소가 되지 않게).
-    g == primary_gid 는 조용히 뺀다(중복일 뿐 제외가 아니다). 둘 다 정렬·중복 제거."""
-    valid, excluded = set(), set()
-    for g in raw or ():
-        if not _is_int(g):
-            continue
-        if g < 0 or g > GID_MAX:
-            excluded.add(g)
-        elif g != primary_gid:
-            valid.add(g)
-    return tuple(sorted(valid)), tuple(sorted(excluded))
-
-
-def limit_supplementary_gids(valid) -> "tuple[tuple[int, ...], str]":
-    """D4: () → ((), SUPP_NONE); len > MAX_SUPPLEMENTARY_GROUPS → ((), SUPP_OVER_LIMIT)(통째로 미적용 = 오늘 동작);
-    그 외 (valid, SUPP_APPLIED)."""
-    valid = tuple(valid)
-    if not valid:
-        return (), SUPP_NONE
-    if len(valid) > MAX_SUPPLEMENTARY_GROUPS:
-        return (), SUPP_OVER_LIMIT
-    return valid, SUPP_APPLIED
 
 
 def supplementary_gids_problem(ident: dict) -> "str | None":

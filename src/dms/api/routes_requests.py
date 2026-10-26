@@ -319,7 +319,7 @@ def _attach_terminal_result(repo, row: dict) -> None:
     미러 — request_state/files_count/completed_at 처럼 최상위 키다).
 
     이게 없던 동안 화면은 **잡의** reason_code 만 읽었다: 잡이 만들어지기 전에
-    거부된 요청(플래너 어드미션 — ldap_identity_not_found·no_eligible_nodes·
+    거부된 요청(플래너 어드미션 — privileged_not_authorized·no_eligible_nodes·
     storage_missing 등)은 잡 행이 아예 없어 사유가 화면에서 통째로 사라졌고,
     잡이 있어도 「요청 정보」에는 사유 자리가 없었다(사용자 보고).
 

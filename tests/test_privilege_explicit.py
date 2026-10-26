@@ -172,7 +172,6 @@ class _PrivSettings:
     agent_report_stale_seconds = 300
     allow_privileged_requesters = True
     privileged_requesters = OPS
-    planner_identity_grace_seconds = 300
 
 
 NOW = "2026-08-02T10:00:00Z"

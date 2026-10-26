@@ -7,7 +7,7 @@ from dms.repositories import Repositories
 from dms.rollout_runner import RolloutRunner, StubRolloutRunner
 from dms.purge_runner import PurgeRunner, StubPurgeRunner
 from dms.wiring import (build_build_runner, build_execution_adapter,
-                        build_identity_resolver, build_purge_runner, build_queue_reader,
+                        build_purge_runner, build_queue_reader,
                         build_rollout_runner)
 
 BASE = {"DMS_DATABASE_URL": "sqlite:///tmp/x.db", "DMS_SHARED_TOKEN": "t",
@@ -18,7 +18,6 @@ def test_stub_backend_default(db):
     settings = Settings.from_env(BASE)
     adapter = build_execution_adapter(settings, Repositories(db))
     assert isinstance(adapter, StubExecutionAdapter)
-    assert build_identity_resolver(settings) is None
 
 
 def test_volcano_backend_builds_adapter(db):

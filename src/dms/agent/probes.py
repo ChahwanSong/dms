@@ -1,7 +1,5 @@
 """노드 프로브. 시스템 접근(파일/명령)은 전부 파라미터 주입 — 순수 로직만 이 모듈에 둔다."""
-import grp
 import os
-import pwd
 import shutil
 
 from ..node_cpu import parse_cpu_millicores
@@ -144,26 +142,6 @@ def probe_tools(names, *, which=shutil.which):
             "path": path,
             "reason": None if path else "tool_not_found",
         })
-    return results
-
-
-def probe_identities(usernames, *, getpwnam=pwd.getpwnam, getgrall=grp.getgrall):
-    try:
-        all_groups = list(getgrall())
-    except Exception:
-        all_groups = []
-    results = []
-    for username in usernames:
-        try:
-            entry = getpwnam(username)
-        except KeyError:
-            results.append({"username": username, "status": "Missing",
-                            "uid": None, "gid": None, "groups": [],
-                            "reason": "user_not_found"})
-            continue
-        groups = sorted(g.gr_name for g in all_groups if username in g.gr_mem)
-        results.append({"username": username, "status": "Ready",
-                        "uid": entry.pw_uid, "gid": entry.pw_gid, "groups": groups})
     return results
 
 

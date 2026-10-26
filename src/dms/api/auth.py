@@ -19,7 +19,7 @@ _NODE_NAME_RE = re.compile(r"[A-Za-z0-9]([A-Za-z0-9.-]{0,252}[A-Za-z0-9])?$")
 
 # Identity.actor 자체는 절대 건드리지 않는다 -- 에이전트 노드 인증(routes_agent.py),
 # 특권 요청자 판정(routes_requests.py의 settings.privileged_requesters),
-# requester_id -> LDAP/denylist 해석, 스캔 경로 소유권, 계정 자기잠금 가드가 전부 이
+# requester_id -> denylist·k8s 맵핑 판정, 스캔 경로 소유권, 계정 자기잠금 가드가 전부 이
 # 값을 그대로 비교한다. 대신 인증 방식만 auth 필드로 따로 들고 다니고, 감사 로그를
 # 쓰는 라우트에서만 audit_actor()를 거쳐 표시용 actor를 만든다.
 # auth 필드에는 일부러 기본값을 두지 않는다 -- current_identity()의 두 반환 지점이
@@ -33,7 +33,7 @@ Identity = namedtuple("Identity", "actor role auth")
 def audit_actor(identity: Identity) -> str:
     """감사 로그에 쓸 actor. 공유 토큰 호출은 사람이 아니라 스크립트이므로
     출처를 표시한다. Identity.actor 자체는 건드리지 않는다 -- 그 값은 에이전트 인증,
-    특권 판정, LDAP/denylist 해석, 소유권 검사가 쓴다."""
+    특권 판정, denylist·k8s 맵핑 판정, 소유권 검사가 쓴다."""
     return identity.actor if identity.auth == "session" else f"{_RESERVED_ACTOR_PREFIX}{identity.actor}"
 
 

@@ -1,16 +1,11 @@
-"""설정 기반 live 어댑터/리졸버 선택. cli/app 공용."""
+"""설정 기반 live 어댑터 선택. cli/app 공용."""
 import os
 
 from .artifact_base import resolve_artifact_base
 from .artifact_files import (JOB_ID_RE, PHASES, SUMMARY_MAX_BYTES, job_owner_uid,
                              read_contained_text)
 from .execution import StubExecutionAdapter
-from .identity_ldap import build_ldap_resolver
 from .job_image import resolve_job_image
-
-
-def build_identity_resolver(settings):
-    return build_ldap_resolver(settings)
 
 
 def build_summary_reader(repos):

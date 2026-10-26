@@ -146,16 +146,16 @@ def test_build_report_threads_host_root_and_marks_probe_mode():
     def ab_fn(path, **kw):
         seen["ab"] = kw
         return None
-    r = build_report("n1", S, [], mountinfo_text=HOST_MI, mounts_fn=mounts_fn,
-                     tools_fn=lambda n, **k: [], identities_fn=lambda u, **k: [],
+    r = build_report("n1", S, mountinfo_text=HOST_MI, mounts_fn=mounts_fn,
+                     tools_fn=lambda n, **k: [],
                      os_fn=os_fn, artifact_base_fn=ab_fn, artifact_base_path="/x",
                      host_root=ROOT, self_mountinfo_text=SELF_MI)
     assert r["probe_mode"] == "host_root"
     assert seen["mounts"]["host_root"] == ROOT and seen["mounts"]["self_mountinfo_text"] == SELF_MI
     assert seen["os"]["host_root"] == ROOT
     assert seen["ab"] == {"host_root": ROOT, "mountinfo_text": HOST_MI}
-    r = build_report("n1", [], [], mountinfo_text="", mounts_fn=mounts_fn,
-                     tools_fn=lambda n, **k: [], identities_fn=lambda u, **k: [],
+    r = build_report("n1", [], mountinfo_text="", mounts_fn=mounts_fn,
+                     tools_fn=lambda n, **k: [],
                      os_fn=os_fn, artifact_base_fn=ab_fn)
     assert r["probe_mode"] == "direct" and seen["mounts"]["host_root"] == ""
 

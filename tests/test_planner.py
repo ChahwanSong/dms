@@ -14,7 +14,6 @@ class _Settings:
     agent_report_stale_seconds = 300
     allow_privileged_requesters = True
     privileged_requesters = frozenset({OPS})
-    planner_identity_grace_seconds = 300
 
 
 def _seed_storage(repos, name="s1", status="Ready"):

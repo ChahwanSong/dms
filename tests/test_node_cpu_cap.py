@@ -15,7 +15,6 @@ from dms.agent.runner import AgentRunner, build_report, carry_node_cpu
 from dms.config import Settings, SettingsError
 from dms.domain import DataJobState, RequestState
 from dms.execution import ExecStatus, StubExecutionAdapter
-from dms.identity import ResolvedIdentity, StubIdentityResolver
 from dms.node_cpu import (DEFAULT_NODE_CPU_RESERVE_MILLICORES, LAUNCHER_CPU_REQUEST_MILLICORES, node_cpu_cap,
                           parse_cpu_millicores, per_node_limit)
 from dms.placement import (PlacementError, dms_node_load, eligible_nodes, resolve_fanout,
@@ -25,19 +24,17 @@ from dms.repositories import Repositories
 from dms.stepper import JobStepper
 
 NOW = "2026-08-02T10:00:00Z"
-ALICE = ResolvedIdentity("alice", 10001, 10000, ("dmsusers",), False)
 TOOLS = ("dscan", "dsync", "nsync", "drm")
 POLICY = {"max_nodes": 3, "procs_per_node": 8, "queue": "dms-data", "default_priority": "mid",
           "max_priority": "high", "execution_timeout_seconds": 3600, "enabled": 1}
 
 
-def _report(node, storages=("s1",), *, alloc=None, identities=("alice",), tools=TOOLS):
+def _report(node, storages=("s1",), *, alloc=None, tools=TOOLS):
     """alloc: 밀리코어 int(보고된 allocatable) | None(k8s_node 없음 -- 옛 에이전트)."""
     r = {"node_name": node,
          "mounts": [{"storage_name": s, "mount_path": f"/mnt/{s}", "status": "Ready", "writable": True}
                     for s in storages],
-         "tools": [{"name": t, "status": "Ready"} for t in tools],
-         "identities": [{"username": u, "status": "Ready"} for u in identities]}
+         "tools": [{"name": t, "status": "Ready"} for t in tools]}
     if alloc is not None:
         r["k8s_node"] = {"schedulable": True, "reason": None, "transient": False,
                          "allocatable_cpu_m": alloc, "capacity_cpu_m": alloc + 200}
@@ -49,7 +46,7 @@ def _fresh(*reports):
 
 
 def _scan(fresh, **kw):
-    return select_tool_and_candidates("scan", fresh, storage_name="s1", owner="alice", privileged=False, **kw)
+    return select_tool_and_candidates("scan", fresh, storage_name="s1", **kw)
 
 
 # ---- ① 수량 파싱·상한 공식 ----
@@ -131,8 +128,8 @@ def test_incluster_reader_takes_cpu_from_node_status(monkeypatch):
 
 
 def test_agent_report_carries_cpu_fields_under_k8s_node():
-    r = build_report("n1", [], [], mountinfo_text="", tools_fn=lambda names: [],
-                     identities_fn=lambda t: [], os_fn=lambda *a, **k: {},
+    r = build_report("n1", [], mountinfo_text="", tools_fn=lambda names: [],
+                     os_fn=lambda *a, **k: {},
                      k8s_node_fn=lambda name: {"schedulable": True, "reason": None, "transient": False,
                                                "allocatable_cpu_m": 1800, "capacity_cpu_m": 2000})
     assert r["k8s_node"]["allocatable_cpu_m"] == 1800 and r["k8s_node"]["capacity_cpu_m"] == 2000
@@ -172,7 +169,7 @@ def test_agent_runner_reports_the_carried_allocatable(monkeypatch):
 
     def handler(request):
         posted.append(json.loads(request.content))
-        return httpx.Response(200, json={"storages": [], "identity_probe_targets": [], "report_interval_seconds": 60})
+        return httpx.Response(200, json={"storages": [], "report_interval_seconds": 60})
     reads = iter([{"unschedulable": False, "allocatable_cpu": "1800m", "capacity_cpu": "2"}, OSError("timeout")])
 
     def read_node(name):
@@ -182,11 +179,10 @@ def test_agent_runner_reports_the_carried_allocatable(monkeypatch):
         return v
     monkeypatch.setattr("dms.agent.runner._read_text", lambda path: "")
     monkeypatch.setattr("dms.agent.runner.probe_tools", lambda names, **k: [])
-    monkeypatch.setattr("dms.agent.runner.probe_identities", lambda users, **k: [])
     monkeypatch.setattr("dms.agent.runner.probe_k8s_node", lambda name: probe_k8s_node(name, read_node=read_node))
     settings = AgentSettings(api_url="http://api", shared_token="tok", node_name="n1", mountinfo_path="/x")
     runner = AgentRunner(settings, httpx.Client(transport=httpx.MockTransport(handler), base_url="http://api"))
-    state = {"storages": [], "probe_targets": [], "interval": 60}
+    state = {"storages": [], "interval": 60}
     runner.run_once(state)
     runner.run_once(state)
     first, second = posted[0]["k8s_node"], posted[1]["k8s_node"]
@@ -204,9 +200,9 @@ def test_node_without_one_core_leaves_candidates_with_insufficient_cpu():
     assert out["node_cpu_caps"] == {"n1": 1, "n3": None}
 
 
-def test_cpu_check_is_after_tool_and_exclusion_and_before_identity():
+def test_cpu_check_is_after_tool_and_exclusion():
     reports = _fresh(_report("n1", alloc=1800), _report("n2", alloc=900, tools=("dsync",)),
-                     _report("n3", alloc=900), _report("n4", alloc=900, identities=()))
+                     _report("n3", alloc=900), _report("n4", alloc=900))
     out = _scan(reports, excluded_nodes={"n3"})
     assert out["rejections"] == {"n2": "missing_tool:dscan", "n3": "node_excluded", "n4": "insufficient_cpu"}
 
@@ -227,7 +223,7 @@ def test_reserve_setting_moves_the_cap():
 def test_every_node_too_small_rejects_with_node_cpu_insufficient(op, kwargs):
     with pytest.raises(PlacementError) as e:
         select_tool_and_candidates(op, _fresh(_report("n1", alloc=1000), _report("n2", alloc=1599)),
-                                   owner="alice", privileged=False, **kwargs)
+                                   **kwargs)
     assert e.value.reason_code == "node_cpu_insufficient"
 
 
@@ -243,13 +239,6 @@ def test_exclusion_is_reported_before_cpu_when_un_excluding_would_work():
     assert e.value.reason_code == "node_cpu_insufficient"
 
 
-def test_identity_pending_node_keeps_the_grace_code():
-    # CPU 부족 노드와 신원 대기 노드가 섞여 0대면 기존 코드 -- planner 신원 유예가 걸려야 한다
-    with pytest.raises(PlacementError) as e:
-        _scan(_fresh(_report("n1", alloc=1000), _report("n2", alloc=1800, identities=())))
-    assert e.value.reason_code == "no_eligible_nodes"
-
-
 def test_mount_problem_is_not_blamed_on_cpu():
     with pytest.raises(PlacementError) as e:
         _scan(_fresh(_report("n1", storages=(), alloc=1000)))
@@ -258,7 +247,7 @@ def test_mount_problem_is_not_blamed_on_cpu():
 
 def test_eligible_nodes_unknown_allocatable_is_fail_open():
     ok, reasons = eligible_nodes(_fresh(_report("n1"), _report("n2", alloc=None)), "s1", tool="dscan",
-                                 owner="alice", privileged=False, require_writable=False)
+                                 require_writable=False)
     assert ok == ["n1", "n2"] and reasons == {}
 
 
@@ -395,7 +384,6 @@ class _PSettings:
     agent_report_stale_seconds = 300
     allow_privileged_requesters = True
     privileged_requesters = frozenset({"ops"})
-    planner_identity_grace_seconds = 300
 
 
 def _planner_world(db, allocs, *, max_nodes=3, procs_per_node=2, settings=None):

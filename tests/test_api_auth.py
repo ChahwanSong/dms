@@ -1,4 +1,3 @@
-from dms.identity import ResolvedIdentity, StubIdentityResolver
 
 
 def test_healthz_is_public(client):
@@ -113,64 +112,11 @@ def test_non_ascii_token_is_rejected_not_500(client):
     assert r.status_code == 403
 
 
-def test_login_preregisters_probe_target_for_ldap_resolvable_account(client, db):
-    # 슬라이스 33(H): 로그인 시점 선등록 -- 첫 데이터 요청이 신원 전파 왕복(~130s)을
-    # 통째로 기다리지 않게, 로그인하자마자 노드 프로브를 예열한다.
-    client.app.state.identity_resolver = StubIdentityResolver(
-        {"alice": ResolvedIdentity("alice", 10001, 10000, ("dmsusers",), False)})
+def test_login_registers_no_identity_probe_target(client, db):
+    # 2026-10-26 dms-k8s LDAP 코드 삭제: 로그인 시점의 노드 신원 프로브 선등록(슬라이스 33 H)은 없다 -- 표는 빈 채로 남는다.
     client.post("/api/auth/signup", json={"username": "alice", "password": "pw"})
     r = client.post("/api/auth/login", json={"username": "alice", "password": "pw"})
-    assert r.status_code == 200
-    rows = db.query("SELECT username FROM identity_probe_targets")
-    assert [row["username"] for row in rows] == ["alice"]
-
-
-def test_login_skips_probe_target_for_local_only_account(client, db):
-    # LDAP 에 해석 안 되는 로컬 전용 계정(mason 류)은 등록하지 않는다 -- 등록하면
-    # 전 노드가 영원히 Missing 프로브만 쌓는다(예열 이득 0, 프로브 낭비만).
-    client.app.state.identity_resolver = StubIdentityResolver({})  # alice 없음
-    client.post("/api/auth/signup", json={"username": "mason", "password": "pw"})
-    r = client.post("/api/auth/login", json={"username": "mason", "password": "pw"})
-    assert r.status_code == 200
-    assert db.query("SELECT username FROM identity_probe_targets") == []
-
-
-def test_login_succeeds_when_ldap_unavailable(client, db):
-    # 선등록은 예열 최적화일 뿐 로그인의 전제가 아니다 -- LDAP 이 죽어도
-    # (IdentityUnavailable) 로그인은 무조건 성공해야 한다(fail-soft).
-    client.app.state.identity_resolver = StubIdentityResolver({}, unavailable=True)
-    client.post("/api/auth/signup", json={"username": "alice", "password": "pw"})
-    r = client.post("/api/auth/login", json={"username": "alice", "password": "pw"})
-    assert r.status_code == 200
-    assert r.json() == {"actor": "alice", "role": "user"}
-    assert db.query("SELECT username FROM identity_probe_targets") == []
-
-
-def test_login_succeeds_when_ldap_has_duplicate_user_entries(client, db):
-    # D14(2026-10-07): 사용자 엔트리 중복은 이제 IdentityLookupInvalid(fail-closed) -- 예전엔 조용히 첫 엔트리.
-    # 로그인 선등록은 예외를 전부 삼키므로 로그인은 그대로 200 이고, 쓸 수 없는 신원은 프로브에 등록하지 않는다.
-    from dms.identity_ldap import LdapIdentityResolver
-
-    class _Entry:
-        def __init__(self, uid):
-            self._uid = uid
-
-        def __getitem__(self, key):
-            return type("_A", (), {"value": self._uid if key == "uidNumber" else 10000})()
-
-    class _DupConn:
-        entries = []
-        result = {"result": 0, "description": "success", "controls": {}}
-
-        def search(self, base, filt, attributes=None, **kwargs):
-            self.entries = [_Entry(10001), _Entry(10009)]
-            return True
-    client.app.state.identity_resolver = LdapIdentityResolver(
-        connect=lambda deadline=None: _DupConn(), user_base="ou=u", group_base="ou=g",
-        group_member_attr="memberUid")
-    client.post("/api/auth/signup", json={"username": "alice", "password": "pw"})
-    r = client.post("/api/auth/login", json={"username": "alice", "password": "pw"})
-    assert r.status_code == 200
+    assert r.status_code == 200 and r.json() == {"actor": "alice", "role": "user"}
     assert db.query("SELECT username FROM identity_probe_targets") == []
 
 

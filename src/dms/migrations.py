@@ -299,6 +299,8 @@ def _apply_migrations(db: Database) -> None:
             created_by TEXT NOT NULL,
             created_at TEXT NOT NULL,
             PRIMARY KEY (subject_type, subject))""",
+        # identity_probe_targets: LDAP 노드 신원 프로브 대상(2026-10-26 dms-k8s LDAP 코드 삭제로 쓰는 코드가 없다). 빈 채로
+        # 남긴다 -- DROP 은 전수 열거 그물(test_migrations)·ALL_TABLES 계약을 함께 바꿔야 하고(runs 선례) 얻는 것이 없다.
         """CREATE TABLE IF NOT EXISTS identity_probe_targets (
             username TEXT PRIMARY KEY,
             last_requested_at TEXT NOT NULL)""",

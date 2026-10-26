@@ -1,5 +1,5 @@
 import os
-from dms.agent.probes import (parse_mountinfo, parse_proc_stat_cpu, probe_mounts, probe_identities,
+from dms.agent.probes import (parse_mountinfo, parse_proc_stat_cpu, probe_mounts,
                               probe_os_metrics, probe_tools)
 
 MOUNTINFO = """\
@@ -241,26 +241,6 @@ def test_probe_tools_status_value_is_wire_contract():
     # 로 노드 적격성을 판정한다. 화면 relabel(설치됨/없음)과 무관하게 유지.
     out = probe_tools(["drm"], which=lambda n: "/opt/bin/drm")
     assert out[0]["status"] == "Ready"
-
-
-def test_probe_identities():
-    class Pw:
-        pw_uid, pw_gid = 1000, 1000
-
-    class Gr:
-        def __init__(self, name, members):
-            self.gr_name, self.gr_mem = name, members
-
-    def getpwnam(name):
-        if name == "alice":
-            return Pw()
-        raise KeyError(name)
-
-    out = probe_identities(["alice", "ghost"], getpwnam=getpwnam,
-                           getgrall=lambda: [Gr("dev", ["alice"]), Gr("ops", [])])
-    assert out[0] == {"username": "alice", "status": "Ready", "uid": 1000,
-                      "gid": 1000, "groups": ["dev"]}
-    assert out[1]["status"] == "Missing" and out[1]["reason"] == "user_not_found"
 
 
 def test_probe_os_metrics_with_failures_are_soft():

@@ -11,7 +11,6 @@ from dms.agent.probes import k8s_schedulability, probe_k8s_node
 from dms.agent.runner import build_report
 from dms.domain import DataJobState, RequestState
 from dms.execution import ExecStatus, StubExecutionAdapter
-from dms.identity import ResolvedIdentity, StubIdentityResolver
 from dms.placement import PlacementError, select_tool_and_candidates
 from dms.planner import Planner
 from dms.repositories import Repositories
@@ -19,16 +18,14 @@ from dms.repositories.node_exclusions import blocked_nodes, k8s_unschedulable
 from dms.stepper import JobStepper
 
 NOW = "2026-08-02T10:00:00Z"
-ALICE = ResolvedIdentity("alice", 10001, 10000, ("dmsusers",), False)
 TOOLS = ("dscan", "dsync", "nsync", "drm")
 
 
-def _report(node, storages=("s1",), *, schedulable=None, identities=("alice",)):
+def _report(node, storages=("s1",), *, schedulable=None):
     r = {"node_name": node,
          "mounts": [{"storage_name": s, "mount_path": f"/mnt/{s}", "status": "Ready", "writable": True}
                     for s in storages],
-         "tools": [{"name": t, "status": "Ready"} for t in TOOLS],
-         "identities": [{"username": u, "status": "Ready"} for u in identities]}
+         "tools": [{"name": t, "status": "Ready"} for t in TOOLS]}
     if schedulable is not None:
         r["k8s_node"] = {"schedulable": schedulable, "reason": None if schedulable else "cordoned"}
     return r
@@ -39,8 +36,7 @@ def _fresh(*reports):
 
 
 def _scan(fresh, excluded=frozenset()):
-    return select_tool_and_candidates("scan", fresh, storage_name="s1", owner="alice",
-                                      privileged=False, excluded_nodes=excluded)
+    return select_tool_and_candidates("scan", fresh, storage_name="s1", excluded_nodes=excluded)
 
 
 # ---- ① placement ----
@@ -61,10 +57,9 @@ def test_unknown_k8s_state_is_not_blocking():
     assert k8s_unschedulable({}) is False and k8s_unschedulable(None) is False
 
 
-def test_exclusion_is_checked_after_tool_and_before_identity():
+def test_exclusion_is_checked_after_tool():
     # 도구 뒤: 마운트가 없는 노드는 제외 여부와 무관하게 missing_target_mount(제외 사유는 "쓸 수 있었던 노드"만).
-    # 신원 앞: 제외된 노드가 identity_not_ready_on_node 로 기록되면 planner 신원 유예가 쓰지도 않을 노드를 기다린다.
-    out = _scan(_fresh(_report("n1"), _report("n2", storages=()), _report("n3", identities=())),
+    out = _scan(_fresh(_report("n1"), _report("n2", storages=()), _report("n3")),
                 excluded={"n2", "n3"})
     assert out["rejections"] == {"n2": "missing_target_mount", "n3": "node_excluded"}
 
@@ -77,22 +72,15 @@ def test_exclusion_is_checked_after_tool_and_before_identity():
 def test_all_blocked_raises_nodes_excluded(op, kwargs):
     with pytest.raises(PlacementError) as e:
         select_tool_and_candidates(op, _fresh(_report("n1"), _report("n2", schedulable=False)),
-                                   owner="alice", privileged=False, excluded_nodes={"n1"}, **kwargs)
+                                   excluded_nodes={"n1"}, **kwargs)
     assert e.value.reason_code == "nodes_excluded"
-
-
-def test_identity_pending_keeps_the_grace_reason_code():
-    # 막힌 노드와 신원 대기 노드가 섞여 0대면 기존 코드(no_eligible_nodes) -- planner 의 신원 유예가 걸려야 한다
-    with pytest.raises(PlacementError) as e:
-        _scan(_fresh(_report("n1"), _report("n2", identities=())), excluded={"n1"})
-    assert e.value.reason_code == "no_eligible_nodes"
 
 
 def test_sync_excluding_the_only_colocated_node_falls_back_to_nsync():
     # n1 만 src·dst 를 함께 마운트 -- 그걸 빼면 dsync 공존 노드가 없어 nsync(src 전용 n2 + dst 전용 n3)로 간다
     fresh = _fresh(_report("n1", ("src", "dst")), _report("n2", ("src",)), _report("n3", ("dst",)))
     out = select_tool_and_candidates("sync", fresh, source_storage="src", destination_storage="dst",
-                                     owner="alice", privileged=False, excluded_nodes={"n1"})
+                                     excluded_nodes={"n1"})
     assert out["tool"] == "nsync"
     assert out["candidates"] == {"source": ["n2"], "destination": ["n3"]}
 
@@ -104,7 +92,6 @@ class _PSettings:
     agent_report_stale_seconds = 300
     allow_privileged_requesters = True
     privileged_requesters = frozenset({"ops"})
-    planner_identity_grace_seconds = 300
 
 
 def _planner_world(db, nodes=("n1", "n2", "n3")):
@@ -360,8 +347,8 @@ def test_probe_k8s_node_fails_open():
 
 
 def test_agent_report_carries_k8s_node():
-    r = build_report("n1", [], [], mountinfo_text="", tools_fn=lambda names: [],
-                     identities_fn=lambda t: [], os_fn=lambda *a, **k: {},
+    r = build_report("n1", [], mountinfo_text="", tools_fn=lambda names: [],
+                     os_fn=lambda *a, **k: {},
                      k8s_node_fn=lambda name: {"schedulable": False, "reason": f"cordoned:{name}"})
     assert r["k8s_node"] == {"schedulable": False, "reason": "cordoned:n1"}
 
@@ -441,13 +428,13 @@ def test_sync_reports_nodes_excluded_only_when_blocks_are_the_cause():
     fresh = _fresh(_report("n1", ("src",)))
     with pytest.raises(PlacementError) as e:
         select_tool_and_candidates("sync", fresh, source_storage="src", destination_storage="dst",
-                                   owner="alice", privileged=False, excluded_nodes={"n1"})
+                                   excluded_nodes={"n1"})
     assert e.value.reason_code == "no_ready_sync_candidate"
     # 막힘만 풀면 배치가 서는 경우는 nodes_excluded
     fresh = _fresh(_report("n1", ("src",)), _report("n2", ("dst",)))
     with pytest.raises(PlacementError) as e:
         select_tool_and_candidates("sync", fresh, source_storage="src", destination_storage="dst",
-                                   owner="alice", privileged=False, excluded_nodes={"n1"})
+                                   excluded_nodes={"n1"})
     assert e.value.reason_code == "nodes_excluded"
 
 

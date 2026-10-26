@@ -15,12 +15,7 @@ _SERVER_INT_KEYS = (
     ("DMS_RECONCILE_INTERVAL_SECONDS", "reconcile_interval_seconds", 30),
     ("DMS_RETENTION_INTERVAL_SECONDS", "retention_interval_seconds", 3600),
     ("DMS_AGENT_REPORT_RETENTION_DAYS", "agent_report_retention_days", 30),
-    ("DMS_IDENTITY_PROBE_TTL_SECONDS", "identity_probe_ttl_seconds", 3600),
     ("DMS_PLANNER_INTERVAL_SECONDS", "planner_interval_seconds", 10),
-    # 신원 전파 유예 창(설계 §2.3). 최악 전파 ≈130s(보고 60s×2 + 플래너 10s)의 2배
-    # 남짓. 늘리기 전에: 같은 resource_key 후속 요청이 Conflict 로 죽는 시간도 같이
-    # 늘어난다(planner 의 find_active 게이트).
-    ("DMS_PLANNER_IDENTITY_GRACE_SECONDS", "planner_identity_grace_seconds", 300),
     # 노드 CPU 상한의 예비 몫(밀리코어, 2026-10-16 -- node_cpu 모듈 docstring): 상한 = floor((allocatable − launcher 100m −
     # 이 값) / 1000) 코어. DaemonSet·제어면·빌드 파드 몫이다(컨트롤러는 다른 파드의 requests 를 볼 수 없다). 음수는 기동 거부.
     ("DMS_NODE_CPU_RESERVE_MILLICORES", "node_cpu_reserve_millicores", DEFAULT_NODE_CPU_RESERVE_MILLICORES),
@@ -193,9 +188,7 @@ class Settings:
     reconcile_interval_seconds: int = 30
     retention_interval_seconds: int = 3600
     agent_report_retention_days: int = 30
-    identity_probe_ttl_seconds: int = 3600
     planner_interval_seconds: int = 10
-    planner_identity_grace_seconds: int = 300
     node_cpu_reserve_millicores: int = DEFAULT_NODE_CPU_RESERVE_MILLICORES
     stepper_interval_seconds: int = 5
     preview_ttl_seconds: int = 86400
@@ -208,38 +201,14 @@ class Settings:
     artifact_base_allowed_prefixes: tuple = ()
     allow_privileged_requesters: bool = True
     privileged_requesters: frozenset = frozenset({"root", "admin"})
-    # 보조 그룹 인정(2026-10-07, D9 기본 켬 -- 포탈 릴리스만으로 동작): 비 root 잡에 실행 신원의 LDAP posixGroup
-    # gidNumber 를 보조 그룹으로 싣는다. **계획 시점 전용** -- planner 만 읽고, 진행 중 잡은 스냅숏대로 끝까지 간다.
-    # 끌 때는 env false + dms-controller 재시작. 이 스위치가 덮지 않는 변경(재확인·base 검사 등)은 deploy/README §2c 표.
-    identity_supplementary_groups: bool = True
     # 비운영자(role=user)가 제출할 수 있는 연산 allowlist(2026-08-20, 사용자 결정:
     # 사용자에겐 sync 만 열고 rm·scan 은 일단 잠근다). admin 은 이 목록과 무관하게
     # 전부 가능. "일단"이라 나중에 rm/scan 을 풀 때는 env 로 목록만 넓히면 된다
     # (DMS_USER_ALLOWED_OPERATIONS="sync,rm" 등). routes_requests.submit 이 강제한다.
     user_allowed_operations: frozenset = frozenset({"sync"})
-    ldap_uri: str = ""
-    ldap_user_base: str = ""
-    ldap_group_base: str = ""
-    ldap_bind_dn: str = ""
-    ldap_bind_pw: str = ""
-    # 슬라이스 28: true 면 bind DN/PW 결측·자리표시자 시 기동 거부(fail-closed).
-    # 익명 바인드로의 침묵 강등을 막는 스위치다 -- identity_ldap 이 아니라 여기서
-    # 거부하는 이유는 발화 시점이 배포 순간(기동)이어야 운영자가 알아채기 때문.
-    ldap_require_auth_bind: bool = False
-    # 프로덕션 LDAP 호환(2026-08-22 사용자 sssd.conf 실측 → 2026-08-23 사용자
-    # 결정으로 그 값을 **기본값으로 승격**. 테스트베드 LDAP 도 프로덕션 미러라
-    # 기본값 그대로 양쪽에서 돈다. rfc2307-only·평문 사이트가 env 로 내리는 예외):
-    # - group_member_attr: 그룹 멤버십 속성. "uniqueMember"(기본, rfc2307bis --
-    #   sssd ldap_schema=rfc2307bis + ldap_group_member=uniqueMember 미러, 사용자
-    #   DN 으로 매칭) 또는 "memberUid"(rfc2307 posixGroup -- uid 로 매칭).
-    # - use_start_tls: sssd ldap_id_use_start_tls=true 미러(389 에서 TLS 승격,
-    #   인증서 검증은 reqcert=never 미러로 생략). ldap_uri 는 콤마 목록(페일오버)도.
-    ldap_group_member_attr: str = "uniqueMember"
-    ldap_use_start_tls: bool = True
-    # LDAP 호출 하나(연결·StartTLS·bind·검색 각각)의 상한(초, 2026-10-07). 예전엔 타임아웃이 없고 다중 URI 를
-    # ServerPool(exhaust=True)로 묶어, 한 번 실패한 서버를 영구히 건너뛰다 전부 죽으면 connect() 가 영원히 돌아오지
-    # 않았다 -- 단일 스레드 컨트롤러(planner·stepper·rollout)가 통째로 멈췄다. URI 는 이제 순서대로 하나씩 시도한다.
-    ldap_timeout_seconds: float = 5.0
+    # (2026-10-26 dms-k8s LDAP 코드 삭제: LDAP 리졸버 설정(DMS_LDAP_*)·보조 그룹 스위치(DMS_IDENTITY_SUPPLEMENTARY_GROUPS)·
+    #  노드 신원 프로브 TTL(DMS_IDENTITY_PROBE_TTL_SECONDS)·신원 전파 유예(DMS_PLANNER_IDENTITY_GRACE_SECONDS) 필드는 없다.
+    #  DMS_LDAP_URI 가 남아 있으면 from_env 가 기동을 거부한다 -- ssc 설정이 섞인 것이다.)
     # 프로덕션 노출(ingress+TLS) 대비: true 면 세션 쿠키에 Secure 플래그가 붙어
     # 평문 HTTP 로는 쿠키가 실리지 않는다. 기본 false 인 이유는 테스트베드의
     # HTTP 경로(NodePort 30080·port-forward)가 살아 있어야 하기 때문 -- TLS 를
@@ -346,29 +315,12 @@ class Settings:
         artifact_base_allowed_prefixes = _parse_path_prefixes(
             environ, "DMS_ARTIFACT_BASE_ALLOWED_PREFIXES", problems)
         # if problems 검사보다 앞에서 파싱해야 잘못된 값이 조용히 기본값으로 바뀌지 않는다.
-        ldap_timeout_seconds = _parse_float(environ, "DMS_LDAP_TIMEOUT_SECONDS", 5.0, problems)
-        if not (0.5 <= ldap_timeout_seconds <= 60):
-            problems.append("DMS_LDAP_TIMEOUT_SECONDS must be between 0.5 and 60 seconds: "
-                            f"{environ.get('DMS_LDAP_TIMEOUT_SECONDS')!r}")
         mail_relay_timeout_seconds = _parse_float(
             environ, "DMS_MAIL_RELAY_TIMEOUT_SECONDS", 20.0, problems)
         # 포탈 검증(mail_config.validate_timeout)과 같은 범위 -- nan·inf·음수가 urllib 에서 엉뚱하게 터지지 않게.
         if not (1 <= mail_relay_timeout_seconds <= 120):
             problems.append("DMS_MAIL_RELAY_TIMEOUT_SECONDS must be between 1 and 120 seconds: "
                             f"{environ.get('DMS_MAIL_RELAY_TIMEOUT_SECONDS')!r}")
-        ldap_bind_dn = environ.get("DMS_LDAP_BIND_DN", "")
-        ldap_bind_pw = environ.get("DMS_LDAP_BIND_PW", "")
-        ldap_require_auth_bind = _parse_bool(environ, "DMS_LDAP_REQUIRE_AUTH_BIND")
-        if ldap_require_auth_bind:
-            # 인증 바인드를 의도했는데 자격증명이 없으면 identity_ldap 이 익명으로
-            # 조용히 떨어진다(bind_dn or None) -- 그 침묵을 기동 거부로 바꾼다.
-            # _is_placeholder 라 빈 값과 CHANGE_ME 류를 같은 구멍으로 본다.
-            for env_key, value in (("DMS_LDAP_BIND_DN", ldap_bind_dn),
-                                   ("DMS_LDAP_BIND_PW", ldap_bind_pw)):
-                if _is_placeholder(value):
-                    problems.append(
-                        f"DMS_LDAP_REQUIRE_AUTH_BIND is true but {env_key}"
-                        " is missing or a placeholder")
         # 신원 모드(dms-k8s 설계 D1 → 2026-10-26 k8s 전용). dms-k8s 는 「모든 잡 root + 권한 = k8s RoleBinding 맵핑」 하나뿐이다
         # (k8s_access 모듈 docstring) -- 값이 없거나 k8s 면 그 모드다. 아래 셋은 **안전장치**다: dms-ssc(LDAP 라인)의 설정·
         # 오버레이를 이 이미지에 잘못 적용했을 때 조용히 다른 권한 모델로 돌지 않고 기동에서 멈춘다.
@@ -407,23 +359,9 @@ class Settings:
             privileged_requesters=_parse_csv_set(
                 environ, "DMS_PRIVILEGED_REQUESTERS",
                 default=frozenset({"root", "admin"})),
-            # true/1 외 전부 False -- 오타는 꺼지는 쪽(더 좁은 권한)이 안전하다.
-            identity_supplementary_groups=_parse_bool(
-                environ, "DMS_IDENTITY_SUPPLEMENTARY_GROUPS", default=True),
             user_allowed_operations=_parse_csv_set(
                 environ, "DMS_USER_ALLOWED_OPERATIONS",
                 default=frozenset({"sync"})),
-            ldap_uri=environ.get("DMS_LDAP_URI", ""),
-            ldap_user_base=environ.get("DMS_LDAP_USER_BASE", ""),
-            ldap_group_base=environ.get("DMS_LDAP_GROUP_BASE", ""),
-            ldap_bind_dn=ldap_bind_dn,
-            ldap_bind_pw=ldap_bind_pw,
-            ldap_require_auth_bind=ldap_require_auth_bind,
-            ldap_group_member_attr=environ.get(
-                "DMS_LDAP_GROUP_MEMBER_ATTR", "uniqueMember"),
-            ldap_use_start_tls=_parse_bool(environ, "DMS_LDAP_USE_START_TLS",
-                                           default=True),
-            ldap_timeout_seconds=ldap_timeout_seconds,
             session_cookie_secure=_parse_bool(
                 environ, "DMS_SESSION_COOKIE_SECURE"),
             account_verification_required=_parse_bool(
@@ -468,10 +406,6 @@ class AgentSettings:
     # 하면 Missing)을 없앤다. 미설정("")이면 종전처럼 컨테이너 안 경로를 직접 본다
     # (레거시 모드: 새 이미지를 옛 매니페스트에 먼저 올려도 동작한다).
     host_root: str = ""
-    # nslcd 관리(2026-09-29). 엔트리포인트가 nslcd 를 띄운 컨테이너에서만 export 한다 --
-    # 그때만 에이전트가 제어면이 내려준 디렉터리 설정으로 nslcd.conf 를 다시 렌더·재기동
-    # 하고(agent/directory.py), 보고에 "directory" 를 실어 그 능력을 선언한다.
-    nslcd_managed: bool = False
 
     @classmethod
     def from_env(cls, environ: Mapping) -> "AgentSettings":
@@ -494,5 +428,4 @@ class AgentSettings:
             net_dev_path=environ.get("DMS_AGENT_NET_DEV_PATH", "/proc/net/dev"),
             virtual_net_path=environ.get("DMS_AGENT_VIRTUAL_NET_PATH", ""),
             host_root=environ.get("DMS_AGENT_HOST_ROOT", "").rstrip("/"),
-            nslcd_managed=_parse_bool(environ, "DMS_AGENT_NSLCD_MANAGED"),
         )
