@@ -95,7 +95,7 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
-### ✅ BACKLOG 결정 묶음 구현 — 직접 경로 결과 소유·rm 경로 겹침 잠금·결과 파일 자동 만료·배치 삭제 상한 2000·dscan 카운터 + 보류 기능 5건 + 결함 3건 — **완료**(2026-10-26~27)
+### ✅ BACKLOG 결정 묶음 구현 — 직접 경로 결과 소유·rm 경로 겹침 잠금·결과 파일 자동 만료·배치 삭제 상한 2000·dscan 카운터 + 보류 기능 5건 + 결함 3건 — **완료·실증**(2026-10-26~27, d6)
 
 사용자 결정(원문): 「A 결정 필요한 것들 1. 권장안대로 구현. 2. 권장안대로 구현하되, 구현 후 다양한 케이스들에 대해 검증을 하여
 제대로 작동하는지 꼼꼼히 체크 필요. 3. 권장안대로 파일만 만료하고 행은 남김. N일의 N 기본값 1500일로 하자. 4. 큰 배치 삭제 숫자를
@@ -199,7 +199,49 @@ ARCHITECTURE(각 항목의 절), 운영은 deploy/README §8-2b·§9-8·§12·§
 - **구현 중 발견 → BACKLOG**: claim_steppable 의 클레임 굶주림(단순 폴링이 updated_at 을 밀지 않는다), 깨진 JSON 행 하나가 stepper
   틱 전체를 멈춤, 만료된 scan 리포트를 읽으려는 화면(스캔 경로 통계·사용량), 단건 scan 요청 상세엔 잘못된 인코딩 이름 수가 안 보임,
   포개진 다른 이름 스토리지의 겹침·둘째 관문의 오래된 판정.
-- **라이브 실증(d6)**: 아래에 덧붙인다.
+- **리뷰(독립 4차원 + 반박 검증)**: 확인 2건(low) 수정 — 배치 실행 설정 chown 칸 안내가 「비우면 소스 소유 보존」(pv/both 목적지는 이제
+  아님), CSV 를 내보내고 다시 읽으면 정말 `'=` 로 시작하는 경로의 `'` 가 사라짐(내보내기가 `'` 로 시작하는 칸에도 `'` 를 붙이고 읽기가 하나
+  걷는다 — 왕복 테스트). 반박: 큰 rm 배치 미리보기 중 겹침 후보 조회의 O(N²)(유한·실패 없음 — BACKLOG 최적화 후보), 만료가 scan 리포트를
+  지워 사용량 이력이 줄어드는 것(의도 — 기본 1500일, 실 사용량은 bytes_count 로 물러남; 만료 전 요약 캐시는 BACKLOG 후속), 배치 기록 삭제와
+  `:rescan` 경합(재열기 쪽의 기존 성질).
+- 검증: 백엔드 전체 3,963 통과 + 부하 플레이크 1(request_purger 초 경계 — 같은 파일 단언 2곳을 고쳐 62 통과), vitest 1,566·`tsc -b`·e2e 29
+  통과(새 스펙 2).
+
+**테스트베드 적용 — d6**(2026-10-27, 소스 99dd8f5): 포탈 빌드 d6(이미지 3종 + 잡 이미지 — mpifileutils ae781bd, 225초) → 릴리스(agent →
+job-image·controller·api) → guard → apply -k(`DMS_JOB_IMAGE` d6·`DMS_ARTIFACT_RETENTION_DAYS` 1500) → migrate → rollout restart. 파드 전부 d6·
+재시작 0·오류 0, `verify.sh --context dmsk8s` PASS 4. 라이브 실증(전부 기대대로):
+- **rm 경로 겹침 잠금 — 층1(planner)**: P1 alice PV sync(확인 대기 = 잠금 보유) → P2 소스 하위 rm Conflict `path_conflict`(상대 P1·source)
+  · P3 목적지 조상 rm Conflict(destination) · P4 성분 접두만 같은 `src2` 는 겹침 아님(계획) · P5 mason **직접 경로** rm 이 PV 주소 sync 와 같은
+  스토리지로 비교돼 Conflict · P6 sync↔sync 는 계획 · P7 같은 대상 rm 두 번째는 종전대로 `resource_conflict` · P8 P1 취소 뒤 같은 rm 은
+  Succeeded(`src/sub` 만 삭제, `keep` 유지) · P9 rm↔scan 대칭(scan Conflict) · P10 남의 요청과 겹친 alice rm Conflict, 그 요청은 alice 에게 404.
+  **배치**: B2 rm 배치 항목 0 이 확인 대기 sync(B1)와 겹쳐 Failed `path_conflict`, 항목 1 은 미리보기 · B3 B1 취소 → 항목 재실행 → PreviewReady
+  · B4 확인 대기 rm 배치 자식이 sync 배치 자식·단건 rm 을 막음 · B4b 배치 취소로 잠금 해제 → sync 배치 자식이 단건 rm 을 막음 · B5 배치 안
+  겹침은 종전대로 422 `batch_rm_targets_overlap`.
+- **층2(실행 직전 보류 — 이 기능 전에 계획된 행을 DB 로 흉내)**: L1 2.4 GB sync 실행 중 그 소스 안을 지우는 rm 이 exec_preflight 전에
+  보류(`path_overlap_hold` 1건, conflict_level 2, 파드 없음) → sync Succeeded 뒤 `path_overlap_released` → rm 진행. **sync 결과 6파일 온전**
+  (f1 md5 원본 일치), 소스 f1 은 그 뒤에 삭제. L3 나중 제출 R2 를 먼저 확인해도 앞선 R1 이 먼저 진행, R2 보류 → 해제 → 대상 부모가 없어
+  `parent_not_writable` 종단 — 교착 없음.
+- **직접 경로 결과 소유**: k8s-pv-nfs(pv, 기본 1600) → 결과 1600:1600·setuid 4755 → 755, k8s-pv-gpfs(both, 기본 1700) PV 루트 아래 →
+  1700:1700(`pv_root` 기록), 같은 스토리지 PV 루트 밖 → 규칙 `none`·소스 소유 1000:1000 보존, cephfs-dms(filesystem) → `none`. 배치:
+  미리보기 뒤 기본값 변경 → 배치 확인 시 자식 Rejected `storage_owner_changed`·목적지 미생성, 그대로면 1650:1650.
+- **결과 파일 자동 만료**: 희생 잡(A1a) 종단 시각을 2022 로 → 루프 1회 `queued 1` → 아웃박스 kind expiry k8s → purging → 약 45초 뒤 소멸.
+  잡 디렉터리·trash 없음, base 항목 61 → 60, 행 수(잡 66·전이 660·요청 77) 불변, 잡은 Succeeded·files_count 5 유지, 이벤트
+  `artifact_expiry_queued`·`artifacts_expired`(request_purged 없음). API 목록 200 `{entries:[], expired_at, retention_days:1500}`·파일 410
+  `artifact_expired`·남의 잡 404, 관리자 현황 만료됨 1건, 재실행 `queued 0`(멱등).
+- **dscan 카운터**: 잘못된 UTF-8 이름 3개(파일 2·디렉터리 1 — 자식은 미가산)·한글 이름 포함 트리 scan → `summary.total_bytes` 1,005,115·
+  `invalid_name_entries` 3·broken 0(카운터만), 잡 bytes_count 1,005,115.
+- **배치 기록 삭제**: 토큰 403 `admin_session_required`, 진행 중 배치 409 `batch_not_deletable`, 끝난 배치 200 + 감사 행 `('batch',
+  'delete_record')`(이름·상태·건수). **CSV**: parse-csv(BOM·빈 줄·따옴표 안 쉼표·`'=` 걷기, 절대경로 줄 `unsafe_path`), items.csv(BOM·
+  Content-Disposition), 템플릿. **빌드**: pod-gc 가 24시간 넘은 빌드에 `pods_gc_at` 표시(재시작 뒤 첫 판은 루프 리스(간격×3=30분)가
+  옛 파드 것이라 그만큼 늦다 — 기존 성질), k3 빌드 기록 삭제가 남은 빌드·프로브 파드 2개를 먼저 정리(토큰 403). **securityContext
+  드리프트**: 평소 api·controller `[]`(거짓 경보 없음) → controller 의 readOnlyRootFilesystem 을 false 로 패치 → `[{field:
+  readOnlyRootFilesystem, live:false, manifest:true}]`·릴리스 화면 「보안 설정 드리프트」 배지(오버레이 재적용으로 원복).
+- **실 Chrome**: 드리프트 배지·「겹친 요청 8fa26065」 링크·「결과 파일 만료됨(보존 1500일, 2026-10-27)」·「목적지 스토리지 기본 소유자
+  1600:1600(직접 경로)」·사용량 분석 「잘못된 인코딩 이름 3개 이상」(옛 리포트가 섞여 「이상」)·배치 생성 스토리지 드롭다운(이름 + 백엔드)·
+  템플릿 링크·배치 CSV 내려받기·요청 상세 단건 삭제 → 목록 알림. 단건 삭제 직후 지운 요청의 재조회 404 두 건이 콘솔에 남아
+  (`useDeleteRequests` 가 화면 이동과 같은 틱에 캐시를 지움) 이동 뒤로 미뤘다 — d7 에서 재확인.
+- 실증 데이터 삭제, 스토리지 기본 소유 0:0 원복. nsync 는 이번 변경과 무관해 다시 돌리지 않았다. 배치 삭제 상한 2000 은 서버·포탈 대조
+  테스트로만(2000개 배치를 만들지 않았다).
 
 ### ✅ 스토리지 기본 소유자(uid:gid) — PV 목적지 sync 결과 소유 — **완료·실증**(2026-10-26, d5)
 
