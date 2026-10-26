@@ -95,7 +95,7 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
-### ✅ nsync 목적지 링크 추종 수정 반영 — root nsync 의 PV 목적지 허용 — **완료**(2026-10-26, d1 → d2)
+### ✅ nsync 목적지 링크 추종 수정 반영 — root nsync 의 PV 목적지 허용 — **완료·실증**(2026-10-26, d1 → d2)
 
 k3 2차 보안 리뷰가 찾은 nsync(dms-mpifileutils) 목적지 쪽 링크 추종을 도구에서 고치고, 그동안 DMS 가 막아 둔 가드를 풀었다.
 
@@ -119,6 +119,18 @@ k3 2차 보안 리뷰가 찾은 nsync(dms-mpifileutils) 목적지 쪽 링크 추
   사유 코드 `pv_sync_needs_shared_node` 는 더 이상 내지 않고 목록·문구에만 남긴다(옛 거부 행 표시 — 「지금은 허용, 다시 제출」).
 - 테스트: 거부 테스트를 「계획됨·nsync」로 교체, 잡 이미지 고정값이 옛 커밋(faefdaf·1b93d54 — 링크 추종, 8cd72f3 — 새 목적지
   실패)이 아님을 고정(가드 없는 planner 와 도구 고정값이 짝이라는 계약).
+- **라이브 실증(dmsk8s, d2)** — 두 PV 를 함께 마운트한 노드가 없게 k8s-w2 의 `/k8s_pv/nfs`·k8s-w1 의 `/k8s_pv/onefs` 를 잠시 내리고
+  (fstab 그대로, 끝나고 원복 — 두 노드 `lookupcache=positive` 유지, 에이전트 보고 Ready 확인), alice(일반 사용자) PV 주소로:
+  - 회귀(마운트 분리 전): team-a datasets → kraken-kv-cache **dsync** Succeeded 146개, 결과 트리 = 원본(모드·크기·md5·링크 145항목).
+  - **nsync 기능**: 같은 쌍 → 새 목적지 Succeeded 146개·327,184 B, 결과 트리 = 원본(145항목). d1(8cd72f3)에서는 같은 요청이 실행
+    rc=1·0 B(「Cannot open destination root」) — 위 2a10a18 의 발견 경위.
+  - **nsync 링크 공격**: 목적지 PV 안에 같은 onefs 스토리지의 남의 영역을 가리키는 `sub`(디렉터리)·`file.txt`(파일)·`a/b`(깊은
+    상위) 링크를 심고 같은 이름의 소스를 sync → Succeeded 210개, 남의 영역 **변화 0**(파일 2개·내용·모드 그대로, 유출 0), 목적지의
+    세 링크는 실제 디렉터리·파일로 바뀜(sub/ 200개, file.txt = 소스 내용, a/b/c/f.txt).
+  - **비 PV root nsync**: mason(특권 운영자) 직접 경로 cephfs-third(w1) → cephfs-secondary(w2), 같은 링크 공격 → Succeeded, 유출 0.
+  - **증분**: 소스 파일 하나 변경 + 하나 추가 후 같은 목적지로 다시 → 3건·3,006 B 만 옮기고 결과 트리 = 원본(146항목).
+  - **도구 대조**(파드에서 잡 이미지 nsync 를 직접, onefs NFS, `--batch-files 1` 링크 공격): k3 이미지 130/200 이 남의 영역에 써지고
+    rc=0(조용히 샘) → d1·d2 이미지 0/200, rc=1(그 경우 아무것도 쓰지 않고 멈춤). 기본 배치는 링크를 실제 디렉터리로 바꿔 200개 복사.
 
 ### ✅ dms-k8s RBAC·PV — 인벤토리·관리자 화면·제출·권한·스토리지·PV 봉쇄 — **완료·실증**(2026-10-25~26, k3)
 

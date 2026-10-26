@@ -31,6 +31,7 @@
 #        이미지에 동봉된 매니페스트의 에이전트·잡 이미지는 자리표시자라 릴리스 화면의 그 둘 드리프트 배지는 「모름」 — 다음 3종 빌드에서 돌아온다).
 #   d1 = dN 관례 첫 태그(2026-10-26, 소스 744e3e5 — nsync 목적지 링크 미추종 dms-mpifileutils 8cd72f3 + root nsync PV 목적지 허용;
 #        이미지 3종 + 잡 이미지, 드리프트 배지 셋 다 일치).
+#   d2 = dms-mpifileutils 2a10a18(2026-10-26, 소스 5f89b3d — d1 실증에서 찾은 「새 목적지로의 nsync 실패」 수정; 이미지 3종 + 잡 이미지).
 #   태그 bump = 아래 newTag(+ patch-config.yaml 의 DMS_JOB_IMAGE) 커밋 — **dms-k8s 에서만** 한다(2026-10-22 브랜치 분리 뒤
 #   빌드 소스는 /home/mason/dms-dev/dms-k8s 체크아웃 = origin/dms-k8s, main 은 이 클러스터와 무관).
 #   overlays/testbed(ssc 클러스터) 는 dms-ssc 쪽 소관이라 여기서 같이 건드리지 않는다(체리픽 충돌·엉뚱한 태그 방지).
@@ -48,10 +49,10 @@ resources:
 images:
   - name: set-by-overlay.invalid/dms
     newName: pkg-01:5001/dms
-    newTag: d1
+    newTag: d2
   - name: set-by-overlay.invalid/dms-agent
     newName: pkg-01:5001/dms-agent
-    newTag: d1
+    newTag: d2
 
 patches:
   - path: patch-config.yaml
