@@ -136,6 +136,38 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
 `tsc -b` 통과, e2e 27 통과(실 브라우저). 테스트베드(dmsk8s)에는 적용하지 않았다 — 적용하면 에이전트 명령·ConfigMap 키가 바뀌므로 이미지와
 함께 다음 태그에서(라이브 실증 필요).
 
+### ✅ d3 라이브 실증 — PV 소유자 chown·setuid·namespaceAdmin·scan·경고·숫자 아이디·배치 PV·멀티 클러스터 — **완료·실증**(2026-10-26, d3)
+
+배포: 포탈 빌드 d3(소스 7171b28, 이미지 3종 + 잡 이미지 — mpifileutils 3c041e0) → 릴리스(agent → job-image·controller·api) → guard(변경 없음)
+→ apply -k(ConfigMap `DMS_ACCOUNT_EMAIL_DOMAIN: example.com`·`DMS_USER_ALLOWED_OPERATIONS: sync,rm`) → rollout restart api·controller.
+
+- **두 번째 클러스터(멀티 클러스터, (i))**: 테스트베드 호스트의 k3s 컨테이너 `dms-k3s2`(v1.31.4+k3s1, API 10.10.10.1:6444 — 테스트베드 IaC 밖,
+  격리 세션은 testbed 저장소를 못 고쳐서). 픽스처: namespace lab-x·lab-y, `alice-clusterrole-edit`(lab-x)·`namespaceAdmin`(lab-y,
+  junwoo.song@example.com)·`cocoa-song-clusterrole-admin`(lab-y)·대조군(view, 다른 도메인 소유자), StorageClass `c2-nfs`(정적 NFS PV 2개
+  → 호스트 `/data/k8s_pv/nfs/c2/<ns>/<pvc>`), DMS 인벤토리 리더(읽기 전용 SA). DMS 등록 `dmsk8s2`(CA·봉인 토큰) → 첫 동기화 10초,
+  SC 매핑 `c2-nfs → k8s-pv-nfs` 템플릿 `c2/{namespace}/{pvc}`. 사용자 가시 범위: alice = dmsk8s team-a(edit)·team-b(admin) + dmsk8s2
+  lab-x(edit), junwoo.song = team-a(admin) + lab-y(admin — namespaceAdmin), cocoa.song = team-b(edit) + lab-y(admin).
+- **(a) namespaceAdmin**: 인식 바인딩 dmsk8s 5 → 8(team-a junwoo.song·team-b alice·team-c ops.lead 소유자), dmsk8s2 2 → 3(junwoo.song),
+  다른 도메인(owner@other.org)·view 는 인식 안 됨.
+- **(l) 결과 소유 = 목적지 PV 루트 소유자**: alice 클러스터 간 PV→PV sync(dmsk8s team-a datasets → dmsk8s2 lab-x results, dsync) — 확인
+  창 단계의 잡에 `dest_pv_owner=1500:1500`, 실행 결과 12항목 전부 1500:1500, setuid 파일 4755 → 755·setgid 파일 2755 → 755, setgid
+  디렉터리 2775 유지, 내용 md5 일치. **nsync**(마운트를 갈라 team-a datasets → kraken-kv-cache, PV 루트 1700:1700 으로 잠시) — 12항목
+  1700:1700, 같은 비트 처리, 내용 일치. **미리보기 뒤 소유자 변경**(확인 창에서 PV 루트를 1600:1600 으로) → 컨펌 → `pv_owner_changed`
+  거부, 목적지 미생성. 요청 상세에 「목적지 PV 소유자 1500:1500(PV 루트 기준)」(실 Chrome).
+- **게이트**: alice chown 403 `chown_not_allowed`·chmod 403 `chmod_not_allowed`·scan 403 `scan_unrestricted_only`, 목록 밖 관리자
+  ops.k8s scan 403, `/me` 연산 alice·ops.k8s = sync·rm / mason = scan·sync·rm, mason 의 dmsk8s2 lab-y weights scan Succeeded. 숫자
+  아이디 가입 인증번호 422 `username_numeric_only`(같은 아이디 재설정은 형식으로 막지 않음 — 404 account_not_found).
+- **(c) 동기화 실패는 경고만**: k3s 컨테이너를 멈춰 dmsk8s2 `failing`(Connection refused) — alice 의 lab-x results 는 그대로 선택 가능,
+  그 PV 로 보낸 sync Succeeded(막지 않음), 제출 화면 PV 줄에 「목록이 오래됐을 수 있습니다(동기화 실패 중) — … 제출은 그대로 됩니다」(실
+  Chrome). 컨테이너 재시작 → 다음 동기화에서 ok.
+- **(e) 배치 PV 검색 사이드바**(실 Chrome 1440·375): results 검색 → PV 안 경로 → 「경로 칸에 넣기」 → 1행 `c2/lab-x/results/from-batch`,
+  스토리지 `k8s-pv-nfs` 자동, 가로 넘침 0px.
+- **PV 탐색 버튼**: ops.k8s(목록 밖 관리자)가 team-c/archive 상세 → 버튼 잠금 + 「이 PV 에 대한 권한이 없습니다 — team-c 에
+  ops-k8s-clusterrole-edit|admin 또는 namespaceAdmin(소유자)이 필요합니다」. 콘솔 오류 0.
+- **`--context`**: current-context `dms` 인 채 `verify.sh --context dmsk8s`(PASS 4)·`preflight-cluster.sh --context dmsk8s`(PASS 10·WARN 5·FAIL 0).
+- 실증 데이터·마운트·PV 루트 소유는 원복. k3s 클러스터는 남겨 둠(제거: `docker rm -f dms-k3s2` + `/data/k8s_pv/nfs/c2` 삭제 + DMS 「k8s 연동」
+  에서 dmsk8s2 삭제).
+
 ### ✅ PostgreSQL 로 k8s 테스트 실행 + 자리표시자 리터럴 결함 — **완료**(2026-10-26)
 
 - conftest `db`: `DMS_TEST_DB=postgresql` + `DMS_TEST_PG_URL` 이면 테스트마다 새 스키마의 PostgreSQL(기본은 종전 sqlite).
@@ -143,8 +175,11 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   test_api_k8s·test_k8s_submit·test_pv_owner_chown·test_agent_k8s_worker(+ 기존 PG 비교 test_usage_equivalence).
 - 찾은 결함: `db._NAMED`(`:name` → `%(name)s`)가 작은따옴표 리터럴 안의 콜론을 자리표시자로 바꿔 PG 에서만 실패 — 리터럴(`''` 이스케이프 포함)을
   통째로 건너뛰게(`::type` 캐스트는 종전대로). 테스트의 날 SQL 3곳(`'v1:sealed'`·`'v1:AAAA'`·`'sha256:new'`)은 파라미터로.
+- 놓친 것: `_NAMED` 에 리터럴 그룹을 더하자 `findall` 이 튜플을 돌려줘 `test_migrations` 의 자리표시자 검사가 기본값 리터럴('mid' 등)을
+  위반으로 셌다 — 7171b28 을 push 한 뒤 전체 스위트(3914 통과·2 실패: 이것 + 부하 타이밍 플레이크 `test_request_purger`)에서 드러났고
+  16c69c9 가 이름 그룹만 세게 고쳤다.
 
-### ✅ dms-k8s 결정 항목 반영 — namespaceAdmin 맵핑·동기화 실패는 경고만·배치 PV 검색·scan 특권 운영자·숫자 아이디·PV 버튼 — **구현**(2026-10-26, 라이브 실증은 d3)
+### ✅ dms-k8s 결정 항목 반영 — namespaceAdmin 맵핑·동기화 실패는 경고만·배치 PV 검색·scan 특권 운영자·숫자 아이디·PV 버튼 — **완료·실증**(2026-10-26, d3)
 
 사용자가 BACKLOG 설계 §10 결정 대기 항목을 정했다(BACKLOG 「설계 §10 결정」).
 
@@ -172,7 +207,7 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   특권 운영자 202, DB 변조 행 planner 거부, /me), 게이트 시험의 기본 연산을 rm 으로(`_rm`), 숫자 아이디(저장소·가입·사용자 지정), 프런트
   freshnessWarns·실패 중 경고 + 제출 가능·VolumesPage 3경우·BatchCreate.k8s 6경우.
 
-### ✅ PV 목적지 sync 의 결과 소유 = 목적지 PV 루트 소유자(자동 chown) — **구현**(2026-10-26, 라이브 실증은 d3)
+### ✅ PV 목적지 sync 의 결과 소유 = 목적지 PV 루트 소유자(자동 chown) — **완료·실증**(2026-10-26, d3)
 
 사용자 결정(BACKLOG (l) 「아주아주 중요」): root sync 의 결과를 소스 소유로 두면 다른 namespace 파드(그 PV 의 uid/fsGroup)가 결과를 못
 읽거나 못 고친다 → 목적지가 PV 주소면 결과를 **목적지 PV 루트의 uid:gid** 로 맞춘다(dsync·nsync 둘 다 이미 `--chown` 지원).
