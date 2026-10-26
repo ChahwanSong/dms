@@ -1168,6 +1168,7 @@ dms-k8s 브랜치 후보(main)를 검증하는 테스트베드다. 오버레이�
 | 일반 사용자·특권 목록 밖 관리자의 직접 경로(storage + 경로) | 403 `raw_path_not_allowed` |
 | 맵핑이 없는 namespace / 한 번도 동기화 안 된 클러스터 | 403 `k8s_access_denied` / 409 `k8s_mapping_unknown` |
 | PV 루트 rm(하위 경로 `''`·`'.'`·`'./'`) | 422 `pv_root_rm_forbidden` |
+| PV 목적지 sync 의 결과 소유(2026-10-26) | 목적지 스토리지의 기본 소유자(스토리지 화면 「기본 소유 uid:gid」, 기본 0:0)로 `--chown` — 일반 사용자는 늘 이것(선택 없음). 특권 운영자만 「결과 소유: PV 루트 소유자」(`pv_owner: "pv_root"` — 비면제 403 `pv_owner_root_not_allowed`)나 chown 지정. 제출 뒤 기본값이 바뀌면 계획 Rejected / 컨펌 409 `storage_owner_changed`(다시 제출), 저장값이 무효면 409 `invalid_storage_owner`. 직접 경로 목적지(배치 포함)는 소스 소유 보존 |
 | 특권 세션 관리자(`DMS_PRIVILEGED_REQUESTERS` = root,admin,mason ∪ 계정 화면 부여) | 맵핑 면제 — 직접 경로·전체 PV·PV ↔ 직접 경로 혼합 |
 | 대기·컨펌 대기 중 권한 회수·PVC 재생성 | 계획 Rejected / 컨펌 409(`k8s_access_denied`·`pv_moved`·`pv_not_found`) |
 | `run_as_root: false` 명시 | 422 `run_as_root_required` |
@@ -1311,16 +1312,20 @@ controller, 잡 이미지) 뒤 `deploy/overlays/testbed-k8s` 의
    persistentvolumes·storageclasses list + namespaces/kube-system get, ServiceAccount, 장기 토큰 Secret)을 대상 클러스터에 apply
    하고 Secret 의 `data.token`(base64 그대로 붙여도 된다)과 CA 를 받는다. 테스트베드는 testbed `scripts/k8s-pv-reader-creds.sh` 가
    만든 `dms-reader/dms-inventory` 를 쓴다 — 토큰 파일은 0600, 화면·로그에 출력하지 않는다(포탈이 봉인해 보내고 서버는 암호화해 저장).
-2. **스토리지**(스토리지 화면, 「종류」): 테스트베드 값 —
+2. **스토리지**(스토리지 화면, 「종류」·「기본 소유(uid:gid)」): 테스트베드 값 —
 
-   | 이름 | mount_path = managed_root | backend | 종류 |
-   |---|---|---|---|
-   | `k8s-pv-nfs` | `/k8s_pv/nfs` | nfs | PV |
-   | `k8s-pv-gpfs` | `/k8s_pv/gpfs` | gpfs | PV·파일시스템(both) |
-   | `k8s-pv-onefs` | `/k8s_pv/onefs` | onefs | PV |
-   | `cephfs-dms`(기존) | `/cephfs` · `/cephfs/managed` | cephfs | 파일시스템 |
+   | 이름 | mount_path = managed_root | backend | 종류 | 기본 소유자 |
+   |---|---|---|---|---|
+   | `k8s-pv-nfs` | `/k8s_pv/nfs` | nfs | PV | 0:0 |
+   | `k8s-pv-gpfs` | `/k8s_pv/gpfs` | gpfs | PV·파일시스템(both) | 0:0 |
+   | `k8s-pv-onefs` | `/k8s_pv/onefs` | onefs | PV | 0:0 |
+   | `cephfs-dms`(기존) | `/cephfs` · `/cephfs/managed` | cephfs | 파일시스템 | —(쓰이지 않아 칸이 없다) |
 
-   에이전트 보고 한 주기 뒤 상태가 Ready 가 된다.
+   에이전트 보고 한 주기 뒤 상태가 Ready 가 된다. **기본 소유자**(2026-10-26)는 PV·둘 다 종류에서만 보이고, 그 스토리지의 PV 를
+   목적지로 하는 sync 결과(목적지와 복사본 전부)가 이 uid:gid 로 맞춰진다 — 일반 사용자는 늘 이 값, 특권 운영자만 「PV 루트 소유자」를
+   고를 수 있다. 생략·기배포 행(migrate 가 0 으로 채운다) = 0:0(root:root), 범위는 0..4294967294. 바꾸면 이미 제출됐지만 아직 실행되지
+   않은 그 PV 목적지 sync 는 계획·컨펌에서 `storage_owner_changed` 로 멈춘다(다시 제출하면 새 값). PV 를 실제로 쓰는 파드의
+   uid/fsGroup 과 맞추려면 여기서 바꾼다.
 3. **호출 노드·주기**(k8s 연동 개요): 주 `k8s-w1`, 보조 `k8s-w2`, 5분.
 4. **클러스터 등록**: 이름 `dmsk8s`, API 서버 `https://k8s-cp1:6443`, TLS 「지정한 CA」, 토큰 → 「지금 동기화」. 첫 run 은 노드 확인
    주기(15초) 안에 가져가 수십 ms 에 적용된다 — 지문 = kube-system uid(`ca1f5a86-…`). 같은 클러스터를 다른 주소로 또 등록하면 카드가

@@ -95,6 +95,78 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ✅ 스토리지 기본 소유자(uid:gid) — PV 목적지 sync 결과 소유 — **완료**(2026-10-26)
+
+사용자 결정(BACKLOG (l) 의 후속, 원문): 「각 k8s 스토리지 항목마다 기본 uid,gid 값을 같이 등록하도록 해 (기본 root:root). 그래서 sync
+목적지가 pv일때 해당 pv의 스토리지 기본 uid gid로 chown 셋업하도록 해줘. 사용자는 항상 자동으로 셋업되도록 해. 단, 운영자는 옵션으로
+pv 의 루트 소유자로 chown 을 둘수 있게 해.」 — 같은 날 출하한 「결과 = 잰 목적지 PV 루트 소유자」(아래 항목)의 **기본값을 바꿨다**: PV
+목적지 sync 의 결과 소유 기본은 목적지 스토리지에 등록한 uid:gid 이고, PV 루트 측정은 특권 운영자 옵션으로만 남는다. 현재 동작의 지도는
+ARCHITECTURE §7 「PV 목적지 root sync 의 결과 소유」.
+
+- **스키마**: `storages.default_uid`·`default_gid` — CREATE TABLE 에 `BIGINT NOT NULL DEFAULT 0`(PG int4 는 2^31 에서 22003 —
+  유효 범위가 0..4294967294 다), `_ensure_columns` 에 BIGINT 두 칸, `_backfill_storage_default_owner`(기배포 행 NULL → 0, `IS NULL` 만
+  — 멱등, 칸마다 따로). CREATE 블록 SQL 주석에는 `uid:gid` 대신 `uid·gid` 를 쓴다(콜론 뒤 이름은 자리표시자 그물
+  `test_no_migration_statement_smuggles_a_named_placeholder_in_comments` 에 걸린다).
+- **정규화 하나**: `repositories.k8s.storage_default_owner(row) -> "uid:gid" | None` — NULL = 0(「컬럼 이전 행 = 사용자 지정 기본값」이라는
+  정의, truthy 축약 아님), bool·정수 아님·음수·`OWNER_ID_MAX`(4294967294 = `execution_manifests._OWNER_ID_MAX`, 테스트로 대조) 초과는
+  None(fail-closed — 0 으로 뭉개지 않는다). 화면·해석·제출·재확인이 전부 이 함수로 읽는다.
+- **저장소·API**: `StoragesRepository.create(default_uid=0, default_gid=0)` 는 늘 명시 정수, `update(None = 유지)` 는 칸마다 **잠근 행**의
+  현재 값을 다시 쓴다(옛 클라이언트·목록 화면의 사용 범위 PUT 이 보내지 않는다; 이미 저장된 무효 값을 고쳐 쓰지 않는다). 범위·형 밖은
+  `invalid_storage_owner`(감사 행에 두 칸이 실린다). 라우트는 `StrictInt`(`"1500"`·`true` 를 강제 변환하지 않는다 — 형 오류는 FastAPI
+  기본 422 목록, 범위 밖은 422 `invalid_storage_owner`), 응답(목록·등록·수정)에 `default_uid`·`default_gid`(NULL = 0, 정수 아닌 변조 값은
+  None, 범위 밖 정수는 그대로 — 무엇이 틀렸는지 보이게)와 `default_owner`. 종류와 무관하게 검증·저장한다(pv·both 에서만 쓰인다).
+  `/api/user/storages`(USER_FIELDS 계약)는 그대로 — 사용자는 볼륨 API 로 본다.
+- **해석**: `resolve_volume` 이 `storage_owner` 를 늘 싣는다(PV 를 담는 스토리지에 매핑됐을 때만 값, 경로 미해석이어도 실림; 변조 값은
+  None 이지만 `selectable` 은 막지 않는다 — 원본으로는 쓸 수 있다). `/api/user/k8s/volumes`·`/api/admin/k8s/volumes`·`resolve_pvc`(제출·
+  재확인)·StorageClass 화면 행으로 그대로 흐른다. `k8s_access.resolve_side` 반환에도 `storage_owner`.
+- **제출**(`routes_requests.submit`): 바디 `pv_owner: Literal["storage","pv_root"] | None`(강제 변환 없음). 게이트 순서 — 세션 게이트 바로
+  뒤(PV 해석 전) 422 `pv_owner_not_applicable`(sync 아님·`destination_pv` 없음·chown 과 함께), 비면제 블록의 chmod 검사 다음 403
+  `pv_owner_root_not_allowed`, 맵핑 게이트 뒤·sync 쌍 전에 **모든** PV 목적지 sync 의 `destination_pv` 블록에 `owner_rule`(생략 =
+  "storage")을 쓰고 "storage" 면 해석된 기본 소유자를 `owner` 로 얼린다(무효면 409 `invalid_storage_owner`). 운영자가 명시 chown 을
+  주면 규칙을 기록하지 않는다(결과는 chown 값 — 쓰이지 않는 스토리지 값을 얼리면 그 값의 변경·무효로 거짓 거부된다, 리뷰). 소스 블록·직접
+  경로 목적지·rm·scan 의 payload 는 이전과 같은 모양.
+  `_resolve_locations` 는 (위치, 블록, 쪽별 기본 소유자) 3-튜플.
+- **재확인**(`k8s_access.recheck_request` → `_recheck_owner_rule`, planner 3a·컨펌 공용 — planner·`routes_jobs` 는 무수정): 블록에
+  `owner_rule` **키가 있으면** 목록(`OWNER_RULES`) 밖 = `pv_owner_not_applicable`(변조), "pv_root" + 비면제 = `pv_owner_root_not_allowed`,
+  "storage" 는 기록 `owner` 가 목적지 스토리지의 **현재** 기본 소유자와 같아야 한다(아니면 `storage_owner_changed`; 명시 chown 이 실린
+  요청은 대조하지 않는다 — 결과가 chown 값).
+  설계보다 엄격하게 정한 것: 현재 값이 무효면 `storage_owner_changed` 가 아니라 `invalid_storage_owner`(기록값도 None 이면 `None == None`
+  으로 통과하는 구멍 + 문구가 「관리자에게 다시 저장 요청」으로 정확). **키가 없는 블록 = 배포 전 옛 행**은 새 검사 없이 종전(측정)대로
+  — 부재를 거부로 강화하지 않는다.
+- **실행**: `JobSpec.result_owner_rule`. stepper `_dest_pv`·`_owner_rule`(규칙이 문자열이 아니면 None — 측정 갈래, 재확인이 이미 끊음)
+  하나로 `_build_spec`(storage → 블록 owner, 그 밖 → `worker_pool.dest_pv_owner`; 형식이 틀리면 None → 빌더 ValueError → submit_failed)과
+  `_pv_owner_required`(규칙 ≠ storage 추가 — 빌더 측정 술어와 짝)를 판정한다. `execution_manifests`: 적용 술어 `pv_dest_owner_applies`
+  (`_auto_chown` — 두 규칙 모두 `--chown <result_owner>`, **0:0 이어도 `--chown 0:0`**: 포크가 --chown 이 있으면 일반 파일 setuid/setgid 를
+  지운다)와 측정 술어 `pv_owner_measured` = 적용 ∧ 규칙 ≠ storage(`_with_pv_owner` 만) — storage 규칙의 preflight 는 측정 이전과 바이트
+  동일(봉쇄만), `pv_owner_unknown`·`pv_owner_changed` 는 pv_root·옛 행에서만 난다.
+- **포탈**: 스토리지 등록·수정 창의 「기본 소유(uid:gid)」 칸 묶음(aria 「기본 소유 uid」·「기본 소유 gid」, 기본 0, 숫자만 0..4294967294 —
+  빈 칸도 오류, PV·둘 다 종류에서만 보이고 싣는다; 정수 아닌 저장값은 빈 칸으로 시작해 다시 적게), 목록의 종류 배지 아래 둘째 줄
+  「기본 소유 1500:1500」·「기본 소유 0:0(root)」·값 오류(빨강)·모름(옛 응답) — 같은 칸이라 e2e 칸 수 그대로, 사용 범위 PUT 무변경. 단일
+  작업: 사용자에겐 조작 없이 소유권 안내가 「결과는 목적지 스토리지 기본 소유자 1500:1500 로 맞춰집니다」, 특권 운영자(`me.unrestricted`)
+  ·PV 목적지 sync 에만 「결과 소유」 선택(`Segmented` 에 `disabled` 추가 — 「스토리지 기본(uid:gid)」 기본 / 「PV 루트 소유자」, chown 을
+  채우면 잠기고 이유를 말한다, 직접 경로 목적지면 없다) — 바디 `pv_owner: "pv_root"` 는 고를 때만(기본 바디 무변경, 테스트로 고정). 목적지
+  스토리지 저장값이 무효면 제출을 잠근다(서버 409 미러, pv_root 는 해당 없음). PV 루트 자체가 목적지면 경고가 「PV 루트 디렉터리 자체가
+  스토리지 기본 소유자 … 로 chown」(막지 않음, `LocationField.pvRootDestNote`). 요청 상세 「목적지 소유」: storage → 「목적지 스토리지 기본
+  소유자 <v>」, pv_root → 「목적지 PV 소유자 <잰 값>(PV 루트 기준 — 운영자 지정)」, 규칙 없는 옛 행 → 종전 문구(바이트 동일); 규칙 값이
+  이상하면 행 생략. 확인 창에 sync 의 「결과 소유: …」 한 줄(RequestDetail → JobCard → JobStages → ConfirmDialog). 요약 실행 권한
+  `PRIV_ROOT_SYNC_PV`(스토리지 기본)·`PRIV_ROOT_SYNC_PV_ROOT`(운영자 지정). 공용 `lib/syncOwnership` 에 `validOwner`·`ownerText`(0:0 →
+  「0:0(root)」)·`OWNER_ID_MAX`·`PvOwnerRule`, `k8sTerms.storageOwnerOf`.
+- **사유 코드**(reasonCodes.json·`REASON_MESSAGES` 양쪽): 새 `invalid_storage_owner`(등록·수정 422 + 제출·재확인 409 공용)·
+  `pv_owner_not_applicable`·`pv_owner_root_not_allowed`·`storage_owner_changed`. 문구 변경: `chown_not_allowed` 꼬리 「결과는 목적지 스토리지
+  기본 소유자(uid:gid)로 자동으로 맞춰집니다」, `pv_owner_unknown`·`pv_owner_changed` 는 「결과 소유를 PV 루트 소유자로 고른 sync」로 범위를 좁힘.
+- **범위 밖(동작 무변경)**: 배치와 운영자의 직접 경로 sync 는 종전대로 소스 소유 보존(BACKLOG ❓ 「직접 경로 목적지가 PV 루트 아래일 때」에
+  선택지 (4) 「그 스토리지의 기본 uid:gid」를 더했다).
+- **테스트**: 새 `tests/test_storage_default_owner.py`(36 — 헬퍼·저장소·API·응답 정규화·해석·볼륨 API·SC 화면), `test_migrations`(그물 개수
+  46 → 48 두 곳, CREATE 선언 BIGINT NOT NULL DEFAULT 0 소스 고정, 옛 DB ALTER·백필·멱등·4294967294 저장 — 방언 구분), `test_k8s_submit`
+  (사용자 pv_root 403·운영자 pv_root·적용 밖 422·강제 변환 없음·무효 저장값 409·미등록 = 0:0·옛 블록 그대로 실행·사용자 PV sync 는 재지 않고
+  스토리지 기본으로 chown·운영자 pv_root 는 잰다, planner·컨펌 재확인 표에 기본값 변경·pv_root 변조·owner 변조/삭제), `test_pv_owner_chown`
+  (술어 둘 분리, 규칙별 argv·형식 거부, storage 0:0 도 `--chown 0:0`, storage 규칙 preflight = 봉쇄만 스크립트(실 sh), stepper 의 storage
+  규칙 흐름 — 재지 않음·exec_preflight 무측정·잡 행 잰 값 무시·기록값 형식 오류 fail-closed·명시 chown 우선, 측정 테스트는 pv_root·옛 행
+  두 규칙으로 매개변수화), `test_execution_manifests`. 프런트 vitest 8 파일(syncOwnership·k8sTerms·requestSpec·RequestSpecCard·
+  ConfirmDialog·SubmitJob.k8s·StorageDialog·StoragesList).
+- 검증(부분): 위 백엔드 5 파일 + `test_reason_codes_coverage` 319 통과, vitest 8 파일 181 통과, `tsc -b` 통과. 백엔드 전체·e2e·테스트베드
+  적용·라이브 실증은 아직.
+
 ### ✅ LDAP 코드 삭제·정리(dms-k8s) — k8s 신원 모드 전용 — **완료·실증**(2026-10-26, d4)
 
 사용자 결정 (d) 「LDAP 코드 삭제 및 정리」(BACKLOG 설계 §10). dms-k8s 는 2026-10-21 부터 LDAP 을 쓰지 않았지만 코드에는 ldap 모드
@@ -271,6 +343,9 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
     `chown_mismatch_at_step`).
   - 포탈 chown 칸 도움말이 PV 목적지에도 「소스 소유 보존」이던 것, 「결과를 고칠 수 있게」 과장 문구 정정. stepper spec → 실제 argv
     `--chown` 통합 테스트 추가.
+
+> 같은 날 기본값이 바뀌었다: PV 목적지 결과 소유 기본 = **목적지 스토리지 기본 소유자**(uid:gid), 이 항목의 PV 루트 측정은 특권 운영자
+> 옵션 `pv_owner: "pv_root"`·규칙 이전 옛 행에만 남는다 — 위 「스토리지 기본 소유자(uid:gid) — PV 목적지 sync 결과 소유」.
 
 ### ✅ nsync 목적지 링크 추종 수정 반영 — root nsync 의 PV 목적지 허용 — **완료·실증**(2026-10-26, d1 → d2)
 

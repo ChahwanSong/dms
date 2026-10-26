@@ -124,8 +124,10 @@ PostgreSQL(제어면) + React 포탈 + 노드 에이전트 + Volcano gang-schedu
     설정 안전장치(`DMS_IDENTITY_MODE` 가 k8s 가 아님·`DMS_LDAP_URI` 있음·`DMS_ALLOW_PRIVILEGED_REQUESTERS=false` → 기동
     거부)는 dms-ssc 설정을 잘못 적용한 경우를 막는다 — 지우지 마라. 그룹 denylist 는 평가하지 않는다(그룹 규칙 추가 422
     `denylist_group_unsupported`). 출발점인 2026-09-30 프로덕션 사고(특권 목록이면 어느 화면이든 root → 남의 디렉터리
-    소유권을 소스 소유로 덮어씀)는 일반 사용자를 맵핑된 PV 안에 가두고(직접 경로는 면제 관리자만) PV 목적지 결과를 PV 루트
-    소유자로 맞추는 것(`execution_manifests._auto_chown`)으로 막는다.
+    소유권을 소스 소유로 덮어씀)는 일반 사용자를 맵핑된 PV 안에 가두고(직접 경로는 면제 관리자만) PV 목적지 결과를 **목적지
+    스토리지 기본 소유자**(스토리지 항목의 `default_uid:default_gid`, 기본 0:0 — 제출이 요청에 얼리고 바뀌면
+    `storage_owner_changed`)로 맞추는 것(`execution_manifests._auto_chown`)으로 막는다(2026-10-26). 일반 사용자는 늘 이 자동
+    규칙이고, 잰 PV 루트 소유자로 맞추는 `pv_owner: "pv_root"` 는 특권 운영자 옵션뿐이다 — 사용자에게 열지 마라.
   - root 는 매니페스트 **컨테이너 수준**(40-api/41-controller)에만 — Dockerfile `USER
     65532`·migrate 는 유지하고 `test_release_manifest_contract.py` 가 모양을 고정한다.
     "강화" 한답시고 runAsNonRoot/65532 를 넣으면 운영 base 에서 즉시 회귀한다.
