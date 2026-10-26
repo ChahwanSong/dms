@@ -95,7 +95,7 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
-### ✅ 스토리지 기본 소유자(uid:gid) — PV 목적지 sync 결과 소유 — **완료**(2026-10-26)
+### ✅ 스토리지 기본 소유자(uid:gid) — PV 목적지 sync 결과 소유 — **완료·실증**(2026-10-26, d5)
 
 사용자 결정(BACKLOG (l) 의 후속, 원문): 「각 k8s 스토리지 항목마다 기본 uid,gid 값을 같이 등록하도록 해 (기본 root:root). 그래서 sync
 목적지가 pv일때 해당 pv의 스토리지 기본 uid gid로 chown 셋업하도록 해줘. 사용자는 항상 자동으로 셋업되도록 해. 단, 운영자는 옵션으로
@@ -164,8 +164,34 @@ ARCHITECTURE §7 「PV 목적지 root sync 의 결과 소유」.
   규칙 흐름 — 재지 않음·exec_preflight 무측정·잡 행 잰 값 무시·기록값 형식 오류 fail-closed·명시 chown 우선, 측정 테스트는 pv_root·옛 행
   두 규칙으로 매개변수화), `test_execution_manifests`. 프런트 vitest 8 파일(syncOwnership·k8sTerms·requestSpec·RequestSpecCard·
   ConfirmDialog·SubmitJob.k8s·StorageDialog·StoragesList).
-- 검증(부분): 위 백엔드 5 파일 + `test_reason_codes_coverage` 319 통과, vitest 8 파일 181 통과, `tsc -b` 통과. 백엔드 전체·e2e·테스트베드
-  적용·라이브 실증은 아직.
+- 진행: 이해(독자 4) → 구현(스토리지 층·포탈 병렬 → 파이프라인 → 문서) → 독립 리뷰(4차원 + 차원마다 반박 검증) 워크플로. 리뷰가
+  남긴 확인 3건(전부 low)을 고쳤다: ① 운영자 명시 chown 요청이 쓰이지 않는 스토리지 값을 얼려 그 값의 변경·무효로 거짓 거부(제출이 chown
+  이면 규칙을 기록하지 않고, 재확인도 chown 이면 대조하지 않는다 — `test_operator_chown_does_not_freeze_the_storage_owner`) ② 「제출 뒤
+  바꾸면 멈춘다」 문구 과장(대조는 계획·컨펌까지 — 이미 컨펌한 잡은 확인 창의 값으로 끝난다) ③ 「결과 소유」 버튼 라벨에 값이 들어가 768 폭에서
+  도움말과 겹침(라벨 고정, 값은 도움말로). 반박된 것: `owner_rule` 키를 지운 변조 행이 측정 갈래로 가는 것(문서화된 옛 행 경로 — 그 DB
+  기록자는 이미 requester 를 운영자로 바꿀 수 있다).
+- 검증: 백엔드 전체 3,651 통과(리뷰 수정 전 스냅숏) + 수정 뒤 영향 파일 387 통과(`test_k8s_submit`·`test_pv_owner_chown`·스토리지·재확인·
+  사유 코드·잡·planner), PG 모드(스토리지 147·마이그레이션 새 테스트), vitest 1,508·`tsc -b`·e2e 27 통과.
+
+**테스트베드 적용 — d5**(2026-10-26, 소스 b31c627): 포탈 빌드 d5(이미지 3종 + 잡 이미지) → 릴리스(agent → job-image·controller·api) → guard
+→ apply -k(DMS_JOB_IMAGE d5) → migrate(새 칸 + NULL 백필 — 스토리지 6개 모두 0:0) → rollout restart api·controller. 라이브 실증(목적지
+dmsk8s2 lab-x results, PV 루트 1500:1500; 소스 dmsk8s team-a datasets 의 setuid 4755·setgid 파일 2755·setgid 디렉터리 2775 를 포함한 12항목):
+- **기본(0:0)**: alice PV→PV sync(dsync) — 요청 `destination_pv` 에 `owner_rule: "storage"`·`owner: "0:0"`(소스 블록은 무변경), 잡에 잰 값
+  없음(측정 안 함), 결과 12항목 전부 **0:0**, setuid 4755 → 755·setgid 파일 2755 → 755(`--chown 0:0` 의 비트 지우기), setgid 디렉터리 2775
+  유지, 내용 일치. 사용자 볼륨 API 의 `storage_owner` 0:0.
+- **스토리지 값 변경(1600:1600)**: 관리자가 k8s-pv-nfs 기본 소유를 바꾼 뒤 alice sync → 결과 12항목 **1600:1600**(같은 비트 처리).
+- **게이트**: alice `pv_owner: "pv_root"` 403 `pv_owner_root_not_allowed`, rm 에 `pv_owner` 422 `pv_owner_not_applicable`.
+- **운영자 옵션 PV 루트**: mason `pv_owner: "pv_root"` → 스토리지 값이 1600 인데 결과 **1500:1500**(잰 PV 루트), 같은 비트 처리.
+- **컨펌 전 변경**: alice 요청이 1600 으로 얼어 ConfirmPending → 관리자가 1700 으로 → 컨펌 409 `storage_owner_changed`·요청 Rejected·목적지
+  미생성.
+- **운영자 명시 chown**: mason chown 1234:1234 → 결과 1234:1234(스토리지 값과 무관).
+- **실 Chrome**: 스토리지 목록 PV 행 「기본 소유 1700:1700」(파일시스템 행엔 없음)·수정 대화상자 uid/gid 칸(4294967295 → 「0~4294967294
+  정수」 오류), alice 제출 안내 「목적지 스토리지 기본 소유자 1700:1700」·「결과 소유」 선택 없음, mason 「결과 소유」(기본 스토리지 기본, 값은
+  도움말 — 1440·768 폭 겹침 없음) → PV 루트 소유자로 바꾸면 요약 「목적지 PV 루트의 소유자·그룹(점검 뒤 확정 — 운영자 지정)」, 요청 상세
+  alice 「목적지 스토리지 기본 소유자 0:0(root)」·mason 「목적지 PV 소유자 1500:1500(PV 루트 기준 — 운영자 지정)」, 확인 창 「결과 소유: 목적지
+  스토리지 기본 소유자 1700:1700」, 콘솔 오류 0. `verify.sh --context dmsk8s` PASS 4.
+- nsync 는 라이브로 다시 돌리지 않았다(argv 는 두 rank 공통이고 규칙은 값만 바꾼다 — 단위 테스트가 nsync 역할 preflight·argv 를 고정, `--chown`
+  의 nsync 동작은 d3 에서 실증). 실증 데이터는 지우고 스토리지 기본 소유는 0:0 으로 원복.
 
 ### ✅ LDAP 코드 삭제·정리(dms-k8s) — k8s 신원 모드 전용 — **완료·실증**(2026-10-26, d4)
 
