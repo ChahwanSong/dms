@@ -136,9 +136,13 @@ export function RequestDetail() {
   const me = useMe();
   const isAdmin = me.data?.role === "admin";
   const nav = useNavigate();
+  // 지운 요청의 캐시는 이 화면이 **사라질 때** 지운다(useDeleteRequests 의 onDeleted 주석) -- 붙어 있는 동안 지우면 재조회 404.
+  const dropOnLeave = useRef<(() => void) | null>(null);
+  useEffect(() => () => { dropOnLeave.current?.(); }, []);
   const del = useDeleteRequests({
-    onDeleted: (r) => {
-      if (!r.deleted.some((d) => d.request_id === requestId)) return;
+    onDeleted: (r, drop) => {
+      if (!r.deleted.some((d) => d.request_id === requestId)) { drop(); return; }
+      dropOnLeave.current = drop;
       const state: NavNoticeState = { notice: `작업 ${requestId.slice(0, 12)}을(를) 삭제했습니다 — 결과 파일·남은 파드 정리는 `
         + "백그라운드에서 진행됩니다(툴바의 정리 현황)." };
       nav("/jobs", { state });

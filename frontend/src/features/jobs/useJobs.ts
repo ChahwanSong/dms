@@ -196,9 +196,11 @@ export interface DeleteSelection {
   request_ids: string[];
   batches: { batch_id: string; expected_request_count: number }[];
 }
-// onDeleted(2026-10-26, 요청 상세의 단건 삭제): 캐시를 지우기 **전에** 결과를 받는 자리. 상세 화면은 지운 요청의 쿼리가 제거되는
-// 순간 다시 조회해 404(「없는 요청」)를 그렸다가 이동했다 — 먼저 이동(navigate)하면 화면이 사라진 뒤에 지운다. 목록은 쓰지 않는다.
-export function useDeleteRequests(opts: { onDeleted?: (r: DeleteRequestsResult) => void } = {}) {
+// onDeleted(2026-10-26, 요청 상세의 단건 삭제): 결과와 함께 캐시 제거 함수(drop)를 받는 자리 -- 넘기면 **언제 지울지는 호출자가**
+// 정한다. 상세 화면은 지운 요청의 쿼리가 붙어 있는 동안 제거하면 다시 렌더되며 지운 요청·잡을 재조회해 404 두 건을 남겼다(d6 실 Chrome;
+// 화면 이동 렌더보다 먼저 도는 setTimeout 0 으로도 남았다 -- 라우터 전환이 트랜지션이다). 그래서 상세는 이동만 하고 **언마운트할 때**
+// drop 한다. onDeleted 가 없으면(목록) 바로 지운다.
+export function useDeleteRequests(opts: { onDeleted?: (r: DeleteRequestsResult, drop: () => void) => void } = {}) {
   const qc = useQueryClient();
   // 지운 요청 하나의 캐시(상세·잡 목록·scan 통계)와 그 잡들의 캐시(아티팩트 목록·파일·로그)를 제거한다.
   const dropRequest = (rid: string) => {
@@ -224,10 +226,7 @@ export function useDeleteRequests(opts: { onDeleted?: (r: DeleteRequestsResult) 
           b.job_ids.forEach(dropJob);
         }
       };
-      opts.onDeleted?.(r);
-      // onDeleted 가 화면을 옮기면(요청 상세) 제거는 그 렌더 **뒤**에 -- 같은 틱에 지우면 아직 붙어 있는 상세 화면의 쿼리가
-      // 다시 렌더되며 지운 요청·잡을 재조회해 404 두 건이 콘솔에 남았다(d6 실 Chrome 실증).
-      if (opts.onDeleted) setTimeout(drop, 0);
+      if (opts.onDeleted) opts.onDeleted(r, drop);
       else drop();
     },
     onSettled: () => Promise.all(

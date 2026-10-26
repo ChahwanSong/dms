@@ -40,10 +40,17 @@ test.describe("E14 상세 삭제 · 배치 CSV", () => {
     await expect(dialog).toContainText("선택한 작업 1개를 영구 삭제합니다. 되돌릴 수 없습니다.");
     await expect(dialog.getByRole("note")).toContainText("성공한 scan 1개 포함");
     await dialog.getByLabel("되돌릴 수 없음을 확인했습니다").check();
+    // 지운 요청을 화면이 다시 조회하지 않는다(d6 실 Chrome 에서 찾은 404 두 건 — 캐시는 상세가 사라질 때 지운다)
+    const gone404: string[] = [];
+    page.on("response", (res) => {
+      if (res.status() === 404 && res.url().includes(`/api/user/requests/${rid}`)) gone404.push(res.url());
+    });
     await dialog.getByRole("button", { name: "1개 영구 삭제" }).click();
     await page.waitForURL(/\/jobs$/);
     await expect(page.getByRole("status").filter({ hasText: "삭제했습니다" }))
       .toContainText(`작업 ${rid.slice(0, 12)}을(를) 삭제했습니다`);
+    await page.waitForTimeout(1500);
+    expect(gone404).toEqual([]);
     expect((await page.request.get(`/api/user/requests/${rid}`)).status()).toBe(404);
   });
 
