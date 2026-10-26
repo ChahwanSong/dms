@@ -379,8 +379,11 @@ def test_no_migration_statement_smuggles_a_named_placeholder_in_comments():
     rec = Rec()
     migrations._apply_migrations(rec)
     assert len(rec.calls) > 30                       # 추출 자기 검증
-    offenders = [(sql.strip()[:60], _NAMED.findall(sql)) for sql, params in rec.calls
-                 if not params and _NAMED.findall(sql)]
+    # _NAMED 는 문자열 리터럴(1번 그룹 -- 변환에서 건너뛴다)과 자리표시자 이름(2번 그룹)을 함께 잡는다(7171b28) -- 이름만 센다.
+    def names(sql):
+        return [name for _literal, name in _NAMED.findall(sql) if name]
+    offenders = [(sql.strip()[:60], names(sql)) for sql, params in rec.calls
+                 if not params and names(sql)]
     assert offenders == []
 
 
