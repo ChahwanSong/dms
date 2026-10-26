@@ -37,10 +37,9 @@ images:
     newTag: REPLACE_DMS_AGENT_TAG           # 예: d80
 
 # 사이트별 값 패치(전략적 머지 -- 명시한 키만 덮고 나머지는 base 유지).
-# dms-k8s 브랜치(2026-10-25): LDAP 없음 + k8s 신원 모드 -- patch-config 가 LDAP 키를 지우고 DMS_IDENTITY_MODE=k8s 를 켜며,
-# patch-agent 가 에이전트를 nslcd 없이 `dms agent` 로 띄운다(testbed-k8s 와 같은 모양, tests/test_prod_k8s_overlay.py).
+# dms-k8s 브랜치: k8s 신원 모드 전용(2026-10-26 LDAP 코드 삭제) -- base 에 LDAP 키·에이전트 LDAP env·nslcd 엔트리포인트가
+# 없어 예전의 LDAP null 패치·patch-agent.yaml 은 지웠다(tests/test_prod_k8s_overlay.py).
 patches:
   - path: patch-config.yaml
-  - path: patch-agent.yaml
   - path: patch-ingress.yaml
   - path: patch-metallb.yaml

@@ -1,21 +1,17 @@
 # DMS k8s 테스트베드 오버레이(2026-10-21) — 두 번째 테스트베드(dms-k8s 브랜치를 검증한다 — 2026-10-22 부터 main 과 별도 라인).
 #
 # 클러스터·컨텍스트: k8s-cp1(10.10.10.20) + k8s-w1·k8s-w2(.21·.22), kubeconfig 컨텍스트 **dmsk8s**.
-#   current-context 는 ssc 테스트베드(`dms`, deploy/overlays/testbed)로 남겨 두므로 이 오버레이는 **항상
+#   current-context 는 ssc 테스트베드(`dms` -- 그 오버레이는 dms-ssc 브랜치에만 있다)로 남겨 두므로 이 오버레이는 **항상
 #   --context dmsk8s 로만** 다룬다(두 클러스터가 같은 네임스페이스 이름 dms 를 써서 컨텍스트가 유일한 구분이다):
 #     kubectl --context dmsk8s -n dms delete job dms-migrate --ignore-not-found
 #     sh deploy/overlays/guard-images.sh deploy/overlays/testbed-k8s --context dmsk8s
 #     kubectl --context dmsk8s apply -k deploy/overlays/testbed-k8s
 #   가드는 이 디렉터리의 kube-context 파일(dmsk8s)과 다른 컨텍스트를 겨누면 거부한다(exit 4) — testbed-k8s 를
-#   dms 에, testbed 를 dmsk8s 에 apply 하는 사고를 막는다. 런북은 deploy/README.md 「두 번째 테스트베드」 절.
+#   dms 에 apply 하는 사고를 막는다. 런북은 deploy/README.md 「두 번째 테스트베드」 절.
 #
-# LDAP 없음(사용자 결정 2026-10-21: 「dms-k8s 브런치에서는 LDAP 을 사용 안할거야」):
-#   - patch-config.yaml 이 base 20-config 의 LDAP 키를 전부 **지운다**(null). 빈 값·"false" 로 남기지 않는다 — base 값
-#     (pkg-01 slapd 10.10.10.30)이 남으면 같은 망의 ssc 용 slapd 를 조용히 쓰게 된다.
-#   - patch-agent.yaml 이 에이전트를 `dms agent` 로 직접 띄운다(nslcd 를 띄우는 엔트리포인트 우회) + LDAP env 삭제.
-#   - dms-secrets 는 4키(DMS_DATABASE_URL·DMS_SHARED_TOKEN·DMS_ADMIN_TOKEN·DMS_SESSION_SECRET)만 — 바인드 비밀번호 키를
-#     넣지 않는다(deploy/README.md 「두 번째 테스트베드」).
-#   결과(2026-10-25 k8s 신원 모드, patch-config.yaml 의 DMS_IDENTITY_MODE "k8s"): 모든 단건 잡이 root 이고 권한은 k8s
+# LDAP 없음(사용자 결정 2026-10-21 → 2026-10-26 LDAP 코드 삭제): base(deploy/k8s)에 LDAP 키·에이전트 LDAP env·nslcd
+#   엔트리포인트가 더는 없다 — 예전의 LDAP null 패치·patch-agent.yaml(에이전트 `dms agent` 직접 기동)은 필요 없어져 지웠다.
+#   dms-secrets 는 4키(DMS_DATABASE_URL·DMS_SHARED_TOKEN·DMS_ADMIN_TOKEN·DMS_SESSION_SECRET). 모든 단건 잡이 root 이고 권한은 k8s
 #   RoleBinding 맵핑으로 판정한다(일반 사용자는 PV 주소만, 특권 세션 관리자는 직접 경로·전체 PV).
 #   tests/test_testbed_k8s_overlay.py 가 렌더 결과에 'ldap'(대소문자 무시) 0건·에이전트 명령·레지스트리·신원 모드를 고정한다.
 #
@@ -36,7 +32,7 @@
 #        검색·--context·PG(2026-10-26, 소스 7171b28; 이미지 3종 + 잡 이미지).
 #   태그 bump = 아래 newTag(+ patch-config.yaml 의 DMS_JOB_IMAGE) 커밋 — **dms-k8s 에서만** 한다(2026-10-22 브랜치 분리 뒤
 #   빌드 소스는 /home/mason/dms-dev/dms-k8s 체크아웃 = origin/dms-k8s, main 은 이 클러스터와 무관).
-#   overlays/testbed(ssc 클러스터) 는 dms-ssc 쪽 소관이라 여기서 같이 건드리지 않는다(체리픽 충돌·엉뚱한 태그 방지).
+#   ssc 클러스터의 오버레이(overlays/testbed)는 dms-ssc 브랜치에만 있다(2026-10-26 이 브랜치에서 지웠다 — 체리픽 충돌·엉뚱한 태그 방지).
 #
 # Deployment(api/controller) 는 패치하지 않는다 — securityContext 는 base 가 유일한 진실
 #   (tests/test_release_manifest_contract.py::test_overlays_do_not_patch_control_plane_deployments).
@@ -58,6 +54,5 @@ images:
 
 patches:
   - path: patch-config.yaml
-  - path: patch-agent.yaml
   - path: patch-ingress.yaml
   - path: patch-metallb.yaml

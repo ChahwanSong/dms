@@ -71,8 +71,8 @@ if [ "${MFU_TAG:-}" = "live" ]; then
   echo "live: MFU_TAG=$MFU_TAG" >&2
 fi
 
-# dms-k8s(2026-10-25): LDAP 키 없음 — 무 LDAP k8s 신원 모드(patch-config.yaml). 옛 values.env 의 LDAP_* 는 읽기만 하고
-# 쓰지 않는다(아래 알림 한 줄, stderr — stdout 의 마지막 `RENDERED:` 파싱을 흐리지 않게).
+# dms-k8s: k8s 신원 모드 전용(2026-10-26 LDAP 코드 삭제) -- LDAP 키 없음. 옛 values.env 의 LDAP_*·IDENTITY_SUPPLEMENTARY_GROUPS
+# 는 쓰지 않는다(아래 알림 한 줄, stderr — stdout 의 마지막 `RENDERED:` 파싱을 흐리지 않게).
 KEYS="REGISTRY DMS_TAG DMS_AGENT_TAG MFU_TAG SHARED_FS EMAIL_DOMAIN LOCAL_ADMIN PORTAL_DOMAIN PORTAL_VIP"
 bad=""
 for k in $KEYS; do
@@ -80,21 +80,12 @@ for k in $KEYS; do
   case "$v" in ""|REPLACE_*) bad="$bad $k";; esac
 done
 [ -z "$bad" ] || { echo "FAIL: values.env 미치환/빈 값 -->$bad"; exit 2; }
-if [ -n "${LDAP_HOST:-}${LDAP_USER_BASE:-}${LDAP_GROUP_BASE:-}${LDAP_BIND_DN:-}" ]; then
-  echo "note: values.env 의 LDAP_* 는 dms-k8s(무 LDAP k8s 신원 모드)에서 쓰지 않는다 — 무시함" >&2
+if [ -n "${LDAP_HOST:-}${LDAP_USER_BASE:-}${LDAP_GROUP_BASE:-}${LDAP_BIND_DN:-}${IDENTITY_SUPPLEMENTARY_GROUPS:-}" ]; then
+  echo "note: values.env 의 LDAP_*·IDENTITY_SUPPLEMENTARY_GROUPS 는 dms-k8s(k8s 신원 모드 전용)에서 쓰지 않는다 — 무시함" >&2
 fi
 
-# 선택 키(2026-10-07): KEYS(필수)에 넣지 않는다 -- 이 키가 생기기 전의 values.env 도 그대로 렌더돼야 한다(생략 =
-# 코드 기본과 같은 "true"). 값은 true|false 만 받는다: config 의 파서는 true/1 외 전부 꺼짐으로 읽어(오타는 더 좁은
-# 권한 쪽) 렌더가 통과시키면 "True"·"yes" 같은 오타가 조용히 기능을 끈다 -- 여기서 시끄럽게 실패시킨다.
-IDENTITY_SUPPLEMENTARY_GROUPS="${IDENTITY_SUPPLEMENTARY_GROUPS:-true}"
-case "$IDENTITY_SUPPLEMENTARY_GROUPS" in
-  true|false) ;;
-  *) echo "FAIL: IDENTITY_SUPPLEMENTARY_GROUPS 는 true|false (지금: '$IDENTITY_SUPPLEMENTARY_GROUPS')"; exit 2;;
-esac
-
 rm -rf "$OUT"; mkdir -p "$OUT"
-cp "$HERE/kustomization.yaml" "$HERE/patch-config.yaml" "$HERE/patch-agent.yaml" \
+cp "$HERE/kustomization.yaml" "$HERE/patch-config.yaml" \
    "$HERE/patch-ingress.yaml" "$HERE/patch-metallb.yaml" "$OUT/"
 # 긴 토큰(REPLACE_DMS_AGENT_TAG)을 짧은 토큰(REPLACE_DMS_TAG)보다 먼저 치환한다
 # (여기선 서로 접두관계가 아니지만 방어적으로). 구분자는 | -- 값에 / : , 가 있어도 안전.
@@ -110,7 +101,6 @@ for f in "$OUT"/kustomization.yaml "$OUT"/patch-config.yaml \
     -e "s|REPLACE_LOCAL_ADMIN|$LOCAL_ADMIN|g" \
     -e "s|REPLACE_PORTAL_DOMAIN|$PORTAL_DOMAIN|g" \
     -e "s|REPLACE_PORTAL_VIP|$PORTAL_VIP|g" \
-    -e "s|REPLACE_IDENTITY_SUPPLEMENTARY_GROUPS|$IDENTITY_SUPPLEMENTARY_GROUPS|g" \
     "$f"
 done
 

@@ -4,18 +4,14 @@
 # (control_state.job_image)가 이 값을 이긴다 — 여기 값은 "오버라이드가 없을 때의 기본" 이자 배지의 매니페스트 기준이다.
 # 빌더 이미지는 ssc 와 같은 :5000 미러를 공용으로 읽는다(노드 CRI-O 가 5000·5001 둘 다 신뢰).
 #
-# LDAP 키 7개 삭제(사용자 결정 2026-10-21, kustomization.yaml 머리말): 비어 있는 LDAP 설정 = 리졸버 없음
-# (identity_ldap.ldap_directory_config → None). base 에 LDAP 키가 새로 생기면 tests/test_testbed_k8s_overlay.py 가 여기에도
-# null 을 넣으라고 빨간불을 낸다. k8s 신원 모드는 DMS_LDAP_URI 가 남아 있으면 기동을 거부한다(config, 설계 D1).
-#
-# k8s 신원 모드(2026-10-25 dms-k8s RBAC·PV 설계 D1·D15): DMS_IDENTITY_MODE "k8s" 가 「모든 단건 잡 root」와 「권한 = k8s
-# RoleBinding 맵핑(<id>-clusterrole-admin|edit → 그 namespace 의 모든 PVC)」을 한 스위치로 켠다. 일반 사용자는 PV 주소로
-# sync·rm 을 내고(DMS_USER_ALLOWED_OPERATIONS — 코드 기본은 sync 뿐; scan 은 특권 운영자만, 2026-10-26), 직접 경로·전체 PV 는 아래 특권 목록(또는 계정
-# 화면 부여)의 세션 관리자만이다. 비 root 잡은 생기지 않는다(서버가 run_as_root 를 강제 — 명시 false 는 422).
+# k8s 신원 모드(2026-10-25 dms-k8s RBAC·PV 설계 D1·D15 → 2026-10-26 유일한 모드 -- base 20-config 의 DMS_IDENTITY_MODE
+# "k8s"): 「모든 단건 잡 root」와 「권한 = k8s RoleBinding 맵핑(<id>-clusterrole-admin|edit → 그 namespace 의 모든 PVC)」.
+# 일반 사용자는 PV 주소로 sync·rm 을 내고(DMS_USER_ALLOWED_OPERATIONS — 코드 기본은 sync 뿐; scan 은 특권 운영자만, 2026-10-26),
+# 직접 경로·전체 PV 는 아래 특권 목록(또는 계정 화면 부여)의 세션 관리자만이다. 비 root 잡은 생기지 않는다(서버가 run_as_root
+# 를 강제 — 명시 false 는 422). LDAP 키는 base 에 없다(2026-10-26 LDAP 코드 삭제 — 예전의 null 패치는 지웠다).
 #
 # 특권 목록·허용은 base 와 같은 값이지만 명시한다 — 이 클러스터에서는 특권 목록이 「맵핑 면제(전체 PV·직접 경로)」의
-# 기준이고 허용 스위치를 끄면 k8s 모드는 기동을 거부한다. 보조 그룹 스위치 false 는 동작 차이가 없는 의도 표시(모든 잡이
-# root 라 privileged 상태).
+# 기준이고 허용 스위치를 끄면 기동을 거부한다.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -27,16 +23,7 @@ data:
   DMS_BUILD_BUILDER_IMAGE: "pkg-01:5000/buildah:stable"
   DMS_PRIVILEGED_REQUESTERS: "root,admin,mason"
   DMS_ALLOW_PRIVILEGED_REQUESTERS: "true"
-  DMS_IDENTITY_SUPPLEMENTARY_GROUPS: "false"
-  DMS_IDENTITY_MODE: "k8s"
   DMS_USER_ALLOWED_OPERATIONS: "sync,rm"
   # 계정 메일 도메인 = 테스트베드 RoleBinding subject 의 이메일 도메인(namespaceAdmin 소유자 인식 — k8s_rbac, 2026-10-26 (a)).
   # 가입 인증 메일 주소도 <아이디>@이 도메인이 된다(테스트베드는 stub 메일러).
   DMS_ACCOUNT_EMAIL_DOMAIN: "example.com"
-  DMS_LDAP_URI: null
-  DMS_LDAP_USER_BASE: null
-  DMS_LDAP_GROUP_BASE: null
-  DMS_LDAP_GROUP_MEMBER_ATTR: null
-  DMS_LDAP_USE_START_TLS: null
-  DMS_LDAP_BIND_DN: null
-  DMS_LDAP_REQUIRE_AUTH_BIND: null

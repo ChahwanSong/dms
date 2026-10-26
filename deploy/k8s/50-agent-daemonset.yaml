@@ -1,6 +1,7 @@
 # dms-agent (`dms agent`, no --once -> AgentSettings + run_loop): reports
-# mounts/tools/identities/os metrics to POST /api/agent/report every
-# DMS_AGENT_INTERVAL_SECONDS.
+# mounts/tools/os metrics/artifact base/k8s node state to POST /api/agent/report every
+# DMS_AGENT_INTERVAL_SECONDS. (2026-10-26 dms-k8s: no LDAP -- no nslcd, no node
+# identity probe; every job runs as root.)
 #
 # Env is set EXPLICITLY here (not envFrom dms-config/dms-secrets): cli.py's
 # "agent" branch calls AgentSettings.from_env() directly and never touches
@@ -8,9 +9,7 @@
 # DMS_ADMIN_TOKEN/DMS_SESSION_SECRET/etc -- only DMS_AGENT_API_URL,
 # DMS_SHARED_TOKEN, DMS_AGENT_NODE_NAME, DMS_AGENT_INTERVAL_SECONDS,
 # DMS_AGENT_MOUNTINFO_PATH, DMS_AGENT_NET_DEV_PATH,
-# DMS_AGENT_VIRTUAL_NET_PATH, DMS_AGENT_HOST_ROOT, plus the DMS_LDAP_* keys
-# agent-entrypoint.sh templates into nslcd.conf (incl. the search account's
-# DMS_LDAP_BIND_PW, by its own secretKeyRef). Blanket envFrom would
+# DMS_AGENT_VIRTUAL_NET_PATH, DMS_AGENT_HOST_ROOT. Blanket envFrom would
 # needlessly expose DMS_DATABASE_URL/DMS_ADMIN_TOKEN on every node.
 #
 # Volume mounts:
@@ -61,10 +60,8 @@
 #     readOnly (the agent never writes) and NEVER re-add per-storage
 #     hostPaths -- test_agent_daemonset_contract.py pins both.
 #
-# hostPID is deliberately NOT set: probe_identities() resolves usernames via
-# pwd.getpwnam()/grp.getgrall() against the CONTAINER's own /etc/passwd,
-# /etc/group -- hostPID (PID namespace sharing) has no effect on NSS
-# resolution, so it buys nothing for this code path.
+# hostPID is deliberately NOT set: nothing in the agent needs the host PID namespace
+# (mountinfo/net-dev are bind-mounted files above).
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -93,47 +90,15 @@ spec:
         - name: agent
           image: set-by-overlay.invalid/dms-agent:set-by-overlay
           imagePullPolicy: IfNotPresent
-          # agent-entrypoint.sh brings up nslcd (LDAP NSS) then execs `dms agent`
-          command: ["/usr/local/bin/agent-entrypoint.sh"]
-          args: ["dms", "agent"]
-          # root: nslcd must start as root (creates its socket, then drops to
-          # the nslcd user). A node agent is inherently privileged (host mounts).
+          # `dms agent` directly (2026-10-26: the nslcd entrypoint is gone with LDAP). A portal release patches only
+          # the image (rollout_runner.image_patch_body), so this command survives rollouts.
+          command: ["dms"]
+          args: ["agent"]
+          # root: a node agent is inherently privileged (host mounts, host-root probes) -- the dms image's
+          # USER 65532 is overridden here.
           securityContext:
             runAsUser: 0
           env:
-            # LDAP for nslcd (node NSS) -- the SAME directory, TLS policy and
-            # search account the API/controller feed the DMS identity resolver
-            # (agent-entrypoint.sh mirrors identity_ldap.py). The bind account
-            # is required wherever the directory refuses anonymous user
-            # searches: prod 2026-09-29 ran nslcd anonymously and resolved
-            # nobody -> every request identity_not_ready_on_node. The password
-            # is pulled by ONE secretKeyRef (not envFrom -- see the header).
-            # optional: a site without these keys still starts (anonymous /
-            # resolver default StartTLS on) instead of CreateContainerConfigError.
-            # tests/test_agent_daemonset_contract.py pins all of this.
-            # These are only the BOOTSTRAP config for the first report cycle:
-            # the API returns its own LDAP settings in every report response and
-            # the agent converges nslcd to them (src/dms/agent/directory.py), so
-            # an image-only portal release fixes an agent even where this block
-            # was never applied (prod 2026-09-29).
-            - name: DMS_LDAP_URI
-              valueFrom:
-                configMapKeyRef: {name: dms-config, key: DMS_LDAP_URI}
-            - name: DMS_LDAP_USER_BASE
-              valueFrom:
-                configMapKeyRef: {name: dms-config, key: DMS_LDAP_USER_BASE}
-            - name: DMS_LDAP_GROUP_BASE
-              valueFrom:
-                configMapKeyRef: {name: dms-config, key: DMS_LDAP_GROUP_BASE}
-            - name: DMS_LDAP_USE_START_TLS
-              valueFrom:
-                configMapKeyRef: {name: dms-config, key: DMS_LDAP_USE_START_TLS, optional: true}
-            - name: DMS_LDAP_BIND_DN
-              valueFrom:
-                configMapKeyRef: {name: dms-config, key: DMS_LDAP_BIND_DN, optional: true}
-            - name: DMS_LDAP_BIND_PW
-              valueFrom:
-                secretKeyRef: {name: dms-secrets, key: DMS_LDAP_BIND_PW, optional: true}
             - name: DMS_AGENT_API_URL
               value: "http://dms-api:8080"
             - name: DMS_AGENT_MOUNTINFO_PATH

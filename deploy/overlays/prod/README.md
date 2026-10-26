@@ -4,9 +4,8 @@
 덮는다. 아래 6단계면 끝난다 — 각 단계는 한 명령이고, 스크립트가 실패를 **한 줄
 사유**로 알린다(파드 로그를 뒤질 일이 없다).
 
-**dms-k8s 브랜치(2026-10-25): LDAP 을 쓰지 않는다.** 오버레이가 base 의 LDAP 키를 지우고(`patch-config.yaml`)
-에이전트를 nslcd 없이 `dms agent` 로 띄우며(`patch-agent.yaml` — testbed-k8s 와 같은 모양), **k8s 신원 모드**
-(`DMS_IDENTITY_MODE=k8s`)를 켠다: 모든 단건 잡이 root 이고 권한은 대상 클러스터의 RoleBinding 맵핑
+**dms-k8s 브랜치: k8s 신원 모드 전용(2026-10-26 LDAP 코드 삭제).** base 에 LDAP 키·nslcd 가 없고 에이전트는 `dms agent`
+로 뜬다(예전의 LDAP null 패치·`patch-agent.yaml` 은 지웠다). 모든 단건 잡이 root 이고 권한은 대상 클러스터의 RoleBinding 맵핑
 (`<id>-clusterrole-admin|edit` → 그 namespace 의 모든 PVC)으로 판정한다. 사용자 연산은 sync·scan·rm.
 대상 클러스터(API 서버·읽기 전용 토큰)·호출 노드·StorageClass 매핑은 설치 뒤 포탈 「k8s 연동」에서 등록한다
 (`deploy/README.md` 런북). 렌더 계약은 `tests/test_prod_k8s_overlay.py`.
@@ -32,7 +31,7 @@ kubectl -n dms create secret generic dms-secrets \
   --from-literal=DMS_ADMIN_TOKEN="$(openssl rand -hex 32)" \
   --from-literal=DMS_SESSION_SECRET="$(openssl rand -hex 32)"
 kubectl -n dms create secret tls dms-portal-tls --cert=tls.crt --key=tls.key
-#   (시크릿은 4키 — LDAP 바인드 비밀번호 키는 없다(무 LDAP). TLS SAN 에 PORTAL_DOMAIN + PORTAL_VIP 둘 다.)
+#   (시크릿은 4키 — LDAP 바인드 비밀번호 키는 없다. TLS SAN 에 PORTAL_DOMAIN + PORTAL_VIP 둘 다.)
 
 # 5) 설치 — 먼저 dry-run(변경 없음)으로 게이트+렌더+서버검증, 통과하면 실제 설치
 sh deploy/install.sh --dry-run
@@ -53,9 +52,8 @@ PORTAL_DOMAIN=<도메인> CACERT=<사내CA> sh deploy/verify.sh
 `deploy/overlays/prod/values.env.example` 의 주석에 각 값의 뜻·예시가 있다.
 요약: `REGISTRY` · `DMS_TAG`/`DMS_AGENT_TAG`/`MFU_TAG`(push 한 태그) · `SHARED_FS`
 (공유 FS 최상위) · `EMAIL_DOMAIN`(계정 아이디 = k8s 맵핑 ID 를 인증 메일이 보증) · `LOCAL_ADMIN`(특권 목록 —
-전체 PV·직접 경로 권한) · `PORTAL_DOMAIN` · `PORTAL_VIP`. 옛 values.env 의 `LDAP_*` 는 무시된다(렌더가 한 줄 알린다).
-선택 키(없어도 렌더된다): `IDENTITY_SUPPLEMENTARY_GROUPS`(`true`|`false`, 기본 `true`) — k8s 신원 모드에서는 효과가
-없다(모든 잡이 root). 옛 values.env 호환으로만 남는다.
+전체 PV·직접 경로 권한) · `PORTAL_DOMAIN` · `PORTAL_VIP`. 옛 values.env 의 `LDAP_*`·`IDENTITY_SUPPLEMENTARY_GROUPS` 는
+무시된다(렌더가 한 줄 알린다).
 
 `render.sh` 가 이 값을 오버레이 템플릿에 넣어 `deploy/overlays/.prod-rendered/`
 (git 밖)를 만들고, `install.sh` 가 거기서 `kubectl apply -k` 한다. 오버레이

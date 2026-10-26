@@ -2,9 +2,9 @@
 # baseline/restricted Pod Security Admission would reject them at admission
 # and this namespace must allow privileged:
 #   * DM data-job pods (Volcano MPI launcher/worker, execution_manifests.py::
-#     _container, runAsUser: 0) -- the launcher `runuser`s down to the
-#     requester identity.
-#   * dms-agent DaemonSet (50-agent-daemonset.yaml) -- nslcd + host mounts.
+#     _container, runAsUser: 0) -- the launcher `runuser`s to the run identity's
+#     uid-0 alias account (dms-k8s: every job is root).
+#   * dms-agent DaemonSet (50-agent-daemonset.yaml) -- host mounts.
 #   * dms-api / dms-controller (40-api.yaml, 41-controller.yaml, 2026-09-09)
 #     -- root:root production artifact base; capabilities dropped, image fs
 #     read-only. The `migrate` initContainers and 30-migrate-job stay 65532.

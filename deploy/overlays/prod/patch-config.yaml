@@ -26,24 +26,12 @@ data:
   # (api/controller 가 root 라 파일시스템이 경로를 걸러 주지 않는다, 2026-09-09).
   DMS_ARTIFACT_BASE_ALLOWED_PREFIXES: "/REPLACE_SHARED_FS"
 
-  # LDAP 없음(dms-k8s 브랜치, 사용자 결정 2026-10-21 「dms-k8s 브런치에서는 LDAP 을 사용 안할거야」): base 20-config 의
-  # LDAP 키를 전부 **지운다**(null). 빈 값·"false" 로 남기지 않는다 -- base 값은 테스트베드 slapd 를 가리킨다. k8s 신원
-  # 모드는 DMS_LDAP_URI 가 남아 있으면 기동을 거부한다(config). tests/test_prod_k8s_overlay.py 가 base 의 LDAP 키 전부가
-  # 여기서 지워지는지 고정한다(base 에 키가 새로 생기면 여기에도 null 을 더하라).
-  DMS_LDAP_URI: null
-  DMS_LDAP_USER_BASE: null
-  DMS_LDAP_GROUP_BASE: null
-  DMS_LDAP_GROUP_MEMBER_ATTR: null
-  DMS_LDAP_USE_START_TLS: null
-  DMS_LDAP_BIND_DN: null
-  DMS_LDAP_REQUIRE_AUTH_BIND: null
-
-  # k8s 신원 모드(2026-10-25 dms-k8s RBAC·PV 설계 D1·D15): 모든 단건 잡이 root 이고 권한은 k8s RoleBinding 맵핑
-  # (<id>-clusterrole-admin|edit → 그 namespace 의 모든 PVC)으로 판정한다. 사용자는 PV 주소로 sync·rm 을 낸다(scan 은 특권 운영자만 — 2026-10-26; 코드 기본
-  # 연산은 sync 뿐이라 여기서 넓힌다 -- rm 안전은 PV 루트 rm 금지 + 본인 컨펌). 등록 절차는 deploy/README.md 런북.
-  DMS_IDENTITY_MODE: "k8s"
+  # k8s 신원 모드(2026-10-25 dms-k8s RBAC·PV 설계 D1·D15 → 2026-10-26 유일한 모드; base 20-config 의 DMS_IDENTITY_MODE "k8s",
+  # LDAP 키 없음): 모든 단건 잡이 root 이고 권한은 k8s RoleBinding 맵핑(<id>-clusterrole-admin|edit → 그 namespace 의 모든
+  # PVC)으로 판정한다. 사용자는 PV 주소로 sync·rm 을 낸다(scan 은 특권 운영자만 — 2026-10-26; 코드 기본 연산은 sync 뿐이라
+  # 여기서 넓힌다 -- rm 안전은 PV 루트 rm 금지 + 본인 컨펌). 등록 절차는 deploy/README.md 런북.
   DMS_USER_ALLOWED_OPERATIONS: "sync,rm"
-  DMS_ALLOW_PRIVILEGED_REQUESTERS: "true"          # k8s 모드는 false 면 기동 거부(모든 잡이 root)
+  DMS_ALLOW_PRIVILEGED_REQUESTERS: "true"          # false 면 기동 거부(모든 잡이 root)
 
   # 계정 셀프서비스 이메일 도메인(<아이디>@도메인). k8s 모드에서는 이 인증이 「DMS 계정 junwoo.song = 그 메일함 주인」을
   # 보증하는 장치다(맵핑 ID = 계정 아이디 -- 인증을 끄면 누구나 남의 ID 로 가입해 그 사람의 PV 권한을 얻는다). 인증 메일 발송(2026-10-01, deploy/README §11)은 포탈
@@ -57,8 +45,3 @@ data:
   # 특권 요청자: 로컬 운영자 계정. k8s 모드에서는 「맵핑 면제(전체 PV·직접 경로·사용자 지정)」의 기준이다(모든 잡이
   # root 라 root 자격이 아니다). 계정 화면의 「전체 PV·직접 경로 권한」 부여로도 넓힌다(root/admin 은 관례상 유지).
   DMS_PRIVILEGED_REQUESTERS: "root,admin,REPLACE_LOCAL_ADMIN"
-
-  # 보조 그룹 인정 스위치(2026-10-07, values.env 의 선택 키 IDENTITY_SUPPLEMENTARY_GROUPS -- 생략이면 "true" =
-  # 코드 기본과 같다). 계획 시점 전용 -- 바꾸면 dms-controller 재시작. 덮는 범위는 deploy/README §2c 표.
-  # k8s 모드에서는 효과가 없다(모든 잡이 root 라 보조 그룹 상태는 privileged) -- 옛 values.env 호환으로만 남긴다.
-  DMS_IDENTITY_SUPPLEMENTARY_GROUPS: "REPLACE_IDENTITY_SUPPLEMENTARY_GROUPS"

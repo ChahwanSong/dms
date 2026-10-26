@@ -1,14 +1,12 @@
-"""k8s 테스트베드 오버레이(deploy/overlays/testbed-k8s) 계약(2026-10-21).
+"""k8s 테스트베드 오버레이(deploy/overlays/testbed-k8s) 계약(2026-10-21 → 2026-10-26 LDAP 코드 삭제).
 
-사용자 결정: 「dms-k8s 브런치에서는 LDAP 을 사용 안할거야. 이점은 확실히해둬.」 — LDAP 을 끄는 것은 값을 지우는 것이고
-(값이 비면 리졸버 None), 2026-10-25 부터는 k8s 신원 모드(DMS_IDENTITY_MODE "k8s" — 모든 단건 잡 root + 권한 = k8s
-RoleBinding 맵핑, dms-k8s RBAC·PV 설계 D1)가 그 위에 켜진다(이 모드는 DMS_LDAP_URI 가 남아 있으면 기동을 거부한다).
-base(deploy/k8s)는 ssc 테스트베드의 LDAP 값
-(pkg-01 slapd)과 nslcd 를 띄우는 에이전트 엔트리포인트를 싣는다. 오버레이가 한 줄이라도 놓치면 결과는 기동 실패
-(시끄러움)이거나 **같은 망의 ssc 용 slapd 를 조용히 쓰는 것**(침묵)이다. 그래서 여기서 두 층으로 고정한다:
+사용자 결정: 「dms-k8s 브런치에서는 LDAP 을 사용 안할거야. 이점은 확실히해둬.」 → 2026-10-26 「(d) LDAP 코드 삭제 및 정리」:
+dms-k8s 는 k8s 신원 모드 전용이다(모든 단건 잡 root + 권한 = k8s RoleBinding 맵핑, dms-k8s RBAC·PV 설계 D1). base
+(deploy/k8s)에 LDAP 키·에이전트 LDAP env·nslcd 엔트리포인트가 더는 없어 오버레이의 LDAP null 패치·patch-agent.yaml 도
+지웠다. 여기서 두 층으로 고정한다:
 
-- 정적(kubectl 없이도 돈다): base 의 LDAP 키·에이전트 LDAP env 가 **전부** 오버레이에서 지워지는지 — base 에 키가
-  새로 생기면 여기서 빨간불(오버레이에 null/$patch: delete 를 더하라).
+- 정적(kubectl 없이도 돈다): base·오버레이 어디에도 DMS_LDAP_* 가 없고, 신원 모드가 base 의 "k8s" 이며, 오버레이가 거는
+  패치 목록·레지스트리가 맞는지. ssc 테스트베드 오버레이(deploy/overlays/testbed)는 이 브랜치에 없다(dms-ssc 소관).
 - 렌더(`kubectl kustomize`, 클러스터·kubeconfig 를 쓰지 않는다): 렌더 결과 어디에도 'ldap'(대소문자 무시)이 없고,
   에이전트가 `dms agent` 로 직접 뜨고, 이미지·빌드 레지스트리가 이 클러스터의 :5001 이고, 공인 VIP·포탈 호스트가
   k8s 값인지. (모든 오버레이의 자리표시자 이미지 검사는 tests/test_overlay_render_contract.py — 공용.)
@@ -26,7 +24,6 @@ from overlay_render import (OVERLAYS, REPO_ROOT, config_data, doc, expected_cont
                             seq)
 
 K8S = OVERLAYS / "testbed-k8s"
-SSC = OVERLAYS / "testbed"
 BASE_CONFIG = REPO_ROOT / "deploy" / "k8s" / "20-config.yaml"
 BASE_AGENT = REPO_ROOT / "deploy" / "k8s" / "50-agent-daemonset.yaml"
 
@@ -42,75 +39,47 @@ def _code(path: Path) -> str:
 
 # --- 정적 계약(kubectl 불필요) ---------------------------------------------------
 
-def _base_ldap_config_keys() -> set:
-    keys = set(re.findall(r"^  (DMS_LDAP_[A-Z0-9_]+):", _code(BASE_CONFIG), re.M))
-    assert keys, "base 20-config.yaml 에서 LDAP 키를 못 찾았다 -- 파서나 base 모양이 바뀌었다"
-    return keys
-
-
-def _base_ldap_agent_env() -> set:
-    names = set(re.findall(r"- name: (DMS_LDAP_[A-Z0-9_]+)", _code(BASE_AGENT)))
-    assert names, "base 50-agent-daemonset.yaml 에서 LDAP env 를 못 찾았다 -- 파서나 base 모양이 바뀌었다"
-    return names
-
-
-def test_patch_config_deletes_every_base_ldap_key():
-    text = _code(K8S / "patch-config.yaml")
-    nulled = set(re.findall(r"^  (DMS_LDAP_[A-Z0-9_]+): null\s*$", text, re.M))
-    missing = _base_ldap_config_keys() - nulled
-    assert missing == set(), (
-        f"base 20-config 의 LDAP 키 {sorted(missing)} 가 testbed-k8s 에서 지워지지 않는다 -- patch-config.yaml 에 "
-        f"`<키>: null` 을 더하라(빈 값·\"false\" 가 아니라 삭제: 남은 base 값은 ssc 용 slapd 를 가리킨다)")
-    valued = [ln.strip() for ln in text.splitlines()
-              if re.match(r"^  DMS_LDAP_[A-Z0-9_]+:", ln) and not re.search(r":\s*null\s*$", ln)]
-    assert valued == [], f"testbed-k8s 는 LDAP 키에 값을 두지 않는다(삭제만): {valued}"
-
-
-def test_patch_agent_bypasses_nslcd_and_deletes_every_base_ldap_env():
-    text = _code(K8S / "patch-agent.yaml")
-    assert re.search(r'^\s*- name: agent\s*$', text, re.M), "컨테이너 이름(agent)으로 병합해야 한다"
-    assert re.search(r'^\s*command: \["dms"\]\s*$', text, re.M), "에이전트는 엔트리포인트(nslcd) 없이 `dms` 로"
-    assert re.search(r'^\s*args: \["agent"\]\s*$', text, re.M), "에이전트 args 는 [agent]"
-    deleted = set(re.findall(r"- name: (DMS_LDAP_[A-Z0-9_]+)\s*\n\s*\$patch: delete", text))
-    missing = _base_ldap_agent_env() - deleted
-    assert missing == set(), (
-        f"base 에이전트 env {sorted(missing)} 가 testbed-k8s 에서 지워지지 않는다 -- patch-agent.yaml 에 "
-        f"`$patch: delete` 항목을 더하라(지운 ConfigMap 키를 참조하면 CreateContainerConfigError)")
+def test_no_ldap_anywhere_in_base_or_overlay():
+    # base 와 오버레이 어디에도 LDAP 키·env 가 없다(되살리면 config 가 DMS_LDAP_URI 로 기동을 거부한다 -- 그 전에 여기서 빨간불).
+    for path in [BASE_CONFIG, BASE_AGENT, *sorted(K8S.glob("*.yaml"))]:
+        assert "DMS_LDAP_" not in _code(path), path
+        assert "nslcd" not in _code(path).lower(), path
+    assert not (K8S / "patch-agent.yaml").exists()          # base 가 `dms agent` 라 필요 없다
+    assert not (OVERLAYS / "testbed").exists()              # ssc 오버레이는 dms-ssc 브랜치에만
 
 
 def _config_values(path: Path) -> dict:
     return dict(re.findall(r'^  (DMS_[A-Z0-9_]+): "([^"]*)"\s*$', _code(path), re.M))
 
 
-def test_patch_config_turns_on_the_k8s_identity_mode_and_user_operations():
-    # 설계 D1·D15(2026-10-25): 코드 기본은 ldap·{sync} -- 이 오버레이가 켠다. 빠지면 사용자 scan·rm 이 403
-    # operation_admin_only 이고, 모드가 ldap 이면 모든 사용자 잡이 ldap_not_configured 로 멈춘다(조용한 회귀).
+def test_identity_mode_comes_from_base_and_user_operations_from_the_overlay():
+    # 신원 모드는 base 의 "k8s"(유일한 모드 -- 코드도 값이 없으면 k8s; ssc 설정의 "ldap" 은 기동 거부). 사용자 연산은 코드
+    # 기본이 {sync} 라 이 오버레이가 rm 을 연다(scan 은 특권 운영자만, 2026-10-26).
+    assert _config_values(BASE_CONFIG)["DMS_IDENTITY_MODE"] == "k8s"
     values = _config_values(K8S / "patch-config.yaml")
-    assert values["DMS_IDENTITY_MODE"] == "k8s"
-    assert values["DMS_USER_ALLOWED_OPERATIONS"] == "sync,rm"   # scan 은 특권 운영자만(2026-10-26)
-    assert values["DMS_ALLOW_PRIVILEGED_REQUESTERS"] == "true"      # k8s 모드는 false 면 기동 거부
+    assert "DMS_IDENTITY_MODE" not in values and "DMS_IDENTITY_SUPPLEMENTARY_GROUPS" not in values
+    assert values["DMS_USER_ALLOWED_OPERATIONS"] == "sync,rm"
+    assert values["DMS_ALLOW_PRIVILEGED_REQUESTERS"] == "true"      # false 면 기동 거부
 
 
 def test_k8s_overlay_kustomization_wires_every_patch_and_the_k8s_registry():
     text = _code(K8S / "kustomization.yaml")
-    for patch in ("patch-config.yaml", "patch-agent.yaml", "patch-ingress.yaml", "patch-metallb.yaml"):
+    for patch in ("patch-config.yaml", "patch-ingress.yaml", "patch-metallb.yaml"):
         assert f"- path: {patch}" in text, f"kustomization.yaml 가 {patch} 를 걸지 않는다"
         assert (K8S / patch).is_file(), patch
     new_names = re.findall(r"newName: (\S+)", text)
     assert new_names and all(n.startswith(K8S_REGISTRY + "/") for n in new_names), new_names
 
 
-def test_the_two_testbeds_do_not_share_registry_vip_host_or_context():
-    # 복사·붙여넣기로 ssc 값이 k8s 오버레이에 실리는 회귀(태그·삭제·「사용 중」 판정이 섞이고, 엉뚱한 클러스터를
-    # 겨눈다)를 막는다.
-    ssc_names = set(re.findall(r"newName: (\S+)", _code(SSC / "kustomization.yaml")))
+def test_the_k8s_testbed_keeps_its_own_registry_vip_host_and_context():
+    # ssc 값(:5000 레지스트리·ssc VIP·컨텍스트 dms)이 복사·붙여넣기로 실리는 회귀(태그·삭제·「사용 중」 판정이 섞이고, 엉뚱한
+    # 클러스터를 겨눈다)를 막는다.
     k8s_names = set(re.findall(r"newName: (\S+)", _code(K8S / "kustomization.yaml")))
-    assert {n.split("/", 1)[0] for n in ssc_names}.isdisjoint({n.split("/", 1)[0] for n in k8s_names})
+    assert k8s_names and {n.split("/", 1)[0] for n in k8s_names} == {K8S_REGISTRY}
     assert K8S_VIP in _code(K8S / "patch-metallb.yaml")
     assert K8S_VIP not in _code(REPO_ROOT / "deploy" / "k8s" / "47-metallb-public-pool.yaml")
     assert K8S_HOST in _code(K8S / "patch-ingress.yaml")
-    ctx = {o: expected_context(OVERLAYS / o) for o in ("testbed", "testbed-k8s")}
-    assert ctx == {"testbed": "dms", "testbed-k8s": "dmsk8s"}, ctx
+    assert expected_context(K8S) == "dmsk8s"
 
 
 # --- 렌더 계약(kubectl kustomize -- 로컬 렌더만, 클러스터·kubeconfig 무관; 헬퍼는 tests/overlay_render.py) ----
@@ -157,7 +126,7 @@ def test_render_identity_is_the_k8s_mode_with_the_privileged_list_as_the_exempti
     assert data["DMS_USER_ALLOWED_OPERATIONS"] == "sync,rm"
     assert data["DMS_PRIVILEGED_REQUESTERS"] == "root,admin,mason"
     assert data["DMS_ALLOW_PRIVILEGED_REQUESTERS"] == "true"
-    assert data["DMS_IDENTITY_SUPPLEMENTARY_GROUPS"] == "false"
+    assert "DMS_IDENTITY_SUPPLEMENTARY_GROUPS" not in data
     settings = Settings.from_env({**data, "DMS_DATABASE_URL": "postgresql://u:p@h/d", "DMS_SHARED_TOKEN": "s",
                                   "DMS_ADMIN_TOKEN": "a", "DMS_SESSION_SECRET": "x"})
     assert settings.allow_privileged_requesters is True  # 기동 = k8s 신원 모드(모든 잡 root -- 끄면 기동 거부)
@@ -171,14 +140,3 @@ def test_render_public_vip_and_portal_host():
     assert seq(pool, "addresses") == [K8S_VIP]
     ingress = doc(text, "Ingress", "dms-portal")
     assert seq(ingress, "hosts") == [K8S_HOST]
-
-
-@needs_kubectl
-def test_render_ssc_testbed_keeps_its_ldap_and_entrypoint():
-    # LDAP 삭제가 testbed-k8s 오버레이 안에서만 일어나는지(base·ssc 오버레이로 새지 않았는지) — ssc 는 LDAP 을 쓴다.
-    text = render("testbed")
-    data = config_data(text)
-    assert data["DMS_LDAP_URI"].startswith("ldap://"), data.get("DMS_LDAP_URI")
-    ds = doc(text, "DaemonSet", "dms-agent")
-    assert seq(ds, "command") == ["/usr/local/bin/agent-entrypoint.sh"]
-    assert not any(i.startswith(K8S_REGISTRY + "/") for i in images(text))

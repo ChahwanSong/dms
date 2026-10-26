@@ -1,13 +1,12 @@
-"""dms-k8s 프로덕션 오버레이(deploy/overlays/prod)의 무 LDAP·k8s 신원 모드 계약(2026-10-25, BACKLOG 「overlays/prod 의 LDAP
-필수 vs 무 LDAP dms-k8s」 해소).
+"""dms-k8s 프로덕션 오버레이(deploy/overlays/prod)의 k8s 신원 모드 전용 계약(2026-10-25 → 2026-10-26 LDAP 코드 삭제).
 
-사용자 결정(2026-10-21 「dms-k8s 브런치에서는 LDAP 을 사용 안할거야」)과 RBAC·PV 설계 D1(k8s 신원 모드 = 모든 잡 root + 권한 =
-k8s RoleBinding 맵핑)을 사이트 설치기에도 적용한다 — testbed-k8s 오버레이와 같은 모양이다(LDAP 키 null·에이전트 `dms agent`·
-LDAP env 삭제·시크릿 4키). 한 줄이라도 놓치면 결과는 기동 실패(k8s 모드는 DMS_LDAP_URI 가 남아 있으면 기동 거부 — 시끄러움)
-이거나 에이전트 CreateContainerConfigError(지운 키 참조)다. 세 층으로 고정한다:
+사용자 결정(2026-10-21 「dms-k8s 브런치에서는 LDAP 을 사용 안할거야」 → 2026-10-26 「(d) LDAP 코드 삭제 및 정리」)과 RBAC·PV
+설계 D1(k8s 신원 모드 = 모든 잡 root + 권한 = k8s RoleBinding 맵핑). base 에 LDAP 키·에이전트 LDAP env·nslcd 엔트리포인트가
+없어 오버레이는 사이트 값만 덮는다(예전의 LDAP null 패치·patch-agent.yaml 은 지웠다). 세 층으로 고정한다:
 
-- 정적: 오버레이 템플릿(patch-config·patch-agent·kustomization)·values.env.example·render.sh·install.sh 의 모양.
-- render.sh(실제 sh): values.env.example 을 채워 렌더 — LDAP 키 없이 통과하고, 옛 values.env 의 LDAP_* 는 무시(알림 한 줄).
+- 정적: 오버레이 템플릿(patch-config·kustomization)·values.env.example·render.sh·install.sh 의 모양.
+- render.sh(실제 sh): values.env.example 을 채워 렌더 — 통과하고, 옛 values.env 의 LDAP_*·IDENTITY_SUPPLEMENTARY_GROUPS 는
+  무시(알림 한 줄).
 - 렌더 산출물을 `kubectl kustomize`(로컬 렌더 — 클러스터 무관)로: 'ldap' 0건, 에이전트 명령, 서버 설정으로 실제 기동.
 """
 import os
@@ -30,50 +29,23 @@ def _code(path: Path) -> str:
                      if not ln.lstrip().startswith("#"))
 
 
-def _base_ldap_config_keys() -> set:
-    keys = set(re.findall(r"^  (DMS_LDAP_[A-Z0-9_]+):", _code(BASE_CONFIG), re.M))
-    assert keys, "base 20-config.yaml 에서 LDAP 키를 못 찾았다"
-    return keys
-
-
-def _base_ldap_agent_env() -> set:
-    names = set(re.findall(r"- name: (DMS_LDAP_[A-Z0-9_]+)", _code(BASE_AGENT)))
-    assert names, "base 50-agent-daemonset.yaml 에서 LDAP env 를 못 찾았다"
-    return names
-
-
 # --- 정적 -------------------------------------------------------------------------------------------
 
-def test_patch_config_deletes_every_base_ldap_key_and_turns_on_the_k8s_mode():
+def test_patch_config_carries_site_values_and_no_ldap():
     text = _code(PROD / "patch-config.yaml")
-    nulled = set(re.findall(r"^  (DMS_LDAP_[A-Z0-9_]+): null\s*$", text, re.M))
-    assert _base_ldap_config_keys() - nulled == set(), "base 의 LDAP 키를 patch-config.yaml 에서 `<키>: null` 로 지워라"
-    valued = [ln.strip() for ln in text.splitlines()
-              if re.match(r"^  DMS_LDAP_[A-Z0-9_]+:", ln) and not re.search(r":\s*null\s*$", ln)]
-    assert valued == [], f"LDAP 키에 값을 두지 않는다(삭제만): {valued}"
+    assert "DMS_LDAP_" not in text and "DMS_IDENTITY_SUPPLEMENTARY_GROUPS" not in text
     values = dict(re.findall(r'^  (DMS_[A-Z0-9_]+): "([^"]*)"', text, re.M))
-    assert values["DMS_IDENTITY_MODE"] == "k8s"
+    assert "DMS_IDENTITY_MODE" not in values                      # base 의 "k8s"(유일한 모드)
     assert values["DMS_USER_ALLOWED_OPERATIONS"] == "sync,rm"   # scan 은 특권 운영자만(2026-10-26)
     assert values["DMS_ALLOW_PRIVILEGED_REQUESTERS"] == "true"
     assert values["DMS_ACCOUNT_VERIFICATION_REQUIRED"] == "true"   # 맵핑 ID = 계정 아이디의 결속 장치
 
 
-def test_patch_agent_bypasses_nslcd_and_deletes_every_base_ldap_env():
-    text = _code(PROD / "patch-agent.yaml")
-    assert re.search(r'^\s*- name: agent\s*$', text, re.M)
-    assert re.search(r'^\s*command: \["dms"\]\s*$', text, re.M)
-    assert re.search(r'^\s*args: \["agent"\]\s*$', text, re.M)
-    deleted = set(re.findall(r"- name: (DMS_LDAP_[A-Z0-9_]+)\s*\n\s*\$patch: delete", text))
-    assert _base_ldap_agent_env() - deleted == set()
-    # testbed-k8s 와 같은 패치다(두 벌이 갈라지면 한쪽만 base 변화를 따라간다)
-    assert _code(PROD / "patch-agent.yaml").split("apiVersion:", 1)[1] == \
-        _code(REPO_ROOT / "deploy" / "overlays" / "testbed-k8s" / "patch-agent.yaml").split("apiVersion:", 1)[1]
-
-
-def test_kustomization_wires_the_agent_patch():
+def test_kustomization_wires_the_site_patches_only():
     text = _code(PROD / "kustomization.yaml")
-    for patch in ("patch-config.yaml", "patch-agent.yaml", "patch-ingress.yaml", "patch-metallb.yaml"):
+    for patch in ("patch-config.yaml", "patch-ingress.yaml", "patch-metallb.yaml"):
         assert f"- path: {patch}" in text, patch
+    assert "patch-agent" not in text and not (PROD / "patch-agent.yaml").exists()   # base 가 `dms agent`
 
 
 def test_values_render_and_install_need_no_ldap():
@@ -82,8 +54,9 @@ def test_values_render_and_install_need_no_ldap():
     render_sh = (PROD / "render.sh").read_text()
     keys = re.search(r'^KEYS="([^"]*)"', render_sh, re.M)
     assert keys and "LDAP" not in keys.group(1), keys
-    assert "REPLACE_LDAP" not in render_sh
-    assert "patch-agent.yaml" in render_sh                       # 렌더 산출물에 복사돼야 kustomization 이 찾는다
+    assert "REPLACE_LDAP" not in render_sh and "REPLACE_IDENTITY_SUPPLEMENTARY_GROUPS" not in render_sh
+    assert "patch-agent.yaml" not in render_sh
+    assert "IDENTITY_SUPPLEMENTARY_GROUPS=" not in example
     secret_keys = re.search(r"^for k in (DMS_[A-Z_ ]+); do", _code(INSTALL), re.M)
     assert secret_keys and secret_keys.group(1).split() == [
         "DMS_DATABASE_URL", "DMS_SHARED_TOKEN", "DMS_ADMIN_TOKEN", "DMS_SESSION_SECRET"]
@@ -117,18 +90,18 @@ def test_render_succeeds_without_ldap_values(tmp_path):
     assert r.returncode == 0, (r.stdout, r.stderr)
     assert r.stdout.strip().splitlines()[-1].startswith("RENDERED: ")
     assert "note:" not in r.stderr
-    assert (out / "patch-agent.yaml").is_file()
     leftover = [ln for f in out.iterdir() for ln in f.read_text().splitlines()
                 if "REPLACE_" in ln and not ln.lstrip().startswith("#")]
     assert leftover == []
 
 
 def test_old_values_env_with_ldap_keys_still_renders_and_says_they_are_ignored(tmp_path):
-    old = _filled_example("\nLDAP_HOST=ldap.corp.example\nLDAP_USER_BASE=ou=People\n")
+    old = _filled_example("\nLDAP_HOST=ldap.corp.example\nLDAP_USER_BASE=ou=People\nIDENTITY_SUPPLEMENTARY_GROUPS=yes\n")
     r, out = _render(tmp_path, old)
-    assert r.returncode == 0, (r.stdout, r.stderr)
-    assert "LDAP_* 는 dms-k8s" in r.stderr
-    assert "ldap.corp.example" not in (out / "patch-config.yaml").read_text()
+    assert r.returncode == 0, (r.stdout, r.stderr)                 # 옛 스위치의 이상한 값도 실패하지 않는다(읽지 않는다)
+    assert "LDAP_*·IDENTITY_SUPPLEMENTARY_GROUPS 는 dms-k8s" in r.stderr
+    rendered = (out / "patch-config.yaml").read_text()
+    assert "ldap.corp.example" not in rendered and "SUPPLEMENTARY" not in rendered
 
 
 @needs_kubectl
