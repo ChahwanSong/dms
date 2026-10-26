@@ -95,6 +95,23 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ✅ nsync 목적지 링크 추종 수정 반영 — root nsync 의 PV 목적지 허용 — **완료**(2026-10-26, d1)
+
+k3 2차 보안 리뷰가 찾은 nsync(dms-mpifileutils) 목적지 쪽 링크 추종을 도구에서 고치고, 그동안 DMS 가 막아 둔 가드를 풀었다.
+
+- 도구(chahwansong/mpifileutils main): `5958e4e` 「nsync: never follow symlinks below the destination root」 — 목적지 루트를 O_PATH
+  dir fd 로 한 번 열고 상위 디렉터리를 성분별 `openat(O_PATH|O_DIRECTORY|O_NOFOLLOW)` 로 걷는다(없으면 `mkdirat`, EEXIST 면 다시
+  O_NOFOLLOW 로 열어 디렉터리일 때만 통과). 파일 생성은 `openat(O_NOFOLLOW|O_CREAT|O_TRUNC)`, 삭제는 `unlinkat`/재귀 `unlinkat`(링크는
+  링크 자체만), 심링크 생성은 `symlinkat`. `8cd72f3` 「close the destination metadata symlink-follow TOCTOU」(자동 보안 리뷰) — chown·
+  utimes 는 늘 `AT_SYMLINK_NOFOLLOW`, chmod 는 `O_PATH|O_NOFOLLOW` + fstat(링크 거부) + `/proc/self/fd/N`. 링크 성분을 만나면 그
+  액션만 실패한다(쓰지 않는다). 로컬 실증(Dockerfile 레시피 그대로 빌드): 링크 너머 유출 0(옛 바이너리 `--batch-files 1` 200개 중
+  130개), 다중 rank 2000×5 회 0, 기능·경계·보안·메타데이터 시나리오 전부 통과, 옛 바이너리 대비 기능 회귀 없음.
+- DMS: `Dockerfile.mpifileutils` `MPIFILEUTILS_REF` 1b93d54 → `8cd72f3`(nsync.c 만 바뀜 — dscan·dsync·drm 동일). planner 의
+  `k8s_access.check_nsync_destination`(5a') 제거 — 두 스토리지를 함께 마운트한 노드가 없으면 PV 목적지 sync 도 nsync 로 계획된다.
+  사유 코드 `pv_sync_needs_shared_node` 는 더 이상 내지 않고 목록·문구에만 남긴다(옛 거부 행 표시 — 「지금은 허용, 다시 제출」).
+- 테스트: 거부 테스트를 「계획됨·nsync」로 교체, 잡 이미지 고정값이 옛 커밋(faefdaf·1b93d54)이 아님을 고정(가드 없는 planner 와
+  도구 고정값이 짝이라는 계약).
+
 ### ✅ dms-k8s RBAC·PV — 인벤토리·관리자 화면·제출·권한·스토리지·PV 봉쇄 — **완료·실증**(2026-10-25~26, k3)
 
 사용자 지시(「DMS-k8s 개발」 세션, 2026-10-25): dms-k8s 는 LDAP 대신 **k8s RoleBinding·PVC 맵핑**으로 권한을 판정하고 **모든 잡을

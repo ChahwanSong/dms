@@ -82,20 +82,6 @@ def pair_gate_exempt(payload, settings) -> bool:
     return all(isinstance(payload.get(key), dict) for key, _, _ in _SIDES["sync"])
 
 
-def check_nsync_destination(payload, *, tool, privileged) -> None:
-    """root nsync 로 PV 주소 목적지에 쓰는 sync 를 거부한다(2026-10-26 2차 보안 리뷰 — planner 가 도구를 정한 뒤 부른다).
-
-    왜: nsync(dms-mpifileutils) 목적지 쪽은 상위 디렉터리를 만들거나 확인할 때 링크를 따라가고(mkdir EEXIST 를 stat 로 받음)
-    파일을 O_NOFOLLOW 없이 연다 — 목적지 PV 안에 사용자가 심은 `sub → 남의 PV` 링크가 있으면 소스의 `sub/…` 가 링크 너머(남의
-    PV)에 root 로 써진다(실 이미지 재현: --batch-files 1 에서 200개 중 128개). PV 주소 봉쇄(_PV_CONTAIN_FN)는 루트 경로만 보고
-    「트리 안쪽 링크는 도구가 따라가지 않는다」를 전제하는데 nsync 는 그 전제가 맞지 않는다. dsync 는 목적지의 타입 불일치 항목을
-    먼저 지운 뒤(집합 연산) 복사해 이 문제가 없다. 그래서 PV 목적지는 두 스토리지를 함께 마운트한 노드(dsync)가 있어야 한다 —
-    k8s 사이트는 PV 스토리지를 모든 DMS 워커가 마운트하는 것이 보통이라 기능 손실은 드물다. 근본 처방(nsync 목적지 걷기를 성분
-    lstat 으로)은 BACKLOG. 비 root(ldap 모드의 사용자 신원)는 커널 DAC 가 남의 PV 를 막으므로 그대로 둔다."""
-    if tool == "nsync" and privileged and isinstance(payload, dict) and isinstance(payload.get("destination_pv"), dict):
-        raise DomainValidationError("pv_sync_needs_shared_node", "root nsync into a PV destination")
-
-
 def normalize_subpath(subpath) -> str:
     """PV 안 하위 경로(빈 값·'.'·'./' = PV 전체 = ''). 절대 경로·NUL·'..' 성분은 unsafe_path(제출 검증의 기존 코드)."""
     if subpath is None or subpath == "":

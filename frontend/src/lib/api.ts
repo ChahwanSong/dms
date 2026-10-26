@@ -428,7 +428,8 @@ export const REASON_MESSAGES: Record<string, string> = {
   pv_storageclass_unmapped: "이 PV 의 StorageClass 가 DMS 스토리지에 매핑돼 있지 않습니다 — 관리자에게 k8s 연동 → StorageClass 에서 매핑을 요청하세요",
   pv_path_unresolved: "이 PV 의 실제 경로를 계산할 수 없습니다(경로 템플릿·PV 정보 부족) — 관리자에게 k8s 연동 → StorageClass 의 경로 템플릿 확인을 요청하세요",
   pv_root_rm_forbidden: "PV 전체(루트)는 삭제할 수 없습니다 — PV 안의 하위 경로를 지정하세요",
-  pv_sync_needs_shared_node: "PV 로 보내는 sync 는 소스와 목적지 스토리지를 함께 마운트한 노드가 있어야 합니다 — 지금은 노드를 나눠 쓰는 방식(nsync)만 가능해 막았습니다(목적지 PV 안의 심볼릭 링크를 따라갈 수 있음). 관리자에게 두 스토리지의 노드 마운트를 확인해 달라고 하세요",
+  // 2026-10-26 가드를 풀어(dms-mpifileutils 8cd72f3) 더 이상 내지 않는다 -- 그 전에 거부된 요청 행을 읽히게 남긴다.
+  pv_sync_needs_shared_node: "이 sync 는 예전 버전에서 막혔습니다(노드를 나눠 쓰는 nsync 가 목적지 PV 안의 심볼릭 링크를 따라갈 수 있었음) — 도구를 고쳐 지금은 허용되니 같은 내용으로 다시 제출하세요",
   raw_path_not_allowed: "직접 경로로는 작업할 수 없습니다 — PV 를 골라 그 안의 경로를 지정하세요(직접 경로는 「전체 PV·직접 경로 권한」이 있는 관리자만 씁니다)",
   k8s_access_denied: "이 PV 의 namespace 에 권한이 없습니다 — 그 namespace 에 rolebinding <아이디>-clusterrole-edit(또는 -admin)이 있어야 합니다. 관리자에게 요청하세요(권한 변경은 다음 동기화 뒤 반영됩니다)",
   pv_moved: "제출한 뒤 PV 의 실제 경로가 바뀌었습니다(PVC 를 다시 만들었거나 StorageClass 매핑·경로 템플릿이 바뀜) — 작업을 다시 제출하세요",
