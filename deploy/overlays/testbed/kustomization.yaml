@@ -26,10 +26,10 @@ resources:
 images:
   - name: set-by-overlay.invalid/dms
     newName: pkg-01:5000/dms
-    newTag: d191
+    newTag: d192
   - name: set-by-overlay.invalid/dms-agent
     newName: pkg-01:5000/dms-agent
-    newTag: d191
+    newTag: d192
 
 patches:
   - path: patch-config.yaml
