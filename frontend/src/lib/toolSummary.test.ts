@@ -232,7 +232,7 @@ describe("previewWarnings(컨펌 전 주의 -- 포탈 괴리 [1]·[6]·[17])", (
 
   test("타입 교체 + 삭제 꺼짐: 실패 예고(조건문), 수를 모르면 「일부 디렉토리가」", () => {
     expect(w({ ...NSYNC_EXEC_TC, dryrun: true }, "nsync")).toEqual([
-      "형식이 바뀐 목적지 항목 1개를 지우고 소스 형식으로 교체합니다(삭제 옵션과 무관) — 되돌릴 수 없습니다",
+      "형식이 바뀐 목적지 항목 1개를 지우고 소스 형식으로 교체를 시도합니다(삭제 옵션과 무관) — 지워진 항목은 되돌릴 수 없습니다",
       "디렉토리 1개가 파일·링크로 바뀝니다 — 삭제를 켜지 않으면 비어 있지 않은 디렉토리는 바뀌지 않고 실패로 남습니다",
     ]);
     expect(w({ detail_version: 2, tool: "nsync", type_change_needs_delete: true }, "nsync"))

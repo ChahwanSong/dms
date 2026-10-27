@@ -176,7 +176,7 @@ test("컨펌 전 주의: 삭제 예정·타입 교체 실패 예고가 창에 �
   const list = screen.getByRole("list", { name: "컨펌 전 주의 사항" });
   expect(Array.from(list.querySelectorAll("li")).map((li) => li.textContent)).toEqual([
     // 삭제가 꺼져 있으면 계획된 삭제는 전부 형식이 바뀐 항목의 교체다 -- 그 이유를 말한다(리뷰 portal-jobs-23)
-    "형식이 바뀐 목적지 항목 1개를 지우고 소스 형식으로 교체합니다(삭제 옵션과 무관) — 되돌릴 수 없습니다",
+    "형식이 바뀐 목적지 항목 1개를 지우고 소스 형식으로 교체를 시도합니다(삭제 옵션과 무관) — 지워진 항목은 되돌릴 수 없습니다",
     "디렉토리 1개가 파일·링크로 바뀝니다 — 삭제를 켜지 않으면 비어 있지 않은 디렉토리는 바뀌지 않고 실패로 남습니다",
   ]);
   expect(screen.getByText("컨펌 전에 확인하세요")).toBeInTheDocument();

@@ -388,7 +388,9 @@ export function JobStatsSection() {
       {/* 결과 열이 여섯이라(Breakdown 주석) 세 표를 한 줄에 두면 md 폭에서 표마다 가로 스크롤이 생긴다 -- 넓은 화면(xl)에서만
           셋을 나란히, 그 아래는 쌓는다. */}
       <Group title="분해" caption="도구·스토리지·사용자별 잡 수 — 실패 = Failed·TimedOut, 거부 = Rejected, 취소·만료 = Cancelled·PreviewExpired(총에는 진행 중 포함)">
-        <div className="grid xl:grid-cols-3 gap-4">
+        {/* 여섯 열(d192 거부·취소·만료 열 추가) 표 셋을 xl(1280)부터 나란히 두면 1440 화면에서도 칸 폭이 모자라 마지막 열이
+            표 안 가로 스크롤로 잘렸다(d192 실화면) -- 둘씩(lg) 놓고 아주 넓을 때(2xl)만 셋. */}
+        <div className="grid lg:grid-cols-2 2xl:grid-cols-3 gap-4">
           <Breakdown title="도구별" rows={asArray<JobMetrics["by_tool"][number]>(d?.by_tool)}
                      nameOf={(r) => r.tool} />
           <Breakdown title="스토리지별" rows={asArray<JobMetrics["by_storage"][number]>(d?.by_storage)}

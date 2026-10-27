@@ -101,6 +101,14 @@ function FailureBlock({ s, tool, phaseWord, onOpenOutput }: {
           ))}
         </ol>
       )}
+      {/* dsync 는 파일을 먼저 만든 뒤(mknod) 내용을 복사한다 -- 복사가 실패한 파일은 목적지에 빈(또는 일부만 쓴) 파일로
+          남는다(d192 실증 D2: 0 B·소스 모드). 목적지에 이름이 보인다고 복사된 것이 아니라는 사실을 말한다. 다시 실행하면 크기가
+          달라 다시 복사한다. nsync 는 실패한 전송이 만든·자른 파일을 지운다(포크 nsync.md §13.3) -- 이 줄은 dsync 만. */}
+      {tool === "dsync" && s.copyFailed !== null && s.copyFailed > 0 && (
+        <p className="mt-2 text-xs text-ink/80 break-keep">
+          {`복사에 실패한 파일 ${countText(s.copyFailed)}는 목적지에 빈 파일(또는 일부만 쓴 파일)로 남아 있을 수 있습니다 — 원인을 고친 뒤 다시 실행하면 크기가 달라 다시 복사합니다.`}
+        </p>
+      )}
       <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-ink/70">
         <p className="min-w-0 flex-1 break-keep">
           {more ? `앞의 ${samples.length.toLocaleString("ko-KR")}개만 보입니다 — ` : ""}

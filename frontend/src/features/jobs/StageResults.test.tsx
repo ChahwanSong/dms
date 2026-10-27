@@ -310,6 +310,16 @@ describe("ExecutionResult — 도구별 라벨 타일(원 키가 아니다)", ()
     expect(within(box).getByRole("heading", { name: "실패 항목" })).toBeInTheDocument();
     expect(within(within(box).getByRole("list", { name: "연산별 실패 수" })).getAllByRole("listitem")
       .map((li) => li.textContent)).toEqual(["복사 2", "생성 2"]);
+    // dsync 는 복사에 실패한 파일을 목적지에 빈 파일로 남긴다(d192 실증 D2) -- 이름이 보여도 복사된 것이 아니라고 말한다
+    expect(within(box).getByText(/복사에 실패한 파일 2개는 목적지에 빈 파일\(또는 일부만 쓴 파일\)로 남아 있을 수 있습니다/))
+      .toBeInTheDocument();
+  });
+
+  test("빈 파일 안내는 dsync 복사 실패에만(nsync 는 실패한 전송이 만든 파일을 지운다)", () => {
+    render(<ExecutionResult job={{ ...SYNC, tool: "nsync" }} summary={{ ...V2, returncode: 1, files: 5, tool: "nsync",
+      dryrun: false, done: { copy: 5 }, failures: { total: 3, by_op: { copy: 3 } },
+      failure_samples: [{ op: "copy", path: "no1.txt", errno: 13 }], reason: "sync_items_failed" }} />);
+    expect(screen.queryByText(/목적지에 빈 파일/)).toBeNull();
   });
 
   test("옛 3키 요약: 핵심 수만 중립 라벨(항목 수·크기·종료 코드) + 이전 형식 안내", () => {

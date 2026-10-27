@@ -393,9 +393,13 @@ export function previewWarnings(s: ReadSummary, opts: { op: string; tool: string
   const typeChanges = (fromDir !== null && fromDir > 0) || (s.typeToDir !== null && s.typeToDir > 0);
   if (typeof remove === "number" && remove > 0) {
     const n = remove.toLocaleString("ko-KR");
+    // 삭제 꺼짐 + 비어 있지 않은 디렉토리 경고(아래)가 함께 뜨면 「교체합니다」 단정이 그 경고와 부딪힌다(d192 실화면 N2) --
+    // 그때는 「교체를 시도합니다」로 말하고 예외를 다음 줄에 맡긴다.
     out.push(opts.deleteOn
       ? `목적지에서 ${n}개를 삭제합니다${typeChanges ? "(형식이 바뀐 항목의 교체 포함)" : ""} — 되돌릴 수 없습니다`
-      : `형식이 바뀐 목적지 항목 ${n}개를 지우고 소스 형식으로 교체합니다(삭제 옵션과 무관) — 되돌릴 수 없습니다`);
+      : s.typeChangeNeedsDelete
+        ? `형식이 바뀐 목적지 항목 ${n}개를 지우고 소스 형식으로 교체를 시도합니다(삭제 옵션과 무관) — 지워진 항목은 되돌릴 수 없습니다`
+        : `형식이 바뀐 목적지 항목 ${n}개를 지우고 소스 형식으로 교체합니다(삭제 옵션과 무관) — 되돌릴 수 없습니다`);
   }
   if (s.typeChangeNeedsDelete) {
     const n = fromDir !== null && fromDir > 0 ? `디렉토리 ${fromDir.toLocaleString("ko-KR")}개가` : "일부 디렉토리가";
