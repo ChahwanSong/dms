@@ -33,7 +33,11 @@ ARG MPIFILEUTILS_REPO=https://github.com/chahwansong/mpifileutils.git
 # --batch-files 0 · 항목별 실패 목록 + --max-errors(기본 65000) · 스캔·소스·목적지 경로를 루트 fd 아래 심링크 없이
 # (openat2) · FIFO 목적지 무한 대기·실패 COPY 의 기존 사본 삭제 수정 · 소스 특수 파일은 건너뜀. DMS 가 읽는
 # 「Planned actions:」·copied-volume= 줄 형식은 같다(특수 파일·선처리·정지는 그 밖의 줄).
-ARG MPIFILEUTILS_REF=c4dbf20f509be2e0d86e22e0ba338672355dba79
+# 461bb73(2026-10-27, 같은 브랜치 — c4dbf20 다음 넷, 시험 커밋 둘 포함): db1e33c nsync --open-noatime 이 실제로 동작(빌드에
+# _GNU_SOURCE 가 없어 O_NOATIME 미정의였다 — 소스 atime 보존, 타인 소유 파일은 EPERM 뒤 O_NOATIME 없이 다시 열어 복사),
+# --direct 는 nsync 에서 받기만 함(정렬 I/O 없음) · 43ba468 dsync(공통 mfu_flist_copy.c)도 O_NOATIME EPERM 이면 다시 열어 복사
+# (전엔 비 root 의 타인 소유 파일이 「Failed to open input file」). 출력 형식은 Options 줄 끝 open-noatime= 추가뿐.
+ARG MPIFILEUTILS_REF=461bb734d40d42287dcc350f6e1bfba84ec50889
 ARG LWGRP_REF=v1.0.6
 ARG DTCMP_REF=v1.1.5
 ARG LIBCIRCLE_REF=v0.3
