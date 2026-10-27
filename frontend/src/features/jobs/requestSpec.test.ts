@@ -205,74 +205,73 @@ const ok = (v: ReturnType<typeof normalizeOptions>) => {
   if (v.state !== "ok") throw new Error(`state ${v.state}`);
   return v;
 };
-const userCtx = { kind: "user" as const, reqState: "Succeeded" };
 
 describe("normalizeOptions", () => {
   test("sync 서버 기본만 있으면 칩 0개 + 기본값 2개", () => {
-    const v = ok(normalizeOptions("sync", { payload: { batch_files: 1000000, bufsize: 4194304 } }, userCtx));
+    const v = ok(normalizeOptions("sync", { payload: { batch_files: 1000000, bufsize: 4194304 } }));
     expect(v.set).toEqual([]);
     expect(v.defaults).toEqual(["batch_files=1000000", "bufsize=4194304(4.0 MiB)"]);   // 기본값 줄에도 사람 단위
     expect(v.unknown).toEqual([]);
   });
 
   test("delete true 는 칩 + 제출 폼 설명, false 는 버린다", () => {
-    const v = ok(normalizeOptions("sync", { payload: { delete: true, open_noatime: false } }, userCtx));
+    const v = ok(normalizeOptions("sync", { payload: { delete: true, open_noatime: false } }));
     expect(v.set).toEqual([{ token: "delete", note: SYNC_OPTION_HELP.delete }]);
   });
 
   test("batch_files 0 = 「배칭 끔」, bufsize 는 사람 표기, 키가 없으면 건너뛴다(unknown 아님)", () => {
-    const v = ok(normalizeOptions("sync", { payload: { batch_files: 0, bufsize: 1048576 } }, userCtx));
+    const v = ok(normalizeOptions("sync", { payload: { batch_files: 0, bufsize: 1048576 } }));
     expect(v.set).toEqual([{ token: "batch_files=0", note: "배칭 끔" }, { token: "bufsize=1048576", note: "1.0 MiB" }]);
-    const none = ok(normalizeOptions("sync", { payload: { contents: true } }, userCtx));
+    const none = ok(normalizeOptions("sync", { payload: { contents: true } }));
     expect([none.defaults, none.unknown]).toEqual([[], []]);
-    const scan = ok(normalizeOptions("scan", { payload: { batch_files: 0, broken_limit: 0, verbose: true } }, userCtx));
+    const scan = ok(normalizeOptions("scan", { payload: { batch_files: 0, broken_limit: 0, verbose: true } }));
     expect(scan.set).toEqual([{ token: "verbose", note: null }, { token: "batch_files=0", note: "배칭 안 함" },
       { token: "broken_limit=0", note: "파손 경로 표본을 보관하지 않음(총계는 정확)" }]);
   });
 
   test("모양이 틀린 값·카탈로그 밖 키는 원문으로(적용 안 됨 꼬리는 bool 만)", () => {
-    const v = ok(normalizeOptions("sync", { payload: { delete: "yes", foo: 1, batch_files: "5", chown: 7, chmod: "" } }, userCtx));
+    const v = ok(normalizeOptions("sync", { payload: { delete: "yes", foo: 1, batch_files: "5", chown: 7, chmod: "" } }));
     expect(v.set).toEqual([]);
     expect(v.unknown).toEqual(['delete="yes" (적용 안 됨)', 'batch_files="5"', "chown=7", "foo=1"]);
   });
 
   test("카탈로그 밖 키가 많아도(변조) 12개 + 「외 N개」 -- 글자 수에 상한", () => {
     const many = Object.fromEntries(Array.from({ length: 5000 }, (_, i) => [`k${i}`, i]));
-    const v = ok(normalizeOptions("sync", { payload: many }, userCtx));
+    const v = ok(normalizeOptions("sync", { payload: many }));
     expect(v.unknown).toHaveLength(13);
     expect(v.unknown.slice(0, 2)).toEqual(["k0=0", "k1=1"]);
     expect(v.unknown[12]).toBe("외 4988개");
     // 카탈로그 쪽 원문과 합쳐도 같은 상한
-    const mixed = ok(normalizeOptions("sync", { payload: { delete: "y", ...Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`x${i}`, 1])) } }, userCtx));
+    const mixed = ok(normalizeOptions("sync", { payload: { delete: "y", ...Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`x${i}`, 1])) } }));
     expect(mixed.unknown).toHaveLength(13);
     expect(mixed.unknown[0]).toBe('delete="y" (적용 안 됨)');
     expect(mixed.unknown[12]).toBe("외 1개");
     // 딱 12개면 꼬리 없음
-    expect(ok(normalizeOptions("weird", { payload: Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`y${i}`, 1])) }, userCtx))
+    expect(ok(normalizeOptions("weird", { payload: Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`y${i}`, 1])) }))
       .unknown).toHaveLength(12);
   });
 
   test("text 키(chmod·chown)는 비어 있지 않은 문자열이면 칩", () => {
-    const v = ok(normalizeOptions("sync", { payload: { chmod: "D755,F644", chown: "10001:10010" } }, userCtx));
+    const v = ok(normalizeOptions("sync", { payload: { chmod: "D755,F644", chown: "10001:10010" } }));
     expect(v.set.map((s) => s.token)).toEqual(["chmod=D755,F644", "chown=10001:10010"]);
   });
 
   test("options 가 문자열·배열이면 malformed, 둘 다 없으면 missing, payload 에 없으면 잡 쪽을 쓴다", () => {
-    expect(normalizeOptions("sync", { payload: "x" }, userCtx)).toEqual({ state: "malformed" });
-    expect(normalizeOptions("sync", { payload: [1] }, userCtx)).toEqual({ state: "malformed" });
-    expect(normalizeOptions("sync", { payload: undefined }, userCtx)).toEqual({ state: "missing" });
-    expect(normalizeOptions("sync", { payload: null, job: null }, userCtx)).toEqual({ state: "missing" });
-    expect(normalizeOptions("sync", { payload: null, job: "x" }, userCtx)).toEqual({ state: "malformed" });
-    expect(ok(normalizeOptions("sync", { payload: undefined, job: { quiet: true } }, userCtx)).set)
+    expect(normalizeOptions("sync", { payload: "x" })).toEqual({ state: "malformed" });
+    expect(normalizeOptions("sync", { payload: [1] })).toEqual({ state: "malformed" });
+    expect(normalizeOptions("sync", { payload: undefined })).toEqual({ state: "missing" });
+    expect(normalizeOptions("sync", { payload: null, job: null })).toEqual({ state: "missing" });
+    expect(normalizeOptions("sync", { payload: null, job: "x" })).toEqual({ state: "malformed" });
+    expect(ok(normalizeOptions("sync", { payload: undefined, job: { quiet: true } })).set)
       .toEqual([{ token: "quiet", note: null }]);
   });
 
   test("rm recursive true 는 생략(동의 게이트), false 는 원문(서버가 받지 않는 비정상 기록)", () => {
-    const t = ok(normalizeOptions("rm", { payload: { recursive: true, stat: true } }, userCtx));
+    const t = ok(normalizeOptions("rm", { payload: { recursive: true, stat: true } }));
     expect([t.set, t.unknown]).toEqual([[{ token: "stat", note: null }], []]);
-    const f = ok(normalizeOptions("rm", { payload: { recursive: false } }, userCtx));
+    const f = ok(normalizeOptions("rm", { payload: { recursive: false } }));
     expect([f.set, f.defaults, f.unknown]).toEqual([[], [], ["recursive=false"]]);
-    expect(ok(normalizeOptions("rm", { payload: { recursive: "y" } }, userCtx)).unknown).toEqual(['recursive="y" (적용 안 됨)']);
+    expect(ok(normalizeOptions("rm", { payload: { recursive: "y" } })).unknown).toEqual(['recursive="y" (적용 안 됨)']);
   });
 
   test("원문은 60자에서 자르고, 직렬화 불가(BigInt)는 ?", () => {
@@ -284,14 +283,7 @@ describe("normalizeOptions", () => {
   });
 
   test("모르는 연산이면 키 전부가 원문", () => {
-    expect(ok(normalizeOptions("weird", { payload: { delete: true, x: null } }, userCtx)).unknown).toEqual(["delete=true", "x=(값 없음)"]);
-  });
-
-  test("noatimeWarn: 비 root + 실패는 참, 비 root + 성공·root 는 거짓", () => {
-    const o = { open_noatime: true };
-    expect(ok(normalizeOptions("sync", { payload: o }, { kind: "user", reqState: "Failed" })).noatimeWarn).toBe(true);
-    expect(ok(normalizeOptions("sync", { payload: o }, { kind: "user", reqState: "Succeeded" })).noatimeWarn).toBe(false);
-    expect(ok(normalizeOptions("sync", { payload: o }, { kind: "root", reqState: "Failed" })).noatimeWarn).toBe(false);
+    expect(ok(normalizeOptions("weird", { payload: { delete: true, x: null } })).unknown).toEqual(["delete=true", "x=(값 없음)"]);
   });
 });
 
@@ -503,7 +495,7 @@ describe("다듬기", () => {
   });
 
   test("문자열 옵션 칩은 60자에서 자른다(변조 행이 칩 하나에 수 KB 를 싣지 않게)", () => {
-    const v = normalizeOptions("sync", { payload: { chmod: "u+rwx,".repeat(50) } }, userCtx);
+    const v = normalizeOptions("sync", { payload: { chmod: "u+rwx,".repeat(50) } });
     expect(v.state === "ok" && v.set[0].token.length).toBe(60);
     expect(v.state === "ok" && v.set[0].token.endsWith("…")).toBe(true);
   });

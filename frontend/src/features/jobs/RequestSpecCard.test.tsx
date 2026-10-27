@@ -7,8 +7,6 @@ import { beforeAll, afterAll, afterEach, test, expect } from "vitest";
 import { RequestDetail } from "./RequestDetail";
 import { PRIV_ROOT_HEAD, PRIV_USER } from "./optionRules";
 
-// 요청 상세 전용 open_noatime 주의 줄(제출 폼의 「root 실행에서만 적용됩니다」 안내와 다른, 이미 실린 기록에 대한 문장).
-const NOATIME_WARN = /^open_noatime 이 비 root 실행에 실렸습니다 — /;
 
 // 요청 상세 「요청 내용」 카드 + 머리말 root 배지(2026-10-08) 화면 테스트. 하네스는 RequestDetail.redesign.test 의 복제.
 
@@ -225,7 +223,6 @@ test("c 배치 자식 root(테스트베드 표본: identity 에 보조 그룹 �
   expect(within(cell(region, "실행 권한")).getByText("배치 항목 — 배치를 만든 관리자의 root 자격이 적용됐습니다.")).toBeInTheDocument();
   expect(cell(region, "실행 도구").textContent).toBe("dsync · 5 노드 · 프로세스 10개(노드당 2)");
   expect(within(region).queryByText("보조 그룹(gid)")).toBeNull();
-  expect(within(region).queryByText(NOATIME_WARN)).toBeNull();   // root 라 경고 없음
 });
 
 test("d 잡 1개: 도구 라벨·보조 그룹은 잡 카드에 없고, 아티팩트 줄은 「상태 전이」 버튼과 같은 줄 컨테이너에", async () => {
@@ -289,17 +286,13 @@ test("g 변조 기록(payload 문자열·worker_pool 문자열·options 배열):
   expect(cell(region, "옵션").textContent).toBe("지정한 옵션 없음기본값: batch_files=1000000 · bufsize=4194304(4.0 MiB)");
 });
 
-test("h open_noatime 비 root: 실패한 요청에만 주의 줄", async () => {
+test("h open_noatime 비 root 실패 요청에도 EPERM 주의 줄이 없다(2026-10-27 — 포크가 O_NOATIME 없이 다시 연다)", async () => {
   const req = { ...REQ, payload: { ...PAYLOAD_A, options: { open_noatime: true } } };
   serve({ ...req, state: "Failed" }, [{ ...JOB, state: "Failed", reason_code: "execution_failed:rc1" }]);
-  const first = renderAt();
-  const region = await specRegion();
-  expect(within(region).getByText(NOATIME_WARN)).toHaveClass("text-attn");
-  first.unmount();
-  serve(req, [JOB]);
   renderAt();
-  await specRegion();
-  expect(screen.queryByText(NOATIME_WARN)).toBeNull();
+  const region = await specRegion();
+  expect(within(region).queryByText(/O_NOATIME/)).toBeNull();
+  expect(cell(region, "옵션").textContent).toContain("open_noatime");
 });
 
 test("i 2026-09-30 이전 관리자 행(run_as_root 없이 root 로 계획, Succeeded): 배지 「실행」 + 설명 줄, 「비정상 상태」·「거부」 단정 없음", async () => {

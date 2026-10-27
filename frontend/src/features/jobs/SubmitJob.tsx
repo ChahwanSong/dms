@@ -22,7 +22,7 @@ import { groupCaveat, groupCaveatsFor } from "../../lib/groupCaveats";
 // 옵션 미러(CHMOD_RE·chownFieldError·intFieldError, sync 숫자 범위·프리필 SYNC_INT_FIELDS)는
 // optionRules.ts 로 이사(슬라이스 32 T8) -- BatchCreate 옵션과 공유한다
 // (사본이면 미러가 발산한다).
-import { CHMOD_RE, chownFieldError, OPEN_NOATIME_NON_ROOT, PRIV_ROOT_SYNC, PRIV_USER, SCAN_INT_FIELDS,
+import { CHMOD_RE, chownFieldError, DIRECT_HELP, OPEN_NOATIME_HELP, PRIV_ROOT_SYNC, PRIV_USER, SCAN_INT_FIELDS,
          SYNC_INT_FIELDS, SYNC_OPTION_HELP, scanIntFieldError, syncIntFieldError } from "./optionRules";
 // 정책 기본값 캡션(슬라이스 37: 배치 생성과 같은 표시 배선 — 백엔드 무변경).
 import { usePolicies } from "../policies/usePolicies";
@@ -234,11 +234,11 @@ export function SubmitJob() {
   function syncOptions(): SubmitBody["options"] {
     const options: SubmitBody["options"] = checkedOptions({
       delete: f.delete, contents: f.contents, direct: f.direct, quiet: f.quiet,
-      // open_noatime 은 **root 실행에만** 실린다(2026-09-30): 비 root 실행에서
-      // 타인 소유 파일 O_NOATIME 은 EPERM 이라 부분 복사 뒤 Failed 가 된다. 예전엔
-      // 운영자 단건 = 항상 root 라 isAdmin 만으로 충분했지만, 이제 root 는
-      // 체크박스(rootEffective)가 정한다. 체크박스 값은 root 를 다시 켤 때를 위해 보존한다.
-      open_noatime: isAdmin && rootEffective && f.openNoatime,
+      // open_noatime 은 운영자 폼의 체크박스 그대로(root 여부 무관, 2026-10-27): 포크가 O_NOATIME 의
+      // EPERM(실행 신원 소유가 아닌 파일)을 그 파일만 O_NOATIME 없이 다시 열어 복사하므로, 비 root 실행에서
+      // 부분 복사 뒤 Failed 가 되던 2026-09-30 의 이유가 없어졌다. 사용자 폼은 이 옵션을 보이지 않는다
+      // (2026-08-22 사용자 결정 「사용자 요청은 기본 OFF」 유지 -- isAdmin).
+      open_noatime: isAdmin && f.openNoatime,
     });
     // 빈 문자열일 때만 생략 — 빈 chmod/chown 을 그대로 실으면 서버 fullmatch 가
     // 422 invalid_option 으로 거부한다(빈 값은 "옵션 없음"이지 "빈 값 지정"이 아니다).
@@ -486,8 +486,9 @@ export function SubmitJob() {
                 운영자가 고급을 안 펼친 것과 결과가 같다. */}
             {isAdmin && (
               <div className="flex flex-wrap gap-x-6 gap-y-2">
-                <label className="flex items-center gap-2 text-sm">
+                <label className="flex items-center gap-2 text-sm" title={DIRECT_HELP}>
                   <input type="checkbox" aria-label="direct" checked={f.direct} onChange={on("direct")} /> direct
+                  <span className="sr-only"> — {DIRECT_HELP}</span>
                 </label>
                 <label className="flex items-center gap-2 text-sm" title="실행 로그를 줄입니다 — 실행 결과 개수(삭제한 항목·복사한 파일)도 「—」가 됩니다. 미리보기(dry-run)에는 적용하지 않습니다(대상 수를 세는 줄이 사라지므로)">
                   <input type="checkbox" aria-label="quiet" checked={f.quiet} onChange={on("quiet")} /> quiet
@@ -511,10 +512,10 @@ export function SubmitJob() {
                   <FieldRow align="check"
                     control={<label className="flex items-center gap-2 text-sm">
                       <input type="checkbox" aria-label="open_noatime"
-                             checked={rootEffective && f.openNoatime} disabled={!rootEffective}
+                             checked={f.openNoatime}
                              onChange={on("openNoatime")} /> open_noatime
                     </label>}
-                    help={!rootEffective && OPEN_NOATIME_NON_ROOT} />
+                    help={OPEN_NOATIME_HELP} />
                   {/* 프리필 계약(2026-09-17): 값이 미리 채워져 있고(placeholder 가
                       아니다) 그 값이 곧 서버 기본이라 비워도 같은 값이 적용된다 —
                       배칭을 끄는 유일한 표현은 0 명시. placeholder 는 "비웠을 때

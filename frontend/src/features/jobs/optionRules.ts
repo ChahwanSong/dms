@@ -83,8 +83,13 @@ export const SYNC_OPTION_HELP = {
   delete: "원본에 없는 파일을 대상에서도 삭제해 완전히 동일하게 맞춥니다(미러 동기화).",
   contents: "크기·수정시각 대신 파일 내용을 바이트 단위로 비교합니다(더 느리지만 정확).",
 } as const;
-export const OPEN_NOATIME_NON_ROOT =
-  "open_noatime 은 root 실행에서만 적용됩니다 — 일반 실행 신원은 남의 파일을 O_NOATIME 으로 열 수 없어(EPERM) 복사가 실패합니다.";
+// open_noatime·direct 안내(SubmitJob·BatchCreate 공용). 2026-10-27 포크(nsync db1e33c·공통 43ba468)부터 nsync·dsync 모두
+// O_NOATIME 이 EPERM(실행 신원 소유가 아닌 파일)이면 그 파일만 O_NOATIME 없이 다시 열어 복사한다 -- 예전처럼 root 실행 전용으로
+// 막지 않는다. direct 는 dsync 만 O_DIRECT 로 열고 nsync 는 받기만 한다(정렬 I/O 미구현, 포크 db1e33c).
+export const OPEN_NOATIME_HELP =
+  "원본을 읽을 때 접근 시각(atime)을 바꾸지 않습니다 — 실행 신원 소유가 아닌 파일은 커널이 허용하지 않아 접근 시각 보존 없이 그대로 복사합니다(root 실행은 전부 보존).";
+export const DIRECT_HELP =
+  "O_DIRECT(페이지 캐시 우회)로 읽고 씁니다 — 한 노드에서 dsync 로 실행될 때만 적용되고, 스토리지가 노드별로 나뉘어 nsync 로 실행되면 무시됩니다.";
 // 실행 권한 문구(제출 요약 「실행 권한」 ↔ 요청 상세 「요청 내용」의 「실행 권한」). root 의 어휘·색(text-bad)은 포탈 전체가 같다.
 // 요청 상세는 PRIV_ROOT_HEAD·PRIV_USER 만 쓴다 -- sync 의 소유 결과는 같은 카드의 「목적지 소유」 행이 말하므로
 // PRIV_ROOT_SYNC(소유 결과를 덧붙인 꼬리)는 제출 요약 전용이다(한 화면에서 같은 사실을 두 번 말하지 않는다).

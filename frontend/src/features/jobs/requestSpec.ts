@@ -34,8 +34,7 @@ export type OptionsView =
   | { state: "ok";
       set: { token: string; note: string | null }[];   // 칩 + (출처 있는) 설명
       defaults: string[];                               // 서버 기본과 같은 값 "batch_files=1000000"
-      unknown: string[];                                // 카탈로그 밖·모양이 틀린 값의 원문(60자 상한)
-      noatimeWarn: boolean };
+      unknown: string[] };                              // 카탈로그 밖·모양이 틀린 값의 원문(60자 상한)
 
 export type PrivKind = "root" | "user" | "batch";
 export type PrivBasis = "plan" | "request";
@@ -136,10 +135,9 @@ function pickOptions(payloadOpts: unknown, jobOpts: unknown):
 }
 
 /** 저장된 옵션 → 칩·기본값·원문. 저장된 뒤에는 명시값과 서버가 채운 기본값을 구분할 수 없다(domain.validate_options)
-    -- 그래서 기본과 같은 값은 둘 다 「기본값」이다. noatimeWarn: 비 root sync 의 open_noatime 은 남의 파일에서 EPERM 이라
-    실패 원인이 될 수 있다(성공한 요청에서는 거짓 경보라 끈다). */
-export function normalizeOptions(op: string, src: { payload: unknown; job?: unknown },
-                                 ctx: { kind: PrivKind; reqState: unknown }): OptionsView {
+    -- 그래서 기본과 같은 값은 둘 다 「기본값」이다. (비 root open_noatime 의 EPERM 주의 줄은 2026-10-27 에 뺐다 -- 포크가
+    그 파일만 O_NOATIME 없이 다시 열어 복사하므로 더 이상 실패 원인이 아니다.) */
+export function normalizeOptions(op: string, src: { payload: unknown; job?: unknown }): OptionsView {
   const picked = pickOptions(src.payload, src.job);
   if (picked.state !== "ok") return picked;
   const opts = picked.opts;
@@ -182,8 +180,7 @@ export function normalizeOptions(op: string, src: { payload: unknown; job?: unkn
     else extra += 1;
   }
   if (extra > 0) unknown.push(`외 ${extra}개`);
-  const noatimeWarn = op === "sync" && opts.open_noatime === true && ctx.kind === "user" && ctx.reqState !== "Succeeded";
-  return { state: "ok", set, defaults, unknown, noatimeWarn };
+  return { state: "ok", set, defaults, unknown };
 }
 
 // ---- 우선순위 --------------------------------------------------------------------------------------------------
@@ -354,7 +351,7 @@ export function deriveRequestSpec(req: RequestDetail, jobs: DataJob[] | null,
   }
 
   // 옵션(+ 목적지 소유가 읽는 원본 객체)
-  const options = normalizeOptions(op, { payload: p.options, job: job0?.options }, { kind, reqState: r.state });
+  const options = normalizeOptions(op, { payload: p.options, job: job0?.options });
   const rawOpts = obj(p.options) ?? obj(job0?.options);
 
   // 노드 지정(배치 자식 payload -- planner 가 정책 상한까지만 min-캡한다). sync 가 nsync(공존 노드 없음 폴백)로 돌면

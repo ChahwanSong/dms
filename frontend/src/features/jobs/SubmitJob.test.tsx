@@ -6,7 +6,7 @@ import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
 import { beforeAll, afterAll, afterEach, test, expect } from "vitest";
 import { SubmitJob } from "./SubmitJob";
-import { SCAN_INT_FIELDS, SYNC_INT_FIELDS } from "./optionRules";
+import { OPEN_NOATIME_HELP, SCAN_INT_FIELDS, SYNC_INT_FIELDS } from "./optionRules";
 import { NODE_CPU_CAP_NOTE } from "../../lib/jobTool";
 import type { UserStorage } from "../../lib/types";
 import type { Me } from "../../lib/types";
@@ -33,8 +33,8 @@ const SYNC_NUM_DEFAULTS = {
   bufsize: Number(SYNC_INT_FIELDS.bufsize.prefill),
 };
 // pristine 관리자 sync 폼이 싣는 옵션: open_noatime(기본 ON) + 숫자 프리필. open_noatime 은
-// root 실행일 때만 실리는데 관리자 기본이 root 다(2026-09-30 사용자 결정) -- 비 root 실행의
-// O_NOATIME 은 타인 소유 파일에서 EPERM 이라 root 를 끄면 빠진다(아래 open_noatime 테스트).
+// root 여부와 무관하게 체크박스 그대로 실린다(2026-10-27 — 포크가 타인 소유 파일의 O_NOATIME EPERM 을
+// 그 파일만 O_NOATIME 없이 다시 열어 복사한다, 아래 open_noatime 테스트).
 const SYNC_DEFAULT_OPTS = { open_noatime: true, ...SYNC_NUM_DEFAULTS };
 
 // 기본 me = admin(2026-08-20): rm·scan·고급옵션·우선순위·실행신원은 운영자
@@ -449,7 +449,7 @@ test("sync 제출 바디가 정확하다", async () => {
     source_storage: "cephfs", source: "a/b",
     destination_storage: "cephfs-secondary", destination: "c/d",
     // 계약: batch_files·bufsize 프리필이 항상 실린다(지우면 빠진다 -- 아래 테스트).
-    // open_noatime 은 root 실행에서만 실린다(관리자 기본 root, 2026-09-30).
+    // open_noatime 은 관리자 폼 기본 ON(root 여부 무관, 2026-10-27).
     options: SYNC_DEFAULT_OPTS,
     // priority 생략 = (정책 기본) — 슬라이스 37, resolve_priority 가 정책값 해석
     // run_as_root: 자격 있는 관리자는 확정값을 명시로 싣는다(기본 root).
@@ -655,26 +655,26 @@ test("고급 숫자 옵션을 지우면 그 키가 바디에서 빠진다(도구
   await userEvent.click(submitButton());
   expect(await screen.findByRole("heading", { name: "요청 상세" })).toBeInTheDocument();
   // 빈 문자열은 "미입력"이라 batch_files·bufsize 는 통째로 생략된다. open_noatime
-  // 은 관리자 기본 root 라 남는다 -- 숫자 생략과 독립.
+  // 은 관리자 폼 기본 ON 이라 남는다 -- 숫자 생략과 독립.
   expect(captured.body.options).toEqual({ open_noatime: true });
 });
 
-test("open_noatime 은 root 실행 전용 — root 를 끄면 잠기고 싣지 않는다", async () => {
-  // 비 root 의 O_NOATIME 은 타인 소유 파일에서 EPERM(mpifileutils 폴백 없음 → 부분 복사 뒤
-  // Failed)이라 잠근다. 관리자 기본은 root 라 여기선 명시로 끈다.
+test("open_noatime 은 root 를 꺼도 켤 수 있고 그대로 실린다 — 타인 소유 파일은 포크가 O_NOATIME 없이 다시 연다", async () => {
+  // 2026-09-30 엔 비 root 의 O_NOATIME 이 타인 소유 파일에서 EPERM(부분 복사 뒤 Failed)이라 잠갔다.
+  // 2026-10-27 포크(nsync db1e33c·공통 43ba468)가 그 파일만 O_NOATIME 없이 다시 열어 복사하므로 잠그지 않는다.
   const captured = captureSubmit();
   renderPage();
   await fillAndOpenAdvanced();
   await userEvent.click(screen.getByLabelText("root 권한으로 실행"));   // 끔
-  expect(screen.getByLabelText("open_noatime")).toBeDisabled();
-  expect(screen.getByLabelText("open_noatime")).not.toBeChecked();
-  expect(screen.getByText(/open_noatime 은 root 실행에서만 적용됩니다/)).toBeInTheDocument();
+  expect(screen.getByLabelText("open_noatime")).toBeEnabled();
+  expect(screen.getByLabelText("open_noatime")).toBeChecked();
+  expect(screen.getByText(OPEN_NOATIME_HELP)).toBeInTheDocument();
   // chown 캡션도 지금 모드를 말한다(root 아님 → 실행 신원 소유로 자동 chown).
   expect(screen.getByText(/비우면 실행 신원의 uid:주 그룹 gid 소유로 자동 chown 됩니다\(지금 root 아님\)/))
     .toBeInTheDocument();
   await userEvent.click(submitButton());
   expect(await screen.findByRole("heading", { name: "요청 상세" })).toBeInTheDocument();
-  expect(captured.body.options).toEqual(SYNC_NUM_DEFAULTS);
+  expect(captured.body.options).toEqual(SYNC_DEFAULT_OPTS);
   expect(captured.body.run_as_root).toBe(false);
 });
 
@@ -915,7 +915,7 @@ test("실행 신원에 다른 사용자를 적으면 root 가 기본으로 꺼�
   await screen.findByRole("heading", { name: "요청 상세" }).catch(() => null);
   expect(captured.body.owner_username).toBe("alice");
   expect(captured.body.run_as_root).toBe(false);
-  expect(captured.body.options.open_noatime).toBeUndefined();
+  expect(captured.body.options.open_noatime).toBe(true);   // root 가 아니어도 실린다(2026-10-27)
   first.unmount();
 
   // 본인 이름을 적는 건 생략과 같다(root 기본 유지).
@@ -951,7 +951,7 @@ test("root 자격 없는 관리자에겐 체크박스 대신 안내 — run_as_r
   await screen.findByRole("heading", { name: "요청 상세" }).catch(() => null);
   // 관리자는 확정값을 항상 명시 -- 서버의 생략 기본값(비 root)이나 me 판정 시점에 기대지 않는다.
   expect(captured.body.run_as_root).toBe(false);
-  expect(captured.body.options.open_noatime).toBeUndefined();
+  expect(captured.body.options.open_noatime).toBe(true);   // 비 root 실행에도 실린다(2026-10-27)
 });
 
 // ---- 사용자 sync 허용 쌍(2026-09-30): 소스·목적지 상호 필터 ------------------------------

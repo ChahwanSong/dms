@@ -11,7 +11,7 @@ import type { Policy } from "../../lib/types";
 import { NODE_CPU_CAP_NOTE } from "../../lib/jobTool";
 import { StoragePicker, field } from "../jobs/formFields";
 import {
-  CHMOD_RE, chownFieldError, SCAN_INT_FIELDS, SYNC_INT_FIELDS, SYNC_OPTION_HELP, intFieldError,
+  CHMOD_RE, chownFieldError, DIRECT_HELP, SCAN_INT_FIELDS, SYNC_INT_FIELDS, SYNC_OPTION_HELP, intFieldError,
   scanIntFieldError, syncIntFieldError,
 } from "../jobs/optionRules";
 import { Button } from "../../components/ui/Button";
@@ -77,8 +77,8 @@ const initial = {
   // 단건·배치 모두 기본 ON 으로 통일했다(사용자 결정 2026-08-22 — 소스 atime
   // 오염 방지). 배치는 통일 게이트로 항상 특권(root) 실행이라 O_NOATIME 권한
   // 제약이 없다. dsync 도구 기본은 off(mfu_flist_copy.c:3344)라 DMS 가 명시적으로
-  // 켠다. (단건 sync 는 비특권 실행이라 타인 소유 파일 O_NOATIME 이 EPERM 일 수
-  // 있다는 캐비엇이 SubmitJob 쪽 초기값 주석에 있다.)
+  // 켠다. (비 root 실행의 타인 소유 파일 O_NOATIME EPERM 은 2026-10-27 포크부터 그 파일만 O_NOATIME 없이
+  // 다시 열어 복사한다 -- optionRules OPEN_NOATIME_HELP.)
   // batchFiles·bufsize 프리필은 단건 폼과 같은 단일 출처(SYNC_INT_FIELDS) —
   // 「왜 도구 기본과 다른 값을 명시 전송하는가」는 그 주석에 있다.
   delete: false, contents: false, direct: false,
@@ -667,9 +667,10 @@ export function BatchCreate() {
               </label>}
               help={SYNC_OPTION_HELP.contents} />
             <div className="flex flex-wrap gap-x-6 gap-y-2">
-              <label className="flex items-center gap-2 text-sm">
+              <label className="flex items-center gap-2 text-sm" title={DIRECT_HELP}>
                 <input type="checkbox" aria-label="direct" checked={f.direct}
                        onChange={on("direct")} /> direct
+                <span className="sr-only"> — {DIRECT_HELP}</span>
               </label>
               <label className="flex items-center gap-2 text-sm">
                 <input type="checkbox" aria-label="quiet" checked={f.quiet}
