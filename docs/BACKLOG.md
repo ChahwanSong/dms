@@ -172,10 +172,13 @@
   `--beneath <mount>`(openat2). **C(정책)** `mount_path` 위 심링크는 허용·아래는 소스·목적지 모두 거부(권장).
 - 🔧 **확인 창이 sync 의 삭제를 보여 주지 않는다**(d188 C8, d189 C13). 미리보기 요약은 files·bytes 뿐이라 목적지 5개를 지운 C13 이 「7 files」로
   확인됐다. nsync `Planned actions: … remove=N` 의 remove 수를 미리보기 요약·확인 창에 싣는다(dsync 의 대응 줄도 확인).
-- 🔧 **sync 옵션 `direct`·`open_noatime` 이 nsync 에서 아무 효과가 없다**(2026-10-27 포크 빌드 확인). mpifileutils 빌드가 `-std=gnu99` 만이고
-  `_GNU_SOURCE` 가 없어 nsync.c 에서 `O_DIRECT`·`O_NOATIME`(·`O_PATH`)이 정의되지 않는다. `_GNU_SOURCE` 를 켜면 정렬되지 않은 버퍼·길이의
-  `O_DIRECT` 쓰기가 EINVAL 로 깨진다 — nsync 로 가는 sync 에서 두 옵션을 숨길지(포탈·서버 검증), 포크가 정렬 I/O 를 구현할지 결정.
-- 🔧 **포크 브랜치 `nsync-fixes-d189`(c4dbf20, 라이브 d189)의 남은 것**. DMS 핀은 main 이 아닌 브랜치 SHA — 포크 main 병합은 소유자 결정.
+- 📝 **테스트베드 CephFS 는 읽어도 atime 이 갱신되지 않는다**(2026-10-27 d190 실측 — `relatime` 마운트인데 노드에서 `cat` 해도 2001
+  그대로, 같은 노드 ext4 는 갱신). 사용량 분석의 atime(hot/cold) 분포는 테스트베드에서 의미가 약하다. 프로덕션 스토리지의 atime 동작은
+  그 사이트에서 한 번 확인할 것(포탈 문구는 이미 「relatime/open_noatime 환경에선 근사」).
+- 📝 **비 root dsync 가 남의 소유 파일을 복사하면 오류 줄 없이 rc 1**(2026-10-27 로컬 확인 — 소유자를 유지할 수 없어서, 자기 파일이면
+  rc 0, `--open-noatime` 무관). DMS 비 root 실행은 실행 신원으로 자동 chown 을 싣는 경로라 라이브 D2 는 Succeeded 였다 — chown 없이
+  남의 파일을 섞어 돌리는 경로가 생기면 다시 볼 것.
+- 🔧 **포크 브랜치 `nsync-fixes-d189`(핀 461bb73, 라이브 d190)의 남은 것**. DMS 핀은 main 이 아닌 브랜치 SHA — 포크 main 병합은 소유자 결정.
   P3: 배치 여럿에서 ENOSPC 정지 뒤 배치의 삭제는 돌지 않음(다음 실행이 이어 감) · ENOSPC 뒤에도 진행 중이던 전송은 끝까지 읽혀 버려짐 ·
   비 root 가 이미 있는 0555 목적지 디렉터리에 새 자식을 못 만듦 · dsync 미리보기는 거부될 타입 교체를 표시하지 않음.
 

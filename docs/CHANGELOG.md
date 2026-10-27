@@ -95,6 +95,29 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ✅ sync `open_noatime` 실효 + `direct` 는 nsync 더미 — **완료·실증**(2026-10-27, d190, dms-ssc)
+
+사용자 결정: 「DMS sync 옵션에서 open_noatime 효과있게 해주고 O_direct 는 nsync에서 의미없게 해도 돼 (더미 옵션)」.
+
+- **원인**: mpifileutils 빌드가 `-std=gnu99` 만이라 nsync.c 에 `_GNU_SOURCE` 가 없어 `O_NOATIME`·`O_DIRECT`·`O_PATH` 가 정의되지
+  않았다 — nsync 의 `--open-noatime`·`--direct` 는 아무 일도 안 했다(로컬: 원본 atime 이 2001 → 오늘로 바뀜). dsync 는 공통 복사
+  코드에 `_GNU_SOURCE` 가 있어 동작했지만, 비 root 가 남의 파일을 읽으면 O_NOATIME 이 EPERM 이라 「Failed to open input file」.
+- **포크**(브랜치 `nsync-fixes-d189`, 핀 461bb73): db1e33c nsync 가 `_GNU_SOURCE` 를 정의 — 소스 읽기(복사·`--contents`)를 O_NOATIME
+  으로 열고, 실행 신원 소유가 아닌 파일은 EPERM 뒤 O_NOATIME 없이 다시 열어 복사(끝에 그 수 한 줄), 목적지 쓰기엔 쓰지 않음.
+  `--direct` 는 받기만 한다(정렬 I/O 미구현, 안내 한 줄). O_PATH 가 실제 값이 되어 경로 걷기에 조상 읽기 권한이 필요 없어졌다.
+  43ba468 dsync(공통 `mfu_flist_copy.c`)도 같은 EPERM 대체. 하네스 92/92(T35~T37 신설, 이전 바이너리에서 실패).
+- **DMS**(d7ec11e): 관리자 폼이 root 를 끈 실행(다른 실행 신원 등)에도 `open_noatime` 을 체크박스 그대로 싣고(잠금·「root 실행에서만」
+  안내 제거, 요청 상세의 EPERM 주의 줄 제거), `direct` 체크박스(단건·배치)에 「dsync 로 실행될 때만, nsync 면 무시」 안내. 사용자 폼은
+  이 옵션을 여전히 보이지 않는다(2026-08-22 「사용자 요청은 기본 OFF」 유지). 프런트 1401 통과.
+- **배포(d190)**: 포탈 빌드 d7ec11e → 릴리스 에이전트 → api·controller·잡 이미지, 오버레이 146e9f8(가드 「이미지 변경 없음」),
+  라이브 번들에 새 안내 문구 있음·옛 문구 0.
+- **라이브 실증(6 케이스, 일회용 데이터 정리·요청 purge)**: nsync root `open_noatime` → `Options: … open-noatime=1`(N1, 대조 N0 은 0);
+  **nsync alice `open_noatime`(alice 소유 3 + root 소유 0644 2) → `--open-noatime: 2 source file(s) not owned by this run were read
+  without O_NOATIME`, 5개 전부 alice 소유로 복사, Succeeded**(N2 — 커널이 남의 파일에서 O_NOATIME 을 거부했다는 증거 = 플래그가 실제로
+  전달됨); nsync `direct:true` → `--direct has no effect in nsync`, md5 일치(DX, 12345 B·1 MiB+1 B); dsync root(D1)·**dsync alice 의 root 소유
+  파일 섞인 `open_noatime` → Copied 5 of 5, 열기 실패 없음**(D2). 테스트베드 CephFS 는 노드에서 `cat` 해도 atime 이 바뀌지 않아(같은
+  노드 ext4 는 바뀜) atime 값 비교로는 판별 불가 — atime 보존 자체는 로컬 시험(T35·T37)으로 확인.
+
 ### ✅ mpifileutils 포크 결함 수정 ae781bd → c4dbf20(포크 브랜치 nsync-fixes-d189) + 재실증 — **완료·실증**(2026-10-27, d189, dms-ssc)
 
 사용자 요청: 「남은 문제들 중 4번 빼고 나머지 모두 먼저 해결하고 실증까지 원해 … 다 끝낸후 4번을 다시 실증하고 문제 및 해결방법 다시
