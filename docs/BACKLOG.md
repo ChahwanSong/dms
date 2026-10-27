@@ -161,28 +161,23 @@
   보고로만 보인다). 배치 후보에서는 신선도로 빠지므로 동작 영향은 없고 노드 화면에 흔적만 남는다. 후보: 관리자 「노드 기록
   삭제」(보고 끊긴 지 N분 넘고 k8s Node 가 없을 때만, 감사 행).
 
-- 🔧 **포크 mpifileutils(ae781bd, 라이브 d188)의 남은 결함 — 포크에서 고친 뒤 핀 올림·재실증**(2026-10-26 d188 21 케이스 실증). 원인 코드
-  행·수정 제안·수용 기준·재현 픽스처는 포크 이슈 보고(https://claude.ai/artifact/85MidcfKYB5zqqiPFHyhwR). 심각도 순:
-  ① **[P0] nsync 디렉터리 → 비디렉터리 교체가 `--delete` 없이 목적지 하위를 재귀 삭제**하고 계획은 「skipped-dst-only=7(보존)」으로 보고(C8 —
-  타입이 다르면 무조건 REMOVE, 실행은 fd 기반 rm -rf). 같은 입력을 dsync 는 rmdir ENOTEMPTY 로 실패·보존(D3) — **DMS 가 스토리지 배치로
-  도구를 고르므로 같은 요청이 「삭제」 vs 「실패」로 갈린다**. ② [P1] 심링크·파일 → 디렉터리 교체가 배치 ≥2 면 결정적 실패(C4·C7
-  `Stopping after batch 1/203` — 항목마다 전체 경로 해시로 배치가 갈려 자식 복사가 부모 교체보다 먼저 돌고 O_NOFOLLOW 로 거부, 오류 1건에
-  남은 배치 전부 중단; 이 트리는 `batch_files` 1~202 전부 실패 예측. DMS 기본 100만도 항목이 많으면 같다). ③ [P1] 같은 교체가 **목적지 rank
-  ≥2** 면 배치 1개(DMS 기본)여도 rank 사이 순서가 없어 간헐 실패(C10 — 199/200, 실패 항목 이름은 로그에 없음; 재실행 C10b 로 수렴).
-  ④ [P2] nsync `--batch-files 0` 거부(C6 미리보기 실패 — dsync 는 0 = 배칭 끔, DMS 도 0 을 허용). ⑤ [P2] 실패 항목 경로·errno 미기록,
-  오류 1건에 남은 배치 중단(계속 옵션 없음). ⑥ [P2] dsync 디렉터리 → 파일 교체 실패 뒤 기존 디렉터리에 파일 모드 0644 적용(D3 —
-  탐색 불가) + `Removed 1`·`Copied 2 of 2 (100%)` 오기. ⑦ [P3] dsync 새 목적지에서 성공인데 `ERROR: Failed to stat` 한 줄(D2).
-  수정 전 운영 우회: nsync 로 가는 sync 에서 목적지 심링크·파일이 디렉터리로 바뀌는 경우 실패하면 같은 요청을 재실행(C7b·C10b 수렴),
-  `batch_files` 는 0 이 아니라 항목 수 이상으로.
-- 🔧 **sync 목적지·소스 봉쇄 검사 없음 — 피해 모양 실측**(2026-10-26 C12). root sync 의 목적지 경로가 다른 사용자 디렉터리(4444:4444, 700)를
-  가리키는 심링크면 nsync 가 따라가 31 파일을 쓰고 **대상 디렉터리를 0:0 755 로 바꾼다**(포크는 목적지 루트 심링크를 의도적으로 따라가고 루트
-  메타 복원이 경로 문자열 chown/chmod). rm 의 `_RM_CONTAINMENT_CHECK`(상위 경로 심링크 성분 없음)를 sync 목적지·소스에도 — preflight·
-  exec_preflight·러너 실행 직전 재확인. 원자적 마감(`openat2 RESOLVE_BENEATH` 류 옵션)은 포크 보고 #4.
-- 🔧 **확인 창이 sync 의 삭제를 보여 주지 않는다**(2026-10-26 C8). 미리보기 요약은 files·bytes 뿐이라 목적지 전용 7항목이 지워질 sync 가
-  「4 files, 16 B」로 확인됐다. nsync 계획 줄(`Planned actions: … remove= … skipped-dst-only=`)의 remove 수(포크가 ①을 고치면 함께 지워질 하위
-  수)를 미리보기 요약·확인 창에 싣는다. dsync 의 대응 줄도 확인 필요.
-- 🔧 **`batch_files: 0` + nsync = 미리보기 실패**(C6). 포크가 0 을 받게 고치지 않으면 DMS 가 nsync 에 0 이면 `--batch-files` 를 빼야 한다
-  (nsync 자체 기본이 배칭 끔).
+- 🔧 **sync 소스·목적지 루트가 심링크 — 봉쇄 검사 없음**(d188 C12 → d189 재실증 C12·C13, 포크 보고 ④, 2026-10-27 사용자 결정 대기).
+  root sync 의 ① 목적지 경로가 다른 사용자 디렉터리(4444:4444, 700)를 가리키는 심링크면 nsync 가 따라가 32개를 쓰고 **대상 디렉터리를
+  0:0 755 로**(C12, Succeeded — 신호 없음), ② **소스 경로가 심링크 + `delete:true` 면 목적지 전부 삭제**(C13 — 스캔이 루트를 링크로 보고
+  나열하지 않아 목적지 전체가 「목적지 전용」, 확인 창은 「7 files」), ③ 루트를 단계마다 경로로 다시 열어 스캔 뒤 루트를 심링크로 바꾸면
+  이후 단계가 그쪽을 연다(포크 리뷰 재현 — 덮어쓰기·비밀 복사). 비 root 는 preflight `destination_not_writable` 로 막힘(C12b). 해결(보고
+  https://claude.ai/artifact/T5G9BDAcE943V3b8bCuf2d §4): **A(DMS)** rm 의 `_RM_CONTAINMENT_CHECK` 처럼 `mount_path` 아래 성분(마지막 포함)에
+  심링크 없음을 preflight·exec_preflight·러너 직전 재확인(사유 코드 양쪽 등록) + 확인 창에 계획 삭제 수. **B(포크)** 루트를 시작에 한 번
+  `O_NOFOLLOW` 로 열어 dev/ino 를 고정하고 모든 단계·루트 메타 복원을 그 fd 로, 소스 루트가 디렉터리가 아니면 실행 거부, 선택
+  `--beneath <mount>`(openat2). **C(정책)** `mount_path` 위 심링크는 허용·아래는 소스·목적지 모두 거부(권장).
+- 🔧 **확인 창이 sync 의 삭제를 보여 주지 않는다**(d188 C8, d189 C13). 미리보기 요약은 files·bytes 뿐이라 목적지 5개를 지운 C13 이 「7 files」로
+  확인됐다. nsync `Planned actions: … remove=N` 의 remove 수를 미리보기 요약·확인 창에 싣는다(dsync 의 대응 줄도 확인).
+- 🔧 **sync 옵션 `direct`·`open_noatime` 이 nsync 에서 아무 효과가 없다**(2026-10-27 포크 빌드 확인). mpifileutils 빌드가 `-std=gnu99` 만이고
+  `_GNU_SOURCE` 가 없어 nsync.c 에서 `O_DIRECT`·`O_NOATIME`(·`O_PATH`)이 정의되지 않는다. `_GNU_SOURCE` 를 켜면 정렬되지 않은 버퍼·길이의
+  `O_DIRECT` 쓰기가 EINVAL 로 깨진다 — nsync 로 가는 sync 에서 두 옵션을 숨길지(포탈·서버 검증), 포크가 정렬 I/O 를 구현할지 결정.
+- 🔧 **포크 브랜치 `nsync-fixes-d189`(c4dbf20, 라이브 d189)의 남은 것**. DMS 핀은 main 이 아닌 브랜치 SHA — 포크 main 병합은 소유자 결정.
+  P3: 배치 여럿에서 ENOSPC 정지 뒤 배치의 삭제는 돌지 않음(다음 실행이 이어 감) · ENOSPC 뒤에도 진행 중이던 전송은 끝까지 읽혀 버려짐 ·
+  비 root 가 이미 있는 0555 목적지 디렉터리에 새 자식을 못 만듦 · dsync 미리보기는 거부될 타입 교체를 표시하지 않음.
 
 ## 2. 의도적 보류 (결정 — "미구현"이 아님)
 

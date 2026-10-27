@@ -95,6 +95,37 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ✅ mpifileutils 포크 결함 수정 ae781bd → c4dbf20(포크 브랜치 nsync-fixes-d189) + 재실증 — **완료·실증**(2026-10-27, d189, dms-ssc)
+
+사용자 요청: 「남은 문제들 중 4번 빼고 나머지 모두 먼저 해결하고 실증까지 원해 … 다 끝낸후 4번을 다시 실증하고 문제 및 해결방법 다시
+정리해줘」(d188 보고의 ①~⑧ 중 ④ 목적지 루트 심링크 제외; 2번은 근본 해결 A안, 3번은 rank 배리어, 6번은 추가 옵션 없이 max errors —
+기본값은 실패 기록을 메모리·디스크 각 32 MiB 로 유지하는 값). 포크 작업은 nsync.c·dsync.c 안에서 끝냈다.
+
+- **포크**(`chahwansong/mpifileutils` 브랜치 `nsync-fixes-d189` — main 이 아니다): f53e458 dsync · c4dbf20 nsync + `nsync.md` §13.
+  - nsync: 비어 있지 않은 디렉터리는 `--delete` 없이 교체하지 않음(실패 1건으로 보고·대체 안 함) · 배치 ≥2 이면 첫 배치 전 타입 교체 선처리
+    (블룸 필터로 탐침, 소스 메타를 실어 조기 중단에도 소스 메타 디렉터리) · 타입 교체 REMOVE 뒤 목적지 rank 배리어 · `--batch-files 0` ·
+    항목별 실패 기록(경로 이스케이프, 경로순 목록) + `--max-errors`(기본 65,000 = 32 MiB ÷ 512 B 기록, 배치 안은 rank 별 몫·실행 실패만) ·
+    스캔·소스 읽기·목적지 쓰기를 루트 fd 아래 심링크 없이(`openat2`, 없으면 O_NOFOLLOW 걷기) · 목적지 FIFO 무한 대기·실패 COPY 의 기존
+    사본 삭제·root 쓰기 중 setuid 창 수정 · 소스 FIFO/소켓/장치 건너뜀 · 복사 루프 선형화(작은 파일 4만 개 67.8 s → 1.6 s).
+  - dsync: 지울 수 없던 타입 교체 항목과 그 하위를 복사·`--link-dest` 에서 뺌(디렉터리 0644 사고, 남은 심링크 너머 복사) · 새 목적지의
+    「Failed to stat」 줄 제거.
+  - 검증: 개발 컨테이너 하네스 85/85(반복 3회), 새 회귀 시험은 이전 바이너리에서 실패. 수정본을 독립 리뷰 2회(1차 9건·2차 3건 반영).
+- **배포(d189)**: dms-ssc 2dceca8(핀) → ssc 포탈 빌드 `dms-mpifileutils`·`dms`·`dms-agent` d189 → 릴리스 에이전트 → api·controller·잡
+  이미지(live == 동봉), 오버레이 f4b7ed2(가드 「이미지 변경 없음」).
+- **라이브 실증(일회용 데이터 17 케이스, root 16 + alice 1)**:
+  | 결과 | 케이스 |
+  |---|---|
+  | 해결(①) | 디렉터리 → 파일, `--delete` 없음: `failed replace-dir \`d\`: Directory not empty` 1건·rc 1, 목적지 전용 6항목·디렉터리 755 보존(C8) / `delete:true` 면 교체(C8d) |
+  | 해결(②) | 심링크·파일 → 디렉터리 `batch_files 1`(203 배치): 선처리 `probed 1, replaced 1` 뒤 Succeeded, 200 파일, 목적지 밖 0(C4·C7) |
+  | 해결(③) | 목적지 rank 2, 배치 1·203: 둘 다 Succeeded 200/200, 밖 0(C10·C10b) |
+  | 해결(④⑤) | `batch_files 0` 미리보기·실행 Succeeded(C6), 실패 항목 목록(C8 위) |
+  | 해결(⑦⑧) | dsync 디렉터리 → 파일 실패 뒤 디렉터리 755 유지 + 「Type change not applied」(D3), 새 목적지 「Destination does not exist yet」·`Failed to stat` 없음(D2) |
+  | 새 동작 | 소스 FIFO 는 건너뜀·rc 0(F1), 목적지의 같은 이름 일반 파일은 `delete:true` 여도 남음(F1d) |
+  | 회귀 없음 | 새 목적지 md5 일치(C1), `chown 0:0` setuid 제거·2775 유지(C9·D2), dsync 심링크 → 디렉터리(D1) |
+  | **④ 그대로(범위 밖)** | root sync 목적지 루트 심링크 → victim 에 32개 쓰고 0:0 755(C12); **소스 루트가 심링크 + `delete:true` → 목적지 5개 전부 삭제**(C13, 미리보기 「7 files」); alice 는 DMS preflight `destination_not_writable` 로 거부(C12b) |
+  ④와 그 해결 방안은 BACKLOG 와 보고(https://claude.ai/artifact/T5G9BDAcE943V3b8bCuf2d, 비공개 — 공유는 소유자). 실증 데이터 정리·
+  요청 17건 purge.
+
 ### ✅ mpifileutils 고정 커밋 5958e4e → ae781bd(포크 main HEAD) + 케이스 실증 — **완료·실증**(2026-10-26, d188, dms-ssc)
 
 사용자 요청: 「가장 최신 push 버전으로 mpifileutils 빌드 및 릴리즈하고 케이스 실증을 통해 어떤 문제가 잇는지 자세하게 설명 및
