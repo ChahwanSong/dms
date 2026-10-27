@@ -296,7 +296,7 @@ def _preflight(src, dst, *, privileged=False, role=None, fake_owner=None, bindir
                              "gid": 0 if privileged else os.getgid(),
                              "privileged": privileged},
                    paths={"source": src, "source_storage": "s1", "destination": dst,
-                          "destination_storage": "s2"},
+                          "destination_storage": "s2", "source_root": "/", "destination_root": "/"},
                    options={}, candidates={"primary": ["n1"]}, process_count=8,
                    queue="dms-data", priority_class="dms-mid",
                    artifact_base="file:///cephfs/dms/artifacts")
@@ -398,11 +398,11 @@ def test_mode_is_passed_positionally_never_inlined(tmp_path):
         JobSpec(job_id="j1", phase="preflight", operation="sync", tool="dsync", dryrun=False,
                 identity={"uid": 10001, "gid": 10000, "privileged": False},
                 paths={"source": "/cephfs/a", "source_storage": "s1",
-                       "destination": "/cephfs/b", "destination_storage": "s1"},
+                       "destination": "/cephfs/b", "destination_storage": "s1", "source_root": "/", "destination_root": "/"},
                 options={}, candidates={"primary": ["n1"]}, process_count=8, queue="q",
                 priority_class="p", artifact_base="file:///cephfs/dms/artifacts"),
         job_image="i", namespace="dms", volumes=_VOL, node="n1")["spec"]["containers"][0]["command"]
-    assert spec_cmd[4:] == ["/cephfs/a", "/cephfs/b", "user"]
+    assert spec_cmd[4:] == ["/cephfs/a", "/cephfs/b", "user", "/", "/"]   # + 봉쇄 기준(source_root·destination_root)
     assert "user" not in spec_cmd[2].split('M="$3"')[0]
 
 

@@ -2,9 +2,10 @@
 
 배치 rm 은 root 라 preflight·exec_preflight 의 `test -w "$(dirname target)"` 가 늘 참이었다 -- 사용자가 상위 디렉터리를
 심링크로 바꿔 두면(users/alice/data -> ../bob) 확인 창의 「실제 경로」와 다른 트리를 root drm 이 지웠다. 봉쇄 조각
-(execution_manifests._RM_CONTAINMENT_CHECK)은 `set -e` 아래 case·명령 치환·AND-OR 의 상호작용이라 문자열 계약으로는
-증명할 수 없다 -- 실 파드와 같은 명령(["sh", "-c", script, "sh", *args])을 임시 트리에 대고 돌린다. 같은 트리로 러너의
-drm 직전 재확인(dms_job_runner.runner.rm_target_redirected)도 돌려 두 판정이 갈라지지 않음을 고정한다.
+(execution_manifests._RM_CONTAINMENT_CHECK + _PATH_CONTAINED_FN)은 `set -e` 아래 case·명령 치환·AND-OR 의 상호작용이라
+문자열 계약으로는 증명할 수 없다 -- 실 파드와 같은 명령(["sh", "-c", script, "sh", *args])을 임시 트리에 대고 돌린다. 같은
+트리로 러너의 drm 직전 재확인(dms_job_runner.runner.rm_target_redirected)도 돌려 두 판정이 갈라지지 않음을 고정한다.
+2026-10-27(사용자 「Rm도 똑같이 dms에서 거부하도록」): 대상 자신이 심링크여도 막는다 -- sync 경로 봉쇄와 같은 규칙.
 """
 import json
 import os
@@ -51,7 +52,8 @@ def tree(tmp_path):
     (m / "users/alice/redirect").symlink_to("../bob")                         # 상대 링크 -> 남의 디렉터리
     (m / "users/alice/absredirect").symlink_to(str(m / "shared/datasets"))    # 절대 링크 -> 같은 스토리지 다른 곳
     (m / "users/alice/outside").symlink_to(str(tmp_path))                      # managed_root 밖
-    (m / "users/alice/lastlink").symlink_to("../bob/old")                     # 마지막 성분이 링크(링크만 지운다)
+    (m / "users/alice/lastlink").symlink_to("../bob/old")                     # 마지막 성분이 링크
+    (m / "users/alice/dangling").symlink_to("../nowhere")                     # 끊긴 링크
     (tmp_path / "mlink").symlink_to(str(m))                                   # managed_root 자신이 링크
     (tmp_path / "up").symlink_to(str(tmp_path))                               # managed_root 위 성분이 링크
     return tmp_path
@@ -65,7 +67,6 @@ _PASS = [
     ("m/", "users/alice/data/old"),            # managed_root 끝 슬래시(DB 표기 그대로)
     ("mlink", "users/alice/data/old"),         # managed_root 자신이 심링크 -- 양쪽을 같은 realpath 로 본다
     ("up/m", "users/alice/data/old"),          # managed_root 위 성분이 심링크
-    ("m", "users/alice/lastlink"),             # 마지막 성분 심링크 -- drm 은 링크 자체만 지운다
     ("m", "dir with space/x*[y]/old"),         # 공백·글롭 문자 -- case 패턴의 "..." 는 글자 그대로
 ]
 _REDIRECT = [
@@ -77,6 +78,9 @@ _REDIRECT = [
     ("m", "users/alice/data/.."),              # 끝이 「..」 -- drm 이 상위를 지우게 된다
     ("m", "users/alice/data/."),
     ("m", "users/alice/data/"),                # 끝 슬래시 -- 마지막 성분 링크를 따라가게 된다
+    ("m", "users/alice/lastlink"),             # 대상 자신이 심링크(2026-10-27 -- 예전엔 링크만 지운다고 통과)
+    ("m", "users/alice/dangling"),             # 대상 자신이 끊긴 링크
+    ("m", "users/alice/lastlink/sub"),         # 링크 아래 없는 경로 -- 가장 깊은 「있는」 성분이 링크
 ]
 
 
@@ -114,11 +118,21 @@ def test_managed_root_with_glob_characters_is_matched_literally(tmp_path):
 
 
 def test_missing_parent_keeps_the_parent_not_writable_reason(tree):
-    # 부모 쓰기가 봉쇄보다 먼저다 -- 오타 경로를 「다른 곳을 가리킨다」로 말하지 않는다. 러너는 막기만 한다(사유는 하나).
+    # 부모 쓰기가 봉쇄보다 먼저다 -- 오타 경로를 「다른 곳을 가리킨다」로 말하지 않는다. 러너는 봉쇄만 본다: 없는 경로는
+    # 가장 깊은 「있는」 상위(users)를 보고 통과 -- 지울 것이 없으면 drm 이 스스로 실패한다(preflight 가 먼저 막는다).
     root = str(tree / "m")
     rc, out = _preflight(f"{root}/users/nobody/x", root)
     assert rc == 1 and "DMS_PREFLIGHT_REASON=parent_not_writable" in out and _REDIRECTED not in out
-    assert rm_target_redirected(f"{root}/users/nobody/x", root) is True
+    assert rm_target_redirected(f"{root}/users/nobody/x", root) is False
+
+
+def test_the_managed_root_itself_is_never_a_target(tree):
+    # stepper 는 managed_root **아래**만 조합한다 -- 루트 자체(끝 슬래시 표기 포함)는 변조 행이다.
+    root = str(tree / "m")
+    for target in (root, root + "/"):
+        rc, out = _preflight(target, root)
+        assert rc == 1 and _REDIRECTED in out, out
+        assert rm_target_redirected(target, root) is True
 
 
 def test_target_not_under_the_given_managed_root_is_rejected(tree):

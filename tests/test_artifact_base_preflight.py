@@ -29,7 +29,7 @@ _BASE = {"name": "dms-artifact-base", "hostPath": {"path": "/cephfs/dms/artifact
 
 def _spec(operation="sync", privileged=False):
     paths = ({"source": "/cephfs/a", "source_storage": "s1", "destination": "/cephfs/b",
-              "destination_storage": "s1"} if operation == "sync"
+              "destination_storage": "s1", "source_root": "/", "destination_root": "/"} if operation == "sync"
              # managed_root: stepper._build_spec 이 대상 하나 연산에 늘 싣는다(2026-10-21 rm 대상 봉쇄 -- 없으면 rm 빌더 거부).
              else {"target": "/cephfs/a", "storage": "s1", "managed_root": "/cephfs"})
     tool = {"sync": "dsync", "scan": "dscan", "rm": "drm"}[operation]

@@ -166,7 +166,9 @@ def test_failed_worker_pod_group_marker_becomes_the_reason(db):
 
 def test_parse_execution_reason_whitelist_and_shape():
     # target_path_redirected(2026-10-21): 러너의 drm 직전 rm 대상 봉쇄 재확인(runner.rm_target_redirected).
-    assert EXECUTION_REASONS == frozenset({"workers_unreachable", "identity_groups_not_applied", "target_path_redirected"})
+    # source/destination_path_redirected(2026-10-27): sync 워커 셸의 경로 봉쇄 재확인(_worker_command_script).
+    assert EXECUTION_REASONS == frozenset({"workers_unreachable", "identity_groups_not_applied", "target_path_redirected",
+                                           "source_path_redirected", "destination_path_redirected"})
     assert parse_execution_reason([("launcher", "DMS_EXEC_REASON=target_path_redirected\n", None)]) == "target_path_redirected"
     assert parse_execution_reason([("p", "x\n  DMS_EXEC_REASON=workers_unreachable  \n", None)]) == "workers_unreachable"
     assert parse_execution_reason([("p", None, "ImagePullBackOff"), ("w", "DMS_EXEC_REASON=workers_unreachable", None)]) \

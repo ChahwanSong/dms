@@ -87,7 +87,7 @@ def _nsync_preflight_spec(phase="preflight"):
                  cand={"source": ["dms-w1", "dms-w2"], "destination": ["dms-w4"]},
                  paths={"source": "/cephfs-third/a", "source_storage": "cephfs-third",
                         "destination": "/cephfs-secondary/b",
-                        "destination_storage": "cephfs-secondary"})
+                        "destination_storage": "cephfs-secondary", "source_root": "/", "destination_root": "/"})
 
 
 def test_submit_nsync_preflight_creates_source_and_dest_pods():
@@ -306,7 +306,7 @@ def test_volumes_nsync_job_mounts_each_storage_only_on_its_own_task():
     spec = _spec(phase="execution", op="sync", tool="nsync",
                  cand={"source": ["dms-src1"], "destination": ["dms-dst1"]},
                  paths={"source": "/cephfs-third/a", "source_storage": "storage-third",
-                        "destination": "/cephfs-secondary/b", "destination_storage": "storage-secondary"})
+                        "destination": "/cephfs-secondary/b", "destination_storage": "storage-secondary", "source_root": "/", "destination_root": "/"})
     for phase in ("preview", "execution"):
         k8s.created.clear()
         a.submit(_spec(phase=phase, op="sync", tool="nsync", cand=spec.candidates, paths=spec.paths))
@@ -330,7 +330,7 @@ def test_volumes_dsync_job_mounts_both_storages_on_every_task():
         read_text=lambda path: None, artifact_base="file:///cephfs/dms/artifacts")
     a.submit(_spec(phase="execution", op="sync", tool="dsync", cand={"primary": ["dms-w1"]},
                    paths={"source": "/mnt-a/x", "source_storage": "s-a",
-                          "destination": "/mnt-b/y", "destination_storage": "s-b"}))
+                          "destination": "/mnt-b/y", "destination_storage": "s-b", "source_root": "/", "destination_root": "/"}))
     for t in k8s.created[0]["spec"]["tasks"]:
         assert {v["hostPath"]["path"] for v in t["template"]["spec"]["volumes"]} == {
             "/mnt-a", "/mnt-b", "/cephfs/dms/artifacts"}, t["name"]

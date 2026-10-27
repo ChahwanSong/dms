@@ -553,10 +553,14 @@ class JobStepper:
                 raise ChownNameAtStep(problem)
         op = job["operation"]
         if op == "sync":
-            paths = {"source": self._abs(job["source_storage"], job["source"]),
-                     "source_storage": job["source_storage"],
-                     "destination": self._abs(job["destination_storage"], job["destination"]),
-                     "destination_storage": job["destination_storage"]}
+            # managed_root 도 싣는다(2026-10-27 sync 경로 봉쇄 -- execution_manifests._PATH_CONTAINED_FN·워커 재확인의 기준).
+            # rm 과 같이 한 번 읽은 같은 값으로 경로를 조합한다(두 번 읽으면 그 사이 스토리지 수정이 기준과 경로를 갈라 놓는다).
+            src_root = self._managed_root(job["source_storage"])
+            dst_root = self._managed_root(job["destination_storage"])
+            paths = {"source": managed_abs_path(src_root, job["source"]),
+                     "source_storage": job["source_storage"], "source_root": src_root,
+                     "destination": managed_abs_path(dst_root, job["destination"]),
+                     "destination_storage": job["destination_storage"], "destination_root": dst_root}
         else:
             # managed_root 도 싣는다(2026-10-21 rm 대상 봉쇄 -- execution_manifests._RM_CONTAINMENT_CHECK·러너 재확인의 기준).
             # 한 번 읽은 같은 값으로 target 을 조합한다: 두 번 읽으면 그 사이 스토리지 수정이 기준과 대상을 갈라 놓는다.

@@ -15,7 +15,7 @@ from dms.execution_manifests import (MAX_PROCESSES_PER_WORKER, build_preflight_p
 from dms.node_cpu import LAUNCHER_CPU_REQUEST_MILLICORES
 
 _VOL = [{"name": "cephfs", "hostPath": {"path": "/cephfs"}, "mountPath": "/cephfs"}]
-_NSYNC_PATHS = {"source": "/a", "source_storage": "s1", "destination": "/b", "destination_storage": "s2"}
+_NSYNC_PATHS = {"source": "/a", "source_storage": "s1", "destination": "/b", "destination_storage": "s2", "source_root": "/", "destination_root": "/"}
 
 
 def _spec(**kw):

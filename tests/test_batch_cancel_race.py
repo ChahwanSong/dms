@@ -372,7 +372,7 @@ def test_job_pods_have_a_short_termination_grace():
         TASK_TERMINATION_GRACE_SECONDS}
     nsync = _spec("b" * 32)
     nsync = JobSpec(**{**nsync.__dict__, "tool": "nsync", "operation": "sync",
-                       "paths": {"source": "a", "destination": "b"},
+                       "paths": {"source": "/a", "destination": "/b", "source_root": "/", "destination_root": "/"},
                        "candidates": {"source": ["n1"], "destination": ["n2"]}})
     njob = build_volcano_job(nsync, job_image="img", namespace="dms", volumes=[],
                              role_volumes={"source": [], "destination": []})

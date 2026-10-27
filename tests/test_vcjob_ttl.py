@@ -106,7 +106,7 @@ def _nsync_spec(**kw):
                  candidates={"source": ["dms-w1"], "destination": ["dms-w4"]},
                  paths={"source": "/cephfs-third/a", "source_storage": "cephfs-third",
                         "destination": "/cephfs-secondary/b",
-                        "destination_storage": "cephfs-secondary"}, **kw)
+                        "destination_storage": "cephfs-secondary", "source_root": "/", "destination_root": "/"}, **kw)
 
 
 def test_build_volcano_job_sets_ttl_on_job_spec_not_task_template():

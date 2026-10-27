@@ -204,6 +204,16 @@ def _worker_command_script():
     docstring) -- 신원은 env 로만 들어오므로 이 스크립트는 잡과 무관한 고정 문자열이다."""
     return "\n".join([
         "set -eu",
+        # sync 경로 봉쇄 재확인(_PATH_CONTAINED_FN 주석) -- 도구가 경로를 열기 직전의 자리. env 는 _worker_path_env.
+        _PATH_CONTAINED_FN,
+        'if [ -n "${DMS_JR_SYNC_SOURCE+x}" ]; then '
+        'dms_path_contained "$DMS_JR_SYNC_SOURCE" "${DMS_JR_SYNC_SOURCE_ROOT:-}" || '
+        '{ echo DMS_EXEC_REASON=source_path_redirected; '
+        'echo "dms: source path is not where it was planned (symlink below the managed root)" >&2; exit 1; }; fi',
+        'if [ -n "${DMS_JR_SYNC_DEST+x}" ]; then '
+        'dms_path_contained "$DMS_JR_SYNC_DEST" "${DMS_JR_SYNC_DEST_ROOT:-}" || '
+        '{ echo DMS_EXEC_REASON=destination_path_redirected; '
+        'echo "dms: destination path is not where it was planned (symlink below the managed root)" >&2; exit 1; }; fi',
         _identity_materialize_stmt(),
         "mkdir -p /run/sshd",
         "ssh-keygen -A >/dev/null 2>&1 || true",
@@ -312,9 +322,27 @@ def _worker_env(spec):
     return env
 
 
-def _worker_container(name, image, spec, volumes):
+def _worker_path_env(spec, role):
+    """sync 워커가 sshd 앞에서 다시 볼 경로(_worker_command_script). 워커는 자기 쪽 스토리지만 마운트한다: nsync 의
+    source-worker 는 소스, destination-worker 는 목적지, primary(dsync 코로케이션) 워커는 둘 다. sync 밖은 빈 dict --
+    그 매니페스트는 이 기능 이전과 같다."""
+    if spec.operation != "sync":
+        return {}
+    src_root, dst_root = _sync_roots(spec)
+    ap = _abs_paths(spec)
+    env = {}
+    if role in (None, "source"):
+        env["DMS_JR_SYNC_SOURCE"] = ap["source"]
+        env["DMS_JR_SYNC_SOURCE_ROOT"] = src_root
+    if role in (None, "destination"):
+        env["DMS_JR_SYNC_DEST"] = ap["destination"]
+        env["DMS_JR_SYNC_DEST_ROOT"] = dst_root
+    return env
+
+
+def _worker_container(name, image, spec, volumes, *, role=None):
     return _container(name, image, ["sh", "-c", _worker_command_script()],
-                      _worker_env(spec), volumes,
+                      {**_worker_env(spec), **_worker_path_env(spec, role)}, volumes,
                       security_context=_worker_security_context(),
                       resources=_worker_resources(spec))
 
@@ -493,25 +521,53 @@ _DEST_CHECK = (
     'test -w "$dest_parent" || '
     '{ echo DMS_PREFLIGHT_REASON=destination_parent_not_writable; exit 1; }; ')
 
-# rm 대상 봉쇄(2026-10-21 리뷰): $1 = 대상 절대경로(drm argv 의 그 문자열), $R = 그 스토리지 managed_root(stepper._abs 가
-# $1 을 조합한 바로 그 값), $parent = dirname "$1". 「대상의 상위 경로 실제 위치 == realpath(managed_root) + 글자 그대로의
-# 상대 상위 경로」여야 통과 -- managed_root 아래 상위 경로 성분 어디에도 심링크가 없다는 뜻이다. 왜: drm 은 경로 문자열을
-# 걸어 들어가 중간 심링크를 커널이 따라가고, 배치 rm 은 root 라 `test -w` 가 늘 참이다 -- 사용자가 users/alice/data 를
-# ../bob(또는 /cephfs/dms 같은 마운트 안 다른 곳)으로 바꿔 두면 확인 창이 보인 「실제 경로」와 다른 트리가 지워졌다(스토리지
-# mount_path 전체가 잡 파드에 마운트된다). 마지막 성분은 심링크여도 된다 -- drm 은 대상을 lstat 해 링크 자체만 지운다.
-# managed_root 자신·그 위가 심링크인 것은 괜찮다(양쪽을 같은 realpath 로 본다). 끝이 「/」「.」「..」인 대상(DB 변조 행 --
-# validate_rm_target 은 정규화된 상대경로만 저장한다)과 상위 경로에 「.」「..」「//」가 낀 대상은 realpath 와 글자가 맞을
-# 수 없어 같은 사유로 막힌다(fail-closed). 값은 전부 positional·변수로만 쓴다(case 패턴의 "..." 는 글자 그대로 비교 --
-# 경로의 * [ 가 글롭이 되지 않는다). 같은 규칙의 러너 재확인: dms_job_runner.runner.rm_target_redirected.
+# 경로 봉쇄(sync 소스·목적지, rm 대상 -- 2026-10-21 rm, 2026-10-27 sync·rm 끝 성분, 포크 보고 ④). 셸 함수 하나가 규칙이다:
+# dms_path_contained PATH ROOT 는 「PATH 가 managed_root(ROOT) 아래 **어느 성분도**(마지막 포함) 심링크가 아니다」일 때만 참.
+# 판정 = 「PATH 의 실제 위치 == realpath(ROOT) + 글자 그대로의 상대경로」. 아직 없는 끝부분(새 목적지)은 존재하는 가장 깊은
+# 상위로 본다(lstat 기준 -- 끊긴 링크도 「있음」이라 막힌다). ROOT 자신·그 위의 심링크는 괜찮다(양쪽을 같은 realpath 로 본다
+# -- 관리 루트 링크·마운트 경로 링크). 끝이 「/」「.」「..」거나 「//」「/./」「/../」가 낀 PATH(DB 변조 행 -- 요청 검증은
+# 정규화된 상대경로만 저장한다), ROOT 밖 PATH 는 막는다(fail-closed). 값은 전부 positional·변수(case 의 "..." 는 글자 그대로
+# 비교 -- 경로의 * [ 가 글롭이 되지 않는다).
+# 왜: 도구는 경로 문자열을 커널로 풀어 심링크를 따라간다. 요청 경로가(또는 중간 성분이) 다른 곳을 가리키면 -- 사용자는 대상
+# 권한 없이도 링크를 만들 수 있다 -- root sync 가 남의 디렉터리에 쓰고 소유를 바꾸며(포크 보고 ④ C12), 소스 경로가 링크면
+# `delete` sync 가 목적지를 통째로 지우거나(nsync C13) 링크로 바꾸고(dsync), root rm 이 확인 창과 다른 트리를 지웠다.
+# 같은 규칙을 세 번 본다: 미리보기 preflight, 실행 직전 exec_preflight(같은 _preflight_script), 그리고 도구가 경로를 열기 바로
+# 앞 -- sync 는 워커 셸(_worker_command_script, 워커만 데이터 스토리지를 마운트한다 -- nsync 런처는 아니다), rm 은 러너
+# (dms_job_runner.runner.rm_target_redirected, 같은 규칙의 Python 미러 -- tests/test_rm_containment_sh·test_sync_containment_sh
+# 가 같은 트리로 두 판정을 대조한다). 마지막 검사와 도구가 경로를 여는 사이 몇 초의 교체는 남는다(BACKLOG ④ B -- 포크 루트 고정).
+_PATH_CONTAINED_FN = (
+    'dms_path_contained() { '
+    'dms_p=$1; dms_r=$2; dms_rb=${dms_r%/}; '
+    'case "$dms_p" in */|*/.|*/..|*//*|*/./*|*/../*) return 1;; esac; '
+    'case "$dms_p" in "$dms_rb"|"$dms_rb"/*) ;; *) return 1;; esac; '
+    'dms_real_root=$(realpath -e -- "$dms_r") || return 1; '
+    'dms_q=$dms_p; '
+    'while [ "$dms_q" != "$dms_rb" ] && [ ! -e "$dms_q" ] && [ ! -L "$dms_q" ]; do dms_q=$(dirname -- "$dms_q"); done; '
+    'if [ "$dms_q" = "$dms_rb" ]; then dms_want=$dms_real_root; '
+    'else dms_want=${dms_real_root%/}/${dms_q#"$dms_rb"/}; fi; '
+    'dms_real_q=$(realpath -e -- "$dms_q") || return 1; '
+    '[ "$dms_real_q" = "$dms_want" ]; }; ')
+
+# rm 대상($1, $R = managed_root): managed_root 자신은 대상이 아니다(stepper 는 그 아래만 조합한다 -- 변조 행). 대상 자신이
+# 링크여도 막는다(2026-10-27 사용자 「Rm도 똑같이 dms에서 거부하도록」 -- 예전엔 drm 이 링크만 지운다고 통과시켰다).
 _RM_TARGET_REDIRECTED = 'echo DMS_PREFLIGHT_REASON=target_path_redirected; exit 1'
 _RM_CONTAINMENT_CHECK = (
-    'case "$1" in */|*/.|*/..) ' + _RM_TARGET_REDIRECTED + ';; esac; '
-    'case "$parent" in "$R"|"${R%/}") rel=;; "${R%/}"/*) rel=${parent#"${R%/}"/};; '
-    '*) ' + _RM_TARGET_REDIRECTED + ';; esac; '
-    'real_root=$(realpath -e -- "$R") && real_parent=$(realpath -e -- "$parent") || '
-    '{ ' + _RM_TARGET_REDIRECTED + '; }; '
-    'if [ -z "$rel" ]; then want=$real_root; else want=${real_root%/}/$rel; fi; '
-    '[ "$real_parent" = "$want" ] || { ' + _RM_TARGET_REDIRECTED + '; }; ')
+    'case "$1" in "$R"|"${R%/}") ' + _RM_TARGET_REDIRECTED + ';; esac; '
+    'dms_path_contained "$1" "$R" || { ' + _RM_TARGET_REDIRECTED + '; }; ')
+_SOURCE_CONTAINMENT_CHECK = (
+    'dms_path_contained "$S" "$SR" || { echo DMS_PREFLIGHT_REASON=source_path_redirected; exit 1; }; ')
+_DEST_CONTAINMENT_CHECK = (
+    'dms_path_contained "$D" "$DR" || { echo DMS_PREFLIGHT_REASON=destination_path_redirected; exit 1; }; ')
+
+
+def _sync_roots(spec):
+    """sync spec 의 (source_root, destination_root) -- stepper._build_spec 이 경로를 조합한 바로 그 managed_root 값. 없거나
+    빈 값이면 ValueError -- 봉쇄 검사 없이 sync 를 내보내지 않는다(어댑터가 submit_failed 로 접는다, fail-closed)."""
+    paths = spec.paths or {}
+    roots = (paths.get("source_root"), paths.get("destination_root"))
+    if not all(isinstance(r, str) and r != "" for r in roots):
+        raise ValueError("sync spec without source_root/destination_root -- refusing to build an uncontained sync")
+    return roots
 
 
 def _rm_managed_root(spec) -> str:
@@ -558,7 +614,9 @@ def _preflight_script(spec, *, role=None):
     0건 Succeeded 로 끝난다(2026-09-30 d139 실증에서 잡음 -- 그 판에서 한때 건너뛰었다).
     실행 모드("user"/"root")는 경로와 같이 positional 로 넘긴다(셸 인젝션 차단 관례).
 
-    rm(2026-10-21 리뷰): 부모 쓰기 다음에 대상 봉쇄(_RM_CONTAINMENT_CHECK -- 상위 경로에 심링크 성분 없음)를 본다.
+    rm(2026-10-21 리뷰, 2026-10-27 끝 성분 포함): 부모 쓰기 다음에 대상 봉쇄(_RM_CONTAINMENT_CHECK -- managed_root 아래 경로
+    성분 어디에도, 대상 자신에도 심링크 없음, _PATH_CONTAINED_FN)를 본다. sync 는 각 쪽 첫 검사로 같은 봉쇄를 본다
+    (source_path_redirected·destination_path_redirected).
     root 든 아니든, 단건이든 배치 자식이든, preflight·exec_preflight 모두 이 한 스크립트다(phase 무관) -- root 는 `test -w`
     가 늘 참이라 봉쇄가 유일한 검사다. 부모 쓰기가 먼저인 이유: 부모가 없으면 realpath -e 도 실패하는데, 그 경우의 사유는
     종전대로 parent_not_writable 이어야 한다(대상 오타를 「다른 곳을 가리킨다」로 말하지 않는다). managed_root 는 경로처럼
@@ -566,24 +624,29 @@ def _preflight_script(spec, *, role=None):
     ap = _abs_paths(spec)
     mode = "root" if (spec.identity or {}).get("privileged") else "user"
     if spec.operation == "sync":
+        # 경로 봉쇄(_PATH_CONTAINED_FN)가 각 쪽의 **첫** 검사다: 링크를 따라간 읽기·쓰기 검사가 먼저면 「읽을 수 없음」·「쓸 수
+        # 없음」으로 진짜 원인(다른 곳을 가리킨다)이 가려진다. 없는 경로는 봉쇄를 통과하고(가장 깊은 상위를 본다) 뒤의
+        # 종전 검사가 사유를 낸다(오타를 「다른 곳」으로 말하지 않는다).
+        src_root, dst_root = _sync_roots(spec)
         if role == "source":
-            script = ('set -e; '
-                      'test -r "$1" || { echo DMS_PREFLIGHT_REASON=source_not_readable; exit 1; }; '
+            script = ('set -e; S="$1"; SR="$2"; ' + _PATH_CONTAINED_FN + _SOURCE_CONTAINMENT_CHECK
+                      + 'test -r "$S" || { echo DMS_PREFLIGHT_REASON=source_not_readable; exit 1; }; '
                       'echo DMS_PREFLIGHT_OK')
-            return script, [ap["source"]]
+            return script, [ap["source"], src_root]
         if role == "destination":
-            script = ('set -e; D="$1"; M="$2"; ' + _DEST_TYPE_CHECK + _DEST_CHECK
-                      + 'echo DMS_PREFLIGHT_OK')
-            return script, [ap["destination"], mode]
-        script = ('set -e; D="$2"; M="$3"; '
-                  'test -r "$1" || { echo DMS_PREFLIGHT_REASON=source_not_readable; exit 1; }; '
-                  + _DEST_TYPE_CHECK + _DEST_CHECK + 'echo DMS_PREFLIGHT_OK')
-        return script, [ap["source"], ap["destination"], mode]
+            script = ('set -e; D="$1"; M="$2"; DR="$3"; ' + _PATH_CONTAINED_FN + _DEST_CONTAINMENT_CHECK
+                      + _DEST_TYPE_CHECK + _DEST_CHECK + 'echo DMS_PREFLIGHT_OK')
+            return script, [ap["destination"], mode, dst_root]
+        script = ('set -e; S="$1"; D="$2"; M="$3"; SR="$4"; DR="$5"; ' + _PATH_CONTAINED_FN
+                  + _SOURCE_CONTAINMENT_CHECK
+                  + 'test -r "$S" || { echo DMS_PREFLIGHT_REASON=source_not_readable; exit 1; }; '
+                  + _DEST_CONTAINMENT_CHECK + _DEST_TYPE_CHECK + _DEST_CHECK + 'echo DMS_PREFLIGHT_OK')
+        return script, [ap["source"], ap["destination"], mode, src_root, dst_root]
     if spec.operation == "rm":
         script = ('set -e; R="$2"; '
                   'parent=$(dirname "$1"); '
                   'test -w "$parent" || { echo DMS_PREFLIGHT_REASON=parent_not_writable; exit 1; }; '
-                  + _RM_CONTAINMENT_CHECK + 'echo DMS_PREFLIGHT_OK')
+                  + _PATH_CONTAINED_FN + _RM_CONTAINMENT_CHECK + 'echo DMS_PREFLIGHT_OK')
         return script, [ap["target"], _rm_managed_root(spec)]
     script = ('set -e; '
               'test -r "$1" || { echo DMS_PREFLIGHT_REASON=target_not_readable; exit 1; }; '
@@ -608,7 +671,7 @@ PREFLIGHT_REASONS = frozenset({
     "destination_not_owned", "parent_not_writable",
     "target_not_readable", "artifact_base_not_traversable",
     "identity_groups_not_applied", "artifact_base_group_writable",
-    "target_path_redirected"})
+    "target_path_redirected", "source_path_redirected", "destination_path_redirected"})
 
 
 # 실행·미리보기(mpirun 을 돌리는 launcher) 실패의 사유 마커(2026-10-02). 러너(dms_job_runner.runner)가 워커
@@ -624,7 +687,10 @@ PREFLIGHT_REASONS = frozenset({
 # 봐서 찍는다(runner.rm_target_redirected, env DMS_JR_RM_ROOT -- _launcher_env). exec_preflight 파드와 vcjob 은 다른
 # 파드라 그 사이(Volcano 대기 포함) 바뀐 심링크를 여기서 잡는다 -- 잡 이미지가 바뀐다.
 EXECUTION_REASON_MARKER = "DMS_EXEC_REASON="
-EXECUTION_REASONS = frozenset({"workers_unreachable", "identity_groups_not_applied", "target_path_redirected"})
+# 2026-10-27 sync 경로 봉쇄: source_path_redirected·destination_path_redirected 는 **워커 셸**이 sshd 앞에서 preflight 와
+# 같은 셸 함수로 다시 봐서 찍는다(_worker_command_script -- identity_groups_not_applied 와 같은 승격 경로).
+EXECUTION_REASONS = frozenset({"workers_unreachable", "identity_groups_not_applied", "target_path_redirected",
+                               "source_path_redirected", "destination_path_redirected"})
 
 
 def _parse_marker(entries, marker, allowed):
@@ -744,14 +810,15 @@ def _build_nsync_job(spec, *, job_image, namespace, volumes, role_volumes):
             "metadata": _worker_task_metadata(spec, "source-worker"),
             "spec": {"restartPolicy": "Never",
                 "affinity": _worker_affinity(spec, "source-worker", src_nodes),
-                "containers": [_worker_container("source-worker", job_image, spec, src_volumes)],
+                "containers": [_worker_container("source-worker", job_image, spec, src_volumes, role="source")],
                 "volumes": _pod_volumes(src_volumes)}}}
     dst_worker = {"name": "destination-worker", "replicas": len(dst_nodes),
         "template": {
             "metadata": _worker_task_metadata(spec, "destination-worker"),
             "spec": {"restartPolicy": "Never",
                 "affinity": _worker_affinity(spec, "destination-worker", dst_nodes),
-                "containers": [_worker_container("destination-worker", job_image, spec, dst_volumes)],
+                "containers": [_worker_container("destination-worker", job_image, spec, dst_volumes,
+                                                 role="destination")],
                 "volumes": _pod_volumes(dst_volumes)}}}
     job_spec = {"schedulerName": "volcano", "queue": spec.queue,
                 "minAvailable": len(src_nodes) + len(dst_nodes) + 1,

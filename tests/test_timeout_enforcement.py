@@ -135,7 +135,7 @@ def _nsync_spec(**kw):
                  candidates={"source": ["dms-w1"], "destination": ["dms-w4"]},
                  paths={"source": "/cephfs-third/a", "source_storage": "cephfs-third",
                         "destination": "/cephfs-secondary/b",
-                        "destination_storage": "cephfs-secondary"}, **kw)
+                        "destination_storage": "cephfs-secondary", "source_root": "/", "destination_root": "/"}, **kw)
 
 
 def _deadlines(manifest):
@@ -333,7 +333,7 @@ def test_poll_composite_nsync_preflight_deadline_exceeded_propagates_timed_out()
                    identity={"uid": 10001, "gid": 10000, "username": "alice"},
                    paths={"source": "/cephfs-third/a", "source_storage": "cephfs-third",
                           "destination": "/cephfs-secondary/b",
-                          "destination_storage": "cephfs-secondary"},
+                          "destination_storage": "cephfs-secondary", "source_root": "/", "destination_root": "/"},
                    options={}, candidates={"source": ["dms-w1"], "destination": ["dms-w4"]},
                    process_count=8, queue="dms-data", priority_class="dms-mid",
                    artifact_base="file:///cephfs/dms/artifacts")

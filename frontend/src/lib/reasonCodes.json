@@ -34,6 +34,8 @@
   "artifact_base_not_traversable",
   "parent_not_writable",
   "target_path_redirected",
+  "source_path_redirected",
+  "destination_path_redirected",
   "target_not_readable",
   "preflight_submit_failed",
   "execution_submit_failed",

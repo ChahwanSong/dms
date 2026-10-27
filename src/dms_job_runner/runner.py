@@ -21,8 +21,8 @@ WORKER_READY_TIMEOUT_SECONDS = 300
 # dms_job_runner 는 dms 를 import 하지 않는 독립 패키지라 중복 정의, 계약 테스트가 둘을 잇는다).
 EXECUTION_REASON_MARKER = "DMS_EXEC_REASON="
 WORKERS_UNREACHABLE = "workers_unreachable"
-# rm 대상 봉쇄 재확인(2026-10-21 리뷰, rm_target_redirected) -- preflight 마커와 같은 코드(execution_manifests 의
-# PREFLIGHT_REASONS·EXECUTION_REASONS 양쪽, 계약 테스트가 잇는다).
+# rm 대상 봉쇄 재확인(2026-10-21 리뷰, 2026-10-27 끝 성분 포함 -- rm_target_redirected) -- preflight 마커와 같은 코드
+# (execution_manifests 의 PREFLIGHT_REASONS·EXECUTION_REASONS 양쪽, 계약 테스트가 잇는다).
 TARGET_PATH_REDIRECTED = "target_path_redirected"
 
 # 슬라이스 24 §2.1 층3: 러너가 exec 할 수 있는 도구의 최종 allowlist.
@@ -39,34 +39,52 @@ def _realpath_strict(path):
     return os.path.realpath(path, strict=True)
 
 
-def rm_target_redirected(target, root, *, realpath=_realpath_strict) -> bool:
-    """drm 대상의 상위 경로가 managed_root 아래 **심링크 성분 없이** 그 자리에 있는가의 반대(True = 막는다).
+def path_redirected(path, root, *, realpath=_realpath_strict, lexists=os.path.lexists) -> bool:
+    """path 가 managed_root(root) 아래 **어느 성분도**(마지막 포함) 심링크 없이 그 자리에 있는가의 반대(True = 막는다).
 
-    execution_manifests._RM_CONTAINMENT_CHECK(preflight·exec_preflight 셸)와 **같은 규칙**이다 -- 둘이 갈라지면 한쪽만
-    통과하는 경로가 생긴다(tests/test_rm_containment_sh.py 가 같은 트리로 두 판정을 대조한다). 왜 러너도 보나: exec_preflight
-    파드와 실행 vcjob 은 다른 파드라 그 사이(Volcano 대기는 길 수 있다)에 사용자가 상위 디렉터리를 심링크로 바꾸면 root drm
-    이 다른 트리를 지운다. 여기는 mpirun 바로 앞이라 창이 「워커 기동 + drm 의 걷기 시작」까지로 줄어든다(완전히 닫히지는
-    않는다 -- BACKLOG §4). target 은 drm argv 마지막(tool_argv), root 는 env DMS_JR_RM_ROOT(stepper 가 target 을 조합한 값).
-    마지막 성분은 심링크여도 된다(drm 은 링크 자체만 지운다). 실제 경로를 못 구하면(없는 상위·고리) 막는다(fail-closed)."""
-    if not isinstance(target, str) or not isinstance(root, str) or root == "":
+    execution_manifests._PATH_CONTAINED_FN(preflight·exec_preflight·sync 워커 셸)의 Python 미러 -- 둘이 갈라지면 한쪽만
+    통과하는 경로가 생긴다(tests/test_rm_containment_sh.py·test_sync_containment_sh.py 가 같은 트리로 두 판정을 대조한다).
+    판정 = 「실제 위치 == realpath(root) + 글자 그대로의 상대경로」. 아직 없는 끝부분은 존재하는 가장 깊은 상위로 본다(lstat
+    기준 -- 끊긴 링크도 「있음」). root 자신·그 위의 심링크는 괜찮다. 끝이 「/」「.」「..」, 「//」「/./」「/../」가 낀 경로,
+    root 밖 경로, 실제 경로를 못 구하는 경우(고리 등)는 막는다(fail-closed)."""
+    if not isinstance(path, str) or not isinstance(root, str) or root == "":
         return True
-    if target.endswith("/") or target.endswith("/.") or target.endswith("/..") or "/" not in target:
+    if (path.endswith("/") or path.endswith("/.") or path.endswith("/..")
+            or "//" in path or "/./" in path or "/../" in path):
         return True
-    parent = os.path.dirname(target)
-    base = root[:-1] if root.endswith("/") else root      # 셸 "${R%/}" 와 같다(끝 슬래시 하나만)
-    if parent in (root, base):
-        rel = ""
-    elif parent.startswith(base + "/"):
-        rel = parent[len(base) + 1:]
-    else:
+    base = root[:-1] if root.endswith("/") else root      # 셸 "${dms_r%/}" 와 같다(끝 슬래시 하나만)
+    if not (path == base or path.startswith(base + "/")):
         return True
     try:
         real_root = realpath(root)
-        real_parent = realpath(parent)
     except (OSError, ValueError):
         return True
-    want = real_root if rel == "" else f"{real_root[:-1] if real_root.endswith('/') else real_root}/{rel}"
-    return real_parent != want
+    q = path
+    while q != base and not lexists(q):
+        q = os.path.dirname(q)
+    if q == base:
+        want = real_root
+    else:
+        want = (real_root[:-1] if real_root.endswith("/") else real_root) + "/" + q[len(base) + 1:]
+    try:
+        real_q = realpath(q)
+    except (OSError, ValueError):
+        return True
+    return real_q != want
+
+
+def rm_target_redirected(target, root, *, realpath=_realpath_strict) -> bool:
+    """drm 대상 봉쇄 재확인(True = 막는다): managed_root 자신은 대상이 아니고(변조 행), 나머지는 path_redirected --
+    대상 자신이 심링크여도 막는다(2026-10-27 사용자 「Rm도 똑같이 dms에서 거부하도록」, 예전엔 drm 이 링크만 지운다고
+    통과시켰다). execution_manifests._RM_CONTAINMENT_CHECK 와 같은 규칙. 왜 러너도 보나: exec_preflight 파드와 실행 vcjob 은
+    다른 파드라 그 사이(Volcano 대기는 길 수 있다)에 사용자가 경로를 심링크로 바꾸면 root drm 이 다른 트리를 지운다. 여기는
+    mpirun 바로 앞이라 창이 「워커 기동 + drm 의 걷기 시작」까지로 줄어든다(완전히 닫히지는 않는다 -- BACKLOG ④).
+    target 은 drm argv 마지막(tool_argv), root 는 env DMS_JR_RM_ROOT(stepper 가 target 을 조합한 값)."""
+    if not isinstance(target, str) or not isinstance(root, str) or root == "":
+        return True
+    if target in (root, root[:-1] if root.endswith("/") else root):
+        return True
+    return path_redirected(target, root, realpath=realpath)
 
 
 def run_job(env, *, run, write_text, read_text, sleep, wait_hostfile,
