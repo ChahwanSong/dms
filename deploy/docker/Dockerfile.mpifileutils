@@ -37,7 +37,12 @@ ARG MPIFILEUTILS_REPO=https://github.com/chahwansong/mpifileutils.git
 # _GNU_SOURCE 가 없어 O_NOATIME 미정의였다 — 소스 atime 보존, 타인 소유 파일은 EPERM 뒤 O_NOATIME 없이 다시 열어 복사),
 # --direct 는 nsync 에서 받기만 함(정렬 I/O 없음) · 43ba468 dsync(공통 mfu_flist_copy.c)도 O_NOATIME EPERM 이면 다시 열어 복사
 # (전엔 비 root 의 타인 소유 파일이 「Failed to open input file」). 출력 형식은 Options 줄 끝 open-noatime= 추가뿐.
-ARG MPIFILEUTILS_REF=461bb734d40d42287dcc350f6e1bfba84ec50889
+# 7a3189c(2026-10-27, 같은 브랜치 — 461bb73 다음 넷, README 커밋 포함): e418ca7 dsync --contents --open-noatime 비교 열기도
+# EPERM 이면 O_NOATIME 없이 다시 연다 · 998608b drm·dsync --delete 가 지우지 못한 항목이 있으면 0 이 아닌 코드로 끝나고
+# 「Removed N items」 는 지운 수(전엔 시도 수·rc 0), 「Remove failed for F of T items」 줄 추가 · dsync 목적지 부모 쓰기 불가는
+# rc 1(전엔 rc 0) · dsync 가 소스 특수 파일에 메타데이터를 시도하지 않고 「Skipped N special file(s)」 한 줄 · 6172405 nsync
+# 「Completed actions:」 줄(실행만, 실제로 반영된 종류별 수 + copied-bytes). DMS 러너 summary v2 가 이 줄들을 읽는다.
+ARG MPIFILEUTILS_REF=7a3189cba75c93b4e66da722235f370790a2f88a
 ARG LWGRP_REF=v1.0.6
 ARG DTCMP_REF=v1.1.5
 ARG LIBCIRCLE_REF=v0.3
