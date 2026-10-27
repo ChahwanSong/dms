@@ -217,7 +217,9 @@ class _Rec:
 
         class R:
             returncode = 0
-            stdout = "10.0.0.1 w\n" if command[0] == "getent" else "Removed 1 items\n"
+            # drm 요약은 포크 7a3189c 의 실제 모양(MFU 접두사 + "Removed N items in") -- 러너 파서가 줄 머리에 맞춘다(d192).
+            stdout = ("10.0.0.1 w\n" if command[0] == "getent"
+                      else "[2026-10-27T13:52:58] Removed 1 items in 0.001 seconds (1000.000 items/sec)\n")
             stderr = ""
         return R()
 
@@ -251,6 +253,9 @@ def test_runner_runs_drm_for_a_contained_target(tree):
     root = str(tree / "m")
     rc, rec = _run_drm(_drm_env(f"{root}/users/alice/data/old", str(tree / "art"), DMS_JR_RM_ROOT=root))
     assert rc == 0 and any("mpirun" in cmd for cmd in rec.ran)
+    # 통과한 경로는 정상 경로 summary(v2 -- 핵심 3키 + 상세)다. 거부 경로(위)는 3키 그대로다.
+    summary = json.loads(rec.writes[f"{tree / 'art'}/summary.json"])
+    assert (summary["files"], summary["removed"], summary["detail_version"]) == (1, 1, 2)
 
 
 def test_runner_without_the_env_key_keeps_the_old_behaviour(tree):

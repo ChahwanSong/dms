@@ -232,7 +232,12 @@ class BatchesRepository:
         - job_state: 잡 상태(ConfirmPending = 확인을 기다리는 미리보기 완료 항목). 잡 없음 = NULL.
         - preview_summary: 미리보기 summary 사본(files/bytes/returncode) -- 운영자가 무엇을 확인하는지 보여 준다.
           NULL = 모름(미리보기 전·구형 행). 값 안의 null(예: dsync dryrun 의 bytes)도 그대로 둔다(null≠0).
-        - preview_expires_at: 이 시각이 지나면 그 항목은 실행되지 않고 거부된다(stepper expire_previews)."""
+        - preview_expires_at: 이 시각이 지나면 그 항목은 실행되지 않고 거부된다(stepper expire_previews).
+        - job_tool(2026-10-27 d192): 자식 잡의 실제 도구(dsync/nsync/drm/dscan, 계획 전 NULL) -- 미리보기 수의 뜻이 도구마다
+          달라(nsync 변경 예정 · dsync 소스 전체 · drm 지울 대상) 확인 합계·항목 라벨이 도구로 가른다(batch_orchestrator
+          .preview_files 의 files_by_tool 도). preview_summary.tool 은 v2 러너의 미리보기에만 있다 -- 옛 미리보기도 가르려면 이
+          열이고, 둘이 어긋나면 이 열이 권위다(batch_orchestrator._preview_tool·포탈 toolSummary.summaryTool 같은 순서). 다른
+          잡 조인 열과 같은 「최신 잡 하나」라 한 항목의 수와 도구가 서로 다른 잡에서 오지 않는다."""
         rows = self._db.query(
             """SELECT bi.*, r.state AS request_state,
                       (SELECT d.files_count FROM data_jobs d
@@ -251,6 +256,10 @@ class BatchesRepository:
                         WHERE d.request_id = bi.request_id
                         ORDER BY d.created_at DESC, d.job_id DESC LIMIT 1)
                           AS preview_expires_at,
+                      (SELECT d.tool FROM data_jobs d
+                        WHERE d.request_id = bi.request_id
+                        ORDER BY d.created_at DESC, d.job_id DESC LIMIT 1)
+                          AS job_tool,
                       res.completed_at AS completed_at
                  FROM batch_items bi
                  LEFT JOIN requests r ON r.request_id = bi.request_id

@@ -1,19 +1,25 @@
 """parsers.py 단위 테스트. 픽스처는 테스트베드 실 잡의 캡처 출력을 그대로 고정한다
-(잡 60d24700 dsync stdout, drm stdout, dscan-report.json 실 스키마, 잡 abc0b559
-nsync stdout -- 설계 부록 A) -- 파서가 "실제 도구가 찍는 것"을 파싱함을 픽스처
-수준에서 보증한다(설계 §6)."""
+(잡 60d24700 dsync stdout, dscan-report.json 실 스키마, 잡 abc0b559 nsync stdout -- 설계 부록 A,
+포크 7a3189c 의 drm·nsync 실행 출력 -- 2026-10-27 d192) -- 파서가 "실제 도구가 찍는 것"을 파싱함을 픽스처
+수준에서 보증한다(설계 §6). 요약 줄은 MFU 접두사 "[YYYY-MM-DDTHH:MM:SS] " 에 줄 머리부터 맞춘다(d192) -- 합성
+입력도 실제 접두사를 쓴다(예전의 "[ts] " 는 앵커 밖이라 무엇을 넣어도 None 이 되어 아무것도 시험하지 않는다).
+summary v2 상세·사유는 tests/test_job_runner_tool_detail.py 가 본다."""
 import json
 
-from dms_job_runner.parsers import (parse_nsync_counts, parse_rm_counts,
-                                    parse_scan_counts, parse_sync_counts)
+from dms_job_runner.parsers import (parse_dsync_counts, parse_nsync_counts, parse_rm_counts,
+                                    parse_scan_counts, parse_sync_counts, parse_tool_detail)
+
+TS = "[2026-10-27T13:00:00] "
 
 # 실측 dsync stdout(잡 60d24700, 파싱 관련 줄 전체). 같은 stdout에 walk 단계의
 # 패딩 요약("Items     : 0"), 복사 단계 중간 요약(Items: 10 + per-file Data),
 # Copy data/Copy rate, 최종 블록(Items/Data/Rate)이 전부 공존한다 -- 파서는 이
-# 전체에서 최종 블록만 골라내야 한다(설계 §1).
+# 전체에서 최종 블록만 골라내야 한다(설계 §1). d192 부터 최종 블록은 「바로 앞 줄이 패딩 없는 Seconds: X 인 Items」라 그 줄도
+# 파싱 관련 줄이다(실제 출력의 최종 블록 머리 -- mfu_flist_copy.c 2795-2803, 값은 같은 블록 Rate 줄의 0.049 초).
 DSYNC_STDOUT = """\
 [2026-08-04T02:14:12] Walked 10 items in 0.001 seconds (15463.025 items/sec)
 [2026-08-04T02:14:12] Started   : Aug-04-2026, 02:14:12
+[2026-08-04T02:14:12] Seconds   : 0.000
 [2026-08-04T02:14:12] Items     : 0
 [2026-08-04T02:14:12] Copying items to destination
 [2026-08-04T02:14:12] Items: 10
@@ -22,6 +28,7 @@ DSYNC_STDOUT = """\
 [2026-08-04T02:14:12] Data: 50.000 B (7.000 B per file)
 [2026-08-04T02:14:12] Copy data: 50.000 B (50 bytes)
 [2026-08-04T02:14:12] Copy rate: 3.284 KiB/s (50 bytes in 0.015 seconds)
+[2026-08-04T02:14:12] Seconds: 0.049
 [2026-08-04T02:14:12] Items: 10
 [2026-08-04T02:14:12]   Directories: 3
 [2026-08-04T02:14:12]   Files: 7
@@ -31,19 +38,22 @@ DSYNC_STDOUT = """\
 [2026-08-04T02:14:12] Completed sync
 """
 
-# 실측 캡처는 중간·최종 값이 같아(10/50) "마지막 매치가 이긴다"를 증명하지 못한다.
-# 값을 달리한 합성 변형으로 순서 규칙을 고정한다(설계 §3: 마지막 매치 = 최종 블록).
+# 실측 캡처는 중간·최종 값이 같아(10/50) "최종 블록이 이긴다"를 증명하지 못한다.
+# 값을 달리한 합성 변형으로 규칙을 고정한다: 복사 계획(Items: 4 + per-file Data)·Copy data(시도 합)는 최종 블록이 아니다.
 DSYNC_STDOUT_MID_DIFFERS = """\
+[2026-08-04T02:14:12] Copying to /d
 [2026-08-04T02:14:12] Items: 4
+[2026-08-04T02:14:12] Data: 20.000 B (5.000 B per file)
 [2026-08-04T02:14:12] Copy data: 20.000 B (20 bytes)
+[2026-08-04T02:14:12] Seconds: 0.020
 [2026-08-04T02:14:12] Items: 10
 [2026-08-04T02:14:12] Data: 50.000 B (50 bytes)
 """
 
-# 실측 nsync stdout(잡 abc0b559 실행 단계, 설계 부록 A). nsync는 stock mpifileutils가
+# 실측 nsync stdout(잡 abc0b559 실행 단계, 설계 부록 A -- Completed 줄 이전 빌드). nsync는 stock mpifileutils가
 # 아니라 역할 기반(src/dst rank) 별도 도구라 "Items:"/"(N bytes)"를 전혀 찍지 않는다 --
-# 진행 줄의 actions=9는 planned 10과 어긋나므로(배치 병합) 쓰지 않고, 사람용 표기
-# copied-volume=50.000 B가 바이트의 유일한 출처다(설계 부록 A).
+# 진행 줄의 actions=9는 planned 10과 어긋나므로(배치 병합) 쓰지 않는다. 이 빌드에는 실제로 반영된 수(Completed)가
+# 없다 -- 실행 files 는 모름이고, 바이트만 진행 줄의 copied-volume=50.000 B 로 물러난다(d192).
 NSYNC_EXEC_STDOUT = """\
 [2026-08-10T01:28:39] Progress 100.0% batch 1/1 actions=9 copied-files=7 copied-volume=50.000 B recent(actions=9 files=7 volume=50.000 B, 27.35 files/s, 195.333 B/s over 0.256 s) avg(27.35 files/s, 195.333 B/s)
 [2026-08-10T01:28:39] nsync Phase 5 planner+execute complete
@@ -56,9 +66,8 @@ NSYNC_EXEC_STDOUT = """\
 [2026-08-10T01:28:39] Execution completed successfully
 """
 
-# 같은 잡의 프리뷰(dryrun) 단계. "Planned actions:" 줄은 실행과 완전히 동일하고
-# 진행 줄 어휘만 다르다(planned-actions/planned-copy-files/planned-volume) --
-# runner에 phase 분기가 없으므로 두 단계가 같은 값을 내야 한다(설계 부록 A).
+# 같은 잡의 프리뷰(dryrun) 단계. "Planned actions:" 줄은 실행과 같은 형식이고
+# 진행 줄 어휘만 다르다(planned-actions/planned-copy-files/planned-volume). 미리보기 files 는 계획 합(변경 예정)이다.
 NSYNC_PREVIEW_STDOUT = """\
 [2026-08-10T01:28:19] Progress 100.0% batch 1/1 planned-actions=10 planned-copy-files=7 planned-volume=50.000 B
 [2026-08-10T01:28:19] nsync Phase 5 planner dryrun complete
@@ -67,12 +76,25 @@ NSYNC_PREVIEW_STDOUT = """\
 [2026-08-10T01:28:19] Planned actions: copy=7 mkdir=3 symlink-update=0 meta-update=0 remove=0 skipped-dst-only=0
 """
 
-# 실측 drm stdout 요지: "Removed N items"가 "Walked N items" 줄과 혼재하고
-# bytes는 보고하지 않는다(설계 §1).
+# 실측 nsync 실행(포크 7a3189c, 2026-10-27 samples nsync_exec_items_failed 의 요약 부분): 5개 복사 실패 -- Planned 합은 28,
+# 실제로 반영된 Completed 합은 23. 실행 files 는 23 이다(포탈 괴리 [2]·[4] -- 예전엔 28 을 「복사한 파일」로 보였다).
+NSYNC_EXEC_D192_STDOUT = """\
+[2026-10-27T13:52:40] Progress 100.0% batch 1/1 actions=22 copied-files=20 copied-volume=100.000 B recent(actions=22 files=20 volume=100.000 B, 9086.60 files/s, 44.368 KiB/s over 0.002 s) avg(9086.60 files/s, 44.368 KiB/s)
+[2026-10-27T13:52:40] [0] [/release/mpifileutils/src/nsync/nsync.c:897] ERROR: Failed items: 5 (copy 5); listed below: 5
+[2026-10-27T13:52:40]   failed copy `ro/r1`: Permission denied (errno 13)
+[2026-10-27T13:52:40] Planned actions: copy=25 mkdir=2 symlink-update=0 meta-update=1 remove=0 skipped-dst-only=0
+[2026-10-27T13:52:40] Completed actions: copy=20 mkdir=2 symlink-update=0 meta-update=1 remove=0 copied-bytes=100
+[2026-10-27T13:52:40] [0] [/release/mpifileutils/src/nsync/nsync.c:9907] ERROR: Execution completed with errors: scan=0 exec=5
+"""
+
+# 실측 drm stdout(포크 7a3189c, 2026-10-27 samples drm_exec_ok): "Removed N items in S seconds (" 가 실제로 지운 수다.
+# "Removing N items"(시작 줄)·"Walked N items" 와 혼재하고 bytes 는 보고하지 않는다(설계 §1).
 DRM_STDOUT = """\
-[2026-08-04T02:31:08] Walked 1 items in 0.001 seconds (1035.197 items/sec)
-[2026-08-04T02:31:08] Removing 1 items
-[2026-08-04T02:31:08] Removed 1 items (0.482 items/sec) in 2.077 seconds
+[2026-10-27T13:52:58] Walking /tmp/smp/rm2
+[2026-10-27T13:52:58] Walked 3 items in 0.001 secs (4580.733 items/sec) ...
+[2026-10-27T13:52:58] Walked 3 items in 0.001 seconds (3221.099 items/sec)
+[2026-10-27T13:52:58] Removing 3 items
+[2026-10-27T13:52:58] Removed 3 items in 0.001 seconds (4094.183 items/sec)
 """
 
 # 실측 dscan-report.json 스키마(dscan 1b93d54 write_report): top_k·oldest 제거,
@@ -115,28 +137,76 @@ def test_sync_last_match_wins_over_mid_copy_summary():
     assert parse_sync_counts(DSYNC_STDOUT_MID_DIFFERS) == (10, 50)
 
 
+def test_sync_copy_plan_alone_is_not_the_final_block():
+    # d192 리뷰(contract-31·portal-jobs-12): 복사 중에 중단·강제 종료되면 최종 블록이 없다 -- 남은 "Items: N" 은 복사 **계획**
+    # 이고 "Copy data" 는 시도 합이다. 예전 「마지막 매치」 규칙은 (4, 20) 을 「반영」으로 냈다.
+    plan_only = DSYNC_STDOUT_MID_DIFFERS.split("[2026-08-04T02:14:12] Seconds: ")[0]
+    assert parse_sync_counts(plan_only) == (None, None)
+    assert parse_dsync_counts(plan_only) == (None, None)
+    # 앞 줄이 Seconds 가 아닌 Items 는 최종 블록이 아니다(패딩된 walk 비교 블록 "Seconds   :" 도 아니다).
+    assert parse_sync_counts(f"{TS}Items: 7\n{TS}Data: 7.000 B (7 bytes)\n") == (None, None)
+    assert parse_sync_counts(f"{TS}Seconds   : 0.000\n{TS}Items: 7\n") == (None, None)
+    # 중단(aborted)이면 최종 블록이 있어도 모름(d192 D6)
+    assert parse_dsync_counts(DSYNC_STDOUT, aborted=True) == (None, None)
+
+
 def test_sync_padded_walk_items_is_not_matched():
     # walk 단계 "Items     : 0"(콜론 앞 패딩)은 "Items: " 형태가 아니라 자연 배제 --
     # 이것만 있으면 최종 요약이 없는 것이므로 None(설계 §3)
-    assert parse_sync_counts("[ts] Items     : 0\n") == (None, None)
+    assert parse_sync_counts(f"{TS}Seconds   : 0.000\n{TS}Items     : 0\n") == (None, None)
+    assert parse_sync_counts(f"{TS}Seconds: 0.001\n{TS}Items: 0\n") == (0, None)   # 대조: 최종 블록 모양은 읽힌다(0 은 정상값)
 
 
 def test_sync_bytes_in_rate_line_is_not_matched():
     # "(50 bytes in 0.015 seconds)"는 "bytes" 뒤에 닫는 괄호가 바로 오지 않아
     # 배제된다 -- 전송률이 총량으로 새면 안 된다(설계 §3)
-    out = "[ts] Copy rate: 3.284 KiB/s (50 bytes in 0.015 seconds)\n"
+    out = f"{TS}Copy rate: 3.284 KiB/s (50 bytes in 0.015 seconds)\n"
     assert parse_sync_counts(out) == (None, None)
 
 
 def test_sync_bytes_embedded_mid_line_is_not_matched():
-    # 요약 줄은 항상 "(N bytes)"로 끝난다 -- 줄 중간에 박힌 같은 모양(예: 경로
-    # 이름에 든 "(999 bytes)")이 총량 행세를 하면 안 된다. Items 쪽과 같은 $ 앵커.
-    assert parse_sync_counts("[ts] copying /backup (999 bytes)/f.bin to x\n") == (None, None)
+    # 요약 줄은 "Data:"/"Copy data:" 로 시작해 "(N bytes)"로 끝난다 -- 다른 줄 끝에 박힌 같은 모양(예: 경로
+    # 이름에 든 "(999 bytes)")이 총량 행세를 하면 안 된다.
+    assert parse_sync_counts(f"{TS}copying /backup (999 bytes)/f.bin to x\n") == (None, None)
+    assert parse_sync_counts(f"{TS}Copying to /backup (999 bytes)\n") == (None, None)
 
 
 def test_sync_items_with_trailing_text_is_not_matched():
     # "Items: 10 (done)"처럼 숫자 뒤에 내용이 붙으면 요약 줄이 아니다 -- $ 앵커가 배제
-    assert parse_sync_counts("[ts] Items: 10 (done)\n") == (None, None)
+    assert parse_sync_counts(f"{TS}Seconds: 0.1\n{TS}Items: 10 (done)\n") == (None, None)
+    assert parse_sync_counts(f"{TS}Seconds: 0.1\n{TS}Items: 10\n") == (10, None)       # 대조
+
+
+def test_sync_summary_must_start_at_the_line_head():
+    # d192: 줄 머리 앵커. 경로 텍스트 안의 "Items: 999" 줄 끝 모양(dsync 오류 줄은 경로를 날것으로 찍는다)은 요약이 아니다.
+    out = (f"{TS}[0] [mfu_flist_copy.c:2092] ERROR: Failed to open input file `/a Items: 999\n"
+           f"{TS}Walking /b/Data: 1 B (999 bytes)\n")
+    assert parse_sync_counts(out) == (None, None)
+
+
+# ---- parse_dsync_counts (2026-10-27 d192) ----
+
+def test_dsync_execution_files_subtract_failed_copies():
+    # 최종 Items 는 inode 를 만든 항목 -- 데이터를 열지 못한 파일도 들어 있다. 실제로 만든 항목 = Items − 「Failed to copy」 줄 수.
+    out = (f"{TS}[0] [mfu_flist_copy.c:2092] ERROR: Failed to open input file `/s/no' (errno=13 Permission denied)\n"
+           f"{TS}[0] [mfu_flist_copy.c:2256] ERROR: Failed to copy `/s/no' to `/d/no'\n"
+           f"{TS}Seconds: 0.010\n{TS}Items: 2\n{TS}Data: 3.000 B (3 bytes)\n")
+    assert parse_dsync_counts(out) == (1, 3)
+    assert parse_sync_counts(out) == (2, 3)                            # 원래 Items 는 그대로(차감 전)
+    assert parse_dsync_counts(DSYNC_STDOUT) == (10, 50)                # 실패가 없으면 같다
+    # 바닥 0: 실패 줄이 Items 보다 많아도(위조 등) 음수가 되지 않는다
+    assert parse_dsync_counts(out.replace(f"{TS}Items: 2\n", f"{TS}Items: 0\n")) == (0, 3)
+    assert parse_dsync_counts("") == (None, None)
+    # mknod 부터 실패한 파일은 Items 에 없다 -- 그 「Failed to copy」 는 빼지 않는다(d192 리뷰 runner-6, 두 번 빼기).
+    mknod = (f"{TS}[0] [mfu_flist_copy.c:1273] ERROR: File `/d/no' mknod() failed (errno=13 Permission denied)\n"
+             + out.replace(f"{TS}Items: 2\n", f"{TS}Items: 1\n"))
+    assert parse_dsync_counts(mknod) == (1, 3)
+    # 날 경로에 "' to `" 가 들어 있어도 목적지를 맞춘다(가능한 분할 전부)
+    odd = mknod.replace("/d/no", "/d/n' to `o").replace("/s/no", "/s/n' to `o")
+    assert parse_dsync_counts(odd) == (1, 3)
+    # 최종 블록 **뒤**의 「Failed to copy」(블록 뒤 날 경로에 심은 줄)는 그 블록의 Items 에 들 수 없다
+    late = out + f"{TS}[0] [mfu_flist_copy.c:2256] ERROR: Failed to copy `/s/x' to `/d/x'\n"
+    assert parse_dsync_counts(late) == (1, 3)
 
 
 def test_sync_empty_and_irrelevant_stdout():
@@ -147,83 +217,120 @@ def test_sync_empty_and_irrelevant_stdout():
 
 # ---- parse_nsync_counts ----
 
-def test_nsync_real_execution_capture_items_and_bytes():
-    # "Planned actions:" 합계 copy=7+mkdir=3(+0들) = 10, copied-volume=50.000 B = 50 --
-    # 같은 트리를 dsync로 돌린 캡처의 (10, 50)과 정확히 일치한다(설계 부록 A)
-    assert parse_nsync_counts(NSYNC_EXEC_STDOUT) == (10, 50)
+def test_nsync_execution_files_are_what_took_effect():
+    # d192: 실행 files = Completed 합(20+2+0+1+0 = 23), bytes = Completed copied-bytes. Planned 합(28)이 아니다 --
+    # 예전 docstring 의 「Planned 합 = 같은 트리의 dsync Items」는 틀렸다(포탈 괴리 [20]).
+    assert parse_nsync_counts(NSYNC_EXEC_D192_STDOUT) == (23, 100)
+    assert parse_nsync_counts(NSYNC_EXEC_D192_STDOUT, dryrun=True)[0] == 28     # 같은 출력의 계획 합
 
 
-def test_nsync_preview_capture_matches_execution():
-    # runner에는 phase 분기가 없다(설계 §3) -- 프리뷰도 같은 파서를 타므로
-    # dryrun 출력에서 같은 값이 나와야 한다. 어휘가 다른 진행 줄
-    # (planned-volume=)도 바이트 출처로 인정된다.
-    assert parse_nsync_counts(NSYNC_PREVIEW_STDOUT) == (10, 50)
+def test_nsync_execution_without_completed_line_is_unknown():
+    # Completed 줄 이전 빌드의 실측: 실제로 반영된 수를 알 수 없다 -- 계획 합(10)을 지어내지 않는다. 바이트는 진행 줄로 물러난다.
+    assert parse_nsync_counts(NSYNC_EXEC_STDOUT) == (None, 50)
+
+
+def test_nsync_preview_counts_the_planned_changes():
+    # 미리보기 files = Planned 합(변경 예정 -- 타입 교체는 remove+copy 두 번, 삭제·속성 갱신 포함, 특수 파일 제외).
+    # 바이트는 planned-volume=.
+    assert parse_nsync_counts(NSYNC_PREVIEW_STDOUT, dryrun=True) == (10, 50)
+    # 실행 파서로 읽으면 미리보기 출력에는 반영된 것이 없다 -- 모름
+    assert parse_nsync_counts(NSYNC_PREVIEW_STDOUT) == (None, None)
 
 
 def test_nsync_skipped_dst_only_is_excluded_from_items():
     # skipped-dst-only는 "건드리지 않은 항목"이라 처리량이 아니다(설계 부록 A).
     # 포함하면 2가 아니라 101이 나온다 -- 값을 크게 벌려 배제를 확실히 판별한다.
-    out = ("[ts] Planned actions: copy=2 mkdir=0 symlink-update=0 "
+    out = (f"{TS}Planned actions: copy=2 mkdir=0 symlink-update=0 "
            "meta-update=0 remove=0 skipped-dst-only=99\n")
-    assert parse_nsync_counts(out)[0] == 2
+    assert parse_nsync_counts(out, dryrun=True)[0] == 2
+
+
+def test_nsync_copied_bytes_is_not_an_action():
+    # Completed 줄의 copied-bytes 는 바이트다 -- 항목 합에 섞이면 1 GiB 복사가 「10억 개 반영」이 된다.
+    out = f"{TS}Completed actions: copy=2 mkdir=1 symlink-update=0 meta-update=0 remove=0 copied-bytes=1073741824\n"
+    assert parse_nsync_counts(out) == (3, 1073741824)
 
 
 def test_nsync_unknown_future_action_key_is_counted():
     # "이름=정수 쌍을 전부 합하되 skip 키만 뺀다"이므로 nsync가 새 액션 종류를
     # 추가해도 파서 수정 없이 따라간다(설계 부록 A) -- 화이트리스트였다면 1이 된다
-    assert parse_nsync_counts("[ts] Planned actions: copy=1 newaction=4 skipped-dst-only=0\n")[0] == 5
+    assert parse_nsync_counts(f"{TS}Planned actions: copy=1 newaction=4 skipped-dst-only=0\n", dryrun=True)[0] == 5
+    assert parse_nsync_counts(f"{TS}Completed actions: copy=1 newaction=4 copied-bytes=0\n")[0] == 5
 
 
 def test_nsync_volume_unit_conversion_is_rounded():
-    # nsync는 원시 정수 바이트를 안 찍고 소수 3자리 사람용 표기만 낸다 --
+    # nsync는 진행 줄에 원시 정수 바이트를 안 찍고 소수 3자리 사람용 표기만 낸다 --
     # 1024 기반 환산 후 반올림(절사가 아니다): 1.234*1024^3 = 1324997410.816
-    out = "[ts] Progress 100.0% batch 1/1 actions=1 copied-volume=1.234 GiB\n"
+    out = f"{TS}Progress 100.0% batch 1/1 actions=1 copied-volume=1.234 GiB\n"
     assert parse_nsync_counts(out)[1] == 1324997411
 
 
 def test_nsync_unknown_volume_unit_is_none_not_earlier_match():
     # 마지막 볼륨 표기의 단위를 모르면 그 값이 정답 후보였던 것이므로 None이다 --
     # 이전(오래된) 매치로 조용히 물러나면 총량이 과소 보고된다
-    out = ("[ts] copied-volume=50.000 B\n"
-           "[ts] copied-volume=7.000 PiB\n")
+    out = (f"{TS}Progress 50.0% batch 1/2 actions=1 copied-volume=50.000 B\n"
+           f"{TS}Progress 100.0% batch 2/2 actions=1 copied-volume=7.000 PiB\n")
     assert parse_nsync_counts(out)[1] is None
+
+
+def test_nsync_volume_must_be_on_a_progress_line():
+    # d192 앵커: 진행 줄이 아닌 곳의 같은 표기는 바이트 출처가 아니다.
+    assert parse_nsync_counts(f"{TS}Requested target: /x copied-volume=9.000 GiB\n") == (None, None)
 
 
 def test_nsync_last_match_wins_for_items_and_bytes():
     # 실측 캡처는 진행/최종 값이 같아(10/50) 순서 규칙을 증명하지 못한다 --
     # 값을 달리한 합성 변형으로 "마지막 매치가 최종이다"를 고정한다(설계 §3)
-    out = ("[ts] Planned actions: copy=1 mkdir=1 skipped-dst-only=0\n"
-           "[ts] planned-volume=1.000 KiB\n"
-           "[ts] Planned actions: copy=7 mkdir=3 skipped-dst-only=0\n"
-           "[ts] copied-volume=2.000 KiB\n")
-    assert parse_nsync_counts(out) == (10, 2048)
+    preview = (f"{TS}Planned actions: copy=1 mkdir=1 skipped-dst-only=0\n"
+               f"{TS}Progress 50.0% batch 1/2 planned-volume=1.000 KiB\n"
+               f"{TS}Planned actions: copy=7 mkdir=3 skipped-dst-only=0\n"
+               f"{TS}Progress 100.0% batch 2/2 planned-volume=2.000 KiB\n")
+    assert parse_nsync_counts(preview, dryrun=True) == (10, 2048)
+    execution = (f"{TS}Completed actions: copy=1 mkdir=0 copied-bytes=5\n"
+                 f"{TS}Completed actions: copy=4 mkdir=2 copied-bytes=70\n")
+    assert parse_nsync_counts(execution) == (6, 70)
 
 
 def test_nsync_empty_and_irrelevant_stdout():
     # 조기 실패 등으로 요약이 없으면 값만 null(설계 §4 fail-soft)
     assert parse_nsync_counts("") == (None, None)
-    assert parse_nsync_counts("[ts] Execution completed successfully\n") == (None, None)
+    assert parse_nsync_counts(f"{TS}Execution completed successfully\n") == (None, None)
     # dsync 출력을 잘못 넣어도 nsync 형식이 아니므로 조용히 null이다
     assert parse_nsync_counts(DSYNC_STDOUT) == (None, None)
+    assert parse_nsync_counts(DSYNC_STDOUT, dryrun=True) == (None, None)
 
 
 # ---- parse_rm_counts ----
 
 def test_rm_real_capture_removed_items_bytes_always_none():
-    # "Removing 1 items"(진행 줄)와 "Walked 1 items"는 배제, "Removed 1 items"만
-    assert parse_rm_counts(DRM_STDOUT) == (1, None)
+    # "Removing 3 items"(시작 줄)와 "Walked 3 items"는 배제, "Removed 3 items in"만
+    assert parse_rm_counts(DRM_STDOUT) == (3, None)
 
 
 def test_rm_last_match_wins():
-    out = "Removed 3 items\nRemoved 7 items in 0.1 seconds\n"
+    out = (f"{TS}Removed 3 items in 0.1 seconds (30.0 items/sec)\n"
+           f"{TS}Removed 7 items in 0.1 seconds (70.0 items/sec)\n")
     assert parse_rm_counts(out) == (7, None)
 
 
 def test_rm_progress_line_alone_is_not_matched():
-    # "Removing N items"(진행 줄)만 있으면 완료 요약이 없는 것 -- 배제되어야 한다.
-    # DRM_STDOUT은 진행/완료 값이 같아(1/1) 이 배제를 증명 못하므로 값이 다른
-    # 단독 진행 줄로 고정한다(sync의 MID_DIFFERS와 같은 이유).
-    assert parse_rm_counts("[ts] Removing 100 items\n") == (None, None)
+    # "Removing N items"(시작 줄)·"Removed N items (x%) in ..."(진행 줄)만 있으면 완료 요약이 없는 것 -- 배제되어야 한다.
+    # DRM_STDOUT은 진행/완료 값이 같아(3/3) 이 배제를 증명 못하므로 값이 다른 단독 줄로 고정한다.
+    assert parse_rm_counts(f"{TS}Removing 100 items\n") == (None, None)
+    progress = f"{TS}Removed 50 items (50.00%) in 1.000 secs (50.000 items/sec) 1 secs remaining ...\n"
+    assert parse_rm_counts(progress) == (None, None)
+    # 줄 머리 앵커(d192): 접두사 없는 줄·줄 한가운데는 요약이 아니다
+    assert parse_rm_counts("Removed 7 items in 0.1 seconds (1.0 items/sec)\n") == (None, None)
+
+
+def test_rm_summary_counts_successes_not_attempts():
+    # 포크 7a3189c: 남은 항목이 있으면 "Removed" 는 실제로 지운 수이고 실패는 다음 줄에 따로(실측 drm_exec_partial 요약).
+    out = (f"{TS}Removing 9 items\n"
+           f"{TS}Removed 4 items in 0.001 seconds (3975.621 items/sec)\n"
+           f"{TS}[0] [/release/mpifileutils/src/common/mfu_flist_remove.c:761] ERROR: Remove failed for 5 of 9 items\n")
+    assert parse_rm_counts(out) == (4, None)
+    detail = parse_tool_detail("drm", out, "", False)
+    assert (detail["removed"], detail["remove_failed"]) == (4, 5)
 
 
 def test_rm_empty_and_walked_only():
@@ -410,8 +517,24 @@ def test_parsers_accept_none_stdout():
     # subprocess 캡처가 어긋난 병적 경로에서 파서가 TypeError 로 잡을 죽이면
     # 계약 위반이고, 그 예외는 stepper _finalize 앞이라 잡이 Executing 에 박힌다.
     assert parse_sync_counts(None) == (None, None)
+    assert parse_dsync_counts(None) == (None, None)
     assert parse_nsync_counts(None) == (None, None)
+    assert parse_nsync_counts(None, dryrun=True) == (None, None)
     assert parse_rm_counts(None) == (None, None)
+    # 상세 파서도 같다: None 은 빈 출력 -- 상세 키는 그 도구의 「아는 0」(dsync·drm 오류 줄 수)뿐이다.
+    assert parse_tool_detail("nsync", None, None, False) == {}
+    assert parse_tool_detail("drm", None, None, False) == {"tool_errors": 0}
+    assert parse_tool_detail("dscan", None, None, False) == {}
+
+
+def test_pathological_numbers_do_not_raise_or_overflow():
+    # int() 는 4300자 넘는 숫자 문자열에 ValueError -- 계약상 예외 금지. int64 를 넘는 값은 BIGINT 승격 컬럼을 깨므로 모름.
+    huge = "9" * 5000
+    assert parse_sync_counts(f"{TS}Seconds: 0.1\n{TS}Items: {huge}\n") == (None, None)
+    assert parse_rm_counts(f"{TS}Removed {2 ** 63} items in 0.1 seconds (1.0 items/sec)\n") == (None, None)
+    assert parse_rm_counts(f"{TS}Removed {2 ** 63 - 1} items in 0.1 seconds (1.0 items/sec)\n") == (2 ** 63 - 1, None)
+    assert parse_nsync_counts(f"{TS}Planned actions: copy={huge} mkdir=1\n", dryrun=True) == (None, None)
+    assert parse_tool_detail("nsync", f"{TS}Completed actions: copy={huge} copied-bytes=1\n", "", False) == {}
 
 
 

@@ -3,8 +3,8 @@ import { Dialog } from "../../components/ui/Dialog";
 import { Button } from "../../components/ui/Button";
 import { field } from "../jobs/formFields";
 import {
-  CHMOD_RE, chownFieldError, intFieldError, scanIntFieldError, syncIntFieldError,
-  SCAN_INT_FIELDS, SYNC_INT_FIELDS,
+  CHMOD_RE, chownFieldError, DIRECT_HELP, directBufsizeError, intFieldError, OPEN_NOATIME_HELP, QUIET_HELP,
+  scanIntFieldError, syncIntFieldError, SCAN_INT_FIELDS, SYNC_INT_FIELDS, SYNC_OPTION_HELP,
 } from "../jobs/optionRules";
 import { ApiError } from "../../lib/api";
 import type { Batch } from "../../lib/types";
@@ -30,6 +30,15 @@ const STRS = { scan: [], sync: ["chmod", "chown"], rm: [] } as const;
 type Op = "scan" | "sync" | "rm";
 const opOf = (b: Batch): Op => (b.operation === "sync" ? "sync" : b.operation === "rm" ? "rm" : "scan");
 const knownKeys = (op: Op): string[] => [...BOOLS[op], ...INTS[op], ...STRS[op]];
+// 체크 칸 설명(2026-10-27 d192, 괴리 [9]·[22]): 생성 폼과 **같은 문구**(optionRules) -- 예전 이 창은 이름만 있는 체크 칸이라
+// nsync 로 도는 배치에서 direct 를 켜도 무시된다는 것, quiet 가 실패 원인까지 지운다는 것을 말하지 않았다. scan 의 verbose·quiet
+// 와 rm 의 recursive·stat·lite 는 dscan·drm 고유 옵션이라 생성 폼에도 설명이 없다(같은 수준을 지킨다).
+const BOOL_HELP: Record<Op, Partial<Record<string, string>>> = {
+  scan: {},
+  sync: { delete: SYNC_OPTION_HELP.delete, contents: SYNC_OPTION_HELP.contents, direct: DIRECT_HELP,
+          quiet: QUIET_HELP.sync, open_noatime: OPEN_NOATIME_HELP },
+  rm: { quiet: QUIET_HELP.rm },
+};
 
 interface Form {
   mc: string; priority: string; nodeCount: string; procsPerNode: string;
@@ -109,9 +118,12 @@ export function BatchExecutionSettingsDialog({ b }: { b: Batch }) {
     raw.trim() === String(stored ?? "") ? null : intFieldError(label, raw, 1, 64);
   const nodeCountError = keptOr(f.nodeCount, b.node_count, "노드 수");
   const procsPerNodeError = keptOr(f.procsPerNode, b.procs_per_node, "노드당 프로세스 수");
+  // sync bufsize 는 범위 다음에 direct 정렬 조건(서버 422 direct_bufsize_misaligned 미러) -- 저장된 값이라도 걸면 막는다:
+  // 그대로 두면 재실행마다 서버가 거부한다(옛 배치의 direct + 8 MiB 같은 조합을 고치는 길이 이 창이다).
   const intErrors = INTS[op].map((k) => (op === "scan"
     ? scanIntFieldError(k as keyof typeof SCAN_INT_FIELDS, f.ints[k])
-    : syncIntFieldError(k as keyof typeof SYNC_INT_FIELDS, f.ints[k])));
+    : syncIntFieldError(k as keyof typeof SYNC_INT_FIELDS, f.ints[k])
+      ?? (k === "bufsize" ? directBufsizeError(f.bools.direct === true, f.ints[k]) : null)));
   const chmodError = op === "sync" && f.strs.chmod.trim() !== "" && !CHMOD_RE.test(f.strs.chmod.trim())
     ? "chmod 형식이 올바르지 않습니다 (예: D770,F660)" : null;
   const chownError = op === "sync" ? chownFieldError(f.strs.chown) : null;
@@ -220,10 +232,22 @@ export function BatchExecutionSettingsDialog({ b }: { b: Batch }) {
           <div className="flex flex-wrap gap-x-4 gap-y-1">
             {BOOLS[op].map((k) => (
               <label key={k} className="flex items-center gap-2 text-sm">
-                <input type="checkbox" aria-label={k} checked={f.bools[k]} onChange={setBool(k)} /> {k}
+                <input type="checkbox" aria-label={k} checked={f.bools[k]} onChange={setBool(k)}
+                       aria-describedby={BOOL_HELP[op][k] !== undefined ? `exec-opt-help-${k}` : undefined} /> {k}
               </label>
             ))}
           </div>
+          {/* 칸 설명은 체크 줄 아래 한 목록으로(창 폭이 좁아 칸마다 문단을 달면 체크 줄이 흩어진다) -- 각 칸이
+              aria-describedby 로 자기 줄을 가리킨다. */}
+          {Object.keys(BOOL_HELP[op]).length > 0 && (
+            <ul aria-label="옵션 설명" className="space-y-1 text-xs text-muted">
+              {BOOLS[op].filter((k) => BOOL_HELP[op][k] !== undefined).map((k) => (
+                <li key={k} id={`exec-opt-help-${k}`}>
+                  <span className="font-mono text-ink">{k}</span>{` — ${BOOL_HELP[op][k]}`}
+                </li>
+              ))}
+            </ul>
+          )}
           {err(verboseQuiet)}
           {rmErrors.map((e, i) => e && <p key={i} className="text-bad text-sm">{e}</p>)}
           {INTS[op].map((k, i) => (
@@ -236,6 +260,11 @@ export function BatchExecutionSettingsDialog({ b }: { b: Batch }) {
               <input aria-label={k} className={field} placeholder="비우면 서버 기본"
                      value={f.ints[k]} onChange={setInt(k)} />
               {err(intErrors[i])}
+              {op === "sync" && k === "bufsize" && (
+                <span className="mt-1 block text-xs text-muted">
+                  direct 를 켜면 4096·8192·…·4194304(4 KiB~4 MiB 의 2의 거듭제곱)만 쓸 수 있습니다.
+                </span>
+              )}
             </label>
           ))}
           {op === "sync" && (<>

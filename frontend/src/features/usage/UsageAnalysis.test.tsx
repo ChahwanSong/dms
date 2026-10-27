@@ -570,6 +570,20 @@ test("온도 추이: atime 기본 + mtime 세그먼트(aria-pressed)", async () 
   expect(within(axis).getByRole("button", { name: "mtime" })).toHaveAttribute("aria-pressed", "true");
   // 긴 캡션은 제목 옆 설명(HelpTip) -- 본문에 상시로 깔지 않는다
   expect(screen.getByRole("button", { name: "데이터 온도 추이 설명" })).toBeInTheDocument();
+  // atime 축의 근사 이유는 스토리지·마운트(2026-10-27 d192, 괴리 [C3] -- 테스트베드 CephFS 는 읽어도 atime 이 그대로였다)
+  await userEvent.click(within(axis).getByRole("button", { name: "atime" }));
+  const help = screen.getByRole("button", { name: "데이터 온도 추이 설명" });
+  expect(help).toHaveAccessibleDescription(/읽기가 atime 에 반영되는지는 마운트·스토리지에 따라 달라 근사치입니다/);
+  expect(help).toHaveAccessibleDescription(/반영하지 않는 곳에선 최근에 쓴 데이터가 hot 으로 보입니다/);
+  // relatime 은 읽기를 하루 단위로 반영한다 -- 「반영 안 하는」 쪽(noatime·일부 CephFS)에 넣지 않는다(2026-10-28 리뷰
+  // portal-batch-27: 예전 「(relatime·noatime, CephFS 등)」은 relatime 스토리지에서 open_noatime 을 꺼도 된다고 읽혔다).
+  const rule = "리눅스 기본 relatime 은 읽기를 파일마다 많아야 하루에 한 번 반영하고, noatime 마운트나 일부 CephFS 는 반영하지 않습니다";
+  expect(help).toHaveAccessibleDescription(new RegExp(rule));
+  const hotHelp = screen.getByRole("button", { name: "hot 비율 설명" });
+  expect(hotHelp).toHaveAccessibleDescription(new RegExp(rule));
+  expect(hotHelp).toHaveAccessibleDescription(
+    /읽기가 atime 을 바꾸지 않는 스토리지\(noatime 마운트, 일부 CephFS 등\)에선 최근에 쓴 데이터 비중에 가까운 근사치/);
+  for (const el of [help, hotHelp]) expect(el).not.toHaveAccessibleDescription(/relatime·noatime/);
 });
 
 test("온도 추이 열 호버 즉시 툴팁(시간·요청자·용량)", async () => {

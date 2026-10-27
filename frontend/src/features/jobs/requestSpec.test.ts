@@ -219,6 +219,31 @@ describe("normalizeOptions", () => {
     expect(v.set).toEqual([{ token: "delete", note: SYNC_OPTION_HELP.delete }]);
   });
 
+  test("direct 는 실제로 돈 도구가 nsync 일 때만 「적용되지 않음」(괴리 [22]) -- dsync·모름은 주석 없음", () => {
+    const NOTE = "nsync 로 실행돼 적용되지 않음(O_DIRECT 는 dsync 에서만)";
+    expect(ok(normalizeOptions("sync", { payload: { direct: true }, tool: "nsync" })).set)
+      .toEqual([{ token: "direct", note: NOTE }]);
+    expect(ok(normalizeOptions("sync", { payload: { direct: true }, tool: "dsync" })).set)
+      .toEqual([{ token: "direct", note: null }]);
+    expect(ok(normalizeOptions("sync", { payload: { direct: true }, tool: null })).set)
+      .toEqual([{ token: "direct", note: null }]);
+    expect(ok(normalizeOptions("sync", { payload: { direct: true } })).set).toEqual([{ token: "direct", note: null }]);
+    // 다른 옵션의 설명은 도구와 무관하게 그대로(nsync 여도 delete 설명은 제출 폼 문구)
+    expect(ok(normalizeOptions("sync", { payload: { delete: true }, tool: "nsync" })).set)
+      .toEqual([{ token: "delete", note: SYNC_OPTION_HELP.delete }]);
+    // 「toString」 같은 이름의 도구가 와도 프로토타입을 읽지 않는다(DB 신뢰 경계)
+    expect(ok(normalizeOptions("sync", { payload: { direct: true }, tool: "toString" })).set)
+      .toEqual([{ token: "direct", note: null }]);
+  });
+
+  test("deriveRequestSpec 은 계획된 도구로 direct 주석을 정한다(nsync 잡)", () => {
+    const s = spec({ payload: { ...SYNC_PAYLOAD, options: { direct: true } } },
+      [JOB({ tool: "nsync", worker_pool: { tool: "nsync", source_count: 1, destination_count: 1, node_count: 2, process_count: 4,
+        identity: ALICE } })]);
+    expect(s.options.state === "ok" ? s.options.set : null)
+      .toEqual([{ token: "direct", note: "nsync 로 실행돼 적용되지 않음(O_DIRECT 는 dsync 에서만)" }]);
+  });
+
   test("batch_files 0 = 「배칭 끔」, bufsize 는 사람 표기, 키가 없으면 건너뛴다(unknown 아님)", () => {
     const v = ok(normalizeOptions("sync", { payload: { batch_files: 0, bufsize: 1048576 } }));
     expect(v.set).toEqual([{ token: "batch_files=0", note: "배칭 끔" }, { token: "bufsize=1048576", note: "1.0 MiB" }]);

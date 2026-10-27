@@ -1,4 +1,5 @@
 import { CHOWN_NAME_ERROR } from "../../lib/syncOwnership";
+import { REASON_MESSAGES } from "../../lib/api";
 // 서버 검증의 클라이언트 미러(즉답용) — 최종 심판은 서버 422 invalid_option 이다.
 // SubmitJob(단건 sync)과 BatchCreate(배치 옵션 스텝)가 공유한다(슬라이스 32 T8) —
 // 파일별 사본이면 미러가 발산한다(슬라이스 31 T3 formFields 이사와 같은 이유).
@@ -77,19 +78,105 @@ export function intFieldError(label: string, raw: string, lo: number, hi: number
   return null;
 }
 
-// 제출 폼(SubmitJob·BatchCreate)과 요청 상세(requestSpec)가 같은 문구를 쓴다(한 곳) -- 화면마다 사본이면 같은 옵션이
-// 화면마다 다르게 설명된다. 바꾸면 SubmitJob.test·BatchCreate.test 의 정확 일치가 함께 깨져야 정상이다.
+// direct + bufsize 교차 검증(2026-10-27 d192, 포탈 괴리 [8]) -- 서버 domain.validate_options 의 미러(422
+// direct_bufsize_misaligned). dsync 는 O_DIRECT 일 때 파일을 4 MiB 조각(MFU_CHUNK_SIZE, DMS 는 --chunksize 를 넘기지
+// 않는다)으로 나눠 읽는데, 조각 길이가 버퍼 크기의 배수가 아니면 파일 끝이 아닌 조각에서 MFU_ABORT(MPI 중단)한다
+// (mfu_flist_copy.c). 4 MiB 의 약수이면서 4 KiB(블록) 정렬인 값 = 4096·2^k ≤ 4194304 뿐이다. 미리보기는 복사를 안 해
+// 통과하고 실행에서 큰 파일이 여러 프로세스에 나뉠 때 중단되므로, 보내기 전에 막는다.
+// 빈 값(생략)은 서버 기본 4 MiB 라 정렬돼 있고, 범위 밖 정수·정수 아님은 syncIntFieldError 가 먼저 말한다(같은 칸에 두 문장을
+// 겹쳐 그리지 않는다). 문구는 서버 422 와 **같은 문장**(REASON_MESSAGES) -- 화면 즉답과 서버 거부가 다르게 말하지 않게.
+export const DIRECT_BUFSIZE_MIN = 4096;
+export const DIRECT_BUFSIZE_MAX = 4_194_304;
+export function directBufsizeError(direct: boolean, raw: string): string | null {
+  if (!direct) return null;
+  const v = raw.trim();
+  if (v === "") return null;
+  const n = Number(v);
+  const { lo, hi } = SYNC_INT_FIELDS.bufsize;
+  if (!Number.isInteger(n) || n < lo || n > hi) return null;          // 범위 오류는 syncIntFieldError 몫
+  // n 은 1 GiB 이하라 32비트 비트 연산이 안전하다 -- 2의 거듭제곱 판정.
+  if (n >= DIRECT_BUFSIZE_MIN && n <= DIRECT_BUFSIZE_MAX && (n & (n - 1)) === 0) return null;
+  return REASON_MESSAGES.direct_bufsize_misaligned;
+}
+
+// 제출 폼(SubmitJob·BatchCreate)·배치 실행 설정 변경과 요청 상세(requestSpec)가 같은 문구를 쓴다(한 곳) -- 화면마다 사본이면
+// 같은 옵션이 화면마다 다르게 설명된다. 바꾸면 SubmitJob.test·BatchCreate.test 의 정확 일치가 함께 깨져야 정상이다.
+// 2026-10-27 d192(포탈 괴리 [3]·[24]·[25]·[28]):
+//   - delete: 「완전히 동일하게 맞춥니다」는 더는 참이 아니다 -- 소스의 FIFO·소켓·장치는 두 도구 모두 복사하지 않지만(nsync·
+//     dsync "Skipped N special file(s)") 그 이름의 목적지 항목을 다루는 방식이 **도구마다 다르다**(2026-10-28 리뷰 portal-batch-26·
+//     contract-39 -- 예전 문구는 두 도구 모두 남긴다고 했다): nsync 는 비교 단계에서 특수 파일을 빼 목적지 항목을 delete 와
+//     무관하게 그대로 둔다(경고 꼬리 "the destination entry at that name is left as it is"). dsync 는 비교에서 종류가 다르면
+//     (예: 소스 FIFO, 목적지 일반 파일) delete 검사 없이 목적지 항목을 지울 목록에 넣고(dsync.c 의 type differ 분기 →
+//     dst_remove_list·dst_retype_list) 복사 단계는 특수 파일을 만들지 않는다(mfu_flist_copy.c) -- 그 이름이 목적지에서 사라진다
+//     (rc 0, 포크 빌드 실측). 비어 있지 않은 디렉토리면 delete 없이는 "Type change not applied" 로 실패하고, delete 를 켜면
+//     하위 트리째 지워진다. 같은 종류(FIFO↔FIFO)는 속성만 맞추고 지우지 않는다. dsync 미리보기(dry-run)는 지울 목록을 채우지
+//     않아 이 경우를 미리 말할 수 없다 -- 그래서 도움말이 미리 말한다.
+//     소스를 다 읽지 못한 실행은 delete 를 그 실행에서 끈다(nsync "--delete is off for this run", dsync "delete option
+//     disabled") -- 꺼지는 것은 「소스에 없는 항목 지우기」뿐이고 타입 교체의 목적지 삭제는 그대로라 「삭제를 하지 않는다」가
+//     아니라 「소스에 없는 항목을 지우지 않는다」로 말한다. 반대로 delete 가 꺼져 있으면 소스에서 파일·링크로 바뀐 디렉토리를
+//     목적지에서 비우지 못해 그 항목이 실패한다(sync_type_change_refused) -- 끌 때의 결과도 말한다.
+//   - contents: nsync 는 바이트 비교가 아니라 스캔 중 양쪽 모든 일반 파일의 SHA-256 을 계산한다(미리보기 포함) -- 읽을 수 없는
+//     파일 하나가 미리보기를 실패시킨다. dsync 는 양쪽에 있고 크기가 같은 파일만 바이트 비교한다.
 export const SYNC_OPTION_HELP = {
-  delete: "원본에 없는 파일을 대상에서도 삭제해 완전히 동일하게 맞춥니다(미러 동기화).",
-  contents: "크기·수정시각 대신 파일 내용을 바이트 단위로 비교합니다(더 느리지만 정확).",
+  delete: "원본에 없는 항목을 대상에서 지웁니다(미러 동기화). 원본에서 파일·링크로 바뀐 디렉토리가 대상에 비어 있지 않게 남아 "
+    + "있으면 이 옵션을 켜야 교체되고, 끄면 그 항목은 실패로 남습니다. 원본의 FIFO·소켓·장치 파일은 복사하지 않습니다 — 노드 간 "
+    + "실행(nsync)은 대상의 같은 이름 항목을 그대로 두고, 한 노드 실행(dsync)은 그 이름의 대상 항목이 다른 종류면 이 옵션과 "
+    + "무관하게 지운 뒤 아무것도 만들지 않아 그 이름이 대상에서 사라집니다(비어 있지 않은 디렉토리는 이 옵션을 켜야 지워지고, "
+    + "끄면 실패로 남습니다). 원본 일부를 읽지 못한 실행은 안전을 위해 그 실행에서 원본에 없는 항목을 지우지 않습니다.",
+  contents: "크기·수정시각 대신 파일 내용으로 비교합니다(더 느리지만 정확). 미리보기 단계부터 파일을 읽습니다 — 한 노드 실행"
+    + "(dsync)은 양쪽에 있고 크기가 같은 파일을 바이트 단위로, 노드 간 실행(nsync)은 양쪽 모든 파일의 SHA-256 을 비교하므로 "
+    + "실행 신원이 읽을 수 없는 그런 파일이 하나라도 있으면 미리보기가 실패합니다.",
 } as const;
-// open_noatime·direct 안내(SubmitJob·BatchCreate 공용). 2026-10-27 포크(nsync db1e33c·공통 43ba468)부터 nsync·dsync 모두
-// O_NOATIME 이 EPERM(실행 신원 소유가 아닌 파일)이면 그 파일만 O_NOATIME 없이 다시 열어 복사한다 -- 예전처럼 root 실행 전용으로
-// 막지 않는다. direct 는 dsync 만 O_DIRECT 로 열고 nsync 는 받기만 한다(정렬 I/O 미구현, 포크 db1e33c).
+// open_noatime·direct 안내(SubmitJob·BatchCreate·배치 실행 설정 공용). 포크(nsync db1e33c·공통 43ba468, 2026-10-27
+// 7a3189c 에서 dsync --contents 비교 경로까지)부터 nsync·dsync 모두 O_NOATIME 이 EPERM(실행 신원 소유가 아닌 파일)이면 그
+// 파일만 O_NOATIME 없이 다시 연다 -- 복사도 contents 비교도. 그래서 root 실행 전용으로 막지 않는다. 읽기가 atime 을 갱신하지
+// 않는 스토리지(noatime 마운트, 테스트베드 CephFS 실측 -- CHANGELOG d190)에선 켜고 끄는 차이가 보이지 않는다(괴리 [C3]).
+// relatime 은 그 목록에 넣지 않는다(2026-10-28 리뷰 portal-batch-27): 리눅스 기본 relatime 은 읽을 때 「이전 atime 이 mtime·
+// ctime 이하이거나 24시간보다 오래됐으면」 갱신한다 -- 오래 안 읽힌(cold) 파일은 sync 한 번에 최근 접근이 되고, 반복 읽기만
+// 하루 단위로 접힌다. 테스트베드 CephFS 가 갱신하지 않은 것은 relatime 마운트인데도 그랬던 CephFS 의 성질이다(같은 노드 ext4
+// 는 갱신). 예전 문구는 relatime 을 「차이 없음」에 넣어, relatime 스토리지에서 이 옵션을 꺼도 된다고 읽혔다.
+// direct 는 dsync 만 O_DIRECT 로 열고 nsync 는 받기만 한다(정렬 I/O 미구현, 포크 db1e33c). bufsize 조건은 directBufsizeError.
 export const OPEN_NOATIME_HELP =
-  "원본을 읽을 때 접근 시각(atime)을 바꾸지 않습니다 — 실행 신원 소유가 아닌 파일은 커널이 허용하지 않아 접근 시각 보존 없이 그대로 복사합니다(root 실행은 전부 보존).";
+  "원본을 읽을 때 접근 시각(atime)을 바꾸지 않습니다. 읽기가 atime 을 갱신하는 스토리지에서만 차이가 납니다 — 리눅스 기본 "
+  + "relatime 도 마지막 접근이 하루를 넘었거나 수정 뒤 처음 읽는 파일은 갱신하므로 차이가 나고, noatime 마운트나 일부 CephFS "
+  + "처럼 읽기가 atime 을 바꾸지 않는 곳에선 차이가 없습니다. 실행 신원 소유가 아닌 파일은 커널이 허용하지 않아 그 파일만 접근 "
+  + "시각 보존 없이 그대로 읽습니다(복사·contents 비교 모두, root 실행은 전부 보존).";
 export const DIRECT_HELP =
-  "O_DIRECT(페이지 캐시 우회)로 읽고 씁니다 — 한 노드에서 dsync 로 실행될 때만 적용되고, 스토리지가 노드별로 나뉘어 nsync 로 실행되면 무시됩니다.";
+  "O_DIRECT(페이지 캐시 우회)로 읽고 씁니다 — 한 노드에서 dsync 로 실행될 때만 적용되고, 스토리지가 노드별로 나뉘어 nsync 로 "
+  + "실행되면 무시됩니다. 켜면 bufsize 는 4 KiB~4 MiB 의 2의 거듭제곱(4096·8192·…·4194304)이어야 합니다(dsync 는 4 MiB 단위로 "
+  + "나눠 읽어 그 약수가 아니면 큰 파일에서 중단됩니다).";
+// bufsize 칸 설명(단건·배치 생성 공용). 프리필 계약(2026-09-17)에 direct 조건을 덧붙인다.
+export const BUFSIZE_HELP =
+  "미리 채운 4194304 = 4 MiB(서버 기본). 비워도 같은 값이 적용됩니다. direct 를 켜면 4096·8192·…·4194304(4 KiB~4 MiB 의 "
+  + "2의 거듭제곱)만 쓸 수 있습니다.";
+// quiet 안내(2026-10-27 d192, 포탈 괴리 [9]·[13]·[18]·[29]): -q 는 도구 로그 수준을 「없음」으로 둔다(nsync·dsync·drm 모두
+// MFU_LOG_NONE) -- 줄이는 게 아니라 오류 줄·실패 항목 목록·요약까지 전부 사라진다. 그래서 결과 개수는 「—」이고, 러너가
+// 실패 원인(DMS_EXEC_REASON)을 가를 재료도 없어 실패하면 일반 사유(execution_failed)로만 남는다. 미리보기는 대상 수를 세야
+// 해서 quiet 를 빼고 돈다(execution_manifests). 단건·배치 생성·배치 실행 설정이 같은 문구를 쓴다.
+export const QUIET_HELP = {
+  sync: "도구 출력을 모두 끕니다 — 실행 결과의 개수(반영·삭제한 항목)가 「—」가 되고, 실패한 항목 목록과 오류 줄도 남지 않아 "
+    + "실패하면 원인이 일반 사유(「실행에 실패했습니다」)로만 보입니다. 미리보기(dry-run)에는 적용하지 않습니다(대상 수를 세는 "
+    + "줄이 사라지므로).",
+  rm: "도구 출력을 모두 끕니다 — 실행 결과의 개수(삭제한 항목)가 「—」가 되고, 지우지 못한 항목 목록과 오류 줄도 남지 않아 "
+    + "실패하면 원인이 일반 사유(「실행에 실패했습니다」)로만 보입니다. 미리보기(dry-run)에는 적용하지 않습니다(지울 대상 수를 "
+    + "세는 줄이 사라지므로).",
+} as const;
+// nsync 실패 한도 안내(2026-10-27 d192, 포탈 괴리 [21]): 포크 nsync 는 --max-errors 기본 65,000(NSYNC_DEFAULT_MAX_ERRORS)에
+// 닿으면 배치 사이에서 멈추고(배치 안에서는 목적지 rank 마다 남은 몫에서) 남은 액션을 시도하지 않는다 -- DMS 는 이 값을 넘기지도
+// 바꾸게 하지도 않는다(domain._OPTION_SPECS 에 없음). 멈춘 실행은 sync_stopped_max_errors 로 남는다. 한도가 화면 어디에도 없어
+// 「왜 더 나아가지 않는가」를 알 수 없었다 -- sync 옵션 구획 캡션(단건·배치 생성)이 말한다. 문구는 그 사유 메시지와 같은 어휘.
+export const SYNC_MAX_ERRORS_NOTE =
+  "노드 간 실행(nsync)은 실패한 항목이 허용 한도(기본 65,000건)에 닿으면 남은 항목을 시도하지 않고 멈춥니다 — 원인을 고친 뒤 "
+  + "다시 실행하면 이미 맞춘 항목은 건너뛰고 이어서 맞춥니다.";
+// 배치 생성의 open_noatime 칸 설명 -- 배치는 특권(root) 실행이라 모든 파일을 보존으로 읽는다. 「통계를 정직하게 유지」는
+// 읽기가 atime 을 갱신하는 스토리지에서만 참이라 그 조건을 함께 말한다(괴리 [C3]). relatime 은 「차이 없음」 쪽이 아니다
+// (2026-10-28 리뷰 portal-batch-27 -- OPEN_NOATIME_HELP 주석): relatime 스토리지에서 이 옵션을 끄면 sync 가 읽은 cold 파일이
+// 다음 scan 에서 hot 으로 뒤집혀 온도 통계가 흐려진다 -- 그 경우를 명시한다.
+export const BATCH_OPEN_NOATIME_HELP =
+  "기본 켬 — 배치는 특권(root) 실행이라 모든 원본 파일을 접근 시각(atime)을 바꾸지 않고 읽습니다. 읽기가 atime 을 갱신하는 "
+  + "스토리지에서 데이터 온도(hot/cold) 통계가 sync 때문에 흐려지지 않게 합니다 — 리눅스 기본 relatime 도 마지막 접근이 하루를 "
+  + "넘은 파일은 읽을 때 갱신하므로(끄면 sync 가 읽은 cold 파일이 hot 이 됩니다) 의미가 있고, noatime 마운트나 일부 CephFS 처럼 "
+  + "읽기가 atime 을 바꾸지 않는 곳에선 차이가 없습니다.";
 // 실행 권한 문구(제출 요약 「실행 권한」 ↔ 요청 상세 「요청 내용」의 「실행 권한」). root 의 어휘·색(text-bad)은 포탈 전체가 같다.
 // 요청 상세는 PRIV_ROOT_HEAD·PRIV_USER 만 쓴다 -- sync 의 소유 결과는 같은 카드의 「목적지 소유」 행이 말하므로
 // PRIV_ROOT_SYNC(소유 결과를 덧붙인 꼬리)는 제출 요약 전용이다(한 화면에서 같은 사실을 두 번 말하지 않는다).

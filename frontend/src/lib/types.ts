@@ -122,14 +122,45 @@ export interface WorkerPoolIdentity {
   supplementary_gids_excluded?: number[] | null;
   supplementary_gids_found?: number | null;
 }
+// summary.json v2(2026-10-27 d192, 러너 _build_summary · parsers.parse_tool_detail): 핵심 3키(returncode·files·bytes)는
+// 그대로이고 나머지는 전부 선택이다 -- 없음 = 모름 또는 그 도구에 해당 없음(0 으로 뭉개지 않는다, null≠0). 옛 잡은 3키만.
+// files 의 뜻(도구·단계별): nsync 미리보기 = 변경 예정 합, nsync 실행 = 실제 반영 합(done), dsync 미리보기 = 소스 전체 walk 수,
+// dsync 실행 = 마지막 블록의 Items − 실패한 복사(mknod 실패로 이미 빠진 것은 빼지 않는다 -- 비정상 종료면 null), drm 미리보기 =
+// 지울 대상 walk 수, drm 실행 = 실제로 지운 수. 화면은 lib/toolSummary 로 읽는다.
+export interface ToolActionCounts {
+  copy?: number; mkdir?: number; symlink_update?: number; meta_update?: number; remove?: number;
+  skipped_dst_only?: number;
+}
+export interface ToolFailureSample { op: string; path: string; errno: number | null }
+export interface ToolSummary {
+  returncode?: number | null; files?: number | null; bytes?: number | null;
+  detail_version?: number; tool?: string; dryrun?: boolean; quiet?: boolean;
+  planned?: ToolActionCounts; done?: ToolActionCounts;
+  copied_bytes?: number; planned_bytes?: number; source_items?: number;
+  copied_items?: number; copy_failed?: number; removed?: number; remove_failed?: number; target_items?: number;
+  // dsync: mkdir()·symlink()·mknod() 를 못 한 항목 수(마지막 Items 에 이미 빠져 있다 -- mknod 실패는 copy_failed 와 겹친다).
+  create_failed?: number;
+  type_changes?: { to_dir?: number; from_dir?: number };
+  type_change_needs_delete?: boolean; type_change_refused?: number; skipped_special?: number;
+  failures?: { total?: number; by_op?: Record<string, number> };
+  failure_samples?: ToolFailureSample[];
+  not_attempted?: number; stopped_early?: boolean;
+  stop_cause?: "max_errors" | "destination_full" | "destination_read_only" | string;
+  // scan_errors = nsync 의 스캔 오류 수(소스·목적지 합), source_scan_errors = 그중 소스 쪽(nsync 가 삭제를 끌 때만 찍는다),
+  // scan_incomplete = dsync 의 소스 walk 오류 표식(수를 찍지 않는다 -- 수로 읽지 않는다).
+  scan_errors?: number; source_scan_errors?: number; scan_incomplete?: boolean; delete_disabled?: boolean;
+  metadata_ignored?: number; metadata_failed?: number; noatime_fallbacks?: number;
+  tool_errors?: number; aborted?: boolean; reason?: string;
+  // 실행 성공인데 summary.json 을 못 읽었을 때 stepper 가 대신 싣는 표식(개수 모름).
+  summary_unavailable?: boolean;
+}
 export interface DataJob {
   job_id: string; request_id: string; operation: string; state: string;
   reason_code: string | null; preview_fingerprint: string | null;
   preview_expires_at: string | null; result_summary: unknown;
-  // 미리보기(dry-run) summary.json 사본(2026-09-17): 러너 계약대로 정확히
-  // {returncode, files, bytes} 이고 개수는 모르면 null. 지문(preview_fingerprint)이
-  // 이 객체의 해시라 컨펌 창이 "무엇을 컨펌하는지" 를 보여줄 수 있다. 이전 잡은 null.
-  preview_summary?: { returncode?: number | null; files?: number | null; bytes?: number | null } | null;
+  // 미리보기(dry-run) summary.json 사본(2026-09-17): 핵심 3키 + d192 상세 키(ToolSummary, 옛 잡은 3키만). 개수는
+  // 모르면 null. 지문(preview_fingerprint)이 이 객체의 해시라 컨펌 창이 "무엇을 컨펌하는지" 를 보여줄 수 있다. 이전 잡은 null.
+  preview_summary?: ToolSummary | null;
   transitions: Transition[]; artifact_uri: string | null;
   // phase -> 실행 ref("pod/<name>" 등). 로그를 실제로 조회할 수 있는 phase가 정확히
   // 이 키들이다 — 뷰어는 하드코딩된 "preflight"가 아니라 여기에 맞춰 탭을 만든다.
@@ -265,12 +296,16 @@ export interface BatchItem {
   files_count?: number | null;
   completed_at?: string | null;
   // 미리보기 조인(2026-10-07, 배치 확인 대화상자): 자식 잡(최신 1개)의 상태·미리보기 요약·만료. null = 모름(잡 없음).
-  // job_state === "ConfirmPending" = 미리보기를 마치고 배치 확인을 기다리는 항목. preview_summary.files 는 단건
-  // ConfirmDialog 의 "복사 대상" 과 같은 값이다(같은 노드 dsync 는 dry-run 이 훑은 소스 항목 수, 노드 간 nsync 는 계획된
-  // 변경 수라 이미 맞는 항목은 빠진다). null = 모름(dsync dryrun 의 bytes 는 null -- 0 으로 뭉개지 않는다).
+  // job_state === "ConfirmPending" = 미리보기를 마치고 배치 확인을 기다리는 항목. preview_summary.files 의 뜻은 도구별이다
+  // (같은 노드 dsync = dry-run 이 훑은 소스 전체 항목 수, 노드 간 nsync = 계획된 변경 수 -- 이미 맞는 항목은 빠진다,
+  // drm = 지울 대상). files_count(위)는 실행 결과만 담는다(nsync = 실제 반영 합, dsync = 만든 항목 − 복사 실패, drm = 지운 수
+  // -- 미리보기 실패의 수는 승격하지 않는다, d192). null = 모름(dsync dryrun 의 bytes 는 null -- 0 으로 뭉개지 않는다).
   job_state?: string | null;
-  preview_summary?: { files?: number | null; bytes?: number | null; returncode?: number | null } | null;
+  // d192: 미리보기 수의 뜻은 도구마다 다르다(nsync = 변경 예정, dsync = 소스 전체 walk 수, drm = 지울 대상) -- 화면은
+  // job_tool(자식 잡의 실제 도구, 서버 조인) 을 먼저, 없으면 preview_summary.tool(v2 러너만 싣는다)로 가른다.
+  preview_summary?: ToolSummary | null;
   preview_expires_at?: string | null;
+  job_tool?: string | null;
 }
 export interface BatchDetail extends Batch { items: BatchItem[] }
 // 요청 단위 scan 리포트 통계(항목별 데이터 온도 — 배치 합산은 제거됐다). 서버가
@@ -563,7 +598,9 @@ export interface NodeMetrics {
   window_hours: number; start: string; end: string; nodes: NodeMetricSeries[];
 }
 export interface StateCount { state: string; count: number }
-export interface BreakdownRow { count: number; succeeded: number; failed: number }
+// d192 통계 정의(서버 metrics 와 같은 한 벌): succeeded = Succeeded, failed = Failed+TimedOut(실행·미리보기 중 실패),
+// rejected = Rejected(점검·계획 단계 거절), cancelled = Cancelled+PreviewExpired(취소·확인 만료). 옛 서버는 뒤 둘이 없다.
+export interface BreakdownRow { count: number; succeeded: number; failed: number; rejected?: number; cancelled?: number }
 // 숫자 요약(슬라이스 31): 평균/중앙값(p50)/p95. p50·p95 는 nearest-rank 실측값
 // (백엔드 summarize_seconds -- 보간 없음). 응답에서 null = 표본 없음(0 아님).
 export interface SecondsSummary {
@@ -611,7 +648,10 @@ export interface JobMetrics {
   exec_runtime_counted: number;
   exec_runtime_excluded: number;
   exec_runtime_summary: SecondsSummary | null;
-  files_total: number | null; bytes_total: number | null;
+  // d192: 처리량을 연산별로 나눈다(예전 files_total 은 sync 항목과 rm 삭제 수를 한 숫자에 섞었다). 창 안의 **모든 종단**
+  // 잡 중 개수를 아는 실행만 더한다 -- files_count 는 이제 실행 결과만 담으므로(미리보기 실패 수는 승격하지 않는다) 실패·
+  // 중단된 실행의 부분 처리도 실제 처리다. null = 아는 행이 없다(0 아님).
+  sync_items_total: number | null; sync_bytes_total: number | null; rm_items_total: number | null;
 }
 export interface InfraComponent {
   component: string; kind: string; workload: string;

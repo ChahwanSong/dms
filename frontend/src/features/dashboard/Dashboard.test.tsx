@@ -22,7 +22,7 @@ const JOB_METRICS = {
     { state: "TimedOut", count: 1 },
   ],
   by_tool: [], by_storage: [], by_requester: [], failure_reasons: [],
-  throughput: [], duration_histogram: [], files_total: null, bytes_total: null,
+  throughput: [], duration_histogram: [], sync_items_total: null, sync_bytes_total: null, rm_items_total: null,
   plan_rejected: 7, plan_rejection_reasons: [],
 };
 
@@ -69,6 +69,15 @@ test("KPI 타일은 요청 목록 즉석 계산이 아니라 잡 통계 집계�
   expect(screen.getByText("대기").parentElement).toHaveTextContent("2");
   expect(screen.getByText("성공(24h)").parentElement).toHaveTextContent("20");
   expect(screen.getByText("실패(24h)").parentElement).toHaveTextContent("5"); // Failed+TimedOut
+});
+
+test("실패(24h) 는 Failed·TimedOut 만 -- 거부·취소·만료는 더하지 않는다(잡 통계 분해의 「실패」 열과 같은 정의)", async () => {
+  // d192: 서버 분해 표가 실패 = Failed+TimedOut, 거부·취소·만료를 따로 센다 -- KPI 가 종단−성공을 실패로 세면 두 숫자가 어긋난다.
+  renderDash({ jobs: { ...JOB_METRICS, by_state: [...JOB_METRICS.by_state,
+    { state: "Rejected", count: 6 }, { state: "Cancelled", count: 2 }, { state: "PreviewExpired", count: 3 }] } });
+  const failed = (await screen.findByText("실패(24h)")).parentElement!;
+  await waitFor(() => expect(screen.getByText("성공(24h)").parentElement).toHaveTextContent("20"));
+  expect(failed).toHaveTextContent(/^실패\(24h\)5$/);
 });
 
 test("계획 거부 타일은 results 집계(잡 통계 밖 구간)를 보여준다", async () => {

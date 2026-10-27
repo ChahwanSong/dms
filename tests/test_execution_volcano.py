@@ -170,8 +170,8 @@ def test_poll_missing_is_failed():
 def test_read_summary_reads_artifact():
     k8s = _FakeK8s()
     spec = _spec(phase="execution")
-    # 픽스처는 실 summary 계약과 같은 모양이어야 한다: runner _build_summary 는
-    # 항상 정확히 3키 {"returncode","files","bytes"} 를 쓴다(슬라이스 15 §2.3).
+    # 픽스처는 실 summary 계약의 핵심 모양이다: runner _build_summary 는 핵심 3키
+    # {"returncode","files","bytes"} 를 늘 쓰고 d192 부터 상세 키를 더한다(슬라이스 15 §2.3).
     # 옛 {"files": 3} 은 사문 계약의 박제였다(BACKLOG §2.5). 등식 단언을 유지해
     # read_summary 가 키를 거르거나 변환하지 않는 pass-through 임도 함께 고정한다.
     a = _adapter(k8s, summaries={

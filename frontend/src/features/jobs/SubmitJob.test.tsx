@@ -6,7 +6,9 @@ import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
 import { beforeAll, afterAll, afterEach, test, expect } from "vitest";
 import { SubmitJob } from "./SubmitJob";
-import { OPEN_NOATIME_HELP, SCAN_INT_FIELDS, SYNC_INT_FIELDS } from "./optionRules";
+import { DIRECT_HELP, OPEN_NOATIME_HELP, QUIET_HELP, SCAN_INT_FIELDS, SYNC_INT_FIELDS, SYNC_MAX_ERRORS_NOTE, SYNC_OPTION_HELP }
+  from "./optionRules";
+import { REASON_MESSAGES } from "../../lib/api";
 import { NODE_CPU_CAP_NOTE } from "../../lib/jobTool";
 import type { UserStorage } from "../../lib/types";
 import type { Me } from "../../lib/types";
@@ -188,19 +190,21 @@ test("입력 칸에서 Enter 를 눌러도 제출되지 않는다(요약을 보�
   expect(screen.queryByRole("heading", { name: "요청 상세" })).not.toBeInTheDocument();
 });
 
-test("입력한 상대경로의 실제 절대경로를 관리 디렉토리 기준으로 보여 준다(모르면 생략)", async () => {
+test("입력한 상대경로를 관리 디렉토리에 붙인 「지정 경로」를 보여 준다(모르면 생략)", async () => {
+  // 2026-10-27 d192(괴리 [C2]): 글자 그대로 붙인 경로라 링크를 풀지 않는다 -- 「실제 경로」라 부르지 않는다.
   server.use(http.get("/api/user/storages", () => HttpResponse.json([
     { storage_name: "cephfs", backend_type: "cephfs", status: "Ready", managed_root: "/cephfs/managed" },
     { storage_name: "cephfs-secondary", backend_type: "cephfs", status: "Ready" }])));   // 뿌리 모름
   renderPage();
   await fillSyncTarget();
-  expect(screen.getByText("실제 경로: /cephfs/managed/a/b")).toBeInTheDocument();
+  expect(screen.getByText("지정 경로: /cephfs/managed/a/b")).toBeInTheDocument();
+  expect(screen.queryByText(/실제 경로/)).toBeNull();
   // 목적지 스토리지는 managed_root 가 없다 -- 거짓 경로를 지어내지 않는다.
-  expect(screen.queryByText(/실제 경로: .*c\/d/)).toBeNull();
+  expect(screen.queryByText(/지정 경로: .*c\/d/)).toBeNull();
 });
 
-test("서버가 거부할 경로(/ 시작·..·관리 디렉토리 자신)는 실제 경로 대신 이유를 보이고 제출을 잠근다", async () => {
-  // domain.validate_relative_path(422 unsafe_path)의 즉답 미러. 예전엔 다듬은 값으로 "실제 경로"를 지어
+test("서버가 거부할 경로(/ 시작·..·관리 디렉토리 자신)는 지정 경로 대신 이유를 보이고 제출을 잠근다", async () => {
+  // domain.validate_relative_path(422 unsafe_path)의 즉답 미러. 예전엔 다듬은 값으로 절대경로를 지어
   // 보여 "/team/data" 에도 그럴듯한 절대경로가 떴다(리뷰 2026-10-06).
   let received: any = null;
   server.use(
@@ -217,7 +221,7 @@ test("서버가 거부할 경로(/ 시작·..·관리 디렉토리 자신)는 �
   await userEvent.clear(screen.getByLabelText("소스 경로"));
   await userEvent.type(screen.getByLabelText("소스 경로"), "/a/b");
   expect(screen.getByText(/"\/" 로 시작할 수 없습니다/)).toBeInTheDocument();
-  expect(screen.queryByText(/^실제 경로: /)).toBeNull();
+  expect(screen.queryByText(/^지정 경로: /)).toBeNull();
   expect(submitButton()).toBeDisabled();
   expect(screen.getByText("경로를 관리 디렉토리 아래 상대경로로 고치세요")).toBeInTheDocument();
   fireEvent.submit(container.querySelector("form")!);
@@ -229,8 +233,25 @@ test("서버가 거부할 경로(/ 시작·..·관리 디렉토리 자신)는 �
   expect(submitButton()).toBeDisabled();
   await userEvent.clear(screen.getByLabelText("소스 경로"));
   await userEvent.type(screen.getByLabelText("소스 경로"), "a/b");
-  expect(screen.getByText("실제 경로: /cephfs/managed/a/b")).toBeInTheDocument();
+  expect(screen.getByText("지정 경로: /cephfs/managed/a/b")).toBeInTheDocument();
   expect(submitButton()).toBeEnabled();
+});
+
+test("경로 조건에 심볼릭 링크 규칙이 있다 — sync 는 목적지 조건 카드, rm 은 대상 경로 아래(d191 봉쇄 검사)", async () => {
+  // 2026-10-27 d192(괴리 [14]): 링크로 된 목적지가 「디렉토리여야 합니다」를 만족한다고 보고 낸 요청이 거부됐다.
+  const view = renderPage();
+  await fillSyncTarget();
+  expect(screen.getByLabelText("목적지 조건과 소유권")).toHaveTextContent(
+    "소스·목적지 경로가 관리 디렉토리 아래 어느 단계든(마지막 이름 포함) 심볼릭 링크를 거치면 거부됩니다 — 링크가 가리키는 "
+    + "곳이 아니라 링크를 거치지 않는 경로로 요청하세요.");
+  expect(screen.queryByRole("note", { name: "삭제 경로 조건" })).toBeNull();
+  view.unmount();
+  renderPage();
+  await chooseOperation("rm");
+  // rm 은 링크를 따라가지도, 링크 자체를 지우지도 않는다(괴리 [27] -- 「링크가 가리키는 곳으로 다시」를 권하지 않는다).
+  expect(screen.getByRole("note", { name: "삭제 경로 조건" })).toHaveTextContent(
+    "삭제할 경로가 관리 디렉토리 아래 어느 단계든(대상 자신 포함) 심볼릭 링크면 거부됩니다 — 링크를 따라가 지우지도, 링크 "
+    + "자체를 지우지도 않습니다.");
 });
 
 test("rm 대상이 관리 디렉토리 자신(.)이면 제출이 잠긴다", async () => {
@@ -253,7 +274,7 @@ test("앞뒤 공백은 다듬지 않고 그대로 보낸다 — 화면도 그 �
   await userEvent.type(screen.getByLabelText("소스 경로"), " ");
   expect(screen.getByText("앞뒤 공백도 경로 이름에 그대로 들어갑니다.")).toBeInTheDocument();
   expect(screen.getByText((_, el) => el?.tagName === "P"
-    && el.textContent === "실제 경로: /cephfs/managed/a/b ")).toBeInTheDocument();
+    && el.textContent === "지정 경로: /cephfs/managed/a/b ")).toBeInTheDocument();
   await userEvent.click(submitButton());
   expect(await screen.findByRole("heading", { name: "요청 상세" })).toBeInTheDocument();
   expect(captured.body.source).toBe("a/b ");
@@ -641,8 +662,10 @@ test("고급 숫자 옵션은 실제 값으로 프리필돼 있다(placeholder �
   expect(screen.getByText(
     "미리 채운 1,000,000 = 서버 기본 배치 사이즈. 비워도 같은 값이 적용되며, 배칭을 끄려면 0 을 입력하세요.",
   )).toBeInTheDocument();
+  // d192: bufsize 설명에 direct 조건이 붙는다(괴리 [8]) -- 프리필 문장은 그대로 앞에 있다.
   expect(screen.getByText(
-    "미리 채운 4194304 = 4 MiB(서버 기본). 비워도 같은 값이 적용됩니다.",
+    "미리 채운 4194304 = 4 MiB(서버 기본). 비워도 같은 값이 적용됩니다. direct 를 켜면 4096·8192·…·4194304(4 KiB~4 MiB 의 "
+    + "2의 거듭제곱)만 쓸 수 있습니다.",
   )).toBeInTheDocument();
 });
 
@@ -669,6 +692,11 @@ test("open_noatime 은 root 를 꺼도 켤 수 있고 그대로 실린다 — �
   expect(screen.getByLabelText("open_noatime")).toBeEnabled();
   expect(screen.getByLabelText("open_noatime")).toBeChecked();
   expect(screen.getByText(OPEN_NOATIME_HELP)).toBeInTheDocument();
+  // relatime(리눅스 기본)은 「차이 없음」 쪽이 아니다(2026-10-28 리뷰 portal-batch-27): 하루 넘게 안 읽혔거나 수정 뒤 처음
+  // 읽는 파일은 갱신한다 -- 차이가 없는 곳은 noatime 마운트·일부 CephFS 뿐이다.
+  expect(OPEN_NOATIME_HELP).toContain("리눅스 기본 relatime 도 마지막 접근이 하루를 넘었거나 수정 뒤 처음 읽는 파일은 갱신하므로 "
+    + "차이가 나고, noatime 마운트나 일부 CephFS 처럼 읽기가 atime 을 바꾸지 않는 곳에선 차이가 없습니다");
+  expect(OPEN_NOATIME_HELP).not.toContain("relatime·noatime");
   // chown 캡션도 지금 모드를 말한다(root 아님 → 실행 신원 소유로 자동 chown).
   expect(screen.getByText(/비우면 실행 신원의 uid:주 그룹 gid 소유로 자동 chown 됩니다\(지금 root 아님\)/))
     .toBeInTheDocument();
@@ -771,6 +799,57 @@ test("범위 밖 bufsize는 제출을 비활성으로 막는다", async () => {
   await userEvent.type(screen.getByLabelText("bufsize"), "100");
   expect(submitButton()).toBeDisabled();
   expect(screen.getByText("bufsize는 4096..1073741824 범위의 정수여야 합니다")).toBeInTheDocument();
+  // 범위 오류가 먼저다 -- direct 를 켜도 같은 칸에 두 문장을 겹쳐 그리지 않는다.
+  await userEvent.click(screen.getByLabelText("direct"));
+  expect(screen.queryByText(REASON_MESSAGES.direct_bufsize_misaligned)).toBeNull();
+});
+
+test("direct 를 켜면 bufsize 는 4096·2^k ≤ 4 MiB 만 — 서버 422 direct_bufsize_misaligned 와 같은 문장으로 즉답·잠금", async () => {
+  // 2026-10-27 d192(괴리 [8]): dsync 는 O_DIRECT 로 4 MiB 조각을 나눠 읽어, 그 약수가 아닌 버퍼면 큰 파일에서 MPI 중단했다.
+  const captured = captureSubmit();
+  renderPage();
+  await fillAndOpenAdvanced();
+  await userEvent.clear(screen.getByLabelText("bufsize"));
+  await userEvent.type(screen.getByLabelText("bufsize"), "8388608");        // 8 MiB -- direct 없이는 정상
+  expect(screen.queryByText(REASON_MESSAGES.direct_bufsize_misaligned)).toBeNull();
+  expect(submitButton()).toBeEnabled();
+  await userEvent.click(screen.getByLabelText("direct"));
+  expect(screen.getByText(REASON_MESSAGES.direct_bufsize_misaligned)).toBeInTheDocument();
+  expect(submitButton()).toBeDisabled();
+  // 고급 옵션이 접히지 않는다(제출이 잠긴 이유가 숨지 않게 -- advancedError)
+  await userEvent.click(screen.getByText("고급 옵션"));
+  await act(async () => { await new Promise((r) => setTimeout(r, 0)); });  // toggle 이벤트는 비동기
+  expect(screen.getByText("고급 옵션").closest("details")!.open).toBe(true);
+  for (const bad of ["1000000", "6144", "2048"]) {                         // 2의 거듭제곱 아님·4 KiB 정렬 아님·4 KiB 미만(범위 오류)
+    await userEvent.clear(screen.getByLabelText("bufsize"));
+    await userEvent.type(screen.getByLabelText("bufsize"), bad);
+    expect(submitButton()).toBeDisabled();
+  }
+  await userEvent.clear(screen.getByLabelText("bufsize"));
+  await userEvent.type(screen.getByLabelText("bufsize"), "65536");          // 64 KiB = 4096·2^4
+  expect(screen.queryByText(REASON_MESSAGES.direct_bufsize_misaligned)).toBeNull();
+  await userEvent.click(submitButton());
+  expect(await screen.findByRole("heading", { name: "요청 상세" })).toBeInTheDocument();
+  expect(captured.body.options).toEqual({ ...SYNC_DEFAULT_OPTS, direct: true, bufsize: 65536 });
+});
+
+test("direct·quiet 설명이 칸 옆에 보인다 — quiet 는 실패 원인까지 지운다, direct 는 nsync 무시 + bufsize 조건", async () => {
+  // 예전엔 title 툴팁뿐이었고 quiet 는 「로그를 줄인다」고만 했다(괴리 [9]·[13]·[18]·[29]).
+  renderPage();
+  await fillSyncTarget();
+  expect(screen.getByText(DIRECT_HELP)).toBeInTheDocument();
+  expect(DIRECT_HELP).toContain("nsync 로 실행되면 무시됩니다");
+  expect(DIRECT_HELP).toContain("bufsize 는 4 KiB~4 MiB 의 2의 거듭제곱");
+  expect(screen.getByText(QUIET_HELP.sync)).toBeInTheDocument();
+  expect(QUIET_HELP.sync).toContain("실패한 항목 목록과 오류 줄도 남지 않아");
+  expect(screen.queryByText(/실행 로그를 줄입니다/)).toBeNull();
+  // nsync 실패 한도(괴리 [21] -- 화면 어디에도 없어 멈춘 이유를 알 수 없었다)는 sync 옵션 구획 캡션
+  expect(screen.getByText(SYNC_MAX_ERRORS_NOTE)).toBeInTheDocument();
+  expect(SYNC_MAX_ERRORS_NOTE).toContain("기본 65,000건");
+  await chooseOperation("rm");
+  expect(screen.getByText(QUIET_HELP.rm)).toBeInTheDocument();
+  expect(QUIET_HELP.rm).toContain("지우지 못한 항목 목록과 오류 줄도 남지 않아");
+  expect(screen.queryByText(SYNC_MAX_ERRORS_NOTE)).toBeNull();
 });
 
 // ---- 슬라이스 37: scan 연산(운영자 전용) ------------------------------------
@@ -790,6 +869,12 @@ test("비관리자 sync 옵션은 delete·contents 만 — direct·quiet·고급
   renderPage();
   await fillSyncTarget();
   expect(screen.getByLabelText("delete")).toBeInTheDocument();
+  // delete 설명은 특수 파일의 같은 이름 목적지 항목을 도구별로 말한다(2026-10-28 리뷰 portal-batch-26·contract-39 -- 사용자
+  // 폼도 한 노드(dsync)로 돌 수 있고, dsync 는 종류가 다른 그 항목을 delete 와 무관하게 지운다)
+  const deleteHelp = screen.getByText(SYNC_OPTION_HELP.delete);
+  expect(deleteHelp).toHaveTextContent("노드 간 실행(nsync)은 대상의 같은 이름 항목을 그대로 두고, 한 노드 실행(dsync)은 그 "
+    + "이름의 대상 항목이 다른 종류면 이 옵션과 무관하게 지운 뒤 아무것도 만들지 않아 그 이름이 대상에서 사라집니다");
+  expect(deleteHelp).not.toHaveTextContent("대상의 같은 이름 항목도 그대로 두며");
   expect(screen.getByLabelText("contents")).toBeInTheDocument();
   expect(screen.queryByLabelText("direct")).not.toBeInTheDocument();
   expect(screen.queryByLabelText("quiet")).not.toBeInTheDocument();

@@ -1,6 +1,7 @@
 import { expect, test } from "vitest";
-import { CHOWN_NAME_ERROR, chownHasName, chownIsPartial, syncOwnership } from "./syncOwnership";
-import { chownFieldError } from "../features/jobs/optionRules";
+import { CHOWN_NAME_ERROR, chownHasName, chownIsPartial, SETID_STRIP_NOTE, syncOwnership } from "./syncOwnership";
+import { chownFieldError, directBufsizeError } from "../features/jobs/optionRules";
+import { REASON_MESSAGES } from "./api";
 
 // 서버 execution_manifests._auto_chown 의 세 갈래 미러(chown 명시 > root 보존 > 실행 신원 uid:gid) +
 // 검증 워크플로 2회(2026-10-01, 포크 소스·테스트베드 실측)가 확인한 도구 동작.
@@ -82,6 +83,21 @@ test("chown + 비 root: gid 는 소속 그룹(주·보조)만(계획 단계 거�
   expect(o.long).toContain("dsync(같은 노드) 는 데이터를 복사한 뒤 작업이 실패하고, nsync(노드 간) 는 소유 변경이 적용되지 않아 실행 신원 소유로 남습니다");
 });
 
+test("소유를 바꾸는 sync(비 root 자동 chown·chown 지정)는 일반 파일의 setuid·setgid 가 지워진다고 말한다 — root+chown 없음은 아니다", () => {
+  // 2026-10-27 d192(괴리 [23]·[30]): 포크 3c041e0(d188)부터 --chown 이 걸리면 일반 파일의 set-ID 비트를 지운다(디렉토리 setgid 는
+  // 유지 -- d189 C9·D2 「setuid 제거·2775 유지」). 예전 문구는 「권한 비트는 소스 그대로」라고만 했다.
+  const clause = "단, 소유를 바꾸므로 일반 파일의 setuid·setgid 비트는 지워집니다(디렉토리의 setgid 는 유지).";
+  expect(SETID_STRIP_NOTE).toBe(clause);
+  expect(syncOwnership({ chown: "", root: false, runAs: "alice", self: true }).long).toContain(clause);
+  expect(syncOwnership({ chown: "", chmod: "F640", root: false, runAs: "alice", self: true }).long).toContain(clause);
+  expect(syncOwnership({ chown: "10003:10000", root: true, runAs: null, self: true }).long).toContain(clause);
+  expect(syncOwnership({ chown: "10003:10000", root: false, runAs: "alice", self: true }).long).toContain(clause);
+  // root 실행에 chown 이 없으면 소유를 바꾸지 않는다 -- 비트도 그대로라 이 문장은 거짓이다.
+  expect(syncOwnership({ chown: "", root: true, runAs: null, self: true }).long).not.toContain("setuid");
+  // 요약(short)은 짧게 둔다 -- 예외는 긴 안내의 몫.
+  expect(syncOwnership({ chown: "", root: false, runAs: "alice", self: true }).short).not.toContain("setuid");
+});
+
 test("chown 한쪽만: 비워 둔 쪽은 소스 값이 유지된다고 말한다", () => {
   expect(chownIsPartial("10003")).toBe(true);
   expect(chownIsPartial(":10000")).toBe(true);
@@ -103,6 +119,18 @@ test("chown 의 이름은 지원하지 않는다(서버 거부) -- 문구는 상
   expect(o.long).toContain("숫자 uid:gid 만 지정할 수 있습니다");
   expect(o.long).not.toMatch(/배치|남은 항목/);              // 배치 문맥 안내는 BatchDetail 몫
   expect(o.long).not.toContain("소유로 셋업됩니다");
+});
+
+test("directBufsizeError: direct 일 때만, 4096·2^k ≤ 4194304 만 통과 — 문구는 서버 422 와 같다(범위 오류·빈 값은 다른 몫)", () => {
+  // 서버 domain.validate_options 미러(2026-10-27 d192, 괴리 [8]). 이 파일은 optionRules 의 다른 미러(chownFieldError)도 고정한다.
+  const msg = REASON_MESSAGES.direct_bufsize_misaligned;
+  expect(msg).toBeTruthy();
+  for (const ok of ["4096", "8192", "65536", "1048576", "4194304", " 4194304 "]) expect(directBufsizeError(true, ok)).toBeNull();
+  for (const bad of ["8388608", "1000000", "6144", "12288", "1073741824"]) expect(directBufsizeError(true, bad)).toBe(msg);
+  // direct 꺼짐이면 무엇이든 이 규칙 밖(범위는 syncIntFieldError)
+  expect(directBufsizeError(false, "8388608")).toBeNull();
+  // 빈 값 = 생략 = 서버 기본 4 MiB(정렬됨), 범위 밖·정수 아님은 범위 오류가 먼저 말한다(한 칸에 두 문장 금지)
+  for (const other of ["", "  ", "100", "2048", "abc", "4096.5", "2000000000"]) expect(directBufsizeError(true, other)).toBeNull();
 });
 
 test("chownFieldError: 숫자는 통과, 이름은 이름 문구, 그 밖의 모양은 형식 문구", () => {

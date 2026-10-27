@@ -125,7 +125,9 @@ function bucketLabel(bucket: string, kind: "hour" | "day"): string {
 // Box 는 제목(h3)을 첫 자식으로 가진 div 라 "제목의 가장 가까운 div = 그 블록" 이 성립한다.
 function Box({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div className="rounded-card border border-line bg-surface p-4">
+    // min-w-0: grid 칸의 기본 최소 폭(auto)이 넓은 표의 내용 폭을 따라가 페이지를 가로로 밀었다(375 실측 445px) -- 칸이
+    // 화면 폭을 따르고 넓은 표는 Table 래퍼(overflow-x-auto) 안에서 민다.
+    <div className="min-w-0 rounded-card border border-line bg-surface p-4">
       <h3 className="font-medium mb-3 text-sm">{title}</h3>
       {children}
     </div>
@@ -176,6 +178,13 @@ function StateCounts({ byState }: { byState: StateCount[] }) {
   );
 }
 
+// 분해 표의 결과 열(2026-10-27 d192 -- 서버 metrics 의 뜻별 묶음과 같은 한 벌): 실패 = Failed·TimedOut(도구·시스템이 끝내지
+// 못함), 거부 = Rejected(점검이 막음), 취소·만료 = Cancelled·PreviewExpired(사람이 멈췄거나 확인하지 않음). 예전엔 「실패」가
+// 종단 − 성공 전부라 취소·만료까지 실패로 보였다. 대시보드 KPI 「실패(24h)」도 같은 Failed·TimedOut 이다(Dashboard.kpiFromStates).
+// 옛 서버는 rejected·cancelled 를 싣지 않는다 -- 0 으로 지어내지 않고 「—」(null≠0). 총에는 진행 중 잡도 들어 있어 넷의 합이
+// 총보다 작을 수 있다.
+const optCount = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
+
 function Breakdown<R extends BreakdownRow>({ title, rows, nameOf }: {
   title: string;
   rows: R[];
@@ -186,24 +195,64 @@ function Breakdown<R extends BreakdownRow>({ title, rows, nameOf }: {
       {rows.length === 0 ? <p className="text-sm text-muted">해당 기간 잡 없음</p> : (
         <Table boxed>
           <thead>
-            <tr className="text-muted">
+            {/* 375 폭(2026-10-27 실측): 여섯 열을 칸 폭에 욱여넣으면 머리글이 한 글자씩(「이/름」) 접히고 이름이 세로로
+                섰다 -- 머리글은 한 줄로 두고 이름 칸에 최소 폭을 줘, 좁으면 표 래퍼(overflow-x-auto) 안에서 가로로 민다. */}
+            <tr className="text-muted [&_th]:whitespace-nowrap">
               <th>이름</th><th className="text-right">총</th>
               <th className="text-right">성공</th><th className="text-right">실패</th>
+              <th className="text-right">거부</th><th className="text-right">취소·만료</th>
             </tr>
           </thead>
           <tbody>
-            {rows.map((r, i) => (
-              <tr key={i}>
-                <td className="font-medium">{nameOf(r) ?? "—"}</td>
-                <td className="text-right tabular-nums">{r.count}</td>
-                <td className="text-right tabular-nums text-ok">{r.succeeded}</td>
-                <td className={`text-right tabular-nums ${r.failed > 0 ? "text-bad" : ""}`}>{r.failed}</td>
-              </tr>
-            ))}
+            {rows.map((r, i) => {
+              const rejected = optCount(r.rejected);
+              const cancelled = optCount(r.cancelled);
+              return (
+                <tr key={i}>
+                  <td className="min-w-[6rem] font-medium break-all">{nameOf(r) ?? "—"}</td>
+                  <td className="text-right tabular-nums">{r.count}</td>
+                  <td className="text-right tabular-nums text-ok">{r.succeeded}</td>
+                  <td className={`text-right tabular-nums ${r.failed > 0 ? "text-bad" : ""}`}>{r.failed}</td>
+                  <td className={`text-right tabular-nums ${rejected !== null && rejected > 0 ? "text-attn" : ""}`}>
+                    {rejected ?? "—"}
+                  </td>
+                  <td className="text-right tabular-nums text-muted">{cancelled ?? "—"}</td>
+                </tr>
+              );
+            })}
           </tbody>
         </Table>
       )}
     </Box>
+  );
+}
+
+// 처리 항목 타일(2026-10-27 d192): 연산별로 나눈다 -- 예전 「처리 항목/바이트」는 sync 반영 항목과 rm 삭제 수를 한 숫자로
+// 더했고 성공 잡만 셌다. 이제 서버가 sync(반영 항목·크기)와 rm(삭제 항목)을 따로, **모든 종단** 잡 중 수를 아는 실행만 더한다
+// (files_count 는 실행 결과만 담는다 -- 실패·중단된 실행이 이미 반영·삭제한 것도 실제 처리다). null = 아는 행 없음 → 「—」.
+// 실패·시간초과·취소 행은 서버가 summary v2(d192 이후 러너) 행만 더한다(metrics.job_stats -- d192 전 실패 행의 files_count 는
+// 계획 합 등 옛 뜻이다). 그래서 캡션의 「부분 처리 포함」은 d192 이후 실행에 대해서만 참이고, 옛 실패 행은 빠진 쪽(모르면 더하지
+// 않는다)이라 수가 부풀지는 않는다 -- 창(최대 30일)이 지나면 그 차이도 사라진다.
+function ProcessedTile({ d }: { d: JobMetrics }) {
+  const syncItems = optCount(d.sync_items_total);
+  const syncBytes = optCount(d.sync_bytes_total);
+  const rmItems = optCount(d.rm_items_total);
+  const n = (v: number | null) => (v === null ? "—" : v.toLocaleString("ko-KR"));
+  return (
+    <div className="rounded-card border border-line bg-panel/60 px-4 py-3">
+      <div className="text-xs text-muted">처리 항목(실행 결과)</div>
+      <dl className="mt-1 grid grid-cols-[max-content_minmax(0,1fr)] items-baseline gap-x-3 gap-y-0.5">
+        <dt className="text-xs text-muted">sync 반영</dt>
+        <dd className="text-lg font-semibold tabular-nums">
+          {n(syncItems)}<span className="text-sm font-normal text-muted">{` 항목 · ${humanBytes(syncBytes)}`}</span>
+        </dd>
+        <dt className="text-xs text-muted">rm 삭제</dt>
+        <dd className="text-lg font-semibold tabular-nums">
+          {n(rmItems)}<span className="text-sm font-normal text-muted"> 항목</span>
+        </dd>
+      </dl>
+      <p className="mt-1 text-xs text-muted">실패·중단된 실행의 부분 처리 포함 · scan 제외</p>
+    </div>
   );
 }
 
@@ -259,12 +308,7 @@ export function JobStatsSection() {
         <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <StatTile label="성공률"><SuccessRateBar byState={byState} /></StatTile>
           <StatTile label="상태별 잡 수"><StateCounts byState={byState} /></StatTile>
-          <div className="rounded-card border border-line bg-panel/60 px-4 py-3">
-            <div className="text-xs text-muted">처리 항목/바이트</div>
-            <div className="mt-1 text-lg font-semibold tabular-nums">
-              {d?.files_total ?? "—"} / {humanBytes(d?.bytes_total ?? null)}
-            </div>
-          </div>
+          <ProcessedTile d={d} />
           <StatTile label="계획 거부">
             <span className="text-lg font-semibold tabular-nums">{d?.plan_rejected ?? 0}</span>
             <span className="ml-1 text-xs text-muted">건 — 잡이 되기 전 거부(아래 사유)</span>
@@ -341,8 +385,10 @@ export function JobStatsSection() {
         </div>
       </Group>
 
-      <Group title="분해" caption="도구·스토리지·사용자별 잡 수와 성공/실패">
-        <div className="grid md:grid-cols-3 gap-4">
+      {/* 결과 열이 여섯이라(Breakdown 주석) 세 표를 한 줄에 두면 md 폭에서 표마다 가로 스크롤이 생긴다 -- 넓은 화면(xl)에서만
+          셋을 나란히, 그 아래는 쌓는다. */}
+      <Group title="분해" caption="도구·스토리지·사용자별 잡 수 — 실패 = Failed·TimedOut, 거부 = Rejected, 취소·만료 = Cancelled·PreviewExpired(총에는 진행 중 포함)">
+        <div className="grid xl:grid-cols-3 gap-4">
           <Breakdown title="도구별" rows={asArray<JobMetrics["by_tool"][number]>(d?.by_tool)}
                      nameOf={(r) => r.tool} />
           <Breakdown title="스토리지별" rows={asArray<JobMetrics["by_storage"][number]>(d?.by_storage)}
@@ -357,8 +403,9 @@ export function JobStatsSection() {
       {(reasons.length > 0 || rejections.length > 0) && (
         <Group title="사유" caption="무엇 때문에 실패하거나 거부됐나 — 많은 순">
           <div className="grid md:grid-cols-2 gap-4">
+            {/* 서버가 Failed·TimedOut·Rejected 의 사유만 센다(d192 -- 취소·만료의 정해진 사유가 상위를 채우지 않게). */}
             {reasons.length > 0 && (
-              <Box title="실패 사유 상위">
+              <Box title="실패·거부 사유 상위">
                 <ReasonTable rows={reasons} />
               </Box>
             )}

@@ -15,15 +15,18 @@ import { ApiError } from "../../lib/api";
 // field·StoragePicker 는 formFields.tsx 에 산다(슬라이스 31 T3) -- 제출 화면이 통째로 갈려도
 // 다른 임포터가 흔들리지 않게 결합을 끊어 둔 것.
 import { StoragePicker, field } from "./formFields";
-import { absolutePath, destinationParent, relativePathProblem } from "../../lib/storagePaths";
+import {
+  absolutePath, destinationParent, relativePathProblem, RM_PATH_LINK_RULE, SYNC_PATH_LINK_RULE,
+} from "../../lib/storagePaths";
 import { pairAllowed, syncChoices } from "../../lib/syncPairs";
 import { syncOwnership } from "../../lib/syncOwnership";
 import { groupCaveat, groupCaveatsFor } from "../../lib/groupCaveats";
 // 옵션 미러(CHMOD_RE·chownFieldError·intFieldError, sync 숫자 범위·프리필 SYNC_INT_FIELDS)는
 // optionRules.ts 로 이사(슬라이스 32 T8) -- BatchCreate 옵션과 공유한다
 // (사본이면 미러가 발산한다).
-import { CHMOD_RE, chownFieldError, DIRECT_HELP, OPEN_NOATIME_HELP, PRIV_ROOT_SYNC, PRIV_USER, SCAN_INT_FIELDS,
-         SYNC_INT_FIELDS, SYNC_OPTION_HELP, scanIntFieldError, syncIntFieldError } from "./optionRules";
+import { BUFSIZE_HELP, CHMOD_RE, chownFieldError, DIRECT_HELP, directBufsizeError, OPEN_NOATIME_HELP, PRIV_ROOT_SYNC,
+         PRIV_USER, QUIET_HELP, SCAN_INT_FIELDS, SYNC_INT_FIELDS, SYNC_MAX_ERRORS_NOTE, SYNC_OPTION_HELP,
+         scanIntFieldError, syncIntFieldError } from "./optionRules";
 // 정책 기본값 캡션(슬라이스 37: 배치 생성과 같은 표시 배선 — 백엔드 무변경).
 import { usePolicies } from "../policies/usePolicies";
 import type { Policy } from "../../lib/types";
@@ -53,12 +56,11 @@ const initial = {
   // batchFiles·bufsize 는 프리필(SYNC_INT_FIELDS.prefill — 「왜」는 그 주석):
   // 값이 실려 있으니 손대지 않으면 바디에 그대로 나간다. 지우면 키가 빠지고 서버가
   // 같은 기본값을 박는다(domain._OPTION_DEFAULTS).
-  // 초기값 ON = **root 실행의 기본**(사용자 결정 2026-08-22 → 2026-09-30 재조정):
-  // O_NOATIME 은 root(또는 파일 소유자)만 쓸 수 있어 비 root 실행에선 타인 소유
-  // 파일 open 이 EPERM 이다(mpifileutils 는 폴백 없이 실패). 2026-09-30 부터 운영자
-  // 단건도 root 가 아닐 수 있어(실행 신원 지정·체크 해제), 이 값은 root 실행일 때만
-  // 실린다(syncOptions). 사용자 폼은 옵션이 숨겨져 어차피 못 바꾼다. 배치는
-  // (자격 있으면) root 라 BatchCreate 가 별도로 기본 ON 을 유지한다.
+  // open_noatime 초기값 ON(사용자 결정 2026-08-22). 운영자 폼은 이 체크박스를 **root 여부와 무관하게** 그대로
+  // 싣는다(2026-10-27, syncOptions): O_NOATIME 은 root(또는 파일 소유자)만 쓸 수 있지만, 포크가 EPERM(실행 신원 소유가
+  // 아닌 파일)이면 그 파일만 O_NOATIME 없이 다시 연다 -- 복사(nsync db1e33c·공통 43ba468)와 dsync --contents 비교(7a3189c)
+  // 모두. 그래서 2026-09-30 의 「root 실행일 때만 싣는다」(비 root 에서 부분 복사 뒤 실패하던 시절의 우회)는 걷혔다 --
+  // 되살리지 마라. 사용자 폼은 옵션을 보이지 않아(isAdmin) 싣지 않는다. 배치는 BatchCreate 가 같은 기본 ON 을 유지한다.
   openNoatime: true,
   batchFiles: SYNC_INT_FIELDS.batch_files.prefill,
   bufsize: SYNC_INT_FIELDS.bufsize.prefill,
@@ -86,9 +88,11 @@ const OPERATION_HELP: Record<Operation, string> = {
 };
 
 // 경로 입력 바로 아래의 즉답: 서버가 거부할 경로면 그 이유(relativePathProblem = validate_relative_path
-// 미러), 아니면 입력한 상대경로가 실제로 가리키는 절대경로(관리 디렉토리를 알 때만 -- 모르면 지어내지
+// 미러), 아니면 입력한 상대경로를 관리 디렉토리에 붙인 절대경로(관리 디렉토리를 알 때만 -- 모르면 지어내지
 // 않는다). 절대경로는 **보내는 값 그대로**로 짓는다 -- 다듬은 값으로 지으면 "/a" 나 "x " 같은 입력에
 // 서버가 실제로 쓰지 않을(또는 거부할) 경로를 그럴듯하게 보여 준다(리뷰 2026-10-06).
+// 라벨은 「지정 경로」(2026-10-27 d192, 괴리 [C2]): 글자 그대로 붙인 경로라 링크를 풀지 않는다 -- 「실제 경로」라 부르면 링크를
+// 거치는 경로로 거부된 뒤 사용자가 화면이 「실제」라 한 바로 그 경로를 다시 낸다(lib/storagePaths absolutePath 주석).
 function PathFeedback({ root, rel }: { root: string | null | undefined; rel: string }) {
   if (rel.trim() === "") return null;
   const problem = relativePathProblem(rel);
@@ -97,7 +101,7 @@ function PathFeedback({ root, rel }: { root: string | null | undefined; rel: str
   return (
     <>
       {abs !== null && (
-        <p className="mt-1 text-xs text-muted [overflow-wrap:anywhere]">{`실제 경로: ${abs}`}</p>
+        <p className="mt-1 text-xs text-muted [overflow-wrap:anywhere]">{`지정 경로: ${abs}`}</p>
       )}
       {rel !== rel.trim() && (
         <p className="mt-1 text-xs text-muted">앞뒤 공백도 경로 이름에 그대로 들어갑니다.</p>
@@ -176,8 +180,10 @@ export function SubmitJob() {
   // 고급 옵션은 sync 전용이라 rm 으로 바꾸면(전송도 안 되므로) 차단 사유에서 빠진다.
   const batchFilesError = f.operation === "sync"
     ? syncIntFieldError("batch_files", f.batchFiles) : null;
+  // 범위 오류가 먼저, 범위 안이면 direct 정렬 조건(서버 422 direct_bufsize_misaligned 미러 -- optionRules 주석). direct 칸은
+  // 관리자에게만 보이지만 f.direct 는 비관리자에겐 늘 false 라 판정이 그대로 맞다.
   const bufsizeError = f.operation === "sync"
-    ? syncIntFieldError("bufsize", f.bufsize) : null;
+    ? syncIntFieldError("bufsize", f.bufsize) ?? directBufsizeError(f.direct, f.bufsize) : null;
   const chmodError = f.operation === "sync" && f.chmod.trim() !== "" && !CHMOD_RE.test(f.chmod.trim())
     ? "chmod 형식이 올바르지 않습니다 (예: D770,F660)" : null;
   const chownError = f.operation === "sync" ? chownFieldError(f.chown) : null;
@@ -331,7 +337,7 @@ export function SubmitJob() {
       </FormSection>
 
       {/* "경로는 관리 디렉토리 아래 상대경로" 는 스토리지 선택 아래 캡션(StoragePicker)이 이미 말하고,
-          입력 아래 "실제 경로" 가 그 결과를 보여 준다 -- 구획 캡션으로 세 번째 반복하지 않는다. */}
+          입력 아래 "지정 경로" 가 그 결과를 보여 준다 -- 구획 캡션으로 세 번째 반복하지 않는다. */}
       <FormSection step={2} title={targetTitle}>
         {/* 목록 로드 실패 문구는 스토리지를 고르는 이 구획에 -- 제출 차단은 blocked 가 맡는다 */}
         {storagesQ.isError && (
@@ -441,6 +447,9 @@ export function SubmitJob() {
                   반영됩니다. 실제 인정 여부는 스토리지 설정에 따라 다를 수 있습니다.
                   {syncGroupCaveats.map((c) => <span key={c} className="block">{c}</span>)}
                 </li>
+                {/* 링크 경로 규칙(2026-10-27 d192, 괴리 [14]) -- 링크로 된 목적지가 위 「디렉토리여야 합니다」를 만족한다고
+                    보고 낸 요청이 preflight 에서 거부됐다(destination_path_redirected). */}
+                <li>{SYNC_PATH_LINK_RULE}</li>
                 <li>조건이 맞지 않으면 미리보기 전에 거부되고 사유가 표시됩니다 — 아무것도 복사되지 않습니다.</li>
                 {canRoot && (
                   <li>root 권한으로 실행하면 권한·소유 검사는 우회됩니다(아래 실행 설정에서 선택) — 상위 디렉토리는
@@ -460,12 +469,18 @@ export function SubmitJob() {
                        placeholder="예: team/projects" onChange={on("target")} />
               </label>
               <PathFeedback root={rootOf(f.storage)} rel={f.target} />
+              {/* rm 대상의 링크 규칙(d191~ 대상 자신이 링크여도 거부 -- 괴리 [14]·[27]): 링크를 지우려던 요청이 거부된 뒤 「링크가
+                  가리키는 곳」을 다시 내지 않게, 고르는 자리에서 먼저 말한다. */}
+              {f.operation === "rm" && (
+                <p className="mt-1 text-xs text-muted" role="note" aria-label="삭제 경로 조건">{RM_PATH_LINK_RULE}</p>
+              )}
             </div>
           </div>
         )}
       </FormSection>
 
-      <FormSection step={3} title="실행 옵션">
+      <FormSection step={3} title="실행 옵션"
+                   caption={f.operation === "sync" ? SYNC_MAX_ERRORS_NOTE : undefined}>
         {f.operation === "sync" ? (
           <>
             {/* 옵션 설명(2026-08-20, 사용자 요청): dsync --delete / --contents. */}
@@ -484,17 +499,20 @@ export function SubmitJob() {
                 payload 는 동일하다 -- checkedOptions 가 기본값(false)을 이미
                 생략하고, 고급 프리필(batch_files·bufsize)은 도구 기본값이라
                 운영자가 고급을 안 펼친 것과 결과가 같다. */}
-            {isAdmin && (
-              <div className="flex flex-wrap gap-x-6 gap-y-2">
-                <label className="flex items-center gap-2 text-sm" title={DIRECT_HELP}>
+            {/* direct·quiet 도 delete·contents 처럼 설명을 칸 옆에 그대로 보인다(2026-10-27 d192): 예전엔 title 툴팁뿐이라
+                quiet 가 실패 원인까지 지운다는 것(괴리 [9]·[13]·[18]·[29])과 direct 의 bufsize 조건([8])이 보이지 않았다. */}
+            {isAdmin && (<>
+              <FieldRow align="check"
+                control={<label className="flex items-center gap-2 text-sm">
                   <input type="checkbox" aria-label="direct" checked={f.direct} onChange={on("direct")} /> direct
-                  <span className="sr-only"> — {DIRECT_HELP}</span>
-                </label>
-                <label className="flex items-center gap-2 text-sm" title="실행 로그를 줄입니다 — 실행 결과 개수(삭제한 항목·복사한 파일)도 「—」가 됩니다. 미리보기(dry-run)에는 적용하지 않습니다(대상 수를 세는 줄이 사라지므로)">
+                </label>}
+                help={DIRECT_HELP} />
+              <FieldRow align="check"
+                control={<label className="flex items-center gap-2 text-sm">
                   <input type="checkbox" aria-label="quiet" checked={f.quiet} onChange={on("quiet")} /> quiet
-                </label>
-              </div>
-            )}
+                </label>}
+                help={QUIET_HELP.sync} />
+            </>)}
             {/* 기본 접힘 — 단순 sync 제출 동선을 바꾸지 않기 위해 <details> 로 숨긴다 */}
             {isAdmin && (
               <details className="rounded-lg border border-line"
@@ -539,7 +557,7 @@ export function SubmitJob() {
                       </label>
                       {bufsizeError && <p className="mt-1 text-bad text-sm">{bufsizeError}</p>}
                     </>}
-                    help="미리 채운 4194304 = 4 MiB(서버 기본). 비워도 같은 값이 적용됩니다." />
+                    help={BUFSIZE_HELP} />
                   <FieldRow
                     control={<>
                       <label className="text-sm block">chmod (선택 · 예: D770,F660 — 콤마 구분, D=디렉터리 F=파일)
@@ -625,12 +643,15 @@ export function SubmitJob() {
               <label className="flex items-center gap-2 text-sm">
                 <input type="checkbox" aria-label="lite" checked={f.lite} onChange={on("lite")} /> lite
               </label>
-              <label className="flex items-center gap-2 text-sm" title="실행 로그를 줄입니다 — 실행 결과 개수(삭제한 항목·복사한 파일)도 「—」가 됩니다. 미리보기(dry-run)에는 적용하지 않습니다(대상 수를 세는 줄이 사라지므로)">
-                <input type="checkbox" aria-label="quiet" checked={f.quiet} onChange={on("quiet")} /> quiet
-              </label>
             </div>
             {recursiveMissing && <p className="text-bad text-sm">재귀 옵션이 필요합니다</p>}
             {statLiteConflict && <p className="text-bad text-sm">stat과 lite는 함께 쓸 수 없습니다</p>}
+            {/* quiet 는 지우지 못한 항목 목록까지 없앤다 -- 설명을 칸 옆에 보인다(sync 와 같은 이유). */}
+            <FieldRow align="check"
+              control={<label className="flex items-center gap-2 text-sm">
+                <input type="checkbox" aria-label="quiet" checked={f.quiet} onChange={on("quiet")} /> quiet
+              </label>}
+              help={QUIET_HELP.rm} />
           </>
         )}
       </FormSection>

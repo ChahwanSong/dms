@@ -831,7 +831,7 @@ class JobStepper:
         promoted = parse_execution_reason(raw)
         return reason_code if promoted is None else promoted
 
-    def _surface_failed_artifact(self, job, ref):
+    def _surface_failed_artifact(self, job, ref, *, promote_counts):
         """실패 잡의 summary 표면화(설계 §2.4). 러너는 도구 비0 종료에도
         summary.json 을 쓰고 exit 하므로(§1-7) returncode 가 카드에 뜬다.
         read_summary 예외는 None(모름)으로 접는다 -- 실패 잡의 보강은 best-effort
@@ -839,8 +839,13 @@ class JobStepper:
         재시도)에 낀다. None 이면 기록하지 않는다 -- artifact_uri 를 지어내면
         포탈이 존재하지 않는 디렉터리를 가리킨다. 비교가 `is not None` 인 것은
         이 슬라이스의 규칙 그대로다: 빈 summary({})는 "러너가 쓰긴 썼다"는
-        정상값이라 모름과 뭉개지 않는다. metrics 는 오염되지 않는다(합계가
-        state='Succeeded' 필터 -- §1-12)."""
+        정상값이라 모름과 뭉개지 않는다.
+
+        promote_counts(2026-10-27 d192): metrics 의 sync·rm 합계는 이제 종단 상태를 가리지 않는다(실패·중단된 실행의
+        부분 처리도 실제로 한 일 -- summary v2 의 files 는 nsync Completed·dsync 복사 성공·drm 실제 삭제 수다; 성공이 아닌
+        행은 result_summary 가 v2 일 때만 센다 -- metrics._SUMMARY_V2_LIKE). 그래서 **실행** 실패는 계속 files_count/
+        bytes_count 로 승격하고(True), **미리보기** 실패·시간초과는 False 로 summary 만 남긴다 -- 미리보기 files 는 할
+        예정인 수라 승격하면 지표에 안 한 일이 섞인다(data_jobs.set_artifact)."""
         try:
             summary = self._exec.read_summary(ref)
         except Exception:
@@ -849,7 +854,7 @@ class JobStepper:
             self._repos.data_jobs.set_artifact(
                 job["job_id"],
                 artifact_uri=f"{self._artifact_base()}/{job['job_id']}",
-                result_summary=summary)
+                result_summary=summary, promote_counts=promote_counts)
 
     def _job_gone(self, job_id) -> bool:
         """잡 행이 없는가(요청 삭제). 조회 실패는 False(모름 -- 지금처럼 request_id 를 단 채 남긴다)."""
@@ -1183,7 +1188,7 @@ class JobStepper:
                 result_summary=summary)
             self._finalize(job, DataJobState.SUCCEEDED, summary=summary)
             return "Succeeded"
-        self._surface_failed_artifact(job, ref)
+        self._surface_failed_artifact(job, ref, promote_counts=True)   # 실행 실패의 부분 처리는 실제로 한 일
         if status == ExecStatus.TIMED_OUT:
             self._finalize(job, DataJobState.TIMED_OUT, reason_code="execution_failed",
                            diag=("execution", ref))
@@ -1237,12 +1242,13 @@ class JobStepper:
             self._repos.data_jobs.set_job_state(jid, DataJobState.CONFIRM_PENDING,
                                                 actor="stepper")
             return "ConfirmPending"
+        # 미리보기 summary 는 표시만 -- files/bytes 는 할 예정인 수라 지표 컬럼으로 승격하지 않는다(_surface_failed_artifact).
         if status == ExecStatus.TIMED_OUT:
-            self._surface_failed_artifact(job, ref)
+            self._surface_failed_artifact(job, ref, promote_counts=False)
             self._finalize(job, DataJobState.TIMED_OUT, reason_code="preview_timed_out",
                            diag=("preview", ref))
             return "TimedOut"
-        self._surface_failed_artifact(job, ref)
+        self._surface_failed_artifact(job, ref, promote_counts=False)
         # 박제는 _run_failure_reason 이 했다(전이 전) -- diag= 를 다시 넘기지 않는다(_preflight_reason 과 같은 규칙).
         reason = self._run_failure_reason(job, "preview", ref, reason_code="preview_failed")
         self._finalize(job, DataJobState.FAILED, reason_code=reason)

@@ -288,16 +288,64 @@ test("16 주석: 이 잡의 phase 이벤트는 ① 미리보기 행에, 다른 �
 test("17 KPI: 결과 {files:120, bytes:456} → 「120개」·「456 B」, rm bytes null 은 크기 칸 없음, 0 은 「0개」", async () => {
   serve({ ...REQ, state: "Failed" }, [{ ...JOB, state: "Succeeded", result_summary: { files: 120, bytes: 456 } }]);
   const v1 = renderAt();
-  expect(await screen.findByText("120개")).toBeInTheDocument();
-  // KPI 칸으로 집는다 -- 1 KiB 미만이면 아래 「실행 결과」 bytes 타일도 같은 「456 B」다.
-  expect(screen.getByText("복사한 크기").nextElementSibling?.textContent).toBe("456 B");
+  // KPI 칸으로 집는다 -- 아래 「실행 결과」 타일도 같은 라벨·표기(옛 3키 요약은 둘 다 중립 「항목 수」·「크기」, d192 리뷰
+  // portal-jobs-20)라 라벨·값만으로는 두 곳이다 -- 실행 구획 밖의 것이 KPI.
+  const r1 = await regions();
+  await within(r1.exec).findByText("항목 수");
+  const kpiOf = (label: string) => screen.getAllByText(label).find((el) => !r1.exec.contains(el));
+  expect(kpiOf("항목 수")?.nextElementSibling?.textContent).toBe("120개");
+  expect(kpiOf("크기")?.nextElementSibling?.textContent).toBe("456 B");
+  expect(screen.queryByText("반영한 항목")).toBeNull();
   v1.unmount();
   // 미리보기 타일에도 「크기」가 있으니 미리보기 요약을 비워 KPI 칸만 본다.
   serve({ ...REQ, operation: "rm" }, [{ ...JOB, operation: "rm", result_summary: { files: 0, bytes: null }, preview_summary: null }]);
   renderAt();
-  expect(await screen.findByText("0개")).toBeInTheDocument();
-  expect(screen.getByText("삭제한 항목")).toBeInTheDocument();
+  const { exec } = await regions();
+  // 「삭제한 항목」은 KPI 와 ② 결과 타일 둘 다다 -- 실행 구획 밖의 것이 KPI.
+  await within(exec).findByText("삭제한 항목");
+  const kpiDt = screen.getAllByText("삭제한 항목").find((el) => !exec.contains(el));
+  expect(kpiDt?.nextElementSibling?.textContent).toBe("0개");
+  expect(within(exec).getByText("삭제한 항목").nextElementSibling?.textContent).toBe("0개");
   expect(screen.queryByText("크기")).toBeNull();
+});
+
+test("17b d192 실패한 nsync 실행: 사유 문구 + KPI 「반영한 항목」(계획) + ② 결과의 「실패 항목」과 stdout.log 열기", async () => {
+  // 실 도구 출력(mpifileutils 7a3189c, nsync_exec_items_failed)을 summary v2 계약대로 옮긴 모양
+  const result = { detail_version: 2, returncode: 1, files: 23, bytes: 100, tool: "nsync", dryrun: false,
+    planned: { copy: 25, mkdir: 2, symlink_update: 0, meta_update: 1, remove: 0, skipped_dst_only: 0 },
+    done: { copy: 20, mkdir: 2, symlink_update: 0, meta_update: 1, remove: 0 }, copied_bytes: 100,
+    failures: { total: 5, by_op: { copy: 5 } },
+    failure_samples: ["r1", "r2", "r3", "r4", "r5"].map((n) => ({ op: "copy", path: `ro/${n}`, errno: 13 })),
+    reason: "sync_items_failed" };
+  const preview = { detail_version: 2, returncode: 0, files: 28, bytes: 125, tool: "nsync", dryrun: true, planned_bytes: 125,
+    planned: result.planned };
+  server.use(
+    http.get("/api/user/jobs/j1/artifacts", () => HttpResponse.json({ entries: [
+      { phase: "execution", name: "stdout.log", size: 2825, modified_at: 2 }], truncated: false })),
+    http.get("/api/user/jobs/j1/logs", () => HttpResponse.json({ phase: "execution", ref: "vcjob/j1", source: "archived", entries: [] })),
+    http.get("/api/user/jobs/j1/artifacts/:phase/:name", () => HttpResponse.json({ phase: "execution", name: "stdout.log",
+      size: 2825, truncated: false, content: "[2026-10-27T13:52:40]   failed copy `ro/r1`: Permission denied (errno 13)\n" })),
+  );
+  serve({ ...REQ, state: "Failed", reason_code: "sync_items_failed",
+    transitions: [tr(null, "Pending", 0), tr("Pending", "Planned", 2), tr("Planned", "Failed", 40)] },
+    [{ ...JOB, tool: "nsync", state: "Failed", reason_code: "sync_items_failed", result_summary: result, preview_summary: preview,
+      transitions: [...SYNC_OK_TR.slice(0, 6), tr("Executing", "Failed", 37)] }]);
+  renderAt();
+  const { exec } = await regions();
+  // 배너: 사유(일부 항목) + 실제로 반영된 것 + 원인 위치(stderr.log 아님)
+  expect(screen.getByText("사유").nextElementSibling?.textContent)
+    .toBe("일부 항목을 반영하지 못했습니다 — 반영된 수와 실패한 항목·이유는 실행 결과에, 전체 목록은 stdout.log 에 있습니다");
+  expect(screen.getByText(/^실패로 끝나기 전까지 복사 20개·디렉토리 생성 2개·속성 갱신 1개가 반영됐습니다\./)).toBeInTheDocument();
+  expect(screen.queryByText(/stderr\.log/)).toBeNull();
+  // KPI
+  const kpi = screen.getByText("반영한 항목");
+  expect(kpi.nextElementSibling?.textContent).toBe("23개");
+  expect(kpi.nextElementSibling?.nextElementSibling?.textContent).toBe("복사 20 · 디렉토리 생성 2 · 속성 갱신 1 (계획 28개)");
+  // ② 결과 + 실패 항목 → stdout.log 열기(출력 칩과 같은 뷰어)
+  const box = within(exec).getByRole("region", { name: "실패 항목" });
+  expect(within(box).getByRole("heading", { name: "실패 항목 5개" })).toBeInTheDocument();
+  await userEvent.click(await within(box).findByRole("button", { name: "stdout.log 열기" }));
+  expect(await within(exec).findByRole("button", { name: "execution/stdout.log", pressed: true })).toBeInTheDocument();
 });
 
 test("V1 잡 첫 조회 실패(요청 비종단): 화면이 2초마다 로딩 골격으로 흔들리지 않고, 「다시 시도」 중에도 상자·문구가 남는다", async () => {
@@ -521,7 +569,7 @@ test("3차 대비: 잡 카드·결과 타일·컨펌 창의 의미 있는 글자
   expect(offenders).toEqual([]);
   expect(within(jobs).getAllByText("dsync · 4 노드")[0]).toHaveClass("text-ink/70");
   expect(within(spec).getByText("보조 그룹(gid)")).toHaveClass("text-ink/70");
-  expect(within(jobs).getByText("bytes")).toHaveClass("text-ink/70");
+  expect(within(jobs).getByText("항목 수")).toHaveClass("text-ink/70");     // 「실행 결과」 타일 라벨(d192 -- 원 키 대신)
   expect(within(dlg).getByText(/^지문\(fingerprint\)/)).toHaveClass("text-ink/70");
   expect(within(dlg).getByText(/^만료: /)).toHaveClass("text-ink/70");
 });

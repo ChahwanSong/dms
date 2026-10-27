@@ -1,7 +1,7 @@
 import { expect, test } from "vitest";
 import type { DataJob, RequestDetail, Transition } from "../../lib/types";
 import { deriveJobStages } from "./stageModel";
-import { deriveKpi, deriveOutcome, focusJob } from "./requestOutcome";
+import { deriveKpi, deriveOutcome, focusJob, toolNeverStarted } from "./requestOutcome";
 
 // 결과 배너·KPI 표 테스트(2026-10-08 요청 상세 재설계 §11.4). 「완료됐지만 0건」 주의는 넣지 않았다 -- 미리보기
 // summary 와 실행 summary 의 files 가 같은 뜻이 아니다(dsync dry-run 은 훑은 소스 항목 수, nsync 는 계획된 변경 수,
@@ -88,7 +88,182 @@ test("실행 중 실패·취소 문구는 연산별로 데이터가 바뀌었을
   const cancelled = outcome({ state: "Cancelled" }, [job({ state: "Cancelled", phase_refs: { preflight: "a", preview: "b", exec_preflight: "c", execution: "v" },
     transitions: [...SYNC_OK_TR.slice(0, 6), t("Executing", "Cancelled", 30)] })]);
   expect(cancelled.title).toBe("실행 중에 취소되었습니다");
-  expect(cancelled.next?.text).toBe("실행 중에 취소되어 일부 파일이 이미 복사됐을 수 있습니다.");
+  // sync 는 복사만이 아니라 삭제·교체도 이미 일어났을 수 있다(괴리 [C1] -- d189-C13 은 복사 0, 삭제 5 뒤 실패)
+  expect(cancelled.next?.text).toBe("실행 중에 취소되어 일부 항목이 이미 복사·삭제됐거나 형식이 바뀌어 교체됐을 수 있습니다.");
+  // 요약 v2 가 없는 sync 실행 실패도 같은 말 + 원인은 stdout.log(stderr.log 가 아니다, 괴리 [19])
+  const sync = outcome({ state: "Failed" }, [job({ state: "Failed", reason_code: "execution_failed:x", phase_refs: { execution: "v" } })]);
+  expect(sync.next?.text).toBe("실패 전에 일부 항목이 이미 복사·삭제됐거나 형식이 바뀌어 교체됐을 수 있습니다. "
+    + "실행 로그와 실행 출력(stdout.log)에서 원인을 찾으세요.");
+  expect(sync.next?.text).not.toContain("stderr.log");
+  expect(rm.next?.text).not.toContain("stderr.log");
+});
+
+// ---- d192 summary v2 · 도구 실패 사유(포탈 괴리 [2]·[4]·[10]·[11]·[12]·[16]·[19]·[C1]) ---------------------------------
+// 실 도구 출력(mpifileutils 7a3189c, mfu-tests/samples)을 summary v2 계약대로 옮긴 모양(StageResults.test 와 같은 출처).
+const V2 = { detail_version: 2 };
+const NSYNC_FAILED = { ...V2, returncode: 1, files: 23, bytes: 100, tool: "nsync", dryrun: false,
+  planned: { copy: 25, mkdir: 2, symlink_update: 0, meta_update: 1, remove: 0, skipped_dst_only: 0 },
+  done: { copy: 20, mkdir: 2, symlink_update: 0, meta_update: 1, remove: 0 }, copied_bytes: 100,
+  failures: { total: 5, by_op: { copy: 5 } },
+  failure_samples: ["r1", "r2", "r3", "r4", "r5"].map((n) => ({ op: "copy", path: `ro/${n}`, errno: 13 })),
+  reason: "sync_items_failed" };
+const NSYNC_PREVIEW = { ...V2, returncode: 0, files: 25 + 2 + 1, bytes: 125, tool: "nsync", dryrun: true, planned_bytes: 125,
+  planned: { copy: 25, mkdir: 2, symlink_update: 0, meta_update: 1, remove: 0, skipped_dst_only: 0 } };
+const EXEC_TR = [...SYNC_OK_TR.slice(0, 6), t("Executing", "Failed", 37)];
+const ALL = { preflight: "a", preview: "b", exec_preflight: "c", execution: "v" };
+
+test("실행 실패(도구 사유 + v2): 실제로 반영된 것을 말하고, 원인은 결과의 「실패 항목」과 stdout.log", () => {
+  const o = outcome({ state: "Failed", reason_code: "sync_items_failed" }, [job({ state: "Failed", tool: "nsync",
+    reason_code: "sync_items_failed", phase_refs: ALL, transitions: EXEC_TR, result_summary: NSYNC_FAILED,
+    preview_summary: NSYNC_PREVIEW })]);
+  expect(o.title).toBe("실행 단계에서 실패했습니다");
+  expect(o.next?.text).toBe("실패로 끝나기 전까지 복사 20개·디렉토리 생성 2개·속성 갱신 1개가 반영됐습니다. "
+    + "원인은 아래 실행 결과의 「실패 항목」과 실행 출력(stdout.log)에 있습니다.");
+  expect(o.next?.actions).toEqual(["failLog"]);
+  // 반영이 0 이면 그렇게 말한다(「됐을 수 있습니다」로 얼버무리지 않는다 -- 0 은 정상값)
+  const zero = outcome({ state: "Failed" }, [job({ state: "Failed", tool: "nsync", reason_code: "sync_stopped_max_errors",
+    phase_refs: ALL, transitions: EXEC_TR, result_summary: { ...NSYNC_FAILED,
+      done: { copy: 0, mkdir: 0, symlink_update: 0, meta_update: 0, remove: 0 }, files: 0 } })]);
+  expect(zero.next?.text).toMatch(/^실패로 끝나기 전까지 반영된 항목은 없습니다\. /);
+  // dsync: 복사·삭제 수
+  const ds = outcome({ state: "Failed" }, [job({ state: "Failed", tool: "dsync", reason_code: "sync_items_failed",
+    phase_refs: ALL, transitions: EXEC_TR, result_summary: { ...V2, returncode: 1, files: 1, bytes: 3, tool: "dsync",
+      copied_items: 1, copy_failed: 1, removed: 2, copied_bytes: 3 } })]);
+  expect(ds.next?.text).toMatch(/^실패로 끝나기 전까지 복사 1개·삭제 2개가 반영됐습니다\. /);
+  // drm: 지운 수 + 못 지운 수
+  const rm = outcome({ state: "Failed", operation: "rm" }, [job({ operation: "rm", state: "Failed", tool: "drm",
+    reason_code: "rm_items_failed", phase_refs: ALL, transitions: EXEC_TR,
+    result_summary: { ...V2, returncode: 1, files: 4, bytes: null, tool: "drm", removed: 4, remove_failed: 5 } })]);
+  expect(rm.next?.text).toBe("실패로 끝나기 전까지 4개를 삭제했습니다. 5개는 지우지 못했습니다. "
+    + "원인은 아래 실행 결과의 「실패 항목」과 실행 출력(stdout.log)에 있습니다.");
+});
+
+test("MPI 중단: 계획 수를 반영으로 말하지 않고(「됐을 수 있습니다」), 원인은 stderr 쪽(ABORT 줄은 stdout.log 에 없다)", () => {
+  // d192 리뷰 portal-jobs-12·16: 중단된 dsync 는 마지막 요약 블록이 없다 -- 남은 「Items: 1」은 복사 전 계획 줄이었다. 러너는
+  // 이제 수를 null 로 두지만(D6), 옛 값이 실려 와도 aborted 면 반영 수로 읽지 않는다.
+  for (const result_summary of [
+    { ...V2, returncode: 134, files: null, bytes: null, tool: "dsync", copy_failed: 0, aborted: true, reason: "tool_aborted" },
+    { ...V2, returncode: 1, files: 1, bytes: 4194304, tool: "dsync", copied_items: 1, copy_failed: 0, aborted: true },
+  ]) {
+    const o = outcome({ state: "Failed" }, [job({ state: "Failed", tool: "dsync", reason_code: "tool_aborted", phase_refs: ALL,
+      transitions: EXEC_TR, result_summary })]);
+    expect(o.next?.text).toBe("실패 전에 일부 항목이 이미 복사·삭제됐거나 형식이 바뀌어 교체됐을 수 있습니다. "
+      + "도구가 비정상 종료했습니다 — 원인은 실행 로그의 stderr 발췌나 stderr.log 의 ABORT 줄에 있습니다.");
+    expect(o.next?.text).not.toContain("stdout.log");
+    expect(o.next?.text).not.toContain("반영됐습니다");
+  }
+  // rm 도 같다(도구 이름을 「복사 도구」라 하지 않는다 -- 사유 문구는 api.ts 의 몫)
+  const rm = outcome({ state: "Failed", operation: "rm" }, [job({ operation: "rm", state: "Failed", tool: "drm",
+    reason_code: "tool_aborted", phase_refs: ALL, transitions: EXEC_TR,
+    result_summary: { ...V2, returncode: 134, files: null, bytes: null, tool: "drm", aborted: true, reason: "tool_aborted" } })]);
+  expect(rm.next?.text).toBe("실패 전에 일부 파일이 이미 삭제됐을 수 있습니다. "
+    + "도구가 비정상 종료했습니다 — 원인은 실행 로그의 stderr 발췌나 stderr.log 의 ABORT 줄에 있습니다.");
+  // 미리보기 중단도 stderr 쪽을 가리킨다
+  const PRE_FAIL_TR = [...SYNC_OK_TR.slice(0, 3), t("PreviewRunning", "Failed", 12)];
+  const pv = outcome({ state: "Failed" }, [job({ state: "Failed", tool: "dsync", reason_code: "tool_aborted",
+    phase_refs: { preflight: "a", preview: "b" }, transitions: PRE_FAIL_TR,
+    result_summary: { ...V2, returncode: 134, files: null, bytes: null, tool: "dsync", dryrun: true, aborted: true } })]);
+  expect(pv.next?.text).toBe("도구가 비정상 종료했습니다 — 원인은 미리보기 로그의 stderr 발췌나 stderr.log 의 ABORT 줄에 있습니다. "
+    + "미리보기는 dry-run 이라 데이터는 변경되지 않았습니다.");
+});
+
+test("v2 실패지만 실패 항목이 없으면 없는 「실패 항목」을 가리키지 않는다", () => {
+  const o = outcome({ state: "Failed" }, [job({ state: "Failed", tool: "dsync", reason_code: "execution_failed:rc1", phase_refs: ALL,
+    transitions: EXEC_TR, result_summary: { ...V2, returncode: 1, files: 1, bytes: 4, tool: "dsync", copied_items: 1,
+      copy_failed: 0 } })]);
+  expect(o.next?.text).toBe("실패로 끝나기 전까지 복사 1개가 반영됐습니다. 실행 로그와 실행 출력(stdout.log)에서 원인을 찾으세요.");
+});
+
+test("dsync 삭제 켬 + 지운 수 모름: 「반영된 항목은 없습니다」라 하지 않는다(null≠0, 리뷰 portal-jobs-19)", () => {
+  const mk = (summary: object, options: Record<string, unknown>) => outcome({ state: "Failed" }, [job({ state: "Failed", tool: "dsync",
+    reason_code: "sync_items_failed", options, phase_refs: ALL, transitions: EXEC_TR,
+    result_summary: { ...V2, returncode: 1, files: 0, bytes: 0, tool: "dsync", copy_failed: 1, ...summary } })]).next?.text;
+  // 복사 0 + 지운 수 모름(Removed 줄이 버려졌다) -- 아는 반영이 없으니 「됐을 수 있습니다」
+  expect(mk({ copied_items: 0 }, { delete: true }))
+    .toMatch(/^실패 전에 일부 항목이 이미 복사·삭제됐거나 형식이 바뀌어 교체됐을 수 있습니다\. /);
+  // 복사 3 + 지운 수 모름 -- 아는 것만 말하고 모르는 것을 밝힌다
+  expect(mk({ copied_items: 3 }, { delete: true }))
+    .toMatch(/^실패로 끝나기 전까지 복사 3개가 반영됐습니다\(삭제 수는 알 수 없습니다\)\. /);
+  // 삭제를 끈 실행은 Removed 줄이 없으면 지울 목록이 없었다 -- 0 으로 말해도 된다
+  expect(mk({ copied_items: 0 }, { delete: false })).toMatch(/^실패로 끝나기 전까지 반영된 항목은 없습니다\. /);
+  // 복사 수를 모르면(마지막 블록 없음) 지운 수만으로 「없습니다」라 하지 않는다
+  expect(mk({ removed: 0 }, { delete: true }))
+    .toMatch(/^실패 전에 일부 항목이 이미 복사·삭제됐거나 형식이 바뀌어 교체됐을 수 있습니다\. /);
+  expect(mk({ removed: 2 }, { delete: true }))
+    .toMatch(/^실패로 끝나기 전까지 삭제 2개가 반영됐습니다\(복사 수는 알 수 없습니다\)\. /);
+});
+
+test("quiet 실행 실패: 로그에 원인이 없다는 사실과 다시 실행하는 방법", () => {
+  const o = outcome({ state: "Failed" }, [job({ state: "Failed", tool: "nsync", reason_code: "execution_failed",
+    options: { quiet: true }, phase_refs: ALL, transitions: EXEC_TR,
+    result_summary: { ...V2, returncode: 1, files: null, bytes: null, tool: "nsync", quiet: true } })]);
+  expect(o.next?.text).toBe("실패 전에 일부 항목이 이미 복사·삭제됐거나 형식이 바뀌어 교체됐을 수 있습니다. "
+    + "quiet 로 실행돼 도구가 오류·실패 항목을 남기지 않았습니다 — 원인을 보려면 quiet 를 끄고 다시 실행하세요.");
+});
+
+test("도구 시작 전 사유(실행 단계): 「이미 복사·삭제됐을 수 있다」 대신 데이터 무변경 + 새 작업", () => {
+  for (const [op, reason] of [["sync", "destination_path_redirected"], ["sync", "source_path_redirected"],
+    ["rm", "target_path_redirected"], ["sync", "workers_unreachable"], ["rm", "identity_groups_not_applied"]] as const) {
+    const o = outcome({ state: "Failed", operation: op }, [job({ operation: op, state: "Failed", reason_code: reason,
+      phase_refs: ALL, transitions: EXEC_TR, result_summary: { returncode: null, files: null, bytes: null } })]);
+    expect(o.title).toBe("실행 단계에서 실패했습니다");
+    expect(o.next?.text).toBe("도구가 시작되기 전에 멈춰 데이터는 바뀌지 않았습니다 — 사유를 확인한 뒤 다시 제출하세요.");
+    expect(o.next?.actions).toEqual(["failLog", "newJob"]);
+  }
+});
+
+test("미리보기 실패: 도구 사유 + 실패 항목이 있으면 결과의 「실패 항목」과 stdout.log, 도구 시작 전 사유면 그 사실", () => {
+  const PRE_FAIL_TR = [...SYNC_OK_TR.slice(0, 3), t("PreviewRunning", "Failed", 12)];
+  const pf = outcome({ state: "Failed" }, [job({ state: "Failed", tool: "nsync", reason_code: "source_scan_incomplete",
+    phase_refs: { preflight: "a", preview: "b" }, transitions: PRE_FAIL_TR,
+    result_summary: { ...V2, returncode: 1, files: 2, bytes: 0, tool: "nsync", dryrun: true, scan_errors: 1,
+      failures: { total: 1, by_op: { scan: 1 } }, failure_samples: [{ op: "scan", path: "locked", errno: 13 }] } })]);
+  expect(pf.title).toBe("미리보기 단계에서 실패했습니다");
+  expect(pf.next?.text).toBe("원인은 미리보기 결과의 「실패 항목」과 미리보기 출력(stdout.log)에 있습니다. "
+    + "미리보기는 dry-run 이라 데이터는 변경되지 않았습니다.");
+  const old = outcome({ state: "Failed" }, [job({ state: "Failed", reason_code: "preview_failed:rc2",
+    phase_refs: { preflight: "a", preview: "b" }, transitions: PRE_FAIL_TR, result_summary: { returncode: 2, files: null, bytes: null } })]);
+  expect(old.next?.text).toBe("미리보기 로그와 미리보기 출력(stdout.log)에서 원인을 찾으세요. 미리보기는 dry-run 이라 데이터는 변경되지 않았습니다.");
+  const wu = outcome({ state: "Failed" }, [job({ state: "Failed", reason_code: "workers_unreachable",
+    phase_refs: { preflight: "a", preview: "b" }, transitions: PRE_FAIL_TR })]);
+  expect(wu.next?.text).toBe("도구가 시작되기 전에 멈췄습니다 — 사유를 확인한 뒤 다시 제출하세요. 미리보기는 dry-run 이라 데이터는 변경되지 않았습니다.");
+});
+
+test("toolNeverStarted: 큐 대기 관문은 RUNNING 관측 전에만 도구 시작 전이다", () => {
+  const mk = (reason: string, sched: number | null) => {
+    const j = job({ state: "Failed", reason_code: reason, phase_refs: ALL, transitions: EXEC_TR, sched_wait_seconds: sched,
+      exec_submitted_at: "2026-10-08T03:15:27Z" });
+    return toolNeverStarted(j, deriveJobStages(j));
+  };
+  expect(mk("destination_path_redirected", 3)).toBe(true);
+  expect(mk("workers_unreachable", 3)).toBe(true);
+  expect(mk("execution_submit_failed:422", null)).toBe(true);
+  expect(mk("node_excluded_at_step", null)).toBe(true);
+  expect(mk("node_excluded_at_step", 3)).toBe(false);           // 한 번 RUNNING 이었다 -- 도구가 돌았을 수 있다
+  expect(mk("identity_changed_at_step", 0)).toBe(false);        // 0 은 「같은 틱에 스케줄됨」(정상값) -- 관측됐다
+  // 노드 CPU 재검사(_raise_if_cpu_short)도 실행 vcjob 의 PENDING 분기 관문이다(d192 리뷰 portal-jobs-24) -- 파드 재시작으로
+  // 다시 PENDING 이면 도구가 이미 돌았을 수 있다. identity_missing_at_step(_note_queued_recheck 의 모양 검사)도 같다.
+  expect(mk("node_cpu_insufficient_at_step", null)).toBe(true);
+  expect(mk("node_cpu_insufficient_at_step", 3)).toBe(false);
+  expect(mk("identity_missing_at_step", 3)).toBe(false);
+  // 제출 직전에만 나오는 관문은 RUNNING 관측과 무관하게 도구 시작 전이다
+  expect(mk("storage_missing_at_step", 3)).toBe(true);
+  expect(mk("sync_items_failed", null)).toBe(false);
+  expect(mk("execution_failed", null)).toBe(false);
+});
+
+test("컨펌 대기 배너: 미리보기가 아는 위험이 있으면 그 수를 먼저 말한다(괴리 [6])", () => {
+  const tc = { ...V2, returncode: 0, files: 3, bytes: 16, tool: "nsync", dryrun: true, planned_bytes: 16,
+    planned: { copy: 2, mkdir: 0, symlink_update: 0, meta_update: 0, remove: 1, skipped_dst_only: 1 },
+    type_changes: { to_dir: 0, from_dir: 1 }, type_change_needs_delete: true };
+  const o = outcome({ state: "Planned" }, [job({ state: "ConfirmPending", tool: "nsync", preview_summary: tc })]);
+  expect(o.next?.text).toBe("미리보기에 컨펌 전에 확인할 점이 2가지 있습니다 — 「미리보기 결과 보기」에서 확인하세요. "
+    + "미리보기 결과를 검토한 뒤 컨펌하면 실제 실행이 시작됩니다. 실행하지 않으려면 컨펌하지 않고 취소하세요.");
+  const plain = outcome({ state: "Planned" }, [job({ state: "ConfirmPending", tool: "nsync", preview_summary: NSYNC_PREVIEW })]);
+  expect(plain.next?.text).toBe("미리보기 결과를 검토한 뒤 컨펌하면 실제 실행이 시작됩니다. 실행하지 않으려면 컨펌하지 않고 취소하세요.");
+  // 삭제 옵션이 꺼진 nsync 의 타입 교체 삭제에도 보조 그룹 경고(rm·delete 만 보던 것을 넓혔다)
+  expect(outcome({ state: "Planned" }, [job({ state: "ConfirmPending", tool: "nsync", preview_summary: tc,
+    worker_pool: { identity: { supplementary_gids_status: "applied" } } as never })]).next?.groupWarning).toBe(true);
 });
 
 test("초점 잡 우선순위: 실패 > 컨펌 대기 > 진행 > 취소 > 만료 > 성공, 여럿이면 제목에 (작업 n개 중 k개)", () => {
@@ -307,29 +482,80 @@ test("KPI: 결과 수치는 단위를 붙이고, 0 은 「0개」, 미리보기 
   const done = job({ state: "Succeeded", transitions: SYNC_OK_TR, result_summary: { files: 120, bytes: 456 },
     preview_summary: { files: 2, bytes: 10, returncode: 0 } });
   const tiles = kpi({}, [done]);
+  // 옛 3키 요약(상세 없음) -- 미리보기 보조 줄은 뜻을 단정하지 않는 「미리보기」, 라벨도 중립(「항목 수」·「크기」 -- 실행 결과
+  // 타일과 같은 이름, 옛 nsync files 는 계획 합이라 「반영한」이 아니다, 리뷰 portal-jobs-20·contract-37)
   expect(tiles.map((x) => [x.label, x.value, x.sub])).toEqual([
-    ["복사한 파일", "120개", "미리보기 2개"],
-    ["복사한 크기", "456 B", "미리보기 10 B"],
+    ["항목 수", "120개", "미리보기 2개"],
+    ["크기", "456 B", "미리보기 10 B"],
     ["수행시간", "40초", "실행 단계 소요 19초"],
     ["제출 대기", "2초", "플래너 배정까지"],
   ]);
   expect(kpi({}, [{ ...done, result_summary: { files: 0, bytes: 0 } }])[0].value).toBe("0개");
 });
 
+test("KPI v2 sync: 「반영한 항목」 + 종류별 내역 + 계획(nsync) / 소스 전체(dsync -- 크기 미리보기 없음)", () => {
+  const ns = job({ state: "Failed", tool: "nsync", reason_code: "sync_items_failed", phase_refs: ALL, transitions: EXEC_TR,
+    result_summary: NSYNC_FAILED, preview_summary: NSYNC_PREVIEW });
+  expect(kpi({ state: "Failed" }, [ns]).slice(0, 2).map((x) => [x.label, x.value, x.sub])).toEqual([
+    ["반영한 항목", "23개", "복사 20 · 디렉토리 생성 2 · 속성 갱신 1 (계획 28개)"],
+    ["복사한 크기", "100 B", "계획 125 B"],
+  ]);
+  const ds = job({ state: "Succeeded", tool: "dsync", transitions: SYNC_OK_TR,
+    result_summary: { ...V2, returncode: 0, files: 1, bytes: 2, tool: "dsync", copied_items: 1, copied_bytes: 2, removed: 3 },
+    preview_summary: { ...V2, returncode: 0, files: 6, bytes: null, tool: "dsync", dryrun: true, source_items: 6 } });
+  expect(kpi({}, [ds]).slice(0, 2).map((x) => [x.label, x.value, x.sub])).toEqual([
+    ["반영한 항목", "1개", "복사 기준 · 삭제 3개 별도 (소스 전체 6개)"],
+    ["복사한 크기", "2 B", null],
+  ]);
+  // 여러 잡의 미리보기 뜻이 다르면(nsync 계획 + dsync 소스 전체) 합을 보조 줄로 붙이지 않는다
+  const mixed = kpi({}, [{ ...ns, job_id: "a", state: "Succeeded", transitions: SYNC_OK_TR }, { ...ds, job_id: "b" }]);
+  expect(mixed[0]).toMatchObject({ label: "반영한 항목", value: "24개", sub: null });
+  // 옛 요약이 하나라도 섞이면(롤아웃 중 옛 러너) 합계 라벨은 중립 -- 그 수는 「반영한」 뜻이 아니다
+  const old = job({ job_id: "c", state: "Succeeded", transitions: SYNC_OK_TR, result_summary: { returncode: 0, files: 4, bytes: 5 } });
+  expect(kpi({}, [{ ...ds, job_id: "b" }, old]).slice(0, 2).map((x) => [x.label, x.value]))
+    .toEqual([["항목 수", "5개"], ["크기", "7 B"]]);
+});
+
+test("KPI v2 rm: 「삭제한 항목」 + 「못 지운 항목」(아는 잡이 있을 때만 -- 성공한 drm 은 칸 없음)", () => {
+  const part = job({ operation: "rm", state: "Failed", tool: "drm", reason_code: "rm_items_failed", phase_refs: ALL,
+    transitions: EXEC_TR, preview_summary: { ...V2, returncode: 0, files: 9, bytes: null, tool: "drm", target_items: 9 },
+    result_summary: { ...V2, returncode: 1, files: 4, bytes: null, tool: "drm", removed: 4, remove_failed: 5 } });
+  expect(kpi({ state: "Failed", operation: "rm" }, [part]).map((x) => [x.label, x.value, x.sub])).toEqual([
+    ["삭제한 항목", "4개", "삭제 대상 9개"],
+    ["못 지운 항목", "5개", "결과의 「실패 항목」 참고"],
+    ["수행시간", "40초", "실행 단계 소요 19초"],
+    ["제출 대기", "2초", "플래너 배정까지"],
+  ]);
+  const ok = { ...part, state: "Succeeded", reason_code: null, transitions: SYNC_OK_TR,
+    result_summary: { ...V2, returncode: 0, files: 9, bytes: null, tool: "drm", removed: 9 } };
+  expect(kpi({ operation: "rm" }, [ok]).map((x) => x.label)).toEqual(["삭제한 항목", "수행시간", "제출 대기"]);
+});
+
 test("KPI null 전파: 한 잡이라도 모르면 합계를 지어내지 않는다", () => {
   const a = job({ job_id: "a", state: "Succeeded", result_summary: { files: 1, bytes: 1 } });
   const b = job({ job_id: "b", state: "Succeeded", result_summary: { files: null, bytes: 2 } });
   const tiles = kpi({}, [a, b]);
-  expect(tiles[0]).toMatchObject({ label: "복사한 파일", value: "—", sub: "일부 작업은 아직 집계 전" });
-  expect(tiles[1]).toMatchObject({ label: "복사한 크기", value: "3 B" });
+  expect(tiles[0]).toMatchObject({ label: "항목 수", value: "—", sub: "일부 작업은 아직 집계 전" });
+  expect(tiles[1]).toMatchObject({ label: "크기", value: "3 B" });
 });
 
-test("KPI 실행 전 단건: 라벨이 「복사 대상」·「대상 크기」(rm 「삭제 대상」)로 바뀌고 보조 줄이 기준을 말한다", () => {
+test("KPI 실행 전 단건: 미리보기 값을 그 뜻의 라벨로(nsync 변경 예정·dsync 소스 전체·모름 미리보기 항목, rm 「삭제 대상」)", () => {
   const cp = job({ state: "ConfirmPending", preview_summary: { files: 1204, bytes: 3435973837, returncode: 0 } });
   const tiles = kpi({ state: "Planned" }, [cp]);
   expect(tiles.slice(0, 2).map((x) => [x.label, x.value, x.sub])).toEqual([
-    ["복사 대상", "1,204개", "미리보기 기준 · 실행 전"],
+    ["미리보기 항목", "1,204개", "미리보기 기준 · 실행 전"],
     ["대상 크기", "3.2 GiB", "미리보기 기준 · 실행 전"],
+  ]);
+  expect(kpi({ state: "Planned" }, [{ ...cp, tool: "nsync", preview_summary: NSYNC_PREVIEW }]).slice(0, 2)
+    .map((x) => [x.label, x.value, x.sub])).toEqual([
+    ["변경 예정", "28개", "복사 25 · 디렉토리 생성 2 · 속성 갱신 1 (미리보기)"],
+    ["복사할 크기", "125 B", "미리보기 기준 · 실행 전"],
+  ]);
+  expect(kpi({ state: "Planned" }, [{ ...cp, tool: "dsync",
+    preview_summary: { ...V2, returncode: 0, files: 6, bytes: null, tool: "dsync", dryrun: true, source_items: 6 } }]).slice(0, 2)
+    .map((x) => [x.label, x.value, x.sub])).toEqual([
+    ["소스 전체", "6개", "변경 수는 실행 후 확정"],
+    ["복사한 크기", "—", "실행 후 집계"],
   ]);
   const rmTiles = kpi({ state: "Planned", operation: "rm" }, [{ ...cp, operation: "rm", preview_summary: { files: 5, bytes: null } }]);
   expect(rmTiles.map((x) => x.label)).toEqual(["삭제 대상", "수행시간", "제출 대기"]);

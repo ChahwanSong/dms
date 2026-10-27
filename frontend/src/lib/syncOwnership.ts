@@ -14,7 +14,10 @@
 //
 // 2026-10-01 검증 워크플로 2회가 포크 소스(mpifileutils 1b93d54)와 테스트베드 실측으로 잡은 사실:
 //   - 권한 비트·수정 시각은 소스 그대로다(preserve) -- uid/gid 만 바뀌므로 소스의 **그룹 권한이 이 주 그룹에**
-//     적용된다. --chmod 를 주면 권한 비트는 그 값.
+//     적용된다. --chmod 를 주면 권한 비트는 그 값. **예외(포탈 괴리 [23]·[30])**: --chown 이 걸리면(비 root 자동 지정·
+//     명시 chown 모두) 두 도구가 일반 파일의 setuid·setgid 비트를 지운다(포크 3c041e0, d188 -- nsync·dsync 공통; c4dbf20 은
+//     소유를 못 바꾼 경우에도 지운다). 디렉토리의 setgid 는 남는다(d189 C9·D2 실측 「setuid 제거·2775 유지」). root 실행에
+//     chown 이 없으면 소유를 바꾸지 않으므로 비트도 그대로다.
 //   - dsync/nsync 의 **기본 비교**(UID·GID·PERM·ATIME·MTIME DIFFER, DMS 는 -o 를 넘기지 않는다)가 목적지에
 //     이미 있던 같은 경로 항목의 메타데이터를 소스(또는 --chown/--chmod 값)로 다시 맞춘다 -- 최상위만이 아니다.
 //     root 실행이면 그 항목들이 전부 소스 소유·권한·시각이 된다(2026-09-30 프로덕션 사고의 범위).
@@ -67,6 +70,10 @@ export const CHOWN_NAME_ERROR =
 const NON_ROOT_CHOWN_EPERM =
   "dsync(같은 노드) 는 데이터를 복사한 뒤 작업이 실패하고, nsync(노드 간) 는 소유 변경이 적용되지 않아 실행 신원 소유로 남습니다";
 
+// 소유를 바꾸는 sync(chown 지정·비 root 자동 지정)의 set-ID 예외 -- 위 머리 주석의 포크 동작.
+export const SETID_STRIP_NOTE =
+  "단, 소유를 바꾸므로 일반 파일의 setuid·setgid 비트는 지워집니다(디렉토리의 setgid 는 유지).";
+
 export function syncOwnership({ chown, chmod = "", root, runAs, self, chownEditable = true }: OwnershipInput):
     { short: string; long: string } {
   const c = chown.trim();
@@ -83,7 +90,7 @@ export function syncOwnership({ chown, chmod = "", root, runAs, self, chownEdita
     const nonRoot = root ? "" : ` root 실행이 아니면 gid 는 실행 신원의 주 그룹 또는 이 작업에 적용된 보조 그룹이어야 하고(보조 그룹이 적용되지 않으면 주 그룹만 — 아니면 계획 단계에서 거부), uid 가 실행 신원 본인이 아니면 바꿀 권한이 없어 ${NON_ROOT_CHOWN_EPERM}.`;
     return {
       short: `chown 지정값 ${c}${root ? "" : " — 비 root: uid 는 본인, gid 는 주·적용된 보조 그룹만(아니면 거부·실패)"}`,
-      long: `${lead}${partial}${nonRoot} ${modeText}`,
+      long: `${lead}${partial}${nonRoot} ${modeText} ${SETID_STRIP_NOTE}`,
     };
   }
   if (root)
@@ -96,6 +103,7 @@ export function syncOwnership({ chown, chmod = "", root, runAs, self, chownEdita
            long: `기본적으로 목적지(새로 만드는 경우 포함)와 복사된 파일·디렉토리는 ${who}의 uid:gid`
                + "(LDAP 계정의 주 그룹)로 셋업됩니다 — 소스 소유자와 관계없습니다. "
                + (m !== "" ? modeText : "권한 비트·수정 시각은 소스 그대로라 소스의 그룹 권한이 이 주 그룹에 적용됩니다.")
+               + ` ${SETID_STRIP_NOTE}`
                + " 목적지에 이미 있던 같은 경로의 항목도 이 소유로 다시 맞춰지므로, 그 안에 다른 사용자 소유 항목이 "
                + "있으면 작업이 실패하거나 일부 항목의 소유·권한이 바뀌지 않을 수 있습니다."
                + (chownEditable

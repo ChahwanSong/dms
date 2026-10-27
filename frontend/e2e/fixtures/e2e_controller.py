@@ -4,7 +4,8 @@
 「확인한 경로가 실제로 지워지고, 확인하지 않은 동안엔 아무것도 지워지지 않는다」가 계약의 전부라 stub 으로는 그 절반을
 못 본다. 그래서 drm 잡만 이 머신에서 **가짜 drm**(fixtures/bin/drm -- 하네스 tmp 스토리지 안만 지운다)을 실제로 돌린다:
 argv 는 실 빌더(execution_manifests.tool_argv -- 미리보기 --dryrun, 옵션 플래그, stepper 가 managed_root 로 조합한 절대경로)
-그대로, 출력은 러너와 같은 파서(dms_job_runner.parsers -- 미리보기 = walk 수, 실행 = Removed 수)로 summary 를 만든다.
+그대로, summary 는 러너와 같은 함수(dms_job_runner.runner._build_summary -- 2026-10-27 d192 summary v2: 핵심 3키 + 상세 키,
+미리보기 files = walk 수, 실행 = Removed 수)로 만든다 -- 포탈이 보는 모양이 실 잡과 같다.
 scan·sync·preflight 는 종전 stub 그대로라 다른 시나리오의 동작은 바뀌지 않는다.
 
 봉쇄(테스트 도구도 지우는 도구다): 대상의 realpath 가 DMS_E2E_RM_ROOT(하네스가 tmp 스토리지로 준다) **아래**가 아니면
@@ -17,7 +18,7 @@ import sys
 from dms import cli, wiring
 from dms.execution import ExecStatus, StubExecutionAdapter
 from dms.execution_manifests import tool_argv
-from dms_job_runner.parsers import parse_rm_counts, parse_rm_dryrun_counts
+from dms_job_runner.runner import _build_summary
 
 FAKE_DRM = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin", "drm")
 
@@ -50,11 +51,17 @@ class LocalDrmStubAdapter(StubExecutionAdapter):
         argv = [FAKE_DRM, *tool_argv(spec, abs_paths=spec.paths)]
         proc = subprocess.run(argv, capture_output=True, text=True, errors="replace", timeout=60,
                               env={**os.environ, "DMS_E2E_RM_ROOT": self._root_raw})
-        files, _ = (parse_rm_dryrun_counts if spec.dryrun else parse_rm_counts)(proc.stdout)
-        print(f"e2e drm: phase={spec.phase} rc={proc.returncode} files={files} argv={argv[1:]}",
+        tool_args = argv[1:]
+        summary = _build_summary("drm", proc.stdout, proc.returncode, "", dryrun="--dryrun" in tool_args,
+                                 quiet=("--quiet" in tool_args or "-q" in tool_args), stderr=proc.stderr)
+        print(f"e2e drm: phase={spec.phase} rc={proc.returncode} files={summary.get('files')} argv={tool_args}",
               file=sys.stderr, flush=True)
-        self.set_summary(ref, {"returncode": proc.returncode, "files": files, "bytes": None})
+        self.set_summary(ref, summary)
         if proc.returncode != 0:
+            # 실 러너처럼 사유 마커를 launcher 로그에 남긴다(d192 -- 스테퍼가 이 줄을 rm_items_failed 등으로 승격한다).
+            reason = summary.get("reason")
+            if reason is not None:
+                self.set_log(ref, [(ref, f"DMS_EXEC_REASON={reason}\n", None)])
             self.script(ref, [ExecStatus.FAILED])
 
 

@@ -9,7 +9,10 @@ import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
 import { beforeAll, afterAll, afterEach, test, expect } from "vitest";
 import { BatchCreate } from "./BatchCreate";
-import { SYNC_INT_FIELDS } from "../jobs/optionRules";
+import { BATCH_OPEN_NOATIME_HELP, BUFSIZE_HELP, DIRECT_HELP, QUIET_HELP, SYNC_INT_FIELDS, SYNC_MAX_ERRORS_NOTE,
+         SYNC_OPTION_HELP } from "../jobs/optionRules";
+import { RM_PATH_LINK_RULE, SYNC_PATH_LINK_RULE } from "../../lib/storagePaths";
+import { REASON_MESSAGES } from "../../lib/api";
 import { NODE_CPU_CAP_NOTE } from "../../lib/jobTool";
 
 // sync 고급 숫자 옵션의 프리필 기본값(사용자 조정 2026-08-16) — 단건 폼과 **같은**
@@ -519,10 +522,10 @@ test("동시 실행 상한을 지우면 빈 칸(0 아님) + 오류 + 생성 비�
 });
 
 // 배치 sync open_noatime 기본 ON(사용자 승인): 배치는 통일 게이트로 항상 특권
-// (root) 실행이라 O_NOATIME 권한 제약이 없고, 소스 atime 오염을 막아야 데이터
-// 온도(hot/cold) 통계가 정직해진다. dsync 도구 기본은 off(mfu_flist_copy.c:3344)
-// 라 DMS 가 명시적으로 켠다. 단건 sync(SubmitJob)는 비특권 경로에서 타인 소유
-// 파일 O_NOATIME open 이 EPERM 이라 기본 OFF 유지 — 스코프 밖.
+// (root) 실행이라 O_NOATIME 권한 제약이 없고, 읽기가 atime 을 갱신하는 스토리지에서
+// 소스 atime 오염을 막는다. dsync 도구 기본은 off(mfu_flist_copy.c:3344)
+// 라 DMS 가 명시적으로 켠다. 단건 sync(SubmitJob)도 운영자 폼은 기본 ON 이고 root 여부와
+// 무관하게 싣는다(2026-10-27 -- 포크가 타인 소유 파일의 EPERM 을 그 파일만 O_NOATIME 없이 다시 연다).
 test("sync 기본 제출: open_noatime 기본 ON — 바디에 true 명시, 생성 요약에도 보인다", async () => {
   const captured = captureCreate();
   renderPage();
@@ -561,8 +564,9 @@ test("sync 고급 숫자 옵션 프리필 — 값·placeholder·캡션, 지우�
   expect(screen.getByText(
     "미리 채운 1,000,000 = 서버 기본 배치 사이즈. 비워도 같은 값이 적용되며, 배칭을 끄려면 0 을 입력하세요.",
   )).toBeInTheDocument();
-  expect(screen.getByText(
-    "미리 채운 4194304 = 4 MiB(서버 기본). 비워도 같은 값이 적용됩니다.")).toBeInTheDocument();
+  // d192: bufsize 설명에 direct 조건이 붙는다(단건과 같은 BUFSIZE_HELP -- 괴리 [8]).
+  expect(screen.getByText(BUFSIZE_HELP)).toBeInTheDocument();
+  expect(BUFSIZE_HELP).toMatch(/^미리 채운 4194304 = 4 MiB\(서버 기본\)\. 비워도 같은 값이 적용됩니다\. direct 를 켜면/);
 
   await userEvent.clear(screen.getByLabelText("batch_files"));
   await userEvent.clear(screen.getByLabelText("bufsize"));
@@ -708,6 +712,62 @@ test("sync 배치: 고급 옵션에 오류가 있으면 펼쳐진 채 접히지 
   await act(async () => { await new Promise((r) => setTimeout(r, 0)); });  // toggle 이벤트는 비동기
   expect(details.open).toBe(true);
   expect(screen.getByText("chmod 형식이 올바르지 않습니다 (예: D770,F660)")).toBeVisible();
+});
+
+test("sync 배치: direct 를 켜면 bufsize 는 4096·2^k ≤ 4 MiB 만 — 서버와 같은 문장으로 즉답·잠금, 고친 값은 그대로 실린다", async () => {
+  // 2026-10-27 d192(괴리 [8]): 단건(SubmitJob)과 같은 규칙(optionRules.directBufsizeError).
+  const captured = captureCreate();
+  renderPage();
+  await fillSync();
+  await userEvent.click(screen.getByText("고급 옵션"));
+  await userEvent.clear(screen.getByLabelText("bufsize"));
+  await userEvent.type(screen.getByLabelText("bufsize"), "1000000");
+  expect(createButton()).toBeEnabled();                                     // direct 없이는 범위 안이면 된다
+  await userEvent.click(screen.getByLabelText("direct"));
+  expect(within(fieldBox("bufsize")).getByText(REASON_MESSAGES.direct_bufsize_misaligned)).toBeInTheDocument();
+  expect(createButton()).toBeDisabled();
+  await userEvent.clear(screen.getByLabelText("bufsize"));
+  await userEvent.type(screen.getByLabelText("bufsize"), "1048576");
+  expect(screen.queryByText(REASON_MESSAGES.direct_bufsize_misaligned)).toBeNull();
+  await userEvent.click(createButton());
+  await screen.findByRole("heading", { name: "배치 b9" });
+  expect(captured.body.options).toEqual({ batch_files: SYNC_NUM_DEFAULTS.batch_files, bufsize: 1048576,
+                                          direct: true, open_noatime: true });
+});
+
+test("sync 배치 옵션 설명: delete·contents·direct·quiet·open_noatime 이 칸 옆에 보이고 경로 링크 규칙을 말한다", async () => {
+  // 2026-10-27 d192: 예전 sync quiet 는 설명이 아예 없었고(괴리 [9]·[13]) direct 는 title 툴팁뿐, open_noatime 은 「통계를
+  // 정직하게」를 조건 없이 약속했다([C3]). delete 는 「완전히 동일하게」([3]·[25]·[28]), contents 는 「바이트 단위」([24]).
+  renderPage();
+  await fillSync();
+  for (const help of [SYNC_OPTION_HELP.delete, SYNC_OPTION_HELP.contents, DIRECT_HELP, QUIET_HELP.sync])
+    expect(screen.getByText(help)).toBeInTheDocument();
+  expect(SYNC_OPTION_HELP.delete).not.toContain("완전히 동일하게");
+  expect(SYNC_OPTION_HELP.delete).toContain("끄면 그 항목은 실패로 남습니다");
+  // 특수 파일의 같은 이름 목적지 항목은 도구마다 다르다(2026-10-28 리뷰 portal-batch-26·contract-39 -- 예전 「대상의 같은
+  // 이름 항목도 그대로 두며」는 nsync 만 참이었다: dsync 는 종류가 다른 목적지 항목을 delete 와 무관하게 지우고 FIFO 를 만들지
+  // 않아 그 이름이 사라진다, 포크 빌드 실측).
+  expect(SYNC_OPTION_HELP.delete).toContain("원본의 FIFO·소켓·장치 파일은 복사하지 않습니다 — 노드 간 실행(nsync)은 대상의 "
+    + "같은 이름 항목을 그대로 두고, 한 노드 실행(dsync)은 그 이름의 대상 항목이 다른 종류면 이 옵션과 무관하게 지운 뒤 아무것도 "
+    + "만들지 않아 그 이름이 대상에서 사라집니다(비어 있지 않은 디렉토리는 이 옵션을 켜야 지워지고, 끄면 실패로 남습니다).");
+  expect(SYNC_OPTION_HELP.delete).not.toContain("대상의 같은 이름 항목도 그대로 두며");
+  // 읽기 오류로 꺼지는 것은 「원본에 없는 항목 지우기」뿐이다(타입 교체의 목적지 삭제는 그대로) -- 「삭제를 하지 않습니다」라 하지 않는다
+  expect(SYNC_OPTION_HELP.delete).toContain("원본 일부를 읽지 못한 실행은 안전을 위해 그 실행에서 원본에 없는 항목을 지우지 않습니다");
+  expect(SYNC_OPTION_HELP.delete).not.toContain("삭제를 하지 않습니다");
+  expect(SYNC_OPTION_HELP.contents).toContain("SHA-256");
+  expect(SYNC_OPTION_HELP.contents).toContain("미리보기가 실패합니다");
+  await userEvent.click(screen.getByText("고급 옵션"));
+  expect(screen.getByText(BATCH_OPEN_NOATIME_HELP)).toBeInTheDocument();
+  expect(BATCH_OPEN_NOATIME_HELP).toContain("읽기가 atime 을 바꾸지 않는 곳에선 차이가 없습니다");
+  // relatime(리눅스 기본)은 「차이 없음」 쪽이 아니다 -- 하루 넘게 안 읽힌 파일은 읽으면 갱신된다(2026-10-28 리뷰 portal-batch-27)
+  expect(BATCH_OPEN_NOATIME_HELP).toContain("리눅스 기본 relatime 도 마지막 접근이 하루를 넘은 파일은 읽을 때 갱신하므로"
+    + "(끄면 sync 가 읽은 cold 파일이 hot 이 됩니다) 의미가 있고, noatime 마운트나 일부 CephFS 처럼");
+  expect(BATCH_OPEN_NOATIME_HELP).not.toContain("relatime·noatime");
+  expect(screen.queryByText(/통계를 정직하게 유지합니다/)).toBeNull();
+  // d191 봉쇄 검사의 링크 규칙(괴리 [14]) -- 목적지 조건 안내에 들어 있다
+  expect(screen.getByRole("note", { name: "목적지 조건과 소유권" })).toHaveTextContent(SYNC_PATH_LINK_RULE);
+  // nsync 실패 한도(괴리 [21])는 sync 옵션 구획 캡션
+  expect(screen.getByText(SYNC_MAX_ERRORS_NOTE)).toBeInTheDocument();
 });
 
 test("scan 배치 요약엔 목적지 소유 행이 없다", async () => {
@@ -919,6 +979,9 @@ test("rm: 「삭제 범위」 안내·요약 위 빨간 경고·실행 권한 �
   const scope = screen.getByRole("note", { name: "삭제 범위" });
   expect(scope).toHaveTextContent("되돌릴 수 없습니다");
   expect(scope).toHaveTextContent("관리자 특권(root)으로 실행돼");
+  // d191 링크 규칙(대상 자신 포함, 링크 자체도 지우지 않는다 -- 괴리 [14]·[27])과 quiet 설명(지우지 못한 항목 목록까지 사라진다)
+  expect(scope).toHaveTextContent(RM_PATH_LINK_RULE);
+  expect(screen.getByText(QUIET_HELP.rm)).toBeInTheDocument();
   expect(screen.getByText(/삭제는 되돌릴 수 없습니다\. 항목별 미리보기에서/)).toBeInTheDocument();
   expect(screen.getByText("실행 권한").closest("div")!.querySelector("dd")).toHaveClass("text-bad");
   expect(screen.getByText("이 배치는 관리자 특권(root)으로 삭제합니다 — 파일 권한·소유와 관계없이 지워집니다."))

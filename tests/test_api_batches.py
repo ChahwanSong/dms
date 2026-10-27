@@ -302,6 +302,8 @@ def test_detail_items_join_child_request_fields(client):
     it = client.get(f"/api/admin/batches/{bid}").json()["items"][0]
     assert it["request_state"] == "Succeeded"
     assert it["files_count"] == 42
+    # d192: 자식 잡의 도구도 싣는다 -- 포탈이 항목 수의 뜻(도구별)과 확인 합계를 이것으로 가른다.
+    assert it["job_tool"] == "dscan"
     # 완료 시각은 results.completed_at(종단의 정직한 원천) — 값이 실존해야 한다
     assert it["completed_at"]
 
@@ -325,6 +327,7 @@ def test_detail_items_without_request_have_null_join_fields(client):
     assert it["request_state"] is None
     assert it["completed_at"] is None
     assert it["files_count"] is None
+    assert it["job_tool"] is None                # 잡 없음 = 모름(도구를 지어내지 않는다)
 
 
 # --- 배치 수정(메타데이터): PATCH {name?, note?} ---

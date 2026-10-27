@@ -692,3 +692,40 @@ test("주석: 이 잡의 phase 이벤트만 그 단계 행에(행마다 3건 + �
   expect(screen.queryByText(/no job id msg/)).toBeNull();
   expect(screen.getByText(/^p1 msg · /)).toBeInTheDocument();
 });
+
+// d192: 결과의 「실패 항목」에서 그 단계 stdout.log 를 연다 -- 출력 목록에 그 파일이 있을 때만(없는 파일을 가리키는 버튼 금지).
+const DRM_PARTIAL = { detail_version: 2, returncode: 1, files: 4, bytes: null, tool: "drm", removed: 4, remove_failed: 5,
+  failure_samples: [{ op: "unlink", path: "/t/root/r1", errno: 13 }], reason: "rm_items_failed" };
+const at = (s: number) => `2026-10-08T03:15:${String(s).padStart(2, "0")}Z`;
+const RM_FAIL_TR = [
+  { from_state: null, to_state: "Pending", at: at(0) }, { from_state: "Pending", to_state: "Preflight", at: at(1) },
+  { from_state: "Preflight", to_state: "PreviewRunning", at: at(3) }, { from_state: "PreviewRunning", to_state: "ConfirmPending", at: at(9) },
+  { from_state: "ConfirmPending", to_state: "Executing", at: at(10) }, { from_state: "Executing", to_state: "Executing", at: at(12) },
+  { from_state: "Executing", to_state: "Failed", at: at(20) },
+];
+
+test("d192 실패 항목의 「stdout.log 열기」: 실행 stdout.log 가 목록에 있을 때만, 누르면 그 칩이 눌린 상태", async () => {
+  server.use(
+    http.get("/api/user/jobs/j1/artifacts", () => HttpResponse.json({ entries: [
+      { phase: "execution", name: "stderr.log", size: 40, modified_at: 1 }], truncated: false })),
+    http.get("/api/user/jobs/j1/logs", () => HttpResponse.json({ phase: "execution", ref: "vcjob/j1", source: "archived", entries: [] })),
+  );
+  const view = renderStages({ operation: "rm", tool: "drm", state: "Failed", reason_code: "rm_items_failed", phase_refs: ALL_REFS,
+    transitions: RM_FAIL_TR, result_summary: DRM_PARTIAL });
+  const exec = screen.getByRole("region", { name: "실행" });
+  await within(exec).findByRole("button", { name: "execution/stderr.log" });
+  const box = within(exec).getByRole("region", { name: "실패 항목" });
+  expect(within(box).queryByRole("button", { name: "stdout.log 열기" })).toBeNull();
+  view.unmount();
+
+  server.use(http.get("/api/user/jobs/j1/artifacts", () => HttpResponse.json({ entries: [
+    { phase: "execution", name: "stdout.log", size: 1839, modified_at: 1 }], truncated: false })));
+  server.use(http.get("/api/user/jobs/j1/artifacts/:phase/:name", () => HttpResponse.json({ phase: "execution", name: "stdout.log",
+    size: 1839, truncated: false, content: "ERROR: Remove failed for 5 of 9 items\n" })));
+  renderStages({ operation: "rm", tool: "drm", state: "Failed", reason_code: "rm_items_failed", phase_refs: ALL_REFS,
+    transitions: RM_FAIL_TR, result_summary: DRM_PARTIAL });
+  const exec2 = screen.getByRole("region", { name: "실행" });
+  const btn = await within(within(exec2).getByRole("region", { name: "실패 항목" })).findByRole("button", { name: "stdout.log 열기" });
+  await userEvent.click(btn);
+  expect(await within(exec2).findByRole("button", { name: "execution/stdout.log", pressed: true })).toBeInTheDocument();
+});

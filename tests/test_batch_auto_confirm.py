@@ -248,10 +248,15 @@ def test_auto_confirm_audit_has_the_same_preview_file_keys_as_a_human_confirm(db
                {"s": json.dumps({"files": 0, "bytes": None, "returncode": 0}), "j": j1})       # 0 은 아는 값
     db.execute("UPDATE data_jobs SET preview_summary = :s WHERE job_id = :j",
                {"s": json.dumps({"files": None, "bytes": None, "returncode": 0}), "j": j2})    # 모름
+    db.execute("UPDATE data_jobs SET preview_summary = :s, tool = 'nsync' WHERE job_id = :j",
+               {"s": json.dumps({"files": 42, "bytes": None, "returncode": 0, "tool": "nsync"}), "j": j0})
     BatchOrchestrator(repos, settings=_S()).run_once()
     assert repos.batches.get(bid)["status"] == "Running"
     after = json.loads(_audit(db, "confirm")[0]["after_state"])
     assert (after["files_total"], after["files_unknown"]) == (42, 1)
+    # d192 도구별 합도 사람의 확인과 같은 키(같은 preview_files). 도구는 잡 행(job_tool 조인)이 권위다 -- summary 에 tool 이
+    # 없는 j1(잡 행 dsync)의 0 은 아는 값이라 dsync 키에 들어가고, 모르는 j2 는 어느 도구 합에도 없다.
+    assert after["files_by_tool"] == {"nsync": 42, "dsync": 0}
 
     bid = _batch(repos)                                                  # 하나도 모르면 None(0 이 아니다)
     _rid, jid = _confirmpending_child(repos, bid, 0)

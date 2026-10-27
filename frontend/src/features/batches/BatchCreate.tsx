@@ -11,8 +11,9 @@ import type { Policy } from "../../lib/types";
 import { NODE_CPU_CAP_NOTE } from "../../lib/jobTool";
 import { StoragePicker, field } from "../jobs/formFields";
 import {
-  CHMOD_RE, chownFieldError, DIRECT_HELP, SCAN_INT_FIELDS, SYNC_INT_FIELDS, SYNC_OPTION_HELP, intFieldError,
-  scanIntFieldError, syncIntFieldError,
+  BATCH_OPEN_NOATIME_HELP, BUFSIZE_HELP, CHMOD_RE, chownFieldError, DIRECT_HELP, directBufsizeError, QUIET_HELP,
+  SCAN_INT_FIELDS, SYNC_INT_FIELDS, SYNC_MAX_ERRORS_NOTE, SYNC_OPTION_HELP, intFieldError, scanIntFieldError,
+  syncIntFieldError,
 } from "../jobs/optionRules";
 import { Button } from "../../components/ui/Button";
 import {
@@ -20,7 +21,7 @@ import {
 } from "../../components/form/SubmitLayout";
 import { ApiError } from "../../lib/api";
 import { syncOwnership } from "../../lib/syncOwnership";
-import { relativePathProblem } from "../../lib/storagePaths";
+import { relativePathProblem, RM_PATH_LINK_RULE, SYNC_PATH_LINK_RULE } from "../../lib/storagePaths";
 import { rmTargetOverlaps } from "../../lib/rmTargets";
 
 // 배치 생성(슬라이스 32): 단일 작업과 같은 한 장짜리 시트 + 오른쪽 제출 요약(2026-10-06 — 4스텝
@@ -154,8 +155,9 @@ export function BatchCreate() {
     ? scanIntFieldError("broken_limit", f.brokenLimit) : null;
   const batchFilesError = f.op === "sync"
     ? syncIntFieldError("batch_files", f.batchFiles) : null;
+  // 범위 오류가 먼저, 범위 안이면 direct 정렬 조건(서버 422 direct_bufsize_misaligned 미러 -- optionRules 주석).
   const bufsizeError = f.op === "sync"
-    ? syncIntFieldError("bufsize", f.bufsize) : null;
+    ? syncIntFieldError("bufsize", f.bufsize) ?? directBufsizeError(f.direct, f.bufsize) : null;
   const chmodError = f.op === "sync" && f.chmod.trim() !== "" && !CHMOD_RE.test(f.chmod.trim())
     ? "chmod 형식이 올바르지 않습니다 (예: D770,F660)" : null;
   const chownError = f.op === "sync" ? chownFieldError(f.chown) : null;
@@ -441,6 +443,8 @@ export function BatchCreate() {
                 <li>관리자 특권(root)으로 실행돼 파일 권한·소유와 관계없이 지워집니다.</li>
                 <li>관리 디렉토리 자신(.)·「..」·「/」로 시작하는 경로는 받지 않고, 한 배치 안에서 겹치는 경로(같은 경로·
                   한 경로 아래의 경로)도 받지 않습니다 — 상위 경로 하나만 남기세요.</li>
+                {/* 링크 규칙(2026-10-27 d192, 괴리 [14]): 위 형식 검사만 보고 링크인 행을 넣으면 미리보기 전에 거부된다. */}
+                <li>{RM_PATH_LINK_RULE}</li>
                 {f.autoConfirm
                   ? <li>자동 실행이 켜져 있습니다 — 항목별 미리보기(지울 항목 수)가 끝나는 즉시 「배치 확인」 없이
                       삭제됩니다(아래 실행 제어).</li>
@@ -485,6 +489,7 @@ export function BatchCreate() {
                   {f.chown.trim() === ""
                     ? "결과는 실행 신원의 uid:gid(주 그룹) 소유가 됩니다."
                     : "chown 의 gid 가 실행 신원의 주 그룹 또는 이 작업에 적용된 보조 그룹이 아니면(보조 그룹이 적용되지 않으면 주 그룹만) 계획 단계에서 거부되고, uid 가 본인이 아니면 적용되지 않습니다(dsync 는 그 항목 실패, nsync 는 소유 변경이 적용되지 않음)."}</li>
+                <li>{SYNC_PATH_LINK_RULE}</li>
                 <li>조건이 맞지 않는 항목은 미리보기 전에 거부됩니다 — 그 항목은 아무것도 복사되지 않습니다.</li>
               </ul>
             </div>
@@ -589,7 +594,8 @@ export function BatchCreate() {
         </div>
       </FormSection>
 
-      <FormSection step={3} title="실행 옵션">
+      <FormSection step={3} title="실행 옵션"
+                   caption={f.op === "sync" ? SYNC_MAX_ERRORS_NOTE : undefined}>
         {f.op === "rm" ? (
           <>
             {/* 단일 작업(SubmitJob) rm 옵션 미러 — 같은 라벨·같은 즉답(같은 옵션 = 같은 문구). */}
@@ -604,12 +610,15 @@ export function BatchCreate() {
               <label className="flex items-center gap-2 text-sm">
                 <input type="checkbox" aria-label="lite" checked={f.lite} onChange={on("lite")} /> lite
               </label>
-              <label className="flex items-center gap-2 text-sm" title="실행 로그를 줄입니다 — 실행 결과 개수(삭제한 항목)도 「—」가 됩니다. 미리보기(dry-run)에는 적용하지 않습니다(대상 수를 세는 줄이 사라지므로)">
-                <input type="checkbox" aria-label="quiet" checked={f.quiet} onChange={on("quiet")} /> quiet
-              </label>
             </div>
             {recursiveMissing && <p className="text-bad text-sm">재귀 옵션이 필요합니다</p>}
             {statLiteConflict && <p className="text-bad text-sm">stat과 lite는 함께 쓸 수 없습니다</p>}
+            {/* quiet 설명은 칸 옆에 그대로(단건과 같은 문구 -- 지우지 못한 항목 목록까지 없앤다, 괴리 [13]). */}
+            <FieldRow align="check"
+              control={<label className="flex items-center gap-2 text-sm">
+                <input type="checkbox" aria-label="quiet" checked={f.quiet} onChange={on("quiet")} /> quiet
+              </label>}
+              help={QUIET_HELP.rm} />
           </>
         ) : f.op === "scan" ? (
           <>
@@ -666,17 +675,19 @@ export function BatchCreate() {
                        onChange={on("contents")} /> contents
               </label>}
               help={SYNC_OPTION_HELP.contents} />
-            <div className="flex flex-wrap gap-x-6 gap-y-2">
-              <label className="flex items-center gap-2 text-sm" title={DIRECT_HELP}>
+            {/* direct·quiet 설명도 칸 옆에(단건과 같은 문구, 2026-10-27 d192) -- 예전 sync quiet 는 설명이 아예 없었다(괴리 [9]·[13]). */}
+            <FieldRow align="check"
+              control={<label className="flex items-center gap-2 text-sm">
                 <input type="checkbox" aria-label="direct" checked={f.direct}
                        onChange={on("direct")} /> direct
-                <span className="sr-only"> — {DIRECT_HELP}</span>
-              </label>
-              <label className="flex items-center gap-2 text-sm">
+              </label>}
+              help={DIRECT_HELP} />
+            <FieldRow align="check"
+              control={<label className="flex items-center gap-2 text-sm">
                 <input type="checkbox" aria-label="quiet" checked={f.quiet}
                        onChange={on("quiet")} /> quiet
-              </label>
-            </div>
+              </label>}
+              help={QUIET_HELP.sync} />
             {/* 접혀 있어도 내용은 마운트돼 있다 -- open_noatime 기본 ON 이 펼치지 않아도 실린다. */}
             <details className="rounded-lg border border-line"
                      open={advancedOpen || advancedError !== null}
@@ -695,7 +706,7 @@ export function BatchCreate() {
                     <input type="checkbox" aria-label="open_noatime" checked={f.openNoatime}
                            onChange={on("openNoatime")} /> open_noatime
                   </label>}
-                  help="기본 켬 — 배치는 특권(root) 실행이라 O_NOATIME 권한 제약이 없고, 소스 atime 오염을 막아 데이터 온도(hot/cold) 통계를 정직하게 유지합니다." />
+                  help={BATCH_OPEN_NOATIME_HELP} />
                 {/* 프리필 계약(단건 폼과 동일 문구, 2026-09-17): 값이 미리 채워져
                     있고 그 값이 곧 서버 기본이라 비워도 같은 값이 적용된다 — 배칭을
                     끄는 유일한 표현은 0 명시. placeholder 는 "비웠을 때", 캡션은
@@ -720,7 +731,7 @@ export function BatchCreate() {
                     </label>
                     {bufsizeError && <p className="mt-1 text-bad text-sm">{bufsizeError}</p>}
                   </>}
-                  help="미리 채운 4194304 = 4 MiB(서버 기본). 비워도 같은 값이 적용됩니다." />
+                  help={BUFSIZE_HELP} />
                 <FieldRow
                   control={<>
                     <label className="text-sm block">chmod (선택 · 예: D770,F660 — 콤마 구분, D=디렉터리 F=파일)

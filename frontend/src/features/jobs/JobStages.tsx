@@ -467,11 +467,18 @@ export function JobStages({ job, events, requestTerminal = false, jobCount = 1, 
     );
   };
 
+  // 결과의 「실패 항목」에서 그 단계 stdout.log 를 여는 버튼(d192) -- 출력 목록에 그 파일이 있을 때만(없는 파일을 가리키는
+  // 버튼을 두지 않는다). 칩을 누른 것과 같다: 그 단계 슬롯에 선택 + 뷰어로 스크롤·포커스(배너 CTA 와 같은 길).
+  const openOutput = (phase: "preview" | "execution", slot: NavSlot) => {
+    const key = `artifact:${phase}/stdout.log`;
+    return (outputs.byStep[phase] ?? []).some((i) => i.key === key) ? () => nav.requestReveal(slot, key) : null;
+  };
   const previewReached = "preview" in model.refs
     || normTransitions(job.transitions).some((t) => t.to_state === "PreviewRunning");
   const preResult = model.flow === "previewed" ? (
     model.resultStage === "pre"
-      ? <PreviewResult job={job} summary={job.result_summary} failedAt headingId={previewHeadingId} />
+      ? <PreviewResult job={job} summary={job.result_summary} failedAt headingId={previewHeadingId}
+                       onOpenOutput={openOutput("preview", "pre")} />
       : job.preview_summary != null
         ? <PreviewResult job={job} summary={job.preview_summary} failedAt={false} headingId={previewHeadingId} />
         // 요약이 없어도 「미리보기 결과 보기」(배너)의 포커스 대상은 남긴다(같은 id).
@@ -505,7 +512,9 @@ export function JobStages({ job, events, requestTerminal = false, jobCount = 1, 
       )}
       <StageSection n={2} stage={model.exec} model={model} op={job.operation} titleId={`stage-exec-${job.job_id}`}
                     refIso={refIso}>
-        {model.resultStage === "exec" && <ExecutionResult summary={job.result_summary} />}
+        {model.resultStage === "exec" && (
+          <ExecutionResult summary={job.result_summary} job={job} onOpenOutput={openOutput("execution", "exec")} />
+        )}
         {renderSteps(model.exec)}
       </StageSection>
       {outputs.other.length > 0 && (

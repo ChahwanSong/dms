@@ -93,6 +93,8 @@ def metrics_jobs(request: Request, window: int = Query(default=24)):
     stats["sched_wait_counted"] = len(sched_waits)
     stats["sched_wait_histogram"] = duration_histogram(
         sched_waits, buckets=SUBMIT_WAIT_BUCKETS, overflow=SUBMIT_WAIT_OVERFLOW)
+    # 처리량 합계(sync_items_total·sync_bytes_total·rm_items_total, d192 -- 옛 files_total·bytes_total 대체)와 분해 행의
+    # succeeded/failed/rejected/cancelled 는 repo 값 그대로 통과한다(정의는 MetricsRepository.job_stats 한 곳).
     stats["window_hours"] = hours
     stats["bucket"] = "hour" if chars == 13 else "day"
     return stats

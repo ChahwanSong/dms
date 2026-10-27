@@ -270,6 +270,21 @@ def option_defaults(operation) -> dict:
     return dict(_OPTION_DEFAULTS[Operation(operation)])
 
 
+# direct(O_DIRECT) 와 함께 쓸 수 있는 bufsize 범위(2026-10-27 d192). dsync 는 파일을 4 MiB 조각(MFU_CHUNK_SIZE -- DMS 는
+# --chunksize 를 넘기지 않는다)으로 나눠 랭크에 주고, O_DIRECT 읽기는 파일 끝이 아닌 조각의 길이가 버퍼의 배수가 아니면
+# MFU_ABORT 한다(mfu_flist_copy.c 의 "O_DIRECT requires chunk size to be integer multiple of block size", --contents 비교도
+# 같은 검사). 버퍼가 4 MiB 의 약수 = 4096·2^k(≤ 4 MiB)여야 어떤 조각 경계에서도 나눠떨어진다 -- 8 MiB·1,000,000 같은 값은
+# 미리보기(dry-run 은 복사를 안 한다)를 통과하고 실행 중 큰 파일에서 MPI 중단으로 끝났다. nsync 는 --direct 를 무시하지만
+# 제출 시점엔 도구가 정해지지 않아 sync 전체에 건다. 하한 4096 은 O_DIRECT 정렬(블록) 하한이다.
+_DIRECT_BUFSIZE_MIN = 4096
+_DIRECT_BUFSIZE_MAX = 4_194_304
+
+
+def direct_bufsize_ok(bufsize) -> bool:
+    return (isinstance(bufsize, int) and not isinstance(bufsize, bool)
+            and _DIRECT_BUFSIZE_MIN <= bufsize <= _DIRECT_BUFSIZE_MAX and bufsize & (bufsize - 1) == 0)
+
+
 def validate_options(operation: Operation, options: dict) -> dict:
     spec = _OPTION_SPECS[Operation(operation)]
     out: dict = {}
@@ -301,6 +316,10 @@ def validate_options(operation: Operation, options: dict) -> dict:
         raise DomainValidationError("invalid_option", "stat and lite are mutually exclusive")
     if Operation(operation) is Operation.SCAN and out.get("verbose") and out.get("quiet"):
         raise DomainValidationError("invalid_option", "verbose and quiet are mutually exclusive")
+    if Operation(operation) is Operation.SYNC and out.get("direct") is True and "bufsize" in out \
+            and not direct_bufsize_ok(out["bufsize"]):
+        raise DomainValidationError("direct_bufsize_misaligned",
+                                    f"with direct, bufsize must be 4096*2^k up to 4194304, got {out['bufsize']}")
     for key, value in _OPTION_DEFAULTS[Operation(operation)].items():
         out.setdefault(key, value)
     return out

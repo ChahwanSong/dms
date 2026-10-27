@@ -14,7 +14,11 @@
 // 돌려주고 화면은 그 줄 자체를 안 그린다 — "undefined/team" 같은 거짓 경로나 빈 문자열로
 // 뭉개면 없는 사실을 지어내는 것이다(null≠빈값 규약).
 
-/** managed_root + 상대경로 → 절대경로. 뿌리를 모르거나 경로가 문자열이 아니면 null.
+// **글자 그대로의 조합이다(링크를 풀지 않는다)**: 결과는 「입력한 경로를 관리 디렉토리에 붙인 것」이지 파일시스템이 실제로
+// 가리키는 곳이 아니다. 그래서 화면 라벨은 「지정 경로」다(2026-10-27 d192, 포탈 괴리 [C2] -- 예전 「실제 경로」는 링크를
+// 거치는 경로로 거부된 뒤 「실제 경로로 다시 요청하세요」와 만나 링크가 가리키는 곳으로 다시 내라는 뜻으로 읽혔다).
+
+/** managed_root + 상대경로 → 절대경로(글자 그대로, 링크 미해석). 뿌리를 모르거나 경로가 문자열이 아니면 null.
  *  빈 상대경로("")는 **뿌리 자신**이다(정상값 — "모름"으로 뭉개지 않는다). */
 export function absolutePath(root: string | null | undefined,
                              rel: unknown): string | null {
@@ -28,7 +32,7 @@ export function absolutePath(root: string | null | undefined,
 
 /** sync 목적지의 **상위 디렉토리** 절대경로(2026-09-30 "상위 디렉토리 쓰기 권한 조건을 분명히").
  *  sync 도구(dsync)는 목적지가 이미 있어도 그 상위에 실행 신원의 쓰기 권한을 요구한다 --
- *  제출 화면이 "어느 디렉토리에" 권한이 필요한지 실제 경로로 보여 주는 데 쓴다.
+ *  제출 화면이 "어느 디렉토리에" 권한이 필요한지 절대경로로 보여 주는 데 쓴다.
  *  목적지 상대경로가 비면(목적지 = 관리 디렉토리 자신) 상위는 관리 디렉토리의 부모다.
  *  뿌리를 모르면 null(absolutePath 와 같은 규칙 -- 지어내지 않는다). */
 export function destinationParent(root: string | null | undefined, rel: unknown): string | null {
@@ -58,6 +62,19 @@ export function relativePathProblem(rel: string): string | null {
     return "관리 디렉토리 자신(.)은 지정할 수 없습니다 — 그 아래 경로를 적으세요";
   return null;
 }
+
+// 심볼릭 링크 경로 규칙(2026-10-27 d192, 포탈 괴리 [14]) -- 서버 봉쇄 검사(execution_manifests dms_path_contained·러너
+// path_redirected: realpath(경로) == realpath(관리 디렉토리) + 상대경로)의 화면 문구. d191 부터 관리 디렉토리 **아래** 어느
+// 성분이든(마지막 이름 포함) 링크면 preflight·실행 직전·도구 직전 세 시점에서 거부된다(source/destination/target_path_redirected).
+// 조건 목록(단건 제출의 목적지 조건 카드, 배치 생성의 sync 안내·rm 삭제 범위)이 이 규칙을 말하지 않아, 링크로 된 목적지가
+// 「디렉토리여야 합니다」를 만족한다고 보고 낸 요청이 거부됐다. 링크가 가리키는 곳으로 다시 내라고 하지 않는다(rm 은 링크 너머를
+// 지우게 되고, sync 는 남이 심은 링크의 대상에 쓰게 된다 -- 괴리 [27]).
+export const SYNC_PATH_LINK_RULE =
+  "소스·목적지 경로가 관리 디렉토리 아래 어느 단계든(마지막 이름 포함) 심볼릭 링크를 거치면 거부됩니다 — 링크가 가리키는 "
+  + "곳이 아니라 링크를 거치지 않는 경로로 요청하세요.";
+export const RM_PATH_LINK_RULE =
+  "삭제할 경로가 관리 디렉토리 아래 어느 단계든(대상 자신 포함) 심볼릭 링크면 거부됩니다 — 링크를 따라가 지우지도, 링크 "
+  + "자체를 지우지도 않습니다.";
 
 export type StorageRoots = Record<string, string | undefined>;
 

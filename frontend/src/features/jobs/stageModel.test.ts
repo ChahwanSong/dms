@@ -206,6 +206,32 @@ test("미리보기 실패 + result_summary: 결과는 ①(미리보기 summary �
   expect(m.autoOpen).toEqual({ stage: "pre", key: "log:preview" });
 });
 
+test("d192 도구 실패 사유는 단계 접두가 없다 -- 같은 코드라도 미리보기 실패는 ①, 실행 실패는 ②(from_state)", () => {
+  // 러너가 미리보기·실행 어느 쪽에서든 같은 코드(TOOL_FAILURE_REASONS)를 낸다 -- 코드만으로 단계를 정하면 안 된다.
+  const PREV_FAIL = [t(null, "Pending", 0), t("Pending", "Preflight", 1), t("Preflight", "PreviewRunning", 3), t("PreviewRunning", "Failed", 9)];
+  const EXEC_FAIL = [...SYNC_OK_TR.slice(0, 6), t("Executing", "Failed", 37)];
+  const summary = { detail_version: 2, returncode: 1, files: 1, bytes: 5, tool: "nsync" };
+  for (const reason of ["sync_items_failed", "sync_type_change_refused", "sync_stopped_max_errors", "destination_full",
+    "destination_read_only", "source_scan_incomplete", "rm_items_failed", "tool_aborted"]) {
+    const pv = deriveJobStages(job({ state: "Failed", reason_code: reason, result_summary: summary,
+      phase_refs: { preflight: "a", preview: "b" }, transitions: PREV_FAIL }));
+    expect([reason, pv.failure?.step, pv.failure?.evidence, pv.resultStage, pv.autoOpen])
+      .toEqual([reason, "preview", "from_state", "pre", { stage: "pre", key: "log:preview" }]);
+    const ex = deriveJobStages(job({ state: "Failed", reason_code: reason, result_summary: summary, phase_refs: ALL_REFS,
+      transitions: EXEC_FAIL }));
+    expect([reason, ex.failure?.step, ex.failure?.evidence, ex.resultStage, ex.autoOpen, ex.executionStarted])
+      .toEqual([reason, "execution", "from_state", "exec", { stage: "exec", key: "log:execution" }, true]);
+  }
+});
+
+test("d192 실행 단계의 도구 시작 전 거부(경로 봉쇄·워커 준비 실패)도 실패 지점은 ② 실행 -- 결과(3키 null)는 ②", () => {
+  for (const reason of ["destination_path_redirected", "source_path_redirected", "target_path_redirected", "workers_unreachable"]) {
+    const m = deriveJobStages(job({ state: "Failed", reason_code: reason, phase_refs: ALL_REFS,
+      result_summary: { returncode: null, files: null, bytes: null }, transitions: [...SYNC_OK_TR.slice(0, 6), t("Executing", "Failed", 30)] }));
+    expect([reason, m.failure?.step, m.resultStage]).toEqual([reason, "execution", "exec"]);
+  }
+});
+
 test("비종단 진행 단계: Executing 은 execution ref 로 재점검/실행을 가른다", () => {
   const tr = SYNC_OK_TR.slice(0, 5);
   expect(statuses(job({ state: "Executing", phase_refs: { preflight: "a", preview: "b", exec_preflight: "c" }, transitions: tr })))

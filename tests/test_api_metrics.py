@@ -120,7 +120,11 @@ def test_metrics_jobs_aggregates_and_histogram_shape(client, db):
     assert sum(b["count"] for b in body["throughput"]) == 2
     assert [b["bucket"] for b in body["duration_histogram"]] == [
         "<1m", "1-10m", "10-60m", "1-6h", "6-24h", ">24h"]
-    assert body["files_total"] is None and body["bytes_total"] is None
+    # d192: 처리량은 연산별 키(scan 은 어디에도 안 잡힌다 -- 여기 잡은 둘 다 scan 이라 모름). 옛 합친 키는 없다.
+    assert (body["sync_items_total"], body["sync_bytes_total"], body["rm_items_total"]) == (None, None, None)
+    assert "files_total" not in body and "bytes_total" not in body
+    assert body["by_tool"] == [{"tool": "dscan", "count": 2, "succeeded": 1, "failed": 1,
+                                "rejected": 0, "cancelled": 0}]
     assert "duration_seconds" not in body        # 원자료는 내보내지 않는다
 
 

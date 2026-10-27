@@ -25,6 +25,19 @@ export function pointEpoch(p: UsagePoint): number | null {
 // 나이 버킷 경계([91d,180d] 상한)와 일치해 버킷이 잘리지 않고 통째로 들어간다.
 export const HOT_AGE_MAX_DAYS = 180;
 
+// 읽기가 atime 에 반영되는 규칙(2026-10-28 d192 리뷰 portal-batch-27). 사용량 hot 비율 도움말·온도 캡션(사용량 TargetDetail·배치
+// 항목)이 같은 문장을 쓴다. 리눅스 기본 relatime 은 읽을 때 「이전 atime 이 mtime·ctime 이하이거나 24시간보다 오래됐으면」
+// 갱신한다 -- 오래 안 읽힌(cold) 파일은 읽히면 곧바로 최근 접근이 되고 같은 파일의 반복 읽기만 하루 단위로 접힌다(hot 창
+// HOT_AGE_MAX_DAYS 에 비하면 무시할 만하다). 반영하지 않는 것은 noatime 마운트와 일부 파일시스템이다 -- 테스트베드 CephFS 는
+// relatime 마운트인데도 노드에서 읽어도 atime 이 그대로였다(CHANGELOG d190, 같은 노드 ext4 는 갱신). 예전 문구는 relatime 을
+// 「읽기가 atime 을 바꾸지 않는 곳」에 넣어, relatime 스토리지에서 open_noatime 을 꺼도 통계에 영향이 없다고 읽혔다.
+export const ATIME_READ_RULE =
+  "리눅스 기본 relatime 은 읽기를 파일마다 많아야 하루에 한 번 반영하고, noatime 마운트나 일부 CephFS 는 반영하지 않습니다";
+// 온도(atime) 캡션의 근사 경고 -- 사용량 상세와 배치 항목이 같은 문장을 쓴다(축 안내 앞부분만 화면마다 다르다).
+export const ATIME_APPROX_NOTE =
+  `읽기가 atime 에 반영되는지는 마운트·스토리지에 따라 달라 근사치입니다(${ATIME_READ_RULE}) — 반영하지 않는 곳에선 `
+  + "최근에 쓴 데이터가 hot 으로 보입니다";
+
 // hot 비율: 나이 ≤HOT_AGE_MAX_DAYS 버킷 bytes / 전체 bytes. 전체 0 은 비율 정의
 // 불가(null -- cumulativeLayout 의 0-나눗셈 규약). bytes 가 실린 버킷의 hot/cold 를
 // 가를 근거가 없으면 null 이다 -- cold 로 접으면(분모에만 넣으면) 비율이 조용히

@@ -2,16 +2,30 @@
 agent_reports(JSON blob 시계열 -- 앱측 파싱)와 data_jobs(typed 컬럼 -- SQL GROUP BY).
 blob은 dual-dialect(SQLite/PostgreSQL)라 json_extract에 기댈 수 없어 여기서 파싱하고,
 GROUP BY는 typed 컬럼에만 건다."""
-from ..db import Database, iso_plus, load_json, utc_now_iso
+from ..db import Database, iso_plus, like_contains, load_json, utc_now_iso
 # metrics_series 와 같은 승격(슬라이스 17) -- 별칭 유지로 호출부 무변경.
 from ..db import iso_epoch as _epoch
 from ..domain import DataJobState, TERMINAL_DATA_JOB_STATES
 
-# 실패로 세는 종단 상태 = 종단 전체 - Succeeded. sorted로 고정해 플레이스홀더
-# 순서(파라미터 이름)가 실행마다 흔들리지 않게 한다.
-_FAILED_STATES = tuple(sorted(
-    s.value for s in TERMINAL_DATA_JOB_STATES if s is not DataJobState.SUCCEEDED))
+# 종단 상태의 뜻별 묶음(2026-10-27 d192). 예전엔 「실패 = 종단 - Succeeded」 하나라 사람이 취소한 잡·확인을 기다리다
+# 만료된 미리보기·점검 거부가 모두 「실패」로 세졌다 -- 실패가 아닌 것을 실패율에 섞으면 대시보드가 거짓 경보를 낸다.
+# 실패 = 도구·시스템이 끝내지 못함(Failed·TimedOut), 거부 = 점검이 막음(Rejected), 취소 = 사람이 멈췄거나 확인하지 않음
+# (Cancelled·PreviewExpired). 넷의 합집합이 종단 - Succeeded 와 같다(test_repo_metrics 가 고정). sorted 로 고정해
+# 플레이스홀더 순서(파라미터 이름)가 실행마다 흔들리지 않게 한다.
+_FAILED_STATES = tuple(sorted((DataJobState.FAILED.value, DataJobState.TIMED_OUT.value)))
+_REJECTED_STATES = (DataJobState.REJECTED.value,)
+_CANCELLED_STATES = tuple(sorted((DataJobState.CANCELLED.value, DataJobState.PREVIEW_EXPIRED.value)))
+# 실패 사유 상위의 재료 -- 취소·만료(사유가 cancelled·preview_expired 로 정해져 있다)는 원인 분석 대상이 아니다.
+_FAILURE_REASON_STATES = tuple(sorted(_FAILED_STATES + _REJECTED_STATES))
 _TERMINAL_STATES = tuple(sorted(s.value for s in TERMINAL_DATA_JOB_STATES))
+
+# summary v2 표식(2026-10-27 d192 리뷰)의 저장 모양. result_summary 는 data_jobs.set_artifact 가 db.dump_json(sort_keys, 기본
+# 구분자 ", " ": ")으로 쓴 TEXT 라 v2 행에는 늘 이 글자가 있다 -- 정렬상 detail_version 뒤에 v2 에 늘 있는 키(dryrun·files·
+# returncode)가 오므로 쉼표까지 맞춰 20·21 같은 다른 판을 잡지 않는다. 도구 문자열(failure_samples[].path)에 같은 글자를 심어도 json 이 '"' 를
+# '\"' 로 이스케이프해 이 연속열이 나오지 않는다. LIKE 패턴은 like_contains 로 '_' 를 이스케이프해 **바인딩 값**으로만
+# 넘긴다(SQL 본문의 '%' 는 PG pyformat 에서 자리표시자로 읽힌다 -- db.like_escape). 저장 형식을 바꾸면
+# test_job_stats_totals_count_failed_runs_only_with_the_v2_meaning 이 빨개진다.
+_SUMMARY_V2_LIKE = like_contains('"detail_version": 2,')
 
 # ---- 큐 현황 파이프라인(2026-10-16, 사용자 요청 「대시보드에서 큐 현황에 대해 조금만 더 자세히 그리고 개선해서 보여주면
 # 좋겠어.」) -- 아래 queue_* 읽기 셋. 시간 창이 없는 라이브 스냅숏이다: 24h created_at 창이면 하루 넘게 확인을 기다린 잡이
@@ -86,14 +100,19 @@ class MetricsRepository:
 
     def job_stats(self, *, start: str, end: str, bucket_chars: int = 13) -> dict:
         params = {"s": start, "e": end}
-        fail_ph = ", ".join(f":f{i}" for i in range(len(_FAILED_STATES)))
-        fail_params = {f"f{i}": v for i, v in enumerate(_FAILED_STATES)}
+        fail_ph, fail_params = _in("f", _FAILED_STATES)
+        rej_ph, rej_params = _in("rj", _REJECTED_STATES)
+        can_ph, can_params = _in("cn", _CANCELLED_STATES)
+        reason_ph, reason_params = _in("fr", _FAILURE_REASON_STATES)
+        outcome_params = {**fail_params, **rej_params, **can_params}   # agg() 의 자리표시자 셋
 
         def agg(prefix=""):
             # SUM(CASE ...)는 두 방언 공통 -- FILTER (WHERE ...)는 PG 전용이라 안 쓴다.
             return (f"COUNT(*) AS cnt, "
                     f"SUM(CASE WHEN {prefix}state = 'Succeeded' THEN 1 ELSE 0 END) AS ok, "
-                    f"SUM(CASE WHEN {prefix}state IN ({fail_ph}) THEN 1 ELSE 0 END) AS bad")
+                    f"SUM(CASE WHEN {prefix}state IN ({fail_ph}) THEN 1 ELSE 0 END) AS bad, "
+                    f"SUM(CASE WHEN {prefix}state IN ({rej_ph}) THEN 1 ELSE 0 END) AS rej, "
+                    f"SUM(CASE WHEN {prefix}state IN ({can_ph}) THEN 1 ELSE 0 END) AS can")
 
         by_state = self._db.query(
             """SELECT state, COUNT(*) AS cnt FROM data_jobs
@@ -104,7 +123,7 @@ class MetricsRepository:
             f"""SELECT COALESCE(tool, '') AS k, {agg()} FROM data_jobs
                 WHERE created_at BETWEEN :s AND :e
                 GROUP BY COALESCE(tool, '') ORDER BY cnt DESC, k ASC""",
-            {**params, **fail_params})
+            {**params, **outcome_params})
 
         # sync 잡은 storage_name이 NULL이고 도착지가 destination_storage에 있다 --
         # "그 스토리지에서 일어난 일"의 대표로 도착지를 쓴다. NULL 정렬은 방언마다
@@ -114,21 +133,23 @@ class MetricsRepository:
                 FROM data_jobs WHERE created_at BETWEEN :s AND :e
                 GROUP BY COALESCE(storage_name, destination_storage, '')
                 ORDER BY cnt DESC, k ASC""",
-            {**params, **fail_params})
+            {**params, **outcome_params})
 
         by_requester = self._db.query(
             f"""SELECT r.requester_id AS k, {agg('d.')}
                 FROM data_jobs d JOIN requests r ON r.request_id = d.request_id
                 WHERE d.created_at BETWEEN :s AND :e
                 GROUP BY r.requester_id ORDER BY cnt DESC, k ASC""",
-            {**params, **fail_params})
+            {**params, **outcome_params})
 
+        # 실패·시간초과·거부만(_FAILURE_REASON_STATES) -- 취소·만료의 사유(cancelled·preview_expired)가 상위를 채우면
+        # 실제 원인이 표 밖으로 밀린다.
         failure_reasons = self._db.query(
             f"""SELECT reason_code, COUNT(*) AS cnt FROM data_jobs
                 WHERE created_at BETWEEN :s AND :e AND reason_code IS NOT NULL
-                  AND state IN ({fail_ph})
+                  AND state IN ({reason_ph})
                 GROUP BY reason_code ORDER BY cnt DESC, reason_code ASC LIMIT 10""",
-            {**params, **fail_params})
+            {**params, **reason_params})
 
         # ISO-8601 UTC 고정 포맷이라 SUBSTR 접두가 곧 시간 버킷이다(13자=시간, 10자=일)
         throughput = self._db.query(
@@ -227,11 +248,29 @@ class MetricsRepository:
         # 막는다(반복 스캔은 사용량 분석이 유도하는 정상 사용이다). files_count 도
         # 같은 이유로 함께 제외한다 -- 지표 라벨(처리 항목/바이트)의 의미는 "잡이
         # 만진 것"이고, scan 은 아무것도 만지지 않는다.
+        #
+        # 연산별 분리·종단 전체(2026-10-27 d192): 예전 files_total 은 sync 반영 항목과 rm 삭제 수를 한 숫자로 더했고
+        # Succeeded 만 셌다. 이제 files_count 는 **실행에서 실제로 일어난 일**만 담는다(summary v2 -- nsync Completed 합·
+        # dsync 복사 성공·drm 실제 삭제 수; 미리보기 실패는 승격하지 않는다 -- stepper._surface_failed_artifact) -- 실패·
+        # 중단된 실행이 이미 복사·삭제한 항목도 실제 변경이라 상태를 가리지 않고 종단 전체를 더한다. 연산 비교는 CASE 안에
+        # 두고 ELSE 를 두지 않는다: NULL 은 SUM 이 건너뛰므로 하나도 모르면 NULL(모름) 그대로다(0 으로 지어내지 않는다).
+        # 종단 한정(term_ph -- 수행시간과 같은 묶음): 진행 중 잡의 수는 아직 확정이 아니다.
+        # exec_submitted_at IS NOT NULL = 실행 vcjob 을 제출한 잡만(stepper._submit_execution 이 제출마다 찍는다) -- 「실행
+        # 결과만」 불변식의 읽기 쪽 절반이다. d192 전에는 미리보기 실패도 계획 수를 컬럼에 올렸고(그때는 Succeeded 만 세서
+        # 무해했다), 그 행이 창(최대 30일) 안에 남아 있다 -- 종단 전체로 넓힌 지금 그대로 더하면 안 한 일이 섞인다.
+        # 실패·시간초과·취소 행은 summary v2(_SUMMARY_V2_LIKE)일 때만 센다(2026-10-27 d192 리뷰): d192 전 **실행** 실패도
+        # files_count 를 올렸는데 그 뜻이 옛것이다(nsync = 계획 동작 합, drm = 삭제 시도 수, dsync = 실패한 복사 포함 Items)
+        # -- 계획 100만 개 중 10개만 복사하고 실패한 옛 잡이 창이 지날 때까지 「반영 100만」으로 더해진다. 성공 행은 옛 뜻도
+        # 실제 결과와 같아 그대로 센다. v2 러너가 상세 파싱에 실패해 핵심 3키만 쓴 실패 행도 빠진다 -- 모르면 더하지 않는 쪽.
         sums = self._db.query_one(
-            """SELECT SUM(files_count) AS files_total, SUM(bytes_count) AS bytes_total
-               FROM data_jobs
-               WHERE created_at BETWEEN :s AND :e AND state = 'Succeeded'
-                 AND operation != 'scan'""", params)
+            f"""SELECT SUM(CASE WHEN operation = 'sync' THEN files_count END) AS sync_items,
+                       SUM(CASE WHEN operation = 'sync' THEN bytes_count END) AS sync_bytes,
+                       SUM(CASE WHEN operation = 'rm' THEN files_count END) AS rm_items
+                FROM data_jobs
+                WHERE created_at BETWEEN :s AND :e AND state IN ({term_ph})
+                  AND exec_submitted_at IS NOT NULL
+                  AND (state = :ok OR result_summary LIKE :v2 ESCAPE '\\')""",
+            {**params, **term_params, "ok": DataJobState.SUCCEEDED.value, "v2": _SUMMARY_V2_LIKE})
 
         # 계획 거부: 계획 단계 거부는 data_jobs 행이 생기기 **전**의 종단이라 위의
         # 어떤 data_jobs 집계(by_state·KPI 전부)에도 잡히지 않는다 -- 요청 종단이
@@ -255,17 +294,23 @@ class MetricsRepository:
                GROUP BY reason_code ORDER BY cnt DESC, reason_code ASC LIMIT 10""",
             params)
 
+        def outcome(r):
+            # 행의 결과 열 넷(위 agg). failed 는 Failed·TimedOut 만 -- 거부·취소·만료는 따로 센다(_FAILED_STATES 주석).
+            return {"succeeded": r["ok"], "failed": r["bad"], "rejected": r["rej"], "cancelled": r["can"]}
+
         def fold(rows_, key_name):
             # COALESCE로 접은 ''를 None으로 되돌리고 내부 별칭을 응답 이름으로 바꾼다
-            return [{key_name: (r["k"] or None), "count": r["cnt"],
-                     "succeeded": r["ok"], "failed": r["bad"]} for r in rows_]
+            return [{key_name: (r["k"] or None), "count": r["cnt"], **outcome(r)} for r in rows_]
+
+        def total(v):
+            # PostgreSQL 의 SUM(BIGINT) 는 numeric(Decimal)이다 -- 두 방언이 같은 int 를 내게 접는다. None 은 모름 그대로.
+            return None if v is None else int(v)
 
         return {
             "by_state": [{"state": r["state"], "count": r["cnt"]} for r in by_state],
             "by_tool": fold(by_tool, "tool"),
             "by_storage": fold(by_storage, "storage"),
-            "by_requester": [{"requester_id": r["k"], "count": r["cnt"],
-                              "succeeded": r["ok"], "failed": r["bad"]}
+            "by_requester": [{"requester_id": r["k"], "count": r["cnt"], **outcome(r)}
                              for r in by_requester],
             "failure_reasons": [{"reason_code": r["reason_code"], "count": r["cnt"]}
                                 for r in failure_reasons],
@@ -282,8 +327,9 @@ class MetricsRepository:
             "submit_wait_excluded": excluded["c"],
             "sched_wait_seconds": [row["w"] for row in sched_waits],
             "sched_wait_excluded": sched_excluded["c"],
-            "files_total": sums["files_total"],
-            "bytes_total": sums["bytes_total"],
+            "sync_items_total": total(sums["sync_items"]),
+            "sync_bytes_total": total(sums["sync_bytes"]),
+            "rm_items_total": total(sums["rm_items"]),
         }
 
     # ---- 큐 현황 파이프라인(2026-10-16) -- 라우트(metrics_queue)가 축마다 독립 try 로 부른다. 조립은

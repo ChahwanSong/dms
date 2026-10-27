@@ -99,11 +99,13 @@ test.describe("E12 — rm 배치", () => {
     const items = dlg.getByRole("list", { name: "항목별 삭제 대상" }).getByRole("listitem");
     await expect(items).toHaveCount(3);
     await expect(items.nth(0)).toContainText(`#0 ${STORAGE_NAME}:${base}/a — 5개`);
-    await expect(items.nth(0)).toContainText(`실제 경로: ${root}/${base}/a`);
+    // 라벨은 「지정 경로」(2026-10-27 d192, 포탈 괴리 [C2] -- 글자 그대로 붙인 경로라 링크를 풀지 않는다, 「실제 경로」 아님)
+    await expect(items.nth(0)).toContainText(`지정 경로: ${root}/${base}/a`);
+    await expect(dlg).not.toContainText("실제 경로");
     await expect(items.nth(1)).toContainText(`#1 ${STORAGE_NAME}:${base}/b — 2개`);
     await expect(items.nth(2)).toContainText("0개(대상 경로를 찾지 못함)");
     await expect(dlg).toContainText("1개 항목 — 미리보기에서 찾지 못했습니다");
-    // 375 에서 긴 실제 경로가 대화상자를 가로로 넘기지 않는다
+    // 375 에서 긴 지정 경로가 대화상자를 가로로 넘기지 않는다
     await page.setViewportSize({ width: 375, height: 800 });
     const [sw, cw] = await dlg.evaluate((el) => [el.scrollWidth, el.clientWidth]);
     expect(sw, `375 에서 확인 대화상자가 가로로 넘친다(${sw} > ${cw})`).toBeLessThanOrEqual(cw);

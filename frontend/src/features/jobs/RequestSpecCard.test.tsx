@@ -5,7 +5,7 @@ import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
 import { beforeAll, afterAll, afterEach, test, expect } from "vitest";
 import { RequestDetail } from "./RequestDetail";
-import { PRIV_ROOT_HEAD, PRIV_USER } from "./optionRules";
+import { PRIV_ROOT_HEAD, PRIV_USER, SYNC_OPTION_HELP } from "./optionRules";
 
 
 // 요청 상세 「요청 내용」 카드 + 머리말 root 배지(2026-10-08) 화면 테스트. 하네스는 RequestDetail.redesign.test 의 복제.
@@ -337,10 +337,29 @@ test("l 옵션: 설명 붙은 옵션은 한 줄씩, 설명 없는 칩은 한 줄
   renderAt();
   const region = await specRegion();
   const items = within(cell(region, "옵션")).getAllByRole("listitem");
+  // delete 설명은 제출 폼과 같은 출처(SYNC_OPTION_HELP) -- 문구가 바뀌어도 두 화면이 같은 말을 하는지만 고정한다.
   expect(items.map((li) => li.textContent)).toEqual([
-    "delete 원본에 없는 파일을 대상에서도 삭제해 완전히 동일하게 맞춥니다(미러 동기화).", "open_noatime", "chmod=D2775,F664"]);
+    `delete ${SYNC_OPTION_HELP.delete}`, "open_noatime", "chmod=D2775,F664"]);
   expect(items.map((li) => li.classList.contains("basis-full"))).toEqual([true, false, false]);
   expect(items[0].parentElement).toHaveClass("flex-wrap");
+});
+
+test("l2 direct 칩: nsync 로 돈 잡이면 「적용되지 않음」 주석, dsync 면 주석 없음(괴리 [22])", async () => {
+  const opts = { direct: true, open_noatime: true };
+  serve({ ...REQ, requester_id: "mason", payload: { ...PAYLOAD_A, run_as_root: true, options: opts } },
+    [{ ...JOB, tool: "nsync", worker_pool: { ...WP_A, tool: "nsync", identity: ROOT_IDENT } }]);
+  const v = renderAt();
+  let region = await specRegion();
+  let items = within(cell(region, "옵션")).getAllByRole("listitem");
+  expect(items.map((li) => li.textContent)).toEqual(["direct nsync 로 실행돼 적용되지 않음(O_DIRECT 는 dsync 에서만)", "open_noatime"]);
+  expect(items[0]).toHaveClass("basis-full");
+  v.unmount();
+  serve({ ...REQ, requester_id: "mason", payload: { ...PAYLOAD_A, run_as_root: true, options: opts } },
+    [{ ...JOB, worker_pool: { ...WP_A, identity: ROOT_IDENT } }]);
+  renderAt();
+  region = await specRegion();
+  items = within(cell(region, "옵션")).getAllByRole("listitem");
+  expect(items.map((li) => li.textContent)).toEqual(["direct", "open_noatime"]);
 });
 
 test("m 두 묶음 2열은 xl(1280)부터 -- 사이드바가 폭을 먹는 1024–1279 는 1열", async () => {

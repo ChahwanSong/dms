@@ -37,7 +37,11 @@ const ICONS: Record<OutcomeIcon, LucideIcon> = {
   check: CircleCheck, x: CircleX, clock: Clock, loader: LoaderCircle, bell: BellRing,
   ban: Ban, hourglass: Hourglass, help: CircleHelp,
 };
-const KPI_COLS: Record<number, string> = { 1: "sm:grid-cols-1", 2: "sm:grid-cols-2", 3: "sm:grid-cols-3", 4: "sm:grid-cols-4" };
+// 5칸 = rm 의 「못 지운 항목」 + 드문 크기 칸(d192). 좁은 폭에선 2열(마지막 칸이 두 칸), sm 부터 한 줄 -- 3열로 두면
+// 둘째 줄에 회색 빈칸이 남는다.
+const KPI_COLS: Record<number, string> = {
+  1: "sm:grid-cols-1", 2: "sm:grid-cols-2", 3: "sm:grid-cols-3", 4: "sm:grid-cols-4", 5: "sm:grid-cols-5",
+};
 
 function KpiDl({ tiles }: { tiles: KpiTile[] }) {
   return (
@@ -46,8 +50,8 @@ function KpiDl({ tiles }: { tiles: KpiTile[] }) {
         // 홀수 개면 좁은 화면에서 마지막 칸이 두 칸을 차지한다(회색 빈칸이 남지 않게).
         <div key={t.key} className={`min-w-0 bg-surface px-4 py-3 ${tiles.length % 2 === 1 && i === tiles.length - 1 ? "col-span-2 sm:col-span-1" : ""}`}>
           <dt className="text-xs text-ink/70">{t.label}</dt>
-          {/* 값은 「120개」·「456 B」처럼 단위를 붙인다. 아래 「실행 결과」 타일의 원값은 "120" 이고, bytes 는 1 KiB
-              미만이면 같은 「456 B」다(괄호 원값은 1 KiB 이상에서만) -- 테스트는 칸(dt 다음 dd)으로 집어 단언한다. */}
+          {/* 값은 「120개」·「456 B」처럼 단위를 붙인다. 아래 「실행 결과」 타일도 같은 표기라(bytes 의 괄호 원값은 1 KiB
+              이상에서만) 같은 글자가 두 번 보일 수 있다 -- 테스트는 칸(dt 다음 dd)으로 집어 단언한다. */}
           <dd className="mt-0.5 text-lg font-semibold tabular-nums [overflow-wrap:anywhere]">
             {t.elapsedFrom ? <Elapsed from={t.elapsedFrom} fallback="—" /> : t.value}
           </dd>

@@ -689,8 +689,17 @@ PREFLIGHT_REASONS = frozenset({
 EXECUTION_REASON_MARKER = "DMS_EXEC_REASON="
 # 2026-10-27 sync 경로 봉쇄: source_path_redirected·destination_path_redirected 는 **워커 셸**이 sshd 앞에서 preflight 와
 # 같은 셸 함수로 다시 봐서 찍는다(_worker_command_script -- identity_groups_not_applied 와 같은 승격 경로).
+# 2026-10-27 d192 도구 결과 사유: 도구가 0 이 아닌 코드로 끝나면 **러너**가 도구 출력(summary v2 -- parsers.parse_tool_detail)
+# 에서 사유를 정해 launcher 로그에 찍는다(runner.TOOL_FAILURE_REASONS 와 같은 집합 -- 계약 테스트가 잇는다). 미리보기·실행
+# 실패 모두 _run_failure_reason 이 이 마커를 승격한다 -- 마커가 없으면 예전대로 execution_failed / preview_failed.
+# 미리보기(dry-run) 실패는 tool_aborted, 아니면 preview_scan_incomplete(nsync 스캔 오류만 -- dsync 는 walk 오류가 종료
+# 코드를 바꾸지 않는다)뿐이다: 나머지는 「반영·삭제했다」는 실행 문구라 아무것도 바뀌지 않은 미리보기엔 거짓이다. 규칙의
+# 순서·조건은 runner._derive_reason 이 정의한다(docs/ARCHITECTURE.md 「도구 결과」 불릿).
+TOOL_FAILURE_REASONS = frozenset({"tool_aborted", "destination_full", "destination_read_only", "sync_stopped_max_errors",
+                                  "sync_type_change_refused", "source_scan_incomplete", "sync_items_failed",
+                                  "rm_items_failed", "preview_scan_incomplete"})
 EXECUTION_REASONS = frozenset({"workers_unreachable", "identity_groups_not_applied", "target_path_redirected",
-                               "source_path_redirected", "destination_path_redirected"})
+                               "source_path_redirected", "destination_path_redirected"}) | TOOL_FAILURE_REASONS
 
 
 def _parse_marker(entries, marker, allowed):
