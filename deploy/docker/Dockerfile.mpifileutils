@@ -27,7 +27,13 @@ ARG MPIFILEUTILS_REPO=https://github.com/chahwansong/mpifileutils.git
 # 따라가지 않음(TOCTOU) · 2a10a18 nsync 가 없는 목적지 루트를 만든다(5958e4e 는 새 목적지 sync 가 전부 실패) · 3c041e0
 # dsync/nsync --chown 이 일반 파일 setuid/setgid 를 지운다 · ae781bd dscan 요약에 total_bytes·invalid_name_entries 추가
 # (기존 키·순서 그대로 -- DMS 는 요약의 숫자 키를 통과시킬 뿐이라 영향 없음).
-ARG MPIFILEUTILS_REF=ae781bdbeb9f26a34a0cc5e6a072bfc7d4d7e89d
+# c4dbf20(2026-10-27, 포크 브랜치 nsync-fixes-d189 — main 이 아니다, ae781bd 다음 둘): d188 실증 결함 수정.
+# f53e458 dsync 타입 교체 거부 항목·그 하위를 복사·--link-dest 에서 뺌(디렉터리 0644 사고) + 새 목적지 「Failed to stat」 제거 ·
+# c4dbf20 nsync 비어 있지 않은 디렉터리는 --delete 없이 교체하지 않음 · 배치 ≥2 타입 교체 선처리 · 목적지 rank 배리어 ·
+# --batch-files 0 · 항목별 실패 목록 + --max-errors(기본 65000) · 스캔·소스·목적지 경로를 루트 fd 아래 심링크 없이
+# (openat2) · FIFO 목적지 무한 대기·실패 COPY 의 기존 사본 삭제 수정 · 소스 특수 파일은 건너뜀. DMS 가 읽는
+# 「Planned actions:」·copied-volume= 줄 형식은 같다(특수 파일·선처리·정지는 그 밖의 줄).
+ARG MPIFILEUTILS_REF=c4dbf20f509be2e0d86e22e0ba338672355dba79
 ARG LWGRP_REF=v1.0.6
 ARG DTCMP_REF=v1.1.5
 ARG LIBCIRCLE_REF=v0.3
