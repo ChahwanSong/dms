@@ -95,6 +95,36 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ✅ sync·rm 경로 봉쇄 — managed_root 아래 어느 성분이든(끝 포함) 심링크면 세 시점에서 거부 — **완료·실증**(2026-10-27, d191, dms-ssc)
+
+사용자 결정: 「경로의 모든 단계를 보고 한번 아니라 여러번 보고 거부해서 이슈를 해결해줘」 + 「Rm도 똑같이 dms에서 거부하도록 해줘」
+(포크 보고 ④ 의 실질 해결 A — 루트 심링크로 root sync 가 남의 디렉터리에 쓰고 소유를 바꾸거나(C12), 소스 링크 + delete 가 목적지를
+지우던(C13) 문제).
+
+- **규칙 하나**(`execution_manifests._PATH_CONTAINED_FN`): 경로의 실제 위치 == realpath(managed_root) + 글자 그대로의 상대경로. 끝
+  성분 포함, 아직 없는 끝부분(새 목적지)은 있는 가장 깊은 상위로, managed_root 자신·그 위 링크는 허용. 러너용 Python 미러
+  `runner.path_redirected`, 실 dash 로 두 판정 대조(`tests/test_sync_containment_sh.py` 신설, `test_rm_containment_sh` 갱신).
+- **세 시점**: ① 미리보기 preflight ② 실행 직전 exec_preflight(같은 스크립트, sync 는 각 쪽 첫 검사) ③ 도구가 경로를 열기 직전 — sync
+  는 워커 셸(sshd 앞, 역할별 env), rm 은 러너(drm 직전). 사유 `source_path_redirected`·`destination_path_redirected`(신설)·
+  `target_path_redirected`. stepper 가 경로를 조합한 같은 managed_root 를 `source_root`·`destination_root` 로 싣고, 없으면 빌더가
+  거부(fail-closed). **rm 은 대상 자신이 링크여도 거부**(예전엔 drm 이 링크만 지운다고 허용).
+- **배포(d191)**: 포탈 빌드 4a13415 → 릴리스 에이전트 → api·controller·잡 이미지(러너), 오버레이 28cb1ff.
+- **라이브 실증(일회용 데이터, victim = 4444:4444 700 — 전부 무손상, 요청 purge)**:
+  | 케이스 | 결과 |
+  |---|---|
+  | P1b root nsync, 목적지 경로 = victim 링크(C12 모양) | 미리보기 preflight 에서 `destination_path_redirected` Rejected |
+  | P2 root nsync, 소스 경로 = 링크 + `delete:true`(C13 모양) | `source_path_redirected` Rejected, 목적지 3파일 그대로 |
+  | P3 목적지 중간 성분이 링크(`mid → victim`, 목적지 `mid/sub`) | `destination_path_redirected` Rejected |
+  | P4 dsync(cephfs-dms → third) 목적지 링크 | `destination_path_redirected` Rejected |
+  | P5 정상(새 목적지) | Succeeded — 회귀 없음 |
+  | P6 확인 대기 중 목적지를 victim 링크로 교체 → 확인 | 실행 직전 exec_preflight 가 `destination_path_redirected` Rejected(②) |
+  | P7 확인 뒤 exec_preflight 통과 5.5초 뒤 교체 | 실행 vcjob **워커 셸**이 `destination_path_redirected` Failed(③), victim 무손상 |
+  | R1 root rm, 대상 자신 = victim 링크 | `target_path_redirected` Rejected(새 동작), 링크·victim 그대로 |
+  | R2 정상 rm | Succeeded |
+  덤: 릴리스 직후 첫 케이스(P1)는 종료 중이던 옛 컨트롤러가 봉쇄 없는 preflight 를 만들어 통과시켰지만, 새 컨트롤러의 미리보기 워커
+  셸(③)이 잡았다(Failed `destination_path_redirected`) — 다층 검사의 효과; 새 컨트롤러로 다시 돌린 P1b 는 preflight 에서 거부.
+- 남는 것: 마지막 검사와 도구가 경로를 여는 사이 몇 초(BACKLOG ④ B — 포크 루트 고정).
+
 ### ✅ sync `open_noatime` 실효 + `direct` 는 nsync 더미 — **완료·실증**(2026-10-27, d190, dms-ssc)
 
 사용자 결정: 「DMS sync 옵션에서 open_noatime 효과있게 해주고 O_direct 는 nsync에서 의미없게 해도 돼 (더미 옵션)」.
