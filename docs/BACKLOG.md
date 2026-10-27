@@ -167,17 +167,35 @@
   경로를 여는 사이 몇 초 — 경로 부모를 가진 사용자가 그 순간에 맞춰 바꿔야 하는 공격. 완전히 닫으려면 **B(포크)**: 각 루트를 시작에
   한 번 `O_NOFOLLOW` 로 열어 dev/ino 를 고정하고 모든 단계·루트 메타 복원을 그 fd 로(지금은 단계마다 경로로 다시 연다), 소스 루트가
   디렉터리가 아니면 실행 거부, 선택 `--beneath <mount>`(openat2). 보고 https://claude.ai/artifact/T5G9BDAcE943V3b8bCuf2d §4.
-- 🔧 **확인 창이 sync 의 삭제를 보여 주지 않는다**(d188 C8, d189 C13). 미리보기 요약은 files·bytes 뿐이라 목적지 5개를 지운 C13 이 「7 files」로
-  확인됐다. nsync `Planned actions: … remove=N` 의 remove 수를 미리보기 요약·확인 창에 싣는다(dsync 의 대응 줄도 확인).
+- 🔧 **dsync 미리보기는 변경 계획을 내지 않는다**(d192 에 nsync 쪽은 해결 — 확인 창·배치 확인이 nsync 종류별 변경 예정(삭제 포함)을
+  보인다). dsync `--dryrun` 은 소스·목적지 walk 수만 찍어(`Items : 0` 은 비교 수) DMS 는 「소스 전체 N개(변경 수는 실행 후 확정)」로
+  정직하게 표시만 한다 — 삭제 수·거부될 타입 교체를 미리 못 본다. 처방: 포크 `dsync_strmap_compare` 의 결정 지점(only-src·타입 차이·
+  크기 차이·심링크 차이·메타 갱신, `--delete` 의 only-dst)에서 dry-run 에도 세어 `Dry run plan: copy=… remove=… type-change=…
+  meta-update=…` 한 줄 → 러너 파서·포탈은 nsync 와 같은 모양으로 읽는다(포크 하네스·잡 이미지 재빌드).
+- 🔧 **dsync 가 복사에 실패한 파일을 목적지에 빈 파일로 남긴다**(d192 실증 D2: 0 B·소스 모드 0600). mknod 로 먼저 만들고 내용을 복사하는
+  구조라 실패한 파일의 이름이 목적지에 보인다(다시 실행하면 크기가 달라 다시 복사). d193 포탈은 「실패 항목」에 그 사실을 말한다.
+  처방(포크): 복사 단계 뒤 집단으로 실패한 목적지 이름을 모아 지우고(청크가 여러 rank 에 갈라져 있어 복사 중 unlink 는 다른 rank 가
+  O_CREAT 로 되살린다) 메타데이터 단계에서 그 이름을 건너뛴다 — nsync 는 이미 「실패한 전송이 만든·자른 파일만 지운다」(nsync.md §13.3).
+- 📝 **dsync·drm 의 원시 경로로 사유 판정을 흔들 수 있다**(d192 리뷰 contract-35, 낮음). dsync·drm 은 오류 줄에 경로를 이스케이프 없이
+  찍어, 줄바꿈이 든 이름이 가짜 `… (errno=28 …)` 줄을 더하면 그 잡의 사유가 `destination_full`·`destination_read_only` 로 바뀔 수 있다
+  (수 판정은 최종 블록·마지막 줄만 믿어 막혔고, abort 는 stderr 만 본다). 자기 잡의 표시만 바뀐다 — 처방: 포크 dsync·drm 오류 줄 경로
+  이스케이프(nsync 처럼).
+- 📝 **dsync walk 오류는 삭제가 켜졌을 때만 보인다**(d192). `Errors detected walking source path` 는 `--delete` 일 때만 찍혀(삭제를 끄는
+  안내라서) 삭제 꺼진 dsync 는 소스 일부를 못 읽어도 summary 에 `scan_incomplete` 가 없다(rc 도 0). 처방(포크): walk 오류 수를 늘
+  요약 줄로.
+- 📝 **quiet 실행은 결과 수·실패 항목·도구 사유가 없다**(의도 — 세 도구 모두 `-q` 가 로그를 NONE 으로). d192 포탈 도움말·결과 화면이
+  그렇게 말하고, summary 는 `quiet: true` + 수 null. 결과가 필요하면 quiet 를 끈다.
+- 📝 **d192 전에 계획된 direct + 맞지 않는 bufsize 잡은 그대로 돈다**(d192 리뷰 control, 낮음). 제출 검증(422 `direct_bufsize_misaligned`)만
+  넣었고 stepper 관문은 없다 — 그런 잡이 중단되면 이제 `tool_aborted` 로 보인다.
 - 📝 **테스트베드 CephFS 는 읽어도 atime 이 갱신되지 않는다**(2026-10-27 d190 실측 — `relatime` 마운트인데 노드에서 `cat` 해도 2001
   그대로, 같은 노드 ext4 는 갱신). 사용량 분석의 atime(hot/cold) 분포는 테스트베드에서 의미가 약하다. 프로덕션 스토리지의 atime 동작은
   그 사이트에서 한 번 확인할 것(포탈 문구는 이미 「relatime/open_noatime 환경에선 근사」).
 - 📝 **비 root dsync 가 남의 소유 파일을 복사하면 오류 줄 없이 rc 1**(2026-10-27 로컬 확인 — 소유자를 유지할 수 없어서, 자기 파일이면
   rc 0, `--open-noatime` 무관). DMS 비 root 실행은 실행 신원으로 자동 chown 을 싣는 경로라 라이브 D2 는 Succeeded 였다 — chown 없이
   남의 파일을 섞어 돌리는 경로가 생기면 다시 볼 것.
-- 🔧 **포크 브랜치 `nsync-fixes-d189`(핀 461bb73, 라이브 d190)의 남은 것**. DMS 핀은 main 이 아닌 브랜치 SHA — 포크 main 병합은 소유자 결정.
-  P3: 배치 여럿에서 ENOSPC 정지 뒤 배치의 삭제는 돌지 않음(다음 실행이 이어 감) · ENOSPC 뒤에도 진행 중이던 전송은 끝까지 읽혀 버려짐 ·
-  비 root 가 이미 있는 0555 목적지 디렉터리에 새 자식을 못 만듦 · dsync 미리보기는 거부될 타입 교체를 표시하지 않음.
+- 🔧 **포크(`nsync-fixes-d189` 7a3189c = 라이브 d192, 2026-10-28 포크 main 에도 ff)의 남은 것**. P3: 배치 여럿에서 ENOSPC 정지 뒤 배치의
+  삭제는 돌지 않음(다음 실행이 이어 감) · ENOSPC 뒤에도 진행 중이던 전송은 끝까지 읽혀 버려짐 · 비 root 가 이미 있는 0555 목적지 디렉터리에
+  새 자식을 못 만듦 · dsync 미리보기 변경 계획·실패 파일 잔여·경로 이스케이프·walk 오류 수(위 항목들).
 
 ## 2. 의도적 보류 (결정 — "미구현"이 아님)
 
@@ -259,29 +277,18 @@
   broken 에 넣을지, 카운터만 둘지가 사용자 결정. 잡 이미지·에이전트 재빌드 필요. **2026-10-26 포크 ae781bd(d188)가 카운터 쪽을 넣었다** —
   `summary.invalid_name_entries`(d_name 엄격 UTF-8, broken 사유 아님) + `summary.total_bytes`(S1 실증: 4·1075745949, DMS API 는 숫자 키라 이미
   통과). 남은 일: 스캔 결과 화면에 표시, `total_bytes` 를 히스토그램 재합산 대신 쓰기.
-- 📝 **drm 은 unlink 실패에도 종료 코드 0**(포크 `drm.c` — `mfu_flist_unlink` 가 void). 일부만 지워졌는데 rm 이
-  Succeeded 로 끝날 수 있다(같은 조사에서 발견). 해법: 포크에서 실패 수를 rc 로, 또는 러너가 오류 줄을 판정.
 - 📝 **rm 대상 봉쇄의 남은 TOCTOU 창**(2026-10-21 배치 rm 리뷰). 「상위 경로에 심링크 성분 없음」은 preflight·exec_preflight
   (`_RM_CONTAINMENT_CHECK`)와 러너의 drm 직전 재확인(`runner.rm_target_redirected` — launcher 가 같은 스토리지 hostPath 를
   마운트하고 root 라 가능했다) 세 번 본다. 그래도 러너 확인 → mpirun → 워커 rank 의 drm 이 경로를 lstat·걷기 시작할 때까지
   (워커 기동·MPI 초기화, 보통 수 초)는 비어 있다 — 상위 디렉터리에 쓸 수 있는 사용자가 그 사이에 정확히 심링크로 바꾸면 root
   drm 이 링크를 따라간다(예전 창은 exec_preflight 파드 → Volcano 대기 → 실행으로 분 단위였다). 닫는 길은 포크 `drm.c` 가
   대상의 상위 경로를 성분마다 `openat(O_NOFOLLOW|O_DIRECTORY)`(또는 `openat2(RESOLVE_NO_SYMLINKS|RESOLVE_BENEATH)`, 기준
-  fd = managed_root)로 열고 그 fd 기준으로 지우는 것 — 잡 이미지 재빌드가 필요해 보류. 단건 root rm·root sync 목적지의 상위
-  심링크도 같은 종류다(sync 목적지는 봉쇄 검사 밖).
+  fd = managed_root)로 열고 그 fd 기준으로 지우는 것 — 잡 이미지 재빌드가 필요해 보류. sync 소스·목적지도 d191 부터 같은
+  봉쇄(워커 셸이 마지막)라 남는 창의 종류가 같다 — §1 「경로 심링크(포크 보고 ④) — 포크 쪽 루트 고정(B)」 한 항목으로 닫는다.
 - 📝 **제출 경계의 lone surrogate 는 422 가 아니라 500**(같은 조사). JSON 본문 `"target":"a/\udcb4x"` 는 파이썬 json·
   pydantic 을 통과해 DB INSERT 에서 UnicodeEncodeError → 500(요청 행은 안 생긴다). `domain.validate_relative_path` 에
   `path.encode("utf-8")` 실패 → `unsafe_path`(이미 양쪽 등록된 코드)를 넣으면 422 가 된다. 경로를 받는 다른 입력도 같다.
 
-- 📝 **dsync 가 "목적지 부모 쓰기 불가" 에서 종료 코드 0**(2026-09-30 d139 실증에서 발견).
-  포크 `dsync.c`(MPIFILEUTILS_REF 1b93d54) 는 목적지 존재와 무관하게 부모 W_OK 를 요구하고,
-  실패하면 `MFU_LOG(ERR)` 후 `goto ERROR` 인데 `rc` 가 초기값 0 이라 **아무것도 복사하지 않고
-  0 으로 끝난다**(dry-run 은 경고만이라 미리보기도 정상처럼 보인다) → DMS 는 Succeeded. 지금은
-  preflight 가 목적지가 있어도 부모 쓰기를 먼저 거부해(`destination_parent_not_writable`)
-  정상 흐름에선 닿지 않지만, preflight 와 실행 사이에 부모 권한이 바뀌는 경합·root-squash
-  류 스토리지에선 여전히 조용한 무동작 성공이다. 근본 해법: 포크에서 그 경로 `rc = 1`(또는
-  목적지가 이미 있으면 부모 검사 생략 — 그러면 "root 755 부모 아래 본인 디렉터리" sync 도 가능),
-  또는 러너가 `ERROR:` 줄을 종료 코드와 함께 판정. 잡 이미지 재빌드가 필요해 보류.
 - 📝 **러너가 `<phase>` 의 `chown -R` 반환코드를 보지 않는다**(`src/dms_job_runner/runner.py`,
   2026-09-30 아티팩트 쓰기 감사). mkdir 은 되고 chown 만 거부되는 드문 FS(NFSv4 idmap 등)에서
   비 root scan 이 원인 표시 없이 dscan "Failed to write output file" 로 죽는다(root_squash 면 그

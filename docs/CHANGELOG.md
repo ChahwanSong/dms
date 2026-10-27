@@ -95,6 +95,44 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ✅ 실패 사유를 도구 출력에서 정확히 · summary v2 · 통계 정확화 · 포탈 결과/확인/배치/도움말 — **완료·실증**(2026-10-28, d192·d193, dms-ssc)
+
+사용자 요청: 「지적된 내용들 전부 고쳐줘. 실패사유는 최대한 정확하게 포탈에 표시해서 사용자가 이해할수있도록. 통계 등도 구현 업데이트 된
+내용 반영해서 정확하게 할것. 포탈은 수정 시 UI 개선작업도 같이」 — 포탈 괴리 감사(확인 32 + 비평 3)와 구현의 적대적 리뷰(확인 40)를 반영.
+
+- **포크 7a3189c**(같은 브랜치, 하네스 117/117): drm·dsync `--delete` 가 지우지 못한 항목이 있으면 rc≠0 + 「Removed N」 = 지운 수 +
+  `Remove failed for F of T items` · dsync 목적지 부모 쓰기 불가 rc 1 · dsync 소스 특수 파일은 메타 시도 없이 경고 한 줄 · nsync
+  `Completed actions:`(실제 반영 종류별 수) · dsync `--contents --open-noatime` 비교 EPERM 폴백.
+- **러너 summary v2**(`parsers.parse_tool_detail`, ARCHITECTURE 「summary.json」): 핵심 3키 + 도구별 상세(계획/반영·실패 by_op·표본 ≤10·
+  타입 교체·특수 파일·정지 원인·스캔 오류…). 요약 줄 정규식은 MFU 시각 접두사에 고정·마지막 매치, dsync 는 최종 블록 Items 만(중단이면
+  모름). files 뜻: nsync 실행 = 실제 반영 합, dsync 실행 = 만든 항목 − 실패 복사, drm 실행 = 지운 수.
+- **도구 결과 사유**(러너 → `DMS_EXEC_REASON` → stepper 승격): `sync_items_failed`·`sync_type_change_refused`(비어 있지 않은 디렉터리 +
+  삭제 꺼짐 증거가 있을 때만)·`sync_stopped_max_errors`·`destination_full`·`destination_read_only`(sync 만)·`source_scan_incomplete`(nsync 소스
+  쪽 + 삭제 실제로 꺼짐)·`rm_items_failed`·`tool_aborted`(stderr 만)·`preview_scan_incomplete`(nsync 미리보기). launcher 로그에 도구 출력
+  꼬리(10 KiB)를 덧붙여 「실행 로그」에서 원인이 보인다.
+- **통계**: `sync_items_total`·`sync_bytes_total`·`rm_items_total`(실패·중단된 실행의 부분 처리 포함, v2 행만), 분해 표 실패 = Failed·TimedOut ·
+  거부 · 취소·만료, 실패 사유에서 취소 제외, 미리보기 실패 수는 files_count 로 승격하지 않음. 배치 확인 감사 행 `files_by_tool`(잡 행 도구).
+- **옵션**: direct + bufsize 는 4096·2^k ≤ 4 MiB(422 `direct_bufsize_misaligned`, 모든 제출·배치 경로 + 포탈 즉답).
+- **포탈**: `lib/toolSummary` 하나로 결과(도구별 라벨 타일 + 「실패 항목」 연산별 칩·표본·errno 이유)·컨펌(nsync 종류별 변경 예정·경고)·
+  배치 확인(도구별 합)·배너(도구 시작 전 거부는 「데이터는 바뀌지 않았습니다」, 반영 수 명시)·도움말(delete·quiet·contents·소유권 set-ID·
+  direct·max-errors·경로 심링크·「지정 경로」·atime)·대시보드(연산별 처리량, 성공/실패/거부/취소·만료).
+- **배포**: d192 = 포탈 빌드 4a27b6e(mpifileutils·dms·dms-agent) → 릴리스 에이전트 → api·controller·job-image, 오버레이 a52d3b1. d193 = 실화면
+  반영(d83446f, dms 만): 타입 교체 경고 겹침 문구 · dsync 실패 파일이 빈 파일로 남는다는 안내 · 분해 표 열 잘림.
+- **라이브 실증**(일회용 데이터, alice = 10001:10000 — 정리·요청 purge 완료):
+  | 케이스 | 결과 |
+  |---|---|
+  | N1 nsync(alice) 읽을 수 없는 소스 파일 3 | Failed `sync_items_failed` · 반영 복사 5·속성 1(계획 9) · 실패 항목 복사 3(권한 없음 errno 13) |
+  | N2 nsync(root) 목적지 비어 있지 않은 디렉터리 ← 소스 파일, 삭제 꺼짐 | 미리보기 경고(교체 시도·비어 있지 않으면 실패) → 실행 Failed `sync_type_change_refused`(replace-dir errno 39) |
+  | N3 nsync(root) delete + 링크 + FIFO | Succeeded · 반영 복사 3·디렉토리 1·링크 1·속성 1·삭제 3 · 특수 파일 1 건너뜀 |
+  | N4 nsync(alice) 읽을 수 없는 하위 디렉터리 | 미리보기 Failed `preview_scan_incomplete`(스캔 1) |
+  | Q1 nsync(alice) quiet | Failed `execution_failed` + summary quiet·수 모름(의도) |
+  | R1 rm(alice) root 소유 하위 | Failed `rm_items_failed` · 지움 4 · 못 지움 5(errno 13·39) |
+  | D1 dsync(root) 타입 교체 거부 | Failed `sync_type_change_refused` |
+  | D2 dsync(alice) 읽을 수 없는 파일 2 | Failed `sync_items_failed` · 복사 3·실패 2(실패 파일은 목적지에 0 B 로 남음 → d193 안내, BACKLOG) |
+  | O1 direct + bufsize 8 MiB·1000000 / 1 MiB | 422 `direct_bufsize_misaligned` / 수락 |
+  통계(24h): sync 반영 19(= 6 + 9 + 1 + 3)·57 B, rm 4, 실패 사유 상위가 새 코드로. 실 Chrome 1440·375 가로 넘침 0, 콘솔 오류 0.
+- 남는 것(BACKLOG): dsync 미리보기 변경 계획 · dsync 실패 파일 잔여 · dsync·drm 경로 이스케이프 · dsync walk 오류 수 · 포크 루트 고정(B).
+
 ### ✅ sync·rm 경로 봉쇄 — managed_root 아래 어느 성분이든(끝 포함) 심링크면 세 시점에서 거부 — **완료·실증**(2026-10-27, d191, dms-ssc)
 
 사용자 결정: 「경로의 모든 단계를 보고 한번 아니라 여러번 보고 거부해서 이슈를 해결해줘」 + 「Rm도 똑같이 dms에서 거부하도록 해줘」
