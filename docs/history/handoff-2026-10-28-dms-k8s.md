@@ -258,4 +258,4 @@ PV 주소 잡도 러너가 보는 경로는 managed_root + 상대경로라 summa
 > `git fetch origin && git show origin/dms-ssc:docs/history/handoff-2026-10-28-dms-k8s.md` 로 DMS-SSC 세션의 인계 문서를 읽고, 0절 순서대로
 > dms-k8s 에 맞게 이식해줘(우선 mpifileutils 핀 7a3189c). 설계 결정이 필요한 곳(경로 봉쇄 통일, rm 끝 링크 거부)은 나에게 먼저 물어봐.
 
-같은 내용을 웹 페이지로도 올렸다(대화 끝의 링크). 그 세션은 Artifact 읽기로도 열 수 있다.
+같은 내용을 웹 페이지로도 올렸다: https://claude.ai/artifact/5YXFYhy5brAoyGVrm44YbE (비공개 — 같은 계정의 세션은 Artifact 읽기로 열 수 있다).
