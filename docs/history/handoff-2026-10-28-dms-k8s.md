@@ -259,3 +259,29 @@ PV 주소 잡도 러너가 보는 경로는 managed_root + 상대경로라 summa
 > dms-k8s 에 맞게 이식해줘(우선 mpifileutils 핀 7a3189c). 설계 결정이 필요한 곳(경로 봉쇄 통일, rm 끝 링크 거부)은 나에게 먼저 물어봐.
 
 같은 내용을 웹 페이지로도 올렸다: https://claude.ai/artifact/5YXFYhy5brAoyGVrm44YbE (비공개 — 같은 계정의 세션은 Artifact 읽기로 열 수 있다).
+
+---
+
+## 8. 추가 — 2026-10-28 후속(dms-ssc d194)
+
+이 문서를 쓴 뒤 dms-ssc 에서 바뀐 것이다. **보안 항목(개행 구멍)은 dms-k8s 에도 있으니 먼저 보라.**
+
+1. **dms-ssc 도 rm 끝 링크 = 링크만 삭제로 바꿨다**(사용자 결정 — 10-27 의 「거부」를 뒤집음). §3 표의 「rm 끝 링크」 행 차이는 없어졌다.
+   ssc 는 함께 다음을 넣었으니 dms-k8s 가 가져갈지 정하면 된다:
+   - 봉쇄 **순서** ① 대상 전체 문자열(끝 `/` `/.` `/..`, `//` `/./` `/../`) ② managed_root 자신 ③ 부모 봉쇄 — ①이 빠지면 변조 행
+     `…/x/..` 를 drm 이 접어 managed_root 를 지운다(실측). dms-k8s 판에 `//`·`/./`·`/../` 까지 있는지 확인.
+   - **`target_kind` + 미리보기 종류 묶기**: 러너가 drm 직전 lstat(link·dir·file·other·missing)을 summary 에, stepper 가 실행 spec 에만
+     미리보기 값을 싣고(env `DMS_JR_RM_EXPECT_KIND`) 다르면 mpirun 없이 `target_changed_since_preview`(새 사유). 포탈은 「심볼릭 링크 ·
+     링크만 삭제(링크가 가리키는 곳은 지우지 않음)」를 표시. 링크로 확인한 요청이 그 사이 디렉터리로 바뀐 이름의 트리를 지우지 않게 —
+     PV rm·직접 경로 rm 공통으로 의미가 있다.
+2. **개행 구멍(보안 — dms-k8s 에도 있다)**: 셸의 `$(dirname …)`·`$(realpath …)` 명령 치환은 결과 끝의 개행을 지운다.
+   - ① 이름이 개행으로 끝나는 링크 성분(`x\n` → 남의 디렉터리) 아래 아직 없는 경로를 실제 디렉터리 `x` 로 보고, ② 링크 `b` 가 이웃 실제
+     디렉터리 `b\n` 을 가리키면 같은 이름으로 보아 **셸 봉쇄가 통과**한다. ssc 에선 sync 의 세 검사가 전부 셸이라 root sync 가 남의 디렉터리에
+     쓸 수 있었다(재현). dms-ssc 검토에서 **origin/dms-k8s 의 rm preflight 스크립트를 dash 로 돌려 개행 성분 링크가 `DMS_PREFLIGHT_OK`
+     를 받는 것도 재현**했다(Python 러너 미러만 막음). k8s 의 `_PV_CONTAIN_FN`·rm preflight 의 `parent=$(dirname "$1")`·sync 경로 셸을 같은
+     눈으로 확인할 것.
+   - 고친 방법(ssc c438667): 상위 오르기 `${q%/*}`, realpath 는 `$(realpath -e -- "$x" && echo /)` 뒤 `${v%?/}`(realpath 자신의 줄바꿈과
+     표식만 떼고 이름의 개행은 남긴다), 부모 계산 `${1%/*}`·`${D%/*}`, 그리고 `domain.validate_relative_path` 가 제어 문자(C0·DEL)를
+     `unsafe_path` 로 거부(포탈 즉답도). 테스트: `tests/test_sync_containment_sh.py`·`tests/test_rm_containment_sh.py` 의 개행 케이스(셸·Python
+     대조).
+3. 참조: dms-ssc 커밋 c438667(기능)·252e50c(오버레이 d194)과 CHANGELOG d194 항목(라이브 실증 표).

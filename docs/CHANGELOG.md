@@ -95,6 +95,42 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ✅ rm 대상 끝 성분 링크는 링크만 삭제 + 종류 표시·미리보기 종류 묶기 + 경로 봉쇄 개행 구멍 — **완료·실증**(2026-10-28, d194, dms-ssc)
+
+사용자 결정: 검토 보고 뒤 「1,2,3 모두 구현해. 개행 구멍 수정도 같이 진행해.」 — 10-27 의 「Rm도 똑같이 dms에서 거부」(d191)를 뒤집어
+dms-k8s 와 같이 **rm 대상 자신이 링크면 drm 이 링크만 지운다**. 근거: 포크 7a3189c drm 은 대상을 lstat 하고 끝 `/` 를 뗀다 — 링크→디렉터리·
+파일·끊긴 링크·`link/`, `--lite`·`--stat`, root·비 root 로 실측(가리키는 데이터 무손상, 미리보기 `Type=LNK` 1개). 변경 검토(적대적 3관점)와
+구현 리뷰(3관점)를 거쳤다.
+
+- **봉쇄 순서**(`_RM_CONTAINMENT_CHECK`·`runner.rm_target_redirected`): ① 대상 전체 문자열(끝 `/` `/.` `/..`, `//` `/./` `/../`) ② managed_root
+  자신 ③ **부모** 봉쇄. ①이 빠지면 변조 행 `…/x/..` 를 drm 이 접어 managed_root 를 지운다(검토에서 실측). 중간 성분 링크는 그대로 거부.
+- **종류 표시**: 러너가 drm 직전 lstat 한 `target_kind`(link·dir·file·other·missing)를 미리보기·실행 summary 에 — 포탈 컨펌·미리보기·결과·
+  KPI·배치 확인이 「심볼릭 링크 · 링크만 삭제(링크가 가리키는 곳은 지우지 않음)」를 말한다(배치에선 「이 항목은」으로 범위를 좁힌다 — 다른
+  항목이 그곳을 지울 수 있다).
+- **미리보기 종류 묶기**: stepper 가 실행 spec 에만 미리보기 `target_kind` 를 싣고(env `DMS_JR_RM_EXPECT_KIND`) 러너가 다르면 mpirun 없이
+  `target_changed_since_preview`(새 사유, 도구 시작 전 거부) — 링크로 확인한 요청이 그 사이 디렉터리가 된 이름의 트리를, 「지울 것이
+  없음」으로 확인한 요청이 그 사이 생긴 트리를 지우지 않게.
+- **개행 구멍**(검토 중 발견·재현 — d191 부터 라이브에 있던 것): `_PATH_CONTAINED_FN` 의 `$(dirname)`·`$(realpath)` 가 끝 개행을 지워
+  ① 이름이 개행으로 끝나는 링크 성분 아래 새 sync 목적지 ② 이웃 실제 디렉터리 「b\n」 을 가리키는 링크 「b」 가 셸 봉쇄를 통과했다(sync 는
+  세 검사가 전부 셸 — root sync 가 남의 디렉터리에 쓸 수 있었다). `${q%/*}` + realpath 끝 표식으로 고치고, preflight 의 부모 계산도
+  `${…%/*}`, `domain.validate_relative_path` 는 제어 문자(C0·DEL)를 `unsafe_path` 로 거부(두 겹, 포탈 즉답도).
+- **배포(d194)**: 포탈 빌드 c438667(dms-mpifileutils·dms) → 릴리스 dms-api·dms-controller·job-image 한 묶음(러너와 제어면 같은 릴리스 —
+  옛 러너는 끝 링크를 거부해 문구가 어긋난다), 오버레이 252e50c. 에이전트는 d192 그대로.
+- **라이브 실증**(일회용 데이터 — victim 4444:4444 700, 정리·요청 purge):
+  | 케이스 | 결과 |
+  |---|---|
+  | L1 root rm, 대상 = 디렉터리 링크 | Succeeded 삭제 1(target_kind link) — 링크만 사라지고 victim 4항목 무손상 |
+  | L2 끊긴 링크 · L3 파일 링크 | Succeeded 1 — 링크만, 파일 무손상 |
+  | L4 중간 성분 링크(`l4/mid/sub`) | preflight `target_path_redirected` Rejected, 링크 그대로 |
+  | L5 미리보기(링크) 뒤 확인 전 실제 디렉터리로 교체 → 확인 | 실행 `target_changed_since_preview` Failed, 교체된 디렉터리 무손상 |
+  | L6 실제 디렉터리 rm | Succeeded 4(target_kind dir) — 회귀 없음 |
+  | L7 alice(비 root) 자기 링크 | Succeeded 1 — 링크만 |
+  | 제어 문자 경로(sync 목적지 `…\n/…`·rm `…\n`·scan `…\t`) | 422 `unsafe_path` |
+  실 Chrome 1440·375: 미리보기 「심볼릭 링크 · 링크만 삭제」 + 주의 문구, 결과 KPI, 거부 사유 문구 — 가로 넘침 0, 콘솔 오류 0.
+- 검증: 백엔드 3745 passed · 프런트 vitest 1520 · tsc · e2e 28 · dist 외부 URL 0.
+- 남는 것(BACKLOG): 등록된 스토리지 루트(또는 그 조상)를 rm 대상으로 거부 · 미리보기 묶기는 종류까지(디렉터리 내용 교체는 묶지 않음) ·
+  dms-k8s 셸의 같은 개행 구멍(인계 문서 추가분).
+
 ### ✅ 실패 사유를 도구 출력에서 정확히 · summary v2 · 통계 정확화 · 포탈 결과/확인/배치/도움말 — **완료·실증**(2026-10-28, d192·d193, dms-ssc)
 
 사용자 요청: 「지적된 내용들 전부 고쳐줘. 실패사유는 최대한 정확하게 포탈에 표시해서 사용자가 이해할수있도록. 통계 등도 구현 업데이트 된
