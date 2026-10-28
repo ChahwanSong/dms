@@ -103,7 +103,11 @@ _USERNAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9._-]{0,63}$")
 
 
 def validate_relative_path(path: str) -> str:
-    if not path or path.startswith("/") or "\x00" in path:
+    # 제어 문자(C0 0x00-0x1F·DEL 0x7F) 거부(2026-10-28): 셸 검사의 명령 치환은 끝 개행을 지운다 -- 「x\n」 링크 성분이
+    # 실제 디렉터리 「x」로 보여 경로 봉쇄를 통과했다(execution_manifests._PATH_CONTAINED_FN 주석). 셸도 고쳤지만 요청 경로에
+    # 제어 문자가 없으면 그 부류가 처음부터 안 들어온다. 그런 이름의 파일은 대상으로 지정할 수 없다(상위 경로로 요청).
+    if (not path or path.startswith("/") or "\x00" in path
+            or any(ord(c) < 0x20 or ord(c) == 0x7f for c in path)):
         raise DomainValidationError("unsafe_path", repr(path))
     if any(part == ".." for part in path.split("/")):
         raise DomainValidationError("unsafe_path", repr(path))

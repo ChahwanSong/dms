@@ -153,6 +153,11 @@ export interface ToolSummary {
   tool_errors?: number; aborted?: boolean; reason?: string;
   // 실행 성공인데 summary.json 을 못 읽었을 때 stepper 가 대신 싣는 표식(개수 모름).
   summary_unavailable?: boolean;
+  // drm 전용(2026-10-28 d194): 러너가 drm 직전 lstat 으로 본 삭제 대상 자신의 종류 -- 미리보기·실행 summary 둘 다. link = 대상
+  // 자신이 심볼릭 링크라 링크만 지운다(가리키는 곳은 지우지 않는다). 없음 = 모름(옛 러너·대상 없음·rm 아님). 실행은 미리보기의
+  // 종류와 다르면 도구 전에 거부한다(target_changed_since_preview). 화면은 toolSummary.readSummary 의 targetKind 로 읽는다.
+  // 러너 lstat(d194): link·dir·file·other, 미리보기 때 대상이 없으면 "missing"(묶기용 -- 화면은 0 = 대상 없음으로 이미 말한다)
+  target_kind?: "link" | "dir" | "file" | "other" | "missing" | string;
 }
 export interface DataJob {
   job_id: string; request_id: string; operation: string; state: string;

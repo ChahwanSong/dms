@@ -21,9 +21,13 @@ WORKER_READY_TIMEOUT_SECONDS = 300
 # dms_job_runner 는 dms 를 import 하지 않는 독립 패키지라 중복 정의, 계약 테스트가 둘을 잇는다).
 EXECUTION_REASON_MARKER = "DMS_EXEC_REASON="
 WORKERS_UNREACHABLE = "workers_unreachable"
-# rm 대상 봉쇄 재확인(2026-10-21 리뷰, 2026-10-27 끝 성분 포함 -- rm_target_redirected) -- preflight 마커와 같은 코드
-# (execution_manifests 의 PREFLIGHT_REASONS·EXECUTION_REASONS 양쪽, 계약 테스트가 잇는다).
+# rm 대상 봉쇄 재확인(2026-10-21 리뷰, 2026-10-28 끝 성분 링크는 링크만 삭제 -- rm_target_redirected) -- preflight 마커와 같은
+# 코드(execution_manifests 의 PREFLIGHT_REASONS·EXECUTION_REASONS 양쪽, 계약 테스트가 잇는다).
 TARGET_PATH_REDIRECTED = "target_path_redirected"
+# rm 미리보기 종류 묶기(2026-10-28): 실행 직전 대상 종류가 미리보기와 다르거나 대상이 없어졌으면 mpirun 없이 이 마커
+# (execution_manifests.EXECUTION_REASONS). 종류 값은 execution_manifests.RM_TARGET_KINDS 와 같은 넷(계약 테스트가 잇는다).
+TARGET_CHANGED_SINCE_PREVIEW = "target_changed_since_preview"
+RM_TARGET_KINDS = ("link", "dir", "file", "other", "missing")
 # 도구 결과 사유(2026-10-27 d192 spec §2): 도구가 0 이 아닌 코드로 끝나면 summary v2 상세에서 사유를 정해 마커로 찍는다
 # (_derive_reason). execution_manifests.TOOL_FAILURE_REASONS 와 같은 집합이어야 한다 -- 갈라지면 스테퍼가 승격하지 못하고
 # execution_failed 로 뭉갠다(tests/test_job_runner_tool_detail.py 계약 테스트가 잇는다).
@@ -111,17 +115,43 @@ def path_redirected(path, root, *, realpath=_realpath_strict, lexists=os.path.le
 
 
 def rm_target_redirected(target, root, *, realpath=_realpath_strict) -> bool:
-    """drm 대상 봉쇄 재확인(True = 막는다): managed_root 자신은 대상이 아니고(변조 행), 나머지는 path_redirected --
-    대상 자신이 심링크여도 막는다(2026-10-27 사용자 「Rm도 똑같이 dms에서 거부하도록」, 예전엔 drm 이 링크만 지운다고
-    통과시켰다). execution_manifests._RM_CONTAINMENT_CHECK 와 같은 규칙. 왜 러너도 보나: exec_preflight 파드와 실행 vcjob 은
-    다른 파드라 그 사이(Volcano 대기는 길 수 있다)에 사용자가 경로를 심링크로 바꾸면 root drm 이 다른 트리를 지운다. 여기는
-    mpirun 바로 앞이라 창이 「워커 기동 + drm 의 걷기 시작」까지로 줄어든다(완전히 닫히지는 않는다 -- BACKLOG ④).
+    """drm 대상 봉쇄 재확인(True = 막는다). execution_manifests._RM_CONTAINMENT_CHECK 와 같은 순서의 미러다(계약):
+    ① 대상 전체 문자열 -- 끝 「/」「/.」「/..」, 「//」「/./」「/../」(변조 행 `…/x/..` 를 drm 이 글자 단위로 접어 managed_root·
+    상위를 지운다 -- 부모만 보면 이 검사가 빠진다) ② managed_root 자신(두 표기) ③ **부모**(os.path.dirname -- 셸 `${1%/*}`)의
+    path_redirected. 대상 자신이 심링크면 막지 않는다: drm 이 링크만 지운다(2026-10-28 사용자 결정 -- 10-27 의 「거부」를 뒤집음;
+    포크 drm 은 대상을 lstat 한다). 왜 러너도 보나: exec_preflight 파드와 실행 vcjob 은 다른 파드라 그 사이(Volcano 대기는 길 수
+    있다)에 사용자가 중간 경로를 심링크로 바꾸면 root drm 이 다른 트리를 지운다. 여기는 mpirun 바로 앞이라 창이 「워커 기동 +
+    drm 의 걷기 시작」까지로 줄어든다(완전히 닫히지는 않는다 -- BACKLOG ④). 대상 자신의 종류 변화는 target_kind 묶기가 본다.
     target 은 drm argv 마지막(tool_argv), root 는 env DMS_JR_RM_ROOT(stepper 가 target 을 조합한 값)."""
     if not isinstance(target, str) or not isinstance(root, str) or root == "":
         return True
+    if (target.endswith("/") or target.endswith("/.") or target.endswith("/..")
+            or "//" in target or "/./" in target or "/../" in target):
+        return True
     if target in (root, root[:-1] if root.endswith("/") else root):
         return True
-    return path_redirected(target, root, realpath=realpath)
+    return path_redirected(os.path.dirname(target), root, realpath=realpath)
+
+
+def target_kind(path, *, lstat=os.lstat):
+    """rm 대상 자신의 종류(따라가지 않는다 -- lstat): "link"|"dir"|"file"|"other", 없으면(ENOENT·ENOTDIR) "missing", 그 밖에
+    못 보면(권한 등) None(모름 -- 묶지 않는다). summary 의 target_kind(포탈이 「링크만 지움」을 말한다)와 미리보기 종류 묶기
+    (DMS_JR_RM_EXPECT_KIND)의 재료다. 경로 문자열이 아니라 커널 값이라 도구 출력(drm 목록 Type=LNK)처럼 이름으로 위조할 수 없다."""
+    import errno as _errno
+    import stat as _stat
+    try:
+        mode = lstat(path).st_mode
+    except OSError as exc:
+        return "missing" if exc.errno in (_errno.ENOENT, _errno.ENOTDIR) else None
+    except (ValueError, TypeError):
+        return None
+    if _stat.S_ISLNK(mode):
+        return "link"
+    if _stat.S_ISDIR(mode):
+        return "dir"
+    if _stat.S_ISREG(mode):
+        return "file"
+    return "other"
 
 
 def run_job(env, *, run, write_text, read_text, sleep, wait_hostfile,
@@ -214,6 +244,7 @@ def run_job(env, *, run, write_text, read_text, sleep, wait_hostfile,
     # 6c. rm 대상 봉쇄 재확인(rm_target_redirected docstring) -- mpirun 바로 앞(워커 준비 대기 뒤)이라 가장 늦은 자리다.
     #     env 키 부재 = 이 검사 전의 제어면이 만든 매니페스트(롤링 업그레이드) -- 그 제어면의 preflight 도 보지 않았으니
     #     종전대로 둔다. 키가 있으면(빈 값 포함) 판정한다.
+    rm_kind = None
     if tool == "drm" and "DMS_JR_RM_ROOT" in env:
         target = argv[-1] if argv else None
         if rm_target_redirected(target, env["DMS_JR_RM_ROOT"]):
@@ -223,6 +254,21 @@ def run_job(env, *, run, write_text, read_text, sleep, wait_hostfile,
             sys.stdout.flush()
             write_text(f"{artifact_dir}/stderr.log", lines)
             # 도구는 실행되지 않았다 -- returncode 는 모름(null), 3키 계약 유지(워커 준비 실패와 같은 모양).
+            write_text(f"{artifact_dir}/summary.json",
+                       json.dumps({"returncode": None, "files": None, "bytes": None}))
+            return 1
+        # 6d. 대상 종류(2026-10-28): 미리보기·실행 summary 의 target_kind, 그리고 실행의 미리보기 종류 묶기. 기대 종류는 stepper 가
+        #     실행 단계에만 싣는다(execution_manifests._launcher_env) -- 다르거나 대상이 없어졌으면 mpirun 없이 거부한다: 「링크만
+        #     지운다」로 확인한 요청이 그 사이 디렉터리로 바뀐 이름의 트리를 지우지 않게(반대로 디렉터리를 확인했는데 링크가 됐으면
+        #     「1개 삭제 성공」으로 조용히 끝나지 않게). 범위 밖 기대값(변조 env)은 묶지 않는다(제어면도 싣지 않는다).
+        rm_kind = target_kind(target) if isinstance(target, str) else None
+        expect = env.get("DMS_JR_RM_EXPECT_KIND")
+        if expect in RM_TARGET_KINDS and rm_kind != expect:
+            lines = (f"{EXECUTION_REASON_MARKER}{TARGET_CHANGED_SINCE_PREVIEW}\n"
+                     f"DMS_JR_RM_TARGET_CHANGED target={target!r} expected={expect} now={rm_kind or 'unknown'}\n")
+            sys.stdout.write(lines)
+            sys.stdout.flush()
+            write_text(f"{artifact_dir}/stderr.log", lines)
             write_text(f"{artifact_dir}/summary.json",
                        json.dumps({"returncode": None, "files": None, "bytes": None}))
             return 1
@@ -240,7 +286,8 @@ def run_job(env, *, run, write_text, read_text, sleep, wait_hostfile,
     #    .parse_sync_dryrun_counts·parse_rm_dryrun_counts). 제어면은 이 사본을 preview_summary 로 저장하고
     #    지문도 이 객체의 해시다(2026-09-17) -- null 이면 지문이 상수가 된다.
     summary = _build_summary(tool, stdout, proc.returncode, artifact_dir,
-                             dryrun="--dryrun" in argv, quiet=("--quiet" in argv or "-q" in argv), stderr=stderr)
+                             dryrun="--dryrun" in argv, quiet=("--quiet" in argv or "-q" in argv), stderr=stderr,
+                             rm_kind=rm_kind)
     write_text(f"{artifact_dir}/summary.json", json.dumps(summary))
 
     # 9. 도구 실패(d192 spec §2): 사유 마커를 **먼저**(mpirun 뒤 첫 출력), 이어서 도구 출력 꼬리를 launcher 로그에 남긴다.
@@ -375,9 +422,10 @@ def _wait_workers_ready(hosts, *, run, sleep, clock, timeout):
     return ips, None
 
 
-def _build_summary(tool, stdout, returncode, artifact_dir, dryrun=False, quiet=False, stderr=""):
+def _build_summary(tool, stdout, returncode, artifact_dir, dryrun=False, quiet=False, stderr="", rm_kind=None):
     """summary.json v2(2026-10-27 d192 spec §1) = 핵심 3키 {"returncode", "files", "bytes"}(모르면 null, 설계 §2.3) +
-    머리 키 {"detail_version": 2, "tool", "dryrun", "quiet"(참일 때만)} + 상세 키(parsers.parse_tool_detail -- 찾은 것만)
+    머리 키 {"detail_version": 2, "tool", "dryrun", "quiet"(참일 때만)} + drm 의 "target_kind"(rm_kind -- 러너의 lstat,
+    2026-10-28) + 상세 키(parsers.parse_tool_detail -- 찾은 것만)
     + "reason"(returncode 가 0 이 아닐 때 _derive_reason 이 정한 경우만). 전부 숫자·참거짓·짧은 ASCII 이고 도구 문자열은
     failure_samples[].path 하나(256자) -- json.dumps 기본 ensure_ascii 라 파일은 ASCII 다(제어면 read 는 strict UTF-8).
 
@@ -421,6 +469,10 @@ def _build_summary(tool, stdout, returncode, artifact_dir, dryrun=False, quiet=F
     core = {"returncode": returncode, "files": files, "bytes": nbytes}
     if tool not in ALLOWED_TOOLS:
         return core
+    # rm 대상 종류(2026-10-28, run_job 6d -- 러너의 lstat, 도구 출력이 아니다). drm 만, 알려진 값일 때만. 상세 파싱이 실패한
+    # 핵심 3키 경로에도 싣는다 -- 미리보기 종류 묶기의 유일한 재료라 도구 출력 파싱에 기대지 않는다(d194 리뷰).
+    if tool == "drm" and rm_kind in RM_TARGET_KINDS:
+        core["target_kind"] = rm_kind
     try:
         if log_quiet:
             # 상세도 모름 -- quiet 에서도 남는 것은 MPI 중단 흔적(stderr)뿐이다.

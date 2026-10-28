@@ -10,6 +10,13 @@ test("정규화는 normpath 와 같다 — 빈 성분·「.」 제거, 형식 �
   expect(normalizedRmTarget("./a")).toBe("a");
   for (const bad of ["", "  ", ".", "./", "/abs", "a/../b", ".."]) expect(normalizedRmTarget(bad)).toBeNull();
   expect(normalizedRmTarget("a b")).toBe("a b");                  // 공백은 이름의 일부(서버도 다듬지 않는다)
+  // 제어 문자(d194 -- 서버 unsafe_path)도 형식 오류라 판정 밖
+  for (const bad of ["a\nb", "a\tb", "link\n", "a\u007f"]) expect(normalizedRmTarget(bad)).toBeNull();
+});
+
+test("제어 문자가 든 행은 겹침으로 세지 않는다(형식 사유가 따로 붙는다 -- 한 행에 두 문장을 붙이지 않는다)", () => {
+  expect(rmTargetOverlaps(rows("a", "a\nb", "a\n"))).toEqual([]);
+  expect(rmTargetOverlaps(rows("a", "a/b\t"))).toEqual([]);
 });
 
 test.each([

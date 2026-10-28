@@ -7,7 +7,8 @@ import { REQUEST_TERMINAL_STATES, isTerminal } from "../../lib/jobState";
 import { kstStamp } from "../../lib/datetime";
 import type { DataJob, RequestDetail } from "../../lib/types";
 import {
-  hasFailureItems, isPreToolReason, kindsCountParts, kindsText, previewWarnings, readSummary, summaryTool, type ReadSummary,
+  hasFailureItems, isPreToolReason, kindsCountParts, kindsText, previewWarnings, readSummary, RM_LINK_ONLY, summaryTool,
+  type ReadSummary,
 } from "../../lib/toolSummary";
 import { countText, humanBytes, isPlainObject, msText, spanText } from "./format";
 import { STEP_COPY, isEstimated, normTransitions, type JobStagesModel, type StageId, type StepId } from "./stageModel";
@@ -422,7 +423,11 @@ function previewWord(s: ReadSummary, jobTool: unknown, op: string): string {
 
 // 반영한 항목의 종류별 내역(단건 sync 만 -- 여러 잡의 내역을 섞으면 읽을 수 없다). nsync = 반영된 종류(「복사 3 · 삭제 2」),
 // dsync = 삭제를 켰을 때 그 수(값은 복사한 항목이라 삭제는 따로 말한다). 모르면 null.
-function breakdownOf(s: ReadSummary, jobTool: unknown): string | null {
+// rm(단건, 2026-10-28 d194): 대상 자신이 심볼릭 링크였으면 「삭제한 항목 1개」가 링크 하나라는 것 -- **실행** summary 의
+// target_kind 만 본다. 미리보기 것으로 메우지 않는다: 종류를 싣지 않는 옛 러너가 실행했다면 묶기도 없었으니(그 사이 링크가
+// 디렉토리로 바뀌어 트리를 지웠을 수 있다) 「링크만」이라 말할 근거가 없다 -- 모르면 말하지 않는다(d194 리뷰).
+function breakdownOf(s: ReadSummary, jobTool: unknown, op: string): string | null {
+  if (op === "rm") return s.targetKind === "link" ? RM_LINK_ONLY : null;
   if (!s.detailed) return null;
   const tool = summaryTool(s, jobTool);
   if (tool === "nsync") return s.done !== null ? kindsText(s.done) : null;
@@ -461,7 +466,8 @@ export function deriveKpi(req: RequestDetail, jobs: DataJob[] | null, models: Jo
         // 크기의 미리보기는 nsync 계획 크기만 뜻이 맞다(dsync·drm 미리보기는 크기를 세지 않는다 -- 옛 잡은 그대로 「미리보기」).
         const pSub = op === "scan" || pAll === null || word === null || (key === "bytes" && word === "소스 전체") ? null
           : `${word} ${fmt[key](pAll)}`;
-        const breakdown = single && key === "files" && op === "sync" && exec[0] !== null ? breakdownOf(exec[0], list[0].tool) : null;
+        const breakdown = single && key === "files" && (op === "sync" || op === "rm") && exec[0] !== null
+          ? breakdownOf(exec[0], list[0].tool, op) : null;
         tiles.push({ key, label: labels[key], value: fmt[key](sum(known)),
           sub: breakdown !== null ? (pSub !== null ? `${breakdown} (${pSub})` : breakdown) : pSub });
         continue;
@@ -472,9 +478,12 @@ export function deriveKpi(req: RequestDetail, jobs: DataJob[] | null, models: Jo
         const tool = summaryTool(p0, list[0].tool);
         if (op === "rm") {
           // rm 의 0 은 「빈 대상」이 아니라 대상 경로를 찾지 못한 것(drm walk 는 대상 자신을 센다 -- 빈 디렉터리도 1, 2026-10-12).
+          // 대상 자신이 링크면(target_kind, d194) 그 사실을 수 바로 아래에(nsync 의 「… (미리보기)」와 같은 꼴).
           const notFound = key === "files" && pvals[0] === 0;
+          const link = key === "files" && p0.targetKind === "link";
           tiles.push({ key, label: key === "files" ? "삭제 대상" : "대상 크기", value: fmt[key](pvals[0]!),
-                       sub: notFound ? "미리보기: 대상 경로를 찾지 못함" : "미리보기 기준 · 실행 전" });
+                       sub: notFound ? "미리보기: 대상 경로를 찾지 못함"
+                         : link ? `${RM_LINK_ONLY} (미리보기)` : "미리보기 기준 · 실행 전" });
         } else if (tool === "nsync") {
           const kinds = key === "files" && p0.planned !== null ? kindsText(p0.planned) : null;
           tiles.push({ key, label: key === "files" ? "변경 예정" : "복사할 크기", value: fmt[key](pvals[0]!),

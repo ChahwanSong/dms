@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 import {
   ACTION_LABELS, errnoText, failureCounts, hasFailureItems, isPreToolReason, kindsCountParts, kindsText, opLabel,
-  previewWarnings, readSummary, sumKinds, summaryTool,
+  previewWarnings, readSummary, RM_LINK_WARNING, sumKinds, summaryTool,
 } from "./toolSummary";
 
 // summary.json v2 판독기(2026-10-27 d192) 표 테스트. 입력은 신뢰 경계 밖(result_summary 는 unknown) -- 모양이 틀린 값은
@@ -86,6 +86,19 @@ describe("readSummary", () => {
     expect(readSummary({ create_failed: -1, source_scan_errors: "1" })).toMatchObject({ createFailed: null, sourceScanErrors: null });
   });
 
+  test("target_kind(d194 drm 대상 종류): 네 값만 그대로, 그 밖(변조·빈 문자열·비문자열)·없음은 null(모름)", () => {
+    for (const k of ["link", "dir", "file", "other"]) {
+      expect(readSummary({ detail_version: 2, tool: "drm", target_kind: k }).targetKind).toBe(k);
+    }
+    for (const raw of [{ target_kind: "LINK" }, { target_kind: "" }, { target_kind: "symlink" }, { target_kind: 1 },
+      { target_kind: null }, { target_kind: "toString" }, {}]) {
+      expect(readSummary(raw).targetKind).toBeNull();
+    }
+    // 옛 3키 요약(키 없음)·객체 아님도 모름 -- 링크가 아니라고 단정하지 않는다
+    expect(readSummary({ returncode: 0, files: 1, bytes: null }).targetKind).toBeNull();
+    expect(readSummary(null).targetKind).toBeNull();
+  });
+
   test("by_op 의 모양이 틀린 값은 버리고, 남는 것이 없으면 null", () => {
     expect(readSummary({ failures: { total: 3, by_op: { copy: 2, meta: "1" } } }).failuresByOp).toEqual({ copy: 2 });
     expect(readSummary({ failures: { total: 3, by_op: { meta: "1" } } }).failuresByOp).toBeNull();
@@ -135,7 +148,9 @@ describe("합·문구 헬퍼", () => {
 
   test("isPreToolReason: 도구 시작 전 사유·제출 실패 접두만 참, 도구 실패 사유·일반 실패는 거짓", () => {
     for (const c of ["workers_unreachable", "identity_groups_not_applied", "destination_path_redirected", "source_path_redirected",
-      "target_path_redirected", "unknown_tool", "execution_submit_failed:422", "preview_submit_failed:x", "node_excluded_at_step"]) {
+      "target_path_redirected", "unknown_tool", "execution_submit_failed:422", "preview_submit_failed:x", "node_excluded_at_step",
+      // d194: 러너가 mpirun 전에 미리보기와 대상 종류를 대조해 거부 -- drm 은 돌지 않았다
+      "target_changed_since_preview"]) {
       expect([c, isPreToolReason(c)]).toEqual([c, true]);
     }
     for (const c of ["sync_items_failed", "tool_aborted", "rm_items_failed", "execution_failed", "preview_failed:rc2", "", null, undefined]) {
@@ -265,6 +280,20 @@ describe("previewWarnings(컨펌 전 주의 -- 포탈 괴리 [1]·[6]·[17])", (
     expect(w({ detail_version: 2, tool: "dsync", source_items: 6, files: 6 }, "dsync", true))
       .toEqual(["dsync 미리보기는 지울 항목 수를 세지 않습니다 — 삭제가 켜져 있어 목적지에만 있는 항목은 실행 때 지워집니다"]);
     expect(w({ detail_version: 2, tool: "dsync", source_items: 6, files: 6 }, "dsync", false)).toEqual([]);
+  });
+
+  test("rm 대상이 심볼릭 링크(d194 target_kind): 링크만 지우고 가리키는 곳은 남는다 + 실행 전 종류 재확인", () => {
+    const link = { detail_version: 2, returncode: 0, files: 1, bytes: null, tool: "drm", dryrun: true, target_items: 1, target_kind: "link" };
+    expect(w(link, "drm", false, "rm")).toEqual([RM_LINK_WARNING]);
+    expect(RM_LINK_WARNING).toBe("대상은 심볼릭 링크입니다 — 링크 하나만 지우고 링크가 가리키는 곳은 지우지 않습니다. 데이터를 지우려면 "
+      + "링크가 아닌 원래 경로로 요청하세요. 실행 직전에 대상이 여전히 링크인지 다시 확인해, 바뀌었거나 없어졌으면 실행하지 않습니다");
+    // 도구를 몰라도(옛 행) 연산이 rm 이면 같은 주의 -- 종류는 summary 가 안다
+    expect(w(link, null, false, "rm")).toEqual([RM_LINK_WARNING]);
+    // 디렉토리·파일·모름은 주의 없음(예전과 같다), sync 에 target_kind 가 붙어 와도(변조) rm 문장을 내지 않는다
+    for (const k of ["dir", "file", "other", undefined]) {
+      expect(w({ ...link, target_kind: k }, "drm", false, "rm")).toEqual([]);
+    }
+    expect(w({ ...NSYNC_PREVIEW_OK, target_kind: "link" }, "nsync", true)).toEqual(["목적지에서 2개를 삭제합니다 — 되돌릴 수 없습니다"]);
   });
 
   test("rm·삭제 0·옛 요약·0 값은 주의 없음", () => {

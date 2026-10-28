@@ -16,7 +16,7 @@ import { ApiError } from "../../lib/api";
 // 다른 임포터가 흔들리지 않게 결합을 끊어 둔 것.
 import { StoragePicker, field } from "./formFields";
 import {
-  absolutePath, destinationParent, relativePathProblem, RM_PATH_LINK_RULE, SYNC_PATH_LINK_RULE,
+  absolutePath, destinationParent, normalizedRelativePath, relativePathProblem, RM_PATH_LINK_RULE, SYNC_PATH_LINK_RULE,
 } from "../../lib/storagePaths";
 import { pairAllowed, syncChoices } from "../../lib/syncPairs";
 import { syncOwnership } from "../../lib/syncOwnership";
@@ -84,7 +84,8 @@ function checkedOptions(opts: Record<string, boolean>): Record<string, boolean> 
 const OPERATION_HELP: Record<Operation, string> = {
   sync: "소스 디렉토리의 내용을 목적지로 복사·동기화합니다.",
   scan: "대상 경로의 파일 수·용량·데이터 온도 통계를 수집합니다.",
-  rm: "대상 경로와 그 아래를 모두 삭제합니다.",
+  // d194: 대상 자신이 심볼릭 링크면 링크만 지운다(drm lstat) -- 「그 아래를 모두」가 링크 너머까지로 읽히지 않게.
+  rm: "대상 경로와 그 아래를 모두 삭제합니다(대상이 심볼릭 링크면 링크만 지웁니다).",
 };
 
 // 경로 입력 바로 아래의 즉답: 서버가 거부할 경로면 그 이유(relativePathProblem = validate_relative_path
@@ -93,15 +94,27 @@ const OPERATION_HELP: Record<Operation, string> = {
 // 서버가 실제로 쓰지 않을(또는 거부할) 경로를 그럴듯하게 보여 준다(리뷰 2026-10-06).
 // 라벨은 「지정 경로」(2026-10-27 d192, 괴리 [C2]): 글자 그대로 붙인 경로라 링크를 풀지 않는다 -- 「실제 경로」라 부르면 링크를
 // 거치는 경로로 거부된 뒤 사용자가 화면이 「실제」라 한 바로 그 경로를 다시 낸다(lib/storagePaths absolutePath 주석).
-function PathFeedback({ root, rel }: { root: string | null | undefined; rel: string }) {
+// 「서버가 저장할 모양」으로 짓는다(2026-10-28 d194): 서버는 경로를 normpath 로 정리해 저장한다(「//」·「.」·끝의 「/」 제거 --
+// 공백은 그대로). 입력과 다르면 저장되는 경로를 말한다. rm 은 끝의 「/」 가 뜻을 바꿀 것처럼 보인다(셸의 「link/」 는 링크 너머) --
+// 서버에선 사라져 그 이름이 링크면 링크만 지워진다는 것을 입력 자리에서 말한다(lib/storagePaths normalizedRelativePath).
+function PathFeedback({ root, rel, op }: { root: string | null | undefined; rel: string; op: Operation }) {
   if (rel.trim() === "") return null;
   const problem = relativePathProblem(rel);
   if (problem !== null) return <p className="mt-1 text-bad text-sm">{problem}</p>;
-  const abs = absolutePath(root, rel);
+  const stored = normalizedRelativePath(rel);
+  const abs = stored === null ? null : absolutePath(root, stored);
+  const changed = stored !== null && stored !== rel;
   return (
     <>
       {abs !== null && (
         <p className="mt-1 text-xs text-muted [overflow-wrap:anywhere]">{`지정 경로: ${abs}`}</p>
+      )}
+      {changed && (
+        <p className="mt-1 text-xs text-muted [overflow-wrap:anywhere]" role="note" aria-label="저장되는 경로">
+          {op === "rm" && rel.endsWith("/")
+            ? `끝의 / 는 무시됩니다 — 이 이름이 링크면 링크만 지워집니다(저장되는 경로: ${stored})`
+            : `서버는 이 경로를 정리해 저장합니다(저장되는 경로: ${stored})`}
+        </p>
       )}
       {rel !== rel.trim() && (
         <p className="mt-1 text-xs text-muted">앞뒤 공백도 경로 이름에 그대로 들어갑니다.</p>
@@ -361,7 +374,7 @@ export function SubmitJob() {
                     <input aria-label="소스 경로" className={field} value={f.sourcePath}
                            placeholder="예: team/dataset" onChange={on("sourcePath")} />
                   </label>
-                  <PathFeedback root={rootOf(f.sourceStorage)} rel={f.sourcePath} />
+                  <PathFeedback root={rootOf(f.sourceStorage)} rel={f.sourcePath} op="sync" />
                 </div>
               </div>
               <ArrowRight aria-hidden
@@ -375,7 +388,7 @@ export function SubmitJob() {
                     <input aria-label="목적지 경로" className={field} value={f.destPath}
                            placeholder="예: backup/dataset" onChange={on("destPath")} />
                   </label>
-                  <PathFeedback root={destRoot} rel={f.destPath} />
+                  <PathFeedback root={destRoot} rel={f.destPath} op="sync" />
                 </div>
               </div>
             </div>
@@ -468,9 +481,10 @@ export function SubmitJob() {
                 <input aria-label="대상 경로" className={field} value={f.target}
                        placeholder="예: team/projects" onChange={on("target")} />
               </label>
-              <PathFeedback root={rootOf(f.storage)} rel={f.target} />
-              {/* rm 대상의 링크 규칙(d191~ 대상 자신이 링크여도 거부 -- 괴리 [14]·[27]): 링크를 지우려던 요청이 거부된 뒤 「링크가
-                  가리키는 곳」을 다시 내지 않게, 고르는 자리에서 먼저 말한다. */}
+              <PathFeedback root={rootOf(f.storage)} rel={f.target} op={f.operation} />
+              {/* rm 대상의 링크 규칙(괴리 [14]·[27], d194~ 중간 단계 링크는 거부·대상 자신이 링크면 링크만 삭제): 거부된 뒤
+                  「링크가 가리키는 곳」을 다시 내지 않게, 그리고 링크를 넣은 사람이 데이터까지 지워진다고 믿지 않게 고르는
+                  자리에서 먼저 말한다. */}
               {f.operation === "rm" && (
                 <p className="mt-1 text-xs text-muted" role="note" aria-label="삭제 경로 조건">{RM_PATH_LINK_RULE}</p>
               )}

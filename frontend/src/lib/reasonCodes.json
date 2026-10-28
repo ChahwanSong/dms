@@ -34,6 +34,7 @@
   "artifact_base_not_traversable",
   "parent_not_writable",
   "target_path_redirected",
+  "target_changed_since_preview",
   "source_path_redirected",
   "destination_path_redirected",
   "tool_aborted",

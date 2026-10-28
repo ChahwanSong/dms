@@ -37,6 +37,27 @@ test("개수를 못 읽은 옛 rm 미리보기는 「모름」 + 목록이 있�
     .toBeInTheDocument();
 });
 
+test("rm 미리보기 대상이 링크(d194 target_kind): 타일 아래 「링크만 삭제」, 설명은 링크 하나를 센 수(「그 아래 합계」 아님) + 주의", () => {
+  render(<PreviewResult job={{ operation: "rm", tool: "drm" }} failedAt={false} headingId="h"
+                        summary={{ detail_version: 2, returncode: 0, files: 1, bytes: null, tool: "drm", dryrun: true,
+                                   target_items: 1, target_kind: "link" }} />);
+  expect(screen.getByText("삭제 대상").nextElementSibling).toHaveTextContent("1개");
+  expect(screen.getByText("삭제 대상").nextElementSibling?.nextElementSibling).toHaveTextContent("심볼릭 링크 · 링크만 삭제");
+  expect(screen.getByText("대상 자신이 심볼릭 링크라 링크 하나를 셉니다 — 링크가 가리키는 곳의 내용은 세지도 지우지도 않습니다."))
+    .toBeInTheDocument();
+  // 「대상 경로 자신과 그 아래 … 합계」는 링크 너머의 내용을 센 것처럼 읽힌다 -- 링크 대상에는 쓰지 않는다
+  expect(screen.queryByText(/그 아래 파일·디렉터리·링크의 합계/)).toBeNull();
+  const notes = screen.getByRole("list", { name: "미리보기 주의 사항" });
+  expect(notes).toHaveTextContent("대상은 심볼릭 링크입니다 — 링크 하나만 지우고 링크가 가리키는 곳은 지우지 않습니다");
+});
+
+test("rm 미리보기 실패 시점(failedAt)엔 링크여도 앞으로의 실행 주의·설명을 붙이지 않는다", () => {
+  render(<PreviewResult job={{ operation: "rm", tool: "drm" }} failedAt headingId="h"
+                        summary={{ detail_version: 2, returncode: 1, files: 1, bytes: null, tool: "drm", target_kind: "link" }} />);
+  expect(screen.queryByRole("list", { name: "미리보기 주의 사항" })).toBeNull();
+  expect(screen.queryByText(/링크 하나를 셉니다/)).toBeNull();
+});
+
 test("sync 미리보기에는 rm 설명 줄이 없다(도구를 모르는 옛 잡은 중립 라벨 「미리보기 항목」)", () => {
   render(<PreviewResult job={{ operation: "sync" }} summary={{ returncode: 0, files: 3, bytes: 10 }}
                         failedAt={false} headingId="h" />);
@@ -275,7 +296,21 @@ describe("ExecutionResult — 도구별 라벨 타일(원 키가 아니다)", ()
   test("drm 성공: 삭제한 항목만(못 지운 수를 0 으로 지어내지 않는다)", () => {
     render(<ExecutionResult summary={DRM_EXEC_OK} job={{ operation: "rm", tool: "drm" }} />);
     expect(tileValue("삭제한 항목")).toBe("3개");
+    expect(tileSub("삭제한 항목")).toBeNull();               // 디렉토리 대상(종류 모름 포함)엔 링크 표지가 없다
     expect(screen.queryByText("지우지 못한 항목", { selector: "dt" })).toBeNull();
+  });
+
+  test("drm 대상이 링크(d194 target_kind): 「삭제한 항목 1개」 아래 「링크만 삭제」 -- 가리키던 곳은 건드리지 않았다", () => {
+    const { unmount } = render(<ExecutionResult summary={{ ...DRM_EXEC_OK, files: 1, removed: 1, target_kind: "link" }}
+                                                job={{ operation: "rm", tool: "drm" }} />);
+    expect([tileValue("삭제한 항목"), tileSub("삭제한 항목")]).toEqual(["1개", "심볼릭 링크 · 링크만 삭제"]);
+    unmount();
+    // 디렉토리·모르는 값(변조)은 표지 없음
+    for (const k of ["dir", "LINK"]) {
+      const v = render(<ExecutionResult summary={{ ...DRM_EXEC_OK, target_kind: k }} job={{ operation: "rm", tool: "drm" }} />);
+      expect(tileSub("삭제한 항목")).toBeNull();
+      v.unmount();
+    }
   });
 
   test("성공했지만 도구가 오류 줄을 남겼으면(rc 0, tool_errors) 그 사실을 말한다", () => {

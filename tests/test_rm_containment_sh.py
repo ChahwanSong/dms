@@ -5,7 +5,10 @@
 (execution_manifests._RM_CONTAINMENT_CHECK + _PATH_CONTAINED_FN)은 `set -e` 아래 case·명령 치환·AND-OR 의 상호작용이라
 문자열 계약으로는 증명할 수 없다 -- 실 파드와 같은 명령(["sh", "-c", script, "sh", *args])을 임시 트리에 대고 돌린다. 같은
 트리로 러너의 drm 직전 재확인(dms_job_runner.runner.rm_target_redirected)도 돌려 두 판정이 갈라지지 않음을 고정한다.
-2026-10-27(사용자 「Rm도 똑같이 dms에서 거부하도록」): 대상 자신이 심링크여도 막는다 -- sync 경로 봉쇄와 같은 규칙.
+2026-10-28(사용자 결정 -- 10-27 의 「대상 자신이 링크여도 거부」를 뒤집음): 대상 **자신**이 심링크면 drm 이 링크만 지운다(포크
+7a3189c drm 은 대상을 lstat). 그래서 봉쇄는 부모에 걸고, 순서(대상 문자열 검사 → managed_root → 부모 봉쇄)가 계약이다 -- 문자열
+검사가 빠지면 변조 행 「…/x/..」 를 drm 이 접어 managed_root 를 지운다. 부모는 `${1%/*}`(셸)·os.path.dirname(Python) -- `$(dirname)`
+은 끝 개행을 지워 「x\n」 링크 성분을 실제 디렉터리 「x」로 봤다.
 """
 import json
 import os
@@ -54,6 +57,14 @@ def tree(tmp_path):
     (m / "users/alice/outside").symlink_to(str(tmp_path))                      # managed_root 밖
     (m / "users/alice/lastlink").symlink_to("../bob/old")                     # 마지막 성분이 링크
     (m / "users/alice/dangling").symlink_to("../nowhere")                     # 끊긴 링크
+    (m / "users/alice/filelink").symlink_to("../bob/old/keep")                # 파일을 가리키는 링크
+    (m / "users/alice/rootlink").symlink_to(str(m))                           # managed_root 를 가리키는 링크
+    (m / "users/alice/nl").mkdir()                                             # 실제 디렉터리 「nl」 옆에
+    (m / "users/alice/nl\n").symlink_to("../bob")                            # 이름이 개행으로 끝나는 링크(-> 남의 디렉터리)
+    (m / "toplink").symlink_to("users/bob")                                   # managed_root 바로 아래 링크
+    (m / "shared/b\n").mkdir()                                                # 이름이 개행으로 끝나는 **실제** 디렉터리
+    (m / "shared/b\n/old").mkdir()
+    (m / "shared/b").symlink_to("b\n")                                        # 개행 없는 링크 -> 그 이웃(realpath 끝 개행 함정)
     (tmp_path / "mlink").symlink_to(str(m))                                   # managed_root 자신이 링크
     (tmp_path / "up").symlink_to(str(tmp_path))                               # managed_root 위 성분이 링크
     return tmp_path
@@ -68,6 +79,16 @@ _PASS = [
     ("mlink", "users/alice/data/old"),         # managed_root 자신이 심링크 -- 양쪽을 같은 realpath 로 본다
     ("up/m", "users/alice/data/old"),          # managed_root 위 성분이 심링크
     ("m", "dir with space/x*[y]/old"),         # 공백·글롭 문자 -- case 패턴의 "..." 는 글자 그대로
+    # 대상 자신이 링크 -- drm 이 링크만 지운다(2026-10-28). 무엇을 가리키든(남의 디렉터리·파일·끊김·managed_root·밖) 같다.
+    ("m", "users/alice/lastlink"),
+    ("m", "users/alice/dangling"),
+    ("m", "users/alice/redirect"),
+    ("m", "users/alice/filelink"),
+    ("m", "users/alice/rootlink"),
+    ("m", "users/alice/outside"),
+    ("m", "toplink"),                          # 부모 == managed_root
+    ("mlink", "users/alice/lastlink"),
+    ("m", "shared/b\n/old"),                   # 개행으로 끝나는 실제 디렉터리 아래 -- 셸도 Python 도 통과(이름의 개행을 지우지 않는다)
 ]
 _REDIRECT = [
     ("m", "users/alice/redirect/old"),         # 상위가 상대 링크(-> ../bob)
@@ -78,9 +99,13 @@ _REDIRECT = [
     ("m", "users/alice/data/.."),              # 끝이 「..」 -- drm 이 상위를 지우게 된다
     ("m", "users/alice/data/."),
     ("m", "users/alice/data/"),                # 끝 슬래시 -- 마지막 성분 링크를 따라가게 된다
-    ("m", "users/alice/lastlink"),             # 대상 자신이 심링크(2026-10-27 -- 예전엔 링크만 지운다고 통과)
-    ("m", "users/alice/dangling"),             # 대상 자신이 끊긴 링크
-    ("m", "users/alice/lastlink/sub"),         # 링크 아래 없는 경로 -- 가장 깊은 「있는」 성분이 링크
+    ("m", "users/alice/lastlink/sub"),         # 링크 아래 없는 경로 -- 가장 깊은 「있는」 성분이 링크(중간 성분)
+    ("m", "users/alice/lastlink/"),            # 끝 슬래시 -- 셸 dirname·os.path.dirname 이 갈리는 모양, 문자열 검사가 먼저 막는다
+    ("m", "users/alice/data/old/.."),          # drm 이 「..」를 접어 상위(data)를 지운다
+    ("m", "toplink/.."),                       # drm 이 managed_root 자신으로 접는다
+    ("m", "users/alice/nl\n/old"),            # 개행으로 끝나는 링크 성분 -- $(dirname) 이면 「nl」로 보여 통과했다
+    ("m", "users/alice/nl\n/new"),            # 같은 링크 아래 아직 없는 경로
+    ("m", "shared/b/old"),                     # 부모 「b」 가 이웃 「b\n」 링크 -- $(realpath) 가 끝 개행을 지우면 통과했다(d194 리뷰)
 ]
 
 
@@ -129,7 +154,7 @@ def test_missing_parent_keeps_the_parent_not_writable_reason(tree):
 def test_the_managed_root_itself_is_never_a_target(tree):
     # stepper 는 managed_root **아래**만 조합한다 -- 루트 자체(끝 슬래시 표기 포함)는 변조 행이다.
     root = str(tree / "m")
-    for target in (root, root + "/"):
+    for target in (root, root + "/", root + "/.", root + "//"):
         rc, out = _preflight(target, root)
         assert rc == 1 and _REDIRECTED in out, out
         assert rm_target_redirected(target, root) is True
@@ -256,6 +281,94 @@ def test_runner_runs_drm_for_a_contained_target(tree):
     # 통과한 경로는 정상 경로 summary(v2 -- 핵심 3키 + 상세)다. 거부 경로(위)는 3키 그대로다.
     summary = json.loads(rec.writes[f"{tree / 'art'}/summary.json"])
     assert (summary["files"], summary["removed"], summary["detail_version"]) == (1, 1, 2)
+
+
+def test_runner_runs_drm_for_a_terminal_link_and_reports_its_kind(tree):
+    # 대상 자신이 링크면 drm 이 링크만 지운다(2026-10-28) -- 러너는 막지 않고, lstat 한 종류를 summary 에 싣는다(포탈이
+    # 「링크만 지움」을 말한다). 가리키는 곳(bob)은 러너가 건드리지 않는다.
+    root = str(tree / "m")
+    rc, rec = _run_drm(_drm_env(f"{root}/users/alice/lastlink", str(tree / "art"), DMS_JR_RM_ROOT=root))
+    assert rc == 0 and any("mpirun" in cmd for cmd in rec.ran)
+    summary = json.loads(rec.writes[f"{tree / 'art'}/summary.json"])
+    assert summary["target_kind"] == "link"
+    assert (tree / "m/users/bob/old/keep").read_text() == "bob"
+    rc, rec = _run_drm(_drm_env(f"{root}/users/alice/data", str(tree / "art"), DMS_JR_RM_ROOT=root))
+    assert json.loads(rec.writes[f"{tree / 'art'}/summary.json"])["target_kind"] == "dir"
+
+
+@pytest.mark.parametrize("target_rel,expect,runs", [
+    ("users/alice/lastlink", "link", True),     # 미리보기와 같은 종류 -- 돈다
+    ("users/alice/data", "dir", True),
+    ("users/alice/data", "link", False),        # 링크로 확인했는데 실행 때 디렉터리 -- 트리를 지우지 않는다
+    ("users/alice/lastlink", "dir", False),     # 디렉터리로 확인했는데 링크가 됐다 -- 「1개 성공」으로 조용히 끝나지 않는다
+    ("users/alice/gone", "dir", False),         # 대상이 없어졌다
+    ("users/alice/gone", "missing", True),      # 미리보기 때도 없었고 지금도 없다 -- 돈다(drm 이 지울 것이 없다)
+    ("users/alice/data", "missing", False),     # 「지울 것이 없음」으로 확인했는데 그 자리에 트리가 생겼다 -- 지우지 않는다
+    ("users/alice/data", "bogus", True),        # 범위 밖 기대값(변조 env)은 묶지 않는다(제어면도 싣지 않는다)
+])
+def test_runner_binds_the_execution_to_the_previewed_kind(tree, capsys, target_rel, expect, runs):
+    root = str(tree / "m")
+    rc, rec = _run_drm(_drm_env(f"{root}/{target_rel}", str(tree / "art"), DMS_JR_RM_ROOT=root,
+                                DMS_JR_RM_EXPECT_KIND=expect))
+    ran = any("mpirun" in cmd for cmd in rec.ran)
+    assert ran is runs
+    out = capsys.readouterr().out
+    if not runs:
+        assert rc == 1 and "DMS_EXEC_REASON=target_changed_since_preview" in out
+        assert f"expected={expect}" in out
+        assert json.loads(rec.writes[f"{tree / 'art'}/summary.json"]) == {"returncode": None, "files": None,
+                                                                          "bytes": None}
+    else:
+        assert "target_changed_since_preview" not in out
+
+
+def test_launcher_env_carries_the_previewed_kind_only_when_known():
+    def env(paths_extra, phase="execution"):
+        spec = _spec("/c/m/a/b", "/c/m", phase=phase, dryrun=(phase == "preview"))
+        spec.paths.update(paths_extra)
+        return _launcher_env(spec)
+    assert env({"expect_target_kind": "link"})["DMS_JR_RM_EXPECT_KIND"] == "link"
+    assert env({"expect_target_kind": "missing"})["DMS_JR_RM_EXPECT_KIND"] == "missing"
+    assert "DMS_JR_RM_EXPECT_KIND" not in env({})                           # 옛 미리보기·대상 없음 -- 묶지 않는다
+    assert "DMS_JR_RM_EXPECT_KIND" not in env({"expect_target_kind": "rm -rf"})   # 범위 밖(변조 행)
+
+
+def test_kind_values_and_reason_match_the_control_plane():
+    from dms.execution_manifests import RM_TARGET_KINDS
+    assert set(runner.RM_TARGET_KINDS) == RM_TARGET_KINDS == {"link", "dir", "file", "other", "missing"}
+    assert runner.TARGET_CHANGED_SINCE_PREVIEW == "target_changed_since_preview" and \
+        runner.TARGET_CHANGED_SINCE_PREVIEW in EXECUTION_REASONS
+
+
+def test_target_kind_never_follows_the_link(tree):
+    m = tree / "m"
+    assert runner.target_kind(str(m / "users/alice/lastlink")) == "link"     # 디렉터리를 가리켜도 link
+    assert runner.target_kind(str(m / "users/alice/filelink")) == "link"
+    assert runner.target_kind(str(m / "users/alice/dangling")) == "link"
+    assert runner.target_kind(str(m / "users/bob/old/keep")) == "file"
+    assert runner.target_kind(str(m / "users/alice/data")) == "dir"
+    assert runner.target_kind(str(m / "users/alice/none")) == "missing"
+    assert runner.target_kind(str(m / "users/bob/old/keep/x")) == "missing"    # 상위가 파일(ENOTDIR)
+    assert runner.target_kind(str(m / "users/alice/data"), lstat=lambda p: (_ for _ in ()).throw(PermissionError(13, "x"))) is None
+
+
+def test_preview_summary_carries_the_target_kind(tree):
+    # 미리보기(dry-run) summary 의 target_kind 가 묶기의 유일한 재료다(stepper 가 실행 spec 으로 넘긴다) -- 미리보기 argv 로 고정한다.
+    root = str(tree / "m")
+    for rel, want in (("users/alice/lastlink", "link"), ("users/alice/data", "dir"), ("users/alice/gone", "missing")):
+        target = f"{root}/{rel}"
+        rc, rec = _run_drm(_drm_env(target, str(tree / "art"), DMS_JR_RM_ROOT=root, DMS_JR_PHASE="preview",
+                                    DMS_JR_DRYRUN="1", DMS_JR_ARGV=json.dumps(["--dryrun", target])))
+        summary = json.loads(rec.writes[f"{tree / 'art'}/summary.json"])
+        assert summary["dryrun"] is True and summary["target_kind"] == want, (rel, summary)
+
+
+def test_target_kind_survives_a_failed_detail_parse(tree, monkeypatch):
+    # 상세 파싱이 실패해 핵심 3키만 남는 fail-soft 경로에도 종류는 남는다 -- 묶기가 도구 출력 파싱에 기대지 않는다.
+    monkeypatch.setattr(runner, "parse_tool_detail", lambda *a, **k: None)
+    s = runner._build_summary("drm", "", 0, "/x", dryrun=True, rm_kind="link")
+    assert s["target_kind"] == "link" and "detail_version" not in s
+    assert "target_kind" not in runner._build_summary("dsync", "", 0, "/x", rm_kind="link")
 
 
 def test_runner_without_the_env_key_keeps_the_old_behaviour(tree):

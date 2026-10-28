@@ -203,7 +203,9 @@ test("quiet 실행 실패: 로그에 원인이 없다는 사실과 다시 실행
 
 test("도구 시작 전 사유(실행 단계): 「이미 복사·삭제됐을 수 있다」 대신 데이터 무변경 + 새 작업", () => {
   for (const [op, reason] of [["sync", "destination_path_redirected"], ["sync", "source_path_redirected"],
-    ["rm", "target_path_redirected"], ["sync", "workers_unreachable"], ["rm", "identity_groups_not_applied"]] as const) {
+    ["rm", "target_path_redirected"], ["sync", "workers_unreachable"], ["rm", "identity_groups_not_applied"],
+    // d194: 러너가 mpirun 전에 미리보기와 대상 종류가 달라 거부(링크였던 경로가 디렉토리로 바뀜) -- drm 은 돌지 않았다
+    ["rm", "target_changed_since_preview"]] as const) {
     const o = outcome({ state: "Failed", operation: op }, [job({ operation: op, state: "Failed", reason_code: reason,
       phase_refs: ALL, transitions: EXEC_TR, result_summary: { returncode: null, files: null, bytes: null } })]);
     expect(o.title).toBe("실행 단계에서 실패했습니다");
@@ -261,6 +263,12 @@ test("컨펌 대기 배너: 미리보기가 아는 위험이 있으면 그 수�
     + "미리보기 결과를 검토한 뒤 컨펌하면 실제 실행이 시작됩니다. 실행하지 않으려면 컨펌하지 않고 취소하세요.");
   const plain = outcome({ state: "Planned" }, [job({ state: "ConfirmPending", tool: "nsync", preview_summary: NSYNC_PREVIEW })]);
   expect(plain.next?.text).toBe("미리보기 결과를 검토한 뒤 컨펌하면 실제 실행이 시작됩니다. 실행하지 않으려면 컨펌하지 않고 취소하세요.");
+  // d194: rm 대상이 심볼릭 링크면 「링크만 지운다」가 컨펌 전 확인할 점이다(같은 previewWarnings) -- 디렉토리 대상은 없음
+  const rmLink = { ...V2, returncode: 0, files: 1, bytes: null, tool: "drm", dryrun: true, target_items: 1, target_kind: "link" };
+  expect(outcome({ state: "Planned", operation: "rm" }, [job({ operation: "rm", state: "ConfirmPending", tool: "drm",
+    preview_summary: rmLink })]).next?.text).toMatch(/^미리보기에 컨펌 전에 확인할 점이 1가지 있습니다/);
+  expect(outcome({ state: "Planned", operation: "rm" }, [job({ operation: "rm", state: "ConfirmPending", tool: "drm",
+    preview_summary: { ...rmLink, target_kind: "dir", files: 5, target_items: 5 } })]).next?.text).toMatch(/^미리보기 결과를 검토한 뒤/);
   // 삭제 옵션이 꺼진 nsync 의 타입 교체 삭제에도 보조 그룹 경고(rm·delete 만 보던 것을 넓혔다)
   expect(outcome({ state: "Planned" }, [job({ state: "ConfirmPending", tool: "nsync", preview_summary: tc,
     worker_pool: { identity: { supplementary_gids_status: "applied" } } as never })]).next?.groupWarning).toBe(true);
@@ -529,6 +537,25 @@ test("KPI v2 rm: 「삭제한 항목」 + 「못 지운 항목」(아는 잡이 
   const ok = { ...part, state: "Succeeded", reason_code: null, transitions: SYNC_OK_TR,
     result_summary: { ...V2, returncode: 0, files: 9, bytes: null, tool: "drm", removed: 9 } };
   expect(kpi({ operation: "rm" }, [ok]).map((x) => x.label)).toEqual(["삭제한 항목", "수행시간", "제출 대기"]);
+});
+
+test("KPI rm 대상이 링크(d194 target_kind): 실행 전 「삭제 대상」·실행 뒤 「삭제한 항목」 아래 「링크만 삭제」", () => {
+  const LINK_PREVIEW = { ...V2, returncode: 0, files: 1, bytes: null, tool: "drm", dryrun: true, target_items: 1, target_kind: "link" };
+  const cp = job({ operation: "rm", state: "ConfirmPending", tool: "drm", preview_summary: LINK_PREVIEW });
+  expect(kpi({ state: "Planned", operation: "rm" }, [cp])[0])
+    .toMatchObject({ label: "삭제 대상", value: "1개", sub: "심볼릭 링크 · 링크만 삭제 (미리보기)" });
+  const done = job({ operation: "rm", state: "Succeeded", tool: "drm", transitions: SYNC_OK_TR, preview_summary: LINK_PREVIEW,
+    result_summary: { ...V2, returncode: 0, files: 1, bytes: null, tool: "drm", removed: 1, target_kind: "link" } });
+  expect(kpi({ operation: "rm" }, [done])[0])
+    .toMatchObject({ label: "삭제한 항목", value: "1개", sub: "심볼릭 링크 · 링크만 삭제 (삭제 대상 1개)" });
+  // 실행 summary 에 종류가 없으면(옛 러너 -- 묶기도 없었다) 미리보기 것으로 메우지 않는다: 그 사이 디렉토리로 바뀌어 트리를
+  // 지웠을 수 있으니 「링크만」이라 말할 근거가 없다(d194 리뷰)
+  const oldExec = { ...done, result_summary: { ...V2, returncode: 0, files: 1, bytes: null, tool: "drm", removed: 1 } };
+  expect(kpi({ operation: "rm" }, [oldExec])[0].sub).toBe("삭제 대상 1개");
+  // 디렉토리 대상은 예전 그대로
+  const dir = { ...done, preview_summary: { ...LINK_PREVIEW, files: 4, target_items: 4, target_kind: "dir" },
+    result_summary: { ...V2, returncode: 0, files: 4, bytes: null, tool: "drm", removed: 4, target_kind: "dir" } };
+  expect(kpi({ operation: "rm" }, [dir])[0]).toMatchObject({ label: "삭제한 항목", value: "4개", sub: "삭제 대상 4개" });
 });
 
 test("KPI null 전파: 한 잡이라도 모르면 합계를 지어내지 않는다", () => {

@@ -214,3 +214,36 @@ test("보조 그룹 삭제 경고: 삭제 옵션이 꺼진 sync 라도 nsync 미
   // 그룹이 실리지 않았으면 삭제 계획이 있어도 해당 없음
   expect(groupDeleteWarning({ operation: "sync", preview_summary: NSYNC_PREVIEW_TC, ...ident("none") } as any)).toBe(false);
 });
+
+// ---- d194: rm 대상 자신이 심볼릭 링크(러너 lstat → summary target_kind) -- 링크만 지운다 --------------------------------------
+// drm walk 는 링크 대상에서 1 항목(Type=LNK)을 센다(포크 7a3189c 실증). 「삭제 대상 1개」만 보이면 데이터를 지우려던 사람이
+// 그대로 컨펌한다 -- 수 옆과 주의 목록 둘 다에서 링크만 지운다는 것을 말한다.
+const RM_LINK_PREVIEW = { returncode: 0, files: 1, bytes: null, detail_version: 2, tool: "drm", dryrun: true, target_items: 1,
+  target_kind: "link" };
+
+test("rm 대상이 링크: 요약 줄은 「삭제 대상 1개 — 심볼릭 링크(링크만 …)」, 주의 목록은 링크만 지운다 + 실행 전 재확인", async () => {
+  expect(previewSummaryText({ operation: "rm", tool: "drm", preview_summary: RM_LINK_PREVIEW }))
+    .toBe("삭제 대상 1개 — 심볼릭 링크(링크만 지웁니다 · 링크가 가리키는 곳은 지우지 않습니다)");
+  // 디렉토리·파일·모름(옛 러너)은 예전 그대로 -- 링크라고 지어내지 않는다
+  for (const k of ["dir", "file", undefined]) {
+    expect(previewSummaryText({ operation: "rm", tool: "drm", preview_summary: { ...RM_LINK_PREVIEW, target_kind: k, files: 4,
+      target_items: 4 } })).toBe("삭제 대상 4개(대상 경로 포함, 파일·디렉터리 합계)");
+  }
+  // 0(대상 경로를 찾지 못함)이 더 센 신호 -- 종류 표식이 잘못 붙어 와도 「못 찾음」을 말한다
+  expect(previewSummaryText({ operation: "rm", preview_summary: { ...RM_LINK_PREVIEW, files: 0, target_items: 0 } }))
+    .toMatch(/^삭제 대상 0개 — 대상 경로를 찾지 못했습니다/);
+  // 수를 모르는 링크 미리보기도 링크만 지운다는 사실이 먼저다(walk 줄 안내보다)
+  expect(previewSummaryText({ operation: "rm", preview_summary: { target_kind: "link", returncode: 0, files: null, bytes: null } }))
+    .toBe("삭제 대상 모름 — 심볼릭 링크(링크만 지웁니다 · 링크가 가리키는 곳은 지우지 않습니다)");
+
+  wrap(<ConfirmDialog job={{ ...job, operation: "rm", tool: "drm", preview_summary: RM_LINK_PREVIEW } as any} />);
+  await userEvent.click(screen.getByRole("button", { name: "작업 컨펌" }));
+  expect(await screen.findByText("삭제 대상 1개 — 심볼릭 링크(링크만 지웁니다 · 링크가 가리키는 곳은 지우지 않습니다)"))
+    .toBeInTheDocument();
+  const list = screen.getByRole("list", { name: "컨펌 전 주의 사항" });
+  expect(Array.from(list.querySelectorAll("li")).map((li) => li.textContent)).toEqual([
+    "대상은 심볼릭 링크입니다 — 링크 하나만 지우고 링크가 가리키는 곳은 지우지 않습니다. 데이터를 지우려면 링크가 아닌 원래 경로로 "
+    + "요청하세요. 실행 직전에 대상이 여전히 링크인지 다시 확인해, 바뀌었거나 없어졌으면 실행하지 않습니다",
+  ]);
+  expect(confirmWarnings({ operation: "rm", tool: "drm", preview_summary: { ...RM_LINK_PREVIEW, target_kind: "dir" } })).toEqual([]);
+});

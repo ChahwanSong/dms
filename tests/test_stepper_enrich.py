@@ -81,3 +81,48 @@ def test_sync_recheck_preflight_before_execution(db):
     exec_spec = [s for s in adapter.submitted_specs() if s.phase == "execution"][0]
     assert exec_spec.paths["source"] == "/cephfs-third/a"
     assert exec_spec.paths["destination"] == "/cephfs-secondary/b"
+
+
+
+def _rm_job(repos, preview_summary, key="k-rm"):
+    if repos.storages.get("cephfs-dms") is None:
+        repos.storages.create(storage_name="cephfs-dms", mount_path="/cephfs",
+                              managed_root="/cephfs/dms", backend_type="cephfs", actor="admin")
+    rid = repos.requests.create(operation="rm", requester_id="alice", actor="alice", resource_key=key,
+                                payload={"storage": "cephfs-dms", "target": "team/link", "options": {"recursive": True}},
+                                priority="mid")
+    repos.requests.set_state(rid, RequestState.PLANNED, actor="planner")
+    plan_id = repos.data_jobs.create_plan(rid, actor="planner")
+    jid = repos.data_jobs.create_job(rid, plan_id, operation="rm", priority="mid", storage_name="cephfs-dms",
+                                     target="team/link", options={"recursive": True}, tool="drm",
+                                     worker_pool={"identity": {"uid": 10001, "gid": 10000, "username": "alice",
+                                                               "groups": [], "privileged": False},
+                                                  "candidates": {"primary": ["dms-w1"]}, "process_count": 1,
+                                                  "queue": "dms-data", "priority_class": "dms-mid"},
+                                     precondition={}, actor="planner")
+    if preview_summary is not None:
+        repos.data_jobs.set_preview(jid, fingerprint="sha256:x", expires_at="2099-01-01T00:00:00Z", artifact_uri="x",
+                                    summary=preview_summary)
+    return jid
+
+
+def test_rm_execution_spec_carries_the_previewed_target_kind(db):
+    # 2026-10-28 rm 미리보기 종류 묶기: 실행 단계 spec 에만, 미리보기 summary 의 target_kind(러너 lstat)를 싣는다 -- 러너가
+    # drm 직전 종류와 다르면 거부한다. 다른 단계·없는 값·범위 밖 값(변조 행)은 싣지 않는다.
+    repos = Repositories(db)
+    stepper = JobStepper(repos, StubExecutionAdapter(), settings=_Settings())
+    jid = _rm_job(repos, {"returncode": 0, "files": 1, "bytes": None, "detail_version": 2, "tool": "drm",
+                          "dryrun": True, "target_kind": "link"})
+    job = repos.data_jobs.get_job(jid)
+    assert stepper._build_spec(job, "execution", False).paths["expect_target_kind"] == "link"
+    for phase in ("preflight", "preview", "exec_preflight"):
+        assert "expect_target_kind" not in stepper._build_spec(job, phase, phase == "preview").paths
+
+
+def test_rm_execution_spec_without_a_known_previewed_kind_does_not_bind(db):
+    repos = Repositories(db)
+    stepper = JobStepper(repos, StubExecutionAdapter(), settings=_Settings())
+    for i, summary in enumerate((None, {"returncode": 0, "files": 1, "bytes": None},
+                                 {"returncode": 0, "files": 1, "bytes": None, "target_kind": "rm -rf"})):
+        jid = _rm_job(repos, summary, key=f"k-rm-{i}")
+        assert "expect_target_kind" not in stepper._build_spec(repos.data_jobs.get_job(jid), "execution", False).paths

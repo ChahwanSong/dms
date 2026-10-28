@@ -2062,6 +2062,47 @@ test("rm 배치 확인: 서버가 동의 없음(422 batch_rm_confirm_ack_require
   expect(await within(dlg).findByRole("alert")).toHaveTextContent("삭제 배치 확인에는 「되돌릴 수 없음」 확인이 필요합니다");
 });
 
+test("rm 배치 확인: 삭제 경고는 「경로 자신이 링크면 링크만」 예외를 늘 말한다(d194 -- 링크 항목이 없어도 규칙)", async () => {
+  renderItems(rmBatch());
+  const dlg = await openConfirmDialog();
+  expect(within(dlg).getByRole("note", { name: "삭제 경고" })).toHaveTextContent(
+    "각 항목의 경로와 그 아래 파일·디렉토리가 모두 삭제됩니다(경로 자신이 심볼릭 링크인 항목은 링크만 지우고 가리키는 곳은 "
+    + "지우지 않습니다). root 로 실행돼 파일 권한·소유와 관계없이 지워집니다.");
+  // 링크 항목이 없으면 「링크 항목」 줄도, 항목 표지도 없다
+  expect(within(dlg).queryByText("링크 항목")).toBeNull();
+  expect(within(dlg).getByRole("list", { name: "항목별 삭제 대상" })).not.toHaveTextContent("링크만 삭제");
+});
+
+test("rm 배치 확인: 대상이 심볼릭 링크인 항목(d194 target_kind) -- 「링크 항목 N개(링크만 삭제 …)」 줄 + 항목 줄 표지", async () => {
+  const LINK = { files: 1, bytes: null, returncode: 0, detail_version: 2, tool: "drm", target_items: 1, target_kind: "link" };
+  renderItems(rmBatch({ items: [
+    rmItem(0, "team/old-a", { preview_summary: { files: 1234, bytes: null, returncode: 0, target_kind: "dir" } }),
+    rmItem(1, "team/link-a", { preview_summary: LINK }),
+    rmItem(2, "team/link-b/", { preview_summary: LINK }),
+    // 실행되지 않는 항목의 링크는 세지 않는다(확인 범위 밖)
+    rmItem(3, "team/link-c", { status: "Rejected", job_state: "Rejected", preview_summary: LINK, reason_code: "parent_not_writable" }),
+  ] }));
+  const dlg = await openConfirmDialog();
+  expect(within(dlg).getByText("링크 항목").nextSibling).toHaveTextContent(
+    "2개(링크만 삭제 — 이 항목은 링크가 가리키는 곳을 지우지 않습니다. 같은 배치의 다른 항목이 그곳을 지우면 지워집니다. "
+    + "실행 직전에 링크가 아니게 바뀐 항목은 실행하지 않습니다)");
+  // 합계 문구(e2e 11-batch-rm 이 고정)는 그대로 -- 링크 항목은 1개씩 든다
+  expect(within(dlg).getByText("1,236개(대상 경로 포함 파일·디렉터리, 항목별 미리보기 합계)")).toBeInTheDocument();
+  const rows = within(within(dlg).getByRole("list", { name: "항목별 삭제 대상" })).getAllByRole("listitem");
+  expect(rows[0]).toHaveTextContent("#0 s1:team/old-a — 1,234개");
+  expect(rows[0]).not.toHaveTextContent("링크");
+  expect(rows[1]).toHaveTextContent("#1 s1:team/link-a — 1개(심볼릭 링크 · 링크만 삭제)");
+  expect(rows[2]).toHaveTextContent("#2 s1:team/link-b/ — 1개(심볼릭 링크 · 링크만 삭제)");
+});
+
+test("rm 항목 펼침: 대상이 링크인 항목은 「삭제 대상(미리보기)」 옆에 링크만 삭제 표지(d194)", async () => {
+  renderItems(rmBatch({ status: "Completed", items: [
+    rmItem(0, "team/link", { status: "Succeeded", request_state: "Succeeded", job_state: "Succeeded", files_count: 1,
+      preview_summary: { files: 1, bytes: null, returncode: 0, target_kind: "link" } })] }));
+  await userEvent.click(await screen.findByRole("button", { name: "항목 0 상세" }));
+  expect(screen.getByText("삭제 대상(미리보기)").nextSibling).toHaveTextContent("1개(심볼릭 링크 · 링크만 삭제)");
+});
+
 test("rm 배치 확인: dry-run 종료코드가 0 이 아니면 그 항목을 빨갛게 표시한다", async () => {
   renderItems(rmBatch({ items: [rmItem(0, "a", { preview_summary: { files: 3, bytes: null, returncode: 2 } })] }));
   const dlg = await openConfirmDialog();

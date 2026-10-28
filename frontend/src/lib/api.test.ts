@@ -134,4 +134,17 @@ describe("reasonText", () => {
     expect(reasonText("poll_failed")).toBe("상태를 확인하지 못했습니다");
     expect(reasonText("poll_failed")).not.toMatch(/빌드/);
   });
+
+  it("rm 링크 사유(d194): target_path_redirected 는 중간 단계 링크만, 대상 자신이 링크면 링크만 지운다 -- 옛 「대상 자신이 링크여도 거부」 아님", () => {
+    // 2026-10-28 사용자 결정으로 10-27 「rm 도 똑같이 거부」를 뒤집었다 -- 옛 문장은 이제 거짓이다(대상 자신은 링크만 지워진다).
+    expect(reasonText("target_path_redirected")).toBe("삭제 대상 경로의 중간 단계에 심볼릭 링크가 있어 삭제하지 않았습니다(도구는 "
+      + "시작되지 않았습니다) — 관리 디렉토리 아래 경로의 중간 단계가 링크면 거부합니다(대상 자신이 링크면 링크만 지웁니다). 링크를 "
+      + "거치지 않는 경로로 다시 요청하세요");
+    expect(reasonText("target_path_redirected")).not.toMatch(/대상 자신이 링크여도/);
+    // sync 의 두 코드는 그대로(sync 는 마지막 이름까지 링크면 거부)
+    expect(reasonText("destination_path_redirected")).toMatch(/어느 단계든 링크면 거부합니다/);
+    // 미리보기-실행 종류 묶기 거부: 도구 전이라 데이터는 그대로, 새 미리보기를 보라
+    expect(reasonText("target_changed_since_preview")).toBe("미리보기 이후 삭제 대상의 종류가 바뀌었거나 대상이 없어져 실행하지 "
+      + "않았습니다(예: 링크였던 경로가 디렉토리로 바뀜) — 데이터는 바뀌지 않았습니다. 지금 경로를 확인하고 다시 요청해 새 미리보기를 보세요");
+  });
 });

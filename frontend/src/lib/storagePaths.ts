@@ -48,13 +48,18 @@ export function destinationParent(root: string | null | undefined, rel: unknown)
 
 /** 제출 경로(관리 디렉토리 아래 상대경로)가 서버에서 거부될 이유 -- domain.validate_relative_path
  *  (422 unsafe_path) 의 즉답 미러. 서버가 최종 심판이고 이건 표시·제출 잠금용이다.
- *  거부: "/" 로 시작, ".." 구성요소, 정규화하면 "." (관리 디렉토리 자신 -- rm 은 rm_root_forbidden).
+ *  거부: "/" 로 시작, 제어 문자, ".." 구성요소, 정규화하면 "." (관리 디렉토리 자신 -- rm 은 rm_root_forbidden).
  *  빈 입력은 null(미입력 안내는 호출측 sanity 몫). 공백은 **거부가 아니다** -- 서버는 다듬지 않고
- *  그대로 이름으로 쓴다(그래서 화면도 다듬은 값으로 경로를 지어 보이면 안 된다). */
+ *  그대로 이름으로 쓴다(그래서 화면도 다듬은 값으로 경로를 지어 보이면 안 된다).
+ *  제어 문자(C0 0x00–0x1F·DEL 0x7F, 2026-10-28 d194): 서버가 받지 않는다 -- 셸 검사의 명령 치환이 이름 끝의 줄바꿈을 지워
+ *  「x\n」 같은 링크 성분이 봉쇄 검사를 빠져나갔다. 단건 입력칸엔 붙여 넣은 탭으로, 배치 CSV 엔 따옴표 안 줄바꿈으로 들어온다. */
 export function relativePathProblem(rel: string): string | null {
   if (rel.trim() === "") return null;
   if (rel.startsWith("/"))
     return "\"/\" 로 시작할 수 없습니다 — 관리 디렉토리 아래 상대경로로 적으세요";
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001f\u007f]/.test(rel))
+    return "제어 문자(줄바꿈·탭 등)는 쓸 수 없습니다 — 경로에 보이지 않는 문자가 섞였는지 확인하세요";
   const parts = rel.split("/");
   if (parts.some((p) => p === ".."))
     return "\"..\" 은 쓸 수 없습니다 — 관리 디렉토리 밖을 가리킬 수 없습니다";
@@ -63,18 +68,30 @@ export function relativePathProblem(rel: string): string | null {
   return null;
 }
 
+/** 서버가 저장할 모양 -- validate_relative_path 의 posixpath.normpath 미러: 빈 성분(「//」·끝의 「/」)과 「.」 을 걷어 낸다.
+ *  공백은 다듬지 않는다(normpath 도 그대로 둔다). 형식이 틀리거나(relativePathProblem) 빈 입력이면 null.
+ *  rm 에서 뜻이 있다(2026-10-28 d194): 「team/link/」 의 끝 「/」 는 서버에서 사라져 대상은 「team/link」 -- 그 이름이 링크면
+ *  링크만 지운다(셸의 「link/」 처럼 링크 너머를 가리키지 않는다). 화면이 입력 그대로를 보이면 그 차이를 모른다. */
+export function normalizedRelativePath(rel: string): string | null {
+  if (rel.trim() === "" || relativePathProblem(rel) !== null) return null;
+  const parts = rel.split("/").filter((p) => p !== "" && p !== ".");
+  return parts.length === 0 ? null : parts.join("/");
+}
+
 // 심볼릭 링크 경로 규칙(2026-10-27 d192, 포탈 괴리 [14]) -- 서버 봉쇄 검사(execution_manifests dms_path_contained·러너
 // path_redirected: realpath(경로) == realpath(관리 디렉토리) + 상대경로)의 화면 문구. d191 부터 관리 디렉토리 **아래** 어느
-// 성분이든(마지막 이름 포함) 링크면 preflight·실행 직전·도구 직전 세 시점에서 거부된다(source/destination/target_path_redirected).
+// 성분이든 링크면 preflight·실행 직전·도구 직전 세 시점에서 거부된다(source/destination/target_path_redirected).
 // 조건 목록(단건 제출의 목적지 조건 카드, 배치 생성의 sync 안내·rm 삭제 범위)이 이 규칙을 말하지 않아, 링크로 된 목적지가
 // 「디렉토리여야 합니다」를 만족한다고 보고 낸 요청이 거부됐다. 링크가 가리키는 곳으로 다시 내라고 하지 않는다(rm 은 링크 너머를
 // 지우게 되고, sync 는 남이 심은 링크의 대상에 쓰게 된다 -- 괴리 [27]).
+// rm 은 2026-10-28 d194 부터 다르다(사용자 결정): 봉쇄 검사는 대상의 **상위**까지만 보고, 대상 자신(마지막 이름)이 링크면
+// drm 이 그 링크만 지운다(lstat -- 가리키는 곳은 건드리지 않는다). 중간 단계의 링크는 여전히 거부. sync 는 그대로(마지막 포함).
 export const SYNC_PATH_LINK_RULE =
   "소스·목적지 경로가 관리 디렉토리 아래 어느 단계든(마지막 이름 포함) 심볼릭 링크를 거치면 거부됩니다 — 링크가 가리키는 "
   + "곳이 아니라 링크를 거치지 않는 경로로 요청하세요.";
 export const RM_PATH_LINK_RULE =
-  "삭제할 경로가 관리 디렉토리 아래 어느 단계든(대상 자신 포함) 심볼릭 링크면 거부됩니다 — 링크를 따라가 지우지도, 링크 "
-  + "자체를 지우지도 않습니다.";
+  "삭제할 경로의 중간 단계(관리 디렉토리 아래)가 심볼릭 링크면 거부됩니다 — 링크를 따라가 지우지 않습니다. 경로 자신(마지막 "
+  + "이름)이 링크면 링크만 지우고, 링크가 가리키는 곳은 지우지 않습니다.";
 
 export type StorageRoots = Record<string, string | undefined>;
 

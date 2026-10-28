@@ -379,6 +379,11 @@ def _launcher_env(spec):
         # 러너가 drm 직전에 대상 봉쇄를 다시 본다(EXECUTION_REASONS 주석) -- 대상은 argv 마지막(tool_argv), 기준은 이 값.
         # 연산이 아니라 도구로 거는 이유: 지우는 것은 drm 이다(변조 행의 연산·도구 불일치도 봉쇄 밖으로 새지 않는다).
         env["DMS_JR_RM_ROOT"] = _rm_managed_root(spec)
+        # 미리보기 종류 묶기(EXECUTION_REASONS 주석): stepper 가 실행 단계 spec 에만 싣는다(미리보기에서 정해진 값). 범위 밖
+        # 값(변조 행)은 싣지 않는다 -- 러너도 같은 네 값만 비교한다. 없으면(옛 미리보기·미리보기에서 대상 없음) 묶지 않는다.
+        kind = (spec.paths or {}).get("expect_target_kind")
+        if kind in RM_TARGET_KINDS:
+            env["DMS_JR_RM_EXPECT_KIND"] = kind
     return env
 
 
@@ -517,11 +522,11 @@ _DEST_CHECK = (
     'if [ "$M" != root ] && [ "$(stat -c %u "$D")" != "$(id -u)" ]; then '
     'echo DMS_PREFLIGHT_REASON=destination_not_owned; exit 1; fi; '
     'fi; '
-    'dest_parent=$(dirname "$D"); '
+    'dest_parent=${D%/*}; '
     'test -w "$dest_parent" || '
     '{ echo DMS_PREFLIGHT_REASON=destination_parent_not_writable; exit 1; }; ')
 
-# 경로 봉쇄(sync 소스·목적지, rm 대상 -- 2026-10-21 rm, 2026-10-27 sync·rm 끝 성분, 포크 보고 ④). 셸 함수 하나가 규칙이다:
+# 경로 봉쇄(sync 소스·목적지, rm 대상의 부모 -- 2026-10-21 rm, 2026-10-27 sync 끝 성분, 포크 보고 ④). 셸 함수 하나가 규칙이다:
 # dms_path_contained PATH ROOT 는 「PATH 가 managed_root(ROOT) 아래 **어느 성분도**(마지막 포함) 심링크가 아니다」일 때만 참.
 # 판정 = 「PATH 의 실제 위치 == realpath(ROOT) + 글자 그대로의 상대경로」. 아직 없는 끝부분(새 목적지)은 존재하는 가장 깊은
 # 상위로 본다(lstat 기준 -- 끊긴 링크도 「있음」이라 막힌다). ROOT 자신·그 위의 심링크는 괜찮다(양쪽을 같은 realpath 로 본다
@@ -535,25 +540,38 @@ _DEST_CHECK = (
 # 앞 -- sync 는 워커 셸(_worker_command_script, 워커만 데이터 스토리지를 마운트한다 -- nsync 런처는 아니다), rm 은 러너
 # (dms_job_runner.runner.rm_target_redirected, 같은 규칙의 Python 미러 -- tests/test_rm_containment_sh·test_sync_containment_sh
 # 가 같은 트리로 두 판정을 대조한다). 마지막 검사와 도구가 경로를 여는 사이 몇 초의 교체는 남는다(BACKLOG ④ B -- 포크 루트 고정).
+# 상위로 거슬러 올라가기는 `${q%/*}`(매개변수 확장)다 -- `$(dirname …)` 명령 치환은 끝 개행을 지워(2026-10-28 검토에서 재현) 이름이
+# 개행으로 끝나는 링크 성분(`x\n` → 남의 디렉터리) 아래 아직 없는 경로를 개행 없는 실제 디렉터리 `x` 로 보고 통과시켰다(Python
+# 미러는 막았지만 sync 의 세 검사는 전부 셸이다). realpath 결과도 같은 함정이다 -- `$(realpath …)` 는 이름 끝의 개행까지 지워,
+# 링크 「b」가 이웃 실제 디렉터리 「b\n」을 가리키면 「…/b\n」 이 「…/b」 로 보여 통과했다(d194 리뷰 재현). 그래서 출력 뒤에 표식
+# 「/」를 붙여 받고(`$(realpath … && echo /)`) realpath 자신의 줄바꿈 하나와 표식만 뗀다(`${v%?/}`) -- 이름의 개행은 남는다.
+# 경로 검증(domain.validate_relative_path)도 제어 문자를 받지 않는다 -- 이 셸 수정은 변조 행·옛 행까지 막는 두 번째 겹이다.
 _PATH_CONTAINED_FN = (
     'dms_path_contained() { '
     'dms_p=$1; dms_r=$2; dms_rb=${dms_r%/}; '
     'case "$dms_p" in */|*/.|*/..|*//*|*/./*|*/../*) return 1;; esac; '
     'case "$dms_p" in "$dms_rb"|"$dms_rb"/*) ;; *) return 1;; esac; '
-    'dms_real_root=$(realpath -e -- "$dms_r") || return 1; '
+    'dms_real_root=$(realpath -e -- "$dms_r" && echo /) || return 1; dms_real_root=${dms_real_root%?/}; '
     'dms_q=$dms_p; '
-    'while [ "$dms_q" != "$dms_rb" ] && [ ! -e "$dms_q" ] && [ ! -L "$dms_q" ]; do dms_q=$(dirname -- "$dms_q"); done; '
+    'while [ "$dms_q" != "$dms_rb" ] && [ ! -e "$dms_q" ] && [ ! -L "$dms_q" ]; do dms_q=${dms_q%/*}; done; '
     'if [ "$dms_q" = "$dms_rb" ]; then dms_want=$dms_real_root; '
     'else dms_want=${dms_real_root%/}/${dms_q#"$dms_rb"/}; fi; '
-    'dms_real_q=$(realpath -e -- "$dms_q") || return 1; '
+    'dms_real_q=$(realpath -e -- "$dms_q" && echo /) || return 1; dms_real_q=${dms_real_q%?/}; '
     '[ "$dms_real_q" = "$dms_want" ]; }; ')
 
-# rm 대상($1, $R = managed_root): managed_root 자신은 대상이 아니다(stepper 는 그 아래만 조합한다 -- 변조 행). 대상 자신이
-# 링크여도 막는다(2026-10-27 사용자 「Rm도 똑같이 dms에서 거부하도록」 -- 예전엔 drm 이 링크만 지운다고 통과시켰다).
+# rm 대상($1, $R = managed_root). 대상 **자신**이 심링크면 drm 이 링크만 지운다(2026-10-28 사용자 결정 -- 10-27 의 「거부」를
+# 뒤집어 dms-k8s 와 같다; 포크 7a3189c drm 은 대상을 lstat 하고 따라가지 않는다 -- 링크→디렉터리·파일·끊긴 링크·「link/」,
+# --lite·--stat, root·비 root 실측). 그래서 봉쇄는 **부모**에 건다. 순서가 계약이다:
+#   ① 대상 전체 문자열 검사 -- 끝 「/」「/.」「/..」와 「//」「/./」「/../」. 부모만 보면 이 검사가 빠져, 변조 행(stepper 는 DB 의
+#      target 을 다시 검증하지 않는다) `…/x/..` 를 drm 이 글자 단위로 접어(mfu_path_strdup_abs_reduce_str) managed_root·상위를 지운다.
+#   ② managed_root 자신(두 표기) -- 대상이 아니다.
+#   ③ 부모 `${1%/*}` 의 봉쇄(dms_path_contained). `$(dirname …)` 은 끝 개행을 지워 다른 부모를 본다(위 함수 주석).
+# 중간 성분 링크·managed_root 밖은 ③ 이 거부한다. 러너의 drm 직전 재확인(runner.rm_target_redirected)이 같은 순서의 미러다.
 _RM_TARGET_REDIRECTED = 'echo DMS_PREFLIGHT_REASON=target_path_redirected; exit 1'
 _RM_CONTAINMENT_CHECK = (
+    'case "$1" in */|*/.|*/..|*//*|*/./*|*/../*) ' + _RM_TARGET_REDIRECTED + ';; esac; '
     'case "$1" in "$R"|"${R%/}") ' + _RM_TARGET_REDIRECTED + ';; esac; '
-    'dms_path_contained "$1" "$R" || { ' + _RM_TARGET_REDIRECTED + '; }; ')
+    'dms_path_contained "${1%/*}" "$R" || { ' + _RM_TARGET_REDIRECTED + '; }; ')
 _SOURCE_CONTAINMENT_CHECK = (
     'dms_path_contained "$S" "$SR" || { echo DMS_PREFLIGHT_REASON=source_path_redirected; exit 1; }; ')
 _DEST_CONTAINMENT_CHECK = (
@@ -568,6 +586,11 @@ def _sync_roots(spec):
     if not all(isinstance(r, str) and r != "" for r in roots):
         raise ValueError("sync spec without source_root/destination_root -- refusing to build an uncontained sync")
     return roots
+
+
+# rm 대상 종류(러너 runner.target_kind 와 같은 값 -- 계약 테스트가 잇는다). "missing" = 미리보기 때 대상이 없었다(lstat ENOENT·
+# ENOTDIR) -- 「지울 것이 없음」으로 확인한 요청이 실행 때 그 자리에 생긴 트리를 지우지 않게 이것도 묶는다(d194 리뷰).
+RM_TARGET_KINDS = frozenset({"link", "dir", "file", "other", "missing"})
 
 
 def _rm_managed_root(spec) -> str:
@@ -614,8 +637,9 @@ def _preflight_script(spec, *, role=None):
     0건 Succeeded 로 끝난다(2026-09-30 d139 실증에서 잡음 -- 그 판에서 한때 건너뛰었다).
     실행 모드("user"/"root")는 경로와 같이 positional 로 넘긴다(셸 인젝션 차단 관례).
 
-    rm(2026-10-21 리뷰, 2026-10-27 끝 성분 포함): 부모 쓰기 다음에 대상 봉쇄(_RM_CONTAINMENT_CHECK -- managed_root 아래 경로
-    성분 어디에도, 대상 자신에도 심링크 없음, _PATH_CONTAINED_FN)를 본다. sync 는 각 쪽 첫 검사로 같은 봉쇄를 본다
+    rm(2026-10-21 리뷰, 2026-10-28 끝 성분 링크는 링크만 삭제): 부모 쓰기 다음에 대상 봉쇄(_RM_CONTAINMENT_CHECK -- 대상 문자열
+    검사, managed_root 자신 거부, 부모의 managed_root 아래 경로 성분 어디에도 심링크 없음 -- _PATH_CONTAINED_FN)를 본다. 대상 자신이
+    링크면 통과하고 drm 이 링크만 지운다. sync 는 각 쪽 첫 검사로 같은 봉쇄를 본다
     (source_path_redirected·destination_path_redirected).
     root 든 아니든, 단건이든 배치 자식이든, preflight·exec_preflight 모두 이 한 스크립트다(phase 무관) -- root 는 `test -w`
     가 늘 참이라 봉쇄가 유일한 검사다. 부모 쓰기가 먼저인 이유: 부모가 없으면 realpath -e 도 실패하는데, 그 경우의 사유는
@@ -644,7 +668,7 @@ def _preflight_script(spec, *, role=None):
         return script, [ap["source"], ap["destination"], mode, src_root, dst_root]
     if spec.operation == "rm":
         script = ('set -e; R="$2"; '
-                  'parent=$(dirname "$1"); '
+                  'parent=${1%/*}; '
                   'test -w "$parent" || { echo DMS_PREFLIGHT_REASON=parent_not_writable; exit 1; }; '
                   + _PATH_CONTAINED_FN + _RM_CONTAINMENT_CHECK + 'echo DMS_PREFLIGHT_OK')
         return script, [ap["target"], _rm_managed_root(spec)]
@@ -698,8 +722,12 @@ EXECUTION_REASON_MARKER = "DMS_EXEC_REASON="
 TOOL_FAILURE_REASONS = frozenset({"tool_aborted", "destination_full", "destination_read_only", "sync_stopped_max_errors",
                                   "sync_type_change_refused", "source_scan_incomplete", "sync_items_failed",
                                   "rm_items_failed", "preview_scan_incomplete"})
+# 2026-10-28 rm 미리보기 종류 묶기: target_changed_since_preview 는 러너가 drm(실행) 직전 lstat 한 대상 종류(link·dir·file·other)가
+# 미리보기 summary 의 target_kind(stepper → env DMS_JR_RM_EXPECT_KIND, _launcher_env)와 다르거나 대상이 없어졌을 때 mpirun 없이
+# 찍는다 -- 「링크만 지운다」로 확인한 요청이 실행 때 디렉터리 트리를 지우지 않게(반대 방향도).
 EXECUTION_REASONS = frozenset({"workers_unreachable", "identity_groups_not_applied", "target_path_redirected",
-                               "source_path_redirected", "destination_path_redirected"}) | TOOL_FAILURE_REASONS
+                               "source_path_redirected", "destination_path_redirected",
+                               "target_changed_since_preview"}) | TOOL_FAILURE_REASONS
 
 
 def _parse_marker(entries, marker, allowed):

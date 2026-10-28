@@ -227,8 +227,10 @@ def test_parse_execution_reason_whitelist_and_shape():
         "tool_aborted", "destination_full", "destination_read_only", "sync_stopped_max_errors",
         "sync_type_change_refused", "source_scan_incomplete", "sync_items_failed", "rm_items_failed",
         "preview_scan_incomplete"})
+    # target_changed_since_preview(2026-10-28): 러너의 rm 미리보기 종류 묶기(실행 직전 대상 종류가 미리보기와 다름).
     assert EXECUTION_REASONS == frozenset({"workers_unreachable", "identity_groups_not_applied", "target_path_redirected",
-                                           "source_path_redirected", "destination_path_redirected"}) | TOOL_FAILURE_REASONS
+                                           "source_path_redirected", "destination_path_redirected",
+                                           "target_changed_since_preview"}) | TOOL_FAILURE_REASONS
     assert parse_execution_reason([("launcher", "DMS_EXEC_REASON=target_path_redirected\n", None)]) == "target_path_redirected"
     assert parse_execution_reason([("p", "x\n  DMS_EXEC_REASON=workers_unreachable  \n", None)]) == "workers_unreachable"
     assert parse_execution_reason([("p", None, "ImagePullBackOff"), ("w", "DMS_EXEC_REASON=workers_unreachable", None)]) \

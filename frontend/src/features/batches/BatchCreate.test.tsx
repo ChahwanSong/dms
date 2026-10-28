@@ -979,8 +979,14 @@ test("rm: 「삭제 범위」 안내·요약 위 빨간 경고·실행 권한 �
   const scope = screen.getByRole("note", { name: "삭제 범위" });
   expect(scope).toHaveTextContent("되돌릴 수 없습니다");
   expect(scope).toHaveTextContent("관리자 특권(root)으로 실행돼");
-  // d191 링크 규칙(대상 자신 포함, 링크 자체도 지우지 않는다 -- 괴리 [14]·[27])과 quiet 설명(지우지 못한 항목 목록까지 사라진다)
+  // 링크 규칙(괴리 [14]·[27]; d194~ 중간 단계 링크만 거부, 경로 자신이 링크면 링크만 삭제)과 quiet 설명(지우지 못한 항목
+  // 목록까지 사라진다). 「경로와 그 아래 모두」 줄도 링크 예외를 말한다 -- 링크 너머까지 지운다고 읽히지 않게.
   expect(scope).toHaveTextContent(RM_PATH_LINK_RULE);
+  expect(scope).toHaveTextContent("각 행의 경로와 그 아래 파일·디렉토리를 모두 삭제합니다(경로 자신이 심볼릭 링크면 링크만) — "
+    + "되돌릴 수 없습니다.");
+  expect(scope).not.toHaveTextContent(/대상 자신 포함|링크 자체를 지우지도/);
+  expect(screen.getByText(/^한 스토리지의 여러 경로를 삭제합니다\(경로와 그 아래 전부 — 경로 자신이 심볼릭 링크면 링크만\)\./))
+    .toBeInTheDocument();
   expect(screen.getByText(QUIET_HELP.rm)).toBeInTheDocument();
   expect(screen.getByText(/삭제는 되돌릴 수 없습니다\. 항목별 미리보기에서/)).toBeInTheDocument();
   expect(screen.getByText("실행 권한").closest("div")!.querySelector("dd")).toHaveClass("text-bad");

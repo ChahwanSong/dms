@@ -7,19 +7,19 @@
 // 판정 규칙은 서버와 같다: posixpath.normpath 처럼 빈 성분·「.」 을 걷어 낸 뒤 경로 **성분** 단위로 비교한다 — a 와
 // ab·「a b」·a.b 는 겹치지 않는다. 형식이 틀린 경로(relativePathProblem — 「/」 시작·「..」·관리 디렉토리 자신)와 빈
 // 입력은 건너뛴다: 그 사유는 따로 말하고(서버도 형식 검사가 같은 이유를 낸다), 여기서 겹침으로 또 세면 한 행에 두
-// 문장이 붙는다. 서버가 최종 심판이고 이건 표시·제출 잠금용이다.
-import { relativePathProblem } from "./storagePaths";
+// 문장이 붙는다. 서버가 최종 심판이고 이건 표시·제출 잠금용이다. 제어 문자가 든 경로(2026-10-28 d194 -- 서버 unsafe_path)도
+// 형식 오류라 건너뛴다(relativePathProblem 한 판정).
+import { normalizedRelativePath } from "./storagePaths";
 
 export interface RmTargetEntry {
   label: string;     // 화면이 행을 부르는 이름(「3행」·「기존 #2」·「추가할 경로」) — 문장에서 조사 없이 쓴다
   target: string;    // 서버에 보낼 값 그대로(호출측이 trim 한 값)
 }
 
-/** 겹침 판정용 정규화 — 서버 validate_relative_path 의 normpath 와 같은 결과. 판정 밖(형식 오류·빈값)이면 null. */
+/** 겹침 판정용 정규화 — 서버 validate_relative_path 의 normpath 와 같은 결과(storagePaths.normalizedRelativePath 한 벌 --
+ *  제출 화면의 「저장되는 경로」와 같은 판정). 판정 밖(형식 오류·빈값)이면 null. */
 export function normalizedRmTarget(target: string): string | null {
-  if (target.trim() === "" || relativePathProblem(target) !== null) return null;
-  const parts = target.split("/").filter((p) => p !== "" && p !== ".");
-  return parts.length === 0 ? null : parts.join("/");
+  return normalizedRelativePath(target);
 }
 
 /** 겹치는 항목마다 한 문장(입력 순서). 겹침이 없으면 빈 배열. 같은 경로는 뒤에 나온 쪽이, 조상·자손은 자손 쪽이

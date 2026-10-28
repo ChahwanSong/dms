@@ -25,7 +25,7 @@ import { useStorageRoots } from "../storages/useUserStorages";
 import { batchPillVariant, batchStatusLabel } from "../../lib/jobState";
 import { chownHasName, syncOwnership } from "../../lib/syncOwnership";
 import { kstStampEpoch, kstStampOrDash } from "../../lib/datetime";
-import { kindsText, readSummary, sumKinds, summaryTool, type ActionKind } from "../../lib/toolSummary";
+import { kindsText, readSummary, RM_LINK_ONLY, sumKinds, summaryTool, type ActionKind } from "../../lib/toolSummary";
 import { SYNC_OPTION_HELP } from "../jobs/optionRules";
 import { ATIME_APPROX_NOTE } from "../usage/usageStats";
 import type { Batch, BatchDetail as BatchDetailData, BatchItem, HistogramBucket } from "../../lib/types";
@@ -172,6 +172,14 @@ const csvOp = (op: string | undefined): ItemsCsvOp => (op === "sync" ? "sync" : 
 // 찾지 못함(오타·이미 삭제·권한), 수가 아니면 모름 — null≠0 이라 둘을 다른 말로 한다.
 const rmCount = (n: unknown): string => (typeof n !== "number" ? "모름"
   : n === 0 ? "0개(대상 경로를 찾지 못함)" : `${n.toLocaleString("ko-KR")}개`);
+// rm 항목의 미리보기가 「대상 자신이 심볼릭 링크」라고 했나(target_kind, 2026-10-28 d194 -- drm 은 그 링크만 지운다). 수 옆의
+// 표지·확인 창의 「링크 항목」 줄이 같은 판정을 쓴다. 모르면(옛 러너·대상 없음) false -- 링크라고 지어내지 않는다.
+const rmLinkItem = (it: BatchItem): boolean => readSummary(it.preview_summary).targetKind === "link";
+// 수 옆 표지(대상 경로를 못 찾은 0 에는 붙이지 않는다 -- 그쪽이 더 센 신호다).
+const rmCountWithKind = (it: BatchItem): string => {
+  const n = it.preview_summary?.files;
+  return `${rmCount(n)}${rmLinkItem(it) && n !== 0 ? `(${RM_LINK_ONLY})` : ""}`;
+};
 const nf = (n: number) => n.toLocaleString("ko-KR");
 // sync 항목 결과 수(files_count)의 이름(2026-10-28 리뷰 portal-batch-29·contract-37). 「반영한 항목」은 d192 이후의 뜻(nsync
 // 완료 액션 합·dsync 복사 성공 수, 미리보기 실패는 승격하지 않음)일 때만 참이다 -- 그 전 기록의 files_count 는 nsync 계획 합
@@ -820,6 +828,8 @@ function ConfirmBatchDialog({ b, confirm, absOf }: {
   const direct = isRm ? null : directNote(b);
   // rm: 미리보기에서 대상 경로를 못 찾은 항목(0 -- walk 는 대상 자신을 세므로 빈 디렉토리도 1). 실행해도 지울 것이 없다.
   const notFound = isRm ? runnable.filter((it) => it.preview_summary?.files === 0).length : 0;
+  // rm: 대상 자신이 심볼릭 링크인 항목(d194) -- 그 항목은 링크만 지운다. 「경로와 그 아래 모두」 경고의 예외라 따로 센다.
+  const linkItems = isRm ? runnable.filter(rmLinkItem).length : 0;
   const expiries = runnable.map((it) => it.preview_expires_at).filter((x): x is string => !!x).sort();
   const earliest = expiries[0] ?? null;
   const del = b.options?.delete === true;
@@ -841,7 +851,10 @@ function ConfirmBatchDialog({ b, confirm, absOf }: {
       {isRm && (
         <p role="note" aria-label="삭제 경고"
            className="mt-3 rounded-lg border border-bad/30 bg-badbg px-3 py-2 text-sm text-bad">
-          각 항목의 경로와 그 아래 파일·디렉토리가 모두 삭제됩니다. root 로 실행돼 파일 권한·소유와 관계없이 지워집니다.
+          {/* 예외(2026-10-28 d194): 경로 자신이 심볼릭 링크인 항목은 drm 이 링크만 지운다 -- 늘 참인 규칙이라 링크 항목이
+              없어도 말한다(목록의 표지·「링크 항목」 줄이 어느 항목인지 가리킨다). */}
+          각 항목의 경로와 그 아래 파일·디렉토리가 모두 삭제됩니다(경로 자신이 심볼릭 링크인 항목은 링크만 지우고 가리키는 곳은
+          지우지 않습니다). root 로 실행돼 파일 권한·소유와 관계없이 지워집니다.
         </p>
       )}
       {/* 자동 확인(2026-10-11)이 곧 같은 확인을 할 수 있다 -- 먼저 누르면 사람 확인으로 남고, 시스템이 먼저면 이 확인은
@@ -878,6 +891,14 @@ function ConfirmBatchDialog({ b, confirm, absOf }: {
             : known.length === 0 ? `모름(미리보기 ${runnable.length}개 항목 모두 수 미기록)`
             : `${fileTotal.toLocaleString("ko-KR")}개(대상 경로 포함 파일·디렉터리, 항목별 미리보기 합계${
                 unknownFiles > 0 ? `, ${unknownFiles}개 항목은 모름` : ""})`}</dd>
+        </>)}
+        {/* 링크만 지우는 항목(d194): 데이터를 지우려고 링크를 넣었다면 확인 전에 알아야 한다. 「그 항목은 가리키는 곳을 지우지
+            않는다」는 미리보기-실행 종류 묶기가 받친다(실행 직전 종류가 바뀐 항목은 도구 전에 거부 -- target_changed_since_preview).
+            결과(「데이터가 남는다」)로 말하지 않는다: 같은 배치의 다른 항목이 그곳을 지우면 지워진다(겹침 판정은 경로 글자 기준). */}
+        {linkItems > 0 && (<>
+          <dt className="text-muted">링크 항목</dt>
+          <dd>{`${linkItems}개(링크만 삭제 — 이 항목은 링크가 가리키는 곳을 지우지 않습니다. 같은 배치의 다른 항목이 그곳을 지우면 `
+            + "지워집니다. 실행 직전에 링크가 아니게 바뀐 항목은 실행하지 않습니다)"}</dd>
         </>)}
         {notFound > 0 && (<>
           <dt className="text-muted">대상 경로 없음</dt>
@@ -982,7 +1003,7 @@ function ConfirmBatchDialog({ b, confirm, absOf }: {
               return (
                 <li key={it.seq} className={`[overflow-wrap:anywhere] ${sm?.files === 0 || rc !== "" ? "text-bad" : ""}`}>
                   {`#${it.seq} ${pathSummary(b.operation, it.payload)} — `}
-                  <span className="font-medium tabular-nums">{`${rmCount(sm?.files)}${rc}`}</span>
+                  <span className="font-medium tabular-nums">{`${rmCountWithKind(it)}${rc}`}</span>
                   {abs !== null && <span className="block text-muted">{`지정 경로: ${abs}`}</span>}
                 </li>
               );
@@ -1650,7 +1671,7 @@ export function BatchDetail() {
                     <dd className="tabular-nums">{it.files_count ?? "—"}</dd>
                     {b?.operation === "rm" && it.preview_summary != null && (<>
                       <dt className="text-muted">삭제 대상(미리보기)</dt>
-                      <dd className="tabular-nums">{rmCount(it.preview_summary.files)}</dd>
+                      <dd className="tabular-nums">{rmCountWithKind(it)}</dd>
                     </>)}
                     {b?.operation === "sync" && it.preview_summary != null && <SyncPreviewRow summary={it.preview_summary} jobTool={it.job_tool} />}
                     <dt className="text-muted">완료 시각</dt>

@@ -38,6 +38,22 @@ function counts(v: unknown): Partial<Record<ActionKind, number>> | null {
   return any ? out : null;
 }
 
+/** rm 대상 자신의 종류(러너가 drm 직전 lstat 으로 싣는 target_kind, 2026-10-28 d194). */
+export type TargetKind = "link" | "dir" | "file" | "other";
+const TARGET_KINDS: ReadonlySet<string> = new Set<TargetKind>(["link", "dir", "file", "other"]);
+
+// rm 대상이 심볼릭 링크일 때의 말(2026-10-28 d194 사용자 결정 -- 대상 자신이 링크면 거부하지 않고 링크만 지운다, drm 은 대상을
+// lstat 한다). 컨펌 창·미리보기·실행 결과·배너 KPI·배치 확인이 같은 말을 쓴다(화면마다 따로 쓰면 한 곳만 고쳐진다).
+// 「가리키는 곳의 데이터는 남는다」를 말할 수 있는 근거는 미리보기-실행 종류 묶기다: 실행 직전 러너가 대상 종류를 다시 보고
+// 미리보기와 다르면(링크가 디렉토리로 바뀌었거나 없어짐) 도구 전에 거부한다(target_changed_since_preview).
+/** 짧은 표지(타일 보조 줄·배치 항목 줄). */
+export const RM_LINK_ONLY = "심볼릭 링크 · 링크만 삭제";
+/** 컨펌 창 요약 줄의 꼬리(「삭제 대상 1개 — 심볼릭 링크(…)」). */
+export const RM_LINK_SUMMARY = "심볼릭 링크(링크만 지웁니다 · 링크가 가리키는 곳은 지우지 않습니다)";
+/** 컨펌 전 주의(previewWarnings rm 갈래) -- 묶기 때문에 실행 직전에 링크가 아니게 바뀌면 실행하지 않는다는 사실까지. */
+export const RM_LINK_WARNING = "대상은 심볼릭 링크입니다 — 링크 하나만 지우고 링크가 가리키는 곳은 지우지 않습니다. 데이터를 지우려면 "
+  + "링크가 아닌 원래 경로로 요청하세요. 실행 직전에 대상이 여전히 링크인지 다시 확인해, 바뀌었거나 없어졌으면 실행하지 않습니다";
+
 export interface ReadSummary {
   /** 원본이 객체였는가(아니면 나머지는 전부 null). */
   present: boolean;
@@ -86,12 +102,14 @@ export interface ReadSummary {
   summaryUnavailable: boolean;
   /** v2 상세가 계산된 summary 인가(detail_version >= 2). 옛 잡·조기 종료 경로는 false. */
   detailed: boolean;
+  /** rm 대상 자신의 종류(drm 직전 lstat -- d194). 네 값 밖(변조·빈 문자열)·없음은 null(모름 -- 링크가 아니라고 단정하지 않는다). */
+  targetKind: TargetKind | null;
 }
 
 const EMPTY: ReadSummary = {
   present: false, tool: null, dryrun: null, quiet: false, returncode: null, files: null, bytes: null,
   planned: null, done: null, copiedBytes: null, plannedBytes: null, sourceItems: null, copiedItems: null,
-  copyFailed: null, createFailed: null, removed: null, removeFailed: null, targetItems: null,
+  copyFailed: null, createFailed: null, removed: null, removeFailed: null, targetItems: null, targetKind: null,
   typeToDir: null, typeFromDir: null,
   typeChangeNeedsDelete: false, typeChangeRefused: null, skippedSpecial: null, failuresTotal: null,
   failuresByOp: null, failureSamples: [], notAttempted: null, stoppedEarly: false, stopCause: null,
@@ -145,6 +163,7 @@ export function readSummary(raw: unknown): ReadSummary {
     removed: count(s.removed),
     removeFailed: count(s.remove_failed),
     targetItems: count(s.target_items),
+    targetKind: typeof s.target_kind === "string" && TARGET_KINDS.has(s.target_kind) ? s.target_kind as TargetKind : null,
     typeToDir: tc ? count(tc.to_dir) : null,
     typeFromDir: tc ? count(tc.from_dir) : null,
     typeChangeNeedsDelete: s.type_change_needs_delete === true,
@@ -253,6 +272,8 @@ export const PRE_TOOL_REASONS: ReadonlySet<string> = new Set([
   "workers_unreachable",
   "identity_groups_not_applied",
   "target_path_redirected",
+  // d194: 러너가 mpirun 전에 rm 대상 종류를 미리보기와 대조해 거부(링크였던 경로가 디렉토리로 바뀜 등) -- drm 은 돌지 않았다.
+  "target_changed_since_preview",
   "source_path_redirected",
   "destination_path_redirected",
   "unknown_tool",
@@ -371,7 +392,9 @@ export function withObj(subject: string): string {
 }
 
 /** 미리보기(dry-run)가 이미 아는, 컨펌 전에 사람이 알아야 할 것(포탈 괴리 [1]·[5]·[6]·[17]). 컨펌 창·미리보기 결과·배너가
- *  같은 문장을 쓴다(화면마다 따로 쓰면 한 곳만 고쳐진다). sync 만 -- rm 미리보기(drm walk)는 경고할 상세가 없다.
+ *  같은 문장을 쓴다(화면마다 따로 쓰면 한 곳만 고쳐진다).
+ *  - rm: 대상 자신이 심볼릭 링크면(target_kind, d194) 링크만 지운다는 것 -- 데이터를 지우려던 사람이 「삭제 대상 1개」만 보고
+ *    컨펌하면 링크만 사라지고 데이터는 남는다. 그 밖의 rm 미리보기(drm walk)는 경고할 상세가 없다.
  *  **성공한 미리보기 전용**이다: 문장이 「…합니다」(앞으로 일어날 일)라, 실패해 실행되지 않을 미리보기에는 붙이지 않는다
  *  (호출측이 가른다 -- StageResults.PreviewResult 의 failedAt, d192 리뷰 portal-jobs-21).
  *  - 삭제 예정(nsync remove): 삭제 옵션이 꺼져 있으면 그 수는 전부 형식이 바뀐 항목의 교체다(nsync 는 타입이 다르면 늘
@@ -385,6 +408,7 @@ export function withObj(subject: string): string {
  *    작은따옴표 형식) -- 출력의 그 줄을 가리킨다.
  *  - dsync 미리보기는 지울 수를 세지 않는다 -- 삭제를 켰다면 그 사실만 말한다(수를 지어내지 않는다). */
 export function previewWarnings(s: ReadSummary, opts: { op: string; tool: string | null; deleteOn: boolean }): string[] {
+  if (opts.op === "rm") return s.targetKind === "link" ? [RM_LINK_WARNING] : [];
   if (opts.op !== "sync") return [];
   const out: string[] = [];
   const nsync = opts.tool === "nsync";

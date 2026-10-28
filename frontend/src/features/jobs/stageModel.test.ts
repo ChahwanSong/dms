@@ -225,7 +225,8 @@ test("d192 도구 실패 사유는 단계 접두가 없다 -- 같은 코드라�
 });
 
 test("d192 실행 단계의 도구 시작 전 거부(경로 봉쇄·워커 준비 실패)도 실패 지점은 ② 실행 -- 결과(3키 null)는 ②", () => {
-  for (const reason of ["destination_path_redirected", "source_path_redirected", "target_path_redirected", "workers_unreachable"]) {
+  for (const reason of ["destination_path_redirected", "source_path_redirected", "target_path_redirected", "workers_unreachable",
+    "target_changed_since_preview"]) {
     const m = deriveJobStages(job({ state: "Failed", reason_code: reason, phase_refs: ALL_REFS,
       result_summary: { returncode: null, files: null, bytes: null }, transitions: [...SYNC_OK_TR.slice(0, 6), t("Executing", "Failed", 30)] }));
     expect([reason, m.failure?.step, m.resultStage]).toEqual([reason, "execution", "exec"]);

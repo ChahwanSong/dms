@@ -2,8 +2,8 @@ import { FileText, Info, TriangleAlert } from "lucide-react";
 import type { DataJob } from "../../lib/types";
 import { reasonText } from "../../lib/api";
 import {
-  ACTION_LABELS, errnoText, failureCounts, hasFailureItems, kindsText, opLabel, previewWarnings, readSummary, scanSubject,
-  sumKinds, summaryTool, withObj, type ActionKind, type ReadSummary,
+  ACTION_LABELS, errnoText, failureCounts, hasFailureItems, kindsText, opLabel, previewWarnings, readSummary, RM_LINK_ONLY,
+  scanSubject, sumKinds, summaryTool, withObj, type ActionKind, type ReadSummary,
 } from "../../lib/toolSummary";
 import { bytesText, countText, humanBytes, isPlainObject } from "./format";
 import { SMALL_BTN } from "./ui";
@@ -199,7 +199,8 @@ const num = (n: number | null | undefined): string => (typeof n === "number" ? c
 /** 실행 결과 타일(도구별 뜻). 옛 잡(상세 없음)은 핵심 수만 중립 라벨로. */
 export function executionTiles(s: ReadSummary, tool: string | null, op: string | null): ResultTile[] {
   if (!s.detailed) {
-    const tiles: ResultTile[] = [{ key: "files", label: op === "rm" ? "삭제한 항목" : "항목 수", value: s.files === null ? "—" : countText(s.files) }];
+    const tiles: ResultTile[] = [{ key: "files", label: op === "rm" ? "삭제한 항목" : "항목 수", value: s.files === null ? "—" : countText(s.files),
+      sub: op === "rm" && s.targetKind === "link" ? RM_LINK_ONLY : null }];
     if (op !== "rm" || s.bytes !== null) tiles.push({ key: "bytes", label: "크기", value: bytesText(s.bytes) });
     if (s.returncode !== null) tiles.push({ key: "rc", label: "종료 코드", value: String(s.returncode), bad: s.returncode !== 0 });
     return tiles;
@@ -222,7 +223,9 @@ export function executionTiles(s: ReadSummary, tool: string | null, op: string |
     return tiles;
   }
   if (tool === "drm" || op === "rm") {
-    const tiles: ResultTile[] = [{ key: "removed", label: "삭제한 항목", value: num(s.removed ?? s.files) }];
+    // 대상 자신이 링크였으면(target_kind, d194) 지운 것은 그 링크 하나다 -- 가리키던 곳은 이 실행이 건드리지 않았다.
+    const tiles: ResultTile[] = [{ key: "removed", label: "삭제한 항목", value: num(s.removed ?? s.files),
+      sub: s.targetKind === "link" ? RM_LINK_ONLY : null }];
     if (s.removeFailed !== null) {
       tiles.push({ key: "remove_failed", label: "지우지 못한 항목", value: countText(s.removeFailed), bad: s.removeFailed > 0 });
     }
@@ -352,7 +355,8 @@ export function previewTiles(s: ReadSummary, tool: string | null, op: string): R
   const tiles: ResultTile[] = [];
   if (rm) {
     const n = s.targetItems ?? s.files;
-    tiles.push({ key: "files", label: "삭제 대상", value: n === null ? "모름" : countText(n) });
+    tiles.push({ key: "files", label: "삭제 대상", value: n === null ? "모름" : countText(n),
+      sub: s.targetKind === "link" ? RM_LINK_ONLY : null });
     // rm 은 도구가 바이트를 보고하지 않아 null 이 정상(「—」).
     tiles.push({ key: "bytes", label: "크기", value: s.bytes === null ? "—" : humanBytes(s.bytes) });
   } else if (tool === "nsync") {
@@ -411,12 +415,16 @@ export function PreviewResult({ job, summary, failedAt, headingId, onOpenOutput 
       {/* 실패 시점 결과(failedAt)에는 붙이지 않는다 -- 도구가 아예 돌지 않았을 수 있어(workers_unreachable 등 stdout.log
           없음) 개수·목록 안내가 거짓이 된다(2026-10-12 리뷰). 0 은 「빈 대상」이 아니라 대상 경로를 찾지 못한 것(walk 는
           대상 자신을 센다 -- 빈 디렉터리도 1). 모르면 개수가 있는 곳(walk 요약 줄 -- 목록은 앞·뒤 10개만). */}
+      {/* 대상 자신이 링크면(target_kind, d194) 「그 아래」가 없다 -- 링크 하나를 센 수라고 말한다(「그 아래 합계」라 하면
+          링크가 가리키는 곳의 내용을 센 것처럼 읽힌다). 링크만 지운다는 주의는 위 주의 목록(previewWarnings)이 말한다. */}
       {rm && !failedAt && (
         <p className="mt-1 text-xs text-ink/70 break-keep">
-          {files === null
-            ? "개수를 읽지 못한 미리보기입니다 — 아래 「미리보기」 단계 출력(stdout.log)의 'Walked N items' 줄이 지울 항목 수입니다(목록은 앞·뒤 10개만 찍힙니다)."
-            : files === 0
-              ? "대상 경로를 찾지 못했습니다(오타·이미 삭제·권한) — 지울 것이 없습니다. 아래 「미리보기」 단계 출력의 'Failed to stat' 을 확인하세요."
+          {files === 0
+            ? "대상 경로를 찾지 못했습니다(오타·이미 삭제·권한) — 지울 것이 없습니다. 아래 「미리보기」 단계 출력의 'Failed to stat' 을 확인하세요."
+            : s.targetKind === "link"
+              ? "대상 자신이 심볼릭 링크라 링크 하나를 셉니다 — 링크가 가리키는 곳의 내용은 세지도 지우지도 않습니다."
+            : files === null
+              ? "개수를 읽지 못한 미리보기입니다 — 아래 「미리보기」 단계 출력(stdout.log)의 'Walked N items' 줄이 지울 항목 수입니다(목록은 앞·뒤 10개만 찍힙니다)."
               : "대상 경로 자신과 그 아래 파일·디렉터리·링크의 합계입니다(실행 뒤 「삭제한 항목」과 같은 기준)."}
         </p>
       )}

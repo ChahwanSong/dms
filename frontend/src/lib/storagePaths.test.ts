@@ -1,5 +1,8 @@
 import { test, expect } from "vitest";
-import { absolutePath, absParts, absSummary, destinationParent, pathParts, pathSummary, relativePathProblem } from "./storagePaths";
+import {
+  absolutePath, absParts, absSummary, destinationParent, normalizedRelativePath, pathParts, pathSummary, relativePathProblem,
+  RM_PATH_LINK_RULE,
+} from "./storagePaths";
 
 test("destinationParent: sync 목적지의 상위 디렉토리 절대경로(쓰기 권한이 필요한 곳)", () => {
   expect(destinationParent("/cephfs/managed", "dms_test/dst")).toBe("/cephfs/managed/dms_test");
@@ -87,4 +90,32 @@ test("relativePathProblem: domain.validate_relative_path(422 unsafe_path) 의 �
   expect(relativePathProblem(".")).toMatch(/관리 디렉토리 자신/);
   expect(relativePathProblem("./")).toMatch(/관리 디렉토리 자신/);
   expect(relativePathProblem("./.")).toMatch(/관리 디렉토리 자신/);
+});
+
+test("relativePathProblem: 제어 문자(C0·DEL)는 거부 -- 서버 validate_relative_path 와 같은 unsafe_path(d194)", () => {
+  // 셸 검사의 명령 치환이 이름 끝 줄바꿈을 지워 「x\n」 링크 성분이 봉쇄 검사를 빠져나갔다 -- 서버가 받지 않으니 화면도 잠근다
+  for (const bad of ["a\nb", "link\n/x", "a\tb", "a\u0000b", "a\u0001", "a\u001fb", "a\u007fb", "x\r"]) {
+    expect([JSON.stringify(bad), relativePathProblem(bad)])
+      .toEqual([JSON.stringify(bad), "제어 문자(줄바꿈·탭 등)는 쓸 수 없습니다 — 경로에 보이지 않는 문자가 섞였는지 확인하세요"]);
+  }
+  // 제어 문자가 아닌 것은 그대로 통과(공백·한글·DEL 바로 다음 문자·「→」)
+  for (const ok of ["a b", "팀/데이터", "a\u0080b", "dir → x", "a~b"]) expect(relativePathProblem(ok)).toBeNull();
+  // 「/」 시작이 먼저다(같은 입력에 한 사유)
+  expect(relativePathProblem("/a\nb")).toMatch(/"\/" 로 시작할 수 없습니다/);
+});
+
+test("normalizedRelativePath: 서버가 저장할 모양(normpath) -- 끝 「/」·「//」·「.」 제거, 공백은 그대로, 형식 오류는 null", () => {
+  expect(normalizedRelativePath("team/link/")).toBe("team/link");
+  expect(normalizedRelativePath("a//b/./c/")).toBe("a/b/c");
+  expect(normalizedRelativePath("./a")).toBe("a");
+  expect(normalizedRelativePath("a/b")).toBe("a/b");
+  expect(normalizedRelativePath("backup/x ")).toBe("backup/x ");
+  expect(normalizedRelativePath(" a")).toBe(" a");
+  for (const bad of ["", "   ", ".", "./", "/abs", "a/../b", "a\nb"]) expect(normalizedRelativePath(bad)).toBeNull();
+});
+
+test("RM_PATH_LINK_RULE(d194): 중간 단계 링크만 거부, 경로 자신이 링크면 링크만 지운다 -- 옛 「대상 자신 포함 거부」를 말하지 않는다", () => {
+  expect(RM_PATH_LINK_RULE).toBe("삭제할 경로의 중간 단계(관리 디렉토리 아래)가 심볼릭 링크면 거부됩니다 — 링크를 따라가 지우지 "
+    + "않습니다. 경로 자신(마지막 이름)이 링크면 링크만 지우고, 링크가 가리키는 곳은 지우지 않습니다.");
+  expect(RM_PATH_LINK_RULE).not.toMatch(/대상 자신 포함|링크 자체를 지우지도/);
 });

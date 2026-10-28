@@ -141,7 +141,8 @@ test("연산을 고르면 옆에 무엇이 일어나는지 한 줄로 말하고,
   expect(screen.getByText("대상 경로의 파일 수·용량·데이터 온도 통계를 수집합니다.")).toBeInTheDocument();
   expect(screen.getByRole("heading", { level: 2, name: "스캔 대상" })).toBeInTheDocument();
   await userEvent.selectOptions(screen.getByLabelText("연산"), "rm");
-  expect(screen.getByText("대상 경로와 그 아래를 모두 삭제합니다.")).toBeInTheDocument();
+  // d194: 대상 자신이 심볼릭 링크면 링크만 지운다 -- 「그 아래를 모두」가 링크 너머까지로 읽히지 않게
+  expect(screen.getByText("대상 경로와 그 아래를 모두 삭제합니다(대상이 심볼릭 링크면 링크만 지웁니다).")).toBeInTheDocument();
   expect(screen.getByRole("heading", { level: 2, name: "삭제 대상" })).toBeInTheDocument();
 });
 
@@ -248,10 +249,64 @@ test("경로 조건에 심볼릭 링크 규칙이 있다 — sync 는 목적지 
   view.unmount();
   renderPage();
   await chooseOperation("rm");
-  // rm 은 링크를 따라가지도, 링크 자체를 지우지도 않는다(괴리 [27] -- 「링크가 가리키는 곳으로 다시」를 권하지 않는다).
-  expect(screen.getByRole("note", { name: "삭제 경로 조건" })).toHaveTextContent(
-    "삭제할 경로가 관리 디렉토리 아래 어느 단계든(대상 자신 포함) 심볼릭 링크면 거부됩니다 — 링크를 따라가 지우지도, 링크 "
-    + "자체를 지우지도 않습니다.");
+  // rm 은 링크를 따라가 지우지 않는다(괴리 [27] -- 「링크가 가리키는 곳으로 다시」를 권하지 않는다). d194(2026-10-28 사용자
+  // 결정)부터 중간 단계 링크만 거부하고, 대상 자신이 링크면 링크만 지운다(drm lstat) -- 옛 「대상 자신 포함 거부」는 거짓이다.
+  const rule = screen.getByRole("note", { name: "삭제 경로 조건" });
+  expect(rule).toHaveTextContent(
+    "삭제할 경로의 중간 단계(관리 디렉토리 아래)가 심볼릭 링크면 거부됩니다 — 링크를 따라가 지우지 않습니다. 경로 자신(마지막 "
+    + "이름)이 링크면 링크만 지우고, 링크가 가리키는 곳은 지우지 않습니다.");
+  expect(rule).not.toHaveTextContent(/대상 자신 포함|링크 자체를 지우지도/);
+});
+
+test("rm 경로 끝의 「/」: 서버가 지우는 모양(normpath)으로 지정 경로를 짓고, 그 이름이 링크면 링크만 지워진다고 말한다(d194)", async () => {
+  // 셸에선 「link/」 가 링크 너머를 가리키지만 서버는 끝 「/」 를 지워 저장한다 -- 대상은 「team/link」 자신이다.
+  server.use(http.get("/api/user/storages", () => HttpResponse.json([
+    { storage_name: "cephfs", backend_type: "cephfs", status: "Ready", managed_root: "/cephfs/managed" },
+    { storage_name: "cephfs-secondary", backend_type: "cephfs", status: "Ready" }])));
+  const captured = captureSubmit();
+  renderPage();
+  const storageSelect = await chooseOperation("rm");
+  await userEvent.selectOptions(storageSelect, "cephfs");
+  await userEvent.type(screen.getByLabelText("대상 경로"), "team/link");
+  expect(screen.getByText("지정 경로: /cephfs/managed/team/link")).toBeInTheDocument();
+  expect(screen.queryByRole("note", { name: "저장되는 경로" })).toBeNull();      // 입력 = 저장 모양이면 줄이 없다
+  await userEvent.type(screen.getByLabelText("대상 경로"), "/");
+  // 지정 경로는 끝 「/」 없이(서버가 지울 바로 그 경로), 끝 「/」 의 뜻을 입력 자리에서
+  expect(screen.getByText("지정 경로: /cephfs/managed/team/link")).toBeInTheDocument();
+  expect(screen.queryByText("지정 경로: /cephfs/managed/team/link/")).toBeNull();
+  expect(screen.getByRole("note", { name: "저장되는 경로" }))
+    .toHaveTextContent("끝의 / 는 무시됩니다 — 이 이름이 링크면 링크만 지워집니다(저장되는 경로: team/link)");
+  await userEvent.click(submitButton());
+  expect(await screen.findByRole("heading", { name: "요청 상세" })).toBeInTheDocument();
+  expect(captured.body.target).toBe("team/link/");                             // 보내는 값은 입력 그대로(정리는 서버 몫)
+});
+
+test("sync·scan 경로도 서버가 정리해 저장하는 모양을 보인다 -- 링크 문장은 rm 의 끝 「/」 에만", async () => {
+  server.use(http.get("/api/user/storages", () => HttpResponse.json([
+    { storage_name: "cephfs", backend_type: "cephfs", status: "Ready", managed_root: "/cephfs/managed" },
+    { storage_name: "cephfs-secondary", backend_type: "cephfs", status: "Ready" }])));
+  renderPage();
+  await fillSyncTarget();
+  await userEvent.clear(screen.getByLabelText("소스 경로"));
+  await userEvent.type(screen.getByLabelText("소스 경로"), "a//./b/");
+  expect(screen.getByText("지정 경로: /cephfs/managed/a/b")).toBeInTheDocument();
+  expect(screen.getByRole("note", { name: "저장되는 경로" }))
+    .toHaveTextContent("서버는 이 경로를 정리해 저장합니다(저장되는 경로: a/b)");
+  expect(screen.queryByText(/링크만 지워집니다/)).toBeNull();
+});
+
+test("경로의 제어 문자(탭·줄바꿈 -- 붙여 넣기)는 서버처럼 거부하고 제출을 잠근다(d194 unsafe_path 미러)", async () => {
+  renderPage();
+  const storageSelect = await chooseOperation("rm");
+  await userEvent.selectOptions(storageSelect, "cephfs");
+  // 입력칸에 탭을 칠 수는 없지만 붙여 넣으면 들어온다 -- 값 변경으로 넣는다
+  fireEvent.change(screen.getByLabelText("대상 경로"), { target: { value: "team/a\tb" } });
+  expect(screen.getByText("제어 문자(줄바꿈·탭 등)는 쓸 수 없습니다 — 경로에 보이지 않는 문자가 섞였는지 확인하세요"))
+    .toBeInTheDocument();
+  expect(screen.queryByText(/^지정 경로: /)).toBeNull();
+  expect(submitButton()).toBeDisabled();
+  fireEvent.change(screen.getByLabelText("대상 경로"), { target: { value: "team/ab" } });
+  expect(screen.queryByText(/제어 문자/)).toBeNull();
 });
 
 test("rm 대상이 관리 디렉토리 자신(.)이면 제출이 잠긴다", async () => {

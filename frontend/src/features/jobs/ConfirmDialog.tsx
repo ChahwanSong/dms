@@ -6,7 +6,7 @@ import { Dialog } from "../../components/ui/Dialog";
 import { Button } from "../../components/ui/Button";
 import { ApiError } from "../../lib/api";
 import { kstStampOrDash } from "../../lib/datetime";
-import { kindsText, previewWarnings, readSummary, sumKinds, summaryTool } from "../../lib/toolSummary";
+import { kindsText, previewWarnings, readSummary, RM_LINK_SUMMARY, sumKinds, summaryTool } from "../../lib/toolSummary";
 import { humanBytes } from "./format";
 import { groupDeleteWarning } from "./requestOutcome";
 
@@ -34,10 +34,13 @@ export function previewSummaryText(job: PreviewJob): string {
     // rm 의 수는 drm walk 항목 수다(2026-10-12): 대상 경로 자신과 그 아래 파일·디렉터리·링크의 합계라 「파일 수」보다
     // 크다 -- 그 뜻을 같이 말한다. 0 은 「빈 대상」이 아니다: walk 는 대상이 있으면 대상 자신을 세므로(빈 디렉터리도 1)
     // 0 = 대상 경로를 찾지 못했다(오타·이미 삭제·권한). 모름(옛 잡)이면 개수가 있는 곳: 미리보기 출력의 walk 요약 줄.
+    // 대상 자신이 심볼릭 링크면(target_kind, 2026-10-28 d194) 「합계」가 아니라 링크 하나다 -- 링크만 지우고 가리키는 곳은
+    // 남는다는 사실을 수 바로 옆에 둔다(데이터를 지우려던 사람이 「1개」만 보고 컨펌하지 않게). 0 이 더 센 신호라 먼저 본다.
     const files = s.targetItems ?? s.files;
-    const rmNote = files === null
-      ? " — 미리보기 출력(stdout.log)의 'Walked N items' 줄이 지울 항목 수입니다(목록은 앞·뒤 10개만 찍힙니다)"
-      : files === 0 ? " — 대상 경로를 찾지 못했습니다(오타·이미 삭제·권한 — 미리보기 출력의 'Failed to stat' 확인)"
+    const rmNote = files === 0 ? " — 대상 경로를 찾지 못했습니다(오타·이미 삭제·권한 — 미리보기 출력의 'Failed to stat' 확인)"
+      : s.targetKind === "link" ? ` — ${RM_LINK_SUMMARY}`
+      : files === null
+        ? " — 미리보기 출력(stdout.log)의 'Walked N items' 줄이 지울 항목 수입니다(목록은 앞·뒤 10개만 찍힙니다)"
       : "(대상 경로 포함, 파일·디렉터리 합계)";
     head = `삭제 대상 ${n(files)}${rmNote}`;
     tail = s.bytes === null ? "" : ` · ${humanBytes(s.bytes)}`;
@@ -59,7 +62,8 @@ export function previewSummaryText(job: PreviewJob): string {
   return `${head}${tail}${rc}`;
 }
 
-/** 컨펌 창의 주의 목록(삭제 예정·타입 교체 실패 예고·특수 파일·소스 읽기 오류 -- lib/toolSummary.previewWarnings). */
+/** 컨펌 창의 주의 목록(삭제 예정·타입 교체 실패 예고·특수 파일·소스 읽기 오류, rm 은 대상이 링크일 때 링크만 지운다는 것 --
+ *  lib/toolSummary.previewWarnings). */
 export function confirmWarnings(job: PreviewJob & Partial<Pick<DataJob, "options">>): string[] {
   if (job.preview_summary == null) return [];
   const s = readSummary(job.preview_summary);

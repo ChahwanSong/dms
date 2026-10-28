@@ -19,8 +19,8 @@ from .batch_cancel import CANCEL_MARK_EVENT, CANCEL_REASON
 from .db import iso_epoch, iso_plus, utc_now_iso
 from .domain import DataJobState, TERMINAL_DATA_JOB_STATES, chown_problem, managed_abs_path
 from .execution import ExecStatus, ExecutionError, JobSpec
-from .execution_manifests import (parse_execution_reason, parse_preflight_reason, processes_per_node,
-                                  worker_pod_count)
+from .execution_manifests import (RM_TARGET_KINDS, parse_execution_reason, parse_preflight_reason,
+                                  processes_per_node, worker_pod_count)
 from .identity import (LDAP_TICK_BUDGET_SECONDS, PRIVILEGE_NEVER, IdentityDeadlineExceeded,
                        IdentityLookupInvalid, IdentityUnavailable, privilege_policy,
                        supplementary_gids_problem, tick_resolve_deadline, valid_supplementary_gids)
@@ -567,6 +567,14 @@ class JobStepper:
             root = self._managed_root(job["storage_name"])
             paths = {"target": managed_abs_path(root, job["target"]),
                      "storage": job["storage_name"], "managed_root": root}
+            # rm 미리보기 종류 묶기(2026-10-28, execution_manifests.EXECUTION_REASONS 주석): 실행 단계에만, 미리보기 summary 가 적은
+            # 대상 종류(러너의 lstat -- link·dir·file·other)를 싣는다 -- 러너가 drm 직전 종류와 다르면 mpirun 없이 거부한다.
+            # 범위 밖 값(변조 행)·없음(옛 미리보기, 미리보기 때 대상 없음)은 싣지 않는다 -- 묶지 않고 종전대로 돈다.
+            if op == "rm" and phase == "execution":
+                ps = job.get("preview_summary")
+                kind = ps.get("target_kind") if isinstance(ps, dict) else None
+                if isinstance(kind, str) and kind in RM_TARGET_KINDS:
+                    paths["expect_target_kind"] = kind
         # job["tool"]은 실행 파일 이름(dscan/dsync/nsync/drm)이지 정책 키(scan/dsync/
         # nsync/rm)가 아니다 -- planner.py가 policy를 조회할 때 쓰는 것과 동일한
         # TOOL_TO_POLICY 매핑을 거쳐야 scan/rm 잡의 정책을 정확히 찾는다.

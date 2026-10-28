@@ -35,6 +35,10 @@ def tree(tmp_path):
     (m / "users/alice/latest").symlink_to(str(m / "shared/latest-real"))      # 절대 링크(C13 모양)
     (m / "users/alice/dangling").symlink_to("../nowhere")                     # 끊긴 링크
     (m / "users/alice/outside").symlink_to(str(tmp_path))                     # managed_root 밖
+    (m / "users/alice/nl").mkdir()                                             # 실제 디렉터리 「nl」 옆에
+    (m / "users/alice/nl\n").symlink_to("../bob")                            # 이름이 개행으로 끝나는 링크(-> 남의 디렉터리)
+    (m / "shared/b\n").mkdir()                                                # 이름이 개행으로 끝나는 **실제** 디렉터리(남의 것)
+    (m / "shared/b").symlink_to("b\n")                                        # 개행 없는 링크 -> 그 이웃
     (tmp_path / "mlink").symlink_to(str(m))                                   # managed_root 자신이 링크
     (tmp_path / "up").symlink_to(str(tmp_path))                               # managed_root 위 성분이 링크
     return tmp_path
@@ -57,6 +61,8 @@ _IN = [
     ("mlink", "users/alice/proj/src"),           # managed_root 자신이 링크
     ("up/m", "users/alice/proj/src"),            # managed_root 위 성분이 링크
     ("m", "dir with space/x*[y]"),               # 공백·글롭 문자 -- 글자 그대로
+    ("m", "shared/b\n"),                          # 개행으로 끝나는 실제 디렉터리 자신 -- 셸도 Python 도 그 이름 그대로 본다
+    ("m", "shared/b\n/new"),
 ]
 _OUT = [
     ("m", "users/alice/to-bob"),                 # 끝 성분이 남의 디렉터리 링크(C12)
@@ -71,6 +77,13 @@ _OUT = [
     ("m", "users/alice/proj/src/"),              # 끝 슬래시
     ("m", "users/alice/proj/./src"),
     ("m", "users//alice"),
+    # 2026-10-28: `$(dirname)` 이 끝 개행을 지워 셸만 「nl」(실제 디렉터리)로 보고 통과시켰다 -- 아직 없는 새 목적지 모양.
+    ("m", "users/alice/nl\n/newdir"),
+    ("m", "users/alice/nl\n/a/b"),
+    ("m", "users/alice/nl\n"),
+    # d194 리뷰: `$(realpath …)` 가 이름 끝 개행까지 지워 「b」 링크가 이웃 「b\n」 을 가리키면 셸만 통과했다(sync 는 셸만 검사).
+    ("m", "shared/b"),
+    ("m", "shared/b/new"),
 ]
 
 

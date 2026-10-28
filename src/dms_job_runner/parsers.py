@@ -403,8 +403,8 @@ def parse_tool_detail(tool, stdout, stderr="", dryrun=False) -> "dict | None":
     """도구 출력 -> summary v2 상세 키(d192 spec §1). 찾은 키만 싣는다(없음 = 모름 또는 해당 없음, 0 으로 뭉개지 않는다).
 
     키 목록은 모듈 docstring 의 상세 키 표다. 참·거짓 키는 참일 때만 싣는다. 밑줄로 시작하는 키는 사유 판정용 내부 근거라
-    러너가 summary 에 싣지 않는다. 핵심 3키(returncode·files·bytes)와 머리 키(detail_version·tool·dryrun·quiet)·reason 은
-    러너(_build_summary)의 몫이다.
+    러너가 summary 에 싣지 않는다. 핵심 3키(returncode·files·bytes)와 머리 키(detail_version·tool·dryrun·quiet)·reason·
+    drm 의 target_kind(러너가 대상을 lstat 한 값 -- 도구 출력이 아니다, 2026-10-28)는 러너(_build_summary)의 몫이다.
 
     예외는 던지지 않는다: 내부에서 무엇이든 터지면 None(상세를 계산하지 못했다 -- 러너는 핵심 3키만 쓴다)."""
     try:
