@@ -38,6 +38,8 @@
 #        CSV/삭제·빌드 GC/삭제·securityContext 드리프트 배지(2026-10-27, 소스 99dd8f5; 이미지 3종 + 잡 이미지).
 #   d7 = 요청 상세 단건 삭제 직후 재조회 404 제거 시도 + d6 실증 기록(2026-10-27, 소스 8385852; 이미지 3종 + 잡 이미지).
 #   d8 = 단건 삭제 뒤 캐시 제거를 상세 언마운트 때로(404 확실히 제거)(2026-10-27, 소스 4bee5cd; 이미지 3종 + 잡 이미지).
+#   d9 = dms-ssc 이식 — mpifileutils 7a3189c · d190 · d191 경로 봉쇄 통일 · d192 summary v2·도구 결과·통계 · d193 포탈(2026-10-28,
+#        소스 110a6b2; 이미지 3종 + 잡 이미지).
 #   태그 bump = 아래 newTag(+ patch-config.yaml 의 DMS_JOB_IMAGE) 커밋 — **dms-k8s 에서만** 한다(2026-10-22 브랜치 분리 뒤
 #   빌드 소스는 /home/mason/dms-dev/dms-k8s 체크아웃 = origin/dms-k8s, main 은 이 클러스터와 무관).
 #   ssc 클러스터의 오버레이(overlays/testbed)는 dms-ssc 브랜치에만 있다(2026-10-26 이 브랜치에서 지웠다 — 체리픽 충돌·엉뚱한 태그 방지).
@@ -55,10 +57,10 @@ resources:
 images:
   - name: set-by-overlay.invalid/dms
     newName: pkg-01:5001/dms
-    newTag: d8
+    newTag: d9
   - name: set-by-overlay.invalid/dms-agent
     newName: pkg-01:5001/dms-agent
-    newTag: d8
+    newTag: d9
 
 patches:
   - path: patch-config.yaml

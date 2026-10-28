@@ -95,7 +95,7 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
-### ✅ dms-ssc 이식 — mpifileutils 7a3189c · d190 · d191(경로 봉쇄 통일) · d192 · d193 — **완료**(2026-10-28, 테스트베드 적용·라이브 실증은 아래에 덧붙인다)
+### ✅ dms-ssc 이식 — mpifileutils 7a3189c · d190 · d191(경로 봉쇄 통일) · d192 · d193 — **완료·실증**(2026-10-28, d9)
 
 DMS-SSC 세션 인계(`origin/dms-ssc:docs/history/handoff-2026-10-28-dms-k8s.md` — 0절 순서 핀 → d190 → d191 → d192 → d193)를 dms-k8s
 (k8s 신원 모드·모든 잡 root·PV/PVC 주소)에 맞게 옮겼다. 사용자 결정(설계 질문 둘, 원문): 경로 봉쇄는 「한 규칙으로 통일」, rm 끝 링크는
@@ -206,6 +206,24 @@ direct + bufsize, §7 `toolSummary`·배치 확인 `files_by_tool`), 운영은 d
   수정을 빼면 새 테스트가 실패함을 변이로 확인. 반박: 없음(확인 3건 전부 반영).
 - 남는 것(BACKLOG §1 「dms-ssc 이식 후속」·§4): dsync 미리보기 변경 계획 · dsync 실패 파일 0 B 잔여 · dsync·drm 오류 줄 경로 미이스케이프 ·
   dsync walk 오류는 `--delete` 일 때만 · 포크 루트 고정(B) · nsync P3 · 이식 전에 계획된 direct + 맞지 않는 bufsize 잡.
+
+**테스트베드 적용 — d9**(2026-10-28, 소스 110a6b2): 포탈 빌드 d9(이미지 3종 + 잡 이미지 — mpifileutils 7a3189c, 210초) → 릴리스 → guard →
+apply -k → migrate → rollout restart, verify PASS 4. 검증: 백엔드 전체 4,180 통과(리뷰 수정 전 스냅숏) + 수정 영향 640 통과, vitest 1,672·tsc·e2e 29,
+dist 외부 URL 0. 라이브 실증(전부 기대대로):
+- **경로 봉쇄(통일)**: 직접 경로 dsync 목적지 루트 링크(C12) → `destination_path_redirected`·소스 링크 + delete(C13) → `source_path_redirected`(남의
+  데이터 불변), 중간 링크 양쪽 거부, 상위 없는 새 목적지는 봉쇄가 아니라 `destination_parent_not_writable`, 미리보기 뒤 목적지를 링크로 바꾸면 실행 직전
+  재점검이 거부 — dsync(nfs 직접 경로)·**nsync**(cephfs-third → cephfs-secondary, 노드 둘) 모두, PV sync 소스 링크 `source_path_redirected`(예전엔
+  target), PV scan 링크 `target_path_redirected`, **rm 끝 링크는 링크만 삭제**(가리키던 victim 그대로, 사용자 결정)·rm 중간 링크 거부, 직접 경로 scan
+  은 봉쇄 밖(결정 — 링크 너머를 스캔).
+- **도구 결과(d192)**: nsync 타입 교체(목적지 비어 있지 않은 디렉터리, 삭제 꺼짐) — 미리보기 `type_change_needs_delete` 경고 → 실행
+  `sync_type_change_refused`(replace-dir 1)·**목적지 내용 보존**(ae781bd 의 C8 데이터 손실 해소) · dsync 타입 교체 → `sync_type_change_refused`·목적지
+  보존 · nsync delete + 링크 + FIFO → Succeeded, 반영 = 계획(복사 2·디렉토리 1·링크 1·속성 1·삭제 1), FIFO 1 건너뜀 · CephFS 쿼터 1 MiB(pkg-01 관리자
+  키로 설정)에 6 MiB → `destination_full` 즉시 정지 · direct + bufsize 8 MiB·1000000 → 422 `direct_bufsize_misaligned`, 1 MiB 수락 · nsync
+  `--open-noatime` 실효(Options 줄 `open-noatime=1` — db1e33c) · 대시보드 24h `sync_items_total` 11·`sync_bytes_total` 8·`rm_items_total` 1 이 DB 손
+  합계(1+6+0+4, dsync 모름 제외)와 일치.
+- **실 Chrome**: 도구 전 거부 배너 「데이터는 바뀌지 않았습니다」 + 새 사유 문구, 타입 교체 실패 「실패로 끝나기 전까지 속성 갱신 1개 반영」·「실패 항목」
+  안내, 가득 참 배너, 반영 타일·FIFO 안내, 컨펌 창 「변경 예정 2개(복사 1·삭제 1)」 + 교체 시도·비어 있지 않은 디렉토리 경고 + 「결과 소유」, 대시보드
+  1440·768 넘침 0, 제출 화면 rm 링크 규칙(끝 링크는 링크만 지움), 콘솔 오류 0. 실증 데이터·쿼터 디렉터리 삭제, 확인 대기 요청 취소.
 
 ### ✅ BACKLOG 결정 묶음 구현 — 직접 경로 결과 소유·rm 경로 겹침 잠금·결과 파일 자동 만료·배치 삭제 상한 2000·dscan 카운터 + 보류 기능 5건 + 결함 3건 — **완료·실증**(2026-10-26~27, d6)
 
