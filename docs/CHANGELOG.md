@@ -95,6 +95,118 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ✅ dms-ssc 이식 — mpifileutils 7a3189c · d190 · d191(경로 봉쇄 통일) · d192 · d193 — **완료**(2026-10-28, 테스트베드 적용·라이브 실증은 아래에 덧붙인다)
+
+DMS-SSC 세션 인계(`origin/dms-ssc:docs/history/handoff-2026-10-28-dms-k8s.md` — 0절 순서 핀 → d190 → d191 → d192 → d193)를 dms-k8s
+(k8s 신원 모드·모든 잡 root·PV/PVC 주소)에 맞게 옮겼다. 사용자 결정(설계 질문 둘, 원문): 경로 봉쇄는 「한 규칙으로 통일」, rm 끝 링크는
+「허용 유지」. 포탈은 UI 개선도 함께(「포탈 UI 도 개선」). ssc 커밋(c4a2562 핀·d7ec11e d190·4a13415 d191·4a27b6e d192·d83446f d193)은
+기준판으로만 읽고 작업 트리에서 손으로 맞췄다 — LDAP 전용 조각(`groupDeleteWarning`·비 root 폴백·보조 그룹·`identity_groups_not_applied`·
+`identity_changed_at_step`·`artifact_base_group_writable`·`ldap_*`·「실행 신원 소유가 아닌 파일」 문구)은 들이지 않았다. 지금 동작의 지도는
+ARCHITECTURE(§4 「미리보기·실행 실패 사유」, §5 metrics 행·`files_count` 불릿, §6 「경로 봉쇄」·「PV 주소 봉쇄」·「summary.json」·옵션 기본값의
+direct + bufsize, §7 `toolSummary`·배치 확인 `files_by_tool`), 운영은 deploy/README §12d.
+
+- **mpifileutils 핀 ae781bd → 7a3189c**(`Dockerfile.mpifileutils` — 공용 파일이라 ssc 판 이력 주석 + k8s 주석 한 벌; 포크 브랜치
+  `nsync-fixes-d189` = 2026-10-28 포크 main): 주 이유는 **C8**(nsync 가 디렉터리 → 파일 교체에서 `--delete` 없이 목적지 전용 항목을 재귀
+  삭제 — 모든 잡이 root 라 그대로 데이터 손실, c4dbf20)과 nsync `--open-noatime` 무동작(빌드에 `_GNU_SOURCE` 가 없어 포탈이 늘 싣는데도
+  root 실행이 소스 atime 을 보존하지 않았다, db1e33c). 함께 들어온 것: 배치 ≥2·목적지 rank ≥2 타입 교체(C4·C7·C10)·`--batch-files 0`(C6)·
+  목적지 루트 심링크(C12)·dsync 디렉터리 0644(D3) 수정, nsync 항목별 실패 목록·`--max-errors`(기본 65,000 — DMS 는 넘기지 않는다)·
+  ENOSPC/EDQUOT/EROFS 즉시 정지·`Completed actions:`, drm·dsync `--delete` 부분 실패 rc≠0 + 「Removed N」 = 지운 수 + `Remove failed for F
+  of T items`, dsync 목적지 부모 쓰기 불가 rc 1·소스 특수 파일 경고 한 줄. dscan 은 ae781bd 그대로(총바이트·이름 카운터 유지).
+  `test_k8s_submit` 고정값 테스트(거부 목록)는 그대로 통과.
+- **d190 옵션 문구**: `optionRules.OPEN_NOATIME_HELP`(k8s 의 「기본 켬 … 모든 작업이 root」 + relatime 은 하루 한 번 정도 갱신·noatime·
+  일부 CephFS 는 갱신 안 됨), `DIRECT_HELP`(공존 노드 문장 유지 + nsync 는 받기만 함 + bufsize 조건). 옛 비 root 행 전용
+  `requestSpec.noatimeWarn`·`RequestSpecCard.NOATIME_DETAIL` 삭제(7a3189c 부터는 비 root 여도 EPERM 뒤 O_NOATIME 없이 다시 연다).
+  요청 상세 옵션 칩은 nsync 로 돈 요청의 direct 에 「적용되지 않음」(`requestSpec.TOOL_IGNORED`). ssc 의 「비 root 관리자 실행에도
+  open_noatime」은 k8s 에 이미 같은 효과(전부 root)라 해당 없고, 배치 전용 문구도 만들지 않았다(단건·배치 모두 root).
+- **d191 경로 봉쇄 — 한 규칙으로 통일**(설계 메모의 표 그대로): 셸 `execution_manifests._PATH_CONTAINED_FN`(`dms_path_contained PATH
+  ROOT` — ssc d191 그대로 + 빈 ROOT 거부 한 줄)과 Python 미러 `dms_job_runner.contain.path_redirected` 하나가 sync 소스·목적지(**직접
+  경로 포함** — 전엔 봉쇄 밖이라 root sync 가 링크 너머 남의 디렉터리에 쓰고 소유를 바꾸거나(C12) 소스 링크 + delete 로 목적지를 지울 수
+  있었다(C13))·rm 대상의 상위·PV scan 대상을 본다. 아직 없는 끝은 존재하는 가장 깊은 상위로(예전 PV 규칙은 부모 하나만), PV 쪽은 여기에
+  PV 루트 글자 경계(`dms_within`/`contain.within`, 합친 판정 `contain.entry_redirected`)만 더한다. 접은 것: `_PV_CONTAIN_FN`(`dms_contain`)·
+  `contain.pv_path_redirected`·`paths.contain[*].anchor`. 기준 root 는 stepper 가 경로를 조합한 같은 값을 싣는다(sync
+  `paths["source_root"/"destination_root"]` — 없으면 `_sync_roots` ValueError → submit_failed). 재확인 지점은 k8s 방식을 직접 경로까지
+  넓혔다: preflight·exec_preflight(sync·PV scan 은 각 쪽 첫 검사 — PV scan 은 예전 `test -r` 뒤라 끊긴 링크가 `target_not_readable` 이었다),
+  dsync·dscan 런처 mpirun 직전(6d, env `DMS_JR_CONTAIN` — sync 는 늘, 직접 경로 쪽은 경계 = 기준), drm 런처(6c), nsync 각 rank 의 도구 exec
+  직전 + 런처 끌어올리기(7b). 사유: 신설 `source_path_redirected`·`destination_path_redirected`(sync — PV·직접 공통), `target_path_redirected`
+  는 rm·PV scan(문구 넓게), 진단 줄 `DMS_JR_PATH_REDIRECTED side=… path=… root=… bound=…`. 배포를 건너 옛 잡 이미지가 찍는 sync 마커
+  (`target_path_redirected` + `DMS_JR_PV_PATH_REDIRECTED side=…`)는 `parse_execution_reason(operation="sync")` 가 쪽별 코드로 다시 가르고,
+  옛 러너도 같은 4칸 env 를 옛 PV 규칙으로 읽어 배포 순서와 무관하게 열리지 않는다. **rm 끝 링크 허용 유지**(사용자 결정 — drm 은 링크만
+  지운다, d183 실증): 대상의 **상위**에만 규칙을 걸고 managed_root 자신·끝 `/` `.` `..` 는 막는다. **직접 경로 scan 은 봉쇄 없음**(특권
+  운영자 전용·읽기만 — 매니페스트 바이트 동일).
+- **d192 러너 — summary v2 + 도구 결과 사유**(잡 이미지): `parsers.parse_tool_detail`(ssc 와 같다 — k8s 의 dscan `total_bytes`·`_is_count`
+  유지), `runner._build_summary`·`_derive_reason`·`_type_change_only`·`_tool_failure_report`·`_echo_tail`(ssc 와 바이트 동일). 핵심 3키는
+  그대로, 상세는 `detail_version: 2` 아래; 실행 files = 실제로 일어난 일(nsync `Completed actions` 합·dsync 최종 Items − 실패 복사·drm 지운 수).
+  rc≠0 이면 launcher 로그에 `DMS_EXEC_REASON=<code>` 를 먼저 찍고 도구 출력 발췌(`DMS_JR_TOOL_OUTPUT` 머리 + stdout 80·stderr 20줄, 합계
+  10 KiB, 줄마다 `  | `)를 붙인다. `run_job` 순서 = 6c/6d 봉쇄 → mpirun → stdout/stderr → **7b(nsync rank 마커 끌어올리기) → 8 summary →
+  9 사유·발췌** — 7b 가 뒤로 가면 도구 사유가 봉쇄 마커보다 먼저 찍혀 첫 마커를 빼앗는다(주석으로 고정). `TARGET_PATH_REDIRECTED` 는
+  러너에서 재정의하지 않고 contain 에서 import. 3키만 쓰는 경로는 미지 도구·워커 준비 실패·봉쇄 거부(returncode null), quiet 는 머리 키 +
+  `quiet: true` + 수 null(ssc 와 같다).
+- **d192 제어면**: `execution_manifests.TOOL_FAILURE_REASONS`(9) — `EXECUTION_REASONS` = 워커·봉쇄 넷 | `TOOL_FAILURE_REASONS`(ssc 의
+  `identity_groups_not_applied` 없음), 승격은 기존 경로(`stepper._run_failure_reason` → `parse_execution_reason`), 발췌 줄은 `| ` 로 시작해
+  마커로도 옛 이미지용 쪽 매핑(`_LEGACY_REDIRECT_SIDES`)으로도 읽히지 않는다. `stepper._surface_failed_artifact(promote_counts=)` +
+  `data_jobs.set_artifact(promote_counts=)` — 실행 실패만 files/bytes 승격(미리보기 실패·시간초과는 표시만). `GET /api/admin/metrics/jobs`:
+  `files_total`·`bytes_total` → `sync_items_total`·`sync_bytes_total`·`rm_items_total`(모든 종단 + `exec_submitted_at`, 성공이 아닌 행은 v2 만 —
+  LIKE 패턴은 k8s 의 `text_search.contains_pattern`), 분해 행 succeeded / failed(+TimedOut) / rejected / cancelled(+PreviewExpired), failure_reasons
+  는 Failed·TimedOut·Rejected 만. 옵션: `domain.direct_bufsize_ok` + 422 `direct_bufsize_misaligned`(direct 면 bufsize 4096·2^k ≤ 4 MiB) — 단건
+  (직접 경로·PV 주소)·배치 생성·항목 추가/수정/교체·실행 설정·다시 돌리기(`_reject_stale_options`)·자식 생성·자동 확인 보류가 모두
+  `validate_options`(배치 CSV 해석은 옵션을 받지 않는다). 배치: `list_items_detail` 의 `job_tool` 조인, 확인 감사 행 `files_by_tool`(잡 행
+  도구가 권위).
+- **d192·d193 포탈**: 새 `lib/toolSummary.ts`(readSummary·summaryTool·failureCounts·previewWarnings·opLabel·errnoText·PRE_TOOL_REASONS).
+  StageResults(도구별 타일·「실패 항목」 연산별 칩·표본·errno·d193 dsync 0 B 잔여 안내·옛 3키는 중립 라벨), ConfirmDialog(도구별 요약 + 주의
+  상자 — d193 「교체를 시도합니다」; k8s 「결과 소유」 줄 유지, 순서 요약 → 주의 → 결과 소유), requestOutcome·OutcomeCard(도구 시작 전 거부 =
+  「데이터는 바뀌지 않았습니다」·반영 수·KPI 5칸·「확인할 점 N가지」, k8s exactBytes title 유지), BatchDetail(도구 뜻별 미리보기 합계 — nsync 변경
+  예정·dsync 소스 전체, 타입 교체·특수 파일·direct 의 nsync 안내, 「지정 경로」), BatchExecutionSettingsDialog·SubmitJob·BatchCreate(direct·quiet
+  를 FieldRow 설명으로, bufsize 즉답 `directBufsizeError` — 서버 422 와 같은 문장, `SYNC_MAX_ERRORS_NOTE`·`BUFSIZE_HELP`·`QUIET_HELP`, 링크 규칙
+  줄), Dashboard·JobStatsSection(연산별 처리량 타일·분해 표 성공/실패/거부/취소·만료·「실패(24h)」 = Failed+TimedOut·d193 lg 2/2xl 3 열), usage
+  (atime 규칙 문구), `format.bytesText`. 사유 코드 12개(reasonCodes.json·REASON_MESSAGES 양쪽): d191 `source_path_redirected`·
+  `destination_path_redirected`, d192 `tool_aborted`·`preview_scan_incomplete`·`destination_full`·`destination_read_only`·`sync_stopped_max_errors`·
+  `sync_type_change_refused`·`source_scan_incomplete`·`sync_items_failed`·`rm_items_failed`·`direct_bufsize_misaligned`; `target_path_redirected` 문구는
+  rm·PV scan 공용으로 넓혔다.
+- **ssc 와 다르게 한 것**(이유):
+  1. rm 끝 링크 허용(사용자 결정 — ssc d191 은 거부한다). 포탈 `storagePaths.RM_PATH_LINK_RULE` 도 「중간 단계(관리 디렉토리·PV 아래)가 링크면
+     거부, 대상 자신이 링크면 링크만 지우고 가리키는 곳은 그대로」(ssc 의 「링크 자체도 지우지 않음」을 쓰면 틀린다).
+  2. 워커 셸(sshd 앞) 재확인은 들이지 않았다 — dsync 런처 6d·nsync rank exec 직전이 더 늦은 자리다(`_worker_command_script` 무변경, 테스트가 고정).
+  3. PV sync 사유도 쪽별(ssc 엔 PV 주소가 없다) + 옛 잡 이미지 마커의 쪽 매핑. 꼬리 안의 옛 진단 줄은 매핑에 걸리지 않는다(k8s 고유 테스트).
+  4. `PRE_TOOL_REASONS` 는 k8s 집합 — stepper 제출 전 fail-closed·PENDING 재검사·`k8s_access.recheck_request`·`_record_pv_owner`·러너 봉쇄와 대조
+     (`chown_not_allowed`·`pv_owner_*`·`storage_owner_changed`·`pv_moved`·`k8s_access_denied`·`privileged_not_authorized` 등 포함, LDAP 사유 제외,
+     `path_conflict` 은 요청 단위 Conflict 라 제외). `requestOutcome.QUEUE_GATE_REASONS` = node_excluded_at_step·node_cpu_insufficient_at_step
+     (k8s 에는 `_note_queued_recheck` 가 없어 `identity_missing_at_step` 은 큐 관문이 아니다).
+  5. 문구: `preview_scan_incomplete`·`SYNC_OPTION_HELP.contents` 는 「실행 계정 권한」 대신 스토리지 쪽(NFS root_squash·마운트 상태), set-ID 제거
+     노트(`syncOwnership.SETID_STRIP_NOTE`)는 명시 chown·옛 비 root 자동 지정에 붙이고 PV·스토리지 기본 소유자 규칙엔 「디렉토리 setgid 유지」만
+     더했다(그 규칙 문구가 이미 setuid 제거를 말한다).
+  6. 「실제 경로」 → 「지정 경로」를 k8s PV UI 까지(LocationField·PvPathPicker·SubmitJob 요약·pvLocation 주석 — PV 루트 + 하위경로를 글자 그대로
+     붙인 것이라서). VolumesPage 의 인벤토리 「실제 경로」는 그대로.
+  7. 결과 파일 만료(k8s 전용 `artifact_expired`): 만료면 「stdout.log 열기」 등 결과 파일 버튼을 만들지 않고 만료 문장만(`JobStages.openOutput`
+     null·StageResults `outputExpired`·requestOutcome 실패 배너) — ssc 판 그대로면 410 으로 끝나는 막다른 버튼이 된다.
+  8. scan 원 키 타일: dscan `total_bytes`(k8s 포크 카운터)를 날 수 대신 「1.0 GiB (1,074,750,158 B)」로(`StageResults.RAW_BYTE_KEYS`),
+     `invalid_name_entries` 는 수 그대로(0 은 0).
+  9. `tests/test_direct_bufsize_paths.py` 는 k8s 용으로 새로 썼다 — ssc 판의 공유 토큰 + `run_as_root: False` 는 k8s 에서 403 이라
+     `test_k8s_submit` 의 world/kclient 픽스처로 직접 경로는 ops 세션 + root, PV 주소는 alice(`_pv_sync`), 항목 추가·수정·교체와
+     `direct_bufsize_ok` 단위 표를 더했다.
+- **테스트**: 새 `test_sync_containment_sh`(셸·Python 판정을 같은 트리·실 dash 로 대조)·`test_job_runner_tool_detail`(실 출력 15종 픽스처 +
+  러너·제어면 사유 상수 계약)·`test_direct_bufsize_paths`, 보강 `test_rm_containment_sh`·`test_pv_containment_sh`(「키 없는 nsync」 검사를 줄
+  단위로 — 발췌 줄 `  | DMS_EXEC_REASON=…` 은 마커가 아니다)·`test_stepper_execution_reason`(ssc 셋 + k8s 하나)·`test_execution_manifests`
+  (`test_worker_script_emits_no_exec_reason_marker` 기대 집합에 `TOOL_FAILURE_REASONS`)·`test_direct_dest_owner`·`test_pv_owner_chown`·
+  `test_api_metrics`·`test_repo_metrics`·`test_api_batches`·`test_repo_batches`·`test_repo_data_jobs`·`test_domain_options` 등, 포탈 `toolSummary.test`
+  새 파일 + 각 화면 테스트(옛 행에 supplementary 키가 남아도 그룹 경고가 생기지 않음, ConfirmDialog 순서, 만료 처리), e2e `03-layout`
+  (「지정 경로: 」)·`11-batch-rm`(「지정 경로:」, 「실제 경로」 없음)·`fixtures/e2e_controller.py`(summary v2 + 사유 마커 — 가짜 drm 출력을 실
+  러너로 돌려 files 4 / target_items 4 / removed 4 확인).
+- 검증: 백엔드 전체 4,179 통과·12 건너뜀(4조각 병렬, 실패 1건 — 위 `test_worker_script_emits_no_exec_reason_marker` 기대 집합 — 고친 뒤
+  재실행 통과), vitest 105 파일 1,672 통과·`tsc -b` 통과. **아직**: e2e(수기 게이트)·테스트베드 적용·라이브 실증. 모든 잡이 root 라 권한 실패
+  모양(ssc N1·N4·R1·D2)은 재현되지 않는다 — 포크 하네스와 러너 실출력 테스트로 갈음하고, 라이브는 N2·D1(타입 교체 거부)·N3(delete + 링크 +
+  FIFO)·CephFS 쿼터 `destination_full`·O1(direct + bufsize 422/수락, 단건 PV·직접·배치·실행 설정)·대시보드 합계 대조·7b 순서(컨펌 뒤 Volcano
+  대기 중 nsync 목적지를 링크로 교체 → `destination_path_redirected`, summary null 3키)·미리보기 실패의 `files_count` NULL·만료된 잡의 실패 화면,
+  그리고 d191 설계 메모의 봉쇄 13케이스(직접 경로 C12·C13·중간 링크·늦은 재확인·PV·rm 끝 링크·직접 경로 scan)를 본다.
+- **리뷰(독립 4차원 + 반박 검증) 반영 — 확인 3건**: ① [medium] dsync 수 위조 — 원시 경로 오류 줄(복사한 것 없는 실행의 walk 「Path name is
+  too long」, 진짜 블록 뒤 갱신 실패 줄)에 개행 이름으로 심은 `Seconds/Items/Data` 블록이 files·bytes 와 대시보드 합계를 부풀렸다(ssc d192 도 같음
+  — 옛 「마지막 매치」 규칙). `parsers._sync_final_block` 이 마지막 walk 요약 뒤·timestamp 머리 줄 앞·배치 진행 블록 제외 구간에서 **정확히 하나**
+  일 때만 받고, 미리보기는 walk 수만(`parse_sync_dryrun_counts`). ② [low] 끝이 개행인 경로 성분에서 셸 `$(dirname)`·`$(realpath)` 가 개행을 잘라
+  셸·파이썬 봉쇄 판정이 갈렸다(파이썬 재확인이 막아 데이터는 무사) — 개행이 든 경로는 셸·파이썬 모두 fail-closed 거부, 제출에서도 제어 문자
+  (\x01-\x1f, \x7f) `unsafe_path`. ③ [low] 러너 7b(rank 표식 끌어올리기)가 사유·꼬리 블록보다 앞이어야 하는 순서를 고정하는 테스트. 세 수정 모두
+  수정을 빼면 새 테스트가 실패함을 변이로 확인. 반박: 없음(확인 3건 전부 반영).
+- 남는 것(BACKLOG §1 「dms-ssc 이식 후속」·§4): dsync 미리보기 변경 계획 · dsync 실패 파일 0 B 잔여 · dsync·drm 오류 줄 경로 미이스케이프 ·
+  dsync walk 오류는 `--delete` 일 때만 · 포크 루트 고정(B) · nsync P3 · 이식 전에 계획된 direct + 맞지 않는 bufsize 잡.
+
 ### ✅ BACKLOG 결정 묶음 구현 — 직접 경로 결과 소유·rm 경로 겹침 잠금·결과 파일 자동 만료·배치 삭제 상한 2000·dscan 카운터 + 보류 기능 5건 + 결함 3건 — **완료·실증**(2026-10-26~27, d6)
 
 사용자 결정(원문): 「A 결정 필요한 것들 1. 권장안대로 구현. 2. 권장안대로 구현하되, 구현 후 다양한 케이스들에 대해 검증을 하여
