@@ -117,7 +117,13 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   셸·러너 같은 판정. 보안 리뷰 3관점(우회 탐색·셸 이식성·셸↔Python 일치) — 개행 1~3개 타깃·링크 체인·
   중간 성분·개행-실명 루트 링크·PV·rm 끝 링크×② 등 적대적 프로브 전부 fail-open 0건. busybox-ash 는
   번들 realpath 가 `-e`/`--` 미지원이라 전수 fail-closed(보안 구멍 아님·배포 셸은 dash). 백엔드 봉쇄·계약
-  배치 580 passed.
+  배치 580 passed, 전체 백엔드 4245 passed.
+- **라이브 실증(d11, 소스 cb0d9b9)**: NFS 에 깨끗한 이름 `selfnl` → 이웃 실제 `selfnl⏎` 를 두고 제출 —
+  ② sync 목적지(`selfnl/new`)·소스(`selfnl`) 모두 Rejected `destination/source_path_redirected`, ② rm
+  상위(`selfnl/old`) Rejected `target_path_redirected`(preflight 가 막는다 — 수정 전엔 통과했다). 과차단 없음:
+  정상 `a/normal/new` 는 ConfirmPending 진행. rm 끝 링크(`selfnl` 자신, ②)는 ConfirmPending 허용(drm 이 링크만
+  삭제 — 설계). 직접 경로 scan `selfnl` 은 Succeeded(직접 경로 scan 은 봉쇄 밖 — 읽기 전용·특권 운영자 전용,
+  개행 구멍과 무관). 경로 문자열 개행(①) 제출은 422 `unsafe_path`. 실증 데이터·대기 요청 정리.
 
 ### ✅ k8s 연동 호출 노드 카드 — 해결된 실패 구분·클러스터별 연결·보조 연결 확인 — **완료**(2026-10-28)
 
