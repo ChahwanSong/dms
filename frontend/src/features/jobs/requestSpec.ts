@@ -33,8 +33,7 @@ export type OptionsView =
   | { state: "ok";
       set: { token: string; note: string | null }[];   // 칩 + (출처 있는) 설명
       defaults: string[];                               // 서버 기본과 같은 값 "batch_files=1000000"
-      unknown: string[];                                // 카탈로그 밖·모양이 틀린 값의 원문(60자 상한)
-      noatimeWarn: boolean };
+      unknown: string[] };                              // 카탈로그 밖·모양이 틀린 값의 원문(60자 상한)
 
 export type PrivKind = "root" | "user" | "batch";
 export type PrivBasis = "plan" | "request";
@@ -137,15 +136,24 @@ function pickOptions(payloadOpts: unknown, jobOpts: unknown):
   return absent(payloadOpts) && absent(jobOpts) ? { state: "missing" } : { state: "malformed" };
 }
 
+// 실제로 돈 도구에서 적용되지 않는 옵션(포탈 괴리 [22]): nsync 는 --direct 를 받기만 하고 O_DIRECT 로 열지 않는다
+// (nsync.c: "--direct has no effect in nsync"). 칩만 보이면 페이지 캐시를 우회했다고 읽힌다 -- 도구를 알 때만 붙인다.
+const TOOL_IGNORED: Record<string, Record<string, string>> = {
+  nsync: { direct: "nsync 로 실행돼 적용되지 않음(O_DIRECT 는 dsync 에서만)" },
+};
+
 /** 저장된 옵션 → 칩·기본값·원문. 저장된 뒤에는 명시값과 서버가 채운 기본값을 구분할 수 없다(domain.validate_options)
-    -- 그래서 기본과 같은 값은 둘 다 「기본값」이다. noatimeWarn: 비 root sync 의 open_noatime 은 남의 파일에서 EPERM 이라
-    실패 원인이 될 수 있다(성공한 요청에서는 거짓 경보라 끈다). */
-export function normalizeOptions(op: string, src: { payload: unknown; job?: unknown },
-                                 ctx: { kind: PrivKind; reqState: unknown }): OptionsView {
+    -- 그래서 기본과 같은 값은 둘 다 「기본값」이다. (옛 비 root 행의 open_noatime EPERM 주의 줄은 2026-10-28 dms-ssc d190 이식으로
+    뺐다 -- 2026-10-26 뒤 새 작업은 전부 root 라 옛 행에만 나오던 줄이고, 잡 이미지 7a3189c 부터는 비 root 여도 그 파일만
+    O_NOATIME 없이 다시 열어 복사하므로 더 이상 실패 원인이 아니다.) tool = 실제로 돈(계획된) 도구 -- 모르면 null(도구별 주석을
+    붙이지 않는다). */
+export function normalizeOptions(op: string, src: { payload: unknown; job?: unknown; tool?: string | null }): OptionsView {
   const picked = pickOptions(src.payload, src.job);
   if (picked.state !== "ok") return picked;
   const opts = picked.opts;
   const catalog = Object.prototype.hasOwnProperty.call(CATALOG, op) ? CATALOG[op] : [];
+  const ignored = typeof src.tool === "string" && Object.prototype.hasOwnProperty.call(TOOL_IGNORED, src.tool)
+    ? TOOL_IGNORED[src.tool] : {};
   const set: { token: string; note: string | null }[] = [];
   const defaults: string[] = [];
   const unknown: string[] = [];
@@ -155,7 +163,9 @@ export function normalizeOptions(op: string, src: { payload: unknown; job?: unkn
     const v = opts[spec.key];
     if (spec.kind === "bool") {
       if (v === true) {
-        if (spec.omitTrue !== true) set.push({ token: spec.key, note: spec.note ? spec.note(true) : null });
+        const note = Object.prototype.hasOwnProperty.call(ignored, spec.key) ? ignored[spec.key]
+          : spec.note ? spec.note(true) : null;
+        if (spec.omitTrue !== true) set.push({ token: spec.key, note });
       } else if (v === false && spec.omitTrue === true) {
         // rm recursive false 는 서버가 받지 않는 값(rm_recursive_required)이라 비정상 기록 -- 꺼짐으로 접지 않는다.
         unknown.push(rawText(spec.key, v));
@@ -184,8 +194,7 @@ export function normalizeOptions(op: string, src: { payload: unknown; job?: unkn
     else extra += 1;
   }
   if (extra > 0) unknown.push(`외 ${extra}개`);
-  const noatimeWarn = op === "sync" && opts.open_noatime === true && ctx.kind === "user" && ctx.reqState !== "Succeeded";
-  return { state: "ok", set, defaults, unknown, noatimeWarn };
+  return { state: "ok", set, defaults, unknown };
 }
 
 // ---- 우선순위 --------------------------------------------------------------------------------------------------
@@ -354,8 +363,10 @@ export function deriveRequestSpec(req: RequestDetail, jobs: DataJob[] | null, ro
     tail = " · uid/gid 기록 없음";
   }
 
+  // 실제로 돈(계획된) 도구 -- 옵션 칩의 도구별 주석(nsync 의 direct 무효)과 노드 지정 문구가 읽는다.
+  const toolName = name(wp?.tool) ?? name(job0?.tool);
   // 옵션(+ 목적지 소유가 읽는 원본 객체)
-  const options = normalizeOptions(op, { payload: p.options, job: job0?.options }, { kind, reqState: r.state });
+  const options = normalizeOptions(op, { payload: p.options, job: job0?.options, tool: toolName });
   const rawOpts = obj(p.options) ?? obj(job0?.options);
 
   // 노드 지정(배치 자식 payload -- planner 가 정책 상한까지만 min-캡한다). sync 가 nsync(공존 노드 없음 폴백)로 돌면
@@ -363,7 +374,6 @@ export function deriveRequestSpec(req: RequestDetail, jobs: DataJob[] | null, ro
   // 같은 사실). 도구를 아직 모르면(계획 전) 조건문으로.
   const nc = posInt(p.node_count);
   const ppn = posInt(p.procs_per_node);
-  const toolName = name(wp?.tool) ?? name(job0?.tool);
   const perSide = op === "sync"
     && (toolName === "nsync" || int(wp?.source_count) !== null || int(wp?.destination_count) !== null);
   const ncNote = perSide ? "(출발·목적지 각각)" : op === "sync" && toolName === null ? "(nsync 로 돌면 출발·목적지 각각)" : "";

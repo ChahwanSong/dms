@@ -46,7 +46,8 @@ class _K8s:
 
 def _spec(phase, op="sync"):
     paths = ({"source": "/mgmt_storage/managed/backup", "source_storage": "cephfs-pvs",
-              "destination": "/mgmt_storage/managed/backup2", "destination_storage": "cephfs-pvs"}
+              "destination": "/mgmt_storage/managed/backup2", "destination_storage": "cephfs-pvs",
+              "source_root": "/mgmt_storage/managed", "destination_root": "/mgmt_storage/managed"}
              if op == "sync" else {"target": "/mgmt_storage/managed/a", "storage": "cephfs-pvs"})
     return JobSpec(job_id="job123456789abc", phase=phase, operation=op,
                    tool="dsync" if op == "sync" else "dscan", dryrun=(phase == "preview"),

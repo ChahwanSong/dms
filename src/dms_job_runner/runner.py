@@ -7,12 +7,13 @@ import sys
 from .commands import (
     getent_hosts_command, mpirun_command, nsync_role_map, passwd_line,
     ssh_key_copy_command, ssh_probe_command)
-# 마커 상수와 PV 주소 봉쇄 판정은 contain 모듈 하나(nsync rank 도 같은 판정을 부른다) -- 이 모듈 이름으로도 그대로 쓴다.
-from .contain import (  # noqa: F401 -- pv_path_redirected 는 재내보내기(테스트·문서가 runner 경로로 부른다)
-    EXECUTION_REASON_MARKER, REDIRECTED_LINE, TARGET_PATH_REDIRECTED, first_blocked, parse_entries,
-    pv_path_redirected, report_lines)
-from .parsers import (parse_nsync_counts, parse_rm_counts, parse_rm_dryrun_counts, parse_scan_counts,
-                      parse_sync_counts, parse_sync_dryrun_counts)
+# 마커 상수와 경로 봉쇄 판정(규칙 하나 -- sync 두 쪽·PV scan·rm 대상)은 contain 모듈 하나(nsync rank 도 같은 판정을 부른다) --
+# 이 모듈 이름으로도 그대로 쓴다.
+from .contain import (  # noqa: F401 -- path_redirected·entry_redirected 는 재내보내기(테스트·문서가 runner 경로로 부른다)
+    DETAIL_PREFIX, EXECUTION_REASON_MARKER, REDIRECT_LINES, TARGET_PATH_REDIRECTED, entry_redirected, first_blocked,
+    parse_entries, path_redirected, report_lines, rm_target_redirected)
+from .parsers import (parse_aborted, parse_dsync_counts, parse_nsync_counts, parse_rm_counts, parse_rm_dryrun_counts,
+                      parse_scan_counts, parse_sync_dryrun_counts, parse_tool_detail)
 
 # 워커 준비 대기(2026-10-02 프로덕션 간헐 실패 수리): 모든 워커가 "IP 로 풀리고 + 그 IP 로 ssh 가 되는" 상태가
 # 될 때까지 기다리는 **전체** 제한 시간. 예전엔 getent 를 한 번만 하고 실패하면 DNS 이름을 그대로 hostfile 에
@@ -24,8 +25,47 @@ WORKER_READY_TIMEOUT_SECONDS = 300
 # 제어면(stepper)이 실행 실패 사유로 승격하는 마커 EXECUTION_REASON_MARKER(execution_manifests.EXECUTION_REASON_MARKER 와 같은
 # 값 -- dms_job_runner 는 dms 를 import 하지 않는 독립 패키지라 contain 모듈에 중복 정의, 계약 테스트가 둘을 잇는다).
 WORKERS_UNREACHABLE = "workers_unreachable"
-# rm 대상 봉쇄 재확인(2026-10-21 리뷰, rm_target_redirected)의 사유 TARGET_PATH_REDIRECTED 도 contain 모듈 값 -- preflight
-# 마커와 같은 코드(execution_manifests 의 PREFLIGHT_REASONS·EXECUTION_REASONS 양쪽, 계약 테스트가 잇는다).
+# 경로 봉쇄 재확인(rm_target_redirected·contain.first_blocked)의 사유(target·source·destination_path_redirected)도 contain 모듈
+# 값 -- preflight 마커와 같은 코드(execution_manifests 의 PREFLIGHT_REASONS·EXECUTION_REASONS 양쪽, 계약 테스트가 잇는다).
+# 도구 결과 사유(2026-10-27 d192 spec §2, dms-k8s 이식 2026-10-28): 도구가 0 이 아닌 코드로 끝나면 summary v2 상세에서 사유를
+# 정해 마커로 찍는다(_derive_reason). execution_manifests.TOOL_FAILURE_REASONS 와 같은 집합이어야 한다 -- 갈라지면 스테퍼가
+# 승격하지 못하고 execution_failed 로 뭉갠다(tests/test_job_runner_tool_detail.py 계약 테스트가 잇는다). 봉쇄 사유와 달리
+# contain 모듈에 두지 않는다: nsync rank(contain 을 python3 -m 으로 부른다)가 쓰지 않는 런처 전용 값이다.
+TOOL_ABORTED = "tool_aborted"
+DESTINATION_FULL = "destination_full"
+DESTINATION_READ_ONLY = "destination_read_only"
+SYNC_STOPPED_MAX_ERRORS = "sync_stopped_max_errors"
+SYNC_TYPE_CHANGE_REFUSED = "sync_type_change_refused"
+SOURCE_SCAN_INCOMPLETE = "source_scan_incomplete"
+SYNC_ITEMS_FAILED = "sync_items_failed"
+RM_ITEMS_FAILED = "rm_items_failed"
+# 미리보기 전용: nsync 스캔 오류(소스·목적지 어느 쪽이든 -- nsync 는 delete 없이 쪽을 말하지 않는다)로 미리보기가 실패했다
+# (아무것도 바뀌지 않았다 -- 실행 사유의 「반영됐습니다」 문구를 쓰지 않는다). dsync 는 walk 오류로 실패하지 않아 해당 없다.
+PREVIEW_SCAN_INCOMPLETE = "preview_scan_incomplete"
+TOOL_FAILURE_REASONS = frozenset({TOOL_ABORTED, DESTINATION_FULL, DESTINATION_READ_ONLY, SYNC_STOPPED_MAX_ERRORS,
+                                  SYNC_TYPE_CHANGE_REFUSED, SOURCE_SCAN_INCOMPLETE, SYNC_ITEMS_FAILED, RM_ITEMS_FAILED,
+                                  PREVIEW_SCAN_INCOMPLETE})
+# summary v2 표식 -- 이 키가 있으면 상세 키가 계산됐다(없으면 옛 잡·조기 종료·상세 파싱 실패: 핵심 3키뿐).
+SUMMARY_DETAIL_VERSION = 2
+# 실패 시 launcher 로그(포탈 「실행 로그」·진단 박제)에 남기는 도구 출력 꼬리. 도구 출력은 stdout.log/stderr.log 파일에만
+# 있어(MFU_LOG 는 stdout) 포탈의 실패 지점 로그(파드 로그)에 원인이 보이지 않았다(포탈 괴리 [19]). 줄마다 "  | " 를 붙여
+# 어떤 줄도 마커로 시작하지 못하게 하고(_parse_marker 는 strip 뒤 startswith -- 7b 의 rank 마커 끌어올리기도 줄 **전체**
+# 비교라 꼬리 줄에 걸리지 않는다), 한 줄은 512자로 자른다.
+# 바이트 상한(d192 리뷰 runner-5): 줄 수만 묶으면 80줄 × 512자(한글이면 ×3 바이트)가 수십 KB 라, 파드가 사라진 뒤 포탈이 보여
+# 주는 박제(stepper._diag_entry -- 파드 로그의 마지막 DIAG_TAIL_BYTES=16 KiB)가 발췌 한가운데서 시작해 사유 마커·
+# DMS_JR_WORKER_READY 줄(느린 워커 진단)을 통째로 잃었다. 마커 포함 글 전체를 UTF-8 10 KiB 안에 두고(남는 6 KiB 가 앞의
+# launcher 줄 몫), 최신 줄을 남긴다. stderr 는 작은 몫(2 KiB -- MPI 중단 배너·ABORT 줄은 짧다), 나머지는 stdout 이다.
+TOOL_OUTPUT_STDOUT_LINES = 80
+TOOL_OUTPUT_STDERR_LINES = 20
+TOOL_OUTPUT_LINE_MAX = 512
+TOOL_OUTPUT_PREFIX = "  | "
+TOOL_OUTPUT_MAX_BYTES = 10 * 1024
+TOOL_OUTPUT_STDERR_BYTES = 2 * 1024
+# 머리 줄("DMS_JR_TOOL_OUTPUT (stdout.log 마지막 80줄)" ≈ 48 바이트) 하나의 예약 -- 줄 수 자릿수가 바뀌어도 넘지 않게 넉넉히.
+_TOOL_OUTPUT_HEADER_RESERVE = 64
+# 출력을 파싱하는 도구(-q 면 아무것도 찍지 않는다 -- 상세 모름). dscan 의 개수는 리포트 파일에서 온다.
+_LOG_PARSED_TOOLS = ("dsync", "nsync", "drm")
+_SYNC_TOOLS = ("dsync", "nsync")
 
 # 슬라이스 24 §2.1 층3: 러너가 exec 할 수 있는 도구의 최종 allowlist.
 # dms 패키지의 config.AGENT_TOOL_NAMES 와 같은 값이어야 하지만 dms_job_runner 는
@@ -35,40 +75,6 @@ WORKERS_UNREACHABLE = "workers_unreachable"
 # (tool_argv)가 뚫려도 -- 이미 제출된 매니페스트/env 의 사후 변조까지 포함해 --
 # 이 층만은 실행을 막는다.
 ALLOWED_TOOLS = ("dscan", "dsync", "nsync", "drm")
-
-
-def _realpath_strict(path):
-    return os.path.realpath(path, strict=True)
-
-
-def rm_target_redirected(target, root, *, realpath=_realpath_strict) -> bool:
-    """drm 대상의 상위 경로가 managed_root 아래 **심링크 성분 없이** 그 자리에 있는가의 반대(True = 막는다).
-
-    execution_manifests._RM_CONTAINMENT_CHECK(preflight·exec_preflight 셸)와 **같은 규칙**이다 -- 둘이 갈라지면 한쪽만
-    통과하는 경로가 생긴다(tests/test_rm_containment_sh.py 가 같은 트리로 두 판정을 대조한다). 왜 러너도 보나: exec_preflight
-    파드와 실행 vcjob 은 다른 파드라 그 사이(Volcano 대기는 길 수 있다)에 사용자가 상위 디렉터리를 심링크로 바꾸면 root drm
-    이 다른 트리를 지운다. 여기는 mpirun 바로 앞이라 창이 「워커 기동 + drm 의 걷기 시작」까지로 줄어든다(완전히 닫히지는
-    않는다 -- BACKLOG §4). target 은 drm argv 마지막(tool_argv), root 는 env DMS_JR_RM_ROOT(stepper 가 target 을 조합한 값).
-    마지막 성분은 심링크여도 된다(drm 은 링크 자체만 지운다). 실제 경로를 못 구하면(없는 상위·고리) 막는다(fail-closed)."""
-    if not isinstance(target, str) or not isinstance(root, str) or root == "":
-        return True
-    if target.endswith("/") or target.endswith("/.") or target.endswith("/..") or "/" not in target:
-        return True
-    parent = os.path.dirname(target)
-    base = root[:-1] if root.endswith("/") else root      # 셸 "${R%/}" 와 같다(끝 슬래시 하나만)
-    if parent in (root, base):
-        rel = ""
-    elif parent.startswith(base + "/"):
-        rel = parent[len(base) + 1:]
-    else:
-        return True
-    try:
-        real_root = realpath(root)
-        real_parent = realpath(parent)
-    except (OSError, ValueError):
-        return True
-    want = real_root if rel == "" else f"{real_root[:-1] if real_root.endswith('/') else real_root}/{rel}"
-    return real_parent != want
 
 
 def run_job(env, *, run, write_text, read_text, sleep, wait_hostfile,
@@ -147,8 +153,9 @@ def run_job(env, *, run, write_text, read_text, sleep, wait_hostfile,
         dst_nodes = json.loads(env.get("DMS_JR_DEST_NODES", "[]"))
         role_map = nsync_role_map(src_nodes, dst_nodes, slots_per_host=procs_per_node)
         rendered = ["--role-mode", "map", "--role-map", role_map, *rendered]
-        # 6e. PV 주소 봉쇄 재확인(nsync) -- 각 rank 가 도구 exec 직전에 자기 역할 쪽만 본다(dms_job_runner.contain docstring).
-        #     소스 rank 수는 role_map 과 같은 식(소스 노드 수 × 노드당 slot). 값은 전부 따옴표로 묶은 인자다.
+        # 6e. 경로 봉쇄 재확인(nsync -- 2026-10-28 부터 PV·직접 경로 공통) -- 각 rank 가 도구 exec 직전에 자기 역할 쪽만 본다
+        #     (dms_job_runner.contain docstring). 소스 rank 수는 role_map 과 같은 식(소스 노드 수 × 노드당 slot). 값은 전부 따옴표로
+        #     묶은 인자다. 키 부재 = 이 검사 전의 제어면(sync 는 이제 늘 싣는다) -- 종전대로.
         if "DMS_JR_CONTAIN" in env:
             rank_check = (f"python3 -m dms_job_runner.contain {len(src_nodes) * procs_per_node} "
                           f"{_shquote(env['DMS_JR_CONTAIN'])} || exit 1\n")
@@ -167,8 +174,10 @@ def run_job(env, *, run, write_text, read_text, sleep, wait_hostfile,
     # 6c. rm 대상 봉쇄 재확인(rm_target_redirected docstring) -- mpirun 바로 앞(워커 준비 대기 뒤)이라 가장 늦은 자리다.
     #     env 키 부재 = 이 검사 전의 제어면이 만든 매니페스트(롤링 업그레이드) -- 그 제어면의 preflight 도 보지 않았으니
     #     종전대로 둔다. 키가 있으면(빈 값 포함) 판정한다.
-    # 6d. PV 주소 봉쇄 재확인(dms_job_runner.contain docstring) -- dsync·dscan 은 런처가 여기서 모든 쪽을(nsync 는 6e 의 rank 가
-    #     자기 쪽을). env 키 부재 = PV 가 아닌 잡 또는 이 검사 전의 제어면 -- 종전대로 둔다. 모양이 틀리면 막는다(fail-closed).
+    # 6d. 경로 봉쇄 재확인(dms_job_runner.contain docstring) -- dsync 는 런처가 여기서 두 쪽을(PV·직접 경로 공통, 2026-10-28 --
+    #     런처는 primary 볼륨으로 데이터 경로를 마운트한다), dscan 은 PV 대상만(직접 경로 scan 은 키가 없다), nsync 는 6e 의 rank 가
+    #     자기 쪽을. 사유는 쪽별(source·destination·target_path_redirected). env 키 부재 = 봉쇄 대상이 아닌 잡 또는 이 검사 전의
+    #     제어면 -- 종전대로 둔다. 모양이 틀리면 막는다(fail-closed).
     if tool in ("dsync", "dscan") and "DMS_JR_CONTAIN" in env:
         try:
             bad = first_blocked(parse_entries(env["DMS_JR_CONTAIN"]))
@@ -198,32 +207,96 @@ def run_job(env, *, run, write_text, read_text, sleep, wait_hostfile,
     # 7. mpirun — runuser로 요청자 신원, OMPI env + -x 전파(commands.mpirun_command)
     proc = run(mpirun_command(process_count=process_count, hostfile=hostfile_path,
                               username=username, rank_script=rank_path))
-    write_text(f"{artifact_dir}/stdout.log", proc.stdout or "")
-    write_text(f"{artifact_dir}/stderr.log", proc.stderr or "")
+    stdout = proc.stdout or ""
+    stderr = getattr(proc, "stderr", None) or ""
+    write_text(f"{artifact_dir}/stdout.log", stdout)
+    write_text(f"{artifact_dir}/stderr.log", stderr)
 
     # 7b. nsync rank 의 봉쇄 마커(6e) 끌어올리기 -- rank 출력은 mpirun 이 런처로 모을 뿐 파드 로그에 찍히지 않는다. stepper 는
     #     런처 파드 로그에서 마커를 읽으므로(parse_execution_reason) 여기서 다시 찍는다. 도구는 데이터를 만지기 전에 끊겼다 --
     #     returncode 는 모름(null), 3키 계약 유지(6c·6d 와 같은 모양).
     #     줄 **전체**가 마커여야 하고 mpirun 이 실패해야 한다(rank 는 마커를 찍고 exit 1) -- 경로 이름에 마커 글자가 든 정상 nsync
-    #     (도구가 「Requested target: …」 등으로 경로를 찍는다)를 봉쇄로 오인하지 않게(2차 리뷰).
+    #     (도구가 「Requested target: …」 등으로 경로를 찍는다)를 봉쇄로 오인하지 않게(2차 리뷰). 두 쪽 rank 가 다 막혔으면 마커가
+    #     둘이다 -- 나온 순서대로 다시 찍고 stepper 는 첫 줄을 쓴다.
+    #     8(summary v2)·9(도구 결과 사유·꼬리)보다 **앞**이어야 한다(d192 이식 2026-10-28): 봉쇄로 끊긴 실행은 도구 결과가 아니라
+    #     「도구 시작 전 거부」다 -- 뒤에 두면 rc≠0 이라 9 가 도구 사유(sync_items_failed 등)를 마커 앞에 찍어 첫 마커를 빼앗는다.
     if tool == "nsync" and "DMS_JR_CONTAIN" in env and proc.returncode != 0:
-        lines = [ln.strip() for ln in f"{proc.stdout or ''}\n{proc.stderr or ''}".split("\n")]
-        if REDIRECTED_LINE in lines:
-            details = list(dict.fromkeys(ln for ln in lines if ln.startswith("DMS_JR_PV_PATH_REDIRECTED ")))[:4]
-            sys.stdout.write("".join(f"{ln}\n" for ln in [REDIRECTED_LINE, *details]))
+        lines = [ln.strip() for ln in f"{stdout}\n{stderr}".split("\n")]
+        markers = list(dict.fromkeys(ln for ln in lines if ln in REDIRECT_LINES))
+        if markers:
+            details = list(dict.fromkeys(ln for ln in lines if ln.startswith(f"{DETAIL_PREFIX} ")))[:4]
+            sys.stdout.write("".join(f"{ln}\n" for ln in [*markers, *details]))
             sys.stdout.flush()
             write_text(f"{artifact_dir}/summary.json",
                        json.dumps({"returncode": None, "files": None, "bytes": None}))
             return 1
 
-    # 8. summary — 도구별 파싱(설계 §3). preview/execution 공통 계약(3키)이되,
+    # 8. summary — 도구별 파싱(설계 §3, d192 summary v2). preview/execution 공통 계약(핵심 3키 + 상세 키)이되,
     #    dsync·drm --dryrun 은 복사·삭제 요약을 찍지 않아 walk 항목 수로 대신한다(parsers
     #    .parse_sync_dryrun_counts·parse_rm_dryrun_counts). 제어면은 이 사본을 preview_summary 로 저장하고
     #    지문도 이 객체의 해시다(2026-09-17) -- null 이면 지문이 상수가 된다.
-    summary = _build_summary(tool, proc.stdout, proc.returncode, artifact_dir,
-                             dryrun="--dryrun" in argv, quiet=("--quiet" in argv or "-q" in argv))
+    summary = _build_summary(tool, stdout, proc.returncode, artifact_dir,
+                             dryrun="--dryrun" in argv, quiet=("--quiet" in argv or "-q" in argv), stderr=stderr)
     write_text(f"{artifact_dir}/summary.json", json.dumps(summary))
+
+    # 9. 도구 실패(d192 spec §2): 사유 마커를 **먼저**(mpirun 뒤 첫 출력), 이어서 도구 출력 꼬리를 launcher 로그에 남긴다.
+    #    summary.json 을 쓴 **뒤**라 여기서 무엇이 잘못돼도 결과는 이미 남았다.
+    if proc.returncode != 0:
+        _emit(_tool_failure_report(summary.get("reason"), stdout, stderr))
     return proc.returncode
+
+
+def _tool_failure_report(reason, stdout, stderr):
+    """도구가 비 0 으로 끝났을 때 launcher stdout 에 쓸 글: 사유 마커(있을 때만, 첫 줄) + stdout·stderr 꼬리.
+
+    마커는 이 러너가 정한 화이트리스트 값만이다 -- 도구 출력은 줄마다 "  | " 접두라 strip 뒤에도 마커로 시작할 수 없다
+    (execution_manifests._parse_marker). splitlines 로 \\r·\\x0b 같은 다른 줄 끝도 나눠 각 조각에 접두를 붙인다.
+    글 전체(마커·머리 줄 포함)는 UTF-8 TOOL_OUTPUT_MAX_BYTES 이하다(위 상수 주석) -- 줄 수 상한 안에서 최신 줄부터 담는다."""
+    marker = [f"{EXECUTION_REASON_MARKER}{reason}"] if reason in TOOL_FAILURE_REASONS else []
+    err_tail = _echo_tail(stderr, TOOL_OUTPUT_STDERR_LINES, TOOL_OUTPUT_STDERR_BYTES)
+    used = sum(_utf8_len(line) + 1 for line in marker) + sum(_utf8_len(line) + 1 for line in err_tail)
+    used += _TOOL_OUTPUT_HEADER_RESERVE * (2 if err_tail else 1)
+    out_tail = _echo_tail(stdout, TOOL_OUTPUT_STDOUT_LINES, TOOL_OUTPUT_MAX_BYTES - used)
+    lines = [*marker, f"DMS_JR_TOOL_OUTPUT (stdout.log 마지막 {len(out_tail)}줄)", *out_tail]
+    if err_tail:
+        lines.append(f"DMS_JR_TOOL_OUTPUT (stderr.log 마지막 {len(err_tail)}줄)")
+        lines.extend(err_tail)
+    return "\n".join(lines) + "\n"
+
+
+def _utf8_len(text):
+    # 도구 출력은 _subprocess_run 의 replace 디코드라 서로게이트가 없다 -- 그래도 길이 재기가 러너를 죽이지 않게.
+    return len(text.encode("utf-8", "replace"))
+
+
+def _echo_tail(text, max_lines, max_bytes):
+    """text 의 마지막 max_lines 줄 중 뒤에서부터(최신부터) 접두·512자 자르기를 한 echo 줄을 max_bytes(줄바꿈 포함) 안에서
+    담는다 -- 넘치는 줄에서 멈춘다(사이를 건너뛰지 않는다: 남는 것은 늘 연속한 꼬리다). 반환은 원래 순서."""
+    kept = []
+    budget = max_bytes
+    for line in reversed((text or "").splitlines()[-max_lines:]):
+        echoed = TOOL_OUTPUT_PREFIX + line[:TOOL_OUTPUT_LINE_MAX]
+        cost = _utf8_len(echoed) + 1
+        if cost > budget:
+            break
+        kept.append(echoed)
+        budget -= cost
+    kept.reverse()
+    return kept
+
+
+def _emit(text):
+    """launcher stdout 에 쓴다(파드 로그). 컨테이너 로케일이 ASCII 여도 죽지 않는다 -- 도구 출력에는 replace 문자(U+FFFD)와
+    한글 이름이 섞이고, 여기서 UnicodeEncodeError 가 나면 러너가 rc 대신 트레이스백으로 끝난다. 실패해도 잡 결과(summary·
+    rc)는 이미 정해졌으니 삼킨다."""
+    try:
+        try:
+            sys.stdout.write(text)
+        except UnicodeEncodeError:
+            sys.stdout.write(text.encode("ascii", "backslashreplace").decode("ascii"))
+        sys.stdout.flush()
+    except Exception:  # noqa: BLE001 -- 진단 출력이 잡 결과를 바꾸지 않는다
+        pass
 
 
 def _scan_report_path(artifact_dir):
@@ -298,28 +371,39 @@ def _wait_workers_ready(hosts, *, run, sleep, clock, timeout):
     return ips, None
 
 
-def _build_summary(tool, stdout, returncode, artifact_dir, dryrun=False, quiet=False):
-    """summary.json은 항상 정확히 3키 {"returncode", "files", "bytes"} -- 모르면
-    null(설계 §2.3). 기존 "마지막 줄 JSON" 계약은 실 mpifileutils가 JSON을 찍지
-    않아 사문이라 제거했다. 파싱이 잡을 죽이는 경로는 없다(설계 §4): 어떤 예외든
-    삼키고 returncode만 보존한 채 files/bytes를 null로 강등한다 -- 제어면
-    _as_count(bool·비int·음수 거부)가 2차 방어로 이미 배포되어 있다(d24)."""
+def _build_summary(tool, stdout, returncode, artifact_dir, dryrun=False, quiet=False, stderr=""):
+    """summary.json v2(2026-10-27 d192 spec §1) = 핵심 3키 {"returncode", "files", "bytes"}(모르면 null, 설계 §2.3) +
+    머리 키 {"detail_version": 2, "tool", "dryrun", "quiet"(참일 때만)} + 상세 키(parsers.parse_tool_detail -- 찾은 것만)
+    + "reason"(returncode 가 0 이 아닐 때 _derive_reason 이 정한 경우만). 전부 숫자·참거짓·짧은 ASCII 이고 도구 문자열은
+    failure_samples[].path 하나(256자) -- json.dumps 기본 ensure_ascii 라 파일은 ASCII 다(제어면 read 는 strict UTF-8).
+
+    files/bytes 의 뜻은 도구·단계별이다(parsers 모듈 docstring 표): 특히 nsync 실행은 이제 계획 합이 아니라 실제로 반영된
+    합(Completed), dsync 실행은 최종 블록의 만든 항목 − 데이터 복사 실패(중단·최종 블록 없음이면 모름), drm 실행은 실제로 지운
+    수 -- 통계(sync·rm 합계)의 출처다. 상세의 밑줄 머리 키(사유 판정 근거)는 싣지 않는다.
+
+    파싱이 잡을 죽이는 경로는 없다(설계 §4): 개수 파싱의 어떤 예외든 files/bytes 를 null 로 강등하고, 상세 파싱이 실패하면
+    핵심 3키만 쓴다(detail_version 없음 = 상세를 계산하지 못했다 -- reason 도 없다). 제어면 _as_count(bool·비int·음수
+    거부)가 2차 방어로 이미 배포되어 있다(d24). 파싱 규칙이 없는 도구(allowlist 밖 -- run_job 은 거기까지 오지 않는다)는
+    핵심 3키 그대로다."""
+    log_quiet = bool(quiet) and tool in _LOG_PARSED_TOOLS
     files = nbytes = None
     try:
-        if dryrun and quiet and tool in ("dsync", "drm"):
-            # quiet 미리보기(2026-10-12 보안 검토 -- 불완전 수정 보강): -q 는 진짜 walk 요약을 지우지만 drm 목록(printf)은
-            # 그대로 찍혀, 이름에 심은 가짜 walk 줄 하나가 「정확히 1개」를 만족했다. 제어면은 미리보기에 --quiet 를 싣지
-            # 않지만(execution_manifests.tool_argv) 옛 제어면(롤링 업그레이드)·DB 변조 argv 에 대비해 여기서도 믿지 않는다.
-            return {"returncode": returncode, "files": None, "bytes": None}
-        if tool == "dsync" and dryrun:
+        if log_quiet:
+            # -q 면 도구가 아무것도 찍지 않는다(MFU_LOG_NONE -- ERROR 줄까지) -- 개수는 모름이다. 미리보기 쪽은 보안 가드이기도
+            # 하다(2026-10-12 보안 검토 -- 불완전 수정 보강): -q 는 진짜 walk 요약을 지우지만 drm 목록(printf)은 그대로 찍혀,
+            # 이름에 심은 가짜 walk 줄 하나가 「정확히 1개」를 만족했다. 제어면은 미리보기에 --quiet 를 싣지 않지만
+            # (execution_manifests.tool_argv) 옛 제어면(롤링 업그레이드)·DB 변조 argv 에 대비해 여기서도 믿지 않는다.
+            pass
+        elif tool == "dsync" and dryrun:
             # 미리보기: 복사 요약이 없으므로 소스 walk 항목 수(바이트는 null).
             files, nbytes = parse_sync_dryrun_counts(stdout or "")
         elif tool == "dsync":
-            files, nbytes = parse_sync_counts(stdout or "")
+            # 중단(MPI_Abort)이면 모름 -- 복사 계획·끝나지 않은 블록을 「반영한 수」로 통계에 넣지 않는다(d192 D6).
+            files, nbytes = parse_dsync_counts(stdout or "", aborted=parse_aborted(stderr))
         elif tool == "nsync":
             # nsync는 mpifileutils가 아니라 역할 기반 별도 도구라 출력 형식이
             # 완전히 다르다 -- dsync 파서로 보내면 항상 null이었다(설계 부록 A).
-            files, nbytes = parse_nsync_counts(stdout or "")
+            files, nbytes = parse_nsync_counts(stdout or "", dryrun=bool(dryrun))
         elif tool == "drm" and dryrun:
             # 미리보기: 삭제 요약이 없으므로 walk 항목 수(= 지울 수, 2026-10-12 -- 늘 「삭제 대상 모름」이던 것).
             files, nbytes = parse_rm_dryrun_counts(stdout or "")
@@ -330,7 +414,123 @@ def _build_summary(tool, stdout, returncode, artifact_dir, dryrun=False, quiet=F
         # 그 외 도구: 파싱 규칙이 없다 -- (None, None) 그대로 둔다
     except Exception:  # noqa: BLE001 -- fail-soft가 계약이다(설계 §4)
         files = nbytes = None
-    return {"returncode": returncode, "files": files, "bytes": nbytes}
+    core = {"returncode": returncode, "files": files, "bytes": nbytes}
+    if tool not in ALLOWED_TOOLS:
+        return core
+    try:
+        if log_quiet:
+            # 상세도 모름 -- quiet 에서도 남는 것은 MPI 중단 흔적(stderr)뿐이다.
+            detail = {"aborted": True} if parse_aborted(stderr) else {}
+        else:
+            detail = parse_tool_detail(tool, stdout, stderr, bool(dryrun))
+        if not isinstance(detail, dict):
+            return core
+        summary = dict(core)
+        summary["detail_version"] = SUMMARY_DETAIL_VERSION
+        summary["tool"] = tool
+        summary["dryrun"] = bool(dryrun)
+        if quiet:
+            summary["quiet"] = True
+        for key, value in detail.items():
+            # 밑줄 머리 키는 사유 판정용 내부 근거(parsers 모듈 docstring) -- summary 계약 밖이라 싣지 않는다.
+            if key not in summary and key != "reason" and not key.startswith("_"):
+                summary[key] = value
+        if returncode is not None and returncode != 0:
+            reason = _derive_reason(tool, detail, dryrun=bool(dryrun))
+            if reason is not None:
+                summary["reason"] = reason
+        return summary
+    except Exception:  # noqa: BLE001 -- 상세는 덤이다: 실패하면 핵심 3키만(spec §1 fail-soft)
+        return core
+
+
+def _positive(value) -> bool:
+    """정수이고 0 보다 큰가 -- null(모름)·0(정상값)·bool·이상한 모양은 전부 아니다."""
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _derive_reason(tool, detail, *, dryrun=False):
+    """도구가 0 이 아닌 코드로 끝났을 때의 사유(d192 spec §2 표 -- 처음 맞는 규칙, 리뷰 결정 D1-D4 반영). 없으면 None(스테퍼가
+    execution_failed / preview_failed 로 접는다).
+
+    미리보기(dryrun)는 tool_aborted 와 미리보기 전용 preview_scan_incomplete(nsync 만) 만 정한다: 나머지 사유의 문구는 실행
+    결과라 아무것도 바꾸지 않은 미리보기 실패에 붙이면 거짓이다. nsync 미리보기에서 실제로 생기는 도구 실패는 스캔 오류(비 root
+    의 읽을 수 없는 하위 디렉토리, --contents 의 읽을 수 없는 파일)다 -- 소스·목적지 어느 쪽이든(문구가 쪽을 말하지 않는다).
+    dsync 의 walk 오류는 종료 코드를 바꾸지 않아(dsync.c walk_rc 는 delete 만 끈다) 실패의 원인이 될 수 없다 -- dsync 에는 스캔
+    사유(미리보기·규칙 6)를 붙이지 않는다.
+
+    errno 규칙(2·3)은 sync 도구만이다: rm 에는 「목적지」가 없고 drm 은 멈추지 않고 전부 시도한 뒤 Remove failed 를 낸다(규칙 8
+    의 문구가 맞다). 남는 위험(d192 리뷰 contract-35): dsync 는 경로를 날것으로 찍어 이름에 심은 가짜 실패 줄(errno=28·30)이
+    샘플에 **더해질** 수 있다 -- 그러면 진짜 원인 대신 destination_full/read_only 가 될 수 있다. 바뀌는 것은 사유 문구뿐이고
+    (데이터·권한은 그대로, 진짜 실패 줄도 stdout.log 에 남는다) 이름을 지을 수 있는 사람 자신의 잡이라 받아들인다. nsync 는
+    경로를 이스케이프해 이 위조가 없다."""
+    if detail.get("aborted") is True:
+        return TOOL_ABORTED
+    failures = detail.get("failures") if isinstance(detail.get("failures"), dict) else {}
+    by_op = failures.get("by_op") if isinstance(failures.get("by_op"), dict) else {}
+    if dryrun:
+        if tool == "nsync" and (_positive(detail.get("scan_errors")) or _positive(by_op.get("scan"))):
+            return PREVIEW_SCAN_INCOMPLETE
+        return None
+    if tool in _SYNC_TOOLS:
+        samples = detail.get("failure_samples")
+        errnos = {s.get("errno") for s in samples if isinstance(s, dict)} if isinstance(samples, list) else set()
+        stop_cause = detail.get("stop_cause")
+        if stop_cause == "destination_full" or errnos & {28, 122}:          # ENOSPC, EDQUOT
+            return DESTINATION_FULL
+        if stop_cause == "destination_read_only" or 30 in errnos:            # EROFS
+            return DESTINATION_READ_ONLY
+        if stop_cause == "max_errors":
+            return SYNC_STOPPED_MAX_ERRORS
+        kinds = {op for op, n in by_op.items() if _positive(n)}
+        refused = detail.get("type_change_refused")
+        copy_failed = detail.get("copy_failed")
+        create_failed = detail.get("create_failed")
+        remove_failed = detail.get("remove_failed")
+        scan_errors = detail.get("scan_errors")
+        if _positive(refused) and _type_change_only(tool, detail, kinds, refused):
+            return SYNC_TYPE_CHANGE_REFUSED
+        # 6. 소스 스캔 오류만(nsync): 소스 쪽 오류가 --delete 를 실제로 껐고(그 줄이 있다) 스캔 오류가 전부 소스 쪽일 때만 --
+        #    목적지 쪽 읽기 오류는 delete 를 끄지 않는다(그 실행의 삭제는 돌았다). delete 없이 돈 실행은 nsync 가 어느 쪽인지
+        #    말하지 않아 「소스」를 확인할 수 없다 -- 일반 항목 실패다(d192 D2).
+        if (tool == "nsync" and _positive(scan_errors) and kinds <= {"scan"}
+                and detail.get("delete_disabled") is True
+                and _positive(detail.get("source_scan_errors")) and detail.get("source_scan_errors") == scan_errors):
+            return SOURCE_SCAN_INCOMPLETE
+        # 7. 그 밖의 항목 실패. dsync 의 scan_incomplete 는 넣지 않는다(종료 코드를 바꾸지 않는다 -- 위 docstring): 그것만으로는
+        #    비 0 의 원인을 모른다(일반 execution_failed 가 정직하다).
+        if (_positive(failures.get("total")) or _positive(copy_failed) or _positive(create_failed) or _positive(refused)
+                or _positive(remove_failed) or _positive(scan_errors)):
+            return SYNC_ITEMS_FAILED
+    if tool == "drm" and _positive(detail.get("remove_failed")):
+        return RM_ITEMS_FAILED
+    return None
+
+
+# 「비어 있지 않은 디렉토리라 지우지 못했다」로 볼 수 있는 제거 errno: ENOTEMPTY(39), 일부 파일시스템의 EEXIST(17).
+_ERRNO_DIR_NOT_EMPTY = frozenset({39, 17})
+
+
+def _type_change_only(tool, detail, kinds, refused):
+    """규칙 5(sync_type_change_refused -- 문구: 「비어 있지 않은 디렉토리를 바꾸지 않았습니다(삭제 옵션 꺼짐) -- 삭제를 켜면 바뀝
+    니다」)의 조건. 그 문구가 참일 때만이다(d192 D1 -- 권한 오류·삭제가 이미 켜진 실행에 「삭제를 켜라」를 권하면 파괴적 옵션을
+    헛되이 권하는 셈이다).
+
+    nsync: 실패가 replace-dir 뿐이고, nsync 가 「--delete 를 주지 않으면 비어 있지 않은 디렉토리는 바뀌지 않는다」 줄을 찍었을 때
+    (!opts.delete 일 때만 찍는다 -- --delete 인데 재귀 제거가 ENOTEMPTY 로 끝난 경우는 아니다).
+    dsync: 막힌 수(N destination item(s) changed type …) == 「(still a directory), a non-empty directory is replaced only with
+    --delete」 줄 수(남은 것이 디렉토리 + delete 꺼짐일 때만 붙는다)이고, 제거 단계 errno 가 전부 39·17(EACCES·EPERM 이면 삭제를
+    켜도 안 바뀐다)이며, 다른 실패(복사·만들기 실패, 소스 walk 오류, 막힌 수보다 많은 제거 실패)가 없을 때."""
+    if tool == "nsync":
+        return kinds <= {"replace-dir"} and detail.get("type_change_needs_delete") is True
+    remove_errnos = detail.get("_remove_errnos")
+    remove_failed = detail.get("remove_failed")
+    # 막힌 타입 교체는 그 제거 실패(Remove failed)로도 세진다 -- 그보다 많은 제거 실패는 다른 항목의 실패다.
+    removes_ok = remove_failed is None or remove_failed == 0 or (_positive(remove_failed) and remove_failed <= refused)
+    return (_positive(detail.get("_type_change_dir_refused")) and detail.get("_type_change_dir_refused") == refused
+            and isinstance(remove_errnos, list) and set(remove_errnos) <= _ERRNO_DIR_NOT_EMPTY
+            and not _positive(detail.get("copy_failed")) and not _positive(detail.get("create_failed"))
+            and detail.get("scan_incomplete") is not True and removes_ok)
 
 
 def _shquote(s):

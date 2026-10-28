@@ -134,6 +134,37 @@ def test_sync_chown_bad_shapes_rejected(value):
     assert e.value.reason_code == "invalid_option"
 
 
+@pytest.mark.parametrize("bufsize", [4096, 8192, 65536, 1_048_576, 4_194_304])
+def test_sync_direct_accepts_power_of_two_bufsize_up_to_the_chunk(bufsize):
+    # d192: 4 MiB 조각(MFU_CHUNK_SIZE)의 약수 = 4096·2^k(≤ 4 MiB) -- 어떤 조각 경계에서도 O_DIRECT 읽기가 나눠떨어진다.
+    out = validate_options(Operation.SYNC, {"direct": True, "bufsize": bufsize})
+    assert out["direct"] is True and out["bufsize"] == bufsize
+
+
+@pytest.mark.parametrize("bufsize", [8_388_608, 1_000_000, 12_288, 6_291_456, 1_073_741_824])
+def test_sync_direct_rejects_bufsize_that_does_not_divide_the_chunk(bufsize):
+    # 8 MiB·1,000,000 은 범위 검사(4096..1 GiB)를 통과해 미리보기도 통과하고, 실행 중 큰 파일에서 dsync 가
+    # "O_DIRECT requires chunk size to be integer multiple of block size" 로 MPI 중단했다(drift [8]).
+    with pytest.raises(DomainValidationError) as e:
+        validate_options(Operation.SYNC, {"direct": True, "bufsize": bufsize})
+    assert e.value.reason_code == "direct_bufsize_misaligned"
+
+
+def test_sync_bufsize_rule_applies_only_with_direct():
+    # direct 가 없거나 false 면 버퍼는 조각과 무관하다(일반 read) -- 범위 검사만.
+    assert validate_options(Operation.SYNC, {"bufsize": 1_000_000})["bufsize"] == 1_000_000
+    assert validate_options(Operation.SYNC, {"direct": False, "bufsize": 8_388_608})["bufsize"] == 8_388_608
+    # direct 만 켜고 bufsize 를 생략하면 서버 기본값(4 MiB)이 박힌다 -- 그 값은 규칙 안이다.
+    assert validate_options(Operation.SYNC, {"direct": True})["bufsize"] == 4_194_304
+
+
+def test_sync_direct_out_of_range_bufsize_keeps_the_range_reason():
+    # 범위 밖(4096 미만)은 기존 invalid_option 이 먼저다 -- 새 사유가 범위 오류를 가리지 않는다.
+    with pytest.raises(DomainValidationError) as e:
+        validate_options(Operation.SYNC, {"direct": True, "bufsize": 2048})
+    assert e.value.reason_code == "invalid_option"
+
+
 def test_rm_stat_lite_exclusive():
     with pytest.raises(DomainValidationError) as e:
         validate_options(Operation.RM, {"recursive": True, "stat": True, "lite": True})

@@ -68,22 +68,51 @@ def _stamped(job) -> bool:
     return job.get("confirmed_fingerprint") is not None and job["confirmed_fingerprint"] == job.get("preview_fingerprint")
 
 
+# 미리보기 요약의 도구 이름으로 받아들이는 값(runner summary v2 의 tool). 밖의 값은 모름 -- 감사 행 키로 임의 문자열을
+# 싣지 않는다(DB·summary 가 신뢰 경계).
+_PREVIEW_TOOLS = frozenset({"dsync", "nsync", "drm", "dscan"})
+
+
+def _preview_tool(item) -> "str | None":
+    """항목 자식 잡의 도구. 잡 행의 tool(조인이 job_tool 로 실어 주면 그것이 권위 -- planner 가 정하고 stepper 가 그 도구로
+    띄운다)을 먼저, 없거나 _PREVIEW_TOOLS 밖이면 미리보기 summary v2 의 tool(러너가 argv 에서 적는 메아리 -- d192 전
+    미리보기·러너 fail-soft 경로엔 없다). 둘 다 모르면 None. 포탈 확인 대화상자(frontend toolSummary.summaryTool)도 같은
+    순서·같은 허용 집합이다 -- 갈라지면 화면의 도구별 합계와 감사 행 files_by_tool 이 같은 항목을 다른 도구로 센다
+    (2026-10-27 d192 리뷰, test_confirm_audit_tool_follows_the_job_row_when_the_summary_disagrees)."""
+    s = item.get("preview_summary")
+    for v in (item.get("job_tool"), s.get("tool") if isinstance(s, dict) else None):
+        if isinstance(v, str) and v in _PREVIEW_TOOLS:
+            return v
+    return None
+
+
 def preview_files(items) -> dict:
     """ConfirmPending 항목 preview_summary.files 의 합(아는 값만)과 모르는 항목 수 -- null≠0: 하나도 모르면 files_total 은
-    None 이고 0 은 정상값이다(rm 의 0 = 대상 경로 없음). 포탈 확인 대화상자의 「삭제·복사 대상」과 같은 집계다. DB 가 신뢰
-    경계라 bool·음수·비정수는 모름으로 센다(stepper 의 _as_count 와 같은 결). items = BatchesRepository.list_items_detail.
+    None 이고 0 은 정상값이다(rm 의 0 = 대상 경로 없음). DB 가 신뢰 경계라 bool·음수·비정수는 모름으로 센다(stepper 의
+    _as_count 와 같은 결). items = BatchesRepository.list_items_detail.
+
+    files_by_tool(2026-10-27 d192): 같은 합을 도구별로 -- {도구: 그 도구 항목의 아는 files 합}. 미리보기 files 의 뜻이
+    도구마다 달라(nsync = 변경 예정 동작 수(삭제·속성 포함), dsync = 소스 전체 항목 수(변경 수 아님), drm = 지울 대상)
+    files_total 하나로는 「무엇을 몇 개 확인했나」를 말할 수 없다. files_total·files_unknown 은 감사 이력의 연속성 때문에
+    그대로 둔다. 도구를 모르는 항목(_preview_tool None)은 files_total 에만 들어가고 files_by_tool 에는 없다 -- 지어낸
+    도구로 넣지 않는다. 키가 있으면 값은 아는 값 하나 이상의 합이다(없는 도구 = 키 없음, 0 이 아니다).
 
     **사람의 확인(routes_batches.confirm_batch)과 자동 확인(_auto_confirm)이 같이 쓴다**(2026-10-21 리뷰): 감사 행
     `batch/confirm` 의 모양이 누르는 주체와 무관해야 「같은 confirm, 같은 기록」이다 -- 자동 확인이 자기 요약을 따로
     만들면서 이 두 키가 자동 확인 행에만 빠져 있었다."""
     pending = [it for it in items if it.get("job_state") == DataJobState.CONFIRM_PENDING.value]
     known = []
+    by_tool: dict = {}
     for it in pending:
         s = it.get("preview_summary")
         v = s.get("files") if isinstance(s, dict) else None
         if isinstance(v, int) and not isinstance(v, bool) and v >= 0:
             known.append(v)
-    return {"files_total": sum(known) if known else None, "files_unknown": len(pending) - len(known)}
+            tool = _preview_tool(it)
+            if tool is not None:
+                by_tool[tool] = by_tool.get(tool, 0) + v
+    return {"files_total": sum(known) if known else None, "files_unknown": len(pending) - len(known),
+            "files_by_tool": by_tool}
 
 
 # 자동 확인 감사 행의 actor. 계정 이름 규칙(repositories/accounts._USERNAME_RE -- [a-z0-9][a-z0-9._-]*)에 없는 ':' 를

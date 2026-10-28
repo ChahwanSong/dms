@@ -373,6 +373,7 @@ def test_rm_inside_a_pv_is_accepted(kclient, world):
     (_rm(_pv("team-a", "ghost")), "pv_not_found"),
     (_rm(_pv("team-a", "checkpoints")), "pv_not_bound"),
     (_rm(_pv("team-a", "datasets"), "/etc"), "unsafe_path"),
+    (_rm(_pv("team-a", "datasets"), "sample/x\n/old"), "unsafe_path"),     # 제어 문자(줄바꿈) -- 2026-10-28
 ])
 def test_pv_resolution_errors_are_422(kclient, world, body, detail):
     _login(kclient, "alice")
@@ -746,10 +747,11 @@ def test_side_label_and_subpath_normalization():
     assert k8s_access.side_label({**block, "path": "ckpt/x"}) == "models — team-a (tb-gpfs) / ckpt/x"
     for raw, norm in (("", ""), (".", ""), ("./", ""), ("a//b/", "a/b"), ("./a/./b", "a/b")):
         assert k8s_access.normalize_subpath(raw) == norm, raw
-    for bad in ("/abs", "a/../b", "..", "a\x00b"):
+    # 제어 문자는 validate_relative_path 와 같은 규칙(domain.has_control_char, 2026-10-28 -- 줄바꿈 이름이 셸 봉쇄를 비껴갔다)
+    for bad in ("/abs", "a/../b", "..", "a\x00b", "x\n/new", "data\n", "a\tb", "a\x1bb", "a\x7f"):
         with pytest.raises(DomainValidationError) as e:
             k8s_access.normalize_subpath(bad)
-        assert e.value.reason_code == "unsafe_path"
+        assert e.value.reason_code == "unsafe_path", repr(bad)
 
 
 def test_recheck_refuses_raw_requests_of_restricted_requesters(world):
@@ -810,12 +812,22 @@ def test_root_nsync_into_a_pv_destination_is_planned(kclient, world):
 # 목적지 링크를 따라가던 nsync 의 고정값들 -- 위 계획이 안전한 전제는 잡 이미지의 nsync 가 고쳐진 커밋 이후라는 것이다.
 _NSYNC_FOLLOWS_DST_LINKS = {"faefdaf05b8da9386671c2cee00db75efc0e9cd7", "1b93d5404d078c55b46194cdd02732417ed856dc"}
 # 링크는 따라가지 않지만 없는 목적지 루트를 못 만들어 새 목적지로의 sync 가 전부 실패하던 고정값(d1 라이브 실증 -- 2a10a18 이 고침).
-_NSYNC_BREAKS_NEW_DESTINATIONS = {"8cd72f30a7bfb075795b2128f4a3dbb74c8b31f8"}
+# 5958e4e(dms-ssc 가 잠시 핀했던 8cd72f3 의 부모)도 같다 -- 메타데이터의 마지막 성분 링크 추종(TOCTOU)까지 남아 있다.
+_NSYNC_BREAKS_NEW_DESTINATIONS = {"8cd72f30a7bfb075795b2128f4a3dbb74c8b31f8", "5958e4eeeadce52cb6498cb0051ed967110930bd"}
 # --chown 뒤 권한 복사가 setuid/setgid 를 되살리던 고정값(목적지 PV 루트 소유자 chown 이 setuid-root 를 만들 수 있었다 -- 3c041e0 이 고침).
 _CHOWN_KEEPS_SETID = {"2a10a18269f1879d91f750106a4406218853bb6f"} | _NSYNC_BREAKS_NEW_DESTINATIONS | _NSYNC_FOLLOWS_DST_LINKS
 # dscan 리포트에 summary.total_bytes·invalid_name_entries 가 없던 고정값(2026-10-26 -- ae781bd 가 더함). DMS 는 그 키가 없으면
 # 히스토그램 합·모름으로 물러나므로 안전 문제는 아니지만, 포탈의 「잘못된 인코딩 이름」 카운터가 영영 「모름」이 된다.
 _DSCAN_LACKS_TOTAL_BYTES = {"3c041e059e32593b1fdf7fffdc29212dd2ae560e"} | _CHOWN_KEEPS_SETID
+# nsync 가 디렉터리 → 비디렉터리 교체에서 --delete 없이 비어 있지 않은 목적지 디렉터리를 재귀 삭제하던 고정값(C8, dms-ssc d188 실증
+# -- c4dbf20 이 고침). dms-k8s 는 모든 잡이 root 라 권한이 막아 주지 않는다 -- 목적지에만 있던 데이터가 그대로 사라진다.
+_NSYNC_REPLACES_NONEMPTY_DIRS = {"ae781bdbeb9f26a34a0cc5e6a072bfc7d4d7e89d"} | _DSCAN_LACKS_TOTAL_BYTES
+# nsync --open-noatime 이 무동작이던 고정값(빌드에 _GNU_SOURCE 가 없어 O_NOATIME 이 0 -- db1e33c 가 고침, 461bb73 에 포함).
+# 포탈이 늘 open_noatime 을 싣는데(모든 잡 root) 소스 atime 이 읽힐 때마다 갱신돼 데이터 온도 통계가 오염된다.
+_NSYNC_NOATIME_IS_NOOP = {"c4dbf20f509be2e0d86e22e0ba338672355dba79"} | _NSYNC_REPLACES_NONEMPTY_DIRS
+# drm·dsync --delete 가 지우지 못한 항목이 남아도 rc 0(「Removed N items」 는 시도 수)이고 nsync 가 「Completed actions:」 를 내지
+# 않던 고정값(998608b·6172405 가 고침, 7a3189c 에 포함) -- 부분 실패가 Succeeded 로 보이고 반영 수를 알 수 없다.
+_PARTIAL_FAILURE_EXITS_ZERO = {"461bb734d40d42287dcc350f6e1bfba84ec50889"} | _NSYNC_NOATIME_IS_NOOP
 
 
 def test_explicit_chown_is_for_privileged_operators_only(kclient, world):
@@ -858,7 +870,9 @@ def test_operator_chown_does_not_freeze_the_storage_owner(kclient, world, db):
 def test_job_image_pins_an_nsync_that_does_not_follow_destination_links():
     """root nsync 의 PV 목적지를 허용하는 것(planner 에 가드 없음)과 잡 이미지의 mpifileutils 고정값은 짝이다 -- 고정값을 옛 커밋으로
     되돌리면 그 짝이 깨진다. 새 커밋으로 올릴 때는 그 커밋이 nsync 목적지 걷기(5958e4e·8cd72f3)·새 목적지 루트 만들기(2a10a18)·
-    --chown 의 setuid/setgid 지우기(3c041e0)·dscan 의 summary.total_bytes·invalid_name_entries(ae781bd)를 포함하는지 확인한다."""
+    --chown 의 setuid/setgid 지우기(3c041e0)·dscan 의 summary.total_bytes·invalid_name_entries(ae781bd)·nsync 타입 교체 안전화
+    (c4dbf20 -- C8)·--open-noatime 실효(db1e33c)·drm/dsync 부분 실패 rc≠0 과 nsync Completed actions(998608b·6172405 -- 7a3189c)를
+    포함하는지 확인한다. 거부 목록은 각 결함을 가진 마지막 고정값까지 누적이다(뒤 집합이 앞 집합을 품는다)."""
     text = (Path(__file__).resolve().parent.parent / "deploy" / "docker" / "Dockerfile.mpifileutils").read_text()
     refs = re.findall(r"^ARG MPIFILEUTILS_REF=([0-9a-f]{40})$", text, flags=re.M)
     assert len(refs) == 1, refs
@@ -866,6 +880,9 @@ def test_job_image_pins_an_nsync_that_does_not_follow_destination_links():
     assert refs[0] not in _NSYNC_BREAKS_NEW_DESTINATIONS
     assert refs[0] not in _CHOWN_KEEPS_SETID
     assert refs[0] not in _DSCAN_LACKS_TOTAL_BYTES
+    assert refs[0] not in _NSYNC_REPLACES_NONEMPTY_DIRS
+    assert refs[0] not in _NSYNC_NOATIME_IS_NOOP
+    assert refs[0] not in _PARTIAL_FAILURE_EXITS_ZERO
 
 
 # --- PV 목적지 결과 소유(2026-10-26 사용자 지시 -- 스토리지 기본 uid:gid, 운영자 옵션 PV 루트 소유자) ------------------------

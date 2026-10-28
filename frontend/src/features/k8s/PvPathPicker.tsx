@@ -103,7 +103,8 @@ export function PvPathPicker({ op, storages, onInsert }: {
               <dd className="min-w-0 [overflow-wrap:anywhere]">{row.storage_name ?? "매핑 없음"}</dd></div>
             <div className="flex gap-2"><dt className="shrink-0 text-ink/70">넣을 경로</dt>
               <dd className="min-w-0"><Mono className="break-all">{path ?? "계산할 수 없음"}</Mono></dd></div>
-            <div className="flex gap-2"><dt className="shrink-0 text-ink/70">실제 경로</dt>
+            {/* 「지정 경로」 = PV 루트 + PV 안 경로를 글자 그대로 붙인 것(링크 미해석 -- d192 이식, 단건 제출과 같은 라벨) */}
+            <div className="flex gap-2"><dt className="shrink-0 text-ink/70">지정 경로</dt>
               <dd className="min-w-0"><Mono className="break-all">{abs ?? "모름"}</Mono></dd></div>
           </dl>
           <div className="flex flex-wrap gap-2">

@@ -65,10 +65,12 @@ class _R:
 
 # 실측 캡처 픽스처 -- tests/test_job_runner_parsers.py와 의도적으로 중복(테스트
 # 파일끼리 import로 결합하지 않는다). 내용은 잡 60d24700 dsync stdout,
-# drm stdout, dscan-report.json 실 스키마 그대로.
+# drm stdout, dscan-report.json 실 스키마 그대로. d192: 최종 블록의 머리 "Seconds: X"(실제 출력에 있는 줄 -- 최종 블록을
+# 복사 계획 "Items:" 와 가르는 근거)도 싣는다.
 DSYNC_STDOUT = """\
 [2026-08-04T02:14:12] Walked 10 items in 0.001 seconds (15463.025 items/sec)
 [2026-08-04T02:14:12] Started   : Aug-04-2026, 02:14:12
+[2026-08-04T02:14:12] Seconds   : 0.000
 [2026-08-04T02:14:12] Items     : 0
 [2026-08-04T02:14:12] Copying items to destination
 [2026-08-04T02:14:12] Items: 10
@@ -77,6 +79,7 @@ DSYNC_STDOUT = """\
 [2026-08-04T02:14:12] Data: 50.000 B (7.000 B per file)
 [2026-08-04T02:14:12] Copy data: 50.000 B (50 bytes)
 [2026-08-04T02:14:12] Copy rate: 3.284 KiB/s (50 bytes in 0.015 seconds)
+[2026-08-04T02:14:12] Seconds: 0.049
 [2026-08-04T02:14:12] Items: 10
 [2026-08-04T02:14:12]   Directories: 3
 [2026-08-04T02:14:12]   Files: 7
@@ -86,19 +89,27 @@ DSYNC_STDOUT = """\
 [2026-08-04T02:14:12] Completed sync
 """
 
-# 실측 nsync stdout(잡 abc0b559 실행 단계, 설계 부록 A) -- 파싱에 쓰이는 줄만.
+# 실측 nsync stdout(포크 7a3189c 실행 단계, 2026-10-27 samples nsync_exec_ok) -- 파싱에 쓰이는 줄만. Completed 줄이 실제로
+# 반영된 수다(d192 -- 실행 files 의 출처).
 NSYNC_STDOUT = """\
-[2026-08-10T01:28:39] Progress 100.0% batch 1/1 actions=9 copied-files=7 copied-volume=50.000 B recent(actions=9 files=7 volume=50.000 B, 27.35 files/s, 195.333 B/s over 0.256 s) avg(27.35 files/s, 195.333 B/s)
-[2026-08-10T01:28:39] Metadata diff summary: only-src=10 only-dst=0 common=0 changed=0
-[2026-08-10T01:28:39] Planned actions: copy=7 mkdir=3 symlink-update=0 meta-update=0 remove=0 skipped-dst-only=0
-[2026-08-10T01:28:39] Execution completed successfully
+[2026-10-27T13:52:40] Progress 100.0% batch 1/1 actions=7 copied-files=3 copied-volume=9.000 B recent(actions=7 files=3 volume=9.000 B, 2080.78 files/s, 6.096 KiB/s over 0.001 s) avg(2080.78 files/s, 6.096 KiB/s)
+[2026-10-27T13:52:40] Metadata diff summary: only-src=5 only-dst=2 common=1 changed=0
+[2026-10-27T13:52:40] Planned actions: copy=3 mkdir=1 symlink-update=1 meta-update=0 remove=2 skipped-dst-only=0
+[2026-10-27T13:52:40] Completed actions: copy=3 mkdir=1 symlink-update=1 meta-update=0 remove=2 copied-bytes=9
+[2026-10-27T13:52:40] Execution completed successfully
 """
 
+# 실측 drm stdout(포크 7a3189c, 2026-10-27 samples drm_exec_ok) -- "Removed N items in" 이 실제로 지운 수다.
 DRM_STDOUT = """\
-[2026-08-04T02:31:08] Walked 1 items in 0.001 seconds (1035.197 items/sec)
-[2026-08-04T02:31:08] Removing 1 items
-[2026-08-04T02:31:08] Removed 1 items (0.482 items/sec) in 2.077 seconds
+[2026-10-27T13:52:58] Walked 3 items in 0.001 seconds (3221.099 items/sec)
+[2026-10-27T13:52:58] Removing 3 items
+[2026-10-27T13:52:58] Removed 3 items in 0.001 seconds (4094.183 items/sec)
 """
+
+
+def _v2(tool, dryrun=False, **detail):
+    """summary v2 머리 키(러너 _build_summary) + 상세 키 -- 정상 경로 summary 의 핵심 3키 밖 전부."""
+    return {"detail_version": 2, "tool": tool, "dryrun": dryrun, **detail}
 
 # 신 스키마(dscan 1b93d54): top_k·oldest 없음, broken_paths_total/limit 신설.
 DSCAN_REPORT = {
@@ -155,9 +166,9 @@ def test_run_job_materializes_identity_and_runs_mpirun(tmp_path):
     assert "$DMS_SCAN_REPORT" not in body
     assert "dscan-report.json" in body
     assert body.startswith("#!/bin/sh")
-    # summary.json은 항상 3키 계약(설계 §2.3) -- dscan인데 리포트가 없으니
-    # files/bytes는 fail-soft로 null, returncode만 실린다
-    assert _summary(rec) == {"returncode": 0, "files": None, "bytes": None}
+    # summary.json 의 핵심 3키(설계 §2.3)는 늘 있다 -- dscan인데 리포트가 없으니 files/bytes는 fail-soft로 null,
+    # returncode만 실린다. 정상 경로라 v2 머리 키(d192)가 붙는다(dscan 은 상세 키가 없다).
+    assert _summary(rec) == {"returncode": 0, "files": None, "bytes": None, **_v2("dscan")}
 
 
 def test_run_job_dsync_summary_parses_final_items_and_bytes():
@@ -165,8 +176,10 @@ def test_run_job_dsync_summary_parses_final_items_and_bytes():
     rc = _run(rec, _env(DMS_JR_TOOL="dsync", DMS_JR_OPERATION="sync"))
     assert rc == 0
     # 실 캡처에는 중간·최종 요약이 공존한다 -- 최종 블록의 10/50이 잡혀야 한다
-    # (순서 규칙 자체는 파서 단위 테스트가 값을 달리해 고정한다)
-    assert _summary(rec) == {"returncode": 0, "files": 10, "bytes": 50}
+    # (순서 규칙 자체는 파서 단위 테스트가 값을 달리해 고정한다). 복사 실패 줄이 없으니 만든 항목 = Items.
+    assert _summary(rec) == {"returncode": 0, "files": 10, "bytes": 50,
+                             **_v2("dsync", copy_failed=0, create_failed=0, copied_items=10, copied_bytes=50,
+                                   tool_errors=0)}
 
 
 def test_run_job_drm_summary_parses_removed_items():
@@ -174,7 +187,7 @@ def test_run_job_drm_summary_parses_removed_items():
     rc = _run(rec, _env(DMS_JR_TOOL="drm", DMS_JR_OPERATION="rm"))
     assert rc == 0
     # drm은 바이트를 보고하지 않는다(설계 §1) -- bytes는 null이 정답이다
-    assert _summary(rec) == {"returncode": 0, "files": 1, "bytes": None}
+    assert _summary(rec) == {"returncode": 0, "files": 3, "bytes": None, **_v2("drm", removed=3, tool_errors=0)}
 
 
 def test_run_job_dscan_summary_reads_report(tmp_path):
@@ -183,16 +196,16 @@ def test_run_job_dscan_summary_reads_report(tmp_path):
     rec = _Recorder(rc=0, stdout="human readable listing\n")
     rc = _run(rec, _env(DMS_JR_ARTIFACT_DIR=str(tmp_path)))
     assert rc == 0
-    assert _summary(rec) == {"returncode": 0, "files": 10, "bytes": None}
+    assert _summary(rec) == {"returncode": 0, "files": 10, "bytes": None, **_v2("dscan")}
 
 
 def test_run_job_dscan_summary_fail_soft_when_report_missing(tmp_path):
     # 도구가 실패해 리포트가 없어도 파싱은 잡을 죽이지 않는다(설계 §4) --
-    # returncode는 보존되고 files/bytes만 null로 강등된다
+    # returncode는 보존되고 files/bytes만 null로 강등된다. dscan 실패에는 도구 사유가 없다(중단이 아니면).
     rec = _Recorder(rc=3, stdout="some non-json output")
     rc = _run(rec, _env(DMS_JR_ARTIFACT_DIR=str(tmp_path)))
     assert rc == 3
-    assert _summary(rec) == {"returncode": 3, "files": None, "bytes": None}
+    assert _summary(rec) == {"returncode": 3, "files": None, "bytes": None, **_v2("dscan")}
 
 
 def test_build_summary_unknown_tool_folds_to_nulls():
@@ -202,17 +215,20 @@ def test_build_summary_unknown_tool_folds_to_nulls():
     # _build_summary 의 fold 분기는 남아 있으므로(도구별 elif 사슬의 기본값)
     # 순수 함수 층에서 계속 못박는다 -- 지우면 "미지 도구를 dsync 파서로
     # 보내는" 회귀를 아무도 못 잡는다.
+    # 상세(v2)도 없다 -- 파싱 규칙이 없는 도구는 핵심 3키 그대로다.
     assert _build_summary("dcp", DSYNC_STDOUT, 0, "/tmp/nonexistent-artifacts") == {
         "returncode": 0, "files": None, "bytes": None}
 
 
 def test_run_job_preview_phase_uses_same_summary_contract():
-    # preview도 동일 계약(설계 §3): set_preview는 files/bytes를 무시하지만 dryrun
-    # 예상치로 정보 가치가 있고, phase 분기가 없어 runner가 단순해진다
+    # preview도 동일 계약(설계 §3): 단계를 가르는 것은 env 의 phase 가 아니라 argv 의 --dryrun 이다(러너가 실제로
+    # 도구에 넘긴 것). 이 argv 에는 --dryrun 이 없으니 실행 파서 그대로다.
     rec = _Recorder(rc=0, stdout=DSYNC_STDOUT)
     rc = _run(rec, _env(DMS_JR_TOOL="dsync", DMS_JR_PHASE="preview"))
     assert rc == 0
-    assert _summary(rec) == {"returncode": 0, "files": 10, "bytes": 50}
+    assert _summary(rec) == {"returncode": 0, "files": 10, "bytes": 50,
+                             **_v2("dsync", copy_failed=0, create_failed=0, copied_items=10, copied_bytes=50,
+                                   tool_errors=0)}
 
 
 def test_rank_script_quotes_argv():
@@ -534,12 +550,16 @@ def test_run_job_mpirun_has_ompi_env_and_runuser_preserve_environment():
 
 def test_run_job_nsync_summary_uses_nsync_parser():
     # nsync 실 출력이 확보되어(설계 부록 A) 가정이 해소됐다 -- nsync는 "Items:"/
-    # "(N bytes)"를 안 찍으므로 dsync 파서로 가면 null이 된다. 디스패치가
-    # parse_nsync_counts로 가야 "Planned actions:" 합계 10과 50 B가 실린다.
+    # "(N bytes)"를 안 찍으므로 dsync 파서로 가면 null이 된다. 디스패치가 parse_nsync_counts로 가야
+    # 실행의 "Completed actions:" 합계 7(d192 -- 계획이 아니라 실제로 반영된 수)과 copied-bytes 9 가 실린다.
     rec = _Recorder(rc=0, stdout=NSYNC_STDOUT)
     rc = _run(rec, _nsync_env(), wait_hostfile=_nsync_wait_hostfile([]))
     assert rc == 0
-    assert _summary(rec) == {"returncode": 0, "files": 10, "bytes": 50}
+    assert _summary(rec) == {
+        "returncode": 0, "files": 7, "bytes": 9,
+        **_v2("nsync",
+              planned={"copy": 3, "mkdir": 1, "symlink_update": 1, "meta_update": 0, "remove": 2, "skipped_dst_only": 0},
+              done={"copy": 3, "mkdir": 1, "symlink_update": 1, "meta_update": 0, "remove": 2}, copied_bytes=9)}
 
 
 # ---- 슬라이스 24 §2.1 층3: allowlist 밖 tool 은 exec 없이 거부 ----
@@ -589,10 +609,10 @@ DSYNC_DRYRUN_STDOUT = """\
 
 def test_build_summary_dsync_dryrun_uses_source_walk_items():
     assert _build_summary("dsync", DSYNC_DRYRUN_STDOUT, 0, "/tmp/x", dryrun=True) == {
-        "returncode": 0, "files": 2, "bytes": None}
+        "returncode": 0, "files": 2, "bytes": None, **_v2("dsync", True, source_items=2, tool_errors=0)}
     # dryrun 이 아니면(실행) 같은 출력은 여전히 모름 -- 복사 요약이 없으니 지어내지 않는다
     assert _build_summary("dsync", DSYNC_DRYRUN_STDOUT, 0, "/tmp/x") == {
-        "returncode": 0, "files": None, "bytes": None}
+        "returncode": 0, "files": None, "bytes": None, **_v2("dsync", copy_failed=0, create_failed=0, tool_errors=0)}
 
 
 DRM_DRYRUN_STDOUT = """\
@@ -609,27 +629,37 @@ Type=REG File=/cephfs/managed/dms_test/suppgrp/ro/p.txt
 def test_build_summary_drm_dryrun_uses_walk_items():
     # 2026-10-12: rm 미리보기가 늘 files null(「삭제 대상 모름」)이었다 -- drm --dryrun 은 삭제 요약을 찍지 않는다.
     assert _build_summary("drm", DRM_DRYRUN_STDOUT, 0, "/tmp/x", dryrun=True) == {
-        "returncode": 0, "files": 6, "bytes": None}
+        "returncode": 0, "files": 6, "bytes": None, **_v2("drm", True, target_items=6, tool_errors=0)}
     # 실행(dryrun 아님)은 같은 출력이면 여전히 모름 -- 실제로 지운 수를 walk 로 지어내지 않는다
     assert _build_summary("drm", DRM_DRYRUN_STDOUT, 0, "/tmp/x") == {
-        "returncode": 0, "files": None, "bytes": None}
+        "returncode": 0, "files": None, "bytes": None, **_v2("drm", tool_errors=0)}
 
 
 def test_quiet_preview_never_trusts_a_walk_line():
     # 2026-10-12 보안 검토(불완전 수정): -q 는 진짜 walk 요약을 지우지만 drm 목록은 printf 라 남는다 -- 이름에 심은 가짜
     # 줄 하나가 「정확히 1개」를 만족했다. quiet 미리보기는 walk 줄을 믿지 않는다(옛 제어면·DB 변조 argv 대비).
+    # d192: 상세도 계산하지 않는다(target_items·source_items 없음) -- quiet 표식만 남는다.
     fake_only = ("\nType=DIR File=/cephfs/managed/u/evil\n"
                  "[2026-10-12T01:00:00] Walked 1 items in 0.0 seconds (x)\n\n")
     assert _build_summary("drm", fake_only, 0, "/tmp/x", dryrun=True, quiet=True) == {
-        "returncode": 0, "files": None, "bytes": None}
+        "returncode": 0, "files": None, "bytes": None, **_v2("drm", True, quiet=True)}
     assert _build_summary("dsync", DSYNC_DRYRUN_STDOUT, 0, "/tmp/x", dryrun=True, quiet=True) == {
-        "returncode": 0, "files": None, "bytes": None}
+        "returncode": 0, "files": None, "bytes": None, **_v2("dsync", True, quiet=True)}
     # quiet 가 아니면 같은 출력의 가짜 줄 하나는 진짜 요약이 없으니 여전히 1개로 보인다 -- 그래서 제어면이 미리보기에
     # --quiet 를 빼는 것과 이 러너 가드가 짝이다(진짜 요약이 늘 있는 출력에서만 「정확히 1개」 규칙이 의미가 있다).
+    assert _build_summary("drm", fake_only, 0, "/tmp/x", dryrun=True)["files"] == 1
     rec = _Recorder(rc=0, stdout=fake_only)
     _run(rec, _env(DMS_JR_TOOL="drm", DMS_JR_OPERATION="rm", DMS_JR_PHASE="preview",
                    DMS_JR_ARGV=json.dumps(["--quiet", "--dryrun", "/cephfs/managed/u"])))
-    assert _summary(rec) == {"returncode": 0, "files": None, "bytes": None}
+    assert _summary(rec) == {"returncode": 0, "files": None, "bytes": None, **_v2("drm", True, quiet=True)}
+
+
+def test_quiet_execution_counts_are_unknown_too():
+    # d192: -q 실행도 도구가 아무것도 찍지 않는다(MFU_LOG_NONE -- ERROR 줄까지). 혹시 무언가 섞여 있어도(옛 빌드·변조) 개수를
+    # 지어내지 않는다 -- 「0개 삭제」가 아니라 모름이다.
+    assert _build_summary("drm", DRM_STDOUT, 0, "/tmp/x", quiet=True) == {
+        "returncode": 0, "files": None, "bytes": None, **_v2("drm", quiet=True)}
+    assert _build_summary("nsync", NSYNC_STDOUT, 0, "/tmp/x", quiet=True)["files"] is None
 
 
 def test_run_job_drm_preview_fills_files_from_the_walk():
@@ -637,7 +667,8 @@ def test_run_job_drm_preview_fills_files_from_the_walk():
     rc = _run(rec, _env(DMS_JR_TOOL="drm", DMS_JR_OPERATION="rm", DMS_JR_PHASE="preview",
                         DMS_JR_ARGV=json.dumps(["--dryrun", "/cephfs/managed/dms_test/suppgrp"])))
     assert rc == 0
-    assert _summary(rec) == {"returncode": 0, "files": 6, "bytes": None}
+    assert _summary(rec) == {"returncode": 0, "files": 6, "bytes": None,
+                             **_v2("drm", True, target_items=6, tool_errors=0)}
 
 
 def test_run_job_detects_dryrun_from_argv_and_fills_preview_files():
@@ -646,7 +677,8 @@ def test_run_job_detects_dryrun_from_argv_and_fills_preview_files():
                         DMS_JR_ARGV=json.dumps(["--batch-files", "1000000", "--dryrun",
                                                 "/cephfs/managed/a", "/cephfs/managed/b"])))
     assert rc == 0
-    assert _summary(rec) == {"returncode": 0, "files": 2, "bytes": None}
+    assert _summary(rec) == {"returncode": 0, "files": 2, "bytes": None,
+                             **_v2("dsync", True, source_items=2, tool_errors=0)}
 
 
 def test_nsync_hostfile_keeps_source_then_destination_order_as_ips():
@@ -748,6 +780,6 @@ def test_run_job_scan_with_non_utf8_name_succeeds_end_to_end(tmp_path):
     assert rc == 0
     summary = (tmp_path / "summary.json").read_bytes()
     assert summary.isascii()                                   # 제어면 read_contained_text 는 strict UTF-8
-    assert json.loads(summary) == {"returncode": 0, "files": 510971, "bytes": 123}
+    assert json.loads(summary) == {"returncode": 0, "files": 510971, "bytes": 123, **_v2("dscan")}
     log = (tmp_path / "stdout.log").read_bytes().decode("utf-8")  # strict 로 읽힌다
     assert "BCompare-3.3.5.15075.exe [abnormal_time]" in log and "�" in log

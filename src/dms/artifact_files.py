@@ -54,8 +54,8 @@ PHASES = ("preflight", "preview", "exec_preflight", "execution")
 # 가드도 피한다).
 NAME_RE = re.compile(r"[A-Za-z0-9._-]+")
 JOB_ID_RE = re.compile(r"[0-9a-f]{32}")
-# 컨트롤러 summary.json 읽기 상한. 정상 summary 는 3키 수십 바이트(runner._build_summary)
-# 라 1MiB 는 넉넉하고, 요청자가 다GB 파일을 summary.json 으로 심어 컨트롤러를 OOM
+# 컨트롤러 summary.json 읽기 상한. 정상 summary 는 핵심 3키 + v2 상세(runner._build_summary -- 실패 표본 10개 × 경로
+# 256자, \u 이스케이프로 커져도 수십 KB)라 1MiB 는 넉넉하고, 요청자가 다GB 파일을 summary.json 으로 심어 컨트롤러를 OOM
 # 크래시 루프에 넣는 것을 끊는다.
 SUMMARY_MAX_BYTES = 1024 * 1024
 

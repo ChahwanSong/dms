@@ -368,7 +368,8 @@ _ROOT = {"uid": 0, "gid": 0, "username": "ops", "privileged": True}
 
 def _spec(**kw):
     base = dict(job_id="j1", phase="preview", operation="sync", tool="dsync", dryrun=False, identity=_ROOT,
-                paths={"source": "/s/a", "source_storage": "s", "destination": "/d/out", "destination_storage": "d"},
+                paths={"source": "/s/a", "source_storage": "s", "destination": "/d/out", "destination_storage": "d",
+                       "source_root": "/s", "destination_root": "/d"},
                 options={}, candidates={"primary": ["n1"]}, process_count=1, queue="dms-data", priority_class="dms-mid",
                 artifact_base="file:///art", result_owner="1500:1500", result_owner_rule="storage",
                 result_owner_direct=True)
@@ -392,7 +393,7 @@ def test_direct_predicate_and_argv():
     argv = tool_argv(_spec(options={"chown": "7:7"}), abs_paths=spec.paths)
     assert argv.count("--chown") == 1 and argv[argv.index("--chown") + 1] == "7:7"
     # PV 목적지(contain 의 destination)면 PV 규칙이 먼저다 -- 직접 경로 술어는 거짓, 적용은 PV 술어로
-    pv = dataclasses.replace(spec, paths={**spec.paths, "contain": {"destination": {"root": "/d", "anchor": "/d"}}})
+    pv = dataclasses.replace(spec, paths={**spec.paths, "contain": {"destination": {"root": "/d"}}})
     assert direct_dest_owner_applies(pv) is False and pv_dest_owner_applies(pv) is True
     # 직접 경로 플래그가 없으면 종전 그대로(root -- 개입 없음)
     assert "--chown" not in tool_argv(_spec(result_owner_direct=False), abs_paths=spec.paths)

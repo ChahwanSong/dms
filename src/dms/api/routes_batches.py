@@ -737,7 +737,8 @@ def confirm_batch(batch_id: str, request: Request, body: ConfirmBatchBody | None
         "previewed": sum(1 for it in items if it.get("job_state") == DataJobState.CONFIRM_PENDING.value),
         "items": len(items),
         "options": b["options"],
-        # 확인한 미리보기의 대상 수 합계(rm = 지울 항목, sync = 복사 대상) -- 「누가 몇 개 삭제를 확인했나」를 감사 행에.
+        # 확인한 미리보기의 대상 수 합계(rm = 지울 항목, sync = nsync 변경 예정·dsync 소스 전체 -- 뜻이 달라 도구별 합
+        # files_by_tool 도, d192) -- 「누가 몇 개 삭제를 확인했나」를 감사 행에.
         # 자동 확인(orchestrator)도 같은 함수로 같은 키를 남긴다(batch_orchestrator.preview_files).
         **preview_files(items),
     }

@@ -11,7 +11,7 @@ import pytest
 
 from dms.domain import RequestState
 from dms.execution import ExecStatus, StubExecutionAdapter
-from dms.execution_manifests import EXECUTION_REASONS, parse_execution_reason
+from dms.execution_manifests import EXECUTION_REASONS, TOOL_FAILURE_REASONS, parse_execution_reason
 from dms.repositories import Repositories
 from dms.stepper import JobStepper
 
@@ -129,6 +129,69 @@ def test_preview_failure_with_worker_marker(db):
     assert doc["phase"] == "preview"
 
 
+# d192: 러너가 도구 비0 종료 때 찍는 사유 마커 + 도구 출력 발췌. 발췌는 포크 7a3189c nsync 실 출력(디렉토리 → 파일 교체,
+# 삭제 꺼짐 -- 비어 있지 않은 디렉토리는 교체되지 않고 실패) 그대로이고, 줄마다 "  | " 접두라 마커로 읽히지 않는다.
+_NSYNC_TYPE_CHANGE_TAIL = (
+    "[2026-10-27T13:52:43] Failed replace-dir `d`: Directory not empty (errno 39)\n"
+    "[2026-10-27T13:52:43] [0] [/release/mpifileutils/src/nsync/nsync.c:897] ERROR: Failed items: 1 (replace-dir 1); "
+    "listed below: 1\n"
+    "[2026-10-27T13:52:43]   failed replace-dir `d`: Directory not empty (errno 39)\n"
+    "[2026-10-27T13:52:43] Planned actions: copy=2 mkdir=0 symlink-update=0 meta-update=0 remove=1 skipped-dst-only=1\n"
+    "[2026-10-27T13:52:43] Completed actions: copy=1 mkdir=0 symlink-update=0 meta-update=0 remove=0 copied-bytes=5\n"
+    "[2026-10-27T13:52:43] Type changes: to-directory 0, from-directory 1\n"
+    "[2026-10-27T13:52:43] [0] [/release/mpifileutils/src/nsync/nsync.c:9907] ERROR: Execution completed with errors: "
+    "scan=0 exec=1\n")
+
+
+def _echo(text):
+    return "".join(f"  | {line}\n" for line in text.splitlines())
+
+
+def test_tool_failure_marker_becomes_the_reason_and_echoed_lines_are_not_markers(db):
+    repos = Repositories(db)
+    rid, jid = _scan_job(repos)
+    # 발췌 안에 파일 이름 등으로 마커 모양 줄이 섞여도(접두 "  | ") 승격되지 않는다 -- 러너 자신의 마커만.
+    log = ("DMS_EXEC_REASON=sync_type_change_refused\n"
+           "DMS_JR_TOOL_OUTPUT (stdout.log 마지막 9줄)\n"
+           + _echo(_NSYNC_TYPE_CHANGE_TAIL + "DMS_EXEC_REASON=workers_unreachable\n"))
+    job = _fail_execution(repos, StubExecutionAdapter(), jid, ExecStatus.FAILED, log)
+    assert job["state"] == "Failed"
+    assert repos.data_jobs.job_transitions(jid)[-1]["reason_code"] == "sync_type_change_refused"
+    assert repos.requests.last_reason_code(rid) == "sync_type_change_refused"
+
+
+def test_marker_only_inside_the_echoed_excerpt_is_not_promoted(db):
+    repos = Repositories(db)
+    rid, jid = _scan_job(repos)
+    log = "DMS_JR_TOOL_OUTPUT (stdout.log 마지막 2줄)\n" + _echo("DMS_EXEC_REASON=destination_full\nboom\n")
+    _fail_execution(repos, StubExecutionAdapter(), jid, ExecStatus.FAILED, log)
+    assert repos.data_jobs.job_transitions(jid)[-1]["reason_code"] == "execution_failed"
+
+
+def test_echoed_legacy_redirect_line_does_not_remap_a_sync_reason(db):
+    # dms-k8s 고유(2026-10-28): 옛 잡 이미지 봉쇄의 쪽 매핑(parse_execution_reason 의 _LEGACY_REDIRECT_SIDES)도 줄 머리 비교라
+    # 꼬리 발췌(접두 "  | ")의 진단 줄 모양에는 걸리지 않는다 -- 마커가 target 이어도 쪽을 모르면 target 그대로다.
+    entries = [("launcher", "DMS_EXEC_REASON=target_path_redirected\n"
+                + _echo("DMS_JR_PV_PATH_REDIRECTED side='source' path='/x' root='/y'\n"), None)]
+    assert parse_execution_reason(entries, operation="sync") == "target_path_redirected"
+
+
+@pytest.mark.parametrize("code", sorted(TOOL_FAILURE_REASONS))
+def test_every_tool_failure_marker_is_promoted_on_a_failed_preview(db, code):
+    # 미리보기(--dryrun)도 같은 러너다 -- 예: --contents 비교가 O_DIRECT 버퍼에 걸려 MPI 중단(tool_aborted).
+    repos = Repositories(db)
+    rid, jid = _sync_job(repos)
+    adapter = StubExecutionAdapter()
+    stepper = JobStepper(repos, adapter, settings=_Settings())
+    stepper.run_once()
+    ref = f"stub-preview-{jid}"
+    adapter.script(ref, [ExecStatus.FAILED])
+    adapter.set_log(ref, [("pv-launcher-0", f"DMS_EXEC_REASON={code}\n", None)])
+    stepper.run_once()
+    stepper.run_once()
+    assert repos.data_jobs.job_transitions(jid)[-1]["reason_code"] == code
+
+
 def test_preview_failure_without_marker_keeps_preview_failed(db):
     repos = Repositories(db)
     rid, jid = _sync_job(repos)
@@ -166,7 +229,14 @@ def test_failed_worker_pod_marker_becomes_the_reason(db):
 
 def test_parse_execution_reason_whitelist_and_shape():
     # target_path_redirected(2026-10-21): 러너의 drm 직전 rm 대상 봉쇄 재확인(runner.rm_target_redirected).
-    assert EXECUTION_REASONS == frozenset({"workers_unreachable", "target_path_redirected"})
+    # source/destination_path_redirected(2026-10-28): sync 경로 봉쇄 재확인(dsync 런처·nsync rank -- dms_job_runner.contain).
+    # TOOL_FAILURE_REASONS(2026-10-27 d192, dms-k8s 이식 2026-10-28): 도구가 비0 으로 끝났을 때 러너가 summary 상세에서 정한 사유.
+    assert TOOL_FAILURE_REASONS == frozenset({
+        "tool_aborted", "destination_full", "destination_read_only", "sync_stopped_max_errors",
+        "sync_type_change_refused", "source_scan_incomplete", "sync_items_failed", "rm_items_failed",
+        "preview_scan_incomplete"})
+    assert EXECUTION_REASONS == frozenset({"workers_unreachable", "target_path_redirected",
+                                           "source_path_redirected", "destination_path_redirected"}) | TOOL_FAILURE_REASONS
     assert parse_execution_reason([("w", "DMS_EXEC_REASON=identity_groups_not_applied", None)]) is None   # 은퇴(2026-10-26)
     assert parse_execution_reason([("launcher", "DMS_EXEC_REASON=target_path_redirected\n", None)]) == "target_path_redirected"
     assert parse_execution_reason([("p", "x\n  DMS_EXEC_REASON=workers_unreachable  \n", None)]) == "workers_unreachable"
@@ -174,6 +244,46 @@ def test_parse_execution_reason_whitelist_and_shape():
         == "workers_unreachable"
     assert parse_execution_reason([("p", "DMS_PREFLIGHT_REASON=target_not_readable", None)]) is None
     assert parse_execution_reason(None) is None and parse_execution_reason([]) is None
+
+
+_LEGACY = "DMS_EXEC_REASON=target_path_redirected\nDMS_JR_PV_PATH_REDIRECTED side='{side}' path='/p' root='/r'\n"
+
+
+def test_legacy_sync_redirect_marker_is_split_by_side():
+    # 2026-10-28 전 잡 이미지(배포를 건너 도는 잡)의 러너는 sync 봉쇄에도 target 코드 + 「DMS_JR_PV_PATH_REDIRECTED side=…」를
+    # 찍었다 -- sync 면 그 쪽으로 새 코드를 고른다. 쪽을 모르거나 sync 가 아니면 그대로(target 문구는 넓은 뜻).
+    for side, want in (("source", "source_path_redirected"), ("destination", "destination_path_redirected"),
+                       ("?", "target_path_redirected")):
+        entries = [("launcher", _LEGACY.format(side=side), None)]
+        assert parse_execution_reason(entries, operation="sync") == want
+        assert parse_execution_reason(entries, operation="scan") == "target_path_redirected"
+        assert parse_execution_reason(entries) == "target_path_redirected"
+    # 새 러너는 쪽별 코드를 바로 찍는다 -- 연산과 무관하게 그대로
+    assert parse_execution_reason([("l", "DMS_EXEC_REASON=destination_path_redirected\n", None)],
+                                  operation="sync") == "destination_path_redirected"
+    # 쪽은 진단 줄의 첫 칸만 본다 -- 경로 글자에 든 side= 는 쪽이 아니다
+    fake = "DMS_EXEC_REASON=target_path_redirected\nDMS_JR_PV_PATH_REDIRECTED side='?' path=\"side='source' \" root=''\n"
+    assert parse_execution_reason([("l", fake, None)], operation="sync") == "target_path_redirected"
+
+
+@pytest.mark.parametrize("log,want", [
+    ("DMS_EXEC_REASON=source_path_redirected\nDMS_JR_PATH_REDIRECTED side='source' path='/src/dms/a'\n",
+     "source_path_redirected"),
+    (_LEGACY.format(side="destination"), "destination_path_redirected"),       # 옛 잡 이미지의 PV sync 마커
+])
+def test_sync_preview_redirect_marker_becomes_the_side_reason(db, log, want):
+    repos = Repositories(db)
+    rid, jid = _sync_job(repos)
+    adapter = StubExecutionAdapter()
+    stepper = JobStepper(repos, adapter, settings=_Settings())
+    stepper.run_once()                                   # Pending -> Preflight
+    ref = f"stub-preview-{jid}"
+    adapter.script(ref, [ExecStatus.FAILED])
+    adapter.set_log(ref, [("pv-launcher-0", log, None)])
+    stepper.run_once()                                   # Preflight ok -> PreviewRunning
+    stepper.run_once()                                   # Preview FAILED
+    assert repos.data_jobs.job_transitions(jid)[-1]["reason_code"] == want
+    assert repos.requests.last_reason_code(rid) == want
 
 
 def _batch_child(repos, db, rid, status):

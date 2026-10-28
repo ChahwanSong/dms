@@ -23,10 +23,6 @@ const split = (parts: string[]) => parts.length > 1 && parts.some((p) => p !== "
 const showPath = (parts: string[]) =>
   parts.map((s) => s.replace(/\r\n|[\r\n]/g, "⏎")).join(split(parts) ? "\n→ " : " → ");
 const pathClass = (parts: string[]) => (split(parts) ? "whitespace-pre-line font-mono text-xs" : "font-mono text-xs");
-// 요청 상세 전용 문구 -- 옛 비 root 행에 open_noatime 이 실린 기록(execution_manifests 는 실행 신원과 무관하게 --open-noatime 을
-// 렌더한다). 2026-10-26 뒤로 새 작업은 전부 root 라 이 문구는 옛 행에만 나온다.
-const NOATIME_DETAIL =
-  "open_noatime 이 비 root 실행에 실렸습니다 — 실행 신원 소유가 아닌 파일은 O_NOATIME 으로 열 수 없어(EPERM) 복사가 실패할 수 있습니다.";
 // head 는 첫 「 — 」 앞(lead)만 굵게. bad = 전부 빨강(root 로 계획됨), badLead = lead 만 빨강(「요청됨 — 실행되지
 // 않았습니다」의 안심 절반까지 경보색으로 칠하지 않는다). [lead, rest]
 const HEAD_TONE: Record<LineTone, [string, string]> = {
@@ -117,7 +113,6 @@ function OptionsCell({ v }: { v: OptionsView }) {
       {v.unknown.length > 0 && (
         <p className="mt-1 text-xs text-ink/70">그 밖에 기록된 값: <span className="break-all font-mono">{v.unknown.join(" · ")}</span></p>
       )}
-      {v.noatimeWarn && <p className="mt-1 text-xs text-attn">{NOATIME_DETAIL}</p>}
     </>
   );
 }

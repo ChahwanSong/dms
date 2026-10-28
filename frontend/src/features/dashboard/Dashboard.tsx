@@ -13,6 +13,9 @@ import type { InfraComponent, StateCount } from "../../lib/types";
 // 집합은 domain.DataJobState 기준: 비종단 중 Pending만 "대기", 나머지가 "실행 중".
 const RUNNING_STATES = new Set(
   ["Preflight", "PreviewRunning", "ConfirmPending", "Executing", "Running"]);
+// 「실패(24h)」 = Failed·TimedOut 만(2026-10-27 d192 에 서버 분해 표가 같은 정의로 맞춰졌다 -- metrics._FAILED_STATES,
+// JobStatsSection Breakdown 주석). 거부(Rejected)·취소·만료(Cancelled·PreviewExpired)를 여기에 더하지 마라: 아래 잡 통계의
+// 「실패」 열과 숫자가 어긋나고, 사람이 멈춘 잡이 실패 경보로 보인다.
 const FAILED_STATES = new Set(["Failed", "TimedOut"]);
 
 export function kpiFromStates(byState: StateCount[]) {

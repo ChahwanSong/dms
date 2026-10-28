@@ -86,18 +86,23 @@ test("computes and renders the request duration from created_at to the last tran
   expect(await screen.findByText("1분 30초")).toBeInTheDocument();
 });
 
-test("renders the job's result_summary as key/value pairs", async () => {
+test("renders the job's (old 3-key) result_summary as labeled tiles, not raw keys", async () => {
+  // d192: 결과는 원 키(files·bytes) 대신 뜻으로 그린다. 상세가 없는 옛 요약은 뜻을 단정하지 않는 중립 라벨(「항목 수」·
+  // 「크기」) -- nsync 의 옛 files 는 계획 합이라 「복사한 파일」이라 부르면 거짓이었다(포탈 괴리 [2]·[4]).
   server.use(
     http.get("/api/user/requests/r1", () => HttpResponse.json(REQUEST)),
     http.get("/api/user/requests/r1/jobs", () => HttpResponse.json(JOBS)),
   );
   renderAt();
-  expect(await screen.findByText("files")).toBeInTheDocument();
-  expect(screen.getByText("120")).toBeInTheDocument();
-  expect(screen.getByText("bytes")).toBeInTheDocument();
+  // 위 KPI 칸과 ② 「실행 결과」 타일이 같은 중립 라벨이다(d192 리뷰 portal-jobs-20 -- 예전엔 KPI 만 「반영한 항목」이라 같은
+  // 수를 두 이름으로 불렀다). 순서: KPI, 실행 결과.
+  const files = await screen.findAllByText("항목 수");
+  expect(files.map((dt) => dt.nextElementSibling?.textContent)).toEqual(["120개", "120개"]);
+  expect(screen.queryByText("files")).toBeNull();
+  expect(screen.queryByText("반영한 항목")).toBeNull();
   // bytes 는 사람 표기 + 원값(2026-08-23, scan 실 사용량도 이 칸으로 온다). 1 KiB 미만은 사람 표기가 곧 원값이라
   // 괄호 없이 한 번만(2026-10-08 — 「456 B (456 B)」 중복 제거; 1 KiB 이상은 아래 테스트가 괄호를 고정한다).
-  expect(screen.getByText("bytes").nextElementSibling?.textContent).toBe("456 B");
+  expect(screen.getAllByText("크기").map((dt) => dt.nextElementSibling?.textContent)).toEqual(["456 B", "456 B"]);
 });
 
 test("humanizes result_summary bytes above 1 KiB", async () => {
@@ -107,8 +112,10 @@ test("humanizes result_summary bytes above 1 KiB", async () => {
     http.get("/api/user/requests/r1/jobs", () => HttpResponse.json(jobs)),
   );
   renderAt();
-  const dt = await screen.findByText("bytes");
-  expect(dt.nextElementSibling).toHaveTextContent("1.5 KiB (1536 B)");
+  // 「크기」는 KPI 칸(사람 표기만)과 ② 실행 결과 타일(원값 병기) 둘이다(옛 요약은 둘 다 중립 라벨) -- 타일 쪽을 본다.
+  const dts = await screen.findAllByText("크기");
+  // 원값도 천 단위 구분(이 화면의 다른 수와 같은 ko-KR 표기)
+  expect(dts.map((dt) => dt.nextElementSibling?.textContent)).toEqual(["1.5 KiB", "1.5 KiB (1,536 B)"]);
 });
 
 test("renders a null result_summary value as — instead of the literal \"null\"", async () => {
@@ -121,8 +128,10 @@ test("renders a null result_summary value as — instead of the literal \"null\"
     http.get("/api/user/requests/r1/jobs", () => HttpResponse.json(jobs)),
   );
   renderAt();
-  const dt = await screen.findByText("bytes");
-  expect(dt.nextElementSibling).toHaveTextContent("—");
+  // KPI 칸과 ② 실행 결과 타일 둘 다 「—」(옛 요약은 둘 다 중립 라벨 「크기」)
+  const dts = await screen.findAllByText("크기");
+  expect(dts).toHaveLength(2);
+  for (const dt of dts) expect(dt.nextElementSibling).toHaveTextContent("—");
   expect(screen.queryByText("null")).not.toBeInTheDocument();
 });
 

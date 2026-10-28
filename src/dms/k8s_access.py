@@ -32,7 +32,7 @@ PV 목적지 sync 의 결과 소유(2026-10-26 사용자 지시): 제출이 dest
 """
 import posixpath
 
-from .domain import DomainValidationError, validate_relative_path
+from .domain import DomainValidationError, has_control_char, validate_relative_path
 from .identity import privilege_eligible
 from .privileged import privileged_names
 from .repositories.k8s import storage_default_owner, storage_kind
@@ -96,10 +96,11 @@ def pair_gate_exempt(payload) -> bool:
 
 
 def normalize_subpath(subpath) -> str:
-    """PV 안 하위 경로(빈 값·'.'·'./' = PV 전체 = ''). 절대 경로·NUL·'..' 성분은 unsafe_path(제출 검증의 기존 코드)."""
+    """PV 안 하위 경로(빈 값·'.'·'./' = PV 전체 = ''). 절대 경로·제어 문자(NUL·줄바꿈 등 -- domain.has_control_char,
+    validate_relative_path 와 같은 규칙)·'..' 성분은 unsafe_path(제출 검증의 기존 코드)."""
     if subpath is None or subpath == "":
         return ""
-    if (not isinstance(subpath, str) or subpath.startswith("/") or "\x00" in subpath
+    if (not isinstance(subpath, str) or subpath.startswith("/") or has_control_char(subpath)
             or ".." in subpath.split("/")):
         raise DomainValidationError("unsafe_path", repr(subpath))
     norm = posixpath.normpath(subpath)

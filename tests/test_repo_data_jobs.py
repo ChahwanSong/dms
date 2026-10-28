@@ -186,6 +186,18 @@ def test_set_artifact_without_counts_leaves_null(db):
     assert (job["files_count"], job["bytes_count"]) == (None, None)
 
 
+def test_set_artifact_without_promotion_keeps_summary_but_leaves_counts_null(db):
+    # d192: 미리보기 실패의 summary 는 화면에 보이되 files/bytes 는 할 예정인 수라 컬럼(지표 원천)에 올리지 않는다.
+    repos = _repos(db)
+    job_id = _mk_job(repos, _mk_request(repos))
+    repos.data_jobs.set_artifact(job_id, artifact_uri="file:///a", promote_counts=False,
+                                 result_summary={"returncode": 1, "files": 4, "bytes": 16})
+    job = repos.data_jobs.get_job(job_id)
+    assert job["result_summary"] == {"returncode": 1, "files": 4, "bytes": 16}
+    assert (job["files_count"], job["bytes_count"]) == (None, None)
+    assert job["artifact_uri"] == "file:///a"
+
+
 def test_set_artifact_rejects_non_int_counts(db):
     # summary는 신뢰 경계 밖(runner 산출물) -- 문자열·bool·음수가 컬럼을 오염시키면 안 된다
     repos = _repos(db)

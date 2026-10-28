@@ -29,8 +29,30 @@ export const REASON_MESSAGES: Record<string, string> = {
   destination_not_owned: "목적지 디렉토리가 작업을 실행하는 계정(요청자 본인 또는 지정된 실행 신원)의 소유가 아닙니다 — sync 는 목적지 최상위의 소유·권한·시각을 맞추는데 남의 디렉토리에는 그럴 수 없어(dsync 는 부분 복사 뒤 실패) 미리 거부합니다. 그룹 쓰기 권한이 있어도 소유자가 아니면 거부합니다. 본인 소유 디렉토리나 새 경로를 지정하세요",
   artifact_base_not_traversable: "작업 기록(artifact) 저장소에 실행 신원이 들어갈 수 없습니다 — 관리자에게 문의하세요(artifact base 디렉토리에 다른 사용자 실행(x) 권한이 필요합니다: 711 또는 755)",
   parent_not_writable: "대상의 상위 디렉토리에 쓸 수 없습니다",
-  // rm 대상 봉쇄(2026-10-21): preflight·exec_preflight 와 러너의 drm 직전 재확인이 같은 코드를 낸다.
-  target_path_redirected: "작업 경로(또는 그 상위)가 심볼릭 링크로 다른 곳을 가리킵니다 — 실제 경로를 확인하세요(관리 디렉토리·PV 안 경로에 심볼릭 링크가 끼면 작업하지 않습니다. PV 경로는 마지막 성분이 링크여도 막고, 삭제는 대상 자신이 링크면 링크만 지웁니다)",
+  // 경로 봉쇄(2026-10-21 rm → 2026-10-28 한 규칙으로 통일): preflight·exec_preflight 와 러너의 재확인(dsync·dscan·drm 런처, nsync rank)이
+  // 같은 코드를 낸다. target 은 삭제·PV 스캔 대상 공용이고(2026-10-28 전 잡 이미지의 PV sync 도 이 코드였다) 문구도 넓게 둔다.
+  target_path_redirected: "작업 대상 경로에 심볼릭 링크가 있어 작업하지 않았습니다(도구를 시작하기 전에 막았습니다) — 관리 디렉토리·PV 아래 경로의 중간 단계가 링크면 거부합니다. PV 스캔은 대상 자신이 링크여도 거부하고, 삭제는 대상 자신이 링크면 링크만 지웁니다(가리키는 곳은 그대로). 링크를 거치지 않는 경로로 다시 요청하세요",
+  source_path_redirected: "원본 경로에 심볼릭 링크가 있어 sync 하지 않았습니다(도구를 시작하기 전에 막았습니다) — 관리 디렉토리·PV 아래 경로의 어느 단계든(원본 자신 포함) 링크면 거부합니다. 링크를 거치지 않는 경로로 다시 요청하세요",
+  destination_path_redirected: "목적지 경로에 심볼릭 링크가 있어 sync 하지 않았습니다(도구를 시작하기 전에 막았습니다) — 관리 디렉토리·PV 아래 경로의 어느 단계든(목적지 자신 포함, 아직 없는 목적지는 있는 가장 깊은 상위까지) 링크면 거부합니다. 링크를 거치지 않는 경로로 다시 요청하세요",
+  // d192(2026-10-28 dms-ssc 에서 이식): 도구가 0 이 아닌 코드로 끝났을 때 러너가 도구 출력(summary v2)에서 정한 사유
+  // (DMS_EXEC_REASON 마커 → execution_manifests.EXECUTION_REASONS ⊇ TOOL_FAILURE_REASONS). 미리보기 실패에도 같은 코드가
+  // 붙는다. 「실패 항목」은 결과 화면의 목록이다. 고정 문구라 「나머지는 반영됐습니다」류를 단정하지 않는다(전부 실패해 0개
+  // 반영인 실행도 같은 코드다) -- 실제로 반영된 수는 실행 결과와 배너가 말한다. destination_* 도 「멈췄습니다」라 하지 않는다
+  // (dsync 는 멈추지 않고 이어 간다).
+  sync_items_failed: "일부 항목을 반영하지 못했습니다 — 반영된 수와 실패한 항목·이유는 실행 결과에, 전체 목록은 stdout.log 에 있습니다",
+  sync_type_change_refused: "목적지의 비어 있지 않은 디렉토리를 소스의 파일·링크로 바꾸지 않았습니다(삭제 옵션 꺼짐) — 「삭제」를 켜고 다시 실행하면 바뀝니다. 그 디렉토리 안의 목적지 전용 항목도 함께 지워집니다",
+  sync_stopped_max_errors: "실패가 허용 한도(nsync 기본 65,000건)에 닿아 중간에 멈췄습니다 — 남은 항목은 시도하지 않았습니다. 실패 원인을 고친 뒤 다시 실행하면 이어서 맞춥니다",
+  destination_full: "목적지 공간 또는 쿼터가 가득 차 항목을 쓰지 못했습니다 — 공간을 확보한 뒤 다시 실행하세요(이미 반영된 항목은 다시 복사하지 않습니다)",
+  destination_read_only: "목적지가 읽기 전용이라 항목을 쓰지 못했습니다 — 스토리지 마운트 상태를 관리자에게 확인하세요",
+  source_scan_incomplete: "소스 일부를 읽지 못했습니다(권한 등) — 읽은 부분만 반영됐고, 안전을 위해 이번 실행에서는 삭제를 하지 않았습니다. 「실패 항목」의 스캔 줄이 읽지 못한 경로입니다",
+  rm_items_failed: "지우지 못한 항목이 있습니다 — 지운 수와 실패한 항목·이유는 실행 결과에, 전체 목록은 stdout.log 에 있습니다",
+  // 모든 도구(dscan·drm 포함)에 붙는다 -- 「복사 도구」라 하지 않는다. mfu_abort 와 mpirun 배너는 stderr 로만 나간다(stdout.log 가
+  // 아니다 -- 러너는 두 흐름을 따로 담고, 실행 로그에 stderr 꼬리를 발췌한다).
+  tool_aborted: "도구가 비정상 종료했습니다(MPI 중단) — 실행 로그의 stderr 발췌나 stderr.log 의 ABORT 줄에 원인이 있습니다. sync 에서 direct 를 켰다면 버퍼 크기 조합 문제일 수 있습니다",
+  // 미리보기 전용(러너 _derive_reason, nsync 만): dry-run 이 일부를 읽지 못해 실패 -- 아무것도 바뀌지 않았다. nsync 의 스캔 오류
+  // 수는 소스·목적지 합이라 어느 쪽인지 단정하지 않는다. dms-k8s 는 모든 잡이 root 라 「실행 계정 권한」이 아니라 스토리지 쪽
+  // (NFS root_squash·끊긴 마운트 등)을 가리킨다.
+  preview_scan_incomplete: "미리보기에서 소스 또는 목적지 일부를 읽지 못했습니다(권한·스토리지 상태 등) — 데이터는 바뀌지 않았습니다. 읽지 못한 경로는 결과의 「실패 항목」(스캔) 줄에 있습니다. 그 경로의 권한(예: NFS root_squash)·마운트 상태를 확인하거나 그 경로를 빼고 다시 요청하세요",
   target_not_readable: "대상 경로를 읽을 수 없습니다 — 경로와 권한을 확인하세요",
   // 복합 접두 (stepper.py 가 f"{prefix}:{ExecutionError.reason_code}" 형태로 발생시킨다)
   preflight_submit_failed: "사전 점검을 시작하지 못했습니다",
@@ -168,6 +190,8 @@ export const REASON_MESSAGES: Record<string, string> = {
   workers_unreachable: "작업 노드(워커)가 제한 시간 안에 준비되지 않아 실행하지 못했습니다 — 워커 이름을 IP로 풀지 못했거나 ssh 접속이 되지 않았습니다. 대개 일시적이니 다시 실행하고, 반복되면 실행 로그의 DMS_JR_WORKER_UNREACHABLE 줄(호스트·단계)을 확인하세요",
   invalid_portal_subtitle: "서브네임은 40자 이하의 한 줄 문자열이어야 합니다(줄바꿈·탭·보이지 않는 문자 불가)",
   chown_name_not_supported: "chown 은 숫자 uid:gid 만 지정할 수 있습니다(예: 10003:10000) — 이름은 작업 컨테이너에서 해석되지 않습니다",
+  // d192(포탈 괴리 [8]): dsync 는 O_DIRECT 로 4 MiB 단위를 나눠 읽는다 -- 버퍼가 그 약수가 아니면 큰 파일에서 MPI 중단.
+  direct_bufsize_misaligned: "direct(O_DIRECT)를 켜면 버퍼 크기는 4 KiB~4 MiB 의 2의 거듭제곱(4096·8192·…·4194304)이어야 합니다 — dsync 는 4 MiB 단위로 나눠 읽는데 버퍼가 그 약수가 아니면 큰 파일에서 중단됩니다",
   verification_client_locked: "이 접속 위치에서 인증번호를 너무 여러 번 틀렸습니다 — 잠시 후(최대 24시간) 다시 시도하거나 관리자에게 문의하세요",
   mail_settings_changed: "그 사이 다른 관리자가 릴레이 주소를 바꿔 설정을 다시 불러왔습니다 — 바뀐 주소를 확인한 뒤 다시 저장하세요(입력한 인증 키는 칸에 남아 있습니다)",
   verification_email_failed: "인증 메일을 보내지 못했습니다 — 잠시 후 다시 시도하고, 계속되면 관리자에게 문의하세요",

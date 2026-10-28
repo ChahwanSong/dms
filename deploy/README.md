@@ -1200,7 +1200,7 @@ BACKLOG 결정 묶음(CHANGELOG 「BACKLOG 결정 묶음 구현」)에서 운영
   있으면 반영하지 않는다. 템플릿 `GET /api/admin/batches/csv-template?operation=scan|sync|rm`, 항목 내보내기
   `GET /api/admin/batches/<id>/items.csv`(BOM·수식 방어 `'` — 그대로 다시 올리면 같은 항목). 셋 다 조회라 공유 토큰도 된다(생성은
   그대로 특권 세션). 배치 생성의 스토리지 칸은 등록된 스토리지 드롭다운이다.
-- **dscan 총바이트·잘못된 인코딩 이름 수 — 잡 이미지 재빌드 필요**: `Dockerfile.mpifileutils` 의 `MPIFILEUTILS_REF` 가 ae781bd 다.
+- **dscan 총바이트·잘못된 인코딩 이름 수 — 잡 이미지 재빌드 필요**: `Dockerfile.mpifileutils` 의 `MPIFILEUTILS_REF` 가 ae781bd 이후(2026-10-28 부터 7a3189c — dscan 은 그대로)다.
   포탈 빌드에서 `dms-mpifileutils` 를 체크해(§8-5 — 기본 선택이 아니다) 같은 태그로 `dms-agent` 까지 빌드하고 잡 이미지를 올려야
   새 scan 리포트에 `summary.total_bytes`·`summary.invalid_name_entries` 가 생긴다. 옛 이미지·저장된 리포트는 총바이트 = 시간
   히스토그램 합(같은 값), 이름 수 = 「기록 없음」. 이름 수는 카운터일 뿐 broken 사유가 아니다(사용량 분석 상세·합계 각주·CSV 열).
@@ -1211,6 +1211,37 @@ BACKLOG 결정 묶음(CHANGELOG 「BACKLOG 결정 묶음 구현」)에서 운영
   감사 `batch / delete_record`, 작업 2000개), §8-2b, §9-8.
 - **마이그레이션**(자동): `builds.pods_gc_at` + `idx_builds_gc`, `request_purges.kind`, `data_jobs.artifacts_expired_at` +
   `idx_data_jobs_expiry`. RBAC·ConfigMap 키 추가는 `DMS_ARTIFACT_RETENTION_DAYS`(기본값과 같음) 하나.
+
+---
+
+## 12d. 2026-10-28 dms-ssc 이식 — mpifileutils 7a3189c · 경로 봉쇄 통일 · 실패 사유 · 통계 (운영자가 알아야 할 것)
+
+CHANGELOG 「dms-ssc 이식」에서 운영 표면이 바뀐 것만 모았다. 동작의 지도는 `docs/ARCHITECTURE.md`.
+
+- **잡 이미지 재빌드 필요**: `Dockerfile.mpifileutils` 의 `MPIFILEUTILS_REF` = 7a3189c 이고 잡 러너(`dms_job_runner` — summary v2·도구
+  결과 사유·경로 봉쇄 재확인)도 바뀌었다. 포탈 빌드에서 `dms-mpifileutils` 를 체크해(§8-5 — 기본 선택이 아니다) 같은 태그로 세 이미지를
+  빌드하고, 릴리스는 agent → job-image·controller·api. 배포 순서는 안전과 무관하다 — 새 제어면 + 옛 잡 이미지면 summary 가 3키라 결과
+  화면은 중립 라벨·도구 실패는 일반 `execution_failed`, 옛 제어면 + 새 잡 이미지면 새 사유 마커를 몰라 `execution_failed` 로 접는다. 봉쇄는 어느
+  조합이든 예전보다 약해지지 않는다(직접 경로 sync 의 봉쇄는 새 제어면의 사전 점검·env 가 있어야 생긴다). 새 사유·결과 화면을 보려면 둘 다
+  새 태그.
+- **동작이 바뀐 것**(사용자 문의에 답할 것):
+  - 목적지의 비어 있지 않은 디렉토리를 소스의 파일·링크로 바꾸는 sync 는 「삭제」가 꺼져 있으면 실패한다(`sync_type_change_refused`) — 옛
+    nsync 는 그 안의 목적지 전용 항목을 지워 버렸다(C8, 모든 잡이 root 라 데이터 손실). 바꾸려면 삭제를 켜고 다시 실행.
+  - rm 이나 sync 의 삭제가 일부를 못 지우면 이제 Failed(`rm_items_failed`·`sync_items_failed`) — 전엔 Succeeded 였다.
+  - nsync 는 목적지 공간·쿼터 부족(ENOSPC·EDQUOT)과 읽기 전용(EROFS)에서 바로 멈추고(`destination_full`·`destination_read_only`), 실패가
+    65,000건(포크 기본 — DMS 에서 바꿀 수 없다)에 닿아도 멈춘다(`sync_stopped_max_errors`). 원인을 고치고 다시 실행하면 이어서 맞춘다.
+  - nsync 의 `open_noatime` 이 실제로 동작한다(소스 atime 보존 — 전 이미지에선 무동작이었다).
+  - **직접 경로 sync 도 경로 봉쇄**를 받는다: 관리 디렉토리 아래 경로의 어느 단계든(소스·목적지 자신 포함) 심링크면 사전 점검·실행 직전·
+    도구 직전에 거부(`source_path_redirected`·`destination_path_redirected`). 관리 디렉토리 자신·그 위의 링크(마운트 경로 링크)는 괜찮다 —
+    링크를 거쳐 지정하던 경로는 실제 경로로 다시 낸다. 직접 경로 scan 은 봉쇄 없음(종전), rm 은 대상 자신이 링크면 링크만 지운다(종전).
+  - direct(O_DIRECT) 를 켜면 bufsize 는 4096·2^k ≤ 4 MiB 여야 한다 — 아니면 제출·배치 생성·실행 설정 변경이 422 `direct_bufsize_misaligned`.
+- **실패 원인 보기**: 요청 상세 「실행 로그」(launcher 로그)의 `DMS_EXEC_REASON=<code>` 줄이 사유이고, 그 뒤 `DMS_JR_TOOL_OUTPUT` 머리 아래
+  `  | ` 줄이 도구 출력 발췌(stdout 끝 80·stderr 끝 20줄, 합계 10 KiB)다. 전체는 stdout.log·stderr.log(결과 파일 만료 전 — §12b), 결과 화면의
+  「실패 항목」은 summary.json 의 표본(최대 10개).
+- **지표 API 키 변경**: `GET /api/admin/metrics/jobs` 의 `files_total`·`bytes_total` 이 없어지고 `sync_items_total`·`sync_bytes_total`·
+  `rm_items_total`(실패·중단된 실행이 실제로 처리한 수 포함 — 이식 전에 실패한 행은 옛 뜻이라 빼고 센다)이 생겼다. 분해 행에 `rejected`·
+  `cancelled`. 옛 키를 읽는 외부 스크립트는 고친다.
+- **마이그레이션·설정**: 없음(새 컬럼·ConfigMap 키 없음).
 
 ---
 

@@ -11,14 +11,16 @@ def repos(db):
 def _seed_job(db, repos, *, created_at, state="Succeeded", tool="dscan",
               operation="sync", storage="s1", dest_storage=None,
               requester="alice", reason_code=None, updated_at=None, files=None,
-              nbytes=None, wait=None, sched=None, exec_at=None):
+              nbytes=None, wait=None, sched=None, exec_at=None, summary=None):
     """data_jobs 한 행을 원하는 상태·시각으로 심는다. set_job_state는 updated_at을
     현재 시각으로 찍으므로 창(window) 테스트가 불가능하다 -- 정상 경로로 만들고
     시각·상태만 UPDATE로 덮는다. wait 는 submit_wait_seconds, sched 는
     sched_wait_seconds, exec_at 은 exec_submitted_at(셋 다 기본 NULL --
     기록 없음/진행 중과 같은 모양). operation 기본은 sync -- 처리량 합계가
     scan(관측)을 제외하므로(2026-08-23), 합계에 잡히는 쪽이 기본이어야 기존
-    시나리오들이 의미를 유지한다."""
+    시나리오들이 의미를 유지한다. summary 는 result_summary -- 실제 저장 경로
+    (data_jobs.set_artifact → db.dump_json)로 써서 지표의 v2 판별(LIKE)이 운영과
+    같은 글자를 본다(files_count 는 아래 UPDATE 의 files 가 정한다)."""
     rid = repos.requests.create(
         operation=operation, requester_id=requester, actor=requester,
         resource_key=f"k:{created_at}:{tool}:{state}:{requester}", payload={},
@@ -28,6 +30,9 @@ def _seed_job(db, repos, *, created_at, state="Succeeded", tool="dscan",
         rid, plan_id, operation=operation, priority="mid", storage_name=storage,
         destination_storage=dest_storage, target="a", options={}, tool=tool,
         worker_pool={}, precondition={}, actor="planner")
+    if summary is not None:
+        repos.data_jobs.set_artifact(job_id, artifact_uri="x", result_summary=summary,
+                                     promote_counts=False)
     db.execute(
         """UPDATE data_jobs SET state = :st, reason_code = :rc, created_at = :c,
                updated_at = :u, files_count = :f, bytes_count = :b,
@@ -105,8 +110,8 @@ def test_job_stats_by_state_tool_and_failure_reasons(db, repos):
     assert stats["by_state"] == [{"state": "Failed", "count": 2},
                                  {"state": "Succeeded", "count": 1}]
     assert stats["by_tool"] == [
-        {"tool": "dsync", "count": 2, "succeeded": 0, "failed": 2},
-        {"tool": "dscan", "count": 1, "succeeded": 1, "failed": 0}]
+        {"tool": "dsync", "count": 2, "succeeded": 0, "failed": 2, "rejected": 0, "cancelled": 0},
+        {"tool": "dscan", "count": 1, "succeeded": 1, "failed": 0, "rejected": 0, "cancelled": 0}]
     assert stats["failure_reasons"] == [
         {"reason_code": "execution_failed", "count": 2}]
 
@@ -118,7 +123,7 @@ def test_job_stats_storage_falls_back_to_destination(db, repos):
     stats = repos.metrics.job_stats(start="2026-08-09T00:00:00Z",
                                     end="2026-08-09T23:59:59Z")
     assert stats["by_storage"] == [
-        {"storage": "s2", "count": 1, "succeeded": 1, "failed": 0}]
+        {"storage": "s2", "count": 1, "succeeded": 1, "failed": 0, "rejected": 0, "cancelled": 0}]
 
 
 def test_job_stats_requester_comes_from_requests_join(db, repos):
@@ -128,8 +133,8 @@ def test_job_stats_requester_comes_from_requests_join(db, repos):
     stats = repos.metrics.job_stats(start="2026-08-09T00:00:00Z",
                                     end="2026-08-09T23:59:59Z")
     assert stats["by_requester"] == [
-        {"requester_id": "alice", "count": 1, "succeeded": 1, "failed": 0},
-        {"requester_id": "bob", "count": 1, "succeeded": 0, "failed": 1}]
+        {"requester_id": "alice", "count": 1, "succeeded": 1, "failed": 0, "rejected": 0, "cancelled": 0},
+        {"requester_id": "bob", "count": 1, "succeeded": 0, "failed": 1, "rejected": 0, "cancelled": 0}]
 
 
 def test_job_stats_throughput_buckets_by_iso_prefix(db, repos):
@@ -154,33 +159,154 @@ def test_job_stats_duration_only_from_terminal_jobs(db, repos):
     assert stats["duration_seconds"] == [30.0]   # 비종단(Pending)은 진행 중 -- 제외
 
 
-def test_job_stats_files_bytes_sum_only_succeeded_and_null_safe(db, repos):
-    _seed_job(db, repos, created_at="2026-08-09T01:00:00Z", files=10, nbytes=100)
-    _seed_job(db, repos, created_at="2026-08-09T02:00:00Z")            # NULL
+def _totals(stats):
+    return (stats["sync_items_total"], stats["sync_bytes_total"], stats["rm_items_total"])
+
+
+_EXEC = "2026-08-09T00:30:00Z"      # 실행 vcjob 제출 시각(exec_submitted_at) -- 합계는 실행까지 간 잡만 센다
+
+
+def _v2(files, nbytes=None, **extra):
+    """d192 러너의 실행 summary 모양(detail_version 2 -- files 는 실제로 일어난 일)."""
+    return {"returncode": 1, "files": files, "bytes": nbytes, "detail_version": 2, "tool": "nsync",
+            "dryrun": False, **extra}
+
+
+def test_job_stats_sync_rm_totals_cover_every_terminal_state_and_null_safe(db, repos):
+    # d192: files_count 는 실행에서 실제로 일어난 일만 담는다(미리보기 실패는 승격 안 함) -- 실패·취소된 실행이 이미
+    # 복사·삭제한 항목도 실제 변경이라 종단 전체를 더한다(예전엔 Succeeded 만: 실패분 5·50 이 빠졌다). sync 와 rm 은
+    # 따로 -- 예전 files_total 은 sync 반영 수와 rm 삭제 수를 한 숫자로 더했다. 성공이 아닌 행은 summary v2 일 때만
+    # 센다(옛 뜻의 실패 행은 아래 test_job_stats_totals_count_failed_runs_only_with_the_v2_meaning).
+    _seed_job(db, repos, created_at="2026-08-09T01:00:00Z", files=10, nbytes=100, exec_at=_EXEC)
+    _seed_job(db, repos, created_at="2026-08-09T02:00:00Z", exec_at=_EXEC)       # NULL -- 모름
     _seed_job(db, repos, created_at="2026-08-09T03:00:00Z", state="Failed",
-              reason_code="execution_failed", files=5, nbytes=50)      # 실패분 제외
+              reason_code="sync_items_failed", files=5, nbytes=50, exec_at=_EXEC,
+              summary=_v2(5, 50))                                                # 부분 처리도 실제
+    _seed_job(db, repos, created_at="2026-08-09T04:00:00Z", state="Cancelled",
+              reason_code="cancelled", files=2, nbytes=20, exec_at=_EXEC, summary=_v2(2, 20))
+    _seed_job(db, repos, created_at="2026-08-09T05:00:00Z", state="Executing",
+              files=99, nbytes=990, exec_at=_EXEC, summary=_v2(99, 990))         # 비종단 -- 아직 안 셈
+    _seed_job(db, repos, created_at="2026-08-09T06:00:00Z", operation="rm", tool="drm",
+              files=7, nbytes=1, exec_at=_EXEC)                                  # rm 바이트는 sync 에 안 섞인다
+    _seed_job(db, repos, created_at="2026-08-09T07:00:00Z", operation="rm", tool="drm",
+              state="Failed", reason_code="rm_items_failed", files=3, exec_at=_EXEC,
+              summary=_v2(3, tool="drm"))
     stats = repos.metrics.job_stats(start="2026-08-09T00:00:00Z",
                                     end="2026-08-09T23:59:59Z")
-    assert (stats["files_total"], stats["bytes_total"]) == (10, 100)
+    assert _totals(stats) == (17, 170, 10)
+    assert "files_total" not in stats and "bytes_total" not in stats
+
+
+def test_job_stats_totals_skip_jobs_that_never_reached_execution(db, repos):
+    # d192 전 미리보기 실패는 계획 수(nsync 계획 합·dsync 소스 전체·drm 대상)를 컬럼에 올렸다 -- 그 행이 창 안에 남아
+    # 있으면 종단 전체 합에 안 한 일이 섞인다. 실행 vcjob 을 제출한 적 없는 잡(exec_submitted_at NULL)은 세지 않는다.
+    _seed_job(db, repos, created_at="2026-08-09T01:00:00Z", files=10, nbytes=100, exec_at=_EXEC)
+    _seed_job(db, repos, created_at="2026-08-09T02:00:00Z", state="Failed",
+              reason_code="preview_failed", files=400, nbytes=4000)               # 옛 미리보기 실패 승격
+    _seed_job(db, repos, created_at="2026-08-09T03:00:00Z", operation="rm", tool="drm", state="TimedOut",
+              reason_code="preview_timed_out", files=50)
+    stats = repos.metrics.job_stats(start="2026-08-09T00:00:00Z",
+                                    end="2026-08-09T23:59:59Z")
+    assert _totals(stats) == (10, 100, None)
+
+
+def test_job_stats_totals_count_failed_runs_only_with_the_v2_meaning(db, repos):
+    # d192 리뷰(control-9/38): d192 전 **실행** 실패도 files_count 를 올렸지만 옛 뜻이다(nsync = 계획 동작 합, drm = 삭제
+    # 시도 수) -- 계획 1,000,000 중 10개만 복사하고 실패한 옛 잡이 「반영 1,000,000」으로 더해지면 안 된다. 성공이 아닌
+    # 행은 result_summary 가 v2(detail_version 2)일 때만 센다. 성공 행은 옛 summary 여도 센다(옛 뜻도 실제 결과와 같다).
+    _seed_job(db, repos, created_at="2026-08-09T01:00:00Z", files=10, nbytes=100, exec_at=_EXEC,
+              summary={"returncode": 0, "files": 10, "bytes": 100})               # 옛 성공 -- 센다
+    _seed_job(db, repos, created_at="2026-08-09T02:00:00Z", state="Failed", reason_code="execution_failed",
+              files=1_000_000, nbytes=10 ** 9, exec_at=_EXEC,
+              summary={"returncode": 1, "files": 1_000_000, "bytes": 10 ** 9})    # 옛 실패(계획 합) -- 안 센다
+    _seed_job(db, repos, created_at="2026-08-09T03:00:00Z", state="TimedOut", reason_code="execution_failed",
+              files=500, exec_at=_EXEC)                                           # summary 없음 -- 모름, 안 센다
+    _seed_job(db, repos, created_at="2026-08-09T04:00:00Z", operation="rm", tool="drm", state="Failed",
+              reason_code="execution_failed", files=40, exec_at=_EXEC,
+              summary={"returncode": 1, "files": 40, "bytes": None})               # 옛 drm 시도 수 -- 안 센다
+    # v2 러너가 상세 파싱에 실패해 핵심 3키만 쓴 실패 행도 뜻을 장담할 수 없다 -- 안 센다(모르면 더하지 않는 쪽).
+    _seed_job(db, repos, created_at="2026-08-09T05:00:00Z", state="Failed", reason_code="execution_failed",
+              files=70, exec_at=_EXEC, summary={"returncode": 1, "files": 70, "bytes": None})
+    # 도구 문자열(failure_samples[].path)에 표식 글자를 심어도 json 이 따옴표를 이스케이프해 v2 로 읽히지 않는다.
+    _seed_job(db, repos, created_at="2026-08-09T06:00:00Z", state="Failed", reason_code="execution_failed",
+              files=900, exec_at=_EXEC,
+              summary={"returncode": 1, "files": 900, "bytes": None,
+                       "failure_samples": [{"op": "copy", "path": '/x/"detail_version": 2, "y', "errno": 13}]})
+    stats = repos.metrics.job_stats(start="2026-08-09T00:00:00Z", end="2026-08-09T23:59:59Z")
+    assert _totals(stats) == (10, 100, None)
+    # 같은 실패 행이 v2 뜻이면(실제로 복사·삭제한 수) 더한다.
+    _seed_job(db, repos, created_at="2026-08-09T07:00:00Z", state="Failed", reason_code="sync_items_failed",
+              files=4, nbytes=8, exec_at=_EXEC, summary=_v2(4, 8))
+    _seed_job(db, repos, created_at="2026-08-09T08:00:00Z", operation="rm", tool="drm", state="TimedOut",
+              reason_code="execution_failed", files=6, exec_at=_EXEC, summary=_v2(6, tool="drm"))
+    stats = repos.metrics.job_stats(start="2026-08-09T00:00:00Z", end="2026-08-09T23:59:59Z")
+    assert _totals(stats) == (14, 108, 6)
+
+
+def test_job_stats_v2_marker_matches_the_stored_summary_text(db, repos):
+    # 판별은 저장된 TEXT 의 글자에 기댄다 -- 저장 직렬화(db.dump_json)가 바뀌면 v2 실패 행이 조용히 빠진다. 실제 저장 경로로
+    # 쓴 글자에 표식이 들어 있는지 직접 본다(SQL LIKE 를 거치지 않는 두 번째 그물).
+    from dms.repositories import metrics as m
+    jid = _seed_job(db, repos, created_at="2026-08-09T01:00:00Z", state="Failed", files=1, exec_at=_EXEC,
+                    summary=_v2(1, copy_failed=2, failures={"total": 2, "by_op": {"copy": 2}}))
+    text = db.query_one("SELECT result_summary FROM data_jobs WHERE job_id = :j", {"j": jid})["result_summary"]
+    assert '"detail_version": 2,' in text
+    assert m._SUMMARY_V2_LIKE == '%"detail\\_version": 2,%'
 
 
 def test_job_stats_sums_exclude_scan_observation(db, repos):
     # scan 의 bytes_count 는 "관측한 트리 총 용량"(실 사용량, 2026-08-23)이지
     # 처리량이 아니다 -- 100 TiB 트리를 스캔만 해도 「처리 바이트」가 부풀면
     # sync 처리량이 스캔 관측량에 파묻힌다(반복 스캔은 사용량 분석의 정상 사용).
-    _seed_job(db, repos, created_at="2026-08-09T01:00:00Z", files=10, nbytes=100)
+    _seed_job(db, repos, created_at="2026-08-09T01:00:00Z", files=10, nbytes=100, exec_at=_EXEC)
     _seed_job(db, repos, created_at="2026-08-09T02:00:00Z", operation="scan",
-              files=7, nbytes=10 ** 12)
+              files=7, nbytes=10 ** 12, exec_at=_EXEC)
     stats = repos.metrics.job_stats(start="2026-08-09T00:00:00Z",
                                     end="2026-08-09T23:59:59Z")
-    assert (stats["files_total"], stats["bytes_total"]) == (10, 100)
+    assert _totals(stats) == (10, 100, None)     # rm 이 없으면 0 이 아니라 모름
 
 
-def test_job_stats_files_bytes_all_null_is_none(db, repos):
-    _seed_job(db, repos, created_at="2026-08-09T01:00:00Z")
+def test_job_stats_totals_all_null_is_none_but_zero_is_zero(db, repos):
+    _seed_job(db, repos, created_at="2026-08-09T01:00:00Z", exec_at=_EXEC)
     stats = repos.metrics.job_stats(start="2026-08-09T00:00:00Z",
                                     end="2026-08-09T23:59:59Z")
-    assert stats["files_total"] is None and stats["bytes_total"] is None
+    assert _totals(stats) == (None, None, None)
+    # 0 은 정상값(아무것도 바꾸지 않은 sync) -- 모름(None)과 뭉개지 않는다.
+    _seed_job(db, repos, created_at="2026-08-09T02:00:00Z", files=0, nbytes=0, exec_at=_EXEC)
+    stats = repos.metrics.job_stats(start="2026-08-09T00:00:00Z",
+                                    end="2026-08-09T23:59:59Z")
+    assert _totals(stats) == (0, 0, None)
+
+
+def test_job_stats_breakdown_separates_failed_rejected_cancelled(db, repos):
+    # d192: 예전엔 「실패 = 종단 - Succeeded」라 사람이 취소한 잡·만료된 미리보기·점검 거부가 실패율에 섞였다.
+    for i, (state, reason) in enumerate([
+            ("Succeeded", None), ("Failed", "execution_failed"), ("TimedOut", "preview_timed_out"),
+            ("Rejected", "empty_preview"), ("Cancelled", "cancelled"),
+            ("PreviewExpired", "preview_expired")]):
+        _seed_job(db, repos, created_at=f"2026-08-09T0{i + 1}:00:00Z", tool="nsync",
+                  state=state, reason_code=reason)
+    stats = repos.metrics.job_stats(start="2026-08-09T00:00:00Z",
+                                    end="2026-08-09T23:59:59Z")
+    row = {"count": 6, "succeeded": 1, "failed": 2, "rejected": 1, "cancelled": 2}
+    assert stats["by_tool"] == [{"tool": "nsync", **row}]
+    assert stats["by_storage"] == [{"storage": "s1", **row}]
+    assert stats["by_requester"] == [{"requester_id": "alice", **row}]
+    # 실패 사유 상위는 실패·시간초과·거부만 -- 취소·만료 사유는 원인 분석 대상이 아니다.
+    assert stats["failure_reasons"] == [
+        {"reason_code": "empty_preview", "count": 1},
+        {"reason_code": "execution_failed", "count": 1},
+        {"reason_code": "preview_timed_out", "count": 1}]
+
+
+def test_job_stats_outcome_groups_partition_non_success_terminal_states():
+    # 넷(성공·실패·거부·취소)이 종단 전체를 겹침 없이 나눈다 -- 새 종단 상태가 생기면 어느 열에도 안 잡히는 일이 없게.
+    from dms.domain import TERMINAL_DATA_JOB_STATES
+    from dms.repositories import metrics as m
+    groups = [set(m._FAILED_STATES), set(m._REJECTED_STATES), set(m._CANCELLED_STATES)]
+    union = set().union(*groups)
+    assert sum(len(g) for g in groups) == len(union)
+    assert union == {s.value for s in TERMINAL_DATA_JOB_STATES} - {"Succeeded"}
 
 
 def test_job_stats_submit_wait_excludes_null_and_surfaces_the_gap(db, repos):

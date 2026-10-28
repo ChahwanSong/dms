@@ -301,15 +301,16 @@ class JobStepper:
         return root
 
     def _pv_containment(self, job, sides) -> dict:
-        """PV 주소 쪽의 봉쇄 값(2026-10-26 보안 리뷰 — execution_manifests._PV_CONTAIN_FN): {쪽: {"root": PV 루트 절대경로,
-        "anchor": 그 쪽 managed_root}}.
+        """PV 주소 쪽의 글자 경계(2026-10-26 보안 리뷰 — execution_manifests._PV_WITHIN_FN): {쪽: {"root": PV 루트 절대경로}}.
 
         요청 payload 의 pv 블록(source_pv·destination_pv·pv)이 있는 쪽만 — 블록의 root 는 managed_root 기준 상대경로라 그 쪽
-        스토리지의 managed_root(경로를 조합한 바로 그 값)와 같은 규칙으로 잇는다. root 는 글자 경계, anchor 는 심링크 검사의
-        기준점이다(PV 루트를 기준점으로 쓰면 managed_root 와 PV 루트 사이의 링크를 놓친다 — 같은 날 2차 리뷰). 블록이 있는데
-        root 가 문자열이 아니거나 '..' 로 managed_root 밖이 되면 빈 루트로 실어 봉쇄가 막게 한다(DB 신뢰 경계 — fail-closed).
-        PV 가 아닌 잡은 {}(매니페스트가 이 기능 이전과 같다). planner·컨펌의 재확인(k8s_access.recheck_request)이 「경로 ⊆ PV
-        루트」를 글자로 보고, 이것은 실행 직전 파일시스템에서 「그 사이에 심링크가 없다」를 본다 — 모든 잡이 root 인 k8s 모드에서
+        스토리지의 managed_root(경로를 조합한 바로 그 값)와 같은 규칙으로 잇는다. 블록이 있는데 root 가 문자열이 아니거나 '..' 로
+        managed_root 밖이 되면 빈 루트로 실어 봉쇄가 막게 한다(DB 신뢰 경계 — fail-closed). PV 가 아닌 잡은 {}. 심링크 검사의
+        기준점은 여기가 아니라 paths 의 managed_root 값(sync source_root·destination_root, 대상 하나 연산 managed_root)이다 —
+        2026-10-28 경로 봉쇄 통일로 PV 든 직접 경로든 같은 규칙(execution_manifests._PATH_CONTAINED_FN)을 그 기준으로 보고, PV 쪽은
+        이 경계만 더한다(PV 루트를 기준점으로 쓰면 managed_root 와 PV 루트 사이의 링크를 놓친다 — 2026-10-26 2차 리뷰; 그래서
+        예전 "anchor" 키는 managed_root 사본이었고 지웠다). planner·컨펌의 재확인(k8s_access.recheck_request)이 「경로 ⊆ PV 루트」를
+        글자로 보고, 봉쇄가 실행 직전 파일시스템에서 「그 사이에 심링크가 없다」를 본다 — 모든 잡이 root 인 k8s 모드에서
         namespace 단위 권한의 마지막 관문이다."""
         req = self._repos.requests.get(job["request_id"]) or {}
         payload = req.get("payload") if isinstance(req.get("payload"), dict) else {}
@@ -325,7 +326,7 @@ class JobStepper:
                 base = posixpath.normpath(managed_root)
                 if cand == base or cand.startswith(base.rstrip("/") + "/"):
                     root = cand
-            contain[side] = {"root": root, "anchor": managed_root}
+            contain[side] = {"root": root}
         return contain
 
     def _abs(self, storage_name, rel):
@@ -388,18 +389,22 @@ class JobStepper:
                     raise ChownMismatchAtStep(key)
         op = job["operation"]
         if op == "sync":
+            # managed_root 도 싣는다(2026-10-28 경로 봉쇄 통일 -- execution_manifests._PATH_CONTAINED_FN·런처/rank 재확인의 기준,
+            # PV·직접 경로 공통; 없으면 빌더가 거부한다). rm 과 같이 한 번 읽은 같은 값으로 경로를 조합한다(두 번 읽으면 그 사이
+            # 스토리지 수정이 기준과 경로를 갈라 놓는다).
             src_root = self._managed_root(job["source_storage"])
             dst_root = self._managed_root(job["destination_storage"])
             paths = {"source": managed_abs_path(src_root, job["source"]),
-                     "source_storage": job["source_storage"],
+                     "source_storage": job["source_storage"], "source_root": src_root,
                      "destination": managed_abs_path(dst_root, job["destination"]),
-                     "destination_storage": job["destination_storage"]}
+                     "destination_storage": job["destination_storage"], "destination_root": dst_root}
             contain = self._pv_containment(job, {"source": ("source_pv", src_root),
                                                  "destination": ("destination_pv", dst_root)})
             if contain:
                 paths["contain"] = contain
         else:
-            # managed_root 도 싣는다(2026-10-21 rm 대상 봉쇄 -- execution_manifests._RM_CONTAINMENT_CHECK·러너 재확인의 기준).
+            # managed_root 도 싣는다(2026-10-21 rm 대상 봉쇄 -- execution_manifests._RM_CONTAINMENT_CHECK·러너 재확인의 기준; PV scan
+            # 봉쇄도 같은 기준).
             # 한 번 읽은 같은 값으로 target 을 조합한다: 두 번 읽으면 그 사이 스토리지 수정이 기준과 대상을 갈라 놓는다.
             root = self._managed_root(job["storage_name"])
             paths = {"target": managed_abs_path(root, job["target"]),
@@ -665,10 +670,11 @@ class JobStepper:
         execution_manifests.EXECUTION_REASONS)를 잡 사유로 승격하고, 없으면 넘어온 reason_code 로 접는다.
         2026-10-02: 워커 준비 실패(workers_unreachable)가 첫 마커 -- 예전엔 사유 없는 execution_failed 였다."""
         raw = self._archive_diag(job, phase, ref)
-        promoted = parse_execution_reason(raw)
+        # operation: 배포를 건너 옛 잡 이미지로 돈 sync 의 봉쇄 마커(target 코드)를 쪽별 코드로 다시 가른다(parse_execution_reason).
+        promoted = parse_execution_reason(raw, operation=job.get("operation"))
         return reason_code if promoted is None else promoted
 
-    def _surface_failed_artifact(self, job, ref):
+    def _surface_failed_artifact(self, job, ref, *, promote_counts):
         """실패 잡의 summary 표면화(설계 §2.4). 러너는 도구 비0 종료에도
         summary.json 을 쓰고 exit 하므로(§1-7) returncode 가 카드에 뜬다.
         read_summary 예외는 None(모름)으로 접는다 -- 실패 잡의 보강은 best-effort
@@ -676,8 +682,13 @@ class JobStepper:
         재시도)에 낀다. None 이면 기록하지 않는다 -- artifact_uri 를 지어내면
         포탈이 존재하지 않는 디렉터리를 가리킨다. 비교가 `is not None` 인 것은
         이 슬라이스의 규칙 그대로다: 빈 summary({})는 "러너가 쓰긴 썼다"는
-        정상값이라 모름과 뭉개지 않는다. metrics 는 오염되지 않는다(합계가
-        state='Succeeded' 필터 -- §1-12)."""
+        정상값이라 모름과 뭉개지 않는다.
+
+        promote_counts(2026-10-27 d192): metrics 의 sync·rm 합계는 이제 종단 상태를 가리지 않는다(실패·중단된 실행의
+        부분 처리도 실제로 한 일 -- summary v2 의 files 는 nsync Completed·dsync 복사 성공·drm 실제 삭제 수다; 성공이 아닌
+        행은 result_summary 가 v2 일 때만 센다 -- metrics._SUMMARY_V2_LIKE). 그래서 **실행** 실패는 계속 files_count/
+        bytes_count 로 승격하고(True), **미리보기** 실패·시간초과는 False 로 summary 만 남긴다 -- 미리보기 files 는 할
+        예정인 수라 승격하면 지표에 안 한 일이 섞인다(data_jobs.set_artifact)."""
         try:
             summary = self._exec.read_summary(ref)
         except Exception:
@@ -686,7 +697,7 @@ class JobStepper:
             self._repos.data_jobs.set_artifact(
                 job["job_id"],
                 artifact_uri=f"{self._artifact_base()}/{job['job_id']}",
-                result_summary=summary)
+                result_summary=summary, promote_counts=promote_counts)
 
     def _job_gone(self, job_id) -> bool:
         """잡 행이 없는가(요청 삭제). 조회 실패는 False(모름 -- 지금처럼 request_id 를 단 채 남긴다)."""
@@ -1150,7 +1161,7 @@ class JobStepper:
                 result_summary=summary)
             self._finalize(job, DataJobState.SUCCEEDED, summary=summary)
             return "Succeeded"
-        self._surface_failed_artifact(job, ref)
+        self._surface_failed_artifact(job, ref, promote_counts=True)   # 실행 실패의 부분 처리는 실제로 한 일
         if status == ExecStatus.TIMED_OUT:
             self._finalize(job, DataJobState.TIMED_OUT, reason_code="execution_failed",
                            diag=("execution", ref))
@@ -1203,12 +1214,13 @@ class JobStepper:
             self._repos.data_jobs.set_job_state(jid, DataJobState.CONFIRM_PENDING,
                                                 actor="stepper")
             return "ConfirmPending"
+        # 미리보기 summary 는 표시만 -- files/bytes 는 할 예정인 수라 지표 컬럼으로 승격하지 않는다(_surface_failed_artifact).
         if status == ExecStatus.TIMED_OUT:
-            self._surface_failed_artifact(job, ref)
+            self._surface_failed_artifact(job, ref, promote_counts=False)
             self._finalize(job, DataJobState.TIMED_OUT, reason_code="preview_timed_out",
                            diag=("preview", ref))
             return "TimedOut"
-        self._surface_failed_artifact(job, ref)
+        self._surface_failed_artifact(job, ref, promote_counts=False)
         # 박제는 _run_failure_reason 이 했다(전이 전) -- diag= 를 다시 넘기지 않는다(_preflight_reason 과 같은 규칙).
         reason = self._run_failure_reason(job, "preview", ref, reason_code="preview_failed")
         self._finalize(job, DataJobState.FAILED, reason_code=reason)

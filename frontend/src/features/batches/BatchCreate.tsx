@@ -12,8 +12,8 @@ import type { Policy } from "../../lib/types";
 import { NODE_CPU_CAP_NOTE } from "../../lib/jobTool";
 import { field } from "../jobs/formFields";
 import {
-  CHMOD_RE, chownFieldError, SCAN_INT_FIELDS, SYNC_INT_FIELDS, SYNC_OPTION_HELP, intFieldError,
-  scanIntFieldError, syncIntFieldError,
+  BUFSIZE_HELP, CHMOD_RE, chownFieldError, DIRECT_HELP, directBufsizeError, OPEN_NOATIME_HELP, QUIET_HELP, SCAN_INT_FIELDS,
+  SYNC_INT_FIELDS, SYNC_MAX_ERRORS_NOTE, SYNC_OPTION_HELP, intFieldError, scanIntFieldError, syncIntFieldError,
 } from "../jobs/optionRules";
 import { Button } from "../../components/ui/Button";
 import {
@@ -23,7 +23,7 @@ import { ApiError } from "../../lib/api";
 import { ownerText, syncOwnership } from "../../lib/syncOwnership";
 import type { DirectDestOwner } from "../../lib/syncOwnership";
 import { storageKindOf, storageOwnerOf } from "../k8s/k8sTerms";
-import { relativePathProblem } from "../../lib/storagePaths";
+import { relativePathProblem, RM_PATH_LINK_RULE, SYNC_PATH_LINK_RULE } from "../../lib/storagePaths";
 import { rmTargetOverlaps } from "../../lib/rmTargets";
 import { PvPathPicker } from "../k8s/PvPathPicker";
 import type { PvSlot } from "../k8s/PvPathPicker";
@@ -82,8 +82,8 @@ const initial = {
   // 단건·배치 모두 기본 ON 으로 통일했다(사용자 결정 2026-08-22 — 소스 atime
   // 오염 방지). 배치는 통일 게이트로 항상 특권(root) 실행이라 O_NOATIME 권한
   // 제약이 없다. dsync 도구 기본은 off(mfu_flist_copy.c:3344)라 DMS 가 명시적으로
-  // 켠다. (단건 sync 는 비특권 실행이라 타인 소유 파일 O_NOATIME 이 EPERM 일 수
-  // 있다는 캐비엇이 SubmitJob 쪽 초기값 주석에 있다.)
+  // 켠다. (dms-k8s 는 단건도 전부 root 라 같은 기본이다 -- 문구는 optionRules
+  // OPEN_NOATIME_HELP 한 곳, nsync 실효는 잡 이미지 7a3189c 부터.)
   // batchFiles·bufsize 프리필은 단건 폼과 같은 단일 출처(SYNC_INT_FIELDS) —
   // 「왜 도구 기본과 다른 값을 명시 전송하는가」는 그 주석에 있다.
   delete: false, contents: false, direct: false,
@@ -176,8 +176,10 @@ export function BatchCreate() {
     ? scanIntFieldError("broken_limit", f.brokenLimit) : null;
   const batchFilesError = f.op === "sync"
     ? syncIntFieldError("batch_files", f.batchFiles) : null;
+  // 범위 오류가 먼저, 범위 안이면 direct 정렬 조건(서버 422 direct_bufsize_misaligned 미러 -- optionRules 주석). CSV 로 가져온
+  // 행은 배치 공통 옵션을 쓰므로(행마다 옵션이 없다) 이 한 칸의 즉답이 전부를 덮는다 -- 최종 판정은 서버 validate_options.
   const bufsizeError = f.op === "sync"
-    ? syncIntFieldError("bufsize", f.bufsize) : null;
+    ? syncIntFieldError("bufsize", f.bufsize) ?? directBufsizeError(f.direct, f.bufsize) : null;
   const chmodError = f.op === "sync" && f.chmod.trim() !== "" && !CHMOD_RE.test(f.chmod.trim())
     ? "chmod 형식이 올바르지 않습니다 (예: D770,F660)" : null;
   const chownError = f.op === "sync" ? chownFieldError(f.chown) : null;
@@ -502,6 +504,9 @@ export function BatchCreate() {
                 <li>관리자 특권(root)으로 실행돼 파일 권한·소유와 관계없이 지워집니다.</li>
                 <li>관리 디렉토리 자신(.)·「..」·「/」로 시작하는 경로는 받지 않고, 한 배치 안에서 겹치는 경로(같은 경로·
                   한 경로 아래의 경로)도 받지 않습니다 — 상위 경로 하나만 남기세요.</li>
+                {/* 링크 규칙(d192 이식, 괴리 [14] -- dms-k8s 는 끝 링크 허용: 링크만 지운다): 위 형식 검사만 보고 중간 단계가
+                    링크인 행을 넣으면 미리보기 전에 거부된다. */}
+                <li>{RM_PATH_LINK_RULE}</li>
                 {f.autoConfirm
                   ? <li>자동 실행이 켜져 있습니다 — 항목별 미리보기(지울 항목 수)가 끝나는 즉시 「배치 확인」 없이
                       삭제됩니다(아래 실행 제어).</li>
@@ -541,6 +546,7 @@ export function BatchCreate() {
                   {f.chown.trim() === "" && " 특정 사용자 소유로 맞추려면 아래 실행 옵션의 고급 옵션 chown 에 숫자 uid:gid 를 지정하세요."}</li>
                 <li>계획 시점에 만든 관리자의 특권 자격이 빠져 있으면 항목은 root 로 돌지 않고 거부됩니다(비 root 로 낮춰
                   실행하지 않습니다).</li>
+                <li>{SYNC_PATH_LINK_RULE}</li>
                 <li>조건이 맞지 않는 항목은 미리보기 전에 거부됩니다 — 그 항목은 아무것도 복사되지 않습니다.</li>
               </ul>
             </div>
@@ -656,7 +662,8 @@ export function BatchCreate() {
         </div>
       </FormSection>
 
-      <FormSection step={3} title="실행 옵션">
+      <FormSection step={3} title="실행 옵션"
+                   caption={f.op === "sync" ? SYNC_MAX_ERRORS_NOTE : undefined}>
         {f.op === "rm" ? (
           <>
             {/* 단일 작업(SubmitJob) rm 옵션 미러 — 같은 라벨·같은 즉답(같은 옵션 = 같은 문구). */}
@@ -671,12 +678,15 @@ export function BatchCreate() {
               <label className="flex items-center gap-2 text-sm">
                 <input type="checkbox" aria-label="lite" checked={f.lite} onChange={on("lite")} /> lite
               </label>
-              <label className="flex items-center gap-2 text-sm" title="실행 로그를 줄입니다 — 실행 결과 개수(삭제한 항목)도 「—」가 됩니다. 미리보기(dry-run)에는 적용하지 않습니다(대상 수를 세는 줄이 사라지므로)">
-                <input type="checkbox" aria-label="quiet" checked={f.quiet} onChange={on("quiet")} /> quiet
-              </label>
             </div>
             {recursiveMissing && <p className="text-bad text-sm">재귀 옵션이 필요합니다</p>}
             {statLiteConflict && <p className="text-bad text-sm">stat과 lite는 함께 쓸 수 없습니다</p>}
+            {/* quiet 설명은 칸 옆에 그대로(단건과 같은 문구 -- 지우지 못한 항목 목록까지 없앤다, d192 이식 괴리 [13]). */}
+            <FieldRow align="check"
+              control={<label className="flex items-center gap-2 text-sm">
+                <input type="checkbox" aria-label="quiet" checked={f.quiet} onChange={on("quiet")} /> quiet
+              </label>}
+              help={QUIET_HELP.rm} />
           </>
         ) : f.op === "scan" ? (
           <>
@@ -733,16 +743,19 @@ export function BatchCreate() {
                        onChange={on("contents")} /> contents
               </label>}
               help={SYNC_OPTION_HELP.contents} />
-            <div className="flex flex-wrap gap-x-6 gap-y-2">
-              <label className="flex items-center gap-2 text-sm">
+            {/* direct·quiet 설명도 칸 옆에(단건과 같은 문구, d192 이식) -- 예전 sync quiet 는 설명이 아예 없었다(괴리 [9]·[13]). */}
+            <FieldRow align="check"
+              control={<label className="flex items-center gap-2 text-sm">
                 <input type="checkbox" aria-label="direct" checked={f.direct}
                        onChange={on("direct")} /> direct
-              </label>
-              <label className="flex items-center gap-2 text-sm">
+              </label>}
+              help={DIRECT_HELP} />
+            <FieldRow align="check"
+              control={<label className="flex items-center gap-2 text-sm">
                 <input type="checkbox" aria-label="quiet" checked={f.quiet}
                        onChange={on("quiet")} /> quiet
-              </label>
-            </div>
+              </label>}
+              help={QUIET_HELP.sync} />
             {/* 접혀 있어도 내용은 마운트돼 있다 -- open_noatime 기본 ON 이 펼치지 않아도 실린다. */}
             <details className="rounded-lg border border-line"
                      open={advancedOpen || advancedError !== null}
@@ -755,13 +768,13 @@ export function BatchCreate() {
               <summary className="cursor-pointer select-none px-4 py-3 text-sm font-medium">고급 옵션</summary>
               <div className="space-y-4 border-t border-line px-4 py-4">
                 {/* 기본 ON 의 「왜」는 initial 의 openNoatime 주석 — 캡션은
-                    사용자에게 같은 근거를 요약해 준다(끄는 건 자유). */}
+                    사용자에게 같은 근거를 요약해 준다(끄는 건 자유, 단건 폼과 같은 문구). */}
                 <FieldRow align="check"
                   control={<label className="flex items-center gap-2 text-sm">
                     <input type="checkbox" aria-label="open_noatime" checked={f.openNoatime}
                            onChange={on("openNoatime")} /> open_noatime
                   </label>}
-                  help="기본 켬 — 배치는 특권(root) 실행이라 O_NOATIME 권한 제약이 없고, 소스 atime 오염을 막아 데이터 온도(hot/cold) 통계를 정직하게 유지합니다." />
+                  help={OPEN_NOATIME_HELP} />
                 {/* 프리필 계약(단건 폼과 동일 문구, 2026-09-17): 값이 미리 채워져
                     있고 그 값이 곧 서버 기본이라 비워도 같은 값이 적용된다 — 배칭을
                     끄는 유일한 표현은 0 명시. placeholder 는 "비웠을 때", 캡션은
@@ -786,7 +799,7 @@ export function BatchCreate() {
                     </label>
                     {bufsizeError && <p className="mt-1 text-bad text-sm">{bufsizeError}</p>}
                   </>}
-                  help="미리 채운 4194304 = 4 MiB(서버 기본). 비워도 같은 값이 적용됩니다." />
+                  help={BUFSIZE_HELP} />
                 <FieldRow
                   control={<>
                     <label className="text-sm block">chmod (선택 · 예: D770,F660 — 콤마 구분, D=디렉터리 F=파일)

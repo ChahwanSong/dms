@@ -6,7 +6,7 @@ import type { ClusterFreshness, PvRef, UserNamespace, VolumeRow } from "./types"
 // 같은 규칙을 읽어 「보이는 것과 보내는 것」이 갈리지 않게 한다.
 //
 // 흐름: namespace (StorageClass) → PV 이름 → PV 안 경로. 서버가 PV 를 (스토리지, root) 로 해석하고(경로 규칙 = 서버 pv_paths)
-// 화면은 그 결과(abs_root)를 「실제 경로」로 보일 뿐이다 -- 벤더 경로 템플릿을 여기서 흉내 내지 않는다(발산 금지).
+// 화면은 그 결과(abs_root)에 하위경로를 붙여 「지정 경로」로 보일 뿐이다 -- 벤더 경로 템플릿을 여기서 흉내 내지 않는다(발산 금지).
 
 export type Side = "source" | "destination" | "target";
 export type LocMode = "pv" | "path";
@@ -127,7 +127,7 @@ export function pvSubProblem(sub: string, operation: string): string | null {
   return null;
 }
 
-/** 「실제 경로」 -- 서버가 준 abs_root + 정규화한 하위경로. abs_root 를 모르면 null(지어내지 않는다). */
+/** 「지정 경로」 -- 서버가 준 abs_root + 정규화한 하위경로(글자 그대로, 링크 미해석). abs_root 를 모르면 null(지어내지 않는다). */
 export function pvAbsPath(r: Pick<VolumeRow, "abs_root"> | null | undefined, sub: string): string | null {
   if (r === null || r === undefined) return null;
   return absolutePath(r.abs_root, normalizeSub(sub));

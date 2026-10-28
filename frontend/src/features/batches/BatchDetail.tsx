@@ -28,6 +28,9 @@ import { kstStampEpoch, kstStampOrDash } from "../../lib/datetime";
 import { HelpTip } from "../../components/ui/HelpTip";
 import { exactBytes, INVALID_NAMES_HELP, INVALID_NAMES_LABEL, invalidNamesText, scanCount,
          SUMMARY_KEYS_SHOWN_ELSEWHERE } from "../../lib/scanCounters";
+import { kindsText, readSummary, sumKinds, summaryTool, type ActionKind } from "../../lib/toolSummary";
+import { SYNC_OPTION_HELP } from "../jobs/optionRules";
+import { ATIME_APPROX_NOTE } from "../usage/usageStats";
 import type { Batch, BatchDetail as BatchDetailData, BatchItem, HistogramBucket } from "../../lib/types";
 
 // NodesList/JobStats/NodeMetrics 의 humanBytes 국소 사본 관례 -- 값이 bytes 대
@@ -93,10 +96,13 @@ function sizeBucketLabel(b: HistogramBucket): string {
 }
 
 // 시간축별 캡션: 색의 의미(왼쪽 빨강=hot, 오른쪽 파랑=cold)를 축마다 그 축의
-// 언어로 말한다. atime 만 근사 경고(relatime/open_noatime 는 접근이 atime 을
-// 안 갱신할 수 있다) -- mtime/ctime 은 마운트 옵션과 무관해 경고가 거짓이 된다.
+// 언어로 말한다. atime 만 근사 경고 -- mtime/ctime 은 마운트 옵션과 무관해 경고가 거짓이 된다.
+// atime 경고(2026-10-27 d192, 괴리 [C3]): 읽기가 atime 에 반영되는지는 마운트·스토리지에 달렸다(noatime 은 반영 안 함,
+// 테스트베드 CephFS 는 relatime 인데도 노드에서 읽어도 atime 이 바뀌지 않았다 -- CHANGELOG d190). 그런 곳에선 「hot」이 최근에
+// 읽힌 것이 아니라 최근에 쓰인 것에 가깝다. relatime 자체는 읽기를 하루 단위로 반영한다(2026-10-28 리뷰 portal-batch-27 --
+// 예전 문구는 relatime 을 반영 안 하는 쪽에 넣었다). 문장은 사용량 TargetDetail 과 같은 한 출처(usageStats ATIME_APPROX_NOTE).
 const TEMP_CAPTIONS: Record<string, string> = {
-  atime: "왼쪽(빨강)=hot·최근 접근, 오른쪽(파랑)=cold — atime 기준 용량 비중. relatime/open_noatime 환경에선 근사",
+  atime: `왼쪽(빨강)=hot·최근 접근, 오른쪽(파랑)=cold — atime 기준 용량 비중. ${ATIME_APPROX_NOTE}`,
   mtime: "왼쪽(빨강)=최근 수정, 오른쪽(파랑)=오래됨 — mtime 기준 용량 비중",
   ctime: "왼쪽(빨강)=최근 변경, 오른쪽(파랑)=오래됨 — ctime 기준 용량 비중",
 };
@@ -169,6 +175,41 @@ const csvOp = (op: string | undefined): ItemsCsvOp => (op === "sync" ? "sync" : 
 // 찾지 못함(오타·이미 삭제·권한), 수가 아니면 모름 — null≠0 이라 둘을 다른 말로 한다.
 const rmCount = (n: unknown): string => (typeof n !== "number" ? "모름"
   : n === 0 ? "0개(대상 경로를 찾지 못함)" : `${n.toLocaleString("ko-KR")}개`);
+const nf = (n: number) => n.toLocaleString("ko-KR");
+// sync 항목 결과 수(files_count)의 이름(2026-10-28 리뷰 portal-batch-29·contract-37). 「반영한 항목」은 d192 이후의 뜻(nsync
+// 완료 액션 합·dsync 복사 성공 수, 미리보기 실패는 승격하지 않음)일 때만 참이다 -- 그 전 기록의 files_count 는 nsync 계획 합
+// (실패한 실행 포함)·dsync 의 실패 포함 Items·미리보기 실패에서 승격된 계획 수일 수 있다(C8: 1개 반영인데 4). 배치 항목 API 는
+// 결과 summary 를 싣지 않고 files_count 만 조인하므로, 같은 자식 잡의 **미리보기** summary 가 v2(detail_version)인지를 「이
+// 잡은 d192 이후 러너로 돌았다」의 대리 신호로 쓴다 -- 실행은 그 미리보기 뒤에 시작하니 롤백이 아니면 더 옛 러너로 돌 일이
+// 없다. 대리 신호가 없으면(옛 미리보기·미리보기 summary 없음) 요청 상세 실행 결과의 옛 요약 라벨과 같은 중립 「항목 수」.
+const syncCountLabel = (it: BatchItem): string =>
+  (readSummary(it.preview_summary).detailed ? "반영한 항목" : "항목 수");
+// sync 항목 펼침의 미리보기 행(2026-10-27 d192): 확인 창 합계와 같은 뜻 구분(previewTotals) -- nsync 는 「변경 예정」과
+// 종류별 수, dsync 는 「소스 전체」(변경 수 아님), 도구를 모르는 옛 항목은 뜻을 가르지 않고 수만. 모르는 수는 「모름」.
+// 도구는 서버 조인 job_tool(자식 잡의 실제 도구) 먼저, 없으면 summary v2 의 tool(옛 미리보기도 가른다 -- summaryTool 한 판정,
+// 백엔드 batch_orchestrator 의 files_by_tool 과 같은 순서).
+function SyncPreviewRow({ summary, jobTool }: { summary: unknown; jobTool?: string | null }) {
+  const s = readSummary(summary);
+  const tool = summaryTool(s, jobTool);
+  if (tool === "nsync") {
+    const n = s.files ?? sumKinds(s.planned);
+    return (<>
+      <dt className="text-muted">변경 예정(미리보기)</dt>
+      <dd>{n === null ? "모름" : `${nf(n)}개${s.planned !== null ? ` — ${kindsText(s.planned)}` : ""}`}</dd>
+    </>);
+  }
+  if (tool === "dsync") {
+    const n = s.sourceItems ?? s.files;
+    return (<>
+      <dt className="text-muted">소스 전체(미리보기)</dt>
+      <dd>{n === null ? "모름" : `${nf(n)}개(변경 수는 실행 후 확정)`}</dd>
+    </>);
+  }
+  return (<>
+    <dt className="text-muted">미리보기 수</dt>
+    <dd className="tabular-nums">{s.files === null ? "모름" : nf(s.files)}</dd>
+  </>);
+}
 // 기존 항목의 rm 대상 → 겹침 즉답 재료(lib/rmTargets). 대상이 문자열이 아니면(DB 변조) 판정에서 뺀다 — 서버도 형식이
 // 틀린 대상은 겹침에서 건너뛴다.
 const rmEntriesOf = (items: BatchItem[], skipSeq?: number): RmTargetEntry[] =>
@@ -195,7 +236,34 @@ function humanizeOptions(options: Record<string, unknown> | undefined): string {
 // 정보가 아니라(사후 확인용) 항상 펼치면 항목 목록이 설정 행수만큼 매번 밀린다
 // — 헤더 카드에 summary 한 줄로 접어 두고 필요할 때 연다. 실행 권한 표기는
 // 기존 헤더의 "특권 실행(root)" 문구 재사용 — 여기 중복하지 않는다.
-function BatchSettings({ b }: { b: Batch }) {
+// direct 는 dsync 만 적용하고 nsync 는 받기만 한다(포크 db1e33c -- 괴리 [22]). 배치 API 엔 도구가 없어(배치 시점에 갈린다)
+// 항목의 도구(summaryTool -- 서버 조인 job_tool 먼저, 없으면 미리보기 summary v2 의 tool)로 센다 -- 둘 다 없는 항목(미리보기
+// 전·잡 없음)은 모름이라 세지 않는다.
+// null = 말할 것 없음(direct 꺼짐 또는 nsync 로 기록된 항목 없음).
+// 「모두」는 **모든 항목**의 도구를 알 때만 말한다(2026-10-28 리뷰 portal-batch-28): 도구는 항목마다 배치(placement) 시점에
+// 갈리고(공존 노드가 있으면 dsync) 아직 materialize 되지 않은 항목은 도구가 없다 -- 동시 실행 상한 1 로 미리보기 중인 배치의
+// 첫 항목만 nsync 로 정해졌을 때 「항목이 모두 nsync」라 하면 뒤의 dsync 항목(O_DIRECT 적용)까지 아니라고 말하게 된다. 도구를
+// 모르는 항목이 있으면 도구가 확인된 항목 중의 수로만 말하고 나머지는 미정이라고 밝힌다. 도구 없이 끝난 항목(거부·실패·취소
+// -- 잡이 만들어지지 않았다)은 앞으로도 돌지 않으니 「미정」에 넣지 않는다(넣으면 끝난 배치에서도 「모두」를 영영 못 말한다).
+function directNote(b: Batch & { items?: BatchItem[] }): string | null {
+  if (b.options?.direct !== true) return null;
+  const withTool = (b.items ?? []).map((it) => ({ it, tool: summaryTool(readSummary(it.preview_summary), it.job_tool) }));
+  const tools = withTool.flatMap((x) => (x.tool !== null ? [x.tool] : []));
+  const nsync = tools.filter((t) => t === "nsync").length;
+  if (nsync === 0) return null;
+  const undecided = withTool.filter((x) => x.tool === null && !ITEM_NOT_RUN.includes(x.it.status)).length;
+  // 현재형으로 말한다 -- 확인 창(실행 전)과 실행 설정(실행 후) 둘 다 같은 배치(placement)의 도구다.
+  if (undecided > 0) {
+    return `도구가 확인된 항목 ${tools.length}개 중 nsync 로 실행되는 ${nsync}개에는 direct 가 적용되지 않습니다(dsync 만 `
+      + `O_DIRECT 로 읽고 씁니다) — 나머지 ${undecided}개 항목은 아직 도구가 정해지지 않았습니다`;
+  }
+  return nsync === tools.length
+    ? "direct 는 적용되지 않습니다 — 항목이 모두 nsync 로 실행됩니다(dsync 만 O_DIRECT 로 읽고 씁니다)"
+    : `direct 는 nsync 로 실행되는 항목(${nsync}개)에는 적용되지 않습니다(dsync 만 O_DIRECT 로 읽고 씁니다)`;
+}
+
+function BatchSettings({ b }: { b: Batch & { items?: BatchItem[] } }) {
+  const direct = directNote(b);
   return (
     <details className="mt-2">
       <summary className="text-sm text-muted cursor-pointer">실행 설정</summary>
@@ -209,7 +277,10 @@ function BatchSettings({ b }: { b: Batch }) {
         <dt className="text-muted">동시 실행 상한</dt>
         <dd className="tabular-nums">{b.max_concurrency}</dd>
         <dt className="text-muted">옵션</dt>
-        <dd className="font-mono text-xs break-all">{humanizeOptions(b.options)}</dd>
+        <dd className="min-w-0">
+          <span className="font-mono text-xs break-all">{humanizeOptions(b.options)}</span>
+          {direct !== null && <span className="block text-xs text-muted">{direct}</span>}
+        </dd>
         {/* 실행 신원(라벨 정정 2026-08-16 — owner_username 은 소유자 기록이 아니라
             잡의 실행 신원이다, identity.resolve_job_identity)은 있을 때만 —
             없으면 행 생략(빈칸 소음 방지, 메모 관례) */}
@@ -654,6 +725,73 @@ const REQUEST_TERMINAL = ["Succeeded", ...REQUEST_NOT_RUN];
 const JOB_PREVIEW_SIDE = ["Pending", "Preflight", "PreviewRunning", "ConfirmPending", "PreviewExpired"];
 const NOT_RUN_LIST_MAX = 10;
 
+// 배치 확인의 미리보기 합계를 **뜻별로** 가른다(2026-10-27 d192, 포탈 괴리 [1]·[5] 의 배치 몫, C13). 예전엔 항목별
+// preview_summary.files 를 한 「복사 대상」으로 더했는데 그 수는 도구마다 뜻이 다르다: nsync = 계획된 변경 수(삭제·디렉토리
+// 생성·속성 갱신·타입 교체 포함, 이미 맞는 항목 제외), dsync = dry-run 이 훑은 소스 전체 항목 수(바뀔 수가 아니다), drm =
+// 지울 대상 수. 그래서 항목의 도구(summaryTool -- job_tool 먼저, 없으면 summary v2 의 tool)로 묶어 따로 더하고, nsync 는
+// 종류별(복사·삭제…) 합을 함께 보인다 -- 삭제 예정이 「복사 대상」에 숨지 않게(C13: 「복사 대상 7개」인데 실제로는 목적지 6개
+// 삭제). 도구를 모르는 항목(job_tool·summary tool 둘 다 없음)은 뜻을 가를 수 없어 따로 센다(지어내지 않는다). 모르는
+// 수(null)는 0 으로 더하지 않는다(null≠0).
+// 경고 재료: type_change_needs_delete(nsync 가 「비어 있지 않은 디렉토리는 delete 없이는 바뀌지 않는다」고 미리 경고한 항목)와
+// skipped_special(FIFO·소켓·장치 -- 복사하지 않는다). 특수 파일의 같은 이름 목적지 항목은 도구마다 다르게 다뤄진다(2026-10-28
+// 리뷰 portal-batch-26·contract-39, optionRules SYNC_OPTION_HELP.delete 주석): nsync 는 그대로 두고, dsync 는 종류가 다르면
+// 지운 뒤 아무것도 만들지 않는다. 그래서 nsync 항목에서 센 수(specialNsyncItems)를 따로 두어, 전부 nsync 일 때만 「그대로
+// 둡니다」라고 말한다(지금 포크의 dsync dry-run 은 이 줄을 찍지 않아 실제로는 nsync 미리보기만 센다 -- 바뀌어도 거짓이 되지 않게).
+interface ToolTotal { items: number; total: number }
+interface PreviewTotals {
+  nsync: ToolTotal & { kinds: Partial<Record<ActionKind, number>>; kindsUnknown: number; bytes: number; bytesKnown: number };
+  dsync: ToolTotal;
+  untyped: ToolTotal;
+  unknown: number;
+  typeChangeItems: number;
+  typeChangeDirs: number;
+  specialItems: number;
+  specialNsyncItems: number;
+  specials: number;
+}
+const KIND_KEYS: ActionKind[] = ["copy", "mkdir", "symlink_update", "meta_update", "remove"];
+
+function previewTotals(runnable: BatchItem[]): PreviewTotals {
+  const t: PreviewTotals = {
+    nsync: { items: 0, total: 0, kinds: {}, kindsUnknown: 0, bytes: 0, bytesKnown: 0 },
+    dsync: { items: 0, total: 0 }, untyped: { items: 0, total: 0 }, unknown: 0,
+    typeChangeItems: 0, typeChangeDirs: 0, specialItems: 0, specialNsyncItems: 0, specials: 0,
+  };
+  for (const it of runnable) {
+    const s = readSummary(it.preview_summary);
+    const tool = summaryTool(s, it.job_tool);
+    if (s.typeChangeNeedsDelete) {
+      t.typeChangeItems += 1;
+      if (s.typeFromDir !== null) t.typeChangeDirs += s.typeFromDir;
+    }
+    if (s.skippedSpecial !== null && s.skippedSpecial > 0) {
+      t.specialItems += 1; t.specials += s.skippedSpecial;
+      if (tool === "nsync") t.specialNsyncItems += 1;
+    }
+    if (tool === "nsync") {
+      const n = s.files ?? sumKinds(s.planned);
+      if (n === null) { t.unknown += 1; continue; }
+      t.nsync.items += 1; t.nsync.total += n;
+      if (s.planned === null) t.nsync.kindsUnknown += 1;
+      else for (const k of KIND_KEYS) {
+        const v = s.planned[k];
+        if (typeof v === "number") t.nsync.kinds[k] = (t.nsync.kinds[k] ?? 0) + v;
+      }
+      const b = s.plannedBytes ?? s.bytes;
+      if (b !== null) { t.nsync.bytes += b; t.nsync.bytesKnown += 1; }
+    } else if (tool === "dsync") {
+      const n = s.sourceItems ?? s.files;
+      if (n === null) { t.unknown += 1; continue; }
+      t.dsync.items += 1; t.dsync.total += n;
+    } else {
+      // tool 없음(옛 미리보기) 또는 예상 밖 도구 -- 수는 알지만 뜻을 가를 수 없다.
+      if (s.files === null) { t.unknown += 1; continue; }
+      t.untyped.items += 1; t.untyped.total += s.files;
+    }
+  }
+  return t;
+}
+
 function notRunCause(it: BatchItem): string | null {
   if (it.status === "Succeeded") return null;
   if (ITEM_NOT_RUN.includes(it.status)) return it.reason_code ? reasonText(it.reason_code) : it.status;
@@ -663,7 +801,7 @@ function notRunCause(it: BatchItem): string | null {
 }
 
 // rm 배치(2026-10-21): 같은 대화상자의 rm 갈래 -- 확인이 곧 root 삭제 시작이라 마찰을 여기 둔다. 무엇이 지워지는지(항목별
-// 삭제 대상 수 + 실제 경로를 **전부** -- 「실행되지 않는 항목」의 10개 상한과 달리 삭제 검토는 누락이 없어야 한다, 목록만
+// 삭제 대상 수 + 지정 경로를 **전부** -- 「실행되지 않는 항목」의 10개 상한과 달리 삭제 검토는 누락이 없어야 한다, 목록만
 // 스크롤), 대상 경로를 못 찾은 항목(미리보기 0), 그리고 「되돌릴 수 없음」 체크를 켜야만 주 버튼 「삭제 실행 확인」이 풀린다.
 // 체크는 열 때마다 풀린다(지난 확인이 새 회차로 이어지지 않게). 버튼 색은 그대로 primary -- danger 는 「멈추는 취소」
 // 전용 의미다(Button.tsx). sync 의 문자열·소유권 줄은 바꾸지 않는다(rm 에 「복사된 파일 소유」는 거짓이라 sync 로 좁힌다).
@@ -691,12 +829,14 @@ function ConfirmBatchDialog({ b, confirm, absOf }: {
   const notRunItems = items.map((it) => ({ it, cause: notRunCause(it) }))
     .filter((x): x is { it: BatchItem; cause: string } => x.cause !== null);
   const expired = items.filter((it) => it.job_state === "PreviewExpired").length;
-  // 복사 대상 합계(단건 ConfirmDialog 의 "복사 대상" 과 같은 값 -- 항목별 dry-run 요약의 files): 값을 아는 항목만
-  // 더하고 모르는 수는 따로 말한다. 전부 모르면 "모름" 이다(null≠0 -- 모름을 0개로 보이지 않는다).
+  // rm 삭제 대상 합계(drm walk 수 -- 항목별 dry-run 요약의 files): 값을 아는 항목만 더하고 모르는 수는 따로 말한다.
+  // 전부 모르면 "모름" 이다(null≠0 -- 모름을 0개로 보이지 않는다). sync 는 도구마다 뜻이 달라 previewTotals 가 가른다.
   const known = runnable.map((it) => it.preview_summary?.files)
     .filter((n): n is number => typeof n === "number");
   const unknownFiles = runnable.length - known.length;
   const fileTotal = known.reduce((a, n) => a + n, 0);
+  const totals = isRm ? null : previewTotals(runnable);
+  const direct = isRm ? null : directNote(b);
   // rm: 미리보기에서 대상 경로를 못 찾은 항목(0 -- walk 는 대상 자신을 세므로 빈 디렉토리도 1). 실행해도 지울 것이 없다.
   const notFound = isRm ? runnable.filter((it) => it.preview_summary?.files === 0).length : 0;
   const expiries = runnable.map((it) => it.preview_expires_at).filter((x): x is string => !!x).sort();
@@ -709,7 +849,7 @@ function ConfirmBatchDialog({ b, confirm, absOf }: {
   const ownership = syncOwnership({ chown: String(b.options?.chown ?? ""), chmod: String(b.options?.chmod ?? ""),
                                     root: true, runAs: null, self: true, directDest: { rule: "varies" } }).long;
   return (
-    // rm 은 넓은 창(lg): 항목별 실제 경로 목록까지 실으면 md 폭에선 1280×900 에서도 버튼이 창 아래로 밀렸다(캡처 실측).
+    // rm 은 넓은 창(lg): 항목별 지정 경로 목록까지 실으면 md 폭에선 1280×900 에서도 버튼이 창 아래로 밀렸다(캡처 실측).
     <Dialog open={open} onOpenChange={onOpenChange} title="배치 확인" size={isRm ? "lg" : "md"}
             trigger={<Button>배치 확인</Button>}>
       <p className="text-sm">
@@ -753,13 +893,13 @@ function ConfirmBatchDialog({ b, confirm, absOf }: {
             {notRunItems.length > NOT_RUN_LIST_MAX && <li>{`외 ${notRunItems.length - NOT_RUN_LIST_MAX}개`}</li>}
           </ul>
         </>)}</dd>
-        <dt className="text-muted">{isRm ? "삭제 대상" : "복사 대상"}</dt>
-        <dd>{runnable.length === 0 ? "—"
-          : known.length === 0 ? `모름(미리보기 ${runnable.length}개 항목 모두 수 미기록)`
-          : isRm
-            ? `${fileTotal.toLocaleString("ko-KR")}개(대상 경로 포함 파일·디렉터리, 항목별 미리보기 합계${
-                unknownFiles > 0 ? `, ${unknownFiles}개 항목은 모름` : ""})`
-            : `${fileTotal.toLocaleString("ko-KR")}개(항목별 미리보기 합계${unknownFiles > 0 ? `, ${unknownFiles}개 항목은 모름` : ""})`}</dd>
+        {isRm && (<>
+          <dt className="text-muted">삭제 대상</dt>
+          <dd>{runnable.length === 0 ? "—"
+            : known.length === 0 ? `모름(미리보기 ${runnable.length}개 항목 모두 수 미기록)`
+            : `${fileTotal.toLocaleString("ko-KR")}개(대상 경로 포함 파일·디렉터리, 항목별 미리보기 합계${
+                unknownFiles > 0 ? `, ${unknownFiles}개 항목은 모름` : ""})`}</dd>
+        </>)}
         {notFound > 0 && (<>
           <dt className="text-muted">대상 경로 없음</dt>
           <dd className="text-bad">
@@ -772,10 +912,87 @@ function ConfirmBatchDialog({ b, confirm, absOf }: {
         <dd>{earliest ? `${kstStampOrDash(earliest)}(가장 이른 항목) — 확인 시각이 아니라 각 항목의 실행 시작 기준입니다. `
           + "슬롯을 기다리다 만료된 항목은 실행되지 않고 거부(실패로 집계)됩니다." : "—"}</dd>
       </dl>
+      {totals !== null && (
+        // sync 미리보기 합계(previewTotals 주석): 항목 수 행들과 구획을 나눠 「무엇을 바꾸는가」를 한 상자에 모은다.
+        <section aria-label="미리보기 합계" className="mt-3 rounded-lg border border-line px-3 py-2">
+          <h3 className="text-sm font-medium">미리보기 합계</h3>
+          <p className="text-xs text-muted">실행할 항목 기준 — 실행 도구마다 수의 뜻이 다릅니다.</p>
+          <dl className="mt-1 grid grid-cols-[max-content_minmax(0,1fr)] gap-x-4 gap-y-1 text-sm">
+            {runnable.length === 0 ? (<><dt className="text-muted">합계</dt><dd>—</dd></>)
+              : totals.unknown === runnable.length ? (<>
+                  <dt className="text-muted">합계</dt>
+                  <dd>{`모름(미리보기 ${runnable.length}개 항목 모두 수 미기록)`}</dd>
+                </>)
+              : (<>
+                  {totals.nsync.items > 0 && (<>
+                    <dt className="text-muted">변경 예정(nsync)</dt>
+                    <dd className="min-w-0">
+                      {`${nf(totals.nsync.total)}개`}
+                      {/* 종류별 합: 0 이 아닌 종류만(kindsText). 종류를 모르는 항목이 섞이면 그 수를 말한다. */}
+                      {totals.nsync.kindsUnknown < totals.nsync.items && (
+                        <span className="block">{kindsText(totals.nsync.kinds)}</span>
+                      )}
+                      <span className="block text-xs text-muted">
+                        {`${totals.nsync.items}개 항목 합계${totals.nsync.kindsUnknown > 0
+                          ? ` · ${totals.nsync.kindsUnknown}개 항목은 종류별 수 모름` : ""}${
+                          // 수와 단위 사이는 줄바꿈 없는 공백(375 폭에서 「25」와 「B」가 갈라졌다)
+                          totals.nsync.bytesKnown > 0 ? ` · 복사할 크기 ${humanBytes(totals.nsync.bytes).replace(" ", " ")}${
+                            totals.nsync.bytesKnown < totals.nsync.items ? "(아는 항목만)" : ""}` : ""}`}
+                      </span>
+                    </dd>
+                  </>)}
+                  {totals.dsync.items > 0 && (<>
+                    <dt className="text-muted">소스 전체(dsync)</dt>
+                    <dd className="min-w-0">
+                      {`${nf(totals.dsync.total)}개 — 변경 수는 실행 후 확정`}
+                      <span className="block text-xs text-muted">
+                        {`${totals.dsync.items}개 항목 합계 · 이미 같은 항목도 셉니다(바뀔 수가 아님)`}
+                      </span>
+                    </dd>
+                  </>)}
+                  {totals.untyped.items > 0 && (<>
+                    <dt className="text-muted">도구 미기록</dt>
+                    <dd className="min-w-0">
+                      {`${nf(totals.untyped.total)}개`}
+                      <span className="block text-xs text-muted">
+                        {`${totals.untyped.items}개 항목 합계 — 이전 버전 미리보기라 변경 예정 수인지 소스 전체 수인지 가를 수 없습니다`}
+                      </span>
+                    </dd>
+                  </>)}
+                  {totals.unknown > 0 && (<>
+                    <dt className="text-muted">수 모름</dt>
+                    <dd>{`${totals.unknown}개 항목(미리보기 수 미기록 — 합계에 넣지 않음)`}</dd>
+                  </>)}
+                </>)}
+          </dl>
+        </section>
+      )}
+      {/* 타입 교체 경고(nsync 미리보기 WARN -- 포탈 괴리 [1]·[6]): 비어 있지 않은 디렉토리가 소스에서 파일·링크로 바뀌었고
+          delete 가 꺼져 있으면 그 항목은 실행에서 실패한다(sync_type_change_refused). 미리보기는 성공(rc 0)이라 확인 창이
+          말하지 않으면 확인 뒤에야 안다. dsync 미리보기는 이 경고를 내지 않는다(포크 미구현) -- 센 것만 말한다. */}
+      {totals !== null && totals.typeChangeItems > 0 && (
+        <p role="note" aria-label="타입 교체 경고"
+           className="mt-3 rounded-lg border border-attn/30 bg-attnbg px-3 py-2 text-sm text-attn">
+          {`${totals.typeChangeItems}개 항목에서 ${totals.typeChangeDirs > 0 ? `디렉토리 ${nf(totals.typeChangeDirs)}개가` : "디렉토리가"} `
+            + "파일·링크로 바뀝니다 — 삭제(delete)를 켜지 않으면 비어 있지 않은 디렉토리는 바뀌지 않고 그 항목은 실패로 "
+            + "남습니다(나머지는 반영)."}
+        </p>
+      )}
+      {totals !== null && totals.specials > 0 && (
+        <p role="note" aria-label="특수 파일" className="mt-2 rounded-lg bg-infobg px-3 py-2 text-sm">
+          {`FIFO·소켓·장치 ${nf(totals.specials)}개(${totals.specialItems}개 항목)는 복사하지 않습니다 — `
+            + (totals.specialNsyncItems === totals.specialItems
+              ? "목적지의 같은 이름 항목은 그대로 둡니다."
+              : "노드 간 실행(nsync)은 목적지의 같은 이름 항목을 그대로 두고, 한 노드 실행(dsync)은 그 이름의 목적지 항목이 "
+                + "다른 종류면 지운 뒤 아무것도 만들지 않습니다.")}
+        </p>
+      )}
+      {direct !== null && <p className="mt-2 text-xs text-muted">{direct}</p>}
       {isRm && runnable.length > 0 && (
         <div className="mt-3">
           <p className="text-sm font-medium">항목별 삭제 대상(미리보기)</p>
-          {/* 실제 경로는 지금의 managed_root 로 조합(absOf -- 모르면 줄 생략). 긴 경로는 아무 데서나 끊는다(375 폭). */}
+          {/* 지정 경로는 지금의 managed_root 에 글자 그대로 붙인 것(absOf -- 모르면 줄 생략, 링크는 풀지 않는다: 「실제 경로」라
+              부르지 않는다 -- 괴리 [C2]). 긴 경로는 아무 데서나 끊는다(375 폭). */}
           <ul aria-label="항목별 삭제 대상"
               className="mt-1 max-h-60 space-y-1 overflow-y-auto rounded-lg border border-line px-3 py-2 text-xs">
             {runnable.map((it) => {
@@ -787,7 +1004,7 @@ function ConfirmBatchDialog({ b, confirm, absOf }: {
                 <li key={it.seq} className={`[overflow-wrap:anywhere] ${sm?.files === 0 || rc !== "" ? "text-bad" : ""}`}>
                   {`#${it.seq} ${pathSummary(b.operation, it.payload)} — `}
                   <span className="font-medium tabular-nums">{`${rmCount(sm?.files)}${rc}`}</span>
-                  {abs !== null && <span className="block text-muted">{`실제 경로: ${abs}`}</span>}
+                  {abs !== null && <span className="block text-muted">{`지정 경로: ${abs}`}</span>}
                 </li>
               );
             })}
@@ -799,9 +1016,25 @@ function ConfirmBatchDialog({ b, confirm, absOf }: {
           {`미리보기 만료 ${expired}개 — 확인해도 실행되지 않고 거부로 기록됩니다(항목 재실행으로 다시 미리보기).`}
         </p>
       )}
+      {/* delete 문구는 제출 폼과 같은 한 출처(SYNC_OPTION_HELP -- 괴리 [3]·[28]: 「미러 동기화」만으로는 특수 파일·읽기
+          오류의 예외를 말하지 않았다). nsync 항목의 삭제 예정 수는 위 합계의 「삭제」다. delete 가 꺼져 있어도 nsync 는 타입이
+          바뀐 항목(파일↔디렉토리·링크)을 다시 만들려고 목적지 쪽을 먼저 지운다 -- 그 「삭제」가 delete 와 무관함을 말한다. */}
       {del && (
-        <p className="mt-3 rounded-lg border border-bad/30 bg-badbg px-3 py-2 text-sm text-bad">
-          delete 옵션: 원본에 없는 파일·디렉토리를 목적지에서 지웁니다(미러 동기화).
+        <p role="note" aria-label="delete 옵션"
+           className="mt-3 rounded-lg border border-bad/30 bg-badbg px-3 py-2 text-sm text-bad">
+          {`delete 옵션: ${SYNC_OPTION_HELP.delete}`}
+          {totals !== null && totals.nsync.items > 0 && (
+            <span className="mt-1 block">
+              {`nsync 항목의 삭제 예정 수는 위 「변경 예정」의 삭제입니다${totals.dsync.items > 0
+                ? "(dsync 항목은 실행 후 확정)" : ""}.`}
+            </span>
+          )}
+        </p>
+      )}
+      {!del && !isRm && totals !== null && (totals.nsync.kinds.remove ?? 0) > 0 && (
+        <p className="mt-2 text-xs text-muted">
+          {`delete 는 꺼져 있지만 위 삭제 ${nf(totals.nsync.kinds.remove ?? 0)}개는 타입 교체입니다 — 종류가 바뀐 항목(파일↔`
+            + "디렉토리·링크)을 다시 만들려고 목적지 쪽을 먼저 지웁니다."}
         </p>
       )}
       {b.operation === "sync" && (
@@ -1435,13 +1668,20 @@ export function BatchDetail() {
                     <ItemTool requestId={it.request_id} />
                     {/* null = 모름(잡 없음/미기록) — 0(파일 없음)은 정상값으로 그대로
                         표기한다(null≠0, ?? 로만 접는다). */}
-                    {/* rm 의 결과 수는 「삭제한 항목」(요청 상세 KPI 와 같은 이름 — requestOutcome) + 확인 때 본 미리보기 수 */}
-                    <dt className="text-muted">{b?.operation === "rm" ? "삭제한 항목" : "파일 수"}</dt>
+                    {/* 결과 수의 이름은 연산의 뜻으로(요청 상세 KPI 와 같은 이름 — requestOutcome): rm 「삭제한 항목」, sync
+                        「반영한 항목」(2026-10-27 d192 -- files_count 는 이제 실행에서 실제로 반영된 수다: nsync 완료 액션 합·
+                        dsync 복사 성공 수. 예전 「파일 수」는 nsync 의 계획 합을 실패한 실행에서도 그대로 보였다, 괴리 [2]·[4]),
+                        scan 「파일 수」. 아래에 확인 때 본 미리보기 수를 도구별 뜻으로 함께 둔다. sync 의 「반영한 항목」은 d192
+                        이후 러너로 돈 항목에만 붙인다(syncCountLabel -- 그 전 기록은 중립 「항목 수」). */}
+                    <dt className="text-muted">
+                      {b?.operation === "rm" ? "삭제한 항목" : b?.operation === "sync" ? syncCountLabel(it) : "파일 수"}
+                    </dt>
                     <dd className="tabular-nums">{it.files_count ?? "—"}</dd>
                     {b?.operation === "rm" && it.preview_summary != null && (<>
                       <dt className="text-muted">삭제 대상(미리보기)</dt>
                       <dd className="tabular-nums">{rmCount(it.preview_summary.files)}</dd>
                     </>)}
+                    {b?.operation === "sync" && it.preview_summary != null && <SyncPreviewRow summary={it.preview_summary} jobTool={it.job_tool} />}
                     <dt className="text-muted">완료 시각</dt>
                     <dd className="text-muted">{kstStampOrDash(it.completed_at)}</dd>
                     <dt className="text-muted">payload</dt>

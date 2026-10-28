@@ -299,6 +299,35 @@ def test_requests_create_with_batch_id(db):
     assert repos.requests.get(rid)["batch_id"]=="b1"
 
 
+# --- 항목 상세 조인(list_items_detail)의 job_tool(2026-10-27 d192) ---
+
+def test_list_items_detail_carries_the_latest_child_job_tool(db):
+    # 미리보기 files 의 뜻이 도구마다 달라(nsync 변경 예정·dsync 소스 전체·drm 지울 대상) 확인 합계(batch_orchestrator
+    # .preview_files 의 files_by_tool)와 포탈 항목 라벨이 이 열로 가른다 -- summary 에 tool 이 없는 d192 전 미리보기도.
+    # 다른 잡 조인 열(files_count·job_state·preview_summary)과 같은 「최신 잡 하나」여야 한 항목의 수와 도구가 어긋나지 않는다.
+    repos = Repositories(db)
+    bid = repos.batches.create(operation="sync", requester_id="admin", actor="admin", max_concurrency=2,
+                               options={}, note=None, status="Previewing",
+                               items=[{"source_storage": "s1", "source": "a", "destination_storage": "s2",
+                                       "destination": f"b{i}"} for i in range(3)])
+    rid = repos.requests.create(operation="sync", requester_id="admin", actor="admin", resource_key="k-jt-0",
+                                payload={}, priority="mid", batch_id=bid)
+    repos.batches.set_item_materialized(bid, 0, rid)
+    plan = repos.data_jobs.create_plan(rid, actor="planner")
+    old, new = (repos.data_jobs.create_job(rid, plan, operation="sync", priority="mid", source_storage="s1",
+                                           destination_storage="s2", source="a", destination="b0", options={},
+                                           tool=t, worker_pool={}, precondition={}, actor="planner")
+                for t in ("dsync", "nsync"))
+    db.execute("UPDATE data_jobs SET created_at = :c WHERE job_id = :j", {"c": "2026-10-01T00:00:00Z", "j": old})
+    db.execute("UPDATE data_jobs SET created_at = :c WHERE job_id = :j", {"c": "2026-10-02T00:00:00Z", "j": new})
+    rid1 = repos.requests.create(operation="sync", requester_id="admin", actor="admin", resource_key="k-jt-1",
+                                 payload={}, priority="mid", batch_id=bid)
+    repos.batches.set_item_materialized(bid, 1, rid1)                  # 요청은 있고 잡은 아직 없다(계획 전)
+    items = repos.batches.list_items_detail(bid)
+    # 최신 잡의 도구, 잡 없음·미 materialize 는 None(모름 -- 지어낸 도구가 아니다).
+    assert [it["job_tool"] for it in items] == ["nsync", None, None]
+
+
 # --- 배치 요약(list_summaries, 2026-10-10): 작업 목록의 「배치」 열·배치 단위 삭제의 자식 수 ---
 
 def _insert_child(db, bid, *, state="Succeeded", order, job=None):

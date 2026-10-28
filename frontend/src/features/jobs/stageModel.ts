@@ -116,7 +116,9 @@ export function submitFailedPhase(reasonCode: string | null | undefined): Phase 
 }
 
 // 사유 접두 → 단계(reasonCodes.json 에 있는 코드만). 마커 승격 사유(destination_not_writable 등)는 phase 접두를
-// 잃으므로 여기 없다 -- 그건 전이의 from_state 로 판정한다.
+// 잃으므로 여기 없다 -- 그건 전이의 from_state 로 판정한다. d192 의 도구 실패 사유(sync_items_failed·tool_aborted·
+// destination_full 등, execution_manifests.TOOL_FAILURE_REASONS)도 같다: 러너가 미리보기·실행 어느 쪽에서든 같은 코드를
+// 내므로(stepper._run_failure_reason) 코드만으로 단계를 정하면 미리보기 실패를 실행 실패로 칠한다.
 const REASON_PREFIX_STEP: Record<string, StepId> = {
   preflight_failed: "preflight",
   preview_failed: "preview", preview_timed_out: "preview", empty_preview: "preview",

@@ -15,7 +15,7 @@ import { exactBytes, INVALID_NAMES_HELP, INVALID_NAMES_LABEL, invalidNamesText, 
 import { useScanHistory } from "./useUsage";
 import { SIZE_HELP, SectionHead, Stat } from "./UsageParts";
 import {
-  AXIS_MEANING, HOT_AGE_MAX_DAYS, ageLabel, hotRatio, humanBytes, pointEpoch, stackLayout, tempColorOf,
+  ATIME_APPROX_NOTE, AXIS_MEANING, HOT_AGE_MAX_DAYS, ageLabel, hotRatio, humanBytes, pointEpoch, stackLayout, tempColorOf,
 } from "./usageStats";
 
 // 펼친 타깃 상세(2026-09-14 행 아래 펼침 → 2026-10-20 UsageAnalysis 에서 분리·정리). 2026-10-20 정리(사용자 요청 「깔끔하고
@@ -29,8 +29,13 @@ import {
 // 선택된 「최근 N건」이 곧 상시 창 안내다(조건부로만 말하면 「이게 전체 이력」이라는 오독이 기본값이 된다 -- 같은 날 요청).
 const HISTORY_WINDOWS = [{ value: 30, label: "최근 30건" }, { value: 60, label: "최근 60건" }] as const;
 
+// atime 근사 경고(2026-10-27 d192, 포탈 괴리 [C3]): 읽기가 atime 에 반영되는지는 마운트·스토리지에 달렸다(noatime 은 반영
+// 안 함, 테스트베드 CephFS 는 relatime 인데도 노드에서 읽어도 atime 이 바뀌지 않았다 -- CHANGELOG d190). 그런 곳에선 hot 이
+// 「최근에 읽힘」이 아니라 「최근에 쓰임」에 가깝다. relatime 자체는 읽기를 하루 단위로 반영한다(2026-10-28 리뷰 portal-batch-27
+// -- 예전 문구는 relatime 을 반영 안 하는 쪽에 넣었다). 문장은 usageStats ATIME_APPROX_NOTE 한 곳(배치 항목 캡션과 같은 문장).
 const TEMP_CAPTIONS: Record<string, string> = {
-  atime: "각 열 = 스캔 1회. 위(빨강)=hot·최근 접근, 아래(파랑)=cold — atime 기준 용량 비중. relatime/open_noatime 환경에선 근사. 열에 마우스를 올리면 구간별 용량",
+  atime: `각 열 = 스캔 1회. 위(빨강)=hot·최근 접근, 아래(파랑)=cold — atime 기준 용량 비중. ${ATIME_APPROX_NOTE}. `
+    + "열에 마우스를 올리면 구간별 용량",
   mtime: "각 열 = 스캔 1회. 위(빨강)=최근 수정, 아래(파랑)=오래됨 — mtime 기준 용량 비중. 열에 마우스를 올리면 구간별 용량",
   ctime: "각 열 = 스캔 1회. 위(빨강)=최근 변경, 아래(파랑)=오래됨 — ctime 기준 용량 비중. 열에 마우스를 올리면 구간별 용량",
 };

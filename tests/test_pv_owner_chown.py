@@ -30,9 +30,10 @@ _ABS = {"source": "/s/a", "destination": "/d/pv/out"}
 
 def _spec(*, identity=_ROOT, contain=True, options=None, owner=None, rule="pv_root", tool="dsync", dryrun=False,
           phase="preview"):
-    paths = {"source": "/s/a", "source_storage": "s", "destination": "/d/pv/out", "destination_storage": "d"}
+    paths = {"source": "/s/a", "source_storage": "s", "destination": "/d/pv/out", "destination_storage": "d",
+             "source_root": "/s", "destination_root": "/d"}
     if contain:
-        paths["contain"] = {"destination": {"root": "/d/pv", "anchor": "/d"}}
+        paths["contain"] = {"destination": {"root": "/d/pv"}}
     return JobSpec(job_id="j1", phase=phase, operation="sync", tool=tool, dryrun=dryrun, identity=identity,
                    paths=paths, options=options or {}, candidates={"primary": ["n1"]}, process_count=1,
                    queue="dms-data", priority_class="dms-mid", artifact_base="file:///art", result_owner=owner,
@@ -49,7 +50,7 @@ def test_rule_applies_to_root_sync_into_a_pv_without_explicit_chown(rule):
     assert pv_dest_owner_applies(_spec(rule=rule, identity=_USER)) is False            # 비 root -- 종전(실행 신원)
     assert pv_dest_owner_applies(_spec(rule=rule, options={"chown": "5:5"})) is False   # 명시 chown 이 이긴다
     src_only = _spec(rule=rule, contain=False)
-    src_only.paths["contain"] = {"source": {"root": "/s", "anchor": "/s"}}
+    src_only.paths["contain"] = {"source": {"root": "/s"}}
     assert pv_dest_owner_applies(src_only) is False                                     # PV 소스 → 직접 경로 목적지
 
 
@@ -136,7 +137,8 @@ def _tree_spec(tmp_path, *, tool="dsync", identity=_ROOT, options=None, root_rel
     (m / "src").mkdir()
     root = str(m / root_rel)
     paths = {"source": str(m / "src"), "source_storage": "s", "destination": root + "/out/new",
-             "destination_storage": "d", "contain": {"destination": {"root": root, "anchor": str(m)}}}
+             "destination_storage": "d", "source_root": str(m), "destination_root": str(m),
+             "contain": {"destination": {"root": root}}}
     return JobSpec(job_id="j1", phase="preflight", operation="sync", tool=tool, dryrun=False, identity=identity,
                    paths=paths, options=options or {}, candidates={"primary": ["n1"]}, process_count=1,
                    queue="dms-data", priority_class="dms-mid", artifact_base="file:///art",
@@ -168,14 +170,14 @@ def test_no_measurement_when_not_required(tmp_path):
 @pytest.mark.parametrize("role", [None, "source", "destination"])
 def test_storage_rule_preflight_is_the_containment_only_script(tmp_path, role):
     """기본 규칙의 preflight 는 측정 기능 이전과 바이트 동일(봉쇄만) -- 같은 root·PV 목적지에서 측정하지 않는 다른 갈래(명시
-    chown)와 스크립트·인자가 같다. 봉쇄(dms_contain)는 그대로 붙는다."""
+    chown)와 스크립트·인자가 같다. 봉쇄(dms_path_contained + PV 경계 dms_within)는 그대로 붙는다."""
     storage, _ = _tree_spec(tmp_path, tool="nsync", rule="storage")
     explicit = dataclasses.replace(storage, result_owner_rule=None, options={"chown": "5:5"})
     assert _preflight_script(storage, role=role) == _preflight_script(explicit, role=role)
     script = _preflight_script(storage, role=role)[0]
     assert "dms_pv_owner" not in script and "DMS_PV_OWNER" not in script
     if role != "source":
-        assert "dms_contain \"$" in script
+        assert 'dms_path_contained "$D" "$DR"' in script and 'dms_within "$D" "$DP"' in script
     measured = dataclasses.replace(storage, result_owner_rule="pv_root")
     if role == "source":
         assert _preflight_script(measured, role=role) == _preflight_script(storage, role=role)
@@ -184,17 +186,17 @@ def test_storage_rule_preflight_is_the_containment_only_script(tmp_path, role):
 
 
 def test_measurement_runs_after_containment(tmp_path):
-    """PV 루트 자신이 링크면 봉쇄(dms_contain)가 먼저 막는다 -- 링크의 소유자를 재지 않는다."""
+    """PV 루트 자신이 링크면 봉쇄(dms_path_contained)가 먼저 막는다 -- 링크의 소유자를 재지 않는다."""
     spec, m = _tree_spec(tmp_path)
     (m / "pvc-b").mkdir()
     (m / "pvc-b/data").symlink_to(str(m / "pvc-a/data"))
     spec2, _ = _tree_spec(tmp_path / "x")
     root = str(m / "pvc-b/data")
-    spec2.paths.update({"destination": root + "/out/new",
-                        "contain": {"destination": {"root": root, "anchor": str(m)}}})
+    spec2.paths.update({"destination": root + "/out/new", "destination_root": str(m),
+                        "contain": {"destination": {"root": root}}})
     rc, out, script = _run(spec2)
-    assert rc != 0 and "DMS_PREFLIGHT_REASON=target_path_redirected" in out and "DMS_PV_OWNER=" not in out
-    assert script.index("dms_contain \"$") < script.index("dms_pv_owner \"$")
+    assert rc != 0 and "DMS_PREFLIGHT_REASON=destination_path_redirected" in out and "DMS_PV_OWNER=" not in out
+    assert script.index('dms_path_contained "$D"') < script.index('dms_pv_owner "$')
 
 
 def test_owner_function_refuses_a_non_directory_root(tmp_path):

@@ -5,7 +5,7 @@ import { HelpTip } from "../../components/ui/HelpTip";
 import type { ScanTargetRow } from "../../lib/types";
 import { agoText, ageDays, kstStampOrDash } from "../../lib/datetime";
 import type { UsageSort } from "./useUsage";
-import { HOT_AGE_MAX_DAYS, hotRatio, humanBytes } from "./usageStats";
+import { ATIME_READ_RULE, HOT_AGE_MAX_DAYS, hotRatio, humanBytes } from "./usageStats";
 import { TargetDetail } from "./TargetDetail";
 
 // 한 스토리지의 타깃 표(2026-10-20 UsageAnalysis 에서 분리). 6열 -- 「스토리지」 열과 행의 「미등록」 배지는 없앴다: 탭이 그
@@ -111,8 +111,11 @@ export function TargetTable({ storage, rows, activeTarget, onToggle, sort, order
             버튼(서버 정렬 -- 받은 100개만 정렬하지 않는다). */}
         <SortHeader col="bytes" label="실 사용량" sort={sort} order={order} onSort={onSort} />
         <SortHeader col="files" label="파일 수" sort={sort} order={order} onSort={onSort} />
+        {/* hot 도움말의 atime 규칙은 usageStats ATIME_READ_RULE 한 곳(2026-10-28 리뷰 portal-batch-27 -- relatime 은 읽기를
+            하루 단위로 반영하므로 「바꾸지 않는 스토리지」 목록에 넣지 않는다). */}
         <SortHeader col="hot" label="hot 비율" sort={sort} order={order} onSort={onSort}
-                    help={`atime 기준 ${HOT_AGE_MAX_DAYS}일 이내 용량 비중 · 최근 성공 scan`} />
+                    help={`atime 기준 ${HOT_AGE_MAX_DAYS}일 이내 용량 비중 · 최근 성공 scan — ${ATIME_READ_RULE}. 읽기가 `
+                      + "atime 을 바꾸지 않는 스토리지(noatime 마운트, 일부 CephFS 등)에선 최근에 쓴 데이터 비중에 가까운 근사치"} />
         <SortHeader col="scans" label="스캔 횟수" sort={sort} order={order} onSort={onSort} />
         {/* pl-6: 바로 왼쪽 「스캔 횟수」가 오른쪽 정렬이라 여백 없이 붙으면 "4"+"1시간 전"이 "41시간 전"으로
             읽혔다(실 Chrome 확인 d156). 서버가 정렬하므로 limit 밖의 오래된 타깃도 오름차순에서 보인다. */}

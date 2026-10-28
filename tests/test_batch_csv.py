@@ -73,7 +73,9 @@ def test_excel_bom_crlf_and_quoted_comma():
 def test_quoted_newline_keeps_physical_line_numbers_for_later_rows():
     r = parse_items_csv("sync", 'a,"b\nc"\nx\n')
     assert r["items"] == [{"source": "a", "destination": "b\nc"}]
-    assert _codes(r) == [(3, 2, "batch_csv_bad_row")]
+    # 칸 안의 줄바꿈은 해석은 되지만 경로로는 unsafe_path 다(2026-10-28 -- 제어 문자 거부, domain.validate_relative_path). 그
+    # 행은 시작 줄(1)로, 다음 행은 물리 줄 번호(3)로 말한다.
+    assert _codes(r) == [(1, 1, "unsafe_path"), (3, 2, "batch_csv_bad_row")]
 
 
 def test_broken_quote_is_a_file_error_and_nothing_is_returned():
@@ -111,6 +113,14 @@ def test_paths_that_really_start_with_an_apostrophe_round_trip():
 
 def test_path_rules_are_build_data_payload_rules_per_line():
     r = parse_items_csv("scan", "ok\n/abs\na/../b\n", storages={"storage": "s1"})
+    assert _codes(r) == [(2, 2, "unsafe_path"), (3, 3, "unsafe_path")]
+
+
+def test_control_characters_inside_a_path_cell_are_unsafe_per_line():
+    # 칸 앞뒤의 공백·탭·CR 은 _cell 이 걷는다(엑셀 CSV) -- 경로 **안쪽**의 제어 문자만 unsafe_path(2026-10-28, 생성과 같은 규칙)
+    r = parse_items_csv("sync", ' a\t,b\r\n"x\ty",z\nq,"r\x1bs"\n', storages={"source_storage": "s1",
+                                                                            "destination_storage": "s2"})
+    assert r["items"][0] == {"source_storage": "s1", "destination_storage": "s2", "source": "a", "destination": "b"}
     assert _codes(r) == [(2, 2, "unsafe_path"), (3, 3, "unsafe_path")]
 
 

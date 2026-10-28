@@ -6,7 +6,10 @@
 import { REQUEST_TERMINAL_STATES, isTerminal } from "../../lib/jobState";
 import { kstStamp } from "../../lib/datetime";
 import type { DataJob, RequestDetail } from "../../lib/types";
-import { countText, finiteOrNull, humanBytes, isPlainObject, msText, spanText } from "./format";
+import {
+  hasFailureItems, isPreToolReason, kindsCountParts, kindsText, previewWarnings, readSummary, summaryTool, type ReadSummary,
+} from "../../lib/toolSummary";
+import { countText, humanBytes, isPlainObject, msText, spanText } from "./format";
 import { exactBytes } from "../../lib/scanCounters";
 import { STEP_COPY, isEstimated, normTransitions, type JobStagesModel, type StageId, type StepId } from "./stageModel";
 
@@ -72,6 +75,94 @@ const lastTerminalAt = (job: DataJob): string | null => {
   const t = [...normTransitions(job.transitions)].reverse().find((x) => isTerminal(x.to_state));
   return t && typeof t.at === "string" ? t.at : null;
 };
+
+// sync 실행이 데이터를 만졌을 수 있을 때의 말(포탈 괴리 [C1]): nsync 는 복사만 하지 않는다 -- 삭제(--delete)와 형식이 바뀐
+// 항목의 교체(삭제 옵션과 무관, 다중 배치면 첫 배치 전에)도 실패·취소 전에 이미 일어났을 수 있다. 「복사됐을 수 있다」만
+// 말하면 지워진·바뀐 목적지 항목을 찾아볼 생각을 하지 않는다(d189-C13: 복사 0, 삭제 5 뒤 실패).
+const SYNC_TOUCHED = "일부 항목이 이미 복사·삭제됐거나 형식이 바뀌어 교체됐을 수 있습니다";
+
+// 도구가 시작되기 전에 멈췄나(포탈 괴리 [10]·[12]·[16]) -- 실행 단계 실패라도 이 사유면 「이미 복사·삭제됐을 수 있다」가
+// 거짓이다(러너가 mpirun·도구 exec 전에 거부 -- 경로 봉쇄·워커 준비 실패, 제출 실패, 단계 관문). 큐 대기 관문만 예외: 실행
+// vcjob 이 PENDING 일 때만 던지지만, 한 번이라도 RUNNING 이 관측된 뒤(파드 재시작으로 다시 PENDING)라면 도구가 이미 돌았을 수
+// 있다. dms-k8s 의 그 관문은 stepper._poll_execution 의 PENDING 분기가 부르는 둘이다 -- _raise_if_blocked(노드 제외)·
+// _raise_if_cpu_short(노드 CPU 부족). dms-ssc 의 _note_queued_recheck(LDAP 신원 재확인 → identity_changed·identity_missing)는
+// 이 라인에 없다(2026-10-26 LDAP 코드 삭제) -- identity_missing_at_step 은 여기선 제출 직전(_build_spec)에만 나온다.
+const QUEUE_GATE_REASONS = new Set(["node_excluded_at_step", "node_cpu_insufficient_at_step"]);
+export function toolNeverStarted(job: DataJob, m: JobStagesModel): boolean {
+  if (!isPreToolReason(job.reason_code)) return false;
+  const prefix = (job.reason_code ?? "").split(":")[0];
+  if (QUEUE_GATE_REASONS.has(prefix) && m.steps.find((s) => s.id === "execution")?.schedWaitSec != null) return false;
+  return true;
+}
+
+// 실행 결과(summary v2)가 아는 「실제로 반영된 것」 한 문장. 모르면 null(호출측이 「…됐을 수 있습니다」로 말한다).
+// 「실패 전까지」가 아니라 「끝나기 전까지」: nsync 는 항목별 실패 뒤에도 나머지를 계속 반영한다.
+// - 비정상 종료(aborted)면 null(d192 리뷰 portal-jobs-12): 중단된 도구는 마지막 요약 블록을 찍지 못한다 -- dsync 의 남은
+//   「Items:」는 복사 전 계획이라 그 수를 「복사 N개가 반영됐습니다」로 말하면 거짓이다.
+// - dsync: 「반영된 항목은 없습니다」는 적용되는 수를 **전부** 알 때만(null≠0, 리뷰 portal-jobs-19). 삭제를 켰는데 지운 수를
+//   모르면(Removed 줄이 없거나 두 번 -- 날 경로가 끼워 넣을 수 있어 러너가 버린다) 아는 수만 말하고 모르는 것을 밝히거나,
+//   아는 반영이 하나도 없으면 null.
+function appliedText(s: ReadSummary, tool: string | null, op: string, deleteOn: boolean): string | null {
+  if (!s.detailed || s.aborted) return null;
+  if (op === "rm" || tool === "drm") {
+    if (s.removed === null) return null;
+    const failed = s.removeFailed !== null && s.removeFailed > 0 ? ` ${countText(s.removeFailed)}는 지우지 못했습니다.` : "";
+    return `실패로 끝나기 전까지 ${countText(s.removed)}를 삭제했습니다.${failed}`;
+  }
+  let parts: string[];
+  const unknown: string[] = [];
+  if (tool === "nsync") {
+    if (s.done === null) return null;
+    parts = kindsCountParts(s.done);
+  } else {
+    if (s.copiedItems === null && s.removed === null) return null;
+    parts = [];
+    if (s.copiedItems !== null && s.copiedItems > 0) parts.push(`복사 ${countText(s.copiedItems)}`);
+    if (s.removed !== null && s.removed > 0) parts.push(`삭제 ${countText(s.removed)}`);
+    if (s.copiedItems === null) unknown.push("복사");
+    if (s.removed === null && deleteOn) unknown.push("삭제");
+  }
+  if (unknown.length > 0) {
+    return parts.length > 0
+      ? `실패로 끝나기 전까지 ${parts.join("·")}가 반영됐습니다(${unknown.join("·")} 수는 알 수 없습니다).` : null;
+  }
+  return parts.length > 0 ? `실패로 끝나기 전까지 ${parts.join("·")}가 반영됐습니다.` : "실패로 끝나기 전까지 반영된 항목은 없습니다.";
+}
+
+// 비정상 종료(MPI 중단)인가 -- summary 의 aborted 또는 승격된 사유. mfu_abort 의 「ABORT:」 줄과 mpirun 배너는 stderr 로만
+// 나간다(stdout.log 가 아니다, d192 리뷰 portal-jobs-16·contract-34) -- 원인 위치 문장을 이것으로 가른다.
+const isAborted = (job: DataJob, s: ReadSummary) => s.aborted || job.reason_code === "tool_aborted";
+
+// 결과 파일이 보존 기간이 지나 지워졌나(dms-k8s 2026-10-26 결과 파일 자동 만료 -- 잡 행 artifacts_expired_at). 지운 것은 파일뿐이라
+// 사유·결과 수치는 그대로 말하고, 파일을 가리키는 안내만 바꾼다(JobStages 의 「결과 파일 만료됨」 줄과 같은 사실).
+export const artifactsExpired = (job: Pick<DataJob, "artifacts_expired_at">) =>
+  typeof job.artifacts_expired_at === "string" && job.artifacts_expired_at !== "";
+
+// 실행 실패의 「다음 할 일」 문장(sync·rm). 순서: 무엇이 바뀌었나 → 원인이 어디에 있나.
+// 원인은 결과의 「실패 항목」과 실행 출력(stdout.log)이다 -- nsync·dsync·drm 의 실패 줄은 stdout 으로 나간다(stderr.log 에는
+// mpirun 소음뿐, 포탈 괴리 [19]). 예외는 비정상 종료: 그 원인(ABORT 줄)은 stderr 에만 있다. quiet 실행은 도구가 아무 줄도
+// 남기지 않아 원인을 로그에서 찾을 수 없다(괴리 [9]·[13]).
+function execFailureText(job: DataJob, m: JobStagesModel, op: string): string {
+  const s = m.resultStage === "exec" ? readSummary(job.result_summary) : readSummary(null);
+  const tool = summaryTool(s, job.tool);
+  const applied = appliedText(s, tool, op, job.options?.delete === true)
+    ?? (op === "rm" ? "실패 전에 일부 파일이 이미 삭제됐을 수 있습니다." : `실패 전에 ${SYNC_TOUCHED}.`);
+  const quiet = s.quiet || job.options?.quiet === true;
+  // 결과 파일 만료(dms-k8s 2026-10-26, 410 artifact_expired): stdout.log·stderr.log 는 지워졌다 -- 없는 파일을 가리키지 않는다.
+  // 결과 수치(summary)·「실패 항목」 예시·실행 로그(파드 로그·보관된 진단)는 그대로라 그쪽만 가리킨다.
+  const gone = artifactsExpired(job);
+  // 「실패 항목」은 결과 화면에 그 구획이 실제로 있을 때만 가리킨다(같은 hasFailureItems -- 없는 구획을 가리키지 않는다).
+  const where = isAborted(job, s)
+    ? (gone ? "도구가 비정상 종료했습니다 — 원인은 실행 로그의 stderr 발췌에 있습니다(stderr.log 는 보존 기간이 지나 만료됐습니다)."
+      : "도구가 비정상 종료했습니다 — 원인은 실행 로그의 stderr 발췌나 stderr.log 의 ABORT 줄에 있습니다.")
+    : quiet ? "quiet 로 실행돼 도구가 오류·실패 항목을 남기지 않았습니다 — 원인을 보려면 quiet 를 끄고 다시 실행하세요."
+    : hasFailureItems(s, tool)
+      ? (gone ? "원인은 아래 실행 결과의 「실패 항목」에 있습니다(전체 목록이 있던 실행 출력 stdout.log 는 보존 기간이 지나 만료됐습니다)."
+        : "원인은 아래 실행 결과의 「실패 항목」과 실행 출력(stdout.log)에 있습니다.")
+    : gone ? "실행 로그에서 원인을 찾으세요(실행 출력 stdout.log 는 보존 기간이 지나 만료됐습니다)."
+    : "실행 로그와 실행 출력(stdout.log)에서 원인을 찾으세요.";
+  return `${applied} ${where}`;
+}
 
 // jobsLoading: 잡 목록을 아직 모르는데 실패 문구도 없다(캐시에 데이터 없는 실패가 남은 채 다시 들어와 재조회 중 --
 // RequestDetail 의 잡 구획이 중립 골격 「작업 정보를 불러오는 중…」을 그리는 바로 그 경우). 이때 배너가 「불러오지
@@ -168,8 +259,13 @@ export function deriveOutcome(req: RequestDetail, jobs: DataJob[] | null, models
           next: next("각 작업의 「작업 컨펌」 줄에서 진행하세요.", []) };
       }
       // "confirm" = 「컨펌하러 가기」(관문 줄의 「작업 컨펌」으로 이동). 창은 관문 줄에만 있다(confirmOwner 참고).
+      // 미리보기가 이미 아는 위험(삭제 예정·타입 교체 실패 예고 등, 괴리 [6])이 있으면 그 수를 먼저 말한다 -- 문장 자체는
+      // 미리보기 결과·컨펌 창에 있다(같은 previewWarnings).
+      const ps = readSummary(job.preview_summary);
+      const warn = previewWarnings(ps, { op, tool: summaryTool(ps, job.tool), deleteOn: job.options?.delete === true }).length;
+      const warnLead = warn > 0 ? `미리보기에 컨펌 전에 확인할 점이 ${warn}가지 있습니다 — 「미리보기 결과 보기」에서 확인하세요. ` : "";
       return { ...o, tone: "action", icon: "bell", title: `컨펌을 기다리고 있습니다${tail}`,
-        next: next("미리보기 결과를 검토한 뒤 컨펌하면 실제 실행이 시작됩니다. 실행하지 않으려면 컨펌하지 않고 취소하세요.",
+        next: next(`${warnLead}미리보기 결과를 검토한 뒤 컨펌하면 실제 실행이 시작됩니다. 실행하지 않으려면 컨펌하지 않고 취소하세요.`,
           ["confirm", "showPreview", "cancelJob"], { expiry: true }) };
     }
     case "Succeeded":
@@ -189,12 +285,14 @@ export function deriveOutcome(req: RequestDetail, jobs: DataJob[] | null, models
       : f.step === "confirm" ? "컨펌 전에 취소되었습니다"
       : `${STEP_COPY[f.step]} 중에 취소되었습니다`;
     // 스케줄 대기 중 취소: 서버가 마지막으로 본 것은 대기였지만 폴링 사이에 시작됐을 수 있다 -- "시작됐다면" 까지만 말한다.
+    // sync 는 복사만이 아니라 삭제·교체도 이미 일어났을 수 있다(SYNC_TOUCHED, 괴리 [C1]).
     const text = f?.queued
       ? (op === "scan" ? "스케줄 대기 중에 취소되었습니다 — scan 은 데이터를 바꾸지 않습니다."
-        : `스케줄 대기 중에 취소되었습니다 — 취소 직전에 실행이 시작됐다면 일부 파일이 이미 ${op === "rm" ? "삭제" : "복사"}됐을 수 있습니다.`)
+        : op === "rm" ? "스케줄 대기 중에 취소되었습니다 — 취소 직전에 실행이 시작됐다면 일부 파일이 이미 삭제됐을 수 있습니다."
+        : `스케줄 대기 중에 취소되었습니다 — 취소 직전에 실행이 시작됐다면 ${SYNC_TOUCHED}.`)
       : m.executionStarted
       ? (op === "rm" ? "실행 중에 취소되어 일부 파일이 이미 삭제됐을 수 있습니다."
-        : op === "sync" ? "실행 중에 취소되어 일부 파일이 이미 복사됐을 수 있습니다."
+        : op === "sync" ? `실행 중에 취소되어 ${SYNC_TOUCHED}.`
         : "실행 중에 취소되었습니다 — scan 은 데이터를 바꾸지 않습니다.")
       : "실행 전에 취소되어 데이터는 변경되지 않았습니다.";
     return { ...o, tone: "neutral", icon: "ban", title: `${where}${tail}`, subtitle: ended, next: next(text, ["newJob"]) };
@@ -245,10 +343,24 @@ export function deriveOutcome(req: RequestDetail, jobs: DataJob[] | null, models
       return bad(`사전 점검 단계에서 ${verb}`,
         "사전 점검 로그에서 실패한 검사를 확인하고 고친 뒤 다시 제출하세요. 데이터는 변경되지 않았습니다.",
         [...failLog, "newJob"]);
-    case "preview":
-      return bad(`미리보기 단계에서 ${verb}`,
-        "미리보기 로그와 stderr.log 에서 원인을 찾으세요. 미리보기는 dry-run 이라 데이터는 변경되지 않았습니다.",
+    case "preview": {
+      // 도구의 실패 줄은 stdout.log 에 있다(괴리 [19]). summary v2 가 실패 항목을 알면 결과의 「실패 항목」을 먼저 가리킨다.
+      const ps = m.resultStage === "pre" ? readSummary(job.result_summary) : readSummary(null);
+      // 결과 파일이 만료됐으면(dms-k8s) stdout.log·stderr.log 를 가리키지 않는다(execFailureText 와 같은 규칙).
+      const gone = artifactsExpired(job);
+      const why = toolNeverStarted(job, m)
+        ? "도구가 시작되기 전에 멈췄습니다 — 사유를 확인한 뒤 다시 제출하세요."
+        : isAborted(job, ps)
+          ? (gone ? "도구가 비정상 종료했습니다 — 원인은 미리보기 로그의 stderr 발췌에 있습니다(stderr.log 는 보존 기간이 지나 만료됐습니다)."
+            : "도구가 비정상 종료했습니다 — 원인은 미리보기 로그의 stderr 발췌나 stderr.log 의 ABORT 줄에 있습니다.")
+        : hasFailureItems(ps, summaryTool(ps, job.tool))
+          ? (gone ? "원인은 미리보기 결과의 「실패 항목」에 있습니다(전체 목록이 있던 미리보기 출력 stdout.log 는 보존 기간이 지나 만료됐습니다)."
+            : "원인은 미리보기 결과의 「실패 항목」과 미리보기 출력(stdout.log)에 있습니다.")
+          : gone ? "미리보기 로그에서 원인을 찾으세요(미리보기 출력 stdout.log 는 보존 기간이 지나 만료됐습니다)."
+          : "미리보기 로그와 미리보기 출력(stdout.log)에서 원인을 찾으세요.";
+      return bad(`미리보기 단계에서 ${verb}`, `${why} 미리보기는 dry-run 이라 데이터는 변경되지 않았습니다.`,
         [...failLog, "newJob"]);
+    }
     case "confirm":
       return bad(`작업 컨펌 단계에서 ${verb}`,
         "사유를 해소한 뒤 다시 제출하세요. 실행 전이라 데이터는 변경되지 않았습니다.", ["newJob"]);
@@ -257,10 +369,13 @@ export function deriveOutcome(req: RequestDetail, jobs: DataJob[] | null, models
         "미리보기 이후 경로나 권한이 바뀌었을 수 있습니다 — 재점검 로그를 보고 다시 제출하세요. 데이터는 변경되지 않았습니다.",
         [...failLog, "newJob"]);
     case "execution":
-      return bad(`실행 단계에서 ${verb}`,
-        op === "scan" ? "실행 로그에서 원인을 찾으세요. scan 은 데이터를 바꾸지 않습니다."
-          : `실행 로그와 stderr.log 에서 원인을 찾으세요. 실패 전에 일부 파일이 이미 ${op === "rm" ? "삭제" : "복사"}됐을 수 있습니다.`,
-        failLog);
+      if (op === "scan") return bad(`실행 단계에서 ${verb}`, "실행 로그에서 원인을 찾으세요. scan 은 데이터를 바꾸지 않습니다.", failLog);
+      // 도구 시작 전 거부(워커 셸·러너의 경로 봉쇄, 워커 준비 실패 등) -- 데이터는 그대로다(괴리 [10]·[12]·[16]).
+      if (toolNeverStarted(job, m)) {
+        return bad(`실행 단계에서 ${verb}`,
+          "도구가 시작되기 전에 멈춰 데이터는 바뀌지 않았습니다 — 사유를 확인한 뒤 다시 제출하세요.", [...failLog, "newJob"]);
+      }
+      return bad(`실행 단계에서 ${verb}`, execFailureText(job, m, op), failLog);
   }
 }
 
@@ -274,16 +389,36 @@ export interface KpiTile {
   title?: string;
 }
 
-// 실행 결과(result_summary)의 수치. 결과가 ② 실행 구획 몫일 때만 센다 -- 미리보기 실패 때의 result_summary 는
-// 미리보기 summary 라(stepper _surface_failed_artifact) "복사한 파일" 로 세면 거짓이다.
-function execVal(job: DataJob, m: JobStagesModel, key: "files" | "bytes"): number | null {
+// 실행 결과(result_summary)의 판독. 결과가 ② 실행 구획 몫일 때만 센다 -- 미리보기 실패 때의 result_summary 는
+// 미리보기 summary 라(stepper _surface_failed_artifact) 「반영한 항목」으로 세면 거짓이다.
+function execSummary(job: DataJob, m: JobStagesModel): ReadSummary | null {
   if (m.resultStage !== "exec" || !isPlainObject(job.result_summary)) return null;
-  return finiteOrNull(job.result_summary[key]);
+  return readSummary(job.result_summary);
 }
-function previewVal(job: DataJob, key: "files" | "bytes"): number | null {
-  return isPlainObject(job.preview_summary) ? finiteOrNull(job.preview_summary[key]) : null;
+function previewOf(job: DataJob): ReadSummary | null {
+  return isPlainObject(job.preview_summary) ? readSummary(job.preview_summary) : null;
 }
 const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
+
+// 미리보기 수의 이름(도구별 뜻, 2026-10-27 d192 -- 포탈 괴리 [2]·[4]): nsync 의 미리보기 files 는 실행과 같은 뜻의 「계획」
+// (변경 예정 합)이라 실행 수와 나란히 비교할 수 있다. dsync 의 미리보기 files 는 소스 전체 walk 수라 「미리보기 N」으로 붙이면
+// 「N 개 중 일부만 복사됐다」로 읽힌다 -- 뜻 그대로 「소스 전체」. drm 은 「삭제 대상」. 상세가 없는 옛 잡은 「미리보기」.
+function previewWord(s: ReadSummary, jobTool: unknown, op: string): string {
+  if (op === "rm") return "삭제 대상";
+  if (!s.detailed) return "미리보기";
+  const tool = summaryTool(s, jobTool);
+  return tool === "nsync" ? "계획" : tool === "dsync" ? "소스 전체" : "미리보기";
+}
+
+// 반영한 항목의 종류별 내역(단건 sync 만 -- 여러 잡의 내역을 섞으면 읽을 수 없다). nsync = 반영된 종류(「복사 3 · 삭제 2」),
+// dsync = 삭제를 켰을 때 그 수(값은 복사한 항목이라 삭제는 따로 말한다). 모르면 null.
+function breakdownOf(s: ReadSummary, jobTool: unknown): string | null {
+  if (!s.detailed) return null;
+  const tool = summaryTool(s, jobTool);
+  if (tool === "nsync") return s.done !== null ? kindsText(s.done) : null;
+  if (s.removed !== null) return `복사 기준 · 삭제 ${countText(s.removed)} 별도`;
+  return null;
+}
 
 export function deriveKpi(req: RequestDetail, jobs: DataJob[] | null, models: JobStagesModel[], nowMs: number): KpiTile[] {
   const tiles: KpiTile[] = [];
@@ -291,30 +426,57 @@ export function deriveKpi(req: RequestDetail, jobs: DataJob[] | null, models: Jo
   const list = jobs ?? [];
   if (list.length > 0 && (op === "sync" || op === "rm" || op === "scan")) {
     const fmt = { files: countText, bytes: (n: number) => humanBytes(n) };
-    const labels = op === "sync" ? { files: "복사한 파일", bytes: "복사한 크기" }
-      : op === "rm" ? { files: "삭제한 항목", bytes: "크기" }
-      : { files: "스캔한 파일", bytes: "사용량" };
-    const preLabels = op === "rm" ? { files: "삭제 대상", bytes: "대상 크기" } : { files: "복사 대상", bytes: "대상 크기" };
     const single = list.length === 1;
     const anyLive = list.some((j) => !isTerminal(j.state));
     const anyStarted = models.some((m) => m.executionStarted);
+    const exec = list.map((j, i) => execSummary(j, models[i]));
+    // files·bytes 는 summary v2 에서 도구별로 「실제로 한 일」이다(nsync = 반영한 종류 합, dsync = 복사한 항목, drm = 지운 수).
+    // 옛 요약(상세 없음 -- d192 이전 잡·롤아웃 중 옛 러너)의 sync files 는 그 뜻이 아니다(nsync = 계획 합, dsync = 실패한 복사
+    // 포함) -- 하나라도 섞이면 「반영한」이라 하지 않고 실행 결과 타일(StageResults.executionTiles)과 같은 중립 라벨(리뷰
+    // portal-jobs-20·contract-37: 같은 화면의 두 곳이 같은 수를 다른 이름으로 불렀다).
+    const legacy = exec.some((s) => s !== null && !s.detailed);
+    const labels = op === "sync" ? (legacy ? { files: "항목 수", bytes: "크기" } : { files: "반영한 항목", bytes: "복사한 크기" })
+      : op === "rm" ? { files: "삭제한 항목", bytes: "크기" }
+      : { files: "스캔한 파일", bytes: "사용량" };
+    const pre = list.map((j) => previewOf(j));
     for (const key of ["files", "bytes"] as const) {
-      const vals = list.map((j, i) => execVal(j, models[i], key));
+      const vals = exec.map((s) => (s === null ? null : s[key]));
       const known = vals.filter((v): v is number => v !== null);
-      const pvals = list.map((j) => previewVal(j, key));
+      const pvals = pre.map((s) => (s === null ? null : key === "bytes" && s.plannedBytes !== null ? s.plannedBytes : s[key]));
       const pAll = pvals.every((v) => v !== null) ? sum(pvals as number[]) : null;
       if (known.length === vals.length) {
+        // 미리보기 보조 줄은 모든 잡의 미리보기 뜻이 같을 때만(nsync 계획과 dsync 소스 전체를 더하면 아무 뜻도 아니다).
+        const words = pre.map((s, i) => (s === null ? null : previewWord(s, list[i].tool, op)));
+        const word = words.every((w) => w !== null && w === words[0]) ? words[0] : null;
+        // 크기의 미리보기는 nsync 계획 크기만 뜻이 맞다(dsync·drm 미리보기는 크기를 세지 않는다 -- 옛 잡은 그대로 「미리보기」).
+        const pSub = op === "scan" || pAll === null || word === null || (key === "bytes" && word === "소스 전체") ? null
+          : `${word} ${fmt[key](pAll)}`;
+        const breakdown = single && key === "files" && op === "sync" && exec[0] !== null ? breakdownOf(exec[0], list[0].tool) : null;
         tiles.push({ key, label: labels[key], value: fmt[key](sum(known)),
-          sub: pAll !== null && op !== "scan" ? `미리보기 ${fmt[key](pAll)}` : null,
+          sub: breakdown !== null ? (pSub !== null ? `${breakdown} (${pSub})` : breakdown) : pSub,
           ...(key === "bytes" ? { title: exactBytes(sum(known)) } : {}) });
         continue;
       }
-      // 실행 전 단건: 미리보기 값을 "대상" 라벨로(실행 결과인 척하지 않는다).
-      if (single && op !== "scan" && !isTerminal(list[0].state) && !models[0].executionStarted && pvals[0] !== null) {
-        // rm 의 0 은 「빈 대상」이 아니라 대상 경로를 찾지 못한 것(drm walk 는 대상 자신을 센다 -- 빈 디렉터리도 1, 2026-10-12).
-        const notFound = op === "rm" && key === "files" && pvals[0] === 0;
-        tiles.push({ key, label: preLabels[key], value: fmt[key](pvals[0]!),
-                     sub: notFound ? "미리보기: 대상 경로를 찾지 못함" : "미리보기 기준 · 실행 전" });
+      // 실행 전 단건: 미리보기 값을 그 뜻의 라벨로(실행 결과인 척하지 않는다). nsync = 변경 예정(종류별), dsync = 소스 전체.
+      const p0 = pre[0];
+      if (single && op !== "scan" && !isTerminal(list[0].state) && !models[0].executionStarted && pvals[0] !== null && p0 !== null) {
+        const tool = summaryTool(p0, list[0].tool);
+        if (op === "rm") {
+          // rm 의 0 은 「빈 대상」이 아니라 대상 경로를 찾지 못한 것(drm walk 는 대상 자신을 센다 -- 빈 디렉터리도 1, 2026-10-12).
+          const notFound = key === "files" && pvals[0] === 0;
+          tiles.push({ key, label: key === "files" ? "삭제 대상" : "대상 크기", value: fmt[key](pvals[0]!),
+                       sub: notFound ? "미리보기: 대상 경로를 찾지 못함" : "미리보기 기준 · 실행 전" });
+        } else if (tool === "nsync") {
+          const kinds = key === "files" && p0.planned !== null ? kindsText(p0.planned) : null;
+          tiles.push({ key, label: key === "files" ? "변경 예정" : "복사할 크기", value: fmt[key](pvals[0]!),
+                       sub: kinds !== null ? `${kinds} (미리보기)` : "미리보기 기준 · 실행 전" });
+        } else if (tool === "dsync") {
+          tiles.push({ key, label: key === "files" ? "소스 전체" : "대상 크기", value: fmt[key](pvals[0]!),
+                       sub: key === "files" ? "변경 수는 실행 후 확정" : "미리보기 기준 · 실행 전" });
+        } else {
+          tiles.push({ key, label: key === "files" ? "미리보기 항목" : "대상 크기", value: fmt[key](pvals[0]!),
+                       sub: "미리보기 기준 · 실행 전" });
+        }
         continue;
       }
       // rm 은 도구가 바이트를 보고하지 않아(bytes: null 이 정상) 모르는 크기 칸을 아예 두지 않는다.
@@ -323,6 +485,16 @@ export function deriveKpi(req: RequestDetail, jobs: DataJob[] | null, models: Jo
         sub: !single && known.length > 0 ? "일부 작업은 아직 집계 전"
           : anyLive ? "실행 후 집계"
           : !anyStarted ? "실행되지 않음" : null });
+    }
+    // rm 의 「못 지운 항목」(d192 -- drm 이 「Remove failed for F of T」를 찍고 0 이 아닌 코드로 끝난다). 아는 잡이 있을 때만
+    // 칸을 둔다(성공한 drm 은 그 키가 없다 -- 0 을 지어내지 않는다).
+    if (op === "rm") {
+      const failed = exec.map((s) => (s === null ? null : s.removeFailed));
+      const fk = failed.filter((v): v is number => v !== null);
+      if (fk.length > 0) {
+        tiles.push({ key: "remove_failed", label: "못 지운 항목", value: countText(sum(fk)),
+          sub: fk.length < failed.length ? "일부 작업은 모름" : sum(fk) > 0 ? "결과의 「실패 항목」 참고" : null });
+      }
     }
   }
   // 수행시간: 종단이면 created_at → 마지막 요청 전이(없으면 updated_at), 비종단이면 지금까지 경과.

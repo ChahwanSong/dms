@@ -63,8 +63,9 @@ def _batch(repos, *, op="sync", status="Previewing", item_status=None, n=1):
 
 
 def _confirmpending_child(repos, bid, seq=0, fp="sha256:fp", expires="2099-01-01T00:00:00Z", op="sync",
-                          summary=None):
-    """배치 항목 seq 를 materialize 하고 자식 잡을 ConfirmPending 으로 만든다(미리보기 완료 시뮬). op="rm" 이면 drm 자식."""
+                          summary=None, tool=None):
+    """배치 항목 seq 를 materialize 하고 자식 잡을 ConfirmPending 으로 만든다(미리보기 완료 시뮬). op="rm" 이면 drm 자식.
+    tool = 잡 행의 도구(기본 rm → drm, sync → dsync) -- d192 의 job_tool 조인이 도구별 합의 권위로 읽는다."""
     payload = dict(RM_ITEM, options={"recursive": True}) if op == "rm" else dict(SYNC_ITEM)
     rid = repos.requests.create(operation=op, requester_id="ops", actor="ops", resource_key=f"k-{bid}-{seq}",
                                 payload=payload, priority="mid", batch_id=bid, auth_method="session")
@@ -73,12 +74,12 @@ def _confirmpending_child(repos, bid, seq=0, fp="sha256:fp", expires="2099-01-01
     plan = repos.data_jobs.create_plan(rid, actor="planner")
     if op == "rm":
         jid = repos.data_jobs.create_job(rid, plan, operation="rm", priority="mid", storage_name="s1", target="a",
-                                         options={"recursive": True}, tool="drm", worker_pool={}, precondition={},
+                                         options={"recursive": True}, tool=tool or "drm", worker_pool={}, precondition={},
                                          actor="planner")
     else:
         jid = repos.data_jobs.create_job(rid, plan, operation="sync", priority="mid", source_storage="s1",
                                          destination_storage="s2", source="a", destination="b", options={},
-                                         tool="dsync", worker_pool={}, precondition={}, actor="planner")
+                                         tool=tool or "dsync", worker_pool={}, precondition={}, actor="planner")
     repos.data_jobs.set_preview(jid, fingerprint=fp, expires_at=expires, artifact_uri="x",
                                 summary=summary if summary is not None
                                 else {"files": 42, "bytes": None, "returncode": 0})
@@ -821,6 +822,8 @@ def test_confirm_audit_records_the_preview_file_total(client, db):
     after = json.loads(row["after_state"])
     assert after["previewed"] == 5 and after["files_total"] == 1234 and after["files_unknown"] == 3
     assert after["options"] == {"recursive": True}
+    # summary 에 tool 이 없는 d192 전 모양이어도 잡 행의 도구(job_tool 조인 -- drm)로 가른다. 모르는 값·변조 값은 합에 없다.
+    assert after["files_by_tool"] == {"drm": 1234}
 
     bid = _batch(repos, op="rm", status="PreviewReady")
     _confirmpending_child(repos, bid, 0, op="rm", summary={"files": None, "bytes": None, "returncode": 0})
@@ -828,6 +831,49 @@ def test_confirm_audit_records_the_preview_file_total(client, db):
     row = db.query_one("SELECT after_state FROM audit_log WHERE operation = 'confirm' AND target_key = :b", {"b": bid})
     after = json.loads(row["after_state"])
     assert after["files_total"] is None and after["files_unknown"] == 1     # 모름 -- 0 으로 뭉개지 않는다
+    assert after["files_by_tool"] == {}                                      # 모르는 값은 어느 도구에도 0 으로 안 들어간다
+
+
+def test_confirm_audit_splits_the_preview_total_by_tool(client, db):
+    # d192: sync 배치 한 회차에 nsync(변경 예정 동작 수)와 dsync(소스 전체 항목 수)가 섞이면 files_total 은 뜻이 다른
+    # 수의 합이다 -- 도구별 합을 함께 남긴다. 도구는 잡 행(job_tool)이 권위이고 없으면 summary v2 의 tool, 범위 밖 이름(변조)은
+    # 모름이다.
+    import json
+    _admin(client)
+    repos = client.app.state.repos
+    bid = _batch(repos, status="PreviewReady", n=5)
+    v2 = {"bytes": None, "returncode": 0, "detail_version": 2}
+    _confirmpending_child(repos, bid, 0, summary={**v2, "files": 7, "tool": "nsync"}, tool="nsync")
+    _confirmpending_child(repos, bid, 1, summary={**v2, "files": 3}, tool="nsync")           # summary 에 tool 없음 → 잡 행
+    _confirmpending_child(repos, bid, 2, summary={**v2, "files": 200, "tool": "dsync"})
+    _confirmpending_child(repos, bid, 3, summary={**v2, "files": 0, "tool": "dsync"})        # 0 은 아는 값
+    _confirmpending_child(repos, bid, 4, summary={**v2, "files": 9, "tool": "rm -rf"}, tool="rm -rf")   # 모르는 도구(변조)
+    assert client.post(f"/api/admin/batches/{bid}:confirm", json={"preview_round": 0}).status_code == 200
+    row = db.query_one("SELECT after_state FROM audit_log WHERE operation = 'confirm' AND target_key = :b", {"b": bid})
+    after = json.loads(row["after_state"])
+    assert after["files_total"] == 219 and after["files_unknown"] == 0
+    assert after["files_by_tool"] == {"nsync": 10, "dsync": 200}
+
+
+def test_confirm_audit_tool_follows_the_job_row_when_the_summary_disagrees(client, db):
+    # d192 리뷰(control-7/10): 도구의 권위는 잡 행(planner 가 정하고 stepper 가 그 도구로 띄운다)이다 -- summary.tool 은
+    # 러너가 적는 도구 쪽 메아리라, 둘이 어긋나면(변조·옛 행) 잡 행을 따른다. 포탈 확인 대화상자(toolSummary.summaryTool)도
+    # 같은 순서라 화면의 「변경 예정/소스 전체」 분할과 감사 행의 files_by_tool 이 같은 항목을 같은 도구로 센다.
+    # 잡 행이 범위 밖 이름(변조)이면 summary.tool(같은 허용 집합)로 물러난다 -- 둘 다 범위 밖이면 모름(files_total 에만).
+    import json
+    _admin(client)
+    repos = client.app.state.repos
+    bid = _batch(repos, status="PreviewReady", n=4)
+    v2 = {"bytes": None, "returncode": 0, "detail_version": 2}
+    _confirmpending_child(repos, bid, 0, summary={**v2, "files": 5, "tool": "nsync"}, tool="dsync")    # 행 dsync 가 이긴다
+    _confirmpending_child(repos, bid, 1, summary={**v2, "files": 7, "tool": "dsync"}, tool="nsync")    # 행 nsync 가 이긴다
+    _confirmpending_child(repos, bid, 2, summary={**v2, "files": 11, "tool": "nsync"}, tool="rm -rf")  # 행 변조 → summary
+    _confirmpending_child(repos, bid, 3, summary={**v2, "files": 13, "tool": "x"}, tool="y")           # 둘 다 모름
+    assert client.post(f"/api/admin/batches/{bid}:confirm", json={"preview_round": 0}).status_code == 200
+    row = db.query_one("SELECT after_state FROM audit_log WHERE operation = 'confirm' AND target_key = :b", {"b": bid})
+    after = json.loads(row["after_state"])
+    assert after["files_total"] == 36 and after["files_unknown"] == 0
+    assert after["files_by_tool"] == {"dsync": 5, "nsync": 18}
 
 
 def test_confirm_rejects_an_rm_batch_whose_options_lost_recursive(client, db):

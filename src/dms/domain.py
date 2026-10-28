@@ -99,8 +99,21 @@ class DomainValidationError(Exception):
         super().__init__(f"{reason_code}: {detail}" if detail else reason_code)
 
 
+# 요청 경로의 ASCII 제어 문자(NUL 포함 \x00-\x1f, DEL \x7f) -- 2026-10-28 리뷰. 줄바꿈이 든 이름은 셸 봉쇄
+# (execution_manifests._PATH_CONTAINED_FN)의 $(dirname …)·$(realpath …) 명령 치환이 끝 줄바꿈을 지워 옆의 다른 이름으로 읽혔고
+# (「x\n」 링크 → 실제 「x」), 도구 로그(dsync·drm 은 경로를 날것으로 찍는다)의 줄도 위조할 수 있다. 셸·러너 봉쇄도 줄바꿈 경로를
+# 막지만(fail-closed) 그건 이 검증 전의 행·변조 행 몫이고, 사용자에겐 여기서 unsafe_path 로 즉답한다. 정상 경로 이름이 제어
+# 문자를 쓸 일은 없다(탭·CR 포함 -- CSV 칸의 앞뒤 공백은 batch_csv._cell 이 먼저 걷는다).
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def has_control_char(path: str) -> bool:
+    """경로 문자열에 ASCII 제어 문자가 있는가(validate_relative_path·k8s_access.normalize_subpath 공용 -- 규칙 한 벌)."""
+    return _CONTROL_CHARS.search(path) is not None
+
+
 def validate_relative_path(path: str) -> str:
-    if not path or path.startswith("/") or "\x00" in path:
+    if not path or path.startswith("/") or has_control_char(path):
         raise DomainValidationError("unsafe_path", repr(path))
     if any(part == ".." for part in path.split("/")):
         raise DomainValidationError("unsafe_path", repr(path))
@@ -338,6 +351,21 @@ def option_defaults(operation) -> dict:
     return dict(_OPTION_DEFAULTS[Operation(operation)])
 
 
+# direct(O_DIRECT) 와 함께 쓸 수 있는 bufsize 범위(2026-10-27 d192). dsync 는 파일을 4 MiB 조각(MFU_CHUNK_SIZE -- DMS 는
+# --chunksize 를 넘기지 않는다)으로 나눠 랭크에 주고, O_DIRECT 읽기는 파일 끝이 아닌 조각의 길이가 버퍼의 배수가 아니면
+# MFU_ABORT 한다(mfu_flist_copy.c 의 "O_DIRECT requires chunk size to be integer multiple of block size", --contents 비교도
+# 같은 검사). 버퍼가 4 MiB 의 약수 = 4096·2^k(≤ 4 MiB)여야 어떤 조각 경계에서도 나눠떨어진다 -- 8 MiB·1,000,000 같은 값은
+# 미리보기(dry-run 은 복사를 안 한다)를 통과하고 실행 중 큰 파일에서 MPI 중단으로 끝났다. nsync 는 --direct 를 무시하지만
+# 제출 시점엔 도구가 정해지지 않아 sync 전체에 건다. 하한 4096 은 O_DIRECT 정렬(블록) 하한이다.
+_DIRECT_BUFSIZE_MIN = 4096
+_DIRECT_BUFSIZE_MAX = 4_194_304
+
+
+def direct_bufsize_ok(bufsize) -> bool:
+    return (isinstance(bufsize, int) and not isinstance(bufsize, bool)
+            and _DIRECT_BUFSIZE_MIN <= bufsize <= _DIRECT_BUFSIZE_MAX and bufsize & (bufsize - 1) == 0)
+
+
 def validate_options(operation: Operation, options: dict) -> dict:
     spec = _OPTION_SPECS[Operation(operation)]
     out: dict = {}
@@ -369,6 +397,10 @@ def validate_options(operation: Operation, options: dict) -> dict:
         raise DomainValidationError("invalid_option", "stat and lite are mutually exclusive")
     if Operation(operation) is Operation.SCAN and out.get("verbose") and out.get("quiet"):
         raise DomainValidationError("invalid_option", "verbose and quiet are mutually exclusive")
+    if Operation(operation) is Operation.SYNC and out.get("direct") is True and "bufsize" in out \
+            and not direct_bufsize_ok(out["bufsize"]):
+        raise DomainValidationError("direct_bufsize_misaligned",
+                                    f"with direct, bufsize must be 4096*2^k up to 4194304, got {out['bufsize']}")
     for key, value in _OPTION_DEFAULTS[Operation(operation)].items():
         out.setdefault(key, value)
     return out

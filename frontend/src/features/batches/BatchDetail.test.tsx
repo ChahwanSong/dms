@@ -8,6 +8,8 @@ import { beforeAll, afterAll, afterEach, test, expect } from "vitest";
 import { BatchDetail } from "./BatchDetail";
 import { BatchesList } from "./BatchesList";
 import { fakeParseCsv, parseCsvHandler } from "../../test/batchCsvFake";
+import { DIRECT_HELP, QUIET_HELP, SYNC_OPTION_HELP } from "../jobs/optionRules";
+import { REASON_MESSAGES } from "../../lib/api";
 // 기본 스토리지 목록은 **빈 배열**이다: 화면이 절대경로 조합용으로 이 목록을
 // 부르는데(useStorageRoots), 기본이 없으면 모든 테스트가 MSW 미처리 경고를 뿜는다.
 // 빈 배열 = 뿌리 모름 = 절대경로 표시 없음이라 기존 단언에는 영향이 없다.
@@ -49,10 +51,11 @@ test("PreviewReady: 「배치 확인」은 대화상자를 열고 「실행 확�
   await waitFor(() => expect(screen.queryByRole("dialog", { name: "배치 확인" })).not.toBeInTheDocument());
 });
 
-test("배치 확인 대화상자: 실행할 항목 수·복사 대상 합계·동시 실행 상한·delete 경고·소유권·가장 이른 만료를 보인다", async () => {
+test("배치 확인 대화상자: 실행할 항목 수·미리보기 합계(도구 미기록)·동시 실행 상한·delete 경고·소유권·가장 이른 만료를 보인다", async () => {
   server.use(http.get("/api/admin/batches/b1", () => HttpResponse.json(batch({
     status: "PreviewReady", options: { delete: true, chown: "10003:10000" }, item_count: 3,
     items: [
+      // d192 전 미리보기(3키, tool 없음) -- 변경 예정 수인지 소스 전체 수인지 가를 수 없다
       { seq: 0, payload: { source: "a" }, status: "Materialized", request_id: "r1", reason_code: null,
         job_state: "ConfirmPending", preview_summary: { files: 40, bytes: null, returncode: 0 },
         preview_expires_at: "2099-10-08T03:00:00Z" },
@@ -73,14 +76,19 @@ test("배치 확인 대화상자: 실행할 항목 수·복사 대상 합계·�
   const notRun = within(dlg).getByRole("list", { name: "실행되지 않는 항목" });
   expect(within(notRun).getAllByRole("listitem")).toHaveLength(1);
   expect(within(notRun).getByRole("listitem")).toHaveTextContent(/^#2 sync · —:c → —:—: /);
-  // 단건 ConfirmDialog 와 같은 이름(복사 대상). 모르는 항목(요약 null)을 0 으로 더하지 않고 따로 말한다(null≠0)
-  expect(within(dlg).getByText("40개(항목별 미리보기 합계, 1개 항목은 모름)")).toBeInTheDocument();
-  expect(within(dlg).queryByText(/소스 항목 수/)).toBeNull();
+  // d192: 「복사 대상」 한 줄로 섞어 더하지 않는다 -- 도구 미기록(옛 미리보기)은 따로, 모르는 항목(요약 null)은 0 으로 더하지
+  // 않고 따로 말한다(null≠0)
+  const totals = within(dlg).getByRole("region", { name: "미리보기 합계" });
+  expect(within(totals).getByText("도구 미기록").nextSibling).toHaveTextContent(
+    "40개1개 항목 합계 — 이전 버전 미리보기라 변경 예정 수인지 소스 전체 수인지 가를 수 없습니다");
+  expect(within(totals).getByText("수 모름").nextSibling).toHaveTextContent("1개 항목(미리보기 수 미기록 — 합계에 넣지 않음)");
+  expect(within(dlg).queryByText("복사 대상")).toBeNull();
   expect(within(dlg).getByText("동시 실행 상한").nextSibling).toHaveTextContent("2");
   // 만료는 확인 마감이 아니다 -- 확인 뒤에도 슬롯을 기다리다 만료될 수 있다
   expect(within(dlg).getByText(/^2099-10-08 10:00:00 KST\(가장 이른 항목\) — 확인 시각이 아니라 각 항목의 실행 시작 기준입니다/))
     .toHaveTextContent("슬롯을 기다리다 만료된 항목은 실행되지 않고 거부(실패로 집계)됩니다.");
-  expect(dlg).toHaveTextContent("delete 옵션: 원본에 없는 파일·디렉토리를 목적지에서 지웁니다(미러 동기화).");
+  // delete 문구는 제출 폼과 같은 한 출처(괴리 [3]·[28] -- 「미러 동기화」만으로는 예외를 말하지 않았다)
+  expect(within(dlg).getByRole("note", { name: "delete 옵션" })).toHaveTextContent(`delete 옵션: ${SYNC_OPTION_HELP.delete}`);
   expect(within(dlg).getByRole("note", { name: "목적지 소유" }))
     .toHaveTextContent("소유권: chown 옵션으로 지정한 10003:10000 소유로 셋업됩니다 — 목적지에 이미 있던 같은 경로의 항목도 이 소유로 바뀝니다.");
 });
@@ -133,7 +141,8 @@ test("배치 확인 대화상자: 만료된 미리보기·이미 성공한 항�
   const notRun = within(dlg).getByRole("list", { name: "실행되지 않는 항목" });
   expect(within(notRun).getAllByRole("listitem").map((li) => li.textContent))
     .toEqual(["#2 sync · —:c → —:—: 미리보기 만료"]);
-  expect(within(dlg).getByText("14개(항목별 미리보기 합계)")).toBeInTheDocument();   // 만료된 항목(#2)의 수는 더하지 않는다
+  // 만료된 항목(#2)의 수는 더하지 않는다(옛 미리보기라 「도구 미기록」 묶음)
+  expect(within(dlg).getByText("도구 미기록").nextSibling).toHaveTextContent(/^14개2개 항목 합계/);
   expect(dlg).toHaveTextContent("미리보기 만료 1개 — 확인해도 실행되지 않고 거부로 기록됩니다(항목 재실행으로 다시 미리보기).");
   expect(dlg).toHaveTextContent("확인하면 미리보기를 마친 항목 2개가");
 });
@@ -187,6 +196,176 @@ test("배치 확인 대화상자: 모든 항목의 수가 모름이면 0개가 �
   const dlg = await openConfirmDialog();
   expect(within(dlg).getByText("모름(미리보기 1개 항목 모두 수 미기록)")).toBeInTheDocument();
   expect(dlg).not.toHaveTextContent("0개(항목별 미리보기 합계");
+});
+
+// ---- d192 summary v2: 미리보기 합계를 도구별 뜻으로 가른다(포탈 괴리 [1]·[5]·[6] 배치 몫) ----------------------------
+// 실제 포크 출력(7a3189c)에서 러너가 만드는 모양 -- nsync_preview_ok.out: 「Planned actions: copy=3 mkdir=1 symlink-update=1
+// meta-update=0 remove=2」, planned-volume=9 B / nsync_preview_type_change.out: 「copy=2 … remove=1 skipped-dst-only=1」 +
+// 「Type changes: to-directory 0, from-directory 1」 + 「A directory that is replaced by a non-directory must be empty unless
+// --delete is given…」 / dsync_preview.out: 첫 walk 6 items.
+const NSYNC_PREVIEW_OK = { returncode: 0, files: 7, bytes: 9, detail_version: 2, tool: "nsync", dryrun: true,
+  planned: { copy: 3, mkdir: 1, symlink_update: 1, meta_update: 0, remove: 2, skipped_dst_only: 0 }, planned_bytes: 9 };
+const NSYNC_PREVIEW_TYPE_CHANGE = { returncode: 0, files: 3, bytes: 16, detail_version: 2, tool: "nsync", dryrun: true,
+  planned: { copy: 2, mkdir: 0, symlink_update: 0, meta_update: 0, remove: 1, skipped_dst_only: 1 }, planned_bytes: 16,
+  type_changes: { to_dir: 0, from_dir: 1 }, type_change_needs_delete: true };
+const DSYNC_PREVIEW = { returncode: 0, files: 6, bytes: null, detail_version: 2, tool: "dsync", dryrun: true,
+  source_items: 6 };
+const syncItem = (seq: number, summary: unknown, over: any = {}) => ({
+  seq, payload: { source_storage: "s1", source: `src${seq}`, destination_storage: "s2", destination: `dst${seq}` },
+  status: "Materialized", request_id: `r${seq}`, reason_code: null, job_state: "ConfirmPending",
+  preview_summary: summary, preview_expires_at: "2099-10-08T03:00:00Z", ...over });
+
+test("배치 확인(sync, v2): nsync 변경 예정(종류별·삭제 포함)·dsync 소스 전체를 따로 더하고 한 「복사 대상」으로 섞지 않는다", async () => {
+  // C13 사고 모양: 「복사 대상 7개」인데 실제로는 목적지 6개를 지웠다 -- 삭제 예정이 합계에 숨지 않게 종류별로 보인다.
+  // dsync 항목의 skipped_special 은 합성이다(지금 포크의 dsync dry-run 은 「Skipped N special file(s)」을 찍지 않는다 --
+  // 복사 단계의 줄이다). summary 가 그 키를 실어도 특수 파일 안내가 nsync 의 동작(목적지 항목 그대로)을 dsync 에 씌우지 않는지 본다.
+  renderItems({ options: { delete: true }, item_count: 3, items: [
+    syncItem(0, NSYNC_PREVIEW_OK), syncItem(1, NSYNC_PREVIEW_TYPE_CHANGE),
+    syncItem(2, { ...DSYNC_PREVIEW, skipped_special: 1 })] });
+  const dlg = await openConfirmDialog();
+  const totals = within(dlg).getByRole("region", { name: "미리보기 합계" });
+  const nsync = within(totals).getByText("변경 예정(nsync)").nextElementSibling as HTMLElement;
+  // 7 + 3 = 10, 종류별 합: 복사 5 · 디렉토리 생성 1 · 링크 1 · 삭제 3, 크기 9 B + 16 B = 25 B
+  expect(nsync).toHaveTextContent("10개복사 5 · 디렉토리 생성 1 · 링크 1 · 삭제 32개 항목 합계 · 복사할 크기 25 B");
+  const dsync = within(totals).getByText("소스 전체(dsync)").nextElementSibling as HTMLElement;
+  expect(dsync).toHaveTextContent("6개 — 변경 수는 실행 후 확정1개 항목 합계 · 이미 같은 항목도 셉니다(바뀔 수가 아님)");
+  expect(within(totals).queryByText("도구 미기록")).toBeNull();
+  expect(within(dlg).queryByText("복사 대상")).toBeNull();
+  expect(dlg).not.toHaveTextContent("16개");                                // 7+3+6 을 한 수로 섞지 않는다
+  // delete 켜짐: nsync 의 삭제 예정이 어디 있는지 말한다(dsync 는 실행 후 확정)
+  expect(within(dlg).getByRole("note", { name: "delete 옵션" }))
+    .toHaveTextContent("nsync 항목의 삭제 예정 수는 위 「변경 예정」의 삭제입니다(dsync 항목은 실행 후 확정).");
+  // dsync 항목의 특수 파일(FIFO·소켓·장치)은 복사하지 않는다 -- 같은 이름 목적지 항목은 도구마다 다르다(2026-10-28 리뷰
+  // portal-batch-26·contract-39: dsync 는 종류가 다른 목적지 항목을 지운 뒤 아무것도 만들지 않는다, 포크 빌드 실측)
+  const special = within(dlg).getByRole("note", { name: "특수 파일" });
+  expect(special).toHaveTextContent("FIFO·소켓·장치 1개(1개 항목)는 복사하지 않습니다 — 노드 간 실행(nsync)은 목적지의 같은 "
+    + "이름 항목을 그대로 두고, 한 노드 실행(dsync)은 그 이름의 목적지 항목이 다른 종류면 지운 뒤 아무것도 만들지 않습니다.");
+  expect(special).not.toHaveTextContent("목적지의 같은 이름 항목은 그대로 둡니다");
+});
+
+test("배치 확인(sync, v2): 특수 파일이 nsync 미리보기에서만 나왔으면 목적지의 같은 이름 항목은 그대로 둔다고 말한다", async () => {
+  // nsync 는 계획 단계에서 특수 파일을 빼고 미리보기에도 「Skipped N special file(s) … the destination entry at that name is
+  // left as it is」를 찍는다(nsync.c) -- 그 경우만 「그대로 둡니다」가 참이다.
+  renderItems({ options: {}, item_count: 2, items: [
+    syncItem(0, { ...NSYNC_PREVIEW_OK, skipped_special: 2 }), syncItem(1, DSYNC_PREVIEW)] });
+  const dlg = await openConfirmDialog();
+  expect(within(dlg).getByRole("note", { name: "특수 파일" }))
+    .toHaveTextContent("FIFO·소켓·장치 2개(1개 항목)는 복사하지 않습니다 — 목적지의 같은 이름 항목은 그대로 둡니다.");
+});
+
+test("배치 확인(sync): 도구는 잡 행(job_tool)이 먼저 -- summary 에 tool 이 없어도 가르고, 둘이 어긋나면 잡 행을 따른다", async () => {
+  // 실서버 모양: list_items_detail 이 data_jobs.tool 을 늘 조인한다(ConfirmPending 이면 잡이 있다). summary 의 tool 은
+  // 도구 쪽 데이터라 어긋나면 잡 행이 권위다 -- 서버 감사 행의 files_by_tool(batch_orchestrator._preview_tool)과 같은 순서
+  // (2026-10-28 리뷰 portal-batch-25·D10). 순서가 다르면 같은 확인의 창 합계와 감사 행이 다른 도구에 항목을 붙인다.
+  const { tool: _t, ...nsyncNoTool } = NSYNC_PREVIEW_OK;
+  renderItems({ options: {}, item_count: 2, items: [
+    syncItem(0, nsyncNoTool, { job_tool: "nsync" }),
+    syncItem(1, { ...NSYNC_PREVIEW_OK, files: 6, source_items: 6 }, { job_tool: "dsync" })] });
+  const dlg = await openConfirmDialog();
+  const totals = within(dlg).getByRole("region", { name: "미리보기 합계" });
+  expect(within(totals).getByText("변경 예정(nsync)").nextElementSibling).toHaveTextContent(/^7개.*1개 항목 합계/);
+  expect(within(totals).getByText("소스 전체(dsync)").nextElementSibling).toHaveTextContent(/^6개 — 변경 수는 실행 후 확정1개 항목 합계/);
+  expect(within(totals).queryByText("도구 미기록")).toBeNull();
+});
+
+test("배치 확인(sync, v2): 타입 교체 WARN 항목을 세어 delete 없이는 실패로 남는다고 경고하고, delete 꺼짐의 삭제는 타입 교체라고 말한다", async () => {
+  // d189-C8 모양: 미리보기는 rc 0 으로 확인 대기가 됐는데 실행은 replace-dir 실패(errno 39)로 끝났다 -- 확인 창이 말하지 않았다.
+  renderItems({ options: {}, item_count: 2, items: [syncItem(0, NSYNC_PREVIEW_TYPE_CHANGE), syncItem(1, NSYNC_PREVIEW_OK)] });
+  const dlg = await openConfirmDialog();
+  const warn = within(dlg).getByRole("note", { name: "타입 교체 경고" });
+  expect(warn).toHaveTextContent("1개 항목에서 디렉토리 1개가 파일·링크로 바뀝니다 — 삭제(delete)를 켜지 않으면 비어 있지 않은 "
+    + "디렉토리는 바뀌지 않고 그 항목은 실패로 남습니다(나머지는 반영).");
+  expect(within(dlg).queryByRole("note", { name: "delete 옵션" })).toBeNull();
+  expect(dlg).toHaveTextContent("delete 는 꺼져 있지만 위 삭제 3개는 타입 교체입니다 — 종류가 바뀐 항목(파일↔디렉토리·링크)을 "
+    + "다시 만들려고 목적지 쪽을 먼저 지웁니다.");
+  expect(within(dlg).queryByRole("note", { name: "특수 파일" })).toBeNull();
+});
+
+test("배치 확인(sync, v2): 타입 교체 경고가 없는 미리보기엔 경고가 없다 — 0 삭제·0 변경은 「변경 없음」", async () => {
+  const none = { ...NSYNC_PREVIEW_OK, files: 0, bytes: 0, planned_bytes: 0,
+    planned: { copy: 0, mkdir: 0, symlink_update: 0, meta_update: 0, remove: 0, skipped_dst_only: 0 } };
+  renderItems({ options: {}, items: [syncItem(0, none)] });
+  const dlg = await openConfirmDialog();
+  expect(within(dlg).getByText("변경 예정(nsync)").nextElementSibling).toHaveTextContent(/^0개변경 없음1개 항목 합계 · 복사할 크기 0 B$/);
+  expect(within(dlg).queryByRole("note", { name: "타입 교체 경고" })).toBeNull();
+  expect(dlg).not.toHaveTextContent("타입 교체입니다");
+});
+
+test("sync 항목 펼침: 결과 수는 「반영한 항목」, 미리보기는 도구별 뜻(nsync 변경 예정·종류 / dsync 소스 전체)", async () => {
+  // d192: files_count 는 실행에서 실제로 반영된 수다(nsync 완료 액션 합·dsync 복사 성공) -- 「파일 수」라 부르지 않는다(괴리 [2]·[4]).
+  renderBatch({ operation: "sync", status: "Completed", items: [
+    syncItem(0, NSYNC_PREVIEW_OK, { status: "Succeeded", request_state: "Succeeded", job_state: "Succeeded", files_count: 5 }),
+    syncItem(1, DSYNC_PREVIEW, { status: "Failed", request_state: "Failed", job_state: "Failed", files_count: 0,
+                                 reason_code: "sync_items_failed" })] });
+  await userEvent.click(await screen.findByRole("button", { name: "항목 0 상세" }));
+  expect(screen.getByText("반영한 항목").nextSibling).toHaveTextContent(/^5$/);
+  expect(screen.getByText("변경 예정(미리보기)").nextSibling)
+    .toHaveTextContent("7개 — 복사 3 · 디렉토리 생성 1 · 링크 1 · 삭제 2");
+  expect(screen.queryByText("파일 수")).toBeNull();
+  await userEvent.click(screen.getByRole("button", { name: "항목 1 상세" }));
+  expect(screen.getByText("반영한 항목").nextSibling).toHaveTextContent(/^0$/);       // 0 은 정상값(null≠0)
+  expect(screen.getByText("소스 전체(미리보기)").nextSibling).toHaveTextContent("6개(변경 수는 실행 후 확정)");
+  expect(screen.getByText(REASON_MESSAGES.sync_items_failed)).toBeInTheDocument();
+});
+
+test("sync 항목 펼침: d192 전 기록(미리보기 summary 가 v2 아님)의 결과 수는 「반영한 항목」이 아니라 중립 「항목 수」", async () => {
+  // 2026-10-28 리뷰 portal-batch-29·contract-37: d192 전 files_count 는 nsync 계획 합(실패한 실행 포함)·미리보기 실패의 승격
+  // 수일 수 있다(d189-C8: 1개 반영인데 4). 배치 항목 API 엔 결과 summary 가 없어 같은 잡의 미리보기 summary v2 를 대리 신호로 쓴다.
+  renderBatch({ operation: "sync", status: "Completed", items: [
+    syncItem(0, { files: 4, bytes: 5, returncode: 0 }, { status: "Failed", request_state: "Failed", job_state: "Failed",
+                                                       files_count: 4, job_tool: "nsync" }),
+    syncItem(1, null, { status: "Succeeded", request_state: "Succeeded", job_state: "Succeeded", files_count: 3 })] });
+  await userEvent.click(await screen.findByRole("button", { name: "항목 0 상세" }));
+  expect(screen.getByText("항목 수").nextSibling).toHaveTextContent(/^4$/);
+  expect(screen.queryByText("반영한 항목")).toBeNull();
+  await userEvent.click(screen.getByRole("button", { name: "항목 0 상세" }));
+  await userEvent.click(screen.getByRole("button", { name: "항목 1 상세" }));       // 미리보기 summary 없음 → 대리 신호 없음
+  expect(screen.getByText("항목 수").nextSibling).toHaveTextContent(/^3$/);
+  expect(screen.queryByText("반영한 항목")).toBeNull();
+});
+
+test("실행 설정: direct 가 켜진 배치의 항목이 nsync 로 돌았으면 적용되지 않았다고 말한다(전부·일부)", async () => {
+  // 괴리 [22]: nsync 는 --direct 를 받기만 한다(포크 db1e33c). 배치 API 엔 도구가 없어 항목 미리보기 summary 의 tool 로 센다.
+  const view = renderBatch({ operation: "sync", status: "Completed", options: { direct: true },
+    items: [syncItem(0, NSYNC_PREVIEW_OK, { status: "Succeeded" })] });
+  await userEvent.click(await screen.findByText("실행 설정"));
+  expect(screen.getByText("옵션").nextElementSibling)
+    .toHaveTextContent("direct=truedirect 는 적용되지 않습니다 — 항목이 모두 nsync 로 실행됩니다(dsync 만 O_DIRECT 로 읽고 씁니다)");
+  view.unmount();
+  const view2 = renderBatch({ operation: "sync", status: "Completed", options: { direct: true },
+    items: [syncItem(0, NSYNC_PREVIEW_OK, { status: "Succeeded" }), syncItem(1, DSYNC_PREVIEW, { status: "Succeeded" })] });
+  await userEvent.click(await screen.findByText("실행 설정"));
+  expect(screen.getByText("옵션").nextElementSibling)
+    .toHaveTextContent("direct 는 nsync 로 실행되는 항목(1개)에는 적용되지 않습니다");
+  view2.unmount();
+  // dsync 만이거나 도구를 모르면(옛 미리보기) 말하지 않는다 -- 지어내지 않는다
+  renderBatch({ operation: "sync", status: "Completed", options: { direct: true },
+    items: [syncItem(0, { files: 3, bytes: null, returncode: 0 }, { status: "Succeeded" })] });
+  await userEvent.click(await screen.findByText("실행 설정"));
+  expect((screen.getByText("옵션").nextElementSibling as HTMLElement).textContent).toBe("direct=true");
+});
+
+test("실행 설정: 도구가 아직 정해지지 않은 항목이 있으면 「모두 nsync」라 하지 않고 확인된 항목 중의 수로만 말한다", async () => {
+  // 2026-10-28 리뷰 portal-batch-28: 동시 실행 상한 1 로 미리보기 중 -- 첫 항목만 nsync 로 정해졌고 뒤 항목은 아직 Queued(잡
+  // 없음 → job_tool·미리보기 없음). 뒤 항목은 공존 노드가 있으면 dsync(O_DIRECT 적용)로 갈 수 있다.
+  const queued = (seq: number) => ({ seq, payload: { source_storage: "s1", source: `src${seq}`, destination_storage: "s2",
+    destination: `dst${seq}` }, status: "Queued", request_id: null, reason_code: null, job_state: null, preview_summary: null,
+    job_tool: null });
+  const view = renderBatch({ operation: "sync", status: "Previewing", options: { direct: true }, max_concurrency: 1,
+    items: [syncItem(0, NSYNC_PREVIEW_OK, { job_state: "PreviewRunning" }), queued(1), queued(2)] });
+  await userEvent.click(await screen.findByText("실행 설정"));
+  const opts = screen.getByText("옵션").nextElementSibling as HTMLElement;
+  expect(opts).toHaveTextContent("도구가 확인된 항목 1개 중 nsync 로 실행되는 1개에는 direct 가 적용되지 않습니다(dsync 만 "
+    + "O_DIRECT 로 읽고 씁니다) — 나머지 2개 항목은 아직 도구가 정해지지 않았습니다");
+  expect(opts).not.toHaveTextContent("모두 nsync");
+  view.unmount();
+  // 도구 없이 끝난 항목(거부 -- 잡이 만들어지지 않았다)은 미정이 아니다: 나머지가 전부 nsync 면 「모두」
+  renderBatch({ operation: "sync", status: "Completed", options: { direct: true },
+    items: [syncItem(0, NSYNC_PREVIEW_OK, { status: "Succeeded" }),
+            { ...queued(1), status: "Rejected", reason_code: "path_invalid" }] });
+  await userEvent.click(await screen.findByText("실행 설정"));
+  expect(screen.getByText("옵션").nextElementSibling)
+    .toHaveTextContent("direct 는 적용되지 않습니다 — 항목이 모두 nsync 로 실행됩니다(dsync 만 O_DIRECT 로 읽고 씁니다)");
 });
 
 test("배치 확인 409 뒤 배치가 미리보기로 돌아가 대화상자가 사라져도 거부 사유는 헤더에 남는다", async () => {
@@ -429,7 +608,14 @@ test("성공 scan 항목 펼침: 조회 발사 + 온도 섹션(사람 표기·�
   expect(fills[1]).toHaveStyle({ backgroundColor: "#6366f1" });
   // 캡션이 색의 의미를 말한다
   expect(screen.getByText(/왼쪽\(빨강\)=hot·최근 접근, 오른쪽\(파랑\)=cold/)).toBeInTheDocument();
-  expect(screen.getByText(/relatime\/open_noatime 환경에선 근사/)).toBeInTheDocument();
+  // atime 근사의 이유는 마운트·스토리지(2026-10-27 d192, 괴리 [C3] -- 테스트베드 CephFS 는 읽어도 atime 이 그대로였다).
+  // relatime 은 읽기를 하루 단위로 반영한다 -- 「반영 안 하는」 쪽에 넣지 않는다(2026-10-28 리뷰 portal-batch-27).
+  const caption = screen.getByText(/읽기가 atime 에 반영되는지는 마운트·스토리지에 따라 달라 근사치입니다/);
+  expect(caption).toHaveTextContent("리눅스 기본 relatime 은 읽기를 파일마다 많아야 하루에 한 번 반영하고, noatime 마운트나 "
+    + "일부 CephFS 는 반영하지 않습니다");
+  expect(caption).toHaveTextContent("반영하지 않는 곳에선 최근에 쓴 데이터가 hot 으로 보입니다");
+  expect(caption).not.toHaveTextContent("relatime·noatime");
+  expect(screen.queryByText(/relatime\/open_noatime 환경에선 근사/)).toBeNull();
   // 파일 크기 분포(count)는 온도가 아니다 — 온도 그라디언트 대신 단색 accent 유지
   // (크기는 hot/cold 축이 아니라 같은 색을 쓰면 "작은 파일=hot"이라는 거짓 의미가 된다)
   const sizeChart = screen.getByRole("img", { name: "파일 크기 분포" });
@@ -1593,6 +1779,44 @@ test("실행 설정 변경: 저장된 명시 false 는 키 없음과 같다 — 
   expect(q.getByRole("button", { name: "변경 없음" })).toBeDisabled();
 });
 
+test("실행 설정 변경(sync): 칸 설명(direct·quiet 등 생성 폼과 같은 문구)과 direct+bufsize 정렬 검사 — 옛 조합도 저장 전에 막는다", async () => {
+  // 2026-10-27 d192(괴리 [8]·[9]·[22]): 예전 이 창은 이름만 있는 체크 칸이라 direct 가 nsync 에선 무시된다는 것, quiet 가 실패
+  // 원인까지 지운다는 것을 말하지 않았고, bufsize 는 범위만 봤다(서버 422 direct_bufsize_misaligned 를 저장에서야 알았다).
+  let sent: any = null;
+  server.use(http.patch("/api/admin/batches/b1/execution", async ({ request }) => {
+    sent = await request.json(); return HttpResponse.json(batch());
+  }));
+  renderExec({ operation: "sync", status: "Completed", options: { direct: true, bufsize: 8388608 } });
+  await userEvent.click(await screen.findByRole("button", { name: "실행 설정 변경" }));
+  const q = within(await screen.findByRole("dialog", { name: "실행 설정 변경" }));
+  const helps = q.getByRole("list", { name: "옵션 설명" });
+  expect(helps).toHaveTextContent(`direct — ${DIRECT_HELP}`);
+  expect(helps).toHaveTextContent(`quiet — ${QUIET_HELP.sync}`);
+  expect(helps).toHaveTextContent(`delete — ${SYNC_OPTION_HELP.delete}`);
+  expect(q.getByLabelText("direct")).toHaveAccessibleDescription(`direct — ${DIRECT_HELP}`);
+  // 저장된 direct + 8 MiB(이 규칙 전에 만든 배치) -- 그대로 두면 재실행마다 서버가 거부하므로 여기서 고치게 한다
+  expect(q.getByText(REASON_MESSAGES.direct_bufsize_misaligned)).toBeInTheDocument();
+  expect(q.getByRole("button", { name: "저장" })).toBeDisabled();
+  await userEvent.clear(q.getByLabelText("bufsize"));
+  await userEvent.type(q.getByLabelText("bufsize"), "4194304");
+  expect(q.queryByText(REASON_MESSAGES.direct_bufsize_misaligned)).toBeNull();
+  await userEvent.click(q.getByRole("button", { name: "저장" }));
+  await waitFor(() => expect(sent?.options).toEqual({ direct: true, bufsize: 4194304 }));
+});
+
+test("실행 설정 변경(rm·scan): rm 은 quiet 설명만, scan 은 설명 목록이 없다(생성 폼과 같은 수준)", async () => {
+  const view = renderExec(rmBatch({ status: "Cancelled", options: { recursive: true } }));
+  await userEvent.click(await screen.findByRole("button", { name: "실행 설정 변경" }));
+  const q = within(await screen.findByRole("dialog", { name: "실행 설정 변경" }));
+  expect(within(q.getByRole("list", { name: "옵션 설명" })).getAllByRole("listitem").map((li) => li.textContent))
+    .toEqual([`quiet — ${QUIET_HELP.rm}`]);
+  view.unmount();
+  renderExec(scanExec);
+  await userEvent.click(await screen.findByRole("button", { name: "실행 설정 변경" }));
+  const q2 = within(await screen.findByRole("dialog", { name: "실행 설정 변경" }));
+  expect(q2.queryByRole("list", { name: "옵션 설명" })).toBeNull();
+});
+
 test("실행 설정 변경: 노드 칸의 숫자 아닌 글자는 오류(빈칸 = 정책 기본으로 조용히 바뀌지 않는다)", async () => {
   renderExec(scanExec);
   await userEvent.click(await screen.findByRole("button", { name: "실행 설정 변경" }));
@@ -1873,7 +2097,9 @@ test("rm 배치 확인 대화상자: 삭제 문장·삭제 경고·삭제 대상
   const rows = within(list).getAllByRole("listitem");
   expect(rows).toHaveLength(3);                                      // 실행할 항목 전부(종단 #3 은 「실행되지 않는 항목」)
   expect(rows[0]).toHaveTextContent("#0 s1:team/old-a — 1,234개");
-  await waitFor(() => expect(rows[0]).toHaveTextContent("실제 경로: /cephfs/dms/team/old-a"));
+  // 글자 그대로 붙인 경로(링크 미해석)라 「지정 경로」(괴리 [C2])
+  await waitFor(() => expect(rows[0]).toHaveTextContent("지정 경로: /cephfs/dms/team/old-a"));
+  expect(list).not.toHaveTextContent("실제 경로");
   expect(rows[1]).toHaveTextContent("#1 s1:team/typo — 0개(대상 경로를 찾지 못함)");
   expect(rows[1]).toHaveClass("text-bad");
   expect(rows[2]).toHaveTextContent("#2 s1:team/unknown — 모름");

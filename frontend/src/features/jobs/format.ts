@@ -62,6 +62,14 @@ export function countText(n: number): string {
   return `${n.toLocaleString("ko-KR")}개`;
 }
 
+// 결과 타일의 크기: 사람 표기 + 원값(정밀도 손실 없이 검증 가능하게, 원값도 천 단위 구분 -- 「1.5 KiB (1,536 B)」).
+// 1 KiB 미만은 사람 표기가 곧 원값이라 괄호를 붙이지 않는다(「10 B (10 B)」 중복, d164 실 화면). 모르면 "—".
+export function bytesText(n: number | null): string {
+  if (n === null || !Number.isFinite(n)) return "—";
+  const human = humanBytes(n);
+  return n < 1024 ? human : `${human} (${n.toLocaleString("ko-KR")} B)`;
+}
+
 // 유한한 숫자만 숫자로 -- 서버가 문자열·null·NaN 을 실어도 수치를 지어내지 않는다.
 export function finiteOrNull(v: unknown): number | null {
   return typeof v === "number" && Number.isFinite(v) ? v : null;

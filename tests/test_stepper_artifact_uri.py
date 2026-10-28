@@ -113,7 +113,7 @@ def test_sync_execution_success_keeps_preview_artifact_uri(db):
 def test_failed_execution_with_summary_records_artifact_and_summary(db):
     # 러너는 도구 비0 종료에도 stdout/stderr/summary 를 쓰고 나서 exit 한다
     # (설계 §1-7) -- returncode 가 카드에 떠야 "왜 실패했나"의 첫 단서가 보인다.
-    # 집계는 오염되지 않는다: metrics 합계는 state='Succeeded' 만 센다(§1-12).
+    # 실행 실패의 files/bytes 는 승격된다(d192 -- 실제로 한 일, 아래 부분 처리 테스트).
     repos = Repositories(db)
     rid, jid = _scan_job(repos)
     adapter = StubExecutionAdapter()
@@ -215,6 +215,71 @@ def test_preview_failure_with_summary_records_artifact(db):
     assert job["state"] == "Failed"
     assert job["artifact_uri"] == f"file:///art/{jid}"
     assert job["result_summary"] == {"returncode": 1, "files": None, "bytes": None}
+
+
+# ---- d192: files_count/bytes_count 는 실행·scan 결과만 -- 미리보기 실패는 표시만, 승격하지 않는다 ----
+
+def _to_executing(repos, stepper, jid):
+    stepper.run_once(); stepper.run_once(); stepper.run_once()          # -> ConfirmPending
+    repos.data_jobs.set_confirmed(jid, repos.data_jobs.get_job(jid)["preview_fingerprint"])
+    repos.data_jobs.set_job_state(jid, DataJobState.EXECUTING, actor="test")
+    stepper.run_once()                                                   # exec_preflight submit
+    stepper.run_once()                                                   # exec_preflight ok -> execution submit
+
+
+def test_failed_execution_promotes_what_actually_took_effect(db):
+    # summary v2 의 실행 files/bytes 는 실제로 반영된 수(nsync Completed·dsync 복사 성공)다 -- 실패 전까지의 부분 처리도
+    # 실제 변경이라 지표(metrics sync_items_total, 종단 전체 합)에 들어가야 한다.
+    repos = Repositories(db)
+    rid, jid = _sync_job(repos)
+    adapter = StubExecutionAdapter()
+    adapter.set_summary(f"stub-preview-{jid}", {"files": 4, "bytes": 16})
+    stepper = _stepper(repos, adapter)
+    _to_executing(repos, stepper, jid)
+    ref = f"stub-execution-{jid}"
+    adapter.script(ref, [ExecStatus.FAILED])
+    adapter.set_summary(ref, {"returncode": 1, "files": 1, "bytes": 5, "detail_version": 2})
+    stepper.run_once()
+    job = repos.data_jobs.get_job(jid)
+    assert job["state"] == "Failed"
+    assert (job["files_count"], job["bytes_count"]) == (1, 5)
+    assert job["result_summary"]["files"] == 1
+
+
+def test_preview_failure_shows_summary_but_does_not_promote_counts(db):
+    # 미리보기 files 는 「할 예정」(nsync 계획 합 등)이다 -- 실패한 미리보기의 4·16 이 컬럼에 들어가면 지표가 아무것도
+    # 안 바뀐 잡을 「반영 4개·16 B」로 센다(지표가 이제 Failed 도 더하므로). summary 는 화면 표시용으로 그대로 남긴다.
+    repos = Repositories(db)
+    rid, jid = _sync_job(repos)
+    adapter = StubExecutionAdapter()
+    stepper = _stepper(repos, adapter)
+    stepper.run_once()                                   # Pending -> Preflight
+    ref = f"stub-preview-{jid}"
+    adapter.script(ref, [ExecStatus.FAILED])
+    adapter.set_summary(ref, {"returncode": 1, "files": 4, "bytes": 16})
+    stepper.run_once()                                   # Preflight ok -> PreviewRunning
+    stepper.run_once()                                   # Preview FAILED
+    job = repos.data_jobs.get_job(jid)
+    assert job["state"] == "Failed"
+    assert job["result_summary"] == {"returncode": 1, "files": 4, "bytes": 16}
+    assert (job["files_count"], job["bytes_count"]) == (None, None)
+
+
+def test_preview_timeout_shows_summary_but_does_not_promote_counts(db):
+    repos = Repositories(db)
+    rid, jid = _sync_job(repos)
+    adapter = StubExecutionAdapter()
+    stepper = _stepper(repos, adapter)
+    stepper.run_once()
+    ref = f"stub-preview-{jid}"
+    adapter.script(ref, [ExecStatus.TIMED_OUT])
+    adapter.set_summary(ref, {"returncode": None, "files": 9, "bytes": 90})
+    stepper.run_once()
+    stepper.run_once()                                   # Preview TIMED_OUT
+    job = repos.data_jobs.get_job(jid)
+    assert job["state"] == "TimedOut"
+    assert job["result_summary"]["files"] == 9
+    assert (job["files_count"], job["bytes_count"]) == (None, None)
 
 
 def test_preflight_failure_records_no_artifact(db):

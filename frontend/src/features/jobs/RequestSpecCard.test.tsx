@@ -6,10 +6,7 @@ import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
 import { beforeAll, afterAll, afterEach, test, expect } from "vitest";
 import { RequestDetail } from "./RequestDetail";
-import { PRIV_ROOT_HEAD, PRIV_USER } from "./optionRules";
-
-// 요청 상세 전용 open_noatime 주의 줄(제출 폼의 「root 실행에서만 적용됩니다」 안내와 다른, 이미 실린 기록에 대한 문장).
-const NOATIME_WARN = /^open_noatime 이 비 root 실행에 실렸습니다 — /;
+import { PRIV_ROOT_HEAD, PRIV_USER, SYNC_OPTION_HELP } from "./optionRules";
 
 // 요청 상세 「요청 내용」 카드 + 머리말 root 배지(2026-10-08) 화면 테스트. 하네스는 RequestDetail.redesign.test 의 복제.
 
@@ -226,7 +223,6 @@ test("c 배치 자식 root(테스트베드 표본: identity 에 보조 그룹 �
   expect(within(cell(region, "실행 권한")).getByText("배치 항목 — 배치를 만든 관리자의 root 자격이 적용됐습니다.")).toBeInTheDocument();
   expect(cell(region, "실행 도구").textContent).toBe("dsync · 5 노드 · 프로세스 10개(노드당 2)");
   expect(within(region).queryByText("보조 그룹(gid)")).toBeNull();
-  expect(within(region).queryByText(NOATIME_WARN)).toBeNull();   // root 라 경고 없음
 });
 
 test("d 잡 1개: 도구 라벨·보조 그룹은 잡 카드에 없고, 아티팩트 줄은 「상태 전이」 버튼과 같은 줄 컨테이너에", async () => {
@@ -290,17 +286,13 @@ test("g 변조 기록(payload 문자열·worker_pool 문자열·options 배열):
   expect(cell(region, "옵션").textContent).toBe("지정한 옵션 없음기본값: batch_files=1000000 · bufsize=4194304(4.0 MiB)");
 });
 
-test("h open_noatime 비 root: 실패한 요청에만 주의 줄", async () => {
+test("h open_noatime 옛 비 root 실패 요청에도 EPERM 주의 줄이 없다(dms-ssc d190 이식 -- 새 작업은 전부 root, 잡 이미지 7a3189c 는 O_NOATIME 없이 다시 연다)", async () => {
   const req = { ...REQ, payload: { ...PAYLOAD_A, options: { open_noatime: true } } };
   serve({ ...req, state: "Failed" }, [{ ...JOB, state: "Failed", reason_code: "execution_failed:rc1" }]);
-  const first = renderAt();
-  const region = await specRegion();
-  expect(within(region).getByText(NOATIME_WARN)).toHaveClass("text-attn");
-  first.unmount();
-  serve(req, [JOB]);
   renderAt();
-  await specRegion();
-  expect(screen.queryByText(NOATIME_WARN)).toBeNull();
+  const region = await specRegion();
+  expect(within(region).queryByText(/O_NOATIME/)).toBeNull();
+  expect(cell(region, "옵션").textContent).toContain("open_noatime");
 });
 
 test("i 2026-09-30 이전 관리자 행(run_as_root 없이 root 로 계획, Succeeded): 배지 「실행」 + 설명 줄, 「비정상 상태」·「거부」 단정 없음", async () => {
@@ -345,10 +337,29 @@ test("l 옵션: 설명 붙은 옵션은 한 줄씩, 설명 없는 칩은 한 줄
   renderAt();
   const region = await specRegion();
   const items = within(cell(region, "옵션")).getAllByRole("listitem");
+  // delete 설명은 제출 폼과 같은 출처(SYNC_OPTION_HELP) -- 문구가 바뀌어도 두 화면이 같은 말을 하는지만 고정한다.
   expect(items.map((li) => li.textContent)).toEqual([
-    "delete 원본에 없는 파일을 대상에서도 삭제해 완전히 동일하게 맞춥니다(미러 동기화).", "open_noatime", "chmod=D2775,F664"]);
+    `delete ${SYNC_OPTION_HELP.delete}`, "open_noatime", "chmod=D2775,F664"]);
   expect(items.map((li) => li.classList.contains("basis-full"))).toEqual([true, false, false]);
   expect(items[0].parentElement).toHaveClass("flex-wrap");
+});
+
+test("l2 direct 칩: nsync 로 돈 잡이면 「적용되지 않음」 주석, dsync 면 주석 없음(괴리 [22])", async () => {
+  const opts = { direct: true, open_noatime: true };
+  serve({ ...REQ, requester_id: "mason", payload: { ...PAYLOAD_A, run_as_root: true, options: opts } },
+    [{ ...JOB, tool: "nsync", worker_pool: { ...WP_A, tool: "nsync", identity: ROOT_IDENT } }]);
+  const v = renderAt();
+  let region = await specRegion();
+  let items = within(cell(region, "옵션")).getAllByRole("listitem");
+  expect(items.map((li) => li.textContent)).toEqual(["direct nsync 로 실행돼 적용되지 않음(O_DIRECT 는 dsync 에서만)", "open_noatime"]);
+  expect(items[0]).toHaveClass("basis-full");
+  v.unmount();
+  serve({ ...REQ, requester_id: "mason", payload: { ...PAYLOAD_A, run_as_root: true, options: opts } },
+    [{ ...JOB, worker_pool: { ...WP_A, identity: ROOT_IDENT } }]);
+  renderAt();
+  region = await specRegion();
+  items = within(cell(region, "옵션")).getAllByRole("listitem");
+  expect(items.map((li) => li.textContent)).toEqual(["direct", "open_noatime"]);
 });
 
 test("m 두 묶음 2열은 xl(1280)부터 -- 사이드바가 폭을 먹는 1024–1279 는 1열", async () => {

@@ -81,6 +81,9 @@ def test_sync_recheck_preflight_before_execution(db):
     exec_spec = [s for s in adapter.submitted_specs() if s.phase == "execution"][0]
     assert exec_spec.paths["source"] == "/cephfs-third/a"
     assert exec_spec.paths["destination"] == "/cephfs-secondary/b"
+    # 경로 봉쇄의 기준(2026-10-28 통일 -- 직접 경로 sync 도): 경로를 조합한 바로 그 managed_root 값이 함께 실린다.
+    assert (exec_spec.paths["source_root"], exec_spec.paths["destination_root"]) == ("/cephfs-third", "/cephfs-secondary")
+    assert "contain" not in exec_spec.paths                     # PV 주소 쪽이 없다(글자 경계 없음)
 
 
 def _pv_job(repos, key, operation, payload, **job):
@@ -98,8 +101,9 @@ def _pv_job(repos, key, operation, payload, **job):
 
 
 def test_pv_containment_roots_follow_payload_blocks(db):
-    """PV 주소 쪽만 paths["contain"] 에 {PV 루트, 기준 managed_root}(2026-10-26 봉쇄) -- 직접 경로 쪽은 키가 없다. 블록 root 의 '..' 가
-    managed_root 밖으로 나가면 빈 루트(봉쇄가 막는다), PV 주소 rm 도 기준점은 managed_root 다(containment_root 없음)."""
+    """PV 주소 쪽만 paths["contain"] 에 {PV 루트}(2026-10-26 봉쇄의 글자 경계) -- 직접 경로 쪽은 키가 없다. 블록 root 의 '..' 가
+    managed_root 밖으로 나가면 빈 루트(봉쇄가 막는다). 심링크 검사의 기준점은 paths 의 managed_root 값 하나다(2026-10-28 통일 --
+    sync source_root·destination_root, 대상 하나 연산 managed_root; 예전 "anchor" 사본은 지웠다, containment_root 없음)."""
     repos = Repositories(db)
     repos.storages.create(storage_name="pv-gpfs", mount_path="/k8s_pv/gpfs", managed_root="/k8s_pv/gpfs",
                           backend_type="gpfs", actor="admin")
@@ -122,9 +126,11 @@ def test_pv_containment_roots_follow_payload_blocks(db):
     JobStepper(repos, adapter, settings=_Settings()).run_once()
     specs = {s.operation: s for s in adapter.submitted_specs()}
     pv_root = "/k8s_pv/gpfs/pvc-52c6/pvc-52c6-data"
-    # root = 글자 경계, anchor = 심링크 검사의 기준점(그 쪽 managed_root — PV 루트로 좁히면 그 사이 링크를 놓친다).
-    assert specs["sync"].paths["contain"] == {"source": {"root": pv_root, "anchor": "/k8s_pv/gpfs"}}
-    assert specs["scan"].paths["contain"] == {"target": {"root": "", "anchor": "/k8s_pv/gpfs"}}
-    assert specs["rm"].paths["contain"] == {"target": {"root": pv_root, "anchor": "/k8s_pv/gpfs"}}
+    # root = 글자 경계. 기준점(그 쪽 managed_root — PV 루트로 좁히면 그 사이 링크를 놓친다)은 경로를 조합한 같은 값으로 따로 싣는다.
+    assert specs["sync"].paths["contain"] == {"source": {"root": pv_root}}
+    assert (specs["sync"].paths["source_root"], specs["sync"].paths["destination_root"]) == ("/k8s_pv/gpfs", "/cephfs/dms")
+    assert specs["scan"].paths["contain"] == {"target": {"root": ""}}
+    assert specs["scan"].paths["managed_root"] == "/k8s_pv/gpfs"
+    assert specs["rm"].paths["contain"] == {"target": {"root": pv_root}}
     assert "containment_root" not in specs["rm"].paths
     assert specs["rm"].paths["managed_root"] == "/k8s_pv/gpfs"

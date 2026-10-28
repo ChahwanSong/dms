@@ -19,9 +19,10 @@ const STATS = {
     { state: "Cancelled", count: 3 }, { state: "PreviewExpired", count: 1 },
     { state: "Pending", count: 2 },
   ],
-  by_tool: [{ tool: "dscan", count: 23, succeeded: 20, failed: 3 }],
-  by_storage: [{ storage: "cephfs-a", count: 30, succeeded: 18, failed: 12 }],
-  by_requester: [{ requester_id: "alice", count: 30, succeeded: 20, failed: 10 }],
+  // d192: 분해 행은 실패(Failed·TimedOut)·거부(Rejected)·취소·만료(Cancelled·PreviewExpired)를 따로 싣는다.
+  by_tool: [{ tool: "dscan", count: 23, succeeded: 20, failed: 3, rejected: 0, cancelled: 0 }],
+  by_storage: [{ storage: "cephfs-a", count: 30, succeeded: 18, failed: 8, rejected: 3, cancelled: 1 }],
+  by_requester: [{ requester_id: "alice", count: 30, succeeded: 20, failed: 6, rejected: 2, cancelled: 2 }],
   failure_reasons: [{ reason_code: "execution_failed", count: 2 }],
   throughput: [{ bucket: "2026-08-09T01", count: 2 },
                { bucket: "2026-08-09T02", count: 1 }],
@@ -50,7 +51,7 @@ const STATS = {
   plan_rejection_reasons: [
     { reason_code: "ldap_identity_not_found", count: 2 },
     { reason_code: "storage_missing", count: 1 }],
-  files_total: null, bytes_total: null,
+  sync_items_total: null, sync_bytes_total: null, rm_items_total: null,
 };
 
 function renderSection(stats: unknown = STATS) {
@@ -73,10 +74,37 @@ test("성공률·처리량·분해 표·실패 사유를 그린다", async () =>
   expect(screen.getByText("실행에 실패했습니다")).toBeInTheDocument();
 });
 
-test("files/bytes가 NULL이면 — 로 우아하게 생략한다", async () => {
+test("처리 항목: 서버 합계가 NULL(아는 행 없음)이면 0 이 아니라 — 로 표기한다", async () => {
   renderSection();
-  const row = await screen.findByText("처리 항목/바이트");
-  expect(row.parentElement).toHaveTextContent("— / —");
+  const tile = (await screen.findByText("처리 항목(실행 결과)")).parentElement!;
+  expect(within(tile).getByText("sync 반영").nextElementSibling).toHaveTextContent(/^— 항목 · —$/);
+  expect(within(tile).getByText("rm 삭제").nextElementSibling).toHaveTextContent(/^— 항목$/);
+});
+
+test("처리 항목: sync 반영 항목·크기와 rm 삭제 항목을 따로 보이고, 실패·중단 실행의 부분 처리가 들어 있다고 말한다", async () => {
+  // d192: 예전 files_total 은 sync 항목과 rm 삭제 수를 한 숫자로 섞었다 -- 연산별 키(sync_items_total 등)를 따로 그린다.
+  renderSection({ ...STATS, sync_items_total: 12345, sync_bytes_total: 3 * 1024 ** 3, rm_items_total: 0 });
+  const tile = (await screen.findByText("처리 항목(실행 결과)")).parentElement!;
+  expect(within(tile).getByText("sync 반영").nextElementSibling).toHaveTextContent(/^12,345 항목 · 3\.0 GiB$/);
+  // 0 은 정상값(지운 것이 없었다) -- 「—」로 뭉개지 않는다(null≠0).
+  expect(within(tile).getByText("rm 삭제").nextElementSibling).toHaveTextContent(/^0 항목$/);
+  expect(tile).toHaveTextContent("실패·중단된 실행의 부분 처리 포함 · scan 제외");
+  expect(screen.queryByText("처리 항목/바이트")).toBeNull();       // 섞인 옛 타일은 없다
+});
+
+test("분해 표: 성공·실패·거부·취소·만료 열 -- 옛 서버(거부·취소 없음)는 0 이 아니라 —", async () => {
+  renderSection({ ...STATS,
+    by_tool: [{ tool: "nsync", count: 5, succeeded: 1, failed: 2 }] });    // 옛 서버: rejected·cancelled 없음
+  await waitFor(() => expect(screen.queryByText("불러오는 중…")).toBeNull());
+  const storageBox = screen.getByText("스토리지별").closest("div")!;
+  expect(within(storageBox).getAllByRole("columnheader").map((th) => th.textContent))
+    .toEqual(["이름", "총", "성공", "실패", "거부", "취소·만료"]);
+  const storageRow = within(storageBox).getByText("cephfs-a").closest("tr")!;
+  expect([...storageRow.querySelectorAll("td")].map((td) => td.textContent)).toEqual(["cephfs-a", "30", "18", "8", "3", "1"]);
+  const toolRow = within(screen.getByText("도구별").closest("div")!).getByText("nsync").closest("tr")!;
+  expect([...toolRow.querySelectorAll("td")].map((td) => td.textContent)).toEqual(["nsync", "5", "1", "2", "—", "—"]);
+  // 열의 뜻은 구획 캡션이 말한다(대시보드 KPI 「실패(24h)」와 같은 Failed·TimedOut)
+  expect(screen.getByText(/실패 = Failed·TimedOut, 거부 = Rejected, 취소·만료 = Cancelled·PreviewExpired/)).toBeInTheDocument();
 });
 
 test("응답이 비배열이어도 죽지 않는다", async () => {
@@ -198,8 +226,8 @@ test("humanSeconds: 초→사람 단위, null 은 —(0 은 정상값 0s)", () =
 test("계획 거부 사유 상위 표가 실패 사유와 분리돼 나오고 캡션이 구간을 정직화한다", async () => {
   renderSection();
   expect(await screen.findByText("계획 거부 사유 상위")).toBeInTheDocument();
-  // 실패 사유 상위(잡 실패)와 한 화면에 공존하되 다른 표다 -- 섞으면 라벨 거짓말.
-  expect(screen.getByText("실패 사유 상위")).toBeInTheDocument();
+  // 실패·거부 사유 상위(잡 실패·점검 거부 -- d192 서버가 취소·만료를 뺀다)와 한 화면에 공존하되 다른 표다 -- 섞으면 라벨 거짓말.
+  expect(screen.getByText("실패·거부 사유 상위")).toBeInTheDocument();
   // 사유는 reasonText 매핑 재사용(실패 사유 표와 같은 한글화)
   expect(screen.getByText(/^이전 버전\(LDAP 신원\)에서 기록된 사유입니다 — 그때 LDAP 에서 실행 신원 계정을 찾지 못했습니다/)).toBeInTheDocument();
   expect(screen.getByText("등록되지 않은 스토리지입니다")).toBeInTheDocument();
@@ -252,6 +280,7 @@ test("요약 타일: 성공률·상태별 잡 수·처리 항목·계획 거부�
   renderSection();
   await waitFor(() => expect(screen.queryByText("불러오는 중…")).toBeNull());
   expect(screen.getByText("상태별 잡 수")).toBeInTheDocument();
+  expect(screen.getByText("처리 항목(실행 결과)")).toBeInTheDocument();
   expect(screen.getByText("계획 거부")).toBeInTheDocument();
   expect(screen.getByRole("img", { name: "성공률" })).toBeInTheDocument();
 });

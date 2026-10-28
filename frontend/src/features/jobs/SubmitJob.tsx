@@ -14,14 +14,17 @@ import { ApiError } from "../../lib/api";
 // field·StoragePicker 는 formFields.tsx 에 산다(슬라이스 31 T3) -- 제출 화면이 통째로 갈려도
 // 다른 임포터가 흔들리지 않게 결합을 끊어 둔 것.
 import { StoragePicker, field } from "./formFields";
-import { absolutePath, destinationParent, relativePathProblem } from "../../lib/storagePaths";
+import {
+  absolutePath, destinationParent, relativePathProblem, RM_PATH_LINK_RULE, SYNC_PATH_LINK_RULE,
+} from "../../lib/storagePaths";
 import { ownerText, syncOwnership, validOwner } from "../../lib/syncOwnership";
 import type { DirectDestOwner, PvOwnerRule } from "../../lib/syncOwnership";
 // 옵션 미러(CHMOD_RE·chownFieldError·intFieldError, sync 숫자 범위·프리필 SYNC_INT_FIELDS)는
 // optionRules.ts 로 이사(슬라이스 32 T8) -- BatchCreate 옵션과 공유한다
 // (사본이면 미러가 발산한다).
-import { CHMOD_RE, chownFieldError, PRIV_ROOT_SYNC, PRIV_ROOT_SYNC_DIRECT_BOTH, PRIV_ROOT_SYNC_PV, PRIV_ROOT_SYNC_PV_ROOT,
-         SCAN_INT_FIELDS, SYNC_INT_FIELDS, SYNC_OPTION_HELP, scanIntFieldError, syncIntFieldError } from "./optionRules";
+import { BUFSIZE_HELP, CHMOD_RE, chownFieldError, DIRECT_HELP, directBufsizeError, OPEN_NOATIME_HELP, PRIV_ROOT_SYNC,
+         PRIV_ROOT_SYNC_DIRECT_BOTH, PRIV_ROOT_SYNC_PV, PRIV_ROOT_SYNC_PV_ROOT, QUIET_HELP, SCAN_INT_FIELDS, SYNC_INT_FIELDS,
+         SYNC_MAX_ERRORS_NOTE, SYNC_OPTION_HELP, scanIntFieldError, syncIntFieldError } from "./optionRules";
 // 정책 기본값 캡션(슬라이스 37: 배치 생성과 같은 표시 배선 — 백엔드 무변경).
 import { usePolicies } from "../policies/usePolicies";
 import type { Policy } from "../../lib/types";
@@ -85,9 +88,12 @@ const OPERATION_HELP: Record<Operation, string> = {
 };
 
 // 경로 입력 바로 아래의 즉답: 서버가 거부할 경로면 그 이유(relativePathProblem = validate_relative_path
-// 미러), 아니면 입력한 상대경로가 실제로 가리키는 절대경로(관리 디렉토리를 알 때만 -- 모르면 지어내지
+// 미러), 아니면 입력한 상대경로를 관리 디렉토리에 붙인 절대경로(관리 디렉토리를 알 때만 -- 모르면 지어내지
 // 않는다). 절대경로는 **보내는 값 그대로**로 짓는다 -- 다듬은 값으로 지으면 "/a" 나 "x " 같은 입력에
 // 서버가 실제로 쓰지 않을(또는 거부할) 경로를 그럴듯하게 보여 준다(리뷰 2026-10-06).
+// 라벨은 「지정 경로」(d192 이식, 괴리 [C2]): 글자 그대로 붙인 경로라 링크를 풀지 않는다 -- 「실제 경로」라 부르면 링크를
+// 거치는 경로로 거부된 뒤 사용자가 화면이 「실제」라 한 바로 그 경로를 다시 낸다(lib/storagePaths absolutePath 주석). PV 쪽
+// (LocationField)도 서버가 준 PV 루트에 하위경로를 글자 그대로 붙이므로 같은 라벨이다.
 function PathFeedback({ root, rel }: { root: string | null | undefined; rel: string }) {
   if (rel.trim() === "") return null;
   const problem = relativePathProblem(rel);
@@ -96,7 +102,7 @@ function PathFeedback({ root, rel }: { root: string | null | undefined; rel: str
   return (
     <>
       {abs !== null && (
-        <p className="mt-1 text-xs text-muted [overflow-wrap:anywhere]">{`실제 경로: ${abs}`}</p>
+        <p className="mt-1 text-xs text-muted [overflow-wrap:anywhere]">{`지정 경로: ${abs}`}</p>
       )}
       {rel !== rel.trim() && (
         <p className="mt-1 text-xs text-muted">앞뒤 공백도 경로 이름에 그대로 들어갑니다.</p>
@@ -235,8 +241,10 @@ export function SubmitJob() {
   // 고급 옵션은 sync 전용이라 rm 으로 바꾸면(전송도 안 되므로) 차단 사유에서 빠진다.
   const batchFilesError = f.operation === "sync"
     ? syncIntFieldError("batch_files", f.batchFiles) : null;
+  // 범위 오류가 먼저, 범위 안이면 direct 정렬 조건(서버 422 direct_bufsize_misaligned 미러 -- optionRules 주석). direct 칸은
+  // 관리자에게만 보이지만 f.direct 는 비관리자에겐 늘 false 라 판정이 그대로 맞다.
   const bufsizeError = f.operation === "sync"
-    ? syncIntFieldError("bufsize", f.bufsize) : null;
+    ? syncIntFieldError("bufsize", f.bufsize) ?? directBufsizeError(f.direct, f.bufsize) : null;
   const chmodError = f.operation === "sync" && f.chmod.trim() !== "" && !CHMOD_RE.test(f.chmod.trim())
     ? "chmod 형식이 올바르지 않습니다 (예: D770,F660)" : null;
   const chownError = f.operation === "sync" ? chownFieldError(f.chown) : null;
@@ -312,8 +320,8 @@ export function SubmitJob() {
   function syncOptions(): SubmitBody["options"] {
     const options: SubmitBody["options"] = checkedOptions({
       delete: f.delete, contents: f.contents, direct: f.direct, quiet: f.quiet,
-      // open_noatime 은 root 실행에만 뜻이 있다(비 root 의 O_NOATIME 은 타인 소유 파일에서 EPERM) -- 모든 작업이 root 라
-      // (설계 D2) 사용자도 같은 기본(ON)이 실린다. 사용자 폼엔 고급 옵션이 없어 기본값 그대로다.
+      // open_noatime: 모든 작업이 root 라(설계 D2 -- O_NOATIME 의 EPERM 제약 없음) 사용자도 같은 기본(ON)이 실린다. 사용자
+      // 폼엔 고급 옵션이 없어 기본값 그대로다. nsync 에서도 실제로 동작하는 것은 잡 이미지 7a3189c 부터(OPEN_NOATIME_HELP 주석).
       open_noatime: f.openNoatime,
     });
     // 빈 문자열일 때만 생략 — 빈 chmod/chown 을 그대로 실으면 서버 fullmatch 가
@@ -481,6 +489,10 @@ export function SubmitJob() {
             {pvDest ? "이 PV 의 스토리지" : "목적지 스토리지"}에 저장된 기본 소유 값이 올바르지 않아 제출할 수 없습니다 — 관리자가 스토리지 화면에서 기본 소유 uid·gid 를 다시 저장해야 합니다.
           </li>
         )}
+        {/* 링크 경로 규칙(d192 이식, 괴리 [14] -- dms-k8s 문구는 2026-10-28 통일 봉쇄: 관리 디렉토리·PV 아래 어느 단계든) --
+            링크로 된 목적지가 위 「디렉토리여야 합니다」를 만족한다고 보고 낸 요청이 preflight 에서 거부됐다
+            (destination_path_redirected). */}
+        <li>{SYNC_PATH_LINK_RULE}</li>
         <li>조건이 맞지 않으면 미리보기 전에 거부되고 사유가 표시됩니다 — 아무것도 복사되지 않습니다.</li>
       </ul>
     </InfoCard>
@@ -533,7 +545,7 @@ export function SubmitJob() {
       </FormSection>
 
       {/* "경로는 관리 디렉토리 아래 상대경로" 는 스토리지 선택 아래 캡션(StoragePicker)이 이미 말하고,
-          입력 아래 "실제 경로" 가 그 결과를 보여 준다 -- 구획 캡션으로 세 번째 반복하지 않는다. */}
+          입력 아래 "지정 경로" 가 그 결과를 보여 준다 -- 구획 캡션으로 세 번째 반복하지 않는다. */}
       <FormSection step={2} title={targetTitle}>
         {/* 목록 로드 실패 문구는 스토리지를 고르는 이 구획에 -- 제출 차단은 blocked 가 맡는다 */}
         {storagesBlock && (
@@ -569,10 +581,19 @@ export function SubmitJob() {
                 안내라 접지 않는다. */}
             {syncConditions}
           </>
-        ) : locationField("target")}
+        ) : (<>
+          {locationField("target")}
+          {/* rm 대상의 링크 규칙(d192 이식, 괴리 [14]·[27] -- dms-k8s 는 끝 링크 허용: 2026-10-28 사용자 결정 「rm 끝 링크 허용
+              유지」). 중간 단계 링크로 거부된 뒤 「링크가 가리키는 곳」을 다시 내지 않게, 끝 링크면 링크만 지운다는 사실과 함께
+              고르는 자리에서 먼저 말한다. */}
+          {f.operation === "rm" && (
+            <p className="text-xs text-muted" role="note" aria-label="삭제 경로 조건">{RM_PATH_LINK_RULE}</p>
+          )}
+        </>)}
       </FormSection>
 
-      <FormSection step={3} title="실행 옵션">
+      <FormSection step={3} title="실행 옵션"
+                   caption={f.operation === "sync" ? SYNC_MAX_ERRORS_NOTE : undefined}>
         {f.operation === "sync" ? (
           <>
             {/* 옵션 설명(2026-08-20, 사용자 요청): dsync --delete / --contents. */}
@@ -591,16 +612,20 @@ export function SubmitJob() {
                 payload 는 동일하다 -- checkedOptions 가 기본값(false)을 이미
                 생략하고, 고급 프리필(batch_files·bufsize)은 도구 기본값이라
                 운영자가 고급을 안 펼친 것과 결과가 같다. */}
-            {isAdmin && (
-              <div className="flex flex-wrap gap-x-6 gap-y-2">
-                <label className="flex items-center gap-2 text-sm">
+            {/* direct·quiet 도 delete·contents 처럼 설명을 칸 옆에 그대로 보인다(d192 이식): 예전엔 title 툴팁뿐이라 quiet 가
+                실패 원인까지 지운다는 것(괴리 [9]·[13]·[18]·[29])과 direct 의 bufsize 조건([8])이 보이지 않았다. */}
+            {isAdmin && (<>
+              <FieldRow align="check"
+                control={<label className="flex items-center gap-2 text-sm">
                   <input type="checkbox" aria-label="direct" checked={f.direct} onChange={on("direct")} /> direct
-                </label>
-                <label className="flex items-center gap-2 text-sm" title="실행 로그를 줄입니다 — 실행 결과 개수(삭제한 항목·복사한 파일)도 「—」가 됩니다. 미리보기(dry-run)에는 적용하지 않습니다(대상 수를 세는 줄이 사라지므로)">
+                </label>}
+                help={DIRECT_HELP} />
+              <FieldRow align="check"
+                control={<label className="flex items-center gap-2 text-sm">
                   <input type="checkbox" aria-label="quiet" checked={f.quiet} onChange={on("quiet")} /> quiet
-                </label>
-              </div>
-            )}
+                </label>}
+                help={QUIET_HELP.sync} />
+            </>)}
             {/* 기본 접힘 — 단순 sync 제출 동선을 바꾸지 않기 위해 <details> 로 숨긴다 */}
             {isAdmin && (
               <details className="rounded-lg border border-line"
@@ -619,7 +644,8 @@ export function SubmitJob() {
                     control={<label className="flex items-center gap-2 text-sm">
                       <input type="checkbox" aria-label="open_noatime"
                              checked={f.openNoatime} onChange={on("openNoatime")} /> open_noatime
-                    </label>} />
+                    </label>}
+                    help={OPEN_NOATIME_HELP} />
                   {/* 프리필 계약(2026-09-17): 값이 미리 채워져 있고(placeholder 가
                       아니다) 그 값이 곧 서버 기본이라 비워도 같은 값이 적용된다 —
                       배칭을 끄는 유일한 표현은 0 명시. placeholder 는 "비웠을 때
@@ -643,7 +669,7 @@ export function SubmitJob() {
                       </label>
                       {bufsizeError && <p className="mt-1 text-bad text-sm">{bufsizeError}</p>}
                     </>}
-                    help="미리 채운 4194304 = 4 MiB(서버 기본). 비워도 같은 값이 적용됩니다." />
+                    help={BUFSIZE_HELP} />
                   <FieldRow
                     control={<>
                       <label className="text-sm block">chmod (선택 · 예: D770,F660 — 콤마 구분, D=디렉터리 F=파일)
@@ -729,12 +755,15 @@ export function SubmitJob() {
               <label className="flex items-center gap-2 text-sm">
                 <input type="checkbox" aria-label="lite" checked={f.lite} onChange={on("lite")} /> lite
               </label>
-              <label className="flex items-center gap-2 text-sm" title="실행 로그를 줄입니다 — 실행 결과 개수(삭제한 항목·복사한 파일)도 「—」가 됩니다. 미리보기(dry-run)에는 적용하지 않습니다(대상 수를 세는 줄이 사라지므로)">
-                <input type="checkbox" aria-label="quiet" checked={f.quiet} onChange={on("quiet")} /> quiet
-              </label>
             </div>
             {recursiveMissing && <p className="text-bad text-sm">재귀 옵션이 필요합니다</p>}
             {statLiteConflict && <p className="text-bad text-sm">stat과 lite는 함께 쓸 수 없습니다</p>}
+            {/* quiet 는 지우지 못한 항목 목록까지 없앤다 -- 설명을 칸 옆에 보인다(sync 와 같은 이유). */}
+            <FieldRow align="check"
+              control={<label className="flex items-center gap-2 text-sm">
+                <input type="checkbox" aria-label="quiet" checked={f.quiet} onChange={on("quiet")} /> quiet
+              </label>}
+              help={QUIET_HELP.rm} />
           </>
         )}
       </FormSection>
@@ -786,11 +815,11 @@ export function SubmitJob() {
           <>
             <SummaryRow label="소스">{sideText("source")}</SummaryRow>
             {sideAbs("source") !== null && (
-              <SummaryRow label="소스 실제 경로">{sideAbs("source")}</SummaryRow>
+              <SummaryRow label="소스 지정 경로">{sideAbs("source")}</SummaryRow>
             )}
             <SummaryRow label="목적지">{sideText("destination")}</SummaryRow>
             {sideAbs("destination") !== null && (
-              <SummaryRow label="목적지 실제 경로">{sideAbs("destination")}</SummaryRow>
+              <SummaryRow label="목적지 지정 경로">{sideAbs("destination")}</SummaryRow>
             )}
             {/* 목적지 조건과 소유권 카드의 요점. root 실행이면 권한 검사가 우회되지만 상위 디렉토리
                 존재는 여전히 필요하다(preflight test -w). */}
@@ -803,7 +832,7 @@ export function SubmitJob() {
           <>
             <SummaryRow label="대상">{sideText("target")}</SummaryRow>
             {sideAbs("target") !== null && (
-              <SummaryRow label="실제 경로">{sideAbs("target")}</SummaryRow>
+              <SummaryRow label="지정 경로">{sideAbs("target")}</SummaryRow>
             )}
           </>
         )}

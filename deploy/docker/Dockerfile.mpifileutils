@@ -19,17 +19,42 @@ FROM debian:bookworm AS build
 ARG MPIFILEUTILS_REPO=https://github.com/chahwansong/mpifileutils.git
 # 1b93d54: dscan top-K 수집 제거·스트리밍 재작성, --batch-files/--broken-limit 신설
 # (리포트에 broken_paths_total/limit 추가, top_k/oldest 키 삭제).
-# 2a10a18(5958e4e·8cd72f3 포함, 2026-10-26): nsync 목적지 쪽이 목적지 루트 아래 링크를 따라가지 않는다 — 상위 디렉터리를 루트
-# fd 기준 성분별 openat(O_NOFOLLOW)로 걷고 파일 생성·삭제·메타데이터도 그 fd 기준. 2a10a18 은 없는 목적지 루트를 먼저 만든다
-# (8cd72f3 은 새 목적지로의 sync 가 전부 실패 — d1 라이브 실증에서 발견). dms-k8s 의 root nsync PV 목적지 허용의 전제 —
-# tests/test_k8s_submit.py 의 고정값 테스트. 3c041e0: dsync·nsync 의 --chown 이 일반 파일의 setuid/setgid 를 지운다(chown(2)
-# 규칙 — PV 목적지 결과를 PV 루트 소유자로 chown 할 때 setuid-root 실행 파일이 생기지 않게, 2026-10-26 보안 리뷰).
-# ae781bd(3c041e0 의 직계 후손 — nsync·--chown 수정 포함, 2026-10-26): dscan 리포트 summary 에 total_bytes(일반 파일 st_size
-# 합, 정확값 — 세 시간 히스토그램 bytes 합과 같다)·invalid_name_entries(이름 d_name 이 엄격 UTF-8 이 아닌 항목 수 — 카운터만,
-# broken 사유·broken_paths_total 에 더하지 않는다, 사용자 결정 「카운터만 둠」)를 scan_errors 뒤에 덧붙인다(기존 키·순서 불변).
-# DMS 는 total_bytes 가 없으면(옛 이미지·저장된 리포트) 히스토그램 합으로, invalid_name_entries 가 없으면 모름(None)으로 읽는다
-# (dms_job_runner/parsers.parse_scan_counts, api/routes_scan_paths._report_total_bytes). drm 은 1b93d54 와 같다.
-ARG MPIFILEUTILS_REF=ae781bdbeb9f26a34a0cc5e6a072bfc7d4d7e89d
+# 5958e4e(2026-10-26, 포크 main HEAD): nsync 가 목적지 루트 아래 심링크를 따라가지 않는다 -- 목적지 변경을 전부 루트
+# dirfd + 구성요소마다 O_NOFOLLOW(openat/mkdirat/unlinkat/fchownat…)로. 타입이 바뀐 항목(심링크 → 디렉터리)의 「지우고
+# 만들고 자식 복사」가 다른 rank·배치로 갈려 순서 없이 돌 때 옛 경로 문자열 생성이 남은 심링크를 타고 목적지 밖에 썼다
+# (포크 실측 --batch-files 1 에서 200 중 130). nsync.c 만 바뀜 -- 옵션·출력(Planned actions 등 DMS 파서가 읽는 줄)은 같다.
+# ae781bd(2026-10-26, 포크 main HEAD — 5958e4e 다음 넷): 8cd72f3 nsync 메타데이터(chown/chmod/utimes)가 마지막 성분 심링크를
+# 따라가지 않음(TOCTOU) · 2a10a18 nsync 가 없는 목적지 루트를 만든다(5958e4e 는 새 목적지 sync 가 전부 실패) · 3c041e0
+# dsync/nsync --chown 이 일반 파일 setuid/setgid 를 지운다 · ae781bd dscan 요약에 total_bytes·invalid_name_entries 추가
+# (기존 키·순서 그대로 -- scan_errors 뒤에 덧붙임. dms-k8s 는 total_bytes 를 실 사용량 정확값(일반 파일 st_size 합),
+# invalid_name_entries 를 카운터만(broken 사유·broken_paths_total 에 더하지 않음, 사용자 결정 「카운터만 둠」)으로 읽고, 없으면(옛
+# 이미지·저장된 리포트) 세 시간 히스토그램 bytes 합·모름(None)으로 물러난다 -- dms_job_runner/parsers.parse_scan_counts,
+# api/routes_scan_paths._report_total_bytes).
+# c4dbf20(2026-10-27, 포크 브랜치 nsync-fixes-d189 — main 이 아니다, ae781bd 다음 둘): d188 실증 결함 수정.
+# f53e458 dsync 타입 교체 거부 항목·그 하위를 복사·--link-dest 에서 뺌(디렉터리 0644 사고) + 새 목적지 「Failed to stat」 제거 ·
+# c4dbf20 nsync 비어 있지 않은 디렉터리는 --delete 없이 교체하지 않음 · 배치 ≥2 타입 교체 선처리 · 목적지 rank 배리어 ·
+# --batch-files 0 · 항목별 실패 목록 + --max-errors(기본 65000) · 스캔·소스·목적지 경로를 루트 fd 아래 심링크 없이
+# (openat2) · FIFO 목적지 무한 대기·실패 COPY 의 기존 사본 삭제 수정 · 소스 특수 파일은 건너뜀. DMS 가 읽는
+# 「Planned actions:」·copied-volume= 줄 형식은 같다(특수 파일·선처리·정지는 그 밖의 줄).
+# 461bb73(2026-10-27, 같은 브랜치 — c4dbf20 다음 넷, 시험 커밋 둘 포함): db1e33c nsync --open-noatime 이 실제로 동작(빌드에
+# _GNU_SOURCE 가 없어 O_NOATIME 미정의였다 — 소스 atime 보존, 타인 소유 파일은 EPERM 뒤 O_NOATIME 없이 다시 열어 복사),
+# --direct 는 nsync 에서 받기만 함(정렬 I/O 없음) · 43ba468 dsync(공통 mfu_flist_copy.c)도 O_NOATIME EPERM 이면 다시 열어 복사
+# (전엔 비 root 의 타인 소유 파일이 「Failed to open input file」). 출력 형식은 Options 줄 끝 open-noatime= 추가뿐.
+# 7a3189c(2026-10-27, 같은 브랜치 — 461bb73 다음 넷, README 커밋 포함): e418ca7 dsync --contents --open-noatime 비교 열기도
+# EPERM 이면 O_NOATIME 없이 다시 연다 · 998608b drm·dsync --delete 가 지우지 못한 항목이 있으면 0 이 아닌 코드로 끝나고
+# 「Removed N items」 는 지운 수(전엔 시도 수·rc 0), 「Remove failed for F of T items」 줄 추가 · dsync 목적지 부모 쓰기 불가는
+# rc 1(전엔 rc 0) · dsync 가 소스 특수 파일에 메타데이터를 시도하지 않고 「Skipped N special file(s)」 한 줄 · 6172405 nsync
+# 「Completed actions:」 줄(실행만, 실제로 반영된 종류별 수 + copied-bytes). DMS 러너 summary v2 가 이 줄들을 읽는다.
+# dms-k8s(모든 잡 root·PV 주소 -- 위는 dms-ssc 와 같은 공용 이력, 2026-10-28 포크 main 도 7a3189c 로 fast-forward): 2a10a18 의
+# 목적지 링크 미추종(+ 새 목적지 루트 만들기)이 root nsync 의 PV 목적지 허용(planner 가드 해제)의 전제이고, 3c041e0 의 setid
+# 지우기는 목적지 결과를 --chown 으로 맞출 때(스토리지 기본 소유자 규칙·운영자 PV 루트 소유자·명시 chown) setuid-root 실행
+# 파일이 생기지 않게 한다(2026-10-26 보안 리뷰). 7a3189c 로 올린 주 이유: ae781bd 에 C8 -- nsync 가 디렉터리 → 파일
+# 교체에서 --delete 없이 목적지 전용 항목을 재귀 삭제(전부 root 라 그대로 데이터 손실, c4dbf20 이 고침) -- 이 남아 있었고,
+# 포탈이 늘 싣는 --open-noatime 이 nsync 에서 무동작이라 root 실행도 소스 atime 을 보존하지 않았다(db1e33c). 998608b 부터
+# drm·dsync 는 남은 항목이 있으면 rc≠0 이라 전엔 Succeeded 로 끝나던 부분 실패가 실패로 보인다. dscan 은 ae781bd 그대로(바뀐
+# 도구는 nsync·dsync·drm). tests/test_k8s_submit.py 가 옛 고정값을 거부 목록으로 고정한다(새 커밋으로 올릴 때 위 수정이 다 들어
+# 있는지 확인).
+ARG MPIFILEUTILS_REF=7a3189cba75c93b4e66da722235f370790a2f88a
 ARG LWGRP_REF=v1.0.6
 ARG DTCMP_REF=v1.1.5
 ARG LIBCIRCLE_REF=v0.3

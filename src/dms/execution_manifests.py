@@ -370,9 +370,10 @@ def _launcher_env(spec):
         # 연산이 아니라 도구로 거는 이유: 지우는 것은 drm 이다(변조 행의 연산·도구 불일치도 봉쇄 밖으로 새지 않는다).
         env["DMS_JR_RM_ROOT"] = _rm_managed_root(spec)
     elif spec.tool in ("dsync", "dscan", "nsync"):
-        # PV 주소 봉쇄 재확인(_PV_CONTAIN_FN, 2026-10-26) -- dsync·dscan 은 런처가 mpirun 직전에(런처는 데이터 경로를 마운트한다 --
-        # primary 볼륨), nsync 는 런처가 경로를 볼 수 없어(아티팩트 base 만 마운트) 각 rank 가 도구 exec 직전에 **자기 역할 쪽만**
-        # 본다(dms_job_runner.contain — 소스 rank 는 소스, 목적지 rank 는 목적지). 키 부재 = PV 가 아닌 잡.
+        # 경로 봉쇄 재확인(_PATH_CONTAINED_FN, 2026-10-26 PV → 2026-10-28 sync 는 직접 경로까지) -- dsync·dscan 은 런처가 mpirun
+        # 직전에(런처는 데이터 경로를 마운트한다 -- primary 볼륨), nsync 는 런처가 경로를 볼 수 없어(아티팩트 base 만 마운트) 각
+        # rank 가 도구 exec 직전에 **자기 역할 쪽만** 본다(dms_job_runner.contain — 소스 rank 는 소스, 목적지 rank 는 목적지).
+        # sync 는 늘 두 쪽, scan 은 PV 대상만(contain_entries) -- 키 부재 = 직접 경로 scan.
         entries = contain_entries(spec, ("source", "destination") if spec.operation == "sync" else ("target",))
         if entries:
             env["DMS_JR_CONTAIN"] = json.dumps(entries)
@@ -479,67 +480,85 @@ _DEST_CHECK = (
     'test -w "$dest_parent" || '
     '{ echo DMS_PREFLIGHT_REASON=destination_parent_not_writable; exit 1; }; ')
 
-# rm 대상 봉쇄(2026-10-21 리뷰): $1 = 대상 절대경로(drm argv 의 그 문자열), $R = 그 스토리지 managed_root(stepper._abs 가
-# $1 을 조합한 바로 그 값), $parent = dirname "$1". 「대상의 상위 경로 실제 위치 == realpath(managed_root) + 글자 그대로의
-# 상대 상위 경로」여야 통과 -- managed_root 아래 상위 경로 성분 어디에도 심링크가 없다는 뜻이다. 왜: drm 은 경로 문자열을
-# 걸어 들어가 중간 심링크를 커널이 따라가고, 배치 rm 은 root 라 `test -w` 가 늘 참이다 -- 사용자가 users/alice/data 를
-# ../bob(또는 /cephfs/dms 같은 마운트 안 다른 곳)으로 바꿔 두면 확인 창이 보인 「실제 경로」와 다른 트리가 지워졌다(스토리지
-# mount_path 전체가 잡 파드에 마운트된다). 마지막 성분은 심링크여도 된다 -- drm 은 대상을 lstat 해 링크 자체만 지운다.
-# managed_root 자신·그 위가 심링크인 것은 괜찮다(양쪽을 같은 realpath 로 본다). 끝이 「/」「.」「..」인 대상(DB 변조 행 --
-# validate_rm_target 은 정규화된 상대경로만 저장한다)과 상위 경로에 「.」「..」「//」가 낀 대상은 realpath 와 글자가 맞을
-# 수 없어 같은 사유로 막힌다(fail-closed). 값은 전부 positional·변수로만 쓴다(case 패턴의 "..." 는 글자 그대로 비교 --
-# 경로의 * [ 가 글롭이 되지 않는다). 같은 규칙의 러너 재확인: dms_job_runner.runner.rm_target_redirected.
-_RM_TARGET_REDIRECTED = 'echo DMS_PREFLIGHT_REASON=target_path_redirected; exit 1'
-_RM_CONTAINMENT_CHECK = (
-    'case "$1" in */|*/.|*/..) ' + _RM_TARGET_REDIRECTED + ';; esac; '
-    'case "$parent" in "$R"|"${R%/}") rel=;; "${R%/}"/*) rel=${parent#"${R%/}"/};; '
-    '*) ' + _RM_TARGET_REDIRECTED + ';; esac; '
-    'real_root=$(realpath -e -- "$R") && real_parent=$(realpath -e -- "$parent") || '
-    '{ ' + _RM_TARGET_REDIRECTED + '; }; '
-    'if [ -z "$rel" ]; then want=$real_root; else want=${real_root%/}/$rel; fi; '
-    '[ "$real_parent" = "$want" ] || { ' + _RM_TARGET_REDIRECTED + '; }; ')
+# 경로 봉쇄 -- 규칙 하나(2026-10-21 rm, 2026-10-26 PV 주소, 2026-10-28 통일: sync 두 쪽은 PV·직접 경로 공통 + rm 대상 + PV scan
+# 대상 -- 사용자 결정 「한 규칙으로 통일」. dms-ssc d191 의 규칙을 그대로 쓰고 k8s 의 PV 전용 규칙 _PV_CONTAIN_FN 을 이 하나로 접었다).
+# dms_path_contained PATH ROOT 는 「PATH 가 managed_root(ROOT) 아래 **어느 성분도**(마지막 포함) 심링크가 아니다」일 때만 참.
+# 판정 = 「PATH 의 실제 위치 == realpath(ROOT) + 글자 그대로의 상대경로」. 아직 없는 끝부분(새 목적지)은 존재하는 가장 깊은
+# 상위로 본다(lstat 기준 -- 끊긴 링크도 「있음」이라 막힌다). ROOT 자신·그 위의 심링크는 괜찮다(양쪽을 같은 realpath 로 본다
+# -- 관리 루트 링크·마운트 경로 링크). 빈 ROOT, 끝이 「/」「.」「..」거나 「//」「/./」「/../」가 낀 PATH(DB 변조 행 -- 요청
+# 검증은 정규화된 상대경로만 저장한다), ROOT 밖 PATH 는 막는다(fail-closed). 값은 전부 positional·변수(case 의 "..." 는 글자
+# 그대로 비교 -- 경로의 * [ 가 글롭이 되지 않는다).
+# 왜: 도구는 경로 문자열을 커널로 풀어 심링크를 따라가고 dms-k8s 는 모든 잡이 root 라 커널 DAC 가 없다. 요청 경로가(또는 중간
+# 성분이) 다른 곳을 가리키면 -- 사용자는 대상 권한 없이도 자기 디렉터리·자기 PV 안에 링크를 만들 수 있다 -- root sync 가 남의
+# 디렉터리·남의 PV 에 쓰고 소유를 바꾸며(포크 보고 ④ C12), 소스 경로가 링크면 `delete` sync 가 목적지를 통째로 지우거나(nsync
+# C13) 링크로 바꾸고(dsync), root rm 이 확인 창과 다른 트리를 지운다. 2026-10-28 전엔 직접 경로 sync 가 봉쇄 밖이었다.
+# 기준점은 늘 그 쪽 managed_root 다 -- PV 주소 쪽도 PV 루트가 아니다(2026-10-26 2차 보안 리뷰: PV 루트로 realpath 를 맞추면
+# managed_root 와 PV 루트 **사이** 성분(PV 루트 자신 포함)이 링크여도 양쪽이 같이 따라가 통과한다). PV 주소 쪽은 여기에 「PV 루트
+# 아래」 글자 경계(dms_within)만 더한다. 트리 **안쪽**의 링크는 상관없다(도구가 따라가지 않는다 -- ARCHITECTURE §7 「경로 봉쇄」).
+# 같은 규칙을 여러 번 본다: 미리보기 preflight, 실행 직전 exec_preflight(같은 _preflight_script), 그리고 도구가 경로를 열기 바로
+# 앞 -- dsync·dscan·drm 은 런처가 mpirun 직전에(런처가 데이터 경로를 마운트한다), nsync 는 각 rank 가 도구 exec 직전에 자기 쪽만
+# (dms_job_runner.contain -- 같은 규칙의 Python 미러 path_redirected; tests/test_sync_containment_sh·test_pv_containment_sh·
+# test_rm_containment_sh 가 같은 트리로 두 판정을 대조한다). dms-ssc 의 워커 셸(sshd 앞) 재확인은 두지 않는다 -- 런처·rank 자리가
+# 그보다 늦다. 마지막 검사와 도구가 경로를 여는 사이 몇 초의 교체는 남는다(BACKLOG -- 포크 루트 고정).
+# 줄바꿈이 든 PATH 도 막는다(2026-10-28 리뷰 -- Python 미러도 같다): $(dirname …)·$(realpath …) 명령 치환은 끝 줄바꿈을 지워
+# 「x<LF>」 성분을 옆의 실제 「x」로 읽는다 -- 링크 「x<LF>」 아래 경로가 여기서만 통과했고(fail-open) 실제 디렉터리 「data<LF>」는
+# 여기서만 막혔다. 제출은 제어 문자를 unsafe_path 로 거부한다(domain.validate_relative_path) -- 이 검사는 그 전의 행·변조 행 몫.
+# dms_nl(줄바꿈 한 글자)은 스크립트를 한 줄로 두려고 printf 로 만든다(명령 치환이 끝 줄바꿈을 지우므로 x 를 붙였다 뗀다). 만들기에
+# 실패해 비면 패턴이 「**」라 모든 경로가 막힌다(fail-closed). rm 의 _RM_CONTAINMENT_CHECK 도 이 변수를 쓴다.
+_PATH_CONTAINED_FN = (
+    "dms_nl=$(printf '\\nx'); dms_nl=${dms_nl%x}; "
+    'dms_path_contained() { '
+    'dms_p=$1; dms_r=$2; dms_rb=${dms_r%/}; '
+    '[ -n "$dms_r" ] || return 1; '
+    'case "$dms_p" in */|*/.|*/..|*//*|*/./*|*/../*|*"$dms_nl"*) return 1;; esac; '
+    'case "$dms_p" in "$dms_rb"|"$dms_rb"/*) ;; *) return 1;; esac; '
+    'dms_real_root=$(realpath -e -- "$dms_r") || return 1; '
+    'dms_q=$dms_p; '
+    'while [ "$dms_q" != "$dms_rb" ] && [ ! -e "$dms_q" ] && [ ! -L "$dms_q" ]; do dms_q=$(dirname -- "$dms_q"); done; '
+    'if [ "$dms_q" = "$dms_rb" ]; then dms_want=$dms_real_root; '
+    'else dms_want=${dms_real_root%/}/${dms_q#"$dms_rb"/}; fi; '
+    'dms_real_q=$(realpath -e -- "$dms_q") || return 1; '
+    '[ "$dms_real_q" = "$dms_want" ]; }; ')
 
-
-# PV 주소 봉쇄(2026-10-26 보안 리뷰 — dms-k8s 의 「모든 잡 root + namespace 단위 권한」): $1 = 경로, $2 = 그 쪽 PV 루트 절대경로
-# (글자 경계), $3 = 그 쪽 스토리지 managed_root(심링크 검사의 **기준점** — stepper 가 경로와 PV 루트를 조합한 바로 그 값).
-# 통과 조건: (a) 경로가 글자로 PV 루트이거나 그 아래, (b) managed_root 부터 경로까지 **어느 성분도 심링크가 아니다** — 경로가
-# 있으면 realpath(경로) == realpath(managed_root) + 글자 그대로의 상대경로(마지막 성분이 링크여도 막는다: dsync 소스·dscan 대상이
-# 링크면 도구가 따라가고, 목적지가 링크면 그 너머에 쓴다), 없으면(sync 목적지가 아직 없음) 부모로 같은 판정. 기준점이 PV 루트가
-# 아니라 managed_root 인 이유(같은 날 2차 보안 리뷰): PV 루트를 기준으로 realpath 를 맞추면 managed_root 와 PV 루트 **사이**의
-# 성분(PV 루트 자신 포함)이 링크여도 양쪽이 같이 따라가 통과한다 — 파드가 PV 루트의 부모에 쓸 수 있는 CSI 에서 `{vol}-data` 를
-# 남의 PV 로 가는 링크로 바꾸면 그대로 넘어갔다. 왜 막나: 모든 잡이 root 라 커널 DAC 가 없고, 사용자 파드가 자기 PV 안에 남의 PV 를
-# 가리키는 링크(../../pvc-b/…)를 심으면 PV A 권한만으로 PV B 를 읽거나 덮어쓸 수 있었다. 트리 **안쪽**의 링크는 상관없다(dsync 는
-# 링크를 링크로 복사, dscan 은 lstat). managed_root 자신·그 위가 링크인 것은 괜찮다(양쪽을 같은 realpath 로 본다). 빈 값·「/」「.」
-# 「..」로 끝나는 경로는 막는다(fail-closed). 같은 규칙의 러너 재확인: dms_job_runner.contain.pv_path_redirected(dsync·dscan 은
-# 런처, nsync 는 역할별 rank — tests/test_pv_containment_sh.py 가 같은 트리로 대조). PV 가 아닌 잡은 이 함수를 싣지 않는다(매니페스트가
-# 이 기능 이전과 바이트 단위로 같다).
-_PV_CONTAIN_FN = (
-    'dms_contain() { '
-    'case "$1" in */|*/.|*/..) ' + _RM_TARGET_REDIRECTED + ';; esac; '
-    '[ -n "$2" ] && [ -n "$3" ] || { ' + _RM_TARGET_REDIRECTED + '; }; '
-    'case "$1" in "$2"|"${2%/}"|"${2%/}"/*) ;; *) ' + _RM_TARGET_REDIRECTED + ';; esac; '
-    'case "$1" in "$3"|"${3%/}") rel=;; "${3%/}"/*) rel=${1#"${3%/}"/};; *) ' + _RM_TARGET_REDIRECTED + ';; esac; '
-    'real_root=$(realpath -e -- "$3") || { ' + _RM_TARGET_REDIRECTED + '; }; '
-    'if [ -z "$rel" ]; then want=$real_root; else want=${real_root%/}/$rel; fi; '
-    'if [ -e "$1" ] || [ -L "$1" ]; then '
-    'real=$(realpath -e -- "$1") || { ' + _RM_TARGET_REDIRECTED + '; }; '
-    '[ "$real" = "$want" ] || { ' + _RM_TARGET_REDIRECTED + '; }; '
-    'else '
-    'real=$(realpath -e -- "$(dirname -- "$1")") || { ' + _RM_TARGET_REDIRECTED + '; }; '
-    '[ "$real" = "$(dirname -- "$want")" ] || { ' + _RM_TARGET_REDIRECTED + '; }; '
-    'fi; }; ')
-
-# PV 주소 rm 의 글자 경계: $1 = 대상, $2 = PV 루트 — 대상이 PV 루트 **아래**여야 한다(PV 루트 자신은 제출이 pv_root_rm_forbidden
-# 으로 막는다). 심링크 검사는 기존 rm 봉쇄(_RM_CONTAINMENT_CHECK, 기준 managed_root — 마지막 성분 링크는 drm 이 링크만 지우므로
-# 허용)가 그대로 맡는다. 빈 PV 루트는 막는다("${2%/}"/* 가 「/*」가 되어 모든 절대경로에 맞지 않게).
+# PV 주소 쪽의 글자 경계(2026-10-26): dms_within PATH PV루트 는 PATH 가 글자로 PV 루트 자신이거나 그 아래일 때만 참. 빈 PV 루트는
+# 거짓(stepper._pv_containment 가 블록 root 가 이상하면 빈 값으로 싣는다 -- "${2%/}"/* 가 「/*」가 되어 모든 절대경로에 맞지 않게).
+# rm 은 대상의 **상위**에 건다(= 대상이 PV 루트 **아래** -- PV 루트 자신은 제출이 pv_root_rm_forbidden 으로 먼저 막는다).
 _PV_WITHIN_FN = (
     'dms_within() { '
-    '[ -n "$2" ] || { ' + _RM_TARGET_REDIRECTED + '; }; '
-    'case "$1" in "${2%/}"/*) ;; *) ' + _RM_TARGET_REDIRECTED + ';; esac; }; ')
+    '[ -n "$2" ] || return 1; '
+    'case "$1" in "$2"|"${2%/}"|"${2%/}"/*) return 0;; esac; return 1; }; ')
+
+# rm 대상($1, $R = managed_root, $parent = dirname "$1" -- 부모 쓰기 검사가 먼저 만든다). 봉쇄는 대상의 **상위 경로**에
+# dms_path_contained 를 쓴다: 대상 자신(끝 성분)은 링크여도 된다 -- drm 은 대상을 lstat 해 링크 자체만 지우고, 걷는 동안에도 링크를
+# 따라가지 않는다(2026-10-21 d183 실증; 2026-10-28 사용자 결정 「rm 끝 링크 허용 유지」 -- dms-ssc d191 은 끝 링크도 거부한다).
+# 중간 성분 링크는 막는다(커널이 따라간다). 끝이 「/」「.」「..」거나 「//」「/./」「/../」가 낀 대상(끝 링크를 따라가게 되거나 상위를
+# 지우게 된다), 줄바꿈이 든 대상($parent=$(dirname …) 가 끝 줄바꿈을 지운다 -- _PATH_CONTAINED_FN 주석; 대상 전체를 본다), managed_root
+# 자신(stepper 는 그 아래만 조합한다 -- 변조 행)은 막는다. 러너 재확인: dms_job_runner.contain.rm_target_redirected(같은 규칙 --
+# drm 직전, env DMS_JR_RM_ROOT).
+_RM_TARGET_REDIRECTED = 'echo DMS_PREFLIGHT_REASON=target_path_redirected; exit 1'
+_RM_CONTAINMENT_CHECK = (
+    'case "$1" in */|*/.|*/..|*//*|*/./*|*/../*|*"$dms_nl"*) ' + _RM_TARGET_REDIRECTED + ';; esac; '
+    'case "$1" in "$R"|"${R%/}") ' + _RM_TARGET_REDIRECTED + ';; esac; '
+    'dms_path_contained "$parent" "$R" || { ' + _RM_TARGET_REDIRECTED + '; }; ')
+
+
+def _contain_fns(*bounds) -> str:
+    """봉쇄 함수 정의 -- 글자 경계(dms_within)는 PV 주소 쪽(bound 가 None 이 아님)이 있을 때만 싣는다."""
+    return _PATH_CONTAINED_FN + ("" if all(b is None for b in bounds) else _PV_WITHIN_FN)
+
+
+def _contain_check(path_var, root_var, bound_var, reason) -> str:
+    """한 쪽의 봉쇄 조각: dms_path_contained(기준 managed_root) + PV 주소 쪽이면 dms_within(PV 루트). 인자는 셸 **변수 이름**
+    (상수)과 사유 코드뿐이다 -- 경로 값은 positional 로만 들어온다(셸 인젝션 차단 관례)."""
+    fail = '{ echo DMS_PREFLIGHT_REASON=' + reason + '; exit 1; }; '
+    check = 'dms_path_contained "$' + path_var + '" "$' + root_var + '" || ' + fail
+    if bound_var is not None:
+        check += 'dms_within "$' + path_var + '" "$' + bound_var + '" || ' + fail
+    return check
 
 
 # 목적지 PV 루트의 소유자 측정(2026-10-26 — 결과 소유를 PV 루트 소유자로 고른 운영자 옵션 "pv_root"·규칙 이전 옛 행만,
-# pv_owner_measured; 기본 규칙 "storage" 는 재지 않는다): $1 = PV 루트. 봉쇄(dms_contain)가
+# pv_owner_measured; 기본 규칙 "storage" 는 재지 않는다): $1 = PV 루트. 봉쇄(dms_path_contained·dms_within)가
 # 경로 사슬에 링크가 없음을 확인한 **뒤에** 부른다. PV 루트가 링크가 아닌 디렉터리여야 하고(아니면 pv_owner_unknown — 모름을
 # 소스 소유 보존으로 접지 않는다), stat 은 GNU 기본이 lstat 이다. 마커 한 줄을 stepper 가 parse_pv_owner 로 읽어 잡에 기록한다.
 _PV_OWNER_FN = (
@@ -569,29 +588,53 @@ def parse_pv_owner(entries):
     return found[0]
 
 
-def contain_entries(spec, sides) -> list:
-    """PV 주소 쪽의 [쪽, 경로, PV 루트, 기준 managed_root] — stepper 가 paths["contain"] = {쪽: {"root", "anchor"}} 로 싣는다.
-    키가 없으면 [](PV 가 아닌 잡). 값이 문자열이 아니면 빈 값으로 실어 봉쇄가 막게 한다(fail-closed — 빌더는 입력을 믿지
-    않는다). 러너 env DMS_JR_CONTAIN 도 이 모양 그대로다(dms_job_runner.contain.parse_entries)."""
+def _sync_roots(spec):
+    """sync spec 의 (source_root, destination_root) -- stepper._build_spec 이 경로를 조합한 바로 그 managed_root 값(경로 봉쇄의
+    기준, 2026-10-28 PV·직접 경로 공통). 없거나 빈 값이면 ValueError -- 봉쇄 검사 없이 sync 를 내보내지 않는다(어댑터가
+    submit_failed 로 접는다, fail-closed). 빌더는 입력을 믿지 않는다."""
     paths = spec.paths or {}
-    contain = paths.get("contain")
-    if not isinstance(contain, dict):
-        return []
+    roots = (paths.get("source_root"), paths.get("destination_root"))
+    if not all(isinstance(r, str) and r != "" for r in roots):
+        raise ValueError("sync spec without source_root/destination_root -- refusing to build an uncontained sync")
+    return roots
+
+
+def _pv_bound(spec, side):
+    """PV 주소 쪽이면 그 PV 루트 절대경로(문자열이 아니면 "" -- 봉쇄가 막는다), 아니면 None. stepper._pv_containment 가
+    paths["contain"] = {쪽: {"root": PV 루트}} 로 싣는다(PV 주소인 쪽만)."""
+    contain = (spec.paths or {}).get("contain")
+    if not isinstance(contain, dict) or side not in contain:
+        return None
+    c = contain[side] if isinstance(contain[side], dict) else {}
+    return c.get("root") if isinstance(c.get("root"), str) else ""
+
+
+def contain_entries(spec, sides) -> list:
+    """봉쇄할 쪽의 [쪽, 경로, 경계, 기준 managed_root] -- 러너 env DMS_JR_CONTAIN 의 모양 그대로다(dms_job_runner.contain.
+    parse_entries·entry_redirected). sync 는 두 쪽 **늘**(2026-10-28 통일 -- 직접 경로 쪽은 경계 = 기준이라 글자 경계가 봉쇄에
+    포함된다; 기준이 없으면 _sync_roots 가 ValueError), scan·rm 은 PV 주소 쪽만(직접 경로 scan 은 봉쇄 대상이 아니다 -- 특권 운영자
+    전용·읽기만, rm 은 env DMS_JR_RM_ROOT 로 따로 본다). 값이 문자열이 아니면 빈 값으로 실어 봉쇄가 막게 한다(fail-closed).
+    옛 러너(2026-10-28 전 잡 이미지)도 같은 4칸 모양을 PV 전용 규칙으로 읽는다 -- 경계 = 기준인 직접 경로 쪽은 그 규칙에서도
+    같은 뜻(managed_root 아래·링크 없음, 없는 끝은 부모 하나만이라 더 좁다)이라 배포 순서와 무관하게 열리지 않는다."""
+    paths = spec.paths or {}
+    if spec.operation == "sync":
+        anchors = dict(zip(("source", "destination"), _sync_roots(spec)))
+    else:
+        anchors = {"target": paths.get("managed_root")}
     out = []
     for side in sides:
-        if side not in contain:
+        bound = _pv_bound(spec, side)
+        if bound is None and spec.operation != "sync":
             continue
-        c = contain[side] if isinstance(contain[side], dict) else {}
+        anchor = anchors.get(side) if isinstance(anchors.get(side), str) else ""
         path = paths.get(side)
-        out.append([side, path if isinstance(path, str) else "",
-                    c.get("root") if isinstance(c.get("root"), str) else "",
-                    c.get("anchor") if isinstance(c.get("anchor"), str) else ""])
+        out.append([side, path if isinstance(path, str) else "", anchor if bound is None else bound, anchor])
     return out
 
 
 def _with_checks(script: str, args: list, fn: str, calls: list) -> tuple:
-    """기존 preflight 스크립트에 봉쇄 검사를 덧붙인다 — 함수 정의는 맨 앞(set -e 뒤), 호출은 마지막 OK 바로 앞(기존 사유가 먼저:
-    소스 읽기·목적지 종류·부모 쓰기 실패는 그 사유로 말한다). calls = 호출마다의 인자 목록(전부 positional). 없으면 그대로."""
+    """기존 preflight 스크립트에 검사를 덧붙인다(지금은 PV 루트 소유자 측정만 -- _with_pv_owner) — 함수 정의는 맨 앞(set -e 뒤),
+    호출은 마지막 OK 바로 앞(봉쇄·기존 사유가 먼저). calls = 호출마다의 인자 목록(전부 positional). 없으면 그대로."""
     if not calls:
         return script, args
     name = fn.split("(", 1)[0]
@@ -607,24 +650,18 @@ def _with_checks(script: str, args: list, fn: str, calls: list) -> tuple:
     return head + fn + body + text + "echo DMS_PREFLIGHT_OK", args
 
 
-def _with_containment(script: str, args: list, entries: list) -> tuple:
-    return _with_checks(script, args, _PV_CONTAIN_FN, [[path, root, anchor] for _, path, root, anchor in entries])
-
-
 def _with_pv_owner(spec, script: str, args: list) -> tuple:
     """결과 소유를 잰 PV 루트 소유자로 맞추는 잡(pv_owner_measured — 운영자 옵션 "pv_root"·규칙 이전 옛 행)의 preflight 에
-    목적지 PV 루트 소유자 측정을 덧붙인다(_PV_OWNER_FN — 봉쇄 호출 **뒤**). 그 밖의 잡(기본 규칙 "storage" 포함 — 값이 요청에
-    기록돼 있다)은 그대로(바이트 동일, 봉쇄만)."""
+    목적지 PV 루트 소유자 측정을 덧붙인다(_PV_OWNER_FN — 봉쇄 **뒤**, 마지막 OK 바로 앞). 그 밖의 잡(기본 규칙 "storage" 포함 —
+    값이 요청에 기록돼 있다)은 그대로(봉쇄만)."""
     if not pv_owner_measured(spec):
         return script, args
-    entries = contain_entries(spec, ("destination",))
-    root = entries[0][2] if entries else ""
-    return _with_checks(script, args, _PV_OWNER_FN, [[root]])
+    return _with_checks(script, args, _PV_OWNER_FN, [[_pv_bound(spec, "destination") or ""]])
 
 
 def _rm_managed_root(spec) -> str:
     """rm spec 의 managed_root(stepper._build_spec 이 paths 에 싣는다) — PV 주소 rm 도 같은 기준점이다(PV 루트로 좁히면
-    managed_root 와 PV 루트 사이의 링크를 놓친다, _PV_CONTAIN_FN 주석). 없거나 빈 값이면 ValueError -- 봉쇄 검사 없이 root
+    managed_root 와 PV 루트 사이의 링크를 놓친다, _PATH_CONTAINED_FN 주석). 없거나 빈 값이면 ValueError -- 봉쇄 검사 없이 root
     drm 을 내보내지 않는다(어댑터가 submit_failed 로 접는다, fail-closed). 빌더는 입력을 믿지 않는다."""
     root = (spec.paths or {}).get("managed_root")
     if not isinstance(root, str) or root == "":
@@ -667,42 +704,64 @@ def _preflight_script(spec, *, role=None):
     0건 Succeeded 로 끝난다(2026-09-30 d139 실증에서 잡음 -- 그 판에서 한때 건너뛰었다).
     실행 모드("user"/"root")는 경로와 같이 positional 로 넘긴다(셸 인젝션 차단 관례).
 
-    rm(2026-10-21 리뷰): 부모 쓰기 다음에 대상 봉쇄(_RM_CONTAINMENT_CHECK -- 상위 경로에 심링크 성분 없음)를 본다.
+    경로 봉쇄(_PATH_CONTAINED_FN, 2026-10-28 통일): sync 는 각 쪽의 **첫** 검사로 본다(PV·직접 경로 공통 -- PV 주소 쪽은 PV 루트
+    글자 경계 dms_within 이 붙는다; 사유 source_path_redirected·destination_path_redirected). 링크를 따라간 읽기·쓰기 검사가 먼저면
+    「읽을 수 없음」·「쓸 수 없음」으로 진짜 원인(다른 곳을 가리킨다)이 가려진다. 없는 경로는 봉쇄를 통과하고(가장 깊은 상위를
+    본다) 뒤의 종전 검사가 사유를 낸다(오타를 「다른 곳」으로 말하지 않는다). nsync 의 역할별 preflight 는 자기 쪽만 본다.
+    PV 주소 scan 도 첫 검사로 같은 봉쇄(target_path_redirected), 직접 경로 scan 은 봉쇄 밖이다(contain_entries docstring).
+
+    rm(2026-10-21 리뷰): 부모 쓰기 다음에 대상 봉쇄(_RM_CONTAINMENT_CHECK -- 대상의 상위 경로에 같은 규칙, 대상 자신은 링크여도
+    된다; PV 주소면 상위가 PV 루트 안)를 본다.
     root 든 아니든, 단건이든 배치 자식이든, preflight·exec_preflight 모두 이 한 스크립트다(phase 무관) -- root 는 `test -w`
     가 늘 참이라 봉쇄가 유일한 검사다. 부모 쓰기가 먼저인 이유: 부모가 없으면 realpath -e 도 실패하는데, 그 경우의 사유는
-    종전대로 parent_not_writable 이어야 한다(대상 오타를 「다른 곳을 가리킨다」로 말하지 않는다). managed_root 는 경로처럼
-    positional 로 넘긴다($2)."""
+    종전대로 parent_not_writable 이어야 한다(대상 오타를 「다른 곳을 가리킨다」로 말하지 않는다). managed_root·PV 루트는 경로처럼
+    positional 로 넘긴다."""
     ap = _abs_paths(spec)
     mode = "root" if (spec.identity or {}).get("privileged") else "user"
     if spec.operation == "sync":
-        # PV 주소 쪽은 기존 검사 뒤에 봉쇄(_PV_CONTAIN_FN)를 덧붙인다 — nsync 의 역할별 preflight 는 자기 쪽만 본다.
+        src_root, dst_root = _sync_roots(spec)
+        src_pv, dst_pv = _pv_bound(spec, "source"), _pv_bound(spec, "destination")
+        src_check = _contain_check("S", "SR", None if src_pv is None else "SP", "source_path_redirected")
+        dst_check = _contain_check("D", "DR", None if dst_pv is None else "DP", "destination_path_redirected")
+        src_read = 'test -r "$S" || { echo DMS_PREFLIGHT_REASON=source_not_readable; exit 1; }; '
         if role == "source":
-            script = ('set -e; '
-                      'test -r "$1" || { echo DMS_PREFLIGHT_REASON=source_not_readable; exit 1; }; '
-                      'echo DMS_PREFLIGHT_OK')
-            return _with_containment(script, [ap["source"]], contain_entries(spec, ("source",)))
+            args = [ap["source"], src_root] + ([] if src_pv is None else [src_pv])
+            script = ('set -e; S="$1"; SR="$2"; ' + ('' if src_pv is None else 'SP="$3"; ') + _contain_fns(src_pv)
+                      + src_check + src_read + 'echo DMS_PREFLIGHT_OK')
+            return script, args
         if role == "destination":
-            script = ('set -e; D="$1"; M="$2"; ' + _DEST_TYPE_CHECK + _DEST_CHECK
-                      + 'echo DMS_PREFLIGHT_OK')
-            return _with_pv_owner(spec, *_with_containment(script, [ap["destination"], mode],
-                                                           contain_entries(spec, ("destination",))))
-        script = ('set -e; D="$2"; M="$3"; '
-                  'test -r "$1" || { echo DMS_PREFLIGHT_REASON=source_not_readable; exit 1; }; '
-                  + _DEST_TYPE_CHECK + _DEST_CHECK + 'echo DMS_PREFLIGHT_OK')
-        return _with_pv_owner(spec, *_with_containment(script, [ap["source"], ap["destination"], mode],
-                                                       contain_entries(spec, ("source", "destination"))))
+            args = [ap["destination"], mode, dst_root] + ([] if dst_pv is None else [dst_pv])
+            script = ('set -e; D="$1"; M="$2"; DR="$3"; ' + ('' if dst_pv is None else 'DP="$4"; ') + _contain_fns(dst_pv)
+                      + dst_check + _DEST_TYPE_CHECK + _DEST_CHECK + 'echo DMS_PREFLIGHT_OK')
+            return _with_pv_owner(spec, script, args)
+        args = [ap["source"], ap["destination"], mode, src_root, dst_root]
+        head = 'set -e; S="$1"; D="$2"; M="$3"; SR="$4"; DR="$5"; '
+        for var, bound in (("SP", src_pv), ("DP", dst_pv)):
+            if bound is not None:
+                args.append(bound)
+                head += f'{var}="${len(args)}"; '
+        script = (head + _contain_fns(src_pv, dst_pv) + src_check + src_read + dst_check + _DEST_TYPE_CHECK + _DEST_CHECK
+                  + 'echo DMS_PREFLIGHT_OK')
+        return _with_pv_owner(spec, script, args)
     if spec.operation == "rm":
-        script = ('set -e; R="$2"; '
-                  'parent=$(dirname "$1"); '
+        pv = _pv_bound(spec, "target")
+        args = [ap["target"], _rm_managed_root(spec)] + ([] if pv is None else [pv])
+        # PV 주소 rm: 대상의 상위가 PV 루트 자신이거나 그 아래 = 대상이 PV 루트 **아래**(글자 경계, _PV_WITHIN_FN 주석).
+        within = '' if pv is None else 'dms_within "$parent" "$P" || { ' + _RM_TARGET_REDIRECTED + '; }; '
+        script = ('set -e; R="$2"; ' + ('' if pv is None else 'P="$3"; ')
+                  + 'parent=$(dirname "$1"); '
                   'test -w "$parent" || { echo DMS_PREFLIGHT_REASON=parent_not_writable; exit 1; }; '
-                  + _RM_CONTAINMENT_CHECK + 'echo DMS_PREFLIGHT_OK')
-        # PV 주소 rm: 심링크 검사는 위 rm 봉쇄(기준 managed_root)가 그대로 맡고, 대상이 PV 루트 아래라는 글자 경계만 더한다.
-        return _with_checks(script, [ap["target"], _rm_managed_root(spec)], _PV_WITHIN_FN,
-                            [[path, root] for _, path, root, _ in contain_entries(spec, ("target",))])
-    script = ('set -e; '
-              'test -r "$1" || { echo DMS_PREFLIGHT_REASON=target_not_readable; exit 1; }; '
-              'echo DMS_PREFLIGHT_OK')
-    return _with_containment(script, [ap["target"]], contain_entries(spec, ("target",)))
+                  + _contain_fns(pv) + _RM_CONTAINMENT_CHECK + within + 'echo DMS_PREFLIGHT_OK')
+        return script, args
+    target_read = 'test -r "$1" || { echo DMS_PREFLIGHT_REASON=target_not_readable; exit 1; }; '
+    pv = _pv_bound(spec, "target")
+    if pv is None:
+        # 직접 경로 scan -- 봉쇄 밖(특권 운영자 전용·읽기만, contain_entries docstring). 이 기능 이전과 같은 스크립트.
+        return 'set -e; ' + target_read + 'echo DMS_PREFLIGHT_OK', [ap["target"]]
+    root = (spec.paths or {}).get("managed_root")
+    script = ('set -e; T="$1"; R="$2"; P="$3"; ' + _contain_fns(pv) + _contain_check("T", "R", "P", "target_path_redirected")
+              + target_read + 'echo DMS_PREFLIGHT_OK')
+    return script, [ap["target"], root if isinstance(root, str) else "", pv]
 
 
 PREFLIGHT_REASON_MARKER = "DMS_PREFLIGHT_REASON="
@@ -713,7 +772,9 @@ PREFLIGHT_REASON_MARKER = "DMS_PREFLIGHT_REASON="
 # 막는다(계약 테스트가 스크립트 실물에서 마커를 추출해 이 집합과 대조한다). 여기에
 # 코드를 추가하면 frontend/src/lib/reasonCodes.json 과 api.ts REASON_MESSAGES 도
 # 같이 갱신해야 한다(양방향 계약 테스트). 2026-10-21 rm 대상 봉쇄: target_path_redirected(_RM_CONTAINMENT_CHECK --
-# 같은 코드를 러너의 drm 직전 재확인도 낸다, EXECUTION_REASONS). 2026-10-26: LDAP 보조 그룹 조각이 내던
+# 같은 코드를 러너의 drm 직전 재확인도 낸다, EXECUTION_REASONS; PV scan 대상도 같은 코드). 2026-10-28 경로 봉쇄 통일:
+# sync 는 쪽별 source_path_redirected·destination_path_redirected(PV·직접 경로 공통 -- 그 전 PV sync 는 target 코드였다).
+# 2026-10-26: LDAP 보조 그룹 조각이 내던
 # identity_groups_not_applied·artifact_base_group_writable 은 스크립트에서 사라져 이 집합에서도 뺐다(계약 테스트가 스크립트
 # 실물과 대조한다 -- 사유 코드 목록·포탈 문구는 옛 행 표시용으로 남는다).
 PREFLIGHT_REASONS = frozenset({
@@ -722,7 +783,7 @@ PREFLIGHT_REASONS = frozenset({
     "destination_parent_not_writable", "destination_not_writable",
     "destination_not_owned", "parent_not_writable",
     "target_not_readable", "artifact_base_not_traversable",
-    "target_path_redirected"})
+    "target_path_redirected", "source_path_redirected", "destination_path_redirected"})
 
 
 # 실행·미리보기(mpirun 을 돌리는 launcher) 실패의 사유 마커(2026-10-02). 러너(dms_job_runner.runner)가 워커
@@ -736,8 +797,26 @@ PREFLIGHT_REASONS = frozenset({
 # 2026-10-21 rm 대상 봉쇄: target_path_redirected 는 러너가 drm(미리보기·실행) 직전에 preflight 와 같은 규칙으로 다시
 # 봐서 찍는다(runner.rm_target_redirected, env DMS_JR_RM_ROOT -- _launcher_env). exec_preflight 파드와 vcjob 은 다른
 # 파드라 그 사이(Volcano 대기 포함) 바뀐 심링크를 여기서 잡는다 -- 잡 이미지가 바뀐다.
+# 2026-10-28 경로 봉쇄 통일: source_path_redirected·destination_path_redirected 는 dsync 런처(mpirun 직전)·nsync rank(도구 exec
+# 직전)가 preflight 와 같은 규칙으로 다시 봐서 찍는다(dms_job_runner.contain, env DMS_JR_CONTAIN -- _launcher_env). 러너 상수
+# (contain.REASON_BY_SIDE)와 계약 테스트가 잇는다.
+# 2026-10-27 d192 도구 결과 사유(dms-k8s 이식 2026-10-28): 도구가 0 이 아닌 코드로 끝나면 **러너**가 도구 출력(summary v2 --
+# parsers.parse_tool_detail)에서 사유를 정해 launcher 로그에 찍는다(runner.TOOL_FAILURE_REASONS 와 같은 집합 -- 계약 테스트가
+# 잇는다). 미리보기·실행 실패 모두 _run_failure_reason 이 이 마커를 승격한다 -- 마커가 없으면 예전대로 execution_failed /
+# preview_failed. 미리보기(dry-run) 실패는 tool_aborted, 아니면 preview_scan_incomplete(nsync 스캔 오류만 -- dsync 는 walk
+# 오류가 종료 코드를 바꾸지 않는다)뿐이다: 나머지는 「반영·삭제했다」는 실행 문구라 아무것도 바뀌지 않은 미리보기엔 거짓이다.
+# 규칙의 순서·조건은 runner._derive_reason 이 정의한다(docs/ARCHITECTURE.md 「도구 결과」 불릿). 봉쇄 마커(6c·6d·7b)는 도구를
+# 띄우기 전이라 이 사유와 한 잡에 같이 나오지 않는다 -- 러너가 봉쇄로 끝내면 도구 꼬리도 찍지 않는다.
+TOOL_FAILURE_REASONS = frozenset({"tool_aborted", "destination_full", "destination_read_only", "sync_stopped_max_errors",
+                                  "sync_type_change_refused", "source_scan_incomplete", "sync_items_failed",
+                                  "rm_items_failed", "preview_scan_incomplete"})
 EXECUTION_REASON_MARKER = "DMS_EXEC_REASON="
-EXECUTION_REASONS = frozenset({"workers_unreachable", "target_path_redirected"})
+EXECUTION_REASONS = frozenset({"workers_unreachable", "target_path_redirected",
+                               "source_path_redirected", "destination_path_redirected"}) | TOOL_FAILURE_REASONS
+# 2026-10-28 전 잡 이미지의 러너는 sync 봉쇄에도 target_path_redirected 를 찍고 진단 줄 「DMS_JR_PV_PATH_REDIRECTED side='…'」를
+# 붙였다(그땐 PV 주소 쪽만 봤다). 배포를 건너 그 이미지로 도는 잡은 그 줄의 쪽으로 새 코드를 고른다(parse_execution_reason).
+_LEGACY_REDIRECT_SIDES = (("DMS_JR_PV_PATH_REDIRECTED side='source' ", "source_path_redirected"),
+                          ("DMS_JR_PV_PATH_REDIRECTED side='destination' ", "destination_path_redirected"))
 
 
 def _parse_marker(entries, marker, allowed):
@@ -755,10 +834,23 @@ def _parse_marker(entries, marker, allowed):
     return None
 
 
-def parse_execution_reason(entries):
+def parse_execution_reason(entries, *, operation=None):
     """launcher(와 실패 워커) 로그에서 실행 실패 사유를 뽑는다 -- 화이트리스트 밖이면 None
-    (parse_preflight_reason 과 같은 계약: entries = read_log 의 [(pod, log|None, waiting_reason)])."""
-    return _parse_marker(entries, EXECUTION_REASON_MARKER, EXECUTION_REASONS)
+    (parse_preflight_reason 과 같은 계약: entries = read_log 의 [(pod, log|None, waiting_reason)]).
+
+    operation == "sync" 인데 target_path_redirected 면 옛 잡 이미지의 봉쇄 마커다(_LEGACY_REDIRECT_SIDES) -- 진단 줄의 쪽이 있으면
+    source·destination 코드로, 없으면(쪽을 모름) 그대로 둔다(target 문구는 넓은 뜻이다). 쪽은 진단 줄의 **첫 칸**이고 값이 고정
+    집합이라 경로 글자로 바꿀 수 없다(러너가 repr 로 찍는다)."""
+    code = _parse_marker(entries, EXECUTION_REASON_MARKER, EXECUTION_REASONS)
+    if code != "target_path_redirected" or operation != "sync":
+        return code
+    for entry in entries or ():
+        for line in (entry[1] or "").split("\n"):
+            line = line.strip()
+            for prefix, mapped in _LEGACY_REDIRECT_SIDES:
+                if line.startswith(prefix):
+                    return mapped
+    return code
 
 
 def parse_preflight_reason(entries):

@@ -709,3 +709,58 @@ test("만료 전 잡은 만료 문구가 없고 빈 단계는 여전히 「출�
   expect((await screen.findAllByText("출력 없음")).length).toBeGreaterThan(0);
   expect(screen.queryByText(/결과 파일 만료됨/)).toBeNull();
 });
+
+// d192: 결과의 「실패 항목」에서 그 단계 stdout.log 를 연다 -- 출력 목록에 그 파일이 있을 때만(없는 파일을 가리키는 버튼 금지).
+const DRM_PARTIAL = { detail_version: 2, returncode: 1, files: 4, bytes: null, tool: "drm", removed: 4, remove_failed: 5,
+  failure_samples: [{ op: "unlink", path: "/t/root/r1", errno: 13 }], reason: "rm_items_failed" };
+const at = (s: number) => `2026-10-08T03:15:${String(s).padStart(2, "0")}Z`;
+const RM_FAIL_TR = [
+  { from_state: null, to_state: "Pending", at: at(0) }, { from_state: "Pending", to_state: "Preflight", at: at(1) },
+  { from_state: "Preflight", to_state: "PreviewRunning", at: at(3) }, { from_state: "PreviewRunning", to_state: "ConfirmPending", at: at(9) },
+  { from_state: "ConfirmPending", to_state: "Executing", at: at(10) }, { from_state: "Executing", to_state: "Executing", at: at(12) },
+  { from_state: "Executing", to_state: "Failed", at: at(20) },
+];
+
+test("d192 실패 항목의 「stdout.log 열기」: 실행 stdout.log 가 목록에 있을 때만, 누르면 그 칩이 눌린 상태", async () => {
+  server.use(
+    http.get("/api/user/jobs/j1/artifacts", () => HttpResponse.json({ entries: [
+      { phase: "execution", name: "stderr.log", size: 40, modified_at: 1 }], truncated: false })),
+    http.get("/api/user/jobs/j1/logs", () => HttpResponse.json({ phase: "execution", ref: "vcjob/j1", source: "archived", entries: [] })),
+  );
+  const view = renderStages({ operation: "rm", tool: "drm", state: "Failed", reason_code: "rm_items_failed", phase_refs: ALL_REFS,
+    transitions: RM_FAIL_TR, result_summary: DRM_PARTIAL });
+  const exec = screen.getByRole("region", { name: "실행" });
+  await within(exec).findByRole("button", { name: "execution/stderr.log" });
+  const box = within(exec).getByRole("region", { name: "실패 항목" });
+  expect(within(box).queryByRole("button", { name: "stdout.log 열기" })).toBeNull();
+  view.unmount();
+
+  server.use(http.get("/api/user/jobs/j1/artifacts", () => HttpResponse.json({ entries: [
+    { phase: "execution", name: "stdout.log", size: 1839, modified_at: 1 }], truncated: false })));
+  server.use(http.get("/api/user/jobs/j1/artifacts/:phase/:name", () => HttpResponse.json({ phase: "execution", name: "stdout.log",
+    size: 1839, truncated: false, content: "ERROR: Remove failed for 5 of 9 items\n" })));
+  renderStages({ operation: "rm", tool: "drm", state: "Failed", reason_code: "rm_items_failed", phase_refs: ALL_REFS,
+    transitions: RM_FAIL_TR, result_summary: DRM_PARTIAL });
+  const exec2 = screen.getByRole("region", { name: "실행" });
+  const btn = await within(within(exec2).getByRole("region", { name: "실패 항목" })).findByRole("button", { name: "stdout.log 열기" });
+  await userEvent.click(btn);
+  expect(await within(exec2).findByRole("button", { name: "execution/stdout.log", pressed: true })).toBeInTheDocument();
+});
+
+test("k8s 결과 파일 만료 + 실패 항목: 「stdout.log 열기」 없이 만료 사실(목록이 아직 파일을 싣고 있어도 잡 행 만료가 이긴다)", async () => {
+  // 폴링 사이: 목록 응답은 만료 전 것(stdout.log 있음)인데 잡 행에 만료 표시가 붙었다 -- 버튼을 누르면 410 artifact_expired 로
+  // 끝난다. 그 길을 만들지 않는다.
+  server.use(
+    http.get("/api/user/jobs/j1/artifacts", () => HttpResponse.json({ entries: [
+      { phase: "execution", name: "stdout.log", size: 1839, modified_at: 1 }], truncated: false })),
+    http.get("/api/user/jobs/j1/logs", () => HttpResponse.json({ phase: "execution", ref: "vcjob/j1", source: "archived", entries: [] })),
+  );
+  renderStages({ operation: "rm", tool: "drm", state: "Failed", reason_code: "rm_items_failed", phase_refs: ALL_REFS,
+    transitions: RM_FAIL_TR, result_summary: DRM_PARTIAL, artifacts_expired_at: "2030-12-03T15:30:00Z" });
+  const exec = screen.getByRole("region", { name: "실행" });
+  const box = within(exec).getByRole("region", { name: "실패 항목" });
+  expect(within(box).getByText(/전체 목록과 원문이 있던 실행 출력\(stdout\.log\)은 보존 기간이 지나 만료됐습니다/))
+    .toBeInTheDocument();
+  await within(exec).findByRole("button", { name: "execution/stdout.log" });
+  expect(within(box).queryByRole("button", { name: "stdout.log 열기" })).toBeNull();
+});

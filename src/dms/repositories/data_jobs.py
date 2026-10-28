@@ -622,7 +622,7 @@ class DataJobsRepository:
             "UPDATE data_jobs SET confirmed_fingerprint = :f, updated_at = :now WHERE job_id = :j",
             {"f": fingerprint, "now": utc_now_iso(), "j": job_id})
 
-    def set_artifact(self, job_id, *, artifact_uri, result_summary):
+    def set_artifact(self, job_id, *, artifact_uri, result_summary, promote_counts=True):
         # files/bytes 승격(설계 §2.3): summary에 키가 있으면 typed 컬럼에 채운다.
         # 슬라이스 15부터 runner가 mpifileutils 출력을 파싱해 이 키를 실제로 채운다.
         # files는 "항목(items)" 의미로 통일했고(dsync/nsync Items, drm Removed N
@@ -631,8 +631,13 @@ class DataJobsRepository:
         # (실 사용량 -- summary.total_bytes, 구형 리포트는 시간 히스토그램 합, parsers.parse_scan_counts), rm 은
         # 도구가 미보고라 NULL 이다. 그래서 처리량 지표(metrics job_stats)는
         # scan 을 SUM 에서 제외한다 -- 파싱 실패는 여전히 fail-soft NULL.
+        #
+        # promote_counts=False(2026-10-27 d192): summary 는 남기되(화면 표시) 두 컬럼은 NULL 로 둔다. 실패·시간초과한
+        # **미리보기**가 쓴다 -- 미리보기 files 는 "할 예정"(nsync 계획 합·dsync 소스 전체·drm 대상)이라 컬럼에 들어가면
+        # 실제로 한 일처럼 지표(metrics sync_items_total 등 -- 이제 실패·중단 잡도 합한다)에 섞인다. 두 컬럼은 실행·scan
+        # 결과만 담는다는 것이 이 키워드의 계약이다.
         files_count = bytes_count = None
-        if isinstance(result_summary, dict):
+        if promote_counts and isinstance(result_summary, dict):
             files_count = _as_count(result_summary.get("files"))
             bytes_count = _as_count(result_summary.get("bytes"))
         self._db.execute(

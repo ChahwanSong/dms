@@ -132,7 +132,7 @@ def test_worker_replicas_follow_candidates():
     spec = _spec(operation="sync", tool="dsync",
                  candidates={"primary": ["dms-w1", "dms-w2", "dms-w3"]},
                  paths={"source": "s", "source_storage": "src",
-                        "destination": "d", "destination_storage": "dst"})
+                        "destination": "d", "destination_storage": "dst", "source_root": "/", "destination_root": "/"})
     m = build_volcano_job(spec, job_image="i", namespace="dms", volumes=_VOL)
     worker = next(t for t in m["spec"]["tasks"] if t["name"] == "worker")
     assert worker["replicas"] == 3 and m["spec"]["minAvailable"] == 4
@@ -166,7 +166,7 @@ def test_nsync_three_tasks():
                              "destination": ["dms-w4"]},
                  paths={"source": "/cephfs-third/a", "source_storage": "cephfs-third",
                         "destination": "/cephfs-secondary/b",
-                        "destination_storage": "cephfs-secondary"})
+                        "destination_storage": "cephfs-secondary", "source_root": "/", "destination_root": "/"})
     m = build_volcano_job(spec, job_image="i", namespace="dms", volumes=_VOL,
                           role_volumes=_NSYNC_ROLE_VOL)
     names = [t["name"] for t in m["spec"]["tasks"]]
@@ -195,7 +195,7 @@ def test_nsync_tasks_mount_only_their_own_storage():
     spec = _spec(operation="sync", tool="nsync",
                  candidates={"source": ["dms-w1"], "destination": ["dms-w4"]},
                  paths={"source": "/cephfs-third/a", "source_storage": "cephfs-third",
-                        "destination": "/cephfs-secondary/b", "destination_storage": "cephfs-secondary"})
+                        "destination": "/cephfs-secondary/b", "destination_storage": "cephfs-secondary", "source_root": "/", "destination_root": "/"})
     m = build_volcano_job(spec, job_image="i", namespace="dms", volumes=[base],
                           role_volumes={"source": [third, base], "destination": [secondary, base]})
     assert _task_host_paths(m, "launcher") == ({"/cephfs/dms/artifacts"}, {"/dms-artifact-base"})
@@ -211,7 +211,7 @@ def test_nsync_without_role_volumes_fails_closed(role_volumes):
     spec = _spec(operation="sync", tool="nsync",
                  candidates={"source": ["dms-w1"], "destination": ["dms-w4"]},
                  paths={"source": "/cephfs-third/a", "source_storage": "cephfs-third",
-                        "destination": "/cephfs-secondary/b", "destination_storage": "cephfs-secondary"})
+                        "destination": "/cephfs-secondary/b", "destination_storage": "cephfs-secondary", "source_root": "/", "destination_root": "/"})
     with pytest.raises(ValueError):
         build_volcano_job(spec, job_image="i", namespace="dms", volumes=_VOL, role_volumes=role_volumes)
 
@@ -254,7 +254,7 @@ def test_nsync_three_tasks_node_affinity():
                              "destination": ["dms-w4"]},
                  paths={"source": "/cephfs-third/a", "source_storage": "cephfs-third",
                         "destination": "/cephfs-secondary/b",
-                        "destination_storage": "cephfs-secondary"})
+                        "destination_storage": "cephfs-secondary", "source_root": "/", "destination_root": "/"})
     m = build_volcano_job(spec, job_image="i", namespace="dms", volumes=_VOL,
                           role_volumes=_NSYNC_ROLE_VOL)
     src = next(t for t in m["spec"]["tasks"] if t["name"] == "source-worker")
@@ -359,7 +359,7 @@ def test_nsync_worker_containers_have_identity_and_sshd_command():
                  candidates={"source": ["dms-w1", "dms-w2"], "destination": ["dms-w4"]},
                  paths={"source": "/cephfs-third/a", "source_storage": "cephfs-third",
                         "destination": "/cephfs-secondary/b",
-                        "destination_storage": "cephfs-secondary"})
+                        "destination_storage": "cephfs-secondary", "source_root": "/", "destination_root": "/"})
     m = build_volcano_job(spec, job_image="i", namespace="dms", volumes=_VOL,
                           role_volumes=_NSYNC_ROLE_VOL)
     for name in ("source-worker", "destination-worker"):
@@ -385,7 +385,7 @@ def test_colocated_worker_spreads_with_required_anti_affinity():
     spec = _spec(operation="sync", tool="dsync",
                  candidates={"primary": ["dms-w1", "dms-w2", "dms-w3"]},
                  paths={"source": "s", "source_storage": "src",
-                        "destination": "d", "destination_storage": "dst"})
+                        "destination": "d", "destination_storage": "dst", "source_root": "/", "destination_root": "/"})
     m = build_volcano_job(spec, job_image="i", namespace="dms", volumes=_VOL)
     worker = next(t for t in m["spec"]["tasks"] if t["name"] == "worker")
     labels = worker["template"]["metadata"]["labels"]
@@ -410,7 +410,7 @@ def test_nsync_workers_get_task_scoped_anti_affinity():
                              "destination": ["dms-w4"]},
                  paths={"source": "/cephfs-third/a", "source_storage": "cephfs-third",
                         "destination": "/cephfs-secondary/b",
-                        "destination_storage": "cephfs-secondary"})
+                        "destination_storage": "cephfs-secondary", "source_root": "/", "destination_root": "/"})
     m = build_volcano_job(spec, job_image="i", namespace="dms", volumes=_VOL,
                           role_volumes=_NSYNC_ROLE_VOL)
     for task_name in ("source-worker", "destination-worker"):
@@ -494,7 +494,7 @@ def _preflight_command(spec, role=None, node="dms-w1", volumes=_VOL):
 def _sync_spec(source, destination):
     return _spec(operation="sync", tool="dsync", phase="preflight",
                  paths={"source": source, "source_storage": "s1",
-                        "destination": destination, "destination_storage": "s2"})
+                        "destination": destination, "destination_storage": "s2", "source_root": "/", "destination_root": "/"})
 
 
 def _run_preflight(cmd):
@@ -600,7 +600,8 @@ def _emitted_markers():
     # 측정(pv_owner_unknown)이 붙는다(dsync 단일·nsync 목적지 역할). 기본 규칙 storage 는 재지 않는다(봉쇄만).
     pv_dest = _spec(operation="sync", tool="dsync", phase="preflight", identity={"uid": 0, "gid": 0, "privileged": True},
                     paths={"source": "/s", "source_storage": "s1", "destination": "/d/pv/out", "destination_storage": "s2",
-                           "contain": {"destination": {"root": "/d/pv", "anchor": "/d"}}},
+                           "source_root": "/", "destination_root": "/d",
+                           "contain": {"destination": {"root": "/d/pv"}}},
                     result_owner_rule="pv_root")
     specs += [(pv_dest, None), (pv_dest, "destination")]
     found = set()
@@ -623,7 +624,7 @@ def test_whitelist_matches_the_markers_the_scripts_actually_emit():
 _BASE_VOL = {"name": "dms-artifact-base", "hostPath": {"path": "/cephfs/dms/artifacts"},
              "mountPath": "/dms-artifact-base"}
 _NSYNC_PATHS = {"source": "/cephfs-third/a", "source_storage": "cephfs-third",
-                "destination": "/cephfs-secondary/b", "destination_storage": "cephfs-secondary"}
+                "destination": "/cephfs-secondary/b", "destination_storage": "cephfs-secondary", "source_root": "/", "destination_root": "/"}
 _ROOT_ALICE = {"uid": 0, "gid": 0, "username": "alice", "groups": [], "privileged": True}
 
 
@@ -680,7 +681,10 @@ def test_a_spec_with_a_supplementary_list_is_refused(gids):
 
 
 def test_worker_script_emits_no_exec_reason_marker():
-    # 워커 셸이 찍던 identity_groups_not_applied(보조 그룹 자기 검증)는 지웠다 -- 실행 사유 마커는 러너만 찍는다.
-    from dms.execution_manifests import EXECUTION_REASONS, _worker_command_script
+    # 워커 셸이 찍던 identity_groups_not_applied(보조 그룹 자기 검증)는 지웠다 -- 실행 사유 마커는 러너만 찍는다. 2026-10-28
+    # 경로 봉쇄 통일도 dms-ssc 의 워커 셸(sshd 앞) 재확인을 들이지 않는다 -- 런처(mpirun 직전)·nsync rank(도구 exec 직전)가 더 늦다.
+    # d192(dms-k8s 이식 2026-10-28)의 도구 결과 사유(TOOL_FAILURE_REASONS)도 러너(런처)가 도구 비0 종료 뒤 찍는다 -- 워커 셸 아님.
+    from dms.execution_manifests import EXECUTION_REASONS, TOOL_FAILURE_REASONS, _worker_command_script
     assert "DMS_EXEC_REASON=" not in _worker_command_script()
-    assert EXECUTION_REASONS == frozenset({"workers_unreachable", "target_path_redirected"})
+    assert EXECUTION_REASONS == frozenset({"workers_unreachable", "target_path_redirected",
+                                           "source_path_redirected", "destination_path_redirected"}) | TOOL_FAILURE_REASONS

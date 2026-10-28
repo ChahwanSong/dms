@@ -167,12 +167,12 @@ test("사용자 sync: namespace (StorageClass) → PV 이름 → PV 안 경로, 
   expect(await screen.findByText(/모든 작업은 root 로 실행됩니다/)).toBeInTheDocument();
   await pick("소스 namespace (StorageClass)", "소스 PV 이름", "team-a (tb-gpfs)", "models — 1Gi · Bound");
   await userEvent.type(screen.getByLabelText("소스 PV 안 경로"), "sample");
-  // 「실제 경로」 = 서버가 해석한 abs_root + 하위경로, 「n분 전 기준」 = 그 클러스터의 마지막 성공 동기화.
-  expect(screen.getByText(`실제 경로: /k8s_pv/gpfs/${GPFS_A}/${GPFS_A}-data/sample`)).toBeInTheDocument();
+  // 「지정 경로」 = 서버가 해석한 abs_root + 하위경로(글자 그대로 -- d192 이식 때 「실제 경로」에서 개명), 「n분 전 기준」 = 그 클러스터의 마지막 성공 동기화.
+  expect(screen.getByText(`지정 경로: /k8s_pv/gpfs/${GPFS_A}/${GPFS_A}-data/sample`)).toBeInTheDocument();
   expect(screen.getAllByText(/3분 전/).length).toBeGreaterThan(0);
   await pick("목적지 namespace (StorageClass)", "목적지 PV 이름", "team-b (tb-nfs)", "scratch — 5Gi · Bound");
   await userEvent.type(screen.getByLabelText("목적지 PV 안 경로"), "in");
-  // 요약: 사람이 읽는 표기 + 실제 경로 + 실행 권한 root
+  // 요약: 사람이 읽는 표기 + 지정 경로 + 실행 권한 root
   expect(screen.getByText("models — team-a (tb-gpfs) / sample")).toBeInTheDocument();
   expect(screen.getByText("scratch — team-b (tb-nfs) / in")).toBeInTheDocument();
   // PV 목적지 root sync: 결과 소유 = 목적지 스토리지 기본 소유자(2026-10-26 사용자 결정 -- 사용자는 늘 자동) -- 요약·소유권 안내
@@ -207,7 +207,7 @@ test("사용자 rm: 하위경로를 적어야 제출된다 -- 바디는 pv + tar
   await choose("rm");
   await pick("namespace (StorageClass)", "PV 이름", "team-b (tb-nfs)", "scratch — 5Gi · Bound");
   await userEvent.type(screen.getByLabelText("PV 안 경로"), "old/run1");
-  expect(screen.getByText("실제 경로: /k8s_pv/nfs/team-b/scratch/old/run1")).toBeInTheDocument();
+  expect(screen.getByText("지정 경로: /k8s_pv/nfs/team-b/scratch/old/run1")).toBeInTheDocument();
   expect(await submitAndBody()).toEqual({
     operation: "rm", pv: { cluster: "dmsk8s", namespace: "team-b", pvc: "scratch" }, target: "old/run1",
     options: { recursive: true }, run_as_root: true,
@@ -227,7 +227,7 @@ test("PV 루트 rm 차단: '', '.', './' 는 PV 루트라 잠기고 이유를 �
     await userEvent.type(sub, v);
     expect(screen.getByText("PV 전체(루트)는 삭제할 수 없습니다 — PV 안의 하위 경로를 적으세요")).toBeInTheDocument();
     expect(submitButton()).toBeDisabled();
-    expect(screen.queryByText(/^실제 경로:/)).toBeNull();
+    expect(screen.queryByText(/^지정 경로:/)).toBeNull();
   }
   await userEvent.clear(sub);
   await userEvent.type(sub, "../x");
@@ -304,7 +304,7 @@ test("?pv=<cluster>/<ns>/<pvc> 프리필: 소스와 대상(rm)에 그 PV 가 골
   await waitFor(() => expect((pv as HTMLSelectElement).selectedOptions[0]?.textContent).toBe("scratch — 5Gi · Bound"));
   expect(screen.getByLabelText("소스 namespace (StorageClass)")).toHaveValue(
     JSON.stringify(["dmsk8s", "team-b", "tb-nfs"]));
-  expect(screen.getByText("실제 경로: /k8s_pv/nfs/team-b/scratch (PV 전체)")).toBeInTheDocument();
+  expect(screen.getByText("지정 경로: /k8s_pv/nfs/team-b/scratch (PV 전체)")).toBeInTheDocument();
   await choose("rm");
   await waitFor(() => expect((screen.getByLabelText("PV 이름") as HTMLSelectElement).selectedOptions[0]?.textContent)
     .toBe("scratch — 5Gi · Bound"));
@@ -373,7 +373,7 @@ test("면제 관리자: 권한 기준 사용자 비움 = 전체 PV 검색(상한
   // 고른 PV 재해석은 이름 정확 일치(pvc=) — 부분 일치 q 는 같은 namespace 에 겹치는 이름이 많으면 상한에 잘렸다(2026-10-26).
   await waitFor(() => expect(adminVolumeUrls.some((u) => u.includes("namespace=team-c") && u.includes("pvc=archive")))
     .toBe(true));
-  expect(await screen.findByText("실제 경로: /k8s_pv/nfs/team-c/archive (PV 전체)")).toBeInTheDocument();
+  expect(await screen.findByText("지정 경로: /k8s_pv/nfs/team-c/archive (PV 전체)")).toBeInTheDocument();
   const mode = screen.getByRole("group", { name: "목적지 지정 방식" });
   await userEvent.click(within(mode).getByRole("button", { name: "직접 경로" }));
   const storage = screen.getByLabelText("목적지 스토리지");
@@ -383,7 +383,7 @@ test("면제 관리자: 권한 기준 사용자 비움 = 전체 PV 검색(상한
   expect(within(storage).getByRole("option", { name: "k8s-pv-gpfs" })).toBeInTheDocument();
   await userEvent.selectOptions(storage, "cephfs-dms");
   await userEvent.type(screen.getByLabelText("목적지 경로"), "backup/archive");
-  expect(screen.getByText("실제 경로: /cephfs/managed/backup/archive")).toBeInTheDocument();
+  expect(screen.getByText("지정 경로: /cephfs/managed/backup/archive")).toBeInTheDocument();
   expect(await submitAndBody()).toEqual({
     operation: "sync",
     source_pv: { cluster: "dmsk8s", namespace: "team-c", pvc: "archive" }, source: "",

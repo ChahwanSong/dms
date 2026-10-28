@@ -19,7 +19,7 @@ import { ownerText, validOwner } from "../../lib/syncOwnership";
 //   - 맵핑 범위(일반 사용자·목록 밖 관리자, 면제 관리자의 「권한 기준 사용자」 지정): namespace (StorageClass) → PV 이름 → PV 안 경로
 //   - 면제 관리자 + 권한 기준 사용자 비움: PV 검색(상한 50) → PV 안 경로
 //   - 면제 관리자는 쪽마다 「PV | 직접 경로」(직접 경로 = 기존 스토리지 + 관리 디렉토리 아래 상대경로 -- rawSlot 으로 받는다)
-// 「실제 경로」(서버가 해석한 abs_root + 하위경로)와 「n분 전 기준」(그 클러스터의 마지막 성공 동기화)을 늘 보여 사용자가 어디를
+// 「지정 경로」(서버가 해석한 abs_root + 하위경로 -- 글자 그대로라 링크는 풀지 않는다, d192 이식 때 「실제 경로」에서 개명)와 「n분 전 기준」(그 클러스터의 마지막 성공 동기화)을 늘 보여 사용자가 어디를
 // 건드리는지 확신하게 한다. 판정(권한·경로 규칙)은 서버 몫이고, 여기는 서버 응답을 보일 뿐이다.
 
 const MODE_OPTIONS: readonly { value: LocMode; label: string }[] = [
@@ -190,7 +190,8 @@ function SearchPicker({ side, loc, onChange, row }: {
   );
 }
 
-/** PV 안 경로 + 「실제 경로」·「n분 전 기준」·경고. */
+/** PV 안 경로 + 「지정 경로」·「n분 전 기준」·경고. 「지정 경로」 = 서버가 준 PV 루트(abs_root) + 하위경로를 글자 그대로 붙인 것
+    (링크를 풀지 않는다 -- d192 이식 때 「실제 경로」에서 개명, 직접 경로의 PathFeedback 과 같은 라벨). */
 function SubField({ side, operation, loc, onChange, resolved, destOwner }: {
   side: Side; operation: string; loc: Loc; onChange: (next: Loc) => void; resolved: Resolved; destOwner: DestOwner;
 }) {
@@ -223,7 +224,7 @@ function SubField({ side, operation, loc, onChange, resolved, destOwner }: {
       ))}
       {abs !== null && (
         <p className="mt-1 text-xs text-ink/80 [overflow-wrap:anywhere]">
-          {`실제 경로: ${abs}`}{whole && !rm ? " (PV 전체)" : ""}
+          {`지정 경로: ${abs}`}{whole && !rm ? " (PV 전체)" : ""}
         </p>
       )}
       {loc.sub !== loc.sub.trim() && problem === null && (
