@@ -476,7 +476,7 @@ _DEST_CHECK = (
     'if [ "$M" != root ] && [ "$(stat -c %u "$D")" != "$(id -u)" ]; then '
     'echo DMS_PREFLIGHT_REASON=destination_not_owned; exit 1; fi; '
     'fi; '
-    'dest_parent=$(dirname "$D"); '
+    'dest_parent=${D%/*}; '
     'test -w "$dest_parent" || '
     '{ echo DMS_PREFLIGHT_REASON=destination_parent_not_writable; exit 1; }; ')
 
@@ -500,11 +500,16 @@ _DEST_CHECK = (
 # (dms_job_runner.contain -- 같은 규칙의 Python 미러 path_redirected; tests/test_sync_containment_sh·test_pv_containment_sh·
 # test_rm_containment_sh 가 같은 트리로 두 판정을 대조한다). dms-ssc 의 워커 셸(sshd 앞) 재확인은 두지 않는다 -- 런처·rank 자리가
 # 그보다 늦다. 마지막 검사와 도구가 경로를 여는 사이 몇 초의 교체는 남는다(BACKLOG -- 포크 루트 고정).
-# 줄바꿈이 든 PATH 도 막는다(2026-10-28 리뷰 -- Python 미러도 같다): $(dirname …)·$(realpath …) 명령 치환은 끝 줄바꿈을 지워
-# 「x<LF>」 성분을 옆의 실제 「x」로 읽는다 -- 링크 「x<LF>」 아래 경로가 여기서만 통과했고(fail-open) 실제 디렉터리 「data<LF>」는
-# 여기서만 막혔다. 제출은 제어 문자를 unsafe_path 로 거부한다(domain.validate_relative_path) -- 이 검사는 그 전의 행·변조 행 몫.
-# dms_nl(줄바꿈 한 글자)은 스크립트를 한 줄로 두려고 printf 로 만든다(명령 치환이 끝 줄바꿈을 지우므로 x 를 붙였다 뗀다). 만들기에
-# 실패해 비면 패턴이 「**」라 모든 경로가 막힌다(fail-closed). rm 의 _RM_CONTAINMENT_CHECK 도 이 변수를 쓴다.
+# 개행 구멍(2026-10-28 §8 재현·수정 -- Python 미러는 처음부터 막았다). 두 함정이 있다: ① 경로 문자열에 든 개행, ② **심링크의
+# 타깃 이름이 개행으로 끝남**(경로 문자열엔 개행이 없다). ①은 아래 case 의 *"$dms_nl"* 가 fail-closed 로 막는다. ②는 case 로는
+# 못 막는다(문자열이 깨끗하다) -- realpath 가 링크를 따라가 「b<LF>」로 풀어도 $(realpath …) 명령 치환이 **끝 개행을 지워** 글자
+# 그대로의 want 「b」와 같아 보였다(심링크 성분이 봉쇄를 통과 -- fail-open, 재현함). 그래서 realpath 는 끝에 「/」 표식을 붙여 받고
+# (`$(realpath … && echo /)`), realpath 자신의 줄바꿈 하나와 표식만 뗀다(`${v%?/}`) -- 이름 끝의 개행은 남아 want 와 **다르게**
+# 보여 막힌다. 같은 이유로 상위 오르기도 $(dirname …) 가 아니라 매개변수 확장 ${dms_q%/*} 다(경로 문자열은 ①로 이미 깨끗해
+# 차이는 없지만 명령 치환을 아예 두지 않는다). 제출은 제어 문자를 unsafe_path 로 거부한다(domain.validate_relative_path) -- 이
+# 두 검사(①·②)는 그 전의 행·변조 행·검사 뒤 교체(TOCTOU) 몫이다. dms_nl(줄바꿈 한 글자)은 스크립트를 한 줄로 두려고 printf 로
+# 만든다(명령 치환이 끝 줄바꿈을 지우므로 x 를 붙였다 뗀다). 만들기에 실패해 비면 패턴이 「**」라 모든 경로가 막힌다(fail-closed).
+# rm 의 _RM_CONTAINMENT_CHECK 도 이 변수를 쓴다.
 _PATH_CONTAINED_FN = (
     "dms_nl=$(printf '\\nx'); dms_nl=${dms_nl%x}; "
     'dms_path_contained() { '
@@ -512,12 +517,12 @@ _PATH_CONTAINED_FN = (
     '[ -n "$dms_r" ] || return 1; '
     'case "$dms_p" in */|*/.|*/..|*//*|*/./*|*/../*|*"$dms_nl"*) return 1;; esac; '
     'case "$dms_p" in "$dms_rb"|"$dms_rb"/*) ;; *) return 1;; esac; '
-    'dms_real_root=$(realpath -e -- "$dms_r") || return 1; '
+    'dms_real_root=$(realpath -e -- "$dms_r" && echo /) || return 1; dms_real_root=${dms_real_root%?/}; '
     'dms_q=$dms_p; '
-    'while [ "$dms_q" != "$dms_rb" ] && [ ! -e "$dms_q" ] && [ ! -L "$dms_q" ]; do dms_q=$(dirname -- "$dms_q"); done; '
+    'while [ "$dms_q" != "$dms_rb" ] && [ ! -e "$dms_q" ] && [ ! -L "$dms_q" ]; do dms_q=${dms_q%/*}; done; '
     'if [ "$dms_q" = "$dms_rb" ]; then dms_want=$dms_real_root; '
     'else dms_want=${dms_real_root%/}/${dms_q#"$dms_rb"/}; fi; '
-    'dms_real_q=$(realpath -e -- "$dms_q") || return 1; '
+    'dms_real_q=$(realpath -e -- "$dms_q" && echo /) || return 1; dms_real_q=${dms_real_q%?/}; '
     '[ "$dms_real_q" = "$dms_want" ]; }; ')
 
 # PV 주소 쪽의 글자 경계(2026-10-26): dms_within PATH PV루트 는 PATH 가 글자로 PV 루트 자신이거나 그 아래일 때만 참. 빈 PV 루트는
@@ -528,13 +533,13 @@ _PV_WITHIN_FN = (
     '[ -n "$2" ] || return 1; '
     'case "$1" in "$2"|"${2%/}"|"${2%/}"/*) return 0;; esac; return 1; }; ')
 
-# rm 대상($1, $R = managed_root, $parent = dirname "$1" -- 부모 쓰기 검사가 먼저 만든다). 봉쇄는 대상의 **상위 경로**에
-# dms_path_contained 를 쓴다: 대상 자신(끝 성분)은 링크여도 된다 -- drm 은 대상을 lstat 해 링크 자체만 지우고, 걷는 동안에도 링크를
-# 따라가지 않는다(2026-10-21 d183 실증; 2026-10-28 사용자 결정 「rm 끝 링크 허용 유지」 -- dms-ssc d191 은 끝 링크도 거부한다).
-# 중간 성분 링크는 막는다(커널이 따라간다). 끝이 「/」「.」「..」거나 「//」「/./」「/../」가 낀 대상(끝 링크를 따라가게 되거나 상위를
-# 지우게 된다), 줄바꿈이 든 대상($parent=$(dirname …) 가 끝 줄바꿈을 지운다 -- _PATH_CONTAINED_FN 주석; 대상 전체를 본다), managed_root
-# 자신(stepper 는 그 아래만 조합한다 -- 변조 행)은 막는다. 러너 재확인: dms_job_runner.contain.rm_target_redirected(같은 규칙 --
-# drm 직전, env DMS_JR_RM_ROOT).
+# rm 대상($1, $R = managed_root, $parent = ${1%/*} -- 부모 쓰기 검사가 먼저 만든다; 매개변수 확장이라 명령 치환의 개행 함정이
+# 없다). 봉쇄는 대상의 **상위 경로**에 dms_path_contained 를 쓴다: 대상 자신(끝 성분)은 링크여도 된다 -- drm 은 대상을 lstat 해
+# 링크 자체만 지우고, 걷는 동안에도 링크를 따라가지 않는다(2026-10-21 d183 실증; 2026-10-28 사용자 결정 「rm 끝 링크 허용 유지」 --
+# dms-ssc d191 도 2026-10-28 에 같아졌다). 중간 성분 링크는 막는다(커널이 따라간다 -- 타깃 이름이 개행으로 끝나는 링크 포함,
+# _PATH_CONTAINED_FN 의 ②). 끝이 「/」「.」「..」거나 「//」「/./」「/../」가 낀 대상(끝 링크를 따라가게 되거나 상위를 지우게 된다),
+# 줄바꿈이 든 대상(_PATH_CONTAINED_FN 의 ① -- 대상 전체를 본다), managed_root 자신(stepper 는 그 아래만 조합한다 -- 변조 행)은
+# 막는다. 러너 재확인: dms_job_runner.contain.rm_target_redirected(같은 규칙 -- drm 직전, env DMS_JR_RM_ROOT).
 _RM_TARGET_REDIRECTED = 'echo DMS_PREFLIGHT_REASON=target_path_redirected; exit 1'
 _RM_CONTAINMENT_CHECK = (
     'case "$1" in */|*/.|*/..|*//*|*/./*|*/../*|*"$dms_nl"*) ' + _RM_TARGET_REDIRECTED + ';; esac; '
@@ -749,7 +754,7 @@ def _preflight_script(spec, *, role=None):
         # PV 주소 rm: 대상의 상위가 PV 루트 자신이거나 그 아래 = 대상이 PV 루트 **아래**(글자 경계, _PV_WITHIN_FN 주석).
         within = '' if pv is None else 'dms_within "$parent" "$P" || { ' + _RM_TARGET_REDIRECTED + '; }; '
         script = ('set -e; R="$2"; ' + ('' if pv is None else 'P="$3"; ')
-                  + 'parent=$(dirname "$1"); '
+                  + 'parent=${1%/*}; '
                   'test -w "$parent" || { echo DMS_PREFLIGHT_REASON=parent_not_writable; exit 1; }; '
                   + _contain_fns(pv) + _RM_CONTAINMENT_CHECK + within + 'echo DMS_PREFLIGHT_OK')
         return script, args

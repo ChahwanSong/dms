@@ -57,11 +57,15 @@ def tree(tmp_path):
     (m / "users/alice/dangling").symlink_to("../nowhere")                     # 끊긴 링크
     (tmp_path / "mlink").symlink_to(str(m))                                   # managed_root 자신이 링크
     (tmp_path / "up").symlink_to(str(tmp_path))                               # managed_root 위 성분이 링크
-    # 이름이 줄바꿈으로 끝나는 성분(2026-10-28 리뷰): 링크 「x\n」 옆에 실제 「x」 -- 셸 parent=$(dirname) 이 끝 줄바꿈을 지워 x 로
-    # 읽었다(preflight OK, 실제 대상은 bob/old 아래). 실제 디렉터리 「data\n」 옆에도 실제 「data」가 있다.
+    # 개행 구멍(2026-10-28 §8) ① 경로 문자열에 든 줄바꿈: 링크 「x\n」 옆에 실제 「x」 -- 예전 셸 parent=$(dirname) 이 끝 줄바꿈을
+    # 지워 x 로 읽었다(preflight OK, 실제 대상은 bob/old 아래). 실제 디렉터리 「data\n」 옆에도 실제 「data」가 있다.
     (m / "users/alice/x").mkdir()
     (m / "users/alice/x\n").symlink_to("../bob/old")
     (m / "users/alice/data\n/old").mkdir(parents=True)
+    # ② 심링크 타깃 이름이 줄바꿈으로 끝남, 경로 문자열은 깨끗: 상위 성분 「selfnl」(깨끗한 이름)이 이웃 실제 「selfnl\n」을 가리킨다 --
+    # $(realpath) 가 끝 줄바꿈을 지워 글자 그대로의 want 「selfnl」과 같아 보여 상위 봉쇄를 통과했다(fail-open).
+    (m / "users/alice/selfnl\n/old").mkdir(parents=True)
+    (m / "users/alice/selfnl").symlink_to("selfnl\n")
     return tmp_path
 
 
@@ -90,9 +94,11 @@ _REDIRECT = [
     ("m", "users//alice/data/old"),            # 「//」 -- 변조 행(글자가 실제 위치와 맞을 수 없다)
     ("m", "users/alice/./data/old"),
     # 줄바꿈이 든 대상 -- 셸·러너 둘 다 막는다(2026-10-28 리뷰, 제출은 unsafe_path). 예전 셸은 첫 줄을 OK 로 통과시켰다.
-    ("m", "users/alice/x\n/keep"),             # 상위가 끝이 줄바꿈인 링크(-> bob/old, 옆에 실제 x)
-    ("m", "users/alice/data\n/old"),           # 상위가 끝이 줄바꿈인 실제 디렉터리
-    ("m", "users/alice/x\n"),                  # 끝 성분의 줄바꿈 -- 끝 링크 허용과 별개로 막는다(셸이 대상 전체를 본다)
+    ("m", "users/alice/x\n/keep"),             # ① 상위가 끝이 줄바꿈인 링크(-> bob/old, 옆에 실제 x)
+    ("m", "users/alice/data\n/old"),           # ① 상위가 끝이 줄바꿈인 실제 디렉터리
+    ("m", "users/alice/x\n"),                  # ① 끝 성분의 줄바꿈 -- 끝 링크 허용과 별개로 막는다(셸이 대상 전체를 본다)
+    # ② 상위 성분이 「타깃 이름 끝 줄바꿈」 링크, 경로 문자열은 깨끗 -- 예전 셸만 OK(fail-open), 러너는 막았다(§8 재현·수정).
+    ("m", "users/alice/selfnl/old"),           # ② 상위 selfnl -> selfnl\n(끝 링크 허용과 무관 -- 상위가 링크다)
 ]
 
 

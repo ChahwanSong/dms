@@ -95,6 +95,30 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ✅ 경로 봉쇄 개행 구멍(§8 ②) 셸 수정 — **완료**(2026-10-28)
+
+인계 문서 §8(dms-ssc d194 c438667 후속)의 보안 항목을 dms-k8s 에 이식. 경로 봉쇄 셸 함수
+(`execution_manifests._PATH_CONTAINED_FN`)가 `$(realpath …)`·`$(dirname …)` **명령 치환이 결과 끝 개행을
+지우는** 탓에 두 함정을 가졌다. ① 경로 문자열에 든 개행은 이미 d191 의 case(`*"$dms_nl"*`)가 막았지만,
+② **심링크의 타깃 이름이 개행으로 끝나는** 경우(경로 문자열은 깨끗 — 예: 깨끗한 이름 `selfnl` → 이웃 실제
+`selfnl⏎`)는 `$(realpath)` 가 타깃 끝 개행을 지워 글자 그대로의 want 와 같아 보여 **봉쇄를 통과**했다
+(fail-open). 모든 잡이 root 라 커널 DAC 가 없어, 뚫리면 root 도구가 그 심링크를 따라간다. Python 미러
+(`dms_job_runner.contain`, `os.path.realpath` 는 개행 보존)는 처음부터 막았으나 **셸 preflight·exec_preflight 는
+열려 있었다** — dash 로 재현했다(핸드오프 §8 이 origin/dms-k8s 에서 재현한 그 구멍).
+
+- **수정**(dms-ssc c438667 이디엄): realpath 는 끝에 「/」 표식을 붙여 받고(`$(realpath -e -- "$x" && echo /)`)
+  realpath 자신의 줄바꿈 하나와 표식만 뗀다(`${v%?/}`) — 이름 끝의 개행은 남아 want 와 다르게 보여 막힌다.
+  상위 오르기는 `$(dirname …)` 가 아니라 매개변수 확장 `${dms_q%/*}`, 목적지 부모 `dest_parent=${D%/*}`,
+  rm 부모 `parent=${1%/*}`(명령 치환을 아예 두지 않는다). k8s 의 ① case·PV 글자 경계(`dms_within`)·rm 끝 링크
+  허용은 그대로. 제출은 이미 제어 문자를 `unsafe_path` 로 거부(d191 `domain.validate_relative_path`). Python
+  미러는 주석만 갱신(코드는 이미 올바름).
+- **검증**: dash 재현 — 수정 전 `selfnl→selfnl⏎` 의 링크 자신·그 아래 새 경로가 셸 IN(fail-open)·Python 차단,
+  수정 후 셸·Python 모두 차단. 세 봉쇄 대조 테스트(`test_{sync,rm,pv}_containment_sh.py`)에 ② 사례 추가 →
+  셸·러너 같은 판정. 보안 리뷰 3관점(우회 탐색·셸 이식성·셸↔Python 일치) — 개행 1~3개 타깃·링크 체인·
+  중간 성분·개행-실명 루트 링크·PV·rm 끝 링크×② 등 적대적 프로브 전부 fail-open 0건. busybox-ash 는
+  번들 realpath 가 `-e`/`--` 미지원이라 전수 fail-closed(보안 구멍 아님·배포 셸은 dash). 백엔드 봉쇄·계약
+  배치 580 passed.
+
 ### ✅ k8s 연동 호출 노드 카드 — 해결된 실패 구분·클러스터별 연결·보조 연결 확인 — **완료**(2026-10-28)
 
 사용자 보고(「K8s 연동 메뉴 알림」): 개요(/admin/k8s)의 호출 노드 카드가 이미 해결된 실패를 지금 오류처럼 보였다. 라이브 분석 —

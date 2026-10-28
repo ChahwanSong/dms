@@ -43,10 +43,14 @@ def tree(tmp_path):
     (m / "users/alice/outside").symlink_to(str(tmp_path))                     # managed_root 밖
     (tmp_path / "mlink").symlink_to(str(m))                                   # managed_root 자신이 링크
     (tmp_path / "up").symlink_to(str(tmp_path))                               # managed_root 위 성분이 링크
-    # 이름이 줄바꿈으로 끝나는 성분(2026-10-28 리뷰): 링크 「x\n」 옆에 실제 「x」 -- 셸 $(dirname) 이 끝 줄바꿈을 지워 x 로 읽었다.
+    # 개행 구멍(2026-10-28 §8) ① 경로 문자열에 든 줄바꿈: 링크 「x\n」 옆에 실제 「x」.
     (m / "users/alice/x").mkdir()
     (m / "users/alice/x\n").symlink_to("../bob/secret")
-    (m / "users/alice/data\n").mkdir()                                        # 실제 디렉터리 -- 셸 $(realpath) 만 막았다
+    (m / "users/alice/data\n").mkdir()                                        # 실제 디렉터리(경로 문자열에 줄바꿈)
+    # 개행 구멍 ② 심링크 타깃 이름이 줄바꿈으로 끝남(경로 문자열은 깨끗): 깨끗한 이름 「selfnl」이 이웃 실제 「selfnl\n」을 가리킨다 --
+    # $(realpath) 가 끝 줄바꿈을 지워 글자 그대로의 want 「selfnl」과 같아 보여 통과했다(fail-open, _PATH_CONTAINED_FN 주석 ②).
+    (m / "users/alice/selfnl\n").mkdir()
+    (m / "users/alice/selfnl").symlink_to("selfnl\n")
     return tmp_path
 
 
@@ -83,11 +87,14 @@ _OUT = [
     ("m", "users//alice"),
     # 줄바꿈이 든 경로 -- 셸·러너 둘 다 막는다(2026-10-28 리뷰, fail-closed 로 맞춘 대칭). 예전엔 셸만 「x\n/new」를 통과시켰고
     # (명령 치환이 끝 줄바꿈을 지워 옆의 실제 x 로 판정 -- fail-open) 「data\n」은 셸만 막았다(realpath 결과가 잘려 오탐).
-    ("m", "users/alice/x\n/new"),                # 끝이 줄바꿈인 링크 성분 아래(옆에 실제 x) -- 예전 셸 IN
-    ("m", "users/alice/x\n"),                    # 그 링크 자신
-    ("m", "users/alice/data\n"),                 # 끝이 줄바꿈인 실제 디렉터리 -- 예전 러너 IN
-    ("m", "users/alice/data\n/new"),             # 그 아래 아직 없는 경로 -- 예전엔 둘 다 IN
-    ("m", "users/alice/a\nb"),                   # 가운데 줄바꿈(없는 경로) -- 줄바꿈은 어디에 있든 막는다
+    ("m", "users/alice/x\n/new"),                # ① 끝이 줄바꿈인 링크 성분 아래(옆에 실제 x) -- 예전 셸 IN
+    ("m", "users/alice/x\n"),                    # ① 그 링크 자신
+    ("m", "users/alice/data\n"),                 # ① 끝이 줄바꿈인 실제 디렉터리 -- 예전 러너 IN
+    ("m", "users/alice/data\n/new"),             # ① 그 아래 아직 없는 경로 -- 예전엔 둘 다 IN
+    ("m", "users/alice/a\nb"),                   # ① 가운데 줄바꿈(없는 경로) -- 줄바꿈은 어디에 있든 막는다
+    # ② 심링크 타깃 이름이 줄바꿈으로 끝남, 경로 문자열은 깨끗 -- 예전 셸만 IN(fail-open), 러너는 막았다(2026-10-28 §8 재현·수정).
+    ("m", "users/alice/selfnl"),                 # ② selfnl -> selfnl\n 링크 자신(깨끗한 이름)
+    ("m", "users/alice/selfnl/new"),             # ② 그 아래 아직 없는 경로(경로 문자열에 줄바꿈이 없다)
 ]
 
 
@@ -226,6 +233,22 @@ def test_newline_names_are_refused_by_preflight_and_runner_alike(tree):
     assert rc == 1 and _SRC in out, out
     assert path_redirected(src, m) is True
     assert (tree / "m/users/bob/secret/victim.txt").read_text() == "bob"
+
+
+def test_newline_target_symlink_is_refused_by_preflight_and_runner_alike(tree):
+    # 개행 구멍 ②(2026-10-28 §8 재현·수정): 깨끗한 이름의 링크 selfnl -> 이웃 실제 selfnl\n. 경로 문자열엔 줄바꿈이 없어 ①의
+    # case(*"$dms_nl"*)로는 못 걸렀고, $(realpath) 가 타깃 끝 줄바꿈을 지워 글자 그대로의 want 「selfnl」과 같아 보여 dsync
+    # preflight·nsync 목적지 preflight 가 OK 로 통과시켰다(러너 Python 미러만 막았다). 이제 셸이 realpath 끝 줄바꿈을 보존해
+    # 막는다 -- 두 층이 같은 사유.
+    m = str(tree / "m")
+    dst = f"{m}/users/alice/selfnl/new"
+    for spec, role in ((_spec(f"{m}/users/alice/proj/src", dst, m, m), None),
+                       (_spec(f"{m}/users/alice/proj/src", dst, m, m, primary=False), "destination")):
+        rc, out = _run(spec, role=role)
+        assert rc == 1 and _DST in out and "DMS_PREFLIGHT_OK" not in out, (role, out)
+    # 링크 자신도(끝 성분) 막는다 -- 셸·러너 같은 판정
+    assert _contained_sh(f"{m}/users/alice/selfnl", m) is False
+    assert path_redirected(f"{m}/users/alice/selfnl", m) is True
 
 
 def test_non_root_sync_is_contained_too(tree):

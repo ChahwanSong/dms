@@ -59,10 +59,12 @@ def path_redirected(path, root, *, realpath=_realpath_strict, lexists=os.path.le
     빈 root, 끝이 「/」「.」「..」거나 「//」「/./」「/../」가 낀 경로(DB 변조 행), 줄바꿈이 든 경로(아래), root 밖 경로, 실제
     경로를 못 구하는 경우(없는 root·고리 등)는 막는다(fail-closed).
 
-    줄바꿈(2026-10-28 리뷰): 셸 미러는 $(dirname …)·$(realpath …) 명령 치환이 끝 줄바꿈을 지워 「x\\n」 성분을 옆의 실제 「x」로
-    읽는다 -- 링크 「x\\n」 아래 경로가 셸에선 통과하고(fail-open) 실제 디렉터리 「data\\n」은 셸에서만 막혔다. 두 층이 같은 판정을
-    내도록 **양쪽 다** 줄바꿈이 든 경로를 막는다(셸 dms_path_contained 의 case). 제출은 제어 문자를 unsafe_path 로 거부하므로
-    (domain.validate_relative_path) 이 줄에 닿는 것은 그 검증 전의 행·변조 행뿐이다."""
+    줄바꿈 두 함정(2026-10-28 §8): ① 경로 문자열에 든 줄바꿈 -- 아래 `"\\n" in path` 로 막는다(셸은 dms_path_contained 의
+    *"$dms_nl"* case, 양쪽 다 fail-closed). ② 심링크의 **타깃 이름이 줄바꿈으로 끝남**(경로 문자열은 깨끗) -- os.path.realpath 는
+    링크를 「b\\n」으로 풀어 글자 그대로의 want 「b」와 **다르게** 봐 막는다(개행을 보존한다). 셸 미러는 한때 $(realpath …) 명령
+    치환이 그 끝 줄바꿈을 지워 ②가 통과했으나(fail-open, 재현함) 2026-10-28 에 `$(realpath … && echo /)`+`${v%?/}` 로 고쳤다
+    (execution_manifests._PATH_CONTAINED_FN 주석). 두 층이 같은 트리에서 같은 판정을 낸다. 제출은 제어 문자를 unsafe_path 로
+    거부하므로(domain.validate_relative_path) 이 줄에 닿는 것은 그 검증 전의 행·변조 행·검사 뒤 교체(TOCTOU)뿐이다."""
     if not isinstance(path, str) or not isinstance(root, str) or root == "":
         return True
     if (path.endswith("/") or path.endswith("/.") or path.endswith("/..")
@@ -108,8 +110,8 @@ def rm_target_redirected(target, root, *, realpath=_realpath_strict, lexists=os.
     대상의 **상위 경로**에 path_redirected(같은 규칙 하나)를 쓰고 대상 자신(끝 성분)은 링크여도 된다: drm 은 대상을 lstat 해
     링크 자체만 지우고 걷는 동안에도 링크를 따라가지 않는다(2026-10-21 d183 실증, 2026-10-28 사용자 결정 「rm 끝 링크 허용 유지」
     -- dms-ssc d191 은 끝 링크도 거부한다). 끝이 「/」「.」「..」거나 「//」「/./」「/../」가 낀 대상(끝 링크를 따라가게 되거나 상위를
-    지우게 된다), 줄바꿈이 든 대상(셸의 parent=$(dirname …) 가 끝 줄바꿈을 지운다 -- path_redirected docstring; 끝 성분만이어도
-    막는다 -- 셸이 대상 전체를 본다), managed_root 자신(stepper 는 그 아래만 조합한다 -- 변조 행)은 막는다. target 은 drm argv
+    지우게 된다), 줄바꿈이 든 대상(path_redirected 의 ① -- 끝 성분만이어도 막는다, 셸이 대상 전체를 본다), managed_root 자신
+    (stepper 는 그 아래만 조합한다 -- 변조 행)은 막는다. 타깃 이름이 줄바꿈으로 끝나는 **중간** 링크(②)는 상위 봉쇄가 막는다. target 은 drm argv
     마지막(tool_argv), root 는 env DMS_JR_RM_ROOT(stepper 가 target 을 조합한 값). 왜 러너도 보나: exec_preflight 파드와 실행
     vcjob 사이에 상위 디렉터리를 링크로 바꾸면 root drm 이 다른 트리를 지운다 -- 여기는 mpirun 바로 앞이다(남는 창은 BACKLOG §4)."""
     if not isinstance(target, str) or not isinstance(root, str) or root == "":

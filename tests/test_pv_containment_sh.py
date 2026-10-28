@@ -65,8 +65,10 @@ def tree(tmp_path):
     (m / "pvc-c/pvc-c-data").symlink_to("../pvc-b/pvc-b-data")     # PV 루트 **자신**이 남의 PV 로 가는 링크(2차 리뷰)
     (m / "pvc-d").symlink_to("pvc-b")                              # managed_root 와 PV 루트 **사이** 성분이 링크
     (tmp_path / "mlink").symlink_to(str(m))                        # managed_root 자신이 링크 -- 괜찮다
-    (a / "data/x\n").symlink_to(str(b))                            # 이름이 줄바꿈으로 끝나는 링크(옆에 실제 data/x, 2026-10-28)
-    (a / "data\n").mkdir()                                         # 이름이 줄바꿈으로 끝나는 실제 디렉터리
+    (a / "data/x\n").symlink_to(str(b))                            # ① 이름이 줄바꿈으로 끝나는 링크(옆에 실제 data/x, 2026-10-28)
+    (a / "data\n").mkdir()                                         # ① 이름이 줄바꿈으로 끝나는 실제 디렉터리
+    (a / "selfnl\n").mkdir()                                       # ② 이웃 실제 디렉터리 selfnl\n
+    (a / "selfnl").symlink_to("selfnl\n")                          # ② 깨끗한 이름 selfnl -> selfnl\n(경로 문자열엔 줄바꿈 없음)
     return tmp_path
 
 
@@ -102,8 +104,11 @@ _REDIRECT = [
     ("mlink", A, "data/x"),             # 경로가 기준(managed_root) 밖 -- 글자로 막는다
     # 줄바꿈이 든 경로는 셸·러너 둘 다 막는다(2026-10-28 리뷰 -- 셸 $(dirname)·$(realpath) 가 끝 줄바꿈을 지워 「x\n」 링크
     # 아래를 옆의 실제 「x」로 읽어 통과시켰고, 실제 디렉터리 「data\n」은 셸에서만 막혔다; 제출은 unsafe_path 로 거부한다)
-    (M, A, "data/x\n/new-dest"),        # 없는 끝 -- 셸이 상위로 걸어 올라가며 「x\n」을 실제 「x」로 읽었다(예전 셸 통과)
+    (M, A, "data/x\n/new-dest"),        # ① 없는 끝 -- 셸이 상위로 걸어 올라가며 「x\n」을 실제 「x」로 읽었다(예전 셸 통과)
     (M, A, "data\n"),
+    # ② 타깃 이름이 줄바꿈으로 끝나는 링크(경로 문자열은 깨끗) -- 예전 셸만 통과(fail-open), 러너는 막았다(§8 재현·수정)
+    (M, A, "selfnl"),                   # ② selfnl -> selfnl\n 링크 자신
+    (M, A, "selfnl/new-dest"),          # ② 그 아래 없는 경로(경로 문자열에 줄바꿈이 없다)
 ]
 
 
