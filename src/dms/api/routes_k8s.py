@@ -4,7 +4,8 @@
   - 조회(GET /api/admin/k8s/*) = require_admin(토큰 관리자도 된다 -- 스크립트·모니터링).
   - 변경(호출 노드·주기, 클러스터 등록·주소·토큰·TLS·삭제, StorageClass 매핑) = require_session_admin -- 매핑·토큰은
     「누가 어느 PVC 에 root 로 읽고 쓰나」의 원천이고, 공유 토큰은 모든 노드 에이전트가 가진 관리자 자격이다.
-  - 「지금 동기화」(:sync) = require_admin(스크립트 가능, 무해 -- 다음 claim 을 앞당길 뿐).
+  - 「지금 동기화」(:sync)·「보조 연결 확인」(secondary:check) = require_admin(스크립트 가능, 무해 -- 다음 claim 을 앞당기거나
+    secondary 에 1회 run 을 줄 뿐; 확인의 연결 실패는 클러스터 상태를 바꾸지 않는다).
   - GET /api/user/k8s/volumes = require_user: 자기 맵핑 범위(인식된 RoleBinding 이 있는 namespace)의 PVC 만. 맵핑 면제
     (api.auth.can_run_as_root -- 관리자 + 특권 목록/계정 부여 + 세션)는 전체.
 
@@ -29,7 +30,7 @@ from pydantic import BaseModel
 
 from .. import k8s_sync
 from ..identity import IDENTITY_MODE_K8S
-from ..db import load_json, utc_now_iso
+from ..db import iso_plus, load_json, utc_now_iso
 from ..domain import DomainValidationError
 from ..mail_config import resolve_mail_config
 from ..pv_paths import effective_template, validate_template
@@ -244,6 +245,7 @@ def _cluster_summaries(state: _State) -> list:
             "consecutive_failures": c.get("consecutive_failures") or 0, "server_version": c.get("server_version"),
             "fingerprint": c.get("fingerprint"), "duplicate_of": dupes[0] if dupes else None,
             "sync_requested_at": c.get("sync_requested_at"), "failover_after": c.get("failover_after"),
+            "check_requested_at": c.get("check_requested_at"),
             "interval_seconds": state.interval, "counts": counts.get(c["name"]),
             "last_run": None if last is None else {
                 "run_id": last["run_id"], "node_name": last["node_name"], "role": last["role"],
@@ -262,10 +264,29 @@ def _node_ips(request: Request) -> dict:
         return {}
 
 
+def _check_pending(state: _State) -> list:
+    """보조 연결 확인이 아직 가져가지 않은 클러스터(활성·토큰 열림 -- claim 이 거르는 클러스터는 영영 남으므로 뺀다). primary 가
+    지정되지 않았으면 claim 이 확인을 주지 않으므로 없다(k8s_sync.claim_trigger)."""
+    if not state.row.get("primary_node"):
+        return []
+    return [c["name"] for c in state.clusters
+            if c.get("check_requested_at") and c.get("enabled") and state.token(c)[0] == "set"]
+
+
+_NO_CALLS = {"last_ok_at": None, "last_fail_at": None, "last_reason": None, "last_trigger": None, "last_status": None}
+
+
 def _nodes(request: Request, state: _State) -> list:
+    """개요의 호출 노드 줄. clusters = 그 노드 × 지금 있는 클러스터(이름순) 각각의 지금 설정(등록·config_rev)에서의 마지막
+    연결(last_status null = 그 노드가 지금 설정의 그 클러스터를 부른 기록 없음 -- 부른 적 없거나, 설정을 바꾼 뒤 아직이거나,
+    보존 정리가 지웠다; 모름이지 실패가 아니다). last_fail_cluster_ok_at = 이 노드가 마지막 실패의 클러스터에 낸 가장 최근
+    성공(설정 세대 무관 -- 「마지막 실패」가 그 뒤 해결됐나를 재는 값; repositories.k8s.node_run_stats). check_pending = 이 노드가
+    secondary 일 때 아직 가져가지 않은 확인 요청. serving(맡은 클러스터)은 정규 경로 run 기준이다(보조 연결 확인은 빼고 --
+    latest_run_per_cluster)."""
     repos, settings = state.repos, state.settings
     agents = {n["node_name"]: n for n in repos.agents.list_nodes(stale_seconds=settings.agent_report_stale_seconds)}
     stats = repos.k8s.node_run_stats()
+    pending = _check_pending(state)
     serving: dict = {}
     existing = {c["name"] for c in state.clusters}
     for cluster, run in repos.k8s.latest_run_per_cluster().items():
@@ -280,15 +301,21 @@ def _nodes(request: Request, state: _State) -> list:
         report = (agent or {}).get("report") or {}
         worker = report.get("k8s_sync") if isinstance(report.get("k8s_sync"), dict) else None
         st = stats.get(name, {})
+        role = k8s_sync.node_role(state.row, name)
+        per_cluster = st.get("clusters", {})
         out.append({
-            "node_name": name, "role": k8s_sync.node_role(state.row, name),
+            "node_name": name, "role": role,
             "fresh": bool(agent and agent["fresh"]), "reported": agent is not None,
             "capable": k8s_capable(report), "reported_at": (agent or {}).get("reported_at"),
             "internal_ip": ips.get(name),
             "worker": None if worker is None else {"state": worker.get("worker"), "run_id": worker.get("run_id")},
             "last_claim_at": st.get("last_claim_at"), "last_ok_at": st.get("last_ok_at"),
             "last_fail_at": st.get("last_fail_at"), "last_reason": st.get("last_reason"),
+            "last_fail_cluster": st.get("last_fail_cluster"), "last_fail_trigger": st.get("last_fail_trigger"),
+            "last_fail_cluster_ok_at": st.get("last_fail_cluster_ok_at"),
             "serving": sorted(serving.get(name, [])),
+            "clusters": [{"cluster": c["name"], **per_cluster.get(c["name"], _NO_CALLS)} for c in state.clusters],
+            "check_pending": pending if role == "secondary" else [],
         })
     return out
 
@@ -441,6 +468,30 @@ def sync_now(name: str, request: Request):
     if not request.app.state.repos.k8s.request_sync(name):
         raise HTTPException(status_code=404, detail="k8s_cluster_not_found")
     return _one_summary(request, name)
+
+
+@router.post("/api/admin/k8s/secondary:check", dependencies=[Depends(require_admin)])
+def check_secondary(request: Request):
+    """「보조 연결 확인」(k8s_sync 「배정」 (3)) -- 활성이고 토큰을 열 수 있는 클러스터 전부에 check_requested_at = 지금.
+    secondary 노드가 다음 폴링마다 하나씩 trigger=check 로 가져간다(정규 동기화 1회와 같은 일; 연결 실패는 클러스터 상태를
+    바꾸지 않는다). 409: secondary 미지정 k8s_sync_no_secondary · primary 미지정 k8s_sync_no_primary(그때는 secondary 가 정규
+    노드라 정규 run 이 곧 확인이다) · secondary 에이전트의 보고가 지연·없음·k8s 동기화 미지원 k8s_sync_secondary_not_ready
+    (가져갈 노드가 없는 요청은 화면에 「확인 요청됨」으로 무기한 남았다 -- 2026-10-28 리뷰) · 대상 없음 k8s_sync_nothing_to_check."""
+    repos, settings = request.app.state.repos, request.app.state.settings
+    row = repos.k8s.get_settings() or {}
+    secondary = row.get("secondary_node")
+    if not secondary:
+        raise HTTPException(status_code=409, detail="k8s_sync_no_secondary")
+    if not row.get("primary_node"):
+        raise HTTPException(status_code=409, detail="k8s_sync_no_primary")
+    agent = next(iter(repos.agents.latest_reports([secondary])), None)
+    fresh_after = iso_plus(utc_now_iso(), -settings.agent_report_stale_seconds)
+    if agent is None or not agent["reported_at"] > fresh_after or not k8s_capable(agent.get("report") or {}):
+        raise HTTPException(status_code=409, detail="k8s_sync_secondary_not_ready")
+    names = repos.k8s.request_check(token_ok=lambda enc: open_cluster_token(settings, enc) is not None)
+    if not names:
+        raise HTTPException(status_code=409, detail="k8s_sync_nothing_to_check")
+    return {"requested": names}
 
 
 @router.get("/api/admin/k8s/runs", dependencies=[Depends(require_admin)])

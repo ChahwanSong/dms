@@ -7,8 +7,8 @@ import type { ReactNode } from "react";
 import { forgetTransportKey } from "../../lib/passwordTransport";
 import { makeServerKey, openSealed, transportKeyHandler, type TestServerKey } from "../../test/transportKey";
 import {
-  K8S_TOKEN_PURPOSE, OVERVIEW_POLL_MS, OVERVIEW_SYNCING_POLL_MS, overviewPollMs, runsUrl, useSaveCluster, useSyncCluster,
-  volumesUrl,
+  K8S_TOKEN_PURPOSE, OVERVIEW_CHECK_POLL_MS, OVERVIEW_POLL_MS, OVERVIEW_SYNCING_POLL_MS, overviewPollMs, runsUrl,
+  useSaveCluster, useSyncCluster, volumesUrl,
 } from "./useK8s";
 import { CLUSTER_OK, overview } from "./k8sFixtures";
 
@@ -32,6 +32,19 @@ test("개요 폴링: 동기화 중인 클러스터가 있으면 3초, 아니면 
   expect(overviewPollMs(overview())).toBe(10_000);
   expect(overviewPollMs(overview({ clusters: [{ ...CLUSTER_OK, status: "syncing" }] }))).toBe(OVERVIEW_SYNCING_POLL_MS);
   expect(OVERVIEW_SYNCING_POLL_MS).toBe(3_000);
+});
+
+test("개요 폴링: 보조 연결 확인을 아직 안 가져갔으면 5초(동기화 중 3초가 우선), 옛 응답(check_pending 없음)은 10초", () => {
+  const ov = overview();
+  const pending = { ...ov, nodes: ov.nodes.map((n) => ({ ...n, check_pending: n.role === "secondary" ? ["dmsk8s"] : [] })) };
+  expect(overviewPollMs(pending)).toBe(OVERVIEW_CHECK_POLL_MS);
+  expect(OVERVIEW_CHECK_POLL_MS).toBe(5_000);
+  expect(overviewPollMs({ ...pending, clusters: [{ ...CLUSTER_OK, status: "syncing" }] })).toBe(OVERVIEW_SYNCING_POLL_MS);
+  expect(overviewPollMs({ ...ov, nodes: ov.nodes.map((n) => ({ ...n, check_pending: [] })) })).toBe(OVERVIEW_POLL_MS);
+  // 보고가 끊긴 노드의 대기 요청은 가져갈 수 없다 -- 빠르게 다시 읽지 않는다(2026-10-28 리뷰)
+  expect(overviewPollMs({ ...pending, nodes: pending.nodes.map((n) => ({ ...n, fresh: false })) })).toBe(OVERVIEW_POLL_MS);
+  // 보고는 오지만 k8s 동기화를 지원하지 않는 노드도 가져가지 않는다(2026-10-28 2차 리뷰)
+  expect(overviewPollMs({ ...pending, nodes: pending.nodes.map((n) => ({ ...n, capable: false })) })).toBe(OVERVIEW_POLL_MS);
 });
 
 test("volumesUrl·runsUrl: 빈 값은 싣지 않고 limit 은 늘", () => {

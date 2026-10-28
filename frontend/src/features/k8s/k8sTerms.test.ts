@@ -1,7 +1,9 @@
 import { describe, expect, test } from "vitest";
 import {
-  BINDING_NAME_RE, bindingParts, callerNodeState, changeNames, clusterStatusMeta, countText, durationText, intervalText,
-  nsLabel, phaseVariant, pvJobLink, runStatusMeta, storageKindOf, storageOwnerOf, unrecognizedWhy, untilText, warningText,
+  BINDING_NAME_RE, TRIGGER_LABEL, bindingParts, callerNodeState, changeNames, clusterStatusMeta, countText, durationText,
+  failureResolved, intervalText, isoAfter, nsLabel, pathUnverifiedSince, phaseVariant, pvJobLink, runStatusMeta,
+  shortReasonText,
+  storageKindOf, storageOwnerOf, unrecognizedWhy, untilText, warningText,
 } from "./k8sTerms";
 import { pvRootDestNote } from "./LocationField";
 import type { CallerNode } from "./types";
@@ -84,6 +86,73 @@ describe("callerNodeState", () => {
                              serving: ["dmsk8s"] })).toEqual({ label: "사용 중", variant: "ok" });
     expect(callerNodeState(base)).toEqual({ label: "대기", variant: "neutral" });
   });
+  // 2026-10-28 사고: secondary 는 대체 때만 불려 실패 하나가 「최근 실패」로 오래 남았다 -- 그 클러스터가 이후 다른 노드로
+  // 회복했으면 지금 실패 중이 아니라 「이 노드 경로를 다시 확인할 일」이다.
+  test("실패한 클러스터가 이후 회복했으면 재확인 필요(action), 아니면·모르면 최근 실패(bad)", () => {
+    const failed = { ...base, role: "secondary" as const, last_ok_at: "2026-10-25T00:00:00Z",
+                     last_fail_at: "2026-10-26T03:27:00Z", last_fail_cluster: "dmsk8s2", last_fail_trigger: "failover" };
+    const later = [{ name: "dmsk8s2", last_success_at: "2026-10-26T03:29:06Z" }];
+    expect(callerNodeState(failed, later)).toEqual({ label: "재확인 필요", variant: "action" });
+    // 클러스터 마지막 성공이 실패보다 앞이면(아직 회복 안 됨) 최근 실패
+    expect(callerNodeState(failed, [{ name: "dmsk8s2", last_success_at: "2026-10-26T03:00:00Z" }]))
+      .toEqual({ label: "최근 실패", variant: "bad" });
+    // 클러스터 정보가 없거나(인자 생략·지운 클러스터) 실패 클러스터를 모르면(옛 응답) 종전대로
+    expect(callerNodeState(failed).label).toBe("최근 실패");
+    expect(callerNodeState(failed, [{ name: "other", last_success_at: "2026-10-27T00:00:00Z" }]).label).toBe("최근 실패");
+    expect(callerNodeState({ ...failed, last_fail_cluster: undefined }, later).label).toBe("최근 실패");
+    expect(callerNodeState(failed, [{ name: "dmsk8s2", last_success_at: null }]).label).toBe("최근 실패");
+    // 그 뒤 이 노드가 성공했으면 실패 판정 자체가 없다
+    expect(callerNodeState({ ...failed, last_ok_at: "2026-10-28T00:00:00Z", serving: ["dmsk8s"] }, later).label)
+      .toBe("사용 중");
+  });
+  // 2026-10-28 리뷰: 「재확인 필요」는 secondary 의 대체·정규 실패에만 — primary 는 매 주기 스스로 다시 부르니 마지막 성공보다
+  // 나중인 실패는 지금 실패다(대체가 매번 메워 클러스터가 회복해 보여도). 확인 run 의 실패는 방금 확인한 결과다.
+  test("primary 의 실패·secondary 의 보조 연결 확인 실패는 클러스터가 회복해도 최근 실패", () => {
+    const later = [{ name: "dmsk8s2", last_success_at: "2026-10-26T03:29:06Z" }];
+    const primary = { ...base, role: "primary" as const, last_ok_at: "2026-10-25T00:00:00Z",
+                      last_fail_at: "2026-10-26T03:27:00Z", last_fail_cluster: "dmsk8s2", last_fail_trigger: "schedule" };
+    expect(callerNodeState(primary, later)).toEqual({ label: "최근 실패", variant: "bad" });
+    const checked = { ...primary, role: "secondary" as const, last_fail_trigger: "check" };
+    expect(callerNodeState(checked, later)).toEqual({ label: "최근 실패", variant: "bad" });
+    expect(pathUnverifiedSince(checked, later)).toBe(false);
+    expect(pathUnverifiedSince({ ...checked, last_fail_trigger: "schedule" }, later)).toBe(true);
+    expect(pathUnverifiedSince({ ...checked, role: null, last_fail_trigger: "failover" }, later)).toBe(false);
+  });
+  // 2026-10-28 2차 리뷰: 배지도 「마지막 실패」 칸과 같은 판정(failureResolved — 그 클러스터에 대한 이 노드의 그 뒤 성공)을
+  // 쓴다. 노드 단위 마지막 성공(다른 클러스터)으로 실패를 덮으면 칸은 빨간데 배지는 「대기」·「사용 중」이었다.
+  test("다른 클러스터의 나중 성공은 실패를 덮지 않는다 — 확인 묶음 앞 실패·뒤 성공이어도 결과는 순서와 무관", () => {
+    const at = (s: number) => new Date(Date.parse("2026-10-28T01:00:00Z") - s * 1000).toISOString();
+    // 같은 확인 묶음: dmsk8s(이름순 앞) 실패 40초 전 → dmsk8s2 성공 20초 전
+    const aFailBOk = { ...base, role: "secondary" as const, last_ok_at: at(20), last_fail_at: at(40),
+                       last_fail_cluster: "dmsk8s", last_fail_trigger: "check", last_fail_cluster_ok_at: at(3 * 86400) };
+    const clusters = [{ name: "dmsk8s", last_success_at: at(5) }, { name: "dmsk8s2", last_success_at: at(20) }];
+    expect(failureResolved(aFailBOk)).toBe(false);
+    expect(callerNodeState(aFailBOk, clusters)).toEqual({ label: "최근 실패", variant: "bad" });
+    // 순서만 반대(앞 성공 → 뒤 실패)여도 같은 배지
+    const aOkBFail = { ...aFailBOk, last_ok_at: at(40), last_fail_at: at(20), last_fail_cluster: "dmsk8s2",
+                       last_fail_cluster_ok_at: null };
+    expect(callerNodeState(aOkBFail, clusters)).toEqual({ label: "최근 실패", variant: "bad" });
+    // 대체 실패(클러스터는 이후 primary 로 회복) 뒤 다른 클러스터를 대체로 맡아 성공 — 「사용 중」이 아니라 「재확인 필요」
+    const failover = { ...aFailBOk, last_fail_trigger: "failover", serving: ["dmsk8s2"] };
+    expect(callerNodeState(failover, clusters)).toEqual({ label: "재확인 필요", variant: "action" });
+    // 그 클러스터에 그 뒤 성공했으면 해결 — 칸 없음(옛 응답)은 노드의 마지막 성공으로
+    expect(callerNodeState({ ...failover, last_fail_cluster_ok_at: at(10) }, clusters))
+      .toEqual({ label: "사용 중", variant: "ok" });
+    expect(failureResolved({ last_fail_at: at(40), last_ok_at: at(20) })).toBe(true);
+    expect(failureResolved({ last_fail_at: at(40), last_ok_at: at(20), last_fail_cluster_ok_at: null })).toBe(false);
+  });
+});
+
+test("보조 연결 확인 라벨·짧은 사유: 짧은 라벨이 있으면 그것, 없으면 사유 문장의 「 — 」 앞부분", () => {
+  expect(TRIGGER_LABEL.check).toBe("보조 연결 확인");
+  expect(shortReasonText("k8s_sync_unreachable")).toBe("API 서버 연결 실패");
+  expect(shortReasonText("k8s_sync_unreachable")).not.toContain("방화벽");
+  expect(shortReasonText("k8s_token_required")).toBe("API 토큰을 입력하세요");
+  expect(shortReasonText("zz_unknown")).toBe("zz_unknown");
+  expect(shortReasonText(null)).toBe("");
+  expect(isoAfter("2026-10-26T03:29:06Z", "2026-10-26T03:27:00Z")).toBe(true);
+  expect(isoAfter(null, "2026-10-26T03:27:00Z")).toBe(false);          // 모름을 「나중」으로 지어내지 않는다
+  expect(isoAfter("2026-10-26T03:27:00Z", undefined)).toBe(false);
 });
 
 test("warningText·changeNames·phaseVariant·storageKindOf", () => {

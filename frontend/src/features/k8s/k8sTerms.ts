@@ -3,7 +3,7 @@ import { ageDays } from "../../lib/datetime";
 import { validOwner } from "../../lib/syncOwnership";
 import type { PillVariant } from "../../lib/jobState";
 import type {
-  BindingRef, BindingSubject, CallerNode, ChangeEntry, RunWarning, StorageKind, UnrecognizedBinding,
+  BindingRef, BindingSubject, CallerNode, ChangeEntry, ClusterSummary, RunWarning, StorageKind, UnrecognizedBinding,
 } from "./types";
 
 // k8s 연동 화면의 용어·표기·라벨 **단일 출처**(설계 §1). 코드는 k8s 용어(pvc·volume)를 쓰고, 화면은 사용자 용어를 쓴다:
@@ -63,7 +63,31 @@ export function runStatusMeta(status: string): Meta {
   return RUN_STATUS[status] ?? { label: status, variant: "neutral", help: `알 수 없는 상태(${status})` };
 }
 
-export const TRIGGER_LABEL: Record<string, string> = { schedule: "정규", manual: "수동", failover: "대체 재시도" };
+export const TRIGGER_LABEL: Record<string, string> = {
+  schedule: "정규", manual: "수동", failover: "대체 재시도", check: "보조 연결 확인",
+};
+
+/** 동기화 실패 사유의 짧은 라벨 — 호출 노드 카드의 「이미 해결된 실패」·클러스터별 연결 줄처럼 조치 문구(방화벽 안내 등)까지
+ *  다 싣기엔 좁거나 지금 할 일이 아닌 자리. 지금 실패 중인 곳은 reasonText 전체를 쓴다. */
+export const SYNC_REASON_SHORT: Record<string, string> = {
+  k8s_sync_dns_failed: "API 서버 이름을 찾지 못함(DNS)",
+  k8s_sync_unreachable: "API 서버 연결 실패",
+  k8s_sync_tls_failed: "인증서 검증 실패(TLS)",
+  k8s_sync_unauthorized: "토큰 거부(401)",
+  k8s_sync_forbidden: "목록 권한 없음(403)",
+  k8s_sync_timeout: "시간 초과",
+  k8s_sync_list_expired: "목록 이어받기 만료(410)",
+  k8s_sync_too_large: "크기 상한 초과",
+  k8s_sync_bad_response: "응답 해석 실패",
+  k8s_sync_expired: "기한 안에 결과 없음",
+  k8s_sync_apply_failed: "결과 저장 실패",
+};
+
+/** 사유 코드 → 짧은 문구: 짧은 라벨이 있으면 그것, 없으면 사유 문장의 「 — 」 앞부분(조치 안내를 뺀 사실만). */
+export function shortReasonText(code: string | null | undefined): string {
+  if (!code) return "";
+  return SYNC_REASON_SHORT[code] ?? reasonText(code).split(" — ")[0];
+}
 export const ROLE_LABEL: Record<string, string> = { primary: "주", secondary: "보조" };
 export const TLS_MODE_LABEL: Record<string, string> = {
   ca: "지정한 CA로 검증", insecure: "검증 안 함", default: "시스템 기본 신뢰",
@@ -219,14 +243,54 @@ export function pvJobLink(cluster: string, ns: string, pvc: string): string {
   return `/jobs/new?pv=${[cluster, ns, pvc].map(encodeURIComponent).join("/")}`;
 }
 
-/** 호출 노드 카드의 상태 배지 — 보고 지연·미지원 에이전트·최근 실패·사용 중·대기. 노드가 목록에 없으면 「보고 없음」. */
-export function callerNodeState(n: CallerNode | undefined): { label: string; variant: PillVariant } {
+/** ISO 시각 a 가 b 보다 나중인가(둘 중 하나라도 모르면 false — 모름을 「나중」으로 지어내지 않는다). */
+export function isoAfter(a: string | null | undefined, b: string | null | undefined): boolean {
+  const x = a ? Date.parse(a) : NaN;
+  const y = b ? Date.parse(b) : NaN;
+  return !Number.isNaN(x) && !Number.isNaN(y) && x > y;
+}
+
+/** 그 클러스터가 이 시각 뒤에 (어느 노드로든) 동기화에 성공했나 — 클러스터 목록에 없거나 모르면 false. */
+export function clusterRecoveredAfter(clusters: Pick<ClusterSummary, "name" | "last_success_at">[] | undefined,
+                                      name: string | null | undefined, iso: string | null | undefined): boolean {
+  if (!name || !clusters) return false;
+  const c = clusters.find((x) => x.name === name);
+  return c !== undefined && isoAfter(c.last_success_at, iso);
+}
+
+/** 이 노드의 마지막 실패가 「지금 실패 중」이 아니라 「그 뒤로 이 경로가 확인되지 않았다」인가 — secondary 이고, 실패한
+ *  클러스터가 이후(다른 노드로) 회복했고, 그 실패가 보조 연결 확인(check) 자체가 아닐 때만. primary 는 매 주기 스스로 다시
+ *  부르므로 마지막 성공보다 나중인 실패는 지금 실패다(대체 재시도가 매번 메워 클러스터가 「정상」이어도 — 2026-10-28 리뷰).
+ *  확인 run 의 실패는 방금 재확인해 실패가 확정된 것이라 다시 확인하라고 하지 않는다(이 노드가 그 뒤 성공해야 풀린다). */
+export function pathUnverifiedSince(n: Pick<CallerNode, "role" | "last_fail_at" | "last_fail_cluster" | "last_fail_trigger">,
+                                    clusters: Pick<ClusterSummary, "name" | "last_success_at">[] | undefined): boolean {
+  return n.role === "secondary" && n.last_fail_trigger !== "check"
+    && clusterRecoveredAfter(clusters, n.last_fail_cluster, n.last_fail_at);
+}
+
+/** 이 노드의 마지막 실패가 그 뒤 해결됐나 — **그 클러스터**에 대한 이 노드의 그 뒤 성공(last_fail_cluster_ok_at)으로 잰다. 다른
+ *  클러스터의 성공으로 이 클러스터의 실패를 「해결됨」이라 하지 않는다(2026-10-28 2차 리뷰: 보조 연결 확인이 이름순으로 앞
+ *  클러스터에서 실패하고 뒤 클러스터에서 성공하면 노드 단위 마지막 성공이 더 나중이라, 「마지막 실패」는 빨간데 배지는 「대기」
+ *  였다). 설정 세대와 무관하다(토큰만 바꿔도 이미 해결된 실패가 다시 빨갛게 보이지 않게 — 지금 설정으로 닿았는지는 「클러스터별
+ *  연결」이 말한다). 옛 응답(칸 없음)은 노드의 마지막 성공(last_ok_at)으로. 「마지막 실패」 칸과 배지가 이 한 판정을 쓴다. */
+export function failureResolved(n: Pick<CallerNode, "last_fail_at" | "last_ok_at" | "last_fail_cluster_ok_at">): boolean {
+  return isoAfter(n.last_fail_cluster_ok_at === undefined ? n.last_ok_at : n.last_fail_cluster_ok_at, n.last_fail_at);
+}
+
+/** 호출 노드 카드의 상태 배지 — 보고 지연·미지원 에이전트·최근 실패(재확인 필요)·사용 중·대기. 노드가 목록에 없으면 「보고 없음」.
+ *  마지막 실패가 해결되지 않았어도(failureResolved) pathUnverifiedSince(secondary·클러스터는 이후 회복·확인 run 의 실패 아님)면
+ *  「재확인 필요」(action) — 지금 실패 중인 것은 아니지만 이 노드의 그 경로는 그 뒤로 검증되지 않았다(secondary 는 대체 때만
+ *  불려 오래 남는다 — 2026-10-28 사고). 클러스터 정보가 없으면(옛 응답·인자 생략) 종전대로 「최근 실패」. */
+export function callerNodeState(n: CallerNode | undefined,
+                                clusters?: Pick<ClusterSummary, "name" | "last_success_at">[]): { label: string; variant: PillVariant } {
   if (n === undefined) return { label: "보고 없음", variant: "bad" };
   if (!n.fresh) return { label: "보고 지연", variant: "bad" };
   if (!n.capable) return { label: "미지원 에이전트", variant: "action" };
   const fail = n.last_fail_at ? Date.parse(n.last_fail_at) : NaN;
-  const ok = n.last_ok_at ? Date.parse(n.last_ok_at) : NaN;
-  if (!Number.isNaN(fail) && (Number.isNaN(ok) || fail > ok)) return { label: "최근 실패", variant: "bad" };
+  if (!Number.isNaN(fail) && !failureResolved(n)) {
+    return pathUnverifiedSince(n, clusters)
+      ? { label: "재확인 필요", variant: "action" } : { label: "최근 실패", variant: "bad" };
+  }
   if (n.serving.length > 0) return { label: "사용 중", variant: "ok" };
   return { label: "대기", variant: "neutral" };
 }

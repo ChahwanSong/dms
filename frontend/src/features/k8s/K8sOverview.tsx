@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
+import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
+import { CircleCheck, CircleDashed, CircleX, LoaderCircle } from "lucide-react";
 import { Card } from "../../components/ui/Card";
 import { Button } from "../../components/ui/Button";
 import { Dialog } from "../../components/ui/Dialog";
@@ -14,16 +16,23 @@ import { ClusterDialog } from "./ClusterDialog";
 import { K8sHeader } from "./K8sTabs";
 import {
   INTERVAL_PRESETS, MIN_INTERVAL_SECONDS, ROLE_LABEL, TLS_MODE_LABEL, TOKEN_LABEL, TRIGGER_LABEL, callerNodeState,
-  clusterStatusMeta, countText, daysUntil, durationText, intervalText, plusSeconds, runStatusMeta, untilText, warningText,
+  clusterStatusMeta, countText, daysUntil, durationText, failureResolved, intervalText, isoAfter, pathUnverifiedSince,
+  plusSeconds,
+  runStatusMeta, shortReasonText, untilText, warningText,
 } from "./k8sTerms";
 import { Ago, DefList, DefRow, Mono, Stat, Tag } from "./parts";
 import {
-  useDeleteCluster, useK8sOverview, useSaveK8sSettings, useSyncAllClusters, useSyncCluster,
+  overviewPollMs, useCheckSecondary, useDeleteCluster, useK8sOverview, useSaveK8sSettings, useSyncAllClusters,
+  useSyncCluster,
 } from "./useK8s";
-import type { CallerNode, ClusterSummary, K8sOverview as Overview, NodeRole } from "./types";
+import type {
+  CallerClusterLink, CallerNode, ClusterSummary, K8sOverview as Overview, NodeRole,
+} from "./types";
 
 // k8s 연동 「개요」(설계 §7): 호출 노드(primary·secondary — 외부 k8s API 를 부르는 DMS 노드) · 동기화 주기 · 클러스터 카드.
-// 폴링은 useK8sOverview(평소 10초, 동기화 중 3초). 「n분 전」은 잎 부품(Ago)이 15초 틱으로 늙힌다.
+// 폴링은 useK8sOverview(평소 10초, 동기화 중 3초, 보조 연결 확인 대기 5초). 「n분 전」은 잎 부품(Ago)이 15초 틱으로 늙힌다.
+// 호출 노드 카드는 「이미 해결된 실패」(흐리게·짧게)와 「지금 실패」(빨갛게·조치까지)를 가르고, 클러스터별 연결로 secondary 가
+// 닿은 기록이 없는 클러스터(장애 넘김 경로 미확인)를 드러낸다(2026-10-28 사고 분석).
 // 상태 문구는 셋을 가른다: null(모름 — 아직 동기화 전·목록 권한 없음) = 「—」·「동기화 전」, 0 = 「0」, 실패 = 사유 문장.
 
 const errText = (e: unknown): string =>
@@ -166,8 +175,146 @@ function SettingsForm({ ov }: { ov: Overview }) {
   );
 }
 
-function NodeSlot({ role, name, node, offsetMs }: {
-  role: NodeRole; name: string | null; node: CallerNode | undefined; offsetMs: number;
+/** 「마지막 실패」 칸. 그 뒤 이 노드가 성공했으면 이미 해결된 일이라 흐린 글씨로 짧게(조치 문구 없이), 아니면 지금처럼 빨간 전체
+ *  사유. 어느 클러스터·계기의 실패인지 앞에 적는다(2026-10-28 사고 — 실험 클러스터 재시작 2분 동안의 수동 동기화 1건이 하루 뒤에도
+ *  방화벽 오류처럼 보였다). 「그 뒤 성공」은 **그 클러스터**에 대한 이 노드의 성공으로 잰다 — 배지와 같은 판정(k8sTerms.
+ *  failureResolved): 다른 클러스터의 성공으로 이 클러스터의 실패를 「해결됨」이라 하지 않는다. */
+function LastFailure({ node, clusters, offsetMs }: {
+  node: CallerNode | undefined; clusters: ClusterSummary[]; offsetMs: number;
+}) {
+  if (!node?.last_fail_at) return <span className="text-ink/70">없음</span>;
+  const trigger = node.last_fail_trigger ? (TRIGGER_LABEL[node.last_fail_trigger] ?? node.last_fail_trigger) : null;
+  const where = [node.last_fail_cluster, trigger].filter(Boolean).join(" ");
+  if (failureResolved(node)) {
+    return (
+      <span className="text-ink/70">
+        <Ago iso={node.last_fail_at} offsetMs={offsetMs} />
+        {where ? ` · ${where}` : ""}
+        {node.last_reason ? ` · ${shortReasonText(node.last_reason)}` : ""}
+        {" · 이후 성공해 해결됨"}
+      </span>
+    );
+  }
+  // 「그 뒤 확인되지 않음」은 secondary 의 대체·정규 실패에만(primary 는 매 주기 다시 부르고, 확인 run 의 실패는 방금 확인한
+  // 것이다 — k8sTerms.pathUnverifiedSince). 배지의 「재확인 필요」와 같은 조건.
+  const recovered = pathUnverifiedSince(node, clusters);
+  return (
+    <>
+      <span className="text-bad">
+        <Ago iso={node.last_fail_at} offsetMs={offsetMs} />
+        {where ? ` · ${where}` : ""}
+        {node.last_reason ? ` · ${reasonText(node.last_reason)}` : ""}
+      </span>
+      {recovered && (
+        <span className="block text-xs text-ink/70">
+          {`클러스터 ${node.last_fail_cluster} 는 이후 다른 노드로 회복했습니다 — 이 노드의 경로는 그 뒤 확인되지 않았습니다.`}
+        </span>
+      )}
+    </>
+  );
+}
+
+/** 「클러스터별 연결」 한 줄 — 이 노드가 그 클러스터의 지금 설정에 낸 마지막 run. 상태는 글자로도 읽힌다(아이콘·색만으로 가르지
+ *  않는다). null = 이 노드의 그 클러스터 호출 기록 없음(모름 — 실패가 아니다). 부른 적이 없을 수도, 주소·토큰을 바꾼 뒤 아직일
+ *  수도, 보존 정리(기본 30일)가 지웠을 수도 있어 「부른 적 없음」으로 단정하지 않는다. secondary 면 어느 쪽이든 「장애 넘김 경로
+ *  미확인」이다. 「클러스터는 이후 회복」은 그 실패가 클러스터 상태를 실패로 만든 경우에만 붙인다 — 보조 연결 확인(check)의
+ *  실패는 클러스터 상태를 (노드성 사유면) 바꾸지 않으니, 클러스터가 실패했다가 회복한 것처럼 읽히지 않게 뺀다(2026-10-28 2차
+ *  리뷰; 「마지막 실패」 칸의 pathUnverifiedSince 와 같은 거름). */
+function ClusterLinkRow({ link, role, cluster, offsetMs }: {
+  link: CallerClusterLink; role: NodeRole; cluster: ClusterSummary | undefined; offsetMs: number;
+}) {
+  const st = link.last_status;
+  let icon = <CircleDashed aria-hidden="true" className="mt-[3px] h-3.5 w-3.5 shrink-0 text-ink/50" />;
+  let body: ReactNode;
+  if (st === "ok") {
+    icon = <CircleCheck aria-hidden="true" className="mt-[3px] h-3.5 w-3.5 shrink-0 text-ok" />;
+    body = <span className="text-ok">성공 · <Ago iso={link.last_ok_at} offsetMs={offsetMs} /></span>;
+  } else if (st === "failed") {
+    icon = <CircleX aria-hidden="true" className="mt-[3px] h-3.5 w-3.5 shrink-0 text-bad" />;
+    const recovered = link.last_trigger !== "check" && isoAfter(cluster?.last_success_at, link.last_fail_at);
+    body = (
+      <>
+        <span className="text-bad">
+          실패 · <Ago iso={link.last_fail_at} offsetMs={offsetMs} />
+          {link.last_reason ? ` · ${shortReasonText(link.last_reason)}` : ""}
+        </span>
+        {recovered && <span className="text-ink/70"> — 클러스터는 이후 회복</span>}
+      </>
+    );
+  } else if (st === "running") {
+    icon = <LoaderCircle aria-hidden="true" className="mt-[3px] h-3.5 w-3.5 shrink-0 text-busy" />;
+    const t = link.last_trigger ? TRIGGER_LABEL[link.last_trigger] ?? link.last_trigger : null;
+    body = <span className="text-busy">{`진행 중${t ? `(${t})` : ""}`}</span>;
+  } else if (st === null || st === undefined) {
+    body = (
+      <>
+        <span className="text-ink/70">호출 기록 없음</span>
+        {role === "secondary" && cluster?.enabled !== false && <span className="text-attn"> — 장애 넘김 경로 미확인</span>}
+      </>
+    );
+  } else {
+    body = <span className="text-ink/70">{`상태 모름(${st})`}</span>;
+  }
+  return (
+    <li className="flex min-w-0 items-start gap-1.5">
+      {icon}
+      <span className="min-w-0 [overflow-wrap:anywhere]">
+        <span className="font-medium">{link.cluster}</span>
+        {cluster?.enabled === false && <span className="text-ink/70"> (동기화 꺼짐)</span>}
+        {" "}{body}
+      </span>
+    </li>
+  );
+}
+
+/** 보조 노드 「연결 확인」 — 장애 넘김 경로(방화벽에 이 노드 IP 허용)를 실제로 필요해지기 전에 확인한다(k8s_sync 「배정」 (3)).
+ *  가져갈 노드가 없으면(보고 없음·지연·미지원) 잠근다 — 서버도 409 k8s_sync_secondary_not_ready. 이미 걸린 요청이 있는데 보고가
+ *  끊겼거나 에이전트가 k8s 동기화를 지원하지 않으면 「다음 폴링 안에」라고 하지 않고 못 가져가는 이유를 적는다(빠른 재조회도
+ *  멈춘다 — useK8s.overviewPollMs, 2026-10-28 2차 리뷰). primary 가 없으면 보조 노드가 정규 노드라 정규 동기화가 곧 확인이다
+ *  (서버 409 k8s_sync_no_primary). */
+function CheckSecondary({ node, pollSeconds, primarySet }: {
+  node: CallerNode | undefined; pollSeconds: number; primarySet: boolean;
+}) {
+  const check = useCheckSecondary();
+  const pending = node?.check_pending ?? [];
+  const blockedWhy = node === undefined || node.reported === false
+    ? "보조 노드의 에이전트 보고가 없어 확인할 수 없습니다"
+    : !node.capable ? "보조 노드의 에이전트가 k8s 동기화를 지원하지 않아 확인할 수 없습니다"
+    : !node.fresh ? "보조 노드의 보고가 지연돼 확인할 수 없습니다 — 에이전트가 다시 보고하면 누를 수 있습니다"
+    : !primarySet ? "주 노드가 지정되지 않아 보조 노드가 정규 동기화를 맡고 있습니다 — 정규 동기화가 곧 연결 확인입니다"
+    : null;
+  const disabled = blockedWhy !== null || pending.length > 0 || check.isPending;
+  const left = `남은 클러스터 ${pending.join(", ")}`;
+  return (
+    <div className="min-w-0 space-y-1">
+      <div className="flex flex-wrap items-center gap-2">
+        <Button variant="outline" className="whitespace-nowrap" disabled={disabled} title={blockedWhy ?? undefined}
+                onClick={() => check.mutate()}>
+          {check.isPending ? "요청 중…" : "연결 확인"}
+        </Button>
+        <span role="status" className="min-w-0 text-xs [overflow-wrap:anywhere]">
+          {pending.length > 0 && node?.fresh && node.capable
+            ? <span className="text-ink/80">{`확인 요청됨 — 보조 노드가 다음 폴링(${pollSeconds}초) 안에 가져갑니다 · ${left}`}</span>
+            : pending.length > 0 && node?.fresh
+            ? <span className="text-attn">{`확인 요청됨 — 보조 노드의 에이전트가 k8s 동기화를 지원하지 않아 가져가지 못합니다 · ${left}`}</span>
+            : pending.length > 0
+            ? <span className="text-attn">{`확인 요청됨 — 보조 노드가 보고하지 않아 아직 가져가지 못했습니다 · ${left}`}</span>
+            : check.isError ? <span className="text-bad">{errText(check.error)}</span>
+            : blockedWhy !== null ? <span className="text-ink/70">{blockedWhy}</span>
+            : check.isSuccess ? <span className="text-ink/70">요청했습니다 — 결과는 위 「클러스터별 연결」에 보입니다</span>
+            : null}
+        </span>
+      </div>
+      <p className="text-xs text-ink/70">
+        보조 노드가 모든 클러스터 API 에 닿는지 지금 확인합니다(정규 동기화 1회와 같음, 연결 실패는 클러스터 상태를 바꾸지 않음).
+      </p>
+    </div>
+  );
+}
+
+function NodeSlot({ role, name, node, clusters, pollSeconds, primarySet, offsetMs }: {
+  role: NodeRole; name: string | null; node: CallerNode | undefined; clusters: ClusterSummary[]; pollSeconds: number;
+  primarySet: boolean; offsetMs: number;
 }) {
   const title = role === "primary" ? "주 호출 노드 · primary" : "보조 호출 노드 · secondary";
   if (name === null) {
@@ -182,7 +329,9 @@ function NodeSlot({ role, name, node, offsetMs }: {
       </div>
     );
   }
-  const st = callerNodeState(node);
+  const st = callerNodeState(node, clusters);
+  const byCluster = new Map(clusters.map((c) => [c.name, c]));
+  const links = node?.clusters ?? null;
   return (
     <div className="min-w-0 rounded-card border border-line px-4 py-3">
       <div className="flex items-start justify-between gap-2">
@@ -200,15 +349,26 @@ function NodeSlot({ role, name, node, offsetMs }: {
           </DefRow>
           <DefRow label="마지막 호출"><Ago iso={node?.last_claim_at} empty="아직 없음" offsetMs={offsetMs} /></DefRow>
           <DefRow label="마지막 성공"><Ago iso={node?.last_ok_at} empty="아직 없음" offsetMs={offsetMs} /></DefRow>
-          <DefRow label="마지막 실패">
-            {node?.last_fail_at
-              ? <span className="text-bad"><Ago iso={node.last_fail_at} offsetMs={offsetMs} />
-                  {node.last_reason ? ` · ${reasonText(node.last_reason)}` : ""}</span>
-              : <span className="text-ink/70">없음</span>}
-          </DefRow>
+          <DefRow label="마지막 실패"><LastFailure node={node} clusters={clusters} offsetMs={offsetMs} /></DefRow>
+          {/* 옛 서버 응답(clusters 칸 없음)이면 줄 자체를 그리지 않는다 -- 「호출 기록 없음」으로 지어내지 않게. */}
+          {links !== null && (
+            <DefRow label="클러스터별 연결">
+              {links.length === 0 ? <span className="text-ink/70">등록된 클러스터 없음</span> : (
+                <ul className="space-y-1">
+                  {links.map((l) => (
+                    <ClusterLinkRow key={l.cluster} link={l} role={role} cluster={byCluster.get(l.cluster)}
+                                    offsetMs={offsetMs} />
+                  ))}
+                </ul>
+              )}
+            </DefRow>
+          )}
           <DefRow label="맡은 클러스터">
             {node && node.serving.length > 0
-              ? <span className="flex flex-wrap gap-1">{node.serving.map((c) => <Tag key={c}>{c}</Tag>)}</span>
+              // 클러스터 이름은 63자까지 -- 꼬리표(whitespace-nowrap) 안에서도 줄을 바꿔 좁은 폭(390)을 뚫지 않게.
+              ? <span className="flex min-w-0 flex-wrap gap-1">{node.serving.map((c) => (
+                  <Tag key={c}><span className="min-w-0 whitespace-normal [overflow-wrap:anywhere]">{c}</span></Tag>
+                ))}</span>
               : <span className="text-ink/70">없음</span>}
           </DefRow>
           {node && !node.capable && (
@@ -218,6 +378,11 @@ function NodeSlot({ role, name, node, offsetMs }: {
           )}
         </DefList>
       </div>
+      {role === "secondary" && (
+        <div className="mt-3 border-t border-line pt-3">
+          <CheckSecondary node={node} pollSeconds={pollSeconds} primarySet={primarySet} />
+        </div>
+      )}
     </div>
   );
 }
@@ -226,6 +391,8 @@ function CallerNodesCard({ ov, offsetMs }: { ov: Overview; offsetMs: number }) {
   const byName = new Map(ov.nodes.map((n) => [n.node_name, n]));
   const { primary_node: p, secondary_node: s } = ov.settings;
   const others = ov.nodes.filter((n) => n.capable && n.node_name !== p && n.node_name !== s).map((n) => n.node_name);
+  const clusters = Array.isArray(ov.clusters) ? ov.clusters : [];
+  const poll = ov.settings.poll_seconds;
   return (
     <Card className="space-y-4">
       <div>
@@ -236,8 +403,10 @@ function CallerNodesCard({ ov, offsetMs }: { ov: Overview; offsetMs: number }) {
         </p>
       </div>
       <div className="grid gap-3 md:grid-cols-2">
-        <NodeSlot role="primary" name={p} node={p ? byName.get(p) : undefined} offsetMs={offsetMs} />
-        <NodeSlot role="secondary" name={s} node={s ? byName.get(s) : undefined} offsetMs={offsetMs} />
+        <NodeSlot role="primary" name={p} node={p ? byName.get(p) : undefined} clusters={clusters} pollSeconds={poll}
+                  primarySet={Boolean(p)} offsetMs={offsetMs} />
+        <NodeSlot role="secondary" name={s} node={s ? byName.get(s) : undefined} clusters={clusters} pollSeconds={poll}
+                  primarySet={Boolean(p)} offsetMs={offsetMs} />
       </div>
       {others.length > 0 && (
         <p className="text-xs text-ink/70">{`그 밖에 k8s 동기화를 선언한 노드: ${others.join(", ")}`}</p>
@@ -510,7 +679,7 @@ export function K8sOverview() {
             <div className="flex flex-wrap items-baseline justify-between gap-2">
               <h2 className="text-lg font-semibold">클러스터</h2>
               <span className="text-xs text-ink/70">
-                {`${intervalText(ov.settings.interval_seconds)}마다 동기화 · 화면은 ${clusters.some((c) => c.status === "syncing") ? 3 : 10}초마다 새로 읽습니다`}
+                {`${intervalText(ov.settings.interval_seconds)}마다 동기화 · 화면은 ${overviewPollMs(ov) / 1000}초마다 새로 읽습니다`}
               </span>
             </div>
             {clusters.length === 0 ? <EmptyClusters /> : (

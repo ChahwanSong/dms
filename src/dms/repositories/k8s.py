@@ -7,8 +7,9 @@
   - 스냅숏 4표(k8s_storage_classes·k8s_pvs·k8s_pvcs·k8s_role_bindings)와 StorageClass → 스토리지 매핑.
 
 동기화 흐름(누가 무엇을 쓰나):
-  - API(에이전트 라우트): claim(CAS 로 run 생성) · receive(결과 수용 -- 성공은 payload 만 저장, 실패는 클러스터 요약까지).
-    큰 스냅숏 적용을 API 단일 커넥션(db.py RLock)에서 하지 않는다.
+  - API(에이전트 라우트): claim(CAS 로 run 생성) · receive(결과 수용 -- 성공은 payload 만 저장, 실패는 클러스터 요약까지;
+    보조 연결 확인 run(trigger=check)의 노드성 실패는 요약 밖 -- _record_failure_in_txn). 큰 스냅숏 적용을 API 단일
+    커넥션(db.py RLock)에서 하지 않는다.
   - 컨트롤러 k8s-inventory 루프: apply_run(클러스터마다 가장 새 received 하나만, diff 적용 + 요약 갱신을 한 트랜잭션) ·
     expire_overdue · cleanup_orphans. 적용은 run 상태 CAS(received → applied 영향 1)로 멱등하다 -- 롤아웃 겹침으로 루프가 두 벌
     돌아도 같은 run 을 두 번 적용하지 않고, applied_run_seq 보다 오래된 run 은 superseded 로 닫아 스냅숏이 과거로 돌아가지 않는다.
@@ -30,6 +31,14 @@ from ..pv_paths import effective_template, resolve_root
 from .text_search import contains_pattern, search_tokens
 
 RUN_STATUSES = ("claimed", "received", "applied", "failed", "expired", "superseded", "discarded")
+# run 상태 → 호출 노드의 연결 판정(node_run_stats -- 개요의 호출 노드 카드·「클러스터별 연결」). superseded·discarded 는
+# 없다. 적용 실패(failed + k8s_sync_apply_failed)는 노드가 API 에 닿아 결과를 올린 뒤 컨트롤러 쪽에서 난 실패라 호출 노드의
+# 성공으로 센다(2026-10-28 리뷰 -- 연결이 멀쩡한 보조 경로가 「실패」로 찍혔다). SQL 두 식과 _caller_status 가 같은 규칙이다.
+_CALLER_STATUS = {"received": "ok", "applied": "ok", "failed": "failed", "expired": "failed", "claimed": "running"}
+_CALLER_OK_SQL = ("({r}.status IN ('received', 'applied') "
+                  "OR ({r}.status = 'failed' AND {r}.reason = 'k8s_sync_apply_failed'))")
+_CALLER_FAIL_SQL = ("({r}.status = 'expired' "
+                    "OR ({r}.status = 'failed' AND COALESCE({r}.reason, '') <> 'k8s_sync_apply_failed'))")
 PV_CAPABLE_KINDS = ("pv", "both")
 STORAGE_KINDS = ("filesystem", "pv", "both")
 # 스토리지 기본 소유 uid·gid 의 유효 범위(2026-10-26) -- execution_manifests.valid_owner 와 같은 상한(4294967295 = (uid_t)-1 은
@@ -69,6 +78,13 @@ SNAPSHOT_TABLES = tuple(spec[0] for spec in _SNAPSHOT)
 
 class RunClosed(Exception):
     """결과를 받을 수 없는 run(없음·다른 노드·이미 종단·기한 지남) -- 라우트가 409 로 바꾼다."""
+
+
+def _caller_status(status, reason) -> "str | None":
+    """run → 호출 노드의 연결 판정(ok·failed·running | None = 판정에 쓰지 않음). _CALLER_OK_SQL·_CALLER_FAIL_SQL 과 같은 규칙."""
+    if status == "failed" and reason == "k8s_sync_apply_failed":
+        return "ok"
+    return _CALLER_STATUS.get(status)
 
 
 def storage_kind(row) -> str:
@@ -220,7 +236,12 @@ class K8sRepository:
         return self._db.query_one("SELECT * FROM k8s_sync_settings WHERE id = 1")
 
     def update_settings(self, *, primary_node, secondary_node, interval_seconds, actor):
-        """세 칸을 통째로 쓴다(PUT 의미 -- 생략한 칸을 NULL 로 지우는 함정이 없도록 라우트가 세 값을 다 준다)."""
+        """세 칸을 통째로 쓴다(PUT 의미 -- 생략한 칸을 NULL 로 지우는 함정이 없도록 라우트가 세 값을 다 준다).
+
+        주·보조 중 하나라도 비우거나 보조 노드를 바꾸면 남은 보조 연결 확인 요청을 지운다(확인은 둘 다 있을 때만 뜻이 있다 --
+        k8s_sync 「배정」 (3); 아무도 가져가지 않는 요청이 남았다가 나중에 노드를 다시 지정했을 때 뜬금없이 돌지 않게). 요청은
+        그때의 보조 노드가 가져갈 수 있는지(보고·k8s 동기화 지원)를 라우트가 보고 받은 것이라 보조 노드가 바뀌면 그 판단이 낡는다
+        -- 미지원 노드로 바꾸면 요청이 영영 남아 화면이 「확인 요청됨」에 갇혔다(2026-10-28 2차 리뷰). 새 노드는 다시 요청한다."""
         now = utc_now_iso()
         with self._db.transaction():
             before = self.get_settings()
@@ -229,6 +250,8 @@ class K8sRepository:
                 """UPDATE k8s_sync_settings SET primary_node = :p, secondary_node = :s, interval_seconds = :i,
                        updated_by = :by, updated_at = :at WHERE id = 1""",
                 {"p": primary_node, "s": secondary_node, "i": interval_seconds, "by": actor, "at": now})
+            if primary_node is None or secondary_node is None or secondary_node != (before or {}).get("secondary_node"):
+                self._db.execute("UPDATE k8s_clusters SET check_requested_at = NULL WHERE check_requested_at IS NOT NULL")
             after = self.get_settings()
             self._audit("k8s_sync_settings", "update", "k8s_sync_settings", before, after, actor)
         return after
@@ -338,6 +361,22 @@ class K8sRepository:
         return self._db.execute_count(
             "UPDATE k8s_clusters SET sync_requested_at = :at WHERE name = :n", {"n": name, "at": utc_now_iso()}) == 1
 
+    def request_check(self, *, token_ok=None) -> list:
+        """「보조 연결 확인」(k8s_sync 「배정」 (3)): 활성이고 토큰이 있는(token_ok 를 주면 열 수 있는 -- claim 과 같은 거름)
+        클러스터 전부에 check_requested_at = 지금. 반환 = 요청한 클러스터 이름(이름순). 감사는 남기지 않는다(request_sync 와
+        같은 이유). 열 수 없는 토큰의 클러스터는 claim 이 영영 거르므로 요청에서 빼야 화면의 「확인 요청됨」이 남지 않는다."""
+        now = utc_now_iso()
+        names = []
+        with self._db.transaction():
+            for c in self._db.query("SELECT name, token_enc FROM k8s_clusters WHERE enabled = 1 ORDER BY name"):
+                if not c.get("token_enc") or (token_ok is not None and not token_ok(c["token_enc"])):
+                    continue
+                if self._db.execute_count(
+                        "UPDATE k8s_clusters SET check_requested_at = :at WHERE name = :n AND enabled = 1",
+                        {"n": c["name"], "at": now}) == 1:
+                    names.append(c["name"])
+        return names
+
     # --- 실행(run) ----------------------------------------------------------------------------------
 
     def active_cluster_names(self, now: str) -> set:
@@ -349,29 +388,46 @@ class K8sRepository:
 
     def claim(self, *, node_name, role, now, interval, primary_configured, token_ok, deadline_seconds):
         """이 노드가 지금 처리할 run 하나(없으면 None). 후보 = 활성·토큰 열림·활성 run 없음·claim_trigger 가 trigger 를 주는
-        클러스터, 대체(failover) → due 이른 순. 경합은 last_attempt_at CAS(+ config_rev)로 정리한다: 같은 클러스터를 두 노드가
-        동시에 집으면 한쪽만 영향 1 행을 얻는다. 토큰은 여기서 열지 않는다(token_ok 는 열 수 있는지만 본다)."""
+        클러스터, 대체(failover)·보조 연결 확인(check, 각자의 예약·요청 시각 순) → due 이른 순. 토큰은 여기서 열지 않는다
+        (token_ok 는 열 수 있는지만 본다).
+
+        경합은 CAS(+ config_rev)로 정리한다 -- 같은 클러스터를 두 노드가 동시에 집으면 한쪽만 영향 1 행을 얻는다:
+          - 정규·대체 claim 은 last_attempt_at = 지금(+ sync_requested_at·failover_after 를 지운다 -- 종전 그대로).
+          - 보조 연결 확인 claim 은 check_requested_at 만 지운다. last_attempt_at·sync_requested_at·failover_after 는 그대로
+            -- 확인이 primary 의 정규 일정을 밀거나 걸려 있던 「지금 동기화」·대체 예약을 삼키지 않게(2026-10-28 리뷰: 확인이
+            실패하면 그 요청들이 흔적 없이 사라지고 다음 정규 run 이 한 주기 밀렸다). 확인 요청은 이긴 claim 의 trigger 가
+            check 일 때만 지운다(primary 의 정규 claim 이 삼키지 않게).
+          두 CAS 는 서로 상대가 바꾸는 칸(last_attempt_at·check_requested_at)을 둘 다 WHERE 에 넣는다 -- 한쪽이 먼저 커밋하면
+          다른 쪽의 seen 이 낡아 진다. 후보 행은 활성 run 판정보다 **먼저** 읽는다: 그 사이 커밋된 claim 은 활성 판정이 보거나
+          (뒤에 읽었다) CAS 가 막는다(seen 이 낡았다). 반대 순서면 활성 판정 뒤에 커밋된 정규 claim 의 행(확인 요청이 남아 있다)을
+          새로 읽은 secondary 가 같은 클러스터에 두 번째 run 을 만들었다(2026-10-28 리뷰)."""
+        rows = self._db.query("SELECT * FROM k8s_clusters WHERE enabled = 1 ORDER BY name")
         active = self.active_cluster_names(now)
         candidates = []
-        for c in self._db.query("SELECT * FROM k8s_clusters WHERE enabled = 1 ORDER BY name"):
+        for c in rows:
             if c["name"] in active or not c.get("token_enc") or not token_ok(c["token_enc"]):
                 continue
             trigger = k8s_sync.claim_trigger(c, role=role, now=now, interval=interval,
                                              primary_configured=primary_configured)
             if trigger is None:
                 continue
-            order = c.get("failover_after") if trigger == "failover" else k8s_sync.due_at(c, interval)
-            candidates.append((0 if trigger == "failover" else 1, order or "", c["name"], c, trigger))
+            order = (c.get("failover_after") if trigger == "failover"
+                     else c.get("check_requested_at") if trigger == "check" else k8s_sync.due_at(c, interval))
+            candidates.append((0 if trigger in ("failover", "check") else 1, order or "", c["name"], c, trigger))
         candidates.sort(key=lambda t: t[:3])
         for _, _, _, c, trigger in candidates:
-            seen = c.get("last_attempt_at")
-            where = "last_attempt_at = :seen" if seen is not None else "last_attempt_at IS NULL"
+            seen, seen_check = c.get("last_attempt_at"), c.get("check_requested_at")
+            where = " AND ".join((
+                "last_attempt_at = :seen" if seen is not None else "last_attempt_at IS NULL",
+                "check_requested_at = :seen_check" if seen_check is not None else "check_requested_at IS NULL"))
+            sets = ("check_requested_at = NULL" if trigger == "check"
+                    else "last_attempt_at = :now, sync_requested_at = NULL, failover_after = NULL")
             run_id = uuid.uuid4().hex
             with self._db.transaction():
                 won = self._db.execute_count(
-                    f"""UPDATE k8s_clusters SET last_attempt_at = :now, sync_requested_at = NULL, failover_after = NULL
+                    f"""UPDATE k8s_clusters SET {sets}
                         WHERE name = :c AND enabled = 1 AND config_rev = :rev AND {where}""",
-                    {"now": now, "c": c["name"], "rev": c["config_rev"], "seen": seen})
+                    {"now": now, "c": c["name"], "rev": c["config_rev"], "seen": seen, "seen_check": seen_check})
                 if won != 1:
                     continue
                 self._db.execute(
@@ -389,7 +445,14 @@ class K8sRepository:
         return self._db.query_one(f"SELECT {cols} FROM k8s_sync_runs WHERE run_id = :r", {"r": run_id})
 
     def _record_failure_in_txn(self, run, *, reason, error, now, server_version=None) -> "int | None":
-        """실패 run 의 클러스터 요약 갱신(같은 config_rev 일 때만). 반환 = 갱신 전 연속 실패 수(갱신 안 했으면 None)."""
+        """실패 run 의 클러스터 요약 갱신(같은 config_rev 일 때만). 반환 = 갱신 전 연속 실패 수(갱신 안 했으면 None).
+
+        보조 연결 확인(trigger=check) run 의 노드성 실패(연결·DNS·시간 초과·기한 초과)는 갱신하지 않는다(k8s_sync.
+        touches_cluster_summary -- 배정 (3)): receive 실패·expire_overdue·fail_apply 세 길이 모두 여기를 지나므로 한 곳에서
+        거른다. None 이라 실패 전이 이벤트도 남지 않는다. 확인 run 이라도 어느 노드에서나 같은 실패(tls·401·403·적용 실패 등)는
+        정규 run 처럼 반영한다."""
+        if not k8s_sync.touches_cluster_summary(run.get("trigger"), reason):
+            return None
         cluster = self._db.query_one(f"SELECT * FROM k8s_clusters WHERE name = :c{self._lock}",
                                      {"c": run["cluster_name"]})
         if cluster is None or cluster["config_rev"] != run["config_rev"]:
@@ -655,27 +718,90 @@ class K8sRepository:
             f"SELECT {_RUN_LIST_COLUMNS} FROM k8s_sync_runs {clause} ORDER BY seq DESC LIMIT :lim", params)
 
     def latest_run_per_cluster(self) -> dict:
+        """클러스터 → 가장 최근 정규 경로 run(개요의 클러스터 카드 「마지막 실행」·호출 노드의 「맡은 클러스터」). 보조 연결
+        확인(trigger=check) run 은 뺀다 -- 확인 한 번(특히 실패)이 맡은 노드를 secondary 로 뒤집고 「정상」 카드에 빨간 실행을
+        띄웠다(2026-10-28 리뷰). 확인 결과는 node_run_stats 의 클러스터별 연결에 있다."""
         rows = self._db.query(
             f"""SELECT {_RUN_LIST_COLUMNS} FROM k8s_sync_runs
-                WHERE seq IN (SELECT MAX(seq) FROM k8s_sync_runs GROUP BY cluster_name)""")
+                WHERE seq IN (SELECT MAX(seq) FROM k8s_sync_runs WHERE trigger <> 'check' GROUP BY cluster_name)""")
         return {r["cluster_name"]: r for r in rows}
 
     def node_run_stats(self) -> dict:
-        """노드 → {last_claim_at, last_ok_at, last_fail_at, last_reason}(개요의 호출 노드 카드)."""
+        """노드 → {last_claim_at, last_ok_at, last_fail_at, last_reason, last_fail_cluster, last_fail_trigger,
+        last_fail_cluster_ok_at, clusters: {클러스터 이름 → {last_ok_at, last_fail_at, last_reason, last_trigger,
+        last_status}}}(개요의 호출 노드 카드).
+
+        (노드, 클러스터, 지금 설정인가) 묶음 집계 한 번 + 그 묶음의 「가장 최근 run」·「가장 최근 실패 run」 행 한 번 -- 노드
+        단위 값은 그 묶음들에서 고른다(노드×클러스터 N+1 없음). last_status 는 그 노드가 그 클러스터에 낸 가장 최근 run 의 연결
+        판정(_caller_status): ok(received·applied, 그리고 적용 실패 -- 노드는 API 에 닿아 결과를 올렸고 실패는 컨트롤러 쪽이다)
+        | failed(그 밖의 failed·expired) | running(claimed). superseded·discarded 는 판정에 쓰지 않는다(적용 단계에서 정해지는
+        상태라 노드 경로를 말하지 않는다 -- 드물다). 묶음이 없는 클러스터는 키가 없다(호출자가 None = 「호출 기록 없음」으로
+        채운다 -- 모름이지 실패가 아니다; 부른 적이 없거나 보존 정리 prune_runs 가 지웠다).
+
+        클러스터별 칸은 **지금 설정**의 run 만 센다 -- 지금 등록분(claimed_at >= 그 클러스터 created_at)이고 지금 설정 세대
+        (run.config_rev = 클러스터 config_rev -- 주소·TLS·CA·토큰을 바꾸면 +1)인 것. 같은 이름으로 지웠다 다시 등록하거나(1차
+        리뷰) PUT 으로 주소를 바꾼(2차 리뷰) 클러스터가 옛 설정의 성공을 물려받아, 새 주소에 한 번도 닿지 않은 secondary 가
+        「성공」으로 보였다(2026-10-28). 설정이 바뀌는 사이에 버려진(discarded) 확인 run 도 그래서 옛 성공으로 돌아가지 않고
+        「호출 기록 없음」이 된다. 설정 세대는 결과를 적용할지 가르는 기준과 같다(모듈 docstring 「config_rev」 -- 바뀌기 전
+        설정으로 가져온 결과는 적용하지 않는다). 등록 시각도 함께 보는 건 다시 등록하면 config_rev 가 0 부터라서다.
+        노드 단위 값(last_*)에는 지운 클러스터·옛 등록·옛 설정의 이력도 들어간다(종전과 같다). last_fail_cluster_ok_at 은 이 노드가
+        마지막 실패의 클러스터(이름)에 낸 가장 최근 성공이다 -- 설정 세대와 무관하다(「그 실패가 그 뒤 해결됐나」를 재는 값이라,
+        토큰만 바꿔도 이미 해결된 실패가 다시 빨갛게 보이지 않게; 지금 설정으로 닿았는지는 클러스터별 칸이 말한다). 실패가 없으면
+        키가 없다."""
+        cur = ("CASE WHEN {c}.created_at IS NOT NULL AND {r}.claimed_at >= {c}.created_at "
+               "AND {r}.config_rev = {c}.config_rev THEN 1 ELSE 0 END")
+        joined = "k8s_sync_runs {r} LEFT JOIN k8s_clusters {c} ON {c}.name = {r}.cluster_name"
+
+        def newest(where: str) -> str:
+            return (f"SELECT MAX(r2.seq) FROM {joined.format(r='r2', c='c2')} WHERE {where.format(r='r2')} "
+                    f"GROUP BY r2.node_name, r2.cluster_name, {cur.format(r='r2', c='c2')}")
+        judged = "{r}.status IN ('claimed', 'received', 'applied', 'failed', 'expired')"
         out: dict = {}
-        for r in self._db.query("SELECT node_name, MAX(claimed_at) AS t FROM k8s_sync_runs GROUP BY node_name"):
-            out.setdefault(r["node_name"], {})["last_claim_at"] = r["t"]
         for r in self._db.query(
-                """SELECT node_name, MAX(finished_at) AS t FROM k8s_sync_runs
-                   WHERE status IN ('received', 'applied') GROUP BY node_name"""):
-            out.setdefault(r["node_name"], {})["last_ok_at"] = r["t"]
+                f"""SELECT r.node_name, r.cluster_name, {cur.format(r='r', c='c')} AS cur, MAX(r.claimed_at) AS claim_at,
+                           MAX(CASE WHEN {_CALLER_OK_SQL.format(r='r')} THEN r.finished_at END) AS ok_at
+                    FROM {joined.format(r='r', c='c')}
+                    GROUP BY r.node_name, r.cluster_name, {cur.format(r='r', c='c')}"""):
+            node = out.setdefault(r["node_name"], {"clusters": {}, "_ok_by_cluster": {}})
+            ok_by = node["_ok_by_cluster"]
+            if r["ok_at"] is not None and (ok_by.get(r["cluster_name"]) or "") < r["ok_at"]:
+                ok_by[r["cluster_name"]] = r["ok_at"]
+            if r["cur"] == 1:
+                node["clusters"][r["cluster_name"]] = {"last_ok_at": r["ok_at"], "last_fail_at": None,
+                                                       "last_reason": None, "last_trigger": None, "last_status": None,
+                                                       "_last_seq": -1, "_fail_seq": -1}
+            if r["claim_at"] is not None and (node.get("last_claim_at") or "") < r["claim_at"]:
+                node["last_claim_at"] = r["claim_at"]
+            if r["ok_at"] is not None and (node.get("last_ok_at") or "") < r["ok_at"]:
+                node["last_ok_at"] = r["ok_at"]
         for r in self._db.query(
-                f"""SELECT node_name, finished_at, reason FROM k8s_sync_runs
-                    WHERE seq IN (SELECT MAX(seq) FROM k8s_sync_runs
-                                  WHERE status IN ('failed', 'expired') GROUP BY node_name)"""):
-            entry = out.setdefault(r["node_name"], {})
-            entry["last_fail_at"] = r["finished_at"]
-            entry["last_reason"] = r["reason"]
+                f"""SELECT r.seq, r.node_name, r.cluster_name, r.status, r.trigger, r.finished_at, r.reason,
+                           {cur.format(r='r', c='c')} AS cur
+                    FROM {joined.format(r='r', c='c')}
+                    WHERE r.seq IN ({newest(judged)}) OR r.seq IN ({newest(_CALLER_FAIL_SQL)})"""):
+            node = out.get(r["node_name"])
+            if node is None:           # 두 질의 사이에 새 노드가 생겼다 -- 다음 조회가 본다
+                continue
+            failed = _caller_status(r["status"], r["reason"]) == "failed"
+            if failed and r["seq"] > node.get("_fail_seq", -1):
+                node.update(_fail_seq=r["seq"], last_fail_at=r["finished_at"], last_reason=r["reason"],
+                            last_fail_cluster=r["cluster_name"], last_fail_trigger=r["trigger"])
+            entry = node["clusters"].get(r["cluster_name"]) if r["cur"] == 1 else None
+            if entry is None:          # 지운·옛 등록의 클러스터, 또는 두 질의 사이에 생긴 묶음
+                continue
+            if failed and r["seq"] > entry["_fail_seq"]:
+                entry.update(_fail_seq=r["seq"], last_fail_at=r["finished_at"], last_reason=r["reason"])
+            if r["seq"] > entry["_last_seq"]:
+                entry.update(_last_seq=r["seq"], last_trigger=r["trigger"],
+                             last_status=_caller_status(r["status"], r["reason"]))
+        for node in out.values():
+            node.pop("_fail_seq", None)
+            ok_by = node.pop("_ok_by_cluster")
+            if "last_fail_cluster" in node:
+                node["last_fail_cluster_ok_at"] = ok_by.get(node["last_fail_cluster"])
+            for entry in node["clusters"].values():
+                entry.pop("_last_seq")
+                entry.pop("_fail_seq")
         return out
 
     # --- 스냅숏 조회 ---------------------------------------------------------------------------------

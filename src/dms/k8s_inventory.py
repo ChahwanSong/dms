@@ -1,7 +1,9 @@
 """컨트롤러 k8s-inventory 루프(dms-k8s 설계 §4.5, 2026-10-25) -- DB 전용(외부 k8s API 를 부르지 않는다).
 
 한 틱(예산 TICK_BUDGET_SECONDS -- 루프 리스 max(10*3, 30)=30초 안):
-  (c) 기한(업로드 유예 포함)이 지난 claimed run → expired(k8s_sync_expired) + 클러스터 요약·primary 대체 예약.
+  (c) 기한(업로드 유예 포함)이 지난 claimed run → expired(k8s_sync_expired) + 클러스터 요약·primary 대체 예약(보조 연결
+      확인 run(trigger=check)은 run 만 닫고 요약·예약은 건드리지 않는다 -- 만료는 노드성 사유, k8s_sync 「배정」 (3)). 확인
+      run 의 적용 실패(b)는 정규처럼 요약에 남는다.
   (a) 클러스터마다 seq 가 가장 큰 received run 하나만 적용하고 더 오래된 received 는 superseded(payload 비움).
   (b) 적용 = repositories.k8s.K8sRepository.apply_run(diff 적용 + run applied + 클러스터 last_success·연속 실패 0 을 한
       트랜잭션). 예외면 롤백 후 별도 트랜잭션으로 failed(k8s_sync_apply_failed) -- 스냅숏은 이전 값 그대로.

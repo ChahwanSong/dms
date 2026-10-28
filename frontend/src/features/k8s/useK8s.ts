@@ -18,12 +18,19 @@ export const K8S_TOKEN_FIELD = "token_enc";
 export const K8S_KEY = ["k8s"] as const;
 export const OVERVIEW_KEY = ["k8s", "overview"] as const;
 
-/** 개요 폴링 간격: 평소 10초, 동기화 중인 클러스터가 있으면 3초(눌러 놓고 결과를 기다리는 동안 화면이 따라오게). */
+/** 개요 폴링 간격: 평소 10초, 동기화 중인 클러스터가 있으면 3초(눌러 놓고 결과를 기다리는 동안 화면이 따라오게), 보조 연결
+ *  확인을 보조 노드가 아직 가져가지 않았으면 5초(가져가는 순간 「진행 중」 → 결과가 바로 보이게 — 가져간 뒤엔 동기화 중 3초).
+ *  보고가 끊긴(fresh 아님) 노드·k8s 동기화를 지원하지 않는(capable 아님) 노드의 대기 요청은 가져갈 수 없으니 빠르게 다시 읽지
+ *  않는다(2026-10-28 리뷰·2차 리뷰 -- 페이지를 연 동안 5초 재조회가 끝없이 이어졌다). */
 export const OVERVIEW_POLL_MS = 10_000;
 export const OVERVIEW_SYNCING_POLL_MS = 3_000;
+export const OVERVIEW_CHECK_POLL_MS = 5_000;
 export function overviewPollMs(data: K8sOverview | undefined): number {
   const clusters = Array.isArray(data?.clusters) ? data!.clusters : [];
-  return clusters.some((c) => c.status === "syncing") ? OVERVIEW_SYNCING_POLL_MS : OVERVIEW_POLL_MS;
+  if (clusters.some((c) => c.status === "syncing")) return OVERVIEW_SYNCING_POLL_MS;
+  const nodes = Array.isArray(data?.nodes) ? data!.nodes : [];
+  return nodes.some((n) => n.fresh && n.capable && (n.check_pending ?? []).length > 0)
+    ? OVERVIEW_CHECK_POLL_MS : OVERVIEW_POLL_MS;
 }
 
 export const useK8sOverview = () =>
@@ -107,6 +114,17 @@ export const useSyncAllClusters = () => {
       return { requested: names.length - failed.length, failed };
     },
     onSettled: () => qc.invalidateQueries({ queryKey: OVERVIEW_KEY }),
+  });
+};
+
+/** 「보조 연결 확인」(POST /api/admin/k8s/secondary:check, require_admin — :sync 와 같은 등급) — 활성 클러스터 전부에 확인
+ *  요청을 걸고 보조 노드가 다음 폴링마다 하나씩 가져간다(정규 동기화 1회와 같음, 연결 실패는 클러스터 상태를 바꾸지 않음).
+ *  응답 = 요청한 클러스터 이름. 개요는 check_pending 동안 5초로 다시 읽는다(overviewPollMs). */
+export const useCheckSecondary = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => apiSend<{ requested: string[] }>("POST", "/api/admin/k8s/secondary:check"),
+    onSuccess: () => qc.invalidateQueries({ queryKey: OVERVIEW_KEY }),
   });
 };
 

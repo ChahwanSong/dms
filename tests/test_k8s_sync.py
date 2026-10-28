@@ -91,6 +91,35 @@ def test_disabled_cluster_is_never_claimed():
         assert ks.claim_trigger(c, role=role, now=NOW, interval=300, primary_configured=True) is None
 
 
+def test_rule3_connection_check_is_secondary_only_after_failover_before_due():
+    """보조 연결 확인(2026-10-28): secondary 전용, 대체 다음·due 앞. primary 는 절대 check 를 받지 않는다."""
+    kw = dict(interval=300, primary_configured=True)
+    c = _cluster(last_attempt_at="2026-10-25T11:59:00Z", check_requested_at="2026-10-25T11:59:30Z")   # due 전
+    assert ks.claim_trigger(c, role="secondary", now=NOW, **kw) == "check"
+    assert ks.claim_trigger(c, role="primary", now=NOW, **kw) is None
+    # primary 가 due 면 primary 는 정규(schedule·manual)로 받는다 -- 확인 요청은 secondary 몫으로 남는다
+    due = _cluster(last_attempt_at="2026-10-25T11:50:00Z", check_requested_at="2026-10-25T11:59:30Z")
+    assert ks.claim_trigger(due, role="primary", now=NOW, **kw) == "schedule"
+    assert ks.claim_trigger(due, role="secondary", now=NOW, **kw) == "check"
+    assert ks.claim_trigger({**due, "sync_requested_at": NOW}, role="primary", now=NOW, **kw) == "manual"
+    # 대체 예약이 때가 됐으면 대체가 먼저(같은 secondary 1회 -- 대체가 확인 요청보다 급하다)
+    fo = _cluster(failover_after="2026-10-25T11:59:40Z", check_requested_at="2026-10-25T11:59:30Z")
+    assert ks.claim_trigger(fo, role="secondary", now=NOW, **kw) == "failover"
+    # 꺼진 클러스터·지정되지 않은 노드는 받지 않는다
+    assert ks.claim_trigger({**c, "enabled": 0}, role="secondary", now=NOW, **kw) is None
+    assert ks.claim_trigger(c, role=None, now=NOW, **kw) is None
+    # primary 가 지정되지 않았으면 secondary 가 정규 노드다 -- 확인을 주지 않고 due 대로(2026-10-28 리뷰)
+    assert ks.claim_trigger(c, role="secondary", now=NOW, interval=300, primary_configured=False) is None
+    assert ks.claim_trigger(due, role="secondary", now=NOW, interval=300, primary_configured=False) == "schedule"
+    # 확인 run 의 노드성 실패만 클러스터 요약 밖이다 -- 어느 노드에서나 같은 실패(tls·401·적용 실패 등)는 반영
+    for reason in ks.FAILOVER_REASONS:
+        assert ks.touches_cluster_summary("check", reason) is False
+        assert all(ks.touches_cluster_summary(t, reason) for t in ("schedule", "manual", "failover", None))
+    for reason in ks.SYNC_REASONS - ks.FAILOVER_REASONS:
+        assert ks.touches_cluster_summary("check", reason) is True, reason
+    assert ks.touches_cluster_summary("check", "k8s_sync_apply_failed") is True
+
+
 # --- 상태 ----------------------------------------------------------------------------------------
 
 def _status(c, **kw):

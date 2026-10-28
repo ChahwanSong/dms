@@ -95,11 +95,15 @@ def test_reads_are_admin_writes_are_session_admin_and_sync_is_admin(client, repo
     # 일반 사용자는 관리자 조회도 못 한다
     _session(client, repos, "alice", "user")
     assert client.get("/api/admin/k8s/overview").status_code == 403
+    assert client.post("/api/admin/k8s/secondary:check").status_code == 403
     assert client.get("/api/user/k8s/volumes").status_code == 200
     client.cookies.clear()
     assert client.get("/api/user/k8s/volumes").status_code == 401
     # :sync 는 토큰 관리자도(스크립트) -- 없는 클러스터는 404
     assert client.post("/api/admin/k8s/clusters/c1:sync", headers=BEARER).json()["detail"] == "k8s_cluster_not_found"
+    # 보조 연결 확인도 토큰 관리자가 부를 수 있다(:sync 와 같은 등급) -- 여기선 secondary 가 없어 409
+    r = client.post("/api/admin/k8s/secondary:check", headers=BEARER)
+    assert r.status_code == 409 and r.json()["detail"] == "k8s_sync_no_secondary"
     _session(client, repos, "ops.admin", "admin")
     assert _create(client).status_code == 201
     client.cookies.clear()
@@ -451,6 +455,89 @@ def test_end_to_end_overview_runs_and_freshness(admin, repos, db):
     by = {c["name"]: c for c in admin.get("/api/admin/k8s/clusters").json()}
     assert by["c1-dns"]["duplicate_of"] == "c1" and by["c1"]["duplicate_of"] == "c1-dns"
     assert by["c1-dns"]["status"] == "never" and by["c1-dns"]["counts"] is None    # 모름 ≠ 0
+
+
+def test_secondary_check_route_and_overview_connection_fields(admin, repos, db):
+    """보조 연결 확인(2026-10-28): 요청 → 개요의 check_pending → secondary 가 check 로 가져감 → 실패해도 클러스터는 정상,
+    노드 카드에는 클러스터별 연결(마지막 실패 클러스터·계기)이 남는다."""
+    _full_sync(admin, repos)
+    nodes = {n["node_name"]: n for n in admin.get("/api/admin/k8s/overview").json()["nodes"]}
+    w1, w2 = nodes["k8s-w1"], nodes["k8s-w2"]
+    assert w1["clusters"] == [{"cluster": "c1", "last_ok_at": w1["last_ok_at"], "last_fail_at": None,
+                               "last_reason": None, "last_trigger": "schedule", "last_status": "ok"}]
+    # secondary 는 c1 을 부른 기록이 없다 -- null(모름)이지 실패가 아니다
+    assert w2["clusters"] == [{"cluster": "c1", "last_ok_at": None, "last_fail_at": None, "last_reason": None,
+                               "last_trigger": None, "last_status": None}]
+    assert w2["check_pending"] == [] and w2["last_fail_cluster"] is None and w2["last_fail_trigger"] is None
+    assert w2["last_fail_cluster_ok_at"] is None and w1["last_fail_cluster_ok_at"] is None   # 실패가 없다
+
+    r = admin.post("/api/admin/k8s/secondary:check")
+    assert r.status_code == 200 and r.json() == {"requested": ["c1"]}
+    ov = admin.get("/api/admin/k8s/overview").json()
+    nodes = {n["node_name"]: n for n in ov["nodes"]}
+    assert nodes["k8s-w2"]["check_pending"] == ["c1"] and nodes["k8s-w1"]["check_pending"] == []
+    assert ov["clusters"][0]["check_requested_at"] is not None
+    assert _claim(admin, "k8s-w1").json()["run"] is None                        # primary 는 check 를 받지 않는다
+    run = _claim(admin, "k8s-w2").json()["run"]
+    assert (run["trigger"], run["role"]) == ("check", "secondary")
+    nodes = {n["node_name"]: n for n in admin.get("/api/admin/k8s/overview").json()["nodes"]}
+    assert nodes["k8s-w2"]["check_pending"] == [] and nodes["k8s-w2"]["clusters"][0]["last_status"] == "running"
+    r = admin.post(f"/api/agent/k8s-sync/runs/{run['run_id']}",
+                   json={"node_name": "k8s-w2", "ok": False, "reason": "k8s_sync_unreachable",
+                         "error": "connection refused"}, headers=_agent("k8s-w2"))
+    assert r.json() == {"status": "failed"}
+    ov = admin.get("/api/admin/k8s/overview").json()
+    c = ov["clusters"][0]
+    assert (c["status"], c["consecutive_failures"], c["last_reason"], c["failover_after"]) == ("ok", 0, None, None)
+    w2 = {n["node_name"]: n for n in ov["nodes"]}["k8s-w2"]
+    assert (w2["last_fail_cluster"], w2["last_fail_trigger"], w2["last_reason"]) == ("c1", "check", "k8s_sync_unreachable")
+    assert w2["last_fail_cluster_ok_at"] is None            # c1 에 성공한 적이 없다 -- 그 실패는 해결되지 않았다
+    assert w2["clusters"][0]["last_status"] == "failed" and w2["clusters"][0]["last_trigger"] == "check"
+    assert db.query_one("SELECT COUNT(*) AS n FROM events WHERE event_type = 'k8s_sync_failing'")["n"] == 0
+    # 확인 run 은 맡은 클러스터·클러스터 카드의 마지막 실행에 쓰지 않는다(2026-10-28 리뷰 -- 확인 실패 한 번에 주·보조
+    # 표시가 뒤집히고 「정상」 카드에 빨간 실행이 떴다). 다음 정규 일정도 확인 시각으로 밀리지 않는다.
+    by = {n["node_name"]: n for n in ov["nodes"]}
+    assert by["k8s-w1"]["serving"] == ["c1"] and by["k8s-w2"]["serving"] == []
+    assert (c["last_run"]["node_name"], c["last_run"]["trigger"], c["last_run"]["status"]) == (
+        "k8s-w1", "schedule", "applied")
+    assert c["last_attempt_at"] == db.query_one("SELECT MIN(claimed_at) AS t FROM k8s_sync_runs")["t"]
+    # 409: 보조 노드 보고가 지연(가져갈 노드가 없다) · 확인할 클러스터가 없음(꺼짐) · primary 미지정 · secondary 미지정
+    db.execute("UPDATE agent_nodes SET reported_at = '2026-01-01T00:00:00Z' WHERE node_name = 'k8s-w2'")
+    r = admin.post("/api/admin/k8s/secondary:check")
+    assert r.status_code == 409 and r.json()["detail"] == "k8s_sync_secondary_not_ready"
+    _capable(admin, "k8s-w2", v=None)                                           # 보고는 새로 왔지만 미지원 에이전트
+    r = admin.post("/api/admin/k8s/secondary:check")
+    assert r.status_code == 409 and r.json()["detail"] == "k8s_sync_secondary_not_ready"
+    _capable(admin, "k8s-w2")
+    assert admin.put("/api/admin/k8s/clusters/c1", json={"enabled": False}).status_code == 200
+    r = admin.post("/api/admin/k8s/secondary:check")
+    assert r.status_code == 409 and r.json()["detail"] == "k8s_sync_nothing_to_check"
+    assert admin.put("/api/admin/k8s/clusters/c1", json={"enabled": True}).status_code == 200
+    assert admin.post("/api/admin/k8s/secondary:check").json() == {"requested": ["c1"]}
+    # 보조 노드를 바꾸면(보고된 적 있는 미지원 노드라도 저장은 된다) 남은 요청을 지운다 -- 그 요청은 옛 보조 노드를 보고
+    # 받았고, 미지원 노드는 영영 가져가지 않는다(2026-10-28 2차 리뷰)
+    _capable(admin, "k8s-w3", v=None)
+    assert admin.put("/api/admin/k8s/settings", json={"primary_node": "k8s-w1", "secondary_node": "k8s-w3",
+                                                      "interval_seconds": 300}).status_code == 200
+    ov = admin.get("/api/admin/k8s/overview").json()
+    assert ov["clusters"][0]["check_requested_at"] is None
+    w3 = {n["node_name"]: n for n in ov["nodes"]}["k8s-w3"]
+    assert (w3["role"], w3["capable"], w3["check_pending"]) == ("secondary", False, [])
+    assert admin.put("/api/admin/k8s/settings", json={"primary_node": "k8s-w1", "secondary_node": "k8s-w2",
+                                                      "interval_seconds": 300}).status_code == 200
+    assert admin.post("/api/admin/k8s/secondary:check").json() == {"requested": ["c1"]}
+    # primary 를 비우면 secondary 가 정규 노드다 -- 확인은 409, 남은 요청은 지워진다(가져갈 claim 이 없다)
+    assert admin.put("/api/admin/k8s/settings", json={"primary_node": None, "secondary_node": "k8s-w2",
+                                                      "interval_seconds": 300}).status_code == 200
+    r = admin.post("/api/admin/k8s/secondary:check")
+    assert r.status_code == 409 and r.json()["detail"] == "k8s_sync_no_primary"
+    ov = admin.get("/api/admin/k8s/overview").json()
+    assert ov["clusters"][0]["check_requested_at"] is None
+    assert {n["node_name"]: n for n in ov["nodes"]}["k8s-w2"]["check_pending"] == []
+    assert admin.put("/api/admin/k8s/settings", json={"primary_node": "k8s-w1", "secondary_node": None,
+                                                      "interval_seconds": 300}).status_code == 200
+    r = admin.post("/api/admin/k8s/secondary:check")
+    assert r.status_code == 409 and r.json()["detail"] == "k8s_sync_no_secondary"
 
 
 def test_storage_class_mapping_routes(admin, repos, db):

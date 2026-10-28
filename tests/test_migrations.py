@@ -760,7 +760,7 @@ def test_every_post_v1_column_rides_both_migration_paths(tmp_path):
     db = Database.connect(f"sqlite:///{tmp_path}/t.db")
     migrate(db)
     pairs = _ensure_pairs()
-    assert len(pairs) == 51      # 추출 자기 검증 -- 0 매치면 등식이 공허해진다(프록시 3 + 호스트 네트워크 1 + CA 1 + storages.user_enabled 1 + portal_subtitle 1 + batches.preview_round 1 + batches.auto_confirm_by 1 + accounts.root_granted 1 + data_jobs.pods_gc_at 1 + storages.kind 1 + requests.target_label 1 + storages.default_uid·default_gid 2 + builds.pods_gc_at 1 + data_jobs.artifacts_expired_at·request_purges.kind 2)
+    assert len(pairs) == 52      # 추출 자기 검증 -- 0 매치면 등식이 공허해진다(프록시 3 + 호스트 네트워크 1 + CA 1 + storages.user_enabled 1 + portal_subtitle 1 + batches.preview_round 1 + batches.auto_confirm_by 1 + accounts.root_granted 1 + data_jobs.pods_gc_at 1 + storages.kind 1 + requests.target_label 1 + storages.default_uid·default_gid 2 + builds.pods_gc_at 1 + data_jobs.artifacts_expired_at·request_purges.kind 2 + k8s_clusters.check_requested_at 1)
     for table, v1 in _V1_COLUMNS.items():
         cols = {r["name"] for r in db.query(f"PRAGMA table_info({table})")}
         ensured = {c for t, c, _ in pairs if t == table}
@@ -777,7 +777,7 @@ def test_ensure_columns_types_match_create_declarations(tmp_path):
     pairs = _ensure_pairs()
     # 추출 자기 검증을 이 테스트에도 둔다 -- 위 등식 테스트가 지워지거나 홀로
     # 실행될 때 정규식이 0 매치면 아래 루프가 공허하게 통과하기 때문이다.
-    assert len(pairs) == 51
+    assert len(pairs) == 52
     for table, column, coltype in pairs:
         assert _declared_type(db, table, column) == coltype, (table, column)
 
@@ -968,6 +968,34 @@ def test_migrate_adds_and_backfills_storage_default_owner_on_an_existing_db(db):
     migrate(db)                                     # 멱등 -- 정한 값(0 포함)은 그대로, NULL 칸만 채운다
     rows = {r["storage_name"]: (r["default_uid"], r["default_gid"]) for r in db.query("SELECT * FROM storages")}
     assert rows == {"old-a": (4294967294, 0), "old-b": (2000, 0)}
+
+
+def test_migrate_adds_check_requested_at_to_existing_k8s_clusters(db):
+    # 2026-10-28 보조 연결 확인: k8s_clusters 는 2026-10-25 에 태어나 기배포 DB 가 있다 -- CREATE 를 다시 안 타므로
+    # _ensure_columns 가 보태야 한다(슬라이스 14 의 실 500 교훈). 기존 행은 NULL(= 요청 없음, 종전 동작). CREATE 쪽 선언은
+    # 신규 DB 에서 _ensure_columns 가 흡수해 PRAGMA 로 못 가르므로 소스로 고정한다.
+    import inspect
+    import re
+    from dms import migrations
+    from dms.migrations import _column_exists
+    db.execute("DROP TABLE k8s_clusters")
+    db.execute("""CREATE TABLE k8s_clusters (name TEXT PRIMARY KEY, api_server TEXT NOT NULL, tls_server_name TEXT,
+        ca_pem TEXT, insecure_skip_tls_verify INTEGER NOT NULL DEFAULT 0, token_enc TEXT,
+        enabled INTEGER NOT NULL DEFAULT 1, fingerprint TEXT, sync_requested_at TEXT, last_attempt_at TEXT,
+        last_success_at TEXT, last_reason TEXT, last_error TEXT, consecutive_failures INTEGER NOT NULL DEFAULT 0,
+        server_version TEXT, failover_after TEXT, config_rev INTEGER NOT NULL DEFAULT 0, applied_run_seq INTEGER,
+        created_by TEXT NOT NULL, created_at TEXT NOT NULL, updated_by TEXT NOT NULL, updated_at TEXT NOT NULL)""")
+    db.execute("""INSERT INTO k8s_clusters (name, api_server, created_by, created_at, updated_by, updated_at)
+                  VALUES ('c1', 'https://a:6443', 'x', 't', 'x', 't')""")
+    migrate(db)
+    migrate(db)                                     # 멱등
+    assert _column_exists(db, "k8s_clusters", "check_requested_at")
+    if db.dialect != "postgresql":
+        assert _declared_type(db, "k8s_clusters", "check_requested_at") == "TEXT"
+    assert db.query_one("SELECT check_requested_at FROM k8s_clusters WHERE name = 'c1'")["check_requested_at"] is None
+    block = re.search(r'CREATE TABLE IF NOT EXISTS k8s_clusters \(.*?"""', inspect.getsource(migrations._apply_migrations),
+                      re.S)
+    assert block is not None and re.search(r"^\s*check_requested_at\s+TEXT\s*,", block.group(0), re.M)
 
 
 def test_k8s_tables_carry_no_request_or_job_reference_columns(tmp_path):

@@ -442,6 +442,11 @@ export const REASON_MESSAGES: Record<string, string> = {
   k8s_token_required: "API 토큰을 입력하세요 — API 서버 주소를 바꿀 때도 토큰을 다시 넣어야 합니다(공백·줄바꿈이 섞인 값은 받지 않습니다)",
   invalid_k8s_sync_settings: "호출 노드·주기 설정이 올바르지 않습니다 — 주기는 60초 이상이고, primary 와 secondary 는 서로 다른 노드여야 합니다",
   k8s_node_unknown: "보고된 적 없는 노드입니다 — 그 노드의 DMS 에이전트가 동작하는지 노드 화면에서 확인한 뒤 고르세요",
+  // 보조 연결 확인(2026-10-28, routes_k8s.check_secondary). reasonCodes.json 과 같은 커밋.
+  k8s_sync_no_secondary: "보조(secondary) 호출 노드가 지정되지 않았습니다 — 위 「호출 노드와 주기」에서 보조 노드를 먼저 고르세요",
+  k8s_sync_nothing_to_check: "확인할 클러스터가 없습니다 — 동기화가 켜져 있고 토큰을 열 수 있는 클러스터만 확인합니다",
+  k8s_sync_no_primary: "주(primary) 호출 노드가 지정되지 않았습니다 — 지금은 보조 노드가 정규 동기화를 맡고 있어 정규 동기화가 곧 연결 확인입니다",
+  k8s_sync_secondary_not_ready: "보조 노드의 에이전트가 보고하지 않거나(보고 지연) k8s 동기화를 지원하지 않아 확인 요청을 가져갈 수 없습니다 — 노드 화면에서 에이전트를 확인하세요",
   storage_class_not_found: "가져온 인벤토리에 없는 StorageClass 입니다 — 클러스터를 동기화한 뒤 다시 시도하세요",
   storage_not_pv_capable: "이 스토리지는 PV 를 담는 종류(PV·둘 다)가 아닙니다 — 스토리지 화면에서 종류를 바꾸거나 다른 스토리지를 고르세요",
   invalid_pv_path_template: "경로 템플릿이 올바르지 않습니다 — managed_root 기준 상대 경로에 {volume}·{pvc}·{namespace}·{storageclass}·{subdir}·{attr:키}·{handle:구분자:번호} 중 하나 이상을 쓰세요(백엔드에 기본 템플릿이 없으면 꼭 적어야 합니다)",

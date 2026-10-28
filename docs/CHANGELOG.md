@@ -95,6 +95,51 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ✅ k8s 연동 호출 노드 카드 — 해결된 실패 구분·클러스터별 연결·보조 연결 확인 — **완료**(2026-10-28)
+
+사용자 보고(「K8s 연동 메뉴 알림」): 개요(/admin/k8s)의 호출 노드 카드가 이미 해결된 실패를 지금 오류처럼 보였다. 라이브 분석 —
+k8s-w1(primary)은 마지막 호출·성공이 2분 전인데 「마지막 실패 1일 전 · 호출 노드에서 API 서버에 연결하지 못했습니다 — 방화벽…」이
+빨간색이었다(실제: 2026-10-26T03:26:51Z dmsk8s2 수동 동기화 1건이 실험 클러스터 컨테이너 재시작 2분 동안 Connection refused, 03:29:06 부터
+쭉 성공). k8s-w2(secondary)는 그 직후 대체 재시도 1건도 같은 이유로 실패했고, secondary 는 대체 때만 불려서 그 뒤 한 번도 안 불려
+`callerNodeState` 가 「최근 실패」(bad)에 45시간째 고착됐다. 정작 중요한 사실 — w2 는 10-26 에 등록한 dmsk8s2 에 **한 번도 성공한 적이
+없다**(장애 넘김 경로 미검증) — 은 화면 어디에도 없었다.
+
+- **보조 연결 확인(trigger `check`)**: `k8s_clusters.check_requested_at`(CREATE + `_ensure_columns` 이중 경로). `k8s_sync.claim_trigger`
+  배정 규칙 (3) — secondary 전용(주·보조가 둘 다 지정됐을 때만), 대체 다음·due 앞, primary 는 절대 받지 않는다. claim 은 대체와 같은
+  우선(0)으로 각자의 시각(failover_after·check_requested_at) 순 정렬하고, 이긴 claim 의 trigger 가 check 일 때만 요청을 지운다(primary 의
+  정규 claim·secondary 의 대체 claim 이 확인 요청을 삼키지 않게). 확인 claim 은 `check_requested_at` 만 지운다 — last_attempt_at·
+  sync_requested_at·failover_after 는 그대로(정규 일정을 밀거나 걸린 「지금 동기화」·대체 예약을 삼키지 않게). 두 CAS 는 서로 상대가
+  바꾸는 칸을 둘 다 WHERE 에 넣고, 후보 행을 활성 run 판정보다 먼저 읽는다(같은 클러스터에 run 이 둘 생기는 경합 차단). 확인 run 의
+  노드성 실패(연결·DNS·시간 초과·기한 초과 — `FAILOVER_REASONS`)는 클러스터 실패 요약(연속 실패·사유·오류)과 대체 예약을 건드리지
+  않는다(`k8s_sync.touches_cluster_summary` — `_record_failure_in_txn` 한 곳이 receive·expire_overdue·fail_apply 세 길을 거른다; 실패
+  전이 이벤트도 없다). tls·401·403·적용 실패처럼 어느 노드에서나 같은 실패는 확인 run 이라도 정규처럼 기록한다. 성공은 정규와 같다.
+  라우트 `POST /api/admin/k8s/secondary:check`(require_admin — `:sync` 와 같은 등급) → 활성이고 토큰을 열 수 있는 클러스터 전부 요청,
+  409 `k8s_sync_no_secondary`·`k8s_sync_no_primary`·`k8s_sync_secondary_not_ready`(보조 노드 보고 지연·없음·미지원 — 가져갈 노드가
+  없는 요청이 무기한 남지 않게)·`k8s_sync_nothing_to_check`(reasonCodes.json·REASON_MESSAGES 양쪽). 주·보조 중 하나를 비우거나 보조
+  노드를 바꾸면 남은 요청을 지운다(`update_settings` — 요청은 그때의 보조 노드가 가져갈 수 있는지 보고 받았다; 미지원 노드로 바꾸면
+  요청이 영영 남았다).
+- **노드 통계 확장**(`node_run_stats` — (노드, 클러스터, 지금 설정) GROUP BY 한 번 + 최근 run·최근 실패 run 행 한 번): 노드의
+  `last_fail_cluster`·`last_fail_trigger`·`last_fail_cluster_ok_at`(마지막 실패의 클러스터에 대한 이 노드의 가장 최근 성공 — 설정
+  세대 무관, 「그 실패가 그 뒤 해결됐나」의 값), 노드 × 지금 있는 클러스터마다 `{last_ok_at, last_fail_at, last_reason, last_trigger,
+  last_status}`(ok·failed·running·null = 호출 기록 없음 — 부른 적 없거나 보존 정리가 지웠다, 모름이지 실패가 아니다; superseded·
+  discarded 는 판정에 쓰지 않는다; 적용 실패는 노드가 닿았으니 ok). 클러스터별 칸은 **지금 설정**의 run 만 센다 — 그 클러스터
+  created_at 이후이고 run.config_rev = 클러스터 config_rev(같은 이름으로 다시 등록하거나 PUT 으로 주소·TLS·토큰을 바꾼 클러스터가 옛
+  설정의 성공을 물려받아 새 주소에 닿은 적 없는 secondary 가 「성공」으로 보이지 않게; 설정이 바뀌는 사이 버려진 확인 run 도 옛
+  성공으로 돌아가지 않고 「호출 기록 없음」). secondary 의 `check_pending`. 클러스터 요약에 `check_requested_at`.
+  클러스터 카드의 마지막 실행·「맡은 클러스터」는 확인 run 을 빼고 고른다(`latest_run_per_cluster` — 확인 한 번이 주·보조 표시를
+  뒤집지 않게).
+- **포탈**: 「마지막 실패」는 그 뒤 성공했으면(**그 클러스터**에 대한 이 노드의 성공 `last_fail_cluster_ok_at` 으로 잰다 — 다른
+  클러스터의 성공으로 「해결됨」이라 하지 않게; 배지도 같은 판정 `k8sTerms.failureResolved` 하나를 쓴다) 흐린 글씨로 「언제 · 클러스터 계기 · 짧은 사유 · 이후 성공해 해결됨」(조치 문구 없음 —
+  `k8sTerms.SYNC_REASON_SHORT`·`shortReasonText`), 해결 안 된 실패는 빨간 전체 사유 + 클러스터 이름. 배지는 secondary 이고 실패한
+  클러스터가 이후 다른 노드로 회복했고 그 실패가 확인 run 자체가 아니면 「재확인 필요」(action — `pathUnverifiedSince`; primary 는 매
+  주기 스스로 다시 부르므로 그 실패는 늘 「최근 실패」). 「클러스터별 연결」 줄(성공·실패·진행 중·호출 기록 없음 — secondary 면 「장애
+  넘김 경로 미확인」; 아이콘 + 글자; 「클러스터는 이후 회복」 꼬리표는 보조 연결 확인의 실패엔 붙이지 않는다 — 클러스터는 실패한 적이
+  없다). secondary 슬롯의 「연결 확인」 버튼(`useCheckSecondary`): 요청이 남은 동안 잠그고 개요를 5초로 다시
+  읽는다(`overviewPollMs` — 보고가 끊기거나 k8s 동기화를 지원하지 않는 노드의 요청은 빠르게 읽지 않고 못 가져가는 이유를 안내),
+  보고 없음·지연·미지원·
+  primary 미지정이면 잠그고 이유를 적는다. 맡은 클러스터 꼬리표는 긴 이름도 줄을 바꾼다(390px 가로 넘침 없음 — 빌드한 포탈을 가짜 API 로
+  실 Chrome 에서 확인). 동기화 이력의 계기 칸은 `TRIGGER_LABEL` 하나로 「보조 연결 확인」을 읽는다.
+
 ### ✅ dms-ssc 이식 — mpifileutils 7a3189c · d190 · d191(경로 봉쇄 통일) · d192 · d193 — **완료·실증**(2026-10-28, d9)
 
 DMS-SSC 세션 인계(`origin/dms-ssc:docs/history/handoff-2026-10-28-dms-k8s.md` — 0절 순서 핀 → d190 → d191 → d192 → d193)를 dms-k8s

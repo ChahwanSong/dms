@@ -446,6 +446,8 @@ def _apply_migrations(db: Database) -> None:
         # k8s_clusters: 등록한 외부 클러스터. 토큰은 secret_box 봉인(token_enc)으로만. config_rev 는 주소·토큰·TLS 가 바뀔 때
         # +1 -- 바뀌기 전에 가져온 결과(run.config_rev 가 다름)는 적용하지 않고 버린다(discarded). applied_run_seq 는 마지막으로
         # 적용한 run 의 seq(그보다 오래된 run 은 superseded). failover_after 는 primary 의 노드성 실패 뒤 secondary 1회 대체 시각.
+        # check_requested_at(2026-10-28)은 「보조 연결 확인」 요청 시각 -- secondary 가 그 클러스터를 trigger=check 로 1회 가져가면
+        # 지운다(k8s_sync 「배정」 (3)). NULL = 요청 없음.
         """CREATE TABLE IF NOT EXISTS k8s_clusters (
             name TEXT PRIMARY KEY,
             api_server TEXT NOT NULL,
@@ -463,6 +465,7 @@ def _apply_migrations(db: Database) -> None:
             consecutive_failures INTEGER NOT NULL DEFAULT 0,
             server_version TEXT,
             failover_after TEXT,
+            check_requested_at TEXT,
             config_rev INTEGER NOT NULL DEFAULT 0,
             applied_run_seq INTEGER,
             created_by TEXT NOT NULL,
@@ -932,6 +935,9 @@ def _ensure_columns(db):
         # ALTER 로 NULL 이 되므로 migrate 가 _backfill_storage_default_owner 로 0(= root:root, 사용자 지정 기본값)을 채운다.
         ("storages", "default_uid", "BIGINT"),
         ("storages", "default_gid", "BIGINT"),
+        # 보조 노드 연결 확인 요청 시각(2026-10-28 dms-k8s) -- 이중 경로 규약(k8s_clusters 는 2026-10-25 에 태어나 기배포 DB 가
+        # 있다). 기배포 행은 NULL = 요청 없음(종전 동작). 백필하지 않는다.
+        ("k8s_clusters", "check_requested_at", "TEXT"),
     ):
         if not _column_exists(db, table, column):
             db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")

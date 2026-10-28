@@ -399,6 +399,365 @@ def test_recovery_event_after_failures(repos, db):
     assert repos.k8s.get_cluster("c1")["consecutive_failures"] == 0
 
 
+# --- 보조 연결 확인(2026-10-28, k8s_sync 「배정」 (3)) ------------------------------------------------
+
+def test_request_check_marks_enabled_clusters_with_an_openable_token(repos, db):
+    for name, enc, enabled in (("c2", "v1:bad", True), ("c3", None, True), ("c4", "v1:x", False)):
+        repos.k8s.create_cluster(name=name, api_server="https://a:6443", tls_server_name=None, ca_pem=None,
+                                 insecure_skip_tls_verify=False, token_enc=enc, enabled=enabled, actor="ops")
+    audits = db.query_one("SELECT COUNT(*) AS n FROM audit_log")["n"]
+    assert repos.k8s.request_check(token_ok=lambda enc: enc != "v1:bad") == ["c1"]   # 못 여는 토큰은 claim 이 영영 거른다
+    assert repos.k8s.request_check() == ["c1", "c2"]                                   # 거름 없음 = 토큰이 있기만 하면
+    rows = {r["name"]: r["check_requested_at"] for r in db.query("SELECT name, check_requested_at FROM k8s_clusters")}
+    assert rows["c1"] and rows["c2"] and rows["c3"] is None and rows["c4"] is None
+    assert db.query_one("SELECT COUNT(*) AS n FROM audit_log")["n"] == audits         # 감사 없음(request_sync 와 같다)
+
+
+def test_check_claim_clears_the_request_but_a_primary_claim_does_not(repos, db):
+    repos.k8s.request_check()
+    got = _claim(repos)                                                    # primary 정규(due = 생성 시각)가 먼저
+    assert got["run"]["trigger"] == "schedule"
+    assert repos.k8s.get_cluster("c1")["check_requested_at"] is not None   # 확인 요청을 삼키지 않는다
+    assert _claim(repos, node="k8s-w2", role="secondary", now=iso_plus(T0, 1)) is None   # 활성 run 동안은 못 받는다
+    repos.k8s.receive(got["run"]["run_id"], node_name="k8s-w1", now=iso_plus(T0, 5), ok=True, data=fixture_data())
+    run_inventory_once(repos, None, now=iso_plus(T0, 6))
+    chk = _claim(repos, node="k8s-w2", role="secondary", now=iso_plus(T0, 10))
+    assert (chk["run"]["trigger"], chk["run"]["role"]) == ("check", "secondary")
+    c = repos.k8s.get_cluster("c1")
+    assert c["check_requested_at"] is None and c["last_attempt_at"] == T0   # 확인은 primary 의 정규 일정을 밀지 않는다
+    # 성공은 정규 동기화와 같다(적용·last_success_at)
+    repos.k8s.receive(chk["run"]["run_id"], node_name="k8s-w2", now=iso_plus(T0, 12), ok=True, data=fixture_data())
+    assert run_inventory_once(repos, None, now=iso_plus(T0, 13))["applied"] == 1
+    assert repos.k8s.get_cluster("c1")["last_success_at"] == iso_plus(T0, 12)
+    # 다음 정규 주기는 그대로 primary(secondary 는 due + 90초 전엔 못 받는다)
+    assert _claim(repos, node="k8s-w2", role="secondary", now=iso_plus(T0, 310)) is None
+    assert _claim(repos, now=iso_plus(T0, 310))["run"]["trigger"] == "schedule"
+
+
+def test_check_claims_order_with_failover_ahead_of_regular_due(repos, db):
+    """secondary 의 후보 정렬: 대체·확인(우선 0, 각자의 예약·요청 시각 순) → 정규 due."""
+    repos.k8s.create_cluster(name="c0", api_server="https://a:6443", tls_server_name=None, ca_pem=None,
+                             insecure_skip_tls_verify=False, token_enc="v1:x", enabled=True, actor="ops")
+    db.execute("UPDATE k8s_clusters SET created_at = :t", {"t": iso_plus(T0, -1000)})    # 둘 다 정규 due 도 지났다
+    db.execute("UPDATE k8s_clusters SET check_requested_at = :t WHERE name = 'c1'", {"t": iso_plus(T0, -5)})
+    first = _claim(repos, node="k8s-w2", role="secondary")
+    assert (first["cluster"]["name"], first["run"]["trigger"]) == ("c1", "check")
+    second = _claim(repos, node="k8s-w2", role="secondary")
+    assert (second["cluster"]["name"], second["run"]["trigger"]) == ("c0", "schedule")
+
+
+def test_check_failure_or_expiry_leaves_the_cluster_summary_alone(repos, db):
+    _sync(repos)                                                           # primary 정상 동기화 1회
+    before = repos.k8s.get_cluster("c1")
+    repos.k8s.request_check()
+    now = iso_plus(T0, 20)
+    chk = _claim(repos, node="k8s-w2", role="secondary", now=now)
+    res = repos.k8s.receive(chk["run"]["run_id"], node_name="k8s-w2", now=now, ok=False,
+                            reason="k8s_sync_unreachable", error="connection refused", server_version="v9")
+    assert res["status"] == "failed" and res["previous_failures"] is None
+    run = repos.k8s.get_run(chk["run"]["run_id"])
+    assert (run["status"], run["reason"], run["error"]) == ("failed", "k8s_sync_unreachable", "connection refused")
+    c = repos.k8s.get_cluster("c1")
+    assert (c["consecutive_failures"], c["last_reason"], c["last_error"], c["failover_after"], c["server_version"]) == (
+        0, None, None, None, before["server_version"])
+    # 기한 초과(expired)도 run 만 닫는다 -- 요약·대체 예약 없음, 실패 전이 이벤트 없음
+    repos.k8s.request_check()
+    chk2 = _claim(repos, node="k8s-w2", role="secondary", now=iso_plus(T0, 30))
+    assert run_inventory_once(repos, None, now=iso_plus(T0, 181))["expired"] == 1
+    assert repos.k8s.get_run(chk2["run"]["run_id"])["status"] == "expired"
+    c = repos.k8s.get_cluster("c1")
+    assert (c["consecutive_failures"], c["last_reason"], c["failover_after"], c["last_success_at"]) == (
+        0, None, None, before["last_success_at"])
+    assert db.query_one("SELECT COUNT(*) AS n FROM events WHERE component = 'k8s-sync'")["n"] == 0
+    # 클러스터가 이미 실패 중이어도 확인 run 의 실패가 연속 실패를 더하지 않는다
+    db.execute("UPDATE k8s_clusters SET consecutive_failures = 2, last_reason = 'k8s_sync_tls_failed'")
+    repos.k8s.request_check()
+    chk3 = _claim(repos, node="k8s-w2", role="secondary", now=iso_plus(T0, 200))
+    repos.k8s.receive(chk3["run"]["run_id"], node_name="k8s-w2", now=iso_plus(T0, 201), ok=False,
+                      reason="k8s_sync_timeout")
+    c = repos.k8s.get_cluster("c1")
+    assert (c["consecutive_failures"], c["last_reason"], c["failover_after"]) == (2, "k8s_sync_tls_failed", None)
+
+
+def test_check_failures_that_any_node_would_see_are_recorded(repos, db, monkeypatch):
+    """확인 run 이라도 노드 경로와 무관한 실패(적용 실패·401 등 -- 어느 노드에서나 같다)는 정규 run 처럼 요약에 남는다
+    (2026-10-28 리뷰: 적용 실패까지 빼자 클러스터는 「정상」인데 스냅숏은 갱신되지 않았다)."""
+    _sync(repos)
+    repos.k8s.request_check()
+    chk = _claim(repos, node="k8s-w2", role="secondary", now=iso_plus(T0, 20))
+    data = fixture_data()
+    data["pvcs"].append({**data["pvcs"][0], "name": "brand-new"})
+    repos.k8s.receive(chk["run"]["run_id"], node_name="k8s-w2", now=iso_plus(T0, 21), ok=True, data=data)
+
+    def boom(*a, **k):
+        raise RuntimeError("constraint")
+    monkeypatch.setattr(repos.k8s, "_insert_many", boom)
+    assert run_inventory_once(repos, None, now=iso_plus(T0, 22))["failed"] == 1
+    monkeypatch.undo()
+    c = repos.k8s.get_cluster("c1")
+    assert (c["consecutive_failures"], c["last_reason"], c["failover_after"]) == (1, "k8s_sync_apply_failed", None)
+    assert [e["event_type"] for e in db.query("SELECT event_type FROM events WHERE component = 'k8s-sync'")] == [
+        "k8s_sync_failing"]
+    assert repos.k8s.node_run_stats()["k8s-w2"]["clusters"]["c1"]["last_status"] == "ok"   # 연결은 됐다
+    repos.k8s.request_check()
+    chk2 = _claim(repos, node="k8s-w2", role="secondary", now=iso_plus(T0, 30))
+    res = repos.k8s.receive(chk2["run"]["run_id"], node_name="k8s-w2", now=iso_plus(T0, 31), ok=False,
+                            reason="k8s_sync_unauthorized", http_status=401)
+    assert res["previous_failures"] == 1
+    c = repos.k8s.get_cluster("c1")
+    assert (c["consecutive_failures"], c["last_reason"], c["failover_after"]) == (2, "k8s_sync_unauthorized", None)
+
+
+def _run_row(db, seq, node, cluster, trigger, status, *, reason=None):
+    t = iso_plus(T0, seq)
+    db.execute("""INSERT INTO k8s_sync_runs (seq, run_id, cluster_name, node_name, role, trigger, status, claimed_at,
+                      deadline_at, finished_at, reason, config_rev)
+                  VALUES (:seq, :r, :c, :n, 'primary', :tr, :st, :t, :t, :fin, :reason, 0)""",
+               {"seq": seq, "r": f"r{seq}", "c": cluster, "n": node, "tr": trigger, "st": status, "t": t,
+                "fin": None if status == "claimed" else t, "reason": reason})
+
+
+def test_node_run_stats_reports_per_cluster_connection(repos, db):
+    repos.k8s.create_cluster(name="c2", api_server="https://a:6443", tls_server_name=None, ca_pem=None,
+                             insecure_skip_tls_verify=False, token_enc="v1:x", enabled=True, actor="ops")
+    db.execute("UPDATE k8s_clusters SET created_at = :t", {"t": iso_plus(T0, -60)})
+    _run_row(db, 1, "k8s-w1", "c1", "schedule", "applied")
+    _run_row(db, 2, "k8s-w1", "c2", "manual", "failed", reason="k8s_sync_unreachable")
+    _run_row(db, 3, "k8s-w1", "c2", "schedule", "applied")                       # c2 실패는 이후 해결
+    _run_row(db, 4, "k8s-w2", "c2", "failover", "failed", reason="k8s_sync_unreachable")
+    _run_row(db, 5, "k8s-w2", "c1", "check", "claimed")
+    _run_row(db, 6, "k8s-w1", "c1", "manual", "discarded")                       # 연결 판정에 쓰지 않는다
+    _run_row(db, 7, "k8s-w1", "gone", "schedule", "expired", reason="k8s_sync_expired")   # 지운 클러스터
+    stats = repos.k8s.node_run_stats()
+    w1, w2 = stats["k8s-w1"], stats["k8s-w2"]
+    assert (w1["last_claim_at"], w1["last_ok_at"], w1["last_fail_at"], w1["last_reason"]) == (
+        iso_plus(T0, 7), iso_plus(T0, 3), iso_plus(T0, 7), "k8s_sync_expired")
+    assert (w1["last_fail_cluster"], w1["last_fail_trigger"]) == ("gone", "schedule")
+    assert w1["clusters"]["c1"] == {"last_ok_at": iso_plus(T0, 1), "last_fail_at": None, "last_reason": None,
+                                    "last_trigger": "schedule", "last_status": "ok"}
+    assert w1["clusters"]["c2"] == {"last_ok_at": iso_plus(T0, 3), "last_fail_at": iso_plus(T0, 2),
+                                    "last_reason": "k8s_sync_unreachable", "last_trigger": "schedule",
+                                    "last_status": "ok"}
+    assert w2["clusters"]["c2"]["last_status"] == "failed" and w2["clusters"]["c2"]["last_trigger"] == "failover"
+    assert w2["clusters"]["c1"] == {"last_ok_at": None, "last_fail_at": None, "last_reason": None,
+                                    "last_trigger": "check", "last_status": "running"}
+    assert w2.get("last_ok_at") is None and (w2["last_fail_cluster"], w2["last_fail_trigger"]) == ("c2", "failover")
+    assert repos.k8s.node_run_stats().get("k8s-w9") is None                      # 부른 적 없는 노드는 키가 없다
+    # 적용 실패는 노드가 API 에 닿아 결과를 올린 뒤의 컨트롤러 쪽 실패 -- 호출 노드의 연결로는 성공이다(2026-10-28 리뷰)
+    _run_row(db, 8, "k8s-w2", "c1", "check", "failed", reason="k8s_sync_apply_failed")
+    w2 = repos.k8s.node_run_stats()["k8s-w2"]
+    assert w2["clusters"]["c1"] == {"last_ok_at": iso_plus(T0, 8), "last_fail_at": None, "last_reason": None,
+                                    "last_trigger": "check", "last_status": "ok"}
+    assert w2["last_ok_at"] == iso_plus(T0, 8) and (w2["last_fail_cluster"], w2["last_reason"]) == (
+        "c2", "k8s_sync_unreachable")
+
+
+def test_recreated_cluster_starts_with_no_node_connection_history(repos, db):
+    """같은 이름으로 지웠다 다시 등록한 클러스터는 옛 등록의 run 을 클러스터별 연결로 물려받지 않는다(2026-10-28 리뷰 --
+    새 주소에 한 번도 닿지 않은 secondary 가 「성공」으로 보였다). 노드 단위 값에는 이력이 남는다."""
+    _run_row(db, 1, "k8s-w2", "c1", "failover", "applied")
+    assert repos.k8s.node_run_stats()["k8s-w2"]["clusters"]["c1"]["last_status"] == "ok"
+    repos.k8s.delete_cluster("c1", actor="ops")
+    repos.k8s.create_cluster(name="c1", api_server="https://10.99.99.99:6443", tls_server_name=None, ca_pem=None,
+                             insecure_skip_tls_verify=False, token_enc="v1:new", enabled=True, actor="ops")
+    w2 = repos.k8s.node_run_stats()["k8s-w2"]
+    assert "c1" not in w2["clusters"] and w2["last_ok_at"] == iso_plus(T0, 1)   # 호출자가 None(기록 없음)으로 채운다
+    # 새 등록 뒤의 run 은 센다
+    created = repos.k8s.get_cluster("c1")["created_at"]
+    db.execute("""INSERT INTO k8s_sync_runs (seq, run_id, cluster_name, node_name, role, trigger, status, claimed_at,
+                      deadline_at, finished_at, reason, config_rev)
+                  VALUES (2, 'new1', 'c1', 'k8s-w2', 'secondary', 'check', 'failed', :t, :t, :t,
+                          'k8s_sync_unreachable', 0)""", {"t": created})
+    assert repos.k8s.node_run_stats()["k8s-w2"]["clusters"]["c1"] == {
+        "last_ok_at": None, "last_fail_at": created, "last_reason": "k8s_sync_unreachable", "last_trigger": "check",
+        "last_status": "failed"}
+
+
+def test_config_change_resets_the_per_cluster_connection(repos, db):
+    """주소·TLS·토큰을 바꾸면(config_rev +1) 클러스터별 연결은 새 설정의 run 만 센다(2026-10-28 2차 리뷰 재현: secondary 가 옛
+    주소에 확인 성공 → PUT 으로 주소 이전 → primary 만 새 주소로 성공 -- 새 주소에 닿은 적 없는 secondary 가 「성공」으로
+    보였다). 설정이 바뀌는 사이에 버려진 확인 run 도 옛 성공으로 돌아가지 않는다. 「마지막 실패」의 해결 판정 값
+    (last_fail_cluster_ok_at)은 설정 세대와 무관하다 -- 토큰만 바꿔도 해결된 실패가 다시 빨갛게 보이지 않게."""
+    _sync(repos)
+    repos.k8s.request_check()
+    chk = _claim(repos, node="k8s-w2", role="secondary", now=iso_plus(T0, 10))
+    repos.k8s.receive(chk["run"]["run_id"], node_name="k8s-w2", now=iso_plus(T0, 11), ok=False,
+                      reason="k8s_sync_unreachable")
+    repos.k8s.request_check()
+    chk = _claim(repos, node="k8s-w2", role="secondary", now=iso_plus(T0, 20))
+    repos.k8s.receive(chk["run"]["run_id"], node_name="k8s-w2", now=iso_plus(T0, 21), ok=True, data=fixture_data())
+    assert repos.k8s.apply_run(chk["run"]["run_id"], now=iso_plus(T0, 22))["outcome"] == "applied"
+    w2 = repos.k8s.node_run_stats()["k8s-w2"]
+    assert w2["clusters"]["c1"]["last_status"] == "ok"
+    assert (w2["last_fail_cluster"], w2["last_fail_at"], w2["last_fail_cluster_ok_at"]) == (
+        "c1", iso_plus(T0, 11), iso_plus(T0, 21))
+    # 주소 이전(PUT) -- primary 만 새 주소로 동기화한다(update_cluster 가 건 「지금 동기화」는 실제 시각이라 그 뒤에)
+    repos.k8s.update_cluster("c1", {"api_server": "https://10.99.99.99:6443", "token_enc": "v1:new"}, actor="ops")
+    now = iso_plus(utc_now_iso(), 5)
+    _sync(repos, now=now)
+    stats = repos.k8s.node_run_stats()
+    assert stats["k8s-w1"]["clusters"]["c1"]["last_status"] == "ok"           # primary 는 새 주소에 닿았다
+    w2 = stats["k8s-w2"]
+    assert "c1" not in w2["clusters"]               # secondary 는 새 설정으로 부른 적 없다 -- 호출자가 「호출 기록 없음」
+    assert w2["last_ok_at"] == iso_plus(T0, 21)                                # 노드 단위 이력은 남는다
+    assert w2["last_fail_cluster_ok_at"] == iso_plus(T0, 21)                   # 이미 해결된 실패는 해결된 채
+    # 확인 run 이 도는 사이에 설정이 바뀌면 그 run 은 discarded -- 연결 칸은 옛 설정의 성공으로 돌아가지 않는다
+    repos.k8s.request_check()
+    t = iso_plus(now, 10)
+    chk = _claim(repos, node="k8s-w2", role="secondary", now=t)
+    assert chk["run"]["trigger"] == "check"
+    assert repos.k8s.node_run_stats()["k8s-w2"]["clusters"]["c1"]["last_status"] == "running"
+    repos.k8s.update_cluster("c1", {"tls_server_name": "kube.example"}, actor="ops")
+    repos.k8s.receive(chk["run"]["run_id"], node_name="k8s-w2", now=t, ok=True, data=fixture_data())
+    assert repos.k8s.apply_run(chk["run"]["run_id"], now=t)["outcome"] == "discarded"
+    assert "c1" not in repos.k8s.node_run_stats()["k8s-w2"]["clusters"]
+
+
+def test_last_fail_cluster_ok_at_is_the_success_on_the_failed_cluster_only(repos, db):
+    """「마지막 실패」가 해결됐나는 그 클러스터에 대한 이 노드의 성공으로 잰다 -- 이름순으로 뒤인 클러스터의 성공이 앞
+    클러스터의 실패를 덮지 않게(2026-10-28 2차 리뷰: 확인 묶음이 c1 실패 → c2 성공이면 노드 단위 last_ok 가 더 나중이라 배지가
+    「대기」였다)."""
+    repos.k8s.create_cluster(name="c2", api_server="https://a:6443", tls_server_name=None, ca_pem=None,
+                             insecure_skip_tls_verify=False, token_enc="v1:x", enabled=True, actor="ops")
+    db.execute("UPDATE k8s_clusters SET created_at = :t", {"t": iso_plus(T0, -60)})
+    _run_row(db, 1, "k8s-w2", "c1", "failover", "applied")
+    _run_row(db, 2, "k8s-w2", "c1", "check", "failed", reason="k8s_sync_unreachable")
+    _run_row(db, 3, "k8s-w2", "c2", "check", "applied")
+    w2 = repos.k8s.node_run_stats()["k8s-w2"]
+    assert (w2["last_ok_at"], w2["last_fail_at"], w2["last_fail_cluster"]) == (iso_plus(T0, 3), iso_plus(T0, 2), "c1")
+    assert w2["last_fail_cluster_ok_at"] == iso_plus(T0, 1)                    # 실패보다 앞 -- 해결 안 됨
+    _run_row(db, 4, "k8s-w2", "c1", "check", "received")
+    assert repos.k8s.node_run_stats()["k8s-w2"]["last_fail_cluster_ok_at"] == iso_plus(T0, 4)
+    _run_row(db, 5, "k8s-w1", "c1", "schedule", "applied")
+    assert "last_fail_cluster_ok_at" not in repos.k8s.node_run_stats()["k8s-w1"]   # 실패가 없으면 키가 없다
+
+
+def test_check_claim_keeps_the_primary_schedule_and_a_pending_manual_sync(repos, db):
+    """확인 claim 은 last_attempt_at·sync_requested_at 을 건드리지 않는다(2026-10-28 리뷰 재현: 주기 300초, primary 의 다음 due
+    T0+300 직전에 「지금 동기화」와 「연결 확인」을 함께 눌렀는데 확인이 방화벽으로 실패하자 「지금 동기화」가 사라지고 정규
+    run 이 T0+580 으로 밀렸다)."""
+    _sync(repos)                                                           # last_attempt_at = T0, 다음 due T0+300
+    repos.k8s.request_sync("c1")
+    db.execute("UPDATE k8s_clusters SET sync_requested_at = :t", {"t": iso_plus(T0, 280)})
+    repos.k8s.request_check()
+    chk = _claim(repos, node="k8s-w2", role="secondary", now=iso_plus(T0, 280))
+    assert chk["run"]["trigger"] == "check"
+    c = repos.k8s.get_cluster("c1")
+    assert (c["last_attempt_at"], c["sync_requested_at"], c["check_requested_at"]) == (T0, iso_plus(T0, 280), None)
+    assert _claim(repos, now=iso_plus(T0, 281)) is None                    # 확인 run 이 도는 동안은 아무도
+    repos.k8s.receive(chk["run"]["run_id"], node_name="k8s-w2", now=iso_plus(T0, 290), ok=False,
+                      reason="k8s_sync_unreachable")
+    # 확인이 끝나면 걸려 있던 「지금 동기화」를 primary 가 바로 받는다
+    got = _claim(repos, now=iso_plus(T0, 291))
+    assert (got["run"]["trigger"], got["run"]["node_name"]) == ("manual", "k8s-w1")
+    repos.k8s.receive(got["run"]["run_id"], node_name="k8s-w1", now=iso_plus(T0, 292), ok=True, data=fixture_data())
+    run_inventory_once(repos, None, now=iso_plus(T0, 293))
+    # 「지금 동기화」 없이도 정규 일정은 그대로(확인 시각 + 주기로 밀리지 않는다)
+    db.execute("UPDATE k8s_clusters SET last_attempt_at = :t", {"t": T0})
+    repos.k8s.request_check()
+    chk2 = _claim(repos, node="k8s-w2", role="secondary", now=iso_plus(T0, 295))
+    repos.k8s.receive(chk2["run"]["run_id"], node_name="k8s-w2", now=iso_plus(T0, 296), ok=False,
+                      reason="k8s_sync_timeout")
+    assert _claim(repos, now=iso_plus(T0, 301))["run"]["trigger"] == "schedule"
+    c = repos.k8s.get_cluster("c1")
+    assert (c["consecutive_failures"], c["last_reason"]) == (0, None)
+
+
+def test_check_claim_before_the_failover_time_keeps_the_failover(repos, db):
+    """대체 예약 시각 전에 확인이 먼저 이겨 실패해도 대체 재시도는 예약대로 돈다(2026-10-28 리뷰 -- 종전엔 확인 claim 이
+    failover_after 를 지워 대체도, 그 실패의 기록도 사라졌다)."""
+    run_id = _claim(repos)["run"]["run_id"]
+    repos.k8s.receive(run_id, node_name="k8s-w1", now=T0, ok=False, reason="k8s_sync_unreachable")
+    assert repos.k8s.get_cluster("c1")["failover_after"] == iso_plus(T0, 30)
+    repos.k8s.request_check()
+    chk = _claim(repos, node="k8s-w2", role="secondary", now=iso_plus(T0, 10))
+    assert chk["run"]["trigger"] == "check"
+    assert repos.k8s.get_cluster("c1")["failover_after"] == iso_plus(T0, 30)
+    repos.k8s.receive(chk["run"]["run_id"], node_name="k8s-w2", now=iso_plus(T0, 20), ok=False,
+                      reason="k8s_sync_unreachable")
+    fo = _claim(repos, node="k8s-w2", role="secondary", now=iso_plus(T0, 31))
+    assert fo["run"]["trigger"] == "failover"
+    repos.k8s.receive(fo["run"]["run_id"], node_name="k8s-w2", now=iso_plus(T0, 40), ok=False,
+                      reason="k8s_sync_unreachable")
+    c = repos.k8s.get_cluster("c1")
+    assert (c["consecutive_failures"], c["failover_after"]) == (2, None)   # 대체 실패는 기록된다(확인 실패는 아니다)
+
+
+def test_failover_claim_leaves_the_check_request_for_the_next_claim(repos, db):
+    """다른 trigger 로 이긴 claim 은 확인 요청을 건드리지 않는다 -- secondary 의 대체 claim 도(대체 run 이 끝나면 확인이 돈다)."""
+    db.execute("UPDATE k8s_clusters SET last_attempt_at = :t, failover_after = :f",
+               {"t": iso_plus(T0, -40), "f": iso_plus(T0, -5)})
+    repos.k8s.request_check()
+    fo = _claim(repos, node="k8s-w2", role="secondary")
+    assert fo["run"]["trigger"] == "failover"
+    assert repos.k8s.get_cluster("c1")["check_requested_at"] is not None
+    repos.k8s.receive(fo["run"]["run_id"], node_name="k8s-w2", now=iso_plus(T0, 5), ok=True, data=fixture_data())
+    run_inventory_once(repos, None, now=iso_plus(T0, 6))
+    chk = _claim(repos, node="k8s-w2", role="secondary", now=iso_plus(T0, 10))
+    assert chk["run"]["trigger"] == "check" and repos.k8s.get_cluster("c1")["check_requested_at"] is None
+
+
+def test_failover_and_check_candidates_order_by_their_own_times(repos, db):
+    """우선 0 후보끼리는 각자의 시각 순: 대체는 failover_after, 확인은 check_requested_at(정규 due 가 아니다)."""
+    repos.k8s.create_cluster(name="c0", api_server="https://a:6443", tls_server_name=None, ca_pem=None,
+                             insecure_skip_tls_verify=False, token_enc="v1:x", enabled=True, actor="ops")
+    db.execute("UPDATE k8s_clusters SET last_attempt_at = :t", {"t": iso_plus(T0, -10)})   # 둘 다 정규 due 는 미래
+    db.execute("UPDATE k8s_clusters SET failover_after = :f WHERE name = 'c0'", {"f": iso_plus(T0, -10)})
+    db.execute("UPDATE k8s_clusters SET check_requested_at = :t WHERE name = 'c1'", {"t": iso_plus(T0, -20)})
+    first = _claim(repos, node="k8s-w2", role="secondary")
+    assert (first["cluster"]["name"], first["run"]["trigger"]) == ("c1", "check")
+    second = _claim(repos, node="k8s-w2", role="secondary")
+    assert (second["cluster"]["name"], second["run"]["trigger"]) == ("c0", "failover")
+
+
+@pytest.mark.parametrize("first", ["secondary", "primary"])
+def test_check_and_regular_claims_cannot_both_win_a_race(repos, monkeypatch, first):
+    """정규 claim 이 확인 요청을 남기고 커밋하는 사이에 확인 claim 이 끼어들어도(또는 그 반대) run 은 하나다(2026-10-28 리뷰
+    -- 활성 판정을 행보다 먼저 읽으면 확인이 남은 행을 새로 읽은 secondary 가 두 번째 run 을 만들었다)."""
+    k8s = repos.k8s
+    k8s.request_check()
+    orig = k8s.active_cluster_names
+    state = {"raced": False}
+    other = ("k8s-w1", "primary") if first == "secondary" else ("k8s-w2", "secondary")
+
+    def racing(now):
+        result = orig(now)
+        if not state["raced"]:                 # 이 claim 이 행·활성을 읽은 뒤, CAS 전에 상대 claim 이 끝까지 돈다
+            state["raced"] = True
+            assert _claim(repos, node=other[0], role=other[1]) is not None
+        return result
+    monkeypatch.setattr(k8s, "active_cluster_names", racing)
+    me = ("k8s-w2", "secondary") if first == "secondary" else ("k8s-w1", "primary")
+    assert _claim(repos, node=me[0], role=me[1]) is None
+    monkeypatch.undo()
+    runs = k8s.list_runs()
+    assert [(r["node_name"], r["trigger"]) for r in runs] == [(other[0], "schedule" if other[1] == "primary" else "check")]
+
+
+def test_unsetting_a_caller_node_drops_pending_check_requests(repos, db):
+    repos.k8s.request_check()
+    repos.k8s.update_settings(primary_node="k8s-w1", secondary_node="k8s-w2", interval_seconds=600, actor="ops")
+    assert repos.k8s.get_cluster("c1")["check_requested_at"] is not None          # 둘 다 있으면 그대로
+    repos.k8s.update_settings(primary_node=None, secondary_node="k8s-w2", interval_seconds=600, actor="ops")
+    assert repos.k8s.get_cluster("c1")["check_requested_at"] is None              # 가져갈 claim 이 없다 -- 지운다
+    # primary 가 없으면 secondary 는 확인이 아니라 정규로 받는다
+    db.execute("UPDATE k8s_clusters SET check_requested_at = :t", {"t": T0})
+    got = _claim(repos, node="k8s-w2", role="secondary", primary_configured=False)
+    assert got["run"]["trigger"] == "schedule"
+
+
+def test_changing_the_secondary_drops_pending_check_requests(repos, db):
+    """확인 요청은 그때의 보조 노드가 가져갈 수 있는지 보고 받았다 -- 보조 노드를 바꾸면 지운다(2026-10-28 2차 리뷰: k8s 동기화
+    미지원 노드로 바꾸면 아무도 가져가지 않는 요청이 남아 화면이 「확인 요청됨」·5초 재조회에 갇혔다). 주 노드·주기만 바꾸면
+    그대로."""
+    repos.k8s.request_check()
+    repos.k8s.update_settings(primary_node="k8s-w3", secondary_node="k8s-w2", interval_seconds=600, actor="ops")
+    assert repos.k8s.get_cluster("c1")["check_requested_at"] is not None
+    repos.k8s.update_settings(primary_node="k8s-w3", secondary_node="k8s-w9", interval_seconds=600, actor="ops")
+    assert repos.k8s.get_cluster("c1")["check_requested_at"] is None
+    assert _claim(repos, node="k8s-w9", role="secondary", now=iso_plus(T0, -59)) is None   # 확인으로 받을 것이 없다
+
+
 # --- 기한·정리·보존 ------------------------------------------------------------------------------
 
 def test_expired_claim_schedules_failover_and_records_event(repos, db):

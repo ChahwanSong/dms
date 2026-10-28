@@ -2,13 +2,27 @@
 
 라우트(claim·관리 화면)와 컨트롤러 루프가 **같은 함수**를 쓴다(domain.auto_confirmable 처럼 한 곳). DB·네트워크를 모른다.
 
-배정(D16, 결정적 두 규칙):
+배정(D16, 결정적 규칙 -- (1)·(2) 설계, (3) 2026-10-28 추가):
   (1) 정규 run 은 primary 전용. due 부터 SECONDARY_GRACE_SECONDS(90초)가 지나도록 primary 가 claim 하지 않으면 secondary 도
       받는다(primary 가 지정되지 않았으면 secondary 가 due 에 바로 받는다).
       due = sync_requested_at(「지금 동기화」) ‖ last_attempt_at + 주기 ‖ (시도 이력 없음) created_at.
   (2) primary run 이 노드성 사유(FAILOVER_REASONS: unreachable·dns_failed·timeout·expired)로 끝나면 FAILOVER_DELAY_SECONDS
       (30초) 뒤 secondary 전용으로 1회 대체 재시도(trigger=failover, 클러스터 failover_after). tls·401·403·too_large·
       bad_response 는 대체하지 않는다(다른 노드에서도 같다). 다음 정규 주기는 다시 primary.
+  (3) 「보조 연결 확인」(관리자가 요청 -- 클러스터 check_requested_at): secondary 전용 1회 run(trigger=check). 주·보조가
+      둘 다 지정됐을 때만 준다(primary 가 없으면 secondary 의 정규 run 이 곧 그 경로의 확인이다 -- 라우트도 409). 판정 순서는
+      대체(2) 다음, due(1) 앞이다. 하는 일은 정규 동기화와 같다(성공하면 스냅숏 적용·last_success_at·연속 실패 리셋). 이긴
+      claim 의 trigger 가 check 일 때만 요청을 지운다 -- primary 의 정규 claim 이 확인 요청을 삼키지 않는다. 확인 claim 은
+      last_attempt_at·sync_requested_at·failover_after 를 건드리지 않는다(다음 정규 주기·걸린 「지금 동기화」·대체 예약은
+      그대로 -- 저장소 claim). 노드성 실패(FAILOVER_REASONS -- 노드에 따라 달라지는 사유)는 클러스터 실패 요약(연속
+      실패·사유)과 대체 예약을 건드리지 않는다(보조 경로의 문제이지 클러스터 문제가 아니다 -- 주 노드는 정상 동기화 중일 수
+      있다; 결과는 run 이력과 개요의 노드별 연결에만 남고, 클러스터 카드의 마지막 실행·맡은 클러스터에도 쓰지 않는다).
+      tls·401·403·too_large·bad_response·적용 실패는 어느 노드에서도 같으므로 확인 run 이라도 정규처럼 요약에 남는다.
+      주·보조 중 하나를 비우거나 보조 노드를 바꾸면 남은 요청을 지운다(저장소 update_settings -- 요청은 그때의 보조 노드가
+      가져갈 수 있는지 보고 받았다). 노드별 연결은 지금 설정(등록·config_rev)의 run 만 센다 -- 주소·TLS·토큰을 바꾸면 보조
+      경로는 다시 「미확인」이다(저장소 node_run_stats).
+      왜: secondary 는 대체 때만 불려서, 장애 넘김 경로(방화벽에 secondary IP 허용 여부)가 실제로 필요할 때까지 검증되지
+      않았다(2026-10-28 사고 분석 -- 새로 등록한 클러스터에 secondary 가 한 번도 닿은 적이 없는데 화면이 그 사실을 몰랐다).
   토큰이 없거나 열 수 없는 클러스터는 due 에서 빠진다(run 을 만들지 않는다 -- 상태 token_missing/token_unreadable).
   노드가 둘 다 지정되지 않았으면 표시만(no_node) -- 다른 노드로 확장하지 않는다(대상 API 서버 방화벽은 노드 IP 기준).
   활성 run(claimed 기한 안 ∪ received)이 있는 클러스터는 claim 하지 않는다(저장소가 판정).
@@ -82,14 +96,17 @@ def due_at(cluster: dict, interval: int) -> "str | None":
 
 
 def claim_trigger(cluster: dict, *, role, now: str, interval: int, primary_configured: bool) -> "str | None":
-    """이 역할의 노드가 지금 이 클러스터를 claim 해도 되나 → trigger("schedule"|"manual"|"failover") | None.
+    """이 역할의 노드가 지금 이 클러스터를 claim 해도 되나 → trigger("schedule"|"manual"|"failover"|"check") | None.
 
-    토큰 유무·활성 run 은 호출자(저장소)가 먼저 거른다."""
+    토큰 유무·활성 run 은 호출자(저장소)가 먼저 거른다. check 는 secondary 전용(배정 (3)) -- primary 는 절대 받지 않고,
+    primary 가 지정되지 않았으면 secondary 도 받지 않는다(그때는 secondary 가 정규 노드다)."""
     if role not in ("primary", "secondary") or not cluster.get("enabled"):
         return None
     failover = cluster.get("failover_after")
     if role == "secondary" and failover and now >= failover:
         return "failover"
+    if role == "secondary" and primary_configured and cluster.get("check_requested_at"):
+        return "check"
     due = due_at(cluster, interval)
     if due is None:
         return None
@@ -98,6 +115,14 @@ def claim_trigger(cluster: dict, *, role, now: str, interval: int, primary_confi
         return trigger if now >= due else None
     threshold = due if not primary_configured else iso_plus(due, SECONDARY_GRACE_SECONDS)
     return trigger if now >= threshold else None
+
+
+def touches_cluster_summary(trigger, reason) -> bool:
+    """이 run 의 실패(failed·expired)가 클러스터 실패 요약·대체 예약에 반영되나. 보조 연결 확인(check)의 노드성 실패
+    (FAILOVER_REASONS -- 연결·DNS·시간 초과·기한 초과)만 아니다(배정 (3)). 확인 run 이라도 어느 노드에서나 같은 실패
+    (tls·401·403·too_large·bad_response·적용 실패 -- 클러스터·데이터 쪽)는 반영한다(2026-10-28 리뷰: 적용 실패까지 빼면
+    클러스터는 정상으로 보이고 그 실패는 다음 정규 run 까지 어디에도 없었다). 성공 적용은 trigger 와 무관하게 같다."""
+    return not (trigger == "check" and reason in FAILOVER_REASONS)
 
 
 def failover_after_for(*, role, trigger, reason, now: str) -> "str | None":

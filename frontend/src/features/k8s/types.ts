@@ -9,7 +9,8 @@ export type ClusterStatus =
   | "ok" | "syncing" | "delayed" | "failing" | "never" | "no_node" | "disabled" | "token_missing" | "token_unreadable";
 export type NodeRole = "primary" | "secondary";
 export type RunStatus = "claimed" | "received" | "applied" | "failed" | "expired" | "superseded" | "discarded";
-export type RunTrigger = "schedule" | "manual" | "failover";
+/** check = 보조 연결 확인(2026-10-28 -- secondary 전용 1회 run, 연결 실패는 클러스터 상태를 바꾸지 않음). */
+export type RunTrigger = "schedule" | "manual" | "failover" | "check";
 export type K8sAccess = "admin" | "edit";
 export type TlsMode = "ca" | "insecure" | "default";
 export type TokenState = "set" | "missing" | "unreadable";
@@ -22,12 +23,31 @@ export interface K8sSettings {
 }
 export interface K8sSettingsBody { primary_node: string | null; secondary_node: string | null; interval_seconds: number }
 
+/** 호출 노드 × 클러스터 한 칸(repositories.k8s.node_run_stats) — 그 노드가 그 클러스터의 지금 설정(등록분·config_rev — 주소·
+ *  TLS·토큰을 바꾸면 새 세대)에 낸 마지막 run 의 연결 판정(적용 실패는 노드가 닿았으니 ok). last_status null = 호출 기록 없음
+ *  (부른 적 없거나, 설정을 바꾼 뒤 아직이거나, 보존 정리가 지웠다 — 모름, 실패가 아니다). */
+export type CallerLinkStatus = "ok" | "failed" | "running";
+export interface CallerClusterLink {
+  cluster: string; last_ok_at: string | null; last_fail_at: string | null; last_reason: string | null;
+  last_trigger: RunTrigger | string | null; last_status: CallerLinkStatus | string | null;
+}
+
 /** 개요의 호출 노드 한 줄 — 에이전트 보고(능력 선언 k8s_sync)와 k8s_sync_runs 집계. */
 export interface CallerNode {
   node_name: string; role: NodeRole | null; fresh: boolean; capable: boolean;
   reported_at: string | null; internal_ip: string | null;
   last_claim_at: string | null; last_ok_at: string | null; last_fail_at: string | null; last_reason: string | null;
   serving: string[];
+  /** 에이전트 보고가 한 번이라도 있나(지정만 하고 보고 없는 노드는 false). 옵션 = 픽스처·옛 응답. */
+  reported?: boolean;
+  // 2026-10-28 -- 옵션 = 옛 응답(이 칸들 이전 API). 마지막 실패의 클러스터·계기, 클러스터별 연결, 보조 연결 확인 대기.
+  last_fail_cluster?: string | null; last_fail_trigger?: RunTrigger | string | null;
+  /** 이 노드가 마지막 실패의 클러스터에 낸 가장 최근 성공(설정 세대 무관 — 「마지막 실패」가 그 뒤 해결됐나를 재는 값;
+   *  k8sTerms.failureResolved). null = 그 클러스터에 성공한 기록 없음. */
+  last_fail_cluster_ok_at?: string | null;
+  clusters?: CallerClusterLink[] | null;
+  /** 이 노드가 secondary 일 때 아직 가져가지 않은 보조 연결 확인 요청의 클러스터(없으면 []). */
+  check_pending?: string[] | null;
 }
 
 export interface ClusterCounts {
@@ -50,6 +70,8 @@ export interface ClusterSummary {
   last_attempt_at: string | null; last_success_at: string | null; last_reason: string | null; last_error: string | null;
   consecutive_failures: number; server_version: string | null; fingerprint: string | null; duplicate_of: string | null;
   interval_seconds: number; counts: ClusterCounts | null; last_run: ClusterLastRun | null;
+  // 보조 연결 확인 요청 시각(2026-10-28 -- secondary 가 가져가면 null). 옵션 = 옛 응답.
+  check_requested_at?: string | null;
 }
 
 export interface K8sTotals {
