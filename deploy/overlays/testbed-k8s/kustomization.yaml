@@ -43,6 +43,8 @@
 #   d10 = k8s 연동 호출 노드 카드 — 해결된 실패 구분·클러스터별 연결·보조 연결 확인(trigger check)(2026-10-28, 소스 cd53224;
 #        이미지 3종 + 잡 이미지).
 #   d11 = 경로 봉쇄 개행 구멍 ② 셸 수정 — realpath 끝 개행 보존(§8, 2026-10-28, 소스 cb0d9b9; 이미지 3종 + 잡 이미지).
+#   d12 = 사용량 분석 필터 — 권한 사용자·요청자·PV 이름·namespace·클러스터·StorageClass·구분(2026-10-29, 소스 efa5c13;
+#        이미지 3종 + 잡 이미지).
 #   태그 bump = 아래 newTag(+ patch-config.yaml 의 DMS_JOB_IMAGE) 커밋 — **dms-k8s 에서만** 한다(2026-10-22 브랜치 분리 뒤
 #   빌드 소스는 /home/mason/dms-dev/dms-k8s 체크아웃 = origin/dms-k8s, main 은 이 클러스터와 무관).
 #   ssc 클러스터의 오버레이(overlays/testbed)는 dms-ssc 브랜치에만 있다(2026-10-26 이 브랜치에서 지웠다 — 체리픽 충돌·엉뚱한 태그 방지).
@@ -60,10 +62,10 @@ resources:
 images:
   - name: set-by-overlay.invalid/dms
     newName: pkg-01:5001/dms
-    newTag: d11
+    newTag: d12
   - name: set-by-overlay.invalid/dms-agent
     newName: pkg-01:5001/dms-agent
-    newTag: d11
+    newTag: d12
 
 patches:
   - path: patch-config.yaml

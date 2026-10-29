@@ -95,7 +95,7 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
-### 🚧 사용량 분석 필터 — 사용자별(권한 사용자·요청자)·PV 이름·namespace·클러스터·StorageClass·구분 — **구현**(2026-10-29, 테스트베드 실증 전)
+### ✅ 사용량 분석 필터 — 사용자별(권한 사용자·요청자)·PV 이름·namespace·클러스터·StorageClass·구분 — **완료·실증**(2026-10-29, d12)
 
 사용자 요청: 사용량 분석을 사용자별·PV 이름·namespace 등으로 거를 수 있게. 두 설계안(A: 계획 시점에 귀속을 data_jobs 에 기록 /
 B: 읽을 때 인벤토리로 해석)을 심사해 **하이브리드**로 지었다 — 의미·원천은 B(대상 단위, 「지금 인벤토리 → 기록 → 밖/모름」, 스키마·planner
@@ -175,6 +175,17 @@ B: 읽을 때 인벤토리로 해석)을 심사해 **하이브리드**로 지었
 - **측정**(리뷰 단계, 1만 대상·6.5만 잡 + PV 600개, PG·sqlite — 수치는 `routes_usage._WINDOW_LIMIT` 주석): 옛 엔드포인트 대비 무필터 목록
   +0.01~0.03초·+0~3MiB, 내보내기 +0.1~0.4초·+4MiB(행의 pv 칸), PV 필터 목록·facets·필터 합계 모두 1.5초 이내, 최악은 동시 3건 내보내기
   +120MiB(옛 export 와 같은 급, api 1Gi 대비 여유). PG generic plan 에서 요청자 경로도 `idx_data_jobs_scan_target` + `idx_requests_requester`.
+- **2차 리뷰 오라클**: 스펙 의미를 독립 구현한 무차별 대입 오라클로 무작위 세계 150개(sqlite 120·PG 30 — 클러스터·namespace·PVC 이름
+  겹침, 겹친·충돌 루트, 지운 PVC 기록, 변조 블록 8종, 직접 경로·PV 상위, 창 몽키패치)에서 /targets 1.05만·export 2.7천·합계 3.6천·
+  facets 4.4천 호출 대조 불일치 0(결함 4종을 심으면 모두 검출).
+- **라이브 실증(d12, 소스 efa5c13)**: 실 Chrome — k8s-pv-nfs 필터 줄(클러스터 dmsk8s 2·dmsk8s2 1, namespace·PV 이름·SC·구분 PV 안 3·
+  밖 2, 권한 사용자·요청자 — 옵션마다 대상 수), 표 둘째 줄 PV 소속. 딥링크 namespace team-a(dmsk8s) → `team-a/datasets/proof-scan`·
+  `dms-proof` + 필터 합계 981.6 KiB, 클러스터 dmsk8s2 → `c2/lab-y/weights`, 구분 PV 밖 → `proof-nl/a/selfnl`·`proof-d9/alice/latest`,
+  권한 사용자 cocoa.song → `c2/lab-y/weights`(RoleBinding: lab-y = cocoa.song·junwoo.song), onefs 요청자 alice → `…/dms-proof`(alice·
+  junwoo.song 둘 다 scan — 경로 단위). namespace 콤보박스에서 lab-y 고름 → URL `cluster=dmsk8s2&namespace=lab-y`·표 걸림. 펼친 상세의
+  PV 소속·권한 사용자(alice, junwoo.song — DB 바인딩과 같음, 중복 바인딩 한 번)·요청자 필터 시 「이력은 요청자와 무관한 이 경로의 전체
+  이력」, 상세를 열어도 URL 에 필터 유지. cephfs-dms(filesystem)는 필터 줄 숨김. 390 가로 넘침 0, 콘솔 오류 0. 검증: 전체 백엔드 4326
+  passed, 사용량 관련 11파일 sqlite 429·PG 429(+기존 sqlite 전용 7), vitest 1708, tsc(앱·e2e), e2e 30.
 
 ### ✅ 경로 봉쇄 개행 구멍(§8 ②) 셸 수정 — **완료**(2026-10-28)
 
