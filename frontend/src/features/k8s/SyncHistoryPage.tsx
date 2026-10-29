@@ -11,7 +11,7 @@ import { K8sHeader } from "./K8sTabs";
 import {
   CHANGE_LABEL, COUNT_LABEL, ROLE_LABEL, TRIGGER_LABEL, changeNames, countText, durationText, runStatusMeta, warningText,
 } from "./k8sTerms";
-import { Ago, DefList, DefRow, Mono, Tag } from "./parts";
+import { Ago, DefList, DefRow, Mono, SELECT_FIELD, Tag } from "./parts";
 import { RUNS_PAGE_SIZE, useInfiniteSyncRuns, useK8sClusters } from "./useK8s";
 import type { ChangeEntry, SyncRun } from "./types";
 
@@ -21,8 +21,6 @@ import type { ChangeEntry, SyncRun } from "./types";
 
 const errText = (e: unknown): string =>
   e instanceof Error && e.message ? e.message : "요청이 실패했습니다 — 잠시 뒤 다시 시도하세요.";
-
-const SELECT_FIELD = "max-w-[14rem] rounded-lg border border-line bg-surface px-2 py-1.5 text-sm";
 
 /** 표 「변경」 칸 한 줄 — 「PVC +2 −1 ~1 · 바인딩 +1」(~ = 내용만 바뀜: Pending→Bound 등). 변경이 없으면 「변경 없음」, 정보가
  *  없으면(실패·진행 중) null. 목록 값 null(그 선택 목록을 못 받음)은 건너뛴다 — 상세가 따로 알린다. */

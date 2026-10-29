@@ -7,13 +7,13 @@ import { Segmented } from "../../components/ui/Segmented";
 import { HoverTip, placeBeside, useHoverAnchor, type Rect } from "../../components/ui/HoverTip";
 import { SizeDistribution } from "../../components/ui/SizeDistribution";
 import type { ApiError } from "../../lib/api";
-import type { HistogramBucket, UsagePoint } from "../../lib/types";
+import type { HistogramBucket, UsagePoint, UsagePv } from "../../lib/types";
 import { kstStampEpoch, kstDay } from "../../lib/datetime";
 import { pctText, sizeDistribution } from "../../lib/sizeBuckets";
 import { HelpTip } from "../../components/ui/HelpTip";
 import { exactBytes, INVALID_NAMES_HELP, INVALID_NAMES_LABEL, invalidNamesText, scanCount } from "../../lib/scanCounters";
 import { useScanHistory } from "./useUsage";
-import { SIZE_HELP, SectionHead, Stat } from "./UsageParts";
+import { PvHead, SIZE_HELP, SectionHead, Stat } from "./UsageParts";
 import {
   ATIME_APPROX_NOTE, AXIS_MEANING, HOT_AGE_MAX_DAYS, ageLabel, hotRatio, humanBytes, pointEpoch, stackLayout, tempColorOf,
 } from "./usageStats";
@@ -218,8 +218,12 @@ function newestPoint(points: UsagePoint[]): UsagePoint | null {
 // 바로 아래에 펼쳐진다**(expand). 표시 창·온도 축 state 는 여기 국소라 타깃을 바꾸면 초기화된다 -- 다른 타깃의 잔류 선택이 새
 // 타깃에 묻어 가지 않는다. showTitle 은 목록 밖 폴백 칸(선택 타깃이 지금 목록에 없을 때)에서만 켠다 -- 펼침 행 안에서는 행
 // 자체가 제목이다. latest = 목록 행의 최신 성공 scan(크기 분포의 기준 -- 폴백 칸엔 행이 없어 undefined).
-export function TargetDetail({ storage, target, showTitle, latest }: {
+// pv(2026-10-29) = 목록 행의 PV 소속(PV 를 담는 탭에서만 -- 머리에 「PV 소속」·「권한 사용자」, 폴백 칸엔 행이 없어 없음).
+// requesterFiltered = 요청자 필터가 켜졌다: 필터는 경로 단위라 아래 이력은 다른 요청자의 scan 도 담는다 -- 그 사실을 말한다.
+export function TargetDetail({ storage, target, showTitle, latest, pv = null, multiCluster = false,
+                               requesterFiltered = false }: {
   storage: string; target: string; showTitle: boolean; latest?: UsagePoint | null;
+  pv?: UsagePv | null; multiCluster?: boolean; requesterFiltered?: boolean;
 }) {
   const navigate = useNavigate();
   const [windowLimit, setWindowLimit] = useState<number>(HISTORY_WINDOWS[0].value);
@@ -267,6 +271,14 @@ export function TargetDetail({ storage, target, showTitle, latest }: {
     <div className="max-w-3xl space-y-5">
       {showTitle && (
         <h3 className="text-base font-medium text-ink [overflow-wrap:anywhere]">{target}</h3>
+      )}
+      {(pv !== null || requesterFiltered) && (
+        <div className="space-y-1">
+          {pv !== null && <PvHead pv={pv} multiCluster={multiCluster} />}
+          {requesterFiltered && (
+            <p className="text-xs text-muted break-keep">이력은 요청자와 무관한 이 경로의 전체 이력입니다</p>
+          )}
+        </div>
       )}
       {history.isLoading ? <p className="text-sm text-muted">이력 불러오는 중…</p>
        : history.isError ? <p className="text-sm text-bad">{(history.error as ApiError).message}</p>

@@ -73,6 +73,30 @@ def test_pv_roots_lists_the_selectable_roots_mapped_to_the_storage(world):
     assert world.k8s.pv_roots("no-such-storage") == ()
 
 
+def test_pv_roots_is_the_sorted_keys_of_the_pv_root_index(world, db, monkeypatch):
+    # 2026-10-29: 계산·메모가 pv_root_index(루트 → PVC 정체들, 사용량 분석 PV 필터용)로 옮겼다 -- 소유 판정이 보는 pv_roots 는
+    # 그 키를 정렬한 것과 바이트 단위로 같아야 한다(보안 민감 경로). 정체 = (cluster, namespace, pvc, volume, storage_class).
+    for name in (NFS, GPFS, CEPH, "k8s-pv-onefs", "no-such-storage"):
+        index = world.k8s.pv_root_index(name)
+        assert world.k8s.pv_roots(name) == tuple(sorted(index))
+    nfs = world.k8s.pv_root_index(NFS)
+    assert nfs["team-a/datasets"] == (("dmsk8s", "team-a", "datasets", "pvc-814fe02b-ffe7-4a17-8430-b8de9a6c0b91",
+                                       "tb-nfs"),)
+    with pytest.raises(TypeError):
+        nfs["x"] = ()                                              # 메모 값 그대로라 읽기 전용이다
+    # 메모는 한 벌: 같은 지문이면 index·pv_roots 어느 쪽으로 불러도 다시 계산하지 않는다
+    calls = []
+    real = k8s_repo.resolve_volume
+    monkeypatch.setattr(k8s_repo, "resolve_volume", lambda *a: calls.append(1) or real(*a))
+    db.execute("UPDATE k8s_clusters SET applied_run_seq = applied_run_seq + 1")       # 지문을 바꿔 새로 계산하게
+    first = world.k8s.pv_root_index(GPFS)
+    n = len(calls)
+    assert n >= 2
+    assert world.k8s.pv_roots(GPFS) == tuple(sorted(first)) and world.k8s.pv_root_index(GPFS) is first
+    assert world.k8s.pv_root_covering(GPFS, sorted(first)[0] + "/x") == sorted(first)[0]
+    assert len(calls) == n
+
+
 def test_pv_root_covering_is_a_path_boundary_match(world, gpfs_roots):
     root = gpfs_roots[0]
     assert world.k8s.pv_root_covering(GPFS, root) == root

@@ -1,4 +1,8 @@
 import { HelpTip } from "../../components/ui/HelpTip";
+import type { UsagePv, UsagePvVolume } from "../../lib/types";
+import { pvInside } from "./usageStats";
+import { TERMS, nsLabel } from "../k8s/k8sTerms";
+import { Tag } from "../k8s/parts";
 
 // 사용량 분석의 작은 공용 부품(2026-10-21 TargetDetail 에서 이동 -- 스토리지 합계가 같은 문법으로 쓴다: 펼친 상세의 「최신 scan」과
 // 패널의 「이 스토리지 합계」가 같은 소제목·수치 모양이라 한 번 익히면 두 곳에서 읽힌다). 무거운 TargetDetail 을 import 하지 않게
@@ -42,5 +46,56 @@ export function Stat({ label, value, lowerBound = false, title }: {
         {lowerBound && <>{" "}<span className="whitespace-nowrap text-xs font-normal text-muted">이상</span></>}
       </dd>
     </div>
+  );
+}
+
+// ---- PV 소속 표기(2026-10-29 사용자 요청 「사용자·PV 이름·namespace 등으로 필터」) ----
+// 표 경로 칸의 둘째 줄과 펼친 상세 머리가 같은 문법이다: 「PV 이름 — namespace (StorageClass)」(서버 target_label·pvLocationText
+// 와 같은 순서). 라벨은 k8sTerms 에서만(화면 「PV 이름」 = PVC, 「볼륨」 = PV 객체). 소속은 서버가 **지금 인벤토리** 기준으로 정한다
+// (없으면 PV 주소 scan 기록) -- PVC 를 지우거나 매핑을 바꾸면 바뀐다.
+export const PV_RECORDED_TITLE = "지금 인벤토리에 없는 PV — 이 경로를 PV 주소로 scan 한 기록 기준";
+export const PV_OUTSIDE_TITLE = "지금 어떤 PV 루트에도 속하지 않는 경로(직접 경로 scan·PV 상위 디렉터리)";
+export const PV_UNKNOWN_TITLE = "PV 소속을 판정할 수 없음(미등록 스토리지·StorageClass 매핑 없음·동기화 전 클러스터)";
+/** 「datasets — team-a (tb-nfs)」 + 클러스터가 여럿인 탭이면 「 · dmsk8s」(namespace 는 클러스터마다만 유일하다). */
+export function pvVolumeText(v: UsagePvVolume, multiCluster: boolean): string {
+  return `${v.pvc} — ${nsLabel(v.namespace, v.storage_class)}${multiCluster ? ` · ${v.cluster}` : ""}`;
+}
+const volumeTitle = (v: UsagePvVolume) => `${TERMS.cluster} ${v.cluster} · ${TERMS.volume} ${v.volume ?? "—"}`;
+const pvTitle = (pv: UsagePv) => [...pv.volumes.map(volumeTitle), `PV 루트 ${pv.root ?? "—"}`].join("\n");
+
+/** 표 경로 칸의 둘째 줄. 루트 충돌(한 루트를 PVC 여럿이 가짐)이면 첫째 + 「외 n개」, 전부는 상세에. */
+export function PvLine({ pv, multiCluster }: { pv: UsagePv; multiCluster: boolean }) {
+  if (pv.source === "outside") return <span title={PV_OUTSIDE_TITLE}>PV 밖</span>;
+  if (pv.source === "unknown") return <span className="italic" title={PV_UNKNOWN_TITLE}>PV 모름</span>;
+  const [first, ...rest] = pv.volumes;
+  return (
+    <>
+      <span title={pvTitle(pv)}>{pvVolumeText(first, multiCluster)}{rest.length > 0 && ` 외 ${rest.length}개`}</span>
+      {pv.source === "recorded" && <>{" "}<Tag title={PV_RECORDED_TITLE}>기록</Tag></>}
+    </>
+  );
+}
+
+/** 펼친 상세 머리: PV 소속(정체 전부) + 권한 사용자(지금 RoleBinding -- 면제 운영자의 전체 접근은 없다). */
+export function PvHead({ pv, multiCluster }: { pv: UsagePv; multiCluster: boolean }) {
+  return (
+    <dl aria-label="PV 소속" className="grid grid-cols-[max-content_minmax(0,1fr)] gap-x-3 gap-y-1 text-sm">
+      <dt className="text-muted">PV 소속</dt>
+      <dd className="min-w-0 [overflow-wrap:anywhere]">
+        {pv.source === "outside" ? <span title={PV_OUTSIDE_TITLE}>PV 밖 — 지금 어떤 PV 루트에도 속하지 않는 경로</span>
+          : pv.source === "unknown" ? <span className="italic" title={PV_UNKNOWN_TITLE}>PV 모름</span>
+          : (<>
+            {pv.volumes.map((v) => (
+              <span key={`${v.cluster}/${v.namespace}/${v.pvc}`} className="block" title={volumeTitle(v)}>
+                {pvVolumeText(v, multiCluster)}</span>))}
+            {pv.source === "recorded" && <Tag title={PV_RECORDED_TITLE}>기록</Tag>}
+          </>)}
+      </dd>
+      {pvInside(pv) && (<>
+        <dt className="text-muted">권한 사용자</dt>
+        <dd className="min-w-0 [overflow-wrap:anywhere]">
+          {pv.users.length > 0 ? pv.users.join(", ") : "없음 — 관리자·특권 운영자만 접근"}</dd>
+      </>)}
+    </dl>
   );
 }

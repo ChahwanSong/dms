@@ -23,6 +23,20 @@ async function visitUsage(page: Page): Promise<void> {
   await expect(panel.locator("table").first().or(panel.getByText("이 스토리지에는 아직 성공한 scan 이 없습니다"))).toBeVisible();
 }
 
+// 사용량 필터 줄(2026-10-29): 켜진 필터는 선택지와 무관하게 늘 그 select 를 보인다(이 스토리지에 없는 값은 「(이 스토리지에 없음)」
+// 옵션). 하네스엔 k8s 클러스터가 없어 PV 탭을 만들 수 없으므로, PV 축 다섯 + 구분 + 요청자를 모두 켠 딥링크가 가장 넓은 필터 줄
+// (select 7칸 + 설명 + 지우기, 긴 값)을 연다 -- 375 에서 두 칸씩 접혀 문서가 넘치지 않아야 한다(L1). 결과는 0건이라 빈 상태 + 툴바.
+const USAGE_FILTERED = `/admin/usage?storage=${STORAGE_NAME}&cluster=e2e-cluster-with-a-rather-long-name`
+  + "&namespace=team-namespace-with-long-name&pvc=datasets-very-long-persistent-volume-claim-0001"
+  + "&storage_class=nfs-client-storage-class-long&user=someone.with.a.long.account.id&scope=pv&requester=admin";
+async function visitUsageFiltered(page: Page): Promise<void> {
+  await visit(page, USAGE_FILTERED, "사용량 분석");
+  const panel = page.getByRole("tabpanel");
+  const filters = panel.getByRole("group", { name: "사용량 필터" });
+  await expect(filters.getByRole("combobox")).toHaveCount(7);
+  await expect(panel.getByText("필터에 맞는 대상이 없습니다").or(panel.locator("table").first())).toBeVisible();
+}
+
 // k8s 연동(dms-k8s 설계 §7) 개요 + 하위 넷. e2e 하네스엔 클러스터가 없어 다섯 화면 모두 빈 상태(안내·빈 표)로 그려진다 -- 표
 // 하한은 0, 머리의 동작 버튼 줄·탭 줄(가로 스크롤)·필터 줄이 L1 위험이다. 로딩 문구가 사라진 뒤에 잰다(개요는 「클러스터」 h2).
 const K8S_PAGES: Array<[string, string]> = [
@@ -95,6 +109,8 @@ async function assertTextContained(page: Page): Promise<void> {
 //   /admin/usage     표는 고른 스토리지 탭에 성공 scan 이 있을 때만 그려진다(이 파일 시점엔 보통 없다) -> 하한 0.
 //                    2026-10-20 스토리지 탭 줄(가로 스크롤)이 새 L1 위험이라 순회에 넣는다 -- 탭 안 sr-only 노드가 화면
 //                    밖으로 문서를 넓히던 유형(StatusPill 619/375). 행·펼침 상세의 375 불변식은 E10(09)이 기록과 함께 잰다.
+//                    필터 줄(2026-10-29)은 375 에서 모든 필터를 켠 딥링크로 따로 잰다(결과 0건 -- 하한 0). 실데이터 요청자
+//                    필터의 375 는 E15(15)가 잰다.
 test.describe("E3 레이아웃 불변식", () => {
   test("1280x800 주요 화면 순회", async ({ page }) => {
     await apiLogin(page);
@@ -191,6 +207,9 @@ test.describe("E3 레이아웃 불변식", () => {
 
     // 사용량 분석 스토리지 탭 줄은 375 에서 줄바꿈 없이 가로 스크롤한다 -- 줄 자체만 넘치고 문서는 넘치지 않아야 한다(L1).
     await visitUsage(page);
+    await assertLayoutSane(page, { sidebarFixed: false, minTableCells: 0 });
+    // 필터 줄(2026-10-29)이 가장 넓게 열린 채로(위 visitUsageFiltered) -- select 가 두 칸씩 접히고 긴 값이 칸을 밀지 않는다.
+    await visitUsageFiltered(page);
     await assertLayoutSane(page, { sidebarFixed: false, minTableCells: 0 });
 
     // 대시보드 노드 칸(2026-10-16 CPU 사용률 추가로 5칸): md 아래는 2열로 쌓여 375 에서 넘치지 않아야 한다.

@@ -7,6 +7,9 @@ import type { ClusterFreshness } from "./types";
 
 // k8s 연동 화면들이 함께 쓰는 작은 잎 부품. 화면 파일마다 같은 표기를 다시 짓지 않게 한 곳에 둔다.
 
+/** 필터 select 한 칸(첫 옵션 「X 전체」 관용) — PV 탐색·동기화 이력·사용량 분석 필터 줄이 같은 모양이다. */
+export const SELECT_FIELD = "max-w-[14rem] rounded-lg border border-line bg-surface px-2 py-1.5 text-sm";
+
 /** 「n분 전」 — 15초 틱(useNow)으로 혼자 다시 그린다(폴링 사이에도 숫자가 늙는다). 모르면 empty 문구(기본 「—」).
  *  절대 시각(KST)은 title 로. offsetMs = 서버 시계 - 브라우저 시계(개요 응답 now 로 잰 값) — 브라우저 시계가 틀려도 거짓 나이를
  *  만들지 않게. */

@@ -709,6 +709,34 @@ def test_usage_storage_queries_read_the_scan_target_index(tmp_path):
         assert "idx_data_jobs_scan_target" in plan, (sql, plan)
 
 
+def test_usage_filter_queries_keep_the_scan_target_index(tmp_path):
+    # 2026-10-29 사용량 분석 필터(인덱스 집합 무변경): 요청자 필터·맞는 대상 수를 건 머리 질의와 PV 주소 scan 기록 조회도
+    # idx_data_jobs_scan_target 으로 스토리지 하나에 내려간다(요청자 서브쿼리는 비상관이라 idx_requests_requester 를 한 번 탄다).
+    # PG generic plan 은 리뷰 단계에서 EXPLAIN (GENERIC_PLAN) 으로 잰다(routes_usage._WINDOW_LIMIT 주석).
+    from dms.repositories import Repositories
+    db = Database.connect(f"sqlite:///{tmp_path}/t.db")
+    migrate(db)
+    repos = Repositories(db)
+    captured = []
+    orig = db.query
+
+    def spy(sql, params=None):
+        captured.append((sql, params))
+        return orig(sql, params)
+
+    db.query = spy
+    repos.data_jobs.scan_target_heads(storage="s1", requester="alice", limit=101, with_matched=True)
+    repos.data_jobs.scan_target_heads(storage="s1", path="team", requester="alice", sort="scans", limit=None)
+    repos.data_jobs.recorded_pv_blocks("s1", ["a", "b"])
+    db.query = orig
+    assert len(captured) == 3
+    for sql, params in captured:
+        plan = " | ".join(r["detail"] for r in db.query("EXPLAIN QUERY PLAN " + sql, params))
+        assert "idx_data_jobs_scan_target" in plan, (sql, plan)
+    plan = " | ".join(r["detail"] for r in db.query("EXPLAIN QUERY PLAN " + captured[0][0], captured[0][1]))
+    assert "idx_requests_requester" in plan, plan
+
+
 def _ensure_pairs():
     # _ensure_columns 의 (table, column, type) 목록은 함수 안 리터럴이라 import 로
     # 닿을 수 없다 -- 소스 정규식으로 뽑는다(모듈 상수 승격은 소스 무접촉 원칙

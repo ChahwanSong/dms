@@ -312,6 +312,35 @@ CHANGELOG 「dms-ssc 이식」. 포크 항목은 dms-ssc BACKLOG 와 같다(인�
 - 📝 **배치 상세는 자식의 실행 결과 상세를 보이지 않는다** — 배치 항목은 `files_count` 만 싣고 result_summary 를 싣지 않아, 「실패 항목」·
   dsync 0 B 잔여 안내(d193)는 자식 요청 상세(StageResults)에서만 보인다. 필요해지면 항목 응답에 summary 의 실패 요약만 싣는 후속.
 
+### 사용량 분석 필터 후속 — 2026-10-29
+
+CHANGELOG 「사용량 분석 필터」. 이번 묶음이 **의도적으로 하지 않은 것**(심사 스펙 §7)과 그 근거 — 필요해지면 여기서 꺼낸다.
+
+- 🧹 **옛 `scan-targets`·`export` 제거** — 새 포탈은 `/targets`·`/targets/export` 를 쓰고 옛 둘은 롤링 배포 중 열린 옛 탭 호환으로 동결했다
+  (본문 무변경 — `tests/test_usage_equivalence.py` 가 그 증거). 다음 정리 때 라우트·참조 그물을 함께 지운다(포탈이 옛 엔드포인트를 더는
+  부르지 않는 것을 확인한 뒤).
+- 🔧 **PV 축 필터의 SQL 푸시다운** — PV 축(클러스터·namespace·PV 이름·StorageClass·권한 사용자·구분)은 정렬과 무관한 최근 스캔 순 머리
+  창(`_WINDOW_LIMIT` 1만 + 1)을 파이썬이 거른다 — 대상이 1만을 넘는 스토리지에서만 「최근 스캔된 1만 개 안」으로 제한되고 matched_count 가
+  null(모름)이 된다(화면·CSV·합계·필터 선택지가 그렇게 말한다 — 「오래된 순」으로 정렬해도 판정 범위는 최근 1만 개다). 그런 스토리지가 실제로 생기면 PV 루트 접두 술어(`target = :root OR target LIKE :root || '/%'` 묶음)를
+  SQL 로 내려 창 제약을 없애거나, 계획 시점 귀속 칸(data_jobs·requests — 이중 경로·백필·요청 삭제 목록)을 다시 검토한다(이번엔 A 안 기각:
+  planner·`recheck_request` 반환형 변경·백필이 옛 직접 경로 scan 을 「모름」으로 굳힌다).
+- 💡 **볼륨(PV 객체 이름) 필터** — 표시(title)·CSV 에만 싣는다. 요청이 오면 `PvFilter` 에 축 하나·facets 목록 하나를 더한다.
+- 💡 **스토리지를 가로지르는 사용자 합계**(「alice 의 전 스토리지 사용량」 한 숫자) — 만들지 않았다. 스토리지끼리 더할 수 없는 이유(겹친
+  대상·한 파일시스템을 여러 스토리지가 공유)가 스토리지 합계와 같다. UsageOverview·「스토리지별 비교」도 무필터 그대로.
+- 💡 **k8s 화면에서 사용량으로 딥링크** — 접근 화면(사용자별)·PV 탐색 행 → 사용량 탭 필터. URL 키(cluster·namespace·pvc·storage_class·
+  user·scope·requester)는 PV 탐색과 같게 미리 맞춰 두었다.
+- 📝 **요청자 기준은 `requests.requester_id`** — 상세의 「요청자」는 잡 신원 `identity.username`(owner 지정 시 owner)이라 다를 수 있다
+  (테스트베드에서는 전부 같다). owner 기준 필터·상세 표기 변경은 요청이 오면.
+- 📝 **PV 상위 디렉터리는 「PV 밖」** — namespace 디렉터리 같은 PV 루트의 상위 경로를 그 namespace 로 묶지 않는다. Released PV 의 claimRef
+  귀속(PVC 를 지운 뒤 남은 PV)도 하지 않는다 — PV 주소로 scan 한 기록이 있으면 그 기록으로 산다.
+- 📝 **권한 사용자 축에 면제 운영자는 없다** — 관리자·특권 운영자의 전체 접근은 바인딩이 아니라 나오지 않는다(포탈 도움말이 말한다).
+  계정이 없는 dms_user(`user.yo.hong.example.com` 같은 파생 이름)도 거르지 않는다.
+- 🐞 **기존 결함(이번에 고치지 않음)**: 사용량 `path`·`q` 검색은 `lower()` 가 없어 PG 는 대소문자를 구분하고 sqlite 는 ASCII 만 무시한다
+  (새 `/targets`·`/targets/export` 도 같은 SQL 이라 같다 — 고치면 옛 엔드포인트와 결과가 갈라진다), 그리고 옛 `scan-targets`·`export` 의
+  NUL 이 든 `path`·`q`·`storage` 는 PG 에서 500 이다. 옛 둘은 고치면 `test_usage_equivalence` 의 참조와 갈라지므로 옛 엔드포인트 제거와
+  같은 묶음에서. 새 엔드포인트(`/targets`·`/targets/export`·`/facets`·`storage-totals`)는 storage·path 의 NUL 을 422 로 막고(2026-10-29
+  2차 리뷰 — 동등성 참조는 옛 엔드포인트 바이트라 무관), 새 필터 값은 제어문자 전부를 422 로 막는다.
+
 ## 2. 의도적 보류 (결정 — "미구현"이 아님)
 
 - ⏸ **회원가입 메일 인증** — 더미(email 기록만, 검증 없음, `routes_auth.py::signup`).

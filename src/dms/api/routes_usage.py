@@ -22,11 +22,23 @@
   뒤 버린다) 반환할 행만 포인트를 만들며, 내보내기는 _CHUNK 타깃 묶음씩 흘려보낸다(StreamingResponse).
 - 스토리지 합계(2026-10-21 사용자 요청: 「스토리지별 사용량 및 정보들의 총합」): 지금 탭 하나만 storage-totals 가 게으르게
   계산한다 -- 최상위 대상만·목록 열과 같은 값·지표마다 known/unknown·한 호출 읽기 예산(규칙은 storage_totals docstring).
+- 필터(2026-10-29 사용자 요청: 사용량 분석을 사용자별·PV 이름·namespace 등으로): 새 봉투 엔드포인트 GET /targets·/targets/export·
+  /facets 와 storage-totals 의 선택 필터. 모든 필터는 **대상 단위**다 -- 한 (storage, target)의 성공 scan 전부가 함께 걸리거나 함께
+  빠진다(scan_count·first/last_scan_at·latest·이력은 늘 그 대상의 전체 기록). PV 소속은 읽을 때 정한다(usage_attribution --
+  지금 인벤토리 > PV 주소 scan 기록 > 모름/PV 밖). 요청자(requests.requester_id)는 SQL 이고, PV 축은 정렬과 무관한 최근 스캔 순
+  창(최대 _WINDOW_LIMIT + 1 -- /facets·필터 합계와 같은 창)을 순서를 보존하며 거른 뒤 그 안에서 요청한 정렬로 놓는다(_select_heads
+  -- 창이 넘치면 matched_count 는 null(모름)이고 포탈이 「최근 스캔된 N개 안에서」라고 말한다).
+  응답은 서버가 적용한 필터를 filters 로 되돌려 준다 -- 롤링 배포 중 새 포탈이 옛 API 를 부르면 모르는 파라미터가 조용히 무시돼
+  「필터 켜진 화면 + 거르지 않은 목록」이 되는데, 메아리가 없으면 포탈이 그것을 알아챈다.
+- **옛 탭 호환 동결**: scan-targets·export 는 본문을 바꾸지 않는다(봉투 없는 배열이라 메아리를 실을 자리가 없다 -- 옛 탭 JS 가
+  그 모양을 읽는다; tests/test_usage_equivalence.py 가 바이트를 고정한다). 새 포탈은 /targets 를 쓴다 -- 다음 정리 때 제거한다
+  (docs/BACKLOG.md).
 """
 import json
 import sys
 import threading
 import time
+from dataclasses import dataclass
 from typing import Iterator
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -42,6 +54,7 @@ from .routes_requests import reject_when_maintenance
 from .routes_scan_paths import (_buckets, _is_number, _numbers, _report_total_bytes,
                                 _summary_count, _time_histograms)
 from ..metrics_series import storage_filesystem
+from ..usage_attribution import FACET_LIST_CAP, PvFilter, attribute, collect, facet_counts, matches, ranked
 from ..usage_metrics import METRIC_SORTS, SORT_PATTERN, StorageTotals, maximal_targets, metric_value, sort_keyed
 
 router = APIRouter(dependencies=[Depends(require_admin)])
@@ -51,12 +64,29 @@ router = APIRouter(dependencies=[Depends(require_admin)])
 _MAX_POINTS = 60
 _TARGET_LIMIT = 200
 # 창 상한(2026-10-20 사용자 요청: 「서버의 스캔 상한선도 5천개에서 1만개로」) -- 지표 정렬(bytes·files·hot)의 대상 창과
-# 내보내기 상한에 함께 쓴다. 전 타깃이 계약이지만 무한은 아니다 -- 내보내기는 넘으면 잘라 내고 truncated 로 말한다(조용한
-# 절단 금지), 포탈은 스토리지의 target_count 가 이 값을 넘을 때만 「최근 스캔된 N개 안에서 정렬」을 알린다(/storages 의
-# window_limit). 메모리 근거(2026-10-20 실측, 1만 타깃 한 스토리지 + 6.5만 잡, 요약 평균 3.6KB): 창 전체의 포인트를 세우고
-# 응답을 통째로 만들던 옛 구조는 1만 내보내기 한 건이 +~465MiB(PG·sqlite 같음), PG 동시 3건이면 HWM 1.3GiB 로 api 한도 1Gi
-# 를 넘었다. 값만 뽑는 목록은 +18~29MiB, 묶음 스트리밍 내보내기는 +37~53MiB(첫 호출; 반복 +4~13MiB, PG 동시 2건 +~60MiB),
-# 시간은 sqlite 내보내기 16.5초 → 2.8초·지표 정렬 목록 15초 → 1.3초다(인덱스 포함) -- 이 값을 올리기 전에 같은 측정을 다시 하라.
+# 내보내기 상한에 함께 쓴다(2026-10-29 부터 PV 필터의 판정 창·/facets·필터 합계의 창도). 전 타깃이 계약이지만 무한은 아니다 --
+# 내보내기는 넘으면 잘라 내고 truncated 로 말한다(조용한 절단 금지), 포탈은 /targets 봉투의 matched_count 가 이 값을 넘거나
+# window_truncated(PV 판정 창 넘침)일 때만 「최근 스캔된 N개 안에서 정렬」을 알린다(N = 봉투의 window_limit -- 탭의 대상 수가
+# 아니다: 검색·필터가 걸리면 그 수는 거짓이다). 메모리 근거(2026-10-20 실측, 1만 타깃 한 스토리지 + 6.5만 잡, 요약 평균 3.6KB): 창
+# 전체의 포인트를 세우고 응답을 통째로 만들던 옛 구조는 1만 내보내기 한 건이 +~465MiB(PG·sqlite 같음), PG 동시 3건이면 HWM 1.3GiB
+# 로 api 한도 1Gi 를 넘었다. 값만 뽑는 목록은 +18~29MiB, 묶음 스트리밍 내보내기는 +37~53MiB(첫 호출; 반복 +4~13MiB, PG 동시 2건
+# +~60MiB), 시간은 sqlite 내보내기 16.5초 → 2.8초·지표 정렬 목록 15초 → 1.3초다(인덱스 포함) -- 이 값을 올리기 전에 같은 측정을
+# 다시 하라.
+# 필터(2026-10-29 실측, 같은 1만 대상·6.5만 잡 + 다른 스토리지 2천 대상, PV 600개(클러스터 둘)·RoleBinding namespace 마다 3명,
+# 요약 캐시 데운 상태, 케이스마다 새 uvicorn, 첫 호출 시간·HWM 증가 「sqlite / PG」): 옛 엔드포인트 대비 무필터 /targets 는
+# +0.01~0.03초·+0~3MiB(last 0.25 / 0.25초 +8 / +5MiB, bytes 1.30 / 1.40초 +31 / +30MiB), 요청자 경로 0.30 / 0.27초(bytes 1.05 /
+# 1.12초), PV 필터 목록 0.32~0.95 / 0.44~1.04초 +13~33MiB, /facets 0.42 / 0.62초 +15 / +13MiB(동시 3건 1.29 / 1.73초 +44 / +37MiB),
+# 필터 합계 0.92~1.13 / 1.08~1.36초 +21~23MiB(무필터 1.33 / 1.45초), 필터 내보내기 1.82~3.19 / 2.02~3.42초 +48~51MiB(무필터 /targets/
+# export 3.00 / 3.31초 +53 / +52MiB -- 옛 export 보다 +0.1~0.4초·+4MiB, 행의 pv 칸), 동시 3건 내보내기 +119 / +120MiB(옛 export 와
+# 같은 급, 1Gi 대비 여유). 창 넘침(sqlite 1.25만 대상·8만 잡): PV 목록 0.41초 +15MiB, facets 0.50초, 필터 합계 1.06초. 구성
+# (PG, 운영 모양 잡음 -- 잡·요청 32만 행·스토리지 14개, 수치는 위와 ±5%): 머리 W+1 216ms·요청자 머리 230ms, collect 141ms(기록 블록
+# 1500 대상 포함), pv_root_index 냉 9ms·메모 0.4ms, 판정 1만 건 12ms·거르기 16ms·facets 집계 14ms, scan_requester_counts 120ms
+# (custom plan 이 requests 를 Parallel Seq Scan -- 요청 테이블 크기에 비례). PG EXPLAIN (GENERIC_PLAN): 요청자 경로의 data_jobs 접근은
+# 옛 무필터 문장과 같은 `Bitmap Index Scan on idx_data_jobs_scan_target` + 서브쿼리 `idx_requests_requester`(hashed SubPlan),
+# 기록·요청자 수 질의는 idx_data_jobs_scan_target + requests_pkey(한 스토리지가 잡의 92% 인 밀집 분포에선 무필터·요청자 모두 Seq Scan
+# -- 회귀 아님). 측정 스크립트는 리뷰 작업 디렉터리의 perf/ 였다(커밋하지 않음 -- 다시 잴 때 같은 조건으로). 측정 뒤 PV 경로의
+# 판정 창을 정렬과 무관한 최근 스캔 순으로 고정했다(_select_heads) -- 머리 문장 모양이 같고 더해진 것은 창 안의 정수 안정 정렬·
+# 묶음 뒤집기(_window_order, 1만 행 수 ms)뿐이라 수치는 같은 급이다.
 _WINDOW_LIMIT = 10000
 # 창·내보내기의 묶음 크기 -- 캐시 조회(get_many)·잡 조회(target IN·job_id IN)·캐시 쓰기(put_many)가 한 번에 다루는 상한.
 # 메모리는 묶음 하나(요약·잡 행 500개)만큼만 든다.
@@ -73,6 +103,21 @@ _TOTALS_READ_BUDGET = 500
 _FAILED_READ_TTL_SECONDS = 600
 _FAILED_READ_CAP = 20000
 _ORDER = "^(asc|desc)$"
+# 새 필터 값(2026-10-29): 빈 문자열은 min_length 로 422(「필터 없음」으로 접지 않는다 -- storage 의 빈 이름 교훈), 제어문자도 422
+# (NUL 은 PG text 가 받지 못해 psycopg DataError → 500 이 된다 -- text_search docstring).
+_FILTER_TEXT = r"^[^\x00-\x1f\x7f]+$"
+# 필터 값의 길이 상한(2026-10-29 2차 리뷰): /facets 가 내는 선택지는 같은 API 의 필터가 받아야 한다(서버가 낸 값을 서버가 422 로
+# 거절하면 포탈에서 고르는 순간 오류다). PV 축 = k8s 이름 상한(k8s_sync._MAX_NAME 253 -- 스냅숏이 그보다 긴 이름을 거부한다).
+# 권한 사용자(dms_user)는 바인딩 이름 `<id>-clusterrole-<level>` 에서 파생해(k8s_rbac) 최대 236자라 같은 상한이다(예전 128 은
+# 긴 파생 이름을 거절했다). 요청자는 requests.requester_id(계정 아이디 ≤64, 옛 공유 토큰 제출의 `node:<노드 이름 ≤254>` 259자 --
+# api.auth) -- storage·path 와 같은 512.
+_NAME_MAX = 253
+_REQUESTER_MAX = 512
+# 새 엔드포인트(/targets·/targets/export·/facets·storage-totals)의 storage·path(2026-10-29 2차 리뷰): NUL 만 422 로 막는다 -- PG
+# text 가 NUL 을 받지 못해 psycopg DataError → 500 이었다(위 _FILTER_TEXT 와 같은 구멍). 빈 문자열(빈 이름 탭 -- storage 의 빈
+# 이름 교훈)과 다른 제어문자(구형·변조 행의 이름일 수 있다 -- 탭이 그 이름으로 서야 지울 수 있다)는 그대로 받는다. 옛
+# scan-targets·export 는 동결(test_usage_equivalence 의 참조 -- BACKLOG 「기존 결함」).
+_NO_NUL = r"^[^\x00]*$"
 
 
 class ReportReadFailures:
@@ -354,10 +399,11 @@ def _previous(job: dict, cached: "dict | None") -> dict:
             "finished_at": job.get("updated_at"), "total_bytes": total}
 
 
-def _export_body(repos, base: str, heads: list, infos: dict, opening: bytes, skip) -> Iterator[bytes]:
+def _export_body(repos, base: str, heads: list, infos: dict, opening: bytes, skip, extra=None) -> Iterator[bytes]:
     """내보내기 본문을 _CHUNK 타깃 묶음씩 흘린다. 묶음마다 최근 두 잡(최신 + 직전)·최신의 요약(캐시, 없으면 읽고 put_many)·
     직전의 캐시 요약만 읽어 행 JSON 을 만들고 버린다 -- 피크 메모리가 묶음 하나다. 행의 바이트는 옛 통짜 본문의 그 행과
-    같다(json.dumps 같은 인자 -- 목록 안 객체의 인코딩은 단독 인코딩과 같다).
+    같다(json.dumps 같은 인자 -- 목록 안 객체의 인코딩은 단독 인코딩과 같다). extra(머리 → 값)가 있으면 행 끝(previous 뒤)에
+    "pv" 로 싣는다(새 /targets/export -- None 이면 바이트가 옛 그대로다).
 
     도중 실패(DB 끊김 등)는 삼키지 않는다 -- 예외가 그대로 올라가 연결이 끊기고 본문은 닫히지 않은 JSON 이 된다. 포탈
     파서가 그걸 실패로 보여야 한다(조용히 잘린 CSV 가 「전부」인 척하면 안 된다). 묶음 사이에 스냅숏은 없다: 그 사이 지워진
@@ -372,12 +418,14 @@ def _export_body(repos, base: str, heads: list, infos: dict, opening: bytes, ski
         parts = []
         for h in chunk:
             js = recent.get((h["storage_name"], h["target"])) or []
-            parts.append(json.dumps({
+            row = {
                 **_public(h),
                 "storage": infos.get(h["storage_name"]),
                 "latest": _point(js[0], digests.get(js[0]["job_id"])) if js else None,
-                "previous": _previous(js[1], prev_cached.get(js[1]["job_id"])) if len(js) > 1 else None},
-                separators=(",", ":")))
+                "previous": _previous(js[1], prev_cached.get(js[1]["job_id"])) if len(js) > 1 else None}
+            if extra is not None:
+                row["pv"] = extra(h)
+            parts.append(json.dumps(row, separators=(",", ":")))
         yield (("," if n else "") + ",".join(parts)).encode()
         n += len(chunk)
     yield f'],"count":{n}}}'.encode()
@@ -419,6 +467,199 @@ def export_usage(request: Request, q: "str | None" = Query(None, max_length=512)
                f'"rows":[').encode()
     return StreamingResponse(_export_body(repos, base, heads, infos, opening, unreadable),
                              media_type="application/json")
+
+
+# ---- 2026-10-29: 필터(사용자별·PV 이름·namespace 등) -- 새 봉투 엔드포인트 ----
+
+@dataclass(frozen=True)
+class AttrFilter:
+    """요청자·PV 쪽 필터(이미 검증·파싱된 값). 라우트 함수에 직접 넘길 때도 이 객체를 만든다 -- Query 기본값 객체(FieldInfo)가
+    필터 값으로 새지 않게(_filter_params 만 FastAPI 가 푼다)."""
+    pv: PvFilter = PvFilter()
+    requester: "str | None" = None
+
+    @property
+    def active(self) -> bool:
+        return self.pv.active or self.requester is not None
+
+    def echo(self) -> dict:
+        """적용한 필터의 메아리(None 도 그대로 -- 포탈이 보낸 것과 대조한다)."""
+        p = self.pv
+        return {"cluster": p.cluster, "namespace": p.namespace, "pvc": p.pvc, "storage_class": p.storage_class,
+                "user": p.user, "scope": p.scope, "requester": self.requester}
+
+
+def _filter_params(cluster: "str | None" = Query(None, min_length=1, max_length=_NAME_MAX, pattern=_FILTER_TEXT),
+                   namespace: "str | None" = Query(None, min_length=1, max_length=_NAME_MAX, pattern=_FILTER_TEXT),
+                   pvc: "str | None" = Query(None, min_length=1, max_length=_NAME_MAX, pattern=_FILTER_TEXT),
+                   storage_class: "str | None" = Query(None, min_length=1, max_length=_NAME_MAX, pattern=_FILTER_TEXT),
+                   user: "str | None" = Query(None, min_length=1, max_length=_NAME_MAX, pattern=_FILTER_TEXT),
+                   scope: "str | None" = Query(None, pattern="^(pv|outside|unknown)$"),
+                   requester: "str | None" = Query(None, min_length=1, max_length=_REQUESTER_MAX, pattern=_FILTER_TEXT)
+                   ) -> AttrFilter:
+    """새 사용량 엔드포인트 공통의 필터 파라미터 한 벌(의미는 usage_attribution 모듈 docstring). cluster·namespace·pvc·
+    storage_class = 소속 PVC 정체의 칸 정확 일치(같은 정체 하나가 모두 만족), user = 그 정체의 namespace 에 지금 인식된
+    RoleBinding 이 있는 dms_user, scope = pv(인벤토리·기록)·outside·unknown, requester = 그 대상의 성공 scan 중 하나라도
+    requests.requester_id 가 이 값. 화면 「PV 이름」 = pvc(PVC 이름 -- k8sTerms)."""
+    return AttrFilter(pv=PvFilter(cluster=cluster, namespace=namespace, pvc=pvc, storage_class=storage_class, user=user,
+                                  scope=scope), requester=requester)
+
+
+def _window_order(heads: list, sort: str, order: str) -> list:
+    """최근 스캔 순 창(scan_target_heads(order="desc", sort="last_scan") -- `last_scan_at DESC, storage_name, target`)을 요청한
+    SQL 정렬(last_scan·scans × asc·desc -- scan_target_heads 의 ORDER BY)의 순서로 다시 놓는다. **문자열을 비교하지 않는다**: 이름
+    순(storage_name, target -- 방언 콜레이션)은 SQL 이 정한 창 안의 상대 순서를 그대로 물려받고, 여기서는 정수(scan_count)
+    비교와 시각 값의 같음만 쓴다 -- 그래서 창이 대상 전부면 결과가 그 정렬의 SQL 결과와 같다(동률 포함 -- 두 방언 테스트).
+
+    - scans: ORDER BY 가 `scan_count {방향}, last_scan_at DESC, storage_name, target` 이라 2차 이하가 창 순서 그대로다 -- 안정
+      정렬을 scan_count 하나로(reverse=True 도 같은 키끼리 원래 순서를 지킨다).
+    - last_scan asc: `last_scan_at ASC, storage_name, target` -- 같은 시각 묶음(창에서 이어져 있다)의 순서를 뒤집고 묶음 안은
+      그대로 둔다(통째로 뒤집으면 동률이 이름 역순이 된다). NULL 묶음도 한 묶음이라 두 방언의 NULL 자리(PG DESC 앞/ASC 뒤,
+      sqlite DESC 뒤/ASC 앞)가 함께 뒤집힌다."""
+    if sort == "scans":
+        return sorted(heads, key=lambda h: h["scan_count"], reverse=order != "asc")
+    if order != "asc":
+        return list(heads)
+    runs: list = []
+    for h in heads:
+        if runs and runs[-1][0]["last_scan_at"] == h["last_scan_at"]:
+            runs[-1].append(h)
+        else:
+            runs.append([h])
+    return [h for run in reversed(runs) for h in run]
+
+
+def _select_heads(repos, *, base: str, unreadable: set, storage: str, path: "str | None", requester: "str | None",
+                  pvf: PvFilter, order: str, sort: str, limit_rows: int) -> tuple:
+    """필터에 맞는 머리를 요청한 순서로 최대 limit_rows 개 → (heads, matched_count | None, window_truncated, attrs). 목록·내보내기·
+    합계가 이 한 벌을 쓴다. attrs = 이 함수가 판정한 대상의 소속(target → usage_attribution.attribute) -- SQL 경로는 비어 있다.
+
+    - SQL 경로(PV 축·구분이 없음): path·requester 는 SQL 의 LIMIT 앞이라 정확하다. matched_count = COUNT(*) OVER()(필터에 맞는
+      대상 전체 -- 창과 무관). 지표 정렬은 예전처럼 최근 스캔 순 _WINDOW_LIMIT 창 안에서 정렬한다.
+    - PV 경로: 머리를 **정렬과 무관하게 최근 스캔 순으로** SQL 에서 _WINDOW_LIMIT + 1 개 읽고(path·requester 는 SQL 에 실린다) 순서를
+      보존하며 소속으로 거른 뒤, 요청한 정렬로 놓는다(지표 정렬은 _metric_order, last_scan·scans 는 _window_order -- 문자열 비교
+      없이 SQL 순서를 물려받는다). 창이 넘치지 않았으면 결과가 전역적으로 정확하다. 창이 넘치면(window_truncated -- 그 스토리지의
+      (경로 검색·요청자에 맞는) 대상이 창보다 많다) 창 밖은 판정하지 않았으므로 matched_count 는 null(모름)이다(0 이 아니다).
+      판정 창을 정렬마다 바꾸지 않는 이유(2026-10-29 리뷰): 요청한 정렬로 창을 자르면 「오래된 순」·「스캔 횟수」에서 창이 가장
+      오래된·가장 많이 스캔된 1만 개가 돼, 정렬을 바꾸기만 해도 걸리는 대상 **집합**이 바뀌고 facets 의 옵션 수(최근 스캔 순 창)·
+      필터 합계·포탈의 「최근 스캔된 N개 안에서」와 서로 어긋났다. 이제 판정 창은 /facets·필터 합계·내보내기와 한 규칙이다."""
+    metric = sort in METRIC_SORTS
+    flt = {"storage": storage, "path": path, "requester": requester}
+    if not pvf.active:
+        if metric:
+            window = repos.data_jobs.scan_target_heads(**flt, order="desc", limit=_WINDOW_LIMIT, with_matched=True)
+            heads = _metric_order(repos, base, window, sort, order, unreadable)[:limit_rows]
+        else:
+            window = heads = repos.data_jobs.scan_target_heads(**flt, order=order, sort=sort, limit=limit_rows,
+                                                               with_matched=True)
+        return heads, (window[0]["matched_count"] if window else 0), False, {}
+    cand = repos.data_jobs.scan_target_heads(**flt, order="desc", limit=_WINDOW_LIMIT + 1)
+    window_truncated = len(cand) > _WINDOW_LIMIT
+    cand = cand[:_WINDOW_LIMIT]
+    inputs = collect(repos, storage, cand)
+    attrs = {h["target"]: attribute(h["target"], inputs) for h in cand}
+    kept = [h for h in cand if matches(attrs[h["target"]], pvf, inputs.users)]
+    ordered = (_metric_order(repos, base, kept, sort, order, unreadable) if metric
+               else _window_order(kept, sort, order))
+    return ordered[:limit_rows], (None if window_truncated else len(kept)), window_truncated, attrs
+
+
+def _attach_attrs(repos, storage: str, heads: list, attrs: dict) -> dict:
+    """반환·내보낼 머리 전부의 소속(SQL 경로는 여기서 처음 판정한다 -- 필터가 없어도 행마다 pv 를 싣는다)."""
+    missing = [h for h in heads if h["target"] not in attrs]
+    if not missing:
+        return attrs
+    inputs = collect(repos, storage, missing)
+    return {**attrs, **{h["target"]: attribute(h["target"], inputs) for h in missing}}
+
+
+def _echo(storage: str, path: "str | None", flt: AttrFilter) -> dict:
+    return {"storage": storage, "path": path, **flt.echo()}
+
+
+@router.get("/api/admin/usage/targets")
+def usage_targets(request: Request, storage: str = Query(..., max_length=512, pattern=_NO_NUL),
+                  path: "str | None" = Query(None, max_length=512, pattern=_NO_NUL),
+                  order: str = Query("desc", pattern=_ORDER),
+                  limit: int = Query(100, ge=1, le=_TARGET_LIMIT),
+                  sort: str = Query("last_scan", pattern=SORT_PATTERN),
+                  flt: AttrFilter = Depends(_filter_params)):
+    """사용량 목록(새 포탈 -- scan-targets 의 뒤를 잇는 봉투). storage 필수(정확 일치, 빈 문자열도 이름), path 는 scan-targets 와
+    같은 부분 문자열(빈 값 = 없음), 필터는 _filter_params. 응답: {rows:[{storage_name, target, scan_count, first_scan_at,
+    last_scan_at, latest, pv:{source, root, volumes, users}}], matched_count(필터에 맞는 대상 수 -- null = 창이 넘쳐 모름),
+    window_limit, window_truncated(PV 축 판정이 최근 스캔 순 창 안에서만 이뤄졌나), filters(서버가 적용한 값의 메아리)}. 행의 pv 는
+    필터가 없어도 싣는다(반환 행 ≤ _TARGET_LIMIT 만 판정한다). 정렬·latest 규칙은 scan-targets 그대로다."""
+    repos = request.app.state.repos
+    path = path or None
+    base = _base(request)
+    unreadable: set = set()
+    heads, matched, window_truncated, attrs = _select_heads(
+        repos, base=base, unreadable=unreadable, storage=storage, path=path, requester=flt.requester, pvf=flt.pv,
+        order=order, sort=sort, limit_rows=limit)
+    attrs = _attach_attrs(repos, storage, heads, attrs)
+    rows = _with_latest(repos, base, heads, skip=unreadable)
+    for row in rows:
+        row["pv"] = attrs[row["target"]]
+    return {"rows": rows, "matched_count": matched, "window_limit": _WINDOW_LIMIT,
+            "window_truncated": window_truncated, "filters": _echo(storage, path, flt)}
+
+
+@router.get("/api/admin/usage/targets/export")
+def export_targets(request: Request, storage: str = Query(..., max_length=512, pattern=_NO_NUL),
+                   path: "str | None" = Query(None, max_length=512, pattern=_NO_NUL),
+                   order: str = Query("desc", pattern=_ORDER),
+                   sort: str = Query("last_scan", pattern=SORT_PATTERN),
+                   flt: AttrFilter = Depends(_filter_params)):
+    """사용량 내보내기(새 포탈 -- export 의 뒤를 잇는다). 파라미터는 /targets 와 같다(limit 없음 -- 상한 _WINDOW_LIMIT). 본문:
+    {generated_at, truncated, matched_count, filters, rows:[{…, storage, latest, previous, pv}], count}(count 맨 뒤 -- 다 흘린
+    뒤에야 정해진다). truncated 는 첫 바이트 전에 정한다: SQL 경로는 필터에 맞는 대상이 상한을 넘음, PV 경로는 판정 창이 넘침
+    (그 스토리지의 대상이 상한보다 많아 PV 필터가 정렬과 무관하게 최근 스캔된 상한 개 안에서만 걸렀다 -- 포탈이 그렇게 말한다,
+    _select_heads). 스트리밍·_CHUNK·
+    도중 실패 시 닫히지 않은 JSON 은 export 와 같다(_export_body)."""
+    repos = request.app.state.repos
+    path = path or None
+    base = _base(request)
+    unreadable: set = set()
+    heads, matched, window_truncated, attrs = _select_heads(
+        repos, base=base, unreadable=unreadable, storage=storage, path=path, requester=flt.requester, pvf=flt.pv,
+        order=order, sort=sort, limit_rows=_WINDOW_LIMIT)
+    truncated = window_truncated or (matched is not None and matched > _WINDOW_LIMIT)
+    attrs = _attach_attrs(repos, storage, heads, attrs)
+    infos = _storage_infos(repos, dict.fromkeys(h["storage_name"] for h in heads))
+    opening = (f'{{"generated_at":{json.dumps(utc_now_iso())},"truncated":{json.dumps(truncated)},'
+               f'"matched_count":{json.dumps(matched)},'
+               f'"filters":{json.dumps(_echo(storage, path, flt), separators=(",", ":"))},"rows":[').encode()
+    return StreamingResponse(_export_body(repos, base, heads, infos, opening, unreadable,
+                                          extra=lambda h: attrs[h["target"]]),
+                             media_type="application/json")
+
+
+@router.get("/api/admin/usage/facets")
+def usage_facets(request: Request, storage: str = Query(..., max_length=512, pattern=_NO_NUL)):
+    """스토리지 탭 하나의 필터 선택지와 대상 수. 응답: {storage_name, computed_at, window_limit, window_truncated, target_count,
+    scope:{inventory, recorded, outside, unknown}, clusters:[{cluster, target_count}], namespaces:[{cluster, namespace,
+    target_count}], pvcs:[{cluster, namespace, pvc, storage_class, target_count}], storage_classes:[{storage_class,
+    target_count}], users:[{dms_user, target_count}], requesters:[{requester_id, target_count}], lists_truncated:{…}}.
+
+    PV 쪽은 머리 창(최근 스캔 순 _WINDOW_LIMIT -- 넘으면 window_truncated)을 판정해 센다(옵션마다 한 대상은 한 번 --
+    usage_attribution.facet_counts). 목록·내보내기의 PV 필터와 **같은 창**이다(_select_heads -- 정렬과 무관) -- 그래서 창이 넘친
+    스토리지에서도 옵션 수 = 그 옵션을 고른 목록이 창 안에서 찾는 대상 수다(포탈이 「최근 스캔된 N개 기준」이라고 말한다). requesters 는 스토리지 전체 기준(scan_requester_counts -- 창과 무관하게 정확하다). 목록마다
+    상한 FACET_LIST_CAP(대상 수 내림차순 → 이름순), 넘으면 lists_truncated[이름] = true. 선택지는 지금 기록에 있는 값만이다(k8s
+    인벤토리 전체가 아니다 -- 고르면 0건인 선택지를 내지 않는다)."""
+    repos = request.app.state.repos
+    heads = repos.data_jobs.scan_target_heads(storage=storage, order="desc", limit=_WINDOW_LIMIT + 1)
+    window_truncated = len(heads) > _WINDOW_LIMIT
+    heads = heads[:_WINDOW_LIMIT]
+    inputs = collect(repos, storage, heads)
+    facets = facet_counts([attribute(h["target"], inputs) for h in heads], cap=FACET_LIST_CAP)
+    requesters, requesters_truncated = ranked(
+        {r["requester_id"]: r["target_count"] for r in repos.data_jobs.scan_requester_counts(storage)},
+        lambda k, n: {"requester_id": k, "target_count": n}, FACET_LIST_CAP)
+    return {"storage_name": storage, "computed_at": utc_now_iso(), "window_limit": _WINDOW_LIMIT,
+            "window_truncated": window_truncated, "target_count": len(heads), "scope": facets["scope"],
+            "clusters": facets["clusters"], "namespaces": facets["namespaces"], "pvcs": facets["pvcs"],
+            "storage_classes": facets["storage_classes"], "users": facets["users"], "requesters": requesters,
+            "lists_truncated": {**facets["lists_truncated"], "requesters": requesters_truncated}}
 
 
 @router.get("/api/admin/usage/scan-storages")
@@ -473,7 +714,8 @@ def usage_storages(request: Request):
 
 
 @router.get("/api/admin/usage/storage-totals")
-def storage_totals(request: Request, storage: str = Query(..., max_length=512)):
+def storage_totals(request: Request, storage: str = Query(..., max_length=512, pattern=_NO_NUL),
+                   flt: AttrFilter = Depends(_filter_params)):
     """스토리지 하나의 합계(2026-10-21 사용자 요청: 「사용량 분석에 스토리지별 사용량 및 정보들의 총합을 볼수있도록」).
     storage 는 필수이고 실린 값은 빈 문자열도 그 이름 하나다(scan-targets 와 같은 정확 일치 -- /storages 가 변조·구형 행의
     빈 이름도 탭으로 낸다). 이름을 경로(/storages/{name}/totals)가 아니라 쿼리로 받는 이유: 미등록 옛 이름은 지금의 이름
@@ -506,11 +748,36 @@ def storage_totals(request: Request, storage: str = Query(..., max_length=512)):
 
     메모리는 _CHUNK 묶음 하나(요약 500개 -- 값을 더한 뒤 버린다)와 머리 행들이다. 결과 캐시는 두지 않는다(1만 대상 sqlite
     ~1.2초, 포탈 staleTime 30초) -- 필요해지면 (storage, 머리 job_id 집합) 키의 프로세스 내 사전이다(요약이 불변이라 키가
-    같으면 값이 같다; pending·unreadable 이 0 인 결과만)."""
+    같으면 값이 같다; pending·unreadable 이 0 인 결과만).
+
+    필터 합계(2026-10-29): 요청자·PV 필터(_filter_params -- **path 는 받지 않는다**: 10-21 「합계는 경로 검색과 무관」)를 주면
+    대상 = 필터에 맞는 머리(_select_heads, 최근 스캔 순 -- 목록과 같은 판정)이고 그 **걸러진 집합 안에서** 최상위만 더한다(필터 밖
+    상위 경로가 있으면 그 하위가 최상위로 센다 -- 포탈 도움말이 말한다). truncated = SQL 경로는 맞는 대상이 창을 넘음, PV 경로는
+    판정 창이 넘침. 예산·실패 기억·pending·progressed 규칙은 같다. 응답 끝에 filters(적용 필터 메아리)가 붙고 filesystem 은 null
+    이다(부분 집합에 df 는 뜻이 없다); target_count 는 필터 뒤 수다. 필터가 없으면 요청·응답 바이트가 예전 그대로다(단 NUL 이 든
+    storage 는 2026-10-29 부터 두 경우 모두 422 -- 예전엔 PG 500·sqlite 빈 합계였다, _NO_NUL)."""
     repos, settings = request.app.state.repos, request.app.state.settings
-    heads = repos.data_jobs.scan_target_heads(storage=storage, order="desc", limit=_WINDOW_LIMIT + 1)
-    truncated = len(heads) > _WINDOW_LIMIT
-    heads = heads[:_WINDOW_LIMIT]
+    if not flt.active:
+        heads = repos.data_jobs.scan_target_heads(storage=storage, order="desc", limit=_WINDOW_LIMIT + 1)
+        truncated = len(heads) > _WINDOW_LIMIT
+        heads = heads[:_WINDOW_LIMIT]
+        body = _totals(request, heads, truncated, storage=storage)
+        filesystem = None
+        if repos.storages.get(storage) is not None:
+            filesystem = storage_filesystem(
+                storage, repos.agents.list_nodes(stale_seconds=settings.agent_report_stale_seconds))
+        return {**body, "filesystem": filesystem}
+    heads, matched, window_truncated, _ = _select_heads(
+        repos, base=_base(request), unreadable=set(), storage=storage, path=None, requester=flt.requester, pvf=flt.pv,
+        order="desc", sort="last_scan", limit_rows=_WINDOW_LIMIT)
+    truncated = window_truncated or (matched is not None and matched > _WINDOW_LIMIT)
+    return {**_totals(request, heads, truncated, storage=storage), "filesystem": None, "filters": flt.echo()}
+
+
+def _totals(request: Request, heads: list, truncated: bool, *, storage: str) -> dict:
+    """storage_totals 의 몸통(필터 없는 합계와 필터 합계가 함께 쓴다) -- 규칙은 storage_totals docstring 1~4. filesystem 은
+    호출자가 붙인다(키 순서: 이 결과 뒤)."""
+    repos = request.app.state.repos
     top, nested, invalid = maximal_targets(heads)
     base = _base(request)
     acc = StorageTotals()
@@ -538,15 +805,10 @@ def storage_totals(request: Request, storage: str = Query(..., max_length=512)):
             d = digests.get(h["job_id"])           # 못 읽음·지연 = None -> 실 사용량은 bytes_count(목록 열과 같은 대체)
             acc.add(h, metric_value({"latest": _point(h, d)}, "bytes"), d)
         del digests
-    registered = repos.storages.get(storage) is not None
-    filesystem = None
-    if registered:
-        filesystem = storage_filesystem(
-            storage, repos.agents.list_nodes(stale_seconds=settings.agent_report_stale_seconds))
     return {"storage_name": storage, "computed_at": utc_now_iso(), "truncated": truncated,
             "window_limit": _WINDOW_LIMIT, "target_count": len(heads), "summed_target_count": len(top),
             "nested_target_count": nested, "invalid_target_count": invalid, "unreadable_count": unreadable,
-            "pending_count": pending, "progressed": read_ok > 0 or noted > 0, **acc.result(), "filesystem": filesystem}
+            "pending_count": pending, "progressed": read_ok > 0 or noted > 0, **acc.result()}
 
 
 @router.get("/api/admin/usage/unregistered-storages")

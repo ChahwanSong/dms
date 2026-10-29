@@ -146,3 +146,40 @@ test("usageCsvFilename: 스토리지 이름 + KST 날짜·시각 -- 파일 이�
   expect(usageCsvFilename(at, "")).toBe("dms-usage-_-20261002-1204.csv");          // 빈 이름(변조·구형 행) 탭
   expect(usageCsvFilename(at, "a".repeat(100))).toBe(`dms-usage-${"a".repeat(64)}-20261002-1204.csv`);
 });
+
+// 2026-10-29 필터: PV 소속 열(맨 뒤 -- 앞 열 위치 불변)과 필터를 건 내보내기의 파일 이름.
+test("buildUsageCsv: k8s_* 열은 맨 뒤 · 정체가 여럿이면 열마다 같은 순서로 「;」 · PV 밖·모름·구형(pv 없음)은 빈 칸", () => {
+  const vol = (cluster: string, ns: string, pvc: string, volume: string | null, sc: string | null) =>
+    ({ cluster, namespace: ns, pvc, volume, storage_class: sc });
+  const { columns, records } = buildUsageCsv([
+    row({ pv: { source: "inventory", root: "team-a/datasets", volumes: [vol("dmsk8s", "team-a", "datasets", "pvc-aaa", "tb-nfs")],
+                users: ["alice", "junwoo.song"] } }),
+    row({ target: "shared", pv: { source: "recorded", root: "shared",
+          volumes: [vol("c1", "ns1", "a", null, "sc1"), vol("c2", "ns1", "a", "pvc-y", null)], users: [] } }),
+    row({ target: "out", pv: { source: "outside", root: null, volumes: [], users: [] } }),
+    row({ target: "unk", pv: { source: "unknown", root: null, volumes: [], users: [] } }),
+    row({ target: "old-server" }),
+    // 깨진 블록(모르는 source)은 없는 것으로 -- 지어내지 않는다
+    row({ target: "bad", pv: { source: "bogus", root: "x", volumes: [], users: [] } as never }),
+  ], ST, NOW);
+  const k8s = ["k8s_source", "k8s_cluster", "k8s_namespace", "k8s_pvc", "k8s_volume", "k8s_storage_class", "k8s_pv_root",
+               "k8s_access_users"];
+  expect(columns.slice(-k8s.length)).toEqual(k8s);
+  expect(columns.indexOf("storage_name")).toBe(0);                          // 앞 열 위치는 그대로
+  const pick = (r: Record<string, unknown>) => k8s.map((c) => r[c]);
+  expect(pick(records[0])).toEqual(["inventory", "dmsk8s", "team-a", "datasets", "pvc-aaa", "tb-nfs", "team-a/datasets",
+                                    "alice;junwoo.song"]);
+  // 루트 충돌: i 번째 값끼리 한 정체(모르는 칸은 빈 문자열로 자리만), 권한 사용자 없음은 빈 칸
+  expect(pick(records[1])).toEqual(["recorded", "c1;c2", "ns1;ns1", "a;a", ";pvc-y", "sc1;", "shared", null]);
+  expect(pick(records[2])).toEqual(["outside", null, null, null, null, null, null, null]);
+  expect(pick(records[3])).toEqual(["unknown", null, null, null, null, null, null, null]);
+  expect(pick(records[4])).toEqual([null, null, null, null, null, null, null, null]);
+  expect(pick(records[5])).toEqual([null, null, null, null, null, null, null, null]);
+});
+
+test("usageCsvFilename: 필터를 건 내보내기는 스토리지 뒤에 -filtered(없으면 그 전 이름 그대로)", () => {
+  const at = Date.parse("2026-10-02T03:04:00Z");
+  expect(usageCsvFilename(at, "k8s-pv-nfs", true)).toBe("dms-usage-k8s-pv-nfs-filtered-20261002-1204.csv");
+  expect(usageCsvFilename(at, "k8s-pv-nfs", false)).toBe("dms-usage-k8s-pv-nfs-20261002-1204.csv");
+  expect(usageCsvFilename(at, "k8s-pv-nfs")).toBe("dms-usage-k8s-pv-nfs-20261002-1204.csv");
+});

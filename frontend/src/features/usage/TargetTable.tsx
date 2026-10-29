@@ -5,8 +5,9 @@ import { HelpTip } from "../../components/ui/HelpTip";
 import type { ScanTargetRow } from "../../lib/types";
 import { agoText, ageDays, kstStampOrDash } from "../../lib/datetime";
 import type { UsageSort } from "./useUsage";
-import { ATIME_READ_RULE, HOT_AGE_MAX_DAYS, hotRatio, humanBytes } from "./usageStats";
+import { ATIME_READ_RULE, HOT_AGE_MAX_DAYS, hotRatio, humanBytes, usagePvOf } from "./usageStats";
 import { TargetDetail } from "./TargetDetail";
+import { PvLine } from "./UsageParts";
 
 // 한 스토리지의 타깃 표(2026-10-20 UsageAnalysis 에서 분리). 6열 -- 「스토리지」 열과 행의 「미등록」 배지는 없앴다: 탭이 그
 // 정보를 말한다(옛 화면은 모든 행에 같은 스토리지 이름을 되풀이했다).
@@ -96,9 +97,15 @@ function useWrapMetrics() {
   return { ref, width, scrolled };
 }
 
-export function TargetTable({ storage, rows, activeTarget, onToggle, sort, order, onSort, now }: {
+// PV 표시(2026-10-29): pvLine = 이 탭이 PV 를 담는가(필터 선택지의 PV 안 대상 수 > 0 -- filesystem·미등록 탭은 둘째 줄이 없다),
+// multiCluster = 탭의 클러스터가 둘 이상(PV 표기 끝에 클러스터), requesterFiltered = 요청자 필터가 켜졌다(상세가 「이력은 전체」라고
+// 말한다).
+export interface PvDisplay { pvLine: boolean; multiCluster: boolean; requesterFiltered: boolean }
+export const NO_PV_DISPLAY: PvDisplay = { pvLine: false, multiCluster: false, requesterFiltered: false };
+
+export function TargetTable({ storage, rows, activeTarget, onToggle, sort, order, onSort, now, pvDisplay = NO_PV_DISPLAY }: {
   storage: string; rows: ScanTargetRow[]; activeTarget: string | null; onToggle: (target: string) => void;
-  sort: UsageSort; order: "desc" | "asc"; onSort: (c: UsageSort) => void; now: number;
+  sort: UsageSort; order: "desc" | "asc"; onSort: (c: UsageSort) => void; now: number; pvDisplay?: PvDisplay;
 }) {
   const wrap = useWrapMetrics();
   // 고정 경로 칸의 오른쪽 그늘은 표를 옆으로 밀었을 때만 -- 넘치지 않는 넓은 화면에선 칸 사이에 선이 없다.
@@ -129,6 +136,7 @@ export function TargetTable({ storage, rows, activeTarget, onToggle, sort, order
           const hot = hotRatio(p?.time_histograms?.["atime"]);
           const age = ageDays(r.last_scan_at, now);
           const bg = active ? "bg-infobg" : "bg-surface";
+          const pv = pvDisplay.pvLine ? usagePvOf(r.pv) : null;
           return (
             <Fragment key={r.target}>
               <tr className={`border-t border-line ${bg}`}>
@@ -149,6 +157,13 @@ export function TargetTable({ storage, rows, activeTarget, onToggle, sort, order
                                   className={`h-3.5 w-3.5 shrink-0 transition-transform ${active ? "rotate-90" : ""}`} />
                     <span className="min-w-0 truncate">{r.target}</span>
                   </button>
+                  {/* PV 소속 둘째 줄(2026-10-29): 버튼 밖 -- 버튼 이름(=경로)·한 줄 불변식(e2e L4)을 바꾸지 않는다. 버튼과 같은 폭
+                      상한·말줄임, 들여쓰기는 화살표 + 간격(0.875 + 0.25rem)이라 경로 글자 아래에 선다. */}
+                  {pv !== null && (
+                    <div className="max-w-[11rem] truncate pl-[1.125rem] text-xs text-muted sm:max-w-[22rem] lg:max-w-full">
+                      <PvLine pv={pv} multiCluster={pvDisplay.multiCluster} />
+                    </div>
+                  )}
                 </td>
                 <td className="whitespace-nowrap px-3 text-right tabular-nums"
                     title={typeof p?.total_bytes === "number"
@@ -184,7 +199,9 @@ export function TargetTable({ storage, rows, activeTarget, onToggle, sort, order
                     <div id={DETAIL_ID} role="region" aria-label={`${storage}:${r.target} 상세`}
                          className="sticky left-0 border-l-2 border-accent bg-surface px-4 pb-5 pt-4"
                          style={wrap.width !== null ? { width: wrap.width } : undefined}>
-                      <TargetDetail storage={storage} target={r.target} showTitle={false} latest={p} />
+                      <TargetDetail storage={storage} target={r.target} showTitle={false} latest={p}
+                                    pv={pv} multiCluster={pvDisplay.multiCluster}
+                                    requesterFiltered={pvDisplay.requesterFiltered} />
                     </div>
                   </td>
                 </tr>

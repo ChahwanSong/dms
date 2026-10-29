@@ -217,7 +217,8 @@ class DataJobsRepository:
 
     def scan_target_heads(self, *, q: "str | None" = None, storage: "str | None" = None,
                           path: "str | None" = None, order: str = "desc",
-                          limit: "int | None" = 100, sort: str = "last_scan") -> list[dict]:
+                          limit: "int | None" = 100, sort: str = "last_scan",
+                          requester: "str | None" = None, with_matched: bool = False) -> list[dict]:
         """성공 scan 이 있는 (storage, target) 목록 — **전 요청자 통합**(사용량
         분석, 2026-08-23 사용자 요청: "요청자에 관계없이 모든 작업"). 필터는
         _scan_target_where. 정렬은 최근 스캔 기준 — 기본 내림차순(화면의 기본 질문이
@@ -235,7 +236,16 @@ class DataJobsRepository:
         전부를 OR 300쌍 묶음으로 다시 물어(1만이면 34문장, 문장마다 성공 잡 전체를 훑음) 전체 잡 행을 메모리에 세웠다
         -- 머리에 job_id 가 있으면 라우트가 캐시를 job_id 로 바로 묻고 전체 행은 반환할 쪽만 읽는다. 필터가 target·
         storage_name 에만 걸리므로 파티션(같은 storage·target 의 잡 전부)은 필터에 잘리지 않는다 -- 최신 판정이 필터와
-        무관하다."""
+        무관하다.
+
+        requester(2026-10-29 사용량 분석 요청자 필터): **대상 단위**다 -- 그 대상의 성공 scan 중 requests.requester_id 가 이 값인
+        것이 하나라도 있으면 대상 전체(scan_count·first_scan_at·최신 잡 = 필터가 없을 때와 같은 값)가 남는다. 잡 단위로 안쪽
+        WHERE 에 걸면 파티션이 잘려 scan_count·최신 잡이 「그 요청자의 잡만」 기준이 된다(정렬 값과 화면의 latest 가 다른 잡에서
+        나온다). 그래서 안쪽에는 파티션 창 MAX 로 표식만 달고 바깥에서 거른다. 요청 행이 없는 고아 data_jobs(DB 가 신뢰 경계)는
+        이 필터에서만 빠진다 -- 요청자를 모르는 잡은 어느 요청자의 것도 아니다. 서브쿼리는 비상관이라 한 번 물어지고
+        idx_requests_requester 를 탄다(열은 r. 접두 -- requests 와 data_jobs 의 열 이름이 겹친다).
+        with_matched: 행마다 matched_count = 필터에 맞는 대상 전체 수(COUNT(*) OVER () -- WHERE 뒤·LIMIT 앞이라 limit 과 무관).
+        두 인자가 기본값이면 문장이 예전과 글자 하나 다르지 않다(계획 테스트·tests/test_usage_equivalence.py)."""
         params: dict = {}
         where = self._scan_target_where(params, q=q, storage=storage, path=path)
         direction = "ASC" if order == "asc" else "DESC"
@@ -245,19 +255,85 @@ class DataJobsRepository:
         if limit is not None:
             tail = " LIMIT :n"
             params["n"] = limit
+        hit_col = hit_where = matched = ""
+        if requester is not None:
+            hit_col = (""",
+                             MAX(CASE WHEN request_id IN (SELECT r.request_id FROM requests r
+                                                          WHERE r.requester_id = :rq)
+                                      THEN 1 ELSE 0 END) OVER (PARTITION BY storage_name, target) AS requester_hit""")
+            hit_where = " AND requester_hit = 1"
+            params["rq"] = requester
+        if with_matched:
+            matched = ",\n                       COUNT(*) OVER () AS matched_count"
         return self._db.query(
             f"""SELECT storage_name, target, scan_count, first_scan_at, last_scan_at,
-                       job_id, request_id, bytes_count
+                       job_id, request_id, bytes_count{matched}
                 FROM (SELECT storage_name, target, job_id, request_id, bytes_count,
                              updated_at AS last_scan_at,
                              ROW_NUMBER() OVER (PARTITION BY storage_name, target
                                                 ORDER BY updated_at DESC, job_id DESC) AS rn,
                              COUNT(*) OVER (PARTITION BY storage_name, target) AS scan_count,
-                             MIN(updated_at) OVER (PARTITION BY storage_name, target) AS first_scan_at
+                             MIN(updated_at) OVER (PARTITION BY storage_name, target) AS first_scan_at{hit_col}
                       FROM data_jobs WHERE {where}) heads
-                WHERE rn = 1
+                WHERE rn = 1{hit_where}
                 ORDER BY {order_by}, storage_name, target{tail}""",
             params)
+
+    def has_recorded_pv_scans(self, storage_name: "str | None") -> bool:
+        """이 스토리지에 PV 주소로 낸(requests.target_label 이 있는 -- 직접 경로 요청은 NULL) 성공 scan 이 하나라도 있나. 사용량
+        분석의 PV 소속 판정이 「기록」 대체(recorded_pv_blocks)를 물을지 정하는 싼 문턱이다(없으면 그 질의를 건너뛴다). 기본 조건은
+        _scan_target_where 와 같다 -- JOIN 때문에 접두형으로 쓴다. storage_name None 은 False(`= NULL` 은 아무것도 맞지 않는다)."""
+        if storage_name is None:
+            return False
+        return self._db.query_one(
+            """SELECT 1 AS x FROM data_jobs d JOIN requests r ON r.request_id = d.request_id
+               WHERE d.operation = 'scan' AND d.state = :s AND d.target IS NOT NULL AND d.storage_name = :sn
+                     AND r.target_label IS NOT NULL
+               LIMIT 1""",
+            {"s": DataJobState.SUCCEEDED.value, "sn": storage_name}) is not None
+
+    def recorded_pv_blocks(self, storage_name: "str | None", targets) -> dict:
+        """한 스토리지의 고른 대상들 -> target -> 그 대상을 PV 주소로 scan 한 성공 잡들의 요청 payload 문자열 목록(최신순 --
+        updated_at DESC, job_id DESC). 사용량 분석의 PV 소속 판정이 「지금 인벤토리에 없는 PV」(지운 PVC·바뀐 루트)를 제출 때 얼린
+        pv 블록으로 대신 보는 재료다 -- 블록의 유효성·루트 포함 판정은 순수 모듈(usage_attribution.parse_block)이 한다(DB 가 신뢰
+        경계라 여기서는 모양을 믿지 않고 문자열 그대로 넘긴다).
+
+        공용 술어(_scan_target_where)는 안쪽 data_jobs 질의에만 둔다 -- 접두 없는 열이 requests 와 겹쳐도 모호하지 않게(batches.py
+        의 EXISTS 처럼 그 함수는 접두 없음에 기댄다). storage_name None 이나 빈 targets 는 빈 결과(문장 없음). 한 문장의 자리표시자는
+        _IN_CHUNK 개 이하로 자른다."""
+        names = [t for t in dict.fromkeys(targets) if t is not None]
+        if storage_name is None or not names:
+            return {}
+        out: dict = {}
+        for i in range(0, len(names), _IN_CHUNK):
+            chunk = {f"t{n}": v for n, v in enumerate(names[i:i + _IN_CHUNK])}
+            params: dict = dict(chunk)
+            where = self._scan_target_where(params, storage=storage_name)
+            rows = self._db.query(
+                f"""SELECT j.target, r.payload
+                    FROM (SELECT target, request_id, updated_at, job_id FROM data_jobs
+                          WHERE {where} AND target IN ({", ".join(":" + k for k in chunk)})) j
+                    JOIN requests r ON r.request_id = j.request_id
+                    WHERE r.target_label IS NOT NULL
+                    ORDER BY j.target, j.updated_at DESC, j.job_id DESC""",
+                params)
+            for r in rows:
+                out.setdefault(r["target"], []).append(r["payload"])
+        return out
+
+    def scan_requester_counts(self, storage_name: "str | None") -> list[dict]:
+        """한 스토리지의 성공 scan 요청자(requests.requester_id)마다 그가 scan 한 대상 수 -- 사용량 분석 요청자 필터의 선택지
+        (스토리지 전체 기준이라 창과 무관하게 정확하다). [{requester_id, target_count}], 요청자 이름순. 요청 행이 없는 고아 잡은
+        세지 않는다(scan_target_heads 의 requester 필터와 같은 판정). storage_name None 은 빈 결과."""
+        if storage_name is None:
+            return []
+        # _scan_target_where 와 같은 기본 조건 -- JOIN 때문에 접두형
+        return self._db.query(
+            """SELECT r.requester_id, COUNT(DISTINCT d.target) AS target_count
+               FROM data_jobs d JOIN requests r ON r.request_id = d.request_id
+               WHERE d.operation = 'scan' AND d.state = :s AND d.target IS NOT NULL AND d.storage_name = :sn
+               GROUP BY r.requester_id ORDER BY r.requester_id""",
+            {"s": DataJobState.SUCCEEDED.value, "sn": storage_name})
 
     def usage_scan_request_ids(self, request_ids) -> set:
         """이 요청들 중 사용량 분석의 지점이 되는 잡(성공 scan -- _scan_target_where 의 기본 조건 그대로)을 가진 것.

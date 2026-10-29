@@ -22,6 +22,8 @@
 """
 import time
 import uuid
+from types import MappingProxyType
+from typing import Mapping
 
 from .. import k8s_sync
 from ..db import Database, dump_json, iso_plus, load_json, utc_now_iso
@@ -48,6 +50,8 @@ OWNER_ID_MAX = 4294967294
 # pv_roots 메모의 수명(초). 입력 지문이 스냅숏 적용·매핑·스토리지 변경을 잡지만, 그 밖의 경로로 고친 행(DB 직접 수정 -- 신뢰
 # 경계)도 이 시간 안에는 반영되게 짧게 둔다(같은 틱의 배치 자식 수십 건이 한 번만 계산하면 충분하다).
 PV_ROOTS_MEMO_SECONDS = 30.0
+# pv_root_index 의 빈 결과(스토리지 없음·PV 를 담지 않음·매핑 없음) -- 읽기 전용 한 벌.
+_NO_PV_ROOTS: "Mapping[str, tuple]" = MappingProxyType({})
 CHANGE_NAMES_MAX = 50
 _RUN_LIST_COLUMNS = ("seq, run_id, cluster_name, node_name, role, trigger, status, claimed_at, deadline_at, finished_at, "
                      "applied_at, config_rev, reason, phase, http_status, error, server_version, duration_ms, counts, "
@@ -215,7 +219,8 @@ _PV_JOIN_COLUMNS = ("v.name AS pv_name, v.volume_handle AS pv_volume_handle, v.v
 class K8sRepository:
     def __init__(self, db: Database):
         self._db = db
-        # pv_roots 의 메모(스토리지 이름 → (입력 지문, 루트들)). 지문이 같을 때만 재사용한다(pv_roots docstring).
+        # pv_root_index 의 메모(스토리지 이름 → (입력 지문, 계산 시각, 루트 → PVC 정체들)). pv_roots 도 이것을 거친다. 지문이
+        # 같고 수명 안일 때만 재사용한다(pv_root_index docstring).
         self._pv_roots_memo: dict = {}
 
     @property
@@ -978,6 +983,17 @@ class K8sRepository:
         결과 소유 판정(k8s_access.direct_dest_owner -- PV·파일시스템(both) 스토리지는 경로가 이 루트 중 하나 아래일 때만 스토리지
         기본 소유자로)이 쓴다. 스토리지가 없거나 PV 를 담는 종류(pv·both)가 아니거나 매핑이 없으면 ().
 
+        계산·메모는 pv_root_index 한 벌이다(2026-10-29 사용량 분석 PV 필터가 루트마다 PVC 정체를 함께 쓰게 되면서 옮겼다) -- 이
+        값은 그 index 의 키를 정렬한 것과 바이트 단위로 같다(tests/test_direct_dest_owner.py 의 등가 단언 -- 보안 민감 경로다)."""
+        return tuple(sorted(self.pv_root_index(storage_name)))
+
+    def pv_root_index(self, storage_name) -> "Mapping[str, tuple]":
+        """pv_roots 의 루트 → 그 루트를 가진 PVC 정체들(cluster, namespace, pvc, volume, storage_class)의 정렬·중복 없는 tuple.
+        루트 충돌(같은 루트를 여러 PVC 가 낸다 -- 클러스터 칸 없는 SC 매핑 키·{volume} 없는 템플릿·같은 subDir 의 정적 PV)이면 여럿
+        이다. 조건(적용된 클러스터·Bound·SC 매핑·resolve_volume 이 선택 가능·storage_name 일치·root != '')은 pv_roots 의 정의 그대로
+        -- 사용량 분석의 PV 소속 판정(usage_attribution)이 이것으로 「지금 어느 PV 아래인가」를 본다. 돌려주는 값은 읽기 전용 사상
+        (MappingProxyType)이다: 메모의 값을 그대로 넘기므로 호출자가 바꾸면 다음 호출(소유 판정 포함)이 오염된다.
+
         메모(PV_ROOTS_MEMO_SECONDS): 계산은 매핑된 PVC 전부를 해석한다 -- 배치 자식마다 생성·계획·컨펌에서 불려, 큰 인벤토리 ×
         큰 배치면 틱이 그 계산으로 찬다. 입력 지문(스토리지 종류·백엔드 = 프리셋 템플릿, 이 스토리지를 가리키는 SC 매핑과 템플릿,
         적용된 클러스터마다 applied_run_seq -- 스냅숏 행은 apply_run 이 같은 트랜잭션에서 그 값을 올릴 때만 바뀐다)이 같고 수명
@@ -985,10 +1001,10 @@ class K8sRepository:
         달라 다시 계산된다 -- 옛 루트가 새 지문에 붙는 순서는 없다."""
         storage = self._db.query_one("SELECT * FROM storages WHERE storage_name = :n", {"n": storage_name})
         if storage is None or storage_kind(storage) not in PV_CAPABLE_KINDS:
-            return ()
+            return _NO_PV_ROOTS
         maps = self.maps_for_storage(storage_name)
         if not maps:
-            return ()
+            return _NO_PV_ROOTS
         clusters = self._db.query(
             "SELECT name, applied_run_seq FROM k8s_clusters WHERE applied_run_seq IS NOT NULL ORDER BY name")
         key = (storage_kind(storage), storage.get("backend_type"),
@@ -1009,17 +1025,25 @@ class K8sRepository:
                 WHERE p.phase = 'Bound'
                   AND COALESCE(NULLIF(p.storage_class, ''), v.storage_class) IN ({', '.join(':' + k for k in params)})""",
             params)
-        roots = set()
+        roots: dict = {}
         for r in rows:
             pv = _joined_pv(r)
             sc = r.get("storage_class") or (pv or {}).get("storage_class")
             item = resolve_volume(r, pv, by_sc.get(sc), storage)
             if item["selectable"] and item["storage_name"] == storage_name and isinstance(item["root"], str) \
                     and item["root"] != "":
-                roots.add(item["root"])
-        out = tuple(sorted(roots))
+                roots.setdefault(item["root"], set()).add(
+                    (item["cluster"], item["namespace"], item["pvc"], item["volume"], item["storage_class"]))
+        # 정체 정렬 키는 None 을 '' 로(선택 가능한 행은 volume·SC 가 늘 문자열이지만 비교가 TypeError 로 죽지 않게).
+        out = MappingProxyType({root: tuple(sorted(ids, key=lambda v: tuple("" if x is None else x for x in v)))
+                                for root, ids in sorted(roots.items())})
         self._pv_roots_memo[storage_name] = (key, now, out)
         return out
+
+    def unsynced_cluster_exists(self) -> bool:
+        """한 번도 적용되지 않은 클러스터(applied_run_seq NULL -- 활성 여부 무관)가 있나. 사용량 분석의 PV 소속 판정이 「지금 어떤
+        PV 루트에도 없음」을 「PV 밖」이 아니라 「모름」으로 두는 재료다 -- 그 클러스터의 PV 는 아직 모른다(null ≠ 0)."""
+        return self._db.query_one("SELECT 1 AS x FROM k8s_clusters WHERE applied_run_seq IS NULL LIMIT 1") is not None
 
     def pv_root_covering(self, storage_name, rel_path) -> "str | None":
         """rel_path(managed_root 기준 **정규화된** 상대경로 -- 호출자가 validate_relative_path 로 맞춘다)와 같거나 그 위인 그

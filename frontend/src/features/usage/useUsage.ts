@@ -1,7 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { apiGet, apiSend } from "../../lib/api";
-import type { PurgeStorageHistoryResult, ScanTargetRow, UnregisteredStorage, UsageExport,
-              UsageHistory, UsageStorageTotals, UsageStorages } from "../../lib/types";
+import { ApiError, apiGet, apiSend } from "../../lib/api";
+import type { PurgeStorageHistoryResult, UnregisteredStorage, UsageAttrFilter, UsageExport, UsageFacets,
+              UsageFiltersEcho, UsageHistory, UsageScope, UsageStorageTotals, UsageStorages,
+              UsageTargetsPage } from "../../lib/types";
 import { DELETE_REQUESTS_INVALIDATES } from "../jobs/useJobs";
 
 // 타깃 필터(2026-10-02): storage = 스토리지 정확히 일치, path = 경로 부분 문자열 -- 둘이 함께 걸린다.
@@ -13,10 +14,48 @@ import { DELETE_REQUESTS_INVALIDATES } from "../jobs/useJobs";
 // 빈 문자열도 이름이다(변조·구형 행의 빈 이름 탭 -- 서버도 실린 storage 는 빈 값이라도 정확히 일치로 본다). 탭을 모르는
 // 동안엔 패널(StoragePanel)이 아예 그려지지 않으니 「아직 모름」 표시를 이 값에 싣지 않는다.
 export type UsageSort = "last_scan" | "scans" | "bytes" | "files" | "hot";
-export interface TargetFilter { storage: string; path: string; order: "desc" | "asc"; sort: UsageSort }
+// attr(2026-10-29 사용자 요청 「사용자·PV 이름·namespace 등으로 필터」): 클러스터·namespace·PV 이름(pvc)·StorageClass·권한 사용자·
+// 구분(scope)·요청자. 모두 **대상 단위**다(서버 routes_usage -- 한 경로의 scan 이력이 통째로 걸리거나 빠진다: 스캔 횟수·최근
+// scan·이력은 늘 그 경로의 전체 기록). 경로 검색(path)·정렬과 달리 URL 에 실린다(UsageAnalysis).
+export interface TargetFilter {
+  storage: string; path: string; order: "desc" | "asc"; sort: UsageSort; attr: UsageAttrFilter;
+}
 
 // 목록 한 번에 받는 행 수(서버 기본 100과 같다) -- 다 차면 화면이 「상위 N개 표시 · 전체 M개」라고 말한다.
 export const LIST_LIMIT = 100;
+
+// 필터 키의 고정 순서 -- 쿼리 문자열·쿼리키·URL 이 같은 순서라 같은 조합이 늘 같은 문자열이다. 이름은 서버 쿼리 파라미터 =
+// URL 키 = PV 탐색 화면(VolumesPage)의 키(후속 딥링크가 그대로 걸리게).
+export const ATTR_KEYS = ["cluster", "namespace", "pvc", "storage_class", "user", "scope", "requester"] as const;
+export type AttrKey = (typeof ATTR_KEYS)[number];
+export const SCOPES: readonly UsageScope[] = ["pv", "outside", "unknown"];
+// PV 축(같은 PVC 정체 하나가 모두 만족해야 한다 -- 서버 결합 규칙). 구분 「PV 밖」·「모름」과는 함께 걸 수 없다(늘 0건).
+export const PV_AXES = ["cluster", "namespace", "pvc", "storage_class", "user"] as const;
+
+// 값이 있는 키만(빈 문자열은 「없음」 -- 서버는 빈 값을 422 로 거절한다). scope 는 아는 값만 -- 손으로 친 URL 의 엉뚱한 값을
+// 서버에 실어 422 를 만들지 않는다.
+export function cleanAttr(a: Partial<Record<AttrKey, string | null | undefined>>): UsageAttrFilter {
+  const out: UsageAttrFilter = {};
+  for (const k of ATTR_KEYS) {
+    const v = a[k];
+    if (typeof v !== "string" || v === "") continue;
+    if (k === "scope") { if ((SCOPES as readonly string[]).includes(v)) out.scope = v as UsageScope; }
+    else out[k] = v;
+  }
+  return out;
+}
+export const hasAttr = (a: UsageAttrFilter): boolean => ATTR_KEYS.some((k) => a[k] !== undefined);
+export const hasPvAxis = (a: UsageAttrFilter): boolean => PV_AXES.some((k) => a[k] !== undefined);
+
+function appendAttr(p: URLSearchParams, a: UsageAttrFilter): void {
+  for (const k of ATTR_KEYS) { const v = a[k]; if (v !== undefined && v !== "") p.set(k, v); }
+}
+// 쿼리키 조각: 고정 순서 직렬화, 필터가 없으면 "".
+export function attrKey(a: UsageAttrFilter): string {
+  const p = new URLSearchParams();
+  appendAttr(p, a);
+  return p.toString();
+}
 
 export function targetQuery(f: TargetFilter): string {
   const p = new URLSearchParams();
@@ -24,19 +63,95 @@ export function targetQuery(f: TargetFilter): string {
   if (f.path) p.set("path", f.path);
   p.set("order", f.order);
   p.set("sort", f.sort);
+  appendAttr(p, f.attr);
   return p.toString();
 }
 
-// 타깃 목록: 필터가 쿼리키에 들어가 조합별로 캐시된다. 4s 폴링은 불필요 --
-// scan 이 끝나야 목록이 변하는 저빈도 데이터라 staleTime 30s 로 왕복을 줄인다.
-// 같은 스토리지 안에서 정렬·검색을 바꿀 때만 이전 행을 자리표시로 남긴다(표가 「불러오는 중」으로 깜빡이지 않게) --
-// 다른 스토리지의 행을 새 탭 아래 잠깐이라도 보이면 「이 스토리지에 그 경로가 있다」는 거짓이 된다.
-export const useScanTargets = (f: TargetFilter) =>
-  useQuery({
-    queryKey: ["usage-targets", f.storage, f.path, f.order, f.sort],
-    queryFn: () => apiGet<ScanTargetRow[]>(`/api/admin/usage/scan-targets?${targetQuery(f)}&limit=${LIST_LIMIT}`),
-    placeholderData: (prev, prevQuery) => (prevQuery?.queryKey[1] === f.storage ? prev : undefined),
+// 배포 틈의 두 모양(2026-10-29): 새 포탈이 옛 API 를 부르면 (1) 새 경로가 없다 -- 404·405 또는 SPA index.html 200(JSON 파서
+// 오류), 봉투가 아닌 배열, (2) 모르는 쿼리 파라미터를 FastAPI 가 조용히 무시해 「필터를 건 척한 전체 목록」이 온다 -- 서버가
+// 되돌려 준 적용 필터(filters)가 보낸 값과 다르다. 둘 다 오류로 말한다(조용한 무필터가 가장 나쁜 거짓이다). 메시지는 화면 문구
+// 그대로라 StoragePanel·StorageTotals 가 .message 를 그대로 보인다. 서버 사유 코드가 아니다(reasonCodes 무관 -- 포탈 판정).
+export const USAGE_API_UNKNOWN = "서버가 새 사용량 API 를 아직 모릅니다(배포 중일 수 있음) — 잠시 뒤 새로고침하세요";
+export const USAGE_FILTER_MISMATCH = "서버가 적용한 필터가 화면과 다릅니다 — 새로고침하세요";
+export class UsageContractError extends Error {
+  constructor(public kind: "unknown_api" | "filter_mismatch") {
+    super(kind === "unknown_api" ? USAGE_API_UNKNOWN : USAGE_FILTER_MISMATCH);
+  }
+}
+
+const isObj = (x: unknown): x is Record<string, unknown> => typeof x === "object" && x !== null && !Array.isArray(x);
+
+async function getNew(url: string): Promise<unknown> {
+  try {
+    return await apiGet<unknown>(url);
+  } catch (e) {
+    if (e instanceof SyntaxError || (e instanceof ApiError && (e.status === 404 || e.status === 405))) {
+      throw new UsageContractError("unknown_api");
+    }
+    throw e;
+  }
+}
+
+// 메아리 대조: 보낸 필터와 서버가 적용한 필터가 키마다 같아야 한다(메아리의 null·부재 = 그 필터 없음). path 는 목록·내보내기만
+// (합계는 경로 검색을 받지 않는다 -- 메아리에 없어도 된다). storage 는 메아리에 있으면 같아야 한다.
+function echoMatches(echo: unknown, storage: string, attr: UsageAttrFilter, path?: string): boolean {
+  if (!isObj(echo)) return false;
+  const e = echo as UsageFiltersEcho;
+  if (e.storage !== undefined && e.storage !== storage) return false;
+  if (path !== undefined && (e.path ?? "") !== path) return false;
+  return ATTR_KEYS.every((k) => (e[k] ?? null) === (attr[k] ?? null));
+}
+
+// 타깃 목록(2026-10-29 새 봉투 엔드포인트 /targets -- 옛 scan-targets 는 옛 탭 호환으로 동결): 필터가 쿼리키에 들어가 조합별로
+// 캐시된다. 4s 폴링은 불필요 -- scan 이 끝나야 목록이 변하는 저빈도 데이터라 staleTime 30s 로 왕복을 줄인다. 쿼리키의 storage 는
+// 늘 인덱스 1, 필터 조각은 끝(attrKey) -- 접두 ["usage-targets"] 무효화(작업 삭제 등)가 그대로 걸린다.
+// 같은 스토리지·같은 필터 안에서 정렬·검색을 바꿀 때만 이전 행을 자리표시로 남긴다(표가 「불러오는 중」으로 깜빡이지 않게) --
+// 다른 스토리지·다른 필터의 행을 잠깐이라도 보이면 「이 스토리지(이 필터)에 그 경로가 있다」는 거짓이 된다.
+export const useScanTargets = (f: TargetFilter) => {
+  const ak = attrKey(f.attr);
+  return useQuery({
+    queryKey: ["usage-targets", f.storage, f.path, f.order, f.sort, ak],
+    queryFn: async (): Promise<UsageTargetsPage> => {
+      const body = await getNew(`/api/admin/usage/targets?${targetQuery(f)}&limit=${LIST_LIMIT}`);
+      if (!isObj(body) || !Array.isArray(body.rows) || !isObj(body.filters)) throw new UsageContractError("unknown_api");
+      if (!echoMatches(body.filters, f.storage, f.attr, f.path)) throw new UsageContractError("filter_mismatch");
+      const page = body as unknown as UsageTargetsPage;
+      // 모르는 수는 null(모름 ≠ 0) -- 구형·부분 응답의 부재를 0 으로 접지 않는다.
+      return { ...page, matched_count: typeof page.matched_count === "number" ? page.matched_count : null,
+               window_truncated: page.window_truncated === true };
+    },
+    placeholderData: (prev, prevQuery) =>
+      (prevQuery?.queryKey[1] === f.storage && prevQuery?.queryKey[5] === ak ? prev : undefined),
     staleTime: 30_000,
+  });
+};
+
+// 필터 선택지(2026-10-29): 옵션마다 대상 수. ["usage-storages"] 접두 아래라 작업 삭제·스토리지 변경 무효화에 함께 걸린다.
+// 실패하면 필터 줄을 그리지 않는다(StoragePanel) -- 자동 재시도로 매번 기다리게 하지 않는다(retry false).
+export const useUsageFacets = (storage: string, enabled = true) =>
+  useQuery({
+    queryKey: ["usage-storages", "facets", storage],
+    queryFn: async (): Promise<UsageFacets> => {
+      const body = await getNew(`/api/admin/usage/facets?storage=${encodeURIComponent(storage)}`);
+      if (!isObj(body) || !isObj(body.scope)) throw new UsageContractError("unknown_api");
+      const arr = (x: unknown) => (Array.isArray(x) ? x.filter(isObj) : []);
+      const num = (x: unknown) => (typeof x === "number" && Number.isFinite(x) && x > 0 ? x : 0);
+      const s = body.scope as Record<string, unknown>;
+      const f = body as unknown as UsageFacets;
+      return {
+        ...f,
+        scope: { inventory: num(s.inventory), recorded: num(s.recorded), outside: num(s.outside), unknown: num(s.unknown) },
+        clusters: arr(body.clusters) as UsageFacets["clusters"], namespaces: arr(body.namespaces) as UsageFacets["namespaces"],
+        pvcs: arr(body.pvcs) as UsageFacets["pvcs"], storage_classes: arr(body.storage_classes) as UsageFacets["storage_classes"],
+        users: arr(body.users) as UsageFacets["users"], requesters: arr(body.requesters) as UsageFacets["requesters"],
+        lists_truncated: isObj(body.lists_truncated) ? (body.lists_truncated as Record<string, boolean>) : {},
+        // PV 선택지가 최근 스캔된 창 안의 것뿐인가(UsageFilters 가 말한다) -- 아는 참만 참이다.
+        window_truncated: body.window_truncated === true,
+      };
+    },
+    enabled,
+    staleTime: 30_000,
+    retry: false,
   });
 
 // 스토리지 탭 요약(2026-10-20): 탭 집합·대상 수·메타 줄·지표 정렬 창 상한의 원천 하나(서버 집계 한 번). 스토리지
@@ -53,17 +168,34 @@ export const useUsageStorages = () =>
 // 1초 뒤 다시 불러 이어 읽게 하고(서버는 못 읽은 리포트를 잠시 기억해 다음 호출이 그 뒤를 연다), 진전이 없으면 멈춘다(같은
 // 실패를 1초마다 되풀이하지 않게). 오류 중엔 멈춘다 -- 그때 패널은 「읽는 중」이라 말하지 않는다(StorageTotals.reading).
 // 빈 이름도 이름이다(encodeURIComponent("") = "" -- 서버는 실린 storage 를 빈 값이라도 정확 일치로 본다).
-export const useStorageTotals = (storage: string) =>
-  useQuery({
-    queryKey: ["usage-storages", "totals", storage],
-    queryFn: () => apiGet<UsageStorageTotals>(
-      `/api/admin/usage/storage-totals?storage=${encodeURIComponent(storage)}`),
+// 필터 합계(2026-10-29, attr 이 있을 때만): 키 끝에 필터 조각, URL 에 필터(경로 검색은 싣지 않는다 -- 합계는 경로 검색과 무관,
+// 2026-10-21 규칙 유지). 필터가 없으면 키·URL 이 그 전과 같다(UsageOverview 와 숫자 한 벌). 필터 합계는 서버 메아리(filters)가
+// 없거나 다르면 오류다(옛 서버가 필터를 무시하고 스토리지 전체 합계를 「필터 합계」로 보이지 않게).
+export const useStorageTotals = (storage: string, attr?: UsageAttrFilter) => {
+  const a = attr ?? {};
+  const filtered = hasAttr(a);
+  const ak = filtered ? attrKey(a) : "";
+  return useQuery({
+    queryKey: filtered ? ["usage-storages", "totals", storage, ak] : ["usage-storages", "totals", storage],
+    queryFn: async (): Promise<UsageStorageTotals> => {
+      if (!filtered) {
+        return apiGet<UsageStorageTotals>(`/api/admin/usage/storage-totals?storage=${encodeURIComponent(storage)}`);
+      }
+      const p = new URLSearchParams();
+      p.set("storage", storage);
+      appendAttr(p, a);
+      const body = await getNew(`/api/admin/usage/storage-totals?${p.toString()}`);
+      if (!isObj(body)) throw new UsageContractError("unknown_api");
+      if (!echoMatches(body.filters, storage, a)) throw new UsageContractError("filter_mismatch");
+      return body as unknown as UsageStorageTotals;
+    },
     staleTime: 30_000,
     refetchInterval: (q) => {
       const d = q.state.data;
       return q.state.status !== "error" && d !== undefined && d.pending_count > 0 && d.progressed === true ? 1_000 : false;
     },
   });
+};
 
 // 성공 scan 기록이 있는 스토리지 이름 -- 요약(useUsageStorages)을 못 받았을 때만 쓰는 대체 원천(enabled): 탭은 등록
 // 목록 ∪ 이 이름들로 그리고 대상 수는 모름으로 둔다.
@@ -71,9 +203,16 @@ export const useScanStorages = (enabled = true) =>
   useQuery({ queryKey: ["usage-scan-storages"],
              queryFn: () => apiGet<string[]>("/api/admin/usage/scan-storages"), staleTime: 60_000, enabled });
 
-// 전체 내보내기(CSV 버튼): 화면 상태가 아니라 버튼을 누를 때 한 번 -- 필터·정렬은 목록과 같다(지금 탭의 스토리지만).
-export const fetchUsageExport = (f: TargetFilter) =>
-  apiGet<UsageExport>(`/api/admin/usage/export?${targetQuery(f)}`);
+// 전체 내보내기(CSV 버튼): 화면 상태가 아니라 버튼을 누를 때 한 번 -- 필터·정렬은 목록과 같다(지금 탭의 스토리지만). 새
+// 엔드포인트(/targets/export)는 적용 필터 메아리가 없거나 다르면 실패다(목록과 같은 배포 틈 판정 -- CSV 가 조용히 무필터가
+// 되지 않게).
+export async function fetchUsageExport(f: TargetFilter): Promise<UsageExport> {
+  const body = await getNew(`/api/admin/usage/targets/export?${targetQuery(f)}`);
+  if (!isObj(body) || !Array.isArray(body.rows)) throw new UsageContractError("unknown_api");
+  if (!echoMatches(body.filters, f.storage, f.attr, f.path)) throw new UsageContractError("filter_mismatch");
+  const out = body as unknown as UsageExport;
+  return { ...out, matched_count: typeof out.matched_count === "number" ? out.matched_count : null };
+}
 
 // 이력: 선택된 타깃에서만 나간다(enabled). 아티팩트 읽기(포인트당 최대 256KiB
 // I/O)가 뒤에 있으므로 staleTime 을 길게 -- 성공 종단 잡의 리포트는 **삭제되기 전까지** 불변이고,

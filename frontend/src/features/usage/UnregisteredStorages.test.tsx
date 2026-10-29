@@ -46,7 +46,16 @@ function renderPage(getList: () => UnregisteredStorage[] | Response) {
           target_count: r.target_count, succeeded_scan_count: r.succeeded_scan_count, last_scan_at: r.last_scan_at }))] });
     }),
     http.get(LIST_URL, () => { const l = getList(); return Array.isArray(l) ? HttpResponse.json(l) : l; }),
-    http.get("/api/admin/usage/scan-targets", () => HttpResponse.json([])),
+    // 목록(2026-10-29 봉투 /targets -- 메아리는 보낸 storage 그대로, 필터 없음)과 필터 선택지(빈 목록).
+    http.get("/api/admin/usage/targets", ({ request }) => {
+      const storage = new URL(request.url).searchParams.get("storage");
+      return HttpResponse.json({ rows: [], matched_count: 0, window_limit: 10000, window_truncated: false,
+                                 filters: { storage, path: null } });
+    }),
+    http.get("/api/admin/usage/facets", ({ request }) => HttpResponse.json({
+      storage_name: new URL(request.url).searchParams.get("storage") ?? "", computed_at: "", window_limit: 10000,
+      window_truncated: false, target_count: 0, scope: { inventory: 0, recorded: 0, outside: 0, unknown: 0 },
+      clusters: [], namespaces: [], pvcs: [], storage_classes: [], users: [], requesters: [], lists_truncated: {} })),
     // 스토리지 합계(2026-10-21) -- 이 파일은 정리 흐름만 본다: 대상 0 응답이면 패널의 합계 블록이 없다(합계 화면은
     // UsageAnalysis.test 몫).
     http.get("/api/admin/usage/storage-totals", ({ request }) => HttpResponse.json({

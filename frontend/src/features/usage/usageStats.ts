@@ -1,6 +1,6 @@
 // 사용량 분석의 순수 규칙(화면·CSV 내보내기 공용 한 벌, 2026-10-02 UsageAnalysis.tsx 에서 분리). hot 비율·
 // 스택 비중·온도 색·나이 구간 라벨이 화면과 CSV 에서 갈라지면 같은 타깃이 두 숫자를 갖는다.
-import type { HistogramBucket, UsagePoint } from "../../lib/types";
+import type { HistogramBucket, UsagePoint, UsagePv, UsagePvSource, UsagePvVolume } from "../../lib/types";
 
 // NodesList/JobStats/RequestDetail 의 humanBytes 국소 사본 관례.
 export function humanBytes(bytes: number): string {
@@ -107,3 +107,32 @@ export function bucketKey(b: HistogramBucket, index: number): string {
 export const AXIS_MEANING: Record<string, string> = {
   atime: "마지막 접근", mtime: "마지막 수정", ctime: "메타데이터 변경",
 };
+
+// ---- PV 소속(2026-10-29) -- 표 둘째 줄·상세 머리(UsageParts)와 CSV 의 k8s_* 열(usageCsv)이 같은 검사를 거친다. ----
+const SOURCES: readonly UsagePvSource[] = ["inventory", "recorded", "outside", "unknown"];
+
+const nonEmpty = (x: unknown): x is string => typeof x === "string" && x !== "";
+const strOrNull = (x: unknown): string | null => (typeof x === "string" && x !== "" ? x : null);
+
+/** 응답 행의 pv 모양 검사(구형·부분 응답이어도 화면이 죽지 않게 -- StorageTotals 의 관례). 모르는 source 면 null(그리지
+ *  않는다). PV 안(inventory·recorded)인데 정체가 하나도 없으면 근거가 없으니 모름으로 본다(지어내지 않는다). */
+export function usagePvOf(x: unknown): UsagePv | null {
+  if (typeof x !== "object" || x === null) return null;
+  const p = x as Record<string, unknown>;
+  const source = SOURCES.find((s) => s === p.source);
+  if (source === undefined) return null;
+  const volumes: UsagePvVolume[] = (Array.isArray(p.volumes) ? p.volumes : []).flatMap((v: unknown) => {
+    const r = (typeof v === "object" && v !== null ? v : {}) as Record<string, unknown>;
+    return nonEmpty(r.cluster) && nonEmpty(r.namespace) && nonEmpty(r.pvc)
+      ? [{ cluster: r.cluster, namespace: r.namespace, pvc: r.pvc, volume: strOrNull(r.volume),
+           storage_class: strOrNull(r.storage_class) }]
+      : [];
+  });
+  const users = (Array.isArray(p.users) ? p.users : []).filter(nonEmpty);
+  if ((source === "inventory" || source === "recorded") && volumes.length === 0) {
+    return { source: "unknown", root: null, volumes: [], users: [] };
+  }
+  return { source, root: strOrNull(p.root), volumes, users };
+}
+export const pvInside = (pv: UsagePv | null): boolean =>
+  pv !== null && (pv.source === "inventory" || pv.source === "recorded");

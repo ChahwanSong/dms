@@ -336,6 +336,50 @@ export interface ScanTargetRow {
   // 옵션(?) = 구형 서버·기존 fixture 호환. latest null = 성공 scan 잡을 못 찾음(경합).
   first_scan_at?: string | null;
   latest?: UsagePoint | null;
+  // 2026-10-29 PV 소속(GET /api/admin/usage/targets·targets/export -- 서버 usage_attribution.attribute). 옵션(?) = 옛 엔드포인트·
+  // 기존 fixture 호환(없으면 화면이 PV 줄을 그리지 않는다).
+  pv?: UsagePv | null;
+}
+// 대상의 PV 소속(읽을 때 판정 -- 대상 단위). source: inventory = 지금 인벤토리의 가장 깊은 PV 루트 아래, recorded = 지금
+// 인벤토리에 없지만 이 경로를 PV 주소로 scan 한 기록, outside = 어떤 PV 루트에도 속하지 않음(직접 경로 scan·PV 상위 디렉터리·
+// filesystem 스토리지), unknown = 판정할 수 없음(미등록 스토리지·StorageClass 매핑 없음·동기화 전 클러스터). volumes 는 그 루트를
+// 가진 PVC 정체들(루트 충돌이면 여럿), users = 지금 RoleBinding 으로 그 namespace 에 접근하는 dms 사용자(면제 운영자는 없다).
+export type UsagePvSource = "inventory" | "recorded" | "outside" | "unknown";
+export interface UsagePvVolume {
+  cluster: string; namespace: string; pvc: string; volume: string | null; storage_class: string | null;
+}
+export interface UsagePv { source: UsagePvSource; root: string | null; volumes: UsagePvVolume[]; users: string[] }
+// 사용량 필터(2026-10-29, URL 키 = 서버 쿼리 이름 = PV 탐색 화면의 키). 값이 없는 키는 「필터 없음」이고 빈 문자열은 싣지 않는다
+// (서버는 빈 값을 422 로 거절한다). scope: pv = PV 안(inventory·recorded), outside, unknown.
+export type UsageScope = "pv" | "outside" | "unknown";
+export interface UsageAttrFilter {
+  cluster?: string; namespace?: string; pvc?: string; storage_class?: string; user?: string; scope?: UsageScope;
+  requester?: string;
+}
+// 서버가 실제로 적용한 필터의 메아리(null = 그 필터 없음). 포탈은 보낸 값과 대조한다 -- 모르는 파라미터를 조용히 무시하는 옛
+// 서버가 「거른 척한 전체 목록」을 주지 않게.
+export interface UsageFiltersEcho {
+  storage?: string | null; path?: string | null; cluster?: string | null; namespace?: string | null; pvc?: string | null;
+  storage_class?: string | null; user?: string | null; scope?: UsageScope | null; requester?: string | null;
+}
+// GET /api/admin/usage/targets 봉투. matched_count = 필터에 맞는 대상 수(limit 무관), null = 모름(PV 필터가 판정 창을 넘었다 --
+// window_truncated). window_limit = 지표 정렬·PV 판정 창.
+export interface UsageTargetsPage {
+  rows: ScanTargetRow[]; matched_count: number | null; window_limit: number; window_truncated: boolean;
+  filters: UsageFiltersEcho;
+}
+// GET /api/admin/usage/facets?storage= -- 필터 선택지(옵션마다 대상 수). PV 쪽은 머리 창(최근 스캔 순 window_limit)을 해석한
+// 집계, requesters 는 스토리지 전체 기준. lists_truncated[이름] = 그 목록이 상한에서 잘렸다.
+export interface UsageFacets {
+  storage_name: string; computed_at: string; window_limit: number; window_truncated: boolean; target_count: number;
+  scope: { inventory: number; recorded: number; outside: number; unknown: number };
+  clusters: { cluster: string; target_count: number }[];
+  namespaces: { cluster: string; namespace: string; target_count: number }[];
+  pvcs: { cluster: string; namespace: string; pvc: string; storage_class: string | null; target_count: number }[];
+  storage_classes: { storage_class: string | null; target_count: number }[];
+  users: { dms_user: string; target_count: number }[];
+  requesters: { requester_id: string; target_count: number }[];
+  lists_truncated?: Record<string, boolean>;
 }
 // 사용량 분석 전체 내보내기(GET /api/admin/usage/export). previous = 최신 직전 성공 scan(증감 계산용).
 export interface UsageExportRow extends ScanTargetRow {
@@ -384,6 +428,9 @@ export interface UsageStorageTotals {
   file_size_histogram: { buckets: HistogramBucket[]; known: number; unknown: number };
   oldest_scan_at: string | null; newest_scan_at: string | null;
   filesystem: UsageStorageFilesystem | null;
+  // 2026-10-29 필터 합계(?cluster=…&requester=… -- 경로 검색은 받지 않는다)일 때만: 서버가 적용한 필터의 메아리. 필터가 있으면
+  // filesystem 은 null 이다(부분 집합에 df 는 뜻이 없다).
+  filters?: UsageFiltersEcho;
 }
 // 사용량 분석의 미등록 스토리지(GET /api/admin/usage/unregistered-storages, 2026-10-12). target_count·succeeded_scan_count·
 // last_scan_at = 사용량 화면 기준(성공 scan -- 실패 scan 만 남은 이름은 0·null), request_count = 정리하면 지워질 작업 수
@@ -408,6 +455,10 @@ export interface PurgeStorageHistoryResult {
 }
 export interface UsageExport {
   generated_at: string; count: number; truncated: boolean; rows: UsageExportRow[];
+  // 2026-10-29 GET /api/admin/usage/targets/export: 필터에 맞는 대상 수(null = 모름 -- PV 필터가 판정 창을 넘었다)와 서버가
+  // 적용한 필터. 옵션(?) = 옛 export·fixture 호환(포탈은 새 엔드포인트에선 메아리가 없으면 실패로 본다).
+  matched_count?: number | null;
+  filters?: UsageFiltersEcho;
 }
 export interface UsagePoint {
   job_id: string; request_id: string; finished_at: string | null;

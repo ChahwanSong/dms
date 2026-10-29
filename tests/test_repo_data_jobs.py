@@ -374,3 +374,149 @@ def test_scan_target_heads_carry_the_latest_job_and_old_group_by_values(db):
         3, "2026-09-01T00:00:00Z", "2026-09-05T00:00:00Z")
     assert head["job_id"] == max(j2, j3) and head["job_id"] != j1
     assert [h["storage_name"] for h in repos.data_jobs.scan_target_heads()] == ["s2", "s1"]   # 최근 스캔 내림차순
+
+
+# ---- 사용량 분석 필터(2026-10-29): 요청자는 대상 단위, 맞는 대상 수, PV 주소 scan 기록 ----
+
+def _scan_by(repos, db, *, requester, storage="s1", target="team", at, pv=None, state=DataJobState.SUCCEEDED):
+    payload = {"storage": storage, "target": target, **({"pv": pv} if pv is not None else {})}
+    rid = repos.requests.create(operation="scan", requester_id=requester, actor=requester,
+                                resource_key=f"k:{uuid.uuid4().hex}", payload=payload, priority="mid",
+                                target_label=f"{pv['pvc']} — {pv['namespace']} ({pv['storage_class']})" if pv else None)
+    plan_id = repos.data_jobs.create_plan(rid, actor="planner")
+    jid = repos.data_jobs.create_job(rid, plan_id, operation="scan", priority="mid", storage_name=storage,
+                                     target=target, options={}, tool="dscan", worker_pool={}, precondition={},
+                                     actor="planner")
+    repos.data_jobs.set_job_state(jid, state, actor="stepper")
+    db.execute("UPDATE data_jobs SET updated_at = :t WHERE job_id = :j", {"t": at, "j": jid})
+    return jid
+
+
+def _heads(repos, **kw):
+    return [(h["target"], h["scan_count"], h["first_scan_at"], h["last_scan_at"], h["job_id"])
+            for h in repos.data_jobs.scan_target_heads(storage="s1", **kw)]
+
+
+def test_requester_filter_is_per_target_and_keeps_the_whole_partition(db):
+    # 옛 scan 은 alice, 최신은 mason -- alice 로 걸러도 그 대상의 전체 이력(scan_count·first·최신 잡)이 그대로 나온다(잡 단위로
+    # 거르면 scan_count 1·최신 = alice 의 옛 잡이 되어 정렬 값과 화면의 latest 가 다른 잡에서 나온다).
+    repos = _repos(db)
+    _scan_by(repos, db, requester="alice", target="team", at="2026-09-01T00:00:00Z")
+    newest = _scan_by(repos, db, requester="mason", target="team", at="2026-09-05T00:00:00Z")
+    _scan_by(repos, db, requester="mason", target="solo", at="2026-09-03T00:00:00Z")
+    _scan_by(repos, db, requester="alice", target="failed-only", at="2026-09-04T00:00:00Z", state=DataJobState.FAILED)
+    _scan_by(repos, db, requester="alice", storage="s2", target="team", at="2026-09-06T00:00:00Z")
+    everything = _heads(repos)
+    assert [h[0] for h in everything] == ["team", "solo"]
+    assert _heads(repos, requester="alice") == [everything[0]]
+    assert everything[0] == ("team", 2, "2026-09-01T00:00:00Z", "2026-09-05T00:00:00Z", newest)
+    assert _heads(repos, requester="mason") == everything
+    assert _heads(repos, requester="nobody") == []
+    assert _heads(repos, requester="alice", path="sol") == []                  # path 와 함께 걸린다
+    assert _heads(repos, requester="", sort="scans") == []                     # 빈 문자열도 값이다(「필터 없음」이 아니다)
+
+
+def test_orphan_jobs_drop_out_only_under_the_requester_filter(db):
+    # 요청 행이 없는 data_jobs(DB 가 신뢰 경계 -- 무검증 INSERT·지워진 요청): 요청자를 모르므로 어느 요청자의 것도 아니다.
+    repos = _repos(db)
+    _scan_by(repos, db, requester="alice", target="team", at="2026-09-01T00:00:00Z")
+    orphan = _scan_by(repos, db, requester="alice", target="orphan", at="2026-09-02T00:00:00Z")
+    rid = db.query_one("SELECT request_id FROM data_jobs WHERE job_id = :j", {"j": orphan})["request_id"]
+    db.execute("DELETE FROM requests WHERE request_id = :r", {"r": rid})
+    assert [h[0] for h in _heads(repos)] == ["orphan", "team"]
+    assert [h[0] for h in _heads(repos, requester="alice")] == ["team"]
+    assert repos.data_jobs.scan_requester_counts("s1") == [{"requester_id": "alice", "target_count": 1}]
+
+
+def test_matched_count_is_the_filtered_total_not_the_page(db):
+    repos = _repos(db)
+    for i, t in enumerate(["a", "b", "c", "d"]):
+        _scan_by(repos, db, requester="alice" if t != "d" else "mason", target=t, at=f"2026-09-0{i + 1}T00:00:00Z")
+    for limit in (1, 2, 100):
+        rows = repos.data_jobs.scan_target_heads(storage="s1", limit=limit, with_matched=True)
+        assert {r["matched_count"] for r in rows} == {4} and len(rows) == min(limit, 4)
+        rows = repos.data_jobs.scan_target_heads(storage="s1", requester="alice", limit=limit, with_matched=True)
+        assert {r["matched_count"] for r in rows} == {3}
+    assert repos.data_jobs.scan_target_heads(storage="s1", path="zz", with_matched=True) == []
+    assert "matched_count" not in repos.data_jobs.scan_target_heads(storage="s1")[0]
+
+
+# 새 인자가 기본값일 때의 머리 문장 -- 2026-10-20 의 것 그대로(계획 테스트·tests/test_usage_equivalence.py 가 이 모양에 기댄다).
+_HEADS_SQL_2026_10_20 = (
+    "SELECT storage_name, target, scan_count, first_scan_at, last_scan_at, job_id, request_id, bytes_count "
+    "FROM (SELECT storage_name, target, job_id, request_id, bytes_count, updated_at AS last_scan_at, "
+    "ROW_NUMBER() OVER (PARTITION BY storage_name, target ORDER BY updated_at DESC, job_id DESC) AS rn, "
+    "COUNT(*) OVER (PARTITION BY storage_name, target) AS scan_count, "
+    "MIN(updated_at) OVER (PARTITION BY storage_name, target) AS first_scan_at "
+    "FROM data_jobs WHERE operation = 'scan' AND state = :s AND target IS NOT NULL AND storage_name = :sn) heads "
+    "WHERE rn = 1 ORDER BY last_scan_at DESC, storage_name, target LIMIT :n")
+
+
+def test_default_arguments_leave_the_heads_statement_unchanged(db, monkeypatch):
+    repos = _repos(db)
+    seen = []
+    real = db.query
+    monkeypatch.setattr(db, "query", lambda sql, params=None: (seen.append((sql, params)), real(sql, params))[1])
+    repos.data_jobs.scan_target_heads(storage="s1")
+    repos.data_jobs.scan_target_heads(storage="s1", requester=None, with_matched=False)
+    assert seen[0][0] == seen[1][0]
+    assert " ".join(seen[0][0].split()) == _HEADS_SQL_2026_10_20
+    assert set(seen[0][1]) == {"s", "sn", "n"}
+    repos.data_jobs.scan_target_heads(storage="s1", requester="alice", with_matched=True)
+    assert "requester_hit" in seen[2][0] and "matched_count" in seen[2][0] and seen[2][1]["rq"] == "alice"
+
+
+def _pv(ns, pvc, root, cluster="dmsk8s"):
+    return {"cluster": cluster, "namespace": ns, "pvc": pvc, "volume": f"pvc-{pvc}", "storage_class": "tb-nfs",
+            "root": root, "path": ""}
+
+
+def test_recorded_pv_blocks_are_newest_first_and_only_pv_address_scans(db):
+    import json
+    repos = _repos(db)
+    assert repos.data_jobs.has_recorded_pv_scans("s1") is False
+    _scan_by(repos, db, requester="mason", target="team-a/data/x", at="2026-09-09T00:00:00Z")           # 직접 경로
+    _scan_by(repos, db, requester="alice", target="team-a/data/x", at="2026-09-01T00:00:00Z",
+             pv=_pv("team-a", "old", "team-a/data"))
+    _scan_by(repos, db, requester="alice", target="team-a/data/x", at="2026-09-05T00:00:00Z",
+             pv=_pv("team-a", "new", "team-a/data"))
+    _scan_by(repos, db, requester="alice", target="team-a/data/x", at="2026-09-07T00:00:00Z",
+             pv=_pv("team-a", "failed", "team-a/data"), state=DataJobState.FAILED)
+    _scan_by(repos, db, requester="alice", storage="s2", target="team-a/data/x", at="2026-09-08T00:00:00Z",
+             pv=_pv("team-a", "other-storage", "team-a/data"))
+    assert repos.data_jobs.has_recorded_pv_scans("s1") is True
+    assert repos.data_jobs.has_recorded_pv_scans("s3") is False and repos.data_jobs.has_recorded_pv_scans(None) is False
+    got = repos.data_jobs.recorded_pv_blocks("s1", ["team-a/data/x", "nope", "team-a/data/x"])
+    assert list(got) == ["team-a/data/x"]
+    assert [json.loads(p)["pv"]["pvc"] for p in got["team-a/data/x"]] == ["new", "old"]
+
+
+def test_recorded_pv_blocks_chunk_their_placeholders_and_skip_empty_input(db, monkeypatch):
+    import re
+    repos = _repos(db)
+    _scan_by(repos, db, requester="alice", target="t00007", at="2026-09-01T00:00:00Z", pv=_pv("ns", "p", "t00007"))
+    statements = []
+    real = db.query
+
+    def spy(sql, params=None):
+        statements.append(len(set(re.findall(r":t\d+", sql))))
+        return real(sql, params)
+    monkeypatch.setattr(db, "query", spy)
+    got = repos.data_jobs.recorded_pv_blocks("s1", [f"t{i:05d}" for i in range(1100)])
+    assert statements == [500, 500, 100] and list(got) == ["t00007"]
+    statements.clear()
+    assert repos.data_jobs.recorded_pv_blocks(None, ["t00007"]) == {}
+    assert repos.data_jobs.recorded_pv_blocks("s1", []) == {}
+    assert statements == []                                                    # 문장 없음
+
+
+def test_scan_requester_counts_count_distinct_targets_per_requester(db):
+    repos = _repos(db)
+    for requester, target in (("alice", "a"), ("alice", "a"), ("alice", "b"), ("mason", "a"), ("junwoo.song", "c")):
+        _scan_by(repos, db, requester=requester, target=target, at="2026-09-01T00:00:00Z")
+    _scan_by(repos, db, requester="zed", target="z", at="2026-09-01T00:00:00Z", state=DataJobState.FAILED)
+    _scan_by(repos, db, requester="other", storage="s2", target="a", at="2026-09-01T00:00:00Z")
+    assert repos.data_jobs.scan_requester_counts("s1") == [
+        {"requester_id": "alice", "target_count": 2}, {"requester_id": "junwoo.song", "target_count": 1},
+        {"requester_id": "mason", "target_count": 1}]
+    assert repos.data_jobs.scan_requester_counts(None) == [] and repos.data_jobs.scan_requester_counts("s9") == []

@@ -2,16 +2,23 @@
 
 픽스처 관례는 test_api_request_scan_stats 를 따른다(성공 잡 materialize +
 execution/dscan-report.json 직접 기록)."""
+import copy
 import os
 import json
+import uuid
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
 
+from dms.agent.k8s_fetch import project_pv, project_pvc, project_role_binding, project_storage_class
 from dms.config import Settings
 from dms.db import Database
 from dms.domain import DataJobState
+from dms.k8s_sync import normalize_snapshot
 from dms.migrations import migrate
+# 필터 절(2026-10-29)의 테스트베드 모양 세계 -- dmsk8s 실데이터 동기화 + 스토리지 4종 + SC 매핑 + 계정(test_k8s_submit 의 것).
+from test_k8s_submit import _FILES, FIXTURES, _k8s_settings, _sync_cluster, world  # noqa: F401
 
 
 def _report(*, mtime_bytes=(30, 20), atime_bytes=(50,), epoch=1785805962,
@@ -1173,3 +1180,612 @@ def test_storage_totals_sum_invalid_names_separately_from_broken(tmp_path):
     assert t["invalid_name_entries"] == {"sum": 4, "known": 2, "unknown": 1}
     assert t["broken_paths_total"] == {"sum": 0, "known": 3, "unknown": 0}
     assert t["total_bytes"] == {"sum": 1000 + 24 + 50, "known": 3, "unknown": 0}
+
+
+# ---- 2026-10-29: 필터(사용자별·PV 이름·namespace 등) -- /targets·/targets/export·/facets·필터 합계 ----
+# 테스트베드 모양: k8s-pv-nfs 가 두 클러스터의 PV 를 함께 담는다(dmsk8s 의 tb-nfs 프리셋 + dmsk8s2 의 c2-nfs 템플릿
+# c2/{namespace}/{pvc}), gpfs 의 PVC 이름 models 가 team-a·team-b 둘 다, onefs 의 한 대상을 요청자 둘(alice → junwoo.song)이
+# PV 주소로 scan, 면제 운영자(mason)의 직접 경로 scan(PV 밖 둘·PV 루트의 상위 하나·PV 루트 아래 하나), 지운 PVC(team-d/old)의
+# PV 주소 scan 기록 하나. DB 는 conftest 의 db 다(DMS_TEST_DB=postgresql 이면 PG 스키마에서도 돈다).
+
+NFS, ONEFS, GPFS, CEPH = "k8s-pv-nfs", "k8s-pv-onefs", "k8s-pv-gpfs", "cephfs-dms"
+GPFS_A = "pvc-52c6132d-bce6-4cbe-842a-dbe35245ab2c/pvc-52c6132d-bce6-4cbe-842a-dbe35245ab2c-data"
+GPFS_B = "pvc-b0b6e65b-f74a-4998-8f84-e1ae6047deb8/pvc-b0b6e65b-f74a-4998-8f84-e1ae6047deb8-data"
+ONEFS_ROOT = "data/csi/k8s-3fa9c2d71e"
+NFS_DATASETS_VOL = "pvc-814fe02b-ffe7-4a17-8430-b8de9a6c0b91"
+TARGETS = "/api/admin/usage/targets"
+FACETS = "/api/admin/usage/facets"
+
+
+def _pvb(cluster, ns, pvc, volume, sc, root):
+    return {"cluster": cluster, "namespace": ns, "pvc": pvc, "volume": volume, "storage_class": sc, "root": root,
+            "path": ""}
+
+
+_DATASETS = _pvb("dmsk8s", "team-a", "datasets", NFS_DATASETS_VOL, "tb-nfs", "team-a/datasets")
+_WEIGHTS = _pvb("dmsk8s2", "lab-y", "weights", "pvc-c2-weights", "c2-nfs", "c2/lab-y/weights")
+_GONE = _pvb("dmsk8s", "team-d", "old", "pvc-gone", "tb-nfs", "team-d/old")
+# (storage, target, requester, 완료 시각, pv 블록 | None = 직접 경로, 실 사용량)
+_SEED = [
+    (NFS, "team-d/old/run", "alice", "2026-10-24T00:00:00Z", _GONE, 50),
+    (NFS, "team-a/datasets/dms-proof", "alice", "2026-10-25T01:00:00Z", _DATASETS, 500),
+    (NFS, "team-a/datasets/proof-scan", "mason", "2026-10-25T02:00:00Z", _DATASETS, 100),
+    (NFS, "c2/lab-y/weights", "mason", "2026-10-25T03:00:00Z", _WEIGHTS, 900),
+    (NFS, "proof-d9/alice/latest", "mason", "2026-10-26T01:00:00Z", None, 300),
+    (NFS, "proof-nl/a/selfnl", "mason", "2026-10-26T02:00:00Z", None, 200),
+    (NFS, "team-a/datasets/proof-ov", "mason", "2026-10-26T03:00:00Z", None, 700),      # PV 루트 아래 직접 경로
+    (NFS, "c2/lab-y", "mason", "2026-10-26T04:00:00Z", None, 1000),                     # PV 루트의 상위 = PV 밖
+    (ONEFS, ONEFS_ROOT + "/dms-proof", "alice", "2026-10-25T05:00:00Z",
+     _pvb("dmsk8s", "team-a", "kraken-kv-cache", "k8s-3fa9c2d71e", "tb-onefs", ONEFS_ROOT), 10),
+    (ONEFS, ONEFS_ROOT + "/dms-proof", "junwoo.song", "2026-10-26T05:00:00Z",
+     _pvb("dmsk8s", "team-a", "kraken-kv-cache", "k8s-3fa9c2d71e", "tb-onefs", ONEFS_ROOT), 20),
+    (GPFS, GPFS_A + "/dms-proof", "mason", "2026-10-25T06:00:00Z",
+     _pvb("dmsk8s", "team-a", "models", GPFS_A.split("/")[0], "tb-gpfs", GPFS_A), 1),
+    (GPFS, GPFS_B + "/run", "alice", "2026-10-25T07:00:00Z",
+     _pvb("dmsk8s", "team-b", "models", GPFS_B.split("/")[0], "tb-gpfs", GPFS_B), 2),
+    (GPFS, "plain/dir", "mason", "2026-10-26T06:00:00Z", None, 3),
+    (CEPH, "proj/x", "mason", "2026-10-26T07:00:00Z", None, 4),
+    (CEPH, "proj/y", "alice", "2026-10-26T08:00:00Z", None, 5),
+]
+# k8s-pv-nfs 의 최근 스캔 내림차순
+NFS_DESC = ["c2/lab-y", "team-a/datasets/proof-ov", "proof-nl/a/selfnl", "proof-d9/alice/latest", "c2/lab-y/weights",
+            "team-a/datasets/proof-scan", "team-a/datasets/dms-proof", "team-d/old/run"]
+
+
+def _c2_snapshot():
+    """두 번째 클러스터 dmsk8s2 -- 테스트베드 실데이터 항목을 고쳐 만든다(SC c2-nfs, PVC lab-y/weights, cocoa.song 의 lab-y 바인딩)."""
+    raw = {key: json.loads((FIXTURES / name).read_text())["items"] for key, (name, _) in _FILES.items()}
+
+    def pick(key, ns, name):
+        return copy.deepcopy(next(i for i in raw[key]
+                                  if i["metadata"].get("namespace") == ns and i["metadata"]["name"] == name))
+    sc = pick("storage_classes", None, "tb-nfs")
+    sc["metadata"]["name"] = "c2-nfs"
+    pvc = pick("pvcs", "team-b", "scratch")
+    pvc["metadata"].update(namespace="lab-y", name="weights", uid="c2-weights-uid")
+    pvc["spec"].update(storageClassName="c2-nfs", volumeName="pvc-c2-weights")
+    pv = pick("pvs", None, "pvc-aa3d0bd2-0219-4ac1-aa57-2cf64e16770c")
+    pv["metadata"]["name"] = "pvc-c2-weights"
+    pv["spec"]["storageClassName"] = "c2-nfs"
+    pv["spec"]["claimRef"].update(namespace="lab-y", name="weights")
+    rb = pick("role_bindings", "team-b", "cocoa-song-clusterrole-edit")
+    rb["metadata"]["namespace"] = "lab-y"
+    return normalize_snapshot({"storage_classes": [project_storage_class(sc)], "pvcs": [project_pvc(pvc)],
+                               "pvs": [project_pv(pv)], "role_bindings": [project_role_binding(rb)]})
+
+
+def _seed_scan(repos, db, art, *, storage, target, requester, at, pv=None, total=None):
+    payload = {"storage": storage, "target": target, **({"pv": pv} if pv is not None else {})}
+    rid = repos.requests.create(operation="scan", requester_id=requester, actor=requester,
+                                resource_key=f"k:{uuid.uuid4().hex}", payload=payload, priority="mid",
+                                auth_method="session",
+                                target_label=f"{pv['pvc']} — {pv['namespace']} ({pv['storage_class']})" if pv else None)
+    plan_id = repos.data_jobs.create_plan(rid, actor="planner")
+    jid = repos.data_jobs.create_job(
+        rid, plan_id, operation="scan", priority="mid", storage_name=storage, target=target, options={}, tool="dscan",
+        worker_pool={"identity": {"username": requester, "uid": os.getuid(), "gid": os.getgid()}}, precondition={},
+        actor="planner")
+    repos.data_jobs.set_job_state(jid, DataJobState.SUCCEEDED, actor="stepper")
+    db.execute("UPDATE data_jobs SET updated_at = :t WHERE job_id = :j", {"t": at, "j": jid})
+    if total is not None:
+        d = art / jid / "execution"
+        d.mkdir(parents=True)
+        (d / "dscan-report.json").write_text(json.dumps(_report(mtime_bytes=(total,))))
+    return jid
+
+
+@pytest.fixture
+def uw(world, db, tmp_path):
+    """테스트베드 모양 사용량 세계(위 절 머리말). 관리자 세션(ops -- 특권 목록)으로 로그인한 client."""
+    from dms.api.app import create_app
+    repos = world
+    _sync_cluster(repos, db, name="dmsk8s2", data=_c2_snapshot())
+    repos.k8s.set_sc_map("c2-nfs", storage_name=NFS, path_template="c2/{namespace}/{pvc}", actor="ops")
+    assert repos.k8s.pv_roots(NFS) == ("c2/lab-y/weights", "team-a/datasets", "team-b/scratch", "team-c/archive")
+    art = tmp_path / "artifacts"
+    jobs = {}
+    for storage, target, requester, at, pv, total in _SEED:
+        jobs[(storage, target, requester)] = _seed_scan(repos, db, art, storage=storage, target=target,
+                                                        requester=requester, at=at, pv=pv, total=total)
+    client = TestClient(create_app(_k8s_settings(artifact_base_uri=f"file://{art}"), db))
+    assert client.post("/api/auth/login", json={"username": "ops", "password": "pw"}).status_code == 200
+    return SimpleNamespace(client=client, repos=repos, db=db, art=art, jobs=jobs)
+
+
+def _page(uw, storage=NFS, **params):
+    r = uw.client.get(TARGETS, params={"storage": storage, **params})
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def _names(uw, storage=NFS, **params):
+    body = _page(uw, storage, **params)
+    names = [row["target"] for row in body["rows"]]
+    if not body["window_truncated"]:
+        assert body["matched_count"] == len(names), (params, body["matched_count"])   # 상한(100) 안 -- 다 보인다
+    return names
+
+
+_NO_FILTERS = dict.fromkeys(("cluster", "namespace", "pvc", "storage_class", "user", "scope", "requester"))
+
+
+def test_targets_envelope_echoes_filters_and_carries_pv_on_every_row(uw):
+    body = _page(uw)
+    assert list(body) == ["rows", "matched_count", "window_limit", "window_truncated", "filters"]
+    assert (body["matched_count"], body["window_limit"], body["window_truncated"]) == (8, 10000, False)
+    assert body["filters"] == {"storage": NFS, "path": None, **_NO_FILTERS}
+    rows = {r["target"]: r for r in body["rows"]}
+    assert [r["target"] for r in body["rows"]] == NFS_DESC
+    assert list(body["rows"][0]) == ["storage_name", "target", "scan_count", "first_scan_at", "last_scan_at", "latest",
+                                     "pv"]
+    datasets = [{"cluster": "dmsk8s", "namespace": "team-a", "pvc": "datasets", "volume": NFS_DATASETS_VOL,
+                 "storage_class": "tb-nfs"}]
+    # PV 루트 아래 직접 경로 scan 도 그 PV 다(경로로 판정 -- 블록이 없어도)
+    assert rows["team-a/datasets/proof-ov"]["pv"] == {"source": "inventory", "root": "team-a/datasets",
+                                                       "volumes": datasets, "users": ["alice", "junwoo.song"]}
+    assert rows["c2/lab-y/weights"]["pv"] == {
+        "source": "inventory", "root": "c2/lab-y/weights", "users": ["cocoa.song"],
+        "volumes": [{"cluster": "dmsk8s2", "namespace": "lab-y", "pvc": "weights", "volume": "pvc-c2-weights",
+                     "storage_class": "c2-nfs"}]}
+    assert rows["team-d/old/run"]["pv"] == {           # 지운 PVC -- PV 주소 scan 기록, 지금 바인딩 없음
+        "source": "recorded", "root": "team-d/old", "users": [],
+        "volumes": [{"cluster": "dmsk8s", "namespace": "team-d", "pvc": "old", "volume": "pvc-gone",
+                     "storage_class": "tb-nfs"}]}
+    for outside in ("c2/lab-y", "proof-d9/alice/latest", "proof-nl/a/selfnl"):
+        assert rows[outside]["pv"] == {"source": "outside", "root": None, "volumes": [], "users": []}
+    # 옛 scan-targets 의 행과 공개 열·latest 가 같다(새 봉투는 pv 를 더했을 뿐)
+    old = uw.client.get("/api/admin/usage/scan-targets", params={"storage": NFS}).json()
+    assert [{k: v for k, v in r.items() if k != "pv"} for r in body["rows"]] == old
+
+
+def test_each_filter_selects_whole_targets(uw):
+    get = lambda storage=NFS, **p: _names(uw, storage, **p)   # noqa: E731
+    team_a = ["team-a/datasets/proof-ov", "team-a/datasets/proof-scan", "team-a/datasets/dms-proof"]
+    assert get(namespace="team-a") == team_a
+    assert get(cluster="dmsk8s", namespace="team-a", pvc="datasets") == team_a
+    assert get(cluster="dmsk8s2") == ["c2/lab-y/weights"]
+    assert get(storage_class="c2-nfs") == ["c2/lab-y/weights"]
+    assert get(namespace="team-d") == ["team-d/old/run"]                      # 기록 대체
+    assert get(scope="outside") == ["c2/lab-y", "proof-nl/a/selfnl", "proof-d9/alice/latest"]
+    assert get(scope="pv") == ["team-a/datasets/proof-ov", "c2/lab-y/weights", "team-a/datasets/proof-scan",
+                               "team-a/datasets/dms-proof", "team-d/old/run"]
+    assert get(scope="unknown") == []
+    assert get(user="cocoa.song") == ["c2/lab-y/weights"]                     # 권한 사용자(지금 RoleBinding)
+    assert get(user="alice") == team_a
+    assert get(requester="alice") == ["team-a/datasets/dms-proof", "team-d/old/run"]
+    assert get(requester="mason", namespace="team-a") == ["team-a/datasets/proof-ov", "team-a/datasets/proof-scan"]
+    assert get(path="proof", scope="outside") == ["proof-nl/a/selfnl", "proof-d9/alice/latest"]
+    assert get(scope="outside", cluster="dmsk8s") == []                       # 밖 + PV 축 = 0건(정상값)
+    assert get(cluster="dmsk8s", namespace="lab-y") == []                     # 축은 같은 정체 하나가 만족해야 한다
+    assert get(user="cocoa.song", cluster="dmsk8s") == []
+    # PVC 이름(화면 「PV 이름」)은 namespace 마다만 유일 -- models 가 team-a·team-b 둘 다
+    assert get(GPFS, pvc="models") == [GPFS_B + "/run", GPFS_A + "/dms-proof"]
+    assert get(GPFS, pvc="models", namespace="team-b") == [GPFS_B + "/run"]
+    assert get(GPFS, scope="outside") == ["plain/dir"]                        # both 스토리지의 PV 밖
+    assert get(CEPH, scope="outside") == ["proj/y", "proj/x"] and get(CEPH, scope="pv") == []
+    body = _page(uw, namespace="team-a", requester="mason", path="proof")
+    assert body["filters"] == {"storage": NFS, "path": "proof", **_NO_FILTERS, "namespace": "team-a",
+                               "requester": "mason"}
+
+
+def test_requester_filter_is_per_target_and_rows_keep_their_latest(uw):
+    # onefs 의 한 대상을 alice(옛)·junwoo.song(최신)이 PV 주소로 scan -- alice 로 걸러도 행은 그 대상의 전체 기록이다.
+    [row] = _page(uw, ONEFS, requester="alice")["rows"]
+    assert row["target"] == ONEFS_ROOT + "/dms-proof" and row["scan_count"] == 2
+    assert row["latest"]["requester"] == "junwoo.song" and row["latest"]["total_bytes"] == 20
+    assert row["pv"]["volumes"][0]["pvc"] == "kraken-kv-cache"
+    assert _page(uw, ONEFS, requester="junwoo.song")["rows"] == [row]
+    assert _page(uw, ONEFS, requester="nobody") == {
+        "rows": [], "matched_count": 0, "window_limit": 10000, "window_truncated": False,
+        "filters": {"storage": ONEFS, "path": None, **_NO_FILTERS, "requester": "nobody"}}
+
+
+def test_unsynced_cluster_makes_the_rest_unknown_and_deleted_clusters_fall_back_to_records(uw):
+    repos = uw.repos
+    repos.k8s.create_cluster(name="dmsk8s3", api_server="https://10.10.10.30:6443", tls_server_name=None, ca_pem=None,
+                             insecure_skip_tls_verify=False, token_enc="v1:x", enabled=False, actor="ops")
+    # 한 번도 적용되지 않은 클러스터(비활성이어도)의 PV 는 모른다 -- 「PV 밖」이 아니라 「모름」(null ≠ 0)
+    assert _names(uw, scope="unknown") == ["c2/lab-y", "proof-nl/a/selfnl", "proof-d9/alice/latest"]
+    assert _names(uw, scope="outside") == []
+    assert _names(uw, CEPH, scope="outside") == ["proj/y", "proj/x"]            # filesystem 은 그대로 밖
+    repos.k8s.delete_cluster("dmsk8s3", actor="ops")
+    # 클러스터를 지우면 그 PV 는 인벤토리에서 바로 사라진다 -- PV 주소 scan 기록으로 산다(지금 바인딩은 없다)
+    repos.k8s.delete_cluster("dmsk8s2", actor="ops")
+    [row] = _page(uw, cluster="dmsk8s2")["rows"]
+    assert row["target"] == "c2/lab-y/weights"
+    assert (row["pv"]["source"], row["pv"]["root"], row["pv"]["users"]) == ("recorded", "c2/lab-y/weights", [])
+    assert _names(uw, user="cocoa.song") == []
+
+
+def test_duplicate_bindings_count_a_user_once(uw):
+    # 같은 (cluster, namespace, user)가 이름만 다른 바인딩으로 둘(테스트베드 실모양 -- clusterrole + namespaceAdmin)
+    uw.db.execute("""INSERT INTO k8s_role_bindings (cluster_name, namespace, name, role_kind, role_name, subjects, dms_user,
+                                                    access, subject_mismatch)
+                     VALUES ('dmsk8s', 'team-a', 'alice-dup', 'ClusterRole', 'kubeflow-admin', '[]', 'alice', 'admin', 0)""")
+    rows = {r["target"]: r for r in _page(uw)["rows"]}
+    assert rows["team-a/datasets/dms-proof"]["pv"]["users"] == ["alice", "junwoo.song"]
+    users = {u["dms_user"]: u["target_count"] for u in uw.client.get(FACETS, params={"storage": NFS}).json()["users"]}
+    assert users == {"alice": 3, "junwoo.song": 3, "cocoa.song": 1}
+
+
+def test_pv_window_is_the_recent_window_whatever_the_sort(uw, monkeypatch):
+    # 2026-10-29 리뷰: PV 판정 창은 정렬과 무관하게 최근 스캔 순(창 W + 1) -- 정렬은 순서만 바꾸고 걸리는 **집합**은 그대로라
+    # facets 의 옵션 수(같은 창)·필터 합계·포탈의 「최근 스캔된 W개 안에서」와 한 규칙이다. 예전엔 요청한 정렬로 창을 잘라
+    # 「오래된 순」이면 가장 오래된 W개를 판정했다(같은 필터가 정렬만 바꿔도 다른 대상을 냈다).
+    from dms.api import routes_usage
+    monkeypatch.setattr(routes_usage, "_WINDOW_LIMIT", 5)
+    every_asc = _names(uw, order="asc")                         # SQL 경로(필터 없음) -- 창과 무관하게 정확
+    assert every_asc == NFS_DESC[::-1]
+    recent = NFS_DESC[:5]                                       # 최근 스캔된 5개 = 판정 창
+    facets = uw.client.get(FACETS, params={"storage": NFS}).json()
+    assert facets["window_truncated"] is True
+    assert (facets["scope"]["inventory"], facets["scope"]["outside"]) == (2, 3)
+    for scope, want in (("pv", ["team-a/datasets/proof-ov", "c2/lab-y/weights"]),
+                        ("outside", ["c2/lab-y", "proof-nl/a/selfnl", "proof-d9/alice/latest"])):
+        for sort, order in (("last_scan", "desc"), ("last_scan", "asc"), ("scans", "desc"), ("scans", "asc")):
+            body = _page(uw, scope=scope, sort=sort, order=order)
+            # 창이 넘쳤으니 맞는 수는 모름(0 이 아니다)
+            assert (body["window_truncated"], body["matched_count"], body["window_limit"]) == (True, None, 5)
+            got = [r["target"] for r in body["rows"]]
+            assert set(got) == set(want) and set(got) <= set(recent), (scope, sort, order)
+            # 창 안의 순서 = 그 정렬의 SQL 순서(필터 없는 SQL 경로에서 같은 대상만 남긴 것)
+            assert got == [t for t in _names(uw, sort=sort, order=order) if t in set(got)], (scope, sort, order)
+    # 내보내기도 같은 창이다(오래된 순 내보내기도 최근 창의 대상 -- 포탈 CSV 문구 「최근 스캔된 W개 안에서만 걸렀습니다」)
+    parts, err = _drain_targets_export(uw.client, order="asc", flt=_flt(scope="outside"))
+    body = json.loads(b"".join(parts))
+    assert err is None and (body["truncated"], body["matched_count"]) == (True, None)
+    assert [r["target"] for r in body["rows"]] == ["proof-d9/alice/latest", "proof-nl/a/selfnl", "c2/lab-y"]
+    # 요청자·경로는 SQL 이라 창과 무관하게 정확하다
+    body = _page(uw, requester="mason")
+    assert (body["window_truncated"], body["matched_count"], len(body["rows"])) == (False, 6, 6)
+
+
+def test_window_order_matches_the_sql_order_with_ties(db):
+    # _window_order 는 문자열을 비교하지 않고 최근 스캔 순 창을 요청한 SQL 정렬로 놓는다 -- 같은 시각·같은 스캔 횟수 동률이 이름
+    # 순(방언 콜레이션)으로 갈리는 자리까지 SQL 결과와 같아야 한다(DMS_TEST_DB=postgresql 이면 PG 콜레이션으로도 돈다).
+    from dms.api.routes_usage import _window_order
+    from dms.repositories import Repositories
+    repos = Repositories(db)
+    # (target, 스캔 시각들) -- 대문자·밑줄·숫자가 섞인 이름(콜레이션마다 순서가 갈리는 글자), 같은 최신 시각 묶음 둘
+    seed = [("b", ["01", "05"]), ("A", ["05"]), ("a_1", ["02", "03", "05"]), ("a-1", ["05"]), ("Z9", ["04"]),
+            ("c", ["04", "04"]), ("10", ["02"]), ("9", ["02", "03"])]
+    for target, ats in seed:
+        for at in ats:
+            jid = uuid.uuid4().hex
+            db.execute("""INSERT INTO data_jobs (job_id, request_id, operation, tool, storage_name, target, options,
+                                                 priority, state, worker_pool, created_at, updated_at)
+                          VALUES (:j, :r, 'scan', 'dscan', 's1', :t, '{}', 'mid', 'Succeeded', '{}', :at, :at)""",
+                       {"j": jid, "r": uuid.uuid4().hex, "t": target, "at": f"2026-09-01T00:00:{at}Z"})
+    window = repos.data_jobs.scan_target_heads(storage="s1", order="desc", limit=None)
+    for sort in ("last_scan", "scans"):
+        for order in ("asc", "desc"):
+            want = [h["target"] for h in repos.data_jobs.scan_target_heads(storage="s1", order=order, sort=sort,
+                                                                           limit=None)]
+            assert [h["target"] for h in _window_order(window, sort, order)] == want, (sort, order)
+    assert [h["target"] for h in window] != [h["target"] for h in _window_order(window, "last_scan", "asc")][::-1]
+
+
+def test_metric_sort_with_a_pv_filter_ranks_by_the_shown_value(uw, monkeypatch):
+    rows = _page(uw, scope="pv", sort="bytes", order="desc")["rows"]
+    assert [r["latest"]["total_bytes"] for r in rows] == [900, 700, 500, 100, 50]     # 정렬 값 = 보이는 값
+    assert [r["target"] for r in rows] == ["c2/lab-y/weights", "team-a/datasets/proof-ov",
+                                           "team-a/datasets/dms-proof", "team-a/datasets/proof-scan", "team-d/old/run"]
+    rows = _page(uw, scope="pv", sort="bytes", order="asc", limit=2)["rows"]
+    assert [r["latest"]["total_bytes"] for r in rows] == [50, 100]
+    from dms.api import routes_usage
+    monkeypatch.setattr(routes_usage, "_WINDOW_LIMIT", 3)
+    body = _page(uw, scope="pv", sort="bytes")          # 지표 정렬의 판정 창은 최근 스캔 순 -- 그 안의 PV 대상만
+    assert [r["target"] for r in body["rows"]] == ["team-a/datasets/proof-ov"] and body["matched_count"] is None
+
+
+@pytest.mark.parametrize("bad", [
+    {"cluster": ""}, {"namespace": ""}, {"pvc": ""}, {"storage_class": ""}, {"user": ""}, {"requester": ""},
+    {"scope": ""}, {"scope": "inside"}, {"cluster": "a\x00b"}, {"user": "al\nice"}, {"requester": "x\x7f"},
+    {"namespace": "n" * 254}, {"user": "u" * 254}, {"requester": "r" * 513},
+])
+def test_bad_filter_values_are_422_not_ignored(uw, bad):
+    for url in (TARGETS, TARGETS + "/export", TOTALS):
+        assert uw.client.get(url, params={"storage": NFS, **bad}).status_code == 422, (url, bad)
+
+
+@pytest.mark.parametrize("url,params", [
+    (TARGETS, {"storage": "a\x00b"}), (TARGETS, {"storage": NFS, "path": "a\x00b"}),
+    (TARGETS + "/export", {"storage": "a\x00b"}), (TARGETS + "/export", {"storage": NFS, "path": "a\x00b"}),
+    (FACETS, {"storage": "a\x00b"}),
+    (TOTALS, {"storage": "a\x00b"}), (TOTALS, {"storage": "a\x00b", "requester": "alice"}),
+])
+def test_new_endpoints_reject_nul_in_storage_and_path(uw, url, params):
+    # 2026-10-29 2차 리뷰: 새 엔드포인트의 storage·path 에 NUL 이 실리면 PG 는 psycopg DataError → 500 이었다(sqlite 는 조용히 빈
+    # 결과 -- 방언마다 달랐다). 이제 둘 다 422. 빈 문자열·다른 제어문자는 이름이다(구형·변조 행의 이름 -- 그 탭을 지울 수 있어야 한다).
+    r = uw.client.get(url, params=params)
+    assert r.status_code == 422, (url, params, r.status_code, r.text[:200])
+    for ok in ({"storage": ""}, {"storage": "a\x01b"}, {"storage": NFS, "path": ""}, {"storage": NFS, "path": "a\tb"}):
+        assert uw.client.get(url, params={**ok, **{k: v for k, v in params.items() if k not in ("storage", "path")}}
+                             ).status_code == 200, (url, ok)
+
+
+def _resync_with_binding(uw, name, *, namespace="team-a"):
+    """dmsk8s 를 테스트베드 실데이터 + RoleBinding 하나(alice 의 team-a 바인딩을 복제해 이름만 바꾼 것)로 다시 동기화한다."""
+    out = {}
+    for key, (fname, project) in _FILES.items():
+        items = json.loads((FIXTURES / fname).read_text())["items"]
+        if key == "role_bindings":
+            rb = copy.deepcopy(next(i for i in items if i["metadata"]["name"] == "alice-clusterrole-edit"))
+            rb["metadata"].update(name=name, namespace=namespace, uid=f"uid-{uuid.uuid4().hex}")
+            items = items + [rb]
+        out[key] = [project(i) for i in items]
+    got = uw.repos.k8s.claim(node_name="k8s-w1", role="primary", now="2026-10-25T14:30:00Z", interval=300,
+                             primary_configured=True, token_ok=lambda e: True, deadline_seconds=120)
+    assert got["run"]["cluster_name"] == "dmsk8s"
+    run_id = got["run"]["run_id"]
+    uw.repos.k8s.receive(run_id, node_name="k8s-w1", now="2026-10-25T14:30:05Z", ok=True,
+                         data=normalize_snapshot(out), fingerprint="fp-long")
+    assert uw.repos.k8s.apply_run(run_id)["outcome"] == "applied"
+
+
+def test_every_facet_value_passes_its_own_filter(uw):
+    """/facets 가 내는 선택지는 같은 API 의 필터가 받고, 그 옵션의 대상 수 = 그 옵션을 고른 목록의 matched_count 다(창이 넘치지 않는
+    세계). 2026-10-29 2차 리뷰: 권한 사용자는 바인딩 이름(≤253, k8s_sync._MAX_NAME)에서 파생해 최대 236자인데 user 필터 상한이 128 이라
+    facets 가 낸 값을 422 로 거절했다(포탈에서 고르는 순간 오류). 요청자도 같은 성질 -- 옛 공유 토큰 제출의 `node:<노드 이름 ≤254>`
+    (259자, api.auth). 둘 다 생산자 상한의 값으로 고정한다. (제어문자가 든 RoleBinding 이름 -- k8s 는 RBAC 이름에 '/'·'%' 만 막는다 --
+    에서 파생한 dms_user 는 필터 패턴이 받지 않는다: 계정 아이디 규칙 밖이라 실 사용자가 아니다.)"""
+    long_id = "long-" + "x" * 231                                   # 바인딩 이름 = 236 + 17 = 253자(k8s 이름 상한 그대로)
+    long_user = long_id.replace("-", ".")
+    _resync_with_binding(uw, long_id + "-clusterrole-edit")
+    long_requester = "node:" + "n" * 254
+    rid = uw.db.query_one("SELECT request_id FROM data_jobs WHERE job_id = :j",
+                          {"j": uw.jobs[(NFS, "proof-nl/a/selfnl", "mason")]})["request_id"]
+    uw.db.execute("UPDATE requests SET requester_id = :q WHERE request_id = :r", {"q": long_requester, "r": rid})
+
+    seen_long = set()
+    for storage in (NFS, ONEFS, GPFS, CEPH):
+        f = uw.client.get(FACETS, params={"storage": storage}).json()
+        assert f["window_truncated"] is False
+        options = ([({"cluster": c["cluster"]}, c["target_count"]) for c in f["clusters"]]
+                   + [({"cluster": x["cluster"], "namespace": x["namespace"]}, x["target_count"]) for x in f["namespaces"]]
+                   + [({"cluster": x["cluster"], "namespace": x["namespace"], "pvc": x["pvc"]}, x["target_count"])
+                      for x in f["pvcs"]]
+                   + [({"storage_class": x["storage_class"]}, x["target_count"]) for x in f["storage_classes"]]
+                   + [({"user": x["dms_user"]}, x["target_count"]) for x in f["users"]]
+                   + [({"requester": x["requester_id"]}, x["target_count"]) for x in f["requesters"]]
+                   + [({"scope": s}, n) for s, n in (("pv", f["scope"]["inventory"] + f["scope"]["recorded"]),
+                                                      ("outside", f["scope"]["outside"]),
+                                                      ("unknown", f["scope"]["unknown"])) if n > 0])
+        assert options
+        for params, count in options:
+            r = uw.client.get(TARGETS, params={"storage": storage, "limit": 200, **params})
+            assert r.status_code == 200, (storage, params, r.text[:200])
+            assert r.json()["matched_count"] == count, (storage, params)
+            if long_user in params.values() or long_requester in params.values():
+                seen_long.update(params.values())
+                for url in (TARGETS + "/export", TOTALS):
+                    assert uw.client.get(url, params={"storage": storage, **params}).status_code == 200, (url, params)
+    assert {long_user, long_requester} <= seen_long                 # 긴 값이 실제로 선택지에 나왔다
+
+
+def test_new_endpoints_need_a_storage_and_an_admin(uw):
+    for url in (TARGETS, TARGETS + "/export", FACETS):
+        assert uw.client.get(url).status_code == 422
+    assert uw.client.get(TARGETS, params={"storage": ""}).json()["rows"] == []     # 빈 이름도 이름이다
+    uw.client.cookies.clear()
+    assert uw.client.post("/api/auth/login", json={"username": "alice", "password": "pw"}).status_code == 200
+    for url in (TARGETS, TARGETS + "/export", FACETS):
+        assert uw.client.get(url, params={"storage": NFS}).status_code == 403
+
+
+def _flt(**kw):
+    from dms.api.routes_usage import AttrFilter
+    from dms.usage_attribution import PvFilter
+    requester = kw.pop("requester", None)
+    return AttrFilter(pv=PvFilter(**kw), requester=requester)
+
+
+def _drain_targets_export(client, **params):
+    """새 /targets/export 를 직접 부른다(_drain_export 와 같은 길) -- 인자는 전부 명시한다(Query 기본값 객체가 새지 않게)."""
+    import asyncio
+    from dms.api import routes_usage
+    args = {"storage": NFS, "path": None, "order": "desc", "sort": "last_scan", "flt": _flt(), **params}
+    resp = routes_usage.export_targets(SimpleNamespace(app=client.app), **args)
+    assert resp.media_type == "application/json"
+
+    async def drain():
+        parts = []
+        try:
+            async for part in resp.body_iterator:
+                parts.append(part)
+        except Exception as exc:          # noqa: BLE001 -- 도중 실패를 그대로 돌려준다
+            return parts, exc
+        return parts, None
+    return asyncio.run(drain())
+
+
+@pytest.mark.parametrize("sort", ["last_scan", "bytes"])
+def test_targets_export_streams_with_filters_echo_and_pv_last(uw, monkeypatch, sort):
+    from dms.api import routes_usage
+    monkeypatch.setattr(routes_usage, "_CHUNK", 2)
+    parts, err = _drain_targets_export(uw.client, sort=sort)
+    assert err is None and len(parts) == 1 + 4 + 1                     # 머리 + 묶음 4 + 꼬리(count)
+    assert parts[0].startswith(b'{"generated_at":') and parts[0].endswith(b'"rows":[')
+    assert b'"truncated":false,"matched_count":8,"filters":{"storage":"k8s-pv-nfs","path":null,' in parts[0]
+    assert parts[-1] == b'],"count":8}'
+    body = json.loads(b"".join(parts))
+    assert list(body) == ["generated_at", "truncated", "matched_count", "filters", "rows", "count"]
+    assert all(list(r)[-3:] == ["latest", "previous", "pv"] for r in body["rows"])
+    by = {r["target"]: r for r in body["rows"]}
+    assert by["team-d/old/run"]["pv"]["source"] == "recorded" and by["c2/lab-y"]["pv"]["source"] == "outside"
+    assert by["team-a/datasets/dms-proof"]["storage"]["backend_type"] == "nfs"
+    # 필터가 걸리면 같은 판정으로 거른 행만
+    parts, err = _drain_targets_export(uw.client, sort=sort, flt=_flt(user="alice"), path="proof")
+    body = json.loads(b"".join(parts))
+    assert sorted(r["target"] for r in body["rows"]) == ["team-a/datasets/dms-proof", "team-a/datasets/proof-ov",
+                                                         "team-a/datasets/proof-scan"]
+    assert body["matched_count"] == body["count"] == 3 and body["filters"]["user"] == "alice"
+    # HTTP 로도 같은 모양
+    r = uw.client.get(TARGETS + "/export", params={"storage": NFS, "sort": sort, "scope": "outside"})
+    assert r.headers["content-type"] == "application/json"
+    assert [x["target"] for x in r.json()["rows"]] == (
+        ["c2/lab-y", "proof-nl/a/selfnl", "proof-d9/alice/latest"] if sort == "last_scan"
+        else ["c2/lab-y", "proof-d9/alice/latest", "proof-nl/a/selfnl"])
+
+
+def test_targets_export_truncation_is_decided_before_the_first_byte(uw, monkeypatch):
+    from dms.api import routes_usage
+    monkeypatch.setattr(routes_usage, "_WINDOW_LIMIT", 3)
+    # PV 경로: 판정 창이 넘쳤다 -- 맞는 수는 모름
+    parts, err = _drain_targets_export(uw.client, flt=_flt(scope="pv"))
+    assert err is None and b'"truncated":true,"matched_count":null,' in parts[0]
+    assert json.loads(b"".join(parts))["count"] == 1                    # 창(최근 3) 안의 PV 대상은 proof-ov 하나
+    # SQL 경로(요청자): 맞는 대상이 상한을 넘었다 -- 맞는 수는 정확하다
+    parts, err = _drain_targets_export(uw.client, flt=_flt(requester="mason"))
+    assert b'"truncated":true,"matched_count":6,' in parts[0] and parts[-1] == b'],"count":3}'
+    monkeypatch.setattr(routes_usage, "_WINDOW_LIMIT", 6)
+    parts, err = _drain_targets_export(uw.client, flt=_flt(requester="mason"))
+    assert b'"truncated":false,"matched_count":6,' in parts[0]
+
+
+def test_targets_export_failure_mid_stream_is_broken_json(uw, monkeypatch):
+    from dms.api import routes_usage
+    monkeypatch.setattr(routes_usage, "_CHUNK", 2)
+    real = uw.repos.data_jobs.recent_scans_for_targets
+    app_repos = uw.client.app.state.repos
+    calls = []
+
+    def flaky(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 2:
+            raise RuntimeError("db gone")
+        return real(*args, **kwargs)
+    monkeypatch.setattr(app_repos.data_jobs, "recent_scans_for_targets", flaky)
+    parts, err = _drain_targets_export(uw.client)
+    assert isinstance(err, RuntimeError) and len(parts) == 2
+    with pytest.raises(ValueError):
+        json.loads(b"".join(parts))
+
+
+def test_facets_count_targets_once_per_option(uw, monkeypatch):
+    r = uw.client.get(FACETS, params={"storage": NFS})
+    assert r.status_code == 200, r.text
+    f = r.json()
+    assert list(f) == ["storage_name", "computed_at", "window_limit", "window_truncated", "target_count", "scope",
+                       "clusters", "namespaces", "pvcs", "storage_classes", "users", "requesters", "lists_truncated"]
+    assert (f["storage_name"], f["window_limit"], f["window_truncated"], f["target_count"]) == (NFS, 10000, False, 8)
+    assert f["scope"] == {"inventory": 4, "recorded": 1, "outside": 3, "unknown": 0}
+    assert f["clusters"] == [{"cluster": "dmsk8s", "target_count": 4}, {"cluster": "dmsk8s2", "target_count": 1}]
+    assert f["namespaces"] == [{"cluster": "dmsk8s", "namespace": "team-a", "target_count": 3},
+                               {"cluster": "dmsk8s", "namespace": "team-d", "target_count": 1},
+                               {"cluster": "dmsk8s2", "namespace": "lab-y", "target_count": 1}]
+    assert f["pvcs"] == [
+        {"cluster": "dmsk8s", "namespace": "team-a", "pvc": "datasets", "storage_class": "tb-nfs", "target_count": 3},
+        {"cluster": "dmsk8s", "namespace": "team-d", "pvc": "old", "storage_class": "tb-nfs", "target_count": 1},
+        {"cluster": "dmsk8s2", "namespace": "lab-y", "pvc": "weights", "storage_class": "c2-nfs", "target_count": 1}]
+    assert f["storage_classes"] == [{"storage_class": "tb-nfs", "target_count": 4},
+                                    {"storage_class": "c2-nfs", "target_count": 1}]
+    assert f["users"] == [{"dms_user": "alice", "target_count": 3}, {"dms_user": "junwoo.song", "target_count": 3},
+                          {"dms_user": "cocoa.song", "target_count": 1}]
+    assert f["requesters"] == [{"requester_id": "mason", "target_count": 6}, {"requester_id": "alice", "target_count": 2}]
+    assert f["lists_truncated"] == dict.fromkeys(
+        ("clusters", "namespaces", "pvcs", "storage_classes", "users", "requesters"), False)
+    # 같은 PVC 이름(models)이 두 namespace -- 선택지는 (cluster, namespace, pvc) 마다
+    g = uw.client.get(FACETS, params={"storage": GPFS}).json()
+    assert [(p["namespace"], p["pvc"]) for p in g["pvcs"]] == [("team-a", "models"), ("team-b", "models")]
+    assert g["scope"] == {"inventory": 2, "recorded": 0, "outside": 1, "unknown": 0}
+    # filesystem 탭: PV 선택지가 없다(포탈은 요청자만 남긴다)
+    c = uw.client.get(FACETS, params={"storage": CEPH}).json()
+    assert c["scope"] == {"inventory": 0, "recorded": 0, "outside": 2, "unknown": 0}
+    assert c["clusters"] == c["namespaces"] == c["pvcs"] == c["storage_classes"] == c["users"] == []
+    assert c["requesters"] == [{"requester_id": "alice", "target_count": 1}, {"requester_id": "mason", "target_count": 1}]
+    # 목록 상한 -- 대상 수 내림차순으로 자르고 잘렸다고 말한다
+    from dms.api import routes_usage
+    monkeypatch.setattr(routes_usage, "FACET_LIST_CAP", 1)
+    f = uw.client.get(FACETS, params={"storage": NFS}).json()
+    assert f["clusters"] == [{"cluster": "dmsk8s", "target_count": 4}]
+    assert f["requesters"] == [{"requester_id": "mason", "target_count": 6}]
+    assert f["lists_truncated"] == {"clusters": True, "namespaces": True, "pvcs": True, "storage_classes": True,
+                                    "users": True, "requesters": True}
+
+
+def test_facets_requesters_are_storage_wide_while_pv_counts_follow_the_window(uw, monkeypatch):
+    from dms.api import routes_usage
+    monkeypatch.setattr(routes_usage, "_WINDOW_LIMIT", 3)
+    f = uw.client.get(FACETS, params={"storage": NFS}).json()
+    assert (f["window_truncated"], f["target_count"]) == (True, 3)
+    assert f["scope"] == {"inventory": 1, "recorded": 0, "outside": 2, "unknown": 0}   # 최근 3개(c2/lab-y·proof-ov·selfnl)
+    assert f["requesters"] == [{"requester_id": "mason", "target_count": 6}, {"requester_id": "alice", "target_count": 2}]
+
+
+def test_filtered_storage_totals_sum_the_top_of_the_filtered_set(uw):
+    whole = _totals(uw.client, NFS)                                  # 필터 없음 -- 모양·요청이 예전 그대로
+    assert "filters" not in whole and whole["target_count"] == 8
+    # c2/lab-y(밖) 가 c2/lab-y/weights 의 상위라 전체 합계에서는 weights 가 하위다
+    assert (whole["summed_target_count"], whole["nested_target_count"]) == (7, 1)
+    assert whole["total_bytes"]["sum"] == 50 + 500 + 100 + 300 + 200 + 700 + 1000
+
+    def filtered(**p):
+        r = uw.client.get(TOTALS, params={"storage": NFS, **p})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert list(body) == _TOTAL_KEYS + ["filters"] and body["filesystem"] is None
+        return body
+    c2 = filtered(cluster="dmsk8s2")
+    # 걸러진 집합 안에서 최상위 -- 필터 밖 상위(c2/lab-y)가 빠지면 weights 가 최상위로 센다
+    assert (c2["target_count"], c2["summed_target_count"], c2["nested_target_count"]) == (1, 1, 0)
+    assert c2["total_bytes"] == {"sum": 900, "known": 1, "unknown": 0}
+    assert c2["filters"] == {**_NO_FILTERS, "cluster": "dmsk8s2"}
+    assert c2["truncated"] is False
+    # path 는 받지 않는다(합계는 경로 검색과 무관)
+    with_path = filtered(cluster="dmsk8s2", path="nothing-matches-this")
+    assert (with_path["target_count"], with_path["total_bytes"]) == (1, c2["total_bytes"])
+    alice = filtered(requester="alice")
+    assert (alice["target_count"], alice["total_bytes"]["sum"]) == (2, 550)
+    outside = filtered(scope="outside")
+    assert (outside["summed_target_count"], outside["total_bytes"]["sum"]) == (3, 1500)
+    none = filtered(user="nobody")
+    assert (none["target_count"], none["total_bytes"]) == (0, {"sum": None, "known": 0, "unknown": 0})
+
+
+def test_filtered_storage_totals_tell_the_window(uw, monkeypatch):
+    from dms.api import routes_usage
+    monkeypatch.setattr(routes_usage, "_WINDOW_LIMIT", 3)
+    pv = uw.client.get(TOTALS, params={"storage": NFS, "scope": "pv"}).json()
+    assert (pv["truncated"], pv["target_count"]) == (True, 1)                 # 판정 창이 넘쳤다(부분 합)
+    mason = uw.client.get(TOTALS, params={"storage": NFS, "requester": "mason"}).json()
+    assert (mason["truncated"], mason["target_count"]) == (True, 3)           # 맞는 대상(6)이 창을 넘었다
+    monkeypatch.setattr(routes_usage, "_WINDOW_LIMIT", 6)
+    assert uw.client.get(TOTALS, params={"storage": NFS, "requester": "mason"}).json()["truncated"] is False
+
+
+def test_new_endpoints_keep_every_id_list_within_the_real_chunk(tmp_path, monkeypatch):
+    # 실제 상수(500)로 1,100 대상: 기록 블록 조회(target IN)까지 한 문장의 자리표시자가 500 을 넘지 않는다(widest == 500).
+    # 미등록 이름이라 소속은 모두 PV 주소 scan 기록이다(인벤토리가 덮지 않는 대상만 기록을 묻는다 -- 1,100 개 전부).
+    import re
+    from dms.db import dump_json
+    art = tmp_path / "artifacts"
+    client = _client(tmp_path, art)
+    _login(client, "admin", "admin")
+    repos = client.app.state.repos
+    _bulk_jobs(repos.db, 1100, reports_for=0, art=art)
+    rows = repos.db.query("SELECT request_id, target FROM data_jobs ORDER BY target")
+    with repos.db.transaction():
+        for i, r in enumerate(rows):
+            pv = _pvb("dmsk8s", "ns", f"p{i}", None, "sc", r["target"])
+            repos.db.execute(
+                """INSERT INTO requests (request_id, commit_order, operation, requester_id, actor, resource_key, priority,
+                                         payload, state, created_at, updated_at, target_label)
+                   VALUES (:r, :o, 'scan', 'alice', 'alice', :k, 'mid', :p, 'Succeeded', :at, :at, 'label')""",
+                {"r": r["request_id"], "o": i + 1, "k": f"k{i}", "p": dump_json({"pv": pv}), "at": "2026-09-01T00:00:00Z"})
+    widest = []
+    real_query = repos.db.query
+
+    def query(sql, params=None):
+        widest.append(max(len(set(re.findall(rf":{p}\d+", sql))) for p in ("j", "t", "d")))
+        return real_query(sql, params)
+    monkeypatch.setattr(repos.db, "query", query)
+    body = client.get(TARGETS + "/export", params={"storage": "s1", "scope": "pv"}).json()
+    assert body["count"] == body["matched_count"] == 1100 and body["truncated"] is False
+    assert {r["pv"]["source"] for r in body["rows"]} == {"recorded"}
+    page = client.get(TARGETS, params={"storage": "s1", "namespace": "ns", "sort": "hot", "limit": 200}).json()
+    assert len(page["rows"]) == 200 and page["matched_count"] == 1100
+    f = client.get(FACETS, params={"storage": "s1"}).json()
+    assert f["scope"]["recorded"] == 1100 and f["requesters"] == [{"requester_id": "alice", "target_count": 1100}]
+    assert client.get(TOTALS, params={"storage": "s1", "scope": "pv"}).json()["target_count"] == 1100
+    assert max(widest) == 500

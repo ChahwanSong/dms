@@ -95,6 +95,87 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### 🚧 사용량 분석 필터 — 사용자별(권한 사용자·요청자)·PV 이름·namespace·클러스터·StorageClass·구분 — **구현**(2026-10-29, 테스트베드 실증 전)
+
+사용자 요청: 사용량 분석을 사용자별·PV 이름·namespace 등으로 거를 수 있게. 두 설계안(A: 계획 시점에 귀속을 data_jobs 에 기록 /
+B: 읽을 때 인벤토리로 해석)을 심사해 **하이브리드**로 지었다 — 의미·원천은 B(대상 단위, 「지금 인벤토리 → 기록 → 밖/모름」, 스키마·planner
+무변경), API·UI 모양은 A(새 봉투 엔드포인트·filters 메아리·matched_count·facets·URL 상태). A 를 기각한 이유: planner·`recheck_request`(보안
+재확인) 반환형 변경, data_jobs 8칸 + 백필, 그리고 백필이 옛 직접 경로 scan 을 「모름」으로 굳힌다(테스트베드 성공 scan 13건 중 6건이 PV
+블록 없는 직접 경로 — 작업 지시의 「직접 경로 scan 은 없음」은 사실이 아니었다).
+
+- **의미 — 모든 필터는 대상 단위**: 한 (storage, target)의 성공 scan 전부가 함께 걸리거나 빠진다(scan_count·first/last·latest·이력은 늘
+  전체 기록 — ARCHITECTURE §5 새 불변식 「사용량 필터는 파티션을 자르지 않는다」). PV 소속(`usage_attribution`, 새 순수 모듈): 지금
+  인벤토리에서 대상을 덮는 가장 깊은 PV 루트의 PVC 정체들(`K8sRepository.pv_root_index` — `pv_roots` 의 계산·메모를 옮기고 루트마다 정체를
+  함께 둔다; `pv_roots` 는 그 키의 정렬과 바이트 단위로 같다 — 직접 경로 소유 판정이 쓰는 보안 경로라 등가 단언을 더했다) > 그 대상을 PV
+  주소로 scan 한 요청의 유효한 최신 pv 블록(지운 PVC·클러스터) > 모름(미등록·PV 스토리지인데 매핑 없음·미적용 클러스터 — null ≠ 0) /
+  PV 밖(PV 루트의 상위 디렉터리 포함). 권한 사용자 = 소속 PVC namespace 의 지금 인식된 RoleBinding(면제 운영자 없음). PV 축은 같은 정체
+  하나가 모두 만족해야 하고, 축이 있으면 구분은 pv 로 본다(outside·unknown 과 함께면 0건).
+- **요청자**는 SQL(`scan_target_heads(requester=)` — 비상관 서브쿼리 표식을 파티션 창 MAX 로 달고 바깥에서 거른다, `idx_requests_requester`)
+  이라 창과 무관하게 정확하다. 요청 행 없는 고아 잡은 이 필터에서만 빠진다. **PV 축**은 **정렬과 무관한 최근 스캔 순** 머리 창(1만 + 1 —
+  `/facets`·필터 합계·내보내기와 같은 창)을 **순서를 보존하며** 거르고 그 안에서 요청한 정렬로 놓는다(`routes_usage._select_heads`·
+  `_window_order` — 문자열 비교 없이 SQL 순서를 물려받는다: scans 는 정수 안정 정렬, 오래된 순은 같은 시각 묶음째 뒤집기 — 동률·콜레이션
+  까지 SQL 결과와 같다). 창이 넘치지 않으면 전역적으로 정확하고, 넘치면 matched_count 를 null(모름)·window_truncated 로 말한다. 스펙은
+  처음에 「요청한 정렬로 창을 자른다」였으나 리뷰가 뒤집었다: 오래된 순·스캔 횟수에서 창이 가장 오래된·가장 많이 스캔된 1만 개가 돼
+  정렬만 바꿔도 걸리는 집합이 바뀌고, facets 의 옵션 수·포탈·CSV 의 「최근 스캔된 N개 안에서」가 거짓이 됐다.
+- **API**: `GET /api/admin/usage/targets`(봉투 `{rows[+pv], matched_count, window_limit, window_truncated, filters}` — 행마다 소속 pv 를
+  필터가 없어도 싣는다), `GET /targets/export`(`{generated_at, truncated, matched_count, filters, rows[…, pv], count}` 스트리밍 — truncated 는
+  첫 바이트 전), `GET /facets?storage=`(구분별 대상 수·클러스터·namespace·PVC(정체 (cluster, namespace, pvc) 마다 한 줄)·StorageClass·
+  권한 사용자 선택지(머리 창 기준) + 요청자(스토리지 전체 기준), 목록 상한 2000·lists_truncated), `storage-totals` 의 선택 필터(path 는 받지
+  않는다 — 10-21 「합계는 경로 검색과 무관」; 걸러진 집합 안의 최상위만, filesystem null, filters 메아리; 필터가 없으면 요청·응답이 예전
+  그대로). 새 필터 값의 빈 문자열·제어문자·나쁜 scope 는 422(「필터 없음」으로 접지 않는다 — PG NUL 500 도 막힌다). 2차 리뷰 뒤: 새
+  엔드포인트(`/targets`·`/targets/export`·`/facets`·`storage-totals`)의 storage·path 에 든 NUL 도 422(PG 500·sqlite 빈 결과로 방언마다
+  달랐다 — 빈 문자열·다른 제어문자는 이름이라 받는다, `_NO_NUL`), 권한 사용자 필터 상한 128 → 253·요청자 128 → 512(facets 가 내는 값을
+  같은 API 가 422 로 거절했다 — 바인딩 이름(≤253)에서 파생한 dms_user 는 최대 236자, 옛 공유 토큰 제출의 요청자 `node:<노드 이름>` 은
+  259자). 새 사유 코드 없음.
+  **옛 `scan-targets`·`export` 는 동결**(본문 무변경 — `test_usage_equivalence` 무수정 통과, 제거는 BACKLOG).
+- **포탈**: 패널 툴바 아래 **필터 줄**(`UsageFilters` — 클러스터 → namespace → PV 이름 → StorageClass → 구분 → 권한 사용자 → 요청자 select
+  + 「필터 지우기」, 라벨은 `k8sTerms.TERMS` 만, 옵션마다 「· N개」, 위계(클러스터를 바꾸면 namespace·PV 이름이 풀리고 아래 단계 선택지는
+  위 단계로 좁혀진다, 「PV 밖」·「모름」과 PV 축은 서로 푼다), 선택지가 둘 이상이거나 켜져 있을 때만 보이고 PV 안 대상이 0 인 탭은
+  요청자만, 375 에서 두 칸씩 접힌다). 필터는 **URL 상태**(`cluster·namespace·pvc·storage_class·user·scope·requester` — PV 탐색과 같은 키,
+  `useUsage.ATTR_KEYS`): 탭 전환·행 펼침·잘못된 storage 정리가 지금 파라미터에서 바꿀 키만 고친다(필터는 탭을 바꿔도 남는다), 필터 변경은
+  replace. 그 스토리지 선택지에 없는 값은 보조 라벨로 풀 수 있게 남는다(「(이 스토리지에 없음)」 — 리뷰 뒤: 짝이 덜 찬 값은 비어 있는
+  축을 「(모든 클러스터)」·「(모든 namespace)」·「(모든 클러스터·namespace)」로, 이름은 있는데 고른 짝 아래에만 없으면 「(이 클러스터에
+  없음)」·「(이 namespace 에 없음)」, 판정 창이 넘친 스토리지의 PV 값은 「(최근 N개 안에 없음)」 + 「PV 선택지와 수는 최근 스캔된 N개
+  기준」 한 줄). 건수·각주는 봉투의 matched_count 로(「N개」·「상위 100개 표시 · 전체 N개」·「필터에 맞는 N개」 — 탭의 대상 수가 아니다),
+  모름이면 「최근 스캔된 N개 대상 안에서 k개 맞음 — …」 한 문단(리뷰 뒤: 요청자·경로 검색이 SQL 로 먼저 좁힌 것을 밝히고, 지표 정렬
+  각주는 「창 → 필터」 순서로 「… 안에서 PV 필터에 맞는 것끼리 정렬」, 0건은 「그 범위 안에는 없습니다」, CSV 문구도 같은 범위 말).
+  필터 0건이면 빈 상태 「필터에 맞는 대상이 없습니다」 + 「필터 지우기」(툴바는 남는다). **배포 틈**은 포탈만 판정한다(`UsageContractError`
+  — 봉투가 아니면 「서버가 새 사용량 API 를 아직 모릅니다」, 메아리가 다르면 「서버가 적용한 필터가 화면과 다릅니다」, 둘 다 CSV 를 막는다;
+  서버 사유 코드가 아니라 `reasonCodes.json` 무변경). 표는 6열 그대로 경로 칸 둘째 줄에 소속(`PV 이름 — namespace (SC)` · 클러스터 ·
+  「외 n개」, 기록이면 「기록」 태그, PV 밖·모름), 펼친 상세 머리에 PV 소속·권한 사용자(요청자 필터면 「이력은 전체 이력」). 필터가 켜지면
+  스토리지 합계 아래 **필터 합계** 카드(df 없음, 경로 검색 무시, 적용 필터 한 줄). CSV 는 `k8s_source·cluster·namespace·pvc·volume·
+  storage_class·pv_root·access_users` 8열을 더하고(여러 값은 `;`, 모름은 빈 칸) 필터가 걸리면 파일 이름에 `-filtered`. 리뷰 뒤 포커스:
+  「필터 지우기」(줄·빈 상태)나 값 때문에만 보이던 칸이 사라지면 포커스를 필터 줄(group, tabIndex -1 — 없으면 툴바)로 옮긴다(<body> 로
+  떨어지면 화면 낭독기가 자리를 잃는다 — JobsList 와 같은 유형). 2차 리뷰 뒤: 툴바도 없으면 패널 자체(tabIndex -1)로, 그리고 새 필터의
+  목록이 자리 잡을 때까지 이 확인을 되풀이한다(기록 0 탭에서 지우면 응답 전엔 있던 툴바가 「기록 없음」 응답과 함께 사라져 옮겨 둔
+  포커스가 다시 <body> 로 떨어졌다). 자리표시(같은 필터 안에서 경로 검색·정렬을 바꿔 응답을 기다리는 동안 남긴 이전 결과) 동안 판정 창
+  문단·지표 정렬 각주는 건수처럼 말하지 않고(이전 결과의 「N개 맞음」을 지금 입력의 범위 이름으로 말했다), 빈 상태의 범위 이름·보조 줄은
+  그 결과를 낸 검색(봉투 메아리의 path)으로 말한다.
+- **테스트**: `tests/test_usage_attribution.py`(신규 — 덮는 루트 = `pv_root_covering`(무작위 300×20·이웃 이름·비정규 target), 겹친
+  루트·루트 충돌의 정체 단위 AND, 인벤토리 > 기록·변조 블록 무시, 모름 셋·밖, 사용자 합집합, 구분 × 축, facets 한 번 세기·상한),
+  `test_direct_dest_owner`(pv_roots == sorted(pv_root_index) 등가·읽기 전용·메모 공유 재계산 0회), `test_repo_data_jobs`(요청자 대상 단위·
+  고아·matched_count 는 limit 무관·기본 인자면 머리 문장 글자 그대로·기록 블록 최신순·자리표시자 ≤ 500·요청자별 대상 수),
+  `test_migrations`(인덱스 집합 무변경, 요청자·기록 질의의 sqlite 계획이 `idx_data_jobs_scan_target`), `test_api_usage_analysis`
+  (테스트베드 모양 세계 — nfs 두 클러스터·gpfs models 두 namespace·onefs 요청자 둘·직접 경로·지운 PVC 기록: 봉투·메아리·필터별 결과·창 3
+  에서 SQL 순서 보존과 matched null·지표 정렬 값 = 보이는 값·422·내보내기 스트리밍/첫 바이트 전 truncated/도중 실패·facets·필터 합계·
+  실제 상수 widest 500; 리뷰 뒤 「판정 창은 정렬과 무관하게 최근 스캔 순 — 네 정렬에서 같은 집합, 순서 = SQL 순서, 내보내기도 같은 창」과
+  `_window_order` == SQL 정렬(같은 시각·같은 스캔 횟수 동률 + 콜레이션이 갈리는 이름 — PG 갈래에서 sqlite 와 다른 이름 순으로 확인);
+  2차 리뷰 뒤 새 엔드포인트 넷의 storage·path NUL 422(빈 이름·다른 제어문자는 200)와 「facets 의 모든 값이 자기 필터를 통과하고 옵션 수 =
+  그 옵션을 고른 목록의 matched_count」(253자 바인딩 이름·259자 `node:` 요청자 포함, 네 스토리지)). 2차 리뷰의 독립 오라클(무작위 세계
+  150개 — sqlite 120·PG 30, /targets 1만 500회·내보내기 2,700회·합계 3,600회·facets 4,386회, 창 상한·목록 상한 몽키패치, 변조 블록 8종)은
+  불일치 0건이었다(커밋하지 않은 리뷰 하네스).
+  포탈 vitest: `UsageAnalysis.test`(+15 — 7개 select·라벨·순서·수, filesystem 탭은 요청자만, 딥링크·필터 합계 URL, 위계, 탭 전환·행
+  토글·잘못된 storage 정리의 URL 보존, 「(이 스토리지에 없음)」·0건 툴바, 건수·각주·창 문단(요청자·경로 검색 범위, 정렬 무관), 봉투 아님·
+  메아리 불일치·CSV 막힘, 자리표시 행, 6열 + 둘째 줄, 상세 머리, 합계 URL, CSV, facets 실패, 포커스 복귀; 2차 리뷰 뒤 +2 — 기록 0 탭에서
+  지운 뒤 포커스가 패널에 남음(빈 상태·필터 줄 두 버튼), 자리표시 동안 창 문단·지표 정렬 각주 없음·빈 상태는 메아리 범위), `UsageFilters.test`(신규 —
+  보조 라벨 규칙·판정 창 줄), `usageCsv.test`(+2 — k8s 열·`-filtered`). e2e(수기 게이트): `15-usage-filters`(신규 — 실 서버의 요청자
+  축: 선택 → URL → 새로고침 유지 → CSV `-filtered`·k8s 열 → 375 → 지우기), `03-layout`(필터 7개를 모두 켠 딥링크의 375 가로 넘침).
+- **세션 가정(사용자 확인 권장)**: 「사용자별」을 권한 사용자(RoleBinding)와 요청자 두 축으로 나눴다 · 필터는 탭을 바꿔도 남는다 · 필터
+  합계는 경로 검색을 반영하지 않는다.
+- **측정**(리뷰 단계, 1만 대상·6.5만 잡 + PV 600개, PG·sqlite — 수치는 `routes_usage._WINDOW_LIMIT` 주석): 옛 엔드포인트 대비 무필터 목록
+  +0.01~0.03초·+0~3MiB, 내보내기 +0.1~0.4초·+4MiB(행의 pv 칸), PV 필터 목록·facets·필터 합계 모두 1.5초 이내, 최악은 동시 3건 내보내기
+  +120MiB(옛 export 와 같은 급, api 1Gi 대비 여유). PG generic plan 에서 요청자 경로도 `idx_data_jobs_scan_target` + `idx_requests_requester`.
+
 ### ✅ 경로 봉쇄 개행 구멍(§8 ②) 셸 수정 — **완료**(2026-10-28)
 
 인계 문서 §8(dms-ssc d194 c438667 후속)의 보안 항목을 dms-k8s 에 이식. 경로 봉쇄 셸 함수

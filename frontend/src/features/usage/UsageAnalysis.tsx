@@ -6,8 +6,10 @@ import { Skeleton } from "../../components/ui/Skeleton";
 import { Tabs, type TabItem } from "../../components/ui/Tabs";
 import type { ApiError } from "../../lib/api";
 import { useStorages } from "../storages/useStorages";
+import type { UsageAttrFilter } from "../../lib/types";
 import {
-  usePurgeUnregisteredStorage, useScanStorages, useUnregisteredStorages, useUsageStorages, type UsageSort,
+  ATTR_KEYS, cleanAttr, usePurgeUnregisteredStorage, useScanStorages, useUnregisteredStorages, useUsageStorages,
+  type UsageSort,
 } from "./useUsage";
 import { buildStorageTabs, defaultStorage, storageLabel, type StorageTab } from "./usageTabs";
 import { StoragePanel } from "./StoragePanel";
@@ -32,6 +34,12 @@ export { staleClass } from "./TargetTable";
 // effect 도 히스토리 항목도 없다. 한 번 고른 기본 탭은 그 탭이 남아 있는 동안 붙잡는다(리뷰: 요약 재조회로 대상 수가 바뀌면
 // 다시 계산된 기본 탭이 보던 스토리지를 바꿔 버렸다). 탭을 바꾸면 target 은 버린다(다른 스토리지로 펼침이 따라가지 않게).
 // 행을 접어도 storage 는 남긴다(빈 URL 로 돌리면 기본 탭으로 튄다).
+//
+// 필터(2026-10-29 -- 클러스터·namespace·PV 이름·StorageClass·권한 사용자·구분·요청자)도 URL 에 산다(키 = 서버 쿼리 이름 = PV
+// 탐색 화면의 키, useUsage.ATTR_KEYS): 새로고침·링크 공유에 남는다. URL 쓰기는 늘 지금 파라미터에서 바꿀 키만 고친다(동기화 이력
+// 화면 관용 -- 통째로 덮으면 탭 전환·행 펼침이 필터를 조용히 지웠다). 필터는 탭을 바꿔도 남고(같은 사용자·namespace 를 스토리지
+// 마다 비교), 그 스토리지에 없는 값은 필터 줄이 「(이 스토리지에 없음)」으로 보여 풀 수 있게 한다. 필터 변경은 replace(뒤로 가기가
+// 선택 하나하나를 되짚지 않게), 탭 전환은 push 그대로. 경로 검색·정렬은 여전히 페이지 상태다.
 
 const PANEL_ID_PREFIX = "usage-storage";
 
@@ -64,6 +72,9 @@ export function UsageAnalysis() {
   const [params, setParams] = useSearchParams();
   const storageParam = params.get("storage");
   const targetParam = params.get("target");
+  // 필터: 값이 있는 키만(빈 값·모르는 구분 값은 없는 것으로 -- 서버가 422 로 거절할 값을 싣지 않는다). 쿼리키는 직렬화한
+  // 문자열(useUsage.attrKey)이라 객체를 렌더마다 새로 만들어도 재조회가 없다.
+  const attr = cleanAttr(Object.fromEntries(ATTR_KEYS.map((k) => [k, params.get(k)])));
 
   // 경로 검색(부분 문자열, 300ms 디바운스 -- 타이핑마다 GROUP BY 를 쏘지 않는다)과 정렬은 페이지 상태 -- 탭을 바꿔도 남는다.
   // 정렬(2026-10-02 최근 스캔 → 2026-10-19 열 정렬): 기본 최근 스캔 내림차순. 서버가 limit 전에 정렬한다(useUsage 주석).
@@ -140,19 +151,33 @@ export function UsageAnalysis() {
     if (storageParam === null || !judgeable || inTabs) return;
     const purged = (purge.isPending || purge.isSuccess) && purge.variables?.storage_name === storageParam;
     setNotice(purged ? null : storageParam);
-    setParams({}, { replace: true });
+    // storage·target 만 지운다 -- 필터는 기본 탭에 그대로 걸린다(필터 줄에서 풀 수 있다).
+    const next = new URLSearchParams(params);
+    next.delete("storage"); next.delete("target");
+    setParams(next, { replace: true });
   }, [storageParam, judgeable, inTabs]);  // eslint-disable-line react-hooks/exhaustive-deps
 
   const selectTab = (name: string) => {
     // 기본 탭(URL 에 없음)을 눌렀으면 URL 에 적는다 -- 그 뒤로는 그 탭이 링크·새로고침에도 남는다.
     if (name === active && storageParam !== null) return;
     setNotice(null);
-    setParams({ storage: name });
+    const next = new URLSearchParams(params);
+    next.set("storage", name); next.delete("target");
+    setParams(next);
   };
   // 펼침은 한 번에 하나(사용자 요청 2026-09-14): 같은 행 재클릭 = 접기(target 만 제거), 다른 행 클릭 = 펼침 이동.
   const toggle = (t: string) => {
     if (active === null) return;
-    setParams(t === activeTarget ? { storage: active } : { storage: active, target: t });
+    const next = new URLSearchParams(params);
+    next.set("storage", active);
+    if (t === activeTarget) next.delete("target"); else next.set("target", t);
+    setParams(next);
+  };
+  // 필터 변경: 필터 키만 다시 쓴다(replace). 펼친 행은 남긴다 -- 필터에 걸리지 않으면 표 아래 폴백 칸이 보인다.
+  const setAttr = (a: UsageAttrFilter) => {
+    const next = new URLSearchParams(params);
+    for (const k of ATTR_KEYS) { const v = a[k]; if (v !== undefined && v !== "") next.set(k, v); else next.delete(k); }
+    setParams(next, { replace: true });
   };
 
   const now = Date.now();
@@ -244,7 +269,7 @@ export function UsageAnalysis() {
               <StoragePanel key={activeTab.name} tab={activeTab}
                             windowLimit={summaryQ.data?.window_limit ?? null}
                             input={input} setInput={setInput} pathQ={pathQ}
-                            sort={sort} order={order} onSort={sortBy}
+                            sort={sort} order={order} onSort={sortBy} attr={attr} onAttrChange={setAttr}
                             activeTarget={activeTarget} onToggle={toggle} storages={storagesQ.data}
                             purge={purge} progress={progress} setProgress={setProgress}
                             onResultFocus={focusResult} now={now} />

@@ -12,7 +12,7 @@ import { useSearchField } from "../jobs/searchField";
 import { K8sHeader } from "./K8sTabs";
 import { ACCESS_LABEL, TERMS, nsLabel, phaseVariant, pvJobLink } from "./k8sTerms";
 import { bindingNameFor } from "./pvLocation";
-import { DefList, DefRow, FreshnessLine, Mono, Tag } from "./parts";
+import { DefList, DefRow, FreshnessLine, Mono, SELECT_FIELD, Tag } from "./parts";
 import { VOLUMES_LIMIT, useK8sVolumes } from "./useK8s";
 import type { VolumeRow, VolumesQuery } from "./types";
 
@@ -24,7 +24,6 @@ const errText = (e: unknown): string =>
   e instanceof Error && e.message ? e.message : "요청이 실패했습니다 — 잠시 뒤 다시 시도하세요.";
 
 const SEARCH_FIELD = "w-64 rounded-lg border border-line bg-surface px-3 py-1.5 text-sm";
-const SELECT_FIELD = "max-w-[14rem] rounded-lg border border-line bg-surface px-2 py-1.5 text-sm";
 
 function rowKey(v: VolumeRow): string { return `${v.cluster}/${v.namespace}/${v.pvc}`; }
 

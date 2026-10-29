@@ -6,9 +6,10 @@ import { setupServer } from "msw/node";
 import { delay, http, HttpResponse } from "msw";
 import { afterAll, afterEach, beforeAll, expect, test, vi } from "vitest";
 import { UsageAnalysis, hotRatio, pointEpoch, stackLayout, staleClass } from "./UsageAnalysis";
-import type { HistogramBucket, Storage, UnregisteredStorage, UsagePoint, UsageStorageSummary,
-              UsageStorageTotals } from "../../lib/types";
+import type { HistogramBucket, Storage, UnregisteredStorage, UsageFacets, UsageFiltersEcho, UsagePoint, UsagePv,
+              UsageStorageSummary, UsageStorageTotals } from "../../lib/types";
 import { downloadCsv } from "../../lib/csvExport";
+import { USAGE_API_UNKNOWN, USAGE_FILTER_MISMATCH } from "./useUsage";
 
 // 다운로드(Blob·a.click)는 jsdom 밖 동작이라 가로챈다 -- 직렬화(toCsv)는 진짜를 쓴다.
 vi.mock("../../lib/csvExport", async (orig) => ({
@@ -135,6 +136,64 @@ const emptyTotals = (name: string): UsageStorageTotals => totalsOf(name, {
   file_size_histogram: { buckets: [], known: 0, unknown: 0 }, oldest_scan_at: null, newest_scan_at: null,
   filesystem: null });
 
+// ---- 서버 흉내(2026-10-29 필터): /targets·/facets 는 픽스처 행의 pv·_requesters(테스트 전용 -- 그 경로를 scan 한 요청자들)로
+// 대상 단위 필터·선택지를 계산한다(서버 usage_attribution 의 결합 규칙: PV 축은 같은 정체 하나가 모두 만족, PV 축이 있으면 구분은
+// pv). pv 가 없는 행은 PV 밖으로 센다(filesystem 탭).
+type Row = { target: string; pv?: UsagePv; _requesters?: string[] } & Record<string, unknown>;
+const ATTR = ["cluster", "namespace", "pvc", "storage_class", "user", "scope", "requester"] as const;
+const PV_AXES = ["cluster", "namespace", "pvc", "storage_class", "user"] as const;
+const echoOf = (u: URL, withPath = true): UsageFiltersEcho => ({
+  storage: u.searchParams.get("storage"), ...(withPath ? { path: u.searchParams.get("path") } : {}),
+  ...Object.fromEntries(ATTR.map((k) => [k, u.searchParams.get(k)])) });
+const hasAttrParams = (u: URL) => ATTR.some((k) => u.searchParams.has(k));
+function serverFilter(rows: Row[], u: URL): Row[] {
+  const g = (k: string) => u.searchParams.get(k);
+  const axes = PV_AXES.filter((k) => g(k) !== null);
+  const scope = g("scope") ?? (axes.length > 0 ? "pv" : null);
+  return rows.filter((r) => {
+    const req = g("requester");
+    if (req !== null && !(r._requesters ?? []).includes(req)) return false;
+    const src = r.pv?.source ?? "outside";
+    const inPv = src === "inventory" || src === "recorded";
+    if (scope !== null && (scope === "pv" ? !inPv : src !== scope)) return false;
+    if (axes.length === 0) return true;
+    return inPv && r.pv!.volumes.some((v) => (g("cluster") === null || v.cluster === g("cluster"))
+      && (g("namespace") === null || v.namespace === g("namespace")) && (g("pvc") === null || v.pvc === g("pvc"))
+      && (g("storage_class") === null || v.storage_class === g("storage_class"))
+      && (g("user") === null || r.pv!.users.includes(g("user")!)));
+  });
+}
+function facetsFrom(name: string, rows: Row[]): UsageFacets {
+  const scope = { inventory: 0, recorded: 0, outside: 0, unknown: 0 };
+  type Tally = Map<string, { e: Record<string, unknown>; t: Set<string> }>;
+  const lists = { clusters: new Map(), namespaces: new Map(), pvcs: new Map(), storage_classes: new Map(),
+                  users: new Map(), requesters: new Map() } as Record<string, Tally>;
+  const add = (l: string, k: string, e: Record<string, unknown>, target: string) => {
+    const m = lists[l]; if (!m.has(k)) m.set(k, { e, t: new Set() }); m.get(k)!.t.add(target);
+  };
+  for (const r of rows) {
+    const src = r.pv?.source ?? "outside";
+    scope[src] += 1;
+    if (src === "inventory" || src === "recorded") {
+      for (const v of r.pv!.volumes) {
+        add("clusters", v.cluster, { cluster: v.cluster }, r.target);
+        add("namespaces", `${v.cluster}/${v.namespace}`, { cluster: v.cluster, namespace: v.namespace }, r.target);
+        add("pvcs", `${v.cluster}/${v.namespace}/${v.pvc}`,
+            { cluster: v.cluster, namespace: v.namespace, pvc: v.pvc, storage_class: v.storage_class }, r.target);
+        if (v.storage_class) add("storage_classes", v.storage_class, { storage_class: v.storage_class }, r.target);
+      }
+      for (const u of r.pv!.users) add("users", u, { dms_user: u }, r.target);
+    }
+    for (const q of r._requesters ?? []) add("requesters", q, { requester_id: q }, r.target);
+  }
+  const out = (l: string) => [...lists[l].values()].map((x) => ({ ...x.e, target_count: x.t.size }));
+  return { storage_name: name, computed_at: "", window_limit: 10000, window_truncated: false, target_count: rows.length,
+           scope, clusters: out("clusters"), namespaces: out("namespaces"), pvcs: out("pvcs"),
+           storage_classes: out("storage_classes"), users: out("users"), requesters: out("requesters"),
+           lists_truncated: {} } as UsageFacets;
+}
+const strip = ({ _requesters, ...r }: Row) => r;   // eslint-disable-line @typescript-eslint/no-unused-vars
+
 // 지금 URL(검색 문자열)을 화면에 꺼내 둔다 -- 탭 전환·행 접기가 URL 에 무엇을 남기는지 단언한다.
 function LocationProbe() {
   const loc = useLocation();
@@ -153,7 +212,16 @@ interface Setup {
   targets?: Record<string, unknown[]>;
   onTargets?: (u: URL) => void;
   slowTargets?: string;              // 이 스토리지의 목록 응답을 늦춘다
+  slowWhen?: (u: URL) => boolean;    // 이 조건의 목록 응답을 늦춘다(자리표시 검사)
   filterPath?: boolean;              // path 파라미터로 행을 거른다(부분 문자열)
+  // 봉투의 matched_count(기본 = 거른 행 수) · window_truncated · 메아리 덮어쓰기 · 봉투 대신 줄 응답(배포 틈)
+  matched?: number | null | ((u: URL, rows: Row[]) => number | null);
+  windowTruncated?: boolean;
+  echo?: (u: URL) => unknown;
+  targetsRaw?: () => Response;
+  // 선택지: 기본은 픽스처 행에서 계산(facetsFrom). "error" = 500.
+  facets?: "error";
+  onFacets?: (u: URL) => void;
   history?: unknown;
   onHistory?: (u: URL) => void;
   onExport?: (u: URL) => unknown;
@@ -161,6 +229,7 @@ interface Setup {
   totals?: Record<string, UsageStorageTotals | "error" | "html">
     | ((storage: string, call: number) => UsageStorageTotals | "error" | "html");
   onTotals?: (u: URL) => void;
+  totalsEcho?: (u: URL) => unknown;    // 필터 합계의 메아리 덮어쓰기
 }
 
 function setup(o: Setup = {}) {
@@ -179,21 +248,39 @@ function setup(o: Setup = {}) {
     }),
     http.get("/api/admin/usage/unregistered-storages", () => HttpResponse.json(o.unregistered ?? [])),
     http.get("/api/admin/usage/scan-storages", () => HttpResponse.json(o.scanStorages ?? ["cephfs-dms"])),
-    http.get("/api/admin/usage/scan-targets", async ({ request }) => {
+    http.get("/api/admin/usage/targets", async ({ request }) => {
       const u = new URL(request.url);
       o.onTargets?.(u);
       const s = u.searchParams.get("storage") ?? "";
-      if (o.slowTargets === s) await delay("infinite");
-      const rows = ((o.targets ?? { "cephfs-dms": TARGETS })[s] ?? []) as { target: string }[];
+      if (o.slowTargets === s || o.slowWhen?.(u)) await delay("infinite");
+      if (o.targetsRaw) return o.targetsRaw();
+      let rows = ((o.targets ?? { "cephfs-dms": TARGETS })[s] ?? []) as Row[];
       const q = u.searchParams.get("path");
-      return HttpResponse.json(o.filterPath && q ? rows.filter((r) => r.target.includes(q)) : rows);
+      if (o.filterPath && q) rows = rows.filter((r) => r.target.includes(q));
+      rows = serverFilter(rows, u);
+      const matched = typeof o.matched === "function" ? o.matched(u, rows) : o.matched !== undefined ? o.matched : rows.length;
+      return HttpResponse.json({
+        rows: rows.slice(0, Number(u.searchParams.get("limit") ?? 100)).map(strip), matched_count: matched,
+        window_limit: o.windowLimit ?? 10000, window_truncated: o.windowTruncated ?? false,
+        filters: o.echo ? o.echo(u) : echoOf(u) });
+    }),
+    http.get("/api/admin/usage/facets", ({ request }) => {
+      const u = new URL(request.url);
+      o.onFacets?.(u);
+      if (o.facets === "error") return HttpResponse.json({ detail: "internal" }, { status: 500 });
+      const s = u.searchParams.get("storage") ?? "";
+      return HttpResponse.json(facetsFrom(s, ((o.targets ?? { "cephfs-dms": TARGETS })[s] ?? []) as Row[]));
     }),
     http.get("/api/admin/usage/scan-history", ({ request }) => {
       o.onHistory?.(new URL(request.url));
       return HttpResponse.json(o.history ?? HISTORY);
     }),
-    http.get("/api/admin/usage/export", ({ request }) =>
-      HttpResponse.json(o.onExport?.(new URL(request.url)) ?? { generated_at: "", count: 0, truncated: false, rows: [] })),
+    // 새 내보내기(/targets/export): 픽스처 본문에 메아리·matched 가 없으면 보낸 값 그대로 채운다(본문이 filters 를 실으면 그 값).
+    http.get("/api/admin/usage/targets/export", ({ request }) => {
+      const u = new URL(request.url);
+      const body = (o.onExport?.(u) ?? { generated_at: "", count: 0, truncated: false, rows: [] }) as { rows: unknown[] };
+      return HttpResponse.json({ matched_count: body.rows.length, filters: echoOf(u), ...body });
+    }),
     http.get("/api/admin/usage/storage-totals", ({ request }) => {
       const u = new URL(request.url);
       o.onTotals?.(u);
@@ -205,7 +292,9 @@ function setup(o: Setup = {}) {
       if (t === "html") {
         return new HttpResponse("<!doctype html><html></html>", { status: 200, headers: { "content-type": "text/html" } });
       }
-      return HttpResponse.json(t);
+      // 필터 합계(필터 파라미터가 있을 때)는 메아리를 싣는다(경로 검색은 받지 않는다 -- 메아리에도 없다).
+      return HttpResponse.json(hasAttrParams(u)
+        ? { ...t, filesystem: null, filters: o.totalsEcho ? o.totalsEcho(u) : echoOf(u, false) } : t);
     }),
   );
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -553,7 +642,7 @@ test("리포트를 못 읽은 스캔만 있으면 「scan 이 없다」가 아�
 
 test("딥링크 타깃이 지금 목록에 없으면 패널 안 표 아래에 표시한다", async () => {
   setup({ path: "/admin/usage?storage=cephfs-dms&target=artifacts", targets: { "cephfs-dms": [TARGETS[1]] } });
-  expect(await screen.findByText(/지금 목록\(검색·상위 100개\)에 없어 아래에 표시합니다/)).toBeInTheDocument();
+  expect(await screen.findByText(/지금 목록\(검색·필터·상위 100개\)에 없어 아래에 표시합니다/)).toBeInTheDocument();
   const region = screen.getByRole("region", { name: "cephfs-dms:artifacts 상세" });
   expect(screen.getByRole("tabpanel")).toContainElement(region);
   expect(await within(region).findByText("최신 실 사용량")).toBeInTheDocument();
@@ -689,12 +778,12 @@ test("검색·정렬은 탭을 바꿔도 남고, 새 탭에서도 그 스토리�
   expect(screen.getByLabelText("경로 검색")).toHaveValue("proj");
 });
 
-test("건수 문구: 「N개」 · 검색 중 「‘q’ N개」", async () => {
+test("건수 문구: 「N개」(봉투의 matched_count) · 검색 중 「필터에 맞는 N개」", async () => {
   list(LIST);
   await screen.findByRole("button", { name: "fresh" });
   expect(within(screen.getByRole("tabpanel")).getByText("3개")).toBeInTheDocument();
   await userEvent.type(screen.getByLabelText("경로 검색"), "fr");
-  expect(await screen.findByText("‘fr’ 3개")).toBeInTheDocument();
+  expect(await screen.findByText("필터에 맞는 3개")).toBeInTheDocument();
 });
 
 test("목록 컬럼: 실 사용량·파일 수·hot 비율(최신 scan) -- 모름은 —", async () => {
@@ -771,18 +860,20 @@ test("열 정렬(2026-10-19): 머리글 -- 서버 sort·order(storage 함께), �
   expect(screen.queryByText("값 모름(—)은 맨 뒤")).toBeNull();
 });
 
-test("지표 정렬 창 안내: 그 스토리지의 대상 수가 서버 window_limit 을 넘을 때만(숫자는 서버 값)", async () => {
-  list(LIST, { summary: [sum("cephfs-dms", { target_count: 12345 })], windowLimit: 10000 });
+test("지표 정렬 창 안내: 맞는 대상 수(봉투 matched_count)가 서버 window_limit 을 넘을 때만(숫자는 서버 값)", async () => {
+  list(LIST, { summary: [sum("cephfs-dms", { target_count: 12345 })], windowLimit: 10000, matched: 12345 });
   await screen.findByRole("button", { name: "fresh" });
   expect(screen.queryByText(/개 안에서 정렬/)).toBeNull();          // 최근 스캔 정렬(SQL)엔 창이 없다
   await userEvent.click(screen.getByRole("button", { name: "hot 비율 정렬" }));
   expect(await screen.findByText("최근 스캔된 10,000개 안에서 정렬")).toBeInTheDocument();
 });
 
-test("지표 정렬 창 안내 + 경로 검색: 결과가 목록 상한보다 적으면 안내 없음, 많으면 조건부로 말한다", async () => {
+test("지표 정렬 창 안내 + 경로 검색: 맞는 수(정확)가 창 이하면 안내 없음, 넘으면 「필터에 맞는 대상 중」 -- 조건부 추정은 없다", async () => {
   const many = Array.from({ length: 100 }, (_, i) => ({ ...(LIST[0] as object), target: `t${i}` }));
+  // 서버 흉내: 검색 없음·「t」는 1만 넘게 맞고, 「solo」는 하나
   list([...many, { ...(LIST[0] as object), target: "solo" }],
-       { summary: [sum("cephfs-dms", { target_count: 12345 })], windowLimit: 10000, filterPath: true });
+       { summary: [sum("cephfs-dms", { target_count: 12345 })], windowLimit: 10000, filterPath: true,
+         matched: (u, rows) => (u.searchParams.get("path") === "solo" ? rows.length : 12345) });
   await userEvent.click(await screen.findByRole("button", { name: "hot 비율 정렬" }));
   expect(await screen.findByText("최근 스캔된 10,000개 안에서 정렬")).toBeInTheDocument();
   await userEvent.type(screen.getByLabelText("경로 검색"), "solo");
@@ -790,12 +881,14 @@ test("지표 정렬 창 안내 + 경로 검색: 결과가 목록 상한보다 �
   await waitFor(() => expect(screen.queryByText(/개 안에서 정렬/)).toBeNull());
   await userEvent.clear(screen.getByLabelText("경로 검색"));
   await userEvent.type(screen.getByLabelText("경로 검색"), "t");
-  expect(await screen.findByText("검색 결과가 10,000개를 넘으면 최근 스캔된 10,000개 안에서 정렬")).toBeInTheDocument();
+  expect(await screen.findByText("필터에 맞는 대상 중 최근 스캔된 10,000개 안에서 정렬")).toBeInTheDocument();
+  expect(screen.getByText("필터에 맞는 12,345개 · 상위 100개 표시")).toBeInTheDocument();
+  expect(screen.queryByText(/넘으면/)).toBeNull();
 });
 
-test("목록이 상한(100)을 채우면 「상위 100개 표시 · 전체 N개」(전체 = 요약의 대상 수)", async () => {
+test("목록이 상한(100)을 채우면 「상위 100개 표시 · 전체 N개」(전체 = 봉투의 matched_count -- 탭 배지의 수가 아니다)", async () => {
   const many = Array.from({ length: 100 }, (_, i) => ({ ...(LIST[0] as object), target: `t${i}` }));
-  list(many, { summary: [sum("cephfs-dms", { target_count: 12345 })] });
+  list(many, { summary: [sum("cephfs-dms", { target_count: 99999 })], matched: 12345 });
   expect(await screen.findByText("상위 100개 표시 · 전체 12,345개")).toBeInTheDocument();
 });
 
@@ -838,12 +931,12 @@ test("CSV 내보내기: 지금 탭의 스토리지·정렬로 export 를 받아 
   expect(await screen.findByRole("status")).toHaveTextContent("1개 항목을 내보냈습니다");
 });
 
-test("CSV 내보내기: 서버 상한을 넘으면 잘렸다고 말한다(경로 검색으로 좁히라고)", async () => {
-  list(LIST, { onExport: () => ({ generated_at: "", count: 10000, truncated: true, rows: [LIST[0]] }) });
+test("CSV 내보내기: 서버 상한을 넘으면 잘렸다고 말한다(경로 검색·필터로 좁히라고)", async () => {
+  list(LIST, { onExport: () => ({ generated_at: "", count: 10000, truncated: true, matched_count: 12345, rows: [LIST[0]] }) });
   await screen.findByRole("button", { name: "fresh" });
   await userEvent.click(screen.getByRole("button", { name: "CSV 내보내기" }));
   expect(await screen.findByRole("status")).toHaveTextContent(
-    "상한 10,000개까지만 내보냈습니다 — 경로 검색으로 범위를 좁히세요");
+    "상한 10,000개까지만 내보냈습니다 — 경로 검색·필터로 범위를 좁히세요");
 });
 
 test("CSV 내보내기는 지금 열 정렬(sort·order)과 경로 검색을 그대로 싣는다", async () => {
@@ -852,7 +945,7 @@ test("CSV 내보내기는 지금 열 정렬(sort·order)과 경로 검색을 그
   await screen.findByRole("button", { name: "fresh" });
   await userEvent.click(screen.getByRole("button", { name: "hot 비율 정렬" }));
   await userEvent.type(screen.getByLabelText("경로 검색"), "fr");
-  await screen.findByText("‘fr’ 3개");
+  await screen.findByText("필터에 맞는 3개");
   await userEvent.click(screen.getByRole("button", { name: /CSV 내보내기/ }));
   await waitFor(() => expect(exportUrls).toHaveLength(1));
   expect(exportUrls[0].searchParams.get("storage")).toBe("cephfs-dms");
@@ -1235,4 +1328,440 @@ test("이 스토리지 합계: 잘못된 인코딩 이름 합은 1개 이상일 
   const old = await totalsBox();
   await within(old).findByText("17.0 MiB");
   expect(old).not.toHaveTextContent("잘못된 인코딩 이름");
+});
+
+// ---- 필터(2026-10-29 「사용자·PV 이름·namespace 등으로 필터」) ----
+// 픽스처 = 테스트베드 모양: k8s-pv-nfs 가 두 클러스터(dmsk8s 의 tb-nfs, dmsk8s2 의 c2-nfs)의 PV 를 담고, 지운 PVC 의 기록 하나,
+// 직접 경로 scan 하나(PV 밖). cephfs-dms 는 filesystem(전부 PV 밖) -- 요청자만 둘.
+
+const NFS = "k8s-pv-nfs";
+const vol = (cluster: string, namespace: string, pvc: string, volume: string, sc: string) =>
+  ({ cluster, namespace, pvc, volume, storage_class: sc });
+const inv = (vs: UsagePv["volumes"], users: string[], root: string): UsagePv => ({ source: "inventory", root, volumes: vs, users });
+const OUTSIDE: UsagePv = { source: "outside", root: null, volumes: [], users: [] };
+const nrow = (target: string, pv: UsagePv, requesters: string[], days = 1) =>
+  ({ storage_name: NFS, target, scan_count: requesters.length, last_scan_at: isoAgo(days), pv, _requesters: requesters });
+const DATASETS = vol("dmsk8s", "team-a", "datasets", "pvc-aaa", "tb-nfs");
+const NFS_ROWS = [
+  nrow("team-a/datasets/dms-proof", inv([DATASETS], ["alice", "junwoo.song"], "team-a/datasets"), ["alice", "mason"]),
+  nrow("team-a/datasets/proof-scan", inv([DATASETS], ["alice", "junwoo.song"], "team-a/datasets"), ["mason"], 2),
+  nrow("team-b/models", inv([vol("dmsk8s", "team-b", "models", "pvc-bbb", "tb-nfs")], [], "team-b/models"), ["mason"], 3),
+  nrow("c2/lab-y/weights", inv([vol("dmsk8s2", "lab-y", "weights", "pvc-ccc", "c2-nfs")], ["cocoa.song"], "c2/lab-y/weights"),
+       ["mason"], 4),
+  nrow("old/gone", { source: "recorded", root: "old/gone", volumes: [vol("dmsk8s", "team-a", "gone", "pvc-ddd", "tb-nfs")],
+                     users: ["alice"] }, ["alice"], 5),
+  nrow("proof-d9/alice/latest", OUTSIDE, ["mason"], 6),
+];
+const FS_ROWS = TARGETS.map((r, i) => ({ ...r, pv: OUTSIDE, _requesters: i === 0 ? ["alice", "mason"] : ["mason"] }));
+const pvSetup = (o: Setup = {}) => setup({
+  storages: [st("cephfs-dms"), st(NFS, { backend_type: "nfs" })],
+  summary: [sum("cephfs-dms"), sum(NFS, { target_count: NFS_ROWS.length })],
+  targets: { "cephfs-dms": FS_ROWS, [NFS]: NFS_ROWS }, ...o });
+
+const filterGroup = () => screen.findByRole("group", { name: "사용량 필터" });
+const select = (label: string) => within(screen.getByRole("group", { name: "사용량 필터" })).getByRole("combobox", { name: label });
+const optionTexts = (el: HTMLElement) => within(el).getAllByRole("option").map((o) => o.textContent);
+
+test("필터 줄: PV 탭은 7개 select(라벨·순서·옵션 = 선택지와 대상 수), filesystem 탭은 요청자만", async () => {
+  pvSetup({ path: `/admin/usage?storage=${NFS}` });
+  await screen.findByRole("button", { name: "team-a/datasets/dms-proof" });
+  const group = await filterGroup();
+  await waitFor(() => expect(within(group).getAllByRole("combobox")).toHaveLength(7));
+  expect(within(group).getAllByRole("combobox").map((s) => s.getAttribute("aria-label"))).toEqual(
+    ["클러스터 필터", "namespace 필터", "PV 이름 필터", "StorageClass 필터", "PV 구분 필터", "권한 사용자 필터", "요청자 필터"]);
+  expect(optionTexts(select("클러스터 필터"))).toEqual(["클러스터 전체", "dmsk8s · 4개", "dmsk8s2 · 1개"]);
+  // 클러스터가 둘이라 namespace 옵션에 클러스터를 붙인다(namespace 는 클러스터마다만 유일)
+  expect(optionTexts(select("namespace 필터"))).toEqual(
+    ["namespace 전체", "team-a · dmsk8s · 3개", "team-b · dmsk8s · 1개", "lab-y · dmsk8s2 · 1개"]);
+  expect(optionTexts(select("PV 이름 필터"))).toEqual(["PV 이름 전체", "datasets — team-a (tb-nfs) · dmsk8s · 2개",
+    "models — team-b (tb-nfs) · dmsk8s · 1개", "weights — lab-y (c2-nfs) · dmsk8s2 · 1개", "gone — team-a (tb-nfs) · dmsk8s · 1개"]);
+  expect(optionTexts(select("StorageClass 필터"))).toEqual(["StorageClass 전체", "tb-nfs · 4개", "c2-nfs · 1개"]);
+  expect(optionTexts(select("PV 구분 필터"))).toEqual(["구분 전체", "PV 안 · 5개", "PV 밖(직접 경로) · 1개"]);  // 0 범주는 없다
+  expect(optionTexts(select("권한 사용자 필터"))).toEqual(
+    ["권한 사용자 전체", "alice · 3개", "junwoo.song · 2개", "cocoa.song · 1개"]);
+  expect(optionTexts(select("요청자 필터"))).toEqual(["요청자 전체", "alice · 2개", "mason · 5개"]);
+  expect(within(group).getByRole("button", { name: "필터 설명" })).toHaveAccessibleDescription(
+    /PV 필터는 각 경로가 지금 어느 PV\(=PVC\) 아래에 있는지로 거릅니다/);
+  expect(within(group).queryByRole("button", { name: "필터 지우기" })).toBeNull();     // 켜진 필터가 없다
+  // filesystem 탭: PV 안 대상이 0 이라 PV 축·구분(범주 하나)은 숨고 요청자만
+  await userEvent.click(screen.getByRole("tab", { name: /^cephfs-dms/ }));
+  await screen.findByRole("button", { name: "artifacts" });
+  await waitFor(() => expect(within(screen.getByRole("group", { name: "사용량 필터" })).getAllByRole("combobox")
+    .map((s) => s.getAttribute("aria-label"))).toEqual(["요청자 필터"]));
+});
+
+test("딥링크 ?storage=k8s-pv-nfs&cluster=dmsk8s2&namespace=lab-y: 요청에 실리고 select 가 그 값, 목록·건수·필터 합계가 그 결과", async () => {
+  const seen: URL[] = [], totals: string[] = [];
+  pvSetup({ path: `/admin/usage?storage=${NFS}&cluster=dmsk8s2&namespace=lab-y`, onTargets: (u) => seen.push(u),
+            totals: { [NFS]: totalsOf(NFS) }, onTotals: (u) => totals.push(u.search) });
+  expect(await screen.findByRole("button", { name: "c2/lab-y/weights" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "team-a/datasets/dms-proof" })).toBeNull();
+  for (const u of seen) {
+    expect(u.pathname).toBe("/api/admin/usage/targets");
+    expect([u.searchParams.get("cluster"), u.searchParams.get("namespace"), u.searchParams.get("pvc")])
+      .toEqual(["dmsk8s2", "lab-y", null]);
+  }
+  await filterGroup();
+  await waitFor(() => expect(select("클러스터 필터")).toHaveValue("dmsk8s2"));
+  expect(select("namespace 필터")).toHaveDisplayValue("lab-y · dmsk8s2 · 1개");
+  expect(screen.getByText("필터에 맞는 1개")).toBeInTheDocument();
+  expect(within(screen.getByRole("group", { name: "사용량 필터" })).getByRole("button", { name: "필터 지우기" }))
+    .toBeInTheDocument();
+  // 필터 합계 카드(스토리지 합계 아래): 제목·적용 필터 한 줄·df 없음, 요청은 필터만(경로 검색 없음)
+  const box = await screen.findByRole("region", { name: "필터 합계" });
+  expect(box).toHaveTextContent("적용 필터: 클러스터 dmsk8s2 · namespace lab-y");
+  expect(within(box).queryByText("파일시스템 사용(df)")).toBeNull();
+  expect(await screen.findByRole("region", { name: "이 스토리지 합계" })).toBeInTheDocument();
+  await waitFor(() => expect([...totals].sort()).toEqual(
+    [`?storage=${NFS}`, `?storage=${NFS}&cluster=dmsk8s2&namespace=lab-y`]));
+});
+
+test("위계: namespace 를 고르면 클러스터가 함께 실리고, 클러스터를 바꾸면 namespace·PV 이름이 풀린다 · 「PV 밖」은 PV 축을, PV 축은 「PV 밖」을 푼다", async () => {
+  pvSetup({ path: `/admin/usage?storage=${NFS}` });
+  await screen.findByRole("button", { name: "team-a/datasets/dms-proof" });
+  await filterGroup();
+  await waitFor(() => expect(select("PV 이름 필터")).toBeInTheDocument());
+  await userEvent.selectOptions(select("PV 이름 필터"), "datasets — team-a (tb-nfs) · dmsk8s · 2개");
+  await waitFor(() => expect([loc().get("cluster"), loc().get("namespace"), loc().get("pvc")])
+    .toEqual(["dmsk8s", "team-a", "datasets"]));
+  expect(await screen.findByRole("button", { name: "team-a/datasets/proof-scan" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "old/gone" })).toBeNull();          // 같은 namespace 의 다른 PV 이름
+  // PV 이름 선택지는 위 단계(클러스터·namespace)로 좁혀진다
+  expect(optionTexts(select("PV 이름 필터"))).toEqual(
+    ["PV 이름 전체", "datasets — team-a (tb-nfs) · dmsk8s · 2개", "gone — team-a (tb-nfs) · dmsk8s · 1개"]);
+  await userEvent.selectOptions(select("클러스터 필터"), "dmsk8s2 · 1개");
+  await waitFor(() => expect([loc().get("cluster"), loc().get("namespace"), loc().get("pvc")])
+    .toEqual(["dmsk8s2", null, null]));
+  expect(await screen.findByRole("button", { name: "c2/lab-y/weights" })).toBeInTheDocument();
+  // 구분 「PV 밖」 → PV 축이 풀린다(함께 걸면 늘 0건)
+  await userEvent.selectOptions(select("PV 구분 필터"), "PV 밖(직접 경로) · 1개");
+  await waitFor(() => expect(loc().get("scope")).toBe("outside"));
+  expect(loc().get("cluster")).toBeNull();
+  expect(await screen.findByRole("button", { name: "proof-d9/alice/latest" })).toBeInTheDocument();
+  // PV 축(권한 사용자)을 고르면 「PV 밖」이 풀린다
+  await userEvent.selectOptions(select("권한 사용자 필터"), "cocoa.song · 1개");
+  await waitFor(() => expect(loc().get("user")).toBe("cocoa.song"));
+  expect(loc().get("scope")).toBeNull();
+  expect(await screen.findByRole("button", { name: "c2/lab-y/weights" })).toBeInTheDocument();
+  // namespace 를 지우면 PV 이름도 풀린다(클러스터는 남는다)
+  await userEvent.selectOptions(select("namespace 필터"), "team-a · dmsk8s · 3개");
+  await waitFor(() => expect([loc().get("cluster"), loc().get("namespace")]).toEqual(["dmsk8s", "team-a"]));
+  await userEvent.selectOptions(select("PV 이름 필터"), "gone — team-a (tb-nfs) · dmsk8s · 1개");
+  await waitFor(() => expect(loc().get("pvc")).toBe("gone"));
+  await userEvent.selectOptions(select("namespace 필터"), "namespace 전체");
+  await waitFor(() => expect([loc().get("cluster"), loc().get("namespace"), loc().get("pvc")]).toEqual(["dmsk8s", null, null]));
+});
+
+test("URL 보존: 필터는 탭 전환·행 펼침/접기에 남는다 · 잘못된 storage 정리(replace)도 필터를 남긴다", async () => {
+  let last: URL | null = null;
+  pvSetup({ path: `/admin/usage?storage=${NFS}&requester=mason`, onTargets: (u) => { last = u; } });
+  await userEvent.click(await screen.findByRole("button", { name: "team-b/models" }));
+  expect([loc().get("target"), loc().get("requester")]).toEqual(["team-b/models", "mason"]);
+  await userEvent.click(screen.getByRole("button", { name: "team-b/models" }));
+  expect([loc().get("storage"), loc().get("target"), loc().get("requester")]).toEqual([NFS, null, "mason"]);
+  await userEvent.click(screen.getByRole("tab", { name: /^cephfs-dms/ }));
+  expect([loc().get("storage"), loc().get("requester")]).toEqual(["cephfs-dms", "mason"]);
+  await waitFor(() => expect(last!.searchParams.get("storage")).toBe("cephfs-dms"));
+  expect(last!.searchParams.get("requester")).toBe("mason");
+  expect(await screen.findByRole("button", { name: "team" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "artifacts" })).not.toBeNull();          // artifacts 도 mason 이 scan 했다
+  await waitFor(() => expect(select("요청자 필터")).toHaveValue("mason"));
+  cleanup();
+  pvSetup({ path: "/admin/usage?storage=typo-name&target=x&requester=alice" });
+  expect(await screen.findByText("‘typo-name’ 스토리지의 사용량 기록이 없습니다 — 기본 탭을 보여 줍니다")).toBeInTheDocument();
+  await waitFor(() => expect(loc().get("storage")).toBeNull());
+  expect([loc().get("target"), loc().get("requester")]).toEqual([null, "alice"]);
+});
+
+test("그 스토리지에 없는 값은 「(이 스토리지에 없음)」 옵션 · 필터 0건이면 툴바·필터 줄이 남고 「필터에 맞는 대상이 없습니다」 → 지우기", async () => {
+  pvSetup({ path: "/admin/usage?storage=cephfs-dms&cluster=dmsk8s" });
+  expect(await screen.findByText("필터에 맞는 대상이 없습니다")).toBeInTheDocument();
+  expect(screen.queryByText("이 스토리지에는 아직 성공한 scan 이 없습니다")).toBeNull();
+  expect(screen.getByLabelText("경로 검색")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "CSV 내보내기" })).toBeInTheDocument();
+  await filterGroup();
+  // filesystem 탭이라도 켜진 PV 축은 보인다(풀 수 있게) -- 값은 이 스토리지에 없다고
+  await waitFor(() => expect(select("클러스터 필터")).toHaveDisplayValue("dmsk8s (이 스토리지에 없음)"));
+  expect(screen.getByText("필터에 맞는 0개")).toBeInTheDocument();
+  const clears = screen.getAllByRole("button", { name: "필터 지우기" });
+  expect(clears).toHaveLength(2);                                                       // 필터 줄 + 빈 상태
+  await userEvent.click(clears[1]);
+  await waitFor(() => expect(loc().get("cluster")).toBeNull());
+  expect(await screen.findByRole("button", { name: "artifacts" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "필터 지우기" })).toBeNull();
+  // 빈 상태의 버튼도 사라진다 -- 포커스는 필터 줄로(<body> 가 아니다)
+  expect(document.activeElement).toBe(screen.getByRole("group", { name: "사용량 필터" }));
+});
+
+test("건수·각주: 「필터에 맞는 N개 · 상위 100개 표시」 · matched 모름(PV 판정 창 넘침)이면 그 사실을 한 문단 + 지표 정렬 각주", async () => {
+  const many = Array.from({ length: 100 }, (_, i) => ({ ...TARGETS[0], target: `t${i}`, pv: OUTSIDE, _requesters: ["mason"] }));
+  pvSetup({ path: "/admin/usage?storage=cephfs-dms&requester=mason", targets: { "cephfs-dms": many, [NFS]: NFS_ROWS },
+            matched: 12345 });
+  expect(await screen.findByText("필터에 맞는 12,345개 · 상위 100개 표시")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "hot 비율 정렬" }));
+  expect(await screen.findByText("필터에 맞는 대상 중 최근 스캔된 10,000개 안에서 정렬")).toBeInTheDocument();
+  cleanup();
+  pvSetup({ path: `/admin/usage?storage=${NFS}&cluster=dmsk8s`, matched: null, windowTruncated: true });
+  expect(await screen.findByText("최근 스캔된 10,000개 대상 안에서 4개 맞음 — 대상이 10,000개를 넘는 스토리지라 PV 필터는 "
+    + "이 범위에서만 거릅니다. 경로 검색으로 범위를 좁히세요")).toBeInTheDocument();
+  expect(screen.queryByText(/필터에 맞는 \d/)).toBeNull();                              // 모르는 수를 지어내지 않는다
+  await userEvent.click(screen.getByRole("button", { name: "파일 수 정렬" }));
+  // PV 경로는 창 → 필터 순서다(2026-10-29 리뷰: 「필터에 맞는 대상 중 최근 N개」는 거꾸로라 위 문단과 모순됐다)
+  expect(await screen.findByText("최근 스캔된 10,000개 대상 안에서 PV 필터에 맞는 것끼리 정렬")).toBeInTheDocument();
+  expect(screen.queryByText("필터에 맞는 대상 중 최근 스캔된 10,000개 안에서 정렬")).toBeNull();
+});
+
+test("PV 판정 창은 정렬과 무관하게 최근 스캔 순(서버 규칙) -- 오래된 순·스캔 횟수에서도 같은 범위, 요청자·경로 검색이 먼저 좁힌 것을 밝힌다, 0건은 「그 범위 안에는」", async () => {
+  // 2026-10-29 리뷰: 서버가 요청한 정렬로 창을 자르던 때 이 문단은 오래된 순에서 거짓이었다 -- 이제 서버 창이 늘 최근 스캔 순이라
+  // 문단은 정렬로 바뀌지 않는다. 대신 요청자·경로 검색(SQL)이 창보다 먼저 걸린다는 사실은 말한다.
+  const seen: URL[] = [];
+  pvSetup({ path: `/admin/usage?storage=${NFS}&cluster=dmsk8s&requester=mason`, matched: null, windowTruncated: true,
+            onTargets: (u) => seen.push(u) });
+  const note = "요청자에 맞는 대상 중 최근 스캔된 10,000개 안에서 3개 맞음 — 요청자에 맞는 대상이 10,000개를 넘어 PV 필터는 "
+    + "이 범위에서만 거릅니다. 경로 검색으로 범위를 좁히세요";
+  expect(await screen.findByText(note)).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: /^최근 스캔 정렬/ }));
+  await waitFor(() => expect(seen[seen.length - 1].searchParams.get("order")).toBe("asc"));
+  await userEvent.click(screen.getByRole("button", { name: "스캔 횟수 정렬" }));
+  await waitFor(() => expect(seen[seen.length - 1].searchParams.get("sort")).toBe("scans"));
+  expect(await screen.findByText(note)).toBeInTheDocument();
+  await userEvent.type(screen.getByLabelText("경로 검색"), "team");
+  expect(await screen.findByText(/^경로 검색·요청자에 맞는 대상 중 최근 스캔된 10,000개 안에서 \d+개 맞음 — 경로 검색·요청자에 맞는 대상이/))
+    .toBeInTheDocument();
+  cleanup();
+  // 판정 창 안에 맞는 대상이 0개 -- 「없다」를 단정하지 않는다
+  pvSetup({ path: `/admin/usage?storage=${NFS}&cluster=nowhere`, matched: null, windowTruncated: true });
+  expect(await screen.findByText("최근 스캔된 10,000개 대상 안에는 필터에 맞는 대상이 없습니다")).toBeInTheDocument();
+  expect(screen.queryByText("필터에 맞는 대상이 없습니다")).toBeNull();
+});
+
+test("포커스: 「필터 지우기」(필터 줄·빈 상태)와 값 때문에만 보이던 칸이 사라져도 포커스가 <body> 로 떨어지지 않고 필터 줄로 간다", async () => {
+  // 2026-10-29 리뷰(JobsList 와 같은 결함 유형): 키보드로 지우면 버튼이 언마운트돼 화면 낭독기가 자리를 잃었다.
+  pvSetup({ path: `/admin/usage?storage=${NFS}&requester=mason` });
+  await screen.findByRole("button", { name: "team-a/datasets/dms-proof" });
+  const group = await filterGroup();
+  const clear = within(group).getByRole("button", { name: "필터 지우기" });
+  clear.focus();
+  await userEvent.keyboard("{Enter}");
+  await waitFor(() => expect(loc().get("requester")).toBeNull());
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("group", { name: "사용량 필터" })));
+  cleanup();
+  // 단일 클러스터 탭: namespace 를 고르면 나타나는 클러스터 select -- 「클러스터 전체」로 바꾸면 그 칸이 사라진다
+  pvSetup({ path: `/admin/usage?storage=${NFS}&cluster=dmsk8s&namespace=team-a`,
+            targets: { "cephfs-dms": FS_ROWS, [NFS]: NFS_ROWS.filter((r) => r.target !== "c2/lab-y/weights") } });
+  await screen.findByRole("button", { name: "team-a/datasets/dms-proof" });
+  await filterGroup();
+  const cluster = await waitFor(() => select("클러스터 필터"));
+  cluster.focus();
+  await userEvent.selectOptions(cluster, "클러스터 전체");
+  await waitFor(() => expect([loc().get("cluster"), loc().get("namespace")]).toEqual([null, null]));
+  await waitFor(() => expect(within(screen.getByRole("group", { name: "사용량 필터" }))
+    .queryByRole("combobox", { name: "클러스터 필터" })).toBeNull());
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("group", { name: "사용량 필터" })));
+  // 살아 있는 칸에서 고르면 포커스를 건드리지 않는다
+  const ns = select("namespace 필터");
+  ns.focus();
+  await userEvent.selectOptions(ns, "team-b · 1개");
+  await waitFor(() => expect(loc().get("namespace")).toBe("team-b"));
+  expect(document.activeElement).toBe(select("namespace 필터"));
+});
+
+test("포커스: 기록 0 탭에서 필터를 지우면 필터 줄·툴바가 함께 사라진다 -- 포커스는 <body> 가 아니라 패널에 남는다", async () => {
+  // 2026-10-29 2차 리뷰: 필터를 지우면 필터 줄이 사라지고(선택지 없음) 새 목록이 오면 「기록 없음」이라 툴바도 사라진다 -- 툴바로
+  // 옮긴 포커스가 다시 <body> 로 떨어졌다. 빈 상태의 「필터 지우기」와 필터 줄의 것 둘 다.
+  const empty = {
+    storages: [st("cephfs-dms"), st("empty-store")],
+    summary: [sum("cephfs-dms"), sum("empty-store", { target_count: 0, succeeded_scan_count: 0, last_scan_at: null })],
+    targets: { "cephfs-dms": TARGETS, "empty-store": [] },
+    path: "/admin/usage?storage=empty-store&requester=mason",
+  };
+  for (const which of ["empty", "group"] as const) {
+    setup(empty);
+    expect(await screen.findByText("필터에 맞는 대상이 없습니다")).toBeInTheDocument();
+    const group = await filterGroup();
+    const clears = screen.getAllByRole("button", { name: "필터 지우기" });
+    expect(clears).toHaveLength(2);
+    const btn = which === "group" ? within(group).getByRole("button", { name: "필터 지우기" }) : clears[1];
+    btn.focus();
+    await userEvent.keyboard("{Enter}");
+    await waitFor(() => expect(loc().get("requester")).toBeNull());
+    expect(await screen.findByText("이 스토리지에는 아직 성공한 scan 이 없습니다")).toBeInTheDocument();
+    expect(screen.queryByLabelText("경로 검색")).toBeNull();                      // 툴바도 사라졌다
+    await waitFor(() => expect(document.activeElement).not.toBe(document.body));
+    expect(screen.getByRole("tabpanel").contains(document.activeElement)).toBe(true);
+    cleanup();
+  }
+});
+
+test("자리표시(경로 검색 응답 대기) 동안 PV 창 문단·지표 정렬 각주를 말하지 않는다 -- 옛 결과의 수를 새 검색의 범위로 이름 붙이지 않는다", async () => {
+  // 2026-10-29 2차 리뷰: 건수 자리는 「검색 중…」인데 문단은 이전 결과의 「4개 맞음」을 지금 입력의 범위(「경로 검색에 맞는 대상 중」)로
+  // 말했다(아무도 확인하지 않은 수와 이유). 건수와 같은 규칙 -- 자리표시 동안 말하지 않는다.
+  pvSetup({ path: `/admin/usage?storage=${NFS}&cluster=dmsk8s`, matched: null, windowTruncated: true, filterPath: true,
+            slowWhen: (u) => u.searchParams.get("path") !== null });
+  expect(await screen.findByText(/^최근 스캔된 10,000개 대상 안에서 4개 맞음 — /)).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "파일 수 정렬" }));
+  expect(await screen.findByText("최근 스캔된 10,000개 대상 안에서 PV 필터에 맞는 것끼리 정렬")).toBeInTheDocument();
+  await userEvent.type(screen.getByLabelText("경로 검색"), "zzz");
+  expect(await screen.findByText("검색 중…")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "team-a/datasets/dms-proof" })).toBeInTheDocument();   // 옛 행은 자리표시로 남는다
+  expect(screen.queryByText(/맞음 — /)).toBeNull();
+  expect(screen.queryByText(/PV 필터에 맞는 것끼리 정렬/)).toBeNull();
+  cleanup();
+  // 빈 결과의 자리표시: 제목·보조 줄은 그 결과를 낸 검색(봉투 메아리)으로 말한다 -- 지금 입력이 아니다
+  pvSetup({ path: `/admin/usage?storage=${NFS}&cluster=nowhere`, matched: null, windowTruncated: true, filterPath: true,
+            slowWhen: (u) => u.searchParams.get("path") !== null });
+  const title = "최근 스캔된 10,000개 대상 안에는 필터에 맞는 대상이 없습니다";
+  expect(await screen.findByText(title)).toBeInTheDocument();
+  await userEvent.type(screen.getByLabelText("경로 검색"), "zzz");
+  expect(await screen.findByText("검색 중…")).toBeInTheDocument();
+  expect(screen.getByText(title)).toBeInTheDocument();
+  expect(screen.queryByText(/경로 검색에 맞는 대상 중/)).toBeNull();
+  expect(screen.queryByText(/경로 검색 ‘zzz’ 도 함께/)).toBeNull();
+});
+
+test("배포 틈: /targets 가 봉투가 아니면(배열·HTML·404) 「새 사용량 API 를 모릅니다」, 메아리가 다르면 「필터가 화면과 다릅니다」 -- 둘 다 CSV 를 막는다", async () => {
+  const cases: (() => Response)[] = [
+    () => HttpResponse.json(TARGETS),                                                  // 옛 scan-targets 모양(배열)
+    () => new HttpResponse("<!doctype html><html></html>", { status: 200, headers: { "content-type": "text/html" } }),
+    () => HttpResponse.json({ detail: "Not Found" }, { status: 404 }),
+  ];
+  for (const raw of cases) {
+    setup({ targetsRaw: raw });
+    expect(await screen.findByText(USAGE_API_UNKNOWN)).toBeInTheDocument();
+    expect(screen.queryByText(/Unexpected token|JSON/)).toBeNull();
+    expect(screen.getByRole("button", { name: "CSV 내보내기" })).toBeDisabled();
+    cleanup();
+  }
+  // 옛 서버는 모르는 파라미터를 조용히 무시한다 -- 메아리에 요청자가 없으면 거른 척한 전체 목록이다
+  pvSetup({ path: `/admin/usage?storage=${NFS}&requester=alice`,
+            echo: (u) => ({ ...echoOf(u), requester: null }) });
+  expect(await screen.findByText(USAGE_FILTER_MISMATCH)).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "team-b/models" })).toBeNull();
+  expect(screen.getByRole("button", { name: "CSV 내보내기" })).toBeDisabled();
+});
+
+test("자리표시: 필터가 바뀌면 이전 필터의 행을 남기지 않는다(같은 필터 안의 정렬·검색만 남긴다)", async () => {
+  pvSetup({ path: `/admin/usage?storage=${NFS}`, slowWhen: (u) => u.searchParams.get("requester") === "alice" });
+  await screen.findByRole("button", { name: "team-b/models" });
+  await filterGroup();
+  await waitFor(() => expect(select("요청자 필터")).toBeInTheDocument());
+  await userEvent.selectOptions(select("요청자 필터"), "alice · 2개");
+  await waitFor(() => expect(screen.queryByRole("button", { name: "team-b/models" })).toBeNull());
+  expect(within(screen.getByRole("tabpanel")).getByText("불러오는 중…")).toBeInTheDocument();
+});
+
+test("표: 6열 그대로 + 경로 칸 둘째 줄(PV 이름 — namespace (SC) · 클러스터 · 외 n개 · 기록 · PV 밖 · PV 모름), filesystem 탭엔 없음", async () => {
+  const both = nrow("shared/root", inv([vol("dmsk8s", "team-a", "a1", "pvc-x", "tb-nfs"), vol("dmsk8s2", "team-a", "a1", "pvc-y", "c2-nfs")],
+                                        ["alice"], "shared/root"), ["mason"]);
+  const unknown = nrow("weird/x", { source: "unknown", root: null, volumes: [], users: [] }, ["mason"]);
+  pvSetup({ path: `/admin/usage?storage=${NFS}`, targets: { "cephfs-dms": FS_ROWS, [NFS]: [...NFS_ROWS, both, unknown] } });
+  await screen.findByRole("button", { name: "team-a/datasets/dms-proof" });
+  expect(within(screen.getByRole("table")).getAllByRole("columnheader")).toHaveLength(6);
+  const rowOf = (t: string) => screen.getByRole("button", { name: t }).closest("td")!;
+  await waitFor(() => expect(rowOf("team-a/datasets/dms-proof")).toHaveTextContent("datasets — team-a (tb-nfs) · dmsk8s"));
+  expect(within(rowOf("team-a/datasets/dms-proof")).getByText("datasets — team-a (tb-nfs) · dmsk8s"))
+    .toHaveAttribute("title", "클러스터 dmsk8s · 볼륨 pvc-aaa\nPV 루트 team-a/datasets");
+  expect(rowOf("shared/root")).toHaveTextContent("a1 — team-a (tb-nfs) · dmsk8s 외 1개");
+  expect(within(rowOf("old/gone")).getByText("기록")).toHaveAttribute("title",
+    "지금 인벤토리에 없는 PV — 이 경로를 PV 주소로 scan 한 기록 기준");
+  expect(within(rowOf("proof-d9/alice/latest")).getByText("PV 밖")).toHaveAttribute("title",
+    "지금 어떤 PV 루트에도 속하지 않는 경로(직접 경로 scan·PV 상위 디렉터리)");
+  expect(within(rowOf("weird/x")).getByText("PV 모름")).toHaveClass("italic");
+  // 버튼 이름은 경로 그대로(둘째 줄은 버튼 밖)
+  expect(screen.getByRole("button", { name: "old/gone" })).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("tab", { name: /^cephfs-dms/ }));
+  await screen.findByRole("button", { name: "artifacts" });
+  expect(within(screen.getByRole("table")).queryByText("PV 밖")).toBeNull();
+  expect(within(screen.getByRole("table")).getAllByRole("columnheader")).toHaveLength(6);
+});
+
+test("펼친 상세 머리: PV 소속(정체 전부)·권한 사용자(없으면 관리자·특권 운영자만) · 요청자 필터면 「이력은 전체」", async () => {
+  pvSetup({ path: `/admin/usage?storage=${NFS}&target=team-a/datasets/dms-proof&requester=alice` });
+  const region = await screen.findByRole("region", { name: `${NFS}:team-a/datasets/dms-proof 상세` });
+  const dl = await within(region).findByLabelText("PV 소속");
+  expect(within(dl).getByText("PV 소속", { selector: "dt" }).nextElementSibling)
+    .toHaveTextContent("datasets — team-a (tb-nfs) · dmsk8s");
+  expect(within(dl).getByText("권한 사용자", { selector: "dt" }).nextElementSibling).toHaveTextContent(/^alice, junwoo\.song$/);
+  expect(within(region).getByText("이력은 요청자와 무관한 이 경로의 전체 이력입니다")).toBeInTheDocument();
+  cleanup();
+  pvSetup({ path: `/admin/usage?storage=${NFS}&target=team-b/models` });
+  const r2 = await screen.findByRole("region", { name: `${NFS}:team-b/models 상세` });
+  await waitFor(() => expect(within(r2).getByLabelText("PV 소속")).toHaveTextContent("models — team-b (tb-nfs)"));
+  expect(within(within(r2).getByLabelText("PV 소속")).getByText("권한 사용자", { selector: "dt" }).nextElementSibling)
+    .toHaveTextContent("없음 — 관리자·특권 운영자만 접근");
+  expect(within(r2).queryByText(/이력은 요청자와 무관한/)).toBeNull();
+});
+
+test("합계: 무필터 요청은 정확히 ?storage=X(스토리지별 비교와 한 벌) · 필터 합계는 필터만 싣고 경로 검색은 싣지 않는다 · 메아리가 다르면 오류", async () => {
+  const seen: string[] = [];
+  let last: URL | null = null;
+  pvSetup({ path: "/admin/usage?storage=cephfs-dms&requester=mason", totals: { "cephfs-dms": totalsOf("cephfs-dms") },
+            onTotals: (u) => seen.push(u.search), onTargets: (u) => { last = u; }, filterPath: true });
+  const box = await screen.findByRole("region", { name: "필터 합계" });
+  expect(await within(box).findByText("17.0 MiB")).toBeInTheDocument();
+  expect(box).toHaveTextContent("적용 필터: 요청자 mason");
+  expect(within(box).queryByText("파일시스템 사용(df)")).toBeNull();
+  expect(within(box).getByRole("button", { name: "필터 합계 설명" })).toHaveAccessibleDescription(
+    /경로 검색은 반영하지 않습니다\. 필터에 맞는 경로 중 최상위만 더합니다/);
+  expect(within(await totalsBox()).getByText("파일시스템 사용(df)")).toBeInTheDocument();   // 스토리지 합계는 그대로
+  await userEvent.type(screen.getByLabelText("경로 검색"), "art");
+  await waitFor(() => expect(last!.searchParams.get("path")).toBe("art"));          // 목록은 검색을 싣는다
+  expect(await screen.findByText("필터에 맞는 1개")).toBeInTheDocument();
+  expect([...new Set(seen)].sort()).toEqual(["?storage=cephfs-dms", "?storage=cephfs-dms&requester=mason"]);
+  expect(seen.some((s) => s.includes("path"))).toBe(false);
+  cleanup();
+  pvSetup({ path: "/admin/usage?storage=cephfs-dms&requester=mason", totals: { "cephfs-dms": totalsOf("cephfs-dms") },
+            totalsEcho: (u) => ({ ...echoOf(u, false), requester: null }) });
+  const bad = await screen.findByRole("region", { name: "필터 합계" });
+  expect(await within(bad).findByText(`합계를 불러오지 못했습니다 — ${USAGE_FILTER_MISMATCH}`)).toBeInTheDocument();
+});
+
+test("CSV(필터): /targets/export 에 필터를 싣고 파일 이름은 -filtered, k8s 열 · PV 판정 창 넘침·메아리 없음을 말한다", async () => {
+  vi.mocked(downloadCsv).mockClear();
+  let exportUrl: URL | null = null;
+  pvSetup({ path: `/admin/usage?storage=${NFS}&cluster=dmsk8s&namespace=team-a`,
+            onExport: (u) => { exportUrl = u;
+              return { generated_at: "", count: 1, truncated: false, rows: [{ ...strip(NFS_ROWS[0]), latest: null, previous: null }] }; } });
+  await screen.findByRole("button", { name: "team-a/datasets/dms-proof" });
+  await userEvent.click(screen.getByRole("button", { name: "CSV 내보내기" }));
+  await waitFor(() => expect(downloadCsv).toHaveBeenCalledTimes(1));
+  expect(exportUrl!.pathname).toBe("/api/admin/usage/targets/export");
+  expect([exportUrl!.searchParams.get("cluster"), exportUrl!.searchParams.get("namespace")]).toEqual(["dmsk8s", "team-a"]);
+  const [filename, text] = vi.mocked(downloadCsv).mock.calls[0];
+  expect(filename).toMatch(new RegExp(`^dms-usage-${NFS}-filtered-\\d{8}-\\d{4}\\.csv$`));
+  const [header, line] = (text as string).split("\r\n");
+  const cols = header.split(",");
+  const val = (c: string) => line.split(",")[cols.indexOf(c)];
+  expect([val("k8s_source"), val("k8s_cluster"), val("k8s_namespace"), val("k8s_pvc"), val("k8s_volume"),
+          val("k8s_storage_class"), val("k8s_pv_root"), val("k8s_access_users")])
+    .toEqual(["inventory", "dmsk8s", "team-a", "datasets", "pvc-aaa", "tb-nfs", "team-a/datasets", "alice;junwoo.song"]);
+  expect(await screen.findByRole("status")).toHaveTextContent("1개 항목을 내보냈습니다");
+  cleanup();
+  pvSetup({ path: `/admin/usage?storage=${NFS}&cluster=dmsk8s`,
+            onExport: () => ({ generated_at: "", count: 4, truncated: true, matched_count: null, rows: [] }) });
+  await screen.findByRole("button", { name: "team-a/datasets/dms-proof" });
+  await userEvent.click(screen.getByRole("button", { name: "CSV 내보내기" }));
+  expect(await screen.findByRole("status")).toHaveTextContent(
+    "대상이 10,000개를 넘는 스토리지라 PV 필터는 최근 스캔된 10,000개 대상 안에서만 걸렀습니다 — CSV 가 전부가 아닐 수 있습니다");
+  cleanup();
+  vi.mocked(downloadCsv).mockClear();
+  pvSetup({ path: `/admin/usage?storage=${NFS}&cluster=dmsk8s`,
+            onExport: () => ({ generated_at: "", count: 0, truncated: false, rows: [], filters: null }) });
+  await screen.findByRole("button", { name: "team-a/datasets/dms-proof" });
+  await userEvent.click(screen.getByRole("button", { name: "CSV 내보내기" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent(USAGE_FILTER_MISMATCH);
+  expect(downloadCsv).not.toHaveBeenCalled();
+});
+
+test("선택지(facets) 실패: 필터 줄을 그리지 않고, 필터가 켜져 있으면 「필터 지우기」만 남는다(URL 의 필터는 그대로 걸린다)", async () => {
+  let last: URL | null = null;
+  pvSetup({ path: "/admin/usage?storage=cephfs-dms&requester=mason", facets: "error", onTargets: (u) => { last = u; } });
+  await screen.findByRole("button", { name: "team" });
+  expect(last!.searchParams.get("requester")).toBe("mason");
+  expect(await screen.findByRole("button", { name: "필터 지우기" })).toBeInTheDocument();
+  expect(screen.queryByRole("group", { name: "사용량 필터" })).toBeNull();
+  expect(screen.queryAllByRole("combobox")).toHaveLength(0);
+  await userEvent.click(screen.getByRole("button", { name: "필터 지우기" }));
+  await waitFor(() => expect(loc().get("requester")).toBeNull());
+  expect(screen.queryByRole("button", { name: "필터 지우기" })).toBeNull();
 });
