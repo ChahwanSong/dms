@@ -239,8 +239,9 @@ export function UsageFilters({ attr, facets, onChange, groupRef }: {
   return (
     <div ref={groupRef} tabIndex={-1} role="group" aria-label="사용량 필터"
          className="mt-2 flex flex-wrap items-center gap-2 rounded-md outline-none focus-visible:ring-2 focus-visible:ring-accent">
-      {controls}
+      {/* 도움말은 맨 앞 -- 뒤에 두면 select 일곱이 한 줄을 채우는 폭(1440)에서 「?」 하나만 둘째 줄로 떨어졌다(d13 실화면). */}
       {controls.length > 0 && <HelpTip label="필터 설명" head="필터" help={FILTERS_HELP} />}
+      {controls}
       {clear}
       {windowed && pvShown && (
         <p className="basis-full text-xs text-muted break-keep">
