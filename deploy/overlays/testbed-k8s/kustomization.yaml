@@ -48,6 +48,7 @@
 #   d13 = 사용량 분석 하위 메뉴 — 경로별·스토리지별 탭, 경로 상세 오른쪽 시트, 합계 한 줄(2026-10-29, 소스 d95a840;
 #        이미지 3종 + 잡 이미지).
 #   d14 = d13 + 필터 도움말 「?」를 필터 줄 맨 앞으로(2026-10-29, 소스 a6e68f2; 이미지 3종 + 잡 이미지).
+#   d15 = 사용량 경로별 표에 PV 이름 열 + 검색을 경로·PV 이름 부분 일치로(2026-10-29, 소스 4934968; 이미지 3종 + 잡 이미지).
 #   태그 bump = 아래 newTag(+ patch-config.yaml 의 DMS_JOB_IMAGE) 커밋 — **dms-k8s 에서만** 한다(2026-10-22 브랜치 분리 뒤
 #   빌드 소스는 /home/mason/dms-dev/dms-k8s 체크아웃 = origin/dms-k8s, main 은 이 클러스터와 무관).
 #   ssc 클러스터의 오버레이(overlays/testbed)는 dms-ssc 브랜치에만 있다(2026-10-26 이 브랜치에서 지웠다 — 체리픽 충돌·엉뚱한 태그 방지).
@@ -65,10 +66,10 @@ resources:
 images:
   - name: set-by-overlay.invalid/dms
     newName: pkg-01:5001/dms
-    newTag: d14
+    newTag: d15
   - name: set-by-overlay.invalid/dms-agent
     newName: pkg-01:5001/dms-agent
-    newTag: d14
+    newTag: d15
 
 patches:
   - path: patch-config.yaml

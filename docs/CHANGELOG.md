@@ -95,7 +95,7 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
-### 🚧 사용량 분석 「경로별」 — PV 이름 열 + 경로·PV 이름 검색(일부 단어) — **구현·단위 검증, 테스트베드 실증 전**(2026-10-29)
+### ✅ 사용량 분석 「경로별」 — PV 이름 열 + 경로·PV 이름 검색(일부 단어) — **완료·실증**(2026-10-29, d15)
 
 사용자 요청: 「테이블에 경로 이름뿐 아니라 pv 이름도 표시해줘. 그리고 경로로 검색할 뿐 아니라, pv 이름도 검색할 수 있게 하고 일부
 단어만 포함해도 뜨도록 해줘.」 「일부 단어만 포함해도」는 포탈의 기존 규칙(2026-10-25 작업 목록 검색, `text_search.search_tokens`)과
@@ -166,8 +166,13 @@ DB 스키마·인덱스·사유 코드·npm 의존성 변경 없음.
   포탈 vitest: `Highlight.test.tsx`(새 — 토큰 규칙·겹침·대소문자), `UsageAnalysis.test.tsx`(7열 표·검색 AND·대소문자·양쪽 강조, 선택지 실패
   시 PV 열, 옛 서버 메아리, 창 넘침 문구 — 검색만·PV 필터만·둘 다·0건·CSV(capped 면 「상한 N개까지만」을 함께, 아니면 행 수가 상한이어도
   창 문구만), 화면에 없는 요청자 필터를 권하지 않음), `TargetSheet.test.tsx`
-  (라벨). e2e `15-usage-filters` 9) 검색 단계(대문자 두 단어 AND·URL q·`<mark>`·filesystem 이라 PV 이름 열 없음·지우면 복원)를 더했다 —
-  **미실행**(수기 게이트, 실증 때 돌린다).
+  (라벨). e2e `15-usage-filters` 9) 검색 단계(대문자 두 단어 AND·URL q·`<mark>`·filesystem 이라 PV 이름 열 없음·지우면 복원)를 더했다.
+- **검증**: 전체 백엔드 4352 passed(스냅숏) + 사용량 파일 최종 sqlite 295·PG 252, vitest 1759, tsc(앱·e2e), e2e 30, dist 외부 URL 0.
+  리뷰 2라운드 — 무차별 대입 오라클(q·창 넘침 병합·capped) sqlite 1,872세계·PG 276세계 불일치 0(변이 7종 모두 검출), 지적 6건 반영.
+- **라이브 실증(d15, 소스 4934968)**: 실 Chrome — PV 스토리지 표 열 「경로 · PV 이름 · 실 사용량 · …」(cephfs-dms 는 PV 열 없이 6열),
+  nfs `data` → `team-a/datasets/proof-scan`·`dms-proof`(경로·PV 이름 양쪽 강조), `WEIGHTS` → `c2/lab-y/weights`(대소문자 무시),
+  `team proof` → 2행(AND)·`team weights` → 0건, onefs `kraken` → `data/csi/k8s-3fa9c2d71e/dms-proof`(경로에 없는 PV 이름 `kraken-kv-cache`
+  로 찾음·강조), gpfs `models` → `pvc-52c6…/dms-proof`(PV 이름), cephfs `GROW` → `e2e/growth`. 1440·390 가로 넘침 0, 콘솔 오류 0.
 
 ### ✅ 사용량 분석 하위 메뉴 — 경로별 · 스토리지별 + 경로 상세 시트 + 합계 줄 — **완료·실증**(2026-10-29, d14)
 
