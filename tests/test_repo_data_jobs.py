@@ -464,6 +464,45 @@ def test_default_arguments_leave_the_heads_statement_unchanged(db, monkeypatch):
     assert set(seen[0][1]) == {"s", "sn", "n"}
     repos.data_jobs.scan_target_heads(storage="s1", requester="alice", with_matched=True)
     assert "requester_hit" in seen[2][0] and "matched_count" in seen[2][0] and seen[2][1]["rq"] == "alice"
+    # 검색 토큰(2026-10-29): 없음·빈 목록이면 문장이 그대로다
+    repos.data_jobs.scan_target_heads(storage="s1", tokens=None)
+    repos.data_jobs.scan_target_heads(storage="s1", tokens=[])
+    assert seen[3] == seen[4] == seen[0]
+    repos.data_jobs.scan_target_heads(storage="s1", tokens=["Team", "a_b"])
+    assert r"lower(target) LIKE lower(:qt0) ESCAPE '\' AND lower(target) LIKE lower(:qt1) ESCAPE '\'" in seen[5][0]
+    assert (seen[5][1]["qt0"], seen[5][1]["qt1"]) == ("%Team%", r"%a\_b%")   # 낮추기는 SQL 이 한다(파이썬 lower 아님)
+
+
+def test_search_tokens_are_partial_case_insensitive_anded_and_wildcards_are_literal(db):
+    # 사용량 검색(2026-10-29, q)의 SQL 경로 -- 작업 목록 검색과 같은 뜻: 토큰마다 부분 일치·대소문자 무시(컬럼·패턴 양쪽 DB
+    # lower()), 토큰 사이 AND, LIKE 와일드카드(% _ \)는 글자 그대로. DMS_TEST_DB=postgresql 이면 PG(대소문자 구분 LIKE)로도 돈다.
+    repos = _repos(db)
+    for target, at in (("Team-A/Data", "01"), ("team-b/data", "02"), ("x/100%_done", "03"), ("x/1000done", "04"),
+                       ("a_c", "05"), ("abc", "06"), ("w\\in", "07")):
+        _usage_scan(repos, db, storage="s1", target=target, at=f"2026-09-{at}T00:00:00Z")
+    first = "2026-09-01T00:00:00Z"
+    _usage_scan(repos, db, storage="s1", target="Team-A/Data", at="2026-09-08T00:00:00Z")      # 같은 대상의 두 번째
+    _usage_scan(repos, db, storage="s2", target="team-c/data", at="2026-09-09T00:00:00Z")      # 다른 스토리지
+
+    def names(tokens, **kw):
+        return [h["target"] for h in repos.data_jobs.scan_target_heads(storage="s1", tokens=tokens, **kw)]
+    assert names(["team"]) == ["Team-A/Data", "team-b/data"]                  # 대소문자 무시(대상 쪽)
+    assert names(["TEAM-b"]) == ["team-b/data"]                                # 대소문자 무시(토큰 쪽)
+    assert names(["DATA", "a/"]) == ["Team-A/Data"]                            # AND -- 둘 다 들어간 것만
+    assert names(["data", "zzz"]) == []
+    assert names(["ata"]) == ["Team-A/Data", "team-b/data"]                    # 단어 일부
+    assert names(["100%"]) == ["x/100%_done"] and names(["%"]) == ["x/100%_done"]   # '%' 는 전부 일치가 아니다
+    assert names(["0%_d"]) == ["x/100%_done"]
+    assert names(["a_c"]) == ["a_c"]                                           # '_' 는 한 글자 와일드카드가 아니다
+    assert names(["\\"]) == ["w\\in"]                                          # 이스케이프 문자도 글자 그대로
+    assert names(["data"], path="team-b") == ["team-b/data"]                   # 옛 path 와 함께 걸린다
+    # 파티션은 잘리지 않는다 -- 검색이 걸려도 scan_count·first·최신 잡은 그 대상 전체 기록
+    [head] = repos.data_jobs.scan_target_heads(storage="s1", tokens=["team-a"])
+    assert (head["scan_count"], head["first_scan_at"], head["last_scan_at"]) == (2, first, "2026-09-08T00:00:00Z")
+    # 맞는 수는 검색 뒤 전체(limit 과 무관)
+    rows = repos.data_jobs.scan_target_heads(storage="s1", tokens=["A"], limit=1, with_matched=True)
+    assert len(rows) == 1 and rows[0]["matched_count"] == 4                     # Team-A/Data·team-b/data·a_c·abc
+    assert names(["data"], requester="alice", sort="scans") == ["Team-A/Data", "team-b/data"]
 
 
 def _pv(ns, pvc, root, cluster="dmsk8s"):

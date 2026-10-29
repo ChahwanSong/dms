@@ -11,7 +11,7 @@ import pytest
 
 from dms.repositories.k8s import K8sRepository
 from dms.usage_attribution import (FACET_LISTS, Inputs, PvFilter, attribute, collect, covering_root, facet_counts,
-                                   matches, parse_block, ranked)
+                                   matches, may_attribute_pv, parse_block, ranked, search_matches)
 
 A_DATA = ("dmsk8s", "team-a", "datasets", "pvc-a1", "tb-nfs")
 B_SCRATCH = ("dmsk8s", "team-b", "scratch", "pvc-b1", "tb-nfs")
@@ -248,3 +248,53 @@ def test_facet_lists_are_capped_by_count_then_name():
     f = facet_counts([attribute(f"r{i}", inp) for i in range(3)], cap=2)
     assert len(f["clusters"]) == 2 and f["lists_truncated"]["clusters"] is True
     assert f["lists_truncated"]["storage_classes"] is False
+
+
+# --- 검색(2026-10-29 사용자 요청: 경로·PV 이름, 일부 단어만 포함해도) ------------------------------------------------
+
+def test_search_tokens_match_the_path_or_a_pv_name_each_and_all_must_hit():
+    # PV 이름 = PVC 이름(k8sTerms 「PV 이름」). 토큰마다 경로든 PV 이름이든 한쪽에 부분 일치, 토큰 사이 AND, 대소문자 무시.
+    inp = _inputs({"shared": (C2_WEIGHTS, A_DATA), "team-b/scratch": (B_SCRATCH,)},
+                  recorded={"team-d/old/x": [_payload(pvc="legacy-cache")]})
+    shared, scratch = attribute("shared/run1", inp), attribute("team-b/scratch/y", inp)
+    rec, out = attribute("team-d/old/x", inp), attribute("proof-d9/alice", inp)
+    assert (shared["source"], rec["source"], out["source"]) == ("inventory", "recorded", "outside")
+    s = search_matches
+    assert s("shared/run1", shared, []) and s("proof-d9/alice", out, [])       # 빈 토큰 = 검색 없음
+    assert s("shared/run1", shared, ["datasets"])                             # 경로엔 없고 PV 이름에만(충돌의 둘째 정체)
+    assert s("shared/run1", shared, ["Weights"]) and s("shared/run1", shared, ["EIGH"])   # 대소문자 무시·단어 일부
+    assert s("shared/run1", shared, ["datasets", "RUN"])                      # 토큰마다 다른 쪽에서
+    assert s("shared/run1", shared, ["datasets", "weights"])                  # 둘 다 PV 이름(다른 정체)
+    assert not s("shared/run1", shared, ["datasets", "zzz"])                  # AND -- 하나라도 빠지면 아니다
+    assert s("team-d/old/x", rec, ["LEGACY"])                                 # 기록 소속의 PV 이름도
+    assert not s("team-b/scratch/y", scratch, ["dmsk8s"]) and not s("team-b/scratch/y", scratch, ["pvc-b1"])
+    assert not s("team-b/scratch/y", scratch, ["tb-nfs"])                     # 클러스터·volume·SC 는 검색하지 않는다
+    assert s("team-b/scratch/y", scratch, ["team-b"])                         # namespace 는 경로에 있을 때만(경로 일치)
+    assert not s("shared/run1", shared, ["team-a"])
+    assert s("proof-d9/alice", out, ["ALICE", "d9"]) and not s("proof-d9/alice", out, ["datasets"])   # PV 밖 = 경로만
+    assert not s("shared/run1", shared, ["%"]) and not s("shared/run1", shared, ["r_n"])   # 와일드카드 없음
+    assert s("x/100%_done", out, ["0%_"])
+    assert s("Ärger/ÉCOLE", out, ["ärger", "école"])                          # 파이썬 쪽은 같은 str.lower() 양쪽
+    assert not s(None, out, ["x"]) and s(None, shared, ["weights"])           # 문자열이 아닌 경로(신뢰 경계)는 맞지 않는다
+    bad = {"source": "inventory", "root": "r", "volumes": [{"pvc": None}, {"pvc": 5}], "users": []}
+    assert not s("r/x", bad, ["5"]) and s("r/x", bad, ["r/x"])
+
+
+@pytest.mark.parametrize("storage,recorded,expected,calls", [
+    (PV, False, True, ["storage"]),                     # 인벤토리가 있을 수 있다 -- 기록은 묻지 않는다
+    (BOTH, False, True, ["storage"]),
+    (FS, False, False, ["storage", "has_recorded"]),
+    (FS, True, True, ["storage", "has_recorded"]),      # 종류를 filesystem 으로 바꾼 스토리지의 옛 PV 주소 scan
+    (None, False, False, ["storage", "has_recorded"]),
+    (None, True, True, ["storage", "has_recorded"]),    # 지운 스토리지의 PV 주소 scan 기록
+    ({"storage_name": "x", "kind": None}, False, False, ["storage", "has_recorded"]),
+])
+def test_may_attribute_pv_follows_the_two_sources_of_collect(storage, recorded, expected, calls):
+    repos = _FakeRepos(storage=storage, index={"team-a/datasets": (A_DATA,)},
+                       recorded={"t": [_payload()]} if recorded else None)
+    assert may_attribute_pv(repos, "s") is expected
+    assert repos.calls == calls
+    # False 이면 collect 의 어떤 판정도 PV 이름을 갖지 않는다(그래서 경로만 보는 SQL 과 같은 결과다)
+    if not expected:
+        inp = collect(repos, "s", [{"target": "t"}, {"target": "team-a/datasets/x"}])
+        assert all(attribute(t, inp)["volumes"] == [] for t in ("t", "team-a/datasets/x"))

@@ -29,7 +29,8 @@ export { staleClass } from "./TargetTable";
 // 바깥 카드는 없다(카드 안에 카드를 넣지 않는다 -- 합계 줄·표가 각자 1px 테두리).
 //
 // URL 이 진실이다: ?storage= = 보는 스토리지(useActiveStorage -- 없으면 기본 스토리지를 파생·붙잡기, URL 에 쓰지 않는다), 필터 일곱
-// (키 = 서버 쿼리 이름 = PV 탐색 화면의 키, useUsage.ATTR_KEYS), q = 경로 검색, sort·order = 열 정렬(기본값 last_scan·desc 는 생략),
+// (키 = 서버 쿼리 이름 = PV 탐색 화면의 키, useUsage.ATTR_KEYS), q = 검색(경로·PV 이름 -- 2026-10-29 전엔 경로만이었다, 같은 키라 옛
+// 링크의 q 가 그대로 걸린다), sort·order = 열 정렬(기본값 last_scan·desc 는 생략),
 // &target= = 그 위에 열린 경로 상세 시트. 새로고침·딥링크·링크 공유에서 같은 화면이 나온다(옛 링크 ?storage=&target= 은 같은
 // 라우트라 리다이렉트 없이 시트가 열린 채로). URL 쓰기는 늘 지금 파라미터에서 바꿀 키만 고친다(동기화 이력 화면 관용 -- 통째로 덮으면
 // 스토리지 전환·시트 열기가 필터를 조용히 지웠다). 기록 방식: 스토리지 = push(select 300ms 디바운스), 필터·검색·정렬 = replace(뒤로
@@ -71,19 +72,19 @@ export function UsageAnalysis() {
     setParams(next, { replace: true });
   };
 
-  // 경로 검색(부분 문자열, 300ms 디바운스 -- 타이핑마다 GROUP BY 를 쏘지 않는다): 입력칸은 이 페이지 상태, 디바운스한 값은 URL 의
-  // q(replace). URL 이 밖에서 바뀌면(뒤로 가기·탭 링크 복원) 입력칸을 따라 맞춘다 -- 우리가 방금 쓴 값의 메아리(wrote)는 건너뛴다
-  // (그 사이 더 친 글자를 지우지 않게).
-  const pathQ = (params.get("q") ?? "").trim();
-  const [input, setInput] = useState(pathQ);
+  // 검색(경로·PV 이름, 토큰마다 부분 일치 -- useUsage.TargetFilter. 300ms 디바운스 -- 타이핑마다 GROUP BY 를 쏘지 않는다): 입력칸은
+  // 이 페이지 상태, 디바운스한 값은 URL 의 q(replace). URL 이 밖에서 바뀌면(뒤로 가기·탭 링크 복원) 입력칸을 따라 맞춘다 -- 우리가
+  // 방금 쓴 값의 메아리(wrote)는 건너뛴다(그 사이 더 친 글자를 지우지 않게).
+  const searchQ = (params.get("q") ?? "").trim();
+  const [input, setInput] = useState(searchQ);
   const wrote = useRef<string | null>(null);
   useEffect(() => {
-    if (wrote.current === pathQ) { wrote.current = null; return; }
-    if (input.trim() !== pathQ) setInput(pathQ);
-  }, [pathQ]);  // eslint-disable-line react-hooks/exhaustive-deps
+    if (wrote.current === searchQ) { wrote.current = null; return; }
+    if (input.trim() !== searchQ) setInput(searchQ);
+  }, [searchQ]);  // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     const v = input.trim();
-    if (v === pathQ) return;
+    if (v === searchQ) return;
     const t = setTimeout(() => {
       const { params: cur, setParams: set, state } = latest.current;
       if ((cur.get("q") ?? "").trim() === v) return;           // 이미 실렸다(시트를 열며 함께 실었다 -- sheet.open)
@@ -136,11 +137,11 @@ export function UsageAnalysis() {
   const sheet = {
     open: (t: string) => {
       if (active === null) return;
-      // 아직 디바운스 중인 경로 검색은 지금 싣는다(지금 항목 replace → 시트 push) -- 열린 동안 뒤 화면 상태가 바뀌지 않아야 뒤로
+      // 아직 디바운스 중인 검색은 지금 싣는다(지금 항목 replace → 시트 push) -- 열린 동안 뒤 화면 상태가 바뀌지 않아야 뒤로
       // (닫기)가 잃는 것이 없고, 닫고 돌아온 항목에도 그 검색이 남는다.
       const v = input.trim();
-      const base = v === pathQ ? params : withQ(params, v);
-      if (v !== pathQ) { wrote.current = v; setParams(base, { replace: true, state: location.state }); }
+      const base = v === searchQ ? params : withQ(params, v);
+      if (v !== searchQ) { wrote.current = v; setParams(base, { replace: true, state: location.state }); }
       const next = new URLSearchParams(base);
       next.set("storage", active); next.set("target", t);
       setParams(next, { state: { [SHEET_STATE]: true } });
@@ -203,7 +204,7 @@ export function UsageAnalysis() {
           </div>
         ) : (
           <StoragePanel key={activeTab.name} tab={activeTab} windowLimit={s.windowLimit}
-                        input={input} setInput={setInput} pathQ={pathQ}
+                        input={input} setInput={setInput} searchQ={searchQ}
                         sort={sort} order={order} onSort={sortBy} attr={attr} onAttrChange={setAttr}
                         activeTarget={activeTarget} sheet={sheet} storages={s.storagesQ.data}
                         purge={purge} progress={progress} setProgress={setProgress}

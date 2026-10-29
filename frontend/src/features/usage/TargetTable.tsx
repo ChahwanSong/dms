@@ -5,11 +5,18 @@ import { HelpTip } from "../../components/ui/HelpTip";
 import type { ScanTargetRow } from "../../lib/types";
 import { agoText, ageDays, kstStampOrDash } from "../../lib/datetime";
 import type { UsageSort } from "./useUsage";
+import { Highlight } from "../../components/ui/Highlight";
+import { TERMS } from "../k8s/k8sTerms";
 import { ATIME_READ_RULE, HOT_AGE_MAX_DAYS, hotRatio, humanBytes, usagePvOf } from "./usageStats";
-import { PvLine } from "./UsageParts";
+import { PvName } from "./UsageParts";
 
 // 한 스토리지의 타깃 표(2026-10-20 UsageAnalysis 에서 분리). 6열 -- 「스토리지」 열과 행의 「미등록」 배지는 없앴다: 스토리지
 // select·경고 띠가 그 정보를 말한다(옛 화면은 모든 행에 같은 스토리지 이름을 되풀이했다). 정렬은 URL(sort·order)이다.
+// PV 를 담는 스토리지는 7열(2026-10-29 사용자 요청 「테이블에 경로 이름뿐 아니라 pv 이름도 표시」): 「경로」 바로 다음 「PV 이름」 열
+// (PvName -- 예전 경로 칸 둘째 줄을 열로 옮겼다, 둘 다 두지 않는다). 정렬 열이 아니다(서버 정렬 키가 없다 -- 한 경로에 정체가 여럿일 수
+// 있다). PV 안 대상이 없는 스토리지(filesystem·미등록)엔 열이 없다(빈 열·「PV 밖」만 되풀이하는 열을 두지 않는다).
+// 검색 강조(2026-10-29): 검색 토큰(searchTokens -- 서버와 같은 토큰)에 맞은 글자를 경로·PV 이름 양쪽에서 <mark>(Highlight). 버튼
+// 이름(=경로)·말줄임은 그대로다(mark 는 글자를 바꾸지 않는다).
 //
 // 행 = 상세 시트 열기(2026-10-29 -- 예전의 행 아래 colSpan 펼침 행 대신 오른쪽 시트 TargetSheet). 경로 버튼이 키보드 자리이고
 // 마우스는 행 아무 곳이나 같다(CompareRow 관용 -- 버튼 클릭은 행으로 올라가 두 번 열지 않게 멈춘다). 시트가 연 행은 bg-infobg.
@@ -87,16 +94,19 @@ function useScrolledEdge() {
   return { ref, scrolled };
 }
 
-// PV 표시(2026-10-29): pvLine = 이 탭이 PV 를 담는가(필터 선택지의 PV 안 대상 수 > 0 -- filesystem·미등록 탭은 둘째 줄이 없다),
-// multiCluster = 탭의 클러스터가 둘 이상(PV 표기 끝에 클러스터), requesterFiltered = 요청자 필터가 켜졌다(상세가 「이력은 전체」라고
-// 말한다).
-export interface PvDisplay { pvLine: boolean; multiCluster: boolean; requesterFiltered: boolean }
-export const NO_PV_DISPLAY: PvDisplay = { pvLine: false, multiCluster: false, requesterFiltered: false };
+// PV 표시(2026-10-29): pvColumn = 이 탭이 PV 를 담는가(필터 선택지의 PV 안 대상 수 > 0 이거나 받은 행에 PV 안이 있다 -- 아니면
+// 「PV 이름」 열이 없고 상세 시트 머리의 PV 소속도 없다), multiCluster = 탭의 클러스터가 둘 이상(PV 표기 끝에 클러스터),
+// requesterFiltered = 요청자 필터가 켜졌다(상세가 「이력은 전체」라고 말한다).
+export interface PvDisplay { pvColumn: boolean; multiCluster: boolean; requesterFiltered: boolean }
+export const NO_PV_DISPLAY: PvDisplay = { pvColumn: false, multiCluster: false, requesterFiltered: false };
 
-export function TargetTable({ rows, activeTarget, onOpen, buttonRefs, sort, order, onSort, now, pvDisplay = NO_PV_DISPLAY }: {
+export function TargetTable({ rows, activeTarget, onOpen, buttonRefs, sort, order, onSort, now, pvDisplay = NO_PV_DISPLAY,
+                              highlight = [] }: {
   rows: ScanTargetRow[]; activeTarget: string | null; onOpen: (target: string) => void;
   buttonRefs?: React.MutableRefObject<Map<string, HTMLButtonElement>>;
   sort: UsageSort; order: "desc" | "asc"; onSort: (c: UsageSort) => void; now: number; pvDisplay?: PvDisplay;
+  // 강조할 검색 토큰 -- 이 행들을 건 검색의 것(자리표시 동안엔 이전 검색, StoragePanel).
+  highlight?: readonly string[];
 }) {
   const wrap = useScrolledEdge();
   // 고정 경로 칸의 오른쪽 그늘은 표를 옆으로 밀었을 때만 -- 넘치지 않는 넓은 화면에선 칸 사이에 선이 없다.
@@ -105,6 +115,7 @@ export function TargetTable({ rows, activeTarget, onOpen, buttonRefs, sort, orde
     <Table framed wrapRef={wrap.ref}>
       <thead><tr>
         <th className={`${TH} sticky left-0 bg-surface pl-2 ${stickyEdge}`}>경로</th>
+        {pvDisplay.pvColumn && <th className={TH}>{TERMS.pvc}</th>}
         {/* 2026-10-02 목록 컬럼: 최신 성공 scan 기준(서버 latest). 모름은 "—"(null≠0). 2026-10-19: 머리글이 정렬
             버튼(서버 정렬 -- 받은 100개만 정렬하지 않는다). */}
         <SortHeader col="bytes" label="실 사용량" sort={sort} order={order} onSort={onSort} />
@@ -130,7 +141,6 @@ export function TargetTable({ rows, activeTarget, onOpen, buttonRefs, sort, orde
           const age = ageDays(r.last_scan_at, now);
           // 고정 칸 바탕은 행 바탕과 같이 바뀐다(불투명 -- 위 머리 주석). 행 hover 는 group 으로 고정 칸까지.
           const bg = active ? "bg-infobg" : "bg-surface group-hover:bg-panel";
-          const pv = pvDisplay.pvLine ? usagePvOf(r.pv) : null;
           return (
             <tr key={r.target} className={`group cursor-pointer border-t border-line ${active ? "bg-infobg" : "hover:bg-panel"}`}
                 onClick={() => onOpen(r.target)}>
@@ -138,23 +148,25 @@ export function TargetTable({ rows, activeTarget, onOpen, buttonRefs, sort, orde
                   알린다. 경로는 한 줄(whitespace-nowrap, 2026-10-12 -- 좁은 폭에서 하이픈마다 쪼개졌다, e2e E10 L4)이고, 좁은
                   폭에선 칸 상한까지만 보이고 말줄임(전체는 title·버튼 이름·시트 제목에). */}
               <td className={`sticky left-0 py-2 pl-2 pr-3 lg:w-full lg:max-w-0 ${bg} ${stickyEdge}`}>
-                <button type="button" aria-haspopup="dialog" title={r.target}
+                {/* aria-label = 경로 그대로(2026-10-29): 검색 강조(<mark>)가 글자를 조각내도 버튼 이름은 경로 한 덩어리다 -- 낭독기가
+                    「강조」를 이름에 섞어 읽지 않게, 이름을 셈하는 쪽이 조각 사이에 공백을 넣어도(jsdom) 같은 이름이게. */}
+                <button type="button" aria-haspopup="dialog" title={r.target} aria-label={r.target}
                         // 지운 행의 버튼은 지도에 남을 수 있다 -- 쓰는 쪽(StoragePanel)이 isConnected 로 거른다.
                         ref={(el) => { if (el !== null) buttonRefs?.current.set(r.target, el); }}
                         className={`inline-flex max-w-[11rem] items-center whitespace-nowrap rounded text-left
                                     text-accent hover:underline focus-visible:outline-none focus-visible:ring-2
                                     focus-visible:ring-accent sm:max-w-[22rem] lg:max-w-full ${active ? "font-medium" : ""}`}
                         onClick={(e) => { e.stopPropagation(); onOpen(r.target); }}>
-                  <span className="min-w-0 truncate">{r.target}</span>
+                  <span className="min-w-0 truncate"><Highlight text={r.target} tokens={highlight} /></span>
                 </button>
-                {/* PV 소속 둘째 줄(2026-10-29): 버튼 밖 -- 버튼 이름(=경로)·한 줄 불변식(e2e L4)을 바꾸지 않는다. 버튼과 같은 폭
-                    상한·말줄임이라 경로 글자 아래에 선다. */}
-                {pv !== null && (
-                  <div className="max-w-[11rem] truncate text-xs text-muted sm:max-w-[22rem] lg:max-w-full">
-                    <PvLine pv={pv} multiCluster={pvDisplay.multiCluster} />
-                  </div>
-                )}
               </td>
+              {/* PV 이름(2026-10-29): 칸 상한·말줄임은 PvName 이 진다(숫자 칸처럼 줄지 않는 열이 아니라 긴 PV 이름이 표를 밀지
+                  않게). 쌓임 맥락을 만들지 않는다(위 머리 주석 -- 고정 경로 칸 위로 올라온다). */}
+              {pvDisplay.pvColumn && (
+                <td className="px-3 py-2">
+                  <PvName pv={usagePvOf(r.pv)} multiCluster={pvDisplay.multiCluster} tokens={highlight} />
+                </td>
+              )}
               <td className="whitespace-nowrap px-3 text-right tabular-nums"
                   title={typeof p?.total_bytes === "number"
                     ? `${p.total_bytes.toLocaleString("ko-KR")} B` : undefined}>

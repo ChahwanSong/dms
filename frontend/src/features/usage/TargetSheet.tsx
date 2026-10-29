@@ -84,7 +84,7 @@ export function TargetSheet({ storage, target, rows, listSettled, pvDisplay, onM
       {target !== null && (
         <TargetDetail key={target} storage={storage} target={target}
                       latest={row === null ? undefined : row.latest ?? null}
-                      pv={row !== null && pvDisplay.pvLine ? usagePvOf(row.pv) : null}
+                      pv={row !== null && pvDisplay.pvColumn ? usagePvOf(row.pv) : null}
                       multiCluster={pvDisplay.multiCluster} requesterFiltered={pvDisplay.requesterFiltered}
                       onFilter={onFilter} />
       )}

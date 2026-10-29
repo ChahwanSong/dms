@@ -5,7 +5,11 @@ import type { PurgeStorageHistoryResult, UnregisteredStorage, UsageAttrFilter, U
               UsageTargetsPage } from "../../lib/types";
 import { DELETE_REQUESTS_INVALIDATES } from "../jobs/useJobs";
 
-// 타깃 필터(2026-10-02): storage = 스토리지 정확히 일치, path = 경로 부분 문자열 -- 둘이 함께 걸린다.
+// 타깃 필터(2026-10-02): storage = 스토리지 정확히 일치, q = 검색 -- 둘이 함께 걸린다. q(2026-10-29 사용자 요청 「경로로 검색할 뿐
+// 아니라 pv 이름도 검색 … 일부 단어만 포함해도」 -- 예전 path(경로 부분 문자열 하나)를 대신한다): 서버 search_tokens 의 토큰마다
+// 대소문자 무시 부분 일치, 토큰 사이 AND, 토큰마다 그 대상의 경로 또는 소속 PV 이름(PVC) 어느 쪽이든(작업 목록 검색과 같은 뜻).
+// PV 이름이 생길 수 있는 스토리지에선 서버가 PV 판정 창(최근 스캔 순) 안에서 거른다 -- 넘치면 matched_count 모름(StoragePanel 이
+// 말한다). 옛 path 파라미터는 서버에 남아 있지만(옛 탭 호환) 이 포탈은 보내지 않는다.
 // sort·order = 정렬 열과 방향(서버가 limit 전에 정렬 -- 화면이 받은 묶음만 뒤집거나 정렬하면 "최근 N개 안의 순위"가 된다).
 // sort(2026-10-19 사용자 요청 「실사용량, 파일수, hot비율 등을 오름/내림차순 정렬」): last_scan(최근 스캔, 기본)·scans(스캔
 // 횟수)·bytes(실 사용량)·files(파일 수)·hot(hot 비율) -- 서버 routes_usage.scan_targets·usage_metrics.
@@ -17,9 +21,9 @@ export type UsageSort = "last_scan" | "scans" | "bytes" | "files" | "hot";
 export const USAGE_SORTS: readonly UsageSort[] = ["last_scan", "scans", "bytes", "files", "hot"];
 // attr(2026-10-29 사용자 요청 「사용자·PV 이름·namespace 등으로 필터」): 클러스터·namespace·PV 이름(pvc)·StorageClass·권한 사용자·
 // 구분(scope)·요청자. 모두 **대상 단위**다(서버 routes_usage -- 한 경로의 scan 이력이 통째로 걸리거나 빠진다: 스캔 횟수·최근
-// scan·이력은 늘 그 경로의 전체 기록). 2026-10-29 부터 경로 검색(q)·정렬(sort·order)도 URL 에 실린다(UsageAnalysis).
+// scan·이력은 늘 그 경로의 전체 기록). 2026-10-29 부터 검색(q)·정렬(sort·order)도 URL 에 실린다(UsageAnalysis).
 export interface TargetFilter {
-  storage: string; path: string; order: "desc" | "asc"; sort: UsageSort; attr: UsageAttrFilter;
+  storage: string; q: string; order: "desc" | "asc"; sort: UsageSort; attr: UsageAttrFilter;
 }
 
 // 목록 한 번에 받는 행 수(서버 기본 100과 같다) -- 다 차면 화면이 「상위 N개 표시 · 전체 M개」라고 말한다.
@@ -61,7 +65,7 @@ export function attrKey(a: UsageAttrFilter): string {
 export function targetQuery(f: TargetFilter): string {
   const p = new URLSearchParams();
   p.set("storage", f.storage);
-  if (f.path) p.set("path", f.path);
+  if (f.q) p.set("q", f.q);
   p.set("order", f.order);
   p.set("sort", f.sort);
   appendAttr(p, f.attr);
@@ -93,13 +97,14 @@ async function getNew(url: string): Promise<unknown> {
   }
 }
 
-// 메아리 대조: 보낸 필터와 서버가 적용한 필터가 키마다 같아야 한다(메아리의 null·부재 = 그 필터 없음). path 는 목록·내보내기만
-// (합계는 경로 검색을 받지 않는다 -- 메아리에 없어도 된다). storage 는 메아리에 있으면 같아야 한다.
-function echoMatches(echo: unknown, storage: string, attr: UsageAttrFilter, path?: string): boolean {
+// 메아리 대조: 보낸 필터와 서버가 적용한 필터가 키마다 같아야 한다(메아리의 null·부재 = 그 필터 없음). q 는 목록·내보내기만
+// (합계는 검색을 받지 않는다 -- 메아리에 없어도 된다). storage 는 메아리에 있으면 같아야 한다. q 를 모르는 옛 서버는 검색을 조용히
+// 무시하고 메아리에 q 가 없다 -- 검색이 있으면 filter_mismatch(검색한 척한 전체 목록을 보이지 않는다, 2026-10-29).
+function echoMatches(echo: unknown, storage: string, attr: UsageAttrFilter, q?: string): boolean {
   if (!isObj(echo)) return false;
   const e = echo as UsageFiltersEcho;
   if (e.storage !== undefined && e.storage !== storage) return false;
-  if (path !== undefined && (e.path ?? "") !== path) return false;
+  if (q !== undefined && (e.q ?? "") !== q) return false;
   return ATTR_KEYS.every((k) => (e[k] ?? null) === (attr[k] ?? null));
 }
 
@@ -111,11 +116,11 @@ function echoMatches(echo: unknown, storage: string, attr: UsageAttrFilter, path
 export const useScanTargets = (f: TargetFilter) => {
   const ak = attrKey(f.attr);
   return useQuery({
-    queryKey: ["usage-targets", f.storage, f.path, f.order, f.sort, ak],
+    queryKey: ["usage-targets", f.storage, f.q, f.order, f.sort, ak],
     queryFn: async (): Promise<UsageTargetsPage> => {
       const body = await getNew(`/api/admin/usage/targets?${targetQuery(f)}&limit=${LIST_LIMIT}`);
       if (!isObj(body) || !Array.isArray(body.rows) || !isObj(body.filters)) throw new UsageContractError("unknown_api");
-      if (!echoMatches(body.filters, f.storage, f.attr, f.path)) throw new UsageContractError("filter_mismatch");
+      if (!echoMatches(body.filters, f.storage, f.attr, f.q)) throw new UsageContractError("filter_mismatch");
       const page = body as unknown as UsageTargetsPage;
       // 모르는 수는 null(모름 ≠ 0) -- 구형·부분 응답의 부재를 0 으로 접지 않는다.
       return { ...page, matched_count: typeof page.matched_count === "number" ? page.matched_count : null,
@@ -169,7 +174,7 @@ export const useUsageStorages = () =>
 // 1초 뒤 다시 불러 이어 읽게 하고(서버는 못 읽은 리포트를 잠시 기억해 다음 호출이 그 뒤를 연다), 진전이 없으면 멈춘다(같은
 // 실패를 1초마다 되풀이하지 않게). 오류 중엔 멈춘다 -- 그때 패널은 「읽는 중」이라 말하지 않는다(StorageTotals.reading).
 // 빈 이름도 이름이다(encodeURIComponent("") = "" -- 서버는 실린 storage 를 빈 값이라도 정확 일치로 본다).
-// 필터 합계(2026-10-29, attr 이 있을 때만): 키 끝에 필터 조각, URL 에 필터(경로 검색은 싣지 않는다 -- 합계는 경로 검색과 무관,
+// 필터 합계(2026-10-29, attr 이 있을 때만): 키 끝에 필터 조각, URL 에 필터(검색은 싣지 않는다 -- 합계는 검색과 무관,
 // 2026-10-21 규칙 유지). 필터가 없으면 키·URL 이 그 전과 같다(스토리지별 비교 표와 숫자 한 벌). 필터 합계는 서버 메아리(filters)가
 // 없거나 다르면 오류다(옛 서버가 필터를 무시하고 스토리지 전체 합계를 「필터 합계」로 보이지 않게).
 export const storageTotalsOptions = (storage: string, attr?: UsageAttrFilter) => {
@@ -211,9 +216,9 @@ export const useScanStorages = (enabled = true) =>
 export async function fetchUsageExport(f: TargetFilter): Promise<UsageExport> {
   const body = await getNew(`/api/admin/usage/targets/export?${targetQuery(f)}`);
   if (!isObj(body) || !Array.isArray(body.rows)) throw new UsageContractError("unknown_api");
-  if (!echoMatches(body.filters, f.storage, f.attr, f.path)) throw new UsageContractError("filter_mismatch");
+  if (!echoMatches(body.filters, f.storage, f.attr, f.q)) throw new UsageContractError("filter_mismatch");
   const out = body as unknown as UsageExport;
-  return { ...out, matched_count: typeof out.matched_count === "number" ? out.matched_count : null };
+  return { ...out, matched_count: typeof out.matched_count === "number" ? out.matched_count : null, capped: out.capped === true };
 }
 
 // 이력: 선택된 타깃에서만 나간다(enabled). 아티팩트 읽기(포인트당 최대 256KiB

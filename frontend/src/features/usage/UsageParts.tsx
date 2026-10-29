@@ -2,6 +2,7 @@ import { Link } from "react-router-dom";
 import { ExternalLink, HardDrive, Info } from "lucide-react";
 import { Card } from "../../components/ui/Card";
 import { HelpTip } from "../../components/ui/HelpTip";
+import { Highlight, containsToken } from "../../components/ui/Highlight";
 import type { ApiError } from "../../lib/api";
 import type { UsageAttrFilter, UsagePv, UsagePvVolume } from "../../lib/types";
 import type { useStorageTabs } from "./useActiveStorage";
@@ -55,9 +56,10 @@ export function Stat({ label, value, lowerBound = false, title }: {
 }
 
 // ---- PV 소속 표기(2026-10-29 사용자 요청 「사용자·PV 이름·namespace 등으로 필터」) ----
-// 표 경로 칸의 둘째 줄과 상세 시트 머리가 같은 문법이다: 「PV 이름 — namespace (StorageClass)」(서버 target_label·pvLocationText
-// 와 같은 순서). 라벨은 k8sTerms 에서만(화면 「PV 이름」 = PVC, 「볼륨」 = PV 객체). 소속은 서버가 **지금 인벤토리** 기준으로 정한다
-// (없으면 PV 주소 scan 기록) -- PVC 를 지우거나 매핑을 바꾸면 바뀐다.
+// 상세 시트 머리는 「PV 이름 — namespace (StorageClass)」(서버 target_label·pvLocationText 와 같은 순서), 표는 같은 값을 「PV 이름」
+// 열 두 줄로(PvName -- 2026-10-29 사용자 요청 「테이블에 경로 이름뿐 아니라 pv 이름도 표시」로 경로 칸 둘째 줄에서 열이 됐다). 라벨은
+// k8sTerms 에서만(화면 「PV 이름」 = PVC, 「볼륨」 = PV 객체). 소속은 서버가 **지금 인벤토리** 기준으로 정한다(없으면 PV 주소 scan
+// 기록) -- PVC 를 지우거나 매핑을 바꾸면 바뀐다.
 export const PV_RECORDED_TITLE = "지금 인벤토리에 없는 PV — 이 경로를 PV 주소로 scan 한 기록 기준";
 export const PV_OUTSIDE_TITLE = "지금 어떤 PV 루트에도 속하지 않는 경로(직접 경로 scan·PV 상위 디렉터리)";
 export const PV_UNKNOWN_TITLE = "PV 소속을 판정할 수 없음(미등록 스토리지·StorageClass 매핑 없음·동기화 전 클러스터)";
@@ -66,18 +68,42 @@ export function pvVolumeText(v: UsagePvVolume, multiCluster: boolean): string {
   return `${v.pvc} — ${nsLabel(v.namespace, v.storage_class)}${multiCluster ? ` · ${v.cluster}` : ""}`;
 }
 const volumeTitle = (v: UsagePvVolume) => `${TERMS.cluster} ${v.cluster} · ${TERMS.volume} ${v.volume ?? "—"}`;
-const pvTitle = (pv: UsagePv) => [...pv.volumes.map(volumeTitle), `PV 루트 ${pv.root ?? "—"}`].join("\n");
+// 표 칸의 title: 정체 전부를 줄마다 전체 표기로(칸은 말줄임·「외 n개」라 다 보이지 않는다 -- 클러스터는 늘 적는다) + PV 루트.
+const pvTitle = (pv: UsagePv) => [...pv.volumes.map((v) => `${pvVolumeText(v, true)} · ${TERMS.volume} ${v.volume ?? "—"}`),
+                                  `PV 루트 ${pv.root ?? "—"}`].join("\n");
 
-/** 표 경로 칸의 둘째 줄. 루트 충돌(한 루트를 PVC 여럿이 가짐)이면 첫째 + 「외 n개」, 전부는 상세에. */
-export function PvLine({ pv, multiCluster }: { pv: UsagePv; multiCluster: boolean }) {
-  if (pv.source === "outside") return <span title={PV_OUTSIDE_TITLE}>PV 밖</span>;
-  if (pv.source === "unknown") return <span className="italic" title={PV_UNKNOWN_TITLE}>PV 모름</span>;
-  const [first, ...rest] = pv.volumes;
+// 루트 충돌(한 루트를 PVC 여럿이 가짐)일 때 칸에 세울 정체: 검색 토큰에 가장 많이 맞는 PV 이름(같으면 서버 순서) -- 둘째 정체의
+// PV 이름으로 걸린 행이 강조 없는 첫째 이름만 보이면 「왜 걸렸는지」가 칸에서 사라진다. 검색이 없으면 첫째.
+function shownVolume(vs: UsagePvVolume[], tokens: readonly string[]): UsagePvVolume {
+  let best = vs[0], bestScore = 0;
+  for (const v of vs) {
+    const score = tokens.filter((t) => containsToken(v.pvc, t)).length;
+    if (score > bestScore) { best = v; bestScore = score; }
+  }
+  return best;
+}
+
+/** 표 「PV 이름」 열의 칸(2026-10-29). PV 안이면 윗줄 = PV 이름(본문 글자, 검색 토큰 강조) + 「외 n개」 + 「기록」 배지, 아랫줄 = 작게
+ *  「namespace (StorageClass)」(+ 클러스터가 여럿인 탭이면 「 · 클러스터」). PV 밖은 흐린 「PV 밖」, 판정 불가는 기울인 「모름」, 소속을
+ *  받지 못한 행(pv null -- 옛·부분 응답)은 「—」. 두 줄 다 칸 상한에서 말줄임(전체는 title·상세 시트) -- 배지·「외 n개」는 줄지 않는다. */
+export function PvName({ pv, multiCluster, tokens = [] }: {
+  pv: UsagePv | null; multiCluster: boolean; tokens?: readonly string[];
+}) {
+  if (pv === null) return <span className="text-muted">—</span>;
+  if (pv.source === "outside") return <span className="whitespace-nowrap text-muted" title={PV_OUTSIDE_TITLE}>PV 밖</span>;
+  if (pv.source === "unknown") return <span className="italic text-muted" title={PV_UNKNOWN_TITLE}>모름</span>;
+  const v = shownVolume(pv.volumes, tokens);
+  const rest = pv.volumes.length - 1;
   return (
-    <>
-      <span title={pvTitle(pv)}>{pvVolumeText(first, multiCluster)}{rest.length > 0 && ` 외 ${rest.length}개`}</span>
-      {pv.source === "recorded" && <>{" "}<Tag title={PV_RECORDED_TITLE}>기록</Tag></>}
-    </>
+    <div className="max-w-[10rem] sm:max-w-[14rem]" title={pvTitle(pv)}>
+      <div className="flex min-w-0 items-center gap-1 whitespace-nowrap">
+        <span className="min-w-0 truncate text-ink"><Highlight text={v.pvc} tokens={tokens} /></span>
+        {rest > 0 && <span className="shrink-0 text-xs text-muted">{`외 ${rest}개`}</span>}
+        {pv.source === "recorded" && <span className="shrink-0"><Tag title={PV_RECORDED_TITLE}>기록</Tag></span>}
+      </div>
+      <div className="truncate text-xs text-muted">
+        {`${nsLabel(v.namespace, v.storage_class)}${multiCluster ? ` · ${v.cluster}` : ""}`}</div>
+    </div>
   );
 }
 

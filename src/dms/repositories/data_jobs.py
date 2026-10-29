@@ -218,7 +218,8 @@ class DataJobsRepository:
     def scan_target_heads(self, *, q: "str | None" = None, storage: "str | None" = None,
                           path: "str | None" = None, order: str = "desc",
                           limit: "int | None" = 100, sort: str = "last_scan",
-                          requester: "str | None" = None, with_matched: bool = False) -> list[dict]:
+                          requester: "str | None" = None, with_matched: bool = False,
+                          tokens: "list[str] | None" = None) -> list[dict]:
         """성공 scan 이 있는 (storage, target) 목록 — **전 요청자 통합**(사용량
         분석, 2026-08-23 사용자 요청: "요청자에 관계없이 모든 작업"). 필터는
         _scan_target_where. 정렬은 최근 스캔 기준 — 기본 내림차순(화면의 기본 질문이
@@ -245,9 +246,16 @@ class DataJobsRepository:
         이 필터에서만 빠진다 -- 요청자를 모르는 잡은 어느 요청자의 것도 아니다. 서브쿼리는 비상관이라 한 번 물어지고
         idx_requests_requester 를 탄다(열은 r. 접두 -- requests 와 data_jobs 의 열 이름이 겹친다).
         with_matched: 행마다 matched_count = 필터에 맞는 대상 전체 수(COUNT(*) OVER () -- WHERE 뒤·LIMIT 앞이라 limit 과 무관).
-        두 인자가 기본값이면 문장이 예전과 글자 하나 다르지 않다(계획 테스트·tests/test_usage_equivalence.py)."""
+        tokens(2026-10-29 사용량 검색 -- text_search.search_tokens 의 결과): 토큰마다 `lower(target) LIKE lower(:qtN) ESCAPE '\\'`
+        를 AND 로(작업 목록 검색과 같은 뜻 -- 부분 일치·대소문자 무시·와일드카드 리터럴, 낮추기는 컬럼과 패턴 양쪽 같은 DB lower()).
+        target 에만 걸리므로 안쪽 WHERE 에 둬도 파티션이 잘리지 않는다(path 와 같다). 경로만 보는 검색이다 -- PV 이름까지 보는 검색은
+        라우트가 판정 창에서 한다(routes_usage._select_heads). 공용 술어(_scan_target_where)는 바꾸지 않는다(batches·동일성 참조가 쓴다).
+        세 인자가 기본값(빈 tokens 포함)이면 문장이 예전과 글자 하나 다르지 않다(계획 테스트·tests/test_usage_equivalence.py)."""
         params: dict = {}
         where = self._scan_target_where(params, q=q, storage=storage, path=path)
+        for i, tok in enumerate(tokens or ()):
+            where += rf" AND lower(target) LIKE lower(:qt{i}) ESCAPE '\'"
+            params[f"qt{i}"] = contains_pattern(tok)
         direction = "ASC" if order == "asc" else "DESC"
         order_by = (f"scan_count {direction}, last_scan_at DESC" if sort == "scans"
                     else f"last_scan_at {direction}")

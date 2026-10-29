@@ -21,6 +21,11 @@ storage_class)에 속하는가. data_jobs 에는 PV 칸이 없고(스키마 무�
 필터 결합(matches): PV 축(cluster·namespace·pvc·storage_class·user)은 **같은 정체 하나**가 모두 만족해야 한다(루트 충돌로 정체가
 여럿이면 축을 정체마다 따로 맞춰 섞지 않는다). PV 축이 있으면 구분은 pv(inventory·recorded)로 본다 -- outside·unknown 과 함께면
 0건(정상값).
+
+검색(search_matches, 2026-10-29 사용자 요청: 「경로로 검색할 뿐 아니라, pv 이름도 검색할 수 있게 하고 일부 단어만 포함해도」): 토큰
+(text_search.search_tokens -- 작업 목록 검색과 같은 뜻) **모두**가 그 대상의 경로 또는 소속 PV 정체 하나의 PV 이름(= PVC 이름 --
+inventory·recorded 모두)에 부분 일치. 토큰마다 어느 쪽이든 된다. PV 이름이 생길 수 없는 스토리지(may_attribute_pv 가 False)는 이
+판정이 경로 부분 일치와 같아 라우트가 SQL 로 건다(routes_usage._select_heads).
 """
 from dataclasses import dataclass, field
 from typing import Mapping
@@ -131,6 +136,18 @@ def collect(repos, storage, heads) -> Inputs:
     return Inputs(index=index, recorded=recorded, users=users, rest=rest)
 
 
+def may_attribute_pv(repos, storage) -> bool:
+    """이 스토리지의 대상이 PV 소속(= PV 이름)을 가질 수 있나 -- 사용량 검색(q)을 판정 창에서 PV 이름까지 볼지, SQL 로 경로만 정확히
+    걸지 가르는 문턱(routes_usage._select_heads). collect 의 두 원천 그대로다: PV 를 담는 종류의 등록 스토리지(인벤토리)이거나, PV 주소
+    scan 기록이 있다. 기록 소속은 종류·등록과 무관하게 생긴다(지운 스토리지·종류를 filesystem 으로 바꾼 스토리지의 옛 PV 주소 scan --
+    collect 는 종류를 보지 않고 기록을 묻는다) -- 그래서 「filesystem·미등록 = PV 이름 없음」으로 접지 않는다(접으면 표에 보이는 기록
+    PV 이름으로 검색해도 그 행이 안 걸린다). False 이면 모든 판정의 volumes 가 비어 search_matches 가 경로 일치와 같다."""
+    row = repos.storages.get(storage)
+    if row is not None and storage_kind(row) in PV_CAPABLE_KINDS:
+        return True
+    return repos.data_jobs.has_recorded_pv_scans(storage)
+
+
 def _attr(source, root, idents, users_by_namespace) -> dict:
     return {"source": source, "root": root,
             "volumes": [{"cluster": c, "namespace": ns, "pvc": p, "volume": v, "storage_class": sc}
@@ -180,6 +197,20 @@ def matches(attr: dict, flt: PvFilter, users_by_namespace) -> bool:
     if flt.scope not in (None, "pv") or source not in PV_SOURCES:
         return False
     return any(_volume_matches(v, flt, users_by_namespace) for v in attr["volumes"])
+
+
+def search_matches(target, attr: dict, tokens) -> bool:
+    """검색 토큰(search_tokens 의 결과 -- 빈 목록 = 검색 없음 = True)이 이 대상에 걸리나(모듈 docstring 「검색」). 토큰마다 대상
+    경로 또는 attr 의 정체 중 하나의 pvc 에 부분 일치해야 하고(AND), 토큰마다 어느 쪽이든 된다 -- 「models run」 = PV 이름 models 이고
+    경로에 run. 대소문자 무시는 대상·토큰 **양쪽 같은** str.lower() 다(같은 검색의 SQL 경로 -- data_jobs.scan_target_heads(tokens=) --
+    는 양쪽 DB lower() 라 비 ASCII 대소문자는 방언에 따라 SQL 쪽이 덜 맞을 수 있다, text_search 모듈 docstring). 와일드카드는 없다
+    ('%'·'_' 는 글자 그대로 -- SQL 쪽은 contains_pattern 의 이스케이프로 같은 뜻). 문자열이 아닌 경로·pvc(DB 가 신뢰 경계)는 어떤
+    토큰에도 맞지 않는다."""
+    if not tokens:
+        return True
+    hay = [target.lower()] if isinstance(target, str) else []
+    hay += [v["pvc"].lower() for v in attr["volumes"] if isinstance(v.get("pvc"), str)]
+    return all(any(t in h for h in hay) for t in (tok.lower() for tok in tokens))
 
 
 def ranked(counts: dict, row, cap: int = FACET_LIST_CAP) -> tuple:

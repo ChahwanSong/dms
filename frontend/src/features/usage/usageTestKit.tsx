@@ -108,10 +108,18 @@ export const emptyTotals = (name: string): UsageStorageTotals => totalsOf(name, 
 export type Row = { target: string; pv?: UsagePv; _requesters?: string[] } & Record<string, unknown>;
 export const ATTR = ["cluster", "namespace", "pvc", "storage_class", "user", "scope", "requester"] as const;
 export const PV_AXES = ["cluster", "namespace", "pvc", "storage_class", "user"] as const;
-export const echoOf = (u: URL, withPath = true): UsageFiltersEcho => ({
-  storage: u.searchParams.get("storage"), ...(withPath ? { path: u.searchParams.get("path") } : {}),
+// 메아리: 목록·내보내기는 검색(q -- 원문)과 옛 path 를 함께 싣는다(합계는 둘 다 받지 않는다 -- withQ false).
+export const echoOf = (u: URL, withQ = true): UsageFiltersEcho => ({
+  storage: u.searchParams.get("storage"),
+  ...(withQ ? { path: u.searchParams.get("path"), q: u.searchParams.get("q") } : {}),
   ...Object.fromEntries(ATTR.map((k) => [k, u.searchParams.get(k)])) });
 export const hasAttrParams = (u: URL) => ATTR.some((k) => u.searchParams.has(k));
+// 검색(q) 흉내(서버 usage_attribution.search_matches): 공백으로 나눈 토큰마다 대소문자 무시 부분 일치, 토큰 사이 AND, 토큰마다 경로
+// 또는 소속 PV 이름(PVC -- inventory·recorded) 어느 쪽이든.
+export function searchHit(r: Row, q: string): boolean {
+  const hay = [r.target, ...(r.pv?.volumes ?? []).map((v) => v.pvc)].map((s) => s.toLowerCase());
+  return q.split(/\s+/).filter(Boolean).every((t) => hay.some((h) => h.includes(t.toLowerCase())));
+}
 export function serverFilter(rows: Row[], u: URL): Row[] {
   const g = (k: string) => u.searchParams.get(k);
   const axes = PV_AXES.filter((k) => g(k) !== null);
@@ -189,7 +197,7 @@ export interface Setup {
   onTargets?: (u: URL) => void;
   slowTargets?: string;              // 이 스토리지의 목록 응답을 늦춘다
   slowWhen?: (u: URL) => boolean;    // 이 조건의 목록 응답을 늦춘다(자리표시 검사)
-  filterPath?: boolean;              // path 파라미터로 행을 거른다(부분 문자열)
+  filterQ?: boolean;                 // q 파라미터로 행을 거른다(searchHit -- 서버 검색 흉내)
   // 봉투의 matched_count(기본 = 거른 행 수) · window_truncated · 메아리 덮어쓰기 · 봉투 대신 줄 응답(배포 틈)
   matched?: number | null | ((u: URL, rows: Row[]) => number | null);
   windowTruncated?: boolean;
@@ -234,8 +242,8 @@ export function setup(o: Setup = {}) {
       if (o.slowTargets === s || o.slowWhen?.(u)) await delay("infinite");
       if (o.targetsRaw) return o.targetsRaw();
       let rows = ((o.targets ?? { "cephfs-dms": TARGETS })[s] ?? []) as Row[];
-      const q = u.searchParams.get("path");
-      if (o.filterPath && q) rows = rows.filter((r) => r.target.includes(q));
+      const q = u.searchParams.get("q");
+      if (o.filterQ && q) rows = rows.filter((r) => searchHit(r, q));
       rows = serverFilter(rows, u);
       const matched = typeof o.matched === "function" ? o.matched(u, rows) : o.matched !== undefined ? o.matched : rows.length;
       return HttpResponse.json({
@@ -271,7 +279,7 @@ export function setup(o: Setup = {}) {
       if (t === "html") {
         return new HttpResponse("<!doctype html><html></html>", { status: 200, headers: { "content-type": "text/html" } });
       }
-      // 필터 합계(필터 파라미터가 있을 때)는 메아리를 싣는다(경로 검색은 받지 않는다 -- 메아리에도 없다).
+      // 필터 합계(필터 파라미터가 있을 때)는 메아리를 싣는다(검색은 받지 않는다 -- 메아리에도 없다).
       return HttpResponse.json(hasAttrParams(u)
         ? { ...t, filesystem: null, filters: o.totalsEcho ? o.totalsEcho(u) : echoOf(u, false) } : t);
     }),

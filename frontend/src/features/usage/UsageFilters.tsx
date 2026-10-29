@@ -5,7 +5,7 @@ import { TERMS, nsLabel } from "../k8s/k8sTerms";
 import { SELECT_FIELD } from "../k8s/parts";
 import { SCOPES, cleanAttr, hasAttr, hasPvAxis } from "./useUsage";
 
-// 사용량 필터 줄(2026-10-29 사용자 요청 「사용자·PV 이름·namespace 등으로 필터」). 패널 툴바(경로 검색 · 건수 · CSV) 아래 둘째 줄.
+// 사용량 필터 줄(2026-10-29 사용자 요청 「사용자·PV 이름·namespace 등으로 필터」). 패널 툴바(검색 · 건수 · CSV) 아래 둘째 줄.
 // 순서: 클러스터 → namespace → PV 이름 → StorageClass → 구분 → 권한 사용자 → 요청자 → 「필터 지우기」. 네이티브 select(첫 옵션
 // 「X 전체」 -- PV 탐색 화면과 같은 관용·같은 SELECT_FIELD), 라벨은 k8sTerms 에서만(화면 「PV 이름」 = PVC).
 //

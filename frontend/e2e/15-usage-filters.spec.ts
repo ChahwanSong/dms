@@ -7,7 +7,8 @@ import { assertLayoutSane } from "./helpers/layout";
 // E15 — 사용량 분석 필터(2026-10-29 사용자 요청 「사용자·PV 이름·namespace 등으로 필터」). 단위 테스트(msw)가 못 보는 것: 실 서버의
 // /targets·/facets·/targets/export 가 실 scan 기록으로 요청자 필터를 **대상 단위**로 걸고, 화면이 그 선택을 URL 에 실어 새로고침에도
 // 같은 결과를 그리며, CSV 가 같은 필터로 「-filtered」 파일 이름을 쓰는가. 필터 줄이 보이는 채로 375 레이아웃 불변식(L1~L4). 하위
-// 탭 왕복(2026-10-29)에 필터가 남는가(경로별 마지막 쿼리 복원).
+// 탭 왕복(2026-10-29)에 필터가 남는가(경로별 마지막 쿼리 복원). 검색칸(2026-10-29 경로·PV 이름)이 실 서버에서 여러 단어 AND·대소문자
+// 무시로 걸리고 맞은 글자를 강조하는가.
 // 하네스엔 k8s 클러스터가 없어 PV 축(클러스터·namespace·PV 이름 …)은 고를 수 없다 -- 요청자 축만 실데이터로 잰다(PV 축의 필터 줄
 // 375 는 E3(03-layout)의 딥링크가 잰다). 요청자 축의 선택지가 둘 이상이어야 select 가 보이므로, 두 번째 특권 관리자(계정 + 자격 부여
 // -- scan 은 특권 운영자만 낸다, E11 과 같은 경로)가 scan 하나를 낸다.
@@ -98,7 +99,8 @@ test.describe("E15 — 사용량 분석 필터", () => {
     // filesystem 스토리지라 PV 밖(직접 경로)
     expect(lines[0].split(",")[cols.indexOf("k8s_source")]).toBe("outside");
 
-    // 6) 375: 필터 줄이 보이는 채로 레이아웃 불변식(표 th 6 + 1행 td 6)
+    // 6) 375: 필터 줄이 보이는 채로 레이아웃 불변식(표 th 6 + 1행 td 6 -- 시드 스토리지는 filesystem 이라 「PV 이름」 열이 없다,
+    //    2026-10-29)
     await page.setViewportSize({ width: 375, height: 667 });
     await expect(filters).toBeVisible();
     await assertLayoutSane(page, { sidebarFixed: false, minTableCells: 12 });
@@ -118,5 +120,21 @@ test.describe("E15 — 사용량 분석 필터", () => {
     await expect(page).not.toHaveURL(/requester=/);
     await expect(rowsOf(page, MINE)).toHaveCount(1);
     await expect(rowsOf(page, THEIRS)).toHaveCount(1);
+
+    // 9) 검색(2026-10-29 사용자 요청 「경로로 검색할 뿐 아니라 pv 이름도 … 일부 단어만 포함해도」): 실 서버의 q 가 토큰마다 대소문자
+    //    무시 부분 일치·토큰 사이 AND 로 걸고(작업 목록 검색과 같은 뜻), 맞은 글자가 경로 칸에서 <mark> 로 강조된다. 시드 스토리지는
+    //    filesystem 이라 서버는 SQL 경로(정확)로 걸고 「PV 이름」 열은 없다. 버튼 이름은 강조와 무관하게 경로 그대로다.
+    const search = panel.getByRole("searchbox", { name: "경로·PV 이름 검색" });
+    await search.fill(`ADMIN ${RUN.toUpperCase()}`);
+    await expect(page).toHaveURL(/[?&]q=ADMIN(\+|%20)/);
+    await expect(rowsOf(page, THEIRS)).toHaveCount(0);
+    await expect(rowsOf(page, MINE)).toHaveCount(1);
+    await expect(rowsOf(page, MINE).locator("mark")).toHaveText(["admin", RUN]);
+    await expect(panel.getByRole("button", { name: MINE, exact: true })).toBeVisible();
+    await expect(panel.getByRole("columnheader", { name: "PV 이름" })).toHaveCount(0);
+    await search.fill("");
+    await expect(page).not.toHaveURL(/[?&]q=/);
+    await expect(rowsOf(page, THEIRS)).toHaveCount(1);
+    await expect(rowsOf(page, MINE).locator("mark")).toHaveCount(0);
   });
 });

@@ -155,7 +155,7 @@ function k8sCells(r: UsageExportRow): Record<string, CsvCell> {
 // 넣는다 -- 여러 스토리지 파일을 한 폴더에 받아도 구별된다(파일 안의 storage_name 열은 그대로 -- 합칠 때 쓴다. 단 요약 키·
 // 구간 열은 파일마다의 합집합이라 이어 붙이면 열이 어긋날 수 있다). 등록 이름은 [a-z0-9-] 이지만 미등록 옛 이름은 그 규칙을
 // 지킨다는 보장이 없다 -- [A-Za-z0-9._-] 밖의 글자는 _ 로, 길이는 64자까지. 필터(클러스터·요청자 등, 2026-10-29)를 건
-// 내보내기는 스토리지 뒤에 「-filtered」 -- 같은 폴더의 전체 파일과 섞여도 부분 집합임이 이름에서 보인다(경로 검색만 건 것은 그
+// 내보내기는 스토리지 뒤에 「-filtered」 -- 같은 폴더의 전체 파일과 섞여도 부분 집합임이 이름에서 보인다(검색만 건 것은 그
 // 전 이름 그대로).
 export function usageCsvFilename(nowMs: number, storage: string, filtered = false): string {
   const s = kstStampEpoch(Math.floor(nowMs / 1000));          // "YYYY-MM-DD HH:MM:SS KST"

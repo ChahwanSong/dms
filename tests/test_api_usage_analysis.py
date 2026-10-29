@@ -1313,7 +1313,7 @@ def test_targets_envelope_echoes_filters_and_carries_pv_on_every_row(uw):
     body = _page(uw)
     assert list(body) == ["rows", "matched_count", "window_limit", "window_truncated", "filters"]
     assert (body["matched_count"], body["window_limit"], body["window_truncated"]) == (8, 10000, False)
-    assert body["filters"] == {"storage": NFS, "path": None, **_NO_FILTERS}
+    assert body["filters"] == {"storage": NFS, "path": None, "q": None, **_NO_FILTERS}
     rows = {r["target"]: r for r in body["rows"]}
     assert [r["target"] for r in body["rows"]] == NFS_DESC
     assert list(body["rows"][0]) == ["storage_name", "target", "scan_count", "first_scan_at", "last_scan_at", "latest",
@@ -1364,7 +1364,7 @@ def test_each_filter_selects_whole_targets(uw):
     assert get(GPFS, scope="outside") == ["plain/dir"]                        # both 스토리지의 PV 밖
     assert get(CEPH, scope="outside") == ["proj/y", "proj/x"] and get(CEPH, scope="pv") == []
     body = _page(uw, namespace="team-a", requester="mason", path="proof")
-    assert body["filters"] == {"storage": NFS, "path": "proof", **_NO_FILTERS, "namespace": "team-a",
+    assert body["filters"] == {"storage": NFS, "path": "proof", "q": None, **_NO_FILTERS, "namespace": "team-a",
                                "requester": "mason"}
 
 
@@ -1377,7 +1377,7 @@ def test_requester_filter_is_per_target_and_rows_keep_their_latest(uw):
     assert _page(uw, ONEFS, requester="junwoo.song")["rows"] == [row]
     assert _page(uw, ONEFS, requester="nobody") == {
         "rows": [], "matched_count": 0, "window_limit": 10000, "window_truncated": False,
-        "filters": {"storage": ONEFS, "path": None, **_NO_FILTERS, "requester": "nobody"}}
+        "filters": {"storage": ONEFS, "path": None, "q": None, **_NO_FILTERS, "requester": "nobody"}}
 
 
 def test_unsynced_cluster_makes_the_rest_unknown_and_deleted_clusters_fall_back_to_records(uw):
@@ -1584,7 +1584,7 @@ def _drain_targets_export(client, **params):
     """새 /targets/export 를 직접 부른다(_drain_export 와 같은 길) -- 인자는 전부 명시한다(Query 기본값 객체가 새지 않게)."""
     import asyncio
     from dms.api import routes_usage
-    args = {"storage": NFS, "path": None, "order": "desc", "sort": "last_scan", "flt": _flt(), **params}
+    args = {"storage": NFS, "path": None, "q": None, "order": "desc", "sort": "last_scan", "flt": _flt(), **params}
     resp = routes_usage.export_targets(SimpleNamespace(app=client.app), **args)
     assert resp.media_type == "application/json"
 
@@ -1606,10 +1606,10 @@ def test_targets_export_streams_with_filters_echo_and_pv_last(uw, monkeypatch, s
     parts, err = _drain_targets_export(uw.client, sort=sort)
     assert err is None and len(parts) == 1 + 4 + 1                     # 머리 + 묶음 4 + 꼬리(count)
     assert parts[0].startswith(b'{"generated_at":') and parts[0].endswith(b'"rows":[')
-    assert b'"truncated":false,"matched_count":8,"filters":{"storage":"k8s-pv-nfs","path":null,' in parts[0]
+    assert b'"truncated":false,"capped":false,"matched_count":8,"filters":{"storage":"k8s-pv-nfs","path":null,' in parts[0]
     assert parts[-1] == b'],"count":8}'
     body = json.loads(b"".join(parts))
-    assert list(body) == ["generated_at", "truncated", "matched_count", "filters", "rows", "count"]
+    assert list(body) == ["generated_at", "truncated", "capped", "matched_count", "filters", "rows", "count"]
     assert all(list(r)[-3:] == ["latest", "previous", "pv"] for r in body["rows"])
     by = {r["target"]: r for r in body["rows"]}
     assert by["team-d/old/run"]["pv"]["source"] == "recorded" and by["c2/lab-y"]["pv"]["source"] == "outside"
@@ -1633,14 +1633,14 @@ def test_targets_export_truncation_is_decided_before_the_first_byte(uw, monkeypa
     monkeypatch.setattr(routes_usage, "_WINDOW_LIMIT", 3)
     # PV 경로: 판정 창이 넘쳤다 -- 맞는 수는 모름
     parts, err = _drain_targets_export(uw.client, flt=_flt(scope="pv"))
-    assert err is None and b'"truncated":true,"matched_count":null,' in parts[0]
+    assert err is None and b'"truncated":true,"capped":false,"matched_count":null,' in parts[0]
     assert json.loads(b"".join(parts))["count"] == 1                    # 창(최근 3) 안의 PV 대상은 proof-ov 하나
     # SQL 경로(요청자): 맞는 대상이 상한을 넘었다 -- 맞는 수는 정확하다
     parts, err = _drain_targets_export(uw.client, flt=_flt(requester="mason"))
-    assert b'"truncated":true,"matched_count":6,' in parts[0] and parts[-1] == b'],"count":3}'
+    assert b'"truncated":true,"capped":true,"matched_count":6,' in parts[0] and parts[-1] == b'],"count":3}'
     monkeypatch.setattr(routes_usage, "_WINDOW_LIMIT", 6)
     parts, err = _drain_targets_export(uw.client, flt=_flt(requester="mason"))
-    assert b'"truncated":false,"matched_count":6,' in parts[0]
+    assert b'"truncated":false,"capped":false,"matched_count":6,' in parts[0]
 
 
 def test_targets_export_failure_mid_stream_is_broken_json(uw, monkeypatch):
@@ -1789,3 +1789,248 @@ def test_new_endpoints_keep_every_id_list_within_the_real_chunk(tmp_path, monkey
     assert f["scope"]["recorded"] == 1100 and f["requesters"] == [{"requester_id": "alice", "target_count": 1100}]
     assert client.get(TOTALS, params={"storage": "s1", "scope": "pv"}).json()["target_count"] == 1100
     assert max(widest) == 500
+
+
+# ---- 2026-10-29: 검색(q) -- 경로·PV 이름(PVC 이름), 토큰 AND·부분 일치·대소문자 무시(작업 목록 검색과 같은 뜻) ----
+# 사용자 요청: 「경로로 검색할 뿐 아니라, pv 이름도 검색할 수 있게 하고 일부 단어만 포함해도 뜨도록」. 위 테스트베드 모양 세계에서
+# onefs·gpfs 대상의 경로엔 PVC 이름(kraken-kv-cache·models)이 없다 -- PV 이름으로만 걸리는 자리다.
+
+def test_q_matches_each_token_in_the_path_or_a_pv_name(uw):
+    get = lambda storage=NFS, **p: _names(uw, storage, **p)   # noqa: E731
+    assert get(q="proof") == [t for t in NFS_DESC if "proof" in t]                     # 경로만
+    assert get(ONEFS, q="kraken") == [ONEFS_ROOT + "/dms-proof"]                        # PV 이름만(경로에 없다)
+    assert get(GPFS, q="models") == [GPFS_B + "/run", GPFS_A + "/dms-proof"]            # 같은 PVC 이름, 두 namespace
+    # 섞인 토큰 AND -- 토큰마다 경로든 PV 이름이든, 순서·대소문자 무관
+    assert get(GPFS, q="models run") == get(GPFS, q="RUN Models") == [GPFS_B + "/run"]
+    assert get(GPFS, q="models plain") == []
+    assert get(GPFS, q="plain") == ["plain/dir"]                                        # PV 밖 경로는 경로로
+    assert get(ONEFS, q="KV-Cache dms-PROOF") == [ONEFS_ROOT + "/dms-proof"]
+    assert get(q="atase") == ["team-a/datasets/proof-ov", "team-a/datasets/proof-scan",   # 단어 일부
+                              "team-a/datasets/dms-proof"]
+    assert get(q="weights") == ["c2/lab-y/weights"] and get(q="lab-y") == ["c2/lab-y", "c2/lab-y/weights"]
+    # namespace·클러스터·StorageClass·volume 은 검색하지 않는다(그건 필터다)
+    assert get(ONEFS, q="team-a") == get(ONEFS, q="dmsk8s") == get(ONEFS, q="tb-onefs") == []
+    assert get(GPFS, q="models→run") == [GPFS_B + "/run"]                             # 화살표는 구분자(search_tokens)
+    # 빈 값·공백뿐 = 검색 없음(메아리는 원문, 빈 문자열은 null -- path 와 같다)
+    assert get(q="") == get(q="  \t ") == NFS_DESC
+    assert _page(uw, q="")["filters"]["q"] is None and _page(uw, q="  \t ")["filters"]["q"] == "  \t "
+    assert _page(uw, q="Models  Run")["filters"] == {"storage": NFS, "path": None, "q": "Models  Run", **_NO_FILTERS}
+    # 행의 PV 이름 = 판정한 정체의 pvc(표의 「PV 이름」 열이 쓰는 값)
+    [row] = _page(uw, ONEFS, q="kraken")["rows"]
+    assert [v["pvc"] for v in row["pv"]["volumes"]] == ["kraken-kv-cache"] and row["pv"]["source"] == "inventory"
+
+
+def test_q_finds_recorded_pv_names_also_on_filesystem_and_unregistered_storages(uw):
+    # 기록 소속(PV 주소 scan 의 얼린 pv 블록)은 스토리지 종류·등록과 무관하게 생긴다(usage_attribution.may_attribute_pv) -- 지운
+    # PVC 의 이름이 경로에 없어도 그 이름으로 걸린다. filesystem·미등록이라고 SQL(경로만)로 접으면 표에 보이는 PV 이름으로 못 찾는다.
+    legacy = _pvb("dmsk8s", "team-z", "legacy-cache", "pvc-lc", "tb-nfs", "proj-z")
+    for storage in (NFS, CEPH, "gone-nfs"):
+        _seed_scan(uw.repos, uw.db, uw.art, storage=storage, target="proj-z/run", requester="alice",
+                   at="2026-10-27T00:00:00Z", pv=legacy)
+        _seed_scan(uw.repos, uw.db, uw.art, storage=storage, target="old-dir/plain", requester="mason",
+                   at="2026-10-27T01:00:00Z")
+        assert _names(uw, storage, q="legacy") == ["proj-z/run"], storage
+        assert _names(uw, storage, q="CACHE run") == ["proj-z/run"], storage
+        assert _names(uw, storage, q="plain") == ["old-dir/plain"], storage
+        [row] = _page(uw, storage, q="legacy")["rows"]
+        assert (row["pv"]["source"], row["pv"]["volumes"][0]["pvc"]) == ("recorded", "legacy-cache")
+    # 클러스터를 지워 인벤토리에서 사라진 PVC 도 기록으로 산다. 2026-10-29 리뷰: 예전 단언(q="weights" → c2/lab-y/weights)은 PVC
+    # 이름이 경로 끝 성분이라 경로 일치만으로 초록이었다 -- PV 이름이 경로에 없는 onefs(kraken-kv-cache)로 PV 이름 판정을 본다.
+    assert _page(uw, ONEFS, q="kraken")["rows"][0]["pv"]["source"] == "inventory"
+    uw.repos.k8s.delete_cluster("dmsk8s2", actor="ops")
+    uw.repos.k8s.delete_cluster("dmsk8s", actor="ops")
+    [row] = _page(uw, ONEFS, q="KRAKEN cache")["rows"]
+    assert row["target"] == ONEFS_ROOT + "/dms-proof" and "kraken" not in row["target"]
+    assert (row["pv"]["source"], row["pv"]["volumes"][0]["pvc"]) == ("recorded", "kraken-kv-cache")
+    [row] = _page(uw, q="weights")["rows"]
+    assert (row["target"], row["pv"]["source"], row["pv"]["volumes"][0]["pvc"]) == \
+        ("c2/lab-y/weights", "recorded", "weights")
+
+
+def test_q_is_sql_exact_without_possible_pv_names_and_judged_in_the_pv_window_otherwise(uw, monkeypatch):
+    from dms.api import routes_usage
+    calls = []
+    _spy(monkeypatch, uw.client.app.state.repos.data_jobs, "scan_target_heads", calls)
+    monkeypatch.setattr(routes_usage, "_WINDOW_LIMIT", 1)
+    # filesystem(PV 주소 scan 기록 없음): 경로만이라 SQL 이 LIMIT 앞에서 정확히 건다 -- 창이 1 이어도 맞는 수가 정확하다
+    body = _page(uw, CEPH, q="PROJ")
+    assert [r["target"] for r in body["rows"]] == ["proj/y", "proj/x"]
+    assert (body["matched_count"], body["window_truncated"]) == (2, False)
+    assert [c[1]["tokens"] for c in calls] == [["PROJ"]]
+    assert _names(uw, CEPH, q="proj X") == ["proj/x"]
+    # PV 축 필터와 함께여도 PV 이름이 생길 수 없으면 토큰은 SQL 에 실린다(판정 창에 들어오는 것부터 검색에 맞는 것)
+    calls.clear()
+    monkeypatch.setattr(routes_usage, "_WINDOW_LIMIT", 10000)
+    assert _names(uw, CEPH, q="x", scope="outside") == ["proj/x"]
+    assert [c[1]["tokens"] for c in calls] == [["x"]]
+    # PV 를 담는 스토리지: 토큰이 PV 이름에만 맞을 수 있어 SQL 에 싣지 않고, PV 축 필터와 같은 판정 창(최근 스캔 순)에서 거른다
+    calls.clear()
+    monkeypatch.setattr(routes_usage, "_WINDOW_LIMIT", 3)
+    body = _page(uw, q="proof")
+    # 창이 넘치면 창 밖의 경로 일치(모든 토큰이 경로에)를 SQL 로 더한다(2026-10-29 리뷰 -- 아래 test_q_finds_path_hits_outside…)
+    assert [c[1]["tokens"] for c in calls] == [None, ["proof"]]
+    assert (body["window_truncated"], body["matched_count"], body["window_limit"]) == (True, None, 3)   # 넘침 = 모름
+    assert [r["target"] for r in body["rows"]] == [t for t in NFS_DESC if "proof" in t]
+    calls.clear()
+    monkeypatch.setattr(routes_usage, "_WINDOW_LIMIT", 10000)
+    body = _page(uw, q="proof")
+    assert (body["window_truncated"], body["matched_count"]) == (False, 5)
+    assert [c[1]["tokens"] for c in calls] == [None]                                   # 넘치지 않으면 창 하나로 정확
+
+
+def test_q_finds_path_hits_outside_the_pv_window_like_the_old_path(uw, monkeypatch):
+    # 2026-10-29 리뷰: 포탈이 path 대신 q 를 보내면서, PV 를 담는 스토리지의 대상이 판정 창을 넘으면 경로 검색이 창 밖의 오래된 경로를
+    # 못 찾았다(예전 path 는 SQL 의 LIMIT 앞이라 정확했다 -- 사용자 요청은 「경로로 검색할 뿐 아니라」). 이제 모든 토큰이 경로에 든
+    # 대상은 창과 무관하게 찾고, 판정 창에 묶이는 것은 PV 이름이 있어야 맞는 대상뿐이다(그래서 맞는 수는 모름 -- null).
+    from dms.api import routes_usage
+    # 정렬 병합의 두 모서리: 창 밖 대상의 스캔 횟수가 더 많다(scans 정렬에서 창 안 대상들보다 앞 -- 옛 시각의 scan 이라 최근 스캔은
+    # 그대로), 창 경계에 걸친 같은 시각 묶음(proof-d9 를 selfnl 과 같은 시각으로 -- 묶음 안은 이름순이라 proof-d9 가 창 안, selfnl 은 밖)
+    _seed_scan(uw.repos, uw.db, uw.art, storage=NFS, target="team-a/datasets/dms-proof", requester="alice",
+               at="2026-10-20T00:00:00Z")
+    uw.db.execute("UPDATE data_jobs SET updated_at = :t WHERE job_id = :j",
+                  {"t": "2026-10-26T02:00:00Z", "j": uw.jobs[(NFS, "proof-d9/alice/latest", "mason")]})
+    monkeypatch.setattr(routes_usage, "_WINDOW_LIMIT", 3)    # 창 = c2/lab-y, proof-ov, proof-d9
+    rows = lambda storage=NFS, **p: [r["target"] for r in _page(uw, storage, **p)["rows"]]   # noqa: E731
+    old, new = _page(uw, path="team-d"), _page(uw, q="team-d")
+    assert [r["target"] for r in old["rows"]] == [r["target"] for r in new["rows"]] == ["team-d/old/run"]
+    assert (new["matched_count"], new["window_truncated"]) == (None, True)
+    assert (new["rows"][0]["pv"]["source"], new["rows"][0]["pv"]["volumes"][0]["pvc"]) == ("recorded", "old")
+    # PV 이름으로만 맞는 대상이 없는 검색이면 결과·순서가 예전 path 와 같다 -- 정렬 다섯 × 방향 × 상한(지표 정렬은 예전처럼 맞는
+    # 대상 중 최근 창 안에서)
+    for sort in ("last_scan", "scans", "bytes", "files", "hot"):
+        for order in ("desc", "asc"):
+            for limit in (100, 2):
+                assert rows(q="PROOF", sort=sort, order=order, limit=limit) == \
+                    rows(path="proof", sort=sort, order=order, limit=limit), (sort, order, limit)
+    proof = ["team-a/datasets/proof-ov", "proof-d9/alice/latest", "proof-nl/a/selfnl", "team-a/datasets/proof-scan",
+             "team-a/datasets/dms-proof"]
+    assert rows(q="proof") == proof
+    assert rows(q="proof", order="asc") == ["team-a/datasets/dms-proof", "team-a/datasets/proof-scan",
+                                            "proof-d9/alice/latest", "proof-nl/a/selfnl", "team-a/datasets/proof-ov"]
+    assert rows(q="proof", sort="scans") == ["team-a/datasets/dms-proof"] + proof[:4]
+    assert rows(q="proof", sort="scans", order="asc") == proof[:4] + ["team-a/datasets/dms-proof"]
+    # PV 축 필터와 함께: 경로 일치는 경로 일치끼리의 최근 창(예전 「path + PV 필터」의 창)에서 소속을 판정해 거른다 -- 예전과 같다
+    for q in ("proof-scan", "proof", "dms-proof datasets"):
+        for p in ({"namespace": "team-a"}, {"scope": "pv"}, {"scope": "outside"}, {"pvc": "datasets", "sort": "bytes"}):
+            assert rows(q=q, **p) == rows(path=q.split()[0], **p), (q, p)
+    [row] = _page(uw, q="proof-scan", namespace="team-a")["rows"]
+    assert row["pv"]["volumes"][0]["pvc"] == "datasets"                                # 창 밖 행의 소속도 판정해 싣는다
+    # 판정 창에 묶이는 것은 PV 이름이 있어야 맞는 대상뿐(알려진 한계 -- 포탈이 말한다). gpfs 의 창 2 = plain/dir, B/run
+    monkeypatch.setattr(routes_usage, "_WINDOW_LIMIT", 2)
+    assert rows(GPFS, q="models") == [GPFS_B + "/run"]                                 # 창 밖 A/dms-proof 는 못 찾는다
+    assert rows(GPFS, q="models proof") == []                                          # 토큰 하나가 PV 이름에만 -- 창 안만
+    assert rows(GPFS, q="PROOF") == [GPFS_A + "/dms-proof"]                            # 경로로는 창 밖도
+    # 내보내기도 같은 판정(상한 = 창 3 -- 넘었다)
+    monkeypatch.setattr(routes_usage, "_WINDOW_LIMIT", 3)
+    parts, err = _drain_targets_export(uw.client, q="proof")
+    assert err is None and b'"truncated":true,"capped":true,"matched_count":null,' in parts[0]   # 경로 일치 5 > 상한 3
+    assert [r["target"] for r in json.loads(b"".join(parts))["rows"]] == proof[:3]
+
+
+def test_q_combines_with_path_requester_and_pv_filters(uw):
+    get = lambda storage=NFS, **p: _names(uw, storage, **p)   # noqa: E731
+    assert get(path="team-a", q="SCAN") == ["team-a/datasets/proof-scan"]
+    assert get(path="proof", q="datasets") == ["team-a/datasets/proof-ov", "team-a/datasets/proof-scan",
+                                               "team-a/datasets/dms-proof"]
+    assert get(path="c2", q="weights") == ["c2/lab-y/weights"]
+    assert get(namespace="team-a", q="ov") == ["team-a/datasets/proof-ov"]
+    assert get(scope="outside", q="proof") == ["proof-nl/a/selfnl", "proof-d9/alice/latest"]
+    assert get(scope="outside", q="datasets") == []
+    assert get(requester="alice", q="old") == ["team-d/old/run"]
+    assert get(requester="mason", q="datasets") == ["team-a/datasets/proof-ov", "team-a/datasets/proof-scan"]
+    assert get(GPFS, namespace="team-b", q="models") == [GPFS_B + "/run"]
+    assert get(GPFS, q="models", sort="bytes") == [GPFS_B + "/run", GPFS_A + "/dms-proof"]   # 지표 정렬(2 > 1)
+    body = _page(uw, path="proof", q="datasets", namespace="team-a")
+    assert body["filters"] == {"storage": NFS, "path": "proof", "q": "datasets", **_NO_FILTERS, "namespace": "team-a"}
+
+
+def test_q_wildcards_are_literal_on_both_paths_and_bad_values_are_422(uw):
+    for storage in (NFS, CEPH):
+        _seed_scan(uw.repos, uw.db, uw.art, storage=storage, target="misc/100%_x", requester="mason",
+                   at="2026-10-27T00:00:00Z")
+    for storage in (NFS, CEPH):        # PV 판정 창(파이썬 부분 문자열)·SQL(LIKE ESCAPE) 두 경로가 같은 뜻
+        assert _names(uw, storage, q="%") == ["misc/100%_x"], storage
+        assert _names(uw, storage, q="0%_") == ["misc/100%_x"], storage
+        assert _names(uw, storage, q="1_0") == [] and _names(uw, storage, q="pro_") == [], storage
+        assert _names(uw, storage, q="\\") == [], storage
+    for url in (TARGETS, TARGETS + "/export"):
+        assert uw.client.get(url, params={"storage": NFS, "q": "a\x00b"}).status_code == 422, url
+        assert uw.client.get(url, params={"storage": NFS, "q": "q" * 513}).status_code == 422, url
+        assert uw.client.get(url, params={"storage": NFS, "q": "q" * 512}).status_code == 200, url
+        assert uw.client.get(url, params={"storage": NFS, "q": "a\tb\x01"}).status_code == 200, url
+
+
+def test_targets_export_takes_q_with_the_same_judgement_and_echo(uw, monkeypatch):
+    parts, err = _drain_targets_export(uw.client, storage=GPFS, q="Models RUN")
+    body = json.loads(b"".join(parts))
+    assert err is None and [r["target"] for r in body["rows"]] == [GPFS_B + "/run"]
+    assert (body["matched_count"], body["count"], body["truncated"]) == (1, 1, False)
+    assert body["filters"] == {"storage": GPFS, "path": None, "q": "Models RUN", **_NO_FILTERS}
+    assert body["rows"][0]["pv"]["volumes"][0]["pvc"] == "models"
+    r = uw.client.get(TARGETS + "/export", params={"storage": ONEFS, "q": "kraken"})
+    assert [x["target"] for x in r.json()["rows"]] == [ONEFS_ROOT + "/dms-proof"] and r.json()["filters"]["q"] == "kraken"
+    r = uw.client.get(TARGETS + "/export", params={"storage": CEPH, "q": "PROJ y"})
+    assert [x["target"] for x in r.json()["rows"]] == ["proj/y"]
+    from dms.api import routes_usage
+    monkeypatch.setattr(routes_usage, "_WINDOW_LIMIT", 3)
+    parts, err = _drain_targets_export(uw.client, q="proof")                  # PV 판정 창이 넘쳤다 -- 맞는 수는 모름
+    assert err is None and b'"truncated":true,"capped":true,"matched_count":null,' in parts[0]
+    # 창 밖의 경로 일치도 더한다(상한 3 = 창) -- 최근 스캔 순 앞 3개
+    assert [r["target"] for r in json.loads(b"".join(parts))["rows"]] == [t for t in NFS_DESC if "proof" in t][:3]
+    monkeypatch.setattr(routes_usage, "_WINDOW_LIMIT", 1)
+    parts, err = _drain_targets_export(uw.client, storage=CEPH, q="proj")     # SQL 경로 -- 맞는 수는 정확, 상한을 넘었다
+    assert err is None and b'"truncated":true,"capped":true,"matched_count":2,' in parts[0] and parts[-1] == b'],"count":1}'
+
+
+def test_targets_export_says_when_known_matches_were_cut_at_the_row_cap(uw, monkeypatch):
+    # 2026-10-29 2차 리뷰: PV 이름까지 보는 검색은 창이 넘치면 창 밖의 경로 일치를 더한다(_with_path_hits) -- 그래서 내보내기가 상한
+    # (_WINDOW_LIMIT)에서 **알려진** 일치를 자를 수 있다. 봉투가 창 넘침(truncated + matched_count null)과 같은 모양이라 포탈은 「PV 이름으로
+    # 맞는 대상은 창 안에서만」만 말했고 경로 일치가 잘린 것이 안 보였다 -- 이제 capped 가 그것을 따로 말한다.
+    from dms.api import routes_usage
+
+    def export(**p):
+        parts, err = _drain_targets_export(uw.client, **p)
+        assert err is None
+        return json.loads(b"".join(parts))
+
+    def shape(body):
+        return body["truncated"], body["capped"], body["matched_count"], body["count"]
+
+    monkeypatch.setattr(routes_usage, "_WINDOW_LIMIT", 3)                      # 창 = c2/lab-y, proof-ov, selfnl
+    assert len([t for t in NFS_DESC if "proof" in t]) == 5
+    for sort in ("last_scan", "scans", "bytes", "files", "hot"):
+        for order in ("desc", "asc"):
+            assert shape(export(q="proof", sort=sort, order=order)) == (True, True, None, 3), (sort, order)
+    assert shape(export(q="dms-proof")) == (True, False, None, 1)              # 창만 넘었다 -- 잘린 일치 없음
+    # 창 안에 맞는 것이 없고 창 밖 경로 일치만 상한만큼 -- 행 수가 상한과 같아도 더 있었다(상한 + 1 개 읽어 안다)
+    monkeypatch.setattr(routes_usage, "_WINDOW_LIMIT", 1)                      # 창 = c2/lab-y
+    for sort in ("last_scan", "scans", "bytes"):
+        assert shape(export(q="proof", sort=sort)) == (True, True, None, 1), sort
+    # PV 필터와 함께면 경로 일치끼리의 창 밖은 판정하지 않았다(모름 -- 창 문구의 몫) -- 잘린 일치가 아니다
+    monkeypatch.setattr(routes_usage, "_WINDOW_LIMIT", 3)
+    body = export(q="proof", flt=_flt(namespace="team-a"))
+    assert shape(body) == (True, False, None, 1) and [r["target"] for r in body["rows"]] == ["team-a/datasets/proof-ov"]
+    # 창 넘침이 아닌 PV 경로는 잘리지 않는다(창 ≤ 상한), SQL 경로는 맞는 수가 상한을 넘을 때 -- truncated 와 같다
+    assert shape(export(flt=_flt(scope="pv"))) == (True, False, None, 1)
+    assert shape(export(flt=_flt(requester="mason"))) == (True, True, 6, 3)
+    monkeypatch.setattr(routes_usage, "_WINDOW_LIMIT", 6)
+    assert shape(export(flt=_flt(requester="mason"))) == (False, False, 6, 6)
+    monkeypatch.setattr(routes_usage, "_WINDOW_LIMIT", len(NFS_DESC))          # 창이 대상 전부 -- 넘침도 잘림도 없다
+    assert shape(export(q="proof")) == (False, False, 5, 5)
+    # 창 안의 PV 이름 일치 + 창 밖 경로 일치가 상한을 넘는다(경로 일치끼리는 그 창 안 -- 지표 정렬은 앞 창으로 자른 것으로 안다)
+    for i in (1, 2):
+        _seed_scan(uw.repos, uw.db, uw.art, storage=GPFS, target=f"archive/models-{i}", requester="mason",
+                   at=f"2026-10-0{i}T00:00:00Z")
+    monkeypatch.setattr(routes_usage, "_WINDOW_LIMIT", 2)                      # gpfs 창 = plain/dir, B/run(PV 이름 models)
+    for sort in ("last_scan", "scans", "bytes", "hot"):
+        body = export(storage=GPFS, q="models", sort=sort)
+        assert shape(body) == (True, True, None, 2), sort
+        assert GPFS_B + "/run" in [r["target"] for r in body["rows"]], sort
+
+
+def test_facets_and_storage_totals_do_not_take_q(uw):
+    # 합계는 경로 검색과 무관하다(2026-10-21 결정) -- q 를 실어도 모르는 파라미터로 무시되고 필터 합계(메아리)가 되지 않는다.
+    whole = _totals(uw.client, NFS)
+    r = uw.client.get(TOTALS, params={"storage": NFS, "q": "nothing-matches"}).json()
+    assert "filters" not in r and (r["target_count"], r["total_bytes"]) == (whole["target_count"], whole["total_bytes"])
+    assert uw.client.get(FACETS, params={"storage": NFS, "q": "nothing-matches"}).json()["target_count"] == 8

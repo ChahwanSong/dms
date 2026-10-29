@@ -358,8 +358,10 @@ export interface UsageAttrFilter {
 }
 // 서버가 실제로 적용한 필터의 메아리(null = 그 필터 없음). 포탈은 보낸 값과 대조한다 -- 모르는 파라미터를 조용히 무시하는 옛
 // 서버가 「거른 척한 전체 목록」을 주지 않게.
+// q(2026-10-29) = 검색 원문(경로·PV 이름 -- 목록·내보내기만, 합계는 받지 않는다). path 는 옛 탭 호환 파라미터의 메아리(포탈은 안 보낸다).
 export interface UsageFiltersEcho {
-  storage?: string | null; path?: string | null; cluster?: string | null; namespace?: string | null; pvc?: string | null;
+  storage?: string | null; path?: string | null; q?: string | null;
+  cluster?: string | null; namespace?: string | null; pvc?: string | null;
   storage_class?: string | null; user?: string | null; scope?: UsageScope | null; requester?: string | null;
 }
 // GET /api/admin/usage/targets 봉투. matched_count = 필터에 맞는 대상 수(limit 무관), null = 모름(PV 필터가 판정 창을 넘었다 --
@@ -458,6 +460,9 @@ export interface UsageExport {
   // 2026-10-29 GET /api/admin/usage/targets/export: 필터에 맞는 대상 수(null = 모름 -- PV 필터가 판정 창을 넘었다)와 서버가
   // 적용한 필터. 옵션(?) = 옛 export·fixture 호환(포탈은 새 엔드포인트에선 메아리가 없으면 실패로 본다).
   matched_count?: number | null;
+  // 알려진 맞는 대상을 행 상한에서 잘랐다(2026-10-29 2차 리뷰 -- 창 넘침과 따로: PV 스토리지의 검색은 창 밖의 경로 일치까지 더해 상한을
+  // 넘을 수 있다, routes_usage.export_targets). 없으면 false(fetchUsageExport 가 접는다).
+  capped?: boolean;
   filters?: UsageFiltersEcho;
 }
 export interface UsagePoint {

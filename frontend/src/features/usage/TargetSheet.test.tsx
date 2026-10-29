@@ -98,9 +98,9 @@ test("시트 URL·포커스: 열기 push → ✕·Esc 는 뒤로(-1) 닫고 포�
 });
 
 test("검색 디바운스 중에 시트를 열어도 그 검색은 지금 항목에 실린다 -- 닫고(뒤로) 돌아와도 검색칸·URL 이 그대로", async () => {
-  setup({ path: "/admin/usage?storage=cephfs-dms", filterPath: true });
+  setup({ path: "/admin/usage?storage=cephfs-dms", filterQ: true });
   await screen.findByRole("button", { name: "artifacts" });
-  await userEvent.type(screen.getByLabelText("경로 검색"), "tea");
+  await userEvent.type(screen.getByLabelText("경로·PV 이름 검색"), "tea");
   await userEvent.click(screen.getByRole("button", { name: "team" }));             // 300ms 안
   await sheetOf("team");
   expect(navType()).toBe("PUSH");
@@ -110,7 +110,7 @@ test("검색 디바운스 중에 시트를 열어도 그 검색은 지금 항목
   await closeSheet();
   expect(navType()).toBe("POP");
   expect([loc().get("q"), loc().get("target")]).toEqual(["tea", null]);
-  expect(screen.getByLabelText("경로 검색")).toHaveValue("tea");
+  expect(screen.getByLabelText("경로·PV 이름 검색")).toHaveValue("tea");
 });
 
 // 끝에 닿은 이전·다음은 aria-disabled(포커스 가능 -- disabled 면 실 브라우저가 포커스를 <body> 로 떨어뜨린다, TargetSheet 머리 주석).

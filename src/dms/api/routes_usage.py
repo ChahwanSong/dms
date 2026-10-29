@@ -30,6 +30,15 @@
   -- 창이 넘치면 matched_count 는 null(모름)이고 포탈이 「최근 스캔된 N개 안에서」라고 말한다).
   응답은 서버가 적용한 필터를 filters 로 되돌려 준다 -- 롤링 배포 중 새 포탈이 옛 API 를 부르면 모르는 파라미터가 조용히 무시돼
   「필터 켜진 화면 + 거르지 않은 목록」이 되는데, 메아리가 없으면 포탈이 그것을 알아챈다.
+- 검색(같은 날 사용자 요청: 「경로로 검색할 뿐 아니라, pv 이름도 검색할 수 있게 하고 일부 단어만 포함해도 뜨도록」): /targets·
+  /targets/export 의 q -- 토큰(text_search.search_tokens: 공백으로 나눔·최대 8개, 작업 목록 검색과 같은 뜻) 모두가 대상 경로 또는
+  소속 PV 정체 하나의 PV 이름(PVC 이름)에 대소문자 무시 부분 일치(usage_attribution.search_matches). 역시 **대상 단위**다. PV 이름이
+  생길 수 있는 스토리지(usage_attribution.may_attribute_pv)는 PV 축 필터와 같은 판정 창에서 거르고(넘치면 matched_count null -- 그때도
+  모든 토큰이 경로에 든 대상은 창 밖까지 SQL 로 더한다: 경로 검색은 예전 path 처럼 창에 묶이지 않는다, _with_path_hits -- 그래서
+  내보내기가 상한에서 알려진 일치를 자를 수 있고 봉투의 capped 가 창 넘침과 따로 그것을 말한다, export_targets), 그 밖은
+  SQL(scan_target_heads(tokens=))로 정확히 건다. 옛 path(경로 부분 일치 -- 방언 LIKE 그대로라 대소문자 무시를 보장하지 않는다)는
+  옛 탭 호환으로 뜻 그대로 남고 q 와 함께 걸린다.
+  facets·storage-totals 는 q 를 받지 않는다(합계는 경로 검색과 무관 -- 2026-10-21).
 - **옛 탭 호환 동결**: scan-targets·export 는 본문을 바꾸지 않는다(봉투 없는 배열이라 메아리를 실을 자리가 없다 -- 옛 탭 JS 가
   그 모양을 읽는다; tests/test_usage_equivalence.py 가 바이트를 고정한다). 새 포탈은 /targets 를 쓴다 -- 다음 정리 때 제거한다
   (docs/BACKLOG.md).
@@ -54,7 +63,9 @@ from .routes_requests import reject_when_maintenance
 from .routes_scan_paths import (_buckets, _is_number, _numbers, _report_total_bytes,
                                 _summary_count, _time_histograms)
 from ..metrics_series import storage_filesystem
-from ..usage_attribution import FACET_LIST_CAP, PvFilter, attribute, collect, facet_counts, matches, ranked
+from ..repositories.text_search import search_tokens
+from ..usage_attribution import (FACET_LIST_CAP, PvFilter, attribute, collect, facet_counts, matches, may_attribute_pv,
+                                 ranked, search_matches)
 from ..usage_metrics import METRIC_SORTS, SORT_PATTERN, StorageTotals, maximal_targets, metric_value, sort_keyed
 
 router = APIRouter(dependencies=[Depends(require_admin)])
@@ -65,9 +76,9 @@ _MAX_POINTS = 60
 _TARGET_LIMIT = 200
 # 창 상한(2026-10-20 사용자 요청: 「서버의 스캔 상한선도 5천개에서 1만개로」) -- 지표 정렬(bytes·files·hot)의 대상 창과
 # 내보내기 상한에 함께 쓴다(2026-10-29 부터 PV 필터의 판정 창·/facets·필터 합계의 창도). 전 타깃이 계약이지만 무한은 아니다 --
-# 내보내기는 넘으면 잘라 내고 truncated 로 말한다(조용한 절단 금지), 포탈은 /targets 봉투의 matched_count 가 이 값을 넘거나
-# window_truncated(PV 판정 창 넘침)일 때만 「최근 스캔된 N개 안에서 정렬」을 알린다(N = 봉투의 window_limit -- 탭의 대상 수가
-# 아니다: 검색·필터가 걸리면 그 수는 거짓이다). 메모리 근거(2026-10-20 실측, 1만 타깃 한 스토리지 + 6.5만 잡, 요약 평균 3.6KB): 창
+# 내보내기는 넘으면 잘라 내고 truncated(알려진 일치를 잘랐으면 capped 도)로 말한다(조용한 절단 금지), 포탈은 /targets 봉투의
+# matched_count 가 이 값을 넘거나 window_truncated(PV 판정 창 넘침)일 때만 「최근 스캔된 N개 안에서 정렬」을 알린다(N = 봉투의
+# window_limit -- 탭의 대상 수가 아니다: 검색·필터가 걸리면 그 수는 거짓이다). 메모리 근거(2026-10-20 실측, 1만 타깃 한 스토리지 + 6.5만 잡, 요약 평균 3.6KB): 창
 # 전체의 포인트를 세우고 응답을 통째로 만들던 옛 구조는 1만 내보내기 한 건이 +~465MiB(PG·sqlite 같음), PG 동시 3건이면 HWM 1.3GiB
 # 로 api 한도 1Gi 를 넘었다. 값만 뽑는 목록은 +18~29MiB, 묶음 스트리밍 내보내기는 +37~53MiB(첫 호출; 반복 +4~13MiB, PG 동시 2건
 # +~60MiB), 시간은 sqlite 내보내기 16.5초 → 2.8초·지표 정렬 목록 15초 → 1.3초다(인덱스 포함) -- 이 값을 올리기 전에 같은 측정을
@@ -530,38 +541,134 @@ def _window_order(heads: list, sort: str, order: str) -> list:
 
 
 def _select_heads(repos, *, base: str, unreadable: set, storage: str, path: "str | None", requester: "str | None",
-                  pvf: PvFilter, order: str, sort: str, limit_rows: int) -> tuple:
-    """필터에 맞는 머리를 요청한 순서로 최대 limit_rows 개 → (heads, matched_count | None, window_truncated, attrs). 목록·내보내기·
-    합계가 이 한 벌을 쓴다. attrs = 이 함수가 판정한 대상의 소속(target → usage_attribution.attribute) -- SQL 경로는 비어 있다.
+                  pvf: PvFilter, order: str, sort: str, limit_rows: int, tokens=()) -> tuple:
+    """필터에 맞는 머리를 요청한 순서로 최대 limit_rows 개 → (heads, matched_count | None, window_truncated, capped, attrs). 목록·
+    내보내기·합계가 이 한 벌을 쓴다. attrs = 이 함수가 판정한 대상의 소속(target → usage_attribution.attribute) -- SQL 경로는 비어 있다.
+    tokens = 검색(q)의 토큰(search_tokens -- 빈 것 = 검색 없음, 합계는 넘기지 않는다). capped = **알려진** 맞는 대상이 돌려준 것보다
+    많다(limit_rows 또는 지표 정렬의 창에서 잘랐다 -- 2026-10-29 2차 리뷰): SQL 경로는 matched_count > 행 수, PV 경로는 판정한 결과가
+    limit_rows 를 넘음. 창이 넘쳐 판정하지 않은 대상(모름)은 세지 않는다 -- 그건 window_truncated 의 몫이다. 창 넘침이 아닌 PV 경로의
+    내보내기(limit_rows = 창)는 잘릴 수 없고, 창 밖 경로 일치를 더하는 _with_path_hits 만 상한을 넘길 수 있다(내보내기가 이 둘을 따로
+    말한다 -- export_targets).
 
-    - SQL 경로(PV 축·구분이 없음): path·requester 는 SQL 의 LIMIT 앞이라 정확하다. matched_count = COUNT(*) OVER()(필터에 맞는
+    - SQL 경로(PV 축·구분이 없고, 검색이 없거나 그 스토리지에 PV 이름이 생길 수 없음 -- may_attribute_pv False): path·requester·
+      검색 토큰(경로만 -- scan_target_heads(tokens=))은 SQL 의 LIMIT 앞이라 정확하다. matched_count = COUNT(*) OVER()(필터에 맞는
       대상 전체 -- 창과 무관). 지표 정렬은 예전처럼 최근 스캔 순 _WINDOW_LIMIT 창 안에서 정렬한다.
-    - PV 경로: 머리를 **정렬과 무관하게 최근 스캔 순으로** SQL 에서 _WINDOW_LIMIT + 1 개 읽고(path·requester 는 SQL 에 실린다) 순서를
-      보존하며 소속으로 거른 뒤, 요청한 정렬로 놓는다(지표 정렬은 _metric_order, last_scan·scans 는 _window_order -- 문자열 비교
-      없이 SQL 순서를 물려받는다). 창이 넘치지 않았으면 결과가 전역적으로 정확하다. 창이 넘치면(window_truncated -- 그 스토리지의
-      (경로 검색·요청자에 맞는) 대상이 창보다 많다) 창 밖은 판정하지 않았으므로 matched_count 는 null(모름)이다(0 이 아니다).
+    - PV 경로(PV 축·구분이 있거나, PV 이름이 생길 수 있는 스토리지의 검색): 머리를 **정렬과 무관하게 최근 스캔 순으로** SQL 에서
+      _WINDOW_LIMIT + 1 개 읽고(path·requester 는 SQL 에 실린다 -- 검색 토큰은 PV 이름이 생길 수 없을 때만 SQL 에, 아니면 판정 뒤
+      search_matches 로: 토큰이 PV 이름에만 맞을 수 있다) 순서를 보존하며 소속·검색으로 거른 뒤, 요청한 정렬로 놓는다(지표 정렬은
+      _metric_order, last_scan·scans 는 _window_order -- 문자열 비교 없이 SQL 순서를 물려받는다). 창이 넘치지 않았으면 결과가
+      전역적으로 정확하다. 창이 넘치면(window_truncated -- 그 스토리지의 (경로 검색·요청자에 맞는) 대상이 창보다 많다) 창 밖은
+      판정하지 않았으므로 matched_count 는 null(모름)이다(0 이 아니다). 단 PV 이름까지 보는 검색은 창이 넘쳐도 창 밖의 경로 일치(모든
+      토큰이 경로에)를 SQL 로 더한다(_with_path_hits, 2026-10-29 리뷰) -- 창에 묶이는 것은 PV 이름이 있어야 맞는 대상뿐이다.
       판정 창을 정렬마다 바꾸지 않는 이유(2026-10-29 리뷰): 요청한 정렬로 창을 자르면 「오래된 순」·「스캔 횟수」에서 창이 가장
       오래된·가장 많이 스캔된 1만 개가 돼, 정렬을 바꾸기만 해도 걸리는 대상 **집합**이 바뀌고 facets 의 옵션 수(최근 스캔 순 창)·
       필터 합계·포탈의 「최근 스캔된 N개 안에서」와 서로 어긋났다. 이제 판정 창은 /facets·필터 합계·내보내기와 한 규칙이다."""
     metric = sort in METRIC_SORTS
-    flt = {"storage": storage, "path": path, "requester": requester}
-    if not pvf.active:
+    pv_search = bool(tokens) and may_attribute_pv(repos, storage)
+    flt = {"storage": storage, "path": path, "requester": requester,
+           "tokens": list(tokens) if tokens and not pv_search else None}
+    if not pvf.active and not pv_search:
         if metric:
             window = repos.data_jobs.scan_target_heads(**flt, order="desc", limit=_WINDOW_LIMIT, with_matched=True)
             heads = _metric_order(repos, base, window, sort, order, unreadable)[:limit_rows]
         else:
             window = heads = repos.data_jobs.scan_target_heads(**flt, order=order, sort=sort, limit=limit_rows,
                                                                with_matched=True)
-        return heads, (window[0]["matched_count"] if window else 0), False, {}
+        matched = window[0]["matched_count"] if window else 0
+        return heads, matched, False, matched > len(heads), {}
     cand = repos.data_jobs.scan_target_heads(**flt, order="desc", limit=_WINDOW_LIMIT + 1)
     window_truncated = len(cand) > _WINDOW_LIMIT
     cand = cand[:_WINDOW_LIMIT]
     inputs = collect(repos, storage, cand)
     attrs = {h["target"]: attribute(h["target"], inputs) for h in cand}
-    kept = [h for h in cand if matches(attrs[h["target"]], pvf, inputs.users)]
+    kept = [h for h in cand if matches(attrs[h["target"]], pvf, inputs.users)
+            and (not pv_search or search_matches(h["target"], attrs[h["target"]], tokens))]
+    if pv_search and window_truncated:
+        ordered, cut = _with_path_hits(repos, base=base, unreadable=unreadable, storage=storage,
+                                       flt={**flt, "tokens": list(tokens)}, pvf=pvf, order=order, sort=sort,
+                                       limit_rows=limit_rows, window=cand, kept=kept, attrs=attrs)
+        return ordered[:limit_rows], None, True, cut or len(ordered) > limit_rows, attrs
     ordered = (_metric_order(repos, base, kept, sort, order, unreadable) if metric
                else _window_order(kept, sort, order))
-    return ordered[:limit_rows], (None if window_truncated else len(kept)), window_truncated, attrs
+    return (ordered[:limit_rows], (None if window_truncated else len(kept)), window_truncated, len(ordered) > limit_rows,
+            attrs)
+
+
+def _with_path_hits(repos, *, base: str, unreadable: set, storage: str, flt: dict, pvf: PvFilter, order: str, sort: str,
+                    limit_rows: int, window: list, kept: list, attrs: dict) -> tuple:
+    """PV 이름까지 보는 검색의 판정 창이 넘쳤을 때(2026-10-29 리뷰): 창 안의 결과(kept -- 최근 스캔 순)에 **창 밖의 경로 일치**(모든
+    토큰이 경로에 든 대상 -- flt 의 tokens 를 실은 scan_target_heads, SQL 이라 창과 무관)를 더해 요청한 순서로 놓는다. 포탈이 path 대신
+    q 를 보내면서 경로로 찾던 오래된 대상이 창 밖이라 안 걸렸다(예전 path 는 SQL 의 LIMIT 앞이라 정확했다 -- 사용자 요청은 「경로로
+    검색할 뿐 아니라」) -- 이제 판정 창에 묶이는 것은 PV 이름이 있어야 맞는 대상뿐이다(그래서 맞는 수는 여전히 모름). attrs 에 새로
+    판정한 소속을 더한다.
+
+    - PV 축·구분이 없고 정렬이 last_scan·scans: 창 밖 일치를 요청한 정렬 그대로 limit_rows(+ 1, 아래 →) 개 SQL 로 읽어 _merge_outside 로
+      합친다.
+      맞는 대상의 앞 limit_rows 개는 「창 안 결과 ∪ 경로 일치의 앞 limit_rows 개」 안에 있다(경로 일치 중 그 밖의 것 앞에는 맞는
+      대상이 이미 limit_rows 개다) -- 경로 일치 수와 무관하게 예전 path 와 같은 순서·같은 앞부분이다.
+    - 그 밖(PV 축·구분 -- 창 밖 대상도 소속을 판정해야 한다, 또는 지표 정렬 -- 맞는 대상 중 최근 창 안에서 정렬한다): 경로 일치끼리의
+      최근 스캔 순 창(_WINDOW_LIMIT -- 예전 「path + PV 필터」의 판정 창과 같다)에서 창 밖 대상을 PV 필터로 거르고 최근 스캔 순으로
+      이어 붙인다(창은 최근 스캔 순의 앞부분이라 창 안의 어느 대상도 창 밖의 어느 대상보다 그 순서에서 앞이다 -- 이어 붙인 것이 곧
+      최근 스캔 순이다). 지표 정렬은 그 앞 _WINDOW_LIMIT 개(SQL 경로의 「맞는 대상 중 최근 N개 안에서 정렬」과 같은 범위).
+
+    → (ordered, cut). 호출자는 ordered 를 limit_rows 에서 자르고 capped = cut 또는 len(ordered) > limit_rows 다(_select_heads -- 알려진
+    맞는 대상을 잘랐나, 2026-10-29 2차 리뷰: 내보내기의 상한 = 창이라 경로 일치를 더하면 넘을 수 있다). 그래서 경로 일치는 **하나 더**
+    읽는다 -- 첫 갈래는 limit_rows + 1 개(앞 limit_rows 개의 순서는 그대로다: 위 논증이 어느 앞부분에도 선다)라 len(ordered) 가 상한을
+    넘는 것으로 더 있음을 안다(창 안에 맞는 것이 없으면 ordered 가 꼭 limit_rows 개라 하나 덜 읽으면 못 안다). 둘째 갈래는 경로 일치끼리의
+    창(_WINDOW_LIMIT)을 넘었는지 보려고 + 1 개를 읽고 창은 그대로 쓴다: PV 필터가 없으면 그 밖의 경로 일치도 맞는 대상이라 cut 이고
+    (지표 정렬이 앞 _WINDOW_LIMIT 개로 자른 것도 cut), PV 필터가 있으면 그 밖은 판정하지 않은 것(모름)이라 cut 이 아니다."""
+    inside = {h["target"] for h in window}
+    if not pvf.active and sort not in METRIC_SORTS:
+        outside = [h for h in repos.data_jobs.scan_target_heads(**flt, order=order, sort=sort, limit=limit_rows + 1)
+                   if h["target"] not in inside]
+        return _merge_outside(_window_order(kept, sort, order), outside, sort, order), False
+    hits = repos.data_jobs.scan_target_heads(**flt, order="desc", limit=_WINDOW_LIMIT + 1)
+    beyond = len(hits) > _WINDOW_LIMIT and not pvf.active
+    extra = [h for h in hits[:_WINDOW_LIMIT] if h["target"] not in inside]
+    if pvf.active:
+        more = collect(repos, storage, extra)
+        attrs.update({h["target"]: attribute(h["target"], more) for h in extra})
+        extra = [h for h in extra if matches(attrs[h["target"]], pvf, more.users)]
+    merged = kept + extra
+    if sort in METRIC_SORTS:
+        return (_metric_order(repos, base, merged[:_WINDOW_LIMIT], sort, order, unreadable),
+                beyond or len(merged) > _WINDOW_LIMIT)
+    return _window_order(merged, sort, order), beyond
+
+
+def _merge_outside(inside: list, outside: list, sort: str, order: str) -> list:
+    """판정 창 안의 결과(inside)와 창 밖의 대상(outside)을 -- 둘 다 요청한 SQL 정렬(last_scan·scans × asc·desc)의 순서로 놓인 것 --
+    그 정렬 하나로 합친다. 문자열은 비교하지 않는다(_window_order 와 같은 이유 -- 방언 콜레이션): 창은 최근 스캔 순(`last_scan_at
+    DESC, storage_name, target`)의 앞부분이라 그 순서에서 창 안의 어느 대상도 창 밖의 어느 대상보다 앞이고, 두 대상의 앞뒤는 이
+    사실과 정수 비교·시각 값의 같음만으로 정해진다(_inside_first)."""
+    out: list = []
+    i = j = 0
+    while i < len(inside) and j < len(outside):
+        if _inside_first(inside[i], outside[j], sort, order):
+            out.append(inside[i])
+            i += 1
+        else:
+            out.append(outside[j])
+            j += 1
+    return out + inside[i:] + outside[j:]
+
+
+def _inside_first(w: dict, p: dict, sort: str, order: str) -> bool:
+    """창 안 대상 w 가 창 밖 대상 p 보다 요청한 정렬에서 앞인가(_merge_outside).
+    - scans(`scan_count {방향}, last_scan_at DESC, storage_name, target`): 횟수가 다르면 그 방향으로, 같으면 2차 이하가 최근 스캔
+      순이라 창 안이 앞.
+    - last_scan desc: 늘 창 안이 앞.
+    - last_scan asc(`last_scan_at ASC, storage_name, target`): 같은 시각이면(창 경계에 걸친 묶음 -- 묶음 안은 두 방향 모두 이름순이라
+      최근 스캔 순에서 앞인 창 안이 여기서도 앞) 창 안, 아니면 창 밖(더 오래됐다). NULL 도 같다: sqlite 는 NULL 이 DESC 끝·ASC 처음이라
+      창 밖의 NULL 이 앞이고, PG 는 DESC 처음·ASC 끝이라 창 밖에 NULL 이 있으면 창이 전부 NULL 이다(같은 묶음)."""
+    if sort == "scans":
+        a, b = w["scan_count"], p["scan_count"]
+        if a != b:
+            return a > b if order != "asc" else a < b
+        return True
+    if order != "asc":
+        return True
+    return w["last_scan_at"] == p["last_scan_at"]
 
 
 def _attach_attrs(repos, storage: str, heads: list, attrs: dict) -> dict:
@@ -573,62 +680,69 @@ def _attach_attrs(repos, storage: str, heads: list, attrs: dict) -> dict:
     return {**attrs, **{h["target"]: attribute(h["target"], inputs) for h in missing}}
 
 
-def _echo(storage: str, path: "str | None", flt: AttrFilter) -> dict:
-    return {"storage": storage, "path": path, **flt.echo()}
+def _echo(storage: str, path: "str | None", q: "str | None", flt: AttrFilter) -> dict:
+    """적용 필터의 메아리. q 는 받은 원문 그대로(빈 문자열은 None -- path 와 같다). 공백뿐인 q 는 원문으로 돌려주되 검색은 없다
+    (search_tokens 가 [] -- 포탈이 보낸 값과 대조할 수 있게 낮추거나 다듬지 않는다)."""
+    return {"storage": storage, "path": path, "q": q, **flt.echo()}
 
 
 @router.get("/api/admin/usage/targets")
 def usage_targets(request: Request, storage: str = Query(..., max_length=512, pattern=_NO_NUL),
                   path: "str | None" = Query(None, max_length=512, pattern=_NO_NUL),
+                  q: "str | None" = Query(None, max_length=512, pattern=_NO_NUL),
                   order: str = Query("desc", pattern=_ORDER),
                   limit: int = Query(100, ge=1, le=_TARGET_LIMIT),
                   sort: str = Query("last_scan", pattern=SORT_PATTERN),
                   flt: AttrFilter = Depends(_filter_params)):
     """사용량 목록(새 포탈 -- scan-targets 의 뒤를 잇는 봉투). storage 필수(정확 일치, 빈 문자열도 이름), path 는 scan-targets 와
-    같은 부분 문자열(빈 값 = 없음), 필터는 _filter_params. 응답: {rows:[{storage_name, target, scan_count, first_scan_at,
+    같은 부분 문자열(빈 값 = 없음, 옛 탭 호환), q 는 경로·PV 이름 검색(모듈 docstring 「검색」 -- 토큰 AND·부분 일치·대소문자 무시,
+    빈 값·공백뿐 = 없음, path 와 함께 걸린다), 필터는 _filter_params. 응답: {rows:[{storage_name, target, scan_count, first_scan_at,
     last_scan_at, latest, pv:{source, root, volumes, users}}], matched_count(필터에 맞는 대상 수 -- null = 창이 넘쳐 모름),
-    window_limit, window_truncated(PV 축 판정이 최근 스캔 순 창 안에서만 이뤄졌나), filters(서버가 적용한 값의 메아리)}. 행의 pv 는
-    필터가 없어도 싣는다(반환 행 ≤ _TARGET_LIMIT 만 판정한다). 정렬·latest 규칙은 scan-targets 그대로다."""
+    window_limit, window_truncated(PV 축·PV 이름 검색 판정이 최근 스캔 순 창 안에서만 이뤄졌나), filters(서버가 적용한 값의 메아리 --
+    q 포함)}. 행의 pv 는 필터가 없어도 싣는다(반환 행 ≤ _TARGET_LIMIT 만 판정한다). 정렬·latest 규칙은 scan-targets 그대로다."""
     repos = request.app.state.repos
-    path = path or None
+    path, q = path or None, q or None
     base = _base(request)
     unreadable: set = set()
-    heads, matched, window_truncated, attrs = _select_heads(
+    heads, matched, window_truncated, _, attrs = _select_heads(
         repos, base=base, unreadable=unreadable, storage=storage, path=path, requester=flt.requester, pvf=flt.pv,
-        order=order, sort=sort, limit_rows=limit)
+        order=order, sort=sort, limit_rows=limit, tokens=search_tokens(q))
     attrs = _attach_attrs(repos, storage, heads, attrs)
     rows = _with_latest(repos, base, heads, skip=unreadable)
     for row in rows:
         row["pv"] = attrs[row["target"]]
     return {"rows": rows, "matched_count": matched, "window_limit": _WINDOW_LIMIT,
-            "window_truncated": window_truncated, "filters": _echo(storage, path, flt)}
+            "window_truncated": window_truncated, "filters": _echo(storage, path, q, flt)}
 
 
 @router.get("/api/admin/usage/targets/export")
 def export_targets(request: Request, storage: str = Query(..., max_length=512, pattern=_NO_NUL),
                    path: "str | None" = Query(None, max_length=512, pattern=_NO_NUL),
+                   q: "str | None" = Query(None, max_length=512, pattern=_NO_NUL),
                    order: str = Query("desc", pattern=_ORDER),
                    sort: str = Query("last_scan", pattern=SORT_PATTERN),
                    flt: AttrFilter = Depends(_filter_params)):
-    """사용량 내보내기(새 포탈 -- export 의 뒤를 잇는다). 파라미터는 /targets 와 같다(limit 없음 -- 상한 _WINDOW_LIMIT). 본문:
-    {generated_at, truncated, matched_count, filters, rows:[{…, storage, latest, previous, pv}], count}(count 맨 뒤 -- 다 흘린
-    뒤에야 정해진다). truncated 는 첫 바이트 전에 정한다: SQL 경로는 필터에 맞는 대상이 상한을 넘음, PV 경로는 판정 창이 넘침
-    (그 스토리지의 대상이 상한보다 많아 PV 필터가 정렬과 무관하게 최근 스캔된 상한 개 안에서만 걸렀다 -- 포탈이 그렇게 말한다,
-    _select_heads). 스트리밍·_CHUNK·
+    """사용량 내보내기(새 포탈 -- export 의 뒤를 잇는다). 파라미터는 /targets 와 같다(q 포함, limit 없음 -- 상한 _WINDOW_LIMIT). 본문:
+    {generated_at, truncated, capped, matched_count, filters, rows:[{…, storage, latest, previous, pv}], count}(count 맨 뒤 -- 다
+    흘린 뒤에야 정해진다). truncated·capped 는 첫 바이트 전에 정한다. truncated = 행이 전부가 아닐 수 있다 = 판정 창이 넘침(PV 경로 --
+    그 스토리지의 대상이 상한보다 많아 PV 필터·PV 이름 검색이 정렬과 무관하게 최근 스캔된 상한 개 안에서만 걸렀다, matched_count null)
+    또는 capped. capped = 알려진 맞는 대상을 상한에서 잘랐다(_select_heads -- SQL 경로는 matched_count 가 상한을 넘음, PV 경로는 창 밖의
+    경로 일치를 더한 결과가 상한을 넘음: 2026-10-29 2차 리뷰 -- 그 전엔 창 넘침과 봉투가 같아 포탈이 「PV 이름으로 맞는 대상은 창
+    안에서만」만 말했고 경로 일치가 잘린 것이 안 보였다). 포탈은 둘을 따로 말한다(창 문구 · 「상한 N개까지만」). 스트리밍·_CHUNK·
     도중 실패 시 닫히지 않은 JSON 은 export 와 같다(_export_body)."""
     repos = request.app.state.repos
-    path = path or None
+    path, q = path or None, q or None
     base = _base(request)
     unreadable: set = set()
-    heads, matched, window_truncated, attrs = _select_heads(
+    heads, matched, window_truncated, capped, attrs = _select_heads(
         repos, base=base, unreadable=unreadable, storage=storage, path=path, requester=flt.requester, pvf=flt.pv,
-        order=order, sort=sort, limit_rows=_WINDOW_LIMIT)
-    truncated = window_truncated or (matched is not None and matched > _WINDOW_LIMIT)
+        order=order, sort=sort, limit_rows=_WINDOW_LIMIT, tokens=search_tokens(q))
+    truncated = window_truncated or capped
     attrs = _attach_attrs(repos, storage, heads, attrs)
     infos = _storage_infos(repos, dict.fromkeys(h["storage_name"] for h in heads))
     opening = (f'{{"generated_at":{json.dumps(utc_now_iso())},"truncated":{json.dumps(truncated)},'
-               f'"matched_count":{json.dumps(matched)},'
-               f'"filters":{json.dumps(_echo(storage, path, flt), separators=(",", ":"))},"rows":[').encode()
+               f'"capped":{json.dumps(capped)},"matched_count":{json.dumps(matched)},'
+               f'"filters":{json.dumps(_echo(storage, path, q, flt), separators=(",", ":"))},"rows":[').encode()
     return StreamingResponse(_export_body(repos, base, heads, infos, opening, unreadable,
                                           extra=lambda h: attrs[h["target"]]),
                              media_type="application/json")
@@ -767,10 +881,10 @@ def storage_totals(request: Request, storage: str = Query(..., max_length=512, p
             filesystem = storage_filesystem(
                 storage, repos.agents.list_nodes(stale_seconds=settings.agent_report_stale_seconds))
         return {**body, "filesystem": filesystem}
-    heads, matched, window_truncated, _ = _select_heads(
+    heads, _, window_truncated, capped, _ = _select_heads(
         repos, base=_base(request), unreadable=set(), storage=storage, path=None, requester=flt.requester, pvf=flt.pv,
         order="desc", sort="last_scan", limit_rows=_WINDOW_LIMIT)
-    truncated = window_truncated or (matched is not None and matched > _WINDOW_LIMIT)
+    truncated = window_truncated or capped
     return {**_totals(request, heads, truncated, storage=storage), "filesystem": None, "filters": flt.echo()}
 
 

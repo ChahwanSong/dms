@@ -19,7 +19,7 @@ import {
 //   무필터: 「이 스토리지 합계(?) · 실 사용량 · 파일 · 디렉터리 · hot 비율 · df %(사용 / 전체)」 -- df 90% 이상은 주의색.
 //   필터:   「필터 합계(?) 대상 N개 · 실 사용량 · 파일 · 디렉터리 · hot 비율 · 이 스토리지 X」 -- 마지막은 흐린 글자(같은 키라 캐시).
 // 줄 안에서 말하는 것: 부분 합 「이상」(값 모름을 뺀 합·창을 넘어 잘린 합 -- 스토리지별 비교와 같은 규칙), 잘못된 인코딩 이름(1개
-// 이상일 때만, 주의색), 요약 읽는 중(useStorageTotals 의 1초 이어 읽기), 경로 검색이 걸렸으면 「합계에 들어가지 않는다」, 실패와
+// 이상일 때만, 주의색), 요약 읽는 중(useStorageTotals 의 1초 이어 읽기), 검색(경로·PV 이름)이 걸렸으면 「합계에 들어가지 않는다」, 실패와
 // [다시 시도](첫 실패·재조회 실패 둘 다 -- 오류 중엔 이어 읽기가 멈춘다). 로딩은 줄 높이의 Skeleton.
 // 필터일 때 스토리지 전체(2026-10-29 리뷰 -- 예전엔 필터를 걸어도 스토리지 합계 블록이 위에 그대로 남아 제 실패·df 경고를 말했다):
 // 그 쿼리의 실패와 [다시 시도](「이 스토리지 합계 다시 시도」 -- 필터 합계의 것과 따로 부른다)와 df 90% 이상 주의(「이 스토리지 df」)는
@@ -105,8 +105,8 @@ function BaseSummary({ t, now, reading }: { t: UsageStorageTotals; now: number; 
   );
 }
 
-export function TotalsLine({ storage, now, attr, pathQ }: {
-  storage: string; now: number; attr: UsageAttrFilter; pathQ: string;
+export function TotalsLine({ storage, now, attr, searchQ }: {
+  storage: string; now: number; attr: UsageAttrFilter; searchQ: string;
 }) {
   const filtered = hasAttr(attr);
   const q = useStorageTotals(storage, filtered ? attr : undefined);
@@ -212,7 +212,7 @@ export function TotalsLine({ storage, now, attr, pathQ }: {
           {`${INVALID_NAMES_LABEL} ${n(invalid)}개${lowerBound(t.invalid_name_entries, invalid) ? " 이상" : ""}`}</span>
       )}
       {reading && <span className="whitespace-nowrap text-xs text-muted">{`요약 읽는 중 ${n(count(t.pending_count))}개`}</span>}
-      {pathQ !== "" && <span className="text-xs text-muted break-keep">경로 검색은 합계에 들어가지 않습니다</span>}
+      {searchQ !== "" && <span className="text-xs text-muted break-keep">검색은 합계에 들어가지 않습니다</span>}
       {q.isError && (
         <span className="inline-flex flex-wrap items-baseline gap-x-2 text-xs text-muted">
           합계를 새로 고치지 못했습니다{retry}</span>

@@ -728,8 +728,10 @@ def test_usage_filter_queries_keep_the_scan_target_index(tmp_path):
     repos.data_jobs.scan_target_heads(storage="s1", requester="alice", limit=101, with_matched=True)
     repos.data_jobs.scan_target_heads(storage="s1", path="team", requester="alice", sort="scans", limit=None)
     repos.data_jobs.recorded_pv_blocks("s1", ["a", "b"])
+    # 검색 토큰(2026-10-29 -- lower(target) LIKE 는 인덱스로 거를 수 없지만 storage_name 접두로 스토리지 하나에 내려가는 건 같다)
+    repos.data_jobs.scan_target_heads(storage="s1", tokens=["Team", "a_b"], limit=101, with_matched=True)
     db.query = orig
-    assert len(captured) == 3
+    assert len(captured) == 4
     for sql, params in captured:
         plan = " | ".join(r["detail"] for r in db.query("EXPLAIN QUERY PLAN " + sql, params))
         assert "idx_data_jobs_scan_target" in plan, (sql, plan)
