@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, apiGet, apiSend } from "../../lib/api";
 import type { PurgeStorageHistoryResult, UnregisteredStorage, UsageAttrFilter, UsageExport, UsageFacets,
               UsageFiltersEcho, UsageHistory, UsageScope, UsageStorageTotals, UsageStorages,
@@ -14,9 +14,10 @@ import { DELETE_REQUESTS_INVALIDATES } from "../jobs/useJobs";
 // 빈 문자열도 이름이다(변조·구형 행의 빈 이름 탭 -- 서버도 실린 storage 는 빈 값이라도 정확히 일치로 본다). 탭을 모르는
 // 동안엔 패널(StoragePanel)이 아예 그려지지 않으니 「아직 모름」 표시를 이 값에 싣지 않는다.
 export type UsageSort = "last_scan" | "scans" | "bytes" | "files" | "hot";
+export const USAGE_SORTS: readonly UsageSort[] = ["last_scan", "scans", "bytes", "files", "hot"];
 // attr(2026-10-29 사용자 요청 「사용자·PV 이름·namespace 등으로 필터」): 클러스터·namespace·PV 이름(pvc)·StorageClass·권한 사용자·
 // 구분(scope)·요청자. 모두 **대상 단위**다(서버 routes_usage -- 한 경로의 scan 이력이 통째로 걸리거나 빠진다: 스캔 횟수·최근
-// scan·이력은 늘 그 경로의 전체 기록). 경로 검색(path)·정렬과 달리 URL 에 실린다(UsageAnalysis).
+// scan·이력은 늘 그 경로의 전체 기록). 2026-10-29 부터 경로 검색(q)·정렬(sort·order)도 URL 에 실린다(UsageAnalysis).
 export interface TargetFilter {
   storage: string; path: string; order: "desc" | "asc"; sort: UsageSort; attr: UsageAttrFilter;
 }
@@ -161,21 +162,21 @@ export const useUsageStorages = () =>
              queryFn: () => apiGet<UsageStorages>("/api/admin/usage/storages"), staleTime: 30_000 });
 
 // 스토리지 합계(2026-10-21 사용자 요청 「스토리지별 사용량 및 정보들의 총합」): 스토리지 하나씩(서버가 그 스토리지 대상들의 요약을
-// 읽는다 -- 전 스토리지를 한 번에 부르면 탭을 열 때마다 모든 대상을 읽는다). 패널(StorageTotals)과 「스토리지별 비교」(UsageOverview)가
-// **같은 키**라 숫자 한 벌을 본다. 키를 ["usage-storages"] 아래에 두는 이유: 작업 삭제·미등록 정리(DELETE_REQUESTS_INVALIDATES)와
+// 읽는다 -- 전 스토리지를 한 번에 부르면 탭을 열 때마다 모든 대상을 읽는다). 경로별의 합계 줄(TotalsLine)과 「스토리지별」 화면의
+// 비교 표(UsageOverview.CompareTable -- 열 정렬 때문에 useQueries 로 한 번에)가 **같은 키**라 숫자 한 벌을 본다. 키를 ["usage-storages"] 아래에 두는 이유: 작업 삭제·미등록 정리(DELETE_REQUESTS_INVALIDATES)와
 // 스토리지 생성·수정·삭제(useStorages)가 그 접두를 무효화한다 -- 무효화 목록을 따로 고치지 않아도 합계가 함께 새로 고쳐진다.
 // 차가운 캐시: 서버는 한 호출에 요약을 정해진 수만큼만 읽고 나머지를 pending 으로 센다 -- 이번 호출이 진전했으면(progressed)
 // 1초 뒤 다시 불러 이어 읽게 하고(서버는 못 읽은 리포트를 잠시 기억해 다음 호출이 그 뒤를 연다), 진전이 없으면 멈춘다(같은
 // 실패를 1초마다 되풀이하지 않게). 오류 중엔 멈춘다 -- 그때 패널은 「읽는 중」이라 말하지 않는다(StorageTotals.reading).
 // 빈 이름도 이름이다(encodeURIComponent("") = "" -- 서버는 실린 storage 를 빈 값이라도 정확 일치로 본다).
 // 필터 합계(2026-10-29, attr 이 있을 때만): 키 끝에 필터 조각, URL 에 필터(경로 검색은 싣지 않는다 -- 합계는 경로 검색과 무관,
-// 2026-10-21 규칙 유지). 필터가 없으면 키·URL 이 그 전과 같다(UsageOverview 와 숫자 한 벌). 필터 합계는 서버 메아리(filters)가
+// 2026-10-21 규칙 유지). 필터가 없으면 키·URL 이 그 전과 같다(스토리지별 비교 표와 숫자 한 벌). 필터 합계는 서버 메아리(filters)가
 // 없거나 다르면 오류다(옛 서버가 필터를 무시하고 스토리지 전체 합계를 「필터 합계」로 보이지 않게).
-export const useStorageTotals = (storage: string, attr?: UsageAttrFilter) => {
+export const storageTotalsOptions = (storage: string, attr?: UsageAttrFilter) => {
   const a = attr ?? {};
   const filtered = hasAttr(a);
   const ak = filtered ? attrKey(a) : "";
-  return useQuery({
+  return queryOptions({
     queryKey: filtered ? ["usage-storages", "totals", storage, ak] : ["usage-storages", "totals", storage],
     queryFn: async (): Promise<UsageStorageTotals> => {
       if (!filtered) {
@@ -196,6 +197,7 @@ export const useStorageTotals = (storage: string, attr?: UsageAttrFilter) => {
     },
   });
 };
+export const useStorageTotals = (storage: string, attr?: UsageAttrFilter) => useQuery(storageTotalsOptions(storage, attr));
 
 // 성공 scan 기록이 있는 스토리지 이름 -- 요약(useUsageStorages)을 못 받았을 때만 쓰는 대체 원천(enabled): 탭은 등록
 // 목록 ∪ 이 이름들로 그리고 대상 수는 모름으로 둔다.

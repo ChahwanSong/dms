@@ -7,7 +7,7 @@ import { Segmented } from "../../components/ui/Segmented";
 import { HoverTip, placeBeside, useHoverAnchor, type Rect } from "../../components/ui/HoverTip";
 import { SizeDistribution } from "../../components/ui/SizeDistribution";
 import type { ApiError } from "../../lib/api";
-import type { HistogramBucket, UsagePoint, UsagePv } from "../../lib/types";
+import type { HistogramBucket, UsageAttrFilter, UsagePoint, UsagePv } from "../../lib/types";
 import { kstStampEpoch, kstDay } from "../../lib/datetime";
 import { pctText, sizeDistribution } from "../../lib/sizeBuckets";
 import { HelpTip } from "../../components/ui/HelpTip";
@@ -18,9 +18,10 @@ import {
   ATIME_APPROX_NOTE, AXIS_MEANING, HOT_AGE_MAX_DAYS, ageLabel, hotRatio, humanBytes, pointEpoch, stackLayout, tempColorOf,
 } from "./usageStats";
 
-// 펼친 타깃 상세(2026-09-14 행 아래 펼침 → 2026-10-20 UsageAnalysis 에서 분리·정리). 2026-10-20 정리(사용자 요청 「깔끔하고
-// 심플하고 직관적으로」): 요약 타일 4개(카드 안의 카드) → 한 줄 수치(dl), 표시 창·온도 축은 공용 Segmented(aria-pressed),
-// 긴 캡션은 제목 옆 HelpTip, 스캔 이력 표는 <details> 기본 닫힘 -- 이력 29건 타깃의 펼침 높이가 1,823px 였다.
+// 타깃 상세(2026-09-14 행 아래 펼침 → 2026-10-20 UsageAnalysis 에서 분리·정리 → 2026-10-29 오른쪽 시트 TargetSheet 의 본문).
+// 2026-10-20 정리(사용자 요청 「깔끔하고 심플하고 직관적으로」): 요약 타일 4개(카드 안의 카드) → 한 줄 수치(dl), 표시 창·온도
+// 축은 공용 Segmented(aria-pressed), 긴 캡션은 제목 옆 HelpTip, 스캔 이력 표는 <details> 기본 닫힘 -- 이력 29건 타깃의 펼침
+// 높이가 1,823px 였다.
 //
 // 절대 시각은 공유 datetime 헬퍼(KST)로 통일했다 -- kstStampEpoch(초 -> KST 벽시계), kstDay(초 -> KST MM-DD). 온도 열 축
 // 라벨은 폭(max-w-12) 때문에 MM-DD 만 쓰고 분 단위는 툴팁이 든다(실화면 확인).
@@ -42,8 +43,8 @@ const TEMP_CAPTIONS: Record<string, string> = {
 
 // 온도 열 툴팁(2026-10-02). 예전엔 열 번호 비율(i/n)로 **차트 전체 폭** 위에 놓았는데, 열은 폭 상한(max-w-12)
 // 때문에 왼쪽에 몰려 있어 툴팁이 열에서 수백 px 떨어진 곳에 떴다(실측: 첫 열 x=299 인데 툴팁 x=407, 끝 열 x=515 인데
-// 1082). 이제 열의 실제 화면 사각형 옆(HoverTip placeBeside -- 키가 큰 범례라 위보다 옆)에 붙고, 펼친 행 안(표
-// 래퍼 overflow-x-auto)에 갇혀 잘리지 않게 포털로 뜬다.
+// 1082). 이제 열의 실제 화면 사각형 옆(HoverTip placeBeside -- 키가 큰 범례라 위보다 옆)에 붙고, 시트 본문(스크롤
+// 상자)에 갇혀 잘리지 않게 포털로 뜬다.
 function TempTooltip({ point, buckets, tempKey, anchor, onClose }: {
   point: UsagePoint; buckets: HistogramBucket[]; tempKey: string;
   anchor: Rect; onClose: () => void;
@@ -214,16 +215,18 @@ function newestPoint(points: UsagePoint[]): UsagePoint | null {
   return best;
 }
 
-// 타깃 1건의 상세(「최신 scan」 블록 = 수치 줄 | 파일 크기 분포 → 실 사용량 추이 → 온도 추이 → 스캔 이력). 목록의 **선택한 행
-// 바로 아래에 펼쳐진다**(expand). 표시 창·온도 축 state 는 여기 국소라 타깃을 바꾸면 초기화된다 -- 다른 타깃의 잔류 선택이 새
-// 타깃에 묻어 가지 않는다. showTitle 은 목록 밖 폴백 칸(선택 타깃이 지금 목록에 없을 때)에서만 켠다 -- 펼침 행 안에서는 행
-// 자체가 제목이다. latest = 목록 행의 최신 성공 scan(크기 분포의 기준 -- 폴백 칸엔 행이 없어 undefined).
-// pv(2026-10-29) = 목록 행의 PV 소속(PV 를 담는 탭에서만 -- 머리에 「PV 소속」·「권한 사용자」, 폴백 칸엔 행이 없어 없음).
+// 타깃 1건의 상세(소속 → 「최신 scan」 블록 = 수치 줄 + 파일 크기 분포 → 실 사용량 추이 → 온도 추이 → 스캔 이력). 오른쪽 시트
+// (TargetSheet) 안에서 한 번에 스크롤한다 -- 제목(경로)은 시트 머리가 말한다. 표시 창·온도 축 state 는 여기 국소다: 시트가
+// ↑↓로 경로를 바꾸면 key={target} 로 새로 그려 초기화한다 -- 다른 타깃의 잔류 선택이 새 타깃에 묻어 가지 않는다.
+// latest = 목록 행의 최신 성공 scan(크기 분포의 기준 -- 목록 밖 경로면 행이 없어 undefined).
+// pv(2026-10-29) = 목록 행의 PV 소속(PV 를 담는 탭에서만 -- 머리에 「PV 소속」·「권한 사용자」, 목록 밖이면 행이 없어 없음).
+// onFilter = 소속 글자(PV 이름·사용자)를 누르면 그 필터를 건다(시트가 닫힌다 -- PvHead).
 // requesterFiltered = 요청자 필터가 켜졌다: 필터는 경로 단위라 아래 이력은 다른 요청자의 scan 도 담는다 -- 그 사실을 말한다.
-export function TargetDetail({ storage, target, showTitle, latest, pv = null, multiCluster = false,
-                               requesterFiltered = false }: {
-  storage: string; target: string; showTitle: boolean; latest?: UsagePoint | null;
+export function TargetDetail({ storage, target, latest, pv = null, multiCluster = false, requesterFiltered = false,
+                               onFilter }: {
+  storage: string; target: string; latest?: UsagePoint | null;
   pv?: UsagePv | null; multiCluster?: boolean; requesterFiltered?: boolean;
+  onFilter?: (a: UsageAttrFilter) => void;
 }) {
   const navigate = useNavigate();
   const [windowLimit, setWindowLimit] = useState<number>(HISTORY_WINDOWS[0].value);
@@ -269,12 +272,9 @@ export function TargetDetail({ storage, target, showTitle, latest, pv = null, mu
   return (
     // 폭 상한 = 실 사용량 차트(TimeSeriesChart max-w-3xl) -- 소제목 줄의 컨트롤이 차트 오른쪽 끝에 맞는다.
     <div className="max-w-3xl space-y-5">
-      {showTitle && (
-        <h3 className="text-base font-medium text-ink [overflow-wrap:anywhere]">{target}</h3>
-      )}
       {(pv !== null || requesterFiltered) && (
         <div className="space-y-1">
-          {pv !== null && <PvHead pv={pv} multiCluster={multiCluster} />}
+          {pv !== null && <PvHead pv={pv} multiCluster={multiCluster} onFilter={onFilter} />}
           {requesterFiltered && (
             <p className="text-xs text-muted break-keep">이력은 요청자와 무관한 이 경로의 전체 이력입니다</p>
           )}
@@ -288,12 +288,12 @@ export function TargetDetail({ storage, target, showTitle, latest, pv = null, mu
           ? `성공 scan ${skipped}건의 리포트를 읽지 못해 표시할 이력이 없습니다`
           : "이 타깃의 성공 scan 이 없습니다"}</p>
       ) : (<>
-        {/* 「최신 scan」 블록(2026-10-21): 수치 줄 | 파일 크기 분포. lg 에선 나란히(수치 2×2) -- 상세가 늘어나는 높이를 분포
-            높이로 묶는다. sm~lg 는 수치 4칸 한 줄 + 분포 아래(지금까지의 모양), 그 아래 폭은 2칸. 스토리지 합계와 같은 문법. */}
-        <div className="grid gap-x-8 gap-y-5 lg:grid-cols-[18rem_minmax(0,1fr)]">
+        {/* 「최신 scan」 블록(2026-10-21): 수치 줄 + 파일 크기 분포. 시트(640px, 2026-10-29)에선 수치 4칸 한 줄 + 분포 아래 --
+            뷰포트 lg 의 나란히 배치는 시트 폭에서 분포를 280px 로 눌렀다. sm 아래(전체 화면 시트)는 2칸. 스토리지 합계와 같은 문법. */}
+        <div className="grid gap-y-5">
           {/* null ≠ 0: 모름은 "—" -- 0 B 로 그리면 "다 지워졌다"는 거짓이 된다 */}
           <dl aria-label="최신 scan 요약"
-              className="grid grid-cols-2 content-start gap-x-6 gap-y-3 sm:grid-cols-4 lg:grid-cols-2">
+              className="grid grid-cols-2 content-start gap-x-6 gap-y-3 sm:grid-cols-4">
             <Stat label="최신 실 사용량" value={latestCharted !== null ? humanBytes(latestCharted.bytes) : "—"}
                   title={latestCharted !== null ? exactBytes(latestCharted.bytes) : undefined} />
             <Stat label="직전 스캔 대비"

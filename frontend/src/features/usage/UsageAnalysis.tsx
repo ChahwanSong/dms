@@ -1,135 +1,108 @@
 import { useEffect, useRef, useState } from "react";
-import { Link, useSearchParams } from "react-router-dom";
-import { HardDrive, Info } from "lucide-react";
-import { Card } from "../../components/ui/Card";
+import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
+import { Info } from "lucide-react";
 import { Skeleton } from "../../components/ui/Skeleton";
-import { Tabs, type TabItem } from "../../components/ui/Tabs";
 import type { ApiError } from "../../lib/api";
-import { useStorages } from "../storages/useStorages";
 import type { UsageAttrFilter } from "../../lib/types";
-import {
-  ATTR_KEYS, cleanAttr, usePurgeUnregisteredStorage, useScanStorages, useUnregisteredStorages, useUsageStorages,
-  type UsageSort,
-} from "./useUsage";
-import { buildStorageTabs, defaultStorage, storageLabel, type StorageTab } from "./usageTabs";
+import { ATTR_KEYS, USAGE_SORTS, cleanAttr, usePurgeUnregisteredStorage, type UsageSort } from "./useUsage";
+import { useActiveStorage } from "./useActiveStorage";
+import { storageLabel } from "./usageTabs";
+import { rememberPaths } from "./usageMemory";
+import { UsageHeader } from "./UsageHeader";
+import { ScopeBar } from "./StorageSelect";
 import { StoragePanel } from "./StoragePanel";
-import { UsageOverview } from "./UsageOverview";
 import { PurgeResult } from "./UnregisteredStorages";
+import { NoStorages, sourceNotices } from "./UsageParts";
 
 // 순수 규칙은 usageStats(화면·CSV 공용 한 벌, 2026-10-02 분리) -- 기존 import 경로 호환을 위해 다시 내보낸다.
 export { HOT_AGE_MAX_DAYS, hotRatio, pointEpoch, stackLayout } from "./usageStats";
 export { staleClass } from "./TargetTable";
 
-// 사용량 분석(2026-10-20 스토리지별 분할, 사용자 요청: 「각 스토리지 별로 처음부터 나뉘어져서 보이게끔 하고 필터 및 서버의
-// 스캔도 각 스토리지 별로」 + 「깔끔하고 심플하고 직관적으로」). 예전엔 첫 화면이 「전체 스토리지」 한 목록이라 정렬·검색이
-// 전 스토리지의 최근 스캔 5천 개 창에서 돌았다. 이제 처음부터 스토리지 탭 하나를 보고, 목록·정렬·CSV 요청에 늘 storage 가
-// 실린다(서버의 지표 정렬 창도 그 스토리지 안에서 -- routes_usage). 「전체」 탭은 없다.
+// 사용량 분석 「경로별」(2026-10-20 스토리지별 분할 -- 사용자 요청: 「각 스토리지 별로 처음부터 나뉘어져서 보이게끔 하고 필터 및
+// 서버의 스캔도 각 스토리지 별로」 + 「깔끔하고 심플하고 직관적으로」 → 2026-10-29 하위 메뉴, 사용자 결정 「권장사항대로」). 처음부터
+// 스토리지 하나를 본다: 목록·정렬·CSV 요청에 늘 storage 가 실린다(서버의 지표 정렬 창도 그 스토리지 안에서 -- routes_usage).
+// 사이드바 「사용량 분석」으로 들어오면 여기다(매일 쓰는 표 -- 열 때 요청이 예전과 같다). 스토리지끼리의 비교는 「스토리지별」 탭
+// (StoragesPage)이다.
 //
-// 구성: 머리말 → 접힌 「스토리지별 비교」(2026-10-21, UsageOverview) → (정리 직후) 결과 줄 → 스토리지 탭(usageTabs: 등록
-// 이름순 | 미등록 이름순) → 탭 패널 = 카드 하나(StoragePanel -- 맨 위에 「이 스토리지 합계」). 미등록 스토리지는 따로 뜨던 칸
-// 대신 「미등록」 표시 탭이 되고, 정리 버튼은 그 탭의 경고 띠에 있다.
+// 구성: 머리(h1 · 설명 · 하위 탭 UsageTabs) → 알림 자리(있을 때만: 정리 결과 · 정리 실패 · 원천 실패 · 없는 storage 안내) → 범위 줄
+// (스토리지 select + 메타 줄, StorageSelect) → 패널(StoragePanel: 미등록 경고 띠 · 도구 줄 · 필터 줄 · 합계 줄 · 표 · 각주 · 상세 시트).
+// 바깥 카드는 없다(카드 안에 카드를 넣지 않는다 -- 합계 줄·표가 각자 1px 테두리).
 //
-// URL 이 진실이다: ?storage= = 탭, &target= = 그 탭 안에서 펼친 행 -- 새로고침·딥링크에서 같은 화면이 나온다(옛 링크
-// ?storage=&target= 의 뜻 그대로). storage 가 없으면 기본 탭(usageTabs.defaultStorage)을 **파생**한다 -- URL 에 쓰지 않아
-// effect 도 히스토리 항목도 없다. 한 번 고른 기본 탭은 그 탭이 남아 있는 동안 붙잡는다(리뷰: 요약 재조회로 대상 수가 바뀌면
-// 다시 계산된 기본 탭이 보던 스토리지를 바꿔 버렸다). 탭을 바꾸면 target 은 버린다(다른 스토리지로 펼침이 따라가지 않게).
-// 행을 접어도 storage 는 남긴다(빈 URL 로 돌리면 기본 탭으로 튄다).
-//
-// 필터(2026-10-29 -- 클러스터·namespace·PV 이름·StorageClass·권한 사용자·구분·요청자)도 URL 에 산다(키 = 서버 쿼리 이름 = PV
-// 탐색 화면의 키, useUsage.ATTR_KEYS): 새로고침·링크 공유에 남는다. URL 쓰기는 늘 지금 파라미터에서 바꿀 키만 고친다(동기화 이력
-// 화면 관용 -- 통째로 덮으면 탭 전환·행 펼침이 필터를 조용히 지웠다). 필터는 탭을 바꿔도 남고(같은 사용자·namespace 를 스토리지
-// 마다 비교), 그 스토리지에 없는 값은 필터 줄이 「(이 스토리지에 없음)」으로 보여 풀 수 있게 한다. 필터 변경은 replace(뒤로 가기가
-// 선택 하나하나를 되짚지 않게), 탭 전환은 push 그대로. 경로 검색·정렬은 여전히 페이지 상태다.
+// URL 이 진실이다: ?storage= = 보는 스토리지(useActiveStorage -- 없으면 기본 스토리지를 파생·붙잡기, URL 에 쓰지 않는다), 필터 일곱
+// (키 = 서버 쿼리 이름 = PV 탐색 화면의 키, useUsage.ATTR_KEYS), q = 경로 검색, sort·order = 열 정렬(기본값 last_scan·desc 는 생략),
+// &target= = 그 위에 열린 경로 상세 시트. 새로고침·딥링크·링크 공유에서 같은 화면이 나온다(옛 링크 ?storage=&target= 은 같은
+// 라우트라 리다이렉트 없이 시트가 열린 채로). URL 쓰기는 늘 지금 파라미터에서 바꿀 키만 고친다(동기화 이력 화면 관용 -- 통째로 덮으면
+// 스토리지 전환·시트 열기가 필터를 조용히 지웠다). 기록 방식: 스토리지 = push(select 300ms 디바운스), 필터·검색·정렬 = replace(뒤로
+// 가기가 선택·타이핑 하나하나를 되짚지 않게), 시트 = 아래 sheet 주석. 지금 쿼리(target 제외)는 sessionStorage 에도 적는다(usageMemory
+// -- 「경로별」 탭 링크가 다른 탭에서 돌아올 때 복원한다).
 
-const PANEL_ID_PREFIX = "usage-storage";
-
-function TabLabel({ tab, selected }: { tab: StorageTab; selected: boolean }) {
-  const n = tab.targetCount;
-  // 대상 수 필은 요약이 왔을 때만(모름 ≠ 0). 기록 0개는 흐리게. 숫자 필은 보조기기에서 숨기고 「대상 N개」를 sr-only 한
-  // 덩어리로 읽힌다 -- 숫자와 「개」를 다른 노드로 쪼개면 이름 계산이 「2 개」로 띄운다. aria-label 로 탭 전체를 덮지 않는다
-  // (보이는 이름 · 숫자가 낭독 이름 안에 그대로 있다). 낱말 사이 공백은 글자 노드로(인라인 span 은 이름 계산에서 붙는다).
-  const pill = n === null ? null
-    : selected ? "bg-infobg text-accent"
-    : n === 0 ? "bg-line/40 text-muted"
-    : "bg-line/70 text-ink/70";
-  return (
-    <>
-      <span className={`max-w-[14rem] truncate ${tab.name === "" ? "italic" : ""}`} title={storageLabel(tab.name)}>
-        {storageLabel(tab.name)}</span>
-      {!tab.registered && (<>{" "}
-        <span className="rounded border border-attn/30 bg-attnbg px-1 text-[11px] leading-4 text-attn">미등록</span>
-      </>)}
-      {n !== null && (<>{" "}
-        <span aria-hidden className={`min-w-[1.25rem] rounded-full px-1.5 text-center text-xs leading-5 tabular-nums ${pill}`}>
-          {n.toLocaleString("ko-KR")}</span>
-        <span className="sr-only">{`대상 ${n.toLocaleString("ko-KR")}개`}</span>
-      </>)}
-    </>
-  );
-}
+// 시트를 이 세션에서 push 로 열었다는 히스토리 항목 표지(location.state 의 키) -- 닫기가 뒤로 갈지 replace 할지 가른다.
+const SHEET_STATE = "usageSheet";
+const isSort = (x: string | null): x is UsageSort => x !== null && (USAGE_SORTS as readonly string[]).includes(x);
+const withQ = (p: URLSearchParams, v: string) => {
+  const next = new URLSearchParams(p);
+  if (v === "") next.delete("q"); else next.set("q", v);
+  return next;
+};
 
 export function UsageAnalysis() {
   const [params, setParams] = useSearchParams();
-  const storageParam = params.get("storage");
+  const location = useLocation();
+  const navigate = useNavigate();
   const targetParam = params.get("target");
   // 필터: 값이 있는 키만(빈 값·모르는 구분 값은 없는 것으로 -- 서버가 422 로 거절할 값을 싣지 않는다). 쿼리키는 직렬화한
   // 문자열(useUsage.attrKey)이라 객체를 렌더마다 새로 만들어도 재조회가 없다.
   const attr = cleanAttr(Object.fromEntries(ATTR_KEYS.map((k) => [k, params.get(k)])));
+  // 디바운스 타이머에서 부르는 URL 쓰기는 그때의 URL 위에서(마지막 렌더의 파라미터·setParams·state) -- 친 순간의 파라미터를 붙잡으면
+  // 그 사이 바뀐 다른 키(정렬·스토리지 select 의 디바운스 등)를 되돌리고, 그 사이 열린 시트 항목의 표지(state)를 지운다.
+  const latest = useRef({ params, setParams, state: location.state as unknown });
+  latest.current = { params, setParams, state: location.state };
 
-  // 경로 검색(부분 문자열, 300ms 디바운스 -- 타이핑마다 GROUP BY 를 쏘지 않는다)과 정렬은 페이지 상태 -- 탭을 바꿔도 남는다.
-  // 정렬(2026-10-02 최근 스캔 → 2026-10-19 열 정렬): 기본 최근 스캔 내림차순. 서버가 limit 전에 정렬한다(useUsage 주석).
-  // 같은 열을 다시 누르면 방향만 바뀌고, 다른 열은 내림차순(큰·많은·최근 것 위)부터 시작한다.
-  const [input, setInput] = useState("");
-  const [pathQ, setPathQ] = useState("");
-  const [sort, setSort] = useState<UsageSort>("last_scan");
-  const [order, setOrder] = useState<"desc" | "asc">("desc");
+  // 정렬(2026-10-02 최근 스캔 → 2026-10-19 열 정렬 → 2026-10-29 URL): 기본 최근 스캔 내림차순(그 값은 URL 에서 생략). 서버가
+  // limit 전에 정렬한다(useUsage 주석). 같은 열을 다시 누르면 방향만 바뀌고, 다른 열은 내림차순(큰·많은·최근 것 위)부터 시작한다.
+  const sortParam = params.get("sort");
+  const sort: UsageSort = isSort(sortParam) ? sortParam : "last_scan";
+  const order: "desc" | "asc" = params.get("order") === "asc" ? "asc" : "desc";
   const sortBy = (col: UsageSort) => {
-    if (col === sort) setOrder((o) => (o === "desc" ? "asc" : "desc"));
-    else { setSort(col); setOrder("desc"); }
+    const nextOrder = col === sort && order === "desc" ? "asc" : "desc";
+    const next = new URLSearchParams(params);
+    if (col === "last_scan") next.delete("sort"); else next.set("sort", col);
+    if (nextOrder === "desc") next.delete("order"); else next.set("order", nextOrder);
+    setParams(next, { replace: true });
   };
+
+  // 경로 검색(부분 문자열, 300ms 디바운스 -- 타이핑마다 GROUP BY 를 쏘지 않는다): 입력칸은 이 페이지 상태, 디바운스한 값은 URL 의
+  // q(replace). URL 이 밖에서 바뀌면(뒤로 가기·탭 링크 복원) 입력칸을 따라 맞춘다 -- 우리가 방금 쓴 값의 메아리(wrote)는 건너뛴다
+  // (그 사이 더 친 글자를 지우지 않게).
+  const pathQ = (params.get("q") ?? "").trim();
+  const [input, setInput] = useState(pathQ);
+  const wrote = useRef<string | null>(null);
   useEffect(() => {
-    const t = setTimeout(() => setPathQ(input.trim()), 300);
+    if (wrote.current === pathQ) { wrote.current = null; return; }
+    if (input.trim() !== pathQ) setInput(pathQ);
+  }, [pathQ]);  // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    const v = input.trim();
+    if (v === pathQ) return;
+    const t = setTimeout(() => {
+      const { params: cur, setParams: set, state } = latest.current;
+      if ((cur.get("q") ?? "").trim() === v) return;           // 이미 실렸다(시트를 열며 함께 실었다 -- sheet.open)
+      wrote.current = v;
+      set(withQ(cur, v), { replace: true, state });
+    }, 300);
     return () => clearTimeout(t);
-  }, [input]);
+  }, [input]);  // eslint-disable-line react-hooks/exhaustive-deps
 
-  // 탭 원천 셋(usageTabs 머리 주석). 요약을 한 번도 못 받았으면 scan 기록 이름으로 탭만 그린다(대상 수 모름). 받아 둔 요약이
-  // 있으면 재조회가 실패해도 그것을 쓴다 -- isError 만 보면 백그라운드 재조회 한 번의 실패에 패널이 자리표시로 돌아갔다(리뷰).
-  const storagesQ = useStorages();
-  const summaryQ = useUsageStorages();
-  const unregQ = useUnregisteredStorages();
-  const summaryMissing = summaryQ.isError && summaryQ.data === undefined;
-  const scanQ = useScanStorages(summaryMissing);
-  const tabs = buildStorageTabs({
-    registered: storagesQ.data, summary: summaryQ.data?.storages, unregistered: unregQ.data,
-    scanNames: summaryMissing ? scanQ.data : undefined,
-  });
-  // 기본 탭은 「기록이 있는가」를 알아야 고를 수 있다 -- 요약(또는 그 대체 원천)이 올 때까지 패널은 자리표시다.
-  const ready = summaryQ.data !== undefined || (summaryMissing && !scanQ.isPending && !storagesQ.isPending);
-  // URL 의 storage 가 탭에 없다는 판정은 미등록 목록까지 온 뒤에만(실패 기록만 남은 미등록 이름은 거기에만 있다) --
-  // 로딩 중의 빈 목록으로 딥링크 탭에서 튕겨 나가지 않게.
-  const judgeable = ready && !unregQ.isPending;
-  const inTabs = storageParam !== null && tabs.some((t) => t.name === storageParam);
-  // 붙잡은 기본 탭(머리 주석): 탭 목록에 남아 있으면 그대로, 사라졌으면(정리·삭제) 다시 고른다. 렌더 중 상태 조정이다 --
-  // effect 로 하면 다른 탭이 한 번 그려진 뒤 바뀐다.
-  const [heldDefault, setHeldDefault] = useState<string | null>(null);
-  const fallbackTab = !ready ? null
-    : heldDefault !== null && tabs.some((t) => t.name === heldDefault) ? heldDefault
-    : defaultStorage(tabs);
-  if (fallbackTab !== null && fallbackTab !== heldDefault) setHeldDefault(fallbackTab);
-  const active = storageParam !== null && (inTabs || !judgeable) ? storageParam : fallbackTab;
-  const activeTab: StorageTab | null = active === null ? null
-    : tabs.find((t) => t.name === active)
-      // 딥링크가 원천보다 먼저 왔다 -- 목록 요청은 바로 병렬로 보낸다(메타 줄·띠는 원천이 오면 채워진다).
-      ?? { name: active, registered: true, targetCount: null, hasTargets: null, summary: null, unregistered: null,
-           info: null };
-  const activeTarget = storageParam !== null && storageParam === active ? targetParam : null;
-
-  // 정리(미등록 스토리지 기록) mutation 은 페이지가 소유한다(UnregisteredStorages 머리 주석) -- 다 지우면 그 탭과 띠가 사라진다.
+  // 정리(미등록 스토리지 기록) mutation 은 페이지가 소유한다(UnregisteredStorages 머리 주석) -- 다 지우면 그 스토리지와 띠가 사라진다.
+  // 결과 줄·정리 실패는 알림 자리에 남는다(같은 pathname 이라 다시 마운트되지 않는다).
   const purge = usePurgeUnregisteredStorage();
+  const purgedName = purge.isPending || purge.isSuccess ? purge.variables?.storage_name ?? null : null;
+  const s = useActiveStorage({ purged: purgedName });
+  const { tabs, active, activeTab } = s;
   const [progress, setProgress] = useState<number | null>(null);
   const resultRef = useRef<HTMLDivElement>(null);
   const focusResult = () => resultRef.current?.focus();
-  // 다 지워 그 탭(과 열린 확인 창)이 재조회로 사라지면 포커스가 <body> 로 떨어진다 -- 결과 줄로 옮긴다. 창이 살아 있으면
+  // 다 지워 그 스토리지(와 열린 확인 창)가 재조회로 사라지면 포커스가 <body> 로 떨어진다 -- 결과 줄로 옮긴다. 창이 살아 있으면
   // (일부 제외 등) 창이 닫히며 onCloseAutoFocus 가 같은 일을 한다. **정리 한 번에 한 번만**(submittedAt): 뒤의 재조회(창
   // 포커스·다른 관리자의 변경)마다 결과 줄로 끌어올려 읽던 표에서 화면이 튀지 않게(리뷰).
   const focusedFor = useRef<number | null>(null);
@@ -138,145 +111,105 @@ export function UsageAnalysis() {
     focusedFor.current = purge.submittedAt;
     if (document.activeElement === null || document.activeElement === document.body) focusResult();
   }, [purge.isSuccess, purge.submittedAt]);  // eslint-disable-line react-hooks/exhaustive-deps
-  // 첫 회차 전체 실패(409 storage_registered·503 등)인데 그 탭이 재조회로 이미 사라졌으면 창 안 오류가 보일 자리가 없다 --
-  // 페이지가 말한다(탭이 있으면 창이 말한다). 예: 다른 관리자가 같은 이름을 다시 등록해 미등록 목록에서 빠졌다.
+  // 첫 회차 전체 실패(409 storage_registered·503 등)인데 그 스토리지가 재조회로 이미 사라졌으면 창 안 오류가 보일 자리가 없다 --
+  // 페이지가 말한다(스토리지가 있으면 창이 말한다). 예: 다른 관리자가 같은 이름을 다시 등록해 미등록 목록에서 빠졌다.
   const failedName = purge.isError ? purge.variables?.storage_name ?? null : null;
-  const orphanError = failedName !== null && !(unregQ.data ?? []).some((r) => r.storage_name === failedName);
+  const orphanError = failedName !== null && !(s.unregQ.data ?? []).some((r) => r.storage_name === failedName);
 
-  // URL 의 storage 가 탭에 없으면(오타·정리됨·삭제됨) 기본 탭으로 돌리고 흐린 한 줄로 알린다(URL 은 replace 로 정리). 방금
-  // 정리해 사라진 탭이면 알리지 않는다 -- 결과 줄이 이미 말한다. 정리 mutation 은 무효화(재조회)가 끝나야 성공이 되므로 탭은
-  // 아직 진행 중(isPending)일 때 사라진다 -- 진행 중도 「방금 정리」로 본다.
-  const [notice, setNotice] = useState<string | null>(null);
-  useEffect(() => {
-    if (storageParam === null || !judgeable || inTabs) return;
-    const purged = (purge.isPending || purge.isSuccess) && purge.variables?.storage_name === storageParam;
-    setNotice(purged ? null : storageParam);
-    // storage·target 만 지운다 -- 필터는 기본 탭에 그대로 걸린다(필터 줄에서 풀 수 있다).
-    const next = new URLSearchParams(params);
-    next.delete("storage"); next.delete("target");
-    setParams(next, { replace: true });
-  }, [storageParam, judgeable, inTabs]);  // eslint-disable-line react-hooks/exhaustive-deps
+  // 경로별의 마지막 쿼리(target 제외)와 보는 스토리지를 적어 둔다(usageMemory) -- 탭 링크·스토리지별 표의 현재 행.
+  useEffect(() => { rememberPaths(location.search, active); }, [location.search, active]);
 
-  const selectTab = (name: string) => {
-    // 기본 탭(URL 에 없음)을 눌렀으면 URL 에 적는다 -- 그 뒤로는 그 탭이 링크·새로고침에도 남는다.
-    if (name === active && storageParam !== null) return;
-    setNotice(null);
-    const next = new URLSearchParams(params);
-    next.set("storage", name); next.delete("target");
-    setParams(next);
-  };
-  // 펼침은 한 번에 하나(사용자 요청 2026-09-14): 같은 행 재클릭 = 접기(target 만 제거), 다른 행 클릭 = 펼침 이동.
-  const toggle = (t: string) => {
-    if (active === null) return;
-    const next = new URLSearchParams(params);
-    next.set("storage", active);
-    if (t === activeTarget) next.delete("target"); else next.set("target", t);
-    setParams(next);
-  };
-  // 필터 변경: 필터 키만 다시 쓴다(replace). 펼친 행은 남긴다 -- 필터에 걸리지 않으면 표 아래 폴백 칸이 보인다.
-  const setAttr = (a: UsageAttrFilter) => {
+  // 필터 변경: 필터 키만 다시 쓴다(replace). 열린 시트는 없다(모달 -- 필터 줄은 시트가 닫혀 있을 때만 만질 수 있다).
+  const attrParams = (a: UsageAttrFilter) => {
     const next = new URLSearchParams(params);
     for (const k of ATTR_KEYS) { const v = a[k]; if (v !== undefined && v !== "") next.set(k, v); else next.delete(k); }
-    setParams(next, { replace: true });
+    return next;
   };
+  const setAttr = (a: UsageAttrFilter) => setParams(attrParams(a), { replace: true });
+  // 경로 상세 시트(2026-10-29 -- 행 아래 펼침 대신, 한 번에 하나는 그대로): 열기는 push(뒤로 가기 = 닫기, 안드로이드 뒤로 포함)이고
+  // 그 항목에 「이 세션에서 push 로 열었다」 표지(location.state)를 단다. ↑↓ 이웃 이동은 replace(표지 유지 -- 이동마다 히스토리를
+  // 쌓지 않는다). 닫기: 표지가 있으면 뒤로(navigate(-1) -- 모달이라 열린 동안 뒤 화면의 필터·검색·정렬은 바뀔 수 없어 잃는 상태가
+  // 없고, 「늘 replace 로 닫기」는 뒤로 가기에 죽은 한 칸을 남긴다), 없으면(옛 딥링크·새로고침한 다른 탭) target 만 지우는
+  // replace. 기본 스토리지에서 열면 storage 도 URL 에 적는다(딥링크 닫기가 남기는 URL 이 기본 스토리지로 튀지 않게 -- 뒤로 닫으면
+  // 열기 전 URL 이고, 그 기본 스토리지는 붙잡혀 있어 같은 스토리지다).
+  const pushedSheet = (location.state as { [SHEET_STATE]?: boolean } | null)?.[SHEET_STATE] === true;
+  const sheet = {
+    open: (t: string) => {
+      if (active === null) return;
+      // 아직 디바운스 중인 경로 검색은 지금 싣는다(지금 항목 replace → 시트 push) -- 열린 동안 뒤 화면 상태가 바뀌지 않아야 뒤로
+      // (닫기)가 잃는 것이 없고, 닫고 돌아온 항목에도 그 검색이 남는다.
+      const v = input.trim();
+      const base = v === pathQ ? params : withQ(params, v);
+      if (v !== pathQ) { wrote.current = v; setParams(base, { replace: true, state: location.state }); }
+      const next = new URLSearchParams(base);
+      next.set("storage", active); next.set("target", t);
+      setParams(next, { state: { [SHEET_STATE]: true } });
+    },
+    move: (t: string) => {
+      const next = new URLSearchParams(params);
+      next.set("target", t);
+      setParams(next, { replace: true, state: location.state });
+    },
+    close: () => {
+      if (pushedSheet) { navigate(-1); return; }
+      const next = new URLSearchParams(params);
+      next.delete("target");
+      setParams(next, { replace: true });
+    },
+    // 시트 안 소속 글자(PV 이름·권한 사용자): 필터 설정 + 시트 닫기를 한 번의 replace 로(필터 변경 관용과 같은 replace).
+    filter: (a: UsageAttrFilter) => {
+      const next = attrParams(a);
+      next.delete("target");
+      setParams(next, { replace: true });
+    },
+  };
+  const activeTarget = s.storageParam !== null && s.storageParam === active ? targetParam : null;
 
   const now = Date.now();
-  const items: TabItem[] = tabs.map((t, i) => ({
-    id: t.name,
-    separatorBefore: !t.registered && i > 0 && tabs[i - 1].registered,
-    content: <TabLabel tab={t} selected={t.name === active} />,
-  }));
-  const sourcesPending = storagesQ.isPending && summaryQ.isPending;
-  const noStorages = tabs.length === 0 && ready && !unregQ.isPending && !storagesQ.isPending;
+  const notices = [
+    purge.data && <PurgeResult key="purge" r={purge.data} innerRef={resultRef} onDismiss={() => purge.reset()} />,
+    orphanError && (
+      <p key="orphan" role="alert" className="text-sm text-bad [overflow-wrap:anywhere]">
+        {`${failedName}: ${(purge.error as ApiError).message}`}</p>
+    ),
+    ...sourceNotices(s),
+    s.notice !== null && (
+      <p key="missing" role="status" className="flex items-center gap-1.5 text-sm text-muted [overflow-wrap:anywhere]">
+        <Info aria-hidden className="h-4 w-4 shrink-0" />
+        {`‘${storageLabel(s.notice)}’ 스토리지의 사용량 기록이 없습니다 — 기본 스토리지를 보여 줍니다`}
+      </p>
+    ),
+  ].filter(Boolean);
 
   return (
-    <section className="space-y-5">
-      <header className="space-y-1">
-        <h1 className="text-2xl font-bold">사용량 분석</h1>
-        <p className="text-sm text-muted break-keep">
-          스토리지별 디렉터리 scan 이력 — 실 사용량과 데이터 온도(요청자와 무관한 모든 성공 scan).
-        </p>
-      </header>
+    <section className="space-y-4">
+      <UsageHeader title="사용량 분석"
+                   description="고른 스토리지의 경로마다 scan 이력 — 실 사용량과 데이터 온도(요청자와 무관한 모든 성공 scan)." />
 
-      {/* 스토리지별 비교(2026-10-21) -- 접힌 한 줄, 열면 스토리지마다의 합계 표(패널 합계와 같은 쿼리). 행 = 그 탭 선택. */}
-      {ready && <UsageOverview tabs={tabs} active={active} onSelect={selectTab} now={now}
-                              windowLimit={summaryQ.data?.window_limit ?? null} />}
+      {notices.length > 0 && <div className="space-y-2">{notices}</div>}
 
-      {(purge.data || orphanError || summaryQ.isError || unregQ.isError) && (
-        <div className="space-y-2">
-          {purge.data && <PurgeResult r={purge.data} innerRef={resultRef} onDismiss={() => purge.reset()} />}
-          {orphanError && (
-            <p role="alert" className="text-sm text-bad [overflow-wrap:anywhere]">
-              {`${failedName}: ${(purge.error as ApiError).message}`}</p>
-          )}
-          {/* 요약을 못 받아도 탭은 대체 원천(scan 기록 이름)으로 그려진다 -- 그 동안엔 흐린 한 줄로 「건수 모름」만 말한다(배포
-              중 옛 API 는 이 경로에 SPA index.html 을 200 으로 줘서, 원문 오류가 「Unexpected token '<'」 같은 파서 문장이었다).
-              대체 원천까지 실패하면 그때 오류다. 받아 둔 요약이 있는데 재조회만 실패했으면 그 사실만. */}
-          {summaryMissing && !scanQ.isError && (
-            <p className="flex items-center gap-1.5 text-sm text-muted">
-              <Info aria-hidden className="h-4 w-4 shrink-0" />스토리지별 대상 수를 불러오지 못해 건수 없이 표시합니다</p>
-          )}
-          {summaryMissing && scanQ.isError && (
-            <p className="text-sm text-bad">
-              {`스토리지별 요약을 불러오지 못했습니다 — ${(scanQ.error as ApiError).message}`}</p>
-          )}
-          {summaryQ.isError && !summaryMissing && (
-            <p className="text-sm text-bad">
-              {`스토리지별 요약을 새로 고치지 못했습니다 — ${(summaryQ.error as ApiError).message}`}</p>
-          )}
-          {unregQ.isError && (
-            <p className="text-sm text-bad">
-              {`미등록 스토리지 목록을 ${unregQ.data === undefined ? "불러오지" : "새로 고치지"} 못했습니다 — `
-                + (unregQ.error as ApiError).message}</p>
-          )}
-        </div>
-      )}
-
-      {sourcesPending ? (
+      {s.sourcesPending ? (
         <div className="space-y-4">
-          <div className="flex gap-3 py-2">
-            <span className="sr-only">스토리지 목록 불러오는 중</span>
-            {[0, 1, 2].map((i) => <Skeleton key={i} className="h-6 w-28" />)}
-          </div>
-          <Card><div className="space-y-2.5">{[0, 1, 2, 3].map((i) => <Skeleton key={i} className="h-5" />)}</div></Card>
+          <span className="sr-only">스토리지 목록 불러오는 중</span>
+          <Skeleton className="h-9 w-full sm:w-72" />
+          <div className="space-y-2.5">{[0, 1, 2, 3].map((i) => <Skeleton key={i} className="h-5" />)}</div>
         </div>
-      ) : noStorages ? (
-        <Card>
-          <div className="flex flex-col items-center gap-2 py-8 text-center">
-            <span aria-hidden className="grid h-10 w-10 place-items-center rounded-full bg-panel text-muted">
-              <HardDrive className="h-5 w-5" /></span>
-            <p className="text-sm font-medium text-ink">등록된 스토리지가 없습니다</p>
-            <p className="text-xs text-muted">스토리지를 등록하고 scan 을 실행하면 여기에 스토리지별 사용량이 쌓입니다.</p>
-            <Link to="/admin/storages" className="mt-1 text-sm text-accent hover:underline">스토리지 화면으로</Link>
+      ) : s.noStorages ? <NoStorages /> : (<>
+        <ScopeBar tabs={tabs} active={active} activeTab={activeTab} onSelect={s.select} now={now} />
+        {activeTab === null ? (
+          <div className="space-y-2.5">
+            <span className="sr-only">불러오는 중…</span>
+            {[0, 1, 2, 3].map((i) => <Skeleton key={i} className="h-5" />)}
           </div>
-        </Card>
-      ) : (
-        <Tabs label="스토리지" items={items} value={active} onSelect={selectTab} idPrefix={PANEL_ID_PREFIX}
-              panelClassName="mt-4 space-y-3">
-          {notice !== null && (
-            <p role="status" className="flex items-center gap-1.5 text-sm text-muted [overflow-wrap:anywhere]">
-              <Info aria-hidden className="h-4 w-4 shrink-0" />
-              {`‘${storageLabel(notice)}’ 스토리지의 사용량 기록이 없습니다 — 기본 탭을 보여 줍니다`}
-            </p>
-          )}
-          <Card>
-            {activeTab === null ? (
-              <div className="space-y-2.5">
-                <span className="sr-only">불러오는 중…</span>
-                {[0, 1, 2, 3].map((i) => <Skeleton key={i} className="h-5" />)}
-              </div>
-            ) : (
-              <StoragePanel key={activeTab.name} tab={activeTab}
-                            windowLimit={summaryQ.data?.window_limit ?? null}
-                            input={input} setInput={setInput} pathQ={pathQ}
-                            sort={sort} order={order} onSort={sortBy} attr={attr} onAttrChange={setAttr}
-                            activeTarget={activeTarget} onToggle={toggle} storages={storagesQ.data}
-                            purge={purge} progress={progress} setProgress={setProgress}
-                            onResultFocus={focusResult} now={now} />
-            )}
-          </Card>
-        </Tabs>
-      )}
+        ) : (
+          <StoragePanel key={activeTab.name} tab={activeTab} windowLimit={s.windowLimit}
+                        input={input} setInput={setInput} pathQ={pathQ}
+                        sort={sort} order={order} onSort={sortBy} attr={attr} onAttrChange={setAttr}
+                        activeTarget={activeTarget} sheet={sheet} storages={s.storagesQ.data}
+                        purge={purge} progress={progress} setProgress={setProgress}
+                        onResultFocus={focusResult} now={now} />
+        )}
+      </>)}
     </section>
   );
 }

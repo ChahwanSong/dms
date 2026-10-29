@@ -1,34 +1,36 @@
 import { useId } from "react";
 import { HelpTip } from "../../components/ui/HelpTip";
-import { Skeleton } from "../../components/ui/Skeleton";
 import { SizeDistribution } from "../../components/ui/SizeDistribution";
-import { ApiError } from "../../lib/api";
 import type { UsageAttrFilter, UsageStorageFilesystem, UsageStorageTotals, UsageTotalMetric } from "../../lib/types";
 import { agoText, ageDays, kstStampOrDash } from "../../lib/datetime";
 import { pctText } from "../../lib/sizeBuckets";
 import { INVALID_NAMES_HELP, INVALID_NAMES_LABEL } from "../../lib/scanCounters";
-import { UsageContractError, hasAttr, useStorageTotals } from "./useUsage";
+import { hasAttr, useStorageTotals } from "./useUsage";
 import { attrSummary } from "./UsageFilters";
 import { HOT_AGE_MAX_DAYS, humanBytes } from "./usageStats";
 import { SIZE_HELP, SectionHead, Stat } from "./UsageParts";
 import { staleClass } from "./TargetTable";
 
-// 스토리지 합계(2026-10-21 사용자 요청 「스토리지별 사용량 및 정보들의 총합」). 패널 맨 위(메타 줄·미등록 띠 아래), 표·검색 위.
+// 스토리지 합계(2026-10-21 사용자 요청 「스토리지별 사용량 및 정보들의 총합」).
 // 정의는 서버(routes_usage.storage_totals): **최상위 대상**(다른 대상 아래가 아닌 것)마다 최근 성공 scan 값의 합 -- 하위 대상은
 // 상위 scan 에 이미 들어 있어 더하지 않는다(목록 「파일 수」 열을 그냥 더하면 team ⊃ team/sub 가 이중으로 들어간다). 화면은 그
 // 정의와 뺀 것(하위·형식 오류·모름·읽는 중·창)과 scan 시점 범위를 각주 한 줄로 늘 말한다 -- 합계는 한 시점의 스냅숏이 아니다.
 // 경로 검색과 무관하다(스토리지 전체 -- 검색어를 요청에 싣지 않는다).
 //
-// 모양은 펼친 상세의 「최신 scan」 블록과 같은 문법(수치 dl | 파일 크기 분포, lg 에서 나란히) -- 타일·그림자 없이(카드 안의 카드
+// 2026-10-29 배치(사용자 결정 「권장사항대로」 -- 합계 두 벌을 한 줄로): 표 바로 위의 합계 줄(TotalsLine)이 숫자·df·인코딩 경고·
+// 「이상」·읽는 중·실패와 다시 시도를 말하고, 이 블록(StorageTotals)은 그 줄의 [자세히] 안에서만 그린다 -- 제목·불러오는 중·실패는
+// 줄이 이미 말하므로 여기엔 없다(값이 왔을 때만 그린다). 같은 쿼리 키라 요청이 늘지 않는다.
+//
+// 모양은 경로 상세의 「최신 scan」 블록과 같은 문법(수치 dl | 파일 크기 분포, lg 에서 나란히) -- 타일·그림자 없이(카드 안의 카드
 // 금지, 2026-10-20 정리). null ≠ 0: 값을 모르면 「—」, 모름을 뺀 합은 하한이라 값 뒤에 흐린 「이상」. 대상 0 이면 블록이 없다
-// (「0 B」는 「모름」을 0 으로 그리는 거짓 -- 빈 상태 안내가 이미 말한다). 실패해도 표를 막지 않는다(한 줄).
+// (「0 B」는 「모름」을 0 으로 그리는 거짓 -- 빈 상태 안내가 이미 말한다).
 //
 // 파일시스템(df)은 에이전트가 노드에서 잰 statvfs -- scan 하지 않은 경로·다른 스토리지·예약 블록이 섞여 scan 합계와 기준이 다르다.
 // 비율로 엮지 않고 나란히만 보인다. 여러 스토리지가 한 파일시스템일 수 있어 스토리지끼리 더하지 않는다(서버 계약).
 //
-// 필터 합계(2026-10-29, attr 이 있을 때 -- 스토리지 합계 카드 아래에 하나 더): 같은 정의를 **필터에 맞는 경로 집합** 위에서 한다.
-// 제목 「필터 합계」 + 적용 필터 한 줄, df 는 없다(부분 집합에 파일시스템 사용량은 뜻이 없다). 경로 검색은 반영하지 않는다(합계는
-// 경로 검색과 무관 -- 2026-10-21 규칙). 최상위 판정도 걸러진 집합 안에서라, 필터 밖 상위 경로가 있으면 그 하위가 최상위로 센다.
+// 필터 합계(2026-10-29, attr 이 있을 때): 같은 정의를 **필터에 맞는 경로 집합** 위에서 한다. 맨 위에 적용 필터 한 줄, df 는 없다
+// (부분 집합에 파일시스템 사용량은 뜻이 없다). 경로 검색은 반영하지 않는다(합계는 경로 검색과 무관 -- 2026-10-21 규칙). 최상위
+// 판정도 걸러진 집합 안에서라, 필터 밖 상위 경로가 있으면 그 하위가 최상위로 센다.
 
 export const TOTALS_HELP = "각 최상위 대상의 최근 성공 scan 값을 더합니다. 다른 대상 아래에 있는 대상(예: team 아래 team/sub1)은 "
   + "상위 대상의 scan 에 이미 들어 있어 더하지 않습니다. 대상마다 scan 시점이 달라 한 시점의 스냅숏은 아닙니다. 경로 검색과 "
@@ -40,11 +42,15 @@ export const DF_HELP = "에이전트가 이 스토리지가 마운트된 노드�
   + "스토리지의 데이터·예약 블록이 섞여 scan 합계와 기준이 다릅니다. 여러 스토리지가 한 파일시스템을 쓰면 같은 값이 보입니다.";
 
 // 응답 값 읽기(DB 가 신뢰 경계 -- 구형·부분 응답이어도 화면이 죽지 않게 모양을 다시 본다).
-const count = (x: unknown): number => (typeof x === "number" && Number.isFinite(x) && x > 0 ? x : 0);
+export const count = (x: unknown): number => (typeof x === "number" && Number.isFinite(x) && x > 0 ? x : 0);
 export const sumOf = (m: UsageTotalMetric | null | undefined): number | null =>
   typeof m?.sum === "number" && Number.isFinite(m.sum) ? m.sum : null;
 export const lowerBound = (m: { unknown?: number } | null | undefined, sum: number | null) =>
   sum !== null && count(m?.unknown) > 0;
+// 부분 합(값 뒤 「이상」): 값 모름을 뺀 합이거나 대상이 창(window_limit)을 넘어 최근 스캔된 것만 더한 합. 스토리지별 비교·합계 줄·
+// [자세히] 블록이 같은 규칙이다(2026-10-29 -- 예전 패널 블록은 모름만 봤고 창 잘림은 각주로만 말했다).
+export const partialSum = (t: UsageStorageTotals, m: { unknown?: number } | null | undefined, sum: number | null) =>
+  sum !== null && (t.truncated === true || lowerBound(m, sum));
 export const countText = (n: number | null) => (n === null ? "—" : `${n.toLocaleString("ko-KR")}개`);
 export const hotText = (t: UsageStorageTotals) => {
   const v = t.hot_ratio?.value;
@@ -166,57 +172,33 @@ export function FilesystemUse({ fs, now, compact = false }: { fs: UsageStorageFi
 const LAYOUT = "grid gap-x-8 gap-y-5 lg:grid-cols-[minmax(18rem,max-content)_minmax(0,1fr)]";
 const STATS = "grid grid-cols-2 content-start gap-x-4 gap-y-3 sm:grid-cols-[repeat(auto-fit,minmax(9.5rem,1fr))] sm:gap-x-6 lg:grid-cols-2";
 
+// 합계 줄 [자세히] 안의 블록(머리 주석): 적용 필터(필터 합계) → 수치 dl(+ df) | 파일 크기 분포 → 각주. 값이 오기 전·실패는
+// 줄이 말하므로 여기는 그리지 않는다.
 export function StorageTotals({ storage, now, attr }: { storage: string; now: number; attr?: UsageAttrFilter }) {
   const filtered = attr !== undefined && hasAttr(attr);
   const q = useStorageTotals(storage, filtered ? attr : undefined);
-  const headId = useId(), sizeId = useId();
+  const sizeId = useId();
   const t = q.data;
   // 대상 0(요약과 합계 사이의 경합·빈 스토리지·필터에 맞는 경로 없음)은 블록 없음 -- 패널이 이미 tab.targetCount === 0 이면
   // 그리지 않고, 필터 0건은 목록의 빈 상태가 말한다.
-  if (t !== undefined && count(t.target_count) === 0) return null;
+  if (t === undefined || count(t.target_count) === 0) return null;
 
   const title = filtered ? "필터 합계" : "이 스토리지 합계";
-  const head = (
-    <div className="space-y-0.5">
-      <SectionHead id={headId} title={title} help={filtered ? FILTER_TOTALS_HELP : TOTALS_HELP} />
-      {filtered && <p className="text-xs text-ink/70 [overflow-wrap:anywhere]">{`적용 필터: ${attrSummary(attr!)}`}</p>}
-    </div>
-  );
-  const wrap = (body: React.ReactNode) => (
-    <section aria-labelledby={headId} className="space-y-3 border-b border-line pb-5">{head}{body}</section>
-  );
-  if (t === undefined) {
-    if (q.isError) {
-      // 옛 API(경로 없음)는 SPA index.html 을 200 으로 줘서 오류가 JSON 파서 문장이다 -- 서버가 준 사유(ApiError)·배포 틈
-      // 판정(UsageContractError -- 필터 합계의 메아리 대조)만 덧붙인다.
-      const msg = q.error instanceof ApiError || q.error instanceof UsageContractError ? q.error.message : null;
-      return wrap(<p className="text-sm text-bad">{`합계를 불러오지 못했습니다${msg ? ` — ${msg}` : ""}`}</p>);
-    }
-    return wrap(
-      <div className={`relative ${LAYOUT}`}>
-        <span className="sr-only">합계 불러오는 중…</span>
-        <div className={STATS}>
-          {[0, 1, 2, 3].map((i) => (
-            <div key={i} className="space-y-1.5"><Skeleton className="h-3 w-14" /><Skeleton className="h-6 w-20" /></div>))}
-        </div>
-        <div className="max-w-xl space-y-2.5">{[0, 1, 2, 3, 4].map((i) => <Skeleton key={i} className="h-3" />)}</div>
-      </div>);
-  }
-
   const bytes = sumOf(t.total_bytes), files = sumOf(t.total_files), dirs = sumOf(t.total_directories);
   const size = t.file_size_histogram;
   // 필터 합계엔 df 가 없다(서버도 null -- 부분 집합의 파일시스템 사용량은 뜻이 없다). 서버가 실어 와도 그리지 않는다.
   const fs = filtered ? null : fsShape(t.filesystem);
   const reading = isReading(t) && !q.isError;
   const exact = (n: number | null) => (n === null ? undefined : countText(n));
-  return wrap(<>
+  return (<div className="space-y-3">
+    {filtered && <p className="text-xs text-ink/70 [overflow-wrap:anywhere]">{`적용 필터: ${attrSummary(attr!)}`}</p>}
     <div className={LAYOUT}>
       <dl aria-label={title} className={STATS}>
         <Stat label="실 사용량" value={bytes === null ? "—" : humanBytes(bytes)}
-              lowerBound={lowerBound(t.total_bytes, bytes)}
+              lowerBound={partialSum(t, t.total_bytes, bytes)}
               title={bytes === null ? undefined : `${bytes.toLocaleString("ko-KR")} B`} />
-        <Stat label="파일" value={countText(files)} lowerBound={lowerBound(t.total_files, files)} title={exact(files)} />
-        <Stat label="디렉터리" value={countText(dirs)} lowerBound={lowerBound(t.total_directories, dirs)}
+        <Stat label="파일" value={countText(files)} lowerBound={partialSum(t, t.total_files, files)} title={exact(files)} />
+        <Stat label="디렉터리" value={countText(dirs)} lowerBound={partialSum(t, t.total_directories, dirs)}
               title={exact(dirs)} />
         {/* hot 은 비율이라 하한이 아니다(모름 대상은 분자·분모 모두에서 빠진다) -- 「이상」을 붙이지 않고 각주가 모름 수를 말한다. */}
         <Stat label={`hot 비율(${HOT_AGE_MAX_DAYS}일)`} value={hotText(t)} />
@@ -242,14 +224,5 @@ export function StorageTotals({ storage, now, attr }: { storage: string; now: nu
       </section>
     </div>
     <Footnote t={t} now={now} reading={reading} />
-    {q.isError && (
-      // 재조회 실패로 이어 읽기가 멈췄을 수 있다(오류 중엔 폴링하지 않는다) -- 창 포커스·30초를 기다리지 않고 다시 부를 수 있게.
-      <p className="text-xs text-muted">
-        합계를 새로 고치지 못했습니다{" "}
-        <button type="button" onClick={() => { void q.refetch(); }}
-                className="rounded text-accent hover:underline focus-visible:outline-none focus-visible:ring-2
-                           focus-visible:ring-accent">다시 시도</button>
-      </p>
-    )}
-  </>);
+  </div>);
 }

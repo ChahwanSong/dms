@@ -16,7 +16,8 @@ import { storageLabel } from "./usageTabs";
 // 2026-10-20: 따로 뜨던 「미등록 스토리지」 칸을 없애고 그 스토리지의 **탭**(「미등록」 표시) 맨 위 경고 띠로 옮겼다 -- 정리
 // 버튼이 그 기록(아래 표·CSV) 바로 위에 있다. 정리 mutation·결과 줄·포커스는 **페이지가 소유한다**(UsageAnalysis): 다 지우면
 // 그 탭과 띠(와 띠 안의 확인 창)가 재조회로 사라진다 -- 띠가 소유하면 결과를 말할 자리도 함께 사라진다. 결과 줄(role=status)은
-// 탭 줄 위에 남고, 창이 사라져 포커스가 <body> 로 떨어지면 결과 줄로 옮긴다(작업 삭제 창의 focusAfterDelete 와 같은 정신).
+// 페이지의 알림 자리(2026-10-29 -- 하위 탭 아래; 탭은 스토리지 select 의 「미등록」 묶음이 됐다)에 남고, 창이 사라져 포커스가
+// <body> 로 떨어지면 결과 줄로 옮긴다(작업 삭제 창의 focusAfterDelete 와 같은 정신).
 //
 // 본문 글자는 ink/70(AA) · 한국어 문단 break-keep · 이름·경로는 overflow-wrap:anywhere(작업 삭제 창 관례).
 
@@ -36,7 +37,7 @@ export function scaleLine(row: UnregisteredStorage): string {
     + (nm > 0 ? ` · 섞인 배치 ${nm}개는 정리하지 않음` : "");
 }
 
-// 결과 줄은 페이지 바탕(탭 줄 위)에 뜨므로 흰 면 + 테두리. onDismiss 가 있으면 닫기(×) -- 다음 정리 전까지 남는 줄이라 다
+// 결과 줄은 페이지 바탕(알림 자리)에 뜨므로 흰 면 + 테두리. onDismiss 가 있으면 닫기(×) -- 다음 정리 전까지 남는 줄이라 다
 // 읽은 뒤 치울 수 있게(2026-10-20).
 export function PurgeResult({ r, innerRef, onDismiss }: {
   r: StorageHistoryPurgeSummary; innerRef: React.RefObject<HTMLDivElement>; onDismiss?: () => void;
@@ -199,7 +200,7 @@ export function UnregisteredBanner({ name, row, summary, purge, progress, setPro
       <div className="flex min-w-0 flex-1 basis-64 items-start gap-2.5">
         <TriangleAlert aria-hidden className="mt-0.5 h-4 w-4 shrink-0 text-attn" />
         <div className="min-w-0 space-y-0.5">
-          {/* 이름을 띠 머리에(탭은 긴 이름을 말줄임한다 -- MetaLine 과 같은 이유). */}
+          {/* 이름을 띠 머리에(미등록 스토리지엔 메타 줄이 없다 -- 띠가 그 자리다). */}
           <p className={`text-sm font-semibold text-ink [overflow-wrap:anywhere] ${name === "" ? "italic" : ""}`}>
             {storageLabel(name)}</p>
           <p className="text-sm text-ink break-keep">스토리지 목록에서 삭제된 스토리지의 기록입니다</p>

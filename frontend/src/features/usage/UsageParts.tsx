@@ -1,5 +1,10 @@
+import { Link } from "react-router-dom";
+import { ExternalLink, HardDrive, Info } from "lucide-react";
+import { Card } from "../../components/ui/Card";
 import { HelpTip } from "../../components/ui/HelpTip";
-import type { UsagePv, UsagePvVolume } from "../../lib/types";
+import type { ApiError } from "../../lib/api";
+import type { UsageAttrFilter, UsagePv, UsagePvVolume } from "../../lib/types";
+import type { useStorageTabs } from "./useActiveStorage";
 import { pvInside } from "./usageStats";
 import { TERMS, nsLabel } from "../k8s/k8sTerms";
 import { Tag } from "../k8s/parts";
@@ -8,7 +13,7 @@ import { Tag } from "../k8s/parts";
 // 패널의 「이 스토리지 합계」가 같은 소제목·수치 모양이라 한 번 익히면 두 곳에서 읽힌다). 무거운 TargetDetail 을 import 하지 않게
 // 따로 둔다.
 
-// 파일 크기 분포 설명(2026-10-21 -- 펼친 상세와 스토리지 합계 공용). 「4–64 KiB」 읽는 법은 여기서 한 번만 말한다(줄마다 쓰면
+// 파일 크기 분포 설명(2026-10-21 -- 경로 상세와 스토리지 합계 공용). 「4–64 KiB」 읽는 법은 여기서 한 번만 말한다(줄마다 쓰면
 // 목록이 길어진다).
 export const SIZE_HELP = "최근 성공 scan 에서 센 일반 파일의 크기별 개수입니다(디렉터리·심링크 제외). 구간은 1024 단위이고 "
   + "「4–64 KiB」는 4 KiB 초과 64 KiB 이하입니다. 막대 길이는 가장 많은 구간 대비, 오른쪽 %는 전체 파일 대비 비중입니다.";
@@ -50,7 +55,7 @@ export function Stat({ label, value, lowerBound = false, title }: {
 }
 
 // ---- PV 소속 표기(2026-10-29 사용자 요청 「사용자·PV 이름·namespace 등으로 필터」) ----
-// 표 경로 칸의 둘째 줄과 펼친 상세 머리가 같은 문법이다: 「PV 이름 — namespace (StorageClass)」(서버 target_label·pvLocationText
+// 표 경로 칸의 둘째 줄과 상세 시트 머리가 같은 문법이다: 「PV 이름 — namespace (StorageClass)」(서버 target_label·pvLocationText
 // 와 같은 순서). 라벨은 k8sTerms 에서만(화면 「PV 이름」 = PVC, 「볼륨」 = PV 객체). 소속은 서버가 **지금 인벤토리** 기준으로 정한다
 // (없으면 PV 주소 scan 기록) -- PVC 를 지우거나 매핑을 바꾸면 바뀐다.
 export const PV_RECORDED_TITLE = "지금 인벤토리에 없는 PV — 이 경로를 PV 주소로 scan 한 기록 기준";
@@ -76,8 +81,25 @@ export function PvLine({ pv, multiCluster }: { pv: UsagePv; multiCluster: boolea
   );
 }
 
-/** 펼친 상세 머리: PV 소속(정체 전부) + 권한 사용자(지금 RoleBinding -- 면제 운영자의 전체 접근은 없다). */
-export function PvHead({ pv, multiCluster }: { pv: UsagePv; multiCluster: boolean }) {
+// 상세 시트의 소속 글자 버튼(2026-10-29) -- 누르면 그 값으로 목록을 거르고 시트를 닫는다(호출측 onFilter). 글자 링크 모양이지만
+// 이동이 아니라 동작이라 버튼이다.
+const PICK = "rounded text-left text-accent underline decoration-accent/40 underline-offset-2 hover:decoration-accent "
+  + "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent";
+export const PV_PICK_HINT = "누르면 이 PV 로 경로 목록을 거릅니다(상세가 닫힙니다)";
+export const USER_PICK_HINT = "누르면 이 권한 사용자로 경로 목록을 거릅니다(상세가 닫힙니다)";
+
+/** PV 탐색 화면(VolumesPage)이 읽는 쿼리 -- 클러스터·namespace 는 정확히, PV 이름은 검색칸(q). */
+export function volumesHref(v: UsagePvVolume): string {
+  const p = new URLSearchParams({ cluster: v.cluster, namespace: v.namespace, q: v.pvc });
+  return `/admin/k8s/volumes?${p.toString()}`;
+}
+
+/** 상세 머리: PV 소속(정체 전부) + 권한 사용자(지금 RoleBinding -- 면제 운영자의 전체 접근은 없다). onFilter 가 있으면(상세
+ *  시트, 2026-10-29) PV 이름·사용자 이름이 그 필터를 거는 버튼이고, 지금 인벤토리의 PV 옆에 「PV 탐색에서 보기」 링크가 붙는다
+ *  (기록뿐인 PV 는 PV 탐색에 없다). PV 를 고르면 그 정체(클러스터·namespace·PV 이름 -- 이름은 namespace 마다만 유일)를 함께 싣는다. */
+export function PvHead({ pv, multiCluster, onFilter }: {
+  pv: UsagePv; multiCluster: boolean; onFilter?: (a: UsageAttrFilter) => void;
+}) {
   return (
     <dl aria-label="PV 소속" className="grid grid-cols-[max-content_minmax(0,1fr)] gap-x-3 gap-y-1 text-sm">
       <dt className="text-muted">PV 소속</dt>
@@ -86,16 +108,80 @@ export function PvHead({ pv, multiCluster }: { pv: UsagePv; multiCluster: boolea
           : pv.source === "unknown" ? <span className="italic" title={PV_UNKNOWN_TITLE}>PV 모름</span>
           : (<>
             {pv.volumes.map((v) => (
-              <span key={`${v.cluster}/${v.namespace}/${v.pvc}`} className="block" title={volumeTitle(v)}>
-                {pvVolumeText(v, multiCluster)}</span>))}
+              <span key={`${v.cluster}/${v.namespace}/${v.pvc}`} className="block">
+                {onFilter === undefined ? <span title={volumeTitle(v)}>{pvVolumeText(v, multiCluster)}</span> : (
+                  <button type="button" className={PICK} title={`${volumeTitle(v)}\n${PV_PICK_HINT}`}
+                          onClick={() => onFilter({ cluster: v.cluster, namespace: v.namespace, pvc: v.pvc })}>
+                    {pvVolumeText(v, multiCluster)}</button>
+                )}
+                {onFilter !== undefined && pv.source === "inventory" && (<>{" "}
+                  <Link to={volumesHref(v)}
+                        className="ml-1 inline-flex items-center gap-1 whitespace-nowrap rounded text-xs text-accent
+                                   hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">
+                    <ExternalLink aria-hidden className="h-3 w-3" />PV 탐색에서 보기
+                    {pv.volumes.length > 1 && <span className="sr-only">{` (${v.pvc})`}</span>}
+                  </Link>
+                </>)}
+              </span>))}
             {pv.source === "recorded" && <Tag title={PV_RECORDED_TITLE}>기록</Tag>}
           </>)}
       </dd>
       {pvInside(pv) && (<>
         <dt className="text-muted">권한 사용자</dt>
         <dd className="min-w-0 [overflow-wrap:anywhere]">
-          {pv.users.length > 0 ? pv.users.join(", ") : "없음 — 관리자·특권 운영자만 접근"}</dd>
+          {pv.users.length === 0 ? "없음 — 관리자·특권 운영자만 접근"
+            : onFilter === undefined ? pv.users.join(", ")
+            : pv.users.map((u, i) => (
+              <span key={u}>{i > 0 && ", "}
+                <button type="button" className={PICK} title={USER_PICK_HINT}
+                        onClick={() => onFilter({ user: u })}>{u}</button>
+              </span>))}
+        </dd>
       </>)}
     </dl>
+  );
+}
+
+// ---- 화면 공용(2026-10-29 하위 메뉴 -- 경로별·스토리지별이 같은 원천 셋을 쓴다) ----
+
+/** 스토리지 원천(요약·대체 원천·미등록 목록)의 알림 줄 -- 각 화면의 알림 자리(탭 바로 아래)에 그대로 놓는다. 요약을 못 받아도
+ *  집합은 대체 원천(scan 기록 이름)으로 그려진다 -- 그 동안엔 흐린 한 줄로 「건수 모름」만 말한다(배포 중 옛 API 는 이 경로에 SPA
+ *  index.html 을 200 으로 줘서, 원문 오류가 「Unexpected token '<'」 같은 파서 문장이었다). 대체 원천까지 실패하면 그때 오류다.
+ *  받아 둔 요약이 있는데 재조회만 실패했으면 그 사실만. */
+export function sourceNotices(src: ReturnType<typeof useStorageTabs>): React.ReactNode[] {
+  const { summaryMissing, summaryQ, scanQ, unregQ } = src;
+  return [
+    summaryMissing && !scanQ.isError && (
+      <p key="src-count" className="flex items-center gap-1.5 text-sm text-muted">
+        <Info aria-hidden className="h-4 w-4 shrink-0" />스토리지별 대상 수를 불러오지 못해 건수 없이 표시합니다</p>
+    ),
+    summaryMissing && scanQ.isError && (
+      <p key="src-scan" className="text-sm text-bad">
+        {`스토리지별 요약을 불러오지 못했습니다 — ${(scanQ.error as ApiError).message}`}</p>
+    ),
+    summaryQ.isError && !summaryMissing && (
+      <p key="src-refresh" className="text-sm text-bad">
+        {`스토리지별 요약을 새로 고치지 못했습니다 — ${(summaryQ.error as ApiError).message}`}</p>
+    ),
+    unregQ.isError && (
+      <p key="src-unreg" className="text-sm text-bad">
+        {`미등록 스토리지 목록을 ${unregQ.data === undefined ? "불러오지" : "새로 고치지"} 못했습니다 — `
+          + (unregQ.error as ApiError).message}</p>
+    ),
+  ].filter((x): x is JSX.Element => x !== false);
+}
+
+/** 등록된 스토리지도 기록도 없다(경로별·스토리지별 공용 빈 상태). */
+export function NoStorages() {
+  return (
+    <Card>
+      <div className="flex flex-col items-center gap-2 py-8 text-center">
+        <span aria-hidden className="grid h-10 w-10 place-items-center rounded-full bg-panel text-muted">
+          <HardDrive className="h-5 w-5" /></span>
+        <p className="text-sm font-medium text-ink">등록된 스토리지가 없습니다</p>
+        <p className="text-xs text-muted">스토리지를 등록하고 scan 을 실행하면 여기에 스토리지별 사용량이 쌓입니다.</p>
+        <Link to="/admin/storages" className="mt-1 text-sm text-accent hover:underline">스토리지 화면으로</Link>
+      </div>
+    </Card>
   );
 }

@@ -129,6 +129,18 @@ describe("k8s 연동 하위 화면(탭)", () => {
   });
 });
 
+describe("사용량 분석 하위 화면(탭, 2026-10-29)", () => {
+  // 「경로별」은 사이드바 항목 자체(/admin/usage), 「스토리지별」은 DETAIL_ROUTES -- 크럼 끝 라벨 = 탭 라벨 = h1(router.test).
+  test("경로별은 사이드바 항목 크럼, 스토리지별은 「사용량 분석」 아래 -- 사이드바는 둘 다 사용량 분석이 켜진다", () => {
+    expect(breadcrumbFor("/admin/usage").map((c) => c.label)).toEqual(["HOME", "DMS", "운영", "사용량 분석"]);
+    expect(breadcrumbFor("/admin/usage/storages").map((c) => c.label))
+      .toEqual(["HOME", "DMS", "운영", "사용량 분석", "스토리지별"]);
+    expect(breadcrumbFor("/admin/usage/storages")[3]).toEqual({ label: "사용량 분석", path: "/admin/usage" });
+    expect(activeNavPath("/admin/usage")).toBe("/admin/usage");
+    expect(activeNavPath("/admin/usage/storages")).toBe("/admin/usage");
+  });
+});
+
 describe("activeNavPath — 사이드바 활성은 최장 일치 하나", () => {
   test("접두 형제(/jobs vs /jobs/new)에서 구체적인 쪽만 켠다(사용자 보고 결함)", () => {
     expect(activeNavPath("/jobs/new")).toBe("/jobs/new");   // 내 작업이 함께 켜지면 안 됨

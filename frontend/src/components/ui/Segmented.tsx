@@ -1,7 +1,8 @@
 // 세그먼트 컨트롤(2026-10-20 공용화). 대시보드 기간 선택(WindowSelect, 2026-09-30)의 모양 그대로 -- 선택은 채움(흰 면 +
 // accent 글자)으로 분명히 하고 aria-pressed 로 알린다. 선택지가 몇 개 안 되는 즉시 전환(표시 창·온도 축·기간)에 쓴다 --
-// 아래 내용을 통째로 바꾸는 큰 전환은 Tabs 다. 라벨은 한 줄(whitespace-nowrap): 좁은 폭에서 「30건」이 음절 중간에서
-// 꺾이면 버튼 높이가 들쭉날쭉해진다(e2e 03 의 aria-pressed 한 줄 검사).
+// 화면을 가르는 큰 전환은 NavLink 하위 탭(BuildTabs·K8sTabs·사용량 분석 UsageTabs), 같은 화면의 보기 전환은 role=tablist
+// 버튼 줄(BatchesList)이다(공용 Tabs 컴포넌트는 2026-10-29 쓰는 곳이 없어져 지웠다). 라벨은 한 줄(whitespace-nowrap):
+// 좁은 폭에서 「30건」이 음절 중간에서 꺾이면 버튼 높이가 들쭉날쭉해진다(e2e 03 의 aria-pressed 한 줄 검사).
 // disabled(2026-10-26 제출 화면 「결과 소유」): 다른 입력이 이 선택을 무효로 만들 때(chown 지정) 버튼을 잠그고 흐리게 --
 // 고른 값(aria-pressed)은 그대로 보인다(그 입력을 지우면 다시 쓰인다). 왜 잠겼는지는 부르는 쪽이 옆 문장으로 말한다.
 export function Segmented<T extends string | number>({ label, options, value, onChange, className = "", disabled = false }: {

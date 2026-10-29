@@ -28,7 +28,7 @@ import { SCOPES, cleanAttr, hasAttr, hasPvAxis } from "./useUsage";
 // 옵션을 고른 목록의 대상 수다). 요청자는 스토리지 전체 기준이다. 그 사실을 줄 끝 한 줄로 말하고, 선택지에 없는 PV 값은
 // 「(최근 N개 안에 없음)」이라 한다(창 밖에는 있을 수 있다).
 //
-// 375 폭: select 는 두 개씩 한 줄(basis 50% - gap 절반, min-w-0 -- 긴 옵션 글자가 칸을 밀지 않게), sm 부터 내용 폭(상한 14rem).
+// 375 폭: select 는 두 개씩 한 줄(basis 50% - gap 절반, min-w-0 -- 긴 옵션 글자가 칸을 밀지 않게), sm 부터 내용 폭(상한 12rem).
 // 포커스: 줄(group)은 tabIndex -1 이다 -- 「필터 지우기」나 값 때문에만 보이던 칸이 고르는 순간 사라지면 StoragePanel 이 포커스를
 // 여기로 옮긴다(groupRef).
 
@@ -52,7 +52,9 @@ export function attrSummary(a: UsageAttrFilter): string {
   ].filter(Boolean).join(" · ");
 }
 
-const FIELD = `${SELECT_FIELD} min-w-0 basis-[calc(50%-0.25rem)] sm:basis-auto`;
+// 칸 상한은 12rem(2026-10-29 -- SELECT_FIELD 의 14rem 보다 좁게: 1440 에서 일곱 칸이 한 줄에 서는 것이 목표, 넘치면 예전처럼
+// 줄바꿈). 같은 칸에 max-w 두 벌을 겹치면 CSS 생성 순서가 이기므로 바꿔 끼운다.
+const FIELD = `${SELECT_FIELD.replace("max-w-[14rem]", "max-w-[12rem]")} min-w-0 basis-[calc(50%-0.25rem)] sm:basis-auto`;
 const n = (x: number) => x.toLocaleString("ko-KR");
 const counted = (label: string, c: number) => `${label} · ${n(typeof c === "number" && Number.isFinite(c) ? c : 0)}개`;
 const nonEmpty = (x: unknown): x is string => typeof x === "string" && x !== "";

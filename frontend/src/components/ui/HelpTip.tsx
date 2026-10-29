@@ -17,11 +17,14 @@ export function useTip<T extends HTMLElement>() {
     if (r) setAnchor({ left: r.left, right: r.right, top: r.top, bottom: r.bottom });
   }, []);
   const close = useCallback(() => setAnchor(null), []);
+  // 열린 툴팁의 Esc 는 툴팁만 닫는다(WCAG 1.4.13 -- 다른 것을 바꾸지 않고 치울 수 있어야 한다). window **캡처** 단계에서 받고
+  // 전파를 멈춘다: 모달(Radix Dialog -- 사용량 경로 상세 시트 등)은 document 캡처 단계에서 Esc 를 받아 창을 닫으므로, bubble 에서
+  // 받으면 툴팁을 치우려던 Esc 가 시트째 닫고 히스토리를 뒤로 보냈다(2026-10-29 리뷰). 닫힌 툴팁은 듣지 않는다(다음 Esc 는 창의 것).
   useEffect(() => {
     if (!anchor) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") close(); };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") { e.stopPropagation(); close(); } };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
   }, [anchor, close]);
   const handlers = {
     onMouseEnter: open, onMouseLeave: close, onFocus: open, onBlur: close,

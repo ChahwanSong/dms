@@ -14,13 +14,26 @@ async function visit(page: Page, path: string, heading: string): Promise<void> {
   await expect(page.getByRole("heading", { name: heading, level: 1 })).toBeVisible();
 }
 
-// 사용량 분석(2026-10-20 스토리지 탭): 탭 줄과 고른 탭의 패널(표·빈 상태 어느 쪽이든)이 그려진 뒤에 잰다 -- 탭은 등록
-// 목록이 오면 바로 그려지지만 패널은 요약(기본 탭 판정)을 기다린다.
+// 사용량 분석 경로별(2026-10-20 스토리지별 → 2026-10-29 하위 탭 + 스토리지 select): select 와 고른 스토리지의 패널(스토리지 이름의
+// 구역 -- 표·빈 상태 어느 쪽이든)이 그려진 뒤에 잰다 -- select 는 등록 목록이 오면 바로 그려지지만 패널은 요약(기본 스토리지
+// 판정)을 기다린다. 옵션 값은 「s:이름」(StorageSelect).
+const usagePanel = (page: Page) => page.getByRole("region", { name: STORAGE_NAME, exact: true });
 async function visitUsage(page: Page): Promise<void> {
   await visit(page, "/admin/usage", "사용량 분석");
-  await expect(page.getByRole("tab", { name: new RegExp(`^${STORAGE_NAME}`) })).toHaveAttribute("aria-selected", "true");
-  const panel = page.getByRole("tabpanel");
+  await expect(page.getByRole("combobox", { name: "스토리지", exact: true })).toHaveValue(`s:${STORAGE_NAME}`);
+  const panel = usagePanel(page);
   await expect(panel.locator("table").first().or(panel.getByText("이 스토리지에는 아직 성공한 scan 이 없습니다"))).toBeVisible();
+}
+
+// 사용량 분석 스토리지별(2026-10-29): 비교 표(th 8 + 시드 스토리지 행 td 8)가 그려지고 합계 칸 자리표시가 걷힌 뒤에 잰다 -- 새로
+// 로드라 합계 캐시가 없고, 자리표시(td 바로 아래 Skeleton = aria-hidden div)도 td 수가 같아 셀 하한(L2)을 채운다. 그 상태에서 재면
+// 실제 값 칸(df compact 막대·「이상」·긴 바이트)의 375 넘침이 초록으로 지나간다(2026-10-29 리뷰). 값이든 「불러오지 못함」이든 실제
+// 칸이 들어선 뒤에 잰다.
+const USAGE_TOTALS_PLACEHOLDER = "table td > div[aria-hidden]";
+async function visitUsageStorages(page: Page): Promise<void> {
+  await visit(page, "/admin/usage/storages", "스토리지별");
+  await expect(page.getByRole("table").getByRole("link", { name: STORAGE_NAME, exact: true })).toBeVisible();
+  await expect(page.locator(USAGE_TOTALS_PLACEHOLDER)).toHaveCount(0);
 }
 
 // 사용량 필터 줄(2026-10-29): 켜진 필터는 선택지와 무관하게 늘 그 select 를 보인다(이 스토리지에 없는 값은 「(이 스토리지에 없음)」
@@ -31,7 +44,7 @@ const USAGE_FILTERED = `/admin/usage?storage=${STORAGE_NAME}&cluster=e2e-cluster
   + "&storage_class=nfs-client-storage-class-long&user=someone.with.a.long.account.id&scope=pv&requester=admin";
 async function visitUsageFiltered(page: Page): Promise<void> {
   await visit(page, USAGE_FILTERED, "사용량 분석");
-  const panel = page.getByRole("tabpanel");
+  const panel = usagePanel(page);
   const filters = panel.getByRole("group", { name: "사용량 필터" });
   await expect(filters.getByRole("combobox")).toHaveCount(7);
   await expect(panel.getByText("필터에 맞는 대상이 없습니다").or(panel.locator("table").first())).toBeVisible();
@@ -106,11 +119,14 @@ async function assertTextContained(page: Page): Promise<void> {
 //                    "빌드 화면"이 아니라 **표가 실제로 있는 화면**에 건다.
 //   /admin/dashboard 표는 잡 통계·큐 데이터가 있을 때만 그려진다 -> 하한 불가(0).
 //                    이 화면은 L1/L3/L4 가 진다.
-//   /admin/usage     표는 고른 스토리지 탭에 성공 scan 이 있을 때만 그려진다(이 파일 시점엔 보통 없다) -> 하한 0.
-//                    2026-10-20 스토리지 탭 줄(가로 스크롤)이 새 L1 위험이라 순회에 넣는다 -- 탭 안 sr-only 노드가 화면
-//                    밖으로 문서를 넓히던 유형(StatusPill 619/375). 행·펼침 상세의 375 불변식은 E10(09)이 기록과 함께 잰다.
-//                    필터 줄(2026-10-29)은 375 에서 모든 필터를 켠 딥링크로 따로 잰다(결과 0건 -- 하한 0). 실데이터 요청자
-//                    필터의 375 는 E15(15)가 잰다.
+//   /admin/usage     표는 고른 스토리지에 성공 scan 이 있을 때만 그려진다(이 파일 시점엔 보통 없다) -> 하한 0.
+//                    하위 탭 줄(2026-10-29 -- 가로 스크롤 띠는 이것 하나)·범위 줄(스토리지 select 전체 폭 + 메타 줄 접힘)이
+//                    L1 위험이라 순회에 넣는다(예전 스토리지 탭 줄의 sr-only 노드가 문서를 넓히던 유형 StatusPill 619/375).
+//                    행·상세 시트의 375 불변식은 E10(09)이 기록과 함께 잰다. 필터 줄(2026-10-29)은 375 에서 모든 필터를 켠
+//                    딥링크로 따로 잰다(결과 0건 -- 하한 0). 실데이터 요청자 필터의 375 는 E15(15)가 잰다.
+//   /admin/usage/storages
+//                    th 8(스토리지·실 사용량·파일·디렉터리·hot·df·대상·최근 스캔) + 시드 스토리지 행 td 8 = 16. 이름 칸 고정 +
+//                    래퍼 안 가로 스크롤(375)이 문서를 넓히지 않아야 한다(L1).
 test.describe("E3 레이아웃 불변식", () => {
   test("1280x800 주요 화면 순회", async ({ page }) => {
     await apiLogin(page);
@@ -163,6 +179,8 @@ test.describe("E3 레이아웃 불변식", () => {
 
     await visitUsage(page);
     await assertLayoutSane(page, { minTableCells: 0 });
+    await visitUsageStorages(page);
+    await assertLayoutSane(page, { minTableCells: 16 });
 
     for (const [path, heading] of K8S_PAGES) {
       await visitK8s(page, path, heading);
@@ -205,9 +223,12 @@ test.describe("E3 레이아웃 불변식", () => {
       .map((b) => b.textContent));
     expect(wrapped, "입력 방식 세그먼트 라벨이 두 줄로 접혔다").toEqual([]);
 
-    // 사용량 분석 스토리지 탭 줄은 375 에서 줄바꿈 없이 가로 스크롤한다 -- 줄 자체만 넘치고 문서는 넘치지 않아야 한다(L1).
+    // 사용량 분석: 하위 탭 줄은 375 에서 줄바꿈 없이 가로 스크롤하고(줄 자체만 넘친다), 스토리지 select 는 전체 폭 -- 문서는
+    // 넘치지 않아야 한다(L1). 스토리지별 표는 래퍼 안에서만 가로로 넘친다.
     await visitUsage(page);
     await assertLayoutSane(page, { sidebarFixed: false, minTableCells: 0 });
+    await visitUsageStorages(page);
+    await assertLayoutSane(page, { sidebarFixed: false, minTableCells: 16 });
     // 필터 줄(2026-10-29)이 가장 넓게 열린 채로(위 visitUsageFiltered) -- select 가 두 칸씩 접히고 긴 값이 칸을 밀지 않는다.
     await visitUsageFiltered(page);
     await assertLayoutSane(page, { sidebarFixed: false, minTableCells: 0 });

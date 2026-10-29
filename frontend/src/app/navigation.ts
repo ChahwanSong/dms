@@ -34,7 +34,8 @@ export const NAVIGATION: NavSection[] = [
         items: [
           { path: "/admin/dashboard", label: "대시보드", icon: LayoutDashboard },
           // 사용량 분석(2026-08-23): 디렉터리별 scan 이력(실 사용량·데이터 온도)
-          // 시계열 — 전 요청자 통합이라 운영 그룹(admin 전용)이다.
+          // 시계열 — 전 요청자 통합이라 운영 그룹(admin 전용)이다. 하위 화면(경로별·스토리지별, 2026-10-29)은
+          // 사이드바가 아니라 화면 안 탭(UsageTabs)이다(k8s 연동·빌드 선례).
           { path: "/admin/usage", label: "사용량 분석", icon: TrendingUp },
           { path: "/admin/builds", label: "빌드", icon: Hammer },
           { path: "/admin/releases", label: "릴리스", icon: Rocket },
@@ -107,6 +108,8 @@ export const DETAIL_ROUTES = [
   { pattern: "/admin/k8s/volumes", label: "PV 탐색", parent: "/admin/k8s" },
   { pattern: "/admin/k8s/access", label: "사용자 권한", parent: "/admin/k8s" },
   { pattern: "/admin/k8s/history", label: "동기화 이력", parent: "/admin/k8s" },
+  // 사용량 분석의 하위 화면(탭, 2026-10-29) -- 라벨은 탭(UsageTabs)·h1 과 같은 문자열. 「경로별」은 사이드바 항목 자체(/admin/usage)다.
+  { pattern: "/admin/usage/storages", label: "스토리지별", parent: "/admin/usage" },
 ] as const;
 
 // 사이드바 활성 항목: **최장 접두 일치 하나만**. NavLink 기본 판정(접두 일치)은

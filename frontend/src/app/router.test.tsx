@@ -201,6 +201,36 @@ test.each([
   expect(nav.querySelector('[aria-current="page"]')).not.toBeNull();
 });
 
+// 사용량 분석(2026-10-29 하위 메뉴): 경로별 h1 = 사이드바 라벨 「사용량 분석」, 스토리지별 h1 = 탭·크럼 라벨(k8s 연동 선례).
+const usageHandlers = () => [
+  http.get("/api/auth/me", () => HttpResponse.json({ actor: "admin", role: "admin" })),
+  http.get("/api/admin/storages", () => HttpResponse.json([])),
+  http.get("/api/admin/usage/storages", () => HttpResponse.json({ window_limit: 10000, storages: [] })),
+  http.get("/api/admin/usage/unregistered-storages", () => HttpResponse.json([])),
+];
+
+test.each([
+  ["/admin/usage", "사용량 분석"],
+  ["/admin/usage/storages", "스토리지별"],
+])("admin can open %s (h1 %s)", async (path, heading) => {
+  server.use(...usageHandlers());
+  renderAt(path);
+  expect(await screen.findByRole("heading", { name: heading, level: 1 })).toBeInTheDocument();
+  // 하위 내비는 두 탭 -- 지금 화면이 aria-current 로 켜진다. 사이드바는 둘 다 「사용량 분석」.
+  const nav = screen.getByRole("navigation", { name: "사용량 분석 하위 메뉴" });
+  expect(nav.querySelectorAll("a")).toHaveLength(2);
+  expect(nav.querySelector('[aria-current="page"]')).toHaveTextContent(path === "/admin/usage" ? "경로별" : "스토리지별");
+});
+
+test("user visiting /admin/usage/storages is redirected to /jobs", async () => {
+  server.use(
+    http.get("/api/auth/me", () => HttpResponse.json({ actor: "alice", role: "user" })),
+    http.get("/api/user/requests", () => HttpResponse.json([])),
+  );
+  renderAt("/admin/usage/storages");
+  expect(await screen.findByRole("heading", { name: "전체 작업" })).toBeInTheDocument();
+});
+
 test("user visiting /admin/k8s is redirected to /jobs", async () => {
   server.use(
     http.get("/api/auth/me", () => HttpResponse.json({ actor: "alice", role: "user" })),

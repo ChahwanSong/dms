@@ -6,13 +6,16 @@ const BOXED = [
   "[&_td]:px-3 [&_td]:py-1.5 [&_tbody_tr]:border-t [&_tbody_tr]:border-line",
 ].join(" ");
 
-// wrapRef(2026-10-20): 가로 스크롤 래퍼를 호출측이 잰다 -- 사용량 분석의 펼침 상세가 표 폭(넘침)이 아니라 **보이는 폭**
-// (래퍼 clientWidth)에 맞춰 375 에서도 한눈에 들어오게.
-export function Table({ children, boxed = false, wrapRef }: {
-  children: React.ReactNode; boxed?: boolean; wrapRef?: React.Ref<HTMLDivElement>;
+// wrapRef(2026-10-20): 가로 스크롤 래퍼를 호출측이 잰다 -- 사용량 분석 표가 옆으로 밀렸는지(고정 경로 칸의 그늘).
+// framed(2026-10-29): 카드 밖(페이지 바탕) 표의 경계 -- 흰 바탕 + 1px 테두리 + 카드 모서리만 주고 칸 여백·머리줄은 호출측 그대로
+// (boxed 는 칸 여백·머리 배경까지 바꾼다). 사용량 분석 패널이 바깥 카드를 없애며 표가 스스로 구획이 됐다.
+export function Table({ children, boxed = false, framed = false, wrapRef }: {
+  children: React.ReactNode; boxed?: boolean; framed?: boolean; wrapRef?: React.Ref<HTMLDivElement>;
 }) {
+  const wrap = boxed ? "overflow-x-auto rounded-lg border border-line"
+    : framed ? "overflow-x-auto rounded-card border border-line bg-surface" : "overflow-x-auto";
   return (
-    <div ref={wrapRef} className={boxed ? "overflow-x-auto rounded-lg border border-line" : "overflow-x-auto"}>
+    <div ref={wrapRef} className={wrap}>
       <table className={`w-full text-sm text-left ${boxed ? BOXED : ""}`}>{children}</table>
     </div>
   );

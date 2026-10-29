@@ -6,7 +6,8 @@ import { assertLayoutSane } from "./helpers/layout";
 
 // E15 — 사용량 분석 필터(2026-10-29 사용자 요청 「사용자·PV 이름·namespace 등으로 필터」). 단위 테스트(msw)가 못 보는 것: 실 서버의
 // /targets·/facets·/targets/export 가 실 scan 기록으로 요청자 필터를 **대상 단위**로 걸고, 화면이 그 선택을 URL 에 실어 새로고침에도
-// 같은 결과를 그리며, CSV 가 같은 필터로 「-filtered」 파일 이름을 쓰는가. 필터 줄이 보이는 채로 375 레이아웃 불변식(L1~L4).
+// 같은 결과를 그리며, CSV 가 같은 필터로 「-filtered」 파일 이름을 쓰는가. 필터 줄이 보이는 채로 375 레이아웃 불변식(L1~L4). 하위
+// 탭 왕복(2026-10-29)에 필터가 남는가(경로별 마지막 쿼리 복원).
 // 하네스엔 k8s 클러스터가 없어 PV 축(클러스터·namespace·PV 이름 …)은 고를 수 없다 -- 요청자 축만 실데이터로 잰다(PV 축의 필터 줄
 // 375 는 E3(03-layout)의 딥링크가 잰다). 요청자 축의 선택지가 둘 이상이어야 select 가 보이므로, 두 번째 특권 관리자(계정 + 자격 부여
 // -- scan 은 특권 운영자만 낸다, E11 과 같은 경로)가 scan 하나를 낸다.
@@ -32,8 +33,10 @@ async function scan(request: APIRequestContext, target: string): Promise<void> {
     message: `scan ${target} 이 60s 안에 끝나지 않았다` }).toBe("Succeeded");
 }
 
+// 경로별 패널 = 스토리지 이름의 구역(2026-10-29 -- 예전 탭 패널).
+const panelOf = (page: Page) => page.getByRole("region", { name: STORAGE_NAME, exact: true });
 function rowsOf(page: Page, target: string) {
-  return page.getByRole("tabpanel").locator("table tbody tr").filter({ hasText: target });
+  return panelOf(page).locator("table tbody tr").filter({ hasText: target });
 }
 
 test.describe("E15 — 사용량 분석 필터", () => {
@@ -56,7 +59,7 @@ test.describe("E15 — 사용량 분석 필터", () => {
 
     // 3) 사용량 화면: 요청자 select(선택지 = 이 스토리지를 scan 한 계정들, 대상 수) → 고르면 URL·목록·건수.
     await page.goto(`/admin/usage?storage=${STORAGE_NAME}`);
-    const panel = page.getByRole("tabpanel");
+    const panel = panelOf(page);
     await expect(rowsOf(page, MINE)).toHaveCount(1);
     const filters = panel.getByRole("group", { name: "사용량 필터" });
     const requester = filters.getByRole("combobox", { name: "요청자 필터" });
@@ -66,8 +69,15 @@ test.describe("E15 — 사용량 분석 필터", () => {
     await expect(rowsOf(page, THEIRS)).toHaveCount(1);
     await expect(rowsOf(page, MINE)).toHaveCount(0);
     await expect(panel.getByText("필터에 맞는 1개", { exact: true })).toBeVisible();
-    // 필터 합계 카드(스토리지 합계 아래) -- 적용 필터를 말한다
-    await expect(panel.getByRole("region", { name: "필터 합계" })).toContainText(`적용 필터: 요청자 ${OTHER}`);
+    // 합계 줄(2026-10-29 한 줄 + [자세히]): 필터가 켜지면 같은 자리가 「필터 합계」 한 줄이 된다(두 벌이 아니다). 적용 필터
+    // 문장은 [자세히] 안 -- 열면 보인다(기본 닫힘).
+    const totals = panel.getByRole("region", { name: "필터 합계" });
+    await expect(totals).toBeVisible();
+    await expect(panel.getByRole("region", { name: "이 스토리지 합계" })).toHaveCount(0);
+    const applied = totals.getByText(`적용 필터: 요청자 ${OTHER}`);
+    await expect(applied).toBeHidden();
+    await totals.getByText("자세히", { exact: true }).click();
+    await expect(applied).toBeVisible();
 
     // 4) 새로고침: URL 이 진실 -- 같은 선택·같은 목록
     await page.reload();
@@ -94,7 +104,16 @@ test.describe("E15 — 사용량 분석 필터", () => {
     await assertLayoutSane(page, { sidebarFixed: false, minTableCells: 12 });
     await page.setViewportSize({ width: 1280, height: 800 });
 
-    // 7) 필터 지우기 → URL 에서 빠지고 전체 목록
+    // 7) 탭 왕복(2026-10-29): 스토리지별로 갔다가 「경로별」 탭으로 돌아오면 마지막 쿼리(필터)가 복원된다(sessionStorage).
+    await page.getByRole("navigation", { name: "사용량 분석 하위 메뉴" }).getByRole("link", { name: "스토리지별" }).click();
+    await expect(page.getByRole("heading", { name: "스토리지별", level: 1 })).toBeVisible();
+    await page.getByRole("navigation", { name: "사용량 분석 하위 메뉴" }).getByRole("link", { name: "경로별" }).click();
+    await expect(page).toHaveURL(new RegExp(`[?&]requester=${OTHER}(&|$)`));
+    await expect(requester).toHaveValue(OTHER);
+    await expect(rowsOf(page, THEIRS)).toHaveCount(1);
+    await expect(rowsOf(page, MINE)).toHaveCount(0);
+
+    // 8) 필터 지우기 → URL 에서 빠지고 전체 목록
     await filters.getByRole("button", { name: "필터 지우기" }).click();
     await expect(page).not.toHaveURL(/requester=/);
     await expect(rowsOf(page, MINE)).toHaveCount(1);

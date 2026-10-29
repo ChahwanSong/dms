@@ -93,6 +93,9 @@ export default {
         // 더 긴 점선 층을 transform 으로 민다(background-position 은 합성되지 않는다) -- 한 마디를 밀면 처음 무늬와 같다.
         "dash-down": { from: { transform: "translateY(0)" }, to: { transform: "translateY(16px)" } },
         "dash-up": { from: { transform: "translateY(16px)" }, to: { transform: "translateY(0)" } },
+        // 측면 시트(Dialog side="right", 2026-10-29)가 열릴 때 오른쪽에서 들어온다 -- 닫을 때는 움직임 없음(Radix Presence 가
+        // 바로 내린다). motion-safe 에만 붙인다.
+        "sheet-in": { from: { transform: "translateX(100%)" }, to: { transform: "translateX(0)" } },
       },
       animation: {
         "flow-x": "flow-x 7s linear infinite",
@@ -106,6 +109,7 @@ export default {
         "dash-flow": "dash-flow 1.2s linear infinite",
         "dash-down": "dash-down 1.2s linear infinite",
         "dash-up": "dash-up 1.2s linear infinite",
+        "sheet-in": "sheet-in 150ms ease-out",
       },
     },
   },

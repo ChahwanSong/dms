@@ -9,8 +9,8 @@ import { UsageAnalysis } from "./UsageAnalysis";
 import type { UnregisteredStorage, UsageStorageSummary } from "../../lib/types";
 
 // 사용량 분석 미등록 스토리지 정리(2026-10-12 사용자 요청: 「미등록 스토리지 항목들은 스토리지 항목별로 전체 clean up」).
-// 2026-10-20: 따로 뜨던 칸 대신 「미등록」 탭의 경고 띠 -- 페이지를 그리고 그 탭을 눌러 들어간다. 정리 결과·고아 오류·목록
-// 오류는 페이지(탭 줄 위)가 말한다.
+// 2026-10-20: 따로 뜨던 칸 대신 「미등록」 스토리지의 경고 띠 -- 경로별 페이지를 그리고 스토리지 select 의 「미등록」 묶음에서
+// 골라 들어간다(2026-10-29 -- 예전엔 탭). 정리 결과·고아 오류·목록 오류는 페이지의 알림 자리(하위 탭 아래)가 말한다.
 const server = setupServer();
 beforeAll(() => server.listen()); afterEach(() => server.resetHandlers()); afterAll(() => server.close());
 
@@ -31,7 +31,7 @@ const REGISTERED: UsageStorageSummary = {
   storage_name: "cephfs-dms", registered: true, source: "registered", backend_type: "cephfs", mount_path: "/cephfs",
   target_count: 0, succeeded_scan_count: 0, last_scan_at: null };
 
-// 요약은 미등록 목록에서 만든다(성공 scan 이 있는 미등록 이름만 -- 서버 규칙) -- 정리로 목록이 비면 탭도 사라진다.
+// 요약은 미등록 목록에서 만든다(성공 scan 이 있는 미등록 이름만 -- 서버 규칙) -- 정리로 목록이 비면 select 옵션도 사라진다.
 function renderPage(getList: () => UnregisteredStorage[] | Response) {
   server.use(
     http.get("/api/admin/storages", () => HttpResponse.json([{ storage_name: "cephfs-dms", mount_path: "/cephfs",
@@ -67,23 +67,32 @@ function renderPage(getList: () => UnregisteredStorage[] | Response) {
     <UsageAnalysis /></MemoryRouter></QueryClientProvider>);
 }
 
+const storageSelect = () => screen.getByRole("combobox", { name: "스토리지" });
+const optionNames = () => within(storageSelect()).getAllByRole("option").map((o) => o.textContent);
+// 미등록 스토리지 고르기(select 「미등록」 묶음 -- 300ms 디바운스 뒤 push): 그 이름의 띠가 그려질 때까지 기다린다.
 async function openTab(name: string) {
-  await userEvent.click(await screen.findByRole("tab", { name: new RegExp(`^${name} 미등록`) }));
-  return screen.findByRole("note", { name: "미등록 스토리지" });
+  await waitFor(() => expect(optionNames().some((o) => o?.startsWith(`${name} · 미등록`))).toBe(true));
+  await userEvent.selectOptions(storageSelect(), `s:${name}`);
+  return waitFor(() => {
+    const note = screen.getByRole("note", { name: "미등록 스토리지" });
+    expect(note.querySelector("p")?.textContent).toBe(name);
+    return note;
+  });
 }
 
 const empty = { deleted: [], deleted_batches: [], skipped: [], skipped_batches: [], purge_pending: 0 };
 
-test("미등록 목록이 비면 미등록 탭이 없다", async () => {
+test("미등록 목록이 비면 select 에 미등록 묶음이 없다", async () => {
   let called = false;
   renderPage(() => { called = true; return []; });
-  await screen.findByRole("tab", { name: /^cephfs-dms/ });
+  await waitFor(() => expect(storageSelect()).toHaveValue("s:cephfs-dms"));
   await waitFor(() => expect(called).toBe(true));
-  expect(screen.queryByRole("tab", { name: /미등록/ })).toBeNull();
+  expect(optionNames()).toEqual(["cephfs-dms · cephfs · 대상 0개"]);
+  expect(storageSelect().querySelectorAll("optgroup")).toHaveLength(1);
   expect(screen.queryByRole("note", { name: "미등록 스토리지" })).toBeNull();
 });
 
-test("미등록 탭의 띠: 마지막 설정·규모·빨강 「기록 정리」(이름이 붙은 접근 이름)", async () => {
+test("미등록 스토리지의 띠: 마지막 설정·규모·빨강 「기록 정리」(이름이 붙은 접근 이름)", async () => {
   renderPage(() => [OLD, GHOST]);
   const note = await openTab("old-gpfs");
   expect(note).toHaveTextContent("스토리지 목록에서 삭제된 스토리지의 기록입니다");
@@ -140,10 +149,11 @@ test("확인 창: 수·범위·데이터 불변 안내, 체크 전엔 잠김 -- 
   // 남은 것 = 건너뛴 것뿐(서버가 센 untried 0) → 「아직 정리하지 않은 기록」 안내는 없다
   expect(result).not.toHaveTextContent("아직 정리하지 않은 기록");
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-  // 탭이 사라져도 결과 줄은 남고(탭 줄 위), 포커스가 그리로 간다. 보던 탭이 사라졌으니 기본 탭으로 -- 안내 문구는 없다.
-  await waitFor(() => expect(screen.queryByRole("tab", { name: /^old-gpfs/ })).toBeNull());
+  // 그 스토리지가 사라져도 결과 줄은 남고(알림 자리), 포커스가 그리로 간다. 보던 스토리지가 사라졌으니 기본 스토리지로 -- 안내
+  // 문구는 없다.
+  await waitFor(() => expect(optionNames().some((o) => o?.startsWith("old-gpfs"))).toBe(false));
   await waitFor(() => expect(result).toHaveFocus());
-  await waitFor(() => expect(screen.getByRole("tab", { name: /^cephfs-dms/ })).toHaveAttribute("aria-selected", "true"));
+  await waitFor(() => expect(storageSelect()).toHaveValue("s:cephfs-dms"));
   expect(screen.queryByText(/사용량 기록이 없습니다/)).toBeNull();
   // 다 읽은 결과 줄은 닫을 수 있다
   await userEvent.click(within(result).getByRole("button", { name: "정리 결과 닫기" }));
@@ -225,7 +235,7 @@ test("회차를 이어 부르는 기준은 서버의 remaining_untried -- 건너
   expect(n).toBe(2);
 });
 
-test("첫 회차 전체 실패 뒤 재조회로 그 탭이 사라져도 페이지가 오류를 말한다(조용히 성공처럼 보이지 않는다)", async () => {
+test("첫 회차 전체 실패 뒤 재조회로 그 스토리지가 사라져도 페이지가 오류를 말한다(조용히 성공처럼 보이지 않는다)", async () => {
   let list = [GHOST];
   server.use(http.post(PURGE_URL, () => {
     list = [];                                   // 다른 관리자가 같은 이름을 다시 등록 -- 미등록 목록에서 빠진다
@@ -241,7 +251,7 @@ test("첫 회차 전체 실패 뒤 재조회로 그 탭이 사라져도 페이�
   expect(await screen.findByRole("alert")).toHaveTextContent("ghost: 이 스토리지는 지금 등록돼 있어");
 });
 
-test("받은 뒤의 재조회 실패는 탭·결과를 지우지 않는다", async () => {
+test("받은 뒤의 재조회 실패는 스토리지·결과를 지우지 않는다", async () => {
   let fail = false;
   server.use(http.post(PURGE_URL, () => {
     fail = true;
@@ -256,6 +266,6 @@ test("받은 뒤의 재조회 실패는 탭·결과를 지우지 않는다", asy
   await userEvent.click(within(dlg).getByRole("button", { name: "6개 영구 삭제" }));
   expect(await screen.findByRole("status", { name: "정리 결과" })).toHaveTextContent("작업 기록 1개 삭제됨");
   expect(await screen.findByText(/미등록 스토리지 목록을 새로 고치지 못했습니다/)).toBeInTheDocument();
-  expect(screen.getByRole("tab", { name: /^old-gpfs 미등록/ })).toBeInTheDocument();
+  expect(optionNames()).toContain("old-gpfs · 미등록 · 대상 3개");
   expect(screen.getByRole("note", { name: "미등록 스토리지" })).toBeInTheDocument();
 });
