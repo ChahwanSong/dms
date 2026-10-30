@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
@@ -210,16 +210,31 @@ const usageHandlers = () => [
 ];
 
 test.each([
-  ["/admin/usage", "사용량 분석"],
-  ["/admin/usage/storages", "스토리지별"],
-])("admin can open %s (h1 %s)", async (path, heading) => {
+  ["/admin/usage", "사용량 분석", "경로별"],
+  ["/admin/usage/storages", "스토리지별", "스토리지별"],
+  ["/admin/usage/breakdown", "소속별", "소속별"],
+])("admin can open %s (h1 %s)", async (path, heading, tab) => {
   server.use(...usageHandlers());
   renderAt(path);
   expect(await screen.findByRole("heading", { name: heading, level: 1 })).toBeInTheDocument();
-  // 하위 내비는 두 탭 -- 지금 화면이 aria-current 로 켜진다. 사이드바는 둘 다 「사용량 분석」.
+  // 하위 내비는 세 탭(2026-10-30 소속별) -- 지금 화면이 aria-current 로 켜진다. 사이드바는 셋 다 「사용량 분석」. 하위 화면의
+  // h1 = 탭 라벨 = 크럼 끝 라벨(소속별·스토리지별).
   const nav = screen.getByRole("navigation", { name: "사용량 분석 하위 메뉴" });
-  expect(nav.querySelectorAll("a")).toHaveLength(2);
-  expect(nav.querySelector('[aria-current="page"]')).toHaveTextContent(path === "/admin/usage" ? "경로별" : "스토리지별");
+  expect(nav.querySelectorAll("a")).toHaveLength(3);
+  expect(nav.querySelector('[aria-current="page"]')).toHaveTextContent(tab);
+  if (path !== "/admin/usage") {
+    const crumb = screen.getByRole("navigation", { name: "breadcrumb" });
+    expect(within(crumb).getByText(heading)).toBeInTheDocument();
+  }
+});
+
+test("user visiting /admin/usage/breakdown is redirected to /jobs", async () => {
+  server.use(
+    http.get("/api/auth/me", () => HttpResponse.json({ actor: "alice", role: "user" })),
+    http.get("/api/user/requests", () => HttpResponse.json([])),
+  );
+  renderAt("/admin/usage/breakdown");
+  expect(await screen.findByRole("heading", { name: "전체 작업" })).toBeInTheDocument();
 });
 
 test("user visiting /admin/usage/storages is redirected to /jobs", async () => {

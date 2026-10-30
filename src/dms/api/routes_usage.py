@@ -39,11 +39,19 @@
   SQL(scan_target_heads(tokens=))로 정확히 건다. 옛 path(경로 부분 일치 -- 방언 LIKE 그대로라 대소문자 무시를 보장하지 않는다)는
   옛 탭 호환으로 뜻 그대로 남고 q 와 함께 걸린다.
   facets·storage-totals 는 q 를 받지 않는다(합계는 경로 검색과 무관 -- 2026-10-21).
+- 소속별(2026-10-30 사용자 결정 「그래 구현시작해.」 -- 사용량 분석의 세 번째 하위 탭): GET /breakdown 이 한 스토리지를 권한 사용자·
+  요청자·namespace·PV 이름·StorageClass·클러스터 묶음으로 나눠 **실 사용량 순위**를 한 번에 낸다(행마다 합계를 따로 부르면 「대상
+  수 순」밖에 못 하고 호출이 묶음 수만큼이다). 창·귀속은 /facets 와 한 벌(최근 스캔 순 _WINDOW_LIMIT, usage_attribution.attribute),
+  묶음 판정은 필터 판정 그대로(usage_attribution.breakdown_groups), 묶음 값은 필터 합계와 같은 정의(그 묶음 안의 최상위 합 --
+  _read_top_summaries 를 storage-totals 와 함께 쓴다). 그래서 행 값 = 경로별에서 그 행의 filter 를 건 storage-totals 다(오라클 --
+  usage_breakdown docstring, tests/test_api_usage_breakdown.py). 키가 필터 파라미터 규칙 밖인(변조·이상 DB 행) 묶음은 filter null
+  행이다(링크 아님 -- filter_value_ok; /facets 도 같은 술어로 그 선택지를 뺀다, 2026-10-30 리뷰).
 - **옛 탭 호환 동결**: scan-targets·export 는 본문을 바꾸지 않는다(봉투 없는 배열이라 메아리를 실을 자리가 없다 -- 옛 탭 JS 가
   그 모양을 읽는다; tests/test_usage_equivalence.py 가 바이트를 고정한다). 새 포탈은 /targets 를 쓴다 -- 다음 정리 때 제거한다
   (docs/BACKLOG.md).
 """
 import json
+import re
 import sys
 import threading
 import time
@@ -64,9 +72,11 @@ from .routes_scan_paths import (_buckets, _is_number, _numbers, _report_total_by
                                 _summary_count, _time_histograms)
 from ..metrics_series import storage_filesystem
 from ..repositories.text_search import search_tokens
-from ..usage_attribution import (FACET_LIST_CAP, PvFilter, attribute, collect, facet_counts, matches, may_attribute_pv,
-                                 ranked, search_matches)
-from ..usage_metrics import METRIC_SORTS, SORT_PATTERN, StorageTotals, maximal_targets, metric_value, sort_keyed
+from ..usage_attribution import (FACET_LIST_CAP, GROUP_AXES, PvFilter, attribute, breakdown_groups, collect, facet_counts,
+                                 group_fields, group_filter, key_expressible, matches, may_attribute_pv, pvc_storage_classes,
+                                 ranked, scope_counts, search_matches)
+from ..usage_metrics import (METRIC_SORTS, SORT_PATTERN, GroupTotals, MaximalIndex, StorageTotals, head_contribution,
+                             maximal_targets, metric_value, sort_keyed)
 
 router = APIRouter(dependencies=[Depends(require_admin)])
 
@@ -75,8 +85,8 @@ router = APIRouter(dependencies=[Depends(require_admin)])
 _MAX_POINTS = 60
 _TARGET_LIMIT = 200
 # 창 상한(2026-10-20 사용자 요청: 「서버의 스캔 상한선도 5천개에서 1만개로」) -- 지표 정렬(bytes·files·hot)의 대상 창과
-# 내보내기 상한에 함께 쓴다(2026-10-29 부터 PV 필터의 판정 창·/facets·필터 합계의 창도). 전 타깃이 계약이지만 무한은 아니다 --
-# 내보내기는 넘으면 잘라 내고 truncated(알려진 일치를 잘랐으면 capped 도)로 말한다(조용한 절단 금지), 포탈은 /targets 봉투의
+# 내보내기 상한에 함께 쓴다(2026-10-29 부터 PV 필터의 판정 창·/facets·필터 합계의 창도, 2026-10-30 부터 소속별의 창도).
+# 전 타깃이 계약이지만 무한은 아니다 -- 내보내기는 넘으면 잘라 내고 truncated(알려진 일치를 잘랐으면 capped 도)로 말한다(조용한 절단 금지), 포탈은 /targets 봉투의
 # matched_count 가 이 값을 넘거나 window_truncated(PV 판정 창 넘침)일 때만 「최근 스캔된 N개 안에서 정렬」을 알린다(N = 봉투의
 # window_limit -- 탭의 대상 수가 아니다: 검색·필터가 걸리면 그 수는 거짓이다). 메모리 근거(2026-10-20 실측, 1만 타깃 한 스토리지 + 6.5만 잡, 요약 평균 3.6KB): 창
 # 전체의 포인트를 세우고 응답을 통째로 만들던 옛 구조는 1만 내보내기 한 건이 +~465MiB(PG·sqlite 같음), PG 동시 3건이면 HWM 1.3GiB
@@ -124,6 +134,19 @@ _FILTER_TEXT = r"^[^\x00-\x1f\x7f]+$"
 # api.auth) -- storage·path 와 같은 512.
 _NAME_MAX = 253
 _REQUESTER_MAX = 512
+_FILTER_TEXT_RE = re.compile(_FILTER_TEXT)
+
+
+def filter_value_ok(param: str, value) -> bool:
+    """서버가 낸 값(묶음 키·/facets 선택지)이 경로별 필터 파라미터(_filter_params)를 통과하나 -- 같은 규칙(길이 1..상한, 제어 문자
+    없음)의 술어 한 벌(2026-10-30 리뷰). DB 가 신뢰 경계라 규칙 밖 값이 생긴다(빈 dms_user·제어 문자가 든 requester_id·기록 pv 블록의
+    탭 든 namespace·253자 넘는 pvc -- parse_block 은 비어 있지 않은 문자열만 본다). 그런 값을 필터로 내면 포탈이 고르거나 누르는 순간
+    422 다 -- /facets 는 선택지에서 빼고, 소속별은 행을 남기되(실 사용량이다 -- 숨기면 조용한 누락) filter 를 null 로 낸다(링크 아님).
+    fullmatch 인 이유: re 의 match·search 에서 '$' 는 끝 개행 앞에서도 맞는다 -- 값 전체가 규칙 안이어야 한다. 이 술어와 Query 검증이
+    갈라지지 않는지는 tests/test_api_usage_breakdown.py 가 실제 storage-totals 응답(200/422)과 대조한다."""
+    limit = _REQUESTER_MAX if param == "requester" else _NAME_MAX
+    return isinstance(value, str) and len(value) <= limit and _FILTER_TEXT_RE.fullmatch(value) is not None
+
 # 새 엔드포인트(/targets·/targets/export·/facets·storage-totals)의 storage·path(2026-10-29 2차 리뷰): NUL 만 422 로 막는다 -- PG
 # text 가 NUL 을 받지 못해 psycopg DataError → 500 이었다(위 _FILTER_TEXT 와 같은 구멍). 빈 문자열(빈 이름 탭 -- storage 의 빈
 # 이름 교훈)과 다른 제어문자(구형·변조 행의 이름일 수 있다 -- 탭이 그 이름으로 서야 지울 수 있다)는 그대로 받는다. 옛
@@ -759,15 +782,18 @@ def usage_facets(request: Request, storage: str = Query(..., max_length=512, pat
     usage_attribution.facet_counts). 목록·내보내기의 PV 필터와 **같은 창**이다(_select_heads -- 정렬과 무관) -- 그래서 창이 넘친
     스토리지에서도 옵션 수 = 그 옵션을 고른 목록이 창 안에서 찾는 대상 수다(포탈이 「최근 스캔된 N개 기준」이라고 말한다). requesters 는 스토리지 전체 기준(scan_requester_counts -- 창과 무관하게 정확하다). 목록마다
     상한 FACET_LIST_CAP(대상 수 내림차순 → 이름순), 넘으면 lists_truncated[이름] = true. 선택지는 지금 기록에 있는 값만이다(k8s
-    인벤토리 전체가 아니다 -- 고르면 0건인 선택지를 내지 않는다)."""
+    인벤토리 전체가 아니다 -- 고르면 0건인 선택지를 내지 않는다). 필터 파라미터 규칙 밖 값(filter_value_ok -- 변조·이상 DB 행의 빈 값·
+    제어 문자·상한 넘는 길이)은 선택지에서 뺀다(2026-10-30 리뷰 -- 고르는 순간 422 인 선택지였다; 상한 자르기 전에 뺀다). 그 대상은
+    scope·다른 목록에는 그대로 센다 -- 소속별은 같은 값을 filter null 행(링크 아님)으로 보인다."""
     repos = request.app.state.repos
     heads = repos.data_jobs.scan_target_heads(storage=storage, order="desc", limit=_WINDOW_LIMIT + 1)
     window_truncated = len(heads) > _WINDOW_LIMIT
     heads = heads[:_WINDOW_LIMIT]
     inputs = collect(repos, storage, heads)
-    facets = facet_counts([attribute(h["target"], inputs) for h in heads], cap=FACET_LIST_CAP)
+    facets = facet_counts([attribute(h["target"], inputs) for h in heads], cap=FACET_LIST_CAP, keep=filter_value_ok)
     requesters, requesters_truncated = ranked(
-        {r["requester_id"]: r["target_count"] for r in repos.data_jobs.scan_requester_counts(storage)},
+        {r["requester_id"]: r["target_count"] for r in repos.data_jobs.scan_requester_counts(storage)
+         if filter_value_ok("requester", r["requester_id"])},
         lambda k, n: {"requester_id": k, "target_count": n}, FACET_LIST_CAP)
     return {"storage_name": storage, "computed_at": utc_now_iso(), "window_limit": _WINDOW_LIMIT,
             "window_truncated": window_truncated, "target_count": len(heads), "scope": facets["scope"],
@@ -888,41 +914,206 @@ def storage_totals(request: Request, storage: str = Query(..., max_length=512, p
     return {**_totals(request, heads, truncated, storage=storage), "filesystem": None, "filters": flt.echo()}
 
 
-def _totals(request: Request, heads: list, truncated: bool, *, storage: str) -> dict:
-    """storage_totals 의 몸통(필터 없는 합계와 필터 합계가 함께 쓴다) -- 규칙은 storage_totals docstring 1~4. filesystem 은
-    호출자가 붙인다(키 순서: 이 결과 뒤)."""
+@dataclass
+class _SummaryReads:
+    """_read_top_summaries 한 번의 결과 수(storage-totals·소속별 응답의 pending_count·unreadable_count·progressed)."""
+    pending: int = 0
+    unreadable: int = 0
+    read_ok: int = 0
+    noted: int = 0
+
+    @property
+    def progressed(self) -> bool:
+        return self.read_ok > 0 or self.noted > 0
+
+
+def _read_top_summaries(request: Request, top: list, consume) -> _SummaryReads:
+    """최상위 머리들(최근 스캔 순)의 최신 리포트 요약을 _CHUNK 묶음씩 읽어 머리 순서대로 consume(머리, 실 사용량, 요약 | None)을
+    부른다 -- 읽기 규칙은 storage_totals docstring 4(예산 _TOTALS_READ_BUDGET·실패 기억·아직 안 연 것 먼저 → TTL 지난 실패). 실
+    사용량은 목록 열과 같은 값(못 읽음·지연이면 bytes_count 대체). storage-totals(_totals)와 소속별(usage_breakdown -- 모든 묶음의
+    최상위 합집합을 **한 예산**으로 읽는다)이 함께 쓴다(2026-10-30 에 _totals 에서 뽑았다 -- 동작·바이트는 그대로). 메모리는 묶음
+    하나(요약 500개)다 -- consume 이 값을 더한 뒤 버린다."""
     repos = request.app.state.repos
-    top, nested, invalid = maximal_targets(heads)
     base = _base(request)
-    acc = StorageTotals()
     failures: ReportReadFailures = request.app.state.report_read_failures
-    budget, pending, unreadable, read_ok, noted = _TOTALS_READ_BUDGET, 0, 0, 0, 0
+    budget, out = _TOTALS_READ_BUDGET, _SummaryReads()
     for i in range(0, len(top), _CHUNK):
         chunk = top[i:i + _CHUNK]
         digests = _cached_digests(repos, [h["job_id"] for h in chunk])
         missing = [h["job_id"] for h in chunk if h["job_id"] not in digests]
         recent, expired = failures.split(missing)
-        unreadable += len(recent)                  # 방금 못 읽은 잡 -- 열지 않고 센다(예산 밖)
+        out.unreadable += len(recent)              # 방금 못 읽은 잡 -- 열지 않고 센다(예산 밖)
         untried = ([jid for jid in missing if jid not in recent and jid not in expired]
                    + [jid for jid in missing if jid in expired])
         take, later = untried[:budget], untried[budget:]
         budget -= len(take)
-        pending += len(later)
+        out.pending += len(later)
         if take:
             fresh = _read_and_cache(repos, base, list(repos.data_jobs.jobs_by_ids(take).values()))
-            read_ok += len(fresh)
+            out.read_ok += len(fresh)
             failed = [jid for jid in take if jid not in fresh]      # 그 사이 지워진 잡도 못 읽은 것이다
-            unreadable += len(failed)
-            noted += failures.record(failed)
+            out.unreadable += len(failed)
+            out.noted += failures.record(failed)
             digests.update(fresh)
         for h in chunk:
             d = digests.get(h["job_id"])           # 못 읽음·지연 = None -> 실 사용량은 bytes_count(목록 열과 같은 대체)
-            acc.add(h, metric_value({"latest": _point(h, d)}, "bytes"), d)
+            consume(h, metric_value({"latest": _point(h, d)}, "bytes"), d)
         del digests
+    return out
+
+
+def _totals(request: Request, heads: list, truncated: bool, *, storage: str) -> dict:
+    """storage_totals 의 몸통(필터 없는 합계와 필터 합계가 함께 쓴다) -- 규칙은 storage_totals docstring 1~4. filesystem 은
+    호출자가 붙인다(키 순서: 이 결과 뒤)."""
+    top, nested, invalid = maximal_targets(heads)
+    acc = StorageTotals()
+    reads = _read_top_summaries(request, top, acc.add)
     return {"storage_name": storage, "computed_at": utc_now_iso(), "truncated": truncated,
             "window_limit": _WINDOW_LIMIT, "target_count": len(heads), "summed_target_count": len(top),
-            "nested_target_count": nested, "invalid_target_count": invalid, "unreadable_count": unreadable,
-            "pending_count": pending, "progressed": read_ok > 0 or noted > 0, **acc.result()}
+            "nested_target_count": nested, "invalid_target_count": invalid, "unreadable_count": reads.unreadable,
+            "pending_count": reads.pending, "progressed": reads.progressed, **acc.result()}
+
+
+# ---- 2026-10-30: 소속별(GET /api/admin/usage/breakdown) ----
+
+_GROUP_BY = "^(" + "|".join(GROUP_AXES) + ")$"
+
+
+class _GroupPlan:
+    """묶음 하나(행·덧붙임·스토리지 전체)의 대상 수와 그 최상위 합 누적기. 값은 _read_top_summaries 가 채운다. 누적기는 행이 싣는
+    칸만 드는 GroupTotals 다(StorageTotals 와 같은 판정 -- 그 칸은 StorageTotals 도 GroupTotals 로 누적한다)."""
+    __slots__ = ("count", "summed", "nested", "acc")
+
+    def __init__(self, members: list, index: MaximalIndex, tops_of: dict):
+        top, self.nested, _ = index.split(members)             # = maximal_targets(members) -- 창의 조상 판정을 한 번만
+        self.count, self.summed, self.acc = len(members), len(top), GroupTotals()
+        for h in top:
+            tops_of.setdefault(h["job_id"], []).append(self.acc)
+
+    def values(self) -> dict:
+        r = self.acc.result()
+        return {"target_count": self.count, "summed_target_count": self.summed,
+                "nested_target_count": self.nested, "total_bytes": r["total_bytes"], "total_files": r["total_files"],
+                "hot_ratio": r["hot_ratio"], "oldest_scan_at": r["oldest_scan_at"], "newest_scan_at": r["newest_scan_at"]}
+
+
+def _group_rank(key: tuple, row: dict) -> tuple:
+    """순위: 실 사용량 합 내림차순(모름 None 은 뒤 -- 0 으로 접지 않는다), 같으면 대상 수 내림차순, 같으면 키 tuple 오름차순(파이썬
+    문자열 순 -- 방언 콜레이션과 무관하게 결정적). 키 칸은 모두 문자열이다(group_keys·요청자 -- requester_id NOT NULL)."""
+    s = row["total_bytes"]["sum"]
+    return (s is None, -s if s is not None else 0, -row["target_count"], key)
+
+
+@router.get("/api/admin/usage/breakdown")
+def usage_breakdown(request: Request, storage: str = Query(..., max_length=512, pattern=_NO_NUL),
+                    by: "str | None" = Query(None, pattern=_GROUP_BY)):
+    """소속별(2026-10-30, 모듈 docstring 「소속별」): 한 스토리지를 by 축의 묶음으로 나눈 실 사용량 순위. storage 는 다른 새
+    엔드포인트와 같다(필수·정확 일치·빈 문자열도 이름·NUL 422), by = user|requester|namespace|pvc|storage_class|cluster(그 밖 422).
+
+    응답: {storage_name, computed_at, by(적용한 축), requested_by(받은 값 | null), window_limit, window_truncated, target_count(창의
+    대상 수), scope:{inventory, recorded, outside, unknown}(facets 와 같은 값), cluster_count(창의 PV 정체에 나오는 서로 다른 클러스터
+    수 -- 포탈은 둘 이상일 때만 클러스터 접미를 붙인다), storage_total:{summed_target_count, total_bytes}(창 전체의 최상위 합 =
+    storage-totals 무필터와 같은 정의 -- 비중 막대의 분모), rows:[{<축 키 칸>, target_count, summed_target_count,
+    nested_target_count, total_bytes, total_files, hot_ratio, oldest_scan_at, newest_scan_at, filter}], rows_truncated,
+    extras:{outside, unknown, none}(각각 행과 같은 값 칸 + filter, 대상 0 이면 null), pending_count, unreadable_count, progressed}.
+    축 키 칸: user → dms_user, requester → requester_id, namespace → cluster·namespace, pvc → cluster·namespace·pvc·storage_class
+    (facets 의 pvcs 규칙 -- 인벤토리 판정 값 우선, 없으면 처음 본 기록 값), storage_class → storage_class, cluster → cluster.
+    행의 filter 는 경로별 쿼리에 그대로 싣는 {파라미터: 값}이다 -- **null 이면** 그 키가 필터 파라미터 규칙 밖이라(filter_value_ok --
+    변조·이상 DB 행의 빈 값·제어 문자·상한 넘는 길이) 경로별에서 그 묶음을 걸 수 없다(포탈은 링크로 그리지 않는다; 2026-10-30 리뷰
+    전엔 그 filter 를 실은 링크가 422 였다). 행은 숨기지 않는다 -- 실 사용량이 있는 묶음이고 순위·rows_truncated 에 그대로 든다.
+
+    1. 창·귀속 = /facets 한 벌: 머리 = scan_target_heads(최근 스캔 순, _WINDOW_LIMIT + 1 -- 넘으면 window_truncated), 대상마다
+       usage_attribution.attribute.
+    2. 적용 축: by 가 없으면 창에 PV 안 대상(inventory·recorded)이 있을 때 user, 없으면 requester. PV 축을 명시했는데 PV 안 대상이
+       0 이면 requester 로 적용한다(422 가 아니다 -- 포탈이 「이 스토리지에는 PV 안 대상이 없습니다 — 요청자 기준만 볼 수 있습니다」라고
+       말하고, 받은 값은 requested_by 로 돌려준다).
+    3. 묶음 = usage_attribution.breakdown_groups(키 판정이 필터 판정 그대로). 요청자 축은 data_jobs.scan_requesters_by_target(창의
+       대상마다 성공 scan 요청자 -- scan_target_heads(requester=) 와 같은 판정). 덧붙임: PV 축은 outside(필터 scope=outside)·unknown
+       (scope=unknown)·none(그 축 값이 없는 PV 안 대상 -- user·storage_class 만, 경로별에 그 필터가 없어 filter null), 요청자 축은
+       none(요청 행 없는 고아 잡만 가진 대상)만.
+    4. 묶음 값 = 그 묶음의 머리들(창 순서) 중 **묶음 안의** 최상위(maximal_targets 와 같은 결과 -- MaximalIndex, 필터 밖 상위가
+       있으면 그 하위가 최상위로 센다, 필터 합계와 같다)를 GroupTotals 로(_totals 의 StorageTotals 가 같은 칸을 누적하는 그 누적기 --
+       값 규칙 한 벌). 읽기는 모든 묶음·덧붙임·전체의 최상위 합집합(job_id 중복 없이,
+       창 순서)을 _read_top_summaries 로 **한 예산**에 -- pending_count·unreadable_count·progressed 는 storage-totals 와 같은 뜻이다
+       (포탈은 pending > 0 && progressed 동안 다시 부른다; pending 동안의 행 값은 그 대상의 리포트 유래 값이 모름이다).
+    5. 순위(_group_rank)는 모든 묶음을 계산한 **뒤** 매기고 FACET_LIST_CAP 에서 자른다(rows_truncated -- 조용한 절단 금지).
+
+    오라클(요약 캐시가 데워져 pending 0 일 때, filter 가 null 이 아닌 행): 행 g 의 target_count·summed_target_count·nested_target_count·
+    total_bytes·total_files·hot_ratio·oldest/newest_scan_at = GET storage-totals?storage=S&<g.filter> 의 같은 키(필터 합계는 같은 판정
+    창·같은 판정으로 거른 뒤 그 안의 최상위를 더한다 -- _select_heads), PV 축의 target_count = /facets 의 그 옵션 수 = /targets?<g.filter>
+    의 matched_count(창이 넘치지 않았을 때), filter 가 있는 행의 키 집합 = /facets 의 그 목록(둘 다 filter_value_ok 로 거른다 -- filter
+    null 행은 /facets 에 없다). 덧붙임 outside·unknown 도 scope 필터 합계와 같다. **요청자 축만 창이 넘치면 다르다**: 필터 합계·목록의 요청자
+    경로는 SQL 이라 그 요청자의 대상만으로 창(최근 스캔 순 _WINDOW_LIMIT)을 짓지만 여기는 스토리지 전체의 창 안에서 묶는다 -- 넘치면
+    둘 다 「최근 스캔된 N개 기준」 부분 값이고 기준이 다르다(창에 없는 요청자는 행이 없다; /facets 의 requesters 는 창과 무관한 스토리지
+    전체 기준이다). 포탈은 window_truncated 면 「최근 스캔된 N개 기준」이라고 말한다.
+
+    비용: 리포트·요약은 대상당 한 번 읽고 한 번 판정한다(head_contribution) -- 묶음 수에 비례하는 것은 소속 판정과 묶음 누적(GroupTotals
+    정수 덧셈)이다. 묶음 누적 횟수 = Σ 대상마다 「그 대상이 최상위인 묶음 수」이고 상한은 **축마다 다르다**(2026-10-30 리뷰 -- 예전
+    문구 「상한 = 창 안 성공 scan 잡 수」는 user 축에서 틀렸다): user = 창 안 PV 안 대상 수 × 그 namespace(루트 충돌이면 namespace
+    들)의 권한 사용자 수(잡 수와 무관 -- 잡 1개짜리 대상도 사용자 5명이면 5회), requester = 창 안 (대상, 요청자) 쌍 수(≤ 창 대상들의
+    성공 scan 잡 수), namespace·pvc·storage_class·cluster = 창 안 PV 안 대상 수 × 정체 수(루트 충돌이 아니면 1); 어느 축이든 여기에
+    덧붙임·전체 누적(각각 창 대상 수 이하)이 더해진다. 묶음 안 최상위 판정은 창에서 한 번 한 조상 관계로 한다(MaximalIndex).
+    리뷰 전 구현은 묶음마다 StorageTotals(요약 7종·broken·크기 분포 구간 사본)와 maximal_targets 를 다시 돌렸다 -- 실제 dscan 구간 수
+    리포트(크기 10·시간 3×8)로 단일 멤버 묶음 1만 개(대상마다 자기 PVC)가 +39.7MiB·누적 10.2µs/회였고(지금 +4.2MiB·0.3µs/회 + 대상당
+    판정 4.5µs), namespace 당 사용자 100명 세계의 user 축은 묶음별 maximal_targets 만 호출의 절반이었다.
+    2026-10-30 측정(sqlite, 커밋하지 않은 perf 스크립트, 같은 기계에서 리뷰 전·후를 번갈아 3번씩 재 최솟값 -- 한 스토리지 9,881 대상·
+    6.7만 잡(+ 다른 스토리지 2천 대상), PV 600개(클러스터 둘 × namespace 50 × PVC 6)·namespace 마다 RoleBinding 3명, 대상 70% 가 PV
+    안(일부는 PV 루트 자체라 겹친 경로), 요청자 20명, 요약 캐시는 실제 dscan 구간 수 리포트(요약 평균 3.1KB)로 데운 상태, 케이스마다 새
+    프로세스, 첫 호출·HWM 증가 「후 / 전」): user 0.62 / 0.71초 +10.3MiB(묶음 40), namespace 0.62 / 0.68초(100), pvc 0.64 / 0.69초
+    +10.4MiB(420), requester 1.39 / 1.83초 +15.2MiB(묶음 20 -- 대상·요청자 쌍 5.1만), namespace 당 사용자 100명이면 user 0.94 / 1.92초
+    +17.0MiB(묶음 137). 같은 세계의 storage-totals 무필터 0.52초 +8.6MiB(요약 재투영이 대부분 -- 소속별의 바닥이다)·user 필터 합계
+    0.32초 -- 소속별 한 번이 필터 합계를 묶음 수만큼 부르는 것(user 축이면 40번 ≈ 13초)을 대신한다. 창 상한(_WINDOW_LIMIT)을 올리기
+    전에 같은 측정을 다시 하라."""
+    repos = request.app.state.repos
+    heads = repos.data_jobs.scan_target_heads(storage=storage, order="desc", limit=_WINDOW_LIMIT + 1)
+    window_truncated = len(heads) > _WINDOW_LIMIT
+    heads = heads[:_WINDOW_LIMIT]
+    inputs = collect(repos, storage, heads)
+    attrs = [attribute(h["target"], inputs) for h in heads]
+    scope = scope_counts(attrs)
+    has_pv = scope["inventory"] + scope["recorded"] > 0
+    if by == "requester" or (by is not None and has_pv):
+        applied = by
+    else:
+        applied = "user" if has_pv else "requester"
+    requesters = (repos.data_jobs.scan_requesters_by_target(storage, [h["target"] for h in heads])
+                  if applied == "requester" else None)
+    groups, extras = breakdown_groups(heads, attrs, applied, requesters)
+
+    tops_of: dict = {}                     # job_id -> 그 머리가 최상위인 묶음들의 누적기
+    index = MaximalIndex(heads)
+    plans = {key: _GroupPlan(members, index, tops_of) for key, members in groups.items()}
+    extra_plans = {name: _GroupPlan(members, index, tops_of) if members else None for name, members in extras.items()}
+    whole = _GroupPlan(heads, index, tops_of)
+
+    def consume(h, total_bytes, digest):
+        contribution = head_contribution(h, total_bytes, digest)      # 판정은 대상마다 한 번, 묶음에는 정수만 더한다
+        for acc in tops_of[h["job_id"]]:
+            acc.add(contribution)
+    reads = _read_top_summaries(request, [h for h in heads if h["job_id"] in tops_of], consume)
+
+    pvc_sc = pvc_storage_classes(attrs) if applied == "pvc" else {}
+    ranked_rows = []
+    for key, plan in plans.items():
+        fields = group_fields(applied, key)
+        if applied == "pvc":
+            fields["storage_class"] = pvc_sc.get(key)
+        flt = group_filter(applied, key) if key_expressible(applied, key, filter_value_ok) else None
+        ranked_rows.append((key, {**fields, **plan.values(), "filter": flt}))
+    ranked_rows.sort(key=lambda kr: _group_rank(*kr))
+    cap = FACET_LIST_CAP
+    out_extras = {name: None if plan is None
+                  else {**plan.values(), "filter": {"scope": name} if name in ("outside", "unknown") else None}
+                  for name, plan in extra_plans.items()}
+    clusters = {v["cluster"] for a in {id(a): a for a in attrs}.values() for v in a["volumes"]}
+    return {"storage_name": storage, "computed_at": utc_now_iso(), "by": applied, "requested_by": by,
+            "window_limit": _WINDOW_LIMIT, "window_truncated": window_truncated, "target_count": len(heads),
+            "scope": scope, "cluster_count": len(clusters),
+            "storage_total": {"summed_target_count": whole.summed,
+                              "total_bytes": whole.acc.result()["total_bytes"]},
+            "rows": [row for _, row in ranked_rows[:cap]], "rows_truncated": len(ranked_rows) > cap,
+            "extras": out_extras, "pending_count": reads.pending, "unreadable_count": reads.unreadable,
+            "progressed": reads.progressed}
 
 
 @router.get("/api/admin/usage/unregistered-storages")

@@ -139,6 +139,13 @@ describe("사용량 분석 하위 화면(탭, 2026-10-29)", () => {
     expect(activeNavPath("/admin/usage")).toBe("/admin/usage");
     expect(activeNavPath("/admin/usage/storages")).toBe("/admin/usage");
   });
+
+  test("소속별(2026-10-30)도 「사용량 분석」 아래 -- 크럼 끝 = 탭 라벨, 사이드바는 사용량 분석", () => {
+    expect(breadcrumbFor("/admin/usage/breakdown").map((c) => c.label))
+      .toEqual(["HOME", "DMS", "운영", "사용량 분석", "소속별"]);
+    expect(breadcrumbFor("/admin/usage/breakdown")[3]).toEqual({ label: "사용량 분석", path: "/admin/usage" });
+    expect(activeNavPath("/admin/usage/breakdown")).toBe("/admin/usage");
+  });
 });
 
 describe("activeNavPath — 사이드바 활성은 최장 일치 하나", () => {

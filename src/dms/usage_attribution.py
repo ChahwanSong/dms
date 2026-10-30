@@ -26,6 +26,13 @@ storage_class)에 속하는가. data_jobs 에는 PV 칸이 없고(스키마 무�
 (text_search.search_tokens -- 작업 목록 검색과 같은 뜻) **모두**가 그 대상의 경로 또는 소속 PV 정체 하나의 PV 이름(= PVC 이름 --
 inventory·recorded 모두)에 부분 일치. 토큰마다 어느 쪽이든 된다. PV 이름이 생길 수 없는 스토리지(may_attribute_pv 가 False)는 이
 판정이 경로 부분 일치와 같아 라우트가 SQL 로 건다(routes_usage._select_heads).
+
+소속별 묶음(breakdown_groups, 2026-10-30 사용자 결정 「그래 구현시작해.」 -- routes_usage.usage_breakdown): 창의 대상마다 by 축의 묶음
+키를 정한다. 키 판정은 **필터 판정 그 자체**다 -- 대상 t 가 묶음 k 에 든다 ⇔ matches(attr(t), PvFilter(**group_filter(by, k)))(요청자
+축은 scan_target_heads(requester=) 의 판정). 그래서 묶음 값 = 경로별에서 그 묶음의 필터를 건 합계(포탈이 행을 누르면 거는 필터)다 --
+테스트가 둘을 대조한다(tests/test_api_usage_breakdown.py). 한 대상은 여러 묶음에 들 수 있고(권한 사용자 축은 namespace 의 사용자
+수만큼, 루트 충돌이면 정체마다) 한 묶음에는 한 번이다. 키가 필터 파라미터 규칙 밖이면(key_expressible -- 변조·이상 DB 행) 묶음은
+있지만 그 필터를 걸 수 없다: 소속별 행은 filter null, facets 는 선택지에서 뺀다(2026-10-30 리뷰).
 """
 from dataclasses import dataclass, field
 from typing import Mapping
@@ -39,8 +46,20 @@ SCOPES = ("pv", "outside", "unknown")
 SOURCES = ("inventory", "recorded", "outside", "unknown")
 PV_SOURCES = ("inventory", "recorded")
 # facets 의 목록마다 상한(대상 수 내림차순 → 이름순으로 자른다 -- 넘으면 lists_truncated). 포탈 select 하나에 그 이상은 못 고른다.
+# 소속별 순위 행의 상한이기도 하다(넘으면 rows_truncated -- 2026-10-30).
 FACET_LIST_CAP = 2000
 FACET_LISTS = ("clusters", "namespaces", "pvcs", "storage_classes", "users")
+# 소속별(2026-10-30) 축. PV 축 다섯은 PV 소속(inventory·recorded)에서, requester 는 SQL(요청 행)에서 키가 나온다.
+PV_GROUP_AXES = ("user", "namespace", "pvc", "storage_class", "cluster")
+GROUP_AXES = ("user", "requester", "namespace", "pvc", "storage_class", "cluster")
+# 축 → 키 tuple 의 칸마다 (행의 이름, 경로별 필터 파라미터 이름). 행 이름은 facets 의 같은 목록과 같다(dms_user·requester_id).
+GROUP_FIELDS = {"user": (("dms_user", "user"),), "requester": (("requester_id", "requester"),),
+                "namespace": (("cluster", "cluster"), ("namespace", "namespace")),
+                "pvc": (("cluster", "cluster"), ("namespace", "namespace"), ("pvc", "pvc")),
+                "storage_class": (("storage_class", "storage_class"),), "cluster": (("cluster", "cluster"),)}
+# 「그 축 값이 없는 PV 안 대상」 덧붙임(none)이 뜻을 갖는 축. namespace·pvc·cluster 는 PV 안 대상이면 늘 값이 있다(parse_block 이
+# 셋을 비어 있지 않은 문자열로 강제하고, 인벤토리 정체는 PVC 행에서 온다) -- 그 셋은 none 이 늘 null 이다(포탈에 라벨이 없다).
+GROUP_NONE_AXES = ("user", "storage_class", "requester")
 
 
 @dataclass(frozen=True)
@@ -92,7 +111,9 @@ def covering_root(index, target) -> "str | None":
 def parse_block(payload_text, target) -> "tuple | None":
     """요청 payload(TEXT JSON) → (root, 정체) 또는 None(유효하지 않음 -- 예외를 던지지 않는다). 유효: payload 가 dict 이고 pv 가
     dict, cluster·namespace·pvc 는 비어 있지 않은 문자열, volume·storage_class 는 문자열이거나 None, root 는 비어 있지 않은
-    문자열이고 target 이 root 와 같거나 root + '/' 아래(제출 때 얼린 블록이 이 대상의 것인가 -- DB 가 신뢰 경계다)."""
+    문자열이고 target 이 root 와 같거나 root + '/' 아래(제출 때 얼린 블록이 이 대상의 것인가 -- DB 가 신뢰 경계다). 문자열은 UTF-8 로
+    인코딩할 수 있어야 한다(2026-10-30 리뷰): TEXT 에는 ASCII 로 들어간 JSON 이스케이프 외톨이 서로게이트(\\ud800)가 풀리면 응답
+    인코딩에서 UnicodeEncodeError -- /facets·/targets·/breakdown 이 500 이었다. 무효 블록과 같이 다음 유효 블록으로 넘어간다."""
     try:
         payload = load_json(payload_text) if isinstance(payload_text, str) else payload_text
     except (ValueError, RecursionError):
@@ -112,7 +133,17 @@ def parse_block(payload_text, target) -> "tuple | None":
         return None
     if not isinstance(target, str) or not (target == root or target.startswith(root + "/")):
         return None
+    if not all(_utf8(x) for x in (*ident, root) if x is not None):
+        return None
     return root, ident
+
+
+def _utf8(s: str) -> bool:
+    try:
+        s.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 def collect(repos, storage, heads) -> Inputs:
@@ -219,12 +250,22 @@ def ranked(counts: dict, row, cap: int = FACET_LIST_CAP) -> tuple:
     return [row(k, n) for k, n in items[:cap]], len(items) > cap
 
 
-def facet_counts(attrs, *, cap: int = FACET_LIST_CAP) -> dict:
+def _note_pvc_sc(pvc_sc: dict, from_inventory: set, key, source, storage_class) -> None:
+    """(cluster, namespace, pvc) 선택지의 storage_class 규칙 한 벌(facet_counts·pvc_storage_classes): 인벤토리 판정의 값을 먼저,
+    없으면 처음 본 기록의 값."""
+    if key not in pvc_sc or (source == "inventory" and key not in from_inventory):
+        pvc_sc[key] = storage_class
+        if source == "inventory":
+            from_inventory.add(key)
+
+
+def facet_counts(attrs, *, cap: int = FACET_LIST_CAP, keep=None) -> dict:
     """판정들(머리 창의 대상마다 하나) → facets 의 PV 부분: scope(source 마다 대상 수), clusters·namespaces·pvcs·storage_classes·
     users(옵션마다 그 옵션에 맞는 대상 수 -- 한 대상은 옵션마다 한 번만 센다: 루트 충돌로 정체가 여럿이어도), lists_truncated.
     pvcs 의 키는 포탈이 고를 때 싣는 (cluster, namespace, pvc) 이고 storage_class 는 인벤토리 판정의 값을 먼저(없으면 처음 본 기록의
     값) -- 지운 뒤 다른 SC 로 다시 만든 PVC 가 한 선택지에 두 줄로 서지 않게. storage_class 가 없거나 빈 정체는 StorageClass
-    목록에 세지 않는다(그 값으로는 거를 수 없다)."""
+    목록에 세지 않는다(그 값으로는 거를 수 없다). keep(파라미터 이름, 값) 이 있으면 그 술어를 통과하지 못하는 선택지는 상한 자르기
+    **전에** 뺀다(key_expressible -- 라우트의 필터 검증이 거절할 값, 2026-10-30)."""
     scope = dict.fromkeys(SOURCES, 0)
     clusters: dict = {}
     namespaces: dict = {}
@@ -241,16 +282,21 @@ def facet_counts(attrs, *, cap: int = FACET_LIST_CAP) -> dict:
             seen_ns.add((v["cluster"], v["namespace"]))
             key = (v["cluster"], v["namespace"], v["pvc"])
             seen_p.add(key)
-            if key not in pvc_sc or (a["source"] == "inventory" and key not in pvc_sc_inventory):
-                pvc_sc[key] = v["storage_class"]
-                if a["source"] == "inventory":
-                    pvc_sc_inventory.add(key)
+            _note_pvc_sc(pvc_sc, pvc_sc_inventory, key, a["source"], v["storage_class"])
             if isinstance(v["storage_class"], str) and v["storage_class"] != "":
                 seen_sc.add(v["storage_class"])
         for bucket, seen in ((clusters, seen_c), (namespaces, seen_ns), (pvcs, seen_p), (classes, seen_sc),
                              (users, set(a["users"]))):
             for k in seen:
                 bucket[k] = bucket.get(k, 0) + 1
+    if keep is not None:
+        def kept(bucket: dict, by: str, as_key) -> dict:
+            return {k: n for k, n in bucket.items() if key_expressible(by, as_key(k), keep)}
+        clusters = kept(clusters, "cluster", lambda k: (k,))
+        namespaces = kept(namespaces, "namespace", lambda k: k)
+        pvcs = kept(pvcs, "pvc", lambda k: k)
+        classes = kept(classes, "storage_class", lambda k: (k,))
+        users = kept(users, "user", lambda k: (k,))
     out: dict = {"scope": scope}
     truncated: dict = {}
     out["clusters"], truncated["clusters"] = ranked(clusters, lambda k, n: {"cluster": k, "target_count": n}, cap)
@@ -264,3 +310,97 @@ def facet_counts(attrs, *, cap: int = FACET_LIST_CAP) -> dict:
     out["users"], truncated["users"] = ranked(users, lambda k, n: {"dms_user": k, "target_count": n}, cap)
     out["lists_truncated"] = truncated
     return out
+
+
+# ---- 소속별(2026-10-30, routes_usage.usage_breakdown) ----
+
+def scope_counts(attrs) -> dict:
+    """판정들 → source 마다 대상 수(facets 의 scope 와 같은 값 -- facet_counts 의 첫 칸)."""
+    scope = dict.fromkeys(SOURCES, 0)
+    for a in attrs:
+        scope[a["source"]] += 1
+    return scope
+
+
+def group_keys(attr: dict, by: str) -> list:
+    """판정 하나 → 그 대상이 드는 PV 축 by 의 묶음 키(tuple)들 -- 중복 없이 처음 본 순. 정의는 필터 판정 그대로다: k 가 여기
+    있다 ⇔ matches(attr, PvFilter(**group_filter(by, k)), users)(모듈 docstring 「소속별 묶음」). 그래서 PV 밖·모름(volumes·users
+    가 빈 판정)은 어느 묶음에도 들지 않고, storage_class 는 비어 있지 않은 문자열만 키다(None·'' 정체는 그 값으로 거를 수 없다 --
+    facets 의 StorageClass 목록과 같은 규칙). user 는 attr["users"](정체마다 그 namespace 의 바인딩 합집합 -- _volume_matches 의
+    「정체 하나의 namespace 에 바인딩」을 정체 전부에 대해 모은 것과 같다). requester 축은 판정이 아니라 SQL 재료라 여기 없다."""
+    if attr["source"] not in PV_SOURCES:
+        return []
+    if by == "user":
+        return [(u,) for u in attr["users"]]
+    seen: dict = {}
+    for v in attr["volumes"]:
+        if by == "cluster":
+            seen[(v["cluster"],)] = None
+        elif by == "namespace":
+            seen[(v["cluster"], v["namespace"])] = None
+        elif by == "pvc":
+            seen[(v["cluster"], v["namespace"], v["pvc"])] = None
+        elif by == "storage_class":
+            sc = v["storage_class"]
+            if isinstance(sc, str) and sc != "":
+                seen[(sc,)] = None
+        else:
+            raise ValueError(f"not a PV group axis: {by!r}")
+    return list(seen)
+
+
+def group_filter(by: str, key: tuple) -> dict:
+    """묶음 키 → 경로별 필터(쿼리 파라미터 이름 → 값). 포탈은 이것을 그대로 쿼리에 싣는다(행 → 그 묶음의 경로 목록)."""
+    return {param: value for (_, param), value in zip(GROUP_FIELDS[by], key)}
+
+
+def key_expressible(by: str, key: tuple, ok) -> bool:
+    """묶음 키(·facets 선택지)를 경로별 필터 파라미터로 표현할 수 있나 -- ok(파라미터 이름, 값) 는 라우트의 필터 검증과 같은 술어
+    (routes_usage.filter_value_ok). DB 가 신뢰 경계라 키는 규칙 밖 값일 수 있다(빈 dms_user·제어 문자·상한 넘는 길이 -- parse_block 은
+    비어 있지 않은 문자열만 본다). 표현 못 하는 키의 묶음은 판정상 존재하지만 그 필터를 걸 수 없다(소속별 행의 filter null,
+    facets 선택지에서 뺌)."""
+    return all(ok(param, value) for param, value in group_filter(by, key).items())
+
+
+def group_fields(by: str, key: tuple) -> dict:
+    """묶음 키 → 행의 키 칸(facets 의 같은 목록과 같은 이름 -- dms_user·requester_id·cluster·namespace·pvc·storage_class)."""
+    return {name: value for (name, _), value in zip(GROUP_FIELDS[by], key)}
+
+
+def pvc_storage_classes(attrs) -> dict:
+    """판정들(창 순서) → (cluster, namespace, pvc) → storage_class(facet_counts 의 pvcs 와 같은 규칙 -- _note_pvc_sc)."""
+    pvc_sc: dict = {}
+    from_inventory: set = set()
+    for a in attrs:
+        for v in a["volumes"]:
+            _note_pvc_sc(pvc_sc, from_inventory, (v["cluster"], v["namespace"], v["pvc"]), a["source"], v["storage_class"])
+    return pvc_sc
+
+
+def breakdown_groups(heads: list, attrs: list, by: str, requesters: "Mapping[str, list] | None" = None) -> tuple:
+    """창의 머리들(최근 스캔 순)과 그 판정들(같은 순서) → (묶음 키 → 머리 목록, 덧붙임 이름 → 머리 목록 | None). 머리 목록은 창 순서를
+    지킨다(합계의 누적 순서 -- StorageTotals 는 머리 순서로 더한다). 한 대상은 여러 묶음에 들 수 있고 한 묶음에는 한 번이다.
+
+    - PV 축(PV_GROUP_AXES): 키 = group_keys. 덧붙임 outside·unknown = 그 source 의 대상(경로별 scope=outside·unknown 과 같은 집합),
+      none = 키가 없는 PV 안 대상(GROUP_NONE_AXES 의 축만 -- 나머지는 None).
+    - requester: requesters(target → requester_id 목록, data_jobs.scan_requesters_by_target)가 키다. outside·unknown 은 None(요청자
+      축에는 PV 구분이 없다), none = 요청자가 하나도 없는 대상(요청 행 없는 고아 잡만 가진 대상 -- 요청자 필터 어디에도 걸리지
+      않는다)."""
+    if by not in GROUP_AXES:
+        raise ValueError(f"not a group axis: {by!r}")
+    groups: dict = {}
+    pv_axis = by != "requester"
+    extras: dict = {"outside": [] if pv_axis else None, "unknown": [] if pv_axis else None,
+                    "none": [] if by in GROUP_NONE_AXES else None}
+    for h, a in zip(heads, attrs):
+        if pv_axis:
+            keys = group_keys(a, by)
+        else:
+            keys = [(r,) for r in dict.fromkeys((requesters or {}).get(h["target"], ()))]
+        for k in keys:
+            groups.setdefault(k, []).append(h)
+        if pv_axis and a["source"] in ("outside", "unknown"):
+            extras[a["source"]].append(h)
+        elif not keys and extras["none"] is not None:
+            extras["none"].append(h)
+    return groups, extras

@@ -19,6 +19,7 @@ import { TotalsLine } from "./TotalsLine";
 import { storageLabel, type StorageTab } from "./usageTabs";
 import { UsageFilters } from "./UsageFilters";
 import { pvInside, usagePvOf } from "./usageStats";
+import { Empty } from "./UsageParts";
 
 // 스토리지 하나의 패널(2026-10-20 탭 패널 → 2026-10-29 바깥 카드 없이 페이지 바탕에 바로 -- 카드 안에 카드를 넣지 않는다). 범위 줄
 // (스토리지 select + 메타 줄)은 페이지가 위에 그린다(StorageSelect). 위에서 아래로: (미등록이면) 경고 띠 → 도구 줄(검색 · 건수 ·
@@ -36,20 +37,6 @@ export const SEARCH_LABEL = "경로·PV 이름 검색";
 export const SEARCH_RULE = "여러 단어는 모두 들어간 것만 · 대소문자 무시 · 경로나 PV 이름 어디든";
 const SEP = "\u00a0· ";
 const n = (x: number) => x.toLocaleString("ko-KR");
-
-// 빈 상태(아이콘 + 한 줄 + 보조 한 줄). 표 자리에 같은 높이감으로.
-function Empty({ icon, title, hint, action }: {
-  icon: React.ReactNode; title: string; hint?: React.ReactNode; action?: React.ReactNode;
-}) {
-  return (
-    <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed border-line px-4 py-10 text-center">
-      <span aria-hidden className="grid h-10 w-10 place-items-center rounded-full bg-panel text-muted">{icon}</span>
-      <p className="text-sm font-medium text-ink break-keep">{title}</p>
-      {hint && <p className="max-w-md text-xs text-muted break-keep">{hint}</p>}
-      {action}
-    </div>
-  );
-}
 
 export function StoragePanel({
   tab, windowLimit, input, setInput, searchQ, sort, order, onSort, attr, onAttrChange, activeTarget, sheet, storages,

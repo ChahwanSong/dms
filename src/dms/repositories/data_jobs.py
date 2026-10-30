@@ -343,6 +343,34 @@ class DataJobsRepository:
                GROUP BY r.requester_id ORDER BY r.requester_id""",
             {"s": DataJobState.SUCCEEDED.value, "sn": storage_name})
 
+    def scan_requesters_by_target(self, storage_name: "str | None", targets) -> dict:
+        """한 스토리지의 고른 대상들 -> target -> 그 대상을 scan 한(성공) 요청자들(requests.requester_id, 중복 없음 -- 순서는
+        보장하지 않는다: 방언 콜레이션에 기대지 않게 호출자가 필요하면 정렬한다). 사용량 분석 소속별의 요청자 축(2026-10-30,
+        routes_usage.usage_breakdown)이 창의 대상마다 「어느 요청자 묶음에 드나」를 한 번에 묻는다. 판정은 scan_target_heads 의
+        requester 필터와 같다 -- 대상의 성공 scan 중 하나라도 그 요청자의 요청이면 든다(대상 단위), 요청 행이 없는 고아 잡은 어느
+        요청자의 것도 아니다(결과에 없는 대상 = 요청자 모름).
+
+        모양은 recorded_pv_blocks 관용: 공용 술어(_scan_target_where)는 안쪽 data_jobs 질의에만 두고(접두 없는 열이 requests 와
+        겹쳐도 모호하지 않게) 바깥에서 requests 를 JOIN 한다 -- idx_data_jobs_scan_target 접두 + requests_pkey. storage_name None
+        이나 빈 targets 는 빈 결과(문장 없음). 한 문장의 자리표시자는 _IN_CHUNK 개 이하로 자른다."""
+        names = [t for t in dict.fromkeys(targets) if t is not None]
+        if storage_name is None or not names:
+            return {}
+        out: dict = {}
+        for i in range(0, len(names), _IN_CHUNK):
+            chunk = {f"t{n}": v for n, v in enumerate(names[i:i + _IN_CHUNK])}
+            params: dict = dict(chunk)
+            where = self._scan_target_where(params, storage=storage_name)
+            rows = self._db.query(
+                f"""SELECT DISTINCT j.target, r.requester_id
+                    FROM (SELECT target, request_id FROM data_jobs
+                          WHERE {where} AND target IN ({", ".join(":" + k for k in chunk)})) j
+                    JOIN requests r ON r.request_id = j.request_id""",
+                params)
+            for r in rows:
+                out.setdefault(r["target"], []).append(r["requester_id"])
+        return out
+
     def usage_scan_request_ids(self, request_ids) -> set:
         """이 요청들 중 사용량 분석의 지점이 되는 잡(성공 scan -- _scan_target_where 의 기본 조건 그대로)을 가진 것.
         요청 목록의 has_succeeded_scan(작업 삭제 확인 창의 사용량 경고, 2026-10-09)이 쓴다 -- 요청 **상태**로 판정하면

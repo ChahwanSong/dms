@@ -7,6 +7,7 @@ import { delay, http, HttpResponse } from "msw";
 import { afterAll, afterEach, beforeAll, expect } from "vitest";
 import { UsageAnalysis } from "./UsageAnalysis";
 import { StoragesPage } from "./StoragesPage";
+import { BreakdownPage } from "./BreakdownPage";
 import type { HistogramBucket, Storage, UnregisteredStorage, UsageFacets, UsageFiltersEcho, UsagePoint, UsagePv,
               UsageStorageSummary, UsageStorageTotals } from "../../lib/types";
 
@@ -214,11 +215,15 @@ export interface Setup {
     | ((storage: string, call: number) => UsageStorageTotals | "error" | "html");
   onTotals?: (u: URL) => void;
   totalsEcho?: (u: URL) => unknown;    // 필터 합계의 메아리 덮어쓰기
+  // 소속별 순위(2026-10-30 /breakdown): 응답 본문(또는 Response) -- call = 같은 (storage, by) 의 몇 번째 호출. 없으면 404(옛 API).
+  breakdown?: (u: URL, call: number) => unknown;
+  onBreakdown?: (u: URL) => void;
 }
 
 export function setup(o: Setup = {}) {
   const summary = o.summary ?? SUMMARY;
   const totalsCalls: Record<string, number> = {};
+  const breakdownCalls: Record<string, number> = {};
   // 기본 합계는 setup 때 한 번 만든다 -- 요청을 받을 때 만들면 scan 시점(isoAgo)이 화면의 now(그보다 먼저 그린 렌더)보다 늦어
   // 「65일 전」이 「64일 전」으로 읽히는 경합이 생긴다(전체 실행의 부하에서 드물게 실패했다).
   const defaultTotals: Record<string, UsageStorageTotals> = { "cephfs-dms": totalsOf("cephfs-dms") };
@@ -283,15 +288,25 @@ export function setup(o: Setup = {}) {
       return HttpResponse.json(hasAttrParams(u)
         ? { ...t, filesystem: null, filters: o.totalsEcho ? o.totalsEcho(u) : echoOf(u, false) } : t);
     }),
+    http.get("/api/admin/usage/breakdown", async ({ request }) => {
+      const u = new URL(request.url);
+      o.onBreakdown?.(u);
+      const k = `${u.searchParams.get("storage")}|${u.searchParams.get("by")}`;
+      breakdownCalls[k] = (breakdownCalls[k] ?? 0) + 1;
+      if (o.breakdown === undefined) return HttpResponse.json({ detail: "Not Found" }, { status: 404 });
+      const body = await o.breakdown(u, breakdownCalls[k]);
+      return body instanceof Response ? body : HttpResponse.json(body as Record<string, unknown>);
+    }),
   );
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={qc}>
       <MemoryRouter initialEntries={o.entries ?? [o.path ?? "/admin/usage"]}>
-        {/* 하위 탭 둘(평평한 라우트 -- router.tsx 와 같은 모양). 그 밖(PV 탐색·단일 작업 링크)은 빈 화면. */}
+        {/* 하위 탭 셋(평평한 라우트 -- router.tsx 와 같은 모양). 그 밖(PV 탐색·단일 작업 링크)은 빈 화면. */}
         <Routes>
           <Route path="/admin/usage" element={<UsageAnalysis />} />
           <Route path="/admin/usage/storages" element={<StoragesPage />} />
+          <Route path="/admin/usage/breakdown" element={<BreakdownPage />} />
           <Route path="*" element={null} />
         </Routes>
         <LocationProbe />

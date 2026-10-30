@@ -110,6 +110,7 @@ export const DETAIL_ROUTES = [
   { pattern: "/admin/k8s/history", label: "동기화 이력", parent: "/admin/k8s" },
   // 사용량 분석의 하위 화면(탭, 2026-10-29) -- 라벨은 탭(UsageTabs)·h1 과 같은 문자열. 「경로별」은 사이드바 항목 자체(/admin/usage)다.
   { pattern: "/admin/usage/storages", label: "스토리지별", parent: "/admin/usage" },
+  { pattern: "/admin/usage/breakdown", label: "소속별", parent: "/admin/usage" },
 ] as const;
 
 // 사이드바 활성 항목: **최장 접두 일치 하나만**. NavLink 기본 판정(접두 일치)은

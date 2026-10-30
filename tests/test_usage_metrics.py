@@ -252,3 +252,54 @@ def test_storage_totals_invalid_name_entries_is_its_own_counter():
     assert r["invalid_name_entries"] == {"sum": 5, "known": 2, "unknown": 4}
     assert r["broken_paths_total"] == {"sum": 2, "known": 2, "unknown": 4}
     assert r["total_bytes"] == {"sum": 100 + 0 + 7 + 3, "known": 6, "unknown": 0}
+
+
+# ---- 2026-10-30: 소속별 묶음(MaximalIndex·GroupTotals -- routes_usage.usage_breakdown, 리뷰 [4]) ----
+
+def test_maximal_index_split_is_maximal_targets_on_every_subset():
+    # 묶음마다 maximal_targets 를 다시 부르지 않고 창에서 한 번 판정한 조상 관계로 같은 결과를 낸다 -- 겹친 경로·모양이 틀린 대상
+    # (조상으로 쓰지 않는다)·문자열 접두(team ⊄ team-x)를 섞은 무작위 부분 집합(창 순서 유지)으로 대조.
+    import random
+    from dms.usage_metrics import MaximalIndex, maximal_targets
+    rng = random.Random(1030)
+    vocab = ["team", "team/a", "team/a/b", "team-x", "team-x/a", "teamb", "a", "a/b/c", "a/b", "x/y/z", "", ".", "/abs",
+             "c//d", "c/", "c/d", "c", None, "q/../r", "p/q/r/s", "p/q", "p"]
+    for _ in range(300):
+        targets = rng.sample(vocab, rng.randint(0, len(vocab)))
+        heads = [{"job_id": f"j{i}", "target": t} for i, t in enumerate(targets)]
+        index = MaximalIndex(heads)
+        for _ in range(5):
+            sub = [h for h in heads if rng.random() < 0.6]
+            top, nested, invalid = index.split(sub)
+            want_top, want_nested, want_invalid = maximal_targets(sub)
+            assert ([h["job_id"] for h in top], nested, invalid) == ([h["job_id"] for h in want_top], want_nested,
+                                                                     want_invalid), [h["target"] for h in sub]
+        assert index.split(heads)[1:] == maximal_targets(heads)[1:]
+
+
+def test_group_totals_are_the_storage_totals_row_fields():
+    # 소속별 행 값 = 그 묶음 필터 합계(오라클) -- 묶음 누적기(GroupTotals, 대상마다 head_contribution 한 번)와 StorageTotals 가 같은
+    # 칸에서 같은 값을 낸다(null≠0·정수 ≥0 만·hot bytes 가중·시점 범위). 응답 키 순서(storage-totals 바이트)도 그대로다.
+    import random
+    from dms.usage_metrics import GroupTotals, StorageTotals, head_contribution
+    rng = random.Random(30)
+    weird = [None, 0, 3, 17, -1, 1.5, True, "9"]
+    for _ in range(200):
+        st, gt = StorageTotals(), GroupTotals()
+        for _ in range(rng.randint(0, 6)):
+            head = {"last_scan_at": rng.choice([None, 7, "2026-10-01T00:00:00Z", "2026-10-30T00:00:00Z",
+                                                "2026-09-15T00:00:00Z"])}
+            atime = rng.choice([None, HOT100, COLD900, HOT100 + COLD900, [{"min_age_days": 30, "bytes": 5}],
+                                [{"min_age_days": 0, "max_age_days": 7, "bytes": rng.choice(weird)}], []])
+            digest = rng.choice([None, "x", {"summary": "x"},
+                                 _digest(files=rng.choice(weird), atime=atime, broken=rng.choice(weird),
+                                         size=rng.choice([None, _size((1, 2, 3))]))])
+            total = rng.choice(weird)
+            st.add(head, total, digest)
+            gt.add(head_contribution(head, total, digest))
+        s, g = st.result(), gt.result()
+        assert g == {k: s[k] for k in ("total_bytes", "total_files", "hot_ratio", "oldest_scan_at", "newest_scan_at")}
+        assert list(s) == ["total_bytes", "total_files", "total_directories", "total_symlinks", "total_other",
+                           "total_entries", "scan_errors", "invalid_name_entries", "broken_paths_total", "hot_ratio",
+                           "file_size_histogram", "oldest_scan_at", "newest_scan_at"]
+        assert list(g) == ["total_bytes", "total_files", "hot_ratio", "oldest_scan_at", "newest_scan_at"]

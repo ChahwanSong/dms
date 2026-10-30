@@ -1,8 +1,8 @@
 import { queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, apiGet, apiSend } from "../../lib/api";
-import type { PurgeStorageHistoryResult, UnregisteredStorage, UsageAttrFilter, UsageExport, UsageFacets,
-              UsageFiltersEcho, UsageHistory, UsageScope, UsageStorageTotals, UsageStorages,
-              UsageTargetsPage } from "../../lib/types";
+import type { PurgeStorageHistoryResult, UnregisteredStorage, UsageAttrFilter, UsageBreakdown, UsageBreakdownBy,
+              UsageExport, UsageFacets, UsageFiltersEcho, UsageGroupRow, UsageHistory, UsageScope, UsageStorageTotals,
+              UsageStorages, UsageTargetsPage } from "../../lib/types";
 import { DELETE_REQUESTS_INVALIDATES } from "../jobs/useJobs";
 
 // 타깃 필터(2026-10-02): storage = 스토리지 정확히 일치, q = 검색 -- 둘이 함께 걸린다. q(2026-10-29 사용자 요청 「경로로 검색할 뿐
@@ -203,6 +203,69 @@ export const storageTotalsOptions = (storage: string, attr?: UsageAttrFilter) =>
   });
 };
 export const useStorageTotals = (storage: string, attr?: UsageAttrFilter) => useQuery(storageTotalsOptions(storage, attr));
+
+// 소속별(2026-10-30, 서버 /breakdown): 묶음 기준. 기본은 권한 사용자(user -- URL 에서 생략, 서버도 파라미터 없음 = 「PV 안 대상이
+// 있으면 user, 없으면 requester」). PV 축 다섯은 PV 안 대상이 없는 스토리지에서 서버가 requester 로 바꿔 적용한다.
+export const BREAKDOWN_BYS: readonly UsageBreakdownBy[] = ["user", "requester", "namespace", "pvc", "storage_class", "cluster"];
+export const PV_BYS: readonly UsageBreakdownBy[] = ["user", "namespace", "pvc", "storage_class", "cluster"];
+export const isBreakdownBy = (x: unknown): x is UsageBreakdownBy =>
+  typeof x === "string" && (BREAKDOWN_BYS as readonly string[]).includes(x);
+// 롤링 배포 중 옛 API(경로 없음)의 안내 -- 화면 문구 그대로(BreakdownPage 가 unknown_api 일 때 이것을 말한다).
+export const BREAKDOWN_API_UNKNOWN = "서버가 아직 소속별을 모릅니다 — 새 버전 배포 뒤에 보입니다";
+
+// 소속별 순위(2026-10-30): 스토리지 하나 × 기준 하나를 한 번에(서버가 facets 와 같은 판정 창·귀속으로 묶음마다 최상위 합을 낸다).
+// by 는 null(기본 -- 파라미터 없음) 또는 명시 값이다. 「user」를 명시해도 서버 규칙은 생략과 같으므로 호출측이 null 로 접어 캐시를
+// 한 벌로 둔다(BreakdownPage). 키는 ["usage-storages"] 아래 -- 작업 삭제·미등록 정리·스토리지 변경이 무효화한다(합계와 같은 원천).
+// 이어 읽기는 합계와 같은 규칙(pending > 0 && progressed 동안 1초, 오류 중엔 멈춤). 같은 스토리지에서 기준만 바꿀 때는 이전 응답을
+// 자리표시로 남긴다 -- 페이지는 그 동안 PV 안 수·구분 줄(스토리지 단위라 기준과 무관)만 쓰고 순위 표는 그리지 않는다(다른 기준의
+// 행을 잠깐이라도 보이면 거짓이다).
+// 응답 모양은 다시 본다(DB 가 신뢰 경계 -- 구형·부분 응답이어도 화면이 죽지 않게): 봉투가 아니거나 적용 기준을 모르면 옛 API 로
+// 보고(unknown_api), 메아리(storage_name·requested_by)가 보낸 값과 다르면 filter_mismatch 다(조용히 다른 스토리지·기준의 순위를
+// 보이지 않는다). 모르는 수는 0 이 아니라 그대로 두고 화면이 sumOf·count 로 다시 읽는다.
+export const breakdownOptions = (storage: string, by: UsageBreakdownBy | null) =>
+  queryOptions({
+    queryKey: ["usage-storages", "breakdown", storage, by ?? ""],
+    queryFn: async (): Promise<UsageBreakdown> => {
+      const p = new URLSearchParams();
+      p.set("storage", storage);
+      if (by !== null) p.set("by", by);
+      const body = await getNew(`/api/admin/usage/breakdown?${p.toString()}`);
+      if (!isObj(body) || !Array.isArray(body.rows) || !isObj(body.scope) || !isBreakdownBy(body.by)) {
+        throw new UsageContractError("unknown_api");
+      }
+      if (typeof body.storage_name === "string" && body.storage_name !== storage) throw new UsageContractError("filter_mismatch");
+      if ("requested_by" in body && (body.requested_by ?? null) !== by) throw new UsageContractError("filter_mismatch");
+      const num = (x: unknown) => (typeof x === "number" && Number.isFinite(x) && x > 0 ? x : 0);
+      const s = body.scope as Record<string, unknown>;
+      const row = (x: unknown) => (isObj(x) ? (x as unknown as UsageGroupRow) : null);
+      const ex = isObj(body.extras) ? body.extras : {};
+      const total = isObj(body.storage_total) && isObj(body.storage_total.total_bytes)
+        ? (body.storage_total as unknown as UsageBreakdown["storage_total"]) : null;
+      const b = body as unknown as UsageBreakdown;
+      return {
+        ...b,
+        requested_by: isBreakdownBy(body.requested_by) ? body.requested_by : null,
+        scope: { inventory: num(s.inventory), recorded: num(s.recorded), outside: num(s.outside), unknown: num(s.unknown) },
+        // target_count 는 그대로 둔다(빠진 값을 0 으로 접으면 「scan 기록 없음」 빈 상태가 거짓으로 뜬다 -- 화면이 수인지 본다).
+        cluster_count: num(body.cluster_count),
+        // 창 크기도 다시 읽는다(2026-10-30 리뷰 -- 빠지면 각주의 천 단위 표기가 undefined 에서 던져 화면이 ErrorBoundary 로 갔다).
+        // 0 = 모름(화면은 「최근 스캔된 것 기준」으로 수 없이 말한다).
+        window_limit: num(body.window_limit),
+        window_truncated: body.window_truncated === true, rows_truncated: body.rows_truncated === true,
+        storage_total: total,
+        rows: body.rows.map(row).filter((r): r is UsageGroupRow => r !== null),
+        extras: { outside: row(ex.outside), unknown: row(ex.unknown), none: row(ex.none) },
+        pending_count: num(body.pending_count), progressed: body.progressed === true,
+      };
+    },
+    placeholderData: (prev, prevQuery) => (prevQuery?.queryKey[2] === storage ? prev : undefined),
+    staleTime: 30_000,
+    refetchInterval: (q) => {
+      const d = q.state.data;
+      return q.state.status !== "error" && d !== undefined && d.pending_count > 0 && d.progressed === true ? 1_000 : false;
+    },
+  });
+export const useUsageBreakdown = (storage: string, by: UsageBreakdownBy | null) => useQuery(breakdownOptions(storage, by));
 
 // 성공 scan 기록이 있는 스토리지 이름 -- 요약(useUsageStorages)을 못 받았을 때만 쓰는 대체 원천(enabled): 탭은 등록
 // 목록 ∪ 이 이름들로 그리고 대상 수는 모름으로 둔다.

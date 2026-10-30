@@ -48,11 +48,12 @@ export const sumOf = (m: UsageTotalMetric | null | undefined): number | null =>
 export const lowerBound = (m: { unknown?: number } | null | undefined, sum: number | null) =>
   sum !== null && count(m?.unknown) > 0;
 // 부분 합(값 뒤 「이상」): 값 모름을 뺀 합이거나 대상이 창(window_limit)을 넘어 최근 스캔된 것만 더한 합. 스토리지별 비교·합계 줄·
-// [자세히] 블록이 같은 규칙이다(2026-10-29 -- 예전 패널 블록은 모름만 봤고 창 잘림은 각주로만 말했다).
-export const partialSum = (t: UsageStorageTotals, m: { unknown?: number } | null | undefined, sum: number | null) =>
+// [자세히] 블록이 같은 규칙이다(2026-10-29 -- 예전 패널 블록은 모름만 봤고 창 잘림은 각주로만 말했다). 소속별의 묶음 행(2026-10-30)도
+// 같은 규칙이라 첫 인자는 「창으로 잘렸나」만 본다(합계 응답의 truncated, 소속별은 응답의 window_truncated).
+export const partialSum = (t: { truncated?: boolean }, m: { unknown?: number } | null | undefined, sum: number | null) =>
   sum !== null && (t.truncated === true || lowerBound(m, sum));
 export const countText = (n: number | null) => (n === null ? "—" : `${n.toLocaleString("ko-KR")}개`);
-export const hotText = (t: UsageStorageTotals) => {
+export const hotText = (t: { hot_ratio?: { value?: number | null } | null }) => {
   const v = t.hot_ratio?.value;
   return typeof v === "number" && Number.isFinite(v) ? `${Math.round(v * 100)}%` : "—";
 };

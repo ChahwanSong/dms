@@ -95,6 +95,53 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ✅ 사용량 분석 「소속별」 탭(2단계) — 권한 사용자·요청자·namespace·PV 이름·StorageClass·클러스터별 실 사용량 순위 — **완료**(2026-10-30)
+
+사용자 결정: 「그래 구현시작해.」(2026-10-29 하위 메뉴 시안의 결정 1 — 「소속별」은 묶음별 합계를 한 번에 주는 서버 API 와 함께만 출하).
+한 스토리지를 **누가·어느 PV 가 얼마나 쓰나**를 실 사용량 순위로 보이고, 행을 누르면 그 묶음의 필터를 건 경로별로 간다. DB 스키마·
+인덱스·사유 코드·npm 의존성 변경 없음.
+
+- **API** `GET /api/admin/usage/breakdown?storage=&by=`(require_admin, 읽기 전용 — `routes_usage.usage_breakdown`): by = user·requester·
+  namespace·pvc·storage_class·cluster(그 밖 422). 생략하면 판정 창에 PV 안 대상이 있으면 user, 없으면 requester; PV 축을 명시했는데 PV 안
+  대상이 0 이면 requester 로 적용한다(응답 `by` = 적용 값, `requested_by` = 받은 값). 판정 창·귀속은 `/facets` 와 한 벌(최근 스캔 순
+  `_WINDOW_LIMIT`, `usage_attribution.attribute`), 묶음 키는 순수 함수 `group_keys`(경로별 필터 `matches` 와 같은 판정 — 무작위 대조
+  테스트), 요청자 축은 새 질의 `DataJobsRepository.scan_requesters_by_target`(500개 IN, 고아 잡 제외 — 요청자 필터와 같은 판정).
+- **불변식(오라클)**: 행 값 = 그 행의 `filter` 를 건 경로별 필터 합계(`storage-totals?<filter>`)와 같은 정의·같은 값 — 묶음 안 최상위
+  대상만 더하고(`team ⊃ team/sub`), 실 사용량은 목록 열과 같은 값(리포트 못 읽으면 bytes_count), 파일 수·hot 은 요약. target_count 는
+  `/facets` 옵션 수·`/targets` matched_count 와 같다. 요청자 축은 창이 넘치지 않을 때만 필터 합계와 같다(필터 합계의 요청자 경로는 그
+  요청자 대상만의 창을 쓴다 — 넘치면 둘 다 「최근 스캔된 N개 기준」 부분 값).
+- **응답**: 행마다 축 키 필드 + target_count·summed/nested_target_count·total_bytes·total_files(sum·known·unknown)·hot_ratio·시점 범위·
+  `filter`(경로별 URL 키 — 포탈이 그대로 싣는다). 순위 = 실 사용량 내림차순(모름은 뒤) → 대상 수 → 키, 상한 `FACET_LIST_CAP` →
+  `rows_truncated`. 덧붙임 `extras`: PV 축의 outside(`scope=outside`)·unknown(`scope=unknown`), 축 값이 없는 대상 none(권한 사용자 없는
+  namespace·SC 없음·요청 기록 없는 scan 만 — 필터 null). 최상위에 scope 네 수·cluster_count·storage_total(비중 막대 분모 = 무필터 합계와
+  같은 정의)·window_truncated·pending/unreadable/progressed(storage-totals 와 같은 읽기 예산·실패 기억 — `_read_top_summaries` 로 뽑아
+  함께 쓴다, storage-totals 바이트 불변).
+- **리뷰 반영**: 경로별 필터 파라미터 규칙 밖 키(빈 dms_user·제어문자·253자 초과 이름 — DB 가 신뢰 경계)의 행은 순위에 남기되 `filter`
+  null(실으면 422 — 숨기면 조용한 누락), `/facets` 는 같은 술어(`routes_usage.filter_value_ok`)로 그 선택지를 뺀다(고르는 순간 422 이던
+  선택지). 묶음 누적은 행에 싣는 칸만(`usage_metrics.GroupTotals`, StorageTotals 도 그 칸은 같은 누적기)·조상 판정은 창에서 한 번
+  (`MaximalIndex`) — 단일 멤버 묶음 1만 개 +39.7 → +4.2MiB. 기록 pv 블록의 JSON 이스케이프 외톨이 서로게이트(`\ud800`)가 응답 인코딩에서
+  500 이던 것(/facets·/targets 에 원래 있던 결함 — 소속별도 같은 입력에서 500)은 `parse_block` 이 무효 블록으로 본다.
+- **비용**(sqlite, 한 스토리지 9,881 대상·잡 6.7만, PV 600·클러스터 둘·namespace 마다 3명, 캐시 데운 상태): user 0.62초 · pvc 0.64초 ·
+  requester 1.39초(대상·요청자 쌍 5.1만) · namespace 마다 100명이면 user 0.94초. user 축을 필터 합계로 묶음마다 부르면 40회 ≈ 13초다.
+- **포탈**: 세 번째 탭 「소속별」(`/admin/usage/breakdown`, 크럼 「소속별」 — 평평한 라우트). 경로별과 같은 스토리지 select(기본 스토리지·
+  붙잡기·300ms push — 탭 링크가 경로별에서 보던 스토리지를 싣는다), 「기준」 select(`?by=` replace, 권한 사용자 = 생략) + 도움말, PV 안이
+  0 이면 PV 축 다섯 disabled + 「이 스토리지에는 PV 안 대상이 없습니다 — 요청자 기준만 볼 수 있습니다」(`aria-describedby`), PV 안이 있으면
+  「PV 안 n · PV 밖(직접 경로) n · 모름 n」(조각마다 경로별 scope 링크). 순위(`GroupTable` — ARIA 표, 1280 이상 표 · 그 아래 두 줄 행):
+  이름(+ 부속 — PV 이름은 경로별 PV 이름 칸 표기 「namespace (SC) · 클러스터」) · 대상 · 실 사용량 + 비중 막대(스토리지 합계 대비 —
+  100% 정규화 아님, 「≈100%」·「<0.1%」) · 파일 · hot. 행 전체가 경로별 링크(push, `?storage=&<filter>` 만), filter null 행·none 덧붙임은
+  링크 아님(설명). 처음 100행 + 「모두 보기 (n개)」, 창 넘침이면 값 「이상」·대상 수 「+」·각주 「최근 스캔된 N개 기준」, 분모가 부분 합이면
+  「X 이상 대비(근사)」, 요약 읽는 중 1초 이어 읽기(TotalsLine 관용), 옛 API(404) 안내, 메아리 불일치 오류, 미등록 스토리지 한 줄.
+  각주: 「행끼리 더하지 않습니다 — 한 경로가 여러 사용자·요청자에 속합니다 · 묶음 합계 = 그 묶음에 맞는 경로 중 최상위 합 · …」.
+- **테스트**: `test_api_usage_breakdown`(새 — 여섯 축·덧붙임·기본/대체 by·순위·상한·창 넘침·읽기 예산·422·권한·겹친 경로·**모든 스토리지 ×
+  축의 행마다 필터 합계·facets·targets 대조**·규칙 밖 키·서로게이트), `test_usage_metrics`(MaximalIndex·GroupTotals 대조),
+  `test_usage_attribution`(서로게이트 블록). 포탈 `BreakdownPage.test.tsx`(새, 30), `UsageHeader`·router·navigation, e2e
+  `16-usage-breakdown`(새).
+- **검증**: 전체 백엔드 4387 passed(스냅숏), 사용량 파일 PG 235, vitest 1794, tsc(앱·e2e), dist 외부 URL 0, e2e 31. e2e 첫 실행에서
+  E16 이 계정 생성 500 으로 한 번 실패했다 — 하네스 sqlite 의 쓰기 락 승격 경합(`global-setup.ts` 주석의 하네스 한정 문제: 컨트롤러 쓰기
+  버스트 중 read-then-write 트랜잭션, 135ms 즉시 실패)이고 단독·E15+E16·전체 재실행 모두 통과. 오라클(무작위 세계 — 행마다 필터 합계·
+  facets·targets·첫 원리 대조, storage-totals 리팩터 전후 대조, 규칙 밖 키) sqlite·PG 불일치 0, 변이 10종 중 9종 검출(남은 1종은 PVC SC
+  충돌 세계가 없어서), 리뷰 지적 17건 반영.
+
 ### ✅ 사용량 분석 「경로별」 — PV 이름 열 + 경로·PV 이름 검색(일부 단어) — **완료·실증**(2026-10-29, d15)
 
 사용자 요청: 「테이블에 경로 이름뿐 아니라 pv 이름도 표시해줘. 그리고 경로로 검색할 뿐 아니라, pv 이름도 검색할 수 있게 하고 일부
@@ -237,7 +284,7 @@ DB 스키마·인덱스·사유 코드·npm 의존성 변경 없음.
   1440·390 가로 넘침 0, 390 시트 전체 화면(390×844), 콘솔 오류 0. d13 실화면에서 select 일곱이 한 줄을 채워 필터 도움말 「?」 하나만
   둘째 줄로 떨어져 「?」를 필터 줄 맨 앞으로 옮겼다(d14).
 - **남은 것**: 2단계 「소속별」(권한 사용자·요청자·namespace·PV 이름 순위) + 읽기 API `/api/admin/usage/breakdown` — 결정 1 에 따라 아직
-  짓지 않았다.
+  짓지 않았다. → 2026-10-30 출하(위 「소속별」 항목).
 
 ### ✅ 사용량 분석 필터 — 사용자별(권한 사용자·요청자)·PV 이름·namespace·클러스터·StorageClass·구분 — **완료·실증**(2026-10-29, d12)
 

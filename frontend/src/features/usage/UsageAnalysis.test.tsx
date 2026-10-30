@@ -69,11 +69,12 @@ test("처음부터 스토리지 하나: 기본 스토리지가 골라지고 목�
   expect(optionTexts(storageSelect())).toEqual(["cephfs-dms · cephfs · 대상 2개"]);
   expect(within(storageSelect()).queryByRole("option", { name: /전체/ })).toBeNull();
   expect(screen.getByRole("heading", { name: "사용량 분석", level: 1 })).toBeInTheDocument();
-  // 하위 탭: 경로별(지금 -- end 매칭) · 스토리지별
+  // 하위 탭: 경로별(지금 -- end 매칭) · 스토리지별 · 소속별(2026-10-30)
   const nav = screen.getByRole("navigation", { name: "사용량 분석 하위 메뉴" });
-  expect(within(nav).getAllByRole("link").map((a) => a.textContent)).toEqual(["경로별", "스토리지별"]);
+  expect(within(nav).getAllByRole("link").map((a) => a.textContent)).toEqual(["경로별", "스토리지별", "소속별"]);
   expect(within(nav).getByRole("link", { name: "경로별" })).toHaveAttribute("aria-current", "page");
   expect(within(nav).getByRole("link", { name: "스토리지별" })).toHaveAttribute("href", "/admin/usage/storages");
+  expect(within(nav).getByRole("link", { name: "소속별" })).toHaveAttribute("href", "/admin/usage/breakdown");
   expect(seen.length).toBeGreaterThan(0);
   for (const u of seen) expect(u.searchParams.get("storage")).toBe("cephfs-dms");
   // 표: 6열(경로·실 사용량·파일 수·hot 비율·스캔 횟수·최근 스캔) -- 스토리지 열은 select 가 말한다

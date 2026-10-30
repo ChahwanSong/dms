@@ -17,19 +17,22 @@ const blocked = () => {
 afterEach(() => { vi.unstubAllGlobals(); sessionStorage.clear(); });
 
 describe("UsageTabs", () => {
-  it("두 하위 화면을 잇고, nav 라벨은 「사용량 분석 하위 메뉴」 하나", () => {
+  it("세 하위 화면을 잇고(2026-10-30 소속별), nav 라벨은 「사용량 분석 하위 메뉴」 하나", () => {
     at("/admin/usage");
     expect(screen.getByRole("navigation", { name: "사용량 분석 하위 메뉴" })).toBeInTheDocument();
-    expect(screen.getAllByRole("link").map((a) => a.textContent)).toEqual(["경로별", "스토리지별"]);
+    expect(screen.getAllByRole("link").map((a) => a.textContent)).toEqual(["경로별", "스토리지별", "소속별"]);
     expect(pathsLink()).toHaveAttribute("href", "/admin/usage");
     expect(screen.getByRole("link", { name: "스토리지별" })).toHaveAttribute("href", "/admin/usage/storages");
+    expect(screen.getByRole("link", { name: "소속별" })).toHaveAttribute("href", "/admin/usage/breakdown");
   });
 
-  it("하위 화면에서 「경로별」이 함께 켜지지 않는다(end 매칭) -- 현재 위치는 aria-current", () => {
-    at("/admin/usage/storages");
-    expect(screen.getByRole("link", { name: "스토리지별" })).toHaveAttribute("aria-current", "page");
-    expect(pathsLink()).not.toHaveAttribute("aria-current");
-  });
+  it.each(["/admin/usage/storages", "/admin/usage/breakdown?storage=a&by=requester"])(
+    "하위 화면(%s)에서 「경로별」이 함께 켜지지 않는다(end 매칭) -- 현재 위치는 aria-current 하나", (path) => {
+      at(path);
+      const current = screen.getAllByRole("link").filter((a) => a.getAttribute("aria-current") === "page");
+      expect(current.map((a) => a.textContent)).toEqual([path.includes("breakdown") ? "소속별" : "스토리지별"]);
+      expect(pathsLink()).not.toHaveAttribute("aria-current");
+    });
 
   it("탭 라벨 = 브레드크럼 라벨(navigation DETAIL_ROUTES) -- h1·크럼·탭이 같은 문자열", () => {
     for (const t of USAGE_TABS.slice(1)) {
@@ -68,6 +71,31 @@ describe("UsageTabs", () => {
     expect(pathsLink()).toHaveAttribute("href", "/admin/usage?q=x");
   });
 
+  it("「소속별」 링크는 경로별이 보던 스토리지를 싣는다(URL → 기억) · 소속별 안에선 지금 쿼리 · 기억이 없으면 쿼리 없이", () => {
+    // 2026-10-30 리뷰: 쿼리 없는 링크라 소속별이 기본 스토리지를 새로 파생해 다른 스토리지의 순위를 보였다.
+    const breakdownLink = () => screen.getByRole("link", { name: "소속별" });
+    rememberPaths("?storage=old-store&q=x", "old-store");
+    const a = at("/admin/usage?storage=k8s-pv-nfs&requester=alice&target=x");   // 경로별: URL 의 storage(필터는 싣지 않는다)
+    expect(breakdownLink()).toHaveAttribute("href", "/admin/usage/breakdown?storage=k8s-pv-nfs");
+    a.unmount();
+    const b = at("/admin/usage?q=team");                                         // 기본 스토리지를 보는 중 -- 기억한 스토리지
+    expect(breakdownLink()).toHaveAttribute("href", "/admin/usage/breakdown?storage=old-store");
+    b.unmount();
+    const c = at("/admin/usage/storages");                                       // 스토리지별의 「현재」와 같은 스토리지
+    expect(breakdownLink()).toHaveAttribute("href", "/admin/usage/breakdown?storage=old-store");
+    c.unmount();
+    const d = at("/admin/usage/breakdown?storage=a&by=requester");               // 소속별 안: 지금 쿼리(기준 포함)
+    expect(breakdownLink()).toHaveAttribute("href", "/admin/usage/breakdown?storage=a&by=requester");
+    d.unmount();
+    rememberPaths("", "");                                                        // 빈 이름도 이름이다
+    const e = at("/admin/usage/storages");
+    expect(breakdownLink()).toHaveAttribute("href", "/admin/usage/breakdown?storage=");
+    e.unmount();
+    sessionStorage.clear();
+    at("/admin/usage/storages");
+    expect(breakdownLink()).toHaveAttribute("href", "/admin/usage/breakdown");
+  });
+
   it("기억을 못 읽으면(차단 환경·깨진 값) 쿼리 없는 링크 -- 화면은 깨지지 않는다", () => {
     sessionStorage.setItem(PATHS_MEMORY_KEY, "[1,2]");
     const { unmount } = at("/admin/usage/storages");
@@ -77,6 +105,7 @@ describe("UsageTabs", () => {
     blocked();
     at("/admin/usage/storages");
     expect(pathsLink()).toHaveAttribute("href", "/admin/usage");
+    expect(screen.getByRole("link", { name: "소속별" })).toHaveAttribute("href", "/admin/usage/breakdown");
   });
 });
 

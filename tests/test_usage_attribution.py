@@ -118,6 +118,7 @@ def test_inventory_beats_the_recorded_block_and_recorded_fills_deleted_pvcs():
     _payload(cluster=""), _payload(namespace=None), _payload(pvc=5), _payload(volume=7), _payload(storage_class=[]),
     _payload(root=""), _payload(root=None), _payload(root="team-d/ol"),          # 대상이 루트 밖(글자 접두만 같음)
     _payload(root="elsewhere"),
+    _payload(namespace="\ud800"), _payload(storage_class="a\udfffb"), _payload(pvc="old\ud800"),  # 외톨이 서로게이트
 ])
 def test_tampered_blocks_are_ignored_and_the_next_valid_one_is_used(bad):
     assert parse_block(bad, "team-d/old/x") is None

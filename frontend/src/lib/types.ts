@@ -434,6 +434,40 @@ export interface UsageStorageTotals {
   // filesystem 은 null 이다(부분 집합에 df 는 뜻이 없다).
   filters?: UsageFiltersEcho;
 }
+// 사용량 분석 「소속별」(GET /api/admin/usage/breakdown?storage=&by=, 2026-10-30 -- 서버 routes_usage.usage_breakdown 계약). 묶음 기준
+// by(user = 권한 사용자 · requester = 요청자 · namespace · pvc = PV 이름 · storage_class · cluster)마다 한 행이고, 행의 값은 경로별에서
+// 그 행의 filter 를 건 필터 합계(/storage-totals?storage=&<filter>)와 같은 정의·같은 값이다(묶음에 맞는 경로 중 최상위 합). 한 경로가
+// 여러 묶음에 들 수 있어 행끼리 더하지 않는다. 이름 BreakdownRow 는 대시보드가 이미 쓴다(아래) -- 그래서 UsageGroupRow.
+export type UsageBreakdownBy = "user" | "requester" | "namespace" | "pvc" | "storage_class" | "cluster";
+export interface UsageGroupRow {
+  target_count: number; summed_target_count: number; nested_target_count: number;
+  total_bytes: UsageTotalMetric; total_files: UsageTotalMetric;
+  hot_ratio: { value: number | null; hot_bytes: number | null; total_bytes: number | null; known: number; unknown: number };
+  oldest_scan_at: string | null; newest_scan_at: string | null;
+  // 경로별에 그대로 싣는 필터(키 = 경로별 URL 키). null = 경로별에 그 필터가 없다(덧붙임 「없음」 묶음) -- 링크가 아니다.
+  filter: UsageAttrFilter | null;
+  // 축의 키 필드(user → dms_user, requester → requester_id, namespace → cluster·namespace, pvc → cluster·namespace·pvc·
+  // storage_class, storage_class → storage_class, cluster → cluster). 덧붙임 행에는 없다.
+  dms_user?: string; requester_id?: string; cluster?: string; namespace?: string; pvc?: string; storage_class?: string | null;
+}
+export interface UsageBreakdown {
+  storage_name: string; computed_at: string;
+  // 적용한 기준(PV 안 대상이 없으면 PV 축을 요청해도 requester) · 받은 기준(없으면 null).
+  by: UsageBreakdownBy; requested_by: UsageBreakdownBy | null;
+  window_limit: number;                                  // 판정 창 크기(포탈 정규화가 빠진 값을 0 = 모름으로 접는다)
+  window_truncated: boolean;
+  target_count: number;                                  // 판정 창 안의 대상 수
+  scope: { inventory: number; recorded: number; outside: number; unknown: number };
+  cluster_count: number;                                 // 창의 PV 정체에 나오는 서로 다른 클러스터 수
+  // 비중 막대의 분모 -- 창 전체 머리의 최상위 합(스토리지 합계 무필터와 같은 정의). 서버는 늘 보낸다(빈 스토리지면
+  // {summed_target_count: 0, total_bytes: {sum: null, …}}); null 은 포탈 정규화가 모양이 깨진 응답을 접은 방어용이다.
+  storage_total: { total_bytes: UsageTotalMetric; summed_target_count: number } | null;
+  rows: UsageGroupRow[]; rows_truncated: boolean;
+  // 순위와 따로 끝에 붙는 묶음(대상 0 이면 null): PV 밖(직접 경로) · 모름(PV 축만) · 그 축 값이 없는 대상(user·storage_class·
+  // requester 축만 -- 필터가 없다).
+  extras: { outside: UsageGroupRow | null; unknown: UsageGroupRow | null; none: UsageGroupRow | null };
+  pending_count: number; unreadable_count: number; progressed: boolean;
+}
 // 사용량 분석의 미등록 스토리지(GET /api/admin/usage/unregistered-storages, 2026-10-12). target_count·succeeded_scan_count·
 // last_scan_at = 사용량 화면 기준(성공 scan -- 실패 scan 만 남은 이름은 0·null), request_count = 정리하면 지워질 작업 수
 // (단건 + batches 의 자식). mixed_batches = 다른 스토리지·다른 작업이 섞여 정리가 건너뛸 배치(수에 넣지 않는다).

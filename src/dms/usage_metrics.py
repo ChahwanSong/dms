@@ -16,7 +16,9 @@ hot 비율 규칙은 포탈 usageStats.hotRatio 의 거울이다(목록·타일�
 
 스토리지 합계(2026-10-21 사용자 요청: 「스토리지별 사용량 및 정보들의 총합」 -- routes_usage.storage_totals)의 순수 규칙도
 여기다: 최상위 대상 고르기(maximal_targets -- 경로 성분 단위), 지표마다 sum·known·unknown 누적(StorageTotals). hot 은
-hot_parts 를 더한 bytes 가중이고 hot_ratio 와 같은 판정 한 벌이다(hot_ratio 가 hot_parts 를 부른다).
+hot_parts 를 더한 bytes 가중이고 hot_ratio 와 같은 판정 한 벌이다(hot_ratio 가 hot_parts 를 부른다). 소속별(2026-10-30 --
+routes_usage.usage_breakdown)의 묶음은 행이 싣는 칸(실 사용량·파일 수·hot·시점 범위)만 누적하는 GroupTotals 를 쓰고,
+StorageTotals 도 그 칸은 GroupTotals 로 누적한다 -- 묶음 행 값 = 그 묶음 필터 합계(오라클)가 두 벌의 판정으로 갈라지지 않게.
 """
 import posixpath
 
@@ -117,6 +119,41 @@ def maximal_targets(heads: list) -> tuple:
     return top, len(plain) - len(top), len(heads) - len(plain)
 
 
+class MaximalIndex:
+    """창 머리들의 모양·조상 관계를 한 번만 판정해 두고, 그 부분 집합마다 maximal_targets 와 **같은 결과**를 낸다(소속별 -- 2026-10-30
+    리뷰: 묶음마다 maximal_targets 를 다시 부르면 경로 성분 판정이 「묶음 수 × 멤버」라, namespace 당 권한 사용자 100명인 1만 대상
+    창에서 그것만 호출 시간의 절반을 넘었다). 같은 이유: 부분 집합의 이름 집합은 창 이름 집합의 부분이라, 부분 집합 안의 조상 =
+    창 안의 조상 중 부분 집합에 든 것이다. 대부분의 머리는 창 안에 조상이 없어 어느 묶음에서도 바로 최상위다. 머리는 job_id 로
+    가린다(창의 머리는 대상마다 최신 잡 하나라 job_id 가 겹치지 않는다)."""
+    __slots__ = ("_plain", "_anc")
+
+    def __init__(self, heads: list):
+        plain = [h for h in heads if _plain_target(h.get("target"))]
+        names = {h["target"] for h in plain}
+        self._plain = {h["job_id"] for h in plain}
+        self._anc: dict = {}                       # job_id -> 창 안에 있는 조상 대상들(없으면 키 없음)
+        for h in plain:
+            parts = h["target"].split("/")
+            anc = tuple(a for a in ("/".join(parts[:i]) for i in range(1, len(parts))) if a in names)
+            if anc:
+                self._anc[h["job_id"]] = anc
+
+    def split(self, members: list) -> tuple:
+        """members(창 머리의 부분 집합, 한 머리는 한 번) -> maximal_targets(members) 와 같은 (최상위(순서 유지), 하위 수, 모양 틀림 수)."""
+        plain = [h for h in members if h["job_id"] in self._plain]
+        names = None
+        top = []
+        for h in plain:
+            anc = self._anc.get(h["job_id"])
+            if anc is not None:
+                if names is None:
+                    names = {x["target"] for x in plain}
+                if any(a in names for a in anc):
+                    continue
+            top.append(h)
+        return top, len(plain) - len(top), len(members) - len(plain)
+
+
 # 합계가 더하는 리포트 요약 정수(summary 의 키). 응답의 지표 순서이기도 하다. invalid_name_entries(2026-10-26, 포크 ae781bd --
 # 이름이 엄격 UTF-8 이 아닌 항목 수)는 카운터만이라(사용자 결정) broken_paths_total 과 따로 더한다 -- 구형 리포트는 키가 없어
 # unknown 으로 센다(0 으로 접지 않는다). summary.total_bytes 는 여기 없다: 실 사용량은 호출자가 목록 열과 같은 값으로 넘긴다.
@@ -157,6 +194,67 @@ def _strict_hot_parts(time_histograms) -> "tuple | None":
     return parts
 
 
+def _metric_result(m: list) -> dict:
+    """[합, known, unknown] -> 응답 칸. known 이 0 이면 sum None(기록 없음 ≠ 0 B)."""
+    return {"sum": m[0] if m[1] > 0 else None, "known": m[1], "unknown": m[2]}
+
+
+def head_contribution(head: dict, total_bytes, digest: "dict | None") -> tuple:
+    """대상 하나가 GroupTotals 에 더하는 칸 -- (최신 스캔 시각, 실 사용량, 파일 수, hot (hot, 전체)), 각각 None = 모름(0 은 값이다).
+    판정(_count·_strict_hot_parts·문자열 시각)은 여기 한 번이다: 소속별은 대상 하나가 여러 묶음에 들므로(권한 사용자 축은 namespace 의
+    사용자 수만큼) 대상마다 한 번 판정하고 묶음에는 정수만 더한다(2026-10-30 리뷰 -- 묶음마다 요약 전체를 다시 판정하던 것을 걷었다).
+    인자는 StorageTotals.add 와 같다."""
+    t = head.get("last_scan_at")
+    d = digest if isinstance(digest, dict) else {}
+    summary = d.get("summary") if isinstance(d.get("summary"), dict) else {}
+    files = summary.get("total_files")
+    return (t if isinstance(t, str) else None, total_bytes if _count(total_bytes) else None,
+            files if _count(files) else None, _strict_hot_parts(d.get("time_histograms")))
+
+
+class GroupTotals:
+    """최상위 대상들의 실 사용량·파일 수·hot·시점 범위 합(순수 누적기) -- 소속별 묶음 하나의 값이자 StorageTotals 의 같은 칸(규칙은
+    StorageTotals docstring 그대로). 묶음 수가 대상 수만큼(대상마다 자기 PVC) 되거나 사용자 다중 소속으로 묶음당 멤버가 늘어도 묶음마다
+    정수 칸 열 개뿐이다(StorageTotals 는 요약 7종·broken·크기 분포 구간 사본까지 든다 -- 행은 그것을 싣지 않는다). add 는
+    head_contribution 의 결과를 받는다."""
+    __slots__ = ("_bytes", "_files", "_hot", "_oldest", "_newest")
+
+    def __init__(self):
+        self._bytes = [0, 0, 0]                # 합, known, unknown
+        self._files = [0, 0, 0]
+        self._hot = [0, 0, 0, 0]               # Σhot, Σ전체, known, unknown
+        self._oldest = self._newest = None
+
+    def add(self, contribution: tuple) -> None:
+        t, b, f, hp = contribution
+        if t is not None:
+            if self._oldest is None or t < self._oldest:
+                self._oldest = t
+            if self._newest is None or t > self._newest:
+                self._newest = t
+        for m, v in ((self._bytes, b), (self._files, f)):
+            if v is None:
+                m[2] += 1
+            else:
+                m[0] += v
+                m[1] += 1
+        if hp is None:
+            self._hot[3] += 1
+        else:
+            self._hot[0] += hp[0]
+            self._hot[1] += hp[1]
+            self._hot[2] += 1
+
+    def result(self) -> dict:
+        hot, total, hot_known, hot_unknown = self._hot
+        known = hot_known > 0
+        return {"total_bytes": _metric_result(self._bytes), "total_files": _metric_result(self._files),
+                "hot_ratio": {"value": hot / total if known and total > 0 else None,
+                              "hot_bytes": hot if known else None, "total_bytes": total if known else None,
+                              "known": hot_known, "unknown": hot_unknown},
+                "oldest_scan_at": self._oldest, "newest_scan_at": self._newest}
+
+
 class StorageTotals:
     """최상위 대상들의 최신 요약 합(순수 누적기). 호출자는 add 를 머리 순서(최근 스캔 순)로 부른다.
 
@@ -169,17 +267,18 @@ class StorageTotals:
       된다. 라벨·경계는 기준 리포트의 것을 그대로 싣는다(마지막 열린 구간은 upper_inclusive 키 없음 -- 투영 모양 그대로,
       라벨도 투영이 버렸으면 키 없음).
     - 스캔 시점 범위(oldest/newest)는 더한 대상들의 최신 스캔 시각이다 -- 하위가 상위보다 새로 스캔돼도 합계엔 상위의
-      (더 오래된) 값이 들어가므로 화면이 시점 범위를 함께 말한다."""
+      (더 오래된) 값이 들어가므로 화면이 시점 범위를 함께 말한다.
+    실 사용량·파일 수·hot·시점 범위는 GroupTotals 로 누적한다(소속별 묶음과 한 벌 -- 2026-10-30)."""
 
     METRICS = ("total_bytes", *TOTAL_SUMMARY_KEYS, "broken_paths_total")
+    _GROUP_METRICS = ("total_bytes", "total_files")      # GroupTotals 가 누적하는 지표
 
     def __init__(self):
-        self._m = {k: [0, 0, 0] for k in self.METRICS}
-        self._hot = [0, 0, 0, 0]               # Σhot, Σ전체, known, unknown
+        self._group = GroupTotals()
+        self._m = {k: [0, 0, 0] for k in self.METRICS if k not in self._GROUP_METRICS}
         self._size_sig = None
         self._size_buckets: list = []
         self._size = [0, 0]                    # known, unknown
-        self._oldest = self._newest = None
 
     def _add(self, key: str, v) -> None:
         m = self._m[key]
@@ -192,23 +291,13 @@ class StorageTotals:
     def add(self, head: dict, total_bytes, digest: "dict | None") -> None:
         """대상 하나: head = 머리 행(last_scan_at), total_bytes = 목록 열과 같은 실 사용량(리포트를 못 읽었으면 DB 의
         bytes_count 대체 -- 호출자가 정한다), digest = 리포트 요약(못 읽음·지연이면 None -- 리포트 유래 값은 전부 모름)."""
-        t = head.get("last_scan_at")
-        if isinstance(t, str):
-            self._oldest = t if self._oldest is None or t < self._oldest else self._oldest
-            self._newest = t if self._newest is None or t > self._newest else self._newest
-        self._add("total_bytes", total_bytes)
+        self._group.add(head_contribution(head, total_bytes, digest))
         d = digest if isinstance(digest, dict) else {}
         summary = d.get("summary") if isinstance(d.get("summary"), dict) else {}
         for k in TOTAL_SUMMARY_KEYS:
-            self._add(k, summary.get(k))
+            if k not in self._GROUP_METRICS:
+                self._add(k, summary.get(k))
         self._add("broken_paths_total", d.get("broken_paths_total"))
-        hp = _strict_hot_parts(d.get("time_histograms"))
-        if hp is None:
-            self._hot[3] += 1
-        else:
-            self._hot[0] += hp[0]
-            self._hot[1] += hp[1]
-            self._hot[2] += 1
         sc = _size_signature(d.get("file_size_histogram"))
         if sc is None or (self._size_sig is not None and sc[0] != self._size_sig):
             self._size[1] += 1
@@ -225,14 +314,9 @@ class StorageTotals:
         self._size[0] += 1
 
     def result(self) -> dict:
-        def metric(m):
-            return {"sum": m[0] if m[1] > 0 else None, "known": m[1], "unknown": m[2]}
-        hot, total, hot_known, hot_unknown = self._hot
-        known = hot_known > 0
-        return {**{k: metric(self._m[k]) for k in self.METRICS},
-                "hot_ratio": {"value": hot / total if known and total > 0 else None,
-                              "hot_bytes": hot if known else None, "total_bytes": total if known else None,
-                              "known": hot_known, "unknown": hot_unknown},
+        g = self._group.result()
+        return {**{k: g[k] if k in self._GROUP_METRICS else _metric_result(self._m[k]) for k in self.METRICS},
+                "hot_ratio": g["hot_ratio"],
                 "file_size_histogram": {"buckets": [dict(b) for b in self._size_buckets] if self._size[0] > 0 else [],
                                         "known": self._size[0], "unknown": self._size[1]},
-                "oldest_scan_at": self._oldest, "newest_scan_at": self._newest}
+                "oldest_scan_at": g["oldest_scan_at"], "newest_scan_at": g["newest_scan_at"]}

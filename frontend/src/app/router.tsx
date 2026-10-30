@@ -15,6 +15,7 @@ import { Dashboard } from "../features/dashboard/Dashboard";
 import { BatchesList } from "../features/batches/BatchesList";
 import { UsageAnalysis } from "../features/usage/UsageAnalysis";
 import { StoragesPage } from "../features/usage/StoragesPage";
+import { BreakdownPage } from "../features/usage/BreakdownPage";
 import { BatchCreate } from "../features/batches/BatchCreate";
 import { BatchDetail } from "../features/batches/BatchDetail";
 import { AuditLog } from "../features/audit/AuditLog";
@@ -78,10 +79,12 @@ export function AppRouter() {
           <Route path="/admin/storages" element={<RequireRole role="admin"><AppShell><StoragesList /></AppShell></RequireRole>} />
           <Route path="/admin/dashboard" element={<RequireRole role="admin"><AppShell><Dashboard /></AppShell></RequireRole>} />
           <Route path="/admin/batches" element={<RequireRole role="admin"><AppShell><BatchesList /></AppShell></RequireRole>} />
-          {/* 사용량 분석(2026-10-29 하위 메뉴): 경로별(기본) + 스토리지별(탭 UsageTabs). 평평한 라우트다 -- 레이아웃 라우트를 두지
-              않으므로 ErrorBoundary key={pathname} 이 탭마다 다시 마운트한다(정리 결과 같은 상태는 경로별 페이지가 소유). */}
+          {/* 사용량 분석(2026-10-29 하위 메뉴): 경로별(기본) + 스토리지별 + 소속별(2026-10-30 2단계, 탭 UsageTabs). 평평한 라우트다
+              -- 레이아웃 라우트를 두지 않으므로 ErrorBoundary key={pathname} 이 탭마다 다시 마운트한다(정리 결과 같은 상태는 경로별
+              페이지가 소유). */}
           <Route path="/admin/usage" element={<RequireRole role="admin"><AppShell><UsageAnalysis /></AppShell></RequireRole>} />
           <Route path="/admin/usage/storages" element={<RequireRole role="admin"><AppShell><StoragesPage /></AppShell></RequireRole>} />
+          <Route path="/admin/usage/breakdown" element={<RequireRole role="admin"><AppShell><BreakdownPage /></AppShell></RequireRole>} />
           <Route path="/admin/batches/new" element={<RequireRole role="admin"><AppShell><BatchCreate /></AppShell></RequireRole>} />
           <Route path="/admin/batches/:batchId" element={<RequireRole role="admin"><AppShell><BatchDetail /></AppShell></RequireRole>} />
           <Route path="/admin/audit" element={<RequireRole role="admin"><AppShell><AuditLog /></AppShell></RequireRole>} />

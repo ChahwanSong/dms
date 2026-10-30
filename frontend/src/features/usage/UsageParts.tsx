@@ -197,7 +197,22 @@ export function sourceNotices(src: ReturnType<typeof useStorageTabs>): React.Rea
   ].filter((x): x is JSX.Element => x !== false);
 }
 
-/** 등록된 스토리지도 기록도 없다(경로별·스토리지별 공용 빈 상태). */
+/** 패널 안 빈 상태(아이콘 + 한 줄 + 보조 한 줄 + 동작) -- 표 자리에 같은 높이감으로. 경로별 패널과 소속별(2026-10-30)이 같은 모양을
+ *  쓴다(2026-10-30 StoragePanel 에서 이동). */
+export function Empty({ icon, title, hint, action }: {
+  icon: React.ReactNode; title: string; hint?: React.ReactNode; action?: React.ReactNode;
+}) {
+  return (
+    <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed border-line px-4 py-10 text-center">
+      <span aria-hidden className="grid h-10 w-10 place-items-center rounded-full bg-panel text-muted">{icon}</span>
+      <p className="text-sm font-medium text-ink break-keep">{title}</p>
+      {hint && <p className="max-w-md text-xs text-muted break-keep">{hint}</p>}
+      {action}
+    </div>
+  );
+}
+
+/** 등록된 스토리지도 기록도 없다(경로별·스토리지별·소속별 공용 빈 상태). */
 export function NoStorages() {
   return (
     <Card>
