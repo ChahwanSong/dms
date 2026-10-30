@@ -18,7 +18,7 @@ metadata:
   name: dms-config
   namespace: dms
 data:
-  DMS_JOB_IMAGE: "pkg-01:5001/dms-mpifileutils:d15"
+  DMS_JOB_IMAGE: "pkg-01:5001/dms-mpifileutils:d16"
   DMS_BUILD_REGISTRY: "pkg-01:5001"
   DMS_BUILD_BUILDER_IMAGE: "pkg-01:5000/buildah:stable"
   DMS_PRIVILEGED_REQUESTERS: "root,admin,mason"

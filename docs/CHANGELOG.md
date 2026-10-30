@@ -95,7 +95,7 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
-### ✅ 사용량 분석 「소속별」 탭(2단계) — 권한 사용자·요청자·namespace·PV 이름·StorageClass·클러스터별 실 사용량 순위 — **완료**(2026-10-30)
+### ✅ 사용량 분석 「소속별」 탭(2단계) — 권한 사용자·요청자·namespace·PV 이름·StorageClass·클러스터별 실 사용량 순위 — **완료·실증**(2026-10-30, d16)
 
 사용자 결정: 「그래 구현시작해.」(2026-10-29 하위 메뉴 시안의 결정 1 — 「소속별」은 묶음별 합계를 한 번에 주는 서버 API 와 함께만 출하).
 한 스토리지를 **누가·어느 PV 가 얼마나 쓰나**를 실 사용량 순위로 보이고, 행을 누르면 그 묶음의 필터를 건 경로별로 간다. DB 스키마·
@@ -141,6 +141,13 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   버스트 중 read-then-write 트랜잭션, 135ms 즉시 실패)이고 단독·E15+E16·전체 재실행 모두 통과. 오라클(무작위 세계 — 행마다 필터 합계·
   facets·targets·첫 원리 대조, storage-totals 리팩터 전후 대조, 규칙 밖 키) sqlite·PG 불일치 0, 변이 10종 중 9종 검출(남은 1종은 PVC SC
   충돌 세계가 없어서), 리뷰 지적 17건 반영.
+- **라이브 실증(d16, 소스 ab8f02b)**: 실 Chrome — 탭 「경로별 · 스토리지별 · 소속별」, k8s-pv-nfs 기본(권한 사용자) junwoo.song 3 · 981.6
+  KiB ≈100% / alice 2 · 981.6 KiB(동률은 대상 수) / cocoa.song 1 · 22 B <0.1% / 흐린 「PV 밖(직접 경로)」 2 · 14 B → `scope=outside`, 요청자
+  mason 4·alice 1, namespace team-a · dmsk8s / lab-y · dmsk8s2(클러스터 둘이라 접미), PV 이름 「datasets team-a (tb-nfs) · dmsk8s」,
+  StorageClass tb-nfs·c2-nfs, 클러스터 dmsk8s·dmsk8s2, onefs·gpfs 각 축. cephfs-dms 에 `by=namespace` 딥링크 → 요청자 적용·PV 축 다섯
+  disabled·안내 문장. 행 클릭 alice → `/admin/usage?storage=k8s-pv-nfs&user=alice`(경로 2개), datasets → `cluster&namespace&pvc` 필터
+  (경로 2개), 뒤로 가기 → 소속별(by 그대로). 1440·1024·390 가로 넘침 0(390·1024 두 줄 행), 콘솔 오류 0. **라이브 오라클**: 네 스토리지 ×
+  여섯 축의 행·덧붙임 39건을 `storage-totals?<filter>` 와 대조(대상 수·최상위 수·실 사용량·파일 수) 불일치 0.
 
 ### ✅ 사용량 분석 「경로별」 — PV 이름 열 + 경로·PV 이름 검색(일부 단어) — **완료·실증**(2026-10-29, d15)
 
