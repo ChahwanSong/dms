@@ -27,8 +27,8 @@ K8S = OVERLAYS / "testbed-k8s"
 BASE_CONFIG = REPO_ROOT / "deploy" / "k8s" / "20-config.yaml"
 BASE_AGENT = REPO_ROOT / "deploy" / "k8s" / "50-agent-daemonset.yaml"
 
-K8S_REGISTRY = "pkg-01:5001"
-SHARED_BUILDER = "pkg-01:5000/buildah:stable"   # 빌더 미러만 ssc 의 :5000 을 공용으로 읽는다
+K8S_REGISTRY = "10.112.0.50:5000"
+SHARED_BUILDER = "10.112.0.50:5000/buildah:stable"   # 빌더 미러만 ssc 의 :5000 을 공용으로 읽는다
 K8S_VIP = "10.20.20.101/32"
 K8S_HOST = "dms-k8s.local"
 

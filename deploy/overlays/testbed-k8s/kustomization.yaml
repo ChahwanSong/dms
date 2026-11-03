@@ -15,8 +15,9 @@
 #   RoleBinding 맵핑으로 판정한다(일반 사용자는 PV 주소만, 특권 세션 관리자는 직접 경로·전체 PV).
 #   tests/test_testbed_k8s_overlay.py 가 렌더 결과에 'ldap'(대소문자 무시) 0건·에이전트 명령·레지스트리·신원 모드를 고정한다.
 #
-# 레지스트리·태그: pkg-01:5001(같은 VM 의 두 번째 registry:2 — ssc 의 :5000 과 태그·삭제·「사용 중」 판정이 섞이지
-#   않게 분리; 빌더 buildah:stable 만 :5000 미러를 공용으로 읽는다). 태그 관례 **dN — d1 부터**(2026-10-26 사용자 결정 「예전
+# 레지스트리·태그: **클러스터 내 레지스트리 10.112.0.50:5000**(2026-11-03 T4 전환 — deploy/platform/registry, cp1, 저장소
+#   /dms_shared/dms/registry; 빌더 buildah:stable 도 여기). 그 전(d18 까지)은 pkg-01:5001(같은 VM 의 두 번째 registry:2 — ssc 의
+#   :5000 과 분리)이었고 되돌림용으로 그대로 둔다(deploy/README §2e-6). 태그 관례 **dN — d1 부터**(2026-10-26 사용자 결정 「예전
 #   dms-ssc 때처럼 d1 부터」 — 포탈의 다음 태그 제안(BuildForm.nextTagSuggestion = 라이브·이 레지스트리·빌드 이력의 dN 최댓값 + 1)이
 #   그대로 맞는다. 레지스트리가 :5001 로 갈려 ssc 의 dN 과 번호가 섞이지 않는다). 그 전의 옛 kN 이력:
 #   k0 = 첫 설치 시드(:5000 의 dms:d184·dms-agent:d179·dms-mpifileutils:d183 을 :5001 에 k0 으로 복사).
@@ -56,9 +57,9 @@
 #   태그 bump = 아래 newTag(+ patch-config.yaml 의 DMS_JOB_IMAGE) 커밋 — **dms-k8s 에서만** 한다(2026-10-22 브랜치 분리 뒤
 #   빌드 소스는 /home/mason/dms-dev/dms-k8s 체크아웃 = origin/dms-k8s, main 은 이 클러스터와 무관).
 #   ssc 클러스터의 오버레이(overlays/testbed)는 dms-ssc 브랜치에만 있다(2026-10-26 이 브랜치에서 지웠다 — 체리픽 충돌·엉뚱한 태그 방지).
-#   클러스터 내 레지스트리(2026-11-03 ④ — 10.112.0.50:5000, deploy/platform/registry)는 T4 동안 **병행**이다: 이 오버레이는 아직 :5001 을
-#   가리키고(values.env REGISTRY_MODE=external), 앱 전환은 newName·patch-config 세 값·values.env 를 한 커밋에서 바꾸는 별도 단계다
-#   (deploy/README §2e-6 — 렌더러 `sh deploy/render.sh testbed-k8s` 가 다섯 곳이 같은지 본다).
+#   클러스터 내 레지스트리(2026-11-03 ④ — 10.112.0.50:5000, deploy/platform/registry)로 앱을 옮겼다(T4 16 — newName·patch-config 세
+#   값·values.env 를 한 커밋에서; 렌더러 `sh deploy/render.sh testbed-k8s` 가 다섯 곳이 같은지 본다, deploy/README §2e-6). 잡 이미지
+#   (control_state.job_image)는 전환 뒤 다시 릴리스했다.
 #
 # Deployment(api/controller) 는 패치하지 않는다 — securityContext 는 base 가 유일한 진실
 #   (tests/test_release_manifest_contract.py::test_overlays_do_not_patch_control_plane_deployments). 예외는 아래 replacements
@@ -81,10 +82,10 @@ resources:
 # migrate initContainer + 30-migrate-job)는 한 항목이 전부 바꾼다.
 images:
   - name: set-by-overlay.invalid/dms
-    newName: pkg-01:5001/dms
+    newName: 10.112.0.50:5000/dms
     newTag: d18
   - name: set-by-overlay.invalid/dms-agent
-    newName: pkg-01:5001/dms-agent
+    newName: 10.112.0.50:5000/dms-agent
     newTag: d18
 
 patches:
