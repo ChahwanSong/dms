@@ -205,6 +205,7 @@
   "build_pod_cleanup_failed",
   "unknown_registry_repo",
   "registry_tag_in_use",
+  "registry_digest_in_use",
   "registry_tag_not_found",
   "registry_delete_disabled",
   "registry_error",

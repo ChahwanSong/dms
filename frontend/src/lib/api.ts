@@ -295,8 +295,9 @@ export const REASON_MESSAGES: Record<string, string> = {
   // 레지스트리 이미지 관리(슬라이스 34). reasonCodes.json 과 같은 커밋.
   unknown_registry_repo: "알 수 없는 이미지 저장소입니다",
   registry_tag_in_use: "지금 배포돼 사용 중인 태그는 삭제할 수 없습니다",
+  registry_digest_in_use: "이 태그는 사용 중인 태그와 같은 이미지(digest)입니다 — 레지스트리는 이미지 단위로 지워 사용 중 태그까지 사라지므로 삭제하지 않았습니다",
   registry_tag_not_found: "레지스트리에서 해당 태그를 찾을 수 없습니다",
-  registry_delete_disabled: "레지스트리 삭제가 비활성화되어 있습니다 — 레지스트리에 삭제를 활성화하세요",
+  registry_delete_disabled: "레지스트리가 지금 삭제를 받지 않습니다(삭제 비활성 또는 정리(GC) 중 읽기 전용) — 잠시 뒤 다시 시도하세요",
   registry_error: "레지스트리 응답에 문제가 있습니다 — 잠시 후 다시 시도하세요",
   build_failed: "빌드가 실패했습니다 — 로그를 확인하세요",
   submit_failed: "빌드 파드를 만들지 못했습니다",

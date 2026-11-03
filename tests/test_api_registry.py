@@ -92,8 +92,9 @@ def test_delete_unknown_repo_is_422(reg_client):
 
 def test_delete_unused_tag_resolves_digest_then_deletes(reg_client, monkeypatch):
     seen = {}
+    # 태그마다 다른 digest(사용 중 d74 와 공유하지 않음 — 공유는 test_delete_refuses_unused_tag_sharing_a_digest_… 가 본다).
     monkeypatch.setattr("dms.api.routes_registry.registry_mod.manifest_digest",
-                        lambda registry, repo, tag: "sha256:" + "a" * 64)
+                        lambda registry, repo, tag: "sha256:" + ("a" if tag == "b99d97238" else "c") * 64)
     def _del(registry, repo, digest):
         seen["digest"] = digest
         return "ok"
@@ -106,7 +107,7 @@ def test_delete_unused_tag_resolves_digest_then_deletes(reg_client, monkeypatch)
 
 def test_delete_maps_registry_delete_disabled_to_409(reg_client, monkeypatch):
     monkeypatch.setattr("dms.api.routes_registry.registry_mod.manifest_digest",
-                        lambda *a: "sha256:" + "b" * 64)
+                        lambda registry, repo, tag: "sha256:" + ("b" if tag == "b99d97238" else "c") * 64)
     monkeypatch.setattr("dms.api.routes_registry.registry_mod.delete_manifest",
                         lambda *a: "disabled")
     r = reg_client.delete("/api/admin/registry/images/dms/b99d97238")
@@ -125,3 +126,32 @@ def test_list_and_delete_are_admin_only(client):
     client.post("/api/auth/login", json={"username": "u1", "password": "p"})
     assert client.get("/api/admin/registry/images").status_code in (401, 403)
     assert client.delete("/api/admin/registry/images/dms/x").status_code in (401, 403)
+
+
+
+def test_effective_db_job_image_tag_is_in_use(reg_client):
+    # T4(2026-11-03): 포탈로 릴리스한 잡 이미지(control_state.job_image)는 동봉 매니페스트와 달라도 지금 잡이 쓰는 태그다 —
+    # 「안 쓰는 태그」로 보여 지울 수 있으면 다음 잡이 ImagePullBackOff.
+    reg_client.app.state.repos.control.set_job_image("pkg-01:5000/dms-mpifileutils:b99d97238", actor="t")
+    body = reg_client.get("/api/admin/registry/images", headers=ADMIN).json()
+    mfu = {t["tag"]: t["in_use"] for r in body["repositories"] if r["repository"] == "dms-mpifileutils" for t in r["tags"]}
+    assert mfu["b99d97238"] is True and mfu["d53"] is True       # DB 실효값 + 동봉값 둘 다 보호
+    r = reg_client.delete("/api/admin/registry/images/dms-mpifileutils/b99d97238")
+    assert r.status_code == 409 and r.json()["detail"] == "registry_tag_in_use"
+
+
+def test_delete_refuses_unused_tag_sharing_a_digest_with_an_in_use_tag(reg_client, monkeypatch):
+    # 레지스트리 삭제는 digest 단위 — 안 쓰는 별칭(b99d97238)이 사용 중 d74 와 같은 digest 면 지우면 d74 도 사라진다.
+    digests = {("dms", "b99d97238"): "sha256:same", ("dms", "d74"): "sha256:same"}
+    deleted = []
+    monkeypatch.setattr("dms.api.routes_registry.registry_mod.manifest_digest",
+                        lambda registry, repo, tag: digests.get((repo, tag)))
+    monkeypatch.setattr("dms.api.routes_registry.registry_mod.delete_manifest",
+                        lambda registry, repo, digest: deleted.append(digest) or "ok")
+    r = reg_client.delete("/api/admin/registry/images/dms/b99d97238")
+    assert r.status_code == 409 and r.json()["detail"] == "registry_digest_in_use"
+    assert deleted == []
+    # digest 가 다르면 그대로 지운다.
+    digests[("dms", "b99d97238")] = "sha256:other"
+    r = reg_client.delete("/api/admin/registry/images/dms/b99d97238")
+    assert r.status_code == 200 and deleted == ["sha256:other"]

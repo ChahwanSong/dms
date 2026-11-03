@@ -11,6 +11,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from .. import registry as registry_mod
+from ..job_image import resolve_job_image
 from ..manifest_tags import manifest_images, manifest_job_image, site_image
 from ..repositories.builds import BUILD_IMAGES
 from ..repositories.releases import COMPONENTS
@@ -52,9 +53,16 @@ def _in_use_tags(request) -> "dict[str, set]":
                 in_use[repo].add(t)
     # 잡 이미지(dms-mpifileutils)는 워크로드가 아니라 config 값이다 -- 매니페스트가
     # 가리키는 태그를 보호한다(api 가 이 이미지로 잡을 띄운다).
-    job_tag = _tag_of(site_image(manifest_job_image(), registry))
-    if job_tag is not None and "dms-mpifileutils" in in_use:
-        in_use["dms-mpifileutils"].add(job_tag)
+    # 실효 잡 이미지(DB control_state.job_image 가 env 를 이긴다 — 포탈 릴리스 뒤의 진실)도 보호한다(2026-11-03 T4 실측): 동봉 매니페스트만
+    # 보면, 레지스트리 전환 뒤처럼 동봉값이 다른 주소일 때 지금 잡이 쓰는 태그가 「안 쓰는 태그」로 보여 지울 수 있었다.
+    try:
+        effective_job = resolve_job_image(request.app.state.repos.control, request.app.state.settings)
+    except Exception:
+        effective_job = None
+    for job_tag in (_tag_of(site_image(manifest_job_image(), registry)),
+                    _tag_of(site_image(effective_job, registry))):
+        if job_tag is not None and "dms-mpifileutils" in in_use:
+            in_use["dms-mpifileutils"].add(job_tag)
     return in_use
 
 
@@ -81,12 +89,19 @@ def delete_registry_image(repository: str, tag: str, request: Request,
         raise HTTPException(status_code=422, detail="unknown_registry_repo")
     registry = request.app.state.settings.build_registry
     # 사용 중 태그 보호를 먼저 본다 -- 레지스트리를 건드리기 전에 거절한다.
-    if tag in _in_use_tags(request).get(repository, set()):
+    in_use = _in_use_tags(request).get(repository, set())
+    if tag in in_use:
         raise HTTPException(status_code=409, detail="registry_tag_in_use")
     digest = registry_mod.manifest_digest(registry, repository, tag)
     if digest is None:
         # 태그가 없거나 레지스트리 무응답 -- 어느 쪽이든 지울 대상이 없다.
         raise HTTPException(status_code=404, detail="registry_tag_not_found")
+    # 레지스트리 삭제는 digest 단위라 그 digest 를 가리키는 태그가 **모두** 사라진다(2026-11-03 T4 실측 — 안 쓰는 별칭을 지우자 같은
+    # digest 의 다른 태그도 없어졌다). 사용 중 태그가 같은 digest 면 거절한다(그 태그를 조회하지 못하면 공유 여부를 모르는 것 — 그
+    # 태그가 이 레지스트리에 없다는 뜻이라 막지 않는다).
+    for other in sorted(in_use):
+        if registry_mod.manifest_digest(registry, repository, other) == digest:
+            raise HTTPException(status_code=409, detail="registry_digest_in_use")
     result = registry_mod.delete_manifest(registry, repository, digest)
     if result == "ok":
         # 감사 -- 어떤 이미지를 누가 지웠는지 남긴다(레지스트리는 이력을 안 남긴다).

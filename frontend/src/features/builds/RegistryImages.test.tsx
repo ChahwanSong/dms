@@ -79,7 +79,7 @@ describe("RegistryImages — 이미지 관리", () => {
     await userEvent.click(await screen.findByLabelText("dms:b99d97238 선택"));
     await userEvent.click(screen.getByRole("button", { name: "선택 삭제" }));
     await userEvent.click(screen.getByRole("button", { name: "1개 삭제 확인" }));
-    expect(await screen.findByText(/레지스트리 삭제가 비활성화/)).toBeInTheDocument();
+    expect(await screen.findByText(/레지스트리가 지금 삭제를 받지 않습니다/)).toBeInTheDocument();
   });
 
   it("삭제·블롭 회수·노드 캐시의 경계를 안내한다", async () => {
