@@ -496,6 +496,7 @@ def test_render_stops_when_versions_lock_and_bases_disagree(tmp_path, mutate, ne
 
 _SHIM = r"""#!/bin/sh
 printf '%s\n' "$*" >> "$FAKE_LOG"
+if [ "$1" = "--context" ]; then shift 2; fi   # guard 는 컨텍스트가 있으면 `kubectl --context C kustomize` 로 렌더한다(2026-11-03 T9)
 if [ "$1" = "kustomize" ]; then cat "$FAKE_RENDER"; exit 0; fi
 if [ "$1" = "config" ]; then [ "$2" = "get-contexts" ] && [ "$3" = "dmsk8s" ] && exit 0; exit 1; fi
 case "$*" in

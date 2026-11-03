@@ -924,8 +924,8 @@ postgresql://dms:<PW>@dms-pg-rw.dms.svc:5432/dms?sslmode=require&target_session_
   &keepalives=1&keepalives_idle=10&keepalives_interval=5&keepalives_count=3&tcp_user_timeout=15000
 ```
 
-- `<PW>` = `dms-pg-app` 의 password. keepalive·`tcp_user_timeout` 이 없으면 primary 가 있던 노드가 죽었을 때 API 가 최대 약 15분 매달린다(추정 —
-  T6' 실증). `connect_timeout` 은 넣지 않는다(코드가 없을 때만 5초를 붙인다).
+- `<PW>` = `dms-pg-app` 의 password. keepalive·`tcp_user_timeout` 이 없으면 primary 가 있던 노드가 죽었을 때 그 연결이 약 16분 매달린다(T6' 실측 —
+  keepalive 없는 클라이언트 15분 52초, 이 값이면 16초에 감지, 2f-7). `connect_timeout` 은 넣지 않는다(코드가 없을 때만 5초를 붙인다).
 - 손으로 만들 때도 값은 stdin 으로: `printf 'username=dms\npassword=%s\n' "$(openssl rand -hex 24)" | kubectl --context C -n dms create secret
   generic dms-pg-app --type=kubernetes.io/basic-auth --from-env-file=/dev/stdin`(`printf` 는 셸 내장이라 argv 에 실리지 않는다).
 - 시크릿은 api·controller 가 기동 때만 읽는다 — URL 을 바꾼 뒤 `kubectl --context C -n dms rollout restart deploy/dms-api deploy/dms-controller`.
@@ -1159,16 +1159,26 @@ Cluster `status.targetPrimary` 패치와 phase `Switchover in progress` 다: 플
 - 공용 스토리지 유지보수(3-2 G2 보충): 그 노드의 DMS 상태 파드(api·controller·registry·CNPG 인스턴스·pg_dump)를 먼저 비우고(primary 면 switchover
   뒤 cordon + 파드 삭제) → 재마운트 → uncordon.
 
-| 장애조치 상황(PG 검토 4-2 — 「실측」 표시 밖은 추정) | 쓰기 불가 시간 |
+| 장애조치 상황(2026-11-03 T6·T7·T6' 실측 — 테스트베드, 앱이 `dms-pg` 위에서; 「추정」 표시만 추정) | 쓰기 불가 시간 |
 |---|---|
-| switchover | 약 7초 API 5xx(2026-11-03 T7 실측 — 앱이 CNPG 위에서; CNPG 의 switchover 완료는 약 9초, T6) |
-| PG 파드 재시작·노드 이동 | 수 초~십수 초(primary 면 그동안 API 500). 인스턴스가 다른 노드에서 같은 PV 로 다시 뜨기까지 22초(T6 실측 — cordon + 파드 삭제, pg_basebackup 없음) |
-| primary 가 있던 마스터 사망 | 약 1~1.5분(노드 판정 약 50초 → 승격 — T6') |
-| dms-api 가 있던 마스터 사망 | 약 1.5~2.5분 — 새 마스터에 dms 이미지가 캐시돼 있다는 전제(prod 오버레이의 not-ready·unreachable 30초 + S11 사전 pull). 레지스트리도 같은 마스터였으면 수 분 더(7-6) |
+| switchover·promote·drain(primary 노드) | 쓰기 공백 약 8~9초, API 5xx 4~6초(T7 약 7초, promote 5회 5~6초). drain 12초, uncordon 뒤 3/3 약 11~12초. `smartShutdownTimeout` 0 대 180 차이 없음 — drain 은 switchover 를 거쳐 smart 대기가 쓰이지 않는다(switchover 없는 종료는 시험 안 함) |
+| PG 파드 재시작·노드 이동 | 수 초~십수 초(primary 면 그동안 API 500 — 추정). 인스턴스가 다른 노드에서 같은 PV 로 다시 뜨기까지 22초(T6 — cordon + 파드 삭제, pg_basebackup 없음) |
+| primary 가 있던 노드 사망(전원 차단 — 테스트베드는 워커 w1) | 전원 차단부터 rw 전환까지 **77~79초**(unreachable +4초 → 장애조치 시작 +7초 → 새 primary +25초 → rw +30초 — 노드 판정을 기다린 뒤), API 78초 불가(처음 약 30초는 매달림). 노드가 돌아오면 옛 primary 는 pg_rewind 로 재합류(630MB — 약 2분에 3/3) |
+| keepalive·`tcp_user_timeout` 없는 클라이언트(위 사망 때) | **15분 52초** 매달린 뒤 ETIMEDOUT — 2f-2 URL 의 값이 있으면 16초에 감지 |
+| apiserver 불통(약 71초) | 영향 없음 — PG 쓰기 공백 0, API 5xx 0, PG 파드 재시작 없음(lease 를 쓰는 컨트롤러들은 재시작 — 정상) |
+| primary 노드의 공용 스토리지 정지 | **정지 시간 + 8~22초**(해제 뒤 새 primary +8초·API 복귀 +14초·3/3 +23초; 93초 정지에 API 76초 불가) — **정지 동안 자동 장애조치가 끝나지 않는다**(CNPG 는 옛 primary 가 멈추기를 기다린다). 데이터 손실 없음(no rewind) |
+| replica 노드 재마운트(3-2 G2 보충 절차) | 영향 없음 — 3/3 42초, API 오류 0 |
+| dms-api 가 있던 마스터 사망 | 약 1.5~2.5분(추정) — 새 마스터에 dms 이미지가 캐시돼 있다는 전제(prod 오버레이의 not-ready·unreachable 30초 + S11 사전 pull). 레지스트리도 같은 마스터였으면 수 분 더(7-6) |
 
-dms-controller 는 DB 연결을 잃으면 exit 1 로 끝나 재시작한다(T7 switchover 실측 — 정상, 곧 다시 붙는다). 짧은 사이에 거듭 잃으면 kubelet
-재시작 백오프가 쌓여 복귀가 DB 보다 늦을 수 있다(T6' 에서 본다).
-keepalive·`tcp_user_timeout`(2f-2 URL)이 없으면 API 가 최대 약 15분 매달린다(추정, T6' 실증). prod 오버레이는 dms-api·dms-controller 를 마스터에
+- **primary 노드의 스토리지만 멈췄을 때**(T6' 4): Cluster 가 primary NotReady·「initiating a failover」인데 새 primary 가 서지 않으면 이 경우다 —
+  스토리지가 돌아오면 저절로 끝난다(쌓인 커밋 flush → 승격). 길어지면 사람이 조치한다: 그 노드를 **전원 차단으로 확정**한 뒤에만 노드 사망 경로로
+  넘긴다(위 6-6 — 꺼진 것을 확인하기 전에는 강제 삭제·out-of-service taint 금지). 이 「정지 중 전원 차단」 경로는 아직 시험하지 않았다(BACKLOG ⑤).
+  지연·쓰기 확인은 durable 쓰기로 잰다(`select pg_logical_emit_message(true, 'probe', now()::text)` — `txid_current()`·`select now()` 는 WAL 을
+  디스크에 쓰지 않아 정지 중에도 성공한다).
+
+dms-controller 는 DB 연결을 잃으면 exit 1 로 끝나 재시작한다(T7·T6' 실측 — 정상, 노드 사망 때 DB 복귀 약 16초 뒤에 붙었다). 짧은 사이에 거듭
+잃으면 kubelet 재시작 백오프가 쌓여 복귀가 DB 보다 늦을 수 있다.
+keepalive·`tcp_user_timeout`(2f-2 URL)이 없으면 DB 연결이 약 16분 매달린다(T6' 실측 15분 52초 — 위 표). prod 오버레이는 dms-api·dms-controller 를 마스터에
 둔다(`deploy/overlays/prod/patch-placement.yaml` — nodeSelector control-plane + toleration + not-ready·unreachable `tolerationSeconds: 30`, #24·#25;
 테스트베드는 cp1 메모리가 모자라 워커 그대로).
 
@@ -1183,8 +1193,8 @@ keepalive·`tcp_user_timeout`(2f-2 URL)이 없으면 API 가 최대 약 15분 �
   `db-cluster` SSA(requests 변경 = 인스턴스 롤링 + switchover — 5xx 수 초).
 - **DMS 앱 DB 는 T7(2026-11-03)부터 `dms-pg`** 다 — 2f-2 「이관 순서」 그대로(앱 정지 창 3분 29초, 테이블 37·행 42,951·시퀀스 7 일치, switchover 5xx
   약 7초; 결과는 CHANGELOG ⑤ 「T7」). pkg-01 의 외부 PG(`dmsdb_k8s`/`dmsapp_k8s`)는 손대지 않고 되돌림용으로 둔다(`dms-secrets-prev` →
-  `restore-url`). 장애 시험 **T6'**(전원 차단·drain 0 대 180·apiserver 불통·export 차단·재마운트·fio/pgbench 공용 대 로컬)은 사용자 승인 뒤
-  별도 단계다.
+  `restore-url`). 장애 시험 **T6'**(전원 차단·drain 0 대 180·apiserver 불통·NFS 정지·재마운트·fsync 공용 대 로컬)도 2026-11-03 사용자 승인 뒤
+  끝났다 — 수치는 2f-7 표, 상세는 CHANGELOG ⑤ 「T6'」. fsync 비교(fdatasync 328 대 319 ops/s)는 둘 다 같은 호스트 디스크라 prod 를 대표하지 않는다.
 - 실행 런북(메인 세션 몫 — 정확한 명령·확인 항목·되돌림; 2026-11-03 실증 끝, 결과는 CHANGELOG ⑤ 「T6 실증」): 설계 10 「T6 세부」의 순서 — push(k8s-w1 skopeo) → 렌더 → PriorityClass(④ 에서
   있음) → `addons/cnpg` → 9443 dry-run → `db-volumes` → 사전 검사 → `db-cluster` → 900초 폴링 → 경로 대조 → `db-backup` + 첫 덤프 → 확인(airgap
   함정 셋·커밋 지연·26:26 음성 대조(별도 일회용 Cluster)·PV 순환·Cluster 삭제·재생성(일회용 — 인스턴스 2·PV 3: 삭제 → PV 2개 Released →

@@ -428,10 +428,20 @@ CHANGELOG 「⑤ DB(CNPG)」, 설계 v6 6·8-1(S2·S9·S10·S12)·8-2·10 T6/T6'
   남은 것: `kubectl-cnpg` 플러그인·checksums 반입(K8), 새 사이트 첫 이관의 import bootstrap — 아래 「⑦ 설치기 후속」.
 - ~~**테스트베드 T6 실증**~~ — **해소**(2026-11-03, CHANGELOG ⑤ 「T6 실증」 — 전 항목 PASS). 실증에서 찾아 고친 것: 옛 PGDATA 잔재 `pgdata_*`
   WARN·덤프 `backoffLimit` 3(1a11d50), VAP 를 기본으로(09b0652 — 아래 「선택 항목」에서 뺐다).
-- 🔧 **T6'(장애·성능, 사용자 승인 필수 — T6·T7 뒤 남은 ⑤ 실증)** — primary 노드 전원 차단(keepalive 없이/넣고 — 15분 매달림 가설), drain(smartShutdown 0 대 180),
-  apiserver 불통 흉내, export 차단(공용 스토리지 일시 정지 — kubelet·etcd 영향·레지스트리 NotReady), 3-2 「G2 보충」 재마운트 절차, fio·pgbench 공용
-  대 로컬(로컬은 렌더 오버레이 밖 일회용). T7 뒤라 앱이 CNPG 위에 있다 — 쓰기 불가 시간을 앱 기준(5xx 창)으로도 잰다. dms-controller 는 DB 를 잃으면
-  exit 1 로 재시작하므로(T7 실측 — 정상) 연속 장애에서 재시작 백오프가 복귀를 늦추는지 본다(README §2f-7).
+- ~~**T6'(장애·성능)**~~ — **해소**(2026-11-03 사용자 승인, CHANGELOG ⑤ 「T6'」 — 4 를 빼고 PASS, 수치는 README §2f-7 표): primary 노드 전원 차단
+  77~79초(keepalive 없는 클라이언트 15분 52초 — 15분 가설 확인), drain 0 대 180 차이 없음(쓰기 공백 약 8~9초), apiserver 불통 약 71초 영향 없음,
+  primary 노드 NFS 정지 = 정지 + 8~22초·손실 없음(아래 📝 — 정지 동안 자동 장애조치 없음), replica 재마운트 42초 영향 없음, fsync 비교(대표성 없음).
+  dms-controller 는 DB 를 잃으면 재시작해 DB 복귀 약 16초 뒤 붙었다.
+- 📝 **primary 노드의 스토리지만 멈추면 자동 장애조치가 막힌다**(T6' 4 — 설명된 편차): CNPG 는 57초에 「initiating a failover」였지만 옛 primary 가
+  멈추기를 기다려 정지 동안 승격하지 않았다(스토리지가 돌아오면 쌓인 커밋 flush → 새 primary +8초). 길어지면 사람이 그 노드를 전원 차단으로 확정해
+  노드 사망 경로로 넘긴다(README §2f-7) — **그 「정지 중 전원 차단」 경로는 시험하지 않았다**(전원 차단 뒤 쌓였던 커밋·pg_rewind 양상 미확인).
+  경보 후보: Cluster 가 failover 시작 뒤 N초 넘게 새 primary 없음.
+- 📝 **CNPG 오퍼레이터 두 레플리카가 노드 장애 뒤 한 노드에 모일 수 있다**(T6' 뒤 둘 다 w2 — preferred anti-affinity 는 스케줄 때만 보고 다시
+  펼치지 않는다; 메인 세션이 손으로 w1·w2 로 펼쳤다). 애드온 패치에 `topologySpreadConstraints`(`kubernetes.io/hostname`, maxSkew 1)를 둘지 검토 —
+  이것도 스케줄 때만이라 `DoNotSchedule` 면 노드가 돌아올 때까지 둘째가 Pending(그동안 1개), `ScheduleAnyway` 면 지금과 같다. 리더 선출이라 한
+  노드에 모여도 동작은 하고, 그 노드가 죽으면 웹훅(9443)·리컨사일이 재스케줄까지 빈다.
+- 📝 **`smartShutdownTimeout` 의 「switchover 없는 종료」 경로는 시험하지 않았다**(T6' 2) — drain 은 CNPG switchover 를 거쳐 0 대 180 이 같았다. 180 이
+  의미 있는 경우(primary 파드가 switchover 없이 종료 — 예: 노드 셧다운·kubelet 축출)는 미실증. 렌더 값은 0 그대로.
 - ~~**T7(앱 DB 이관)**~~ — **해소**(2026-11-03 사용자 승인, CHANGELOG ⑤ 「T7」 — 앱 정지 창 3분 29초, 테이블 37·행 42,951·시퀀스 7 일치; 순서는 README
   §2f-2 「이관 순서」). 실증 검토에서 고친 것: `set-url` 이 되돌림 URL 을 덮던 결함(a22cb32). 남은 것:
   - 📝 **pkg-01 외부 PG(`dmsdb_k8s`) 정리 시점** — 결정 대기. 지금은 되돌림용이다(`dms-secrets-prev` → `restore-url`; 이관 뒤 쓰기는 거기 없다).
@@ -460,7 +470,7 @@ CHANGELOG 「⑤ DB(CNPG)」, 설계 v6 6·8-1(S2·S9·S10·S12)·8-2·10 T6/T6'
   **B1** SQLSTATE 25006(read-only transaction) 처리·readyz 쓰기 확인(우선순위 낮음 — `target_session_attrs=read-write` 는 새 연결만 거른다(추정:
   switchover 뒤 옛 primary 에 남은 연결)), B2·B6 선택, B5 보류.
 - 🔧 **런북 위치** — T6 실행 런북은 메인 세션의 작업 노트(저장소 밖)다. 실증이 끝나면 확정된 명령을 deploy/README §2f-8 에 옮긴다(2026-11-03:
-  T7 이관 순서·대조 SQL 은 §2f-2·§2f-5 에 옮겼다 — T6 전체 런북은 아직 작업 노트).
+  T7 이관 순서·대조 SQL 은 §2f-2·§2f-5 에, T6' 수치·스토리지 정지 대응·durable 쓰기 측정은 §2f-7 에 옮겼다 — T6·T6' 전체 런북은 아직 작업 노트).
 - 📝 **testbed-k8s 의 api·controller 는 워커에 남는다**(설계 10 — cp1 메모리) — prod 의 마스터 배치(`patch-placement.yaml`)는 테스트베드에서
   실증되지 않는다(테스트베드로 증명할 수 없는 것: 마스터 1대 장애·실제 마스터 3대의 PG anti-affinity).
 

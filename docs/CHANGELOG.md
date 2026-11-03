@@ -343,7 +343,7 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
 - **남은 것**: 테스트베드 영구 컷오버(haproxy 를 testbed IaC 의 관리 서비스로 — 그 전까지 사용자 경로는 ingress-nginx), testbed IaC 인계 — BACKLOG
   「⑥ 입구 후속」. 설치기 연결(S8 감지·MetalLB/ingress 게이트 삭제)은 ⑦ 에서 끝났다.
 
-### ✅ ⑤ DB(CNPG) — CloudNativePG 1.30.1 애드온 층·정적 hostPath PV 풀·Cluster dms-pg·pg_dump·경로 프로브·prod 제어면 마스터 배치 — **완료·실증**(2026-11-03, T6·T7 — 테스트베드 DMS 가 CNPG 위에서 돈다; T6' 장애 시험은 별도)
+### ✅ ⑤ DB(CNPG) — CloudNativePG 1.30.1 애드온 층·정적 hostPath PV 풀·Cluster dms-pg·pg_dump·경로 프로브·prod 제어면 마스터 배치 — **완료·실증**(2026-11-03, T6·T7·T6')
 
 설계 v6(`docs/history/specs/2026-11-03-dms-k8s-prod-design.md`) 6(6-1~6-6)·#24~#36·#40·2-1/2-2·3-1·8-1(S-1·S2·S9·S10)·8-2(CNPG 행·A 경로·층 배치)·
 9절 ⑤·10 T6/T6'/T7·12 위험(#3·#4·#23~#25·#29). 런북은 deploy/README §2f. **DMS 애플리케이션 코드는 바꾸지 않았다**(6-3 — 접속 문자열만, `connect_timeout`
@@ -431,7 +431,7 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   `wait --for=condition=complete`(Failed 에서도 시간 초과까지 기다림) 대신 Complete·Failed 를 함께 보는 루프. §2f 의 렌더 디렉터리 변수는 `RD`
   (§2e 의 `R` = …/platform 과 섞이면 경로가 틀렸다). Cluster 주석의 이관 절 참조(§2f-6 → §2f-5).
 - **테스트베드**: T6(push → 오퍼레이터 → 9443 dry-run → SC/PV → 사전 검사 → Cluster → 폴링 → 경로 대조 → CronJob·첫 덤프 → 확인 항목)·T7 은 메인
-  세션이 했다(아래 — T7 은 사용자 승인 뒤). T6'(장애 시험)는 남았다(BACKLOG 「⑤ DB(CNPG) 후속」).
+  세션이 했다(아래 — T7·T6' 는 사용자 승인 뒤).
 - **T6 실증(2026-11-03, dmsk8s — 전 항목 PASS)**:
   - airgap: CNPG·PG 파드 이미지 전부 `10.112.0.50:5000/…@sha256`(ghcr.io 0건). 오퍼레이터 w1·w2(`dms-addon-critical`), 웹훅 9443 — Cluster CR
     server dry-run 통과.
@@ -461,6 +461,27 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
     외부 DB URL 이 사라졌다. 옛 값이 이 클러스터 `-rw` 면 prev 를 그대로 두고, prev 에 다른 외부 URL 이 있으면 `--overwrite-prev` 없이는 멈춘다).
   - 테스트베드 용량: ⑤ 뒤 워커마다 +200m(PG 인스턴스 100m + 오퍼레이터 100m) — dms-controller 위치에 따라 2노드 dscan gang(워커 1000m +
     launcher 100m)이 5m 모자라 대기 → testbed `PG_CPU_REQUEST` 100m → 50m(values.env, 계약 테스트 값 갱신).
+- **T6' — 장애·성능(2026-11-03, dmsk8s, 앱이 `dms-pg` 위에서 — 4 를 빼고 PASS, 4 는 설명된 편차)**:
+  1. **primary 노드 전원 차단**(`virsh destroy k8s-w1`): 노드 unreachable +4초 → 장애조치 시작 +7초 → 새 primary +25초 → rw 전환 +30초 — 전원 차단부터
+     **77~79초**. keepalive 클라이언트 공백 79초(`tcp_user_timeout` 15초로 16초에 감지), **keepalive 없는 클라이언트는 ETIMEDOUT 까지 15분 52초**(약 15분
+     가설 확인 — 6-3 URL 의 keepalive·`tcp_user_timeout` 이 필요한 이유). 앱(VIP `/readyz`) 78초 불가(처음 약 30초는 매달림, 뒤는 ingress 503), rw 전환
+     2초 뒤 복귀. dms-controller 는 DB 를 잃으면 exit 1 → 재시작(DB 복귀 약 16초 뒤). 복구: `virsh start` 35초 뒤 노드 Ready, 옛 primary 는 pg_rewind
+     (630MB)로 재합류 → 약 2분에 3/3. 꺼진 노드의 파드는 Terminating 그대로 뒀다(강제 삭제 없음 — 6-6).
+  2. **drain `smartShutdownTimeout` 0 대 180**: 같다 — drain 12초, 앱 503 5.0초 대 4.0초, 쓰기 공백 약 8초 대 약 9초, uncordon 뒤 3/3 약 12초 대 약 11초.
+     drain 은 CNPG switchover 를 거치므로 smart 대기가 쓰이지 않는다(180 은 switchover 없는 종료에서만 — 시험 안 함). 렌더 값 0 으로 원복. promote
+     5회 모두 앱 503 5~6초.
+  3. **apiserver 불통 약 71초**: PG 쓰기 공백 0, 앱 5xx 0, PG 파드 재시작 없음. 오퍼레이터 leader·kcm·scheduler·cilium-operator·csi-nfs-controller·
+     envoy-gateway 재시작(lease 상실 — 정상).
+  4. **primary 노드의 NFS 정지**(호스트 iptables DROP 93초, 자동 해제 타이머를 먼저 걸고): durable 쓰기(`pg_logical_emit_message(true, …)`)가 즉시 멈춤.
+     CNPG 는 27초에 primary NotReady, 57초에 「initiating a failover」였지만 **정지 동안 장애조치는 끝나지 않았다**(옛 primary 가 멈추기를 기다린다).
+     해제 뒤 옛 primary 에 쌓인 커밋이 flush → 새 primary +8초, 3/3 +23초. 앱은 정지 31초째부터 해제 14초 뒤까지 76초 불가, D 상태 프로세스 최대
+     10개(5초 안에 해소), 데이터 손실 없음(두 회차 모두 「no rewind required」). 운영 의미: primary 노드의 스토리지만 멈추면 자동 장애조치가 막힌다 —
+     길어지면 사람이 조치한다(예: 그 노드 전원 차단 → 1 의 경로, 시험 안 함). 1회차 측정은 무효였다(`txid_current()`·`select now()` 표본은 durable WAL
+     쓰기를 하지 않는다) — 런북은 `pg_logical_emit_message(true, …)` 로 잰다.
+  5. **replica 노드 재마운트 절차**(3-2 G2 보충): umount·mount 성공, 3/3 42초, 앱 오류 0.
+  6. **fsync 공용 NFS 대 로컬 emptyDir**(w1): fdatasync 328 대 319 ops/s(≈3ms), fsync 310 대 159 — 둘 다 같은 호스트 디스크 위라 prod 스토리지를
+     대표하지 않는다.
+  - 뒤: CNPG 오퍼레이터 두 레플리카가 모두 w2 에 남았다(preferred anti-affinity 는 다시 펼치지 않는다) → 메인 세션이 w1·w2 로 다시 펼쳤다(BACKLOG).
 
 ### ✅ ④ 클러스터 내 레지스트리 — Distribution v3.1.2 플랫폼 층·렌더러 일반화·images.lock·가드 — **완료·실증**(2026-11-03, d19 — 앱 전환)
 
