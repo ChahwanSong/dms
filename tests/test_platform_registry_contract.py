@@ -133,6 +133,7 @@ def test_config_is_the_designed_distribution_config():
     assert flat["storage.maintenance.readonly.enabled"] == "false"
     assert flat["http.addr"] == ":5000"
     assert flat["health.storagedriver.enabled"] == "true"
+    assert flat["http.draintimeout"] == "20s"     # 종료 drain(T4 실측: 없으면 SIGTERM 에 exit 2)
     # cache 없음(GC 뒤 낡은 「있음」), 디버그 서버 없음(이미지 기본 :5001 을 덮는다), 비밀·TLS·인증 없음(평문·익명 — 설계 7-2).
     for key in flat:
         low = key.lower()
@@ -843,3 +844,15 @@ def test_testbed_switch_must_move_the_builder_too(tmp_path):
     _switch_overlay(_tree(tmp_path), "pkg-01:5000")
     r, out = _render(tmp_path, "testbed-k8s", _testbed_values(REGISTRY_MODE="in-cluster", REGISTRY="10.112.0.50:5000"))
     _assert_failed(r, out, "DMS_BUILD_BUILDER_IMAGE")
+
+
+def test_registry_drains_within_the_grace_period():
+    # T4(2026-11-03): draintimeout 이 없으면 SIGTERM 에 곧바로 exit 2 — 진행 중 블롭 전송이 끊긴다. preStop(엔드포인트 전파) + drain 이
+    # terminationGracePeriodSeconds 안에 끝나야 SIGKILL 로 다시 끊기지 않는다.
+    flat = _flat_yaml((REGISTRY_BASE / "config.yml").read_text(encoding="utf-8"))
+    drain = int(flat["http.draintimeout"].rstrip("s"))
+    dep = (REGISTRY_BASE / "deployment.yaml").read_text(encoding="utf-8")
+    grace = int(re.search(r"(?m)^\s*terminationGracePeriodSeconds: (\d+)$", dep).group(1))
+    m = re.search(r'(?m)^\s*command: \["/bin/sh", "-c", "sleep (\d+)"\]$', dep)
+    assert m, "registry preStop sleep 없음"
+    assert int(m.group(1)) + drain < grace, (m.group(1), drain, grace)

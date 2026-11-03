@@ -14,7 +14,8 @@
 #   빈 로컬 디렉터리를 만들어 레지스트리가 조용히 로컬 디스크에 쓴다.
 # 이미지: <REG>/registry:3.1.2 **태그 ref**(설계 7-5 — digest 고정의 문서화된 예외). 레지스트리 자기 이미지는 이 레지스트리에 기대지
 #   않는다(7-4 의존 규칙): 마스터마다 oci-archive 로 containers-storage 에 넣고 CRI-O pinned_images 로 고정한다(S0-5,
-#   /etc/crio/crio.conf.d/99-dms-pinned.conf). 반입본의 digest 가 레지스트리 digest 와 같은지는 실증되지 않아 태그로 가리킨다.
+#   /etc/crio/crio.conf.d/99-dms-pinned.conf). 반입본 digest == 레지스트리 digest == lock 은 T4(2026-11-03)에서 실증했지만, 반입·업그레이드 순서를 단순하게
+#   두려고 태그로 가리킨다.
 #   IfNotPresent(init·본 컨테이너 둘 다): 노드에 고정된 사본을 쓴다(Always 면 레지스트리가 내려간 동안 자기 자신을 못 띄운다 — 자기
 #   이미지를 자기에게서 pull 하는 교착). 태그는 deploy/images.lock 의 registry 항목·라벨 dms.io/addon-version 과 같아야 한다(테스트가 고정).
 # 라벨(설계 8-2 A): managed-by dms-install + dms.io/addon-version(설치된 Distribution 버전 — ⑦ 감지기가 이 Deployment 에서 읽어
@@ -154,12 +155,19 @@ spec:
                 secretKeyRef:
                   name: dms-registry-http
                   key: http-secret
+          # preStop(2026-11-03 T4): 파드 삭제와 엔드포인트 제거는 동시에 일어나 kube-proxy 가 잠깐 옛 파드로 새 연결을 보낸다 — 5초 동안
+          # 리스너를 열어 둔 뒤 SIGTERM → config.yml http.draintimeout(20s) 동안 진행 중 요청을 마친다. 합 25s < grace 30s.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 5"]
           ports:
             - name: http
               containerPort: 5000
               protocol: TCP
           # readiness = 저장소를 실제로 만지는 GET /v2/_catalog?n=1. /v2/ 는 저장소 health 검사가 타임아웃 없이 동기로 돌아 공용 스토리지가
-          # 멈춰도(I/O 대기, G8) 200 을 준다(app.go·health.go) — 그래서 readiness 로 쓰지 않는다. 빈 레지스트리에서 200 인지는 T4 확인 항목.
+          # 멈춰도(I/O 대기, G8) 200 을 준다(app.go·health.go) — 그래서 readiness 로 쓰지 않는다. 빈 레지스트리에서도 200({"repositories":[]},
+          # T4 2026-11-03 3노드 실측).
           readinessProbe:
             httpGet:
               path: /v2/_catalog?n=1

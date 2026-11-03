@@ -31,6 +31,9 @@ storage:
       enabled: false
 http:
   addr: :5000
+  # 종료 drain(2026-11-03 T4): 없으면 SIGTERM 에 곧바로 exit 2 로 끝나 진행 중인 큰 블롭 push·pull 이 끊겼다(롤링·GC 토글 때 실측).
+  # deployment.yaml 의 preStop sleep 5 + 이 값 < terminationGracePeriodSeconds 30(테스트가 고정).
+  draintimeout: 20s
   headers:
     X-Content-Type-Options: [nosniff]
 health:
