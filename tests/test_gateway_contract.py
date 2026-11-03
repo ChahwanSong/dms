@@ -551,3 +551,10 @@ def test_runbook_applies_the_addon_priorityclass_for_external_sites():
     assert ("kubectl --context C get priorityclass dms-addon-critical || kubectl --context C apply --server-side "
             "--field-manager=dms-install -k $RD/platform/priorityclass") in sec
     assert "REGISTRY_MODE=external" in sec and "ADDON_REGISTRY" in sec
+
+
+
+def test_envoy_prometheus_stats_listener_is_off():
+    # 커밋 보안 리뷰(2026-11-03): hostNetwork Envoy 의 stats(:19001)는 마스터 호스트 전 인터페이스에 열린다 — 쓰지 않으니 끈다.
+    text = (REPO_ROOT / "deploy" / "platform" / "gateway" / "envoyproxy.yaml").read_text(encoding="utf-8")
+    assert re.search(r"(?m)^    metrics:\n      prometheus:\n        disable: true$", text)

@@ -93,6 +93,12 @@ spec:
                       image: set-by-overlay.invalid/gateway:v1.9.3
                       imagePullPolicy: IfNotPresent
   telemetry:
+    # prometheus stats 리스너(:19001) 끔(2026-11-03 커밋 보안 리뷰): hostNetwork 라 마스터 호스트의 모든 인터페이스에 열린다 — DMS 는
+    # 이 지표를 쓰지 않는다. 남는 :19003(readiness — kubelet 이 노드 자신에서 probe)·:19002(shutdown-manager — /shutdown/ready 대기 GET
+    # 뿐, drain 은 envoy 컨테이너의 localhost admin :19000)은 마스터 방화벽에서 노드 밖을 막는다(deploy/README §2g, 설계 4-2: :443 만 SE 대역).
+    metrics:
+      prometheus:
+        disable: true
     accessLog:
       settings:
         - format:
