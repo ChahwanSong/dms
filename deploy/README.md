@@ -411,7 +411,8 @@ python3 deploy/shared-storage-probe.py --context <ctx> --overlay deploy/overlays
 2. **S0**: 한 노드에서 `sh deploy/shared-dir-init.sh <SHARED_DIR>` → 다른 노드에서 `--check` 가 PASS(같은 센티널 값).
 3. **S7**: `shared-storage-probe.py` 가 0(또는 3 WARN)이어야 진행한다. 1·4 면 멈추고 원인을 고친다.
 4. **옛 base 복사(소유 보존)**: 한 노드에서 root 로 `rsync -aH --numeric-ids <옛 base>/ <SHARED_DIR>/dms/artifacts/`(rsync 가 없으면
-   `cp -a <옛 base>/. <SHARED_DIR>/dms/artifacts/`). 대조: 두 쪽에서 `find . -printf '%p %U:%G %m %s\n' | sort | md5sum` 이 같고, 새
+   `cp -a <옛 base>/. <SHARED_DIR>/dms/artifacts/`). 대조: 두 쪽에서 `{ find . -type d -printf '%p d %U:%G %m\n'; find . ! -type d -printf '%p %y %U:%G %m %s\n'; } | sort | md5sum`
+   이 같고(디렉터리 크기는 뺀다 — CephFS 는 디렉터리 크기를 하위 바이트 합계로 보고해 늘 다르다, 2026-11-03 T3 실측), 새
    base 가 `root:root 755`. `-A`·`-X` 는 쓰지 않는다(NFS 4.2 가 xattr 을 지원하지 않을 수 있고, base 에는 원래 ACL 이 없어야 한다 — §2b-1).
 5. **적용**: `sh deploy/overlays/guard-images.sh <overlay> --context <ctx>` → 기대 exit 5(라이브 hostPath → 새 경로를 찍는다; 오버레이
    태그가 라이브와도 다르면 3 이 먼저다 — 그때는 `ALLOW_IMAGE_CHANGE=1` 도). `ALLOW_HOSTPATH_CHANGE=1` 로 다시 통과시킨 뒤 평소 적용
@@ -464,7 +465,7 @@ python3 deploy/shared-storage-probe.py --context dmsk8s --overlay deploy/overlay
 #    (k8s-w1 에서 `sudo ls -la /cephfs/dms | grep -c '\.probe-'` = 0 — 프로브가 CephFS 에도 흔적을 남기지 않는다)
 # 3. 옛 base 복사 — k8s-w1 에서 root 로, 소유 보존 + 대조
 sudo rsync -aH --numeric-ids /cephfs/dms/artifacts/ /dms_shared/dms/artifacts/
-sudo sh -c 'cd /cephfs/dms/artifacts && find . -printf "%p %U:%G %m %s\n" | sort | md5sum; cd /dms_shared/dms/artifacts && find . -printf "%p %U:%G %m %s\n" | sort | md5sum'   # 같음
+sudo sh -c 'for b in /cephfs/dms/artifacts /dms_shared/dms/artifacts; do cd $b && { find . -type d -printf "%p d %U:%G %m\n"; find . ! -type d -printf "%p %y %U:%G %m %s\n"; } | sort | md5sum; done'   # 같음(디렉터리 크기 제외 — CephFS 디렉터리 크기 = rbytes)
 stat -c '%U:%G %a' /dms_shared/dms/artifacts                                                                                 # root:root 755
 # 4. 적용 — §13-6 순서 그대로, 가드만 플래그로 연다(오버레이 태그가 라이브와 다르면 ALLOW_IMAGE_CHANGE=1 도)
 kubectl --context dmsk8s -n dms delete job dms-migrate --ignore-not-found
