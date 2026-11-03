@@ -482,8 +482,14 @@ kubectl --context dmsk8s -n dms get cm dms-config \
 # 5~7. DB base 재저장(출처가 db 였을 때) → 3홉·「DMS 상태 디렉터리」 /dms_shared/dms·겹침 경고 없음 → 2d-4 의 7 확인
 ```
 
-- 선택 음성 대조(설계 T3 — 별도 export 가 필요해 위 명령에는 없다): root_squash export → S7 FAIL, 같은 export 를
-  `nosharecache,lookupcache=all` 로 붙인 별도 경로 → ② WARN(①③④⑤⑥ 은 PASS).
+- 선택 음성 대조(설계 T3 — 별도 export·임시 마운트가 필요해 위 명령에는 없다, 2026-11-03 실측):
+  - root_squash export → S7 **FAIL**(exit 1) — 3노드 모두 ③ G4 「root 소유 변경(squash) … export 에 no_root_squash」.
+  - 같은 export 를 `nosharecache,lookupcache=all`(+`nocto`·60초 속성 캐시까지) 로 붙인 별도 경로 → **PASS**. 설계는 ② WARN 을
+    기대했지만(추정) 이 커널(6.8)은 디렉터리가 바뀌면 부정 dentry 를 다시 확인해, 노드 셸 직접 측정에서도 다른 노드가 만든 새 이름이
+    즉시(0.001초) 보였다 — ② 는 동작 판정이라 PASS 가 맞다(WARN 경로는 단위 테스트가 고정). 이 대조에서 찾은 프로브 결함(새 이름과
+    rename 교체를 한 루프에서 봐 교체 쪽 LOOKUP 이 부정 dentry 를 무효로 만듦)은 고쳤다 — 이제 차례로 본다.
+  - `SHARED_DIR=/cephfs` → **FAIL**(cp1 「마운트 없음」, w1·w2 「센티널 없음」), CephFS 위 `.probe-*` 잔여 0. S0 를 cp1 의 `/cephfs` 로
+    돌리면 rc=1 이고 아무것도 만들지 않는다.
 - **되돌림**: `values.env` 의 `SHARED_DIR=/cephfs` 와 `patch-config.yaml` 의 base `file:///cephfs/dms/artifacts`(→ hostPath `/cephfs/dms/artifacts`)로 함께 고치고,
   `tests/test_shared_dir_contract.py::test_testbed_values_env_carries_a_valid_shared_dir_matching_the_overlay_base` 의 기대값(`/dms_shared`)도
   고친 뒤 `ALLOW_HOSTPATH_CHANGE=1` 로 적용, 출처가 db 였으면 다시 저장한다. 그 배치에서는 `cephfs-dms`(`/cephfs`)가 상태 디렉터리

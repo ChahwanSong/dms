@@ -264,16 +264,18 @@ def op_put(base, probe, name, content):
     replace_file(pdir(base, probe), name, content.encode())
     out(ok=True)
 
+# 부정 조회(stat new)는 **마지막**에 한다(2026-11-03): 앞에 두면 뒤의 readdir·old 읽기가 디렉터리 속성을 새로 고쳐 막 만든 부정
+# dentry 를 A 가 쓰기도 전에 무효로 만들 수 있다(op_g3_check 주석과 같은 원인).
 def op_g3_prime(base, probe, new, old, old_content, retry):
     d = pdir(base, probe)
+    os.listdir(d)
+    ok, err = wait_until(time.monotonic() + float(retry),
+                         lambda: read_fd(os.path.join(d, old))[1] == old_content.encode())
     negative = False
     try:
         os.stat(os.path.join(d, new))
     except OSError as exc:
         negative = exc.errno == errno.ENOENT
-    os.listdir(d)
-    ok, err = wait_until(time.monotonic() + float(retry),
-                         lambda: read_fd(os.path.join(d, old))[1] == old_content.encode())
     out(negative=negative, old_ok=ok, error=err)
 
 def op_g3_write(base, probe, new, new_content, old, replacement):
@@ -282,28 +284,31 @@ def op_g3_write(base, probe, new, new_content, old, replacement):
     replace_file(d, old, replacement.encode())
     out(ok=True)
 
+# 새 이름과 rename 교체를 **차례로** 본다(2026-11-03 T3 음성 대조): 한 루프에 섞으면 rename 교체 쪽 open 의 LOOKUP 응답이 부모
+# 디렉터리 change 속성을 새로 고쳐 새 이름의 부정 dentry 가 곧바로 무효가 된다 -- lookupcache=all·nosharecache 마운트가 50ms 만에
+# 「보임」으로 나와 ② WARN 을 놓쳤다(dmsk8s 실측). 새 이름 루프는 그 이름의 stat 만 하고(보인 뒤에 open·readdir), 창은 각자 1초다.
 def op_g3_check(base, probe, new, new_content, old, replacement, window):
     d = pdir(base, probe)
-    t0 = time.monotonic()
-    deadline = t0 + float(window)
-    res = {"new": None, "repl": None}
     def new_ok():
         os.stat(os.path.join(d, new))
         return read_fd(os.path.join(d, new))[1] == new_content.encode() and new in os.listdir(d)
     def repl_ok():
         return read_fd(os.path.join(d, old))[1] == replacement.encode()
-    while True:
-        for key, fn in (("new", new_ok), ("repl", repl_ok)):
-            if res[key] is None:
-                try:
-                    if fn():
-                        res[key] = round(time.monotonic() - t0, 3)
-                except OSError:
-                    pass
-        if all(v is not None for v in res.values()) or time.monotonic() >= deadline:
-            break
-        time.sleep(0.05)
-    out(new_ok=res["new"] is not None, repl_ok=res["repl"] is not None, new_at=res["new"], repl_at=res["repl"])
+    def within(fn):
+        t0 = time.monotonic()
+        deadline = t0 + float(window)
+        while True:
+            try:
+                if fn():
+                    return round(time.monotonic() - t0, 3)
+            except OSError:
+                pass
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(0.05)
+    new_at = within(new_ok)
+    repl_at = within(repl_ok)
+    out(new_ok=new_at is not None, repl_ok=repl_at is not None, new_at=new_at, repl_at=repl_at)
 
 def op_owner(base, probe, tag):
     d = pdir(base, probe)
