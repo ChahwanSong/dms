@@ -54,6 +54,7 @@
 #         소스 ab8f02b; 이미지 3종 + 잡 이미지).
 #   d17 = ① B3 잡 객체 채택·회수 + ② 로그인·식별(아이디 기준 상한·보호 장치·관리자 구제·보안 이벤트 화면)(2026-11-03, 소스 99eebd4; 이미지 3종 + 잡 이미지).
 #   d18 = ① B3 + ② 로그인·식별 실증 반영 + ③ 공용 디렉터리(SHARED_DIR) — 아티팩트 hostPath /dms_shared/dms/artifacts(T3), S7 ② 순차 확인, 보안 이벤트 375 쌓기 (b68d50a)
+#   d19 = ④ 클러스터 내 레지스트리(10.112.0.50:5000) 첫 포탈 빌드 — 레지스트리 drain·포탈 이미지 삭제 보호(DB 잡 이미지·digest 공유) (01fd922)
 #   태그 bump = 아래 newTag(+ patch-config.yaml 의 DMS_JOB_IMAGE) 커밋 — **dms-k8s 에서만** 한다(2026-10-22 브랜치 분리 뒤
 #   빌드 소스는 /home/mason/dms-dev/dms-k8s 체크아웃 = origin/dms-k8s, main 은 이 클러스터와 무관).
 #   ssc 클러스터의 오버레이(overlays/testbed)는 dms-ssc 브랜치에만 있다(2026-10-26 이 브랜치에서 지웠다 — 체리픽 충돌·엉뚱한 태그 방지).
@@ -83,10 +84,10 @@ resources:
 images:
   - name: set-by-overlay.invalid/dms
     newName: 10.112.0.50:5000/dms
-    newTag: d18
+    newTag: d19
   - name: set-by-overlay.invalid/dms-agent
     newName: 10.112.0.50:5000/dms-agent
-    newTag: d18
+    newTag: d19
 
 patches:
   - path: patch-config.yaml
