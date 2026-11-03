@@ -186,7 +186,7 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
-### ✅ ⑥ 입구(Envoy Gateway) — Gateway API v1.6.1 standard·EG v1.9.3 애드온 층·DMS Gateway/HTTPRoute/정책/EnvoyProxy·prod 의 Ingress·MetalLB 삭제 — **구현·검증**(2026-11-03, 테스트베드 T8 실증 대기)
+### ✅ ⑥ 입구(Envoy Gateway) — Gateway API v1.6.1 standard·EG v1.9.3 애드온 층·DMS Gateway/HTTPRoute/정책/EnvoyProxy·prod 의 Ingress·MetalLB 삭제 — **완료·실증**(2026-11-03, T8 — 테스트베드는 병행 설치·컷오버 시험 뒤 원복; 영구 컷오버는 testbed IaC)
 
 설계 v6(`docs/history/specs/2026-11-03-dms-k8s-prod-design.md`) #5·#13~#15(「#14 EG 기본값 세부」)·#22·#42·2-1/2-2(Envoy·EG 컨트롤러 행)·4-2·4-3·
 5 「원 IP 기록」·8-1(S0-5·S1·S8·S11·S12·「순서의 이유」)·8-2(Gateway API·EG 행)·9절 ⑥·10 T8·12 위험(#12·#15·#16·#19). 런북은 deploy/README §2g.
@@ -255,8 +255,30 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   (gateway·envoy 포함)를 REGISTRY 로 push, §2g-3 의 PriorityClass 를 `get … || apply` 로(§2f-3 과 같게), 증상 표에 레지스트리 주소 ErrImagePull(prod
   README 3b·3c 도). ⑤ 테스트베드 컷오버 순서 — haproxy 를 먼저 bind 하고 DNAT 를 뺀다(되돌림은 DNAT 먼저), host-net 재시작이 ssc 릴레이도 잠깐 끊는다,
   `status` 는 `/etc/default` 를 읽지 않는다(README §2g-7). 테스트 2개: §2g 의 Envoy 로그 명령이 라벨 셀렉터인지, A 경로의 PriorityClass `get || apply`.
-- **남은 것**: 테스트베드 T8(cp1 sysctl·이미지 push·A 경로 설치·haproxy `send-proxy-v2` 로 비 root 443·xDS·413·15초+·PROXY optional/필수·X-Real-IP·
-  원 IP), 설치기 연결(S8 감지·MetalLB/ingress 게이트 삭제 — ⑦), 테스트베드 컷오버(별도 승인) — BACKLOG 「⑥ 입구 후속」.
+- **T8 실증(2026-11-03, dmsk8s — 병행, 전 항목 PASS)**:
+  - 설치(A 경로): cp1 sysctl `ip_unprivileged_port_start` 1024 → 443(노드 변경은 그 키 하나), Gateway API v1.6.1 CRD 10개, EG v1.9.3(컨트롤러 w1·
+    `dms-addon-critical`·이미지 전부 `10.112.0.50:5000/…@sha256` — docker.io pull 0건), Gateway `Programmed`. Envoy uid 65532 가 cp1 `0.0.0.0:443`
+    bind, `ClusterFirstWithHostNet` 으로 xDS(`envoy-gateway.envoy-gateway-system.svc.cluster.local.`), `--disable-hot-restart`(cilium-envoy 재시작 0).
+  - luminous haproxy(`send-proxy-v2` — Avi VS-443 흉내) 경유: 포탈 200·로그인, HSTS 없음. 원 IP — 앱 이벤트 `client_ip` = PROXY 출발지, 위조
+    X-Real-IP·XFF 무시(앱에 닿은 요청을 tcpdump — `x-real-ip` 0건). 21MiB 413·19MiB 통과(422 — 앱이 본문까지 처리), 3600s 라우트(느린 다운로드
+    20.9초 200), PROXY 필수에서 직접 연결 거부·optional 에서 허용, 80 연결 거부.
+  - 컷오버 시험: luminous :8443 의 DNAT 4줄(nat PREROUTING·OUTPUT)을 빼 → haproxy → Envoy, LAN·Tailscale 로그인 200, 원 IP 가 실제 PC(옛 경로는
+    MASQUERADE 라 10.10.10.1) → 원복(규칙 바이트 동일). 테스트베드 사용자 경로는 ingress-nginx·MetalLB 그대로이고 EG 는 병행(PROXY 필수)으로 남는다.
+  - 고친 것(3fd7da9): envoy preStop `httpGet.host: 127.0.0.1` — EG 기본 preStop(host 없음)은 hostNetwork 파드에서 kubelet 이 「failed to find
+    networking container」로 실패해 envoy 가 드레인 없이 SIGTERM, shutdown-manager 가 60초 기다려 롤링마다 약 61초 공백(maxSurge 0) → 1.44초.
+    Envoy DS `priorityClassName: dms-addon-critical`(없어서 cp1 메모리 압박 때 축출 1순위였다). 접근 로그의 빈 `sni` 필드 제거(hostname 없는
+    리스너라 늘 null — 33/33줄).
+  - :19001 stats 끔(bd53e9b, 커밋 보안 리뷰): 끄기 전 `0.0.0.0:19001` 이 열려 다른 노드에서 지표 약 1758줄을 읽었다 → 끈 뒤 LISTEN 없음, Gateway
+    Programmed 그대로.
+  - EG watch = ns dms(79ed341, 백그라운드 보안 리뷰): 모든 네임스페이스를 보면 다른 네임스페이스의 Gateway + EnvoyProxy 패치(EnvoyProxyPatch 가
+    켜져 있다)로 PSA privileged 인 `envoy-gateway-system` 에 임의의 특권 파드(hostPath·privileged)를 띄울 수 있었다. 라이브: ns default 의 class `dms`
+    Gateway 는 조건 `Unknown` 그대로·프록시 생성 없음, DMS Gateway Accepted·Programmed, VIP 경유 포탈 200. 남이 설치한 EG(C)는 건드리지 않는다(설계 8-2).
+  - 용량: EG·GW API CRD 스키마(2.04MB — 클러스터 CRD 스키마의 55%)로 kube-apiserver RSS ≈1GB → 2.5GiB cp1 이 MemoryPressure(speaker 축출 반복) →
+    DB primary 를 cp1 밖으로 먼저 옮기고(switchover 7초) cp1 4GiB 로 증설(virsh). testbed IaC(tfvars `memory_mb` 4096·cp1 sysctl drop-in)는 작업
+    사본 패치로 인계 대기.
+  - 테스트: `test_gateway_contract.py` 추가 2(stats 끔 · preStop host·우선순위·sni 없음), 갱신 1(EG 설정 watch = ns dms).
+- **남은 것**: 테스트베드 영구 컷오버(haproxy 를 testbed IaC 의 관리 서비스로 — 그 전까지 사용자 경로는 ingress-nginx), testbed IaC 인계 — BACKLOG
+  「⑥ 입구 후속」. 설치기 연결(S8 감지·MetalLB/ingress 게이트 삭제)은 ⑦ 에서 끝났다.
 
 ### ✅ ⑤ DB(CNPG) — CloudNativePG 1.30.1 애드온 층·정적 hostPath PV 풀·Cluster dms-pg·pg_dump·경로 프로브·prod 제어면 마스터 배치 — **완료·실증**(2026-11-03, T6·T7 — 테스트베드 DMS 가 CNPG 위에서 돈다; T6' 장애 시험은 별도)
 

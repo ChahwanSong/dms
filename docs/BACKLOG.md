@@ -476,19 +476,28 @@ CHANGELOG 「⑥ 입구(Envoy Gateway)」, 설계 v6 #13~#15·4-3·8-1(S0-5·S8�
   를 읽는다), C 면 platform/gateway 만. TLS 게이트는 `render.env` 의 `PORTAL_TLS_SECRET`(존재·kubernetes.io/tls). S12 verify 는 마스터마다 :443·
   `--resolve <PORTAL_DOMAIN>:443:<PORTAL_VIP>` readyz·「80 불가 = 정상」. `--upgrade-addon envoy-gateway` 는 certgen Job 을 지운 뒤 가드를 열고 SSA.
   남은 것(아래 「⑦ 설치기 후속」): 클러스터 도메인 values 키, 마스터 :443·:19000~19003 비어 있음(K6)의 자동 확인, S12 의 413·15초 스트림·원 IP 검사.
-- 🔧 **테스트베드 T8 실증**(dmsk8s — 메인 세션) — 설계 10 T8: cp1 sysctl(testbed IaC) → 이미지 push(k8s-w1) → A 경로 설치 → cp1 :443 비 root bind·
-  `ClusterFirstWithHostNet` xDS → luminous haproxy(`send-proxy-v2`)로 413(21MiB)·15초+ 스트림·PROXY optional/필수·X-Real-IP 제거·원 IP(이벤트·접근
-  로그)·cilium-envoy 와 공존(`--disable-hot-restart` — 두 Envoy 모두 Running, cilium-envoy 재시작 0)·상류 유휴 4s(5초 간격 폴링에서 접근 로그
-  `UC` 0건). 결과는 실증 뒤 CHANGELOG 에 기입하고 확정 명령을 README §2g-7 에 옮긴다. 테스트베드 컷오버(호스트 릴레이 :8443 → haproxy, MetalLB 는
-  되돌림용)는 별도 승인(README §2g-7).
-- 📝 **T8 확인 대기(추정으로 둔 것)** — EG v1.9.3 이 Gateway 쪽 `infrastructure.parametersRef`(ns dms 의 EnvoyProxy)의 DaemonSet 패치(hostNetwork·
-  dnsPolicy)를 컨트롤러 ns 의 DS 에 그대로 적용하는지(소스상 MergeWithPatch — securityContext 도 기본값 위에 strategic merge 라 root 를 막지 않는다:
-  root 금지는 DMS 계약 테스트 몫), 기본 EnvoyProxy(EG 설정 `envoyProxy`)가
-  더 구체적인 EnvoyProxy 에 통째로 대체되는지(mergeType 없음), 버퍼 필터와 `perConnectionBufferLimitBytes: 32768`(EG 기본)이 19MiB 본문을 막지 않는지
-  (버퍼 필터가 decoder 버퍼 한도를 올린다 — 막히면 CTP `connection.bufferLimit`), DaemonSet 롤링 중 그 마스터의 공백 길이.
-- 📝 **설계 ⑥ 의 선택·뒤로 미룬 것** — Envoy 접근 로그 수집처·보존(K15·보안 S2 — 지금은 stdout), Envoy stats(:19001)를 마스터 호스트에 여는 것
-  (EG 기본 — 끄려면 EnvoyProxy telemetry.metrics.prometheus.disable, 지금은 그대로), C 경로에서 남의 EG 설정이 shutdown-manager 이미지를 docker.io 로
-  두어도 DMS EnvoyProxy 가 이미지를 명시하므로 영향 없음(확인만), 전역 rate limit(EG `rateLimit`) 미사용 — 쓰게 되면 ratelimit 이미지를 lock 에.
+- ~~**테스트베드 T8 실증**~~ — **해소**(2026-11-03, CHANGELOG ⑥ 「T8 실증」 — 전 항목 PASS, 병행 설치·컷오버 시험 뒤 원복): A 경로 설치·cp1 :443
+  비 root bind·`ClusterFirstWithHostNet` xDS·cilium-envoy 공존·haproxy(`send-proxy-v2`) 경유 413/19MiB/3600s/PROXY optional·필수/X-Real-IP·XFF
+  위조 무시/원 IP·80 거부, 컷오버 시험(DNAT 4줄 → haproxy, 원 IP = 실제 PC). 실증에서 찾아 고친 것: preStop host 127.0.0.1·Envoy DS
+  `dms-addon-critical`·빈 sni 제거(3fd7da9), :19001 stats 끔(bd53e9b), EG watch = ns dms(79ed341 — 백그라운드 보안 리뷰), cp1 2.5 → 4GiB(아래 IaC).
+  확정 사항은 README §2g-1·2g-2·2g-3·2g-5·2g-6·2g-7 에 옮겼다.
+- ~~**T8 확인 대기(추정으로 둔 것)**~~ — **해소**(2026-11-03 T8 실측):
+  - parametersRef(ns dms 의 EnvoyProxy)의 DaemonSet 패치가 컨트롤러 ns 의 DS 에 그대로 적용된다 — Envoy 파드 hostNetwork·`ClusterFirstWithHostNet`·
+    `dms-addon-critical`·preStop host(securityContext 도 같은 merge 라 root 금지는 여전히 DMS 계약 테스트 몫).
+  - 기본 EnvoyProxy(EG 설정 `envoyProxy`)는 더 구체적인 DMS EnvoyProxy 에 통째로 대체된다(Envoy 파드가 DMS 의 이미지·자원·extraArgs 로 떴다).
+  - 19MiB 본문은 413 이 아니라 앱까지 간다(422 — 본문 처리) — CTP `connection.bufferLimit` 불필요.
+  - DaemonSet 롤링 공백: EG 기본 preStop(host 없음)으로 약 61초 → host 127.0.0.1 로 1.44초(3fd7da9, README §2g-6).
+- 🔧 **테스트베드 영구 컷오버**(별도 승인, README §2g-7) — haproxy 를 관리 서비스(systemd 유닛 + 설정)로 testbed IaC 에 두고(host-net 유닛 곁)
+  `HOSTNET_RELAYS` 에서 `8443=10.20.20.101:443` 을 뺀다 — T8 의 :8443 DNAT `-D`/`-I` 만으로는 시험이다(유닛 재시작·재부팅이면 되돌아간다). 그 전까지
+  테스트베드 사용자 경로는 ingress-nginx(MetalLB VIP)이고 EG 는 병행(PROXY 필수). 소크 뒤 testbed-k8s 오버레이의 Ingress·MetalLB 삭제(README §2g-7 ③).
+- 🔧 **testbed IaC**(testbed 저장소 몫) — cp1 sysctl drop-in(roles/common `90-dms-envoy.conf`, dmsk8s 만)·tfvars cp1 `memory_mb` 4096(라이브는
+  virsh 로 이미 4GiB — T8). 작업 사본 패치는 메인 세션이 사용자에게 준다(인계 대기).
+- 📝 **EG 리스너에 hostname 이 없어 접근 로그에 SNI 가 없다** — `%REQUESTED_SERVER_NAME%` 는 늘 null 이라 필드를 지웠다(3fd7da9, T8 33/33줄).
+  리스너에 hostname 을 두게 되면(지금은 hostname·80·HSTS 없음 — README §2g-1) 그때 다시 싣는다.
+- 📝 **설계 ⑥ 의 선택·뒤로 미룬 것** — Envoy 접근 로그 수집처·보존(K15·보안 S2 — 지금은 stdout), ~~Envoy stats(:19001)를 마스터 호스트에 여는
+  것~~(끔 — bd53e9b, EnvoyProxy `telemetry.metrics.prometheus.disable`; 지표가 필요해지면 노드 밖을 막는 방화벽과 함께 다시 켠다), C 경로에서
+  남의 EG 설정이 shutdown-manager 이미지를 docker.io 로 두어도 DMS EnvoyProxy 가 이미지를 명시하므로 영향 없음(확인만), 전역 rate limit(EG
+  `rateLimit`) 미사용 — 쓰게 되면 ratelimit 이미지를 lock 에.
   `platform/gateway`·`addons/gateway-api` 는 워크로드가 없어 `guard-images.sh` 대상이 아니다(Envoy 이미지 교체는 렌더 diff 로 본다).
 
 ### ⑦ 설치기 후속 — 2026-11-03
