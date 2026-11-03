@@ -27,7 +27,7 @@ k8s 테스트베드는 §13 이 런북이다.
 | | **ssc 테스트베드** | **k8s 테스트베드** (§13) |
 |---|---|---|
 | 검증하는 브랜치 | dms-ssc(후보) — 빌드 소스 전환 전에는 main | dms-k8s(2026-10-22 분리 뒤 직접 개발) |
-| 노드 | dms-cp1 .10 + dms-w1~w3 .11–.13 | k8s-cp1 .20 + k8s-w1·k8s-w2 .21·.22 — cp1 메모리 4GiB(2026-11-03 ⑥ T8 에 2.5 → 4 — EG·GW API CRD 로 kube-apiserver RSS ≈1GB, §2g-6) |
+| 노드 | dms-cp1 .10 + dms-w1~w3 .11–.13 | k8s-cp1 .20(Ubuntu 24.04, 4GiB — 2026-11-03 ⑥ T8 에 2.5 → 4: EG·GW API CRD 로 kube-apiserver RSS ≈1GB, §2g-6) + k8s-w1·k8s-w2 .21·.22(**Rocky Linux 9.6, SELinux permissive**, firewalld 꺼짐, 3GiB — 2026-11-03 T-SE, 설계 #49) |
 | kube 컨텍스트 | `dms` (current) | `dmsk8s` (current 로 만들지 않는다) |
 | 오버레이 | `deploy/overlays/testbed`(dms-ssc 에만) | `deploy/overlays/testbed-k8s` |
 | 포탈 | https://dms.local (VIP 10.20.20.100) | https://dms-k8s.local (VIP 10.20.20.101 → ingress-nginx). Envoy Gateway 가 **병행**(cp1 :443, PROXY 필수 — 2026-11-03 ⑥ T8, §2g-7) |
@@ -1470,6 +1470,12 @@ sh deploy/install.sh --help                                      # 머리 주석
 | S12 | `verify.sh --rendered`(§2g-5 의 검사 + CNPG·여분 PV·경로 대조·CronJob·레지스트리 태그·애드온 요약·80 불가 = 정상·EACCES 힌트). readyz 판정은 apiserver 서비스 프록시(`get --raw …/services/http:dms-api:http/proxy/readyz`), VIP 경유(`--resolve`)는 응답 없음이면 WARN(Avi VS-443 미개통 — 첫 설치) | FAIL(이때도 S13 체크리스트를 보인다) |
 | S13 | 사후 체크리스트 출력 — 첫 관리자 부트스트랩(port-forward + `x-admin-token` 파일, 토큰·비밀번호를 출력·argv 에 싣지 않는다)·DNS·Avi 헬스·포탈 등록 | — |
 
+- **S2b(SELinux) — 테스트베드 실측**(2026-11-03 T-SE, Rocky 9.6 워커): `setenforce 1` 이면 그 노드만 FAIL 「enforcing」, config 만 enforcing 이면 FAIL
+  「재부팅하면 enforcing」. enforcing 동안 dms-agent(`container_t`)가 `/proc/1/mountinfo`(`init_t`)·CephFS 루트(`unlabeled_t`)를 못 읽어 그 노드의
+  스토리지가 전부 Missing(`not_a_mountpoint`)으로 보고됐다 — prod README 「0. 사이트 준비」 2(SELinux 필수 전제, 설계 #48)의 근거. NFS 경로는 AVC 0.
+- **RHEL firewalld — 설치기·preflight 는 보지 않는다**(S0 사이트 몫): 기본 public zone 을 켜면 노드 간 흐름이 깨진다(T-SE 실측 — Cilium vxlan 이라
+  다른 노드 백엔드의 응답이 8472/udp 로 들어와 INPUT 에서 막힌다: 파드 DNS·호스트 → ClusterIP·NodePort·agent 보고 실패, 노드 안에서 끝나는 외부
+  egress 는 산다). 설계 4-2 포트(10250/tcp·8472/udp·4240/tcp·4244/tcp·7946/tcp+udp·30000-32767/tcp)를 열면 모두 복구 — FORWARD 정책은 바꿀 필요 없었다.
 - **`--context` 는 필수**다(KUBE_CONTEXT·current-context 를 쓰지 않는다). 렌더의 `kube-context`(testbed-k8s = dmsk8s)와 다르면 exit 2. 모든 kubectl
   은 `kc`·`kcn` 함수(`command kubectl --context "$CTX"`)로만 부른다 — 계약 테스트 `test_check_scripts_context.py`.
 - **층의 소유**: addons·platform 은 SSA(`--field-manager=dms-install`), 앱은 client-side apply. 감지가 **C**(남이 설치한 호환 애드온)면 그 층에는 apply 도
@@ -2506,6 +2512,8 @@ dms-k8s 브랜치 후보(main)를 검증하는 테스트베드다. 오버레이�
   svc 10.112.0.0/12), Volcano v1.15.0, MetalLB(자동 풀 10.10.10.220–.229 — ssc 의 .200–.210 과 겹치면 ARP 충돌) +
   ingress-nginx 2 레플리카(`--default-ssl-certificate=dms/dms-portal-tls`, svc 어노테이션 `metallb.io/address-pool=dms-public-pool`),
   `k8s-w1`·`k8s-w2` 둘 다 `network-zone=public`. kubeconfig 에 컨텍스트 `dmsk8s`(current 는 `dms` 유지).
+- OS(2026-11-03 T-SE~): cp1 Ubuntu 24.04, w1·w2 **Rocky Linux 9.6**(SELinux permissive, firewalld 꺼짐, CRI-O·kube rpm, ceph-common 19.2.2) — testbed
+  IaC 의 EL 분기(넘기기 대기 동안 진짜 testbed 저장소에서 terraform·ansible 을 돌리지 않는다 — BACKLOG). 맨 위 표.
 - 노드: **LDAP 클라이언트 없음**(sssd·nslcd 미설치, nsswitch 에 sss/ldap 없음, `getent passwd alice` 실패 — testbed validate 의
   부정 검사), CRI-O 가 `pkg-01:5000`·`pkg-01:5001` 신뢰, `/etc/hosts`·CoreDNS hosts 에 pkg-01(api 파드가 레지스트리를 조회),
   CephFS `dmsfs:/k8s` → `/cephfs`(둘 다), `/k8s/third` → `/cephfs-third`(k8s-w1), `/k8s/secondary` → `/cephfs-secondary`(k8s-w2)

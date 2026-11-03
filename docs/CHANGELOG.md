@@ -54,6 +54,43 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
 
 ## 슬라이스별 상세 기록
 
+### ✅ 테스트베드 워커 EL9(T-SE) — k8s-w1·w2 를 Rocky Linux 9.6(SELinux permissive)으로 재구성, SELinux 프로브·firewalld·EL9 고유 실측 — **완료·실증**(2026-11-03)
+
+설계 v6 #49·10 「T-SE 세부」(4-2 「RHEL firewalld」·#48 SELinux 전제의 확인). **DMS 코드·매니페스트는 바꾸지 않았다** — testbed IaC 만. 이 세션은 testbed
+저장소에 쓸 수 없어 작업 사본에서 고쳐 terraform·ansible 도 그 사본으로 돌렸고, 패치 + terraform state 를 넘긴다(job tmp `tse/handback.md` — 사용자
+적용 대기, 그 전에는 진짜 저장소에서 terraform·ansible 금지 — BACKLOG).
+
+- **IaC(작업 사본)**: terraform 노드별 `os`(ubuntu2404 | rocky9 — Rocky 9.6 vault GenericCloud sha256 고정, 기존 base 볼륨 그대로), cloud-init(wheel·
+  짧은 hostname), EL 분기 roles(vault repo 고정·permissive·crashkernel 제거·authselect minimal·cri-o rpm 1.34.9 + container-selinux·kube rpm 1.34.6
+  (exclude)·ceph-common 19.2.2 + EPEL `includepkgs` — 19.2.3+ 는 OPENSSL_3.4 를 요구해 9.6 에 못 올린다·kubelet `--resolv-conf=/etc/resolv.conf`(Rocky 엔
+  systemd-resolved 경로가 없어 빠지면 파드가 하나도 뜨지 않는다)·firewalld 설치·꺼짐), `/dms_shared`(③) IaC, validate·post-boot 의 EL 점검(EL9 은
+  `/proc/sys/fs/protected_*` 가 0600 이라 `sudo sysctl` 로 — 고친 결함 1). 회귀 게이트: 다른 노드 terraform plan 0·Ubuntu/ssc ansible check 의 changed
+  수 동일.
+- **실행(노드마다 drain → 꺼짐 확인 뒤 노드 삭제 → VM 재생성 → 프로비저닝 → 합류)**: drain → Ready w1 6분 54초·w2 6분 23초(apply → Ready 5분 52초·
+  5분 40초, w1 은 빌드 노드라 그동안 포탈 빌드 공백). w2 전에 primary 를 cp1 로 promote(21초 — 그 순간 dms-controller 가 옛 rw 로 `Connection refused`
+  exit 1 → 2회 재시작 뒤 자동 회복, 관찰만). 워커 메모리 2 → 3GiB(w1 빌드 중 MemoryPressure 실측 — BestEffort speaker 2회 축출; w2 는 재구성 apply 에
+  함께, w1 은 도메인만 교체 — drain → Ready 1분 57초), cp1 2.5 → 4GiB(⑥ T8). 결과 노드: cp1 Ubuntu 24.04(4GiB), w1·w2 Rocky 9.6(커널
+  5.14.0-570.17.1.el9_6, allocatable 2356Mi, permissive), CNPG 3/3.
+- **검증**: validate-dmsk8s PASS=182·validate-dms PASS=132·post-boot PASS=96 — 남은 FAIL 1 은 셋 다 Ceph `HEALTH_WARN mon pkg-01 is low on available
+  space`(재구성 전 기준선에도 있음, T-SE 무관). S2b PASS(cp1 no-selinux, w1·w2 permissive), S6 pull OK, S7 PASS(3노드), agent fresh·artifact base 쓰기 가능.
+- **SE-1(S2b 판정 매트릭스 — ⑦ `selinux-probe.py` 와 같은 규칙의 일회용 프로브; 그때 그 파일은 미커밋이라 돌리지 않았다, 설치기 S2b 자체는 T9 ②)**:
+  기준 PASS, `setenforce 1` → 그 노드만 FAIL 「enforcing」(w1·w2 각각), 원복 PASS, config 만 enforcing(w1) → FAIL 「재부팅하면 enforcing」, 원복 PASS(3노드).
+  **enforcing 동안 실측 거부**: dms-agent(`container_t`)의 `/proc/1/mountinfo`(`init_t`)·CephFS 루트(`unlabeled_t` — `seclabel` 마운트지만 xattr 라벨
+  없음) 읽기 → 그 회차 보고가 스토리지 전부 `Missing/not_a_mountpoint`·artifact base 쓰기 불가(보고 자체는 들어온다), `setenforce 0` 다음 회차에
+  Ready. 설계 #48 「SELinux enforcing 금지」 전제(위험 26 「추정」)가 실측으로 확인됐다. permissive 기록(AVC — enforcing 이면 거부될 접근): dscan·dsync·
+  nsync·agent → CephFS read/write/create/setattr, crio mounton `init_t`. NFS(`/k8s_pv`·`/dms_shared`) AVC 0, 빌드 파드(privileged)는 `spc_t`.
+  CRI-O rpm 기본 `selinux = true`(Ubuntu 빌드는 false — 파드가 `container_t` 로 뜬다).
+- **SE-2(EL9 고유)**: `crio config` 차이 — Ubuntu 대비 3줄(`storage_driver = "overlay"`·`overlay.mountopt=nodev,metacopy=on`·`selinux = true`; 앞 둘은
+  빌드 노드의 skopeo → containers-common `/etc/containers/storage.conf` 때문, w2(Rocky) 와는 그 2줄만), registries.conf `short-name-mode = "enforcing"`,
+  `fs.protected_regular` 1(Ubuntu 2), `/etc/crio/crio.conf.d/99-dms-pinned.conf` 경로 동작(설치 → pinned_images → 제거·reload). **firewalld 기본 public
+  zone 을 켜면 노드 간 흐름이 깨진다**(w1, 기준선 7/7 PASS 뒤): Cilium(vxlan, KPR 꺼짐)이라 다른 노드 백엔드의 응답이 8472/udp 로 들어와 INPUT 에서
+  막힌다 — 파드 DNS·호스트 → ClusterIP(레지스트리 000)·NodePort(000)·agent 보고(`Temporary failure in name resolution`) FAIL, 노드 안에서 끝나는
+  외부 egress·VIP 는 산다. **설계 4-2 포트(10250/tcp·8472/udp·4240/tcp·4244/tcp·7946/tcp+udp·30000-32767/tcp)를 열면 7항목 모두 복구**(FORWARD
+  정책은 바꿀 필요 없음). 최종은 firewalld 꺼짐(w1 의 `--permanent` 포트 7개는 `public.xml` 에 남아 다음에 켜면 열린 채 시작).
+- **SE-3(잡·빌드)**: w1 scan(207 항목·72,193,764 B, preflight·launcher w1)·dsync(cephfs-third 안 — md5 목록·링크 동일)·nsync w1(Rocky) → w2(당시
+  Ubuntu)(md5·소유/모드/종류 207항목 동일 — 교차 OS MPI), w2 scan·nsync w1 → w2(Rocky ↔ Rocky, launcher w2 — md5 201·메타데이터 207항목 동일),
+  포탈 빌드 d20(210초, 빌드 파드 `spc_t` — **릴리스 안 함**, 라이브 d19 그대로).
+
 ### ✅ ⑦ 설치기 — 단계 설치기(S1~S13)·감지 상태 기계·SELinux·pull·마스터 프로브·인터넷 노드 push·S5 lock 대조·MetalLB/ingress 게이트 삭제 — **구현·검증**(2026-11-03, 테스트베드 T9 실증 대기)
 
 설계 v6(`docs/history/specs/2026-11-03-dms-k8s-prod-design.md`) 8-1(S-1~S13·「S0 세부」·「S1 점검 항목」·「S2b 세부」·「S7 세부」·「S10 세부」·

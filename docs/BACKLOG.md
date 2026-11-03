@@ -358,7 +358,7 @@ deploy/README §2d.
   `SHARED_DIR` 형식을, S4·S7·S10 이 센티널·마운트를 동작으로 본다.
 - 🔧 **테스트베드 IaC**(testbed 저장소 몫)
   - `/dms_shared` export(호스트 `/data/dms_shared` → 10.10.10.20–.22)와 3노드 fstab 마운트를 testbed 에 반영한다 — 지금은 라이브
-    적용만이다(deploy/README §2d-5).
+    적용만이다(deploy/README §2d-5). 작업 사본 패치는 T-SE 넘기기 누적 패치에 들어 있다(아래 「T-SE 후속」).
   - `deploy/testbed/dms-shared-fs.yml` 의 DMS 공용 디렉터리 태스크(`/cephfs/dms`·`/cephfs/dms/artifacts`, `findmnt … FSTYPE == ceph`
     단정)는 dmsk8s 에서 옛 base 다. T3 보존 창이 끝나면 dmsk8s 쪽을 정리하고(일반화한 마운트 가드는 S0 스크립트에 있다), 데이터 root·
     픽스처는 CephFS 에 그대로 둔다.
@@ -393,7 +393,7 @@ CHANGELOG 「④ 클러스터 내 레지스트리」, 설계 v6 7·8-1(S0-4·S0-
   - 📝 **`pkg-01:5001` 정리 시점** — 결정 대기. 지금은 되돌림용이다(d18 까지만 있다 — d19 부터는 새 레지스트리에만).
 - 🔧 **testbed IaC**(testbed 저장소 몫) — crio 롤에 `50-dms-registry.conf`(3노드)·`99-dms-pinned.conf`(cp1)·skopeo 패키지(cp1·빌드 노드
   k8s-w1 만, 추천 패키지 없이), validate 점검.
-  작업 사본 패치는 메인 세션이 사용자에게 준다.
+  작업 사본 패치는 T-SE 넘기기 누적 패치에 함께 들어 있다(아래 「T-SE 후속」).
 - ~~**T4 확인 대기(추정으로 둔 것)**~~ — **해소**(2026-11-03 T4 실측, CHANGELOG ④ 「T4 실증」):
   - 빈 레지스트리 `/v2/_catalog?n=1` → 200(`{"repositories":[]}`, 3노드 호스트 → ClusterIP) — readiness 그대로.
   - GC 의 env readonly(`REGISTRY_STORAGE_MAINTENANCE_READONLY='{"enabled":true}'`) JSON 파싱 OK(POST 405) — deploy/README §2e-5 길 A.
@@ -491,7 +491,7 @@ CHANGELOG 「⑥ 입구(Envoy Gateway)」, 설계 v6 #13~#15·4-3·8-1(S0-5·S8�
   `HOSTNET_RELAYS` 에서 `8443=10.20.20.101:443` 을 뺀다 — T8 의 :8443 DNAT `-D`/`-I` 만으로는 시험이다(유닛 재시작·재부팅이면 되돌아간다). 그 전까지
   테스트베드 사용자 경로는 ingress-nginx(MetalLB VIP)이고 EG 는 병행(PROXY 필수). 소크 뒤 testbed-k8s 오버레이의 Ingress·MetalLB 삭제(README §2g-7 ③).
 - 🔧 **testbed IaC**(testbed 저장소 몫) — cp1 sysctl drop-in(roles/common `90-dms-envoy.conf`, dmsk8s 만)·tfvars cp1 `memory_mb` 4096(라이브는
-  virsh 로 이미 4GiB — T8). 작업 사본 패치는 메인 세션이 사용자에게 준다(인계 대기).
+  virsh 로 이미 4GiB — T8). 작업 사본 패치는 T-SE 넘기기 누적 패치에 함께 들어 있다(아래 「T-SE 후속」).
 - 📝 **EG 리스너에 hostname 이 없어 접근 로그에 SNI 가 없다** — `%REQUESTED_SERVER_NAME%` 는 늘 null 이라 필드를 지웠다(3fd7da9, T8 33/33줄).
   리스너에 hostname 을 두게 되면(지금은 hostname·80·HSTS 없음 — README §2g-1) 그때 다시 싣는다.
 - 📝 **설계 ⑥ 의 선택·뒤로 미룬 것** — Envoy 접근 로그 수집처·보존(K15·보안 S2 — 지금은 stdout), ~~Envoy stats(:19001)를 마스터 호스트에 여는
@@ -505,7 +505,8 @@ CHANGELOG 「⑥ 입구(Envoy Gateway)」, 설계 v6 #13~#15·4-3·8-1(S0-5·S8�
 CHANGELOG 「⑦ 설치기」, 설계 v6 8-1·8-2·9 ⑦·10 T9, deploy/README §2h, prod README.
 
 - 🔧 **T9 실증(테스트베드)** — 런북은 메인 세션의 작업 노트(`t9-runbook.md` — 저장소 밖): ① `install.sh --context dmsk8s --site testbed-k8s --plan`
-  (2026-11-03 ⑦ 실측 PASS — 감지 D=·C, 층 dry-run PASS·SKIP), ② 라이브에서 안전한 단계(S1·S2b·S5·S6·S7·S12 — 결과가 바뀌지 않는 단계), ③ A·P·X
+  (2026-11-03 ⑦ 실측 PASS — 감지 D=·C, 층 dry-run PASS·SKIP), ② 라이브에서 안전한 단계(S1·S2b·S5·S6·S7·S12 — 결과가 바뀌지 않는 단계; S2b 는 이제
+  Rocky 워커 — T-SE 는 같은 규칙의 일회용 프로브로만 봤다), ③ A·P·X
   조합은 **일회용 k3s**(호스트 컨테이너, dms-k3s2 와 다른 이름·포트)에서 — 공용 디렉터리·레지스트리 마운트가 없어 S1·S3·S8(A 경로 SSA·대기)·S9·
   감지 조합만. 결과를 `test_install_detect` 기대와 대조하고 CHANGELOG 에 기입한다.
 - 🔧 **Volcano 층(`deploy/addons/volcano/v1.16.0`)** — 상류 매니페스트 + SOURCE·sha256 + DMS 패치 층(이미지 자리표시자 → lock digest, 라벨,
@@ -530,6 +531,25 @@ CHANGELOG 「⑦ 설치기」, 설계 v6 8-1·8-2·9 ⑦·10 T9, deploy/README �
 - 🔧 **리뷰 1 고침 가운데 라이브로 못 본 것**(2026-11-03 ⑦ 리뷰 1 — 심 테스트만): S13 첫 관리자 부트스트랩 명령(port-forward + `-H @<토큰 파일>` —
   계정을 만드는 변경이라 dmsk8s 에서 돌리지 않았다), 라벨 붙인 애드온 ns SSA·실패 certgen 재실행·`--upgrade-addon registry`·`--adopt db` 의 S9 dry-run
   (T9 일회용 k3s 의 A6·D1·P 행에서). 실측한 것: 태그를 올린 `--plan`(dms-migrate immutable → 앱 층 PASS)·verify 의 서비스 프록시 readyz·VIP 무응답 WARN.
+
+### 테스트베드 워커 EL9(T-SE) 후속 — 2026-11-03
+
+CHANGELOG 「테스트베드 워커 EL9(T-SE)」, 설계 v6 #49·10 「T-SE 세부」, deploy/README 「테스트베드는 둘이다」·§2h·§13-1.
+
+- ~~**T-SE**(w1·w2 를 한 대씩 Rocky Linux 9 로 재구성 — S2b 매트릭스·EL9 고유·S6·S7·잡)~~ — **해소**(2026-11-03, 전 항목 PASS): w1·w2 Rocky 9.6
+  permissive·3GiB, enforcing 이면 agent 가 `/proc/1`·CephFS 를 못 읽어 스토리지 전부 Missing(설계 #48 전제의 실측 근거), firewalld 기본 zone 은 노드 간
+  흐름을 깨고 4-2 포트를 열면 복구, scan·dsync·nsync(교차 OS·EL ↔ EL)·포탈 빌드 정상. K8s·CRI-O 버전은 그대로(rpm 1.34.6·1.34.9).
+- 🔧 **testbed IaC 패치 + terraform state 넘기기(사용자)** — job tmp `tse/handback.md` 대로 **한 번**: 진짜 testbed 저장소에 `tse/testbed-cumulative.patch`
+  (③ `/dms_shared`·④ 레지스트리 drop-in·skopeo·⑥ cp1 sysctl·cp1 4GiB·T-SE EL9·워커 3GiB 전부; ④⑥ 를 이미 적용했다면 `testbed-tse.patch`) 적용 →
+  두 새 스크립트 0755 → 작업 사본 `terraform.tfstate` 복사. **그 전까지 진짜 testbed 저장소에서 terraform(`make plan`·`vm-up`·`vm-down`·`destroy`)과
+  k8s-w1·w2 대상 ansible(`make baseline` 등)을 돌리지 않는다** — 진짜 state·tfvars 는 T-SE 전이라 워커를 다시 만들거나(이름 충돌) Ubuntu·2GiB 로,
+  cp1 을 2.5GiB 로 되돌리려 하고, 옛 roles 는 Rocky 노드에서 apt 를 부른다.
+- 📝 **pkg-01 Ceph mon 공간 경고(기존 — T-SE 무관)** — `HEALTH_WARN mon pkg-01 is low on available space` 가 재구성 전 기준선부터 있다. validate·
+  post-boot 의 남은 FAIL 1 이 늘 이것이라 post-boot 수렴 루프가 FAIL=0 으로 끝나지 않는다(T-SE 에서는 수동 중지). testbed 저장소 몫(pkg-01 mon
+  디스크 여유).
+- 📝 **T-SE 시험 흔적 정리**(사용자 확인 뒤) — `/cephfs-third/tse-w1`, `/cephfs-secondary/tse-w1-nsync`·`tse-w2*`, 레지스트리 `t4-gc:tse-w1`, 빌드
+  태그 d20(릴리스 안 함 — 라이브 d19). w1 의 firewalld 는 꺼져 있지만 `--permanent` 포트 7개가 `/etc/firewalld/zones/public.xml` 에 남아 켜면 열린 채
+  시작한다.
 
 ## 2. 의도적 보류 (결정 — "미구현"이 아님)
 
