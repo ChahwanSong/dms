@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 #
-# Build the DMS container images (mpifileutils/dms/agent) and push them to the
-# testbed's insecure registry. RUN THIS ON pkg-01 (10.10.10.30) -- that's the
-# node with podman and internet access for the mpifileutils/kubectl fetches.
+# Build the DMS container images (mpifileutils/dms/agent) and push them to an
+# insecure (http) registry. Run it on the build (internet) node -- the node with
+# podman and internet access for the mpifileutils/kubectl fetches (testbed:
+# pkg-01, 10.10.10.30; prod: the internet node of design v6 7-5, first bootstrap).
 # Build context is always the repo root, regardless of caller's cwd.
 #
-#   REGISTRY=pkg-01:5000 TAG=dev ./deploy/docker/build-and-push.sh
+#   REGISTRY=pkg-01:5000 TAG=dev ./deploy/docker/build-and-push.sh          # testbed example
+#   REGISTRY=<IP>:<PORT> TAG=<values.env DMS_TAG> ./deploy/docker/build-and-push.sh
+#   (TAG = values.env DMS_TAG = DMS_AGENT_TAG = MFU_TAG; never edit the base manifests' image: -- they are placeholders)
 #
 # Env knobs:
 #   REGISTRY   image registry/prefix           (default: pkg-01:5000)
@@ -27,7 +30,7 @@ PUSH="${PUSH:-1}"
 NO_CACHE="${NO_CACHE:-0}"
 
 command -v podman >/dev/null 2>&1 \
-  || { echo "!! podman not found -- this script must run on pkg-01" >&2; exit 2; }
+  || { echo "!! podman not found -- run this on the build (internet) node (testbed: pkg-01)" >&2; exit 2; }
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
@@ -71,6 +74,7 @@ done
 
 echo
 echo ">> done: ${IMAGES}  (registry=$REGISTRY tag=$TAG push=$PUSH)"
-echo ">> if TAG != dev, update DMS_JOB_IMAGE in deploy/k8s/20-config.yaml and the"
-echo "   image: fields in 40-api.yaml / 41-controller.yaml / 30-migrate-job.yaml /"
-echo "   50-agent-daemonset.yaml to match."
+# 2026-11-03 ⑦ 리뷰 1: 예전 안내는 base 매니페스트(deploy/k8s/*)의 image:·DMS_JOB_IMAGE 를 고치라고 했다 — base 는 사이트 중립 자리표시자라
+# 고치면 오버레이 치환이 조용히 빠진다. 태그는 오버레이(values.env 의 DMS_TAG·DMS_AGENT_TAG·MFU_TAG / 테스트베드 newTag)가 넣는다.
+echo ">> tag: values.env 의 DMS_TAG·DMS_AGENT_TAG·MFU_TAG 를 '$TAG' 와 같게 둔다(테스트베드는 오버레이 newTag)."
+echo "   base 매니페스트(deploy/k8s/*)는 자리표시자다 -- 고치지 않는다. 설치기면 이어서: sh deploy/install.sh --context <ctx> --site <site> --stage S5"

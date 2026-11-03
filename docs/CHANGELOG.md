@@ -54,6 +54,97 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
 
 ## 슬라이스별 상세 기록
 
+### ✅ ⑦ 설치기 — 단계 설치기(S1~S13)·감지 상태 기계·SELinux·pull·마스터 프로브·인터넷 노드 push·S5 lock 대조·MetalLB/ingress 게이트 삭제 — **구현·검증**(2026-11-03, 테스트베드 T9 실증 대기)
+
+설계 v6(`docs/history/specs/2026-11-03-dms-k8s-prod-design.md`) 8-1(S-1~S13·「S0 세부」·「S1 점검 항목」·「S2b 세부」·「S7 세부」·「S10 세부」·
+「순서의 이유」)·8-2(감지 → 없으면 설치)·2-3(SELinux 전제)·7-5(images.lock·인터넷 노드 push·S5 대조)·9절 ⑦·10 T9. 런북은 `deploy/README.md` §2h
+(설치기)·§2e-4(이미지 반입 — 인터넷 노드), 사이트 순서는 `deploy/overlays/prod/README.md`. **DMS 애플리케이션 코드는 바꾸지 않았다.**
+
+- **`deploy/install.sh` 다시 씀**(옛 원커맨드 → 단계 설치기): `--context` **필수**(KUBE_CONTEXT·current-context 를 쓰지 않는다 — 모든 kubectl 은
+  `kc`·`kcn` = `command kubectl --context "$CTX"`, 도우미에도 같은 값), `--site`·`--plan`(S1 + S2 확인 + S3, 무변경)·`--stage <S>`(재개)·`--only <S,…>`·
+  `--upgrade-addon`·`--adopt`·`ADDON_INSTALL`. 단계: S1 preflight + 감지(FAIL·P·X 면 중단) → S2 `00-namespace.yaml` → `pg-secrets.py` ensure-app·
+  init-secrets·4키·자리표시자·check → `PORTAL_TLS_SECRET`(존재·kubernetes.io/tls — 옛 `dms-portal-tls` 고정 게이트 대체) → S2b SELinux 프로브 → S3 계획 →
+  S4 PriorityClass·레지스트리 SSA(`dms-install`)·http 시크릿(없을 때만, stdin)·rollout·port-forward `/v2/` 200 → S5 lock 대조 + DMS 3종 태그(다르면
+  `push-images.sh --print` — **S4 에서 이어 왔으면 PAUSE exit 10**, 아니면 FAIL; 옛 호스트 podman push WARN 대체) → S6 pull 프로브 → S7 공용 스토리지
+  (3 계속·1·4 정지) → S8 Gateway API·EG(감지대로, ns 먼저)·마스터 sysctl·platform/gateway·Programmed·마스터마다 :443 → S9 CNPG(ns 먼저·rollout·Cluster
+  CR dry-run 9443 — 막 뜬 웹훅 재시도, 업그레이드면 직전 덤프·healthy 대기) → S9b Volcano(층이 있으면)·DMS 모양 vcjob dry-run → S10 pv-check →
+  volumes → precheck → cluster → 900초 폴링 → contrast → backup → 첫 덤프 → S11 시크릿·앱 이미지 게이트·guard·migrate·`apply -k`·설정 rev 가 바뀌었는데
+  파드가 그대로면 restart(`dms.io/install-config-rev` — dms-config·dms-secrets 의 resourceVersion, 값이 아니다)·마스터 사전 pull(WARN) → S12 verify →
+  S13 체크리스트. **MetalLB·IngressClass nginx 게이트와 ingress-nginx 어노테이션을 지웠다**(설계 12 위험 19 해소). 종료 0·1·2·4·10, `STAGE:`·`RESULT:` 줄.
+- **`deploy/install-detect.py`**(파트 A): 감지 상태 기계 — 항목 8개 × 코드 A·D=·D<·D>·C·C!·X·U·P(+ `-`·`?`) → action, `detect`·`plan`(층별 SSA server
+  dry-run, 첫 설치의 ns·CRD 없음은 SKIP, 소비 층 dry-run 이 애드온의 최종 판정, C 층에는 dry-run 도 없음), 이번에 `vcjob` 모드(S9b — Volcano 판정 +
+  vcjob dry-run 만)를 더했다(`vcjob_layer`·`consumer_verdicts` 로 plan 과 공유). CNPG 는 어디에든 있으면 두 번째를 설치하지 않는다(CRD 만·오퍼레이터만·
+  둘 이상 = P). Volcano 스케줄러 탐지 라벨을 상류의 `app=volcano-scheduler` 로(옛 preflight 의 `app.kubernetes.io/name` 은 늘 빈 결과였다).
+- **노드 프로브**(파트 B): `deploy/selinux-probe.py`(S2b — privileged 임시 DS, `imagePullPolicy: Never` 의 Cilium 이미지, `/sys/fs`·`/etc` 읽기 전용,
+  enforcing·「재부팅하면 enforcing」(부팅 인자 > config) FAIL, selinuxfs 없음 + cgroup 보임 PASS, 읽기 오류 모름), `deploy/pull-probe.py`(S6 — 레지스트리
+  이미지 `Always`, 120초, 오류 문구로 신뢰·서명·프록시·ClusterIP 경로 힌트; `--image --nodes` 로 S11 마스터 사전 pull). 둘 다 DMS 노드만 판정
+  (`pg-path-probe.dms_nodes`). **`deploy/host-net-probe.sh`**(새 — 마스터 호스트 netns 일회용 Pod(hostNetwork·비 root·cap 없음): `--sysctl`
+  `ip_unprivileged_port_start ≤ 443`(S8 — platform/gateway 전), `--listen` :443 LISTEN(S8 Programmed 뒤·S12 — sysctl 빠진 마스터는 Programmed·Ready
+  인 채 조용히 빠진다, ⑥ 리뷰 1)).
+- **인터넷 노드 반입·S5 대조**(파트 C): `deploy/push-images.sh`(POSIX sh — `--print`·`--run` 멱등·push 뒤 digest 재확인, `--only`·`--skip`, 프록시 env 가
+  있는데 NO_PROXY 가 레지스트리를 덮지 않으면 아무것도 하지 않음 — Go httpproxy 규칙), `images-lock.py compare-registry`(매니페스트 본문 sha256 == lock,
+  태그 없음·다른 digest FAIL — 태그 없는 lock digest 면 GC 위험 사유, 프록시 없이, 닿지 않음·익명 아님 모름). 설치기는 이 사이트가 받지 않는 줄을
+  `--skip` 한다(C 인 CNPG 의 오퍼레이터, 레지스트리 없는 사이트의 레지스트리 자기 이미지).
+- **preflight·verify**: 둘 다 컨텍스트 필수 — `--context` 또는 env `KUBE_CONTEXT`(플래그가 이긴다), 둘 다 없으면 exit 2(옛 「current-context 로
+  돈다」 테스트를 거꾸로 고정; install.sh 는 플래그만 — 리뷰 2 문구 정정). preflight 는 K8s 1.34~1.36(밖이면
+  FAIL)·control-plane 수·taint·클러스터 도메인·PSA(dms·envoy-gateway-system)·admission(VAP·웹훅·Kyverno/Gatekeeper)·`--render-env` 의 SHARED_DIR 형식·
+  REGISTRY_CLUSTER_IP(ServiceCIDR 안·IPAddress parentRef/Service clusterIP 로 미사용·하단 정적 대역 min(max(16, n/16), 256))·감지 요약·설치 호스트
+  도구·프록시·**노드 셸 체크리스트**(getenforce·SELINUX=·crio config 의 pinned_images·signature_policy·`crictl inspecti … pinned`·런타임 NO_PROXY·sysctl·
+  findmnt -T). MetalLB·ingress-nginx 절은 지웠다. verify 는 CNPG·dms-pg-rw·여분 PV·Released·CronJob·경로 대조·레지스트리 Ready·clusterIP·라이브 태그
+  (apiserver 서비스 프록시 GET)·Gateway Programmed·마스터 :443·readyz `--resolve`·「80 불가 = 정상」·애드온 요약·FAIL 이면 api·controller 로그의 EACCES
+  → S2b 다시 안내(`--no-probes` 면 파드를 띄우지 않는다).
+- **구현 중 잡은 결함**: port-forward 를 셸 함수(`kcn … &`)로 띄우면 `$!` 가 서브셸이라 kill 해도 kubectl 이 남았다(dmsk8s 실측 — 프로세스 1개 잔류) →
+  `( exec kubectl --context … ) &` 로 고치고 테스트가 끝난 뒤 그 PID 가 없는지 본다. 테스트 심이 `echo "$*"` 로 jsonpath 의 `{"\n"}` 를 줄바꿈으로
+  바꿔 「--context 없는 호출」로 잘못 보였다(dash echo) → printf.
+- **문서**: deploy/README §2h(설치기 단계 표)·§2e-4(인터넷 노드 반입 런북 — 파트 C 초안)·§2d~§2g 의 「⑦ 전에는 손으로」 문구·머리 배너, prod README 를 단계
+  흐름으로(0. 사이트 준비 — **SELinux 전제** 포함, 1~5 설치, 이미지 반입 요약, 선행조건 표), `values.env.example`·`images.lock` 머리 주석, ARCHITECTURE
+  모듈 행 5·불변식 2(「모든 kubectl 에 --context」·「SSA manager dms-install, C 는 다시 설치하지 않는다」), BACKLOG ③④⑤⑥ 의 ⑦ 항목 해소 + 「⑦ 설치기 후속」.
+- **테스트**: `tests/test_install_stages.py`(새 — 심 kubectl·가짜 도우미로 단계 순서, S4 PAUSE → `--stage S5` 재개, S5 lock·DMS 이미지 FAIL·모름,
+  port-forward 잔류 없음, S7 0/3/1/4/2, external 대 in-cluster, 멱등 재실행 2회, `--plan` 무변경(세계 JSON 이 그대로), C 애드온 비적용·A 순서(ns 먼저),
+  `--upgrade-addon`·`--adopt` 전달, 감지 FAIL·Volcano 층 없음 S1 정지, S2 TLS·S2b·S10 폴링 판정·첫 덤프 실패·S11 설정 재시작·가드 거부, 실제 render.sh
+  (prod·testbed-k8s)와 이어서, preflight 의 새 점검), `test_check_scripts_context.py`(필수 `--context`·host-net-probe·설치기의 정적 「kubectl 다음 낱말」
+  검사), `test_prod_k8s_overlay.py`(MetalLB·ingress 게이트 0건). 옛 `test_platform_registry_contract.py` 의 install.sh in-cluster 게이트 3건은 같은 단언을
+  S5·S11 로 옮겼다. 파트 A·B·C 테스트(`test_install_detect`·`test_selinux_probe`·`test_pull_probe`·`test_push_images`·`test_images_lock`) 그대로.
+- **테스트베드 실측(dmsk8s — 읽기 전용, 2026-11-03)**: `install.sh --context dmsk8s --site testbed-k8s --plan` → RESULT PASS(리뷰 2 뒤로는 preflight
+  WARN 이 판정에 들어가 S1·RESULT WARN; S1 preflight WARN 1 = control-plane 1대, 감지 priorityclass·registry·gateway·db D= reapply · gateway-api·envoy-gateway·cnpg D= none · volcano C(v1.15.0) — 층 dry-run PASS 8·SKIP 4).
+  `--only S5` → lock 6줄 OK + dms·dms-agent·dms-mpifileutils d19 있음 PASS, port-forward 잔류 0. `verify.sh --no-probes` PASS 13·WARN 0·FAIL 0, readyz 는
+  MetalLB VIP(병행 중인 옛 입구) `--resolve dms-k8s.local:443:10.20.20.101` 200. 렌더는 작업 트리의 `deploy/.rendered` 를 건드리지 않게(T8 병행) 복사본에서.
+- **설계와 다른 점**: (1) Volcano 층은 아직 없다 — 감지가 A 면 S1 이 멈춘다(lock 3줄·VOLCANO_VERSION 도 그 층과 함께 — BACKLOG). (2) S4 뒤 멈춤은
+  「S5 대조가 실패할 때만」이다(재실행이 늘 멈추지 않게 — 멱등). (3) `--only`·`--plan` 의 S2 확인 모드·PAUSE 종료 코드 10·`VERIFY_NO_PROBES` 는 설계에 없던
+  모양이다. (4) S10 폴링은 세 조건이 선 뒤에도 `spec.instances` 까지 기다리고(contrast 가 join 중인 PVC 를 모름으로 멈추지 않게) 시간 초과에 ≥ 1 이면
+  WARN 이다. (5) 설정 해시는 값의 해시가 아니라 resourceVersion(비밀을 다루지 않는다). (6) S6·S2b 의 판정 범위는 DMS 노드(S6 는 설계 행에 범위가 없다).
+  (7)(리뷰 1) S2 의 TLS 시크릿은 WARN — 쓰는 곳인 S8 이 멈춘다(설계 S2 판정 「—」). (8)(리뷰 1) S12 의 readyz 판정은 apiserver 서비스 프록시이고
+  `--resolve` VIP 무응답은 WARN 이다(첫 설치에서 Avi VS-443 이 S13 몫이라 늘 FAIL 이었다).
+- **리뷰 1 고침(2026-11-03)**: (high) 앱 태그를 올리면 S3·`--plan` 이 끝난 `dms-migrate` Job 의 `field is immutable` 로 늘 FAIL — 앱 층에서 그 줄만
+  「S11 이 지우고 다시 만든다」 PASS(dmsk8s d19→d20 사본 `--plan` 실측 PASS). 재개 명령(`again`)이 `--upgrade-addon`·`--adopt`·판정 env 를 싣는다(빠지면
+  재개한 S9 가 업그레이드 없이 rc 0). env `DMS_NS` 를 무시(`unset`)하고 도우미 세 곳·verify·preflight 에 `--namespace dms`. S4 가드는 레지스트리 층을
+  적용할 때만·`--upgrade-addon registry` 면 allow-image, CNPG 업그레이드 가드는 Cluster 유무와 무관(덤프·healthy 만 Cluster 에 묶음), `--adopt db` 면
+  S9 dry-run 도 `--force-conflicts`. 빈 `--stage`·`--only` 는 사용법 오류. 시크릿 읽기 실패는 모름(exit 4)이고 `--plan` 에서 FAIL 뒤 [OK] 를 찍지 않는다.
+  애드온 ns 를 DMS 라벨로 SSA(끊겨도 다음 감지가 P 로 멈추지 않게), DMS 소유 EG·CNPG 를 적용하지 않을 때도 Ready·xDS 시크릿 확인(실패 certgen 은 지우고
+  다시). S4 실패 사유에 파드 노드·FailedScheduling·ImagePullBackOff(S0-5 미반입), S2b 사용법 오류에 `SELINUX_PROBE_IMAGE`, S5 PAUSE 에 실제 태그,
+  S12 FAIL 이어도 S13 체크리스트, S13 첫 관리자 부트스트랩(port-forward + 토큰 파일 — 출력·argv 없음). 문서: prod README §0(레지스트리 주소 먼저·Avi
+  VS-443·kubelet 값·마스터 skopeo/crictl)·첫 관리자·CACERT, deploy/README §1(base 매니페스트를 고치라던 문단)·§2e-2·§2e-3(ImagePullBackOff)·§2e-5·§2h,
+  build-and-push.sh 안내. 테스트: 단계별 멈춤 18건 표·S10 순서(사전 검사 → Cluster)·migrate 선삭제 순서, `tests/test_install_verify.py`(새 — verify.sh
+  판정 표·EACCES 힌트·`--no-probes` 무파드, host-net-probe 의 sysctl·:443 판정과 /proc/net/tcp 정규식), preflight Volcano 미설치·PSA 비특권 FAIL,
+  `test_install_detect` migrate immutable·DMS_NS.
+- **리뷰 2 고침(2026-11-03)**: `--plan` 이 모름·FAIL 줄에 클러스터를 바꾸는 `--stage S1`·`--stage S2` 를 권했다 → `again()` 은 계획에서 늘 `--plan`,
+  「계획 끝」의 실제 설치 명령은 FAIL·모름이 없을 때만 계획과 같은 플래그·env(`--adopt`·`ADDON_INSTALL`·`VALUES_ENV`)로; Volcano 층 게이트는 S1 이
+  돈 실행에서 S3 가 다시 부르지 않는다(같은 FAIL 두 번·dry-run PASS 인 S3 FAIL·「계획 끝」 누락). preflight(S1)·verify(S12)의 `[WARN]` 을 세어
+  STAGE·RESULT 를 WARN 으로(dmsk8s `--plan` 「WARN 1」인데 PASS 였다). 도우미 출력은 4칸 들여 쓰고 감지·계획의 기계 줄(DETECT·PLAN·RESULT)은 사람
+  출력에서 뺀다 — 0열 `RESULT:` 는 설치기의 한 줄뿐(python 도우미는 `PYTHONUNBUFFERED=1` 로 진행 줄을 그대로 흘린다). 재개 줄에 S12 의 `CACERT`·
+  `PORTAL_DOMAIN`·`PORTAL_VIP`·`VERIFY_NO_PROBES`. 가드 exit 3 안내를 층별로(애드온·플랫폼 = `--only <S> --upgrade-addon <x>`, 전역
+  `ALLOW_IMAGE_CHANGE=1` 은 S11 앱 가드까지 연다), `--upgrade-addon <x>` 의 D= 재적용(lock digest 만 바뀜 — action reapply)도 그 층 가드를 연다.
+  S5 는 lock 대조 PASS 면 lock push 블록을 다시 보이지 않고, 머리에 「같은 커밋의 저장소 루트에서」(push-images.sh 의 `lock:` 표시는 상대 경로),
+  external TLS 레지스트리(`REGISTRY_TLS_VERIFY=true`)면 push 안내에 `--dest-tls-verify true`(대조·push 가 같은 규칙 `reg_tls` — 빈 값은 false:
+  전에는 빈 값이면 대조만 https 였다). `--help` 는 머리 주석·exit 0. preflight 노드 체크리스트는 external 사이트에 `<REGISTRY_CLUSTER_IP>`·
+  pinned_images·`crictl inspecti` 대신 사이트 REGISTRY 신뢰·서명 정책·런타임 NO_PROXY. 낡은 문구(「Volcano 층은 ⑦ 에서」·「install.sh 의 push」·
+  「S1 자동 검사는 ⑦」·Volcano 「≥ v1.15」만). 문서: 렌더는 매 실행 처음에 다시 한다 — `deploy/.rendered` 손 편집은 적용되지 않는다(prod README·
+  deploy/README §2g-2·§2h), 컨텍스트 규칙(install.sh·host-net-probe 는 플래그만, preflight·verify·python 도우미는 플래그 또는 env), `REGISTRY_TLS_VERIFY`
+  (external TLS = push·대조만, 포탈은 http). 테스트: `test_install_stages`(계획의 다음 명령 3경우·계획 끝 줄의 플래그·env·S3 단독 Volcano 게이트·preflight/
+  verify WARN·S12 재개 env·가드 안내 층별·`--upgrade-addon` reapply 가드 3층·S5 lock PASS·external TLS·0열 RESULT 하나·`--help`·preflight external
+  체크리스트), `test_install_detect`(vcjob 모드 — volcano 만 판정·dry-run 실패 FAIL·X/P 면 dry-run 없이 FAIL).
+- **남은 것**: T9(테스트베드 안전한 단계·일회용 k3s 의 A·P·X 조합), Volcano 층, 새 사이트 DB import bootstrap, `kubectl-cnpg` 반입 — BACKLOG 「⑦ 설치기 후속」.
+
 ### ✅ 설치기 이미지 push 단계 + 신규 사이트 "레지스트리 연결 불가" 오진 수정 — **완료**(2026-09-09, d126)
 
 사용자 보고: 초기 구축 시 install(-ssc).sh 에 push 단계가 없어 레지스트리에 이미지가

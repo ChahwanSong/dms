@@ -1,4 +1,4 @@
-"""점검 스크립트의 --context(2026-10-26 사용자 지시 「점검 스크립트에 context 옵션 추가해」): deploy/preflight-cluster.sh·
+"""점검 스크립트의 --context(2026-10-26 사용자 지시 「점검 스크립트에 context 옵션 추가해」 → 2026-11-03 ⑦ 필수 — 없으면 exit 2): deploy/preflight-cluster.sh·
 deploy/verify.sh·deploy/overlays/prod/render.sh(live 태그 해석)가 guard-images.sh 와 같은 문법(--context <ctx> / --context=<ctx>
 / KUBE_CONTEXT, 플래그가 이긴다)으로 대상 클러스터를 고른다 — 두 테스트베드가 같은 네임스페이스라 current-context 에 기대지 않게.
 
@@ -78,11 +78,49 @@ def test_flag_beats_env_and_bad_usage_is_rejected(tmp_path, script):
         assert r.returncode == 2 and "usage" in r.stderr, bad
 
 
-def test_without_context_scripts_use_the_current_context_as_before(tmp_path):
+@pytest.mark.parametrize("script", ["preflight-cluster.sh", "verify.sh"])
+def test_without_context_scripts_refuse_before_touching_a_cluster(tmp_path, script):
+    # 2026-11-03 ⑦: --context 필수 — 예전에는 current-context 로 돌았다(두 테스트베드가 같은 ns 라 엉뚱한 클러스터를 점검할 수 있었다).
     env, log = _env(tmp_path)
-    subprocess.run(["sh", str(DEPLOY / "verify.sh")], env=env, capture_output=True, text=True, timeout=120)
+    r = subprocess.run(["sh", str(DEPLOY / script)], env=env, capture_output=True, text=True, timeout=60)
+    assert r.returncode == 2 and "--context" in r.stderr, (r.stdout, r.stderr)
+    assert _calls(log) == []
+
+
+def test_host_net_probe_sends_every_call_to_the_named_context(tmp_path):
+    env, log = _env(tmp_path)
+    r = subprocess.run(["sh", str(DEPLOY / "host-net-probe.sh"), "--context", "known", "--image", "reg/dms:d7", "--listen",
+                        "--nodes", "cp1", "--timeout", "1"], env=env, capture_output=True, text=True, timeout=60)
+    assert r.returncode == 4 and r.stdout.strip().endswith("RESULT: UNKNOWN"), (r.stdout, r.stderr)   # 심은 파드 상태를 주지 않는다 — 모름
     calls = _cluster_calls(log)
-    assert calls and not any(c.startswith("--context") for c in calls)
+    assert calls and all(c.startswith("--context known ") for c in calls), calls
+    assert any(" create -f -" in c for c in calls) and any("delete pod -l app.kubernetes.io/name=dms-hostnet-probe" in c for c in calls)
+    for bad in ([], ["--context", "known", "--image", "x"], ["--context", "known", "--sysctl", "--image", 'a"b']):
+        r = subprocess.run(["sh", str(DEPLOY / "host-net-probe.sh"), *bad], env=env, capture_output=True, text=True, timeout=30)
+        assert r.returncode == 2, bad
+
+
+# 정적(2026-11-03 ⑦ 설계 8-1 「모든 kubectl 에 --context C」): 설치기·마스터 프로브는 kubectl 을 함수로 감싸지 않고 kc·kcn 또는
+# `command kubectl --context` 로만 부른다 — 명령 자리의 kubectl 다음 낱말은 --context(또는 컨텍스트 존재 확인 config get-contexts)뿐이다.
+# (preflight·verify 는 kubectl() 함수가 --context 를 붙이는 방식이라 위 실행 테스트가 본다.)
+_CMD_KUBECTL = re.compile(r"(?:^|[;&|({]\s*|\bcommand\s+|\bexec\s+|\bthen\s+|\bdo\s+|\belse\s+)kubectl\s+(\S+)")
+
+
+@pytest.mark.parametrize("script", ["install.sh", "host-net-probe.sh"])
+def test_every_kubectl_command_in_the_installer_names_the_context(script):
+    bad = []
+    for n, line in enumerate((DEPLOY / script).read_text(encoding="utf-8").splitlines(), 1):
+        code = line.split(" #", 1)[0]
+        if code.lstrip().startswith("#"):
+            continue
+        for m in _CMD_KUBECTL.finditer(code):
+            if m.group(1) not in ("--context", "config"):
+                bad.append((n, line.strip()))
+    assert bad == [], bad
+    text = (DEPLOY / script).read_text(encoding="utf-8")
+    assert re.search(r'(?m)^kc\(\) \{ command kubectl --context "\$CTX" "\$@"; \}', text)
+    code = "\n".join(ln for ln in text.splitlines() if not ln.lstrip().startswith("#"))
+    assert "config current-context" not in code and "use-context" not in code      # 현재 컨텍스트를 읽지도 바꾸지도 않는다
 
 
 def test_preflight_shows_the_named_context_not_the_kubeconfig_current_one(tmp_path):
@@ -136,3 +174,10 @@ def test_render_live_tag_with_an_unknown_context_fails(tmp_path):
     r, log = _render(tmp_path, "live", KUBE_CONTEXT="nope")
     assert r.returncode == 2 and "컨텍스트 'nope'" in r.stderr
     assert _cluster_calls(log) == []
+
+
+def test_render_live_tag_without_any_context_fails_instead_of_reading_the_current_one(tmp_path):
+    # 2026-11-03 ⑦: 'live' 를 current-context 로 읽으면 엉뚱한 클러스터의 태그로 렌더된다 — 컨텍스트가 없으면 kubectl 을 부르지 않고 멈춘다.
+    r, log = _render(tmp_path, "live")
+    assert r.returncode == 2 and "--context" in r.stderr, (r.stdout, r.stderr)
+    assert _calls(log) == []

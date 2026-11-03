@@ -48,7 +48,8 @@
 #   REGISTRY             앱이 쓰는 host:port(경로 접두 불가 — 7-2). in-cluster 면 <REGISTRY_CLUSTER_IP>:<REGISTRY_PORT> 와 같아야 하고, 비우면
 #                        그 값으로 채운다 — 「같은 주소가 여섯 곳」(7-4: REGISTRY·newName·DMS_JOB_IMAGE·DMS_BUILD_REGISTRY·DMS_BUILD_BUILDER_IMAGE
 #                        + DB control_state.job_image)의 원천이 이 한 값이다. 렌더 결과에서 다섯 곳이 같은지 다시 본다.
-#   REGISTRY_TLS_VERIFY  in-cluster 면 false(평문 HTTP). install.sh 의 push 가 쓴다.
+#   REGISTRY_TLS_VERIFY  in-cluster 면 false(평문 HTTP). external TLS 레지스트리면 true — 인터넷 노드 push(push-images.sh --dest-tls-verify)·
+#                        설치기 S5 대조(https)가 쓴다(포탈 태그 조회·삭제는 http:// 고정이라 TLS 레지스트리에서는 쓰지 못한다, 2026-11-03 ⑦ 리뷰 2).
 #   SHARED_DIR_ID        S0 가 쓴 <SHARED_DIR>/dms/.dms-shared-id 값 = 레지스트리 센티널(.dms-registry-id) 기대값(7-3). 레지스트리를 렌더할 때 필수.
 #   REGISTRY_CPU_REQUEST·REGISTRY_MEMORY_REQUEST  (선택) 레지스트리 requests(기본 100m/128Mi — 테스트베드는 50m/64Mi, 설계 10).
 #
@@ -164,13 +165,14 @@ NS="${DMS_NS:-dms}"
 # 되는 경로가 없다; 적대적 태그 주입 실측으로 확인). 태그당 if 블록이라 간접 변수 접근도 필요 없다.
 _live_tag() {   # $1=사람이 읽는 이름  $2..=kubectl get 인자(이미지 ref 하나를 출력)
   _human=$1; shift
-  if [ -n "$CTX" ]; then
-    command kubectl config get-contexts "$CTX" >/dev/null 2>&1 \
-      || { echo "FAIL: 컨텍스트 '$CTX' 가 kubeconfig 에 없습니다" >&2; return 1; }
-    _img=$(kubectl --context "$CTX" -n "$NS" get "$@" 2>/dev/null || true)
-  else
-    _img=$(kubectl -n "$NS" get "$@" 2>/dev/null || true)
+  # 'live' 는 컨텍스트가 있어야 읽는다(2026-11-03 ⑦ — 모든 kubectl 에 --context: current-context 로 읽으면 엉뚱한 클러스터의 태그가 렌더된다).
+  if [ -z "$CTX" ]; then
+    echo "FAIL: $_human 태그가 'live' 인데 --context <ctx>(또는 KUBE_CONTEXT)가 없습니다 — 어느 클러스터에서 읽을지 정하세요" >&2
+    return 1
   fi
+  command kubectl config get-contexts "$CTX" >/dev/null 2>&1 \
+    || { echo "FAIL: 컨텍스트 '$CTX' 가 kubeconfig 에 없습니다" >&2; return 1; }
+  _img=$(kubectl --context "$CTX" -n "$NS" get "$@" 2>/dev/null || true)
   case "$_img" in
     "") echo "FAIL: $_human 태그가 'live' 인데 클러스터에서 라이브 이미지를 읽지 못했습니다" >&2
         echo "  (첫 설치면 명시 태그(예: d118)를 쓰세요; 아니면 kubectl 접근과 네임스페이스 '$NS' 를 확인)" >&2
@@ -263,8 +265,8 @@ _ipv4_problem() {
 }
 if [ -n "$RCIP" ]; then
   _why=$(_ipv4_problem "$RCIP")
-  # 렌더러는 형식만 본다. ServiceCIDR 안·미사용·하단 정적 대역은 지금 손으로 확인한다(values.env.example 주석의 명령 — S1 자동 검사는 ⑦).
-  [ -z "$_why" ] || fail "values.env 의 REGISTRY_CLUSTER_IP='$RCIP' — $_why (예: 10.96.0.50 — ServiceCIDR 안·미사용·하단 정적 대역인지는 values.env.example 주석의 명령으로 손으로 확인)"
+  # 렌더러는 형식만 본다. ServiceCIDR 안·미사용·하단 정적 대역은 S1 preflight(--render-env)가 본다(2026-11-03 ⑦).
+  [ -z "$_why" ] || fail "values.env 의 REGISTRY_CLUSTER_IP='$RCIP' — $_why (예: 10.96.0.50 — ServiceCIDR 안·미사용·하단 정적 대역은 S1 preflight 가 본다; 렌더 전에 고르려면 REGISTRY_MODE=in-cluster REGISTRY_CLUSTER_IP=<IP> sh deploy/preflight-cluster.sh --context <ctx>)"
 fi
 case "$REGISTRY_PORT" in
   ""|0*|*[!0123456789]*) fail "values.env 의 REGISTRY_PORT='$REGISTRY_PORT' — 1..65535 숫자(기본 5000)" ;;

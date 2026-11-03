@@ -5,6 +5,17 @@
                                                                          # sh 와 같은 줄·칸 규칙(CR·비 ASCII·들여쓴 주석 거부)
   python3 deploy/images-lock.py verify  [--lock <파일>] [--timeout 30]  # 상류에서: digest 가 단일 매니페스트(index 아님)이고 linux/amd64
   python3 deploy/images-lock.py resolve <DEST> <SOURCE> [--timeout 30]  # SOURCE 태그를 읽어 lock 한 줄을 출력(index 면 linux/amd64 항목)
+  python3 deploy/images-lock.py compare-registry --registry-url http://127.0.0.1:<port> [--lock <파일>] [--only <이름>]... [--skip <이름>]...
+                                                                         # S5 대조(2026-11-03 ⑦): 레지스트리의 각 DEST 태그 digest == lock
+
+compare-registry(설계 7-5 ④·8-1 S5 「없거나 다르면 FAIL」): 설치 호스트가 `kubectl --context C -n dms port-forward svc/dms-registry
+:<PORT>` 로 연 주소를 받는다(port-forward 는 apiserver 를 거치므로 설치 호스트가 ClusterIP 에 닿지 않아도 된다 — 여는 것은 호출자 몫).
+줄마다 `GET /v2/<이름>/manifests/<태그>`(Accept = 매니페스트·index 네 종류) 본문의 sha256 을 lock digest 와 견준다 — 헤더
+(Docker-Content-Digest)가 아니라 본문으로 잰다. 태그가 없거나 다른 digest 면 FAIL 이고, 그때 lock digest 가 레지스트리에 (태그 없이)
+있는지도 봐서 사유를 가른다(태그 없는 digest 는 GC --delete-untagged 가 지운다). env 프록시는 쓰지 않는다(127.0.0.1 port-forward 도
+urllib 는 HTTP_PROXY 로 보낸다). 레지스트리 자기 이미지(registry)는 설계 7-5 의 **태그 ref 예외** — 매니페스트가 digest 가 아니라 태그로
+받으므로(S6 pull 프로브·새 마스터·업그레이드) 다른 것과 똑같이 대조하되 사유에 그것을 적는다. --only/--skip 은 DEST 또는 그 이름(태그 앞)
+— 어느 줄에도 맞지 않으면 사용법 오류(exit 2, 오타가 조용히 0개가 되지 않게).
 
 lock 형식은 deploy/images.lock 머리 주석이 정의한다(공백으로 가른 세 칸 DEST SOURCE DIGEST — sh 의 `read -r dest src dg` 로도 읽힌다).
 
@@ -15,7 +26,8 @@ lock 형식은 deploy/images.lock 머리 주석이 정의한다(공백으로 가
 상류 접근은 익명이다(docker.io·quay.io 의 Bearer 토큰 흐름 — WWW-Authenticate 를 따라 한 번 받는다). 프록시는 표준 env
 (HTTPS_PROXY·NO_PROXY)를 urllib 가 그대로 쓴다. 설치 호스트의 python3(RHEL 9 = 3.9)로 돌고 표준 라이브러리만 쓴다.
 
-종료: 0 PASS · 1 FAIL(형식 오류·index digest·amd64 아님·digest 불일치) · 2 사용법 · 4 모름(네트워크·상류 무응답). 마지막 줄 `RESULT: …`.
+종료: 0 PASS · 1 FAIL(형식 오류·index digest·amd64 아님·digest 불일치, compare-registry 의 태그 없음·digest 다름) · 2 사용법 ·
+4 모름(네트워크·상류·레지스트리 무응답, 레지스트리가 익명이 아님). 마지막 줄 `RESULT: …`.
 """
 from __future__ import annotations
 
@@ -143,16 +155,30 @@ def parse_lock(text: str):
 
 # --- 상류 레지스트리(익명) ---------------------------------------------------------------------------------------------
 
-def http_get(url: str, headers: dict, timeout: float):
-    """(status, 소문자 헤더 dict, body). 테스트가 이 함수를 바꿔치기한다. 연결 실패는 Unknown."""
+def _fetch(opener_open, url: str, headers: dict, timeout: float):
     req = urllib.request.Request(url, headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with opener_open(req, timeout=timeout) as r:
             return r.status, {k.lower(): v for k, v in r.headers.items()}, r.read()
     except urllib.error.HTTPError as e:
         return e.code, {k.lower(): v for k, v in (e.headers or {}).items()}, e.read() or b""
     except (urllib.error.URLError, OSError, ValueError) as e:
         raise Unknown(f"{url}: {e}") from None
+
+
+def http_get(url: str, headers: dict, timeout: float):
+    """(status, 소문자 헤더 dict, body). 테스트가 이 함수를 바꿔치기한다. 연결 실패는 Unknown. 상류용 — env 프록시를 탄다."""
+    return _fetch(urllib.request.urlopen, url, headers, timeout)
+
+
+# 클러스터 내 레지스트리용(compare-registry, 2026-11-03 ⑦): env 프록시를 쓰지 않는다. urllib 는 127.0.0.1 도 예외로 두지 않아 설치
+# 호스트에 HTTP_PROXY 가 있으면 port-forward 주소를 프록시로 보낸다 — 프록시는 그 주소에 닿지 않으므로 「모름」이 된다.
+_DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def http_get_direct(url: str, headers: dict, timeout: float):
+    """http_get 과 같되 프록시 없이(레지스트리 대조)."""
+    return _fetch(_DIRECT.open, url, headers, timeout)
 
 
 def split_source(src: str):
@@ -167,9 +193,13 @@ def split_source(src: str):
 
 
 class Upstream:
-    def __init__(self, api: str, repo: str, timeout: float):
+    def __init__(self, api: str, repo: str, timeout: float, fetch=None):
         self.api, self.repo, self.timeout = api, repo, timeout
         self.token = None
+        self.fetch = fetch      # None = 모듈의 http_get(부를 때 찾는다 — 테스트의 바꿔치기가 먹게)
+
+    def _get(self, url: str, headers: dict):
+        return (self.fetch or http_get)(url, headers, self.timeout)
 
     def _token(self, challenge: str):
         params = dict(re.findall(r'(\w+)="([^"]*)"', challenge or ""))
@@ -177,7 +207,7 @@ class Upstream:
         if not challenge.lower().startswith("bearer") or not realm:
             raise Unknown(f"{self.api}: 익명 Bearer 토큰 흐름이 아니다({challenge!r})")
         query = urllib.parse.urlencode({"service": params.get("service", ""), "scope": f"repository:{self.repo}:pull"})
-        status, _, body = http_get(f"{realm}?{query}", {}, self.timeout)
+        status, _, body = self._get(f"{realm}?{query}", {})
         if status != 200:
             raise Unknown(f"{realm}: 토큰 HTTP {status}")
         try:
@@ -195,7 +225,7 @@ class Upstream:
             headers = {"Accept": accept}
             if self.token:
                 headers["Authorization"] = f"Bearer {self.token}"
-            status, hdrs, body = http_get(url, headers, self.timeout)
+            status, hdrs, body = self._get(url, headers)
             if status == 401 and attempt == 0:
                 self._token(hdrs.get("www-authenticate", ""))
                 continue
@@ -267,6 +297,126 @@ def resolve(src: str, timeout: float):
     if why:
         raise ValueError(why)
     return digest
+
+
+# --- 레지스트리 대조(S5, 2026-11-03 ⑦) ---------------------------------------------------------------------------------
+
+# 태그로 받는 소비자가 있는 lock 줄(DEST 의 이름) — 이 줄의 태그가 다른 digest 를 가리키면 소비자가 lock 과 다른 이미지를 받는다. 나머지는
+# 렌더러가 <REG>/<DEST>@<DIGEST> 로 digest 를 집으므로 태그는 GC 보호(태그 없는 digest 는 GC 가 지운다)뿐이다. 판정은 같고(없거나 다르면
+# FAIL — 레지스트리 자기 이미지도 S6 pull 프로브가 이 태그를 Always 로 받으므로 예외로 넘기지 않는다) 사유만 다르다.
+TAG_REF = {
+    "registry": "태그 ref — 설계 7-5 의 문서화된 예외: deploy/platform/registry 가 태그로 쓰고 S6 pull 프로브·새 마스터·업그레이드가 이 태그로 받는다",
+    "buildah": "태그 ref — 포탈 빌드의 빌더(DMS_BUILD_BUILDER_IMAGE = <REGISTRY>/buildah:stable)가 이 태그로 받는다",
+}
+
+
+def _short(digest: str) -> str:
+    return digest[:19] + "…"
+
+
+def _body_digest(body: bytes) -> str:
+    return "sha256:" + hashlib.sha256(body).hexdigest()
+
+
+def compare_entry(reg_url: str, dest: str, digest: str, timeout: float):
+    """레지스트리의 DEST 태그가 lock digest 인가. (판정 OK|FAIL, 사유). 닿지 못하거나 익명이 아니면 Unknown."""
+    repo, tag = _split_tagged(dest)
+    reg = Upstream(reg_url, repo, timeout, fetch=http_get_direct)
+    status, hdrs, body = reg.get("manifests", tag)
+    if status == 200:
+        got = _body_digest(body)
+        if got == digest:
+            mt = _media_type(hdrs, body)
+            if mt in INDEX_TYPES:
+                return "FAIL", f"태그 {tag} 가 index 다({mt}) — lock 은 linux/amd64 매니페스트 digest 여야 한다(images-lock.py verify)"
+            return "OK", _short(digest)
+        tagged = f"태그 {tag} 가 다른 digest({_short(got)})를 가리킨다"
+    elif status == 404:
+        tagged = f"태그 {tag} 가 없다(404)"
+    elif status in (401, 403):
+        raise Unknown(f"{reg_url}/v2/{repo}/manifests/{tag}: HTTP {status} — 익명 레지스트리가 아니다(주소 확인)")
+    else:
+        raise Unknown(f"{reg_url}/v2/{repo}/manifests/{tag}: HTTP {status}")
+    # lock digest 가 (태그 없이) 레지스트리에 있는지로 사유를 가른다 — 고치는 길은 같다(태그를 붙여 다시 push).
+    st2, _, body2 = reg.get("manifests", digest)
+    if st2 == 200 and _body_digest(body2) == digest:
+        return "FAIL", (f"{tagged}. lock digest({_short(digest)})는 레지스트리에 있지만 이 태그가 가리키지 않는다 — 태그 없는 digest 는 "
+                        "GC(--delete-untagged)가 지운다")
+    if st2 in (200, 404):
+        if status == 404:
+            return "FAIL", f"{tagged} — lock 의 이미지({_short(digest)})가 레지스트리에 없다(S5 push 전이거나 빠졌다)"
+        return "FAIL", f"{tagged} — lock({_short(digest)})과 다른 이미지가 이 태그로 push 됐다"
+    raise Unknown(f"{reg_url}/v2/{repo}/manifests/{digest}: HTTP {st2}")
+
+
+def _registry_url(raw: str):
+    """http(s)://<호스트>[:<포트>] 만(경로·계정·쿼리 없이). 아니면 None."""
+    url = raw.rstrip("/")
+    try:
+        p = urllib.parse.urlsplit(url)
+        p.port                                                # 포트 모양 검사(ValueError)
+    except ValueError:
+        return None
+    if p.scheme not in ("http", "https") or not p.hostname or p.path or p.query or p.fragment or "@" in p.netloc:
+        return None
+    return url
+
+
+def _select(entries, only, skip):
+    """--only/--skip(DEST 또는 그 이름). 어느 줄에도 맞지 않는 이름은 사용법 오류 — 오타가 조용히 0개·전부가 되지 않게."""
+    def hit(name, dest):
+        return name == dest or name == _split_tagged(dest)[0]
+    for name in list(only) + list(skip):
+        if not any(hit(name, d) for _, d, _, _ in entries):
+            print(f"FAIL: '{name}' 가 lock 의 어느 줄에도 맞지 않는다(--only/--skip 은 DEST 또는 그 이름)", file=sys.stderr)
+            sys.exit(2)
+    return [e for e in entries
+            if (not only or any(hit(n, e[1]) for n in only)) and not any(hit(n, e[1]) for n in skip)]
+
+
+def cmd_compare_registry(args) -> str:
+    url = _registry_url(args.registry_url)
+    if url is None:
+        print("FAIL: --registry-url 은 http(s)://<호스트>:<포트> 만(경로·계정 없이 — 예: port-forward 의 http://127.0.0.1:15000)",
+              file=sys.stderr)
+        sys.exit(2)
+    entries, problems = parse_lock(_read(args.lock))
+    result = "PASS"
+    for no, why in problems:
+        print(f"  FAIL  {args.lock}:{no}: {why}")
+        result = "FAIL"
+    selected = _select(entries, args.only, args.skip)
+    if not selected:
+        print(f"  FAIL  {args.lock}: 대조할 항목이 없다")
+        return "FAIL"
+    # 먼저 /v2/ 한 번 — 닿지 않으면 줄마다 시간 초과를 기다리지 않고 「모름」 하나로 끝낸다(port-forward 가 닫혔거나 주소가 틀림).
+    try:
+        st, _, _ = http_get_direct(f"{url}/v2/", {}, args.timeout)
+    except Unknown as e:
+        print(f"  UNKNOWN 레지스트리에 닿지 못했다 — {e} (port-forward 가 열렸는지·주소)")
+        return "UNKNOWN" if result == "PASS" else result
+    if st not in (200, 401):
+        print(f"  UNKNOWN {url}/v2/ 가 HTTP {st} — Distribution 레지스트리가 아니다(주소 확인)")
+        return "UNKNOWN" if result == "PASS" else result
+    unknown = False
+    for no, dest, _src, dg in selected:
+        name = _split_tagged(dest)[0]
+        note = f" [{TAG_REF[name]}]" if name in TAG_REF else ""
+        try:
+            verdict, why = compare_entry(url, dest, dg, args.timeout)
+        except Unknown as e:
+            print(f"  UNKNOWN {dest}: {e}")
+            unknown = True
+            continue
+        if verdict == "OK":
+            print(f"  OK    {dest}: {why}{note}")
+        else:
+            print(f"  FAIL  {args.lock}:{no} {dest}: {why} — 인터넷 노드에서 push: "
+                  f"sh deploy/push-images.sh --registry <REG> --only {dest} --run{note}")
+            result = "FAIL"
+    if result == "PASS" and unknown:
+        return "UNKNOWN"
+    return result
 
 
 # --- CLI -------------------------------------------------------------------------------------------------------------
@@ -346,11 +496,18 @@ def main(argv=None) -> int:
     p.add_argument("dest")
     p.add_argument("source")
     p.add_argument("--timeout", type=float, default=30.0)
+    p = sub.add_parser("compare-registry")
+    p.add_argument("--registry-url", required=True)
+    p.add_argument("--lock", default=LOCK)
+    p.add_argument("--only", action="append", default=[])
+    p.add_argument("--skip", action="append", default=[])
+    p.add_argument("--timeout", type=float, default=30.0)
     args = ap.parse_args(argv)
     if args.cmd is None:
         ap.print_usage(sys.stderr)
         return 2
-    result = {"check": cmd_check, "verify": cmd_verify, "resolve": cmd_resolve}[args.cmd](args)
+    result = {"check": cmd_check, "verify": cmd_verify, "resolve": cmd_resolve,
+              "compare-registry": cmd_compare_registry}[args.cmd](args)
     stream = sys.stderr if args.cmd == "resolve" else sys.stdout   # resolve 의 stdout 은 lock 한 줄만
     print(f"RESULT: {result}", file=stream)
     return EXIT[result]

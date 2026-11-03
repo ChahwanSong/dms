@@ -673,80 +673,9 @@ def test_render_env_carries_the_resolved_app_tags(tmp_path):
     assert (env["DMS_TAG"], env["DMS_AGENT_TAG"], env["MFU_TAG"]) == ("v-dms-tag", "v-dms-agent-tag", "v-mfu-tag")
 
 
-# --- install.sh 의 in-cluster 게이트(2026-11-03 ④ 리뷰 2) — kubectl·curl 은 가짜(클러스터를 보지 않는다) ------------------------------
-
-_KUBECTL_SHIM = r'''#!/bin/sh
-echo "$*" >> "$SHIM_LOG"
-case "$*" in
-  version) exit 0 ;;
-  "get crd "*|"get ns "*|"get ingressclass "*) exit 0 ;;
-  *"get secret dms-secrets -o go-template"*)
-    printf 'DMS_DATABASE_URL=x\nDMS_SHARED_TOKEN=x\nDMS_ADMIN_TOKEN=x\nDMS_SESSION_SECRET=x\n'; exit 0 ;;
-  *"get secret "*) exit 0 ;;
-  *"get svc dms-registry"*) printf '%s' "$FAKE_SVC_IP"; exit 0 ;;
-  *"get deploy dms-registry"*) printf '1'; exit 0 ;;
-  *"port-forward svc/dms-registry "*)
-    if [ -n "${FAKE_PF_FAIL:-}" ]; then echo "error: unable to forward port" >&2; exit 1; fi
-    echo "Forwarding from 127.0.0.1:41234 -> 5000"; echo "Forwarding from [::1]:41234 -> 5000"; exec sleep 20 ;;
-  *"apply -k "*"--dry-run=server"*) exit 0 ;;
-esac
-echo "unexpected kubectl $*" >&2; exit 97
-'''
-
-_CURL_SHIM = r'''#!/bin/sh
-echo "$*" >> "$CURL_LOG"
-for a; do url=$a; done
-p=${url#http://127.0.0.1:41234/v2/}
-[ "$p" != "$url" ] || { printf 000; exit 7; }
-repo=${p%%/manifests/*}; tag=${p##*/manifests/}
-case " $PRESENT " in *" $repo:$tag "*) printf 200 ;; *) printf 404 ;; esac
-'''
-
-
-def _install_dry_run(tmp_path, present, **env_extra):
-    root = _tree(tmp_path)
-    shutil.copy(DEPLOY / "install.sh", root / "install.sh")
-    bindir = tmp_path / "bin"
-    bindir.mkdir()
-    for name, body in (("kubectl", _KUBECTL_SHIM), ("curl", _CURL_SHIM)):
-        (bindir / name).write_text(body)
-        (bindir / name).chmod(0o755)
-    vals = tmp_path / "prod.values.env"
-    vals.write_text(_prod_values())
-    env = {"PATH": f"{bindir}{os.pathsep}{os.environ.get('PATH', '/usr/bin:/bin')}", "HOME": str(tmp_path),
-           "VALUES_ENV": str(vals), "SHIM_LOG": str(tmp_path / "kubectl.log"), "CURL_LOG": str(tmp_path / "curl.log"),
-           "FAKE_SVC_IP": "10.96.0.50", "PRESENT": present, **env_extra}
-    r = subprocess.run(["sh", str(root / "install.sh"), "--dry-run"], env=env, capture_output=True, text=True, timeout=60)
-    log = lambda n: (tmp_path / n).read_text().splitlines() if (tmp_path / n).exists() else []   # noqa: E731
-    return r, log("kubectl.log"), log("curl.log")
-
-
-ALL_TAGS = "dms:v-dms-tag dms-agent:v-dms-agent-tag dms-mpifileutils:v-mfu-tag"
-
-
-def test_install_in_cluster_gate_passes_when_every_app_tag_is_in_the_registry(tmp_path):
-    r, kcalls, curls = _install_dry_run(tmp_path, ALL_TAGS)
-    assert r.returncode == 0, (r.stdout, r.stderr)
-    for spec in ALL_TAGS.split():
-        assert f"레지스트리에 {spec} 있음" in r.stdout
-    assert [c for c in kcalls if "port-forward" in c] == ["-n dms port-forward svc/dms-registry :5000"]   # 무작위 로컬 포트
-    assert len(curls) == 3 and all(" -I " in f" {c} " and "application/vnd.oci.image.manifest.v1+json" in c for c in curls), curls
-    assert any("apply -k" in c and "--dry-run=server" in c for c in kcalls)
-
-
-def test_install_in_cluster_gate_stops_before_apply_when_s5_is_missing(tmp_path):
-    # S5(DMS 이미지 push)를 빠뜨렸으면 migrate 가 ImagePullBackOff → 180초 타임아웃으로 끝나던 것을 apply 전 한 줄 사유로.
-    r, kcalls, _ = _install_dry_run(tmp_path, "dms:v-dms-tag dms-mpifileutils:v-mfu-tag")
-    assert r.returncode == 1, (r.stdout, r.stderr)
-    assert "S5 미완" in r.stderr and "dms-agent:v-dms-agent-tag(HTTP 404)" in r.stderr, r.stderr
-    assert not any("apply -k" in c for c in kcalls), kcalls
-
-
-def test_install_in_cluster_gate_reports_a_port_forward_that_never_listens(tmp_path):
-    r, kcalls, curls = _install_dry_run(tmp_path, ALL_TAGS, FAKE_PF_FAIL="1")
-    assert r.returncode == 1, (r.stdout, r.stderr)
-    assert "port-forward 가 열리지 않았다" in r.stderr and "unable to forward port" in r.stderr, r.stderr
-    assert curls == [] and not any("apply -k" in c for c in kcalls)
+# --- install.sh 의 in-cluster 게이트(2026-11-03 ④ 리뷰 2) → 2026-11-03 ⑦ 단계 설치기의 S5·S11 로 옮겼다 ------------------------------
+# 「앱 태그가 레지스트리에 없으면 apply 전 한 줄 사유로 멈춘다」·「port-forward 가 열리지 않으면 그 사유」는 tests/test_install_stages.py 가
+# 실제 렌더러(render.sh prod)의 render.env 로 본다(test_real_prod_render_*).
 
 
 def test_registry_values_in_the_callers_environment_are_ignored(tmp_path):

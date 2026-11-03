@@ -353,8 +353,9 @@ deploy/README §2d.
   testbed-k8s 앱 오버레이와 `platform/{priorityclass,registry}` 를 `deploy/.rendered/<site>/` 에 렌더한다(⑤ db 는 같은 자리로). testbed-k8s 의
   앱 값(아티팩트 base·레지스트리)은 여전히 커밋된 오버레이가 원천이고 `values.env` 는 그 기록이다 — 렌더러가 어긋나면 FAIL 한다. 플랫폼 층의
   값은 `values.env` 만이 원천이다.
-- 🔧 **설치기 연결(⑦)** — `install.sh` 단계에 S0 안내와 S7 자동 호출(exit 3 이면 계속, 1·4 면 정지)을 넣는다. 지금은
-  `preflight-cluster.sh` 의 수동 확인(M) 줄과 `install.sh` 가드(exit 5)의 안내 문구뿐이다.
+- ~~**설치기 연결(⑦)**~~ — **해소**(2026-11-03 ⑦, CHANGELOG 「⑦ 설치기」): S7 이 `shared-storage-probe.py` 를 부른다(exit 3 이면 계속, 1·4 면
+  정지). S0 은 사이트 몫이라 설치기는 하지 않는다 — prod README 「0. 사이트 준비」와 preflight 노드 셸 체크리스트가 안내하고, S1 이
+  `SHARED_DIR` 형식을, S4·S7·S10 이 센티널·마운트를 동작으로 본다.
 - 🔧 **테스트베드 IaC**(testbed 저장소 몫)
   - `/dms_shared` export(호스트 `/data/dms_shared` → 10.10.10.20–.22)와 3노드 fstab 마운트를 testbed 에 반영한다 — 지금은 라이브
     적용만이다(deploy/README §2d-5).
@@ -378,25 +379,13 @@ deploy/README §2d.
 
 CHANGELOG 「④ 클러스터 내 레지스트리」, 설계 v6 7·8-1(S0-4·S0-5·S-1·S4~S6)·10 T4, deploy/README §2e.
 
-- 🔧 **설치기 연결(⑦)** — 지금은 런북(deploy/README §2e)을 손으로 돈다. `install.sh` 는 in-cluster 면 호스트 push 를 건너뛰고, Service
-  `dms-registry`(clusterIP == `REGISTRY_CLUSTER_IP`)가 Ready 가 아니거나 dms·dms-agent·dms-mpifileutils 태그(render.env 의 해석값)가 그
-  레지스트리에 없으면(port-forward 로 매니페스트 HEAD — 2026-11-03 ④ 리뷰 2) apply 전에 멈출 뿐이다. ⑦ 에서:
-  - S2 → S4 순서: 네임스페이스(`deploy/k8s/00-namespace.yaml`)를 S4 앞에 적용한다 — 새 클러스터에서 http 시크릿·레지스트리 SSA 는 ns 가
-    없으면 실패하고, install.sh 의 앱 apply(ns 포함)는 레지스트리 Ready 게이트 뒤라 우회되지 않는다(지금은 §2e-3·prod README 3단계의 손 명령).
-  - S4: PriorityClass·레지스트리 SSA(`--field-manager=dms-install`), http 시크릿(없을 때만·출력 없음), port-forward `/v2/_catalog` 200
-    (listen 을 기다린 뒤), 「마스터 X 에 공용 디렉터리 없음」(FailedMount 이벤트 — init 전)「센티널 없음·불일치」(init 로그)「clusterIP 충돌」
-    사유 문구. ⑦ 감지기는 Deployment 라벨 `dms.io/addon-version` 으로 D=/D</D> 를 가른다.
-  - lock 에 **Volcano v1.16.0 3종**(scheduler·controller-manager·admission — S9b A 경로 설치용, 설계 7-5 ③)을 덧붙인다(⑤ CNPG·⑥ EG 와 함께).
-  - S4 뒤 정지 → 인터넷 노드용 **push 스크립트**(`images.lock` → `skopeo copy --preserve-digests`, 프록시는 env `HTTPS_PROXY`·`NO_PROXY`) →
-    `install.sh --stage S5` 재개 → port-forward 로 태그별 digest 를 lock 과 대조(없거나 다르면 **FAIL** — 지금의 호스트 podman push WARN 을
-    대체, 설계 9 ⑦).
-  - S6 pull 프로브(임시 DS, toleration Exists, 레지스트리 이미지, `Always`, 120초 — 노드별 「신뢰 설정·서명 정책·프록시·ClusterIP 경로」).
-  - S11 마스터 3대 `dms` 이미지 사전 pull, S12 verify 에 레지스트리 Ready·태그.
-  - S1 preflight: `REGISTRY_CLUSTER_IP` 가 ServiceCIDR 안·미사용·하단 정적 대역인지(렌더러는 IPv4 형식만 본다), 노드 셸 체크리스트
-    (`crio config` 의 `pinned_images`·`signature_policy`, 런타임 프록시 NO_PROXY).
-  - `SHARED_DIR_ID` 를 손으로 values.env 에 옮기지 않게: S0 결과(`.dms-shared-id`)를 일회용 파드로 읽어 제안·대조하는 길.
-  - SHARED_DIR 변경 때 레지스트리 저장소 이동(지금은 deploy/README §2e-5 「저장소 이동」 손 절차 — 센티널을 복사에서 빼고 `SHARED_DIR_ID`
-    를 새 값으로, 앱보다 먼저): 설치기가 플랫폼 층을 SSA 할 때 같은 순서·가드 exit 5 를 따른다.
+- ~~**설치기 연결(⑦)**~~ — **해소**(2026-11-03 ⑦, CHANGELOG 「⑦ 설치기」 — deploy/README §2h): S2 가 ns 를 S4 앞에 적용, S4(PriorityClass·
+  레지스트리 SSA `dms-install`·http 시크릿 없을 때만·stdin·rollout·port-forward `/v2/` 200·FailedMount·센티널·clusterIP 충돌 사유), S4 뒤 정지
+  (PAUSE exit 10) → `deploy/push-images.sh`(인터넷 노드, `--print`·`--run`, 프록시 NO_PROXY 검사) → `--stage S5` 재개 → `images-lock.py
+  compare-registry`(없거나 다르면 FAIL — 옛 호스트 podman push WARN 을 대체) + DMS 3종 태그, S6 `pull-probe.py`, S11 마스터 사전 pull, S12 레지스트리
+  Ready·태그, S1 REGISTRY_CLUSTER_IP(ServiceCIDR·IPAddress·하단 정적 대역)·노드 셸 체크리스트(pinned_images·signature_policy·NO_PROXY). 감지기는
+  Deployment 라벨 `dms.io/addon-version` 으로 D=/D</D> 를 가른다. 남은 것은 아래 「⑦ 설치기 후속」(Volcano lock 줄·`SHARED_DIR_ID` 제안·
+  SHARED_DIR 변경 때 레지스트리 저장소 이동 자동화).
 - ~~**테스트베드 T4 실증**~~ — **해소**(2026-11-03, CHANGELOG ④ 「T4 실증」 — 확인 항목 1~7 전 항목 PASS, 4(cp1 재부팅) 실패 창 약 93초).
   실증에서 찾은 레지스트리 종료 drain 없음(b3c5f4e)·포탈 이미지 삭제 보호 두 구멍(01fd922)은 고쳤다.
 - ~~**testbed-k8s 앱 전환**~~ — **해소**(2026-11-03, 6287cd8 → 첫 포탈 빌드 d19 35a10a3, deploy/README §2e-6): 잡 이미지 재릴리스, 모든 dms
@@ -422,7 +411,7 @@ CHANGELOG 「④ 클러스터 내 레지스트리」, 설계 v6 7·8-1(S0-4·S0-
 - 📝 **GC 로 블롭이 실제 지워지는 경로는 T4 에서 0건**(별칭이 블롭 공유) — 다음 GC 때 확인.
 - 📝 **레지스트리 1개(#46)** — HA(2개 이상)는 G3(S7 ②)가 PASS 인 사이트에서만 다시 본다(설계 7-1 — NFS 부정 캐시로 `blob unknown`).
   1개라 레지스트리가 있는 마스터 급사 때 약 90~110초 공백(7-6 표).
-- 📝 **설계 ④ 의 선택 항목은 하지 않았다** — 마스터 사전 pull(S11 — ⑦ 와 함께), 태그 DELETE(Distribution v3 의 태그 단위 삭제 — 포탈은 지금처럼 digest 로 매니페스트를
+- 📝 **설계 ④ 의 선택 항목 가운데 태그 DELETE 는 하지 않았다**(마스터 사전 pull 은 ⑦ S11 이 한다 — `pull-probe.py --image <dms> --nodes <마스터>`) — 태그 DELETE(Distribution v3 의 태그 단위 삭제 — 포탈은 지금처럼 digest 로 매니페스트를
   지운다; DMS 코드는 바꾸지 않는다, 설계 7-3).
 - 📝 **REGISTRY_PORT ≠ 5000** — Service 포트만 바뀌고 컨테이너는 :5000 그대로다(테스트가 고정). 노드 신뢰·고정 패턴은 `<IP>:<PORT>`.
 
@@ -430,27 +419,13 @@ CHANGELOG 「④ 클러스터 내 레지스트리」, 설계 v6 7·8-1(S0-4·S0-
 
 CHANGELOG 「⑤ DB(CNPG)」, 설계 v6 6·8-1(S2·S9·S10·S12)·8-2·10 T6/T6'/T7, deploy/README §2f.
 
-- 🔧 **설치기 연결(⑦)** — 지금은 §2f 의 손 명령이다. ⑦ 에서:
-  - **S2**: `deploy/pg-secrets.py ensure-app`·`init-secrets`(값 출력 없음)를 설치 흐름에, install 게이트에 `pg-secrets.py check`(설계 6-3 「host·DB·
-    사용자·비밀번호 일치를 메모리에서만」) — 지금 install.sh 는 `dms-secrets` 4키의 존재·자리표시자만 본다.
-  - **S9 감지 상태 기계(8-2 CNPG 행)**: CRD `clusters.postgresql.cnpg.io`·라벨 `app.kubernetes.io/name=cloudnative-pg`·manager 이미지 태그·
-    `dms.io/addon-version`·`WATCH_NAMESPACE`(env 와 ConfigMap/Secret `cnpg-controller-manager-config`) → A/D=/D</D>/C/C!/X/U/P(오퍼레이터 둘 이상 = P,
-    하한 1.25 — `dataDurability`, watch 범위에 dms 없음 = X). A 면 SSA → rollout → **Cluster CR server dry-run**(「failed calling webhook」이면 9443
-    사유). `ADDON_INSTALL=never` 면 FAIL + 「클러스터 운영자에게 요청」. **함정**: 첫 설치의 addons server dry-run(S3 `--plan` 포함)은
-    `cnpg-system` 이 없으면 그 안 객체마다 `namespaces "cnpg-system" not found` — server dry-run 은 묶음 안의 Namespace 를 저장하지 않는다
-    (kubernetes#83562). Namespace 를 먼저 만들거나(지금 손 절차 — README §2f-3) 그 NotFound 를 「첫 설치 예상」으로 판정한다.
-  - **S10 자동 순서·판정**: 이미 있는 SC·PV 가 렌더와 다르면 FAIL(path·SC·용량 — `pg-path-probe.py --mode pv-check` 가 이미 한다: **적용 전에**
-    불러야 한다, 용량·SC 이름은 SSA 가 Bound PV 까지 조용히 바꾼다), PV 경로가 `<SHARED_DIR>/dms/pgdata/` 밖이면 FAIL, Released 는 WARN,
-    사전 검사·경로 대조는 `deploy/pg-path-probe.py`(종료 코드 그대로), 900초 폴링(readyInstances ≥ 1·`dms-pg-rw` Endpoints·currentPrimary Ready),
-    readyInstances < 3 WARN·0/시간 초과 FAIL·Available 여분 < 1 WARN, CronJob + 첫 덤프 완료 확인(Complete·Failed 를 함께 본다 — `wait
-    --for=condition=complete` 는 Failed 에서도 시간 초과까지 기다린다, README §2f-4 6)). 경로 프로브의 판정 대상은 S2b 와 같은 DMS 노드(`pg-path-probe.
-    dms_nodes` — ⑦ 의 S2b 는 같은 정의를 써야 한다). external 사이트는 S4 를 거치지 않으므로 S9 앞에 PriorityClass·애드온 이미지 push(README §2f-3).
-    **DMS(S11)는 DB 가 Ready 된 뒤에** — migrate 는
-    `backoffLimit: 3`·install 은 180초만 기다린다(`30-migrate-job.yaml`, `install.sh`).
-  - **S12 verify**: CNPG·Available 여분 PV·경로 대조(S10 과 같은 검사)·CronJob 마지막 성공 시각.
-  - `install.sh --upgrade-addon cnpg`(6-5): K8s 지원 범위·**minor 하나씩**·직전 덤프·SSA → 롤아웃 → switchover 완료 대기. 인터넷 노드 push 스크립트에
-    lock 의 `cloudnative-pg`·`postgresql` 이 이미 들어간다(lock 의 모든 줄).
-  - `kubectl-cnpg` 플러그인·`cnpg-<v>-checksums.txt` 반입(K8 — 인터넷 노드 → 설치 호스트).
+- ~~**설치기 연결(⑦)**~~ — **해소**(2026-11-03 ⑦, CHANGELOG 「⑦ 설치기」 — deploy/README §2h): S2 `pg-secrets.py ensure-app`·`init-secrets`·
+  `check`(설계 6-3 게이트 — S11 apply 전에도), S9 감지 상태 기계(`install-detect.py` — CNPG 행 그대로, A 면 ns 먼저 → SSA → rollout → Cluster CR
+  server dry-run, 막 뜬 웹훅은 재시도, 「failed calling webhook」이면 9443 사유; `ADDON_INSTALL=never`; 첫 설치 dry-run 의 ns·CRD 없음은 SKIP),
+  S10 자동 순서·판정(pv-check 를 **적용 전에** → db-volumes → precheck → db-cluster → 900초 폴링(세 조건, 시간 초과에 ≥1 이면 WARN·0 이면 FAIL) →
+  contrast → db-backup → 첫 덤프 Complete·Failed — CronJob 마지막 성공이 있으면 건너뜀), S12 CNPG·여분 PV·경로 대조·CronJob, `--upgrade-addon cnpg`
+  (minor 하나씩은 감지가 막고, 직전 덤프 → SSA → rollout → healthy 대기). external 사이트는 S4 가 PriorityClass 를, S5 가 lock 대조·push 명령을 한다.
+  남은 것: `kubectl-cnpg` 플러그인·checksums 반입(K8), 새 사이트 첫 이관의 import bootstrap — 아래 「⑦ 설치기 후속」.
 - ~~**테스트베드 T6 실증**~~ — **해소**(2026-11-03, CHANGELOG ⑤ 「T6 실증」 — 전 항목 PASS). 실증에서 찾아 고친 것: 옛 PGDATA 잔재 `pgdata_*`
   WARN·덤프 `backoffLimit` 3(1a11d50), VAP 를 기본으로(09b0652 — 아래 「선택 항목」에서 뺐다).
 - 🔧 **T6'(장애·성능, 사용자 승인 필수 — T6·T7 뒤 남은 ⑤ 실증)** — primary 노드 전원 차단(keepalive 없이/넣고 — 15분 매달림 가설), drain(smartShutdown 0 대 180),
@@ -460,7 +435,8 @@ CHANGELOG 「⑤ DB(CNPG)」, 설계 v6 6·8-1(S2·S9·S10·S12)·8-2·10 T6/T6'
 - ~~**T7(앱 DB 이관)**~~ — **해소**(2026-11-03 사용자 승인, CHANGELOG ⑤ 「T7」 — 앱 정지 창 3분 29초, 테이블 37·행 42,951·시퀀스 7 일치; 순서는 README
   §2f-2 「이관 순서」). 실증 검토에서 고친 것: `set-url` 이 되돌림 URL 을 덮던 결함(a22cb32). 남은 것:
   - 📝 **pkg-01 외부 PG(`dmsdb_k8s`) 정리 시점** — 결정 대기. 지금은 되돌림용이다(`dms-secrets-prev` → `restore-url`; 이관 뒤 쓰기는 거기 없다).
-  - 새 사이트의 첫 이관을 import bootstrap 으로 만드는 흐름은 ⑦ 설치기 몫(import 경로 자체는 T6 이 일회용 Cluster 로 실증 — 행 수·md5 일치).
+  - 새 사이트의 첫 이관을 import bootstrap 으로 만드는 흐름은 아직 손 절차다(⑦ 설치기는 S2 `pg-secrets.py check` 가 외부 DB URL 이면 §2f-2 「이관
+    순서」로 멈출 뿐 — 아래 「⑦ 설치기 후속」; import 경로 자체는 T6 이 일회용 Cluster 로 실증 — 행 수·md5 일치).
 - ~~**T6 확인 대기(추정으로 둔 것)**~~ — **해소**(2026-11-03 T6·T7 실측, CHANGELOG ⑤):
   - Cluster `Ready` 조건은 모든 인스턴스가 healthy 일 때만 선다(switchover 중에도 `ClusterIsNotReady`) — 폴링은 세 조건 그대로.
   - Cluster 삭제 때 PVC 는 ownerReference 로 약 10초 안에 함께 지워진다 → PV Released → 재활용 런북(README §2f-5 의 「추정」 정정).
@@ -492,31 +468,14 @@ CHANGELOG 「⑤ DB(CNPG)」, 설계 v6 6·8-1(S2·S9·S10·S12)·8-2·10 T6/T6'
 
 CHANGELOG 「⑥ 입구(Envoy Gateway)」, 설계 v6 #13~#15·4-3·8-1(S0-5·S8·S12)·8-2·10 T8, deploy/README §2g.
 
-- 🔧 **설치기 연결(⑦) — 지금 install.sh 는 prod 에서 쓸 수 없다**(설계 12 위험 19):
-  - **MetalLB·ingress 게이트 삭제**: 1단계의 `metallb-system` 네임스페이스·IngressClass `nginx` 검사(`install.sh` 「애드온: Volcano · MetalLB ·
-    ingress-nginx」)와 6단계 `ingress-nginx-controller` 의 `metallb.io/address-pool` 어노테이션을 지운다(prod 앱 렌더에는 Ingress·풀이 이미 없다).
-    `preflight-cluster.sh` 의 MetalLB·VIP 충돌 검사(`PORTAL_VIP` env)도 같이 — VIP-A 는 Avi 소유다.
-  - **S8 감지 상태 기계(8-2 Gateway API·EG 행)**: Gateway API = CRD `gateways.gateway.networking.k8s.io` 의 `bundle-version`·`channel`(v1.6.x 미만이면 X,
-    없으면 A); EG = CRD `envoyproxies.gateway.envoyproxy.io`·Deployment `envoy-gateway`(라벨 `app.kubernetes.io/name=gateway-helm`·`dms.io/addon-version`)·
-    설정 ConfigMap 의 `gateway.controllerName`·`provider.kubernetes.watch`·`runtimeFlags`(EnvoyProxyPatch 가 `disabled` 에 있으면 X — enabled 에도
-    있어도 disabled 가 이긴다, hostNetwork 패치가 조용히 무시된다)·컨트롤러 ns 의 PSA(hostNetwork 허용 아니면 X)·버전(v1.9.x, v1.8 이하는 C! — 2026-11-08 EOL). A 면 gateway-api SSA → CRD
-    Established → (ns 먼저) envoy-gateway SSA → certgen 완료 → rollout → (마스터 전부 sysctl ≤ 443 재확인) → `platform/gateway` SSA → Gateway
-    `Programmed` → 마스터마다 :443 LISTEN. C 면 `platform/gateway` 만
-    (README §2g-3). 첫 설치 server dry-run 은 `envoy-gateway-system` NotFound(⑤ 의 cnpg-system 과 같은 함정).
-  - **S1 점검**: 마스터 sysctl `net.ipv4.ip_unprivileged_port_start` ≤ 443(노드 셸 체크리스트), 마스터 :443·:19000~19003 비어 있음(K6), 클러스터
-    도메인 = `cluster.local`(EG 컨트롤러 env `KUBERNETES_CLUSTER_DOMAIN` — 다르면 xDS 주소가 틀린다; 다른 사이트가 나오면 values 키로), admission
-    정책이 hostNetwork 파드를 막는지(K11), 이름 충돌(클러스터 범위 GatewayClass `dms`, ns `envoy-gateway-system` 을 남이 쓰는지).
-  - **TLS 게이트**: install.sh 의 `dms-portal-tls` 존재 검사를 `render.env` 의 `PORTAL_TLS_SECRET` 으로.
-  - **external 레지스트리 사이트**(2026-11-03 ⑥ 리뷰 2): install.sh 1b 는 DMS 이미지만 push 한다 — lock **전부**(cloudnative-pg·postgresql·gateway·
-    envoy)를 `REGISTRY` 로 push 하거나 lock digest 가 그 레지스트리에 없으면 S8·S9 전에 멈추고, PriorityClass `dms-addon-critical` 을 `get || apply`
-    (지금은 손 절차 — README §2f-3·§2g-3, prod README 3b·3c).
-  - **S12 verify**: 성공 판정은 Gateway `Programmed` 가 아니라 **마스터마다** :443 이다(2026-11-03 ⑥ 리뷰 1 — sysctl 이 빠진 마스터에서도 Envoy 는
-    리스너 bind 실패를 NACK 만 하고 Ready, EG 의 Programmed 는 DaemonSet 가용 수만 본다; 한 마스터만 빠지면 나머지로 돌아 Avi 가 조용히 뺀다):
-    마스터마다 `ss -ltnH '( sport = :443 )'` 에 envoy, 또는 SE 대역 자리에서 마스터 IP 별로 PROXY v2 를 실은 TLS 연결(`curl --haproxy-protocol` 은
-    v1 이라 v2 를 내는 도구·haproxy 경유). 빠진 마스터면 sysctl 을 고친 뒤 그 노드의 Envoy 파드 삭제(EG 가 같은 설정을 다시 내려 주지 않는다).
-    그다음 `--resolve <PORTAL_DOMAIN>:443:<PORTAL_VIP>` readyz 200(render.env 의 두 값), 「80 불가 = 정상」 안내. 접근 로그를 볼 때는 라벨 셀렉터
-    `-l gateway.envoyproxy.io/owning-gateway-name=dms-portal`(마스터 전부 — `logs ds/` 는 파드 하나뿐, ⑥ 리뷰 2).
-  - `install.sh --upgrade-addon envoy-gateway`(README §2g-6): Gateway API 층 먼저 → certgen Job 삭제 → SSA → rollout → `platform/gateway`.
+- ~~**설치기 연결(⑦) — install.sh 를 prod 에서 쓸 수 없다**(설계 12 위험 19)~~ — **해소**(2026-11-03 ⑦, CHANGELOG 「⑦ 설치기」): install.sh·
+  preflight 의 MetalLB·IngressClass·`ingress-nginx-controller` 어노테이션·`PORTAL_VIP` 풀 검사를 지웠다(계약 `test_prod_k8s_overlay.py`).
+  S8 = 감지(`install-detect.py` — Gateway API·EG 행 그대로: bundle-version·channel, controllerName·watch·runtimeFlags·PSA·버전) → A 면 gateway-api SSA →
+  CRD Established → ns 먼저 → EG SSA → certgen(Complete 또는 TTL 뒤 xDS 시크릿) → rollout → **마스터 전부 sysctl ≤ 443**(`host-net-probe.sh
+  --sysctl`) → platform/gateway SSA → Programmed → **마스터마다 :443 LISTEN**(`host-net-probe.sh --listen` — hostNetwork 일회용 Pod 가 /proc/net/tcp
+  를 읽는다), C 면 platform/gateway 만. TLS 게이트는 `render.env` 의 `PORTAL_TLS_SECRET`(존재·kubernetes.io/tls). S12 verify 는 마스터마다 :443·
+  `--resolve <PORTAL_DOMAIN>:443:<PORTAL_VIP>` readyz·「80 불가 = 정상」. `--upgrade-addon envoy-gateway` 는 certgen Job 을 지운 뒤 가드를 열고 SSA.
+  남은 것(아래 「⑦ 설치기 후속」): 클러스터 도메인 values 키, 마스터 :443·:19000~19003 비어 있음(K6)의 자동 확인, S12 의 413·15초 스트림·원 IP 검사.
 - 🔧 **테스트베드 T8 실증**(dmsk8s — 메인 세션) — 설계 10 T8: cp1 sysctl(testbed IaC) → 이미지 push(k8s-w1) → A 경로 설치 → cp1 :443 비 root bind·
   `ClusterFirstWithHostNet` xDS → luminous haproxy(`send-proxy-v2`)로 413(21MiB)·15초+ 스트림·PROXY optional/필수·X-Real-IP 제거·원 IP(이벤트·접근
   로그)·cilium-envoy 와 공존(`--disable-hot-restart` — 두 Envoy 모두 Running, cilium-envoy 재시작 0)·상류 유휴 4s(5초 간격 폴링에서 접근 로그
@@ -531,6 +490,37 @@ CHANGELOG 「⑥ 입구(Envoy Gateway)」, 설계 v6 #13~#15·4-3·8-1(S0-5·S8�
   (EG 기본 — 끄려면 EnvoyProxy telemetry.metrics.prometheus.disable, 지금은 그대로), C 경로에서 남의 EG 설정이 shutdown-manager 이미지를 docker.io 로
   두어도 DMS EnvoyProxy 가 이미지를 명시하므로 영향 없음(확인만), 전역 rate limit(EG `rateLimit`) 미사용 — 쓰게 되면 ratelimit 이미지를 lock 에.
   `platform/gateway`·`addons/gateway-api` 는 워크로드가 없어 `guard-images.sh` 대상이 아니다(Envoy 이미지 교체는 렌더 diff 로 본다).
+
+### ⑦ 설치기 후속 — 2026-11-03
+
+CHANGELOG 「⑦ 설치기」, 설계 v6 8-1·8-2·9 ⑦·10 T9, deploy/README §2h, prod README.
+
+- 🔧 **T9 실증(테스트베드)** — 런북은 메인 세션의 작업 노트(`t9-runbook.md` — 저장소 밖): ① `install.sh --context dmsk8s --site testbed-k8s --plan`
+  (2026-11-03 ⑦ 실측 PASS — 감지 D=·C, 층 dry-run PASS·SKIP), ② 라이브에서 안전한 단계(S1·S2b·S5·S6·S7·S12 — 결과가 바뀌지 않는 단계), ③ A·P·X
+  조합은 **일회용 k3s**(호스트 컨테이너, dms-k3s2 와 다른 이름·포트)에서 — 공용 디렉터리·레지스트리 마운트가 없어 S1·S3·S8(A 경로 SSA·대기)·S9·
+  감지 조합만. 결과를 `test_install_detect` 기대와 대조하고 CHANGELOG 에 기입한다.
+- 🔧 **Volcano 층(`deploy/addons/volcano/v1.16.0`)** — 상류 매니페스트 + SOURCE·sha256 + DMS 패치 층(이미지 자리표시자 → lock digest, 라벨,
+  `system-cluster-critical` 유지 — 설계 2-1), `versions.env` 의 `VOLCANO_VERSION`, lock 3줄(scheduler·controller-manager·admission — 파트 C 가 resolve 로
+  확인한 amd64 digest: `vc-scheduler:v1.16.0 sha256:90cadf93…`, `vc-controller-manager:v1.16.0 sha256:e5def827…`, `vc-webhook-manager:v1.16.0
+  sha256:f688627b…`), 렌더러의 `addons/volcano`. 그때까지 감지가 A(없음)면 **S1 이 멈춘다**(「클러스터 운영자에게 ≥ v1.15 설치 요청」) — 설치기
+  S9b 와 install-detect 의 plan·vcjob 은 층이 생기면 그대로 쓴다(테스트베드·지금까지의 사이트는 C).
+- 🔧 **새 사이트 DB 첫 이관(import bootstrap)** — 외부 PG 를 쓰던 사이트는 S2 `pg-secrets.py check` 가 FAIL 하고 §2f-2 「이관 순서」(덤프 →
+  import → `set-url`)로 안내한다. CNPG `bootstrap.initdb.import` 로 Cluster 를 만드는 흐름(설계 6-4 「첫 이관」)을 설치기 단계로 넣을지는 결정 대기.
+- 🔧 **`kubectl-cnpg` 플러그인·checksums 반입**(K8 — 인터넷 노드 → 설치 호스트). 지금 설치기는 플러그인 없이 동작한다(switchover 는 `status.targetPrimary`).
+- 📝 **설치 흐름 밖에 남긴 사이트 확인** — `SHARED_DIR_ID` 를 values.env 에 손으로 옮긴다(S0 결과를 일회용 파드로 읽어 제안·대조하는 길은 없다 —
+  틀리면 S4 가 「센티널 불일치」로 멈춘다), SHARED_DIR 변경 때 레지스트리 저장소 이동은 §2e-5 손 절차(설치기는 S4·S11 가드 exit 5 로 멈출 뿐),
+  클러스터 도메인 ≠ cluster.local 은 preflight WARN 뿐(EG `KUBERNETES_CLUSTER_DOMAIN` values 키 없음 — 설치기는 매 실행 다시 렌더하므로
+  `deploy/.rendered` 손 패치로는 못 넘는다, ⑦ 리뷰 2; 렌더를 건너뛰는 `RENDER=skip` 같은 길은 두지 않았다 — 값 키를 더하는 쪽), 마스터 :443·:19000~19003 비어 있음(K6)·
+  `crictl inspecti … pinned`·`fs.protected_*` 는 노드 셸 체크리스트(MANUAL)뿐, S12 의 413(21MiB)·15초 스트림·원 IP 는 §2g-5 손 명령.
+- 📝 **S6 판정 범위는 DMS 노드만**(파트 B 의 확장 — 설계 S6 행에는 범위가 없다): S2b·S10 과 같은 정의(`pg-path-probe.dms_nodes`)로 다른 팀 노드는
+  pull 은 해 보되 정보로만 보인다. 모든 노드를 판정해야 한다면 `pull-probe.py` 의 판정 대상을 바꾼다 — 사용자 확인 대기.
+- 📝 **PAUSE 종료 코드 10** — S4 뒤 「push 대기」를 실패(1)와 가른다. 자동화가 0 을 「끝」으로 읽어도 안전하게 0 이 아니다. 레지스트리에 이미
+  lock·DMS 이미지가 다 있으면 멈추지 않는다(멱등 재실행).
+- 📝 **프로브는 같은 클러스터에서 동시에 둘 돌리지 않는다** — S2b·S6·마스터 프로브는 시작할 때 같은 라벨의 옛 DaemonSet·파드를 지운다(설치 운영자는
+  한 명 전제).
+- 🔧 **리뷰 1 고침 가운데 라이브로 못 본 것**(2026-11-03 ⑦ 리뷰 1 — 심 테스트만): S13 첫 관리자 부트스트랩 명령(port-forward + `-H @<토큰 파일>` —
+  계정을 만드는 변경이라 dmsk8s 에서 돌리지 않았다), 라벨 붙인 애드온 ns SSA·실패 certgen 재실행·`--upgrade-addon registry`·`--adopt db` 의 S9 dry-run
+  (T9 일회용 k3s 의 A6·D1·P 행에서). 실측한 것: 태그를 올린 `--plan`(dms-migrate immutable → 앱 층 PASS)·verify 의 서비스 프록시 readyz·VIP 무응답 WARN.
 
 ## 2. 의도적 보류 (결정 — "미구현"이 아님)
 

@@ -72,9 +72,20 @@ def test_values_render_and_install_need_no_ldap():
     assert "REPLACE_LDAP" not in render_sh and "REPLACE_IDENTITY_SUPPLEMENTARY_GROUPS" not in render_sh
     assert "patch-agent.yaml" not in render_sh
     assert "IDENTITY_SUPPLEMENTARY_GROUPS=" not in example
-    secret_keys = re.search(r"^for k in (DMS_[A-Z_ ]+); do", _code(INSTALL), re.M)
+    secret_keys = re.search(r"^\s*for k in (DMS_[A-Z_ ]+); do", _code(INSTALL), re.M)
     assert secret_keys and secret_keys.group(1).split() == [
         "DMS_DATABASE_URL", "DMS_SHARED_TOKEN", "DMS_ADMIN_TOKEN", "DMS_SESSION_SECRET"]
+
+
+def test_installer_and_preflight_no_longer_gate_on_metallb_or_ingress_nginx():
+    # 2026-11-03 ⑦(설계 9 ⑦ — install.sh :74-80·135-138): prod 입구는 Envoy Gateway — MetalLB·IngressClass nginx 가 없다고 멈추거나
+    # ingress-nginx Service 에 풀 어노테이션을 다는 줄이 설치기·preflight 에 남아 있으면 prod 에서 install.sh 를 쓸 수 없다(설계 12 위험 19).
+    for path in (INSTALL, REPO_ROOT / "deploy" / "preflight-cluster.sh"):
+        code = _code(path)
+        for gone in ("get ns metallb-system", "ingressclass", "ipaddresspools.metallb.io", "metallb.io/address-pool",
+                     "ingress-nginx-controller", "PORTAL_VIP=<"):
+            assert gone not in code, (path.name, gone)
+    assert "rv PORTAL_TLS_SECRET" in _code(INSTALL)                                 # TLS 게이트는 render.env 의 이름(⑥)
 
 
 # --- render.sh -------------------------------------------------------------------------------------

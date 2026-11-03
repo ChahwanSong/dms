@@ -2,12 +2,10 @@
 
 > **프로덕션 설치는 이 파일(716줄, 테스트베드 런북)을 읽지 마세요.**
 > `deploy/overlays/prod/README.md` **하나**만 보면 됩니다 — 프리플라이트 →
-> `values.env` 채우기 → 시크릿/TLS → `deploy/install.sh` → `deploy/verify.sh`(클러스터가 여럿이면 `--context <ctx>` —
-> `preflight-cluster.sh`·`verify.sh`·`render.sh`(옛 `overlays/prod/render.sh`)의 live 태그 해석이 받는다).
-> 이 문서는 테스트베드(개별 파일 apply)·시나리오·HTTPS 원리의 상세 참고용입니다.
-> **단, `REGISTRY_MODE=in-cluster`(prod 기본)면 §2e(노드 준비 S0-4·S0-5 → S4 적용 → S5 push → S6 pull)도 따릅니다** — 설치기 연결은
-> 묶음 ⑦ 이라 지금은 그 절의 명령을 손으로 돌고, prod README 3단계가 그 절을 가리킵니다(2026-11-03 ④).
-> **DB 는 CloudNativePG(§2f — S2 시크릿·S9 오퍼레이터·S10 DB 층·백업·업그레이드·운영 규칙)도 손 명령입니다**(prod README 3b단계, 2026-11-03 ⑤).
+> S0(노드 IaC) → `values.env` 채우기 → `deploy/install.sh --context <ctx> --plan` → `deploy/install.sh --context <ctx>`(S4 뒤 인터넷 노드 push →
+> `--stage S5` 로 재개) → S13 체크리스트. **`--context` 는 필수**입니다(`install.sh`·`preflight-cluster.sh`·`verify.sh` — 2026-11-03 ⑦).
+> 이 문서는 테스트베드(개별 파일 apply)·시나리오·HTTPS 원리의 상세 참고용입니다. 설치기의 단계 표는 §2h, 단계가 자동으로 하는 일의 손 판
+> (조사·복구용)은 §2d(공용 디렉터리)·§2e(레지스트리·이미지 반입)·§2f(DB)·§2g(입구)입니다.
 
 Deploys the clean-slate DMS control plane (`dms api` / `dms controller` /
 `dms agent`, execution backend = Volcano) onto the testbeds. All
@@ -157,10 +155,12 @@ Builds and pushes, in order (agent depends on the other two):
 `pkg-01:5000/dms-mpifileutils:dev`, `pkg-01:5000/dms:dev`,
 `pkg-01:5000/dms-agent:dev`.
 
-If you use a `TAG` other than `dev`, update it in `deploy/k8s/20-config.yaml`
-(`DMS_JOB_IMAGE`) and the `image:` fields in `30-migrate-job.yaml`,
-`40-api.yaml`, `41-controller.yaml`, `50-agent-daemonset.yaml` to match --
-these are static manifests, not templated.
+위 `pkg-01:5000` 은 **테스트베드 예**다 — 사이트에서는 인터넷(빌드) 노드에서 `REGISTRY=<레지스트리 host:port> TAG=<태그>` 로 돌린다
+(설치기 S5 PAUSE 가 렌더의 실제 값으로 이 줄을 보인다). **태그는 values.env 의 `DMS_TAG`·`DMS_AGENT_TAG`·`MFU_TAG` 와 같게** 둔다 — agent 는
+같은 `TAG` 의 dms·dms-mpifileutils 위에서 빌드되므로 첫 부트스트랩은 세 값을 같게 두는 것이 쉽다. **base 매니페스트(`deploy/k8s/*`)의
+`image:`·`DMS_JOB_IMAGE` 는 사이트 중립 자리표시자다 — 고치지 않는다**(2026-11-03 ⑦ 리뷰 1: 예전 이 절은 base 를 고치라고 했다. base 를 실값으로
+바꾸면 오버레이의 `images: name: set-by-overlay.invalid/dms` 치환이 조용히 빠지고, 저장소를 받은 다른 사이트가 그 값을 배포한다 — CLAUDE.md
+「base 매니페스트는 사이트 중립」). 태그는 오버레이(prod 는 `values.env`, 테스트베드는 `newTag`)가 넣는다.
 
 ## 2. Mount CephFS on the worker nodes
 
@@ -419,10 +419,10 @@ python3 deploy/shared-storage-probe.py --context <ctx> --overlay deploy/overlays
    base 가 `root:root 755`. `-A`·`-X` 는 쓰지 않는다(NFS 4.2 가 xattr 을 지원하지 않을 수 있고, base 에는 원래 ACL 이 없어야 한다 — §2b-1).
 4b. **(`REGISTRY_MODE=in-cluster` 면) 레지스트리 저장소**: §2e-5 「저장소 이동」 2~4 를 앱 적용(5) **전에** 한다(빌드·push 가 없는 창 —
    S0 는 2 에서 했다). 빠뜨리면 레지스트리는 옛 경로에 남고, `SHARED_DIR_ID` 만 새 값으로 바꾼 렌더는 「센티널 불일치」로 레지스트리를 못
-   띄운다 — install.sh 의 in-cluster 게이트가 Ready 아님으로 멈춘다(install.sh 는 플랫폼 층을 적용하지 않는다 — ⑦).
+   띄운다 — install.sh S4 가 레지스트리 rollout 시간 초과(init 「센티널 불일치」)로 멈춘다(2026-11-03 ⑦).
 5. **적용**: `sh deploy/overlays/guard-images.sh <overlay> --context <ctx>` → 기대 exit 5(라이브 hostPath → 새 경로를 찍는다; 오버레이
    태그가 라이브와도 다르면 3 이 먼저다 — 그때는 `ALLOW_IMAGE_CHANGE=1` 도). `ALLOW_HOSTPATH_CHANGE=1` 로 다시 통과시킨 뒤 평소 적용
-   절차(testbed-k8s = §13-6, prod = `ALLOW_HOSTPATH_CHANGE=1 sh deploy/install.sh`). api·controller 를
+   절차(testbed-k8s = §13-6, prod = `ALLOW_HOSTPATH_CHANGE=1 sh deploy/install.sh --context <ctx>` — S4·S11 의 가드가 함께 열린다). api·controller 를
    `rollout restart`(ConfigMap 의 base·allowlist 는 기동 때만 읽힌다 — §13-8) → `rollout status`. 확인: 두 Deployment 의
    `.spec.template.spec.volumes[*].hostPath` 와 `dms-config` 의 `DMS_ARTIFACT_BASE_URI`·`DMS_ARTIFACT_BASE_ALLOWED_PREFIXES` 가 새 경로.
    컨트롤러 롤아웃 뒤 30초쯤 기다린 다음 본다.
@@ -505,7 +505,8 @@ kubectl --context dmsk8s -n dms get cm dms-config \
 ## 2e. 클러스터 내 레지스트리(플랫폼 층) — 노드 준비·S4·S5·S6·운영 (2026-11-03 ④)
 
 설계 v6 7(7-1~7-6)·8-1(S0-4·S0-5·S-1·S4~S6)·8-2 「층 배치」·10 T4. 이 절은 dms-k8s 공통(prod·testbed-k8s)이고 테스트베드 판은 2e-6 이다.
-설치기 연결(S4 자동 적용·S4 뒤 정지·`--stage S5` 재개·lock 대조·S6 프로브)은 묶음 ⑦ 몫이다 — 지금은 아래 명령을 손으로 돈다.
+설치기(§2h)의 S4·S5·S6 가 아래를 자동으로 한다(S4 뒤 정지·`--stage S5` 재개·lock 대조·pull 프로브 — 2026-11-03 ⑦). 아래 명령은 같은 일의
+손 판(조사·복구용)이다.
 
 CNCF Distribution v3.1.2 하나(오퍼레이터 없음, #46)를 control-plane 노드에 띄운다. **평문 HTTP·익명·`host:port` 만**(DMS 가 강제 — 포탈
 태그 조회·삭제는 `http://` 고정, 빌드 push 는 `--tls-verify=false`, 경로 접두 불가). 저장소는 공용 디렉터리 `<SHARED_DIR>/dms/registry`
@@ -536,10 +537,10 @@ sh deploy/render.sh <site> [--context <ctx>]      # prod·testbed-k8s. 옛 `sh d
 | values.env 키 | 뜻 |
 |---|---|
 | `REGISTRY_MODE` | `in-cluster`(앱이 이 레지스트리를 쓴다 — prod 권장) / `external`(사이트 레지스트리 `REGISTRY`). 없으면 external(옛 values.env) |
-| `REGISTRY_CLUSTER_IP` | Service 고정 ClusterIP. 렌더러는 IPv4 형식만 본다 — ServiceCIDR 안·미사용·하단 정적 대역은 **지금 손으로** 확인한다(S1 자동 검사는 ⑦): `kubectl --context C get servicecidr`(대역), `kubectl --context C get ipaddresses.networking.k8s.io <IP>` 가 NotFound(미사용), 하단 정적 대역 = CIDR 의 처음 min(max(16, 주소 수/16), 256)개(/12 면 `x.x.0.0`~`x.x.0.255` — 동적 할당이 마지막에 쓰는 대역이라 걷어내기·재적용 사이에 다른 Service 가 가져갈 위험이 가장 작다). 있으면 레지스트리 층을 렌더한다(external 이어도 — 병행 기간) |
+| `REGISTRY_CLUSTER_IP` | Service 고정 ClusterIP. 렌더러는 IPv4 형식만 본다 — ServiceCIDR 안·미사용·하단 정적 대역은 S1(`preflight-cluster.sh --render-env`)이 본다(2026-11-03 ⑦) — 손으로는: `kubectl --context C get servicecidr`(대역), `kubectl --context C get ipaddresses.networking.k8s.io <IP>` 가 NotFound(미사용), 하단 정적 대역 = CIDR 의 처음 min(max(16, 주소 수/16), 256)개(/12 면 `x.x.0.0`~`x.x.0.255` — 동적 할당이 마지막에 쓰는 대역이라 걷어내기·재적용 사이에 다른 Service 가 가져갈 위험이 가장 작다). 있으면 레지스트리 층을 렌더한다(external 이어도 — 병행 기간) |
 | `REGISTRY_PORT` | Service 포트(기본 5000) |
 | `REGISTRY` | 앱 레지스트리 `host:port`. in-cluster 면 비우거나 `<IP>:<PORT>` 와 같게 — **같은 주소가 여섯 곳**(REGISTRY·newName·`DMS_JOB_IMAGE`·`DMS_BUILD_REGISTRY`·`DMS_BUILD_BUILDER_IMAGE` + DB `control_state.job_image`)의 원천. 렌더러가 다섯 곳이 같은지 다시 본다 |
-| `REGISTRY_TLS_VERIFY` | in-cluster 면 `false` 만 |
+| `REGISTRY_TLS_VERIFY` | in-cluster 면 `false` 만. external TLS 레지스트리면 `true` — 인터넷 노드 push(`--dest-tls-verify true`)와 설치기 S5 대조(https)만 쓴다. 포탈 태그 조회·삭제·빌드 push 는 `http://` 고정이라 TLS 레지스트리에서는 쓰지 못한다(설계 7-2, 2026-11-03 ⑦ 리뷰 2). 빈 값 = `false` |
 | `SHARED_DIR_ID` | S0 가 쓴 `<SHARED_DIR>/dms/.dms-shared-id` 값 = 센티널 기대값(레지스트리 층을 렌더할 때 필수) |
 | `REGISTRY_CPU_REQUEST`·`REGISTRY_MEMORY_REQUEST` | (선택) requests — 기본 100m/128Mi(limits 1/512Mi) |
 
@@ -549,6 +550,14 @@ sh deploy/render.sh <site> [--context <ctx>]      # prod·testbed-k8s. 옛 `sh d
 ### 2e-2. 노드 준비(사이트 IaC, 1회) — S0-4 신뢰 · S0-5 레지스트리 이미지 반입·고정
 
 `C`=kube-context, `IP:PORT`=`<REGISTRY_CLUSTER_IP>:<REGISTRY_PORT>`. CRI-O 기준(containerd 경로 없음).
+
+**주소부터 고르고 확인한다**(2026-11-03 ⑦ 리뷰 1): 이 주소는 아래 S0-4(전 노드 drop-in)·S0-5(마스터 반입 이름·고정 패턴)에 박히므로, 박기 전에
+렌더 없이 env 만으로 S1 의 주소 검사(§5 — ServiceCIDR 안·미사용·하단 정적 대역)를 돌려 PASS 인 주소를 고른다. 예: /12 대역의 `x.x.0.10` 은
+kube-dns 기본 주소라 FAIL 이다. 한 번 정하면 바꾸지 않는다.
+
+```bash
+REGISTRY_MODE=in-cluster REGISTRY_CLUSTER_IP=<IP> sh deploy/preflight-cluster.sh --context C    # §5 의 두 줄이 PASS 인 주소로
+```
 
 ```bash
 # S0-4 — 모든 노드(마스터·워커). v2 형식, .conf 만 읽고 같은 location 은 덮어쓴다. crio.conf 의 insecure_registries 는 폐기 예정이라 쓰지 않는다.
@@ -598,9 +607,8 @@ sudo rm -f /tmp/registry-3.1.2.tar             # 반입 뒤 지운다(인터넷 
 
 ### 2e-3. 적용(S4) — PriorityClass·http 시크릿·레지스트리
 
-네임스페이스 `dms` 가 먼저 있어야 한다(설계 8-1 S2 — 새 클러스터면 아래 첫 줄). 없으면 시크릿 생성과 레지스트리 apply 가
-`namespaces "dms" not found` 로 실패하고, 앱 apply(install.sh — `00-namespace.yaml` 포함)는 in-cluster 면 레지스트리 Service 가 Ready 가
-아닐 때 apply 전에 멈추므로 그쪽으로 우회되지도 않는다.
+네임스페이스 `dms` 가 먼저 있어야 한다(설계 8-1 S2 — 새 클러스터면 아래 첫 줄; 설치기는 S2 가 먼저 적용한다). 없으면 시크릿 생성과
+레지스트리 apply 가 `namespaces "dms" not found` 로 실패한다.
 
 ```bash
 kubectl --context C apply -f deploy/k8s/00-namespace.yaml        # S2: PSA privileged 라벨 — 이미지 없는 유일한 raw apply(멱등)
@@ -640,36 +648,162 @@ kill $PF
 | Pod `CreateContainerConfigError` | Secret `dms-registry-http` 가 없다(위 명령) |
 | Service apply `provided IP is already allocated` | `REGISTRY_CLUSTER_IP` 를 다른 Service 가 쓴다(`kubectl --context C get ipaddresses.networking.k8s.io <IP>` 의 PARENTREF) — 아직 아무 데도 박히기 전이면 미사용 주소로 바꾼다(2e-1 의 확인 명령) |
 | 파드 Pending + 이벤트 `FailedScheduling` | control-plane 노드에 자리가 없거나 taint 키가 다르다(`describe` 의 사유). FailedMount 면 위 첫 줄 |
+| `ErrImagePull`·`ImagePullBackOff` `…IP:PORT/registry:<태그>` | 그 마스터에 S0-5 반입·고정이 없다(레지스트리는 자기 이미지를 자기에게서 받을 수 없다 — 태그 ref·IfNotPresent). 그 노드에서 `sudo crictl images --digests \| grep registry` · 2e-4 2) 를 그 마스터에 한다. 설치기 S4 는 실패 사유에 파드의 노드 이름을 함께 낸다 |
 
-### 2e-4. 이미지 반입(S5)·pull 확인(S6) — 인터넷 노드·모든 노드
+### 2e-4. 이미지 반입 — 인터넷 노드(S0-5·S5)·설치 호스트 대조(S5)·pull 확인(S6) (2026-11-03 ⑦)
+
+설계 v6 7-5·8-1(S-1·S0-5·S4~S6). 여러 이미지를 묶은 오프라인 번들은 없다 — **인터넷 노드 1대**(외부 인터넷이 되는 클러스터 노드, 첫
+설치에는 K8 로 받은 노드, 설치 뒤에는 컨트롤 상태의 빌드 노드 `build_node_name` — S13)가 상류에서 받아 레지스트리 ClusterIP 로 직접
+push 한다. 파일로 옮기는 것은 레지스트리 자기 이미지 하나(oci-archive)뿐이고 반입 뒤 지운다. 설치기(§2h)는 S4 뒤에 멈춰 3) 의 명령을
+보이고(`RESULT: PAUSE`, exit 10), push 뒤 `install.sh --context C --stage S5` 가 4) 의 대조와 S6 를 한다.
+
+| 누가 | 무엇 | 도구 |
+|---|---|---|
+| 인터넷 노드 | S0-5 레지스트리 자기 이미지 → oci-archive 파일(레지스트리가 뜨기 전, 1회) · S5 lock push · DMS 3종 최초 빌드 | skopeo(RHEL AppStream), podman(DMS 최초 빌드), python3(lock 검사 — RHEL 9 기본), DMS 저장소 체크아웃(**설치와 같은 커밋** — lock 이 그 커밋의 것) |
+| 마스터 ×3 | S0-5 반입·고정(파일을 받아 containers-storage 로) | skopeo, crictl |
+| 설치 호스트 | S4 적용 → 멈춤 → S5 대조(`install.sh --stage S5`) → S6 | kubectl(`--context C`), python3, curl |
+
+프록시: 상류 pull 은 인터넷 노드의 env `HTTPS_PROXY`(·`HTTP_PROXY`)를 타고, **레지스트리 push 는 타면 안 된다**(프록시는 ClusterIP 에
+닿지 않는다 — 포탈 빌드와 같은 규칙, §8). 프록시를 거치는 노드면 `NO_PROXY` 에 레지스트리 IP 를 넣는다. skopeo(Go)는 `NO_PROXY`
+가 비어 있지 않으면 그것만 읽고(`no_proxy` 무시), 정확한 IP·`IP:PORT`·CIDR·도메인 접미·`*` 를 받는다. 컨트롤 상태 화면의 프록시
+값은 빌드·프리플라이트 **파드**에만 들어간다 — 호스트에서 도는 이 반입에는 셸 env 로 준다.
+
+#### 1) 인터넷 노드 — lock 확인(S-1 · 릴리스 담당이 이미 했어도 같은 커밋인지)
 
 ```bash
-# S5 — 인터넷 노드 호스트에서 ClusterIP 로 직접(평문 HTTP, 소스는 amd64 매니페스트 digest — 그 매니페스트 하나만 복사).
-#      프록시를 거치는 노드면 NO_PROXY 에 IP 를 넣는다(push 는 프록시를 타지 않는다). 전부 태그를 붙인다(GC 보호).
-grep -v '^#' deploy/images.lock | while read -r dest src dg; do
-  [ -n "$dest" ] || continue
-  skopeo copy --preserve-digests --dest-tls-verify=false "docker://${src%:*}@$dg" "docker://IP:PORT/$dest"
-done
-# 대조(lock 과 같아야 한다 — 다르거나 없으면 FAIL):
-grep -v '^#' deploy/images.lock | while read -r dest src dg; do
-  [ -n "$dest" ] || continue
-  got=$(skopeo inspect --tls-verify=false --raw "docker://IP:PORT/$dest" | sha256sum | cut -d' ' -f1)
-  [ "sha256:$got" = "$dg" ] && echo "OK $dest" || echo "FAIL $dest ($got)"
-done
-# DMS 이미지(dms·dms-agent·dms-mpifileutils dN)는 상류가 없다 — 처음에는 같은 노드에서 최초 부트스트랩으로 빌드해 push 한다
-# (REGISTRY=IP:PORT TAG=dN ./deploy/docker/build-and-push.sh, §1). 기존 레지스트리가 있으면 그대로 옮겨도 된다:
-#   skopeo copy --preserve-digests --src-tls-verify=false --dest-tls-verify=false docker://<옛 레지스트리>/dms:dN docker://IP:PORT/dms:dN
-# S6 — 모든 노드에서(호스트 netns → ClusterIP 는 kube-proxy 가 처리한다; KPR·kube-proxy 둘 다 없으면 안 된다)
-sudo crictl pull IP:PORT/registry:3.1.2 && sudo crictl pull IP:PORT/buildah:stable
-#   실패면: 신뢰 drop-in(S0-4)·서명 정책·런타임 프록시 NO_PROXY·ClusterIP 경로(kube-proxy) 순서로 본다.
+cd <DMS 저장소>                                     # 설치 호스트와 같은 커밋
+python3 deploy/images-lock.py check                 # 형식(오프라인)
+python3 deploy/images-lock.py verify                # 상류에서 digest 가 linux/amd64 단일 매니페스트인지(index digest 면 FAIL)
+#   UNKNOWN(exit 4) = 상류에 닿지 못함 — 프록시 env·사내 CA 를 본다(실패가 아니다; 고친 뒤 다시).
 ```
+
+#### 2) S0-5 — 레지스트리 자기 이미지(레지스트리가 뜨기 전, 1회 · 새 마스터)
+
+레지스트리 Deployment 는 자기 이미지를 **태그 ref**(`IP:PORT/registry:<태그>`, 설계 7-5 의 문서화된 예외)로, `IfNotPresent` 로 쓴다 —
+자기에게서 pull 할 수 없으므로 마스터마다 미리 넣고 kubelet GC 에서 고정한다. 태그·digest 는 lock 의 `registry:` 줄 하나가 원천이다.
+
+```bash
+# 인터넷 노드: lock 의 amd64 매니페스트 digest 로 받아 파일 하나로(docker save·index digest 는 쓰지 않는다)
+RT=$(awk '$1 ~ /^registry:/ {print $1}' deploy/images.lock)          # 예: registry:3.1.2
+DG=$(awk -v d="$RT" '$1 == d {print $3}' deploy/images.lock)
+SRC=$(awk -v d="$RT" '$1 == d {sub(/:[^:\/]*$/, "", $2); print $2}' deploy/images.lock)   # docker.io/library/registry
+skopeo copy "docker://$SRC@$DG" "oci-archive:/tmp/${RT%%:*}-${RT#*:}.tar"
+sha256sum "/tmp/${RT%%:*}-${RT#*:}.tar"                                # 옮긴 뒤 마스터에서 같은 값인지
+# → 마스터 3대로 옮긴다(scp 등 — K8). 각 마스터에서(store 는 `sudo crio config` 의 root·runroot·storage_driver 와 같게 — 기본값 예):
+sudo skopeo copy oci-archive:/tmp/registry-3.1.2.tar \
+  "containers-storage:[overlay@/var/lib/containers/storage+/run/containers/storage]IP:PORT/registry:3.1.2"
+sudo crictl images --digests | grep 'IP:PORT/registry'               # 3.1.2 와 DIGEST 앞자리 = lock digest 앞자리(T4: 1290056e…)
+# 고정 — 같은 옵션은 이름순 마지막 drop-in 이 이기고 배열은 합치지 않는다: 기존 목록을 읽어 같은 배열에 함께 쓴다.
+sudo crio config 2>/dev/null | sed -n '/^[[:space:]]*pinned_images/,/]/p'     # 기존 목록(주석 `# pinned_images` 면 비어 있다)
+sudo tee /etc/crio/crio.conf.d/99-dms-pinned.conf >/dev/null <<'EOF'
+[crio.image]
+pinned_images = ["IP:PORT/registry:*"]
+EOF
+#   ↑ 기존 목록이 있으면 같은 배열에 넣는다. 패키지 10-crio.conf 는 업그레이드 때 덮어써지므로 건드리지 않는다.
+sudo systemctl reload crio
+sudo crio config 2>/dev/null | sed -n '/^[[:space:]]*pinned_images/,/]/p'     # 실효값에 IP:PORT/registry:* 가 있어야 한다
+sudo crictl inspecti IP:PORT/registry:3.1.2 | grep -m1 '"pinned"'             # "pinned": true (CRI Image.pinned — preflight 노드 체크리스트와 같은 줄;
+                                                                              #  T4 가 어떤 명령으로 봤는지는 기록이 없다 — T9 에서 실측 확인)
+sudo rm -f /tmp/registry-3.1.2.tar                                            # 마스터·인터넷 노드 모두 지운다
+```
+
+- 새 마스터: 레지스트리가 살아 있으면 `sudo crictl pull IP:PORT/registry:<태그>` 뒤 고정(패턴 `registry:*` 가 덮는다), 아니면 이 2) 를
+  다시 한다(레지스트리 자기 이미지는 이 레지스트리에 기대지 않는다 — 7-4 의존 규칙).
+- 레지스트리 업그레이드: lock 의 `registry:` 줄·`deploy/platform/registry` 의 두 이미지 태그·라벨을 한 커밋에서 바꾼 뒤 3) 의
+  `--only registry` push → 마스터 전부 `crictl pull` → §2e-5 업그레이드 순서.
+
+#### 3) S5 — 인터넷 노드에서 lock push (`deploy/push-images.sh`)
+
+`install.sh` 는 S4(레지스트리 Ready·`/v2/` 200) 뒤에 멈추고 아래 명령을 출력한다(이 사이트가 받지 않는 줄 — 남이 설치한 CNPG(C)의 오퍼레이터,
+external 사이트의 레지스트리 자기 이미지 — 은 `--skip` 이 붙어 나온다). 인터넷 노드에서:
+
+```bash
+cd <DMS 저장소>                                           # 설치 호스트와 같은 커밋
+export NO_PROXY="${NO_PROXY:+$NO_PROXY,}IP"              # 프록시를 거치는 노드만(no_proxy 만 쓰는 셸이면 그것도)
+sh deploy/push-images.sh --registry IP:PORT              # --print(기본): 실행할 skopeo 명령만 본다(네트워크 없음)
+sh deploy/push-images.sh --registry IP:PORT --run        # push — 멱등(이미 lock digest 인 태그는 SKIP, push 뒤 digest 재확인)
+#   한 줄만: --only <이름|DEST>(여러 번), 빼기: --skip <이름|DEST>. 끊겼으면 같은 명령을 다시 돌린다(올라간 줄은 건너뛴다).
+#   마지막 줄 RESULT: PASS 면 설치 호스트에서 install.sh --context C --stage S5 로 재개한다.
+```
+
+- 줄마다 `skopeo copy --preserve-digests --dest-tls-verify=false docker://<SOURCE 저장소>@<DIGEST> docker://IP:PORT/<DEST>` 다 — 소스를 lock
+  의 amd64 매니페스트 digest 로 집어 그 매니페스트 하나만 복사하고(`--all` 금지), `--preserve-digests` 로 레지스트리 digest == lock digest
+  를 지킨다(렌더가 `<REG>/<DEST>@<DIGEST>` 로 받는다). DEST 는 늘 태그를 붙인다(GC `--delete-untagged` 가 태그 없는 digest 를 지운다).
+- 대상: lock 전부 — buildah(포탈 빌더), CNPG 2(오퍼레이터·PG), EG 2(gateway — 컨트롤러·certgen·shutdown-manager 가 같은 이미지, envoy),
+  레지스트리 자기 이미지(업그레이드·새 마스터·S6 용). Volcano 3 줄(A 경로 설치용)은 Volcano 층과 함께 덧붙인다(아직 없다 — BACKLOG ⑦).
+- `--run` 은 프록시 env 가 있는데 `NO_PROXY` 가 레지스트리를 덮지 않으면 **아무것도 하지 않고** FAIL 한다(stderr 에 export 줄).
+- **external 레지스트리 사이트**(`REGISTRY_MODE=external`, `REGISTRY_CLUSTER_IP` 없음): S4 는 PriorityClass 만 — lock 전부를 사이트 `REGISTRY` 로
+  push 한다(`--registry <REGISTRY>`, TLS 레지스트리면 `--dest-tls-verify true` — values.env `REGISTRY_TLS_VERIFY=true` 면 설치기가 그대로 싣는다;
+  포탈 태그 조회·삭제는 http 라 TLS 레지스트리에서 쓰지 못한다). 설치기 S5 가 그 `REGISTRY` 를 직접 대조하고(설치 호스트가 닿아야
+  한다 — 닿지 않으면 모름 exit 4) 다르면 이 명령을 같은 주소로 보인다. lock 대조가 PASS 면 lock 줄은 다시 보이지 않고 DMS 이미지 안내만 보인다
+  (2026-11-03 ⑦ 리뷰 2). 출력은 **인터넷 노드의 DMS 저장소(설치 호스트와 같은 커밋) 루트에서** 붙여 넣는다(`lock: deploy/images.lock` — 상대 경로).
+- **DMS 3종**(dms·dms-agent·dms-mpifileutils, B3 포함 dN)은 상류 이미지가 아니라 lock 밖이다. 처음에는 같은 노드에서 최초 부트스트랩으로
+  빌드해 push 한다(`REGISTRY=IP:PORT TAG=<values.env 의 DMS_TAG — 세 태그 같게> ./deploy/docker/build-and-push.sh`, §1 — 빌드 전 e2e 게이트는 인터넷 노드가 아니라 개발 PC
+  에서 같은 커밋으로). 기존 레지스트리가 있으면 `skopeo copy --preserve-digests --src-tls-verify=false --dest-tls-verify=false
+  docker://<옛 레지스트리>/dms:dN docker://IP:PORT/dms:dN` 로 옮겨도 된다. 설치 뒤에는 포탈 빌드(§8)가 같은 노드를 빌드 노드로 쓴다.
+  설치기 S5 는 앱 렌더의 세 이미지 태그가 레지스트리에 있는지도 본다(없으면 위 안내와 함께 멈춘다 — S11 도 apply 전에 다시 본다).
+
+| 증상(`--run`) | 뜻 · 할 일 |
+|---|---|
+| `FAIL NO_PROXY — 아무것도 push 하지 않았다` | 프록시 env 가 있는데 레지스트리 IP 가 `NO_PROXY` 밖 — 출력된 `export NO_PROXY=…` 뒤 다시 |
+| `skopeo copy 실패` + `pinging container registry IP:PORT … connection refused / i/o timeout` | 인터넷 노드 → ClusterIP 경로(kube-proxy 가 그 노드에서 도는가, 노드 방화벽), S4 의 레지스트리 Ready |
+| `… http: server gave HTTP response to HTTPS client` | `--dest-tls-verify true` 로 돌렸다 — 클러스터 내 레지스트리는 평문 HTTP(기본 false) |
+| `… reading manifest sha256:… : manifest unknown`(소스) | lock digest 가 상류에 없다(상류가 지움·저장소 이동) — 1) 의 `verify`, 새 줄은 `images-lock.py resolve` |
+| `… toomanyrequests` | docker.io 익명 pull 한도 — 시간을 두고 다시(멱등) |
+| `… x509: certificate signed by unknown authority`(소스) | 사내 TLS 가로채기 프록시 — 사내 CA 를 인터넷 노드 신뢰 저장소에(`/etc/pki/ca-trust/source/anchors` + `update-ca-trust`) |
+| `push 뒤 레지스트리 digest … 가 lock 과 다르다` | 같은 태그에 다른 push 가 겹쳤다(포탈 빌드·다른 운영자) — 겹치는 작업을 멈추고 다시 |
+
+#### 4) S5 대조 — 설치 호스트(`install.sh --context C --stage S5`)
+
+설치기가 port-forward 를 열어 `images-lock.py compare-registry` 로 각 DEST 태그의 매니페스트 본문 sha256 을 lock 과 견준다 — **태그가 없거나
+다른 digest 면 FAIL**(설계 8-1 S5). 손으로 같은 일을 하려면:
+
+```bash
+kubectl --context C -n dms port-forward svc/dms-registry :PORT >/tmp/pf.log 2>&1 &
+PF=$!
+# listen 을 기다린다(apiserver 에 붙어 파드를 찾은 뒤에야 찍힌다) — 무작위 로컬 포트
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  LPORT=$(sed -n 's/^Forwarding from 127\.0\.0\.1:\([0-9][0-9]*\) .*/\1/p' /tmp/pf.log | head -n 1); [ -n "$LPORT" ] && break; sleep 1
+done
+python3 deploy/images-lock.py compare-registry --registry-url "http://127.0.0.1:$LPORT"     # [--skip <이름>]... [--only <이름>]...
+kill $PF
+```
+
+| 결과 | 뜻 · 할 일 |
+|---|---|
+| `OK <DEST>: sha256:…` | 태그 == lock digest. `registry`·`buildah` 줄에는 `[태그 ref …]` — 소비자가 digest 가 아니라 태그로 받는다(레지스트리 자기 이미지 = 설계 7-5 예외: S6 pull 프로브·새 마스터·업그레이드, buildah = 포탈 빌더) |
+| `FAIL … 태그 … 가 없다(404) — lock 의 이미지가 레지스트리에 없다` | 3) 을 하지 않았거나 그 줄이 빠졌다 — 출력된 `push-images.sh --only <DEST> --run` |
+| `FAIL … 가 없다(404). lock digest 는 레지스트리에 있지만 …` / `… 다른 digest … lock digest 는 레지스트리에 있지만 이 태그가 가리키지 않는다` | 태그 없는 lock digest — GC 가 지운다. 태그를 붙여 다시 push(같은 명령) |
+| `FAIL … 다른 digest … lock 과 다른 이미지가 이 태그로 push 됐다` | 누군가 같은 태그에 다른 이미지를 push 했다(태그 ref 줄이면 소비자가 그 이미지를 받는다) — 다시 push 로 lock 에 맞춘다 |
+| `UNKNOWN 레지스트리에 닿지 못했다` (exit 4) | port-forward 가 닫혔거나 주소가 틀렸다 — S4 의 레지스트리 Ready·`/v2/` 부터 |
+| `UNKNOWN … HTTP 401 — 익명 레지스트리가 아니다` | 다른 서비스에 붙었다(클러스터 내 레지스트리는 익명) — Service·포트 확인 |
+
+대조는 레지스트리 안의 사본만 본다 — 마스터에 고정된 레지스트리 자기 이미지는 2) 의 `crictl images --digests` 가, 노드 pull 은 S6 가 본다.
+
+#### 5) S6 — pull 확인(설치기의 임시 DS — `deploy/pull-probe.py`; 손으로는 모든 노드에서)
+
+```bash
+python3 deploy/pull-probe.py --context C --render-env deploy/.rendered/<site>/render.env      # 노드마다 실제 pull(Always), 120초, DMS 노드만 판정
+sudo crictl pull IP:PORT/registry:3.1.2 && sudo crictl pull IP:PORT/buildah:stable           # 손으로(노드에서)
+#   실패면: 신뢰 drop-in(S0-4)·서명 정책(/etc/crio/policy.json)·런타임 프록시 NO_PROXY·ClusterIP 경로(kube-proxy) 순서로 본다.
+```
+
+#### 테스트베드(dmsk8s) 실측 (2026-11-03, d19 레지스트리 10.112.0.50:5000)
+
+`compare-registry`(port-forward) — lock 6줄(registry·buildah·cloudnative-pg·postgresql·gateway·envoy) 전부 OK, RESULT PASS. lock 사본에 Volcano
+v1.16.0 3줄(`images-lock.py resolve` 로 만든 docker.io/volcanosh 의 amd64 digest)을 더하면 그 3줄만 「태그 없음 — 레지스트리에 없다」 FAIL
+(테스트베드 Volcano 는 IaC 설치 — 레지스트리에 vc-* 저장소 없음), `--skip` 으로 빼면 PASS. 닿지 않는 `HTTP_PROXY` env 를 걸어도 PASS(대조는
+프록시를 쓰지 않는다). `install.sh --context dmsk8s --site testbed-k8s --only S5` — 같은 대조 + dms·dms-agent·dms-mpifileutils d19 태그 확인 PASS,
+끝난 뒤 port-forward 프로세스 0(2026-11-03 ⑦).
 
 ### 2e-5. 운영 (설계 7-6)
 
 - **업그레이드**: `deploy/platform/registry/deployment.yaml` 의 두 이미지 태그·라벨 `dms.io/addon-version` 과 `deploy/images.lock` 의
   `registry:` 줄(`images-lock.py resolve`)을 함께 바꿔 커밋(셋이 같아야 한다 — 테스트가 고정) → 인터넷 노드가 새 이미지를 push(S5) → **마스터 전부** `sudo crictl pull IP:PORT/registry:<새 태그>`(고정 패턴
   `registry:*` 가 덮는다) → `sh deploy/render.sh <site> --context C` → `guard-images.sh` 가 exit 3(이미지 변경 — 안내에 이 순서가 나온다) →
-  `ALLOW_IMAGE_CHANGE=1` 로 다시 → SSA apply → `rollout status`. maxSurge 1 이라 새 파드가 Ready 가 된 뒤 옛 파드가 내려간다. **빌드·push
+  `ALLOW_IMAGE_CHANGE=1` 로 다시 → SSA apply → `rollout status`. 설치기로는 마스터 pull 뒤 `sh deploy/install.sh --context C --site <site> --only S4
+  --upgrade-addon registry`(감지 D< → upgrade — 가드를 이 층에서만 연다; 전역 `ALLOW_IMAGE_CHANGE=1` 은 S11 의 앱 가드까지 열므로 설치기에서는
+  쓰지 않는다, 2026-11-03 ⑦ 리뷰 1). maxSurge 1 이라 새 파드가 Ready 가 된 뒤 옛 파드가 내려간다. **빌드·push
   가 없을 때** 한다(겹치는 동안 Service 가 요청을 나눠 S7 ② WARN 사이트에서는 push 가 `blob unknown` 일 수 있다). 옛 파드는 preStop 5초
   뒤 SIGTERM 을 받고 진행 중 요청을 `http.draintimeout`(20s) 동안 마친다(b3c5f4e — T4 실측: 교체 중 매니페스트 GET 172회·이미지 복사 62회
   실패 0). drain 이 없는 옛 템플릿(b3c5f4e 이전)에서 처음 올릴 때는 옛 파드가 drain 없이 끝난다(SIGTERM 에 곧바로 exit 2 — 진행 중 pull 이
@@ -739,7 +873,7 @@ sudo crictl pull IP:PORT/registry:3.1.2 && sudo crictl pull IP:PORT/buildah:stab
 ## 2f. DB(CNPG) — 오퍼레이터(S9)·DB 층(S10)·백업·재활용·업그레이드·운영 규칙 (2026-11-03 ⑤)
 
 설계 v6 6(6-1~6-6)·8-1(S-1·S2·S9·S10 「S10 세부」·「순서의 이유」)·8-2(CNPG 행·A 경로·층 배치)·10 T6/T6'/T7. 이 절은 dms-k8s 공통이고
-테스트베드 판은 2f-8 이다. 설치기 연결(S9 감지 상태 기계·S10 자동 순서·판정)은 묶음 ⑦ 몫이다 — 지금은 아래 명령을 손으로 돈다.
+테스트베드 판은 2f-8 이다. 설치기(§2h)의 S2·S9·S10 이 아래를 감지 상태 기계·자동 순서·판정으로 한다(2026-11-03 ⑦) — 아래는 손 판이다.
 **DMS 애플리케이션 코드는 바뀌지 않았다**(접속 문자열만 바뀐다 — `connect_timeout` 은 코드 기본 5초 그대로, 6-3).
 
 PG 는 CloudNativePG(#26) **1.30.1**(1.30.x 최신, 2026-09-23 — cosign 번들로 검증한 상류 원본 그대로, `deploy/addons/cnpg/1.30.1/SOURCE`)
@@ -815,7 +949,7 @@ postgresql://dms:<PW>@dms-pg-rw.dms.svc:5432/dms?sslmode=require&target_session_
 
 ### 2f-3. CNPG 오퍼레이터(S9, A 경로) — 감지 → SSA → 롤아웃 → Cluster CR server dry-run
 
-먼저 감지한다(⑦ 의 상태 기계 전까지는 손으로 — 설계 8-2): CNPG 가 이미 있으면(**C**) 다시 설치하지 않는다(둘이면 P — 이중 오퍼레이터).
+먼저 감지한다(설치기는 `install-detect.py` — 설계 8-2; 손으로는 아래): CNPG 가 이미 있으면(**C**) 다시 설치하지 않는다(둘이면 P — 이중 오퍼레이터).
 
 ```bash
 kubectl --context C get crd clusters.postgresql.cnpg.io                                       # 없으면 A(설치), 있으면 아래로 판정
@@ -826,7 +960,7 @@ kubectl --context C get deploy -A -l app.kubernetes.io/name=cloudnative-pg \
 
 A 경로(S5 가 lock 의 `cloudnative-pg:1.30.1`·`postgresql:17.11-…` 를 레지스트리에 push 한 뒤 — §2e-4. **`REGISTRY_MODE=external`** 이고
 `REGISTRY_CLUSTER_IP` 가 없으면 애드온 이미지도 사이트 레지스트리(`render.env` 의 `ADDON_REGISTRY` = `REGISTRY`)에서 받는다 — §2e-4 의 lock push
-루프를 `IP:PORT` 대신 그 `REGISTRY` 로 돌리거나 그 레지스트리에 미리 미러한다. install.sh 1b 의 push 는 DMS 이미지·buildah 뿐이다):
+루프를 `IP:PORT` 대신 그 `REGISTRY` 로 돌리거나 그 레지스트리에 미리 미러한다 — 설치기 S5 가 그 `REGISTRY` 로 대조하고 push 명령을 보인다):
 
 ```bash
 sh deploy/render.sh <site> --context C
@@ -1006,7 +1140,7 @@ kubectl --context C -n dms logs job/dms-pg-dump-first                 # 「dms-p
 | PG minor | `versions.env` 의 `PG_IMAGE` + lock 줄(날짜 붙은 새 태그) → push → 렌더 → `db-cluster`·`db-backup`·`addons/cnpg`(POSTGRES_IMAGE_NAME) SSA → CNPG 가 standby 부터 롤링하고 primary 는 switchover(`primaryUpdateMethod: switchover` — 새 이미지를 이미 받은 인스턴스가 승격된다). **imageName 과 `postgresql.parameters`(예: `PG_SHARED_BUFFERS`)를 한 번에 바꾸지 않는다** — switchover 모드에서는 웹훅이 거절한다(상류 rolling_update 문서): 이미지 먼저, 롤링이 끝난 뒤 설정 |
 | PG major | 별도 설계(지금 없음) |
 | K8s minor | 신·구 K8s 를 모두 지원하는 버전으로 애드온을 먼저 올린다(1.30.x = K8s 1.34~1.36). CRI-O minor 도 함께 |
-| 남이 설치한 CNPG(C) | 업그레이드는 소유자 몫 — DMS 는 EOL·지원 범위를 경고만(⑦) |
+| 남이 설치한 CNPG(C) | 업그레이드는 소유자 몫 — DMS 는 EOL·지원 범위를 경고만(감지 C! — 설치·verify 때마다) |
 | 롤백 | 다운그레이드에 기대지 않는다 — 같은 이름 `dms-pg` 로 다시 만들고 `pg_restore`(2f-5 복구) |
 
 `kubectl cnpg` 플러그인(switchover·destroy 등)은 인터넷 노드가 릴리스의 `kubectl-cnpg_<v>_linux_x86_64.tar.gz` 를 `cnpg-<v>-checksums.txt` 와
@@ -1068,8 +1202,8 @@ keepalive·`tcp_user_timeout`(2f-2 URL)이 없으면 API 가 최대 약 15분 �
 설계 v6 #5·#13~#15(#14 「EG 기본값 세부」)·4-2·4-3·5 「원 IP 기록」·8-1(S0-5·S8·S12)·8-2(Gateway API·EG 행)·10 T8. **prod 의 포탈 입구는 이것
 하나다** — MetalLB·ingress-nginx 를 쓰지 않는다(prod 오버레이가 공용 base 의 Ingress·MetalLB 풀을 `$patch: delete` 로 지운다 —
 `deploy/overlays/prod/patch-remove-ingress.yaml`). testbed-k8s 는 T8 동안 Ingress + MetalLB VIP 10.20.20.101 을 그대로 두고 Gateway 를 병행한다(2g-7).
-설치기 연결(S8 감지 상태 기계·A/C 판정·S12 자동 검증)과 install.sh 의 MetalLB·ingress 게이트 삭제는 묶음 ⑦ 몫이다 — 지금은 아래 명령을 손으로 돈다
-(**⑦ 전에는 prod 에 install.sh 를 쓰지 않는다** — 지금 install.sh 는 MetalLB·IngressClass nginx 가 없으면 멈춘다, 설계 12 위험 19).
+설치기(§2h)의 S8·S12 가 아래를 감지 상태 기계(A 면 설치·C 면 platform/gateway 만)·마스터 sysctl·Programmed·마스터마다 :443 으로 한다 — install.sh 의
+MetalLB·ingress 게이트는 없앴다(2026-11-03 ⑦, 설계 12 위험 19 해소). 아래는 손 판이다.
 
 ```
 사내 PC ─https://<FQDN>─▶ Avi VS-443(VIP-A, L4 TCP, PROXY v2) ─▶ 마스터 ×3 :443 = Envoy DaemonSet(hostNetwork, 비 root 65532, TLS 종단)
@@ -1088,7 +1222,7 @@ keepalive·`tcp_user_timeout`(2f-2 URL)이 없으면 API 가 최대 약 15분 �
 | values.env 키(전부 선택) | 기본 | 뜻 |
 |---|---|---|
 | `GATEWAY_PROXY_PROTOCOL` | `required` | `optional` 은 **컷오버 중에만**(2g-4) — CTP `proxyProtocol.optional` 한 칸이 이 값에서 나온다. 렌더가 stderr 에 알린다 |
-| `PORTAL_TLS_SECRET` | `dms-portal-tls` | Gateway 인증서 Secret(ns dms, kubernetes.io/tls, SAN = 포탈 FQDN + VIP-A — 보안 S3). install.sh 의 존재 게이트는 아직 `dms-portal-tls` 고정(⑦) |
+| `PORTAL_TLS_SECRET` | `dms-portal-tls` | Gateway 인증서 Secret(ns dms, kubernetes.io/tls, SAN = 포탈 FQDN + VIP-A — 보안 S3). install.sh S2 가 이 이름으로 존재·`kubernetes.io/tls` 를 본다(⑦) |
 | `GATEWAY_ENVOY_CPU_REQUEST`·`GATEWAY_ENVOY_MEMORY_REQUEST` | `100m`·`256Mi` | Envoy requests(limits 1/2Gi 는 base — **넘으면 렌더 FAIL**: EnvoyProxy CRD 는 받아도 EG 가 만드는 DaemonSet 을 apiserver 가 거절해 Gateway 가 뜨지 않는다). 테스트베드 50m/128Mi(설계 10) |
 
 `PORTAL_DOMAIN`·`PORTAL_VIP`(prod 필수 키)는 매니페스트에 들어가지 않는다 — `render.env` 로만 가서 인증서 SAN 과 S12 `curl --resolve` 의 기준이 된다.
@@ -1129,11 +1263,13 @@ ss -xlH | grep -c envoy_domain_socket       # 0 이 아니면 호스트 netns �
   :19002 는 drain 완료를 기다리는 GET `/shutdown/ready` 뿐이고 drain 자체는 localhost admin 이 한다).
 - 클러스터 도메인이 `cluster.local` 이 아니면 EG 컨트롤러 env `KUBERNETES_CLUSTER_DOMAIN`(상류 그대로 cluster.local)이 xDS 주소
   `envoy-gateway.envoy-gateway-system.svc.<도메인>.` 을 틀리게 만든다 — `kubectl --context C -n kube-system get cm coredns -o yaml | grep kubernetes`
-  로 확인한다(다르면 지금은 렌더 후 패치 — 값 키는 ⑦).
+  로 확인한다(S1 preflight 가 다르면 WARN). 고치는 values 키는 아직 없다(BACKLOG 「⑦ 설치기 후속」) — **`deploy/.rendered` 를 손으로 고쳐도
+  설치기는 매 실행 처음에 다시 렌더해 그 편집을 지운다**(2026-11-03 ⑦ 리뷰 2). 그런 사이트는 지금 설치기로 입구를 끝낼 수 없다(S8 이
+  Programmed 에서 멈춘다) — values 키를 더하는 것이 BACKLOG 「⑦ 설치기 후속」의 할 일이다.
 
 ### 2g-3. 설치(S8, A 경로) — Gateway API → EG → 대기 → platform/gateway
 
-먼저 감지한다(⑦ 의 상태 기계 전까지는 손으로 — 설계 8-2):
+먼저 감지한다(설치기는 `install-detect.py` — 설계 8-2; 손으로는):
 
 ```bash
 kubectl --context C get crd gateways.gateway.networking.k8s.io \
@@ -1147,7 +1283,7 @@ kubectl --context C get crd envoyproxies.gateway.envoyproxy.io; kubectl --contex
 A 경로(S5 가 lock 의 `gateway:v1.9.3`·`envoy:distroless-v1.39.5` 를 레지스트리에 push 한 뒤 — §2e-4 루프가 lock 전부를 돈다. **`REGISTRY_MODE=external`**
 이고 `REGISTRY_CLUSTER_IP` 가 없으면 EG 컨트롤러·certgen·Envoy·shutdown-manager 이미지도 사이트 레지스트리(`render.env` 의 `ADDON_REGISTRY` = `REGISTRY`)
 에서 받는다 — §2e-4 의 lock push 루프를 `IP:PORT` 대신 그 `REGISTRY` 로 돌리거나 그 레지스트리에 미리 미러한다(§2f-3 과 같다, 2026-11-03 ⑥ 리뷰 2).
-install.sh 1b 의 push 는 DMS 이미지·buildah 뿐이다):
+설치기 S5 가 그 `REGISTRY` 로 대조하고 push 명령을 보인다):
 
 ```bash
 sh deploy/render.sh <site> --context C
@@ -1191,7 +1327,7 @@ C 경로(남이 설치한 Gateway API·EG): CRD·컨트롤러는 건드리지 �
 | Envoy 파드 Ready 가 안 되고 로그에 xDS `envoy-gateway.envoy-gateway-system.svc.cluster.local` 해석 실패 | `dnsPolicy: ClusterFirstWithHostNet` 이 안 들어갔다(EnvoyProxyPatch 꺼짐 — C) 또는 호스트 → ClusterIP 경로 불가(S6 와 같은 원인 — kube-proxy·방화벽) |
 | Envoy 파드가 `FailedCreate … violates PodSecurity "baseline": host namespaces (hostNetwork=true)` | ns `envoy-gateway-system` 에 PSA privileged 가 없다(C 경로 — 소유자에게) |
 | `ErrImagePull … docker.io/envoyproxy/…` | 렌더하지 않은 base·EG 기본값으로 갔다(자리표시자) — 렌더 결과만 적용 |
-| `ErrImagePull <레지스트리>/gateway:v1.9.3@sha256:…` 또는 `<레지스트리>/envoy:…@sha256:…` | lock 의 gateway·envoy 가 그 레지스트리에 없다 — in-cluster 면 S5(§2e-4) 누락, external 이면 위 A 경로 문단의 `REGISTRY` 로 lock push 누락(install.sh 1b 는 DMS 이미지만) |
+| `ErrImagePull <레지스트리>/gateway:v1.9.3@sha256:…` 또는 `<레지스트리>/envoy:…@sha256:…` | lock 의 gateway·envoy 가 그 레지스트리에 없다 — S5(§2e-4) 누락(설치기는 S5 대조가 PASS 여야 S8 로 간다 — 손으로 돌았으면 `install.sh --context C --only S5`) |
 | EG 컨트롤러 Pending `no PriorityClass with name dms-addon-critical` | S4 의 PriorityClass 가 없다(external 사이트 — 위 `get … \|\| apply … platform/priorityclass`) |
 | HTTPRoute `ResolvedRefs: False`(BackendNotFound) | 앱(S11)이 아직 없다 — S11 뒤 저절로 풀린다 |
 
@@ -1253,7 +1389,7 @@ kubectl --context C -n envoy-gateway-system logs -l gateway.envoyproxy.io/owning
 | EG 설정만 바뀜 | `envoy-gateway-config` 는 기동 때만 읽힌다 — SSA 뒤 `kubectl --context C -n envoy-gateway-system rollout restart deploy/envoy-gateway` |
 | 인증서 교체 | 같은 이름의 Secret 을 바꾸면 EG 가 Envoy 에 다시 내려 준다(재기동 없음) |
 | EG 컨트롤러 사망 | Envoy 는 마지막 설정으로 계속 돈다(설계 2-1) — 설정 변경만 멈춘다 |
-| 남이 설치한 EG(C) | 업그레이드는 소유자 몫 — DMS 는 EOL·지원 범위를 경고만(⑦) |
+| 남이 설치한 EG(C) | 업그레이드는 소유자 몫 — DMS 는 EOL·지원 범위를 경고만(감지 C! — 설치·verify 때마다) |
 
 가드: `platform/gateway`·`addons/gateway-api` 에는 워크로드가 없어 `guard-images.sh` 대상이 아니다(exit 2) — Envoy 이미지 교체는 `render.env` 의
 `ENVOY_PROXY_REF` 변화로 본다. `addons/envoy-gateway` 는 컨트롤러 Deployment 를 `envoy-gateway-system` 에서 읽어 이미지가 바뀌면 exit 3.
@@ -1276,6 +1412,66 @@ kubectl --context C -n envoy-gateway-system logs -l gateway.envoyproxy.io/owning
   `HOSTNET_RELAYS` 원복 + 유닛 재시작(DNAT 가 먼저 가로채 사용자 경로가 VIP 로 돌아간다) → 그 뒤 haproxy 중지(오버레이를 바꾸기 전까지는 Ingress 가
   그대로 살아 있다). 상태 확인은 `dms-testbed-hostnet status` 에 같은 `HOSTNET_RELAYS` 를 env 로 준다 — 스크립트는 `/etc/default` 를 읽지 않는다(유닛의
   `EnvironmentFile` 만), env 없이 돌리면 정상 컷오버에서도 8443 MISS 다.
+
+## 2h. 설치기(install.sh) — 단계 S1~S13·감지·멱등 (2026-11-03 ⑦)
+
+설계 v6 8-1(단계)·8-2(감지 상태 기계)·9 ⑦. §2d~§2g 의 손 명령을 단계로 묶었다 — 손 명령은 같은 일의 조사·복구용 판으로 남긴다. prod 의 순서는
+`deploy/overlays/prod/README.md`, 판정 근거는 각 도우미의 머리 주석이다.
+
+```bash
+sh deploy/install.sh --context C [--site prod] --plan            # S1 + S2(확인만) + S3 — 클러스터를 바꾸지 않는다
+sh deploy/install.sh --context C [--site prod]                   # S1 → … → S4 뒤 PAUSE(exit 10: push 명령 출력) — 이미 다 있으면 끝까지
+sh deploy/install.sh --context C [--site prod] --stage S5        # 인터넷 노드 push 뒤 재개(S5 → S13)
+sh deploy/install.sh --context C [--site prod] --only S7,S12     # 그 단계만(설치 순서대로) — 끝난 단계는 no-op·검증
+#   --upgrade-addon <x>(D< 올리기·D= 재적용) · --adopt <x>(P 채택 — SSA --force-conflicts) · env ADDON_INSTALL=never(A 면 FAIL + 운영자에게 요청)
+#   env ALLOW_IMAGE_CHANGE=1·ALLOW_HOSTPATH_CHANGE=1(가드 3·5) · VERIFY_NO_PROBES=1(S12 순수 읽기) · PORTAL_DOMAIN·PORTAL_VIP·CACERT(S12)
+#   env SELINUX_PROBE_IMAGE=<ref>(S2b — Cilium 이 없는 클러스터: 모든 노드에 이미 있는 셸 포함 이미지)
+sh deploy/install.sh --help                                      # 머리 주석(env·--upgrade-addon 이름·종료 코드) — exit 0
+```
+
+| 단계 | 하는 일(도우미) | 멈춤 |
+|---|---|---|
+| S1 | `preflight-cluster.sh --render-env`(K8s 1.34~1.36·control-plane·Volcano 라벨 `app=volcano-scheduler`·클러스터 도메인·PSA·admission·SHARED_DIR 형식·REGISTRY_CLUSTER_IP 의 ServiceCIDR·IPAddress·하단 정적 대역·노드 셸 체크리스트) + `install-detect.py detect` | FAIL·P·X(감지), Volcano 를 설치해야 하는데 층 없음 |
+| S2 | `00-namespace.yaml` → `pg-secrets.py ensure-app`·(없으면) `init-secrets` → 4키·자리표시자·`pg-secrets.py check` → `PORTAL_TLS_SECRET` 확인(없으면 WARN — 쓰는 곳인 S8 이 멈춘다) | 키·URL 어긋남(읽기 실패는 모름) |
+| S2b | `selinux-probe.py`(privileged 임시 DS, DMS 노드만 판정) | FAIL·모름 |
+| S3 | `install-detect.py plan`(층별 SSA server dry-run — 첫 설치의 「ns 가 아직 없음」·「CRD 가 아직 없음」은 SKIP) | FAIL |
+| S4 | PriorityClass SSA → (in-cluster, 적용할 때만) guard(`--upgrade-addon registry` 면 이 층에서 이미지 교체 허용) → `dms-registry-http`(없을 때만·stdin) → platform/registry SSA → rollout → port-forward `/v2/` 200 | FailedMount(마스터 이름과 함께)·ImagePullBackOff(S0-5 반입 없음)·FailedScheduling·센티널·clusterIP 충돌 |
+| S5 | `images-lock.py compare-registry`(port-forward) + DMS 3종 태그 HEAD → lock 이 다르면 `push-images.sh --print`(external TLS 면 `--dest-tls-verify true`), DMS 이미지만 없으면 그 빌드·복사 안내만 | S4 에서 이어 왔으면 PAUSE, 아니면 FAIL |
+| S6 | `pull-probe.py`(Always, 120초, DMS 노드만) | FAIL·모름 |
+| S7 | `shared-storage-probe.py`(①~⑥, ② 는 WARN) | 1·4(3 은 계속) |
+| S8 | gateway-api SSA → CRD Established → (ns 먼저 — DMS 라벨) EG SSA → certgen → rollout(DMS 소유 EG 를 적용하지 않을 때도 Ready·xDS 시크릿 확인) → TLS 시크릿 → `host-net-probe.sh --sysctl`(마스터 ≤ 443) → platform/gateway → Programmed → `host-net-probe.sh --listen`(마스터마다 :443) | 각 대기 실패, TLS 없음, 덜 설치된 EG(→ `--upgrade-addon envoy-gateway`) |
+| S9 | (ns 먼저 — DMS 라벨) CNPG SSA → rollout(업그레이드면 가드를 이 층에서 열고, Cluster 가 있으면 직전 덤프 → healthy 대기) → Cluster CR server dry-run(웹훅 9443, 막 뜬 웹훅은 재시도, `--adopt db` 면 `--force-conflicts`) | 「failed calling webhook」 |
+| S9b | (층이 있으면) Volcano SSA → `install-detect.py vcjob`(DMS 모양 vcjob dry-run) | FAIL |
+| S10 | `pg-path-probe.py pv-check` → db-volumes → `precheck` → db-cluster → 900초 폴링 → `contrast` → db-backup → 첫 덤프(Complete·Failed) | 각 판정 |
+| S11 | 시크릿 게이트 → 앱 이미지 확인 → `guard-images.sh` → migrate 지움 → `apply -k`(client-side) → migrate·rollout → 설정 rev 바뀌면 restart → 마스터 사전 pull(WARN) | 가드 3·4·5, migrate |
+| S12 | `verify.sh --rendered`(§2g-5 의 검사 + CNPG·여분 PV·경로 대조·CronJob·레지스트리 태그·애드온 요약·80 불가 = 정상·EACCES 힌트). readyz 판정은 apiserver 서비스 프록시(`get --raw …/services/http:dms-api:http/proxy/readyz`), VIP 경유(`--resolve`)는 응답 없음이면 WARN(Avi VS-443 미개통 — 첫 설치) | FAIL(이때도 S13 체크리스트를 보인다) |
+| S13 | 사후 체크리스트 출력 — 첫 관리자 부트스트랩(port-forward + `x-admin-token` 파일, 토큰·비밀번호를 출력·argv 에 싣지 않는다)·DNS·Avi 헬스·포탈 등록 | — |
+
+- **`--context` 는 필수**다(KUBE_CONTEXT·current-context 를 쓰지 않는다). 렌더의 `kube-context`(testbed-k8s = dmsk8s)와 다르면 exit 2. 모든 kubectl
+  은 `kc`·`kcn` 함수(`command kubectl --context "$CTX"`)로만 부른다 — 계약 테스트 `test_check_scripts_context.py`.
+- **층의 소유**: addons·platform 은 SSA(`--field-manager=dms-install`), 앱은 client-side apply. 감지가 **C**(남이 설치한 호환 애드온)면 그 층에는 apply 도
+  dry-run 도 부르지 않는다 — 소비 층(platform/gateway·Cluster CR dry-run·vcjob)만 본다.
+- **멱등**: 같은 렌더로 다시 돌리면 SSA 는 no-op, 시크릿·Job·ns 는 만들지 않고(있으면 그대로), 첫 덤프는 CronJob 의 마지막 성공이 있으면 건너뛰고,
+  rollout restart 는 `dms-config`·`dms-secrets` 의 resourceVersion 이 바뀌었는데 이번 apply 가 파드를 바꾸지 않은 경우에만 한다(워크로드 어노테이션
+  `dms.io/install-config-rev` — 값이 아니라 rev 만). `tests/test_install_stages.py` 가 심 kubectl 로 순서·PAUSE·재개·멱등·`--plan` 무변경을 고정한다.
+- 종료: 0 완료(WARN 포함) · 1 FAIL · 2 사용법·환경(빈 `--stage`·`--only` 포함) · 4 모름 · 10 PAUSE. 마지막 줄 `RESULT: …`, 단계마다 `STAGE: <S> <판정>`.
+  preflight(S1)·verify(S12)의 `[WARN]` 줄은 rc 0 이어도 그 단계와 RESULT 를 WARN 으로 만든다(2026-11-03 ⑦ 리뷰 2 — dmsk8s `--plan` 이
+  「preflight WARN 1」인데 RESULT PASS 였다). 도우미 출력은 4칸 들여 쓴다 — 0열의 `==`·`STAGE:`·`RESULT:` 는 설치기 자신의 줄뿐이라
+  `grep '^RESULT:'` 는 설치 결과 하나만 잡는다.
+- **재개 명령**(PAUSE·모름·FAIL 줄)은 이번 실행의 `--upgrade-addon`·`--adopt` 와 판정을 바꾸는 env(`ADDON_INSTALL`·`ALLOW_*`·`SELINUX_PROBE_IMAGE`·
+  `VALUES_ENV`·S12 의 `CACERT`·`PORTAL_DOMAIN`·`PORTAL_VIP`·`VERIFY_NO_PROBES`)를 그대로 싣는다 — 출력된 줄을 그대로 붙여 넣는다(2026-11-03 ⑦ 리뷰 1·2:
+  플래그가 빠진 재개는 업그레이드를 조용히 건너뛰었고, CACERT 가 빠진 S12 재실행은 VIP readyz 가 TLS 실패로 WARN 이 됐다). **`--plan` 의 「확인한
+  뒤」·「계획 끝」 줄은 늘 `--plan` 이다** — 실제 설치 명령(`… --site S [--adopt …]`)은 FAIL·모름이 없는 계획 뒤에만 계획과 같은 플래그·env 로 보인다
+  (전에는 계획 중의 모름·FAIL 이 클러스터를 바꾸는 `--stage S1`·`--stage S2` 를 권했다). env `DMS_NS`(옛 install.sh)는 읽지 않는다 — ns dms 고정,
+  도우미에도 `--namespace dms`.
+- **가드 거부(이미지 변경, exit 3)**: 애드온·플랫폼 층(registry·envoy-gateway·cnpg)이면 안내는 `--only <S> --upgrade-addon <x>`(그 층에서만 연다 —
+  감지 D< 의 upgrade 와 lock digest 만 바뀐 D= 재적용 둘 다)이고, 앱이면 values.env 태그를 라이브에 맞추거나 `live`(의도한 앱 이미지 변경만
+  `ALLOW_IMAGE_CHANGE=1`). 전역 `ALLOW_IMAGE_CHANGE=1` 은 재개 줄에 실려 S11 의 앱 가드(포탈 릴리스 되돌림 방지)까지 열므로 애드온에 쓰지 않는다.
+- **렌더는 매 실행 처음에 다시 한다**(`--plan`·`--only` 포함 — `deploy/.rendered/<site>` 를 통째로 바꾼다). 그 아래를 손으로 고친 값은 설치기로
+  적용되지 않는다 — 사이트 값은 values.env 키로만(키가 없으면 BACKLOG 「⑦ 설치기 후속」에 올리고, 그 전에는 설치기 실행 뒤 §2d~§2g 의 손 명령으로).
+- **앱 업그레이드**: 계획(S3)은 끝난 `dms-migrate` Job 의 `field is immutable` 을 실패로 보지 않는다(S11 이 지우고 다시 만드는 Job — 앱 층 PASS 에
+  사유를 적는다).
+- **아직 없는 것**(BACKLOG ⑦): Volcano 층(`addons/volcano` — A 사이트는 S1 에서 멈춘다), 새 사이트 DB 의 import bootstrap, `kubectl-cnpg` 반입.
 
 ## 3. Apply manifests, in order
 
