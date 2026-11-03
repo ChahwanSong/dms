@@ -51,6 +51,7 @@
 #   d15 = 사용량 경로별 표에 PV 이름 열 + 검색을 경로·PV 이름 부분 일치로(2026-10-29, 소스 4934968; 이미지 3종 + 잡 이미지).
 #   d16 = 사용량 분석 「소속별」 탭 — /breakdown(권한 사용자·요청자·namespace·PV 이름·SC·클러스터별 실 사용량 순위)(2026-10-30,
 #         소스 ab8f02b; 이미지 3종 + 잡 이미지).
+#   d17 = ① B3 잡 객체 채택·회수 + ② 로그인·식별(아이디 기준 상한·보호 장치·관리자 구제·보안 이벤트 화면)(2026-11-03, 소스 99eebd4; 이미지 3종 + 잡 이미지).
 #   태그 bump = 아래 newTag(+ patch-config.yaml 의 DMS_JOB_IMAGE) 커밋 — **dms-k8s 에서만** 한다(2026-10-22 브랜치 분리 뒤
 #   빌드 소스는 /home/mason/dms-dev/dms-k8s 체크아웃 = origin/dms-k8s, main 은 이 클러스터와 무관).
 #   ssc 클러스터의 오버레이(overlays/testbed)는 dms-ssc 브랜치에만 있다(2026-10-26 이 브랜치에서 지웠다 — 체리픽 충돌·엉뚱한 태그 방지).
@@ -68,10 +69,10 @@ resources:
 images:
   - name: set-by-overlay.invalid/dms
     newName: pkg-01:5001/dms
-    newTag: d16
+    newTag: d17
   - name: set-by-overlay.invalid/dms-agent
     newName: pkg-01:5001/dms-agent
-    newTag: d16
+    newTag: d17
 
 patches:
   - path: patch-config.yaml
