@@ -33,7 +33,7 @@ k8s 테스트베드는 §13 이 런북이다.
 | kube 컨텍스트 | `dms` (current) | `dmsk8s` (current 로 만들지 않는다) |
 | 오버레이 | `deploy/overlays/testbed`(dms-ssc 에만) | `deploy/overlays/testbed-k8s` |
 | 포탈 | https://dms.local (VIP 10.20.20.100) | https://dms-k8s.local (VIP 10.20.20.101) |
-| 레지스트리 | `pkg-01:5000` (docker `registry`) | `pkg-01:5001` (docker `registry-k8s`); 빌더 `buildah:stable` 만 :5000 공용. 클러스터 내 `10.112.0.50:5000`(④ T4 병행 — 앱 전환 전, §2e-6) |
+| 레지스트리 | `pkg-01:5000` (docker `registry`) | `10.112.0.50:5000` — 클러스터 내(④, 2026-11-03~ 앱·빌더 `buildah:stable` 모두, §2e-6). 그 전 `pkg-01:5001`(docker `registry-k8s`, 빌더만 :5000 공용) — 되돌림용으로 둔다 |
 | 태그 관례 | `dN` | `dN` — d1 부터(2026-10-26; 그 전 k0~k4 는 옛 kN, 첫 설치 시드는 `d0`) |
 | PostgreSQL | `dmsdb` / `dmsapp` | `dmsdb_k8s` / `dmsapp_k8s` |
 | LDAP | 사용(pkg-01 slapd, 아래 표) | **없음**(사용자 결정) — k8s 신원 모드(모든 잡 root + 권한 = RoleBinding 맵핑, §13) |
@@ -54,7 +54,7 @@ truth):
 | thing | value |
 |---|---|
 | build/registry node | `pkg-01` (10.10.10.30) |
-| registry | `pkg-01:5000`, insecure (k8s 테스트베드는 `pkg-01:5001`) |
+| registry | `pkg-01:5000`, insecure (k8s 테스트베드는 클러스터 내 `10.112.0.50:5000` — 2026-11-03~, 그 전 `pkg-01:5001`) |
 | PostgreSQL | `postgresql://dmsapp:<PW>@10.10.10.30:5432/dmsdb` — PW 는 testbed `group_vars/all.yml` 의 `postgresql_app_password`(테스트베드 전용 데모값, 인라인). testbed `secrets.yml`(gitignored)엔 k8s 테스트베드의 `postgresql_app_password_k8s` 만 있다 |
 | LDAP | `ldap://10.10.10.30:389`, base `dc=dms,dc=local` (ssc 전용 — k8s 테스트베드는 LDAP 없음) |
 | CephFS `cephfs-dms` | `/cephfs`, mounted on w1-3 |
@@ -593,6 +593,8 @@ sudo rm -f /tmp/registry-3.1.2.tar             # 반입 뒤 지운다(인터넷 
   은 CRI-O 에 쓰이지 않는다(`crio config` 의 `signature_policy` 로 확인).
 - 새 워커는 S0-4 만 하면 된다. 새 마스터는 레지스트리가 살아 있으면 `sudo crictl pull IP:PORT/registry:3.1.2` 뒤 고정하고, 아니면 S0-5 를
   반복한다. 레지스트리 자기 이미지는 이 레지스트리에 기대지 않는다(7-4 의존 규칙 — 시스템 이미지도 마찬가지).
+- 반입 store 지정: `crio config` 의 `storage_driver = ""` 는 자동 선택이다(실효 overlay — reload 로그 `storage_driver = "overlay"`, 2026-11-03
+  T4 cp1) — 위 `overlay@…` 그대로 쓴다.
 
 ### 2e-3. 적용(S4) — PriorityClass·http 시크릿·레지스트리
 
@@ -668,14 +670,17 @@ sudo crictl pull IP:PORT/registry:3.1.2 && sudo crictl pull IP:PORT/buildah:stab
   `registry:` 줄(`images-lock.py resolve`)을 함께 바꿔 커밋(셋이 같아야 한다 — 테스트가 고정) → 인터넷 노드가 새 이미지를 push(S5) → **마스터 전부** `sudo crictl pull IP:PORT/registry:<새 태그>`(고정 패턴
   `registry:*` 가 덮는다) → `sh deploy/render.sh <site> --context C` → `guard-images.sh` 가 exit 3(이미지 변경 — 안내에 이 순서가 나온다) →
   `ALLOW_IMAGE_CHANGE=1` 로 다시 → SSA apply → `rollout status`. maxSurge 1 이라 새 파드가 Ready 가 된 뒤 옛 파드가 내려간다. **빌드·push
-  가 없을 때** 한다(겹치는 동안 Service 가 요청을 나눠 S7 ② WARN 사이트에서는 push 가 `blob unknown` 일 수 있다).
+  가 없을 때** 한다(겹치는 동안 Service 가 요청을 나눠 S7 ② WARN 사이트에서는 push 가 `blob unknown` 일 수 있다). 옛 파드는 preStop 5초
+  뒤 SIGTERM 을 받고 진행 중 요청을 `http.draintimeout`(20s) 동안 마친다(b3c5f4e — T4 실측: 교체 중 매니페스트 GET 172회·이미지 복사 62회
+  실패 0). drain 이 없는 옛 템플릿(b3c5f4e 이전)에서 처음 올릴 때는 옛 파드가 drain 없이 끝난다(SIGTERM 에 곧바로 exit 2 — 진행 중 pull 이
+  끊긴다) — 빌드·push 가 없는 조용한 창에.
 - **설정 변경**(2026-11-03 ④ 리뷰 2): Distribution 은 `config.yml` 을, init 은 `expected-registry-id` 를 **기동 때만** 읽는다. 렌더러가 둘의
   sha256 을 파드 템플릿 annotation `dms.io/config-sha256` 에 넣으므로 `config.yml`·`SHARED_DIR_ID` 만 바뀐 렌더도 SSA 로 적용하면 롤링
   교체된다(가드는 이미지·hostPath 만 보므로 이 변경은 막지 않는다). 업그레이드와 같이 빌드·push 가 없을 때 한다. 손으로 고친 ConfigMap
   (아래 GC 길 B)은 렌더값이 그대로라 체크섬도 그대로다 — 되돌린 뒤 `rollout restart` 가 필요하다.
 - **GC**(연 몇 번, 수동 — 빌드가 없고 레지스트리가 Ready 일 때만):
   1. readonly 켜기: `kubectl --context C -n dms set env deploy/dms-registry REGISTRY_STORAGE_MAINTENANCE_READONLY='{"enabled":true}'`
-     (env 의 JSON 맵 파싱은 T4 확인 항목 — 안 되면 `kubectl --context C -n dms edit cm dms-registry-config` 의 `readonly.enabled: true` +
+     (env 의 JSON 맵 파싱은 T4 확인(POST 405) — 길 A. 다른 판에서 안 되면 길 B: `kubectl --context C -n dms edit cm dms-registry-config` 의 `readonly.enabled: true` +
      `kubectl --context C -n dms rollout restart deploy/dms-registry`. 그러면 `data.config.yml` 이 kubectl-edit 소유가 되므로 끈 뒤의 SSA
      재적용은 `--force-conflicts` 가 필요하다).
   2. `rollout status` 가 끝나고 옛 ReplicaSet 파드(Terminating 포함)가 0개인지 본 뒤 `terminationGracePeriodSeconds`(30초)만큼 더 기다린다.
@@ -686,8 +691,11 @@ sudo crictl pull IP:PORT/registry:3.1.2 && sudo crictl pull IP:PORT/buildah:stab
      길 B(ConfigMap): `kubectl --context C apply --server-side --field-manager=dms-install --force-conflicts -k $R/registry`(ConfigMap 원복) →
      **`kubectl --context C -n dms rollout restart deploy/dms-registry`** → `rollout status` — 렌더값이 그대로라 체크섬 annotation 이 바뀌지 않아
      SSA 만으로는 파드가 다시 뜨지 않고 계속 읽기 전용이다.
-  GC 창 동안 포탈 삭제는 409(`registry_delete_disabled`), 빌드 push 는 실패, pull 은 된다. `set env` 로 바꾼 필드는 kubectl 소유가 되므로
-  끈 뒤 다음 SSA apply 가 충돌하면 `--force-conflicts` 로 dms-install 에 되돌린다.
+  GC 창 동안 포탈 삭제는 409(`registry_delete_disabled` — 문구가 GC 읽기 전용 창도 말한다, T4 확인), 빌드 push 는 실패, pull 은 된다.
+  `set env` 로 바꾼 필드는 kubectl 소유가 되므로 끈 뒤 다음 SSA apply 가 충돌하면 `--force-conflicts` 로 dms-install 에 되돌린다.
+- **포탈 이미지 관리**(「빌드 > 이미지 관리」, §8 2b): 삭제는 digest 단위(매니페스트)다 — 안 쓰는 태그라도 사용 중 태그와 digest 를
+  공유하면 409 `registry_digest_in_use`(같이 지우면 사용 중 태그가 사라진다 — T4 실증, 01fd922). 사용 중 판정은 동봉 매니페스트에 더해
+  DB 잡 이미지 실효값(`control_state.job_image` — 레지스트리 전환 뒤 다시 릴리스한 잡 이미지)도 본다.
 - **백업**: 애드온은 인터넷 노드가 lock 의 digest 로 다시 받을 수 있다. **현장에서 빌드한 DMS 태그는 레지스트리에만 있다** —
   `skopeo sync --src docker --dest dir --src-tls-verify=false IP:PORT/dms <공용 스토리지 밖 경로>`(dms-agent·dms-mpifileutils 도)로 사본을 더한다.
 - **장애**(설계 7-6 표): 레지스트리가 있는 마스터의 공용 스토리지가 멈추면 readiness(catalog)가 NotReady 로 드러낸다(`/v2/` 는 계속 200) —
@@ -711,19 +719,22 @@ sudo crictl pull IP:PORT/registry:3.1.2 && sudo crictl pull IP:PORT/buildah:stab
      가 「센티널 확인 (<새 id>)」, `/v2/<repo>/tags/list` 가 옮기기 전과 같다.
   5. 그다음 앱을 적용한다(§2d-4 5). 옛 `<옛 SHARED_DIR>/dms/registry` 는 되돌림 창 동안 지우지 않는다.
 
-### 2e-6. k8s 테스트베드(`dmsk8s`) — T4 (병행, 앱 전환 전)
+### 2e-6. k8s 테스트베드(`dmsk8s`) — T4·앱 전환 (2026-11-03 완료, d19)
 
-- 값: `deploy/overlays/testbed-k8s/values.env` — `REGISTRY_MODE=external`·`REGISTRY=pkg-01:5001`(앱은 그대로), `REGISTRY_CLUSTER_IP=10.112.0.50`
-  (svc 10.112.0.0/12 하단, 미사용 실측)·`REGISTRY_PORT=5000`·`SHARED_DIR_ID`(= `/dms_shared/dms/.dms-shared-id`)·requests 50m/64Mi(설계 10).
-  `sh deploy/render.sh testbed-k8s` 가 `deploy/.rendered/testbed-k8s/platform/{priorityclass,registry}` 를 내고, 렌더된 `app/` 은 커밋된
-  오버레이와 같다(테스트가 고정). 앱 적용은 지금처럼 `kubectl --context dmsk8s apply -k deploy/overlays/testbed-k8s`(§13-6).
-- control-plane 은 cp1 하나라 S0-5 는 cp1 에만, S0-4 는 3노드, 인터넷 노드 역할은 빌드 노드 k8s-w1. `pkg-01:5001` 은 병행 유지한다.
-  T4 를 중간에 멈추면 2e-5 「걷어내기」(`C`=dmsk8s, `R=deploy/.rendered/testbed-k8s/platform`) — 앱은 `pkg-01:5001` 이라 영향이 없다.
-- **앱 전환은 T4 실증 뒤의 별도 단계**다: `values.env`(`REGISTRY_MODE=in-cluster`, `REGISTRY=10.112.0.50:5000`)·오버레이 `newName`·
-  `patch-config.yaml` 의 `DMS_JOB_IMAGE`·`DMS_BUILD_REGISTRY`·`DMS_BUILD_BUILDER_IMAGE` 를 한 커밋에서 바꾸고(렌더러가 다섯 곳 대조 —
-  빌더도 같은 레지스트리여야 한다), `tests/test_testbed_k8s_overlay.py` 의 레지스트리 상수도 고친다 → guard exit 3 → `ALLOW_IMAGE_CHANGE=1` →
-  apply → api·controller `rollout restart`(ConfigMap) → 포탈 릴리스로 **잡 이미지(`control_state.job_image`)를 새 주소로 다시 릴리스**.
-  되돌림 = 그 커밋을 되돌려 같은 순서로(`pkg-01:5001` 은 병행 유지라 그대로 돌아간다).
+- 값: `deploy/overlays/testbed-k8s/values.env` — `REGISTRY_MODE=in-cluster`·`REGISTRY=10.112.0.50:5000`(2026-11-03 T4 16 전환 — 그 전
+  external·`pkg-01:5001`), `REGISTRY_CLUSTER_IP=10.112.0.50`(svc 10.112.0.0/12 하단, 미사용 실측)·`REGISTRY_PORT=5000`·`SHARED_DIR_ID`
+  (= `/dms_shared/dms/.dms-shared-id`)·requests 50m/64Mi(설계 10 — T4 실측 RSS 43~50MB, 대량 pull 때 최고 약 66MiB 로 request 를 살짝 넘는다;
+  limit 512Mi). `sh deploy/render.sh testbed-k8s` 가 `deploy/.rendered/testbed-k8s/platform/{priorityclass,registry}` 를 내고, 렌더된 `app/` 은
+  커밋된 오버레이와 같다(테스트가 고정). 앱 적용은 지금처럼 `kubectl --context dmsk8s apply -k deploy/overlays/testbed-k8s`(§13-6).
+- control-plane 은 cp1 하나라 S0-5 는 cp1 에만, S0-4 는 3노드, 인터넷 노드 역할은 빌드 노드 k8s-w1. 결과는 CHANGELOG ④ 「T4 실증」.
+  앱이 이 레지스트리를 쓰므로 2e-5 「걷어내기」(`C`=dmsk8s, `R=deploy/.rendered/testbed-k8s/platform`)는 아래 되돌림 뒤에만 한다.
+- **앱 전환**(T4 16 — 완료, 6287cd8; 첫 포탈 빌드 d19 = 35a10a3): `values.env`(`REGISTRY_MODE=in-cluster`, `REGISTRY=10.112.0.50:5000`)·
+  오버레이 `newName`·`patch-config.yaml` 의 `DMS_JOB_IMAGE`·`DMS_BUILD_REGISTRY`·`DMS_BUILD_BUILDER_IMAGE` 를 한 커밋에서 바꾸고(렌더러가 다섯
+  곳 대조 — 빌더도 같은 레지스트리여야 한다), `tests/test_testbed_k8s_overlay.py` 의 레지스트리 상수도 고친다 → guard exit 3 →
+  `ALLOW_IMAGE_CHANGE=1` → apply → api·controller `rollout restart`(ConfigMap) → 포탈 릴리스로 **잡 이미지(`control_state.job_image`)를 새
+  주소로 다시 릴리스**. 이후 포탈 빌드는 새 레지스트리로 push 하고 동봉 매니페스트가 새 주소로 스탬프돼 드리프트가 「일치」다(d19).
+  되돌림 = 그 커밋을 되돌려 같은 순서로 — `pkg-01:5001` 은 되돌림용으로 남겨 뒀지만 d18 까지만 있다(d19 부터는 새 레지스트리에만 —
+  태그를 d18 로 맞추거나 `skopeo copy` 로 옮긴 뒤).
 
 ## 2f. DB(CNPG) — 오퍼레이터(S9)·DB 층(S10)·백업·재활용·업그레이드·운영 규칙 (2026-11-03 ⑤)
 
@@ -1284,7 +1295,7 @@ export 하지 않는다. 새 체크아웃은 testbed `dms_src_checkouts` 에 넣
 | 클러스터 | build_node_name | build_source_path | 따라가는 브랜치 | 레지스트리 / 태그 |
 |---|---|---|---|---|
 | ssc(`dms`) | dms-w1 | `/home/mason/dms-dev/dms-ssc`(전체 clone — 전환 전엔 `/home/mason/dms-dev/dms`) | origin/dms-ssc | pkg-01:5000 / dN |
-| k8s(`dmsk8s`) | k8s-w1 | `/home/mason/dms-dev/dms` | origin/dms-k8s(`/home/mason/dms-dev/dms-k8s`) | pkg-01:5001 / dN |
+| k8s(`dmsk8s`) | k8s-w1 | `/home/mason/dms-dev/dms` | origin/dms-k8s(`/home/mason/dms-dev/dms-k8s`) | 10.112.0.50:5000(클러스터 내, 2026-11-03~; 그 전 pkg-01:5001) / dN |
 
 체크아웃은 호스트 cron 이 ff-only 로 맞춘다. **git worktree 로 만들지 않는다** — 빌드 파드는 이 경로 하나만 마운트해서
 `.git` 파일이 가리키는 바깥 gitdir 를 못 따라가 SHA 가 `unknown` 이 된다. 컨트롤 상태 PUT 은 전체 치환이라(빠진 필드는
@@ -2114,7 +2125,7 @@ kubectl --context dmsk8s -n dms exec ds/dms-agent -- sh -c 'test -S /run/nslcd/s
 ### 13-8. 빌드 → 릴리스 → 태그 bump(`dN`)
 
 포탈 「빌드」에서 images `[dms-mpifileutils, dms, dms-agent]`, 태그는 **제안 칩(`d<다음 번호>`)을 그대로** 쓴다 — 제안은 이 사이트의
-라이브 태그·이 레지스트리(:5001)·빌드 이력의 `dN` 최댓값 + 1 이라 git 에 커밋된 오버레이 태그와 무관하다(프로덕션도 같은 코드로
+라이브 태그·이 레지스트리(2026-11-03~ 클러스터 내 `10.112.0.50:5000`, 그 전 :5001)·빌드 이력의 `dN` 최댓값 + 1 이라 git 에 커밋된 오버레이 태그와 무관하다(프로덕션도 같은 코드로
 자기 레지스트리·이력의 다음 번호를 제안한다). 2026-10-26 에 옛 `kN`(k0~k4)에서 `dN` 으로 바꿨다 — d1 부터. 릴리스(agent → api →
 controller, 잡 이미지) 뒤 `deploy/overlays/testbed-k8s` 의
 `newTag`·`DMS_JOB_IMAGE` 를 맞추는 커밋을 **dms-k8s 에서만** 만든다(2026-10-22 브랜치 분리 — ssc 오버레이 `testbed` 는 같이

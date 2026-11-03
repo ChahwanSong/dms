@@ -185,7 +185,7 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
 - **테스트베드**: T6(push → 오퍼레이터 → 9443 dry-run → SC/PV → 사전 검사 → Cluster → 폴링 → 경로 대조 → CronJob·첫 덤프 → 확인 항목)·T6'·T7 은 메인
   세션이 한다 — T6'·T7 은 사용자 승인 뒤. 결과는 실증 뒤 기입.
 
-### ✅ ④ 클러스터 내 레지스트리 — Distribution v3.1.2 플랫폼 층·렌더러 일반화·images.lock·가드 — **구현·검증**(2026-11-03, 테스트베드 T4 실증 대기)
+### ✅ ④ 클러스터 내 레지스트리 — Distribution v3.1.2 플랫폼 층·렌더러 일반화·images.lock·가드 — **완료·실증**(2026-11-03, d19 — 앱 전환)
 
 설계 v6(`docs/history/specs/2026-11-03-dms-k8s-prod-design.md`) 7(7-1~7-6)·2-1(PriorityClass)·8-1(S0-4·S0-5·S-1·S4~S6)·8-2 「층 배치」·
 9절 ④·10 T4, 사용자 결정 #46(1개·오퍼레이터 없음). 런북은 deploy/README §2e. DMS 코드(`registry.py`·`routes_registry.py`)는 바꾸지 않았다.
@@ -209,7 +209,7 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   (센티널 기대값 = S0 의 `.dms-shared-id` — **값의 원천을 values 로 둔 이유**: 설치 호스트는 공용 스토리지를 마운트하지 않을 수 있고, 렌더가
   호스트 상태에 기대지 않게), 선택 `REGISTRY_CPU_REQUEST`·`REGISTRY_MEMORY_REQUEST`. in-cluster 면 `REGISTRY` 를 비우면 `<IP>:<PORT>` 로
   채우고 다르면 FAIL, 렌더 결과에서 **같은 주소 다섯 곳**(REGISTRY·newName·`DMS_JOB_IMAGE`·`DMS_BUILD_REGISTRY`·`DMS_BUILD_BUILDER_IMAGE`)을
-  다시 대조한다(external 이면 빌더 미러만 예외). testbed-k8s 는 앱이 `pkg-01:5001` 그대로(external — T4 병행)이고 values.env 에
+  다시 대조한다(external 이면 빌더 미러만 예외). testbed-k8s 는 앱이 `pkg-01:5001` 그대로(external — T4 병행, 실증 뒤 in-cluster 로 전환 — 아래 「T4 실증」)이고 values.env 에
   `REGISTRY_CLUSTER_IP=10.112.0.50`·`REGISTRY_PORT=5000`·`SHARED_DIR_ID`(실측)·requests 50m/64Mi 를 기록했다 — 렌더된 앱 == 커밋된 오버레이.
   셸 환경의 레지스트리 키는 읽지 않는다(values.env 만 원천 — ③ 의 SHARED_DIR 와 같은 이유).
 - **images.lock**(설계 7-5 ①, 커밋): `DEST SOURCE DIGEST` 세 칸(sh `read -r` 로도 읽힘) — `registry:3.1.2`(docker.io, amd64 `sha256:1290056e…`)·
@@ -248,8 +248,27 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   ipaddresses·하단 정적 대역)으로 — S1 자동 검사는 ⑦, 렌더 명령에 `--context`, deploy/README 머리말에 「in-cluster 면 §2e 도」, prod README
   의 S7 프로브를 S6 뒤로(render.env 의 REGISTRY), skopeo 의 `/usr/lib/cni` 는 추천이 아니라 containers-common 의 필수 의존(CRI-O `plugin_dirs`
   밖이라 무해 — cp1·w1 `apt-get install -s` 확인).
-- **테스트베드**: T4(cp1 반입·고정 → 10.112.0.50 레지스트리 → k8s-w1 에서 lock·d17 push → 3노드 pull → 확인 항목)와 앱 전환은 메인 세션이 한다 —
-  결과는 실증 뒤 기입. `pkg-01:5001` 은 병행 유지. testbed IaC(crio 롤 drop-in 둘·skopeo)는 testbed 저장소 몫(작업 사본 패치).
+- **테스트베드**: T4(cp1 반입·고정 → 10.112.0.50 레지스트리 → k8s-w1 에서 lock·d17 push → 3노드 pull → 확인 항목)와 앱 전환은 메인 세션이
+  했다(아래). 라이브는 d19 = `10.112.0.50:5000`, `pkg-01:5001` 은 되돌림용으로 둔다. testbed IaC(crio 롤 drop-in 둘·skopeo)는 testbed 저장소
+  몫(작업 사본 패치).
+- **T4 실증(2026-11-03 — 전 항목 PASS)**:
+  - 노드: 3노드 `50-dms-registry.conf`(reload 로 `10.112.0.50:5000 Insecure:true`), w1·cp1 skopeo 1.13.3(설정 diff 는 policy.json·registries.conf·
+    shortnames.conf 추가뿐, `/usr/lib/cni` 는 생기지만 CRI-O plugin_dirs 는 `/opt/cni/bin` 뿐), cp1 oci-archive 반입 → repoDigest = lock
+    `1290056e…` → `99-dms-pinned.conf` reload 만으로 pinned true(재부팅 뒤 유지).
+  - S4: SSA 3초 롤아웃, init 「센티널 확인」, 빈 catalog 200(3노드 호스트 → ClusterIP). S5: lock 대조 OK(registry·buildah). S6: 5 ref × 3노드 pull.
+  - 센티널 음성: 없는 디렉터리 → Init:Error·만들지 않음, 기대값 불일치 → 거부, 대조군 Completed.
+  - 업그레이드(maxSurge 1): 매니페스트 GET 172회 실패 0. GC: env readonly JSON 파싱 OK(POST 405) → 포탈 삭제 409 `registry_delete_disabled` → GC → 끄기 202.
+  - cp1 재부팅: 실패 창 약 93초(레지스트리는 고정된 자기 이미지로 같은 파드 재시작, 부팅 뒤 pull 0회).
+  - 앱 전환(16): 오버레이 newName·`DMS_JOB_IMAGE`·`DMS_BUILD_REGISTRY`·빌더 → 10.112.0.50:5000(6287cd8), 가드 exit 3 → 허용, migrate 4초, 잡 이미지
+    재릴리스(DB 오버라이드 → `10.112.0.50:5000/dms-mpifileutils:d18`), 모든 dms 파드 새 주소, 작은 scan 성공. 첫 포탈 빌드 d19(소스 01fd922)가 새
+    레지스트리에 push → 없는 태그 릴리스 422 `unknown_tag` → 4종 릴리스 Applied(동봉 매니페스트가 새 주소로 스탬프돼 드리프트 「일치」) → 노드
+    pull → 이미지 관리 화면 d19 3종 사용 중 보호(35a10a3).
+  - 실증에서 찾아 고친 것: 레지스트리 종료 drain 없음(SIGTERM 에 exit 2 — 실제로 진행 중 전체 이미지 pull 이 5분 매달린 뒤 실패) →
+    `http.draintimeout 20s` + preStop 5s(b3c5f4e) — 이후 「Draining connections for 20s」·exit 0, 교체 중 이미지 복사 62회 실패 0.
+    포탈 이미지 삭제 보호 두 구멍(01fd922): DB 잡 이미지 실효값 미보호, digest 를 공유하는 사용 중 태그가 함께 지워짐 → 409 `registry_digest_in_use`
+    (reasonCodes.json·REASON_MESSAGES 양쪽; `registry_delete_disabled` 문구는 GC 읽기 전용 창도 말한다).
+  - 실측: 레지스트리 RSS 43~50MB(대량 pull 때 최고 약 66MiB — 테스트베드 request 64Mi 를 살짝 넘음, limit 512Mi).
+  - 전환 뒤 계약: `test_platform_registry_contract`·`test_testbed_k8s_overlay` 102 passed·2 skipped(사본에 전환을 적용하던 2건 — 이미 전환됐다).
 
 ### ✅ ③ 공용 디렉터리(SHARED_DIR) — 아티팩트 경로 한 원천(`<SHARED_DIR>/dms/artifacts`)·hostPath 가드(exit 5)·스토리지 등록 가드·S0 초기화·S7 동작 프로브 — **완료·실증**(2026-11-03, d18)
 

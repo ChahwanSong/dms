@@ -397,24 +397,29 @@ CHANGELOG 「④ 클러스터 내 레지스트리」, 설계 v6 7·8-1(S0-4·S0-
   - `SHARED_DIR_ID` 를 손으로 values.env 에 옮기지 않게: S0 결과(`.dms-shared-id`)를 일회용 파드로 읽어 제안·대조하는 길.
   - SHARED_DIR 변경 때 레지스트리 저장소 이동(지금은 deploy/README §2e-5 「저장소 이동」 손 절차 — 센티널을 복사에서 빼고 `SHARED_DIR_ID`
     를 새 값으로, 앱보다 먼저): 설치기가 플랫폼 층을 SSA 할 때 같은 순서·가드 exit 5 를 따른다.
-- 🔧 **테스트베드 T4 실증**(dmsk8s — 메인 세션) — 설계 10 「T4 확인 항목」 1~3·5~7. 4(cp1 재부팅)는 파괴적이라 사용자 승인 뒤. 결과는 실증
-  뒤 CHANGELOG 에 기입.
-- 🔧 **testbed-k8s 앱 전환**(T4 뒤 별도 단계, deploy/README §2e-6) — `values.env`(`REGISTRY_MODE=in-cluster`, `REGISTRY=10.112.0.50:5000`)·
-  오버레이 newName·`DMS_JOB_IMAGE`·`DMS_BUILD_REGISTRY`·`DMS_BUILD_BUILDER_IMAGE`·`tests/test_testbed_k8s_overlay.py` 상수를 한 커밋에서 →
-  `ALLOW_IMAGE_CHANGE=1` 적용 → 잡 이미지 재릴리스. 그 뒤 「모든 이미지가 새 주소로 시작」 게이트(테스트베드는 인터넷이 있어 빠진 이미지를
-  조용히 받아 온다)와 `pkg-01:5001` 정리 시점 결정.
+- ~~**테스트베드 T4 실증**~~ — **해소**(2026-11-03, CHANGELOG ④ 「T4 실증」 — 확인 항목 1~7 전 항목 PASS, 4(cp1 재부팅) 실패 창 약 93초).
+  실증에서 찾은 레지스트리 종료 drain 없음(b3c5f4e)·포탈 이미지 삭제 보호 두 구멍(01fd922)은 고쳤다.
+- ~~**testbed-k8s 앱 전환**~~ — **해소**(2026-11-03, 6287cd8 → 첫 포탈 빌드 d19 35a10a3, deploy/README §2e-6): 잡 이미지 재릴리스, 모든 dms
+  파드가 새 주소(「모든 이미지가 새 주소로 시작」 게이트), 포탈 빌드·릴리스 드리프트 「일치」. 남은 것:
+  - 📝 **`pkg-01:5001` 정리 시점** — 결정 대기. 지금은 되돌림용이다(d18 까지만 있다 — d19 부터는 새 레지스트리에만).
 - 🔧 **testbed IaC**(testbed 저장소 몫) — crio 롤에 `50-dms-registry.conf`(3노드)·`99-dms-pinned.conf`(cp1)·skopeo 패키지(cp1·빌드 노드
   k8s-w1 만, 추천 패키지 없이), validate 점검.
   작업 사본 패치는 메인 세션이 사용자에게 준다.
-- 📝 **T4 확인 대기(추정으로 둔 것)** — 빈 레지스트리에서 `/v2/_catalog?n=1` 이 200 인지(아니면 readiness 를 다시 정한다), GC 의 env
-  readonly(`REGISTRY_STORAGE_MAINTENANCE_READONLY='{"enabled":true}'`) JSON 파싱, `readOnlyRootFilesystem` 에서 레지스트리가 정상인지,
-  containers-storage 반입본 digest 와 레지스트리 digest 의 관계(그래서 태그 ref 예외), requests 실측(2-1 은 추정), Ubuntu `apt-get install
-  --no-install-recommends skopeo` 의 영향 — 판정 기준은 설치 전후 `find /etc/containers /etc/crio /etc/cni -type f -exec sha256sum {} +`·
-  `ls /opt/cni/bin` 대조(`crio config` diff 는 registries.conf.d 를 보이지 않는다). 생기는 것으로 알려진 것: `/etc/containers/
-  {policy.json,registries.conf,registries.conf.d/shortnames.conf}`(shortnames 는 CRI-O 가 reload 때 읽는다 — 짧은 이름 이미지가 없으면 무해,
-  dmsk8s 파드 이미지는 전부 FQDN), `/usr/lib/cni`(containernetworking-plugins — containers-common 의 **필수** 의존 container-network-stack 이라
-  `--no-install-recommends` 로도 깔린다; CRI-O `plugin_dirs` 는 기본 `/opt/cni/bin` 뿐이라 무해 — 2026-11-03 cp1·w1 `apt-get install -s`),
-  storage.conf 는 없다.
+- ~~**T4 확인 대기(추정으로 둔 것)**~~ — **해소**(2026-11-03 T4 실측, CHANGELOG ④ 「T4 실증」):
+  - 빈 레지스트리 `/v2/_catalog?n=1` → 200(`{"repositories":[]}`, 3노드 호스트 → ClusterIP) — readiness 그대로.
+  - GC 의 env readonly(`REGISTRY_STORAGE_MAINTENANCE_READONLY='{"enabled":true}'`) JSON 파싱 OK(POST 405) — deploy/README §2e-5 길 A.
+  - `readOnlyRootFilesystem` 에서 정상(S4 SSA 3초 롤아웃·S5·S6·업그레이드·GC·cp1 재부팅).
+  - 반입본 repoDigest == lock `1290056e…` == 레지스트리 digest. 태그 ref 예외는 반입·업그레이드 순서를 단순하게 두려고 유지한다
+    (deployment.yaml 머리 주석).
+  - requests 실측: RSS 43~50MB, 대량 pull 때 최고 약 66MiB — 테스트베드 request 64Mi 를 살짝 넘음(limit 512Mi).
+  - Ubuntu skopeo 1.13.3(w1·cp1, `--no-install-recommends`): 설정 diff 는 `/etc/containers/{policy.json,registries.conf,registries.conf.d/
+    shortnames.conf}` 추가뿐(storage.conf 없음), `/usr/lib/cni` 는 생기지만 CRI-O `plugin_dirs` 는 `/opt/cni/bin` 뿐이라 무해.
+- 📝 **익명 쓰기 레지스트리**(설계 7-2·7-4 수용) — 클러스터 안 모든 파드가 push·delete 가능 — 클러스터를 나눠 쓰면 남의 파드가 dms 태그를
+  덮어쓸 수 있다(IfNotPresent 캐시 노드는 무영향, 새 노드·재스케줄이 영향). 완화 후보: CiliumNetworkPolicy(fromEntities host·remote-node +
+  ns dms 파드)로 ingress 제한 — 노드 netns pull·인터넷 노드 push 를 막지 않는지 테스트베드 검증 뒤. 포탈은 dms 3종 태그만 다룬다.
+- 🔧 **guard-images.sh UX** — dms-registry 일 때 「newTag/DMS_TAG 를 맞춰라」 대신 deployment.yaml·images.lock 안내(`guard-images.sh:153`),
+  첫 설치(라이브 없음)에 「변경 없음」 문구(`:186`), init 컨테이너 이미지 비교(`:103-109` — 본 컨테이너만 뽑는다).
+- 📝 **GC 로 블롭이 실제 지워지는 경로는 T4 에서 0건**(별칭이 블롭 공유) — 다음 GC 때 확인.
 - 📝 **레지스트리 1개(#46)** — HA(2개 이상)는 G3(S7 ②)가 PASS 인 사이트에서만 다시 본다(설계 7-1 — NFS 부정 캐시로 `blob unknown`).
   1개라 레지스트리가 있는 마스터 급사 때 약 90~110초 공백(7-6 표).
 - 📝 **설계 ④ 의 선택 항목은 하지 않았다** — 마스터 사전 pull(S11 — ⑦ 와 함께), 태그 DELETE(Distribution v3 의 태그 단위 삭제 — 포탈은 지금처럼 digest 로 매니페스트를
