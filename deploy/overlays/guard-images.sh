@@ -98,19 +98,22 @@ fi
 
 rendered=$(kubectl kustomize "$DIR") || { echo "[guard] kustomize 실패: $DIR" >&2; exit 2; }
 # 렌더 산출물에서 워크로드별 컨테이너 이미지(첫 컨테이너 = 본 컨테이너)를 뽑는다.
+# 네임스페이스(2026-11-03 ⑤): 워크로드의 metadata.namespace 를 같이 뽑아 그 네임스페이스에서 라이브를 읽는다 — CNPG 오퍼레이터
+# (addons/cnpg — cnpg-system)를 DMS_NS(dms)에서 찾으면 「첫 설치」로 보여 이미지 교체(= CNPG 업그레이드)가 조용히 통과한다. 없으면 DMS_NS.
 want=$(printf '%s\n' "$rendered" | awk '
-  /^kind: (Deployment|DaemonSet)$/ {kind=$2; name=""; img=""}
+  /^kind: (Deployment|DaemonSet)$/ {kind=$2; name=""; ns=""; img=""}
   /^  name: / && kind!="" && name=="" {name=$2}
+  /^  namespace: / && kind!="" && ns=="" {ns=$2}
   /^      containers:$/ && kind!="" {inc=1; next}
-  inc==1 && /image: / {sub(/^.*image: */,""); img=$0; print kind"/"name" "img; kind=""; inc=0}
+  inc==1 && /image: / {sub(/^.*image: */,""); img=$0; print kind"/"name" "img" "ns; kind=""; inc=0}
 ')
 [ -n "$want" ] || { echo "[guard] 렌더 산출물에 워크로드가 없다" >&2; exit 2; }
 
 changes=""
-while read -r ref img; do
+while read -r ref img wns; do
   kind=${ref%%/*}; name=${ref#*/}
   case "$kind" in Deployment) k=deploy;; DaemonSet) k=ds;; *) continue;; esac
-  live=$(kubectl "$@" -n "$NS" get "$k" "$name" -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)
+  live=$(kubectl "$@" -n "${wns:-$NS}" get "$k" "$name" -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)
   [ -z "$live" ] && continue                      # 첫 설치: 라이브 없음 -> 통과
   if [ "$live" != "$img" ]; then changes="$changes
   $ref: live=$live -> overlay=$img"; fi
@@ -151,6 +154,11 @@ if [ -n "$changes" ]; then
     case "$changes" in *"Deployment/dms-registry:"*)
       echo "[guard] dms-registry 이미지 교체(설계 v6 7-6 업그레이드): 인터넷 노드가 새 이미지를 레지스트리에 push → 마스터 전부에서 crictl pull 하고" >&2
       echo "[guard] 고정 목록(/etc/crio/crio.conf.d/99-dms-pinned.conf)이 새 태그를 덮는지 확인 → 그 뒤에 ALLOW_IMAGE_CHANGE=1. 빌드·push 가 없을 때 한다." >&2 ;;
+    esac
+    case "$changes" in *"Deployment/cnpg-controller-manager:"*)
+      # 2026-11-03 ⑤: 오퍼레이터 이미지 = OPERATOR_IMAGE_NAME(PG 인스턴스 파드의 bootstrap 이미지)이라 바뀌면 인스턴스가 롤링(+ switchover)된다.
+      echo "[guard] CNPG 오퍼레이터 교체 = CNPG 업그레이드(설계 v6 6-5, deploy/README §2f-6): minor 는 하나씩, 테스트베드 리허설·직전 덤프 뒤, 새 이미지를" >&2
+      echo "[guard] 레지스트리에 push(S5) → ALLOW_IMAGE_CHANGE=1 로 SSA → 오퍼레이터 rollout → PG 인스턴스 롤링·switchover 완료 대기(그동안 수 초 500)." >&2 ;;
     esac
     exit 3
   fi

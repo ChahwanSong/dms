@@ -27,6 +27,8 @@
 #   dms/.dms-shared-id                       무작위 32 hex(공용 스토리지의 정체 -- S7 ① 가 모든 노드에서 같은지 본다)
 #   dms/registry/.dms-registry-id            = .dms-shared-id(레지스트리 init 은 검사만 한다, 7-3)
 #   dms/pgdata/dms-pgdata-0N/.dms-pv-id      = PV 이름(dms-pgdata-0N)
+#   dms/backup/pg/.dms-backup-id             = dms-backup-pg(2026-11-03 ⑤ — pg_dump CronJob 이 덤프 전에 검사만 한다: 마운트 빠진 워커의
+#                                              같은 이름 로컬 디렉터리에 덤프가 쌓이지 않게. 이미 S0 를 돌린 트리는 다시 돌리면 이것만 만든다)
 #
 # **이미 있으면 검사만 하고 고치지 않는다**(설계 S0 세부 3): 공용 경로라 통째 chmod·chown 이 전 노드에 번지는 함정이 있다
 # (testbed roles/nfs_client). 어긋나면 FAIL 로 무엇이 다른지 알리고 운영자가 확인해 손으로 고친다. 심링크는 따라가지 않는다
@@ -220,6 +222,7 @@ fi
 for n in 01 02 03 04 05; do
   _sentinel "dms/pgdata/dms-pgdata-$n/.dms-pv-id" "dms-pgdata-$n"
 done
+_sentinel dms/backup/pg/.dms-backup-id dms-backup-pg
 
 if [ "$fails" -gt 0 ]; then
   echo "RESULT: FAIL"; exit 1

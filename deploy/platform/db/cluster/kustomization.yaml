@@ -1,0 +1,16 @@
+# 플랫폼 층(DMS 소유) — CNPG Cluster dms-pg(2026-11-03 ⑤, 설계 v6 6-1·#26~#31·#36). CNPG 오퍼레이터(deploy/addons/cnpg)와
+# db-volumes(SC·PV ×5)가 먼저 있어야 한다. 순서(설계 8-1 S10): SC + PV ×5 → 사전 검사(db-probe) → 이 Cluster → 900초 폴링 → 경로 대조
+# (db-probe) → CronJob(db-backup) → 첫 덤프. 「Ready 대기」는 kubectl wait --for=condition=Ready 가 아니다 — 그 조건은 인스턴스가 모두
+# healthy 일 때만 선다(추정) — status.readyInstances ≥ 1·dms-pg-rw Endpoints·status.currentPrimary 파드 Ready 셋을 본다(deploy/README §2f-4).
+#
+# 사이트 중립 base: imageName·storage.size 는 자리표시자다(raw apply 는 CNPG 웹훅이 거절한다 — 의도). 렌더:
+#   sh deploy/render.sh <site>  →  deploy/.rendered/<site>/platform/db-cluster
+#   kubectl --context <ctx> apply --server-side --field-manager=dms-install --dry-run=server -k …/db-cluster   # S9 9443 경로 실증과 같은 dry-run
+#   kubectl --context <ctx> apply --server-side --field-manager=dms-install -k …/db-cluster
+# 사이트 값(렌더러): imageName(= lock 의 PG digest), storage.size(= PV capacity), 선택 PG_CPU_REQUEST·PG_MEMORY·PG_SHARED_BUFFERS,
+# PG_PLACEMENT=all-nodes(테스트베드만 — control-plane nodeSelector 를 뺀다; toleration·required anti-affinity 는 그대로라 노드마다 1개).
+# Secret dms-pg-app(kubernetes.io/basic-auth, username dms)은 매니페스트 밖이다(S2 — 출력하지 않고 stdin 으로 만든다, deploy/README §2f-2).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - cluster.yaml

@@ -1,0 +1,10 @@
+# 일회용 도구 — PG 볼륨 경로 프로브(2026-11-03 ⑤, 설계 v6 8-1 「S10 세부」의 사전 검사·경로 대조). 상주 층이 아니다: deploy/pg-path-probe.py
+# 가 렌더 결과(deploy/.rendered/<site>/platform/db-probe)를 SSA 로 띄우고, 노드마다 결과를 모아 판정한 뒤 지운다.
+#   python3 deploy/pg-path-probe.py --context <ctx> --rendered deploy/.rendered/<site>/platform/db-probe --mode precheck   # Cluster 전
+#   python3 deploy/pg-path-probe.py --context <ctx> --rendered deploy/.rendered/<site>/platform/db-probe --mode contrast   # Ready 뒤
+# 사이트 중립 base: 이미지·hostPath 는 자리표시자(raw apply 는 경로가 없어 뜨지 않는다 — 의도). 렌더러가 PG 이미지(lock digest — 모든 노드가
+# 어차피 받는 이미지)와 <SHARED_DIR>/dms/pgdata/dms-pgdata-0N 다섯 경로를 넣는다.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - daemonset.yaml

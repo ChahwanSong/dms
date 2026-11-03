@@ -1,0 +1,29 @@
+CloudNativePG 오퍼레이터 매니페스트 — 상류 원본 그대로(2026-11-03 ⑤, 설계 v6 6-1·6-5·8-1 S-1·8-2 A 경로)
+
+파일      cnpg-1.30.1.yaml (한 바이트도 고치지 않는다 — DMS 패치는 같은 디렉터리의 kustomization.yaml·patch-operator.yaml 층)
+상류      https://github.com/cloudnative-pg/cloudnative-pg/releases/download/v1.30.1/cnpg-1.30.1.yaml
+릴리스    v1.30.1 (published 2026-09-23T13:35:42Z, prerelease false) — 1.30.x 의 최신(2026-11-03 GitHub releases API 조회, 1.31 없음)
+sha256    37237f145d8138256ea25ae830f87759255665ff08f8d552fdd8224a5ec032fb  (같은 디렉터리의 cnpg-1.30.1.yaml.sha256 — sha256sum -c 형식)
+
+검증(S-1, 2026-11-03 인터넷 노드 역할의 개발 호스트에서):
+  1) 서명 번들 https://github.com/cloudnative-pg/cloudnative-pg/releases/download/v1.30.1/cnpg-1.30.1.sigstore.json
+     cosign v3.1.4(공식 릴리스 바이너리, cosign_checksums.txt 의 sha256 과 대조 후 사용):
+       cosign verify-blob --bundle cnpg-1.30.1.sigstore.json \
+         --certificate-identity 'https://github.com/cloudnative-pg/cloudnative-pg/.github/workflows/release-publish.yml@refs/tags/v1.30.1' \
+         --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+         cnpg-1.30.1.yaml
+       → Verified OK
+     번들의 messageDigest(SHA2_256) = 위 sha256, 인증서 SAN = release-publish.yml@refs/tags/v1.30.1(GitHub Actions OIDC),
+     Rekor tlog logIndex 2920200579.
+  2) sha256sum -c cnpg-1.30.1.yaml.sha256 → OK
+  (릴리스의 cnpg-1.30.1-checksums.txt 는 kubectl-cnpg 플러그인 바이너리만 담는다 — 매니페스트의 무결성 근거는 위 서명 번들이다.)
+
+이미지(deploy/images.lock — linux/amd64 단일 매니페스트 digest, index 아님; python3 deploy/images-lock.py verify):
+  cloudnative-pg:1.30.1   ← ghcr.io/cloudnative-pg/cloudnative-pg:1.30.1   (index sha256:923c267e… 의 linux/amd64 항목)
+  postgresql:17.11-202611020810-minimal-trixie ← ghcr.io/cloudnative-pg/postgresql:17.11-202611020810-minimal-trixie
+                          (index sha256:7c680fc8… 의 linux/amd64 항목 — 17.11-minimal-trixie 와 같은 index, 날짜 붙은 태그는 다시 빌드돼도
+                           움직이지 않아 레지스트리 태그로 쓴다: 움직이는 태그를 덮어쓰면 옛 digest 가 태그 없이 남아 GC 가 지운다)
+
+지원 창(6-5): 1.30.x 는 K8s 1.34~1.36. EOL 약 2026-12 — 연 2회 이상 점검 창에서 다음 minor 로(하나씩, deploy/README §2f-6).
+새 버전: 이 디렉터리를 복사(deploy/addons/cnpg/<v>/)해 원본·SOURCE·sha256 을 바꾸고, kustomization.yaml 의 dms.io/addon-version·patch-operator.yaml
+의 자리표시자 태그·deploy/versions.env·deploy/images.lock 을 한 커밋에서(tests/test_addons_render.py 가 맞물림을 본다).

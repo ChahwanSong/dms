@@ -16,6 +16,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -226,7 +227,10 @@ def test_context_comes_from_env_when_no_flag(tmp_path):
 
 @pytest.mark.skipif(shutil.which("kubectl") is None, reason="kubectl 없음")
 def test_overlay_image_resolution_uses_the_rendered_dms_image():
-    assert probe.resolve_image(str(REPO_ROOT / "deploy" / "overlays" / "testbed-k8s")).startswith("pkg-01:5001/dms:")
+    # 레지스트리는 커밋된 values.env 의 REGISTRY(오버레이 newName 과 같다 — 렌더러가 대조) — 2026-11-03 T4 16 에 pkg-01:5001 → 10.112.0.50:5000.
+    tb = REPO_ROOT / "deploy" / "overlays" / "testbed-k8s"
+    registry = re.search(r"(?m)^REGISTRY=(\S+)$", (tb / "values.env").read_text()).group(1)
+    assert probe.resolve_image(str(tb)).startswith(f"{registry}/dms:")
     with pytest.raises(RuntimeError):                       # prod 템플릿은 미렌더(REPLACE_) -- --image 나 렌더본을 쓴다
         probe.resolve_image(str(REPO_ROOT / "deploy" / "overlays" / "prod"))
 

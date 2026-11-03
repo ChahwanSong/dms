@@ -421,6 +421,56 @@ CHANGELOG 「④ 클러스터 내 레지스트리」, 설계 v6 7·8-1(S0-4·S0-
   지운다; DMS 코드는 바꾸지 않는다, 설계 7-3).
 - 📝 **REGISTRY_PORT ≠ 5000** — Service 포트만 바뀌고 컨테이너는 :5000 그대로다(테스트가 고정). 노드 신뢰·고정 패턴은 `<IP>:<PORT>`.
 
+### ⑤ DB(CNPG) 후속 — 2026-11-03
+
+CHANGELOG 「⑤ DB(CNPG)」, 설계 v6 6·8-1(S2·S9·S10·S12)·8-2·10 T6/T6'/T7, deploy/README §2f.
+
+- 🔧 **설치기 연결(⑦)** — 지금은 §2f 의 손 명령이다. ⑦ 에서:
+  - **S2**: `deploy/pg-secrets.py ensure-app`·`init-secrets`(값 출력 없음)를 설치 흐름에, install 게이트에 `pg-secrets.py check`(설계 6-3 「host·DB·
+    사용자·비밀번호 일치를 메모리에서만」) — 지금 install.sh 는 `dms-secrets` 4키의 존재·자리표시자만 본다.
+  - **S9 감지 상태 기계(8-2 CNPG 행)**: CRD `clusters.postgresql.cnpg.io`·라벨 `app.kubernetes.io/name=cloudnative-pg`·manager 이미지 태그·
+    `dms.io/addon-version`·`WATCH_NAMESPACE`(env 와 ConfigMap/Secret `cnpg-controller-manager-config`) → A/D=/D</D>/C/C!/X/U/P(오퍼레이터 둘 이상 = P,
+    하한 1.25 — `dataDurability`, watch 범위에 dms 없음 = X). A 면 SSA → rollout → **Cluster CR server dry-run**(「failed calling webhook」이면 9443
+    사유). `ADDON_INSTALL=never` 면 FAIL + 「클러스터 운영자에게 요청」. **함정**: 첫 설치의 addons server dry-run(S3 `--plan` 포함)은
+    `cnpg-system` 이 없으면 그 안 객체마다 `namespaces "cnpg-system" not found` — server dry-run 은 묶음 안의 Namespace 를 저장하지 않는다
+    (kubernetes#83562). Namespace 를 먼저 만들거나(지금 손 절차 — README §2f-3) 그 NotFound 를 「첫 설치 예상」으로 판정한다.
+  - **S10 자동 순서·판정**: 이미 있는 SC·PV 가 렌더와 다르면 FAIL(path·SC·용량 — `pg-path-probe.py --mode pv-check` 가 이미 한다: **적용 전에**
+    불러야 한다, 용량·SC 이름은 SSA 가 Bound PV 까지 조용히 바꾼다), PV 경로가 `<SHARED_DIR>/dms/pgdata/` 밖이면 FAIL, Released 는 WARN,
+    사전 검사·경로 대조는 `deploy/pg-path-probe.py`(종료 코드 그대로), 900초 폴링(readyInstances ≥ 1·`dms-pg-rw` Endpoints·currentPrimary Ready),
+    readyInstances < 3 WARN·0/시간 초과 FAIL·Available 여분 < 1 WARN, CronJob + 첫 덤프 완료 확인(Complete·Failed 를 함께 본다 — `wait
+    --for=condition=complete` 는 Failed 에서도 시간 초과까지 기다린다, README §2f-4 6)). 경로 프로브의 판정 대상은 S2b 와 같은 DMS 노드(`pg-path-probe.
+    dms_nodes` — ⑦ 의 S2b 는 같은 정의를 써야 한다). external 사이트는 S4 를 거치지 않으므로 S9 앞에 PriorityClass·애드온 이미지 push(README §2f-3).
+    **DMS(S11)는 DB 가 Ready 된 뒤에** — migrate 는
+    `backoffLimit: 3`·install 은 180초만 기다린다(`30-migrate-job.yaml`, `install.sh`).
+  - **S12 verify**: CNPG·Available 여분 PV·경로 대조(S10 과 같은 검사)·CronJob 마지막 성공 시각.
+  - `install.sh --upgrade-addon cnpg`(6-5): K8s 지원 범위·**minor 하나씩**·직전 덤프·SSA → 롤아웃 → switchover 완료 대기. 인터넷 노드 push 스크립트에
+    lock 의 `cloudnative-pg`·`postgresql` 이 이미 들어간다(lock 의 모든 줄).
+  - `kubectl-cnpg` 플러그인·`cnpg-<v>-checksums.txt` 반입(K8 — 인터넷 노드 → 설치 호스트).
+- 🔧 **테스트베드 T6 실증**(dmsk8s — 메인 세션) — 설계 10 「T6 세부」 전부. 결과는 실증 뒤 CHANGELOG 에 기입.
+- 🔧 **T6'(장애·성능, 사용자 승인 필수)** — primary 노드 전원 차단(keepalive 없이/넣고 — 15분 매달림 가설), drain(smartShutdown 0 대 180),
+  apiserver 불통 흉내, export 차단(공용 스토리지 일시 정지 — kubelet·etcd 영향·레지스트리 NotReady), 3-2 「G2 보충」 재마운트 절차, fio·pgbench 공용
+  대 로컬(로컬은 렌더 오버레이 밖 일회용).
+- 🔧 **T7(앱 DB 이관, 사용자 승인 필수)** — 동결 창에서 pkg-01 `dmsdb_k8s` 덤프 → CNPG 에 복원 → `pg-secrets.py set-url` → api·controller
+  `rollout restart`. 롤백 = `pg-secrets.py restore-url`(그 사이 쓰기는 덤프로). 그 뒤 pkg-01 외부 PG 정리 시점 결정. 설계 6-4·T7 의 「initdb
+  import」는 Cluster 생성 때만 쓰인다(bootstrap) — `dms-pg` 가 T6 에서 이미 initdb 로 떠 있어 T7 은 덤프·복원으로 같은 결과를 내고, import 경로
+  자체는 T6 이 일회용 Cluster 로 실증한다(README §2f-5). 새 사이트의 첫 이관을 import bootstrap 으로 만드는 흐름은 ⑦ 설치기 몫.
+- 📝 **T6 확인 대기(추정으로 둔 것)** — Cluster `Ready` 조건이 「모든 인스턴스 healthy」일 때만 서는지(그래서 폴링은 세 조건), Cluster 삭제 때 PVC 가
+  ownerReference 로 함께 지워지는지(그러면 PV 3개 Released → 런북), 재활용 때 옛 PGDATA 가 남으면 join 이 실패하는지, CNPG 가 볼륨 루트의 root 소유
+  `.dms-pv-id` 를 문제 삼지 않는지(PGDATA 는 `pgdata/` 하위), CRI-O 의 `이름:태그@digest` pull(dmsk8s 의 cilium·ingress-nginx 가 이미 그 모양으로 돈다 —
+  같은 경로로 본다), 플러그인 없는 switchover(`status.targetPrimary` 패치), `dataDurability: preferred` 의 커밋 지연(공용 스토리지 fsync + 동기 복제).
+- 📝 **설계 ⑤ 의 선택 항목은 하지 않았다** — ValidatingAdmissionPolicy 로 SC `dms-pg-shared` 의 PVC 를 ns `dms` 로 제한(6-2 [권고, 선택] — 다른
+  네임스페이스 PVC 가 여분을 가져가는 위험 #24: 지금은 경로 대조 프로브가 WARN 으로 드러낸다), dms-controller 2개(#25 「1 → 실증 뒤 2」 — 2개면
+  preferred anti-affinity), 오퍼레이터 PDB, pg_dump 의 PriorityClass(워커가 잡으로 가득하면 덤프 파드가 Pending → activeDeadline(50분) 뒤 Job
+  실패로 보이고 다음 시각에 다시; 요청이 100m/256Mi 라 드물다). **사용자 결정 필요**(2026-11-03 ⑤ 리뷰 — 「백업이 조용히 건너뛰어진다」 지적):
+  `dms-addon-critical`(선점)을 주면 워커가 잡으로 찬 동안 **매시간** 실행 중 데이터 잡(gang)을 선점한다 — 애드온 컨트롤러(재스케줄이 드묾)와 비용이
+  다르다. 대안: `preemptionPolicy: Never` 의 전용 PriorityClass(큐 순서만 앞) 또는 덤프 연속 실패 경보.
+- 📝 **남은 코드 보강(설계 9 「⑤ 뒤에 따로」 — 이번 묶음은 코드를 바꾸지 않았다)** — **B4** migrate 도중 재연결 감지 → 실패(우선순위 낮음),
+  **B1** SQLSTATE 25006(read-only transaction) 처리·readyz 쓰기 확인(우선순위 낮음 — `target_session_attrs=read-write` 는 새 연결만 거른다(추정:
+  switchover 뒤 옛 primary 에 남은 연결)), B2·B6 선택, B5 보류.
+- 🔧 **런북 위치** — T6 실행 런북은 메인 세션의 작업 노트(저장소 밖)다. 실증이 끝나면 확정된 명령을 deploy/README §2f-8 에 옮긴다.
+- 📝 **testbed-k8s 의 api·controller 는 워커에 남는다**(설계 10 — cp1 메모리) — prod 의 마스터 배치(`patch-placement.yaml`)는 테스트베드에서
+  실증되지 않는다(테스트베드로 증명할 수 없는 것: 마스터 1대 장애·실제 마스터 3대의 PG anti-affinity).
+
 ## 2. 의도적 보류 (결정 — "미구현"이 아님)
 
 - ⏸ **회원가입 메일 인증** — 더미(email 기록만, 검증 없음, `routes_auth.py::signup`).

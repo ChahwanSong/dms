@@ -109,6 +109,9 @@ def _render(tmp_path, mfu_tag, *args, **extra_env):
     prod = tmp_path / "overlays" / "prod"
     shutil.copytree(DEPLOY / "overlays/prod", prod, ignore=shutil.ignore_patterns("values.env"))
     shutil.copytree(DEPLOY / "platform", tmp_path / "platform")      # 렌더러 본체(2026-11-03 ④)가 플랫폼 층도 낸다
+    shutil.copytree(DEPLOY / "addons", tmp_path / "addons")          # ⑤ 애드온·DB 층(2026-11-03)
+    for name in ("versions.env", "images.lock"):
+        shutil.copy(DEPLOY / name, tmp_path / name)
     shutil.copy(DEPLOY / "render.sh", tmp_path / "render.sh")         # prod/render.sh(호환 진입점)가 ../../render.sh 로 넘긴다
     env, log = _env(tmp_path, VALUES_ENV=str(_values(tmp_path, mfu_tag)), **extra_env)
     r = subprocess.run(["sh", str(prod / "render.sh"), *args], env=env, capture_output=True, text=True, timeout=60)

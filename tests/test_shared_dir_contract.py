@@ -139,6 +139,9 @@ def _render_prod(tmp_path, values_text, **env_extra):
     shutil.copytree(PROD, prod, ignore=shutil.ignore_patterns("values.env"))
     shutil.copytree(BASE, tmp_path / "k8s")
     shutil.copytree(REPO_ROOT / "deploy" / "platform", tmp_path / "platform")   # 렌더러 본체가 플랫폼 층도 낸다(2026-11-03 ④)
+    shutil.copytree(REPO_ROOT / "deploy" / "addons", tmp_path / "addons")       # ⑤ 애드온·DB 층(2026-11-03)
+    for name in ("versions.env", "images.lock"):
+        shutil.copy(REPO_ROOT / "deploy" / name, tmp_path / name)
     shutil.copy(RENDER, tmp_path / "render.sh")                                # prod/render.sh(호환 진입점)가 ../../render.sh 로
     vals = tmp_path / "values.env"
     vals.write_text(values_text)

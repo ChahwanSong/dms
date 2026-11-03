@@ -18,5 +18,12 @@
 #   예외 — 마스터에는 oci-archive 로 반입·고정하고, 업그레이드·새 마스터용으로 레지스트리에도 push 한다). 태그를 바꾸면 매니페스트도 같이.
 # buildah:stable — 포탈 빌드의 빌더(DMS_BUILD_BUILDER_IMAGE = <REGISTRY>/buildah:stable). 상류 v1.43.1 의 amd64 digest 는 테스트베드
 #   미러(pkg-01:5000/buildah:stable)의 digest 와 같다(2026-11-03 대조 — 지금까지의 포탈 빌드가 쓴 그 이미지).
+# cloudnative-pg:1.30.1 · postgresql:17.11-…(2026-11-03 ⑤, 설계 6-1·7-5) — CNPG 오퍼레이터(= OPERATOR_IMAGE_NAME, PG 인스턴스 파드의 bootstrap
+#   init 도 이 이미지 — 마스터가 받는다)와 PG 17(Cluster imageName·pg_dump CronJob·경로 프로브·POSTGRES_IMAGE_NAME). 렌더러가 deploy/versions.env 의
+#   CNPG_OPERATOR_IMAGE·PG_IMAGE(= 이 DEST)로 이 줄을 찾아 <레지스트리>/<DEST>@<DIGEST> 로 쓴다(태그 + digest — pull 은 digest 로, 태그는 GC 보호).
+#   PG 는 날짜 붙은 불변 태그다(움직이는 17.11-minimal-trixie 를 덮어쓰면 옛 digest 가 태그 없이 남아 GC 가 지운다). 둘 다 ghcr.io index 의 linux/amd64
+#   항목(resolve 로 만듦, verify PASS 2026-11-03).
 registry:3.1.2  docker.io/library/registry:3.1.2  sha256:1290056e2357eceb0c047cb60ae9abb370305a218e2df650eb8d3ea021b1c151
 buildah:stable  quay.io/buildah/stable:v1.43.1    sha256:7bb110e1d8b761d08e87d004ea4086e295a52319f3ea70ecef65da6dff7ceef0
+cloudnative-pg:1.30.1  ghcr.io/cloudnative-pg/cloudnative-pg:1.30.1  sha256:b0f9805bd5f98592e7320b5ea624dd10a7a6ef8e477df5650655c94f0b242497
+postgresql:17.11-202611020810-minimal-trixie  ghcr.io/cloudnative-pg/postgresql:17.11-202611020810-minimal-trixie  sha256:2eeaa8edc695e49ccb41cbee326cc1ae0bfc96a7bf3d559062f9a11994fefe23

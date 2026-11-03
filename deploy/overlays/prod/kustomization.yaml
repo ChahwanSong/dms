@@ -43,6 +43,9 @@ patches:
   - path: patch-config.yaml
   - path: patch-ingress.yaml
   - path: patch-metallb.yaml
+  # dms-api·dms-controller 를 마스터에 + not-ready·unreachable 30초(2026-11-03 ⑤, 설계 #24·#25). 제어면 Deployment 에서 바꾸는 배치 필드
+  # 둘(nodeSelector·tolerations)뿐 — tests/test_release_manifest_contract.py 가 글자 그대로 고정한다. testbed-k8s 에는 없다(설계 10).
+  - path: patch-placement.yaml
 
 # 공용 디렉터리(2026-11-03 ③): patch-config.yaml 의 DMS_ARTIFACT_BASE_URI(file://<SHARED_DIR>/dms/artifacts — render.sh 가
 # values.env 의 SHARED_DIR 로 채운다) 하나에서 allowlist 와 api/controller 의 hostPath·mountPath 를 낸다. replacements 는 위

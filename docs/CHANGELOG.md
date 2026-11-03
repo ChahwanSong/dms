@@ -95,6 +95,96 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ✅ ⑤ DB(CNPG) — CloudNativePG 1.30.1 애드온 층·정적 hostPath PV 풀·Cluster dms-pg·pg_dump·경로 프로브·prod 제어면 마스터 배치 — **구현·검증**(2026-11-03, 테스트베드 T6 실증 대기)
+
+설계 v6(`docs/history/specs/2026-11-03-dms-k8s-prod-design.md`) 6(6-1~6-6)·#24~#36·#40·2-1/2-2·3-1·8-1(S-1·S2·S9·S10)·8-2(CNPG 행·A 경로·층 배치)·
+9절 ⑤·10 T6/T6'/T7·12 위험(#3·#4·#23~#25·#29). 런북은 deploy/README §2f. **DMS 애플리케이션 코드는 바꾸지 않았다**(6-3 — 접속 문자열만, `connect_timeout`
+기본 5초 그대로).
+
+- **애드온 층 `deploy/addons/cnpg/1.30.1`**(서드파티 — SSA field manager `dms-install`): 상류 `cnpg-1.30.1.yaml`(1.30.x 최신, 2026-09-23 릴리스 —
+  GitHub releases 조회)을 **바이트 그대로** 커밋, `SOURCE`(URL·태그·검증 방법)·`cnpg-1.30.1.yaml.sha256`(`37237f14…`). 검증(S-1): cosign v3.1.4(체크섬
+  대조한 공식 바이너리) `verify-blob --bundle cnpg-1.30.1.sigstore.json --certificate-identity …/release-publish.yml@refs/tags/v1.30.1
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com` → Verified OK(번들 digest = 파일 sha256, Rekor logIndex 2920200579). DMS 패치
+  층(kustomization + `patch-operator.yaml`)이 6-1 airgap 함정을 막는다: 이미지와 env `OPERATOR_IMAGE_NAME`(PG 인스턴스 파드의 bootstrap init 이미지)을
+  자리표시자로 두고 렌더러가 **한 변수에서** `<REG>/cloudnative-pg:1.30.1@sha256:<amd64>` 로, `Always` → `IfNotPresent`, env `POSTGRES_IMAGE_NAME` =
+  PG 이미지(imageName 을 생략한 Cluster 도 ghcr.io 로 가지 않게 — 함정 3 의 이중 방어), replicas 2, 워커(required nodeAffinity control-plane
+  `DoesNotExist`, 두 파드 다른 노드 선호), `priorityClassName: dms-addon-critical`, 라벨 `app.kubernetes.io/managed-by=dms-install`·
+  `dms.io/addon-version=1.30.1`(모든 객체 — selector·파드 템플릿에는 넣지 않는다). **`WATCH_NAMESPACE` 는 두지 않는다**(상류 기본 = 모든 네임스페이스,
+  dms 포함 — 클러스터에 CNPG 는 하나만 두고 다른 팀이 재사용할 수 있게; 감지기(⑦)는 env·ConfigMap/Secret 의 그 값을 본다). 렌더 결과에 외부 호스트
+  0건(설명문까지).
+- **DB 층 `deploy/platform/db/{volumes,cluster,backup,probe}`**(DMS 소유 — 렌더 결과 `platform/db-{volumes,cluster,backup,probe}`, S10 순서):
+  SC `dms-pg-shared`(no-provisioner·Immediate·Retain·확장 불가) + PV `dms-pgdata-01..05`(hostPath `<SHARED_DIR>/dms/pgdata/dms-pgdata-0N` **`type:
+  Directory`**, Retain, RWO, nodeAffinity·claimRef 없음 — 6-2 [확정]) · Cluster `dms-pg`(instances 3, imageName `<REG>/postgresql:17.11-202611020810-
+  minimal-trixie@sha256:<amd64>` IfNotPresent, `smartShutdownTimeout: 0`, enablePDB, `primaryUpdateMethod: switchover`(6-5 「롤링 + switchover」 — 상류
+  기본은 restart), synchronous `any/1/preferred`, `shared_buffers` 1GB, initdb `dms`/`dms` + Secret `dms-pg-app`, storage size == PV capacity·
+  `resizeInUseVolumes: false`, required anti-affinity·control-plane nodeSelector + toleration, 1 CPU/4Gi·메모리 limit 4Gi·CPU limit 없음 — CRD 1.30.1
+  스키마로 필드 대조) · pg_dump CronJob `dms-pg-dump`(아래) · 일회용 경로 프로브 DaemonSet. base 는 자리표시자뿐(용량 `set-by-overlay` — raw apply 는
+  apiserver·웹훅이 거절).
+- **pg_dump CronJob**(6-4): 매시간 `17 * * * *`, `-Fc`, `dms-pg-rw`, 워커, uid 26, hostPath `<SHARED_DIR>/dms/backup/pg`, 100m/256Mi..1/1Gi,
+  concurrencyPolicy Forbid. **센티널 `backup/pg/.dms-backup-id`(값 `dms-backup-pg`) 검사만** — 없거나 다르면 덤프하지 않는다(마운트 빠진 워커의 로컬
+  디렉터리, 위험 #29; 레지스트리 init 과 같은 이유). 쓰기는 `.partial` → `pg_restore --list` → fsync → 같은 이름이 없을 때만 rename → 디렉터리 fsync —
+  단계마다 종료 코드를 보고 실패면 보존 정리 없이 exit 1(리뷰 1회차: fsync·rename 실패를 무시해 새 덤프 없이 「완료」 exit 0 + 옛 덤프 삭제였다).
+  보존은 **개수**(`PG_BACKUP_KEEP` 기본 336 = 14일, 형식 `dms-<UTC>.dump` 파일만, 새 덤프 성공 뒤에만 — 시각 기준이면 며칠 실패 동안 좋은 덤프가 다
+  지워진다), 3시간 넘은 조각만 정리, 접속 정보는 `dms-pg-app` secretKeyRef 뿐(로그·argv 에 값 없음), 잠금 대기 2분 상한.
+- **S0(`deploy/shared-dir-init.sh`)**: 센티널 `dms/backup/pg/.dms-backup-id` 를 더 쓴다(이미 돌린 트리는 다시 돌리면 그것만 만든다 — 테스트베드 T3 트리
+  포함).
+- **렌더러(`deploy/render.sh`)**: `addons/cnpg`·`platform/db-*` 를 늘 낸다(설계 ⑤ — v4 의 `PG_STORAGE` 키 없음: 로컬 디스크 선택지가 없다). 버전은
+  새 커밋 파일 `deploy/versions.env`(`CNPG_VERSION=1.30.1`·`CNPG_OPERATOR_IMAGE`·`PG_IMAGE` = lock DEST — sh 로 . 하지 않고 줄만 읽는다), digest 는
+  `images.lock` 의 그 DEST(정확히 한 줄·`sha256:<64 hex>` 아니면 FAIL), 이미지 ref = `<애드온 레지스트리>/<DEST>@<digest>`(애드온 레지스트리 = 클러스터
+  내 레지스트리가 있으면 그것 — 앱이 external 이어도, 없으면 REGISTRY). 오퍼레이터 태그 ≠ `CNPG_VERSION`·`addons/cnpg/<v>` 없음·라벨 불일치도 FAIL.
+  사이트 값(전부 선택): `PG_STORAGE_SIZE`(20Gi — storage.size **와** PV capacity 를 한 값으로), `PG_CPU_REQUEST`·`PG_MEMORY`(requests == 메모리 limit)·
+  `PG_SHARED_BUFFERS`, `PG_PLACEMENT`(control-plane | all-nodes — 테스트베드만, nodeSelector 를 JSON 패치로 뺀다), `PG_BACKUP_KEEP` — 형식 검사, 셸 env
+  무시(values.env 만 원천). `render.env` 에 `ADDON_REGISTRY`·`CNPG_OPERATOR_REF`·`PG_IMAGE_REF`·`ADDON_LAYERS`·`DB_LAYERS`(S10 순서)·`DB_PROBE` 등,
+  stdout 에 `ADDON:`·`PLATFORM:`(db)·`PROBE:` 줄(마지막 줄은 그대로 `RENDERED:`). ④ 의 `PLATFORM_LAYERS`·레지스트리 동작은 그대로.
+- **images.lock**: `cloudnative-pg:1.30.1`(ghcr.io index `sha256:923c267e…` 의 linux/amd64 = `sha256:b0f9805b…`)·`postgresql:17.11-202611020810-minimal-trixie`
+  (index `sha256:7c680fc8…` 의 linux/amd64 = `sha256:2eeaa8ed…` — 같은 날 `17.11-minimal-trixie` 와 같은 index; 날짜 붙은 **불변 태그**를 레지스트리
+  태그로 쓴다: 움직이는 태그를 덮어쓰면 옛 digest 가 태그 없이 남아 GC 가 지운다). `images-lock.py resolve` 로 만들고 `verify` PASS(ghcr 익명 토큰).
+- **도구**: `deploy/pg-path-probe.py`(S10 값 대조·사전 검사·경로 대조, py3.9 — `pv-check`(적용 전, 프로브 없이): 이미 있는 PV 의 hostPath·type·
+  capacity·storageClassName 과 SC 의 바꿀 수 없는 필드를 render.env(SHARED_DIR·PG_STORAGE_SIZE)와 대조해 다르면 FAIL — 리뷰 1회차: apiserver 는
+  hostPath·volumeMode 만 막고 **용량·SC 이름은 SSA 가 Bound PV 까지 조용히 바꾼다**(k8s 1.34 ValidatePersistentVolumeUpdate); 렌더된 프로브 DaemonSet(모든 노드, uid 26, 읽기 전용, PG_VERSION 은 open 으로
+  60초 재시도)을 띄워 노드별 PV 모양·센티널·PG_VERSION 을 모아 판정하고 지운다; precheck = 26:26 0700·`.dms-pv-id`·Available 에 옛 PGDATA 없음, contrast =
+  Bound PV 마다 **모든 노드가 같은 PG_VERSION**(곧 인스턴스 아닌 노드도) — 아니면 「PG 가 공용 경로가 아닌 곳에 씀」 FAIL(Cluster `initializingPVC` 의
+  PV — initdb·join 중 — 는 UNKNOWN, 리뷰 1회차), FailedMount 는 「마운트 없음」
+  FAIL, pull·시간 초과는 모름, 여분 < 1·Released 는 WARN; 시작 때 옛 프로브를 지워 옛 로그를 읽지 않는다, 렌더 디렉터리의 kube-context 와 다른
+  `--context` 는 거부) · `deploy/pg-secrets.py`(`ensure-app`·`init-secrets`·`set-url`(옛 URL 은 `dms-secrets-prev`)·`restore-url`·`check` — 6-3 URL
+  (`dms-pg-rw`·keepalives 10/5/3·`tcp_user_timeout=15000`·`target_session_attrs=read-write`·`sslmode=require`)을 조립하고 값은 kubectl stdin 으로만,
+  출력·argv 0건; `check` 는 어긋난 항목 이름만).
+- **prod 제어면 마스터 배치(#24·#25)**: `deploy/overlays/prod/patch-placement.yaml` — dms-api·dms-controller 에 control-plane nodeSelector + toleration +
+  not-ready·unreachable `tolerationSeconds: 30`. 오버레이가 제어면 Deployment 를 패치하는 **유일한 파일**이고 내용은 그 두 필드뿐 —
+  `test_release_manifest_contract.py` 가 코드 줄을 글자 그대로 고정하고, 렌더 비교에서 prod 만 그 두 블록을 정확히 한 번씩 가진 뒤 나머지는 base 와
+  같다(securityContext 등은 여전히 base 가 유일한 진실). testbed-k8s 는 cp1 메모리가 모자라 워커 그대로(설계 10 — 테스트가 「prod 에만」을 고정).
+- **guard-images.sh**: 워크로드를 렌더된 `metadata.namespace` 에서 읽는다(전에는 늘 `dms` — CNPG 오퍼레이터(cnpg-system)는 「첫 설치」로 보여 이미지
+  교체가 조용히 통과했다). 오퍼레이터 이미지 교체 = CNPG 업그레이드 → exit 3 + 6-5 순서 안내.
+- **문서**: deploy/README §2f(구성·값, S2 시크릿(값 출력 없음), S9 감지·SSA·9443 dry-run·증상 표, S10 순서·900초 폴링 세 조건(`wait
+  --for=condition=Ready` 금지)·경로 대조·첫 덤프·증상 표, 백업 층·공용 스토리지 밖 사본(암호화)·복구(같은 이름 `dms-pg` 로 다시 만들고 pg_restore)·Released 재활용 런북
+  (0단계 마운트 가드·상위 디렉터리 생성 금지), 업그레이드 표(minor 하나씩, **imageName 과 parameters 를 한 번에 바꾸지 않는다** — switchover 모드
+  웹훅 거절), 마스터 운영 규칙·장애조치 시간 표, 테스트베드 T6·걷어내기), 머리말, prod README 3b단계·4단계(URL)·선행조건·마스터 배치, prod
+  `values.env.example`(PG 키), testbed-k8s `values.env`(100m/256Mi/64MB·all-nodes·보존 24), ARCHITECTURE(모듈 3행·렌더러 행·불변식 4개 + Deployment
+  패치 예외), BACKLOG(⑤ 후속 — ⑦ 설치기 S2/S9/S10/S12·`--upgrade-addon`, T6/T6'/T7, 추정 확인 대기, 하지 않은 선택 항목, B4·B1).
+- **테스트**: `test_addons_render`(새 — 상류 바이트·SOURCE·sha256, versions·lock·디렉터리·라벨 맞물림, base 자리표시자·외부 호스트 0건, 렌더(testbed·
+  prod)의 모든 이미지 = 애드온 레지스트리 + lock digest(태그@digest), `OPERATOR_IMAGE_NAME` == manager·`POSTGRES_IMAGE_NAME` == PG ref, `IfNotPresent`
+  뿐, replicas 2·워커·`dms-addon-critical`, 라벨·selector 불변, `WATCH_NAMESPACE` 없음, 웹훅 Fail·cnpg-system, external 이어도 클러스터 내 레지스트리,
+  가드가 cnpg-system 에서 읽고 업그레이드를 exit 3 — 상류 `verify` 는 `DMS_NETWORK_TESTS=1` 일 때), `test_platform_db_contract`(새 — base 자리표시자,
+  Cluster 고정값·이미지·자원, PV 5개 모양·경로·Retain·nodeAffinity/claimRef 0, size == capacity(한 값), SC, **로컬 디스크 PV·local-path 0건 + 모든 상태
+  경로가 같은 `<SHARED_DIR>/dms/` 접두**(③ 조건과 함께), CronJob 모양·비밀 참조·센티널 값 == S0, 덤프 스크립트를 실제 sh + 가짜 pg_dump 로(센티널
+  없음·불일치·심링크 → 아무것도 안 만듦, 보존 개수·다른 파일 안 건드림, 실패 때 보존분 유지·조각 없음, 오래된 조각만 정리, 비밀번호 미출력),
+  프로브 DaemonSet 모양·스크립트 실행(쓰기 없음), `pg-path-probe.py` 판정·main 순서(옛 프로브 삭제 → apply → 판정 → 삭제)·컨텍스트 고정,
+  렌더러 DB 값 검사·기본값·출력 순서·셸 env 무시·versions/lock/addons 불일치 FAIL, `pg-secrets.py`(가짜 kubectl 로 argv·출력에 값 0건, set-url·
+  restore-url·check)), `test_release_manifest_contract`(prod 배치 예외를 정확히), `test_shared_dir_init`(백업 센티널), 렌더러 사본 헬퍼 다섯
+  곳(`addons`·`versions.env`·`images.lock` 복사). dmsk8s client-side dry-run(`--validate=strict`)으로 db-volumes·db-backup·db-probe·addons/cnpg 통과.
+- **리뷰 2회차(2026-11-03)**: 복구 런북을 **같은 이름 `dms-pg`** 로(전에는 새 이름 `dms-pg-r` + set-url — CronJob `PGHOST`·경로 프로브·`pg-secrets.py`
+  ·⑦ 설치기가 `dms-pg` 고정이라 매시간 덤프가 버린 옛 DB 를 「완료」로 뜨고 새 라이브 DB 덤프는 0개였다; 앱 0 → Cluster 삭제 → 같은 렌더 SSA →
+  pg_restore → 앱 복귀, URL 그대로). Released 재활용 1단계를 PV 기준으로(「그 이름의 PVC 를 쓰는 파드 없음」은 CNPG 1.30 의 번호 재사용 때문에
+  정상 재활용에서 늘 거짓 — 이 PV 에 묶인 PVC 없음 + 같은 이름 새 PVC 는 정상 + 강제 삭제였으면 VM 꺼짐 확인). 경로 프로브의 판정 대상을 DMS
+  노드(마스터 + 역할 NoSchedule taint 없는 워커 — 설계 2-3, `node.kubernetes.io/*` 상태 taint 는 세지 않음)로 좁히고 `--nodes` 를 더했다(다른
+  팀의 taint 노드가 섞인 클러스터에서 그 노드의 FailedMount 로 S10 이 늘 FAIL 했다 — 판정 밖은 목록·INFO). 렌더러: `PG_SHARED_BUFFERS` 가
+  없고 `PG_MEMORY` 가 있으면 그 1/4, 실효 메모리의 절반 이상이면 FAIL(PG_MEMORY 만 줄이면 base 1GB 가 남아 limit 을 채웠다). §2f-3: external
+  사이트의 PriorityClass 적용·애드온 이미지 push(REGISTRY) 단계와 「파드 0개 + FailedCreate … no PriorityClass」 증상 행. §2f-4 첫 덤프는
+  `wait --for=condition=complete`(Failed 에서도 시간 초과까지 기다림) 대신 Complete·Failed 를 함께 보는 루프. §2f 의 렌더 디렉터리 변수는 `RD`
+  (§2e 의 `R` = …/platform 과 섞이면 경로가 틀렸다). Cluster 주석의 이관 절 참조(§2f-6 → §2f-5).
+- **테스트베드**: T6(push → 오퍼레이터 → 9443 dry-run → SC/PV → 사전 검사 → Cluster → 폴링 → 경로 대조 → CronJob·첫 덤프 → 확인 항목)·T6'·T7 은 메인
+  세션이 한다 — T6'·T7 은 사용자 승인 뒤. 결과는 실증 뒤 기입.
+
 ### ✅ ④ 클러스터 내 레지스트리 — Distribution v3.1.2 플랫폼 층·렌더러 일반화·images.lock·가드 — **구현·검증**(2026-11-03, 테스트베드 T4 실증 대기)
 
 설계 v6(`docs/history/specs/2026-11-03-dms-k8s-prod-design.md`) 7(7-1~7-6)·2-1(PriorityClass)·8-1(S0-4·S0-5·S-1·S4~S6)·8-2 「층 배치」·

@@ -1,0 +1,153 @@
+# dms-pg-path-probe — 모든 노드에서 PV 다섯 디렉터리를 읽기만 한다(2026-11-03 ⑤, 설계 v6 8-1 「S10 세부」). 판정은 바깥(deploy/pg-path-probe.py).
+#
+# 왜 모든 노드인가: 「경로 대조」(Bound PV 마다 그 인스턴스가 **아닌** 노드에서 <PV 경로>/pgdata/PG_VERSION 이 보여야 한다 — 없으면 PG 가 공용
+#   경로가 아닌 곳, 곧 마운트 빠진 노드의 로컬 디스크에 썼다)를 인스턴스 위치를 몰라도 판정할 수 있다: **모든** 노드가 같은 값을 보면 인스턴스
+#   아닌 노드도 본 것이다. 사전 검사(Cluster 전 — 디렉터리가 있고 26:26 0700, .dms-pv-id == PV 이름, 옛 PGDATA 없음)도 같은 파드가 한다 —
+#   모든 노드에서 보이는지(G1)까지 덤으로 본다. 경로가 없는 노드에서는 파드가 FailedMount 로 뜨지 않는다(type Directory — 그 자체가 「마운트 없음」).
+#   판정은 DMS 노드만(설계 2-3 — 마스터 + NoSchedule taint 없는 워커; deploy/pg-path-probe.py --nodes 로 바꾼다): 다른 팀과 나눠 쓰는 클러스터의
+#   taint 노드에는 공용 스토리지가 없을 수 있다 — 거기서 뜨지 못한 파드는 목록만 보이고 FAIL 로 세지 않는다(2026-11-03 ⑤ 리뷰 2).
+# 무엇을 하나: 노드마다 PV 별 한 줄(모양 uid:gid:mode·센티널·PG_VERSION)을 찍고 `PGPROBE node=<n> done` 뒤 잠든다(DaemonSet 이라 끝나면
+#   다시 뜨지 않게). PG_VERSION 은 stat 이 아니라 open(cat)으로 읽고 DMS_PROBE_RETRY_SECONDS(60 = NFS 기본 acdirmax)까지 재시도한다 — S7 의
+#   교차 노드 원칙(다른 노드가 막 만든 이름의 부정 캐시를 실패로 오판하지 않게). 쓰지 않는다(볼륨 모두 readOnly, 이미지 fs 읽기 전용).
+# 누구로: uid/gid 26(PV 디렉터리 소유 — 0700 안의 pgdata/ 를 읽으려면 소유자여야 한다), cap 없음. 0:0 소유 디렉터리면 안을 못 읽어 모양으로 FAIL.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: dms-pg-path-probe
+  namespace: dms
+  labels:
+    app.kubernetes.io/name: dms-pg-path-probe
+    app.kubernetes.io/part-of: dms
+    app.kubernetes.io/managed-by: dms-install
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dms-pg-path-probe
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dms-pg-path-probe
+        app.kubernetes.io/part-of: dms
+    spec:
+      tolerations:
+        - operator: Exists
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 1
+      securityContext:
+        runAsUser: 26
+        runAsGroup: 26
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: probe
+          image: set-by-overlay.invalid/postgresql:set-by-overlay
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -u
+              node=${NODE_NAME:-unknown}
+              retry=${DMS_PROBE_RETRY_SECONDS:-60}
+              case "$retry" in ""|*[!0123456789]*) retry=60 ;; esac
+              pvs="dms-pgdata-01 dms-pgdata-02 dms-pgdata-03 dms-pgdata-04 dms-pgdata-05"
+              for pv in $pvs; do
+                d="/pv/$pv"
+                shape=$(stat -c '%u:%g:%a' "$d" 2>/dev/null) || shape="unreadable"
+                f="$d/.dms-pv-id"
+                if [ -L "$f" ]; then
+                  id="<symlink>"
+                elif [ -f "$f" ]; then
+                  id=$(head -n 1 "$f" 2>/dev/null) || id="<unreadable>"
+                  [ -n "$id" ] || id="<empty>"
+                elif [ -e "$f" ]; then
+                  id="<not-a-file>"
+                else
+                  id="<missing>"
+                fi
+                echo "PGPROBE node=$node pv=$pv shape=$shape id=$id"
+              done
+              start=$(date +%s)
+              pending="$pvs"
+              while :; do
+                left=""
+                for pv in $pending; do
+                  v=$(cat "/pv/$pv/pgdata/PG_VERSION" 2>/dev/null | head -n 1) || v=""
+                  if [ -n "$v" ]; then
+                    echo "PGPROBE node=$node pv=$pv pgdata=$v waited=$(( $(date +%s) - start ))"
+                  else
+                    left="$left $pv"
+                  fi
+                done
+                pending=$left
+                [ -n "$pending" ] || break
+                [ $(( $(date +%s) - start )) -lt "$retry" ] || break
+                sleep 2
+              done
+              for pv in $pending; do
+                if [ -e "/pv/$pv/pgdata" ] || [ -L "/pv/$pv/pgdata" ]; then
+                  echo "PGPROBE node=$node pv=$pv pgdata=<no-PG_VERSION> waited=$retry"
+                else
+                  echo "PGPROBE node=$node pv=$pv pgdata=none waited=$retry"
+                fi
+              done
+              echo "PGPROBE node=$node done"
+              exec sleep 2147483647
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: DMS_PROBE_RETRY_SECONDS
+              value: "60"
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: pv01
+              mountPath: /pv/dms-pgdata-01
+              readOnly: true
+            - name: pv02
+              mountPath: /pv/dms-pgdata-02
+              readOnly: true
+            - name: pv03
+              mountPath: /pv/dms-pgdata-03
+              readOnly: true
+            - name: pv04
+              mountPath: /pv/dms-pgdata-04
+              readOnly: true
+            - name: pv05
+              mountPath: /pv/dms-pgdata-05
+              readOnly: true
+      volumes:
+        - name: pv01
+          hostPath:
+            path: /set-by-overlay.invalid/dms/pgdata/dms-pgdata-01
+            type: Directory
+        - name: pv02
+          hostPath:
+            path: /set-by-overlay.invalid/dms/pgdata/dms-pgdata-02
+            type: Directory
+        - name: pv03
+          hostPath:
+            path: /set-by-overlay.invalid/dms/pgdata/dms-pgdata-03
+            type: Directory
+        - name: pv04
+          hostPath:
+            path: /set-by-overlay.invalid/dms/pgdata/dms-pgdata-04
+            type: Directory
+        - name: pv05
+          hostPath:
+            path: /set-by-overlay.invalid/dms/pgdata/dms-pgdata-05
+            type: Directory

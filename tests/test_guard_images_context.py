@@ -419,8 +419,10 @@ def _rendered_registry(tmp_path) -> tuple:
     root = tmp_path / "tree" / "deploy"
     root.mkdir(parents=True)
     shutil.copy(REPO_ROOT / "deploy" / "render.sh", root / "render.sh")
-    for d in ("platform", "k8s", "overlays"):
+    for d in ("platform", "k8s", "overlays", "addons"):              # addons·versions.env·images.lock — ⑤ 애드온·DB 층(2026-11-03)
         shutil.copytree(REPO_ROOT / "deploy" / d, root / d)
+    for name in ("versions.env", "images.lock"):
+        shutil.copy(REPO_ROOT / "deploy" / name, root / name)
     r = subprocess.run(["sh", str(root / "render.sh"), "testbed-k8s"], capture_output=True, text=True, timeout=60,
                        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")})
     assert r.returncode == 0, (r.stdout, r.stderr)

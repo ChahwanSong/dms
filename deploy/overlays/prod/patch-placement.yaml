@@ -1,0 +1,55 @@
+# dms-api·dms-controller 를 마스터에(2026-11-03 ⑤, 설계 v6 #24·#25·2-1). 오버레이가 제어면 Deployment 에서 바꾸는 **배치 필드 둘뿐**이다
+# (nodeSelector·tolerations — tests/test_release_manifest_contract.py 가 이 파일을 글자 그대로 고정하고, 렌더된 Deployment 가 이미지·아티팩트
+# 경로·이 두 필드 말고는 base 와 같은지 본다. securityContext 등 다른 필드는 여전히 base 가 유일한 진실이다).
+#
+# 왜: DB(CNPG 인스턴스)·레지스트리·입구가 마스터에 있고, 워커는 잡이 CPU 를 채운다 — 제어면을 잡과 떼어 둔다(설계 2-1·2-2 예산). 마스터는
+#   control-plane taint 를 유지하므로(#1) toleration 이 필요하다. 노드가 죽으면 not-ready·unreachable 30초 뒤 다른 마스터로 옮긴다(기본 300초면
+#   5분 넘게 포탈·API 가 멈춘다 — 6-3 표의 「dms-api 가 있던 마스터 사망 약 1.5~2.5분」은 이 30초가 전제다). 새 마스터에 dms 이미지가 캐시돼
+#   있어야 빨리 뜬다(S11 마스터 3대 사전 pull — 묶음 ⑦).
+# 테스트베드(testbed-k8s)는 이 패치가 없다 — cp1 메모리가 모자라 api·controller 는 워커에 둔다(설계 10).
+# dms-controller 2개(#25 「1 → 실증 뒤 2」, 2개면 preferred anti-affinity)는 아직이다 — replicas 는 base(1) 그대로.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dms-api
+  namespace: dms
+spec:
+  template:
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: ""
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: node.kubernetes.io/not-ready
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 30
+        - key: node.kubernetes.io/unreachable
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 30
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dms-controller
+  namespace: dms
+spec:
+  template:
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: ""
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: node.kubernetes.io/not-ready
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 30
+        - key: node.kubernetes.io/unreachable
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 30

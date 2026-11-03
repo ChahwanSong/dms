@@ -78,6 +78,9 @@ def _render(tmp_path, values_text):
     shutil.copytree(PROD, prod, ignore=shutil.ignore_patterns("values.env"))
     shutil.copytree(REPO_ROOT / "deploy" / "k8s", tmp_path / "k8s")      # ../../../k8s 가 렌더 산출물에서 풀리게
     shutil.copytree(REPO_ROOT / "deploy" / "platform", tmp_path / "platform")
+    shutil.copytree(REPO_ROOT / "deploy" / "addons", tmp_path / "addons")         # ⑤ 애드온·DB 층(2026-11-03)
+    for name in ("versions.env", "images.lock"):
+        shutil.copy(REPO_ROOT / "deploy" / name, tmp_path / name)
     shutil.copy(RENDER, tmp_path / "render.sh")                           # prod/render.sh(호환 진입점)가 ../../render.sh 로 넘긴다
     vals = tmp_path / "values.env"
     vals.write_text(values_text)

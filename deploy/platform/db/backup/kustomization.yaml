@@ -1,0 +1,12 @@
+# 플랫폼 층(DMS 소유) — pg_dump CronJob(2026-11-03 ⑤, 설계 v6 6-4·2-1·#35). Cluster dms-pg 가 Ready 된 뒤(S10 의 경로 대조 다음) 적용한다.
+#
+# 사이트 중립 base: 이미지·hostPath·보존 개수는 자리표시자·기본값이다(raw apply 는 이미지가 없어 뜨지 않는다 — 의도). 렌더:
+#   sh deploy/render.sh <site>  →  deploy/.rendered/<site>/platform/db-backup
+#   kubectl --context <ctx> apply --server-side --field-manager=dms-install -k deploy/.rendered/<site>/platform/db-backup
+#   kubectl --context <ctx> -n dms create job --from=cronjob/dms-pg-dump dms-pg-dump-first     # S10 「첫 덤프」
+# 덤프는 공용 스토리지 위에 있다 — 복제본 3개와 같은 스토리지라 **공용 스토리지 밖 사본**(덤프 + dms-secrets·dms-pg-app 암호화본)을 따로
+# 둔다(6-4, deploy/README §2f-5). 복원 조건: 원래의 DMS_SESSION_SECRET(없으면 메일 키·k8s 토큰을 다시 넣는다).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - cronjob.yaml

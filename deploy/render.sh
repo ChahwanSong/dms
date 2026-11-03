@@ -1,6 +1,6 @@
 #!/bin/sh
-# 사이트 렌더러(2026-08-30 overlays/prod/render.sh → 2026-11-03 ④ 일반화 — 설계 v6 9 「③ 공유 FS 세부」(render.sh 일반화)·④·8-2
-# 「층 배치」). 같은 렌더러가 앱 오버레이와 플랫폼 층(platform/{priorityclass,registry}, 묶음 ⑤ 의 db 가 같은 자리로 붙는다)을 렌더한다.
+# 사이트 렌더러(2026-08-30 overlays/prod/render.sh → 2026-11-03 ④ 일반화 — 설계 v6 9 「③ 공유 FS 세부」(render.sh 일반화)·④·⑤·8-2
+# 「층 배치」). 같은 렌더러가 앱 오버레이와 플랫폼 층(platform/{priorityclass,registry,db-*})·애드온 층(addons/cnpg)을 렌더한다.
 #
 #   sh deploy/render.sh <site> [--context <ctx>]      # site = deploy/overlays/<site>(kustomization.yaml 이 있는 디렉터리 이름)
 #
@@ -12,10 +12,26 @@
 #   platform/priorityclass/   PriorityClass dms-addon-critical → SSA(--server-side --field-manager=dms-install)
 #   platform/registry/        클러스터 내 레지스트리(REGISTRY_CLUSTER_IP 가 있을 때만) → SSA. base(deploy/platform/registry)를 가리키고 사이트
 #                             값(이미지 호스트·clusterIP·포트·hostPath·센티널 기대값·선택 requests)만 덮는다.
-#   render.env                해석된 값(REGISTRY·앱 태그 등 — install.sh 의 in-cluster 게이트와 런북이 읽는다)
+#   addons/cnpg/              CNPG 오퍼레이터(설계 6-1 A 경로, ⑤) → SSA. base(deploy/addons/cnpg/<CNPG_VERSION> — 상류 원본 + DMS 패치 층)를
+#                             가리키고 이미지·OPERATOR_IMAGE_NAME·POSTGRES_IMAGE_NAME 을 lock digest 로 덮는다(S9).
+#   platform/db-volumes/      SC dms-pg-shared + 정적 hostPath PV ×5(<SHARED_DIR>/dms/pgdata/dms-pgdata-0N, 용량 = PG_STORAGE_SIZE) → SSA(S10 첫째)
+#   platform/db-cluster/      CNPG Cluster dms-pg(imageName = lock digest, storage.size = PV 용량, 선택 자원·배치) → SSA(S10, 사전 검사 뒤)
+#   platform/db-backup/       pg_dump CronJob(이미지·hostPath <SHARED_DIR>/dms/backup/pg·보존 개수) → SSA(S10, 경로 대조 뒤)
+#   platform/db-probe/        일회용 경로 프로브 DaemonSet — deploy/pg-path-probe.py 가 띄우고 지운다(S10 사전 검사·경로 대조)
+#   render.env                해석된 값(REGISTRY·앱 태그·애드온 레지스트리·이미지 ref 등 — install.sh 의 in-cluster 게이트와 런북이 읽는다)
 #   (kube-context 가 있는 오버레이는 그 파일을 각 층 디렉터리에 복사한다 — guard-images.sh 가 같은 컨텍스트 고정을 본다)
-# 성공하면 층마다 `PLATFORM: <디렉터리>` 를, 마지막 줄에 `RENDERED: <app 디렉터리>` 를 찍는다(install.sh 가 파싱). 실패는 한 줄 사유 + exit 2
-# 이고 결과 디렉터리를 바꾸지 않는다(임시 디렉터리에 렌더한 뒤 끝에서만 바꿔 넣는다).
+# 성공하면 층마다 `PLATFORM: <디렉터리>`(db 층은 S10 순서)·`ADDON: <디렉터리>`·`PROBE: <디렉터리>` 를, 마지막 줄에 `RENDERED: <app 디렉터리>`
+# 를 찍는다(install.sh 가 파싱). 실패는 한 줄 사유 + exit 2 이고 결과 디렉터리를 바꾸지 않는다(임시 디렉터리에 렌더한 뒤 끝에서만 바꿔 넣는다).
+#
+# DB(CNPG, 2026-11-03 ⑤ — 설계 v6 6·8-1 S9/S10). 버전은 deploy/versions.env(커밋 — CNPG_VERSION·CNPG_OPERATOR_IMAGE·PG_IMAGE), 이미지 digest 는
+# deploy/images.lock(그 DEST 의 linux/amd64 매니페스트 digest)이 원천이다 — 이미지 ref = <애드온 레지스트리>/<DEST>@<digest>. 애드온 레지스트리 =
+# 클러스터 내 레지스트리(REGISTRY_CLUSTER_IP 가 있으면 <IP>:<PORT> — S5 가 lock 이미지를 그리로 push 한다; 앱이 아직 external 이어도, 테스트베드
+# T4 병행), 없으면 REGISTRY. DB 층은 늘 렌더한다(설계 ⑤: PG 는 늘 공용 경로 PV — 로컬 디스크 선택지 없음, v4 의 PG_STORAGE 키는 없앴다).
+#   PG_STORAGE_SIZE    (선택, 기본 20Gi) Cluster storage.size == PV capacity — 한 값이 두 곳에 들어간다(명목값, hostPath 는 강제하지 않는다)
+#   PG_CPU_REQUEST·PG_MEMORY·PG_SHARED_BUFFERS  (선택) 기본 1 / 4Gi(requests == 메모리 limit) / PG_MEMORY 의 1/4(둘 다 없으면 base 1GB) — 실효
+#                      메모리의 절반 이상인 shared_buffers 는 FAIL. 테스트베드 100m / 256Mi / 64MB(설계 10)
+#   PG_PLACEMENT       (선택) control-plane(기본 — 마스터마다 1개, #27) | all-nodes(테스트베드만 — nodeSelector 를 빼 cp1·w1·w2 에 하나씩)
+#   PG_BACKUP_KEEP     (선택, 기본 336 = 14일 × 매시간) pg_dump 보존 개수
 #
 # 레지스트리(설계 v6 7, values 키):
 #   REGISTRY_MODE        in-cluster(DMS 가 띄우는 레지스트리를 앱이 쓴다) | external(사이트 레지스트리 REGISTRY). 없으면 external(옛 values.env).
@@ -66,6 +82,8 @@ fi
 # (아래 「무시함」 알림이 values.env 에서 온 것만 말하게). 의도된 env 입력은 VALUES_ENV·KUBE_CONTEXT·DMS_NS 뿐이다.
 unset SHARED_FS SHARED_DIR SHARED_DIR_ID REGISTRY REGISTRY_MODE REGISTRY_CLUSTER_IP REGISTRY_PORT REGISTRY_TLS_VERIFY \
       REGISTRY_CPU_REQUEST REGISTRY_MEMORY_REQUEST \
+      PG_STORAGE_SIZE PG_CPU_REQUEST PG_MEMORY PG_SHARED_BUFFERS PG_PLACEMENT PG_BACKUP_KEEP \
+      CNPG_VERSION CNPG_OPERATOR_IMAGE PG_IMAGE \
       DMS_TAG DMS_AGENT_TAG MFU_TAG EMAIL_DOMAIN LOCAL_ADMIN PORTAL_DOMAIN PORTAL_VIP \
       LDAP_HOST LDAP_USER_BASE LDAP_GROUP_BASE LDAP_BIND_DN IDENTITY_SUPPLEMENTARY_GROUPS
 # shellcheck disable=SC1090
@@ -271,6 +289,112 @@ for layer in $LAYERS; do
   [ -f "$HERE/platform/$layer/kustomization.yaml" ] || fail "플랫폼 base 없음: $HERE/platform/$layer/kustomization.yaml"
 done
 
+# --- DB(CNPG) 값(2026-11-03 ⑤, 설계 v6 6·8-1 S9/S10 — 머리 주석 「DB」) ------------------------------------------------------------
+# 버전·digest 의 원천은 커밋된 두 파일이다(values.env 가 아니다 — 사이트마다 다르면 안 되는 값). versions.env 는 sh 로 . 하지 않고 `KEY=값` 줄만
+# 읽는다(같은 키가 둘이면 FAIL — 어느 쪽인지 추측하지 않는다).
+VERS="$HERE/versions.env"
+LOCKF="$HERE/images.lock"
+[ -f "$VERS" ] || fail "버전 고정 파일 없음: $VERS (설계 6-5 — 커밋된 deploy/versions.env)"
+[ -f "$LOCKF" ] || fail "이미지 lock 없음: $LOCKF"
+_ver() {
+  _n=$(grep -c "^$1=" "$VERS" || true)
+  [ "$_n" = 1 ] || { echo "FAIL: $VERS 에 $1= 줄이 정확히 하나가 아니다($_n개)"; return 1; }
+  sed -n "s/^$1=//p" "$VERS"
+}
+CNPG_VERSION=$(_ver CNPG_VERSION) || { echo "$CNPG_VERSION"; exit 2; }
+CNPG_OPERATOR_IMAGE=$(_ver CNPG_OPERATOR_IMAGE) || { echo "$CNPG_OPERATOR_IMAGE"; exit 2; }
+PG_IMAGE=$(_ver PG_IMAGE) || { echo "$PG_IMAGE"; exit 2; }
+case "$CNPG_VERSION" in
+  ""|.*|*.|*..*|*[!0123456789.]*) fail "$VERS 의 CNPG_VERSION='$CNPG_VERSION' — 예: 1.30.1" ;;
+esac
+for _img in "$CNPG_OPERATOR_IMAGE" "$PG_IMAGE"; do
+  case "$_img" in
+    *[!abcdefghijklmnopqrstuvwxyz0123456789._:/-]*|*:*:*|:*|*:|*/|/*) fail "$VERS 의 이미지 '$_img' — lock 의 DEST(<이름>:<태그>, 호스트 없이)" ;;
+    *:*) ;;
+    *) fail "$VERS 의 이미지 '$_img' 에 태그가 없다 — lock 의 DEST(<이름>:<태그>)" ;;
+  esac
+done
+[ "${CNPG_OPERATOR_IMAGE##*:}" = "$CNPG_VERSION" ] \
+  || fail "$VERS 의 CNPG_OPERATOR_IMAGE='$CNPG_OPERATOR_IMAGE' 태그가 CNPG_VERSION='$CNPG_VERSION' 과 다르다(한 커밋에서 같이 올린다)"
+CNPG_BASE="$HERE/addons/cnpg/$CNPG_VERSION"
+[ -f "$CNPG_BASE/kustomization.yaml" ] || fail "애드온 base 없음: $CNPG_BASE/kustomization.yaml (CNPG_VERSION=$CNPG_VERSION — deploy/addons/cnpg/<v>)"
+grep -q "^      dms.io/addon-version: \"$CNPG_VERSION\"\$" "$CNPG_BASE/kustomization.yaml" \
+  || fail "$CNPG_BASE/kustomization.yaml 의 라벨 dms.io/addon-version 이 CNPG_VERSION='$CNPG_VERSION' 이 아니다"
+for layer in db/volumes db/cluster db/backup db/probe; do
+  [ -f "$HERE/platform/$layer/kustomization.yaml" ] || fail "플랫폼 base 없음: $HERE/platform/$layer/kustomization.yaml"
+done
+# lock 에서 DEST 의 digest — 첫 칸이 #(주석)인 줄은 건너뛰고(sh 소비자와 같은 규칙), 정확히 한 줄이어야 한다.
+_lock_digest() {
+  _dg=$(awk -v d="$1" '$1 !~ /^#/ && $1 == d { print $3; n++ } END { exit (n == 1 ? 0 : 1) }' "$LOCKF") \
+    || { echo "FAIL: $LOCKF 에 DEST '$1' 줄이 정확히 하나가 아니다 — versions.env 와 lock 을 한 커밋에서(images-lock.py resolve)"; return 1; }
+  case "$_dg" in
+    sha256:????????????????????????????????????????????????????????????????) ;;
+    *) echo "FAIL: $LOCKF 의 '$1' digest '$_dg' 가 sha256:<64 hex> 가 아니다"; return 1 ;;
+  esac
+  case "${_dg#sha256:}" in *[!0123456789abcdef]*) echo "FAIL: $LOCKF 의 '$1' digest '$_dg' 가 소문자 hex 가 아니다"; return 1 ;; esac
+  printf '%s' "$_dg"
+}
+OP_DG=$(_lock_digest "$CNPG_OPERATOR_IMAGE") || { echo "$OP_DG"; exit 2; }
+PG_DG=$(_lock_digest "$PG_IMAGE") || { echo "$PG_DG"; exit 2; }
+if [ -n "$RCIP" ]; then ADDON_REGISTRY="$RCIP:$REGISTRY_PORT"; else ADDON_REGISTRY=$REGISTRY; fi
+OP_REF="$ADDON_REGISTRY/$CNPG_OPERATOR_IMAGE@$OP_DG"
+PG_REF="$ADDON_REGISTRY/$PG_IMAGE@$PG_DG"
+# 사이트 값(values.env, 전부 선택). 형식은 글자를 나열해 본다(아래 값은 YAML·JSON 패치에 그대로 들어간다).
+_qty() {   # $1=키 $2=값 $3=허용 단위(공백 구분) $4=예
+  for _u in $3; do
+    case "$2" in
+      *"$_u")
+        _num=${2%"$_u"}
+        case "$_num" in ""|0*|*[!0123456789]*) ;; *) return 0 ;; esac ;;
+    esac
+  done
+  fail "values.env 의 $1='$2' — 예: $4($3)"
+}
+_set "${PG_STORAGE_SIZE:-}" || PG_STORAGE_SIZE=20Gi
+_qty PG_STORAGE_SIZE "$PG_STORAGE_SIZE" "Mi Gi Ti" 20Gi
+if _set "${PG_CPU_REQUEST:-}"; then
+  _num=${PG_CPU_REQUEST%m}
+  case "$_num" in ""|0*|*[!0123456789]*) fail "values.env 의 PG_CPU_REQUEST='$PG_CPU_REQUEST' — 예: 1 또는 100m" ;; esac
+else PG_CPU_REQUEST=""; fi
+if _set "${PG_MEMORY:-}"; then _qty PG_MEMORY "$PG_MEMORY" "Mi Gi" 4Gi; else PG_MEMORY=""; fi
+if _set "${PG_SHARED_BUFFERS:-}"; then _qty PG_SHARED_BUFFERS "$PG_SHARED_BUFFERS" "kB MB GB" 1GB; else PG_SHARED_BUFFERS=""; fi
+# shared_buffers 는 메모리 limit 안에서 채워진다(2026-11-03 ⑤ 리뷰 2): PG_MEMORY 만 줄이고 base 의 1GB 를 남기면 부하 때 cgroup OOM 으로 인스턴스가
+# 재기동을 반복한다(렌더는 통과했다). 그래서 PG_SHARED_BUFFERS 가 없고 PG_MEMORY 가 있으면 그 1/4(base 의 4Gi → 1GB 와 같은 비율 — PG 검토 5-2)을
+# 쓰고, 실효 메모리(PG_MEMORY, 없으면 base 의 4Gi)의 절반 이상이면 멈춘다. PG 의 kB·MB·GB 는 1024 배수라 Ki·Mi·Gi 와 같은 단위로 센다.
+_kib() {   # $1 = 위에서 형식을 본 수량 → KiB. 9자리를 넘으면 실패(셸 산술 범위)
+  case "$1" in
+    *Gi|*GB) _n=${1%??}; _m=1048576 ;;
+    *Mi|*MB) _n=${1%??}; _m=1024 ;;
+    *kB) _n=${1%??}; _m=1 ;;
+    *) return 1 ;;
+  esac
+  [ "${#_n}" -le 9 ] || return 1
+  echo $((_n * _m))
+}
+PG_MEM_EFF=${PG_MEMORY:-4Gi}
+_mem_k=$(_kib "$PG_MEM_EFF") || fail "values.env 의 PG_MEMORY='$PG_MEMORY' 가 너무 크다(9자리 이하)"
+if [ -z "$PG_SHARED_BUFFERS" ] && [ -n "$PG_MEMORY" ]; then
+  _sb_k=$((_mem_k / 4))
+  if [ $((_sb_k % 1048576)) = 0 ]; then PG_SHARED_BUFFERS="$((_sb_k / 1048576))GB"
+  elif [ $((_sb_k % 1024)) = 0 ]; then PG_SHARED_BUFFERS="$((_sb_k / 1024))MB"
+  else PG_SHARED_BUFFERS="${_sb_k}kB"; fi
+  echo "info: PG_SHARED_BUFFERS = PG_MEMORY($PG_MEMORY)/4 = $PG_SHARED_BUFFERS" >&2
+fi
+if [ -n "$PG_SHARED_BUFFERS" ]; then
+  _sb_k=$(_kib "$PG_SHARED_BUFFERS") || fail "values.env 의 PG_SHARED_BUFFERS='$PG_SHARED_BUFFERS' 가 너무 크다(9자리 이하)"
+  [ "$((_sb_k * 2))" -lt "$_mem_k" ] \
+    || fail "values.env 의 PG_SHARED_BUFFERS='$PG_SHARED_BUFFERS' 가 메모리 limit $PG_MEM_EFF(PG_MEMORY)의 절반 이상이다 — shared_buffers 는 그 limit 안에서 채워져 부하 때 cgroup OOM 으로 재기동을 반복한다(비우면 PG_MEMORY/4)"
+fi
+_set "${PG_PLACEMENT:-}" || PG_PLACEMENT=control-plane
+case "$PG_PLACEMENT" in
+  control-plane|all-nodes) ;;
+  *) fail "values.env 의 PG_PLACEMENT='$PG_PLACEMENT' — control-plane(기본, 마스터마다 1개) 또는 all-nodes(테스트베드)" ;;
+esac
+_set "${PG_BACKUP_KEEP:-}" || PG_BACKUP_KEEP=336
+case "$PG_BACKUP_KEEP" in ""|0*|*[!0123456789]*) fail "values.env 의 PG_BACKUP_KEEP='$PG_BACKUP_KEEP' — 양의 정수(기본 336 = 14일 × 매시간)" ;; esac
+[ "${#PG_BACKUP_KEEP}" -le 5 ] || fail "values.env 의 PG_BACKUP_KEEP='$PG_BACKUP_KEEP' 가 너무 크다(5자리 이하)"
+DB_LAYERS="db-volumes db-cluster db-backup"
+
 # --- 렌더(임시 디렉터리 — 끝에서만 OUT 을 바꾼다) ----------------------------------------------------------------------------
 mkdir -p "$HERE/.rendered"
 TMP="$HERE/.rendered/.$SITE.tmp.$$"
@@ -419,8 +543,187 @@ EOF
     echo "            type: Directory"
   } > "$TMP/platform/registry/site-patch.yaml"
 fi
+
+# --- 애드온 층: CNPG 오퍼레이터(2026-11-03 ⑤, 설계 6-1 airgap 함정 1·3) -------------------------------------------------------------
+# image 와 env OPERATOR_IMAGE_NAME 을 **한 변수(OP_REF)에서** 쓴다 — 둘이 어긋나면 PG 인스턴스 파드의 bootstrap init 이 다른 이미지(또는 ghcr.io)를
+# 받으러 간다. POSTGRES_IMAGE_NAME = Cluster imageName 과 같은 PG_REF(imageName 을 생략한 Cluster 도 ghcr.io 로 가지 않게).
+mkdir -p "$TMP/addons/cnpg"
+cat > "$TMP/addons/cnpg/kustomization.yaml" <<EOF
+$HEAD
+# 적용(S9): kubectl --context <ctx> apply --server-side --field-manager=dms-install -k <이 디렉터리> → rollout status → Cluster CR server dry-run
+# (deploy/README §2f-3). base = deploy/addons/cnpg/$CNPG_VERSION(상류 원본 + DMS 패치 층).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../../../addons/cnpg/$CNPG_VERSION
+patches:
+  - path: site-patch.yaml
+EOF
+cat > "$TMP/addons/cnpg/site-patch.yaml" <<EOF
+$HEAD
+# 이미지 = <애드온 레지스트리>/<lock DEST>@<amd64 매니페스트 digest>(deploy/versions.env + deploy/images.lock).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cnpg-controller-manager
+  namespace: cnpg-system
+spec:
+  template:
+    spec:
+      containers:
+        - name: manager
+          image: $OP_REF
+          env:
+            - name: OPERATOR_IMAGE_NAME
+              value: $OP_REF
+            - name: POSTGRES_IMAGE_NAME
+              value: $PG_REF
+EOF
+
+# --- DB 층(2026-11-03 ⑤, 설계 6-1·6-2·6-4·8-1 S10) — base(deploy/platform/db/*)를 가리키는 kustomization + 사이트 값 ----------------------
+PGDATA_DIR="$SHARED_DIR/dms/pgdata"
+mkdir -p "$TMP/platform/db-volumes" "$TMP/platform/db-cluster" "$TMP/platform/db-backup" "$TMP/platform/db-probe"
+cat > "$TMP/platform/db-volumes/kustomization.yaml" <<EOF
+$HEAD
+# 적용(S10 첫째): python3 deploy/pg-path-probe.py … --mode pv-check(이미 있는 PV 의 경로·용량·SC 대조 — 용량·SC 는 SSA 가 조용히 바꾸므로
+# 적용 전에) → SSA → … --mode precheck(사전 검사) → db-cluster.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../../../platform/db/volumes
+patches:
+  - path: site-patch.yaml
+EOF
+{
+  echo "$HEAD"
+  echo "# PV 다섯 개의 경로(<SHARED_DIR>/dms/pgdata/dms-pgdata-0N — S0 가 26:26 0700 + .dms-pv-id 로 만든다)와 용량(= Cluster storage.size)."
+  for n in 01 02 03 04 05; do
+    [ "$n" = 01 ] || echo "---"
+    echo "apiVersion: v1"
+    echo "kind: PersistentVolume"
+    echo "metadata:"
+    echo "  name: dms-pgdata-$n"
+    echo "spec:"
+    echo "  capacity:"
+    echo "    storage: $PG_STORAGE_SIZE"
+    echo "  hostPath:"
+    echo "    path: $PGDATA_DIR/dms-pgdata-$n"
+  done
+} > "$TMP/platform/db-volumes/site-patch.yaml"
+{
+  echo "$HEAD"
+  echo "# 적용(S10): SSA --dry-run=server(웹훅 9443 경로) → SSA → 900초 폴링(readyInstances ≥ 1·dms-pg-rw Endpoints·currentPrimary Ready —"
+  echo "# wait --for=condition=Ready 가 아니다) → python3 deploy/pg-path-probe.py … --mode contrast(경로 대조) → db-backup. deploy/README §2f-4."
+  echo "apiVersion: kustomize.config.k8s.io/v1beta1"
+  echo "kind: Kustomization"
+  echo "resources:"
+  echo "  - ../../../../platform/db/cluster"
+  echo "patches:"
+  echo "  - target:"
+  echo "      group: postgresql.cnpg.io"
+  echo "      kind: Cluster"
+  echo "      name: dms-pg"
+  echo "    patch: |-"
+  echo "      - op: replace"
+  echo "        path: /spec/imageName"
+  echo "        value: $PG_REF"
+  echo "      - op: replace"
+  echo "        path: /spec/storage/size"
+  echo "        value: $PG_STORAGE_SIZE"
+  if [ -n "$PG_CPU_REQUEST" ]; then
+    echo "      - op: replace"
+    echo "        path: /spec/resources/requests/cpu"
+    echo "        value: \"$PG_CPU_REQUEST\""
+  fi
+  if [ -n "$PG_MEMORY" ]; then
+    # 메모리는 requests == limits(설계 2-1 — limit 만 있고 CPU limit 은 없다).
+    echo "      - op: replace"
+    echo "        path: /spec/resources/requests/memory"
+    echo "        value: $PG_MEMORY"
+    echo "      - op: replace"
+    echo "        path: /spec/resources/limits/memory"
+    echo "        value: $PG_MEMORY"
+  fi
+  if [ -n "$PG_SHARED_BUFFERS" ]; then
+    echo "      - op: replace"
+    echo "        path: /spec/postgresql/parameters/shared_buffers"
+    echo "        value: $PG_SHARED_BUFFERS"
+  fi
+  if [ "$PG_PLACEMENT" = all-nodes ]; then
+    # 테스트베드만(설계 10 T6 — cp1 하나뿐인 control-plane): nodeSelector 를 빼 모든 노드에 하나씩. toleration(cp1 taint)·required
+    # anti-affinity 는 그대로 둔다 — 노드마다 1개는 지킨다. prod 는 늘 control-plane(마스터마다 1개, #27).
+    echo "      - op: remove"
+    echo "        path: /spec/affinity/nodeSelector"
+  fi
+} > "$TMP/platform/db-cluster/kustomization.yaml"
+cat > "$TMP/platform/db-backup/kustomization.yaml" <<EOF
+$HEAD
+# 적용(S10, 경로 대조 뒤): SSA → kubectl --context <ctx> -n dms create job --from=cronjob/dms-pg-dump dms-pg-dump-first(첫 덤프).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../../../platform/db/backup
+patches:
+  - path: site-patch.yaml
+EOF
+cat > "$TMP/platform/db-backup/site-patch.yaml" <<EOF
+$HEAD
+# 덤프 위치 = <SHARED_DIR>/dms/backup/pg(S0 가 26:26 0700 + .dms-backup-id 로 만든다), 보존 = PG_BACKUP_KEEP 개.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: dms-pg-dump
+  namespace: dms
+spec:
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+            - name: pg-dump
+              image: $PG_REF
+              env:
+                - name: DMS_BACKUP_KEEP
+                  value: "$PG_BACKUP_KEEP"
+          volumes:
+            - name: backup
+              hostPath:
+                path: $SHARED_DIR/dms/backup/pg
+EOF
+cat > "$TMP/platform/db-probe/kustomization.yaml" <<EOF
+$HEAD
+# 일회용(S10 사전 검사·경로 대조): python3 deploy/pg-path-probe.py --context <ctx> --rendered <이 디렉터리> --mode precheck|contrast
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../../../platform/db/probe
+patches:
+  - path: site-patch.yaml
+EOF
+{
+  echo "$HEAD"
+  echo "apiVersion: apps/v1"
+  echo "kind: DaemonSet"
+  echo "metadata:"
+  echo "  name: dms-pg-path-probe"
+  echo "  namespace: dms"
+  echo "spec:"
+  echo "  template:"
+  echo "    spec:"
+  echo "      containers:"
+  echo "        - name: probe"
+  echo "          image: $PG_REF"
+  echo "      volumes:"
+  for n in 01 02 03 04 05; do
+    echo "        - name: pv$n"
+    echo "          hostPath:"
+    echo "            path: $PGDATA_DIR/dms-pgdata-$n"
+  done
+} > "$TMP/platform/db-probe/site-patch.yaml"
+
 if [ -f "$OV/kube-context" ]; then
-  for layer in $LAYERS; do cp "$OV/kube-context" "$TMP/platform/$layer/"; done
+  for layer in $LAYERS $DB_LAYERS db-probe; do cp "$OV/kube-context" "$TMP/platform/$layer/"; done
+  cp "$OV/kube-context" "$TMP/addons/cnpg/"
 fi
 {
   echo "# deploy/render.sh $SITE 의 해석값 — 손으로 고치지 않는다(설치기·런북이 읽는다; sh 로 . 해도 된다)."
@@ -437,10 +740,24 @@ fi
   echo "DMS_AGENT_TAG=${DMS_AGENT_TAG:-}"
   echo "MFU_TAG=${MFU_TAG:-}"
   echo "PLATFORM_LAYERS=\"$LAYERS\""
+  # DB(CNPG, ⑤) — 설치 단계별: 애드온(S9) · DB 층(S10 순서) · 일회용 경로 프로브. 이미지 ref 는 lock digest 를 담은 전체 값이다.
+  echo "ADDON_LAYERS=\"cnpg\""
+  echo "DB_LAYERS=\"$DB_LAYERS\""
+  echo "DB_PROBE=db-probe"
+  echo "ADDON_REGISTRY=$ADDON_REGISTRY"
+  echo "CNPG_VERSION=$CNPG_VERSION"
+  echo "CNPG_OPERATOR_REF=$OP_REF"
+  echo "PG_IMAGE_REF=$PG_REF"
+  echo "PG_STORAGE_SIZE=$PG_STORAGE_SIZE"
+  echo "PG_PLACEMENT=$PG_PLACEMENT"
+  echo "PG_BACKUP_KEEP=$PG_BACKUP_KEEP"
 } > "$TMP/render.env"
 
 rm -rf "$OUT"
 mv "$TMP" "$OUT"
 trap - EXIT
 for layer in $LAYERS; do echo "PLATFORM: $OUT/platform/$layer"; done
+echo "ADDON: $OUT/addons/cnpg"
+for layer in $DB_LAYERS; do echo "PLATFORM: $OUT/platform/$layer"; done
+echo "PROBE: $OUT/platform/db-probe"
 echo "RENDERED: $OUT/app"

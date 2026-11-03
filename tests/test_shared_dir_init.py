@@ -150,11 +150,13 @@ def test_fresh_init_builds_the_tree_and_sentinels_then_rerun_only_checks(tmp_pat
     assert (shared / "dms" / "registry" / ".dms-registry-id").read_text() == sid
     for n in range(1, 6):
         assert (shared / "dms" / "pgdata" / f"dms-pgdata-0{n}" / ".dms-pv-id").read_text() == f"dms-pgdata-0{n}\n"
+    # 2026-11-03 ⑤: pg_dump CronJob 이 덤프 전에 검사만 하는 센티널(값은 deploy/platform/db/backup/cronjob.yaml 의 DMS_BACKUP_SENTINEL 과 같다).
+    assert (shared / "dms" / "backup" / "pg" / ".dms-backup-id").read_text() == "dms-backup-pg\n"
     before = _listing(shared)
 
     again = _run(tmp_path, str(shared))
     assert again.returncode == 0 and "MADE" not in again.stdout, (again.stdout, again.stderr)
-    assert again.stdout.count("이미 있음") == len(TREE) + 1 + 1 + 5      # 트리 + shared-id + registry-id + pv-id ×5
+    assert again.stdout.count("이미 있음") == len(TREE) + 1 + 1 + 5 + 1  # 트리 + shared-id + registry-id + pv-id ×5 + backup-id
     assert (shared / "dms" / ".dms-shared-id").read_text() == sid and _listing(shared) == before
     check = _run(tmp_path, "--check", str(shared))
     assert check.returncode == 0 and "MADE" not in check.stdout, check.stdout

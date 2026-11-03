@@ -396,6 +396,10 @@ def _tree(tmp_path) -> Path:
     shutil.copytree(PLATFORM, root / "platform")
     shutil.copytree(DEPLOY / "k8s", root / "k8s")
     shutil.copytree(OVERLAYS, root / "overlays", ignore=shutil.ignore_patterns(".prod-rendered", "values.env.local"))
+    # 렌더러가 ⑤ 부터 애드온·DB 층도 낸다(2026-11-03 ⑤) — 버전 고정·lock·애드온 base 를 같이 복사한다.
+    shutil.copytree(DEPLOY / "addons", root / "addons")
+    for name in ("versions.env", "images.lock"):
+        shutil.copy(DEPLOY / name, root / name)
     return root
 
 

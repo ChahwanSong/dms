@@ -31,12 +31,19 @@ kubectl apply -f deploy/k8s/00-namespace.yaml   # 설계 S2 — 이미지 없는
 #    REGISTRY_MODE=external: 사이트 레지스트리 — install.sh 1b 가 이 호스트의 podman/docker 에서 REGISTRY 로 push 한다
 #    (실패·로컬 이미지 없음은 WARN). DMS 는 평문 HTTP 레지스트리만 다룬다(REGISTRY_TLS_VERIFY=false, 노드 insecure 신뢰).
 
+# 3b) DB — CloudNativePG(2026-11-03 ⑤, 설계 v6 6·8-1 S2/S9/S10). DMS 는 DB 가 Ready 된 뒤에 적용한다(5단계 — migrate 는 backoffLimit 3).
+#    명령은 deploy/README.md §2f(설치기 자동화는 묶음 ⑦): S2 시크릿(python3 deploy/pg-secrets.py --context <ctx> ensure-app → init-secrets —
+#    값을 출력하지 않는다) → S9 CNPG 오퍼레이터(이미 있으면 다시 설치하지 않는다 — 감지; 첫 설치는 ns cnpg-system 을 먼저 만든 뒤 server
+#    dry-run) SSA → Cluster CR server dry-run(9443) → S10 값 대조(python3 deploy/pg-path-probe.py … --mode pv-check — 적용 전: PV 용량·SC 는 SSA 가
+#    조용히 바꾼다) → db-volumes(SC + PV ×5) → 사전 검사(… --mode precheck) → db-cluster → 900초 폴링(readyInstances·dms-pg-rw·
+#    primary Ready) → 경로 대조(--mode contrast) → db-backup + 첫 덤프. 공용 스토리지 밖 사본(덤프·시크릿 암호화본)의 보관처를 정한다(§2f-5).
+#    REGISTRY_MODE=external 이면 S9 앞에 둘을 더 한다(in-cluster 는 3단계 S4·S5 가 했다): PriorityClass dms-addon-critical 적용(없으면 오퍼레이터
+#    파드가 admission 에서 거절된다)과 lock 의 cloudnative-pg·postgresql 을 REGISTRY 로 push(install.sh 1b 는 DMS 이미지만) — §2f-3.
+
 # 4) 시크릿·TLS (out-of-band — git 밖, 오버레이가 만들지 않는다). 네임스페이스 dms 는 3)에서 만들었다(없으면 not found)
-kubectl -n dms create secret generic dms-secrets \
-  --from-literal=DMS_DATABASE_URL='postgresql://USER:PW@HOST:5432/DB' \
-  --from-literal=DMS_SHARED_TOKEN="$(openssl rand -hex 32)" \
-  --from-literal=DMS_ADMIN_TOKEN="$(openssl rand -hex 32)" \
-  --from-literal=DMS_SESSION_SECRET="$(openssl rand -hex 32)"
+#    dms-secrets(4키)는 3b) 의 pg-secrets.py init-secrets 가 만든다 — DMS_DATABASE_URL = CNPG URL(설계 6-3: dms-pg-rw·keepalive·
+#    tcp_user_timeout=15000·target_session_attrs=read-write·sslmode=require, 비밀번호 = dms-pg-app), 토큰 셋 무작위. 확인:
+python3 deploy/pg-secrets.py --context <ctx> check
 kubectl -n dms create secret tls dms-portal-tls --cert=tls.crt --key=tls.key
 #   (시크릿은 4키 — LDAP 바인드 비밀번호 키는 없다. TLS SAN 에 PORTAL_DOMAIN + PORTAL_VIP 둘 다.)
 
@@ -110,10 +117,14 @@ DMS 스토리지로 등록할 수 없다(포탈 422 `storage_overlaps_dms_state`
 | **MetalLB(L2)** | `kubectl -n metallb-system get pods` — 풀·광고는 오버레이가 적용 |
 | **ingress-nginx** | IngressClass `nginx` + 컨트롤러에 `--default-ssl-certificate=dms/dms-portal-tls` |
 | **PSA** | `dms` 네임스페이스 `enforce: privileged`(00-namespace.yaml) — 사내 정책이 허용해야 잡 파드가 뜸 |
-| **PostgreSQL** | 도달 가능 + DB/계정 생성 |
+| **PostgreSQL** | CloudNativePG Cluster `dms-pg`(3b단계 — `deploy/README.md` §2f): 마스터마다 1개, 공용 디렉터리의 정적 hostPath PV ×5(S0 가 `dms/pgdata/dms-pgdata-01..05` 를 26:26 0700 으로 만든다), `dms-secrets` 의 URL 은 `dms-pg-rw`(설계 6-3). apiserver → 워커 파드 9443(CNPG 웹훅)이 열려 있어야 한다 |
 | **공용 디렉터리** | 모든 마스터·워커의 같은 경로 `SHARED_DIR` 에 마운트 + S0 `sh deploy/shared-dir-init.sh <SHARED_DIR>`(한 노드, root — `dms` 0750·`dms/artifacts` 0755 등과 센티널), 각 스토리지 `managed_root` 사전 mkdir. 확인: `deploy/shared-storage-probe.py`(in-cluster 면 3단계 S6 뒤 — 프로브 파드가 dms 이미지를 그 레지스트리에서 받는다) |
 | **클러스터 내 레지스트리**(in-cluster) | 모든 노드 CRI-O 신뢰 `/etc/containers/registries.conf.d/50-dms-registry.conf`(S0-4) · 마스터 전부 레지스트리 이미지 반입 + `/etc/crio/crio.conf.d/99-dms-pinned.conf`(S0-5) · S4 적용 · S5 push · S6 pull — `deploy/README.md` §2e. install.sh 는 Service `dms-registry`(clusterIP == `REGISTRY_CLUSTER_IP`)가 Ready 가 아니거나 dms·dms-agent·dms-mpifileutils 태그가 그 레지스트리에 없으면 멈춘다 |
 | **공인 존 노드 라벨** | `kubectl label node -l <셀렉터> network-zone=public --overwrite` |
 
 세부(공인 존 제약·페일오버·인증서 재발급·HTTPS 원리)는 `deploy/README.md §10`.
 api/controller 의 hostPath 는 `SHARED_DIR` 에서 렌더된다(base 는 자리표시자 — 손으로 패치하지 않는다).
+**dms-api·dms-controller 는 마스터에 뜬다**(2026-11-03 ⑤, 설계 #24·#25 — `patch-placement.yaml`: control-plane nodeSelector + toleration,
+not-ready·unreachable `tolerationSeconds: 30`). 이 오버레이가 제어면 Deployment 에서 바꾸는 것은 이미지·아티팩트 경로·이 배치 두 필드뿐이다
+(`tests/test_release_manifest_contract.py`). 마스터에도 `SHARED_DIR` 마운트·레지스트리 신뢰가 있어야 한다(G1·S0-4). 마스터를 내릴 때의 규칙은
+`deploy/README.md` §2f-7(VM 전원 확인 전 강제 삭제·out-of-service taint·Node 삭제 금지).

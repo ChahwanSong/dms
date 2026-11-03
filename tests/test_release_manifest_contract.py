@@ -211,6 +211,43 @@ _ALLOWED_DEPLOYMENT_FIELDS = {
     "spec.template.spec.containers.[name=controller].volumeMounts.[name=dms-artifacts].mountPath",
 }
 
+# prod 의 제어면 배치(2026-11-03 ⑤, 설계 v6 #24·#25): dms-api·dms-controller 를 마스터에 + not-ready·unreachable 30초. 오버레이가 Deployment 를
+# 패치하는 **유일한 파일**이고 내용은 이 두 필드(nodeSelector·tolerations)뿐이다 — 주석을 뺀 코드 줄이 글자 그대로 이것이어야 한다(한 필드라도
+# 더하면 빨간불). 테스트베드(testbed-k8s)는 cp1 메모리가 모자라 이 파일이 없다(설계 10). securityContext 는 여전히 base 가 유일한 진실이다.
+_PLACEMENT_SPEC = '''      nodeSelector:
+        node-role.kubernetes.io/control-plane: ""
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: node.kubernetes.io/not-ready
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 30
+        - key: node.kubernetes.io/unreachable
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 30'''
+_PLACEMENT_PATCH_FILES = {"prod": "patch-placement.yaml"}
+
+
+def _placement_patch_code() -> str:
+    docs_ = []
+    for name in ("dms-api", "dms-controller"):
+        docs_.append("apiVersion: apps/v1\nkind: Deployment\nmetadata:\n"
+                     f"  name: {name}\n  namespace: dms\nspec:\n  template:\n    spec:\n{_PLACEMENT_SPEC}")
+    return "\n---\n".join(docs_)
+
+
+# kustomize 출력(키 정렬·시퀀스는 부모 키와 같은 열)에서 위 두 필드가 보이는 모양 — 렌더 비교에서 prod 만 이 블록을 정확히 한 번씩 갖는다.
+_RENDERED_PLACEMENT = (
+    '      nodeSelector:\n        node-role.kubernetes.io/control-plane: ""\n',
+    "      tolerations:\n"
+    "      - effect: NoSchedule\n        key: node-role.kubernetes.io/control-plane\n        operator: Exists\n"
+    "      - effect: NoExecute\n        key: node.kubernetes.io/not-ready\n        operator: Exists\n        tolerationSeconds: 30\n"
+    "      - effect: NoExecute\n        key: node.kubernetes.io/unreachable\n        operator: Exists\n        tolerationSeconds: 30\n",
+)
+
 
 def _replacement_fields(block: str) -> set:
     """replacements 블록의 (선택한 kind, fieldPaths 항목) 쌍. kind 는 가장 가까운 앞 `kind:` 줄(source·select 공통)."""
@@ -247,6 +284,11 @@ def test_overlays_do_not_patch_control_plane_deployments():
         code = "\n".join(ln for ln in text.splitlines() if not ln.lstrip().startswith("#"))
         if "securityContext" in code:
             offenders.append(f"{path.relative_to(REPO_ROOT)}: securityContext")
+        if _PLACEMENT_PATCH_FILES.get(path.parent.name) == path.name:
+            # prod 배치 패치(2026-11-03 ⑤) — 허용하는 모양은 하나뿐(글자 그대로).
+            if code.strip() != _placement_patch_code():
+                offenders.append(f"{path.relative_to(REPO_ROOT)}: 배치 패치가 nodeSelector·tolerations 두 필드의 정해진 모양이 아니다")
+            continue
         if path.name == "kustomization.yaml":
             outside = "\n".join(ln for key in ("patches", "patchesStrategicMerge", "patchesJson6902", "resources",
                                                "images", "components")
@@ -265,15 +307,35 @@ def test_overlays_do_not_patch_control_plane_deployments():
                 offenders.append(str(path.relative_to(REPO_ROOT)))
     assert offenders == [], (
         f"오버레이가 Deployment 를 패치한다: {offenders} -- dms-api/dms-controller 의 "
-        f"securityContext 는 base 가 유일한 진실이어야 한다(허용: replacements 의 아티팩트 경로 필드뿐)")
+        f"securityContext 는 base 가 유일한 진실이어야 한다(허용: replacements 의 아티팩트 경로 필드, prod 배치 패치의 "
+        f"nodeSelector·tolerations 뿐)")
 
 
-def _normalized_workload(rendered: str, kind: str, name: str, artifact_path: "str | None") -> str:
+def test_only_prod_places_the_control_plane_on_masters():
+    # 2026-11-03 ⑤(설계 #24·#25 — prod 만, 테스트베드는 설계 10 으로 워커): 허용 파일이 정확히 그 오버레이에만 있고 kustomization 이 싣는다.
+    overlays = REPO_ROOT / "deploy" / "overlays"
+    for overlay in sorted(p.parent.name for p in overlays.glob("*/kustomization.yaml")):
+        kust = (overlays / overlay / "kustomization.yaml").read_text()
+        wired = re.search(r"(?m)^  - path: patch-placement\.yaml$", kust) is not None
+        exists = (overlays / overlay / "patch-placement.yaml").exists()
+        if overlay in _PLACEMENT_PATCH_FILES:
+            assert wired and exists, overlay
+        else:
+            assert not wired and not exists, overlay
+    assert "prod" in _PLACEMENT_PATCH_FILES and "testbed-k8s" not in _PLACEMENT_PATCH_FILES
+
+
+def _normalized_workload(rendered: str, kind: str, name: str, artifact_path: "str | None",
+                         placement: bool = False) -> str:
     from overlay_render import doc
     text = doc(rendered, kind, name)
     text = re.sub(r"(?m)^(\s*(?:- )?image: ).*$", r"\1<image>", text)
     if artifact_path:
         text = text.replace(artifact_path, "<artifact-path>")
+    for block in _RENDERED_PLACEMENT:
+        # prod 배치(2026-11-03 ⑤): 정해진 두 블록이 정확히 한 번씩 있어야 하고(그 오버레이), 없어야 한다(나머지) — 지운 뒤 base 와 비교한다.
+        assert text.count(block) == (1 if placement else 0), (name, placement, block.splitlines()[0])
+        text = text.replace(block, "")
     return text
 
 
@@ -281,6 +343,7 @@ def _normalized_workload(rendered: str, kind: str, name: str, artifact_path: "st
 def test_overlays_change_control_plane_deployments_only_in_image_and_artifact_path():
     # 위 정적 검사의 짝(2026-11-03 ③): 어떤 모양으로 쓰든 렌더된 dms-api·dms-controller 가 base 렌더와 이미지·아티팩트 경로
     # 말고는 글자 그대로 같아야 한다 -- securityContext·command·볼륨 종류(type: Directory)·마운트 전파가 오버레이에서 바뀌면 빨간불.
+    # 2026-11-03 ⑤: prod 는 배치 두 필드(nodeSelector·tolerations — _RENDERED_PLACEMENT 글자 그대로)도 다르다. 그 밖은 여전히 같아야 한다.
     from overlay_render import config_data, present_overlays, render
     base = subprocess.run([shutil.which("kubectl"), "kustomize", str(REPO_ROOT / "deploy" / "k8s")],
                           capture_output=True, text=True, timeout=120, env={**os.environ, "KUBECONFIG": os.devnull})
@@ -289,8 +352,9 @@ def test_overlays_change_control_plane_deployments_only_in_image_and_artifact_pa
     for overlay in present_overlays():
         text = render(overlay)
         path = config_data(text)["DMS_ARTIFACT_BASE_URI"][len("file://"):]
+        placed = overlay in _PLACEMENT_PATCH_FILES
         for name in ("dms-api", "dms-controller"):
-            assert (_normalized_workload(text, "Deployment", name, path)
+            assert (_normalized_workload(text, "Deployment", name, path, placement=placed)
                     == _normalized_workload(base.stdout, "Deployment", name, base_path)), (overlay, name)
 
 

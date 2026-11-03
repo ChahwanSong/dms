@@ -1,0 +1,193 @@
+# dms-pg-dump — 매시간 논리 덤프(2026-11-03 ⑤, 설계 v6 6-4 — PITR 없음, #29·#35). 막는 것: 잘못된 마이그레이션·삭제·재구축(동기 복제는
+# 노드·파드 장애 1건만 막는다). 값마다의 이유:
+#   매시간 17분(`17 * * * *`), -Fc(custom — pg_restore 로 선택 복원), dms-pg-rw(primary)에서 읽는다(6-4). concurrencyPolicy Forbid.
+#   워커에서만(control-plane 노드 금지, 설계 2-1 — 마스터 예산 밖), 100m/256Mi..1/1Gi(추정).
+#   저장: hostPath <SHARED_DIR>/dms/backup/pg(type Directory — S0 가 26:26 0700 로 만든다, 마운트가 빠진 노드에서는 경로가 없어 파드가 뜨지
+#     않는다; 경로를 만드는 타입 금지). uid/gid 26 = 그 디렉터리 소유(PG 이미지의 postgres). 덤프에는 비밀번호 해시·봉인된 키가 있다(umask 077).
+#   센티널 검사(검사만 — 레지스트리 init 과 같은 이유): S0 가 마운트를 확인한 뒤 쓴 backup/pg/.dms-backup-id(값 dms-backup-pg)가 없거나 다르면
+#     덤프하지 않는다 — 마운트 빠진 워커의 같은 이름 로컬 디렉터리에 덤프가 조용히 쌓이는 경우(#29). 만들지 않는다.
+#   쓰기: .dms-<시각>.dump.partial 에 쓰고 → pg_restore --list 로 읽히는지 확인 → fsync → 같은 이름이 없을 때만 rename(dms-<UTC 시각>.dump)
+#     → 디렉터리 fsync. 실패하면 조각을 지우고 보존분은 건드리지 않는다 — 단계마다 종료 코드를 본다(set -e 없음: fsync·rename·디렉터리 fsync
+#     실패를 무시하면 새 덤프 없이 「완료」 exit 0 으로 끝나며 옛 덤프를 지운다 — 2026-11-03 ⑤ 리뷰 실측). 디렉터리 fsync 실패는 덤프를
+#     남기되 보존 정리를 건너뛰고 실패로 끝낸다(Job 실패가 보여야 한다).
+#   보존: 이름 형식(dms-YYYYMMDDTHHMMSSZ.dump)의 파일만 세어 최신 DMS_BACKUP_KEEP 개(기본 336 = 14일 × 24, 테스트베드 24)만 남긴다 — 새 덤프가
+#     성공한 뒤에만 지운다. **개수**로 세는 이유: 시각 기준(14일 지난 것 삭제)이면 덤프가 며칠 실패하는 동안 좋은 덤프가 전부 지워질 수 있다.
+#     센티널·조각·손으로 둔 파일은 세지도 지우지도 않는다. 3시간 넘은 조각(.dms-*.dump.partial — 죽은 실행의 흔적)만 지운다.
+#   비밀: 접속 정보는 env(secretKeyRef dms-pg-app 의 username·password)로만 — 매니페스트·로그에 값이 없다(set -x·env 출력 금지).
+#     sslmode require(CNPG 서버 TLS), 잠금 대기 2분 상한(마이그레이션이 테이블을 잡고 있으면 이번 회차는 실패하고 다음 시각에 다시).
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: dms-pg-dump
+  namespace: dms
+  labels:
+    app.kubernetes.io/name: dms-pg-dump
+    app.kubernetes.io/part-of: dms
+    app.kubernetes.io/managed-by: dms-install
+spec:
+  schedule: "17 * * * *"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 3000
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: dms-pg-dump
+            app.kubernetes.io/part-of: dms
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          enableServiceLinks: false
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: node-role.kubernetes.io/control-plane
+                        operator: DoesNotExist
+          securityContext:
+            runAsUser: 26
+            runAsGroup: 26
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: pg-dump
+              image: set-by-overlay.invalid/postgresql:set-by-overlay
+              imagePullPolicy: IfNotPresent
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -u
+                  umask 077
+                  d=/backup
+                  f="$d/.dms-backup-id"
+                  want=${DMS_BACKUP_SENTINEL:-}
+                  keep=${DMS_BACKUP_KEEP:-}
+                  case "$want" in
+                    ""|set-by-overlay.invalid)
+                      echo "dms-pg-dump: 센티널 기대값 없음 -- 렌더한 platform/db-backup 을 적용할 것(deploy/render.sh)" >&2
+                      exit 1 ;;
+                  esac
+                  case "$keep" in
+                    ""|0*|*[!0123456789]*)
+                      echo "dms-pg-dump: 보존 개수 DMS_BACKUP_KEEP='$keep' 가 양의 정수가 아님" >&2
+                      exit 1 ;;
+                  esac
+                  if [ ! -e "$f" ] && [ ! -L "$f" ]; then
+                    echo "dms-pg-dump: 센티널 없음 -- 백업 경로는 있으나 .dms-backup-id 가 없다: 마운트가 빠진 노드의 같은 이름 로컬 디렉터리이거나 S0 를 거치지 않은 디렉터리(findmnt -T <SHARED_DIR>·S0 --check; 만들지 않는다)" >&2
+                    exit 1
+                  fi
+                  if [ -L "$f" ] || [ ! -f "$f" ]; then
+                    echo "dms-pg-dump: 센티널이 일반 파일이 아님(심링크 등) -- 따라가지 않는다" >&2
+                    exit 1
+                  fi
+                  got=$(head -n 1 "$f" 2>/dev/null) || got=""
+                  if [ "$got" != "$want" ]; then
+                    echo "dms-pg-dump: 센티널 불일치 -- 기대 '$want' / 실제 '$got' (확인 전엔 덤프하지 않는다)" >&2
+                    exit 1
+                  fi
+                  find "$d" -maxdepth 1 -type f -name '.dms-*.dump.partial' -mmin +180 -print -delete \
+                    | sed 's|^.*/|dms-pg-dump: 오래된 조각 지움: |'
+                  name="dms-$(date -u +%Y%m%dT%H%M%SZ).dump"
+                  part="$d/.$name.partial"
+                  if ! pg_dump --format=custom --no-password --lock-wait-timeout=120000 --file="$part"; then
+                    rm -f -- "$part"
+                    echo "dms-pg-dump: pg_dump 실패(위 오류) -- 보존분은 지우지 않았다" >&2
+                    exit 1
+                  fi
+                  if ! pg_restore --list "$part" >/dev/null; then
+                    rm -f -- "$part"
+                    echo "dms-pg-dump: 덤프 목록을 읽지 못했다(깨진 덤프) -- 보존분은 지우지 않았다" >&2
+                    exit 1
+                  fi
+                  if ! sync -- "$part"; then
+                    rm -f -- "$part"
+                    echo "dms-pg-dump: 덤프 fsync 실패(위 오류 -- NFS 는 쓰기 오류가 여기서야 드러난다) -- 보존분은 지우지 않았다" >&2
+                    exit 1
+                  fi
+                  if [ -e "$d/$name" ] || [ -L "$d/$name" ]; then
+                    rm -f -- "$part"
+                    echo "dms-pg-dump: $name 이 이미 있다(같은 초에 두 실행?) -- 덮어쓰지 않는다" >&2
+                    exit 1
+                  fi
+                  if ! mv -- "$part" "$d/$name"; then
+                    rm -f -- "$part"
+                    echo "dms-pg-dump: rename 실패(위 오류) -- 보존분은 지우지 않았다" >&2
+                    exit 1
+                  fi
+                  if [ -L "$d/$name" ] || [ ! -f "$d/$name" ]; then
+                    echo "dms-pg-dump: rename 뒤 $name 이 일반 파일로 보이지 않는다 -- 보존분은 지우지 않았다" >&2
+                    exit 1
+                  fi
+                  if ! sync -- "$d"; then
+                    echo "dms-pg-dump: $name 은 썼으나 디렉터리 fsync 실패 -- 새 덤프가 남는지 모르므로 보존 정리를 건너뛴다(실패로 끝낸다)" >&2
+                    exit 1
+                  fi
+                  echo "dms-pg-dump: $name ($(stat -c %s "$d/$name" 2>/dev/null || echo '?') bytes)"
+                  n=0
+                  for old in $(ls -1 "$d" | grep -E '^dms-[0-9]{8}T[0-9]{6}Z\.dump$' | sort -r); do
+                    n=$((n + 1))
+                    [ "$n" -gt "$keep" ] || continue
+                    rm -f -- "$d/$old" && echo "dms-pg-dump: 보존 개수($keep) 밖 삭제: $old"
+                  done
+                  echo "dms-pg-dump: 완료(보존 $keep 개)"
+              env:
+                - name: PGHOST
+                  value: dms-pg-rw
+                - name: PGPORT
+                  value: "5432"
+                - name: PGDATABASE
+                  value: dms
+                - name: PGUSER
+                  valueFrom:
+                    secretKeyRef:
+                      name: dms-pg-app
+                      key: username
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: dms-pg-app
+                      key: password
+                - name: PGSSLMODE
+                  value: require
+                - name: PGCONNECT_TIMEOUT
+                  value: "10"
+                - name: PGAPPNAME
+                  value: dms-pg-dump
+                - name: DMS_BACKUP_SENTINEL
+                  value: dms-backup-pg
+                - name: DMS_BACKUP_KEEP
+                  value: "336"
+              terminationMessagePolicy: FallbackToLogsOnError
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
+                limits:
+                  cpu: "1"
+                  memory: 1Gi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              volumeMounts:
+                - name: backup
+                  mountPath: /backup
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: backup
+              hostPath:
+                path: /set-by-overlay.invalid/dms/backup/pg
+                type: Directory
+            - name: tmp
+              emptyDir:
+                sizeLimit: 64Mi

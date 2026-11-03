@@ -1,0 +1,37 @@
+# 오퍼레이터 Deployment 패치(전략적 머지 — containers·env 는 name 으로 합쳐진다). 왜 이 값들인지는 kustomization.yaml 머리 주석(2026-11-03 ⑤).
+# 이미지 문자열(image·OPERATOR_IMAGE_NAME·POSTGRES_IMAGE_NAME)은 사이트 중립 자리표시자 — 렌더러가 deploy/images.lock 의 digest 로 덮는다.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cnpg-controller-manager
+  namespace: cnpg-system
+spec:
+  replicas: 2
+  template:
+    spec:
+      priorityClassName: dms-addon-critical
+      affinity:
+        # 워커에만(설계 #33·2-1): 마스터 자원 예산(2-2)에 넣지 않았고, 마스터 3대가 PG 인스턴스를 하나씩 가진다.
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: DoesNotExist
+        # 두 파드를 다른 워커에 — 선호(required 면 워커 1대 유지보수 동안 둘째가 Pending 이다).
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: cloudnative-pg
+      containers:
+        - name: manager
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: OPERATOR_IMAGE_NAME
+              value: set-by-overlay.invalid/cloudnative-pg:1.30.1
+            - name: POSTGRES_IMAGE_NAME
+              value: set-by-overlay.invalid/postgresql:set-by-overlay

@@ -1,0 +1,75 @@
+# dms-pg — DMS 제어면 DB(2026-11-03 ⑤, 설계 v6 6-1). 값마다의 이유:
+#   instances 3, required anti-affinity(호스트마다 1개), control-plane nodeSelector + toleration — 마스터마다 1개(#27). 마스터 1대 유지보수
+#     동안 그 인스턴스는 Pending 이고 나머지 둘로 돈다(2-2).
+#   imageName 명시 + IfNotPresent — 생략하면 오퍼레이터가 ghcr.io 의 18.x 를 받으려 한다(6-1 airgap 함정 3). 값은 렌더러가
+#     <REG>/postgresql:<태그>@sha256:<amd64 매니페스트 digest>(deploy/images.lock — 태그는 날짜 붙은 불변 태그, GC 보호용)로 쓴다.
+#     PG 이미지는 PG 17 고정(#27) — minor 는 digest 교체 → 롤링 + switchover(6-5).
+#   primaryUpdateMethod switchover — 상류 기본(restart)은 primary 를 제자리 재시작하고 새 이미지를 그때 받는다. switchover 는 새 이미지를
+#     이미 받은 standby 를 승격한다(6-5 「롤링 + switchover」). 대가: imageName 과 postgresql.parameters 를 한 번에 바꾸면 웹훅이 거절한다
+#     (상류 rolling_update 문서) — 이미지 먼저, 롤링이 끝난 뒤 설정(deploy/README §2f-6).
+#   smartShutdownTimeout 0 — 종료 때 smart shutdown(모든 세션이 끝날 때까지 대기, 기본 180초)을 건너뛰고 곧바로 fast shutdown.
+#     DMS 는 연결을 계속 열어 두어 기본값이면 180초를 다 쓰고, 그동안 새 연결이 거부돼 switchover 없는 primary 종료(파드 삭제·노드 graceful
+#     shutdown)가 최대 3분 쓰기 불가가 된다(#27, PG 검토 4-2·M5). drain 0 대 180 비교는 T6'.
+#   enablePDB — primary 를 보호하는 PDB(drain 은 switchover 를 거친다).
+#   synchronous any/1/preferred(#28 확정): standby 하나의 확인으로 커밋, standby 가 없으면 요구 수가 자동으로 줄어 쓰기가 멈추지 않는다.
+#     dataDurability 를 쓰지 않거나 required 면(상류 기본이 required) standby 가 없을 때 COMMIT 이 무한 대기한다(실측). 커밋 지연은 T6.
+#   shared_buffers 1GB(PG 검토 5-2, 메모리 4Gi 의 1/4) — 테스트베드는 values 로 64MB. values 가 PG_MEMORY 만 바꾸면 렌더러가 그 1/4 로 맞추고,
+#     메모리의 절반 이상이면 렌더를 멈춘다(shared_buffers 는 메모리 limit 안에서 채워진다 — 1GB 를 남기면 cgroup OOM 재기동, 2026-11-03 ⑤ 리뷰 2).
+#   bootstrap initdb dms/dms + Secret dms-pg-app(basic-auth, S2 가 만든다 — 같은 비밀번호가 dms-secrets 의 DMS_DATABASE_URL 에 들어간다,
+#     설계 6-3). 첫 이관(옛 DB 가 있을 때)은 이 Cluster 를 bootstrap initdb import 로 만들거나(⑦) 이미 떠 있으면 덤프·복원(T7), 복구도 같은
+#     이름 dms-pg 로 다시 만든다(pg_dump CronJob·경로 프로브·DMS_DATABASE_URL 이 이 이름을 본다) — deploy/README §2f-5(복구·첫 이관).
+#   storage: SC dms-pg-shared(정적 hostPath PV 풀 — db-volumes), size == PV capacity(렌더러가 한 값으로), resizeInUseVolumes false(확장할 수
+#     없는 SC 에서 크기를 바꾸려는 시도를 막는다 — 크기는 명목값).
+#   resources: requests 1 CPU/4Gi, limits 메모리 4Gi 만(CPU limit 없음 — checkpoint·autovacuum 때 CFS 스로틀이 걸리면 그 지연이 DMS 의
+#     DB 잠금(RLock) 때문에 API 지연에 그대로 실린다(추정, PG 검토 5-2), 2-1·위험 #21). 테스트베드는 values 로 100m/256Mi(설계 10).
+# 이중 마운트: hostPath PV 는 노드 간 RWO 를 강제하지 않는다 — VM 전원이 꺼진 것을 확인하기 전에는 파드 강제 삭제·out-of-service taint·
+#   Node 삭제를 하지 않는다(6-6, deploy/README §2f-7).
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: dms-pg
+  namespace: dms
+  labels:
+    app.kubernetes.io/part-of: dms
+    app.kubernetes.io/managed-by: dms-install
+spec:
+  instances: 3
+  imageName: set-by-overlay.invalid/postgresql:set-by-overlay
+  imagePullPolicy: IfNotPresent
+  primaryUpdateStrategy: unsupervised
+  primaryUpdateMethod: switchover
+  smartShutdownTimeout: 0
+  enablePDB: true
+  postgresql:
+    synchronous:
+      method: any
+      number: 1
+      dataDurability: preferred
+    parameters:
+      shared_buffers: 1GB
+  bootstrap:
+    initdb:
+      database: dms
+      owner: dms
+      secret:
+        name: dms-pg-app
+  storage:
+    storageClass: dms-pg-shared
+    size: set-by-overlay
+    resizeInUseVolumes: false
+  affinity:
+    enablePodAntiAffinity: true
+    podAntiAffinityType: required
+    topologyKey: kubernetes.io/hostname
+    nodeSelector:
+      node-role.kubernetes.io/control-plane: ""
+    tolerations:
+      - key: node-role.kubernetes.io/control-plane
+        operator: Exists
+        effect: NoSchedule
+  resources:
+    requests:
+      cpu: "1"
+      memory: 4Gi
+    limits:
+      memory: 4Gi

@@ -1,0 +1,31 @@
+# 플랫폼 층(DMS 소유) — PG 볼륨: 전용 StorageClass + 정적 hostPath PV 풀 ×5(2026-11-03 ⑤, 설계 v6 6-2 [확정, 5회차]·#40).
+#
+# 왜 이 모양인가(6-2): 스토리지 종류에 따른 분기·애드온·CSI·새 이미지 없이, 사이트가 모든 노드의 같은 경로에 마운트한 공용 디렉터리
+# <SHARED_DIR>/dms/pgdata/dms-pgdata-0N 을 그대로 쓴다(artifacts·registry·backup 과 같은 hostPath 방식 — 사이트 값은 SHARED_DIR 하나).
+# PV 에 nodeAffinity 가 없어 인스턴스가 어느 노드에서든 같은 PGDATA 로 뜬다(마스터 교체 = 재복제 없이 새 노드에서 기동). claimRef 로 미리
+# 묶지 않는다 — 전용 SC 매칭만: 인스턴스를 볼륨째 다시 만들면 새 PVC 가 Available 여분을 가져가고(자가 치유) 옛 PV 는 Released 로 남는다
+# (런북: deploy/README §2f-5). 인스턴스 3 + 여분 2 = 5. 여분이 0 이면 새 PVC 가 Pending 일 뿐 데이터 위험은 없다.
+# 상류 비권장을 감수한다(5회차 확정): k8s 문서의 「hostPath PV 는 single node testing only」는 노드마다 로컬 디스크가 다르다는 전제다 —
+# 여기 경로는 모든 노드에서 같은 공용 FS 다(S7 프로브·S10 경로 대조로 증명).
+#
+# 지켜야 하는 것(tests/test_platform_db_contract.py 가 고정):
+#   - hostPath type 은 Directory 만(경로를 만드는 타입 금지 — 마운트가 빠진 노드에서 빈 로컬 디렉터리를 만들어 PG 가 로컬 디스크에 쓴다,
+#     #31 의 조용한 위반). 디렉터리는 S0(deploy/shared-dir-init.sh)가 26:26 0700 + .dms-pv-id(= PV 이름)로 미리 만든다 — hostPath 는
+#     fsGroup 을 적용하지 않는다(그 대신 CNPG 의 재귀 chown 도 없다).
+#   - Retain(지우지 않는다 — Released 는 런북으로만 되돌린다), nodeAffinity·claimRef 0건, capacity == Cluster storage.size(크면 맞는 PV 가
+#     없어 새 PVC 가 Pending — 둘 다 렌더러가 values 의 PG_STORAGE_SIZE 한 값으로 쓴다). hostPath PV 의 크기는 명목값이다(강제하지 않음).
+#   - SC 는 no-provisioner·Immediate·Retain·확장 불가. 이 SC 의 PVC 를 만들 수 있는 주체가 곧 보안 경계다(6-2 「소유·보안」 — 선택 VAP 는
+#     BACKLOG). access mode 는 쓰기 보호가 아니다(RWOP 는 CSI 전용) — 이중 마운트 방지는 마스터 운영 규칙(6-6, deploy/README §2f-7).
+#
+# 사이트 중립 base: 경로·용량은 자리표시자(set-by-overlay.invalid)라 raw apply 는 apiserver 가 거절한다(용량이 수량이 아님 — 의도). 렌더:
+#   sh deploy/render.sh <site>  →  deploy/.rendered/<site>/platform/db-volumes(이 base + PV 5개의 경로·용량 패치)
+#   kubectl --context <ctx> apply --server-side --field-manager=dms-install -k deploy/.rendered/<site>/platform/db-volumes
+# 이미 있는 PV 와 값이 다르면 S10 은 FAIL 이다(조용히 다시 만들지 않는다). 단 apiserver 가 막는 것은 hostPath·volumeMode 뿐이고(시끄럽다)
+# capacity·storageClassName 은 가변이라 SSA 가 Bound PV 까지 조용히 바꾼다(2026-11-03 ⑤ 리뷰 — k8s 1.34 ValidatePersistentVolumeUpdate) —
+# 그래서 적용 **전에** `python3 deploy/pg-path-probe.py --context <ctx> --rendered deploy/.rendered/<site>/platform/db-probe --mode pv-check`
+# 가 경로·type·용량·SC 를 render.env 와 대조한다(deploy/README §2f-4 0단계).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - storageclass.yaml
+  - pv.yaml

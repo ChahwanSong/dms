@@ -1,0 +1,38 @@
+# 애드온 층(서드파티) — CloudNativePG 1.30.1 오퍼레이터, DMS 가 설치할 때(설계 v6 8-2 A 경로)의 패치 층(2026-11-03 ⑤, 설계 6-1·2-1·8-2).
+#
+# cnpg-1.30.1.yaml 은 상류 원본 그대로다(SOURCE·cnpg-1.30.1.yaml.sha256 — cosign 번들로 검증, 바이트 하나 고치지 않는다). DMS 가 바꾸는
+# 것은 전부 이 층에 있다 — 6-1 의 airgap 함정과 배치:
+#   1) 이미지와 env OPERATOR_IMAGE_NAME 을 **둘 다** <REG>/cloudnative-pg:<v>@sha256:<amd64 매니페스트 digest> 로 — OPERATOR_IMAGE_NAME 은
+#      PG 인스턴스 파드의 bootstrap init 컨테이너 이미지다(마스터가 이것을 pull 한다). 하나만 바꾸면 인스턴스 파드가 ghcr.io 에서 받으려 한다.
+#      여기(사이트 중립 base)는 자리표시자(set-by-overlay.invalid)이고 렌더러(deploy/render.sh)가 lock 의 digest 로 두 값을 **한 변수에서** 쓴다.
+#   2) Always → IfNotPresent(상류 Deployment 의 imagePullPolicy 하나뿐 — CRD 스키마 설명문의 「Always」 글자는 필드가 아니다).
+#   3) POSTGRES_IMAGE_NAME(오퍼레이터 기본 PG 이미지 — imageName 을 생략한 Cluster 가 쓴다)도 레지스트리 이미지로: DMS 의 Cluster 는 imageName 을
+#      명시하지만(6-1 함정 3), 생략한 Cluster(시험용 등)가 ghcr.io 의 18.x 를 받으러 가지 않게 같은 PG 이미지를 기본값으로 둔다.
+#   그 밖에 replicas 2(리더 선출 — 웹훅은 두 파드 모두 9443 에서 받는다), 워커 배치(control-plane 노드 금지 — required nodeAffinity,
+#   두 파드는 다른 노드 선호), PriorityClass dms-addon-critical(1000 — 잡이 워커를 채워도 잡을 선점해 자리를 얻는다, 설계 2-1),
+#   라벨 managed-by dms-install + dms.io/addon-version(설계 8-2 A — ⑦ 감지기가 D=/D</D> 를 가른다; selector·파드 템플릿에는 넣지 않는다 —
+#   Deployment selector 는 바꿀 수 없는 필드다).
+# watch 범위(8-2 「watch 범위에 dms 가 없으면 X」): WATCH_NAMESPACE 를 두지 않는다 = 상류 기본 「모든 네임스페이스」(dms 포함). 좁히지 않는
+#   이유: 클러스터에 CNPG 는 하나만 둔다(설계 8-2 — 둘 이상이면 P)라 다른 팀이 이 오퍼레이터를 재사용할 수 있어야 하고, 상류 RBAC 은 어차피
+#   ClusterRole 이다. 감지(⑦)는 env 와 ConfigMap/Secret cnpg-controller-manager-config 의 WATCH_NAMESPACE 를 본다(테스트가 env 부재를 고정).
+# 네임스페이스·RBAC·웹훅(failurePolicy Fail — apiserver → 워커 파드 9443 이 열려 있어야 한다, 설계 #7)·CRD 는 상류 그대로다.
+#
+# 적용(SSA — 상류 CRD 는 client-side apply 의 last-applied annotation 크기 한도를 넘는다, 상류 문서도 --server-side):
+#   sh deploy/render.sh <site> --context <ctx>
+#   kubectl --context <ctx> apply --server-side --field-manager=dms-install -k deploy/.rendered/<site>/addons/cnpg
+# 이 디렉터리를 그대로 apply 하면 이미지가 자리표시자라 오퍼레이터가 뜨지 않는다(의도 — 앱 base 와 같은 규칙). 계약: tests/test_addons_render.py.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - cnpg-1.30.1.yaml
+labels:
+  - pairs:
+      app.kubernetes.io/managed-by: dms-install
+      dms.io/addon-version: "1.30.1"
+    includeSelectors: false
+    includeTemplates: false
+images:
+  - name: ghcr.io/cloudnative-pg/cloudnative-pg
+    newName: set-by-overlay.invalid/cloudnative-pg
+patches:
+  - path: patch-operator.yaml

@@ -1,0 +1,15 @@
+# dms-pg-shared — PG 정적 PV 전용 StorageClass(2026-11-03 ⑤, 설계 v6 6-1·6-2). 프로비저너 없음: PVC 는 이 SC 의 Available PV(아래
+# pv.yaml 의 5개)에만 붙는다. Immediate — 프로비저닝·토폴로지가 없으니 기다릴 이유가 없다(PV 에 nodeAffinity 가 없다). 확장 불가 —
+# hostPath 는 크기를 강제하지 않는다(Cluster 의 resizeInUseVolumes: false 와 짝).
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: dms-pg-shared
+  labels:
+    app.kubernetes.io/part-of: dms
+    app.kubernetes.io/managed-by: dms-install
+    dms.io/pg-cluster: dms-pg
+provisioner: kubernetes.io/no-provisioner
+reclaimPolicy: Retain
+volumeBindingMode: Immediate
+allowVolumeExpansion: false
