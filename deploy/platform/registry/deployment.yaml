@@ -1,0 +1,213 @@
+# dms-registry — 클러스터 내 이미지 레지스트리(2026-11-03 ④, 설계 v6 7-1·7-3·7-6). CNCF Distribution v3.1.2, 오퍼레이터 없이 1개(#46).
+#
+# 사이트 중립 base(앱 base 와 같은 규칙): image·hostPath·Service clusterIP·센티널 기대값은 자리표시자(set-by-overlay.invalid)뿐이다 —
+# raw apply(`kubectl apply -k deploy/platform/registry`)는 Service 가 거절되고(clusterIP 가 IP 가 아님) 파드는 이미지를 못 받고 init 이
+# 기대값 없음으로 멈춘다(의도). 사이트 값은 렌더러(deploy/render.sh <site>)가 deploy/.rendered/<site>/platform/registry 에 낸다.
+#
+# 배치·개수: replicas 1, control-plane 노드(nodeSelector + taint toleration). 노드가 죽으면 not-ready·unreachable 30초 뒤 다른 마스터로
+#   옮긴다(기본 300초면 5분 넘게 pull·push 가 끊긴다). HA(2개 이상)는 G3(노드 간 가시성)가 PASS 인 사이트에서만 다시 본다(7-1).
+# 롤링: maxSurge 1 / maxUnavailable 0 — 새 파드가 Ready 가 된 뒤 옛 파드를 내린다. Recreate 면 업그레이드 때 새 이미지를 받을 곳이
+#   없어 교착한다(레지스트리가 자기 이미지의 출처다). 교체는 빌드·push 가 없을 때 한다(두 파드가 겹치는 동안 Service 가 요청을
+#   나누므로, S7 ② 가 WARN 인 사이트에서는 그 사이 push 가 blob unknown 으로 실패할 수 있다).
+# 저장소: hostPath <SHARED_DIR>/dms/registry, type Directory(S0 가 65532:65532 0750 로 만든다 — deploy/shared-dir-init.sh). 마운트가
+#   빠진 노드에는 이 하위 경로가 없어 파드가 뜨지 않는다(G2 fail-closed). 경로를 만드는 타입으로 「완화」하지 마라 — 마운트 없는 노드에
+#   빈 로컬 디렉터리를 만들어 레지스트리가 조용히 로컬 디스크에 쓴다.
+# 이미지: <REG>/registry:3.1.2 **태그 ref**(설계 7-5 — digest 고정의 문서화된 예외). 레지스트리 자기 이미지는 이 레지스트리에 기대지
+#   않는다(7-4 의존 규칙): 마스터마다 oci-archive 로 containers-storage 에 넣고 CRI-O pinned_images 로 고정한다(S0-5,
+#   /etc/crio/crio.conf.d/99-dms-pinned.conf). 반입본의 digest 가 레지스트리 digest 와 같은지는 실증되지 않아 태그로 가리킨다.
+#   IfNotPresent(init·본 컨테이너 둘 다): 노드에 고정된 사본을 쓴다(Always 면 레지스트리가 내려간 동안 자기 자신을 못 띄운다 — 자기
+#   이미지를 자기에게서 pull 하는 교착). 태그는 deploy/images.lock 의 registry 항목·라벨 dms.io/addon-version 과 같아야 한다(테스트가 고정).
+# 라벨(설계 8-2 A): managed-by dms-install + dms.io/addon-version(설치된 Distribution 버전 — ⑦ 감지기가 이 Deployment 에서 읽어
+#   D=/D</D> 를 가른다). 업그레이드는 이 라벨·두 이미지 태그·images.lock 을 한 커밋에서 바꾼다(deploy/README §2e-5).
+# 보안 강화(설계 7-3 「(선택)」 — 2026-11-03 ④ 결정: 한다): 파드는 uid/gid 65532(S0 가 저장소를 65532:65532 0750 으로 만든다 — tests 가 두 파일을 대조한다),
+#   capabilities drop ALL, 이미지 fs 읽기 전용(/tmp 만 emptyDir), SA 토큰 없음. root 로 돌리면 저장소 파일이 0 소유로 섞이고, drop ALL 인
+#   root 는 DAC_OVERRIDE 가 없어 65532 소유 0750 디렉터리에 쓰지도 못한다 — 65532 가 소유와 맞는 유일한 선택이다. 제어면(api·controller)의
+#   「root 제어면」 규칙(ARCHITECTURE §7)은 아티팩트 base 가 root:root 라서이고 여기와 무관하다.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dms-registry
+  namespace: dms
+  labels:
+    app.kubernetes.io/name: dms-registry
+    app.kubernetes.io/part-of: dms
+    app.kubernetes.io/managed-by: dms-install
+    dms.io/addon-version: "3.1.2"
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dms-registry
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dms-registry
+        app.kubernetes.io/part-of: dms
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: ""
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: node.kubernetes.io/not-ready
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 30
+        - key: node.kubernetes.io/unreachable
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 30
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      # GC 절차(deploy/README §2e)가 「옛 파드가 0개가 된 뒤 이 시간만큼 더 기다린다」에 쓴다 — 바꾸면 런북도 같이.
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsUser: 65532
+        runAsGroup: 65532
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      # 센티널 검사(설계 7-3 「init 센티널(검사만)」): <SHARED_DIR>/dms/registry/.dms-registry-id 는 S0 가 마운트를 확인한 뒤 쓴다
+      # (값 = <SHARED_DIR>/dms/.dms-shared-id). 이 init 은 **검사만** 한다 — 저장소를 읽기 전용으로 붙이고 아무것도 쓰지 않는다(종료
+      # 사유는 로그 끝 줄 = terminationMessagePolicy FallbackToLogsOnError). 막는 상황: 마운트가 빠진 마스터에 우연히 같은 이름의 로컬
+      # 디렉터리가 있어 레지스트리가 로컬 디스크에 쓰는 경우. 「없으면 만든다」면 바로 그때 센티널을 만들어 무력해진다. 기대값은
+      # ConfigMap(dms-registry-config 의 expected-registry-id — values.env SHARED_DIR_ID 를 렌더러가 넣는다)이다.
+      # 경로 자체가 없으면(마운트 빠짐·S0 미실행 — 더 흔하다) 이 init 은 돌지도 않는다: kubelet 이 hostPath type 검사로 FailedMount
+      # (`hostPath type check failed: … is not a directory`)를 내고 파드는 Init:0/1 에 멈춘다(init 로그 없음 — describe 이벤트를 본다).
+      initContainers:
+        - name: sentinel-check
+          image: set-by-overlay.invalid/registry:3.1.2
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -u
+              d=/var/lib/registry
+              f="$d/.dms-registry-id"
+              want=${DMS_EXPECTED_REGISTRY_ID:-}
+              case "$want" in
+                ""|set-by-overlay.invalid)
+                  echo "dms-registry: 센티널 기대값 없음 -- 렌더한 platform/registry(values.env SHARED_DIR_ID)를 적용할 것(deploy/render.sh)" >&2
+                  exit 1 ;;
+              esac
+              if [ ! -r "$d" ] || [ ! -x "$d" ]; then
+                echo "dms-registry: 저장소 디렉터리를 읽을 수 없음 -- S0 의 소유·모드(65532:65532 0750)를 확인할 것(고치지 않는다)" >&2
+                exit 1
+              fi
+              if [ ! -e "$f" ] && [ ! -L "$f" ]; then
+                echo "dms-registry: 센티널 없음 -- 저장소 경로는 있으나 .dms-registry-id 가 없다: 마운트가 빠진 노드의 같은 이름 로컬 디렉터리, 센티널 삭제, 또는 S0 를 거치지 않고 만든 디렉터리(findmnt -T <SHARED_DIR>·S0 --check; init 은 만들지 않는다)" >&2
+                exit 1
+              fi
+              if [ -L "$f" ] || [ ! -f "$f" ]; then
+                echo "dms-registry: 센티널이 일반 파일이 아님(심링크 등) -- 따라가지 않는다" >&2
+                exit 1
+              fi
+              got=$(head -n 1 "$f" 2>/dev/null) || got=""
+              if [ "$got" != "$want" ]; then
+                echo "dms-registry: 센티널 불일치 -- 기대 '$want' / 실제 '$got' (다른 스토리지·이전 설치의 흔적인지 확인; 확인 전엔 기동하지 않는다)" >&2
+                exit 1
+              fi
+              echo "dms-registry: 센티널 확인 ($got)"
+          env:
+            - name: DMS_EXPECTED_REGISTRY_ID
+              valueFrom:
+                configMapKeyRef:
+                  name: dms-registry-config
+                  key: expected-registry-id
+          terminationMessagePolicy: FallbackToLogsOnError
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 32Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: registry-data
+              mountPath: /var/lib/registry
+              readOnly: true
+      containers:
+        - name: registry
+          image: set-by-overlay.invalid/registry:3.1.2
+          imagePullPolicy: IfNotPresent
+          # 이미지 entrypoint.sh 를 거치지 않고 바이너리를 직접 — 인자 해석이 이 줄 하나다.
+          command: ["/bin/registry"]
+          args: ["serve", "/etc/distribution/config.yml"]
+          env:
+            # 비밀은 매니페스트에 없다 — S4 가 없을 때만 무작위로 만들고 출력하지 않는다(deploy/README §2e). 없으면 파드가 뜨지 않는다
+            # (CreateContainerConfigError — 파드마다 다른 무작위 비밀로 뜨면 롤링 중 업로드 세션이 끊긴다).
+            - name: REGISTRY_HTTP_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: dms-registry-http
+                  key: http-secret
+          ports:
+            - name: http
+              containerPort: 5000
+              protocol: TCP
+          # readiness = 저장소를 실제로 만지는 GET /v2/_catalog?n=1. /v2/ 는 저장소 health 검사가 타임아웃 없이 동기로 돌아 공용 스토리지가
+          # 멈춰도(I/O 대기, G8) 200 을 준다(app.go·health.go) — 그래서 readiness 로 쓰지 않는다. 빈 레지스트리에서 200 인지는 T4 확인 항목.
+          readinessProbe:
+            httpGet:
+              path: /v2/_catalog?n=1
+              port: http
+            timeoutSeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          # liveness = TCP 만. 저장소를 만지면 안 된다 — D state 로 멈춘 컨테이너는 재시작해도 회복되지 않고 재시작만 쌓인다.
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 10
+            timeoutSeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          # 설계 2-1(추정, T4 실측으로 보정). 테스트베드는 values.env 의 REGISTRY_CPU_REQUEST·REGISTRY_MEMORY_REQUEST 로 줄인다(설계 10).
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: registry-data
+              mountPath: /var/lib/registry
+            - name: config
+              mountPath: /etc/distribution
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: registry-data
+          hostPath:
+            path: /set-by-overlay.invalid/dms/registry
+            type: Directory
+        - name: config
+          configMap:
+            name: dms-registry-config
+            defaultMode: 0444
+            items:
+              - key: config.yml
+                path: config.yml
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi

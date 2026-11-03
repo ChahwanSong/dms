@@ -4,7 +4,9 @@
 #
 # images: 변환은 워크로드 image 필드만 바꾸므로, 레지스트리를 담은 아래 세
 # 문자열 값은 여기서 별도로 맞춰야 한다(안 맞추면 잡·빌드가 pkg-01:5000 을
-# 계속 pull 하려다 ImagePullBackOff).
+# 계속 pull 하려다 ImagePullBackOff). REPLACE_REGISTRY 는 values.env 의 REGISTRY 하나 —
+# REGISTRY_MODE=in-cluster 면 클러스터 내 레지스트리 주소 <REGISTRY_CLUSTER_IP>:<REGISTRY_PORT> 다(2026-11-03 ④, 설계 v6 7-4
+# 「같은 주소가 여섯 곳」 — 렌더러가 kustomization 의 newName 과 함께 다섯 곳이 같은지 본다; 여섯째는 DB 의 잡 이미지).
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -13,10 +15,11 @@ metadata:
 data:
   # 잡 러너 이미지 -- REPLACE_REGISTRY + dms-mpifileutils:태그
   DMS_JOB_IMAGE: "REPLACE_REGISTRY/dms-mpifileutils:REPLACE_MFU_TAG"
-  # 포탈 빌드가 push/pull 하는 레지스트리(호스트:포트). TLS 레지스트리 권장 --
-  # 평문이면 각 노드 CRI-O 에 insecure 등록이 별도로 필요하다(README).
+  # 포탈 빌드가 push/pull 하는 레지스트리(호스트:포트). **평문 HTTP·익명만 된다**(2026-11-03 ④ 정정 — 예전 주석의 「TLS 레지스트리
+  # 권장」은 틀렸다: 포탈의 태그 조회·삭제(registry.py)는 http:// 고정이고 빌드 push 는 --tls-verify=false 다, 설계 v6 7-2). 그래서 모든
+  # 노드 CRI-O 에 이 주소의 insecure 신뢰 drop-in 이 필요하다(/etc/containers/registries.conf.d/50-dms-registry.conf — deploy/README §2e S0-4).
   DMS_BUILD_REGISTRY: "REPLACE_REGISTRY"
-  # buildah 빌더 이미지의 로컬 미러(반드시 위 레지스트리에 미러돼 있어야 함).
+  # buildah 빌더 이미지(반드시 위 레지스트리에 있어야 함 — deploy/images.lock 의 buildah:stable 을 S5 가 push 한다).
   DMS_BUILD_BUILDER_IMAGE: "REPLACE_REGISTRY/buildah:stable"
 
   # 아티팩트 베이스 = file://<SHARED_DIR>/dms/artifacts(2026-11-03 ③, 설계 v6 3-1). SHARED_DIR 는 values.env 의 절대 경로

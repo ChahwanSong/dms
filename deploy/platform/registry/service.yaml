@@ -1,0 +1,28 @@
+# dms-registry Service(2026-11-03 ④, 설계 v6 7-4 「고정 ClusterIP」).
+#
+# clusterIP 는 values.env 의 REGISTRY_CLUSTER_IP 로 **고정**한다(렌더러가 넣는다 — 여기 값은 자리표시자라 raw apply 는 거절된다).
+# 이 주소가 노드 CRI-O 신뢰(/etc/containers/registries.conf.d/50-dms-registry.conf)·고정 이미지 이름(<IP>:<PORT>/registry:*)·앱의
+# 레지스트리 문자열 다섯 곳(REGISTRY·오버레이 newName·DMS_JOB_IMAGE·DMS_BUILD_REGISTRY·DMS_BUILD_BUILDER_IMAGE)과 DB 의
+# control_state.job_image 에 박힌다 — 한 번 정하면 바꾸지 않는 계약이다(바꾸면 노드 설정·재반입·잡 이미지 재릴리스, 7-4). clusterIP 는
+# 만든 뒤 바꿀 수 없는 필드라 다른 값의 apply 는 apiserver 가 거절한다. 노드 호스트 netns → ClusterIP 는 kube-proxy(또는 Cilium KPR)가
+# 처리한다 — S6 pull 프로브가 노드마다 그 경로를 실증한다. 서비스 CIDR 은 사내망에 광고되지 않아 익명 push·delete 가 클러스터 안에서만
+# 보인다(#43).
+apiVersion: v1
+kind: Service
+metadata:
+  name: dms-registry
+  namespace: dms
+  labels:
+    app.kubernetes.io/name: dms-registry
+    app.kubernetes.io/part-of: dms
+    app.kubernetes.io/managed-by: dms-install
+spec:
+  type: ClusterIP
+  clusterIP: set-by-overlay.invalid
+  selector:
+    app.kubernetes.io/name: dms-registry
+  ports:
+    - name: http
+      port: 5000
+      targetPort: http
+      protocol: TCP

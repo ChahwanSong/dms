@@ -3,8 +3,10 @@
 > **프로덕션 설치는 이 파일(716줄, 테스트베드 런북)을 읽지 마세요.**
 > `deploy/overlays/prod/README.md` **하나**만 보면 됩니다 — 프리플라이트 →
 > `values.env` 채우기 → 시크릿/TLS → `deploy/install.sh` → `deploy/verify.sh`(클러스터가 여럿이면 `--context <ctx>` —
-> `preflight-cluster.sh`·`verify.sh`·`overlays/prod/render.sh` 의 live 태그 해석이 받는다).
+> `preflight-cluster.sh`·`verify.sh`·`render.sh`(옛 `overlays/prod/render.sh`)의 live 태그 해석이 받는다).
 > 이 문서는 테스트베드(개별 파일 apply)·시나리오·HTTPS 원리의 상세 참고용입니다.
+> **단, `REGISTRY_MODE=in-cluster`(prod 기본)면 §2e(노드 준비 S0-4·S0-5 → S4 적용 → S5 push → S6 pull)도 따릅니다** — 설치기 연결은
+> 묶음 ⑦ 이라 지금은 그 절의 명령을 손으로 돌고, prod README 3단계가 그 절을 가리킵니다(2026-11-03 ④).
 
 Deploys the clean-slate DMS control plane (`dms api` / `dms controller` /
 `dms agent`, execution backend = Volcano) onto the testbeds. All
@@ -30,7 +32,7 @@ k8s 테스트베드는 §13 이 런북이다.
 | kube 컨텍스트 | `dms` (current) | `dmsk8s` (current 로 만들지 않는다) |
 | 오버레이 | `deploy/overlays/testbed`(dms-ssc 에만) | `deploy/overlays/testbed-k8s` |
 | 포탈 | https://dms.local (VIP 10.20.20.100) | https://dms-k8s.local (VIP 10.20.20.101) |
-| 레지스트리 | `pkg-01:5000` (docker `registry`) | `pkg-01:5001` (docker `registry-k8s`); 빌더 `buildah:stable` 만 :5000 공용 |
+| 레지스트리 | `pkg-01:5000` (docker `registry`) | `pkg-01:5001` (docker `registry-k8s`); 빌더 `buildah:stable` 만 :5000 공용. 클러스터 내 `10.112.0.50:5000`(④ T4 병행 — 앱 전환 전, §2e-6) |
 | 태그 관례 | `dN` | `dN` — d1 부터(2026-10-26; 그 전 k0~k4 는 옛 kN, 첫 설치 시드는 `d0`) |
 | PostgreSQL | `dmsdb` / `dmsapp` | `dmsdb_k8s` / `dmsapp_k8s` |
 | LDAP | 사용(pkg-01 slapd, 아래 표) | **없음**(사용자 결정) — k8s 신원 모드(모든 잡 root + 권한 = RoleBinding 맵핑, §13) |
@@ -414,6 +416,9 @@ python3 deploy/shared-storage-probe.py --context <ctx> --overlay deploy/overlays
    `cp -a <옛 base>/. <SHARED_DIR>/dms/artifacts/`). 대조: 두 쪽에서 `{ find . -type d -printf '%p d %U:%G %m\n'; find . ! -type d -printf '%p %y %U:%G %m %s\n'; } | sort | md5sum`
    이 같고(디렉터리 크기는 뺀다 — CephFS 는 디렉터리 크기를 하위 바이트 합계로 보고해 늘 다르다, 2026-11-03 T3 실측), 새
    base 가 `root:root 755`. `-A`·`-X` 는 쓰지 않는다(NFS 4.2 가 xattr 을 지원하지 않을 수 있고, base 에는 원래 ACL 이 없어야 한다 — §2b-1).
+4b. **(`REGISTRY_MODE=in-cluster` 면) 레지스트리 저장소**: §2e-5 「저장소 이동」 2~4 를 앱 적용(5) **전에** 한다(빌드·push 가 없는 창 —
+   S0 는 2 에서 했다). 빠뜨리면 레지스트리는 옛 경로에 남고, `SHARED_DIR_ID` 만 새 값으로 바꾼 렌더는 「센티널 불일치」로 레지스트리를 못
+   띄운다 — install.sh 의 in-cluster 게이트가 Ready 아님으로 멈춘다(install.sh 는 플랫폼 층을 적용하지 않는다 — ⑦).
 5. **적용**: `sh deploy/overlays/guard-images.sh <overlay> --context <ctx>` → 기대 exit 5(라이브 hostPath → 새 경로를 찍는다; 오버레이
    태그가 라이브와도 다르면 3 이 먼저다 — 그때는 `ALLOW_IMAGE_CHANGE=1` 도). `ALLOW_HOSTPATH_CHANGE=1` 로 다시 통과시킨 뒤 평소 적용
    절차(testbed-k8s = §13-6, prod = `ALLOW_HOSTPATH_CHANGE=1 sh deploy/install.sh`). api·controller 를
@@ -495,6 +500,229 @@ kubectl --context dmsk8s -n dms get cm dms-config \
   `tests/test_shared_dir_contract.py::test_testbed_values_env_carries_a_valid_shared_dir_matching_the_overlay_base` 의 기대값(`/dms_shared`)도
   고친 뒤 `ALLOW_HOSTPATH_CHANGE=1` 로 적용, 출처가 db 였으면 다시 저장한다. 그 배치에서는 `cephfs-dms`(`/cephfs`)가 상태 디렉터리
   `/cephfs/dms` 를 덮어 「아티팩트 경로」 화면에 겹침 경고가 뜬다(③ 이전 배치의 원래 모양 — 가드는 경로를 바꿀 때만 걸린다).
+
+## 2e. 클러스터 내 레지스트리(플랫폼 층) — 노드 준비·S4·S5·S6·운영 (2026-11-03 ④)
+
+설계 v6 7(7-1~7-6)·8-1(S0-4·S0-5·S-1·S4~S6)·8-2 「층 배치」·10 T4. 이 절은 dms-k8s 공통(prod·testbed-k8s)이고 테스트베드 판은 2e-6 이다.
+설치기 연결(S4 자동 적용·S4 뒤 정지·`--stage S5` 재개·lock 대조·S6 프로브)은 묶음 ⑦ 몫이다 — 지금은 아래 명령을 손으로 돈다.
+
+CNCF Distribution v3.1.2 하나(오퍼레이터 없음, #46)를 control-plane 노드에 띄운다. **평문 HTTP·익명·`host:port` 만**(DMS 가 강제 — 포탈
+태그 조회·삭제는 `http://` 고정, 빌드 push 는 `--tls-verify=false`, 경로 접두 불가). 저장소는 공용 디렉터리 `<SHARED_DIR>/dms/registry`
+(S0 가 65532:65532 0750 + 센티널 `.dms-registry-id` 로 만든다 — §2d). DMS 코드(`registry.py`·`routes_registry.py`)는 바뀌지 않았다.
+
+### 2e-1. 구성·값
+
+| 무엇 | 어디 | 비고 |
+|---|---|---|
+| PriorityClass `dms-addon-critical`(1000) | `deploy/platform/priorityclass` | 잡(≤ 200)보다 위 — ⑤ CNPG·⑥ EG 컨트롤러가 쓴다. 레지스트리는 쓰지 않는다(마스터 전용) |
+| ConfigMap `dms-registry-config` | `deploy/platform/registry/config.yml` + `expected-registry-id` | `/etc/distribution/config.yml`(이미지 기본·debug :5001 을 덮음): rootdirectory `/var/lib/registry`, delete 켬, uploadpurging 168h/24h, readonly 끔, **cache 없음**, `:5000`, health.storagedriver |
+| Deployment `dms-registry` | `deploy/platform/registry/deployment.yaml` | replicas 1, control-plane nodeSelector + toleration, not-ready·unreachable 30초, RollingUpdate maxSurge 1·maxUnavailable 0, hostPath `<SHARED_DIR>/dms/registry`(`Directory`), 이미지 `<IP>:<PORT>/registry:3.1.2`(**태그 ref 예외**, init·본 컨테이너 모두 IfNotPresent — 자기 이미지를 자기에게서 pull 하지 않는다), 라벨 `dms.io/addon-version`(= 태그), readiness `GET /v2/_catalog?n=1`(5s/10s/3), liveness TCP, init `sentinel-check`(**검사만**), uid/gid 65532·drop ALL·읽기 전용 rootfs |
+| Service `dms-registry` | `deploy/platform/registry/service.yaml` | `clusterIP: <REGISTRY_CLUSTER_IP>` 고정, 포트 `<REGISTRY_PORT>`(→ 컨테이너 5000) |
+| Secret `dms-registry-http` | **매니페스트 밖**(2e-3) | 키 `http-secret` → env `REGISTRY_HTTP_SECRET`(secretKeyRef). 없으면 파드가 뜨지 않는다 |
+| `deploy/images.lock` | 커밋 | linux/amd64 **매니페스트** digest(index 금지). 검사 `python3 deploy/images-lock.py check|verify`, 줄 만들기 `resolve <DEST> <SOURCE>` |
+
+base 는 사이트 중립 자리표시자(`set-by-overlay.invalid`)뿐이라 `kubectl apply -k deploy/platform/registry` 는 실패한다(의도). 사이트 값은
+렌더러가 낸다 — **같은 렌더러가 앱 오버레이와 플랫폼 층을 함께 렌더한다**:
+
+```bash
+sh deploy/render.sh <site> [--context <ctx>]      # prod·testbed-k8s. 옛 `sh deploy/overlays/prod/render.sh` 는 `render.sh prod` 의 호환 진입점
+# → deploy/.rendered/<site>/app/                    (앱 — kubectl apply -k, client-side)
+#   deploy/.rendered/<site>/platform/priorityclass/ (SSA)
+#   deploy/.rendered/<site>/platform/registry/      (SSA — REGISTRY_CLUSTER_IP 가 있을 때만)
+#   deploy/.rendered/<site>/render.env              (해석값: REGISTRY 등)
+```
+
+| values.env 키 | 뜻 |
+|---|---|
+| `REGISTRY_MODE` | `in-cluster`(앱이 이 레지스트리를 쓴다 — prod 권장) / `external`(사이트 레지스트리 `REGISTRY`). 없으면 external(옛 values.env) |
+| `REGISTRY_CLUSTER_IP` | Service 고정 ClusterIP. 렌더러는 IPv4 형식만 본다 — ServiceCIDR 안·미사용·하단 정적 대역은 **지금 손으로** 확인한다(S1 자동 검사는 ⑦): `kubectl --context C get servicecidr`(대역), `kubectl --context C get ipaddresses.networking.k8s.io <IP>` 가 NotFound(미사용), 하단 정적 대역 = CIDR 의 처음 min(max(16, 주소 수/16), 256)개(/12 면 `x.x.0.0`~`x.x.0.255` — 동적 할당이 마지막에 쓰는 대역이라 걷어내기·재적용 사이에 다른 Service 가 가져갈 위험이 가장 작다). 있으면 레지스트리 층을 렌더한다(external 이어도 — 병행 기간) |
+| `REGISTRY_PORT` | Service 포트(기본 5000) |
+| `REGISTRY` | 앱 레지스트리 `host:port`. in-cluster 면 비우거나 `<IP>:<PORT>` 와 같게 — **같은 주소가 여섯 곳**(REGISTRY·newName·`DMS_JOB_IMAGE`·`DMS_BUILD_REGISTRY`·`DMS_BUILD_BUILDER_IMAGE` + DB `control_state.job_image`)의 원천. 렌더러가 다섯 곳이 같은지 다시 본다 |
+| `REGISTRY_TLS_VERIFY` | in-cluster 면 `false` 만 |
+| `SHARED_DIR_ID` | S0 가 쓴 `<SHARED_DIR>/dms/.dms-shared-id` 값 = 센티널 기대값(레지스트리 층을 렌더할 때 필수) |
+| `REGISTRY_CPU_REQUEST`·`REGISTRY_MEMORY_REQUEST` | (선택) requests — 기본 100m/128Mi(limits 1/512Mi) |
+
+**주소는 한 번 정하면 바꾸지 않는다**(7-4): 노드 신뢰 drop-in·고정 이미지 이름·DB 의 잡 이미지에 박힌다. 바꾸면 S0-4·S0-5 를 다시 하고
+앱 이미지·잡 이미지를 새 주소로 다시 릴리스한다. clusterIP 는 만든 뒤 못 바꾸는 필드라 다른 값의 apply 는 apiserver 가 거절한다.
+
+### 2e-2. 노드 준비(사이트 IaC, 1회) — S0-4 신뢰 · S0-5 레지스트리 이미지 반입·고정
+
+`C`=kube-context, `IP:PORT`=`<REGISTRY_CLUSTER_IP>:<REGISTRY_PORT>`. CRI-O 기준(containerd 경로 없음).
+
+```bash
+# S0-4 — 모든 노드(마스터·워커). v2 형식, .conf 만 읽고 같은 location 은 덮어쓴다. crio.conf 의 insecure_registries 는 폐기 예정이라 쓰지 않는다.
+sudo tee /etc/containers/registries.conf.d/50-dms-registry.conf >/dev/null <<'EOF'
+[[registry]]
+location = "IP:PORT"
+insecure = true
+EOF
+sudo systemctl reload crio                     # SIGHUP — 컨테이너 재시작 없음(자동 반영은 기본 꺼짐)
+#   서명 정책: 패키지 CRI-O 는 /etc/crio/policy.json — reject 기본이면 IP:PORT 를 허용한다. 런타임 프록시 env 가 있으면 NO_PROXY 에 IP 를.
+
+# S0-5 — 인터넷 노드(빌드 노드)에서 한 번: lock 의 amd64 digest 로 받아 파일 하나로(docker save 는 쓰지 않는다)
+DG=$(awk '$1=="registry:3.1.2"{print $3}' deploy/images.lock)
+skopeo copy "docker://docker.io/library/registry@$DG" oci-archive:/tmp/registry-3.1.2.tar
+# → 마스터 전부로 옮긴다(scp 등). 각 마스터에서(store 지정은 `sudo crio config` 의 root·runroot·storage_driver 와 같게 — 기본값 예):
+sudo skopeo copy oci-archive:/tmp/registry-3.1.2.tar \
+  "containers-storage:[overlay@/var/lib/containers/storage+/run/containers/storage]IP:PORT/registry:3.1.2"
+sudo crictl images | grep 'IP:PORT/registry'   # 3.1.2 가 보여야 한다
+# 고정(kubelet 이 GC 하지 않게): 기존 pinned_images 를 읽어 합친다 — 같은 옵션은 이름순 마지막 drop-in 이 이기고 배열은 합치지 않는다.
+sudo crio config 2>/dev/null | sed -n '/^[[:space:]]*pinned_images/,/]/p'     # 기존 목록(주석 `# pinned_images` 면 비어 있다)
+sudo tee /etc/crio/crio.conf.d/99-dms-pinned.conf >/dev/null <<'EOF'
+[crio.image]
+pinned_images = ["IP:PORT/registry:*"]
+EOF
+#   ↑ 기존 목록이 있으면 같은 배열에 함께 쓴다. 패키지 10-crio.conf 는 업그레이드 때 덮어써지므로 건드리지 않는다.
+sudo systemctl reload crio
+sudo crio config 2>/dev/null | sed -n '/^[[:space:]]*pinned_images/,/]/p'     # 실효값에 IP:PORT/registry:* 가 있어야 한다
+sudo rm -f /tmp/registry-3.1.2.tar             # 반입 뒤 지운다(인터넷 노드도)
+```
+
+- skopeo 는 RHEL AppStream 패키지다(사이트 미러) — 클러스터 노드 중에는 인터넷 노드와 마스터에만 둔다(워커에는 필요 없다).
+  Ubuntu 24.04 노드의 `skopeo`(1.13.3)는
+  `golang-github-containers-common`(`/etc/containers/policy.json`, **`/etc/containers/registries.conf.d/shortnames.conf`** — CRI-O 가 읽는
+  drop-in 이고 짧은 이름 별칭 수십 개, `/usr/share/containers/{containers.conf,seccomp.json}`)·`golang-github-containers-image`
+  (`/etc/containers/registries.conf`, 전부 주석)를 함께 깔고, containers-common 의 **필수** 의존 `container-network-stack` 으로
+  containernetworking-plugins(`/usr/lib/cni`)도 깐다 — `--no-install-recommends` 로도 빠지지 않는다(2026-11-03 cp1·w1 `apt-get install -s`
+  확인). CRI-O 의 `plugin_dirs` 는 기본값 `/opt/cni/bin` 뿐이라(`crio config` 에서 주석 처리된 기본값) `/usr/lib/cni` 는 쓰이지 않아 무해하다.
+  추천 패키지 netavark·aardvark-dns 는 `--no-install-recommends` 로 빠진다(storage.conf 는 어느 패키지에도 없다).
+  `apt-get install -y --no-install-recommends skopeo` 로 깔고, 영향은 설치 전후 `sudo find /etc/containers /etc/crio /etc/cni -type f -exec
+  sha256sum {} +`·`ls /opt/cni/bin` 을 대조하고 `sudo crio config | grep -A3 plugin_dirs` 가 `/opt/cni/bin` 뿐인지 본다(`crio config`
+  diff 는 registries.conf.d 의 내용을 보이지 않는다). 패키지 CRI-O 의 서명 정책은 `/etc/crio/policy.json` 이라 새 `/etc/containers/policy.json`
+  은 CRI-O 에 쓰이지 않는다(`crio config` 의 `signature_policy` 로 확인).
+- 새 워커는 S0-4 만 하면 된다. 새 마스터는 레지스트리가 살아 있으면 `sudo crictl pull IP:PORT/registry:3.1.2` 뒤 고정하고, 아니면 S0-5 를
+  반복한다. 레지스트리 자기 이미지는 이 레지스트리에 기대지 않는다(7-4 의존 규칙 — 시스템 이미지도 마찬가지).
+
+### 2e-3. 적용(S4) — PriorityClass·http 시크릿·레지스트리
+
+네임스페이스 `dms` 가 먼저 있어야 한다(설계 8-1 S2 — 새 클러스터면 아래 첫 줄). 없으면 시크릿 생성과 레지스트리 apply 가
+`namespaces "dms" not found` 로 실패하고, 앱 apply(install.sh — `00-namespace.yaml` 포함)는 in-cluster 면 레지스트리 Service 가 Ready 가
+아닐 때 apply 전에 멈추므로 그쪽으로 우회되지도 않는다.
+
+```bash
+kubectl --context C apply -f deploy/k8s/00-namespace.yaml        # S2: PSA privileged 라벨 — 이미지 없는 유일한 raw apply(멱등)
+sh deploy/render.sh <site> --context C   # 태그가 'live' 면 C 에서 읽는다(빠뜨리면 current-context — 엉뚱한 클러스터의 태그)
+R=deploy/.rendered/<site>/platform
+kubectl --context C apply --server-side --field-manager=dms-install --dry-run=server -k $R/priorityclass
+kubectl --context C apply --server-side --field-manager=dms-install -k $R/priorityclass
+# http 시크릿 — 없을 때만 만들고 값을 출력하지 않는다(argv 에도 싣지 않는다: stdin 으로)
+kubectl --context C -n dms get secret dms-registry-http >/dev/null 2>&1 || \
+  head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' | \
+  kubectl --context C -n dms create secret generic dms-registry-http --from-file=http-secret=/dev/stdin >/dev/null
+sh deploy/overlays/guard-images.sh $R/registry --context C        # 재적용이면 이미지(3)·저장소 hostPath(5) 변경을 막는다
+kubectl --context C apply --server-side --field-manager=dms-install --dry-run=server -k $R/registry
+kubectl --context C apply --server-side --field-manager=dms-install -k $R/registry
+kubectl --context C -n dms rollout status deploy/dms-registry --timeout=180s
+kubectl --context C -n dms port-forward svc/dms-registry 15000:<PORT> >/dev/null 2>&1 &
+PF=$!
+# port-forward 는 apiserver 에 붙어 파드를 찾은 뒤에야 listen 한다 — 바로 curl 하면 000(연결 거부)이 나 실패로 잘못 보인다. 10초까지 기다린다.
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  code=$(curl -s -o /dev/null -w '%{http_code}' 'http://127.0.0.1:15000/v2/_catalog?n=1') && [ "$code" != 000 ] && break
+  sleep 1
+done
+echo "catalog $code"                                                     # 200(빈 레지스트리도)
+kill $PF
+```
+
+먼저 `kubectl --context C -n dms describe pod -l app.kubernetes.io/name=dms-registry` 의 이벤트, 그다음 init 로그
+(`kubectl --context C -n dms logs deploy/dms-registry -c sentinel-check`)를 본다 — 가장 흔한 실패(경로 없음)는 init 이 돌기 전에 난다.
+
+| 증상 | 뜻 · 할 일 |
+|---|---|
+| Pod `Init:0/1`(ContainerCreating) + 이벤트 `FailedMount … hostPath type check failed: <SHARED_DIR>/dms/registry is not a directory` | 그 마스터에 공용 스토리지 마운트가 없거나 S0 미실행(설계 S4 「마스터 X 에 공용 디렉터리 없음」). `findmnt -T <SHARED_DIR>`·S0 `--check`. 경로를 손으로 만들지 않는다(G2 — 마운트 없는 노드의 로컬 디스크에 쓰게 된다). init 로그는 비어 있다 |
+| init `sentinel-check` 실패 「센티널 없음」 | 경로는 있으나 `.dms-registry-id` 가 없다 — 마운트가 빠진 마스터에 같은 이름의 **로컬** 디렉터리가 있거나, 센티널이 지워졌거나, S0 를 거치지 않고 만든 디렉터리. `findmnt -T <SHARED_DIR>`·S0 `--check` 를 본다. init 은 만들지 않는다 |
+| 「센티널 불일치」 | `SHARED_DIR_ID`(values.env → ConfigMap `expected-registry-id`)와 저장소의 `.dms-registry-id` 가 다르다. 먼저 아무 노드에서 `sudo cat <SHARED_DIR>/dms/.dms-shared-id <SHARED_DIR>/dms/registry/.dms-registry-id` 로 두 파일을 본다. **두 값이 같고 values 만 다르면**(가장 흔함 — 옮겨 적다 틀렸거나 S0 를 다시 한 뒤 갱신 누락): values.env 의 `SHARED_DIR_ID` 를 고치고 `sh deploy/render.sh <site> --context C` → platform/registry SSA 적용(설정 체크섬이 바뀌어 새 파드로 교체된다) → `rollout status`. **두 파일이 서로 다르면**: 다른 스토리지·옛 설치의 흔적이다 — S0 `--check` 결과와 함께 손으로 확인하기 전에는 고치지 않는다(init 도 고치지 않는다) |
+| 「저장소 디렉터리를 읽을 수 없음」 | `<SHARED_DIR>/dms/registry` 소유·모드가 65532:65532 0750 이 아니다(S0 `--check`) |
+| 「센티널 기대값 없음」 | 렌더하지 않은 base 를 적용했다 — `.rendered/<site>/platform/registry` 를 적용 |
+| Pod `CreateContainerConfigError` | Secret `dms-registry-http` 가 없다(위 명령) |
+| Service apply `provided IP is already allocated` | `REGISTRY_CLUSTER_IP` 를 다른 Service 가 쓴다(`kubectl --context C get ipaddresses.networking.k8s.io <IP>` 의 PARENTREF) — 아직 아무 데도 박히기 전이면 미사용 주소로 바꾼다(2e-1 의 확인 명령) |
+| 파드 Pending + 이벤트 `FailedScheduling` | control-plane 노드에 자리가 없거나 taint 키가 다르다(`describe` 의 사유). FailedMount 면 위 첫 줄 |
+
+### 2e-4. 이미지 반입(S5)·pull 확인(S6) — 인터넷 노드·모든 노드
+
+```bash
+# S5 — 인터넷 노드 호스트에서 ClusterIP 로 직접(평문 HTTP, 소스는 amd64 매니페스트 digest — 그 매니페스트 하나만 복사).
+#      프록시를 거치는 노드면 NO_PROXY 에 IP 를 넣는다(push 는 프록시를 타지 않는다). 전부 태그를 붙인다(GC 보호).
+grep -v '^#' deploy/images.lock | while read -r dest src dg; do
+  [ -n "$dest" ] || continue
+  skopeo copy --preserve-digests --dest-tls-verify=false "docker://${src%:*}@$dg" "docker://IP:PORT/$dest"
+done
+# 대조(lock 과 같아야 한다 — 다르거나 없으면 FAIL):
+grep -v '^#' deploy/images.lock | while read -r dest src dg; do
+  [ -n "$dest" ] || continue
+  got=$(skopeo inspect --tls-verify=false --raw "docker://IP:PORT/$dest" | sha256sum | cut -d' ' -f1)
+  [ "sha256:$got" = "$dg" ] && echo "OK $dest" || echo "FAIL $dest ($got)"
+done
+# DMS 이미지(dms·dms-agent·dms-mpifileutils dN)는 상류가 없다 — 처음에는 같은 노드에서 최초 부트스트랩으로 빌드해 push 한다
+# (REGISTRY=IP:PORT TAG=dN ./deploy/docker/build-and-push.sh, §1). 기존 레지스트리가 있으면 그대로 옮겨도 된다:
+#   skopeo copy --preserve-digests --src-tls-verify=false --dest-tls-verify=false docker://<옛 레지스트리>/dms:dN docker://IP:PORT/dms:dN
+# S6 — 모든 노드에서(호스트 netns → ClusterIP 는 kube-proxy 가 처리한다; KPR·kube-proxy 둘 다 없으면 안 된다)
+sudo crictl pull IP:PORT/registry:3.1.2 && sudo crictl pull IP:PORT/buildah:stable
+#   실패면: 신뢰 drop-in(S0-4)·서명 정책·런타임 프록시 NO_PROXY·ClusterIP 경로(kube-proxy) 순서로 본다.
+```
+
+### 2e-5. 운영 (설계 7-6)
+
+- **업그레이드**: `deploy/platform/registry/deployment.yaml` 의 두 이미지 태그·라벨 `dms.io/addon-version` 과 `deploy/images.lock` 의
+  `registry:` 줄(`images-lock.py resolve`)을 함께 바꿔 커밋(셋이 같아야 한다 — 테스트가 고정) → 인터넷 노드가 새 이미지를 push(S5) → **마스터 전부** `sudo crictl pull IP:PORT/registry:<새 태그>`(고정 패턴
+  `registry:*` 가 덮는다) → `sh deploy/render.sh <site> --context C` → `guard-images.sh` 가 exit 3(이미지 변경 — 안내에 이 순서가 나온다) →
+  `ALLOW_IMAGE_CHANGE=1` 로 다시 → SSA apply → `rollout status`. maxSurge 1 이라 새 파드가 Ready 가 된 뒤 옛 파드가 내려간다. **빌드·push
+  가 없을 때** 한다(겹치는 동안 Service 가 요청을 나눠 S7 ② WARN 사이트에서는 push 가 `blob unknown` 일 수 있다).
+- **설정 변경**(2026-11-03 ④ 리뷰 2): Distribution 은 `config.yml` 을, init 은 `expected-registry-id` 를 **기동 때만** 읽는다. 렌더러가 둘의
+  sha256 을 파드 템플릿 annotation `dms.io/config-sha256` 에 넣으므로 `config.yml`·`SHARED_DIR_ID` 만 바뀐 렌더도 SSA 로 적용하면 롤링
+  교체된다(가드는 이미지·hostPath 만 보므로 이 변경은 막지 않는다). 업그레이드와 같이 빌드·push 가 없을 때 한다. 손으로 고친 ConfigMap
+  (아래 GC 길 B)은 렌더값이 그대로라 체크섬도 그대로다 — 되돌린 뒤 `rollout restart` 가 필요하다.
+- **GC**(연 몇 번, 수동 — 빌드가 없고 레지스트리가 Ready 일 때만):
+  1. readonly 켜기: `kubectl --context C -n dms set env deploy/dms-registry REGISTRY_STORAGE_MAINTENANCE_READONLY='{"enabled":true}'`
+     (env 의 JSON 맵 파싱은 T4 확인 항목 — 안 되면 `kubectl --context C -n dms edit cm dms-registry-config` 의 `readonly.enabled: true` +
+     `kubectl --context C -n dms rollout restart deploy/dms-registry`. 그러면 `data.config.yml` 이 kubectl-edit 소유가 되므로 끈 뒤의 SSA
+     재적용은 `--force-conflicts` 가 필요하다).
+  2. `rollout status` 가 끝나고 옛 ReplicaSet 파드(Terminating 포함)가 0개인지 본 뒤 `terminationGracePeriodSeconds`(30초)만큼 더 기다린다.
+  3. `curl -s -o /dev/null -w '%{http_code}' -X POST http://IP:PORT/v2/dms/blobs/uploads/` 가 **405**(읽기 전용의 증거).
+  4. `kubectl --context C -n dms exec deploy/dms-registry -c registry -- registry garbage-collect --dry-run --delete-untagged /etc/distribution/config.yml`
+     로 확인한 뒤 `--dry-run` 없이. **태그 없는 digest 이미지는 지워진다.**
+  5. readonly 끄기 → 롤아웃 뒤 `POST …/blobs/uploads/` 가 202 → 시험 push·삭제. 길 A(env): `set env … REGISTRY_STORAGE_MAINTENANCE_READONLY-`.
+     길 B(ConfigMap): `kubectl --context C apply --server-side --field-manager=dms-install --force-conflicts -k $R/registry`(ConfigMap 원복) →
+     **`kubectl --context C -n dms rollout restart deploy/dms-registry`** → `rollout status` — 렌더값이 그대로라 체크섬 annotation 이 바뀌지 않아
+     SSA 만으로는 파드가 다시 뜨지 않고 계속 읽기 전용이다.
+  GC 창 동안 포탈 삭제는 409(`registry_delete_disabled`), 빌드 push 는 실패, pull 은 된다. `set env` 로 바꾼 필드는 kubectl 소유가 되므로
+  끈 뒤 다음 SSA apply 가 충돌하면 `--force-conflicts` 로 dms-install 에 되돌린다.
+- **백업**: 애드온은 인터넷 노드가 lock 의 digest 로 다시 받을 수 있다. **현장에서 빌드한 DMS 태그는 레지스트리에만 있다** —
+  `skopeo sync --src docker --dest dir --src-tls-verify=false IP:PORT/dms <공용 스토리지 밖 경로>`(dms-agent·dms-mpifileutils 도)로 사본을 더한다.
+- **장애**(설계 7-6 표): 레지스트리가 있는 마스터의 공용 스토리지가 멈추면 readiness(catalog)가 NotReady 로 드러낸다(`/v2/` 는 계속 200) —
+  그 마스터를 cordon 하고 파드를 지우는 수동 조치 전까지 이어진다. 이미 도는 파드는 영향이 없다(`IfNotPresent`). **릴리스는 레지스트리가
+  정상일 때만** 한다.
+- **걷어내기**(앱이 아직 이 레지스트리를 쓰지 않을 때만 — 실증 중단·다시 적용 전): `kubectl --context C delete -k $R/registry`(ConfigMap·
+  Service·Deployment — clusterIP 가 풀린다) → `kubectl --context C -n dms delete secret dms-registry-http` → PriorityClass 는 참조하는 파드가
+  0개일 때만(`kubectl --context C get pods -A -o jsonpath='{range .items[*]}{.spec.priorityClassName}{"\n"}{end}' | grep -cx dms-addon-critical`
+  이 0) `kubectl --context C delete priorityclass dms-addon-critical`. 저장소 `<SHARED_DIR>/dms/registry` 는 지우지 않는다(센티널·push 한
+  이미지 — 다시 적용하면 그대로 쓴다). 노드의 신뢰 drop-in·고정 설정·반입 이미지는 남겨도 무해하다(그 주소에 아무것도 없으면 쓰이지 않는다).
+- **저장소 이동**(SHARED_DIR 변경 — §2d-4 의 in-cluster 하위 단계, 2026-11-03 ④ 리뷰 2). 렌더된 레지스트리 층의 hostPath 가 바뀌어
+  `guard-images.sh` 가 exit 5 로 멈춘다. **빌드·push 가 없는 창에서, 앱 재적용보다 먼저** 한다(앱의 새 파드는 이 레지스트리에서 pull 한다):
+  1. 새 경로에 S0(`sh deploy/shared-dir-init.sh <새 SHARED_DIR>` — 새 무작위 `.dms-shared-id` 와 같은 값의 `registry/.dms-registry-id`) → 다른
+     노드에서 `--check`.
+  2. 한 노드에서 root 로 `rsync -aH --numeric-ids --exclude=/.dms-registry-id <옛 SHARED_DIR>/dms/registry/ <새 SHARED_DIR>/dms/registry/`.
+     **센티널은 복사에서 뺀다** — 통째로 복사하면 새 센티널이 옛 값으로 덮여 레지스트리가 「센티널 불일치」로 기동을 거부하고 S0
+     `--check` 도 FAIL 한다. 대조는 §2d-4 4 의 find·md5sum 을 두 쪽에서 `! -path ./.dms-registry-id` 를 더해(65532 소유 그대로).
+  3. values.env 의 `SHARED_DIR` 와 `SHARED_DIR_ID`(= 새 `<SHARED_DIR>/dms/.dms-shared-id`)를 고치고 `sh deploy/render.sh <site> --context C`.
+  4. `sh deploy/overlays/guard-images.sh $R/registry --context C` → 기대 exit 5 → `ALLOW_HOSTPATH_CHANGE=1` 로 다시 → SSA 적용 →
+     `rollout status`(새 파드가 새 경로·새 기대값으로 Ready 가 된 뒤 옛 파드가 내려간다). 확인: `logs deploy/dms-registry -c sentinel-check`
+     가 「센티널 확인 (<새 id>)」, `/v2/<repo>/tags/list` 가 옮기기 전과 같다.
+  5. 그다음 앱을 적용한다(§2d-4 5). 옛 `<옛 SHARED_DIR>/dms/registry` 는 되돌림 창 동안 지우지 않는다.
+
+### 2e-6. k8s 테스트베드(`dmsk8s`) — T4 (병행, 앱 전환 전)
+
+- 값: `deploy/overlays/testbed-k8s/values.env` — `REGISTRY_MODE=external`·`REGISTRY=pkg-01:5001`(앱은 그대로), `REGISTRY_CLUSTER_IP=10.112.0.50`
+  (svc 10.112.0.0/12 하단, 미사용 실측)·`REGISTRY_PORT=5000`·`SHARED_DIR_ID`(= `/dms_shared/dms/.dms-shared-id`)·requests 50m/64Mi(설계 10).
+  `sh deploy/render.sh testbed-k8s` 가 `deploy/.rendered/testbed-k8s/platform/{priorityclass,registry}` 를 내고, 렌더된 `app/` 은 커밋된
+  오버레이와 같다(테스트가 고정). 앱 적용은 지금처럼 `kubectl --context dmsk8s apply -k deploy/overlays/testbed-k8s`(§13-6).
+- control-plane 은 cp1 하나라 S0-5 는 cp1 에만, S0-4 는 3노드, 인터넷 노드 역할은 빌드 노드 k8s-w1. `pkg-01:5001` 은 병행 유지한다.
+  T4 를 중간에 멈추면 2e-5 「걷어내기」(`C`=dmsk8s, `R=deploy/.rendered/testbed-k8s/platform`) — 앱은 `pkg-01:5001` 이라 영향이 없다.
+- **앱 전환은 T4 실증 뒤의 별도 단계**다: `values.env`(`REGISTRY_MODE=in-cluster`, `REGISTRY=10.112.0.50:5000`)·오버레이 `newName`·
+  `patch-config.yaml` 의 `DMS_JOB_IMAGE`·`DMS_BUILD_REGISTRY`·`DMS_BUILD_BUILDER_IMAGE` 를 한 커밋에서 바꾸고(렌더러가 다섯 곳 대조 —
+  빌더도 같은 레지스트리여야 한다), `tests/test_testbed_k8s_overlay.py` 의 레지스트리 상수도 고친다 → guard exit 3 → `ALLOW_IMAGE_CHANGE=1` →
+  apply → api·controller `rollout restart`(ConfigMap) → 포탈 릴리스로 **잡 이미지(`control_state.job_image`)를 새 주소로 다시 릴리스**.
+  되돌림 = 그 커밋을 되돌려 같은 순서로(`pkg-01:5001` 은 병행 유지라 그대로 돌아간다).
 
 ## 3. Apply manifests, in order
 

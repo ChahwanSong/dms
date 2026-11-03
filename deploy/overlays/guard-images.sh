@@ -23,6 +23,14 @@
 # (새 base·allowlist)으로 떠 summary 를 못 읽는다(잡이 summary_unavailable). 이미지 되돌림과 같은 「apply -k 가 암묵적으로
 # 배치를 바꾸는」 사고라 같은 가드에 둔다. 경로를 옮기는 apply 는 전환 런북(deploy/README.md)을 따른 뒤에만 플래그로 연다.
 #
+# 플랫폼 층(2026-11-03 ④): 렌더된 레지스트리 층(deploy/.rendered/<site>/platform/registry)에도 같은 가드를 건다 — 워크로드 추출이
+# Deployment 일반이라 그대로 동작한다. hostPath(<SHARED_DIR>/dms/registry)가 바뀌면 exit 5(레지스트리가 빈 저장소로, 또는 센티널 불일치로
+# 뜬다), 이미지(<IP>:<PORT>/registry:<태그> — 태그 ref 예외, 설계 7-5)가 바뀌면 exit 3 이고 설계 7-6 업그레이드 순서를 함께 알린다(새
+# 이미지를 마스터 전부에 먼저 pull·고정하지 않으면 다른 마스터로 옮겨진 파드가 뜨지 못한다). 렌더 결과가 DMS 소유 층(라벨
+# app.kubernetes.io/managed-by: dms-install)이면 통과 메시지의 다음 명령이 SSA(--server-side --field-manager=dms-install)다 — 앱 오버레이는
+# 지금처럼 client-side apply(포탈 릴리스가 strategic-merge 로 image 를 바꾼다, 설계 8-2). 컨텍스트 거부(exit 4)의 「맞는 짝」 안내도 같은
+# 구분을 따르되, 렌더 전이라 디렉터리 배치(부모가 platform·addons)로 가른다. 워크로드가 없는 층(priorityclass)은 가드 대상이 아니다(exit 2).
+#
 # 사용: sh deploy/overlays/guard-images.sh <오버레이 디렉터리> [--allow-image-change] [--allow-hostpath-change] [--context <ctx>]
 #       KUBE_CONTEXT=<ctx> 환경변수도 같다(인자가 이긴다).
 #       (install.sh 가 apply 직전에 부른다; 테스트베드는 deploy/README.md 의 테스트베드 적용 절차 — 브랜치마다
@@ -60,8 +68,13 @@ if [ -f "$DIR/kube-context" ]; then
     [ -n "$CTX" ] || { echo "[guard] 현재 컨텍스트가 없다 -- --context $EXPECT 로 다시" >&2; exit 4; }
   fi
   if [ "$CTX" != "$EXPECT" ]; then
+    # 안내의 apply 모양(2026-11-03 ④ 리뷰): 여기서는 아직 렌더(kubectl kustomize)하지 않는다(거부는 아무것도 읽기 전) -- 그래서 아래
+    # managed-by 라벨 대신 디렉터리 배치로 고른다: 부모 디렉터리가 platform·addons(DMS 소유 층 — deploy/platform/<층>,
+    # deploy/.rendered/<site>/platform/<층>)면 SSA, 그 밖(앱 오버레이)은 client-side.
+    _ssa=apply
+    case "$(basename "$(dirname "${DIR%/}")")" in platform|addons) _ssa="apply --server-side --field-manager=dms-install" ;; esac
     echo "[guard] 거부: $DIR 은 컨텍스트 '$EXPECT' 전용인데 '$CTX'($CTX_FROM) 를 겨눴다 -- 엉뚱한 클러스터에 apply 하게 된다." >&2
-    echo "[guard] 맞는 짝: sh $0 $DIR --context $EXPECT && kubectl --context $EXPECT apply -k $DIR" >&2
+    echo "[guard] 맞는 짝: sh $0 $DIR --context $EXPECT && kubectl --context $EXPECT $_ssa -k $DIR" >&2
     exit 4
   fi
 elif [ "$CTX_FROM" = "KUBE_CONTEXT" ]; then
@@ -126,12 +139,19 @@ for name in $(printf '%s\n' "$want_hp" | awk 'NF {print $1}' | sort -u); do
   Deployment/$name hostPath: live=[ ${live_paths}] -> overlay=[ ${want_paths}]"; fi
 done
 
-where=""; next="kubectl apply -k $DIR"
-if [ -n "$CTX" ]; then where=" (context $CTX)"; next="kubectl --context $CTX apply -k $DIR"; fi
+# DMS 소유 층(platform·addons — 라벨 managed-by dms-install)은 SSA 로 적용한다(설계 8-2). 앱 오버레이에는 이 라벨이 없다.
+apply="apply"
+case "$rendered" in *"app.kubernetes.io/managed-by: dms-install"*) apply="apply --server-side --field-manager=dms-install" ;; esac
+where=""; next="kubectl $apply -k $DIR"
+if [ -n "$CTX" ]; then where=" (context $CTX)"; next="kubectl --context $CTX $apply -k $DIR"; fi
 if [ -n "$changes" ]; then
   if [ "$ALLOW" != 1 ]; then
     echo "[guard] 거부: 이 apply 는 라이브 워크로드 이미지를 바꾼다(포탈 릴리스를 되돌릴 수 있음)$where:$changes" >&2
     echo "[guard] 의도한 변경이면 ALLOW_IMAGE_CHANGE=1 로 다시. 아니면 오버레이 태그(newTag / values.env DMS_TAG)를 라이브에 맞춰라." >&2
+    case "$changes" in *"Deployment/dms-registry:"*)
+      echo "[guard] dms-registry 이미지 교체(설계 v6 7-6 업그레이드): 인터넷 노드가 새 이미지를 레지스트리에 push → 마스터 전부에서 crictl pull 하고" >&2
+      echo "[guard] 고정 목록(/etc/crio/crio.conf.d/99-dms-pinned.conf)이 새 태그를 덮는지 확인 → 그 뒤에 ALLOW_IMAGE_CHANGE=1. 빌드·push 가 없을 때 한다." >&2 ;;
+    esac
     exit 3
   fi
   echo "[guard] 이미지 변경 허용(ALLOW_IMAGE_CHANGE)$where:$changes"
@@ -142,6 +162,15 @@ if [ -n "$hp_changes" ]; then
     echo "[guard] 새 경로가 노드에 없으면 새 파드는 FailedMount 로 멈추고, 옛 파드가 재시작하면 옛 마운트 + 새 설정(base·allowlist)으로 떠" >&2
     echo "[guard] 결과 파일을 못 읽는다. 공용 디렉터리 전환 런북(deploy/README.md -- 노드 마운트·S0·프로브·복사)을 마친 뒤 ALLOW_HOSTPATH_CHANGE=1 로 다시." >&2
     echo "[guard] 의도하지 않았다면 오버레이의 SHARED_DIR(values.env·DMS_ARTIFACT_BASE_URI)를 라이브 배치에 맞춰라." >&2
+    case "$hp_changes" in *"Deployment/dms-registry hostPath"*)
+      # 순서(2026-11-03 ④ 리뷰 2): 센티널을 복사에서 뺀다 — 새 경로의 S0 는 새 무작위 id 를 쓰고 values 의 SHARED_DIR_ID 도 그 값이
+      # 되는데, 옛 registry/ 를 통째로 rsync 하면 .dms-registry-id 가 옛 값으로 덮여 「센티널 불일치」로 기동을 거부한다.
+      echo "[guard] dms-registry 저장소를 옮기면 레지스트리는 새 경로의 센티널을 검사하고(없거나 다르면 기동 거부) 옛 이미지는 새 경로에 없다 --" >&2
+      echo "[guard] 빌드·push 가 없을 때, 앱 재적용보다 먼저: 1) 새 경로에 S0(sh deploy/shared-dir-init.sh <새 SHARED_DIR>)" >&2
+      echo "[guard] 2) rsync -aH --numeric-ids --exclude=/.dms-registry-id <옛 SHARED_DIR>/dms/registry/ <새 SHARED_DIR>/dms/registry/ (센티널은 새 S0 값 유지, 65532 소유 보존)" >&2
+      echo "[guard] 3) values.env 의 SHARED_DIR_ID = 새 <SHARED_DIR>/dms/.dms-shared-id  4) sh deploy/render.sh <site> --context <ctx>" >&2
+      echo "[guard] 5) ALLOW_HOSTPATH_CHANGE=1 로 이 가드를 통과한 뒤 SSA 적용 → rollout status (deploy/README §2e-5 「저장소 이동」)." >&2 ;;
+    esac
     exit 5
   fi
   echo "[guard] hostPath 변경 허용(ALLOW_HOSTPATH_CHANGE)$where:$hp_changes"

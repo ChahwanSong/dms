@@ -1,0 +1,22 @@
+# DMS 이미지 lock(2026-11-03 ④, 설계 v6 7-5 ①·8-1 S-1) — 커밋한다. 같은 파일에 줄을 덧붙인다: ⑤ CNPG(오퍼레이터·PostgreSQL),
+# ⑥ Envoy Gateway 3(gateway·envoy·shutdown-manager), ⑦ S9b Volcano v1.16.0 3(scheduler·controller-manager·admission — A 경로 설치용).
+#
+# 모든 노드가 x86_64 라(#41) 이미지마다 **linux/amd64 매니페스트 digest 하나**만 적는다. lock·렌더·S5 대조가 모두 이 digest 를 쓴다.
+# 한 줄 = 공백·탭으로 가른 세 칸(넷째 칸 없음, 첫 칸이 # 인 줄·빈 줄은 무시 — sh 가 읽는 규칙 그대로: LF·ASCII 만, 주석을 들여쓰지 않는다):
+#   DEST    레지스트리(values.env 의 REGISTRY) 안의 <이름>:<태그> — 호스트 없이. 전부 태그를 붙여 push 한다(GC 가 태그 없는 digest 를 지운다).
+#   SOURCE  상류 ref(<호스트>/<경로>:<태그>) — 출처·버전 기록. 가져오기는 이 태그가 아니라 DIGEST 로 한다(태그는 움직일 수 있다).
+#   DIGEST  sha256:<64 hex> — 단일 매니페스트 digest. index(멀티 아키) digest 를 적으면 레지스트리에 index 가 없어 manifest unknown 이 난다.
+#
+# 검사: python3 deploy/images-lock.py check            # 형식(오프라인 — 테스트·설치기)
+#       python3 deploy/images-lock.py verify           # 상류에서 digest 가 linux/amd64 단일 매니페스트인지(인터넷 노드, S-1)
+# 줄 만들기: python3 deploy/images-lock.py resolve <DEST> <SOURCE>   # index 면 linux/amd64 항목을 골라 한 줄 출력(인터넷 노드)
+# push(S5, 인터넷 노드 → 레지스트리 ClusterIP — 설치기 연결은 묶음 ⑦):
+#   grep -v '^#' deploy/images.lock | while read -r dest src dg; do [ -n "$dest" ] || continue
+#     skopeo copy --preserve-digests --dest-tls-verify=false "docker://${src%:*}@$dg" "docker://<REGISTRY>/$dest"; done
+#
+# registry:3.1.2 — 레지스트리 자기 이미지. 매니페스트(deploy/platform/registry)는 이 줄의 태그를 **태그 ref** 로 쓴다(설계 7-5 의 문서화된
+#   예외 — 마스터에는 oci-archive 로 반입·고정하고, 업그레이드·새 마스터용으로 레지스트리에도 push 한다). 태그를 바꾸면 매니페스트도 같이.
+# buildah:stable — 포탈 빌드의 빌더(DMS_BUILD_BUILDER_IMAGE = <REGISTRY>/buildah:stable). 상류 v1.43.1 의 amd64 digest 는 테스트베드
+#   미러(pkg-01:5000/buildah:stable)의 digest 와 같다(2026-11-03 대조 — 지금까지의 포탈 빌드가 쓴 그 이미지).
+registry:3.1.2  docker.io/library/registry:3.1.2  sha256:1290056e2357eceb0c047cb60ae9abb370305a218e2df650eb8d3ea021b1c151
+buildah:stable  quay.io/buildah/stable:v1.43.1    sha256:7bb110e1d8b761d08e87d004ea4086e295a52319f3ea70ecef65da6dff7ceef0

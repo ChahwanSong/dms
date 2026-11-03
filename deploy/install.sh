@@ -36,6 +36,12 @@ VALS="${VALUES_ENV:-$HERE/overlays/prod/values.env}"
 # 레지스트리를 pull)는 push 가 있어야 정상이다. 로컬에 이미지가 없으면(반입만 한
 # 경우) 그것도 WARN 으로 알리고 건너뛴다.
 push_images(){
+  # 클러스터 내 레지스트리(2026-11-03 ④, REGISTRY_MODE=in-cluster): 이 호스트는 레지스트리 ClusterIP 에 닿지 않을 수 있고, 반입은
+  # 인터넷 노드가 images.lock 으로 직접 push 한다(S5 — deploy/README §2e). 설치기 연결(S4 뒤 정지·--stage S5 재개·lock 대조)은 묶음 ⑦.
+  if [ "${REGISTRY_MODE:-external}" = in-cluster ]; then
+    info "REGISTRY_MODE=in-cluster — 이 호스트에서 push 하지 않는다(S5: 인터넷 노드가 images.lock·DMS 이미지를 레지스트리 ClusterIP 로 push, deploy/README §2e)"
+    return 0
+  fi
   tool=""
   command -v podman >/dev/null 2>&1 && tool=podman
   [ -z "$tool" ] && command -v docker >/dev/null 2>&1 && tool=docker
@@ -98,11 +104,58 @@ ok "dms-portal-tls 존재"
 step "1b. 이미지 push (레지스트리 ${REGISTRY:-?} — 실패해도 설치 계속, WARN 으로 구분)"
 push_images
 
-step "2. 렌더 (values.env → .prod-rendered)"
-R=$(sh "$HERE/overlays/prod/render.sh") || { printf '%s\n' "$R" >&2; die "render 실패(위 사유)"; }
+step "2. 렌더 (values.env → deploy/.rendered/prod)"
+R=$(sh "$HERE/render.sh" prod) || { printf '%s\n' "$R" >&2; die "render 실패(위 사유)"; }
 DIR=$(printf '%s\n' "$R" | sed -n 's/^RENDERED: //p')
 [ -n "$DIR" ] || die "렌더 디렉터리 확인 불가"
 ok "렌더 완료: $DIR"
+
+# 클러스터 내 레지스트리 게이트(2026-11-03 ④): 앱 이미지가 그 레지스트리를 가리키는데 레지스트리가 없거나 주소가 다르면 모든 새 파드가
+# ImagePullBackOff 다 — apply 전에 멈춘다. 플랫폼 층 적용(S4: PriorityClass·레지스트리 SSA, http 시크릿)과 S5 push·S6 pull 확인은 아직
+# 런북(deploy/README §2e)이다 — 설치기 연결은 묶음 ⑦.
+RENV="${DIR%/app}/render.env"
+RMODE=$(sed -n 's/^REGISTRY_MODE=//p' "$RENV" 2>/dev/null || true)
+if [ "$RMODE" = in-cluster ]; then
+  RIP=$(sed -n 's/^REGISTRY_CLUSTER_IP=//p' "$RENV")
+  RPORT=$(sed -n 's/^REGISTRY_PORT=//p' "$RENV")
+  LIVE_IP=$(kubectl -n "$NS" get svc dms-registry -o jsonpath='{.spec.clusterIP}' 2>/dev/null || true)
+  [ -n "$LIVE_IP" ] || die "REGISTRY_MODE=in-cluster 인데 Service dms-registry 가 없다 — 먼저 S4(deploy/README §2e: 플랫폼 층 SSA·http 시크릿)와 S5 push"
+  [ "$LIVE_IP" = "$RIP" ] || die "Service dms-registry 의 clusterIP $LIVE_IP 가 values.env 의 REGISTRY_CLUSTER_IP $RIP 와 다르다(주소는 바꾸지 않는 계약 — 설계 v6 7-4)"
+  READY=$(kubectl -n "$NS" get deploy dms-registry -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)
+  [ "${READY:-0}" -ge 1 ] 2>/dev/null || die "dms-registry 가 Ready 가 아니다 — deploy/README §2e 의 S4 확인(센티널 없음·불일치는 init 로그)"
+  ok "클러스터 내 레지스트리: $RIP (Ready)"
+  # 앱 이미지 태그(2026-11-03 ④ 리뷰 2): Service·Ready 만 보면 S5(DMS 이미지 push)를 빠뜨렸거나 태그가 레지스트리에 없어도 apply 까지 가서
+  # migrate Job 이 ImagePullBackOff → 4단계 wait 의 180초 일반 타임아웃으로 끝난다(머리 주석의 「한 줄 사유」에 어긋남). port-forward 는
+  # apiserver 를 거치므로 이 호스트가 ClusterIP 에 닿지 않아도 된다. 태그는 render.env 의 해석값('live' 면 클러스터에서 읽은 태그).
+  # 애드온 이미지의 lock digest 대조(S5)는 ⑦ 몫이다.
+  command -v curl >/dev/null 2>&1 || die "curl 없음 — 클러스터 내 레지스트리의 태그 확인에 쓴다(설치 호스트 도구, 설계 S0-7)"
+  PFLOG=$(mktemp) || die "임시 파일을 만들지 못했다(mktemp)"
+  kubectl -n "$NS" port-forward svc/dms-registry ":${RPORT:-5000}" >"$PFLOG" 2>&1 &
+  PF=$!
+  trap 'kill "$PF" 2>/dev/null; rm -f "$PFLOG"' EXIT
+  # 무작위 로컬 포트(고정 포트가 이미 쓰이면 엉뚱한 서비스에 묻게 된다) — listen 한 뒤에 찍히는 「Forwarding from 127.0.0.1:<port>」 를 기다린다.
+  LPORT=""
+  for _i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    LPORT=$(sed -n 's/^Forwarding from 127\.0\.0\.1:\([0-9][0-9]*\) .*/\1/p' "$PFLOG" | head -n 1)
+    [ -z "$LPORT" ] || break
+    kill -0 "$PF" 2>/dev/null || break
+    sleep 1
+  done
+  [ -n "$LPORT" ] || die "레지스트리 port-forward 가 열리지 않았다 — $(tr '\n' ' ' < "$PFLOG" | cut -c1-200)"
+  ACCEPT='application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json'
+  missing=""
+  for spec in "dms:$(sed -n 's/^DMS_TAG=//p' "$RENV")" "dms-agent:$(sed -n 's/^DMS_AGENT_TAG=//p' "$RENV")" \
+              "dms-mpifileutils:$(sed -n 's/^MFU_TAG=//p' "$RENV")"; do
+    case "$spec" in *:) missing="$missing ${spec}(태그 없음 — render.env)"; continue ;; esac
+    code=$(curl -s -m 10 -o /dev/null -w '%{http_code}' -I -H "Accept: $ACCEPT" \
+      "http://127.0.0.1:$LPORT/v2/${spec%%:*}/manifests/${spec#*:}" 2>/dev/null || true)
+    if [ "$code" = 200 ]; then ok "레지스트리에 $spec 있음"; else missing="$missing ${spec}(HTTP ${code:-?})"; fi
+  done
+  kill "$PF" 2>/dev/null || true
+  rm -f "$PFLOG"
+  trap - EXIT
+  [ -z "$missing" ] || die "S5 미완: 클러스터 내 레지스트리에 없는 이미지 —$missing. deploy/README §2e-4 의 S5(DMS 이미지 push)를 마치거나 values.env 의 태그를 레지스트리에 있는 값으로"
+fi
 
 if [ "$DRY" = 1 ]; then
   step "3. DRY-RUN (서버측 검증 — 변경 없음)"

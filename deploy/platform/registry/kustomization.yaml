@@ -1,0 +1,31 @@
+# 플랫폼 층(DMS 소유) — 클러스터 내 레지스트리 base(2026-11-03 ④, 설계 v6 7-3·8-2 「층 배치」).
+#
+# 사이트 중립 base: 이미지·hostPath·clusterIP·센티널 기대값은 자리표시자(set-by-overlay.invalid)뿐이다 — 이 디렉터리를 그대로
+# apply 하면 실패한다(의도, 앱 base 와 같은 규칙). 사이트 값은 렌더러가 낸다:
+#   sh deploy/render.sh <site>      # → deploy/.rendered/<site>/platform/registry (이 base 를 가리키는 kustomization + 사이트 패치)
+#   kubectl --context <ctx> apply --server-side --field-manager=dms-install -k deploy/.rendered/<site>/platform/registry
+# SSA(field manager dms-install)는 addons·platform 층에만 쓴다 — 앱 오버레이는 client-side apply 그대로다(포탈 릴리스가 strategic-merge
+# 로 image 를 바꾸기 때문, 설계 8-2). Secret dms-registry-http 는 여기 없다(S4 가 없을 때만 만든다 — deploy/README §2e).
+#
+# overlays/·k8s/ 밖에 두는 이유: 그 아래 디렉터리를 모두 도는 계약 테스트(「오버레이는 제어면 Deployment 를 패치하지 않는다」·base 이미지
+# 자리표시자 등)를 피한다(설계 8-2). 이 층의 계약은 tests/test_platform_registry_contract.py 가 본다.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - deployment.yaml
+  - service.yaml
+# 이름 고정(해시 접미 없음): GC 런북이 `kubectl --context <ctx> -n dms edit cm dms-registry-config` + `rollout restart` 로 다룬다
+# (deploy/README §2e-5). 기대값 literal 은 렌더 결과가 behavior: merge 로 덮는다.
+configMapGenerator:
+  - name: dms-registry-config
+    namespace: dms
+    files:
+      - config.yml
+    literals:
+      - expected-registry-id=set-by-overlay.invalid
+    options:
+      disableNameSuffixHash: true
+      labels:
+        app.kubernetes.io/name: dms-registry
+        app.kubernetes.io/part-of: dms
+        app.kubernetes.io/managed-by: dms-install

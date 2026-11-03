@@ -1,0 +1,22 @@
+# dms-addon-critical(2026-11-03 ④, 설계 v6 2-1 「PriorityClass 를 두는 이유」·8-1 S4).
+#
+# 왜: 잡(dms-low 50 / dms-mid 100 / dms-high 200 — deploy/k8s/05-volcano-queue-priorityclass.yaml)이 워커 CPU 를 채운 상태에서
+# 애드온 컨트롤러(⑤ CNPG 오퍼레이터·⑥ EG 컨트롤러)가 재스케줄되면, 잡 파드를 선점해야 자리를 얻는다 — 상류 Deployment 에는
+# PriorityClass 가 없어 0(잡보다 낮음)으로 떠 영영 Pending 일 수 있다. 1000 은 dms-high(200)보다 위이고 system-cluster-critical
+# (2000000000)보다 한참 아래다. Volcano 3종은 이 클래스로 바꾸지 않는다(상류 system-cluster-critical 유지 — 바꾸면 우선순위가
+# 내려간다, dmsk8s 실측). 레지스트리(마스터 전용, 잡이 없는 노드)는 선점할 일이 없어 이 클래스를 쓰지 않는다.
+#
+# 순서: 이것을 참조하는 애드온(S8·S9)보다 먼저, S4 에서 platform/registry 와 함께 SSA(field manager dms-install)로 만든다 —
+# 없는 클래스를 참조한 파드는 admission 에서 거절된다. globalDefault false: 클러스터 기본값이 되면 우선순위 없는 모든 파드가 잡을
+# 선점한다. 사이트 값이 없어 렌더러는 이 디렉터리를 그대로 가리키는 kustomization 만 만든다(deploy/render.sh).
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: dms-addon-critical
+  labels:
+    app.kubernetes.io/part-of: dms
+    app.kubernetes.io/managed-by: dms-install
+value: 1000
+globalDefault: false
+preemptionPolicy: PreemptLowerPriority
+description: "DMS add-on controllers (CNPG operator, Envoy Gateway controller) -- above DMS data jobs (dms-high 200) so a rescheduled controller can preempt job pods."

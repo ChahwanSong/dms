@@ -407,3 +407,96 @@ def test_repo_testbed_overlays_are_pinned_to_their_clusters():
     assert any(_PINS[o] for o in present), f"테스트베드 오버레이(kube-context 고정)가 하나도 없다: {present}"
     for o in present:
         assert _pinned(overlays / o) == _PINS[o], o
+
+
+# --- 플랫폼 층: 클러스터 내 레지스트리(2026-11-03 ④) ----------------------------------------------------------------------
+# 가드의 워크로드·hostPath 추출은 Deployment 일반이라 렌더된 platform/registry 에도 그대로 건다: 저장소(<SHARED_DIR>/dms/registry)가
+# 바뀌면 exit 5, 이미지(태그 ref)가 바뀌면 exit 3 + 업그레이드 순서 안내, DMS 소유 층이면 다음 명령이 SSA.
+
+def _rendered_registry(tmp_path) -> tuple:
+    """실제 렌더러(deploy/render.sh testbed-k8s)가 낸 platform/registry 디렉터리와 그 kustomize 출력."""
+    import shutil
+    root = tmp_path / "tree" / "deploy"
+    root.mkdir(parents=True)
+    shutil.copy(REPO_ROOT / "deploy" / "render.sh", root / "render.sh")
+    for d in ("platform", "k8s", "overlays"):
+        shutil.copytree(REPO_ROOT / "deploy" / d, root / d)
+    r = subprocess.run(["sh", str(root / "render.sh"), "testbed-k8s"], capture_output=True, text=True, timeout=60,
+                       env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")})
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    layer = root / ".rendered" / "testbed-k8s" / "platform" / "registry"
+    k = subprocess.run(["kubectl", "kustomize", str(layer)], capture_output=True, text=True, timeout=120,
+                       env={**os.environ, "KUBECONFIG": os.devnull})
+    assert k.returncode == 0, k.stderr
+    return layer, k.stdout
+
+
+REG_IMG = "10.112.0.50:5000/registry:3.1.2"
+REG_HP = "/dms_shared/dms/registry"
+
+
+@needs_kubectl
+def test_registry_layer_same_as_live_passes_with_an_ssa_next_command(tmp_path):
+    layer, rendered = _rendered_registry(tmp_path)
+    live = {"FAKE_LIVE_dms_registry": REG_IMG, "FAKE_HP_dms_registry": REG_HP}
+    r, calls = _run(tmp_path, layer, "--context", "dmsk8s", live=live, rendered=rendered)
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    # DMS 소유 층(managed-by dms-install)은 SSA — 앱 오버레이(client-side apply)와 다르다(설계 8-2).
+    assert f"kubectl --context dmsk8s apply --server-side --field-manager=dms-install -k {layer}" in r.stdout
+    assert any("get deploy dms-registry" in c for c in _gets(calls))
+
+
+@needs_kubectl
+def test_registry_first_install_passes(tmp_path):
+    layer, rendered = _rendered_registry(tmp_path)
+    r, _ = _run(tmp_path, layer, "--context", "dmsk8s", rendered=rendered)
+    assert r.returncode == 0, (r.stdout, r.stderr)
+
+
+@needs_kubectl
+def test_registry_image_change_is_exit_3_with_the_upgrade_order(tmp_path):
+    layer, rendered = _rendered_registry(tmp_path)
+    live = {"FAKE_LIVE_dms_registry": "10.112.0.50:5000/registry:3.1.1", "FAKE_HP_dms_registry": REG_HP}
+    r, _ = _run(tmp_path, layer, "--context", "dmsk8s", live=live, rendered=rendered)
+    assert r.returncode == 3, (r.stdout, r.stderr)
+    assert f"Deployment/dms-registry: live=10.112.0.50:5000/registry:3.1.1 -> overlay={REG_IMG}" in r.stderr
+    assert "crictl pull" in r.stderr and "99-dms-pinned.conf" in r.stderr
+    r, _ = _run(tmp_path, layer, "--context", "dmsk8s", live=live, rendered=rendered,
+                extra_env={"ALLOW_IMAGE_CHANGE": "1"})
+    assert r.returncode == 0, (r.stdout, r.stderr)
+
+
+@needs_kubectl
+def test_registry_storage_move_is_exit_5_with_the_copy_hint(tmp_path):
+    layer, rendered = _rendered_registry(tmp_path)
+    live = {"FAKE_LIVE_dms_registry": REG_IMG, "FAKE_HP_dms_registry": "/old_shared/dms/registry"}
+    r, _ = _run(tmp_path, layer, "--context", "dmsk8s", live=live, rendered=rendered)
+    assert r.returncode == 5, (r.stdout, r.stderr)
+    assert f"Deployment/dms-registry hostPath: live=[ /old_shared/dms/registry ] -> overlay=[ {REG_HP} ]" in r.stderr
+    assert "센티널" in r.stderr and "--numeric-ids" in r.stderr
+    # 2026-11-03 ④ 리뷰 2: 새 경로의 S0 가 쓴 센티널을 옛 값으로 덮지 않게 복사에서 빼고, values 의 SHARED_DIR_ID 를 새 값으로 다시 렌더한다
+    # — 통째로 rsync 하면 「센티널 불일치」로 기동을 거부한다.
+    assert "--exclude=/.dms-registry-id" in r.stderr and "SHARED_DIR_ID" in r.stderr and "render.sh" in r.stderr, r.stderr
+
+
+@needs_kubectl
+def test_registry_layer_is_pinned_like_its_overlay(tmp_path):
+    # 렌더러는 오버레이의 kube-context 를 각 층에 복사한다 — testbed-k8s 의 레지스트리 층을 dms(ssc)에 겨누면 exit 4.
+    layer, rendered = _rendered_registry(tmp_path)
+    r, calls = _run(tmp_path, layer, "--context", "dms", rendered=rendered)
+    assert r.returncode == 4, (r.stdout, r.stderr)
+    assert _gets(calls) == [] and not any(c.startswith("kustomize") for c in calls), calls
+    # 「맞는 짝」 안내도 DMS 소유 층이면 SSA(2026-11-03 ④ 리뷰) — client-side 로 따라 하면 last-applied 주석이 붙고 필드 소유가 갈린다.
+    assert (f"kubectl --context dmsk8s apply --server-side --field-manager=dms-install -k {layer}" in r.stderr), r.stderr
+    r, _ = _run(tmp_path, f"{layer}/", "--context", "dms", rendered=rendered)
+    assert r.returncode == 4 and "--server-side --field-manager=dms-install" in r.stderr, r.stderr
+
+
+def test_app_overlay_context_refusal_hint_stays_client_side(tmp_path):
+    r, _ = _run(tmp_path, _overlay(tmp_path, "dmsk8s\n"), "--context", "dms", live=LIVE_SAME)
+    assert r.returncode == 4 and "맞는 짝" in r.stderr and "--server-side" not in r.stderr, r.stderr
+
+
+def test_app_overlay_next_command_stays_client_side(tmp_path):
+    r, _ = _run(tmp_path, _overlay(tmp_path, "dmsk8s\n"), "--context", "dmsk8s", live=LIVE_SAME)
+    assert r.returncode == 0 and "--server-side" not in r.stdout, (r.stdout, r.stderr)

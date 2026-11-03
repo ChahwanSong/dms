@@ -95,6 +95,72 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ✅ ④ 클러스터 내 레지스트리 — Distribution v3.1.2 플랫폼 층·렌더러 일반화·images.lock·가드 — **구현·검증**(2026-11-03, 테스트베드 T4 실증 대기)
+
+설계 v6(`docs/history/specs/2026-11-03-dms-k8s-prod-design.md`) 7(7-1~7-6)·2-1(PriorityClass)·8-1(S0-4·S0-5·S-1·S4~S6)·8-2 「층 배치」·
+9절 ④·10 T4, 사용자 결정 #46(1개·오퍼레이터 없음). 런북은 deploy/README §2e. DMS 코드(`registry.py`·`routes_registry.py`)는 바꾸지 않았다.
+
+- **플랫폼 층(DMS 소유, `overlays/`·`k8s/` 밖 — SSA field manager `dms-install`)**: `deploy/platform/priorityclass` = PriorityClass
+  `dms-addon-critical`(1000 > dms-high 200, globalDefault false — ⑤⑥ 애드온 컨트롤러가 잡을 선점할 수 있게). `deploy/platform/registry` =
+  ConfigMap `dms-registry-config`(`config.yml`: rootdirectory `/var/lib/registry`·delete 켬·uploadpurging 168h/24h·readonly 끔·**cache 없음**·
+  `:5000`·health.storagedriver — 이미지 기본의 debug :5001 을 덮음, + `expected-registry-id`) · Deployment `dms-registry`(replicas 1,
+  control-plane nodeSelector + toleration, not-ready·unreachable 30초, RollingUpdate maxSurge 1/maxUnavailable 0, hostPath
+  `<SHARED_DIR>/dms/registry` `Directory`, 이미지 `<IP>:<PORT>/registry:3.1.2` **태그 ref 예외**·IfNotPresent, `REGISTRY_HTTP_SECRET` 은 Secret
+  `dms-registry-http` 참조, readiness `GET /v2/_catalog?n=1`(5s/10s/3), liveness TCP, **검사만 하는 init**(센티널 없음·불일치·읽을 수 없음·
+  기대값 없음을 다른 문구로, 저장소는 읽기 전용), 2-1 자원) · Service `dms-registry`(clusterIP 고정). base 는 사이트 중립 자리표시자뿐이라
+  raw apply 는 실패한다.
+- **보안 강화(설계 7-3 「(선택)」 — 했다)**: 파드 uid/gid 65532(S0 의 저장소 소유 65532:65532 0750 과 같음 — 테스트가 두 파일을 대조),
+  drop ALL·읽기 전용 rootfs(/tmp emptyDir)·SA 토큰 없음. root 면 저장소 파일이 0 소유로 섞이고, drop ALL 인 root 는 그 디렉터리에 쓰지도 못한다.
+- **렌더러 일반화**(설계 9 ③·④): `deploy/render.sh <site>` 하나가 앱 오버레이(prod 는 템플릿 치환, testbed-k8s 는 커밋된 오버레이 복사 —
+  둘 다 `../../k8s` 깊이 보정)와 플랫폼 층을 `deploy/.rendered/<site>/{app,platform/priorityclass,platform/registry,render.env}` 에 낸다(.gitignore).
+  옛 `deploy/overlays/prod/render.sh` 는 호환 진입점(`render.sh prod`), 결과 위치가 `.prod-rendered` 에서 바뀌었다. 실패는 임시 디렉터리에서
+  끝나 이전 결과를 바꾸지 않는다. 새 values 키: `REGISTRY_MODE`(in-cluster|external — 없으면 external), `REGISTRY_CLUSTER_IP`(IPv4 검사 —
+  있으면 레지스트리 층을 렌더, external 이어도 병행), `REGISTRY_PORT`(5000), `REGISTRY_TLS_VERIFY`(in-cluster 면 false 만), `SHARED_DIR_ID`
+  (센티널 기대값 = S0 의 `.dms-shared-id` — **값의 원천을 values 로 둔 이유**: 설치 호스트는 공용 스토리지를 마운트하지 않을 수 있고, 렌더가
+  호스트 상태에 기대지 않게), 선택 `REGISTRY_CPU_REQUEST`·`REGISTRY_MEMORY_REQUEST`. in-cluster 면 `REGISTRY` 를 비우면 `<IP>:<PORT>` 로
+  채우고 다르면 FAIL, 렌더 결과에서 **같은 주소 다섯 곳**(REGISTRY·newName·`DMS_JOB_IMAGE`·`DMS_BUILD_REGISTRY`·`DMS_BUILD_BUILDER_IMAGE`)을
+  다시 대조한다(external 이면 빌더 미러만 예외). testbed-k8s 는 앱이 `pkg-01:5001` 그대로(external — T4 병행)이고 values.env 에
+  `REGISTRY_CLUSTER_IP=10.112.0.50`·`REGISTRY_PORT=5000`·`SHARED_DIR_ID`(실측)·requests 50m/64Mi 를 기록했다 — 렌더된 앱 == 커밋된 오버레이.
+  셸 환경의 레지스트리 키는 읽지 않는다(values.env 만 원천 — ③ 의 SHARED_DIR 와 같은 이유).
+- **images.lock**(설계 7-5 ①, 커밋): `DEST SOURCE DIGEST` 세 칸(sh `read -r` 로도 읽힘) — `registry:3.1.2`(docker.io, amd64 `sha256:1290056e…`)·
+  `buildah:stable`(quay.io v1.43.1, amd64 `sha256:7bb110e1…` = 테스트베드 `pkg-01:5000/buildah:stable` 미러와 같은 digest). digest 는
+  레지스트리 HTTP API(익명 토큰)로 받아 index 면 linux/amd64 항목을 골랐다(본문 sha256 재계산). `deploy/images-lock.py`(python 3.9):
+  `check`(형식 — 칸 수·호스트 없는 DEST·태그·digest 모양·DEST 중복), `verify`(상류에서 index 아님·linux/amd64 — 인터넷 노드), `resolve`
+  (한 줄 생성). 상류 무응답은 모름(exit 4).
+- **guard-images.sh**: 렌더된 레지스트리 층에도 같은 가드 — 저장소 hostPath 변경 exit 5(새 경로의 S0·소유 보존 복사 안내), 이미지 변경 exit 3
+  (7-6 업그레이드 순서: push → 마스터 전부 crictl pull·고정 확인 → 적용), DMS 소유 층이면 다음 명령을 SSA 로. 기존 exit 3/4/5 의미는 그대로.
+- **install.sh**: 렌더 호출을 `render.sh prod` 로. in-cluster 면 호스트 push 를 건너뛰고(S5 는 인터넷 노드), Service `dms-registry` 가 없거나
+  clusterIP 가 values 와 다르거나 Ready 가 아니면 apply 전에 멈춘다. S4~S6 자동화는 ⑦(BACKLOG).
+- **문서**: prod `patch-config.yaml` 의 「TLS 레지스트리 권장」 주석 정정(평문 HTTP·익명만 된다 — 7-2), values.env.example·prod README(레지스트리
+  키·선행조건), deploy/README §2e(S0-4 신뢰 drop-in `50-dms-registry.conf`, S0-5 oci-archive 반입·`99-dms-pinned.conf` 고정 병합, S4 SSA·
+  http 시크릿 stdin 생성·catalog 확인·증상 표, S5 lock push·digest 대조, S6 crictl pull, 업그레이드·GC·백업·장애, 테스트베드 T4·전환 절차),
+  ARCHITECTURE §6(모듈 3행·불변식 3개).
+- **테스트**: `test_platform_registry_contract`(새 파일 — 설계 9 ④ 줄 전부 + base 자리표시자·config·프로브·securityContext↔S0·init 을 실제
+  sh 로 돌려 「만들지 않음」·렌더러 prod/testbed·실패 케이스·testbed 전환 모양), `test_images_lock`(새 파일 — 형식·sh 파싱·상류 바꿔치기로 index/
+  arm64/digest 불일치/모름/토큰/resolve·3.9 문법), `test_guard_images_context`(레지스트리 층 3/5/4·SSA 안내), 렌더러 이동에 맞춘
+  `test_prod_k8s_overlay`·`test_shared_dir_contract`·`test_check_scripts_context`(복사 대상·결과 위치·견본 IP). 관련 16개 파일 379 passed·1 skipped
+  (testbed-k8s 앱 전환 모양을 사본에 적용해 같은 계약이 `test_testbed_k8s_overlay` 상수만 고치면 통과함도 확인 — 「전환 전」 전용 2건은 skip).
+- **리뷰 1회차(2026-11-03)**: init·본 컨테이너 둘 다 `IfNotPresent`(Always 0건 — 자기 이미지를 자기에게서 pull 하는 교착)·PriorityClass
+  `preemptionPolicy: PreemptLowerPriority` 를 테스트로 고정, Deployment 에 라벨 `dms.io/addon-version: "3.1.2"`(설계 8-2 A — 이미지 태그·lock 과
+  같이 움직이는지 테스트), 렌더러가 셸 env 의 태그·도메인·VIP·옛 LDAP 키도 읽지 않게(unset), `images-lock.py check` 가 sh 소비자와 같은 줄·칸
+  규칙(CR·비 ASCII·들여쓴 주석 거부), 가드 exit 4 의 「맞는 짝」 안내도 플랫폼 층이면 SSA. 문서: §2e-3 맨 앞에 네임스페이스(S2 —
+  새 클러스터에서 S4 가 `namespaces "dms" not found`), 증상 표 첫 줄 = FailedMount(hostPath type 검사 — init 전, 가장 흔함, init 「센티널 없음」은
+  경로는 있을 때만), port-forward listen 대기, GC 의 `kubectl edit` 에 `--context`·`-n`, 걷어내기 절차, skopeo 가 실제로 까는 것
+  (shortnames.conf·registries.conf·policy.json·CNI 플러그인 — storage.conf 아님)과 `--no-install-recommends`, lock 머리에 Volcano 3종(⑦ S9b).
+- **리뷰 2회차(2026-11-03)**: install.sh 의 in-cluster 게이트가 Ready 뒤 port-forward(무작위 로컬 포트, listen 줄을 기다림)로 dms·dms-agent·
+  dms-mpifileutils 매니페스트를 HEAD 해 없으면 apply 전에 「S5 미완」으로 멈춘다(전에는 migrate ImagePullBackOff → 180초 타임아웃) — 태그는
+  render.env 에 새로 적는 해석값(`live` 포함). 렌더러: 레지스트리 파드 템플릿에 `dms.io/config-sha256`(= sha256(config.yml + expected-registry-id)
+  — 기동 때만 읽혀 설정만 바뀐 SSA 재적용이 반영되지 않던 것), in-cluster 에서 REGISTRY 를 비웠으면 미치환 목록에서 빼고(비워 두라던 값을
+  채우게 하던 것) REGISTRY_CLUSTER_IP·SHARED_DIR_ID 에는 값을 얻는 곳을 한 줄씩. 가드 exit 5(레지스트리 저장소 이동) 안내를 「새 S0 →
+  `rsync --exclude=/.dms-registry-id`(통째 복사는 새 센티널을 옛 값으로 덮어 「센티널 불일치」) → `SHARED_DIR_ID` 갱신·재렌더 → 허용 SSA」 로.
+  문서: §2e-5 「설정 변경」·「저장소 이동」, §2d-4 의 in-cluster 하위 단계(앱보다 먼저), GC 길 B 의 원복은 SSA `--force-conflicts` + `rollout
+  restart`, 「센티널 불일치」 행에 두 파일 대조·고치는 순서, REGISTRY_CLUSTER_IP 의 「S1 이 본다」를 지금의 손 확인 명령(servicecidr·
+  ipaddresses·하단 정적 대역)으로 — S1 자동 검사는 ⑦, 렌더 명령에 `--context`, deploy/README 머리말에 「in-cluster 면 §2e 도」, prod README
+  의 S7 프로브를 S6 뒤로(render.env 의 REGISTRY), skopeo 의 `/usr/lib/cni` 는 추천이 아니라 containers-common 의 필수 의존(CRI-O `plugin_dirs`
+  밖이라 무해 — cp1·w1 `apt-get install -s` 확인).
+- **테스트베드**: T4(cp1 반입·고정 → 10.112.0.50 레지스트리 → k8s-w1 에서 lock·d17 push → 3노드 pull → 확인 항목)와 앱 전환은 메인 세션이 한다 —
+  결과는 실증 뒤 기입. `pkg-01:5001` 은 병행 유지. testbed IaC(crio 롤 drop-in 둘·skopeo)는 testbed 저장소 몫(작업 사본 패치).
+
 ### ✅ ③ 공용 디렉터리(SHARED_DIR) — 아티팩트 경로 한 원천(`<SHARED_DIR>/dms/artifacts`)·hostPath 가드(exit 5)·스토리지 등록 가드·S0 초기화·S7 동작 프로브 — **완료·실증**(2026-11-03, d18)
 
 설계 v6(`docs/history/specs/2026-11-03-dms-k8s-prod-design.md`) 3-1·3-2·8-1 「S0·S7 세부」·9절 「③ 공유 FS 세부」·10절 T3, 사용자 결정

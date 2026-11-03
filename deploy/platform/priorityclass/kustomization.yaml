@@ -1,0 +1,8 @@
+# 플랫폼 층(DMS 소유) — PriorityClass(2026-11-03 ④, 설계 v6 8-2 「층 배치」). 적용은 렌더 결과를 SSA 로:
+#   sh deploy/render.sh <site>
+#   kubectl --context <ctx> apply --server-side --field-manager=dms-install -k deploy/.rendered/<site>/platform/priorityclass
+# overlays/·k8s/ 밖에 두는 이유: 그 아래 디렉터리를 모두 도는 계약 테스트(오버레이·base)를 피한다(설계 8-2).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - priorityclass.yaml

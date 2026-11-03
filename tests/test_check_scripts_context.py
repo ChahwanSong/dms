@@ -99,6 +99,7 @@ def _values(tmp_path, mfu_tag):
     text = re.sub(r"\bREPLACE_([A-Z_]+)", lambda m: "v-" + m.group(1).lower().replace("_", "-"), text)
     text = re.sub(r"^MFU_TAG=.*$", f"MFU_TAG={mfu_tag}", text, flags=re.M)
     text = re.sub(r"^SHARED_DIR=\S+", "SHARED_DIR=/v-shared-dir", text, flags=re.M)   # 절대 경로(2026-11-03 ③ 형식 검사)
+    text = re.sub(r"^REGISTRY_CLUSTER_IP=\S+", "REGISTRY_CLUSTER_IP=10.96.0.50", text, flags=re.M)   # IPv4(④)
     vals = tmp_path / "values.env"
     vals.write_text(text)
     return vals
@@ -107,6 +108,8 @@ def _values(tmp_path, mfu_tag):
 def _render(tmp_path, mfu_tag, *args, **extra_env):
     prod = tmp_path / "overlays" / "prod"
     shutil.copytree(DEPLOY / "overlays/prod", prod, ignore=shutil.ignore_patterns("values.env"))
+    shutil.copytree(DEPLOY / "platform", tmp_path / "platform")      # 렌더러 본체(2026-11-03 ④)가 플랫폼 층도 낸다
+    shutil.copy(DEPLOY / "render.sh", tmp_path / "render.sh")         # prod/render.sh(호환 진입점)가 ../../render.sh 로 넘긴다
     env, log = _env(tmp_path, VALUES_ENV=str(_values(tmp_path, mfu_tag)), **extra_env)
     r = subprocess.run(["sh", str(prod / "render.sh"), *args], env=env, capture_output=True, text=True, timeout=60)
     return r, log

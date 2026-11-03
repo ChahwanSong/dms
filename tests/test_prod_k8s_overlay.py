@@ -19,6 +19,7 @@ from dms.config import Settings
 from overlay_render import KUBECTL, REPO_ROOT, config_data, doc, needs_kubectl, seq
 
 PROD = REPO_ROOT / "deploy" / "overlays" / "prod"
+RENDER = REPO_ROOT / "deploy" / "render.sh"          # 렌더러 본체(2026-11-03 ④ — prod/render.sh 는 호환 진입점)
 BASE_CONFIG = REPO_ROOT / "deploy" / "k8s" / "20-config.yaml"
 BASE_AGENT = REPO_ROOT / "deploy" / "k8s" / "50-agent-daemonset.yaml"
 INSTALL = REPO_ROOT / "deploy" / "install.sh"
@@ -51,7 +52,7 @@ def test_kustomization_wires_the_site_patches_only():
 def test_values_render_and_install_need_no_ldap():
     example = _code(PROD / "values.env.example")
     assert not re.findall(r"(?m)^LDAP_\w+=", example)
-    render_sh = (PROD / "render.sh").read_text()
+    render_sh = RENDER.read_text() + (PROD / "render.sh").read_text()
     keys = re.search(r'^KEYS="([^"]*)"', render_sh, re.M)
     assert keys and "LDAP" not in keys.group(1), keys
     assert "REPLACE_LDAP" not in render_sh and "REPLACE_IDENTITY_SUPPLEMENTARY_GROUPS" not in render_sh
@@ -67,14 +68,17 @@ def test_values_render_and_install_need_no_ldap():
 def _filled_example(extra: str = "") -> str:
     text = (PROD / "values.env.example").read_text()
     text = re.sub(r"\bREPLACE_([A-Z_]+)", lambda m: "v-" + m.group(1).lower().replace("_", "-"), text)
-    # SHARED_DIR 는 절대 경로여야 렌더가 통과한다(2026-11-03 ③ -- render.sh 형식 검사).
+    # SHARED_DIR 는 절대 경로여야 렌더가 통과한다(2026-11-03 ③ -- render.sh 형식 검사). REGISTRY_CLUSTER_IP 는 IPv4(④).
+    text = re.sub(r"(?m)^REGISTRY_CLUSTER_IP=\S+", "REGISTRY_CLUSTER_IP=10.96.0.50", text)
     return re.sub(r"(?m)^SHARED_DIR=\S+", "SHARED_DIR=/v-shared-dir", text) + extra
 
 
 def _render(tmp_path, values_text):
     prod = tmp_path / "overlays" / "prod"
     shutil.copytree(PROD, prod, ignore=shutil.ignore_patterns("values.env"))
-    shutil.copytree(REPO_ROOT / "deploy" / "k8s", tmp_path / "k8s")      # ../../k8s 가 렌더 산출물에서 풀리게
+    shutil.copytree(REPO_ROOT / "deploy" / "k8s", tmp_path / "k8s")      # ../../../k8s 가 렌더 산출물에서 풀리게
+    shutil.copytree(REPO_ROOT / "deploy" / "platform", tmp_path / "platform")
+    shutil.copy(RENDER, tmp_path / "render.sh")                           # prod/render.sh(호환 진입점)가 ../../render.sh 로 넘긴다
     vals = tmp_path / "values.env"
     vals.write_text(values_text)
     bindir = tmp_path / "bin"
@@ -84,7 +88,7 @@ def _render(tmp_path, values_text):
     shim.chmod(0o755)
     env = {"PATH": f"{bindir}{os.pathsep}{os.environ.get('PATH', '/usr/bin:/bin')}", "VALUES_ENV": str(vals)}
     r = subprocess.run(["sh", str(prod / "render.sh")], env=env, capture_output=True, text=True, timeout=60)
-    return r, tmp_path / "overlays" / ".prod-rendered"
+    return r, tmp_path / ".rendered" / "prod" / "app"
 
 
 def test_render_succeeds_without_ldap_values(tmp_path):

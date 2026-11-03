@@ -25,6 +25,7 @@ from overlay_render import KUBECTL, OVERLAYS, REPO_ROOT, config_data, doc, needs
 
 BASE = REPO_ROOT / "deploy" / "k8s"
 PROD = OVERLAYS / "prod"
+RENDER = REPO_ROOT / "deploy" / "render.sh"          # 렌더러 본체(2026-11-03 ④ — prod/render.sh 는 호환 진입점)
 TESTBED = OVERLAYS / "testbed-k8s"
 PLACEHOLDER_PATH = "/set-by-overlay.invalid/dms/artifacts"
 # 설계 v6 3-2 의 SHARED_DIR 형식(render.sh·shared-storage-probe.py 와 같은 규칙).
@@ -122,6 +123,7 @@ def _prod_values(**overrides) -> str:
     text = (PROD / "values.env.example").read_text()
     text = re.sub(r"\bREPLACE_([A-Z_]+)", lambda m: "v-" + m.group(1).lower().replace("_", "-"), text)
     text = re.sub(r"(?m)^SHARED_DIR=\S+", "SHARED_DIR=/srv/dms_shared", text)
+    text = re.sub(r"(?m)^REGISTRY_CLUSTER_IP=\S+", "REGISTRY_CLUSTER_IP=10.96.0.50", text)   # IPv4(2026-11-03 ④)
     for key, value in overrides.items():
         if value is None:
             text = re.sub(rf"(?m)^{key}=.*$", "", text)
@@ -136,6 +138,8 @@ def _render_prod(tmp_path, values_text, **env_extra):
     prod = tmp_path / "overlays" / "prod"
     shutil.copytree(PROD, prod, ignore=shutil.ignore_patterns("values.env"))
     shutil.copytree(BASE, tmp_path / "k8s")
+    shutil.copytree(REPO_ROOT / "deploy" / "platform", tmp_path / "platform")   # 렌더러 본체가 플랫폼 층도 낸다(2026-11-03 ④)
+    shutil.copy(RENDER, tmp_path / "render.sh")                                # prod/render.sh(호환 진입점)가 ../../render.sh 로
     vals = tmp_path / "values.env"
     vals.write_text(values_text)
     bindir = tmp_path / "bin"
@@ -146,14 +150,14 @@ def _render_prod(tmp_path, values_text, **env_extra):
     env = {"PATH": f"{bindir}{os.pathsep}{os.environ.get('PATH', '/usr/bin:/bin')}", "VALUES_ENV": str(vals),
            **env_extra}
     r = subprocess.run(["sh", str(prod / "render.sh")], env=env, capture_output=True, text=True, timeout=60)
-    return r, tmp_path / "overlays" / ".prod-rendered"
+    return r, tmp_path / ".rendered" / "prod" / "app"
 
 
 def test_prod_template_has_no_shared_fs_and_one_shared_dir_source():
     code = _code(PROD / "patch-config.yaml")
     assert "SHARED_FS" not in code
-    assert re.search(r'(?m)^KEYS="[^"]*\bSHARED_DIR\b', (PROD / "render.sh").read_text())
-    assert "s|REPLACE_SHARED_DIR|$SHARED_DIR|g" in (PROD / "render.sh").read_text()
+    assert re.search(r'(?m)^KEYS="[^"]*\bSHARED_DIR\b', RENDER.read_text())
+    assert "s|REPLACE_SHARED_DIR|$SHARED_DIR|g" in RENDER.read_text()
     config = dict(re.findall(r'(?m)^  (DMS_[A-Z0-9_]+): "([^"]*)"', code))
     assert config["DMS_ARTIFACT_BASE_URI"] == "file://REPLACE_SHARED_DIR/dms/artifacts"
     assert "DMS_ARTIFACT_BASE_ALLOWED_PREFIXES" not in config

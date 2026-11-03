@@ -21,6 +21,7 @@ frontend/test-results/
 /*.png
 /*.jpeg
 
-# 프로덕션 오버레이 렌더 산출물(values.env → render.sh, 커밋 안 함)
+# 렌더 산출물(values.env → deploy/render.sh <site>, 커밋 안 함 — 2026-11-03 ④). .prod-rendered 는 그 전의 prod 렌더 위치(옛 체크아웃에 남은 것)
+deploy/.rendered/
 deploy/overlays/.prod-rendered/
 deploy/overlays/prod/values.env

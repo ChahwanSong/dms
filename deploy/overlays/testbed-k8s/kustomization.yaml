@@ -56,6 +56,9 @@
 #   태그 bump = 아래 newTag(+ patch-config.yaml 의 DMS_JOB_IMAGE) 커밋 — **dms-k8s 에서만** 한다(2026-10-22 브랜치 분리 뒤
 #   빌드 소스는 /home/mason/dms-dev/dms-k8s 체크아웃 = origin/dms-k8s, main 은 이 클러스터와 무관).
 #   ssc 클러스터의 오버레이(overlays/testbed)는 dms-ssc 브랜치에만 있다(2026-10-26 이 브랜치에서 지웠다 — 체리픽 충돌·엉뚱한 태그 방지).
+#   클러스터 내 레지스트리(2026-11-03 ④ — 10.112.0.50:5000, deploy/platform/registry)는 T4 동안 **병행**이다: 이 오버레이는 아직 :5001 을
+#   가리키고(values.env REGISTRY_MODE=external), 앱 전환은 newName·patch-config 세 값·values.env 를 한 커밋에서 바꾸는 별도 단계다
+#   (deploy/README §2e-6 — 렌더러 `sh deploy/render.sh testbed-k8s` 가 다섯 곳이 같은지 본다).
 #
 # Deployment(api/controller) 는 패치하지 않는다 — securityContext 는 base 가 유일한 진실
 #   (tests/test_release_manifest_contract.py::test_overlays_do_not_patch_control_plane_deployments). 예외는 아래 replacements

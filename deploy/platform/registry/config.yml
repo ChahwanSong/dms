@@ -1,0 +1,40 @@
+# CNCF Distribution v3.1.2 설정(2026-11-03 ④, 설계 v6 7-3) — ConfigMap dms-registry-config 의 config.yml 로 들어가
+# /etc/distribution/config.yml 에 붙는다(이미지에 든 기본 설정 — debug 서버 :5001 포함 — 을 통째로 덮는다).
+#
+# - 평문 HTTP·익명 접근·host:port 뿐: DMS 가 강제하는 조건이다(설계 7-2 — registry.py 는 http:// 고정, 경로 접두 불가). TLS·auth
+#   절을 넣지 마라 — 포탈 태그 조회·삭제와 빌드 push 가 깨진다.
+# - http.secret 은 여기 두지 않는다: Secret dms-registry-http 를 env REGISTRY_HTTP_SECRET 으로(secretKeyRef) 넣는다 — 롤링 중 두 파드가
+#   함께 떠도 업로드 세션이 이어진다(configuration.md 「http.secret」). 파일에 두면 비밀이 ConfigMap·git 에 남는다.
+# - cache 절 없음(일부러): inmemory blobdescriptor 캐시는 GC 뒤 낡은 「있음」을 돌려줄 수 있고, redis 는 구성요소만 늘린다.
+# - delete.enabled: 포탈 「이미지 관리」 삭제(routes_registry — 405 면 409 registry_delete_disabled)와 GC 의 전제.
+# - readonly 는 평소 false. GC 창에서만 env REGISTRY_STORAGE_MAINTENANCE_READONLY 로 켠다(deploy/README §2e 「GC」).
+# - health.storagedriver: 저장소 검사가 threshold 번 이어 실패하면 모든 요청이 503 이 된다. 다만 저장소가 멈춰(I/O 대기) 검사가
+#   끝나지 않으면 503 도 나지 않는다 — 그래서 readiness 는 저장소를 실제로 만지는 /v2/_catalog 로 따로 본다(deployment.yaml 주석).
+version: 0.1
+log:
+  level: info
+  formatter: text
+  fields:
+    service: dms-registry
+storage:
+  filesystem:
+    rootdirectory: /var/lib/registry
+  delete:
+    enabled: true
+  maintenance:
+    uploadpurging:
+      enabled: true
+      age: 168h
+      interval: 24h
+      dryrun: false
+    readonly:
+      enabled: false
+http:
+  addr: :5000
+  headers:
+    X-Content-Type-Options: [nosniff]
+health:
+  storagedriver:
+    enabled: true
+    interval: 10s
+    threshold: 3

@@ -349,9 +349,10 @@ CHANGELOG 「사용량 분석 필터」. 이번 묶음이 **의도적으로 하�
 CHANGELOG 「③ 공용 디렉터리」, 설계 v6(`docs/history/specs/2026-11-03-dms-k8s-prod-design.md`) 9절 「③ 공유 FS 세부」·10절 T3,
 deploy/README §2d.
 
-- 🔧 **render.sh 일반화**(설계 9 ③ — ④⑤⑦ 와 함께) — 하나의 렌더러가 prod·testbed-k8s·platform(registry·db)을 렌더한다. 그때까지
-  testbed-k8s 의 `values.env` 는 기록용이다(kustomize 는 읽지 않는다 — 렌더 원천은 `patch-config.yaml` 의 base, 소비자는 S7 프로브의
-  `--overlay` 뿐). 두 값의 일치는 `tests/test_shared_dir_contract.py` 가 강제한다.
+- ~~**render.sh 일반화**~~ — **해소**(2026-11-03 ④, CHANGELOG 「④ 클러스터 내 레지스트리」): `deploy/render.sh <site>` 하나가 prod·
+  testbed-k8s 앱 오버레이와 `platform/{priorityclass,registry}` 를 `deploy/.rendered/<site>/` 에 렌더한다(⑤ db 는 같은 자리로). testbed-k8s 의
+  앱 값(아티팩트 base·레지스트리)은 여전히 커밋된 오버레이가 원천이고 `values.env` 는 그 기록이다 — 렌더러가 어긋나면 FAIL 한다. 플랫폼 층의
+  값은 `values.env` 만이 원천이다.
 - 🔧 **설치기 연결(⑦)** — `install.sh` 단계에 S0 안내와 S7 자동 호출(exit 3 이면 계속, 1·4 면 정지)을 넣는다. 지금은
   `preflight-cluster.sh` 의 수동 확인(M) 줄과 `install.sh` 가드(exit 5)의 안내 문구뿐이다.
 - 🔧 **테스트베드 IaC**(testbed 저장소 몫)
@@ -373,12 +374,60 @@ deploy/README §2d.
 - 📝 **S7 파드 이미지 pull** — 마스터에 레지스트리 신뢰가 없으면 cp 노드가 이미지 pull 실패로 「모름」(exit 4)이 된다(④·S0-4 레지스트리
   신뢰 drop-in 이 전제). 그 전에는 마스터에 미리 pull 해 둔다.
 
+### ④ 클러스터 내 레지스트리 후속 — 2026-11-03
+
+CHANGELOG 「④ 클러스터 내 레지스트리」, 설계 v6 7·8-1(S0-4·S0-5·S-1·S4~S6)·10 T4, deploy/README §2e.
+
+- 🔧 **설치기 연결(⑦)** — 지금은 런북(deploy/README §2e)을 손으로 돈다. `install.sh` 는 in-cluster 면 호스트 push 를 건너뛰고, Service
+  `dms-registry`(clusterIP == `REGISTRY_CLUSTER_IP`)가 Ready 가 아니거나 dms·dms-agent·dms-mpifileutils 태그(render.env 의 해석값)가 그
+  레지스트리에 없으면(port-forward 로 매니페스트 HEAD — 2026-11-03 ④ 리뷰 2) apply 전에 멈출 뿐이다. ⑦ 에서:
+  - S2 → S4 순서: 네임스페이스(`deploy/k8s/00-namespace.yaml`)를 S4 앞에 적용한다 — 새 클러스터에서 http 시크릿·레지스트리 SSA 는 ns 가
+    없으면 실패하고, install.sh 의 앱 apply(ns 포함)는 레지스트리 Ready 게이트 뒤라 우회되지 않는다(지금은 §2e-3·prod README 3단계의 손 명령).
+  - S4: PriorityClass·레지스트리 SSA(`--field-manager=dms-install`), http 시크릿(없을 때만·출력 없음), port-forward `/v2/_catalog` 200
+    (listen 을 기다린 뒤), 「마스터 X 에 공용 디렉터리 없음」(FailedMount 이벤트 — init 전)「센티널 없음·불일치」(init 로그)「clusterIP 충돌」
+    사유 문구. ⑦ 감지기는 Deployment 라벨 `dms.io/addon-version` 으로 D=/D</D> 를 가른다.
+  - lock 에 **Volcano v1.16.0 3종**(scheduler·controller-manager·admission — S9b A 경로 설치용, 설계 7-5 ③)을 덧붙인다(⑤ CNPG·⑥ EG 와 함께).
+  - S4 뒤 정지 → 인터넷 노드용 **push 스크립트**(`images.lock` → `skopeo copy --preserve-digests`, 프록시는 env `HTTPS_PROXY`·`NO_PROXY`) →
+    `install.sh --stage S5` 재개 → port-forward 로 태그별 digest 를 lock 과 대조(없거나 다르면 **FAIL** — 지금의 호스트 podman push WARN 을
+    대체, 설계 9 ⑦).
+  - S6 pull 프로브(임시 DS, toleration Exists, 레지스트리 이미지, `Always`, 120초 — 노드별 「신뢰 설정·서명 정책·프록시·ClusterIP 경로」).
+  - S11 마스터 3대 `dms` 이미지 사전 pull, S12 verify 에 레지스트리 Ready·태그.
+  - S1 preflight: `REGISTRY_CLUSTER_IP` 가 ServiceCIDR 안·미사용·하단 정적 대역인지(렌더러는 IPv4 형식만 본다), 노드 셸 체크리스트
+    (`crio config` 의 `pinned_images`·`signature_policy`, 런타임 프록시 NO_PROXY).
+  - `SHARED_DIR_ID` 를 손으로 values.env 에 옮기지 않게: S0 결과(`.dms-shared-id`)를 일회용 파드로 읽어 제안·대조하는 길.
+  - SHARED_DIR 변경 때 레지스트리 저장소 이동(지금은 deploy/README §2e-5 「저장소 이동」 손 절차 — 센티널을 복사에서 빼고 `SHARED_DIR_ID`
+    를 새 값으로, 앱보다 먼저): 설치기가 플랫폼 층을 SSA 할 때 같은 순서·가드 exit 5 를 따른다.
+- 🔧 **테스트베드 T4 실증**(dmsk8s — 메인 세션) — 설계 10 「T4 확인 항목」 1~3·5~7. 4(cp1 재부팅)는 파괴적이라 사용자 승인 뒤. 결과는 실증
+  뒤 CHANGELOG 에 기입.
+- 🔧 **testbed-k8s 앱 전환**(T4 뒤 별도 단계, deploy/README §2e-6) — `values.env`(`REGISTRY_MODE=in-cluster`, `REGISTRY=10.112.0.50:5000`)·
+  오버레이 newName·`DMS_JOB_IMAGE`·`DMS_BUILD_REGISTRY`·`DMS_BUILD_BUILDER_IMAGE`·`tests/test_testbed_k8s_overlay.py` 상수를 한 커밋에서 →
+  `ALLOW_IMAGE_CHANGE=1` 적용 → 잡 이미지 재릴리스. 그 뒤 「모든 이미지가 새 주소로 시작」 게이트(테스트베드는 인터넷이 있어 빠진 이미지를
+  조용히 받아 온다)와 `pkg-01:5001` 정리 시점 결정.
+- 🔧 **testbed IaC**(testbed 저장소 몫) — crio 롤에 `50-dms-registry.conf`(3노드)·`99-dms-pinned.conf`(cp1)·skopeo 패키지(cp1·빌드 노드
+  k8s-w1 만, 추천 패키지 없이), validate 점검.
+  작업 사본 패치는 메인 세션이 사용자에게 준다.
+- 📝 **T4 확인 대기(추정으로 둔 것)** — 빈 레지스트리에서 `/v2/_catalog?n=1` 이 200 인지(아니면 readiness 를 다시 정한다), GC 의 env
+  readonly(`REGISTRY_STORAGE_MAINTENANCE_READONLY='{"enabled":true}'`) JSON 파싱, `readOnlyRootFilesystem` 에서 레지스트리가 정상인지,
+  containers-storage 반입본 digest 와 레지스트리 digest 의 관계(그래서 태그 ref 예외), requests 실측(2-1 은 추정), Ubuntu `apt-get install
+  --no-install-recommends skopeo` 의 영향 — 판정 기준은 설치 전후 `find /etc/containers /etc/crio /etc/cni -type f -exec sha256sum {} +`·
+  `ls /opt/cni/bin` 대조(`crio config` diff 는 registries.conf.d 를 보이지 않는다). 생기는 것으로 알려진 것: `/etc/containers/
+  {policy.json,registries.conf,registries.conf.d/shortnames.conf}`(shortnames 는 CRI-O 가 reload 때 읽는다 — 짧은 이름 이미지가 없으면 무해,
+  dmsk8s 파드 이미지는 전부 FQDN), `/usr/lib/cni`(containernetworking-plugins — containers-common 의 **필수** 의존 container-network-stack 이라
+  `--no-install-recommends` 로도 깔린다; CRI-O `plugin_dirs` 는 기본 `/opt/cni/bin` 뿐이라 무해 — 2026-11-03 cp1·w1 `apt-get install -s`),
+  storage.conf 는 없다.
+- 📝 **레지스트리 1개(#46)** — HA(2개 이상)는 G3(S7 ②)가 PASS 인 사이트에서만 다시 본다(설계 7-1 — NFS 부정 캐시로 `blob unknown`).
+  1개라 레지스트리가 있는 마스터 급사 때 약 90~110초 공백(7-6 표).
+- 📝 **설계 ④ 의 선택 항목은 하지 않았다** — 마스터 사전 pull(S11 — ⑦ 와 함께), 태그 DELETE(Distribution v3 의 태그 단위 삭제 — 포탈은 지금처럼 digest 로 매니페스트를
+  지운다; DMS 코드는 바꾸지 않는다, 설계 7-3).
+- 📝 **REGISTRY_PORT ≠ 5000** — Service 포트만 바뀌고 컨테이너는 :5000 그대로다(테스트가 고정). 노드 신뢰·고정 패턴은 `<IP>:<PORT>`.
+
 ## 2. 의도적 보류 (결정 — "미구현"이 아님)
 
 - ⏸ **회원가입 메일 인증** — 더미(email 기록만, 검증 없음, `routes_auth.py::signup`).
 - ⏸ **Prometheus/Grafana** — 포탈 대시보드로 대체.
 - ⏸ **롤백 버튼** — 이력에서 옛 태그 재선택으로 갈음.
-- ⏸ **클러스터 내 registry** — 호스트 `pkg-01:5000` 사용(슬라이스 11 비목표: 독립 인프라 작업).
+- ~~**클러스터 내 registry**~~ — **구현**(2026-11-03 ④, 설계 v6 7): `deploy/platform/registry`(Distribution v3.1.2). 테스트베드 실증·앱
+  전환은 아래 1절 「④ 클러스터 내 레지스트리 후속」.
 - ⏸ **레지스트리 경로 접두 미지원**(2026-10-21 테스트베드 분리 때 확인) — `DMS_BUILD_REGISTRY` 는 `host:port` 만 된다:
   `registry.py` 가 `http://{registry}/v2/{repo}/…` 로 URL 을 만들고(`pkg-01:5000/k8s` 면 `/k8s/v2/…` 로 깨진다)
   `manifest_tags.image_registry` 는 첫 경로 조각만 레지스트리로 봐 `site_image` 가 늘 None(배지 「모름」)이 된다. 그래서 두
