@@ -152,15 +152,35 @@ def cmd_set_url(kube, args) -> int:
     if old == url:
         print("DMS_DATABASE_URL: 이미 그 값이다 — 바꾸지 않았다")
         return 0
+    # 되돌림 URL 보존(2026-11-03 T7 실측): 이관 뒤 다시 돌리면(비밀번호 교체 등) 옛 값이 이미 CNPG URL 이라, 그대로 덮으면 이관 전
+    # 외부 DB URL — 유일한 되돌림 — 이 사라진다. 옛 값이 이 클러스터의 -rw 면 prev 를 건드리지 않고, 다른 외부 URL 이 prev 와 다르면
+    # --overwrite-prev 없이는 멈춘다(어느 쪽이 되돌림인지 사람이 고른다).
     prev = kube.secret(PREV_SECRET)
-    if prev is None:
+    prev_url = (prev or {}).get("DMS_DATABASE_URL", "")
+    if _points_at_cluster(old, args.cluster, args.namespace):
+        note = f"{PREV_SECRET} 는 그대로(옛 값도 {args.cluster}-rw 였다)"
+    elif prev is None:
         kube.create_secret(PREV_SECRET, {"DMS_DATABASE_URL": old})
-    else:
+        note = f"옛 값은 {PREV_SECRET} 에"
+    elif prev_url in ("", old) or args.overwrite_prev:
         kube.patch_secret(PREV_SECRET, {"DMS_DATABASE_URL": old})
+        note = f"옛 값은 {PREV_SECRET} 에"
+    else:
+        print(f"FAIL: {PREV_SECRET} 에 지금과 다른 되돌림 URL 이 이미 있다 — 덮으면 그 되돌림이 사라진다. 확인한 뒤 --overwrite-prev",
+              file=sys.stderr)
+        return 1
     kube.patch_secret(DMS_SECRET, {"DMS_DATABASE_URL": url})
-    print(f"DMS_DATABASE_URL: {args.cluster}-rw URL 로 바꿨다(옛 값은 {PREV_SECRET} 에 — 되돌림은 restore-url). "
+    print(f"DMS_DATABASE_URL: {args.cluster}-rw URL 로 바꿨다({note} — 되돌림은 restore-url). "
           f"api·controller 를 rollout restart 해야 반영된다")
     return 0
+
+
+def _points_at_cluster(url: str, cluster: str, namespace: str) -> bool:
+    try:
+        host = urllib.parse.urlsplit(url).hostname or ""
+    except ValueError:
+        return False
+    return host.split(".")[0] == f"{cluster}-rw" and (host == f"{cluster}-rw" or host.split(".")[1:2] == [namespace])
 
 
 def cmd_restore_url(kube, args) -> int:
@@ -195,6 +215,8 @@ def main(argv=None, *, kube_factory=Kube) -> int:
     ap.add_argument("--context", required=True)
     ap.add_argument("--namespace", default="dms")
     ap.add_argument("--cluster", default="dms-pg")
+    ap.add_argument("--overwrite-prev", action="store_true",
+                    help="set-url: dms-secrets-prev 에 다른 되돌림 URL 이 있어도 덮는다")
     ap.add_argument("command", choices=sorted(COMMANDS))
     try:
         args = ap.parse_args(sys.argv[1:] if argv is None else argv)

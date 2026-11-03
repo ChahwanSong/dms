@@ -1080,3 +1080,30 @@ def test_stale_pgdata_remnants_are_a_warning_in_every_mode():
 def test_dump_job_retries_three_times():
     cron = (DB / "backup" / "cronjob.yaml").read_text(encoding="utf-8")
     assert re.search(r"(?m)^      backoffLimit: 3$", cron)
+
+
+
+def test_set_url_rerun_keeps_the_pre_migration_rollback_url(tmp_path):
+    # T7(2026-11-03): 이관 뒤 set-url 을 다시 돌리면(비밀번호 교체 등) 옛 값이 이미 CNPG URL 이다 — prev(이관 전 외부 DB)를 덮지 않는다.
+    ext = "postgresql://dmsapp_k8s:oldpw@pkg-01:5432/dmsdb_k8s"
+    store = {"dms-pg-app": {"username": "dms", "password": "f" * 48},
+             "dms-secrets": {"DMS_DATABASE_URL": ext}}
+    r, data, _ = _secrets_run(tmp_path, "set-url", store=store)
+    assert r.returncode == 0 and data["dms-secrets-prev"]["DMS_DATABASE_URL"] == ext
+    data["dms-pg-app"]["password"] = "g" * 48                          # 비밀번호 교체 뒤 다시
+    r, data, _ = _secrets_run(tmp_path, "set-url", store=data)
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    assert data["dms-secrets-prev"]["DMS_DATABASE_URL"] == ext           # 되돌림 보존
+    assert "g" * 48 in data["dms-secrets"]["DMS_DATABASE_URL"]
+
+
+def test_set_url_refuses_to_overwrite_a_different_rollback_url_without_the_flag(tmp_path):
+    store = {"dms-pg-app": {"username": "dms", "password": "f" * 48},
+             "dms-secrets": {"DMS_DATABASE_URL": "postgresql://a:b@other-db:5432/x"},
+             "dms-secrets-prev": {"DMS_DATABASE_URL": "postgresql://a:b@pkg-01:5432/y"}}
+    r, data, _ = _secrets_run(tmp_path, "set-url", store=store)
+    assert r.returncode == 1 and "--overwrite-prev" in r.stderr
+    assert data["dms-secrets-prev"]["DMS_DATABASE_URL"].endswith("pkg-01:5432/y")
+    assert data["dms-secrets"]["DMS_DATABASE_URL"].endswith("other-db:5432/x")   # 아무것도 안 바꿈
+    r, data, _ = _secrets_run(tmp_path, "--overwrite-prev", "set-url")
+    assert r.returncode == 0 and data["dms-secrets-prev"]["DMS_DATABASE_URL"].endswith("other-db:5432/x")
