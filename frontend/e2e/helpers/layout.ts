@@ -71,11 +71,17 @@ async function probeLayout(page: Page): Promise<LayoutProbe> {
       const doc = document.documentElement;
       const cells = Array.from(document.querySelectorAll(cellSelector));
       const aside = document.querySelector("aside");
+      // 의도한 좁은 화면 쌓기(2026-11-03, 보안 이벤트 표): `data-mobile-stack` 을 단 tbody 안의 셀은 **sm(640px) 미만에서만**
+      // L2 에서 뺀다 -- 그 폭에서는 행을 flex 로 쌓도록 일부러 block 으로 바꾼다. 640 이상에서는 그대로 table-cell 이어야 하고,
+      // 표시 없는 표는 어느 폭에서든 종전대로 본다(9fbef86 결함 그물을 넓히지 않는다).
+      const narrow = window.innerWidth < 640;
+      const stacked = (el: Element) => narrow && el.closest("tbody[data-mobile-stack]") !== null;
       return {
         docScrollWidth: doc.scrollWidth,
         docClientWidth: doc.clientWidth,
         cellCount: cells.length,
         badCells: cells
+          .filter((el) => !stacked(el))
           .map((el) => ({ el, display: getComputedStyle(el).display }))
           .filter((c) => c.display !== "table-cell")
           .map((c) => ({ where: describe(c.el), display: c.display, text: text(c.el) })),

@@ -453,7 +453,8 @@ function EventsCard() {
                   <th className="pr-3">서버 메시지</th><th className="pr-3">출발지</th><th>상세</th>
                 </tr>
               </thead>
-              <tbody className="max-sm:block">
+              {/* data-mobile-stack: e2e 레이아웃 불변식 L2 가 sm 미만에서 이 tbody 의 셀만 table-cell 검사에서 뺀다(의도한 쌓기). */}
+              <tbody className="max-sm:block" data-mobile-stack="">
                 {rows.map((e) => {
                   const sev = ownValue(SEVERITY, e.severity) ?? { variant: "neutral" as const, label: e.severity };
                   const ip = str(e.payload?.client_ip);
