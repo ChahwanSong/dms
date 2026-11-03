@@ -91,7 +91,7 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   Ubuntu)(md5·소유/모드/종류 207항목 동일 — 교차 OS MPI), w2 scan·nsync w1 → w2(Rocky ↔ Rocky, launcher w2 — md5 201·메타데이터 207항목 동일),
   포탈 빌드 d20(210초, 빌드 파드 `spc_t` — **릴리스 안 함**, 라이브 d19 그대로).
 
-### ✅ ⑦ 설치기 — 단계 설치기(S1~S13)·감지 상태 기계·SELinux·pull·마스터 프로브·인터넷 노드 push·S5 lock 대조·MetalLB/ingress 게이트 삭제 — **구현·검증**(2026-11-03, 테스트베드 T9 실증 대기)
+### ✅ ⑦ 설치기 — 단계 설치기(S1~S13)·감지 상태 기계·SELinux·pull·마스터 프로브·인터넷 노드 push·S5 lock 대조·MetalLB/ingress 게이트 삭제 — **완료·실증**(2026-11-03, T9 — 라이브 테스트베드 no-op 확인·일회용 k3s 에서 감지 A·P·X·C·D=·D<·U)
 
 설계 v6(`docs/history/specs/2026-11-03-dms-k8s-prod-design.md`) 8-1(S-1~S13·「S0 세부」·「S1 점검 항목」·「S2b 세부」·「S7 세부」·「S10 세부」·
 「순서의 이유」)·8-2(감지 → 없으면 설치)·2-3(SELinux 전제)·7-5(images.lock·인터넷 노드 push·S5 대조)·9절 ⑦·10 T9. 런북은 `deploy/README.md` §2h
@@ -180,7 +180,33 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   (external TLS = push·대조만, 포탈은 http). 테스트: `test_install_stages`(계획의 다음 명령 3경우·계획 끝 줄의 플래그·env·S3 단독 Volcano 게이트·preflight/
   verify WARN·S12 재개 env·가드 안내 층별·`--upgrade-addon` reapply 가드 3층·S5 lock PASS·external TLS·0열 RESULT 하나·`--help`·preflight external
   체크리스트), `test_install_detect`(vcjob 모드 — volcano 만 판정·dry-run 실패 FAIL·X/P 면 dry-run 없이 FAIL).
-- **남은 것**: T9(테스트베드 안전한 단계·일회용 k3s 의 A·P·X 조합), Volcano 층, 새 사이트 DB import bootstrap, `kubectl-cnpg` 반입 — BACKLOG 「⑦ 설치기 후속」.
+- **T9 실증(2026-11-03)** — 증거는 메인 세션 job tmp(`b7/t9/` — 실행마다 `<행>.out`·kubectl 호출 기록 `<행>.k.log`, 저장소 밖):
+  - **라이브 테스트베드(dmsk8s · testbed-k8s, d19 — 바뀌는 것이 없음을 확인)**: `--plan` rc 0·RESULT WARN(preflight 「control-plane 노드 1대」 — 단일
+    control-plane 이면 정상, 감지 D=·C·층 dry-run PASS·SKIP). `--only` 로 S1(같은 WARN)·S2b·S5·S6·S7·S12 PASS. S4·S8·S9·S9b·S10 재실행 PASS — 그 단계가
+    SSA 하는 15객체(PriorityClass·GatewayClass·레지스트리 Deployment·Service·Gateway·HTTPRoute·EnvoyProxy·ClientTrafficPolicy·Cluster `dms-pg`·CronJob·
+    PV `dms-pgdata-01~05`)의 resourceVersion 이 전후 같다(SSA no-op). **S11 은 돌리지 않았다** — migrate Job 을 지우고 다시 만드는 단계라 no-op 이
+    아니다(라이브 앱은 포탈 릴리스 몫).
+  - **일회용 k3s(dmst9 — 호스트 컨테이너 k3s v1.34.12 서버·워커 + 레지스트리 컨테이너, 끝난 뒤 컨테이너·볼륨·kubeconfig 를 걷었다)**: 행 A1(빈
+    클러스터 → 전부 A install)·A2(`ADDON_INSTALL=never` → 서드파티 A stop)·A3~A7(Volcano C 위 A 경로: 계획 → S2b 사용법 오류 rc 2(Cilium 없음 —
+    `SELINUX_PROBE_IMAGE` 안내)·S7 FAIL(공용 마운트 없음)·`--only S8,S9,S9b` 실제 설치(ns 먼저·certgen·rollout·Cluster CR dry-run) → 재실행 D=)·C1(남의
+    CNPG 1.30.1 → C reuse, Cluster CR dry-run 이 최종 판정)·CG(남의 Gateway API v1.6.1 → C, S8 은 EG·입구만)·D1(DMS CNPG 1.29 → D< keep →
+    `--upgrade-addon cnpg` S9 → D=)·D2(1.28 + `--upgrade-addon cnpg` → 「minor 는 하나씩」 stop)·P1(라벨 없는 PriorityClass → P stop → `--adopt priorityclass` S4 `--force-conflicts`
+    → D=)·P2(CNPG 오퍼레이터 2개)·P3(CRD 만 → `--adopt cnpg` S9)·P4(남이 쓰는 envoy-gateway-system)·X1(PriorityClass value 999)·X2(Gateway API
+    v1.2.1)·X3(CNPG watch 에 dms 없음)·X4(마스터 sysctl > 443 → S8 FAIL)·U1(버전 모르는 EG → 계획 dry-run 통과 WARN) — 전부 기대(`test_install_detect`)
+    대로. D>·C! 은 만들지 않았다(심 테스트만).
+  - **T9 에서 고친 것**: ① SSA 충돌 안내가 늘 「채택은 --adopt 로만」이었다 — `--adopt` 는 감지 P 에만 듣는다. 이제 충돌한 field manager 이름
+    (apiserver 문구 `conflict with "<m>"`)과 「손 수정이면 되돌리거나 `kubectl --context C apply --server-side --field-manager=dms-install
+    --force-conflicts -k <층>` 로 덮어쓰고 같은 단계부터, 다른 도구면 소유자와 정리」를 보인다(P 만 `--adopt` 안내; 계획의 충돌 힌트도 같게) ② 감지
+    WARN 이 감지를 처음 부른 단계에 붙었다(`--only S9` 가 envoy-gateway U 로 `STAGE: S9 WARN` — C1b) → 감지 WARN·FAIL·모름 줄에 항목(단계 코드 동작)을
+    싣고, WARN 은 그 항목의 단계가 센다(S1 이면 S1, 뒤에 돌 단계면 그 단계, 이번 실행 밖이면 RESULT 에만) ③ `guard-images.sh` 의 로컬 렌더
+    `kubectl kustomize` 만 `--context` 가 없었다 → 컨텍스트가 있으면 단다(불변식 「모든 kubectl 에 --context」, `test_check_scripts_context` 실행 검사)
+    ④ 애드온이 stop·P 면 계획의 소비 층(platform/gateway·db-cluster)·앱 층이 날것의 `no matches for kind` 로 FAIL 이었고(A2·P4), P4 에서는 그 FAIL 이
+    멀쩡한 gateway-api(D=)까지 「최종 판정 FAIL」로 번졌다 → vcjob 처럼 `skipped: <애드온> 판정 FAIL(<코드> stop) — <종류> 는 확인하지 않는다`
+    ⑤ 문서: 입구 제거·되돌림 순서(platform/gateway → EG → Gateway API — GatewayClass 의 `gateway-exists-finalizer` 를 EG 가 걷는다, deploy/README
+    §2g-6)·단일 control-plane 의 `--plan` RESULT WARN 은 정상(§2h). 테스트: `test_install_stages`(충돌 안내 2형·감지 WARN 자리 4경우·감지 FAIL 항목
+    이름), `test_install_detect`(stop 의존 SKIP — P4·A2 모양·진짜 오류와 섞이면 FAIL·충돌 힌트 D=/P·관리자 이름 파싱), `test_check_scripts_context`·
+    `test_guard_images_context`(렌더 호출의 `--context`).
+- **남은 것**: Volcano 층, 새 사이트 DB import bootstrap, `kubectl-cnpg` 반입, T9 에서 만들지 않은 D>·C! 의 실클러스터 확인 — BACKLOG 「⑦ 설치기 후속」.
 
 ### ✅ 설치기 이미지 push 단계 + 신규 사이트 "레지스트리 연결 불가" 오진 수정 — **완료**(2026-09-09, d126)
 

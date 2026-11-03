@@ -981,6 +981,103 @@ def test_plan_stop_items_are_not_dry_run(kenv, capsys):
     assert not any(c["args"][-1].endswith("platform/priorityclass") for c in kenv.applies())
 
 
+def _no_kind(name, kind, group_version):
+    return ('resource mapping not found for name: "%s" namespace: "dms" from "x": no matches for kind "%s" in version "%s"\n'
+            'ensure CRDs are installed first\n' % (name, kind, group_version))
+
+
+_EG_KINDS = "".join(_no_kind("dms-portal", k, "gateway.envoyproxy.io/v1alpha1")
+                    for k in ("BackendTrafficPolicy", "ClientTrafficPolicy", "EnvoyProxy"))
+
+
+def _eg_p_world():
+    """T9 P4 의 모양: DMS 입구·Gateway API 는 그대로인데 envoy-gateway-system 을 남이 쓰고(라벨 없음) EG 가 없다 → envoy-gateway P(stop)."""
+    w = tb_world()
+    drop(w, "deployments", "envoy-gateway", "envoy-gateway-system")
+    drop(w, "configmaps", "envoy-gateway-config", "envoy-gateway-system")
+    drop(w, "crds", det.EG_CRD)
+    drop(w, "namespaces", "envoy-gateway-system")
+    add(w, "namespaces", nsobj("envoy-gateway-system", {"team": "other"}))
+    return w
+
+
+def test_plan_layer_needing_a_stopped_addon_is_a_named_skip_not_a_raw_fail(kenv, capsys):
+    """T9(2026-11-03 일회용 k3s P4): EG 가 P(stop)면 platform/gateway 가 날것의 `no matches for kind` 로 FAIL 이었고, 그 FAIL 이 같은 소비 층의
+    멀쩡한 gateway-api(D=)까지 「최종 판정 FAIL」로 번졌다 — vcjob 층처럼 그 애드온 이름을 단 SKIP 이다."""
+    w = _eg_p_world()
+    w["dry_run"] = [{"match": "platform/gateway", "stderr": _EG_KINDS}]
+    rc, doc, items, layers = _plan(kenv, capsys, w, make_rendered(kenv.tmp))
+    assert items["envoy-gateway"]["code"] == "P" and items["envoy-gateway"]["action"] == "stop"
+    gw = layers["platform/gateway"]
+    assert gw["status"] == "SKIP", gw
+    assert gw["detail"].startswith("skipped: envoy-gateway 판정 FAIL(P stop) — BackendTrafficPolicy·ClientTrafficPolicy·EnvoyProxy 는 확인하지 "
+                                   "않는다"), gw
+    assert "no matches" not in gw["detail"]
+    assert items["gateway-api"]["level"] == "PASS" and not any("최종 판정" in n for n in items["gateway-api"]["notes"])
+    assert rc == 1 and doc["result"] == "FAIL"                                   # 판정은 envoy-gateway 항목의 FAIL 하나로
+    assert [k for k, v in layers.items() if v["status"] == "FAIL"] == []
+
+
+def test_plan_addon_install_never_names_each_stopped_dependency(kenv, capsys, monkeypatch):
+    """T9 A2(ADDON_INSTALL=never 의 빈 클러스터): platform/gateway·db-cluster·app 이 FAIL 이었다 — 각 층이 기대는 애드온 이름을 단 SKIP,
+    vcjob 과 같은 문구. 첫 설치의 「ns dms 가 아직 없음」 SKIP 과 함께 나온다."""
+    monkeypatch.setenv("ADDON_INSTALL", "never")
+    w = empty_world()
+    w["dry_run"] = [
+        {"match": "platform/gateway", "stderr": _no_kind("dms", "GatewayClass", "gateway.networking.k8s.io/v1") + _EG_KINDS},
+        {"match": "platform/db-cluster", "stderr": _no_kind("dms-pg", "Cluster", "postgresql.cnpg.io/v1")
+                                                  + 'Error from server (NotFound): namespaces "dms" not found\n'},
+        {"match": "/app", "stderr": _no_kind("dms-data", "Queue", "scheduling.volcano.sh/v1beta1")
+                                   + 'Error from server (NotFound): namespaces "dms" not found\n'},
+    ]
+    rc, doc, items, layers = _plan(kenv, capsys, w, make_rendered(kenv.tmp))
+    assert {k: items[k]["action"] for k in det.THIRD_PARTY} == dict.fromkeys(det.THIRD_PARTY, "stop")
+    gw, db, app, vc = layers["platform/gateway"], layers["platform/db-cluster"], layers["app"], layers["vcjob"]
+    assert gw["status"] == "SKIP" and "envoy-gateway 판정 FAIL(A stop)" in gw["detail"] and "gateway-api 판정 FAIL(A stop) — GatewayClass" in gw["detail"]
+    assert db["status"] == "SKIP" and "cnpg 판정 FAIL(A stop) — Cluster 는" in db["detail"] and "ns dms will be created" in db["detail"]
+    assert app["status"] == "SKIP" and "volcano 판정 FAIL(A stop) — Queue 는" in app["detail"], app
+    assert vc["status"] == "SKIP" and vc["detail"] == "volcano 판정 FAIL(A stop) — 확인하지 않는다"
+    assert [k for k, v in layers.items() if v["status"] == "FAIL"] == [] and rc == 1
+
+
+def test_plan_real_error_beside_a_stopped_dependency_stays_fail(kenv, capsys):
+    w = _eg_p_world()
+    w["dry_run"] = [{"match": "platform/gateway",
+                     "stderr": _EG_KINDS + 'The Gateway "dms-portal" is invalid: spec.listeners[0].port: Invalid value: 0\n'}]
+    rc, doc, items, layers = _plan(kenv, capsys, w, make_rendered(kenv.tmp))
+    gw = layers["platform/gateway"]
+    assert gw["status"] == "FAIL" and "Invalid value: 0" in gw["detail"] and "no matches" not in gw["detail"], gw
+    assert "(또 envoy-gateway 판정 FAIL(P stop)" in gw["detail"]
+
+
+_SSA_CONFLICT = ('error: Apply failed with 1 conflict: conflict with "kubectl-edit" using scheduling.k8s.io/v1: .description\n'
+                 'Please review the fields above--they currently have other managers.\n')
+
+
+def test_plan_conflict_on_a_dms_owned_layer_names_the_manager_not_adopt(kenv, capsys):
+    """T9: --adopt 는 감지 P 에만 듣는다 — D= 층의 충돌 힌트가 「채택은 --adopt 로만」이면 운영자가 효과 없는 플래그로 다시 돌린다."""
+    w = tb_world()
+    w["dry_run"] = [{"match": "platform/priorityclass", "stderr": _SSA_CONFLICT}]
+    rd = make_rendered(kenv.tmp)
+    rc, doc, items, layers = _plan(kenv, capsys, w, rd)
+    pc = layers["platform/priorityclass"]
+    assert pc["status"] == "FAIL" and "field manager(kubectl-edit)" in pc["detail"], pc
+    assert ("kubectl --context ctx apply --server-side --field-manager=dms-install --force-conflicts -k %s" % (rd / "platform/priorityclass")
+            in pc["detail"]), pc
+    assert "채택은 --adopt" not in pc["detail"] and "--adopt 는 감지 P 에만" in pc["detail"]
+
+
+def test_conflict_hint_keeps_adopt_only_for_p_and_parses_every_manager():
+    args = ["apply", "--server-side", "--dry-run=server", "--field-manager=dms-install", "-k", "/r/platform/registry"]
+    p = det.Finding("registry").set("P", "이름 충돌")
+    r = det._layer_result("platform/registry", "registry", args, 1, _SSA_CONFLICT, {}, set(), finding=p, context="ctx")
+    assert r.status == "FAIL" and "채택은 --adopt registry 로만" in r.detail and "--force-conflicts" not in r.detail, r.detail
+    multi = ('error: Apply failed with 2 conflicts: conflicts with "kubectl-patch" using apps/v1:\n- .spec.replicas\n'
+             'conflicts with "helm" using apps/v1:\n- .metadata.labels.x\n')
+    assert det.conflict_managers(multi) == ["helm", "kubectl-patch"]
+    assert det.conflict_managers("Error from server: something else") == []
+
+
 def test_plan_table_and_machine_lines(kenv, capsys):
     rd = make_rendered(kenv.tmp)
     kenv.wfile.write_text(json.dumps(tb_world()))

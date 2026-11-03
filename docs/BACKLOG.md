@@ -504,11 +504,13 @@ CHANGELOG 「⑥ 입구(Envoy Gateway)」, 설계 v6 #13~#15·4-3·8-1(S0-5·S8�
 
 CHANGELOG 「⑦ 설치기」, 설계 v6 8-1·8-2·9 ⑦·10 T9, deploy/README §2h, prod README.
 
-- 🔧 **T9 실증(테스트베드)** — 런북은 메인 세션의 작업 노트(`t9-runbook.md` — 저장소 밖): ① `install.sh --context dmsk8s --site testbed-k8s --plan`
-  (2026-11-03 ⑦ 실측 PASS — 감지 D=·C, 층 dry-run PASS·SKIP), ② 라이브에서 안전한 단계(S1·S2b·S5·S6·S7·S12 — 결과가 바뀌지 않는 단계; S2b 는 이제
-  Rocky 워커 — T-SE 는 같은 규칙의 일회용 프로브로만 봤다), ③ A·P·X
-  조합은 **일회용 k3s**(호스트 컨테이너, dms-k3s2 와 다른 이름·포트)에서 — 공용 디렉터리·레지스트리 마운트가 없어 S1·S3·S8(A 경로 SSA·대기)·S9·
-  감지 조합만. 결과를 `test_install_detect` 기대와 대조하고 CHANGELOG 에 기입한다.
+- ~~**T9 실증(테스트베드)**~~ — **해소**(2026-11-03, CHANGELOG 「⑦ 설치기」 T9 블록): 라이브 dmsk8s `--plan` rc 0·WARN(단일 control-plane
+  preflight WARN — 정상), S1(같은 WARN)·S2b·S5·S6·S7·S12 PASS, S4·S8·S9·S9b·S10 재실행은 15객체 resourceVersion 그대로(no-op), S11 은 no-op 이 아니라
+  돌리지 않았다. 일회용 k3s 에서 감지 A·P·X·C·D=·D<·U 행(A1~A7·C1·CG·D1·D2·P1~P4·X1~X4·U1) 전부 기대대로. 거기서 나온 고침 4건(SSA 충돌 안내·감지
+  WARN 의 자리·guard-images 렌더 `--context`·stop 애드온에 기대는 계획 층 SKIP)과 문서(입구 제거 순서·단일 control-plane WARN)는 같은 변경에서 끝냈다.
+- 🔧 **T9 에서 만들지 않은 감지 행 — D>·C!** — D>(DMS 소유인데 고정보다 높은 버전 → keep·WARN, 다운그레이드하지 않음)·C!(남이 설치한 EOL·범위 밖 →
+  reuse + WARN·소유자 요청 문구)는 심 테스트(`test_install_detect` — CNPG·EG 버전 표)로만 봤다. 실클러스터에서 볼 일이 생기면(예: 다음 CNPG·EG
+  업그레이드 리허설에서 옛 판으로 되돌린 테스트베드, EG v1.8 을 깐 일회용 클러스터) `--plan` 표·S8/S9 의 「건드리지 않는다」를 확인한다.
 - 🔧 **Volcano 층(`deploy/addons/volcano/v1.16.0`)** — 상류 매니페스트 + SOURCE·sha256 + DMS 패치 층(이미지 자리표시자 → lock digest, 라벨,
   `system-cluster-critical` 유지 — 설계 2-1), `versions.env` 의 `VOLCANO_VERSION`, lock 3줄(scheduler·controller-manager·admission — 파트 C 가 resolve 로
   확인한 amd64 digest: `vc-scheduler:v1.16.0 sha256:90cadf93…`, `vc-controller-manager:v1.16.0 sha256:e5def827…`, `vc-webhook-manager:v1.16.0
@@ -529,8 +531,10 @@ CHANGELOG 「⑦ 설치기」, 설계 v6 8-1·8-2·9 ⑦·10 T9, deploy/README �
 - 📝 **프로브는 같은 클러스터에서 동시에 둘 돌리지 않는다** — S2b·S6·마스터 프로브는 시작할 때 같은 라벨의 옛 DaemonSet·파드를 지운다(설치 운영자는
   한 명 전제).
 - 🔧 **리뷰 1 고침 가운데 라이브로 못 본 것**(2026-11-03 ⑦ 리뷰 1 — 심 테스트만): S13 첫 관리자 부트스트랩 명령(port-forward + `-H @<토큰 파일>` —
-  계정을 만드는 변경이라 dmsk8s 에서 돌리지 않았다), 라벨 붙인 애드온 ns SSA·실패 certgen 재실행·`--upgrade-addon registry`·`--adopt db` 의 S9 dry-run
-  (T9 일회용 k3s 의 A6·D1·P 행에서). 실측한 것: 태그를 올린 `--plan`(dms-migrate immutable → 앱 층 PASS)·verify 의 서비스 프록시 readyz·VIP 무응답 WARN.
+  계정을 만드는 변경이라 dmsk8s 에서 돌리지 않았다), 실패 certgen 재실행·`--upgrade-addon registry`(T9 일회용 k3s 는 external 레지스트리)·`--adopt db`
+  의 S9 dry-run(T9 의 db 는 늘 A). 실측한 것: 태그를 올린 `--plan`(dms-migrate immutable → 앱 층 PASS)·verify 의 서비스 프록시 readyz·VIP 무응답
+  WARN, 라벨 붙인 애드온 ns SSA(T9 A6 — `envoy-gateway-system`·`cnpg-system` 을 DMS 라벨로 먼저 만들고 층 SSA)·`--upgrade-addon cnpg`(T9 D1)·
+  `--adopt priorityclass`·`--adopt cnpg`(T9 P1·P3 — `--force-conflicts` SSA 뒤 D=).
 
 ### 테스트베드 워커 EL9(T-SE) 후속 — 2026-11-03
 

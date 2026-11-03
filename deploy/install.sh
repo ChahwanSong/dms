@@ -64,7 +64,8 @@
 #
 # 출력: 단계마다 `== S<n> … ==` 와 [OK]/[INFO]/[WARN]/[FAIL] 줄, 끝에 `STAGE: <S> <PASS|WARN|SKIP|PAUSE|FAIL|UNKNOWN>`. 마지막 줄 `RESULT: …`.
 #   도우미 출력은 4칸 들여 쓴다 — 0열의 `==`·`STAGE:`·`RESULT:` 는 설치기 자신의 줄뿐이다(도우미의 RESULT 를 설치 결과로 읽지 않게). preflight(S1)·
-#   verify(S12)의 [WARN] 줄은 그 단계의 WARN 이다(rc 0 이어도 — ⑦ 리뷰 2).
+#   verify(S12)의 [WARN] 줄은 그 단계의 WARN 이다(rc 0 이어도 — ⑦ 리뷰 2). 감지의 WARN·FAIL 줄은 항목 이름(단계 코드 동작)을 싣고, 감지 WARN 은
+#   S1 이 아니면 그 항목의 단계가 센다 — 이번 실행에 없는 단계의 항목이면 RESULT 에만(2026-11-03 T9: `--only S9` 가 envoy-gateway U 로 S9 WARN 이었다).
 # 종료: 0 완료(WARN 포함) · 1 FAIL · 2 사용법·환경(클러스터를 바꾸기 전) · 4 모름(UNKNOWN — 확인 뒤 같은 단계부터) · 10 PAUSE(S4 뒤 push 대기).
 #   --help 는 이 머리 주석을 보이고 0.
 # 전제: 설치 호스트에 kubectl(클러스터 minor ±1)·python3(RHEL 9 = 3.9)·curl(설계 S0-7). 이 스크립트는 POSIX sh(dash -n).
@@ -139,6 +140,7 @@ step() { printf '\n== %s ==\n' "$1"; }
 ok() { printf '  [OK] %s\n' "$1"; }
 info() { printf '  [INFO] %s\n' "$1"; }
 warn() { printf '  [WARN] %s\n' "$1"; WARNS=$((WARNS + 1)); STAGE_WARN=1; }
+warn_result() { printf '  [WARN] %s\n' "$1"; WARNS=$((WARNS + 1)); }   # RESULT 에만 센다 — 지금 단계의 판정이 아닌 WARN(이번 실행에 없는 단계의 감지 항목)
 finish() {   # $1 = RESULT, $2 = 종료 코드. 진행 중인 단계가 있으면 그 단계의 STAGE 줄을 먼저 낸다.
   [ -z "$CUR" ] || printf 'STAGE: %s %s\n' "$CUR" "$1"
   printf 'RESULT: %s\n' "$1"
@@ -289,12 +291,63 @@ det() {   # $1 = 항목, $2 = code|action|apply|level
 detect_gate() {   # $1 = 감지 rc — 설계 8-1 S1 「FAIL·P·X 면 중단」(--adopt 로 채택하는 P 는 WARN)
   case "$1" in
     0) ok "감지 PASS" ;;
-    3) warn "감지 WARN(위 표 — 설치는 계속한다)" ;;
-    1) die "감지 FAIL — 위 표의 FAIL·P·X 를 먼저 해소한다(P 는 --adopt <x> 로만 채택, 설계 8-2)" ;;
-    4) unknown "감지 모름(읽기 실패 — 권한·연결). 확인한 뒤: $(again)" ;;
+    3) det_warn_gate ;;
+    1) _f=$(det_items FAIL); die "감지 FAIL${_f:+ — $_f} — 위 표의 FAIL·P·X 를 먼저 해소한다(P 는 --adopt <x> 로만 채택, 설계 8-2)" ;;
+    4) _f=$(det_items UNKNOWN); unknown "감지 모름${_f:+ — $_f}(읽기 실패 — 권한·연결). 확인한 뒤: $(again)" ;;
     *) envfail "install-detect.py 사용법·환경 오류(rc=$1)" ;;
   esac
   volcano_layer_gate
+}
+item_stage() {   # 감지 항목 → 그 항목을 적용하는 단계(install-detect.py STAGES 와 같다)
+  case "$1" in
+    priorityclass|registry) echo S4 ;; gateway-api|envoy-gateway|gateway) echo S8 ;; cnpg) echo S9 ;; volcano) echo S9b ;; db) echo S10 ;; *) echo '?' ;;
+  esac
+}
+det_items() {   # $1 = 판정(WARN·FAIL·UNKNOWN) → 「항목(단계 코드 동작), …」 — 감지 표의 그 판정 항목(사람용 — 어느 항목의 판정인지 줄에 싣는다)
+  awk -v l="$1" '$1 == "DETECT:" && $6 == l { print $2, $3, $4 }' "$DET" | while read -r _i _c _a; do
+    printf '%s(%s %s %s)\n' "$_i" "$(item_stage "$_i")" "$_c" "$_a"
+  done | awk 'NR > 1 { printf ", " } { printf "%s", $0 }'
+}
+# 감지 WARN 의 자리(2026-11-03 T9): 감지는 처음 그것을 부른 단계에서 한 번 돈다 — `--only S9` 에서 envoy-gateway U(S8 몫)가 「STAGE: S9 WARN」을
+# 만들었다. S1(preflight·감지)은 표 전체가 그 단계의 일이라 거기서 센다. 그 밖의 단계에서는 항목의 단계로 보낸다: 지금 단계면 지금, 이번 실행에서
+# 뒤에 돌 단계면 그 단계가 시작할 때(DEFER), 이번 실행에 없는 단계면 RESULT 에만 센다(그 단계의 STAGE 줄이 없다). 줄마다 항목 이름을 싣는다.
+DEFER=""
+det_warn_gate() {
+  _list=$(awk '$1 == "DETECT:" && $6 == "WARN" { print $2, $3, $4 }' "$DET")
+  if [ -z "$_list" ]; then warn "감지 WARN(위 표 — 설치는 계속한다)"; return; fi
+  while read -r _i _c _a; do
+    [ -n "$_i" ] || continue
+    _st=$(item_stage "$_i")
+    _m="감지 WARN — $_i($_st $_c $_a)"
+    if [ "$CUR" = S1 ] || [ "$CUR" = "$_st" ]; then warn "$_m(위 표 — 설치는 계속한다)"
+    elif _later "$_st"; then
+      info "$_m — $_st 의 판정으로 센다"
+      DEFER="$DEFER
+$_st|$_m(감지는 $CUR 에서 — 위 표, 설치는 계속한다)"
+    else warn_result "$_m — $_st 는 이번 실행에 없다(위 표 — $CUR 의 판정이 아니라 RESULT 에만 센다)"; fi
+  done <<EOF
+$_list
+EOF
+}
+_later() {   # $1 = 단계 — 이번 실행에서 지금 단계($CUR) 뒤에 도는가
+  _seen=0
+  for _s in $RUN; do
+    if [ "$_seen" = 1 ] && [ "$_s" = "$1" ]; then return 0; fi
+    [ "$_s" != "$CUR" ] || _seen=1
+  done
+  return 1
+}
+flush_deferred() {   # 단계 시작 — 앞 단계의 감지가 이 단계($CUR) 몫으로 미뤄 둔 WARN
+  [ -n "$DEFER" ] || return 0
+  _rest=""
+  while IFS='|' read -r _st _m; do
+    [ -n "$_st" ] || continue
+    if [ "$_st" = "$CUR" ]; then warn "$_m"; else _rest="$_rest
+$_st|$_m"; fi
+  done <<EOF
+$DEFER
+EOF
+  DEFER=$_rest
 }
 volcano_layer_gate() {
   # Volcano 층은 아직 동봉하지 않는다(docs/BACKLOG.md ⑦) — 설치해야 하는 사이트는 그 전에 멈춘다(S9b 에서 늦게 알지 않게).
@@ -333,11 +386,24 @@ ssa() {   # $1 = 층(렌더 디렉터리 기준), $2 = 감지 action(adopt 면 -
       die "$_layer SSA 실패 — clusterIP 충돌: REGISTRY_CLUSTER_IP $RCIP 를 다른 Service 가 쓴다(kubectl --context $CTX get ipaddresses.networking.k8s.io $RCIP 의 PARENTREF, deploy/README §2e-1)"
     fi
     if grep -qi 'conflict' "$WORK/ssa.err"; then
-      die "$_layer SSA 실패 — 다른 field manager 가 가진 필드다(남이 관리하는 객체 — 채택은 --adopt 로만, 설계 8-2)"
+      # --adopt 는 감지 P 에만 듣는다(install-detect.py decide) — DMS 소유(D=·D<)·설치(A) 층의 충돌에 「채택은 --adopt 로만」이라 하면 운영자가
+      # 효과 없는 플래그로 다시 돌린다(2026-11-03 T9). 충돌한 관리자 이름(kubectl-edit·helm …)으로 손 수정인지 남의 도구인지 가른다.
+      _item=$(layer_item "$_layer"); _code=$(det "$_item" code); _mgrs=$(conflict_managers "$WORK/ssa.err")
+      if [ "$_code" = P ]; then
+        die "$_layer SSA 실패 — 다른 field manager(${_mgrs:-이름 모름 — 위 오류})가 가진 필드다(감지 P — 남이 관리하는 객체). 채택은 --adopt $_item 로만(설계 8-2): $(again) --adopt $_item"
+      fi
+      die "$_layer SSA 실패 — 다른 field manager(${_mgrs:-이름 모름 — 위 오류})가 가진 필드다(감지 ${_code:-?} ${_act:-?} — --adopt 는 감지 P 에만 듣는다). 손 수정(관리자 kubectl-edit·kubectl-patch 등)이면 그 수정을 되돌리거나 DMS 값으로 덮어쓰고(kubectl --context $CTX apply --server-side --field-manager=$FM --force-conflicts -k $RDIR/$_layer) 다시: $(again). 다른 도구·컨트롤러(Helm·오퍼레이터 등)의 필드면 덮어쓰지 말고 그 소유자와 정리한다"
     fi
     die "$_layer SSA 실패(위 오류)"
   fi
   ok "SSA $_layer (field manager $FM$([ "$_act" = adopt ] && printf ' · --force-conflicts'))"
+}
+layer_item() { case "$1" in platform/db-*) echo db ;; *) echo "${1##*/}" ;; esac; }   # 렌더 층 → 감지 항목
+conflict_managers() {   # $1 = SSA 오류 파일 → 충돌한 field manager 이름(쉼표). apiserver 문구 `conflict with "<m>" using …`·`conflicts with "<m>" …:`
+  awk '{ s = $0
+         while (match(s, /conflicts? with "[^"]*"/)) { m = substr(s, RSTART, RLENGTH); sub(/^conflicts? with "/, "", m); sub(/"$/, "", m); print m
+                                                      s = substr(s, RSTART + RLENGTH) } }' "$1" \
+    | sort -u | awk 'NR > 1 { printf ", " } { printf "%s", $0 }'
 }
 guard() {   # $1 = 렌더 층(Deployment 가 있는 층) — 이미지(3)·컨텍스트(4)·hostPath(5) 변경 가드. $2 = allow-image(--upgrade-addon 의 의도한 교체)
   if [ "${2:-}" = allow-image ]; then
@@ -532,7 +598,7 @@ stage_S3() {
   fi
   case "$_rc" in
     0) ok "계획 PASS" ;;
-    3) warn "계획 WARN(위 표)" ;;
+    3) _w=$(det_items WARN); warn "계획 WARN${_w:+ — $_w}(위 표)" ;;
     1) die "계획 FAIL — 위 표의 FAIL 층·항목(설계 8-2 — 최종 판정은 DMS 가 만들 CR 의 server dry-run)" ;;
     4) unknown "계획 모름(읽기 실패). 확인한 뒤: $(again S3)" ;;
     *) envfail "install-detect.py 사용법·환경 오류(rc=$_rc)" ;;
@@ -1028,6 +1094,7 @@ for s in $RUN; do
   SOFT=0
   [ "$PLAN" = 1 ] && [ "$s" != S3 ] && SOFT=1
   step "$s $(title "$s")"
+  flush_deferred
   "stage_$s"
   if [ -n "$STAGE_FAIL" ]; then r=$STAGE_FAIL; elif [ "$STAGE_SKIP" = 1 ]; then r=SKIP; elif [ "$STAGE_WARN" = 1 ]; then r=WARN; else r=PASS; fi
   printf 'STAGE: %s %s\n' "$s" "$r"

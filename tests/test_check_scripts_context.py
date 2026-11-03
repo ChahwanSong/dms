@@ -20,6 +20,7 @@ _SHIM = """#!/bin/sh
 printf '%s\\n' "$*" >> '{log}'
 if [ "$1" = "config" ] && [ "$2" = "get-contexts" ]; then [ "$3" = "known" ] && exit 0; exit 1; fi
 if [ "$1" = "config" ] && [ "$2" = "current-context" ]; then echo current-ctx; exit 0; fi
+case " $* " in *" kustomize "*) [ -z "${{FAKE_RENDER:-}}" ] || cat "${{FAKE_RENDER}}"; exit 0;; esac
 case "$*" in *DMS_JOB_IMAGE*) printf 'reg/dms-mpifileutils:d7'; exit 0;; esac
 case "$*" in *"get deploy dms-api"*|*"get ds dms-agent"*) printf 'reg/dms:d7'; exit 0;; esac
 exit 0
@@ -121,6 +122,38 @@ def test_every_kubectl_command_in_the_installer_names_the_context(script):
     assert re.search(r'(?m)^kc\(\) \{ command kubectl --context "\$CTX" "\$@"; \}', text)
     code = "\n".join(ln for ln in text.splitlines() if not ln.lstrip().startswith("#"))
     assert "config current-context" not in code and "use-context" not in code      # 현재 컨텍스트를 읽지도 바꾸지도 않는다
+
+
+_GUARD_RENDER = """apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dms-api
+  namespace: dms
+spec:
+  template:
+    spec:
+      containers:
+      - image: reg/dms:d7
+        name: api
+"""
+
+
+@pytest.mark.parametrize("how", [["--context", "known"], ["--context=known"]])
+def test_guard_images_sends_every_call_to_the_named_context(tmp_path, how):
+    # 2026-11-03 T9: guard-images.sh 의 로컬 렌더(`kubectl kustomize`)만 --context 가 없었다 — 클러스터를 보지 않는 호출이라도 「모든 kubectl 에
+    # --context」(설계 8-1) 그물 안에 둔다. 라이브 조회(get)와 렌더가 둘 다 이름 붙은 컨텍스트로 간다.
+    ovl = tmp_path / "ovl"
+    ovl.mkdir()
+    (ovl / "kustomization.yaml").write_text("resources: []\n")
+    (tmp_path / "rendered.yaml").write_text(_GUARD_RENDER)
+    env, log = _env(tmp_path, FAKE_RENDER=str(tmp_path / "rendered.yaml"))
+    r = subprocess.run(["sh", str(DEPLOY / "overlays" / "guard-images.sh"), str(ovl), *how], env=env, capture_output=True,
+                       text=True, timeout=60)
+    assert r.returncode == 0 and "변경 없음" in r.stdout, (r.stdout, r.stderr)
+    calls = _cluster_calls(log)
+    assert [c for c in calls if " kustomize " in f" {c} "] == [f"--context known kustomize {ovl}"], calls
+    assert any(" get deploy dms-api " in f" {c} " for c in calls), calls
+    assert all(c.startswith("--context known ") for c in calls), calls
 
 
 def test_preflight_shows_the_named_context_not_the_kubeconfig_current_one(tmp_path):

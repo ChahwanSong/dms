@@ -99,7 +99,8 @@ else
   set --
 fi
 
-rendered=$(kubectl kustomize "$DIR") || { echo "[guard] kustomize 실패: $DIR" >&2; exit 2; }
+# 렌더는 로컬(클러스터를 보지 않는다)이지만 컨텍스트가 있으면 같은 --context 를 단다 — 「모든 kubectl 에 --context」 불변식(설계 8-1, 2026-11-03 T9).
+rendered=$(kubectl "$@" kustomize "$DIR") || { echo "[guard] kustomize 실패: $DIR" >&2; exit 2; }
 # 렌더 산출물에서 워크로드별 컨테이너 이미지(첫 컨테이너 = 본 컨테이너)를 뽑는다.
 # 네임스페이스(2026-11-03 ⑤): 워크로드의 metadata.namespace 를 같이 뽑아 그 네임스페이스에서 라이브를 읽는다 — CNPG 오퍼레이터
 # (addons/cnpg — cnpg-system)를 DMS_NS(dms)에서 찾으면 「첫 설치」로 보여 이미지 교체(= CNPG 업그레이드)가 조용히 통과한다. 없으면 DMS_NS.

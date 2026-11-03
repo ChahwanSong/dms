@@ -50,7 +50,10 @@ vcjob 을 `create --dry-run=server`(S9b — 웹훅 8443 경로). 그 층의 acti
 dry-run 은 그 애드온의 최종 판정이다(설계 8-2 「최종 판정은 DMS 가 만들 CR 의 server-side dry-run」): 실패하면 C·D·U 라도 FAIL, U 는 통과해야 WARN.
 **첫 설치 함정**(kubernetes#83562 — server dry-run 은 같은 묶음의 Namespace 를 저장하지 않는다): `namespaces "X" not found` 가 그 층 자신이 만들
 네임스페이스(Namespace 객체가 층 안에 있음)이거나 S2 가 만드는 DMS 네임스페이스면 실패가 아니라 `SKIP — ns X will be created`, 아직 설치 전인
-애드온의 CRD 때문인 `no matches for kind` 도 같은 SKIP 이다(그 밖의 객체는 통과했다는 뜻). **앱 업그레이드 함정**(2026-11-03 ⑦ 리뷰 1): 앱 층의
+애드온의 CRD 때문인 `no matches for kind` 도 같은 SKIP 이다(그 밖의 객체는 통과했다는 뜻). 판정이 stop 인 애드온(ADDON_INSTALL=never 의 A·P·X·?)의
+CRD 때문인 `no matches for kind` 는 날것의 FAIL 이 아니라 그 애드온 이름을 단 SKIP 이다(「envoy-gateway 판정 FAIL(P stop) — EnvoyProxy… 는 확인하지
+않는다」 — vcjob 층과 같은 처리, 그 애드온의 FAIL 이 이미 사유다; 2026-11-03 T9 — 그 층이 FAIL 이면 같은 소비 층의 멀쩡한 애드온(D= gateway-api)까지
+「최종 판정 FAIL」로 번졌다). **앱 업그레이드 함정**(2026-11-03 ⑦ 리뷰 1): 앱 층의
 이미 끝난 Job dms-migrate 는 spec 을 바꿀 수 없어 태그를 올린 dry-run 이 `field is immutable` 이다 — S11 이 apply 전에 지우고 다시 만드는 그
 Job 이라 앱 층은 PASS(그 사유를 적어서)로 본다.
 
@@ -1340,10 +1343,26 @@ _MIGRATE_IMMUTABLE = re.compile(r'\bJob(?:\.batch)? "%s" is invalid: .*field is 
 MIGRATE_NOTE = "Job %s 의 spec 은 바꿀 수 없다 — S11 이 지우고 다시 만든다" % MIGRATE_JOB
 
 
-def _classify(stderr, will_create_ns, will_install, layer=None):
-    """dry-run 오류 줄 → (무해한 사유 목록, 진짜 오류 목록). 무해 = 설치가 만들 네임스페이스·아직 없는 애드온 CRD·(앱 층) 끝난 migrate Job 의
-    바꿀 수 없는 spec."""
-    benign, real = [], []
+def _dep_note(addon, f, kinds=()):
+    """의존 애드온의 판정이 stop(FAIL·모름)이라 그 애드온 CRD 의 객체는 확인하지 않는다는 SKIP 사유 — vcjob 층과 소비 층·앱 층이 같은 문구를 쓴다
+    (2026-11-03 T9: 일회용 k3s 에서 EG·CNPG·Volcano 가 stop 이면 platform/gateway·db-cluster·app 이 날것의 `no matches for kind` 로 FAIL 이었다)."""
+    what = " — %s 는" % "·".join(kinds) if kinds else " —"
+    return "%s 판정 %s(%s %s)%s 확인하지 않는다" % (addon, f.level, f.code, f.action, what)
+
+
+_CONFLICT_MANAGER = re.compile(r'conflicts? with "([^"]+)"')
+
+
+def conflict_managers(text):
+    """SSA 충돌 오류(apiserver 문구 `conflict with "kubectl-edit" using v1: …` · `conflicts with "helm" using apps/v1:`)의 field manager 이름들."""
+    return sorted(set(_CONFLICT_MANAGER.findall(text or "")))
+
+
+def _classify(stderr, will_create_ns, will_install, layer=None, blocked=None):
+    """dry-run 오류 줄 → (무해한 사유 목록, 진짜 오류 목록, {의존 애드온: 확인하지 않은 종류}). 무해 = 설치가 만들 네임스페이스·아직 없는 애드온
+    CRD·(앱 층) 끝난 migrate Job 의 바꿀 수 없는 spec. 의존 = 판정이 stop 인 애드온(blocked)의 CRD 가 없어 생긴 `no matches for kind` — 그 애드온의
+    FAIL 이 이미 사유이므로 이 층의 FAIL 로 다시 세지 않는다(T9)."""
+    benign, real, deps = [], [], {}
     for line in (stderr or "").splitlines():
         line = line.strip()
         # stderr 의 줄은 경고·안내를 빼면 모두 오류다 — 「resource mapping not found … no matches for kind」 줄에는 error 라는 말이 없다
@@ -1365,8 +1384,11 @@ def _classify(stderr, will_create_ns, will_install, layer=None):
         if m and CRD_GROUP_ADDON.get(m.group(2)) in will_install:
             benign.append("CRD %s(%s) 는 %s 설치가 만든다" % (m.group(1), m.group(2), CRD_GROUP_ADDON[m.group(2)]))
             continue
+        if m and CRD_GROUP_ADDON.get(m.group(2)) in (blocked or {}):
+            deps.setdefault(CRD_GROUP_ADDON[m.group(2)], set()).add(m.group(1))
+            continue
         real.append(line)
-    return sorted(set(benign)), real
+    return sorted(set(benign)), real, deps
 
 
 def vcjob_layer(kube, state, findings, will_install=()):
@@ -1374,7 +1396,7 @@ def vcjob_layer(kube, state, findings, will_install=()):
     layer, item = "vcjob", "volcano"
     vf = findings["volcano"]
     if vf.action == "stop":
-        return LayerResult(layer, item, "SKIP", "Volcano 판정 FAIL — 확인하지 않는다")
+        return LayerResult(layer, item, "SKIP", _dep_note("volcano", vf))
     if "jobs.batch.volcano.sh" not in state.crds:
         return LayerResult(layer, item, "SKIP", "CRD jobs.batch.volcano.sh 는 volcano 설치가 만든다 — 설치 뒤 S9b 에서")
     if state.ns not in state.namespaces:
@@ -1382,7 +1404,7 @@ def vcjob_layer(kube, state, findings, will_install=()):
     queue = "dms-data" if kube.one("get", "queues.scheduling.volcano.sh", "dms-data") is not None else "default"
     args = ["create", "--dry-run=server", "-f", "-", "-o", "name"]
     rc, out, err = kube.dry_run(args, stdin=json.dumps(vcjob_manifest(state.ns, queue)))
-    r = _layer_result(layer, item, args, rc, err, {}, will_install)
+    r = _layer_result(layer, item, args, rc, err, {}, will_install, finding=vf, context=kube.context)
     if queue == "default":
         r.detail = (r.detail + "; " if r.detail else "") + "Queue dms-data 가 아직 없어 default 로 봤다(앱 05-*.yaml 이 만든다)"
     return r
@@ -1392,6 +1414,8 @@ def run_plan(kube, state, findings, rendered):
     results = []
     by_layer = {}
     will_install = {i for i, f in findings.items() if f.action in ("install", "upgrade", "adopt")}
+    # 판정이 stop 인 애드온 — 그 CRD 가 없어 생긴 소비 층·앱 층의 `no matches for kind` 는 그 애드온 이름을 단 SKIP 이다(vcjob 과 같게, T9).
+    blocked = {i: f for i, f in findings.items() if f.action == "stop"}
     # S2 가 deploy/k8s/00-namespace.yaml 로 DMS 네임스페이스를 만든다(설계 8-1 S2) — 그 전의 plan 이면 dms 안 객체는 「만들 예정」.
     will_create_ns = {state.ns: "S2 deploy/k8s/00-namespace.yaml"}
     consumer_of = {}
@@ -1435,7 +1459,7 @@ def run_plan(kube, state, findings, rendered):
                 if f is not None and f.action == "adopt":
                     args.insert(4, "--force-conflicts")
             rc, out, err = kube.dry_run(args)
-            r = _layer_result(layer, item, args, rc, err, ns_here, will_install)
+            r = _layer_result(layer, item, args, rc, err, ns_here, will_install, blocked=blocked, finding=f, context=kube.context)
             # 이 층이 만들 네임스페이스는 뒤 층에서도 「만들 예정」이다(적용할 층일 때만).
             if f is None or f.apply:
                 for kind, name, _ in objs or []:
@@ -1465,16 +1489,19 @@ def consumer_verdicts(findings, by_layer):
             f.notes.append("최종 판정: %s server dry-run 통과" % layer)
 
 
-def _layer_result(layer, item, args, rc, err, will_create_ns, will_install):
+def _layer_result(layer, item, args, rc, err, will_create_ns, will_install, blocked=None, finding=None, context="<ctx>"):
     if rc == 0:
         return LayerResult(layer, item, "PASS", "", args)
-    benign, real = _classify(err, will_create_ns, will_install, layer)
-    if benign and not real:
-        if benign == [MIGRATE_NOTE]:
+    benign, real, deps = _classify(err, will_create_ns, will_install, layer, blocked)
+    dep_notes = [_dep_note(a, blocked[a], sorted(kinds)) for a, kinds in sorted(deps.items())]
+    if (benign or dep_notes) and not real:
+        if benign == [MIGRATE_NOTE] and not dep_notes:
             # 건너뛴 것이 아니라 dry-run 이 된 것이다(그 Job 하나만 S11 몫) — PASS 로 보인다.
             return LayerResult(layer, item, "PASS", "%s — 그 밖의 객체는 dry-run 통과" % MIGRATE_NOTE, args)
-        return LayerResult(layer, item, "SKIP", "skipped: %s — 그 밖의 객체는 dry-run 통과" % "; ".join(benign), args)
+        return LayerResult(layer, item, "SKIP", "skipped: %s — 그 밖의 객체는 dry-run 통과" % "; ".join(dep_notes + benign), args)
     detail = " | ".join(real[:3]) if real else ((err or "").strip().splitlines() or ["rc=%d" % rc])[-1]
+    if dep_notes:
+        detail += " (또 %s)" % "; ".join(dep_notes)
     if "failed calling webhook" in (err or ""):
         # 웹훅 이름(mcluster.cnpg.io · validatejob.volcano.sh · …envoyproxy…)이나 층으로 어느 애드온인지 고른다.
         low = (err or "").lower()
@@ -1482,8 +1509,17 @@ def _layer_result(layer, item, args, rc, err, will_create_ns, will_install):
             or {"platform/db-cluster": "cnpg", "platform/db-backup": "cnpg", "vcjob": "volcano", "platform/gateway": "envoy-gateway"}.get(layer)
         if group in _WEBHOOK_HINT:
             detail += " — 힌트: " + _WEBHOOK_HINT[group]
-    if "conflict" in (err or "").lower() and "--force-conflicts" not in args:
-        detail += " — 힌트: 다른 field manager 가 가진 필드다(남이 관리하는 객체 — 채택은 --adopt %s 로만)" % item
+    if "conflict" in (err or "").lower() and "--server-side" in (args or []) and "--force-conflicts" not in args:
+        mgrs = conflict_managers(err)
+        who = "다른 field manager(%s)" % ", ".join(mgrs) if mgrs else "다른 field manager"
+        if finding is not None and finding.code == "P":
+            detail += " — 힌트: %s 가 가진 필드다(남이 관리하는 객체 — 채택은 --adopt %s 로만)" % (who, item)
+        else:
+            # --adopt 는 감지 P 에만 듣는다(decide) — DMS 소유(D=·D<)·설치(A) 층의 충돌에 「--adopt 로만」이라 하면 운영자가 효과 없는 플래그를
+            # 붙여 다시 돌린다(2026-11-03 T9). 충돌한 관리자 이름으로 손 수정인지 남의 도구인지 가른다.
+            detail += (" — 힌트: %s 가 가진 필드다. 손 수정(관리자 kubectl-edit·kubectl-patch 등)이면 되돌리거나 DMS 값으로 덮어쓴다: kubectl --context %s apply "
+                       "--server-side --field-manager=%s --force-conflicts -k %s · 다른 도구·컨트롤러(Helm·오퍼레이터)의 필드면 덮어쓰지 말고 "
+                       "소유자와 정리한다(--adopt 는 감지 P 에만 듣는다)") % (who, context, FIELD_MANAGER, args[-1])
     return LayerResult(layer, item, "FAIL", detail, args)
 
 

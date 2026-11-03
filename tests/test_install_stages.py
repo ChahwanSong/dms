@@ -2,7 +2,8 @@
 S7 종료 코드 처리, in-cluster 대 external, 멱등 재실행, `--plan` 무변경, C 애드온 비적용, 감지 FAIL 정지, 설정 해시 재시작, --context 필수.
 리뷰 1(2026-11-03): 단계별 멈춤 조건 표(STOPS — 판정·사유 문구·다음 단계 없음·적용되면 안 되는 층), S10 「사전 검사 → Cluster」 순서, migrate
 선삭제 순서, 재개 명령의 플래그·env, env DMS_NS 차단, 가드 allow-image(레지스트리·CNPG), --adopt db 의 S9 dry-run, 빈 --stage·--only, S12 의
-verify 인자·FAIL 뒤 S13, S13 첫 관리자. verify.sh·host-net-probe.sh 의 판정 자체는 test_install_verify.py.
+verify 인자·FAIL 뒤 S13, S13 첫 관리자. T9(2026-11-03): SSA 충돌 안내(관리자 이름·--force-conflicts — --adopt 는 P 에만), 감지 WARN 을 그 항목의
+단계가 센다, 감지 FAIL 줄의 항목 이름. verify.sh·host-net-probe.sh 의 판정 자체는 test_install_verify.py.
 
 실제 sh(dash)로 install.sh 를 돌린다. 클러스터·도우미는 전부 가짜다:
   - PATH 앞의 kubectl 심(fixtures/install_stages/fake_kubectl.py) — 세계 JSON 을 읽고 고쳐 써서 apply·create·annotate 가 다음 실행에 보인다.
@@ -737,6 +738,68 @@ def test_adopt_db_dry_runs_the_cluster_cr_with_force_conflicts(rig):
     dry = [c for c in cluster_calls(rig) if "--dry-run=server" in c and c.endswith("platform/db-cluster")]
     ssa = [c for c in mutations(rig) if c.endswith("platform/db-cluster")]
     assert dry and "--force-conflicts" in dry[0] and ssa and "--force-conflicts" in ssa[0], (dry, ssa)
+
+
+# --- T9 고침(2026-11-03 — 라이브 테스트베드·일회용 k3s 실증에서 나온 것) -------------------------------------------------------------
+
+_CONFLICT_1 = ('error: Apply failed with 1 conflict: conflict with "kubectl-edit" using gateway.networking.k8s.io/v1: .spec.listeners\n'
+               'Please review the fields above--they currently have other managers. Here\n'
+               'are the ways you can resolve this warning:\n'
+               '* If you intend to manage all of these fields, please re-run the apply\n'
+               '  command with the `--force-conflicts` flag.')
+_CONFLICT_2 = ('error: Apply failed with 2 conflicts: conflicts with "kubectl-patch" using gateway.networking.k8s.io/v1:\n'
+               '- .spec.listeners\nconflicts with "helm" using gateway.networking.k8s.io/v1:\n- .metadata.labels.team\n'
+               'Please review the fields above--they currently have other managers.')
+
+
+@pytest.mark.parametrize("stderr, managers", [(_CONFLICT_1, "kubectl-edit"), (_CONFLICT_2, "helm, kubectl-patch")])
+def test_ssa_conflict_on_a_dms_owned_layer_names_the_managers_not_adopt(rig, stderr, managers):
+    """T9: DMS 소유(D=) 층의 SSA 충돌에도 「채택은 --adopt 로만」이라 했다 — --adopt 는 감지 P 에만 듣는다(install-detect decide). 충돌한 field
+    manager 이름과 「손 수정이면 되돌리거나 --force-conflicts 로 덮어쓴다」(그 층 경로·--context 를 단 명령)를 보인다."""
+    rig.world(installed_world(fail={"--field-manager=dms-install -k": [1, stderr]}))
+    r = rig.run("--context", "known", "--site", "testbed-k8s", "--only", "S8")
+    assert r.returncode == 1 and stages(r) == [("S8", "FAIL")], r.all
+    line = next(ln for ln in r.stderr.splitlines() if "[FAIL] platform/gateway SSA 실패" in ln)
+    assert f"field manager({managers})" in line and "감지 D= reapply" in line, line
+    layer = rig.deploy / ".rendered" / "testbed-k8s" / "platform" / "gateway"
+    assert f"kubectl --context known apply --server-side --field-manager=dms-install --force-conflicts -k {layer}" in line, line
+    assert "--adopt 는 감지 P 에만" in line and "채택은 --adopt" not in line, line
+    assert "다시: sh deploy/install.sh --context known --site testbed-k8s --stage S8" in line, line
+    assert not [c for c in mutations(rig) if "--force-conflicts" in c]                # 덮어쓰기는 운영자가 고른다 — 설치기는 하지 않는다
+
+
+def test_detection_warn_names_the_item_and_counts_in_the_stage_that_owns_it(rig):
+    """T9: 감지는 처음 부른 단계에서 한 번 돈다 — `--only S9` 에서 envoy-gateway U(S8 몫)가 「STAGE: S9 WARN」이었다(일회용 k3s C1b 실측).
+    줄에 항목 이름을 싣고, 그 항목의 단계가 센다(뒤에 돌 단계면 그 단계에서, 이번 실행에 없는 단계면 RESULT 에만)."""
+    rig.world(installed_world())
+    rig.scenario({"install-detect.py detect": {"rc": 3}, "detect": {"envoy-gateway": "U verify 0 WARN"}})
+    r = rig.run("--context", "known", "--site", "testbed-k8s", "--only", "S9")
+    assert r.returncode == 0 and stages(r) == [("S9", "PASS")], r.all
+    assert r.stdout.strip().splitlines()[-1] == "RESULT: WARN"
+    assert "[WARN] 감지 WARN — envoy-gateway(S8 U verify) — S8 는 이번 실행에 없다" in r.stdout, r.stdout
+
+    r = rig.run("--context", "known", "--site", "testbed-k8s", "--only", "S5,S8")
+    assert r.returncode == 0 and stages(r) == [("S5", "PASS"), ("S8", "WARN")], r.all
+    s5, s8 = r.stdout.split("== S8 ")
+    assert "[INFO] 감지 WARN — envoy-gateway(S8 U verify) — S8 의 판정으로 센다" in s5 and "[WARN]" not in s5, s5
+    assert "[WARN] 감지 WARN — envoy-gateway(S8 U verify)(감지는 S5 에서" in s8, s8
+
+    # 지금 단계의 항목이면 지금 단계가, S1(preflight·감지)이면 표 전체가 S1 의 판정이다
+    rig.scenario({"install-detect.py detect": {"rc": 3}, "detect": {"cnpg": "D< keep 0 WARN", "envoy-gateway": "U verify 0 WARN"}})
+    r = rig.run("--context", "known", "--site", "testbed-k8s", "--only", "S9")
+    assert stages(r) == [("S9", "WARN")] and "[WARN] 감지 WARN — cnpg(S9 D< keep)(위 표" in r.stdout, r.all
+    r = rig.run("--context", "known", "--site", "testbed-k8s", "--plan")
+    assert ("S1", "WARN") in stages(r), r.all
+    s1 = r.stdout.split("== S2 ")[0]
+    assert "감지 WARN — envoy-gateway(S8 U verify)" in s1 and "감지 WARN — cnpg(S9 D< keep)" in s1, s1
+
+
+def test_detection_fail_line_names_the_items(rig):
+    rig.world(installed_world())
+    rig.scenario({"install-detect.py detect": {"rc": 1}, "detect": {"envoy-gateway": "P stop 0 FAIL", "priorityclass": "X stop 0 FAIL"}})
+    r = rig.run("--context", "known", "--site", "testbed-k8s", "--only", "S1")
+    assert r.returncode == 1 and stages(r) == [("S1", "FAIL")], r.all
+    assert "[FAIL] 감지 FAIL — priorityclass(S4 X stop), envoy-gateway(S8 P stop) — 위 표의" in r.stderr, r.stderr
 
 
 def test_plan_secret_read_failure_is_unknown_and_never_printed_ok(rig):

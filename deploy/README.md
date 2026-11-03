@@ -1409,6 +1409,20 @@ kubectl --context C -n envoy-gateway-system logs -l gateway.envoyproxy.io/owning
   apiserver RSS 가 ≈1GB 가 됐다(T8 실측, 수백 MB 증가). 설계 2-2 예산의 apiserver requests 2Gi 면 충분하지만 작은 마스터는 압박을 받는다 —
   테스트베드 cp1 2.5GiB 는 MemoryPressure(speaker 축출 반복)로 4GiB 로 올렸다(2g-7). Envoy DS 는 `dms-addon-critical` 이라 압박 때 먼저 축출되지
   않는다(전에는 우선순위가 없어 1순위였다).
+- **제거·되돌림 순서는 설치의 역순 — `platform/gateway` → Envoy Gateway → Gateway API**(2026-11-03 T9 일회용 k3s): EG 는 Gateway 가 가리키는
+  GatewayClass `dms` 에 finalizer `gateway-exists-finalizer.gateway.networking.k8s.io` 를 걸고, 그 Gateway 가 지워진 뒤 **자기가** 걷는다. 순서를
+  바꾸면(EG·Gateway API 를 입구 층보다 먼저) 그 finalizer 가 남아 GatewayClass 가 Terminating 에 머물고, Gateway API 층의 삭제(CRD
+  `gatewayclasses`)가 그 객체를 기다리며 멈춘다. DMS 가 설치한(D) 층만 지운다 — C(남이 설치한 EG·Gateway API)는 `platform/gateway` 만:
+
+  ```bash
+  RD=deploy/.rendered/<site>
+  kubectl --context C delete -k $RD/platform/gateway --wait=true     # Gateway·GatewayClass·EnvoyProxy·정책 — EG 가 살아 있을 때(finalizer 를 걷는다)
+  kubectl --context C delete -k $RD/addons/envoy-gateway             # 컨트롤러·certgen·EG CRD·ns envoy-gateway-system
+  kubectl --context C delete -k $RD/addons/gateway-api               # Gateway API CRD — 마지막
+  ```
+
+  이미 거꾸로 지워 GatewayClass 가 Terminating 에 남았으면(걷을 EG 가 없다 — Gateway 가 먼저 지워졌는지 확인한 뒤) finalizer 를 손으로 걷는다:
+  `kubectl --context C patch gatewayclass dms --type=merge -p '{"metadata":{"finalizers":null}}'` — 그러면 CRD 삭제도 끝난다.
 
 ### 2g-7. k8s 테스트베드(`dmsk8s`) — T8(병행)과 이후 컷오버
 
@@ -1486,7 +1500,17 @@ sh deploy/install.sh --help                                      # 머리 주석
 - 종료: 0 완료(WARN 포함) · 1 FAIL · 2 사용법·환경(빈 `--stage`·`--only` 포함) · 4 모름 · 10 PAUSE. 마지막 줄 `RESULT: …`, 단계마다 `STAGE: <S> <판정>`.
   preflight(S1)·verify(S12)의 `[WARN]` 줄은 rc 0 이어도 그 단계와 RESULT 를 WARN 으로 만든다(2026-11-03 ⑦ 리뷰 2 — dmsk8s `--plan` 이
   「preflight WARN 1」인데 RESULT PASS 였다). 도우미 출력은 4칸 들여 쓴다 — 0열의 `==`·`STAGE:`·`RESULT:` 는 설치기 자신의 줄뿐이라
-  `grep '^RESULT:'` 는 설치 결과 하나만 잡는다.
+  `grep '^RESULT:'` 는 설치 결과 하나만 잡는다. **control-plane 이 1대인 클러스터(테스트베드·일회용 k3s)에서는 `--plan` 도 `STAGE: S1 WARN`·
+  `RESULT: WARN`(rc 0)이 정상이다** — preflight 「control-plane 노드 1대 — prod 는 3대」 WARN 이다(2026-11-03 T9 dmsk8s 실측; 다른 WARN 이 없는지만 본다).
+- **감지 줄은 항목 이름을 싣는다**(2026-11-03 T9): `감지 WARN — envoy-gateway(S8 U verify)`·`감지 FAIL — priorityclass(S4 X stop), …`. 감지는
+  처음 부른 단계에서 한 번 돌지만 WARN 은 **그 항목의 단계**가 센다 — S1 이면 S1(표 전체가 S1 의 일), `--stage S5` 처럼 뒤에 돌 단계면 그 단계가
+  시작할 때(`[INFO] … S8 의 판정으로 센다` → S8 의 `[WARN]`), 이번 실행에 없는 단계(`--only S9` 의 S8 항목)면 STAGE 가 아니라 RESULT 에만(전에는
+  `--only S9` 가 envoy-gateway U 로 `STAGE: S9 WARN` 이었다). 계획(S3)도 기대는 애드온의 판정이 stop(A never·P·X·?)이면 그 소비 층·앱 층을 날것의
+  `no matches for kind` FAIL 이 아니라 `skipped: envoy-gateway 판정 FAIL(P stop) — EnvoyProxy… 는 확인하지 않는다` 로 보인다(vcjob 층과 같다).
+- **SSA 충돌**(층 적용 중 `Apply failed with N conflict`): 설치기는 충돌한 field manager 이름을 보인다. `--adopt <x>` 는 감지 **P** 에만 듣는다 —
+  DMS 소유(D=·D<)·설치(A) 층의 충돌은 관리자가 손 수정(`kubectl-edit`·`kubectl-patch` 등)이면 그 수정을 되돌리거나 DMS 값으로 덮어쓰고
+  (`kubectl --context C apply --server-side --field-manager=dms-install --force-conflicts -k deploy/.rendered/<site>/<층>`) 같은 단계부터 다시, 다른
+  도구·컨트롤러(Helm·오퍼레이터)면 덮어쓰지 말고 소유자와 정리한다. 설치기는 스스로 `--force-conflicts` 를 쓰지 않는다(채택 P 만).
 - **재개 명령**(PAUSE·모름·FAIL 줄)은 이번 실행의 `--upgrade-addon`·`--adopt` 와 판정을 바꾸는 env(`ADDON_INSTALL`·`ALLOW_*`·`SELINUX_PROBE_IMAGE`·
   `VALUES_ENV`·S12 의 `CACERT`·`PORTAL_DOMAIN`·`PORTAL_VIP`·`VERIFY_NO_PROBES`)를 그대로 싣는다 — 출력된 줄을 그대로 붙여 넣는다(2026-11-03 ⑦ 리뷰 1·2:
   플래그가 빠진 재개는 업그레이드를 조용히 건너뛰었고, CACERT 가 빠진 S12 재실행은 VIP readyz 가 TLS 실패로 WARN 이 됐다). **`--plan` 의 「확인한

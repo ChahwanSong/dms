@@ -55,6 +55,7 @@ spec:
 FAKE_KUBECTL = r"""#!/bin/sh
 printf '%s\n' "$*" >> "$FAKE_LOG"
 if [ "$1" = "kustomize" ]; then cat "$FAKE_RENDER"; exit 0; fi
+if [ "$1" = "--context" ] && [ "$3" = "kustomize" ]; then cat "$FAKE_RENDER"; exit 0; fi
 if [ "$1" = "config" ]; then
   case "$2" in
     current-context)
@@ -122,7 +123,7 @@ def test_k8s_overlay_against_the_ssc_context_is_refused_before_reading_live(tmp_
     r, calls = _run(tmp_path, ovl, "--context", "dms", live=LIVE_SAME)
     assert r.returncode == 4, (r.stdout, r.stderr)
     assert "dmsk8s" in r.stderr and "dms" in r.stderr
-    assert _gets(calls) == [] and not any(c.startswith("kustomize") for c in calls), calls
+    assert _gets(calls) == [] and not any(" kustomize " in f" {c} " for c in calls), calls
 
 
 def test_ssc_overlay_against_the_k8s_context_is_refused(tmp_path):
@@ -137,6 +138,8 @@ def test_matching_explicit_context_passes_and_pins_every_kubectl_read(tmp_path):
     assert r.returncode == 0, (r.stdout, r.stderr)
     gets = _gets(calls)
     assert len(gets) == 2 and all(g.startswith("--context dmsk8s -n dms get ") for g in gets), gets
+    # 로컬 렌더도 같은 --context(2026-11-03 T9 — 「모든 kubectl 에 --context」; 전에는 `kubectl kustomize` 만 컨텍스트가 없었다)
+    assert [c for c in calls if " kustomize " in f" {c} "] == [f"--context dmsk8s kustomize {ovl}"], calls
     assert f"kubectl --context dmsk8s apply -k {ovl}" in r.stdout
 
 
@@ -487,7 +490,7 @@ def test_registry_layer_is_pinned_like_its_overlay(tmp_path):
     layer, rendered = _rendered_registry(tmp_path)
     r, calls = _run(tmp_path, layer, "--context", "dms", rendered=rendered)
     assert r.returncode == 4, (r.stdout, r.stderr)
-    assert _gets(calls) == [] and not any(c.startswith("kustomize") for c in calls), calls
+    assert _gets(calls) == [] and not any(" kustomize " in f" {c} " for c in calls), calls
     # 「맞는 짝」 안내도 DMS 소유 층이면 SSA(2026-11-03 ④ 리뷰) — client-side 로 따라 하면 last-applied 주석이 붙고 필드 소유가 갈린다.
     assert (f"kubectl --context dmsk8s apply --server-side --field-manager=dms-install -k {layer}" in r.stderr), r.stderr
     r, _ = _run(tmp_path, f"{layer}/", "--context", "dms", rendered=rendered)
