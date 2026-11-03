@@ -95,7 +95,7 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
-### ✅ ③ 공용 디렉터리(SHARED_DIR) — 아티팩트 경로 한 원천(`<SHARED_DIR>/dms/artifacts`)·hostPath 가드(exit 5)·스토리지 등록 가드·S0 초기화·S7 동작 프로브 — **구현·검증**(2026-11-03, d18 테스트베드 T3 전환·실증 대기)
+### ✅ ③ 공용 디렉터리(SHARED_DIR) — 아티팩트 경로 한 원천(`<SHARED_DIR>/dms/artifacts`)·hostPath 가드(exit 5)·스토리지 등록 가드·S0 초기화·S7 동작 프로브 — **완료·실증**(2026-11-03, d18)
 
 설계 v6(`docs/history/specs/2026-11-03-dms-k8s-prod-design.md`) 3-1·3-2·8-1 「S0·S7 세부」·9절 「③ 공유 FS 세부」·10절 T3, 사용자 결정
 #45(테스트베드도 DMS 상태를 모든 노드가 마운트한 공용 경로에)·#47(G3 는 필수 아님 — WARN). 런북은 deploy/README §2d.
@@ -129,8 +129,23 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   `test_guard_images_context`(hostPath)·`test_release_manifest_contract`(경로 예외)·`test_prod_k8s_overlay`·`test_check_scripts_context`,
   포탈 `ArtifactBasePage.test.tsx`(겹침 경고). 관련 11개 파일 240 passed·1 skipped(root 가 아니라 건너뜀).
 - **테스트베드**: 공용 디렉터리(호스트 `10.10.10.1:/data/dms_shared` NFS export → 3노드 `/dms_shared`, `lookupcache=positive`)는 라이브에
-  적용했다(IaC 반영은 BACKLOG). T3 전환(S0 → S7 → 옛 base 소유 보존 복사 → `ALLOW_HOSTPATH_CHANGE=1` 적용 → DB base 재저장, deploy/README
-  §2d-5)과 실증은 d18 배포 때 메인 세션이 한다 — 결과는 실증 뒤 기입. 옛 base `/cephfs/dms/artifacts` 는 보존한다.
+  적용했다(IaC 반영은 BACKLOG). 옛 base `/cephfs/dms/artifacts` 는 되돌림용으로 보존한다.
+- **T3 실증(d18, 2026-11-03 — 전 항목 PASS)**:
+  - S0: w1 에서 트리·센티널 생성(RESULT PASS), cp1·w2 `--check` PASS(같은 센티널). 가드 음성: cp1 의 `/cephfs`(마운트 없음)는 rc=1, 아무것도
+    만들지 않음.
+  - S7: `/dms_shared` 3노드(cp1 포함) ①~⑥ PASS(exit 0). 음성 대조 — `SHARED_DIR=/cephfs` FAIL(cp1 「마운트 없음」·w1/w2 「센티널 없음」,
+    CephFS 위 `.probe-*` 잔여 0), root_squash 임시 export → ③ G4 「root 소유 변경(squash)」 FAIL(exit 1). `nosharecache,lookupcache=all`
+    (+`nocto`·60초 속성 캐시) 임시 마운트는 **PASS** — 설계는 ② WARN 을 기대했지만(추정) 커널 6.8 은 디렉터리가 바뀌면 부정 dentry 를 다시
+    확인해 노드 셸 직접 측정에서도 새 이름이 즉시 보였다(② 는 동작 판정이라 PASS 가 맞다). 이 대조에서 찾은 프로브 결함(새 이름·rename 교체를
+    한 루프에서 봐 교체 쪽 LOOKUP 이 부정 dentry 를 무효로 만듦)은 고쳤다(4b81774 — 차례로 확인, prime 의 부정 조회는 마지막).
+  - 전환: 옛 base 를 w1 에서 `rsync -aH --numeric-ids` 로 복사 → 대조(740 항목 소유·모드·크기 일치 — 디렉터리 크기는 뺐다: CephFS 디렉터리
+    크기는 rbytes) → guard 가 플래그 없이 exit 5(라이브 `/cephfs` → `/dms_shared/dms/artifacts`) → drain → 차이분 rsync → `ALLOW_HOSTPATH_CHANGE=1`
+    적용(migrate·재시작·verify PASS 4/0) → drain 해제. base 출처가 env 라 DB 재저장은 필요 없었다. 3홉(API·컨트롤러·w1·w2) 모두 정상.
+  - 기능: 전환 전 잡(scan·nsync·dsync)의 결과 파일·로그가 복사본에서 열림, 새 scan(w1·w2)·다중 노드 dsync 미리보기 → 확인 → 성공(결과 파일이
+    cp1·w1·w2 세 노드에서 같게 보임), 사용량 분석 엔드포인트 정상, rm 으로 목적지 정리, 요청 삭제 → 정리 대기 0·결과 디렉터리 삭제.
+    등록 가드 — `/dms_shared`·`/dms_shared/dms`·`/dms_shared/dms/x`·끝 슬래시·관리 루트 겹침·기존 스토리지 경로 변경 모두 422
+    `storage_overlaps_dms_state`, 형제 `/dms_sharedx`·`/dms_shared/dmsx` 는 통과. 「아티팩트 경로」 1280·375·보안 이벤트 375(쌓기) — 콘솔 오류 0,
+    가로 넘침 0.
 
 ### ✅ ② 로그인·식별 — 아이디 기준 상한·원 IP 는 기록 전용·인증번호 6자리·대기형 보호 장치·관리자 구제·보안 이벤트 화면 — **완료·실증**(2026-11-03, d17)
 
