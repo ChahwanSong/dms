@@ -6,7 +6,7 @@ import { Table } from "../../components/ui/Table";
 import { StatusPill } from "../../components/ui/StatusPill";
 import { WarnTooltip } from "../../components/ui/WarnTooltip";
 import { ApiError, reasonText } from "../../lib/api";
-import type { ArtifactBaseInfo, ArtifactBaseNodeCheck, ArtifactRetention } from "../../lib/types";
+import type { ArtifactBaseDmsState, ArtifactBaseInfo, ArtifactBaseNodeCheck, ArtifactRetention } from "../../lib/types";
 import { relTime } from "./ControlStatePage";
 import { kstStamp } from "../../lib/datetime";
 import { useArtifactBase, useArtifactBaseHistory, useSetArtifactBase,
@@ -90,6 +90,40 @@ function RetentionLine({ r }: { r: ArtifactRetention }) {
   );
 }
 
+/** DMS 상태 디렉터리(2026-11-03 ③): 스토리지로 등록할 수 없는 경로(<SHARED_DIR>/dms -- 그 자신·상위·하위)와, 등록 가드가 생기기
+    전에(또는 SHARED_DIR 이행으로) 그것과 겹치게 된 이미 등록된 스토리지. 가드는 생성·경로 변경에만 걸리므로 그런 행은 여기서만
+    드러난다 -- 잡 파드가 그 마운트 경로를 root 로 붙여 남의 결과 파일(이후 DB·레지스트리·백업)이 잡 컨테이너에 보인다. */
+function DmsStateLine({ s }: { s: ArtifactBaseDmsState }) {
+  return (
+    <div className="text-sm mt-2 break-keep">
+      <p>
+        <span className="text-muted">DMS 상태 디렉터리(스토리지 등록 금지 — 자신·상위·하위): </span>
+        {s.roots.length > 0
+          ? s.roots.map((r) => <span key={r} className="font-mono mr-2">{r}</span>)
+          : <span className="text-muted">—</span>}
+      </p>
+      {s.overlapping_storages.length > 0 && (
+        <div role="alert" className="mt-1 rounded bg-badbg px-2 py-1 text-bad">
+          <p className="font-medium">{`이 디렉터리와 겹치는 스토리지 ${s.overlapping_storages.length}건`}</p>
+          <ul className="list-disc pl-5">
+            {s.overlapping_storages.map((o) => (
+              <li key={o.storage_name}>
+                <span className="font-mono">{o.storage_name}</span>
+                <span className="font-mono text-muted">{` (마운트 ${o.mount_path} · 관리 루트 ${o.managed_root})`}</span>
+                {!o.enabled && <span className="text-muted"> · 비활성</span>}
+              </li>
+            ))}
+          </ul>
+          <p className="text-xs">
+            잡 파드가 스토리지 마운트 경로를 root 로 붙이므로 이 스토리지를 쓰는 작업에서 다른 작업의 결과 파일(이후 DB·레지스트리·백업)이 보입니다 —
+            스토리지 경로를 이 디렉터리 밖으로 옮기거나, 공용 디렉터리(SHARED_DIR)를 별도 마운트포인트로 옮기세요
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function ArtifactBasePage() {
   const q = useArtifactBase();
   const historyQ = useArtifactBaseHistory();
@@ -147,6 +181,7 @@ export function ArtifactBasePage() {
               )}
             </p>
             {d.artifact_retention && <RetentionLine r={d.artifact_retention} />}
+            {d.dms_state && <DmsStateLine s={d.dms_state} />}
           </Card>
           <Card>
             <div className="flex items-center gap-2 mb-1">

@@ -1,6 +1,7 @@
 import posixpath
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, StrictInt
+from ..artifact_base import dms_state_roots
 from ..domain import DomainValidationError
 from ..repositories.k8s import storage_default_owner, storage_kind
 from ..repositories.storages import storage_open_to_users
@@ -63,6 +64,12 @@ def list_storages(request: Request):
     return [_with_kind(r) for r in request.app.state.repos.storages.list()]
 
 
+def _state_roots(request: Request) -> tuple:
+    """DMS 상태 디렉터리(<SHARED_DIR>/dms) -- 스토리지 경로가 겹치면 저장소가 422 storage_overlaps_dms_state 로 거부한다
+    (2026-11-03 ③, repositories.storages._check_dms_state). 요청마다 계산한다: DB 의 base 가 바뀌면 바로 따라간다."""
+    return dms_state_roots(request.app.state.repos.control, request.app.state.settings)
+
+
 @router.post("/api/admin/storages", status_code=201)
 def create_storage(body: StorageCreate, request: Request,
                    identity: Identity = Depends(require_admin)):
@@ -72,7 +79,7 @@ def create_storage(body: StorageCreate, request: Request,
             managed_root=body.managed_root, backend_type=body.backend_type,
             enabled=body.enabled, user_enabled=body.user_enabled, kind=body.kind,
             default_uid=body.default_uid, default_gid=body.default_gid,
-            actor=audit_actor(identity)))
+            protected_roots=_state_roots(request), actor=audit_actor(identity)))
     except DomainValidationError as e:
         raise HTTPException(
             status_code=409 if e.reason_code == "storage_exists" else 422,
@@ -93,9 +100,9 @@ def update_storage(name: str, body: StorageUpdate, request: Request,
     # (후행 슬래시만 다른 PUT 의 409 오탐 방지). delete 가드와 같은 요청 레벨
     # check-then-act 라 원자적이지 않다 -- 잔여 창은 stepper._abs fail-closed 가
     # 최종 방어이고, 이 가드는 창을 좁힐 뿐 없애지 못한다(설계 §2.4 정직한 한계).
-    changed = (posixpath.normpath(body.mount_path) != current["mount_path"]
-               or posixpath.normpath(body.managed_root) != current["managed_root"]
-               or body.backend_type != current["backend_type"])
+    path_changed = (posixpath.normpath(body.mount_path) != current["mount_path"]
+                    or posixpath.normpath(body.managed_root) != current["managed_root"])
+    changed = path_changed or body.backend_type != current["backend_type"]
     if changed and repos.requests.active_referencing_storage(name):
         raise HTTPException(status_code=409, detail="storage_in_use")
     try:
@@ -103,7 +110,11 @@ def update_storage(name: str, body: StorageUpdate, request: Request,
             name, mount_path=body.mount_path, managed_root=body.managed_root,
             backend_type=body.backend_type, enabled=body.enabled,
             user_enabled=body.user_enabled, kind=body.kind, default_uid=body.default_uid,
-            default_gid=body.default_gid, actor=audit_actor(identity)))
+            default_gid=body.default_gid,
+            # 상태 디렉터리 가드(2026-11-03 ③)는 경로를 바꿀 때만 -- 가드 이전에 등록된 겹치는 행의 비활성화·사용 범위
+            # 토글(진행 중 잡의 비상 차단)을 막지 않는다. 그런 행은 경로를 고치는 순간 걸린다.
+            protected_roots=_state_roots(request) if path_changed else (),
+            actor=audit_actor(identity)))
     except DomainValidationError as e:
         raise HTTPException(status_code=422, detail=e.reason_code)
     except KeyError:

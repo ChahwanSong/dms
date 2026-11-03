@@ -353,5 +353,6 @@
   "invalid_storage_owner",
   "pv_owner_not_applicable",
   "pv_owner_root_not_allowed",
-  "storage_owner_changed"
+  "storage_owner_changed",
+  "storage_overlaps_dms_state"
 ]

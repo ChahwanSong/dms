@@ -496,6 +496,7 @@ export const REASON_MESSAGES: Record<string, string> = {
   pv_moved: "제출한 뒤 PV 의 실제 경로가 바뀌었습니다(PVC 를 다시 만들었거나 StorageClass 매핑·경로 템플릿이 바뀜) — 작업을 다시 제출하세요",
   pv_target_outside: "작업 경로가 PV 바깥을 가리킵니다 — PV 를 다시 골라 새로 제출하세요",
   scan_path_unrestricted_only: "스캔 경로 등록·통계는 「전체 PV·직접 경로 권한」이 있는 관리자만 씁니다 — PV 는 단일 작업의 scan 으로 확인하세요",
+  storage_overlaps_dms_state: "DMS 상태 디렉터리(공용 디렉터리의 dms — 결과 파일·DB·레지스트리·백업)와 겹치는 경로는 스토리지로 등록할 수 없습니다 — 마운트 경로·관리 루트가 그 디렉터리 자신·상위(공용 디렉터리 포함)·하위가 아니어야 합니다. 금지 경로는 「아티팩트 경로」 화면의 「DMS 상태 디렉터리」에 있습니다",
 };
 
 /** 사유 코드를 사용자에게 보일 문구로. 매핑이 없으면 원시 코드를 그대로 돌려준다

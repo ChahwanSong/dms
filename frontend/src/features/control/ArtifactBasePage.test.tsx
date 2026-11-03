@@ -46,6 +46,30 @@ test("env 소스 배지 + 노드 행의 「확인 대기 중」을 실패와 구
   expect(screen.getByText(/에이전트 프로세스\(uid\) 기준/)).toBeInTheDocument();
 });
 
+test("DMS 상태 디렉터리와 그것과 겹치는 기존 스토리지를 경고로 보인다(2026-11-03 ③)", async () => {
+  server.use(http.get("/api/admin/artifact-base", () => HttpResponse.json({
+    ...BASE,
+    dms_state: { roots: ["/dms_shared/dms"],
+                 overlapping_storages: [{ storage_name: "legacy", mount_path: "/dms_shared",
+                                          managed_root: "/dms_shared/m", enabled: false }] },
+  })));
+  wrap();
+  expect(await screen.findByText("/dms_shared/dms")).toBeInTheDocument();
+  const alert = screen.getByRole("alert");
+  expect(alert).toHaveTextContent("이 디렉터리와 겹치는 스토리지 1건");
+  expect(alert).toHaveTextContent("legacy");
+  expect(alert).toHaveTextContent("마운트 /dms_shared · 관리 루트 /dms_shared/m");
+  expect(alert).toHaveTextContent("비활성");
+});
+
+test("겹치는 스토리지가 없으면 경고 없이 금지 경로만 보인다", async () => {
+  server.use(http.get("/api/admin/artifact-base", () => HttpResponse.json({
+    ...BASE, dms_state: { roots: ["/dms_shared/dms"], overlapping_storages: [] } })));
+  wrap();
+  expect(await screen.findByText("/dms_shared/dms")).toBeInTheDocument();
+  expect(screen.queryByRole("alert")).toBeNull();
+});
+
 test("DB 소스 배지 + 컨트롤러 홉 실패는 사유 코드와 함께 실패로 렌더된다", async () => {
   server.use(http.get("/api/admin/artifact-base", () => HttpResponse.json({
     ...BASE, source: "db", db_value: "file:///new",

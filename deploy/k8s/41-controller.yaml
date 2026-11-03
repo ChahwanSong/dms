@@ -4,7 +4,9 @@
 # run_all_once() takes a DB lease per loop so more replicas would be safe
 # (hot standby), but one is enough to validate the scenarios.
 #
-# /cephfs hostPath is REQUIRED (same as dms-api): JobStepper calls
+# The artifact-base hostPath (volume dms-artifacts) is REQUIRED (same as
+# dms-api; site-neutral placeholder rendered from DMS_ARTIFACT_BASE_URI by the
+# overlay's replacements -- see 40-api.yaml 「공용 디렉터리」, 2026-11-03): JobStepper calls
 # execution_adapter.read_summary(ref) (stepper.py, preview + execution
 # phases), which opens <DMS_ARTIFACT_BASE_URI>/<job_id>/<phase>/summary.json
 # with the file:// scheme stripped (execution_volcano.py::read_summary /
@@ -12,6 +14,9 @@
 # the CONTROLLER'S OWN filesystem, not through the k8s API. Without this
 # mount every preview/execution phase would read back None and jobs would
 # stall. controller_check_once (artifact_base.py) also writes a probe file.
+# The request-purge loop's trash (artifact_trash.py, <base>/.dms-trash) and
+# artifact expiry also live under the base, so <SHARED_DIR>/dms/artifacts is
+# the whole footprint -- the controller never needs the rest of <SHARED_DIR>.
 #
 # root (2026-09-09): the `controller` container runs as uid 0 with all
 # capabilities dropped and a read-only image fs -- same rationale and same
@@ -76,8 +81,9 @@ spec:
             - secretRef:
                 name: dms-secrets
           volumeMounts:
-            - name: cephfs
-              mountPath: /cephfs
+            # 경로는 오버레이 replacements 가 hostPath 와 같은 값으로 바꾼다(40-api.yaml 헤더 「공용 디렉터리」).
+            - name: dms-artifacts
+              mountPath: /set-by-overlay.invalid/dms/artifacts
               mountPropagation: HostToContainer
           resources:
             requests:
@@ -87,7 +93,7 @@ spec:
               cpu: "1"
               memory: 1Gi
       volumes:
-        - name: cephfs
+        - name: dms-artifacts
           hostPath:
-            path: /cephfs
+            path: /set-by-overlay.invalid/dms/artifacts
             type: Directory

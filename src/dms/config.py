@@ -245,7 +245,7 @@ class Settings:
     # 제어면 root 전환). 65532 시절엔 파일시스템이 사실상의 allowlist 였다(대부분의
     # 경로가 쓰기 불가 → 422). root 면 존재하는 모든 디렉터리가 저장 가능해지고 그
     # 아래에 잡 파드가 <job_id>/<phase> 를 mkdir/chown 한다 -- 공유 FS 마운트로
-    # 묶는다. 빈 튜플은 무제한(테스트·로컬); 배포는 20-config.yaml 이 /cephfs 를 준다.
+    # 묶는다. 빈 튜플은 무제한(테스트·로컬); 배포는 오버레이가 <SHARED_DIR>/dms/artifacts 를 준다(2026-11-03 ③).
     artifact_base_allowed_prefixes: tuple = ()
     allow_privileged_requesters: bool = True
     privileged_requesters: frozenset = frozenset({"root", "admin"})

@@ -66,7 +66,9 @@ def test_values_render_and_install_need_no_ldap():
 
 def _filled_example(extra: str = "") -> str:
     text = (PROD / "values.env.example").read_text()
-    return re.sub(r"\bREPLACE_([A-Z_]+)", lambda m: "v-" + m.group(1).lower().replace("_", "-"), text) + extra
+    text = re.sub(r"\bREPLACE_([A-Z_]+)", lambda m: "v-" + m.group(1).lower().replace("_", "-"), text)
+    # SHARED_DIR 는 절대 경로여야 렌더가 통과한다(2026-11-03 ③ -- render.sh 형식 검사).
+    return re.sub(r"(?m)^SHARED_DIR=\S+", "SHARED_DIR=/v-shared-dir", text) + extra
 
 
 def _render(tmp_path, values_text):

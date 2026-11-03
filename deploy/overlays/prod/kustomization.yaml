@@ -43,3 +43,35 @@ patches:
   - path: patch-config.yaml
   - path: patch-ingress.yaml
   - path: patch-metallb.yaml
+
+# 공용 디렉터리(2026-11-03 ③): patch-config.yaml 의 DMS_ARTIFACT_BASE_URI(file://<SHARED_DIR>/dms/artifacts — render.sh 가
+# values.env 의 SHARED_DIR 로 채운다) 하나에서 allowlist 와 api/controller 의 hostPath·mountPath 를 낸다. replacements 는 위
+# patches 뒤에 돈다. 「file://」 로 잘라 둘째 조각 = 호스트 경로(scheme 이 없으면 렌더 실패 -- fail-closed). Deployment 에서
+# 바꾸는 것은 이 경로 두 필드뿐이다(tests/test_release_manifest_contract.py 가 렌더로 고정). testbed-k8s 오버레이와 같은
+# 블록이다(두 곳을 같이 고친다).
+replacements:
+  - source:
+      kind: ConfigMap
+      name: dms-config
+      fieldPath: data.DMS_ARTIFACT_BASE_URI
+      options:
+        delimiter: "file://"
+        index: 1
+    targets:
+      - select:
+          kind: ConfigMap
+          name: dms-config
+        fieldPaths:
+          - data.DMS_ARTIFACT_BASE_ALLOWED_PREFIXES
+      - select:
+          kind: Deployment
+          name: dms-api
+        fieldPaths:
+          - spec.template.spec.volumes.[name=dms-artifacts].hostPath.path
+          - spec.template.spec.containers.[name=api].volumeMounts.[name=dms-artifacts].mountPath
+      - select:
+          kind: Deployment
+          name: dms-controller
+        fieldPaths:
+          - spec.template.spec.volumes.[name=dms-artifacts].hostPath.path
+          - spec.template.spec.containers.[name=controller].volumeMounts.[name=dms-artifacts].mountPath

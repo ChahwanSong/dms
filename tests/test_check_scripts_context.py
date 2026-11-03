@@ -98,6 +98,7 @@ def _values(tmp_path, mfu_tag):
     text = (DEPLOY / "overlays/prod/values.env.example").read_text()
     text = re.sub(r"\bREPLACE_([A-Z_]+)", lambda m: "v-" + m.group(1).lower().replace("_", "-"), text)
     text = re.sub(r"^MFU_TAG=.*$", f"MFU_TAG={mfu_tag}", text, flags=re.M)
+    text = re.sub(r"^SHARED_DIR=\S+", "SHARED_DIR=/v-shared-dir", text, flags=re.M)   # 절대 경로(2026-11-03 ③ 형식 검사)
     vals = tmp_path / "values.env"
     vals.write_text(text)
     return vals

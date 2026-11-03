@@ -8,6 +8,7 @@
 """
 import errno
 import os
+import posixpath
 import stat
 import struct
 import uuid
@@ -16,13 +17,13 @@ from .domain import DomainValidationError
 
 
 # 잡 파드 **안**에서 아티팩트 base 가 보이는 고정 경로(2026-09-09). 공용 디렉터리(base 의
-# 부모, 예 /cephfs/dms)를 root:root 로 잠가도 잡이 돌아야 한다 -- 잠금은 **그룹 쓰기·other 통과 금지(750)**(ARCHITECTURE
+# 부모 <SHARED_DIR>/dms -- 옛 테스트베드는 /cephfs/dms, 2026-11-03 ③)를 root:root 로 잠가도 잡이 돌아야 한다 -- 잠금은 **그룹 쓰기·other 통과 금지(750)**(ARCHITECTURE
 # §7; LDAP 보조 그룹 시절(2026-10-07~25)의 gid 0 그룹 우려는 dms-k8s 에서 사라졌지만 잠금 규칙은 그대로 둔다). 부모의 711·755 는 금지다 -- other-x 가 있으면
 # 모든 uid 가 base(755)와 0755 잡 디렉터리·0644 아티팩트를 직접 읽어 API 의 소유자 검사(artifact_files)를 우회한다
 # (711/755 는 base **자체**의 선택지다). 러너(launcher)는
 # root 지만 도구(dscan/dsync)와 rank.sh 는 요청자 uid 로 돌아 <base>/<job>/<phase> 까지의
 # 모든 부모를 통과(x)해야 한다. base 를 **전용 hostPath 볼륨**으로 이 경로에 마운트하면
-# 커널은 마운트 루트 위의 호스트 부모(/cephfs/dms)를 검사하지 않는다 -- 요청자는 마운트
+# 커널은 마운트 루트 위의 호스트 부모(<SHARED_DIR>/dms)를 검사하지 않는다 -- 요청자는 마운트
 # 루트(= base 자체, root:root 755)부터 내려간다. 호스트 경로(제어면 읽기·artifact_uri)는
 # 그대로 <base>/... 이고, 파드 안 경로만 이 값으로 바뀐다(execution_manifests._artifact_dir,
 # execution_volcano._volumes). 스토리지 mount_path 가 이 경로와 겹치면 invalid_storage
@@ -69,6 +70,56 @@ def normalize_artifact_base(raw: str) -> str:
     if ".." in value.split("/"):
         raise DomainValidationError("artifact_base_traversal", raw)
     return f"file://{value}"
+
+
+def _abs_norm(path: str) -> str:
+    """normpath + 선두 '//' 접기. POSIX 는 선두 '//' 하나를 구현 정의로 남겨 posixpath.normpath 가 보존하지만 리눅스(노드·잡
+    파드)에서는 '/' 와 같은 경로다 -- 접지 않으면 '//dms_shared' 가 '/dms_shared/dms' 와의 문자열 비교를 빠져나간다(2026-11-03
+    리뷰)."""
+    p = posixpath.normpath(path)
+    return "/" + p.lstrip("/") if p.startswith("//") else p
+
+
+def state_root_of(base_uri) -> "str | None":
+    """아티팩트 base 에서 DMS 상태 디렉터리를 낸다(2026-11-03 ③, 설계 v6 3-1). 배치 규약이 <SHARED_DIR>/dms/{artifacts,
+    pgdata, backup/pg, registry} 라 base 가 **…/dms/artifacts 꼴이면** 그 부모(<SHARED_DIR>/dms)가 상태 디렉터리다 -- 옛
+    테스트베드 배치(/cephfs/dms/artifacts → /cephfs/dms)도 같다. 그 꼴이 아니면 base **자신**만 지킨다(2026-11-03 리뷰): 배치
+    규약을 따르지 않는 base(e2e 하네스의 <tmp>/artifacts, 옛 allowlist(/cephfs) 시절 포탈에 저장된 /cephfs/scratch-art 같은 DB
+    base)의 부모를 지키면 형제 디렉터리(<tmp>/storage, /cephfs 아래 모든 스토리지)가 통째로 막힌다 -- 그런 base 의 부모에는
+    PG·레지스트리·백업이 없다. 오버레이 렌더는 늘 file://<SHARED_DIR>/dms/artifacts 를 내므로(env base) 운영 배치는 부모를 지킨다.
+    절대 경로가 아니거나 '/' 이면 None(모름 -- 지킬 것이 없다)."""
+    if not isinstance(base_uri, str) or not base_uri:
+        return None
+    path = _abs_norm(strip_scheme(base_uri))
+    if not path.startswith("/") or path == "/":
+        return None
+    parent = posixpath.dirname(path)
+    if posixpath.basename(path) == "artifacts" and posixpath.basename(parent) == "dms":
+        return parent
+    return path
+
+
+def dms_state_roots(control_repo, settings) -> tuple:
+    """스토리지 등록 가드(routes_storages)가 지키는 상태 디렉터리들(2026-11-03 ③). env base(설치기가 SHARED_DIR 에서 렌더한
+    값 -- PG·레지스트리·백업이 같은 <SHARED_DIR>/dms 아래라 DB 에서 base 를 바꿔도 이 위치는 그대로다)와 지금 유효한 base(DB
+    우선 -- 실제 산출물이 있는 곳) 둘 다에서 낸다. 정렬된 튜플."""
+    roots = {state_root_of(getattr(settings, "artifact_base_uri", None)),
+             state_root_of(resolve_artifact_base(control_repo, settings))}
+    return tuple(sorted(r for r in roots if r))
+
+
+def overlaps_dms_state(path, roots) -> bool:
+    """path 가 상태 디렉터리 하나와 같거나, 그 아래거나, 그것을 덮는가(상위). 문자열 비교다 -- 스토리지 경로는 노드 경로라
+    api 파드에서 realpath 로 풀 수 없다(심링크로 우회한 등록은 막지 못한다 -- 정직한 한계). 후행 슬래시로 /dms 가 /dms2 를
+    잘못 삼키지 않게 성분 경계로 본다. 선두 '//' 는 '/' 로 접는다(_abs_norm -- '//dms_shared' 우회 방지)."""
+    if not isinstance(path, str) or not path.startswith("/"):
+        return False
+    p = _abs_norm(path).rstrip("/")
+    for root in roots:
+        r = _abs_norm(root).rstrip("/")
+        if p == r or p.startswith(r + "/") or r.startswith(p + "/"):
+            return True
+    return False
 
 
 def allowlist_reason(path: str, prefixes) -> "str | None":

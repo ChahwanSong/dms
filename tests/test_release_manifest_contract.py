@@ -12,6 +12,10 @@ strategic merge patch 에서 containers 의 patchMergeKey 는 name 이라, COMPO
 추출이 빗나가면 조용히 통과하는 대신 assert 가 빨간불이 되는 성질(match_labels/
 container_names)은 그대로다.
 """
+import os
+import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -187,18 +191,72 @@ def test_image_user_stays_non_root_so_root_is_a_manifest_decision_only():
     assert "\nUSER 65532:65532\n" in dockerfile
 
 
+def _top_level_block(text: str, key: str) -> str:
+    """kustomization.yaml 원문에서 최상위 키 `key:` 의 블록(다음 최상위 키 전까지). 없으면 빈 문자열."""
+    out, inside = [], False
+    for line in text.splitlines():
+        if line and not line[0].isspace() and not line.startswith("#"):
+            inside = line.split(":", 1)[0].strip() == key
+            continue
+        if inside:
+            out.append(line)
+    return "\n".join(out)
+
+
+# 오버레이가 Deployment 에서 바꿀 수 있는 유일한 필드들(2026-11-03 ③): 아티팩트 base 의 hostPath 와 그 mountPath --
+# DMS_ARTIFACT_BASE_URI 에서 kustomize replacements 로 낸다(40-api.yaml 헤더 「공용 디렉터리」).
+_ALLOWED_DEPLOYMENT_FIELDS = {
+    "spec.template.spec.volumes.[name=dms-artifacts].hostPath.path",
+    "spec.template.spec.containers.[name=api].volumeMounts.[name=dms-artifacts].mountPath",
+    "spec.template.spec.containers.[name=controller].volumeMounts.[name=dms-artifacts].mountPath",
+}
+
+
+def _replacement_fields(block: str) -> set:
+    """replacements 블록의 (선택한 kind, fieldPaths 항목) 쌍. kind 는 가장 가까운 앞 `kind:` 줄(source·select 공통)."""
+    out, kind, fp_indent = set(), None, None
+    for line in block.splitlines():
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip())
+        if fp_indent is not None and stripped.startswith("- ") and indent >= fp_indent:
+            out.add((kind, stripped[2:].strip()))
+            continue
+        fp_indent = None
+        bare = stripped[2:].strip() if stripped.startswith("- ") else stripped
+        if bare.startswith("kind:"):
+            kind = bare.split(":", 1)[1].strip().strip("{}, ")
+        elif bare == "fieldPaths:":
+            fp_indent = indent
+    return out
+
+
 def test_overlays_do_not_patch_control_plane_deployments():
     # 이 파일의 테스트는 base 만 파싱한다 -- 오버레이가 Deployment 를 패치해
     # securityContext 를 바꾸면 여기서는 안 보인다. 그 우회를 별도로 막는다.
+    # 2026-11-03 ③(설계 v6 9 「Deployment 패치 금지 테스트를 securityContext 금지로 좁힘」): 공용 디렉터리 경로는 사이트 값이라
+    # 오버레이가 넣어야 한다 -- 허용하는 길은 kustomization.yaml 의 replacements 가 위 경로 필드만 겨냥하는 것 하나다. 전략적
+    # 머지 패치 파일·inline patch·json6902 로 Deployment 를 건드리는 것은 여전히 금지이고, 렌더 결과가 「이미지와 그 경로 말고는
+    # base 와 같다」는 것을 아래 렌더 테스트가 따로 본다(정적 검사가 놓치는 모양까지).
     overlays = REPO_ROOT / "deploy" / "overlays"
     offenders = []
     # 파일명이 patch-* 가 아니어도(예: sc.yaml) 오버레이 디렉터리의 모든 YAML 문서를
     # 본다. kustomization.yaml 은 inline patch(`patch: |`)·json6902 `target:` 이
     # 별도 파일 없이 Deployment 를 겨냥할 수 있어 원문에서 'kind: Deployment' 를 찾는다.
     for path in sorted(overlays.glob("*/*.yaml")):
+        text = path.read_text()
+        code = "\n".join(ln for ln in text.splitlines() if not ln.lstrip().startswith("#"))
+        if "securityContext" in code:
+            offenders.append(f"{path.relative_to(REPO_ROOT)}: securityContext")
         if path.name == "kustomization.yaml":
-            if "kind: Deployment" in path.read_text():
-                offenders.append(str(path.relative_to(REPO_ROOT)))
+            outside = "\n".join(ln for key in ("patches", "patchesStrategicMerge", "patchesJson6902", "resources",
+                                               "images", "components")
+                                for ln in _top_level_block(code, key).splitlines())
+            if "kind: Deployment" in outside or "Deployment" in _top_level_block(code, "patches"):
+                offenders.append(f"{path.relative_to(REPO_ROOT)}: Deployment patch")
+            fields = _replacement_fields(_top_level_block(code, "replacements"))
+            deployment_fields = {f for kind, f in fields if kind == "Deployment"}
+            if not deployment_fields <= _ALLOWED_DEPLOYMENT_FIELDS:
+                offenders.append(f"{path.relative_to(REPO_ROOT)}: replacements -> {sorted(deployment_fields)}")
             continue
         for doc in documents(path):
             kinds = [line for line in doc if line.strip().startswith("kind:")
@@ -207,7 +265,33 @@ def test_overlays_do_not_patch_control_plane_deployments():
                 offenders.append(str(path.relative_to(REPO_ROOT)))
     assert offenders == [], (
         f"오버레이가 Deployment 를 패치한다: {offenders} -- dms-api/dms-controller 의 "
-        f"securityContext 는 base 가 유일한 진실이어야 한다")
+        f"securityContext 는 base 가 유일한 진실이어야 한다(허용: replacements 의 아티팩트 경로 필드뿐)")
+
+
+def _normalized_workload(rendered: str, kind: str, name: str, artifact_path: "str | None") -> str:
+    from overlay_render import doc
+    text = doc(rendered, kind, name)
+    text = re.sub(r"(?m)^(\s*(?:- )?image: ).*$", r"\1<image>", text)
+    if artifact_path:
+        text = text.replace(artifact_path, "<artifact-path>")
+    return text
+
+
+@pytest.mark.skipif(shutil.which("kubectl") is None, reason="kubectl 없음 — 렌더 계약은 kubectl kustomize 가 필요")
+def test_overlays_change_control_plane_deployments_only_in_image_and_artifact_path():
+    # 위 정적 검사의 짝(2026-11-03 ③): 어떤 모양으로 쓰든 렌더된 dms-api·dms-controller 가 base 렌더와 이미지·아티팩트 경로
+    # 말고는 글자 그대로 같아야 한다 -- securityContext·command·볼륨 종류(type: Directory)·마운트 전파가 오버레이에서 바뀌면 빨간불.
+    from overlay_render import config_data, present_overlays, render
+    base = subprocess.run([shutil.which("kubectl"), "kustomize", str(REPO_ROOT / "deploy" / "k8s")],
+                          capture_output=True, text=True, timeout=120, env={**os.environ, "KUBECONFIG": os.devnull})
+    assert base.returncode == 0, base.stderr
+    base_path = config_data(base.stdout)["DMS_ARTIFACT_BASE_URI"][len("file://"):]
+    for overlay in present_overlays():
+        text = render(overlay)
+        path = config_data(text)["DMS_ARTIFACT_BASE_URI"][len("file://"):]
+        for name in ("dms-api", "dms-controller"):
+            assert (_normalized_workload(text, "Deployment", name, path)
+                    == _normalized_workload(base.stdout, "Deployment", name, base_path)), (overlay, name)
 
 
 # --- 사이트 중립 base(2026-09-14) ------------------------------------------------

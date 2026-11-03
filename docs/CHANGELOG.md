@@ -95,7 +95,44 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
-### ✅ ② 로그인·식별 — 아이디 기준 상한·원 IP 는 기록 전용·인증번호 6자리·대기형 보호 장치·관리자 구제·보안 이벤트 화면 — **구현·검증**(2026-11-03, 테스트베드 실증 대기)
+### ✅ ③ 공용 디렉터리(SHARED_DIR) — 아티팩트 경로 한 원천(`<SHARED_DIR>/dms/artifacts`)·hostPath 가드(exit 5)·스토리지 등록 가드·S0 초기화·S7 동작 프로브 — **구현·검증**(2026-11-03, d18 테스트베드 T3 전환·실증 대기)
+
+설계 v6(`docs/history/specs/2026-11-03-dms-k8s-prod-design.md`) 3-1·3-2·8-1 「S0·S7 세부」·9절 「③ 공유 FS 세부」·10절 T3, 사용자 결정
+#45(테스트베드도 DMS 상태를 모든 노드가 마운트한 공용 경로에)·#47(G3 는 필수 아님 — WARN). 런북은 deploy/README §2d.
+
+- **배치·원천 하나**: base(20-config·40-api·41-controller)의 아티팩트 경로(api/controller hostPath·mountPath·`DMS_ARTIFACT_BASE_URI`·
+  `DMS_ARTIFACT_BASE_ALLOWED_PREFIXES`)를 자리표시자 `/set-by-overlay.invalid/dms/artifacts` 로 바꿨다(볼륨 이름 `cephfs` → `dms-artifacts`,
+  raw apply 는 없는 경로라 뜨지 않음). 오버레이(prod·testbed-k8s — 같은 블록)의 kustomize `replacements` 가 `DMS_ARTIFACT_BASE_URI`
+  (`file://<SHARED_DIR>/dms/artifacts`) 하나에서 allowlist 와 hostPath·mountPath 를 낸다 — hostPath == mountPath == allowlist == env base,
+  `type: Directory` 만. allowlist 는 공유 FS 최상위(`/cephfs`)에서 `<SHARED_DIR>/dms/artifacts` 로 좁아졌다. 「오버레이는 제어면 Deployment 를
+  패치하지 않는다」 계약은 「이미지·이 경로 두 필드 말고는 base 와 같다」로 좁혔다. 「DirectoryOrCreate 로 바꿔라」 주석을 지웠다.
+- **prod values**: `SHARED_FS`(상대 이름) → `SHARED_DIR`(절대 경로, `/` 아님, 정규화, `^/[A-Za-z0-9._/-]+$`). 옛 키가 남으면 render FAIL +
+  이행 안내 세 가지(DB base·겹치는 스토리지·guard exit 5). 셸 환경의 `SHARED_FS`·`SHARED_DIR` 는 무시한다(values.env 만 원천). prod
+  README·values.env.example·patch-config(allowlist 키 삭제 — 두 원천 금지)·preflight 수동 확인 줄·install.sh 가드 안내를 함께 고쳤다.
+- **testbed-k8s**: `values.env`(`SHARED_DIR=/dms_shared`)를 커밋했다. 렌더 원천은 `patch-config.yaml` 의 base
+  `file:///dms_shared/dms/artifacts` 이고 values.env 는 같은 값의 기록이다(일치는 테스트가 강제, 소비자는 S7 프로브의 `--overlay`).
+- **guard-images.sh**: 렌더된 Deployment 의 hostPath 집합 != 라이브면 exit 5, `ALLOW_HOSTPATH_CHANGE=1`(`--allow-hostpath-change`)로만
+  통과 — 이미지(exit 3)가 먼저. 새 경로가 없는 노드의 FailedMount·옛 마운트 + 새 base 로 재시작한 파드의 summary 못 읽음을 막는다.
+- **스토리지 등록 가드**: mount_path·managed_root 가 DMS 상태 디렉터리(`artifact_base.dms_state_roots` — env·유효 base 가 `…/dms/artifacts`
+  꼴이면 그 부모, 아니면 base 자신)와 같음·아래·덮음이면 422 `storage_overlaps_dms_state`(생성·경로 변경만 — 비활성화·범위 토글은 막지
+  않음; 선두 `//` 는 `invalid_storage`). 「아티팩트 경로」 화면(`GET /api/admin/artifact-base` 의 `dms_state`)이 상태 디렉터리와, 그것과
+  겹치는 기존 스토리지를 경고로 보인다. 사유 코드는 reasonCodes.json·REASON_MESSAGES 양쪽.
+- **S0** `deploy/shared-dir-init.sh`(새 파일): 마운트 가드(`[ -d ]` + 포함 마운트 TARGET ≠ `/`) 뒤 3-1 트리와 센티널(`.dms-shared-id`·
+  `registry/.dms-registry-id`·`.dms-pv-id` ×5). SHARED_DIR·상위는 만들지 않고, 이미 있으면 검사만 한다(`--check` 는 검사만; 종료 0/1/2/4).
+  설계가 테스트베드 플레이북(`dms-shared-fs.yml` 의 FSTYPE == ceph 단정)의 일반화로 둔 가드를 이 스크립트가 맡고, 플레이북은 그대로 뒀다.
+- **S7** `deploy/shared-storage-probe.py`(새 파일): 노드별 일회용 Pod(설계의 「임시 DS」)로 G1·G3·G4·G5·G9·fsync 를 동작으로 판정한다
+  (FS 종류·옵션으로는 FAIL 하지 않음, G3 는 WARN, 교차 노드는 재시도 뒤 판정; 종료 0 PASS·3 WARN·1 FAIL·4 모름·2 사용법).
+- **최종 리뷰에서 고친 것**: 프로브 정리가 남 소유 0700 디렉터리(CephFS 등 — 파드 cap 에 DAC_OVERRIDE 없음)에서 `.probe-<nonce>` 를
+  남김 → lchown·fchmod 로 되찾은 뒤 지움(링크는 안 따라감) · 센티널이 모든 노드에 없을 때 WARN → FAIL 「센티널 없음(S0 미실행)」(그래서
+  exit 3 = G3 만) · 셸의 `SHARED_DIR` 가 values.env 의 빠진 줄을 채움 → 무시 · S0 스크립트가 없음 → 신설.
+- **테스트**: `test_shared_dir_contract`·`test_shared_dir_init`·`test_shared_storage_probe`·`test_storage_dms_state_guard`(새 파일),
+  `test_guard_images_context`(hostPath)·`test_release_manifest_contract`(경로 예외)·`test_prod_k8s_overlay`·`test_check_scripts_context`,
+  포탈 `ArtifactBasePage.test.tsx`(겹침 경고). 관련 11개 파일 240 passed·1 skipped(root 가 아니라 건너뜀).
+- **테스트베드**: 공용 디렉터리(호스트 `10.10.10.1:/data/dms_shared` NFS export → 3노드 `/dms_shared`, `lookupcache=positive`)는 라이브에
+  적용했다(IaC 반영은 BACKLOG). T3 전환(S0 → S7 → 옛 base 소유 보존 복사 → `ALLOW_HOSTPATH_CHANGE=1` 적용 → DB base 재저장, deploy/README
+  §2d-5)과 실증은 d18 배포 때 메인 세션이 한다 — 결과는 실증 뒤 기입. 옛 base `/cephfs/dms/artifacts` 는 보존한다.
+
+### ✅ ② 로그인·식별 — 아이디 기준 상한·원 IP 는 기록 전용·인증번호 6자리·대기형 보호 장치·관리자 구제·보안 이벤트 화면 — **완료·실증**(2026-11-03, d17)
 
 설계 v6(`docs/history/specs/2026-11-03-dms-k8s-prod-design.md`) 5절·9절 ②, 사용자 결정 #15~#23(비밀번호 최소 규칙은 넣지 않음,
 인증번호 전체 오답 1000회/시간, 전체 스위치는 기본 꺼짐·대기형, 선택 4종 모두 포함).
@@ -123,8 +160,19 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   이벤트 행·1280/375) + E3 순회에 보안 이벤트.
 - **검증(①·② 함께)**: 전체 백엔드 4588 passed(스냅숏), vitest 1847, tsc(앱·e2e), e2e 32(E17 첫 실행 1건 실패 = 테스트 결함 — 종류 코드
   칸을 부분 일치로 찾아 같은 조치의 완료 안내 메일 행을 잡음 → 정확 일치로 고친 뒤 통과), dist 외부 URL 0.
+- **테스트베드 실증(d17, 2026-11-03, 전 항목 PASS)**:
+  - 같은 출발지에서 proof-a 오답 10회 → proof-a 맞는 비밀번호도 429 `login_rate_limited`(Retry-After 45), proof-b 는 200(다른 아이디가
+    함께 잠기지 않음). 위조 `X-Real-IP: 6.6.6.6`·`X-Forwarded-For: 7.7.7.7` 은 기록되지 않음(client_ip = 10.10.10.1).
+  - 관리자 재설정 200 `sessions_revoked` → 대상의 옛 세션 401 `session_revoked`, 옛 비밀번호 401·새 비밀번호 200, 자기 자신 409.
+    브라우저로 로그인해 둔 대상은 로그인 화면에서 「비밀번호가 바뀌어 로그인이 끝났습니다」 안내.
+  - 인증번호 6자리(stub), 전체 오답 상한을 env 3 으로 낮춰 발동 → 맞는 코드도 429 `verification_global_locked` → 관리자 전체 해제 →
+    맞는 코드 200 → 상한 원복(1000).
+  - 대기형 스위치(L=2·W=60·M=5): 동시 8개 중 6개 503 `login_busy`(Retry-After 30), 3.6초 대기 뒤 응답 1건, 성공은 토큰 환불.
+    그동안 `/healthz` 328회 모두 200(최대 0.019s). 맞는 로그인 동시 30개 모두 200(최대 1.05s, scrypt 슬롯 2개).
+  - 보안 이벤트 화면 1280·375, 재설정 창, 로그인 6자리 칸 — 콘솔 오류 0·가로 넘침 0. 375폭에서 이벤트 표가 옆으로 밀리던 것을
+    좁은 화면 쌓기(같은 DOM, CSS 만)로 고쳐 d18 에 싣는다.
 
-### ✅ ① B3 — ref 기록이 끊긴 틱의 잡 객체를 이어 받거나 회수한다(409 AlreadyExists 를 잡 실패로 접지 않음) — **구현·검증**(2026-11-03, 테스트베드 실증 대기)
+### ✅ ① B3 — ref 기록이 끊긴 틱의 잡 객체를 이어 받거나 회수한다(409 AlreadyExists 를 잡 실패로 접지 않음) — **완료·실증**(2026-11-03, d17)
 
 설계 v6 9절 「① B3 세부」(사용자 승인).
 
@@ -162,8 +210,13 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
 5. 설계에 없던 확장: **create 결과 모름(5xx·429·타임아웃)도 다시 읽어 같은 판정**을 한다.
 6. 설계에 없던 삭제 경로: **성공 아닌 종단·취소 때 라벨(전체 job_id)로 ref 밖의 이 잡 객체를 지운다**.
 
+**테스트베드 실증(d17, 2026-11-03, PASS)** — drain 으로 잡을 Pending 에 묶고 컨트롤러가 지을 preflight 파드를 같은 이름·라벨·지문으로
+미리 만든 뒤(`_record_ref` 직전 끊김과 같은 모양) drain 을 풀었다:
+- 그대로: 그 파드(uid 하나)를 채택 → Pending→Preflight→Running→Succeeded, `submit_adopted` 이벤트·요청 단계 행 주석.
+- 지문 변조: Rejected `preflight_submit_failed:submit_failed`, 미리 만든 파드를 컨트롤러가 회수(payload `reclaimed`).
+- 남의 라벨: Rejected, 그 객체는 건드리지 않음(종단 20초 뒤에도 같은 uid).
+
 **남은 것**:
-- 테스트베드 실증(DB 끊김 흉내 — ref 기록 직전 실패 → 다음 틱 채택, 회수 이벤트)은 메인 세션 몫이다.
 - 겹친 컨트롤러가 다른 쪽이 기록한 끝난 재점검을 만나면 그 틱은 `step_error`(SubmitUndecided)로 남는다(무해한 경보).
 - 앞 틱 객체 + 이번 5xx 로 채택된 경우 `submit_adopted` 주석이 없다.
 - 둘째 실행 관문(GATE_EXECUTION) 보류 뒤 재점검이 오래된 것은 기존 한계 그대로다.

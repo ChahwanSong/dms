@@ -74,7 +74,7 @@ PostgreSQL(제어면) + React 포탈 + 노드 에이전트 + Volcano gang-schedu
   ssc 클러스터(컨텍스트 `dms`, pkg-01:5000, LDAP 사용)의 오버레이 `deploy/overlays/testbed` 는 **dms-ssc 에만** 있다
   (이 브랜치에선 2026-10-26 LDAP 코드 삭제 때 지웠다 — 되살리지 마라); 이 브랜치의 테스트베드 오버레이는
   `deploy/overlays/testbed-k8s` = **k8s 클러스터**(컨텍스트 `dmsk8s`, pkg-01:5001, 태그 `dN` — d1 부터, 2026-10-26 전엔 `kN`,
-  **LDAP 없음** — 사용자 결정) 하나고 **dms-k8s 에서만**(2026-10-22 분리 뒤 이 클러스터의 빌드 소스는 dms-k8s 체크아웃)
+  **LDAP 없음** — 사용자 결정, 공용 디렉터리 `/dms_shared`) 하나고 **dms-k8s 에서만**(2026-10-22 분리 뒤 이 클러스터의 빌드 소스는 dms-k8s 체크아웃)
   bump. 두 클러스터가 같은 네임스페이스(dms)라 **kubectl 은 늘 `--context` 를
   명시**한다(current-context 는 dms; dmsk8s 를 current 로 만들지 마라). 적용은
   항상 `kubectl --context <ctx> apply -k deploy/overlays/<site>` — raw `kubectl apply -f deploy/k8s` 는
@@ -86,6 +86,11 @@ PostgreSQL(제어면) + React 포탈 + 노드 에이전트 + Volcano gang-schedu
   LDAP 키·env 를 다시 더하지 마라. 포탈 빌드는 이미지에 COPY 되는 사본만 스탬프하므로
   (`build_manifests`) 포탈에서 태그를 지정해 빌드·릴리스하면 live == 동봉 매니페스트라
   드리프트 배지가 안 뜨고, 동봉값이 자리표시자·타 레지스트리면 배지는 "모름"(None) 이다.
+  **아티팩트 경로도 같다**(2026-11-03 ③): api/controller hostPath·mountPath·`DMS_ARTIFACT_BASE_URI`·allowlist 는 base 에서
+  자리표시자(`/set-by-overlay.invalid/dms/artifacts`)이고 오버레이 replacements 가 `DMS_ARTIFACT_BASE_URI`(`file://<SHARED_DIR>/dms/artifacts`
+  — prod 는 values.env `SHARED_DIR`, testbed-k8s 는 patch-config) 하나에서 낸다 — hostPath 는 늘 `type: Directory`(DirectoryOrCreate
+  금지), guard-images.sh 는 hostPath 변경도 거부(exit 5, `ALLOW_HOSTPATH_CHANGE=1`), S0·확인은 `deploy/shared-dir-init.sh`·
+  `deploy/shared-storage-probe.py`, `<SHARED_DIR>/dms` 와 겹치는 스토리지 등록은 422 `storage_overlaps_dms_state`(deploy/README.md §2d).
 - **워크트리 공유 중 커밋은 `git commit -- <경로>`**(pathspec). `git add` 로 인덱스를
   거치면 다른 세션 커밋에 파일이 섞인다(실제 사고 있었음, BACKLOG §5).
 - **PYTHONPATH 함정**: venv 의 `dms` 편집설치는 **본 저장소** src 를 가리킨다. 워크트리

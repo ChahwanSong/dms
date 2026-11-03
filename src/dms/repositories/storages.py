@@ -1,6 +1,6 @@
 import posixpath
 import re
-from ..artifact_base import ARTIFACT_MOUNT
+from ..artifact_base import ARTIFACT_MOUNT, overlaps_dms_state
 from ..db import Database, dump_json, load_json, utc_now_iso
 from ..domain import DomainValidationError
 from .k8s import OWNER_ID_MAX, PV_CAPABLE_KINDS, STORAGE_KINDS, delete_maps_for_storage_in_txn, storage_kind
@@ -52,6 +52,11 @@ def _validate(storage_name, mount_path, managed_root, backend_type):
         # 이유가 "/" 를 살리는 것이었고, 이제 위에서 명시 거부한다(이중 봉인).
         if not p.startswith("/") or posixpath.normpath(p) != p.rstrip("/"):
             raise DomainValidationError("invalid_storage", f"bad path {p!r}")
+        if p.startswith("//"):
+            # 선두 '//'(2026-11-03 리뷰): posixpath.normpath 가 POSIX 의 구현 정의 '//' 를 보존해 위 정규형 검사를 통과하지만
+            # 리눅스에서는 '/' 와 같은 경로다 -- 살려 두면 문자열로 비교하는 가드(아래 ARTIFACT_MOUNT 충돌, _check_dms_state)를
+            # '//dms-artifact-base'·'//<SHARED_DIR>' 로 빠져나간다. 정당한 표기가 아니므로 형식 오류로 거부한다.
+            raise DomainValidationError("invalid_storage", f"bad path {p!r}")
     mount = posixpath.normpath(mount_path)
     root = posixpath.normpath(managed_root)
     if root != mount and not root.startswith(mount + "/"):
@@ -62,6 +67,18 @@ def _validate(storage_name, mount_path, managed_root, backend_type):
         # 같은 mountPath 가 둘이면 파드 스펙이 거부되거나 한쪽이 가려진다.
         raise DomainValidationError("invalid_storage",
                                     f"mount_path collides with {ARTIFACT_MOUNT}")
+
+
+def _check_dms_state(mount_path, managed_root, protected_roots) -> None:
+    """스토리지 경로가 DMS 상태 디렉터리(<SHARED_DIR>/dms -- 아티팩트·PG·레지스트리·백업)와 겹치면 거부(2026-11-03 ③, 설계 v6
+    3-1 「<SHARED_DIR> 는 DMS 스토리지로 등록 금지」). 같음·아래(하위)·덮음(상위, SHARED_DIR 자신 포함) 셋 다다: 잡 파드는
+    스토리지 mount_path 를 root 로 hostPath 마운트하므로(execution_volcano._volumes) 덮는 스토리지 하나면 sync·rm 잡 컨테이너에
+    PG 데이터·레지스트리·백업(비밀번호 해시·봉인된 키)과 남의 아티팩트가 통째로 보이고, 관리 루트가 그 안이면 잡이 상태를 직접
+    지우거나 덮어쓴다. protected_roots 는 호출자(routes_storages)가 artifact_base.dms_state_roots 로 준다 -- 저장소 계층은
+    설정을 모른다. 빈 튜플이면 검사하지 않는다(경로를 안 바꾸는 갱신 -- 비활성화 같은 비상 조작을 막지 않는다)."""
+    for p in (mount_path, managed_root):
+        if overlaps_dms_state(p, protected_roots):
+            raise DomainValidationError("storage_overlaps_dms_state", f"{p!r} overlaps {list(protected_roots)!r}")
 
 
 def storage_open_to_users(row) -> bool:
@@ -89,10 +106,11 @@ class StoragesRepository:
 
     def create(self, *, storage_name, mount_path, managed_root, backend_type, actor,
                enabled: bool = True, user_enabled: bool = True, kind: str = "filesystem",
-               default_uid: int = 0, default_gid: int = 0):
+               default_uid: int = 0, default_gid: int = 0, protected_roots: tuple = ()):
         """default_uid·default_gid = PV 목적지 sync 결과의 기본 소유자(2026-10-26, 생략 = 0:0 = root:root). 늘 명시 정수로
-        쓴다(NULL 은 기배포 ALTER 직후 행만의 모양이다)."""
+        쓴다(NULL 은 기배포 ALTER 직후 행만의 모양이다). protected_roots = 겹치면 안 되는 DMS 상태 디렉터리(_check_dms_state)."""
         _validate(storage_name, mount_path, managed_root, backend_type)
+        _check_dms_state(mount_path, managed_root, protected_roots)
         _validate_kind(kind)
         _validate_owner_id(default_uid, "default_uid")
         _validate_owner_id(default_gid, "default_gid")
@@ -117,7 +135,7 @@ class StoragesRepository:
 
     def update(self, storage_name, *, mount_path, managed_root, backend_type,
                enabled: bool, actor, user_enabled: bool | None = None, kind: str | None = None,
-               default_uid: int | None = None, default_gid: int | None = None):
+               default_uid: int | None = None, default_gid: int | None = None, protected_roots: tuple = ()):
         """user_enabled=None 은 "건드리지 않음"(현재 값 유지) -- 필드를 모르는 옛 클라이언트가
         경로만 고치는 PUT 이 관리자 전용 스토리지를 조용히 사용자에게 다시 열지 않게 한다. kind=None 도 같다(유지).
         default_uid·default_gid=None 도 같다(유지 -- 옛 클라이언트와 목록 화면의 사용 범위 PUT 이 보내지 않는다; 칸마다 따로).
@@ -127,8 +145,12 @@ class StoragesRepository:
         종류 전환(dms-k8s 설계 D10): StorageClass 매핑이 걸린 스토리지를 PV 를 담지 않는 종류(filesystem)로 바꾸면
         storage_has_sc_mappings -- 매핑이 「PV 를 담지 않는 스토리지」를 가리킨 채 매달리지 않게(해석은 그 매핑을 unmapped 로
         읽는다). 판정은 스토리지 행을 잠근 같은 트랜잭션에서 한다(repositories.k8s.set_sc_map 이 같은 행을 잠그고 종류를
-        본다 -- 둘이 엇갈려 「filesystem 인데 매핑 있음」이 생기지 않게)."""
+        본다 -- 둘이 엇갈려 「filesystem 인데 매핑 있음」이 생기지 않게).
+
+        protected_roots(2026-11-03 ③): 호출자가 경로를 **바꿀 때만** 준다(routes_storages.update_storage) -- 가드 이전에 등록된
+        겹치는 행도 비활성화·사용 범위 토글은 막지 않는다(진행 중 잡의 비상 차단 경로)."""
         _validate(storage_name, mount_path, managed_root, backend_type)
+        _check_dms_state(mount_path, managed_root, protected_roots)
         if kind is not None:
             _validate_kind(kind)
         if default_uid is not None:

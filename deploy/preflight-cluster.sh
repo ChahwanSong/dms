@@ -163,8 +163,8 @@ H "5. 공인 존 노드 라벨 / 스토리지 (부분 자동)"
 NPUB=$(kubectl get nodes -l network-zone=public --no-headers 2>/dev/null | wc -l | tr -d ' ')
 [ "$NPUB" -gt 0 ] && P "network-zone=public 노드 ${NPUB}개" \
                   || W "network-zone=public 라벨 노드 없음 -- 공인 라우팅 닿는 노드에 라벨 필요(VIP 광고 자격). kubectl label node <노드> network-zone=public"
-M "공유 FS 마운트: 컨트롤러/잡 노드에 스토리지가 물려 있고 <base>/dms/artifacts, 각 managed_root 가 mkdir 됐는지는 노드에서 직접 확인(스크립트 밖)"
-M "base hostPath 경로(/cephfs 등)가 사내 실제 마운트 경로와 같은지 -- 다르면 base 수정/hostPath 패치 필요"
+M "공용 디렉터리: values.env 의 SHARED_DIR 가 모든 마스터·워커의 같은 경로에 마운트돼 있고 S0(한 노드에서 root 로 sh deploy/shared-dir-init.sh <SHARED_DIR>)를 마쳤는지 -- python3 deploy/shared-storage-probe.py --context <ctx> --shared-dir <SHARED_DIR> --image <dms 이미지> (2026-11-03)"
+M "각 스토리지 managed_root 가 mkdir 됐는지는 노드에서 직접 확인(스크립트 밖). <SHARED_DIR>/dms 와 그 상위·하위는 스토리지로 등록할 수 없다"
 
 H "요약"
 printf '  PASS %d · WARN %d · FAIL %d\n' "$pass" "$warn" "$fail"

@@ -9,10 +9,13 @@ apply" 가 새 사고 유형이다. 오버레이 디렉터리의 `kube-context` 
 (가짜가 모든 호출을 기록한다) 함께 본다. 이 호스트 /bin/sh = dash 로 실제 스크립트를 돌린다.
 """
 import os
+import re
 import subprocess
 from pathlib import Path
 
 import pytest
+
+from overlay_render import needs_kubectl, render
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 GUARD = REPO_ROOT / "deploy" / "overlays" / "guard-images.sh"
@@ -65,6 +68,12 @@ if [ "$1" = "config" ]; then
 fi
 name=$(printf '%s\n' "$*" | sed -n 's/.* get [a-z]* \([a-z-]*\) .*/\1/p' | tr '-' '_')
 eval "live=\${FAKE_LIVE_$name:-}"
+case "$*" in
+  *hostPath*)
+    # hostPath 조회(2026-11-03): 워크로드가 있으면(FAKE_LIVE_<이름>) FAKE_HP_<이름>(\n 구분, 없으면 hostPath 0개)을 돌려준다.
+    if [ -n "$live" ]; then eval "hp=\${FAKE_HP_$name:-}"; printf '%b' "$hp"; exit 0; fi
+    echo 'Error from server (NotFound)' >&2; exit 1 ;;
+esac
 if [ -n "$live" ]; then printf '%s' "$live"; exit 0; fi
 echo 'Error from server (NotFound)' >&2; exit 1
 """
@@ -81,14 +90,14 @@ def _overlay(tmp_path, context_file=None, name="ovl"):
     return d
 
 
-def _run(tmp_path, overlay, *args, current="dms", contexts="dms dmsk8s", live=None, extra_env=None):
+def _run(tmp_path, overlay, *args, current="dms", contexts="dms dmsk8s", live=None, extra_env=None, rendered=RENDERED):
     bindir = tmp_path / "bin"
     if not bindir.exists():
         bindir.mkdir()
         shim = bindir / "kubectl"
         shim.write_text(FAKE_KUBECTL)
         shim.chmod(0o755)
-        (tmp_path / "rendered.yaml").write_text(RENDERED)
+    (tmp_path / "rendered.yaml").write_text(rendered)
     log = tmp_path / "kubectl.log"
     log.write_text("")
     env = {"PATH": f"{bindir}{os.pathsep}/usr/bin:/bin",
@@ -180,6 +189,138 @@ def test_image_change_is_still_refused_on_the_right_context(tmp_path):
     assert "Deployment/dms-api: live=reg/dms:k0 -> overlay=reg/dms:k1" in r.stderr
     r, _ = _run(tmp_path, ovl, "--context", "dmsk8s", live=live, extra_env={"ALLOW_IMAGE_CHANGE": "1"})
     assert r.returncode == 0, (r.stdout, r.stderr)
+
+
+# --- hostPath 변경(2026-11-03 ③ 리뷰 — 공용 디렉터리 전환) -------------------------------
+
+# kustomize 출력 모양 그대로(키 정렬): api 는 아티팩트 hostPath 하나, controller 도 하나, 에이전트(DaemonSet)의 hostPath 는
+# 비교 대상이 아니다.
+RENDERED_HP = """\
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/name: dms-api
+  name: dms-api
+  namespace: dms
+spec:
+  template:
+    spec:
+      containers:
+      - image: reg/dms:k1
+        name: api
+        volumeMounts:
+        - mountPath: /dms_shared/dms/artifacts
+          name: dms-artifacts
+      volumes:
+      - hostPath:
+          path: /dms_shared/dms/artifacts
+          type: Directory
+        name: dms-artifacts
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dms-controller
+  namespace: dms
+spec:
+  template:
+    spec:
+      containers:
+      - image: reg/dms:k1
+        name: controller
+      volumes:
+      - emptyDir: {}
+        name: tmp
+      - hostPath:
+          path: /dms_shared/dms/artifacts
+          type: Directory
+        name: dms-artifacts
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: dms-agent
+  namespace: dms
+spec:
+  template:
+    spec:
+      containers:
+      - image: reg/dms-agent:k1
+        name: agent
+      volumes:
+      - hostPath:
+          path: /
+          type: Directory
+        name: host-root
+"""
+LIVE_ALL = {**LIVE_SAME, "FAKE_LIVE_dms_controller": "reg/dms:k1"}
+HP_OLD = {"FAKE_HP_dms_api": "/cephfs\\n", "FAKE_HP_dms_controller": "\\n/cephfs\\n"}       # 옛 배치(d16): /cephfs
+HP_NEW = {"FAKE_HP_dms_api": "/dms_shared/dms/artifacts", "FAKE_HP_dms_controller": "\\n/dms_shared/dms/artifacts\\n"}
+
+
+def test_hostpath_change_is_refused_with_exit_5_even_when_images_match(tmp_path):
+    # ③ 을 담은 오버레이를 공용 디렉터리 전환 전에 태그 bump 용으로 apply 하는 사고: 이미지 가드는 통과하지만 api·controller 가
+    # 없는 hostPath 로 롤아웃돼 멈춘다 -- 같은 가드가 막는다.
+    ovl = _overlay(tmp_path, "dmsk8s\n")
+    r, calls = _run(tmp_path, ovl, "--context", "dmsk8s", live={**LIVE_ALL, **HP_OLD}, rendered=RENDERED_HP)
+    assert r.returncode == 5, (r.stdout, r.stderr)
+    assert "Deployment/dms-api hostPath: live=[ /cephfs ] -> overlay=[ /dms_shared/dms/artifacts ]" in r.stderr
+    assert "Deployment/dms-controller hostPath" in r.stderr and "dms-agent" not in r.stderr
+    assert "ALLOW_HOSTPATH_CHANGE=1" in r.stderr
+    hp_gets = [c for c in _gets(calls) if "hostPath" in c]
+    assert len(hp_gets) == 2 and all(c.startswith("--context dmsk8s -n dms get deploy ") for c in hp_gets), calls
+
+
+@pytest.mark.parametrize("how", ["env", "flag"])
+def test_hostpath_change_passes_only_with_the_explicit_permission(tmp_path, how):
+    ovl = _overlay(tmp_path, "dmsk8s\n")
+    args, env = (["--allow-hostpath-change"], None) if how == "flag" else ([], {"ALLOW_HOSTPATH_CHANGE": "1"})
+    r, _ = _run(tmp_path, ovl, "--context", "dmsk8s", *args, live={**LIVE_ALL, **HP_OLD}, extra_env=env,
+                rendered=RENDERED_HP)
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    assert "hostPath 변경 허용" in r.stdout and "kubectl --context dmsk8s apply -k" in r.stdout
+
+
+def test_same_hostpaths_or_first_install_pass(tmp_path):
+    ovl = _overlay(tmp_path, "dmsk8s\n")
+    r, _ = _run(tmp_path, ovl, "--context", "dmsk8s", live={**LIVE_ALL, **HP_NEW}, rendered=RENDERED_HP)
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    assert "변경 없음" in r.stdout
+    r, _ = _run(tmp_path, ovl, "--context", "dmsk8s", rendered=RENDERED_HP)          # 라이브 없음 = 첫 설치
+    assert r.returncode == 0, (r.stdout, r.stderr)
+
+
+def test_live_deployment_without_hostpath_is_a_change(tmp_path):
+    ovl = _overlay(tmp_path, "dmsk8s\n")
+    r, _ = _run(tmp_path, ovl, "--context", "dmsk8s", live=LIVE_ALL, rendered=RENDERED_HP)
+    assert r.returncode == 5, (r.stdout, r.stderr)
+    assert "live=[ ] -> overlay=[ /dms_shared/dms/artifacts ]" in r.stderr
+
+
+def test_image_and_hostpath_change_need_both_permissions(tmp_path):
+    ovl = _overlay(tmp_path, "dmsk8s\n")
+    live = {**LIVE_ALL, "FAKE_LIVE_dms_api": "reg/dms:k0", **HP_OLD}
+    r, _ = _run(tmp_path, ovl, "--context", "dmsk8s", live=live, rendered=RENDERED_HP)
+    assert r.returncode == 3, (r.stdout, r.stderr)                 # 이미지가 먼저
+    r, _ = _run(tmp_path, ovl, "--context", "dmsk8s", live=live, rendered=RENDERED_HP,
+                extra_env={"ALLOW_IMAGE_CHANGE": "1"})
+    assert r.returncode == 5, (r.stdout, r.stderr)
+    r, _ = _run(tmp_path, ovl, "--context", "dmsk8s", "--allow-hostpath-change", live=live, rendered=RENDERED_HP,
+                extra_env={"ALLOW_IMAGE_CHANGE": "1"})
+    assert r.returncode == 0, (r.stdout, r.stderr)
+
+
+@needs_kubectl
+def test_repo_testbed_render_against_the_pre_switch_live_layout_is_refused(tmp_path):
+    # 실제 testbed-k8s 렌더(SHARED_DIR=/dms_shared) 대 전환 전 라이브(d16 -- /cephfs 하나) -- 태그를 맞춰도 5 로 멈춘다.
+    rendered = render("testbed-k8s")
+    img = re.search(r"image: (\S+/dms:\S+)", rendered).group(1)
+    agent = re.search(r"image: (\S+/dms-agent:\S+)", rendered).group(1)
+    live = {"FAKE_LIVE_dms_api": img, "FAKE_LIVE_dms_controller": img, "FAKE_LIVE_dms_agent": agent, **HP_OLD}
+    ovl = _overlay(tmp_path, "dmsk8s\n")
+    r, _ = _run(tmp_path, ovl, "--context", "dmsk8s", live=live, rendered=rendered)
+    assert r.returncode == 5, (r.stdout, r.stderr)
 
 
 # --- 고정 없는 오버레이(prod·ssc 사이트) — 종전 동작 ---------------------------------

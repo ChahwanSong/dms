@@ -630,10 +630,17 @@ export interface ArtifactRetention {
   days: number; pending: number; stalled: number; oldest_requested_at: string | null;
   last_error: string | null; expired_jobs: number;
 }
+export interface ArtifactBaseDmsState {
+  roots: string[];
+  overlapping_storages: { storage_name: string; mount_path: string; managed_root: string; enabled: boolean }[];
+}
+
 export interface ArtifactBaseInfo {
   effective: string; source: "db" | "env"; db_value: string | null; env_value: string;
   locked_by_jobs: number;
   artifact_retention?: ArtifactRetention;
+  // DMS 상태 디렉터리(<SHARED_DIR>/dms, 2026-11-03 ③)와 그것과 겹치는 이미 등록된 스토리지(routes_artifact_base._dms_state).
+  dms_state?: ArtifactBaseDmsState;
   checks: {
     api: { ok: boolean; reason: string | null };
     controller: ArtifactBaseControllerCheck;

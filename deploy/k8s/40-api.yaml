@@ -19,10 +19,20 @@
 # The same partial unique index treatment is needed for releases with state IN
 # ('Pending','Applying') before replicas > 1.
 #
-# /cephfs hostPath is REQUIRED and read-write: routes_artifact_base.py creates
-# and unlinks a probe file under the artifact base (3-hop check), and
-# routes_artifacts.py / routes_scan_paths.py / routes_usage.py read files in
-# the requester-owned <base>/<job_id>/<phase>/ directories.
+# The artifact-base hostPath (volume dms-artifacts) is REQUIRED and read-write:
+# routes_artifact_base.py creates and unlinks a probe file under the artifact
+# base (3-hop check), and routes_artifacts.py / routes_scan_paths.py /
+# routes_usage.py read files in the requester-owned <base>/<job_id>/<phase>/
+# directories.
+#
+# 공용 디렉터리(2026-11-03 ③, 설계 v6 3-1·3-2): 이 볼륨은 **<SHARED_DIR>/dms/artifacts 하나**만 같은 경로로 붙인다
+# (hostPath == mountPath — 제어면은 base 를 호스트 경로 문자열 그대로 연다). 여기 경로는 이미지처럼 사이트 중립
+# 자리표시자(/set-by-overlay.invalid/dms/artifacts)이고, 오버레이가 dms-config 의 DMS_ARTIFACT_BASE_URI 하나에서
+# kustomize replacements 로 이 두 필드와 allowlist 를 함께 낸다(deploy/overlays/<site>/kustomization.yaml) -- 그래서
+# 「hostPath == allowlist == env base」가 구성상 같고 tests/test_shared_dir_contract.py 가 렌더 결과로 고정한다. raw apply 는
+# 없는 경로라 파드가 뜨지 않는다(의도). 예전처럼 마운트포인트 자체(/cephfs)를 붙이면 마운트가 빠진 노드에서 빈 로컬
+# 디렉터리로 Directory 검사를 통과해 조용히 로컬 디스크에 쓴다 -- 하위 경로라야 fail-closed 다(G2). 그래서 type 은 늘
+# Directory 이고 DirectoryOrCreate 는 금지다(마운트 없는 노드에 디렉터리를 만들어 같은 함정을 되살린다).
 #
 # root (2026-09-09): the `api` container runs as uid 0 (container-level
 # securityContext below). Production artifact bases are root:root, so 65532
@@ -58,11 +68,9 @@
 # `kubectl apply -k deploy/overlays/<site>`. The portal build stamps the copy
 # baked into the image (build_manifests), never this checkout.
 #
-# NOTE: `type: Directory` means this pod FAILS to start on any node without a
-# real /cephfs mount. That's fine as long as dms-api only schedules onto the
-# w1-5 workers (all of which mount cephfs-dms per the testbed) -- if the
-# cluster grows a non-cephfs worker, add a nodeSelector/affinity here (or
-# switch to DirectoryOrCreate to degrade instead of failing).
+# `type: Directory` 는 <SHARED_DIR>/dms/artifacts 가 없는 노드(공용 스토리지 미마운트·S0 초기화(deploy/shared-dir-init.sh) 전)에서 이 파드를
+# 띄우지 않는다(2026-11-03 ③) -- 공용 스토리지 계약 G1 이 「모든 마스터·워커의 같은 경로」라 정상 노드에서는 늘 있다.
+# 확인은 deploy/shared-storage-probe.py(S7 동작 프로브). 실패를 DirectoryOrCreate 로 「완화」하지 마라(위 G2).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -150,8 +158,9 @@ spec:
               port: http
             periodSeconds: 30
           volumeMounts:
-            - name: cephfs
-              mountPath: /cephfs
+            # 경로는 오버레이 replacements 가 hostPath 와 같은 값으로 바꾼다(헤더 「공용 디렉터리」).
+            - name: dms-artifacts
+              mountPath: /set-by-overlay.invalid/dms/artifacts
               mountPropagation: HostToContainer
           resources:
             requests:
@@ -161,9 +170,9 @@ spec:
               cpu: "1"
               memory: 1Gi
       volumes:
-        - name: cephfs
+        - name: dms-artifacts
           hostPath:
-            path: /cephfs
+            path: /set-by-overlay.invalid/dms/artifacts
             type: Directory
 ---
 apiVersion: v1

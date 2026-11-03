@@ -3,8 +3,8 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
-from ..artifact_base import (allowlist_reason, normalize_artifact_base,
-                             roundtrip_artifact_base, strip_scheme)
+from ..artifact_base import (allowlist_reason, dms_state_roots, normalize_artifact_base,
+                             overlaps_dms_state, roundtrip_artifact_base, strip_scheme)
 from ..domain import DomainValidationError
 from .auth import Identity, audit_actor, require_admin, require_session_admin
 
@@ -70,6 +70,21 @@ def _node_checks(repos, settings, effective_path) -> list[dict]:
     return nodes
 
 
+def _dms_state(repos, settings) -> dict:
+    """DMS 상태 디렉터리(<SHARED_DIR>/dms -- artifact_base.dms_state_roots)와 그것과 겹치는 **이미 등록된** 스토리지(2026-11-03
+    ③ 리뷰). 등록 가드(routes_storages)는 생성·경로 변경에만 걸리므로, 가드 이전에 등록됐거나 SHARED_DIR 이행(옛 SHARED_FS 최상위를
+    그대로 SHARED_DIR 로)으로 새로 겹치게 된 행은 아무 데도 드러나지 않는다 -- 잡 파드가 그 mount_path 를 root 로 hostPath 마운트해
+    남의 아티팩트(이후 PG·레지스트리·백업)가 잡 컨테이너에 보이는데도. 그래서 이 화면이 그 목록을 경고로 싣는다(차단은 하지 않는다
+    -- 진행 중 잡의 비상 비활성화를 막지 않는다). roots 는 운영자가 「어디가 등록 금지인가」를 보는 자리이기도 하다."""
+    roots = dms_state_roots(repos.control, settings)
+    overlapping = [
+        {"storage_name": r["storage_name"], "mount_path": r["mount_path"], "managed_root": r["managed_root"],
+         "enabled": bool(r["enabled"])}
+        for r in repos.storages.list()
+        if overlaps_dms_state(r["mount_path"], roots) or overlaps_dms_state(r["managed_root"], roots)]
+    return {"roots": list(roots), "overlapping_storages": overlapping}
+
+
 def _check_path(path: str, settings) -> "str | None":
     """(a) 즉석 검증 = allowlist → 쓰기 왕복. 컨트롤러 홉(artifact_base.
     controller_check_once)과 같은 순서·같은 두 함수라 두 홉의 판정이 갈리지 않는다.
@@ -101,6 +116,7 @@ def _payload(request: Request) -> dict:
         # 잡 수). 관리자 화면이 보존 정책을 볼 수 있는 유일한 자리다 -- 결과 파일이 이 base 아래에 있으니 여기 둔다.
         "artifact_retention": {"days": settings.artifact_retention_days,
                                **repos.request_purges.expiry_status()},
+        "dms_state": _dms_state(repos, settings),
         "checks": {
             "api": {"ok": api_reason is None, "reason": api_reason},
             "controller": _controller_check(row, effective),

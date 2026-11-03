@@ -115,8 +115,10 @@ fi
 # 이미지 변경 가드(2026-09-14): 포탈 릴리스 뒤 values.env 태그를 안 맞춘 채 install.sh 를
 # 다시 돌리면 라이브 이미지가 옛 태그로 되돌아간다 -- 렌더 이미지 != 라이브면 거부한다.
 # 의도한 이미지 변경(업그레이드)은 ALLOW_IMAGE_CHANGE=1 sh install.sh 로 명시한다.
-step "2b. 이미지 변경 가드 (렌더 이미지 == 라이브가 아니면 거부; ALLOW_IMAGE_CHANGE=1 로 허용)"
-sh "$HERE/overlays/guard-images.sh" "$DIR" || die "가드 거부 -- values.env 의 DMS_TAG/DMS_AGENT_TAG 를 라이브에 맞추거나 ALLOW_IMAGE_CHANGE=1 로 재실행"
+# hostPath 가드(2026-11-03 ③): 렌더 hostPath(공용 디렉터리 배치 <SHARED_DIR>/dms/...) != 라이브면 exit 5 로 거부한다 -- SHARED_DIR
+# 이행·변경은 노드 마운트·S0·프로브·복사 뒤에 ALLOW_HOSTPATH_CHANGE=1 로 명시한다(deploy/README.md 전환 런북).
+step "2b. 이미지·hostPath 변경 가드 (렌더 != 라이브면 거부; ALLOW_IMAGE_CHANGE=1 / ALLOW_HOSTPATH_CHANGE=1 로 허용)"
+sh "$HERE/overlays/guard-images.sh" "$DIR" || die "가드 거부 -- 위 [guard] 안내대로: 이미지(exit 3)는 values.env 의 DMS_TAG/DMS_AGENT_TAG 를 라이브에 맞추거나 ALLOW_IMAGE_CHANGE=1, hostPath(exit 5)는 공용 디렉터리 전환 런북을 마친 뒤 ALLOW_HOSTPATH_CHANGE=1 로 재실행"
 
 step "3. 적용 (kubectl apply -k)"
 # migrate Job 은 spec 불변이라 이미지 태그가 바뀌면 apply 가 못 고친다 — 재실행

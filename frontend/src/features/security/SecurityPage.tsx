@@ -358,8 +358,8 @@ const str = (v: unknown): string | null => (typeof v === "string" && v !== "" ? 
 function EventDetail({ e }: { e: SecurityEvent }) {
   const entries = e.payload === null ? [] : Object.entries(e.payload);
   return (
-    <tr>
-      <td colSpan={6} className="pb-3">
+    <tr className="max-sm:block">
+      <td colSpan={6} className="pb-3 max-sm:block">
         <div className="bg-panel rounded-card p-3 text-xs space-y-1">
           {e.payload === null || entries.length === 0 ? <p className="text-muted">추가 기록이 없습니다</p> : (
             <dl className="space-y-1">
@@ -442,35 +442,39 @@ function EventsCard() {
           <p className="text-muted">{filtered ? "조건에 맞는 이벤트가 없습니다" : "기록된 보안 이벤트가 없습니다"}</p>
         ) : (
           <>
+            {/* 좁은 화면(< sm, 2026-11-03 d17 실증 375폭 「종류」 열이 옆으로 밀림): 같은 DOM 을 CSS 로만 쌓는다 --
+                1줄 시각·심각도·펼치기, 다음 줄 종류 → 서버 메시지 → 출발지. 머리줄은 숨기고 출발지는 ::before 로 이름을 단다
+                (텍스트 노드를 늘리지 않아 표 의미·테스트 조회가 그대로다). tbody 를 block 으로 바꿔 펼침 행(colSpan)과 섞여도
+                열 폭이 갈라지지 않는다. */}
             <Table>
-              <thead>
+              <thead className="max-sm:hidden">
                 <tr className="text-muted whitespace-nowrap">
                   <th className="py-2 pr-3">시각</th><th className="pr-3">종류</th><th className="pr-3">심각도</th>
                   <th className="pr-3">서버 메시지</th><th className="pr-3">출발지</th><th>상세</th>
                 </tr>
               </thead>
-              <tbody>
+              <tbody className="max-sm:block">
                 {rows.map((e) => {
                   const sev = ownValue(SEVERITY, e.severity) ?? { variant: "neutral" as const, label: e.severity };
                   const ip = str(e.payload?.client_ip);
                   const peer = str(e.payload?.peer);
                   return (
                     <Fragment key={e.id}>
-                      <tr className="border-t border-black/5 align-top">
-                        <td className="py-2 pr-3 whitespace-nowrap text-muted">{kstStamp(e.at)}</td>
-                        <td className="py-2 pr-3 min-w-[10rem]">
+                      <tr className="border-t border-black/5 align-top max-sm:flex max-sm:flex-wrap max-sm:items-center max-sm:gap-x-2 max-sm:gap-y-1 max-sm:py-2">
+                        <td className="py-2 pr-3 whitespace-nowrap text-muted max-sm:order-1 max-sm:p-0 max-sm:text-xs">{kstStamp(e.at)}</td>
+                        <td className="py-2 pr-3 min-w-[10rem] max-sm:order-4 max-sm:basis-full max-sm:min-w-0 max-sm:p-0">
                           <span className="block">{eventLabel(e.event_type)}</span>
                           <span className="block font-mono text-xs text-muted">{e.event_type}</span>
                         </td>
-                        <td className="py-2 pr-3 whitespace-nowrap">
+                        <td className="py-2 pr-3 whitespace-nowrap max-sm:order-2 max-sm:p-0">
                           <StatusPill state={e.severity} variant={sev.variant} label={sev.label} />
                         </td>
-                        <td className="py-2 pr-3 min-w-[14rem] break-words [overflow-wrap:anywhere]">{e.message ?? "—"}</td>
-                        <td className="py-2 pr-3 whitespace-nowrap font-mono text-xs">
+                        <td className="py-2 pr-3 min-w-[14rem] break-words [overflow-wrap:anywhere] max-sm:order-5 max-sm:basis-full max-sm:min-w-0 max-sm:p-0">{e.message ?? "—"}</td>
+                        <td className="py-2 pr-3 whitespace-nowrap font-mono text-xs max-sm:order-6 max-sm:basis-full max-sm:p-0 max-sm:text-muted max-sm:before:mr-1 max-sm:before:font-sans max-sm:before:content-['출발지']">
                           {ip ?? "—"}
-                          {peer !== null && peer !== ip && <span className="block text-xs text-muted">{`피어 ${peer}`}</span>}
+                          {peer !== null && peer !== ip && <span className="block text-xs text-muted max-sm:ml-1 max-sm:inline">{`피어 ${peer}`}</span>}
                         </td>
-                        <td className="py-1">
+                        <td className="py-1 max-sm:order-3 max-sm:ml-auto max-sm:p-0">
                           <Button variant="ghost" className="whitespace-nowrap" aria-expanded={openId === e.id}
                                   onClick={() => setOpenId((cur) => (cur === e.id ? null : e.id))}>
                             {openId === e.id ? "닫기" : "펼치기"}

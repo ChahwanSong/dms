@@ -344,6 +344,35 @@ CHANGELOG 「사용량 분석 필터」. 이번 묶음이 **의도적으로 하�
   같은 묶음에서. 새 엔드포인트(`/targets`·`/targets/export`·`/facets`·`storage-totals`)는 storage·path 의 NUL 을 422 로 막고(2026-10-29
   2차 리뷰 — 동등성 참조는 옛 엔드포인트 바이트라 무관), 새 필터 값은 제어문자 전부를 422 로 막는다.
 
+### ③ 공용 디렉터리(SHARED_DIR) 후속 — 2026-11-03
+
+CHANGELOG 「③ 공용 디렉터리」, 설계 v6(`docs/history/specs/2026-11-03-dms-k8s-prod-design.md`) 9절 「③ 공유 FS 세부」·10절 T3,
+deploy/README §2d.
+
+- 🔧 **render.sh 일반화**(설계 9 ③ — ④⑤⑦ 와 함께) — 하나의 렌더러가 prod·testbed-k8s·platform(registry·db)을 렌더한다. 그때까지
+  testbed-k8s 의 `values.env` 는 기록용이다(kustomize 는 읽지 않는다 — 렌더 원천은 `patch-config.yaml` 의 base, 소비자는 S7 프로브의
+  `--overlay` 뿐). 두 값의 일치는 `tests/test_shared_dir_contract.py` 가 강제한다.
+- 🔧 **설치기 연결(⑦)** — `install.sh` 단계에 S0 안내와 S7 자동 호출(exit 3 이면 계속, 1·4 면 정지)을 넣는다. 지금은
+  `preflight-cluster.sh` 의 수동 확인(M) 줄과 `install.sh` 가드(exit 5)의 안내 문구뿐이다.
+- 🔧 **테스트베드 IaC**(testbed 저장소 몫)
+  - `/dms_shared` export(호스트 `/data/dms_shared` → 10.10.10.20–.22)와 3노드 fstab 마운트를 testbed 에 반영한다 — 지금은 라이브
+    적용만이다(deploy/README §2d-5).
+  - `deploy/testbed/dms-shared-fs.yml` 의 DMS 공용 디렉터리 태스크(`/cephfs/dms`·`/cephfs/dms/artifacts`, `findmnt … FSTYPE == ceph`
+    단정)는 dmsk8s 에서 옛 base 다. T3 보존 창이 끝나면 dmsk8s 쪽을 정리하고(일반화한 마운트 가드는 S0 스크립트에 있다), 데이터 root·
+    픽스처는 CephFS 에 그대로 둔다.
+- 📝 **옛 base `/cephfs/dms/artifacts`(dmsk8s)의 보존 기한·삭제 시점** — 결정 대기. T3 전환은 복사라 옛 base 가 그대로 남는다(되돌림 창).
+- 📝 **등록 가드(`storage_overlaps_dms_state`)의 한계**
+  - 문자열 비교다(스토리지 경로는 노드 경로라 api 파드에서 realpath 로 풀 수 없다) — 심링크로 우회한 등록은 못 막는다.
+  - 가드 이전에 등록된 겹치는 행은 경로를 바꿀 때만 걸리고, 그 전에는 「아티팩트 경로」 화면의 경고만 뜬다(차단하지 않는다 — 진행 중
+    잡의 비상 비활성화를 막지 않으려고).
+- 📝 **S0 는 실행한 노드 하나의 마운트만 본다** — 나머지 노드는 S7 몫이다. 어긋난 기존 디렉터리는 고치지 않으므로(공용 경로라
+  chmod·chown 이 전 노드에 번진다) 운영자가 확인해 손으로 고친다.
+- 📝 **S0 가 pgdata·backup·registry 를 미리 만든다** — ④⑤ 전에는 빈 디렉터리다(소유·모드·센티널만).
+- 📝 **프로브 정리 실패는 INFO(판정 밖)** — stderr 와 결과에 지울 경로와 `rm -rf` 명령을 남긴다. 비-NFS(CephFS 등)에서 `.probe-<nonce>`
+  가 남던 문제(남 소유 0700 디렉터리 — 파드 cap 에 DAC_OVERRIDE 가 없다)는 2026-11-03 리뷰에서 고쳤다(lchown·fchmod 로 되찾은 뒤 지움).
+- 📝 **S7 파드 이미지 pull** — 마스터에 레지스트리 신뢰가 없으면 cp 노드가 이미지 pull 실패로 「모름」(exit 4)이 된다(④·S0-4 레지스트리
+  신뢰 drop-in 이 전제). 그 전에는 마스터에 미리 pull 해 둔다.
+
 ## 2. 의도적 보류 (결정 — "미구현"이 아님)
 
 - ⏸ **회원가입 메일 인증** — 더미(email 기록만, 검증 없음, `routes_auth.py::signup`).
@@ -496,8 +525,11 @@ CHANGELOG 「사용량 분석 필터」. 이번 묶음이 **의도적으로 하�
   얽힌 별도 작업.
 - 📝 **`imagePullPolicy: IfNotPresent` + 태그 재사용 = 노드 캐시 stale** — 고유 태그
   관례(dNN 단조 증가)로만 완화. 같은 태그 재빌드는 노드가 옛 이미지를 쓸 수 있다.
-- 📝 **`/cephfs` hostPath `type: Directory`** — 비-cephfs 노드가 스케줄 풀에 들어오면
-  파드 admission 실패.
+- ~~**`/cephfs` hostPath `type: Directory`**~~ — **해소**(2026-11-03 ③, CHANGELOG 「③ 공용 디렉터리」): api/controller hostPath 는
+  이제 `<SHARED_DIR>/dms/artifacts`(type Directory) 하나다. 「모든 마스터·워커의 같은 경로」(G1)는 공용 스토리지 계약이고 S7
+  (`deploy/shared-storage-probe.py`)이 확인한다 — 마운트가 없는 노드에서 파드가 뜨지 않는 것은 의도한 fail-closed 다(deploy/README §2d).
+  기록: 옛 hostPath 는 마운트포인트 `/cephfs` 자체라 `/cephfs` 가 없는 노드에서는 파드가 뜨지 않았고, 마운트만 빠진 노드에서는 빈 로컬
+  디렉터리로 통과했다.
 - 🔧 **러너 root 쓰기가 심링크를 따라간다**(`src/dms_job_runner/runner.py` `main().write_text`
   → `open(path, "w")`; 2026-09-09 root 전환 검토에서 확인, 전환과 무관한 기존 결함) —
   요청자가 chown 이후 자기 phase 디렉터리에 `stdout.log`/`summary.json` 심링크를 심으면

@@ -27,3 +27,8 @@ data:
   # 계정 메일 도메인 = 테스트베드 RoleBinding subject 의 이메일 도메인(namespaceAdmin 소유자 인식 — k8s_rbac, 2026-10-26 (a)).
   # 가입 인증 메일 주소도 <아이디>@이 도메인이 된다(테스트베드는 stub 메일러).
   DMS_ACCOUNT_EMAIL_DOMAIN: "example.com"
+  # 아티팩트 base = file://<SHARED_DIR>/dms/artifacts, SHARED_DIR=/dms_shared(이 디렉터리의 values.env, 2026-11-03 ③).
+  # 이 한 값에서 kustomization.yaml 의 replacements 가 allowlist 와 api/controller hostPath·mountPath 를 낸다 -- SHARED_DIR 를
+  # 바꾸면 values.env 와 이 줄을 같이 고친다(tests/test_shared_dir_contract.py). 포탈에서 저장한 base(DB control_state)가 있으면
+  # 그것이 이긴다 -- 전환 때 같은 값으로 다시 저장한다(deploy/README.md).
+  DMS_ARTIFACT_BASE_URI: "file:///dms_shared/dms/artifacts"

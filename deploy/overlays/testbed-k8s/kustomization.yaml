@@ -57,7 +57,16 @@
 #   ssc 클러스터의 오버레이(overlays/testbed)는 dms-ssc 브랜치에만 있다(2026-10-26 이 브랜치에서 지웠다 — 체리픽 충돌·엉뚱한 태그 방지).
 #
 # Deployment(api/controller) 는 패치하지 않는다 — securityContext 는 base 가 유일한 진실
-#   (tests/test_release_manifest_contract.py::test_overlays_do_not_patch_control_plane_deployments).
+#   (tests/test_release_manifest_contract.py::test_overlays_do_not_patch_control_plane_deployments). 예외는 아래 replacements
+#   의 아티팩트 경로 두 필드뿐이다(2026-11-03 ③ — 그 테스트가 「이미지·그 경로 말고는 base 와 같다」를 렌더로 본다).
+#
+# 공용 디렉터리(2026-11-03 ③, 설계 v6 3-1·T3): DMS 상태(아티팩트 — 이후 묶음의 PG·레지스트리·백업도)는 3노드 모두가 같은
+#   경로에 마운트한 공용 경로 SHARED_DIR=/dms_shared 아래 dms/ 에 둔다. 이 오버레이는 렌더 단계 없이 apply -k 로 바로 쓰므로
+#   **렌더의 원천은 patch-config.yaml 의 DMS_ARTIFACT_BASE_URI** 하나이고(아래 replacements 가 거기서 allowlist·hostPath 를 낸다),
+#   values.env 의 SHARED_DIR 는 같은 값의 기록이다(kustomize 는 읽지 않는다 -- 공용 스토리지 프로브가 --overlay 로 읽는다).
+#   tests/test_shared_dir_contract.py 가 둘과 렌더 결과(base·allowlist·api/controller hostPath)가 같은 <SHARED_DIR>/dms/artifacts
+#   인지 고정한다(한쪽만 고치면 빨간불). 옛 base 는 /cephfs/dms/artifacts(라이브 hostPath /cephfs) — 이 값을 담은 apply 는
+#   guard-images.sh 가 hostPath 변경으로 exit 5 거부한다. 전환 절차는 deploy/README.md(마친 뒤 ALLOW_HOSTPATH_CHANGE=1).
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
@@ -78,3 +87,33 @@ patches:
   - path: patch-config.yaml
   - path: patch-ingress.yaml
   - path: patch-metallb.yaml
+
+# DMS_ARTIFACT_BASE_URI(file://<SHARED_DIR>/dms/artifacts) 하나에서 allowlist 와 api/controller 의 hostPath·mountPath 를
+# 낸다(2026-11-03 ③). replacements 는 위 patches 뒤에 돌아 오버레이 값을 읽는다. 「file://」 로 잘라 둘째 조각 = 호스트 경로
+# (scheme 이 없으면 index 1 이 없어 렌더가 실패한다 -- fail-closed). prod 오버레이와 같은 블록이다(두 곳을 같이 고친다).
+replacements:
+  - source:
+      kind: ConfigMap
+      name: dms-config
+      fieldPath: data.DMS_ARTIFACT_BASE_URI
+      options:
+        delimiter: "file://"
+        index: 1
+    targets:
+      - select:
+          kind: ConfigMap
+          name: dms-config
+        fieldPaths:
+          - data.DMS_ARTIFACT_BASE_ALLOWED_PREFIXES
+      - select:
+          kind: Deployment
+          name: dms-api
+        fieldPaths:
+          - spec.template.spec.volumes.[name=dms-artifacts].hostPath.path
+          - spec.template.spec.containers.[name=api].volumeMounts.[name=dms-artifacts].mountPath
+      - select:
+          kind: Deployment
+          name: dms-controller
+        fieldPaths:
+          - spec.template.spec.volumes.[name=dms-artifacts].hostPath.path
+          - spec.template.spec.containers.[name=controller].volumeMounts.[name=dms-artifacts].mountPath

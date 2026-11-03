@@ -248,7 +248,7 @@ def assess_deployment(norm: dict, *, since: "str | None" = None) -> "tuple[str, 
             return ("failed", f"ProgressDeadlineExceeded: {cond.get('message') or ''}"[:200])
     for cond in norm["conditions"]:
         if cond.get("type") == "ReplicaFailure" and cond.get("status") == "True":
-            # 종단이 아니라 노출이다 -- admission 오류(/cephfs hostPath 없음 등)를
+            # 종단이 아니라 노출이다 -- admission 오류(공용 디렉터리 hostPath 없음 등)를
             # 운영자가 실패 확정 전에 볼 수 있어야 한다. 확정은 PDE가 한다.
             return ("progressing", (cond.get("message") or cond.get("reason") or "")[:200])
     return ("progressing", None)

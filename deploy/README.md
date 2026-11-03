@@ -36,10 +36,13 @@ k8s 테스트베드는 §13 이 런북이다.
 | LDAP | 사용(pkg-01 slapd, 아래 표) | **없음**(사용자 결정) — k8s 신원 모드(모든 잡 root + 권한 = RoleBinding 맵핑, §13) |
 | `dms-secrets` | 5키(+ `DMS_LDAP_BIND_PW`) | **4키**(바인드 비밀번호 키 없음) |
 | CephFS | dmsfs:/ → `/cephfs`, `/third` → `/cephfs-third`(w1·w2), `/secondary` → `/cephfs-secondary`(w3) | dmsfs:/k8s → `/cephfs`, `/k8s/third` → `/cephfs-third`(k8s-w1), `/k8s/secondary` → `/cephfs-secondary`(k8s-w2) |
+| 아티팩트 base | `file:///cephfs/dms/artifacts`(CephFS, 아래 표) | `file:///dms_shared/dms/artifacts` — 공용 디렉터리 `SHARED_DIR=/dms_shared`(호스트 NFS `10.10.10.1:/data/dms_shared`, 3노드, §2d; 2026-11-03 ③ d18 T3 전환. 옛 base `/cephfs/dms/artifacts` 는 보존) |
 | 빌드 노드 / `build_source_path` | dms-w1 / `/home/mason/dms-dev/dms-ssc`(전환 뒤; 전 `/home/mason/dms-dev/dms`) | k8s-w1 / `/home/mason/dms-dev/dms-k8s`(origin/dms-k8s 체크아웃, cron 이 ff) |
 
-경로 문자열(`/cephfs`, artifact base, 스토리지 mount_path)은 두 클러스터가 같다 — k8s 쪽은 CephFS 의 `/k8s` 하위 트리를
-같은 이름에 마운트하므로 매니페스트·시드를 바꿀 필요가 없다. 인프라(VM·CephFS 마운트·레지스트리·DB·호스트 라우트·TLS CA)는
+경로 문자열(`/cephfs`, 스토리지 mount_path)은 두 클러스터가 같다 — k8s 쪽은 CephFS 의 `/k8s` 하위 트리를
+같은 이름에 마운트하므로 스토리지 시드를 바꿀 필요가 없다. **artifact base 는 다르다**(2026-11-03 ③): k8s 테스트베드의 DMS 상태는
+3노드 모두가 마운트한 공용 디렉터리 `/dms_shared` 아래(`file:///dms_shared/dms/artifacts`, §2d)이고, 데이터 root `/cephfs/managed`·
+픽스처는 그대로 CephFS 다. 인프라(VM·CephFS 마운트·레지스트리·DB·호스트 라우트·TLS CA)는
 testbed 저장소(`~/dms-dev/testbed`) 몫이다.
 
 Testbed facts baked into these assets — ssc 테스트베드 (see repo `CLAUDE.md` for the source of
@@ -54,7 +57,7 @@ truth):
 | CephFS `cephfs-dms` | `/cephfs`, mounted on w1-3 |
 | CephFS `cephfs-third` | `/cephfs-third`, mounted on w1-2 |
 | CephFS `cephfs-secondary` | `/cephfs-secondary`, mounted on w3 |
-| artifact base | `file:///cephfs/dms/artifacts` |
+| artifact base | `file:///cephfs/dms/artifacts` (k8s 테스트베드는 `file:///dms_shared/dms/artifacts` — §2d) |
 | namespace | `dms`, PSA enforce=privileged |
 | Volcano | v1.15.0 installed; queue/priority classes NOT yet installed |
 
@@ -218,6 +221,12 @@ verification scripts use. k8s 테스트베드(LDAP 없음)에서는 LDAP uid/gid
 a subdirectory of it. `dms-controller`/`dms-api` need `/cephfs/dms/artifacts`
 readable -- see `DMS_ARTIFACT_BASE_URI`.)
 
+**k8s 테스트베드(2026-11-03 ③)**: 이 플레이북의 `/cephfs/dms`·`/cephfs/dms/artifacts` 는 dmsk8s 에서 **옛 base**(T3 보존 창,
+§2d-5)다 — 지금 base 는 공용 디렉터리 `/dms_shared/dms/artifacts` 이고, 그 트리는 플레이북이 아니라 S0
+(`sh deploy/shared-dir-init.sh /dms_shared`, §2d-2)가 만든다. 데이터 root `/cephfs/managed`·`/cephfs/managed/e2e` 픽스처는 여전히
+이 플레이북 몫이다. `<SHARED_DIR>/dms` 자신·상위·하위는 스토리지로 등록할 수 없다(422 `storage_overlaps_dms_state`) — `cephfs-dms`
+(`/cephfs`)는 `/dms_shared` 와 겹치지 않는다.
+
 ## 2b. 제어면 root 전제 (2026-09-09)
 
 `dms-api`·`dms-controller` 컨테이너는 **uid 0** 으로 돈다(`40-api.yaml`·
@@ -267,14 +276,17 @@ readable -- see `DMS_ARTIFACT_BASE_URI`.)
    (711/755 는 base **자체**의 선택지다, 위 1). 제어면·에이전트·러너(launcher)·잡 도구는 root 라 통과하고, 잡 파드는
    base 를 **전용 hostPath 볼륨**(`/dms-artifact-base`, `artifact_base.ARTIFACT_MOUNT`)으로 받아 그 부모를 지나가지
    않는다. 테스트베드 `/cephfs/dms` 는 770 그대로다(dms-k8s 에는 잡이
-   그룹 권한으로 도는 경로가 없다 — 750 으로 조일지는 사용자 결정 사항).
+   그룹 권한으로 도는 경로가 없다 — 750 으로 조일지는 사용자 결정 사항). k8s 테스트베드의 지금 공용 디렉터리
+   `/dms_shared/dms` 는 S0 가 만든 `750` 이다(2026-11-03 ③, §2d — S0 는 이미 있는 `dms` 의 750·700 만 받아들이고 770 은 FAIL 로
+   알린다).
    단 **스토리지의 `managed_root`(사용자 데이터 root)는 공용 디렉터리 아래에
    두지 마라** -- 비 root 잡이 있던 시절 preflight 가 요청자 uid 로 `test -r/-w` 해 `source_not_readable`
    류로 거부됐다(dms-k8s 의 root 잡은 막히지 않지만 레이아웃은 그대로 둔다; 테스트베드는 §6 시드대로 `cephfs-dms` 의 managed_root 가
    `/cephfs/managed` 여야 한다; `/cephfs/dms` 로 드리프트해 있던 것을 d129 실증에서
    되돌렸다). 실증: `/cephfs/dms` 770 + 데이터 `/cephfs/managed` 에서 alice sync Succeeded.
-4. **`DMS_ARTIFACT_BASE_ALLOWED_PREFIXES`**(`20-config.yaml`, 기본 `/cephfs`; 오버레이는
-   `/<SHARED_FS>`) — 포탈에서 고를 수 있는 base 를 파드가 실제로 마운트한 공유 FS 로
+4. **`DMS_ARTIFACT_BASE_ALLOWED_PREFIXES`**(`20-config.yaml` — base 는 자리표시자 `/set-by-overlay.invalid/dms/artifacts`,
+   오버레이 `replacements` 가 `DMS_ARTIFACT_BASE_URI` 에서 `<SHARED_DIR>/dms/artifacts` 로 낸다, 2026-11-03 ③ §2d) — 포탈에서
+   고를 수 있는 base 를 api/controller 가 실제로 붙인 경로(같은 값의 hostPath) 아래로
    묶는다. root 라 파일시스템이 더는 경로를 걸러 주지 않는다. 허용 밖 경로는 422
    `artifact_base_outside_allowlist`, 이미 저장된 base 가 밖이면 3홉 화면의 API·컨트롤러
    홉이 같은 사유로 실패를 낸다.
@@ -313,6 +325,169 @@ LDAP 보조 그룹(계획 시점 스냅숏·큐 대기 재확인·`DMS_IDENTITY_
 으로 끊기고(빌더도 거부 — 조용히 버리고 돌리지 않는다), 옛 사유 코드(`identity_groups_not_applied`·`identity_changed_at_step`·
 `ldap_unavailable` 등)는 옛 행 표시용으로 포탈 문구에만 남는다. 옛 values.env 의 `IDENTITY_SUPPLEMENTARY_GROUPS`·`LDAP_*` 는
 `render.sh` 가 무시한다(알림 한 줄).
+
+## 2d. 공용 디렉터리(SHARED_DIR) — 배치·S0·S7·전환 런북 (2026-11-03 ③)
+
+설계 v6(`docs/history/specs/2026-11-03-dms-k8s-prod-design.md`) 3-1·3-2·8-1 「S0·S7 세부」·10 「T3 세부」. 이 절은 dms-k8s
+공통(prod·testbed-k8s)이고 테스트베드 판은 2d-5 다.
+
+DMS 상태(아티팩트 — 이후 묶음 ④⑤ 의 레지스트리·PG·백업도)는 사이트가 **모든 마스터·워커의 같은 호스트 경로**에 `/etc/fstab` 으로
+미리 마운트한 공용 스토리지(종류 무관) `<SHARED_DIR>` 아래 `dms/` 에 둔다. DMS 는 마운트·프로비저닝하지 않고 FS 종류·마운트 옵션으로
+판정하지도 않는다. api·controller 는 `<SHARED_DIR>/dms/artifacts` **하나만** hostPath(`type: Directory`)로 같은 경로에 붙이고, env
+base·allowlist 도 같은 값이다 — base 매니페스트는 자리표시자(`/set-by-overlay.invalid/dms/artifacts`)뿐이고 오버레이 `replacements` 가
+`DMS_ARTIFACT_BASE_URI` 하나에서 셋을 낸다(`docs/ARCHITECTURE.md` §6 「아티팩트 경로의 원천은 하나다」, `tests/test_shared_dir_contract.py`).
+원천 값: prod = `values.env` 의 `SHARED_DIR`(render.sh — `deploy/overlays/prod/README.md`), testbed-k8s = `patch-config.yaml` 의
+`DMS_ARTIFACT_BASE_URI`(커밋된 `values.env` 의 `SHARED_DIR=/dms_shared` 는 같은 값의 기록 — 둘이 어긋나면 테스트가 빨간불).
+형식(render.sh·S0·S7 공통): 절대 경로, `/` 아님, 정규화(`//`·`/./`·`/../`·끝 `/` 없음), 문자 `^/[A-Za-z0-9._/-]+$`.
+
+### 2d-1. 트리 (설계 v6 3-1)
+
+| 경로(`<SHARED_DIR>/…`) | 소유:모드 | 쓰는 주체 | 비고 |
+|---|---|---|---|
+| (`<SHARED_DIR>` 자신) | 사이트 | — | 마운트포인트 또는 그 아래. DMS 가 만들지 않는다 |
+| `dms` | root:root 0750(이미 있으면 0700 도) | — | 공용 디렉터리 — 요청자 통과 금지(§2b-3, 711·755 금지). 센티널 `.dms-shared-id`(무작위 32 hex) |
+| `dms/artifacts` | root:root 0755(이미 있으면 0711 도) | api·controller·잡(uid 0) | 아티팩트 base = allowlist = api/controller hostPath(§2b-1) |
+| `dms/pgdata` | root:root 0700 | (⑤ DB) | `.retired`(root 0700), `dms-pgdata-01..05`(26:26 0700 + `.dms-pv-id` = PV 이름) |
+| `dms/backup` · `dms/backup/pg` | root:root 0750 · 26:26 0700 | (⑤ pg_dump) | |
+| `dms/registry` | 65532:65532 0750 | (④ 레지스트리) | 센티널 `.dms-registry-id`(= `.dms-shared-id`) |
+
+- pgdata·backup·registry 는 ④⑤ 전에는 빈 디렉터리다(S0 가 미리 만든다).
+- 모든 hostPath 는 `<SHARED_DIR>/dms/…` **하위**를 가리키고 `type: Directory` 다 — 마운트가 빠진 노드에는 그 하위 경로가 없어 파드가
+  뜨지 않는다(fail-closed, G2). 옛 base 처럼 마운트포인트 자체(`/cephfs`)를 붙이거나 `DirectoryOrCreate` 로 「완화」하면 그 노드에서 빈
+  로컬 디렉터리로 통과해 조용히 로컬 디스크에 쓴다 — 하지 마라(deploy 아래 `DirectoryOrCreate` 0건을 테스트가 고정).
+- `<SHARED_DIR>/dms` 자신·상위(SHARED_DIR 포함)·하위는 DMS 스토리지(`mount_path`·`managed_root`)로 등록할 수 없다(422
+  `storage_overlaps_dms_state` — 생성·경로 변경 때). 이미 겹친 행은 포탈 「아티팩트 경로」 화면의 「DMS 상태 디렉터리」 아래 경고로 보인다.
+  데이터 스토리지와 같은 파일시스템이면 SHARED_DIR 를 그 스토리지의 `mount_path` 밖(별도 마운트포인트)에 둔다.
+
+### 2d-2. S0 초기화 — `deploy/shared-dir-init.sh`
+
+```bash
+sh deploy/shared-dir-init.sh [--check] <SHARED_DIR>     # 한 노드에서 root 로(공용이라 한 번이면 모든 노드에 보인다)
+```
+
+- **가드**(하나라도 어긋나면 아무것도 만들지 않는다): 형식 · root · `[ -d <SHARED_DIR> ]` · `findmnt -n -o TARGET -T <SHARED_DIR>` 가
+  `/` 가 아님(아니면 「마운트 없음」). SOURCE·FSTYPE·OPTIONS 는 보고만 한다.
+- SHARED_DIR·상위는 만들지 않는다(`mkdir -p`·`install -d` 없음). 트리는 위에서 아래로 한 단계씩 만들고 상위에서 물려받은 setgid 를
+  지운다. 센티널은 noclobber 로 쓴다(두 노드에서 동시에 돌려도 하나만 쓴다).
+- **이미 있으면 검사만 하고 고치지 않는다** — 공용 경로라 chmod·chown 이 전 노드에 번진다. 어긋나면 FAIL 로 무엇이 다른지 알리고
+  운영자가 확인해 손으로 고친다. 심링크는 따라가지 않고 FAIL, 레지스트리 센티널만 있고 `.dms-shared-id` 가 없으면 추측하지 않고 FAIL.
+- `--check`: 만들지 않고 검사만(없는 것도 FAIL) — 다른 노드에서 같은 결과·같은 센티널 값인지 볼 때.
+- 종료: 0 PASS · 1 FAIL(가드 거부·모양 어긋남) · 2 사용법·환경(인자·형식·root 아님) · 4 모름(findmnt 없음·무응답). 마지막 줄 `RESULT:`.
+- 실행한 노드 하나의 마운트만 본다 — 모든 노드는 S7 이 본다. root 특권을 주지 않는 export(root_squash)면 chown 이 거부돼 FAIL 이다.
+
+### 2d-3. S7 동작 프로브 — `deploy/shared-storage-probe.py`
+
+```bash
+python3 deploy/shared-storage-probe.py --context <ctx> --shared-dir <SHARED_DIR> --image <REGISTRY>/dms:<DMS_TAG>
+python3 deploy/shared-storage-probe.py --context <ctx> --overlay deploy/overlays/<site>   # 렌더에서 dms 이미지, values.env 에서 SHARED_DIR
+#   선택: --dry-run(계획·파드 매니페스트만) --nodes a,b --json --g3-rounds 20 --retry-seconds 60 --start-timeout 180
+```
+
+- `--context`(또는 `KUBE_CONTEXT`) 필수 — current-context 에 기대지 않는다. SHARED_DIR 는 `--shared-dir` > env `SHARED_DIR` >
+  `--overlay` 디렉터리의 `values.env` 순이다(render.sh 는 반대로 셸의 `SHARED_DIR` 를 무시한다 — values.env 만 원천).
+- **파드 모양**: 설계의 「임시 DS」는 **노드별 일회용 Pod** 로 구현했다 — nodeName 고정·toleration Exists(control-plane 포함)·dms
+  이미지·root, cap 은 drop ALL + CHOWN·FOWNER·DAC_READ_SEARCH, 이미지 fs 읽기 전용, SA 토큰 없음, hostPath `<SHARED_DIR>/dms`
+  (`Directory` — 없으면 파드가 뜨지 않아 「마운트 없음」)와 호스트 `/proc/1/mountinfo`(읽기 전용), `activeDeadlineSeconds` 로 스스로도
+  끝난다. 도우미 코드는 `kubectl exec -i` 의 stdin 으로 보낸다. 쓰는 곳은 `<SHARED_DIR>/dms/.probe-<nonce>` 하나이고 끝나면(실패·중단
+  에도) 지우고 파드도 지운다 — 정리 실패는 INFO(판정 밖)로 남기고 지울 경로·명령을 stderr 에 낸다.
+- **검사**: ① G1 같은 스토리지(포함 마운트 TARGET `/` → 「마운트 없음」, 교차 노드 nonce, `.dms-shared-id` 가 노드마다 다름·일부만·빈
+  값·**전부 없음(S0 미실행)** → FAIL) ② G3 노드 간 가시성(부정 캐시·rename 교체, 1초 안, 20회 — **실패는 WARN**) ③ G4 root 소유
+  보존(남 소유 0700 통과 포함) ④ G5 숫자 uid/gid(26·65532) ⑤ fsync 왕복 ⑥ G9 POSIX(O_EXCL·nlink·O_NOFOLLOW·rename 원자·디렉터리
+  fsync). FS 종류·마운트 옵션만으로 FAIL 하지 않고, 교차 노드 확인(② 제외)은 `--retry-seconds` 까지 재시도한 뒤 판정한다.
+  FAIL·WARN 사유에 NFS 힌트(`no_root_squash`·`sec=sys`/idmap·`lookupcache=positive` + `nocto` 없음)가 붙는다.
+- 종료: 0 PASS · 3 WARN(G3 만 — 계속해도 된다) · 1 FAIL(센티널 없음 포함) · 4 모름(파드 미기동·이미지 pull 실패·exec 실패 — FAIL
+  은 없음) · 2 사용법(클러스터를 건드리기 전). 마지막 줄 `RESULT:`. 마스터에 레지스트리 신뢰가 없으면 그 노드는 이미지 pull 실패로
+  「모름」이다 — 미리 pull 해 둔다.
+
+### 2d-4. 전환 런북 — 공용 디렉터리 이행·변경
+
+옛 배치(hostPath `/cephfs`, base `/cephfs/dms/artifacts`)에서 `<SHARED_DIR>` 로 옮기거나 SHARED_DIR 를 바꿀 때. 이 렌더를 그냥
+적용하면 `guard-images.sh` 가 hostPath 변경으로 **exit 5** 거부한다 — 아래를 마친 뒤에만 `ALLOW_HOSTPATH_CHANGE=1` 로 연다.
+
+0. **확인(읽기만)**: 진행 중 잡이 없다(`kubectl --context <ctx> -n dms get vcjob,pods`) — 6 단계(DB base)까지 잡 제출을 멈춘다. 포탈 관리 →
+   「아티팩트 경로」의 출처(env/db)와 값을 적어 둔다.
+1. **노드 마운트**(사이트): 모든 마스터·워커의 같은 경로에 `/etc/fstab`. NFS 라면 export `no_root_squash`·`sec=sys`, 마운트 `hard`,
+   `lookupcache=positive`(G3 권장 — remount 로는 안 바뀐다).
+2. **S0**: 한 노드에서 `sh deploy/shared-dir-init.sh <SHARED_DIR>` → 다른 노드에서 `--check` 가 PASS(같은 센티널 값).
+3. **S7**: `shared-storage-probe.py` 가 0(또는 3 WARN)이어야 진행한다. 1·4 면 멈추고 원인을 고친다.
+4. **옛 base 복사(소유 보존)**: 한 노드에서 root 로 `rsync -aH --numeric-ids <옛 base>/ <SHARED_DIR>/dms/artifacts/`(rsync 가 없으면
+   `cp -a <옛 base>/. <SHARED_DIR>/dms/artifacts/`). 대조: 두 쪽에서 `find . -printf '%p %U:%G %m %s\n' | sort | md5sum` 이 같고, 새
+   base 가 `root:root 755`. `-A`·`-X` 는 쓰지 않는다(NFS 4.2 가 xattr 을 지원하지 않을 수 있고, base 에는 원래 ACL 이 없어야 한다 — §2b-1).
+5. **적용**: `sh deploy/overlays/guard-images.sh <overlay> --context <ctx>` → 기대 exit 5(라이브 hostPath → 새 경로를 찍는다; 오버레이
+   태그가 라이브와도 다르면 3 이 먼저다 — 그때는 `ALLOW_IMAGE_CHANGE=1` 도). `ALLOW_HOSTPATH_CHANGE=1` 로 다시 통과시킨 뒤 평소 적용
+   절차(testbed-k8s = §13-6, prod = `ALLOW_HOSTPATH_CHANGE=1 sh deploy/install.sh`). api·controller 를
+   `rollout restart`(ConfigMap 의 base·allowlist 는 기동 때만 읽힌다 — §13-8) → `rollout status`. 확인: 두 Deployment 의
+   `.spec.template.spec.volumes[*].hostPath` 와 `dms-config` 의 `DMS_ARTIFACT_BASE_URI`·`DMS_ARTIFACT_BASE_ALLOWED_PREFIXES` 가 새 경로.
+   컨트롤러 롤아웃 뒤 30초쯤 기다린 다음 본다.
+6. **DB base**: 0 단계 출처가 `db` 였다면 세션 관리자로 포탈 「아티팩트 경로」를 `file://<SHARED_DIR>/dms/artifacts` 로 다시 저장한다
+   (잠겨 있으면 force). 적용 **뒤**여야 한다 — 3홉 검증은 새 마운트에서만 통과한다. `env` 면 할 일이 없다. 3홉(API·컨트롤러·노드)이 모두
+   정상이고, 「DMS 상태 디렉터리」가 `<SHARED_DIR>/dms` 이며 겹치는 스토리지 경고가 없어야 한다.
+7. **확인**: 옛 잡 로그가 열린다(복사본), 다중 노드에서 미리보기·실행·scan·사용량·정리, `<SHARED_DIR>` 를 `mount_path` 로 등록하면 422
+   `storage_overlaps_dms_state`.
+8. **보존·되돌림**: 옛 base 는 지우지 않는다(되돌림 창 — 기한은 BACKLOG). 되돌림은 같은 절차를 거꾸로 — SHARED_DIR(와 base)를 원래
+   값으로 되돌려 `ALLOW_HOSTPATH_CHANGE=1` 로 적용하고, 출처가 db 였으면 다시 저장한다.
+
+**옛 `SHARED_FS` 사이트(prod values.env)의 이행 주의** — `SHARED_FS` 가 남은 values.env 는 render.sh 가 FAIL 하고 `SHARED_DIR=/<옛 값>`
+을 안내한다(같은 env base). 그 값을 쓰기 전에 확인한다(render.sh FAIL 문구와 같은 세 가지):
+(1) 「아티팩트 경로」가 **DB 설정**이고 값이 `file://<SHARED_DIR>/dms/artifacts`(또는 그 아래)가 아니면 새 배치에서 그 경로는 api·controller 에
+보이지 않는다(옛 allowlist·hostPath 는 공용 디렉터리 최상위 전체였다 — 잡 파드는 DB base 를 그대로 붙여 잡은 돌고 컨트롤러만 summary 를
+못 읽는다) — 산출물을 그 경로로 옮기고 base 를 다시 저장(force)한다. (2) 등록 스토리지의 `mount_path`·`managed_root` 가 `<SHARED_DIR>/dms`
+를 덮으면(옛 사이트의 `mount_path=/cephfs` 처럼) 그 스토리지를 쓰는 잡 컨테이너에 DMS 상태가 보인다 — SHARED_DIR 는 그 스토리지 밖의
+**별도 마운트포인트**로 고른다(같은 파일시스템의 하위 디렉터리로는 못 피한다; 등록 가드는 경로를 바꿀 때만 걸리므로 적용 뒤 「아티팩트
+경로」 화면의 경고로 드러난다). (3) 옛 배치 위에 이 렌더를 적용하면 guard exit 5 — 위 런북을 마친 뒤 `ALLOW_HOSTPATH_CHANGE=1`.
+
+### 2d-5. k8s 테스트베드(`dmsk8s`) — 지금 배치 (T3, d18)
+
+- **공용 스토리지**: 호스트(10.10.10.1)의 `/data/dms_shared`(root:root 0755)를 NFS 로 export — 클라이언트는 dmsk8s 3노드 10.10.10.20·.21·.22
+  만(`rw,sync,no_subtree_check,no_root_squash`; 등록 스토리지용 `/data/k8s_pv`·VM 서브넷 전체용 `/data/mgmt_storage` 와 분리). 3노드
+  (k8s-cp1·w1·w2) 모두 fstab 으로 `/dms_shared` 에: `10.10.10.1:/data/dms_shared /dms_shared nfs4 _netdev,nofail,vers=4.2,rw,hard,timeo=600,retrans=2,lookupcache=positive 0 0`.
+  testbed IaC 반영 전이다(라이브 적용만 — BACKLOG).
+- **배치**: `SHARED_DIR=/dms_shared`(오버레이 `values.env` + `patch-config.yaml` 의 base `file:///dms_shared/dms/artifacts`) → api/controller
+  hostPath·allowlist `/dms_shared/dms/artifacts`, 상태 디렉터리 `/dms_shared/dms`(0750, S0).
+- **옛 base** `/cephfs/dms/artifacts`(CephFS — 라이브 hostPath 가 `/cephfs` 이던 d17 까지)는 되돌림 창 동안 지우지 않는다. 데이터 root
+  `/cephfs/managed`·`/cephfs/managed/e2e` 픽스처·스토리지 `cephfs-*` 는 그대로 CephFS 다(§2 플레이북). `cephfs-dms`(`/cephfs`)는
+  `/dms_shared` 와 겹치지 않아 등록 가드·경고에 걸리지 않는다.
+- **전환 명령**(2d-4 의 테스트베드 판, 한 번). S0 는 스크립트를 노드에 복사해(예: `/tmp`) root 로 돌린다. **w1·w2 에는 `/cephfs`(CephFS)가
+  마운트돼 있다** — 거기서 `--check` 없이 `/cephfs` 로 돌리면 CephFS 에 트리를 만든다. 가드 음성 대조는 cp1(`/cephfs` 마운트 없음)에서만.
+
+```bash
+# 0. 확인 — 3노드 `findmnt /dms_shared` = nfs4 … lookupcache=positive, 진행 중 잡 없음, 「아티팩트 경로」 출처·값 기록
+kubectl --context dmsk8s -n dms get vcjob,pods
+# 1. S0 — w1 에서 한 번 → cp1·w2 검사 → cp1 가드 음성 대조
+sudo sh /tmp/shared-dir-init.sh /dms_shared            # k8s-w1: RESULT: PASS (MADE …)
+sudo sh /tmp/shared-dir-init.sh --check /dms_shared    # k8s-cp1·k8s-w2: PASS, 같은 .dms-shared-id
+sudo sh /tmp/shared-dir-init.sh /cephfs; ls -ld /cephfs /cephfs/dms   # k8s-cp1 만: rc=1 「마운트 없음」, 아무것도 생기지 않음
+# 2. S7 — 설치 호스트에서(이 체크아웃)
+python3 deploy/shared-storage-probe.py --context dmsk8s --overlay deploy/overlays/testbed-k8s --dry-run
+python3 deploy/shared-storage-probe.py --context dmsk8s --overlay deploy/overlays/testbed-k8s; echo rc=$?                      # 0(cp1 포함 ①~⑥)
+python3 deploy/shared-storage-probe.py --context dmsk8s --overlay deploy/overlays/testbed-k8s --shared-dir /cephfs; echo rc=$?  # 1: cp1 「마운트 없음」, w1·w2 「센티널 없음」
+#    (k8s-w1 에서 `sudo ls -la /cephfs/dms | grep -c '\.probe-'` = 0 — 프로브가 CephFS 에도 흔적을 남기지 않는다)
+# 3. 옛 base 복사 — k8s-w1 에서 root 로, 소유 보존 + 대조
+sudo rsync -aH --numeric-ids /cephfs/dms/artifacts/ /dms_shared/dms/artifacts/
+sudo sh -c 'cd /cephfs/dms/artifacts && find . -printf "%p %U:%G %m %s\n" | sort | md5sum; cd /dms_shared/dms/artifacts && find . -printf "%p %U:%G %m %s\n" | sort | md5sum'   # 같음
+stat -c '%U:%G %a' /dms_shared/dms/artifacts                                                                                 # root:root 755
+# 4. 적용 — §13-6 순서 그대로, 가드만 플래그로 연다(오버레이 태그가 라이브와 다르면 ALLOW_IMAGE_CHANGE=1 도)
+kubectl --context dmsk8s -n dms delete job dms-migrate --ignore-not-found
+sh deploy/overlays/guard-images.sh deploy/overlays/testbed-k8s --context dmsk8s; echo rc=$?   # 5: hostPath /cephfs → /dms_shared/dms/artifacts
+ALLOW_HOSTPATH_CHANGE=1 sh deploy/overlays/guard-images.sh deploy/overlays/testbed-k8s --context dmsk8s
+kubectl --context dmsk8s apply -k deploy/overlays/testbed-k8s
+kubectl --context dmsk8s -n dms wait --for=condition=complete job/dms-migrate --timeout=180s
+kubectl --context dmsk8s -n dms rollout restart deploy/dms-api deploy/dms-controller
+kubectl --context dmsk8s -n dms rollout status deploy/dms-api --timeout=300s
+kubectl --context dmsk8s -n dms rollout status deploy/dms-controller --timeout=300s
+kubectl --context dmsk8s -n dms get deploy dms-api dms-controller \
+  -o jsonpath='{range .items[*]}{.metadata.name} {.spec.template.spec.volumes[*].hostPath}{"\n"}{end}'
+kubectl --context dmsk8s -n dms get cm dms-config \
+  -o jsonpath='{.data.DMS_ARTIFACT_BASE_URI} {.data.DMS_ARTIFACT_BASE_ALLOWED_PREFIXES}{"\n"}'
+# 5~7. DB base 재저장(출처가 db 였을 때) → 3홉·「DMS 상태 디렉터리」 /dms_shared/dms·겹침 경고 없음 → 2d-4 의 7 확인
+```
+
+- 선택 음성 대조(설계 T3 — 별도 export 가 필요해 위 명령에는 없다): root_squash export → S7 FAIL, 같은 export 를
+  `nosharecache,lookupcache=all` 로 붙인 별도 경로 → ② WARN(①③④⑤⑥ 은 PASS).
+- **되돌림**: `values.env` 의 `SHARED_DIR=/cephfs` 와 `patch-config.yaml` 의 base `file:///cephfs/dms/artifacts`(→ hostPath `/cephfs/dms/artifacts`)로 함께 고치고,
+  `tests/test_shared_dir_contract.py::test_testbed_values_env_carries_a_valid_shared_dir_matching_the_overlay_base` 의 기대값(`/dms_shared`)도
+  고친 뒤 `ALLOW_HOSTPATH_CHANGE=1` 로 적용, 출처가 db 였으면 다시 저장한다. 그 배치에서는 `cephfs-dms`(`/cephfs`)가 상태 디렉터리
+  `/cephfs/dms` 를 덮어 「아티팩트 경로」 화면에 겹침 경고가 뜬다(③ 이전 배치의 원래 모양 — 가드는 경로를 바꿀 때만 걸린다).
 
 ## 3. Apply manifests, in order
 
@@ -377,6 +552,9 @@ ssc 테스트베드는 `deploy/overlays/testbed`(newTag = 이 테스트베드의
 오버레이 디렉터리의 `kube-context` 파일(testbed = `dms`, testbed-k8s = `dmsk8s`)이 짝을 고정하고, 가드는
 `--context`(또는 `KUBE_CONTEXT`, 둘 다 없으면 현재 컨텍스트)가 다르면 **exit 4** 로 거부한다. 가드는 뒤따르는 apply
 명령을 통제하지 못하므로 apply·wait·rollout 에도 같은 `--context` 를 쓴다(가드 통과 메시지가 apply 명령을 그대로 찍어 준다).
+가드의 종료 코드: 0 통과 · 2 사용법·렌더 실패·없는 컨텍스트 · 3 이미지 변경 거부(`ALLOW_IMAGE_CHANGE=1`) · 4 컨텍스트 불일치 ·
+**5 hostPath 변경 거부**(2026-11-03 ③ — 렌더된 Deployment 의 hostPath 집합 != 라이브, 공용 디렉터리 이행은 §2d 전환 런북 뒤
+`ALLOW_HOSTPATH_CHANGE=1`; 둘 다 바뀌면 3 이 먼저).
 
 ```bash
 kubectl --context dms -n dms delete job dms-migrate --ignore-not-found   # Job 은 불변이라 재실행 전 삭제
@@ -882,7 +1060,7 @@ capabilities add/drop — 컨테이너 값이 없으면 파드 수준)를 이미
 ## 프로덕션 배포 — kustomize 오버레이
 
 사내 클러스터 배포는 **`deploy/overlays/prod`** 를 쓴다. 테스트베드 매니페스트를
-base 로 두고 사이트별 값(레지스트리·태그·공유 FS 경로·이메일 도메인·포탈
+base 로 두고 사이트별 값(레지스트리·태그·공용 디렉터리 `SHARED_DIR`(§2d)·이메일 도메인·포탈
 도메인·VIP)만 오버레이에서 덮는다 -- 자리표시자를 채우고 `kubectl apply -k`.
 전제조건·값 표·Secret/TLS 생성·적용 순서는 **`deploy/overlays/prod/README.md`**.
 이 §(테스트베드 개별 파일 apply)는 그대로 유효하다 -- 오버레이는 base 를 건드리지
@@ -1105,7 +1283,7 @@ kubectl -n dms logs deploy/dms-controller -c controller | grep request-purge   #
 |---|---|---|
 | `purge_waiting_pods` | 삭제 10분이 지나도 그 잡의 Pod·vcjob 이 남아 있다(대개 Terminating) | 아래 「Terminating 파드」. 파일 단계로 넘어가지 않는 것이 정상(안전 > 진행) |
 | `purge_k8s_failed` | k8s 나열·삭제 실패(API 서버·RBAC·Volcano CRD 부재) | `kubectl -n dms auth can-i delete pods --as=system:serviceaccount:dms:dms-controller`, vcjob CRD 확인 |
-| `purge_base_unavailable` | base 를 열 수 없다(마운트 빠짐) 또는 삭제 시점 base 가 비어 있었다 | 컨트롤러 파드의 `/cephfs` 마운트·artifact base 화면 3홉 확인 |
+| `purge_base_unavailable` | base 를 열 수 없다(마운트 빠짐) 또는 삭제 시점 base 가 비어 있었다 | 컨트롤러 파드의 `<SHARED_DIR>/dms/artifacts` hostPath(노드의 공용 디렉터리 마운트, §2d)·artifact base 화면 3홉 확인 |
 | `purge_base_unsafe` | base 가 root 소유가 아니거나 g+w/o+w, 또는 `.dms-trash` 가 심링크·0700 아님·다른 FS | §2b 전제(base root:root 755)로 되돌린다. `.dms-trash` 는 root 0700 디렉터리여야 한다 |
 | `artifact_dir_unexpected` | `<base>/<job_id>` 가 root 소유 디렉터리가 아니다(심링크·파일·남의 소유) — §2b 규칙 5 위반 신호 | 그 경로를 운영자가 직접 확인(누가 만들었나). DMS 는 건드리지 않는다 |
 | `purge_detach_failed` | rename 실패(일시 FS 오류) | 자동 재시도. 계속되면 컨트롤러 로그 |
@@ -1356,7 +1534,9 @@ curl -s http://localhost:5001/v2/_catalog
 
 DB·롤은 testbed `postgresql_server` 롤이 만든다(`dmsdb_k8s`/`dmsapp_k8s`, 비밀번호는 testbed `secrets.yml`). 스키마는 migrate 가
 만든다. 공유 FS 레이아웃은 §2 의 플레이북을 `-e dms_cluster=dmsk8s` 로(k8s-w1 이 `/k8s` 하위 트리 안에 `/cephfs/dms`(770)·
-`/cephfs/dms/artifacts`(755)·`/cephfs/managed`·`/cephfs/managed/e2e` 를 만든다 — LDAP 픽스처 없음).
+`/cephfs/dms/artifacts`(755)·`/cephfs/managed`·`/cephfs/managed/e2e` 를 만든다 — LDAP 픽스처 없음). **DMS 상태(아티팩트 base)는
+2026-11-03 ③(d18 T3)부터 공용 디렉터리 `/dms_shared` 다**(3노드 NFS 마운트, S0 `sh deploy/shared-dir-init.sh /dms_shared` — §2d-5) —
+플레이북의 `/cephfs/dms`·`/cephfs/dms/artifacts` 는 옛 base(보존 창)이고, 데이터 root `/cephfs/managed`·픽스처는 그대로다.
 
 ### 13-5. 네임스페이스 · 시크릿(4키) · TLS
 
@@ -1377,7 +1557,7 @@ kubectl --context dmsk8s -n dms get secret dms-secrets -o go-template='{{range $
 
 ```bash
 kubectl --context dmsk8s -n dms delete job dms-migrate --ignore-not-found
-sh deploy/overlays/guard-images.sh deploy/overlays/testbed-k8s --context dmsk8s   # 다른 컨텍스트면 exit 4
+sh deploy/overlays/guard-images.sh deploy/overlays/testbed-k8s --context dmsk8s   # 다른 컨텍스트면 exit 4, 이미지 != 라이브면 3, hostPath != 라이브면 5(§2d)
 kubectl --context dmsk8s apply -k deploy/overlays/testbed-k8s
 kubectl --context dmsk8s -n dms wait --for=condition=complete job/dms-migrate --timeout=180s
 kubectl --context dmsk8s -n dms rollout status deployment/dms-api
@@ -1518,12 +1698,11 @@ controller, 잡 이미지) 뒤 `deploy/overlays/testbed-k8s` 의
   introducing e.g. Helm/kustomize for this pass). Portal-driven rollout (§9) patches the live
   `dms:` and `dms-agent:` workloads but does NOT rewrite these files, so after
   a rollout you must hand-edit the tag here to keep repo and cluster aligned.
-- **`/cephfs` scheduling assumption on `dms-api`/`dms-controller`**: both
-  Deployments hostPath-mount `/cephfs` with `type: Directory` (fails pod
-  admission on a node without that mount). This is safe today because the
-  only schedulable nodes are w1-5, all of which mount `cephfs-dms`. If a
-  non-cephfs node joins the schedulable pool, add a nodeSelector/affinity or
-  relax to `DirectoryOrCreate`.
+- **`dms-api`/`dms-controller` 의 아티팩트 hostPath**(2026-11-03 ③ — 옛 「`/cephfs` scheduling assumption」): 두 Deployment 는
+  `<SHARED_DIR>/dms/artifacts` 하나만 `type: Directory` 로 붙인다 — 공용 디렉터리가 마운트되지 않았거나 S0 전인 노드에서는 파드가
+  뜨지 않는다. 의도한 fail-closed 다: 공용 스토리지 계약 G1 이 「모든 마스터·워커의 같은 경로」라 정상 노드에는 늘 있고, 확인은
+  `deploy/shared-storage-probe.py`(§2d-3). `DirectoryOrCreate` 로 완화하지 마라 — 마운트 없는 노드에 빈 로컬 디렉터리를 만들어 조용히
+  로컬 디스크에 쓴다.
 - **DaemonSet node heterogeneity**: `cephfs-third` volume is
   `DirectoryOrCreate` so the agent pod still starts on w4-5 (which never had
   `/cephfs-third`) -- it just shadows an empty dir there, and

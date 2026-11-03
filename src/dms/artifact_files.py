@@ -29,7 +29,7 @@ tests/test_wiring_phase3c.py 의 고정 테스트가 지킨다(배선은 wiring.
   liveness 없음). FIFO 는 즉시 돌아와 S_ISREG 에서 탈락한다.
 - nlink: 하드링크는 realpath 봉쇄로 못 잡는다(inode 가 바깥 것). 러너·도구는
   하드링크를 만들지 않으므로 nlink>1 거부는 오탐 없는 심층 방어다. 근본 방어는
-  fs.protected_hardlinks=1 이 /cephfs 를 마운트한 **모든** 호스트에 켜져 있는 것
+  fs.protected_hardlinks=1 이 공용 디렉터리(<SHARED_DIR>)의 스토리지를 마운트한 **모든** 호스트에 켜져 있는 것
   (링커 커널의 may_linkat 에서 검사 -- 배포 전제, deploy/README).
 - 소유자: 65532 시절 EACCES 가 조용히 해 주던 세 번째 장벽의 대체. rename(2) 으로
   들여온 남의 정규 파일(nlink=1, 봉쇄 통과)은 소유자가 다르다. 0 을 함께 허용하는
