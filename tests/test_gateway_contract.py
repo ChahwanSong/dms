@@ -558,3 +558,15 @@ def test_envoy_prometheus_stats_listener_is_off():
     # 커밋 보안 리뷰(2026-11-03): hostNetwork Envoy 의 stats(:19001)는 마스터 호스트 전 인터페이스에 열린다 — 쓰지 않으니 끈다.
     text = (REPO_ROOT / "deploy" / "platform" / "gateway" / "envoyproxy.yaml").read_text(encoding="utf-8")
     assert re.search(r"(?m)^    metrics:\n      prometheus:\n        disable: true$", text)
+
+
+
+def test_envoy_prestop_targets_loopback_and_pod_has_priority():
+    # T8(2026-11-03): host 없는 httpGet preStop 은 hostNetwork 파드에서 kubelet 이 실패시킨다(드레인 없이 SIGTERM — 롤링마다 약 61초 공백).
+    # 우선순위가 없으면 마스터 메모리 압박 때 Envoy 가 축출 1순위였다.
+    text = (REPO_ROOT / "deploy" / "platform" / "gateway" / "envoyproxy.yaml").read_text(encoding="utf-8")
+    assert re.search(r"(?m)^                  priorityClassName: dms-addon-critical$", text)
+    assert re.search(r"(?m)^                      lifecycle:\n                        preStop:\n                          httpGet:\n"
+                     r"                            host: 127\.0\.0\.1\n                            path: /shutdown/ready\n"
+                     r"                            port: 19002$", text)
+    assert "REQUESTED_SERVER_NAME" not in text        # hostname 없는 리스너라 sni 는 늘 비었다(T8 33/33줄 null)

@@ -25,10 +25,15 @@
 #     Cilium 의 cilium-envoy DaemonSet(hostNetwork, `--base-id 0`)이 이미 그 이름을 잡고 있어 늦게 뜬 쪽이 `unable to bind domain socket with
 #     base_id=0 … errno=98` 로 죽는다(Envoy 가 늦으면 CrashLoop, 마스터 재부팅 뒤 Envoy 가 먼저면 cilium-envoy 가 죽어 L7 프록시가 깨진다). EG 는
 #     파드를 바꿔 끼울 뿐 hot restart 를 쓰지 않으므로 끈다(--base-id 1 은 다른 hostNetwork Envoy 와 다시 겹칠 수 있다).
-#   - 마스터 호스트에 함께 열리는 포트(K6 — 비어 있어야 한다): :443(리스너), :19001(stats), :19003(readiness), :19002(shutdown-manager),
-#     127.0.0.1:19000(admin).
+#   - 마스터 호스트에 함께 열리는 포트(K6 — 비어 있어야 한다): :443(리스너), :19003(readiness), :19002(shutdown-manager),
+#     127.0.0.1:19000(admin). :19001(stats)은 끈다(아래 telemetry).
+#   - envoy 의 preStop 은 host 를 127.0.0.1 로 못박는다(2026-11-03 T8 실측): EG 기본 preStop(httpGet /shutdown/ready :19002, host 없음)은
+#     hostNetwork 파드에서 kubelet 이 「failed to find networking container」로 실패해 envoy 가 곧바로 SIGTERM — :443 이 즉시 사라지고 드레인이
+#     없었다(롤링마다 마스터당 약 61초 공백, shutdown-manager 가 60초 기다리고 maxSurge 0). 127.0.0.1 이면 드레인 동안 443 유지, 공백 1.4초.
 # 배치: control-plane 노드에만(nodeSelector + control-plane taint toleration) — 마스터 ×3 = DS 3(#14). DS 는 not-ready·unreachable 를 스스로 견딘다.
-#   롤링은 노드마다 옛 파드를 내린 뒤 새 파드(maxSurge 0 — 같은 호스트 포트라 겹칠 수 없다): 그 마스터는 잠깐 빠지고 Avi 헬스 모니터가 거른다.
+#   롤링은 노드마다 옛 파드를 내린 뒤 새 파드(maxSurge 0 — 같은 호스트 포트라 겹칠 수 없다): 드레인(readiness 503) 동안 Avi 헬스 모니터가 그
+#   마스터를 빼고, 새 파드까지 공백은 약 1.4초(T8 실측 — preStop host 127.0.0.1).
+# 우선순위: dms-addon-critical(2026-11-03 T8 — 없으면 마스터 메모리 압박 때 kubelet 축출 1순위였다; 마스터 입구다).
 # 이미지(airgap): envoy = container.image, shutdown-manager = 패치(EnvoyProxy 에 그 필드가 없다 — EG 설정의 shutdownManager.image 는 DMS 가 설치한
 #   EG(A)에서만 DMS 값이다. 남이 설치한 EG(C)에서도 docker.io 로 가지 않게 여기서 명시한다). 둘 다 사이트 중립 자리표시자 — 렌더러가 lock 의
 #   digest ref 로 바꾼다. imagePullPolicy IfNotPresent(EG 기본과 같지만 계약으로 고정).
@@ -86,9 +91,17 @@ spec:
                 spec:
                   hostNetwork: true
                   dnsPolicy: ClusterFirstWithHostNet
+                  priorityClassName: dms-addon-critical
                   containers:
                     - name: envoy
                       imagePullPolicy: IfNotPresent
+                      lifecycle:
+                        preStop:
+                          httpGet:
+                            host: 127.0.0.1
+                            path: /shutdown/ready
+                            port: 19002
+                            scheme: HTTP
                     - name: shutdown-manager
                       image: set-by-overlay.invalid/gateway:v1.9.3
                       imagePullPolicy: IfNotPresent
@@ -120,7 +133,6 @@ spec:
               upstream_host: "%UPSTREAM_HOST%"
               user_agent: "%REQ(USER-AGENT)%"
               request_id: "%REQ(X-REQUEST-ID)%"
-              sni: "%REQUESTED_SERVER_NAME%"
           sinks:
             - type: File
               file:
