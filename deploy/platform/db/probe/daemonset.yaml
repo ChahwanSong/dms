@@ -67,7 +67,10 @@ spec:
                 else
                   id="<missing>"
                 fi
-                echo "PGPROBE node=$node pv=$pv shape=$shape id=$id"
+                # 옛 PGDATA 잔재(2026-11-03 T6 실측): CNPG 1.30 은 PV 에 옛 pgdata/ 가 있으면 실패하지 않고 pgdata_<UTC> 로 옮긴 뒤 진행한다 —
+                # 옛 데이터가 조용히 남는다. 개수만 센다(읽기만).
+                stale=$(ls -d "$d"/pgdata_* 2>/dev/null | wc -l | tr -d " ")
+                echo "PGPROBE node=$node pv=$pv shape=$shape id=$id stale=$stale"
               done
               start=$(date +%s)
               pending="$pvs"

@@ -20,7 +20,9 @@ PG 데이터는 정적 hostPath PV(<SHARED_DIR>/dms/pgdata/dms-pgdata-01..05, ty
     node.kubernetes.io/* 상태 taint 는 세지 않는다). 프로브 파드는 모든 노드에 뜨지만(toleration Exists) 그 밖의 노드(다른 팀의 taint 노드 —
     공용 스토리지가 없을 수 있다)는 판정하지 않고 목록만 보인다(2026-11-03 ⑤ 리뷰 2: 공유 클러스터에서 늘 FAIL 했다). `--nodes a,b` 로 바꾼다.
   precheck(Cluster 를 만들기 전): PV 다섯 개가 있고, **판정 대상 노드마다** 각 디렉터리가 26:26 0700 이고 .dms-pv-id == PV 이름이며, Available PV 에
-    옛 PGDATA(pgdata/)가 없다 — 있으면 FAIL(새 인스턴스가 옛 데이터를 붙잡는다: initdb·join 이 실패한다 — 재활용 런북 deploy/README §2f-5).
+    옛 PGDATA(pgdata/)가 없다 — 있으면 FAIL(새 인스턴스가 붙으면 CNPG 1.30 은 실패하지 않고 옛 PGDATA 를 같은 PV 안 pgdata_<UTC> 로
+    옮긴 뒤 진행한다 — 옛 데이터가 조용히 남는다(2026-11-03 T6 실측; 재활용 런북 deploy/README §2f-5). 어느 단계든 PV 안에 그 잔재
+    (pgdata_*)가 보이면 WARN.
     Released PV 는 건드리지 않고 WARN(S10), Bound 는 재실행으로 보고 INFO.
   contrast(Cluster Ready 뒤 — 「경로 대조」): Bound PV(claim 이 이 네임스페이스) 마다 **판정 대상 노드 모두**가 같은 pgdata/PG_VERSION 을 본다 —
     모두 보면 인스턴스가 아닌 노드도 본 것이다(PG 인스턴스는 DMS 노드에만 뜬다 — 마스터, 테스트베드 all-nodes 는 taint 없는 노드).
@@ -76,7 +78,7 @@ class UsageError(Exception):
 # --- 판정(순수 함수 — 테스트가 직접 부른다) ------------------------------------------------------------------------------------
 
 def parse_logs(text: str) -> dict:
-    """한 파드의 로그 → {"pv": {pv: {"shape","id","pgdata"}}, "done": bool, "node": 이름 또는 None}. 모르는 줄은 무시."""
+    """한 파드의 로그 → {"pv": {pv: {"shape","id","pgdata","stale"}}, "done": bool, "node": 이름 또는 None}. 모르는 줄은 무시."""
     out = {"pv": {}, "done": False, "node": None}
     for line in text.splitlines():
         m = _LINE.match(line.strip())
@@ -92,7 +94,7 @@ def parse_logs(text: str) -> dict:
         if pv not in PVS:
             continue
         entry = out["pv"].setdefault(pv, {})
-        for key in ("shape", "id", "pgdata"):
+        for key in ("shape", "id", "pgdata", "stale"):
             if key in fields:
                 entry[key] = fields[key]
     return out
@@ -144,14 +146,20 @@ def judge(mode: str, nodes: list, results: dict, pvs: dict, node_problems: dict,
         phase, claim = state.get("phase"), state.get("claim")
         seen_values = {node: results[node]["pv"].get(pv, {}).get("pgdata") for node in seen}
         has_data = sorted(n for n, v in seen_values.items() if v not in (None, "none"))
+        stale = max((int(results[n]["pv"].get(pv, {}).get("stale") or 0) for n in seen
+                     if str(results[n]["pv"].get(pv, {}).get("stale") or "0").isdigit()), default=0)
+        if stale:
+            out.append(("WARN", f"{pv}: 옛 PGDATA 잔재 pgdata_* {stale}개 — CNPG 가 옛 데이터를 옮겨 두고 진행한 흔적(T6 실측). 내용을 확인한 뒤 "
+                                f"같은 FS 의 pgdata/.retired 로 옮긴다(재활용 런북 deploy/README §2f-5)"))
         if phase == "Released":
             out.append(("WARN", f"{pv}: Released(옛 claim {claim}) — 건드리지 않는다; 재활용은 런북(deploy/README §2f-5)"))
             continue
         if phase == "Available":
             if has_data:
                 level = "FAIL" if mode == "precheck" else "WARN"
-                out.append((level, f"{pv}: Available 인데 옛 PGDATA(pgdata/)가 보인다({', '.join(has_data)}) — 새 인스턴스가 붙으면 initdb·join 이 "
-                                   f"실패한다. 재활용 런북(.retired 로 옮기고 빈 디렉터리 + .dms-pv-id)"))
+                out.append((level, f"{pv}: Available 인데 옛 PGDATA(pgdata/)가 보인다({', '.join(has_data)}) — 새 인스턴스가 붙으면 CNPG 가 "
+                                   f"실패 없이 옛 데이터를 pgdata_<UTC> 로 옮겨 두고 새로 시작한다(옛 데이터가 조용히 남음). 재활용 런북(.retired 로 "
+                                   f"옮기고 빈 디렉터리 + .dms-pv-id)"))
             continue
         if phase != "Bound":
             out.append(("UNKNOWN", f"{pv}: 상태 {phase}"))

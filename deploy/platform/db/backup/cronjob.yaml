@@ -32,7 +32,9 @@ spec:
   failedJobsHistoryLimit: 3
   jobTemplate:
     spec:
-      backoffLimit: 1
+      # 재시도 3회(2026-11-03 T6): switchover 와 겹친 덤프는 첫 시도가 「terminating connection」으로 끊기고 재시도가 살렸다 — 노드 사망
+      # 장애조치(약 1~1.5분)는 1회로는 부족하다. 재시도 대기 합(약 70초)은 activeDeadlineSeconds 안이다.
+      backoffLimit: 3
       activeDeadlineSeconds: 3000
       template:
         metadata:

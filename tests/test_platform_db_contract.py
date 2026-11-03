@@ -498,13 +498,16 @@ def test_probe_script_reports_shape_sentinel_and_pg_version(tmp_path):
         (pv / PVS[0] / "pgdata" / "PG_VERSION").write_text("17\n")
         (pv / PVS[1] / "pgdata").mkdir()                                  # PG_VERSION 없는 pgdata(깨진 흔적)
         (pv / PVS[2] / ".dms-pv-id").write_text("dms-pgdata-99\n")
+        (pv / PVS[3] / "pgdata_20261103T061051Z").mkdir()
+        (pv / PVS[3] / "pgdata_20261103T070000Z").mkdir()
 
     r = _run_probe(tmp_path, setup)
     assert r.returncode == 0, r.stderr
     parsed = PROBE.parse_logs(r.stdout)
     assert parsed["done"] and parsed["node"] == "n1"
     uid, gid = os.getuid(), os.getgid()
-    assert parsed["pv"][PVS[0]] == {"shape": f"{uid}:{gid}:700", "id": PVS[0], "pgdata": "17"}
+    assert parsed["pv"][PVS[0]] == {"shape": f"{uid}:{gid}:700", "id": PVS[0], "pgdata": "17", "stale": "0"}
+    assert parsed["pv"][PVS[3]]["stale"] == "2"                         # 옛 PGDATA 잔재 pgdata_<UTC> 두 개
     assert parsed["pv"][PVS[1]]["pgdata"] == "<no-PG_VERSION>"
     assert parsed["pv"][PVS[2]]["id"] == "dms-pgdata-99"
     assert parsed["pv"][PVS[4]]["pgdata"] == "none"
@@ -1058,3 +1061,22 @@ def test_pg_storage_class_pvcs_are_limited_to_namespace_dms(sites, site):
     binding = doc(layer, "ValidatingAdmissionPolicyBinding", "dms-pg-shared-pvc-namespace")
     assert re.search(r"(?m)^  policyName: dms-pg-shared-pvc-namespace$", binding)
     assert re.search(r"(?m)^  - Deny$", binding)
+
+
+
+def test_stale_pgdata_remnants_are_a_warning_in_every_mode():
+    # T6(2026-11-03): CNPG 1.30 은 옛 PGDATA 를 pgdata_<UTC> 로 옮기고 진행한다 — 실패가 아니라 조용한 잔존이라 프로브가 알린다.
+    nodes = ["n1", "n2"]
+    res = {n: {"done": True, "node": n, "pv": {pv: {"shape": "26:26:700", "id": pv, "pgdata": "none", "stale": "0"} for pv in PVS}}
+           for n in nodes}
+    res["n2"]["pv"][PVS[0]]["stale"] = "1"
+    pvs = {pv: {"phase": "Available", "claim": None} for pv in PVS}
+    for mode in ("precheck", "contrast"):
+        out = PROBE.judge(mode, nodes, res, pvs, {})
+        warns = [m for lvl, m in out if lvl == "WARN" and "pgdata_*" in m]
+        assert len(warns) == 1 and PVS[0] in warns[0], out
+
+
+def test_dump_job_retries_three_times():
+    cron = (DB / "backup" / "cronjob.yaml").read_text(encoding="utf-8")
+    assert re.search(r"(?m)^      backoffLimit: 3$", cron)
