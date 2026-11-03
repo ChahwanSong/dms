@@ -1041,3 +1041,20 @@ def test_secrets_helper_is_python39_syntax_and_needs_a_context():
     ast.parse((DEPLOY / "pg-secrets.py").read_text(encoding="utf-8"), feature_version=(3, 9))
     r = subprocess.run([sys.executable, str(DEPLOY / "pg-secrets.py"), "check"], capture_output=True, text=True, timeout=30)
     assert r.returncode == 2                                              # --context 필수
+
+
+
+@needs_kubectl
+@pytest.mark.parametrize("site", SITES)
+def test_pg_storage_class_pvcs_are_limited_to_namespace_dms(sites, site):
+    # 6-2 「소유·보안」(2026-11-03 커밋 보안 리뷰): claimRef 없는 여분 PV 에 다른 네임스페이스 PVC 가 붙지 못하게 — VAP + Deny 바인딩이
+    # 볼륨 층과 함께 적용된다(따로 미루면 PV 가 먼저 열린다).
+    layer = sites[site]["layers"]["db-volumes"]
+    vap = doc(layer, "ValidatingAdmissionPolicy", "dms-pg-shared-pvc-namespace")
+    assert re.search(r"(?m)^  failurePolicy: Fail$", vap)
+    assert "persistentvolumeclaims" in vap and "CREATE" in vap and "UPDATE" in vap
+    expr = " ".join(vap.split()).replace("''", "'")      # kustomize 가 작은따옴표 스칼라로 다시 쓴다
+    assert "object.spec.storageClassName != 'dms-pg-shared'" in expr and "object.metadata.namespace == 'dms'" in expr
+    binding = doc(layer, "ValidatingAdmissionPolicyBinding", "dms-pg-shared-pvc-namespace")
+    assert re.search(r"(?m)^  policyName: dms-pg-shared-pvc-namespace$", binding)
+    assert re.search(r"(?m)^  - Deny$", binding)

@@ -29,3 +29,4 @@ kind: Kustomization
 resources:
   - storageclass.yaml
   - pv.yaml
+  - vap.yaml
