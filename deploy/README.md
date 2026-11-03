@@ -35,7 +35,7 @@ k8s 테스트베드는 §13 이 런북이다.
 | 포탈 | https://dms.local (VIP 10.20.20.100) | https://dms-k8s.local (VIP 10.20.20.101) |
 | 레지스트리 | `pkg-01:5000` (docker `registry`) | `10.112.0.50:5000` — 클러스터 내(④, 2026-11-03~ 앱·빌더 `buildah:stable` 모두, §2e-6). 그 전 `pkg-01:5001`(docker `registry-k8s`, 빌더만 :5000 공용) — 되돌림용으로 둔다 |
 | 태그 관례 | `dN` | `dN` — d1 부터(2026-10-26; 그 전 k0~k4 는 옛 kN, 첫 설치 시드는 `d0`) |
-| PostgreSQL | `dmsdb` / `dmsapp` | `dmsdb_k8s` / `dmsapp_k8s` |
+| PostgreSQL | `dmsdb` / `dmsapp` | CNPG Cluster `dms-pg`(DB `dms`/사용자 `dms` — ⑤, 2026-11-03 T7~, §2f-8). 그 전 pkg-01 `dmsdb_k8s` / `dmsapp_k8s` — 되돌림용으로 둔다 |
 | LDAP | 사용(pkg-01 slapd, 아래 표) | **없음**(사용자 결정) — k8s 신원 모드(모든 잡 root + 권한 = RoleBinding 맵핑, §13) |
 | `dms-secrets` | 5키(+ `DMS_LDAP_BIND_PW`) | **4키**(바인드 비밀번호 키 없음) |
 | CephFS | dmsfs:/ → `/cephfs`, `/third` → `/cephfs-third`(w1·w2), `/secondary` → `/cephfs-secondary`(w3) | dmsfs:/k8s → `/cephfs`, `/k8s/third` → `/cephfs-third`(k8s-w1), `/k8s/secondary` → `/cephfs-secondary`(k8s-w2) |
@@ -752,7 +752,7 @@ PG 17 digest 고정(#27), 볼륨은 공용 디렉터리의 **정적 hostPath PV 
 | 무엇 | 어디(base → 렌더) | 비고 |
 |---|---|---|
 | CNPG 오퍼레이터 | `deploy/addons/cnpg/<CNPG_VERSION>/`(상류 원본 + `SOURCE`·`*.sha256` + DMS 패치 층) → `.rendered/<site>/addons/cnpg` | 6-1 airgap 함정: 이미지와 env `OPERATOR_IMAGE_NAME`(= PG 인스턴스 파드의 bootstrap init 이미지 — 마스터가 받는다) **둘 다** `<REG>/cloudnative-pg:1.30.1@sha256:<amd64>`, `Always` → `IfNotPresent`, env `POSTGRES_IMAGE_NAME` = PG 이미지(imageName 을 생략한 Cluster 도 ghcr.io 로 가지 않게). replicas 2·워커(required nodeAffinity control-plane `DoesNotExist`, 두 파드 다른 노드 선호)·`dms-addon-critical`. 라벨 `app.kubernetes.io/managed-by=dms-install`·`dms.io/addon-version=1.30.1`(모든 객체, selector 는 상류 그대로). **`WATCH_NAMESPACE` 없음** = 모든 네임스페이스(dms 포함 — 8-2 「watch 범위에 dms 가 없으면 X」; 클러스터에 CNPG 는 하나만 둔다). 웹훅·RBAC·CRD·ns `cnpg-system` 은 상류 그대로(웹훅 `failurePolicy: Fail` — apiserver → 워커 파드 **9443**, 설계 #7) |
-| SC + PV ×5 | `deploy/platform/db/volumes` → `platform/db-volumes` | SC `dms-pg-shared`(no-provisioner·Immediate·Retain·확장 불가). PV `dms-pgdata-0N`: hostPath `<SHARED_DIR>/dms/pgdata/dms-pgdata-0N` **`type: Directory`**, Retain, RWO, **nodeAffinity·claimRef 없음**, capacity = `PG_STORAGE_SIZE`. 디렉터리는 S0 가 26:26 0700 + `.dms-pv-id`(= PV 이름)로 만든다(hostPath 는 fsGroup 을 적용하지 않는다) |
+| SC + PV ×5 | `deploy/platform/db/volumes` → `platform/db-volumes` | SC `dms-pg-shared`(no-provisioner·Immediate·Retain·확장 불가). PV `dms-pgdata-0N`: hostPath `<SHARED_DIR>/dms/pgdata/dms-pgdata-0N` **`type: Directory`**, Retain, RWO, **nodeAffinity·claimRef 없음**, capacity = `PG_STORAGE_SIZE`. 디렉터리는 S0 가 26:26 0700 + `.dms-pv-id`(= PV 이름)로 만든다(hostPath 는 fsGroup 을 적용하지 않는다). ValidatingAdmissionPolicy `dms-pg-shared-pvc-namespace`(+ Deny 바인딩): 이 클래스의 PVC 는 ns `dms` 에서만(claimRef 없는 여분 PV 를 다른 네임스페이스 PVC 가 붙이지 못하게 — 2026-11-03 09b0652) |
 | Cluster `dms-pg` | `deploy/platform/db/cluster` → `platform/db-cluster` | instances 3, imageName `<REG>/postgresql:17.11-202611020810-minimal-trixie@sha256:<amd64>`(IfNotPresent), `smartShutdownTimeout: 0`, `enablePDB`, `primaryUpdateMethod: switchover`, synchronous `any/1/preferred`, `shared_buffers` 1GB, bootstrap initdb `dms`/`dms` + Secret `dms-pg-app`, storage SC `dms-pg-shared` + size(= PV capacity) + `resizeInUseVolumes: false`, 1 CPU/4Gi(메모리 limit 4Gi, CPU limit 없음) |
 | pg_dump CronJob `dms-pg-dump` | `deploy/platform/db/backup` → `platform/db-backup` | 매시간 `17 * * * *`, `-Fc`, `dms-pg-rw` 에서, 워커, uid 26, hostPath `<SHARED_DIR>/dms/backup/pg`(Directory), 센티널 `.dms-backup-id` **검사만**, 보존 개수 `PG_BACKUP_KEEP`(기본 336 = 14일), 접속 정보는 `dms-pg-app` secretKeyRef 뿐 |
 | 경로 프로브 | `deploy/platform/db/probe` → `platform/db-probe` + `deploy/pg-path-probe.py` | 일회용 DaemonSet(모든 노드에 뜨되 **판정은 DMS 노드** — 마스터 + NoSchedule taint 없는 워커(설계 2-3), 그 밖은 정보만; `--nodes a,b` 로 바꾼다. uid 26, 읽기 전용) — S10 사전 검사·경로 대조. 상주하지 않는다. `--mode pv-check` 는 프로브 없이 이미 있는 SC·PV 를 render.env 와 대조한다(적용 전) |
@@ -766,7 +766,7 @@ cluster,backup,probe}` 를 함께 낸다(`ADDON:`·`PLATFORM:`(S10 순서)·`PRO
 | values.env 키(전부 선택) | 기본 | 뜻 |
 |---|---|---|
 | `PG_STORAGE_SIZE` | `20Gi` | Cluster `storage.size` **와** PV capacity(한 값이 두 곳 — 크면 맞는 PV 가 없어 새 PVC 가 Pending). 명목값(hostPath 는 강제하지 않는다). PV 를 만든 뒤에는 바꾸지 않는다 — PV 용량은 가변이라 SSA 가 조용히 바꾸지만 CNPG 는 `storage.size` 축소를 거절해 둘이 어긋난다(재생성 PVC Pending). 그래서 2f-4 0단계 `pv-check` 가 라이브 PV 와 다르면 FAIL 한다 |
-| `PG_CPU_REQUEST`·`PG_MEMORY`·`PG_SHARED_BUFFERS` | `1`·`4Gi`·`PG_MEMORY`/4 | 메모리는 requests == limits. `PG_SHARED_BUFFERS` 를 비우면 `PG_MEMORY` 의 1/4(둘 다 없으면 base 의 1GB = 4Gi/4) — shared_buffers 는 메모리 limit 안에서 채워지므로 `PG_MEMORY` 만 줄이고 1GB 를 남기면 부하 때 cgroup OOM 으로 재기동을 반복한다. 실효 메모리의 절반 이상이면 렌더 FAIL. 테스트베드 100m/256Mi/64MB(설계 10) |
+| `PG_CPU_REQUEST`·`PG_MEMORY`·`PG_SHARED_BUFFERS` | `1`·`4Gi`·`PG_MEMORY`/4 | 메모리는 requests == limits. `PG_SHARED_BUFFERS` 를 비우면 `PG_MEMORY` 의 1/4(둘 다 없으면 base 의 1GB = 4Gi/4) — shared_buffers 는 메모리 limit 안에서 채워지므로 `PG_MEMORY` 만 줄이고 1GB 를 남기면 부하 때 cgroup OOM 으로 재기동을 반복한다. 실효 메모리의 절반 이상이면 렌더 FAIL. 테스트베드 50m/256Mi/64MB(설계 10 축소, CPU 는 T7 실측 뒤 더 낮춤 — 2f-8) |
 | `PG_PLACEMENT` | `control-plane` | 마스터마다 1개(#27). `all-nodes` 는 **테스트베드만**(control-plane 이 하나 — nodeSelector 를 빼고 toleration·required anti-affinity 는 둔다) |
 | `PG_BACKUP_KEEP` | `336` | pg_dump 보존 개수(매시간 → 14일). **개수**로 센다 — 시각 기준이면 덤프가 며칠 실패하는 동안 좋은 덤프가 전부 지워질 수 있다 |
 
@@ -795,6 +795,23 @@ postgresql://dms:<PW>@dms-pg-rw.dms.svc:5432/dms?sslmode=require&target_session_
 - 손으로 만들 때도 값은 stdin 으로: `printf 'username=dms\npassword=%s\n' "$(openssl rand -hex 24)" | kubectl --context C -n dms create secret
   generic dms-pg-app --type=kubernetes.io/basic-auth --from-env-file=/dev/stdin`(`printf` 는 셸 내장이라 argv 에 실리지 않는다).
 - 시크릿은 api·controller 가 기동 때만 읽는다 — URL 을 바꾼 뒤 `kubectl --context C -n dms rollout restart deploy/dms-api deploy/dms-controller`.
+- `set-url` 은 되돌림 URL 을 지킨다(2026-11-03 a22cb32 — T7 검토): 옛 값이 이미 이 클러스터의 `dms-pg-rw` 면(이관 뒤 재실행 — 비밀번호 교체 등)
+  `dms-secrets-prev` 를 건드리지 않고, prev 에 지금과 다른 외부 URL 이 있으면 멈춘다(어느 쪽이 되돌림인지 확인한 뒤 `--overwrite-prev`).
+
+**이관 순서**(외부 PG → 이미 떠 있는 `dms-pg`, 덤프·복원 — 2026-11-03 T7 실측, 앱 정지 창 약 3.5분):
+
+1. 동결: DMS drain 켬(포탈 컨트롤 상태 — `PUT /api/admin/control-state`, 세션 관리자) → 진행 중 잡·빌드 0 확인 →
+   `kubectl --context C -n dms patch cronjob dms-pg-dump --type=merge -p '{"spec":{"suspend":true}}'` → `get deploy dms-api dms-controller` 로 replicas 를
+   적고 `scale deploy dms-api dms-controller --replicas=0` → **두 Deployment 의 파드가 모두 사라질 때까지** 기다린다(`get pod -l
+   'app.kubernetes.io/name in (dms-api,dms-controller)'` 가 빔 — 종료 중인 파드가 원본에 쓰면 그 쓰기는 덤프에 없다).
+2. 원본 덤프(`pg_dump -Fc --no-owner --no-acl`, 원본 세션은 `PGOPTIONS='-c default_transaction_read_only=on'` — 원본에 쓸 수 없게) → 대상 `dms` 의
+   public 테이블이 0개인지 확인 → `dms` 사용자로 `pg_restore --no-owner --no-acl --exit-on-error --single-transaction -d dms`(실패하면 통째로
+   되돌아 반쯤 복원된 DB 가 남지 않는다 — 재시도에 정리가 필요 없다) → `ANALYZE` → 원본·대상 대조(2f-5 「대조」 — 행 수·행 해시·시퀀스).
+3. `python3 deploy/pg-secrets.py --context C set-url` → `check`(PASS).
+4. `scale deploy dms-api dms-controller --replicas=<적은 값>` — 이미 0 이라 `rollout restart` 로는 뜨지 않는다. initContainer migrate 는 no-op.
+5. CronJob `suspend: false` → `create job --from=cronjob/dms-pg-dump` 로 새 DB 의 덤프 확인 → DMS drain 끔.
+
+되돌림은 `restore-url` → `rollout restart`(원본은 손대지 않는다 — 이관 뒤의 쓰기는 원본에 없으니 살리려면 `dms-pg` 덤프를 원본에 복원).
 
 ### 2f-3. CNPG 오퍼레이터(S9, A 경로) — 감지 → SSA → 롤아웃 → Cluster CR server dry-run
 
@@ -856,7 +873,8 @@ kubectl --context C get sc dms-pg-shared --ignore-not-found -o 'custom-columns=P
 kubectl --context C apply --server-side --field-manager=dms-install --dry-run=server -k $RD/platform/db-volumes
 kubectl --context C apply --server-side --field-manager=dms-install -k $RD/platform/db-volumes
 # 2) 사전 검사 — DMS 노드(마스터 + NoSchedule taint 없는 워커 — 설계 2-3; 그 밖의 노드는 정보만, `--nodes a,b` 로 바꾼다)마다 PV 디렉터리
-#    26:26 0700·.dms-pv-id == PV 이름·Available PV 에 옛 PGDATA 없음(약 1~2분). 첫 줄들에 판정 대상·판정 밖 노드 목록이 나온다
+#    26:26 0700·.dms-pv-id == PV 이름·Available PV 에 옛 PGDATA 없음(약 1~2분). 첫 줄들에 판정 대상·판정 밖 노드 목록이 나온다.
+#    어느 모드든 PV 안의 옛 PGDATA 잔재 `pgdata_*`(CNPG 가 옮겨 둔 것 — 2f-5 재활용 런북)는 WARN(2026-11-03 T6)
 python3 deploy/pg-path-probe.py --context C --rendered $RD/platform/db-probe --mode precheck       # 0 PASS·3 WARN·1 FAIL·4 모름
 # 3) 시크릿(2f-2)이 있는지 → Cluster
 kubectl --context C -n dms get secret dms-pg-app >/dev/null
@@ -864,8 +882,8 @@ kubectl --context C apply --server-side --field-manager=dms-install --dry-run=se
 kubectl --context C apply --server-side --field-manager=dms-install -k $RD/platform/db-cluster
 ```
 
-4) **900초 폴링** — `kubectl wait --for=condition=Ready` 는 쓰지 않는다(인스턴스가 **모두** healthy 일 때만 서는 조건이라(추정) 하나가 늦으면 끝없이
-기다린다). 세 조건이 모두 서면 「DB 사용 가능」이다:
+4) **900초 폴링** — `kubectl wait --for=condition=Ready` 는 쓰지 않는다(인스턴스가 **모두** healthy 일 때만 서는 조건이라(2026-11-03 T6 실측 —
+switchover 중에도 `ClusterIsNotReady`) 하나가 늦으면 끝없이 기다린다). 세 조건이 모두 서면 「DB 사용 가능」이다:
 
 ```bash
 for i in $(seq 1 90); do
@@ -881,7 +899,8 @@ kubectl --context C -n dms get cluster dms-pg; kubectl --context C -n dms get pv
 ```
 
 판정(S10): readyInstances 3 → PASS, 1~2 → **WARN**(모름 ≠ 실패 — 나머지는 join 중일 수 있다), 0 이거나 900초 초과 → **FAIL**(Cluster `status.phase`·
-`kubectl --context C -n dms describe cluster dms-pg`·인스턴스 파드 이벤트). Available 여분 PV < 1 → WARN.
+`kubectl --context C -n dms describe cluster dms-pg`·인스턴스 파드 이벤트). Available 여분 PV < 1 → WARN. 테스트베드 실측(NFS, 2026-11-03 T6): 첫
+primary 약 135초(initdb 67초 + template SQL 43초 — fsync 비용), 3/3 Ready 6분 31초.
 
 ```bash
 # 5) 경로 대조 — Bound PV 마다 모든 DMS 노드(곧 인스턴스가 아닌 노드도)가 같은 <PV 경로>/pgdata/PG_VERSION 을 보는지. 못 보면 FAIL
@@ -906,8 +925,9 @@ kubectl --context C -n dms logs job/dms-pg-dump-first                 # 「dms-p
 | 증상 | 뜻 · 할 일 |
 |---|---|
 | 인스턴스 파드 `FailedMount … hostPath type check failed` | 그 노드에 `<SHARED_DIR>/dms/pgdata/dms-pgdata-0N` 이 없다(마운트 없음·S0 미실행). 경로를 손으로 만들지 않는다(G2) |
-| initdb 실패 `could not create directory … Permission denied` | PV 디렉터리가 26:26 0700 이 아니다(S0 `--check`·사전 검사). hostPath 는 fsGroup 을 적용하지 않는다 |
-| 새 PVC 가 Pending | Available 여분이 없다(Released 는 2f-5 런북) 또는 `storage.size` > PV capacity |
+| initdb Job 이 반복 실패 — 로그 `Error while checking for an existing data directory … stat …/pgdata: permission denied` | PV 디렉터리가 26:26 0700 이 아니다(S0 `--check`·사전 검사 — 2026-11-03 T6 의 0:0 음성 대조 문구). hostPath 는 fsGroup 을 적용하지 않는다 |
+| 새 PVC 가 Pending — 이벤트 `ProvisioningFailed: no volume plugin matched name: kubernetes.io/no-provisioner` | 맞는 PV 가 없다(정적 풀이라 프로비저너가 없다는 문구로 나온다): Available 여분이 없다(Released 는 2f-5 런북) 또는 `storage.size` > PV capacity |
+| 다른 네임스페이스의 `dms-pg-shared` PVC 생성이 `Forbidden`(「네임스페이스 dms 에서만」) | 정상 — VAP `dms-pg-shared-pvc-namespace`(2f-1). 클래스 없이 `volumeName` 으로 고른 PVC 는 클래스가 달라 `VolumeMismatch` 로 Pending |
 | 덤프 「센티널 없음」 | 그 워커의 `<SHARED_DIR>/dms/backup/pg` 에 `.dms-backup-id` 가 없다 — 마운트 빠진 노드의 로컬 디렉터리이거나 S0 를 ⑤ 전에 돌렸다(S0 재실행) |
 | 덤프 `password authentication failed` | `dms-pg-app` 과 Cluster 의 dms 역할 비밀번호가 다르다(시크릿을 Cluster 뒤에 다시 만들었다) |
 
@@ -923,15 +943,16 @@ kubectl --context C -n dms logs job/dms-pg-dump-first                 # 「dms-p
 - **복구**(**같은 이름 `dms-pg`** 로 새로 만들고 `pg_restore` — 다운그레이드·제자리 복원에 기대지 않는다). 이름을 바꾸지 않는 이유(2026-11-03 ⑤
   리뷰 2): pg_dump CronJob 의 `PGHOST=dms-pg-rw`·경로 프로브·`pg-secrets.py`(URL·`check`)·⑦ 설치기·S12 가 모두 `dms-pg` 를 본다 — 새 이름으로
   복구하면 옛 Cluster 를 남겼을 때 매시간 덤프가 **버린 옛 DB** 를 「완료」로 받고(경보 없음 — 보존 개수가 차면 좋은 덤프가 밀려난다) 새 라이브 DB
-  의 덤프는 하나도 생기지 않는다. 같은 이름이어도 옛 데이터와 섞이지 않는다 — Cluster 를 지우면 PVC 가 함께 지워지고(추정, T6 확인) Released PV 는
+  의 덤프는 하나도 생기지 않는다. 같은 이름이어도 옛 데이터와 섞이지 않는다 — Cluster 를 지우면 PVC 가 함께 지워지고(PVC 에 Cluster ownerReference —
+  2026-11-03 T6 실측, 약 10초) Released PV 는
   claimRef 의 옛 UID 때문에 새 PVC 에 붙지 않는다(옛 PGDATA 는 그 PV 디렉터리에 남는다 — 재활용 런북이 `.retired` 로 옮겨 보관한다).
   1. 쓰기를 멈춘다: `kubectl --context C -n dms get deploy dms-api dms-controller` 로 replicas 를 적고 `kubectl --context C -n dms scale deploy
      dms-api dms-controller --replicas=0` — 앱이 빈 새 DB 에 먼저 붙으면 migrate 가 스키마를 만들어 `pg_restore` 와 겹친다.
   2. 복원할 덤프를 고른다(`<SHARED_DIR>/dms/backup/pg/dms-<UTC>.dump` — 옛 DB 가 읽히고 손상 전이면 `create job --from=cronjob/dms-pg-dump` 로
      하나 더 뜨고, 잘못된 마이그레이션·삭제가 원인이면 그 전 시각의 것). 공용 스토리지를 잃었으면 밖 사본에서 되살린다(S0 → 2f-4 의 `db-volumes` 부터).
-  3. `kubectl --context C -n dms delete cluster dms-pg` → PVC 가 지워지고 PV 3개가 Released. `kubectl --context C -n dms get pvc -l
-     cnpg.io/cluster=dms-pg` 가 비어 있는지 본다 — 남은 PVC 가 있으면(위 「추정」이 틀렸을 때) 지운다: 같은 이름의 새 Cluster 가 옛 PGDATA 째 다시
-     붙잡을 수 있다(추정).
+  3. `kubectl --context C -n dms delete cluster dms-pg` → PVC 가 지워지고(T6 실측 약 10초) PV 3개가 Released. `kubectl --context C -n dms get pvc -l
+     cnpg.io/cluster=dms-pg` 가 비어 있는지 본다 — 그래도 남은 PVC 가 있으면 지운다: 같은 이름의 새 Cluster 가 옛 PGDATA 째 다시 붙잡을 수
+     있다(추정).
   4. 2f-4 3)의 `db-cluster` SSA(같은 렌더, `dms-pg-app` 그대로 — URL·비밀번호가 바뀌지 않는다) → 2f-4 4) 900초 폴링. 여분 PV 2개로 두 인스턴스가
      뜨고 셋째는 Pending 이다 — Released PV 에 아래 재활용 런북을 돌리면 뜬다(복원과 병행해도 된다).
   5. `P=$(kubectl --context C -n dms get cluster dms-pg -o jsonpath='{.status.currentPrimary}')` →
@@ -943,8 +964,14 @@ kubectl --context C -n dms logs job/dms-pg-dump-first                 # 「dms-p
   생긴다(`artifact_trash.py`). **첫 이관(외부 PG → CNPG)은 CNPG 「initdb import」**(설계 6-4): Cluster 를 `bootstrap.initdb.import`(type
   `microservice`, `databases: [<원본 DB>]`, `externalClusters` 에 원본 접속 — 비밀번호는 `secretKeyRef`)로 **만들 때** 원본을 읽어 들인다.
   bootstrap 은 Cluster 를 만들 때 한 번뿐이라 이미 initdb 로 뜬 Cluster 에는 쓸 수 없다 — 이관할 사이트는 S10 의 `db-cluster` 대신 import
-  bootstrap 으로 만들거나(⑦ 설치기 몫 — 이름은 그대로 `dms-pg`: 위 복구와 같은 이유), 이미 떠 있으면 덤프·복원(`pg_restore --no-owner --role=dms`)으로 같은 결과를 낸다. 테스트베드: T6 이
-  일회용 Cluster 로 import 를 실증하고(행 수·md5 대조), T7 은 `dms-pg` 가 T6 에서 이미 떠 있어 덤프·복원으로 한다(2f-8).
+  bootstrap 으로 만들거나(⑦ 설치기 몫 — 이름은 그대로 `dms-pg`: 위 복구와 같은 이유), 이미 떠 있으면 덤프·복원(2f-2 「이관 순서」)으로 같은 결과를 낸다. 테스트베드
+  (2026-11-03): T6 이 일회용 Cluster 로 import 를, T7 이 이미 떠 있던 `dms-pg` 로 덤프·복원을 실증했다 — 둘 다 행 수·md5 일치(2f-8).
+- **대조**(복원·이관 뒤 — 원본과 대상에서 같은 SQL, 결과를 diff): 세션 표시 설정을 양쪽 같게 고정하고(`SET TimeZone='UTC'; SET DateStyle='ISO, MDY';
+  SET IntervalStyle='postgres'; SET extra_float_digits=1; SET bytea_output='hex'` — 행 텍스트 표현이 같아야 해시가 같다) public 테이블마다
+  `SELECT count(*), md5(coalesce(string_agg(h, '' ORDER BY h COLLATE "C"), '')) FROM (SELECT md5(t::text) AS h FROM public.<표> t) s`, 시퀀스는
+  `SELECT sequencename, last_value FROM pg_sequences WHERE schemaname = 'public' ORDER BY 1`. **행 텍스트를 통째로 `string_agg` 하지 않는다** — 그
+  백엔드가 테이블 크기만큼 메모리를 쓴다(T7 1회차: agent_reports 54MB → 대상 primary 백엔드 183MB, `PG_MEMORY` 256Mi cgroup OOM → 장애조치).
+  행 해시(32자)만 모으면 4만 행에 약 1.3MB 다.
 - **Released 재활용 런북**(6-2 — 인스턴스를 볼륨째 다시 만든 뒤 옛 PV 가 Released 로 남았을 때. 여분이 2개라 급하지 않다):
   0. **실행하는 노드에서** `[ "$(findmnt -n -o TARGET -T <SHARED_DIR>)" != / ] && [ -f <SHARED_DIR>/dms/.dms-shared-id ]` — 아니면 중단(마운트가
      빠진 노드에서 디렉터리를 만들면 그 노드의 `Directory` 검사가 통과해 PG 가 로컬 디스크에 쓴다).
@@ -962,10 +989,13 @@ kubectl --context C -n dms logs job/dms-pg-dump-first                 # 「dms-p
      printf 'dms-pgdata-0N\n' | sudo tee <SHARED_DIR>/dms/pgdata/dms-pgdata-0N/.dms-pv-id >/dev/null   # root:root 0644(umask 022)
      sudo sh deploy/shared-dir-init.sh --check <SHARED_DIR>                                               # 모양·센티널 PASS
      ```
-     옛 PGDATA 가 남아 있으면 join(pg_basebackup)이 실패할 것으로 본다(추정 — T6 확인). `.retired/` 의 옛 PGDATA 는 덤프 밖의 유일한 사본일 수
-     있으니 보존 기한을 정해 지운다(용량 3-3).
+     옛 PGDATA 가 남은 채 새 인스턴스가 붙어도 **실패하지 않는다** — CNPG 1.30 은 그것을 같은 PV 안 `pgdata_<UTC>` 로 옮기고 새로 시작해 옛
+     데이터가 조용히 남는다(2026-11-03 T6 실측 — 설계의 「join 실패」 추정 정정). 그래서 이 단계를 건너뛰어도 드러나지 않는다: 경로 프로브가
+     어느 모드든 `pgdata_*` 잔재를 WARN 하면 내용을 확인한 뒤 같은 FS 의 `pgdata/.retired/` 로 옮긴다. `.retired/` 의 옛 PGDATA 는 덤프 밖의
+     유일한 사본일 수 있으니 보존 기한을 정해 지운다(용량 3-3).
   3. claimRef 를 지워 Available 로: `kubectl --context C patch pv dms-pgdata-0N --type=json -p '[{"op":"remove","path":"/spec/claimRef"}]'`
-  - **Cluster 삭제**는 CNPG 가 PVC 를 함께 지운다(PVC 에 Cluster ownerReference — 추정, T6 확인) → PV 3개가 Released 가 되고 여분은 2개뿐이라
+  - **Cluster 삭제**는 CNPG 가 PVC 를 함께 지운다(PVC 에 Cluster ownerReference — 2026-11-03 T6 실측: 약 10초 안에, 일회용 인스턴스 2·PV 3 에서
+    PV 2개 Released + 1개 Available) → PV 3개가 Released 가 되고 여분은 2개뿐이라
     다시 만든 Cluster(같은 이름 `dms-pg` — 위 복구)의 셋째 인스턴스는 런북을 돌린 뒤에 뜬다. 옛 PGDATA 는 지우지 않고 `.retired` 로 옮겨 보관한다.
 
 ### 2f-6. 업그레이드 (설계 6-5 — 연 2회 이상)
@@ -981,8 +1011,9 @@ kubectl --context C -n dms logs job/dms-pg-dump-first                 # 「dms-p
 
 `kubectl cnpg` 플러그인(switchover·destroy 등)은 인터넷 노드가 릴리스의 `kubectl-cnpg_<v>_linux_x86_64.tar.gz` 를 `cnpg-<v>-checksums.txt` 와
 대조해 받아 설치 호스트로 옮긴다(수단은 K8). switchover = `kubectl cnpg promote dms-pg <인스턴스>`(플러그인 권장 — 플러그인이 하는 일은
-Cluster `status.targetPrimary` 패치다: 플러그인이 없을 때 `kubectl --context C -n dms patch cluster dms-pg --subresource=status --type=merge
--p '{"status":{"targetPrimary":"dms-pg-2"}}'` — T6 에서 둘 다 확인).
+Cluster `status.targetPrimary` 패치와 phase `Switchover in progress` 다: 플러그인이 없을 때 `kubectl --context C -n dms patch cluster dms-pg
+--subresource=status --type=merge -p '{"status":{"targetPrimary":"dms-pg-2"}}'` — 이때 phase 는 바뀌지 않으니 `status.currentPrimary` 가
+`targetPrimary` 와 같아질 때까지를 진행 중으로 본다). 2026-11-03 T6 실측: 둘 다 약 9초, 옛 primary 의 RESTARTS +1 은 정상.
 
 ### 2f-7. 마스터 운영 규칙(6-6)·장애조치 시간(6-3)
 
@@ -994,32 +1025,40 @@ Cluster `status.targetPrimary` 패치다: 플러그인이 없을 때 `kubectl --
 - 공용 스토리지 유지보수(3-2 G2 보충): 그 노드의 DMS 상태 파드(api·controller·registry·CNPG 인스턴스·pg_dump)를 먼저 비우고(primary 면 switchover
   뒤 cordon + 파드 삭제) → 재마운트 → uncordon.
 
-| 장애조치 상황(추정, PG 검토 4-2) | 쓰기 불가 시간 |
+| 장애조치 상황(PG 검토 4-2 — 「실측」 표시 밖은 추정) | 쓰기 불가 시간 |
 |---|---|
-| switchover, PG 파드 재시작 | 수 초~십수 초(그동안 API 500) |
-| primary 가 있던 마스터 사망 | 약 1~1.5분(노드 판정 약 50초 → 승격) |
+| switchover | 약 7초 API 5xx(2026-11-03 T7 실측 — 앱이 CNPG 위에서; CNPG 의 switchover 완료는 약 9초, T6) |
+| PG 파드 재시작·노드 이동 | 수 초~십수 초(primary 면 그동안 API 500). 인스턴스가 다른 노드에서 같은 PV 로 다시 뜨기까지 22초(T6 실측 — cordon + 파드 삭제, pg_basebackup 없음) |
+| primary 가 있던 마스터 사망 | 약 1~1.5분(노드 판정 약 50초 → 승격 — T6') |
 | dms-api 가 있던 마스터 사망 | 약 1.5~2.5분 — 새 마스터에 dms 이미지가 캐시돼 있다는 전제(prod 오버레이의 not-ready·unreachable 30초 + S11 사전 pull). 레지스트리도 같은 마스터였으면 수 분 더(7-6) |
 
+dms-controller 는 DB 연결을 잃으면 exit 1 로 끝나 재시작한다(T7 switchover 실측 — 정상, 곧 다시 붙는다). 짧은 사이에 거듭 잃으면 kubelet
+재시작 백오프가 쌓여 복귀가 DB 보다 늦을 수 있다(T6' 에서 본다).
 keepalive·`tcp_user_timeout`(2f-2 URL)이 없으면 API 가 최대 약 15분 매달린다(추정, T6' 실증). prod 오버레이는 dms-api·dms-controller 를 마스터에
 둔다(`deploy/overlays/prod/patch-placement.yaml` — nodeSelector control-plane + toleration + not-ready·unreachable `tolerationSeconds: 30`, #24·#25;
 테스트베드는 cp1 메모리가 모자라 워커 그대로).
 
 ### 2f-8. k8s 테스트베드(`dmsk8s`) — T6 (CNPG 실증)·T6'·T7
 
-- 값: `deploy/overlays/testbed-k8s/values.env` — `PG_CPU_REQUEST=100m`·`PG_MEMORY=256Mi`·`PG_SHARED_BUFFERS=64MB`(설계 10 축소 — 64MB 는 PG_MEMORY/4 기본과 같다), `PG_PLACEMENT=all-nodes`
+- 값: `deploy/overlays/testbed-k8s/values.env` — `PG_CPU_REQUEST=50m`·`PG_MEMORY=256Mi`·`PG_SHARED_BUFFERS=64MB`(설계 10 축소 — 64MB 는 PG_MEMORY/4 기본과 같다), `PG_PLACEMENT=all-nodes`
   (control-plane 이 cp1 하나 — 인스턴스를 cp1·w1·w2 에 하나씩; 이 오버레이만), `PG_BACKUP_KEEP=24`(호스트 `/data` 여유가 작다). 오퍼레이터는
   w1·w2, 이미지는 클러스터 내 레지스트리 `10.112.0.50:5000`(빌드 노드 k8s-w1 에서 lock 으로 push). PV 디렉터리 5개는 T3 의 S0 가 이미 만들었다
   (`/dms_shared/dms/pgdata/dms-pgdata-0N` 26:26 0700 + `.dms-pv-id`); `backup/pg/.dms-backup-id` 는 ⑤ 에서 새로 생긴 센티널이라 S0 를 한 번 더 돈다.
-- **DMS 앱 DB 는 아직 pkg-01 의 외부 PG**(`dmsdb_k8s`/`dmsapp_k8s` — `dms-secrets` 의 `DMS_DATABASE_URL`). T6 은 CNPG 를 띄우고 시험할 뿐 앱 URL 을
-  바꾸지 않는다. 앱을 CNPG 로 옮기는 **T7**(덤프 → 복원 → `pg-secrets.py set-url` → `rollout restart`, 롤백 = `restore-url`)과 장애 시험 **T6'**
-  (전원 차단·drain 0 대 180·apiserver 불통·export 차단·fio/pgbench 공용 대 로컬)은 사용자 승인 뒤 별도 단계다.
-- 실행 런북(메인 세션 몫 — 정확한 명령·확인 항목·되돌림): 설계 10 「T6 세부」의 순서 — push(k8s-w1 skopeo) → 렌더 → PriorityClass(④ 에서
+- **용량**(2026-11-03 T7 실측): ⑤ 뒤 워커마다 +200m(PG 인스턴스 100m + 오퍼레이터 100m) — dms-controller 가 어느 워커에 있느냐에 따라 2노드
+  dscan gang(워커 1000m + launcher 100m)이 5m 모자라 Volcano 에서 대기했다 → `PG_CPU_REQUEST` 100m → 50m(CPU limit 은 없다). 라이브 반영은
+  `db-cluster` SSA(requests 변경 = 인스턴스 롤링 + switchover — 5xx 수 초).
+- **DMS 앱 DB 는 T7(2026-11-03)부터 `dms-pg`** 다 — 2f-2 「이관 순서」 그대로(앱 정지 창 3분 29초, 테이블 37·행 42,951·시퀀스 7 일치, switchover 5xx
+  약 7초; 결과는 CHANGELOG ⑤ 「T7」). pkg-01 의 외부 PG(`dmsdb_k8s`/`dmsapp_k8s`)는 손대지 않고 되돌림용으로 둔다(`dms-secrets-prev` →
+  `restore-url`). 장애 시험 **T6'**(전원 차단·drain 0 대 180·apiserver 불통·export 차단·재마운트·fio/pgbench 공용 대 로컬)은 사용자 승인 뒤
+  별도 단계다.
+- 실행 런북(메인 세션 몫 — 정확한 명령·확인 항목·되돌림; 2026-11-03 실증 끝, 결과는 CHANGELOG ⑤ 「T6 실증」): 설계 10 「T6 세부」의 순서 — push(k8s-w1 skopeo) → 렌더 → PriorityClass(④ 에서
   있음) → `addons/cnpg` → 9443 dry-run → `db-volumes` → 사전 검사 → `db-cluster` → 900초 폴링 → 경로 대조 → `db-backup` + 첫 덤프 → 확인(airgap
   함정 셋·커밋 지연·26:26 음성 대조(별도 일회용 Cluster)·PV 순환·Cluster 삭제·재생성(일회용 — 인스턴스 2·PV 3: 삭제 → PV 2개 Released →
   재생성 때 둘째 인스턴스 Pending → 재활용 런북 → 기동)·노드 이동·switchover·덤프 복원·initdb import(일회용 Cluster — 행 수·md5 대조)).
   S10 0단계 `pv-check` 는 `db-volumes` 적용 전에, 첫 설치의 `addons/cnpg` server dry-run 전에는 `create namespace cnpg-system`(2f-3).
-- **걷어내기**(T6 을 중간에 멈출 때 — 앱은 외부 PG 라 영향 없음; `RD=deploy/.rendered/testbed-k8s` — 2f-3·2f-4 와 같은 뜻, §2e 의 `R`(…/platform)과
-  다르다): `kubectl --context dmsk8s delete -k $RD/platform/db-backup` →
+- **걷어내기**(`RD=deploy/.rendered/testbed-k8s` — 2f-3·2f-4 와 같은 뜻, §2e 의 `R`(…/platform)과 다르다). T7 뒤로는 앱 DB 다 — 먼저 앱을
+  외부 PG 로 되돌린다(DMS drain → `pg-secrets.py --context dmsk8s restore-url` → api·controller `rollout restart` → drain 끔; 그 뒤 `check` 는
+  FAIL 이 맞다 — CNPG URL 이 아니다. 이관 뒤 쓰기를 살리려면 `dms-pg` 덤프를 원본에 먼저 복원). 그다음 `kubectl --context dmsk8s delete -k $RD/platform/db-backup` →
   `kubectl --context dmsk8s -n dms delete cluster dms-pg`(PVC 가 함께 지워지면 PV 3개가 Released — 2f-5 런북으로 되돌린다) →
   (다시 시작하지 않을 때만) `delete -k $RD/platform/db-volumes`(PV·SC — 디렉터리는 남는다) → `delete -k $RD/addons/cnpg`(CRD 를 지우면 그 종류의
   모든 객체가 지워진다 — Cluster 가 0개인지 먼저 확인). `dms-pg-app` 은 Cluster 를 다시 만들 때 그대로 쓴다.
@@ -1084,7 +1123,10 @@ ss -xlH | grep -c envoy_domain_socket       # 0 이 아니면 호스트 netns �
 - hot restart 는 끈다(EnvoyProxy `extraArgs: [--disable-hot-restart]`, 2026-11-03 ⑥ 리뷰 1): EG 가 `--base-id` 를 넘기지 않아 Envoy 는 base-id 0 의
   추상 유닉스 소켓(`@envoy_domain_socket_*_0`)을 bind 하는데, 추상 소켓은 netns 단위라 hostNetwork 파드는 호스트 것과 겹친다. Cilium 의
   cilium-envoy DaemonSet(hostNetwork, `--base-id 0`)이 이미 잡고 있으면 늦게 뜬 쪽이 `unable to bind domain socket with base_id=0` 으로 죽는다.
-- 마스터 호스트에 함께 열리는 포트: :443(리스너)·:19001(stats)·:19003(readiness)·:19002(shutdown-manager)·127.0.0.1:19000(admin) — 비어 있어야 한다.
+- 마스터 호스트에 함께 열리는 포트: :443(리스너)·:19003(readiness)·:19002(shutdown-manager)·127.0.0.1:19000(admin) — 비어 있어야 한다.
+  :19001(prometheus stats)은 끈다(`telemetry.metrics.prometheus.disable`, 2026-11-03 커밋 보안 리뷰 — hostNetwork 라 전 인터페이스에 열린다).
+  **마스터 방화벽**: :443 은 Avi SE 대역에서만(V4), :19002·:19003 은 노드 밖에서 막는다(kubelet probe·preStop 은 노드 자신에서 온다 —
+  :19002 는 drain 완료를 기다리는 GET `/shutdown/ready` 뿐이고 drain 자체는 localhost admin 이 한다).
 - 클러스터 도메인이 `cluster.local` 이 아니면 EG 컨트롤러 env `KUBERNETES_CLUSTER_DOMAIN`(상류 그대로 cluster.local)이 xDS 주소
   `envoy-gateway.envoy-gateway-system.svc.<도메인>.` 을 틀리게 만든다 — `kubectl --context C -n kube-system get cm coredns -o yaml | grep kubernetes`
   로 확인한다(다르면 지금은 렌더 후 패치 — 값 키는 ⑦).
@@ -2283,7 +2325,8 @@ curl -s http://localhost:5001/v2/_catalog
 ### 13-3. DB · 13-4. 공유 FS
 
 DB·롤은 testbed `postgresql_server` 롤이 만든다(`dmsdb_k8s`/`dmsapp_k8s`, 비밀번호는 testbed `secrets.yml`). 스키마는 migrate 가
-만든다. 공유 FS 레이아웃은 §2 의 플레이북을 `-e dms_cluster=dmsk8s` 로(k8s-w1 이 `/k8s` 하위 트리 안에 `/cephfs/dms`(770)·
+만든다. **앱 DB 는 2026-11-03 T7 부터 클러스터 안 CNPG `dms-pg`** 다(§2f-8 — 아래 13-5 의 pkg-01 URL 은 첫 설치 때 값이고 지금은
+`dms-secrets-prev` 의 되돌림 URL). 공유 FS 레이아웃은 §2 의 플레이북을 `-e dms_cluster=dmsk8s` 로(k8s-w1 이 `/k8s` 하위 트리 안에 `/cephfs/dms`(770)·
 `/cephfs/dms/artifacts`(755)·`/cephfs/managed`·`/cephfs/managed/e2e` 를 만든다 — LDAP 픽스처 없음). **DMS 상태(아티팩트 base)는
 2026-11-03 ③(d18 T3)부터 공용 디렉터리 `/dms_shared` 다**(3노드 NFS 마운트, S0 `sh deploy/shared-dir-init.sh /dms_shared` — §2d-5) —
 플레이북의 `/cephfs/dms`·`/cephfs/dms/artifacts` 는 옛 base(보존 창)이고, 데이터 root `/cephfs/managed`·픽스처는 그대로다.

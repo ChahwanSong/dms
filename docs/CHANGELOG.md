@@ -167,7 +167,7 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
 - **남은 것**: 테스트베드 T8(cp1 sysctl·이미지 push·A 경로 설치·haproxy `send-proxy-v2` 로 비 root 443·xDS·413·15초+·PROXY optional/필수·X-Real-IP·
   원 IP), 설치기 연결(S8 감지·MetalLB/ingress 게이트 삭제 — ⑦), 테스트베드 컷오버(별도 승인) — BACKLOG 「⑥ 입구 후속」.
 
-### ✅ ⑤ DB(CNPG) — CloudNativePG 1.30.1 애드온 층·정적 hostPath PV 풀·Cluster dms-pg·pg_dump·경로 프로브·prod 제어면 마스터 배치 — **구현·검증**(2026-11-03, 테스트베드 T6 실증 대기)
+### ✅ ⑤ DB(CNPG) — CloudNativePG 1.30.1 애드온 층·정적 hostPath PV 풀·Cluster dms-pg·pg_dump·경로 프로브·prod 제어면 마스터 배치 — **완료·실증**(2026-11-03, T6·T7 — 테스트베드 DMS 가 CNPG 위에서 돈다; T6' 장애 시험은 별도)
 
 설계 v6(`docs/history/specs/2026-11-03-dms-k8s-prod-design.md`) 6(6-1~6-6)·#24~#36·#40·2-1/2-2·3-1·8-1(S-1·S2·S9·S10)·8-2(CNPG 행·A 경로·층 배치)·
 9절 ⑤·10 T6/T6'/T7·12 위험(#3·#4·#23~#25·#29). 런북은 deploy/README §2f. **DMS 애플리케이션 코드는 바꾸지 않았다**(6-3 — 접속 문자열만, `connect_timeout`
@@ -254,8 +254,37 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   사이트의 PriorityClass 적용·애드온 이미지 push(REGISTRY) 단계와 「파드 0개 + FailedCreate … no PriorityClass」 증상 행. §2f-4 첫 덤프는
   `wait --for=condition=complete`(Failed 에서도 시간 초과까지 기다림) 대신 Complete·Failed 를 함께 보는 루프. §2f 의 렌더 디렉터리 변수는 `RD`
   (§2e 의 `R` = …/platform 과 섞이면 경로가 틀렸다). Cluster 주석의 이관 절 참조(§2f-6 → §2f-5).
-- **테스트베드**: T6(push → 오퍼레이터 → 9443 dry-run → SC/PV → 사전 검사 → Cluster → 폴링 → 경로 대조 → CronJob·첫 덤프 → 확인 항목)·T6'·T7 은 메인
-  세션이 한다 — T6'·T7 은 사용자 승인 뒤. 결과는 실증 뒤 기입.
+- **테스트베드**: T6(push → 오퍼레이터 → 9443 dry-run → SC/PV → 사전 검사 → Cluster → 폴링 → 경로 대조 → CronJob·첫 덤프 → 확인 항목)·T7 은 메인
+  세션이 했다(아래 — T7 은 사용자 승인 뒤). T6'(장애 시험)는 남았다(BACKLOG 「⑤ DB(CNPG) 후속」).
+- **T6 실증(2026-11-03, dmsk8s — 전 항목 PASS)**:
+  - airgap: CNPG·PG 파드 이미지 전부 `10.112.0.50:5000/…@sha256`(ghcr.io 0건). 오퍼레이터 w1·w2(`dms-addon-critical`), 웹훅 9443 — Cluster CR
+    server dry-run 통과.
+  - VAP(09b0652 — 설계 6-2 「권고, 선택」을 기본으로: 볼륨 층에 ValidatingAdmissionPolicy + Deny 바인딩, SC `dms-pg-shared` 의 PVC 는 ns `dms`
+    에서만 — claimRef 없는 여분 PV 를 다른 네임스페이스 PVC 가 붙여 DB 디렉터리를 읽는 길, 커밋 보안 리뷰 지적): 다른 네임스페이스의
+    `dms-pg-shared` PVC → Forbidden(정책 메시지). 클래스 없이 `volumeName` 으로 고른 PVC 는 VolumeMismatch 로 Pending.
+  - 기동: Cluster 적용 → 첫 primary 약 135초(initdb 67초 + template SQL 43초 — NFS fsync), 3/3 Ready 6분 31초. 배치 cp1·w1·w2.
+  - 경로 대조 PASS(Bound PV 3개 모두 3노드가 같은 PG_VERSION). 첫 덤프 11초. 커밋 지연 동기 12.8ms / local 7.9ms(복제 비용 약 5ms).
+  - 소유 음성(일회용 Cluster): 0:0 디렉터리 → initdb Job 이 `stat …/pgdata: permission denied` 로 반복 실패.
+  - PV 순환: 인스턴스 destroy → 새 PVC 가 여분 PV, 옛 PV Released → 재활용 런북 → Available.
+  - Cluster 삭제(일회용 — 인스턴스 2·PV 3): PVC 는 Cluster ownerReference 로 약 10초 안에 함께 지워진다(추정 → 실측), PV 2개 Released + 1개
+    Available, 같은 이름 재생성은 둘째 인스턴스가 런북 뒤 기동.
+  - **옛 PGDATA 가 남은 PV 에 붙어도 실패하지 않는다**(설계 추정 정정): CNPG 1.30 이 같은 PV 안 `pgdata_<UTC>` 로 옮기고 새로 시작한다 — 옛
+    데이터가 조용히 남는다 → 경로 프로브가 어느 단계든 `pgdata_*` 를 WARN(1a11d50).
+  - 노드 이동(preferred + cordon + 파드 삭제): 다른 노드에서 같은 PV 로 22초, pg_basebackup 없음, system ID·LSN·inode 동일. switchover 는 플러그인·
+    수동(`status.targetPrimary` 패치) 모두 약 9초(수동은 phase 가 바뀌지 않음, 옛 primary RESTARTS +1 은 정상).
+  - 덤프 → 복원, initdb import(일회용 Cluster) 모두 행 수·md5 일치. switchover 와 겹친 덤프의 첫 시도는 끊기고(`terminating connection`) 재시도가
+    성공 → 덤프 Job `backoffLimit` 1 → 3(1a11d50 — 노드 장애조치 1~1.5분에 맞춤).
+- **T7 — 테스트베드 앱 DB 이전(2026-11-03, 사용자 승인)**: pkg-01 `dmsdb_k8s`(PG 17.10) → `dms-pg`(17.11), 덤프·복원(README §2f-2 「이관 순서」).
+  - 동결(DMS drain on·CronJob suspend·api/controller 0 — 파드가 사라질 때까지) — 앱 정지 창 3분 29초. 덤프 1초(3.4MB)·`pg_restore
+    --single-transaction` 16초, 테이블 37·행 42,951·시퀀스 7 일치(행별 md5), `set-url` → `check` PASS, migrate no-op, API 스냅숏 동일,
+    `pg_stat_activity` 에 api·controller(TLS 1.3).
+  - 대조 1회차: 행 텍스트를 통째로 `string_agg` 하는 SQL 이 대상 primary 백엔드를 183MB 로(agent_reports 54MB) — PG_MEMORY 256Mi cgroup OOM →
+    장애조치. 행 해시만 모아 다시 돌려 PASS(README §2f-5 「대조」).
+  - switchover 5xx 창 약 7초(controller 는 DB 를 잃으면 재시작 — 정상), 수동 덤프 6초. pkg-01 `dmsdb_k8s` 는 손대지 않음(되돌림 = `restore-url`).
+  - 고친 것: `pg-secrets.py set-url` 이 되돌림 URL 을 덮던 결함(a22cb32 — 이관 뒤 다시 돌리면 옛 값이 이미 CNPG URL 이라 `dms-secrets-prev` 의
+    외부 DB URL 이 사라졌다. 옛 값이 이 클러스터 `-rw` 면 prev 를 그대로 두고, prev 에 다른 외부 URL 이 있으면 `--overwrite-prev` 없이는 멈춘다).
+  - 테스트베드 용량: ⑤ 뒤 워커마다 +200m(PG 인스턴스 100m + 오퍼레이터 100m) — dms-controller 위치에 따라 2노드 dscan gang(워커 1000m +
+    launcher 100m)이 5m 모자라 대기 → testbed `PG_CPU_REQUEST` 100m → 50m(values.env, 계약 테스트 값 갱신).
 
 ### ✅ ④ 클러스터 내 레지스트리 — Distribution v3.1.2 플랫폼 층·렌더러 일반화·images.lock·가드 — **완료·실증**(2026-11-03, d19 — 앱 전환)
 

@@ -177,7 +177,7 @@ def test_cluster_image_is_the_pinned_pg17_from_the_lock(sites, site):
 
 
 @needs_kubectl
-@pytest.mark.parametrize("site, cpu, mem, buffers", [("prod", '"1"', "4Gi", "1GB"), ("testbed-k8s", "100m", "256Mi", "64MB")])
+@pytest.mark.parametrize("site, cpu, mem, buffers", [("prod", '"1"', "4Gi", "1GB"), ("testbed-k8s", "50m", "256Mi", "64MB")])
 def test_cluster_resources_and_shared_buffers(sites, site, cpu, mem, buffers):
     cl = doc(sites[site]["layers"]["db-cluster"], "Cluster", "dms-pg")
     assert re.search(rf"(?m)^  resources:\n    limits:\n      memory: {mem}\n    requests:\n      cpu: {cpu}\n      memory: {mem}$", cl)
@@ -858,7 +858,8 @@ def test_prod_defaults_are_the_design_values(tmp_path):
 
 def test_testbed_values_are_the_design_10_shrink():
     values = _values_env(OVERLAYS / "testbed-k8s" / "values.env")
-    assert (values["PG_CPU_REQUEST"], values["PG_MEMORY"], values["PG_SHARED_BUFFERS"]) == ("100m", "256Mi", "64MB")
+    # CPU 는 설계 10 의 100m 에서 50m 로 더 낮췄다(2026-11-03 T7 실측 — 워커 +200m 로 2노드 dscan gang 이 5m 모자랐다, values.env 주석)
+    assert (values["PG_CPU_REQUEST"], values["PG_MEMORY"], values["PG_SHARED_BUFFERS"]) == ("50m", "256Mi", "64MB")
     assert values["PG_PLACEMENT"] == "all-nodes"
     assert "PG_PLACEMENT=all-nodes" not in (OVERLAYS / "prod" / "values.env.example").read_text().replace("# PG_PLACEMENT", "")
 

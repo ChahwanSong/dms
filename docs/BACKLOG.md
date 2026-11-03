@@ -451,28 +451,40 @@ CHANGELOG 「⑤ DB(CNPG)」, 설계 v6 6·8-1(S2·S9·S10·S12)·8-2·10 T6/T6'
   - `install.sh --upgrade-addon cnpg`(6-5): K8s 지원 범위·**minor 하나씩**·직전 덤프·SSA → 롤아웃 → switchover 완료 대기. 인터넷 노드 push 스크립트에
     lock 의 `cloudnative-pg`·`postgresql` 이 이미 들어간다(lock 의 모든 줄).
   - `kubectl-cnpg` 플러그인·`cnpg-<v>-checksums.txt` 반입(K8 — 인터넷 노드 → 설치 호스트).
-- 🔧 **테스트베드 T6 실증**(dmsk8s — 메인 세션) — 설계 10 「T6 세부」 전부. 결과는 실증 뒤 CHANGELOG 에 기입.
-- 🔧 **T6'(장애·성능, 사용자 승인 필수)** — primary 노드 전원 차단(keepalive 없이/넣고 — 15분 매달림 가설), drain(smartShutdown 0 대 180),
+- ~~**테스트베드 T6 실증**~~ — **해소**(2026-11-03, CHANGELOG ⑤ 「T6 실증」 — 전 항목 PASS). 실증에서 찾아 고친 것: 옛 PGDATA 잔재 `pgdata_*`
+  WARN·덤프 `backoffLimit` 3(1a11d50), VAP 를 기본으로(09b0652 — 아래 「선택 항목」에서 뺐다).
+- 🔧 **T6'(장애·성능, 사용자 승인 필수 — T6·T7 뒤 남은 ⑤ 실증)** — primary 노드 전원 차단(keepalive 없이/넣고 — 15분 매달림 가설), drain(smartShutdown 0 대 180),
   apiserver 불통 흉내, export 차단(공용 스토리지 일시 정지 — kubelet·etcd 영향·레지스트리 NotReady), 3-2 「G2 보충」 재마운트 절차, fio·pgbench 공용
-  대 로컬(로컬은 렌더 오버레이 밖 일회용).
-- 🔧 **T7(앱 DB 이관, 사용자 승인 필수)** — 동결 창에서 pkg-01 `dmsdb_k8s` 덤프 → CNPG 에 복원 → `pg-secrets.py set-url` → api·controller
-  `rollout restart`. 롤백 = `pg-secrets.py restore-url`(그 사이 쓰기는 덤프로). 그 뒤 pkg-01 외부 PG 정리 시점 결정. 설계 6-4·T7 의 「initdb
-  import」는 Cluster 생성 때만 쓰인다(bootstrap) — `dms-pg` 가 T6 에서 이미 initdb 로 떠 있어 T7 은 덤프·복원으로 같은 결과를 내고, import 경로
-  자체는 T6 이 일회용 Cluster 로 실증한다(README §2f-5). 새 사이트의 첫 이관을 import bootstrap 으로 만드는 흐름은 ⑦ 설치기 몫.
-- 📝 **T6 확인 대기(추정으로 둔 것)** — Cluster `Ready` 조건이 「모든 인스턴스 healthy」일 때만 서는지(그래서 폴링은 세 조건), Cluster 삭제 때 PVC 가
-  ownerReference 로 함께 지워지는지(그러면 PV 3개 Released → 런북), 재활용 때 옛 PGDATA 가 남으면 join 이 실패하는지, CNPG 가 볼륨 루트의 root 소유
-  `.dms-pv-id` 를 문제 삼지 않는지(PGDATA 는 `pgdata/` 하위), CRI-O 의 `이름:태그@digest` pull(dmsk8s 의 cilium·ingress-nginx 가 이미 그 모양으로 돈다 —
-  같은 경로로 본다), 플러그인 없는 switchover(`status.targetPrimary` 패치), `dataDurability: preferred` 의 커밋 지연(공용 스토리지 fsync + 동기 복제).
-- 📝 **설계 ⑤ 의 선택 항목은 하지 않았다** — ValidatingAdmissionPolicy 로 SC `dms-pg-shared` 의 PVC 를 ns `dms` 로 제한(6-2 [권고, 선택] — 다른
-  네임스페이스 PVC 가 여분을 가져가는 위험 #24: 지금은 경로 대조 프로브가 WARN 으로 드러낸다), dms-controller 2개(#25 「1 → 실증 뒤 2」 — 2개면
+  대 로컬(로컬은 렌더 오버레이 밖 일회용). T7 뒤라 앱이 CNPG 위에 있다 — 쓰기 불가 시간을 앱 기준(5xx 창)으로도 잰다. dms-controller 는 DB 를 잃으면
+  exit 1 로 재시작하므로(T7 실측 — 정상) 연속 장애에서 재시작 백오프가 복귀를 늦추는지 본다(README §2f-7).
+- ~~**T7(앱 DB 이관)**~~ — **해소**(2026-11-03 사용자 승인, CHANGELOG ⑤ 「T7」 — 앱 정지 창 3분 29초, 테이블 37·행 42,951·시퀀스 7 일치; 순서는 README
+  §2f-2 「이관 순서」). 실증 검토에서 고친 것: `set-url` 이 되돌림 URL 을 덮던 결함(a22cb32). 남은 것:
+  - 📝 **pkg-01 외부 PG(`dmsdb_k8s`) 정리 시점** — 결정 대기. 지금은 되돌림용이다(`dms-secrets-prev` → `restore-url`; 이관 뒤 쓰기는 거기 없다).
+  - 새 사이트의 첫 이관을 import bootstrap 으로 만드는 흐름은 ⑦ 설치기 몫(import 경로 자체는 T6 이 일회용 Cluster 로 실증 — 행 수·md5 일치).
+- ~~**T6 확인 대기(추정으로 둔 것)**~~ — **해소**(2026-11-03 T6·T7 실측, CHANGELOG ⑤):
+  - Cluster `Ready` 조건은 모든 인스턴스가 healthy 일 때만 선다(switchover 중에도 `ClusterIsNotReady`) — 폴링은 세 조건 그대로.
+  - Cluster 삭제 때 PVC 는 ownerReference 로 약 10초 안에 함께 지워진다 → PV Released → 재활용 런북(README §2f-5 의 「추정」 정정).
+  - **재활용 때 옛 PGDATA 가 남아도 join 은 실패하지 않는다** — CNPG 1.30 이 같은 PV 안 `pgdata_<UTC>` 로 옮기고 새로 시작한다(옛 데이터가 조용히
+    남는다). 경로 프로브가 어느 단계든 `pgdata_*` 를 WARN(1a11d50).
+  - 볼륨 루트의 root 소유 `.dms-pv-id` 는 문제 되지 않는다(3/3 Ready·PV 순환·재생성 모두 센티널이 있는 PV 에서).
+  - CRI-O 의 `이름:태그@digest` pull — CNPG·PG 파드 전부 `10.112.0.50:5000/…@sha256` 로 떴다(ghcr.io 0건).
+  - 플러그인 없는 switchover(`status.targetPrimary` 패치) — 플러그인과 같이 약 9초. 수동은 phase 가 바뀌지 않는다(`currentPrimary` ≠ `targetPrimary`
+    로 진행을 본다), 옛 primary RESTARTS +1 은 정상.
+  - `dataDurability: preferred` 커밋 지연 — 동기 12.8ms / local 7.9ms(복제 비용 약 5ms, 테스트베드 NFS).
+- 📝 **앱 PG 세션의 `application_name` 이 비어 있다**(T7 — `pg_stat_activity` 에서 api·controller 를 주소로만 가른다) — 6-3 URL 에
+  `application_name=dms` 추가 검토(관측 편의). 넣으면 `pg-secrets.py` 의 URL 조립·`check` 필수 파라미터 규칙과 라이브 `DMS_DATABASE_URL`(`set-url`)을
+  함께 바꾼다.
+- 📝 **설계 ⑤ 의 선택 항목은 하지 않았다** — dms-controller 2개(#25 「1 → 실증 뒤 2」 — 2개면
   preferred anti-affinity), 오퍼레이터 PDB, pg_dump 의 PriorityClass(워커가 잡으로 가득하면 덤프 파드가 Pending → activeDeadline(50분) 뒤 Job
   실패로 보이고 다음 시각에 다시; 요청이 100m/256Mi 라 드물다). **사용자 결정 필요**(2026-11-03 ⑤ 리뷰 — 「백업이 조용히 건너뛰어진다」 지적):
   `dms-addon-critical`(선점)을 주면 워커가 잡으로 찬 동안 **매시간** 실행 중 데이터 잡(gang)을 선점한다 — 애드온 컨트롤러(재스케줄이 드묾)와 비용이
-  다르다. 대안: `preemptionPolicy: Never` 의 전용 PriorityClass(큐 순서만 앞) 또는 덤프 연속 실패 경보.
+  다르다. 대안: `preemptionPolicy: Never` 의 전용 PriorityClass(큐 순서만 앞) 또는 덤프 연속 실패 경보. (VAP 로 SC `dms-pg-shared` 의 PVC 를
+  ns `dms` 로 제한하는 6-2 [권고, 선택]은 커밋 보안 리뷰 뒤 기본으로 넣었다 — 09b0652, README §2f-1.)
 - 📝 **남은 코드 보강(설계 9 「⑤ 뒤에 따로」 — 이번 묶음은 코드를 바꾸지 않았다)** — **B4** migrate 도중 재연결 감지 → 실패(우선순위 낮음),
   **B1** SQLSTATE 25006(read-only transaction) 처리·readyz 쓰기 확인(우선순위 낮음 — `target_session_attrs=read-write` 는 새 연결만 거른다(추정:
   switchover 뒤 옛 primary 에 남은 연결)), B2·B6 선택, B5 보류.
-- 🔧 **런북 위치** — T6 실행 런북은 메인 세션의 작업 노트(저장소 밖)다. 실증이 끝나면 확정된 명령을 deploy/README §2f-8 에 옮긴다.
+- 🔧 **런북 위치** — T6 실행 런북은 메인 세션의 작업 노트(저장소 밖)다. 실증이 끝나면 확정된 명령을 deploy/README §2f-8 에 옮긴다(2026-11-03:
+  T7 이관 순서·대조 SQL 은 §2f-2·§2f-5 에 옮겼다 — T6 전체 런북은 아직 작업 노트).
 - 📝 **testbed-k8s 의 api·controller 는 워커에 남는다**(설계 10 — cp1 메모리) — prod 의 마스터 배치(`patch-placement.yaml`)는 테스트베드에서
   실증되지 않는다(테스트베드로 증명할 수 없는 것: 마스터 1대 장애·실제 마스터 3대의 PG anti-affinity).
 
