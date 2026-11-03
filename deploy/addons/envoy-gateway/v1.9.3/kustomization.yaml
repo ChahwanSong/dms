@@ -17,7 +17,7 @@
 #   5) 네임스페이스 envoy-gateway-system 에 PSA privileged(설계 4-3·S1 승인 — Envoy DaemonSet 이 이 네임스페이스에 hostNetwork 로 뜬다).
 #   6) 라벨 managed-by dms-install(상류의 Helm 을 덮는다) + dms.io/addon-version(설계 8-2 A — ⑦ 감지기가 D=/D</D> 를 가른다; selector·
 #      파드 템플릿에는 넣지 않는다 — Deployment selector 는 바꿀 수 없는 필드다).
-# 그 밖(RBAC·Service·certgen·웹훅·EG CRD 8개)은 상류 그대로다. watch 범위는 두지 않는다(= 모든 네임스페이스 — Gateway 는 ns dms 에 있다).
+# 그 밖(RBAC·Service·certgen·웹훅·EG CRD 8개)은 상류 그대로다. watch 는 ns dms 하나(patch-config.yaml — 다른 네임스페이스의 EnvoyProxy 패치로 특권 파드를 띄우는 길을 막는다).
 # 클러스터 도메인: 상류 env KUBERNETES_CLUSTER_DOMAIN=cluster.local 그대로 — Envoy 부트스트랩의 xDS 주소가
 #   envoy-gateway.envoy-gateway-system.svc.<그 값>. 이다(설계 4-3). 사이트 도메인이 다르면 xDS 가 붙지 않는다(S1 확인 — deploy/README §2g).
 #

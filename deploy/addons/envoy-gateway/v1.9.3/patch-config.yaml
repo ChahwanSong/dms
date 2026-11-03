@@ -7,6 +7,9 @@
 # 패치가 **조용히** 무시돼 Envoy 가 파드 네트워크에만 떠 마스터 :443 이 비고 Avi 헬스가 실패한다 — 기본값이 바뀌어도 그러지 않게 명시한다).
 # 이미지 두 줄은 사이트 중립 자리표시자다 — 렌더러(deploy/render.sh)가 이 파일을 읽어 두 자리표시자를 lock 의 digest ref 로 바꾼 사본을
 # 사이트 패치로 덧붙인다(설정 문자열의 원천은 이 파일 하나). 설정이 바뀌면 컨트롤러를 다시 띄워야 읽힌다(rollout restart — deploy/README §2g).
+# watch 는 ns dms 하나(2026-11-03 백그라운드 보안 리뷰): 모든 네임스페이스를 보면 다른 네임스페이스의 Gateway + EnvoyProxy(파드 패치 —
+# EnvoyProxyPatch 가 켜져 있다)로 PSA privileged 인 envoy-gateway-system 에 임의의 특권 파드를 띄우게 할 수 있다. DMS 가 설치한 EG(A)는
+# DMS 전용이고 DMS 의 Gateway·EnvoyProxy·TLS Secret 은 모두 ns dms 다. 남이 설치한 EG(C)는 건드리지 않는다(설계 8-2).
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -28,6 +31,10 @@ data:
     provider:
       type: Kubernetes
       kubernetes:
+        watch:
+          type: Namespaces
+          namespaces:
+            - dms
         shutdownManager:
           image: set-by-overlay.invalid/gateway:v1.9.3
     envoyProxy:

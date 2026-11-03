@@ -208,14 +208,15 @@ def test_eg_controller_runs_on_workers_with_the_addon_priority(eg_base):
 
 
 @needs_kubectl
-def test_eg_config_pins_images_and_the_patch_flag_and_watches_everything(eg_base):
+def test_eg_config_pins_images_and_the_patch_flag_and_watches_only_dms(eg_base):
     cm = doc(eg_base, "ConfigMap", "envoy-gateway-config")
     assert "shutdownManager:\n          image: set-by-overlay.invalid/gateway:" in cm
     assert re.search(r"envoyProxy:\n      provider:\n        type: Kubernetes\n        kubernetes:\n          envoyDeployment:\n"
                      r"            container:\n              image: set-by-overlay\.invalid/envoy:", cm)
     _assert_patch_flag_only_enabled(cm)                                        # hostNetwork 패치가 조용히 무시되지 않게(disabled 0)
     assert "controllerName: gateway.envoyproxy.io/gatewayclass-controller" in cm
-    assert "watch:" not in cm                                                  # 모든 네임스페이스(Gateway 는 ns dms)
+    # watch 는 ns dms 하나 — 다른 네임스페이스의 Gateway + EnvoyProxy 패치가 privileged ns 에 특권 파드를 띄우지 못하게(보안 리뷰 2026-11-03).
+    assert re.search(r"(?m)^        watch:\n          type: Namespaces\n          namespaces:\n            - dms$", cm)
 
 
 @needs_kubectl
