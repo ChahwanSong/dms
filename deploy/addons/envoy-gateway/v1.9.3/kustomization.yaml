@@ -1,0 +1,55 @@
+# 애드온 층(서드파티) — Envoy Gateway v1.9.3, DMS 가 설치할 때(설계 v6 8-2 A 경로·8-1 S8)의 패치 층(2026-11-03 ⑥, 설계 #13·#14·2-1·4-3).
+#
+# install.yaml 은 상류 원본 그대로다(SOURCE·install.yaml.sha256 — 바이트 하나 고치지 않는다). DMS 가 바꾸는 것은 전부 이 층에 있다:
+#   1) Gateway API CRD(실험 채널 13개 — x-k8s 포함)와 safe-upgrades VAP·Binding 을 지운다(어노테이션 gateway.networking.k8s.io/bundle-version
+#      이 붙은 객체 전부). Gateway API 의 원천은 addons/gateway-api(v1.6.1 standard — S8 첫째)다. 지우지 않으면 EG 적용이 standard CRD 를 실험
+#      채널로 덮으려다 safe-upgrades VAP 에 거절되거나(그 VAP 가 먼저 있을 때), 없는 클러스터에는 실험 채널을 깐다(설계 8-2 고정은 standard).
+#   2) 이미지: 컨트롤러·certgen Job = <REG>/gateway:v1.9.3@sha256:<amd64 매니페스트 digest>. 여기(사이트 중립 base)는 자리표시자
+#      (set-by-overlay.invalid)이고 렌더러(deploy/render.sh)가 lock 의 digest 로 덮는다. 상류는 호스트 없는 `envoyproxy/gateway:v1.9.3`
+#      (= docker.io)라 이름 매칭으로 바꾼다. imagePullPolicy 는 상류부터 IfNotPresent.
+#   3) EnvoyGateway 설정(ConfigMap envoy-gateway-config, patch-config.yaml): shutdown-manager 이미지와 **기본 EnvoyProxy 의 Envoy 이미지**를
+#      레지스트리 이미지로 — EG 가 만드는 Envoy 파드가 docker.io 를 받으러 가지 않게(airgap). DMS Gateway 는 자기 EnvoyProxy(platform/gateway —
+#      이미지 명시)를 parametersRef 로 붙이고, 더 구체적인 EnvoyProxy 는 기본값을 통째로 대신한다(mergeType 없음) — 기본값은 다른 Gateway 가
+#      생겨도 docker.io 로 가지 않게 하는 그물이다. 상류의 ratelimit 이미지 줄은 뺐다(SOURCE).
+#   4) 컨트롤러 배치(설계 2-1 EG 컨트롤러 행): 워커에만(control-plane 노드 금지 — required nodeAffinity, CNPG 오퍼레이터와 같은 모양),
+#      PriorityClass dms-addon-critical(1000 — 잡이 워커를 채워도 선점해 자리를 얻는다). replicas 1 은 상류 그대로(죽어도 Envoy 는 마지막
+#      설정으로 돈다 — 2-1). Envoy 파드(데이터 면)는 EG 가 만든다 — 배치·이미지·hostNetwork 는 platform/gateway 의 EnvoyProxy 가 정한다.
+#   5) 네임스페이스 envoy-gateway-system 에 PSA privileged(설계 4-3·S1 승인 — Envoy DaemonSet 이 이 네임스페이스에 hostNetwork 로 뜬다).
+#   6) 라벨 managed-by dms-install(상류의 Helm 을 덮는다) + dms.io/addon-version(설계 8-2 A — ⑦ 감지기가 D=/D</D> 를 가른다; selector·
+#      파드 템플릿에는 넣지 않는다 — Deployment selector 는 바꿀 수 없는 필드다).
+# 그 밖(RBAC·Service·certgen·웹훅·EG CRD 8개)은 상류 그대로다. watch 범위는 두지 않는다(= 모든 네임스페이스 — Gateway 는 ns dms 에 있다).
+# 클러스터 도메인: 상류 env KUBERNETES_CLUSTER_DOMAIN=cluster.local 그대로 — Envoy 부트스트랩의 xDS 주소가
+#   envoy-gateway.envoy-gateway-system.svc.<그 값>. 이다(설계 4-3). 사이트 도메인이 다르면 xDS 가 붙지 않는다(S1 확인 — deploy/README §2g).
+#
+# 적용(S8 둘째 — addons/gateway-api 다음, SSA: 상류 CRD 는 client-side apply 의 last-applied annotation 크기 한도를 넘는다):
+#   sh deploy/render.sh <site> --context <ctx>
+#   kubectl --context <ctx> apply --server-side --field-manager=dms-install -k deploy/.rendered/<site>/addons/envoy-gateway
+#   kubectl --context <ctx> -n envoy-gateway-system rollout status deploy/envoy-gateway --timeout=180s
+# 이 디렉터리를 그대로 apply 하면 이미지가 자리표시자라 컨트롤러가 뜨지 않는다(의도 — 앱 base 와 같은 규칙). 계약: tests/test_gateway_contract.py.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - install.yaml
+labels:
+  - pairs:
+      app.kubernetes.io/managed-by: dms-install
+      dms.io/addon-version: "v1.9.3"
+    includeSelectors: false
+    includeTemplates: false
+images:
+  - name: envoyproxy/gateway
+    newName: set-by-overlay.invalid/gateway
+patches:
+  # 1) Gateway API CRD·safe-upgrades VAP 제거 — 이 어노테이션은 Gateway API 번들 객체에만 있다(EG 자기 CRD·RBAC 에는 없다).
+  #    target 이 여럿에 걸리면 kustomize 는 패치의 kind·이름을 각 대상의 것으로 본다(아래 kind·name 은 자리일 뿐이다).
+  - target:
+      annotationSelector: gateway.networking.k8s.io/bundle-version
+    patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: Removed
+      metadata:
+        name: removed
+  - path: patch-config.yaml
+  - path: patch-controller.yaml
+  - path: patch-namespace.yaml

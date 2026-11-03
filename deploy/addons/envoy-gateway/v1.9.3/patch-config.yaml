@@ -1,0 +1,39 @@
+# EnvoyGateway 설정(ConfigMap envoy-gateway-config — 컨트롤러가 기동 때 /config/envoy-gateway.yaml 로 읽는다). 상류 값을 통째로 대신한다
+# (data 의 키 하나가 문자열 하나라 부분 병합이 없다). 왜 이 값들인지는 kustomization.yaml 머리 주석 3)(2026-11-03 ⑥).
+#
+# 상류와 다른 점은 넷뿐이다: shutdownManager.image(상류 envoyproxy/gateway:v1.9.3 — docker.io), envoyProxy(기본 EnvoyProxy — Envoy 이미지),
+# rateLimitDeployment 삭제(상류 docker.io/envoyproxy/ratelimit — 전역 rate limit 을 쓰지 않아 생기지 않는 Deployment 의 이미지),
+# runtimeFlags.enabled EnvoyProxyPatch(v1.9 기본값도 켜짐 — DMS EnvoyProxy 의 hostNetwork·dnsPolicy 가 이 패치 기능으로만 들어간다. 꺼지면
+# 패치가 **조용히** 무시돼 Envoy 가 파드 네트워크에만 떠 마스터 :443 이 비고 Avi 헬스가 실패한다 — 기본값이 바뀌어도 그러지 않게 명시한다).
+# 이미지 두 줄은 사이트 중립 자리표시자다 — 렌더러(deploy/render.sh)가 이 파일을 읽어 두 자리표시자를 lock 의 digest ref 로 바꾼 사본을
+# 사이트 패치로 덧붙인다(설정 문자열의 원천은 이 파일 하나). 설정이 바뀌면 컨트롤러를 다시 띄워야 읽힌다(rollout restart — deploy/README §2g).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: envoy-gateway-config
+  namespace: envoy-gateway-system
+data:
+  envoy-gateway.yaml: |
+    apiVersion: gateway.envoyproxy.io/v1alpha1
+    kind: EnvoyGateway
+    extensionApis: {}
+    gateway:
+      controllerName: gateway.envoyproxy.io/gatewayclass-controller
+    logging:
+      level:
+        default: info
+    runtimeFlags:
+      enabled:
+        - EnvoyProxyPatch
+    provider:
+      type: Kubernetes
+      kubernetes:
+        shutdownManager:
+          image: set-by-overlay.invalid/gateway:v1.9.3
+    envoyProxy:
+      provider:
+        type: Kubernetes
+        kubernetes:
+          envoyDeployment:
+            container:
+              image: set-by-overlay.invalid/envoy:distroless-v1.39.5

@@ -1,0 +1,22 @@
+# EG 컨트롤러 Deployment 패치(전략적 머지 — containers 는 name 으로 합쳐진다). 왜 이 값들인지는 kustomization.yaml 머리 주석 4)(2026-11-03 ⑥).
+# 이미지는 kustomization.yaml 의 images 가 자리표시자로 바꾸고 렌더러가 lock 의 digest ref 로 덮는다.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: envoy-gateway
+  namespace: envoy-gateway-system
+spec:
+  template:
+    spec:
+      priorityClassName: dms-addon-critical
+      affinity:
+        # 워커에만(설계 2-1 EG 컨트롤러 행): 마스터 자원 예산(2-2)에 넣지 않았다. 죽어도 Envoy 는 마지막 설정으로 돈다.
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: DoesNotExist
+      containers:
+        - name: envoy-gateway
+          imagePullPolicy: IfNotPresent

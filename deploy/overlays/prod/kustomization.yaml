@@ -1,4 +1,6 @@
-# DMS 프로덕션 오버레이(2026-08-20, 사용자 결정: MetalLB 유지 + prod 오버레이).
+# DMS 프로덕션 오버레이(2026-08-20, 사용자 결정: MetalLB 유지 + prod 오버레이 → 2026-11-03 ⑥ 설계 v6 #13: prod 입구는 Envoy Gateway —
+# MetalLB·ingress-nginx 를 쓰지 않는다. 공용 base 의 Ingress·MetalLB 풀은 patch-remove-ingress.yaml 이 지우고, 포탈 입구는 렌더러가 내는
+# 플랫폼 층 deploy/.rendered/prod/platform/gateway(+ addons/gateway-api·envoy-gateway)다 — deploy/README §2g).
 #
 # 테스트베드 매니페스트(deploy/k8s/*.yaml)를 base 로 두고, 사이트별 값만 여기서
 # 덮는다. base 는 그대로 `kubectl apply -f deploy/k8s/`(테스트베드 흐름)로도
@@ -41,8 +43,9 @@ images:
 # 없어 예전의 LDAP null 패치·patch-agent.yaml 은 지웠다(tests/test_prod_k8s_overlay.py).
 patches:
   - path: patch-config.yaml
-  - path: patch-ingress.yaml
-  - path: patch-metallb.yaml
+  # Ingress dms-portal·IPAddressPool dms-public-pool·L2Advertisement dms-public-l2 삭제($patch: delete — 2026-11-03 ⑥). 예전의
+  # patch-ingress.yaml(포탈 도메인)·patch-metallb.yaml(공인 VIP)은 지웠다 — 그 값(PORTAL_DOMAIN·PORTAL_VIP)은 render.env 로만 간다.
+  - path: patch-remove-ingress.yaml
   # dms-api·dms-controller 를 마스터에 + not-ready·unreachable 30초(2026-11-03 ⑤, 설계 #24·#25). 제어면 Deployment 에서 바꾸는 배치 필드
   # 둘(nodeSelector·tolerations)뿐 — tests/test_release_manifest_contract.py 가 글자 그대로 고정한다. testbed-k8s 에는 없다(설계 10).
   - path: patch-placement.yaml

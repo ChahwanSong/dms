@@ -44,9 +44,23 @@ def test_patch_config_carries_site_values_and_no_ldap():
 
 def test_kustomization_wires_the_site_patches_only():
     text = _code(PROD / "kustomization.yaml")
-    for patch in ("patch-config.yaml", "patch-ingress.yaml", "patch-metallb.yaml"):
+    for patch in ("patch-config.yaml", "patch-remove-ingress.yaml", "patch-placement.yaml"):
         assert f"- path: {patch}" in text, patch
     assert "patch-agent" not in text and not (PROD / "patch-agent.yaml").exists()   # base 가 `dms agent`
+    # 2026-11-03 ⑥(설계 #13·9 ⑥): prod 입구는 Envoy Gateway — 옛 Ingress 도메인·MetalLB VIP 패치는 없어졌다(삭제 패치가 대신한다).
+    for gone in ("patch-ingress.yaml", "patch-metallb.yaml"):
+        assert gone not in text and not (PROD / gone).exists(), gone
+
+
+def test_remove_patch_deletes_exactly_the_ingress_and_the_metallb_objects():
+    # 공용 base(46-ingress·47-metallb)는 고치지 않는다(testbed-k8s 가 T8 동안 쓰고, main·dms-ssc 와 같은 파일) — prod 렌더에서만 지운다.
+    docs_ = [d for d in re.split(r"(?m)^---\s*$", _code(PROD / "patch-remove-ingress.yaml")) if d.strip()]
+    got = sorted((re.search(r"(?m)^kind: (\S+)$", d).group(1), re.search(r"(?m)^  name: (\S+)$", d).group(1)) for d in docs_)
+    assert got == [("IPAddressPool", "dms-public-pool"), ("Ingress", "dms-portal"), ("L2Advertisement", "dms-public-l2")]
+    assert all(re.search(r"(?m)^\$patch: delete$", d) for d in docs_)
+    base = REPO_ROOT / "deploy" / "k8s"
+    assert "kind: Ingress" in (base / "46-ingress.yaml").read_text()                   # base 는 그대로(testbed-k8s 병행)
+    assert "kind: IPAddressPool" in (base / "47-metallb-public-pool.yaml").read_text()
 
 
 def test_values_render_and_install_need_no_ldap():
@@ -132,3 +146,26 @@ def test_rendered_overlay_has_no_ldap_and_boots_in_k8s_mode(tmp_path):
     settings = Settings.from_env({**data, "DMS_DATABASE_URL": "postgresql://u:p@h/d", "DMS_SHARED_TOKEN": "s",
                                   "DMS_ADMIN_TOKEN": "a", "DMS_SESSION_SECRET": "x"})
     assert settings.allow_privileged_requesters is True  # 기동 = k8s 신원 모드(모든 잡 root -- 끄면 기동 거부)
+
+
+@needs_kubectl
+def test_rendered_prod_has_no_ingress_or_metallb_and_the_gateway_is_rendered(tmp_path):
+    # 2026-11-03 ⑥(설계 v6 #13 — prod 는 MetalLB·ingress-nginx 의존을 없앤다): 앱 렌더에 Ingress·MetalLB CR 0건(metallb CRD 가 없는 prod 에서
+    # apply 가 「no matches for kind」로 실패하던 자리), 입구는 플랫폼 층 platform/gateway 의 Gateway·HTTPRoute 다(PROXY 필수가 기본).
+    r, out = _render(tmp_path, _filled_example())
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    env = {**os.environ, "KUBECONFIG": os.devnull}
+    k = subprocess.run([KUBECTL, "kustomize", str(out)], capture_output=True, text=True, timeout=120, env=env)
+    assert k.returncode == 0, k.stderr
+    kinds = re.findall(r"(?m)^kind: (\S+)$", k.stdout)
+    assert not {"Ingress", "IPAddressPool", "L2Advertisement"} & set(kinds), kinds
+    assert "metallb" not in k.stdout.lower() and "ingress" not in k.stdout.lower()
+    doc(k.stdout, "Service", "dms-api")                                   # HTTPRoute 의 백엔드는 그대로 있다
+    gw_dir = out.parent / "platform" / "gateway"
+    assert f"GATEWAY: {gw_dir}" in r.stdout
+    g = subprocess.run([KUBECTL, "kustomize", str(gw_dir)], capture_output=True, text=True, timeout=120, env=env)
+    assert g.returncode == 0, g.stderr
+    assert re.search(r"(?m)^kind: Gateway$", g.stdout) and re.search(r"(?m)^kind: HTTPRoute$", g.stdout)
+    assert re.search(r"(?m)^  proxyProtocol:\n    optional: false$", g.stdout)
+    renv = (out.parent / "render.env").read_text()
+    assert "PORTAL_DOMAIN=v-portal-domain" in renv and "PORTAL_VIP=v-portal-vip" in renv   # 매니페스트가 아니라 render.env 로만

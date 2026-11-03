@@ -1,0 +1,61 @@
+# 입구 정책 두 개(2026-11-03 ⑥, 설계 #14·#15·4-3 「PROXY·헤더 계약」 — 근거는 실측 design/ppexp/).
+#
+# ClientTrafficPolicy dms-portal → Gateway dms-portal(리스너 전체):
+#   proxyProtocol.optional: false = **PROXY 필수** — PROXY v2 헤더 없이 들어온 연결은 Envoy 가 끊는다. Avi VS-443 이 PROXY v2 를 붙이고(#5·#42)
+#     마스터 :443 은 Avi SE 대역에서만 받는다(4-2·V4 — PROXY 헤더를 스스로 실은 위조 연결을 막는 것은 이 방화벽이다). 그래서 원 IP(PROXY 헤더의
+#     출발지)는 SE 가 아닌 사용자 PC 다. **optional(true)은 컷오버 중에만** — PROXY 를 아직 안 붙인 경로(직접 접속·전환 전 LB)를 잠시 함께 받을
+#     때. optional 이면 PROXY 없는 연결의 원 IP 자리에 직접 피어(LB·SE)가 남고, 「PROXY 가 빠진 LB 설정」이 조용히 통과한다(필수면 접속 실패로
+#     바로 드러난다). 기록만 틀릴 뿐 차단 판정에는 쓰지 않는다(#15·12 위험 16). 렌더 값 GATEWAY_PROXY_PROTOCOL=optional 만 이 칸을 true 로
+#     바꾼다(deploy/render.sh — 기본 required, 컷오버 절차 deploy/README §2g).
+#   headers.earlyRequestHeaders.remove X-Real-IP — 라우팅·XFF 처리 전에 지운다. 앱(src/dms/api/auth.py client_ip)은 X-Real-IP 를 읽지 않지만, 정책이
+#     빠진 배치에서 클라이언트가 보낸 위조값(실측 6.6.6.6)이 그대로 백엔드에 닿지 않게 두 겹으로 둔다.
+#   clientIPDetection 은 **두지 않는다** — 기본(use_remote_address, 신뢰 홉 0)에서 Envoy 는 PROXY 헤더로 얻은 원 IP 를 XFF **끝에** 덧붙인다
+#     (원 IP 가 루프백이면 Envoy 자기 주소 — 시험에서만, envoyproxy.yaml 접근 로그 절).
+#     앱은 XFF 마지막 항목(IP 형식 검증) → 소켓 피어 순으로 읽는다. clientIPDetection(xForwardedFor numTrustedHops 등)을 켜면 Envoy 가 클라이언트가
+#     심은 앞 항목을 원 IP 로 믿게 된다 — 「계약이 하나라도 틀리면 헤더를 위조해 남을 잠글 수 있다」(auth.py 의 「왜」).
+#   PROXY v2 는 감사·로그 전용이다(#15): 원 IP 로 거절·상한을 걸지 않는다(로그인 상한은 아이디 축뿐 — #16).
+#   headers.withUnderscoresAction DropHeader — 이름에 밑줄이 든 헤더는 지우고 요청은 받는다. EG 기본(RejectRequest)은 요청 전체를 400 으로 끊는데,
+#     옛 입구(ingress-nginx — underscores_in_headers off)는 그 헤더만 버렸다. 컷오버에서 동작이 바뀌지 않게 같은 쪽을 고른다(#38 사용성 — 앱은
+#     밑줄 헤더를 읽지 않는다).
+# BackendTrafficPolicy dms-portal → HTTPRoute dms-portal:
+#   requestBuffer.limit 20Mi — Envoy 가 요청 본문을 다 받은 뒤 백엔드로 보내고, 넘으면 413 으로 끊는다(옛 Ingress 의 proxy-body-size 20m —
+#     대량 배치 제출 JSON). 앱에 업로드 스트리밍·WebSocket 이 없어 버퍼링의 제약(httpUpgrade 와 같이 못 씀)이 걸리지 않는다. 버퍼는 Envoy
+#     메모리(limit 2Gi)에 잡힌다.
+#   timeout.http.connectionIdleTimeout 4s(2026-11-03 ⑥ 리뷰 1) — Envoy → dms-api 연결의 유휴 타임아웃. Envoy 기본 1시간인데 앱(uvicorn — src/dms/cli.py
+#     가 timeout_keep_alive 를 주지 않아 기본 5초)은 5초 유휴 연결을 닫는다. 상류가 먼저 닫는 순간 Envoy 가 그 연결에 요청을 실으면 재시도 없이
+#     503(response_flags UC)이다 — 포탈 개요 화면이 5초마다 폴링해 유휴 시간이 늘 그 마감 근처다. 프록시 쪽을 상류 keep-alive 보다 짧게 두면 닫는
+#     쪽이 늘 Envoy 라 경쟁이 없다(옛 ingress-nginx 는 GET 을 proxy_next_upstream 으로 다시 보내 가려졌다). 재시도(reset)는 POST 를 두 번 보낼 수 있어
+#     쓰지 않는다. 앱의 keep-alive 를 줄이면 이 값도 그 아래로 내린다(늘리는 것은 무해).
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: ClientTrafficPolicy
+metadata:
+  name: dms-portal
+  namespace: dms
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: dms-portal
+  proxyProtocol:
+    optional: false
+  headers:
+    earlyRequestHeaders:
+      remove:
+        - X-Real-IP
+    withUnderscoresAction: DropHeader
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: dms-portal
+  namespace: dms
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: dms-portal
+  requestBuffer:
+    limit: 20Mi
+  timeout:
+    http:
+      connectionIdleTimeout: 4s

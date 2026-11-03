@@ -1,5 +1,6 @@
 # DMS 이미지 lock(2026-11-03 ④, 설계 v6 7-5 ①·8-1 S-1) — 커밋한다. 같은 파일에 줄을 덧붙인다: ⑤ CNPG(오퍼레이터·PostgreSQL),
-# ⑥ Envoy Gateway 3(gateway·envoy·shutdown-manager), ⑦ S9b Volcano v1.16.0 3(scheduler·controller-manager·admission — A 경로 설치용).
+# ⑥ Envoy Gateway 2(gateway — 컨트롤러·certgen·shutdown-manager 가 같은 이미지 · envoy), ⑦ S9b Volcano v1.16.0 3(scheduler·controller-manager·
+# admission — A 경로 설치용).
 #
 # 모든 노드가 x86_64 라(#41) 이미지마다 **linux/amd64 매니페스트 digest 하나**만 적는다. lock·렌더·S5 대조가 모두 이 digest 를 쓴다.
 # 한 줄 = 공백·탭으로 가른 세 칸(넷째 칸 없음, 첫 칸이 # 인 줄·빈 줄은 무시 — sh 가 읽는 규칙 그대로: LF·ASCII 만, 주석을 들여쓰지 않는다):
@@ -23,7 +24,12 @@
 #   CNPG_OPERATOR_IMAGE·PG_IMAGE(= 이 DEST)로 이 줄을 찾아 <레지스트리>/<DEST>@<DIGEST> 로 쓴다(태그 + digest — pull 은 digest 로, 태그는 GC 보호).
 #   PG 는 날짜 붙은 불변 태그다(움직이는 17.11-minimal-trixie 를 덮어쓰면 옛 digest 가 태그 없이 남아 GC 가 지운다). 둘 다 ghcr.io index 의 linux/amd64
 #   항목(resolve 로 만듦, verify PASS 2026-11-03).
+# gateway:v1.9.3 · envoy:distroless-v1.39.5(2026-11-03 ⑥, 설계 4-3·7-5) — Envoy Gateway 컨트롤러(= certgen Job·shutdown-manager — 상류 설정의
+#   shutdownManager.image 가 같은 envoyproxy/gateway 이미지라 줄 하나)와 Envoy 데이터 면(EG v1.9.3 DefaultEnvoyProxyImage 의 index sha256:9d84a586…
+#   — 그 linux/amd64 항목). 렌더러가 deploy/versions.env 의 ENVOY_GATEWAY_IMAGE·ENVOY_PROXY_IMAGE 로 이 줄을 찾는다(deploy/addons/envoy-gateway/<v>/SOURCE).
 registry:3.1.2  docker.io/library/registry:3.1.2  sha256:1290056e2357eceb0c047cb60ae9abb370305a218e2df650eb8d3ea021b1c151
 buildah:stable  quay.io/buildah/stable:v1.43.1    sha256:7bb110e1d8b761d08e87d004ea4086e295a52319f3ea70ecef65da6dff7ceef0
 cloudnative-pg:1.30.1  ghcr.io/cloudnative-pg/cloudnative-pg:1.30.1  sha256:b0f9805bd5f98592e7320b5ea624dd10a7a6ef8e477df5650655c94f0b242497
 postgresql:17.11-202611020810-minimal-trixie  ghcr.io/cloudnative-pg/postgresql:17.11-202611020810-minimal-trixie  sha256:2eeaa8edc695e49ccb41cbee326cc1ae0bfc96a7bf3d559062f9a11994fefe23
+gateway:v1.9.3  docker.io/envoyproxy/gateway:v1.9.3  sha256:83dee303a1fda5477339c7d1ba1c311be36bff173c761339393bb57c9502f477
+envoy:distroless-v1.39.5  docker.io/envoyproxy/envoy:distroless-v1.39.5  sha256:00c38048aeb4bb4b49d9ec6f3d7742a7c9f3d4d33f0371632a76734c02bebb7d

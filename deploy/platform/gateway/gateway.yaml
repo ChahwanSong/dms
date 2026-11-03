@@ -1,0 +1,31 @@
+# Gateway dms-portal(2026-11-03 ⑥, 설계 #14): HTTPS 443 리스너 하나, hostname 없음, 인증서 dms-portal-tls(렌더 값 PORTAL_TLS_SECRET 로 바꿀 수
+# 있다 — 같은 ns dms 의 kubernetes.io/tls Secret, S2 가 out-of-band 로 만든다; SAN = 포탈 FQDN + VIP-A, 보안 S3). 80 리스너·HSTS 는 두지 않는다 —
+# 사용자 PC 는 https://<FQDN> 만 쓰고 Avi 에도 80 VS 가 없다(#5 — 「80 불가 = 정상」).
+# hostname 이 없어 SNI 가 없거나(IP 직접 접속) 어떤 이름이어도 이 인증서 하나로 종단한다(옛 Ingress 의 catch-all + default-ssl-certificate 와 같은
+# 범위). infrastructure.parametersRef 가 DMS EnvoyProxy(같은 ns)를 붙인다 — GatewayClass 쪽이 아니라 여기라서 남이 설치한 EG(C)에서도 DMS 설정만
+# 이 Gateway 에 걸린다(설계 8-2).
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: dms-portal
+  namespace: dms
+spec:
+  gatewayClassName: dms
+  infrastructure:
+    parametersRef:
+      group: gateway.envoyproxy.io
+      kind: EnvoyProxy
+      name: dms-portal
+  listeners:
+    - name: https
+      protocol: HTTPS
+      port: 443
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - group: ""
+            kind: Secret
+            name: dms-portal-tls
+      allowedRoutes:
+        namespaces:
+          from: Same

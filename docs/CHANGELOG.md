@@ -95,6 +95,78 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ✅ ⑥ 입구(Envoy Gateway) — Gateway API v1.6.1 standard·EG v1.9.3 애드온 층·DMS Gateway/HTTPRoute/정책/EnvoyProxy·prod 의 Ingress·MetalLB 삭제 — **구현·검증**(2026-11-03, 테스트베드 T8 실증 대기)
+
+설계 v6(`docs/history/specs/2026-11-03-dms-k8s-prod-design.md`) #5·#13~#15(「#14 EG 기본값 세부」)·#22·#42·2-1/2-2(Envoy·EG 컨트롤러 행)·4-2·4-3·
+5 「원 IP 기록」·8-1(S0-5·S1·S8·S11·S12·「순서의 이유」)·8-2(Gateway API·EG 행)·9절 ⑥·10 T8·12 위험(#12·#15·#16·#19). 런북은 deploy/README §2g.
+**DMS 애플리케이션 코드는 바꾸지 않았다** — 원 IP 를 읽는 쪽(`auth.client_ip` — XFF 마지막 항목 → 피어, X-Real-IP 무시)은 ② 에서 이미 이 계약에 맞췄다.
+
+- **버전 선택(2026-11-03 GitHub releases 조회)**: EG **v1.9.3**(2026-10-26 — 1.9.x 최신; v1.10.0-rc.1 은 prerelease, v1.8 은 2026-11-08 EOL; 호환 표
+  v1.9 = K8s 1.33~1.36·EOL 2027-02-14). Gateway API **v1.6.1** standard(1.6.x 최신은 v1.6.3) — EG v1.9.3 의 go.mod 가 v1.6.1 이고, v1.6.1 → v1.6.3 의
+  standard CRD 차이는 bundle-version 어노테이션·설명문뿐(스키마 0 — diff), v1.7.0 은 EG v1.9 가 따르지 않는다. 상류는 두 매니페스트에 서명을
+  싣지 않는다 — 무결성은 GitHub 자산 digest(서버 계산) == 받은 파일 sha256 으로 기록(`SOURCE`). 이미지 lock(linux/amd64 단일 매니페스트, `images-lock.py
+  verify` PASS): `gateway:v1.9.3` ← `docker.io/envoyproxy/gateway:v1.9.3@sha256:83dee303…`(index `192fc9bd…` 의 amd64 — 컨트롤러·certgen Job·
+  shutdown-manager 가 같은 이미지라 줄 하나), `envoy:distroless-v1.39.5` ← `…/envoy:distroless-v1.39.5@sha256:00c38048…`(index `9d84a586…` = EG v1.9.3
+  `DefaultEnvoyProxyImage` 의 고정 digest 의 amd64 항목).
+- **애드온 층 `deploy/addons/gateway-api/v1.6.1`**: 상류 `standard-install.yaml` 바이트 그대로(CRD 10개 + safe-upgrades VAP·Binding, 이미지 0) + 라벨
+  층(managed-by `dms-install`·`dms.io/addon-version=v1.6.1`).
+- **애드온 층 `deploy/addons/envoy-gateway/v1.9.3`**: 상류 `install.yaml` 바이트 그대로 + DMS 패치 층 — ① 어노테이션 `gateway.networking.k8s.io/
+  bundle-version` 이 붙은 객체 전부 삭제(상류가 싣는 Gateway API **실험 채널** CRD 13개(x-k8s 3개 포함)·VAP — 원천은 standard 층; EG 컨트롤러는 없는
+  CRD 의 watch 를 건너뛴다 — `controller.go` checkCRD), ② 이미지 `envoyproxy/gateway`(호스트 없음 = docker.io) → 자리표시자 → 렌더러가 lock digest ref
+  (컨트롤러·certgen), ③ EG 설정 ConfigMap 을 DMS 판으로: shutdown-manager 이미지·**기본 EnvoyProxy 의 Envoy 이미지**(다른 Gateway 가 생겨도 docker.io
+  로 가지 않게 하는 그물)·`runtimeFlags.enabled: [EnvoyProxyPatch]`(DMS EnvoyProxy 의 hostNetwork 패치가 이 플래그로만 들어간다 — 꺼지면 조용히 무시)·
+  상류 ratelimit 이미지 줄 삭제(전역 rate limit 미사용), ④ 컨트롤러 워커 배치(required nodeAffinity control-plane `DoesNotExist`)·`dms-addon-critical`,
+  ⑤ ns `envoy-gateway-system` PSA privileged(Envoy DaemonSet 이 거기 hostNetwork 로 뜬다), ⑥ 라벨(상류 Helm 을 덮음, selector 는 그대로).
+- **플랫폼 층 `deploy/platform/gateway`**(DMS 소유): GatewayClass `dms` · Gateway `dms-portal`(ns dms, HTTPS 443 리스너 하나 — hostname·80·HSTS 없음,
+  인증서 `dms-portal-tls`, `infrastructure.parametersRef` → EnvoyProxy — A·C 경로 공통) · EnvoyProxy `dms-portal`(DaemonSet control-plane + toleration,
+  패치로 `hostNetwork: true`·`dnsPolicy: ClusterFirstWithHostNet`, `useListenerPortAsContainerPort: true`, Service ClusterIP, concurrency 2, 100m/256Mi..
+  1/2Gi, maxSurge 0, envoy·shutdown-manager 이미지 명시, 접근 로그 JSON — `client_ip`(PROXY 출발지)·`peer`(직접 피어)·`x_forwarded_for`·쿼리 뺀 경로) ·
+  HTTPRoute(/ → `dms-api:8080`, `timeouts.request: 3600s`) · ClientTrafficPolicy(`proxyProtocol.optional: false`, `earlyRequestHeaders.remove: [X-Real-IP]`,
+  clientIPDetection 없음, `withUnderscoresAction: DropHeader` — 옛 nginx 처럼 헤더만 버린다; EG 기본은 요청 400) · BackendTrafficPolicy(`requestBuffer.limit:
+  20Mi`). Envoy 는 비 root(65532) — 443 bind 는 마스터 sysctl `ip_unprivileged_port_start=443`(S0-5)이 전제다.
+- **렌더러(`deploy/render.sh`)**: `versions.env` 에 `GATEWAY_API_VERSION`·`ENVOY_GATEWAY_VERSION`·`ENVOY_GATEWAY_IMAGE`·`ENVOY_PROXY_IMAGE`, 입구 층을
+  늘 낸다(`GATEWAY:` 줄 S8 순서 — 기존 `PLATFORM:`/`ADDON:`/`PROBE:` 순서·`ADDON_LAYERS` 는 그대로). EG 설정은 base `patch-config.yaml` 의 두 자리표시자를
+  글자 그대로 바꾼 사본(설정 문자열이라 kustomize images 가 못 닿는다 — 남으면 FAIL), EnvoyProxy·CTP·Gateway 는 JSON 패치(shutdown-manager 위치는 `test`
+  op 로 확인). values(전부 선택): `GATEWAY_PROXY_PROTOCOL`(required 기본 | optional — stderr 알림, 컷오버 중에만), `PORTAL_TLS_SECRET`(기본
+  dms-portal-tls, DNS-1123), `GATEWAY_ENVOY_{CPU,MEMORY}_REQUEST`(testbed-k8s 50m/128Mi — 설계 10). 버전·태그·자리표시자·lock 이 어긋나면 FAIL.
+  `PORTAL_DOMAIN`·`PORTAL_VIP` 는 prod 필수 키로 두되 `render.env` 로만 낸다(인증서 SAN·S12 `--resolve`).
+- **prod 오버레이**: `patch-ingress.yaml`·`patch-metallb.yaml` 을 지우고 `patch-remove-ingress.yaml`(`$patch: delete` — Ingress `dms-portal`·IPAddressPool
+  `dms-public-pool`·L2Advertisement `dms-public-l2`). 공용 base 46·47 은 그대로(testbed-k8s 가 T8 동안 병행, main·dms-ssc 와 같은 파일). 지우지 않으면
+  MetalLB CRD 가 없는 prod 에서 apply 가 `no matches for kind` 로 실패했다.
+- **가드(`guard-images.sh`)**: `addons/envoy-gateway` 의 컨트롤러를 `envoy-gateway-system` 에서 읽어(⑤ 의 네임스페이스 추출 그대로) 이미지가 바뀌면 exit 3 +
+  EG 업그레이드 순서 안내.
+- **검증(오프라인)**: egctl v1.9.3(릴리스 바이너리 — 자산 digest 대조)의 `x translate` 로 렌더 결과를 xDS 로 번역 — 모든 정책·EnvoyProxy·Gateway·
+  HTTPRoute Accepted, 리스너 `0.0.0.0:443`(포트 이동 없음), `envoy.filters.listener.proxy_protocol`(required — optional 렌더는
+  `allowRequestsWithoutProxyProtocol: true`), early header mutation `remove: X-Real-IP`, `useRemoteAddress: true`·XFF 신뢰 홉·originalIpDetection 없음,
+  버퍼 필터 `maxRequestBytes: 20971520`, 라우트 `timeout: 3600s`, 접근 로그 포매터(REQ_WITHOUT_QUERY 확장 자동). CR 6종은 CRD openAPIV3Schema 로
+  알 수 없는 필드·enum·타입 대조(Strict field validation 과 같은 기준) PASS. dmsk8s server dry-run: Gateway API 층 전부 · EG 층의 CRD·클러스터 범위
+  객체(ns 객체는 첫 설치 NotFound — ⑤ 와 같은 함정, 런북은 ns 먼저).
+- **테스트**: 새 `tests/test_gateway_contract.py`(62 — 리뷰 1·2 포함) — 상류 바이트·버전/lock/디렉터리/라벨 맞물림·EG base(Gateway API 객체 0·자리표시자 이미지 4·외부
+  참조 0·워커·PriorityClass·PSA·라벨/selector)·렌더(이미지 = 애드온 레지스트리 + lock digest·Always 0·EnvoyProxy 바인드 모양·자원(prod 100m/256Mi,
+  testbed 50m/128Mi)·접근 로그·CTP 계약·Gateway 리스너·HTTPRoute 3600s·BTP 20Mi)·값 검사·셸 env 무시·versions/lock/base 불일치 FAIL·가드.
+  `tests/test_prod_k8s_overlay.py` — 삭제 패치 모양, 앱 렌더에 Ingress·IPAddressPool·L2Advertisement·metallb 0건, 입구 층 렌더(PROXY 필수).
+- **리뷰 1 반영(2026-11-03)**: ① EnvoyProxy `extraArgs: [--disable-hot-restart]` — EG v1.9.3 `BuildProxyArgs` 가 `--base-id` 를 넘기지 않아 hot restart
+  추상 소켓(base-id 0, netns 단위)이 hostNetwork 의 cilium-envoy(`--base-id 0` — dmsk8s 에서 확인)와 겹쳐 늦게 뜬 쪽이 `errno=98` 로 죽는다(리뷰어가
+  docker 로 재현). ② sysctl 이 빠진 마스터는 **조용히** 빠진다 — Envoy 는 LDS bind 실패를 NACK 만 하고 Ready, EG 의 Programmed 는 DaemonSet
+  `NumberAvailable > 0` 만 본다(상류 status/gateway.go) — 문서의 「Programmed False·CrashLoop」 증상을 바로잡고 확인을 마스터마다 :443 으로, 고친 뒤
+  Envoy 파드 재기동을 더했다(README §2g-2·2g-3·2g-5, BACKLOG ⑦ S12). ③ 「EG 가 root securityContext 를 정화·차단」은 사실이 아니다(상류
+  `applySecurityContextOverrides` = 기본값 위 strategic merge) — 세 문서의 근거를 「설계 (i) 선택·S1 범위·계약 테스트가 막는다」로 고쳤다(정책은 그대로).
+  ④ BTP `timeout.http.connectionIdleTimeout: 4s` — 상류(uvicorn keep-alive 기본 5초)가 먼저 닫는 연결 재사용 경쟁의 503 UC 방지(egctl 번역:
+  cluster `commonHttpProtocolOptions.idleTimeout: 4s`, 라우트 `timeout: 3600s` 그대로). ⑤ 렌더러가 Envoy requests > base limits(1/2Gi)를 FAIL(CRD 는
+  받고 EG 의 DaemonSet 생성만 apiserver 에서 거절돼 늦게 드러난다), `PORTAL_TLS_SECRET` 라벨 단위 검사(`a..b`·`a.-b`·`a-.b` 거부). ⑥ 테스트:
+  EG 설정 `runtimeFlags` 가 정확히 `enabled: [EnvoyProxyPatch]`(disabled 가 enabled 를 이긴다 — base·두 렌더), HSTS 단언 대소문자 무시,
+  EnvoyProxy 의 securityContext·capabilities 0건·`--disable-hot-restart`, BTP 4s, 값 상한·경계.
+- **리뷰 2 반영(2026-11-03, 문서·런북만 — 매니페스트 동작 변화 없음)**: ① 원 IP 예외 — PROXY 출발지가 **루프백**이면 Envoy 는 XFF 에 원 IP 대신 자기
+  주소(호스트의 첫 비 루프백 주소)를 덧붙인다(Envoy `conn_manager_utility.cc` appendXff). LB 흉내 haproxy 에 127.0.0.1 로 붙는 시험에서만 생기고 prod 의
+  SE 는 PC 주소를 싣는다 — EnvoyProxy·CTP 주석, README §2g-5 에 적고 T8 원 IP 시험은 `10.10.10.1:9443` 으로. ② 앱 이벤트의 `peer` 는 마스터의 호스트 쪽
+  출발 주소 — Cilium 이면 노드 IP 가 아니라 cilium_host(CiliumInternalIP, dmsk8s cp1 10.245.0.129 — `ip route get` 실측; EG 는 엔드포인트 파드 IP 로
+  붙는다). ③ README §2g-5 의 Envoy 로그를 `logs ds/<이름>`(파드 하나만) → 라벨 셀렉터(마스터 전부). ④ external 레지스트리 사이트: lock **전부**
+  (gateway·envoy 포함)를 REGISTRY 로 push, §2g-3 의 PriorityClass 를 `get … || apply` 로(§2f-3 과 같게), 증상 표에 레지스트리 주소 ErrImagePull(prod
+  README 3b·3c 도). ⑤ 테스트베드 컷오버 순서 — haproxy 를 먼저 bind 하고 DNAT 를 뺀다(되돌림은 DNAT 먼저), host-net 재시작이 ssc 릴레이도 잠깐 끊는다,
+  `status` 는 `/etc/default` 를 읽지 않는다(README §2g-7). 테스트 2개: §2g 의 Envoy 로그 명령이 라벨 셀렉터인지, A 경로의 PriorityClass `get || apply`.
+- **남은 것**: 테스트베드 T8(cp1 sysctl·이미지 push·A 경로 설치·haproxy `send-proxy-v2` 로 비 root 443·xDS·413·15초+·PROXY optional/필수·X-Real-IP·
+  원 IP), 설치기 연결(S8 감지·MetalLB/ingress 게이트 삭제 — ⑦), 테스트베드 컷오버(별도 승인) — BACKLOG 「⑥ 입구 후속」.
+
 ### ✅ ⑤ DB(CNPG) — CloudNativePG 1.30.1 애드온 층·정적 hostPath PV 풀·Cluster dms-pg·pg_dump·경로 프로브·prod 제어면 마스터 배치 — **구현·검증**(2026-11-03, 테스트베드 T6 실증 대기)
 
 설계 v6(`docs/history/specs/2026-11-03-dms-k8s-prod-design.md`) 6(6-1~6-6)·#24~#36·#40·2-1/2-2·3-1·8-1(S-1·S2·S9·S10)·8-2(CNPG 행·A 경로·층 배치)·

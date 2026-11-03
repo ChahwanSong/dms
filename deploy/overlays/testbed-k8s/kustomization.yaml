@@ -91,6 +91,8 @@ images:
 
 patches:
   - path: patch-config.yaml
+  # 입구(2026-11-03 ⑥): 이 테스트베드는 T8 동안 Ingress + MetalLB VIP 10.20.20.101 을 그대로 쓰고 Envoy Gateway(렌더러의 platform/gateway — cp1
+  # hostNetwork :443)를 병행한다. 컷오버(별도 승인) 뒤에는 prod 처럼 아래 둘을 빼고 patch-remove-ingress.yaml 을 싣는다(deploy/README §2g-7).
   - path: patch-ingress.yaml
   - path: patch-metallb.yaml
 

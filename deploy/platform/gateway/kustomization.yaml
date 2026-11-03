@@ -1,0 +1,44 @@
+# 플랫폼 층(DMS 소유) — 포탈 입구: Envoy Gateway 위의 GatewayClass·Gateway·HTTPRoute·정책·EnvoyProxy(2026-11-03 ⑥, 설계 v6 #13·#14·#15·4-3·
+# 5 「원 IP 기록」·8-1 S8). prod 는 MetalLB + ingress-nginx(deploy/k8s/46·47) 대신 이것 하나로 포탈을 받는다(overlays/prod 가 Ingress·풀을 지운다).
+#
+#   사내 PC ─https─▶ Avi VS-443(L4, PROXY v2) ─▶ 마스터 ×3 :443 = Envoy DaemonSet(hostNetwork, TLS 종단) ─▶ svc dms-api:8080
+#
+# 객체(이름이 고정된 계약 — 설치기·런북·테스트가 이 이름으로 찾는다):
+#   GatewayClass dms                  controllerName gateway.envoyproxy.io/gatewayclass-controller(EG 기본). parametersRef 를 두지 않는다 —
+#                                     설정은 Gateway 쪽 infrastructure.parametersRef 가 붙인다(A·C 경로 공통 — C 는 남이 설치한 EG 를 쓰고
+#                                     DMS EnvoyProxy 만 붙인다, 설계 8-2). 같은 controllerName 의 다른 GatewayClass 와 함께 있어도 된다.
+#   Gateway dms-portal(ns dms)        HTTPS 443 리스너 하나 — hostname 없음(IP 직접 접속 포함 catch-all, 옛 Ingress 와 같은 범위), 인증서
+#                                     Secret dms-portal-tls(같은 ns — ReferenceGrant 불필요). 80 리스너·HSTS 없음(#14 — 「80 불가 = 정상」).
+#   EnvoyProxy dms-portal(ns dms)     Envoy DaemonSet 을 control-plane 노드에(toleration), hostNetwork + ClusterFirstWithHostNet +
+#                                     useListenerPortAsContainerPort(443 그대로 bind), 이미지 명시(envoy·shutdown-manager), Service ClusterIP,
+#                                     concurrency 2, --disable-hot-restart(cilium-envoy 와 추상 소켓 충돌 방지), 자원 100m/256Mi..1/2Gi,
+#                                     접근 로그(원 IP 칸 client_ip — K15). 파일 머리 주석.
+#   HTTPRoute dms-portal(ns dms)      / → svc dms-api:8080, timeouts.request 3600s(Envoy 기본 15s 면 큰 다운로드·내보내기가 끊긴다).
+#   ClientTrafficPolicy dms-portal    PROXY 프로토콜 필수(optional: false — 컷오버 중에만 true, 렌더 값 GATEWAY_PROXY_PROTOCOL), X-Real-IP 제거,
+#                                     clientIPDetection 없음(#15). 파일 머리 주석.
+#   BackendTrafficPolicy dms-portal   requestBuffer 20Mi — 넘는 요청은 Envoy 가 413(옛 Ingress 의 proxy-body-size 20m 자리), 상류 유휴
+#                                     타임아웃 4s(앱 uvicorn keep-alive 5초보다 짧게 — 503 UC 경쟁 방지). 파일 머리 주석.
+#
+# 사이트 중립 base: 이미지 두 줄(envoy·shutdown-manager)만 자리표시자(set-by-overlay.invalid)다 — 그대로 apply 하면 Envoy 파드가 이미지를 못
+# 받는다(의도, 앱 base 와 같은 규칙). 사이트 값은 렌더러가 낸다:
+#   sh deploy/render.sh <site>      # → deploy/.rendered/<site>/platform/gateway (이 base + 이미지 digest·PROXY 모드·인증서 이름·선택 자원)
+#   kubectl --context <ctx> apply --server-side --field-manager=dms-install -k deploy/.rendered/<site>/platform/gateway
+# 앞선 조건(S0-5·S8): 마스터 sysctl net.ipv4.ip_unprivileged_port_start=443(Envoy 는 비 root 65532 — 4-3 (i)), addons/gateway-api →
+# addons/envoy-gateway 적용·컨트롤러 Ready, Secret dms-portal-tls. 확인: Gateway Programmed **와 마스터마다** `ss -ltnp` 에 :443(envoy) — Programmed 는
+# DaemonSet 가용 수만 봐서 sysctl 이 빠진 마스터(리스너 bind 실패)를 못 잡는다(envoyproxy.yaml 머리 주석). deploy/README §2g.
+#
+# overlays/·k8s/ 밖에 두는 이유: 그 아래 디렉터리를 모두 도는 계약 테스트를 피한다(설계 8-2). 이 층의 계약은 tests/test_gateway_contract.py.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - gatewayclass.yaml
+  - envoyproxy.yaml
+  - gateway.yaml
+  - httproute.yaml
+  - policies.yaml
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: dms
+      app.kubernetes.io/managed-by: dms-install
+    includeSelectors: false
+    includeTemplates: false

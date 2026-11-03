@@ -1,6 +1,7 @@
 #!/bin/sh
 # 사이트 렌더러(2026-08-30 overlays/prod/render.sh → 2026-11-03 ④ 일반화 — 설계 v6 9 「③ 공유 FS 세부」(render.sh 일반화)·④·⑤·8-2
-# 「층 배치」). 같은 렌더러가 앱 오버레이와 플랫폼 층(platform/{priorityclass,registry,db-*})·애드온 층(addons/cnpg)을 렌더한다.
+# 「층 배치」). 같은 렌더러가 앱 오버레이와 플랫폼 층(platform/{priorityclass,registry,db-*,gateway})·애드온 층(addons/{cnpg,gateway-api,
+# envoy-gateway} — ⑥ 2026-11-03)을 렌더한다.
 #
 #   sh deploy/render.sh <site> [--context <ctx>]      # site = deploy/overlays/<site>(kustomization.yaml 이 있는 디렉터리 이름)
 #
@@ -18,10 +19,16 @@
 #   platform/db-cluster/      CNPG Cluster dms-pg(imageName = lock digest, storage.size = PV 용량, 선택 자원·배치) → SSA(S10, 사전 검사 뒤)
 #   platform/db-backup/       pg_dump CronJob(이미지·hostPath <SHARED_DIR>/dms/backup/pg·보존 개수) → SSA(S10, 경로 대조 뒤)
 #   platform/db-probe/        일회용 경로 프로브 DaemonSet — deploy/pg-path-probe.py 가 띄우고 지운다(S10 사전 검사·경로 대조)
+#   addons/gateway-api/       Gateway API CRD v1.6.x standard(⑥, S8 첫째) → SSA. base = deploy/addons/gateway-api/<GATEWAY_API_VERSION>(상류 원본 + 라벨)
+#   addons/envoy-gateway/     Envoy Gateway 컨트롤러(⑥, S8 둘째) → SSA → rollout. base = deploy/addons/envoy-gateway/<ENVOY_GATEWAY_VERSION>(상류 원본
+#                             + DMS 패치 층) + 이미지(컨트롤러·certgen) lock digest + EG 설정(shutdown-manager·기본 Envoy 이미지)의 사이트 사본
+#   platform/gateway/         포탈 입구(⑥, S8 셋째): GatewayClass·Gateway·HTTPRoute·CTP·BTP·EnvoyProxy → SSA. base(deploy/platform/gateway)를
+#                             가리키고 Envoy·shutdown-manager 이미지·PROXY 모드·인증서 이름·선택 Envoy requests 만 덮는다(설계 4-3)
 #   render.env                해석된 값(REGISTRY·앱 태그·애드온 레지스트리·이미지 ref 등 — install.sh 의 in-cluster 게이트와 런북이 읽는다)
 #   (kube-context 가 있는 오버레이는 그 파일을 각 층 디렉터리에 복사한다 — guard-images.sh 가 같은 컨텍스트 고정을 본다)
-# 성공하면 층마다 `PLATFORM: <디렉터리>`(db 층은 S10 순서)·`ADDON: <디렉터리>`·`PROBE: <디렉터리>` 를, 마지막 줄에 `RENDERED: <app 디렉터리>`
-# 를 찍는다(install.sh 가 파싱). 실패는 한 줄 사유 + exit 2 이고 결과 디렉터리를 바꾸지 않는다(임시 디렉터리에 렌더한 뒤 끝에서만 바꿔 넣는다).
+# 성공하면 층마다 `PLATFORM: <디렉터리>`(db 층은 S10 순서)·`GATEWAY: <디렉터리>`(S8 순서 — 위 셋, ⑥)·`ADDON: <디렉터리>`·`PROBE: <디렉터리>` 를,
+# 마지막 줄에 `RENDERED: <app 디렉터리>` 를 찍는다(install.sh 가 파싱). 실패는 한 줄 사유 + exit 2 이고 결과 디렉터리를 바꾸지 않는다(임시
+# 디렉터리에 렌더한 뒤 끝에서만 바꿔 넣는다).
 #
 # DB(CNPG, 2026-11-03 ⑤ — 설계 v6 6·8-1 S9/S10). 버전은 deploy/versions.env(커밋 — CNPG_VERSION·CNPG_OPERATOR_IMAGE·PG_IMAGE), 이미지 digest 는
 # deploy/images.lock(그 DEST 의 linux/amd64 매니페스트 digest)이 원천이다 — 이미지 ref = <애드온 레지스트리>/<DEST>@<digest>. 애드온 레지스트리 =
@@ -44,6 +51,15 @@
 #   REGISTRY_TLS_VERIFY  in-cluster 면 false(평문 HTTP). install.sh 의 push 가 쓴다.
 #   SHARED_DIR_ID        S0 가 쓴 <SHARED_DIR>/dms/.dms-shared-id 값 = 레지스트리 센티널(.dms-registry-id) 기대값(7-3). 레지스트리를 렌더할 때 필수.
 #   REGISTRY_CPU_REQUEST·REGISTRY_MEMORY_REQUEST  (선택) 레지스트리 requests(기본 100m/128Mi — 테스트베드는 50m/64Mi, 설계 10).
+#
+# 입구(Envoy Gateway, 2026-11-03 ⑥ — 설계 v6 #13·#14·#15·4-3·8-1 S8). 버전은 deploy/versions.env(GATEWAY_API_VERSION·ENVOY_GATEWAY_VERSION·
+# ENVOY_GATEWAY_IMAGE·ENVOY_PROXY_IMAGE), 이미지 digest 는 deploy/images.lock — CNPG 와 같은 애드온 레지스트리에서 받는다. 입구 층은 늘 렌더한다
+# (prod 의 유일한 입구 — 앱 오버레이가 Ingress·MetalLB 풀을 지운다; testbed-k8s 는 T8 동안 Ingress 와 병행). values(전부 선택):
+#   GATEWAY_PROXY_PROTOCOL  required(기본 — PROXY v2 헤더 없는 연결을 끊는다) | optional(**컷오버 중에만** — PROXY 없는 연결도 받는다, 설계 4-3).
+#                           ClientTrafficPolicy proxyProtocol.optional 한 칸이 이 값에서 나온다(deploy/README §2g 컷오버).
+#   PORTAL_TLS_SECRET       Gateway 리스너 인증서 Secret(ns dms, kubernetes.io/tls). 기본 dms-portal-tls(설계 #14).
+#   GATEWAY_ENVOY_CPU_REQUEST·GATEWAY_ENVOY_MEMORY_REQUEST  Envoy requests(기본 100m/256Mi, limits 1/2Gi 는 base — 테스트베드 50m/128Mi, 설계 10).
+#                           limits 를 넘으면 FAIL(EG 가 만드는 DaemonSet 을 apiserver 가 거절한다 — SSA 는 통과해 늦게 드러난다).
 set -eu
 usage() { echo "usage: $0 <site> [--context <ctx>]" >&2; exit 2; }
 fail() { echo "FAIL: $*"; exit 2; }
@@ -84,6 +100,8 @@ unset SHARED_FS SHARED_DIR SHARED_DIR_ID REGISTRY REGISTRY_MODE REGISTRY_CLUSTER
       REGISTRY_CPU_REQUEST REGISTRY_MEMORY_REQUEST \
       PG_STORAGE_SIZE PG_CPU_REQUEST PG_MEMORY PG_SHARED_BUFFERS PG_PLACEMENT PG_BACKUP_KEEP \
       CNPG_VERSION CNPG_OPERATOR_IMAGE PG_IMAGE \
+      GATEWAY_PROXY_PROTOCOL PORTAL_TLS_SECRET GATEWAY_ENVOY_CPU_REQUEST GATEWAY_ENVOY_MEMORY_REQUEST \
+      GATEWAY_API_VERSION ENVOY_GATEWAY_VERSION ENVOY_GATEWAY_IMAGE ENVOY_PROXY_IMAGE \
       DMS_TAG DMS_AGENT_TAG MFU_TAG EMAIL_DOMAIN LOCAL_ADMIN PORTAL_DOMAIN PORTAL_VIP \
       LDAP_HOST LDAP_USER_BASE LDAP_GROUP_BASE LDAP_BIND_DN IDENTITY_SUPPLEMENTARY_GROUPS
 # shellcheck disable=SC1090
@@ -197,7 +215,9 @@ fi
 
 # dms-k8s: k8s 신원 모드 전용(2026-10-26 LDAP 코드 삭제) -- LDAP 키 없음. 옛 values.env 의 LDAP_*·IDENTITY_SUPPLEMENTARY_GROUPS
 # 는 쓰지 않는다(아래 알림 한 줄, stderr — stdout 의 마지막 `RENDERED:` 파싱을 흐리지 않게).
-# 템플릿 오버레이(prod)의 필수 키 -- 템플릿의 REPLACE_<키> 와 같은 집합(어긋나면 아래 잔여 토큰 그물이 잡는다).
+# 템플릿 오버레이(prod)의 필수 키 -- 템플릿의 REPLACE_<키> 와 같은 집합(어긋나면 아래 잔여 토큰 그물이 잡는다). 예외 둘(2026-11-03 ⑥):
+# PORTAL_DOMAIN·PORTAL_VIP 는 prod 가 Ingress·MetalLB 풀을 지워 템플릿에 더는 없지만 사이트 사실(포탈 FQDN·Avi VIP-A — 인증서 SAN 과 S12
+# `curl --resolve` 의 대상)이라 필수로 두고 render.env 로만 낸다(Gateway 리스너는 hostname 이 없다 — 설계 #14).
 KEYS="REGISTRY DMS_TAG DMS_AGENT_TAG MFU_TAG SHARED_DIR EMAIL_DOMAIN LOCAL_ADMIN PORTAL_DOMAIN PORTAL_VIP"
 # 고정 오버레이(testbed-k8s)는 값이 오버레이에 커밋돼 있다 -- values.env 는 그 기록이고 렌더러가 아래에서 둘이 같은지 본다.
 [ "$TEMPLATE" = 1 ] || KEYS="REGISTRY SHARED_DIR"
@@ -395,6 +415,80 @@ case "$PG_BACKUP_KEEP" in ""|0*|*[!0123456789]*) fail "values.env 의 PG_BACKUP_
 [ "${#PG_BACKUP_KEEP}" -le 5 ] || fail "values.env 의 PG_BACKUP_KEEP='$PG_BACKUP_KEEP' 가 너무 크다(5자리 이하)"
 DB_LAYERS="db-volumes db-cluster db-backup"
 
+# --- 입구(Envoy Gateway) 값(2026-11-03 ⑥, 설계 v6 #13·#14·4-3·8-1 S8 — 머리 주석 「입구」) -------------------------------------------------------
+# 버전·digest 의 원천은 CNPG 와 같은 두 커밋 파일이다. 디렉터리 이름 = 상류 태그(v 접두 — 이미지 태그도 v1.9.3 이라 태그 == 버전 검사가 그대로 선다).
+GATEWAY_API_VERSION=$(_ver GATEWAY_API_VERSION) || { echo "$GATEWAY_API_VERSION"; exit 2; }
+ENVOY_GATEWAY_VERSION=$(_ver ENVOY_GATEWAY_VERSION) || { echo "$ENVOY_GATEWAY_VERSION"; exit 2; }
+ENVOY_GATEWAY_IMAGE=$(_ver ENVOY_GATEWAY_IMAGE) || { echo "$ENVOY_GATEWAY_IMAGE"; exit 2; }
+ENVOY_PROXY_IMAGE=$(_ver ENVOY_PROXY_IMAGE) || { echo "$ENVOY_PROXY_IMAGE"; exit 2; }
+for _v in "GATEWAY_API_VERSION=$GATEWAY_API_VERSION" "ENVOY_GATEWAY_VERSION=$ENVOY_GATEWAY_VERSION"; do
+  _n=${_v#*=v}
+  case "$_v" in *=v[0123456789]*) ;; *) fail "$VERS 의 ${_v%%=*}='${_v#*=}' — 상류 태그(예: v1.9.3)" ;; esac
+  case "$_n" in ""|.*|*.|*..*|*[!0123456789.]*) fail "$VERS 의 ${_v%%=*}='${_v#*=}' — 상류 태그(예: v1.9.3)" ;; esac
+done
+for _img in "$ENVOY_GATEWAY_IMAGE" "$ENVOY_PROXY_IMAGE"; do
+  case "$_img" in
+    *[!abcdefghijklmnopqrstuvwxyz0123456789._:/-]*|*:*:*|:*|*:|*/|/*) fail "$VERS 의 이미지 '$_img' — lock 의 DEST(<이름>:<태그>, 호스트 없이)" ;;
+    *:*) ;;
+    *) fail "$VERS 의 이미지 '$_img' 에 태그가 없다 — lock 의 DEST(<이름>:<태그>)" ;;
+  esac
+done
+[ "${ENVOY_GATEWAY_IMAGE##*:}" = "$ENVOY_GATEWAY_VERSION" ] \
+  || fail "$VERS 의 ENVOY_GATEWAY_IMAGE='$ENVOY_GATEWAY_IMAGE' 태그가 ENVOY_GATEWAY_VERSION='$ENVOY_GATEWAY_VERSION' 과 다르다(한 커밋에서 같이 올린다)"
+GWAPI_BASE="$HERE/addons/gateway-api/$GATEWAY_API_VERSION"
+EG_BASE="$HERE/addons/envoy-gateway/$ENVOY_GATEWAY_VERSION"
+GW_BASE="$HERE/platform/gateway"
+for _b in "$GWAPI_BASE=$GATEWAY_API_VERSION" "$EG_BASE=$ENVOY_GATEWAY_VERSION"; do
+  [ -f "${_b%=*}/kustomization.yaml" ] || fail "애드온 base 없음: ${_b%=*}/kustomization.yaml (deploy/versions.env 의 버전 — deploy/addons/<애드온>/<v>)"
+  grep -q "^      dms.io/addon-version: \"${_b##*=}\"\$" "${_b%=*}/kustomization.yaml" \
+    || fail "${_b%=*}/kustomization.yaml 의 라벨 dms.io/addon-version 이 '${_b##*=}' 가 아니다"
+done
+[ -f "$GW_BASE/kustomization.yaml" ] || fail "플랫폼 base 없음: $GW_BASE/kustomization.yaml"
+# 이미지 자리표시자는 글자 그대로 바꾼다(EG 설정 문자열 안에도 있다 — kustomize images 가 못 닿는다). base 의 자리표시자 태그가 versions.env 와
+# 다르면 치환이 조용히 무동작이 되므로 여기서 멈춘다(설정·EnvoyProxy 두 파일 — 업그레이드 때 같이 바꾼다).
+for _f in "$EG_BASE/patch-config.yaml" "$GW_BASE/envoyproxy.yaml"; do
+  for _img in "$ENVOY_GATEWAY_IMAGE" "$ENVOY_PROXY_IMAGE"; do
+    grep -qF "image: set-by-overlay.invalid/$_img" "$_f" \
+      || fail "$_f 에 자리표시자 'set-by-overlay.invalid/$_img' 가 없다 — versions.env 와 base 의 태그를 한 커밋에서 맞춘다"
+  done
+done
+EG_DG=$(_lock_digest "$ENVOY_GATEWAY_IMAGE") || { echo "$EG_DG"; exit 2; }
+ENVOY_DG=$(_lock_digest "$ENVOY_PROXY_IMAGE") || { echo "$ENVOY_DG"; exit 2; }
+EG_REF="$ADDON_REGISTRY/$ENVOY_GATEWAY_IMAGE@$EG_DG"
+ENVOY_REF="$ADDON_REGISTRY/$ENVOY_PROXY_IMAGE@$ENVOY_DG"
+_set "${GATEWAY_PROXY_PROTOCOL:-}" || GATEWAY_PROXY_PROTOCOL=required
+case "$GATEWAY_PROXY_PROTOCOL" in
+  required) PROXY_OPTIONAL=false ;;
+  optional) PROXY_OPTIONAL=true
+            echo "note: GATEWAY_PROXY_PROTOCOL=optional — PROXY 헤더 없는 연결도 받는다(원 IP 자리에 직접 피어). **컷오버 중에만** 쓰고 끝나면 required 로 되돌린다(설계 4-3, deploy/README §2g)" >&2 ;;
+  *) fail "values.env 의 GATEWAY_PROXY_PROTOCOL='$GATEWAY_PROXY_PROTOCOL' — required(기본) 또는 optional(컷오버 중에만)" ;;
+esac
+_set "${PORTAL_TLS_SECRET:-}" || PORTAL_TLS_SECRET=dms-portal-tls
+# Secret 이름 = DNS-1123 subdomain(소문자·숫자·. -, 점으로 나눈 라벨마다 처음·끝은 영숫자, 253자 이하).
+case "$PORTAL_TLS_SECRET" in
+  *[!abcdefghijklmnopqrstuvwxyz0123456789.-]*|[.-]*|*[.-]|*..*|*.-*|*-.*) fail "values.env 의 PORTAL_TLS_SECRET='$PORTAL_TLS_SECRET' — Secret 이름(소문자·숫자·. -, 예: dms-portal-tls)" ;;
+esac
+[ "${#PORTAL_TLS_SECRET}" -le 253 ] || fail "values.env 의 PORTAL_TLS_SECRET 이 253자를 넘는다"
+# Envoy requests 는 base 의 limits(cpu 1·memory 2Gi — platform/gateway/envoyproxy.yaml, 설계 #14) 이하여야 한다(2026-11-03 ⑥ 리뷰 1): EnvoyProxy
+# CRD 에는 requests ≤ limits 규칙이 없어 SSA 는 통과하고, EG 가 만드는 DaemonSet 을 apiserver 가 거절해 Gateway 가 뜨지 않는다(첫 설치 — 마스터
+# :443 이 빈다) 또는 옛 spec 에 머문다(재적용) — 원인은 EG 로그에만 남는다. 레지스트리·PG 와 달리 server dry-run 이 못 잡으니 여기서 멈춘다.
+# base limits 를 바꾸면 이 두 상한도 같이 바꾼다(tests/test_gateway_contract.py 가 base limits 를 1/2Gi 로 고정한다).
+if _set "${GATEWAY_ENVOY_CPU_REQUEST:-}"; then
+  _num=${GATEWAY_ENVOY_CPU_REQUEST%m}
+  case "$_num" in ""|0*|*[!0123456789]*) fail "values.env 의 GATEWAY_ENVOY_CPU_REQUEST='$GATEWAY_ENVOY_CPU_REQUEST' — 예: 100m 또는 1" ;; esac
+  [ "${#_num}" -le 9 ] || fail "values.env 의 GATEWAY_ENVOY_CPU_REQUEST='$GATEWAY_ENVOY_CPU_REQUEST' 가 너무 크다(9자리 이하)"
+  case "$GATEWAY_ENVOY_CPU_REQUEST" in *m) _mcpu=$_num ;; *) _mcpu=$((_num * 1000)) ;; esac
+  [ "$_mcpu" -le 1000 ] \
+    || fail "values.env 의 GATEWAY_ENVOY_CPU_REQUEST='$GATEWAY_ENVOY_CPU_REQUEST' 가 base limits(cpu 1 — 설계 #14)를 넘는다 — EG 가 만드는 DaemonSet 을 apiserver 가 거절해 Gateway 가 뜨지 않는다"
+else GATEWAY_ENVOY_CPU_REQUEST=""; fi
+if _set "${GATEWAY_ENVOY_MEMORY_REQUEST:-}"; then
+  _qty GATEWAY_ENVOY_MEMORY_REQUEST "$GATEWAY_ENVOY_MEMORY_REQUEST" "Mi Gi" 256Mi
+  _env_k=$(_kib "$GATEWAY_ENVOY_MEMORY_REQUEST") || fail "values.env 의 GATEWAY_ENVOY_MEMORY_REQUEST='$GATEWAY_ENVOY_MEMORY_REQUEST' 가 너무 크다(9자리 이하)"
+  [ "$_env_k" -le 2097152 ] \
+    || fail "values.env 의 GATEWAY_ENVOY_MEMORY_REQUEST='$GATEWAY_ENVOY_MEMORY_REQUEST' 가 base limits(memory 2Gi — 설계 #14)를 넘는다 — EG 가 만드는 DaemonSet 을 apiserver 가 거절해 Gateway 가 뜨지 않는다"
+else GATEWAY_ENVOY_MEMORY_REQUEST=""; fi
+GATEWAY_LAYERS="addons/gateway-api addons/envoy-gateway platform/gateway"
+
 # --- 렌더(임시 디렉터리 — 끝에서만 OUT 을 바꾼다) ----------------------------------------------------------------------------
 mkdir -p "$HERE/.rendered"
 TMP="$HERE/.rendered/.$SITE.tmp.$$"
@@ -580,6 +674,126 @@ spec:
               value: $PG_REF
 EOF
 
+# --- 입구 층(2026-11-03 ⑥, 설계 4-3·8-1 S8 — 순서: gateway-api → envoy-gateway(rollout) → platform/gateway) ----------------------------------------
+mkdir -p "$TMP/addons/gateway-api" "$TMP/addons/envoy-gateway" "$TMP/platform/gateway"
+cat > "$TMP/addons/gateway-api/kustomization.yaml" <<EOF
+$HEAD
+# 적용(S8 첫째): kubectl --context <ctx> apply --server-side --field-manager=dms-install -k <이 디렉터리> → CRD Established 대기(deploy/README §2g).
+# base = deploy/addons/gateway-api/$GATEWAY_API_VERSION(상류 standard 채널 원본 + 라벨). 사이트 값이 없다.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../../../addons/gateway-api/$GATEWAY_API_VERSION
+EOF
+cat > "$TMP/addons/envoy-gateway/kustomization.yaml" <<EOF
+$HEAD
+# 적용(S8 둘째): kubectl --context <ctx> apply --server-side --field-manager=dms-install -k <이 디렉터리> → rollout status deploy/envoy-gateway
+# (ns envoy-gateway-system) → certgen Job 완료(deploy/README §2g). base = deploy/addons/envoy-gateway/$ENVOY_GATEWAY_VERSION(상류 원본 + DMS 패치 층).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../../../addons/envoy-gateway/$ENVOY_GATEWAY_VERSION
+patches:
+  - path: site-patch.yaml
+  - path: site-config.yaml
+EOF
+cat > "$TMP/addons/envoy-gateway/site-patch.yaml" <<EOF
+$HEAD
+# 이미지 = <애드온 레지스트리>/<lock DEST>@<amd64 매니페스트 digest>(deploy/versions.env + deploy/images.lock) — 컨트롤러와 certgen Job 이 같은 이미지다.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: envoy-gateway
+  namespace: envoy-gateway-system
+spec:
+  template:
+    spec:
+      containers:
+        - name: envoy-gateway
+          image: $EG_REF
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: eg-gateway-helm-certgen
+  namespace: envoy-gateway-system
+spec:
+  template:
+    spec:
+      containers:
+        - name: envoy-gateway-certgen
+          image: $EG_REF
+EOF
+# EG 설정(ConfigMap)은 base 의 patch-config.yaml 을 원천으로 두 자리표시자만 글자 그대로 바꾼 사본이다(설정 문자열 안 — kustomize images 가 못
+# 닿는다). 점은 정규식 메타라 이스케이프한다. 바꾼 뒤 자리표시자가 남으면 멈춘다(base 와 versions.env 를 위에서 대조했지만 그물 한 겹 더).
+_re() { printf '%s' "$1" | sed 's/[.]/\\./g'; }
+{
+  echo "$HEAD"
+  echo "# EnvoyGateway 설정 = deploy/addons/envoy-gateway/$ENVOY_GATEWAY_VERSION/patch-config.yaml 의 이미지 두 줄을 lock digest ref 로 바꾼 것(기동 때만"
+  echo "# 읽힌다 — 바뀌면 kubectl --context <ctx> -n envoy-gateway-system rollout restart deploy/envoy-gateway, deploy/README §2g)."
+  sed -e '/^#/d' \
+      -e "s|set-by-overlay\\.invalid/$(_re "$ENVOY_GATEWAY_IMAGE")\$|$EG_REF|" \
+      -e "s|set-by-overlay\\.invalid/$(_re "$ENVOY_PROXY_IMAGE")\$|$ENVOY_REF|" \
+      "$EG_BASE/patch-config.yaml"
+} > "$TMP/addons/envoy-gateway/site-config.yaml"
+! grep -q 'set-by-overlay' "$TMP/addons/envoy-gateway/site-config.yaml" \
+  || fail "EG 설정 사본에 자리표시자가 남았다 — $EG_BASE/patch-config.yaml 의 이미지 줄 모양(\`image: set-by-overlay.invalid/<DEST>\`)을 확인"
+# platform/gateway: JSON 패치(EnvoyProxy·정책은 CRD 라 전략적 머지의 목록 병합 키가 없다 — 경로로 정확히 바꾼다). shutdown-manager 는 패치 목록의
+# 둘째 항목이다 — test op 가 이름을 확인해 base 의 순서가 바뀌면 렌더(kustomize)가 실패한다.
+{
+  echo "$HEAD"
+  echo "# 적용(S8 셋째, addons/envoy-gateway 가 Ready 된 뒤): kubectl --context <ctx> apply --server-side --field-manager=dms-install -k <이 디렉터리>"
+  echo "# → Gateway dms-portal Programmed 대기 → **마스터마다** \`ss -ltnp\` 에 :443(Programmed 는 bind 실패를 못 잡는다 — deploy/README §2g). PROXY 모드 = $GATEWAY_PROXY_PROTOCOL."
+  echo "apiVersion: kustomize.config.k8s.io/v1beta1"
+  echo "kind: Kustomization"
+  echo "resources:"
+  echo "  - ../../../../platform/gateway"
+  echo "patches:"
+  echo "  - target:"
+  echo "      group: gateway.envoyproxy.io"
+  echo "      kind: EnvoyProxy"
+  echo "      name: dms-portal"
+  echo "    patch: |-"
+  echo "      - op: replace"
+  echo "        path: /spec/provider/kubernetes/envoyDaemonSet/container/image"
+  echo "        value: $ENVOY_REF"
+  echo "      - op: test"
+  echo "        path: /spec/provider/kubernetes/envoyDaemonSet/patch/value/spec/template/spec/containers/1/name"
+  echo "        value: shutdown-manager"
+  echo "      - op: replace"
+  echo "        path: /spec/provider/kubernetes/envoyDaemonSet/patch/value/spec/template/spec/containers/1/image"
+  echo "        value: $EG_REF"
+  if [ -n "$GATEWAY_ENVOY_CPU_REQUEST" ]; then
+    echo "      - op: replace"
+    echo "        path: /spec/provider/kubernetes/envoyDaemonSet/container/resources/requests/cpu"
+    echo "        value: \"$GATEWAY_ENVOY_CPU_REQUEST\""
+  fi
+  if [ -n "$GATEWAY_ENVOY_MEMORY_REQUEST" ]; then
+    echo "      - op: replace"
+    echo "        path: /spec/provider/kubernetes/envoyDaemonSet/container/resources/requests/memory"
+    echo "        value: $GATEWAY_ENVOY_MEMORY_REQUEST"
+  fi
+  echo "  - target:"
+  echo "      group: gateway.envoyproxy.io"
+  echo "      kind: ClientTrafficPolicy"
+  echo "      name: dms-portal"
+  echo "    patch: |-"
+  echo "      - op: replace"
+  echo "        path: /spec/proxyProtocol/optional"
+  echo "        value: $PROXY_OPTIONAL"
+  echo "  - target:"
+  echo "      group: gateway.networking.k8s.io"
+  echo "      kind: Gateway"
+  echo "      name: dms-portal"
+  echo "    patch: |-"
+  echo "      - op: test"
+  echo "        path: /spec/listeners/0/name"
+  echo "        value: https"
+  echo "      - op: replace"
+  echo "        path: /spec/listeners/0/tls/certificateRefs/0/name"
+  echo "        value: $PORTAL_TLS_SECRET"
+} > "$TMP/platform/gateway/kustomization.yaml"
+
 # --- DB 층(2026-11-03 ⑤, 설계 6-1·6-2·6-4·8-1 S10) — base(deploy/platform/db/*)를 가리키는 kustomization + 사이트 값 ----------------------
 PGDATA_DIR="$SHARED_DIR/dms/pgdata"
 mkdir -p "$TMP/platform/db-volumes" "$TMP/platform/db-cluster" "$TMP/platform/db-backup" "$TMP/platform/db-probe"
@@ -724,6 +938,7 @@ EOF
 if [ -f "$OV/kube-context" ]; then
   for layer in $LAYERS $DB_LAYERS db-probe; do cp "$OV/kube-context" "$TMP/platform/$layer/"; done
   cp "$OV/kube-context" "$TMP/addons/cnpg/"
+  for layer in $GATEWAY_LAYERS; do cp "$OV/kube-context" "$TMP/$layer/"; done
 fi
 {
   echo "# deploy/render.sh $SITE 의 해석값 — 손으로 고치지 않는다(설치기·런북이 읽는다; sh 로 . 해도 된다)."
@@ -751,12 +966,24 @@ fi
   echo "PG_STORAGE_SIZE=$PG_STORAGE_SIZE"
   echo "PG_PLACEMENT=$PG_PLACEMENT"
   echo "PG_BACKUP_KEEP=$PG_BACKUP_KEEP"
+  # 입구(⑥) — S8 순서의 층(렌더 디렉터리 기준 상대 경로)·버전·이미지 ref·사이트 값. PORTAL_DOMAIN·PORTAL_VIP 는 템플릿 오버레이(prod)만 있다
+  # (S12 `curl --resolve <PORTAL_DOMAIN>:443:<PORTAL_VIP>` 의 대상 — 인증서 SAN 도 이 둘).
+  echo "GATEWAY_LAYERS=\"$GATEWAY_LAYERS\""
+  echo "GATEWAY_API_VERSION=$GATEWAY_API_VERSION"
+  echo "ENVOY_GATEWAY_VERSION=$ENVOY_GATEWAY_VERSION"
+  echo "ENVOY_GATEWAY_REF=$EG_REF"
+  echo "ENVOY_PROXY_REF=$ENVOY_REF"
+  echo "GATEWAY_PROXY_PROTOCOL=$GATEWAY_PROXY_PROTOCOL"
+  echo "PORTAL_TLS_SECRET=$PORTAL_TLS_SECRET"
+  echo "PORTAL_DOMAIN=${PORTAL_DOMAIN:-}"
+  echo "PORTAL_VIP=${PORTAL_VIP:-}"
 } > "$TMP/render.env"
 
 rm -rf "$OUT"
 mv "$TMP" "$OUT"
 trap - EXIT
 for layer in $LAYERS; do echo "PLATFORM: $OUT/platform/$layer"; done
+for layer in $GATEWAY_LAYERS; do echo "GATEWAY: $OUT/$layer"; done
 echo "ADDON: $OUT/addons/cnpg"
 for layer in $DB_LAYERS; do echo "PLATFORM: $OUT/platform/$layer"; done
 echo "PROBE: $OUT/platform/db-probe"

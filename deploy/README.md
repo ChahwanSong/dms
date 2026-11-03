@@ -1024,6 +1024,217 @@ keepalive·`tcp_user_timeout`(2f-2 URL)이 없으면 API 가 최대 약 15분 �
   (다시 시작하지 않을 때만) `delete -k $RD/platform/db-volumes`(PV·SC — 디렉터리는 남는다) → `delete -k $RD/addons/cnpg`(CRD 를 지우면 그 종류의
   모든 객체가 지워진다 — Cluster 가 0개인지 먼저 확인). `dms-pg-app` 은 Cluster 를 다시 만들 때 그대로 쓴다.
 
+## 2g. 입구(Envoy Gateway) — 마스터 sysctl(S0-5)·S8 설치·Avi VS-443·PROXY 컷오버·검증 (2026-11-03 ⑥)
+
+설계 v6 #5·#13~#15(#14 「EG 기본값 세부」)·4-2·4-3·5 「원 IP 기록」·8-1(S0-5·S8·S12)·8-2(Gateway API·EG 행)·10 T8. **prod 의 포탈 입구는 이것
+하나다** — MetalLB·ingress-nginx 를 쓰지 않는다(prod 오버레이가 공용 base 의 Ingress·MetalLB 풀을 `$patch: delete` 로 지운다 —
+`deploy/overlays/prod/patch-remove-ingress.yaml`). testbed-k8s 는 T8 동안 Ingress + MetalLB VIP 10.20.20.101 을 그대로 두고 Gateway 를 병행한다(2g-7).
+설치기 연결(S8 감지 상태 기계·A/C 판정·S12 자동 검증)과 install.sh 의 MetalLB·ingress 게이트 삭제는 묶음 ⑦ 몫이다 — 지금은 아래 명령을 손으로 돈다
+(**⑦ 전에는 prod 에 install.sh 를 쓰지 않는다** — 지금 install.sh 는 MetalLB·IngressClass nginx 가 없으면 멈춘다, 설계 12 위험 19).
+
+```
+사내 PC ─https://<FQDN>─▶ Avi VS-443(VIP-A, L4 TCP, PROXY v2) ─▶ 마스터 ×3 :443 = Envoy DaemonSet(hostNetwork, 비 root 65532, TLS 종단)
+                                                                  └─▶ svc dms-api:8080(HTTPRoute, 3600s) — 앱은 XFF 마지막 항목을 원 IP 로 기록
+```
+
+### 2g-1. 구성·값
+
+| 무엇 | 어디(base → 렌더) | 비고 |
+|---|---|---|
+| Gateway API CRD | `deploy/addons/gateway-api/<GATEWAY_API_VERSION>/`(상류 `standard-install.yaml` 그대로 + `SOURCE`·sha256 + 라벨 층) → `.rendered/<site>/addons/gateway-api` | **v1.6.1 standard**(EG v1.9.3 의 go.mod 가 v1.6.1 — v1.6.3 과 스키마 같음, `SOURCE`). CRD 10개 + safe-upgrades VAP. 이미지 없음 |
+| Envoy Gateway | `deploy/addons/envoy-gateway/<ENVOY_GATEWAY_VERSION>/`(상류 `install.yaml` 그대로 + DMS 패치 층) → `addons/envoy-gateway` | **v1.9.3**(1.9.x 최신, 2026-10-26; v1.8 은 2026-11-08 EOL). 패치 층: Gateway API 실험 채널 CRD·VAP 를 **지운다**(원천은 위 standard), 이미지 = `<REG>/gateway:v1.9.3@sha256:<amd64>`(컨트롤러·certgen Job), EG 설정(ConfigMap `envoy-gateway-config`)의 shutdown-manager·기본 Envoy 이미지 = 레지스트리, 상류 ratelimit 이미지 줄 삭제, 런타임 플래그 `EnvoyProxyPatch` 명시, 컨트롤러는 워커(required nodeAffinity control-plane `DoesNotExist`)·`dms-addon-critical`, ns `envoy-gateway-system` PSA privileged(Envoy 파드가 여기 hostNetwork 로 뜬다), 라벨 managed-by `dms-install`·`dms.io/addon-version=v1.9.3` |
+| 포탈 입구 | `deploy/platform/gateway`(DMS 소유) → `platform/gateway` | GatewayClass `dms`(controllerName EG 기본) · Gateway `dms-portal`(ns dms — HTTPS 443 리스너 하나, **hostname·80 리스너·HSTS 없음**, 인증서 `PORTAL_TLS_SECRET`, `infrastructure.parametersRef` → EnvoyProxy) · EnvoyProxy `dms-portal`(DaemonSet 을 control-plane 노드에, **hostNetwork + `dnsPolicy: ClusterFirstWithHostNet`**(EG 패치) + **`useListenerPortAsContainerPort: true`**, Service ClusterIP, concurrency 2, **`--disable-hot-restart`**(2g-2), 100m/256Mi..1/2Gi, Envoy·shutdown-manager 이미지 명시, 접근 로그 JSON — 2g-5) · HTTPRoute `dms-portal`(/ → `dms-api:8080`, `timeouts.request: 3600s`) · ClientTrafficPolicy(PROXY **필수**, `earlyRequestHeaders.remove: [X-Real-IP]`, clientIPDetection **없음**, 밑줄 헤더는 지우고 받음) · BackendTrafficPolicy(`requestBuffer.limit: 20Mi` — 넘으면 413, 상류 유휴 `connectionIdleTimeout: 4s` — 앱 uvicorn keep-alive 5초보다 짧게: 상류가 먼저 닫으면 503 UC) |
+| 버전·digest | `deploy/versions.env`(`GATEWAY_API_VERSION`·`ENVOY_GATEWAY_VERSION`·`ENVOY_GATEWAY_IMAGE`·`ENVOY_PROXY_IMAGE`) + `deploy/images.lock`(`gateway:v1.9.3`·`envoy:distroless-v1.39.5`) | shutdown-manager 는 상류에서 컨트롤러와 같은 `envoyproxy/gateway` 이미지라 lock 줄은 둘이다. Envoy 태그 = EG v1.9.3 의 `DefaultEnvoyProxyImage`(index `sha256:9d84a586…` 의 amd64 항목) |
+
+| values.env 키(전부 선택) | 기본 | 뜻 |
+|---|---|---|
+| `GATEWAY_PROXY_PROTOCOL` | `required` | `optional` 은 **컷오버 중에만**(2g-4) — CTP `proxyProtocol.optional` 한 칸이 이 값에서 나온다. 렌더가 stderr 에 알린다 |
+| `PORTAL_TLS_SECRET` | `dms-portal-tls` | Gateway 인증서 Secret(ns dms, kubernetes.io/tls, SAN = 포탈 FQDN + VIP-A — 보안 S3). install.sh 의 존재 게이트는 아직 `dms-portal-tls` 고정(⑦) |
+| `GATEWAY_ENVOY_CPU_REQUEST`·`GATEWAY_ENVOY_MEMORY_REQUEST` | `100m`·`256Mi` | Envoy requests(limits 1/2Gi 는 base — **넘으면 렌더 FAIL**: EnvoyProxy CRD 는 받아도 EG 가 만드는 DaemonSet 을 apiserver 가 거절해 Gateway 가 뜨지 않는다). 테스트베드 50m/128Mi(설계 10) |
+
+`PORTAL_DOMAIN`·`PORTAL_VIP`(prod 필수 키)는 매니페스트에 들어가지 않는다 — `render.env` 로만 가서 인증서 SAN 과 S12 `curl --resolve` 의 기준이 된다.
+렌더러 출력: `GATEWAY: <렌더>/addons/gateway-api` → `…/addons/envoy-gateway` → `…/platform/gateway`(S8 순서), `render.env` 의 `GATEWAY_LAYERS`·
+`ENVOY_GATEWAY_REF`·`ENVOY_PROXY_REF`·`GATEWAY_PROXY_PROTOCOL`·`PORTAL_TLS_SECRET`.
+
+### 2g-2. 마스터 sysctl(S0-5, 사이트 IaC — 1회)
+
+Envoy 는 **비 root(65532)** 다(EG 기본값 — DMS 는 바꾸지 않는다, 아래). k8s 는 ambient capability 를 주지 않아
+`NET_BIND_SERVICE` 로는 443 bind 가 안 된다(kubernetes#56374) — 마스터 3대의 호스트 netns 에서 비특권 포트 하한을 443 으로 내린다(설계 4-3 (i)).
+hostNetwork 파드에는 `net.*` sysctl 을 줄 수 없어 호스트에 둔다. 부작용: 마스터 호스트의 비 root 프로세스도 443~1023 을 bind 할 수 있다(마스터에
+일반 사용자가 없다는 전제).
+
+```bash
+# 마스터 3대 각각(root):
+printf 'net.ipv4.ip_unprivileged_port_start = 443\n' > /etc/sysctl.d/90-dms-envoy.conf
+sysctl --system >/dev/null
+sysctl -n net.ipv4.ip_unprivileged_port_start          # 443
+ss -ltnH '( sport = :443 or sport = :19000 or sport = :19001 or sport = :19002 or sport = :19003 )'   # 비어 있어야 한다(K6)
+ss -xlH | grep -c envoy_domain_socket       # 0 이 아니면 호스트 netns 에 다른 Envoy(예: cilium-envoy)가 있다 — --disable-hot-restart 라 무해(아래)
+```
+
+- 빠뜨리면 **조용히** 그 마스터만 빠진다(2026-11-03 ⑥ 리뷰 1): Envoy 는 동적 리스너의 bind 실패를 거절(NACK)만 하고 기동을 계속해 파드는 Ready,
+  Gateway 는 `Programmed: True`(EG 는 DaemonSet 의 가용 수만 본다)인데 그 마스터 :443 이 LISTEN 이 아니다 — Envoy 로그에 `cannot bind '0.0.0.0:443':
+  Permission denied`·`config rejected`, Avi 헬스가 그 마스터를 뺀다. EG 는 같은 설정을 다시 내려 주지 않으므로 **sysctl 을 고친 뒤 그 노드의 Envoy
+  파드를 지운다**(`kubectl --context C -n envoy-gateway-system delete pod <그 마스터의 envoy 파드>` — DaemonSet 이 다시 띄운다). 그래서 2g-3 은
+  적용 전에 마스터 전부의 sysctl 을, 적용 뒤 마스터마다 :443 을 본다.
+- 「root 로 올려 해결」하지 않는다. EG 가 막아 주는 것은 아니다 — EnvoyProxy `container.securityContext`(와 DS patch)는 기본값 위에 strategic merge 로
+  덮여 `runAsUser: 0` 도 들어간다(상류 `applySecurityContextOverrides` — 권한 강제는 PSA 등 외부 정책 몫). 쓰지 않는 이유는 설계 4-3 의 선택((i) 권고)·
+  비 root 원칙·S1 승인 범위이고, 지키는 것은 이 규약과 계약 테스트(EnvoyProxy 에 securityContext·runAsUser 0건)다. sysctl 을 받을 수 없는 사이트만
+  설계 4-3 (ii)(root + NET_BIND_SERVICE)를 따로 검토한다.
+- hot restart 는 끈다(EnvoyProxy `extraArgs: [--disable-hot-restart]`, 2026-11-03 ⑥ 리뷰 1): EG 가 `--base-id` 를 넘기지 않아 Envoy 는 base-id 0 의
+  추상 유닉스 소켓(`@envoy_domain_socket_*_0`)을 bind 하는데, 추상 소켓은 netns 단위라 hostNetwork 파드는 호스트 것과 겹친다. Cilium 의
+  cilium-envoy DaemonSet(hostNetwork, `--base-id 0`)이 이미 잡고 있으면 늦게 뜬 쪽이 `unable to bind domain socket with base_id=0` 으로 죽는다.
+- 마스터 호스트에 함께 열리는 포트: :443(리스너)·:19001(stats)·:19003(readiness)·:19002(shutdown-manager)·127.0.0.1:19000(admin) — 비어 있어야 한다.
+- 클러스터 도메인이 `cluster.local` 이 아니면 EG 컨트롤러 env `KUBERNETES_CLUSTER_DOMAIN`(상류 그대로 cluster.local)이 xDS 주소
+  `envoy-gateway.envoy-gateway-system.svc.<도메인>.` 을 틀리게 만든다 — `kubectl --context C -n kube-system get cm coredns -o yaml | grep kubernetes`
+  로 확인한다(다르면 지금은 렌더 후 패치 — 값 키는 ⑦).
+
+### 2g-3. 설치(S8, A 경로) — Gateway API → EG → 대기 → platform/gateway
+
+먼저 감지한다(⑦ 의 상태 기계 전까지는 손으로 — 설계 8-2):
+
+```bash
+kubectl --context C get crd gateways.gateway.networking.k8s.io \
+  -o 'jsonpath={.metadata.annotations.gateway\.networking\.k8s\.io/bundle-version} {.metadata.annotations.gateway\.networking\.k8s\.io/channel}{"\n"}'
+#   없음 → A. v1.6.x 이상 → 재사용(standard 든 experimental 이든 — DMS 는 standard 필드만 쓴다). 더 낮으면 X(소유자에게 올려 달라고)
+kubectl --context C get crd envoyproxies.gateway.envoyproxy.io; kubectl --context C get deploy -A -l app.kubernetes.io/name=gateway-helm \
+  -o 'custom-columns=NS:.metadata.namespace,NAME:.metadata.name,BY:.metadata.labels.app\.kubernetes\.io/managed-by,V:.metadata.labels.dms\.io/addon-version,IMG:.spec.template.spec.containers[0].image'
+#   없음 → A · BY=dms-install(V 같음 → D=, 낮음 → D< — 2g-6) · 남이 설치 → C(아래) · 둘 이상 → P(중단)
+```
+
+A 경로(S5 가 lock 의 `gateway:v1.9.3`·`envoy:distroless-v1.39.5` 를 레지스트리에 push 한 뒤 — §2e-4 루프가 lock 전부를 돈다. **`REGISTRY_MODE=external`**
+이고 `REGISTRY_CLUSTER_IP` 가 없으면 EG 컨트롤러·certgen·Envoy·shutdown-manager 이미지도 사이트 레지스트리(`render.env` 의 `ADDON_REGISTRY` = `REGISTRY`)
+에서 받는다 — §2e-4 의 lock push 루프를 `IP:PORT` 대신 그 `REGISTRY` 로 돌리거나 그 레지스트리에 미리 미러한다(§2f-3 과 같다, 2026-11-03 ⑥ 리뷰 2).
+install.sh 1b 의 push 는 DMS 이미지·buildah 뿐이다):
+
+```bash
+sh deploy/render.sh <site> --context C
+RD=deploy/.rendered/<site>
+# PriorityClass dms-addon-critical — in-cluster 면 S4(§2e-3)가 이미 만들었다. external 사이트는 §2e 를 따르지 않으므로 여기서(§2f-3 과 같은 줄 —
+# 없으면 EG 컨트롤러 파드가 admission 에서 거절된다):
+kubectl --context C get priorityclass dms-addon-critical || kubectl --context C apply --server-side --field-manager=dms-install -k $RD/platform/priorityclass
+# 1) Gateway API CRD(standard)
+kubectl --context C apply --server-side --field-manager=dms-install --dry-run=server -k $RD/addons/gateway-api
+kubectl --context C apply --server-side --field-manager=dms-install -k $RD/addons/gateway-api
+kubectl --context C wait --for=condition=Established crd/gateways.gateway.networking.k8s.io crd/httproutes.gateway.networking.k8s.io --timeout=60s
+# 2) Envoy Gateway — 첫 설치면 네임스페이스부터(server dry-run 은 묶음 안의 Namespace 를 저장하지 않는다 — 2f-3 과 같은 이유)
+sh deploy/overlays/guard-images.sh $RD/addons/envoy-gateway --context C   # 재적용이면 컨트롤러 이미지 변경(= EG 업그레이드)을 exit 3 으로 막는다
+kubectl --context C get ns envoy-gateway-system || kubectl --context C create namespace envoy-gateway-system
+kubectl --context C apply --server-side --field-manager=dms-install --dry-run=server -k $RD/addons/envoy-gateway
+kubectl --context C apply --server-side --field-manager=dms-install -k $RD/addons/envoy-gateway
+kubectl --context C -n envoy-gateway-system wait --for=condition=complete job/eg-gateway-helm-certgen --timeout=120s   # 끝나고 30초 뒤 TTL 로 지워진다(그 뒤면 NotFound)
+kubectl --context C -n envoy-gateway-system get secret envoy-gateway envoy   # certgen 이 만든 xDS mTLS 시크릿 — 있으면 된다
+kubectl --context C -n envoy-gateway-system rollout status deploy/envoy-gateway --timeout=180s
+kubectl --context C -n envoy-gateway-system get pods -o wide        # 컨트롤러 1개 워커, IMAGE 가 레지스트리 주소
+# 3) 포탈 입구 — Secret(S2) 먼저: kubectl --context C -n dms get secret <PORTAL_TLS_SECRET>
+#    마스터 **전부**의 sysctl(S0-5): ssh <마스터> 'sysctl -n net.ipv4.ip_unprivileged_port_start'   # 마스터마다 443 이하 — 하나라도 크면 멈춘다(2g-2)
+kubectl --context C apply --server-side --field-manager=dms-install --dry-run=server -k $RD/platform/gateway
+kubectl --context C apply --server-side --field-manager=dms-install -k $RD/platform/gateway
+kubectl --context C -n dms wait --for=condition=Programmed gateway/dms-portal --timeout=180s
+kubectl --context C -n envoy-gateway-system get ds,pods -o wide -l gateway.envoyproxy.io/owning-gateway-name=dms-portal   # 마스터마다 1개, Ready
+ssh <마스터> 'sudo ss -ltnpH "( sport = :443 )"'     # **마스터마다** envoy 가 LISTEN — Programmed·Ready 는 bind 실패를 못 잡는다(2g-2)
+```
+
+C 경로(남이 설치한 Gateway API·EG): CRD·컨트롤러는 건드리지 않고(`addons/*` 를 적용하지 않는다) `platform/gateway` 만 적용한다 — Gateway 의
+`infrastructure.parametersRef` 가 DMS EnvoyProxy 만 붙인다(GatewayClass 는 DMS 의 `dms`, 다른 GatewayClass 와 함께 있어도 된다). 확인할 것:
+그 EG 의 설정(`kubectl --context C -n <ns> get cm envoy-gateway-config -o yaml`)의 `gateway.controllerName` 이 `gateway.envoyproxy.io/gatewayclass-controller`
+인지(다르면 GatewayClass `dms` 가 Accepted 가 되지 않는다 — X), `runtimeFlags.disabled` 에 `EnvoyProxyPatch` 가 **없는지**(있으면 hostNetwork 패치가
+조용히 무시돼 마스터 :443 이 빈다 — X), `provider.kubernetes.watch` 가 dms 를 포함하는지, 그 컨트롤러 네임스페이스(= Envoy 파드가 뜨는 곳)의 PSA 가
+`privileged` 인지, 버전이 v1.9.x 인지(v1.8 은 2026-11-08 EOL — C!).
+
+| 증상 | 뜻 · 할 일 |
+|---|---|
+| 파드 Ready·Gateway `Programmed: True` 인데 그 마스터 :443 이 LISTEN 아님, Envoy 로그 `cannot bind '0.0.0.0:443': Permission denied`·`config rejected` | 그 마스터에 sysctl(2g-2)이 없다 — 고친 뒤 그 노드의 Envoy 파드를 지운다(EG 가 같은 설정을 다시 내려 주지 않는다) |
+| Envoy 파드 CrashLoop(또는 cilium-envoy 가 죽음), 로그 `unable to bind domain socket with base_id=0 … errno=98` | hot restart 추상 소켓 충돌 — EnvoyProxy 의 `extraArgs: [--disable-hot-restart]` 가 빠졌다(렌더 결과만 적용, 2g-2) |
+| Envoy 파드 Ready 가 안 되고 로그에 xDS `envoy-gateway.envoy-gateway-system.svc.cluster.local` 해석 실패 | `dnsPolicy: ClusterFirstWithHostNet` 이 안 들어갔다(EnvoyProxyPatch 꺼짐 — C) 또는 호스트 → ClusterIP 경로 불가(S6 와 같은 원인 — kube-proxy·방화벽) |
+| Envoy 파드가 `FailedCreate … violates PodSecurity "baseline": host namespaces (hostNetwork=true)` | ns `envoy-gateway-system` 에 PSA privileged 가 없다(C 경로 — 소유자에게) |
+| `ErrImagePull … docker.io/envoyproxy/…` | 렌더하지 않은 base·EG 기본값으로 갔다(자리표시자) — 렌더 결과만 적용 |
+| `ErrImagePull <레지스트리>/gateway:v1.9.3@sha256:…` 또는 `<레지스트리>/envoy:…@sha256:…` | lock 의 gateway·envoy 가 그 레지스트리에 없다 — in-cluster 면 S5(§2e-4) 누락, external 이면 위 A 경로 문단의 `REGISTRY` 로 lock push 누락(install.sh 1b 는 DMS 이미지만) |
+| EG 컨트롤러 Pending `no PriorityClass with name dms-addon-critical` | S4 의 PriorityClass 가 없다(external 사이트 — 위 `get … \|\| apply … platform/priorityclass`) |
+| HTTPRoute `ResolvedRefs: False`(BackendNotFound) | 앱(S11)이 아직 없다 — S11 뒤 저절로 풀린다 |
+
+### 2g-4. Avi VS-443·PROXY 컷오버(optional → required)
+
+Avi(설계 #5·#42·V2~V5 — 사이트 LB 담당 몫, DMS 는 값만 준다):
+
+| 항목 | 값 |
+|---|---|
+| VS | VIP-A **:443 하나**(80 VS 없음 — 「80 불가 = 정상」), L4 TCP(TLS 는 Envoy 가 종단 — Avi 는 바이트만 넘긴다) |
+| 애플리케이션 프로필 | **443 전용** L4 프로필, PROXY protocol **v2** 켬. 6443(apiserver) VS 의 프로필과 공유하지 않는다(공용 프로필을 고치면 6443 에도 PROXY 가 붙어 apiserver 가 끊긴다 — 위험 15) |
+| 풀 | 마스터 3대 **:443**(노드 IP) |
+| 헬스 모니터 | TCP 443(연결만) — HTTPS 모니터는 PROXY 헤더 없이 말해 **required 에서 실패**한다. HTTP 모니터를 쓰려면 모니터에도 PROXY 를 싣는 기능이 필요하다(제품 확인) |
+| 유휴 타임아웃(V5) | 3600초 이상(HTTPRoute 3600s 와 맞춘다 — 짧으면 긴 다운로드를 Avi 가 먼저 끊는다) |
+| 방화벽(V4) | 마스터 :443 은 **Avi SE 대역에서만** 받는다 — PROXY 헤더를 스스로 실은 위조 연결을 막는 것은 이 규칙이다 |
+
+컷오버(기존 입구에서 옮길 때 — 첫 설치면 처음부터 `required`):
+
+1. `GATEWAY_PROXY_PROTOCOL=optional` 로 렌더 → `platform/gateway` SSA. PROXY 없는 연결(직접 접속·전환 전 LB)도 받는다 — 원 IP 자리에 직접 피어가 남는다.
+2. Avi VS-443(PROXY v2) 개통 → DNS 를 VIP-A 로. 접근 로그의 `client_ip` 가 사용자 PC, `peer` 가 SE 대역인지 본다(2g-5).
+3. 옛 경로가 비면 `GATEWAY_PROXY_PROTOCOL=required`(기본 — 줄을 지워도 된다) → 렌더 → SSA. 직접 접속(PROXY 없음)이 연결 단계에서 끊기는지 본다.
+   optional 로 오래 두지 않는다 — 「PROXY 가 빠진 LB 설정」이 조용히 통과한다(필수면 접속 실패로 바로 드러난다).
+- 되돌림: 1단계 값으로 다시 렌더·SSA(Envoy 는 설정만 바뀌고 재기동하지 않는다). Avi 를 못 쓰게 되면(PROXY 옵션 없음) 원 IP 자리에 SE IP 가 남는다 —
+  원 IP 별 경보를 끄고 Avi VS 로그를 원 IP 출처로 쓴다(설계 4-3, V5).
+
+### 2g-5. 검증(S12)·원 IP
+
+```bash
+kubectl --context C -n dms get gateway dms-portal                     # PROGRAMMED True, ADDRESS = Envoy Service ClusterIP
+kubectl --context C -n dms get httproute,clienttrafficpolicy,backendtrafficpolicy dms-portal -o yaml | grep -A3 'type: Accepted'
+ssh <마스터> 'sudo ss -ltnp "( sport = :443 )"'                         # **마스터마다** envoy, users:(("envoy",…)) — 비 root(65532)
+curl -sS --resolve <FQDN>:443:<VIP-A> --cacert <사내 CA> https://<FQDN>/readyz           # 200
+curl -sS -o /dev/null -w '%{http_code}\n' -X POST --resolve <FQDN>:443:<VIP-A> --cacert <사내 CA> \
+  -H 'Content-Type: application/json' --data-binary @<21MiB 파일> https://<FQDN>/api/auth/login    # 413(Envoy) — 19MiB 는 413 이 아니다(앱이 답한다)
+curl -sS -o /dev/null --limit-rate 50k -w '%{http_code} %{time_total}\n' --resolve <FQDN>:443:<VIP-A> --cacert <사내 CA> \
+  https://<FQDN>/assets/<index-*.js>                                   # 200 이고 15초를 넘겨도 끊기지 않는다(라우트 기본 15초였던 자리 — 3600s)
+curl -sS -m 5 http://<FQDN>/ ; echo "exit=$?"                            # 연결 실패가 **정상**(80 리스너·80 VS 없음 — 「80 불가 = 정상」)
+# 접근 로그는 라벨로 **마스터 전부**를 읽는다 — `logs ds/<이름>` 은 파드 하나만 고른다(--all-pods=false; Avi 가 요청을 셋에 나눈다, 2026-11-03 ⑥ 리뷰 2)
+kubectl --context C -n envoy-gateway-system logs -l gateway.envoyproxy.io/owning-gateway-name=dms-portal -c envoy --prefix --tail=5   # JSON 한 줄/요청 — client_ip·peer·x_forwarded_for
+kubectl --context C -n envoy-gateway-system logs -l gateway.envoyproxy.io/owning-gateway-name=dms-portal -c envoy --since=1h | grep -c '"response_flags":"UC"'   # 0(상류 유휴 경쟁 — 2g-1 BTP)
+```
+
+- **원 IP**: 접근 로그 `client_ip` = PROXY v2 헤더의 출발지(사용자 PC), `peer` = 실제 TCP 피어(Avi SE), `x_forwarded_for` 의 마지막 항목 = client_ip
+  (예외: PROXY 출발지가 루프백이면 Envoy 는 자기 주소를 덧붙인다 — `conn_manager_utility.cc` appendXff. LB 흉내에 127.0.0.1 로 붙는 시험에서만 생긴다).
+  앱 이벤트(보안 이벤트 payload `{client_ip, peer}`)의 client_ip 도 같은 값이다(앱은 XFF 마지막 항목 → 소켓 피어 — `src/dms/api/auth.py`; 앱의
+  `peer` 는 SE 가 아니라 Envoy 가 뜬 마스터의 호스트 쪽 출발 주소다 — 이름만 같다. Cilium 이면 그 노드의 cilium_host(CiliumInternalIP, 예: dmsk8s cp1
+  10.245.0.129)이고 노드 IP 가 아닐 수 있다 — 기록 전용 칸이라 노드 IP 와 대조하지 않는다). 위조
+  `X-Forwarded-For: 7.7.7.7`·`X-Real-IP: 6.6.6.6` 을 실은 요청도 client_ip 는 실제 PC 다(XFF 앞에 남을 뿐 마지막이 아니고, X-Real-IP 는 Envoy 가 지운다).
+  접근 로그 수집처·보존은 K15·보안 S2. 경로는 쿼리를 뺀다.
+- **80 불가 = 정상**: HTTP 로 들어오는 리디렉트가 없다(옛 Ingress 의 force-ssl-redirect 자리) — 사용자 안내는 `https://<FQDN>` 하나.
+- e2e(실 브라우저)를 이 경로로 한 번 돈다 — EG 의 경로 정규화(`//` 합침·`%2F` 해제 후 리디렉트)가 옛 nginx 와 다르다(앱 경로 조각에 `/` 가 들어가는
+  곳은 없다 — 2026-11-03 확인).
+
+### 2g-6. 업그레이드·운영
+
+| 경우 | 절차 |
+|---|---|
+| EG minor/patch | CNPG 와 같은 점검 창(#30·12 위험 6). ① `deploy/addons/envoy-gateway/<새 v>/`(상류 `install.yaml`·SOURCE·sha256 + 패치 층 — 라벨·자리표시자 태그) · 새 EG 의 go.mod 를 보고 `deploy/addons/gateway-api/<v>/` · `deploy/versions.env` · `deploy/images.lock`(`images-lock.py resolve gateway:<v> docker.io/envoyproxy/gateway:<v>` · 새 EG 의 `DefaultEnvoyProxyImage` 태그로 envoy 줄)을 **한 커밋**에서, 옛 디렉터리는 지운다 ② push(S5) ③ 테스트베드 리허설 ④ `addons/gateway-api` SSA → 남은 `job/eg-gateway-helm-certgen` 삭제(Job spec 은 바꿀 수 없다 — 보통 TTL 30초로 이미 없다) → `guard-images.sh $RD/addons/envoy-gateway` exit 3 → `ALLOW_IMAGE_CHANGE=1` 로 SSA → rollout → `platform/gateway` SSA(Envoy·shutdown-manager 이미지 → DaemonSet 이 마스터마다 차례로 교체 — 그 마스터가 잠깐 빠지고 Avi 헬스가 거른다) |
+| EG 설정만 바뀜 | `envoy-gateway-config` 는 기동 때만 읽힌다 — SSA 뒤 `kubectl --context C -n envoy-gateway-system rollout restart deploy/envoy-gateway` |
+| 인증서 교체 | 같은 이름의 Secret 을 바꾸면 EG 가 Envoy 에 다시 내려 준다(재기동 없음) |
+| EG 컨트롤러 사망 | Envoy 는 마지막 설정으로 계속 돈다(설계 2-1) — 설정 변경만 멈춘다 |
+| 남이 설치한 EG(C) | 업그레이드는 소유자 몫 — DMS 는 EOL·지원 범위를 경고만(⑦) |
+
+가드: `platform/gateway`·`addons/gateway-api` 에는 워크로드가 없어 `guard-images.sh` 대상이 아니다(exit 2) — Envoy 이미지 교체는 `render.env` 의
+`ENVOY_PROXY_REF` 변화로 본다. `addons/envoy-gateway` 는 컨트롤러 Deployment 를 `envoy-gateway-system` 에서 읽어 이미지가 바뀌면 exit 3.
+
+### 2g-7. k8s 테스트베드(`dmsk8s`) — T8(병행)과 이후 컷오버
+
+- 값: `deploy/overlays/testbed-k8s/values.env` — `GATEWAY_PROXY_PROTOCOL=required`(최종 값 — T8 의 optional 단계는 이 파일을 고치지 않고 `VALUES_ENV`
+  로 따로 렌더), `PORTAL_TLS_SECRET=dms-portal-tls`(Ingress 와 같은 인증서 — SAN dms-k8s.local·10.20.20.101·Tailscale IP), Envoy 50m/128Mi. 이미지는
+  `10.112.0.50:5000`(k8s-w1 이 lock 으로 push). cp1 sysctl 은 testbed IaC(`/etc/sysctl.d/90-dms-envoy.conf` — 2026-11-03 실측 1024).
+- T8: Gateway·Envoy(cp1 hostNetwork :443)를 **병행**으로 띄운다 — 포탈 사용자 경로(MetalLB VIP 10.20.20.101 → ingress-nginx, 호스트 릴레이
+  luminous :8443 → VIP)는 그대로다. Avi VS-443 흉내는 luminous 의 haproxy(`send-proxy-v2` → 10.10.10.20:443, 예비 포트)이고 시험은 그 포트로만
+  한다(비 root 443 bind·xDS·413·15초+ 스트림·PROXY optional/필수·X-Real-IP 제거·원 IP). 런북은 메인 세션 몫.
+- 이후 컷오버(별도 승인 — MetalLB 는 되돌림용으로 남긴다): ① haproxy 를 **먼저** 띄워(상주는 testbed IaC — host-net 유닛 곁) luminous 의 외부 주소
+  :8443 에 bind 해 두고 — DNAT 가 남아 있어도 bind 는 된다 — 그다음 `/etc/default/dms-testbed-hostnet` 의 `HOSTNET_RELAYS` 에서
+  `8443=10.20.20.101:443` 을 빼고 유닛을 재시작한다(DNAT 가 PREROUTING·OUTPUT 에서 소켓보다 먼저 가로채므로 규칙이 남아 있으면 haproxy 에 닿지 않는다;
+  순서를 바꾸면 그 사이 :8443 이 거부된다. 재시작은 ExecStop 이 태그 규칙을 전부 지웠다 넣으므로 ssc(dms.local) 릴레이도 몇 초 끊긴다 — 2026-11-03 ⑥
+  리뷰 2) ② `https://dms-k8s.local:8443` 이 Gateway 경로가 된다(원 IP = 실제 PC — 지금의 DNAT+MASQUERADE 경로는 원 IP 가 호스트 브리지 주소
+  10.10.10.1 이다) ③ 소크 뒤 testbed-k8s 오버레이도 prod 처럼 `patch-ingress.yaml`·`patch-metallb.yaml` 을 빼고 `patch-remove-ingress.yaml` 을
+  싣는다(테스트 `test_testbed_k8s_overlay.py` 의 VIP·호스트 단언을 같이 바꾼다) — ingress-nginx·MetalLB 자체는 testbed IaC 가 걷는다. 되돌림 =
+  `HOSTNET_RELAYS` 원복 + 유닛 재시작(DNAT 가 먼저 가로채 사용자 경로가 VIP 로 돌아간다) → 그 뒤 haproxy 중지(오버레이를 바꾸기 전까지는 Ingress 가
+  그대로 살아 있다). 상태 확인은 `dms-testbed-hostnet status` 에 같은 `HOSTNET_RELAYS` 를 env 로 준다 — 스크립트는 `/etc/default` 를 읽지 않는다(유닛의
+  `EnvironmentFile` 만), env 없이 돌리면 정상 컷오버에서도 8443 MISS 다.
+
 ## 3. Apply manifests, in order
 
 ```bash
@@ -1596,7 +1807,8 @@ capabilities add/drop — 컨테이너 값이 없으면 파드 수준)를 이미
 
 사내 클러스터 배포는 **`deploy/overlays/prod`** 를 쓴다. 테스트베드 매니페스트를
 base 로 두고 사이트별 값(레지스트리·태그·공용 디렉터리 `SHARED_DIR`(§2d)·이메일 도메인·포탈
-도메인·VIP)만 오버레이에서 덮는다 -- 자리표시자를 채우고 `kubectl apply -k`.
+도메인·VIP)만 오버레이에서 덮는다 -- 자리표시자를 채우고 `kubectl apply -k`. **prod 의 포탈 입구는 §2g(Envoy Gateway)** 다(2026-11-03 ⑥ —
+prod 오버레이가 base 의 Ingress·MetalLB 풀을 지운다; 아래 §10 의 nginx ingress + MetalLB 는 testbed-k8s 의 지금 입구).
 전제조건·값 표·Secret/TLS 생성·적용 순서는 **`deploy/overlays/prod/README.md`**.
 이 §(테스트베드 개별 파일 apply)는 그대로 유효하다 -- 오버레이는 base 를 건드리지
 않는다.
@@ -1604,6 +1816,9 @@ base 로 두고 사이트별 값(레지스트리·태그·공용 디렉터리 `S
 ---
 
 ## 10. 포탈 HTTPS 노출 — nginx ingress + TLS + 공인 VIP(L2) (2026-08-19 완증)
+
+> 2026-11-03 ⑥: **prod 는 이 절을 쓰지 않는다** — 입구는 §2g(Avi L4 + PROXY v2 → 마스터 :443 의 Envoy Gateway). 이 절은 테스트베드(testbed-k8s —
+> T8 동안 Gateway 와 병행, §2g-7)의 지금 입구다.
 
 경로: `브라우저 → https://dms.local (공인 VIP 10.20.20.100) → 상위 라우팅이
 노드 세그먼트로 배달 → MetalLB L2 가 ARP 응답(선출 노드) → ingress-nginx(TLS

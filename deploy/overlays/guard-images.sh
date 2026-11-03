@@ -30,6 +30,9 @@
 # app.kubernetes.io/managed-by: dms-install)이면 통과 메시지의 다음 명령이 SSA(--server-side --field-manager=dms-install)다 — 앱 오버레이는
 # 지금처럼 client-side apply(포탈 릴리스가 strategic-merge 로 image 를 바꾼다, 설계 8-2). 컨텍스트 거부(exit 4)의 「맞는 짝」 안내도 같은
 # 구분을 따르되, 렌더 전이라 디렉터리 배치(부모가 platform·addons)로 가른다. 워크로드가 없는 층(priorityclass)은 가드 대상이 아니다(exit 2).
+# 입구(2026-11-03 ⑥): addons/envoy-gateway 는 컨트롤러 Deployment 를 그 네임스페이스(envoy-gateway-system)에서 읽는다(⑤ 의 네임스페이스 추출
+# 그대로). platform/gateway 와 addons/gateway-api 에는 워크로드가 없다(exit 2 — Envoy DaemonSet 은 EG 가 EnvoyProxy 로 만든다. Envoy 이미지
+# 교체는 렌더 결과의 ENVOY_PROXY_REF 로 본다 — deploy/README §2g-6).
 #
 # 사용: sh deploy/overlays/guard-images.sh <오버레이 디렉터리> [--allow-image-change] [--allow-hostpath-change] [--context <ctx>]
 #       KUBE_CONTEXT=<ctx> 환경변수도 같다(인자가 이긴다).
@@ -159,6 +162,12 @@ if [ -n "$changes" ]; then
       # 2026-11-03 ⑤: 오퍼레이터 이미지 = OPERATOR_IMAGE_NAME(PG 인스턴스 파드의 bootstrap 이미지)이라 바뀌면 인스턴스가 롤링(+ switchover)된다.
       echo "[guard] CNPG 오퍼레이터 교체 = CNPG 업그레이드(설계 v6 6-5, deploy/README §2f-6): minor 는 하나씩, 테스트베드 리허설·직전 덤프 뒤, 새 이미지를" >&2
       echo "[guard] 레지스트리에 push(S5) → ALLOW_IMAGE_CHANGE=1 로 SSA → 오퍼레이터 rollout → PG 인스턴스 롤링·switchover 완료 대기(그동안 수 초 500)." >&2 ;;
+    esac
+    case "$changes" in *"Deployment/envoy-gateway:"*)
+      # 2026-11-03 ⑥: EG 컨트롤러 = certgen Job·shutdown-manager 와 같은 이미지. 컨트롤러가 죽어 있어도 Envoy 는 마지막 설정으로 돈다(설계 2-1).
+      echo "[guard] EG 컨트롤러 교체 = Envoy Gateway 업그레이드(deploy/README §2g-6): CNPG 와 같은 점검 창에서, 새 EG 의 go.mod 에 맞춘 Gateway API 층을" >&2
+      echo "[guard] 먼저 SSA → 새 이미지(gateway·envoy)를 레지스트리에 push(S5) → 남은 certgen Job 을 지우고(Job spec 은 바꿀 수 없다) ALLOW_IMAGE_CHANGE=1 로 SSA →" >&2
+      echo "[guard] rollout → platform/gateway SSA(Envoy·shutdown-manager 이미지 — 마스터마다 Envoy 가 차례로 잠깐 빠진다, Avi 헬스가 거른다)." >&2 ;;
     esac
     exit 3
   fi

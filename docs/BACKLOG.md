@@ -476,6 +476,50 @@ CHANGELOG 「⑤ DB(CNPG)」, 설계 v6 6·8-1(S2·S9·S10·S12)·8-2·10 T6/T6'
 - 📝 **testbed-k8s 의 api·controller 는 워커에 남는다**(설계 10 — cp1 메모리) — prod 의 마스터 배치(`patch-placement.yaml`)는 테스트베드에서
   실증되지 않는다(테스트베드로 증명할 수 없는 것: 마스터 1대 장애·실제 마스터 3대의 PG anti-affinity).
 
+### ⑥ 입구(Envoy Gateway) 후속 — 2026-11-03
+
+CHANGELOG 「⑥ 입구(Envoy Gateway)」, 설계 v6 #13~#15·4-3·8-1(S0-5·S8·S12)·8-2·10 T8, deploy/README §2g.
+
+- 🔧 **설치기 연결(⑦) — 지금 install.sh 는 prod 에서 쓸 수 없다**(설계 12 위험 19):
+  - **MetalLB·ingress 게이트 삭제**: 1단계의 `metallb-system` 네임스페이스·IngressClass `nginx` 검사(`install.sh` 「애드온: Volcano · MetalLB ·
+    ingress-nginx」)와 6단계 `ingress-nginx-controller` 의 `metallb.io/address-pool` 어노테이션을 지운다(prod 앱 렌더에는 Ingress·풀이 이미 없다).
+    `preflight-cluster.sh` 의 MetalLB·VIP 충돌 검사(`PORTAL_VIP` env)도 같이 — VIP-A 는 Avi 소유다.
+  - **S8 감지 상태 기계(8-2 Gateway API·EG 행)**: Gateway API = CRD `gateways.gateway.networking.k8s.io` 의 `bundle-version`·`channel`(v1.6.x 미만이면 X,
+    없으면 A); EG = CRD `envoyproxies.gateway.envoyproxy.io`·Deployment `envoy-gateway`(라벨 `app.kubernetes.io/name=gateway-helm`·`dms.io/addon-version`)·
+    설정 ConfigMap 의 `gateway.controllerName`·`provider.kubernetes.watch`·`runtimeFlags`(EnvoyProxyPatch 가 `disabled` 에 있으면 X — enabled 에도
+    있어도 disabled 가 이긴다, hostNetwork 패치가 조용히 무시된다)·컨트롤러 ns 의 PSA(hostNetwork 허용 아니면 X)·버전(v1.9.x, v1.8 이하는 C! — 2026-11-08 EOL). A 면 gateway-api SSA → CRD
+    Established → (ns 먼저) envoy-gateway SSA → certgen 완료 → rollout → (마스터 전부 sysctl ≤ 443 재확인) → `platform/gateway` SSA → Gateway
+    `Programmed` → 마스터마다 :443 LISTEN. C 면 `platform/gateway` 만
+    (README §2g-3). 첫 설치 server dry-run 은 `envoy-gateway-system` NotFound(⑤ 의 cnpg-system 과 같은 함정).
+  - **S1 점검**: 마스터 sysctl `net.ipv4.ip_unprivileged_port_start` ≤ 443(노드 셸 체크리스트), 마스터 :443·:19000~19003 비어 있음(K6), 클러스터
+    도메인 = `cluster.local`(EG 컨트롤러 env `KUBERNETES_CLUSTER_DOMAIN` — 다르면 xDS 주소가 틀린다; 다른 사이트가 나오면 values 키로), admission
+    정책이 hostNetwork 파드를 막는지(K11), 이름 충돌(클러스터 범위 GatewayClass `dms`, ns `envoy-gateway-system` 을 남이 쓰는지).
+  - **TLS 게이트**: install.sh 의 `dms-portal-tls` 존재 검사를 `render.env` 의 `PORTAL_TLS_SECRET` 으로.
+  - **external 레지스트리 사이트**(2026-11-03 ⑥ 리뷰 2): install.sh 1b 는 DMS 이미지만 push 한다 — lock **전부**(cloudnative-pg·postgresql·gateway·
+    envoy)를 `REGISTRY` 로 push 하거나 lock digest 가 그 레지스트리에 없으면 S8·S9 전에 멈추고, PriorityClass `dms-addon-critical` 을 `get || apply`
+    (지금은 손 절차 — README §2f-3·§2g-3, prod README 3b·3c).
+  - **S12 verify**: 성공 판정은 Gateway `Programmed` 가 아니라 **마스터마다** :443 이다(2026-11-03 ⑥ 리뷰 1 — sysctl 이 빠진 마스터에서도 Envoy 는
+    리스너 bind 실패를 NACK 만 하고 Ready, EG 의 Programmed 는 DaemonSet 가용 수만 본다; 한 마스터만 빠지면 나머지로 돌아 Avi 가 조용히 뺀다):
+    마스터마다 `ss -ltnH '( sport = :443 )'` 에 envoy, 또는 SE 대역 자리에서 마스터 IP 별로 PROXY v2 를 실은 TLS 연결(`curl --haproxy-protocol` 은
+    v1 이라 v2 를 내는 도구·haproxy 경유). 빠진 마스터면 sysctl 을 고친 뒤 그 노드의 Envoy 파드 삭제(EG 가 같은 설정을 다시 내려 주지 않는다).
+    그다음 `--resolve <PORTAL_DOMAIN>:443:<PORTAL_VIP>` readyz 200(render.env 의 두 값), 「80 불가 = 정상」 안내. 접근 로그를 볼 때는 라벨 셀렉터
+    `-l gateway.envoyproxy.io/owning-gateway-name=dms-portal`(마스터 전부 — `logs ds/` 는 파드 하나뿐, ⑥ 리뷰 2).
+  - `install.sh --upgrade-addon envoy-gateway`(README §2g-6): Gateway API 층 먼저 → certgen Job 삭제 → SSA → rollout → `platform/gateway`.
+- 🔧 **테스트베드 T8 실증**(dmsk8s — 메인 세션) — 설계 10 T8: cp1 sysctl(testbed IaC) → 이미지 push(k8s-w1) → A 경로 설치 → cp1 :443 비 root bind·
+  `ClusterFirstWithHostNet` xDS → luminous haproxy(`send-proxy-v2`)로 413(21MiB)·15초+ 스트림·PROXY optional/필수·X-Real-IP 제거·원 IP(이벤트·접근
+  로그)·cilium-envoy 와 공존(`--disable-hot-restart` — 두 Envoy 모두 Running, cilium-envoy 재시작 0)·상류 유휴 4s(5초 간격 폴링에서 접근 로그
+  `UC` 0건). 결과는 실증 뒤 CHANGELOG 에 기입하고 확정 명령을 README §2g-7 에 옮긴다. 테스트베드 컷오버(호스트 릴레이 :8443 → haproxy, MetalLB 는
+  되돌림용)는 별도 승인(README §2g-7).
+- 📝 **T8 확인 대기(추정으로 둔 것)** — EG v1.9.3 이 Gateway 쪽 `infrastructure.parametersRef`(ns dms 의 EnvoyProxy)의 DaemonSet 패치(hostNetwork·
+  dnsPolicy)를 컨트롤러 ns 의 DS 에 그대로 적용하는지(소스상 MergeWithPatch — securityContext 도 기본값 위에 strategic merge 라 root 를 막지 않는다:
+  root 금지는 DMS 계약 테스트 몫), 기본 EnvoyProxy(EG 설정 `envoyProxy`)가
+  더 구체적인 EnvoyProxy 에 통째로 대체되는지(mergeType 없음), 버퍼 필터와 `perConnectionBufferLimitBytes: 32768`(EG 기본)이 19MiB 본문을 막지 않는지
+  (버퍼 필터가 decoder 버퍼 한도를 올린다 — 막히면 CTP `connection.bufferLimit`), DaemonSet 롤링 중 그 마스터의 공백 길이.
+- 📝 **설계 ⑥ 의 선택·뒤로 미룬 것** — Envoy 접근 로그 수집처·보존(K15·보안 S2 — 지금은 stdout), Envoy stats(:19001)를 마스터 호스트에 여는 것
+  (EG 기본 — 끄려면 EnvoyProxy telemetry.metrics.prometheus.disable, 지금은 그대로), C 경로에서 남의 EG 설정이 shutdown-manager 이미지를 docker.io 로
+  두어도 DMS EnvoyProxy 가 이미지를 명시하므로 영향 없음(확인만), 전역 rate limit(EG `rateLimit`) 미사용 — 쓰게 되면 ratelimit 이미지를 lock 에.
+  `platform/gateway`·`addons/gateway-api` 는 워크로드가 없어 `guard-images.sh` 대상이 아니다(Envoy 이미지 교체는 렌더 diff 로 본다).
+
 ## 2. 의도적 보류 (결정 — "미구현"이 아님)
 
 - ⏸ **회원가입 메일 인증** — 더미(email 기록만, 검증 없음, `routes_auth.py::signup`).

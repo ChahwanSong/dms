@@ -1,0 +1,27 @@
+# prod 는 MetalLB + ingress-nginx 를 쓰지 않는다(2026-11-03 ⑥, 설계 v6 #13·9 ⑥ — 「Ingress $patch: delete, prod MetalLB 삭제」). 포탈은 Avi
+# VS-443(L4, PROXY v2) → 마스터 ×3 :443 의 Envoy(deploy/platform/gateway — Gateway·HTTPRoute 가 옛 Ingress 의 자리)로 들어온다.
+#
+# 공용 base(deploy/k8s/46-ingress.yaml·47-metallb-public-pool.yaml)는 고치지 않는다 — testbed-k8s 는 T8 동안 그것을 그대로 쓰고(병행), main·
+# dms-ssc 라인과 같은 파일이다(설계 9 「공통 규칙」). 그래서 prod 렌더에서만 세 객체를 지운다: 지우지 않으면 MetalLB·ingress-nginx 가 없는 prod 에
+# Ingress(IngressClass nginx — 아무도 받지 않는다)와 metallb.io CR(CRD 가 없어 apply 가 「no matches for kind」로 **실패**)이 들어간다.
+# 계약: tests/test_prod_k8s_overlay.py(렌더에 Ingress·IPAddressPool·L2Advertisement·metallb 0건).
+$patch: delete
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: dms-portal
+  namespace: dms
+---
+$patch: delete
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: dms-public-pool
+  namespace: metallb-system
+---
+$patch: delete
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: dms-public-l2
+  namespace: metallb-system

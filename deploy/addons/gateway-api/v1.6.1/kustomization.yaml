@@ -1,0 +1,26 @@
+# 애드온 층(서드파티) — Gateway API CRD v1.6.1 **standard** 채널, DMS 가 설치할 때(설계 v6 8-2 A 경로·8-1 S8)의 층(2026-11-03 ⑥).
+#
+# standard-install.yaml 은 상류 원본 그대로다(SOURCE·standard-install.yaml.sha256 — 바이트 하나 고치지 않는다). 이 층이 더하는 것은 라벨
+# 둘뿐이다: managed-by dms-install + dms.io/addon-version(설계 8-2 A — ⑦ 감지기가 D=/D</D> 를 가른다). CRD 의 상류 어노테이션
+# gateway.networking.k8s.io/{bundle-version,channel}(감지의 원천 — 8-2 「bundle-version·channel」)은 그대로 둔다.
+# 이미지는 없다(CRD 10개 + safe-upgrades ValidatingAdmissionPolicy·Binding — 실험 채널 CRD 를 standard 위에 덮거나 v1.5 미만으로 내리는
+# 것을 apiserver 가 거절한다. 상류 그대로 둔다: Envoy Gateway 의 install.yaml 이 싣는 실험 채널 CRD 를 DMS 가 지운 이유와 같은 방향).
+#
+# 왜 v1.6.1 인가(2026-11-03 조회): Envoy Gateway v1.9.3 의 go.mod 가 sigs.k8s.io/gateway-api v1.6.1 이다(EG 가 그 스키마로 빌드됐다).
+# v1.6.2·v1.6.3 은 standard CRD 가 설명문·bundle-version 어노테이션만 다르다(conformance 테스트 수정 — SOURCE). v1.7.0(2026-10-29)은 EG v1.9
+# 가 따르지 않는 minor 라 쓰지 않는다. EG 를 올릴 때(6-5 와 같은 점검 창) 그 EG 의 go.mod 를 보고 같이 올린다.
+#
+# 적용(S8 첫째, SSA — 상류 CRD 는 client-side apply 의 last-applied annotation 크기 한도를 넘는다):
+#   sh deploy/render.sh <site> --context <ctx>
+#   kubectl --context <ctx> apply --server-side --field-manager=dms-install -k deploy/.rendered/<site>/addons/gateway-api
+# 계약: tests/test_gateway_contract.py(상류 바이트·라벨·standard 채널·이미지 0건).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - standard-install.yaml
+labels:
+  - pairs:
+      app.kubernetes.io/managed-by: dms-install
+      dms.io/addon-version: "v1.6.1"
+    includeSelectors: false
+    includeTemplates: false

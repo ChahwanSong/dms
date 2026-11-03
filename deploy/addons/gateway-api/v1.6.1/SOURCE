@@ -1,0 +1,24 @@
+Gateway API CRD — standard 채널, 상류 원본 그대로(2026-11-03 ⑥, 설계 v6 8-1 S8·8-2 「Gateway API CRD」 행)
+
+파일      standard-install.yaml (한 바이트도 고치지 않는다 — DMS 는 같은 디렉터리 kustomization.yaml 의 라벨 둘만 더한다)
+상류      https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.6.1/standard-install.yaml
+릴리스    v1.6.1 (published 2026-07-16T16:30:35Z, prerelease false)
+sha256    24d931f22abd8e40c973264319ead7cfa09d0fb7716b7ab1ee2ff174cb063a73  (같은 디렉터리의 standard-install.yaml.sha256 — sha256sum -c 형식)
+
+검증(S-1, 2026-11-03 인터넷 노드 역할의 개발 호스트에서):
+  1) GitHub releases API 의 자산 digest(서버가 계산한 값) = sha256:24d931f2…3a73 — 받은 파일의 sha256 과 같다.
+     상류는 이 매니페스트에 서명·체크섬 파일을 싣지 않는다(CNPG 의 sigstore 번들 같은 것이 없다) — 무결성 근거는 이 두 값의 일치다.
+  2) sha256sum -c standard-install.yaml.sha256 → OK
+  3) 내용: CRD 10개(backendtlspolicies·gatewayclasses·gateways·grpcroutes·httproutes·listenersets·referencegrants·tcproutes·tlsroutes·udproutes —
+     전부 gateway.networking.k8s.io/channel: standard, bundle-version: v1.6.1) + ValidatingAdmissionPolicy·Binding safe-upgrades. 이미지 0개.
+
+왜 v1.6.1(1.6.x 최신은 v1.6.3 — 2026-10-06):
+  - Envoy Gateway v1.9.3 의 go.mod 가 sigs.k8s.io/gateway-api v1.6.1(https://raw.githubusercontent.com/envoyproxy/gateway/v1.9.3/go.mod:77) — EG 가
+    빌드된 스키마와 같은 것을 둔다. EG install.yaml 이 싣는 Gateway API CRD 도 bundle-version v1.6.1(실험 채널 — DMS 는 그쪽을 지운다).
+  - v1.6.1 → v1.6.3 의 standard-install.yaml 차이는 bundle-version 어노테이션 5줄과 HTTPRequestRedirect 설명문 13줄뿐이다(스키마 변경 0 —
+    2026-11-03 diff). v1.6.2·v1.6.3 릴리스 노트도 conformance 테스트·빌드 수정뿐이다.
+  - v1.7.0(2026-10-29)은 EG v1.9 가 따르지 않는 minor 다.
+설계 8-2 호환 규칙: 클러스터에 이미 있으면 bundle-version 이 v1.6.x 이상인지 본다(낮으면 X). C 경로에서는 다시 적용하지 않는다(⑦ 감지기).
+
+새 버전: 이 디렉터리를 복사(deploy/addons/gateway-api/<v>/)해 원본·SOURCE·sha256 을 바꾸고, kustomization.yaml 의 dms.io/addon-version·
+deploy/versions.env 의 GATEWAY_API_VERSION 을 한 커밋에서(tests/test_gateway_contract.py 가 맞물림을 본다). EG 의 go.mod 를 먼저 본다.

@@ -1,0 +1,34 @@
+Envoy Gateway 설치 매니페스트 — 상류 원본 그대로(2026-11-03 ⑥, 설계 v6 #13·#14·4-3·8-1 S8·8-2 「Envoy Gateway」 행)
+
+파일      install.yaml (한 바이트도 고치지 않는다 — DMS 패치는 같은 디렉터리의 kustomization.yaml·patch-*.yaml 층)
+상류      https://github.com/envoyproxy/gateway/releases/download/v1.9.3/install.yaml
+릴리스    v1.9.3 (published 2026-10-26T09:58:38Z, prerelease false) — 1.9.x 의 최신(2026-11-03 GitHub releases API 조회. v1.10.0-rc.1 은
+          prerelease, v1.8.6 은 1.8 줄 — v1.8 EOL 2026-11-08)
+sha256    ac89b0b564e52c97c97a3f8b4d82bb594a0fbc810431fb2e6ffd91702aabebfb  (같은 디렉터리의 install.yaml.sha256 — sha256sum -c 형식)
+
+검증(S-1, 2026-11-03 인터넷 노드 역할의 개발 호스트에서):
+  1) GitHub releases API 의 자산 digest(서버가 계산한 값) = sha256:ac89b0b5…ebfb — 받은 파일의 sha256 과 같다. 상류는 install.yaml 에
+     서명 번들을 싣지 않는다 — 무결성 근거는 이 두 값의 일치다(CNPG 처럼 cosign 으로 볼 것이 없다).
+  2) sha256sum -c install.yaml.sha256 → OK
+  3) 호환 표(site/content/en/news/releases/matrix.md @v1.9.3): v1.9 = Envoy distroless-v1.39.x · Gateway API v1.6.1 · Kubernetes v1.33~v1.36 ·
+     EOL 2027/02/14. v1.9.3 릴리스 노트: Envoy v1.39.5(CVE-2026-35189 등), shutdown-manager /tmp emptyDir 수정 외 버그 수정 — 깨지는 변경 없음.
+
+내용(헬름 차트 gateway-helm 의 렌더): 네임스페이스 envoy-gateway-system · 컨트롤러 Deployment envoy-gateway(replicas 1, 65532, xDS :18000,
+웹훅 :9443) · Service · RBAC · EnvoyGateway 설정 ConfigMap envoy-gateway-config · certgen Job(xDS mTLS 시크릿을 만들고 topology-injector 웹훅의
+caBundle 을 채운다) · MutatingWebhookConfiguration topology-injector(failurePolicy Ignore) · EG CRD 8개(gateway.envoyproxy.io) ·
+**Gateway API 실험 채널 CRD 13개(x-k8s 3개 포함) + safe-upgrades VAP·Binding** — DMS 층이 이것들을 지운다(Gateway API 는 addons/gateway-api
+의 standard 채널이 원천, 설계 8-1 S8 「GW API → EG」). EG v1.9.3 컨트롤러는 TLSRoute 등 CRD 가 없으면 그 watch 를 건너뛰고
+(internal/provider/kubernetes/controller.go — checkCRD) x-k8s 자원은 보지 않는다 — standard 채널만으로 돈다.
+
+이미지(deploy/images.lock — linux/amd64 단일 매니페스트 digest, index 아님; python3 deploy/images-lock.py verify):
+  gateway:v1.9.3            ← docker.io/envoyproxy/gateway:v1.9.3            (index sha256:192fc9bd… 의 linux/amd64 항목)
+                              컨트롤러·certgen Job·**shutdown-manager**(상류 설정 shutdownManager.image 가 같은 이미지 — 줄 하나로 셋을 덮는다)
+  envoy:distroless-v1.39.5  ← docker.io/envoyproxy/envoy:distroless-v1.39.5  (index sha256:9d84a586… 의 linux/amd64 항목 — EG v1.9.3 의
+                              DefaultEnvoyProxyImage(api/v1alpha1/shared_types.go:30)가 이 index digest 를 고정한다)
+  상류 설정의 ratelimit 이미지(docker.io/envoyproxy/ratelimit:5ae0682e)는 DMS 설정에서 뺐다 — 전역 rate limit(EnvoyGateway rateLimit)을 쓰지
+  않아 그 Deployment 가 생기지 않는다. 쓰게 되면 이미지를 lock 에 더하고 rateLimitDeployment.container.image 를 같이 둔다.
+
+새 버전: 이 디렉터리를 복사(deploy/addons/envoy-gateway/<v>/)해 원본·SOURCE·sha256 을 바꾸고, kustomization.yaml 의 dms.io/addon-version·
+patch-*.yaml 의 자리표시자 태그·deploy/versions.env(ENVOY_GATEWAY_VERSION·ENVOY_GATEWAY_IMAGE·ENVOY_PROXY_IMAGE)·deploy/images.lock 을 한
+커밋에서(tests/test_gateway_contract.py 가 맞물림을 본다). Envoy 이미지는 새 EG 의 DefaultEnvoyProxyImage 태그를 따른다. Gateway API 는 새 EG 의
+go.mod 버전으로 addons/gateway-api 를 같이. 점검 창은 CNPG 와 묶는다(설계 #30·12 위험 6).

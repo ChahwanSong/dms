@@ -1,0 +1,8 @@
+# GatewayClass dms(2026-11-03 ⑥) — EG 기본 컨트롤러 이름. 설정(EnvoyProxy)은 Gateway 의 infrastructure.parametersRef 가 붙인다(kustomization.yaml).
+# 남이 설치한 EG(C 경로)가 controllerName 을 바꿨으면 이 클래스는 Accepted 가 되지 않는다 — 감지(⑦)가 그 EG 의 설정을 읽어 대조한다.
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: dms
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
