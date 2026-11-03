@@ -4,11 +4,21 @@
 
 커밋 뒤 회수(sweep_after_cancel, 2026-10-12): 취소는 잡을 읽고(스냅숏) → 그 ref 를 끝내고 → Cancelled 를 커밋한다. 그 사이
 stepper 가 다음 단계(파드·vcjob)를 제출하면 그 ref 는 스냅숏에 없어 아무도 끝내지 않았다(실행 vcjob 이 Cancelled 잡 밑에서
-끝까지 돌았다 -- pod_gc 는 파드만 치운다). stepper 는 set_phase_ref 커밋 **뒤** 상태를 다시 읽고(_reclaim_if_terminal),
-취소는 Cancelled 커밋 **뒤** ref 를 다시 읽는다 -- 커밋에는 전순서가 있으므로 둘 중 하나는 반드시 상대의 쓰기를 본다.
+끝까지 돌았다 -- pod_gc 는 파드만 치운다). stepper 는 ref 기록(data_jobs.record_phase_ref) 커밋 **뒤** 상태를 다시 읽고
+(_reclaim_if_terminal), 취소는 Cancelled 커밋 **뒤** ref 를 다시 읽는다 -- 커밋에는 전순서가 있으므로 둘 중 하나는 반드시 상대의
+쓰기를 본다.
+
+ref 없이 남은 객체(2026-11-03 B3 리뷰): stepper 가 create 에 성공하고 ref 기록이 끊긴 창(DB 장애조치)의 객체는 다음 틱의 같은
+제출이 채택해 잇는다(execution_volcano._create_or_adopt) -- 그 다음 틱보다 취소가 먼저면 phase_refs 어디에도 없어 위 두 읽기
+모두 못 본다(rm·sync 실행 vcjob 이 Cancelled 잡 밑에서 끝까지 돈다). 그래서 Cancelled 커밋 뒤 라벨(전체 job_id)로 한 번 더
+찾아 끝낸다(_sweep_unrecorded -- 어댑터 unrecorded_refs, stepper._reclaim_unrecorded 와 같은 조회).
 """
+import logging
+
 from ..domain import DataJobState, TERMINAL_DATA_JOB_STATES
 from ..execution import ExecutionError
+
+logger = logging.getLogger(__name__)
 
 
 def terminate_job(adapter, job) -> None:
@@ -41,4 +51,44 @@ def sweep_after_cancel(repos, adapter, snapshot) -> "str | None":
                     message=f"{exc.reason_code}: {phase} {ref} after cancel"[:500],
                     payload={"job_id": snapshot["job_id"], "phase": phase, "ref": ref, "after_cancel": True},
                     request_id=snapshot.get("request_id"))
+    _sweep_unrecorded(repos, adapter, snapshot, cur)
     return cur["state"]
+
+
+def _sweep_unrecorded(repos, adapter, snapshot, cur) -> None:
+    """Cancelled 로 커밋된 잡의 객체 중 phase_refs 에 없는 것(B3 창 -- 모듈 docstring)을 끝낸다. 비교 기준은 커밋 뒤 다시 읽은
+    phase_refs(cur) -- 그 사이 stepper 가 기록한 ref 는 위 루프가 이미 끝냈다. 잡은 이미 종단이라 그 잡의 살아 있는 객체는 전부
+    쓰레기다(라벨이 전체 job_id 라 남의 것은 안 걸린다). 조회·종료 실패는 되돌릴 수 없으니 숨기지 않고 terminate_failed(error)로
+    남기고 취소 응답은 막지 않는다(위 루프와 같은 원칙). 어댑터가 조회를 모르면(옛 가짜 어댑터) 아무것도 하지 않는다."""
+    fn = getattr(adapter, "unrecorded_refs", None)
+    if fn is None:
+        return
+    jid = snapshot["job_id"]
+    recorded = [ref for ref in (cur.get("phase_refs") or {}).values() if ref]
+    try:
+        refs = list(fn(jid, recorded) or [])
+    except Exception as exc:  # noqa: BLE001 -- 보강 조회가 이미 커밋된 취소의 응답을 깨면 안 된다
+        repos.observability.record_event(
+            component="api", severity="error", event_type="terminate_failed",
+            message=f"unrecorded sweep after cancel: {type(exc).__name__}: {exc}"[:500],
+            payload={"job_id": jid, "after_cancel": True}, request_id=snapshot.get("request_id"))
+        return
+    reclaimed = []
+    for ref in refs:
+        try:
+            adapter.terminate(ref)
+        except ExecutionError as exc:
+            repos.observability.record_event(
+                component="api", severity="error", event_type="terminate_failed",
+                message=f"{exc.reason_code}: unrecorded {ref} after cancel -- 추적 밖에서 돌 수 있음(확인·정리 필요)"[:500],
+                payload={"job_id": jid, "ref": ref, "after_cancel": True, "unrecorded": True},
+                request_id=snapshot.get("request_id"))
+        else:
+            logger.info("reclaimed untracked object after cancel job=%s ref=%s", jid, ref)
+            reclaimed.append(ref)
+    if reclaimed:
+        repos.observability.record_event(
+            component="api", severity="warning", event_type="unrecorded_reclaimed",
+            message=f"ref 기록 없이 남은 이 잡의 객체 회수(취소 뒤): {', '.join(reclaimed)}"[:500],
+            payload={"job_id": jid, "reclaimed": reclaimed, "after_cancel": True},
+            request_id=snapshot.get("request_id"))

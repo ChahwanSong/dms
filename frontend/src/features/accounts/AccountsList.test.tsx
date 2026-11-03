@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
@@ -88,7 +88,8 @@ test("the current user's own row has disabled controls", async () => {
 
   const otherRow = screen.getByText("admin", { selector: "td" }).closest("tr")!;
   expect(within(otherRow).getByRole("combobox", { name: "admin 역할" })).not.toBeDisabled();
-  expect(within(otherRow).getByRole("button")).not.toBeDisabled();
+  // 남의 행엔 비밀번호 재설정 버튼이 더 있다(2026-11-03) -- 상태 토글을 이름으로 집는다.
+  expect(within(otherRow).getByRole("button", { name: "비활성화" })).not.toBeDisabled();
 });
 
 test("shows the Korean message when a mutation returns 409 cannot_lock_self", async () => {
@@ -368,4 +369,232 @@ test("?create=<id>(k8s 연동 「사용자 권한」의 「계정 만들기」):
   await userEvent.click(within(dlg).getByRole("button", { name: "취소" }));
   await userEvent.click(screen.getByRole("button", { name: "계정 생성" }));
   expect(within(await screen.findByRole("dialog", { name: "계정 생성" })).getByLabelText("회사 아이디")).toHaveValue("");
+});
+
+
+// ---- 관리자 비밀번호 재설정(2026-11-03) -- 인증번호 전체 잠금 중에도 쓰는 구제 경로 ----------------------------------------
+
+const RESET_ROWS = [
+  { username: "admin", role: "admin", email: null, disabled: 0, created_at: "2026-08-05T00:00:00Z" },
+  { username: "bob", role: "user", email: "bob@corp.example", disabled: 0, created_at: "2026-08-05T00:00:00Z" },
+];
+
+async function openReset(name: string) {
+  await screen.findByText(name, { selector: "td" });
+  await userEvent.click(within(rowOf(name)).getByRole("button", { name: `${name} 비밀번호 재설정` }));
+  return screen.findByRole("dialog", { name: "비밀번호 재설정" });
+}
+
+test("비밀번호 재설정: 남의 행에만 버튼이 있다(자기 계정은 셀프 재설정)", async () => {
+  stubMe("admin");
+  server.use(http.get("/api/admin/accounts", () => HttpResponse.json(RESET_ROWS)));
+  wrap();
+  await screen.findByText("bob", { selector: "td" });
+  expect(within(rowOf("bob")).getByRole("button", { name: "bob 비밀번호 재설정" })).toHaveTextContent("비밀번호 재설정");
+  expect(within(rowOf("admin")).queryByRole("button", { name: /비밀번호 재설정/ })).toBeNull();
+  // 보안 이벤트 화면 안내(라우터 밖 맨 렌더라 링크 없이 같은 문장)
+  expect(screen.getByText(/인증번호 잠금 해제와 로그인 보안 기록은/)).toHaveTextContent(
+    "인증번호 잠금 해제와 로그인 보안 기록은 「보안 이벤트」 화면에서 봅니다.");
+});
+
+test("비밀번호 재설정: 두 칸이 다르면 「두 비밀번호가 다릅니다」 + 재설정 잠김, 같아지면 열린다", async () => {
+  stubMe("admin");
+  server.use(http.get("/api/admin/accounts", () => HttpResponse.json(RESET_ROWS)));
+  wrap();
+  const dlg = await openReset("bob");
+  expect(dlg).toHaveTextContent("bob 의 비밀번호를 새로 정합니다. 인증번호 없이 바로 바뀌고, 이 계정으로 로그인해 있던 모든 브라우저는 다시 로그인해야 합니다.");
+  expect(dlg).toHaveTextContent("새 비밀번호는 사용자에게 직접 전달하세요.");
+  const submit = within(dlg).getByRole("button", { name: "재설정" });
+  expect(submit).toBeDisabled();
+  const pw = within(dlg).getByLabelText("새 비밀번호");
+  const confirm = within(dlg).getByLabelText("새 비밀번호 확인");
+  expect(pw).toHaveAttribute("type", "password");
+  expect(pw).toHaveAttribute("autocomplete", "new-password");
+  await userEvent.type(pw, "n3w-pass");
+  expect(within(dlg).queryByText("두 비밀번호가 다릅니다")).toBeNull();   // 확인 칸이 비면 아직 말하지 않는다
+  await userEvent.type(confirm, "n3w-pas");
+  const msg = within(dlg).getByText("두 비밀번호가 다릅니다");
+  expect(confirm).toHaveAttribute("aria-describedby", msg.id);
+  expect(confirm).toHaveAttribute("aria-invalid", "true");
+  expect(submit).toBeDisabled();
+  await userEvent.type(confirm, "s");
+  expect(within(dlg).queryByText("두 비밀번호가 다릅니다")).toBeNull();
+  expect(submit).toBeEnabled();
+});
+
+test.each([
+  ["queued", "bob 의 비밀번호를 재설정했습니다 — 변경 안내 메일 발송을 예약했습니다(발송 결과는 보안 이벤트 화면에서 확인)"],
+  ["stub", "bob 의 비밀번호를 재설정했습니다 — 메일 발송 방식이 stub 이라 안내 메일은 보내지 않았습니다"],
+  ["unavailable", "bob 의 비밀번호를 재설정했습니다 — 메일 설정 오류로 안내 메일은 보내지 않았습니다"],
+])("비밀번호 재설정: 봉인해 보내고(평문 password 없음) 결과 안내 메일 %s 를 표 위 결과 줄에 말한다", async (mail, text) => {
+  stubMe("admin");
+  let captured: Record<string, unknown> | null = null;
+  server.use(
+    http.get("/api/admin/accounts", () => HttpResponse.json(RESET_ROWS)),
+    http.post("/api/admin/accounts/bob/password-reset", async ({ request }) => {
+      captured = await request.json() as Record<string, unknown>;
+      return HttpResponse.json({ username: "bob", sessions_revoked: true, notice_mail: mail });
+    }),
+  );
+  wrap();
+  await screen.findByText("bob", { selector: "td" });
+  // 결과 줄은 늘 있는 라이브 리전이다(내용을 가진 채 새로 생긴 리전은 화면낭독기가 흔히 읽지 않는다) -- 처음엔 비어 있다.
+  const note = screen.getByRole("status");
+  expect(note).toHaveTextContent(/^$/);
+  // 긴 목록에서도 보이게 표 **위**에 있다(2026-11-03 리뷰 -- 표 아래면 계정이 수십 개일 때 화면 밖).
+  expect(note.compareDocumentPosition(screen.getByRole("table")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  const dlg = await openReset("bob");
+  await userEvent.type(within(dlg).getByLabelText("새 비밀번호"), "Tmp-2026!");
+  await userEvent.type(within(dlg).getByLabelText("새 비밀번호 확인"), "Tmp-2026!");
+  await userEvent.click(within(dlg).getByRole("button", { name: "재설정" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(screen.getByRole("status")).toBe(note);
+  expect(note).toHaveTextContent(text);
+  // 창이 닫히면 포커스는 트리거가 아니라 결과 줄로 간다(그 자리로 스크롤되고 읽힌다)
+  await waitFor(() => expect(note).toHaveFocus());
+  const body = captured as unknown as { username: string; password?: string; password_enc: unknown };
+  expect(body.username).toBe("bob");
+  expect(body.password).toBeUndefined();
+  expect(isSealed(body.password_enc)).toBe(true);
+  // 용도 admin_password_reset + AAD 사용자 자리 = 대상 아이디(다른 용도·다른 아이디로는 열리지 않는다)
+  expect(await openSealed(serverKey, body.password_enc as never, "admin_password_reset", "bob")).toBe("Tmp-2026!");
+  await expect(openSealed(serverKey, body.password_enc as never, "admin_create", "bob")).rejects.toThrow();
+  await expect(openSealed(serverKey, body.password_enc as never, "admin_password_reset", "admin")).rejects.toThrow();
+});
+
+test("비밀번호 재설정: 특권 계정 403 은 창 안 alert 로 남고, 다시 열면 입력·오류가 비워져 있다", async () => {
+  stubMe("admin");
+  server.use(
+    http.get("/api/admin/accounts", () => HttpResponse.json(RESET_ROWS)),
+    http.post("/api/admin/accounts/bob/password-reset", () =>
+      HttpResponse.json({ detail: "privileged_account_protected" }, { status: 403 })),
+  );
+  wrap();
+  const dlg = await openReset("bob");
+  await userEvent.type(within(dlg).getByLabelText("새 비밀번호"), "x");
+  await userEvent.type(within(dlg).getByLabelText("새 비밀번호 확인"), "x");
+  await userEvent.click(within(dlg).getByRole("button", { name: "재설정" }));
+  expect(await within(dlg).findByRole("alert")).toHaveTextContent("특권 실행 목록에 있는 이름의 계정은 특권 실행 자격이 있는 관리자만 관리합니다");
+  // 결과 줄은 비어 있다(모달이 뒤 화면을 aria-hidden 으로 가리므로 hidden 까지 찾는다)
+  expect(screen.getByRole("status", { hidden: true })).toHaveTextContent(/^$/);
+  await userEvent.click(within(dlg).getByRole("button", { name: "취소" }));
+  // 실패 뒤 「취소」는 평소대로 트리거로 포커스를 돌려준다(결과 줄은 성공일 때만)
+  await waitFor(() => expect(within(rowOf("bob")).getByRole("button", { name: "bob 비밀번호 재설정" })).toHaveFocus());
+  const again = await openReset("bob");
+  expect(within(again).getByLabelText("새 비밀번호")).toHaveValue("");
+  expect(within(again).getByLabelText("새 비밀번호 확인")).toHaveValue("");
+  expect(within(again).queryByRole("alert")).toBeNull();
+});
+
+test("비밀번호 재설정: 토큰 관리자(403 accounts_session_required)는 세션 관리자 전용 사유를 본다", async () => {
+  stubMe("admin");
+  server.use(
+    http.get("/api/admin/accounts", () => HttpResponse.json(RESET_ROWS)),
+    http.post("/api/admin/accounts/bob/password-reset", () =>
+      HttpResponse.json({ detail: "accounts_session_required" }, { status: 403 })),
+  );
+  wrap();
+  const dlg = await openReset("bob");
+  await userEvent.type(within(dlg).getByLabelText("새 비밀번호"), "x");
+  await userEvent.type(within(dlg).getByLabelText("새 비밀번호 확인"), "x");
+  await userEvent.click(within(dlg).getByRole("button", { name: "재설정" }));
+  expect(await within(dlg).findByRole("alert"))
+    .toHaveTextContent("계정 생성·삭제·역할·비활성화·비밀번호 재설정·인증 잠금 해제는 포탈에 로그인한 관리자만 할 수 있습니다(토큰 인증 불가)");
+});
+
+test("비밀번호 재설정: 보내는 동안엔 Esc·창 닫기·「취소」로 닫히지 않고(바깥 클릭도 같은 onOpenChange), 응답이 오면 결과를 말한다", async () => {
+  // 닫히면 effect 의 reset.reset() 이 진행 중인 mutation 에서 observer 를 떼어 onSuccess(결과 줄)가 사라지는데, 서버는 이미
+  // 비밀번호를 바꿨다(2026-11-03 리뷰) -- 관리자가 「취소했다」고 믿지 않게 보내는 동안은 창을 붙잡는다.
+  stubMe("admin");
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  server.use(
+    http.get("/api/admin/accounts", () => HttpResponse.json(RESET_ROWS)),
+    http.post("/api/admin/accounts/bob/password-reset", async () => {
+      await gate;
+      return HttpResponse.json({ username: "bob", sessions_revoked: true, notice_mail: "stub" });
+    }),
+  );
+  wrap();
+  const dlg = await openReset("bob");
+  await userEvent.type(within(dlg).getByLabelText("새 비밀번호"), "x");
+  await userEvent.type(within(dlg).getByLabelText("새 비밀번호 확인"), "x");
+  await userEvent.click(within(dlg).getByRole("button", { name: "재설정" }));
+  expect(await within(dlg).findByRole("button", { name: "재설정 중…" })).toBeDisabled();
+  expect(dlg).toHaveAttribute("aria-busy", "true");
+  const cancel = within(dlg).getByRole("button", { name: "취소" });
+  expect(cancel).toBeDisabled();
+  await userEvent.keyboard("{Escape}");
+  await userEvent.click(within(dlg).getByRole("button", { name: "창 닫기" }));
+  expect(screen.getByRole("dialog", { name: "비밀번호 재설정" })).toBe(dlg);
+  release();
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(screen.getByRole("status")).toHaveTextContent(
+    "bob 의 비밀번호를 재설정했습니다 — 메일 발송 방식이 stub 이라 안내 메일은 보내지 않았습니다");
+});
+
+test("비밀번호 재설정: 「재설정」 직후 다시 그리기 전의 Esc·「취소」·두 번째 제출도 막는다 -- 한 번만 보내고 결과를 말한다", async () => {
+  // isPending 은 TanStack 알림(setTimeout 0) 뒤 다음 렌더에야 참이다 -- 그 틈에 들어온 Esc·「취소」가 창을 닫아 결과가 사라지고,
+  // 두 번째 Enter 가 한 번 더 보냈다(실 Chrome 5회 중 4회 재현, 2026-11-03). 같은 틱의 동기 이벤트로 그 틈을 만든다.
+  stubMe("admin");
+  let posts = 0;
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  server.use(
+    http.get("/api/admin/accounts", () => HttpResponse.json(RESET_ROWS)),
+    http.post("/api/admin/accounts/bob/password-reset", async () => {
+      posts += 1;
+      await gate;
+      return HttpResponse.json({ username: "bob", sessions_revoked: true, notice_mail: "stub" });
+    }),
+  );
+  wrap();
+  const dlg = await openReset("bob");
+  await userEvent.type(within(dlg).getByLabelText("새 비밀번호"), "x");
+  await userEvent.type(within(dlg).getByLabelText("새 비밀번호 확인"), "x");
+  const form = dlg.querySelector("form")!;
+  fireEvent.submit(form);
+  fireEvent.submit(form);
+  fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+  fireEvent.click(within(dlg).getByRole("button", { name: "취소" }));
+  fireEvent.click(within(dlg).getByRole("button", { name: "창 닫기" }));
+  expect(screen.getByRole("dialog", { name: "비밀번호 재설정" })).toBe(dlg);
+  await waitFor(() => expect(posts).toBe(1));
+  release();
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(posts).toBe(1);
+  expect(screen.getByRole("status")).toHaveTextContent(
+    "bob 의 비밀번호를 재설정했습니다 — 메일 발송 방식이 stub 이라 안내 메일은 보내지 않았습니다");
+});
+
+test("비밀번호 재설정: 숨은 username 칸이 자격을 대상 아이디에 묶는다(비밀번호 관리자가 관리자 본인 자격을 덮지 않게)", async () => {
+  stubMe("admin");
+  server.use(http.get("/api/admin/accounts", () => HttpResponse.json(RESET_ROWS)));
+  wrap();
+  const dlg = await openReset("bob");
+  const form = dlg.querySelector("form")!;
+  const user = form.querySelector('input[autocomplete="username"]') as HTMLInputElement;
+  expect(user).not.toBeNull();
+  expect(user.value).toBe("bob");
+  expect(user).toHaveAttribute("readonly");
+  expect(user).not.toBeVisible();
+  // 새 비밀번호 칸보다 앞(브라우저는 비밀번호 칸 앞의 username 칸을 그 자격의 아이디로 읽는다)
+  expect(user.compareDocumentPosition(within(dlg).getByLabelText("새 비밀번호")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  // 보이는 입력 칸은 두 비밀번호뿐(숨은 칸은 접근성 트리 밖)
+  expect(within(dlg).queryAllByRole("textbox")).toHaveLength(0);
+});
+
+test("보안 이벤트 안내는 라우터 안에서 /admin/security 링크다", async () => {
+  stubMe("admin");
+  server.use(http.get("/api/admin/accounts", () => HttpResponse.json(RESET_ROWS)));
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(
+    <QueryClientProvider client={qc}>
+      <MemoryRouter initialEntries={["/admin/accounts"]}>
+        <Routes><Route path="/admin/accounts" element={<AccountsList />} /></Routes>
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+  await screen.findByText("bob", { selector: "td" });
+  expect(screen.getByRole("link", { name: "「보안 이벤트」 화면" })).toHaveAttribute("href", "/admin/security");
 });

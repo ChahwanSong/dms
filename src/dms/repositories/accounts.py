@@ -13,9 +13,10 @@ _USERNAME_RE = re.compile(r"(?![0-9]+$)[a-z0-9][a-z0-9._-]{0,63}$")
 _NUMERIC_ONLY_RE = re.compile(r"[0-9]+$")
 _N, _R, _P = 16384, 8, 1
 
-# 계정 셀프서비스 인증번호(2026-08-20): 4자리·5분. 4자리는 사용자 결정(사내
-# 이메일 수신 전제) -- 무차별 대입은 시도 상한(5회)으로 막는다: 10^4 공간을
-# 5회로는 0.05% 확률이고, 초과 시 코드가 무효라 재발급 전엔 진행 불가.
+# 계정 셀프서비스 인증번호(2026-08-20): 5분. 자릿수는 6자리(2026-11-03 사용자 결정 -- 2026-08-20 의 4자리를
+# 대체): 4자리는 아이디별 누적 상한 아래에서도 여러 계정에 나눠 던지는 추측(전체 오답 상한이 1000회/시간이라 그만큼
+# 시도할 수 있다)에 10^4 공간이 좁았다. 무차별 대입은 세 층으로 막는다 -- 코드당 시도 상한(5회, 초과 시 코드 무효),
+# 아래 아이디별 누적 상한, 전체 오답 상한(routes_auth._consume_code, DMS_VERIFICATION_GUESS_GLOBAL_LIMIT).
 VERIFICATION_TTL_SECONDS = 300
 VERIFICATION_MAX_ATTEMPTS = 5
 VERIFICATION_PURPOSES = ("signup", "password_reset")
@@ -23,14 +24,22 @@ VERIFICATION_PURPOSES = ("signup", "password_reset")
 # 재발급"(수신자 상한 5통/10분)으로 하루 720코드x5회 = 맞힐 확률 ~30%(1주 ~92%) -- 남의 계정 재설정·미가입
 # 직원 아이디 선점. (username, purpose)별 실패를 첫 실패부터 24시간 누적해 10회면 그 창이 끝날 때까지 발급·
 # 소비를 모두 막는다(맞힐 확률 하루 0.1%). 대가: 남의 아이디로 10번 틀려 그 사람의 재설정을 하루 막을 수
-# 있다(로그인은 그대로; 창이 끝나면 저절로 풀린다 -- 급하면 운영자가 verification_failures 의 그 행을 지운다).
+# 있다(로그인은 그대로; 창이 끝나면 저절로 풀린다 -- 급하면 관리자가 보안 이벤트 화면에서 그 아이디의 잠금을 푼다:
+# clear_verification_failures, 2026-11-03).
 VERIFICATION_FAILURE_LIMIT = 10
 VERIFICATION_FAILURE_WINDOW_SECONDS = 86400
 
 
 def new_verification_code() -> str:
-    """4자리 숫자(0000~9999). 저장은 issue_verification_code(code=...) 가 한다."""
-    return f"{secrets.randbelow(10000):04d}"
+    """6자리 숫자(000000~999999, 2026-11-03 사용자 결정 -- 2026-08-20 의 4자리를 대체). 저장은
+    issue_verification_code(code=...) 가 한다."""
+    return f"{secrets.randbelow(1_000_000):06d}"
+
+
+def _new_session_epoch() -> str:
+    """세션 세대 토큰(2026-11-03, accounts.session_epoch). 시각(password_changed_at)이 아니라 난수인 이유: utc_now_iso()
+    는 초 단위라 같은 초에 일어난 두 번의 변경이나 「지우고 같은 이름으로 다시 만들기」에서 값이 같아 옛 세션이 살아남는다."""
+    return secrets.token_hex(16)
 
 
 def _lock_remaining(row, now: str) -> "int | None":
@@ -78,16 +87,20 @@ class AccountsRepository:
             raise DomainValidationError("username_reserved", repr(username))
         if not _USERNAME_RE.fullmatch(username):
             raise DomainValidationError("invalid_username", repr(username))
+        # 해시(scrypt ~수십 ms)는 트랜잭션 **밖에서** 만든다 -- 안에서 만들면 그동안 단일 커넥션 RLock 을 쥐어 다른 요청의
+        # DB 호출(readyz 포함)이 함께 멈춘다(2026-11-03).
+        password_hash = _hash_password(password)
         with self._db.transaction():
             if self._db.query_one("SELECT 1 AS x FROM accounts WHERE username = :u",
                                   {"u": username}):
                 raise DomainValidationError("account_exists", username)
             now = utc_now_iso()
+            # 새 계정도 새 세션 세대를 받는다(2026-11-03): 지운 뒤 같은 이름으로 다시 만든 계정에 옛 세션 쿠키가 붙지 않게.
             self._db.execute(
-                """INSERT INTO accounts (username, password_hash, role, email, created_at)
-                   VALUES (:u, :h, :r, :e, :now)""",
-                {"u": username, "h": _hash_password(password), "r": role,
-                 "e": email, "now": now})
+                """INSERT INTO accounts (username, password_hash, role, email, created_at, session_epoch)
+                   VALUES (:u, :h, :r, :e, :now, :ep)""",
+                {"u": username, "h": password_hash, "r": role,
+                 "e": email, "now": now, "ep": _new_session_epoch()})
             self._db.execute(
                 """INSERT INTO audit_log (mutation_class, operation, target_key, actor,
                        before_state, after_state, at)
@@ -96,36 +109,73 @@ class AccountsRepository:
                  "a": dump_json({"username": username, "role": role, "email": email}),
                  "at": now})
 
-    def verify(self, username, password) -> str | None:
+    def authenticate(self, username, password) -> "dict | None":
+        """활성 계정이고 비밀번호가 맞으면 {"role", "session_epoch"}, 아니면 None(2026-11-03 -- 로그인이 세션 쿠키에 세대를
+        얼린다). scrypt 비교는 DB 조회 **뒤에**, 락 밖에서 한다(query_one 이 돌아오면 RLock 은 이미 풀렸다)."""
         row = self._db.query_one(
-            "SELECT password_hash, role, disabled FROM accounts WHERE username = :u",
+            "SELECT password_hash, role, disabled, session_epoch FROM accounts WHERE username = :u",
             {"u": username})
         if not row or row["disabled"]:
             return None
-        return row["role"] if _verify_password(password, row["password_hash"]) else None
+        if not _verify_password(password, row["password_hash"]):
+            return None
+        return {"role": row["role"], "session_epoch": row["session_epoch"]}
+
+    def verify(self, username, password) -> str | None:
+        """authenticate 의 역할만 돌려주는 래퍼(기존 호출·테스트 호환)."""
+        auth = self.authenticate(username, password)
+        return None if auth is None else auth["role"]
+
+    def session_state(self, username) -> "dict | None":
+        """세션 검사용(api.auth.current_identity, 요청마다): {"role", "disabled", "session_epoch"} | None(계정 없음).
+        get()/list() 는 세대 토큰을 싣지 않는다 -- 감사 스냅숏(before/after)에 토큰이 남지 않게."""
+        return self._db.query_one(
+            "SELECT role, disabled, session_epoch FROM accounts WHERE username = :u", {"u": username})
 
     def set_password(self, username, password):
-        self._db.execute("UPDATE accounts SET password_hash = :h WHERE username = :u",
-                         {"h": _hash_password(password), "u": username})
+        # 비밀번호와 세션 세대를 **같은 UPDATE** 에서 바꾼다(2026-11-03) -- 따로 하면 그 사이에 옛 세션이 새 비밀번호를 본다.
+        password_hash = _hash_password(password)
+        self._db.execute(
+            "UPDATE accounts SET password_hash = :h, session_epoch = :ep WHERE username = :u",
+            {"h": password_hash, "ep": _new_session_epoch(), "u": username})
 
     def reset_password(self, username, password, *, actor):
         """인증번호 검증을 통과한 비밀번호 변경(셀프서비스). set_password 와 달리
         존재 확인 + 감사를 남긴다 -- 누가 언제 바꿨는지가 계정 변경의 본질이다.
-        해시는 감사에 싣지 않는다."""
+        해시는 감사에 싣지 않는다. 세션 세대를 같은 UPDATE 에서 회전해 그 계정의 **모든** 세션을 끝낸다(2026-11-03 --
+        재설정 화면은 로그인 전 화면이라 「지금 세션 유지」를 따질 대상이 없다)."""
+        password_hash = _hash_password(password)
         with self._db.transaction():
             before = self.get(username)
             if before is None:
                 raise DomainValidationError("account_not_found", username)
             self._db.execute(
-                "UPDATE accounts SET password_hash = :h WHERE username = :u",
-                {"h": _hash_password(password), "u": username})
+                "UPDATE accounts SET password_hash = :h, session_epoch = :ep WHERE username = :u",
+                {"h": password_hash, "ep": _new_session_epoch(), "u": username})
             self._audit_account("password_reset", username,
-                                {"username": username}, {"username": username},
+                                {"username": username},
+                                {"username": username, "sessions_revoked": True},
+                                actor, utc_now_iso())
+
+    def admin_reset_password(self, username, password, *, actor) -> None:
+        """관리자 비밀번호 재설정(2026-11-03, routes_auth.admin_password_reset -- 세션 관리자·특권 가드·자기 자신 409 는
+        라우트가 판정). 인증번호 없이 바로 바꾸고 세션 세대를 같은 UPDATE 에서 회전해 대상의 모든 세션을 끝낸다. 행이 없으면
+        KeyError(라우트 판정 뒤 삭제 경합). 감사 ('account','password_admin_reset') -- 해시는 싣지 않는다."""
+        password_hash = _hash_password(password)
+        with self._db.transaction():
+            if self._db.query_one("SELECT 1 AS x FROM accounts WHERE username = :u", {"u": username}) is None:
+                raise KeyError(username)
+            self._db.execute(
+                "UPDATE accounts SET password_hash = :h, session_epoch = :ep WHERE username = :u",
+                {"h": password_hash, "ep": _new_session_epoch(), "u": username})
+            self._audit_account("password_admin_reset", username,
+                                {"username": username},
+                                {"username": username, "sessions_revoked": True},
                                 actor, utc_now_iso())
 
     # --- 인증번호(계정 셀프서비스) ---
     def issue_verification_code(self, username, purpose, code: "str | None" = None) -> str:
-        """4자리 코드 발급(upsert -- (username, purpose)당 최신 1개만 유효).
+        """6자리 코드 발급(upsert -- (username, purpose)당 최신 1개만 유효).
         재발급은 이전 코드를 무효화한다: 시도 카운터 우회를 막고 '마지막으로
         받은 메일의 코드가 유효'라는 사용자 직관과 일치한다.
         code 를 주면 그 값을 저장한다(2026-10-01 Knox 메일: 메일을 **보낸 뒤에** 저장해, 발송이
@@ -218,6 +268,57 @@ class AccountsRepository:
                 "DELETE FROM verification_failures WHERE username = :u AND purpose = :p",
                 {"u": username, "p": purpose})
             return None
+
+    def verification_lock_rows(self, *, limit: int = 200, now_iso=None) -> "tuple[list[dict], bool]":
+        """보안 이벤트 화면의 「인증번호 잠금(아이디별)」 표(2026-11-03): 창(첫 실패부터 24시간)이 아직 살아 있는 누적 실패
+        행만. 잠김(failures >= 상한) 먼저, 그다음 실패 수 내림차순·아이디·용도. limit+1 개를 읽어 잘렸는지(truncated)를
+        정한다. 창 판정은 ISO 문자열 비교(window_start > now-24h)다 -- 형식이 고정 폭 UTC 라 사전순 = 시간순."""
+        now = now_iso or utc_now_iso()
+        rows = self._db.query(
+            """SELECT username, purpose, failures, window_start FROM verification_failures
+               WHERE window_start > :cutoff
+               ORDER BY CASE WHEN failures >= :lim THEN 0 ELSE 1 END, failures DESC, username, purpose
+               LIMIT :n""",
+            {"cutoff": iso_plus(now, -VERIFICATION_FAILURE_WINDOW_SECONDS),
+             "lim": VERIFICATION_FAILURE_LIMIT, "n": limit + 1})
+        truncated = len(rows) > limit
+        out = []
+        for r in rows[:limit]:
+            retry = _lock_remaining(r, now)
+            out.append({"username": r["username"], "purpose": r["purpose"], "failures": r["failures"],
+                        "limit": VERIFICATION_FAILURE_LIMIT, "window_start": r["window_start"],
+                        "locked": retry is not None, "retry_after_seconds": retry})
+        return out, truncated
+
+    def clear_verification_failures(self, username, purpose=None, *, actor) -> "list[dict]":
+        """관리자 인증 잠금 해제(아이디별, 2026-11-03): 그 아이디의 누적 실패 행(purpose None = 두 용도 모두)을 지우고 지운
+        행 [{purpose, failures, window_start}] 을 돌려준다. 0행이어도 정상이고 감사 ('security','verification_unlock')는
+        **0행이어도** 남긴다 -- 누가 언제 풀려고 했는지가 기록의 본질이다(그 사이 저절로 풀렸어도). 성공한 소비 말고 이 행을
+        지우는 길은 이것뿐이다. 계정이 없어도 된다(가입 잠금은 아직 없는 아이디의 것)."""
+        if purpose is not None and purpose not in VERIFICATION_PURPOSES:
+            raise DomainValidationError("invalid_verification_purpose", purpose)
+        where = "username = :u" + ("" if purpose is None else " AND purpose = :p")
+        params = {"u": username} if purpose is None else {"u": username, "p": purpose}
+        with self._db.transaction():
+            rows = [dict(r) for r in self._db.query(
+                f"SELECT purpose, failures, window_start FROM verification_failures WHERE {where} ORDER BY purpose",
+                params)]
+            self._db.execute(f"DELETE FROM verification_failures WHERE {where}", params)
+            self._audit("security", "verification_unlock", username, {"rows": rows}, None, actor)
+        return rows
+
+    def audit_security(self, operation, target_key, before, after, *, actor) -> None:
+        """mutation_class 'security' 감사 한 줄(2026-11-03 -- 메모리 상한의 전체 잠금 해제처럼 DB 행 변경이 없는 조치용)."""
+        self._audit("security", operation, target_key, before, after, actor)
+
+    def _audit(self, mutation_class, operation, target_key, before, after, actor) -> None:
+        self._db.execute(
+            """INSERT INTO audit_log (mutation_class, operation, target_key, actor,
+                   before_state, after_state, at)
+               VALUES (:mc, :op, :t, :actor, :b, :a, :at)""",
+            {"mc": mutation_class, "op": operation, "t": target_key, "actor": actor,
+             "b": dump_json(before) if before is not None else None,
+             "a": dump_json(after) if after is not None else None, "at": utc_now_iso()})
 
     def get(self, username):
         row = self._db.query_one(

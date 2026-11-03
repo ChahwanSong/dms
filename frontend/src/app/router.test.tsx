@@ -54,6 +54,39 @@ test("admin can open audit log", async () => {
   expect(await screen.findByRole("heading", { name: "감사 로그" })).toBeInTheDocument();
 });
 
+// 보안 이벤트(2026-11-03): 사이드바 라벨 = h1. 세 카드(상태·잠금·이벤트)의 조회를 모두 받아 화면이 끝까지 그려지는지 본다.
+test("admin can open security events", async () => {
+  server.use(
+    http.get("/api/auth/me", () => HttpResponse.json({ actor: "admin", role: "admin" })),
+    http.get("/api/admin/security/status", () => HttpResponse.json({
+      started_at: "2026-11-03T01:00:00Z",
+      login: { id_failure_limit: 10, id_failure_window_seconds: 60, id_attempt_limit: 60, id_attempt_window_seconds: 60,
+               scrypt_slots: 2, scrypt_max_wait_seconds: 5, scrypt_in_use: 0, scrypt_waiting: 0,
+               pacing: { enabled: false, limit: 0, window_seconds: 60, max_wait_seconds: 15, tokens: null, waiting: 0 } },
+      alarms: { window_seconds: 600, failures: 30, attempts: 300, source_failures: 20, recent_failures: 0, recent_attempts: 0 },
+      verification: { code_digits: 6, code_ttl_seconds: 300, per_code_attempts: 5, per_id_failure_limit: 10,
+                      per_id_failure_window_seconds: 86400, global_guess_limit: 1000, global_guess_window_seconds: 3600,
+                      global_guess_failures: 0, global_locked: false, global_retry_after_seconds: null },
+    })),
+    http.get("/api/admin/security/verification-locks", () => HttpResponse.json({ items: [], truncated: false, limit: 200 })),
+    http.get("/api/admin/security/events", () => HttpResponse.json([])),
+  );
+  renderAt("/admin/security");
+  expect(await screen.findByRole("heading", { name: "보안 이벤트", level: 1 })).toBeInTheDocument();
+  expect(await screen.findByText("기록된 보안 이벤트가 없습니다")).toBeInTheDocument();
+  expect(await screen.findByText("잠기거나 실패가 쌓인 아이디가 없습니다")).toBeInTheDocument();
+  expect(screen.getByRole("navigation", { name: "breadcrumb" })).toHaveTextContent("HOME>DMS>관리>보안 이벤트");
+});
+
+test("user visiting /admin/security is redirected to /jobs", async () => {
+  server.use(
+    http.get("/api/auth/me", () => HttpResponse.json({ actor: "alice", role: "user" })),
+    http.get("/api/user/requests", () => HttpResponse.json([])),
+  );
+  renderAt("/admin/security");
+  expect(await screen.findByRole("heading", { name: "전체 작업" })).toBeInTheDocument();
+});
+
 test("admin can open policies list", async () => {
   server.use(
     http.get("/api/auth/me", () => HttpResponse.json({ actor: "admin", role: "admin" })),

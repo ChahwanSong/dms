@@ -8,8 +8,9 @@ export const useMe = () =>
   useQuery({ queryKey: ["auth", "me"], queryFn: () => apiGet<Me>("/api/auth/me") });
 
 // 비밀번호를 보내는 훅은 전부 postWithSealedPassword 를 쓴다(2026-09-07 전송 봉인)
-// -- 평문 password 는 와이어에 실리지 않는다. 429 login_rate_limited 는 request()
-// 가 ApiError 로 올리고 화면이 reasonText 로 보여준다(별도 처리 없음).
+// -- 평문 password 는 와이어에 실리지 않는다. 429 login_rate_limited·503 login_busy 는 request()
+// 가 ApiError(retryAfter 포함)로 올리고 화면이 apiErrorText 로 보여준다(별도 처리 없음). 서버는 과부하에 거절 대신
+// 기다리게 하므로(2026-11-03) 이 요청은 수 초 걸릴 수 있다 -- 화면이 2초 뒤 대기 안내를 띄운다.
 export function useLogin() {
   const qc = useQueryClient();
   return useMutation({
@@ -20,7 +21,7 @@ export function useLogin() {
   });
 }
 
-// 계정 셀프서비스(2026-08-20): 인증번호(4자리·5분 TTL) 발급 -> 검증 -> 완료.
+// 계정 셀프서비스(2026-08-20): 인증번호(6자리(2026-11-03, 옛 4자리 대체)·5분 TTL) 발급 -> 검증 -> 완료.
 // 이메일은 <아이디>@도메인 파생이라 서버가 계산해 돌려준다. stub 메일러(현행)
 // 에선 stub_code 가 에코된다 -- 실메일 백엔드로 바뀌면 이 필드가 사라진다.
 // delivery_uncertain(2026-10-01): 릴레이에 요청은 갔는데 응답을 못 받음 -- 서버는 코드를 저장했고 메일이 늦게

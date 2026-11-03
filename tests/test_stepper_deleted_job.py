@@ -168,13 +168,14 @@ def test_reclaim_if_terminal_with_missing_row_terminates_instead_of_snapshot_fal
     rid, jid = _job(repos, "scan")
     adapter = _Recorder()
     stepper = JobStepper(repos, adapter, settings=_Settings())
-    real = repos.data_jobs.set_phase_ref
+    # stepper 는 record_phase_ref(set_phase_ref 의 빈 자리 CAS 판, 2026-11-03)로 쓴다.
+    real = repos.data_jobs.record_phase_ref
 
-    def set_then_delete(job_id, phase, ref):
-        ok = real(job_id, phase, ref)
+    def set_then_delete(job_id, phase, ref, **kw):
+        outcome = real(job_id, phase, ref, **kw)
         _delete_request(db, rid)
-        return ok
-    repos.data_jobs.set_phase_ref = set_then_delete
+        return outcome
+    repos.data_jobs.record_phase_ref = set_then_delete
 
     assert stepper._step_one(_snapshot(repos, jid)) == "gone"
 

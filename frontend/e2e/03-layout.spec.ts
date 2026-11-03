@@ -60,6 +60,15 @@ const K8S_PAGES: Array<[string, string]> = [
   ["/admin/k8s/history", "동기화 이력"],
 ];
 
+// 보안 이벤트(2026-11-03): 세 카드(상태 dl·인증번호 잠금·이벤트)가 다 그려진 뒤에 잰다 -- 이 파일 시점엔 잠금·이벤트가 보통 없어
+// (빈 상태 문구) 표 하한은 0이다(이벤트 표가 있는 375 는 E17 이 잰다). 상태 dl 은 375 에서 1열로 접히고, 필터 줄(긴 종류 select·
+// 검색칸)은 줄바꿈으로 접혀 문서를 넘치지 않아야 한다(L1).
+async function visitSecurity(page: Page): Promise<void> {
+  await visit(page, "/admin/security", "보안 이벤트");
+  await expect(page.getByText("불러오는 중…", { exact: true })).toHaveCount(0);
+  await expect(page.getByText(/^카운터는 dms-api 프로세스 메모리에 있습니다/)).toBeVisible();
+}
+
 async function visitK8s(page: Page, path: string, heading: string): Promise<void> {
   await visit(page, path, heading);
   await expect(page.getByText("불러오는 중…", { exact: true })).toHaveCount(0);
@@ -189,6 +198,9 @@ test.describe("E3 레이아웃 불변식", () => {
       await visitK8s(page, path, heading);
       await assertLayoutSane(page, { minTableCells: 0 });
     }
+
+    await visitSecurity(page);
+    await assertLayoutSane(page, { minTableCells: 0 });
   });
 
   test("375x667 모바일 spot check", async ({ page }) => {
@@ -246,5 +258,9 @@ test.describe("E3 레이아웃 불변식", () => {
       await visitK8s(page, path, heading);
       await assertLayoutSane(page, { sidebarFixed: false, minTableCells: 0 });
     }
+
+    // 보안 이벤트: 상태 dl 1열·필터 줄 접힘(문서 L1)
+    await visitSecurity(page);
+    await assertLayoutSane(page, { sidebarFixed: false, minTableCells: 0 });
   });
 });

@@ -88,8 +88,10 @@ def test_k8s_inventory_loop_and_retention_actually_run(db, settings):
 def test_seal_purpose_matches_the_frontend_exactly():
     assert "k8s_cluster_token" in pt.PURPOSES
     src = (ROOT / "frontend" / "src" / "lib" / "passwordTransport.ts").read_text()
+    # 2026-11-03: 관리자 비밀번호 재설정(admin_password_reset)을 끝에 더했다(password_transport.PURPOSES 와 같은 순서).
     assert ('export type Purpose = "login" | "signup" | "password_reset" | "admin_create" | "mail_relay_token" | '
-            '"k8s_cluster_token";') in src
+            '"k8s_cluster_token" | "admin_password_reset";') in src
+    assert pt.PURPOSES[-1] == "admin_password_reset"
 
 
 def test_every_k8s_reason_is_registered_on_both_sides():

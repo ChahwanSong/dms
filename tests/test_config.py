@@ -157,6 +157,49 @@ def test_login_rate_limit_env_parsing_and_defaults():
         Settings.from_env({**VALID, "DMS_LOGIN_RATE_LIMIT_ATTEMPTS": "ten"})
 
 
+def test_login_guard_keys_from_env_defaults_and_dataclass_defaults():
+    # 2026-11-03 로그인·식별 묶음: _SERVER_INT_KEYS 에만 넣으면 from_env 의 **extra 가 배선한다 -- 필드/키 양쪽이 실제로
+    # 이어졌는지, 그리고 총 시도 상한의 두 층 기본값(라이브 60 · 직접 생성 0)을 고정한다.
+    s = Settings.from_env(VALID)
+    assert (s.login_id_attempt_limit, s.login_id_attempt_window_seconds) == (60, 60)
+    assert (s.login_scrypt_slots, s.login_scrypt_max_wait_seconds) == (2, 5)
+    assert (s.login_global_pace_limit, s.login_global_pace_window_seconds,
+            s.login_global_pace_max_wait_seconds) == (0, 60, 15)          # 대기형 전체 스위치 기본 꺼짐
+    assert (s.login_alarm_window_seconds, s.login_alarm_failures, s.login_alarm_attempts,
+            s.login_alarm_source_failures) == (600, 30, 300, 20)
+    assert (s.verification_guess_global_limit, s.verification_guess_global_window_seconds) == (1000, 3600)
+    d = Settings(database_url="u", shared_token="s", admin_token="a", session_secret="x")
+    assert d.login_id_attempt_limit == 0                                  # 직접 생성(테스트)은 끔
+    assert (d.login_scrypt_slots, d.login_global_pace_limit, d.verification_guess_global_limit) == (2, 0, 1000)
+    s = Settings.from_env({**VALID, "DMS_LOGIN_ID_ATTEMPT_LIMIT": "0", "DMS_LOGIN_GLOBAL_PACE_LIMIT": "60",
+                           "DMS_LOGIN_ALARM_SOURCE_FAILURES": "0", "DMS_VERIFICATION_GUESS_GLOBAL_LIMIT": "0",
+                           "DMS_LOGIN_SCRYPT_SLOTS": "4"})
+    assert (s.login_id_attempt_limit, s.login_global_pace_limit, s.login_alarm_source_failures,
+            s.verification_guess_global_limit, s.login_scrypt_slots) == (0, 60, 0, 0, 4)
+
+
+@pytest.mark.parametrize("key,bad", [
+    ("DMS_LOGIN_SCRYPT_SLOTS", "0"),                      # 슬롯 0 = 모든 로그인 503
+    ("DMS_LOGIN_SCRYPT_MAX_WAIT_SECONDS", "0"),
+    ("DMS_LOGIN_ID_ATTEMPT_LIMIT", "-1"),
+    ("DMS_LOGIN_ID_ATTEMPT_WINDOW_SECONDS", "0"),
+    ("DMS_LOGIN_GLOBAL_PACE_LIMIT", "-5"),
+    ("DMS_LOGIN_GLOBAL_PACE_WINDOW_SECONDS", "0"),
+    ("DMS_LOGIN_GLOBAL_PACE_MAX_WAIT_SECONDS", "0"),
+    ("DMS_LOGIN_ALARM_WINDOW_SECONDS", "0"),
+    ("DMS_LOGIN_ALARM_FAILURES", "-1"),
+    ("DMS_LOGIN_ALARM_ATTEMPTS", "-1"),
+    ("DMS_LOGIN_ALARM_SOURCE_FAILURES", "-1"),
+    ("DMS_VERIFICATION_GUESS_GLOBAL_LIMIT", "-1"),
+    ("DMS_VERIFICATION_GUESS_GLOBAL_WINDOW_SECONDS", "0"),
+    ("DMS_LOGIN_SCRYPT_SLOTS", "two"),
+])
+def test_login_guard_keys_below_their_floor_refuse_to_start(key, bad):
+    with pytest.raises(SettingsError) as e:
+        Settings.from_env({**VALID, key: bad})
+    assert key in str(e.value)
+
+
 def test_session_cookie_secure_parses_and_defaults_off():
     # TLS 종단(ingress) 배포 대비 게이트. 기본 false 인 이유는 테스트베드의
     # HTTP 경로(NodePort 30080·port-forward)가 살아 있어야 하기 때문.

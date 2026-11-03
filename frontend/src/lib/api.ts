@@ -109,9 +109,15 @@ export const REASON_MESSAGES: Record<string, string> = {
   invalid_job_id: "잡 ID가 올바르지 않습니다",
   invalid_batch: "배치 값이 올바르지 않습니다",
   invalid_credentials: "사용자명 또는 비밀번호가 올바르지 않습니다",
-  // 웹 인증 하드닝(2026-09-07). 로그인 감속(사용자명·IP 별 1분 10회 실패) 429 와
-  // 비밀번호 전송 봉인(passwordTransport.ts ↔ api/password_transport.py) 422 들.
-  login_rate_limited: "로그인 시도가 너무 많습니다 — 1분 뒤 다시 시도하세요",
+  // 웹 인증 하드닝(2026-09-07). 로그인 감속(아이디별 실패·총 시도 상한, 2026-11-03 IP 축 제거) 429 와
+  // 비밀번호 전송 봉인(passwordTransport.ts ↔ api/password_transport.py) 422 들. 429·503 은 Retry-After 가 오면
+  // 화면이 apiErrorText 로 「(다시 시도까지 약 N초)」를 붙인다 -- 문구에 「1분 뒤」 같은 고정 시간을 박지 않는다.
+  login_rate_limited: "이 아이디의 로그인 시도가 너무 많습니다 — 잠시 뒤 다시 시도하세요",
+  // 로그인 과부하(2026-11-03): scrypt 대기형 슬롯·대기형 전체 스위치가 기다리게 하다 넘친 경우의 503 -- 차단이 아니다.
+  login_busy: "로그인 요청이 몰려 지금은 처리하지 못했습니다 — 잠시 뒤 다시 시도하세요",
+  // 세션 세대(2026-11-03): 비밀번호가 바뀌면 그 계정의 모든 세션이 끝난다. request() 가 이 401 을 sessionStorage 에
+  // 남기고 로그인 화면이 한 번 보여준다(AUTH_NOTICE_KEY).
+  session_revoked: "비밀번호가 바뀌어 로그인이 끝났습니다 — 새 비밀번호로 다시 로그인하세요",
   password_missing: "비밀번호가 없습니다",
   password_encryption_required: "이 서버는 봉인되지 않은 비밀번호를 받지 않습니다 — HTTPS 로 접속한 포탈에서 다시 시도하세요",
   password_encryption_invalid: "비밀번호 봉인을 열 수 없습니다 — 페이지를 새로고침한 뒤 다시 시도하세요",
@@ -186,13 +192,15 @@ export const REASON_MESSAGES: Record<string, string> = {
   // 인증 메일(Knox 릴레이, 2026-10-01 routes_auth.request_verification_code).
   mailer_misconfigured: "인증 메일 발송 설정이 잘못되어 인증번호를 보낼 수 없습니다 — 관리자에게 문의하세요",
   verification_rate_limited: "인증 메일 요청이 너무 잦거나 발송이 몰렸습니다 — 잠시 후 다시 시도하세요(이미 받은 인증번호가 있으면 그대로 입력하세요)",
-  verification_locked: "인증번호를 여러 번 틀려 이 아이디의 인증이 잠겼습니다 — 첫 실패부터 24시간 뒤 다시 시도하세요(로그인은 그대로 됩니다)",
+  verification_locked: "인증번호를 여러 번 틀려 이 아이디의 인증이 잠겼습니다 — 첫 실패부터 24시간 뒤 다시 시도하거나 관리자에게 잠금 해제를 요청하세요(로그인은 그대로 됩니다)",
   workers_unreachable: "작업 노드(워커)가 제한 시간 안에 준비되지 않아 실행하지 못했습니다 — 워커 이름을 IP로 풀지 못했거나 ssh 접속이 되지 않았습니다. 대개 일시적이니 다시 실행하고, 반복되면 실행 로그의 DMS_JR_WORKER_UNREACHABLE 줄(호스트·단계)을 확인하세요",
   invalid_portal_subtitle: "서브네임은 40자 이하의 한 줄 문자열이어야 합니다(줄바꿈·탭·보이지 않는 문자 불가)",
   chown_name_not_supported: "chown 은 숫자 uid:gid 만 지정할 수 있습니다(예: 10003:10000) — 이름은 작업 컨테이너에서 해석되지 않습니다",
   // d192(포탈 괴리 [8]): dsync 는 O_DIRECT 로 4 MiB 단위를 나눠 읽는다 -- 버퍼가 그 약수가 아니면 큰 파일에서 MPI 중단.
   direct_bufsize_misaligned: "direct(O_DIRECT)를 켜면 버퍼 크기는 4 KiB~4 MiB 의 2의 거듭제곱(4096·8192·…·4194304)이어야 합니다 — dsync 는 4 MiB 단위로 나눠 읽는데 버퍼가 그 약수가 아니면 큰 파일에서 중단됩니다",
-  verification_client_locked: "이 접속 위치에서 인증번호를 너무 여러 번 틀렸습니다 — 잠시 후(최대 24시간) 다시 시도하거나 관리자에게 문의하세요",
+  // 인증번호 전체 오답 상한(2026-11-03 사용자 결정 1000회/1시간): 옛 접속 IP 별 잠금(verification_client_locked)을 대체한다
+  // -- 그 코드는 HTTP 응답에만 쓰였고 DB 행에 남지 않아 지웠다. 구제는 관리자(계정 생성·비밀번호 재설정·보안 이벤트의 해제).
+  verification_global_locked: "인증번호 오답이 전체적으로 너무 많아 계정 생성·비밀번호 변경이 잠시 중단됐습니다 — 잠시 후(최대 1시간) 다시 시도하세요. 급하면 관리자에게 요청하세요(관리자는 계정 화면에서 바로 계정을 만들거나 비밀번호를 재설정할 수 있습니다)",
   mail_settings_changed: "그 사이 다른 관리자가 릴레이 주소를 바꿔 설정을 다시 불러왔습니다 — 바뀐 주소를 확인한 뒤 다시 저장하세요(입력한 인증 키는 칸에 남아 있습니다)",
   verification_email_failed: "인증 메일을 보내지 못했습니다 — 잠시 후 다시 시도하고, 계속되면 관리자에게 문의하세요",
   // 포탈 메일 설정(관리 → 메일 설정, 2026-10-01 routes_mail_settings).
@@ -206,8 +214,12 @@ export const REASON_MESSAGES: Record<string, string> = {
   mail_relay_token_conflict: "인증 키를 바꾸면서 동시에 지울 수는 없습니다",
   invalid_mail_recipient: "받는 사람 메일 주소 형식이 올바르지 않습니다",
   mail_settings_session_required: "메일 설정 변경·연결 확인·테스트 메일은 포탈에 로그인한 관리자만 할 수 있습니다(토큰 인증 불가)",
-  accounts_session_required: "계정 생성·삭제·역할·비활성화 변경은 포탈에 로그인한 관리자만 할 수 있습니다(토큰 인증 불가)",
-  privileged_account_protected: "특권 실행 목록에 있는 이름의 계정은 특권 실행 자격이 있는 관리자만 관리합니다(만들기·역할·비활성화·삭제) — 이 계정은 셀프 비밀번호 재설정도 쓸 수 없으니 특권 관리자에게 요청하세요",
+  accounts_session_required: "계정 생성·삭제·역할·비활성화·비밀번호 재설정·인증 잠금 해제는 포탈에 로그인한 관리자만 할 수 있습니다(토큰 인증 불가)",
+  privileged_account_protected: "특권 실행 목록에 있는 이름의 계정은 특권 실행 자격이 있는 관리자만 관리합니다(만들기·역할·비활성화·삭제·비밀번호 재설정·인증 잠금 해제) — 이 계정은 셀프 비밀번호 재설정도 쓸 수 없으니 특권 관리자에게 요청하세요",
+  // 관리자 비밀번호 재설정(2026-11-03, POST /api/admin/accounts/{u}/password-reset)·보안 이벤트 화면(routes_security).
+  cannot_reset_self: "자기 계정의 비밀번호는 여기서 재설정할 수 없습니다 — 로그인 화면의 「비밀번호 변경」(인증번호)으로 바꾸세요",
+  account_username_mismatch: "요청한 계정과 본문의 아이디가 다릅니다 — 화면을 새로고침한 뒤 다시 시도하세요",
+  invalid_event_filter: "이벤트 필터 값이 올바르지 않습니다 — 목록에 있는 종류·심각도만 고를 수 있습니다",
   confirm_session_required: "작업 실행 확인(컨펌)은 포탈에 로그인한 사용자만 할 수 있습니다(토큰 인증 불가)",
   admin_session_required: "빌드·릴리스·컨트롤 상태·레지스트리 삭제·결과 폴더(artifact base) 변경·배치 기록 삭제·작업 삭제는 포탈에 로그인한 관리자만 할 수 있습니다(토큰 인증 불가)",
   preview_round_required: "배치 확인에는 확인한 미리보기 회차가 필요합니다 — 화면을 새로고침한 뒤 「배치 확인」을 다시 여세요",
@@ -502,10 +514,38 @@ export function reasonText(code: string | null | undefined): string {
   return code;
 }
 
+// retryAfter(2026-11-03): 429·503 응답의 Retry-After(정수 초). 없거나 HTTP-date 형식이면 null(모름) -- 0 과 섞지 않는다.
 export class ApiError extends Error {
-  constructor(public status: number, public code: string, message: string) {
+  constructor(public status: number, public code: string, message: string,
+              public retryAfter: number | null = null) {
     super(message);
   }
+}
+
+/** 로그인 화면에 한 번 보일 인증 안내(지금은 session_revoked 하나)를 넘기는 sessionStorage 키(2026-11-03). request() 가
+ *  401 session_revoked 를 받으면 여기에 코드를 남기고, 로그인 화면이 마운트할 때 읽고 지운다 -- 401 뒤 me 무효화 →
+ *  RequireRole 이 /login 으로 보내는 사이에 「왜 로그아웃됐는지」가 사라지지 않게. */
+export const AUTH_NOTICE_KEY = "dms.authNotice";
+
+// Retry-After 는 정수 초만 읽는다(서버는 늘 정수 초를 보낸다). HTTP-date·음수·소수는 null(모름).
+function parseRetryAfter(raw: string | null): number | null {
+  if (raw === null) return null;
+  const t = raw.trim();
+  return /^\d+$/.test(t) ? Number(t) : null;
+}
+
+/** 남은 시간(초) → 「약 N초/분/시간」. 분·시간은 올림(기다릴 시간을 짧게 말하지 않는다), 0 이하는 「약 1초」. */
+export function retryAfterText(seconds: number): string {
+  if (seconds < 60) return `약 ${Math.max(1, Math.ceil(seconds))}초`;
+  if (seconds < 3600) return `약 ${Math.ceil(seconds / 60)}분`;
+  return `약 ${Math.ceil(seconds / 3600)}시간`;
+}
+
+/** 오류 문구 + (429·503 이고 Retry-After 를 알면) 「(다시 시도까지 약 N초)」. 로그인·인증번호 화면이 쓴다. */
+export function apiErrorText(e: ApiError): string {
+  if ((e.status === 429 || e.status === 503) && e.retryAfter !== null)
+    return `${e.message} (다시 시도까지 ${retryAfterText(e.retryAfter)})`;
+  return e.message;
 }
 
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -526,8 +566,15 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     } catch { /* noop */ }
     // dms:unauthorized 는 401 전용 계약이다 -- AuthContext 가 me 쿼리를 무효화하는
     // 소비자라, 403 등에서도 발화하면 권한 없는 화면마다 로그인으로 튕긴다.
-    if (res.status === 401) window.dispatchEvent(new CustomEvent("dms:unauthorized"));
-    throw new ApiError(res.status, code, reasonText(code));
+    if (res.status === 401) {
+      // 비밀번호 변경으로 끝난 세션(2026-11-03): 다음 401(not_authenticated)이 덮기 전에 남긴다 -- 로그인 화면이 읽고 지운다.
+      // 저장소를 못 쓰는 브라우저(사생활 모드 등)면 안내만 빠진다(로그인 이동은 그대로).
+      if (code === "session_revoked") {
+        try { sessionStorage.setItem(AUTH_NOTICE_KEY, code); } catch { /* noop */ }
+      }
+      window.dispatchEvent(new CustomEvent("dms:unauthorized"));
+    }
+    throw new ApiError(res.status, code, reasonText(code), parseRetryAfter(res.headers.get("Retry-After")));
   }
   if (res.status === 204) return undefined as T;
   return res.json() as Promise<T>;

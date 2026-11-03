@@ -23,7 +23,7 @@ export const SESSION_KEY_INFO = "dms-password-transport-v1/aes-256-gcm";
 export const AAD_PREFIX = "dms-password-transport-v1";
 
 /** 비밀번호를 받는 엔드포인트마다 하나 -- 서버 PURPOSES 와 같은 값. */
-export type Purpose = "login" | "signup" | "password_reset" | "admin_create" | "mail_relay_token" | "k8s_cluster_token";
+export type Purpose = "login" | "signup" | "password_reset" | "admin_create" | "mail_relay_token" | "k8s_cluster_token" | "admin_password_reset";
 
 export interface TransportKey { version: number; kid: string; public_key: string }
 export interface EncryptedPassword {
@@ -100,8 +100,9 @@ export function forgetTransportKey(): void {
 
 /**
  * 본문의 `password` 를 `password_enc` 로 바꿔 POST 한다 -- 비밀번호를 보내는 훅
- * 넷(login/signup/password-reset/admin accounts)이 전부 이 함수를 쓴다. 새 훅이
- * 생기면 여기로 -- apiSend 에 password 를 직접 실으면 그 경로만 평문이다.
+ * 다섯(login/signup/password-reset/admin accounts/관리자 비밀번호 재설정 -- 2026-11-03)이 전부 이 함수를 쓴다.
+ * 새 훅이 생기면 여기로 -- apiSend 에 password 를 직접 실으면 그 경로만 평문이다. AAD 의 사용자명 자리는
+ * body.username 이다(관리자 재설정은 **대상** 계정 -- 서버가 경로의 아이디와 대조한다).
  */
 export async function postWithSealedPassword<T>(
   path: string, purpose: Purpose,

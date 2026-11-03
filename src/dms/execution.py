@@ -44,10 +44,34 @@ class JobSpec:
 
 
 class ExecutionError(Exception):
-    def __init__(self, reason_code: str, detail: str = ""):
+    def __init__(self, reason_code: str, detail: str = "", *, strays=()):
         self.reason_code = reason_code
         self.detail = detail
+        # 제출 실패인데 클러스터에 이 잡의 객체가 남은 경우의 ref 들(2026-11-03 B3 리뷰): 채택 판정에서 라벨(전체 job_id·phase·
+        # tool)은 같지만 지문이 다른 기존 객체, 복합 preflight 의 앞쪽에서 이번 제출이 만들거나 채택한 파드. 잡은 곧 종단되고
+        # ref 는 기록되지 않으므로 아무도 추적·회수하지 않는다 -- stepper 가 「다른 stepper 가 이 단계를 이미 기록했나」를 DB 로
+        # 확인한 **뒤** terminate 한다(어댑터는 DB 를 모르므로 스스로 지우지 않는다 -- stepper._fail_submit).
+        self.strays = list(strays)
         super().__init__(f"{reason_code}: {detail}" if detail else reason_code)
+
+
+class SubmitUndecided(Exception):
+    """제출 결과를 아직 모른다 -- 다음 틱에 같은 제출을 다시 한다(2026-11-03 B3 리뷰). ExecutionError 가 **아니라서** stepper 의
+    제출 실패 종단(REJECTED/FAILED)으로 접히지 않고 run_once 의 step_error 로 남으며 잡은 이전 상태에 머문다.
+
+    왜: 409 는 그 이름의 객체가 있다는 증거인데 다시 읽기(GET)가 일시 실패했거나, create 가 상태 코드 없이·5xx·429 로 끊겨
+    (요청은 etcd 에 반영됐는데 응답만 잃었을 수 있다) 객체가 있는지 모르는 경우다. 「모름」을 실패로 접으면 잡은 FAILED 인데
+    객체는 ref 없이 도는 B3 가 같은 장애(장애조치 + apiserver 한 대 소실)에서 되살아난다. 다음 틱의 create 가 409 면 채택,
+    없으면 새로 만든다. 객체가 **없거나 삭제 중이라고 확인된** 경우만 상한(execution_volcano.SUBMIT_UNDECIDED_WINDOW_SECONDS) 뒤
+    종전 submit_failed 로 접는다 -- 웹훅 장애 같은 지속 5xx·걸린 finalizer 가 잡을 영원히 붙잡지 않게.
+
+    strays(2026-11-03 리뷰 2회차 [3]): 다음 틱에 새로 내려면 먼저 치워야 하는 이 잡의 객체 ref -- 이미 끝난 실행 전 재점검
+    (exec_preflight) 파드처럼 이 잡·단계의 것이 맞지만 그 결과를 이번 제출의 결과로 쓸 수 없는 것. ExecutionError.strays 와 같은
+    규칙으로 stepper 가 「다른 stepper 가 이 단계를 이미 기록했나」를 확인한 **뒤** 지운다(stepper._submit_phase)."""
+
+    def __init__(self, detail: str = "", *, strays=()):
+        self.strays = list(strays)
+        super().__init__(detail)
 
 
 class ExecutionAdapter(Protocol):
@@ -86,6 +110,14 @@ class StubExecutionAdapter:
 
     def read_summary(self, ref: str):
         return self._summaries.get(ref, {"files": 0, "bytes": 0})
+
+    def take_adopted(self, ref: str) -> list:
+        # 스텁은 같은 ref 를 매번 새로 「만든다」 -- 채택(B3, execution_volcano._create_or_adopt)이 없다.
+        return []
+
+    def unrecorded_refs(self, job_id: str, recorded) -> list:
+        # 스텁엔 ref 밖에 남는 객체가 없다(execution_volcano.unrecorded_refs 의 짝).
+        return []
 
     def terminate(self, ref: str) -> None:
         if ref in self._fail_terminate_refs:

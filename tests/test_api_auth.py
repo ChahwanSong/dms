@@ -159,7 +159,7 @@ def test_verification_code_issue_signup_flow(client, db, settings):
     assert body["email"] == "cocoa.song@samsung.com"
     assert body["expires_in_seconds"] == 300
     code = body["stub_code"]
-    assert len(code) == 4 and code.isdigit()
+    assert len(code) == 6 and code.isdigit()          # 6자리(2026-11-03 -- 4자리를 대체)
     # 더미 전송 흔적(이벤트)은 남고 코드는 실리지 않는다
     ev = db.query_one("SELECT event_type, message FROM events "
                       "WHERE event_type = 'verification_email_stub'")

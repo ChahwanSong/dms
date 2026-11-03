@@ -219,6 +219,29 @@ export interface AuditEntry {
   actor: string; before_state: string | null; after_state: string | null; at: string;
 }
 export interface Node { node_name: string; reported_at: string; fresh: boolean; report: unknown }
+// 보안 이벤트 화면(2026-11-03, GET /api/admin/security/status). 0 = 「끔」, null = 「없음·모름」(꺼진 스위치의 tokens,
+// 잠기지 않은 전체 상한의 남은 시간) -- 화면이 둘을 섞지 않는다. 카운터는 dms-api 프로세스 메모리(started_at 이후 값).
+export interface SecurityStatus {
+  started_at: string;
+  login: { id_failure_limit: number; id_failure_window_seconds: number; id_attempt_limit: number;
+           id_attempt_window_seconds: number; scrypt_slots: number; scrypt_max_wait_seconds: number;
+           scrypt_in_use: number; scrypt_waiting: number;
+           pacing: { enabled: boolean; limit: number; window_seconds: number; max_wait_seconds: number;
+                     tokens: number | null; waiting: number } };
+  alarms: { window_seconds: number; failures: number; attempts: number; source_failures: number;
+            recent_failures: number; recent_attempts: number };
+  verification: { code_digits: number; code_ttl_seconds: number; per_code_attempts: number;
+                  per_id_failure_limit: number; per_id_failure_window_seconds: number;
+                  global_guess_limit: number; global_guess_window_seconds: number;
+                  global_guess_failures: number; global_locked: boolean; global_retry_after_seconds: number | null };
+}
+export interface VerificationLock { username: string; purpose: "signup" | "password_reset"; failures: number; limit: number;
+  window_start: string; locked: boolean; retry_after_seconds: number | null }
+export interface VerificationLocks { items: VerificationLock[]; truncated: boolean; limit: number }
+export interface SecurityEvent { id: number; at: string; component: string; severity: string; event_type: string;
+  message: string | null; payload: Record<string, unknown> | null }
+export interface AdminPasswordResetResult { username: string; sessions_revoked: boolean;
+  notice_mail: "queued" | "stub" | "unavailable" }
 export interface Account {
   username: string; role: string; email: string | null;
   disabled: number; created_at: string;

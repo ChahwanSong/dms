@@ -16,7 +16,7 @@ from .batch_cancel import CANCEL_MARK_EVENT, CANCEL_REASON
 from .db import iso_plus, utc_now_iso
 from .domain import (DataJobState, TERMINAL_DATA_JOB_STATES, chown_problem, destructive_operation, managed_abs_path,
                      overlap_sides, path_conflict)
-from .execution import ExecStatus, ExecutionError, JobSpec
+from .execution import ExecStatus, ExecutionError, JobSpec, SubmitUndecided
 from .execution_manifests import (parse_execution_reason, parse_preflight_reason, parse_pv_owner, processes_per_node,
                                   valid_owner, worker_pod_count)
 from .identity import PRIVILEGE_NEVER, privilege_policy
@@ -550,13 +550,22 @@ class JobStepper:
             request_id=job.get("request_id"))
         return new_wp
 
-    def _finalize(self, job, job_state, *, reason_code=None, summary=None, diag=None, polled=False):
+    def _finalize(self, job, job_state, *, reason_code=None, summary=None, diag=None, polled=False, attempted=()):
         # 슬라이스 25 §2.2: diag=(phase, ref) 가 오면 종단 전이 **전에** 박제한다.
         # 순서가 계약이다 -- 박제 후 크래시하면 잡이 비종단으로 남아 다음 틱이
         # finalize 를 재시도하고(archive 는 IS NULL 이 중복을 막는다), 역순이면
         # 종단 잡은 다시 스텝되지 않아 박제 기회가 영영 사라진다.
         if diag is not None:
             self._archive_diag(job, *diag)
+        # 성공 아닌 종단은 ref 기록 없이 남은 이 잡의 객체(B3 창)를 라벨로 찾아 회수한다 -- **여기 한 곳**에서(2026-11-03 리뷰
+        # 2회차 [1]). 앞 틱이 다음 단계를 만들고 ref 기록이 끊겼는데 이번 틱이 그것을 채택하기 전에 잡을 끝내는 경로는 fail-closed·
+        # 배치 취소 정지만이 아니다 -- 앞 단계 파드가 사라져 폴링이 FAILED 로 읽거나(preflight_failed·execution_recheck_failed),
+        # 소유자 측정이 거부해도(pv_owner_unknown·changed) 잡은 종단이고 실행 vcjob 은 ref 없이 돈다(pod_gc 는 phase_refs 만 본다).
+        # 종단 전이 **전에** 한다(박제와 같은 이유 -- 전이 뒤 크래시면 종단 잡은 다시 스텝되지 않는다). 성공은 마지막 단계(실행)까지
+        # ref 가 기록된 뒤에만 오므로 조회하지 않는다. attempted = 호출자가 이미 지우려 한 ref(_fail_submit 의 strays -- 같은
+        # 객체를 두 번 보고하지 않게).
+        if job_state != DataJobState.SUCCEEDED:
+            self._reclaim_unrecorded(job, skip=attempted)
         # 배치 취소가 지운 vcjob·파드를 실패로 본 것이면 Cancelled 로 기록한다(2026-10-16 검증 지적: 취소가 죽인 자식이
         # Failed·Rejected 로 실패 수에 들어가 「실패분 재실행」 대상이 됐다). **증거**가 있을 때만: 배치가 취소 중·취소됐고
         # 취소가 이 자식의 객체를 지우러 왔다(CANCEL_MARK_EVENT -- 라우트·그물이 지우기 **전에** 남긴다). 취소가 아직 닿지 않은
@@ -575,7 +584,8 @@ class JobStepper:
     def _stop_for_batch_cancel(self, job) -> bool:
         """취소 중·취소된 배치의 자식은 다음 단계(사전 점검·미리보기·실행 전 재점검·실행)를 제출하지 않고 Cancelled 로 끝낸다
         (2026-10-16 검증 지적: 종료가 실패해 Cancelling 에 머문 배치의 자식이 사전 점검을 마치자 실행 vcjob 을 제출했다 --
-        사용자 보고 증상 「Cancel 했는데 launcher/worker pod 가 돈다」의 재현). 지금 단계는 끝났으므로 지울 객체가 없다."""
+        사용자 보고 증상 「Cancel 했는데 launcher/worker pod 가 돈다」의 재현). 지금 단계는 끝났으므로 기록된 ref 중 지울 객체는
+        없다 -- 앞 틱이 다음 단계를 만들고 ref 기록이 끊긴 객체(B3 창)는 _finalize 가 라벨로 찾아 회수한다(2026-11-03)."""
         if not self._batch_cancelling(job):
             return False
         self._finalize(job, DataJobState.CANCELLED, reason_code=CANCEL_REASON)
@@ -594,7 +604,7 @@ class JobStepper:
         batch = self._repos.batches.get(bid)
         return batch is not None and batch["status"] in ("Cancelling", "Cancelled")
 
-    def _record_submit_failure(self, job, phase, exc):
+    def _record_submit_failure(self, job, phase, exc, *, reclaimed=(), reclaim_failed=()):
         """제출 실패 원문 보존(2026-09-15 프로덕션 사고: apiserver 422 의 causes --
         볼륨 이름 RFC 1123 위반 -- 가 어디에도 남지 않아 컨트롤러 파드 안에서 제출
         경로를 재현해야 원인을 알 수 있었다). 어댑터가 blanket except 로 접은
@@ -602,17 +612,31 @@ class JobStepper:
         콘솔에, (2) diag_logs 에 합성 항목(pod="submit:<phase>")으로 박제해 요청
         상세의 진단 로그 자리에 보이게 한다 -- 파드가 만들어지지 않았으니 박제할
         파드 로그는 없고 이 원문이 유일한 진단이다. 기록 실패는 finalize 를 막지
-        않는다(_archive_diag 와 같은 원칙)."""
+        않는다(_archive_diag 와 같은 원칙).
+
+        reclaimed·reclaim_failed(2026-11-03 B3 리뷰, _fail_submit): 제출은 실패했는데 클러스터에 남았던 이 잡의 객체(exc.strays)를
+        회수한 결과. 회수에 실패한 것이 있으면 severity 를 error 로 올리고 문구에 「추적 밖에서 돌 수 있음」을 적는다 -- 화면은
+        「시작하지 못했다」인데 rm·sync 객체가 돌고 있을 수 있다(조용히 두지 않는다)."""
+        note = ""
+        if reclaimed:
+            note += f" -- 남은 객체 회수: {', '.join(reclaimed)}"
+        if reclaim_failed:
+            note += f" -- 회수 실패, 추적 밖에서 돌 수 있음(확인·정리 필요): {', '.join(reclaim_failed)}"
+        payload = {"phase": phase, "reason_code": exc.reason_code}
+        if reclaimed:
+            payload["reclaimed"] = list(reclaimed)
+        if reclaim_failed:
+            payload["reclaim_failed"] = list(reclaim_failed)
         try:
             self._repos.observability.record_event(
-                component="stepper", severity="warning", event_type="submit_failed",
-                message=f"{phase}: {exc.detail}"[:500],
-                payload={"phase": phase, "reason_code": exc.reason_code},
+                component="stepper", severity="error" if reclaim_failed else "warning", event_type="submit_failed",
+                message=f"{phase}: {exc.detail}{note}"[:500],
+                payload=payload,
                 request_id=job.get("request_id"))
             self._repos.data_jobs.archive_diag_logs(
                 job["job_id"], phase=phase,
                 entries=[{"pod": f"submit:{phase}",
-                          "log": f"{exc.reason_code}: {exc.detail}", "truncated": False}])
+                          "log": f"{exc.reason_code}: {exc.detail}{note}", "truncated": False}])
         except Exception as inner:  # noqa: BLE001 -- 진단 기록이 종단을 막으면 잡이 낀다
             logger.warning("submit failure record failed job=%s: %s", job["job_id"], inner)
 
@@ -706,14 +730,169 @@ class JobStepper:
         except Exception:  # noqa: BLE001 -- 진단 보강용 조회가 step_error 기록을 막으면 안 된다
             return False
 
-    def _record_ref(self, job, phase, ref) -> bool:
-        """제출 직후 ref 를 행에 남긴다(2026-10-08, 요청 삭제 선행 보강). False = 잡 행이 없다 -- claim 스냅숏 뒤
-        관리자가 요청을 지웠다. 방금 만든 Pod/vcjob 은 여기서 이미 회수했으니 호출자는 "gone" 을 돌려준다(진행하면
-        요청 없는 실제 rm/sync 가 고아로 돈다)."""
-        if self._repos.data_jobs.set_phase_ref(job["job_id"], phase, ref):
-            return True
-        self._reclaim_deleted(job, ref)
-        return False
+    def _record_ref(self, job, phase, ref) -> "str | None":
+        """제출 직후 ref 를 행에 남긴다(2026-10-08, 요청 삭제 선행 보강). 반환 None = 계속 진행, 문자열 = 호출자가 그대로 돌려줄
+        결과다: "gone" = 잡 행이 없다(claim 스냅숏 뒤 관리자가 요청을 지웠다 -- 방금 만든 Pod/vcjob 은 여기서 이미 회수했다.
+        진행하면 요청 없는 실제 rm/sync 가 고아로 돈다), 그 밖 = 다른 stepper 가 이 단계를 먼저 기록했다(_yield_to_other_stepper).
+
+        DB 예외(끊김·장애조치)는 **잡지 않고** 그대로 던진다 -- 원래 그랬고 B3 수정(2026-11-03)은 그 위에 선다: 잡은 이전 상태로
+        남고(run_once 의 step_error), 다음 틱의 같은 제출이 같은 이름에서 409 를 받아 그 객체를 채택해
+        (execution_volcano._create_or_adopt) 같은 ref 를 다시 여기로 가져온다. 여기서 실패를 종단으로 접으면 객체는 돌고 잡만
+        FAILED 인 B3 가 되살아난다.
+
+        빈 자리 CAS(2026-11-03 리뷰 -- data_jobs.record_phase_ref): 스냅숏에 이 단계 ref 가 없으면 「DB 에도 없을 때만」 쓴다.
+        리스가 풀린 두 컨트롤러(30초 넘는 틱)가 겹치면 낡은 스냅숏의 이 제출은 409 채택으로 같은 객체를 잡는데, 그대로 진행하면
+        상태 전이를 한 번 더 남기거나(자기 전이 중복) 앞서 간 잡을 뒤로 끌어당긴다(_advance 의 CAS 와 짝). 스냅숏에 이미 있으면
+        (ref 는 남았는데 상태 전이가 끊긴 앞 틱의 재시도) 같은 값을 다시 쓴다.
+
+        채택이 있었고 **빠진 ref 를 이번에 채웠을 때만** 이벤트를 남긴다(_note_adopted) -- 다른 stepper 가 이미 기록한 ref 를
+        채택했거나 ref 는 있던 재시도면 「기록하지 못한 객체」가 아니다."""
+        take = getattr(self._exec, "take_adopted", None)   # 스텁·테스트 어댑터엔 없을 수 있다 -- 채택 없음
+        adopted = list(take(ref) or []) if take is not None else []
+        had = phase in (job.get("phase_refs") or {})
+        outcome = self._repos.data_jobs.record_phase_ref(job["job_id"], phase, ref, expect_absent=not had)
+        if outcome == "gone":
+            self._reclaim_deleted(job, ref)
+            return "gone"
+        if outcome == "taken":
+            return self._yield_to_other_stepper(job, phase, ref, adopted)
+        if adopted and not had:
+            self._note_adopted(job, phase, ref, adopted)
+        return None
+
+    def _yield_to_other_stepper(self, job, phase, ref, adopted) -> str:
+        """claim 스냅숏엔 없던 이 단계 ref 를 다른 stepper 가 그 사이 기록했다(record_phase_ref "taken") -- 이 제출은 아무것도
+        더 하지 않고 지금 상태를 돌려준다(전이·이벤트·앵커는 기록한 쪽의 몫). 이름이 결정적이라 ref 는 같아야 하고, 그러면 이
+        제출이 잡은 객체가 곧 그쪽이 추적하는 객체다. 다르면(같은 잡 행에서 후보가 갈렸다 -- 정상 흐름엔 없다) 이번에 **새로
+        만든** 것만 있는 ref 는 아무도 추적하지 않으니 회수한다(채택이 섞였으면 남의 것을 지울 수 있어 로그만)."""
+        current = self._repos.data_jobs.get_job(job["job_id"])
+        if current is None:
+            self._reclaim_deleted(job, ref)
+            return "gone"
+        existing = (current.get("phase_refs") or {}).get(phase)
+        if existing != ref:
+            logger.warning("stepper overlap job=%s phase=%s: recorded %s, this submit %s", job["job_id"], phase,
+                           existing, ref)
+            if not adopted:
+                self._terminate_strays(job, [ref])
+        return current["state"]
+
+    def _advance(self, job, to_state) -> str:
+        """제출 뒤의 비종단 전진 전이를 스냅숏 상태 CAS 로(data_jobs.set_job_state expected_state, 2026-11-03 B3 리뷰). 다른
+        stepper 가 그 사이 잡을 옮겼으면 아무것도 하지 않고 지금 상태를 돌려준다 -- 낡은 스냅숏이 Running 을 Preflight 로,
+        컨펌된 Executing 을 ConfirmPending 으로 되돌리지 않게. 종단 가드에 걸린 경우(그 사이 취소)도 지금 상태다."""
+        if self._repos.data_jobs.set_job_state(job["job_id"], to_state, actor="stepper",
+                                               expected_state=job["state"]):
+            return to_state.value
+        current = self._repos.data_jobs.get_job(job["job_id"])
+        return current["state"] if current is not None else "gone"
+
+    def _phase_taken(self, job, phase) -> "str | None":
+        """스냅숏엔 없던 이 단계 ref 가 지금 DB 에 있으면 그 잡의 지금 상태(= 다른 stepper 가 이 단계를 이미 냈다), 아니면 None."""
+        if phase in (job.get("phase_refs") or {}):
+            return None
+        current = self._repos.data_jobs.get_job(job["job_id"])
+        if current is None or phase not in (current.get("phase_refs") or {}):
+            return None
+        return current["state"]
+
+    def _fail_submit(self, job, phase, exc, state, reason_prefix) -> str:
+        """제출 실패의 종단(네 제출 지점 공용, 2026-11-03 B3 리뷰). 순서가 계약이다:
+        (1) 다른 stepper 가 claim 스냅숏 뒤 이 단계를 내고 기록했으면(_phase_taken) 이 실패는 낡은 스냅숏의 것이다 -- 종단도
+            회수도 하지 않고 지금 상태를 돌려준다. 지문은 그 사이 바뀐 행 값(재클램프 등)에서 갈릴 수 있어, 이 확인 없이 (2)로
+            가면 남이 돌리는 객체를 지우고 잡을 죽인다.
+        (2) 어댑터가 알려 온 이 잡의 남은 객체(exc.strays -- 라벨 셋은 같고 지문만 다른 기존 객체, 복합 preflight 의 앞쪽에서
+            이번 제출이 만들거나 채택한 파드)를 terminate 한다. ref 가 기록되지 않으므로 지금 아니면 아무도 못 치운다(pod_gc 는
+            phase_refs 만 본다) -- 잡은 「시작하지 못함」인데 객체만 돌면 rm 이 화면 밖에서 지운다.
+        (3) 종전대로 원문 박제(_record_submit_failure -- 회수 결과도 같은 기록에) + 종단."""
+        taken = self._phase_taken(job, phase)
+        if taken is not None:
+            return taken
+        reclaimed, failed = self._terminate_strays(job, list(getattr(exc, "strays", None) or []))
+        self._record_submit_failure(job, phase, exc, reclaimed=reclaimed, reclaim_failed=failed)
+        self._finalize(job, state, reason_code=f"{reason_prefix}:{exc.reason_code}", attempted=reclaimed + failed)
+        return state.value
+
+    def _submit_phase(self, job, phase, *, dryrun):
+        """단계 제출(네 제출 지점 공용). 어댑터의 SubmitUndecided(결과 모름 -- 잡은 이전 상태, 다음 틱 재시도)는 그대로 올리되,
+        다음 틱에 새로 내려면 먼저 치워야 하는 이 잡의 객체(exc.strays -- 이미 끝난 실행 전 재점검 파드, 2026-11-03 리뷰 2회차
+        [3])는 여기서 지운다. _fail_submit 과 같은 순서: 다른 stepper 가 이 단계를 이미 기록했으면(_phase_taken -- 그 파드는 그쪽이
+        추적하는 결과다) 지우지 않는다. 회수는 unrecorded_reclaimed 이벤트로 남긴다(파드가 사라진 이유)."""
+        try:
+            return self._exec.submit(self._build_spec(job, phase, dryrun=dryrun))
+        except SubmitUndecided as exc:
+            strays = list(getattr(exc, "strays", None) or [])
+            if strays and self._phase_taken(job, phase) is None:
+                reclaimed, failed = self._terminate_strays(job, strays)
+                self._report_reclaimed(job, reclaimed, failed, phase=phase, cause=str(exc))
+            raise
+
+    def _terminate_strays(self, job, refs) -> tuple:
+        """ref 기록 없이 남은 이 잡의 객체를 best-effort 로 지운다 -> (지운 것, 못 지운 것). 지운 것도 로그로 남긴다 -- 파드가
+        사라진 이유를 운영자가 찾을 수 있게(호출자가 이벤트에도 싣는다)."""
+        reclaimed, failed = [], []
+        for ref in refs:
+            try:
+                self._exec.terminate(ref)
+            except ExecutionError as exc:
+                logger.warning("untracked object reclaim failed job=%s ref=%s: %s", job["job_id"], ref, exc)
+                failed.append(ref)
+            else:
+                logger.info("reclaimed untracked object job=%s ref=%s", job["job_id"], ref)
+                reclaimed.append(ref)
+        return reclaimed, failed
+
+    def _reclaim_unrecorded(self, job, *, skip=()) -> None:
+        """종단 직전(_finalize -- 성공 아닌 종단 전부), 이 잡의 객체 중 phase_refs 에 없는 것(앞 틱이 만들고 ref 기록이 끊긴 객체 --
+        B3 창)을 회수한다(2026-11-03 리뷰). 그런 객체는 다음 틱의 같은 제출이 채택해 잇지만, 다음 틱이 그 제출에 닿기 **전에** 잡을
+        끝내면(fail-closed -- 그 사이 노드 cordon·스토리지 결측·CPU 부족·신원 가드, 배치 취소 정지, 앞 단계 파드 소실로 폴링이
+        FAILED, 소유자 측정 거부) 아무도 추적하지 않는다. 찾기는 어댑터의 라벨 조회(unrecorded_refs -- 전체 job_id 라벨이라 남의
+        것은 안 걸린다). 비교 기준은 지금 DB 의 phase_refs(스냅숏 뒤 기록된 것까지). skip = 호출자가 이미 지우려 한 ref. 조회 실패는
+        terminate_failed 이벤트로 남기고 종단을 막지 않는다(_fail_closed 의 terminate 실패와 같은 원칙)."""
+        fn = getattr(self._exec, "unrecorded_refs", None)
+        if fn is None:
+            return
+        jid = job["job_id"]
+        try:
+            current = self._repos.data_jobs.get_job(jid)
+            recorded = [r for r in ((current if current is not None else job).get("phase_refs") or {}).values() if r]
+            refs = [r for r in (fn(jid, recorded) or []) if r not in skip]
+        except Exception as exc:  # noqa: BLE001 -- 보강 회수가 종단을 막으면 잡이 낀다
+            self._repos.observability.record_event(
+                component="stepper", severity="warning", event_type="terminate_failed",
+                message=f"unrecorded sweep: {type(exc).__name__}: {exc}"[:500],
+                payload={"job_id": jid}, request_id=job.get("request_id"))
+            return
+        if not refs:
+            return
+        reclaimed, failed = self._terminate_strays(job, refs)
+        self._report_reclaimed(job, reclaimed, failed)
+
+    def _report_reclaimed(self, job, reclaimed, failed, *, phase=None, cause=None) -> None:
+        """ref 기록 없이 남은 이 잡의 객체를 지운 결과(unrecorded_reclaimed). 못 지운 것이 있으면 error 로 「추적 밖에서 돌 수 있음」
+        -- 조용히 두지 않는다. cause = 왜 지웠는지(_submit_phase 의 미결 사유), phase = 그 제출 단계."""
+        payload = {"job_id": job["job_id"], "reclaimed": reclaimed, "reclaim_failed": failed}
+        if phase is not None:
+            payload["phase"] = phase
+        self._repos.observability.record_event(
+            component="stepper", severity="error" if failed else "warning", event_type="unrecorded_reclaimed",
+            message=(f"ref 기록 없이 남은 이 잡의 객체 회수: {', '.join(reclaimed) or '-'}"
+                     + (f" -- 회수 실패, 추적 밖에서 돌 수 있음(확인·정리 필요): {', '.join(failed)}" if failed else "")
+                     + (f" -- {cause}" if cause else ""))[:500],
+            payload=payload, request_id=job.get("request_id"))
+
+    def _note_adopted(self, job, phase, ref, names):
+        """앞 틱이 만들고 ref 를 남기지 못한 객체를 채택했다는 기록(2026-11-03 B3). payload 에 job_id·phase 가 있어 포탈이 그 단계
+        행의 주석으로 보여준다(stageModel.annotationsFor). 잡은 정상 진행이라 severity 는 info -- 끊김 자체(DB·컨트롤러)는 그
+        쪽 경보의 몫이다. 기록 실패는 진행을 막지 않는다(_record_submit_failure 와 같은 원칙)."""
+        try:
+            self._repos.observability.record_event(
+                component="stepper", severity="info", event_type="submit_adopted",
+                message=f"이전 제출이 만들고 기록하지 못한 객체를 이어 받아 계속 진행 -- {', '.join(names)}"[:500],
+                payload={"job_id": job["job_id"], "phase": phase, "ref": ref, "adopted": list(names)},
+                request_id=job.get("request_id"))
+        except Exception as exc:  # noqa: BLE001 -- 진단 기록이 전이를 막으면 잡이 낀다
+            logger.warning("submit_adopted record failed job=%s: %s", job["job_id"], exc)
 
     def _reclaim_deleted(self, job, ref):
         """행이 사라진 잡에 방금 제출한 ref 를 회수한다. 이벤트는 request_id=NULL 로 남긴다 -- 지워진 id 로 쓰면
@@ -743,7 +922,7 @@ class JobStepper:
         고아가 남는다. 그 고아는 아무도 못 치운다 — cancel_job은 종단 잡에 409,
         terminate_job은 종단 잡에 no-op이기 때문. 그래서 여기서 한 번 더 읽는다.
 
-        행이 아예 없으면(set_phase_ref 뒤에 요청이 지워졌다 -- 삭제 게이트의 조용한 창이 방금 updated_at 이 찍힌
+        행이 아예 없으면(ref 기록(record_phase_ref) 뒤에 요청이 지워졌다 -- 삭제 게이트의 조용한 창이 방금 updated_at 이 찍힌
         잡을 거르므로 좁은 창이다) 스냅숏 상태로 폴백하지 않고 같은 회수 후 "gone" 이다(예전 폴백은 스냅숏의 비종단을
         읽어 계속 진행했다)."""
         current = self._repos.data_jobs.get_job(job["job_id"])
@@ -774,7 +953,9 @@ class JobStepper:
 
         살아 있을 수 있는 phase_refs 는 _reclaim_if_terminal 관례대로 best-effort
         terminate 하고, 실패는 terminate_failed 이벤트로 남긴다 -- 고아 리소스를
-        조용히 두지 않는다(설계 §4). 이미 끝난 파드의 terminate 는 무해하다."""
+        조용히 두지 않는다(설계 §4). 이미 끝난 파드의 terminate 는 무해하다. 앞 틱이 만들고 ref 기록이 끊긴 객체(B3 창 --
+        이번 틱이 그것을 채택하기 전, 제출 전에 여기로 왔다)는 phase_refs 에 없으므로 _finalize 가 라벨로 찾아 함께 회수한다
+        (_reclaim_unrecorded, 2026-11-03 리뷰)."""
         target = (DataJobState.FAILED if job["state"] in self._EXEC_STATES
                   else DataJobState.REJECTED)
         for ref in (job["phase_refs"] or {}).values():
@@ -875,23 +1056,19 @@ class JobStepper:
         return state
 
     def _submit_preflight(self, job):
-        jid = job["job_id"]
         if self._stop_for_batch_cancel(job):
             return "Cancelled"
         try:
-            ref = self._exec.submit(self._build_spec(job, "preflight", dryrun=False))
+            ref = self._submit_phase(job, "preflight", dryrun=False)
         except ExecutionError as exc:
-            self._record_submit_failure(job, "preflight", exc)
-            self._finalize(job, DataJobState.REJECTED,
-                           reason_code=f"preflight_submit_failed:{exc.reason_code}")
-            return "Rejected"
-        if not self._record_ref(job, "preflight", ref):
-            return "gone"
+            return self._fail_submit(job, "preflight", exc, DataJobState.REJECTED, "preflight_submit_failed")
+        stop = self._record_ref(job, "preflight", ref)
+        if stop is not None:
+            return stop
         reclaimed = self._reclaim_if_terminal(job, ref)
         if reclaimed is not None:
             return reclaimed
-        self._repos.data_jobs.set_job_state(jid, DataJobState.PREFLIGHT, actor="stepper")
-        return "Preflight"
+        return self._advance(job, DataJobState.PREFLIGHT)
 
     def _overlap_hold(self, job, gate, phase) -> bool:
         """실행 관문(2026-10-27, BACKLOG 「rm 경로의 다른 요청·배치와의 겹침 판정」의 둘째 층): 실행 측 단계(phase =
@@ -919,7 +1096,7 @@ class JobStepper:
         else:
             req = self._repos.requests.get(job["request_id"])
             if req is None:
-                return False         # 요청이 지워졌다 -- 제출 경로의 set_phase_ref False 가 회수한다
+                return False         # 요청이 지워졌다 -- 제출 경로의 record_phase_ref "gone" 이 회수한다(_record_ref)
             my_key = _order_key(req["commit_order"], job["request_id"])
         blocker = None
         for row in sorted(rows, key=lambda r: _order_key(r["commit_order"], r["request_id"])):
@@ -1105,14 +1282,12 @@ class JobStepper:
     def _submit_execution(self, job, running_state):
         jid = job["job_id"]
         try:
-            ref = self._exec.submit(self._build_spec(job, "execution", dryrun=False))
+            ref = self._submit_phase(job, "execution", dryrun=False)
         except ExecutionError as exc:
-            self._record_submit_failure(job, "execution", exc)
-            self._finalize(job, DataJobState.FAILED,
-                           reason_code=f"execution_submit_failed:{exc.reason_code}")
-            return "Failed"
-        if not self._record_ref(job, "execution", ref):
-            return "gone"
+            return self._fail_submit(job, "execution", exc, DataJobState.FAILED, "execution_submit_failed")
+        stop = self._record_ref(job, "execution", ref)
+        if stop is not None:
+            return stop
         # 슬라이스 20(설계 §2.2, 플랜 D1): 스케줄 대기의 앵커 = "execution vcjob
         # 제출 직후". 전이 행(Preflight→Running/Executing→Executing)의 at 을 나중에
         # 해석하는 대신 여기서 컬럼에 직접 남긴다 -- 세 모듈 교차 불변식(자기 전이
@@ -1122,8 +1297,7 @@ class JobStepper:
         reclaimed = self._reclaim_if_terminal(job, ref)
         if reclaimed is not None:
             return reclaimed
-        self._repos.data_jobs.set_job_state(jid, running_state, actor="stepper")
-        return running_state.value
+        return self._advance(job, running_state)
 
     def _poll_execution(self, job):
         ref = (job["phase_refs"] or {}).get("execution")
@@ -1172,22 +1346,17 @@ class JobStepper:
         return DataJobState.FAILED.value
 
     def _submit_preview(self, job):
-        jid = job["job_id"]
         try:
-            ref = self._exec.submit(self._build_spec(job, "preview", dryrun=True))
+            ref = self._submit_phase(job, "preview", dryrun=True)
         except ExecutionError as exc:
-            self._record_submit_failure(job, "preview", exc)
-            self._finalize(job, DataJobState.FAILED,
-                           reason_code=f"preview_submit_failed:{exc.reason_code}")
-            return "Failed"
-        if not self._record_ref(job, "preview", ref):
-            return "gone"
+            return self._fail_submit(job, "preview", exc, DataJobState.FAILED, "preview_submit_failed")
+        stop = self._record_ref(job, "preview", ref)
+        if stop is not None:
+            return stop
         reclaimed = self._reclaim_if_terminal(job, ref)
         if reclaimed is not None:
             return reclaimed
-        self._repos.data_jobs.set_job_state(jid, DataJobState.PREVIEW_RUNNING,
-                                            actor="stepper")
-        return "PreviewRunning"
+        return self._advance(job, DataJobState.PREVIEW_RUNNING)
 
     def _poll_preview(self, job):
         jid = job["job_id"]
@@ -1211,9 +1380,9 @@ class JobStepper:
             self._repos.data_jobs.set_preview(jid, fingerprint=fingerprint,
                                               expires_at=expires, artifact_uri=artifact,
                                               summary=summary)
-            self._repos.data_jobs.set_job_state(jid, DataJobState.CONFIRM_PENDING,
-                                                actor="stepper")
-            return "ConfirmPending"
+            # 스냅숏 상태 CAS(_advance) -- 낡은 스냅숏의 이 전이가 그 사이 컨펌된 잡(Executing)을 다시 ConfirmPending 으로
+            # 되돌려 돌고 있는 rm 에 컨펌을 또 요구하던 겹침(2026-11-03 B3 리뷰)을 막는다.
+            return self._advance(job, DataJobState.CONFIRM_PENDING)
         # 미리보기 summary 는 표시만 -- files/bytes 는 할 예정인 수라 지표 컬럼으로 승격하지 않는다(_surface_failed_artifact).
         if status == ExecStatus.TIMED_OUT:
             self._surface_failed_artifact(job, ref, promote_counts=False)
@@ -1242,14 +1411,13 @@ class JobStepper:
             if self._overlap_hold(job, GATE_START, "exec_preflight"):
                 return "held"
             try:
-                ref = self._exec.submit(self._build_spec(job, "exec_preflight", dryrun=False))
+                ref = self._submit_phase(job, "exec_preflight", dryrun=False)
             except ExecutionError as exc:
-                self._record_submit_failure(job, "exec_preflight", exc)
-                self._finalize(job, DataJobState.FAILED,
-                               reason_code=f"execution_recheck_submit_failed:{exc.reason_code}")
-                return "Failed"
-            if not self._record_ref(job, "exec_preflight", ref):
-                return "gone"
+                return self._fail_submit(job, "exec_preflight", exc, DataJobState.FAILED,
+                                         "execution_recheck_submit_failed")
+            stop = self._record_ref(job, "exec_preflight", ref)
+            if stop is not None:
+                return stop
             reclaimed = self._reclaim_if_terminal(job, ref)
             if reclaimed is not None:
                 return reclaimed

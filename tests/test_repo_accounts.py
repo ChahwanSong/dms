@@ -75,3 +75,122 @@ def test_concurrent_create_same_username_raises_domain_error(db):
         t.join()
     assert errors == ["account_exists"]
     assert repo.get("race") is not None
+
+
+# --- 2026-11-03 세션 세대·관리자 재설정·인증 잠금 해제 ---
+
+def _epoch(db, username):
+    return db.query_one("SELECT session_epoch FROM accounts WHERE username = :u", {"u": username})["session_epoch"]
+
+
+def test_create_sets_a_random_session_epoch(db):
+    import re
+    repo = AccountsRepository(db)
+    repo.create("alice", "pw", ROLE_USER)
+    repo.create("bob", "pw", ROLE_USER)
+    assert re.fullmatch(r"[0-9a-f]{32}", _epoch(db, "alice"))
+    assert _epoch(db, "alice") != _epoch(db, "bob")
+    # get()/list() 는 세대를 싣지 않는다(감사 스냅숏에 토큰이 남지 않게)
+    assert "session_epoch" not in repo.get("alice")
+    assert all("session_epoch" not in r for r in repo.list())
+
+
+def test_every_password_change_rotates_the_epoch(db):
+    repo = AccountsRepository(db)
+    repo.create("carol", "pw0", ROLE_USER)
+    seen = {_epoch(db, "carol")}
+    repo.set_password("carol", "pw1")
+    seen.add(_epoch(db, "carol"))
+    repo.reset_password("carol", "pw2", actor="carol")
+    seen.add(_epoch(db, "carol"))
+    repo.admin_reset_password("carol", "pw3", actor="boss")
+    seen.add(_epoch(db, "carol"))
+    assert len(seen) == 4                                    # 같은 초에 일어나도 매번 다르다(시각이 아니라 난수)
+    assert repo.verify("carol", "pw3") == ROLE_USER
+    # 역할·비활성 변경은 회전하지 않는다
+    before = _epoch(db, "carol")
+    repo.set_role("carol", ROLE_ADMIN, actor="t")
+    repo.set_disabled("carol", True, actor="t")
+    assert _epoch(db, "carol") == before
+
+
+def test_admin_reset_password_audits_and_rejects_missing(db):
+    from dms.db import load_json
+    repo = AccountsRepository(db)
+    repo.create("dave", "old", ROLE_USER)
+    repo.admin_reset_password("dave", "new", actor="boss")
+    row = db.query_one("SELECT actor, before_state, after_state FROM audit_log WHERE operation = 'password_admin_reset'")
+    assert row["actor"] == "boss"
+    assert load_json(row["before_state"]) == {"username": "dave"}
+    assert load_json(row["after_state"]) == {"username": "dave", "sessions_revoked": True}
+    with pytest.raises(KeyError):
+        repo.admin_reset_password("ghost", "x", actor="boss")
+
+
+def test_authenticate_returns_role_and_epoch(db):
+    repo = AccountsRepository(db)
+    repo.create("erin", "pw", ROLE_ADMIN)
+    assert repo.authenticate("erin", "pw") == {"role": ROLE_ADMIN, "session_epoch": _epoch(db, "erin")}
+    assert repo.authenticate("erin", "nope") is None
+    assert repo.authenticate("nobody", "pw") is None
+    repo.set_disabled("erin", True, actor="t")
+    assert repo.authenticate("erin", "pw") is None
+    assert repo.session_state("erin") == {"role": ROLE_ADMIN, "disabled": 1, "session_epoch": _epoch(db, "erin")}
+    assert repo.session_state("nobody") is None
+
+
+def _fail_rows(db, rows):
+    for username, purpose, window_start, failures in rows:
+        db.execute("""INSERT INTO verification_failures (username, purpose, window_start, failures)
+                      VALUES (:u, :p, :w, :f)""", {"u": username, "p": purpose, "w": window_start, "f": failures})
+
+
+def test_verification_lock_rows_order_window_and_truncation(db):
+    repo = AccountsRepository(db)
+    now = "2026-11-03T12:00:00Z"
+    _fail_rows(db, [
+        ("old.one", "signup", "2026-11-02T11:59:59Z", 10),      # 창 지남(24h 초과) -- 제외
+        ("b.user", "password_reset", "2026-11-03T10:00:00Z", 3),
+        ("a.user", "signup", "2026-11-03T11:00:00Z", 10),       # 잠김
+        ("c.user", "signup", "2026-11-03T09:00:00Z", 7),
+        ("a.user", "password_reset", "2026-11-03T08:00:00Z", 12),  # 잠김(상한 넘김)
+    ])
+    rows, truncated = repo.verification_lock_rows(now_iso=now)
+    assert truncated is False
+    assert [(r["username"], r["purpose"]) for r in rows] == [
+        ("a.user", "password_reset"), ("a.user", "signup"), ("c.user", "signup"), ("b.user", "password_reset")]
+    locked = rows[1]
+    assert locked["locked"] is True and locked["limit"] == 10
+    assert locked["retry_after_seconds"] == 23 * 3600              # 첫 실패 11:00 + 24h - 12:00
+    assert (rows[2]["locked"], rows[2]["retry_after_seconds"]) == (False, None)
+    rows, truncated = repo.verification_lock_rows(limit=2, now_iso=now)
+    assert len(rows) == 2 and truncated is True
+
+
+def test_clear_verification_failures_returns_rows_and_always_audits(db):
+    from dms.db import load_json
+    repo = AccountsRepository(db)
+    _fail_rows(db, [("f.user", "signup", "2026-11-03T10:00:00Z", 10),
+                    ("f.user", "password_reset", "2026-11-03T10:00:00Z", 4),
+                    ("g.user", "signup", "2026-11-03T10:00:00Z", 2)])
+    cleared = repo.clear_verification_failures("f.user", "signup", actor="boss")
+    assert cleared == [{"purpose": "signup", "failures": 10, "window_start": "2026-11-03T10:00:00Z"}]
+    assert [r["purpose"] for r in db.query("SELECT purpose FROM verification_failures WHERE username = 'f.user'")] \
+        == ["password_reset"]
+    cleared = repo.clear_verification_failures("f.user", None, actor="boss")     # 두 용도 모두
+    assert [r["purpose"] for r in cleared] == ["password_reset"]
+    assert repo.clear_verification_failures("nobody", None, actor="boss") == []  # 0행도 정상
+    audits = db.query("SELECT target_key, actor, before_state, after_state FROM audit_log "
+                      "WHERE mutation_class = 'security' AND operation = 'verification_unlock' ORDER BY id")
+    assert [a["target_key"] for a in audits] == ["f.user", "f.user", "nobody"]   # 0행에도 감사
+    assert load_json(audits[2]["before_state"]) == {"rows": []} and audits[2]["after_state"] is None
+    assert db.query_one("SELECT failures FROM verification_failures WHERE username = 'g.user'")["failures"] == 2
+    with pytest.raises(DomainValidationError):
+        repo.clear_verification_failures("f.user", "hack", actor="boss")
+
+
+def test_new_verification_code_is_six_digits():
+    from dms.repositories.accounts import new_verification_code
+    codes = {new_verification_code() for _ in range(200)}
+    assert all(len(c) == 6 and c.isdigit() for c in codes)
+    assert len(codes) > 150                                   # 10^6 공간

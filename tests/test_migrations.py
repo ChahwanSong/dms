@@ -518,6 +518,36 @@ def test_diag_logs_is_declared_in_the_create_table_block():
     assert re.search(r"^\s*diag_logs\s+TEXT\s*,\s*$", sql, re.M)
 
 
+def test_migrate_adds_session_epoch_to_existing_accounts(db):
+    # 2026-11-03 세션 세대: 기배포 DB 는 CREATE 를 다시 안 탄다 -- _ensure_columns 를 빼먹으면 라이브에서만 열이 없어 모든 세션
+    # 검사(current_identity)가 500 이다. 기존 행은 NULL 로 남는다(백필하지 않는다 = 옛 세션 유효).
+    db.execute("DROP TABLE accounts")
+    db.execute("""CREATE TABLE accounts (username TEXT PRIMARY KEY, password_hash TEXT NOT NULL,
+        role TEXT NOT NULL, email TEXT, disabled INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL,
+        root_granted INTEGER)""")
+    db.execute("""INSERT INTO accounts (username, password_hash, role, created_at)
+                  VALUES ('old.user', 'scrypt$x', 'user', '2026-01-01T00:00:00Z')""")
+    from dms.migrations import _column_exists, migrate
+    migrate(db)
+    assert _column_exists(db, "accounts", "session_epoch")
+    if db.dialect == "sqlite":                     # PRAGMA 는 sqlite 전용 -- PG 갈래(DMS_TEST_DB)는 존재·값만 본다
+        assert _declared_type(db, "accounts", "session_epoch") == "TEXT"
+    row = db.query_one("SELECT session_epoch FROM accounts WHERE username = 'old.user'")
+    assert row["session_epoch"] is None
+
+
+def test_session_epoch_is_declared_in_the_create_table_block():
+    # 신규 DB 에선 CREATE 누락도 _ensure_columns 가 흡수한다 -- CREATE 쪽은 소스로 고정한다(diag_logs 와 같은 방식).
+    import inspect
+    import re
+    from dms import migrations
+    src = inspect.getsource(migrations._apply_migrations)
+    block = re.search(r'CREATE TABLE IF NOT EXISTS accounts \(.*?"""', src, re.S)
+    assert block is not None
+    sql = re.sub(r"--[^\n]*", "", block.group(0))
+    assert re.search(r"^\s*session_epoch\s+TEXT\s*\)", sql, re.M)
+
+
 def test_all_tables_is_nineteen_tables_not_columns():
     # len(ALL_TABLES) 는 **테이블** 수 계약이다(슬라이스 25 가 20 으로 박제,
     # 슬라이스 27 의 runs 제거로 19). 늘든 줄든 명시 결정 없이는 여기가 먼저
@@ -790,7 +820,7 @@ def test_every_post_v1_column_rides_both_migration_paths(tmp_path):
     db = Database.connect(f"sqlite:///{tmp_path}/t.db")
     migrate(db)
     pairs = _ensure_pairs()
-    assert len(pairs) == 52      # 추출 자기 검증 -- 0 매치면 등식이 공허해진다(프록시 3 + 호스트 네트워크 1 + CA 1 + storages.user_enabled 1 + portal_subtitle 1 + batches.preview_round 1 + batches.auto_confirm_by 1 + accounts.root_granted 1 + data_jobs.pods_gc_at 1 + storages.kind 1 + requests.target_label 1 + storages.default_uid·default_gid 2 + builds.pods_gc_at 1 + data_jobs.artifacts_expired_at·request_purges.kind 2 + k8s_clusters.check_requested_at 1)
+    assert len(pairs) == 53      # 추출 자기 검증 -- 0 매치면 등식이 공허해진다(프록시 3 + 호스트 네트워크 1 + CA 1 + storages.user_enabled 1 + portal_subtitle 1 + batches.preview_round 1 + batches.auto_confirm_by 1 + accounts.root_granted 1 + data_jobs.pods_gc_at 1 + storages.kind 1 + requests.target_label 1 + storages.default_uid·default_gid 2 + builds.pods_gc_at 1 + data_jobs.artifacts_expired_at·request_purges.kind 2 + k8s_clusters.check_requested_at 1 + accounts.session_epoch 1)
     for table, v1 in _V1_COLUMNS.items():
         cols = {r["name"] for r in db.query(f"PRAGMA table_info({table})")}
         ensured = {c for t, c, _ in pairs if t == table}
@@ -807,7 +837,7 @@ def test_ensure_columns_types_match_create_declarations(tmp_path):
     pairs = _ensure_pairs()
     # 추출 자기 검증을 이 테스트에도 둔다 -- 위 등식 테스트가 지워지거나 홀로
     # 실행될 때 정규식이 0 매치면 아래 루프가 공허하게 통과하기 때문이다.
-    assert len(pairs) == 52
+    assert len(pairs) == 53
     for table, column, coltype in pairs:
         assert _declared_type(db, table, column) == coltype, (table, column)
 

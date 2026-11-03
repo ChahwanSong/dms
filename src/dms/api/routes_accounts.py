@@ -21,7 +21,8 @@ class RootGrantBody(BaseModel):
 
 
 def _require_session(identity: Identity) -> None:
-    """계정 생성·삭제·역할·비활성화 변경은 **세션으로 로그인한 관리자**만(2026-10-07 리뷰). require_admin 은 모든
+    """계정 생성·삭제·역할·비활성화 변경은 **세션으로 로그인한 관리자**만(2026-10-07 리뷰 -- 2026-11-03 부터 관리자 비밀번호
+    재설정(routes_auth.admin_password_reset)과 인증번호 잠금 해제(routes_security 의 아이디별·전체)도). require_admin 은 모든
     노드 에이전트가 가진 공유 토큰도 관리자로 받는데, 그 경로로 특권 allowlist 에 있는 이름의 계정을 지우고 다시
     만들면(비밀번호는 토큰 보유자가 정한다) 그 이름의 세션으로 배치 특권 게이트(_require_batch_privilege)·root
     실행 자격을 그대로 얻는다. 조회(GET)는 토큰 관리자도 된다(routes_mail_settings._require_session 과 같은 축)."""
@@ -32,7 +33,8 @@ def _require_session(identity: Identity) -> None:
 def guard_privileged_account(request: Request, identity: Identity, username: str) -> None:
     """특권 목록(DMS_PRIVILEGED_REQUESTERS ∪ 계정 화면에서 root 실행 자격 플래그가 선 계정 -- 비활성이어도,
     privileged.protected_names) 이름의 계정은 **특권 세션 관리자**만 만들고·역할을 바꾸고·끄고·지운다
-    (2026-10-07 리뷰). 목록은 관리자 사이의 경계다(can_run_as_root: 관리자 + 목록 + 세션) -- 목록 밖 관리자가
+    (2026-10-07 리뷰) -- 2026-11-03 부터 비밀번호를 재설정하고(routes_auth.admin_password_reset)·인증번호 잠금을 푸는 것
+    (routes_security.verification_unlock)도. 목록은 관리자 사이의 경계다(can_run_as_root: 관리자 + 목록 + 세션) -- 목록 밖 관리자가
     계정 화면에서 "root"·"admin" 계정을 새로 만들거나(비밀번호는 자기가 정한다) 지웠다 다시 만들거나 그 이름의
     가입 계정을 승격하면, 그 세션으로 배치 특권 게이트·root 실행 자격을 그대로 얻었다. 특권 실행이 꺼져 있으면
     (allow_privileged_requesters=false) 그 이름에 특권이 없으므로 가드도 없다. 첫 관리자 부트스트랩(x-admin-token)은

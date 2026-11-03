@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { useInRouterContext, useSearchParams } from "react-router-dom";
+import { useEffect, useRef, useState } from "react";
+import { Link, useInRouterContext, useSearchParams } from "react-router-dom";
 import { useAccounts, useCreateAccount, useSetRole, useSetDisabled, useSetRootGrant } from "./useAccounts";
 import { K8S_GRANT_LABEL, RootGrantCell } from "./RootGrantCell";
 import { useMe } from "../auth/useAuth";
@@ -9,9 +9,10 @@ import { Card } from "../../components/ui/Card";
 import { Button } from "../../components/ui/Button";
 import { Dialog } from "../../components/ui/Dialog";
 import { DeleteAccountDialog } from "./DeleteAccountDialog";
+import { ResetPasswordDialog } from "./ResetPasswordDialog";
 import { ApiError } from "../../lib/api";
 import { kstStamp } from "../../lib/datetime";
-import type { Account } from "../../lib/types";
+import type { Account, AdminPasswordResetResult } from "../../lib/types";
 
 const dlgField = "mt-1 w-full rounded-lg border border-black/10 px-3 py-2";
 
@@ -60,7 +61,7 @@ function CreateAccountDialog({ preset = null, onPresetUsed }: {
   }, [open]);
   return (
     <Dialog open={open} onOpenChange={setOpen} title="계정 생성"
-            trigger={<Button>계정 생성</Button>}>
+            trigger={<Button className="whitespace-nowrap">계정 생성</Button>}>
       <form className="space-y-3 text-sm"
             onSubmit={(e) => {
               e.preventDefault();
@@ -93,6 +94,16 @@ function CreateAccountDialog({ preset = null, onPresetUsed }: {
   );
 }
 
+// 관리자 비밀번호 재설정 결과의 안내 메일 문구(2026-11-03) -- 서버가 메일 설정으로 바로 정한 값(notice_mail)이다. 실제 발송
+// 결과(릴레이 성공·실패)는 응답 뒤에 나므로 보안 이벤트(account_notice_*)에서 본다. queued 는 「보냈다」가 아니다(2026-11-03
+// 리뷰): 서버는 응답 뒤 BackgroundTasks 로 예약만 했고, 메일 상한·혼잡(account_notice_skipped)이나 릴레이 오류
+// (account_notice_failed)로 안 갈 수 있다.
+const NOTICE_MAIL_TEXT: Record<AdminPasswordResetResult["notice_mail"], string> = {
+  queued: "변경 안내 메일 발송을 예약했습니다(발송 결과는 보안 이벤트 화면에서 확인)",
+  stub: "메일 발송 방식이 stub 이라 안내 메일은 보내지 않았습니다",
+  unavailable: "메일 설정 오류로 안내 메일은 보내지 않았습니다",
+};
+
 export function AccountsList() {
   const q = useAccounts();
   const me = useMe();
@@ -107,6 +118,11 @@ export function AccountsList() {
   // 아이디 검색(사용자 요청 2026-08-19): 서버가 전체 목록을 주므로(페이징 없음)
   // 클라이언트 필터가 맞다 — 즉답이고 API 무변경. 대소문자 무시 부분 일치.
   const [search, setSearch] = useState("");
+  // 마지막 비밀번호 재설정 결과 -- 다음 재설정·역할·상태 변경 때까지 표 **위** 결과 줄에 남긴다(창은 닫혔으므로 결과를 여기서
+  // 말한다). 결과 줄은 늘 있는 라이브 리전이고(내용을 가진 채 새로 생긴 리전은 화면낭독기가 흔히 읽지 않는다) 창이 닫히면
+  // 포커스가 그리로 온다 -- 표 맨 아래에 두었을 땐 계정이 수십 개면 결과가 화면 밖이었다(2026-11-03 리뷰, JobsList 관례).
+  const [resetDone, setResetDone] = useState<AdminPasswordResetResult | null>(null);
+  const resetNoteRef = useRef<HTMLParagraphElement | null>(null);
 
   const mutationError = setRole.isError
     ? (setRole.error as ApiError).message
@@ -117,7 +133,10 @@ export function AccountsList() {
     ? (rootGrant.error as ApiError).message
     : null;
 
-  const toggle = (a: Account) => setDisabled.mutate({ username: a.username, disabled: a.disabled !== 1 });
+  const toggle = (a: Account) => {
+    setResetDone(null);
+    setDisabled.mutate({ username: a.username, disabled: a.disabled !== 1 });
+  };
 
   const rows = q.data ?? [];
   // 활성 관리자(role=admin AND disabled=0). 하나뿐이면 그 행의 삭제를 막는다 --
@@ -132,11 +151,13 @@ export function AccountsList() {
 
   return (
     <section className="space-y-4">
-      <div className="flex items-center justify-between gap-3">
-        <h1 className="text-2xl font-bold">계정</h1>
-        <div className="flex items-center gap-2">
+      {/* 375 에서 제목이 「계/정」 두 줄로, 「계정 생성」이 두 줄로 접히던 머리(2026-11-03 실측) -- 좁으면 검색·생성 묶음이 다음
+          줄로 내려가고 제목·버튼 글자는 접지 않는다. */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h1 className="text-2xl font-bold shrink-0">계정</h1>
+        <div className="flex min-w-0 items-center gap-2">
           <input aria-label="아이디 검색" placeholder="아이디 검색"
-                 className="w-56 rounded-lg border border-black/10 px-3 py-2 text-sm"
+                 className="w-56 min-w-0 rounded-lg border border-black/10 px-3 py-2 text-sm"
                  value={search} onChange={(e) => setSearch(e.target.value)} />
           {inRouter && <CreateFromQuery onPreset={setCreatePreset} />}
           <CreateAccountDialog preset={createPreset} onPresetUsed={() => setCreatePreset(null)} />
@@ -144,6 +165,14 @@ export function AccountsList() {
       </div>
       {/* Card 구획(2026-08-19): 운영 화면들과 같은 서피스 — 관리 그룹 일관화 */}
       <Card>
+      {/* 비밀번호 재설정 결과 줄(늘 렌더 -- 비어 있으면 높이 0). */}
+      <p ref={resetNoteRef} role="status" tabIndex={-1}
+         className={resetDone
+           ? "mb-3 rounded-lg border border-ok/30 bg-okbg px-3 py-2 text-sm text-ink break-keep [overflow-wrap:anywhere] focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+           : "focus:outline-none"}>
+        {resetDone
+          && `${resetDone.username} 의 비밀번호를 재설정했습니다 — ${NOTICE_MAIL_TEXT[resetDone.notice_mail] ?? NOTICE_MAIL_TEXT.unavailable}`}
+      </p>
       {q.isLoading ? <p className="text-muted">불러오는 중…</p> : q.isError ? (
         <p className="text-bad">{(q.error as ApiError).message}</p>
       ) : visible.length === 0 ? (
@@ -171,7 +200,7 @@ export function AccountsList() {
                       aria-label={`${a.username} 역할`}
                       value={a.role}
                       disabled={isSelf}
-                      onChange={(e) => setRole.mutate({ username: a.username, role: e.target.value })}
+                      onChange={(e) => { setResetDone(null); setRole.mutate({ username: a.username, role: e.target.value }); }}
                     >
                       <option value="user">user</option>
                       <option value="admin">admin</option>
@@ -195,6 +224,10 @@ export function AccountsList() {
                         {a.disabled === 1 ? "활성화" : "비활성화"}
                       </Button>
                       {isSelf && <span className="text-muted text-xs">자기 계정은 변경할 수 없습니다</span>}
+                      {/* 비밀번호 재설정(2026-11-03): 자기 계정엔 두지 않는다(서버 409 cannot_reset_self -- 자기 비밀번호는 셀프
+                          재설정). 특권 계정은 버튼을 보이고 서버가 판정한다(403 사유는 창 안). */}
+                      {!isSelf && <ResetPasswordDialog account={a} onDone={setResetDone}
+                                                       focusAfterDone={() => resetNoteRef.current?.focus()} />}
                       {/* 삭제 자리에는 삭제 고유의 사유를 낸다 -- 왼쪽 문구는 역할/토글
                           가드용이고 여기는 삭제 버튼이 있어야 할 자리다(설계 §3). */}
                       {isSelf ? (
@@ -218,6 +251,14 @@ export function AccountsList() {
         {canGrant
           ? `${K8S_GRANT_LABEL}은 admin 역할과 따로입니다 — admin 계정의 「자격 주기」로 줍니다(배포 설정 계정은 화면에서 바꿀 수 없습니다). 권한이 없는 관리자는 자기 k8s 권한(namespace 의 rolebinding) 안의 PV 만 고릅니다.`
           : `${K8S_GRANT_LABEL}은 admin 역할과 따로이며, 이 권한이 있는 관리자만 주거나 뺄 수 있습니다.`}
+      </p>
+      {/* 보안 이벤트 화면(2026-11-03) 안내 -- 라우터 밖(단위 테스트의 맨 렌더)에서는 링크 없이 같은 문장. */}
+      <p className="mt-1 text-xs text-ink/70 break-keep">
+        {"인증번호 잠금 해제와 로그인 보안 기록은 "}
+        {inRouter
+          ? <Link className="text-accent underline" to="/admin/security">「보안 이벤트」 화면</Link>
+          : "「보안 이벤트」 화면"}
+        {"에서 봅니다."}
       </p>
       </Card>
     </section>

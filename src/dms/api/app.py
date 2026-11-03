@@ -8,18 +8,19 @@ from starlette.middleware.sessions import SessionMiddleware
 from starlette.responses import FileResponse, JSONResponse, Response
 from starlette.staticfiles import StaticFiles
 from ..config import Settings
-from ..db import Database
+from ..db import Database, utc_now_iso
 from ..repositories import Repositories
 from ..wiring import (build_build_runner, build_execution_adapter,
                      build_node_lister, build_queue_reader,
                      build_rollout_runner, wire_reconnect_event)
+from .login_guard import GlobalPacer, LoginAlarms, LoginGate
 from .login_limiter import LoginRateLimiter
 from .password_transport import PasswordTransport
 from .routes_accounts import router as accounts_router
-from .routes_auth import (router as auth_router, VERIFICATION_GUESS_PER_CLIENT_LIMIT,
-                          VERIFICATION_GUESS_WINDOW_SECONDS, VERIFICATION_MAIL_CONCURRENCY,
+from .routes_auth import (router as auth_router, VERIFICATION_MAIL_CONCURRENCY,
                           VERIFICATION_MAIL_GLOBAL_LIMIT, VERIFICATION_MAIL_LIMIT,
-                          VERIFICATION_MAIL_PER_CLIENT_LIMIT, VERIFICATION_MAIL_WINDOW_SECONDS)
+                          VERIFICATION_MAIL_WINDOW_SECONDS)
+from .routes_security import router as security_router
 from .routes_mail_settings import router as mail_settings_router
 from .routes_portal import public_router as portal_public_router, router as portal_router
 from .mailer import SendThrottle
@@ -67,26 +68,52 @@ def create_app(settings: Settings, db: Database, exit_fn=None) -> FastAPI:
     app.state.node_lister = build_node_lister(settings)
     # 슬라이스 22 §2.6: 재연결 성공의 영속 흔적(events.db_reconnected) 훅.
     wire_reconnect_event(db, app.state.repos)
-    # 2026-09-07 웹 인증 하드닝: 로그인 감속기(프로세스 메모리)와 비밀번호 전송
+    # 메모리 카운터(아래 로그인·인증 상한·경보)의 기준 시각 -- 보안 이벤트 화면이 「이 시각 이후 값, 재시작하면 비워짐」을
+    # 보인다(2026-11-03).
+    app.state.started_at = utc_now_iso()
+    # 2026-09-07 웹 인증 하드닝: 로그인 감속기(프로세스 메모리, 2026-11-03 부터 아이디 키만)와 비밀번호 전송
     # 봉인기(세션 시크릿에서 유도한 P-256 키 -- 레플리카·재시작에 걸쳐 동일).
     app.state.login_limiter = LoginRateLimiter(
         settings.login_rate_limit_attempts, settings.login_rate_limit_window_seconds)
+    # 2026-11-03 로그인·식별 묶음(api/login_guard.py, routes_auth.login 의 처리 순서): 아이디별 총 시도(성공 포함) 상한,
+    # scrypt 대기형 슬롯, 대기형 전체 스위치(기본 꺼짐), 경보 카운터. 모두 프로세스 메모리.
+    app.state.login_attempt_limiter = LoginRateLimiter(
+        settings.login_id_attempt_limit, settings.login_id_attempt_window_seconds)
+    app.state.login_gate = LoginGate(settings.login_scrypt_slots, settings.login_scrypt_max_wait_seconds)
+    app.state.login_pacer = GlobalPacer(
+        settings.login_global_pace_limit, settings.login_global_pace_window_seconds,
+        settings.login_global_pace_max_wait_seconds)
+    app.state.login_alarms = LoginAlarms(
+        settings.login_alarm_window_seconds, settings.login_alarm_failures,
+        settings.login_alarm_attempts, settings.login_alarm_source_failures)
     app.state.password_transport = PasswordTransport(settings.session_secret)
     # 2026-10-01 Knox 메일 릴레이: 수신자별 인증 메일 상한(프로세스 메모리 -- 릴레이 쪽 상한이 최후 방어선).
+    # 클라이언트 IP 별 상한(mail_throttle_client)은 2026-11-03 에 지웠다(원 IP 는 기록·경보 전용).
     app.state.mail_throttle = SendThrottle(VERIFICATION_MAIL_LIMIT, VERIFICATION_MAIL_WINDOW_SECONDS)
-    app.state.mail_throttle_client = SendThrottle(VERIFICATION_MAIL_PER_CLIENT_LIMIT,
-                                                  VERIFICATION_MAIL_WINDOW_SECONDS)
     app.state.mail_throttle_global = SendThrottle(VERIFICATION_MAIL_GLOBAL_LIMIT,
                                                   VERIFICATION_MAIL_WINDOW_SECONDS)
     app.state.mail_send_slots = threading.BoundedSemaphore(VERIFICATION_MAIL_CONCURRENCY)
-    # 세 상한을 "모두 통과할 때만 모두 기록"하는 peek~record 구간의 락, 그리고 거절 이벤트를 (상한, 키)마다
-    # 창에 한 번만 남기는 기록표(routes_auth.request_verification_code).
+    # 두 상한을 "모두 통과할 때만 모두 기록"하는 peek~record 구간의 락(인증 메일·완료 안내 메일 공용), 그리고 거절
+    # 이벤트를 (상한, 키)마다 창에 한 번만 남기는 기록표(routes_auth.request_verification_code).
     app.state.mail_throttle_lock = threading.Lock()
     app.state.mail_throttle_notes = SendThrottle(1, VERIFICATION_MAIL_WINDOW_SECONDS)
-    # 접속 IP 별 틀린 인증번호 상한(routes_auth._consume_code) -- 아이디별 누적 잠금(DB)과 별개 축.
+    # 인증번호 전체 오답 상한(routes_auth._consume_code, 키 "global" 하나 -- 2026-11-03 사용자 결정 1000회/1시간) --
+    # 아이디별 누적 잠금(DB)과 별개 축. 옛 접속 IP 별 상한을 대체한다. 보안 이벤트 화면의 「전체 잠금 해제」가 비운다.
     app.state.verification_guess_limiter = LoginRateLimiter(
-        VERIFICATION_GUESS_PER_CLIENT_LIMIT, VERIFICATION_GUESS_WINDOW_SECONDS)
+        settings.verification_guess_global_limit, settings.verification_guess_global_window_seconds)
     app.state.verification_guess_lock = threading.Lock()   # 검사 -> 소비 -> 기록을 원자로(_consume_code)
+    if app.state.login_pacer.enabled:
+        # 켜 둔 채 잊지 않게(2026-11-03): 스위치는 env + 재시작으로만 켜므로, 켜진 채 뜬 기동마다 한 줄을 남긴다(보안 이벤트
+        # 화면). record_event 는 올리지 않는다(DB 가 아직 없어도 기동은 계속된다).
+        app.state.repos.observability.record_event(
+            component="auth", severity="info", event_type="login_pacing_enabled",
+            message=(f"global login pacing is ON at startup: {settings.login_global_pace_limit} failures per "
+                     f"{settings.login_global_pace_window_seconds}s, max wait "
+                     f"{settings.login_global_pace_max_wait_seconds}s -- set DMS_LOGIN_GLOBAL_PACE_LIMIT=0 and "
+                     "restart dms-api to turn it off"),
+            payload={"limit": settings.login_global_pace_limit,
+                     "window_seconds": settings.login_global_pace_window_seconds,
+                     "max_wait_seconds": settings.login_global_pace_max_wait_seconds})
     # 2026-10-21 리뷰: 스토리지 합계의 리포트 읽기 실패 기억(프로세스 메모리, TTL) -- 같은 실패가 호출마다 읽기 예산을 먼저
     # 써서 뒤의 읽을 수 있는 대상에 닿지 못하는 것을 막는다(routes_usage.storage_totals 규칙 4).
     app.state.report_read_failures = ReportReadFailures()
@@ -106,8 +133,10 @@ def create_app(settings: Settings, db: Database, exit_fn=None) -> FastAPI:
                        session_cookie="dms_session",
                        https_only=settings.session_cookie_secure)
 
+    # async(2026-11-03): 동기 def 는 스레드풀(기본 40)에서 돈다 -- 로그인 폭주·릴레이 지연이 스레드를 잡아도 liveness 가
+    # 그 줄에 서지 않고 이벤트 루프에서 바로 답한다(로그인은 슬롯을 이벤트 루프에서 기다린다, api/login_guard.py).
     @app.get("/healthz")
-    def healthz():
+    async def healthz():
         return {"status": "ok"}
 
     # 연속 readyz 실패 카운터(슬라이스 22 §2.4). 리스트에 담는 이유는 클로저에서
@@ -143,6 +172,7 @@ def create_app(settings: Settings, db: Database, exit_fn=None) -> FastAPI:
 
     app.include_router(auth_router)
     app.include_router(accounts_router)
+    app.include_router(security_router)
     app.include_router(storages_router)
     app.include_router(user_storages_router)
     app.include_router(scan_paths_router)

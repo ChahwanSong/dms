@@ -1,7 +1,7 @@
 import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
 import { beforeAll, afterAll, afterEach, test, expect, vi, describe, it } from "vitest";
-import { apiGet, apiSend, ApiError, reasonText } from "./api";
+import { apiGet, apiSend, ApiError, AUTH_NOTICE_KEY, apiErrorText, reasonText, retryAfterText } from "./api";
 
 const server = setupServer();
 beforeAll(() => server.listen());
@@ -133,5 +133,67 @@ describe("reasonText", () => {
     // 들어가면 잡 로그 탭에서 거짓말이 된다. 공유 코드의 문구는 문맥 중립이어야 한다.
     expect(reasonText("poll_failed")).toBe("상태를 확인하지 못했습니다");
     expect(reasonText("poll_failed")).not.toMatch(/빌드/);
+  });
+});
+
+// ---- 2026-11-03 로그인·식별 묶음: Retry-After·세션 무효화 안내 ----------------------------------------------------------
+
+describe("Retry-After", () => {
+  it("정수 초면 retryAfter 에 숫자로 싣는다(공백 허용)", async () => {
+    server.use(http.post("/api/auth/login", () =>
+      HttpResponse.json({ detail: "login_rate_limited" }, { status: 429, headers: { "Retry-After": " 42 " } })));
+    await expect(apiSend("POST", "/api/auth/login", {}))
+      .rejects.toMatchObject({ status: 429, code: "login_rate_limited", retryAfter: 42 });
+  });
+
+  it("없거나 HTTP-date 형식이면 null(모름) -- 0 으로 지어내지 않는다", async () => {
+    server.use(http.post("/api/auth/login", () =>
+      HttpResponse.json({ detail: "login_busy" }, { status: 503 })));
+    await expect(apiSend("POST", "/api/auth/login", {})).rejects.toMatchObject({ status: 503, retryAfter: null });
+    server.use(http.post("/api/auth/login", () =>
+      HttpResponse.json({ detail: "login_busy" }, { status: 503, headers: { "Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT" } })));
+    await expect(apiSend("POST", "/api/auth/login", {})).rejects.toMatchObject({ status: 503, retryAfter: null });
+  });
+
+  it("retryAfterText: 초·분·시간(올림), 0 은 약 1초", () => {
+    expect(retryAfterText(30)).toBe("약 30초");
+    expect(retryAfterText(90)).toBe("약 2분");
+    expect(retryAfterText(3600)).toBe("약 1시간");
+    expect(retryAfterText(3601)).toBe("약 2시간");
+    expect(retryAfterText(59)).toBe("약 59초");
+    expect(retryAfterText(0)).toBe("약 1초");
+  });
+
+  it("apiErrorText: 429·503 + 남은 시간을 알면 덧붙이고, 그 밖엔 문구 그대로", () => {
+    expect(apiErrorText(new ApiError(429, "login_rate_limited", "많음", 30))).toBe("많음 (다시 시도까지 약 30초)");
+    expect(apiErrorText(new ApiError(503, "login_busy", "몰림", 5))).toBe("몰림 (다시 시도까지 약 5초)");
+    expect(apiErrorText(new ApiError(429, "login_rate_limited", "많음", null))).toBe("많음");
+    expect(apiErrorText(new ApiError(401, "invalid_credentials", "틀림", 30))).toBe("틀림");
+    expect(apiErrorText(new ApiError(429, "login_rate_limited", "많음"))).toBe("많음");
+  });
+});
+
+describe("세션 무효화 안내(401 session_revoked)", () => {
+  it("session_revoked 면 로그인 화면용 키를 남기고 dms:unauthorized 도 발화한다", async () => {
+    sessionStorage.removeItem(AUTH_NOTICE_KEY);
+    const spy = vi.fn();
+    window.addEventListener("dms:unauthorized", spy);
+    try {
+      server.use(http.get("/api/auth/me", () => HttpResponse.json({ detail: "session_revoked" }, { status: 401 })));
+      await expect(apiGet("/api/auth/me")).rejects.toMatchObject({
+        status: 401, code: "session_revoked", message: "비밀번호가 바뀌어 로그인이 끝났습니다 — 새 비밀번호로 다시 로그인하세요" });
+      expect(sessionStorage.getItem(AUTH_NOTICE_KEY)).toBe("session_revoked");
+      expect(spy).toHaveBeenCalledOnce();
+    } finally {
+      window.removeEventListener("dms:unauthorized", spy);
+      sessionStorage.removeItem(AUTH_NOTICE_KEY);
+    }
+  });
+
+  it("다른 401(not_authenticated 등)은 키를 남기지 않는다", async () => {
+    sessionStorage.removeItem(AUTH_NOTICE_KEY);
+    server.use(http.get("/api/auth/me", () => HttpResponse.json({ detail: "not_authenticated" }, { status: 401 })));
+    await expect(apiGet("/api/auth/me")).rejects.toBeInstanceOf(ApiError);
+    expect(sessionStorage.getItem(AUTH_NOTICE_KEY)).toBeNull();
   });
 });

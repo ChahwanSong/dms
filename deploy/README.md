@@ -957,7 +957,7 @@ ingress-nginx v1.15.1(IngressClass `nginx`).
    레플리카 노드로 ARP 재선출·자동 복구(svc 가 externalTrafficPolicy=Local 이라
    선출은 컨트롤러 파드가 있는 노드 중에서만).
 
-7. **웹 인증 하드닝(2026-09-07, d119)** — 20-config 의 세 키가 라이브 자세다:
+7. **웹 인증 하드닝(2026-09-07, d119)** — 20-config 의 아래 키들이 라이브 자세다(2026-11-03 로그인 보호 장치 키 추가):
    - `DMS_PASSWORD_ENCRYPTION_REQUIRED: "true"` — 포탈은 비밀번호를 WebCrypto 로
      봉인해(`password_enc`, ECDH P-256 + HKDF + AES-256-GCM) 보내고 서버는 평문
      `password` 를 422 로 거절한다. 서버 키는 `DMS_SESSION_SECRET` 에서 유도되므로
@@ -966,14 +966,35 @@ ingress-nginx v1.15.1(IngressClass `nginx`).
      "password":..}' https://<포탈>/api/admin/accounts`. 자동화가 로그인 세션이
      필요하면 `python -c 'from dms.api.password_transport import seal_with_info'`
      로 봉인해 보낸다(예: `~/.claude/jobs/.../tmp/login-sealed.py`).
-   - `DMS_LOGIN_RATE_LIMIT_ATTEMPTS: "10"` / `..._WINDOW_SECONDS: "60"` — 사용자명·
-     IP 별 실패 10회/분 초과 시 429 + Retry-After(창이 지나면 자동 해제, 잠금 아님).
-     ingress-nginx 가 X-Real-IP 를 채우므로 IP 키가 정확하다. 관찰만 하려면 ATTEMPTS
-     를 0 으로.
+   - `DMS_LOGIN_RATE_LIMIT_ATTEMPTS: "10"` / `..._WINDOW_SECONDS: "60"`: **아이디별** 실패 10회/분을
+     넘으면 429 + Retry-After 다. 창이 지나면 저절로 풀린다(잠금 아님). 원 IP 로는 막지 않는다
+     (2026-11-03 — SNAT 뒤 전원이 함께 잠겼다). 관찰만 하려면 이 ATTEMPTS 와 아래
+     `DMS_LOGIN_ID_ATTEMPT_LIMIT` 를 **둘 다** 0 으로 둔다(이것만 0 이면 남의 틀린 비밀번호도 총 시도로
+     세어 남의 아이디가 429 에 묶인다).
+   - `DMS_LOGIN_ID_ATTEMPT_LIMIT: "60"`(/60초): 아이디별 총 시도(성공 포함)다. 맞는 비밀번호를 반복해
+     CPU 를 태우는 경로를 막는다. e2e 한 벌의 admin 로그인은 약 31회라 영향이 없다(60 에 다가가면 e2e
+     `env.ts` 에 이 키를 준다).
+   - `DMS_LOGIN_SCRYPT_SLOTS: "2"` / `..._MAX_WAIT_SECONDS: "5"`: 비밀번호 검증 동시 실행 수다. 못 얻으면
+     최대 5초 기다린 뒤 503 `login_busy`(과부하 신호, 차단 아님).
+   - `DMS_LOGIN_GLOBAL_PACE_LIMIT: "0"`(꺼짐) / `..._WINDOW_SECONDS: "60"` / `..._MAX_WAIT_SECONDS: "15"`:
+     대기형 전체 스위치다.
+     - 스프레이 공격 중 출발지 차단(Avi·방화벽) 전까지 켠다. 예: LIMIT "60" → 전 아이디 실패를 분당
+       60회로 늦춘다.
+     - 켜고 끄는 절차는 ConfigMap 수정 → `kubectl --context <ctx> -n dms rollout restart deploy/dms-api`
+       다(재시작은 메모리 카운터도 비운다).
+     - 켠 채 기동하면 보안 이벤트에 `login_pacing_enabled` 가 남는다.
+   - `DMS_LOGIN_ALARM_WINDOW_SECONDS: "600"` / `_FAILURES: "30"` / `_ATTEMPTS: "300"` /
+     `_SOURCE_FAILURES: "20"`: 경보 임계다(이벤트만).
+     - 출발지 경보는 창당 50건까지만 남는다.
+     - 원 IP 가 한 주소로 모이는 배치(PROXY 없음)는 SOURCE_FAILURES 를 0 으로 둔다.
+   - 확인은 포탈 **관리 → 보안 이벤트**에서 한다(보호 장치 현재 값·인증번호 잠금 해제·최근 이벤트·
+     출발지 IP).
    - 검증(실증 절차): 평문 로그인 `curl -d '{"username":"u","password":"p"}'
      /api/auth/login` = 422 `password_encryption_required`; 봉인 로그인 = 200 +
-     Set-Cookie; 틀린 비밀번호 봉인 10회 후 11번째(정답) = 429; 포탈 화면 로그인
-     정상 + 개발자도구 네트워크 탭 본문에 `password` 없음.
+     Set-Cookie; 틀린 비밀번호 봉인 10회 후 11번째(정답) = 429; 같은 출발지에서 다른
+     아이디로 10회 실패한 뒤에도 내 아이디 로그인 = 200(IP 축 없음); 위조 `X-Real-IP` 는
+     보안 이벤트의 출발지에 반영되지 않는다; 포탈 화면 로그인 정상 + 개발자도구 네트워크
+     탭 본문에 `password` 없음.
 
 ---
 
@@ -1017,9 +1038,11 @@ ingress-nginx v1.15.1(IngressClass `nginx`).
 운영 신호: 인증 메일마다 events 에 `verification_email_sent` / `_failed`(사유) / `_uncertain`(요청은 갔는데 응답을
 못 받음 -- 코드는 저장, 화면은 "발송 확인이 늦어지고 있다") 가 남고, `_throttled` 는 같은 상한·키에 10분에 한 번만
 남는다(인증번호는 어디에도 없다). 사용자 화면은 실패 시 502 `verification_email_failed`(인증번호는 발송 성공 뒤에만 저장하므로 실패가 메일함의
-이전 코드를 죽이지 않는다), 상한 초과 시 429 `verification_rate_limited`(Retry-After) -- 수신자별 5통/10분, 클라이언트
-IP 별 20통/10분, 전체 300통/10분, 동시 발송 8건(모두 api 프로세스 메모리라 레플리카 수만큼 늘어난다; 거절된 요청은
+이전 코드를 죽이지 않는다), 상한 초과 시 429 `verification_rate_limited`(Retry-After) -- 수신자별 5통/10분,
+전체 300통/10분, 동시 발송 8건(모두 api 프로세스 메모리라 레플리카 수만큼 늘어난다; 거절된 요청은
 어느 상한도 쓰지 않는다). 릴레이 자체의 `RELAY_RATE_LIMIT` 은 그와 별개로 걸린다.
+가입·비밀번호 변경이 끝나면 같은 상한을 거쳐 완료 안내 메일(「계정 생성 완료 안내」·「비밀번호 변경 안내」)이
+간다. 결과는 이벤트 `account_notice_sent`·`_stub`·`_failed`·`_skipped` 로 남고, 실패해도 가입·변경은 그대로다.
 
 **테스트베드 검증(사내 릴레이 없음)**: `tests/fake_knox_relay.py` 가 같은 계약을 흉내 낸다 --
 `python3 tests/fake_knox_relay.py --host 0.0.0.0 --port 8025 --token <T> --outbox <DIR>` 로 띄우고 포탈에서
@@ -1028,15 +1051,21 @@ IP 별 20통/10분, 전체 300통/10분, 동시 발송 8건(모두 api 프로세
 때만 릴레이로 간다). 검증이 끝나면 발송 방식을 다시 비우거나 `stub` 으로 되돌린다(가짜 릴레이가 꺼지면 knox_relay
 는 502 가 된다).
 
-**인증번호 무차별 대입 상한**: 코드당 5회 틀리면 그 코드가 죽고, (아이디, 용도)별로 첫 실패부터 24시간 동안
-누적 10회 틀리면 그 창이 끝날 때까지 인증번호 발급·확인이 모두 429 `verification_locked`(Retry-After)다 --
-재발급으로 시도 횟수를 초기화하는 공격(4자리를 하루 ~30% 확률로 맞힘)을 막는다. 로그인은 영향이 없고 잠금은
-창이 끝나면 저절로 풀린다(포탈에 해제 버튼은 없다 -- 급하면 운영자가 DB 테이블 `verification_failures` 의 그
-(username, purpose) 행을 지운다; 성공한 확인도 그 행을 지운다). 남의 아이디로 10번 틀려 그 사람의 재설정·가입을
-하루 막을 수 있다는 것이 이 상한의 대가다(이벤트 `verification_locked` 로 보인다).
-또 **같은 접속 IP** 의 틀린 인증번호는 24시간에 20회까지다(여러 아이디에 나눠 던지는 추측 차단) -- 넘으면 그 IP 의
-가입·재설정 확인이 429 `verification_client_locked`(이벤트 `verification_client_locked` 에 IP). api 프로세스
-메모리라 재시작하면 풀리고, 공용 프록시 뒤의 사용자들은 함께 막힐 수 있다.
+**인증번호 무차별 대입 상한**(6자리·5분, 2026-11-03):
+- 코드당 5회 틀리면 그 코드가 죽는다.
+- (아이디, 용도)별로 첫 실패부터 24시간 동안 누적 10회 틀리면, 그 창이 끝날 때까지 인증번호 발급·확인이 모두
+  429 `verification_locked`(Retry-After)다.
+- 모든 아이디를 합친 틀린 인증번호가 1시간에 1000회(`DMS_VERIFICATION_GUESS_GLOBAL_LIMIT`/`_WINDOW_SECONDS`)에
+  닿으면, 셀프 가입·재설정(발급·확인)이 창이 밀려날 때까지 429 `verification_global_locked`다(이벤트
+  `verification_global_locked`).
+
+로그인은 영향이 없다. **구제**:
+- 관리 → 계정의 「계정 생성」·「비밀번호 재설정」은 인증번호와 무관하다(세션 관리자만, 특권 계정은 특권 관리자만,
+  대상 계정의 기존 로그인은 모두 끊긴다).
+- 관리 → 보안 이벤트에서 아이디별 「잠금 해제」(DB `verification_failures` 행 삭제)와 「전체 잠금 해제」(api
+  메모리)를 할 수 있다. 둘 다 감사 로그(`security`)와 이벤트에 누가 했는지 남는다.
+
+원 IP 별 상한(옛 `verification_client_locked`)은 없앴다. api 프로세스 메모리 상한은 재시작하면 풀린다.
 
 ## 12. 작업(요청) 삭제 — 정리 상태·지연 대응 (2026-10-08)
 

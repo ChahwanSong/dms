@@ -3,7 +3,7 @@ import type { LucideIcon } from "lucide-react";
 import {
   Ban, Boxes, Database, FilePlus, FolderCog, Hammer,
   Layers, LayoutDashboard, ListTodo, Mail, Rocket, ScrollText,
-  Server, Settings, Shield, ShipWheel, SlidersHorizontal, TrendingUp, Users,
+  Server, Settings, Shield, ShieldAlert, ShipWheel, SlidersHorizontal, TrendingUp, Users,
 } from "lucide-react";
 
 // 메뉴는 **데이터가 진실**이다(슬라이스 31 T2): 항목 추가·이동은 아래 배열 한 줄이고,
@@ -80,6 +80,9 @@ export const NAVIGATION: NavSection[] = [
           { path: "/admin/policies", label: "정책", icon: Shield },
           { path: "/admin/denylist", label: "denylist", icon: Ban },
           { path: "/admin/audit", label: "감사 로그", icon: ScrollText },
+          // 보안 이벤트(2026-11-03): 로그인·인증번호 보호 장치 상태 + 인증번호 잠금 해제 + 보안 이벤트 목록 -- 감사 로그 바로 뒤
+          // (둘 다 「누가 언제 무엇을」 기록을 보는 화면이다).
+          { path: "/admin/security", label: "보안 이벤트", icon: ShieldAlert },
           // 메일 설정(2026-10-01): 인증 메일(Knox 릴레이) 연결값 -- 계정 셀프서비스의 운영 설정이라 관리 그룹.
           { path: "/admin/mail", label: "메일 설정", icon: Mail },
           // 포탈 설정(2026-10-02): 포탈 이름의 서브네임(사이트 표시 이름).

@@ -95,6 +95,79 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ✅ ② 로그인·식별 — 아이디 기준 상한·원 IP 는 기록 전용·인증번호 6자리·대기형 보호 장치·관리자 구제·보안 이벤트 화면 — **구현·검증**(2026-11-03, 테스트베드 실증 대기)
+
+설계 v6(`docs/history/specs/2026-11-03-dms-k8s-prod-design.md`) 5절·9절 ②, 사용자 결정 #15~#23(비밀번호 최소 규칙은 넣지 않음,
+인증번호 전체 오답 1000회/시간, 전체 스위치는 기본 꺼짐·대기형, 선택 4종 모두 포함).
+
+- **식별**: IP 축 셋(로그인 `ip:` 키·인증 메일 IP 별·인증번호 IP 별)을 없앴다. 원 IP(`auth.client_ip` — XFF 마지막 항목(IP 검증) →
+  소켓 피어, **X-Real-IP 무시**)는 보안 이벤트 payload `{client_ip, peer}` 와 경보에만 쓴다. SNAT·NAT 뒤 전원이 함께 잠기던 문제
+  (테스트베드 ingress 출발지가 모두 10.10.10.1)가 사라진다.
+- **인증번호**: 6자리(2026-08-20 의 4자리를 대체)·5분·코드당 5회·아이디별 10회/24h + **전체 오답 상한 1000회/3600초**(거절형 429
+  `verification_global_locked`, 발급도 거절 — 옛 `verification_client_locked` 삭제).
+- **로그인**(`routes_auth.login` async, `api/login_guard.py`): 아이디 실패 10/60s + 아이디별 총 시도 60/60s(성공 포함) → 봉인
+  해제 → 대기형 전체 스위치(기본 꺼짐, 켜면 토큰 버킷으로 늦추고 예상 대기 > M 이면 503 `login_busy`) → scrypt 대기형 슬롯 2개(이벤트
+  루프에서 최대 5초, 넘치면 503) → 슬롯 안 재확인 → 검증 → 401 이 아니면 토큰 환불. `/healthz` async(대기 중에도 응답). 경보 3종
+  (실패·전체 시도·출발지별 실패 — 공격자가 고르는 키의 이벤트는 종류별 창당 50건).
+- **관리자 구제·세션**: 관리자 비밀번호 재설정 `POST /api/admin/accounts/{u}/password-reset`(세션 관리자·봉인 용도
+  `admin_password_reset`·특권 가드·자기 자신 409 `cannot_reset_self`), 인증번호 잠금 해제(아이디별·전체 — `routes_security`),
+  비밀번호가 바뀌면 `accounts.session_epoch`(난수) 회전 → 옛 세션 401 `session_revoked`(CREATE TABLE + `_ensure_columns`),
+  가입·비밀번호 변경 완료 안내 메일(최선 노력, `api/account_notice.py`).
+- **포탈**: 관리 → 「보안 이벤트」(보호 장치 상태·인증번호 잠금 표와 해제·이벤트 목록 — 종류·심각도·검색·키셋 무한 스크롤, 해제 결과는
+  늘 있는 결과 줄로 알리고 포커스를 옮김), 계정 화면 「비밀번호 재설정」(봉인, 자기 행 없음, 안내 메일 결과 문구), 로그인 화면 6자리
+  인증번호 칸·429/503 남은 시간 안내·2초 넘으면 대기 안내·비밀번호 변경으로 끝난 세션 안내, 375px 결함 2건 수리.
+- **리뷰**: 계약 → 백엔드·포탈 병렬 구현 → 리뷰 1라운드(백엔드·포탈 UX·보안/회귀) → 수정 → 2라운드(새 눈, 지적 7건 — 실 Chrome 에서
+  찾은 「전체 해제 결과 줄이 안 뜸」 포함) → 수정.
+- **테스트**: 백엔드 새 파일 6개(login_guard·login_concurrency·admin_password_reset·session_revocation·api_security 외) + 기존 파일 갱신,
+  포탈 SecurityPage·ResetPasswordDialog·Login 등, e2e E17(관리자 재설정 → 다른 브라우저 401 session_revoked 안내·옛/새 비밀번호·보안
+  이벤트 행·1280/375) + E3 순회에 보안 이벤트.
+- **검증(①·② 함께)**: 전체 백엔드 4588 passed(스냅숏), vitest 1847, tsc(앱·e2e), e2e 32(E17 첫 실행 1건 실패 = 테스트 결함 — 종류 코드
+  칸을 부분 일치로 찾아 같은 조치의 완료 안내 메일 행을 잡음 → 정확 일치로 고친 뒤 통과), dist 외부 URL 0.
+
+### ✅ ① B3 — ref 기록이 끊긴 틱의 잡 객체를 이어 받거나 회수한다(409 AlreadyExists 를 잡 실패로 접지 않음) — **구현·검증**(2026-11-03, 테스트베드 실증 대기)
+
+설계 v6 9절 「① B3 세부」(사용자 승인).
+
+**현상**: 잡 객체 이름이 결정적이고(`dms-{op}-{phase}-{job_id[:12]}`·`dms-preflight-…`) ref 는 create **뒤에** DB 에 남긴다(`stepper._record_ref`). 그 사이 DB 가 끊기면(장애조치·컨트롤러 재시작) 다음 틱이 같은 이름으로 다시 만들다 409 를 받았다. 그것이 submit_failed 로 접혀 잡은 FAILED/REJECTED 로 잘못 기록됐고, vcjob 은 추적 없이 돌았다(pod_gc 는 phase_refs 만 본다). rm·sync 라면 화면 밖에서 지우거나 덮어쓴다는 뜻이다. DB 스키마·사유 코드·RBAC 변경은 없다.
+
+- **create 갈래**: 실 클라이언트는 409 를 `K8sAlreadyExists` 로, 반영됐는지 모르는 실패를 `K8sTransient` 로 올린다(`create_error_class`). 「모르는 실패」는 상태 코드 없음·0·429·5xx·OSError·urllib3 전송 오류다. 그 밖의 4xx 는 원문 그대로 submit_failed(종전).
+- **채택**(`VolcanoExecutionAdapter._create_or_adopt`·`adoption_problem`): 다시 읽은 객체가 아래를 모두 만족하면 새로 만든 것과 **같은 ref** 를 돌려준다. 복합 preflight 는 파드별로 본다.
+  - 라벨 `dms.io/job-id`(전체 id)·`dms.io/phase`·`dms.io/tool` 이 같다. preflight 파드에 tool 라벨을 새로 붙였다.
+  - 지을 때 실은 지문 annotation `dms.io/spec-fingerprint` 가 같다. `manifest_fingerprint` v1 = apiVersion·kind·이름·ns·라벨·spec 의 정렬 JSON sha256, 컨테이너 image 만 뺀다.
+  - 삭제 중이 아니다.
+  - 이미지를 지문에서 빼는 근거: 채택이 정하는 것은 실행이 아니라 추적이다. 틱 사이에 포탈 릴리스가 끼어도 이미 도는 객체를 놓치지 않게 한다. 행 값(재클램프·경로·소유자)은 지문에 남는다.
+  - 409 로 채택한 것만 `submit_adopted`(info, 포탈 단계 행 주석 「이전 제출이 만들고 기록하지 못한 객체」)로 남긴다. create 응답만 잃은 채택은 로그만 남긴다.
+- **「모름」은 실패가 아니다** — `SubmitUndecided`: 잡은 이전 상태에 머물고 run_once 의 step_error 를 남기며 다음 틱에 다시 낸다.
+  - 409 뒤 다시 읽기 실패: 상한 없이 재시도.
+  - create 결과 모름: 다시 읽어 같은 판정을 하고, 응답만 잃은 create 는 같은 틱에 채택한다.
+  - 다시 읽으니 없음·삭제 중: `SUBMIT_UNDECIDED_WINDOW_SECONDS`(300초)를 넘기면 종전 submit_failed.
+  - 문구는 판정을 앞에 두고, apiserver 원문은 따로 잘라 끝에 붙인다.
+- **채택하지 않은 이 잡의 객체는 회수한다**:
+  - 라벨 셋은 같고 지문만 다른 객체(배포 경계의 옛 객체)와, 복합 preflight 뒤쪽이 실패할 때 앞쪽 파드는 `ExecutionError.strays` 로 올라온다. `stepper._fail_submit` 이 지우고, 그 결과를 submit_failed 이벤트·진단 로그에 싣는다(못 지우면 error 「추적 밖에서 돌 수 있음」).
+  - 이미 끝난 실행 전 재점검 파드(exec_preflight)는 채택하지 않는다. `SubmitUndecided(strays)` 로 지우고(`_submit_phase`) 다음 틱에 다시 점검한다. 재점검은 첫 실행 관문 뒤의 결과여야 하는데, 기록이 끊긴 잡은 겹침 판정에서 재점검 전으로 보여 앞선 rm 이 먼저 돌 수 있기 때문이다.
+  - stepper 가 성공 아닌 종단으로 끝낼 때마다(`_finalize` 한 곳 — fail-closed·배치 취소 정지·앞 단계 파드 소실·소유자 측정 거부) 라벨(전체 job_id)로 phase_refs 밖 객체를 찾아 지운다(`_reclaim_unrecorded`·`unrecorded_refs`, `unrecorded_reclaimed` 이벤트).
+  - 잡·요청·배치 취소는 Cancelled 커밋 뒤 같은 조회로 끝낸다(`api.cancel._sweep_unrecorded`).
+- **겹친 컨트롤러**(30초 리스를 넘는 틱)의 낡은 스냅숏은 아무것도 더 하지 않는다:
+  - phase_refs 빈 자리 CAS(`data_jobs.record_phase_ref` "recorded/gone/taken" — `set_phase_ref` 는 그 래퍼)
+  - 제출 뒤 전진 전이의 상태 CAS(`set_job_state(expected_state=)`, `stepper._advance` — Running→Preflight, 컨펌된 Executing→ConfirmPending 되돌림 방지)
+  - 실패 전 확인(`_phase_taken`). 회수는 이 확인 뒤에만 한다.
+  - Executing→Executing 자기 전이는 하나만 남는다.
+- **테스트**: `tests/test_submit_adopt.py` 90건. 열 가지 제출 경로 채택(preflight·exec_preflight·scan/rm 실행·rm·dsync 미리보기·nsync 복합 4단계), 라벨·지문·삭제 중·사라짐·GET 실패·transient, 복합 파드별, 지문의 이미지 무관·결정성(해시 시드), stepper 기록 실패 다음 틱 채택(preflight·실행·미리보기·exec_preflight·반복), 회수(strays·종단·취소·재점검), 겹친 스냅숏 CAS, 저장소 CAS.
+
+**설계 9절과 달라진 점(출하 전 사용자 확인 필요)** — 설계 문구는 「하나라도 어긋나면 지금처럼 실패합니다」다.
+1. **삭제 중(deletionTimestamp)이면 실패가 아니라 최대 300초 재시도**한다. 다 지워지면 다음 틱의 create 가 새로 만든다.
+2. **409 뒤 다시 읽기(GET) 실패는 상한 없이 재시도**한다(작업 명세는 「clear reason 과 함께 submit_failed」였다). 409 는 객체가 있다는 증거라, 실패로 접으면 B3 가 같은 장애에서 되살아난다. 폴링의 GET 실패도 같은 방식이다.
+3. **라벨은 같고 지문만 다른 이 잡의 객체는 실패로 끝내면서 그 객체를 지운다**(새 파괴적 동작). 배포 경계에서 빌더 모양이 바뀌면 실제 rm·sync 실행 vcjob 이 도중에 끊길 수 있다. 지우지 않으면 잡은 FAILED 인데 객체는 추적 밖에서 끝까지 돈다.
+4. 모든 조건이 맞아도 **이미 끝난 exec_preflight 파드는 채택하지 않고 지운 뒤 재점검**한다.
+5. 설계에 없던 확장: **create 결과 모름(5xx·429·타임아웃)도 다시 읽어 같은 판정**을 한다.
+6. 설계에 없던 삭제 경로: **성공 아닌 종단·취소 때 라벨(전체 job_id)로 ref 밖의 이 잡 객체를 지운다**.
+
+**남은 것**:
+- 테스트베드 실증(DB 끊김 흉내 — ref 기록 직전 실패 → 다음 틱 채택, 회수 이벤트)은 메인 세션 몫이다.
+- 겹친 컨트롤러가 다른 쪽이 기록한 끝난 재점검을 만나면 그 틱은 `step_error`(SubmitUndecided)로 남는다(무해한 경보).
+- 앞 틱 객체 + 이번 5xx 로 채택된 경우 `submit_adopted` 주석이 없다.
+- 둘째 실행 관문(GATE_EXECUTION) 보류 뒤 재점검이 오래된 것은 기존 한계 그대로다.
+
 ### ✅ 사용량 분석 「소속별」 탭(2단계) — 권한 사용자·요청자·namespace·PV 이름·StorageClass·클러스터별 실 사용량 순위 — **완료·실증**(2026-10-30, d16)
 
 사용자 결정: 「그래 구현시작해.」(2026-10-29 하위 메뉴 시안의 결정 1 — 「소속별」은 묶음별 합계를 한 번에 주는 서버 API 와 함께만 출하).

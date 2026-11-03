@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiGet, apiSend } from "../../lib/api";
 import { postWithSealedPassword } from "../../lib/passwordTransport";
-import type { Account } from "../../lib/types";
+import type { Account, AdminPasswordResetResult } from "../../lib/types";
 export const useAccounts = () =>
   useQuery({ queryKey: ["accounts"], queryFn: () => apiGet<Account[]>("/api/admin/accounts") });
 // 운영자 계정 생성(2026-08-20, 사용자 결정): 세션 admin 경로 -- 인증번호 없이
@@ -12,6 +12,17 @@ export const useCreateAccount = () => {
   return useMutation({ mutationFn: (v: { username: string; password: string; role: string }) =>
     postWithSealedPassword("/api/admin/accounts", "admin_create", v),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["accounts"] }) });
+};
+
+// 관리자 비밀번호 재설정(2026-11-03): 인증번호 없이 바로 바꾼다 -- 인증번호 전체 잠금 중에도 동작하는 구제 경로다. 비밀번호는
+// 봉인해 보낸다(용도 admin_password_reset, AAD 사용자 자리 = **대상** 아이디 -- apiSend 에 password 를 싣지 않는다). 서버가
+// 그 계정의 모든 세션을 끊고(session_epoch 회전) 아이디 실패 카운터를 비운다. 결과는 보안 이벤트에도 남는다.
+export const useAdminResetPassword = () => {
+  const qc = useQueryClient();
+  return useMutation({ mutationFn: (v: { username: string; password: string }) =>
+    postWithSealedPassword<AdminPasswordResetResult>(
+      `/api/admin/accounts/${encodeURIComponent(v.username)}/password-reset`, "admin_password_reset", v),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["security"] }) });
 };
 
 export const useSetRole = () => {

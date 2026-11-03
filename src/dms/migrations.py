@@ -335,9 +335,12 @@ def _apply_migrations(db: Database) -> None:
             created_at TEXT NOT NULL,
             -- root 실행 자격 부여(2026-10-12, privileged.py): 1 = 특권 세션 관리자가 계정 화면에서 줬다. NULL/0 = 없음
             -- (env 목록 DMS_PRIVILEGED_REQUESTERS 는 따로). 역할 admin · 활성일 때만 효력, 강등이 지운다.
-            root_granted INTEGER)""",
-        # 계정 셀프서비스 인증번호(2026-08-20): 4자리·5분 TTL. (username, purpose)
-        # 당 최신 1개만 유효(발급이 upsert). attempts 는 4자리 무차별 대입을 막는
+            root_granted INTEGER,
+            -- 세션 세대(2026-11-03): 비밀번호 변경·계정 생성마다 새 난수(32 hex). 세션 쿠키의 epoch 와 다르면 401
+            -- session_revoked(api.auth.current_identity). NULL = 옛 행(키 없는 옛 세션과 같다고 본다).
+            session_epoch TEXT)""",
+        # 계정 셀프서비스 인증번호(2026-08-20): 4자리(2026-11-03 부터 6자리)·5분 TTL. (username, purpose)
+        # 당 최신 1개만 유효(발급이 upsert). attempts 는 무차별 대입을 막는
         # 시도 카운터(상한 초과 시 코드 무효). 새 테이블이라 _ensure_columns 보강은
         # 불필요 -- CREATE IF NOT EXISTS 가 기배포 DB 에도 그대로 생성한다.
         """CREATE TABLE IF NOT EXISTS verification_codes (
@@ -938,6 +941,9 @@ def _ensure_columns(db):
         # 보조 노드 연결 확인 요청 시각(2026-10-28 dms-k8s) -- 이중 경로 규약(k8s_clusters 는 2026-10-25 에 태어나 기배포 DB 가
         # 있다). 기배포 행은 NULL = 요청 없음(종전 동작). 백필하지 않는다.
         ("k8s_clusters", "check_requested_at", "TEXT"),
+        # 세션 세대(2026-11-03) -- 이중 경로 규약. 기배포 행은 NULL = 옛 세션 유효(키 없는 세션과 같다). 백필하지 않는다 --
+        # 채우면 배포 순간 모든 로그인이 끊긴다. 그 계정의 첫 비밀번호 변경부터 회전한다.
+        ("accounts", "session_epoch", "TEXT"),
     ):
         if not _column_exists(db, table, column):
             db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")

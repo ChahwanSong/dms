@@ -67,11 +67,37 @@ _SERVER_INT_KEYS = (
     # 256MiB. sparse 초대형 파일로 디스크·대역을 태우는 공격을 여기서 끊는다 --
     # 초과는 413 artifact_too_large(판정은 봉쇄 통과 뒤에만, 크기 오라클 방지).
     ("DMS_ARTIFACT_DOWNLOAD_MAX_BYTES", "artifact_download_max_bytes", 268435456),
-    # 로그인 무차별 대입 감속(2026-09-07, 사용자 결정: 1분 10회). 사용자명·클라이언트
-    # IP 각각 창 안 **실패** 상한 -- 초과는 429 login_rate_limited(Retry-After).
+    # 로그인 무차별 대입 감속(2026-09-07, 사용자 결정: 1분 10회 → 2026-11-03 아이디 축만). 아이디별 창 안 **실패**
+    # 상한 -- 초과는 429 login_rate_limited(Retry-After). 원 IP 키는 없다(기록·경보 전용, api/auth.client_ip).
     # 어느 하나라도 0 이면 명시적 비활성(api/login_limiter.py).
     ("DMS_LOGIN_RATE_LIMIT_ATTEMPTS", "login_rate_limit_attempts", 10),
     ("DMS_LOGIN_RATE_LIMIT_WINDOW_SECONDS", "login_rate_limit_window_seconds", 60),
+    # 아래는 2026-11-03 로그인·식별 묶음(설계 v6 §5, api/login_guard.py) -- 하한은 _AUTH_INT_FLOORS 한 곳에서 검사한다.
+    # 아이디별 총 시도(성공 포함) 상한. 넘으면 같은 429 login_rate_limited(이벤트만 login_attempt_limited). 0 = 끔.
+    # 운영 기본 60/60초의 근거(자동화·사람 로그인 빈도 실측): e2e 한 벌의 admin 로그인 약 31회(apiLogin 호출 자리 27 + 07·08·12
+    # 의 beforeEach 가 테스트마다 다시 도는 3 + E1 UI 로그인 1, 2026-11-03 리뷰가 다시 셈) -- 스위트가 1분 안에 끝나도 31 < 60.
+    # 호출 자리가 늘어 60 에 다가가면 e2e env.ts 에 DMS_LOGIN_ID_ATTEMPT_LIMIT 를 준다. 테스트베드 login-sealed.py 는
+    # 실행당 1회, 사람은 하루 몇 회. 60/분이면 계정 하나가 scrypt(약 28ms)에 쓰는 CPU 가 약 3%. 실패는 이미 10/분에서 막히므로 이 상한은 맞는 비밀번호를 가진 사람에게만 걸린다 -- 새
+    # DoS 레버가 아니다. 단 실패 상한(위 ATTEMPTS)을 0 으로 끈 채 이것만 켜 두면 남의 틀린 비밀번호도 여기 차서 공격자가 남의
+    # 아이디를 429 에 묶는다 -- 관찰 전용은 둘 다 0(2026-11-03 리뷰, 20-config.yaml).
+    # dataclass 기본은 0(아래 Settings 필드 주석 -- 두 층 기본값).
+    ("DMS_LOGIN_ID_ATTEMPT_LIMIT", "login_id_attempt_limit", 60),
+    ("DMS_LOGIN_ID_ATTEMPT_WINDOW_SECONDS", "login_id_attempt_window_seconds", 60),
+    # scrypt 대기형 슬롯 수와 슬롯 대기 상한(초). 넘으면 503 login_busy(과부하 신호, 차단 아님).
+    ("DMS_LOGIN_SCRYPT_SLOTS", "login_scrypt_slots", 2),
+    ("DMS_LOGIN_SCRYPT_MAX_WAIT_SECONDS", "login_scrypt_max_wait_seconds", 5),
+    # 대기형 전체 스위치 L(창 W 초 동안 허용할 전 아이디 실패 수)·W·최대 대기 M. 기본 꺼짐(L = 0, 사용자 결정).
+    ("DMS_LOGIN_GLOBAL_PACE_LIMIT", "login_global_pace_limit", 0),
+    ("DMS_LOGIN_GLOBAL_PACE_WINDOW_SECONDS", "login_global_pace_window_seconds", 60),
+    ("DMS_LOGIN_GLOBAL_PACE_MAX_WAIT_SECONDS", "login_global_pace_max_wait_seconds", 15),
+    # 로그인 경보(이벤트만): 창·전체 실패·전체 시도(성공 포함)·원 IP 하나의 실패 임계. 임계 0 = 그 경보 끔.
+    ("DMS_LOGIN_ALARM_WINDOW_SECONDS", "login_alarm_window_seconds", 600),
+    ("DMS_LOGIN_ALARM_FAILURES", "login_alarm_failures", 30),
+    ("DMS_LOGIN_ALARM_ATTEMPTS", "login_alarm_attempts", 300),
+    ("DMS_LOGIN_ALARM_SOURCE_FAILURES", "login_alarm_source_failures", 20),
+    # 인증번호 전체 오답 상한(사용자 결정 1000회/1시간 -- 모든 아이디의 틀린 인증번호 합). 0 = 끔.
+    ("DMS_VERIFICATION_GUESS_GLOBAL_LIMIT", "verification_guess_global_limit", 1000),
+    ("DMS_VERIFICATION_GUESS_GLOBAL_WINDOW_SECONDS", "verification_guess_global_window_seconds", 3600),
     # k8s 인벤토리 동기화(2026-10-25 dms-k8s 설계 §4·§5). 주기는 env 기본값이고 포탈(k8s 연동 → 개요)에서 바꾼 DB 값
     # (k8s_sync_settings.interval_seconds)이 이긴다. 매번 전체 list 다(watch 없음). 하한 60.
     ("DMS_K8S_SYNC_INTERVAL_SECONDS", "k8s_sync_interval_seconds", 300),
@@ -98,6 +124,24 @@ _K8S_INT_FLOORS = (
     ("DMS_K8S_SYNC_MAX_BYTES", "k8s_sync_max_bytes", 1048576),
     ("DMS_K8S_INVENTORY_INTERVAL_SECONDS", "k8s_inventory_interval_seconds", 1),
     ("DMS_K8S_SYNC_RUN_RETENTION_DAYS", "k8s_sync_run_retention_days", 1),
+)
+# 로그인·식별 정수 키의 하한(2026-11-03, 기동 거부) -- _K8S_INT_FLOORS 와 같은 모양으로 from_env 가 한 곳에서 검사한다.
+# 상한값(LIMIT·임계)은 0 = 끔이라 하한 0, 창·슬롯·대기 상한은 0 이면 의미가 없거나(창 0 = 나눗셈·즉시 만료) 장치가 조용히
+# 꺼진다(슬롯 0 = 모든 로그인 503) -- 1.
+_AUTH_INT_FLOORS = (
+    ("DMS_LOGIN_ID_ATTEMPT_LIMIT", "login_id_attempt_limit", 0),
+    ("DMS_LOGIN_ID_ATTEMPT_WINDOW_SECONDS", "login_id_attempt_window_seconds", 1),
+    ("DMS_LOGIN_SCRYPT_SLOTS", "login_scrypt_slots", 1),
+    ("DMS_LOGIN_SCRYPT_MAX_WAIT_SECONDS", "login_scrypt_max_wait_seconds", 1),
+    ("DMS_LOGIN_GLOBAL_PACE_LIMIT", "login_global_pace_limit", 0),
+    ("DMS_LOGIN_GLOBAL_PACE_WINDOW_SECONDS", "login_global_pace_window_seconds", 1),
+    ("DMS_LOGIN_GLOBAL_PACE_MAX_WAIT_SECONDS", "login_global_pace_max_wait_seconds", 1),
+    ("DMS_LOGIN_ALARM_WINDOW_SECONDS", "login_alarm_window_seconds", 1),
+    ("DMS_LOGIN_ALARM_FAILURES", "login_alarm_failures", 0),
+    ("DMS_LOGIN_ALARM_ATTEMPTS", "login_alarm_attempts", 0),
+    ("DMS_LOGIN_ALARM_SOURCE_FAILURES", "login_alarm_source_failures", 0),
+    ("DMS_VERIFICATION_GUESS_GLOBAL_LIMIT", "verification_guess_global_limit", 0),
+    ("DMS_VERIFICATION_GUESS_GLOBAL_WINDOW_SECONDS", "verification_guess_global_window_seconds", 1),
 )
 # 재시도 설정은 두지 않는다: 상위 스펙에 재시도 요구가 없고, 실패한 rm/sync 를 자동으로
 # 재실행하는 것은 파괴적이다. 재실행은 배치 :rerun-failed 와 사용자 재제출로 한다.
@@ -218,7 +262,7 @@ class Settings:
     # HTTP 경로(NodePort 30080·port-forward)가 살아 있어야 하기 때문 -- TLS 를
     # 앞단에 세운 배포에서만 env 로 켠다(deploy/k8s/46-ingress.yaml 주석).
     session_cookie_secure: bool = False
-    # 계정 셀프서비스(2026-08-20, 사용자 결정): 계정 생성·비밀번호 변경은 4자리
+    # 계정 셀프서비스(2026-08-20, 사용자 결정): 계정 생성·비밀번호 변경은 6자리(2026-11-03 -- 4자리를 대체)
     # 인증번호(5분 TTL)를 사내 이메일로 보내 검증한다. 이메일은 항상
     # <회사아이디>@<도메인> 파생이다. 전송 백엔드는 지금 stub 뿐(사내 메일 연동
     # 불가) -- stub 이면 발급 응답에 코드를 에코해 화면에서 흐름을 완주할 수
@@ -271,9 +315,27 @@ class Settings:
     rollout_interval_seconds: int = 10
     rollout_timeout_seconds: int = 600
     artifact_download_max_bytes: int = 268435456
-    # 로그인 감속(2026-09-07): 사용자명·IP 별 창 안 실패 상한. 0 은 명시적 비활성.
+    # 로그인 감속(2026-09-07 → 2026-11-03 아이디 축만): 아이디별 창 안 실패 상한. 0 은 명시적 비활성.
     login_rate_limit_attempts: int = 10
     login_rate_limit_window_seconds: int = 60
+    # 로그인·식별 묶음(2026-11-03) -- _SERVER_INT_KEYS 의 주석 참고.
+    # 아이디별 총 시도(성공 포함) 상한의 기본이 **두 층**이다(account_verification_required 와 같은 관례): from_env(라이브)는
+    # 60(켜짐 -- fail-closed), dataclass 직접 생성(테스트)은 0(끔). 직접 생성한 Settings 를 쓰는 기존 테스트 수백 곳이 한
+    # 사용자로 수십 번 로그인한다 -- 켜져 있으면 테스트끼리 서로 잠긴다. 상한 자체는 test_api_auth_hardening 이 명시로 켠
+    # 앱으로 검증한다.
+    login_id_attempt_limit: int = 0
+    login_id_attempt_window_seconds: int = 60
+    login_scrypt_slots: int = 2
+    login_scrypt_max_wait_seconds: int = 5
+    login_global_pace_limit: int = 0
+    login_global_pace_window_seconds: int = 60
+    login_global_pace_max_wait_seconds: int = 15
+    login_alarm_window_seconds: int = 600
+    login_alarm_failures: int = 30
+    login_alarm_attempts: int = 300
+    login_alarm_source_failures: int = 20
+    verification_guess_global_limit: int = 1000
+    verification_guess_global_window_seconds: int = 3600
     # k8s 인벤토리 동기화(2026-10-25) -- _SERVER_INT_KEYS 의 주석 참고.
     k8s_sync_interval_seconds: int = 300
     k8s_sync_poll_seconds: int = 15
@@ -315,6 +377,9 @@ class Settings:
             problems.append("DMS_REQUEST_PURGE_INTERVAL_SECONDS must be >= 1: "
                             f"{environ.get('DMS_REQUEST_PURGE_INTERVAL_SECONDS')!r}")
         for env_key, field, floor in _K8S_INT_FLOORS:
+            if extra[field] < floor:
+                problems.append(f"{env_key} must be >= {floor}: {environ.get(env_key)!r}")
+        for env_key, field, floor in _AUTH_INT_FLOORS:
             if extra[field] < floor:
                 problems.append(f"{env_key} must be >= {floor}: {environ.get(env_key)!r}")
         if extra["k8s_sync_page_limit"] > 5000:

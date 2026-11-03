@@ -53,12 +53,42 @@ data:
   # 서버 키는 DMS_SESSION_SECRET 에서 유도된다 -- 시크릿 회전 = 키 회전(포탈은
   # 키 불일치를 받으면 키를 다시 받아 재시도하므로 사용자 조치 없음).
   DMS_PASSWORD_ENCRYPTION_REQUIRED: "true"
-  # 로그인 감속(사용자 결정: 1분 10회): 사용자명·클라이언트 IP 각각 창 안 **실패**
-  # 상한. 초과는 429 login_rate_limited + Retry-After, 창이 지나면 저절로 풀린다
-  # (잠금 아님). 프로세스 메모리라 dms-api 레플리카 수만큼 실효 상한이 곱해진다.
-  # ATTEMPTS 를 0 으로 두면 명시적 비활성(관찰 전용).
+  # 로그인 감속(사용자 결정: 1분 10회 → 2026-11-03 아이디 축만): 아이디별 창 안 **실패** 상한. 초과는 429
+  # login_rate_limited + Retry-After, 창이 지나면 저절로 풀린다(잠금 아님). 원 IP 로는 막지 않는다(기록·경보 전용 --
+  # NAT·SNAT 뒤 전원이 함께 잠기지 않게). 프로세스 메모리라 dms-api 레플리카 수만큼 실효 상한이 곱해진다.
+  # 관찰 전용(아무도 막지 않음)은 이 ATTEMPTS 와 아래 DMS_LOGIN_ID_ATTEMPT_LIMIT 를 **둘 다** 0 으로(2026-11-03 리뷰) --
+  # 이것만 0 이면 남의 틀린 비밀번호도 총 시도로 세여, 공격자가 분당 60회로 남의 아이디를 429 에 묶는다.
   DMS_LOGIN_RATE_LIMIT_ATTEMPTS: "10"
   DMS_LOGIN_RATE_LIMIT_WINDOW_SECONDS: "60"
+  # 아이디별 총 로그인 시도 상한(성공 포함, 2026-11-03): 맞는 비밀번호를 반복해 scrypt 를 태우는 경로를 묶는다. 넘으면
+  # 같은 429 login_rate_limited. 60/60초 = 사람·자동화(e2e 한 벌 약 31회)보다 넉넉하다. 0 = 끔. 실패도 시도라, 위 실패 상한을
+  # 끈 채 이것만 켜 두면 남의 실패로도 찬다(실패 상한이 켜져 있으면 남의 몫은 아이디당 분당 약 10+슬롯 수로 묶인다).
+  DMS_LOGIN_ID_ATTEMPT_LIMIT: "60"
+  DMS_LOGIN_ID_ATTEMPT_WINDOW_SECONDS: "60"
+  # scrypt 동시 실행 슬롯(대기형, 2026-11-03): 비밀번호 검증은 동시에 이 수만큼만 돈다(1회 16MiB·CPU 1코어). 슬롯을 못 얻은
+  # 로그인은 이벤트 루프에서(스레드를 잡지 않고) 최대 MAX_WAIT 초 기다린 뒤 503 login_busy(차단이 아니라 과부하 신호).
+  DMS_LOGIN_SCRYPT_SLOTS: "2"
+  DMS_LOGIN_SCRYPT_MAX_WAIT_SECONDS: "5"
+  # 대기형 전체 스위치(기본 꺼짐 = 0, 사용자 결정 2026-11-03): 켜면 전 아이디의 로그인 실패를 W 초에 L 회 속도로 늦춘다
+  # (거절하지 않고 기다리게 한다 -- 예상 대기가 MAX_WAIT 초를 넘을 때만 503 login_busy + Retry-After). 여러 아이디에
+  # 흩뿌리는 스프레이를 출발지 차단(Avi·방화벽) 전까지 늦추는 비상 수단이다. 켜는 예: LIMIT "60"(분당 60회). 바꾸면
+  # dms-api 재시작(재시작은 메모리 카운터도 비운다).
+  DMS_LOGIN_GLOBAL_PACE_LIMIT: "0"
+  DMS_LOGIN_GLOBAL_PACE_WINDOW_SECONDS: "60"
+  DMS_LOGIN_GLOBAL_PACE_MAX_WAIT_SECONDS: "15"
+  # 로그인 경보(이벤트만, 차단 없음, 2026-11-03): 창 안 전체 실패·전체 시도(성공 포함)·원 IP 하나의 실패가 임계에 닿으면
+  # (종류, 키)마다 창에 한 번 보안 이벤트를 남긴다(포탈 관리 → 보안 이벤트). 0 = 그 경보 끔. 원 IP 가 프록시 뒤 한
+  # 주소로 모이는 배치(PROXY 프로토콜 없음)는 SOURCE_FAILURES 를 0 으로.
+  DMS_LOGIN_ALARM_WINDOW_SECONDS: "600"
+  DMS_LOGIN_ALARM_FAILURES: "30"
+  DMS_LOGIN_ALARM_ATTEMPTS: "300"
+  DMS_LOGIN_ALARM_SOURCE_FAILURES: "20"
+  # 인증번호 전체 오답 상한(2026-11-03 사용자 결정 1000회/1시간): 모든 아이디의 틀린 인증번호를 합쳐 창 안에 이 수에
+  # 닿으면 셀프 가입·비밀번호 재설정(발급·확인)이 창이 밀려날 때까지 429 verification_global_locked(맞는 코드도 거절).
+  # 그동안에도 관리자는 계정 화면에서 계정을 만들고 비밀번호를 재설정할 수 있고, 보안 이벤트 화면에서 전체 잠금을 풀 수
+  # 있다. 0 = 끔.
+  DMS_VERIFICATION_GUESS_GLOBAL_LIMIT: "1000"
+  DMS_VERIFICATION_GUESS_GLOBAL_WINDOW_SECONDS: "3600"
 
   # --- 신원 모드(2026-10-26 dms-k8s LDAP 코드 삭제 -- k8s 신원 모드 전용) ---
   # 모든 단건 잡이 root 이고 권한은 k8s RoleBinding 맵핑(<id>-clusterrole-admin|edit → 그 namespace 의 모든 PVC)으로

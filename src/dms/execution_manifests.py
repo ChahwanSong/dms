@@ -1,10 +1,65 @@
 """Volcano 매니페스트 + 도구 명령 빌더. 전부 순수 함수 — 실제 제출은 어댑터(Task 6)."""
 
+import hashlib
 import json
 import re
 
 from .artifact_base import ARTIFACT_MOUNT
 from .node_cpu import LAUNCHER_CPU_REQUEST_MILLICORES
+
+# 기존 객체 채택(2026-11-03 B3, execution_volcano._create_or_adopt): 잡 객체 이름은 결정적이고(dms-{op}-{phase}-{job_id[:12]}·
+# dms-preflight-…) ref 는 create **뒤에** DB 에 남는다(stepper._record_ref). 그 사이 DB 가 끊기면(장애조치·컨트롤러 재시작) 다음
+# 틱의 같은 이름 create 가 409 다 -- 그 객체가 「이 잡·이 단계에 지금 지을 것과 같은 것」인지는 라벨(전체 job_id·phase·tool)과
+# 아래 지문으로만 판정한다. 살아 있는 객체의 spec 은 apiserver·Volcano 웹훅이 기본값을 채워 넣어 우리 매니페스트와 글자로 같지
+# 않으므로, 지문은 **지을 때** 계산해 annotation 으로 싣고 채택 때는 새로 지은 매니페스트의 지문과 그 annotation 을 비교한다.
+ADOPTION_LABELS = ("dms.io/job-id", "dms.io/phase", "dms.io/tool")
+SPEC_FINGERPRINT_ANNOTATION = "dms.io/spec-fingerprint"
+# 계산 규칙을 바꾸면 접두를 올린다 -- 옛 규칙의 지문과 우연히 같아질 일이 없게(다르면 채택하지 않을 뿐이다).
+_FINGERPRINT_VERSION = "v1"
+
+
+def _without_images(node):
+    """컨테이너의 image 만 뺀 깊은 사본. 이미지를 지문에서 빼는 이유: 잡 이미지는 호출 시점 해석이다(wiring 의 job_image
+    콜러블 -- 포탈 릴리스가 재시작 없이 바꾼다). create 와 다음 틱 사이에 릴리스가 끼면 같은 잡·같은 단계의 객체가 이미지 하나로
+    채택을 못 받아 B3 그대로(잡 FAILED + 추적 없는 객체)가 된다.
+
+    「이미지는 버전일 뿐」이라서가 **아니다** -- 러너 로직(drm·sync 봉쇄 재확인, chown, rank.sh)이 이미지 안에 있어 spec 이 같아도
+    이미지가 다르면 다르게 돌 수 있다(2026-11-03 리뷰). 근거는 채택이 정하는 것이 **실행이 아니라 추적**이라는 데 있다: 그 객체는
+    DMS 가 그 틱의 이미지로 이미 만들어 돌고 있고, 채택을 거절해도 멈추지 않는다(잡만 FAILED 가 되고 객체는 추적 밖) -- DB 쓰기만
+    성공했어도 그 이미지로 추적됐을 객체다. 이 논리를 다른 필드에 그대로 옮겨 쓰지 마라: 틱 사이에 바뀌는 행 값(재클램프·경로·
+    소유자)은 「같은 일을 하는가」의 판정이라 지문에 남는다."""
+    if isinstance(node, dict):
+        out = {}
+        for key, value in node.items():
+            if key in ("containers", "initContainers") and isinstance(value, list):
+                out[key] = [({k: _without_images(v) for k, v in c.items() if k != "image"}
+                             if isinstance(c, dict) else _without_images(c)) for c in value]
+            else:
+                out[key] = _without_images(value)
+        return out
+    if isinstance(node, list):
+        return [_without_images(v) for v in node]
+    return node
+
+
+def manifest_fingerprint(manifest: dict) -> str:
+    """잡 객체 매니페스트의 안정 지문 "v1:<sha256 hex>". apiVersion·kind·이름·namespace·라벨·spec(컨테이너 image 제외 --
+    _without_images)을 정렬 키 JSON 으로 해시한다. annotation(지문 자신)은 넣지 않는다. 시각·난수는 빌더에 없다 -- 같은 입력이면
+    틱이 달라도 같은 값이다(tests/test_submit_adopt.py 가 고정). 노드 CPU 재클램프·정책 타임아웃·스토리지 경로처럼 틱 사이에
+    바뀔 수 있는 실행 의미는 **일부러 넣는다**: 바뀌었으면 옛 객체는 지금 지을 것과 다른 일을 하므로 채택하지 않는다(그때는 종전처럼
+    submit_failed)."""
+    meta = manifest.get("metadata") or {}
+    body = {"apiVersion": manifest.get("apiVersion"), "kind": manifest.get("kind"),
+            "name": meta.get("name"), "namespace": meta.get("namespace"),
+            "labels": meta.get("labels") or {}, "spec": _without_images(manifest.get("spec"))}
+    canon = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return f"{_FINGERPRINT_VERSION}:{hashlib.sha256(canon.encode()).hexdigest()}"
+
+
+def _stamp_fingerprint(manifest: dict) -> dict:
+    manifest["metadata"].setdefault("annotations", {})[SPEC_FINGERPRINT_ANNOTATION] = manifest_fingerprint(manifest)
+    return manifest
+
 
 _SCAN_BOOL_FLAGS = {"verbose": "--verbose", "quiet": "--quiet"}
 # dscan(1b93d54): --broken-limit은 롱네임뿐(-B는 optstring에 없다). top_k는
@@ -896,7 +951,8 @@ def build_preflight_pod(spec, *, job_image, namespace, volumes, node, role=None)
                 "volumes": _pod_volumes(volumes)}
     if spec.timeout_seconds:
         pod_spec["activeDeadlineSeconds"] = spec.timeout_seconds
-    return {
+    # dms.io/tool(2026-11-03): 채택 판정(ADOPTION_LABELS)이 vcjob 과 같은 라벨 셋을 본다 -- 예전엔 preflight 파드에만 없었다.
+    return _stamp_fingerprint({
         "apiVersion": "v1", "kind": "Pod",
         # phase(+role) in the name: one job can run multiple preflight Pods -- the
         # initial (phase "preflight") and the post-confirm re-validation (phase
@@ -909,8 +965,8 @@ def build_preflight_pod(spec, *, job_image, namespace, volumes, node, role=None)
                               f"{spec.phase.replace('_', '-')}{role_seg}-{node}")[:63],
                      "namespace": namespace,
                      "labels": {"dms.io/job-id": spec.job_id,
-                                "dms.io/phase": spec.phase}},
-        "spec": pod_spec}
+                                "dms.io/phase": spec.phase, "dms.io/tool": spec.tool}},
+        "spec": pod_spec})
 
 
 def _build_nsync_job(spec, *, job_image, namespace, volumes, role_volumes):
@@ -959,12 +1015,12 @@ def _build_nsync_job(spec, *, job_image, namespace, volumes, role_volumes):
     _apply_task_deadlines(spec, job_spec["tasks"])
     _apply_termination_grace(job_spec["tasks"])
     _apply_ttl(spec, job_spec)
-    return {
+    return _stamp_fingerprint({
         "apiVersion": "batch.volcano.sh/v1alpha1", "kind": "Job",
         "metadata": {"name": _job_name(spec), "namespace": namespace,
                      "labels": {"dms.io/job-id": spec.job_id,
                                 "dms.io/phase": spec.phase, "dms.io/tool": spec.tool}},
-        "spec": job_spec}
+        "spec": job_spec})
 
 
 def build_volcano_job(spec, *, job_image, namespace, volumes, role_volumes=None):
@@ -1002,9 +1058,9 @@ def build_volcano_job(spec, *, job_image, namespace, volumes, role_volumes=None)
     _apply_task_deadlines(spec, job_spec["tasks"])
     _apply_termination_grace(job_spec["tasks"])
     _apply_ttl(spec, job_spec)
-    return {
+    return _stamp_fingerprint({
         "apiVersion": "batch.volcano.sh/v1alpha1", "kind": "Job",
         "metadata": {"name": _job_name(spec), "namespace": namespace,
                      "labels": {"dms.io/job-id": spec.job_id,
                                 "dms.io/phase": spec.phase, "dms.io/tool": spec.tool}},
-        "spec": job_spec}
+        "spec": job_spec})

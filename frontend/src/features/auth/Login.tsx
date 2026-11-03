@@ -1,22 +1,37 @@
-import { useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useLogin, useRequestCode, useSignup, usePasswordReset } from "./useAuth";
 import { useMailInfo } from "../mail/useMailSettings";
 import { portalTitle, usePortalDocumentTitle } from "../portal/usePortal";
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
-import { ApiError } from "../../lib/api";
+import { ApiError, AUTH_NOTICE_KEY, apiErrorText, reasonText } from "../../lib/api";
 
 const field = "mt-1 w-full rounded-lg border border-black/10 px-3 py-2";
+const CODE_DIGITS = 6;
+// 로그인이 이만큼(ms) 넘게 걸리면 「순서를 기다리고 있다」고 알린다(2026-11-03) -- 서버는 거절 대신 기다리게 하므로(scrypt 대기형
+// 슬롯 최대 5초 + 켜졌을 때의 전체 스위치 최대 15초) 아무 말 없이 멈춘 화면이면 사용자가 새로고침·재시도로 줄을 더 늘린다.
+const SLOW_LOGIN_MS = 2000;
 
 function errText(e: unknown, fallback: string): string {
   // fetch 네트워크 단절은 TypeError 로 reject 된다 -- 무가드 캐스트는
-  // 영어 원문("Failed to fetch")을 그대로 노출했다.
-  return e instanceof ApiError ? e.message : fallback;
+  // 영어 원문("Failed to fetch")을 그대로 노출했다. 429·503 은 Retry-After 를 붙인다(apiErrorText, 2026-11-03).
+  return e instanceof ApiError ? apiErrorText(e) : fallback;
+}
+
+// 인증번호 칸은 숫자만 6자리까지 남긴다 -- 메일에서 「123 456」·「123-456」처럼 끊어 복사해도 그대로 붙는다.
+const onlyCode = (raw: string) => raw.replace(/\D/g, "").slice(0, CODE_DIGITS);
+
+// 로그인 화면에 한 번 보일 인증 안내(request() 가 401 session_revoked 에 남김). 읽기만 하고 지우는 건 마운트 effect 몫이다 --
+// StrictMode 는 초기화 함수를 두 번 부르므로 여기서 지우면 안내가 사라질 수 있다. 저장소가 막힌 브라우저면 안내 없음.
+function readAuthNotice(): string | null {
+  try {
+    return sessionStorage.getItem(AUTH_NOTICE_KEY) === "session_revoked" ? "session_revoked" : null;
+  } catch { return null; }
 }
 
 /** 계정 생성·비밀번호 변경 공용 폼(2026-08-20, 사용자 결정): 흐름이 동일하다 --
-    아이디 입력 → 인증번호 받기(4자리·5분, 사내 이메일 <아이디>@도메인) →
+    아이디 입력 → 인증번호 받기(6자리(2026-11-03 -- 2026-08-20 의 4자리를 대체)·5분, 사내 이메일 <아이디>@도메인) →
     인증번호 + 새 비밀번호 → 완료. 메일러가 stub 이면 발급 응답의 stub_code 를 화면에
     안내하고, 사내 Knox 메일(knox_relay, 2026-10-01)이면 서버가 stub_code 를 빼므로 이
     안내는 저절로 사라진다. 도메인은 서버 설정(GET /api/auth/mail-info)에서 읽는다 --
@@ -28,6 +43,7 @@ function VerifiedForm({ purpose, submitLabel, doneText, onDone }: {
   const [username, setUsername] = useState("");
   const [code, setCode] = useState("");
   const [password, setPassword] = useState("");
+  const codeHintId = useId();
   const request = useRequestCode();
   const mailInfo = useMailInfo();
   const domain = mailInfo.data?.email_domain;
@@ -56,7 +72,7 @@ function VerifiedForm({ purpose, submitLabel, doneText, onDone }: {
           인증번호 받기
         </Button>
       </div>
-      {request.isError && <p className="text-bad text-sm">{errText(request.error, "인증번호 요청에 실패했습니다 — 네트워크 상태를 확인하세요")}</p>}
+      {request.isError && <p role="alert" className="text-bad text-sm">{errText(request.error, "인증번호 요청에 실패했습니다 — 네트워크 상태를 확인하세요")}</p>}
       {issued && (
         <p className="text-ok text-sm">
           {`${issued.email} 로 인증번호를 보냈습니다 (유효 ${Math.round(issued.expires_in_seconds / 60)}분)`}
@@ -71,19 +87,29 @@ function VerifiedForm({ purpose, submitLabel, doneText, onDone }: {
           )}
         </p>
       )}
-      <label className="block text-sm">인증번호 (4자리)
-        <input aria-label="인증번호" className={field} value={code} inputMode="numeric"
-               onChange={(e) => setCode(e.target.value)} />
+      {/* 자릿수 안내는 설명(aria-describedby)으로 잇는다(2026-11-03 리뷰) -- 칸의 aria-label 「인증번호」가 보이는 라벨을 덮어
+          화면낭독기가 자릿수를 못 들었고, 6자리가 아니면 제출 버튼은 조용히 잠긴다. */}
+      <label className="block text-sm">인증번호 <span id={codeHintId}>{`(숫자 ${CODE_DIGITS}자리)`}</span>
+        {/* maxLength 는 타이핑 상한이다 -- 붙여넣기는 브라우저가 maxLength 로 먼저 자르면 「123 456」이 「12345」가 되므로
+            직접 받아 숫자만 남긴다(OTP 칸이라 붙여넣기는 칸 전체를 바꾼다). */}
+        <input aria-label="인증번호" aria-describedby={codeHintId} className={field} value={code} inputMode="numeric"
+               autoComplete="one-time-code" maxLength={CODE_DIGITS}
+               onChange={(e) => setCode(onlyCode(e.target.value))}
+               onPaste={(e) => {
+                 const digits = onlyCode(e.clipboardData.getData("text"));
+                 e.preventDefault();
+                 if (digits !== "") setCode(digits);
+               }} />
       </label>
       <label className="block text-sm">{purpose === "signup" ? "비밀번호" : "새 비밀번호"}
         <input aria-label={purpose === "signup" ? "비밀번호" : "새 비밀번호"} type="password"
                className={field} value={password}
                onChange={(e) => setPassword(e.target.value)} />
       </label>
-      {submit.isError && <p className="text-bad text-sm">{errText(submit.error, `${submitLabel} 요청에 실패했습니다 — 네트워크 상태를 확인하세요`)}</p>}
+      {submit.isError && <p role="alert" className="text-bad text-sm">{errText(submit.error, `${submitLabel} 요청에 실패했습니다 — 네트워크 상태를 확인하세요`)}</p>}
       {submit.isSuccess && <p className="text-ok text-sm">{doneText}</p>}
       <Button type="submit" className="w-full mt-2"
-              disabled={submit.isPending || username.trim() === "" || code === "" || password === ""}>
+              disabled={submit.isPending || username.trim() === "" || code.length !== CODE_DIGITS || password === ""}>
         {submitLabel}
       </Button>
     </form>
@@ -101,14 +127,27 @@ export function Login() {
   const [mode, setMode] = useState<Mode>("login");
   const [username, setU] = useState(""); const [password, setP] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
+  // 세션 무효화 안내(2026-11-03): 성공 notice(text-ok)와 따로 둔다 -- 「비밀번호가 바뀌어 로그인이 끝났다」는 주의 문구다.
+  const [authNotice, setAuthNotice] = useState<string | null>(readAuthNotice);
+  useEffect(() => {
+    try { sessionStorage.removeItem(AUTH_NOTICE_KEY); } catch { /* noop */ }
+  }, []);
   const login = useLogin();
   const nav = useNavigate();
   const subtitle = usePortalDocumentTitle();
+  const [slow, setSlow] = useState(false);
+  useEffect(() => {
+    if (!login.isPending) { setSlow(false); return; }
+    const t = window.setTimeout(() => setSlow(true), SLOW_LOGIN_MS);
+    return () => window.clearTimeout(t);
+  }, [login.isPending]);
   return (
     <div className="min-h-full grid place-items-center p-6">
       {/* max-w-md(448px, 사용자 요청 2026-08-20): 구 max-w-sm(384px)보다 살짝
           넓게 -- 3탭·인증번호 안내 문구가 덜 답답하다. */}
-      <div className="w-full max-w-md">
+      {/* min-w-0(2026-11-03, 375 실측 384/375): 그리드 아이템의 자동 최소 폭이 「인증번호가 <아이디>@도메인 로 전송됩니다」
+          한 줄(truncate -- 줄바꿈 없음)의 전체 길이라, 긴 아이디를 치면 카드가 화면보다 넓어졌다. 0 으로 풀어 말줄임이 먹게 한다. */}
+      <div className="w-full max-w-md min-w-0">
         {/* 브랜드 블록은 div 다 -- h1 은 화면이 소유하고 브랜드가 h1 이 되면
             접근성 트리가 흐려진다. */}
         <div className="rounded-t-card bg-navy px-5 py-4 text-white text-sm font-semibold">
@@ -128,11 +167,12 @@ export function Login() {
                         mode === t.mode
                           ? "border-accent text-accent font-medium"
                           : "border-transparent text-muted hover:text-ink"}`}
-                      onClick={() => { setMode(t.mode); setNotice(null); }}>
+                      onClick={() => { setMode(t.mode); setNotice(null); setAuthNotice(null); }}>
                 {t.label}
               </button>
             ))}
           </div>
+          {authNotice && <p role="status" className="text-sm mb-3 text-attn">{reasonText(authNotice)}</p>}
           {notice && <p className="text-ok text-sm mb-3">{notice}</p>}
           {mode === "login" && (
             <form onSubmit={(e) => {
@@ -149,12 +189,17 @@ export function Login() {
                        value={password} onChange={(e) => setP(e.target.value)} />
               </label>
               {login.isError && (
-                <p className="text-bad text-sm">
+                <p role="alert" className="text-bad text-sm">
                   {errText(login.error, "로그인 요청에 실패했습니다 — 네트워크 상태를 확인하세요")}
                 </p>
               )}
+              {slow && (
+                <p role="status" className="text-sm text-muted">로그인 요청이 많아 순서를 기다리고 있습니다 — 창을 닫지 말고 잠시 기다려 주세요</p>
+              )}
               {/* 버튼 위 여백 한 단계(mt-2): 인풋 묶음과 제출 행동을 시각 분리. */}
-              <Button type="submit" className="w-full mt-2" disabled={login.isPending}>로그인</Button>
+              <Button type="submit" className="w-full mt-2" disabled={login.isPending}>
+                {login.isPending ? "로그인 중…" : "로그인"}
+              </Button>
             </form>
           )}
           {mode === "signup" && (

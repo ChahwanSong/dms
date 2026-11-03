@@ -46,7 +46,10 @@ VERSION = 1
 # mail_relay_token(2026-10-01): 포탈 메일 설정의 릴레이 토큰(routes_mail_settings) -- 비밀번호는 아니지만
 # 같은 통로로 봉인해 평문으로 오가지 않게 한다.
 # k8s_cluster_token(2026-10-25 dms-k8s): k8s 연동 화면의 클러스터 API 토큰(routes_k8s, AAD 사용자 자리 = 클러스터 이름).
-PURPOSES = ("login", "signup", "password_reset", "admin_create", "mail_relay_token", "k8s_cluster_token")
+# admin_password_reset(2026-11-03): 계정 화면의 관리자 비밀번호 재설정(routes_auth.admin_password_reset, AAD 사용자 자리 =
+# 대상 아이디). 끝에 붙인다 -- 프런트 Purpose 유니언과 순서까지 같게 둔다(test_k8s_wiring 리터럴 대조).
+PURPOSES = ("login", "signup", "password_reset", "admin_create", "mail_relay_token", "k8s_cluster_token",
+            "admin_password_reset")
 
 _CURVE = ec.SECP256R1()
 # P-256 군의 위수(n). 유도한 32 바이트를 [1, n-1] 로 접어 유효한 개인키 스칼라로 만든다.

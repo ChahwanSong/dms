@@ -48,6 +48,44 @@ class ObservabilityRepository:
             out.append(e)
         return out
 
+    def security_events(self, types, *, limit: int, before: "int | None" = None,
+                        event_type: "str | None" = None, severity: "str | None" = None,
+                        q_tokens=()) -> list[dict]:
+        """관리 → 보안 이벤트 목록(2026-11-03, routes_security): event_type 이 types(SECURITY_EVENT_TYPES) 안인 행만, 최신순
+        한 쪽. before 는 키셋 커서(감사 로그와 같다 -- offset 은 새 기록이 위에 쌓이면 경계가 밀린다). q_tokens 는
+        text_search.search_tokens 결과 -- 토큰마다 message·payload 어느 쪽이든 부분 일치(대소문자 무시, 와일드카드 리터럴),
+        토큰 사이는 AND. 새 인덱스는 없다: 보안 이벤트는 (종류, 키)마다 창에 한 번이라 드물고, idx_events_at·PK 범위로 충분.
+        payload 는 파싱해 돌려주고 request_id 는 싣지 않는다(보안 이벤트는 요청에 묶이지 않는다)."""
+        from .text_search import contains_pattern
+        params: dict = {"n": limit}
+        names = []
+        for i, t in enumerate(types):
+            params[f"t{i}"] = t
+            names.append(f":t{i}")
+        where = [f"event_type IN ({', '.join(names)})"]
+        if event_type is not None:
+            where.append("event_type = :et")
+            params["et"] = event_type
+        if severity is not None:
+            where.append("severity = :sev")
+            params["sev"] = severity
+        if before is not None:
+            where.append("id < :before")
+            params["before"] = before
+        for i, token in enumerate(q_tokens):
+            params[f"p{i}"] = contains_pattern(token)
+            where.append(f"(lower(coalesce(message, '')) LIKE lower(:p{i}) ESCAPE '\\' "
+                         f"OR lower(coalesce(payload, '')) LIKE lower(:p{i}) ESCAPE '\\')")
+        rows = self._db.query(
+            f"""SELECT id, at, component, severity, event_type, message, payload FROM events
+                WHERE {' AND '.join(where)} ORDER BY id DESC LIMIT :n""", params)
+        out = []
+        for row in rows:
+            e = dict(row)
+            e["payload"] = load_json(e.get("payload"))
+            out.append(e)
+        return out
+
     def prune_events(self, cutoff: str, batch_size: int = 5000) -> int:
         # agents.py의 prune_reports와 같은 패턴: 배치가 남는 한 계속 돈다. 틱당
         # 배치 1개만 지우고 리턴하면(예전 구현), 유입량이 batch_size /

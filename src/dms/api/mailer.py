@@ -15,6 +15,7 @@ routes_auth.py 가 `from .mailer import ...` 로 쓴다.
   SendThrottle                 수신자별 발송 상한 (코드 발급 전에 검사)
   check_relay_health()         GET /healthz (포탈 메일 설정의 "연결 확인", 2026-10-01 추가)
   render_test_email()          포탈 메일 설정의 "테스트 메일" (제목, HTML 본문) (2026-10-01 추가)
+  render_account_notice_email() 가입·비밀번호 변경 완료 안내 (제목, HTML 본문) (2026-11-03 추가, account_notice.py)
 
 인증번호는 HTML 본문에만 들어간다. 제목·프리헤더·예외 메시지에는 넣지 않는다
 (릴레이 로그와 observability 이벤트가 제목·실패 사유를 기록하기 때문).
@@ -312,6 +313,47 @@ def render_test_email(*, service_name: str = DEFAULT_SERVICE_NAME, requested_by:
     return subject, body
 
 
+@dataclass(frozen=True)
+class _NoticeCopy:
+    subject: str      # 제목 꼬리("[서비스] " 뒤)
+    heading: str      # 본문 제목
+    when_label: str   # 시각 행의 이름
+
+
+_NOTICE_COPY = {
+    "signup": _NoticeCopy("계정 생성 완료 안내", "계정 생성 완료", "생성 시각"),
+    "password_reset": _NoticeCopy("비밀번호 변경 안내", "비밀번호 변경", "변경 시각"),
+    "password_admin_reset": _NoticeCopy("비밀번호 변경 안내", "비밀번호 변경", "변경 시각"),
+}
+_NOTICE_FALLBACK = _NoticeCopy("계정 변경 안내", "계정 변경", "변경 시각")
+
+
+def render_account_notice_email(*, kind: str, username: str, service_name: str = DEFAULT_SERVICE_NAME,
+                                actor: str | None = None, now: datetime | None = None) -> tuple[str, str]:
+    """가입·비밀번호 변경 완료 안내 메일의 (제목, HTML 본문)(2026-11-03, api/account_notice.py). 인증번호 메일과 같은 골격
+    (table + 인라인 스타일, 외부 자원 없음). **비밀번호·인증번호·IP 는 넣지 않는다** -- 알림은 「무슨 일이 언제 있었나」만
+    말하고, 본인이 한 일이 아니면 관리자에게 알리라고만 한다(관리자 재설정이면 누가 했는지 -- 관리자 아이디는 비밀이 아니다)."""
+    copy = _NOTICE_COPY.get(kind, _NOTICE_FALLBACK)
+    when = (now or datetime.now(KST)).astimezone(KST)
+    name = escape(username)
+    svc = escape(service_name)
+    if kind == "signup":
+        lead = f"{name} 님의 {svc} 계정이 만들어졌습니다."
+    elif kind == "password_admin_reset":
+        lead = (f"관리자({escape(actor or '-')})가 {name} 님의 비밀번호를 재설정했습니다. 새 비밀번호는 관리자에게 "
+                "받으세요. 이전에 로그인해 둔 브라우저는 모두 다시 로그인해야 합니다.")
+    elif kind == "password_reset":
+        lead = f"{name} 님의 비밀번호가 변경되었습니다. 이전에 로그인해 둔 브라우저는 모두 다시 로그인해야 합니다."
+    else:
+        lead = f"{name} 님의 계정 정보가 변경되었습니다."
+    subject = f"[{service_name}] {copy.subject}"
+    body = _NOTICE_HTML.substitute(
+        font=_FONT, title=escape(subject), service_name=svc, heading=escape(copy.heading),
+        lead=lead, username=name, when_label=escape(copy.when_label),
+        when=when.strftime("%Y-%m-%d %H:%M"))
+    return subject, body
+
+
 # 메일 클라이언트(Outlook·Knox 웹메일·모바일) 호환을 위해 table 레이아웃 + 인라인 스타일만 쓴다.
 # <style> 블록·외부 이미지·스크립트 없음. 치환자는 string.Template 의 ${name}.
 _VERIFICATION_HTML = Template("""\
@@ -436,6 +478,73 @@ _TEST_HTML = Template("""\
         이 메일이 보이면 포탈 → 메신저 서버 릴레이 → Knox 메일 경로가 정상입니다.<br>
         요청한 관리자: <strong style="color:#191f28;">${requested_by}</strong><br>
         보낸 시각: ${sent_at} (KST)
+      </td>
+    </tr>
+  </table>
+</td>
+</tr>
+</table>
+</body>
+</html>
+""")
+
+# 완료 안내 메일(2026-11-03) -- 같은 골격. 리드 문장은 렌더러가 조각마다 이스케이프해 넘긴다(관리자 아이디·계정 아이디).
+_NOTICE_HTML = Template("""\
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light only">
+<title>${title}</title>
+</head>
+<body style="margin:0;padding:0;background-color:#f4f5f7;-webkit-text-size-adjust:100%;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#f4f5f7;">
+<tr>
+<td align="center" style="padding:40px 16px;">
+  <table role="presentation" width="560" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:560px;background-color:#ffffff;border:1px solid #e5e8eb;border-radius:12px;">
+    <tr>
+      <td style="height:4px;line-height:4px;font-size:0;background-color:#1d4ed8;border-radius:12px 12px 0 0;">&nbsp;</td>
+    </tr>
+    <tr>
+      <td style="padding:32px 40px 0;font-family:${font};word-break:keep-all;font-size:14px;line-height:20px;font-weight:700;color:#1d4ed8;">${service_name}</td>
+    </tr>
+    <tr>
+      <td style="padding:10px 40px 0;font-family:${font};word-break:keep-all;font-size:22px;line-height:32px;font-weight:700;color:#191f28;">${heading} 안내</td>
+    </tr>
+    <tr>
+      <td style="padding:16px 40px 0;font-family:${font};word-break:keep-all;font-size:15px;line-height:26px;color:#4e5968;">${lead}</td>
+    </tr>
+    <tr>
+      <td style="padding:24px 40px 0;">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-top:1px solid #eef0f3;">
+          <tr>
+            <td width="84" style="padding:16px 0 0;font-family:${font};word-break:keep-all;font-size:13px;line-height:20px;color:#8b95a1;">계정 ID</td>
+            <td style="padding:16px 0 0;font-family:${font};word-break:keep-all;font-size:13px;line-height:20px;color:#191f28;">${username}</td>
+          </tr>
+          <tr>
+            <td width="84" style="padding:6px 0 0;font-family:${font};word-break:keep-all;font-size:13px;line-height:20px;color:#8b95a1;">${when_label}</td>
+            <td style="padding:6px 0 0;font-family:${font};word-break:keep-all;font-size:13px;line-height:20px;color:#191f28;">${when} (KST)</td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:24px 40px 36px;">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+          <tr>
+            <td style="padding:14px 16px;background-color:#fff7ed;border-radius:8px;font-family:${font};word-break:keep-all;font-size:12px;line-height:20px;color:#9a3412;">
+              본인이 요청하지 않았다면 즉시 관리자에게 알려 주세요.
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+  <table role="presentation" width="560" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:560px;">
+    <tr>
+      <td align="center" style="padding:20px 24px 0;font-family:${font};word-break:keep-all;font-size:12px;line-height:18px;color:#8b95a1;">
+        본 메일은 ${service_name}에서 자동 발송된 발신 전용 메일입니다. 회신하셔도 확인되지 않습니다.
       </td>
     </tr>
   </table>

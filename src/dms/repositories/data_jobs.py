@@ -41,6 +41,11 @@ def _guard_component(actor: str) -> str:
     return actor if actor in _KNOWN_COMPONENTS else "api"
 
 
+def _state_value(state) -> str:
+    # set_job_state 의 expected_state 는 스냅숏의 문자열(job["state"])이나 DataJobState 둘 다 받는다.
+    return state.value if isinstance(state, DataJobState) else str(state)
+
+
 class _PlanLost(Exception):
     """create_plan_and_job 의 조건부 Pending→Planned 가 졌다 -- 트랜잭션을 롤백시키려고 던진다(밖으로 새지 않는다)."""
 
@@ -510,9 +515,16 @@ class DataJobsRepository:
                 {"r": request_id, "n": limit})
         return [self._hydrate(r) for r in rows]
 
-    def set_job_state(self, job_id, to_state: DataJobState, *, reason_code=None, actor):
+    def set_job_state(self, job_id, to_state: DataJobState, *, reason_code=None, actor, expected_state=None) -> bool:
+        """전이. 반환 True = 전이했다(state_transitions 행이 남았다), False = 종단 가드 또는 expected_state 불일치로 하지 않았다.
+
+        expected_state(2026-11-03, B3 리뷰): 주면 잠근 행의 현재 상태가 그 값일 때만 전이한다(CAS). stepper 는 잠금 없는 claim
+        스냅숏으로 스텝하므로, 리스가 풀린 두 컨트롤러(30초 넘는 틱)가 겹치면 낡은 스냅숏의 전진 전이가 다른 쪽이 이미 앞으로 보낸
+        잡을 뒤로 끌어당긴다(Running→Preflight, 컨펌된 rm 의 Executing→ConfirmPending). 불일치는 조용히 no-op 이다 -- 다른
+        stepper 가 이미 진행시킨 정상 경합이라 이벤트를 남기지 않는다(종단 가드와 달리 사람이 볼 일이 없다)."""
         now = utc_now_iso()
         guard_tripped = False
+        moved_ok = False
         # 요청 삭제(2026-10-08)와의 경합: PG 행 잠금으로 읽고 UPDATE 영향 행 수를 확인한다 -- 잠금 없이 읽은 뒤 삭제가
         # 커밋되면 0행 UPDATE 위에 전이만 커밋돼 지운 잡의 고아 전이가 남는다(RequestsRepository._apply_state 와 같은
         # 처방). 0행이면 KeyError -- 트랜잭션이 롤백된다(행 없음과 같은 신호).
@@ -530,6 +542,8 @@ class DataJobsRepository:
                 # 한 잡 때문에 죽여선 안 된다. 일어나지 않은 전이는 state_transitions에
                 # 기록하지 않는다 -- 진단 이벤트는 트랜잭션 밖에서(아래) 남긴다.
                 guard_tripped = True
+            elif expected_state is not None and current["state"] != _state_value(expected_state):
+                pass                       # 다른 stepper 가 먼저 옮겼다(위 docstring) -- 전이도 이벤트도 없다
             else:
                 # 제출 대기(슬라이스 17 설계 §2.3): Pending -> 첫 비-Pending 엣지에서만
                 # 계산해 한 번 쓴다(write-once). IS NULL 가드는 이중 안전장치다 --
@@ -557,6 +571,7 @@ class DataJobsRepository:
                     raise KeyError(job_id)
                 self._record_transition("data_job", job_id, DataJobState(current["state"]),
                                         to_state, reason_code, actor, now)
+                moved_ok = True
         if guard_tripped:
             # self._db만 있고 repos가 없다 -- 저장소 규약(__init__(self, db))을 지키려고
             # 협력자를 주입받는 대신 여기서 즉석으로 만든다. ObservabilityRepository는
@@ -571,6 +586,7 @@ class DataJobsRepository:
                 message=(f"actor={actor} job_id={job_id} state={current['state']} "
                          f"attempted_to={to_state.value}"),
                 request_id=current["request_id"])
+        return moved_ok
 
     def job_transitions(self, job_id):
         return self._db.query(
@@ -620,20 +636,32 @@ class DataJobsRepository:
         남길 행이 없다 -- 예전엔 row["phase_refs"] 의 TypeError 로 끝나 회수 경로(_reclaim_if_terminal)에 닿지 못했고 실제
         rm/sync 가 고아로 돌았다. 호출자(stepper)는 False 면 그 ref 를 즉시 terminate 한다. PG 는 행을 FOR UPDATE 로 잠가
         요청 삭제 트랜잭션(requests → data_jobs FOR UPDATE)과 직렬화한다: 삭제가 먼저면 여기서 행이 없고, 여기가 먼저면
-        삭제가 새 ref 와 새 updated_at(조용한 창)을 본다."""
+        삭제가 새 ref 와 새 updated_at(조용한 창)을 본다. stepper 는 record_phase_ref(같은 몸통 + 빈 자리 CAS)를 쓴다."""
+        return self.record_phase_ref(job_id, phase, ref, expect_absent=False) == "recorded"
+
+    def record_phase_ref(self, job_id, phase, ref, *, expect_absent: bool) -> str:
+        """set_phase_ref 의 stepper 판(2026-11-03, B3 리뷰). 반환 "recorded" | "gone"(행 없음) | "taken".
+
+        expect_absent=True 면 그 단계 자리가 **비어 있을 때만** 쓴다(잠근 행에서 판정 -- CAS). 이미 있으면 쓰지 않고 "taken":
+        claim 스냅숏엔 없던 ref 를 그 사이 다른 stepper(리스가 풀린 겹친 컨트롤러)가 같은 결정적 이름으로 내고 기록했다는 뜻이다
+        -- 이 제출은 409 채택으로 같은 객체를 잡았을 뿐이니 호출자는 아무것도 더 하지 않는다(전이·이벤트를 두 번 남기지 않는다:
+        Executing→Executing 자기 전이는 스케줄 대기 측정이 유일성을 전제한다). stepper 는 스냅숏에 그 단계 ref 가 없을 때 True,
+        있을 때(ref 는 남았는데 상태 전이가 끊긴 앞 틱의 재시도) False 로 부른다."""
         now = utc_now_iso()
         lock = " FOR UPDATE" if self._db.dialect == "postgresql" else ""
         with self._db.transaction():
             row = self._db.query_one(
                 f"SELECT phase_refs FROM data_jobs WHERE job_id = :j{lock}", {"j": job_id})
             if row is None:
-                return False
+                return "gone"
             refs = load_json(row["phase_refs"]) or {}
+            if expect_absent and phase in refs:
+                return "taken"
             refs[phase] = ref
             changed = self._db.execute_count(
                 "UPDATE data_jobs SET phase_refs = :p, updated_at = :now WHERE job_id = :j",
                 {"p": dump_json(refs), "now": now, "j": job_id})
-        return changed == 1
+        return "recorded" if changed == 1 else "gone"
 
     def set_worker_pool(self, job_id, worker_pool: dict, *, expected_state) -> bool:
         """stepper 의 노드 CPU 재클램프(2026-10-16, stepper._clamp_to_node_cpu)가 줄인 worker_pool 을 다시 쓴다. 조건부

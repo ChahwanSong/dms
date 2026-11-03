@@ -4,11 +4,13 @@ import json
 import logging
 import re
 import threading
+import time
 from typing import Protocol
 
 from .artifact_base import ARTIFACT_MOUNT, strip_scheme
-from .execution import ExecStatus, ExecutionError
-from .execution_manifests import build_preflight_pod, build_volcano_job
+from .execution import ExecStatus, ExecutionError, SubmitUndecided
+from .execution_manifests import (ADOPTION_LABELS, SPEC_FINGERPRINT_ANNOTATION, build_preflight_pod,
+                                  build_volcano_job)
 
 logger = logging.getLogger(__name__)
 
@@ -81,8 +83,141 @@ def _vcjob_deadline_exceeded(obj) -> bool:
     return "DeadlineExceeded" in (state.get("message") or "")
 
 
+class K8sAlreadyExists(Exception):
+    """create 의 409 AlreadyExists -- 같은 이름의 객체가 이미 있다(2026-11-03 B3). 어댑터만 이것을 따로 받아 채택 판정으로
+    간다(VolcanoExecutionAdapter._create_or_adopt). Exception 의 하위라 다른 호출자(build_runner·purge_runner 의 「있으면 성공」
+    관용)는 종전처럼 일반 예외로 받는다."""
+
+
+class K8sTransient(Exception):
+    """create 가 「반영됐는지 모르게」 끊겼다(2026-11-03 B3 리뷰) -- 연결 끊김·타임아웃(상태 코드 없음)·status 0·429·5xx.
+    요청이 etcd 에 반영되고 응답만 잃었을 수 있으므로 어댑터는 이름으로 다시 읽어 판정하고(있으면 409 와 같은 채택 판정),
+    없으면 다음 틱에 다시 낸다(SubmitUndecided). 4xx(403·422 …)는 apiserver 가 판정을 내린 것이라 여기 오지 않고 원문 그대로
+    submit_failed 다(2026-09-15 교훈). K8sAlreadyExists 처럼 Exception 하위라 다른 호출자는 일반 예외로 받는다."""
+
+
+# 다시 읽어 보니 객체가 **없거나 삭제 중인** 제출(409·create 결과 모름 뒤)을 다음 틱으로 미루는 상한(초, 이름별 첫 관측부터). 넘기면 종전
+# submit_failed -- 웹훅 장애 같은 지속 5xx 가 잡을 영원히 Pending 에 붙잡지 않게. 객체가 있는지조차 모르는 경우(다시 읽기 실패)는
+# 상한 없이 미룬다: 접으면 객체는 돌고 잡만 FAILED 인 B3 그대로이고, 폴링도 같은 GET 실패를 상한 없이 step_error 로 남긴다.
+SUBMIT_UNDECIDED_WINDOW_SECONDS = 300
+
+# 잡 id 를 라벨 셀렉터에 넣기 전 형식 검사(DB 신뢰 경계 -- 쉼표·연산자가 섞이면 셀렉터가 넓어진다). k8s 라벨 값 문법.
+_LABEL_VALUE_RE = re.compile(r"[A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?")
+
+
+def _existing_meta(existing) -> dict:
+    meta = existing.get("metadata") if isinstance(existing, dict) else None
+    return meta if isinstance(meta, dict) else {}
+
+
+def _being_deleted(meta) -> bool:
+    # vcjob 은 원시 JSON(camelCase), Pod 은 kubernetes 모델 to_dict()(snake_case) -- 둘 다 본다(adoption_problem docstring).
+    return meta.get("deletionTimestamp") is not None or meta.get("deletion_timestamp") is not None
+
+
+def _label_problem(desired: dict, meta: dict) -> "str | None":
+    want_labels = (desired.get("metadata") or {}).get("labels") or {}
+    have_labels = meta.get("labels") if isinstance(meta.get("labels"), dict) else {}
+    for key in ADOPTION_LABELS:
+        want = want_labels.get(key)
+        if want is None or have_labels.get(key) != want:
+            return f"라벨 {key} 불일치"
+    return None
+
+
+def adoption_problem(desired: dict, existing) -> "str | None":
+    """409 뒤 다시 읽은 객체를 이번 제출로 채택해도 되는가(2026-11-03 B3). None = 채택, 문자열 = 채택하지 않는 이유.
+
+    전부 만족해야 채택한다: (1) 객체가 있다(409 와 GET 사이에 지워졌으면 아니다), (2) 삭제 중이 아니다(deletionTimestamp --
+    취소·회수가 지우는 중인 객체를 붙이면 곧 사라져 폴링이 FAILED 로 읽는다), (3) 라벨 dms.io/job-id(**전체** id)·phase·tool 이
+    지금 지은 매니페스트와 같다(이름은 job_id 앞 12자뿐이라 앞자리가 같은 다른 잡의 객체를 이름으로 붙이면 남의 결과를 내 잡에
+    기록한다), (4) 지문 annotation 이 지금 지은 매니페스트의 지문과 같다(execution_manifests.manifest_fingerprint -- 같은 잡·
+    단계라도 경로·신원·노드·프로세스 수가 바뀌었으면 옛 객체는 다른 일을 한다). 지문이 없는 옛 객체(이 변경 전 코드가 만든 것)도
+    채택하지 않는다.
+
+    지문은 **DMS 가 지은 객체끼리의 대조**다 -- 살아 있는 spec 을 다시 해시하지 않으므로(웹훅이 기본값을 채워 넣어 할 수도 없다)
+    annotation 을 베낀 객체는 무엇을 하든 통과한다. 위조 방어가 아닌 이유는 RBAC 다: dms 네임스페이스의 pods·jobs(volcano)
+    create 는 dms-controller SA 뿐이고 patch 는 어느 DMS SA 에도 없다(deploy/k8s/10-rbac.yaml) -- 그 권한이 있으면 이미 root
+    hostPath 파드를 직접 띄울 수 있다. RBAC 를 넓히면 이 전제부터 다시 본다.
+
+    실 클라이언트의 모양 차이: Pod GET 은 kubernetes 모델의 to_dict()(snake_case -- metadata.deletion_timestamp), vcjob 은
+    custom objects API 의 원시 JSON(camelCase -- metadata.deletionTimestamp)이다. 라벨·annotation 은 사전이라 키가 그대로다."""
+    if not isinstance(existing, dict):
+        return "다시 읽을 때 없음(409 뒤 사라짐)"
+    meta = _existing_meta(existing)
+    if _being_deleted(meta):
+        return "삭제 중(deletionTimestamp)"
+    problem = _label_problem(desired, meta)
+    if problem is not None:
+        return problem
+    want_fp = ((desired.get("metadata") or {}).get("annotations") or {}).get(SPEC_FINGERPRINT_ANNOTATION)
+    have_ann = meta.get("annotations") if isinstance(meta.get("annotations"), dict) else {}
+    if want_fp is None or have_ann.get(SPEC_FINGERPRINT_ANNOTATION) != want_fp:
+        return f"지문 불일치({SPEC_FINGERPRINT_ANNOTATION})"
+    return None
+
+
+def owned_by_this_phase(desired: dict, existing) -> bool:
+    """채택하지 않은 기존 객체가 그래도 **이 잡·이 단계의 것**인가(2026-11-03 B3 리뷰) -- 라벨 셋(전체 job_id·phase·tool)이 전부
+    같고 삭제 중이 아니다. 그렇다면 지문만 다른(배포 경계의 옛 객체·재클램프 전 객체) 우리 객체가 ref 없이 돌고 있다는 증거라,
+    잡을 「시작 못 함」으로 끝내면서 그대로 두지 않고 stepper 가 회수한다(ExecutionError.strays -- purge 의 「전체 job_id 로
+    확인된 객체만 지운다」 선례). 라벨이 하나라도 다르면 남의 것이라 건드리지 않는다."""
+    if not isinstance(existing, dict):
+        return False
+    meta = _existing_meta(existing)
+    return not _being_deleted(meta) and _label_problem(desired, meta) is None
+
+
+def _finished_recheck(desired: dict, existing) -> "str | None":
+    """채택 판정을 통과한 기존 객체가 **이미 끝난 실행 전 재점검 파드**(phase exec_preflight, Pod phase Succeeded·Failed)면 그
+    phase, 아니면 None(2026-11-03 리뷰 2회차 [3]). 그런 파드는 채택하지 않는다.
+
+    왜: exec_preflight 는 실행 직전 TOCTOU 재점검이고, 첫 실행 관문(stepper GATE_START -- 겹치는 작업이 끝날 때까지 보류)
+    **뒤에** 돌아야 의미가 있다. ref 기록이 끊긴 틱의 재점검 파드는 관문 **앞**에서 만들어졌고, 기록이 없으니 그 잡은 겹침 판정에서
+    단계 0(재점검 전)으로 보여 commit 순서가 앞선 겹치는 rm 이 먼저 돌 수 있다 -- 보류가 풀린 뒤 그 파드(상대 실행 **전**에 끝난
+    결과)를 채택하면 「목적지가 파일로 바뀜」 같은 판정을 건너뛰고 실행으로 간다. 아직 도는 파드는 관문 뒤의 상태를 볼 수 있어
+    채택한다. 초기 preflight(phase preflight)는 그대로 채택한다 -- 그 결과는 설계상 보류 뒤에도 쓰이고(scan 의 실행 관문), sync·rm
+    은 실행 전에 이 재점검을 다시 거친다(끝난 파드를 다시 돌리는 비용만 늘린다). vcjob(미리보기·실행)은 끝났어도 채택한다 --
+    실제로 돈 결과라 다시 돌리면 안 된다."""
+    want_phase = ((desired.get("metadata") or {}).get("labels") or {}).get("dms.io/phase")
+    if desired.get("kind") != "Pod" or want_phase != "exec_preflight":
+        return None
+    status = existing.get("status") if isinstance(existing.get("status"), dict) else {}
+    phase = status.get("phase")
+    return phase if phase in ("Succeeded", "Failed") else None
+
+
+def _ref_of(manifest) -> str:
+    return ("pod/" if manifest["kind"] == "Pod" else "vcjob/") + manifest["metadata"]["name"]
+
+
+def create_error_class(exc) -> "str | None":
+    """실 클라이언트 create 예외의 갈래(2026-11-03 B3): "exists"(409) | "transient"(반영됐는지 모름) | None(apiserver 판정 --
+    원문 그대로 submit_failed). status 속성으로 판별하는 이유는 get_workload 와 같다(.venv 에 kubernetes 가 없어 ApiException
+    타입을 테스트가 만들 수 없다). 상태 코드가 없는 예외는 **전송 오류 타입일 때만** transient 다(OSError 계열 -- 연결 거부·
+    타임아웃, urllib3.exceptions.HTTPError 계열 -- 재시도 소진·프로토콜·읽기 타임아웃): 매니페스트 직렬화의 TypeError 같은
+    코드 결함을 「모름」으로 미루면 상한까지 헛돈다."""
+    status = getattr(exc, "status", None)
+    if isinstance(status, int):
+        if status == 409:
+            return "exists"
+        if status == 0 or status == 429 or status >= 500:
+            return "transient"
+        return None
+    if isinstance(exc, OSError):
+        return "transient"
+    try:
+        import urllib3
+    except ImportError:          # pragma: no cover - 실 클라이언트에는 늘 있다(kubernetes 의존)
+        return None
+    return "transient" if isinstance(exc, urllib3.exceptions.HTTPError) else None
+
+
 class K8sClient(Protocol):
-    def create(self, manifest: dict) -> None: ...
+    def create(self, manifest: dict) -> None:
+        """이름이 이미 있으면(409) K8sAlreadyExists, 반영됐는지 모르게 끊기면(연결·타임아웃·0·429·5xx) K8sTransient 를 던진다
+        (2026-11-03 B3) -- 그 밖의 실패(4xx 판정)는 원래 예외 그대로."""
+        ...
     def get(self, kind: str, name: str, namespace: str) -> "dict | None": ...
     def delete(self, kind: str, name: str, namespace: str) -> None:
         """대상이 이미 없으면 조용히 무시(404 삼킴) — 멱등 종료 계약."""
@@ -123,8 +258,9 @@ def node_addresses_from(node_list: dict) -> list:
 
 class VolcanoExecutionAdapter:
     def __init__(self, k8s, *, job_image, namespace, storages_lookup, read_text,
-                 artifact_base):
+                 artifact_base, monotonic=None):
         self._k8s = k8s
+        self._monotonic = monotonic or time.monotonic
         # job_image 도 artifact_base 와 같은 계약(슬라이스 35): str(고정값) 또는
         # 0-인자 callable(호출 시점 해석). 생성자 캡처를 피해야 포탈 릴리스의
         # job-image 오버라이드가 재시작 없이 다음 잡부터 반영된다.
@@ -141,6 +277,9 @@ class VolcanoExecutionAdapter:
         self._artifact_base_fn = (artifact_base if callable(artifact_base)
                                   else (lambda: artifact_base))
         self._summary_paths = {}   # ref -> artifact summary.json path (in-memory 빠른 경로)
+        self._adopted = {}         # ref -> [채택한 객체 이름](B3 -- take_adopted)
+        # 객체 이름 -> 「create 결과 모름 + 다시 읽으니 없음」의 첫 관측 시각(SUBMIT_UNDECIDED_WINDOW_SECONDS). 판정이 나면 지운다.
+        self._undecided_since = {}
 
     def _volumes(self, spec, *, role=None):
         # 데이터 스토리지 mount_path + 아티팩트 base 를 수집해 hostPath 볼륨으로.
@@ -202,21 +341,164 @@ class VolcanoExecutionAdapter:
             spec, job_image=self._job_image_fn(), namespace=self._namespace,
             volumes=self._volumes(spec, role=role), node=node, role=role)
 
+    def _create_or_adopt(self, manifest, adopted: list) -> None:
+        """create 하고, 409 AlreadyExists 면 그 객체를 다시 읽어 채택 판정한다(2026-11-03 B3 -- adoption_problem).
+
+        왜: 이름이 결정적이고 ref 는 create **뒤에** DB 에 남는다(stepper._record_ref). 그 사이 DB 가 끊기면(장애조치·컨트롤러
+        재시작) 잡은 이전 상태로 남아 다음 틱이 같은 이름으로 다시 만든다 -- 예전엔 그 409 가 submit_failed 로 접혀 잡이
+        FAILED/REJECTED 로 잘못 기록되고, 객체는 ref 없이 돌아 아무도 추적·회수하지 않았다(pod_gc 는 phase_refs 만 본다).
+        채택하면 새로 만든 것과 **같은 ref** 를 돌려주므로 stepper 는 차이를 모른다 -- 틱이 몇 번 반복돼도 같은 이름·같은 ref 다
+        (리스가 풀린 두 컨트롤러의 겹침은 stepper 가 phase_refs 빈 자리 CAS 로 한쪽만 진행시킨다 -- data_jobs.record_phase_ref).
+        409 로 채택한 이름만 adopted 에 넣는다 -- stepper 가 ref 를 기록한 뒤 이벤트(submit_adopted, 포탈 단계 행 주석 「이전 제출이
+        만들고 기록하지 못한 객체」)로 남긴다(take_adopted). create 결과 모름 뒤 다시 읽어 채택한 것은 넣지 않는다(2026-11-03 리뷰
+        2회차 [4]): 대개 **이번** create 가 반영되고 응답만 잃은 것이라 그 문구가 거짓이고, apiserver 한 번 끊김마다 사용자 화면에
+        주석이 뜬다. 앞 틱의 객체 + 이번 5xx 인 경우와 구별할 수 없어 그때도 주석은 없다(로그만 -- 끊김 자체는 앞 틱의 step_error 가
+        이미 남겼다).
+
+        판정(2026-11-03 리뷰 반영):
+          채택                              -> 반환(같은 ref)
+          라벨·지문 불일치                   -> ExecutionError submit_failed(종전). 라벨 셋은 같고 지문만 다르면(이 잡·단계의
+                                               객체 -- owned_by_this_phase) strays 에 실어 stepper 가 회수한다.
+          이미 끝난 실행 전 재점검 파드       -> SubmitUndecided(strays) -- stepper 가 지우고 다음 틱에 새로 낸다(_finished_recheck)
+          create 결과 모름(K8sTransient)     -> 같은 이름을 다시 읽어 위와 같이 판정(응답만 잃은 create 는 채택된다)
+          다시 읽기 실패                     -> SubmitUndecided(모름 -- 다음 틱 재시도, 상한 없음)
+          다시 읽으니 없음·삭제 중           -> SubmitUndecided, SUBMIT_UNDECIDED_WINDOW_SECONDS 를 넘기면 submit_failed.
+                                               삭제 중은 「곧 없음」이다 -- 다 지워지면 다음 틱의 create 가 새로 만든다(없음과
+                                               같은 결과를 몇 초 늦게 낼 뿐이라 종단으로 접지 않는다, 2026-11-03 리뷰 [2]).
+                                               finalizer 가 걸려 안 사라지면 상한 뒤 종전 submit_failed.
+
+        문구는 DMS 판정을 앞에, apiserver 원문(K8sTransient)은 따로 잘라 끝에 붙인다(2026-11-03 리뷰 2회차 [5]): 원문을 앞에 두고
+        통째로 자르면 ApiException 의 긴 헤더(Audit-Id 등)가 판정 문구를 밀어내 「무엇을 왜 실패로 접었나」가 사라진다. 원문 보존
+        (2026-09-15 교훈)은 그대로다 -- 판정이 원문을 자르지 않는다."""
+        name = manifest["metadata"]["name"]
+        try:
+            self._k8s.create(manifest)
+        except K8sAlreadyExists:
+            head, origin, via = f"AlreadyExists {name}", "", "exists"
+        except K8sTransient as exc:
+            head, origin, via = f"create 결과 모름 {name}", f" -- 원문: {str(exc)[:160]}", "transient"
+        else:
+            self._undecided_since.pop(name, None)
+            return
+        try:
+            existing = self._k8s.get(manifest["kind"], name, self._namespace)
+        except Exception as exc:
+            raise SubmitUndecided(
+                f"{head}: 채택 판정 조회 실패 -- {type(exc).__name__}: {exc}"[:300] + origin) from exc
+        if existing is None:
+            self._undecided(name, f"{head}: 다시 읽을 때 없음", origin)
+        if _being_deleted(_existing_meta(existing)):
+            self._undecided(name, f"{head}: 삭제 중(deletionTimestamp) -- 사라지면 새로 만든다", origin)
+        problem = adoption_problem(manifest, existing)
+        self._undecided_since.pop(name, None)
+        if problem is None:
+            finished = _finished_recheck(manifest, existing)
+            if finished is not None:
+                raise SubmitUndecided(
+                    f"{head}: 채택 안 함 -- 이미 끝난 실행 전 재점검 파드({finished}) -- 지우고 다음 틱에 다시 점검"[:300]
+                    + origin, strays=[_ref_of(manifest)])
+            if via == "exists":
+                logger.warning("adopted existing %s %s/%s (ref was not recorded by an earlier tick)",
+                               manifest["kind"], self._namespace, name)
+                adopted.append(name)
+            else:
+                logger.info("create outcome unknown for %s %s/%s; re-read matches this submit -- adopted",
+                            manifest["kind"], self._namespace, name)
+            return
+        if owned_by_this_phase(manifest, existing):
+            raise ExecutionError(
+                "submit_failed", f"{head}: 채택 안 함 -- {problem} -- 이 잡·단계의 객체(회수 대상)"[:200] + origin,
+                strays=[_ref_of(manifest)])
+        raise ExecutionError("submit_failed", f"{head}: 채택 안 함 -- {problem}"[:200] + origin)
+
+    def _undecided(self, name, detail, origin=""):
+        """객체가 없다고(또는 삭제 중이라고) 확인된 미결 제출: 상한 안이면 SubmitUndecided(다음 틱), 넘기면 종전 submit_failed.
+        반환하지 않는다. origin(apiserver 원문 꼬리)은 판정 문구를 자른 **뒤** 붙인다(_create_or_adopt docstring)."""
+        now = self._monotonic()
+        first = self._undecided_since.setdefault(name, now)
+        if now - first >= SUBMIT_UNDECIDED_WINDOW_SECONDS:
+            self._undecided_since.pop(name, None)
+            raise ExecutionError("submit_failed", f"{detail} ({int(now - first)}초 동안 재시도)"[:200] + origin)
+        raise SubmitUndecided(detail[:300] + origin)
+
+    def _note_submitted(self, ref, adopted) -> None:
+        # 같은 ref 의 옛 항목을 늘 지운다 -- 남아 있으면 채택 없는 다음 제출이 거짓 채택 이벤트를 남긴다(take_adopted).
+        self._adopted.pop(ref, None)
+        if adopted:
+            self._adopted[ref] = list(adopted)
+
+    def take_adopted(self, ref) -> list:
+        """ref 를 만들 때 409 로 채택한 객체 이름(없으면 [] -- create 결과 모름 뒤의 채택은 넣지 않는다, _create_or_adopt
+        docstring). 꺼내면 지운다 -- stepper._record_ref 가 ref 를 기록하기 **전에** 한 번
+        부르므로 기록이 실패해도 항목은 남지 않는다(다음 틱의 같은 제출이 다시 채택하고 그때 이벤트가 남는다). submit 이 매번
+        같은 ref 의 옛 항목을 지우고 쓰므로(_note_submitted) 꺼내지 않은 항목이 다음 제출에 섞이지 않는다."""
+        return self._adopted.pop(ref, [])
+
+    def unrecorded_refs(self, job_id, recorded) -> list:
+        """이 잡(라벨 dms.io/job-id = **전체** id)의 살아 있는 객체 중 recorded(phase_refs 값들)에 없는 것의 ref(2026-11-03 B3 리뷰).
+
+        ref 기록이 끊긴 틱이 만든 객체는 다음 틱의 같은 제출이 채택해 잇지만, 다음 틱이 제출 **전에** 종단되면(_build_spec 의
+        fail-closed -- 그 사이 노드 cordon·스토리지 결측·CPU 부족, 배치 취소) phase_refs 에 없어 아무도 못 치운다 --
+        stepper._reclaim_unrecorded 가 이 목록을 terminate 한다. vcjob 은 라벨로, 파드는 preflight 파드만(라벨 dms.io/phase
+        가 있는 것 -- vcjob 의 launcher·worker 는 phase 라벨이 없고 vcjob 을 지우면 함께 간다). 삭제 중인 것은 뺀다.
+        job_id 가 라벨 값 문법이 아니면 아무것도 고르지 않는다(DB 신뢰 경계 -- 셀렉터가 넓어지지 않게)."""
+        if not isinstance(job_id, str) or not _LABEL_VALUE_RE.fullmatch(job_id):
+            return []
+        pods, vcjobs = set(), set()
+        for ref in recorded or ():
+            prefix, _, rest = str(ref or "").partition("/")
+            if prefix in ("pod", "pods"):
+                pods.update(rest.split(","))
+            elif prefix == "vcjob":
+                vcjobs.add(rest)
+        sel = f"dms.io/job-id={job_id}"
+        out = []
+        for v in self._k8s.list_vcjob_briefs(self._namespace, sel):
+            n = v.get("name")
+            if isinstance(n, str) and n and n not in vcjobs and v.get("deleting") is not True:
+                out.append(f"vcjob/{n}")
+        for p in self._k8s.list_pod_briefs(self._namespace, f"{sel},dms.io/phase"):
+            n = p.get("name")
+            if isinstance(n, str) and n and n not in pods and p.get("deleting") is not True:
+                out.append(f"pod/{n}")
+        return out
+
     def submit(self, spec) -> str:
+        adopted = []
         try:
             if spec.phase in self._PREFLIGHT_PHASES:
                 # nsync = disjoint source/destination pools ("primary" 없음). 소스
                 # 노드에서는 목적지 쓰기를, 목적지 노드에서는 소스 읽기를 검증할 수
                 # 없으므로 preflight를 양쪽 노드에 각각 띄운다(role src/dst). 복합
                 # ref "pods/<src>,<dst>"로 반환 — poll/terminate가 둘 다 다룬다.
+                # 채택은 파드별이다(B3): 앞 틱이 src 만 만들고 끊겼으면 src 는 채택, dst 는 새로 만든다.
                 if "primary" not in spec.candidates and spec.candidates.get("source"):
                     src = self._preflight_pod(spec, spec.candidates["source"][0], "source")
                     dst = self._preflight_pod(
                         spec, spec.candidates["destination"][0], "destination")
-                    self._k8s.create(src)
-                    self._k8s.create(dst)
-                    return "pods/" + ",".join(
+                    done = []      # 이번 제출이 만들었거나 채택한 앞쪽 파드의 ref
+                    try:
+                        for pod in (src, dst):
+                            self._create_or_adopt(pod, adopted)
+                            done.append(_ref_of(pod))
+                    except SubmitUndecided as exc:
+                        # 모름이면 잡은 이전 상태에 남고 다음 틱이 앞쪽 파드를 채택한다 -- 지우지 않는다. 다만 뒤쪽이 이미 끝난
+                        # 재점검이라 지우고 다시 내는 경우(strays 있음)는 앞쪽도 함께 지운다 -- 두 파드의 점검이 같은 시점이게
+                        # (남기면 다음 틱엔 그것이 끝나 있어 또 한 틱을 지운다).
+                        if exc.strays:
+                            exc.strays = done + exc.strays
+                        raise
+                    except ExecutionError as exc:
+                        # 잡은 곧 종단되고 ref 는 기록되지 않는다 -- 앞쪽 파드는 stepper 가 회수한다(ExecutionError.strays:
+                        # 다른 stepper 가 이 단계를 이미 기록했는지 DB 로 본 뒤에. 어댑터는 DB 를 모르므로 직접 지우지 않는다).
+                        exc.strays = done + exc.strays
+                        raise
+                    except Exception as exc:
+                        raise ExecutionError("submit_failed", str(exc)[:200], strays=done) from exc
+                    ref = "pods/" + ",".join(
                         [src["metadata"]["name"], dst["metadata"]["name"]])
+                    self._note_submitted(ref, adopted)
+                    return ref
                 nodes = (spec.candidates.get("primary")
                          or spec.candidates.get("source") or ["dms-w1"])
                 manifest = self._preflight_pod(spec, nodes[0], None)
@@ -234,13 +516,16 @@ class VolcanoExecutionAdapter:
                     spec, job_image=self._job_image_fn(), namespace=self._namespace,
                     volumes=self._volumes(spec))
                 prefix = "vcjob"
-            self._k8s.create(manifest)
+            self._create_or_adopt(manifest, adopted)
+        except (ExecutionError, SubmitUndecided):
+            raise                      # 채택 판정이 이미 지었다 -- 다시 감싸면 detail 에 코드가 두 번 붙는다
         except Exception as exc:
             raise ExecutionError("submit_failed", str(exc)[:200]) from exc
         name = manifest["metadata"]["name"]
         ref = f"{prefix}/{name}"
         base = strip_scheme(spec.artifact_base)  # 접두사 전용(설계 §2.2)
         self._summary_paths[ref] = f"{base}/{spec.job_id}/{spec.phase}/summary.json"
+        self._note_submitted(ref, adopted)
         return ref
 
     def _poll_pod(self, name) -> ExecStatus:
@@ -405,12 +690,23 @@ class KubernetesClient:  # pragma: no cover - 실증 대상
 
     def create(self, manifest):
         self._ensure()
-        if manifest["kind"] == "Pod":
-            self._core.create_namespaced_pod(self._namespace, manifest)
-        else:
-            self._custom.create_namespaced_custom_object(
-                self._VC["group"], self._VC["version"], self._namespace,
-                self._VC["plural"], manifest)
+        try:
+            if manifest["kind"] == "Pod":
+                self._core.create_namespaced_pod(self._namespace, manifest)
+            else:
+                self._custom.create_namespaced_custom_object(
+                    self._VC["group"], self._VC["version"], self._namespace,
+                    self._VC["plural"], manifest)
+        except Exception as exc:
+            # 409·일시 오류만 갈라 올린다(2026-11-03 B3 -- K8sAlreadyExists·K8sTransient, create_error_class). 원래 예외는
+            # __cause__ 로 남는다.
+            kind = create_error_class(exc)
+            if kind == "exists":
+                raise K8sAlreadyExists(
+                    f"{manifest.get('kind')} {manifest['metadata']['name']} already exists") from exc
+            if kind == "transient":
+                raise K8sTransient(f"{type(exc).__name__}: {exc}"[:200]) from exc
+            raise
 
     def get(self, kind, name, namespace):
         self._ensure()

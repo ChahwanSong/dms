@@ -3,10 +3,11 @@ import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { setupServer } from "msw/node";
-import { http, HttpResponse } from "msw";
+import { delay, http, HttpResponse } from "msw";
 import { beforeAll, beforeEach, afterAll, afterEach, test, expect } from "vitest";
 import { Login } from "./Login";
 import { forgetTransportKey } from "../../lib/passwordTransport";
+import { AUTH_NOTICE_KEY } from "../../lib/api";
 import { isSealed, makeServerKey, openSealed, transportKeyHandler, type TestServerKey } from "../../test/transportKey";
 
 const server = setupServer();
@@ -73,7 +74,7 @@ test("계정 생성 흐름: 인증번호 발급(stub 에코 안내) → 생성 �
     http.post("/api/auth/verification-codes", async ({ request }) => {
       bodies.push(await request.json());
       return HttpResponse.json({ email: "cocoa.song@samsung.com",
-                                 expires_in_seconds: 300, stub_code: "1234" });
+                                 expires_in_seconds: 300, stub_code: "123456" });
     }),
     http.post("/api/auth/signup", async ({ request }) => {
       bodies.push(await request.json());
@@ -88,8 +89,8 @@ test("계정 생성 흐름: 인증번호 발급(stub 에코 안내) → 생성 �
   await userEvent.click(screen.getByRole("button", { name: "인증번호 받기" }));
   expect(await screen.findByText(/인증번호를 보냈습니다 \(유효 5분\)/)).toBeInTheDocument();
   // stub 메일러 안내(사내 메일 연동 전 임시)
-  expect(screen.getByText(/개발용 안내: 인증번호 1234/)).toBeInTheDocument();
-  await userEvent.type(screen.getByLabelText("인증번호"), "1234");
+  expect(screen.getByText(/개발용 안내: 인증번호 123456/)).toBeInTheDocument();
+  await userEvent.type(screen.getByLabelText("인증번호"), "123456");
   await userEvent.type(screen.getByLabelText("비밀번호"), "pw1");
   await userEvent.click(screen.getByRole("button", { name: "계정 생성" }));
   // 성공 시 로그인 탭으로 복귀 + 안내
@@ -99,20 +100,115 @@ test("계정 생성 흐름: 인증번호 발급(stub 에코 안내) → 생성 �
   // 비밀번호는 봉인돼 실린다 -- 평문 password 필드는 와이어에 없다.
   const signupBody = bodies[1] as { username: string; code: string; password?: string; password_enc: unknown };
   expect(signupBody.username).toBe("cocoa.song");
-  expect(signupBody.code).toBe("1234");
+  expect(signupBody.code).toBe("123456");
   expect(signupBody.password).toBeUndefined();
   expect(isSealed(signupBody.password_enc)).toBe(true);
   expect(await openSealed(serverKey, signupBody.password_enc as never, "signup", "cocoa.song")).toBe("pw1");
 });
 
-test("로그인 429(감속)는 한국어 문구로 보인다", async () => {
+test("로그인 429(아이디 감속)는 한국어 문구 + Retry-After 의 남은 시간으로 보인다", async () => {
   server.use(http.post("/api/auth/login",
     () => HttpResponse.json({ detail: "login_rate_limited" }, { status: 429, headers: { "Retry-After": "42" } })));
   renderLogin();
   await userEvent.type(screen.getByLabelText("사용자명"), "alice");
   await userEvent.type(screen.getByLabelText("비밀번호"), "pw");
   await userEvent.click(screen.getByRole("button", { name: "로그인" }));
-  expect(await screen.findByText("로그인 시도가 너무 많습니다 — 1분 뒤 다시 시도하세요")).toBeInTheDocument();
+  expect(await screen.findByRole("alert"))
+    .toHaveTextContent("이 아이디의 로그인 시도가 너무 많습니다 — 잠시 뒤 다시 시도하세요 (다시 시도까지 약 42초)");
+});
+
+test("로그인 503 login_busy(과부하)는 문구 + 남은 시간 -- 차단이 아니라 「잠시 뒤」다", async () => {
+  server.use(http.post("/api/auth/login",
+    () => HttpResponse.json({ detail: "login_busy" }, { status: 503, headers: { "Retry-After": "5" } })));
+  renderLogin();
+  await userEvent.type(screen.getByLabelText("사용자명"), "alice");
+  await userEvent.type(screen.getByLabelText("비밀번호"), "pw");
+  await userEvent.click(screen.getByRole("button", { name: "로그인" }));
+  expect(await screen.findByRole("alert"))
+    .toHaveTextContent("로그인 요청이 몰려 지금은 처리하지 못했습니다 — 잠시 뒤 다시 시도하세요 (다시 시도까지 약 5초)");
+  expect(screen.getByRole("button", { name: "로그인" })).toBeEnabled();
+});
+
+test("로그인이 2초를 넘기면 대기 안내(role=status)와 「로그인 중…」을 보인다", async () => {
+  server.use(http.post("/api/auth/login", async () => {
+    await delay(2600);
+    return HttpResponse.json({ actor: "alice", role: "user" });
+  }));
+  renderLogin();
+  await userEvent.type(screen.getByLabelText("사용자명"), "alice");
+  await userEvent.type(screen.getByLabelText("비밀번호"), "pw");
+  await userEvent.click(screen.getByRole("button", { name: "로그인" }));
+  expect(await screen.findByRole("button", { name: "로그인 중…" })).toBeDisabled();
+  // 2초 전에는 안내가 없다(빠른 로그인마다 깜빡이지 않게)
+  expect(screen.queryByText(/순서를 기다리고 있습니다/)).not.toBeInTheDocument();
+  expect(await screen.findByRole("status", {}, { timeout: 3000 }))
+    .toHaveTextContent("로그인 요청이 많아 순서를 기다리고 있습니다 — 창을 닫지 말고 잠시 기다려 주세요");
+}, 10_000);
+
+test("비밀번호가 바뀌어 끝난 세션(session_revoked)이면 로그인 화면이 한 번 알리고 키를 지운다", async () => {
+  sessionStorage.setItem(AUTH_NOTICE_KEY, "session_revoked");
+  renderLogin();
+  expect(screen.getByRole("status")).toHaveTextContent("비밀번호가 바뀌어 로그인이 끝났습니다 — 새 비밀번호로 다시 로그인하세요");
+  await waitFor(() => expect(sessionStorage.getItem(AUTH_NOTICE_KEY)).toBeNull());
+  // 탭을 바꾸면 사라진다(성공 안내와 같은 규칙)
+  await userEvent.click(screen.getByRole("tab", { name: "계정 생성" }));
+  expect(screen.queryByText(/비밀번호가 바뀌어 로그인이 끝났습니다/)).not.toBeInTheDocument();
+});
+
+test("안내 키가 없거나 다른 값이면 세션 안내는 없다", async () => {
+  sessionStorage.setItem(AUTH_NOTICE_KEY, "something_else");
+  renderLogin();
+  expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  sessionStorage.removeItem(AUTH_NOTICE_KEY);
+});
+
+test("인증번호는 6자리 숫자만 -- 숫자 아닌 글자는 지우고, 6자리 전에는 제출 버튼이 잠긴다", async () => {
+  server.use(http.post("/api/auth/verification-codes", () =>
+    HttpResponse.json({ email: "a.b@samsung.com", expires_in_seconds: 300 })));
+  renderLogin();
+  await userEvent.click(screen.getByRole("tab", { name: "계정 생성" }));
+  expect(screen.getByText("(숫자 6자리)")).toBeInTheDocument();
+  const code = screen.getByLabelText("인증번호");
+  // 자릿수는 보이는 라벨에만 있으면 aria-label 에 덮여 화면낭독기가 못 듣는다 -- 설명으로 잇는다(2026-11-03 리뷰).
+  expect(code).toHaveAccessibleName("인증번호");
+  expect(code).toHaveAccessibleDescription("(숫자 6자리)");
+  expect(code).toHaveAttribute("inputmode", "numeric");
+  expect(code).toHaveAttribute("autocomplete", "one-time-code");
+  expect(code).toHaveAttribute("maxlength", "6");
+  await userEvent.type(screen.getByLabelText("회사 아이디"), "a.b");
+  await userEvent.type(screen.getByLabelText("비밀번호"), "pw");
+  await userEvent.type(code, "12a3-4b5");
+  expect(code).toHaveValue("12345");
+  const submit = screen.getByRole("button", { name: "계정 생성" });
+  expect(submit).toBeDisabled();
+  await userEvent.type(code, "6");
+  expect(code).toHaveValue("123456");
+  expect(submit).toBeEnabled();
+});
+
+test("인증번호 붙여넣기: 메일의 「123 456」도 숫자 6자리로 들어간다(maxLength 에 먼저 잘리지 않음)", async () => {
+  renderLogin();
+  await userEvent.click(screen.getByRole("tab", { name: "비밀번호 변경" }));
+  const code = screen.getByLabelText("인증번호");
+  await userEvent.click(code);
+  await userEvent.paste("123 456");
+  expect(code).toHaveValue("123456");
+  await userEvent.clear(code);
+  await userEvent.paste(" 98-76-54-32 ");
+  expect(code).toHaveValue("987654");
+});
+
+test("인증번호 전체 오답 상한(429 verification_global_locked)은 관리자 구제 안내 + 남은 시간으로 보인다", async () => {
+  server.use(http.post("/api/auth/verification-codes", () =>
+    HttpResponse.json({ detail: "verification_global_locked" }, { status: 429, headers: { "Retry-After": "1800" } })));
+  renderLogin();
+  await userEvent.click(screen.getByRole("tab", { name: "비밀번호 변경" }));
+  await userEvent.type(screen.getByLabelText("회사 아이디"), "a.b");
+  await userEvent.click(screen.getByRole("button", { name: "인증번호 받기" }));
+  const alert = await screen.findByRole("alert");
+  expect(alert).toHaveTextContent(/인증번호 오답이 전체적으로 너무 많아 계정 생성·비밀번호 변경이 잠시 중단됐습니다/);
+  expect(alert).toHaveTextContent(/관리자는 계정 화면에서 바로 계정을 만들거나 비밀번호를 재설정할 수 있습니다/);
+  expect(alert).toHaveTextContent(/\(다시 시도까지 약 30분\)$/);
 });
 
 test("로그인 본문은 봉인된 비밀번호를 싣는다", async () => {
@@ -133,7 +229,7 @@ test("로그인 본문은 봉인된 비밀번호를 싣는다", async () => {
 test("비밀번호 변경: 잘못된 인증번호는 한국어 사유로 거부된다", async () => {
   server.use(
     http.post("/api/auth/verification-codes", () =>
-      HttpResponse.json({ email: "a.b@samsung.com", expires_in_seconds: 300, stub_code: "1234" })),
+      HttpResponse.json({ email: "a.b@samsung.com", expires_in_seconds: 300, stub_code: "123456" })),
     http.post("/api/auth/password-reset", () =>
       HttpResponse.json({ detail: "verification_invalid" }, { status: 422 })),
   );
@@ -142,7 +238,7 @@ test("비밀번호 변경: 잘못된 인증번호는 한국어 사유로 거부�
   await userEvent.type(screen.getByLabelText("회사 아이디"), "a.b");
   await userEvent.click(screen.getByRole("button", { name: "인증번호 받기" }));
   await screen.findByText(/인증번호를 보냈습니다/);
-  await userEvent.type(screen.getByLabelText("인증번호"), "9999");
+  await userEvent.type(screen.getByLabelText("인증번호"), "999999");
   await userEvent.type(screen.getByLabelText("새 비밀번호"), "new");
   await userEvent.click(screen.getByRole("button", { name: "비밀번호 변경" }));
   expect(await screen.findByText("인증번호가 일치하지 않습니다")).toBeInTheDocument();
@@ -201,6 +297,8 @@ test("누적 실패 잠금은 429 verification_locked 의 한국어 사유로 �
   await userEvent.type(screen.getByLabelText("회사 아이디"), "a.b");
   await userEvent.click(screen.getByRole("button", { name: "인증번호 받기" }));
   expect(await screen.findByText(/인증번호를 여러 번 틀려 이 아이디의 인증이 잠겼습니다/)).toBeInTheDocument();
+  // 남은 시간은 Retry-After(86000초 → 약 24시간)로 말하고, 관리자 해제 길도 알린다(2026-11-03)
+  expect(screen.getByRole("alert")).toHaveTextContent(/관리자에게 잠금 해제를 요청하세요.*\(다시 시도까지 약 24시간\)/);
 });
 
 test("인증 메일 실패·상한은 한국어 사유로 보인다", async () => {

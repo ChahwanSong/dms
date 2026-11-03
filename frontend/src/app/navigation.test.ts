@@ -17,14 +17,24 @@ function dmsItems(): { group: string; groupAdminOnly: boolean; item: NavItem }[]
 }
 
 // 2026-10-25(dms-k8s): 스토리지 그룹에 「k8s 연동」(/admin/k8s) -- 하위 넷은 화면 안 탭이라 링크 수엔 하나만 더한다.
-test("현행 사이드바 18링크가 전부 데이터에 있다(전수 -- 초과도 누락도 없다)", () => {
+// 2026-11-03: 관리 그룹에 「보안 이벤트」(/admin/security) -- 19링크.
+test("현행 사이드바 19링크가 전부 데이터에 있다(전수 -- 초과도 누락도 없다)", () => {
   const paths = dmsItems().map((x) => x.item.path).sort();
   expect(paths).toEqual([
     "/admin/accounts", "/admin/artifact-base", "/admin/audit", "/admin/batches",
     "/admin/builds", "/admin/control", "/admin/dashboard", "/admin/denylist", "/admin/k8s", "/admin/mail",
-    "/admin/nodes", "/admin/policies", "/admin/portal", "/admin/releases",
+    "/admin/nodes", "/admin/policies", "/admin/portal", "/admin/releases", "/admin/security",
     "/admin/storages", "/admin/usage", "/jobs", "/jobs/new",
   ].sort());
+});
+
+test("관리 그룹(관리자 전용) 순서: 보안 이벤트는 감사 로그 바로 뒤다(2026-11-03)", () => {
+  const admin = (NAVIGATION[0].groups ?? []).find((g) => g.label === "관리")!;
+  expect(admin.adminOnly).toBe(true);
+  expect(admin.items.map((i) => i.label))
+    .toEqual(["계정", "정책", "denylist", "감사 로그", "보안 이벤트", "메일 설정", "포탈 설정"]);
+  expect(breadcrumbFor("/admin/security").map((c) => c.label)).toEqual(["HOME", "DMS", "관리", "보안 이벤트"]);
+  expect(activeNavPath("/admin/security")).toBe("/admin/security");
 });
 
 test("k8s 연동은 스토리지 그룹(관리자 전용)의 스토리지와 노드 사이다", () => {
