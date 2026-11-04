@@ -54,6 +54,37 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
 
 ## 슬라이스별 상세 기록
 
+### ✅ 라이브 기능 전수 점검(2026-11-04) + 확정 결함 5건 수정 d23 — **완료·실증**(2026-11-05)
+
+사용자 지시 「모든 기능들에 대해 다양한 종류의 작업등 수행해서 정상 작동하는지 확인해봐」 → 「결함 5개 고쳐. Cpu 문제는 건드리지마.」.
+
+- **전수 점검(dmsk8s 라이브 d19)**: 기준선 스냅숏 → 8 영역 병렬(인증·계정·보안 / 인벤토리·k8s·노드·정책 / scan·사용량 / sync /
+  rm / 배치 / 결과물·요청 삭제·지표 / 포탈 UI 데스크톱·390px·이름·IP 입구) + FAIL 마다 독립 반박 재현 → 운영(유지보수·드레인·빌드 →
+  레지스트리 → 잡 이미지 릴리스 → 원복, 로그인 감속) → 엔드포인트 138·화면 35 전수 대조 → 보충(제어면 릴리스 d22 → d19 원복 포함) →
+  원복·흔적 0 확인. 판정 490행(원시 약 1,350건): PASS 464 · FAIL 12 · BLOCKED 2 · SKIP 10. 데이터 손상·권한 우회 0. 시험 데이터·요청·
+  계정 0, 설정 = 기준선, 이미지 d19, post-boot PASS=103 FAIL=0. 보고서·하네스는 세션 job tmp `fv/`(REPORT.md·coverage.md).
+- **확정 결함 5건 → 수정(소스 7434e1c5)**:
+  1. 없는 `/api/*` GET 이 200 index.html — SPA 폴백을 `/api` 에 매치하지 않는 라우트로(404 JSON, 다른 메서드 전용 경로 405 JSON+Allow),
+     `redirect_slashes=False`(끝 슬래시 /api 가 HTTPS 엣지 뒤에서 `http://` 로 307 되던 부작용 차단).
+  2. 보호 화면이 `/me` 5xx·네트워크 오류에도 /login — 401 일 때만 /login, 그 밖은 제자리 「세션 확인에 실패했습니다」+「다시 시도」(재시도 중
+     같은 버튼·포커스 유지), `/me` 만 5xx·네트워크 2회 짧은 재시도. 구현 중 세션 만료 시 `/me` 무한 재조회 루프(401 이벤트가 진행 중 me
+     조회를 취소·재조회)를 찾아 함께 수정(`cancelRefetch: false`), Home 대기 판정 `isPending`.
+  3. 390px 표 버튼·칸 음절 단위 줄바꿈 — 노드·감사·denylist·릴리스 이력에 `whitespace-nowrap`, e2e 03 375 점검에 세 화면.
+  4. vcjob 시한 초과가 Failed — 라이브 Volcano 는 PodFailed→AbortJob 뒤 `{phase: Aborted}`(사유 없음)만 남긴다: 끝난 vcjob 이면 task
+     파드(`volcano.sh/job-name`)의 DeadlineExceeded 로 TIMED_OUT(조회 실패는 poll_failed). 테스트 가짜를 라이브 모양으로.
+  5. 미리보기 시한이 사전 점검 파드에도 걸려 preflight_failed — preflight·exec_preflight 는 고정 `PREFLIGHT_DEADLINE_SECONDS`(600),
+     시한 초과는 TimedOut `preflight_timed_out`·`execution_recheck_timed_out`(양쪽 등록), 상태 설명·결과 배너·정책 화면 문구.
+  리뷰 2라운드(지적 7 → 전부 반영, 2회차 0). 백엔드 5600 passed / 15 skipped, vitest 1858, tsc, e2e 32, dist 외부 URL 0.
+- **배포**: 포탈 빌드 d23(3종, 225초) → 릴리스 dms-agent → dms-api → dms-controller → job-image 전부 Applied(live == 동봉 d23),
+  오버레이 bump 590cd4ab(guard exit 0). d20~d22 는 점검 시험 빌드(원복·삭제).
+- **라이브 재실증(d23)**: 검증 70행 + 독립 재확인 11행 모두 PASS — #1 두 입구에서 404/405 JSON·Location 없음·SPA 딥링크 그대로, #2 `/me`
+  500·503·abort → 1.9초 뒤 제자리 패널(호출 1+2), 401 → /login(루프 없음), #3 390·375px 노드·감사·denylist 한 줄·페이지 넘침 없음,
+  #4 dsync 실행 시한 2·5초 → 잡 TimedOut(vcjob Aborted + 파드 DeadlineExceeded), #5 미리보기 시한 3초 → preflight 는 600초 시한으로 성공,
+  잡 TimedOut `preview_timed_out`. 기본 정책 scan·사용자 PV sync 정상(d23 잡 이미지). 정책은 바꾼 뒤 7~8초 안에 원복(비메타 차이 0).
+- **남은 것(이번 범위 밖)**: 실행 시한 초과의 사유 코드가 여전히 `execution_failed`(stepper 실행 TimedOut 분기 — 그동안 도달 불가였다;
+  화면 제목은 「시간이 초과」인데 사유 줄은 「실행에 실패」); 로그아웃 뒤 옛 서명 쿠키 재사용(설계 한계 — BACKLOG 보강 권고);
+  테스트베드 워커 CPU(2 vCPU 에 DMS 외 requests 가 700m 를 넘으면 잡이 Volcano 에서 무기한 대기 — 사용자 지시로 손대지 않음).
+
 ### ✅ 옛 dmsk8s 레지스트리 pkg-01:5001 삭제 — testbed IaC 은퇴 목록·노드 신뢰 정리·DMS 헬퍼·문서 — **완료·실증**(2026-11-04)
 
 사용자 결정(2026-11-04) 「이미지 레지스트리 dms-k8s 의 예전 방식 (5001) 은 삭제해도 돼. 되돌릴일 없을거야. 관련 스크립트들도 모두 정리해.」.
