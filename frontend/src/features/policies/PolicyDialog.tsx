@@ -139,7 +139,9 @@ export function PolicyDialog({ policy, trigger }: { policy: Policy; trigger: Rea
               </select></label>
           </div>
         </Group>
-        <Group title="타임아웃" caption="단계별 제한 시간(초)입니다 — 넘기면 작업이 TimedOut 으로 끝납니다.">
+        {/* 사전 점검·실행 직전 재점검 파드는 정책과 무관한 고정 시한이다(stepper.PREFLIGHT_DEADLINE_SECONDS, 2026-11-04 결함 #5) --
+            그래서 scan(미리보기 없음)에는 미리보기 타임아웃이 쓰이지 않는다. */}
+        <Group title="타임아웃" caption="단계별 제한 시간(초)입니다 — 넘기면 작업이 TimedOut 으로 끝납니다. 미리보기 타임아웃은 미리보기에만 걸립니다(scan 은 미리보기가 없어 쓰지 않습니다). 사전 점검·실행 직전 재점검은 이 값과 무관하게 10분입니다.">
           <div className="grid gap-3 sm:grid-cols-2">
             <label className="block">미리보기 타임아웃(초) — 비우면 타임아웃 없음
               <input aria-label="미리보기 타임아웃(초)" type="number" min={1} className={field} value={previewTimeout}

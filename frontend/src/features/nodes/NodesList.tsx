@@ -157,7 +157,8 @@ function LastReport({ node, nowMs, compact }: { node: NodeInfo; nowMs: number; c
             : ` · 시각 차이 -${fmtDuration(-skew!)}(시계 또는 프로브 지연)`}</span>
         )}
       </div>
-      {!compact && <div className={`text-xs ${bad ? "" : "text-muted"}`}>{kstStamp(node.reported_at)}</div>}
+      {/* 시각 줄도 nowrap(2026-11-04 기능 점검 #3) -- 노드 표 맨 끝 칸이라 390px 에서 「2026-11-05 02:16:33 KST」가 4줄로 쪼개졌다. */}
+      {!compact && <div className={`text-xs whitespace-nowrap ${bad ? "" : "text-muted"}`}>{kstStamp(node.reported_at)}</div>}
     </div>
   );
 }
@@ -389,7 +390,9 @@ export function NodesList() {
               const cpu = cpuLoadText(os);
               return (
                 <tr key={n.node_name} className={`border-t border-line ${n.fresh ? "" : "bg-badbg/40"}`}>
-                  <td className="py-2 font-medium">{n.node_name}</td>
+                  {/* 노드명·「상세」 버튼은 nowrap(9fbef86 규약, 2026-11-04 기능 점검 #3) -- 390px 에서 열이 min-content 로
+                      줄면 이름이 하이픈에서, 버튼은 음절마다 꺾였다. 가로 넘침은 Table 래퍼(overflow-x-auto)가 맡는다. */}
+                  <td className="py-2 font-medium whitespace-nowrap">{n.node_name}</td>
                   <td>{n.fresh
                     ? <Pill tone="ok">fresh</Pill>
                     : <span className="text-bad font-semibold">stale</span>}</td>
@@ -404,7 +407,7 @@ export function NodesList() {
                   <td className="pr-6"><UsageBar pct={memoryPct(os)} /></td>
                   <td className="py-2">
                     <Dialog title={`${n.node_name} 상세`} size="xl"
-                            trigger={<Button variant="ghost">상세</Button>}>
+                            trigger={<Button variant="ghost" className="whitespace-nowrap">상세</Button>}>
                       <NodeDetail node={n} />
                     </Dialog>
                   </td>

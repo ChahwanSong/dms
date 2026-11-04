@@ -255,7 +255,8 @@ export function ReleasesPage() {
             <tbody>
               {history.map((r) => (
                 <tr key={r.id} className="border-t border-black/5">
-                  <td className="py-2">{kstStampOrDash(r.applied_at)}</td>
+                  {/* 시각 칸은 nowrap(9fbef86 규약, 2026-11-04 기능 점검 #3 같은 부류) -- 좁은 폭에서 시각이 여러 줄로 쪼개지지 않게. */}
+                  <td className="py-2 whitespace-nowrap">{kstStampOrDash(r.applied_at)}</td>
                   <td>{r.component}</td>
                   <td>{r.tag ?? "—"}</td>
                   <td><StatusPill state={r.state} variant={releasePillVariant(r.state)} /></td>

@@ -4,8 +4,10 @@ import threading
 import sys
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
+from fastapi.routing import APIRoute
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.responses import FileResponse, JSONResponse, Response
+from starlette.routing import Match
 from starlette.staticfiles import StaticFiles
 from ..config import Settings
 from ..db import Database, utc_now_iso
@@ -46,6 +48,28 @@ from .routes_metrics import router as metrics_router
 from .routes_usage import ReportReadFailures, router as usage_router
 
 
+class _SpaFallbackRoute(APIRoute):
+    """SPA 폴백 catch-all -- `/api`·`/api/*` 에는 **매치 자체를 하지 않는다**(Match.NONE).
+
+    본문에서 404 를 던지는 대신 매치에서 빼는 이유(2026-11-04 기능 점검 결함 #1): 라우터는 FULL 매치를 PARTIAL(메서드
+    불일치)보다 먼저 집는다 -- catch-all 이 /api 를 FULL 로 잡으면 없는 경로는 200 index.html 이 됐고, PUT 전용 라우트의
+    GET 도 405 대신 index.html 이 됐다. 매치에서 빠지면 FastAPI 기본 그대로 없는 경로 JSON 404(`{"detail":"Not Found"}`),
+    다른 메서드 전용 경로 JSON 405(`Allow` 헤더)가 된다 -- 본문에서 404 를 던지면 405 가 404 로 뭉개진다. 끝 슬래시만 다른
+    /api 경로도 JSON 404 다: 앱은 `redirect_slashes=False` 다(create_app). 켜 두면 매치에서 빠진 /api 끝 슬래시 경로가 처음으로
+    Starlette 의 307 을 받는데, Location 이 scope 의 scheme 으로 만든 절대 URL 이라 TLS 엣지 뒤(uvicorn 이 X-Forwarded-Proto 를
+    믿지 않는다)에선 `http://` 로 내려가고, 307 은 메서드·본문을 유지해 쓰기 본문이 평문으로 다시 간다. 비 API 경로는 이 라우트가
+    FULL·PARTIAL 로 잡아 리다이렉트에 닿지 않는다. 판정은 이 라우트가 잘라 낸 `full_path` 로 한다(root_path 를 뺀 같은 경로 -- 위치 계산을 따로
+    하지 않는다). 세그먼트로 가른다: `/apiary`·`/api-tokens` 는 SPA 몫."""
+
+    def matches(self, scope):
+        match, child_scope = super().matches(scope)
+        if match != Match.NONE:
+            full_path = child_scope.get("path_params", {}).get("full_path", "")
+            if full_path == "api" or full_path.startswith("api/"):
+                return Match.NONE, {}
+        return match, child_scope
+
+
 def create_app(settings: Settings, db: Database, exit_fn=None) -> FastAPI:
     # exit_fn: readyz 연속 실패 자기 종료의 실행부(슬라이스 22 §2.4). 기본은
     # 자신에게 SIGTERM -- uvicorn graceful 종료 -> 컨테이너 종료 -> restartPolicy
@@ -53,7 +77,9 @@ def create_app(settings: Settings, db: Database, exit_fn=None) -> FastAPI:
     if exit_fn is None:
         def exit_fn():
             os.kill(os.getpid(), signal.SIGTERM)
-    app = FastAPI(title="dms")
+    # redirect_slashes=False: 끝 슬래시 307 은 TLS 엣지 뒤에서 http:// 로 내려간다(_SpaFallbackRoute docstring) -- 퍼스트파티
+    # 클라이언트는 끝 슬래시를 쓰지 않는다.
+    app = FastAPI(title="dms", redirect_slashes=False)
     app.state.settings = settings
     app.state.repos = Repositories(db)
     app.state.execution_adapter = build_execution_adapter(settings, app.state.repos)
@@ -207,13 +233,17 @@ def create_app(settings: Settings, db: Database, exit_fn=None) -> FastAPI:
             app.mount("/assets", StaticFiles(directory=assets), name="assets")
         index_path = os.path.join(static_root, "index.html")
 
-        @app.get("/{full_path:path}")
         def spa_fallback(full_path: str) -> Response:
-            # /api·/healthz·/docs·/openapi.json 는 이미 위 라우터가 처리했다.
+            # /healthz·/readyz·/docs·/openapi.json 는 위에서 먼저 등록된 GET 이 FULL 로 이긴다. /api·/api/* 는
+            # _SpaFallbackRoute 가 매치에서 뺀다 -- 여기까지 오지 않는다.
             candidate = os.path.normpath(os.path.join(static_root, full_path))
             if ((candidate == static_root or candidate.startswith(static_root + os.sep))
                     and os.path.isfile(candidate)):
                 return FileResponse(candidate)
             return FileResponse(index_path)
+
+        # app.get 은 라우트 클래스를 고를 수 없다 -- APIRouter.add_api_route 의 route_class_override 로 단다(같은 등록 경로).
+        app.router.add_api_route("/{full_path:path}", spa_fallback, methods=["GET"],
+                                 route_class_override=_SpaFallbackRoute)
 
     return app

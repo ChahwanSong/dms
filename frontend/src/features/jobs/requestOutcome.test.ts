@@ -416,6 +416,32 @@ test("V8 스케줄 대기: 비종단은 「실행 대기열」, 대기 중 관�
   expect(ran.next?.text).toContain("이미 삭제됐을 수 있습니다");
 });
 
+test("점검 파드 시한 초과(TimedOut preflight_timed_out·execution_recheck_timed_out)는 그 점검 단계지만 「실패한 검사」를 가리키지 않는다", () => {
+  // 2026-11-04 결함 #5: 점검 파드의 고정 시한 초과는 Rejected preflight_failed 가 아니라 TimedOut 이다 -- 죽은 점검 파드엔 실패한
+  // 검사(마커)가 없으므로 「실패한 검사를 고쳐라」·「경로나 권한이 바뀌었을 수 있다」는 사유 문구와 어긋난다.
+  const pre = job({ state: "TimedOut", reason_code: "preflight_timed_out", phase_refs: { preflight: "pod/p" },
+    transitions: [...PRE_TR, t("Preflight", "TimedOut", 9)] });
+  expect(deriveJobStages(pre).failure).toMatchObject({ step: "preflight", evidence: "reason_prefix" });
+  const po = outcome({ state: "Failed", events: [] }, [pre]);
+  expect([po.title, po.tone]).toEqual(["사전 점검 단계에서 시간이 초과되었습니다", "bad"]);
+  expect(po.next?.text).toBe("점검이 제한 시간 안에 끝나지 않았습니다 — 스토리지 응답·노드 상태를 확인한 뒤 다시 제출하세요. 데이터는 변경되지 않았습니다.");
+  expect(po.next?.text).not.toContain("실패한 검사");
+  expect(po.next?.actions).toEqual(["failLog", "newJob"]);
+  expect(po.failTarget).toEqual({ jobId: "j1", stage: "pre", key: "log:preflight" });
+  const ex = job({ state: "TimedOut", reason_code: "execution_recheck_timed_out",
+    phase_refs: { preflight: "a", preview: "b", exec_preflight: "c" }, transitions: [...TO_EXEC, t("Executing", "TimedOut", 25)] });
+  expect(deriveJobStages(ex).failure).toMatchObject({ step: "exec_preflight", evidence: "reason_prefix" });
+  const eo = outcome({ state: "Failed", events: [] }, [ex]);
+  expect(eo.title).toBe("실행 직전 재점검 단계에서 시간이 초과되었습니다");
+  expect(eo.next?.text).toBe("재점검이 제한 시간 안에 끝나지 않아 실행하지 않았습니다 — 스토리지 응답·노드 상태를 확인한 뒤 다시 제출하세요. 데이터는 변경되지 않았습니다.");
+  expect(eo.next?.text).not.toContain("경로나 권한");
+  expect(eo.failTarget).toEqual({ jobId: "j1", stage: "exec", key: "log:exec_preflight" });
+  // 같은 단계의 거부(Rejected)는 그대로 검사·경로를 가리킨다.
+  const rej = outcome({ state: "Rejected", events: [] }, [job({ ...pre, state: "Rejected", reason_code: "preflight_failed",
+    transitions: [...PRE_TR, t("Preflight", "Rejected", 9)] })]);
+  expect(rej.next?.text).toContain("실패한 검사");
+});
+
 test("N3 artifact_base_* 파드 마커 거부는 그 파드 단계를 탓하고 로그로 데려간다(base 관문은 2026-10-26 삭제 -- 늘 마커)", () => {
   const pre = job({ state: "Rejected", reason_code: "artifact_base_not_traversable", phase_refs: { preflight: "pod/p" },
     transitions: [...PRE_TR, t("Preflight", "Rejected", 9)] });

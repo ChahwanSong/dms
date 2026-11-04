@@ -100,10 +100,12 @@ export function AuditLog() {
               <Fragment key={e.id}>
                 <tr className="border-t border-black/5">
                   <td className="py-2">{e.mutation_class}</td>
-                  <td className="text-muted">{kstStamp(e.at)}</td><td>{e.operation}</td>
+                  {/* 시각 칸·펼치기 버튼은 nowrap(9fbef86 규약, 2026-11-04 기능 점검 #3) -- 390px 에서 시각이 4줄, 「펼치기」가
+                      음절마다 3줄로 쪼개졌다(보안 이벤트 표와 같은 처리). 가로 넘침은 Table 래퍼(overflow-x-auto)가 맡는다. */}
+                  <td className="text-muted whitespace-nowrap">{kstStamp(e.at)}</td><td>{e.operation}</td>
                   <td>{e.target_key}</td><td className="text-muted">{e.actor}</td>
                   <td className="py-1">
-                    <Button variant="ghost" aria-expanded={openId === e.id}
+                    <Button variant="ghost" className="whitespace-nowrap" aria-expanded={openId === e.id}
                             onClick={() => setOpenId((cur) => (cur === e.id ? null : e.id))}>
                       {openId === e.id ? "닫기" : "펼치기"}
                     </Button>

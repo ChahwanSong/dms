@@ -113,6 +113,21 @@ async function assertTextContained(page: Page): Promise<void> {
   expect(leaks, "긴 무공백 경로가 요약 칸·지정 경로 줄을 넘쳤다(overflow-wrap/minmax(0,1fr) 회귀)").toEqual([]);
 }
 
+// 표 칸 글자가 한 줄인가(2026-11-04 기능 점검 #3). L4 는 `table button` 만 재고 td 는 행 높이를 따라 늘어 높이로는 못 잰다 --
+// 칸 내용의 줄 상자(Range.getClientRects)의 서로 다른 top 개수로 잰다. 칸이 하나도 안 잡히면 잰 게 없으니 실패다.
+async function assertCellsOneLine(page: Page, selector: string, label: string): Promise<void> {
+  const { count, wrapped } = await page.locator(selector).evaluateAll((tds) => ({
+    count: tds.length,
+    wrapped: tds.filter((td) => {
+      const range = document.createRange();
+      range.selectNodeContents(td);
+      return new Set(Array.from(range.getClientRects()).map((r) => Math.round(r.top))).size > 1;
+    }).map((td) => td.textContent),
+  }));
+  expect(count, `${label}: 칸(${selector})을 하나도 못 찾았다 -- 셀렉터가 화면과 어긋났다`).toBeGreaterThan(0);
+  expect(wrapped, `${label}이 두 줄 이상으로 쪼개졌다(whitespace-nowrap 회귀)`).toEqual([]);
+}
+
 // 각 화면의 minTableCells 는 **소스 실측치**다(완화가 아니라 실측으로 정한다):
 //   /admin/accounts  th 6 + (admin 1 + e2ewide 3)행 × td 6 = 30 >= 24
 //   /jobs            th 10(관리자 선택 열 1 + 관리자 배치 열 1 + 요청·요청자·작업·대상·우선순위·상태·생성·갱신 8)
@@ -262,5 +277,37 @@ test.describe("E3 레이아웃 불변식", () => {
     // 보안 이벤트: 상태 dl 1열·필터 줄 접힘(문서 L1)
     await visitSecurity(page);
     await assertLayoutSane(page, { sidebarFixed: false, minTableCells: 0 });
+
+    // 표 안 버튼·시각 칸 nowrap(2026-11-04 기능 점검 #3): 390·375 에서 노드 표 「배치 제외」(4줄)·「상세」·마지막 리포트 시각(4줄), 감사 로그 「펼치기」
+    // (3줄)·시각 칸(4줄)이 음절마다 세로로 쪼개졌다 -- 공용 Button 엔 nowrap 이 없어 표 안 버튼마다 붙여야 한다(9fbef86 규약).
+    // L4 는 `table button` 을 재므로 **버튼이 그려진 뒤에** 잰다(없으면 잰 게 없는 초록). 셀 하한은 소스 실측:
+    //   /admin/nodes     th 9 + e2e-node 1행 × td 9 = 18
+    //   /admin/audit     th 6 + 시드가 남긴 기록(스토리지 등록 등) 1행 이상 × td 6 >= 12
+    //   /admin/denylist  th 4 + 아래에서 심는 규칙 1행 × td 4 = 8(같은 부류 「해제」 버튼)
+    await visit(page, "/admin/nodes", "노드");
+    await expect(page.getByRole("button", { name: "e2e-node 배치 제외", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "상세", exact: true })).toBeVisible();
+    await assertLayoutSane(page, { sidebarFixed: false, minTableCells: 18 });
+    await assertCellsOneLine(page, "main table tbody tr td:first-child", "노드 표 노드명 칸");
+    // 맨 끝 「마지막 리포트」 칸은 의도된 두 블록(경과 + 시각)이라 칸 전체가 아니라 시각 줄 하나만 잰다(LastReport).
+    await assertCellsOneLine(page, "main table tbody tr td:last-child > div > div:last-child", "노드 표 마지막 리포트 시각");
+
+    // denylist 는 이 파일 시점엔 비어 있다 -- 아무 시나리오도 쓰지 않는 이름으로 하나 심고 끝에 지운다(감사 기록도 하나 는다).
+    const denyPath = "/api/admin/identity-denylist/requester/e2e-layout-nobody";
+    const denied = await page.request.put(denyPath, { data: { reason: "e2e 375 레이아웃" } });
+    expect(denied.status(), await denied.text()).toBe(201);
+    try {
+      await visit(page, "/admin/denylist", "denylist");
+      await expect(page.getByRole("button", { name: "해제", exact: true })).toBeVisible();
+      await assertLayoutSane(page, { sidebarFixed: false, minTableCells: 8 });
+    } finally {
+      const allowed = await page.request.delete(denyPath);
+      expect(allowed.status(), await allowed.text()).toBe(200);
+    }
+
+    await visit(page, "/admin/audit", "감사 로그");
+    await expect(page.getByRole("button", { name: "펼치기", exact: true }).first()).toBeVisible();
+    await assertLayoutSane(page, { sidebarFixed: false, minTableCells: 12 });
+    await assertCellsOneLine(page, "main table tbody tr td:nth-child(2)", "감사 로그 시각 칸");
   });
 });

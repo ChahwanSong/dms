@@ -116,6 +116,17 @@ class PrivilegeNotRequestedAtStep(Exception):
 # 목적지 PV 루트 소유자 마커를 못 읽을 때(로그 조회 실패) 다시 읽는 틱 수(_record_pv_owner) -- 넘기면 pv_owner_unknown.
 PV_OWNER_READ_ATTEMPTS = 20
 
+# 사전 점검(preflight)·실행 전 재점검(exec_preflight) 파드의 시한(activeDeadlineSeconds, 초) -- 정책값이 아니다(2026-11-04 라이브
+# 기능 점검 결함 #5). 예전엔(slice7 §1.4) 정책 preview_timeout_seconds 를 이 파드들에도 걸어, 미리보기 타임아웃을 짧게 잡으면
+# 미리보기 vcjob 이 서기도 전에 점검 파드가 죽어 Rejected preflight_failed 로 끝났다(PO-03·03b: 1초·3초 -- 화면 라벨 「미리보기
+# 타임아웃」과 결과가 다르고 preview_timed_out 경로엔 아예 닿지 못했다). 점검 스크립트는 경로 몇 개의 test·realpath·stat 뿐이라
+# 몇 초면 끝난다 -- 10분은 차가운 노드의 잡 이미지 pull(kubelet 의 시한은 파드 시작부터라 pull 도 센다)과 느린 스토리지를 넉넉히
+# 덮고, 그보다 길면 멈춘 마운트·노드 이상일 가능성이 크다(정책의 12h 를 기다릴 이유가 없다). 넘기면 TimedOut
+# (preflight_timed_out·execution_recheck_timed_out -- _poll_preflight·_poll_or_submit_execution). 설정 키로 빼지 않는다: 점검의
+# 양은 정책·사이트와 무관하다(purge_runner.PURGE_POD_DEADLINE_SECONDS 선례). 스케줄 전에는 발화하지 않는다(kubelet 이 파드를
+# 받은 뒤부터 센다 -- execution_manifests._container 주석).
+PREFLIGHT_DEADLINE_SECONDS = 600
+
 
 class ChownMismatchAtStep(Exception):
     """잡 행의 chown·chmod 가 요청 행(제출·planner·컨펌이 판정한 값)과 다르다(2026-10-26 리뷰) -- create_job 은
@@ -435,8 +446,12 @@ class JobStepper:
         # 미지 tool 은 _step_one 층1 가드(슬라이스 24)가 이미 종단시켰으므로 여기서
         # 직접 인덱싱해도 KeyError 불능이다. policy None 은 이제 "정책 행이 지워진"
         # 운영 조작뿐이라 크래시 대신 타임아웃 없음으로 관용한다(기존 동작 유지).
+        # 사전 점검·실행 전 재점검 파드는 정책과 무관한 고정 시한이다(PREFLIGHT_DEADLINE_SECONDS, 2026-11-04) -- 정책의 두 값은
+        # 미리보기·실행 vcjob 에만 걸린다.
         policy = self._repos.control.get_policy(TOOL_TO_POLICY[job["tool"]])
-        if policy is None:
+        if phase in ("preflight", "exec_preflight"):
+            timeout = PREFLIGHT_DEADLINE_SECONDS
+        elif policy is None:
             timeout = None
         elif phase == "execution":
             timeout = policy["execution_timeout_seconds"]
@@ -1273,6 +1288,12 @@ class JobStepper:
             if stop is not None:
                 return stop
             return self._submit_preview(job)  # Task 7에서 구현
+        if status == ExecStatus.TIMED_OUT:
+            # 점검 파드가 고정 시한(PREFLIGHT_DEADLINE_SECONDS)을 넘겼다(2026-11-04 결함 #5) -- 점검이 끝나지 않았으니 마커 사유도
+            # 없다. preflight_failed(「로그에서 사유를 보라」)로 접지 않고 시간 초과로 끝낸다. 박제는 미리보기 시간 초과와 같이 diag=.
+            self._finalize(job, DataJobState.TIMED_OUT, reason_code="preflight_timed_out",
+                           diag=("preflight", ref))
+            return DataJobState.TIMED_OUT.value
         # diag= 를 넘기지 않는 이유: _preflight_reason 이 이미 박제했다(전이 전).
         reason = self._preflight_reason(job, "preflight", ref,
                                         reason_code="preflight_failed")
@@ -1440,6 +1461,11 @@ class JobStepper:
             if stop is not None:
                 return stop
             return self._submit_execution(job, DataJobState.EXECUTING)
+        if status == ExecStatus.TIMED_OUT:
+            # 재점검 파드의 고정 시한 초과(_poll_preflight 의 짝 -- 사유만 실행 전 재점검 쪽).
+            self._finalize(job, DataJobState.TIMED_OUT, reason_code="execution_recheck_timed_out",
+                           diag=("exec_preflight", refs["exec_preflight"]))
+            return DataJobState.TIMED_OUT.value
         # 재검증도 같은 preflight 스크립트다 -- 미리보기와 confirm 사이에 목적지가
         # 파일로 바뀌는 TOCTOU 가 여기서 잡히므로 사유를 뭉개지 않는다.
         reason = self._preflight_reason(job, "exec_preflight", refs["exec_preflight"],

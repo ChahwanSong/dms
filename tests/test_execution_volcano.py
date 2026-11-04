@@ -33,6 +33,11 @@ class _FakeK8s:
     def read_pod_log(self, name, namespace):
         return ""
 
+    def list_pod_briefs(self, namespace, label_selector):
+        # vcjob task 파드는 이 가짜가 만들지 않는다 -- 끝난 vcjob 의 시한 판정(_task_pod_deadline_exceeded)에겐 「파드 없음」
+        # (= 종전 FAILED). 라이브 모양 판정은 test_timeout_enforcement 가 본다.
+        return []
+
 
 def _spec(phase="execution", op="scan", tool="dscan", cand=None, paths=None, artifact_base=None):
     return JobSpec(job_id="job123456789abc", phase=phase, operation=op, tool=tool,

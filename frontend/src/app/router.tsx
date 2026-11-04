@@ -41,7 +41,9 @@ import { SyncHistoryPage } from "../features/k8s/SyncHistoryPage";
 
 function Home() {
   const me = useMe();
-  if (me.isLoading) return <div className="p-6 text-muted">불러오는 중…</div>;
+  // isPending(RequireRole 과 같은 술어, 2026-11-04): useMe 의 5xx 재시도는 숨은 탭에서 일시정지한다(fetchStatus paused) -- 그때
+  // isLoading 은 거짓이라 아래 「/jobs」로 빠져 관리자가 탭에 돌아와도 /admin/dashboard 가 아니라 /jobs 에 남았다.
+  if (me.isPending) return <div className="p-6 text-muted">불러오는 중…</div>;
   // §2.4-5: 일시 500/네트워크 오류를 /login 으로 흘려보내면 로그인된 관리자가 "세션
   // 만료"로 오독하고 재로그인한다 -- 리다이렉트 없이 오류 문구 + 재시도를 렌더한다.
   // 단 401(세션 없음)은 진짜 "로그인 필요"라 기존 리다이렉트에 맡긴다: 여기서

@@ -308,6 +308,8 @@ export function deriveOutcome(req: RequestDetail, jobs: DataJob[] | null, models
   // 관문 문구는 파드 로그가 아니라 사유와 진단 이벤트를 가리킨다 -- 그 단계 파드는 돌지 않았고(_fail_closed 는 박제하지
   // 않는다) 막힌 이유(노드·신원·권한)는 이벤트에 남는다.
   const gateNext = "사유와 아래 「진단 이벤트」를 확인한 뒤 다시 제출하세요. 데이터는 변경되지 않았습니다.";
+  // 점검(사전·재점검) 파드 시한 초과의 다음 행동 -- 점검은 몇 초짜리라 넘겼다면 스토리지·노드 쪽이 먼저다(사유 문구와 같은 뜻).
+  const CHECK_TIMED_OUT_NEXT = "스토리지 응답·노드 상태를 확인한 뒤 다시 제출하세요. 데이터는 변경되지 않았습니다.";
   if (f?.evidence === "gate_ambiguous") {
     // 노드 제외는 앞 파드의 스케줄 대기 재검사에서도, 다음 제출 직전에서도 나온다 -- 단계를 단정하지 않는다.
     return bad(`작업이 ${verb}`, `실행 노드 점검에서 막혀 중단되었습니다 — ${gateNext}`, ["newJob"]);
@@ -340,6 +342,11 @@ export function deriveOutcome(req: RequestDetail, jobs: DataJob[] | null, models
   }
   switch (f.step) {
     case "preflight":
+      // 점검 파드의 시한 초과(preflight_timed_out, 2026-11-04 결함 #5)는 실패한 검사(마커)가 없다 -- 고칠 검사를 가리키지 않는다.
+      if (job.state === "TimedOut") {
+        return bad(`사전 점검 단계에서 ${verb}`,
+          `점검이 제한 시간 안에 끝나지 않았습니다 — ${CHECK_TIMED_OUT_NEXT}`, [...failLog, "newJob"]);
+      }
       return bad(`사전 점검 단계에서 ${verb}`,
         "사전 점검 로그에서 실패한 검사를 확인하고 고친 뒤 다시 제출하세요. 데이터는 변경되지 않았습니다.",
         [...failLog, "newJob"]);
@@ -365,6 +372,10 @@ export function deriveOutcome(req: RequestDetail, jobs: DataJob[] | null, models
       return bad(`작업 컨펌 단계에서 ${verb}`,
         "사유를 해소한 뒤 다시 제출하세요. 실행 전이라 데이터는 변경되지 않았습니다.", ["newJob"]);
     case "exec_preflight":
+      if (job.state === "TimedOut") {
+        return bad(`실행 직전 재점검 단계에서 ${verb}`,
+          `재점검이 제한 시간 안에 끝나지 않아 실행하지 않았습니다 — ${CHECK_TIMED_OUT_NEXT}`, [...failLog, "newJob"]);
+      }
       return bad(`실행 직전 재점검 단계에서 ${verb}`,
         "미리보기 이후 경로나 권한이 바뀌었을 수 있습니다 — 재점검 로그를 보고 다시 제출하세요. 데이터는 변경되지 않았습니다.",
         [...failLog, "newJob"]);

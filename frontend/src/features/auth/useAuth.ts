@@ -1,11 +1,24 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { apiGet, apiSend } from "../../lib/api";
+import { ApiError, apiGet, apiSend } from "../../lib/api";
 import { postWithSealedPassword } from "../../lib/passwordTransport";
 import { resetNavCollapsed } from "../../lib/navState";
 import type { Me } from "../../lib/types";
 
+// /me 만 짧게 재시도한다(2026-11-04 기능 점검 #2): 5xx·네트워크 오류(fetch 거부 = ApiError 아님)는 최대 2회, 0.5초·1초
+// 뒤에 -- 롤아웃·연결 끊김 같은 한 번짜리 실패를 흡수하고, 그래도 실패하면 약 1.5초 안에 RequireRole·Home 의 「세션 확인에
+// 실패했습니다 + 다시 시도」로 넘긴다(수십 초짜리 DB 전환은 재시도로 버티지 않는다 -- 화면이 정직하게 말하고 사람이 다시 누른다).
+// 4xx 는 재시도하지 않는다: 401 은 진짜 「로그인 필요」이고(재시도는 dms:unauthorized → me 무효화와 겹쳐 요청만 늘린다),
+// 다른 4xx 도 다시 물어 답이 바뀌지 않는다. 전역 기본값(queryClient retry:false)은 그대로다 -- 화면 조회들은 자기 오류를 보인다.
+export const ME_RETRY_LIMIT = 2;
+export const meRetry = (failureCount: number, error: unknown): boolean =>
+  !(error instanceof ApiError && error.status < 500) && failureCount < ME_RETRY_LIMIT;
+export const meRetryDelay = (failureCount: number): number => 500 * 2 ** failureCount;
+
 export const useMe = () =>
-  useQuery({ queryKey: ["auth", "me"], queryFn: () => apiGet<Me>("/api/auth/me") });
+  useQuery({
+    queryKey: ["auth", "me"], queryFn: () => apiGet<Me>("/api/auth/me"),
+    retry: meRetry, retryDelay: meRetryDelay,
+  });
 
 // 비밀번호를 보내는 훅은 전부 postWithSealedPassword 를 쓴다(2026-09-07 전송 봉인)
 // -- 평문 password 는 와이어에 실리지 않는다. 429 login_rate_limited·503 login_busy 는 request()

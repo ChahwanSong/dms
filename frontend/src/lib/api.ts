@@ -18,6 +18,10 @@ export const REASON_MESSAGES: Record<string, string> = {
   preview_timed_out: "미리보기가 제한 시간을 넘겼습니다",
   preview_failed: "미리보기에 실패했습니다",
   execution_recheck_failed: "실행 직전 재점검에 실패했습니다",
+  // 점검 파드의 고정 시한(stepper.PREFLIGHT_DEADLINE_SECONDS -- 정책의 미리보기 타임아웃과 무관, 2026-11-04) 초과. 점검 스크립트는
+  // 몇 초짜리라 넘겼다면 스토리지·노드 쪽 이상이 먼저다. 점검은 데이터를 바꾸지 않는다.
+  preflight_timed_out: "사전 점검이 제한 시간을 넘겼습니다 — 스토리지 응답이 멈췄거나 노드에 이상이 있을 수 있습니다(데이터는 바뀌지 않았습니다). 잠시 뒤 다시 신청하세요",
+  execution_recheck_timed_out: "실행 직전 재점검이 제한 시간을 넘겨 실행하지 않았습니다 — 스토리지 응답이 멈췄거나 노드에 이상이 있을 수 있습니다(데이터는 바뀌지 않았습니다)",
   // preflight 스크립트(execution_manifests._preflight_script)가 찍는 마커 사유 —
   // 스테퍼가 화이트리스트(PREFLIGHT_REASONS)로만 잡 사유로 승격한다. 승격이 없던
   // 동안 이 다섯은 전부 preflight_failed 로 뭉개져 화면에서 구분되지 않았다.

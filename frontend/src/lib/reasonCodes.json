@@ -18,6 +18,8 @@
   "preview_timed_out",
   "preview_failed",
   "execution_recheck_failed",
+  "preflight_timed_out",
+  "execution_recheck_timed_out",
   "preview_expired",
   "build_timeout",
   "build_failed",

@@ -120,9 +120,10 @@ export function submitFailedPhase(reasonCode: string | null | undefined): Phase 
 // destination_full 등, execution_manifests.TOOL_FAILURE_REASONS)도 같다: 러너가 미리보기·실행 어느 쪽에서든 같은 코드를
 // 내므로(stepper._run_failure_reason) 코드만으로 단계를 정하면 미리보기 실패를 실행 실패로 칠한다.
 const REASON_PREFIX_STEP: Record<string, StepId> = {
-  preflight_failed: "preflight",
+  // *_timed_out(점검 파드 고정 시한 초과, 2026-11-04 결함 #5)은 그 점검 파드 단계뿐이다.
+  preflight_failed: "preflight", preflight_timed_out: "preflight",
   preview_failed: "preview", preview_timed_out: "preview", empty_preview: "preview",
-  execution_recheck_failed: "exec_preflight",
+  execution_recheck_failed: "exec_preflight", execution_recheck_timed_out: "exec_preflight",
   execution_failed: "execution",
   preview_expired: "confirm",
 };

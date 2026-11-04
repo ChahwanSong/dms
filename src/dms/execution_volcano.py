@@ -76,11 +76,21 @@ def _vcjob_deadline_exceeded(obj) -> bool:
     """Volcano Job이 deadline으로 죽었는지. 파드와 필드 위치가 다르다: v1.15.0 CRD의
     Job.status.conditions[] 항목은 {lastTransitionTime, status}만 갖고 reason/message는
     status.state에만 있다 — status.reason이나 conditions[].reason을 보면 영원히 못 잡는다.
-    파드와 마찬가지로 불확실하면 False(FAILED 유지)."""
+    파드와 마찬가지로 불확실하면 False(FAILED 유지).
+
+    DMS 매니페스트의 시한 초과는 대개 이 신호를 남기지 **않는다**(2026-11-04 라이브 기능 점검 PO-04): 시한은 task 파드에 걸리고
+    정책 PodFailed→AbortJob 이 vcjob 을 {phase: Aborted}(reason·message 없음)로 끝낸다 -- 그래서 poll 은 이것이 False 인 끝난
+    vcjob 의 task 파드를 따로 본다(VolcanoExecutionAdapter._task_pod_deadline_exceeded). 이 함수는 state 에 사유를 싣는 판·경로를
+    위해 남는다."""
     state = (obj.get("status") or {}).get("state") or {}
     if state.get("reason") == "DeadlineExceeded":
         return True
     return "DeadlineExceeded" in (state.get("message") or "")
+
+
+# 끝난(실패한) vcjob phase -- 시한 초과를 task 파드에서 확인하는 상태(VolcanoExecutionAdapter._task_pod_deadline_exceeded).
+# Terminated 는 TerminateJob 정책이 내는데 DMS 매니페스트엔 그 정책이 없다(_VCJOB_PHASE 밖 -- 종전 FAILED 그대로).
+_VCJOB_ENDED_PHASES = ("Failed", "Aborted")
 
 
 class K8sAlreadyExists(Exception):
@@ -226,7 +236,8 @@ class K8sClient(Protocol):
     # 슬라이스 25: vcjob 파드는 이름을 모르므로 라벨로 찾는다. 구현은 이미 있었지만
     # Protocol 에 없어 계약 문서가 실제 의존을 숨기고 있었다(설계 §1-4). 각 항목의
     # "deleting"(2026-10-08) = deletionTimestamp 있음(Terminating) -- 요청 삭제 정리
-    # (purge_runner)가 「아직 남은 객체」에 Terminating 도 세려고 쓴다.
+    # (purge_runner)가 「아직 남은 객체」에 Terminating 도 세려고 쓴다. "reason"(2026-11-04) = 파드 status.reason(없으면 None)
+    # -- 끝난 vcjob 의 시한 초과 판정(VolcanoExecutionAdapter._task_pod_deadline_exceeded)이 kubelet 의 DeadlineExceeded 를 본다.
     def list_pod_briefs(self, namespace: str, label_selector: str) -> list: ...
     # 요청 삭제 정리(2026-10-08, purge_runner.sweep): 라벨로 vcjob 을 찾는다 --
     # [{"name", "deleting", "uid"}]. phase_refs 에 없는 vcjob(제출 직후 크래시)도 회수해야 한다.
@@ -559,9 +570,37 @@ class VolcanoExecutionAdapter:
             return ExecStatus.FAILED
         phase = ((obj.get("status") or {}).get("state") or {}).get("phase")
         status = _VCJOB_PHASE.get(phase, ExecStatus.FAILED)
-        if status == ExecStatus.FAILED and _vcjob_deadline_exceeded(obj):
+        if status == ExecStatus.FAILED and (
+                _vcjob_deadline_exceeded(obj)
+                or (phase in _VCJOB_ENDED_PHASES and self._task_pod_deadline_exceeded(name))):
             return ExecStatus.TIMED_OUT
         return status
+
+    def _task_pod_deadline_exceeded(self, name) -> bool:
+        """끝난(Failed·Aborted) vcjob 의 task 파드 중 하나라도 activeDeadlineSeconds 로 죽었는가(2026-11-04 기능 점검 결함 #4).
+
+        왜 파드를 보나: 시한은 vcjob spec 이 아니라 task 파드에 건다(execution_manifests._apply_task_deadlines). 파드가
+        DeadlineExceeded 로 죽으면 정책 PodFailed→AbortJob 이 vcjob 을 끝내는데, 라이브 Volcano 는 그때 status.state 에
+        {phase: Aborted} 만 남긴다(reason·message 없음 -- PO-04 실측, 요청 49412bf5). state 만 보면(_vcjob_deadline_exceeded)
+        실행·미리보기의 시한 초과가 늘 FAILED 라 stepper 의 TimedOut 분기에 닿지 못했다. Volcano 의 abort 는 Succeeded·Failed
+        파드를 남기고 나머지만 지우므로(PodRetainPhaseSoft) 시한으로 죽은 파드는 vcjob 이 있는 동안 남는다 -- 조회는 read_log 와
+        같은 Volcano 라벨(volcano.sh/job-name)이다.
+
+        판정: 파드 phase Failed + status.reason DeadlineExceeded(kubelet 이 둘을 한 번에 쓴다 -- _poll_pod 와 같은 신호). 하나라도
+        그러면 시한 초과다: 모든 task 에 같은 시한이 걸려 있고, 다른 파드의 평범한 실패가 먼저였다면 abort 가 나머지(Running)를
+        지워 대개 시한에 닿을 파드가 남지 않는다(복합 preflight 의 「하나라도 TIMED_OUT」과 같은 규칙). 파드가 없거나(지워짐) 신호가 없으면 False --
+        종전 FAILED(불확실하면 보수적, slice7 결정).
+
+        조회 실패는 poll_failed 로 던진다 -- False 로 접지 않는다(모름 ≠ 시한 아님): 잡은 지금 상태에 남고 run_once 의 step_error
+        뒤 다음 틱이 다시 읽는다(같은 poll 의 vcjob GET 실패와 같은 길 -- 끝난 vcjob 과 남은 파드는 다음 틱에도 그대로다). 이름이
+        라벨 값 문법이 아니면 셀렉터를 만들지 않고 False(DB 신뢰 경계 -- unrecorded_refs 와 같은 검사)."""
+        if not _LABEL_VALUE_RE.fullmatch(name):
+            return False
+        try:
+            briefs = self._k8s.list_pod_briefs(self._namespace, f"volcano.sh/job-name={name}")
+        except Exception as exc:
+            raise ExecutionError("poll_failed", str(exc)[:200]) from exc
+        return any(b.get("phase") == "Failed" and b.get("reason") == "DeadlineExceeded" for b in briefs or ())
 
     def read_summary(self, ref):
         path = self._summary_paths.get(ref)
@@ -836,6 +875,9 @@ class KubernetesClient:  # pragma: no cover - 실증 대상
                 "node": pod.spec.node_name,
                 "images": {c.name: c.image for c in pod.spec.containers},
                 "phase": pod.status.phase or "",
+                # kubelet 이 activeDeadlineSeconds 로 죽인 파드는 phase Failed + reason DeadlineExceeded(_task_pod_deadline_exceeded).
+                # 사유 없음 = None(V1PodStatus 기본). getattr 은 위 waiting 과 같은 관용 -- 속성이 없는 객체도 「사유 없음」이다.
+                "reason": getattr(pod.status, "reason", None),
                 "waiting_reason": reason,
                 # Terminating(삭제 요청됨, 아직 존재) -- 요청 삭제 정리가 「남은 객체」로 센다.
                 "deleting": pod.metadata.deletion_timestamp is not None,

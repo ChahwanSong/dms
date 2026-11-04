@@ -68,12 +68,15 @@ export function PlacementCell({ node }: { node: NodeInfo }) {
     setOpen(o);
   };
 
+  // 표 안 버튼은 whitespace-nowrap(9fbef86 규약, 2026-11-04 기능 점검 #3): 공용 Button 에는 nowrap 이 없어, 노드 표가 좁은 폭
+  // (390px)에서 열을 min-content 로 줄이면 「배치 제외」가 한 음절씩 세로로 쪼개졌다 -- 표 래퍼(overflow-x-auto)가 가로 스크롤을 맡는다.
   return (
     <div className="flex flex-wrap items-center gap-1.5">
       <PlacementBadges node={node} />
       {excluded ? (
         <Dialog open={open} onOpenChange={onOpen} title={`${node.node_name} 다시 포함`}
-                trigger={<Button variant="ghost" aria-label={`${node.node_name} 다시 포함`}>다시 포함</Button>}>
+                trigger={<Button variant="ghost" className="whitespace-nowrap"
+                                 aria-label={`${node.node_name} 다시 포함`}>다시 포함</Button>}>
           <div className="space-y-3 text-sm">
             {/* cordon·리포트 지연이면 다시 포함해도 바로 배치되지 않는다 -- 그 사실을 말한다(리뷰) */}
             {k8sNodeState(node).schedulable === false && !k8sNodeState(node).transient ? (
@@ -101,7 +104,8 @@ export function PlacementCell({ node }: { node: NodeInfo }) {
         </Dialog>
       ) : (
         <Dialog open={open} onOpenChange={onOpen} title={`${node.node_name} 배치 제외`}
-                trigger={<Button variant="ghost" aria-label={`${node.node_name} 배치 제외`}>배치 제외</Button>}>
+                trigger={<Button variant="ghost" className="whitespace-nowrap"
+                                 aria-label={`${node.node_name} 배치 제외`}>배치 제외</Button>}>
           <div className="space-y-3 text-sm">
             <ul className="list-disc space-y-1 pl-5">
               <li>새 작업은 이 노드에 배치되지 않습니다(남은 노드로 실행, 남은 노드가 없으면 거부).</li>

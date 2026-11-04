@@ -13,9 +13,10 @@ function ReleaseButton({ e }: { e: DenyEntry }) {
   const [open, setOpen] = useState(false);
   const allow = useAllow();
   useEffect(() => { if (!open) allow.reset(); }, [open]);
+  // 표 안 버튼은 nowrap(9fbef86 규약, 2026-11-04 기능 점검 #3 같은 부류) -- 좁은 폭에서 「해제」가 음절마다 꺾이지 않게.
   return (
     <Dialog open={open} onOpenChange={setOpen} title="해제"
-            trigger={<Button variant="ghost">해제</Button>}>
+            trigger={<Button variant="ghost" className="whitespace-nowrap">해제</Button>}>
       <p className="text-sm text-muted mb-3">{e.subject} 을(를) denylist에서 해제할까요?</p>
       {allow.isError && <p className="text-bad text-sm mb-2">{(allow.error as ApiError).message}</p>}
       <div className="flex justify-end gap-2">
