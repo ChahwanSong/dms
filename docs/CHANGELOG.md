@@ -54,6 +54,130 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
 
 ## 슬라이스별 상세 기록
 
+### ✅ 옛 dmsk8s 레지스트리 pkg-01:5001 삭제 — testbed IaC 은퇴 목록·노드 신뢰 정리·DMS 헬퍼·문서 — **완료·실증**(2026-11-04)
+
+사용자 결정(2026-11-04) 「이미지 레지스트리 dms-k8s 의 예전 방식 (5001) 은 삭제해도 돼. 되돌릴일 없을거야. 관련 스크립트들도 모두 정리해.」.
+옛 방식 = pkg-01 의 두 번째 docker 레지스트리 `registry-k8s`(registry:2, 호스트 :5001, 데이터 `/opt/dms-registry-k8s` 3.0G — d1~d18·k0~k4). 2026-11-03
+④ 앱 전환(d19)부터 k8s 테스트베드의 이미지는 전부 클러스터 내 레지스트리 `10.112.0.50:5000`(데이터 호스트 NFS `/dms_shared/dms/registry`)에 있고
+:5001 은 되돌림용으로만 남아 있었다. **ssc 레지스트리 `registry`(:5000, `/opt/dms-registry`)는 건드리지 않는다.** DMS 코드·매니페스트 동작은 바뀌지
+않는다(헬퍼 스크립트·주석·문서·테스트).
+
+- **조사(읽기만)**: dmsk8s 의 워크로드·ConfigMap·DMS 설정·testbed 역할 어디도 pkg-01:5000/:5001 을 참조하지 않는다(애드온 역할은 상류,
+  DMS 애드온·빌더는 클러스터 내); 노드 캐시에 남은 것은 k8s-cp1 의 `pkg-01:5001/dms:d17` 하나. 릴리스 이력의 `pkg-01:5001/…` 행(86)은 기록으로 남고
+  다시 읽히지 않는다. d18 3종은 클러스터 내에 같은 digest 로 있다. 노드 신뢰는 두 파일 — `50-dms-registry.conf`(클러스터 내, 유지)와
+  `99-pkg-01-insecure.conf`(pkg-01:5000 + :5001). 살아 있는 객체(파드·deploy·ds·sts·job·cronjob·vcjob·ConfigMap)의 참조는 0 이지만 **롤아웃
+  이력은 옛 :5001 이미지를 가리킨다**(리뷰 r1) — dms-api·dms-controller 의 0-replica ReplicaSet 11개(d17·d18)와 dms-agent ControllerRevision
+  9개(rev 14~22 = d10~d18). 쓰이지는 않지만 `kubectl rollout undo`(·`--to-revision`)로 그 리비전에 돌아가면 이미지도 신뢰도 없어
+  ImagePullBackOff 다 — 되돌림은 포탈 릴리스로만 한다(deploy/README §2e-6; 코드·문서 어디도 rollout undo 를 쓰지 않는다).
+- **testbed IaC**(`~/dms-dev/testbed` — 상세 그 저장소 `docs/ARCHITECTURE.md` §15.1·§19.6): `group_vars/all.yml` 의 `registry_instances` 에서
+  `registry-k8s` 를 빼 `registry_instances_retired` 로 — `roles/registry_server` 가 활성 레지스트리 `/v2/` 확인 **뒤** 컨테이너 `docker rm -f` → 데이터
+  디렉터리 삭제(멱등). **fail-closed 가드**(무엇이든 바꾸기 전에 목록 전체): 은퇴 이름·포트가 활성 것이면, data_dir 이 정확히 `/opt/dms-registry-<접미>`
+  가 아니거나 활성 data_dir 과 같음·포함·하위면 거부; 제거 때 그 이름의 컨테이너가 `<data_dir>:/var/lib/registry` 를 붙인 그 레지스트리가 아니면,
+  다른 컨테이너가 data_dir 을 붙이고 있으면, docker 가 「no such object」 외 오류면(모름) 거부. `scripts/tbinfo.py registries` 가 같은 규칙으로 스크립트에
+  목록을 준다. `group_vars/dmsk8s.yml` `crio_insecure_registries: []`(키 유지) — `roles/crio` 가 빈 목록이면 `99-pkg-01-insecure.conf` 를 **지우고**
+  reload(템플릿만 건너뛰면 옛 파일이 남아 신뢰가 이어졌다; ssc 는 렌더 바이트 동일), 신뢰 태스크에 태그 `crio_trust`. `dms_build_registry` 는
+  `10.112.0.50:5000`(아무것도 읽지 않는 기록값이라고 주석). validate: pkg-01 레지스트리 검사가 활성만(하드코딩 5000/5001 → `tb registries`), 은퇴는
+  부정 검사 3종(포트 리스너 없음 = curl 000 + `ss` 빈 출력, 컨테이너 없음, data_dir 없음 — ssh·sudo·docker 실패는 PASS 가 아니라 FAIL), 빈 신뢰 목록
+  = 파일 부재; post-boot: 활성 포트 up·은퇴 포트 down. 주석·문서: Makefile help, `playbooks/registry.yml`, tfvars(plan 무변경), `coredns-node-hosts.sh`,
+  README(레지스트리 표·시드 절 — dmsk8s 는 pkg-01 에 아무것도 없고 새 공용 디렉터리면 DMS §2e-4·§13-2), ARCHITECTURE §1 그림·§10·§15.1·§16·§17·
+  §18·§21·§19.6. 노드 `/etc/hosts`·CoreDNS 블록의 pkg-01 줄은 공용 규칙이라 그대로(무해).
+- **DMS**(이 저장소): `deploy/docker/registry-setup.sh` — dmsk8s 기본 신뢰 목록을 없앴다(`nodes --context dmsk8s` 는 `REGISTRIES` 없이 exit 2 —
+  그 클러스터의 신뢰는 testbed crio 롤 몫), 머리 주석·레지스트리 표에서 `registry-k8s` 제거; 오버레이 testbed-k8s 주석(`kustomization.yaml`·
+  `patch-config.yaml`·`values.env` — 되돌림용 문구 → 삭제), `deploy/render.sh` 빌더 미러 주석, `deploy/shared-storage-probe.py` 도움말 예시,
+  `CLAUDE.md`·`docs/ARCHITECTURE.md` 불변식의 테스트베드 레지스트리 문구; 테스트 — `test_platform_registry_contract.py`(external `pkg-01:5001` 분기·전환 전
+  skip 테스트 2개 제거 → in-cluster 단언 + 「values 만 external 로 바꾸면 렌더 거부」·「빌더만 다른 레지스트리면 렌더 거부」를 커밋된 오버레이에 직접),
+  `test_shared_storage_probe.py`·`test_testbed_k8s_overlay.py` 예시·주석. `deploy/README.md`: 「테스트베드는 둘이다」·사실 표, §0(레지스트리 표·
+  dmsk8s 헬퍼 줄 → testbed crio 롤·Verify), §2e-5 「걷어내기」·§2e-6 되돌림(external 로 돌아갈 곳 없음 — 옛 태그는 클러스터 내에 있는 d18·d19 만,
+  d18 이하는 동봉 매니페스트가 `pkg-01:5001` 스탬프라 배지 「모름」; `kubectl rollout undo` 금지 — 리뷰 r1), §8 빌더 미러·§10 선행 컴포넌트 문구,
+  §13-1(노드 신뢰·pkg-01), §13-2(옛 :5001 `d0` 복사 → 클러스터 내 레지스트리·새 공용 디렉터리면 §2e-4; 리뷰 r1 — 같은 공용 디렉터리라도 k8s-cp1 을
+  새로 만들었으면 S4 전에 레지스트리 자기 이미지 S0-5 반입을 다시; 리뷰 r2 — 새 공용 디렉터리의 첫 부트스트랩 빌드 노드 testbed k8s-w1 에는 podman 이
+  없다(실측, IaC 는 skopeo 만 — pkg-01 은 ClusterIP 에 닿지 않아 대신 못 한다) → 빌드 전 `sudo dnf install -y podman`; testbed README·§17(5) 도 같게). 레지스트리 자체(Distribution)의 debug 포트 `:5001` 언급은 무관해 그대로.
+- **오프라인 검증**(라이브 무변경): 가드 26/26(`tbinfo.py registries` 와 역할의 가드 태스크를 그대로 꺼내 localhost 에서 같은 17 변형 — 이름·포트·
+  data_dir 의 같음/포함/하위/상대/끝 `/`/`/opt`·활성 data_dir 이 은퇴 것 아래·이름/data_dir 끝·안 개행 — 판정 일치. 리뷰 r1: 역할의 `match`
+  는 Python `re.match` 라 `$` 가 끝 개행 하나 앞에서도 맞아 `"registry\n"` 이 이름 규칙을 통과했다(→ 역할 `\Z`, tbinfo `fullmatch` — 그때도
+  ssc 컨테이너는 제거 직전 바인드 검사가 막았다); 제거 직전 거부 9 — docker 29·옛 「No such object」 둘 다
+  부재로, 데몬 불통은 모름, 같은 이름의 다른 컨테이너·바인드 없음·다른 컨테이너의 마운트(하위·정확히) 거부, 이웃 이름 `/opt/dms-registry-k8s2` 는 통과);
+  `bash -n`·`py_compile`·shellcheck 새 경고 0·`--syntax-check`; 진짜 저장소에서 `make registry ANSIBLE='ansible-playbook --check --diff'` — pkg-01
+  changed 2(`docker rm -f registry-k8s` echo + `/opt/dms-registry-k8s` directory → absent), `registry` :5000 무변경; `baseline --check --diff
+  --limit dmsk8s --tags crio_trust` — 3노드 각 changed 2(99 파일 absent + Reload crio 핸들러), `--limit dms` 0; 태그 없는 전 VM `baseline --check` — dmsk8s
+  각 2(같은 둘)·dms-* 각 1(기존 CRI-O apt 키 오탐)·pkg-01 0; `terraform plan` No changes(리뷰 r1 수정 뒤 가드·`--syntax-check`·registry·crio_trust
+  `--check`·plan 을 다시 돌려 같은 결과). `READ_ONLY=1 validate`(적용 전 라이브): 전 PASS=284 FAIL=0 →
+  후 PASS=279 FAIL=6 — 빠진 PASS 5(:5001 /v2/·`registry-k8s` 컨테이너·3노드 「trusts exactly pkg-01:5000 pkg-01:5001」), 새 FAIL 6 은 전부 「아직
+  적용 안 함」(은퇴 3종 + 3노드 99 파일 존재), 나머지 줄 동일; post-boot 103/0 → 102/1(은퇴 :5001 응답). 적용 뒤 기대 validate PASS=285 FAIL=0,
+  post-boot PASS=103 FAIL=0.
+- **라이브 적용·실증**(2026-11-04 09:3x–09:42 KST, 런북 job tmp `r5001/apply-runbook.md`): 사전 기록 — :5001 카탈로그 dms·dms-agent·
+  dms-mpifileutils(d1~d18 + k0~k4), dmsk8s 라이브 참조 0, `make registry --check` changed=2. `make registry` → pkg-01 changed=2(컨테이너
+  `registry-k8s` 삭제 + `/opt/dms-registry-k8s` 삭제), 다시 돌려 changed=0(멱등); :5001 연결 거부(curl 000/exit 7)·리스너 없음, pkg-01 `/` 67% → 59%;
+  ssc `:5000` 카탈로그 전과 같음·`dms:d194` 매니페스트 200·dms-w1 `crictl pull pkg-01:5000/dms-agent:d192` 정상·Ceph HEALTH_OK.
+  `baseline --limit dmsk8s --tags crio_trust` → 3노드 각 changed=2(99 파일 삭제 + Reload crio), 다시 0; `50-dms-registry.conf` 그대로·crio active,
+  k8s-w2 `crictl pull 10.112.0.50:5000/dms:d19` 정상, 비정상 파드 0, ssc 4노드 check changed=0. k8s-cp1 `crictl rmi pkg-01:5001/dms:d17`(09:41) → 노드
+  5001 이미지 0. `make validate` **PASS=285 FAIL=0**(퇴역 검사 3 + dmsk8s 3노드 「no 99-pkg-01-insecure.conf」 PASS), `make post-boot-check` **PASS=103
+  FAIL=0**(「retired registry registry-k8s :5001 stays down」). 데이터 되돌림은 없다(사용자 결정) — IaC·신뢰 되돌림은 git.
+
+### ✅ 테스트베드 정식 구축 — 입구 영구 컷오버(호스트 edge haproxy = Avi VS-443 흉내 → Envoy cp1:443 PROXY v2, MetalLB 유지)·pkg-01 journald 상한 — **완료·실증**(2026-11-04)
+
+사용자 지시 「이번 업데이트된 구현들의 실증을 위해 테스트베드 IaC 및 저장소 수정해도 돼. 임시로 구축말고 제대로 구축해줘.」. 설계 v6 #5·4-3·10 T8
+「컷오버(MetalLB 유지)」, deploy/README §2g-4·§2g-7. **DMS 코드·매니페스트는 바꾸지 않았다**(문서·오버레이 주석만) — testbed 저장소(`~/dms-dev/testbed`)
+IaC 가 본체다(상세·게이트: 그 저장소 `docs/ARCHITECTURE.md` §15.3·§15.5·§13·§19.5, `README.md` 「Portal edge」).
+
+- **호스트 edge**(T8 의 손 haproxy → 관리 서비스): 배포판 haproxy(`apt`, Ubuntu 24.04 — 2.8 LTS) + group_vars 에서 생성한 `/etc/haproxy/dms-testbed-edge.cfg`
+  (`scripts/host-edge.sh render|check|install|config|status`, `make host-edge`·`host-edge-check`) + drop-in `CONFIG=` — 패키지 conffile 은 그대로. Avi VS-443 값
+  그대로(2g-4): L4 TCP, 풀 = `dmsk8s_cp` 전부 :443, `send-proxy-v2`, TCP 체크 5초(3/2), client/server 3600초, `leastconn`, 로그 journald. 받는 주소: **VIP-A
+  `10.10.10.1:443`**(호스트 dmsbr0 주소 — libvirt 가 소유해 만들고 지울 주소가 없고, 모든 VM 에서 on-link, 호스트에서 붙어도 PROXY 출발지가 루프백이 아니다;
+  :443 미사용·MetalLB 풀·공인 VIP·노드·외부 주소와 겹치지 않음을 `tbinfo.py` 가 검사) + 외부 `192.168.75.215:8443`·`100.65.195.106:8443`(옛 DNAT 와 같은
+  주소·포트 — 사용자 안내 그대로, 원 IP = 실제 PC). 바인드는 `transparent`(부팅 때 dmsbr0·Tailscale 주소보다 먼저 떠도 bind — 없으면 haproxy 가 죽는 것을 실측).
+  설정이 바뀌면 reload(배포판 ExecReload = `haproxy -c` 뒤 USR2 — 맺은 스트림은 끊기지 않는다), `haproxy -c` 통과분만 설치.
+- **스위치** `portal_edge: gateway | ingress`(testbed `group_vars/dmsk8s.yml`, 기본 gateway): host-net 의 :8443 DNAT(ingress 에만)·호스트 `/etc/hosts` 의
+  `dms-k8s.local`(gateway → VIP-A, ingress → 10.20.20.101)·haproxy frontend(gateway 에만)를 함께 정한다. 전환 `make host-edge host-net host-hosts`, 되돌림
+  `portal_edge: ingress` + `make host-net host-hosts host-edge` — 세 스크립트가 틀린 순서를 아무것도 바꾸기 전에 거부한다(리스너 없는 포트의 DNAT 제거 /
+  리스너 없는 VIP-A 로 이름 이동 / DNAT 없는 포트·아직 이름이 가리키는 VIP-A 의 frontend 제거). MetalLB VIP·ingress-nginx·`10.20.20.101` 라우트는 두 모드
+  모두 그대로(되돌림용 — validate 가 늘 readyz 200 을 본다). 인증서 SAN 변경 없음(클라이언트는 이름으로 붙는다).
+- **host-net 정리**(T8 이 짚은 두 함정): 릴레이·VIP·외부 주소를 스크립트 기본값에서 group_vars 로 옮겨 `make host-net` 이 `/etc/default/dms-testbed-hostnet`
+  을 **생성**하고 스크립트가 직접 읽는다(유닛 `EnvironmentFile` 제거 — 손 `status`·validate 가 설정과 다른 기본값으로 검사하던 것 해소). 유닛에 `ExecReload`,
+  `up` 은 설정에 없는 태그 규칙·옛 VIP 라우트를 prune 한 뒤 빠진 것만 더하는 수렴이라 `make host-net` 이 restart 대신 reload — ssc 릴레이가 한 순간도 빠지지
+  않는다(T8 의 손 `iptables -D` 를 대신). ssc 규칙은 옛 기본값과 바이트 동일(오프라인 대조).
+- **pkg-01 journald 상한**: `HEALTH_WARN MON_DISK_LOW`(루트 사용 가능 28% < 30%)의 원인 = 영구 저널 2.4 GiB(journald 기본 상한 10%·최대 4 GiB). testbed
+  `group_vars/pkg.yml` `journald_system_max_use: "512M"` → `roles/common` drop-in + 재시작·vacuum 핸들러(pkg-01 만 — 클러스터 VM 은 임계에서 멀다),
+  `--limit pkg-01 --tags journald` 로 단독 적용.
+- **검증(validate·post-boot)**: gateway 클러스터에 「host portal edge」 절 — haproxy active·enabled·이 설정으로 실행·설치본 = 생성·bind 마다 LISTEN·백엔드
+  UP, 릴레이 포트에 DNAT 없음, Gateway `dms/dms-portal` Programmed, 마스터마다 Envoy :443, **PROXY 강제**(PROXY 없는 직접 TLS 가 curl 35/56), VIP-A·외부
+  주소마다 :8443 경유 readyz 200, 되돌림 VIP readyz 200; pkg-01 루트 ≥ 30%·journald drop-in·저널 크기; post-boot 에 haproxy·Gateway·VIP-A readyz·
+  `envoy-gateway-system`.
+- **오프라인 게이트**(라이브 무변경): 가짜 iptables/ip/ss/sudo/systemctl(라이브 `iptables -S` 시드) — host-net 26/26(ssc 규칙 바이트 동일, 라이브 테이블에서
+  :8443 DNAT 4줄만 prune, 되돌림 복원, 가드·reload), host-edge 12/12(restart/reload/no-op·되돌림 가드 2종·apt·`haproxy -c` 실패 시 미설치), host-hosts
+  가드 4/4; 버리는 Ubuntu 24.04 컨테이너의 배포판 haproxy `2.8.30-0ubuntu0.24.04.2` 로 생성 설정 `haproxy -c` valid; 생성 설정을 예비 포트로 잠깐 띄워
+  실제 Envoy 로 `/readyz` 200·접근 로그 client_ip = PROXY 출발지·위조 XFF 무시·k8s-w2 경유 200, PROXY 없는 직접 TLS curl 35; shellcheck 새 경고 0;
+  baseline `--check --diff` 전 VM — pkg-01 journald 3건만(dmsk8s 0, dms-* 의 1 은 기존 CRI-O 키 오탐); `READ_ONLY=1 validate` — ssc 검사 불변, 새 FAIL 은
+  전부 「아직 적용 안 함」.
+- **리뷰 r1 반영**(같은 날, 라이브 적용 전): ① 전환 가드가 리스너만 보던 것 → `host-edge.sh ready <클러스터> <주소>…`(frontend 열림 + 리스너 + 그 주소가
+  **호스트 것**(transparent bind 는 없는 주소에도 LISTEN) + **헬스체크를 통과한 백엔드 UP** — 갓 시작한 haproxy 는 안 잰 서버를 `UP 1/3`·INI 로 보여 판정까지
+  기다린다)을 host-net·host-hosts 가 옮기기 전에 본다; 되돌림은 edge 가 아직 응답하면 MetalLB VIP :443 TCP 응답을 본다(Ingress 삭제 뒤의 되돌림 방지).
+  `status` 도 CSV 머리로 열을 찾는다(옛 awk `$3` 은 `UP 1/3` 을 UP 으로 읽었다). ② `portal_edge_vip` 는 호스트 dmsbr0 주소(`host_nfs_server`)만(tbinfo).
+  ③ **V4 흉내**: cp1 :443 은 edge(10.10.10.1)에서만 — testbed `dms_envoy_443_sources` → `roles/common` nft 테이블 `inet dms_testbed_cp443` + oneshot
+  유닛(kubelet 전, kube-proxy·Cilium 무간섭, nftables.service 는 끈 채); validate 가 워커 → cp1:443 직접 = curl 7 을 본다(적용 전 실측 curl 35 = VM 이
+  PROXY 위조 가능). ④ 첫 설치가 중간에 죽어 haproxy 가 패키지 기본 설정에 남으면 `config` 가 reload 가 아니라 restart(다른 `-f`). ⑤ 바이너리 없음 메시지가
+  삼켜지던 것. ⑥ validate journald = **보관** 파일 ≤ 상한(활성 파일은 상한 밖 — journald vacuum 이 세지 않는다), 512M ≈ 3일 보존(≈150 MB/일). ⑦ 새로
+  짓는 중(DMS 네임스페이스 없음)엔 edge 백엔드 DOWN 이 INFO, README §13-6b(Gateway) 추가. ⑧ 되돌림 순서 주석·문서 정리. 오프라인: host-edge 27/27·
+  host-net 30/30·host-hosts 11/11(진짜 haproxy 2.8.30 관리 소켓), tbinfo 7/7, nft 13/13(버리는 컨테이너), `--check --tags cp443` 전 VM(k8s-cp1 3건만),
+  READ_ONLY validate — ssc 검사 불변.
+- **리뷰 r2 반영**(같은 날, 라이브 적용 전): ① haproxy 는 헬스체크가 도는 순간의 `check_status` 를 직전 결과에 `* ` 를 붙여 보인다(`* L4OK` — 2.8 패키지
+  management.txt §9.1 36번) — `ready` 가 그 순간 건강한 edge 를 「NOT ready … UP/*_L4OK」 로 거부할 수 있던 것을 `servers()` 가 표시를 떼도록 고침(진짜
+  2.8.30 CSV 에 그 값만 고정한 소켓으로 재현·수정 확인, r1 스크립트 = 대조군). ② `config` 첫 설치는 diff 대신 설치하는 설정 전문을 출력. ③ 런북: 맨 위·4·5
+  단계 끝에 **긴급 되돌림 한 줄**(`portal_edge: ingress` + `make host-net host-hosts host-edge` — 거부하는 첫 타깃에서 멈추고 거부는 무변경), 2b 되돌림을
+  붙여 넣을 수 있는 명령으로, 「haproxy 손으로 걷기」 문단 → IaC 가 관리(edge 를 거둘 때 = `portal_edge:` 줄 삭제 → 빈 설정, 검사 건너뜀 — 오프라인 확인),
+  저널 크기 확인을 validate 와 같은 셈(할당 바이트 + `*.journal~`)으로, #56(pkg-01:5001 정리)과 겹치는 validate 2줄·커밋 범위 확인(`precommit-check.sh`)·새
+  파일 3개 `git add --` 를 명시. testbed `docs/ARCHITECTURE.md` §15.5(패키지·검증)·§19.5, `README.md` 「Portal edge」 동기화. 오프라인: host-edge 34/34.
+- **라이브 적용·실증**(2026-11-04 08:16–08:21 KST, 런북 job tmp `edge/apply-runbook.md` 순서 그대로 — 되돌림 없음):
+  ① pkg-01 journald(`--limit pkg-01 --tags journald`): 영구 저널 2.4 GiB → 471 MiB, 루트 사용 72% → 67%, Ceph `MON_DISK_LOW` 해소 → `HEALTH_OK`.
+  ② cp1 :443 방화벽(`--limit k8s-cp1 --tags cp443`): `dms-testbed-cp443` active·enabled — k8s-w2 → cp1:443 직접 = curl exit 7(TCP reset — 적용 전 35),
+  호스트(edge 출발지) → cp1:443 = 35(PROXY 필수). ③ `make host-edge`: 배포판 haproxy `2.8.30-0ubuntu0.24.04.1`, bind `10.10.10.1:443`·`192.168.75.215:8443`·
+  `100.65.195.106:8443`, 백엔드 k8s-cp1 UP, VIP-A 경유 readyz 200. ④ `make host-net`(reload): :8443 DNAT **4줄만** prune — ssc DNAT 6줄·VIP 라우트·
+  FORWARD 그대로; :8443 경유 readyz 200(외부 주소 둘 다), Envoy 접근 로그 `client_ip` = `192.168.75.215`·`100.65.195.106`(peer `10.10.10.1` — 원 IP
+  보존; 옛 DNAT+MASQUERADE 경로는 `10.10.10.1` 이었다), ssc `dms.local` 200. ⑤ `make host-hosts`: 바뀐 줄은 `dms-k8s.local` 하나(10.20.20.101 →
+  10.10.10.1), 이름으로 readyz 200, 봉인 로그인 alice → `/api/auth/me` actor=alice. 위조 XFF(k8s-w2 에서 `7.7.7.7`): `client_ip` = `10.10.10.22`,
+  `x_forwarded_for` = `"7.7.7.7,10.10.10.22"`(위조값은 앞에만 — 판정에 쓰이지 않는다). ⑥ `make validate` **PASS=284 FAIL=0**(두 클러스터),
+  `make post-boot-check` **PASS=103 FAIL=0**. 기록: testbed `docs/ARCHITECTURE.md` §19.5 결과 표. 남은 것은 BACKLOG ⑥(소크 뒤 Ingress·MetalLB 삭제 등).
+
 ### ✅ 테스트베드 워커 EL9(T-SE) — k8s-w1·w2 를 Rocky Linux 9.6(SELinux permissive)으로 재구성, SELinux 프로브·firewalld·EL9 고유 실측 — **완료·실증**(2026-11-03)
 
 설계 v6 #49·10 「T-SE 세부」(4-2 「RHEL firewalld」·#48 SELinux 전제의 확인). **DMS 코드·매니페스트는 바꾸지 않았다** — testbed IaC 만. 이 세션은 testbed

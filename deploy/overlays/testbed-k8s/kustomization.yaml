@@ -16,10 +16,11 @@
 #   tests/test_testbed_k8s_overlay.py 가 렌더 결과에 'ldap'(대소문자 무시) 0건·에이전트 명령·레지스트리·신원 모드를 고정한다.
 #
 # 레지스트리·태그: **클러스터 내 레지스트리 10.112.0.50:5000**(2026-11-03 T4 전환 — deploy/platform/registry, cp1, 저장소
-#   /dms_shared/dms/registry; 빌더 buildah:stable 도 여기). 그 전(d18 까지)은 pkg-01:5001(같은 VM 의 두 번째 registry:2 — ssc 의
-#   :5000 과 분리)이었고 되돌림용으로 그대로 둔다(deploy/README §2e-6). 태그 관례 **dN — d1 부터**(2026-10-26 사용자 결정 「예전
-#   dms-ssc 때처럼 d1 부터」 — 포탈의 다음 태그 제안(BuildForm.nextTagSuggestion = 라이브·이 레지스트리·빌드 이력의 dN 최댓값 + 1)이
-#   그대로 맞는다. 레지스트리가 :5001 로 갈려 ssc 의 dN 과 번호가 섞이지 않는다). 그 전의 옛 kN 이력:
+#   /dms_shared/dms/registry; 빌더 buildah:stable 도 여기 — 이 클러스터는 pkg-01 의 어느 레지스트리도 쓰지 않는다). 그 전(d18
+#   까지)은 pkg-01:5001(같은 VM 의 두 번째 registry:2 — ssc 의 :5000 과 분리)이었고 2026-11-04 삭제했다(사용자 결정 — 되돌림 없음;
+#   d1~d17·kN 이미지도 함께 사라졌다 — d18 3종은 T4 16 전환 때 클러스터 내 레지스트리로 복사한 같은 digest 사본이 남아 있다). 태그 관례 **dN — d1 부터**(2026-10-26 사용자 결정 「예전 dms-ssc 때처럼 d1 부터」 — 포탈의
+#   다음 태그 제안(BuildForm.nextTagSuggestion = 라이브·이 레지스트리·빌드 이력의 dN 최댓값 + 1)이 그대로 맞는다. 레지스트리가
+#   ssc 의 pkg-01:5000 과 따로라(d18 까지 :5001, d19 부터 클러스터 내) ssc 의 dN 과 번호가 섞이지 않는다). 그 전의 옛 kN 이력:
 #   k0 = 첫 설치 시드(:5000 의 dms:d184·dms-agent:d179·dms-mpifileutils:d183 을 :5001 에 k0 으로 복사).
 #   k1 = 첫 포탈 빌드(빌드 노드 k8s-w1, 소스 main 체크아웃 928b3c9 — nsync 역할별 볼륨; 이미지 3종 + 잡 이미지).
 #   k2 = 전체 작업 검색·열 폭(2026-10-25, 소스 dms-k8s 체크아웃 1b0febe; 이미지 3종 + 잡 이미지).
@@ -91,8 +92,9 @@ images:
 
 patches:
   - path: patch-config.yaml
-  # 입구(2026-11-03 ⑥): 이 테스트베드는 T8 동안 Ingress + MetalLB VIP 10.20.20.101 을 그대로 쓰고 Envoy Gateway(렌더러의 platform/gateway — cp1
-  # hostNetwork :443)를 병행한다. 컷오버(별도 승인) 뒤에는 prod 처럼 아래 둘을 빼고 patch-remove-ingress.yaml 을 싣는다(deploy/README §2g-7).
+  # 입구(2026-11-03 ⑥): 포탈 사용자 경로는 testbed IaC 의 호스트 edge(haproxy, PROXY v2) → Envoy Gateway(렌더러의 platform/gateway — cp1
+  # hostNetwork :443)다(testbed `portal_edge: gateway`, 2026-11-04 정식 구축). 아래 Ingress + MetalLB VIP 10.20.20.101 은 되돌림용으로 남긴다.
+  # 소크 뒤(별도 결정)에는 prod 처럼 아래 둘을 빼고 patch-remove-ingress.yaml 을 싣는다(deploy/README §2g-7).
   - path: patch-ingress.yaml
   - path: patch-metallb.yaml
 

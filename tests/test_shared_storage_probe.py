@@ -177,7 +177,7 @@ def _script(env, *args):
 
 def test_dry_run_only_reads_nodes_with_the_named_context_and_prints_the_pod_shape(tmp_path):
     env, log = _shim_env(tmp_path)
-    r = _script(env, "--context", "known", "--shared-dir", "/dms_shared", "--image", "pkg-01:5001/dms:d16",
+    r = _script(env, "--context", "known", "--shared-dir", "/dms_shared", "--image", "10.112.0.50:5000/dms:d19",
                 "--dry-run", "--json")
     assert r.returncode == 0, (r.stdout, r.stderr)
     calls = log.read_text().splitlines()
@@ -194,7 +194,7 @@ def test_dry_run_only_reads_nodes_with_the_named_context_and_prints_the_pod_shap
         assert vols["shared-dms"] == {"path": "/dms_shared/dms", "type": "Directory"}
         assert vols["host-mountinfo"] == {"path": "/proc/1/mountinfo", "type": "File"}
         c = spec["containers"][0]
-        assert c["image"] == "pkg-01:5001/dms:d16" and c["command"][0] == "sleep"
+        assert c["image"] == "10.112.0.50:5000/dms:d19" and c["command"][0] == "sleep"
         assert c["securityContext"]["runAsUser"] == 0
         assert c["securityContext"]["capabilities"] == {"drop": ["ALL"], "add": ["CHOWN", "FOWNER", "DAC_READ_SEARCH"]}
         assert spec["activeDeadlineSeconds"] > 0 and spec["restartPolicy"] == "Never"

@@ -7,7 +7,8 @@ PriorityClass 존재. 여기에 더해:
 - base(deploy/platform/registry)는 사이트 중립 자리표시자뿐이다(raw apply 는 실패) — 앱 base 와 같은 규칙.
 - 렌더러(deploy/render.sh — 2026-11-03 ④ 일반화)가 prod(템플릿 + 견본 values)·testbed-k8s(커밋된 values) 두 사이트의 플랫폼 층을 낸다.
   in-cluster 면 「같은 주소가 여섯 곳」(설계 7-4) 중 다섯(REGISTRY·newName·DMS_JOB_IMAGE·DMS_BUILD_REGISTRY·DMS_BUILD_BUILDER_IMAGE)이
-  <REGISTRY_CLUSTER_IP>:<REGISTRY_PORT> 하나다. testbed-k8s 는 앱이 아직 pkg-01:5001(external, T4 병행)이고 렌더된 앱 == 커밋된 오버레이다.
+  <REGISTRY_CLUSTER_IP>:<REGISTRY_PORT> 하나다. testbed-k8s 는 2026-11-03(T4 16)부터 앱·빌더도 in-cluster(10.112.0.50:5000)이고 렌더된
+  앱 == 커밋된 오버레이다(그 전의 외부 pkg-01:5001 은 2026-11-04 삭제 — external 로 되돌릴 곳이 없다).
 - 렌더러 실패는 결과 디렉터리를 만들지도 바꾸지도 않는다.
 - 레지스트리 파드 uid(65532)는 S0(deploy/shared-dir-init.sh)가 만드는 저장소 소유와 같다(두 파일 대조).
 
@@ -487,16 +488,14 @@ def test_testbed_rendered_app_is_the_committed_overlay(tmp_path):
 
 
 def test_testbed_values_env_records_the_overlay_registry():
-    # T4 동안 앱은 pkg-01:5001 그대로(external, 병행). 전환(별도 단계)은 values + 오버레이 다섯 곳을 한 커밋에서 바꾼다 — 그 뒤에는
-    # in-cluster 쪽 단언이 선다(이 테스트는 두 상태를 다 안다; 전환 때 고칠 것은 tests/test_testbed_k8s_overlay.py 의 레지스트리 상수).
+    # 2026-11-03 T4 16 에 values + 오버레이 다섯 곳을 한 커밋에서 in-cluster 로 옮겼다. 그 전의 external(pkg-01:5001)은 2026-11-04
+    # 레지스트리째 삭제해 되돌릴 곳이 없다 — 그래서 in-cluster 만 맞는 상태다(레지스트리 상수는 tests/test_testbed_k8s_overlay.py).
     values = _values_env(TESTBED / "values.env")
     assert values["REGISTRY_TLS_VERIFY"] == "false"
     cfg = dict(re.findall(r'(?m)^  (DMS_[A-Z0-9_]+): "([^"]*)"', (TESTBED / "patch-config.yaml").read_text()))
-    if values["REGISTRY_MODE"] == "in-cluster":
-        assert values["REGISTRY"] == f"{values['REGISTRY_CLUSTER_IP']}:{values['REGISTRY_PORT']}"
-        assert cfg["DMS_BUILD_BUILDER_IMAGE"].split("/", 1)[0] == values["REGISTRY"]
-    else:
-        assert (values["REGISTRY_MODE"], values["REGISTRY"]) == ("external", "pkg-01:5001")
+    assert values["REGISTRY_MODE"] == "in-cluster"
+    assert values["REGISTRY"] == f"{values['REGISTRY_CLUSTER_IP']}:{values['REGISTRY_PORT']}"
+    assert cfg["DMS_BUILD_BUILDER_IMAGE"].split("/", 1)[0] == values["REGISTRY"]
     kust = (TESTBED / "kustomization.yaml").read_text()
     hosts = {n.split("/", 1)[0] for n in re.findall(r"(?m)^\s*newName: (\S+)$", kust)}
     assert hosts == {values["REGISTRY"]}
@@ -733,49 +732,24 @@ def test_testbed_record_must_match_the_overlay(tmp_path, values, needle):
 
 
 def test_testbed_mode_flip_without_the_overlay_is_refused(tmp_path):
-    # values.env 의 REGISTRY_MODE 만 바꾸고 오버레이(newName 등)를 그대로 두면 렌더가 멈춘다 — 전환은 한 커밋에서.
-    current = _values_env(TESTBED / "values.env")
-    if current["REGISTRY_MODE"] == "external":
-        flipped = _testbed_values(REGISTRY_MODE="in-cluster")          # REGISTRY 가 pkg-01:5001 이라 레지스트리 주소와 다르다
-        needle = "REGISTRY_MODE=in-cluster"
-    else:
-        flipped = _testbed_values(REGISTRY_MODE="external", REGISTRY="pkg-01:5001")   # 오버레이는 이미 새 주소
-        needle = "newName"
+    # values.env 의 REGISTRY_MODE 만 external 로 바꾸고 오버레이(newName 등 — 클러스터 내 주소)를 그대로 두면 렌더가 멈춘다 — 레지스트리를
+    # 옮기는 일은 values 와 오버레이를 한 커밋에서. 「다른 외부 레지스트리」 자리는 실재할 수 없는 이름(.invalid)이다.
+    assert _values_env(TESTBED / "values.env")["REGISTRY_MODE"] == "in-cluster"
+    flipped = _testbed_values(REGISTRY_MODE="external", REGISTRY="old-registry.invalid:5000")
     r, out = _render(tmp_path, "testbed-k8s", flipped)
-    _assert_failed(r, out, needle)
+    _assert_failed(r, out, "newName")
 
 
-_BEFORE_SWITCH = pytest.mark.skipif(
-    _values_env(TESTBED / "values.env")["REGISTRY_MODE"] != "external",
-    reason="testbed-k8s 가 이미 in-cluster 로 전환됐다 — 커밋된 오버레이 자체를 위 렌더 테스트들이 본다")
-
-
-def _switch_overlay(root: Path, builder_host: str):
-    """T4 뒤 전환 단계의 모양: 오버레이 newName·DMS_JOB_IMAGE·DMS_BUILD_REGISTRY·DMS_BUILD_BUILDER_IMAGE 를 새 주소로."""
-    ov = root / "overlays" / "testbed-k8s"
-    for name in ("kustomization.yaml", "patch-config.yaml"):
-        p = ov / name
-        text = p.read_text().replace("pkg-01:5001", "10.112.0.50:5000")
-        text = text.replace('DMS_BUILD_BUILDER_IMAGE: "pkg-01:5000/buildah:stable"',
-                            f'DMS_BUILD_BUILDER_IMAGE: "{builder_host}/buildah:stable"')
-        p.write_text(text)
-
-
-@_BEFORE_SWITCH
-@needs_kubectl
-def test_testbed_switch_to_the_in_cluster_registry_renders_one_address(tmp_path):
-    _switch_overlay(_tree(tmp_path), "10.112.0.50:5000")
-    r, out = _render(tmp_path, "testbed-k8s", _testbed_values(REGISTRY_MODE="in-cluster", REGISTRY="10.112.0.50:5000"))
-    assert r.returncode == 0, (r.stdout, r.stderr)
-    data = config_data(_kustomize(out / "app"))
-    assert data["DMS_BUILD_REGISTRY"] == "10.112.0.50:5000"
-    assert data["DMS_BUILD_BUILDER_IMAGE"] == "10.112.0.50:5000/buildah:stable"
-
-
-@_BEFORE_SWITCH
-def test_testbed_switch_must_move_the_builder_too(tmp_path):
-    _switch_overlay(_tree(tmp_path), "pkg-01:5000")
-    r, out = _render(tmp_path, "testbed-k8s", _testbed_values(REGISTRY_MODE="in-cluster", REGISTRY="10.112.0.50:5000"))
+def test_testbed_builder_must_stay_on_the_in_cluster_registry(tmp_path):
+    # in-cluster 에서는 노드가 그 레지스트리만 믿는다 — 빌더(buildah:stable)만 다른 레지스트리에 둔 오버레이는 렌더가 멈춘다(external
+    # 이면 빌더 미러만 예외로 note). T4 16 전환이 빌더를 앱과 함께 옮긴 이유다. 2026-11-04 까지 이 자리는 전환 전 오버레이를 흉내 낸
+    # skip 테스트(_switch_overlay — pkg-01:5001 을 치환)였다; 전환이 끝났고 그 레지스트리도 지워져 커밋된 오버레이에 직접 건다.
+    patch = _tree(tmp_path) / "overlays" / "testbed-k8s" / "patch-config.yaml"
+    text = patch.read_text()
+    builder = 'DMS_BUILD_BUILDER_IMAGE: "10.112.0.50:5000/buildah:stable"'
+    assert text.count(builder) == 1, "커밋된 오버레이의 빌더가 클러스터 내 레지스트리가 아니다"
+    patch.write_text(text.replace(builder, 'DMS_BUILD_BUILDER_IMAGE: "old-registry.invalid:5000/buildah:stable"'))
+    r, out = _render(tmp_path, "testbed-k8s")
     _assert_failed(r, out, "DMS_BUILD_BUILDER_IMAGE")
 
 

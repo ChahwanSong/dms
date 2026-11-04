@@ -390,10 +390,14 @@ CHANGELOG 「④ 클러스터 내 레지스트리」, 설계 v6 7·8-1(S0-4·S0-
   실증에서 찾은 레지스트리 종료 drain 없음(b3c5f4e)·포탈 이미지 삭제 보호 두 구멍(01fd922)은 고쳤다.
 - ~~**testbed-k8s 앱 전환**~~ — **해소**(2026-11-03, 6287cd8 → 첫 포탈 빌드 d19 35a10a3, deploy/README §2e-6): 잡 이미지 재릴리스, 모든 dms
   파드가 새 주소(「모든 이미지가 새 주소로 시작」 게이트), 포탈 빌드·릴리스 드리프트 「일치」. 남은 것:
-  - 📝 **`pkg-01:5001` 정리 시점** — 결정 대기. 지금은 되돌림용이다(d18 까지만 있다 — d19 부터는 새 레지스트리에만).
-- 🔧 **testbed IaC**(testbed 저장소 몫) — crio 롤에 `50-dms-registry.conf`(3노드)·`99-dms-pinned.conf`(cp1)·skopeo 패키지(cp1·빌드 노드
-  k8s-w1 만, 추천 패키지 없이), validate 점검.
-  작업 사본 패치는 T-SE 넘기기 누적 패치에 함께 들어 있다(아래 「T-SE 후속」).
+  - ~~📝 **`pkg-01:5001` 정리 시점**~~ — **결정·구현**(2026-11-04, 사용자 「이미지 레지스트리 dms-k8s 의 예전 방식 (5001) 은 삭제해도 돼.
+    되돌릴일 없을거야. 관련 스크립트들도 모두 정리해.」 — CHANGELOG 「옛 dmsk8s 레지스트리 pkg-01:5001 삭제」): testbed IaC 의
+    `registry_instances_retired` 가 `registry-k8s` 컨테이너·`/opt/dms-registry-k8s`(d1~d18·k0~k4, 3.0G)를 지우고 dmsk8s 노드의 pkg-01 신뢰
+    drop-in 을 걷는다(`crio_insecure_registries: []`), DMS `registry-setup.sh` 는 dmsk8s 기본 신뢰를 없앴다. external 로의 되돌림 경로는 없다 —
+    옛 태그는 클러스터 내에 있는 것(d18·d19)만 다시 고를 수 있다(README §2e-6). 라이브 적용은 그 CHANGELOG 항목의 상태가 말한다.
+- ~~🔧 **testbed IaC**(testbed 저장소 몫) — crio 롤에 `50-dms-registry.conf`(3노드)·`99-dms-pinned.conf`(cp1)·skopeo 패키지(cp1·빌드 노드
+  k8s-w1 만, 추천 패키지 없이), validate 점검~~ — **해소**(2026-11-04: 진짜 testbed 저장소에 반영 — 아래 「T-SE 후속」의 넘기기, validate 가
+  3노드 신뢰·cp1 고정을 본다). 같은 날 dmsk8s 의 `99-pkg-01-insecure.conf` 제거(빈 목록이면 롤이 파일을 지운다 — `--tags crio_trust`)가 더해졌다.
 - ~~**T4 확인 대기(추정으로 둔 것)**~~ — **해소**(2026-11-03 T4 실측, CHANGELOG ④ 「T4 실증」):
   - 빈 레지스트리 `/v2/_catalog?n=1` → 200(`{"repositories":[]}`, 3노드 호스트 → ClusterIP) — readiness 그대로.
   - GC 의 env readonly(`REGISTRY_STORAGE_MAINTENANCE_READONLY='{"enabled":true}'`) JSON 파싱 OK(POST 405) — deploy/README §2e-5 길 A.
@@ -497,11 +501,21 @@ CHANGELOG 「⑥ 입구(Envoy Gateway)」, 설계 v6 #13~#15·4-3·8-1(S0-5·S8�
   - 기본 EnvoyProxy(EG 설정 `envoyProxy`)는 더 구체적인 DMS EnvoyProxy 에 통째로 대체된다(Envoy 파드가 DMS 의 이미지·자원·extraArgs 로 떴다).
   - 19MiB 본문은 413 이 아니라 앱까지 간다(422 — 본문 처리) — CTP `connection.bufferLimit` 불필요.
   - DaemonSet 롤링 공백: EG 기본 preStop(host 없음)으로 약 61초 → host 127.0.0.1 로 1.44초(3fd7da9, README §2g-6).
-- 🔧 **테스트베드 영구 컷오버**(별도 승인, README §2g-7) — haproxy 를 관리 서비스(systemd 유닛 + 설정)로 testbed IaC 에 두고(host-net 유닛 곁)
-  `HOSTNET_RELAYS` 에서 `8443=10.20.20.101:443` 을 뺀다 — T8 의 :8443 DNAT `-D`/`-I` 만으로는 시험이다(유닛 재시작·재부팅이면 되돌아간다). 그 전까지
-  테스트베드 사용자 경로는 ingress-nginx(MetalLB VIP)이고 EG 는 병행(PROXY 필수). 소크 뒤 testbed-k8s 오버레이의 Ingress·MetalLB 삭제(README §2g-7 ③).
-- 🔧 **testbed IaC**(testbed 저장소 몫) — cp1 sysctl drop-in(roles/common `90-dms-envoy.conf`, dmsk8s 만)·tfvars cp1 `memory_mb` 4096(라이브는
-  virsh 로 이미 4GiB — T8). 작업 사본 패치는 T-SE 넘기기 누적 패치에 함께 들어 있다(아래 「T-SE 후속」).
+- ~~**테스트베드 영구 컷오버**~~ — **구현·라이브 적용·실증**(2026-11-04, CHANGELOG 「테스트베드 정식 구축」 — testbed IaC): 호스트 edge = 배포판 haproxy 관리 서비스
+  (`scripts/host-edge.sh`·`make host-edge`, group_vars 에서 생성한 설정 — VIP-A `10.10.10.1:443`·외부 `:8443` → `send-proxy-v2` → 마스터 전부 :443, TCP
+  헬스체크, 3600초), 스위치 `portal_edge: gateway | ingress`(host-net 의 :8443 DNAT·호스트 `/etc/hosts`·haproxy frontend 를 함께 정한다), host-net 설정을
+  group_vars 에서 생성 + reload 제자리 수렴(ssc 릴레이 무공백) + 순서 가드 3종, validate·post-boot 의 edge 검사. MetalLB VIP·ingress-nginx 는 되돌림용으로
+  유지(README §2g-7). 남은 것:
+  - ~~🔧 **라이브 적용**(DMS 세션 런북 `tmp/edge/apply-runbook.md` — pkg-01 journald → cp1 :443 방화벽(`--tags cp443`) → `make host-edge` → `make host-net`
+    → `make host-hosts` → validate·post-boot)과 그 실측 기록~~ — **해소**(2026-11-04 08:16–08:21 KST, 되돌림 없음): journald 2.4G → 471M·루트 72% → 67%·
+    Ceph HEALTH_OK, cp1 :443 은 edge 에서만(k8s-w2 직접 curl 7, edge 출발지 35), haproxy 2.8.30 bind 3개·백엔드 UP, host-net reload 가 :8443 DNAT 4줄만
+    prune(ssc 6줄·라우트·FORWARD 그대로), :8443 의 Envoy `client_ip` = 실제 PC 주소(옛 DNAT 경로는 10.10.10.1), `/etc/hosts` 는 `dms-k8s.local` 한 줄만,
+    validate PASS=284 FAIL=0·post-boot PASS=103 FAIL=0 — 상세 CHANGELOG 「테스트베드 정식 구축」, testbed `docs/ARCHITECTURE.md` §19.5.
+  - 📝 소크 뒤 testbed-k8s 오버레이의 Ingress·MetalLB 삭제(README §2g-7 — 그때 testbed IaC 가 dmsk8s 의 ingress-nginx·MetalLB 를 걷고 되돌림 경로가 없어진다).
+  - 📝 (선택) testbed-k8s `values.env` 에 `PORTAL_DOMAIN=dms-k8s.local`·`PORTAL_VIP=10.10.10.1` — 설치기 S12·`verify.sh` 의 VIP 경유 readyz 가 edge 경로를
+    보게(지금은 env 를 줄 때만 본다). 렌더·설치기 테스트 영향 확인 뒤.
+- ~~🔧 **testbed IaC**(testbed 저장소 몫) — cp1 sysctl drop-in(roles/common `90-dms-envoy.conf`, dmsk8s 만)·tfvars cp1 `memory_mb` 4096~~ — **해소**
+  (2026-11-04: 진짜 testbed 저장소에 반영 — terraform plan No changes·tfstate 4096, `--check` 0 changes; 커밋은 사용자).
 - 📝 **EG 리스너에 hostname 이 없어 접근 로그에 SNI 가 없다** — `%REQUESTED_SERVER_NAME%` 는 늘 null 이라 필드를 지웠다(3fd7da9, T8 33/33줄).
   리스너에 hostname 을 두게 되면(지금은 hostname·80·HSTS 없음 — README §2g-1) 그때 다시 싣는다.
 - 📝 **설계 ⑥ 의 선택·뒤로 미룬 것** — Envoy 접근 로그 수집처·보존(K15·보안 S2 — 지금은 stdout), ~~Envoy stats(:19001)를 마스터 호스트에 여는
@@ -553,14 +567,16 @@ CHANGELOG 「테스트베드 워커 EL9(T-SE)」, 설계 v6 #49·10 「T-SE 세�
 - ~~**T-SE**(w1·w2 를 한 대씩 Rocky Linux 9 로 재구성 — S2b 매트릭스·EL9 고유·S6·S7·잡)~~ — **해소**(2026-11-03, 전 항목 PASS): w1·w2 Rocky 9.6
   permissive·3GiB, enforcing 이면 agent 가 `/proc/1`·CephFS 를 못 읽어 스토리지 전부 Missing(설계 #48 전제의 실측 근거), firewalld 기본 zone 은 노드 간
   흐름을 깨고 4-2 포트를 열면 복구, scan·dsync·nsync(교차 OS·EL ↔ EL)·포탈 빌드 정상. K8s·CRI-O 버전은 그대로(rpm 1.34.6·1.34.9).
-- 🔧 **testbed IaC 패치 + terraform state 넘기기(사용자)** — job tmp `tse/handback.md` 대로 **한 번**: 진짜 testbed 저장소에 `tse/testbed-cumulative.patch`
-  (③ `/dms_shared`·④ 레지스트리 drop-in·skopeo·⑥ cp1 sysctl·cp1 4GiB·T-SE EL9·워커 3GiB 전부; ④⑥ 를 이미 적용했다면 `testbed-tse.patch`) 적용 →
-  두 새 스크립트 0755 → 작업 사본 `terraform.tfstate` 복사. **그 전까지 진짜 testbed 저장소에서 terraform(`make plan`·`vm-up`·`vm-down`·`destroy`)과
-  k8s-w1·w2 대상 ansible(`make baseline` 등)을 돌리지 않는다** — 진짜 state·tfvars 는 T-SE 전이라 워커를 다시 만들거나(이름 충돌) Ubuntu·2GiB 로,
-  cp1 을 2.5GiB 로 되돌리려 하고, 옛 roles 는 Rocky 노드에서 apt 를 부른다.
-- 📝 **pkg-01 Ceph mon 공간 경고(기존 — T-SE 무관)** — `HEALTH_WARN mon pkg-01 is low on available space` 가 재구성 전 기준선부터 있다. validate·
-  post-boot 의 남은 FAIL 1 이 늘 이것이라 post-boot 수렴 루프가 FAIL=0 으로 끝나지 않는다(T-SE 에서는 수동 중지). testbed 저장소 몫(pkg-01 mon
-  디스크 여유).
+- ~~🔧 **testbed IaC 패치 + terraform state 넘기기(사용자)** — job tmp `tse/handback.md` 대로 진짜 testbed 저장소에 누적 패치(③ `/dms_shared`·④ 레지스트리
+  drop-in·skopeo·⑥ cp1 sysctl·cp1 4GiB·T-SE EL9·워커 3GiB) + 작업 사본 `terraform.tfstate`~~ — **해소**(2026-11-04: 진짜 testbed 저장소가 작업 사본과
+  같아졌다 — `terraform plan` No changes, dmsk8s 호스트 대상 storage·baseline·cephfs `--check` 0 changes, `validate-dmsk8s` 의 남은 FAIL 은 pkg-01
+  MON_DISK_LOW 하나(아래 journald). 그 저장소에서 terraform·ansible 을 다시 돌려도 된다. 저장소 커밋은 사용자 한 명령).
+- ~~**pkg-01 Ceph mon 공간 경고(기존 — T-SE 무관)**~~ — **구현·라이브 적용**(2026-11-04 08:16, 위 「라이브 적용」 런북 첫 단계 — 저널 2.4G → 471M,
+  루트 72% → 67%, Ceph HEALTH_OK; validate·post-boot 의 FAIL 0): 원인은
+  journald 기본 상한(파일시스템 10%, 최대 4 GiB)이 영구 저널을 2.4 GiB 까지 키운 것(루트 72% 사용 = 사용 가능 28% < mon 경고선 30%). `group_vars/pkg.yml`
+  `journald_system_max_use: "512M"` → `roles/common` 이 pkg-01 에만 journald drop-in + 재시작·vacuum 핸들러(약 1.9 GiB 회수 → ≈33%), validate 가 drop-in·
+  **보관** 저널 크기(상한은 보관 파일만 묶는다 — 활성 파일은 그 위, 리뷰 r1)·루트 사용 가능 ≥ 30% 를 본다. 보존은 ≈3일(≈150 MB/일 실측) — 더 길게는
+  루트 디스크를 키운 뒤. ssc 레지스트리 데이터(`/opt/dms-registry`)는 건드리지 않는다.
 - 📝 **T-SE 시험 흔적 정리**(사용자 확인 뒤) — `/cephfs-third/tse-w1`, `/cephfs-secondary/tse-w1-nsync`·`tse-w2*`, 레지스트리 `t4-gc:tse-w1`, 빌드
   태그 d20(릴리스 안 함 — 라이브 d19). w1 의 firewalld 는 꺼져 있지만 `--permanent` 포트 7개가 `/etc/firewalld/zones/public.xml` 에 남아 켜면 열린 채
   시작한다.
@@ -575,7 +591,8 @@ CHANGELOG 「테스트베드 워커 EL9(T-SE)」, 설계 v6 #49·10 「T-SE 세�
 - ⏸ **레지스트리 경로 접두 미지원**(2026-10-21 테스트베드 분리 때 확인) — `DMS_BUILD_REGISTRY` 는 `host:port` 만 된다:
   `registry.py` 가 `http://{registry}/v2/{repo}/…` 로 URL 을 만들고(`pkg-01:5000/k8s` 면 `/k8s/v2/…` 로 깨진다)
   `manifest_tags.image_registry` 는 첫 경로 조각만 레지스트리로 봐 `site_image` 가 늘 None(배지 「모름」)이 된다. 그래서 두
-  테스트베드는 같은 VM 에 **포트(프로세스)를 나눴다**(ssc :5000, k8s :5001) — 레지스트리를 같이 쓰면 「사용 중」 보호
+  테스트베드는 레지스트리를 나눈다 — 2026-10-21~11-03 은 같은 VM 의 **포트(프로세스)**(ssc :5000, k8s :5001), 2026-11-03 부터 k8s 는 클러스터 내
+  `10.112.0.50:5000`(④; 옛 :5001 은 2026-11-04 삭제) — 레지스트리를 같이 쓰면 「사용 중」 보호
   (`routes_registry._in_use_tags`)가 자기 클러스터만 봐 상대의 라이브 태그를 지울 수 있고 태그 제안이 경합한다. 필요해지면
   고칠 곳: `registry.py` URL 분해, `manifest_tags.image_registry`, 빌드 스탬프 정규식, `_registry_host`.
 - ⏸ **이미지 태그 동기화 템플릿 계층** — 5파일 수기(`deploy/README.md`). 슬라이스 16 이

@@ -1208,7 +1208,7 @@ def parse_args(argv):
     p.add_argument("--shared-dir", default=os.environ.get("SHARED_DIR") or None,
                    help="공용 디렉터리(또는 env SHARED_DIR; 둘 다 없으면 --overlay 디렉터리의 values.env 의 SHARED_DIR)")
     src = p.add_mutually_exclusive_group()
-    src.add_argument("--image", help="dms 이미지 ref(예: pkg-01:5001/dms:d16)")
+    src.add_argument("--image", help="dms 이미지 ref(예: 10.112.0.50:5000/dms:d19)")
     src.add_argument("--overlay", help="이 오버레이를 로컬 렌더해 dms 이미지를 고른다(예: deploy/overlays/testbed-k8s) -- "
                                        "--shared-dir 가 없으면 그 디렉터리의 values.env 에서 SHARED_DIR 도 읽는다")
     p.add_argument("--namespace", default="dms")

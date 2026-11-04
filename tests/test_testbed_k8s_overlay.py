@@ -8,8 +8,9 @@ dms-k8s 는 k8s 신원 모드 전용이다(모든 단건 잡 root + 권한 = k8s
 - 정적(kubectl 없이도 돈다): base·오버레이 어디에도 DMS_LDAP_* 가 없고, 신원 모드가 base 의 "k8s" 이며, 오버레이가 거는
   패치 목록·레지스트리가 맞는지. ssc 테스트베드 오버레이(deploy/overlays/testbed)는 이 브랜치에 없다(dms-ssc 소관).
 - 렌더(`kubectl kustomize`, 클러스터·kubeconfig 를 쓰지 않는다): 렌더 결과 어디에도 'ldap'(대소문자 무시)이 없고,
-  에이전트가 `dms agent` 로 직접 뜨고, 이미지·빌드 레지스트리가 이 클러스터의 :5001 이고, 공인 VIP·포탈 호스트가
-  k8s 값인지. (모든 오버레이의 자리표시자 이미지 검사는 tests/test_overlay_render_contract.py — 공용.)
+  에이전트가 `dms agent` 로 직접 뜨고, 이미지·빌드 레지스트리·빌더가 이 클러스터의 클러스터 내 레지스트리 10.112.0.50:5000
+  (2026-11-03~; 그 전의 pkg-01:5001 은 2026-11-04 삭제)이고, 공인 VIP·포탈 호스트가 k8s 값인지.
+  (모든 오버레이의 자리표시자 이미지 검사는 tests/test_overlay_render_contract.py — 공용.)
 
 렌더 파싱은 PyYAML 없이(저장소 의존성이 아니다 — manifest_tags 와 같은 방침) kustomize 출력의 고정된 모양
 (키 정렬·2칸 들여쓰기·시퀀스는 부모 키와 같은 들여쓰기)에 기대는 최소 정규식이다. 찾지 못하면 조용히 통과하지 않고
@@ -28,7 +29,7 @@ BASE_CONFIG = REPO_ROOT / "deploy" / "k8s" / "20-config.yaml"
 BASE_AGENT = REPO_ROOT / "deploy" / "k8s" / "50-agent-daemonset.yaml"
 
 K8S_REGISTRY = "10.112.0.50:5000"
-SHARED_BUILDER = "10.112.0.50:5000/buildah:stable"   # 빌더 미러만 ssc 의 :5000 을 공용으로 읽는다
+SHARED_BUILDER = "10.112.0.50:5000/buildah:stable"   # 빌더도 앱과 같은 클러스터 내 레지스트리(T4 16 전엔 ssc 의 pkg-01:5000 미러를 공용)
 K8S_VIP = "10.20.20.101/32"
 K8S_HOST = "dms-k8s.local"
 

@@ -30,9 +30,9 @@ k8s 테스트베드는 §13 이 런북이다.
 | 노드 | dms-cp1 .10 + dms-w1~w3 .11–.13 | k8s-cp1 .20(Ubuntu 24.04, 4GiB — 2026-11-03 ⑥ T8 에 2.5 → 4: EG·GW API CRD 로 kube-apiserver RSS ≈1GB, §2g-6) + k8s-w1·k8s-w2 .21·.22(**Rocky Linux 9.6, SELinux permissive**, firewalld 꺼짐, 3GiB — 2026-11-03 T-SE, 설계 #49) |
 | kube 컨텍스트 | `dms` (current) | `dmsk8s` (current 로 만들지 않는다) |
 | 오버레이 | `deploy/overlays/testbed`(dms-ssc 에만) | `deploy/overlays/testbed-k8s` |
-| 포탈 | https://dms.local (VIP 10.20.20.100) | https://dms-k8s.local (VIP 10.20.20.101 → ingress-nginx). Envoy Gateway 가 **병행**(cp1 :443, PROXY 필수 — 2026-11-03 ⑥ T8, §2g-7) |
-| 레지스트리 | `pkg-01:5000` (docker `registry`) | `10.112.0.50:5000` — 클러스터 내(④, 2026-11-03~ 앱·빌더 `buildah:stable` 모두, §2e-6). 그 전 `pkg-01:5001`(docker `registry-k8s`, 빌더만 :5000 공용) — 되돌림용으로 둔다 |
-| 태그 관례 | `dN` | `dN` — d1 부터(2026-10-26; 그 전 k0~k4 는 옛 kN, 첫 설치 시드는 `d0`) |
+| 포탈 | https://dms.local (VIP 10.20.20.100) | https://dms-k8s.local — 이름 → luminous 의 **호스트 edge**(배포판 haproxy = Avi VS-443 흉내: VIP-A 10.10.10.1:443·외부 :8443, L4) → `send-proxy-v2` → k8s-cp1 :443 Envoy Gateway(PROXY 필수). 되돌림용 MetalLB VIP 10.20.20.101 → ingress-nginx 는 유지(testbed `portal_edge`, 2026-11-04 정식 구축 — §2g-7) |
+| 레지스트리 | `pkg-01:5000` (docker `registry`) | `10.112.0.50:5000` — 클러스터 내(④, 2026-11-03~ 앱·빌더 `buildah:stable`·애드온 모두, §2e-6; 저장소 `/dms_shared/dms/registry`). 노드는 이것만 신뢰하고 pkg-01 의 레지스트리는 쓰지 않는다. 그 전 `pkg-01:5001`(docker `registry-k8s`, d18 까지)은 **2026-11-04 삭제**(사용자 결정 — 되돌림 없음, §2e-6) |
+| 태그 관례 | `dN` | `dN` — d1 부터(2026-10-26; 그 전 k0~k4 는 옛 kN. 빈 레지스트리의 첫 이미지는 부트스트랩 빌드의 새 `dN` — §13-2) |
 | PostgreSQL | `dmsdb` / `dmsapp` | CNPG Cluster `dms-pg`(DB `dms`/사용자 `dms` — ⑤, 2026-11-03 T7~, §2f-8). 그 전 pkg-01 `dmsdb_k8s` / `dmsapp_k8s` — 되돌림용으로 둔다 |
 | LDAP | 사용(pkg-01 slapd, 아래 표) | **없음**(사용자 결정) — k8s 신원 모드(모든 잡 root + 권한 = RoleBinding 맵핑, §13) |
 | `dms-secrets` | 5키(+ `DMS_LDAP_BIND_PW`) | **4키**(바인드 비밀번호 키 없음) |
@@ -52,7 +52,7 @@ truth):
 | thing | value |
 |---|---|
 | build/registry node | `pkg-01` (10.10.10.30) |
-| registry | `pkg-01:5000`, insecure (k8s 테스트베드는 클러스터 내 `10.112.0.50:5000` — 2026-11-03~, 그 전 `pkg-01:5001`) |
+| registry | `pkg-01:5000`, insecure (k8s 테스트베드는 클러스터 내 `10.112.0.50:5000` — 2026-11-03~; 그 전 `pkg-01:5001` 은 2026-11-04 삭제) |
 | PostgreSQL | `postgresql://dmsapp:<PW>@10.10.10.30:5432/dmsdb` — PW 는 testbed `group_vars/all.yml` 의 `postgresql_app_password`(테스트베드 전용 데모값, 인라인). testbed `secrets.yml`(gitignored)엔 k8s 테스트베드의 `postgresql_app_password_k8s` 만 있다 |
 | LDAP | `ldap://10.10.10.30:389`, base `dc=dms,dc=local` (ssc 전용 — k8s 테스트베드는 LDAP 없음) |
 | CephFS `cephfs-dms` | `/cephfs`, mounted on w1-3 |
@@ -119,22 +119,28 @@ cd frontend && npm run test:e2e
 
 | 컨테이너 | 포트 | 데이터 | 쓰는 클러스터 |
 |---|---|---|---|
-| `registry` | 5000 | `/opt/dms-registry` | ssc 테스트베드(`dms`) + 공용 `buildah:stable`·애드온 미러 |
-| `registry-k8s` | 5001 | `/opt/dms-registry-k8s` | k8s 테스트베드(`dmsk8s`) |
+| `registry` | 5000 | `/opt/dms-registry` | ssc 테스트베드(`dms`) + `buildah:stable` 빌더 미러 |
 
-둘 다 docker `registry:2`, `--restart=always`, `REGISTRY_STORAGE_DELETE_ENABLED=true`. 노드 CRI-O 신뢰
-(`/etc/containers/registries.conf.d/99-pkg-01-insecure.conf`)도 testbed 의 crio 롤이 깔고, 손으로 고칠 때만 이 저장소의
-헬퍼를 쓴다 — 클러스터는 **반드시 명시**한다(기본 컨텍스트 없음):
+docker `registry:2`, `--restart=always`, `REGISTRY_STORAGE_DELETE_ENABLED=true`. **k8s 테스트베드(`dmsk8s`)는 pkg-01 의 레지스트리를
+쓰지 않는다** — 2026-11-03(④ d19)부터 앱·빌더·애드온 이미지가 모두 클러스터 내 레지스트리 `10.112.0.50:5000`(§2e)에 있다. 그 전의
+`registry-k8s`(:5001, `/opt/dms-registry-k8s`, d1~d18·k0~k4)는 **2026-11-04 삭제**했다(사용자 결정 「이미지 레지스트리 dms-k8s 의 예전
+방식 (5001) 은 삭제해도 돼. 되돌릴일 없을거야.」 — testbed `registry_instances_retired` 가 컨테이너·데이터를 지운다; d18 3종은 클러스터 내에
+같은 digest 로 남아 있다).
+
+노드 CRI-O 신뢰는 testbed 의 crio 롤이 깐다: ssc 노드 = `/etc/containers/registries.conf.d/99-pkg-01-insecure.conf`(`pkg-01:5000`), k8s 노드 =
+`50-dms-registry.conf`(`10.112.0.50:5000`) **하나뿐**(testbed `crio_insecure_registries: []` — 롤이 옛 `99-pkg-01-insecure.conf` 를 지운다; 손으로는
+`cd ~/dms-dev/testbed && make baseline ANSIBLE='ansible-playbook --limit dmsk8s --tags crio_trust'`). 이 저장소의 헬퍼는 손으로 고칠 때만 쓰고,
+클러스터는 **반드시 명시**한다(기본 컨텍스트 없음):
 
 ```bash
 ./deploy/docker/registry-setup.sh nodes --context dms      # ssc 노드: pkg-01:5000
-./deploy/docker/registry-setup.sh nodes --context dmsk8s   # k8s 노드: pkg-01:5000 + pkg-01:5001
 #   SSH_USER=ubuntu SSH_OPTS="-i ~/dms-dev/testbed/files/id_ed25519" 로 접속 옵션, NODES/REGISTRIES 로 대상 고정
+#   --context dmsk8s 는 기본 목록이 없어 거부(exit 2)한다 — 그 클러스터의 신뢰는 testbed crio 롤 몫(위)
 ```
 
-Verify: 노드에서 `sudo crictl pull pkg-01:5000/buildah:stable`(k8s 노드는 `pkg-01:5001/dms:d0` 도)이
+Verify: ssc 노드에서 `sudo crictl pull pkg-01:5000/buildah:stable`, k8s 노드에서 `sudo crictl pull 10.112.0.50:5000/buildah:stable`(§2e-4 5) 이
 "http: server gave HTTP response to HTTPS client" 없이 받아져야 한다. 레지스트리 경로 접두(`pkg-01:5000/k8s`)는 코드가
-지원하지 않는다 — 클러스터마다 포트(프로세스)를 나눈 이유다(docs/BACKLOG.md).
+지원하지 않는다 — 클러스터마다 레지스트리를 나누는 이유다(docs/BACKLOG.md).
 
 ## 1. Build and push images (비상용 — 평상시엔 §8 포탈 빌드를 쓴다)
 
@@ -840,6 +846,8 @@ v1.16.0 3줄(`images-lock.py resolve` 로 만든 docker.io/volcanosh 의 amd64 d
   0개일 때만(`kubectl --context C get pods -A -o jsonpath='{range .items[*]}{.spec.priorityClassName}{"\n"}{end}' | grep -cx dms-addon-critical`
   이 0) `kubectl --context C delete priorityclass dms-addon-critical`. 저장소 `<SHARED_DIR>/dms/registry` 는 지우지 않는다(센티널·push 한
   이미지 — 다시 적용하면 그대로 쓴다). 노드의 신뢰 drop-in·고정 설정·반입 이미지는 남겨도 무해하다(그 주소에 아무것도 없으면 쓰이지 않는다).
+  앱이 이미 이 레지스트리를 쓰고 있으면 걷기 전에 앱이 받을 다른 레지스트리가 있어야 한다 — k8s 테스트베드에는 없다(§2e-6: 옛 `pkg-01:5001`
+  은 2026-11-04 삭제).
 - **저장소 이동**(SHARED_DIR 변경 — §2d-4 의 in-cluster 하위 단계, 2026-11-03 ④ 리뷰 2). 렌더된 레지스트리 층의 hostPath 가 바뀌어
   `guard-images.sh` 가 exit 5 로 멈춘다. **빌드·push 가 없는 창에서, 앱 재적용보다 먼저** 한다(앱의 새 파드는 이 레지스트리에서 pull 한다):
   1. 새 경로에 S0(`sh deploy/shared-dir-init.sh <새 SHARED_DIR>` — 새 무작위 `.dms-shared-id` 와 같은 값의 `registry/.dms-registry-id`) → 다른
@@ -856,19 +864,26 @@ v1.16.0 3줄(`images-lock.py resolve` 로 만든 docker.io/volcanosh 의 amd64 d
 ### 2e-6. k8s 테스트베드(`dmsk8s`) — T4·앱 전환 (2026-11-03 완료, d19)
 
 - 값: `deploy/overlays/testbed-k8s/values.env` — `REGISTRY_MODE=in-cluster`·`REGISTRY=10.112.0.50:5000`(2026-11-03 T4 16 전환 — 그 전
-  external·`pkg-01:5001`), `REGISTRY_CLUSTER_IP=10.112.0.50`(svc 10.112.0.0/12 하단, 미사용 실측)·`REGISTRY_PORT=5000`·`SHARED_DIR_ID`
+  external·`pkg-01:5001`, 2026-11-04 삭제), `REGISTRY_CLUSTER_IP=10.112.0.50`(svc 10.112.0.0/12 하단, 미사용 실측)·`REGISTRY_PORT=5000`·`SHARED_DIR_ID`
   (= `/dms_shared/dms/.dms-shared-id`)·requests 50m/64Mi(설계 10 — T4 실측 RSS 43~50MB, 대량 pull 때 최고 약 66MiB 로 request 를 살짝 넘는다;
   limit 512Mi). `sh deploy/render.sh testbed-k8s` 가 `deploy/.rendered/testbed-k8s/platform/{priorityclass,registry}` 를 내고, 렌더된 `app/` 은
   커밋된 오버레이와 같다(테스트가 고정). 앱 적용은 지금처럼 `kubectl --context dmsk8s apply -k deploy/overlays/testbed-k8s`(§13-6).
 - control-plane 은 cp1 하나라 S0-5 는 cp1 에만, S0-4 는 3노드, 인터넷 노드 역할은 빌드 노드 k8s-w1. 결과는 CHANGELOG ④ 「T4 실증」.
-  앱이 이 레지스트리를 쓰므로 2e-5 「걷어내기」(`C`=dmsk8s, `R=deploy/.rendered/testbed-k8s/platform`)는 아래 되돌림 뒤에만 한다.
+  앱이 이 레지스트리를 쓰고 되돌아갈 외부 레지스트리가 없으므로(아래) 2e-5 「걷어내기」는 이 테스트베드에 쓰지 않는다 — 걷으면 앱·빌더가
+  이미지를 받을 곳이 없다. 노드 신뢰는 testbed crio 롤의 `50-dms-registry.conf` 하나뿐이다(2026-11-04 — pkg-01 신뢰 drop-in 은 걷었다).
 - **앱 전환**(T4 16 — 완료, 6287cd8; 첫 포탈 빌드 d19 = 35a10a3): `values.env`(`REGISTRY_MODE=in-cluster`, `REGISTRY=10.112.0.50:5000`)·
   오버레이 `newName`·`patch-config.yaml` 의 `DMS_JOB_IMAGE`·`DMS_BUILD_REGISTRY`·`DMS_BUILD_BUILDER_IMAGE` 를 한 커밋에서 바꾸고(렌더러가 다섯
   곳 대조 — 빌더도 같은 레지스트리여야 한다), `tests/test_testbed_k8s_overlay.py` 의 레지스트리 상수도 고친다 → guard exit 3 →
   `ALLOW_IMAGE_CHANGE=1` → apply → api·controller `rollout restart`(ConfigMap) → 포탈 릴리스로 **잡 이미지(`control_state.job_image`)를 새
   주소로 다시 릴리스**. 이후 포탈 빌드는 새 레지스트리로 push 하고 동봉 매니페스트가 새 주소로 스탬프돼 드리프트가 「일치」다(d19).
-  되돌림 = 그 커밋을 되돌려 같은 순서로 — `pkg-01:5001` 은 되돌림용으로 남겨 뒀지만 d18 까지만 있다(d19 부터는 새 레지스트리에만 —
-  태그를 d18 로 맞추거나 `skopeo copy` 로 옮긴 뒤).
+  **external 로의 되돌림은 없다**: 되돌림용으로 남겨 뒀던 `pkg-01:5001`(`registry-k8s`, d1~d18·k0~k4)은 2026-11-04 삭제했다(사용자 결정
+  「이미지 레지스트리 dms-k8s 의 예전 방식 (5001) 은 삭제해도 돼. 되돌릴일 없을거야.」 — CHANGELOG 「옛 dmsk8s 레지스트리 pkg-01:5001 삭제」).
+  옛 태그로 돌아가려면 이 레지스트리에 있는 태그를 포탈 이력에서 다시 고른다(2026-11-04 기준 dms·dms-agent·dms-mpifileutils 각 d18·d19 —
+  d18 은 전환 때 :5001 에서 옮긴 같은 digest 사본). d18 이하 이미지는 동봉 매니페스트가 `pkg-01:5001` 로 스탬프돼 있어 그 태그로 릴리스하면
+  드리프트 배지가 「모름」이다(타 레지스트리 — CLAUDE.md 「base 매니페스트는 사이트 중립」). d1~d17·kN 은 더 없다. 릴리스 이력의 옛
+  `pkg-01:5001/…` 행은 기록으로 남고 아무것도 다시 읽지 않는다. **`kubectl rollout undo`(·`--to-revision`)로 되돌리지 않는다**: 롤아웃 이력
+  (dms-api·dms-controller 의 0-replica ReplicaSet, dms-agent ControllerRevision — 2026-11-04 기준 d10~d18)은 옛 `pkg-01:5001/…` 이미지를
+  가리켜, 그 리비전으로 돌아가면 이미지도 노드 신뢰도 없어 `ImagePullBackOff` 다 — 되돌림은 포탈 릴리스(위)로만.
 
 ## 2f. DB(CNPG) — 오퍼레이터(S9)·DB 층(S10)·백업·재활용·업그레이드·운영 규칙 (2026-11-03 ⑤)
 
@@ -1211,7 +1226,9 @@ keepalive·`tcp_user_timeout`(2f-2 URL)이 없으면 DB 연결이 약 16분 매�
 
 설계 v6 #5·#13~#15(#14 「EG 기본값 세부」)·4-2·4-3·5 「원 IP 기록」·8-1(S0-5·S8·S12)·8-2(Gateway API·EG 행)·10 T8. **prod 의 포탈 입구는 이것
 하나다** — MetalLB·ingress-nginx 를 쓰지 않는다(prod 오버레이가 공용 base 의 Ingress·MetalLB 풀을 `$patch: delete` 로 지운다 —
-`deploy/overlays/prod/patch-remove-ingress.yaml`). testbed-k8s 는 Ingress + MetalLB VIP 10.20.20.101 을 사용자 경로로 두고 Gateway 를 병행한다(T8 실증 뒤에도 — 영구 컷오버는 testbed IaC, 2g-7).
+`deploy/overlays/prod/patch-remove-ingress.yaml`). testbed-k8s 의 사용자 경로도 Gateway 다 — luminous 의 호스트 edge(haproxy, Avi VS-443 흉내)가
+VIP-A·외부 :8443 을 받아 PROXY v2 로 cp1 :443 에 넘긴다(testbed IaC `portal_edge: gateway`, 2026-11-04 정식 구축). Ingress + MetalLB VIP 10.20.20.101 은
+되돌림용으로 남는다(2g-7).
 설치기(§2h)의 S8·S12 가 아래를 감지 상태 기계(A 면 설치·C 면 platform/gateway 만)·마스터 sysctl·Programmed·마스터마다 :443 으로 한다 — install.sh 의
 MetalLB·ingress 게이트는 없앴다(2026-11-03 ⑦, 설계 12 위험 19 해소). 아래는 손 판이다.
 
@@ -1355,7 +1372,7 @@ Avi(설계 #5·#42·V2~V5 — 사이트 LB 담당 몫, DMS 는 값만 준다):
 | 풀 | 마스터 3대 **:443**(노드 IP) |
 | 헬스 모니터 | TCP 443(연결만) — HTTPS 모니터는 PROXY 헤더 없이 말해 **required 에서 실패**한다. HTTP 모니터를 쓰려면 모니터에도 PROXY 를 싣는 기능이 필요하다(제품 확인) |
 | 유휴 타임아웃(V5) | 3600초 이상(HTTPRoute 3600s 와 맞춘다 — 짧으면 긴 다운로드를 Avi 가 먼저 끊는다) |
-| 방화벽(V4) | 마스터 :443 은 **Avi SE 대역에서만** 받는다 — PROXY 헤더를 스스로 실은 위조 연결을 막는 것은 이 규칙이다 |
+| 방화벽(V4) | 마스터 :443 은 **Avi SE 대역에서만** 받는다 — PROXY 헤더를 스스로 실은 위조 연결을 막는 것은 이 규칙이다(testbed-k8s 의 흉내: cp1 nft — 2g-7) |
 
 컷오버(기존 입구에서 옮길 때 — 첫 설치면 처음부터 `required`):
 
@@ -1434,31 +1451,50 @@ kubectl --context C -n envoy-gateway-system logs -l gateway.envoyproxy.io/owning
   이미 거꾸로 지워 GatewayClass 가 Terminating 에 남았으면(걷을 EG 가 없다 — Gateway 가 먼저 지워졌는지 확인한 뒤) finalizer 를 손으로 걷는다:
   `kubectl --context C patch gatewayclass dms --type=merge -p '{"metadata":{"finalizers":null}}'` — 그러면 CRD 삭제도 끝난다.
 
-### 2g-7. k8s 테스트베드(`dmsk8s`) — T8(병행)과 이후 컷오버
+### 2g-7. k8s 테스트베드(`dmsk8s`) — T8(병행) → 호스트 edge 정식 구축(영구 컷오버, 2026-11-04)
 
+- **지금의 포탈 경로(2026-11-04 testbed IaC 정식 구축 — 같은 날 08:16–08:21 KST 라이브 적용·실증: validate PASS=284 FAIL=0, :8443 의 Envoy
+  `client_ip` = 실제 PC 주소, CHANGELOG 「테스트베드 정식 구축」)**: 이름 `dms-k8s.local` → luminous 의
+  **호스트 edge** = 배포판 haproxy(`haproxy.service`, testbed `scripts/host-edge.sh`·`make host-edge`; 설정은 testbed group_vars 에서 생성) — Avi
+  VS-443 을 흉내 낸다(2g-4): L4 TCP, 풀 = `dmsk8s_cp` 전부 :443(지금 k8s-cp1), `send-proxy-v2`, TCP 헬스체크(5초, 3 down/2 up — PROXY
+  필수 리스너에도 통과), client/server 타임아웃 3600초, `balance leastconn`, 로그 journald(`journalctl -u haproxy`), **방화벽(V4)** — cp1 :443 은 edge
+  (호스트 dmsbr0 `10.10.10.1`)에서만: testbed `dms_envoy_443_sources` → `roles/common` 의 nft 테이블 `inet dms_testbed_cp443` + `dms-testbed-cp443.service`
+  (다른 출발지는 TCP reset — VM 이 PROXY 헤더를 스스로 실어 client_ip 를 위조할 길이 없다; testbed validate 가 워커 → cp1:443 직접 = curl 7 을 본다,
+  2026-11-04 리뷰 r1 — 그 전엔 V4 를 흉내 내지 않았다). 받는 주소: **VIP-A
+  `10.10.10.1:443`**(호스트의 dmsbr0 주소 — 호스트 `/etc/hosts` 가 이름을 여기로; VM 에서도 on-link 라 원 IP = 그 VM 시험이 된다) + 외부
+  `192.168.75.215:8443`·`100.65.195.106:8443`(LAN·Tailscale — 옛 DNAT 와 같은 주소·포트라 `https://dms-k8s.local:8443` 안내 그대로, 원 IP = 실제 PC).
+  **되돌림용**: MetalLB VIP `10.20.20.101` → ingress-nginx 는 그대로 떠 있고 호스트에서 라우팅된다(`--resolve dms-k8s.local:443:10.20.20.101` 200 — testbed
+  validate 가 늘 본다).
+- **스위치·되돌림(testbed `group_vars/dmsk8s.yml` `portal_edge: gateway | ingress`)**: 하나가 셋을 정한다 — host-net 의 :8443 DNAT(ingress 에만),
+  호스트 `/etc/hosts` 의 이름(gateway → VIP-A, ingress → 10.20.20.101), haproxy frontend(gateway 에만). 전환 `make host-edge host-net host-hosts`
+  (haproxy 가 먼저 bind — DNAT 가 남아 있는 동안엔 DNAT 가 먼저 가로챈다 → host-net **reload** 가 :8443 DNAT 4줄만 뺀다(유닛 재시작이 아니라 제자리
+  수렴이라 ssc 릴레이는 한 순간도 빠지지 않는다 — T8 의 손 `iptables -D` 를 대신) → 이름), 되돌림 = `portal_edge: ingress` + `make host-net host-hosts
+  host-edge`(DNAT 먼저 → 이름 → frontend 제거). 세 스크립트가 틀린 순서를 아무것도 바꾸기 전에 거부하고, **서비스하지 않는 경로로의 옮김**도 거부한다
+  (리뷰 r1): host-net·host-hosts 는 edge 쪽으로 옮길 때 `host-edge.sh ready` — 리스너 + 그 주소가 호스트 것(transparent bind 는 없는 주소에도 LISTEN)
+  + 헬스체크를 통과한 백엔드 UP(Envoy 가 없거나 Gateway 가 Programmed 가 아니면 한 줄 make 가 host-net 에서 멈춘다) — 를, 되돌릴 때 edge 가 아직
+  응답하면 `10.20.20.101:443` TCP 응답을 본다(소크 뒤 Ingress 를 지운 다음의 되돌림 방지). host-net 설정은 이제 group_vars 에서 생성한
+  `/etc/default/dms-testbed-hostnet` 이고 스크립트가 직접 읽는다 — 아래 T8 시절 「`status` 에 env 를 줘야 한다」 주의는 더는 해당 없다. 상세·검증:
+  testbed `docs/ARCHITECTURE.md` §15.3·§15.5·§19.5, testbed `README.md` 「Portal edge」.
+- 인증서: SAN 변경 없음 — 클라이언트는 늘 이름으로 붙는다(VIP-A 10.10.10.1 로 IP 접속하는 경로가 없다). 소크 뒤(별도 결정) testbed-k8s 오버레이가
+  prod 처럼 `patch-ingress.yaml`·`patch-metallb.yaml` 을 빼고 `patch-remove-ingress.yaml` 을 싣는다(`test_testbed_k8s_overlay.py` 의 VIP·호스트 단언을
+  같이 바꾼다) — 그때 testbed IaC 가 dmsk8s 의 ingress-nginx·MetalLB 를 걷고 되돌림 경로가 없어진다.
 - 값: `deploy/overlays/testbed-k8s/values.env` — `GATEWAY_PROXY_PROTOCOL=required`(최종 값 — T8 의 optional 단계는 이 파일을 고치지 않고 `VALUES_ENV`
   로 따로 렌더), `PORTAL_TLS_SECRET=dms-portal-tls`(Ingress 와 같은 인증서 — SAN dms-k8s.local·10.20.20.101·Tailscale IP), Envoy 50m/128Mi. 이미지는
   `10.112.0.50:5000`(k8s-w1 이 lock 으로 push). cp1 sysctl 은 `/etc/sysctl.d/90-dms-envoy.conf`(T8 에서 1024 → 443 — 노드 변경은 그 키 하나).
 - cp1 메모리 4GiB(T8): EG·GW API CRD 뒤 kube-apiserver RSS ≈1GB 로 2.5GiB cp1 이 MemoryPressure(speaker 축출 반복, 2g-6) → DB primary 를 cp1 밖으로
-  먼저 옮기고(switchover 7초) virsh 로 4GiB. sysctl drop-in·tfvars `memory_mb` 4096 의 testbed IaC 반영은 작업 사본 패치로 인계 대기(BACKLOG ⑥).
-- T8(2026-11-03 완료 — CHANGELOG ⑥ 「T8 실증」): Gateway·Envoy(cp1 hostNetwork :443, PROXY 필수)가 **병행**으로 떠 있다 — 포탈 사용자 경로(MetalLB
-  VIP 10.20.20.101 → ingress-nginx, 호스트 릴레이 luminous :8443 → VIP)는 그대로다. Avi VS-443 흉내는 luminous 의 haproxy(`send-proxy-v2` →
-  10.10.10.20:443, 예비 포트)이고 시험은 그 포트로만 했다(비 root 443 bind·xDS·413·15초+ 스트림·PROXY optional/필수·X-Real-IP 제거·원 IP).
-  테스트베드 한계: 노드 방화벽이 없어 cp1 :19002(shutdown-manager)가 다른 노드에서도 열린다 — prod 는 마스터 방화벽(2g-2).
+  먼저 옮기고(switchover 7초) virsh 로 4GiB. testbed IaC 반영 완료(2026-11-04 — tfvars `memory_mb` 4096·`roles/common` `90-dms-envoy.conf`, 진짜 testbed
+  저장소에서 terraform plan No changes).
+- T8(2026-11-03 완료 — CHANGELOG ⑥ 「T8 실증」): 그때 Gateway·Envoy(cp1 hostNetwork :443, PROXY 필수)는 **병행**이었다 — 포탈 사용자 경로(MetalLB
+  VIP 10.20.20.101 → ingress-nginx, 호스트 릴레이 luminous :8443 → VIP)는 그대로 두고, Avi VS-443 흉내는 손으로 띄운 haproxy(`send-proxy-v2` →
+  10.10.10.20:443, 예비 포트)로 그 포트로만 시험했다(비 root 443 bind·xDS·413·15초+ 스트림·PROXY optional/필수·X-Real-IP 제거·원 IP).
+  테스트베드 한계: 노드 방화벽은 :443(V4, 위 — 2026-11-04 리뷰 r1)만 흉내 낸다 — cp1 :19002(shutdown-manager)·:19003 은 다른 노드에서도 열린다(prod 는
+  마스터 방화벽, 2g-2).
 - 컷오버 시험(T8, 원복함): haproxy 를 **먼저** :8443 에 bind 해 두고, 유닛 재시작 대신 nat PREROUTING·OUTPUT 의 `--dport 8443` DNAT 4줄을
   `iptables -t nat -D` 로 뺐다(ssc 릴레이를 끊지 않는다) — LAN·Tailscale 로그인 200·원 IP = 실제 PC. 되돌림은 같은 4줄을 `-I`(규칙 바이트 동일 확인)
   → haproxy 중지. `HOSTNET_RELAYS` 를 그대로 둔 `-D` 는 유닛 재시작·재부팅이면 되돌아간다 — 시험 전용이다.
-- 이후 영구 컷오버(별도 승인 — MetalLB 는 되돌림용으로 남긴다. haproxy 를 testbed IaC 의 관리 서비스(systemd 유닛 + 설정, host-net 유닛 곁)로
-  두는 것이 먼저다 — BACKLOG ⑥): ① haproxy 를 **먼저** 띄워 luminous 의 외부 주소 :8443 에 bind 해 두고 — DNAT 가 남아 있어도 bind 는 된다 —
-  그다음 `/etc/default/dms-testbed-hostnet` 의 `HOSTNET_RELAYS` 에서 `8443=10.20.20.101:443` 을 빼고(영속), 지금 규칙은 유닛 재시작 대신 위 DNAT
-  4줄을 `-D` 로 뺀다(DNAT 가 PREROUTING·OUTPUT 에서 소켓보다 먼저 가로채므로 규칙이 남아 있으면 haproxy 에 닿지 않는다; 순서를 바꾸면 그 사이
-  :8443 이 거부된다. 유닛을 재시작해도 되지만 ExecStop 이 태그 규칙을 전부 지웠다 넣으므로 ssc(dms.local) 릴레이도 몇 초 끊긴다 — 2026-11-03 ⑥
-  리뷰 2) ② `https://dms-k8s.local:8443` 이 Gateway 경로가 된다(원 IP = 실제 PC — 지금의 DNAT+MASQUERADE 경로는 원 IP 가 호스트 브리지 주소
-  10.10.10.1 이다) ③ 소크 뒤 testbed-k8s 오버레이도 prod 처럼 `patch-ingress.yaml`·`patch-metallb.yaml` 을 빼고 `patch-remove-ingress.yaml` 을
-  싣는다(테스트 `test_testbed_k8s_overlay.py` 의 VIP·호스트 단언을 같이 바꾼다) — ingress-nginx·MetalLB 자체는 testbed IaC 가 걷는다. 되돌림 =
-  `HOSTNET_RELAYS` 원복 + 같은 4줄 `-I`(또는 유닛 재시작 — DNAT 가 먼저 가로채 사용자 경로가 VIP 로 돌아간다) → 그 뒤 haproxy 중지(오버레이를
-  바꾸기 전까지는 Ingress 가 그대로 살아 있다). 상태 확인은 `dms-testbed-hostnet status` 에 같은 `HOSTNET_RELAYS` 를 env 로 준다 — 스크립트는 `/etc/default` 를 읽지 않는다(유닛의
-  `EnvironmentFile` 만), env 없이 돌리면 정상 컷오버에서도 8443 MISS 다.
+- (역사) T8 의 영구 컷오버 계획 — haproxy 를 먼저 bind → `HOSTNET_RELAYS` 에서 `8443=…` 를 빼고 DNAT 4줄 `-D` — 은 위 「스위치·되돌림」으로
+  IaC 가 됐다(2026-11-04). 그 계획이 짚은 두 함정은 IaC 가 구조로 막는다: 순서(가드), 유닛 재시작 때의 ssc 릴레이 공백(reload 수렴). 「`status` 는
+  `/etc/default` 를 읽지 않는다」도 고쳤다(스크립트가 생성 설정을 직접 읽는다 — 유닛의 `EnvironmentFile` 은 없앴다).
 
 ## 2h. 설치기(install.sh) — 단계 S1~S13·감지·멱등 (2026-11-03 ⑦)
 
@@ -1807,7 +1843,7 @@ export 하지 않는다. 새 체크아웃은 testbed `dms_src_checkouts` 에 넣
 | 클러스터 | build_node_name | build_source_path | 따라가는 브랜치 | 레지스트리 / 태그 |
 |---|---|---|---|---|
 | ssc(`dms`) | dms-w1 | `/home/mason/dms-dev/dms-ssc`(전체 clone — 전환 전엔 `/home/mason/dms-dev/dms`) | origin/dms-ssc | pkg-01:5000 / dN |
-| k8s(`dmsk8s`) | k8s-w1 | `/home/mason/dms-dev/dms` | origin/dms-k8s(`/home/mason/dms-dev/dms-k8s`) | 10.112.0.50:5000(클러스터 내, 2026-11-03~; 그 전 pkg-01:5001) / dN |
+| k8s(`dmsk8s`) | k8s-w1 | `/home/mason/dms-dev/dms` | origin/dms-k8s(`/home/mason/dms-dev/dms-k8s`) | 10.112.0.50:5000(클러스터 내, 2026-11-03~; 그 전 pkg-01:5001 — 2026-11-04 삭제) / dN |
 
 체크아웃은 호스트 cron 이 ff-only 로 맞춘다. **git worktree 로 만들지 않는다** — 빌드 파드는 이 경로 하나만 마운트해서
 `.git` 파일이 가리키는 바깥 gitdir 를 못 따라가 SHA 가 `unknown` 이 된다. 컨트롤 상태 PUT 은 전체 치환이라(빠진 필드는
@@ -1848,7 +1884,8 @@ pod-gc 는 빌드도 치운 것에 `builds.pods_gc_at` 을 찍어 다음부터 �
 개방이 아니어도 된다.
 
 **필요한 egress 는 전부 빌드 파드 경로다.** 빌더 이미지는
-`pkg-01:5000/buildah:stable` **로컬 미러**를 쓰므로(`20-config.yaml`) 노드(kubelet/
+`pkg-01:5000/buildah:stable` **로컬 미러**를 쓰므로(`20-config.yaml`; k8s 테스트베드는 클러스터 내 `10.112.0.50:5000/buildah:stable` —
+testbed-k8s `patch-config.yaml`, §2e) 노드(kubelet/
 CRI-O)는 인터넷 없이도 빌더를 받는다. 슬라이스 21 실증에서 이걸 안 하면 무슨 일이
 나는지 확인했다: 프리플라이트 프로브는 **파드 네트워크**로 검사하는데 빌더 이미지
 pull 은 **노드 네트워크**로 일어나, 노드 egress 만 막으면 프로브는 통과하고 빌드
@@ -2118,8 +2155,9 @@ prod 오버레이가 base 의 Ingress·MetalLB 풀을 지운다; 아래 §10 의
 
 ## 10. 포탈 HTTPS 노출 — nginx ingress + TLS + 공인 VIP(L2) (2026-08-19 완증)
 
-> 2026-11-03 ⑥: **prod 는 이 절을 쓰지 않는다** — 입구는 §2g(Avi L4 + PROXY v2 → 마스터 :443 의 Envoy Gateway). 이 절은 테스트베드(testbed-k8s —
-> Gateway 와 병행 — 영구 컷오버 전까지, §2g-7)의 지금 입구다.
+> 2026-11-03 ⑥: **prod 는 이 절을 쓰지 않는다** — 입구는 §2g(Avi L4 + PROXY v2 → 마스터 :443 의 Envoy Gateway). 이 절은 ssc 테스트베드의 입구이고,
+> testbed-k8s 에서는 **되돌림 경로**다(사용자 경로는 testbed 호스트 edge → Gateway; Ingress·MetalLB VIP 10.20.20.101 은 testbed `portal_edge: ingress`
+> 로 되돌릴 때 쓴다 — §2g-7, 2026-11-04 정식 구축).
 
 경로: `브라우저 → https://dms.local (공인 VIP 10.20.20.100) → 상위 라우팅이
 노드 세그먼트로 배달 → MetalLB L2 가 ARP 응답(선출 노드) → ingress-nginx(TLS
@@ -2133,7 +2171,8 @@ SPA+API 를 서빙하고 ingress 는 프록시만 한다.
 next-hop 경로를 요구)의 검증된 구성은 git 이력 c127c1f(47-metallb-bgp.yaml +
 luminous FRR)에 있다.
 
-선행 컴포넌트(설치 완료, 이미지는 pkg-01:5000 미러): MetalLB v0.16.0,
+선행 컴포넌트(설치 완료 — 2026-08 당시 이미지는 pkg-01:5000 미러, 지금은 두 테스트베드 모두 testbed IaC 의 metallb·ingress 역할이 상류
+quay.io·registry.k8s.io 에서 받는다): MetalLB v0.16.0,
 ingress-nginx v1.15.1(IngressClass `nginx`).
 
 절차:
@@ -2175,10 +2214,11 @@ ingress-nginx v1.15.1(IngressClass `nginx`).
    `ip route replace 10.20.20.100/32 dev dmsbr0` — onlink 라우트라 dmsbr0 에서
    VIP 를 ARP 로 찾는다. 외부 PC·Tailscale 사용자의 옛 주소 호환용으로
    luminous iptables 가 자기 IP 의 80/443/8080 을 VIP 로 DNAT 한다. 2026-10-21 부터 라우트·릴레이(k8s VIP
-   10.20.20.101 과 그 :8443 릴레이 포함)는 testbed 저장소의 호스트 네트워크 스크립트와 systemd 유닛이 부팅마다
+   10.20.20.101 포함)는 testbed 저장소의 호스트 네트워크 스크립트와 systemd 유닛이 부팅마다
    다시 깐다 — 옛 손작업 규칙은 세션 스크래치 `setup-relay.sh`·`relay-tailscale.sh`·`relay-8080.sh` 였다.
    k8s 포탈엔 평문 릴레이(:8081)를 두지 않는다(2026-10-22 제거): force-ssl-redirect 가 포트 없는 `https://<host>/`
-   = :443 = **ssc** VIP 로 보내 다른 포탈에 떨어졌다. k8s 포탈의 외부 입구는 `https://dms-k8s.local:8443` 하나.)
+   = :443 = **ssc** VIP 로 보내 다른 포탈에 떨어졌다. k8s 포탈의 외부 입구는 `https://dms-k8s.local:8443` 하나 —
+   2026-11-04 부터 그 :8443 은 DNAT 가 아니라 호스트 edge(haproxy → Envoy Gateway, §2g-7)가 받는다.)
 6. 검증(전부 실증됨): `curl --cacert ca.crt https://dms.local/` = 200(검증
    통과), `http://` = 308, 로그인 Set-Cookie 에 `Secure`, 로그인·admin API·SPA
    딥링크 https 로 200, `ip neigh show 10.20.20.100` = 선출 노드 MAC.
@@ -2506,7 +2546,8 @@ CHANGELOG 「dms-ssc 이식」에서 운영 표면이 바뀐 것만 모았다. �
 ## 13. 두 번째 테스트베드 — k8s 클러스터(`dmsk8s`), LDAP 없음 (2026-10-21)
 
 dms-k8s 브랜치 후보(main)를 검증하는 테스트베드다. 오버레이는 `deploy/overlays/testbed-k8s`, 컨텍스트는 `dmsk8s`,
-포탈은 https://dms-k8s.local(VIP 10.20.20.101). 맨 위 「테스트베드는 둘이다」 표가 ssc 와의 차이 전부다.
+포탈은 https://dms-k8s.local(2026-11-04~ 호스트 edge VIP-A 10.10.10.1 → Envoy Gateway — §2g-7; 되돌림 VIP 10.20.20.101). 맨 위 「테스트베드는 둘이다」
+표가 ssc 와의 차이 전부다.
 
 **LDAP 을 쓰지 않는다**(사용자 결정 2026-10-21: 「dms-k8s 브런치에서는 LDAP 을 사용 안할거야. 이점은 확실히해둬.」).
 2026-10-26 부터 **코드에 LDAP 이 없다**(사용자 결정 (d) 「LDAP 코드 삭제 및 정리」): 리졸버·노드 신원 프로브·nslcd·보조 그룹이
@@ -2547,16 +2588,20 @@ dms-k8s 브랜치 후보(main)를 검증하는 테스트베드다. 오버레이�
   ingress-nginx 2 레플리카(`--default-ssl-certificate=dms/dms-portal-tls`, svc 어노테이션 `metallb.io/address-pool=dms-public-pool`),
   `k8s-w1`·`k8s-w2` 둘 다 `network-zone=public`. kubeconfig 에 컨텍스트 `dmsk8s`(current 는 `dms` 유지).
 - OS(2026-11-03 T-SE~): cp1 Ubuntu 24.04, w1·w2 **Rocky Linux 9.6**(SELinux permissive, firewalld 꺼짐, CRI-O·kube rpm, ceph-common 19.2.2) — testbed
-  IaC 의 EL 분기(넘기기 대기 동안 진짜 testbed 저장소에서 terraform·ansible 을 돌리지 않는다 — BACKLOG). 맨 위 표.
+  IaC 의 EL 분기(2026-11-04 진짜 testbed 저장소에 반영 — terraform plan No changes). 맨 위 표. cp1 은 :443 을 호스트 edge 에서만 받는다(nft, §2g-7).
 - 노드: **LDAP 클라이언트 없음**(sssd·nslcd 미설치, nsswitch 에 sss/ldap 없음, `getent passwd alice` 실패 — testbed validate 의
-  부정 검사), CRI-O 가 `pkg-01:5000`·`pkg-01:5001` 신뢰, `/etc/hosts`·CoreDNS hosts 에 pkg-01(api 파드가 레지스트리를 조회),
+  부정 검사), CRI-O 는 클러스터 내 레지스트리 `10.112.0.50:5000` **만** 신뢰(testbed crio 롤의 `50-dms-registry.conf` — pkg-01 신뢰 drop-in
+  `99-pkg-01-insecure.conf` 는 2026-11-04 걷었다, `crio_insecure_registries: []`; 그 전 `pkg-01:5000`·`pkg-01:5001`), `/etc/hosts`·CoreDNS hosts 의
+  pkg-01 줄은 testbed 공용 규칙이라 남는다(이 클러스터는 pkg-01 레지스트리를 조회하지 않는다 — 무해),
   CephFS `dmsfs:/k8s` → `/cephfs`(둘 다), `/k8s/third` → `/cephfs-third`(k8s-w1), `/k8s/secondary` → `/cephfs-secondary`(k8s-w2)
   — cephx `client.dmsk8s` 는 MDS `path=/k8s` + OSD `namespace=k8s`(`/k8s` 레이아웃 `pool_namespace=k8s`)로 두 층에서 갇힌다,
   빌드 소스 `/home/mason/dms-dev/dms` ro NFS(체크아웃별 export·워커 IP 만 — 부모 `/home/mason/dms-dev` 는 export 하지 않는다).
-- pkg-01: `registry-k8s` :5001(§0), PostgreSQL `dmsdb_k8s` / 롤 `dmsapp_k8s`(scram — pg_hba 는 DB 별: `dmsapp_k8s` 만
+- pkg-01: 이 클러스터의 레지스트리는 **없다**(옛 `registry-k8s` :5001 은 2026-11-04 삭제 — §0; 이미지는 클러스터 내 레지스트리, 13-2),
+  PostgreSQL `dmsdb_k8s` / 롤 `dmsapp_k8s`(scram — pg_hba 는 DB 별: `dmsapp_k8s` 만
   `dmsdb_k8s` 에, LDAP 사용자 로그인은 이 DB 에 닿지 않는다; PUBLIC CONNECT 회수).
-- 호스트: `10.20.20.101/32 dev dmsbr0` onlink 라우트, `/etc/hosts` 의 `10.20.20.101 dms-k8s.local`, (선택) 외부 릴레이
-  :8443 → .101:443(평문 릴레이 없음 — §10), 테스트베드 CA(`~/dms-dev/testbed/files/tls/`, gitignore; 영구 사본
+- 호스트: 포탈 입구 = 호스트 edge(haproxy — VIP-A `10.10.10.1:443`·외부 `:8443` → PROXY v2 → k8s-cp1 :443, §2g-7), `/etc/hosts` 의
+  `10.10.10.1 dms-k8s.local`(testbed `portal_edge: gateway`; `ingress` 로 되돌리면 `10.20.20.101 dms-k8s.local` + :8443 → .101:443 DNAT), 되돌림용
+  `10.20.20.101/32 dev dmsbr0` onlink 라우트(평문 릴레이 없음 — §10), 테스트베드 CA(`~/dms-dev/testbed/files/tls/`, gitignore; 영구 사본
   `/data/dms-testbed/backup-20261021/tls/`).
 
 ```bash
@@ -2566,22 +2611,28 @@ PORTAL_VIP=10.20.20.101 sh deploy/preflight-cluster.sh --context dmsk8s
 sh deploy/verify.sh --context dmsk8s
 ```
 
-### 13-2. 레지스트리 시드 `d0`
+### 13-2. 레지스트리 시드 — 클러스터 내 레지스트리(2026-11-03~; 옛 pkg-01:5001 시드는 2026-11-04 삭제)
 
-첫 설치는 포탈이 아직 없어 포탈 빌드를 못 한다 — ssc 레지스트리의 검증된 이미지를 :5001 에 **`d0`** 으로 복사한다(pkg-01 에서,
-testbed `make registry` 가 :5001 을 띄운 뒤). `d0` 은 숫자 태그라 포탈의 다음 태그 제안이 곧바로 `d1` 이 된다(2026-10-21 첫 설치는
-옛 관례로 `k0` 이었다):
+이미지는 **클러스터 내 레지스트리 `10.112.0.50:5000`**(§2e, testbed-k8s `values.env`) 하나에 있다 — 앱 3종·빌더 `buildah:stable`·애드온. 저장소가
+공용 디렉터리 `/dms_shared/dms/registry`(호스트 NFS `/data/dms_shared`)라 **VM·pkg-01 재구축에도 남는다**: 같은 공용 디렉터리면 S4(레지스트리 적용)
+뒤 그대로 서비스하고 시드할 것이 없다 — **cp1 에 레지스트리 자기 이미지가 남아 있는 한**. 그 이미지(`10.112.0.50:5000/registry:<태그>`,
+`IfNotPresent`, control-plane 에만)는 cp1 의 containers-storage 에 손으로 반입·고정한 것이라 k8s-cp1 을 새로 만들었으면(testbed 처음부터
+재구축이면 늘) S4 **전에** §2e-4 2) S0-5(k8s-w1 에서 lock digest 로 oci-archive → cp1 반입; 고정 drop-in 은 testbed crio 롤이 둔다)를 다시 한다 —
+안 하면 레지스트리 파드가 `ImagePullBackOff`(§2e-3 표)이고 앱·빌더·애드온 모두 받을 곳이 없다. 데이터는 그대로 쓴다. pkg-01 에는 이 클러스터의
+레지스트리가 없다.
 
-```bash
-for pair in dms:d184 dms-agent:d179 dms-mpifileutils:d183; do
-  repo=${pair%%:*}
-  sudo docker pull localhost:5000/$pair && sudo docker tag localhost:5000/$pair localhost:5001/$repo:d0 \
-    && sudo docker push localhost:5001/$repo:d0
-done
-curl -s http://localhost:5001/v2/_catalog
-```
+공용 디렉터리가 **새것**(빈 레지스트리)이면 §2e-4 그대로(전부 `--context dmsk8s`, 인터넷 노드 = 빌드 노드 k8s-w1): S0 `deploy/shared-dir-init.sh`
+(§2d) → S0-5 레지스트리 자기 이미지 반입·고정(cp1 — testbed crio 롤이 고정 drop-in 을 이미 둔다) → `sh deploy/install.sh --context dmsk8s --site testbed-k8s`
+가 S4 뒤 PAUSE(exit 10) → k8s-w1 에서 `sh deploy/push-images.sh --registry 10.112.0.50:5000 --run`(lock: 빌더·CNPG·EG·레지스트리) + DMS 3종 첫
+부트스트랩 빌드(`REGISTRY=10.112.0.50:5000 TAG=<새 dN — 세 태그 같게> ./deploy/docker/build-and-push.sh`, §1 — podman 필요: testbed k8s-w1 에는
+**podman 이 없다**(testbed IaC 는 skopeo 만 — 없으면 이 스크립트가 exit 2) → 빌드 전 그 노드에서 `sudo dnf install -y podman`(AppStream). podman 이 있는
+pkg-01 은 ClusterIP `10.112.0.50` 에 닿지 않아 대신할 수 없다; 빌드 전 e2e 게이트는 개발 PC 에서 같은 커밋으로) → 오버레이 `kustomization.yaml` 의 `newTag`·`patch-config.yaml` 의 `DMS_JOB_IMAGE` 를 그 `dN` 으로(13-8 의 태그
+bump) → `install.sh … --stage S5`(lock 대조 + DMS 3종 태그 확인). 새 빌드는 늘 **새 `dN`** — 옛 태그 이름으로 다시 push 하면 태그가 거짓말을
+한다. 그 뒤 포탈 빌드(13-8)가 같은 레지스트리로 push 한다.
 
-시드 이미지에 동봉된 매니페스트는 :5000 태그로 스탬프돼 있어 k8s 포탈의 드리프트 배지는 첫 포탈 빌드 전까지 「모름」이다(정상, §8-2).
+(역사: 2026-10-21 첫 설치는 ssc 의 검증된 이미지 dms:d184·dms-agent:d179·dms-mpifileutils:d183 을 pkg-01 의 두 번째 레지스트리 :5001 에 `k0` 으로
+복사했고, 2026-10-26 태그 관례를 `dN` 으로 바꾼 뒤 이 절의 시드 이름은 `d0` 이었다(다시 쓰인 적은 없다 — :5001 에 d0 태그 없음). 그 :5001 은
+2026-11-04 컨테이너·데이터째 삭제했다.)
 
 ### 13-3. DB · 13-4. 공유 FS
 
@@ -2629,11 +2680,21 @@ kubectl --context dmsk8s -n dms get ds dms-agent -o jsonpath='{.spec.template.sp
 kubectl --context dmsk8s -n dms exec ds/dms-agent -- sh -c 'test -S /run/nslcd/socket && echo nslcd-up || echo no-nslcd'   # no-nslcd
 ```
 
+### 13-6b. 입구 — Gateway(2026-11-04~, testbed `portal_edge: gateway`)
+
+호스트의 `dms-k8s.local` 은 testbed 호스트 edge(VIP-A `10.10.10.1`, haproxy) → cp1 :443 의 Envoy 다 — **Gateway 가 없으면 이름이 답하지 않는다**
+(edge 는 떠 있지만 백엔드가 DOWN 이라 연결을 바로 끊는다). 13-7 전에 §2g-3 그대로(전부 `--context dmsk8s`):
+cp1 sysctl 확인(§2g-2 — testbed `roles/common` 이 이미 둔다) → `sh deploy/render.sh testbed-k8s --context dmsk8s` → `addons/gateway-api` → `addons/envoy-gateway`
+→ `platform/gateway`(SSA) → `gateway/dms-portal` Programmed → cp1 에 envoy :443 LISTEN. 그다음 `bash ~/dms-dev/testbed/scripts/host-edge.sh status` 에
+`OK dmsk8s backend k8s-cp1 10.10.10.20:443 UP`. 그 전에 앱에 닿아야 하면 되돌림 경로로: `curl --resolve dms-k8s.local:443:10.20.20.101 …`(MetalLB →
+ingress-nginx — testbed validate 가 늘 200 을 본다).
+
 ### 13-7. 첫 관리자 · 시드 · 컨트롤 상태
 
 - 첫 관리자: `curl --cacert <CA> -H "x-admin-token: <ADMIN>" -H 'content-type: application/json'
   -d '{"username":"mason","password":"<pw>"}' https://dms-k8s.local/api/admin/accounts` — mason 은 특권 목록에 있어 root 자격이
-  있다(로컬 계정 — dms-k8s 에는 LDAP 이 없다). 이후 자동화는 봉인 로그인(§10-7).
+  있다(로컬 계정 — dms-k8s 에는 LDAP 이 없다). 이후 자동화는 봉인 로그인(§10-7). 이름은 13-6b 의 Gateway 뒤에야 답한다(아니면 위 `--resolve` 로
+  되돌림 경로).
 - 시드: §6 과 같은 스토리지 이름·경로(`cephfs-dms` `/cephfs` → `/cephfs/managed`, `cephfs-third`, `cephfs-secondary`)·정책·쌍을
   `API=https://dms-k8s.local`, 토큰은 `--context dmsk8s` 시크릿에서 읽어 넣는다. **그룹 denylist 규칙은 넣지 않는다.**
 - 컨트롤 상태(세션 관리자 전용, 전체 치환이라 GET 후 전 필드): `build_node_name=k8s-w1`, `build_source_path=/home/mason/dms-dev/dms`.

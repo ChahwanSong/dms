@@ -550,7 +550,7 @@ done
 [ "${job_image%%/*}" = "$REGISTRY" ] || fail "DMS_JOB_IMAGE='$job_image' 의 레지스트리가 REGISTRY='$REGISTRY' 와 다르다"
 [ "$build_registry" = "$REGISTRY" ] || fail "DMS_BUILD_REGISTRY='$build_registry' 가 REGISTRY='$REGISTRY' 와 다르다"
 if [ "${builder%%/*}" != "$REGISTRY" ]; then
-  # external 에서는 빌더 미러만 다른 레지스트리일 수 있다(테스트베드: 공용 :5000 미러). in-cluster 는 노드가 그 레지스트리만 믿으므로 같아야 한다.
+  # external 에서는 빌더 미러만 다른 레지스트리일 수 있다(예: 사내 미러 레지스트리의 buildah). in-cluster 는 노드가 그 레지스트리만 믿으므로 같아야 한다.
   [ "$REGISTRY_MODE" != in-cluster ] || fail "DMS_BUILD_BUILDER_IMAGE='$builder' 의 레지스트리가 REGISTRY='$REGISTRY' 와 다르다(in-cluster — images.lock 의 buildah 를 그 레지스트리에 push)"
   echo "note: DMS_BUILD_BUILDER_IMAGE='$builder' 는 REGISTRY 와 다른 레지스트리다(external — 빌더 미러)" >&2
 fi
