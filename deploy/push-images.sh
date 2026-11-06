@@ -22,10 +22,10 @@
 #     렌더(<REG>/<DEST>@<DIGEST>)의 전제다.
 #   - DEST 는 늘 태그를 붙인다(GC --delete-untagged 가 태그 없는 digest 를 지운다).
 #   - 레지스트리 자기 이미지(registry:<태그>)도 같은 줄로 push 한다(업그레이드·새 마스터·S6 pull 프로브용). 레지스트리가 뜨기 전 마스터에
-#     넣는 첫 반입은 oci-archive 경로다(설계 7-5 ②, deploy/README §2e-2) — 이 스크립트 몫이 아니다.
+#     넣는 첫 반입은 oci-archive 경로다(설계 7-5 ②, deploy/README §2e-4 2) — S0-5) — 이 스크립트 몫이 아니다.
 #
 # 프록시(설계 7-5): 상류 pull 은 env HTTPS_PROXY(·HTTP_PROXY)를 타고, 레지스트리 push 는 타면 안 된다(프록시는 ClusterIP 에 닿지 않는다 —
-#   포탈 빌드와 같은 규칙, deploy/README 「빌드 프록시」). skopeo(Go)는 NO_PROXY(비었으면 no_proxy)로 가른다. 프록시 env 가 있는데
+#   포탈 빌드와 같은 규칙, deploy/README §8 3b-1)). skopeo(Go)는 NO_PROXY(비었으면 no_proxy)로 가른다. 프록시 env 가 있는데
 #   NO_PROXY 가 레지스트리 호스트를 덮지 않으면 --run 은 아무것도 하지 않고 멈추고(exit 1), --print 는 stderr 에 경고한다. 덮는지는
 #   Go(golang.org/x/net/http/httpproxy)의 규칙대로 본다: `*`, 정확한 IP(·:포트), CIDR, 도메인 접미(foo.com·.foo.com·*.foo.com),
 #   localhost·127/8 은 늘 제외.
@@ -87,7 +87,7 @@ esac
 case "$REG" in
   "") echo "FAIL: --registry <host:port> 가 필요하다(in-cluster 면 <REGISTRY_CLUSTER_IP>:<REGISTRY_PORT>)" >&2; exit 2 ;;
   *[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.:-]*|:*|*:|*:*:*|.*|-*)
-    echo "FAIL: --registry '$REG' 는 host:port 모양이 아니다(스킴·경로·사용자 없이 — 예: 10.112.0.50:5000)" >&2; exit 2 ;;
+    echo "FAIL: --registry '$REG' 는 host:port 모양이 아니다(스킴·경로·사용자 없이 — 예: 10.96.0.50:5000)" >&2; exit 2 ;;
 esac
 REG_HOST=${REG%:*}
 case "$REG" in *:*) REG_PORT=${REG##*:} ;; *) REG_PORT=443 ;; esac

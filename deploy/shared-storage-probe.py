@@ -284,9 +284,9 @@ def op_g3_write(base, probe, new, new_content, old, replacement):
     replace_file(d, old, replacement.encode())
     out(ok=True)
 
-# 새 이름과 rename 교체를 **차례로** 본다(2026-11-03 T3 음성 대조): 한 루프에 섞으면 rename 교체 쪽 open 의 LOOKUP 응답이 부모
+# 새 이름과 rename 교체를 **차례로** 본다(2026-11-03 테스트베드 T3 음성 대조): 한 루프에 섞으면 rename 교체 쪽 open 의 LOOKUP 응답이 부모
 # 디렉터리 change 속성을 새로 고쳐 새 이름의 부정 dentry 가 곧바로 무효가 된다 -- lookupcache=all·nosharecache 마운트가 50ms 만에
-# 「보임」으로 나와 ② WARN 을 놓쳤다(dmsk8s 실측). 새 이름 루프는 그 이름의 stat 만 하고(보인 뒤에 open·readdir), 창은 각자 1초다.
+# 「보임」으로 나와 ② WARN 을 놓쳤다(테스트베드 dmsk8s 실측). 새 이름 루프는 그 이름의 stat 만 하고(보인 뒤에 open·readdir), 창은 각자 1초다.
 def op_g3_check(base, probe, new, new_content, old, replacement, window):
     d = pdir(base, probe)
     def new_ok():
@@ -1208,8 +1208,9 @@ def parse_args(argv):
     p.add_argument("--shared-dir", default=os.environ.get("SHARED_DIR") or None,
                    help="공용 디렉터리(또는 env SHARED_DIR; 둘 다 없으면 --overlay 디렉터리의 values.env 의 SHARED_DIR)")
     src = p.add_mutually_exclusive_group()
-    src.add_argument("--image", help="dms 이미지 ref(예: 10.112.0.50:5000/dms:d19)")
-    src.add_argument("--overlay", help="이 오버레이를 로컬 렌더해 dms 이미지를 고른다(예: deploy/overlays/testbed-k8s) -- "
+    src.add_argument("--image", help="dms 이미지 ref(예: 10.96.0.50:5000/dms:<DMS_TAG> -- <REGISTRY> 는 render.env 의 REGISTRY=)")
+    src.add_argument("--overlay", help="이 오버레이를 로컬 렌더해 dms 이미지를 고른다(예: deploy/.rendered/prod/app -- 렌더된 "
+                                       "앱 오버레이; 템플릿 deploy/overlays/prod 는 자리표시자라 쓸 수 없다) -- "
                                        "--shared-dir 가 없으면 그 디렉터리의 values.env 에서 SHARED_DIR 도 읽는다")
     p.add_argument("--namespace", default="dms")
     p.add_argument("--nodes", help="쉼표 목록(기본: 모든 노드 -- 설계 G1 「모든 마스터·워커」)")

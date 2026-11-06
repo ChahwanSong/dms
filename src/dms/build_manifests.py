@@ -22,7 +22,8 @@ from .repositories.builds import BUILD_IMAGES, build_pod_name, build_probe_pod_n
 #   SHA 는 "그 커밋일 공산이 크다"이지 증명이 아니다.
 #
 # 레지스트리가 평문 HTTP 라 pull 도 insecure 로 열어야 한다: dms-agent 이미지가
-# `FROM pkg-01:5000/...` 를 하기 때문이다. push 만 --tls-verify=false 로는 부족하다.
+# `FROM <DMS_BUILD_REGISTRY>/...` 를 하기 때문이다(아래 --build-arg DMS_IMAGE·MFU_IMAGE).
+# push 만 --tls-verify=false 로는 부족하다.
 _SCRIPT = r"""
 set -eu
 mkdir -p /etc/containers/registries.conf.d
@@ -91,8 +92,9 @@ cd /src
 # (드리프트는 그 매니페스트를 dms-api 이미지에서 읽는다) 오히려 없던 드리프트를
 # 만든다. 콜론 구분(`/$img:`)이 dms 를 dms-agent/dms-mpifileutils 와 분리한다.
 #
-# 레지스트리도 함께 치환한다(2026-09-08): 소스 트리의 매니페스트는 테스트베드
-# 레지스트리(pkg-01:5000)를 담고 있어, 다른 사이트에서 "$DMS_BUILD_REGISTRY/$img:"
+# 레지스트리도 함께 치환한다(2026-09-08): 소스 트리의 매니페스트는 그때 테스트베드
+# 레지스트리를, 2026-09-14 부터는 사이트 중립 자리표시자(set-by-overlay.invalid)를 담고
+# 있어, 다른 사이트에서 "$DMS_BUILD_REGISTRY/$img:"
 # 로만 맞추면 한 줄도 안 맞아 스탬프가 조용히 무동작이었다 -- 그 사이트 이미지의
 # 동봉 매니페스트가 영원히 남의 태그를 가리켰다. 레지스트리 조각은
 # host[:port](점·콜론 허용)이고 그 뒤 "/$img:" 콜론 경계는 그대로다.
@@ -112,8 +114,8 @@ for img in $DMS_BUILD_IMAGES; do
       buildah bud $net_flag $ca_args -f deploy/docker/Dockerfile.dms -t "$ref" . ;;
     dms-agent)
       # dms-agent는 dms/dms-mpifileutils를 FROM한다(Dockerfile.agent). --build-arg
-      # 없이 buildah를 돌리면 Dockerfile의 ARG 기본값(:dev, 손으로 만든 옛 이미지)이
-      # 조용히 쓰여 엉뚱한 베이스에서 "성공"한다 -- 이 빌드가 push할 태그로 명시
+      # 없이 buildah를 돌리면 예전엔 Dockerfile의 ARG 기본값(:dev, 손으로 만든 옛 이미지)이
+      # 조용히 쓰여 엉뚱한 베이스에서 "성공"했다(2026-11-06 기본값 제거 -- 지금은 FROM 이 실패) -- 이 빌드가 push할 태그로 명시
       # 고정한다. 같은 빌드 안에 앞의 둘이 있거나 그 태그가 이미 레지스트리에
       # 있어야 하고, 없으면 buildah가 pull에 실패해 시끄럽게 죽는다(의도된 동작).
       buildah bud $net_flag $ca_args -f deploy/docker/Dockerfile.agent \

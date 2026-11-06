@@ -1158,7 +1158,8 @@ class PurgeScanHistoryBody(BaseModel):
 def purge_unregistered_storage(body: PurgeScanHistoryBody, request: Request,
                                identity: Identity = Depends(require_session_admin)):
     """미등록 스토리지 하나의 scan 작업 기록 정리 **한 회차**(2026-10-12). **세션 관리자만**(작업 삭제와 같은 경계 --
-    CLAUDE.md 「작업(요청) 삭제는 세션 관리자」, 공유 토큰 403 admin_session_required). 유지보수 중 503.
+    CLAUDE.md 「공유 토큰은 계정·배포 경로를 못 만진다」(require_session_admin — 작업(요청) 삭제), 공유 토큰 403
+    admin_session_required). 유지보수 중 503.
 
     - 대상: 그 스토리지의 scan 잡을 가진 요청 전부(request_purges.scan_storage_selection -- 성공·실패·취소). 배치 자식은
       배치째(그 스토리지의 scan 만 담은 배치일 때만), 나머지는 단건. rm·sync 기록과 스토리지의 실제 데이터는 건드리지 않는다.

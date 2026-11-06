@@ -137,7 +137,8 @@ def test_rm_over_running_sync_destination_conflicts(repos):
 
 
 def test_sync_after_rm_conflicts_symmetrically(repos):
-    # 대칭 판정 -- sync 계획 때도 rm 을 본다(BACKLOG 「대칭 판정이 없으면 반쪽」).
+    # 대칭 판정 -- sync 계획 때도 rm 을 본다(CHANGELOG 「BACKLOG 결정 묶음 구현」 2026-10-26~27 의 「A2 rm 경로 겹침 잠금」
+    # 층1 planner 1b — 한쪽이 rm 이면 어느 쪽이 늦게 와도 늦은 쪽이 Conflict).
     r = rm(repos, "data")
     s = sync(repos, "data/sub", "x")
     result = _plan(repos)

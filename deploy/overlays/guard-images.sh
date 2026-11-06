@@ -8,20 +8,22 @@
 # 이 가드는 "apply -k 는 이미지를 암묵적으로 바꾸지 않는다"를 강제한다 -- 이미지를 바꾸려는
 # apply 는 운영자가 플래그로 의도를 밝혀야 한다. 첫 설치(라이브 워크로드 없음)는 통과.
 #
-# 컨텍스트(2026-10-21, 테스트베드가 둘이 되며): 두 클러스터가 같은 네임스페이스(dms)를 쓰므로 엉뚱한 클러스터에
+# 컨텍스트(2026-10-21, 테스트베드가 둘이 되며): 클러스터 여럿이 같은 네임스페이스(dms)를 쓸 수 있어 엉뚱한 클러스터에
 # apply 하는 것이 새 사고 유형이다. 오버레이 디렉터리에 `kube-context` 파일(첫 비주석 줄 = 컨텍스트 이름)이 있으면
-# 그 오버레이는 그 컨텍스트 전용이다 -- 겨눈 컨텍스트(--context / KUBE_CONTEXT, 없으면 현재 컨텍스트)가 다르면
-# 거부(exit 4). 예: dmsk8s 전용 오버레이를 dms 에, dms 전용을 dmsk8s 에. 파일이 없는 오버레이(prod·ssc 사이트)는
-# 종전 그대로다(--context 를 주면 그 컨텍스트로 라이브를 읽을 뿐; 환경변수 KUBE_CONTEXT 만 있고 현재 컨텍스트와 다르면
-# 부르는 install.sh 의 apply 대상과 어긋나므로 거부). 가드는 뒤따르는 apply 명령을 통제하지 못한다 --
-# 통과 메시지가 출력하는 `kubectl --context <ctx> apply -k <dir>` 을 그대로 쓴다.
+# 그 오버레이는 그 컨텍스트 전용이다 -- 겨눈 컨텍스트(--context / KUBE_CONTEXT, **둘 다 없으면 현재 컨텍스트**)가 다르면
+# 거부(exit 4). 예(테스트베드): testbed-k8s 오버레이의 kube-context = dmsk8s. prod 는 파일이 없다 -- 사이트가
+# deploy/overlays/prod/kube-context 를 두면 render.sh 가 각 렌더 층에 복사해 같은 고정을 얻는다(install.sh 도 대조 — deploy/README §3-2).
+# 파일이 없는 오버레이는 --context 를 주면 그 컨텍스트로 라이브를 읽고, **아무것도 주지 않으면 현재 컨텍스트**로 읽는다; 환경변수
+# KUBE_CONTEXT 만 있고 현재 컨텍스트와 다르면 뒤따르는 apply 가 어느 클러스터로 갈지 모호하므로 거부한다. 가드는 뒤따르는 apply 명령을
+# 통제하지 못한다 -- 통과 메시지가 출력하는 `kubectl --context <ctx> apply -k <dir>` 을 그대로 쓴다(install.sh 는 늘 --context 로 부르고
+# 같은 --context 로 apply 한다).
 #
 # hostPath(2026-11-03 ③ 리뷰): 렌더된 Deployment 의 hostPath 경로 집합이 라이브와 다르면 **같은 방식으로 거부**한다(exit 5,
 # ALLOW_HOSTPATH_CHANGE=1 또는 --allow-hostpath-change 로만 통과). 공용 디렉터리(SHARED_DIR) 전환은 api·controller 의
 # hostPath(<SHARED_DIR>/dms/artifacts, type Directory)를 옮긴다 -- 그 경로가 아직 없는 클러스터에 태그만 올린 apply 가 섞이면
 # 새 파드는 FailedMount 로 멈추고(롤링 maxUnavailable 0 이라 옛 파드는 산다), 옛 파드가 재시작하면 옛 마운트 + 새 ConfigMap
 # (새 base·allowlist)으로 떠 summary 를 못 읽는다(잡이 summary_unavailable). 이미지 되돌림과 같은 「apply -k 가 암묵적으로
-# 배치를 바꾸는」 사고라 같은 가드에 둔다. 경로를 옮기는 apply 는 전환 런북(deploy/README.md)을 따른 뒤에만 플래그로 연다.
+# 배치를 바꾸는」 사고라 같은 가드에 둔다. 경로를 옮기는 apply 는 전환 런북(deploy/README §2d-4)을 따른 뒤에만 플래그로 연다.
 #
 # 플랫폼 층(2026-11-03 ④): 렌더된 레지스트리 층(deploy/.rendered/<site>/platform/registry)에도 같은 가드를 건다 — 워크로드 추출이
 # Deployment 일반이라 그대로 동작한다. hostPath(<SHARED_DIR>/dms/registry)가 바뀌면 exit 5(레지스트리가 빈 저장소로, 또는 센티널 불일치로
@@ -36,8 +38,9 @@
 #
 # 사용: sh deploy/overlays/guard-images.sh <오버레이 디렉터리> [--allow-image-change] [--allow-hostpath-change] [--context <ctx>]
 #       KUBE_CONTEXT=<ctx> 환경변수도 같다(인자가 이긴다).
-#       (install.sh 가 apply 직전에 부른다; 테스트베드는 deploy/README.md 의 테스트베드 적용 절차 — 브랜치마다
-#        싣는 테스트베드 오버레이가 다르다: main·dms-ssc = testbed(dms), dms-k8s = testbed-k8s(dmsk8s))
+#       (install.sh 가 각 층(S4 registry·S8 envoy-gateway·S9 cnpg·S9b volcano·S11 app)의 apply 직전에 --context 로 부른다 — 손으로
+#        부를 때도 --context 를 준다(deploy/README §3-2·§3-3). 테스트베드 절차는 deploy/testbed/README.md — 브랜치마다 싣는 테스트베드
+#        오버레이가 다르다: main·dms-ssc = testbed(dms), dms-k8s = testbed-k8s(dmsk8s))
 # 종료: 0 통과 / 2 사용법·렌더 실패·없는 컨텍스트 / 3 이미지 변경 거부 / 4 컨텍스트 불일치 거부 / 5 hostPath 변경 거부
 #       (이미지·hostPath 가 둘 다 바뀌면 3 이 먼저다 -- 각각의 플래그를 다 줘야 통과)
 set -eu
@@ -81,8 +84,9 @@ if [ -f "$DIR/kube-context" ]; then
     exit 4
   fi
 elif [ "$CTX_FROM" = "KUBE_CONTEXT" ]; then
-  # 고정 없는 오버레이 + 환경변수 컨텍스트: 부르는 스크립트(install.sh)는 현재 컨텍스트로 apply 하므로, 환경에 남은
-  # KUBE_CONTEXT 가 다른 클러스터를 가리키면 가드가 엉뚱한 클러스터의 라이브를 보고 통과시킨다 -- 모호하면 거부한다.
+  # 고정 없는 오버레이 + 환경변수 컨텍스트만: install.sh 는 늘 --context 로 부르므로 이 갈래는 손으로 부른 경우다. 뒤따르는 손 apply 가
+  # --context 없이 현재 컨텍스트로 가면, 환경에 남은 KUBE_CONTEXT 가 다른 클러스터를 가리킬 때 가드가 엉뚱한 클러스터의 라이브를 보고
+  # 통과시킨다 -- 모호하면 거부한다.
   CUR=$(kubectl config current-context 2>/dev/null || true)
   if [ "$CTX" != "$CUR" ]; then
     echo "[guard] 거부: KUBE_CONTEXT='$CTX' 가 현재 컨텍스트 '${CUR:-없음}' 와 다르다 -- 고정(kube-context) 없는 오버레이라 apply 가 어느 클러스터로 갈지 모호하다." >&2
@@ -99,7 +103,7 @@ else
   set --
 fi
 
-# 렌더는 로컬(클러스터를 보지 않는다)이지만 컨텍스트가 있으면 같은 --context 를 단다 — 「모든 kubectl 에 --context」 불변식(설계 8-1, 2026-11-03 T9).
+# 렌더는 로컬(클러스터를 보지 않는다)이지만 컨텍스트가 있으면 같은 --context 를 단다 — 「모든 kubectl 에 --context」 불변식(설계 8-1, 2026-11-03 테스트베드 T9).
 rendered=$(kubectl "$@" kustomize "$DIR") || { echo "[guard] kustomize 실패: $DIR" >&2; exit 2; }
 # 렌더 산출물에서 워크로드별 컨테이너 이미지(첫 컨테이너 = 본 컨테이너)를 뽑는다.
 # 네임스페이스(2026-11-03 ⑤): 워크로드의 metadata.namespace 를 같이 뽑아 그 네임스페이스에서 라이브를 읽는다 — CNPG 오퍼레이터
@@ -178,7 +182,7 @@ if [ -n "$hp_changes" ]; then
   if [ "$ALLOW_HP" != 1 ]; then
     echo "[guard] 거부: 이 apply 는 라이브 Deployment 의 hostPath(공용 디렉터리 배치)를 바꾼다$where:$hp_changes" >&2
     echo "[guard] 새 경로가 노드에 없으면 새 파드는 FailedMount 로 멈추고, 옛 파드가 재시작하면 옛 마운트 + 새 설정(base·allowlist)으로 떠" >&2
-    echo "[guard] 결과 파일을 못 읽는다. 공용 디렉터리 전환 런북(deploy/README.md -- 노드 마운트·S0·프로브·복사)을 마친 뒤 ALLOW_HOSTPATH_CHANGE=1 로 다시." >&2
+    echo "[guard] 결과 파일을 못 읽는다. 공용 디렉터리 전환 런북(deploy/README §2d-4 -- 노드 마운트·S0·프로브·복사)을 마친 뒤 ALLOW_HOSTPATH_CHANGE=1 로 다시." >&2
     echo "[guard] 의도하지 않았다면 오버레이의 SHARED_DIR(values.env·DMS_ARTIFACT_BASE_URI)를 라이브 배치에 맞춰라." >&2
     case "$hp_changes" in *"Deployment/dms-registry hostPath"*)
       # 순서(2026-11-03 ④ 리뷰 2): 센티널을 복사에서 뺀다 — 새 경로의 S0 는 새 무작위 id 를 쓰고 values 의 SHARED_DIR_ID 도 그 값이

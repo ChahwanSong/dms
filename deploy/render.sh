@@ -37,7 +37,8 @@
 #   PG_STORAGE_SIZE    (선택, 기본 20Gi) Cluster storage.size == PV capacity — 한 값이 두 곳에 들어간다(명목값, hostPath 는 강제하지 않는다)
 #   PG_CPU_REQUEST·PG_MEMORY·PG_SHARED_BUFFERS  (선택) 기본 1 / 4Gi(requests == 메모리 limit) / PG_MEMORY 의 1/4(둘 다 없으면 base 1GB) — 실효
 #                      메모리의 절반 이상인 shared_buffers 는 FAIL. 테스트베드 100m / 256Mi / 64MB(설계 10)
-#   PG_PLACEMENT       (선택) control-plane(기본 — 마스터마다 1개, #27) | all-nodes(테스트베드만 — nodeSelector 를 빼 cp1·w1·w2 에 하나씩)
+#   PG_PLACEMENT       (선택) control-plane(기본 — 마스터마다 1개, #27) | all-nodes(control-plane 이 1대뿐인 시험 클러스터 전용 — nodeSelector
+#                      를 빼 모든 노드에 하나씩; 예: 테스트베드 cp1·w1·w2. prod 에 쓰지 않는다)
 #   PG_BACKUP_KEEP     (선택, 기본 336 = 14일 × 매시간) pg_dump 보존 개수
 #
 # 레지스트리(설계 v6 7, values 키):
@@ -55,7 +56,8 @@
 #
 # 입구(Envoy Gateway, 2026-11-03 ⑥ — 설계 v6 #13·#14·#15·4-3·8-1 S8). 버전은 deploy/versions.env(GATEWAY_API_VERSION·ENVOY_GATEWAY_VERSION·
 # ENVOY_GATEWAY_IMAGE·ENVOY_PROXY_IMAGE), 이미지 digest 는 deploy/images.lock — CNPG 와 같은 애드온 레지스트리에서 받는다. 입구 층은 늘 렌더한다
-# (prod 의 유일한 입구 — 앱 오버레이가 Ingress·MetalLB 풀을 지운다; testbed-k8s 는 T8 동안 Ingress 와 병행). values(전부 선택):
+# (prod 의 유일한 입구 — 앱 오버레이가 Ingress·MetalLB 풀을 지운다; 테스트베드 testbed-k8s 는 되돌림용 Ingress·MetalLB 를 소크 뒤 지울 때까지
+# 함께 렌더한다 — deploy/testbed/README.md). values(전부 선택):
 #   GATEWAY_PROXY_PROTOCOL  required(기본 — PROXY v2 헤더 없는 연결을 끊는다) | optional(**컷오버 중에만** — PROXY 없는 연결도 받는다, 설계 4-3).
 #                           ClientTrafficPolicy proxyProtocol.optional 한 칸이 이 값에서 나온다(deploy/README §2g 컷오버).
 #   PORTAL_TLS_SECRET       Gateway 리스너 인증서 Secret(ns dms, kubernetes.io/tls). 기본 dms-portal-tls(설계 #14).
@@ -94,8 +96,8 @@ fi
 # SHARED_DIR 도 values.env 에서 온 것만 쓴다(2026-11-03 리뷰): 프로브(shared-storage-probe.py)가 env SHARED_DIR 를 입력으로 받아
 # 운영자 셸에 export 돼 있을 수 있다 -- 그대로 두면 SHARED_DIR 줄이 빠진 values.env 가 「미치환」 FAIL 대신 셸 값으로 렌더돼
 # hostPath·base·allowlist 가 사이트 원천(values.env)에 없는 경로가 된다. 레지스트리 키(④)도 같은 이유로 values.env 만 원천이다.
-# 템플릿 키(태그·도메인·VIP — 2026-11-03 ④ 리뷰)도 같다: prod README 1단계가 `PORTAL_VIP=… sh preflight-cluster.sh` 처럼 같은 이름을
-# env 로 쓰게 하므로 셸에 남아 있을 수 있다 — 그대로 두면 줄이 빠진 values.env 가 「미치환」 FAIL 대신 셸 값으로 렌더된다. 옛 LDAP 키도
+# 템플릿 키(태그·도메인·VIP — 2026-11-03 ④ 리뷰)도 같다: prod README 가 `REGISTRY_MODE=… REGISTRY_CLUSTER_IP=… sh preflight-cluster.sh`(§0 의 0)·
+# `PORTAL_DOMAIN=… PORTAL_VIP=… sh install.sh --only S12` 처럼 같은 이름을 env 로 쓰게 하므로 셸에 남아 있을 수 있다 — 그대로 두면 줄이 빠진 values.env 가 「미치환」 FAIL 대신 셸 값으로 렌더된다. 옛 LDAP 키도
 # (아래 「무시함」 알림이 values.env 에서 온 것만 말하게). 의도된 env 입력은 VALUES_ENV·KUBE_CONTEXT·DMS_NS 뿐이다.
 unset SHARED_FS SHARED_DIR SHARED_DIR_ID REGISTRY REGISTRY_MODE REGISTRY_CLUSTER_IP REGISTRY_PORT REGISTRY_TLS_VERIFY \
       REGISTRY_CPU_REQUEST REGISTRY_MEMORY_REQUEST \
@@ -108,7 +110,7 @@ unset SHARED_FS SHARED_DIR SHARED_DIR_ID REGISTRY REGISTRY_MODE REGISTRY_CLUSTER
 # shellcheck disable=SC1090
 . "$VALS"
 
-# 공용 디렉터리(2026-11-03 ③, 설계 v6 3-2·9 「③ 공유 FS 세부」). 옛 SHARED_FS(상대 이름, cephfs → file:///cephfs/dms/artifacts)
+# 공용 디렉터리(2026-11-03 ③, 설계 v6 3-2·9 「③ 공유 FS 세부」). 옛 SHARED_FS(상대 이름, 예(테스트베드): cephfs → file:///cephfs/dms/artifacts)
 # 는 SHARED_DIR(절대 경로)로 바뀌었다. 남아 있으면 어느 쪽이 맞는지 추측하지 않고 멈춘다 -- 조용히 무시하면 SHARED_DIR 를 아직
 # 안 채운 옛 values.env 가 다른 경로(또는 예시 값)로 렌더된다. 같은 base 를 유지하려면 SHARED_DIR=/<옛 값>.
 # 안내가 「그 값을 그대로 쓰면 된다」로 끝나지 않는 이유(2026-11-03 리뷰): 옛 배치는 allowlist·api/controller hostPath 가 SHARED_FS
@@ -121,7 +123,7 @@ if [ "${SHARED_FS+set}" = set ]; then
   echo "FAIL: values.env 의 SHARED_FS 는 더 쓰지 않습니다(2026-11-03) — 'SHARED_FS=$SHARED_FS' 줄을 지우고 SHARED_DIR=/${_old:-<공용 디렉터리>} 처럼 절대 경로로 쓰세요(아티팩트 base 는 그대로 <SHARED_DIR>/dms/artifacts, api/controller hostPath·allowlist 는 공용 디렉터리 전체에서 그 경로 하나로 좁아집니다)"
   echo "  그 값을 쓰기 전에 확인: (1) 포탈 「아티팩트 경로」 화면이 'DB 설정'이고 값이 file:///${_old:-<공용 디렉터리>}/dms/artifacts 가 아니면, 새 배치에서 그 경로는 api·controller 에 보이지 않습니다 — 산출물을 그 경로로 옮기고 base 를 다시 저장(force)한 뒤 적용하세요"
   echo "  (2) 등록 스토리지의 마운트 경로·관리 루트가 /${_old:-<공용 디렉터리>}/dms 를 덮으면(예: 마운트 경로 /${_old:-<공용 디렉터리>}) 그 스토리지를 쓰는 잡에 DMS 상태가 보입니다 — SHARED_DIR 는 그 스토리지 밖의 별도 마운트포인트로 고르세요(같은 파일시스템의 하위 디렉터리로는 피할 수 없습니다; 적용 뒤 「아티팩트 경로」 화면이 겹치는 스토리지를 경고로 보입니다)"
-  echo "  (3) 이 렌더를 적용하면 api/controller hostPath 가 바뀌어 guard-images.sh 가 exit 5 로 멈춥니다 — 전환 런북(deploy/README.md: 노드 마운트·S0·shared-storage-probe.py·복사)을 마친 뒤 ALLOW_HOSTPATH_CHANGE=1 로 적용하세요"
+  echo "  (3) 이 렌더를 적용하면 api/controller hostPath 가 바뀌어 guard-images.sh 가 exit 5 로 멈춥니다 — 전환 런북(deploy/README §2d-4: 노드 마운트·S0·shared-storage-probe.py·복사)을 마친 뒤 ALLOW_HOSTPATH_CHANGE=1 로 적용하세요"
   exit 2
 fi
 # SHARED_DIR 형식(설계 v6 3-2 -- shared-storage-probe.py 와 같은 규칙): 절대 경로, '/' 아님, 정규화(// · /./ · /../ · 끝 / 없음),
@@ -144,7 +146,7 @@ _shared_dir_problem() {
 case "${SHARED_DIR:-}" in
   ""|REPLACE_*) ;;
   *) _why=$(_shared_dir_problem "$SHARED_DIR")
-     [ -z "$_why" ] || { echo "FAIL: values.env 의 SHARED_DIR='$SHARED_DIR' — $_why (예: SHARED_DIR=/srv/dms_shared)"; exit 2; } ;;
+     [ -z "$_why" ] || { echo "FAIL: values.env 의 SHARED_DIR='$SHARED_DIR' — $_why (예: SHARED_DIR=/srv/shared)"; exit 2; } ;;
 esac
 
 # 템플릿 오버레이(값을 넣는 REPLACE_* 토큰이 코드 줄에 있음 — prod) vs 고정 오버레이(그대로 쓰는 커밋된 값 — testbed-k8s).
@@ -175,7 +177,7 @@ _live_tag() {   # $1=사람이 읽는 이름  $2..=kubectl get 인자(이미지 
   _img=$(kubectl --context "$CTX" -n "$NS" get "$@" 2>/dev/null || true)
   case "$_img" in
     "") echo "FAIL: $_human 태그가 'live' 인데 클러스터에서 라이브 이미지를 읽지 못했습니다" >&2
-        echo "  (첫 설치면 명시 태그(예: d118)를 쓰세요; 아니면 kubectl 접근과 네임스페이스 '$NS' 를 확인)" >&2
+        echo "  (첫 설치면 실제로 push 한 명시 태그를 쓰세요; 아니면 kubectl 접근과 네임스페이스 '$NS' 를 확인)" >&2
         return 1 ;;
     *set-by-overlay*) echo "FAIL: $_human 라이브가 아직 자리표시자입니다($_img) — 오버레이 미적용(첫 설치) 상태라 'live' 를 쓸 수 없습니다. 명시 태그를 쓰세요" >&2
         return 1 ;;

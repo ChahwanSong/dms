@@ -1,10 +1,16 @@
 # ConfigMap dms-config 의 사이트별 값만 덮는다(전략적 머지). 여기 없는 키는
 # base(20-config.yaml)의 값이 그대로 산다 -- 루프 간격·보존일수 등 튜닝 값은
 # 대개 base 기본이 프로덕션에도 적절하다.
+# 튜닝 키(로그인 보호·경보·보존일 등 base 20-config.yaml 의 키, 또는 base 에 없고 코드 기본값만 있는 키 -- 예: DMS_MAILER_BACKEND, 더하면 새 키가
+# 생긴다)를 사이트에서 **영구히** 바꾸는 길은 지금 이 파일뿐이다:
+# 사이트 체크아웃의 이 파일에 키를 더하고 `sh deploy/install.sh --context <ctx> --only S11`(S11 이 dms-config 변화를 보고 api·controller·
+# agent 를 다시 띄운다). ConfigMap 을 손으로 고치면 다음 설치기 실행(S11 apply)이 되돌린다. 추적 파일의 로컬 수정이므로 DMS 저장소를
+# 새 커밋으로 올릴 때 그 줄을 다시 얹는다(deploy/README §3-4 — values.env 키로 옮기는 일은 docs/BACKLOG.md).
 #
 # images: 변환은 워크로드 image 필드만 바꾸므로, 레지스트리를 담은 아래 세
-# 문자열 값은 여기서 별도로 맞춰야 한다(안 맞추면 잡·빌드가 pkg-01:5000 을
-# 계속 pull 하려다 ImagePullBackOff). REPLACE_REGISTRY 는 values.env 의 REGISTRY 하나 —
+# 문자열 값은 여기서 별도로 맞춰야 한다(안 맞추면 base 의 사이트 중립 자리표시자 set-by-overlay.invalid 를 pull 하려다 ImagePullBackOff —
+# 그래서 render.sh 가 셋 중 하나라도 이 파일에 없거나 레지스트리가 REGISTRY 와 다르면 FAIL 한다; 빌더 이미지만 external 이면 알림).
+# REPLACE_REGISTRY 는 values.env 의 REGISTRY 하나 —
 # REGISTRY_MODE=in-cluster 면 클러스터 내 레지스트리 주소 <REGISTRY_CLUSTER_IP>:<REGISTRY_PORT> 다(2026-11-03 ④, 설계 v6 7-4
 # 「같은 주소가 여섯 곳」 — 렌더러가 kustomization 의 newName 과 함께 다섯 곳이 같은지 본다; 여섯째는 DB 의 잡 이미지).
 apiVersion: v1
@@ -32,16 +38,18 @@ data:
   # k8s 신원 모드(2026-10-25 dms-k8s RBAC·PV 설계 D1·D15 → 2026-10-26 유일한 모드; base 20-config 의 DMS_IDENTITY_MODE "k8s",
   # LDAP 키 없음): 모든 단건 잡이 root 이고 권한은 k8s RoleBinding 맵핑(<id>-clusterrole-admin|edit → 그 namespace 의 모든
   # PVC)으로 판정한다. 사용자는 PV 주소로 sync·rm 을 낸다(scan 은 특권 운영자만 — 2026-10-26; 코드 기본 연산은 sync 뿐이라
-  # 여기서 넓힌다 -- rm 안전은 PV 루트 rm 금지 + 본인 컨펌). 등록 절차는 deploy/README.md 런북.
+  # 여기서 넓힌다 -- rm 안전은 PV 루트 rm 금지 + 본인 컨펌). 등록 절차(대상 클러스터·호출 노드·스토리지·StorageClass·계정)는
+  # deploy/README §6-5, 권한 모델은 §10-1.
   DMS_USER_ALLOWED_OPERATIONS: "sync,rm"
   DMS_ALLOW_PRIVILEGED_REQUESTERS: "true"          # false 면 기동 거부(모든 잡이 root)
 
   # 계정 셀프서비스 이메일 도메인(<아이디>@도메인). k8s 모드에서는 이 인증이 「DMS 계정 junwoo.song = 그 메일함 주인」을
-  # 보증하는 장치다(맵핑 ID = 계정 아이디 -- 인증을 끄면 누구나 남의 ID 로 가입해 그 사람의 PV 권한을 얻는다). 인증 메일 발송(2026-10-01, deploy/README §11)은 포탈
-  # 관리 → 메일 설정에서 Knox 릴레이(knox_relay)의 IP·포트·인증 키를 넣는다(포탈 값이 env 를 이긴다).
+  # 보증하는 장치다(맵핑 ID = 계정 아이디 -- 인증을 끄면 누구나 남의 ID 로 가입해 그 사람의 PV 권한을 얻는다). 인증 메일 발송(2026-10-01)은
+  # **사용자에게 열기 전·k8s 연동 등록 전에** 포탈 관리 → 메일 설정에서 Knox 릴레이(knox_relay)의 IP·포트·인증 키를 넣고 연결 확인·테스트
+  # 메일까지 한다(포탈 값이 env 를 이긴다; 릴레이의 허용 클라이언트 = dms-api 가 뜨는 마스터 IP — patch-placement.yaml; deploy/README §6-2·§11).
   # 발송 방식 env 기본값(DMS_MAILER_BACKEND)은 코드 기본 stub -- stub 은 인증번호를 화면에 돌려줘 아이디만
-  # 알면 누구나 가입·비밀번호 재설정을 할 수 있으니, 릴레이 연결을 확인한 뒤에는 여기에도
-  # DMS_MAILER_BACKEND: "knox_relay" 를 넣어 포탈 칸을 비워도 stub 으로 돌아가지 않게 한다.
+  # 알면 누구나 가입·비밀번호 재설정을 할 수 있으니, 릴레이 연결을 확인한 뒤에는 사이트 체크아웃의 이 파일에
+  # DMS_MAILER_BACKEND: "knox_relay" 를 넣고 `--only S11` 로 적용해 포탈 칸을 비워도 stub 으로 돌아가지 않게 한다(위 머리 「튜닝 키」).
   DMS_ACCOUNT_EMAIL_DOMAIN: "REPLACE_EMAIL_DOMAIN"     # 예: corp.example
   DMS_ACCOUNT_VERIFICATION_REQUIRED: "true"
 

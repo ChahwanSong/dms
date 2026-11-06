@@ -180,3 +180,42 @@ def test_rendered_prod_has_no_ingress_or_metallb_and_the_gateway_is_rendered(tmp
     assert re.search(r"(?m)^  proxyProtocol:\n    optional: false$", g.stdout)
     renv = (out.parent / "render.env").read_text()
     assert "PORTAL_DOMAIN=v-portal-domain" in renv and "PORTAL_VIP=v-portal-vip" in renv   # 매니페스트가 아니라 render.env 로만
+
+
+# --- 사이트 중립(2026-11-06 문서 감사 — 「배포 문서는 실제 프로덕션 기준, 테스트베드에 국한되지 않게」) ------------------------------
+# base·플랫폼·애드온 층의 어느 기본값도 테스트베드 값(레지스트리·VIP·도메인·운영자 이름·공용 디렉터리·노드 이름)을 prod 매니페스트에
+# 싣지 않는다. 오버레이가 덮지 않은 키는 base 값이 그대로 배포되므로, 이 그물이 「base 에 테스트베드 값을 다시 커밋한」 회귀와
+# 「prod 오버레이가 사이트 키를 빠뜨린」 회귀를 함께 잡는다(kustomize 출력에는 주석이 없다 — 남는 것은 실제로 배포되는 글자다).
+_TESTBED_TOKENS = ("pkg-01", "10.10.10.", "10.20.20.", "10.112.", "mason", "dms-k8s.local", "dms.local", "/dms_shared",
+                   "/cephfs/dms", "/home/", "dmsk8s", "k8s-w1", "k8s-cp1", "luminous", "testbed")
+
+
+@needs_kubectl
+def test_rendered_prod_layers_carry_no_testbed_value(tmp_path):
+    r, out = _render(tmp_path, _filled_example())
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    env = {**os.environ, "KUBECONFIG": os.devnull}
+    root = out.parent
+    layers = sorted(p.parent for p in root.rglob("kustomization.yaml"))
+    assert out in layers and (root / "platform" / "gateway") in layers and (root / "platform" / "db-cluster") in layers, layers
+    offenders = []
+    for layer in layers:
+        k = subprocess.run([KUBECTL, "kustomize", str(layer)], capture_output=True, text=True, timeout=180, env=env)
+        assert k.returncode == 0, (layer, k.stderr)
+        for ln in k.stdout.splitlines():
+            if any(t in ln.lower() for t in _TESTBED_TOKENS):
+                offenders.append((layer.relative_to(root).as_posix(), ln.strip()[:160]))
+    for ln in (root / "render.env").read_text().splitlines():
+        if not ln.startswith("#") and any(t in ln.lower() for t in _TESTBED_TOKENS):
+            offenders.append(("render.env", ln))
+    assert offenders == [], offenders[:20]
+
+
+def test_prod_patch_config_overrides_every_site_key_of_the_base():
+    # 오버레이가 덮지 않으면 base 값이 배포되는 사이트 키(레지스트리 셋 + 특권 목록). 레지스트리 셋은 render.sh 도 FAIL 로 막지만
+    # (「base 의 값(다른 사이트 레지스트리)이 배포된다」) 특권 목록은 렌더 검사가 없다 — 템플릿에서 줄이 빠지면 base 의 root,admin 만
+    # 남아 values.env 의 LOCAL_ADMIN 이 조용히 특권 목록 밖이 된다(첫 관리자가 맵핑 면제를 잃는다).
+    values = dict(re.findall(r'^  (DMS_[A-Z0-9_]+): "([^"]*)"', _code(PROD / "patch-config.yaml"), re.M))
+    assert values["DMS_PRIVILEGED_REQUESTERS"] == "root,admin,REPLACE_LOCAL_ADMIN"
+    for key in ("DMS_JOB_IMAGE", "DMS_BUILD_REGISTRY", "DMS_BUILD_BUILDER_IMAGE"):
+        assert values[key].startswith("REPLACE_REGISTRY"), (key, values[key])

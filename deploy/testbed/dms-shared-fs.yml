@@ -1,6 +1,12 @@
 ---
 # DMS 공유 FS 레이아웃 + LDAP e2e 픽스처 (테스트베드 전용, 멱등).
 #
+# **이 브랜치(dms-k8s)에서는 늘 `-e dms_cluster=dmsk8s` 를 준다** — 기본값 dms 는 ssc 클러스터라 빠뜨리면 ssc 의 워커를
+# 겨눈다(기본값은 바꾸지 않았다 — 정리는 BACKLOG). 대상만 보려면 끝에 --list-hosts. 순서·맥락: deploy/testbed/README.md §4-3.
+# dmsk8s 에서 이 플레이북의 몫은 데이터 root(/cephfs/managed)와 e2e 픽스처뿐이다 — 아래 /cephfs/dms·/cephfs/dms/artifacts 는
+# 그 클러스터의 **옛** 아티팩트 base(보존 창 — deploy/testbed/README.md §7)이고, 지금 DMS 상태는 공용 디렉터리 /dms_shared/dms
+# (S0 `sh deploy/shared-dir-init.sh /dms_shared` 가 0750 으로 만든다 — deploy/README.md §2d-2)다.
+#
 # 테스트베드 IaC(~/dms-dev/testbed, `make ceph`)는 CephFS 를 /cephfs 에 마운트할 뿐 그 안의
 # 디렉터리는 만들지 않는다 -- 아래 레이아웃은 손으로 만들어져 있었고(2026-08-23 e2e 픽스처,
 # 2026-09-09 root 전환·770 실증) 재프로비저닝(`make destroy && make all`)이면 사라진다.
@@ -14,8 +20,9 @@
 #   /cephfs/dms/artifacts   root:root 0755  아티팩트 base. 3홉 검증이 world-writable /
 #                                           비-root 소유를 거부한다(§2b-1).
 #   /cephfs/managed         root:root 0755  데이터 root = 스토리지 cephfs-dms 의 managed_root
-#                                           (README §6 시드). 공용 디렉터리 **밖**이어야 한다
-#                                           (preflight 가 요청자 uid 로 test -r/-w).
+#                                           (deploy/testbed/README.md §5 시드). 공용 디렉터리 **밖**에 둔다
+#                                           (비 root 잡 시절 preflight 가 요청자 uid 로 test -r/-w 했다 —
+#                                           레이아웃 규칙은 그대로, deploy/README.md §2b-3).
 #   /cephfs/managed/ldap-e2e                LDAP e2e 픽스처(uid/gid 는 테스트베드 openldap 역할:
 #                                           alice 10001, bob 10002, cocoa.song 10003,
 #                                           dmsusers 10000, dmsproj 10010). LDAP 없는 클러스터는

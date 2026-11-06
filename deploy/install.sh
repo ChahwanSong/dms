@@ -4,9 +4,9 @@
 #   sh deploy/install.sh --context <ctx> [--site prod] [--plan]
 #   sh deploy/install.sh --context <ctx> [--site prod] [--stage <S>] [--only <S>[,<S>…]] [--upgrade-addon <x>]… [--adopt <x>]…
 #
-#   --context <ctx>  **필수**(2026-11-03 ⑦): 모든 kubectl·도우미에 그대로 붙인다. current-context·env KUBE_CONTEXT 에 기대지 않는다(두
-#                    테스트베드가 같은 네임스페이스 — 엉뚱한 클러스터에 설치하는 것이 가장 비싼 사고다). 렌더의 kube-context(고정 오버레이)와
-#                    다르면 exit 2.
+#   --context <ctx>  **필수**(2026-11-03 ⑦): 모든 kubectl·도우미에 그대로 붙인다. current-context·env KUBE_CONTEXT 에 기대지 않는다(클러스터
+#                    여럿이 같은 네임스페이스 dms 를 쓸 수 있다 — 예: 테스트베드 둘. 엉뚱한 클러스터에 설치하는 것이 가장 비싼 사고다). 렌더의
+#                    kube-context(오버레이 디렉터리의 kube-context 파일 — 사이트도 deploy/overlays/prod/kube-context 로 둘 수 있다)와 다르면 exit 2.
 #   --site <site>    deploy/overlays/<site>(기본 prod). values 는 deploy/overlays/<site>/values.env(env VALUES_ENV 로 바꾼다 — render.sh 규칙).
 #   --plan           = S1(읽기 전용 점검) + S2(확인만 — 만들지 않는다) + S3(모든 층 렌더·server dry-run·애드온 판정 표). **클러스터를 바꾸지 않는다.**
 #   --stage <S>      S 부터 끝까지(재개 — 예: S4 뒤 멈춘 설치를 인터넷 노드 push 뒤 `--stage S5` 로).
@@ -46,7 +46,8 @@
 #       → 마스터 `dms` 이미지 사전 pull(pull-probe.py --nodes <마스터>, 실패는 WARN).
 #   S12 verify.sh(--rendered) — readyz(apiserver 서비스 프록시 = 판정, --resolve VIP = Avi 미개통이면 WARN)·CNPG·여분 PV·경로 대조·CronJob·
 #       Gateway·마스터 :443·레지스트리·애드온 요약·「80 불가 = 정상」. FAIL 이어도 S13 체크리스트를 보이고 멈춘다.
-#   S13 사후 체크리스트(출력만 — 첫 관리자 부트스트랩·Avi·DNS·포탈 등록).
+#   S13 사후 체크리스트(출력만 — 첫 관리자 부트스트랩 → 메일(Knox 릴레이) → 포탈 등록(컨트롤 상태·k8s 연동) → 사본 → 스모크 →
+#       DNS·Avi·S12. 상세는 deploy/README §6·§7).
 #
 # 재개 안내(PAUSE·모름·FAIL 줄의 명령)는 이번 실행의 --upgrade-addon·--adopt 와 판정을 바꾸는 env(ADDON_INSTALL·ALLOW_*·SELINUX_PROBE_IMAGE·
 # VALUES_ENV·S12 의 CACERT·PORTAL_DOMAIN·PORTAL_VIP·VERIFY_NO_PROBES)를 그대로 싣는다(⑦ 리뷰 1·2). --plan 이 보이는 다시 확인 명령은 늘 --plan 이다
@@ -65,7 +66,7 @@
 # 출력: 단계마다 `== S<n> … ==` 와 [OK]/[INFO]/[WARN]/[FAIL] 줄, 끝에 `STAGE: <S> <PASS|WARN|SKIP|PAUSE|FAIL|UNKNOWN>`. 마지막 줄 `RESULT: …`.
 #   도우미 출력은 4칸 들여 쓴다 — 0열의 `==`·`STAGE:`·`RESULT:` 는 설치기 자신의 줄뿐이다(도우미의 RESULT 를 설치 결과로 읽지 않게). preflight(S1)·
 #   verify(S12)의 [WARN] 줄은 그 단계의 WARN 이다(rc 0 이어도 — ⑦ 리뷰 2). 감지의 WARN·FAIL 줄은 항목 이름(단계 코드 동작)을 싣고, 감지 WARN 은
-#   S1 이 아니면 그 항목의 단계가 센다 — 이번 실행에 없는 단계의 항목이면 RESULT 에만(2026-11-03 T9: `--only S9` 가 envoy-gateway U 로 S9 WARN 이었다).
+#   S1 이 아니면 그 항목의 단계가 센다 — 이번 실행에 없는 단계의 항목이면 RESULT 에만(2026-11-03 테스트베드 T9: `--only S9` 가 envoy-gateway U 로 S9 WARN 이었다).
 # 종료: 0 완료(WARN 포함) · 1 FAIL · 2 사용법·환경(클러스터를 바꾸기 전) · 4 모름(UNKNOWN — 확인 뒤 같은 단계부터) · 10 PAUSE(S4 뒤 push 대기).
 #   --help 는 이 머리 주석을 보이고 0.
 # 전제: 설치 호스트에 kubectl(클러스터 minor ±1)·python3(RHEL 9 = 3.9)·curl(설계 S0-7). 이 스크립트는 POSIX sh(dash -n).
@@ -308,7 +309,7 @@ det_items() {   # $1 = 판정(WARN·FAIL·UNKNOWN) → 「항목(단계 코드 �
     printf '%s(%s %s %s)\n' "$_i" "$(item_stage "$_i")" "$_c" "$_a"
   done | awk 'NR > 1 { printf ", " } { printf "%s", $0 }'
 }
-# 감지 WARN 의 자리(2026-11-03 T9): 감지는 처음 그것을 부른 단계에서 한 번 돈다 — `--only S9` 에서 envoy-gateway U(S8 몫)가 「STAGE: S9 WARN」을
+# 감지 WARN 의 자리(2026-11-03 테스트베드 T9): 감지는 처음 그것을 부른 단계에서 한 번 돈다 — `--only S9` 에서 envoy-gateway U(S8 몫)가 「STAGE: S9 WARN」을
 # 만들었다. S1(preflight·감지)은 표 전체가 그 단계의 일이라 거기서 센다. 그 밖의 단계에서는 항목의 단계로 보낸다: 지금 단계면 지금, 이번 실행에서
 # 뒤에 돌 단계면 그 단계가 시작할 때(DEFER), 이번 실행에 없는 단계면 RESULT 에만 센다(그 단계의 STAGE 줄이 없다). 줄마다 항목 이름을 싣는다.
 DEFER=""
@@ -387,7 +388,7 @@ ssa() {   # $1 = 층(렌더 디렉터리 기준), $2 = 감지 action(adopt 면 -
     fi
     if grep -qi 'conflict' "$WORK/ssa.err"; then
       # --adopt 는 감지 P 에만 듣는다(install-detect.py decide) — DMS 소유(D=·D<)·설치(A) 층의 충돌에 「채택은 --adopt 로만」이라 하면 운영자가
-      # 효과 없는 플래그로 다시 돌린다(2026-11-03 T9). 충돌한 관리자 이름(kubectl-edit·helm …)으로 손 수정인지 남의 도구인지 가른다.
+      # 효과 없는 플래그로 다시 돌린다(2026-11-03 테스트베드 T9). 충돌한 관리자 이름(kubectl-edit·helm …)으로 손 수정인지 남의 도구인지 가른다.
       _item=$(layer_item "$_layer"); _code=$(det "$_item" code); _mgrs=$(conflict_managers "$WORK/ssa.err")
       if [ "$_code" = P ]; then
         die "$_layer SSA 실패 — 다른 field manager(${_mgrs:-이름 모름 — 위 오류})가 가진 필드다(감지 P — 남이 관리하는 객체). 채택은 --adopt $_item 로만(설계 8-2): $(again) --adopt $_item"
@@ -499,7 +500,7 @@ stage_S1() {
   helper "$WORK/preflight.out" env PREFLIGHT_SKIP_DETECT=1 sh "$HERE/preflight-cluster.sh" --context "$CTX" --render-env "$RENV"
   _rc=$?
   # preflight 는 WARN 이 있어도 rc 0 이다 — 그 줄(정책 엔진·envoy-gateway-system PSA·cluster.local 아님·하단 정적 대역 밖·ServiceCIDR 모름 등 뒤
-  # 단계 실패를 예고하는 것)이 STAGE·RESULT 에서 빠지지 않게 센다(2026-11-03 ⑦ 리뷰 2 — dmsk8s --plan 이 「WARN 1」인데 RESULT PASS 였다).
+  # 단계 실패를 예고하는 것)이 STAGE·RESULT 에서 빠지지 않게 센다(2026-11-03 ⑦ 리뷰 2 — 테스트베드 dmsk8s --plan 이 「WARN 1」인데 RESULT PASS 였다).
   _n=$(warn_lines "$WORK/preflight.out")
   case $_rc in
     0) if [ "${_n:-0}" -gt 0 ]; then warn "preflight WARN ${_n}건(위 [WARN] 줄 — 설치는 계속한다)"; else ok "preflight 통과"; fi ;;
@@ -1052,8 +1053,10 @@ stage_S13() {
   # 첫 관리자: 계정 0개인 새 사이트에서 포탈 항목(「k8s 연동」·「컨트롤 상태」)을 시작하려면 먼저 있어야 한다. x-admin-token 부트스트랩만 평문
   # 비밀번호를 받는다(routes_auth.create_admin_account). 토큰은 파일(0600)로만 curl 에 넘긴다(출력·argv 없음), 비밀번호는 셸 내장 printf 로
   # stdin 에. port-forward 라 Avi VS-443·DNS 전에도 된다(2026-11-03 ⑦ 리뷰 1).
+  # 순서(2026-11-06): 메일은 사용자에게 열기 전·k8s 연동 등록 전이다 — 기본 발송 방식 stub(config.Settings.mailer_backend)은 인증번호를
+  # 응답에 돌려줘, 아이디(= RoleBinding 맵핑 ID)만 알면 누구나 가입해 그 PV 권한을 얻는다. 아래 heredoc 은 따옴표 없는 EOF 라 $·백틱이 펼쳐진다.
   cat <<EOF
-  사후 체크리스트(운영자 — 설계 8-1 S13, 이 스크립트는 확인하지 않는다):
+  사후 체크리스트(운영자 — 설계 8-1 S13, 이 스크립트는 확인하지 않는다. 위에서 아래 순서로 — 상세 deploy/README §6):
     [ ] 첫 관리자(이름 = values.env 의 LOCAL_ADMIN — 특권 목록이라 root 자격·전체 PV 권한, 이름이 다르면 일반 관리자). 한 터미널에서
           kubectl --context $CTX -n $NS port-forward svc/dms-api 18080:http
         다른 터미널(POSIX sh — 비밀번호에 " 와 \\ 는 쓰지 않는다):
@@ -1063,12 +1066,19 @@ stage_S13() {
           printf '{"username":"%s","password":"%s"}' '<LOCAL_ADMIN>' "\$PW" | curl --noproxy '*' -sS -H @"\$H" -H 'content-type: application/json' --data-binary @- http://127.0.0.1:18080/api/admin/accounts
           rm -f "\$H"; unset PW
         201 이면 포탈에 로그인한다(그 뒤 자동화는 봉인 로그인 — deploy/README §10-7). 이미 있으면 409 account_exists.
+    [ ] 메일(Knox 릴레이) — 사용자에게 열기 전·k8s 연동 등록 전(기본 발송 방식 stub 은 인증번호를 화면에 돌려준다 — 아이디만 알면
+        누구나 가입해 그 아이디의 PV 권한을 얻는다): 포탈 관리 → 메일 설정 → 발송 방식 knox_relay·릴레이 IP·포트·키 → 연결 확인 →
+        테스트 메일(릴레이의 허용 클라이언트 IP = dms-api 가 뜨는 노드 — prod 오버레이는 마스터 3대) (deploy/README §6-2·§11)
+    [ ] 포탈 「컨트롤 상태」: build_node_name·build_source_path·빌드 프록시 = 인터넷 노드(설계 7-5 — NoSchedule taint 없는 워커,
+        그 노드의 로컬 체크아웃 — git worktree 금지; deploy/README §6-3·§8 0))
+    [ ] 포탈 「k8s 연동」: 대상 클러스터·호출 노드·스토리지·StorageClass 등록(deploy/README §6-5). 등록 전에 계정 목록에 운영자가
+        만들지 않은 user 계정이 없는지 본다(메일 전 stub 창의 가입 — 맵핑이 생기면 그 아이디의 PV 권한을 얻는다, deploy/README §6-2)
     [ ] 공용 스토리지 밖 사본: pg_dump(<SHARED_DIR>/dms/backup/pg)·dms-secrets·dms-pg-app(암호화) — 보관처(설계 6-4, deploy/README §2f-5)
-    [ ] 현장 빌드 DMS 태그의 레지스트리 밖 사본(skopeo sync --dest dir — 설계 7-6 「백업」)
-    [ ] DNS(포탈 FQDN → VIP-A)·Avi VS-443(설치 전 사이트 준비 7 — deploy/README §2g-4) 풀 마스터 3/3 헬스 up 확인. 그 뒤 VIP 경유 검증:
+    [ ] 현장 빌드 DMS 태그의 레지스트리 밖 사본(skopeo sync --dest dir — 설계 7-6 「백업」, deploy/README §2e-5)
+    [ ] 스모크 시험(일반 사용자 가입·PV sync·rm — deploy/README §7)
+    [ ] Avi VS-443(설치 전 사이트 준비 7 — deploy/README §2g-4) 풀 마스터 3/3 헬스 up 확인. 그 뒤 VIP 경유 검증(--resolve 라 DNS 가 필요 없다):
           $([ -n "${CACERT:-}" ] || printf "CACERT=<사내CA> ")$(base_cmd) --only S12      (FQDN·VIP 는 render.env — values.env 의 PORTAL_DOMAIN·PORTAL_VIP)
-    [ ] 포탈 「k8s 연동」: 대상 클러스터·호출 노드·스토리지·StorageClass 등록(deploy/README §13-9)
-    [ ] 포탈 「컨트롤 상태」: build_node_name·build_source_path·빌드 프록시 = 인터넷 노드(설계 7-5)
+    [ ] 사용자에게 열기 전 확인표(deploy/README §6-8) → 그다음 DNS(포탈 FQDN → VIP-A) 등록 → 사용자에게 공지(deploy/README §6-7)
     [ ] 레지스트리 주소를 바꾸거나 DB 를 이관했으면 잡 이미지 재릴리스(control_state.job_image — 설계 7-4)
     [ ] Released PV 재활용 런북·마스터 운영 규칙(deploy/README §2f-5·§2f-7)
 EOF

@@ -2,7 +2,9 @@
 # 디렉터리를 참조한다. 20-secret.example.yaml 은 제외한다 -- Secret 은 out-of-band 로 만든다.
 #
 # 이 디렉터리를 raw 로 apply 하지 않는다(2026-09-14~ image: 가 자리표시자라 pull 에서 실패하는 게 의도) --
-# 늘 `kubectl --context <ctx> apply -k deploy/overlays/<site>`. 어떤 오버레이가 있는지는 브랜치마다 다르다
+# 적용은 설치기 `sh deploy/install.sh --context <ctx> --site <site>`(render.sh → 가드 → S11 apply -k) 하나다(deploy/README §3-1).
+# 손 apply 는 testbed-k8s 의 커밋된 오버레이나 prod 렌더 디렉터리 deploy/.rendered/prod/app 로만 한다(prod 오버레이 자체는 REPLACE_
+# 템플릿이라 직접 apply -k 하면 그 글자가 이미지로 들어간다). 어떤 오버레이가 있는지는 브랜치마다 다르다
 # (2026-10-22 브랜치 분리: main·dms-ssc = testbed·prod(+ssc), dms-k8s = testbed-k8s·prod).
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization

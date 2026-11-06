@@ -1,5 +1,10 @@
+import re
+from pathlib import Path
+
 import pytest
 from dms.config import Settings, SettingsError
+
+SECRET_EXAMPLE = Path(__file__).resolve().parent.parent / "deploy" / "k8s" / "20-secret.example.yaml"
 
 VALID = {
     "DMS_DATABASE_URL": "sqlite:///tmp/dms.db",
@@ -29,16 +34,11 @@ def test_missing_and_placeholder_collected():
 
 
 def test_committed_manifest_placeholders_are_rejected():
-    # deploy/k8s/20-secret.example.yaml 이 담고 있는 값 그대로. 이 값들은 공개
-    # 저장소에 적혀 있고 DMS_SHARED_TOKEN 은 Bearer 로 admin 을 준다 -- 접미사가
-    # 붙었다는 이유로 통과시키면 누구나 아는 admin 토큰으로 기동한다.
-    env = {
-        "DMS_DATABASE_URL":
-            "postgresql://dmsapp:CHANGE_ME_DB_PASSWORD@10.10.10.30:5432/dmsdb",
-        "DMS_SHARED_TOKEN": "CHANGE_ME_SHARED_TOKEN",
-        "DMS_ADMIN_TOKEN": "CHANGE_ME_ADMIN_TOKEN",
-        "DMS_SESSION_SECRET": "CHANGE_ME_SESSION_SECRET",
-    }
+    # deploy/k8s/20-secret.example.yaml 이 담고 있는 값 그대로 -- 파일에서 읽는다(2026-11-06: 예시 URL 을 CNPG 모양으로
+    # 바꾼 뒤 손으로 옮긴 옛 값이 남아 그물이 빠졌었다). 이 값들은 공개 저장소에 적혀 있고 DMS_SHARED_TOKEN 은 Bearer 로
+    # admin 을 준다 -- 접미사가 붙었다는 이유로 통과시키면 누구나 아는 admin 토큰으로 기동한다.
+    env = dict(re.findall(r'(?m)^\s+(DMS_[A-Z_]+):\s*"([^"]*)"\s*$', SECRET_EXAMPLE.read_text(encoding="utf-8")))
+    assert set(env) == {"DMS_DATABASE_URL", "DMS_SHARED_TOKEN", "DMS_ADMIN_TOKEN", "DMS_SESSION_SECRET"}, env
     with pytest.raises(SettingsError) as e:
         Settings.from_env(env)
     text = str(e.value)

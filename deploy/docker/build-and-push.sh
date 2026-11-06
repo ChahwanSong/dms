@@ -2,16 +2,20 @@
 #
 # Build the DMS container images (mpifileutils/dms/agent) and push them to an
 # insecure (http) registry. Run it on the build (internet) node -- the node with
-# podman and internet access for the mpifileutils/kubectl fetches (testbed:
-# pkg-01, 10.10.10.30; prod: the internet node of design v6 7-5, first bootstrap).
-# Build context is always the repo root, regardless of caller's cwd.
+# podman and internet access for the mpifileutils/kubectl fetches (prod: the
+# internet node of design v6 7-5, first bootstrap / emergency -- deploy/README §1;
+# normal builds go through the portal, §8). Build context is always the repo
+# root, regardless of caller's cwd.
 #
-#   REGISTRY=pkg-01:5000 TAG=dev ./deploy/docker/build-and-push.sh          # testbed example
 #   REGISTRY=<IP>:<PORT> TAG=<values.env DMS_TAG> ./deploy/docker/build-and-push.sh
+#   (in-cluster registry: <IP>:<PORT> = values.env REGISTRY_CLUSTER_IP:REGISTRY_PORT = render.env REGISTRY;
+#    the install.sh S5 PAUSE prints this line with the real values)
 #   (TAG = values.env DMS_TAG = DMS_AGENT_TAG = MFU_TAG; never edit the base manifests' image: -- they are placeholders)
 #
 # Env knobs:
-#   REGISTRY   image registry/prefix           (default: pkg-01:5000)
+#   REGISTRY   registry host:port (no path prefix)  REQUIRED -- no default: a
+#              wrong default would push the site's images to another site's
+#              registry, so an unset/empty REGISTRY stops before any command runs
 #   TAG        image tag                       (default: dev)
 #   IMAGES     which to build, space-separated (default: "mpifileutils dms agent")
 #   PUSH       "1" to podman push each image    (default: 1)
@@ -23,14 +27,16 @@
 # agent.
 set -euo pipefail
 
-REGISTRY="${REGISTRY:-pkg-01:5000}"
+# fail-closed(2026-11-06): 기본값을 두지 않는다 -- 예전 기본(테스트베드 레지스트리)은 다른 사이트에서 REGISTRY 를 빠뜨리면 남의
+# 레지스트리로 push 했다. 이 줄 앞에서는 외부 명령을 부르지 않는다(tests/test_build_and_push_script.py).
+: "${REGISTRY:?REGISTRY=<host:port> 가 필요하다(in-cluster 면 <REGISTRY_CLUSTER_IP>:<REGISTRY_PORT> — deploy/README §1)}"
 TAG="${TAG:-dev}"
 IMAGES="${IMAGES:-mpifileutils dms agent}"
 PUSH="${PUSH:-1}"
 NO_CACHE="${NO_CACHE:-0}"
 
 command -v podman >/dev/null 2>&1 \
-  || { echo "!! podman not found -- run this on the build (internet) node (testbed: pkg-01)" >&2; exit 2; }
+  || { echo "!! podman not found -- run this on the build (internet) node (deploy/README §1)" >&2; exit 2; }
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"

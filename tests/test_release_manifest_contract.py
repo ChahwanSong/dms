@@ -367,7 +367,7 @@ def test_overlays_change_control_plane_deployments_only_in_image_and_artifact_pa
 from dms.manifest_tags import (PLACEHOLDER_REGISTRY, PLACEHOLDER_TAG,  # noqa: E402
                                _unquote, _value)
 
-_IMAGE_KEYS = ("image:", "DMS_JOB_IMAGE:")
+_IMAGE_KEYS = ("image:", "DMS_JOB_IMAGE:", "DMS_BUILD_BUILDER_IMAGE:")
 
 
 def _image_lines(path):
@@ -386,7 +386,25 @@ def test_base_manifests_carry_only_the_site_neutral_placeholder():
             assert value.startswith(PLACEHOLDER_REGISTRY + "/") and value.endswith(":" + PLACEHOLDER_TAG), (
                 f"{path.name}: {value!r} -- base 에는 실 레지스트리·태그를 커밋하지 않는다. "
                 f"실 태그는 deploy/overlays/<site> 의 newTag(테스트베드 오버레이) 또는 values.env(사이트 설치기)로")
-    assert seen >= 7, seen          # api·controller 본체+migrate init, migrate job, agent, DMS_JOB_IMAGE
+    assert seen >= 8, seen          # api·controller 본체+migrate init, migrate job, agent, DMS_JOB_IMAGE, DMS_BUILD_BUILDER_IMAGE
+
+
+def _base_config_value(key):
+    for doc in documents(REPO_ROOT / "deploy" / "k8s" / "20-config.yaml"):
+        for line in doc:
+            if line.strip().startswith(key + ":"):
+                return _unquote(_value(line))
+    raise AssertionError(f"20-config.yaml 에 {key} 가 없다")
+
+
+def test_base_config_carries_no_site_registry_or_operator_name():
+    # 2026-11-06(문서 감사 — 배포 문서는 프로덕션 기준): 오버레이가 이 키들을 덮지 않으면 base 값이 그대로 배포된다. render.sh 는
+    # 레지스트리 셋(DMS_JOB_IMAGE·DMS_BUILD_REGISTRY·DMS_BUILD_BUILDER_IMAGE)만 FAIL 로 막고 특권 목록은 보지 않는다 — 그래서 base 값은
+    # 자리표시자(위 테스트가 두 이미지 키를 본다)와 코드 기본(config.Settings.privileged_requesters = root,admin)뿐이어야 한다.
+    # 테스트베드 레지스트리나 운영자 이름이 돌아오면, 오버레이가 키를 빠뜨린 사이트에서 그 이름이 맵핑 면제자가 된다.
+    assert _base_config_value("DMS_BUILD_REGISTRY") == PLACEHOLDER_REGISTRY
+    privileged = _base_config_value("DMS_PRIVILEGED_REQUESTERS")
+    assert set(privileged.split(",")) <= {"root", "admin"}, privileged
 
 
 def test_every_overlay_maps_the_placeholder_image_names():

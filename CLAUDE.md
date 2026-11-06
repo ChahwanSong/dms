@@ -15,10 +15,14 @@ PostgreSQL(제어면) + React 포탈 + 노드 에이전트 + Volcano gang-schedu
 | 알고 싶은 것 | 문서 |
 |---|---|
 | **지금 시스템이 어떻게 도는가** (유지보수 진입점) | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) + 코드의 「왜」 주석 |
-| **어떻게 배포·운영하는가** | [`deploy/README.md`](deploy/README.md) |
+| **프로덕션 설치** (한 화면 체크리스트 — values·순서) | [`deploy/overlays/prod/README.md`](deploy/overlays/prod/README.md) |
+| **어떻게 배포·운영하는가** (프로덕션 런북 — 사이트 중립; 절 번호는 설치기 출력·다른 파일이 가리키는 앵커, 옛 번호는 그 문서 부록 Z) | [`deploy/README.md`](deploy/README.md) |
+| **k8s 테스트베드(dmsk8s) 운영 — DMS 쪽** (값·순서·되돌림·한계) | [`deploy/testbed/README.md`](deploy/testbed/README.md) (인프라: testbed IaC 저장소 `~/dms-dev/testbed`) |
 | **남은 일** | [`docs/BACKLOG.md`](docs/BACKLOG.md) |
-| **무엇을·언제·왜 지었나** (빌드 역사) | [`docs/CHANGELOG.md`](docs/CHANGELOG.md) |
-| **왜 그렇게 설계했나** (원문 근거, 동결) | [`docs/history/`](docs/history/) |
+| **무엇을·언제·왜 지었나** (빌드 역사 — 2026-10-21 테스트베드 분리 이후) | [`docs/CHANGELOG.md`](docs/CHANGELOG.md) |
+| **옛 변경 이력** (동결 — 2026-09~10-21 · 2026-08 슬라이스) | [`docs/history/changelog-2026-09-to-10-21.md`](docs/history/changelog-2026-09-to-10-21.md) · [`docs/history/changelog-2026-08-slices.md`](docs/history/changelog-2026-08-slices.md) |
+| **왜 그렇게 설계했나** (원문 근거, 동결 — 색인·상태는 [`docs/history/README.md`](docs/history/README.md)) | [`docs/history/`](docs/history/) |
+| **포탈 프론트 개발** (명령·규약) | [`frontend/README.md`](frontend/README.md) |
 
 **드리프트 규칙**: 현재 동작의 진실은 **코드 + 모듈 docstring**이 정의한다.
 `ARCHITECTURE.md`는 얇은 지도(모듈·불변식을 가리킴, 메커니즘 재서술 안 함)이고,
@@ -69,20 +73,24 @@ PostgreSQL(제어면) + React 포탈 + 노드 에이전트 + Volcano gang-schedu
 - **base 매니페스트는 사이트 중립, 실 태그는 오버레이에**(2026-09-14). `deploy/k8s` 의
   `image:`·`DMS_JOB_IMAGE` 는 자리표시자(`set-by-overlay.invalid/<img>:set-by-overlay`)뿐이고 계약 테스트가
   고정한다 — 여기에 실 레지스트리·태그를 커밋하면 git pull 한 다른 사이트가 그 값을
-  배포한다(실사고). 태그 bump 는 테스트베드 오버레이의 `newTag`(+`patch-config.yaml` 의
-  `DMS_JOB_IMAGE`), 사이트는 `values.env`. **테스트베드는 둘이다**(2026-10-21, deploy/README.md 「테스트베드는 둘이다」):
-  ssc 클러스터(컨텍스트 `dms`, pkg-01:5000, LDAP 사용)의 오버레이 `deploy/overlays/testbed` 는 **dms-ssc 에만** 있다
+  배포한다(실사고). 2026-11-06 부터 `20-config.yaml` 의 `DMS_BUILD_REGISTRY`·`DMS_BUILD_BUILDER_IMAGE` 도 자리표시자이고
+  특권 목록은 코드 기본과 같은 `root,admin` 이다(사이트 운영자 이름은 prod values 의 `LOCAL_ADMIN` 으로 렌더가 넣는다). 태그 bump 는 테스트베드 오버레이의 `newTag`(+`patch-config.yaml` 의
+  `DMS_JOB_IMAGE`), 사이트는 `values.env`. **테스트베드는 둘이다**(2026-10-21, `deploy/testbed/README.md` §1·§2):
+  ssc 클러스터(컨텍스트 `dms`, LDAP 사용)의 오버레이 `deploy/overlays/testbed` 는 **dms-ssc 에만** 있다
   (이 브랜치에선 2026-10-26 LDAP 코드 삭제 때 지웠다 — 되살리지 마라); 이 브랜치의 테스트베드 오버레이는
-  `deploy/overlays/testbed-k8s` = **k8s 클러스터**(컨텍스트 `dmsk8s`, 클러스터 내 레지스트리 `10.112.0.50:5000` — 2026-11-03~, 그 전
-  레지스트리 pkg-01:5001 은 2026-11-04 삭제, 태그 `dN` — d1 부터, 2026-10-26 전엔 `kN`,
-  **LDAP 없음** — 사용자 결정, 공용 디렉터리 `/dms_shared`) 하나고 **dms-k8s 에서만**(2026-10-22 분리 뒤 이 클러스터의 빌드 소스는 dms-k8s 체크아웃)
+  `deploy/overlays/testbed-k8s` = **k8s 클러스터**(컨텍스트 `dmsk8s`, **LDAP 없음** — 사용자 결정; 레지스트리·태그 계열·공용
+  디렉터리 같은 값은 `deploy/testbed/README.md` §2, 주소·태그 이력은 CHANGELOG) 하나고 **dms-k8s 에서만**(2026-10-22 분리 뒤 이 클러스터의 빌드 소스는 dms-k8s 체크아웃)
   bump. 두 클러스터가 같은 네임스페이스(dms)라 **kubectl 은 늘 `--context` 를
-  명시**한다(current-context 는 dms; dmsk8s 를 current 로 만들지 마라). 적용은
-  항상 `kubectl --context <ctx> apply -k deploy/overlays/<site>` — raw `kubectl apply -f deploy/k8s` 는
+  명시**한다(current-context 는 dms; dmsk8s 를 current 로 만들지 마라). 프로덕션도 같다 — 클러스터 여럿이 ns 이름을 같이 쓰면
+  컨텍스트가 유일한 구분이다. 적용은 prod·testbed-k8s 모두 설치기 `sh deploy/install.sh --context <ctx> --site <site>`(매 실행
+  `deploy/render.sh <site>` 로 `deploy/.rendered/<site>` 를 다시 렌더 → 가드 → S11 `apply -k`; 설정만 바꿨으면 `--only S11`)다 —
+  손 apply 는 testbed-k8s 는 커밋된 오버레이(`kubectl --context <ctx> apply -k deploy/overlays/testbed-k8s`), prod 는 렌더
+  디렉터리(`deploy/.rendered/prod/app`)로만 한다(prod 오버레이 디렉터리는 `REPLACE_*` 템플릿이라 직접 `apply -k` 하면 그 글자가
+  이미지로 들어간다). raw `kubectl apply -f deploy/k8s` 는
   pull 에서 실패하도록 돼 있다(base 이미지는 자리표시자다). apply 전
   `deploy/overlays/guard-images.sh <dir> --context <ctx>` 가 "렌더 이미지 != 라이브" 면 거부하고(exit 3 — 포탈 릴리스 뒤
   오버레이 태그를 안 맞춘 재적용이 되돌리는 사고 방지; 의도한 변경은 `ALLOW_IMAGE_CHANGE=1`), 오버레이의
-  `kube-context` 파일과 다른 컨텍스트면 거부한다(exit 4). base·testbed-k8s·prod 렌더에 LDAP 이 0건이고 에이전트가
+  `kube-context` 파일과 다른 컨텍스트면 거부한다(exit 4 — `--context`·`KUBE_CONTEXT` 가 둘 다 없으면 current-context 를 읽는다). base·testbed-k8s·prod 렌더에 LDAP 이 0건이고 에이전트가
   `dms agent`(root, nslcd 없음)로 뜨는 것을 `tests/test_testbed_k8s_overlay.py`·`test_prod_k8s_overlay.py` 가 고정한다 —
   LDAP 키·env 를 다시 더하지 마라. 포탈 빌드는 이미지에 COPY 되는 사본만 스탬프하므로
   (`build_manifests`) 포탈에서 태그를 지정해 빌드·릴리스하면 live == 동봉 매니페스트라
@@ -151,6 +159,9 @@ PostgreSQL(제어면) + React 포탈 + 노드 에이전트 + Volcano gang-schedu
 
 ## 테스트·검증
 
-- 백엔드: `PYTHONPATH=<워크트리>/src <venv>/bin/python -m pytest tests -q` (~7분, 1280+ passed)
-- 프론트: `cd frontend && npx vitest run` (266+ passed) · `npx tsc -b`
-- e2e(실 브라우저): `cd frontend && npm run test:e2e` (9 passed, ~25s) — **CI 없음, 수기 게이트**
+- 백엔드: `PYTHONPATH=<워크트리>/src <venv>/bin/python -m pytest tests -q` (~7분+, 5600+ passed · 15 skipped — 2026-11-06 기준)
+- 프론트: `cd frontend && npx vitest run` (1858+ passed) · `npx tsc -b`
+- e2e(실 브라우저): `cd frontend && npm run test:e2e` (32 passed, 17 spec — 빌드 포함) — **CI 없음, 수기 게이트**(이미지 빌드 전 게이트는
+  `deploy/README.md` §8 「이미지 빌드 전 게이트」)
+- 배포 문서·스크립트 계약: 절 번호·출력 문구를 바꾸면 `tests/test_gateway_contract.py`·`test_install_stages.py`·`test_addons_render.py` 등이
+  본다 — 번호를 옮기면 가리키는 곳(설치기 출력·주석·다른 문서)을 같은 커밋에서 고치고 `deploy/README.md` 부록 Z 에 대응을 남긴다.

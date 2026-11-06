@@ -149,7 +149,7 @@ def judge(mode: str, nodes: list, results: dict, pvs: dict, node_problems: dict,
         stale = max((int(results[n]["pv"].get(pv, {}).get("stale") or 0) for n in seen
                      if str(results[n]["pv"].get(pv, {}).get("stale") or "0").isdigit()), default=0)
         if stale:
-            out.append(("WARN", f"{pv}: 옛 PGDATA 잔재 pgdata_* {stale}개 — CNPG 가 옛 데이터를 옮겨 두고 진행한 흔적(T6 실측). 내용을 확인한 뒤 "
+            out.append(("WARN", f"{pv}: 옛 PGDATA 잔재 pgdata_* {stale}개 — CNPG 가 옛 데이터를 옮겨 두고 진행한 흔적(CNPG 1.30 동작 — 테스트베드 실측). 내용을 확인한 뒤 "
                                 f"같은 FS 의 pgdata/.retired 로 옮긴다(재활용 런북 deploy/README §2f-5)"))
         if phase == "Released":
             out.append(("WARN", f"{pv}: Released(옛 claim {claim}) — 건드리지 않는다; 재활용은 런북(deploy/README §2f-5)"))

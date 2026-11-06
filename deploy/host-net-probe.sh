@@ -1,5 +1,6 @@
 #!/bin/sh
-# 마스터 호스트 netns 프로브(2026-11-03 ⑦, 설계 v6 4-3 「443 바인드」·BACKLOG ⑥ 「S8 마스터 전부 sysctl ≤ 443 재확인」·「S12 마스터마다 :443」).
+# 마스터 호스트 netns 프로브(2026-11-03 ⑦, 설계 v6 4-3 「443 바인드」 — S8 마스터 전부 sysctl ≤ 443 재확인·S12 마스터마다 :443; 기록은
+# docs/CHANGELOG.md 「⑦ 설치기」).
 #
 #   sh deploy/host-net-probe.sh --context <ctx> --image <ref> (--sysctl | --listen) [--nodes a,b] [--namespace dms] [--timeout 120]
 #

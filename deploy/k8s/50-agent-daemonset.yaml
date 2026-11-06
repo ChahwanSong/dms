@@ -50,7 +50,7 @@
 #     /usr, ...). Submounts that HostToContainer propagates -- the storages
 #     themselves -- keep their host options (rw), because Kubernetes'
 #     recursiveReadOnly cannot be combined with HostToContainer (verified
-#     2026-09-16: `touch /host/root/cephfs/x` in the pod succeeds). That is
+#     2026-09-16 on the testbed: `touch /host/root/cephfs/x` in the pod succeeds). That is
 #     the same privilege the previous per-storage rw hostPaths granted; the
 #     delta is read access to the rest of the host fs. Writability is
 #     derived from the host mountinfo options (rw/ro), not os.access(W_OK)

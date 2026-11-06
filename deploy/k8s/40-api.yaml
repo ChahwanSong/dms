@@ -30,7 +30,7 @@
 # 자리표시자(/set-by-overlay.invalid/dms/artifacts)이고, 오버레이가 dms-config 의 DMS_ARTIFACT_BASE_URI 하나에서
 # kustomize replacements 로 이 두 필드와 allowlist 를 함께 낸다(deploy/overlays/<site>/kustomization.yaml) -- 그래서
 # 「hostPath == allowlist == env base」가 구성상 같고 tests/test_shared_dir_contract.py 가 렌더 결과로 고정한다. raw apply 는
-# 없는 경로라 파드가 뜨지 않는다(의도). 예전처럼 마운트포인트 자체(/cephfs)를 붙이면 마운트가 빠진 노드에서 빈 로컬
+# 없는 경로라 파드가 뜨지 않는다(의도). 예전처럼 마운트포인트 자체(예: 테스트베드의 옛 /cephfs)를 붙이면 마운트가 빠진 노드에서 빈 로컬
 # 디렉터리로 Directory 검사를 통과해 조용히 로컬 디스크에 쓴다 -- 하위 경로라야 fail-closed 다(G2). 그래서 type 은 늘
 # Directory 이고 DirectoryOrCreate 는 금지다(마운트 없는 노드에 디렉터리를 만들어 같은 함정을 되살린다).
 #
