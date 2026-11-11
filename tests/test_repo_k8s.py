@@ -530,9 +530,12 @@ def test_node_run_stats_reports_per_cluster_connection(repos, db):
     _run_row(db, 7, "k8s-w1", "gone", "schedule", "expired", reason="k8s_sync_expired")   # 지운 클러스터
     stats = repos.k8s.node_run_stats()
     w1, w2 = stats["k8s-w1"], stats["k8s-w2"]
+    # 지운 클러스터(gone)의 실패는 노드 단위 「마지막 실패」가 아니다(2026-11-11) -- 마지막 호출에만 남는다
     assert (w1["last_claim_at"], w1["last_ok_at"], w1["last_fail_at"], w1["last_reason"]) == (
-        iso_plus(T0, 7), iso_plus(T0, 3), iso_plus(T0, 7), "k8s_sync_expired")
-    assert (w1["last_fail_cluster"], w1["last_fail_trigger"]) == ("gone", "schedule")
+        iso_plus(T0, 7), iso_plus(T0, 3), iso_plus(T0, 2), "k8s_sync_unreachable")
+    assert (w1["last_fail_cluster"], w1["last_fail_trigger"], w1["last_fail_cluster_ok_at"]) == (
+        "c2", "manual", iso_plus(T0, 3))
+    assert "gone" not in w1["clusters"]
     assert w1["clusters"]["c1"] == {"last_ok_at": iso_plus(T0, 1), "last_fail_at": None, "last_reason": None,
                                     "last_trigger": "schedule", "last_status": "ok"}
     assert w1["clusters"]["c2"] == {"last_ok_at": iso_plus(T0, 3), "last_fail_at": iso_plus(T0, 2),
@@ -571,6 +574,49 @@ def test_recreated_cluster_starts_with_no_node_connection_history(repos, db):
     assert repos.k8s.node_run_stats()["k8s-w2"]["clusters"]["c1"] == {
         "last_ok_at": None, "last_fail_at": created, "last_reason": "k8s_sync_unreachable", "last_trigger": "check",
         "last_status": "failed"}
+
+
+def test_deleted_cluster_leaves_the_node_success_and_failure(repos, db):
+    """지운 클러스터의 run 은 노드 단위 「마지막 성공」·「마지막 실패」에 쓰지 않는다(2026-11-11 재현: 기능 검증 때 TLS 를 틀리게
+    등록했다 지운 임시 클러스터 fv-inv-c1 의 수동 동기화 실패가 6일 뒤에도 주 호출 노드 카드에 방화벽 조치 문구와 함께 남았다).
+    「마지막 호출」은 모든 run 이다. 같은 이름으로 다시 등록하면 그 이름의 옛 run 을 다시 센다(클러스터별 칸은 새 등록분만)."""
+    repos.k8s.create_cluster(name="fv-inv-c1", api_server="https://10.10.10.99:6443", tls_server_name=None,
+                             ca_pem=None, insecure_skip_tls_verify=False, token_enc="v1:x", enabled=True, actor="ops")
+    db.execute("UPDATE k8s_clusters SET created_at = :t", {"t": iso_plus(T0, -60)})
+    _run_row(db, 1, "k8s-w1", "c1", "schedule", "failed", reason="k8s_sync_unreachable")
+    _run_row(db, 2, "k8s-w1", "c1", "schedule", "applied")
+    _run_row(db, 3, "k8s-w1", "fv-inv-c1", "manual", "failed", reason="k8s_sync_tls_failed")
+    _run_row(db, 4, "k8s-w1", "c1", "schedule", "applied")
+    _run_row(db, 5, "k8s-w2", "fv-inv-c1", "check", "applied")                   # w2 의 성공은 fv-inv-c1 뿐
+    w1, w2 = (repos.k8s.node_run_stats()[n] for n in ("k8s-w1", "k8s-w2"))
+    assert (w1["last_fail_cluster"], w1["last_reason"], w1["last_fail_cluster_ok_at"]) == (
+        "fv-inv-c1", "k8s_sync_tls_failed", None)                              # 등록돼 있는 동안은 빨간 실패
+    assert w2["last_ok_at"] == iso_plus(T0, 5)
+
+    repos.k8s.delete_cluster("fv-inv-c1", actor="ops")
+    w1, w2 = (repos.k8s.node_run_stats()[n] for n in ("k8s-w1", "k8s-w2"))
+    # 노드 단위 실패는 등록된 클러스터의 더 오래된 실패로 돌아가고(그 뒤 성공했으니 해결됨), 지운 클러스터 칸은 없다
+    assert (w1["last_fail_at"], w1["last_fail_cluster"], w1["last_fail_trigger"], w1["last_reason"]) == (
+        iso_plus(T0, 1), "c1", "schedule", "k8s_sync_unreachable")
+    assert w1["last_fail_cluster_ok_at"] == iso_plus(T0, 4)
+    assert (w1["last_claim_at"], w1["last_ok_at"]) == (iso_plus(T0, 4), iso_plus(T0, 4))
+    assert set(w1["clusters"]) == {"c1"}
+    # w2 는 지운 클러스터만 불렀다 -- 마지막 호출은 남고, 성공·실패는 「없음」(모름)이다
+    assert w2["last_claim_at"] == iso_plus(T0, 5) and w2.get("last_ok_at") is None and w2["clusters"] == {}
+    assert not {"last_fail_at", "last_fail_cluster", "last_reason", "last_fail_cluster_ok_at"} & set(w2)
+    # 등록된 클러스터의 실패가 하나도 없으면 실패 키가 없다(호출자가 None = 「없음」)
+    db.execute("DELETE FROM k8s_sync_runs WHERE seq = 1")
+    w1 = repos.k8s.node_run_stats()["k8s-w1"]
+    assert not {"last_fail_at", "last_fail_cluster", "last_fail_trigger", "last_reason",
+                "last_fail_cluster_ok_at"} & set(w1)
+
+    # 같은 이름으로 다시 등록하면 그 이름의 옛 run 을 다시 센다(지울 때 활성 run 은 닫혔다) -- 클러스터별 칸은 새 등록분만
+    repos.k8s.create_cluster(name="fv-inv-c1", api_server="https://10.10.10.98:6443", tls_server_name=None,
+                             ca_pem=None, insecure_skip_tls_verify=False, token_enc="v1:y", enabled=True, actor="ops")
+    w1, w2 = (repos.k8s.node_run_stats()[n] for n in ("k8s-w1", "k8s-w2"))
+    assert (w1["last_fail_cluster"], w1["last_reason"]) == ("fv-inv-c1", "k8s_sync_tls_failed")
+    assert w2["last_ok_at"] == iso_plus(T0, 5)
+    assert "fv-inv-c1" not in w1["clusters"] and "fv-inv-c1" not in w2["clusters"]
 
 
 def test_config_change_resets_the_per_cluster_connection(repos, db):
@@ -827,6 +873,44 @@ def test_prune_runs_keeps_recent_and_last_success(repos, db):
     assert removed == 11 and len(left) == 51 and "live" in left
     applied = db.query_one("SELECT run_id FROM k8s_sync_runs WHERE status = 'applied'")
     assert applied is not None                                                       # 마지막 성공 run 은 남는다
+
+
+def test_prune_runs_drops_a_deleted_clusters_history_after_retention(repos, db):
+    """지운 클러스터의 run 에는 「최근 50건·마지막 applied」 보존이 없다 -- 보존일이 지나면 전부 지운다(2026-11-11: run 이 50건
+    미만인 지운 클러스터의 이력이 영영 남아 노드 카드의 「마지막 실패」로 보였다). 등록된 클러스터는 종전 그대로이고, 보존일
+    안의 run·활성 run 은 건드리지 않는다. 같은 이름으로 다시 등록하면 다시 등록 규칙이다."""
+    old, recent = iso_plus(T0, -40 * 86400), iso_plus(T0, -86400)
+
+    def run(run_id, cluster, status, claimed_at):
+        db.execute("""INSERT INTO k8s_sync_runs (run_id, cluster_name, node_name, role, trigger, status, claimed_at,
+                          deadline_at, config_rev) VALUES (:r, :c, 'k8s-w1', 'primary', 'manual', :st, :t, :t, 0)""",
+                   {"r": run_id, "c": cluster, "st": status, "t": claimed_at})
+
+    _sync(repos)                                                            # c1: applied 1건
+    db.execute("UPDATE k8s_sync_runs SET claimed_at = :t", {"t": old})
+    run("c1-old-fail", "c1", "failed", old)
+    repos.k8s.create_cluster(name="fv-inv-c1", api_server="https://10.10.10.99:6443", tls_server_name=None,
+                             ca_pem=None, insecure_skip_tls_verify=False, token_enc="v1:x", enabled=True, actor="ops")
+    for i, status in enumerate(("applied", "failed", "expired", "discarded", "failed")):
+        run(f"fv-old-{i}", "fv-inv-c1", status, old)
+    run("fv-recent", "fv-inv-c1", "failed", recent)
+    repos.k8s.delete_cluster("fv-inv-c1", actor="ops")
+    run("fv-live", "fv-inv-c1", "claimed", old)              # 활성 run(정상 경로로는 지울 때 닫힌다) -- 건드리지 않는다
+    run("ghost-old", "ghost", "failed", old)                 # 클러스터 행이 처음부터 없는 이름도 같은 규칙
+
+    removed = repos.k8s.prune_runs(iso_plus(T0, -30 * 86400), batch_size=2)   # 묶음 여러 번
+    left = {r["run_id"] for r in db.query("SELECT run_id FROM k8s_sync_runs")}
+    assert removed == 6
+    assert {"fv-recent", "fv-live", "c1-old-fail"} <= left                   # 보존일 안·활성·등록된 클러스터(50건 미만)
+    assert not {r for r in left if r.startswith("fv-old-")} and "ghost-old" not in left
+    assert db.query_one("SELECT COUNT(*) AS n FROM k8s_sync_runs WHERE cluster_name = 'c1'")["n"] == 2
+
+    # 같은 이름으로 다시 등록하면 등록 규칙(최근 50건 보존) -- 옛 run 이 보존일 밖이어도 지우지 않는다
+    repos.k8s.create_cluster(name="fv-inv-c1", api_server="https://10.10.10.98:6443", tls_server_name=None,
+                             ca_pem=None, insecure_skip_tls_verify=False, token_enc="v1:y", enabled=True, actor="ops")
+    run("fv-again-old", "fv-inv-c1", "failed", old)
+    assert prune_runs_once(repos, retention_days=30, now_iso=T0) == 0
+    assert "fv-again-old" in {r["run_id"] for r in db.query("SELECT run_id FROM k8s_sync_runs")}
 
 
 # --- 해석·권한 ------------------------------------------------------------------------------------

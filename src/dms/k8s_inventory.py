@@ -71,6 +71,7 @@ def run_inventory_once(repos, settings, *, now=None, budget_seconds=TICK_BUDGET_
 
 
 def prune_runs_once(repos, *, retention_days: int, now_iso=None) -> int:
-    """보존 정리(retention 루프): 보존일보다 오래된 종단 run. 클러스터별 최근 50건·마지막 성공 run 은 남긴다."""
+    """보존 정리(retention 루프): 보존일보다 오래된 종단 run. 등록된 클러스터는 최근 50건·마지막 성공 run 을 남기고, 지운
+    클러스터의 run 은 보존일이 지나면 전부 지운다(repositories.k8s.K8sRepository.prune_runs)."""
     now = now_iso or utc_now_iso()
     return repos.k8s.prune_runs(iso_plus(now, -retention_days * 86400))

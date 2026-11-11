@@ -344,7 +344,9 @@ class K8sRepository:
 
     def delete_cluster(self, name, *, actor):
         """클러스터 행만 지운다(스냅숏 행은 컨트롤러 cleanup_orphans 가 묶음 단위로 -- 큰 삭제를 API 커넥션에서 하지 않는다).
-        조회는 클러스터 행과 조인하므로 지운 순간부터 그 스냅숏은 보이지 않는다. 동기화 이력은 보존 정리에 맡긴다."""
+        조회는 클러스터 행과 조인하므로 지운 순간부터 그 스냅숏은 보이지 않는다. 동기화 이력(run 행)은 여기서 지우지 않는다 --
+        이력 화면에 남았다가 보존 정리 prune_runs 가 보존일이 지나면 전부 지운다(지운 클러스터에는 「최근 N건·마지막 applied」
+        보존이 없다). 호출 노드 카드(node_run_stats)는 지운 순간부터 그 run 을 성공·실패 판정에 쓰지 않는다."""
         with self._db.transaction():
             before = self.get_cluster(name)
             if before is None:
@@ -676,11 +678,21 @@ class K8sRepository:
         return total
 
     def prune_runs(self, cutoff_iso: str, *, keep_per_cluster: int = 50, batch_size: int = 5000) -> int:
-        """보존 정리: cutoff 보다 오래된 종단 run 을 지운다. 클러스터마다 최근 keep_per_cluster 건과 마지막 applied run 은
-        남긴다(화면의 「마지막 성공」이 이력에서 사라지지 않게). 활성 run(claimed·received)은 건드리지 않는다."""
-        total = 0
-        for row in self._db.query("SELECT DISTINCT cluster_name FROM k8s_sync_runs"):
-            c = row["cluster_name"]
+        """보존 정리: cutoff 보다 claimed_at 이 오래된 종단 run 을 지운다. 활성 run(claimed·received)은 건드리지 않는다.
+
+          - 지금 등록된 클러스터: 클러스터마다 최근 keep_per_cluster 건과 마지막 applied run 은 남긴다(화면의 「마지막 성공」이
+            이력에서 사라지지 않게 -- cluster_counts 가 applied_run_seq 의 run 을 읽는다).
+          - 등록되지 않은(지운) 클러스터 이름의 run: 그 두 보존이 없다 -- cutoff 보다 오래되면 전부 지운다. 두 보존은 등록된
+            클러스터의 화면을 위한 것이라 지운 클러스터에는 뜻이 없고, 있으면 run 이 keep_per_cluster 건 미만인 지운 클러스터의
+            이력이 영영 남았다(2026-11-11 -- 11-04 기능 검증의 임시 클러스터를 지운 뒤에도 그 TLS 실패가 개요에 남았다).
+            「등록되지 않음」은 지우는 묶음을 고르는 질의 안에서 판정한다(NOT EXISTS) -- 그 사이 같은 이름으로 다시 등록해도
+            지우는 것은 cutoff 보다 오래된(옛 등록의) 종단 run 뿐이다. 다시 등록한 이름은 그때부터 위 등록 규칙이다."""
+        total = self._delete_runs(
+            """r.claimed_at < :cutoff AND r.status NOT IN ('claimed', 'received')
+               AND NOT EXISTS (SELECT 1 FROM k8s_clusters kc WHERE kc.name = r.cluster_name)""",
+            {"cutoff": cutoff_iso}, batch_size)
+        for row in self._db.query("SELECT name FROM k8s_clusters ORDER BY name"):
+            c = row["name"]
             nth = self._db.query_one(
                 "SELECT seq FROM k8s_sync_runs WHERE cluster_name = :c ORDER BY seq DESC LIMIT 1 OFFSET :o",
                 {"c": c, "o": keep_per_cluster - 1})
@@ -689,21 +701,25 @@ class K8sRepository:
             last_applied = self._db.query_one(
                 "SELECT MAX(seq) AS s FROM k8s_sync_runs WHERE cluster_name = :c AND status = 'applied'", {"c": c})
             keep = last_applied["s"] if last_applied and last_applied["s"] is not None else -1
-            while True:
-                with self._db.transaction():
-                    ids = [r["seq"] for r in self._db.query(
-                        """SELECT seq FROM k8s_sync_runs
-                           WHERE cluster_name = :c AND seq < :thr AND claimed_at < :cutoff AND seq <> :keep
-                                 AND status NOT IN ('claimed', 'received')
-                           ORDER BY seq LIMIT :n""",
-                        {"c": c, "thr": nth["seq"], "cutoff": cutoff_iso, "keep": keep, "n": batch_size})]
-                    if not ids:
-                        break
-                    params = {f"i{k}": v for k, v in enumerate(ids)}
-                    self._db.execute(
-                        f"DELETE FROM k8s_sync_runs WHERE seq IN ({', '.join(':' + k for k in params)})", params)
-                    total += len(ids)
+            total += self._delete_runs(
+                """r.cluster_name = :c AND r.seq < :thr AND r.claimed_at < :cutoff AND r.seq <> :keep
+                   AND r.status NOT IN ('claimed', 'received')""",
+                {"c": c, "thr": nth["seq"], "cutoff": cutoff_iso, "keep": keep}, batch_size)
         return total
+
+    def _delete_runs(self, where: str, params: dict, batch_size: int) -> int:
+        """where(별칭 r)에 맞는 run 을 seq 순으로 batch_size 건씩 각자의 트랜잭션에서 지운다(다 지울 때까지). 지운 수."""
+        total = 0
+        while True:
+            with self._db.transaction():
+                ids = [r["seq"] for r in self._db.query(
+                    f"SELECT r.seq FROM k8s_sync_runs r WHERE {where} ORDER BY r.seq LIMIT :n",
+                    {**params, "n": batch_size})]
+                if not ids:
+                    return total
+                ps = {f"i{k}": v for k, v in enumerate(ids)}
+                self._db.execute(f"DELETE FROM k8s_sync_runs WHERE seq IN ({', '.join(':' + k for k in ps)})", ps)
+                total += len(ids)
 
     # --- 이력 조회 ---------------------------------------------------------------------------------
 
@@ -749,24 +765,36 @@ class K8sRepository:
         「성공」으로 보였다(2026-10-28). 설정이 바뀌는 사이에 버려진(discarded) 확인 run 도 그래서 옛 성공으로 돌아가지 않고
         「호출 기록 없음」이 된다. 설정 세대는 결과를 적용할지 가르는 기준과 같다(모듈 docstring 「config_rev」 -- 바뀌기 전
         설정으로 가져온 결과는 적용하지 않는다). 등록 시각도 함께 보는 건 다시 등록하면 config_rev 가 0 부터라서다.
-        노드 단위 값(last_*)에는 지운 클러스터·옛 등록·옛 설정의 이력도 들어간다(종전과 같다). last_fail_cluster_ok_at 은 이 노드가
-        마지막 실패의 클러스터(이름)에 낸 가장 최근 성공이다 -- 설정 세대와 무관하다(「그 실패가 그 뒤 해결됐나」를 재는 값이라,
-        토큰만 바꿔도 이미 해결된 실패가 다시 빨갛게 보이지 않게; 지금 설정으로 닿았는지는 클러스터별 칸이 말한다). 실패가 없으면
-        키가 없다."""
+
+        노드 단위 판정 값(last_ok_at 과 실패 묶음 -- last_fail_at·last_reason·last_fail_cluster·last_fail_trigger·
+        last_fail_cluster_ok_at)은 **지금 등록된 클러스터**(이름이 k8s_clusters 에 있다)의 run 만 센다(2026-11-11: 11-04 기능
+        검증 때 일부러 TLS 를 틀리게 등록했다 지운 임시 클러스터의 실패가 주 호출 노드 카드에 「마지막 실패」로 남아 방화벽 조치
+        문구를 띄웠다). 성공도 같은 기준이라야 「마지막 성공」과 「마지막 실패」를 견줄 수 있다. 이름 기준이라 옛 등록·옛 설정
+        세대의 run 은 센다(종전과 같다) -- 같은 이름으로 다시 등록하면 그 이름의 옛 run 도 다시 센다(활성 run 은 지울 때 이미
+        닫혔고 -- delete_cluster, 옛 실패는 그 노드가 새 등록에 성공하면 「해결됨」이다). last_claim_at(「마지막 호출」)만은 지운
+        클러스터까지 모든 run 이다 -- 판정이 아니라 이 노드의 워커가 일을 가져가고 있나를 말한다. 지운 클러스터의 run 은 이력
+        (list_runs)에 남았다가 보존 정리(prune_runs)가 보존일 뒤 지운다.
+        last_fail_cluster_ok_at 은 이 노드가 마지막 실패의 클러스터(이름)에 낸 가장 최근 성공이다 -- 설정 세대와 무관하다(「그
+        실패가 그 뒤 해결됐나」를 재는 값이라, 토큰만 바꿔도 이미 해결된 실패가 다시 빨갛게 보이지 않게; 지금 설정으로 닿았는지는
+        클러스터별 칸이 말한다). 실패가 없으면 키가 없다."""
         cur = ("CASE WHEN {c}.created_at IS NOT NULL AND {r}.claimed_at >= {c}.created_at "
                "AND {r}.config_rev = {c}.config_rev THEN 1 ELSE 0 END")
+        reg = "CASE WHEN {c}.name IS NULL THEN 0 ELSE 1 END"      # 지금 등록된 클러스터의 run 인가(cur = 1 이면 늘 1)
         joined = "k8s_sync_runs {r} LEFT JOIN k8s_clusters {c} ON {c}.name = {r}.cluster_name"
 
         def newest(where: str) -> str:
-            return (f"SELECT MAX(r2.seq) FROM {joined.format(r='r2', c='c2')} WHERE {where.format(r='r2')} "
+            # 등록된 클러스터의 묶음만 -- 이 행들은 노드 단위 실패와 클러스터별 칸(cur = 1)에만 쓰고, 둘 다 그 밖을 보지 않는다
+            return (f"SELECT MAX(r2.seq) FROM {joined.format(r='r2', c='c2')} "
+                    f"WHERE {reg.format(c='c2')} = 1 AND ({where.format(r='r2')}) "
                     f"GROUP BY r2.node_name, r2.cluster_name, {cur.format(r='r2', c='c2')}")
         judged = "{r}.status IN ('claimed', 'received', 'applied', 'failed', 'expired')"
         out: dict = {}
         for r in self._db.query(
-                f"""SELECT r.node_name, r.cluster_name, {cur.format(r='r', c='c')} AS cur, MAX(r.claimed_at) AS claim_at,
+                f"""SELECT r.node_name, r.cluster_name, {cur.format(r='r', c='c')} AS cur, {reg.format(c='c')} AS reg,
+                           MAX(r.claimed_at) AS claim_at,
                            MAX(CASE WHEN {_CALLER_OK_SQL.format(r='r')} THEN r.finished_at END) AS ok_at
                     FROM {joined.format(r='r', c='c')}
-                    GROUP BY r.node_name, r.cluster_name, {cur.format(r='r', c='c')}"""):
+                    GROUP BY r.node_name, r.cluster_name, {cur.format(r='r', c='c')}, {reg.format(c='c')}"""):
             node = out.setdefault(r["node_name"], {"clusters": {}, "_ok_by_cluster": {}})
             ok_by = node["_ok_by_cluster"]
             if r["ok_at"] is not None and (ok_by.get(r["cluster_name"]) or "") < r["ok_at"]:
@@ -777,7 +805,7 @@ class K8sRepository:
                                                        "_last_seq": -1, "_fail_seq": -1}
             if r["claim_at"] is not None and (node.get("last_claim_at") or "") < r["claim_at"]:
                 node["last_claim_at"] = r["claim_at"]
-            if r["ok_at"] is not None and (node.get("last_ok_at") or "") < r["ok_at"]:
+            if r["reg"] == 1 and r["ok_at"] is not None and (node.get("last_ok_at") or "") < r["ok_at"]:
                 node["last_ok_at"] = r["ok_at"]
         for r in self._db.query(
                 f"""SELECT r.seq, r.node_name, r.cluster_name, r.status, r.trigger, r.finished_at, r.reason,
@@ -792,7 +820,7 @@ class K8sRepository:
                 node.update(_fail_seq=r["seq"], last_fail_at=r["finished_at"], last_reason=r["reason"],
                             last_fail_cluster=r["cluster_name"], last_fail_trigger=r["trigger"])
             entry = node["clusters"].get(r["cluster_name"]) if r["cur"] == 1 else None
-            if entry is None:          # 지운·옛 등록의 클러스터, 또는 두 질의 사이에 생긴 묶음
+            if entry is None:          # 옛 등록·옛 설정 세대의 묶음, 또는 두 질의 사이에 생긴 묶음
                 continue
             if failed and r["seq"] > entry["_fail_seq"]:
                 entry.update(_fail_seq=r["seq"], last_fail_at=r["finished_at"], last_reason=r["reason"])

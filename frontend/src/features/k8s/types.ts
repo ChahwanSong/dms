@@ -32,7 +32,9 @@ export interface CallerClusterLink {
   last_trigger: RunTrigger | string | null; last_status: CallerLinkStatus | string | null;
 }
 
-/** 개요의 호출 노드 한 줄 — 에이전트 보고(능력 선언 k8s_sync)와 k8s_sync_runs 집계. */
+/** 개요의 호출 노드 한 줄 — 에이전트 보고(능력 선언 k8s_sync)와 k8s_sync_runs 집계. last_ok_at·last_fail_*·last_reason 은
+ *  지금 등록된 클러스터의 run 만(지운 클러스터의 실패가 남지 않게, 2026-11-11), last_claim_at 은 지운 클러스터까지 모든 run
+ *  (repositories.k8s.node_run_stats). */
 export interface CallerNode {
   node_name: string; role: NodeRole | null; fresh: boolean; capable: boolean;
   reported_at: string | null; internal_ip: string | null;

@@ -279,10 +279,11 @@ _NO_CALLS = {"last_ok_at": None, "last_fail_at": None, "last_reason": None, "las
 def _nodes(request: Request, state: _State) -> list:
     """개요의 호출 노드 줄. clusters = 그 노드 × 지금 있는 클러스터(이름순) 각각의 지금 설정(등록·config_rev)에서의 마지막
     연결(last_status null = 그 노드가 지금 설정의 그 클러스터를 부른 기록 없음 -- 부른 적 없거나, 설정을 바꾼 뒤 아직이거나,
-    보존 정리가 지웠다; 모름이지 실패가 아니다). last_fail_cluster_ok_at = 이 노드가 마지막 실패의 클러스터에 낸 가장 최근
-    성공(설정 세대 무관 -- 「마지막 실패」가 그 뒤 해결됐나를 재는 값; repositories.k8s.node_run_stats). check_pending = 이 노드가
-    secondary 일 때 아직 가져가지 않은 확인 요청. serving(맡은 클러스터)은 정규 경로 run 기준이다(보조 연결 확인은 빼고 --
-    latest_run_per_cluster)."""
+    보존 정리가 지웠다; 모름이지 실패가 아니다). last_ok_at·last_fail_*·last_reason 은 지금 등록된 클러스터의 run 만 센다(지운
+    클러스터의 실패가 조치 문구와 함께 남지 않게, 2026-11-11), last_claim_at 은 지운 클러스터까지 모든 run.
+    last_fail_cluster_ok_at = 이 노드가 마지막 실패의 클러스터에 낸 가장 최근 성공(설정 세대 무관 -- 「마지막 실패」가 그 뒤
+    해결됐나를 재는 값; repositories.k8s.node_run_stats). check_pending = 이 노드가 secondary 일 때 아직 가져가지 않은 확인
+    요청. serving(맡은 클러스터)은 정규 경로 run 기준이다(보조 연결 확인은 빼고 -- latest_run_per_cluster)."""
     repos, settings = state.repos, state.settings
     agents = {n["node_name"]: n for n in repos.agents.list_nodes(stale_seconds=settings.agent_report_stale_seconds)}
     stats = repos.k8s.node_run_stats()

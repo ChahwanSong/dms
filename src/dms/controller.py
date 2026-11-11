@@ -70,7 +70,8 @@ def build_loops(settings: Settings, repos: Repositories, *,
         # (새 루프를 만들지 않는다).
         prune_agent_reports_once(repos, retention_days=settings.agent_report_retention_days)
         prune_events_once(repos, retention_days=settings.event_retention_days)
-        # k8s 동기화 이력(2026-10-25): 보존일보다 오래된 종단 run. 클러스터별 최근 50건·마지막 성공 run 은 남긴다.
+        # k8s 동기화 이력(2026-10-25): 보존일보다 오래된 종단 run. 등록된 클러스터는 최근 50건·마지막 성공 run 을 남기고,
+        # 지운 클러스터의 run 은 보존일이 지나면 전부(2026-11-11).
         prune_runs_once(repos, retention_days=settings.k8s_sync_run_retention_days)
 
     loops = [

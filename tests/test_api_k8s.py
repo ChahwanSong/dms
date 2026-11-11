@@ -14,7 +14,7 @@ from dms.agent.k8s_fetch import project_pv, project_pvc, project_role_binding, p
 from dms.api import password_transport as pt
 from dms.api.app import create_app
 from dms.db import iso_plus, utc_now_iso
-from dms.k8s_inventory import run_inventory_once
+from dms.k8s_inventory import prune_runs_once, run_inventory_once
 from dms.repositories import Repositories
 from dms.secret_box import open_at_rest
 
@@ -538,6 +538,36 @@ def test_secondary_check_route_and_overview_connection_fields(admin, repos, db):
                                                       "interval_seconds": 300}).status_code == 200
     r = admin.post("/api/admin/k8s/secondary:check")
     assert r.status_code == 409 and r.json()["detail"] == "k8s_sync_no_secondary"
+
+
+def test_deleted_cluster_failure_leaves_the_caller_node_card(admin, repos, db):
+    """개요의 호출 노드 카드는 지운 클러스터의 실패를 「마지막 실패」로 보이지 않는다(2026-11-11 재현: 기능 검증용 임시 클러스터
+    fv-inv-c1 을 TLS 가 틀린 채 등록 → 동기화 실패 → 삭제했는데, 주 호출 노드 카드에 6일 뒤에도 그 실패가 방화벽 조치 문구와
+    함께 남았다). run 이력에는 남았다가 보존 정리가 보존일 뒤 지운다(등록된 클러스터는 마지막 성공 run 을 남긴다)."""
+    _full_sync(admin, repos)
+    assert _create(admin, name="fv-inv-c1", api_server="https://10.10.10.99:6443").status_code == 201
+    run = _claim(admin, "k8s-w1").json()["run"]
+    assert run["cluster"] == "fv-inv-c1"
+    r = admin.post(f"/api/agent/k8s-sync/runs/{run['run_id']}",
+                   json={"node_name": "k8s-w1", "ok": False, "reason": "k8s_sync_tls_failed",
+                         "error": "certificate verify failed"}, headers=_agent("k8s-w1"))
+    assert r.json() == {"status": "failed"}
+    w1 = {n["node_name"]: n for n in admin.get("/api/admin/k8s/overview").json()["nodes"]}["k8s-w1"]
+    assert (w1["last_fail_cluster"], w1["last_reason"], w1["last_fail_cluster_ok_at"]) == (
+        "fv-inv-c1", "k8s_sync_tls_failed", None)                               # 등록돼 있는 동안은 해결 안 된 실패
+    claim_at, ok_at = w1["last_claim_at"], w1["last_ok_at"]
+
+    assert admin.delete("/api/admin/k8s/clusters/fv-inv-c1").json() == {"deleted": "fv-inv-c1"}
+    w1 = {n["node_name"]: n for n in admin.get("/api/admin/k8s/overview").json()["nodes"]}["k8s-w1"]
+    assert (w1["last_fail_at"], w1["last_reason"], w1["last_fail_cluster"], w1["last_fail_trigger"],
+            w1["last_fail_cluster_ok_at"]) == (None, None, None, None, None)
+    assert (w1["last_claim_at"], w1["last_ok_at"]) == (claim_at, ok_at)          # 마지막 호출·c1 의 성공은 그대로
+    assert [c["cluster"] for c in w1["clusters"]] == ["c1"] and w1["serving"] == ["c1"]
+    # run 이력에는 남는다 -- 보존 정리가 보존일 뒤 지운다(등록된 c1 은 마지막 성공 run 을 남긴다)
+    assert [x["status"] for x in admin.get("/api/admin/k8s/runs?cluster=fv-inv-c1").json()] == ["failed"]
+    assert prune_runs_once(repos, retention_days=30, now_iso=iso_plus(utc_now_iso(), 31 * 86400)) == 1
+    assert admin.get("/api/admin/k8s/runs?cluster=fv-inv-c1").json() == []
+    assert [x["status"] for x in admin.get("/api/admin/k8s/runs?cluster=c1").json()] == ["applied"]
 
 
 def test_storage_class_mapping_routes(admin, repos, db):

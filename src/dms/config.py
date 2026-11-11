@@ -111,7 +111,8 @@ _SERVER_INT_KEYS = (
     ("DMS_K8S_SYNC_MAX_BYTES", "k8s_sync_max_bytes", 33554432),
     # 컨트롤러 k8s-inventory 루프 간격(적용·만료·정리 -- DB 전용). 1 이상.
     ("DMS_K8S_INVENTORY_INTERVAL_SECONDS", "k8s_inventory_interval_seconds", 10),
-    # 동기화 이력 보존일(클러스터별 최근 50건·마지막 성공 run 은 보존일과 무관하게 남는다). 1 이상.
+    # 동기화 이력 보존일(등록된 클러스터의 최근 50건·마지막 성공 run 은 보존일과 무관하게 남는다 -- 지운 클러스터의 run 은
+    # 보존일이 지나면 전부 지운다, repositories.k8s.prune_runs). 1 이상.
     ("DMS_K8S_SYNC_RUN_RETENTION_DAYS", "k8s_sync_run_retention_days", 30),
 )
 

@@ -206,7 +206,7 @@ export function SyncHistoryPage() {
   return (
     <section className="space-y-4">
       <K8sHeader title="동기화 이력"
-                 description={`호출 노드가 클러스터 목록을 받아 온 기록입니다 — 최근 것부터 ${RUNS_PAGE_SIZE}건씩, 아래로 스크롤하면 이어서 불러옵니다. 30일이 지난 기록은 정리되지만 클러스터마다 최근 50건과 마지막 성공은 남깁니다.`} />
+                 description={`호출 노드가 클러스터 목록을 받아 온 기록입니다 — 최근 것부터 ${RUNS_PAGE_SIZE}건씩, 아래로 스크롤하면 이어서 불러옵니다. 30일이 지난 기록은 정리되지만 등록된 클러스터마다 최근 50건과 마지막 성공은 남깁니다(지운 클러스터의 기록은 모두 정리).`} />
       <div className="flex flex-wrap items-center gap-2">
         <select aria-label="클러스터 필터" className={SELECT_FIELD} value={cluster} onChange={(e) => setFilter("cluster", e.target.value)}>
           <option value="">클러스터 전체</option>
