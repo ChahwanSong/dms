@@ -7,11 +7,14 @@ import { DETAIL_ROUTES } from "../../app/navigation";
 const at = (path: string) => render(<MemoryRouter initialEntries={[path]}><K8sTabs /></MemoryRouter>);
 
 describe("K8sTabs", () => {
-  it("다섯 하위 화면을 잇고, nav 라벨은 「k8s 연동 하위 메뉴」 하나", () => {
+  it("여섯 하위 화면을 잇고(클러스터는 개요 다음), nav 라벨은 「k8s 연동 하위 메뉴」 하나", () => {
     at("/admin/k8s");
     const nav = screen.getByRole("navigation", { name: "k8s 연동 하위 메뉴" });
     expect(nav).toBeInTheDocument();
+    expect(Array.from(nav.querySelectorAll("a")).map((a) => a.textContent))
+      .toEqual(["개요", "클러스터", "StorageClass", "PV 탐색", "사용자 권한", "동기화 이력"]);
     expect(screen.getByRole("link", { name: "개요" })).toHaveAttribute("href", "/admin/k8s");
+    expect(screen.getByRole("link", { name: "클러스터" })).toHaveAttribute("href", "/admin/k8s/clusters");
     expect(screen.getByRole("link", { name: "StorageClass" })).toHaveAttribute("href", "/admin/k8s/storageclasses");
     expect(screen.getByRole("link", { name: "PV 탐색" })).toHaveAttribute("href", "/admin/k8s/volumes");
     expect(screen.getByRole("link", { name: "사용자 권한" })).toHaveAttribute("href", "/admin/k8s/access");
@@ -19,8 +22,12 @@ describe("K8sTabs", () => {
   });
 
   it("하위 화면에서 「개요」가 함께 켜지지 않는다(end 매칭) -- 현재 위치는 aria-current", () => {
-    at("/admin/k8s/volumes");
+    const view = at("/admin/k8s/volumes");
     expect(screen.getByRole("link", { name: "PV 탐색" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("link", { name: "개요" })).not.toHaveAttribute("aria-current");
+    view.unmount();
+    at("/admin/k8s/clusters");
+    expect(screen.getByRole("link", { name: "클러스터" })).toHaveAttribute("aria-current", "page");
     expect(screen.getByRole("link", { name: "개요" })).not.toHaveAttribute("aria-current");
   });
 

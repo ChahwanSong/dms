@@ -12,7 +12,7 @@ import { useSearchField } from "../jobs/searchField";
 import { K8sHeader } from "./K8sTabs";
 import { ACCESS_LABEL, TERMS, nsLabel, phaseVariant, pvJobLink } from "./k8sTerms";
 import { bindingNameFor } from "./pvLocation";
-import { DefList, DefRow, FreshnessLine, Mono, SELECT_FIELD, Tag } from "./parts";
+import { DefList, DefRow, FreshnessLine, Mono, NoClustersText, SELECT_FIELD, Tag } from "./parts";
 import { VOLUMES_LIMIT, useK8sVolumes } from "./useK8s";
 import type { VolumeRow, VolumesQuery } from "./types";
 
@@ -155,7 +155,7 @@ export function VolumesPage() {
     <section className="space-y-4">
       <K8sHeader title="PV 탐색"
                  description="동기화된 PV(PVC)를 찾아 실제 경로와 권한 사용자를 확인합니다. 화면의 「PV 이름」은 PVC 이름, 「볼륨」은 경로를 만드는 PV 이름(VOLUME 열)입니다." />
-      <FreshnessLine clusters={clusters} />
+      <FreshnessLine clusters={clusters} empty={null} />
       <div className="flex flex-wrap items-center gap-2">
         <input type="search" aria-label="PV 검색" className={SEARCH_FIELD} placeholder="PV 이름·볼륨·namespace(일부)"
                {...search.bind} />
@@ -224,7 +224,7 @@ export function VolumesPage() {
           </Table>
           {q.isLoading ? <p className="pt-3 text-ink/70">불러오는 중…</p>
             : rows.length > 0 ? null
-            : clusters.length === 0 ? <p className="pt-3 text-ink/70">등록된 클러스터가 없습니다 — 「개요」에서 클러스터를 등록하세요.</p>
+            : clusters.length === 0 ? <p className="pt-3 text-ink/70"><NoClustersText /></p>
             : noneSynced ? <p className="pt-3 text-ink/70">아직 동기화에 성공한 클러스터가 없습니다 — PV 목록은 모름입니다(없다는 뜻이 아닙니다).</p>
             : filtered ? <p className="pt-3 text-ink/70">조건에 맞는 PV 가 없습니다</p>
             : <p className="pt-3 text-ink/70">동기화된 PVC 가 0개입니다</p>}

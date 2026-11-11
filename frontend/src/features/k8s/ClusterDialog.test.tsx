@@ -168,7 +168,7 @@ test("편집: 검증을 끄거나 TLS 서버 이름을 바꾸면 토큰을 다�
   expect("token_enc" in sent!).toBe(true);
 });
 
-test("편집 중에 개요 폴링으로 cluster 가 바뀌어도 입력칸을 되돌리지 않는다", async () => {
+test("편집 중에 클러스터 탭 폴링으로 cluster 가 바뀌어도 입력칸을 되돌리지 않는다", async () => {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const view = render(<QueryClientProvider client={qc}>
     <ClusterDialog mode="edit" cluster={CLUSTER_OK} trigger={<Button>열기</Button>} />

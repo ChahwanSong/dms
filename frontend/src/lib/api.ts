@@ -474,7 +474,7 @@ export const REASON_MESSAGES: Record<string, string> = {
   invalid_storage_kind: "스토리지 종류는 파일시스템·PV·둘 다 중 하나여야 합니다 — 등록 화면에서 종류를 다시 고르세요",
   run_as_root_required: "이 시스템에서는 모든 작업이 root 로 실행됩니다 — 화면을 새로 고친 뒤 다시 제출하세요(「root 아님」으로는 보낼 수 없습니다)",
   pv_and_storage_conflict: "한 쪽에 PV 와 직접 경로(스토리지)를 함께 지정했습니다 — 둘 중 하나만 고르세요",
-  k8s_mapping_unknown: "이 클러스터의 k8s 권한 정보가 아직 없습니다(등록되지 않았거나 한 번도 동기화되지 않음) — 잠시 뒤 다시 시도하고, 계속되면 관리자에게 k8s 연동 → 개요의 동기화 상태 확인을 요청하세요",
+  k8s_mapping_unknown: "이 클러스터의 k8s 권한 정보가 아직 없습니다(등록되지 않았거나 한 번도 동기화되지 않음) — 잠시 뒤 다시 시도하고, 계속되면 관리자에게 k8s 연동 → 클러스터의 동기화 상태 확인을 요청하세요",
   pv_not_found: "그 PV 를 찾을 수 없습니다 — 삭제됐거나 이름이 바뀌었을 수 있습니다. 목록을 새로 고쳐 다시 고르세요(새로 만든 PV 는 다음 동기화 뒤에 보입니다)",
   pv_not_bound: "PV 가 아직 볼륨에 연결(Bound)되지 않았습니다 — 연결된 뒤(다음 동기화 이후) 다시 시도하거나 다른 PV 를 고르세요",
   pv_storageclass_unmapped: "이 PV 의 StorageClass 가 DMS 스토리지에 매핑돼 있지 않습니다 — 관리자에게 k8s 연동 → StorageClass 에서 매핑을 요청하세요",

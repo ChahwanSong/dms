@@ -33,12 +33,21 @@ export function overviewPollMs(data: K8sOverview | undefined): number {
     ? OVERVIEW_CHECK_POLL_MS : OVERVIEW_POLL_MS;
 }
 
+/** 개요 응답 하나를 개요 탭(합계·호출 노드)과 클러스터 탭(클러스터 카드)이 함께 쓴다 -- 같은 키라 탭을 오가도 다시 기다리지
+ *  않고, 폴링 간격(동기화 중 3초)도 두 탭에서 같다. */
 export const useK8sOverview = () =>
   useQuery({
     queryKey: OVERVIEW_KEY,
     queryFn: () => apiGet<K8sOverview>("/api/admin/k8s/overview"),
     refetchInterval: (q) => overviewPollMs(q.state.data as K8sOverview | undefined),
   });
+
+/** 서버 시계 - 브라우저 시계(ms): 「n분 전」을 서버 기준으로 잰다(브라우저 시계가 틀려도 거짓 나이를 만들지 않게). now = 개요
+ *  응답의 서버 시각, receivedAt = 그 응답을 받은 브라우저 시각(react-query dataUpdatedAt, 아직 없으면 0). 모르면 0. */
+export function serverOffsetMs(now: string | undefined, receivedAt: number): number {
+  const t = now ? Date.parse(now) : NaN;
+  return Number.isNaN(t) || receivedAt === 0 ? 0 : t - receivedAt;
+}
 
 /** 필터용 클러스터 목록(폴링 없음 — 동기화 이력의 클러스터 선택지). */
 export const useK8sClusters = () =>
@@ -93,7 +102,7 @@ export const useDeleteCluster = () => {
   });
 };
 
-/** 「지금 동기화」 — sync_requested_at = now. 다음 claim 에서 호출 노드가 가져간다(개요는 3초 폴링으로 따라간다). */
+/** 「지금 동기화」 — sync_requested_at = now. 다음 claim 에서 호출 노드가 가져간다(클러스터 탭은 3초 폴링으로 따라간다). */
 export const useSyncCluster = () => {
   const qc = useQueryClient();
   return useMutation({

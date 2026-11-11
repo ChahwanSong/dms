@@ -1958,7 +1958,7 @@ rm -f "$H"; unset PW
 **왜 게이트인가.** prod 렌더에는 `DMS_MAILER_BACKEND` 가 없어 코드 기본 `stub` 으로 돈다(`config.Settings.mailer_backend`). stub 은 인증번호를 메일로 보내지
 않고 **응답에 돌려준다**(`routes_auth.request_verification_code` — `stub_code`). k8s 신원 모드에서는 DMS 계정 아이디 = RoleBinding 의 ID 라, 이 상태로 열면
 누구나 남의 아이디로 가입·비밀번호 재설정을 해 **그 사람의 PV 권한을 얻는다**(§10-1). 이 단계를 마치기 전에는 DNS 를 등록·공지하지 않고 k8s 연동(6-5)을
-등록하지 않는다. 「k8s 연동」 개요 화면도 stub 이면 경고한다.
+등록하지 않는다. 「k8s 연동」 「개요」·「클러스터」 탭도 stub 이면 경고한다(「클러스터」 탭은 등록 버튼이 있는 화면이다).
 
 **DNS 를 미루는 것만으로는 닫히지 않는다.** Gateway 리스너에 hostname 이 없고(§2g-1), 인증서 SAN 에 `IP:<VIP-A>` 가 있고(§3b-2), Avi VS-443 은 설치
 전에 만든다(§0-5 1f) — 그래서 S8 이 끝나면 사용자망에서 `https://<VIP-A>` 가 경고 없이 열린다. 이 창에 stub 인증번호로 남의 아이디로 가입한 계정은
@@ -2075,16 +2075,16 @@ docstring).
   다중 노드 dsync 에서 다른 노드가 막 만든 디렉터리를 음성 캐시 때문에 못 봐 ENOENT 로 실패한다(테스트베드 실측 2026-10-26). remount 로는 안 바뀐다
   (umount → mount). CephFS·GPFS 는 해당 없다.
 - PV 스토리지를 노드마다 따로 마운트해도 된다 — 두 스토리지를 함께 마운트한 노드가 없으면 PV 로 보내는 sync 는 nsync 로 돈다. 함께 마운트한 노드가 있으면 dsync 가 먼저다.
-- **호출 노드의 에이전트가 대상 API 서버에 닿는다**. 대상 방화벽에는 개요 화면의 「주·보조 호출 노드 IP」만 연다. 확인(그 노드의 dms-agent 파드에서):
+- **호출 노드의 에이전트가 대상 API 서버에 닿는다**. 대상 방화벽에는 「개요」 탭의 「주·보조 호출 노드 IP」만 연다. 확인(그 노드의 dms-agent 파드에서):
 
   ```sh
   POD=$(kubectl --context <ctx> -n dms get pods -l app.kubernetes.io/name=dms-agent --field-selector spec.nodeName=<호출 노드> -o name)
   kubectl --context <ctx> -n dms exec "$POD" -- getent hosts <대상 API 호스트>          # 이름이 풀린다(IP 로 등록하면 생략)
   ```
 
-**절차**(포탈 스토리지 → k8s 연동)
+**절차**(포탈 스토리지 → k8s 연동 — 탭: 개요(합계·호출 노드와 주기) · 클러스터(등록·카드·지금 동기화) · StorageClass · PV 탐색 · 사용자 권한 · 동기화 이력)
 
-1. **리더 계정**(대상 클러스터): 「클러스터 등록」 창의 「대상 클러스터에 만들 읽기 전용 계정」 YAML 을 대상에 적용한다 — ns `dms-reader`, SA `dms-inventory`,
+1. **리더 계정**(대상 클러스터): 「클러스터」 탭 「클러스터 등록」 창의 「대상 클러스터에 만들 읽기 전용 계정」 YAML 을 대상에 적용한다 — ns `dms-reader`, SA `dms-inventory`,
    ClusterRole `dms-inventory-reader`(rolebindings·persistentvolumeclaims·persistentvolumes·storageclasses **list** + namespace `kube-system` get), 바인딩,
    장기 토큰 Secret `dms-inventory-token`(`frontend/src/features/k8s/readerManifest.ts`). 쓰기 권한은 없다.
 
@@ -2100,10 +2100,10 @@ docstring).
 2. **PV 스토리지**(6-4 — 종류 `pv` 또는 `both`, `backend_type` 은 PV 백엔드에 맞게). **기본 소유 uid:gid** 는 그 PV 를 실제로 쓰는 파드의 uid/fsGroup 에
    맞춘다. 그 스토리지의 PV 를 목적지로 하는 sync 결과가 이 소유로 `--chown` 된다(일반 사용자는 늘 이 값, 특권 운영자만 「PV 루트 소유자」를 고른다 —
    `execution_manifests._auto_chown`). 바꾸면 이미 제출됐지만 아직 실행되지 않은 그 PV 목적지 sync 는 `storage_owner_changed` 로 멈춘다(다시 제출).
-3. **호출 노드·주기**(개요): 주·보조 = 대상 API 에 닿는 DMS 워커(에이전트가 보고한 노드). 주기 기본 300초(`DMS_K8S_SYNC_INTERVAL_SECONDS`, 하한 60) — 포탈 값이 이긴다.
-4. **클러스터 등록**: 이름(소문자 DNS 라벨), API 서버 `https://<호스트>[:<포트>]`(경로 없음), TLS = 「지정한 CA」(`reader-ca.crt`) 권장 — 서버 이름(SNI)이 인증서와
-   다르면 지정한다. 검증 끄기는 쓰지 않는다. 토큰 = `reader.token` → 「지금 동기화」. 첫 run 은 폴링 주기(15초) 안에 시작한다.
-   같은 클러스터를 다른 주소로 또 등록하면 카드가 「같은 클러스터로 보입니다」로 경고한다(지문 = `kube-system` namespace uid).
+3. **호출 노드·주기**(「개요」 탭 「호출 노드와 주기」): 주·보조 = 대상 API 에 닿는 DMS 워커(에이전트가 보고한 노드). 주기 기본 300초(`DMS_K8S_SYNC_INTERVAL_SECONDS`, 하한 60) — 포탈 값이 이긴다.
+4. **클러스터 등록**(「클러스터」 탭 → 「클러스터 등록」): 이름(소문자 DNS 라벨), API 서버 `https://<호스트>[:<포트>]`(경로 없음), TLS = 「지정한 CA」(`reader-ca.crt`) 권장 — 서버 이름(SNI)이 인증서와
+   다르면 지정한다. 검증 끄기는 쓰지 않는다. 토큰 = `reader.token` → 그 클러스터 카드의 「지금 동기화」. 첫 run 은 폴링 주기(15초) 안에 시작한다.
+   같은 클러스터를 다른 주소로 또 등록하면 「클러스터」 탭의 카드가 「같은 클러스터로 보입니다」로 경고한다(지문 = `kube-system` namespace uid).
    API 서버 주소를 바꾸면 같은 저장에서 토큰을 다시 넣어야 한다(422 `k8s_token_required`).
 5. **StorageClass 매핑**(StorageClass 탭): 동기화로 SC 가 보인 **뒤에만** 된다(전에는 404 `storage_class_not_found`). SC 마다 스토리지를 고른다. 경로 템플릿을
    비우면 `backend_type` 프리셋이다 — `nfs` = `{subdir}`, `gpfs` = `{volume}/{volume}-data`, `onefs` = `data/csi/{volume}`(`pv_paths.PRESETS`). 화면의
@@ -2117,13 +2117,13 @@ docstring).
    시험 사용자로 로그인 → 작업 → 단일 작업에서 자기 namespace 의 PV 만 보인다(§7).
 
 **장애 표시**
-- 토큰 거부 → 카드 「실패 · API 서버가 토큰을 거부했습니다(401)」. 서버 이름 불일치 → 「API 서버 인증서를 검증하지 못했습니다」 + 원문. 둘 다 노드 탓이 아니라
+- 토큰 거부 → 「클러스터」 탭 카드 「실패 · API 서버가 토큰을 거부했습니다(401)」. 서버 이름 불일치 → 「API 서버 인증서를 검증하지 못했습니다」 + 원문. 둘 다 노드 탓이 아니라
   보조 노드로 넘기지 않는다.
 - 주 노드 에이전트가 멈추면 요청 약 90초 뒤 보조 노드가 가져간다(테스트베드 실측 93초).
 - 권한 회수(RoleBinding 삭제)는 다음 동기화에 반영된다. 컨펌 대기 중이던 작업은 컨펌 때 409 `k8s_access_denied` 로 끝난다.
-- 클러스터를 지우면 그 클러스터의 성공·실패는 호출 노드 카드의 「마지막 성공」·「마지막 실패」에서 바로 빠진다(「마지막 호출」에는 남는다). 동기화 이력은
+- 클러스터를 지우면(「클러스터」 탭 카드의 「삭제」) 그 클러스터의 성공·실패는 「개요」 탭 호출 노드 카드의 「마지막 성공」·「마지막 실패」에서 바로 빠진다(「마지막 호출」에는 남는다). 동기화 이력은
   보존일(`DMS_K8S_SYNC_RUN_RETENTION_DAYS`, 기본 30)이 지나면 지운다 — 등록된 클러스터와 달리 최근 50건을 남기지 않는다(`repositories.k8s` `prune_runs`).
-  같은 이름으로 다시 등록하면 그 이름의 옛 실패가 카드에 다시 보이다가, 그 노드가 새 등록에 성공하면 「해결됨」이 된다.
+  같은 이름으로 다시 등록하면 그 이름의 옛 실패가 호출 노드 카드에 다시 보이다가, 그 노드가 새 등록에 성공하면 「해결됨」이 된다.
 - `DMS_SESSION_SECRET` 을 바꾸면 저장한 토큰이 열리지 않는다 — 클러스터마다 다시 넣는다(§3b-4).
 
 ### 6-6. 공용 스토리지 밖 사본
@@ -2165,7 +2165,7 @@ S13 의 두 줄이다. 처음 한 번 만들고 주기를 정한다(§14-2).
 
 - **시험 대상**: 대상 클러스터에 시험 namespace 하나, 그 안에 지워도 되는 PVC 둘(소스·목적지), 시험 사용자의 바인딩
   `<시험id>-clusterrole-edit`(roleRef ClusterRole `kubeflow-edit`)을 만든다. 실제 사용자 namespace 를 쓰면 데이터를 건드린다 — 쓰지 않는다.
-  「k8s 연동」에서 「지금 동기화」 → 「사용자 권한」에 그 바인딩이 인식됐는지 본다(§6-5).
+  「k8s 연동」 「클러스터」 탭에서 그 클러스터 카드의 「지금 동기화」 → 「사용자 권한」 탭에 그 바인딩이 인식됐는지 본다(§6-5).
 - **계정**: 시험 사용자(그 맵핑 ID — `<시험id>` 의 `-` 를 `.` 로), 특권 운영자(`<LOCAL_ADMIN>`).
 - **도구**: 포탈(브라우저)로 한다. 잡 제출은 세션 로그인만 된다 — 공유 토큰 Bearer 제출은 403 `privileged_not_authorized` 다(`routes_requests.submit`).
   스크립트로 하려면 봉인 로그인(§10-7)으로 세션을 얻는다.
@@ -2205,7 +2205,7 @@ VERIFY_NO_PROBES=1 CACERT=<사내CA> sh deploy/install.sh --context <ctx> --only
 - 스토리지 → 노드: 모든 워커의 에이전트 보고가 신선하다.
 - 요청 상세의 결과 화면·실행 로그가 열린다(결과 파일이 공용 디렉터리에 써졌다는 뜻).
 
-끝나면 정리한다: 시험 작업은 관리자가 전체 작업에서 지운다(§12 — 세션 관리자). 시험 PVC·바인딩·namespace 를 대상 클러스터에서 지우고 「지금 동기화」.
+끝나면 정리한다: 시험 작업은 관리자가 전체 작업에서 지운다(§12 — 세션 관리자). 시험 PVC·바인딩·namespace 를 대상 클러스터에서 지우고 「클러스터」 탭 카드의 「지금 동기화」.
 시험 계정은 관리 → 계정에서 비활성화하거나 지운다.
 
 ### 7-5. 기대 거부 사유

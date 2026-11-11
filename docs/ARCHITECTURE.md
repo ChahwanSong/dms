@@ -995,7 +995,7 @@ env를 기동 시점에 전수 검증해 frozen Settings/AgentSettings로 만들
 
 - 제출(`api.routes_requests.submit`)·planner 3a(`planner.Planner._plan_one`)·컨펌(`api.routes_jobs.confirm_job`)·배치 자식 생성과 확인(`batch_orchestrator.BatchOrchestrator._materialize`·`_confirm_child`)이 같은 `k8s_access` 술어를 쓴다.
 - stepper 는 pv 블록으로 봉쇄 경계(`stepper.JobStepper._pv_containment`)와 결과 소유 규칙(`JobStepper._owner_rule`·`_pv_owner_required`)을 정한다(§6).
-- 포탈: 관리 → k8s 연동 화면(`/admin/k8s*`), 사용자 볼륨 고르기(`/api/user/k8s/volumes`), 신선도 경고(`pvLocation.freshnessWarns`), 개요 응답의 `signup_guard` 경고.
+- 포탈: 관리 → k8s 연동 화면(`/admin/k8s*` — 탭 `features/k8s/K8sTabs.K8S_TABS`: 개요(합계·호출 노드와 주기) · 클러스터(`ClustersPage` — 등록·카드·지금 동기화, 2026-11-11 개요에서 분리) · StorageClass · PV 탐색 · 사용자 권한 · 동기화 이력), 사용자 볼륨 고르기(`/api/user/k8s/volumes`), 신선도 경고(`pvLocation.freshnessWarns`), 개요 응답의 `signup_guard` 경고.
 - 사용량 분석의 PV 소속(`usage_attribution`)이 `K8sRepository.pv_root_index`·`users_by_namespace` 를 읽는다.
 
 ---

@@ -133,8 +133,13 @@ test("상한에 걸리면(truncated) 좁히라고 안내", async () => {
 
 test("빈 상태 셋: 클러스터 없음 / 동기화 전(모름) / 조건 0건을 다른 문구로", async () => {
   wrap(volumes({ clusters: [], volumes: [] }));
-  expect(await screen.findByText(/등록된 클러스터가 없습니다 — 「개요」에서 클러스터를 등록하세요\./, { selector: "p.pt-3" }))
-    .toBeInTheDocument();
+  // 표의 빈 상태는 클러스터 탭 링크(2026-11-11 개요에서 분리) 한 줄뿐 -- 스냅숏 기준 줄의 위치 글(단일 작업 화면용)은 끈다(같은
+  // 지시가 한 화면에 두 문구로 겹치지 않게, 2026-11-11 리뷰)
+  const link = await screen.findByRole("link", { name: "클러스터 탭" });
+  expect(link).toHaveAttribute("href", "/admin/k8s/clusters");
+  expect(link.closest("p")).toHaveTextContent("등록된 클러스터가 없습니다 — 클러스터 탭에서 클러스터를 등록하세요.");
+  expect(screen.getAllByText(/등록된 클러스터가 없습니다/)).toHaveLength(1);
+  expect(screen.queryByText(/「k8s 연동 → 클러스터」/)).toBeNull();
 });
 
 test("빈 상태: 한 번도 동기화하지 않았으면 「모름」", async () => {

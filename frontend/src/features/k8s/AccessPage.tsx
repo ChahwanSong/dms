@@ -6,7 +6,7 @@ import { Table } from "../../components/ui/Table";
 import { useSearchField } from "../jobs/searchField";
 import { K8sHeader } from "./K8sTabs";
 import { ACCESS_LABEL, bindingParts, subjectText, unrecognizedWhy } from "./k8sTerms";
-import { FreshnessLine, Mono, Tag } from "./parts";
+import { FreshnessLine, Mono, NoClustersText, Tag } from "./parts";
 import { useK8sAccess } from "./useK8s";
 import type { AccessGrant, AccessUser } from "./types";
 
@@ -202,7 +202,7 @@ export function AccessPage() {
     <section className="space-y-4">
       <K8sHeader title="사용자 권한"
                  description="RoleBinding <ID>-clusterrole-admin|edit(역할 ClusterRole kubeflow-admin|kubeflow-edit) 또는 namespace 소유자 namespaceAdmin(이메일 로컬파트, 계정 메일 도메인과 같을 때)이 있는 namespace 의 모든 PV 에 그 ID 가 읽기·쓰기 권한을 가집니다. ID 는 이름 앞부분의 - 를 . 으로 바꾼 값이고 DMS 계정 아이디와 정확히 같아야 합니다." />
-      <FreshnessLine clusters={clusters} />
+      <FreshnessLine clusters={clusters} empty={null} />
       <div className="flex flex-wrap items-center gap-2">
         <Segmented label="보기 기준" value={view} onChange={setView}
                    options={[{ value: "user", label: "사용자별" }, { value: "namespace", label: "namespace별" }]} />
@@ -223,7 +223,7 @@ export function AccessPage() {
             {view === "user" ? <ByUser users={users} /> : <ByNamespace users={users} />}
             {q.isLoading ? <p className="pt-3 text-ink/70">불러오는 중…</p>
               : users.length > 0 ? null
-              : clusters.length === 0 ? <p className="pt-3 text-ink/70">등록된 클러스터가 없습니다 — 「개요」에서 클러스터를 등록하세요.</p>
+              : clusters.length === 0 ? <p className="pt-3 text-ink/70"><NoClustersText /></p>
               : noneSynced ? <p className="pt-3 text-ink/70">아직 동기화에 성공한 클러스터가 없습니다 — 권한은 모름입니다(권한이 없다는 뜻이 아닙니다).</p>
               : search.applied !== "" ? <p className="pt-3 text-ink/70">검색어에 맞는 권한이 없습니다</p>
               : <p className="pt-3 text-ink/70">인식된 바인딩이 없습니다 — 아래 「인식하지 않은 바인딩」에서 이름·역할을 확인하세요.</p>}

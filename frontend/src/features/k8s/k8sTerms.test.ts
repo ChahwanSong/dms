@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import {
-  BINDING_NAME_RE, TRIGGER_LABEL, bindingParts, callerNodeState, changeNames, clusterStatusMeta, countText, durationText,
+  BINDING_NAME_RE, TRIGGER_LABEL, bindingParts, callerNodeState, changeNames, clusterStatusCounts, clusterStatusMeta,
+  countText, durationText,
   failureResolved, intervalText, isoAfter, nsLabel, pathUnverifiedSince, phaseVariant, pvJobLink, runStatusMeta,
   shortReasonText,
   storageKindOf, storageOwnerOf, unrecognizedWhy, untilText, warningText,
@@ -199,4 +200,14 @@ test("pvRootDestNote: PV 루트 목적지 경고는 결과 소유 규칙을 따�
     .toBe("목적지가 PV 전체(루트)라 PV 루트 디렉터리의 권한·시각이 소스에 맞춰 바뀝니다(소유자는 PV 루트 소유자 그대로) — 하위 디렉터리로 받으려면 경로를 적으세요.");
   expect(pvRootDestNote({ rule: "chown", value: "7:7" }, { storage_owner: "1500:1500" }))
     .toContain("PV 루트 디렉터리 자체가 chown 지정값 7:7 소유로 바뀌고");
+});
+
+test("클러스터 상태별 개수: 「정상」 먼저·배지 표 순서·모르는 상태는 끝에 원문, 0개 상태는 없다(개요 타일·클러스터 탭 요약 공용)", () => {
+  expect(clusterStatusCounts([])).toEqual([]);
+  const got = clusterStatusCounts([{ status: "failing" }, { status: "weird" }, { status: "ok" }, { status: "failing" },
+                                   { status: "token_missing" }, { status: "ok" }, { status: "ok" }]);
+  expect(got.map((s) => `${s.label} ${s.count}`)).toEqual(["정상 3", "실패 2", "토큰 없음 1", "weird 1"]);
+  expect(got.map((s) => s.variant)).toEqual(["ok", "bad", "action", "neutral"]);
+  // no_node 안내는 개요 탭을 가리킨다(호출 노드가 클러스터 탭이 아니라 개요에 있다 -- 2026-11-11)
+  expect(clusterStatusMeta("no_node").help).toContain("「개요」 탭의 「호출 노드와 주기」");
 });

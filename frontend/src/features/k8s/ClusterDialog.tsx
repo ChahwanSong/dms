@@ -112,7 +112,7 @@ export function ClusterDialog({ mode, cluster, trigger }: {
   const save = useSaveCluster();
 
   // **열 때만** 서버 값으로 맞춘다(닫을 때 저장 오류도 비운다 -- 다시 열었는데 낡은 오류가 남지 않게, StorageDialog 관례).
-  // cluster 를 의존성에 넣지 않는다: 개요는 10초(동기화 중 3초)마다 다시 읽어 카드의 cluster 객체가 바뀌는데, 그때마다
+  // cluster 를 의존성에 넣지 않는다: 클러스터 탭은 10초(동기화 중 3초)마다 다시 읽어 카드의 cluster 객체가 바뀌는데, 그때마다
   // 편집 중인 칸(토큰 포함)이 서버 값으로 되돌아갔다.
   useEffect(() => {
     if (!open) { save.reset(); return; }
@@ -189,7 +189,7 @@ export function ClusterDialog({ mode, cluster, trigger }: {
           {apiErr
             ? <p id={`${ids}-api-err`} className="text-bad">{apiErr}</p>
             : <p id={`${ids}-api-help`} className="text-xs text-ink/70">
-                IP 나 도메인 모두 됩니다. 이 주소는 DMS 서버가 아니라 아래 「호출 노드」(primary·secondary)에서 부릅니다 — 대상
+                IP 나 도메인 모두 됩니다. 이 주소는 DMS 서버가 아니라 「개요」 탭에서 지정한 호출 노드(primary·secondary)가 부릅니다 — 대상
                 API 서버의 방화벽에 호출 노드 IP 를 허용하세요. 이름은 등록 뒤 바꿀 수 없습니다.
               </p>}
           <label className="flex items-center gap-2">

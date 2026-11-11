@@ -205,7 +205,7 @@ test("admin can open releases screen", async () => {
   expect(await screen.findByRole("heading", { name: "릴리스" })).toBeInTheDocument();
 });
 
-// k8s 연동(dms-k8s 설계 §7): 개요 h1 = 사이드바 라벨 「k8s 연동」, 하위 넷 h1 = 탭·크럼 라벨(빌드 이력 선례).
+// k8s 연동(dms-k8s 설계 §7): 개요 h1 = 사이드바 라벨 「k8s 연동」, 하위 다섯 h1 = 탭·크럼 라벨(빌드 이력 선례).
 const K8S_OVERVIEW = {
   now: "2026-10-25T00:00:00Z",
   settings: { primary_node: null, secondary_node: null, interval_seconds: 300, poll_seconds: 15 },
@@ -225,6 +225,7 @@ const k8sHandlers = () => [
 
 test.each([
   ["/admin/k8s", "k8s 연동"],
+  ["/admin/k8s/clusters", "클러스터"],
   ["/admin/k8s/storageclasses", "StorageClass"],
   ["/admin/k8s/volumes", "PV 탐색"],
   ["/admin/k8s/access", "사용자 권한"],
@@ -233,10 +234,14 @@ test.each([
   server.use(...k8sHandlers());
   renderAt(path);
   expect(await screen.findByRole("heading", { name: heading, level: 1 })).toBeInTheDocument();
-  // 하위 내비는 다섯 탭 -- 지금 화면이 aria-current 로 켜진다.
+  // 하위 내비는 여섯 탭(2026-11-11 클러스터 분리) -- 지금 화면이 aria-current 로 켜진다. 하위 화면의 h1 = 탭 라벨 = 크럼 끝 라벨.
   const nav = screen.getByRole("navigation", { name: "k8s 연동 하위 메뉴" });
-  expect(nav.querySelectorAll("a")).toHaveLength(5);
-  expect(nav.querySelector('[aria-current="page"]')).not.toBeNull();
+  expect(nav.querySelectorAll("a")).toHaveLength(6);
+  expect(nav.querySelector('[aria-current="page"]')).toHaveTextContent(path === "/admin/k8s" ? "개요" : heading);
+  if (path !== "/admin/k8s") {
+    const crumb = screen.getByRole("navigation", { name: "breadcrumb" });
+    expect(within(crumb).getByText(heading)).toBeInTheDocument();
+  }
 });
 
 // 사용량 분석(2026-10-29 하위 메뉴): 경로별 h1 = 사이드바 라벨 「사용량 분석」, 스토리지별 h1 = 탭·크럼 라벨(k8s 연동 선례).

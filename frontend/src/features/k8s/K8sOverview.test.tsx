@@ -7,11 +7,11 @@ import { http, HttpResponse } from "msw";
 import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from "vitest";
 import { reasonText } from "../../lib/api";
 import { K8sOverview, customIntervalSeconds } from "./K8sOverview";
-import { CLUSTER_FAILING, CLUSTER_OK, NOW, overview } from "./k8sFixtures";
+import { CLUSTER_OK, NOW, overview } from "./k8sFixtures";
 import type { CallerClusterLink, CallerNode, ClusterSummary, K8sOverview as Overview } from "./types";
 
-// 개요(설계 §7): 호출 노드 카드·노드 지정·주기 변경(1·5·15·60분 + 직접 입력)·클러스터 카드(상태·n분 전·개수·마지막 run·
-// 지금 동기화)·빈 상태·오류 상태. null(모름)·0·실패를 다른 문구로 보이는지까지 고정한다.
+// 개요(설계 §7): 합계(「클러스터」 타일 = 클러스터 탭 링크 + 상태별 개수)·호출 노드 카드·노드 지정·주기 변경(1·5·15·60분 +
+// 직접 입력)·빈 상태·오류 상태. 클러스터 카드·등록·지금 동기화는 2026-11-11 「클러스터」 탭으로 옮겼다(ClustersPage.test).
 
 const server = setupServer();
 beforeAll(() => server.listen({ onUnhandledRequest: "bypass" }));
@@ -39,66 +39,42 @@ function wrap(data: Overview | null = overview()) {
 
 // 데이터가 온 뒤(h1·탭은 로딩 중에도 그려진다) -- 호출 노드 카드 제목이 앵커.
 const ready = () => screen.findByRole("heading", { name: "호출 노드와 주기", level: 2 });
-const card = (name: string) => screen.getByRole("heading", { name, level: 3 }).closest("div.flex-col") as HTMLElement;
+// 「클러스터」 타일 = 클러스터 탭 링크(이름 = 타일 글자 「클러스터 2 정상 1 · 실패 1」). 탭 링크 「클러스터」와는 이름이 다르다.
+const clusterTile = () => screen.getByRole("link", { name: /^클러스터\s*\d/ });
 
-test("h1·탭·합계·호출 노드(IP·방화벽 안내·맡은 클러스터)·클러스터 카드를 그린다", async () => {
+test("h1·탭·합계·호출 노드(IP·방화벽 안내·맡은 클러스터)를 그리고, 클러스터 카드·등록 동작은 없다(클러스터 탭)", async () => {
   wrap();
   expect(await screen.findByRole("heading", { name: "k8s 연동", level: 1 })).toBeInTheDocument();
   await ready();
   expect(screen.getByRole("link", { name: "개요" })).toHaveAttribute("aria-current", "page");
+  expect(screen.getByRole("link", { name: "클러스터" })).toHaveAttribute("href", "/admin/k8s/clusters");
   // 노드 슬롯: 주 노드는 IP + 방화벽 안내 + 맡은 클러스터
   expect(screen.getByText("10.10.10.21")).toBeInTheDocument();
   expect(screen.getAllByText("대상 API 서버 방화벽에 이 IP 를 허용하세요")).toHaveLength(2);
   expect(screen.getByText("사용 중")).toBeInTheDocument();
   expect(screen.getByText("대기")).toBeInTheDocument();
-  // 클러스터 카드 둘
-  const ok = card("dmsk8s");
-  expect(within(ok).getByText("정상")).toBeInTheDocument();
-  expect(within(ok).getByText("https://10.10.10.20:6443")).toBeInTheDocument();
-  expect(within(ok).getByText("3분 전")).toBeInTheDocument();
-  const bad = card("dmsk8s-dns");
-  expect(within(bad).getAllByText("실패").length).toBeGreaterThanOrEqual(1);   // 배지 + 마지막 실행
+  // 클러스터 카드·등록·모두 동기화는 클러스터 탭으로 옮겼다
+  expect(screen.queryByRole("heading", { name: "dmsk8s" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "클러스터 등록" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "모두 지금 동기화" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "지금 동기화" })).toBeNull();
+  expect(screen.queryByText("등록된 클러스터가 없습니다")).toBeNull();
 });
 
-test("null(모름)·0·실패를 다른 문구로 -- 개수 0 은 「0」, 받은 목록 없음은 「모름」, 실패는 사유 문장", async () => {
-  wrap();
+test("「클러스터」 타일은 클러스터 탭 링크이고 상태별 개수를 보인다 -- 실패는 빨간 글자, 조치 필요는 주의색", async () => {
+  wrap(overview({ clusters: [CLUSTER_OK, { ...CLUSTER_OK, name: "c-fail", status: "failing" },
+                             { ...CLUSTER_OK, name: "c-token", token: "missing", status: "token_missing" }],
+                  totals: { clusters: 3, namespaces: 3, pvcs: 7, bindings: 9, users: 0 } }));
   await ready();
-  const ok = card("dmsk8s");
-  // users: 0 -- 「0」으로 보인다(—로 뭉개지 않는다)
-  const usersTile = within(ok).getByText("권한 사용자").parentElement!;
-  expect(usersTile).toHaveTextContent("0");
-  expect(usersTile).not.toHaveTextContent("—");
-  const bad = card("dmsk8s-dns");
-  expect(within(bad).getByText(/아직 받은 목록이 없습니다 — 개수는 모름/)).toBeInTheDocument();
-  expect(within(bad).getByText("아직 없음")).toBeInTheDocument();          // 마지막 성공 없음
-  expect(within(bad).getByText("2회")).toBeInTheDocument();
-  expect(within(bad).getByText(/certificate verify failed/)).toBeInTheDocument();
-  expect(within(bad).getByText(/한 번도 성공하지 않아/)).toBeInTheDocument();
-  expect(within(bad).getByText(/같은 클러스터로 보입니다\(kube-system uid 일치\): dmsk8s/)).toBeInTheDocument();
-});
-
-test("지금 동기화: POST /api/admin/k8s/clusters/<이름>:sync 를 부르고 결과를 알린다", async () => {
-  const hits: string[] = [];
-  server.use(http.post(/\/api\/admin\/k8s\/clusters\/[^/]+:sync$/, ({ request }) => {
-    hits.push(new URL(request.url).pathname);
-    return HttpResponse.json({ ok: true });
-  }));
-  wrap();
-  await ready();
-  await userEvent.click(within(card("dmsk8s")).getByRole("button", { name: "지금 동기화" }));
-  await waitFor(() => expect(hits).toEqual(["/api/admin/k8s/clusters/dmsk8s:sync"]));
-  expect(await within(card("dmsk8s")).findByText(/요청했습니다/)).toBeInTheDocument();
-});
-
-test("토큰 없는·꺼진 클러스터는 지금 동기화가 잠긴다(이유는 title)", async () => {
-  wrap(overview({ clusters: [{ ...CLUSTER_OK, token: "missing", status: "token_missing" },
-                             { ...CLUSTER_FAILING, enabled: false, status: "disabled" }] }));
-  await ready();
-  const a = within(card("dmsk8s")).getByRole("button", { name: "지금 동기화" });
-  expect(a).toBeDisabled();
-  expect(a).toHaveAttribute("title", "토큰이 있어야 동기화합니다");
-  expect(within(card("dmsk8s-dns")).getByRole("button", { name: "지금 동기화" })).toBeDisabled();
-  expect(within(card("dmsk8s")).getByText("토큰 필요")).toBeInTheDocument();
+  const tile = clusterTile();
+  expect(tile).toHaveAttribute("href", "/admin/k8s/clusters");
+  expect(tile).toHaveTextContent("클러스터3정상 1 ·실패 1 ·토큰 없음 1");
+  expect(within(tile).getByText(/^실패 1/)).toHaveClass("text-bad");
+  expect(within(tile).getByText(/^토큰 없음 1/)).toHaveClass("text-attn");
+  expect(within(tile).getByText(/^정상 1/)).not.toHaveClass("text-bad");
+  // 다른 합계 타일은 링크가 아니다(0 은 「0」 -- 「—」로 뭉개지 않는다)
+  expect(screen.getAllByRole("link").filter((a) => a.textContent?.startsWith("권한 사용자"))).toHaveLength(0);
+  expect(screen.getByText("권한 사용자").closest("div.rounded-card")).toHaveTextContent("권한 사용자0");
 });
 
 test("주기 변경: 15분을 고르고 저장하면 PUT settings 에 interval_seconds 900(노드는 그대로)", async () => {
@@ -190,13 +166,16 @@ test("가입 신원 경고: 인증 메일이 stub·꺼짐이면 보이고, 실�
   v.unmount();
 });
 
-test("빈 상태: 클러스터가 없으면 등록 안내와 등록 버튼", async () => {
+test("빈 상태: 클러스터가 없으면 호출 노드 지정 → 클러스터 탭 등록 순서를 한 줄로 안내한다(등록 창은 클러스터 탭에만)", async () => {
   wrap(overview({ clusters: [], settings: { primary_node: null, secondary_node: null, interval_seconds: 300, poll_seconds: 15 },
                   totals: { clusters: 0, namespaces: null, pvcs: null, bindings: null, users: null } }));
-  expect(await screen.findByText("등록된 클러스터가 없습니다")).toBeInTheDocument();
-  expect(screen.getAllByRole("button", { name: "클러스터 등록" }).length).toBeGreaterThanOrEqual(2);
+  expect(await screen.findByText(/아직 등록된 클러스터가 없습니다 — 아래 「호출 노드와 주기」에서/)).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "클러스터 탭에서 등록" })).toHaveAttribute("href", "/admin/k8s/clusters");
+  expect(screen.queryByRole("button", { name: "클러스터 등록" })).toBeNull();
   expect(screen.getAllByText("지정 안 됨")).toHaveLength(2);
-  expect(screen.queryByRole("button", { name: "모두 지금 동기화" })).not.toBeInTheDocument();
+  // 0 개 타일도 클러스터 탭 링크(부제 없음), 모르는 합계는 「—」
+  expect(clusterTile()).toHaveTextContent(/^클러스터0$/);
+  expect(screen.getByText("namespace").closest("div.rounded-card")).toHaveTextContent("namespace—");
 });
 
 test("오류 상태: 개요 조회 실패는 role=alert 하나로 알린다(불러오는 중에 갇히지 않는다)", async () => {
@@ -239,6 +218,9 @@ function incident(secondary: Partial<CallerNode> = {}): Overview {
 }
 
 const slot = (title: string) => screen.getByText(title).closest("div.rounded-card") as HTMLElement;
+// 「마지막 실패」의 빨간 줄 -- 클러스터 이름이 링크(그 카드로)라 글자가 여러 노드에 나뉜다. 전체 글자로 찾는다.
+const redLine = (root: HTMLElement, re: RegExp) =>
+  within(root).getByText((_, el) => el !== null && el.classList.contains("text-bad") && re.test(el.textContent ?? ""));
 const PRIMARY = "주 호출 노드 · primary";
 const SECONDARY = "보조 호출 노드 · secondary";
 
@@ -254,8 +236,22 @@ test("이미 해결된 실패는 흐리게·짧게(조치 문구 없이), 클러
   expect(p.querySelector(".text-bad")).toBeNull();                          // 빨간 글씨가 하나도 없다
   const rows = within(p).getAllByRole("listitem");
   expect(rows.map((r) => r.textContent)).toEqual(["dmsk8s 성공 · 2분 전", "dmsk8s2 성공 · 2분 전"]);
-  // 호출 노드 카드 밖(클러스터 카드)은 그대로
-  expect(within(card("dmsk8s2")).getByText("정상")).toBeInTheDocument();
+  // 호출 노드 카드 밖(클러스터 상태 -- 타일의 상태별 개수)은 그대로
+  expect(clusterTile()).toHaveTextContent("정상 2");
+});
+
+test("클러스터 이름(마지막 실패·클러스터별 연결)은 클러스터 탭의 그 카드로 가는 링크 -- 실패 사유가 시키는 「편집」으로 바로 간다", async () => {
+  wrap(incident());
+  await ready();
+  const s = slot(SECONDARY);
+  const red = redLine(s, /dmsk8s2 대체 재시도 · /);
+  expect(within(red).getByRole("link", { name: "dmsk8s2" })).toHaveAttribute("href", "/admin/k8s/clusters#cluster-dmsk8s2");
+  const [a, b] = within(s).getAllByRole("listitem");
+  expect(within(a).getByRole("link", { name: "dmsk8s" })).toHaveAttribute("href", "/admin/k8s/clusters#cluster-dmsk8s");
+  expect(within(b).getByRole("link", { name: "dmsk8s2" })).toHaveAttribute("href", "/admin/k8s/clusters#cluster-dmsk8s2");
+  // 이미 해결된 실패(흐린 줄)의 이름도 같은 링크
+  const fixed = within(slot(PRIMARY)).getByText(/이후 성공해 해결됨/);
+  expect(within(fixed).getByRole("link", { name: "dmsk8s2" })).toHaveAttribute("href", "/admin/k8s/clusters#cluster-dmsk8s2");
 });
 
 test("다른 클러스터의 성공으로 이 클러스터의 실패를 「해결됨」이라 하지 않는다 — 칸과 배지가 같은 판정", async () => {
@@ -267,7 +263,7 @@ test("다른 클러스터의 성공으로 이 클러스터의 실패를 「해�
   await ready();
   const p = slot(PRIMARY);
   expect(within(p).queryByText(/이후 성공해 해결됨/)).toBeNull();
-  expect(within(p).getByText(/dmsk8s2 수동 · /)).toHaveClass("text-bad");
+  expect(redLine(p, /dmsk8s2 수동 · /)).toHaveTextContent(`1일 전 · dmsk8s2 수동 · ${reasonText("k8s_sync_unreachable")}`);
   // 배지도 노드 단위 마지막 성공(dmsk8s, 2분 전)으로 덮지 않는다(2026-10-28 2차 리뷰 -- 칸은 빨간데 배지는 「사용 중」이었다)
   expect(within(p).getByText("최근 실패")).toBeInTheDocument();
   expect(within(p).queryByText("사용 중")).toBeNull();
@@ -279,8 +275,7 @@ test("해결 안 된 실패: 빨간 전체 사유 + 클러스터 이름, 그 클
   const s = slot(SECONDARY);
   expect(within(s).getByText("재확인 필요")).toBeInTheDocument();
   expect(within(s).queryByText("최근 실패")).toBeNull();
-  const red = within(s).getByText(/dmsk8s2 대체 재시도 · /);
-  expect(red).toHaveClass("text-bad");
+  const red = redLine(s, /dmsk8s2 대체 재시도 · /);
   expect(red).toHaveTextContent(`1일 전 · dmsk8s2 대체 재시도 · ${reasonText("k8s_sync_unreachable")}`);
   expect(within(s).getByText(/클러스터 dmsk8s2 는 이후 다른 노드로 회복했습니다/)).toBeInTheDocument();
   const [a, b] = within(s).getAllByRole("listitem");
@@ -335,14 +330,15 @@ test("primary 의 실패·보조 연결 확인의 실패는 클러스터가 회�
   await ready();
   const s = slot(SECONDARY);
   expect(within(s).getByText("최근 실패")).toBeInTheDocument();
-  expect(within(s).getByText(/dmsk8s2 보조 연결 확인 · /)).toHaveClass("text-bad");
+  expect(redLine(s, /dmsk8s2 보조 연결 확인 · /)).toBeInTheDocument();
   expect(s).not.toHaveTextContent("이 노드의 경로는 그 뒤 확인되지 않았습니다");
   // 「클러스터별 연결」도 확인 실패에 「클러스터는 이후 회복」을 붙이지 않는다 -- 클러스터는 실패한 적이 없다(카드는 「정상」,
   // primary 가 2분 전 성공; 2026-10-28 2차 리뷰)
   const [, row] = within(s).getAllByRole("listitem");
   expect(row).toHaveTextContent("dmsk8s2 실패 · 10분 전 · API 서버 연결 실패");
   expect(row).not.toHaveTextContent("회복");
-  expect(within(card("dmsk8s2")).getByText("정상")).toBeInTheDocument();
+  expect(clusterTile()).toHaveTextContent("정상 2");
+  expect(clusterTile()).not.toHaveTextContent("실패");
 });
 
 test("옛 서버 응답(clusters 칸 없음)이면 「클러스터별 연결」 줄을 지어내지 않는다", async () => {
@@ -427,18 +423,4 @@ test("걸린 확인 요청이 있는데 보조 노드 보고가 끊겼으면 「
     .toHaveClass("text-attn");
   expect(s2).not.toHaveTextContent("다음 폴링");
   expect(within(s2).getByRole("button", { name: "연결 확인" })).toBeDisabled();
-  expect(screen.getByText(/초마다 새로 읽습니다/)).toHaveTextContent("화면은 10초마다 새로 읽습니다");
-});
-
-test("모두 지금 동기화: 동기화 가능한(켜짐·토큰 있음) 클러스터만 요청", async () => {
-  const hits: string[] = [];
-  server.use(http.post(/\/api\/admin\/k8s\/clusters\/[^/]+:sync$/, ({ request }) => {
-    hits.push(new URL(request.url).pathname);
-    return HttpResponse.json({});
-  }));
-  wrap(overview({ clusters: [CLUSTER_OK, { ...CLUSTER_FAILING, token: "missing", status: "token_missing" }] }));
-  await ready();
-  await userEvent.click(screen.getByRole("button", { name: "모두 지금 동기화" }));
-  expect(await screen.findByText("1개 클러스터 동기화를 요청했습니다")).toBeInTheDocument();
-  expect(hits).toEqual(["/api/admin/k8s/clusters/dmsk8s:sync"]);
 });

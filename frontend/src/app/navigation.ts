@@ -66,8 +66,8 @@ export const NAVIGATION: NavSection[] = [
         label: "스토리지", adminOnly: true,
         items: [
           { path: "/admin/storages", label: "스토리지", icon: Database },
-          // k8s 연동(dms-k8s, 2026-10-25 설계 §7): 클러스터 등록·호출 노드·StorageClass 매핑·PV 탐색·사용자 권한·동기화
-          // 이력 -- 하위 다섯 화면은 사이드바가 아니라 화면 안 탭(K8sTabs)이다(빌드 선례). 스토리지와 노드 사이: PV 는
+          // k8s 연동(dms-k8s, 2026-10-25 설계 §7): 호출 노드·클러스터 등록·StorageClass 매핑·PV 탐색·사용자 권한·동기화
+          // 이력 -- 하위 여섯 화면은 사이드바가 아니라 화면 안 탭(K8sTabs)이다(빌드 선례). 스토리지와 노드 사이: PV 는
           // 스토리지의 한 종류이고, 호출 노드는 노드 화면의 노드다.
           { path: "/admin/k8s", label: "k8s 연동", icon: ShipWheel },
           { path: "/admin/nodes", label: "노드", icon: Server },
@@ -107,6 +107,7 @@ export const DETAIL_ROUTES = [
   { pattern: "/admin/builds/images", label: "이미지 관리", parent: "/admin/builds" },
   { pattern: "/admin/builds/:buildId", label: "빌드 상세", parent: "/admin/builds" },
   // k8s 연동의 하위 화면(탭) -- 라벨은 탭(K8sTabs)·h1 과 같은 문자열이다. :param 패턴이 없어 순서 함정은 없다.
+  { pattern: "/admin/k8s/clusters", label: "클러스터", parent: "/admin/k8s" },
   { pattern: "/admin/k8s/storageclasses", label: "StorageClass", parent: "/admin/k8s" },
   { pattern: "/admin/k8s/volumes", label: "PV 탐색", parent: "/admin/k8s" },
   { pattern: "/admin/k8s/access", label: "사용자 권한", parent: "/admin/k8s" },

@@ -50,10 +50,12 @@ async function visitUsageFiltered(page: Page): Promise<void> {
   await expect(panel.getByText("필터에 맞는 대상이 없습니다").or(panel.locator("table").first())).toBeVisible();
 }
 
-// k8s 연동(dms-k8s 설계 §7) 개요 + 하위 넷. e2e 하네스엔 클러스터가 없어 다섯 화면 모두 빈 상태(안내·빈 표)로 그려진다 -- 표
-// 하한은 0, 머리의 동작 버튼 줄·탭 줄(가로 스크롤)·필터 줄이 L1 위험이다. 로딩 문구가 사라진 뒤에 잰다(개요는 「클러스터」 h2).
+// k8s 연동(dms-k8s 설계 §7) 개요 + 하위 다섯(클러스터는 2026-11-11 개요에서 분리). e2e 하네스엔 클러스터가 없어 여섯 화면 모두
+// 빈 상태(안내·빈 표)로 그려진다 -- 표 하한은 0, 머리의 동작 버튼 줄·탭 줄(가로 스크롤 -- 여섯 탭)·필터 줄이 L1 위험이다. 로딩
+// 문구가 사라진 뒤에 잰다(개요는 「호출 노드와 주기」 h2, 클러스터는 빈 상태 h2 -- 카드가 있으면 카드 이름 h2).
 const K8S_PAGES: Array<[string, string]> = [
   ["/admin/k8s", "k8s 연동"],
+  ["/admin/k8s/clusters", "클러스터"],
   ["/admin/k8s/storageclasses", "StorageClass"],
   ["/admin/k8s/volumes", "PV 탐색"],
   ["/admin/k8s/access", "사용자 권한"],
@@ -72,7 +74,21 @@ async function visitSecurity(page: Page): Promise<void> {
 async function visitK8s(page: Page, path: string, heading: string): Promise<void> {
   await visit(page, path, heading);
   await expect(page.getByText("불러오는 중…", { exact: true })).toHaveCount(0);
-  if (path === "/admin/k8s") await expect(page.getByRole("heading", { name: "클러스터", level: 2 })).toBeVisible();
+  if (path === "/admin/k8s") await expect(page.getByRole("heading", { name: "호출 노드와 주기", level: 2 })).toBeVisible();
+  if (path === "/admin/k8s/clusters") {
+    await expect(page.getByRole("heading", { name: "등록된 클러스터가 없습니다", level: 2 })
+      .or(page.getByRole("button", { name: "지금 동기화", exact: true }).first())).toBeVisible();
+  }
+  // 켜진 탭은 탭 줄 안에 보여야 한다 -- 여섯 탭이 375·390·768 에서 넘쳐 「사용자 권한」·「동기화 이력」이 켜진 채 화면 밖에 있었다
+  // (2026-11-11 리뷰; 문서 가로 넘침 L1 은 탭 줄 안의 스크롤이라 못 잡는다). K8sTabs 가 켜진 탭으로 탭 줄을 옮긴다.
+  const nav = page.getByRole("navigation", { name: "k8s 연동 하위 메뉴" });
+  await expect.poll(async () => nav.evaluate((el) => {
+    const a = el.querySelector<HTMLElement>('[aria-current="page"]');
+    if (!a) return "켜진 탭 없음";
+    const n = el.getBoundingClientRect();
+    const t = a.getBoundingClientRect();
+    return t.left >= n.left - 1 && t.right <= n.right + 1 ? "보임" : `밖: 탭 [${t.left},${t.right}] nav [${n.left},${n.right}]`;
+  }), { message: `${path} 켜진 탭이 탭 줄 밖에 있다` }).toBe("보임");
 }
 
 // 단일 작업 화면에 200자 무공백 경로를 넣는다(제출하지 않음 -- resource_key·검증과 무관).
@@ -268,7 +284,8 @@ test.describe("E3 레이아웃 불변식", () => {
     await expect(page.getByRole("group", { name: / CPU 사용률$/ }).first()).toBeVisible();
     await assertLayoutSane(page, { sidebarFixed: false, minTableCells: 0 });
 
-    // k8s 연동: 머리 동작 버튼(클러스터 등록 등)은 375 에서 제목 아래로 접히고, 하위 메뉴 탭 줄은 자기 안에서 가로 스크롤한다.
+    // k8s 연동: 머리 동작 버튼(클러스터 탭의 클러스터 등록 등)은 375 에서 제목 아래로 접히고, 하위 메뉴 탭 줄(여섯)은 자기 안에서
+    // 가로 스크롤한다.
     for (const [path, heading] of K8S_PAGES) {
       await visitK8s(page, path, heading);
       await assertLayoutSane(page, { sidebarFixed: false, minTableCells: 0 });

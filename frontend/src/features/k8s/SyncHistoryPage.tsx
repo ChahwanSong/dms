@@ -17,7 +17,7 @@ import type { ChangeEntry, SyncRun } from "./types";
 
 // 동기화 이력(설계 §4·§7): k8s_sync_runs 를 seq 내림차순으로, 다음 쪽은 마지막 seq 를 before 로 당긴다(키셋 커서 — 감사 로그·
 // 전체 작업과 같은 IntersectionObserver 무한 스크롤). 상세 창은 추가·삭제 개수와 이름(상위 50), 개수, 경고, 오류 원문.
-// 주소의 ?cluster= 로 들어오면(개요 카드의 「이력」) 그 클러스터만 본다.
+// 주소의 ?cluster= 로 들어오면(클러스터 탭 카드의 「이력」) 그 클러스터만 본다.
 
 const errText = (e: unknown): string =>
   e instanceof Error && e.message ? e.message : "요청이 실패했습니다 — 잠시 뒤 다시 시도하세요.";

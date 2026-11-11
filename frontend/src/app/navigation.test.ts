@@ -124,9 +124,9 @@ describe("breadcrumbFor", () => {
 });
 
 describe("k8s 연동 하위 화면(탭)", () => {
-  // 하위 넷은 사이드바 항목이 아니라 DETAIL_ROUTES 를 탄다 -- 크럼 끝 라벨 = 탭 라벨 = h1(router.test), 사이드바는 「k8s 연동」.
+  // 하위 다섯은 사이드바 항목이 아니라 DETAIL_ROUTES 를 탄다 -- 크럼 끝 라벨 = 탭 라벨 = h1(router.test), 사이드바는 「k8s 연동」.
   const SUB: [string, string][] = [
-    ["/admin/k8s/storageclasses", "StorageClass"], ["/admin/k8s/volumes", "PV 탐색"],
+    ["/admin/k8s/clusters", "클러스터"], ["/admin/k8s/storageclasses", "StorageClass"], ["/admin/k8s/volumes", "PV 탐색"],
     ["/admin/k8s/access", "사용자 권한"], ["/admin/k8s/history", "동기화 이력"],
   ];
   test("개요는 사이드바 항목 크럼", () => {

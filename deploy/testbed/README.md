@@ -68,7 +68,7 @@ deploy/README 머리의 자리표시자가 이 테스트베드에서 무엇인�
 | `build_source_path` | `/home/mason/dms-dev/dms-k8s` — origin/dms-k8s 전체 clone(호스트 cron 이 ff), 워커에는 같은 경로로 읽기 전용 NFS | testbed `dms_build_source_path` |
 | `<LOCAL_ADMIN>` | `mason`(특권 목록 `root,admin,mason`) | `patch-config.yaml` 의 `DMS_PRIVILEGED_REQUESTERS` |
 | `<EMAIL_DOMAIN>` | `example.com`(테스트베드 RoleBinding subject 의 도메인) | `patch-config.yaml` 의 `DMS_ACCOUNT_EMAIL_DOMAIN` |
-| 메일 발송 방식 | `stub`(코드 기본 — `config.py` `mailer_backend`; 사내 릴레이에 닿지 않는다). 개요 화면의 stub 경고가 **정상**이다 | 코드 기본 |
+| 메일 발송 방식 | `stub`(코드 기본 — `config.py` `mailer_backend`; 사내 릴레이에 닿지 않는다). 「k8s 연동」 「개요」·「클러스터」 탭의 stub 경고가 **정상**이다 | 코드 기본 |
 | `<DMS_TAG>` | `dN` 계열(2026-10-26 d1 부터). **현재 값은 `kustomization.yaml` 의 `newTag`(dms·dms-agent 두 항목)와 `patch-config.yaml` 의 `DMS_JOB_IMAGE`** 를 본다. 그 전의 `k0`~`k4` 이력은 `kustomization.yaml` 머리 주석·CHANGELOG 「테스트베드 분리」 | 오버레이 |
 | `<사내CA>` | 테스트베드 CA `~/dms-dev/testbed/files/tls/ca.crt`(gitignore, 영구 사본 `/data/dms-testbed/backup-20261021/tls/`) | testbed `README.md` 「Secrets」·`docs/ARCHITECTURE.md` §15.4 |
 | `<PORTAL_TLS_SECRET>` | `dms-portal-tls` — testbed `make portal-tls-dmsk8s` 가 같은 CA 로 만든다(SAN `dms-k8s.local`·`10.20.20.101`·`PORTAL_TLS_EXTRA_IPS`) | `values.env` 의 `PORTAL_TLS_SECRET` |
@@ -301,8 +301,8 @@ testbed-k8s 의 `values.env` 에는 `PORTAL_DOMAIN`·`PORTAL_VIP` 가 없어(넣
 | 항목 | 값 |
 |---|---|
 | 읽기 전용 리더 | testbed `bash scripts/k8s-pv-reader-creds.sh <이 저장소·export 밖 디렉터리>` → `token`·`ca.crt`(0600, 토큰은 출력하지 않는다) — SA `dms-reader/dms-inventory` |
-| 호출 노드·주기 | 주 `k8s-w1`, 보조 `k8s-w2`, 5분 |
-| 클러스터 등록 | 이름 `dmsk8s`, API 서버 `https://k8s-cp1:6443`(CoreDNS 가 `k8s-cp1` → 10.10.10.20 — testbed `coredns-hosts-dmsk8s`), TLS 「지정한 CA」(위 `ca.crt`), 토큰 → 「지금 동기화」 |
+| 호출 노드·주기(「개요」 탭) | 주 `k8s-w1`, 보조 `k8s-w2`, 5분 |
+| 클러스터 등록(「클러스터」 탭) | 이름 `dmsk8s`, API 서버 `https://k8s-cp1:6443`(CoreDNS 가 `k8s-cp1` → 10.10.10.20 — testbed `coredns-hosts-dmsk8s`), TLS 「지정한 CA」(위 `ca.crt`), 토큰 → 카드의 「지금 동기화」 |
 | StorageClass 매핑 | `tb-nfs → k8s-pv-nfs`, `tb-gpfs → k8s-pv-gpfs`, `tb-onefs → k8s-pv-onefs`(템플릿 비움 = 백엔드 프리셋). 「예시 경로」가 워커의 실제 디렉터리인지 `ssh k8s-w1 ls -d <예시 경로>` |
 | 계정 | 픽스처 RoleBinding(ns `team-a`·`team-b`·`team-c`, ClusterRole `kubeflow-admin/edit/view`)의 ID 와 같은 아이디 — 예: `junwoo-song-clusterrole-admin` → `junwoo.song`. stub 메일이라 인증번호가 화면에 나온다(테스트베드만) |
 | 기대값(2026-10-26 k3 실측) | PV 탐색 PVC 7 · Bound 6, 사용자 권한 인식 바인딩 5 · 사용자 4. 픽스처를 바꾸면 달라진다(testbed `make pv-fixtures-dmsk8s`) |

@@ -108,6 +108,13 @@ test("빈 상태: 동기화 전이면 「모름」, 검색 0건은 다른 문구
   expect(await screen.findByText(/권한은 모름입니다\(권한이 없다는 뜻이 아닙니다\)/)).toBeInTheDocument();
 });
 
+test("빈 상태: 클러스터가 없으면 클러스터 탭 링크 한 줄만(스냅숏 기준 줄의 위치 글과 겹치지 않는다)", async () => {
+  wrap({ clusters: [], users: [], unrecognized: [] });
+  const link = await screen.findByRole("link", { name: "클러스터 탭" });
+  expect(link).toHaveAttribute("href", "/admin/k8s/clusters");
+  expect(screen.getAllByText(/등록된 클러스터가 없습니다/)).toHaveLength(1);
+});
+
 test("빈 상태: 검색어에 맞는 권한 없음", async () => {
   wrap({ ...ACCESS, users: [], unrecognized: [] }, "/admin/k8s/access?q=nobody");
   expect(await screen.findByText("검색어에 맞는 권한이 없습니다")).toBeInTheDocument();

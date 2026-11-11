@@ -37,7 +37,7 @@ const CLUSTER_STATUS: Record<string, Meta> = {
   never: { label: "동기화 전", variant: "neutral",
            help: "아직 한 번도 성공하지 않았습니다 — 이 클러스터의 PV 권한은 「모름」이라 PV 작업을 받지 않습니다." },
   no_node: { label: "호출 노드 없음", variant: "bad",
-             help: "주·보조 호출 노드가 둘 다 지정되지 않았거나 쓸 수 없습니다 — 위 「호출 노드」에서 지정하세요." },
+             help: "주·보조 호출 노드가 둘 다 지정되지 않았거나 쓸 수 없습니다 — 「개요」 탭의 「호출 노드와 주기」에서 지정하세요." },
   disabled: { label: "꺼짐", variant: "neutral", help: "동기화를 끈 클러스터입니다 — 마지막 스냅숏은 그대로 남습니다." },
   token_missing: { label: "토큰 없음", variant: "action", help: "API 토큰이 없어 동기화하지 않습니다 — 편집에서 토큰을 넣으세요." },
   token_unreadable: { label: "토큰 읽기 불가", variant: "bad",
@@ -47,6 +47,19 @@ const CLUSTER_STATUS: Record<string, Meta> = {
 /** 클러스터 상태 → 배지 라벨·variant·설명. 모르는 상태는 원문을 중립 배지로(지어내지 않는다). */
 export function clusterStatusMeta(status: string): Meta {
   return CLUSTER_STATUS[status] ?? { label: status, variant: "neutral", help: `알 수 없는 상태(${status})` };
+}
+
+/** 클러스터 상태별 개수(배지 라벨 단위) — 개요의 「클러스터」 타일과 클러스터 탭 요약 줄이 같은 문구를 쓴다. 「정상」이 먼저,
+ *  나머지는 배지 표(CLUSTER_STATUS) 순서, 표에 없는 상태는 끝에 원문 그대로. 0개인 상태는 넣지 않는다. */
+export function clusterStatusCounts(clusters: Pick<ClusterSummary, "status">[]):
+    { status: string; label: string; variant: PillVariant; count: number }[] {
+  const known = Object.keys(CLUSTER_STATUS);
+  const rank = (s: string) => (known.includes(s) ? known.indexOf(s) : known.length);
+  const counts = new Map<string, number>();
+  for (const c of clusters) counts.set(c.status, (counts.get(c.status) ?? 0) + 1);
+  return [...counts.entries()]
+    .sort(([a], [b]) => rank(a) - rank(b) || a.localeCompare(b))
+    .map(([status, count]) => ({ status, ...clusterStatusMeta(status), count }));
 }
 
 const RUN_STATUS: Record<string, Meta> = {
