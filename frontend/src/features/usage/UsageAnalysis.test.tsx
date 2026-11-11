@@ -506,6 +506,26 @@ test("검색: storage 와 q 가 함께 나가고(디바운스 후 -- 옛 path �
   expect(loc().get("q")).toBeNull();
 });
 
+test("검색 빈 결과의 자리표시: 분기·제목은 그 결과를 낸 검색(봉투 메아리)으로 -- 응답 전에 새 검색어로 「없음」·「기록 없음」을 단정하지 않는다", async () => {
+  // 2026-11-11 B39: (1) 0건이던 검색어를 고치면 응답 전에 새 검색어로 「‘team’ 검색 결과가 없습니다」가 떴다. (2) ?q= 딥링크(0건)에서
+  // 검색을 지우면 응답 전까지 「이 스토리지에는 아직 성공한 scan 이 없습니다」(기록 없음)라는 거짓 빈 상태가 보였다.
+  setup({ path: "/admin/usage?q=teamm", filterQ: true, slowWhen: (u) => u.searchParams.get("q") === "team" });
+  expect(await screen.findByText("‘teamm’ 검색 결과가 없습니다")).toBeInTheDocument();
+  await userEvent.type(screen.getByLabelText("경로·PV 이름 검색"), "{backspace}");
+  await waitFor(() => expect(loc().get("q")).toBe("team"));
+  expect(await screen.findByText("검색 중…")).toBeInTheDocument();
+  expect(screen.getByText("‘teamm’ 검색 결과가 없습니다")).toBeInTheDocument();
+  expect(screen.queryByText("‘team’ 검색 결과가 없습니다")).toBeNull();
+  cleanup();
+  setup({ path: "/admin/usage?q=zzz", filterQ: true, slowWhen: (u) => u.searchParams.get("q") === null });
+  expect(await screen.findByText("‘zzz’ 검색 결과가 없습니다")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "검색 지우기" }));
+  await waitFor(() => expect(loc().get("q")).toBeNull());
+  expect(await screen.findByText("검색 중…")).toBeInTheDocument();
+  expect(screen.queryByText("이 스토리지에는 아직 성공한 scan 이 없습니다")).toBeNull();
+  expect(screen.getByText("‘zzz’ 검색 결과가 없습니다")).toBeInTheDocument();
+});
+
 test("검색·정렬은 스토리지를 바꿔도 남고(URL), 새 스토리지에서도 그 스토리지 안에서만 걸린다", async () => {
   let last: URL | null = null;
   setup({ storages: [st("cephfs-dms"), st("mirror")], summary: [sum("cephfs-dms"), sum("mirror")],
@@ -545,6 +565,23 @@ test("목록 컬럼: 실 사용량·파일 수·hot 비율(최신 scan) -- 모�
   // 머리글은 정렬 버튼이다(2026-10-19). hot 비율의 정의는 옆 설명(HelpTip).
   expect(screen.getByRole("button", { name: "hot 비율 정렬" }).closest("th")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "hot 비율 설명" })).toBeInTheDocument();
+});
+
+test("목록 컬럼 표기: hot 비율은 pctText(0.3% ≠ 0%) · 스캔 횟수는 천 단위 구분", async () => {
+  // 2026-11-11 B90·B79: hot 이 정수 반올림이라 0.3% 가 진짜 0% 와 같은 「0%」였고(시트 온도 툴팁은 「0.3%」), 스캔 횟수는 「1234」였다
+  // (옆 파일 수는 「1,234」).
+  const atime = (hot: number, cold: number) => ({ atime: [
+    { bucket: "[0d,1d]", min_age_days: 0, max_age_days: 1, bytes: hot },
+    { bucket: "[181d,365d]", min_age_days: 181, max_age_days: 365, bytes: cold }] });
+  list([
+    { storage_name: "cephfs-dms", target: "nearly-cold", scan_count: 1234, last_scan_at: isoAgo(2),
+      latest: point({ total_bytes: 1000, summary: { total_files: 1234 }, time_histograms: atime(3, 997) }) },
+    { storage_name: "cephfs-dms", target: "all-cold", scan_count: 2, last_scan_at: isoAgo(3),
+      latest: point({ total_bytes: 1000, summary: { total_files: 5 }, time_histograms: atime(0, 1000) }) },
+  ]);
+  await screen.findByRole("button", { name: "nearly-cold" });
+  expect([cellsOf("nearly-cold")[3], cellsOf("nearly-cold")[4]].map((c) => c.textContent)).toEqual(["0.3%", "1,234"]);
+  expect(cellsOf("all-cold")[3]).toHaveTextContent(/^0%$/);
 });
 
 test("최근 스캔 경과: N일 전 + 30일 주의색(attn) · 90일 빨강", async () => {
@@ -853,7 +890,9 @@ test("합계 실패여도 표는 그려진다 -- 서버 사유는 덧붙이고, 
   expect(await within(await totalsLine()).findByText("17.0 MiB")).toBeInTheDocument();
   cleanup();
   setup({ totals: { "cephfs-dms": "html" } });
-  expect(await screen.findByText("합계를 불러오지 못했습니다")).toBeInTheDocument();
+  // 2026-11-11: request() 가 비 JSON 성공 본문을 ApiError(invalid_response, 한국어 사유)로 올리게 되어 그 사유가 덧붙을 수 있다 --
+  // 이 검사의 뜻은 「파서 원문(Unexpected token …)을 띄우지 않는다」이므로 머리만 고정한다.
+  expect(await screen.findByText(/^합계를 불러오지 못했습니다/)).toBeInTheDocument();
   expect(screen.queryByText(/Unexpected token|JSON/)).toBeNull();
   expect(await screen.findByRole("button", { name: "artifacts" })).toBeInTheDocument();
 });
@@ -1006,6 +1045,29 @@ test("합계 줄: df 90% 이상은 주의색 · 창을 넘어 잘린 합은 「�
   const loading = await totalsLine();
   expect(within(loading).getByText("합계 불러오는 중…")).toHaveClass("sr-only");
   expect(within(loading).queryByText("자세히")).toBeNull();
+});
+
+test("합계 줄: df 주의색은 보이는 값으로 판정(89.6% = 「90%」 주의, 89.4% = 「89%」 보통) · hot 비율은 pctText(0.3%)", async () => {
+  // 2026-11-11 B90: 표시는 pctText(89.6) = 「90%」인데 판정은 원값(>= 90)이라 「90%」가 보통 색이었다. hot 은 정수 반올림이라 0.3% 가
+  // 진짜 0% 와 같은 「0%」였다(시트 온도 툴팁은 「0.3%」).
+  const fs = (used: number) => ({ total_bytes: 10000, used_bytes: used, node_name: "w1", reported_at: isoAgo(0), fresh: true,
+                                  node_count: 1, consistent: true });
+  const hot = { value: 0.003, hot_bytes: 3, total_bytes: 1000, known: 4, unknown: 0 };
+  setup({ totals: { "cephfs-dms": totalsOf("cephfs-dms", { filesystem: fs(8960), hot_ratio: hot }) } });
+  let line = await totalsLine();
+  await within(line).findByText("17.0 MiB");
+  expect(valueOf(line, "df")).toHaveTextContent(/^90%/);
+  expect(valueOf(line, "df")).toHaveClass("text-attn");
+  expect(valueOf(line, "hot 비율")).toHaveTextContent(/^0\.3%$/);
+  const box = await totalsBox();
+  expect(valueOf(box, "hot 비율(180일)")).toHaveTextContent(/^0\.3%$/);
+  expect(box.querySelector(".bg-attn")).not.toBeNull();                              // [자세히] 의 df 미터도 같은 판정
+  cleanup();
+  setup({ totals: { "cephfs-dms": totalsOf("cephfs-dms", { filesystem: fs(8940) }) } });
+  line = await totalsLine();
+  await within(line).findByText("17.0 MiB");
+  expect(valueOf(line, "df")).toHaveTextContent(/^89%/);
+  expect(valueOf(line, "df")).not.toHaveClass("text-attn");
 });
 
 test("합계 줄(필터 0건): 줄은 남아 「대상 0개」와 스토리지 전체 숫자를 말한다 -- 예전 스토리지 합계 블록의 숫자를 잃지 않는다", async () => {

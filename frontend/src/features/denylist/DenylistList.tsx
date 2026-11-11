@@ -37,11 +37,14 @@ export function DenylistList() {
         <DenyDialog trigger={<Button>대상 추가</Button>} />
       </div>
       {/* 유형 의미(사용자 요청 2026-08-19): 문구는 DenyDialog.SUBJECT_TYPES 가
-          단일 진실 — 다이얼로그의 선택 캡션과 여기가 같은 데이터를 그린다 */}
+          단일 진실 — 다이얼로그의 선택 캡션과 여기가 같은 데이터를 그린다.
+          판정 시점(2026-11-11 정정): is_denied 는 identity.resolve_job_identity 안에서만 돌고 그 호출자는 planner 다 -- 제출
+          (routes_requests.submit)은 보지 않고, 컨펌·stepper 도 다시 보지 않는다. 옛 문구 「제출 시점에 판정」은 사실과 달랐다. */}
       <InfoPanel>
         <p className="mb-2">
-          등재된 대상의 <span className="font-medium">새 작업 제출을 차단</span>합니다
-          — 제출 시점에 판정하며, 특권 실행 경로보다 먼저 적용됩니다.
+          등재된 대상의 <span className="font-medium">작업을 계획 단계에서 거부</span>합니다
+          — 작업 계획 시점에 판정하므로 제출은 접수된 뒤 거부(identity_denied)로 끝나고, 등재 전에 낸 아직 계획되지 않은
+          요청에도 걸립니다. 이미 계획돼 확인 대기·실행 중인 작업은 막지 않으며, 특권 실행 경로보다 먼저 적용됩니다.
         </p>
         <dl className="space-y-1 text-muted">
           {SUBJECT_TYPES.map((t) => (

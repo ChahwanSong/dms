@@ -174,6 +174,33 @@ def test_create_name_at_limit_ok_over_limit_422(client):
     assert bad.status_code == 422 and bad.json()["detail"] == "invalid_batch_name"
 
 
+def test_create_note_is_trimmed_and_blank_becomes_null(client):
+    # 2026-11-11 (B81): 생성도 수정(patch)과 같은 메모 규칙 -- 예전엔 생성만 받은 그대로 저장해 공백뿐인 메모가 「메모 없음」의
+    # 두 번째 표현("   ")으로 남았다.
+    _admin(client)
+    repo = client.app.state.repos.batches
+    blank = client.post("/api/admin/batches", json={"operation": "scan", "max_concurrency": 1,
+        "options": {}, "note": "   ", "items": [{"storage": "s1", "target": "a"}]})
+    assert blank.status_code == 202
+    assert repo.get(blank.json()["batch_id"])["note"] is None
+    padded = client.post("/api/admin/batches", json={"operation": "scan", "max_concurrency": 1,
+        "options": {}, "note": "  8월 정기  ", "items": [{"storage": "s1", "target": "a"}]})
+    assert repo.get(padded.json()["batch_id"])["note"] == "8월 정기"
+
+
+def test_list_limit_lets_portal_detect_truncation(client):
+    # 2026-11-11 (B33): 기본은 종전대로 최신 100건, limit 을 주면 그만큼 -- 포탈은 창 + 1 건을 받아 잘림을 안다.
+    _admin(client)
+    ids = [client.post("/api/admin/batches", json={"operation": "scan", "max_concurrency": 1,
+        "options": {}, "note": None, "items": [{"storage": "s1", "target": "a"}]}).json()["batch_id"]
+           for _ in range(3)]
+    assert len(client.get("/api/admin/batches").json()) == 3
+    two = client.get("/api/admin/batches?limit=2").json()
+    assert len(two) == 2 and set(b["batch_id"] for b in two) <= set(ids)
+    assert client.get("/api/admin/batches?limit=0").status_code == 422
+    assert client.get("/api/admin/batches?limit=1001").status_code == 422
+
+
 def test_confirm_requires_previewready(client):
     _admin(client)
     bid = client.post("/api/admin/batches", json={"operation": "scan", "max_concurrency": 1,

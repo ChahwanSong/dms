@@ -10,8 +10,8 @@ import { INVALID_NAMES_HELP, INVALID_NAMES_LABEL } from "../../lib/scanCounters"
 import { UsageContractError, hasAttr, useStorageTotals } from "./useUsage";
 import { humanBytes } from "./usageStats";
 import {
-  FILTER_TOTALS_HELP, StorageTotals, TOTALS_HELP, count, countText, fsShape, hotText, isReading, lowerBound, partialSum,
-  sumOf,
+  FILTER_TOTALS_HELP, StorageTotals, TOTALS_HELP, count, countText, dfAttn, fsShape, hotText, isReading, lowerBound,
+  partialSum, sumOf,
 } from "./StorageTotals";
 
 // 합계 줄(2026-10-29 사용자 결정 「권장사항대로」 -- 「이 스토리지 합계」·「필터 합계」 두 벌 블록을 표 바로 위 한 줄로). 숫자는
@@ -90,7 +90,7 @@ function BaseSummary({ t, now, reading }: { t: UsageStorageTotals; now: number; 
     `hot ${hotText(t)}`,
     fs !== null && df !== null && (<>
       {`df ${humanBytes(fs.used_bytes)} / ${humanBytes(fs.total_bytes)} `}
-      <span className={df.pct >= 90 ? "font-medium text-attn" : undefined} title={df.title}>{`(${pctText(df.pct)})`}</span>
+      <span className={dfAttn(df.pct) ? "font-medium text-attn" : undefined} title={df.title}>{`(${pctText(df.pct)})`}</span>
       {df.caveat !== "" && <span className="text-attn">{` — ${df.caveat}`}</span>}
     </>),
     invalid !== null && invalid > 0 && (
@@ -143,13 +143,13 @@ export function TotalsLine({ storage, now, attr, searchQ }: {
   const baseBytes = baseKnown !== undefined ? sumOf(baseKnown.total_bytes) : null;
   const baseFs = baseKnown !== undefined ? fsShape(baseKnown.filesystem) : null;
   const baseDf = baseFs !== null ? dfParts(baseFs, now) : null;
-  const baseItems = baseKnown !== undefined && (baseBytes !== null || (baseDf !== null && baseDf.pct >= 90)) && (
+  const baseItems = baseKnown !== undefined && (baseBytes !== null || (baseDf !== null && dfAttn(baseDf.pct))) && (
     <dl className="flex min-w-0 flex-wrap items-baseline gap-x-4 gap-y-1">
       {baseBytes !== null && (
         <Item label="이 스토리지" valueClass="text-muted">
           {humanBytes(baseBytes)}{partialSum(baseKnown, baseKnown.total_bytes, baseBytes) && <More />}</Item>
       )}
-      {baseDf !== null && baseDf.pct >= 90 && (
+      {baseDf !== null && dfAttn(baseDf.pct) && (
         <Item label="이 스토리지 df" title={baseDf.title} valueClass="font-medium text-attn">
           {pctText(baseDf.pct)}<Caveat text={baseDf.caveat} /></Item>
       )}
@@ -197,7 +197,7 @@ export function TotalsLine({ storage, now, attr, searchQ }: {
             <Item label="hot 비율">{hotText(t)}</Item>
           </>)}
           {df !== null && fs !== null && (
-            <Item label="df" title={df.title} valueClass={df.pct >= 90 ? "font-medium text-attn" : "text-ink"}>
+            <Item label="df" title={df.title} valueClass={dfAttn(df.pct) ? "font-medium text-attn" : "text-ink"}>
               {pctText(df.pct)}
               <span className="text-muted">{` (${humanBytes(fs.used_bytes)} / ${humanBytes(fs.total_bytes)})`}</span>
               <Caveat text={df.caveat} />

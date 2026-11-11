@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
 import { setupServer } from "msw/node";
@@ -159,7 +159,10 @@ test("도구별 카드: 용도 설명·병렬도(노드×프로세스=최대)·�
   expect(within(scan).getByText(/파일 수·용량·데이터 온도/)).toBeInTheDocument();
   expect(within(scan).getByText("4노드 × 8프로세스")).toBeInTheDocument();
   expect(within(scan).getByText("최대 32개 프로세스")).toBeInTheDocument();
-  expect(within(scan).getByText("없음")).toBeInTheDocument();          // 미리보기 타임아웃 null
+  // 미리보기 타임아웃: scan 은 미리보기가 없어 값이 쓰이지 않는다(2026-11-11 -- 옛 단언 「없음」(null)은 preview 값이 사전 점검
+  // 시한으로도 쓰이던 11-04 이전 의미였다). null 의 「없음」은 미리보기가 있는 도구의 것이다.
+  expect(within(scan).getByText("쓰지 않음")).toBeInTheDocument();
+  expect(within(scan).getByText("scan 은 미리보기가 없습니다")).toBeInTheDocument();
   // 노드당 프로세스 = 워커 CPU 요청 코어, 노드 CPU 상한에서 줄어든다(2026-10-16) -- 머리 설명 한 번
   expect(screen.getByText(/워커는 노드당 프로세스 수만큼 CPU 코어를 요청합니다/)).toBeInTheDocument();
   // dsync 와 nsync 의 차이가 화면에 있다(같은 노드 공존 vs 노드 간).
@@ -207,6 +210,85 @@ test("카드는 한 줄에 하나씩, 제목은 정책 키(dsync·nsync 등) -- 
   expect(within(dsync).queryByText(/^도구/)).not.toBeInTheDocument();    // 키 = 도구명이면 덧붙이지 않는다
   const rm = screen.getByRole("article", { name: "rm 정책" });
   expect(within(rm).getByText("drm")).toBeInTheDocument();
+});
+
+// ---- 2026-11-11 전수조사 수정 -----------------------------------------------------------------------------------------
+test("scan 카드의 미리보기 타임아웃은 값이 있어도 「쓰지 않음」, null 인 dsync 는 「없음」", async () => {
+  server.use(http.get("/api/admin/policies", () => HttpResponse.json([
+    { ...POLICIES[0], preview_timeout_seconds: 43200 }, { ...POLICIES[1], preview_timeout_seconds: null }])));
+  wrap();
+  const scan = await screen.findByRole("article", { name: "scan 정책" });
+  expect(within(scan).getByText("쓰지 않음")).toBeInTheDocument();
+  expect(within(scan).queryByText("43200s (12h)")).toBeNull();
+  const dsync = screen.getByRole("article", { name: "dsync 정책" });
+  expect(within(dsync).getByText("없음")).toBeInTheDocument();
+});
+
+test("큐를 비우거나 k8s 이름 규칙 밖이면 인라인 오류 + 저장 비활성, 앞뒤 공백은 지워 보낸다", async () => {
+  // 빈 큐는 Volcano 가 default 큐로 채워 dms-data 한도 밖에서 돌고, 규칙 밖 이름은 없는 큐라 잡 생성이 전부 실패한다.
+  let captured: { queue?: string } | null = null;
+  server.use(
+    http.get("/api/admin/policies", () => HttpResponse.json(POLICIES)),
+    http.put("/api/admin/policies/:tool", async ({ request }) => {
+      captured = await request.json() as { queue?: string }; return HttpResponse.json(POLICIES[1]); }));
+  wrap();
+  const card = (await screen.findByText("dsync")).closest("article")!;
+  await userEvent.click(within(card).getByRole("button", { name: "수정" }));
+  const queue = await screen.findByRole("textbox", { name: "큐" });
+  await userEvent.clear(queue);
+  expect(screen.getByText("큐: 값을 입력하세요")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "저장" })).toBeDisabled();
+  await userEvent.type(queue, "   ");
+  expect(screen.getByText("큐: 값을 입력하세요")).toBeInTheDocument();
+  await userEvent.clear(queue);
+  await userEvent.type(queue, "DMS data");
+  expect(screen.getByText(/큐: 소문자·숫자·하이픈·점만 쓸 수 있습니다/)).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "저장" })).toBeDisabled();
+  await userEvent.clear(queue);
+  await userEvent.type(queue, " dms-data ");
+  expect(screen.queryByText(/^큐: /)).toBeNull();
+  await userEvent.click(screen.getByRole("button", { name: "저장" }));
+  await waitFor(() => expect(captured?.queue).toBe("dms-data"));
+});
+
+test("최대 노드·타임아웃은 int4 상한(2147483647)을 넘으면 인라인 오류로 막는다(서버 le 미러 -- PostgreSQL 500 방지)", async () => {
+  const calls: string[] = [];
+  server.use(
+    http.get("/api/admin/policies", () => HttpResponse.json(POLICIES)),
+    http.put("/api/admin/policies/:tool", () => { calls.push("put"); return HttpResponse.json(POLICIES[1]); }));
+  wrap();
+  const card = (await screen.findByText("dsync")).closest("article")!;
+  await userEvent.click(within(card).getByRole("button", { name: "수정" }));
+  for (const [name, label] of [["최대 노드", "최대 노드"], ["실행 타임아웃(초)", "실행 타임아웃"],
+                               ["미리보기 타임아웃(초)", "미리보기 타임아웃"]]) {
+    const input = await screen.findByRole("spinbutton", { name });
+    await userEvent.clear(input);
+    await userEvent.type(input, "9999999999");
+    expect(screen.getByText(`${label}: 2147483647 이하여야 합니다`)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "저장" })).toBeDisabled();
+    await userEvent.clear(input);
+    await userEvent.type(input, "2147483647");                // 상한 자체는 허용
+    expect(screen.queryByText(`${label}: 2147483647 이하여야 합니다`)).toBeNull();
+  }
+  expect(screen.getByRole("button", { name: "저장" })).toBeEnabled();
+  expect(calls).toEqual([]);
+});
+
+test("nsync 의 기본 우선순위는 쓰이지 않는다: 카드는 「dsync 따름」, 수정 창은 칸을 잠그고 이유를, dsync 엔 nsync 에도 적용됨을", async () => {
+  // domain.resolve_priority 가 sync 를 늘 dsync 정책에 대응시킨다 -- nsync 행의 default_priority 는 죽은 값이다.
+  server.use(http.get("/api/admin/policies", () => HttpResponse.json(POLICIES)));
+  wrap();
+  const nsync = await screen.findByRole("article", { name: "nsync 정책" });
+  expect(within(nsync).getByText("dsync 따름 / high")).toBeInTheDocument();
+  expect(within(nsync).getByText(/기본값은 dsync 정책 값을 씁니다/)).toBeInTheDocument();
+  const dsync = screen.getByRole("article", { name: "dsync 정책" });
+  expect(within(dsync).getByText("mid / high")).toBeInTheDocument();
+  expect(within(dsync).getByText(/기본값은 nsync 로 실행되는 sync 에도 적용/)).toBeInTheDocument();
+  await userEvent.click(within(nsync).getByRole("button", { name: "수정" }));
+  const dialog = await screen.findByRole("dialog");
+  expect(within(dialog).getByRole("combobox", { name: "기본 우선순위" })).toBeDisabled();
+  expect(within(dialog).getByRole("combobox", { name: "최대 우선순위" })).toBeEnabled();
+  expect(within(dialog).getByText(/sync 의 기본 우선순위는 dsync 정책 값을 씁니다/)).toBeInTheDocument();
 });
 
 test("지표 다섯 칸(병렬·우선순위·큐·타임아웃 둘)은 한 격자 -- 넓으면 한 줄, 좁으면 자연 줄바꿈(2026-10-02)", async () => {

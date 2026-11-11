@@ -44,20 +44,40 @@ class ControlRepository:
 
     # --- denylist ---
     def deny(self, subject_type, subject, reason, actor):
+        """등재(멱등). 정규화한 대상을 돌려준다(라우트 응답이 저장값과 같게)."""
         if subject_type not in DENY_SUBJECT_TYPES:
             raise DomainValidationError("invalid_denylist_subject_type", subject_type)
-        subject = subject.lower()
+        # 앞뒤 공백 제거(2026-11-11): is_denied 는 계정 이름(공백 불가)과 비교하므로 「alice 」로 저장된 규칙은 아무것도 막지
+        # 못하는데 표에서는 HTML 이 끝 공백을 접어 「alice」로 보였다(kill-switch 가 조용히 무효). 공백만이면 빈 대상 행이다 -- 거절.
+        subject = subject.strip().lower()
+        if subject == "":
+            raise DomainValidationError("denylist_subject_empty", "blank subject")
+        key = f"{subject_type}:{subject}"
         with self._db.transaction():
-            self._db.execute(
-                """INSERT INTO identity_denylist (subject_type, subject, reason,
-                       created_by, created_at)
-                   SELECT :t, :s, :r, :actor, :now
-                   WHERE NOT EXISTS (SELECT 1 FROM identity_denylist
-                                     WHERE subject_type = :t AND subject = :s)""",
-                {"t": subject_type, "s": subject, "r": reason,
-                 "actor": actor, "now": utc_now_iso()})
-            self._audit("denylist", "deny", f"{subject_type}:{subject}", None,
-                        {"subject_type": subject_type, "subject": subject, "reason": reason}, actor)
+            existing = self._db.query_one(
+                "SELECT reason FROM identity_denylist WHERE subject_type = :t AND subject = :s",
+                {"t": subject_type, "s": subject})
+            if existing is None:
+                self._db.execute(
+                    """INSERT INTO identity_denylist (subject_type, subject, reason,
+                           created_by, created_at)
+                       SELECT :t, :s, :r, :actor, :now
+                       WHERE NOT EXISTS (SELECT 1 FROM identity_denylist
+                                         WHERE subject_type = :t AND subject = :s)""",
+                    {"t": subject_type, "s": subject, "r": reason,
+                     "actor": actor, "now": utc_now_iso()})
+                self._audit("denylist", "deny", key, None,
+                            {"subject_type": subject_type, "subject": subject, "reason": reason}, actor)
+            elif existing["reason"] != reason:
+                # 이미 등재된 대상을 다른 사유로 다시 넣으면 사유를 바꾼다(2026-11-11 -- PUT 은 대체다). 예전엔 행은 그대로 두고
+                # 감사에만 새 사유를 남겨 목록(옛 사유)과 감사 기록이 어긋났다. 감사는 실제로 바뀐 경우에만, 실제 전·후로.
+                self._db.execute(
+                    "UPDATE identity_denylist SET reason = :r WHERE subject_type = :t AND subject = :s",
+                    {"t": subject_type, "s": subject, "r": reason})
+                self._audit("denylist", "update", key,
+                            {"subject_type": subject_type, "subject": subject, "reason": existing["reason"]},
+                            {"subject_type": subject_type, "subject": subject, "reason": reason}, actor)
+        return subject
 
     def allow(self, subject_type, subject, actor):
         subject = subject.lower()
@@ -75,9 +95,14 @@ class ControlRepository:
         for row in rows:
             subject = row["subject"]
             kind = row["subject_type"]
-            if kind == "requester" and subject.lower() == requester.lower():
+            # 앞뒤 공백은 지우고 비교한다(2026-11-11): deny 가 strip 하기 전에 저장된 「alice 」 행도 화면에 보이는 대로
+            # alice 를 막는다. 공백만인 옛 행은 아무것도 막지 않는다(빈 이름과 맞추지 않는다).
+            norm = subject.strip().lower()
+            if norm == "":
+                continue
+            if kind == "requester" and norm == requester.lower():
                 return subject
-            if kind == "owner" and subject.lower() == owner.lower():
+            if kind == "owner" and norm == owner.lower():
                 return subject
         return None
 

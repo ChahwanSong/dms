@@ -15,12 +15,22 @@ import type { ClusterBody, ClusterSummary, TlsMode } from "./types";
 // 용도 k8s_cluster_token · AAD 사용자 자리 = 클러스터 이름). API 서버 주소를 바꾸면 토큰을 다시 넣어야 저장된다 -- 저장된
 // 토큰이 운영자가 모르는 새 주소로 보내지는 길을 막는다(서버 k8s_token_required 와 같은 규칙, 메일 설정 relayUrlOf 선례).
 
-/** https://host[:port] 만(설계 §4.2 invalid_k8s_api_server — 경로·쿼리·자격증명 금지). 빈 값은 「필수」로 따로 센다. */
+/** https://host[:port] 만(설계 §4.2 invalid_k8s_api_server — 경로·쿼리·자격증명 금지). 빈 값은 「필수」로 따로 센다. 서버
+ *  validate_api_server 와 같은 모양으로 맞춘다(2026-11-11): 끝 / 하나는 받고(서버가 떼어 저장한다 — normalizeApiServer), 포트
+ *  자리가 빈 「host:」는 막는다(예전엔 반대로 끝 / 를 막고 끝 콜론을 통과시켜 서버 422 를 받았다). */
 export function apiServerError(v: string): string | null {
   const s = v.trim();
   if (s === "") return null;
-  return /^https:\/\/[^\s/?#@]+$/.test(s) ? null
+  const m = /^https:\/\/([^\s/?#@]+)\/?$/.exec(s);
+  return m !== null && !m[1].endsWith(":") ? null
     : "https://주소[:포트] 형식이어야 합니다 — 경로·쿼리 없이(예: https://10.10.10.20:6443, https://k8s-api.example.com:6443)";
+}
+
+/** 보낼·비교할 주소: 앞뒤 공백과 끝 / 하나를 뗀다(서버가 저장하는 모양 https://{netloc} — 같은 주소에 / 만 붙였다고 「주소가
+ *  바뀜 → 토큰 다시」로 막지 않게). */
+export function normalizeApiServer(v: string): string {
+  const s = v.trim();
+  return s.endsWith("/") ? s.slice(0, -1) : s;
 }
 
 /** 이름은 주소(경로·「:sync」)에 들어간다 -- 공백·/·:·?·#·% 만 화면에서 막고 나머지 규칙은 서버(invalid_k8s_cluster_name)가 정한다. */
@@ -130,7 +140,7 @@ export function ClusterDialog({ mode, cluster, trigger }: {
   const caMissing = tlsMode === "ca" && ca.trim() === "" && !caKept;
   // 토큰은 「검증된 그 서버」에 묶인다(서버 규칙과 같음 — routes_k8s.update_cluster): 주소·TLS 서버 이름이 바뀌거나 검증을
   // 끄는 쪽이면 토큰을 다시 받는다. CA 교체(인증서 갱신)와 검증을 다시 켜는 쪽은 묻지 않는다.
-  const addressChanged = editing && apiServer.trim() !== cluster!.api_server;
+  const addressChanged = editing && normalizeApiServer(apiServer) !== cluster!.api_server;
   const serverNameChanged = editing && (tlsName.trim() || null) !== (cluster!.tls_server_name || null);
   const verifyTurnedOff = editing && tlsMode === "insecure" && cluster!.tls_mode !== "insecure";
   const tokenReason = addressChanged ? "API 서버 주소를 바꾸려면" : serverNameChanged ? "TLS 서버 이름을 바꾸려면"
@@ -149,7 +159,7 @@ export function ClusterDialog({ mode, cluster, trigger }: {
     if (blocked) return;
     const body: ClusterBody = {
       name: editing ? cluster!.name : name.trim(),
-      api_server: apiServer.trim(),
+      api_server: normalizeApiServer(apiServer),
       tls_server_name: tlsName.trim() === "" ? null : tlsName.trim(),
       insecure_skip_tls_verify: tlsMode === "insecure",
       enabled,

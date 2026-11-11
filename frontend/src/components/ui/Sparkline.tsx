@@ -29,44 +29,59 @@ function scaleOf(nums: number[], domain: SparklineDomain) {
 const yOf = (v: number, lo: number, span: number, height: number) =>
   r2(height - (span === 0 ? 0 : (v - lo) / span) * height);
 
+// x 좌표. xs(0..1 비율, values 와 같은 길이)가 있으면 그 자리, 없거나 길이가 다르거나 유한수가 아닌 값이 끼면 순번 균등
+// 배치(옛 동작). 2026-11-11: 노드 지표를 순번으로 놓으면 보고가 끊긴 몇 시간이 한 칸(24h 창 ~1/1440 폭)으로 줄어 공백이
+// 사라졌다 -- 호출부가 시각 비율(창 start~end)을 넘기면 공백이 공백의 폭으로 보인다. 범위 밖 비율은 가장자리로 접는다.
+function xPositions(n: number, width: number, xs?: readonly number[]): number[] {
+  if (xs !== undefined && xs.length === n && xs.every((x) => Number.isFinite(x)))
+    return xs.map((x) => r2(Math.min(1, Math.max(0, x)) * width));
+  const step = n > 1 ? width / (n - 1) : 0;
+  return Array.from({ length: n }, (_, i) => r2(i * step));
+}
+
+const isNum = (v: number | null): v is number => v !== null && Number.isFinite(v);
+
 export function sparklinePath(
   values: (number | null)[], width: number, height: number,
-  domain: SparklineDomain = AUTO,
+  domain: SparklineDomain = AUTO, xs?: readonly number[],
 ): string {
-  const nums = values.filter((v): v is number => v !== null && Number.isFinite(v));
+  const nums = values.filter(isNum);
   if (nums.length === 0) return "";
   const { lo, span } = scaleOf(nums, domain);
-  const step = values.length > 1 ? width / (values.length - 1) : 0;
+  const xAt = xPositions(values.length, width, xs);
   let d = "";
   let pen = false;
   values.forEach((v, i) => {
-    if (v === null || !Number.isFinite(v)) {
+    if (!isNum(v)) {
       // null은 결측/카운터 리셋 구간이다 -- 선을 끊는다. 0으로 이으면
       // "그때 값이 0이었다"는 거짓말이 된다.
       pen = false;
       return;
     }
-    d += `${pen ? "L" : "M"}${r2(i * step)},${yOf(v, lo, span, height)}`;
+    d += `${pen ? "L" : "M"}${xAt[i]},${yOf(v, lo, span, height)}`;
     pen = true;
   });
   return d;
 }
 
-export function Sparkline({ values, width = 120, height = 32, label, domain = AUTO }: {
+export function Sparkline({ values, width = 120, height = 32, label, domain = AUTO, xs }: {
   values: (number | null)[]; width?: number; height?: number; label?: string;
   domain?: SparklineDomain;
+  // 값마다의 가로 위치(0..1 비율) -- 생략하면 순번 균등(위 xPositions).
+  xs?: readonly number[];
 }) {
-  const d = sparklinePath(values, width, height, domain);
+  const d = sparklinePath(values, width, height, domain, xs);
   if (!d) return <span className="text-muted text-xs">—</span>;
-  const nums = values.filter((v): v is number => v !== null && Number.isFinite(v));
+  const nums = values.filter(isNum);
   const { lo, span } = scaleOf(nums, domain);
-  // 유효점이 정확히 1개면 path 는 bare M 이라 아무것도 안 보인다. "—" 로 접지
-  // 않는 이유: 첫 리포트 1점은 실측값이지 결측이 아니다 -- 0 과 null 을 뭉개지
-  // 않는 원칙의 SVG 판. 좌표는 path 와 같은 규칙(step 공식, scaleOf 스케일).
-  const validIdx = values
-    .map((v, i) => (v !== null && Number.isFinite(v) ? i : null))
+  // 앞뒤 이웃이 모두 결측(또는 끝)인 유효점은 path 가 bare M 이라 아무것도 안 보인다. "—" 로 접지 않는 이유: 첫 리포트
+  // 1점은 실측값이지 결측이 아니다 -- 0 과 null 을 뭉개지 않는 원칙의 SVG 판. 예전엔 유효점이 정확히 1개일 때만 점을
+  // 찍어 [5, null, 7] 처럼 외딴 점이 여럿이면 차트가 비었는데 캡션은 「7 · 최대 7」이었다(2026-11-11 -- 외딴 점마다 찍는다).
+  // 좌표는 path 와 같은 규칙(xPositions, scaleOf 스케일).
+  const xAt = xPositions(values.length, width, xs);
+  const lone = values
+    .map((v, i) => (isNum(v) && !isNum(values[i - 1] ?? null) && !isNum(values[i + 1] ?? null) ? i : null))
     .filter((i): i is number => i !== null);
-  const step = values.length > 1 ? width / (values.length - 1) : 0;
   // 상한 기준선: 고정 상한(100%·코어 수)이 있을 때만. 데이터가 상한 안이면 상단
   // 라인이고, 넘으면 스케일이 늘어나 기준선이 상단 아래로 내려온다(위 scaleOf).
   // 상한 라벨(수치)은 SVG 밖 캡션이 맡는다 -- preserveAspectRatio="none" 아래의
@@ -83,11 +98,10 @@ export function Sparkline({ values, width = 120, height = 32, label, domain = AU
       )}
       <path d={d} fill="none" stroke="currentColor" strokeWidth={1.5}
             vectorEffect="non-scaling-stroke" />
-      {validIdx.length === 1 && (
-        <circle cx={r2(validIdx[0] * step)}
-                cy={yOf(values[validIdx[0]] as number, lo, span, height)}
+      {lone.map((i) => (
+        <circle key={i} cx={xAt[i]} cy={yOf(values[i] as number, lo, span, height)}
                 r={1.5} fill="currentColor" />
-      )}
+      ))}
     </svg>
   );
 }

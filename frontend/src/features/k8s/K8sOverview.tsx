@@ -333,7 +333,8 @@ function NodeSlot({ role, name, node, clusters, pollSeconds, primarySet, offsetM
         <p className="text-xs text-ink/70">{title}</p>
         <p className="mt-1 font-medium text-ink/80">지정 안 됨</p>
         <p className="mt-1 text-xs text-ink/70">
-          {role === "primary" ? "주 노드가 없으면 정규 동기화는 예정 시각 90초 뒤 보조 노드가 받습니다."
+          {/* k8s_sync.claim_trigger: 90초 유예는 주 노드가 지정돼 있을 때만 붙는다(2026-11-11 — 예전 문구는 반대로 말했다) */}
+          {role === "primary" ? "주 노드가 없으면 보조 노드가 정규 동기화를 예정 시각에 바로 맡습니다(90초 유예는 주 노드가 있을 때만)."
             : "보조 노드가 없으면 주 노드가 막혔을 때 대신 부를 노드가 없습니다."}
         </p>
       </div>

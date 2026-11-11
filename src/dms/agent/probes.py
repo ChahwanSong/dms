@@ -154,8 +154,10 @@ def probe_artifact_base(path, *, isdir=os.path.isdir, access=os.access,
 
     exists 가 핵심 신호다: 잡 파드 hostPath 는 type: Directory 강제라
     (execution_manifests) 디렉터리가 없는 노드에서는 파드가 기동 자체를 실패한다.
-    writable 은 **에이전트 프로세스 uid** 의 W_OK 지 잡 파드 요청자 uid 가 아니다
-    -- 정직한 한계로 화면이 문구로 표기한다. probe_mounts 의 status 판정이
+    writable 은 **에이전트 프로세스** 의 W_OK(호스트 루트 모드에서는 base 를 덮는 마운트의
+    rw)다. dms-k8s 는 에이전트·잡 파드가 모두 root 라(비 root 잡 경로는 2026-10-26 삭제)
+    잡 파드의 쓰기 판정과 같다 -- 화면 문구도 그렇게 말한다(2026-11-11 갱신; 옛 문구
+    「잡 파드 요청자 uid 와 다를 수 있다」는 요청자 uid 로 잡이 돌던 모델 기준). probe_mounts 의 status 판정이
     writable 을 반영하지 않는 것과 같은 이유로, 소비자는 status 같은 요약이 아니라
     이 두 필드를 직접 본다."""
     if not path:

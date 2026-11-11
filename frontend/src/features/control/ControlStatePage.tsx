@@ -70,7 +70,8 @@ export function ControlStatePage() {
   const nodesQ = useNodes();
   const historyQ = useControlHistory();
   const hintsQ = useProxyHints();
-  // 영향 요약 재료: 대시보드와 같은 잡 집계(24h 창의 by_state 에서 실행/대기).
+  // 영향 요약 재료: 대시보드 KPI 와 같은 창 없는 비종단 집계(live_by_state 에서 실행/대기, 2026-11-11). 예전엔 24h 창의
+  // by_state 라 이틀째 도는 sync·하루 넘게 확인을 기다리는 잡이 빠져 드레인 영향이 「실행 중 0」으로 읽혔다.
   const jobsQ = useJobMetrics(24);
   const setControlState = useSetControlState();
   const [maintenance, setMaintenance] = useState(false);
@@ -84,19 +85,34 @@ export function ControlStatePage() {
   const [hostNetwork, setHostNetwork] = useState(false);
   const [proxyCaPath, setProxyCaPath] = useState("");
 
+  const syncForm = (cs: ControlState) => {
+    setMaintenance(cs.maintenance === 1);
+    setDrain(cs.drain === 1);
+    setReason(cs.reason ?? "");
+    setBuildNodeName(cs.build_node_name ?? "");
+    setBuildSourcePath(cs.build_source_path ?? "");
+    setHttpProxy(cs.build_http_proxy ?? "");
+    setHttpsProxy(cs.build_https_proxy ?? "");
+    setNoProxy(cs.build_no_proxy ?? "");
+    setHostNetwork(cs.build_host_network === 1);
+    setProxyCaPath(cs.build_proxy_ca_path ?? "");
+  };
+  // 폼을 서버 값으로 채우는 때는 둘뿐이다(2026-11-11): 처음 데이터가 왔을 때(여기)와 저장 성공 직후(submit 의
+  // onSuccess). q.data 는 창 포커스 재조회마다 새 객체가 될 수 있다 -- 컨트롤러가 30초마다 artifact_base_check_at 을
+  // 갱신해 응답이 늘 조금씩 다르다. [q.data] 마다 덮어쓰던 때는 다른 창에 다녀온 사이 편집 중이던 입력이 경고 없이
+  // 서버 값으로 사라졌다. 적용값은 아래 「현재 상태」 카드가 q.data 로 따로 보여 준다.
+  // 「처음 데이터」는 **이 마운트의 조회가 끝난 값**이다(2026-11-11 리뷰): ['control-state'] 캐시는 빌드 화면도 채우고
+  // gcTime 동안 남아, 마운트 즉시 q.data 는 옛 캐시일 수 있다(그사이 남이 유지보수·프록시를 바꿨으면 낡은 값). 그 값에서
+  // 확정하면 재조회로 온 새 값이 무시되고, 그대로 「저장」하면 남의 변경을 조용히 되돌린다. 그래서 조회 중(isFetching)이면
+  // 캐시로 미리 채우기만 하고(빈 폼 깜빡임 방지) 확정·저장 허용은 조회가 끝난 뒤 -- 실패해도 isFetching 은 내려가 캐시 값으로
+  // 확정한다. 신선한 캐시(staleTime 안)는 마운트 조회가 없어 isFetching 이 처음부터 거짓이라 바로 확정된다
+  // (isFetchedAfterMount 로 기다리면 이 경우 폼이 영영 빈 채로 남는다).
+  const [formSynced, setFormSynced] = useState(false);
   useEffect(() => {
-    if (!q.data) return;
-    setMaintenance(q.data.maintenance === 1);
-    setDrain(q.data.drain === 1);
-    setReason(q.data.reason ?? "");
-    setBuildNodeName(q.data.build_node_name ?? "");
-    setBuildSourcePath(q.data.build_source_path ?? "");
-    setHttpProxy(q.data.build_http_proxy ?? "");
-    setHttpsProxy(q.data.build_https_proxy ?? "");
-    setNoProxy(q.data.build_no_proxy ?? "");
-    setHostNetwork(q.data.build_host_network === 1);
-    setProxyCaPath(q.data.build_proxy_ca_path ?? "");
-  }, [q.data]);
+    if (q.data == null || formSynced) return;
+    syncForm(q.data);
+    if (!q.isFetching) setFormSynced(true);
+  }, [q.data, q.isFetching, formSynced]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const submit = () => {
     setControlState.mutate({
@@ -109,6 +125,9 @@ export function ControlStatePage() {
       build_no_proxy: noProxy.trim() === "" ? null : noProxy.trim(),
       build_host_network: hostNetwork,
       build_proxy_ca_path: proxyCaPath.trim() === "" ? null : proxyCaPath.trim(),
+    }, {
+      // PUT 응답 = 저장 뒤 control_state 전체 -- 서버가 정규화한 값(trim·프록시 정규화)으로 폼을 다시 맞춘다.
+      onSuccess: (cs) => { if (cs != null) syncForm(cs); },
     });
   };
 
@@ -181,7 +200,7 @@ export function ControlStatePage() {
                        placeholder="/home/mason/dms-dev/dms"
                        onChange={(e) => setBuildSourcePath(e.target.value)} />
                 <span className="block text-muted text-xs mt-1">
-                  빌드 노드에서 DMS 저장소가 있는 절대 경로 — 빌드는 이 경로의 로컬
+                  빌드 노드에서 DMS 저장소가 있는 절대 경로(300자 이하, '..' 불가) — 빌드는 이 경로의 로컬
                   소스(미커밋 변경 포함)로 진행됩니다
                 </span>
               </label>
@@ -266,7 +285,7 @@ export function ControlStatePage() {
                 <p className="text-bad">{(setControlState.error as ApiError).message}</p>
               )}
               <div className="flex justify-end pt-2">
-                <Button type="submit" disabled={setControlState.isPending}>저장</Button>
+                <Button type="submit" disabled={setControlState.isPending || !formSynced}>저장</Button>
               </div>
             </form>
           </Card>
@@ -284,9 +303,9 @@ export function ControlStatePage() {
               )}
             </div>
             {/* 영향 요약: 드레인을 켜면 무엇이 멈추는지(켠 상태면 무엇이 동결 중인지)
-                의 재료. null(집계 실패)은 표시하지 않는다 -- 0 과 모름을 섞지 않는다. */}
-            {Array.isArray(jobsQ.data?.by_state) && (() => {
-              const kpi = kpiFromStates(jobsQ.data.by_state);
+                의 재료. null(집계 실패)은 표시하지 않는다 -- 0 과 모름을 섞지 않는다. 창 없는 비종단 집계다(위 jobsQ 주석). */}
+            {Array.isArray(jobsQ.data?.live_by_state) && (() => {
+              const kpi = kpiFromStates(jobsQ.data.live_by_state);
               return (
                 <p className="text-sm text-muted">
                   진행 중 작업: 실행 중 <span className="text-ink font-medium tabular-nums">{kpi.running}</span>
@@ -296,17 +315,19 @@ export function ControlStatePage() {
               );
             })()}
             {/* 항목당 한 줄 -- 소스 경로가 길어 한 줄에 붙이면 좁은 폭에서 임의
-                위치로 접힌다(사용자 지적). */}
+                위치로 접힌다(사용자 지적). 경로·프록시 값은 break-all(2026-11-11): 쉼표·점·콜론으로만
+                이어진 no_proxy(권장 값 ~90자)는 줄바꿈 기회가 없어 390px 폭에서 카드를 뚫고 가로 스크롤을
+                만들었다 -- 위 힌트 줄(권장 값)과 같은 규칙. */}
             <div className="text-sm text-muted space-y-1 border-t border-line pt-3">
               <p>빌드 노드: <span className="text-ink font-medium">{q.data?.build_node_name ?? "—"}</span></p>
-              <p>소스 경로: <span className="text-ink font-mono">{q.data?.build_source_path ?? "—"}</span></p>
-              <p>빌드 프록시: <span className="text-ink font-mono">
+              <p>소스 경로: <span className="text-ink font-mono break-all">{q.data?.build_source_path ?? "—"}</span></p>
+              <p>빌드 프록시: <span className="text-ink font-mono break-all">
                 {q.data?.build_http_proxy || q.data?.build_https_proxy
                   ? `${q.data?.build_http_proxy ?? "—"} / ${q.data?.build_https_proxy ?? "—"}`
                     + (q.data?.build_no_proxy ? ` (제외: ${q.data.build_no_proxy})` : "")
                   : "없음(직접 연결)"}
               </span></p>
-              <p>프록시 CA: <span className="text-ink font-mono">{q.data?.build_proxy_ca_path || "없음"}</span></p>
+              <p>프록시 CA: <span className="text-ink font-mono break-all">{q.data?.build_proxy_ca_path || "없음"}</span></p>
               <p>빌드 파드 네트워크: <span className="text-ink font-medium">
                 {(() => {
                   const host = proxyHostOf(q.data?.build_https_proxy || q.data?.build_http_proxy);

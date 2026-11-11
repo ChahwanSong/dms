@@ -13,7 +13,7 @@ import { NODE_CPU_CAP_NOTE } from "../../lib/jobTool";
 import { field } from "../jobs/formFields";
 import {
   BUFSIZE_HELP, CHMOD_RE, chownFieldError, DIRECT_HELP, directBufsizeError, OPEN_NOATIME_HELP, QUIET_HELP, SCAN_INT_FIELDS,
-  SYNC_INT_FIELDS, SYNC_MAX_ERRORS_NOTE, SYNC_OPTION_HELP, intFieldError, scanIntFieldError, syncIntFieldError,
+  SYNC_INT_FIELDS, SYNC_MAX_ERRORS_NOTE, SYNC_OPTION_HELP, intFieldError, priorityCapText, scanIntFieldError, syncIntFieldError,
 } from "../jobs/optionRules";
 import { Button } from "../../components/ui/Button";
 import {
@@ -33,9 +33,6 @@ import type { PvSlot } from "../k8s/PvPathPicker";
 // 항목 → 실행 옵션 → 실행 제어 → 이름·메모.
 
 type InputTab = "table" | "paste" | "upload";
-
-// 우선순위 순서는 PRIORITIES(domain.py:61)의 미러 — 상한 초과 판정에 쓴다.
-const PRIORITY_RANK: Record<string, number> = { low: 0, mid: 1, high: 2 };
 
 // 동시 실행 상한 프리필(사용자 결정 2026-10-01: 2 → 32). 서버엔 기본값이 없다(필수 필드,
 // domain.validate_batch 1..64) -- 기본은 이 화면이 정해 바디에 늘 싣는다. 배치 하나가 동시에
@@ -243,46 +240,10 @@ export function BatchCreate() {
   const priorityDefaultLabel = defaultPolicy === undefined
     ? "(정책 기본)" : `(정책 기본: ${defaultPolicy.default_priority})`;
 
-  // 우선순위 캡션 — 상한부는 _clamp_priority(placement.py) 미러: fanout 이 상한
-  // 초과 선택을 **조용히** 상한으로 누르는 침묵을 화면이 미리 말한다. sync 는
-  // 도구별 묶음(기본+상한)으로 nsync 기본값도 **표기**하되, 기본값 **적용**은
-  // dsync 정책 단독(resolve_priority — 제출 시점 도구 미정이라 dsync 대표.
-  // nsync 폴백 실행이어도 요청에 박힌 기본값은 dsync 것)이고 nsync 는 상한만
-  // 실행 도구 기준으로 실제 적용됨을 문장으로 명시한다(화면 거짓말 금지 —
-  // 제출 바디=요약 동일 함수 관례와 같은 정직성 규약). 미조회·행 부재는 거짓값
-  // 대신 캡션 생략(null≠0).
-  const priorityCapCaption = (() => {
-    if (byTool === undefined) return null;
-    const tools = f.op === "sync" ? ["dsync", "nsync"] : [f.op];
-    const rows = tools.flatMap((tool) => {
-      const p = byTool.get(tool);
-      return p === undefined ? []
-        : [{ tool, def: p.default_priority, cap: p.max_priority }];
-    });
-    if (rows.length === 0) return null;
-    // 초과 선택 즉답 — 오류가 아니라 조정 예고이므로 톤(text-muted)은 유지하되
-    // 실값으로 구체화한다. ""(정책 기본)는 rank -1 이라 절대 초과가 아니다.
-    const over = rows.filter((r) =>
-      (PRIORITY_RANK[f.priority] ?? -1) > (PRIORITY_RANK[r.cap] ?? Infinity));
-    const overValues = [...new Set(over.map((r) => r.cap))];
-    const overTail = over.length === rows.length && overValues.length === 1
-      ? `선택한 ${f.priority}는 상한 ${overValues[0]}로 조정됩니다`
-      // 한쪽 상한만 넘거나 두 상한이 다른 경우 — 조정은 실제 배치 도구의
-      // 정책으로만 일어나므로 넘는 도구만 정직하게 말한다.
-      : `선택한 ${f.priority}는 배치 시 ${
-          over.map((r) => `${r.tool} 상한 ${r.cap}`).join(" · ")}로 조정됩니다`;
-    if (f.op !== "sync")
-      return `정책 상한: ${rows[0].cap} — ${over.length === 0
-        ? "상한을 넘는 선택은 배치 시 상한으로 조정됩니다" : overTail}`;
-    // sync: 기본·상한이 전부 같으면 한 묶음으로 축약(같은 값 반복은 소음).
-    const allSame = rows.length > 1
-      && rows.every((r) => r.def === rows[0].def && r.cap === rows[0].cap);
-    const head = allSame
-      ? `${rows.map((r) => r.tool).join("·")}: 기본 ${rows[0].def} · 상한 ${rows[0].cap}`
-      : rows.map((r) => `${r.tool}: 기본 ${r.def} · 상한 ${r.cap}`).join(" / ");
-    return `정책 — ${head}. 기본값 적용은 dsync 기준(제출 시점 도구 미정), ${
-      over.length === 0 ? "상한은 실행 도구 기준으로 조정됩니다" : overTail}`;
-  })();
+  // 우선순위 캡션 — 상한부는 _clamp_priority(placement.py) 미러(fanout 이 상한 초과 선택을 **조용히** 상한으로 누르는
+  // 침묵을 화면이 미리 말한다). 계산은 optionRules.priorityCapText 한 곳 -- 단일 작업도 같은 캡션을 읽는다(2026-11-11 이사,
+  // 「왜」는 그 주석). 미조회·행 부재는 거짓값 대신 캡션 생략(null≠0).
+  const priorityCapCaption = priorityCapText(byTool, f.op, f.priority);
 
   function buildOptions(): Record<string, unknown> {
     const options: Record<string, unknown> = {};
@@ -326,7 +287,9 @@ export function BatchCreate() {
       : rows.map((r) => ({ storage: f.storage, target: r.a.trim() }));        // scan·rm
     return {
       operation: f.op, max_concurrency: Number(f.mc), options: buildOptions(),
-      note: f.note || null, items,
+      // 메모도 이름처럼 trim — 공백뿐이면 null(메모 없음). 서버도 같은 규칙(normalized_batch_note, 2026-11-11)이라 요약과
+      // 저장값이 같다(예전엔 "   " 이 그대로 저장돼 요약에 빈 「메모」 행이 보였다).
+      note: f.note.trim() !== "" ? f.note.trim() : null, items,
       // 배치 이름: 빈값은 키 생략 = 서버 NULL(이름 없음) — 아래 생략 계약의 미러.
       ...(f.name.trim() !== "" && { name: f.name.trim() }),
       // 미지정("")은 키 자체를 생략한다 — 서버 NULL(정책 기본), null≠0.
@@ -708,7 +671,10 @@ export function BatchCreate() {
             <FieldRow
               control={<>
                 <label className="text-sm block">batch_files (선택 · 0..1,000,000,000 · 0 = 배칭 끔)
-                  <input aria-label="batch_files" type="number" min={0} max={1000000000}
+                  {/* 숫자 칸은 text + inputMode(2026-11-11, 실행 설정 대화상자와 같은 이유): type=number 는 「8e」·(Firefox)
+                      「2,000,000」 같은 글자를 value "" 로 돌려줘, 칸엔 친 글자가 남은 채 키가 빠져 서버·정책 기본으로 조용히
+                      생성됐다. 원문을 받아 intFieldError 가 거른다. */}
+                  <input aria-label="batch_files" inputMode="numeric"
                          placeholder="비우면 기본 1,000,000 적용 · 0 = 배칭 끔"
                          className={field} value={f.scanBatchFiles}
                          onChange={on("scanBatchFiles")} />
@@ -719,7 +685,7 @@ export function BatchCreate() {
             <FieldRow
               control={<>
                 <label className="text-sm block">broken_limit (선택 · 0..10,000 · 리포트에 보관할 파손 경로 수)
-                  <input aria-label="broken_limit" type="number" min={0} max={10000}
+                  <input aria-label="broken_limit" inputMode="numeric"
                          placeholder="비우면 기본 100 적용"
                          className={field} value={f.brokenLimit}
                          onChange={on("brokenLimit")} />
@@ -868,13 +834,14 @@ export function BatchCreate() {
         <div className="space-y-1">
           <div className="grid gap-x-6 gap-y-3 sm:grid-cols-2 sm:items-end">
             <label className="text-sm block">노드 수 (선택 · 1..64, 빈값 = 정책 기본)
-              <input aria-label="노드 수" type="number" min={1} max={64} className={field}
+              {/* text + inputMode(위 batch_files 칸 주석 — 「8e」가 빈값(= 정책 기본)으로 조용히 실렸다) */}
+              <input aria-label="노드 수" inputMode="numeric" className={field}
                      placeholder="비우면 정책 기본"
                      value={f.nodeCount} onChange={on("nodeCount")} />
             </label>
             {/* 요청은 정책을 줄일 수만 있다(planner min-캡) — 늘리려면 정책 수정 */}
             <label className="text-sm block">노드당 프로세스 수 (선택 · 1..64, 빈값 = 정책 기본)
-              <input aria-label="노드당 프로세스 수" type="number" min={1} max={64}
+              <input aria-label="노드당 프로세스 수" inputMode="numeric"
                      className={field} placeholder="비우면 정책 기본"
                      value={f.procsPerNode} onChange={on("procsPerNode")} />
             </label>
@@ -900,7 +867,7 @@ export function BatchCreate() {
         <FieldRow
           control={<>
             <label className="text-sm block">동시 실행 상한 (1..64)
-              <input aria-label="동시 실행 상한" type="number" min={1} max={64} className={field}
+              <input aria-label="동시 실행 상한" inputMode="numeric" className={field}
                      placeholder={`예: ${DEFAULT_MAX_CONCURRENCY}`}
                      value={f.mc} onChange={(e) => setF({ ...f, mc: e.target.value })} />
             </label>

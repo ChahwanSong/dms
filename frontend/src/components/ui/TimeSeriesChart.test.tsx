@@ -99,6 +99,23 @@ test("키보드 포커스도 툴팁을 띄운다(마우스 없는 접근성)", (
   expect(screen.getByRole("tooltip")).toHaveTextContent("bob");
 });
 
+test("호버한 채 점이 줄어도(60→30 창 전환) 범위 밖 인덱스로 죽지 않고 툴팁을 접는다", () => {
+  // 2026-11-11: 사라진 버튼은 mouseleave 를 내지 않아 active=45 가 남고 pts[45].x 에서 TypeError
+  // → ErrorBoundary 「화면을 표시하지 못했습니다」였다(BarChart 의 hovered 가드와 같은 규칙).
+  const mk = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({ t: 1000 + i * 60, y: i + 1, label: `p${i}` }));
+  const { rerender } = render(<TimeSeriesChart points={mk(60)} label="추이" formatY={String}
+                                               emptyText="-" />);
+  fireEvent.mouseEnter(screen.getByRole("button", { name: "p45" }));
+  expect(screen.getByRole("tooltip")).toHaveTextContent("p45");
+  rerender(<TimeSeriesChart points={mk(30)} label="추이" formatY={String} emptyText="-" />);
+  expect(screen.queryByRole("tooltip")).toBeNull();
+  expect(screen.getAllByRole("button")).toHaveLength(30);
+  // 줄어든 뒤의 새 호버는 정상으로 뜬다
+  fireEvent.mouseEnter(screen.getByRole("button", { name: "p3" }));
+  expect(screen.getByRole("tooltip")).toHaveTextContent("p3");
+});
+
 test("tooltip 미지정이면 label 한 줄로 폴백", async () => {
   render(<TimeSeriesChart points={P} label="추이" formatY={String} emptyText="-" />);
   await userEvent.hover(screen.getByRole("button", { name: "p1: 1.0 KiB" }));

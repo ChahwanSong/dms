@@ -4,7 +4,7 @@ import { useBatch, useConfirmBatch, useRerunFailed, useRequestScanStats,
          useCancelBatch, useRescanBatch, useUpdateBatch, useDeleteBatch,
          useUpdateBatchItem, useDeleteBatchItem, useDeleteBatchItems,
          useAddBatchItem, useReplaceBatchItems, useRerunBatchItems,
-         useDisableAutoConfirm, needsBatchConfirm, autoConfirmable, useParseBatchCsv } from "./useBatches";
+         useDisableAutoConfirm, needsBatchConfirm, autoConfirmable, useParseBatchCsv, batchGone } from "./useBatches";
 import { batchItemsCsvUrl, csvErrorLines, serializeItemsCsv,
          type CsvParseResult, type ItemsCsvOp } from "../../lib/csv";
 import { Card } from "../../components/ui/Card";
@@ -160,12 +160,16 @@ const itemBody = (isSync: boolean, p: Record<string, unknown>,
 // 관례 미러(scan/rm: storage:target, sync: src → dst). ?? 로만 접는다 — truthy
 // 검사는 ""(빈 경로)를 "모름"으로 뭉갠다.
 const part = (v: unknown) => String(v ?? "—");
-function summarizeItem(operation: string | undefined,
-                       p: Record<string, unknown>): string {
-  const body = operation === "sync"
+// 대상만(연산 접두 없음) — 항목 행 요약용. 배치는 연산이 하나라(헤더가 말한다) 행마다 「scan · 」를 붙이면 좁은 폭에서 그
+// 접두가 경로 앞 폭을 먼저 먹었다(2026-11-11 390px 실측: rm 항목 둘이 모두 「r..」).
+function itemTarget(operation: string | undefined, p: Record<string, unknown>): string {
+  return operation === "sync"
     ? `${part(p.source_storage)}:${part(p.source)} → ${part(p.destination_storage)}:${part(p.destination)}`
     : `${part(p.storage)}:${part(p.target)}`;
-  return `${operation ?? "—"} · ${body}`;
+}
+function summarizeItem(operation: string | undefined,
+                       p: Record<string, unknown>): string {
+  return `${operation ?? "—"} · ${itemTarget(operation, p)}`;
 }
 
 // CSV 대화상자 연산: 항목 **모양**만 가른다(sync = 쌍, 나머지 = 대상 하나). 모르는 문자열은 1열(scan)로 읽는다 — 예전
@@ -1112,6 +1116,34 @@ function DeleteBatchButton({ batchId }: { batchId: string }) {
   );
 }
 
+// 배치를 아직 못 읽었거나 읽지 못한 화면(2026-11-11): 예전엔 q.isLoading·q.isError 를 보지 않아 404(기록을 지운 배치·없는 id)
+// 에서도 「배치 xxx」·「…」 배지·숫자 없는 「성공 /실패 /전체」·빈 항목 카드만 남았다 — 오류 문구도 돌아갈 길도 없었다.
+// 404 는 오류가 아니라 상태라 중립 상자이고 「다시 시도」가 없다(다시 읽어도 404 — RequestDetail NotFoundView 관례). 그 밖의
+// 실패는 사유 + 「다시 시도」(데이터 없는 오류는 자동으로 다시 읽지 않는다 — useBatch 주석). 「이 배치의 작업 보기」는 남긴다:
+// 기록만 지운 배치의 작업은 전체 작업에 그대로 있다.
+function BatchUnavailable({ batchId, q }: { batchId: string; q: ReturnType<typeof useBatch> }) {
+  const gone = batchGone(q.error);
+  return (
+    <section className="space-y-4">
+      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+        <h1 className="text-2xl font-bold">{`배치 ${batchId.slice(0, 12)}`}</h1>
+        <Link className="text-accent text-sm" to={batchJobsPath(batchId)}>전체 작업에서 이 배치의 작업 보기</Link>
+      </div>
+      <Card>
+        {q.isError ? (
+          <div role={gone ? "status" : "alert"} className="flex flex-wrap items-center gap-3 text-sm">
+            <p className={`min-w-0 flex-1 break-keep ${gone ? "" : "text-bad"}`}>
+              {gone ? `${(q.error as Error).message} — 기록이 지워졌을 수 있습니다` : (q.error as Error).message}
+            </p>
+            {!gone && <Button variant="ghost" onClick={() => { void q.refetch(); }}>다시 시도</Button>}
+            <Link className="text-accent" to="/admin/batches">배치 목록으로</Link>
+          </div>
+        ) : <p className="text-muted">불러오는 중…</p>}
+      </Card>
+    </section>
+  );
+}
+
 export function BatchDetail() {
   const { batchId = "" } = useParams();
   const q = useBatch(batchId);
@@ -1127,7 +1159,11 @@ export function BatchDetail() {
   const [editing, setEditing] = useState(false);
   const [nameDraft, setNameDraft] = useState("");
   const [noteDraft, setNoteDraft] = useState("");
+  // 열 때·편집 취소 때 지난 저장 실패 문구를 지운다(2026-11-11 — 같은 파일 대화상자들의 「닫힐 때마다 오류를 비운다」 관례.
+  // 예전엔 유지보수 503 뒤 취소하고 다시 열면 아무것도 안 했는데 그 실패 문구가 떠 있었다). 진행 중엔 reset 하지 않는다.
+  const resetUpdate = () => { if (!update.isPending) update.reset(); };
   const startEdit = () => {
+    resetUpdate();
     setNameDraft(b?.name ?? ""); setNoteDraft(b?.note ?? ""); setEditing(true);
   };
   const save = () => update.mutate({ name: nameDraft, note: noteDraft },
@@ -1160,7 +1196,11 @@ export function BatchDetail() {
   const [armedSeq, setArmedSeq] = useState<number | null>(null);
   const [pathDraft, setPathDraft] = useState("");
   const [dstDraft, setDstDraft] = useState("");
+  // 이름·메모 편집과 같은 이유로 열 때·취소 때 지난 저장 실패를 지운다(2026-11-11 — #1 저장 422 뒤 #2 를 열면 #1 의 문구가
+  // #2 폼 밑에 보였다). 실패 문구는 그 저장을 시도한 행에만 그린다(아래 updateItem.variables 대조 — 행 삭제 실패와 같은 규칙).
+  const resetUpdateItem = () => { if (!updateItem.isPending) updateItem.reset(); };
   const startItemEdit = (it: BatchItem) => {
+    resetUpdateItem();
     setPathDraft(String((isSync ? it.payload.source : it.payload.target) ?? ""));
     setDstDraft(String(it.payload.destination ?? ""));
     setEditSeq(it.seq);
@@ -1193,19 +1233,20 @@ export function BatchDetail() {
   // 같은 리페치는 같은 참조를 돌려준다.
   const deletableSeqs = useMemo(
     () => (b?.items ?? []).filter(canEditItem).map((it) => it.seq), [b?.items, terminal]);
-  const liveSeqs = useMemo(
-    () => new Set((b?.items ?? []).map((it) => it.seq)), [b?.items]);
-  // 유령 선택 정리: 리페치로 사라진 항목(단건 삭제·다른 세션의 교체)을 선택에서
-  // 뺀다 — 안 그러면 화면에 없는 seq 에 DELETE 를 쏘고 404 를 "실패"로 보고한다.
-  // 부분집합이라 길이 비교로 동일성을 판정하고, 같으면 같은 참조를 돌려 재렌더
-  // 루프를 끊는다.
+  // 유령 선택 정리: 리페치로 **지금 고를 수 없게 된** 항목을 선택에서 뺀다 — 사라진 항목(단건 삭제·다른 세션의 교체)뿐 아니라
+  // 고른 사이 Queued → Materialized 가 된 항목도(2026-11-11: 예전엔 존재만 봐서, 그 항목이 체크된 채 잠겨(disabled) 개별 해제가
+  // 안 되고 「N개 삭제 확인」이 그 항목에 409 를 냈다). 안 그러면 화면에 없거나 지울 수 없는 seq 에 DELETE 를 쏘고 "실패"로
+  // 보고한다. 부분집합이라 길이 비교로 동일성을 판정하고, 같으면 같은 참조를 돌려 재렌더 루프를 끊는다.
   useEffect(() => {
+    const selectable = new Set(deletableSeqs);
     setSelected((prev) => {
-      const next = prev.filter((s) => liveSeqs.has(s));
+      const next = prev.filter((s) => selectable.has(s));
       return next.length === prev.length ? prev : next;
     });
-  }, [liveSeqs]);
-  const allChecked = deletableSeqs.length > 0 && selected.length === deletableSeqs.length;
+  }, [deletableSeqs]);
+  // 전체 선택 판정은 개수가 아니라 집합으로 본다 — 위 정리 effect 가 돌기 전 한 렌더(폴링 직후)엔 선택이 고를 수 있는 집합의
+  // 부분집합이 아닐 수 있다(선택 [3,4]·고를 수 있는 [4,5] 를 「전체 선택됨」으로 보이고, 누르면 #5 를 담지 않고 비웠다).
+  const allChecked = deletableSeqs.length > 0 && deletableSeqs.every((s) => selected.includes(s));
   // indeterminate 는 속성이 아니라 DOM 프로퍼티라 ref 로만 설정된다.
   const allRef = useRef<HTMLInputElement>(null);
   const someChecked = selected.length > 0 && !allChecked;
@@ -1237,6 +1278,8 @@ export function BatchDetail() {
     () => (b?.items ?? []).filter((it) => selected.includes(it.seq)
                                           && RERUNNABLE_ITEM.has(it.status)).length,
     [b?.items, selected]);
+  // 훅은 전부 위에서 불렀다 — 조기 return 은 여기서부터만(훅 순서 고정).
+  if (b === undefined) return <BatchUnavailable batchId={batchId} q={q} />;
   return (
     <section className="space-y-4">
       {/* 이름이 있으면 이름이 헤더 — 축약 batch_id 는 식별자로 병기한다(사라지면
@@ -1248,6 +1291,14 @@ export function BatchDetail() {
             (2026-10-11 검증 지적: 작업 목록에 배치 필터·링크가 없어 오래된 배치의 작업을 찾을 수 없었다). */}
         <Link className="text-accent text-sm" to={batchJobsPath(batchId)}>전체 작업에서 이 배치의 작업 보기</Link>
       </div>
+      {/* 보는 사이 다른 관리자가 기록을 지웠다(재조회 404 — 폴링은 멈춘다, useBatch). 아래는 마지막으로 읽은 내용이라고 말한다
+          (2026-11-11 — 예전엔 아무 말 없이 404 를 2.5초마다 다시 읽었다). */}
+      {q.isError && batchGone(q.error) && (
+        <p role="alert" className="text-sm text-bad">
+          {`${(q.error as Error).message} — 기록이 지워졌을 수 있습니다(아래는 마지막으로 읽은 내용입니다). `}
+          <Link className="text-accent" to="/admin/batches">배치 목록으로</Link>
+        </p>
+      )}
       <Card>
         {/* 헤더 세 줄은 줄바꿈된다(2026-10-11 375 실측): 끝난 배치의 버튼 넷(편집·전체 재실행·실행 설정 변경·배치 삭제)이
             한 줄로 12~19px 넘쳤고, 자동 실행 표시가 붙으면 80px 까지 넘쳤다. */}
@@ -1290,7 +1341,9 @@ export function BatchDetail() {
                 PATCH {name, note} 계약·폼 구조는 무변경. */}
             {b && !editing && <Button variant="ghost" onClick={startEdit}>편집</Button>}
             {b?.status === "PreviewReady" && <ConfirmBatchDialog b={b} confirm={confirm} absOf={absOf} />}
-            {b?.status === "Completed" && (b?.failed_count ?? 0) > 0 && <Button disabled={rerun.isPending} onClick={() => rerun.mutate()}>실패분 재실행</Button>}
+            {/* 종단(Completed·Cancelled) 모두(2026-11-11): 서버 :rerun-failed 는 Cancelling 만 거부하고 Cancelled 도 되살린다 --
+                취소 전에 실패한 항목이 있는 Cancelled 배치에서 「실행 설정 변경」 뒤 실패분만 다시 돌리는 동선이 버튼만 없었다. */}
+            {terminal && (b?.failed_count ?? 0) > 0 && <Button disabled={rerun.isPending} onClick={() => rerun.mutate()}>실패분 재실행</Button>}
             {/* 전체 재실행(:rescan): 종단 배치 한정(서버 가드 미러) — 성공 item 포함
                 전부 재큐잉(성장 모니터링). "실패분 재실행"(실패만)과 공존한다 */}
             {(b?.status === "Completed" || b?.status === "Cancelled") && <Button disabled={rescan.isPending} onClick={() => rescan.mutate()}>전체 재실행</Button>}
@@ -1421,7 +1474,7 @@ export function BatchDetail() {
             <div className="flex gap-2">
               <Button disabled={update.isPending} onClick={save}>저장</Button>
               {/* 배치 취소 버튼("취소")과 라벨이 겹치지 않게 "편집 취소" */}
-              <Button variant="ghost" onClick={() => setEditing(false)}>편집 취소</Button>
+              <Button variant="ghost" onClick={() => { resetUpdate(); setEditing(false); }}>편집 취소</Button>
             </div>
             {update.isError && (
               <p className="text-bad text-sm">{(update.error as ApiError).message}</p>
@@ -1432,7 +1485,7 @@ export function BatchDetail() {
       {/* 항목: 표 대신 리스트 + 행 펼침. 표(td) 안에 버튼·flex 를 넣으면 e2e L2
           (display=table-cell 불변식)가 무는 함정이라, 펼침 UI 는 표 밖 리스트가
           구조적으로 안전하다. 기본 행은 컴팩트(순번·대상 요약·상태), 상세(사유·
-          파일 수·완료 시각·payload·요청 링크)는 펼친 행에만. */}
+          결과 수·완료 시각·payload·요청 링크)는 펼친 행에만. */}
       <Card>
         {/* 카드 헤더 = 전체 선택 + 제목 + 도구 버튼 3종. 도구가 헤더에 모여 있어야
             항목 목록이 카드의 본문 전체를 쓴다(인라인 시절엔 목록 아래 세 영역이
@@ -1458,7 +1511,7 @@ export function BatchDetail() {
               <CurrentItemsCsvDialog operation={csvOp(b.operation)}
                                      items={b.items ?? []} />
             )}
-            {/* 「CSV 내보내기」(2026-10-26): 서버가 항목마다 경로·스토리지 + 상태 열(상태·요청·사유·처리 파일 수·완료 시각)을
+            {/* 「CSV 내보내기」(2026-10-26): 서버가 항목마다 경로·스토리지 + 상태 열(상태·요청·사유·결과 수 files_count·완료 시각)을
                 내린다(엑셀용 BOM·수식 방어). 고친 파일은 「CSV로 전체 교체」·배치 생성에 그대로 쓸 수 있다. */}
             {b && hasItems && (
               <a href={batchItemsCsvUrl(batchId)} download
@@ -1560,7 +1613,10 @@ export function BatchDetail() {
                 구조로 막는다 — stopPropagation 불필요). 항목은 표(Table)가 아니라
                 리스트 구조라(위 카드 주석 — d54 결정) e2e L2(td 안 flex/버튼
                 불변식)는 애초에 안 문다 — 실측: td 없음. */}
-            <div className="flex items-center gap-3">
+            {/* 좁은 폭(sm 미만)에선 줄바꿈된다(2026-11-11 390px 실측): 체크박스·순번·요약·배지·수정·삭제가 한 줄이라 요약에 남는
+                폭이 거의 없어 rm 항목 둘이 「r..」로만 보였다. 수정·삭제는 다음 줄(요약 들여쓰기에 맞춤)로 내리고, 요약은 잘라
+                내지 않고 접어 보인다(절대경로는 title 뿐이라 터치 기기에선 볼 길이 없다). sm 이상은 종전 한 줄 + truncate. */}
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
               {/* 삭제 가능한 항목만 선택 가능(canEditItem 재사용 — 행 삭제 버튼과
                   같은 게이트). disabled 로 끝내지 않고 title 로 이유를 남긴다. */}
               <input type="checkbox" aria-label={`항목 ${it.seq} 선택`}
@@ -1580,9 +1636,9 @@ export function BatchDetail() {
                     또렷하게), 크기만 한 단 올린다. */}
                 {/* 절대경로는 title 로만 — 본문에 이어 붙이면 한 줄이 두 배로
                     길어져 truncate 가 정작 대상 경로를 먹는다(좁은 자리 규칙). */}
-                <span className="min-w-0 flex-1 truncate font-mono text-sm"
+                <span className="min-w-0 flex-1 break-all font-mono text-sm sm:truncate"
                       title={absOf(it) ?? undefined}>
-                  {summarizeItem(b?.operation, it.payload)}
+                  {itemTarget(b?.operation, it.payload)}
                 </span>
                 <StatusPill state={it.status} />
               </button>
@@ -1592,7 +1648,9 @@ export function BatchDetail() {
                   아래에 열려(펼침과 무관) 대상과 입력이 붙어 있다. 행별 aria-label
                   은 삭제 버튼 관례 미러 — 행이 여럿이라 무접두 "수정"은 모호하다.
                   노출 조건은 canEditItem 재사용(표시 게이트, 진짜 차단은 서버 409). */}
-              {canEditItem(it) && editSeq !== it.seq && (
+              {/* 수정·삭제 묶음: sm 미만에선 한 줄을 다 차지해 다음 줄로 내려간다(요약 들여쓰기에 맞춤 — 위 행 주석). */}
+              {canEditItem(it) && (<div className={`flex basis-full gap-2 ${ITEM_INDENT} sm:ml-0 sm:basis-auto`}>
+              {editSeq !== it.seq && (
                 <Button variant="ghost" aria-label={`항목 ${it.seq} 수정`}
                         onClick={() => startItemEdit(it)}>수정</Button>
               )}
@@ -1604,13 +1662,14 @@ export function BatchDetail() {
                   체크(1)→선택 삭제(2)→N개 삭제 확인(3) 세 클릭이 되는데, 행
                   버튼은 삭제(1)→삭제 확인(2) 두 클릭이다. 가장 흔한 조작이
                   느려지는 건 정리가 아니라 퇴보라 중복을 감수한다. */}
-              {canEditItem(it) && (armedSeq === it.seq
+              {armedSeq === it.seq
                 ? <Button aria-label={`항목 ${it.seq} 삭제 확인`}
                           disabled={deleteItem.isPending}
                           onClick={() => deleteItem.mutate(it.seq,
                             { onSettled: () => setArmedSeq(null) })}>삭제 확인</Button>
                 : <Button variant="ghost" aria-label={`항목 ${it.seq} 삭제`}
-                          onClick={() => setArmedSeq(it.seq)}>삭제</Button>)}
+                          onClick={() => setArmedSeq(it.seq)}>삭제</Button>}
+              </div>)}
             </div>
             {/* 삭제 실패 사유는 시도한 행 밑에만 — variables(마지막 mutate 의
                 seq)로 행을 특정한다(전 행에 도배하면 어느 삭제가 실패했는지
@@ -1642,9 +1701,9 @@ export function BatchDetail() {
                 <div className="flex gap-2">
                   <Button disabled={updateItem.isPending} onClick={() => saveItem(it)}>항목 저장</Button>
                   {/* 배치 취소("취소")·이름 편집("편집 취소")과 라벨이 겹치지 않게 */}
-                  <Button variant="ghost" onClick={() => setEditSeq(null)}>항목 편집 취소</Button>
+                  <Button variant="ghost" onClick={() => { resetUpdateItem(); setEditSeq(null); }}>항목 편집 취소</Button>
                 </div>
-                {updateItem.isError && (
+                {updateItem.isError && updateItem.variables?.seq === it.seq && (
                   <p className="text-bad text-sm">{(updateItem.error as ApiError).message}</p>
                 )}
               </div>
@@ -1671,10 +1730,13 @@ export function BatchDetail() {
                     {/* 결과 수의 이름은 연산의 뜻으로(요청 상세 KPI 와 같은 이름 — requestOutcome): rm 「삭제한 항목」, sync
                         「반영한 항목」(2026-10-27 d192 -- files_count 는 이제 실행에서 실제로 반영된 수다: nsync 완료 액션 합·
                         dsync 복사 성공 수. 예전 「파일 수」는 nsync 의 계획 합을 실패한 실행에서도 그대로 보였다, 괴리 [2]·[4]),
-                        scan 「파일 수」. 아래에 확인 때 본 미리보기 수를 도구별 뜻으로 함께 둔다. sync 의 「반영한 항목」은 d192
-                        이후 러너로 돈 항목에만 붙인다(syncCountLabel -- 그 전 기록은 중립 「항목 수」). */}
+                        scan 「스캔한 항목」(2026-11-11 -- scan 의 files_count 는 dscan summary.total_entries, 즉 디렉터리·링크까지 합한
+                        전체 항목 수다(parsers.parse_scan_counts). 예전 「파일 수」는 디렉터리 1개·파일 0개 항목을 「파일 수 1」로
+                        보였고 사용량 분석의 「파일 수」(total_files)와 어긋났다. rm·sync 처럼 동사형으로 KPI 와 같은 이름 -- 「항목 수」로
+                        두면 같은 수를 두 화면이 다르게 불렀다). 아래에 확인 때 본 미리보기 수를 도구별 뜻으로 함께
+                        둔다. sync 의 「반영한 항목」은 d192 이후 러너로 돈 항목에만 붙인다(syncCountLabel -- 그 전 기록은 중립 「항목 수」). */}
                     <dt className="text-muted">
-                      {b?.operation === "rm" ? "삭제한 항목" : b?.operation === "sync" ? syncCountLabel(it) : "파일 수"}
+                      {b?.operation === "rm" ? "삭제한 항목" : b?.operation === "sync" ? syncCountLabel(it) : "스캔한 항목"}
                     </dt>
                     <dd className="tabular-nums">{it.files_count ?? "—"}</dd>
                     {b?.operation === "rm" && it.preview_summary != null && (<>

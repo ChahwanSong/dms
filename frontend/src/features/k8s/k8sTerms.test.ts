@@ -40,6 +40,13 @@ test("intervalText·durationText·untilText", () => {
   expect(durationText(null)).toBe("—");
   expect(durationText(1234)).toBe("1.2초");
   expect(durationText(250)).toBe("250ms");
+  // 반올림 경계(2026-11-11): 단위를 고르기 전에 반올림한다 -- 「60.0초」·「1분 60초」·「1000ms」가 나오지 않는다
+  expect(durationText(999.6)).toBe("1.0초");
+  expect(durationText(59949)).toBe("59.9초");
+  expect(durationText(59960)).toBe("1분 0초");
+  expect(durationText(119600)).toBe("2분 0초");
+  expect(durationText(179500)).toBe("3분 0초");
+  expect(durationText(125400)).toBe("2분 5초");
   const now = Date.parse("2026-10-25T00:00:00Z");
   expect(untilText("2026-10-25T00:05:30Z", now)).toBe("5분 뒤");
   expect(untilText("2026-10-24T23:00:00Z", now)).toBe("곧");

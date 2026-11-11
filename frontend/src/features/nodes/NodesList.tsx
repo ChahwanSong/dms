@@ -336,6 +336,10 @@ function NodeDetail({ node }: { node: NodeInfo }) {
           <p className="text-muted">불러오는 중…</p>
         ) : reportsQ.isError ? (
           <p className="text-bad">{(reportsQ.error as ApiError).message}</p>
+        ) : asArray<NodeReport>(reportsQ.data).length === 0 ? (
+          // 보존 작업이 agent_reports 만 지우고 노드 행은 남겨 서버가 일부러 200 [] 를 준다(routes_nodes.node_reports) --
+          // 오래 보고하지 않은 노드에서 버튼만 사라지고 빈 목록이 남아 반응이 없는 것처럼 보였다(2026-11-11).
+          <Empty text="보존 기간(DMS_AGENT_REPORT_RETENTION_DAYS, 기본 30일) 안의 리포트가 없습니다" />
         ) : (
           <ul className="grid gap-1 sm:grid-cols-2 lg:grid-cols-3">
             {asArray<NodeReport>(reportsQ.data).map((r, i) => (
@@ -360,9 +364,12 @@ export function NodesList() {
     <section className="space-y-4">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <h1 className="text-2xl font-bold">노드</h1>
+        {/* 0대면 「정상 보고」라고 단정하지 않는다(2026-11-11) -- 설치 직후 에이전트가 한 번도 보고하지 못한 상태(토큰·네트워크
+            오설정)에서 운영자가 원인을 찾으러 이 화면을 연다. */}
         {!q.isLoading && !q.isError && (
-          <p className={`text-sm ${staleCount > 0 ? "text-bad font-medium" : "text-muted"}`}>
-            {staleCount > 0 ? `리포트 지연 ${staleCount}대 / 전체 ${nodes.length}대` : `전체 ${nodes.length}대 정상 보고`}
+          <p className={`text-sm ${staleCount > 0 || nodes.length === 0 ? "text-bad font-medium" : "text-muted"}`}>
+            {nodes.length === 0 ? "보고한 노드 0대"
+              : staleCount > 0 ? `리포트 지연 ${staleCount}대 / 전체 ${nodes.length}대` : `전체 ${nodes.length}대 정상 보고`}
             {excludedCount > 0 && ` · 배치 제외·cordon ${excludedCount}대`}
           </p>
         )}
@@ -373,6 +380,10 @@ export function NodesList() {
         <p className="text-muted">불러오는 중…</p>
       ) : q.isError ? (
         <p className="text-bad">{(q.error as ApiError).message}</p>
+      ) : nodes.length === 0 ? (
+        <p className="text-muted break-keep">
+          보고한 노드가 없습니다 — 에이전트(DaemonSet dms-agent)가 떠 있는지, 공유 토큰·API 주소 설정이 맞는지 확인하세요.
+        </p>
       ) : (
         <>
         {/* 열 순서(사용자 요청 2026-09-30): 마지막 리포트는 맨 끝 -- 상태 판단(무엇이

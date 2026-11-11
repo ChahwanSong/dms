@@ -7,7 +7,8 @@
 (execution_manifests). 그래서 요청이 지나가는 단계 전부를 한 줄(pipeline)로, 기다리는 항목을 한 표(waiting)로 낸다.
 
 단계(STAGES -- 화면 띠의 순서이자 대기 목록 동률 정렬의 순서):
-  planning     요청 Pending -- planner(기본 10s 주기)가 도구·노드를 정하기 전. 신원 전파 유예(기본 300s)도 여기다.
+  planning     요청 Pending -- planner(기본 10s 주기)가 도구·노드를 정하기 전. (옛 LDAP 시절의 신원 전파 유예는
+               2026-10-26 planner 에서 지웠다 -- 화면 도움말도 말하지 않는다.)
   pickup       잡 Pending -- 계획됐고 stepper(기본 5s 주기)가 집기 전. 드레인(control_state.drain)이면 여기서 멈춘다.
   preflight    잡 Preflight -- 노드 사전 점검 파드. 확인 뒤 실행 전 재점검(Executing 인데 execution ref 가 아직 없는 잡 --
                exec_preflight 파드, vcjob 이 없다)도 여기다(detail.exec_preflight). 예전엔 「Volcano 실행 중」에 들어가

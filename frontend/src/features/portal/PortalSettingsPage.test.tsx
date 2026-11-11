@@ -70,6 +70,18 @@ test("40자 초과는 저장을 막고 칸에 오류를 잇는다, 서버 422 �
   expect(await screen.findByText(/40자 이하의 한 줄 문자열/)).toBeInTheDocument();
 });
 
+test("서버 거절(422) 문구는 입력을 고치기 시작하면 사라진다(2026-11-11 B56)", async () => {
+  server.use(http.put("/api/admin/portal-settings", () =>
+    HttpResponse.json({ detail: "invalid_portal_subtitle" }, { status: 422 })));
+  renderPage();
+  const input = await screen.findByLabelText("서브네임");
+  await userEvent.type(input, "A B");     // 서버가 거절했다고 치는 값(실제로는 탭·zero-width 같은 제어 문자)
+  await userEvent.click(screen.getByRole("button", { name: "저장" }));
+  expect(await screen.findByText(/40자 이하의 한 줄 문자열/)).toBeInTheDocument();
+  await userEvent.type(input, "C");
+  expect(screen.queryByText(/40자 이하의 한 줄 문자열/)).toBeNull();
+});
+
 test("탭 아이콘 미리보기는 번들된 /favicon.svg 다(외부 주소 아님)", async () => {
   renderPage();
   expect(await screen.findByAltText("현재 탭 아이콘")).toHaveAttribute("src", "/favicon.svg");

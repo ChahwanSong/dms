@@ -103,8 +103,10 @@ def update_storage(name: str, body: StorageUpdate, request: Request,
     path_changed = (posixpath.normpath(body.mount_path) != current["mount_path"]
                     or posixpath.normpath(body.managed_root) != current["managed_root"])
     changed = path_changed or body.backend_type != current["backend_type"]
+    # 사유 코드는 삭제 가드(storage_in_use -- 「비활성화하세요」)와 따로 둔다(2026-11-11): 같은 코드라 수정 창에 삭제 문구가 떴고,
+    # 시키는 대로 비활성화해도 진행 중 요청이 남아 있는 한 이 가드는 그대로라 안내가 틀렸다.
     if changed and repos.requests.active_referencing_storage(name):
-        raise HTTPException(status_code=409, detail="storage_in_use")
+        raise HTTPException(status_code=409, detail="storage_in_use_path_change")
     try:
         return _with_kind(repos.storages.update(
             name, mount_path=body.mount_path, managed_root=body.managed_root,

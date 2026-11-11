@@ -224,8 +224,10 @@ export function ArtifactBasePage() {
                   <NodeRow key={n.node_name} n={n} now={q.dataUpdatedAt} />)}</tbody>
               </table>
             )}
-            {/* 정직한 한계 표기(설계 §2.4b): W_OK 판정 주체를 화면에 그대로 적는다 */}
-            <p className="text-xs text-muted mt-2">쓰기 가능 여부는 에이전트 프로세스(uid) 기준입니다 — 잡 파드 요청자 권한과 다를 수 있습니다</p>
+            {/* 판정 주체 표기(설계 §2.4b). 「잡 파드 요청자 권한과 다를 수 있다」던 옛 문구는 요청자 uid 로 잡이 돌던
+                모델 기준이다 -- dms-k8s 는 에이전트·잡 파드가 모두 root 라(identity 모듈, 2026-10-26) 같은 판정이다
+                (2026-11-11 고침, agent/probes.probe_artifact_base). */}
+            <p className="text-xs text-muted mt-2">쓰기 가능 여부는 노드의 마운트 rw(에이전트 프로세스) 기준입니다 — 에이전트와 잡 파드가 모두 root 로 돌므로 잡 파드의 쓰기 가능 여부와 같습니다</p>
           </Card>
           <Card>
             <div className="flex flex-wrap items-center gap-2 mb-2">
@@ -319,6 +321,12 @@ export function ArtifactBasePage() {
                   사본)까지 지키는 장치다 -- 강제 변경의 대가를 그대로 보여주고
                   확인시킨 뒤에만 force=true 를 보낸다. */}
               <p>{`기존 잡 ${d.locked_by_jobs}건이 있습니다(삭제한 작업의 결과 파일 정리 대기 포함). 경로를 바꾸면 이 잡들의 아티팩트·로그 열람이 깨집니다. 정리 대기 중인 결과 파일은 지워지지 않고 옛 경로에 남습니다.`}</p>
+              {/* 강제 변경 자체의 실패(2026-11-11): 서버는 잠금(409)을 경로 검증(422)보다 먼저 본다 -- 잠긴 사이트에서
+                  틀린 경로는 늘 여기(force=true)에서야 거절된다. 폼 아래 문구는 모달 덮개 뒤라(바깥은 aria-hidden)
+                  다이얼로그 안에서 말한다. */}
+              {setBase.isError && (setBase.error as ApiError).code !== "artifact_base_locked" && (
+                <p role="alert" className="text-bad">{(setBase.error as ApiError).message}</p>
+              )}
               <div className="flex justify-end gap-2">
                 <Button type="button" onClick={() => setConfirmOpen(false)}>취소</Button>
                 <Button type="button" disabled={setBase.isPending}

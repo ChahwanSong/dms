@@ -53,10 +53,14 @@ export const lowerBound = (m: { unknown?: number } | null | undefined, sum: numb
 export const partialSum = (t: { truncated?: boolean }, m: { unknown?: number } | null | undefined, sum: number | null) =>
   sum !== null && (t.truncated === true || lowerBound(m, sum));
 export const countText = (n: number | null) => (n === null ? "—" : `${n.toLocaleString("ko-KR")}개`);
+// hot 비율 표기 = pctText(2026-11-11 B90 -- 경로 표·시트·온도 툴팁과 한 벌: 정수 반올림이면 0.3% 가 진짜 0% 와 같은 「0%」였다).
 export const hotText = (t: { hot_ratio?: { value?: number | null } | null }) => {
   const v = t.hot_ratio?.value;
-  return typeof v === "number" && Number.isFinite(v) ? `${Math.round(v * 100)}%` : "—";
+  return typeof v === "number" && Number.isFinite(v) ? pctText(v * 100) : "—";
 };
+// df 주의(90% 이상)는 **보이는 값**으로 판정한다(2026-11-11 B90): pctText 는 10% 이상을 정수로 반올림해 89.6% 를 「90%」로 보이는데
+// 판정이 원값(pct >= 90)이면 「90%」가 보통 색이었다. 합계 줄·[자세히] 미터·비교 표·「이 스토리지 df」가 이 하나를 쓴다.
+export const dfAttn = (pct: number) => Math.round(pct) >= 90;
 // 읽는 중 = 서버가 이번 호출에서 진전했고 남은 것이 있다(useStorageTotals 가 1초 뒤 다시 부른다). 응답 값만 보는 판정이다 --
 // 화면은 여기에 「재조회가 실패하지 않았다」를 더한다(StorageTotals 의 reading): 재조회가 실패하면 폴링이 멈추는데(useStorageTotals
 // -- 오류 중엔 멈춘다) 캐시에 남은 응답은 여전히 읽는 중이라 말해, 「요약 읽는 중 240개」가 아무것도 읽지 않는 동안 남았다(리뷰).
@@ -121,7 +125,7 @@ export function FilesystemUse({ fs, now, compact = false }: { fs: UsageStorageFi
   const pct = fs.total_bytes > 0 ? (fs.used_bytes / fs.total_bytes) * 100 : null;
   const exact = `${fs.used_bytes.toLocaleString("ko-KR")} B / ${fs.total_bytes.toLocaleString("ko-KR")} B · ${fs.node_name} 보고`
     + (fs.consistent === false ? " · 노드마다 다름" : "") + (fs.fresh === false ? ` · 보고 ${agoText(fs.reported_at, now)}` : "");
-  const fill = pct !== null && pct >= 90 ? "bg-attn" : "bg-ink/40";
+  const fill = pct !== null && dfAttn(pct) ? "bg-attn" : "bg-ink/40";
   const width = pct === null ? 0 : Math.min(100, Math.max(pct, pct > 0 ? 1 : 0));
   if (compact) {
     // 비교 표의 칸: 한 줄(사용 / 전체 · 짧은 막대 · %) -- 행 높이가 칸마다 들쭉날쭉하지 않게. 노드 불일치·오래된 보고는 「*」 +
@@ -135,7 +139,7 @@ export function FilesystemUse({ fs, now, compact = false }: { fs: UsageStorageFi
         {pct !== null && (<>
           <span aria-hidden className="h-1.5 w-12 overflow-hidden rounded-full bg-line/70">
             <span className={`block h-full rounded-full ${fill}`} style={{ width: `${width}%` }} /></span>
-          <span className={`w-10 text-right text-xs ${pct >= 90 ? "font-medium text-attn" : "text-muted"}`}>{pctText(pct)}</span>
+          <span className={`w-10 text-right text-xs ${dfAttn(pct) ? "font-medium text-attn" : "text-muted"}`}>{pctText(pct)}</span>
         </>)}
         {caveat !== "" && (<span className="text-xs text-attn"><span aria-hidden>*</span>
           <span className="sr-only">{`(${caveat})`}</span></span>)}

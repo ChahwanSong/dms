@@ -67,7 +67,21 @@ def test_update_path_change_blocked_while_referenced(client):
     r = client.put("/api/admin/storages/s1", json={
         "mount_path": "/s1", "managed_root": "/s1/elsewhere",
         "backend_type": "cephfs", "enabled": True})
-    assert r.status_code == 409 and r.json()["detail"] == "storage_in_use"
+    # 삭제 가드(storage_in_use -- 「비활성화하세요」)와 다른 코드다(2026-11-11): 비활성화해도 이 가드는 풀리지 않는다.
+    assert r.status_code == 409 and r.json()["detail"] == "storage_in_use_path_change"
+    # 백엔드만 바꿔도 같은 가드다.
+    r = client.put("/api/admin/storages/s1", json={
+        "mount_path": "/s1", "managed_root": "/s1/dms",
+        "backend_type": "gpfs", "enabled": True})
+    assert r.status_code == 409 and r.json()["detail"] == "storage_in_use_path_change"
+    # 비활성화한 뒤에도(안내가 시키던 대로) 경로 변경은 여전히 막힌다 -- 그래서 삭제 문구를 쓰면 안 된다.
+    assert client.put("/api/admin/storages/s1", json={
+        "mount_path": "/s1", "managed_root": "/s1/dms",
+        "backend_type": "cephfs", "enabled": False}).status_code == 200
+    r = client.put("/api/admin/storages/s1", json={
+        "mount_path": "/s1", "managed_root": "/s1/elsewhere",
+        "backend_type": "cephfs", "enabled": False})
+    assert r.status_code == 409 and r.json()["detail"] == "storage_in_use_path_change"
 
 
 def test_update_enabled_toggle_allowed_while_referenced(client):

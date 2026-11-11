@@ -17,11 +17,16 @@ import { RELEASE_TARGETS_KEY } from "../releases/useReleases";
 // 리뷰 R3). 안전망이다: 빌드·릴리스는 다른 화면이라 무효화 순간 그 쿼리를 보는 화면은 보통 없고(즉시 재조회
 // 없음), 릴리스 화면은 진입할 때 늘 다시 읽는다(useReleaseTargets refetchOnMount). 캐시를 공유하는 다른 화면이
 // 생겨도 빌드 전 목록을 신선한 것으로 믿지 않게 한다.
+// 목록 표시 상한(2026-11-11): 서버 기본 limit 50 을 그대로 받던 때는 51건째부터 조용히 잘려 이력 화면의 「N건」·
+// 페이지·필터가 최근 50건 안에서만 계산되는데도 전체처럼 읽혔다(빌드 기록은 보존 정리가 없어 계속 쌓인다). 하나 더
+// (limit+1) 받아 잘림 여부만 알고, 화면(BuildHistory)은 상한까지만 그리며 「최근 50건만 표시」를 밝힌다.
+export const BUILD_LIST_LIMIT = 50;
+
 export const useBuilds = () => {
   const qc = useQueryClient();
   const q = useQuery({
     queryKey: ["builds"],
-    queryFn: () => apiGet<Build[]>("/api/admin/builds"),
+    queryFn: () => apiGet<Build[]>(`/api/admin/builds?limit=${BUILD_LIST_LIMIT + 1}`),
     refetchInterval: (q) => {
       const builds = q.state.data as Build[] | undefined;
       return Array.isArray(builds) && builds.some((b) => !isTerminal(b.state)) ? 5000 : false;

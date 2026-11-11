@@ -8,7 +8,7 @@ import { ApiError, reasonText } from "../../lib/api";
 import { buildPillVariant, isTerminal } from "../../lib/jobState";
 import { formatDuration, spanMs } from "../../lib/duration";
 import { kstStamp } from "../../lib/datetime";
-import { useBuilds, useDeleteBuilds } from "./useBuilds";
+import { BUILD_LIST_LIMIT, useBuilds, useDeleteBuilds } from "./useBuilds";
 import { BuildTabs } from "./BuildTabs";
 import type { Build } from "../../lib/types";
 
@@ -68,7 +68,10 @@ export function BuildHistory() {
   // 2단 확인(BatchesList 관례): 1단 클릭이 무장, 2단이 쏜다.
   const [armed, setArmed] = useState(false);
 
-  const builds = useMemo(() => (Array.isArray(q.data) ? q.data : []), [q.data]);
+  // useBuilds 는 상한+1 건을 받는다 -- 넘치면 잘린 것이다(BUILD_LIST_LIMIT 주석). 표·건수·필터·선택은 상한까지만.
+  const all = useMemo(() => (Array.isArray(q.data) ? q.data : []), [q.data]);
+  const truncated = all.length > BUILD_LIST_LIMIT;
+  const builds = useMemo(() => (truncated ? all.slice(0, BUILD_LIST_LIMIT) : all), [all, truncated]);
 
   // 삭제 가능(종단) 빌드 -- 필터·페이지와 무관하게 목록 전체 기준(전체 선택도 그 기준).
   const deletableIds = useMemo(
@@ -146,6 +149,12 @@ export function BuildHistory() {
             </div>
             <span className="text-muted tabular-nums shrink-0">{`${filtered.length}건`}</span>
           </div>
+          {/* 잘림 고지(RequestActivity 「최근 100건만 표시됩니다」 관례) -- 건수·페이지가 전체처럼 읽히지 않게. */}
+          {truncated && (
+            <p className="text-muted text-xs mb-3">
+              {`최근 ${BUILD_LIST_LIMIT}건만 표시됩니다 — 건수·필터·페이지는 이 안에서 계산되며, 그 이전 빌드는 보이지 않습니다.`}
+            </p>
+          )}
           {/* 일괄 삭제 툴바 — 늘 렌더(자리 예약)라 체크해도 표가 아래로 밀리지
               않는다(BatchesList 관례). 표 밖이라 L2 사정권 밖이다. */}
           <div role="toolbar" aria-label="빌드 이력 일괄 작업"

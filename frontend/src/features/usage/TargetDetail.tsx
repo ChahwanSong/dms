@@ -298,9 +298,10 @@ export function TargetDetail({ storage, target, latest, pv = null, multiCluster 
                   title={latestCharted !== null ? exactBytes(latestCharted.bytes) : undefined} />
             <Stat label="직전 스캔 대비"
                   value={delta === null ? "—" : `${delta >= 0 ? "+" : "−"}${humanBytes(Math.abs(delta))}`} />
-            {/* 라벨은 짧게(375 의 두 칸 배치에서 한 줄) -- atime 기준이라는 정의는 표 머리글 설명·온도 툴팁이 말한다. */}
+            {/* 라벨은 짧게(375 의 두 칸 배치에서 한 줄) -- atime 기준이라는 정의는 표 머리글 설명·온도 툴팁이 말한다. 표기는
+                온도 툴팁과 같은 pctText(2026-11-11 B90 -- 정수 반올림이면 같은 scan 이 여기선 「0%」, 툴팁에선 「0.3%」였다). */}
             <Stat label={`hot 비율(${HOT_AGE_MAX_DAYS}일)`}
-                  value={latestHot === null ? "—" : `${Math.round(latestHot * 100)}%`} />
+                  value={latestHot === null ? "—" : pctText(latestHot * 100)} />
             <Stat label="스캔 이력" value={`${points.length}건`} />
           </dl>
           <section aria-labelledby={sizeHeadId} className="min-w-0 space-y-2">
@@ -401,7 +402,7 @@ export function TargetDetail({ storage, target, latest, pv = null, multiCluster 
                       </td>
                       <td className="pr-4 text-right tabular-nums">
                         {typeof files === "number" ? files.toLocaleString("ko-KR") : "—"}</td>
-                      <td className="pr-4 text-right tabular-nums">{hot === null ? "—" : `${Math.round(hot * 100)}%`}</td>
+                      <td className="pr-4 text-right tabular-nums">{hot === null ? "—" : pctText(hot * 100)}</td>
                       <td className="pr-4 text-muted">{p.requester ?? "—"}</td>
                       <td><Link className="font-mono text-xs text-accent hover:underline" to={`/jobs/${p.request_id}`}>
                         {p.request_id.slice(0, 12)}

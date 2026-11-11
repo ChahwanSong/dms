@@ -263,6 +263,18 @@ test("로딩 중에는 알 수 없음(RBAC 확인) 문구를 내지 않는다", 
   expect(await screen.findByText(/대기 중인 잡이 없습니다/)).toBeInTheDocument();
 });
 
+test("첫 조회가 5xx 면 RBAC 가 아니라 API 오류를 말하고, 흐름·표를 그리지 않는다(2026-11-11)", async () => {
+  // retry:false 라 첫 응답 하나가 실패하면 data 없이 착지한다 -- 예전엔 그 모양이 「알 수 없음」과 같아 모든 역이 모름으로
+  // 그려지고 「권한(RBAC) 또는 Volcano 설치를 확인하세요」가 떴다(실제 원인은 api 롤아웃·게이트웨이 타임아웃 등).
+  server.use(http.get("/api/admin/metrics/queue", () => HttpResponse.json({ detail: "boom" }, { status: 502 })));
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={qc}><MemoryRouter><QueueSection /></MemoryRouter></QueryClientProvider>);
+  expect(await screen.findByText(/^큐 현황을 불러오지 못했습니다 — /)).toBeInTheDocument();
+  expect(screen.queryByText(/권한\(RBAC\)/)).toBeNull();
+  expect(screen.queryByText(/알 수 없/)).toBeNull();
+  expect(screen.queryByText("지금 대기 중")).toBeNull();
+});
+
 test("waitText는 초를 사람이 읽는 단위로 접는다", () => {
   expect(waitText(null)).toBe("—");
   expect(waitText(0)).toBe("0초");                            // 0 은 정상값(방금 들어옴)

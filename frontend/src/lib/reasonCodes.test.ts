@@ -22,7 +22,9 @@ describe("REASON_MESSAGES 커버리지", () => {
   });
 
   it("죽은 키가 없다 -- 백엔드가 내지 않는 코드는 두지 않는다", () => {
-    const allowed = new Set([...codes, "http_401", "http_422", "http_500", "http_503"]);
+    // http_* 는 request() 가 비 JSON 오류 본문에서 합성한다 -- 413·502·504 는 게이트웨이(Envoy)가 실제로 내는 것(2026-11-11).
+    const allowed = new Set([...codes, "http_401", "http_413", "http_422", "http_500", "http_502", "http_503",
+                             "http_504"]);
     const dead = Object.keys(REASON_MESSAGES).filter((k) => !allowed.has(k));
     expect(dead).toEqual([]);
   });

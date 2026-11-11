@@ -120,8 +120,10 @@ export interface ScSample {
   root: string | null; abs_root: string | null; reason?: string | null; problem: string | null;
 }
 
+/** cluster null = 매핑은 있는데 어느 (활성) 클러스터에도 보이지 않는 StorageClass 이름 — 서버가 해제할 수 있게 일부러 싣는 행
+ *  (routes_k8s.list_storage_classes; SC·클러스터를 지워도 매핑은 남는다). */
 export interface StorageClassRow {
-  cluster: string; name: string; provisioner: string | null; parameters: Record<string, string> | null;
+  cluster: string | null; name: string; provisioner: string | null; parameters: Record<string, string> | null;
   reclaim_policy: string | null; pvc_count: number | null;
   storage_name: string | null; storage_kind: StorageKind | null;
   path_template: string | null; effective_template: string | null; template_source: "storageclass" | "preset" | null;

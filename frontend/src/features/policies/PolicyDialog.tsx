@@ -10,10 +10,24 @@ const field = "mt-1 w-full rounded-lg border border-line px-3 py-2";
     빌더가 워커당 1024 rank 를 넘으면 제출을 거부하므로 정책이 그 위를 저장하면 잡이 사전 점검 뒤에야 실패했다. */
 export const MAX_PROCS_PER_NODE = 1024;
 
+/** 최대 노드·타임아웃 상한 — 서버 PolicyBody(le=routes_policies.INT4_MAX)의 미러(2026-11-11). policies 의 정수 칸이 int4 라
+    그 위는 PostgreSQL 22003 → 처리되지 않은 500 「서버 오류」였다. 운영 상한이 아니라 칸의 표현 한계다. */
+export const INT4_MAX = 2147483647;
+
+/** 큐 이름 검증 — 서버 put_policy 의 미러(2026-11-11): 앞뒤 공백은 지우고, Volcano 큐(k8s 객체 이름, DNS-1123 subdomain)
+    규칙. 빈 큐는 Volcano 가 default 큐로 채워 dms-data 한도 밖에서 돌고, 규칙 밖 이름은 없는 큐라 그 도구의 잡이 전부
+    생성 실패한다. */
+const QUEUE_RE = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$/;
+export function queueError(raw: string): string | null {
+  const v = raw.trim();
+  if (v === "") return "큐: 값을 입력하세요";
+  if (v.length > 253 || !QUEUE_RE.test(v)) return "큐: 소문자·숫자·하이픈·점만 쓸 수 있습니다(k8s 이름 규칙, 253자 이하)";
+  return null;
+}
+
 /** 필수 정수(≥1) 검증. 서버 계약(pydantic ge=1)의 미러 — 상한(max)은 서버에
-    상한이 있는 필드(노드당 프로세스)에만 준다. 다른 필드는 지어내지 않는다(정책이
-    곧 캡이다). 빈 값은 intFieldError(선택 필드용)와 달리 여기선 오류다 — 이
-    필드들은 생략 불가. */
+    상한이 있는 필드(노드당 프로세스 1024, 최대 노드·타임아웃은 int4)를 그대로 준다.
+    빈 값은 intFieldError(선택 필드용)와 달리 여기선 오류다 — 이 필드들은 생략 불가. */
 export function requiredIntError(label: string, raw: string, max?: number): string | null {
   const v = raw.trim();
   if (v === "") return `${label}: 값을 입력하세요`;
@@ -24,8 +38,8 @@ export function requiredIntError(label: string, raw: string, max?: number): stri
 }
 
 /** 선택 정수(비우면 없음). 미리보기 타임아웃 전용 — null 은 "타임아웃 없음". */
-export function optionalIntError(label: string, raw: string): string | null {
-  return raw.trim() === "" ? null : requiredIntError(label, raw);
+export function optionalIntError(label: string, raw: string, max?: number): string | null {
+  return raw.trim() === "" ? null : requiredIntError(label, raw, max);
 }
 
 /** 입력 중인 초를 사람 단위로(입력 옆 보조 표기) -- 잘못된 값이면 아무것도 안 보인다. */
@@ -77,10 +91,11 @@ export function PolicyDialog({ policy, trigger }: { policy: Policy; trigger: Rea
   // 저장 전 검증: 서버 422(pydantic detail 은 원시 문구)에 앞서 어느 필드가
   // 왜 틀렸는지 한국어로 필드 밑에 보여준다.
   const errors = {
-    maxNodes: requiredIntError("최대 노드", maxNodes),
+    maxNodes: requiredIntError("최대 노드", maxNodes, INT4_MAX),
     procsPerNode: requiredIntError("노드당 프로세스", procsPerNode, MAX_PROCS_PER_NODE),
-    previewTimeout: optionalIntError("미리보기 타임아웃", previewTimeout),
-    executionTimeout: requiredIntError("실행 타임아웃", executionTimeout),
+    queue: queueError(queue),
+    previewTimeout: optionalIntError("미리보기 타임아웃", previewTimeout, INT4_MAX),
+    executionTimeout: requiredIntError("실행 타임아웃", executionTimeout, INT4_MAX),
   };
   const invalid = Object.values(errors).some((e) => e !== null);
   const totalProcs = errors.maxNodes || errors.procsPerNode ? null : Number(maxNodes) * Number(procsPerNode);
@@ -89,7 +104,7 @@ export function PolicyDialog({ policy, trigger }: { policy: Policy; trigger: Rea
     m.mutate({
       tool: policy.tool,
       body: {
-        max_nodes: Number(maxNodes), procs_per_node: Number(procsPerNode), queue,
+        max_nodes: Number(maxNodes), procs_per_node: Number(procsPerNode), queue: queue.trim(),
         default_priority: defaultPriority, max_priority: maxPriority,
         preview_timeout_seconds: previewTimeout.trim() === "" ? null : Number(previewTimeout),
         execution_timeout_seconds: Number(executionTimeout), enabled,
@@ -126,12 +141,25 @@ export function PolicyDialog({ policy, trigger }: { policy: Policy; trigger: Rea
         <Group title="스케줄링" caption="Volcano 큐와 우선순위입니다 — 요청이 최대보다 높은 우선순위를 원하면 최대로 낮춰집니다.">
           <div className="grid gap-3 sm:grid-cols-3">
             <label className="block">큐
-              <input aria-label="큐" className={field} value={queue} onChange={(e) => setQueue(e.target.value)} /></label>
+              <input aria-label="큐" className={field} value={queue} onChange={(e) => setQueue(e.target.value)} />
+              {errors.queue && <span className="block text-bad mt-1">{errors.queue}</span>}</label>
+            {/* nsync 의 기본 우선순위는 어디에서도 읽히지 않는다(2026-11-11): 기본값을 채우는 곳은 domain.resolve_priority 하나고,
+                sync 는 제출 시점에 도구가 정해지지 않아 늘 dsync 정책을 읽는다(_OP_POLICY). 편집해도 효과가 없는 칸이라 잠그고
+                그 사실을 말한다 -- 최대 우선순위는 nsync 로 계획된 잡에 그대로 걸린다. */}
             <label className="block">기본 우선순위
               <select aria-label="기본 우선순위" className={field} value={defaultPriority}
+                      disabled={policy.tool === "nsync"}
                       onChange={(e) => setDefaultPriority(e.target.value)}>
                 <option value="low">low</option><option value="mid">mid</option><option value="high">high</option>
-              </select></label>
+              </select>
+              {policy.tool === "nsync" && (
+                <span className="block text-xs text-muted mt-1">
+                  sync 의 기본 우선순위는 dsync 정책 값을 씁니다 — nsync 에는 최대 우선순위만 적용됩니다.
+                </span>
+              )}
+              {policy.tool === "dsync" && (
+                <span className="block text-xs text-muted mt-1">nsync 로 실행되는 sync 에도 이 기본값이 적용됩니다.</span>
+              )}</label>
             <label className="block">최대 우선순위
               <select aria-label="최대 우선순위" className={field} value={maxPriority}
                       onChange={(e) => setMaxPriority(e.target.value)}>

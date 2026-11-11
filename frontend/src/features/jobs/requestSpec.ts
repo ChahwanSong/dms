@@ -237,6 +237,12 @@ const USER_HEAD = `root 아님 — ${PRIV_USER}`;
 // (PrivilegeNotRequestedAtStep). 이미 끝난 작업에 그 말을 붙이면 사실과 다르다.
 const LEGACY_ROOT_NOTE = "요청 기록에는 root 지정이 없습니다 — 2026-09-30 규칙 변경(root 는 명시 요청만) 전에 계획된 작업이거나 비정상 기록입니다.";
 const LEGACY_ROOT_LIVE = "요청 기록에는 root 지정이 없습니다 — 2026-09-30 규칙 변경 전에 계획된 작업이거나 비정상 기록이며, 이 상태의 root 실행은 서버가 다음 단계 제출 전에 거부합니다.";
+// 계획 전 배치 자식(B1). dms-k8s 는 자격 없는 배치 자식을 비 root 로 낮추지 않고 계획 단계에서 privileged_not_authorized 로
+// **거부**한다(identity.resolve_job_identity -- 낮출 LDAP 신원이 없다). 예전 「없으면 실행 신원 권한으로 실행됩니다」는 dms-ssc
+// 문구라 실제 동작과 달랐다(2026-11-11). 공유 토큰 배치도 같은 이유로 「거부」다 -- 그쪽은 머리 문장 자체가 거부를 말한다
+// (USER_HEAD 「실행 신원의 uid/gid(권한 그대로 적용)」를 머리에 두면 바로 아래 「거부됩니다」 줄과 한 칸에서 다른 말을 한다).
+const BATCH_PENDING_HEAD = "배치 항목 — 배치를 만든 관리자에게 root 자격이 있으면 root(특권)로 실행되고, 없으면 계획 단계에서 거부됩니다";
+const TOKEN_BATCH_HEAD = "root 아님 — 공유 토큰(API)으로 만든 배치 항목이라 root 자격이 없어 계획 단계에서 거부됩니다";
 export interface PrivilegeView {
   kind: PrivKind; basis: PrivBasis;
   privilege: { head: Line; subs: Line[] };
@@ -252,6 +258,10 @@ export function resolvePrivilege(i: PrivilegeInput): PrivilegeView {
     : i.askedRoot ? "root" : i.batch && !tokenBatch ? "batch" : "user";
   const basis: PrivBasis = i.planned !== null ? "plan" : "request";
   const nJobs = i.jobs === null ? null : i.jobs.length;
+  // 계획 전 공유 토큰 배치 자식(root 명시 없음). 작업 없이 끝난 행만 과거형 보조 줄로 따로 말한다(취소일 수도 있어 원인을
+  // 단정하지 않는다) -- 나머지는 머리 문장이 거부를 말한다.
+  const tokenPending = tokenBatch && i.planned === null && !i.askedRoot;
+  const tokenEndedNoJobs = tokenPending && i.reqTerminal && nJobs === 0;
   const plain = (text: string): Line => ({ text, tone: "plain" });
   const sub = (text: string): Line => ({ text, tone: "sub" });
   let head: Line;
@@ -271,13 +281,15 @@ export function resolvePrivilege(i: PrivilegeInput): PrivilegeView {
   } else if (kind === "batch") {
     head = plain(nJobs === null
       ? (i.reqTerminal ? "배치 항목 — 작업 기록을 불러오지 못해 실행 권한을 확인할 수 없습니다"
-        : "배치 항목 — 배치를 만든 관리자에게 root 자격이 있으면 root(특권), 없으면 실행 신원 권한으로 실행됩니다(계획 단계에서 확정)")
+        : BATCH_PENDING_HEAD)
       : nJobs === 0 ? (i.reqTerminal ? "배치 항목 — 작업이 만들어지지 않아 실행되지 않았습니다"
-        : "배치 항목 — 배치를 만든 관리자에게 root 자격이 있으면 root(특권), 없으면 실행 신원 권한으로 실행됩니다(계획 단계에서 확정)")
+        : BATCH_PENDING_HEAD)
       : "배치 항목 — 작업 기록에 권한 정보가 없습니다");
+  } else if (tokenPending && !tokenEndedNoJobs) {
+    head = plain(TOKEN_BATCH_HEAD);
   } else if (i.planned === null && nJobs === null && !i.batch) {
     // 단건인데 작업 기록을 못 읽었다 -- 요청엔 root 지정이 없지만 2026-09-30 전 관리자 요청은 그것 없이 root 로 돌았다
-    // (LEGACY_ROOT_NOTE). 공유 토큰 배치는 언제나 root 자격이 없어 아래 확정 문구 그대로다.
+    // (LEGACY_ROOT_NOTE). 공유 토큰 배치는 언제나 root 자격이 없어 위 거부 문구 그대로다.
     head = plain("root 지정 없음 — 작업 기록을 불러오지 못해 실제 실행 권한은 확인하지 못했습니다");
   } else {
     head = plain(USER_HEAD);
@@ -285,10 +297,8 @@ export function resolvePrivilege(i: PrivilegeInput): PrivilegeView {
   if (i.batch && i.planned === true) subs.push(sub("배치 항목 — 배치를 만든 관리자의 root 자격이 적용됐습니다."));
   if (i.batch && i.planned === false)
     subs.push(sub("배치 항목 — 배치를 만든 관리자에게 root 자격이 없어 실행 신원 권한이 적용됐습니다."));
-  if (tokenBatch && i.planned === null && !i.askedRoot)
-    subs.push(sub(i.reqTerminal && nJobs === 0
-      ? "배치 항목 — 작업이 만들어지지 않아 실행되지 않았습니다(공유 토큰 배치라 root 자격 없음)."
-      : "배치 항목 — 공유 토큰(API)으로 만든 배치라 root 자격이 없어 실행 신원 권한으로 실행됩니다."));
+  if (tokenEndedNoJobs)
+    subs.push(sub("배치 항목 — 작업이 만들어지지 않아 실행되지 않았습니다(공유 토큰 배치라 root 자격 없음)."));
   // 계획 스냅숏과 요청 의도가 어긋나면 조용히 덮지 않는다(DB 신뢰 경계 + 2026-09-30 이전 행).
   if (i.planned === true && !i.askedRoot && !i.batch && i.rootStopped !== true) {
     subs.push(i.jobTerminal === true ? sub(LEGACY_ROOT_NOTE) : { text: LEGACY_ROOT_LIVE, tone: "attn" });
@@ -296,7 +306,7 @@ export function resolvePrivilege(i: PrivilegeInput): PrivilegeView {
   if (i.planned === false && i.askedRoot)
     subs.push({ text: "요청은 root(특권)였지만 작업은 실행 신원 권한으로 계획됐습니다 — 비정상 기록입니다.", tone: "attn" });
   // 공유 토큰 배치가 계획된 뒤의 강등 이유. 단건은 head 가 이미 확정(비 root)이라 같은 사실의 반복이고, 계획 전은 위
-  // 배치 줄이 같은 사실을 말한다.
+  // 머리 문장(TOKEN_BATCH_HEAD)·배치 줄이 같은 사실을 말한다.
   if (tokenBatch && i.planned === false) subs.push(sub("공유 토큰(API)으로 제출 — root 실행 불가"));
   const badge = kind !== "root" || i.rootStopped === true ? null : basis === "plan" ? "run" : "requested";
   return { kind, basis, privilege: { head, subs }, badge };

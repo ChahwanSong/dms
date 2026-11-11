@@ -85,7 +85,10 @@ const NO_CLUSTERS_PLACE = "등록된 클러스터가 없습니다 — 「k8s 연
  *  synced_at null = 한 번도 성공하지 않음(모름 — 「없음」과 다르다), stale = 2×주기보다 오래됨.
  *  「클러스터 없음」 기본 문구는 위치 글이다 — 단일 작업 화면(LocationField — 일반 사용자도 본다)에도 그려져 관리 화면 링크를 걸지
  *  않는다. 관리 화면(PV 탐색·사용자 권한)은 표 아래에 링크 있는 NoClustersText 를 따로 그리므로 empty={null} 로 이 줄을 끈다 —
- *  같은 지시가 한 화면에 두 문구로 겹치지 않게(2026-11-11 리뷰). */
+ *  같은 지시가 한 화면에 두 문구로 겹치지 않게(2026-11-11 리뷰).
+ *  줄바꿈 금지는 「n분 전 성공」에만 건다(2026-11-11): 클러스터 하나의 글 전체(이름 · 오래됨 · 이후 변경은… · 지연)를 nowrap 으로
+ *  묶으면 flex 항목이 그 폭 아래로 줄지 못해 390 폭에서 본문을 넘고, 이름이 10자 남짓만 돼도 페이지가 가로로 스크롤됐다. 경고
+ *  꼬리는 낱말 사이에서, 긴 이름(최대 63자)은 아무 데서나 접힌다. */
 export function FreshnessLine({ clusters, empty = NO_CLUSTERS_PLACE }: {
   clusters: ClusterFreshness[]; empty?: ReactNode | null;
 }) {
@@ -99,11 +102,11 @@ export function FreshnessLine({ clusters, empty = NO_CLUSTERS_PLACE }: {
         // 오래됐거나 지연·실패면 경고색(2026-10-26 (c) -- 막지 않고 경고만, pvLocation.freshnessWarns 와 같은 조건)
         const tone = c.synced_at === null ? "text-bad" : freshnessWarns(c) ? "text-attn" : "text-ink/80";
         return (
-          <span key={c.name} className={`whitespace-nowrap ${tone}`}>
+          <span key={c.name} className={`min-w-0 [overflow-wrap:anywhere] ${tone}`}>
             <span className="font-medium">{c.name}</span>{" "}
             {c.synced_at === null
               ? "아직 동기화 안 됨(모름)"
-              : <><Ago iso={c.synced_at} /> 성공{c.stale ? " · 오래됨" : ""}{freshnessWarns(c) ? " · 이후 변경은 반영 안 됐을 수 있음" : ""}</>}
+              : <><span className="whitespace-nowrap"><Ago iso={c.synced_at} /> 성공</span>{c.stale ? " · 오래됨" : ""}{freshnessWarns(c) ? " · 이후 변경은 반영 안 됐을 수 있음" : ""}</>}
             {c.status !== "ok" && c.synced_at !== null && ` · ${clusterStatusMeta(c.status).label}`}
           </span>
         );

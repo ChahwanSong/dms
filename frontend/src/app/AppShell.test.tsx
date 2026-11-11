@@ -169,6 +169,35 @@ test("서브네임이 있으면 사이드바 이름 아래 줄과 탭 제목에 
   await waitFor(() => expect(document.title).toBe("AI Storage Portal - DAI-CAE"));
 });
 
+// 좁은 폭 메뉴(2026-11-11, BACKLOG 「모바일(375) 사이드바 접기」 해소): md 미만에서 메뉴·사용자 패널 묶음은 「메뉴」 버튼으로
+// 여닫는다(기본 닫힘). jsdom 은 CSS 를 계산하지 않으므로 표시는 클래스(hidden ↔ flex, md:flex 는 늘)와 aria-expanded 로 잰다 --
+// 실제 기하(375 첫 화면에 본문)는 e2e 03 모바일 spot check 몫이다.
+test("좁은 폭 메뉴: 기본 닫힘(hidden·md:flex), 「메뉴」가 열고 닫으며 링크를 누르면 닫힌다", async () => {
+  renderShell("admin", "/jobs");
+  await screen.findByRole("link", { name: "대시보드" });
+  const btn = screen.getByRole("button", { name: "메뉴" });
+  const menu = document.getElementById("app-menu")!;
+  expect(btn).toHaveAttribute("aria-controls", "app-menu");
+  expect(btn).toHaveAttribute("aria-expanded", "false");
+  expect(btn).toHaveClass("md:hidden");              // md 이상엔 버튼이 없고 메뉴가 늘 보인다
+  expect(menu).toHaveClass("hidden", "md:flex");
+  // 링크는 DOM 에 남는다(CSS 로만 숨김) -- e2e L4 의 `aside a` 하한이 375 에서도 선다.
+  expect(menu.querySelector("a")).not.toBeNull();
+  expect(menu).toContainElement(screen.getByRole("button", { name: "로그아웃" }));
+  await userEvent.click(btn);
+  expect(btn).toHaveAttribute("aria-expanded", "true");
+  expect(menu).toHaveClass("flex", "md:flex");
+  expect(menu).not.toHaveClass("hidden");
+  // 같은 경로 링크(/jobs)를 눌러도 닫힌다 -- 셸 리마운트가 없는 경우
+  await userEvent.click(screen.getByRole("link", { name: "전체 작업" }));
+  expect(btn).toHaveAttribute("aria-expanded", "false");
+  expect(menu).toHaveClass("hidden");
+  // 그룹 접기 버튼은 메뉴를 닫지 않는다(링크만)
+  await userEvent.click(btn);
+  await userEvent.click(screen.getByRole("button", { name: "운영" }));
+  expect(btn).toHaveAttribute("aria-expanded", "true");
+});
+
 test("서브네임이 없거나 조회가 실패하면 메인 이름만", async () => {
   server.use(http.get("/api/portal-info", () => HttpResponse.json({ detail: "x" }, { status: 500 })));
   renderShell("user");

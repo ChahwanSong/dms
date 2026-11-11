@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { ChangeEvent, CompositionEvent } from "react";
 
 /** 타이핑이 멈춘 뒤 검색어를 적용하기까지(2026-10-25 -- 사용량 분석 경로 검색과 같은 300ms). */
@@ -29,6 +29,9 @@ export function useSearchField(initial = "") {
     const t = setTimeout(() => setApplied(next), SEARCH_DEBOUNCE_MS);
     return () => clearTimeout(t);
   }, [input, settled]);
+  // 밖에서 값을 바꾼다(2026-11-11 -- 「전체 작업」 검색어가 주소에 실리면서): 뒤로 가기·사이드바 링크로 주소의 검색어가
+  // 바뀌면 보이는 값과 적용값을 디바운스 없이 함께 맞춘다(주소와 칸이 어긋나지 않게).
+  const set = useCallback((v: string) => { setInput(v); setApplied(v.trim()); }, []);
   const bind = {
     value: input,
     onChange: (e: ChangeEvent<HTMLInputElement>) => setInput(e.target.value),
@@ -39,5 +42,5 @@ export function useSearchField(initial = "") {
       setSettled((n) => n + 1);
     },
   };
-  return { applied, bind };
+  return { applied, bind, set };
 }

@@ -12,7 +12,7 @@ import {
   CHANGE_LABEL, COUNT_LABEL, ROLE_LABEL, TRIGGER_LABEL, changeNames, countText, durationText, runStatusMeta, warningText,
 } from "./k8sTerms";
 import { Ago, DefList, DefRow, Mono, SELECT_FIELD, Tag } from "./parts";
-import { RUNS_PAGE_SIZE, useInfiniteSyncRuns, useK8sClusters } from "./useK8s";
+import { RUNS_PAGE_SIZE, useInfiniteSyncRuns, useK8sClusters, useK8sOverviewOnce } from "./useK8s";
 import type { ChangeEntry, SyncRun } from "./types";
 
 // 동기화 이력(설계 §4·§7): k8s_sync_runs 를 seq 내림차순으로, 다음 쪽은 마지막 seq 를 before 로 당긴다(키셋 커서 — 감사 로그·
@@ -174,16 +174,21 @@ export function SyncHistoryPage() {
     setParams(next, { replace: true });
   };
 
-  // 노드 선택지는 본 행에서 모은다(누적 — 노드로 걸러도 선택지가 사라지지 않게).
+  // 노드 선택지는 본 행에서 모은다(누적 — 노드로 걸러도 선택지가 사라지지 않게). 지금 지정된 주·보조 호출 노드(개요 설정)도 늘
+  // 넣는다(2026-11-11): 첫 쪽(50건)이 모두 주 노드의 정규 동기화면 보조 노드는 몇 쪽을 스크롤해야 선택지에 생겼다.
+  const ovQ = useK8sOverviewOnce();
+  const primaryNode = ovQ.data?.settings?.primary_node ?? null;
+  const secondaryNode = ovQ.data?.settings?.secondary_node ?? null;
   const [seenNodes, setSeenNodes] = useState<string[]>([]);
   useEffect(() => {
     setSeenNodes((prev) => {
       const s = new Set(prev);
       for (const r of rows) if (r.node_name) s.add(r.node_name);
       if (node) s.add(node);
+      for (const n of [primaryNode, secondaryNode]) if (n !== null && n !== "") s.add(n);
       return s.size === prev.length ? prev : [...s].sort();
     });
-  }, [rows, node]);
+  }, [rows, node, primaryNode, secondaryNode]);
   const clusterNames = useMemo(() => {
     const s = new Set((clustersQ.data ?? []).map((c) => c.name));
     if (cluster) s.add(cluster);

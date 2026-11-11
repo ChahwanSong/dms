@@ -7,7 +7,7 @@ import { http, HttpResponse } from "msw";
 import { afterAll, afterEach, beforeAll, expect, test, vi } from "vitest";
 import { reasonText } from "../../lib/api";
 import { SyncHistoryPage, changeSummary } from "./SyncHistoryPage";
-import { CLUSTER_OK, run } from "./k8sFixtures";
+import { CLUSTER_OK, overview, run } from "./k8sFixtures";
 import type { SyncRun } from "./types";
 
 // 동기화 이력(설계 §7): seq 커서 무한 스크롤(before=<마지막 seq>), ?cluster= 로 시작, 결과 요약(추가·삭제 개수 / 실패 사유),
@@ -72,6 +72,17 @@ test("?cluster= 로 시작하면 그 클러스터만, 필터를 바꾸면 쿼리
   expect(screen.getByLabelText("클러스터 필터")).toHaveValue("dmsk8s");
   await userEvent.selectOptions(screen.getByLabelText("호출 노드 필터"), "k8s-w1");
   await waitFor(() => expect(asked).toContain("?cluster=dmsk8s&node=k8s-w1&limit=50"));
+});
+
+test("호출 노드 선택지: 불러온 행에 없어도 지정된 주·보조 호출 노드(개요 설정)는 고를 수 있다(2026-11-11)", async () => {
+  server.use(http.get("/api/admin/k8s/overview", () => HttpResponse.json(overview())));   // 주 k8s-w1 · 보조 k8s-w2
+  const asked = wrap(() => runs(3, 1));                                                  // 행은 모두 k8s-w1
+  await screen.findByText("마지막 기록입니다 — 전체 3건");
+  const select = screen.getByLabelText("호출 노드 필터");
+  expect(await within(select).findByRole("option", { name: "k8s-w2" })).toBeInTheDocument();
+  expect(within(select).getAllByRole("option").map((o) => o.textContent)).toEqual(["호출 노드 전체", "k8s-w1", "k8s-w2"]);
+  await userEvent.selectOptions(select, "k8s-w2");
+  await waitFor(() => expect(asked).toContain("?node=k8s-w2&limit=50"));
 });
 
 test("결과 칸: 적용된 run 은 변경 요약, 실패한 run 은 사유", async () => {

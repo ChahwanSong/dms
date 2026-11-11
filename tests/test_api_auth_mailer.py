@@ -294,6 +294,11 @@ def test_uncertain_delivery_stores_the_code_and_says_so(db, settings):
         code = _code_from(relay.sent[0])
     ev = db.query_one("SELECT message FROM events WHERE event_type = 'verification_email_uncertain'")
     assert "relay_no_response" in ev["message"] and code not in ev["message"]
+    # 실패 이벤트와 같은 payload(수신자·용도·사유 + 출발지, 2026-11-11) -- 코드는 없다
+    (uncertain,) = _events(db, "verification_email_uncertain")
+    assert {k: uncertain["payload"][k] for k in ("purpose", "recipient", "reason")} == {
+        "purpose": "signup", "recipient": "slow.mail@samsung.com", "reason": "relay_no_response"}
+    assert code not in str(uncertain["payload"])
     assert c.post("/api/auth/signup", json={"username": "slow.mail", "password": "pw",
                                             "code": code}).status_code == 201
 

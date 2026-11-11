@@ -30,5 +30,8 @@ test("단계 설명은 흐름을 따른다(scan 은 미리보기 언급 없음)"
   expect(stageHelp("pre", "scan")).not.toMatch(/미리보기/);
   expect(stageHelp("pre", "previewed")).toMatch(/미리보기/);
   expect(stageHelp("exec", "scan")).toMatch(/사용량/);
+  // 소요가 스케줄 대기를 포함한다는 안내는 sync·rm 실행에도(2026-11-11 -- 예전엔 scan 에만 있었다)
+  expect(stageHelp("exec", "scan")).toMatch(/스케줄 대기/);
+  expect(stageHelp("exec", "previewed")).toMatch(/스케줄 대기/);
   expect(stageHelp("gate", "previewed", { batchChild: true })).toMatch(/배치 확인/);
 });

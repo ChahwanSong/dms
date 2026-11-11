@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { Link, useLocation, useSearchParams } from "react-router-dom";
 import { Card } from "../../components/ui/Card";
 import { Button } from "../../components/ui/Button";
 import { Dialog } from "../../components/ui/Dialog";
@@ -10,7 +10,7 @@ import { kstStampOrDash } from "../../lib/datetime";
 import { useMe } from "../auth/useAuth";
 import { useSearchField } from "../jobs/searchField";
 import { K8sHeader } from "./K8sTabs";
-import { ACCESS_LABEL, TERMS, nsLabel, phaseVariant, pvJobLink } from "./k8sTerms";
+import { ACCESS_LABEL, TERMS, nsLabel, phaseVariant, pvJobLink, shortReasonText } from "./k8sTerms";
 import { bindingNameFor } from "./pvLocation";
 import { DefList, DefRow, FreshnessLine, Mono, NoClustersText, SELECT_FIELD, Tag } from "./parts";
 import { VOLUMES_LIMIT, useK8sVolumes } from "./useK8s";
@@ -27,9 +27,29 @@ const SEARCH_FIELD = "w-64 rounded-lg border border-line bg-surface px-3 py-1.5 
 
 function rowKey(v: VolumeRow): string { return `${v.cluster}/${v.namespace}/${v.pvc}`; }
 
+// 관리자 시점의 조치(2026-11-11): REASON_MESSAGES 의 PV 사유 문장은 제출 화면(일반 사용자)용이라 「관리자에게 … 요청하세요」로
+// 끝난다 — 이 화면(관리자 전용)에서 그대로 보이면 그 매핑을 직접 할 관리자에게 「관리자에게 요청하라」고 시킨다. 사실 부분(「 — 」
+// 앞, shortReasonText)은 같은 문장을 쓰고 조치만 StorageClass 탭 링크로 바꾼다. 여기 없는 사유는 reasonText 그대로.
+const ADMIN_PV_ACTION: Record<string, string> = {
+  pv_storageclass_unmapped: "에서 이 StorageClass 를 DMS 스토리지에 매핑하세요",
+  pv_path_unresolved: "에서 이 StorageClass 의 경로 템플릿을 확인하세요",
+};
+const SC_TAB_PATH = "/admin/k8s/storageclasses";
+
+function ReasonText({ code }: { code: string }) {
+  const action = ADMIN_PV_ACTION[code];
+  if (action === undefined) return <>{reasonText(code)}</>;
+  return (
+    <>
+      {`${shortReasonText(code)} — `}
+      <Link to={SC_TAB_PATH} className="text-accent hover:underline">StorageClass 탭</Link>{action}
+    </>
+  );
+}
+
 function PathCell({ v }: { v: VolumeRow }) {
   if (v.abs_root) return <Mono>{v.abs_root}</Mono>;
-  if (v.reason) return <span className={v.selectable ? "text-ink/70" : "text-bad"}>{reasonText(v.reason)}</span>;
+  if (v.reason) return <span className={v.selectable ? "text-ink/70" : "text-bad"}><ReasonText code={v.reason} /></span>;
   return <span className="text-ink/70">—</span>;
 }
 
@@ -76,7 +96,7 @@ function VolumeDetail({ v }: { v: VolumeRow }) {
           <DefRow label="관리 디렉토리 기준">{v.root !== null ? <Mono>{v.root === "" ? "(관리 디렉토리 자체)" : v.root}</Mono> : <span className="text-ink/70">—</span>}</DefRow>
           <DefRow label="실제 경로">
             {v.abs_root ? <Mono className="font-semibold">{v.abs_root}</Mono>
-              : <span className="text-bad">{v.reason ? reasonText(v.reason) : "경로를 정할 수 없습니다"}</span>}
+              : <span className="text-bad">{v.reason ? <ReasonText code={v.reason} /> : "경로를 정할 수 없습니다"}</span>}
           </DefRow>
         </DefList>
 
@@ -99,7 +119,7 @@ function VolumeDetail({ v }: { v: VolumeRow }) {
         </div>
 
         <div className="flex flex-wrap items-center justify-end gap-2 border-t border-line pt-3">
-          {!v.selectable && <span className="mr-auto text-xs text-bad">{v.reason ? reasonText(v.reason) : "지금은 작업 대상으로 고를 수 없습니다"}</span>}
+          {!v.selectable && <span className="mr-auto text-xs text-bad">{v.reason ? <ReasonText code={v.reason} /> : "지금은 작업 대상으로 고를 수 없습니다"}</span>}
           <Button variant="ghost" onClick={() => setOpen(false)}>닫기</Button>
           {v.selectable && !usable && (
             <span className="mr-auto text-xs text-attn">
@@ -120,8 +140,23 @@ function VolumeDetail({ v }: { v: VolumeRow }) {
   );
 }
 
+// 주소가 상태다(2026-11-11): 필터·검색어는 주소에 쓰고(replace — 칸을 바꿀 때마다 뒤로 가기 기록을 쌓지 않게), 밖에서 주소가
+// 바뀌면(탭 「PV 탐색」을 다시 누름·다른 화면의 「PV 보기」 링크) 그 주소로 다시 시작한다. 예전에는 주소를 마운트 때 한 번만
+// 읽어, ?user=alice 로 들어온 뒤 탭을 누르면 주소에선 쿼리가 빠지는데 필터는 alice 로 남았다(같은 경로라 라우터가 다시
+// 마운트하지 않는다). 이 화면이 쓴 주소는 location.state 표지로 가려 다시 시작하지 않는다. 검색칸(useSearchField)은 밖에서 값을
+// 넣을 수 없어 key 로 새로 마운트한다(받아 둔 목록은 react-query 캐시라 다시 기다리지 않는다).
+const OWN_URL_MARK = "k8sVolumesFilter";
+
 export function VolumesPage() {
-  const [params] = useSearchParams();
+  const location = useLocation();
+  const own = (location.state as Record<string, unknown> | null)?.[OWN_URL_MARK] === true;
+  const [viewKey, setViewKey] = useState(location.key);
+  if (!own && viewKey !== location.key) setViewKey(location.key);
+  return <VolumesView key={viewKey} />;
+}
+
+function VolumesView() {
+  const [params, setParams] = useSearchParams();
   const search = useSearchField(params.get("q") ?? "");
   const userSearch = useSearchField(params.get("user") ?? "");
   const [cluster, setCluster] = useState(params.get("cluster") ?? "");
@@ -130,6 +165,14 @@ export function VolumesPage() {
   const query: VolumesQuery = useMemo(() => ({
     cluster, namespace, storage_class: storageClass, q: search.applied, user: userSearch.applied,
   }), [cluster, namespace, storageClass, search.applied, userSearch.applied]);
+  // 적용된 조건 → 주소(빈 값은 지운다, 모르는 쿼리는 그대로 둔다)
+  useEffect(() => {
+    const next = new URLSearchParams(params);
+    for (const [k, v] of Object.entries(query)) {
+      if (typeof v === "string" && v !== "") next.set(k, v); else next.delete(k);
+    }
+    if (next.toString() !== params.toString()) setParams(next, { replace: true, state: { [OWN_URL_MARK]: true } });
+  }, [query]); // eslint-disable-line react-hooks/exhaustive-deps
   const q = useK8sVolumes(query);
   const data = q.data;
   const rows = useMemo(() => (Array.isArray(data?.volumes) ? data!.volumes : []), [data]);

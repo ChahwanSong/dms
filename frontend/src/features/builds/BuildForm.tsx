@@ -137,6 +137,11 @@ export function BuildForm() {
   const [images, setImages] = useState<string[]>(DEFAULT_IMAGES);
   const [guideOpen, setGuideOpen] = useState(false);
 
+  // 모름(로딩·조회 실패) ≠ 미설정(2026-11-11): data 가 없을 때 `?? null` 로 접으면 control-state 가 오기 전·500 일
+  // 때도 「빌드 노드가 지정되지 않았습니다」를 단정하고 제출을 잠갔다. 미설정 경고·잠금은 응답이 와서 값이 null 일 때만.
+  const controlKnown = controlQ.data != null;
+  const controlErrText = controlQ.isError && !controlKnown
+    ? `컨트롤 상태를 읽지 못했습니다 — ${(controlQ.error as ApiError).message}` : null;
   const buildNodeName = controlQ.data?.build_node_name ?? null;
   const sourcePath = controlQ.data?.build_source_path ?? null;
 
@@ -159,7 +164,8 @@ export function BuildForm() {
       .flatMap((r) => (Array.isArray(r.tags) ? r.tags.map((t) => t.tag) : []));
     return nextTagSuggestion([currentTag, ...registryTags, ...builds.map((b) => b.tag)]);
   }, [currentTag, registryQ.data, builds]);
-  const canSubmit = buildNodeName !== null && sourcePath !== null && images.length > 0;
+  // 컨트롤 상태를 모르면 잠그지 않는다 -- 미설정이면 서버가 422(build_node_not_set 등)로 판정한다.
+  const canSubmit = !(controlKnown && (buildNodeName === null || sourcePath === null)) && images.length > 0;
 
   // 백엔드는 동시 1건만 허용한다(build_in_progress 409). 제출 **전에** 알려 주면
   // 헛클릭 한 번과 빨간 오류 한 줄을 아낀다. 막지는 않는다: 목록은 최대 5초
@@ -225,6 +231,22 @@ export function BuildForm() {
         <InfoPanel className="border border-line">
           <p className="font-medium mb-2">빌드 전 확인</p>
           <ul className="space-y-1.5">
+            {/* 컨트롤 상태를 아직 모르면(로딩·조회 실패) 두 줄 대신 한 줄로 그 사실만 말한다 -- 미설정으로 단정하지 않는다. */}
+            {!controlKnown ? (
+              <li className="flex items-start gap-2">
+                {controlErrText !== null ? (
+                  <>
+                    <AlertTriangle className={`${ICON} mt-0.5 text-bad`} aria-hidden />
+                    <span role="alert" className="text-bad">{controlErrText}</span>
+                  </>
+                ) : (
+                  <>
+                    <Loader className={`${ICON} mt-0.5 text-muted`} aria-hidden />
+                    <span className="text-muted">빌드 노드·소스 경로 확인 중…</span>
+                  </>
+                )}
+              </li>
+            ) : (<>
             <li className="flex items-start gap-2">
               {/* 빌드 노드 미설정은 제출 시 422(build_node_not_set)로 끝난다 — 그
                   사실을 미리 말하고, 고칠 수 있는 화면으로 바로 보낸다. */}
@@ -271,6 +293,7 @@ export function BuildForm() {
                 </>
               )}
             </li>
+            </>)}
           </ul>
         </InfoPanel>
 

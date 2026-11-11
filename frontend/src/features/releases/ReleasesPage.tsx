@@ -219,7 +219,8 @@ export function ReleasesPage() {
           {/* fail-open 비침묵화(슬라이스 28): 서버가 태그 존재를 검증하지 못한 채
               접수했다 -- 202 라서 성공처럼 보이는 바로 그 순간에 보여야 한다.
               레지스트리 전면 다운이면 드롭다운이 비어 여기까지 못 오고, 이 배너가
-              잡는 실 창은 목록 로드 후 제출 전 장애(TOCTOU)와 리포별 부분 침묵이다. */}
+              잡는 실 창은 목록 로드 후 제출 전 장애(TOCTOU)와 리포별 부분 침묵, 그리고 잘린 태그
+              목록(tags_truncated)에 없는 최근 빌드 태그다 -- 문구가 두 사유를 함께 말한다(2026-11-11). */}
           {submit.data?.tag_verified === false && (
             <p className="rounded-lg bg-busybg px-3 py-2 text-busy">
               {reasonText("tag_unverified")}

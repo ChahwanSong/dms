@@ -173,6 +173,9 @@ test("빈 상태: 클러스터가 없으면 호출 노드 지정 → 클러스�
   expect(screen.getByRole("link", { name: "클러스터 탭에서 등록" })).toHaveAttribute("href", "/admin/k8s/clusters");
   expect(screen.queryByRole("button", { name: "클러스터 등록" })).toBeNull();
   expect(screen.getAllByText("지정 안 됨")).toHaveLength(2);
+  // 주 노드가 없으면 보조 노드가 예정 시각에 바로 받는다(k8s_sync.claim_trigger — 90초 유예는 주 노드가 있을 때만, 2026-11-11)
+  expect(screen.getByText(/주 노드가 없으면 보조 노드가 정규 동기화를 예정 시각에 바로 맡습니다/)).toBeInTheDocument();
+  expect(screen.queryByText(/예정 시각 90초 뒤/)).toBeNull();
   // 0 개 타일도 클러스터 탭 링크(부제 없음), 모르는 합계는 「—」
   expect(clusterTile()).toHaveTextContent(/^클러스터0$/);
   expect(screen.getByText("namespace").closest("div.rounded-card")).toHaveTextContent("namespace—");

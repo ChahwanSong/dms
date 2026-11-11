@@ -61,6 +61,22 @@ def test_denylist_case_insensitive_write_paths(db):
     assert repo.is_denied(requester="Mallory", owner="x") is None
 
 
+def test_denylist_legacy_padded_rows_still_match_and_blank_rows_match_nothing(db):
+    # 2026-11-11: deny 가 strip 하기 전에 저장된 「alice 」 행은 화면에 보이는 대로 alice 를 막는다. 공백만인 옛 행은 빈 이름과
+    # 맞추지 않는다. 해제(allow)는 원문 그대로 지운다 -- 목록이 돌려준 원문으로 지울 수 있어야 한다.
+    db.execute("""INSERT INTO identity_denylist (subject_type, subject, reason, created_by, created_at)
+                  VALUES ('requester', 'alice ', NULL, 'a', 't'), ('owner', '  ', NULL, 'a', 't')""")
+    repo = ControlRepository(db)
+    assert repo.is_denied(requester="alice", owner="x") == "alice "
+    assert repo.is_denied(requester="bob", owner="") is None
+    repo.allow("requester", "alice ", actor="admin")
+    assert repo.is_denied(requester="alice", owner="x") is None
+    with pytest.raises(DomainValidationError) as e:
+        repo.deny("owner", " \t", reason=None, actor="admin")
+    assert e.value.reason_code == "denylist_subject_empty"
+    assert repo.deny("owner", "  Carol ", reason=None, actor="admin") == "carol"
+
+
 def test_audit_entries_returns_latest_first(db):
     repo = ControlRepository(db)
     repo.deny("requester", "u1", reason=None, actor="admin")

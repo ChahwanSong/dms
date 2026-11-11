@@ -1,6 +1,6 @@
 import re
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, StrictBool
 from ..batch_csv import MAX_CSV_BYTES, export_items_csv, parse_items_csv, template_csv
 from ..batch_orchestrator import auto_confirm_hold, preview_files
@@ -19,6 +19,8 @@ router = APIRouter()
 # 배치 이름 상한: 목록 열·상세 헤더에 한 줄로 얹히는 식별용 자유 텍스트라 120자면
 # 충분하다(위생값 — DB 는 TEXT 라 제약이 없고, 여기가 유일한 심판이다).
 _MAX_BATCH_NAME = 120
+# 목록 GET 의 limit 상한(위생값 -- list_batches docstring).
+_MAX_BATCH_LIST = 1000
 
 
 def normalized_batch_name(name: str | None) -> str | None:
@@ -33,6 +35,16 @@ def normalized_batch_name(name: str | None) -> str | None:
     if len(name) > _MAX_BATCH_NAME:
         raise HTTPException(status_code=422, detail="invalid_batch_name")
     return name
+
+
+def normalized_batch_note(note: str | None) -> str | None:
+    """배치 메모 정규화(생성·수정 공용 -- 이름과 같은 지우기 계약): trim 후 빈 문자열은 None(메모 없음)으로 접는다.
+    2026-11-11 이전엔 수정(patch)만 접고 생성은 받은 그대로 저장해, 공백뿐인 메모가 「메모 없음」의 두 번째 표현("   ")으로
+    남았다(상세 헤더·생성 요약에 빈 메모 줄, 편집 칸은 공백으로 채워짐). 상한은 두지 않는다(종전 그대로)."""
+    if note is None:
+        return None
+    note = note.strip()
+    return note if note != "" else None
 
 
 class BatchBody(BaseModel):
@@ -132,7 +144,7 @@ def create_batch(body: BatchBody, request: Request, identity: Identity = Depends
     status = "Previewing" if confirm_gated(body.operation) else "Running"
     bid = request.app.state.repos.batches.create(
         operation=body.operation, requester_id=identity.actor, actor=identity.actor,
-        max_concurrency=body.max_concurrency, options=body.options, note=body.note,
+        max_concurrency=body.max_concurrency, options=body.options, note=normalized_batch_note(body.note),
         name=name, items=body.items, status=status,
         priority=body.priority, node_count=body.node_count,
         procs_per_node=body.procs_per_node,
@@ -147,8 +159,12 @@ def create_batch(body: BatchBody, request: Request, identity: Identity = Depends
 
 
 @router.get("/api/admin/batches")
-def list_batches(request: Request, identity: Identity = Depends(require_admin)):
-    return request.app.state.repos.batches.list()
+def list_batches(request: Request, limit: int = Query(100, ge=1, le=_MAX_BATCH_LIST),
+                 identity: Identity = Depends(require_admin)):
+    """최신순 배치 목록(기본 100건 -- 종전과 같다). limit 은 2026-11-11 에 열었다: 포탈이 창(100) + 1 건을 받아 「더 오래된
+    배치가 있다」를 안다(그 전엔 정확히 100건이 왔을 때 잘린 것인지 알 수 없어 탭 건수 「전체 (100)」을 전체로 보였다).
+    상한은 폴링 목록이 한 번에 끌어올 수 있는 위생값이다."""
+    return request.app.state.repos.batches.list(limit=limit)
 
 
 # --- 항목 CSV(2026-10-26 BACKLOG C -- 해석·검증은 batch_csv 모듈 docstring) -------------------------------------------
@@ -229,9 +245,8 @@ def patch_batch(batch_id: str, body: BatchPatchBody, request: Request,
         fields["name"] = normalized_batch_name(sent["name"])     # 생성과 같은 검증
     if "note" in sent:
         # note 도 name 과 같은 지우기 계약(trim 후 빈값 → NULL) — "이름 없음"이
-        # NULL/"" 두 표현으로 갈라지는 것을 막는 동일 규칙.
-        note = (sent["note"] or "").strip()
-        fields["note"] = note if note != "" else None
+        # NULL/"" 두 표현으로 갈라지는 것을 막는 동일 규칙(생성과 같은 함수).
+        fields["note"] = normalized_batch_note(sent["note"])
     repo.update_meta(batch_id, **fields)
     return repo.get(batch_id)
 

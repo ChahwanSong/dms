@@ -19,6 +19,7 @@ export const SECURITY_EVENT_LABELS: Record<string, string> = {
   password_admin_reset: "관리자 비밀번호 재설정",
   verification_email_throttled: "인증 메일 상한",
   verification_email_failed: "인증 메일 발송 실패",
+  verification_email_uncertain: "인증 메일 발송 불확실(릴레이 무응답)",
   account_notice_sent: "완료 안내 메일 발송",
   account_notice_stub: "완료 안내 메일(stub — 미발송)",
   account_notice_failed: "완료 안내 메일 실패",
@@ -33,7 +34,7 @@ export const SECURITY_EVENT_GROUPS: { label: string; types: string[] }[] = [
   ] },
   { label: "인증번호", types: ["verification_locked", "verification_global_locked", "verification_client_locked"] },
   { label: "메일", types: [
-    "verification_email_throttled", "verification_email_failed",
+    "verification_email_throttled", "verification_email_failed", "verification_email_uncertain",
     "account_notice_sent", "account_notice_stub", "account_notice_failed", "account_notice_skipped",
   ] },
   { label: "관리자 조치", types: ["verification_unlocked", "verification_global_unlocked", "password_admin_reset"] },

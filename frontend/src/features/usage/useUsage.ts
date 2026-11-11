@@ -90,7 +90,8 @@ async function getNew(url: string): Promise<unknown> {
   try {
     return await apiGet<unknown>(url);
   } catch (e) {
-    if (e instanceof SyntaxError || (e instanceof ApiError && (e.status === 404 || e.status === 405))) {
+    // SPA index.html 200 은 request() 가 ApiError(invalid_response)로 올린다(2026-11-11 -- 예전엔 SyntaxError 원문이었다).
+    if (e instanceof ApiError && (e.code === "invalid_response" || e.status === 404 || e.status === 405)) {
       throw new UsageContractError("unknown_api");
     }
     throw e;

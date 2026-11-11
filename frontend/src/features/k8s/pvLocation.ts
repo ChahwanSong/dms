@@ -133,9 +133,10 @@ export function pvAbsPath(r: Pick<VolumeRow, "abs_root"> | null | undefined, sub
   return absolutePath(r.abs_root, normalizeSub(sub));
 }
 
-/** sync 목적지가 PV 일 때 「상위 디렉토리」(있어야 하는 곳) -- 하위경로가 비면 PV 루트의 부모다. */
+/** sync 목적지가 PV 일 때 「상위 디렉토리」(있어야 하는 곳) -- 하위경로가 비면 PV 루트의 부모다. 서버가 거부할 하위경로("/…"·
+ *  "..")면 null(2026-11-11 -- 입력 아래엔 오류가 뜨는데 카드·요약은 「<PV 루트>/.. 가 이미 있어야 합니다」라고 지어냈다). */
 export function pvDestParent(r: Pick<VolumeRow, "abs_root"> | null | undefined, sub: string): string | null {
-  if (r === null || r === undefined) return null;
+  if (r === null || r === undefined || pvSubProblem(sub, "sync") !== null) return null;
   return destinationParent(r.abs_root, normalizeSub(sub));
 }
 
@@ -163,7 +164,16 @@ export const RESERVED_ACCOUNT_IDS: ReadonlySet<string> = new Set([
 
 /** 계정 아이디로 쓸 수 있나(형식 + 예약어 제외 -- 서버 domain.valid_owner_username 과 같은 판정). */
 export function isAccountId(name: string): boolean {
-  return ACCOUNT_ID_RE.test(name) && !RESERVED_ACCOUNT_IDS.has(name);
+  return accountIdProblem(name) === null;
+}
+
+/** 계정 아이디로 쓸 수 없는 이유(null = 쓸 수 있다). 거부 문구가 형식 하나뿐이면 「nobody」「sync」「1234」처럼 안내한 형식
+ *  (영소문자·숫자로 시작 …)에 맞는 입력에 「형식이 아닙니다」가 떠 무엇을 고칠지 몰랐다(2026-11-11) -- 서버 validate_owner_username
+ *  처럼 예약어를 먼저 가르고(username_reserved), 숫자만(username_numeric_only 와 같은 뜻)을 형식 오류와 나눈다. 문구는 화면 몫. */
+export function accountIdProblem(name: string): "reserved" | "numeric_only" | "format" | null {
+  if (RESERVED_ACCOUNT_IDS.has(name)) return "reserved";
+  if (/^[0-9]+$/.test(name)) return "numeric_only";
+  return ACCOUNT_ID_RE.test(name) ? null : "format";
 }
 
 /** ?pv=<cluster>/<ns>/<pvc>(관리자 PV 탐색 「이 PV로 단일 작업」, k8sTerms.pvJobLink) → PvRef. 모양이 틀리면 null. */

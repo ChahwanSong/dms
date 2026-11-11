@@ -22,6 +22,11 @@ import { storageLabel } from "./usageTabs";
 // 본문 글자는 ink/70(AA) · 한국어 문단 break-keep · 이름·경로는 overflow-wrap:anywhere(작업 삭제 창 관례).
 
 const SKIP_PREVIEW = 10;
+// 수는 천 단위 구분(2026-11-11 B79 -- 바로 위 스토리지 select·메타 줄은 「대상 12,345개」인데 띠·확인 창·결과 줄은 「12345」였다).
+const n = (x: number) => x.toLocaleString("ko-KR");
+// 빈 이름(변조·구형 행)은 정리 API 가 받지 않는다(PurgeScanHistoryBody.storage_name min_length=1 -- 서버 테스트가 고정, 2026-11-11
+// B22): 누르면 늘 422 「입력값이 올바르지 않습니다」였다. 버튼을 잠그고 이유와 다른 길(작업 단위 삭제)을 말한다.
+export const UNNAMED_PURGE_HINT = "이름이 빈 스토리지의 기록은 여기서 정리할 수 없습니다 — 전체 작업에서 작업 단위로 지우세요";
 
 export function lastKnownLine(row: UnregisteredStorage): string {
   const k = row.last_known;
@@ -32,9 +37,9 @@ export function lastKnownLine(row: UnregisteredStorage): string {
 export function scaleLine(row: UnregisteredStorage): string {
   const nb = row.batches.length;
   const nm = row.mixed_batches.length;
-  return `대상 ${row.target_count}개 · 성공 scan ${row.succeeded_scan_count}개 · 정리할 작업 ${row.request_count}개`
-    + (nb > 0 ? `(배치 ${nb}개 포함)` : "")
-    + (nm > 0 ? ` · 섞인 배치 ${nm}개는 정리하지 않음` : "");
+  return `대상 ${n(row.target_count)}개 · 성공 scan ${n(row.succeeded_scan_count)}개 · 정리할 작업 ${n(row.request_count)}개`
+    + (nb > 0 ? `(배치 ${n(nb)}개 포함)` : "")
+    + (nm > 0 ? ` · 섞인 배치 ${n(nm)}개는 정리하지 않음` : "");
 }
 
 // 결과 줄은 페이지 바탕(알림 자리)에 뜨므로 흰 면 + 테두리. onDismiss 가 있으면 닫기(×) -- 다음 정리 전까지 남는 줄이라 다
@@ -53,9 +58,9 @@ export function PurgeResult({ r, innerRef, onDismiss }: {
         </button>
       )}
       <p className={`font-medium text-ink [overflow-wrap:anywhere] ${onDismiss ? "pr-8" : ""}`}>
-        {`${r.storage_name}: 작업 기록 ${r.deletedRequests}개 삭제됨`
-          + (r.deletedBatches > 0 ? `(배치 ${r.deletedBatches}개 포함)` : "")
-          + (r.skipped.length > 0 ? ` · ${r.skipped.length}건 제외` : "")}
+        {`${r.storage_name}: 작업 기록 ${n(r.deletedRequests)}개 삭제됨`
+          + (r.deletedBatches > 0 ? `(배치 ${n(r.deletedBatches)}개 포함)` : "")
+          + (r.skipped.length > 0 ? ` · ${n(r.skipped.length)}건 제외` : "")}
       </p>
       {r.skipped.length > 0 && (
         <ul aria-label="제외된 항목" className="space-y-0.5">
@@ -68,14 +73,14 @@ export function PurgeResult({ r, innerRef, onDismiss }: {
               )}
             </li>
           ))}
-          {rest > 0 && <li>{`외 ${rest}건`}</li>}
+          {rest > 0 && <li>{`외 ${n(rest)}건`}</li>}
         </ul>
       )}
       {r.error !== null && <p className="text-bad">{`중간에 멈췄습니다 — ${r.error}. 다시 정리하면 남은 기록을 이어서 지웁니다.`}</p>}
       {/* 아직 시도하지 않은 기록(서버가 센 remaining_untried -- 회차 상한에 닿아 멈춘 경우). 건너뛴 것은 위 목록이 사유와
           함께 말한다(그 스토리지 탭은 기록이 남는 동안 남아 다시 정리할 수 있다). */}
       {r.error === null && r.untried !== null && r.untried > 0 && (
-        <p>{`아직 정리하지 않은 기록 ${r.untried}개 — 다시 정리하면 이어서 지웁니다.`}</p>
+        <p>{`아직 정리하지 않은 기록 ${n(r.untried)}개 — 다시 정리하면 이어서 지웁니다.`}</p>
       )}
       {r.deletedRequests > 0 && <p>결과 파일·파드 정리는 백그라운드에서 이어집니다.</p>}
     </div>
@@ -105,6 +110,7 @@ export function PurgeDialog({ row, purge, progress, setProgress, onResultFocus }
   const nb = snap.batches.length;
   const children = snap.batches.reduce((a, b) => a + b.request_count, 0);
   const nm = snap.mixed_batches.length;
+  const unnamed = row.storage_name === "";
   const confirm = () => {
     if (sending.current || purge.isPending) return;
     sending.current = true;
@@ -118,32 +124,32 @@ export function PurgeDialog({ row, purge, progress, setProgress, onResultFocus }
     <Dialog open={open} onOpenChange={onOpenChange} size="lg" title="미등록 스토리지 기록 정리" busy={busy}
             onCloseAutoFocus={(e) => { if (succeeded.current) { e.preventDefault(); onResultFocus(); } }}
             trigger={
-              <Button variant="danger" className="gap-1.5" disabled={row.request_count === 0 || purge.isPending}
-                      aria-label={`${row.storage_name} 기록 정리`}
-                      title={row.request_count === 0
+              <Button variant="danger" className="gap-1.5" disabled={unnamed || row.request_count === 0 || purge.isPending}
+                      aria-label={`${storageLabel(row.storage_name)} 기록 정리`}
+                      title={unnamed ? UNNAMED_PURGE_HINT : row.request_count === 0
                         ? "여기서 정리할 수 있는 작업 기록이 없습니다(섞인 배치는 전체 작업에서 배치 단위로)" : undefined}>
                 <Trash2 aria-hidden="true" className="h-4 w-4 shrink-0" />기록 정리
               </Button>}>
       <div className="space-y-3 text-sm text-ink/70 break-keep">
         <p className="font-medium text-ink [overflow-wrap:anywhere]">
-          {`${snap.storage_name} 의 scan 작업 기록 ${snap.request_count}개를 영구 삭제합니다. 되돌릴 수 없습니다.`}
+          {`${snap.storage_name} 의 scan 작업 기록 ${n(snap.request_count)}개를 영구 삭제합니다. 되돌릴 수 없습니다.`}
         </p>
         <p>
-          {`단일 작업 ${snap.single_count}개` + (nb > 0 ? ` · 배치 ${nb}개(작업 ${children}개)` : "")
+          {`단일 작업 ${n(snap.single_count)}개` + (nb > 0 ? ` · 배치 ${n(nb)}개(작업 ${n(children)}개)` : "")
             + " — 성공·실패·취소된 scan 을 모두 지웁니다."}
         </p>
         <div role="note" className="flex items-start gap-2 rounded-lg border border-attn/30 bg-attnbg px-3 py-2 text-ink">
           <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0 text-attn" aria-hidden />
           <p className="min-w-0 flex-1 break-keep">
-            {`사용량 분석(목록·이력 차트·CSV)에서 이 스토리지의 대상 ${snap.target_count}개(성공 scan `
-              + `${snap.succeeded_scan_count}개)가 사라집니다.`}
+            {`사용량 분석(목록·이력 차트·CSV)에서 이 스토리지의 대상 ${n(snap.target_count)}개(성공 scan `
+              + `${n(snap.succeeded_scan_count)}개)가 사라집니다.`}
           </p>
         </div>
         {nb > 0 && <p>배치는 배치 기록(항목 목록·이름·실행 설정)과 함께 지워집니다.</p>}
         {nm > 0 && (
           <p>
-            {`다른 스토리지 항목이나 다른 작업이 섞인 배치 ${nm}개(작업 `
-              + `${snap.mixed_batches.reduce((a, b) => a + b.request_count, 0)}개)는 지우지 않습니다 — 배치 상세에서 확인한 뒤 `
+            {`다른 스토리지 항목이나 다른 작업이 섞인 배치 ${n(nm)}개(작업 `
+              + `${n(snap.mixed_batches.reduce((a, b) => a + b.request_count, 0))}개)는 지우지 않습니다 — 배치 상세에서 확인한 뒤 `
               + "전체 작업에서 배치 단위로 지우세요."}
           </p>
         )}
@@ -163,12 +169,12 @@ export function PurgeDialog({ row, purge, progress, setProgress, onResultFocus }
         </label>
         {purge.isError && mine && <p role="alert" className="text-bad">{(purge.error as ApiError).message}</p>}
         <div className="flex flex-wrap items-center justify-end gap-2 pt-1">
-          <span role="status" className="sr-only">{busy ? `삭제 중… ${progress ?? 0}개` : ""}</span>
+          <span role="status" className="sr-only">{busy ? `삭제 중… ${n(progress ?? 0)}개` : ""}</span>
           <span aria-hidden className="mr-auto" />
           <Button variant="ghost" disabled={busy} onClick={() => setOpen(false)}>닫기</Button>
           <Button disabled={!ack || snap.request_count === 0} aria-disabled={busy || undefined}
                   className={busy ? "cursor-not-allowed opacity-50" : ""} onClick={confirm}>
-            {busy ? `삭제 중… ${progress ?? 0}개` : `${snap.request_count}개 영구 삭제`}
+            {busy ? `삭제 중… ${n(progress ?? 0)}개` : `${n(snap.request_count)}개 영구 삭제`}
           </Button>
         </div>
       </div>

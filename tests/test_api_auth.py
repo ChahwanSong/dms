@@ -249,6 +249,36 @@ def test_password_reset_flow(client, db, settings):
     assert row is not None
 
 
+def test_disabled_account_login_and_self_reset_say_account_disabled(client, db, settings):
+    # 2026-11-11: 비활성 계정은 맞는 비밀번호에도 401 invalid_credentials 였고(실패로 세어 10번이면 429), 셀프 재설정은 성공해
+    # 「새 비밀번호로 로그인하세요」 뒤에도 같은 401 이었다. 비밀번호가 맞으면 401 account_disabled, 재설정은 발급·변경 모두 403.
+    from dms.repositories import Repositories
+    repos = Repositories(db)
+    vc = _verified_client(db, settings)
+    client.post("/api/auth/signup", json={"username": "off.user", "password": "pw"})
+    code = vc.post("/api/auth/verification-codes",
+                   json={"username": "off.user", "purpose": "password_reset"}).json()["stub_code"]
+    repos.accounts.set_disabled("off.user", True, actor="t")
+    # 틀린 비밀번호는 그대로 invalid_credentials -- 비활성인지는 비밀번호를 아는 사람에게만 알린다
+    r = vc.post("/api/auth/login", json={"username": "off.user", "password": "bad"})
+    assert (r.status_code, r.json()["detail"]) == (401, "invalid_credentials")
+    # 맞는 비밀번호: account_disabled, 세션 쿠키 없음, 실패로 세지 않음(상한을 넘겨 시도해도 429 가 아니다)
+    for _ in range(vc.app.state.login_limiter.max_attempts + 2):
+        r = vc.post("/api/auth/login", json={"username": "off.user", "password": "pw"})
+        assert (r.status_code, r.json()["detail"]) == (401, "account_disabled")
+        assert "set-cookie" not in r.headers
+    # 셀프 재설정: 발급도, 비활성화 전에 받은 코드로의 변경도 403 -- 코드는 소비되지 않는다
+    r = vc.post("/api/auth/verification-codes", json={"username": "off.user", "purpose": "password_reset"})
+    assert (r.status_code, r.json()["detail"]) == (403, "account_disabled")
+    r = vc.post("/api/auth/password-reset", json={"username": "off.user", "password": "new", "code": code})
+    assert (r.status_code, r.json()["detail"]) == (403, "account_disabled")
+    # 다시 켜면 같은 코드로 재설정되고 새 비밀번호로 로그인된다
+    repos.accounts.set_disabled("off.user", False, actor="t")
+    assert vc.post("/api/auth/password-reset", json={
+        "username": "off.user", "password": "new", "code": code}).status_code == 200
+    assert vc.post("/api/auth/login", json={"username": "off.user", "password": "new"}).status_code == 200
+
+
 def test_admin_session_creates_account(client, db):
     # 운영자 포탈 경로(2026-08-20): 세션 admin 이 계정을 만든다(역할 선택 가능)
     client.post("/api/auth/signup", json={"username": "boss", "password": "pw"})

@@ -43,6 +43,9 @@ SECURITY_EVENT_TYPES = (
     "password_admin_reset",
     "verification_email_throttled",
     "verification_email_failed",
+    # 릴레이가 응답 전에 끊김(relay_no_response -- 코드는 저장, 메일은 갔을 수도). 빠져 있던 동안(~2026-11-11) 이 경고는 포탈
+    # 어디에도 보이지 않았다 -- 「메일이 안 왔다」 문의에서 「메일」 묶음으로 걸러 보는 행이다.
+    "verification_email_uncertain",
     "account_notice_sent",
     "account_notice_stub",
     "account_notice_failed",

@@ -11,6 +11,7 @@ import { ApiError, reasonText } from "../../lib/api";
 import { kstStamp } from "../../lib/datetime";
 import { useNow } from "../../lib/useNow";
 import type { DataJob, RequestDetail } from "../../lib/types";
+import { batchJobsPath } from "./useJobs";
 import type { useCancelJob, useCancelRequest } from "./useJobs";
 import { Elapsed } from "./JobStages";
 import { useStageNav } from "./stageNav";
@@ -121,7 +122,14 @@ export function OutcomeCard({ req, jobs, models, cancelRequest, cancelJob, jobsL
       {n && (
         <div className={`mt-4 rounded-lg px-4 py-3 text-sm ${TONE_STRIP[outcome.tone]}`}>
           <p className="text-xs font-semibold text-ink">다음 할 일</p>
-          {n.batchNotice ? (
+          {n.batchNotice && req.batch_exists === false && typeof req.batch_id === "string" ? (
+            // 배치 기록만 지워진 묶음(2026-11-11, BACKLOG 「요청 상세·결과 카드의 배치 링크」): 배치 상세는 404 라 그리로
+            // 보내지 않는다 -- 배치 확인을 할 곳이 없다는 사실과 그 묶음의 작업 목록(작업 목록 BatchCell 과 같은 길)을 말한다.
+            <p className="mt-1 break-keep">
+              배치 항목입니다 — 실행 확인은 항목별이 아니라 배치 단위로 하는데, 이 배치는 기록이 지워져 배치 확인을 할 수
+              없습니다. <Link className="text-accent underline" to={batchJobsPath(req.batch_id)}>이 묶음의 작업 보기</Link>
+            </p>
+          ) : n.batchNotice ? (
             // 배치 자식은 단건 컨펌을 못 한다(서버 409 batch_child_confirm_via_batch, 2026-10-07) -- 배치 확인 1회가
             // 자식 전부를 대표하고 특권 게이트도 그쪽에 있다. 컨펌 버튼 대신 어디서 확인하는지를 말한다.
             <p className="mt-1 break-keep">

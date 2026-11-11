@@ -25,7 +25,7 @@ from dms.identity import (PRIVILEGE_IF_ELIGIBLE, PRIVILEGE_REQUESTED, IdentityRe
                           root_allowed)
 from dms.k8s_sync import normalize_snapshot
 from dms.planner import Planner
-from dms.repositories import Repositories
+from dms.repositories import Repositories, text_search
 from dms.repositories.accounts import _USERNAME_RE as ACCOUNT_USERNAME_RE
 from dms.stepper import JobStepper
 
@@ -718,6 +718,28 @@ def test_path_search_matches_the_pv_label(kclient, world):
         rows = kclient.get("/api/user/requests", params={"path": q}).json()
         assert [r["request_id"] for r in rows] == [rid], q
     assert kclient.get("/api/user/requests", params={"path": "models"}).json() == []
+
+
+def test_path_search_accepts_the_pv_whole_cell_pasted_as_shown(kclient, world):
+    # 화면은 하위경로가 빈 PV 쪽을 「pvc — ns (sc) / (PV 전체)」로 그리지만 target_label 은 「 / …」를 뗀다 -- 대상 칸을 그대로
+    # 붙여 넣으면 0건이던 결함(2026-11-11, 라이브 'weights — lab-y (c2-nfs) / (PV 전체)' 2건 → 0건).
+    _login(kclient, "alice")
+    r = kclient.post("/api/user/requests", json=_pv_sync(dst_path=""))
+    assert r.status_code == 202, r.text
+    rid = r.json()["request_id"]
+    shown = "datasets — team-a (tb-nfs) / sample → scratch — team-b (tb-nfs) / (PV 전체)"
+    for q in (shown, "scratch — team-b (tb-nfs) / (PV 전체)", "(PV 전체)"):
+        rows = kclient.get("/api/user/requests", params={"path": q}).json()
+        assert [row["request_id"] for row in rows] == [rid], q
+
+
+def test_pv_whole_label_matches_the_portal_constant():
+    # 서버가 구분자로 지우는 구절은 포탈이 그리는 글자와 바이트 단위로 같아야 한다(어긋나면 붙여 넣기 검색이 다시 0건).
+    src = (Path(__file__).resolve().parents[1] / "frontend/src/lib/storagePaths.ts").read_text(encoding="utf-8")
+    m = re.search(r'export const PV_WHOLE = "([^"]*)";', src)
+    assert m is not None and m.group(1) == text_search.PV_WHOLE_LABEL
+    assert text_search.search_tokens("a — ns (sc) / (PV 전체)") == ["a", "—", "ns", "(sc)"]
+    assert text_search.search_tokens("a / (PV 전체) → b / x") == ["a", "b", "/", "x"]
 
 
 # --- 스캔 경로(§6) ---------------------------------------------------------------------------------

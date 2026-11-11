@@ -10,7 +10,7 @@ import { InfoCard } from "../../components/ui/InfoCard";
 import {
   FieldRow, FormSection, OptionTokens, SubmitHints, SubmitLayout, SummaryList, SummaryPanel, SummaryRow,
 } from "../../components/form/SubmitLayout";
-import { ApiError } from "../../lib/api";
+import { ApiError, REASON_MESSAGES } from "../../lib/api";
 // field·StoragePicker 는 formFields.tsx 에 산다(슬라이스 31 T3) -- 제출 화면이 통째로 갈려도
 // 다른 임포터가 흔들리지 않게 결합을 끊어 둔 것.
 import { StoragePicker, field } from "./formFields";
@@ -22,9 +22,10 @@ import type { DirectDestOwner, PvOwnerRule } from "../../lib/syncOwnership";
 // 옵션 미러(CHMOD_RE·chownFieldError·intFieldError, sync 숫자 범위·프리필 SYNC_INT_FIELDS)는
 // optionRules.ts 로 이사(슬라이스 32 T8) -- BatchCreate 옵션과 공유한다
 // (사본이면 미러가 발산한다).
-import { BUFSIZE_HELP, CHMOD_RE, chownFieldError, DIRECT_HELP, directBufsizeError, OPEN_NOATIME_HELP, PRIV_ROOT_SYNC,
+import { BUFSIZE_HELP, CHMOD_RE, chownFieldError, DIRECT_HELP, directBufsizeError, OPEN_NOATIME_HELP, PRIV_ROOT_HEAD, PRIV_ROOT_SYNC,
          PRIV_ROOT_SYNC_DIRECT_BOTH, PRIV_ROOT_SYNC_PV, PRIV_ROOT_SYNC_PV_ROOT, QUIET_HELP, SCAN_INT_FIELDS, SYNC_INT_FIELDS,
-         SYNC_MAX_ERRORS_NOTE, SYNC_OPTION_HELP, scanIntFieldError, syncIntFieldError } from "./optionRules";
+         SYNC_MAX_ERRORS_NOTE, SYNC_OPTION_HELP, priorityCapText, priorityClampNote, scanIntFieldError, syncIntFieldError }
+  from "./optionRules";
 // 정책 기본값 캡션(슬라이스 37: 배치 생성과 같은 표시 배선 — 백엔드 무변경).
 import { usePolicies } from "../policies/usePolicies";
 import type { Policy } from "../../lib/types";
@@ -37,7 +38,7 @@ import { Segmented } from "../../components/ui/Segmented";
 import { usePvCatalog, useResolvedPv } from "../k8s/usePvCatalog";
 import type { Resolved } from "../k8s/usePvCatalog";
 import {
-  isAccountId, SIDE_LABELS, emptyLoc, normalizeSub, parsePvParam, pvAbsPath, pvDestParent, pvSubProblem, pvSummaryText,
+  accountIdProblem, SIDE_LABELS, emptyLoc, normalizeSub, parsePvParam, pvAbsPath, pvDestParent, pvSubProblem, pvSummaryText,
 } from "../k8s/pvLocation";
 import type { Loc, Side } from "../k8s/pvLocation";
 import { storageKindOf, storageOwnerOf } from "../k8s/k8sTerms";
@@ -124,13 +125,19 @@ export function SubmitJob() {
   const me = useMe();
   // 폼 값은 단일 useState -- 연산을 바꿔도 필드를 초기화하지 않는다(현행 정책). 숨은 연산의 값은
   // 남지만 아래 검증·바디가 f.operation 으로 걸러 싣지 않는다.
-  const [f, setF] = useState(initial);
+  const [f, setFState] = useState(initial);
+  // 지난 제출의 거부 문구(요약의 submit.isError)는 그때 입력에 대한 답이다 -- 폼을 고치면 지운다(2026-11-11: k8s_access_denied 로
+  // 거부된 뒤 다른 PV 로 바꿔도 「이 PV 의 namespace 에 권한이 없습니다」가 남아 새로 고른 PV 이야기처럼 읽혔다. K8sOverview·Login 의
+  // 입력 변경 reset 과 같은 관례). 오류일 때만 -- 진행 중(pending)에 reset 하면 성공 뒤 이동(onSuccess)이 끊긴다.
+  const clearSubmitError = () => { if (submit.isError) submit.reset(); };
+  const setF = (next: typeof initial) => { clearSubmitError(); setFState(next); };
   // 고급 옵션 펼침 상태. 오류가 있으면 항상 펼친다(아래 details open/onToggle).
   const [advancedOpen, setAdvancedOpen] = useState(false);
   // PV 목적지 sync 의 결과 소유(2026-10-26 사용자 결정 「사용자는 항상 자동으로 셋업, 운영자는 옵션으로 PV 루트 소유자」): 기본은
   // 목적지 스토리지 기본 소유자. 「PV 루트 소유자」는 특권 운영자(면제자)만 고른다(서버 pv_owner_root_not_allowed). 연산·목적지를
   // 바꿔도 남지만(f 와 같은 정책) 바디에는 쓰일 때(아래 pvRootChosen)만 실린다.
-  const [pvOwnerChoice, setPvOwnerChoice] = useState<PvOwnerRule>("storage");
+  const [pvOwnerChoice, setPvOwnerChoiceState] = useState<PvOwnerRule>("storage");
+  const setPvOwnerChoice = (v: PvOwnerRule) => { clearSubmitError(); setPvOwnerChoiceState(v); };
 
   // ---- k8s 신원 모드(dms-k8s 설계 D1·D2·D4·D15·§7) ----------------------------------------------------------
   // 분기 키는 me.unrestricted(맵핑 면제 = 관리자 + 전체 PV·직접 경로 권한 + 세션) 하나다. 모든 작업이 root 이고(서버 D2 -- 바디
@@ -142,13 +149,16 @@ export function SubmitJob() {
     const ref = parsePvParam(params.get("pv"));
     return { source: emptyLoc(ref), destination: emptyLoc(), target: emptyLoc(ref) };
   });
-  const setLoc = (side: Side) => (next: Loc) => setLocs((prev) => ({ ...prev, [side]: next }));
+  const setLoc = (side: Side) => (next: Loc) => { clearSubmitError(); setLocs((prev) => ({ ...prev, [side]: next })); };
   const unrestricted = me.data?.unrestricted === true;
   // 「권한 기준 사용자」(면제자): 비우면 전체 PV 검색, 채우면 그 사용자의 범위(같은 고르기 흐름). 목록 조회는 디바운스된 값으로,
   // 바디·요약은 보이는 값 그대로(보이는 것 = 보내는 것).
   const scopeField = useSearchField("");
   const scopeInput = unrestricted ? scopeField.bind.value.trim() : "";
-  const scopeInvalid = scopeInput !== "" && !isAccountId(scopeInput);
+  // 거부 이유를 셋으로 가른다(예약어·숫자만·형식 -- 문구가 형식 하나면 「nobody」「1234」처럼 안내 형식에 맞는 입력에 무엇을 고칠지
+  // 말하지 못했다, 2026-11-11).
+  const scopeProblem = scopeInput === "" ? null : accountIdProblem(scopeInput);
+  const scopeInvalid = scopeProblem !== null;
   const scopeUser = unrestricted && !scopeInvalid ? scopeField.applied : "";
   const accessQ = useK8sAccess("", unrestricted);
   const scopeChoices = (accessQ.data?.users ?? []).map((u) => u.dms_user);
@@ -185,10 +195,12 @@ export function SubmitJob() {
   // 직접 경로 선택지(면제자): 파일시스템·둘 다 종류만(PV 전용 스토리지는 PV 주소로 -- 설계 D11).
   const rawStorages = storages.filter((s) => storageKindOf(s) !== "pv");
   // sync 목적지의 상위 디렉토리: PV 목적지면 서버가 해석한 PV 실제 경로 기준(하위경로가 비면 PV 루트의 부모), 직접 경로면
-  // 관리 디렉토리 기준(모르면 null -- 지어내지 않는다).
+  // 관리 디렉토리 기준(모르면 null -- 지어내지 않는다). 서버가 거부할 경로면 null(pvDestParent 가 pvSubProblem 을, 직접 경로는
+  // relativePathProblem 을 본다 -- 입력 아래엔 오류가 뜨는데 카드·요약은 「<루트>/.. 가 이미 있어야 합니다」라고 했다, 2026-11-11).
+  // 직접 경로는 **보내는 값 그대로**로 짓는다(PathFeedback 주석 -- 다듬은 값이면 「 a/b」가 「<root>/a」로 보였다).
   const destParentAbs = modeOf("destination") === "pv" ? pvDestParent(rowOf("destination"), locs.destination.sub)
-    : locs.destination.path.trim() === "" ? null
-    : destinationParent(rootOf(locs.destination.storage), locs.destination.path.trim());
+    : locs.destination.path.trim() === "" || relativePathProblem(locs.destination.path) !== null ? null
+    : destinationParent(rootOf(locs.destination.storage), locs.destination.path);
   // 결과(목적지) 소유권 안내 -- 바디와 같은 값(chown 옵션·목적지 종류·결과 소유 선택)에서 파생한다(lib/syncOwnership = 서버
   // _auto_chown 미러). PV 목적지 sync 면 결과는 목적지 스토리지 기본 소유자(서버가 해석한 VolumeRow.storage_owner -- 사용자는 늘
   // 이것), 운영자가 「PV 루트 소유자」를 고르면 점검이 잰 PV 루트 소유자(2026-10-26 사용자 결정) -- 소유권 문구·「목적지가 이미
@@ -220,8 +232,10 @@ export function SubmitJob() {
     : { rule: "storage_if_under_pv", owner: rawDestOwner };
   const directOwnerLabel = rawDestOwner !== null ? ownerText(rawDestOwner) : null;
   // pv 종류 스토리지의 저장값이 무효면 서버가 409 invalid_storage_owner -- 보내기 전에 잠근다. both 는 경로가 PV 루트 아래일 때만
-  // 거부되므로(화면은 모른다) 잠그지 않는다. 생략(undefined) = 옛 응답(모름) -- 잠그지 않는다.
-  const storageOwnerBad = (pvOwnerRule === "storage" && destRow !== null && destRow.selectable
+  // 거부되므로(화면은 모른다) 잠그지 않는다. 생략(undefined) = 옛 응답(모름) -- 잠그지 않는다. chown 을 지정하면(chownSet) 스토리지
+  // 값은 쓰이지 않아 서버도 규칙을 기록·대조하지 않는다(routes_requests 「"chown" not in options」 -- 2026-11-11: PV 쪽만 chownSet 을
+  // 안 봐, 저장값이 무효일 때 운영자의 자연스러운 우회로인 chown 명시가 화면에서 막혔다. 직접 경로 쪽 directDest 는 이미 null).
+  const storageOwnerBad = (pvOwnerRule === "storage" && !chownSet && destRow !== null && destRow.selectable
     && storageOwnerRaw !== undefined && storageOwner === null)
     || (directDest?.rule === "storage" && rawDestOwnerRaw === null);
   const ownership = syncOwnership({
@@ -274,7 +288,10 @@ export function SubmitJob() {
   const k8sPvBad = checks.some((c) => c.pvBad || c.pvLoading);
   const k8sSubBad = checks.some((c) => c.subBad);
   const k8sRmRoot = checks.some((c) => c.rmRoot);
-  const k8sCatalogError = catalog.status === "error";
+  // PV 목록은 PV 쪽에만 쓰인다 -- 그 조회 실패·미동기화는 PV 를 고르는 쪽이 있을 때만 잠그고 말한다(아래 storagesBlock 의 거울,
+  // 2026-11-11: 면제자가 권한 기준 사용자를 채우고 양쪽을 직접 경로로 두면 범위 목록 5xx 하나로 PV 를 안 쓰는 제출이 잠겼다).
+  const anyPv = checks.some((c) => !c.raw);
+  const k8sCatalogError = catalog.status === "error" && anyPv;
   const targetMissing = checks.some((c) => c.missing);
   // 서버가 422 unsafe_path 로 거부할 경로(relativePathProblem 미러) -- 보내기 전에 잠근다.
   const pathInvalid = checks.some((c) => c.invalid);
@@ -313,13 +330,19 @@ export function SubmitJob() {
   const defaultPolicy = byTool?.get(f.operation === "sync" ? "dsync" : f.operation);
   const priorityDefaultLabel = defaultPolicy === undefined
     ? "(정책 기본)" : `(정책 기본: ${defaultPolicy.default_priority})`;
+  // 정책 상한(placement._clamp_priority 미러, 배치 생성과 같은 계산 -- optionRules.priorityCapText): 상한을 넘는 선택은 배치 때
+  // 조용히 상한으로 깎인다 -- 칸 아래 캡션과 요약 「우선순위」가 미리 말한다(2026-11-11: 요약은 high 인데 실제로는 mid 로 돌았다).
+  const priorityCapCaption = priorityCapText(byTool, f.operation, f.priority);
+  const priorityClamp = priorityClampNote(byTool, f.operation, f.priority);
 
   const on = (k: keyof typeof initial) => (e: any) =>
     setF({ ...f, [k]: e.target.type === "checkbox" ? e.target.checked : e.target.value });
 
   function syncOptions(): SubmitBody["options"] {
     const options: SubmitBody["options"] = checkedOptions({
-      delete: f.delete, contents: f.contents, direct: f.direct, quiet: f.quiet,
+      // quiet 는 sync·scan·rm 이 함께 쓰는 상태라, 사용자가 rm 에서 켜고 sync 로 돌아오면 sync 화면엔 그 칸이 없는데(관리자 전용)
+      // 바디에 실렸다(2026-11-11 -- 끌 수도 없이 결과 수·실패 항목이 사라졌다). 칸이 보이는 관리자만 싣는다(「숨겨도 payload 동일」).
+      delete: f.delete, contents: f.contents, direct: f.direct, quiet: isAdmin && f.quiet,
       // open_noatime: 모든 작업이 root 라(설계 D2 -- O_NOATIME 의 EPERM 제약 없음) 사용자도 같은 기본(ON)이 실린다. 사용자
       // 폼엔 고급 옵션이 없어 기본값 그대로다. nsync 에서도 실제로 동작하는 것은 잡 이미지 7a3189c 부터(OPEN_NOATIME_HELP 주석).
       open_noatime: f.openNoatime,
@@ -407,12 +430,13 @@ export function SubmitJob() {
   if (submit.isPending) hints.push("제출 중…");
   if (storagesBlock) hints.push("스토리지 목록 조회 실패 — 새로고침 후 다시 시도하세요");
   // 필드·구획 머리의 문구와 다른, 짧은 「무엇을 하면 되나」(SubmitHints 계약).
-  if (scopeInvalid) hints.push("권한 기준 사용자를 계정 아이디 형식으로 고치세요");
+  if (scopeProblem === "reserved") hints.push("권한 기준 사용자에 시스템 계정 이름이 아닌 계정 아이디를 적으세요");
+  else if (scopeProblem === "numeric_only") hints.push("권한 기준 사용자에 숫자만이 아닌 계정 아이디를 적으세요");
+  else if (scopeProblem === "format") hints.push("권한 기준 사용자를 계정 아이디 형식으로 고치세요");
   if (k8sCatalogError) hints.push("PV 목록 조회 실패 — 새로고침 후 다시 시도하세요");
-  else if (catalog.status === "ready" && catalog.clusters.every((c) => c.synced_at === null))
+  else if (catalog.status === "ready" && catalog.clusters.every((c) => c.synced_at === null) && anyPv)
     hints.push("k8s 목록이 아직 동기화되지 않아 PV 를 고를 수 없습니다");
-  else if (catalog.status === "ready" && catalog.namespaces !== null && catalog.namespaces.length === 0
-           && checks.some((c) => !c.raw))
+  else if (catalog.status === "ready" && catalog.namespaces !== null && catalog.namespaces.length === 0 && anyPv)
     hints.push("권한 있는 namespace 가 없어 지금은 PV 를 고를 수 없습니다");
   if (targetMissing)
     hints.push(f.operation === "sync"
@@ -531,13 +555,16 @@ export function SubmitJob() {
             control={<>
               <label className="text-sm block">권한 기준 사용자
                 <input aria-label="권한 기준 사용자" className={field} list="k8s-scope-users"
-                       placeholder="비우면 전체 PV 검색 · 예: junwoo.song" autoComplete="off" {...scopeField.bind} />
+                       placeholder="비우면 전체 PV 검색 · 예: junwoo.song" autoComplete="off" {...scopeField.bind}
+                       onChange={(e) => { clearSubmitError(); scopeField.bind.onChange(e); }} />
               </label>
               <datalist id="k8s-scope-users">
                 {scopeChoices.map((u) => <option key={u} value={u} />)}
               </datalist>
-              {scopeInvalid && (
-                <p className="mt-1 text-bad text-sm">계정 아이디 형식이 아닙니다(영소문자·숫자로 시작, 영소문자·숫자·. _ -)</p>
+              {scopeProblem !== null && (
+                <p className="mt-1 text-bad text-sm">{scopeProblem === "reserved" ? REASON_MESSAGES.username_reserved
+                  : scopeProblem === "numeric_only" ? REASON_MESSAGES.username_numeric_only
+                  : "계정 아이디 형식이 아닙니다(영소문자·숫자로 시작, 영소문자·숫자·. _ -)"}</p>
               )}
             </>}
             help="적으면 그 사용자의 namespace 권한 안의 PV 만 보이고, 작업에 그 사용자가 「대상 사용자」로 기록됩니다(실행은 그래도 root). 비우면 모든 클러스터의 PV 를 검색합니다." />
@@ -779,7 +806,8 @@ export function SubmitJob() {
                 <option value="">{priorityDefaultLabel}</option>
                 <option value="low">low</option><option value="mid">mid</option><option value="high">high</option>
               </select>
-            </label>} />
+            </label>}
+            help={priorityCapCaption} />
           {/* 실행 신원·root 체크박스는 없다(설계 D2·D4) -- 모든 작업이 root 이고, 사용자 지정은 1구획의 「권한 기준 사용자」
               (면제자만)가 맡는다. */}
           {f.operation === "rm" && (
@@ -837,12 +865,16 @@ export function SubmitJob() {
           </>
         )}
         <SummaryRow label="옵션"><OptionTokens options={currentOptions()} /></SummaryRow>
-        <SummaryRow label="우선순위">{f.priority === "" ? priorityDefaultLabel : f.priority}</SummaryRow>
+        <SummaryRow label="우선순위">
+          {`${f.priority === "" ? priorityDefaultLabel : f.priority}${priorityClamp !== null ? ` — ${priorityClamp}` : ""}`}
+        </SummaryRow>
         {unrestricted && scopeInput !== "" && (
           <SummaryRow label="대상 사용자">{scopeInput}</SummaryRow>
         )}
+        {/* rm·scan 은 머리만(요청 상세와 같은 PRIV_ROOT_HEAD) -- sync 의 소유 결과 꼬리는 rm·scan 과 관계없다(2026-11-11). */}
         <SummaryRow label="실행 권한" className="text-bad">
-          {pvDest ? (pvOwnerRule === "pv_root" ? PRIV_ROOT_SYNC_PV_ROOT : PRIV_ROOT_SYNC_PV)
+          {f.operation !== "sync" ? PRIV_ROOT_HEAD
+            : pvDest ? (pvOwnerRule === "pv_root" ? PRIV_ROOT_SYNC_PV_ROOT : PRIV_ROOT_SYNC_PV)
             : directDest?.rule === "storage" ? PRIV_ROOT_SYNC_PV
             : directDest?.rule === "storage_if_under_pv" ? PRIV_ROOT_SYNC_DIRECT_BOTH : PRIV_ROOT_SYNC}
         </SummaryRow>
@@ -858,7 +890,10 @@ export function SubmitJob() {
         <h1 className="text-2xl font-bold">단일 작업</h1>
         {me.data !== undefined && (
           <p className="mt-1 text-sm text-muted">
-            {isAdmin ? "경로 하나에 sync·scan·rm 을 실행합니다 — 여러 경로의 sync·scan·rm 은 배치 작업으로 묶어 요청하세요."
+            {/* 배치 안내는 특권 운영자(canRoot)에게만 -- 배치 생성은 특권 목록·세션 게이트(403 privileged_not_authorized)라 목록 밖
+                관리자는 못 쓰고, 그 관리자의 연산 선택지엔 scan 도 없다(2026-11-11: isAdmin 하나로 갈라 「sync·scan·rm … 배치 작업으로」를
+                보였다). 목록 밖 관리자는 사용자와 같은 「권한 있는 PV」 흐름이다. 연산 이름은 선택지와 같은 operations 에서 짓는다. */}
+            {canRoot ? `경로 하나에 ${operations.join("·")} 을 실행합니다 — 여러 경로의 ${operations.join("·")} 은 배치 작업으로 묶어 요청하세요.`
               : `권한 있는 PV 에서 ${operations.join("·")} 을 실행합니다 — namespace (StorageClass) → PV 이름 → PV 안 경로 순서로 고르세요.`}
           </p>
         )}

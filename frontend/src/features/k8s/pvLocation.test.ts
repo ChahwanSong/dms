@@ -1,6 +1,7 @@
 import { beforeEach, expect, test } from "vitest";
 import {
-  SIDE_LABELS, bindingNameFor, buildGroups, effectiveGroup, emptyLoc, freshnessWarns, groupKey, isAccountId, normalizeSub,
+  SIDE_LABELS, accountIdProblem, bindingNameFor, buildGroups, effectiveGroup, emptyLoc, freshnessWarns, groupKey, isAccountId,
+  normalizeSub,
   parsePvParam,
   pvAbsPath,
   pvDestParent, pvOptionText, pvSubProblem, pvSummaryText, readLastGroup, unselectableText, writeLastGroup,
@@ -37,6 +38,9 @@ test("normalizeSub·pvAbsPath·pvDestParent: 서버 normpath 처럼 접고, abs_
   expect(pvAbsPath(null, "x")).toBeNull();
   expect(pvDestParent({ abs_root: "/k8s_pv/nfs/team-a/datasets" }, "")).toBe("/k8s_pv/nfs/team-a");
   expect(pvDestParent({ abs_root: "/k8s_pv/nfs/team-a/datasets" }, "in/run")).toBe("/k8s_pv/nfs/team-a/datasets/in");
+  // 서버가 거부할 하위경로면 「상위 디렉토리」를 지어내지 않는다(2026-11-11 -- 예전엔 「<abs_root>/..」·「<abs_root>/abs」)
+  expect(pvDestParent({ abs_root: "/k8s_pv/nfs/team-a/datasets" }, "../x")).toBeNull();
+  expect(pvDestParent({ abs_root: "/k8s_pv/nfs/team-a/datasets" }, "/abs/x")).toBeNull();
 });
 
 test("buildGroups: 「namespace (StorageClass)」 묶음, 권한 namespace 의 PV 없음은 따로, 클러스터가 여럿이면 꼬리", () => {
@@ -142,4 +146,15 @@ test("isAccountId: 계정 아이디 형식 + 잡 이미지 시스템 계정 이�
   expect(isAccountId("daemon")).toBe(false);
   expect(isAccountId("nobody")).toBe(false);
   expect(isAccountId("www-data")).toBe(false);
+});
+
+test("accountIdProblem: 거부 이유를 예약어·숫자만·형식으로 가른다(서버 validate_owner_username 처럼 예약어 먼저, 2026-11-11)", () => {
+  expect(accountIdProblem("alice")).toBeNull();
+  expect(accountIdProblem("1user")).toBeNull();
+  expect(accountIdProblem("root")).toBeNull();
+  expect(accountIdProblem("nobody")).toBe("reserved");
+  expect(accountIdProblem("sync")).toBe("reserved");
+  expect(accountIdProblem("1234")).toBe("numeric_only");
+  expect(accountIdProblem("Bad User")).toBe("format");
+  expect(accountIdProblem(".alice")).toBe("format");
 });

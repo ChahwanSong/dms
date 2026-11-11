@@ -200,14 +200,17 @@ export function plusSeconds(iso: string | null | undefined, seconds: number): st
   return Number.isNaN(ms) ? null : new Date(ms + seconds * 1000).toISOString();
 }
 
-/** 소요 ms → 「1.2초」·「2분 3초」. null 은 「—」. */
+/** 소요 ms → 「1.2초」·「2분 3초」. null 은 「—」. 표시 단위로 **먼저** 반올림한 뒤 단위를 고른다(2026-11-11): 단위를 고른 뒤
+ *  반올림하면 59960 이 「60.0초」, 119600 이 「1분 60초」가 됐다(기한 120초 근처에서 끝난 run). */
 export function durationText(ms: number | null | undefined): string {
   if (typeof ms !== "number" || !Number.isFinite(ms) || ms < 0) return "—";
-  if (ms < 1000) return `${Math.round(ms)}ms`;
-  const s = ms / 1000;
-  if (s < 60) return `${s.toFixed(1)}초`;
-  const m = Math.floor(s / 60);
-  return `${m}분 ${Math.round(s - m * 60)}초`;
+  const whole = Math.round(ms);
+  if (whole < 1000) return `${whole}ms`;
+  const tenths = Math.round(ms / 100);                 // 0.1초 단위
+  if (tenths < 600) return `${(tenths / 10).toFixed(1)}초`;
+  const total = Math.round(ms / 1000);                 // 1초 단위
+  const m = Math.floor(total / 60);
+  return `${m}분 ${total - m * 60}초`;
 }
 
 // 경로 템플릿 자리표시자(설계 D9 — 서버 pv_paths 가 해석한다; 여기는 안내 문구일 뿐이다).

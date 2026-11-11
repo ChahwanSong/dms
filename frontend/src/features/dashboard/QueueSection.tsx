@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { useQueueMetrics } from "./useMetrics";
+import { loadErrorText, useQueueMetrics } from "./useMetrics";
 import { Card } from "../../components/ui/Card";
 import { StatusPill } from "../../components/ui/StatusPill";
 import { Table } from "../../components/ui/Table";
@@ -195,8 +195,13 @@ export function QueueSection() {
       {/* 첫 응답 전에도 data 는 undefined 라 아래 「알 수 없음」과 모양이 같다.
           구분하지 않으면 매 첫 페인트가 "권한(RBAC)을 확인하세요"로 깜빡이며
           없는 원인을 가리킨다 -- 잡 통계 카드와 같은 로딩 문구를 먼저 낸다. */}
+      {/* 첫 응답이 실패(5xx·네트워크 -- retry:false 라 한 번이면 착지)해도 data 가 비어 같은 모양이었다: 흐름의 모든 역이
+          「알 수 없음」이고 표 자리에 「권한(RBAC) 또는 Volcano 설치를 확인하세요」가 떴다(실제 원인은 API 오류, 2026-11-11).
+          API 오류를 먼저 가른다 -- 이미 받은 data 가 있으면 react-query 가 유지하므로 첫 조회 실패에서만 이 줄이 뜬다. */}
       {q.isLoading ? (
         <p className="text-muted text-sm">불러오는 중…</p>
+      ) : q.isError && !q.data ? (
+        <p className="text-bad text-sm break-keep">{loadErrorText("큐 현황을", q.error)}</p>
       ) : (
         <>
           <QueueFlowHero pipeline={pipeline} flow={flow} control={control} />
@@ -207,8 +212,8 @@ export function QueueSection() {
               {`Volcano PodGroup — Pending ${counts.Pending} · Inqueue ${counts.Inqueue} · Running ${counts.Running}`}
             </p>
           )}
-          {/* KPI 타일의 「대기」는 24h 창 DB 집계, 이 카드는 무윈도 라이브 -- 두 숫자는 어긋날 수 있고 그래야
-              정상이다. 라벨이 그 사실을 드러낸다(설계 §3 주의). */}
+          {/* KPI 타일의 「대기」는 잡 Pending 의 무윈도 DB 집계(2026-11-11 -- 예전엔 24h 창), 이 카드는 단계별 라이브 --
+              세는 단위(요청·잡·배치)가 달라 두 숫자는 어긋날 수 있다. 라벨이 그 사실을 드러낸다(설계 §3 주의). */}
           <div className="mt-4 mb-2 flex flex-wrap items-center gap-2">
             <h3 className="font-medium text-sm mr-1">지금 대기 중</h3>
             {waiting !== null && (

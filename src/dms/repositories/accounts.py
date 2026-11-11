@@ -111,20 +111,27 @@ class AccountsRepository:
 
     def authenticate(self, username, password) -> "dict | None":
         """활성 계정이고 비밀번호가 맞으면 {"role", "session_epoch"}, 아니면 None(2026-11-03 -- 로그인이 세션 쿠키에 세대를
-        얼린다). scrypt 비교는 DB 조회 **뒤에**, 락 밖에서 한다(query_one 이 돌아오면 RLock 은 이미 풀렸다)."""
+        얼린다). scrypt 비교는 DB 조회 **뒤에**, 락 밖에서 한다(query_one 이 돌아오면 RLock 은 이미 풀렸다).
+
+        비밀번호는 맞는데 비활성 계정이면 {"disabled": True}(2026-11-11): 예전엔 None 이라 로그인이 401 invalid_credentials 로
+        답했고, 사용자는 비밀번호를 잊은 줄 알고 셀프 재설정까지 한 뒤에도 같은 401 을 받았다. 맞는 비밀번호를 아는 사람에게만
+        구분해 주므로 열거 통로가 아니다. role·session_epoch 를 싣지 않는다 -- None 만 보는 호출자가 이 값을 성공으로 읽으면
+        KeyError 로 끝나고 세션은 생기지 않는다(fail-closed)."""
         row = self._db.query_one(
             "SELECT password_hash, role, disabled, session_epoch FROM accounts WHERE username = :u",
             {"u": username})
-        if not row or row["disabled"]:
+        if not row:
             return None
         if not _verify_password(password, row["password_hash"]):
             return None
+        if row["disabled"]:
+            return {"disabled": True}
         return {"role": row["role"], "session_epoch": row["session_epoch"]}
 
     def verify(self, username, password) -> str | None:
-        """authenticate 의 역할만 돌려주는 래퍼(기존 호출·테스트 호환)."""
+        """authenticate 의 역할만 돌려주는 래퍼(기존 호출·테스트 호환). 비활성 계정은 None(통과 못 함)."""
         auth = self.authenticate(username, password)
-        return None if auth is None else auth["role"]
+        return None if auth is None or auth.get("disabled") is True else auth["role"]
 
     def session_state(self, username) -> "dict | None":
         """세션 검사용(api.auth.current_identity, 요청마다): {"role", "disabled", "session_epoch"} | None(계정 없음).

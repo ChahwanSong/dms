@@ -27,11 +27,27 @@ type StorageWithKind = Storage & { kind?: string | null };
 
 type Filter = "all" | "todo" | "mapped";
 
-/** 손볼 것: 매핑이 없거나, 매핑은 있는데 예시 경로가 풀리지 않는(problem) StorageClass. PVC 가 없어 예시가 없는 것은 손볼 것이 아니다. */
+/** 손볼 것: 매핑이 없거나, 매핑은 있는데 예시 경로가 풀리지 않는(problem) StorageClass. PVC 가 없어 예시가 없는 것은 손볼 것이 아니다.
+ *  cluster null = 매핑만 남고 어느 클러스터에도 보이지 않는 이름(서버가 해제할 수 있게 싣는 행 — SC·클러스터를 지운 뒤)도 손볼
+ *  것이다(2026-11-11 — 빈 클러스터 칸으로 「정상」에 섞여 있었다). */
 export function needsAttention(r: StorageClassRow): boolean {
-  return r.storage_name === null || (r.sample !== null && (r.sample.reason ?? r.sample.problem) != null)
+  return r.cluster === null || r.storage_name === null
+    || (r.sample !== null && (r.sample.reason ?? r.sample.problem) != null)
     || (r.storage_name !== null && r.effective_template === null);
 }
+
+/** 어느 클러스터에도 보이지 않는 매핑 행의 클러스터 칸·창 문구. */
+const NO_CLUSTER_TEXT = "어느 클러스터에도 보이지 않음 — 매핑 해제 가능";
+
+// 예시 칸의 사유(관리자 시점, 2026-11-11): REASON_MESSAGES 의 PV 사유 문장은 제출 화면(일반 사용자)용이라 「관리자에게 k8s 연동 →
+// StorageClass … 요청하세요」로 끝난다 — 그 일을 하는 관리자가 바로 이 화면에 있다. 조치는 같은 행의 매핑·경로 템플릿이다(예시는
+// 매핑 창 안에도 그려지므로 버튼 이름은 적지 않는다). 매핑된 행의 pv_storageclass_unmapped 는 「매핑된 스토리지가 지워졌거나 PV 를
+// 담을 수 없는 종류」다(repositories.k8s.resolve_volume). 여기 없는 사유는 reasonText 그대로.
+const SAMPLE_REASON: Record<string, string> = {
+  pv_storageclass_unmapped: "매핑된 스토리지가 없거나 PV 를 담을 수 없는 종류입니다 — 종류가 PV·둘 다 인 스토리지로 다시 매핑하세요",
+  pv_path_unresolved: "이 PV 의 실제 경로를 계산할 수 없습니다(경로 템플릿·PV 정보 부족) — 경로 템플릿을 확인하세요",
+};
+const sampleReasonText = (code: string): string => SAMPLE_REASON[code] ?? reasonText(code);
 
 function SourceTag({ r }: { r: StorageClassRow }) {
   if (r.template_source === "storageclass") return <Tag tone="info">SC 지정</Tag>;
@@ -46,7 +62,7 @@ function SampleCell({ r }: { r: StorageClassRow }) {
   // reason = 사유 코드(사람 말로), problem = 영문 진단(보조 — 템플릿·PV 값 어디가 비었는지). 옛 응답은 reason 이 없다.
   const reason = r.sample.reason ?? null;
   if (reason !== null || r.sample.problem !== null) {
-    return <div className="min-w-0"><span className="text-bad">{reasonText(reason ?? "pv_path_unresolved")}</span>
+    return <div className="min-w-0"><span className="text-bad">{sampleReasonText(reason ?? "pv_path_unresolved")}</span>
       {r.sample.problem !== null && <Mono className="block text-xs text-ink/70">{r.sample.problem}</Mono>}
       <span className="block text-xs text-ink/70">{`예: ${who}`}</span></div>;
   }
@@ -58,7 +74,12 @@ function SampleCell({ r }: { r: StorageClassRow }) {
   );
 }
 
-function MapDialog({ r, storages, trigger }: { r: StorageClassRow; storages: StorageWithKind[]; trigger: React.ReactNode }) {
+/** storages null = 스토리지 목록을 아직 받지 못함(불러오는 중·실패 — storagesError 가 그 사유). 그동안은 고를 수 있는 스토리지가
+ *  「없다」거나 지금 매핑이 「PV 를 담을 수 없는 종류」라고 단정하지 않는다(2026-11-11 — 빈 배열로 판정해 표의 종류 배지와 말이
+ *  엇갈렸다). */
+function MapDialog({ r, storages, storagesError, trigger }: {
+  r: StorageClassRow; storages: StorageWithKind[] | null; storagesError: string | null; trigger: React.ReactNode;
+}) {
   const [open, setOpen] = useState(false);
   const [storage, setStorage] = useState(r.storage_name ?? "");
   const [tpl, setTpl] = useState(r.path_template ?? "");
@@ -69,10 +90,16 @@ function MapDialog({ r, storages, trigger }: { r: StorageClassRow; storages: Sto
     setStorage(r.storage_name ?? ""); setTpl(r.path_template ?? "");
   }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const capable = storages.filter((s) => storageKindOf(s) !== "filesystem");
-  const fsOnly = storages.filter((s) => storageKindOf(s) === "filesystem");
-  // 지금 매핑된 스토리지가 종류가 바뀌어(또는 지워져) 목록에 없으면 그 값을 잃지 않게 한 옵션으로 남긴다.
+  const known = storages !== null;
+  const capable = (storages ?? []).filter((s) => storageKindOf(s) !== "filesystem");
+  const fsOnly = (storages ?? []).filter((s) => storageKindOf(s) === "filesystem");
+  // 지금 매핑된 스토리지가 종류가 바뀌어(또는 지워져) 목록에 없으면 그 값을 잃지 않게 한 옵션으로 남긴다. 목록을 아직 못 받았으면
+  // 고를 수 있는 옵션이 없으니 지금 값을 그대로 한 옵션으로(종류는 단정하지 않는다). 라벨의 이유는 서버 storage_kind 로 가른다
+  // (null = 그 이름의 스토리지가 없음 — 지워짐, filesystem = 종류가 바뀜).
   const orphan = r.storage_name !== null && !capable.some((s) => s.storage_name === r.storage_name);
+  const orphanWhy = !known ? "지금 매핑"
+    : r.storage_kind === null ? "지금 매핑 — 스토리지 목록에 없음(지워졌을 수 있음)"
+    : r.storage_kind === "filesystem" ? "지금 매핑 — PV 를 담을 수 없는 종류" : "지금 매핑";
   const dirty = storage !== (r.storage_name ?? "") || tpl.trim() !== (r.path_template ?? "");
   const unmapping = storage === "" && r.storage_name !== null;
   const params = Object.entries(r.parameters ?? {});
@@ -89,7 +116,9 @@ function MapDialog({ r, storages, trigger }: { r: StorageClassRow; storages: Sto
             title={`StorageClass ${r.name} 매핑`} trigger={trigger}>
       <form className="space-y-4 text-sm" onSubmit={(e) => { e.preventDefault(); submit(); }}>
         <DefList>
-          <DefRow label="클러스터">{[r.cluster, ...r.duplicate_in].join(", ")}</DefRow>
+          <DefRow label="클러스터">
+            {r.cluster === null ? <span className="text-attn">{NO_CLUSTER_TEXT}</span> : [r.cluster, ...r.duplicate_in].join(", ")}
+          </DefRow>
           <DefRow label="provisioner"><Mono>{r.provisioner ?? "모름"}</Mono></DefRow>
           <DefRow label="parameters">
             {params.length === 0 ? <span className="text-ink/70">없음</span> : (
@@ -116,7 +145,7 @@ function MapDialog({ r, storages, trigger }: { r: StorageClassRow; storages: Sto
                 {`${s.storage_name} · ${KIND_LABEL[storageKindOf(s)]} · ${s.backend_type} · ${s.managed_root}`}
               </option>
             ))}
-            {orphan && <option value={r.storage_name!}>{`${r.storage_name} (지금 매핑 — PV 를 담을 수 없는 종류)`}</option>}
+            {orphan && <option value={r.storage_name!}>{`${r.storage_name} (${orphanWhy})`}</option>}
             {fsOnly.length > 0 && (
               <optgroup label="파일시스템 전용 — 고를 수 없음">
                 {fsOnly.map((s) => <option key={s.storage_name} value={s.storage_name} disabled>{s.storage_name}</option>)}
@@ -128,7 +157,11 @@ function MapDialog({ r, storages, trigger }: { r: StorageClassRow; storages: Sto
             {" "}화면에서 종류를 바꾸세요. 경로는 그 스토리지의 관리 디렉토리 아래입니다.
           </span>
         </label>
-        {capable.length === 0 && (
+        {!known ? (
+          storagesError !== null
+            ? <p className="text-bad">{`스토리지 목록을 불러오지 못해 고를 수 있는 스토리지를 보일 수 없습니다 — ${storagesError}`}</p>
+            : <p className="text-ink/70">스토리지 목록을 불러오는 중…</p>
+        ) : capable.length === 0 && (
           <p className="text-attn">PV 를 담을 수 있는(종류 PV·둘 다) 스토리지가 아직 없습니다.</p>
         )}
 
@@ -180,7 +213,10 @@ export function StorageClassesPage() {
   const storagesQ = useStorages();
   const [filter, setFilter] = useState<Filter>("all");
   const rows = useMemo(() => (Array.isArray(q.data) ? q.data : []), [q.data]);
-  const storages = (storagesQ.data ?? []) as StorageWithKind[];
+  // 받기 전(불러오는 중·실패)은 null — 매핑 창이 「없다」고 단정하지 않게 그대로 넘긴다. 표의 종류 배지는 서버 storage_kind 가 먼저다.
+  const storagesList = Array.isArray(storagesQ.data) ? (storagesQ.data as StorageWithKind[]) : null;
+  const storagesError = storagesQ.isError ? errText(storagesQ.error) : null;
+  const storages = storagesList ?? [];
   const kindByName = new Map<string, StorageKind>(storages.map((s) => [s.storage_name, storageKindOf(s)]));
   const todo = rows.filter(needsAttention).length;
   const shown = rows.filter((r) => filter === "all" ? true : filter === "todo" ? needsAttention(r) : !needsAttention(r));
@@ -217,7 +253,9 @@ export function StorageClassesPage() {
                       </div>
                     </td>
                     <td className="py-2 pr-3">
-                      <span className="whitespace-nowrap">{r.cluster}</span>
+                      {r.cluster === null
+                        ? <span className="block min-w-[8rem] text-attn">{NO_CLUSTER_TEXT}</span>
+                        : <span className="whitespace-nowrap">{r.cluster}</span>}
                       {r.duplicate_in.length > 0 && (
                         <span className="block text-xs text-attn">{`다른 클러스터에도: ${r.duplicate_in.join(", ")}`}</span>
                       )}
@@ -239,7 +277,7 @@ export function StorageClassesPage() {
                     </td>
                     <td className="max-w-[22rem] py-2 pr-3"><div className="min-w-[14rem]"><SampleCell r={r} /></div></td>
                     <td className="py-2">
-                      <MapDialog r={r} storages={storages}
+                      <MapDialog r={r} storages={storagesList} storagesError={storagesError}
                                  trigger={<Button variant="outline" className="whitespace-nowrap px-2.5 py-1 text-xs">
                                    {r.storage_name === null ? "매핑" : "편집"}</Button>} />
                     </td>

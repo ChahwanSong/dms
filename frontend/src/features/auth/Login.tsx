@@ -1,5 +1,6 @@
 import { useEffect, useId, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
+import { loginReturnPath } from "../../app/navigation";
 import { useLogin, useRequestCode, useSignup, usePasswordReset } from "./useAuth";
 import { useMailInfo } from "../mail/useMailSettings";
 import { portalTitle, usePortalDocumentTitle } from "../portal/usePortal";
@@ -132,8 +133,16 @@ export function Login() {
   useEffect(() => {
     try { sessionStorage.removeItem(AUTH_NOTICE_KEY); } catch { /* noop */ }
   }, []);
+  // 로그인 오류(401·429)는 탭을 바꾸거나 가입·재설정을 마치고 로그인 탭으로 돌아올 때 비운다(login.reset, 2026-11-11) -- 이 화면은
+  // 탭을 바꿔도 마운트된 채라 지난 빨간 오류가 초록 성공 안내와 함께 남았다(셀프 재설정 성공은 서버가 실패 카운터를 비우므로 남은
+  // 429 「잠시 뒤」는 사실과도 달랐다). 끝난 결과(오류·성공)만 비운다 -- 진행 중(대기형 슬롯으로 최대 ~20초)에 reset 하면
+  // observer 가 mutation 에서 떨어져 200 이 와도 mutate 단위 onSuccess(원래 화면으로 이동)가 안 불려, 로그인된 채 이 화면에
+  // 남았다(2026-11-11 리뷰). 진행 중이면 그대로 두어 로그인 탭으로 돌아와도 「로그인 중…」이 이어진다.
   const login = useLogin();
+  const clearLoginResult = () => { if (!login.isPending) login.reset(); };
   const nav = useNavigate();
+  // RequireRole 이 401 로 보낼 때 실은 원래 주소(state.from) -- 로그인 뒤 그 화면으로 돌아간다(2026-11-11, 없으면 「/」).
+  const location = useLocation();
   const subtitle = usePortalDocumentTitle();
   const [slow, setSlow] = useState(false);
   useEffect(() => {
@@ -167,7 +176,7 @@ export function Login() {
                         mode === t.mode
                           ? "border-accent text-accent font-medium"
                           : "border-transparent text-muted hover:text-ink"}`}
-                      onClick={() => { setMode(t.mode); setNotice(null); setAuthNotice(null); }}>
+                      onClick={() => { setMode(t.mode); setNotice(null); setAuthNotice(null); clearLoginResult(); }}>
                 {t.label}
               </button>
             ))}
@@ -177,7 +186,8 @@ export function Login() {
           {mode === "login" && (
             <form onSubmit={(e) => {
                     e.preventDefault();
-                    login.mutate({ username, password }, { onSuccess: () => nav("/") });
+                    login.mutate({ username, password },
+                                 { onSuccess: () => nav(loginReturnPath(location.state), { replace: true }) });
                   }}
                   className="space-y-3">
               <label className="block text-sm">사용자명
@@ -205,12 +215,12 @@ export function Login() {
           {mode === "signup" && (
             <VerifiedForm purpose="signup" submitLabel="계정 생성"
                           doneText="계정이 생성됐습니다 — 로그인 탭에서 로그인하세요"
-                          onDone={() => { setMode("login"); setNotice("계정이 생성됐습니다 — 로그인하세요"); }} />
+                          onDone={() => { clearLoginResult(); setMode("login"); setNotice("계정이 생성됐습니다 — 로그인하세요"); }} />
           )}
           {mode === "reset" && (
             <VerifiedForm purpose="password_reset" submitLabel="비밀번호 변경"
                           doneText="비밀번호가 변경됐습니다 — 로그인 탭에서 로그인하세요"
-                          onDone={() => { setMode("login"); setNotice("비밀번호가 변경됐습니다 — 새 비밀번호로 로그인하세요"); }} />
+                          onDone={() => { clearLoginResult(); setMode("login"); setNotice("비밀번호가 변경됐습니다 — 새 비밀번호로 로그인하세요"); }} />
           )}
         </Card>
       </div>

@@ -6,6 +6,7 @@ import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
 import { afterAll, afterEach, beforeAll, expect, test } from "vitest";
 import { UsageAnalysis } from "./UsageAnalysis";
+import { UNNAMED_PURGE_HINT } from "./UnregisteredStorages";
 import type { UnregisteredStorage, UsageStorageSummary } from "../../lib/types";
 
 // 사용량 분석 미등록 스토리지 정리(2026-10-12 사용자 요청: 「미등록 스토리지 항목들은 스토리지 항목별로 전체 clean up」).
@@ -210,6 +211,51 @@ test("섞인 배치: 띠·확인 창이 따로 말하고 지울 수에 넣지 �
   const dlg = await screen.findByRole("dialog");
   expect(dlg).toHaveTextContent("섞인 배치 1개(작업 2개)는 지우지 않습니다");
   expect(within(dlg).getByRole("button", { name: "6개 영구 삭제" })).toBeInTheDocument();
+});
+
+test("빈 이름 미등록 스토리지: 「기록 정리」는 잠기고 이유를 말한다 -- 정리 API 가 빈 이름을 받지 않는다(누르면 늘 422 였다)", async () => {
+  // 2026-11-11 B22: 서버 PurgeScanHistoryBody.storage_name 은 min_length=1(서버 테스트가 고정) -- 확인하면 「입력값이 올바르지
+  // 않습니다」로 실패했다. 버튼을 잠그고 title 로 이유와 다른 길(작업 단위 삭제)을 말한다.
+  let posted = false;
+  server.use(http.post(PURGE_URL, () => { posted = true; return HttpResponse.json({ detail: [] }, { status: 422 }); }));
+  renderPage(() => [{ ...GHOST, storage_name: "" }]);
+  await waitFor(() => expect(optionNames()).toContain("(이름 없음) · 미등록 · 대상 1개"));
+  await userEvent.selectOptions(storageSelect(), "s:");
+  const note = await waitFor(() => {
+    const el = screen.getByRole("note", { name: "미등록 스토리지" });
+    expect(el.querySelector("p")?.textContent).toBe("(이름 없음)");
+    return el;
+  });
+  const btn = within(note).getByRole("button", { name: "(이름 없음) 기록 정리" });
+  expect(btn).toBeDisabled();
+  expect(btn).toHaveAttribute("title", UNNAMED_PURGE_HINT);
+  expect(note).toHaveTextContent("정리할 작업 1개");                                   // 규모는 그대로 말한다
+  expect(posted).toBe(false);
+});
+
+test("수는 천 단위 구분 -- 띠·확인 창·확인 단추·결과 줄이 select 옵션(「대상 12,345개」)과 같은 표기", async () => {
+  // 2026-11-11 B79: select 옵션은 「대상 12,345개」인데 바로 아래 띠는 「대상 12345개」였다.
+  const BIG: UnregisteredStorage = { ...GHOST, storage_name: "big", target_count: 12345, succeeded_scan_count: 67890,
+                                     single_count: 1234, request_count: 1234 };
+  let list = [BIG];
+  server.use(http.post(PURGE_URL, () => {
+    list = [];
+    return HttpResponse.json({ ...empty, storage_name: "big",
+      deleted: Array.from({ length: 1234 }, (_, i) => ({ request_id: `r${i}`, job_ids: [] })),
+      remaining: { requests: 0, batches: 0 }, remaining_untried: { requests: 0, batches: 0 } });
+  }));
+  renderPage(() => list);
+  await waitFor(() => expect(optionNames()).toContain("big · 미등록 · 대상 12,345개"));
+  const note = await openTab("big");
+  expect(note).toHaveTextContent("대상 12,345개 · 성공 scan 67,890개 · 정리할 작업 1,234개");
+  await userEvent.click(within(note).getByRole("button", { name: "big 기록 정리" }));
+  const dlg = await screen.findByRole("dialog", { name: "미등록 스토리지 기록 정리" });
+  expect(dlg).toHaveTextContent("big 의 scan 작업 기록 1,234개를 영구 삭제합니다.");
+  expect(dlg).toHaveTextContent("단일 작업 1,234개 — ");
+  expect(dlg).toHaveTextContent("대상 12,345개(성공 scan 67,890개)가 사라집니다");
+  await userEvent.click(within(dlg).getByLabelText("되돌릴 수 없음을 확인했습니다"));
+  await userEvent.click(within(dlg).getByRole("button", { name: "1,234개 영구 삭제" }));
+  expect(await screen.findByRole("status", { name: "정리 결과" })).toHaveTextContent("big: 작업 기록 1,234개 삭제됨");
 });
 
 test("회차를 이어 부르는 기준은 서버의 remaining_untried -- 건너뛴 id 개수와 비교하지 않는다", async () => {

@@ -79,6 +79,12 @@ export function Elapsed({ from, prefix = "", suffix = "째", fallback }: {
   return <>{`${prefix}${d}${suffix}`}</>;
 }
 
+/** iso + sec 초(실행 시작 = 제출 + 스케줄 대기). sec 가 null(모름)이거나 iso 를 못 읽으면 iso 그대로(지어내지 않는다). */
+function shiftIso(iso: string, sec: number | null): string {
+  const ms = Date.parse(iso);
+  return sec === null || Number.isNaN(ms) ? iso : new Date(ms + sec * 1000).toISOString();
+}
+
 function Time({ iso, refIso }: { iso: string; refIso?: string | null }) {
   return <time dateTime={iso} title={kstStamp(iso)}>{kstClock(iso, refIso)}</time>;
 }
@@ -113,15 +119,23 @@ function StepMeta({ step, refIso, hasRef, estimate }: {
   let text: ReactNode = null;
   switch (step.status) {
     case "done":
-      text = joinParts([time(step.start), dur !== null ? `소요 ${dur}` : null, schedPart]);
+      // 실행 단계의 소요는 vcjob 제출(exec_submitted_at)부터라 스케줄 대기를 **포함**한다(stateHelp exec_*). 「소요 11초 ·
+      // 스케줄 대기 5초」로 나란히 두면 실행 11초 + 대기 5초로 읽혀(실제 실행 6초) 포함 관계를 글로 밝힌다(2026-11-11).
+      text = joinParts([time(step.start),
+        dur !== null ? `소요 ${dur}${sched !== null ? `(스케줄 대기 ${sched} 포함)` : ""}` : schedPart]);
       break;
-    case "running":
+    case "running": {
       // 파드가 아직 없으면(Executing 인데 재점검 ref 전) "시작 대기" -- 경과를 세면 파드가 도는 것처럼 읽힌다.
+      // 실행 단계는 스케줄 대기가 관측된 뒤에만 running 이고 step.start 는 **제출** 시각이다 -- 「HH:MM 시작」을 제출
+      // 시각으로 찍으면 Volcano 대기만큼 이르고 경과에도 대기가 섞였다(2026-11-11). 대기를 알면 제출 + 대기(첫 RUNNING
+      // 관측 -- 스테퍼 틱 오차)를 시작으로 센다. 모르면(다른 단계·옛 잡) 예전 그대로.
+      const runStart = step.start !== null ? shiftIso(step.start, step.schedWaitSec) : null;
       text = !hasRef ? "시작 대기"
-        : step.start ? <Elapsed from={step.start} prefix={`${kstClock(step.start, refIso)} 시작 · `}
-                                suffix={`째${schedPart ? ` · ${schedPart}` : ""}`} />
+        : runStart ? <Elapsed from={runStart} prefix={`${kstClock(runStart, refIso)} 시작 · `}
+                              suffix={`째${schedPart ? ` · ${schedPart}` : ""}`} />
         : "진행 중";
       break;
+    }
     case "waiting":
       // 스케줄 대기(실행 vcjob 제출 뒤 RUNNING 관측 전): 제출 시각부터의 대기 경과 -- 「시작 · N째」(실행 중)와 다른 말이다.
       text = !step.queued ? "대기"

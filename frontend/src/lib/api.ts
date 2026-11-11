@@ -145,6 +145,8 @@ export const REASON_MESSAGES: Record<string, string> = {
   no_ready_sync_candidate: "소스와 목적지를 함께 다룰 수 있는 노드가 없습니다",
   storage_exists: "이미 존재하는 스토리지입니다",
   storage_in_use: "사용 중인 스토리지는 삭제할 수 없습니다 (비활성화하세요)",
+  // 수정(PUT) 가드는 삭제와 다른 코드다(2026-11-11) -- 비활성화해도 진행 중 요청이 남아 있는 한 풀리지 않는다.
+  storage_in_use_path_change: "진행 중인 작업이 쓰는 스토리지라 마운트 경로·관리 루트·백엔드를 바꿀 수 없습니다 — 작업이 끝난 뒤 다시 시도하세요(사용 범위·종류·기본 소유는 지금도 바꿀 수 있습니다)",
   storage_not_found: "스토리지를 찾을 수 없습니다",
   // 제출만이 아니다 -- 작업 삭제·배치 생성/확인/취소·빌드·릴리스도 같은 503 을 받는다(reject_when_maintenance 호출처).
   maintenance_mode: "유지보수 중입니다 — 작업 제출·삭제·빌드 같은 변경이 일시 중단되었습니다",
@@ -152,6 +154,7 @@ export const REASON_MESSAGES: Record<string, string> = {
   invalid_policy: "정책 값이 올바르지 않습니다",
   invalid_priority: "우선순위 값이 올바르지 않습니다",
   invalid_denylist_subject_type: "대상 유형이 올바르지 않습니다",
+  denylist_subject_empty: "대상을 입력하세요 — 앞뒤 공백만으로는 등재할 수 없습니다",
   policy_not_found: "정책을 찾을 수 없습니다",
   artifact_not_found: "아티팩트를 찾을 수 없습니다",
   artifact_too_large: "파일이 다운로드 상한을 넘습니다 — 관리자에게 문의하세요",
@@ -162,7 +165,8 @@ export const REASON_MESSAGES: Record<string, string> = {
   log_not_available: "이 단계는 파드 로그를 제공하지 않습니다 — 아티팩트를 확인하세요",
   unsafe_path: "경로가 올바르지 않습니다",
   operation_admin_only: "이 연산은 관리자만 가능합니다",
-  account_disabled: "계정이 비활성화되었습니다",
+  // 로그인(비밀번호가 맞을 때)·셀프 비밀번호 재설정도 이 사유로 답한다(2026-11-11) -- 비밀번호가 아니라 활성화가 필요하다고 안내한다.
+  account_disabled: "계정이 비활성화되었습니다 — 관리자에게 활성화를 요청하세요",
   node_not_found: "노드를 찾을 수 없습니다",
   // 노드 배치 제외(2026-10-02, repositories/node_exclusions.py). nodes_excluded = 계획 거부(쓸 수 있는 노드가 전부
   // 막힘), node_excluded_at_step = 계획 뒤 배정 노드가 막혀 종단, node_excluded = 컨펌 시점에 같은 이유로 종단.
@@ -175,7 +179,9 @@ export const REASON_MESSAGES: Record<string, string> = {
   // 노드당 프로세스보다 작아 종단(제출 직전 재클램프의 상한 0, 또는 Volcano 대기 중 재검사 stepper._raise_if_cpu_short).
   node_cpu_insufficient: "실행할 수 있는 노드에 CPU 가 부족합니다 — 워커 1개(1코어)도 담을 수 있는 노드가 없습니다. 관리자에게 노드 CPU 를 확인하세요",
   node_cpu_insufficient_at_step: "배정된 노드의 CPU 상한이 이 작업의 노드당 프로세스 수보다 작아(워커가 노드에 들어가지 않아) 종료했습니다 — 다시 제출하면 노드 CPU 상한에 맞춰 계획됩니다",
-  invalid_exclusion_reason: "제외 사유는 500자 이하여야 합니다",
+  // 서버는 길이 초과와 제어문자(붙여 넣은 탭 포함)를 같은 코드로 거부한다(routes_nodes.exclude_node) -- 길이만 말하면 10자
+  // 사유가 「500자 이하」로 거부돼 원인을 몰랐다(2026-11-11).
+  invalid_exclusion_reason: "제외 사유는 500자 이하의 한 줄 글자여야 합니다(탭·제어문자 불가)",
   requester_disabled: "요청자 계정이 비활성화되었습니다",
   // 브리프 BACKEND_CODES 목록에는 없지만 src/dms/ grep으로 확인한, 현재도 실제로
   // 발생하는 코드들 -- 삭제하면 AccountsList.test.tsx 가
@@ -283,12 +289,23 @@ export const REASON_MESSAGES: Record<string, string> = {
   http_401: "인증이 필요합니다",
   http_500: "서버 오류가 발생했습니다",
   http_503: "서비스를 일시적으로 사용할 수 없습니다",
+  // 게이트웨이(Envoy)가 백엔드 앞에서 만드는 비 JSON 오류(2026-11-11) -- 등록하지 않으면 화면에 「http_413」 원시 코드가 보였다.
+  // 413 은 policies.yaml 의 requestBuffer.limit(20Mi) 초과다.
+  http_413: "요청 본문이 너무 큽니다(게이트웨이 상한 20 MiB) — 입력을 줄이거나 나눠서 보내세요",
+  http_502: "게이트웨이가 서버 응답을 받지 못했습니다(502) — API 가 재시작 중일 수 있습니다. 잠시 뒤 다시 시도하세요",
+  http_504: "게이트웨이가 서버 응답을 기다리다 시간이 초과됐습니다(504) — 잠시 뒤 다시 시도하세요(제출·변경이었다면 반영됐는지 먼저 확인하세요)",
+  // 프론트 전용 코드다(registry_unreachable 과 같은 관례, 2026-11-11): request() 가 fetch 거부(네트워크 단절)·성공 응답의 비 JSON
+  // 본문을 status 0 ApiError 로 바꿀 때 쓴다 -- 브라우저 영문 원문(「Failed to fetch」)·SyntaxError 문구를 보이지 않는다.
+  network_error: "서버에 연결하지 못했습니다 — 네트워크 상태를 확인하고 잠시 뒤 다시 시도하세요",
+  invalid_response: "서버 응답을 해석하지 못했습니다(배포 중이거나 프록시가 가로챈 응답일 수 있음) — 잠시 뒤 새로고침한 뒤 다시 시도하세요",
   build_node_not_set: "빌드 노드가 지정되지 않았습니다 — 컨트롤 상태에서 먼저 지정하세요",
   build_in_progress: "이미 진행 중인 빌드가 있습니다",
   unknown_image: "빌드할 이미지를 선택해 주세요",
   // 로컬 소스 빌드(슬라이스 33) 검증·프로브 4종. reasonCodes.json 과 같은 커밋.
   build_source_not_set: "빌드 소스 경로가 지정되지 않았습니다 — 컨트롤 상태에서 먼저 지정하세요",
-  invalid_source_path: "소스 경로 형식이 올바르지 않습니다 — '/'로 시작하는 절대 경로여야 합니다",
+  // 실제 거절 조건(routes_builds.validate_source_path) 전부를 말한다(2026-11-11) -- '/' 조건만 말하면 이미 '/' 로 시작하는
+  // '/home/u/x/../dms' 를 넣은 운영자가 무엇을 고칠지 모른다.
+  invalid_source_path: "소스 경로 형식이 올바르지 않습니다 — '/'로 시작하는 300자 이하 절대 경로여야 하고 '..'·제어 문자는 쓸 수 없습니다",
   invalid_build_tag: "태그 형식이 올바르지 않습니다 — 영숫자로 시작하는 64자 이하(영숫자·._-)여야 합니다",
   build_source_unavailable: "빌드 노드의 소스 경로에서 DMS 저장소를 찾을 수 없습니다 — 경로와 노드 마운트를 확인하세요(경로는 로그에 있습니다)",
   build_node_report_stale: "빌드 노드의 에이전트 리포트가 오래되었습니다 — 노드가 내려갔을 수 있습니다",
@@ -341,10 +358,14 @@ export const REASON_MESSAGES: Record<string, string> = {
   // registry_ok=false 로만 알린다(태그 목록은 빈 배열이 되고 존재 검증이 꺼진다).
   // 그래도 문구를 여기에 두는 이유: 화면이 한국어를 하드코딩하지 않는다는 규칙을
   // 릴리스 화면만 예외로 두면 문구가 두 곳으로 갈라진다.
-  registry_unreachable: "레지스트리에 연결할 수 없어 태그 목록이 비어 있습니다 — 레지스트리 주소(DMS_BUILD_REGISTRY)·네트워크를 확인하세요 (리포가 아직 없는 신규 사이트는 이 오류가 아니라 빈 목록으로 보입니다)",
+  // registry_ok=false 는 리포 **하나라도** 태그 조회가 실패하면 선다(routes_releases.release_targets) -- 전체 연결 실패로
+  // 단정하지 않는다(2026-11-11: 한 리포만 타임아웃이어도 「연결할 수 없음」이라 했다). 실패한 리포의 행만 목록이 빈다.
+  registry_unreachable: "레지스트리에서 태그 목록을 읽지 못한 리포가 있습니다 — 그 행은 태그 목록이 비어 있습니다. 레지스트리 주소(DMS_BUILD_REGISTRY)·네트워크를 확인하세요 (리포가 아직 없는 신규 사이트는 이 오류가 아니라 빈 목록으로 보입니다)",
   // 프론트 전용 코드다(registry_unreachable 과 같은 관례) -- 백엔드는 detail 이
-  // 아니라 제출 202 응답의 tag_verified:false 필드로 알린다(슬라이스 28).
-  tag_unverified: "레지스트리가 응답하지 않아 태그 존재를 확인하지 못한 채 접수되었습니다 — 태그가 틀리면 ImagePullBackOff 로 드러납니다",
+  // 아니라 제출 202 응답의 tag_verified:false 필드로 알린다(슬라이스 28). 미검증 사유는 둘이다(routes_releases._unverifiable
+  // -- 레지스트리 무응답, 또는 잘린 태그 목록에 없음) -- 응답이 사유를 싣지 않으므로 둘 다 말한다(2026-11-11: 잘림인데도
+  // 「레지스트리가 응답하지 않아」라고 했다).
+  tag_unverified: "레지스트리가 응답하지 않았거나 태그 목록이 잘려(태그가 많은 리포) 태그 존재를 확인하지 못한 채 접수되었습니다 — 태그가 틀리면 ImagePullBackOff 로 드러납니다",
   // 아티팩트 base 설정(슬라이스 18). 정규화 3종 + 즉석 검증 3종 + 잠금 1종 --
   // reasonCodes.json 과 함께 갱신해야 양방향 커버리지 테스트가 초록이다.
   artifact_base_not_absolute: "아티팩트 경로는 절대 경로여야 합니다",
@@ -554,13 +575,23 @@ export function apiErrorText(e: ApiError): string {
   return e.message;
 }
 
+// status 0 = 쓸 수 있는 HTTP 응답이 없다(프런트 합성, 2026-11-11). fetch 거부(VPN 단절·api 재시작·TLS 리셋)는 브라우저마다 영문
+// TypeError(「Failed to fetch」·「Load failed」 …)라, 그대로 올리면 `(x.error as ApiError).message` 로 그리는 화면마다 영문 원문이
+// 보였다 -- 여기서 한국어 사유(network_error)로 바꾼다. 성공 응답 본문이 JSON 이 아닌 경우(배포 틈의 SPA index.html·프록시
+// 로그인 페이지)도 SyntaxError 원문 대신 invalid_response 다. 직렬화(JSON.stringify) 오류는 네트워크가 아니라 try 밖에서 난다.
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const res = await fetch(path, {
-    method,
-    credentials: "include",
-    headers: body !== undefined ? { "Content-Type": "application/json" } : undefined,
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
+  const payload = body !== undefined ? JSON.stringify(body) : undefined;
+  let res: Response;
+  try {
+    res = await fetch(path, {
+      method,
+      credentials: "include",
+      headers: body !== undefined ? { "Content-Type": "application/json" } : undefined,
+      body: payload,
+    });
+  } catch {
+    throw new ApiError(0, "network_error", reasonText("network_error"));
+  }
   if (!res.ok) {
     // 파싱은 한 벌이어야 한다 -- 과거 401 전용 분기가 같은 파싱을 복제해
     // 폴백·문구가 구조적으로 갈라질 수 있었다. 비 JSON 본문(인그레스/프록시가
@@ -583,7 +614,13 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     throw new ApiError(res.status, code, reasonText(code), parseRetryAfter(res.headers.get("Retry-After")));
   }
   if (res.status === 204) return undefined as T;
-  return res.json() as Promise<T>;
+  try {
+    return (await res.json()) as T;
+  } catch (e) {
+    // 본문을 받다 연결이 끊기면 TypeError(네트워크), 받았는데 JSON 이 아니면 SyntaxError(응답 모양).
+    if (e instanceof SyntaxError) throw new ApiError(0, "invalid_response", reasonText("invalid_response"));
+    throw new ApiError(0, "network_error", reasonText("network_error"));
+  }
 }
 
 export const apiGet = <T>(path: string) => request<T>("GET", path);

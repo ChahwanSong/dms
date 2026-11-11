@@ -1,6 +1,6 @@
 """스토리지 백엔드 식별자 셋 계약(2026-09-15).
 
-backend_type 은 검증·저장·표시·변경 가드(routes_storages 의 storage_in_use)에만
+backend_type 은 검증·저장·표시·변경 가드(routes_storages 의 storage_in_use_path_change)에만
 쓰이는 라벨이다 -- 마운트 프로브(agent/probes.probe_mounts)·잡 볼륨(execution_volcano
 ._volumes)·경로 해석(stepper._abs)은 전부 mount_path/managed_root 만 본다. 그래서
 값을 더하는 일은 세 곳을 함께 움직여야 하고 이 테스트가 그 일치를 고정한다:

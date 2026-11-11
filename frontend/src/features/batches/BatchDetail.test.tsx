@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
@@ -459,35 +459,41 @@ async function openDialog(name: string) {
 
 test("항목 행은 접힘 기본: 순번·대상 요약·상태만 — 상세 미렌더", async () => {
   renderDetailed();
-  // 대상 요약은 대시보드 summarize 관례 미러(scan: storage:target)
-  expect(await screen.findByText("scan · s1:team")).toBeInTheDocument();
+  // 대상 요약은 대시보드 summarize 관례 미러(scan: storage:target). 연산 접두(「scan · 」)는 행마다 붙이지 않는다 -- 배치
+  // 공통이라 헤더가 말하고, 좁은 폭에서 경로 앞 폭을 먹었다(2026-11-11 B75).
+  expect(await screen.findByText("s1:team")).toBeInTheDocument();
+  expect(screen.queryByText("scan · s1:team")).toBeNull();
   expect(screen.getByText("Succeeded")).toBeInTheDocument();
-  expect(screen.queryByText("파일 수")).toBeNull();
+  expect(screen.queryByText("스캔한 항목")).toBeNull();
   expect(screen.queryByText("42")).toBeNull();
 });
 
-test("펼침: aria-expanded 토글 + 상세(사유·파일 수·완료 시각·요청 링크) → 재클릭 접힘", async () => {
+test("펼침: aria-expanded 토글 + 상세(사유·스캔한 항목·완료 시각·요청 링크) → 재클릭 접힘", async () => {
   renderDetailed();
   const toggle = await screen.findByRole("button", { name: "항목 0 상세" });
   expect(toggle).toHaveAttribute("aria-expanded", "false");
   await userEvent.click(toggle);
   expect(toggle).toHaveAttribute("aria-expanded", "true");
-  expect(screen.getByText("파일 수")).toBeInTheDocument();
+  // scan 의 files_count 는 디렉터리·링크까지 합한 전체 항목 수(dscan total_entries) -- 「파일 수」라 부르지 않는다(2026-11-11 B09).
+  // 이름은 요청 상세 KPI(requestOutcome.deriveKpi)와 같은 「스캔한 항목」 -- 「항목 수」로 두면 같은 수를 두 화면이 다르게 불렀다.
+  expect(screen.getByText("스캔한 항목")).toBeInTheDocument();
+  expect(screen.queryByText("항목 수")).toBeNull();
+  expect(screen.queryByText("파일 수")).toBeNull();
   expect(screen.getByText("42")).toBeInTheDocument();
   expect(screen.getByText("2026-08-14 10:00:00 KST")).toBeInTheDocument();  // 완료시각(KST=+9h)
   expect(screen.getByRole("link", { name: "요청 상세" }))
     .toHaveAttribute("href", "/jobs/r1");
   await userEvent.click(toggle);
   expect(toggle).toHaveAttribute("aria-expanded", "false");
-  expect(screen.queryByText("파일 수")).toBeNull();
+  expect(screen.queryByText("스캔한 항목")).toBeNull();
 });
 
-test("실패 항목 펼침: 사유는 reasonText 한글 문구, 파일 수 null 은 — (null≠0)", async () => {
+test("실패 항목 펼침: 사유는 reasonText 한글 문구, 스캔한 항목 null 은 — (null≠0)", async () => {
   renderDetailed();
   await userEvent.click(await screen.findByRole("button", { name: "항목 1 상세" }));
   expect(screen.getByText("실행에 실패했습니다")).toBeInTheDocument();
-  expect(screen.getByText("파일 수")).toBeInTheDocument();
-  const dd = screen.getByText("파일 수").nextElementSibling as HTMLElement;
+  expect(screen.getByText("스캔한 항목")).toBeInTheDocument();
+  const dd = screen.getByText("스캔한 항목").nextElementSibling as HTMLElement;
   expect(dd.textContent).toBe("—");
 });
 test("Completed 는 전체 재실행 버튼 노출 + :rescan 발사", async () => {
@@ -584,7 +590,7 @@ test("펼침 전에는 조회가 없고(lazy) 배치 레벨 온도 섹션도 없
   const c = { calls: 0 };
   server.use(statsHandler("r1", c));
   renderDetailed();
-  await screen.findByText("scan · s1:team");
+  await screen.findByText("s1:team");
   expect(c.calls).toBe(0);
   expect(screen.queryByText("데이터 온도(hot/cold)")).toBeNull();
 });
@@ -789,7 +795,7 @@ test("펼침 전에는 잡 조회가 없다(lazy) — 펼치면 도구 행이 �
       worker_pool: { node_count: 3, process_count: 12 } })]);
   }));
   renderDetailed();
-  await screen.findByText("scan · s1:team");
+  await screen.findByText("s1:team");
   expect(calls).toBe(0);
   await userEvent.click(await screen.findByRole("button", { name: "항목 0 상세" }));
   expect(await screen.findByText("도구")).toBeInTheDocument();
@@ -810,7 +816,7 @@ test("잡이 없으면(계획 전·미 materialize) 도구 행 자체를 생략�
   server.use(http.get("/api/user/requests/r1/jobs", () => HttpResponse.json([])));
   renderDetailed();
   await userEvent.click(await screen.findByRole("button", { name: "항목 0 상세" }));
-  expect(await screen.findByText("파일 수")).toBeInTheDocument();   // 패널은 떴다
+  expect(await screen.findByText("스캔한 항목")).toBeInTheDocument();   // 패널은 떴다
   expect(screen.queryByText("도구")).toBeNull();
 });
 
@@ -864,6 +870,115 @@ test("편집 취소는 PATCH 없이 닫힌다", async () => {
   await userEvent.click(screen.getByRole("button", { name: "편집 취소" }));
   expect(screen.queryByLabelText("배치 이름")).toBeNull();
   expect(patchCalls).toBe(0);
+});
+
+test("이름·메모 편집: 저장 실패 뒤 취소하고 다시 열면 지난 실패 문구가 없다", async () => {
+  // 2026-11-11 (B55): 예전엔 update 를 reset 하지 않아, 다시 연 폼에 아무것도 안 했는데 지난 실패가 떠 있었다.
+  server.use(http.patch("/api/admin/batches/b1",
+    () => HttpResponse.json({ detail: "maintenance_mode" }, { status: 503 })));
+  renderAt("Running");
+  await userEvent.click(await screen.findByRole("button", { name: "편집" }));
+  await userEvent.click(screen.getByRole("button", { name: "저장" }));
+  expect(await screen.findByText(REASON_MESSAGES.maintenance_mode)).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "편집 취소" }));
+  await userEvent.click(screen.getByRole("button", { name: "편집" }));
+  expect(screen.getByLabelText("배치 이름")).toBeInTheDocument();
+  expect(screen.queryByText(REASON_MESSAGES.maintenance_mode)).toBeNull();
+});
+
+test("항목 수정: #0 저장 실패 문구는 #1 폼에 따라오지 않는다(열 때 reset + 시도한 행에만)", async () => {
+  // 2026-11-11 (B55): #0 저장 422 뒤 #1 의 「수정」을 열면 #0 의 문구가 #1 폼 밑에 바로 보였다.
+  server.use(http.put("/api/admin/batches/b1/items/0",
+    () => HttpResponse.json({ detail: "unsafe_path" }, { status: 422 })));
+  renderDetailed();
+  await userEvent.click(await screen.findByRole("button", { name: "항목 0 수정" }));
+  await userEvent.click(screen.getByRole("button", { name: "항목 저장" }));
+  expect(await screen.findByText(REASON_MESSAGES.unsafe_path)).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "항목 1 수정" }));
+  expect(screen.getByLabelText("대상 경로")).toHaveValue("proj");
+  expect(screen.queryByText(REASON_MESSAGES.unsafe_path)).toBeNull();
+  // 취소 뒤 다시 열어도 깨끗하다
+  await userEvent.click(screen.getByRole("button", { name: "항목 편집 취소" }));
+  await userEvent.click(screen.getByRole("button", { name: "항목 0 수정" }));
+  expect(screen.queryByText(REASON_MESSAGES.unsafe_path)).toBeNull();
+});
+
+// --- 못 읽은 배치(2026-11-11 B07): 예전엔 404 에도 빈 뼈대만 남기고 2.5초마다 끝없이 다시 읽었다 ---
+function renderDetailWith(handler: Parameters<typeof server.use>[0]) {
+  server.use(handler);
+  const qc = new QueryClient({ defaultOptions:{ queries:{ retry:false }}});
+  const r = render(<QueryClientProvider client={qc}><MemoryRouter initialEntries={["/admin/batches/b1"]}>
+    <Routes>
+      <Route path="/admin/batches/:batchId" element={<BatchDetail/>} />
+      <Route path="/admin/batches" element={<p>배치 목록 화면</p>} />
+    </Routes>
+  </MemoryRouter></QueryClientProvider>);
+  return { ...r, qc };
+}
+// useBatch 가 지금 정한 폴링 간격(false = 멈춤) — 실제 시간을 기다리지 않고 판정 함수를 직접 부른다.
+const pollingOf = (qc: QueryClient) => {
+  const query = qc.getQueryCache().find({ queryKey: ["batch", "b1"] })!;
+  const ri = query.observers[0].options.refetchInterval as (q: unknown) => number | false;
+  return ri(query);
+};
+
+test("없는(지워진) 배치: 「배치를 찾을 수 없습니다」 + 목록·작업 링크, 빈 뼈대 없음, 폴링 멈춤", async () => {
+  const { qc } = renderDetailWith(http.get("/api/admin/batches/b1",
+    () => HttpResponse.json({ detail: "batch_not_found" }, { status: 404 })));
+  expect(await screen.findByText("배치를 찾을 수 없습니다 — 기록이 지워졌을 수 있습니다")).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "배치 목록으로" })).toHaveAttribute("href", "/admin/batches");
+  expect(screen.getByRole("link", { name: "전체 작업에서 이 배치의 작업 보기" })).toHaveAttribute("href", "/jobs?batch=b1");
+  // 404 는 다시 읽어도 404 -- 「다시 시도」도, 숫자 없는 「성공 /실패 /전체」·「…」 배지·빈 항목 카드도 없다
+  expect(screen.queryByRole("button", { name: "다시 시도" })).toBeNull();
+  expect(screen.queryByText(/성공 .*\/실패/)).toBeNull();
+  expect(screen.queryByText("…")).toBeNull();
+  expect(screen.queryByRole("heading", { name: "항목" })).toBeNull();
+  expect(pollingOf(qc)).toBe(false);
+});
+
+test("처음 읽는 중엔 「불러오는 중…」, 그 밖의 실패는 사유 + 「다시 시도」(자동 폴링 없음)", async () => {
+  let fail = true;
+  const { qc } = renderDetailWith(http.get("/api/admin/batches/b1", async () => {
+    await delay(50);
+    return fail ? HttpResponse.json({ detail: "http_500" }, { status: 500 })
+                : HttpResponse.json(batch({ status: "Completed" }));
+  }));
+  expect(screen.getByText("불러오는 중…")).toBeInTheDocument();
+  expect(await screen.findByRole("alert")).toHaveTextContent(REASON_MESSAGES.http_500);
+  // 데이터 없는 오류는 자동으로 다시 읽지 않는다(다시 읽을 때마다 pending 으로 돌아가 화면이 깜빡인다)
+  expect(pollingOf(qc)).toBe(false);
+  fail = false;
+  await userEvent.click(screen.getByRole("button", { name: "다시 시도" }));
+  expect(await screen.findByText("Completed")).toBeInTheDocument();
+});
+
+test("보는 사이 기록이 지워지면(재조회 404) 마지막 내용 위에 알리고 폴링을 멈춘다", async () => {
+  let gone = false;
+  const { qc } = renderDetailWith(http.get("/api/admin/batches/b1", () => (gone
+    ? HttpResponse.json({ detail: "batch_not_found" }, { status: 404 })
+    : HttpResponse.json(batch({ status: "Running" })))));
+  expect(await screen.findByText("Materialized")).toBeInTheDocument();
+  expect(pollingOf(qc)).toBe(2500);                     // 진행 중 배치는 돈다
+  gone = true;
+  await act(async () => { await qc.refetchQueries({ queryKey: ["batch", "b1"] }); });
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "배치를 찾을 수 없습니다 — 기록이 지워졌을 수 있습니다(아래는 마지막으로 읽은 내용입니다).");
+  expect(screen.getByText("Materialized")).toBeInTheDocument();
+  expect(pollingOf(qc)).toBe(false);
+});
+
+test("Cancelled 배치도 실패 항목이 있으면 「실패분 재실행」 — :rerun-failed 를 쏜다(서버는 Cancelling 만 거부)", async () => {
+  // 2026-11-11 (B32): 예전엔 Completed 만 버튼이 있었다.
+  let fired = false;
+  server.use(http.post("/api/admin/batches/b1:rerun-failed", () => {
+    fired = true; return HttpResponse.json({ status: "Running", requeued: 1 }); }));
+  const { unmount } = renderBatch({ status: "Cancelled", failed_count: 1 });
+  await userEvent.click(await screen.findByRole("button", { name: "실패분 재실행" }));
+  await waitFor(() => expect(fired).toBe(true));
+  unmount();
+  renderBatch({ status: "Cancelled", failed_count: 0 });
+  expect(await screen.findByRole("button", { name: "전체 재실행" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "실패분 재실행" })).toBeNull();
 });
 // --- 항목 편집(수정·삭제·추가): 종단 배치는 전 항목, 활성 배치는 Queued 만 ---
 
@@ -957,7 +1072,7 @@ test("활성 배치: Queued 항목엔 행 삭제·수정 버튼", async () => {
 
 test("항목 제목은 주변 글자(text-sm)와 같은 크기 — 체크박스보다 작아 보이지 않는다", async () => {
   renderDetailed();
-  const title = await screen.findByText("scan · s1:team");
+  const title = await screen.findByText("s1:team");
   expect(title.className).toMatch(/\btext-sm\b/);
   expect(title.className).not.toMatch(/\btext-xs\b/);
 });
@@ -1424,7 +1539,7 @@ test("체크박스 클릭은 행 펼침을 토글하지 않는다", async () => 
   await userEvent.click(screen.getByLabelText("항목 0 선택"));
   expect(screen.getByLabelText("항목 0 선택")).toBeChecked();
   expect(toggle).toHaveAttribute("aria-expanded", "false");
-  expect(screen.queryByText("파일 수")).toBeNull();
+  expect(screen.queryByText("스캔한 항목")).toBeNull();
 });
 
 test("리페치로 사라진 항목은 선택에서 자동 제거된다(유령 선택 방지)", async () => {
@@ -1446,6 +1561,46 @@ test("리페치로 사라진 항목은 선택에서 자동 제거된다(유령 �
   await userEvent.click(screen.getByRole("button", { name: "항목 1 삭제" }));
   await userEvent.click(screen.getByRole("button", { name: "항목 1 삭제 확인" }));
   await waitFor(() => expect(screen.queryByText(/개 선택됨/)).toBeNull());
+});
+
+test("고른 사이 Materialized 가 된 항목은 선택에서 빠지고, 전체 선택 판정은 집합이다", async () => {
+  // 2026-11-11 (B23): 예전엔 존재만 봐서 #3 이 체크된 채 잠겨 개별 해제가 안 되고 일괄 삭제가 #3 에 409 를 냈다. 또
+  // 선택 [3,4]·고를 수 있는 [4,5] 처럼 개수만 같으면 헤더가 「전체 선택됨」으로 보이고, 누르면 #5 를 담지 않고 비웠다.
+  const q = (seq: number, status = "Queued") => ({ seq, payload: { storage: "s1", target: `t${seq}` }, status,
+    request_id: status === "Queued" ? null : `r${seq}`, reason_code: null });
+  let moved = false;
+  const { qc } = renderDetailWith(http.get("/api/admin/batches/b1", () => HttpResponse.json(batch({
+    operation: "scan", status: "Running", item_count: 3,
+    items: [q(3, moved ? "Materialized" : "Queued"), q(4), q(5)] }))));
+  await userEvent.click(await screen.findByLabelText("항목 3 선택"));
+  await userEvent.click(screen.getByLabelText("항목 4 선택"));
+  expect(screen.getByText("2개 선택됨")).toBeInTheDocument();
+  moved = true;
+  await act(async () => { await qc.refetchQueries({ queryKey: ["batch", "b1"] }); });
+  expect(await screen.findByText("1개 선택됨")).toBeInTheDocument();
+  expect(screen.getByLabelText("항목 3 선택")).toBeDisabled();
+  expect(screen.getByLabelText("항목 3 선택")).not.toBeChecked();
+  const all = screen.getByLabelText("전체 선택") as HTMLInputElement;
+  expect(all).not.toBeChecked();
+  expect(all.indeterminate).toBe(true);
+  await userEvent.click(all);                     // 남은 선택 가능 집합(#4·#5)을 담는다
+  expect(screen.getByText("2개 선택됨")).toBeInTheDocument();
+  expect(screen.getByLabelText("항목 5 선택")).toBeChecked();
+});
+
+test("항목 행은 좁은 폭에서 줄바꿈된다 — 요약은 접어 보이고(sm 이상만 truncate) 수정·삭제는 다음 줄", async () => {
+  // 2026-11-11 (B75) 390px 실측: 한 줄에 체크박스·순번·요약·배지·수정·삭제가 놓여 rm 항목 둘이 「r..」로만 보였다.
+  // jsdom 은 배치를 계산하지 않으므로 반응형 클래스 계약을 고정한다.
+  renderDetailed();
+  const summary = await screen.findByText("s1:team");
+  expect(summary.className).toMatch(/\bbreak-all\b/);
+  expect(summary.className).toMatch(/\bsm:truncate\b/);
+  expect(summary.className).not.toMatch(/(^| )truncate\b/);
+  const actions = screen.getByRole("button", { name: "항목 0 삭제" }).parentElement!;
+  expect(actions).toContainElement(screen.getByRole("button", { name: "항목 0 수정" }));
+  expect(actions.className).toMatch(/\bbasis-full\b/);
+  expect(actions.className).toMatch(/\bsm:basis-auto\b/);
+  expect(actions.parentElement!.className).toMatch(/\bflex-wrap\b/);
 });
 
 // --- 항목 선택 재실행: 액션 바의 두 번째 일괄 동작(삭제와 같은 2단 확인 UX) ---
@@ -1536,7 +1691,7 @@ test("항목 펼침: payload 아래 절대경로 행 + 행 요약 title 에도 �
   server.use(storagesHandler(ROOTED), statsHandler("r1", { calls: 0 }));
   renderDetailed();
   // 접힌 행에서도 title 로 절대경로를 준다(본문 길이는 그대로 — 레이아웃 불변)
-  const summary = await screen.findByText("scan · s1:team");
+  const summary = await screen.findByText("s1:team");
   await waitFor(() => expect(summary).toHaveAttribute("title", "/cephfs/dms/team"));
   await userEvent.click(screen.getByRole("button", { name: "항목 0 상세" }));
   expect(screen.getByText("절대경로")).toBeInTheDocument();
@@ -1547,7 +1702,7 @@ test("managed_root 를 못 읽으면 절대경로 행도 title 도 없다", asyn
   server.use(storagesHandler([{ storage_name: "s1", backend_type: "cephfs", status: "Ready" }]),
              statsHandler("r1", { calls: 0 }));
   renderDetailed();
-  const summary = await screen.findByText("scan · s1:team");
+  const summary = await screen.findByText("s1:team");
   await userEvent.click(screen.getByRole("button", { name: "항목 0 상세" }));
   expect(screen.getByText("payload")).toBeInTheDocument();      // 펼침 완료
   expect(screen.queryByText("절대경로")).toBeNull();
@@ -1588,23 +1743,23 @@ function renderSlowRefetch(deletedSeq: number) {
 
 test("단건 항목 삭제: 삭제가 끝났다고 말하는 시점엔 이미 행이 사라져 있다", async () => {
   renderSlowRefetch(1);
-  await screen.findByText("scan · s1:proj");
+  await screen.findByText("s1:proj");
   await userEvent.click(screen.getByRole("button", { name: "항목 1 삭제" }));
   await userEvent.click(screen.getByRole("button", { name: "항목 1 삭제 확인" }));
   // 「삭제 확인」이 「삭제」로 되돌아온 순간 = 화면이 mutation 종료를 말한 순간
   await waitFor(() => expect(
     screen.queryByRole("button", { name: "항목 1 삭제 확인" })).toBeNull());
-  expect(screen.queryByText("scan · s1:proj")).toBeNull();
+  expect(screen.queryByText("s1:proj")).toBeNull();
 });
 
 test("다중 선택 항목 삭제: 결과 문구가 뜨는 시점엔 이미 행이 사라져 있다", async () => {
   renderSlowRefetch(1);
-  await screen.findByText("scan · s1:proj");
+  await screen.findByText("s1:proj");
   await userEvent.click(screen.getByLabelText("항목 1 선택"));
   await userEvent.click(screen.getByRole("button", { name: "선택 삭제" }));
   await userEvent.click(screen.getByRole("button", { name: "1개 삭제 확인" }));
   expect(await screen.findByText("1개 삭제됨")).toBeInTheDocument();
-  expect(screen.queryByText("scan · s1:proj")).toBeNull();
+  expect(screen.queryByText("s1:proj")).toBeNull();
 });
 
 // --- 펼침 패널 dl 정렬(사용자 지시 2026-08-15): 「요약」도 히스토그램 섹션들과

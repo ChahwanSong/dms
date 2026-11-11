@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
@@ -6,7 +6,7 @@ import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
 import { afterAll, afterEach, beforeAll, expect, test } from "vitest";
 import { ClustersPage } from "./ClustersPage";
-import { CLUSTER_FAILING, CLUSTER_OK, overview } from "./k8sFixtures";
+import { CLUSTER_FAILING, CLUSTER_OK, NOW, overview } from "./k8sFixtures";
 import type { K8sOverview as Overview } from "./types";
 
 // 「클러스터」 탭(2026-11-11 개요에서 분리): 클러스터 카드(상태·n분 전·개수·마지막 run·경고·같은 클러스터 경고·지금 동기화)·
@@ -133,6 +133,61 @@ test("빈 상태: 등록 순서(호출 노드는 개요 탭 링크 + 지금 지�
   // 호출 노드가 지정돼 있으면 그 상태를 적는다(경고색 아님)
   wrap(overview({ ...EMPTY, settings: { ...EMPTY.settings, primary_node: "k8s-w1" } }));
   expect(await screen.findByText(/지금: 주 k8s-w1 · 보조 없음/)).not.toHaveClass("text-attn");
+});
+
+test("호출 노드가 없는(no_node) 클러스터는 지금 동기화가 잠기고 「다음 예정」은 「호출 노드 없음」(2026-11-11)", async () => {
+  const hits: string[] = [];
+  server.use(http.post(/\/api\/admin\/k8s\/clusters\/[^/]+:sync$/, ({ request }) => {
+    hits.push(new URL(request.url).pathname);
+    return HttpResponse.json({});
+  }));
+  wrap(overview({ clusters: [{ ...CLUSTER_OK, status: "no_node", last_attempt_at: "2026-10-24T00:00:00Z" },
+                             { ...CLUSTER_FAILING, consecutive_failures: 0 }] }));
+  await ready();
+  const nn = card("dmsk8s");
+  const btn = within(nn).getByRole("button", { name: "지금 동기화" });
+  expect(btn).toBeDisabled();
+  expect(btn).toHaveAttribute("title", "호출 노드가 지정되지 않았습니다 — 개요 탭에서 지정하세요");
+  // 지난 예정 시각을 「곧」으로 영원히 보이지 않는다
+  const due = within(nn).getByText("다음 예정").nextElementSibling as HTMLElement;
+  expect(due).toHaveTextContent("호출 노드 없음");
+  expect(due).not.toHaveTextContent("곧");
+  // 「모두 지금 동기화」도 그 클러스터를 넣지 않는다
+  await userEvent.click(screen.getByRole("button", { name: "모두 지금 동기화" }));
+  expect(await screen.findByText("1개 클러스터 동기화를 요청했습니다")).toBeInTheDocument();
+  expect(hits).toEqual(["/api/admin/k8s/clusters/dmsk8s-dns:sync"]);
+});
+
+test("지금 동기화·모두 지금 동기화의 성공 문구는 호출 노드가 요청을 가져가면(last_attempt_at 바뀜) 지운다(2026-11-11)", async () => {
+  let picked = false;
+  let pickedAll = false;
+  server.use(
+    http.post(/\/api\/admin\/k8s\/clusters\/[^/]+:sync$/, () => HttpResponse.json({ ok: true })),
+    http.get("/api/admin/k8s/overview", () => HttpResponse.json(overview(picked
+      ? { clusters: [{ ...CLUSTER_OK, last_attempt_at: NOW },
+                     pickedAll ? { ...CLUSTER_FAILING, last_attempt_at: NOW } : CLUSTER_FAILING] } : {}))),
+  );
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={qc}>
+    <MemoryRouter initialEntries={["/admin/k8s/clusters"]}><ClustersPage /></MemoryRouter>
+  </QueryClientProvider>);
+  await ready();
+  await userEvent.click(within(card("dmsk8s")).getByRole("button", { name: "지금 동기화" }));
+  expect(await within(card("dmsk8s")).findByText(/요청했습니다 — 호출 노드가/)).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "모두 지금 동기화" }));
+  expect(await screen.findByText("2개 클러스터 동기화를 요청했습니다")).toBeInTheDocument();
+  // 아직 가져가지 않았으면(같은 last_attempt_at) 그대로 -- 다시 읽어도 남는다
+  await act(() => qc.invalidateQueries({ queryKey: ["k8s", "overview"] }));
+  expect(within(card("dmsk8s")).getByText(/요청했습니다 — 호출 노드가/)).toBeInTheDocument();
+  // dmsk8s 를 호출 노드가 가져감 → 카드 문구는 사라진다. 모두 동기화는 dmsk8s-dns 가 아직이라 남는다
+  picked = true;
+  await act(() => qc.invalidateQueries({ queryKey: ["k8s", "overview"] }));
+  await waitFor(() => expect(within(card("dmsk8s")).queryByText(/요청했습니다 — 호출 노드가/)).toBeNull());
+  expect(screen.getByText("2개 클러스터 동기화를 요청했습니다")).toBeInTheDocument();
+  // 요청한 클러스터를 모두 가져가면(dmsk8s-dns 의 last_attempt_at 도 바뀜) 머리의 「n개 … 요청했습니다」도 지운다(syncAll.reset)
+  pickedAll = true;
+  await act(() => qc.invalidateQueries({ queryKey: ["k8s", "overview"] }));
+  await waitFor(() => expect(screen.queryByText("2개 클러스터 동기화를 요청했습니다")).toBeNull());
 });
 
 test("「호출 노드 없음」 클러스터가 있으면 개요 탭으로 보내는 안내를 맨 위에", async () => {

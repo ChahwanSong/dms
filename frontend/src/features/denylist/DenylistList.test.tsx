@@ -110,10 +110,16 @@ test("유형 의미 설명: 목록 상단 패널에 2유형(requester·owner) + 
   server.use(http.get("/api/admin/identity-denylist", () => HttpResponse.json([])));
   wrap();
   await screen.findByText("등재된 대상이 없습니다");
-  // 판정 시점·우선순위(identity.resolve_job_identity 의 미러)
-  expect(screen.getByText(/제출 시점에 판정하며, 특권 실행 경로보다 먼저/)).toBeInTheDocument();
+  // 판정 시점·우선순위(identity.resolve_job_identity 의 미러 -- 그 함수는 planner 가 계획할 때 부른다). 2026-11-11 정정: 옛
+  // 단언 「제출 시점에 판정하며」는 사실과 다른 문구를 고정하고 있었다(제출은 201 로 접수된 뒤 계획에서 identity_denied).
+  expect(screen.getByText(/작업 계획 시점에 판정하므로 제출은 접수된 뒤 거부\(identity_denied\)로 끝나고/)).toBeInTheDocument();
+  expect(screen.getByText(/이미 계획돼 확인 대기·실행 중인 작업은 막지 않으며, 특권 실행 경로보다 먼저/)).toBeInTheDocument();
+  expect(screen.queryByText(/제출 시점에 판정/)).toBeNull();
   // 두 유형의 구분(제출 계정 vs 실행 신원)이 화면에 있다 -- group(LDAP) 유형은 2026-10-26 에 없어졌다
   expect(screen.getByText(/작업을 제출한 계정 기준/)).toBeInTheDocument();
+  // requester 설명도 판정 시점과 같은 말(2026-11-11 B58 후속): 「모든 제출을 차단」은 머리 문장 「제출은 접수된 뒤 거부」와 맞섰다
+  expect(screen.getByText(/이 계정이 낸 작업을 계획 단계에서 거부합니다/)).toBeInTheDocument();
+  expect(screen.queryByText(/모든 제출을 차단/)).toBeNull();
   expect(screen.getByText(/실행 신원\(권한 기준 사용자\) 기준/)).toBeInTheDocument();
   expect(screen.queryByText(/LDAP 그룹 기준/)).toBeNull();
 });
@@ -130,6 +136,49 @@ test("옛 group 행은 「평가 안 됨」으로 남아 해제할 수 있고, �
   expect(within(within(dialog).getByLabelText("대상 유형")).queryByRole("option", { name: "group" })).toBeNull();
 });
 
+test("대상의 앞뒤 공백은 지워 보내고, 비었거나 공백뿐이면 저장을 잠근다(2026-11-11)", async () => {
+  // 「alice 」로 저장되면 계정 alice 와 맞지 않아 차단이 조용히 무효였고, 빈 대상은 PUT …/requester/ 가 라우트와 안 맞아
+  // 영문 「Not Found」가 떴다.
+  const paths: string[] = [];
+  server.use(
+    http.get("/api/admin/identity-denylist", () => HttpResponse.json([])),
+    http.put("/api/admin/identity-denylist/*", ({ request }) => {
+      paths.push(new URL(request.url).pathname);
+      return HttpResponse.json({ subject_type: "requester", subject: "alice" }, { status: 201 });
+    }));
+  wrap();
+  await screen.findByText("등재된 대상이 없습니다");
+  await userEvent.click(screen.getByRole("button", { name: "대상 추가" }));
+  const dialog = await screen.findByRole("dialog");
+  const save = within(dialog).getByRole("button", { name: "저장" });
+  expect(save).toBeDisabled();
+  expect(within(dialog).getByText("대상을 입력하세요")).toBeInTheDocument();
+  const input = within(dialog).getByRole("textbox", { name: "대상" });
+  await userEvent.type(input, "   ");
+  expect(save).toBeDisabled();
+  await userEvent.type(input, "{Enter}");                     // 엔터 제출도 막힌다
+  expect(paths).toEqual([]);
+  await userEvent.clear(input);
+  await userEvent.type(input, " alice ");
+  expect(save).toBeEnabled();
+  expect(within(dialog).queryByText("대상을 입력하세요")).toBeNull();
+  await userEvent.click(save);
+  await waitFor(() => expect(paths).toEqual(["/api/admin/identity-denylist/requester/alice"]));
+});
+
+test("서버가 공백 대상을 422 denylist_subject_empty 로 거절하면 한국어로 보인다", async () => {
+  server.use(
+    http.get("/api/admin/identity-denylist", () => HttpResponse.json([])),
+    http.put("/api/admin/identity-denylist/*", () =>
+      HttpResponse.json({ detail: "denylist_subject_empty" }, { status: 422 })));
+  wrap();
+  await screen.findByText("등재된 대상이 없습니다");
+  await userEvent.click(screen.getByRole("button", { name: "대상 추가" }));
+  await userEvent.type(await screen.findByRole("textbox", { name: "대상" }), "x");
+  await userEvent.click(screen.getByRole("button", { name: "저장" }));
+  expect(await screen.findByText(/대상을 입력하세요 — 앞뒤 공백만으로는 등재할 수 없습니다/)).toBeInTheDocument();
+});
+
 test("추가 다이얼로그: 유형 선택을 바꾸면 설명 캡션이 따라 바뀐다", async () => {
   server.use(http.get("/api/admin/identity-denylist", () => HttpResponse.json([])));
   wrap();
@@ -138,6 +187,7 @@ test("추가 다이얼로그: 유형 선택을 바꾸면 설명 캡션이 따라
   const dialog = await screen.findByRole("dialog");
   // 기본 requester 의 설명이 떠 있다
   expect(within(dialog).getByText(/작업을 제출한 계정 기준/)).toBeInTheDocument();
+  expect(within(dialog).queryByText(/모든 제출을 차단/)).not.toBeInTheDocument();
   await userEvent.selectOptions(within(dialog).getByLabelText("대상 유형"), "owner");
   expect(within(dialog).getByText(/실행 신원\(권한 기준 사용자\) 기준/)).toBeInTheDocument();
   expect(within(dialog).queryByText(/작업을 제출한 계정 기준/)).not.toBeInTheDocument();

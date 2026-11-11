@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
 import { setupServer } from "msw/node";
@@ -42,8 +42,11 @@ test("env 소스 배지 + 노드 행의 「확인 대기 중」을 실패와 구
   const w1 = screen.getByText("w1").closest("tr")!;
   expect(w1).toHaveTextContent("있음");
   expect(w1).toHaveTextContent("가능");
-  // writable 한계 문구(설계 §2.4b: 에이전트 uid 기준)를 화면에 그대로 적는다
-  expect(screen.getByText(/에이전트 프로세스\(uid\) 기준/)).toBeInTheDocument();
+  // writable 판정 주체(설계 §2.4b)를 화면에 적는다. 2026-11-11 B69: 옛 문구 「잡 파드 요청자 권한과 다를 수 있습니다」는
+  // 요청자 uid 로 잡이 돌던 모델 기준이라 고쳤다 -- dms-k8s 는 에이전트·잡 파드가 모두 root 다.
+  const note = screen.getByText(/마운트 rw\(에이전트 프로세스\) 기준/);
+  expect(note).toHaveTextContent("에이전트와 잡 파드가 모두 root");
+  expect(note).not.toHaveTextContent("요청자 권한");
 });
 
 test("DMS 상태 디렉터리와 그것과 겹치는 기존 스토리지를 경고로 보인다(2026-11-03 ③)", async () => {
@@ -129,6 +132,26 @@ test("409 잠금이면 확인 다이얼로그를 강제하고, 강제 변경만 
   expect(screen.getByText(/아티팩트·로그 열람이 깨집니다/)).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "강제 변경" }));
   expect(bodies).toEqual([{ uri: "/new", force: false }, { uri: "/new", force: true }]);
+});
+
+test("강제 변경이 경로 검증(422)에 걸리면 다이얼로그 안에서 사유를 말한다(2026-11-11 B27)", async () => {
+  // 서버는 잠금(409)을 경로 검증보다 먼저 본다 -- 잠긴 사이트에서 틀린 경로는 force=true 에서야 422 가 난다.
+  server.use(
+    http.get("/api/admin/artifact-base", () => HttpResponse.json({ ...BASE, locked_by_jobs: 3 })),
+    http.put("/api/admin/artifact-base", async ({ request }) => {
+      const body = (await request.json()) as { uri: string; force: boolean };
+      return body.force
+        ? HttpResponse.json({ detail: "artifact_base_outside_allowlist" }, { status: 422 })
+        : HttpResponse.json({ detail: "artifact_base_locked" }, { status: 409 });
+    }),
+  );
+  wrap();
+  await screen.findByText("env 기본");
+  await userEvent.type(screen.getByLabelText("새 경로"), "/tmp/x");
+  await userEvent.click(screen.getByRole("button", { name: "저장" }));
+  const dialog = await screen.findByRole("dialog");
+  await userEvent.click(within(dialog).getByRole("button", { name: "강제 변경" }));
+  expect(await within(dialog).findByRole("alert")).toHaveTextContent(/허용된 공유 FS 경로/);
 });
 
 test("잠금 사전 고지: 잡 N건 참조를 저장 전에 보여주고, 0건이면 잠금 없음 문구", async () => {

@@ -13,6 +13,10 @@ test("destinationParent: sync 목적지의 상위 디렉토리 절대경로(쓰�
   expect(destinationParent("/data", "")).toBe("/");
   expect(destinationParent(undefined, "a/b")).toBeNull();                // 뿌리 모름 -- 지어내지 않음
   expect(destinationParent("/cephfs/managed", undefined)).toBeNull();
+  // ".." 성분은 글자로 접지 않는다(2026-11-11 -- 「/cephfs/managed/..」를 「이미 있어야 합니다」로 지어냈다)
+  expect(destinationParent("/cephfs/managed", "../x")).toBeNull();
+  expect(destinationParent("/cephfs/managed", "a/../b")).toBeNull();
+  expect(destinationParent("/cephfs/managed", " a/b")).toBe("/cephfs/managed/ a");   // 공백은 이름의 일부
 });
 
 test("절대경로 조합: 뿌리 + 상대경로, 슬래시 중복 없이", () => {

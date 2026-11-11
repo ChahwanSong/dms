@@ -146,7 +146,8 @@ def resolve_side(repos, ref: dict, subpath, *, operation) -> dict:
 
 
 def side_label(block: dict) -> str:
-    """사람이 읽는 PV 표기(D17): 「PV 이름 — namespace (storageclass) / 하위경로」(하위 경로가 비면 뒤를 뗀다)."""
+    """사람이 읽는 PV 표기(D17): 「PV 이름 — namespace (storageclass) / 하위경로」(하위 경로가 비면 뒤를 뗀다). 화면은 빈 하위경로를
+    「 / (PV 전체)」로 그리므로 경로 검색(text_search.search_tokens)이 그 구절을 구분자로 지운다(2026-11-11 -- 저장 모양은 그대로)."""
     base = f"{block.get('pvc')} — {block.get('namespace')} ({block.get('storage_class')})"
     return f"{base} / {block['path']}" if block.get("path") else base
 

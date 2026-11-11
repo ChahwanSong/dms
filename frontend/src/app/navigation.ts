@@ -160,3 +160,14 @@ export function breadcrumbFor(pathname: string): Crumb[] {
       return [...breadcrumbFor(detail.parent), { label: detail.label }];
   return [home];
 }
+
+/** 로그인 뒤 돌아갈 곳(2026-11-11). RequireRole 이 401 로 /login 에 보낼 때 location.state.from 에 원래 주소(pathname+search+
+ *  hash)를 싣고, 로그인이 성공하면 이 값으로 replace 이동한다 -- 예전엔 늘 「/」라 공유받은 /jobs/<id> 딥링크·세션 만료 직전
+ *  화면을 잃었다. 앱 내부 경로만 받는다: 「/」로 시작하고 「//」·「/\」(프로토콜 상대 URL -- 다른 출처로 읽힌다)가 아니며 /login
+ *  자신이 아닐 때. 그 밖(없음·문자열 아님)은 「/」(Home 이 역할별로 보낸다). 관리자 화면이면 RequireRole 이 역할을 다시 본다. */
+export function loginReturnPath(state: unknown): string {
+  const from = typeof state === "object" && state !== null ? (state as { from?: unknown }).from : undefined;
+  if (typeof from !== "string" || !from.startsWith("/") || from.startsWith("//") || from.startsWith("/\\")) return "/";
+  if (/^\/login(?:[/?#]|$)/.test(from)) return "/";
+  return from;
+}

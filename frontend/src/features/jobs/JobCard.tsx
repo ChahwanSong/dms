@@ -4,7 +4,7 @@ import { Card } from "../../components/ui/Card";
 import { StatusPill } from "../../components/ui/StatusPill";
 import { jobStateHelp } from "../../lib/stateHelp";
 import { CancelButton } from "../../components/ui/CancelButton";
-import { isTerminal } from "../../lib/jobState";
+import { isTerminal, jobPillVariant } from "../../lib/jobState";
 import { ApiError, reasonText } from "../../lib/api";
 import { toolSummary } from "../../lib/jobTool";
 import type { DataJob } from "../../lib/types";
@@ -84,7 +84,8 @@ export function JobCard({ job, model, cancel, events, jobCount, refIso, batchChi
           {jobCount > 1 && <ToolLabel job={job} />}
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          <StatusPill state={job.state} help={jobStateHelp(job.state, { batchChild })} />
+          <StatusPill state={job.state} variant={jobPillVariant(job.state)}
+                      help={jobStateHelp(job.state, { batchChild })} />
           {canCancel && (
             <CancelButton disabled={cancel.isPending}
                           onClick={() => cancel.mutate(job.job_id)}>취소</CancelButton>

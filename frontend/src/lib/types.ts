@@ -746,8 +746,13 @@ export interface SecondsSummary {
   mean_seconds: number; p50_seconds: number; p95_seconds: number;
 }
 export interface JobMetrics {
+  // bucket "hour" 의 throughput 버킷은 UTC 시간("YYYY-MM-DDTHH" -- 라벨은 프런트가 KST 로), "day" 는 KST 날짜("YYYY-MM-DD",
+  // 서버가 화면 달력으로 접는다 -- 2026-11-11).
   window_hours: number; bucket: "hour" | "day";
   by_state: StateCount[];
+  // 창 없는 비종단 잡 상태별 수(2026-11-11) -- KPI 「실행 중」·「대기」와 컨트롤 상태 「진행 중 작업」의 재료. by_state 는
+  // created_at 창이라 창보다 오래 도는 잡이 빠진다. 옵션(?) = 구 서버·fixture 호환(없으면 화면은 「—」).
+  live_by_state?: StateCount[];
   by_tool: ({ tool: string | null } & BreakdownRow)[];
   by_storage: ({ storage: string | null } & BreakdownRow)[];
   by_requester: ({ requester_id: string } & BreakdownRow)[];

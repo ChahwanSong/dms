@@ -193,7 +193,9 @@ describe("ReleasesPage", () => {
       HttpResponse.json({ registry_ok: false,
                           targets: TARGETS.targets.map(t => ({ ...t, tags: [] })) })));
     wrap(<ReleasesPage />);
-    expect(await screen.findByText(/레지스트리에 연결할 수 없어/)).toBeInTheDocument();
+    // 2026-11-11 B66: registry_ok=false 는 리포 하나라도 조회 실패면 선다 -- 전체 「연결할 수 없음」이 아니라 「읽지 못한 리포가 있다」.
+    expect(await screen.findByText(/태그 목록을 읽지 못한 리포가 있습니다/)).toBeInTheDocument();
+    expect(screen.queryByText(/레지스트리에 연결할 수 없어/)).toBeNull();
     expect(screen.getByRole("heading", { name: "릴리스" })).toBeInTheDocument();
   });
 
@@ -216,7 +218,9 @@ describe("ReleasesPage", () => {
     await screen.findByRole("heading", { name: "릴리스" });
     await userEvent.selectOptions(screen.getByLabelText("dms-api"), "d23");
     await userEvent.click(screen.getByRole("button", { name: "롤아웃 시작" }));
-    expect(await screen.findByText(/태그 존재를 확인하지 못한 채/)).toBeInTheDocument();
+    // 2026-11-11 B66: 미검증 사유는 무응답 또는 잘린 목록 -- 응답이 사유를 싣지 않으니 둘 다 말한다(무응답 단정 금지).
+    const banner = await screen.findByText(/태그 존재를 확인하지 못한 채/);
+    expect(banner).toHaveTextContent(/응답하지 않았거나 태그 목록이 잘려/);
   });
 
   it("검증된 제출(tag_verified=true)에는 경고 배너가 없다", async () => {

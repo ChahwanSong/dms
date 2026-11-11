@@ -133,6 +133,29 @@ def test_metrics_jobs_day_bucket_beyond_48h(client):
     assert body["bucket"] == "day" and body["window_hours"] == 168
 
 
+def test_metrics_jobs_live_by_state_has_no_window(client, db):
+    # 2026-11-11: KPI 「실행 중」·「대기」·컨트롤 상태 「진행 중 작업」의 재료 -- 창(by_state) 밖의 오래 도는 잡도 센다.
+    repos = Repositories(db)
+    now = utc_now_iso()
+    _seed_job(db, repos, created_at=iso_plus(now, -3 * 86400), state="Running")    # 24h 창 밖, 아직 실행 중
+    _seed_job(db, repos, created_at=iso_plus(now, -3600), state="Pending")
+    _seed_job(db, repos, created_at=iso_plus(now, -1800))                           # 종단 -- 세지 않는다
+    body = client.get("/api/admin/metrics/jobs?window=24", headers=ADMIN).json()
+    assert {r["state"]: r["count"] for r in body["by_state"]} == {"Pending": 1, "Succeeded": 1}
+    assert body["live_by_state"] == [{"state": "Pending", "count": 1}, {"state": "Running", "count": 1}]
+
+
+def test_metrics_nodes_break_the_series_at_report_gaps(client, db):
+    # 2026-11-11: 신선도 기준(DMS_AGENT_REPORT_STALE_SECONDS, 기본 300s)을 넘는 보고 공백은 null 표지로 끊긴다.
+    repos = Repositories(db)
+    now = utc_now_iso()
+    repos.agents.ingest("n1", _report(rx=1000), reported_at=iso_plus(now, -7 * 3600))
+    repos.agents.ingest("n1", _report(rx=7000), reported_at=iso_plus(now, -60))
+    points = client.get("/api/admin/metrics/nodes?window=24", headers=ADMIN).json()["nodes"][0]["points"]
+    assert [p["load1"] for p in points] == [0.5, None, 0.5]
+    assert [p["net_rx_bps"] for p in points] == [None, None, None]
+
+
 def test_request_events_wrapper_scoped_to_request(client, db):
     repos = Repositories(db)
     rid = repos.requests.create(operation="scan", requester_id="alice",

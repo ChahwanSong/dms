@@ -202,6 +202,25 @@ def test_history_requires_admin(tmp_path):
                       params={"storage": "s1", "target": "t"}).status_code == 403
 
 
+def test_history_accepts_empty_storage_name_and_rejects_nul(tmp_path):
+    # 2026-11-11 B22: 빈 이름 탭(변조·구형 행 -- /targets·합계·CSV 는 storage="" 정확 일치로 선다)에서 행을 열면 이력이 늘
+    # 422(min_length=1)라 상세 시트가 「입력값이 올바르지 않습니다」만 보였다. 이제 /targets 와 같은 규칙(_NO_NUL): 빈 값은
+    # 이름이고 NUL 만 422(PG text 가 NUL 을 받지 못해 500 이 되던 구멍).
+    art = tmp_path / "artifacts"
+    client = _client(tmp_path, art)
+    _login(client, "admin", "admin")
+    jid, _ = _scan_job(client, storage="", target="team", art_base=art)
+    _scan_job(client, storage="s1", target="team", art_base=art)          # 다른 이름의 같은 경로는 섞이지 않는다
+    r = client.get("/api/admin/usage/scan-history", params={"storage": "", "target": "team"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["storage_name"] == "" and [p["job_id"] for p in body["points"]] == [jid]
+    assert client.get("/api/admin/usage/scan-history",
+                      params={"storage": "a\x00b", "target": "team"}).status_code == 422
+    assert client.get("/api/admin/usage/scan-history",
+                      params={"storage": "x" * 513, "target": "team"}).status_code == 422
+
+
 # ---- 2026-10-02: 목록 컬럼(latest)·필터 분리·정렬·리포트 요약 캐시·내보내기 ----
 
 def _at(client, jid, iso):

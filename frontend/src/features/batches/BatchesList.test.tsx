@@ -240,6 +240,69 @@ test("리페치로 목록에서 사라진 배치는 선택에서 자동 제거(�
   expect(await screen.findByText("1개 선택됨")).toBeInTheDocument();
 });
 
+test("리페치로 활성이 된(재실행된) 배치는 선택에서 빠지고, 전체 선택 판정은 개수가 아니라 집합이다", async () => {
+  // 2026-11-11 (B23): 예전엔 존재만 봐서 활성이 된 배치가 체크된 채 잠겨(disabled) 개별 해제가 안 되고 일괄 삭제가 409 였다.
+  let rows = mixed();
+  const { qc } = renderList(() => rows);
+  await selectBoth();
+  expect(screen.getByText("2개 선택됨")).toBeInTheDocument();
+  rows = rows.map((r) => ((r as { batch_id: string }).batch_id === ID1 ? { ...r, status: "Running" } : r));
+  await act(async () => { await qc.refetchQueries({ queryKey: ["batches"] }); });
+  expect(await screen.findByText("1개 선택됨")).toBeInTheDocument();
+  expect(box(ID1)).toBeDisabled();
+  expect(box(ID1)).not.toBeChecked();
+  // 남은 선택(ID2)이 고를 수 있는 집합 전부라 전체 선택됨 — 누르면 비운다
+  const all = screen.getByLabelText("전체 선택") as HTMLInputElement;
+  expect(all).toBeChecked();
+  expect(all.indeterminate).toBe(false);
+});
+
+test("「진행」 열은 세 수의 이름(성공/실패/전체)과 칸 title 로 뜻을 말한다", async () => {
+  // 2026-11-11 (B80): 「1/1/2」를 「2개 중 1개 진행」으로 오독했다.
+  renderList([row({ batch_id: ID1, status: "Completed", succeeded_count: 1, failed_count: 1, item_count: 2 })]);
+  const cell = await screen.findByText("1/1/2");
+  expect(screen.getByRole("columnheader", { name: "성공/실패/전체" })).toBeInTheDocument();
+  expect(screen.queryByRole("columnheader", { name: "진행" })).toBeNull();
+  expect(cell).toHaveAttribute("title", "성공 1 · 실패 1 · 전체 2");
+});
+
+test("「배치 생성」은 버튼 모양의 링크 하나다(a 안의 button 없음 — Tab 한 번)", async () => {
+  // 2026-11-11 (B83): <Link><Button/></Link> 라 Tab 이 같은 이름에서 두 번 멈췄다.
+  renderList([]);
+  const link = await screen.findByRole("link", { name: "배치 생성" });
+  expect(link).toHaveAttribute("href", "/admin/batches/new");
+  expect(link.querySelector("button")).toBeNull();
+  expect(screen.queryByRole("button", { name: "배치 생성" })).toBeNull();
+});
+
+test("목록 창(100건)이 잘리면 「+」 건수와 안내를 보이고, 101번째는 그리지 않는다", async () => {
+  // 2026-11-11 (B33): 서버에 창 + 1 건(limit=101)을 청해 잘림을 안다 — 예전엔 100건을 전체로 여겨 「전체 (100)」.
+  let asked: string | null = null;
+  const many = Array.from({ length: 101 }, (_, i) =>
+    row({ batch_id: `b${String(i).padStart(15, "0")}`, operation: i % 2 === 0 ? "scan" : "sync",
+          status: "Completed", name: `n${i}` }));
+  server.use(http.get("/api/admin/batches", ({ request }) => {
+    asked = new URL(request.url).searchParams.get("limit");
+    return HttpResponse.json(many);
+  }));
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={qc}><MemoryRouter><BatchesList /></MemoryRouter></QueryClientProvider>);
+  await screen.findByText("n0");
+  expect(asked).toBe("101");
+  expect(screen.getByRole("tab", { name: "전체 (100+)" })).toBeInTheDocument();
+  expect(screen.getByRole("tab", { name: "scan (50+)" })).toBeInTheDocument();
+  expect(screen.getByRole("tab", { name: "sync (50+)" })).toBeInTheDocument();
+  expect(screen.queryByText("n100")).toBeNull();
+  expect(screen.getByText(/^최근 생성된 100건만 표시합니다/)).toBeInTheDocument();
+});
+
+test("창 안(100건 이하)이면 「+」도 안내도 없다", async () => {
+  renderList(mixed());
+  await screen.findByLabelText(`배치 ${ID1.slice(0, 12)} 선택`);
+  expect(screen.getByRole("tab", { name: "전체 (3)" })).toBeInTheDocument();
+  expect(screen.queryByText(/건만 표시합니다/)).toBeNull();
+});
+
 // --- 작업 종류 탭(2026-08-23): sync/scan/rm 을 따로 모아 본다 -----------------
 
 const opsMix = () => [

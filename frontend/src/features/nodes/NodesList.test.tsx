@@ -272,6 +272,45 @@ test("배치 제외: 사유를 적어 제외하면 PUT 바디에 사유가 실�
   await waitFor(() => expect(puts).toEqual([[{ reason: "디스크 오류" }, "node-a"]]));
 });
 
+test("배치 제외: 사유에 붙여 넣은 탭(제어문자)은 보내기 전에 알리고 막는다 -- 「500자 이하」 길이 오류로 오도하지 않는다", async () => {
+  // 2026-11-11: 텍스트 입력은 줄바꿈만 지우고 탭은 남겨 「디스크<TAB>점검」(10자)이 서버 422 invalid_exclusion_reason 으로 돌아왔고,
+  // 화면은 「500자 이하여야 합니다」라고 했다.
+  const puts: unknown[] = [];
+  renderPlacement(NODES, { put: (b) => puts.push(b) });
+  await userEvent.click(await screen.findByRole("button", { name: "node-a 배치 제외" }));
+  const dlg = await screen.findByRole("dialog", { name: "node-a 배치 제외" });
+  await userEvent.click(within(dlg).getByLabelText("제외 사유"));
+  await userEvent.paste("디스크\t점검");
+  expect(within(dlg).getByText(/탭·제어문자를 넣을 수 없습니다/)).toBeInTheDocument();
+  expect(within(dlg).queryByText(/500자 이하여야/)).toBeNull();
+  expect(within(dlg).getByRole("button", { name: "배치에서 제외" })).toBeDisabled();
+  expect(puts).toEqual([]);
+});
+
+test("보고한 노드가 0대면 「정상 보고」라고 단정하지 않고 에이전트 점검을 안내한다", async () => {
+  // 2026-11-11: 설치 직후 에이전트가 한 번도 보고하지 못했을 때 「전체 0대 정상 보고」와 머리줄만 있는 표가 떴다.
+  server.use(http.get("/api/admin/nodes", () => HttpResponse.json([])));
+  wrap();
+  expect(await screen.findByText("보고한 노드 0대")).toBeInTheDocument();
+  expect(screen.getByText(/보고한 노드가 없습니다 — 에이전트\(DaemonSet dms-agent\)/)).toBeInTheDocument();
+  expect(screen.queryByText(/정상 보고/)).toBeNull();
+  expect(screen.queryByRole("table")).toBeNull();
+});
+
+test("최근 리포트가 비어 있으면(보존 기간이 지난 노드) 빈칸이 아니라 안내 문구", async () => {
+  // 보존 작업이 agent_reports 만 지워 서버가 일부러 200 [] 를 준다(routes_nodes.node_reports, 2026-11-11).
+  server.use(
+    http.get("/api/admin/nodes", () => HttpResponse.json(NODES)),
+    http.get("/api/admin/nodes/:name/reports", () => HttpResponse.json([])),
+  );
+  wrap();
+  const rowA = (await screen.findByText("node-a")).closest("tr")!;
+  await userEvent.click(within(rowA).getByRole("button", { name: "상세" }));
+  await userEvent.click(await screen.findByRole("button", { name: "최근 리포트" }));
+  expect(await screen.findByText(/보존 기간\(DMS_AGENT_REPORT_RETENTION_DAYS, 기본 30일\) 안의 리포트가 없습니다/))
+    .toBeInTheDocument();
+});
+
 test("배치 제외: 빈 사유는 null 로 보낸다", async () => {
   const puts: unknown[] = [];
   renderPlacement(NODES, { put: (b) => puts.push(b) });

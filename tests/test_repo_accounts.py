@@ -134,7 +134,11 @@ def test_authenticate_returns_role_and_epoch(db):
     assert repo.authenticate("erin", "nope") is None
     assert repo.authenticate("nobody", "pw") is None
     repo.set_disabled("erin", True, actor="t")
-    assert repo.authenticate("erin", "pw") is None
+    # 2026-11-11: 비밀번호가 맞은 비활성 계정은 None 이 아니라 {"disabled": True}(로그인이 401 account_disabled 로 알린다).
+    # role·session_epoch 는 없다 -- 세션 재료가 되지 않게. 틀린 비밀번호는 비활성이어도 None(비활성인지 알리지 않는다).
+    assert repo.authenticate("erin", "pw") == {"disabled": True}
+    assert repo.authenticate("erin", "nope") is None
+    assert repo.verify("erin", "pw") is None
     assert repo.session_state("erin") == {"role": ROLE_ADMIN, "disabled": 1, "session_epoch": _epoch(db, "erin")}
     assert repo.session_state("nobody") is None
 

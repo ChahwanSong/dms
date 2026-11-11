@@ -21,6 +21,8 @@ const JOB_METRICS = {
     { state: "Succeeded", count: 20 }, { state: "Failed", count: 4 },
     { state: "TimedOut", count: 1 },
   ],
+  // 창 없는 비종단 집계(2026-11-11) -- KPI 「실행 중」·「대기」의 재료. 기본은 창 안 비종단과 같은 수.
+  live_by_state: [{ state: "Executing", count: 3 }, { state: "Pending", count: 2 }],
   by_tool: [], by_storage: [], by_requester: [], failure_reasons: [],
   throughput: [], duration_histogram: [], sync_items_total: null, sync_bytes_total: null, rm_items_total: null,
   plan_rejected: 7, plan_rejection_reasons: [],
@@ -104,23 +106,61 @@ test("컴포넌트 카드가 이미지·ready·판정을 보여주고 null은 �
   expect(screen.getByText("—/—")).toBeInTheDocument();   // observe 강등된 dms-api
 });
 
-test("잡 통계가 비배열로 와도 죽지 않는다", async () => {
+test("「실행 중」·「대기」는 24h 창이 아니라 창 없는 비종단 집계(live_by_state)를 센다(2026-11-11)", async () => {
+  // 25시간 전에 낸 sync(Running)·하루 넘게 확인을 기다리는 잡(ConfirmPending)은 by_state(created_at 24h 창)에 없다 --
+  // 예전엔 위 큐 현황이 「실행 중」을 보이는데 KPI 는 「실행 중 0」이었다.
+  renderDash({ jobs: { ...JOB_METRICS,
+    live_by_state: [{ state: "Executing", count: 3 }, { state: "Running", count: 1 },
+                    { state: "ConfirmPending", count: 2 }, { state: "Pending", count: 4 }] } });
+  const running = (await screen.findByText("실행 중")).parentElement!;
+  await waitFor(() => expect(running).toHaveTextContent(/^실행 중6$/));
+  expect(screen.getByText("대기").parentElement).toHaveTextContent(/^대기4$/);
+  expect(screen.getByText("성공(24h)").parentElement).toHaveTextContent("20");   // 성공·실패는 창 그대로
+});
+
+// 비배열 응답은 모름이다(2026-11-11) -- 예전 기대값 「0」은 [] 로 접은 결과를 고정하고 있었다(B24: 모름을 0 으로 그림).
+test("잡 통계가 비배열로 와도 죽지 않는다 -- 모르는 타일은 0 이 아니라 —", async () => {
   renderDash({ jobs: { by_state: null } });
   const running = (await screen.findByText("실행 중")).parentElement!;
-  expect(running).toHaveTextContent("0");
+  await waitFor(() => expect(screen.queryAllByText("불러오는 중…")).toHaveLength(0));
+  expect(running).toHaveTextContent(/^실행 중—$/);
+  expect(screen.getByText("실패(24h)").parentElement).toHaveTextContent(/^실패\(24h\)—$/);
+});
+
+test("metrics 첫 조회가 500 이면 KPI 는 0 이 아니라 — 이고, 카드마다 오류 한 줄을 낸다(큐 카드는 RBAC 를 탓하지 않는다)", async () => {
+  // 2026-11-11 라이브 재현: 「실행 중 0 · 대기 0 …」, 빈 컴포넌트·노드 카드, 큐 카드의 「권한(RBAC) … 확인하세요」.
+  const boom = () => HttpResponse.json({ detail: "boom" }, { status: 500 });
+  server.use(
+    http.get("/api/admin/metrics/jobs", boom), http.get("/api/admin/metrics/infra", boom),
+    http.get("/api/admin/metrics/queue", boom), http.get("/api/admin/metrics/nodes", boom),
+    http.get("/api/admin/nodes", () => HttpResponse.json([])),
+  );
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={qc}><MemoryRouter><Dashboard /></MemoryRouter></QueryClientProvider>);
+  expect(await screen.findByText(/^잡 집계를 불러오지 못했습니다 — /)).toBeInTheDocument();
+  for (const label of ["실행 중", "대기", "성공(24h)", "실패(24h)", "계획 거부(24h)"])
+    expect(screen.getByText(label).parentElement!.textContent).toBe(`${label}—`);
+  expect(await screen.findByText(/^컴포넌트 상태를 불러오지 못했습니다 — /)).toBeInTheDocument();
+  expect(await screen.findByText(/^큐 현황을 불러오지 못했습니다 — /)).toBeInTheDocument();
+  expect(screen.queryByText(/권한\(RBAC\)/)).toBeNull();
+  expect(await screen.findByText(/^노드 지표를 불러오지 못했습니다 — /)).toBeInTheDocument();
+  expect(await screen.findByText(/^잡 통계를 불러오지 못했습니다 — /)).toBeInTheDocument();
+  expect(screen.queryByText("집계된 잡 없음")).toBeNull();
+  expect(screen.queryByText("해당 기간 잡 없음")).toBeNull();
 });
 
 test("잡 통계가 비배열 truthy({})로 와도 죽지 않는다 -- null 사례는 ?? [] 도 통과시킨다", async () => {
   // 기존 by_state:null 테스트는 `x ?? []` 구현도 초록으로 만들었다(null 은 nullish).
   // {} 는 Array.isArray 가드만 걸러낸다 -- 프록시/구버전 API 가 객체를 흘리는
   // 경우의 실 구분 사례다.
-  renderDash({ jobs: { by_state: {} } });
-  // KPI 타일은 로딩 첫 렌더에도 0 으로 그려져 즉시 단언은 데이터 착지 전에
-  // 초록으로 끝난다 -- 로딩 문구 3곳(Queue/NodeMetrics/JobStats)의 소거를
+  renderDash({ jobs: { by_state: {}, live_by_state: {} } });
+  // KPI 타일은 로딩 첫 렌더에도 「—」로 그려져 즉시 단언은 데이터 착지 전에
+  // 초록으로 끝난다 -- 로딩 문구(Queue/컴포넌트/NodeMetrics/JobStats)의 소거를
   // 기다려 관찰 창을 착지 뒤로 민다. 크래시하면 트리째 언마운트라 타일도 사라진다.
+  // 비배열은 모름이라 「—」(2026-11-11 -- 예전 기대값 「0」은 모름을 0 으로 접은 결과였다).
   await waitFor(() => expect(screen.queryAllByText("불러오는 중…")).toHaveLength(0));
   const running = screen.getByText("실행 중").parentElement!;
-  expect(running).toHaveTextContent("0");
+  expect(running).toHaveTextContent(/^실행 중—$/);
 });
 
 const DRIFTED = {

@@ -75,6 +75,10 @@ export function TimeSeriesChart({ points, label, formatY, formatX, emptyText,
   const area = [`${pts[0].x},100`, ...svgPts, `${pts[pts.length - 1].x},100`];
   const tipRows = (i: number) =>
     points[i].tooltip ?? [{ k: "", v: points[i].label }];
+  // 마우스를 올려 둔 채 점이 줄면(이력 표시 창 60→30 을 키보드로 바꾸거나 포커스 재조회로 목록이 줄 때) 사라진 버튼은
+  // mouseleave 를 내지 않아 active 가 범위 밖으로 남는다 -- 범위 밖 인덱스는 강조·툴팁 없음(2026-11-11: pts[active]
+  // undefined 로 화면 전체가 ErrorBoundary 로 죽었다. BarChart 의 hovered 가드와 같은 규칙).
+  const act = active !== null && active < pts.length ? active : null;
   return (
     <div aria-label={label} role="group" className="max-w-3xl">
       {/* y 축 구실: 최대값 한 점 + 중간 눈금(점선) -- 매 점 값은 호버 툴팁이 든다 */}
@@ -95,8 +99,8 @@ export function TimeSeriesChart({ points, label, formatY, formatX, emptyText,
           <polyline points={svgPts.join(" ")} fill="none" stroke="currentColor"
                     strokeWidth={1.5} vectorEffect="non-scaling-stroke" />
           {/* 호버 점 세로 가이드 -- 어느 x 를 보고 있는지 눈이 즉시 잡는다 */}
-          {active !== null && (
-            <line x1={pts[active].x} x2={pts[active].x} y1="0" y2="100"
+          {act !== null && (
+            <line x1={pts[act].x} x2={pts[act].x} y1="0" y2="100"
                   stroke="currentColor" strokeWidth={0.5} opacity={0.25}
                   vectorEffect="non-scaling-stroke" />
           )}
@@ -125,15 +129,15 @@ export function TimeSeriesChart({ points, label, formatY, formatX, emptyText,
                   style={{ left: `${p.x}%`, top: `${100 - p.yPct}%` }}>
             <span className={`block rounded-full border border-surface bg-accent
                               transition-transform
-                              ${active === i ? "h-3 w-3 ring-2 ring-accent/30"
+                              ${act === i ? "h-3 w-3 ring-2 ring-accent/30"
                                              : "h-2.5 w-2.5"}`} />
           </button>
         ))}
         {/* 즉시 툴팁: active 일 때만 렌더(조건부라 지연 0). 끝점·상단에서 넘치지
             않게 수평/수직 앵커를 좌표로 결정한다. pointer-events-none 이라 점
             호버를 가로채지 않는다. */}
-        {active !== null && (() => {
-          const p = pts[active];
+        {act !== null && (() => {
+          const p = pts[act];
           const below = tooltipPlaceBelow(p.yPct);
           const tx = tooltipTranslateX(p.x);
           return (
@@ -147,7 +151,7 @@ export function TimeSeriesChart({ points, label, formatY, formatX, emptyText,
                               : `calc(${100 - p.yPct}% - 12px)`,
                    transform: `translate(${tx}, ${below ? "0" : "-100%"})`,
                  }}>
-              {tipRows(active).map((r, ri) => (
+              {tipRows(act).map((r, ri) => (
                 <div key={ri} className="flex items-baseline gap-2">
                   {r.k && <span className="text-muted">{r.k}</span>}
                   <span className="ml-auto tabular-nums font-medium">{r.v}</span>

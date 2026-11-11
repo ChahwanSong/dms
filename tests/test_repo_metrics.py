@@ -150,6 +150,34 @@ def test_job_stats_throughput_buckets_by_iso_prefix(db, repos):
     assert daily["throughput"] == [{"bucket": "2026-08-09", "count": 3}]
 
 
+def test_job_stats_day_buckets_follow_the_kst_calendar(db, repos):
+    # 2026-11-11: 일 버킷을 UTC 날짜 접두로 자르면 KST 00~09시(UTC 15~24시)에 만든 잡이 전날 막대에 들어갔다 -- 화면 달력(KST)
+    # 의 날짜로 센다. 시간 버킷은 UTC 그대로(라벨의 KST 변환은 프런트 -- API 시각은 UTC).
+    _seed_job(db, repos, created_at="2026-08-09T14:30:00Z")   # KST 08-09 23:30
+    _seed_job(db, repos, created_at="2026-08-09T15:10:00Z")   # KST 08-10 00:10
+    _seed_job(db, repos, created_at="2026-08-10T01:15:00Z")   # KST 08-10 10:15
+    daily = repos.metrics.job_stats(start="2026-08-09T00:00:00Z",
+                                    end="2026-08-10T23:59:59Z", bucket_chars=10)
+    assert daily["throughput"] == [{"bucket": "2026-08-09", "count": 1},
+                                   {"bucket": "2026-08-10", "count": 2}]
+    hourly = repos.metrics.job_stats(start="2026-08-09T00:00:00Z",
+                                     end="2026-08-10T23:59:59Z", bucket_chars=13)
+    assert [b["bucket"] for b in hourly["throughput"]] == ["2026-08-09T14", "2026-08-09T15", "2026-08-10T01"]
+
+
+def test_live_job_states_counts_every_unfinished_job_without_a_window(db, repos):
+    # 2026-11-11: KPI 「실행 중」·「대기」와 컨트롤 상태 「진행 중 작업」이 24h created_at 창의 by_state 로 세서, 이틀째 도는
+    # sync·하루 넘게 확인을 기다리는 잡이 「실행 중 0」으로 빠졌다. live_job_states 는 창 없이 비종단만 센다.
+    _seed_job(db, repos, created_at="2026-07-01T00:00:00Z", state="Executing")       # 한 달 넘게 실행 중
+    _seed_job(db, repos, created_at="2026-07-02T00:00:00Z", state="ConfirmPending")
+    _seed_job(db, repos, created_at="2026-08-09T01:00:00Z", state="Pending")
+    _seed_job(db, repos, created_at="2026-08-09T01:00:00Z")                          # 종단(Succeeded) -- 세지 않는다
+    _seed_job(db, repos, created_at="2026-08-09T02:00:00Z", state="Failed")
+    assert repos.metrics.live_job_states() == [{"state": "ConfirmPending", "count": 1},
+                                               {"state": "Executing", "count": 1},
+                                               {"state": "Pending", "count": 1}]
+
+
 def test_job_stats_duration_only_from_terminal_jobs(db, repos):
     _seed_job(db, repos, created_at="2026-08-09T01:00:00Z",
               updated_at="2026-08-09T01:00:30Z")

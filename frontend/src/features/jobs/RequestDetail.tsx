@@ -106,6 +106,30 @@ function DeleteRequestControl({ req, jobs, del }: {
   );
 }
 
+// 머리말의 배치 링크(2026-11-11, BACKLOG 「요청 상세·결과 카드의 배치 링크」 해소). 작업 목록 BatchCell 과 같은 규칙: 배치
+// 기록만 지워진 묶음(batch_exists === false)은 상세(404 batch_not_found)가 아니라 그 묶음의 작업만 거른 목록으로 「기록 없음
+// xxxxxxxxxxxx」, 살아 있으면 배치 상세로 이름(없으면 id 앞 12자 -- 목록·확인 창과 같은 길이, 예전 8자는 목록과 달랐다).
+// 요약이 없으면(구형 응답) 상세 링크를 두고 상세가 판정한다. 배치 상세는 관리자 화면이라(비관리자에겐 403) 비관리자에게는
+// 누구에게나 열린 작업 목록 필터(?batch= -- 서버가 자기 작업으로 좁힌다)로 보낸다.
+function BatchRefLink({ req, batchId, isAdmin }: { req: RequestDetailData; batchId: string; isAdmin: boolean }) {
+  const cls = `text-accent underline ${FOCUS_RING}`;
+  const short = batchId.slice(0, 12);
+  if (!isAdmin || req.batch_exists === false) {
+    return (
+      <Link className={cls} to={batchJobsPath(batchId)}
+            title={`${req.batch_exists === false ? "배치 기록 없음" : "배치"} · ${batchId} — 이 묶음의 작업만 보기`}>
+        {req.batch_exists === false ? `배치 기록 없음 ${short}` : `배치 ${short}`}
+      </Link>
+    );
+  }
+  const name = typeof req.batch_name === "string" && req.batch_name.trim() !== "" ? req.batch_name : null;
+  return (
+    <Link className={cls} to={`/admin/batches/${batchId}`} title={`${name ?? "이름 없음"} · ${batchId}`}>
+      {`배치 ${name ?? short}`}
+    </Link>
+  );
+}
+
 function RetryButton({ onClick }: { onClick: () => void }) {
   return <button type="button" className={SMALL_BTN} onClick={onClick}>다시 시도</button>;
 }
@@ -236,8 +260,7 @@ export function RequestDetail() {
           <div className="min-w-0 flex-1">
             {/* 배지는 h1 **밖**(h1 이름 정확 일치 계약 「sync 요청」). root 일 때만 -- 비 root 는 정상 경우라 요소를 늘리지 않는다
                 (비 root 는 카드의 「실행 권한」이 「root 아님」으로 말한다). 본문의 첫 줄이라 카드(배너·KPI 아래)보다 먼저
-                보인다. 단 375 에서는 관리자 사이드바 블록(약 1,060px) 다음이라 첫 화면 안은 아니다 -- 모바일 사이드바 접기는
-                BACKLOG(셸 범위). */}
+                보인다(375 도 첫 화면 안 -- 2026-11-11 부터 좁은 폭 사이드바는 「메뉴」 버튼으로 접힌다, AppShell). */}
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
               <h1 className="text-2xl font-bold">{`${data.operation} 요청`}</h1>
               {spec.badge !== null && <RootBadge kind={spec.badge} />}
@@ -246,11 +269,9 @@ export function RequestDetail() {
               <span className="select-all font-mono [overflow-wrap:anywhere]">{data.request_id}</span>
               <span aria-hidden>·</span><span>{`요청자 ${data.requester_id}`}</span>
               <span aria-hidden>·</span><span>{`제출 ${kstStamp(data.created_at)}`}</span>
-              {data.batch_id && (<>
+              {typeof data.batch_id === "string" && data.batch_id !== "" && (<>
                 <span aria-hidden>·</span>
-                <Link className={`text-accent underline ${FOCUS_RING}`} to={`/admin/batches/${data.batch_id}`}>
-                  {`배치 ${data.batch_id.slice(0, 8)}`}
-                </Link>
+                <BatchRefLink req={data} batchId={data.batch_id} isAdmin={isAdmin} />
               </>)}
             </div>
           </div>

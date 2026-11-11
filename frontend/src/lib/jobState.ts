@@ -14,11 +14,23 @@ export const REQUEST_TERMINAL_STATES = new Set([...TERMINAL_STATES, "Conflict"])
 
 // action = 운영자 행동이 필요한 상태(주의색 앰버 -- busy 의 연파랑·버튼의 accent 와 구별된다). 지금은 배치 「확인 대기」 하나.
 export type PillVariant = "ok" | "bad" | "busy" | "neutral" | "action";
+// 2026-11-11: Conflict(요청 전용 종단 -- 다른 요청과 겹쳐 실행되지 않음)는 같은 성격의 Rejected 처럼 bad 다(잡 상태엔 없는
+// 문자열이라 잡 화면 무영향; requestOutcome 도 tone bad). busy 의 옛 "Planning"·"Scheduled" 는 domain 에 없는 죽은 문자열이었고
+// 실제로 도는 잡 단계 Preflight·PreviewRunning 이 회색(대기처럼)으로 떨어졌다. Pending·Running 은 테스트가 고정한 neutral
+// 그대로다(요청 Running 과 문자열이 겹친다) -- 잡 Running 은 잡 배지 자리가 jobPillVariant 로 따로 칠한다.
 export function pillVariant(state: string): PillVariant {
   if (state === "Succeeded") return "ok";
-  if (["Failed", "TimedOut", "Rejected", "Cancelled", "PreviewExpired"].includes(state)) return "bad";
-  if (["Executing", "ConfirmPending", "Planning", "Scheduled"].includes(state)) return "busy";
+  if (["Failed", "TimedOut", "Rejected", "Cancelled", "PreviewExpired", "Conflict"].includes(state)) return "bad";
+  if (["Executing", "ConfirmPending", "Preflight", "PreviewRunning"].includes(state)) return "busy";
   return "neutral";
+}
+
+// 잡 상태 배지(JobCard) 전용 매핑(2026-11-11): 잡 Running 은 scan 이 데이터를 훑는 실행 단계(stepper 가 RUNNING 으로 제출)라
+// sync·rm 의 Executing 과 같은 busy 다. 공유 pillVariant 에서 neutral 로 두면 scan 잡 배지가 Preflight(파랑) → Running(회색)
+// 으로 「대기로 돌아간」 것처럼 읽혔다. 요청 Running 과 문자열이 겹쳐 공유 매핑은 고치지 않는다(buildPillVariant 와 같은 M5 관례).
+export function jobPillVariant(state: string): PillVariant {
+  if (state === "Running") return "busy";
+  return pillVariant(state);
 }
 
 // M5: 빌드 상태(Pending/Running/Succeeded/Failed)만을 위한 별도 매핑이다. 빌드의

@@ -286,3 +286,15 @@ test("PV 수정: 지금 기본 소유로 시작하고(0 도 값), 바꾼 값을 
   await waitFor(() => expect(body).toEqual({ mount_path: "/k8s_pv/gpfs", managed_root: "/k8s_pv/gpfs", backend_type: "gpfs",
     enabled: true, user_enabled: true, kind: "both", default_uid: 2000, default_gid: 1500 }));
 });
+
+test("연결된 StorageClass: 어느 클러스터에도 없는 매핑(cluster null)은 「(null)」이 아니라 사람 말로(2026-11-11)", async () => {
+  const S = { storage_name: "k8s-pv-nfs", mount_path: "/k8s_pv/nfs", managed_root: "/k8s_pv/nfs", backend_type: "nfs",
+              enabled: 1, status: "Ready", status_detail: null, kind: "pv" } as unknown as Storage;
+  server.use(http.get("/api/admin/k8s/storage-classes", () => HttpResponse.json([
+    { cluster: "dmsk8s", name: "tb-nfs", storage_name: "k8s-pv-nfs" },
+    { cluster: null, name: "old-sc", storage_name: "k8s-pv-nfs" }])));
+  wrap(<StorageDialog mode="edit" storage={S} trigger={<Button>수정</Button>} />);
+  await userEvent.click(screen.getByRole("button", { name: "수정" }));
+  expect(await screen.findByText("연결된 StorageClass: tb-nfs (dmsk8s), old-sc (어느 클러스터에도 없음)")).toBeInTheDocument();
+  expect(screen.queryByText(/\(null\)/)).toBeNull();
+});

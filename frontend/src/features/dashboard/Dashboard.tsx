@@ -1,4 +1,4 @@
-import { useInfraMetrics, useJobMetrics } from "./useMetrics";
+import { loadErrorText, useInfraMetrics, useJobMetrics } from "./useMetrics";
 import { NodeMetricsSection } from "./NodeMetricsSection";
 import { JobStatsSection } from "./JobStatsSection";
 import { QueueSection } from "./QueueSection";
@@ -38,9 +38,12 @@ const VERDICT_VARIANT: Record<string, PillVariant> = {
 export function Dashboard() {
   const jobsQ = useJobMetrics(24);
   const infraQ = useInfraMetrics();
-  // 방어적 정규화 -- 배열 아닌 페이로드 하나가 화면을 죽이면 안 된다
-  const byState = Array.isArray(jobsQ.data?.by_state) ? jobsQ.data.by_state : [];
-  const kpi = kpiFromStates(byState);
+  // 방어적 정규화 -- 배열 아닌 페이로드 하나가 화면을 죽이면 안 된다. 배열이 아니면(로딩·조회 실패·구 서버) null(모름)이고
+  // 타일은 0 이 아니라 「—」다(2026-11-11 -- 예전엔 [] 로 접어 첫 조회가 실패해도 「실행 중 0 · 대기 0 …」이 정상값처럼 떴다).
+  // 「실행 중」·「대기」는 창 없는 비종단 집계(live_by_state)다 -- 24h 창(by_state)으로 세면 이틀째 도는 sync·하루 넘게
+  // 확인을 기다리는 잡이 빠져 위 큐 현황과 다른 「실행 중 0」이 됐다(2026-11-11). 성공·실패는 창 그대로(라벨에 24h).
+  const live = Array.isArray(jobsQ.data?.live_by_state) ? kpiFromStates(jobsQ.data.live_by_state) : null;
+  const win = Array.isArray(jobsQ.data?.by_state) ? kpiFromStates(jobsQ.data.by_state) : null;
   const components = Array.isArray(infraQ.data?.components)
     ? infraQ.data.components : [];
   const jobImage = infraQ.data?.job_image;
@@ -56,19 +59,27 @@ export function Dashboard() {
       <QueueSection />
       {/* 5타일: md 폭에서 5열은 타일당 ~130px -- MetricTile(라벨 한 줄 + 숫자)이
           충분히 읽힌다(실측). 좁은 폭은 2열 그대로. */}
+      {jobsQ.isError && !jobsQ.data && (
+        <p className="text-bad text-sm">{loadErrorText("잡 집계를", jobsQ.error)}</p>
+      )}
       <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-        <MetricTile label="실행 중" value={kpi.running} />
-        <MetricTile label="대기" value={kpi.pending} />
-        <MetricTile label="성공(24h)" value={kpi.succeeded} />
-        <MetricTile label="실패(24h)" value={kpi.failed} />
+        <MetricTile label="실행 중" value={live?.running ?? "—"} />
+        <MetricTile label="대기" value={live?.pending ?? "—"} />
+        <MetricTile label="성공(24h)" value={win?.succeeded ?? "—"} />
+        <MetricTile label="실패(24h)" value={win?.failed ?? "—"} />
         {/* 계획 거부는 data_jobs 가 생기기 전의 종단이라 위 4타일(전부 by_state
             = data_jobs 집계) 밖이다 -- results 집계 필드가 유일한 원천. 0 은
-            0 으로 표기한다(null≠0 -- 거부 없음은 정상값). */}
-        <MetricTile label="계획 거부(24h)" value={jobsQ.data?.plan_rejected ?? 0} />
+            0 으로 표기한다(null≠0 -- 거부 없음은 정상값). 응답이 없으면(로딩·실패) 모름이라 「—」. */}
+        <MetricTile label="계획 거부(24h)"
+                    value={typeof jobsQ.data?.plan_rejected === "number" ? jobsQ.data.plan_rejected : "—"} />
       </div>
       {/* grid 에 홀로 남은 컴포넌트 카드는 md 반폭이 어색해 전폭으로 편다. */}
       <Card>
         <h2 className="font-medium mb-3">컴포넌트</h2>
+        {infraQ.isLoading && <p className="text-muted text-sm">불러오는 중…</p>}
+        {infraQ.isError && !infraQ.data && (
+          <p className="text-bad text-sm">{loadErrorText("컴포넌트 상태를", infraQ.error)}</p>
+        )}
         <ul className="space-y-2 text-sm">
           {components.map((c) => (
             <li key={c.component} className="space-y-1">

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { NAVIGATION, activeNavPath, breadcrumbFor } from "./navigation";
+import { NAVIGATION, activeNavPath, breadcrumbFor, loginReturnPath } from "./navigation";
 import type { NavItem } from "./navigation";
 
 // 메뉴는 데이터가 진실이다(슬라이스 31 T2) -- 이 파일은 그 데이터가 "현행 사이드바
@@ -188,4 +188,17 @@ test("배치 작업은 작업 그룹의 관리자 전용 항목이다(사용자 
   expect(breadcrumbFor("/admin/batches").map((c) => c.label)).toEqual(["HOME", "DMS", "작업", "배치 작업"]);
   expect(breadcrumbFor("/admin/batches/abc").map((c) => c.label))
     .toEqual(["HOME", "DMS", "작업", "배치 작업", "배치 상세"]);
+});
+
+// 2026-11-11 로그인 뒤 복귀: RequireRole 이 실은 state.from 중 앱 내부 경로만 받는다(그 밖은 「/」 -- Home 이 역할별로 보낸다).
+test("loginReturnPath: 내부 경로만 돌려주고 외부·프로토콜 상대·/login·이상한 값은 「/」", () => {
+  expect(loginReturnPath({ from: "/jobs/r-1?tab=log#x" })).toBe("/jobs/r-1?tab=log#x");
+  expect(loginReturnPath({ from: "/admin/batches/b1" })).toBe("/admin/batches/b1");
+  for (const bad of [null, undefined, "x", 3, {}, { from: 1 }, { from: "" }, { from: "jobs" },
+                     { from: "//evil.example/x" }, { from: "/\\evil.example" }, { from: "https://evil.example/" },
+                     { from: "/login" }, { from: "/login?x=1" }, { from: "/login#a" }, { from: "/login/" }]) {
+    expect(loginReturnPath(bad)).toBe("/");
+  }
+  // /login 으로 시작할 뿐 다른 경로는 그대로(접두 오판 금지)
+  expect(loginReturnPath({ from: "/loginx" })).toBe("/loginx");
 });

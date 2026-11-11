@@ -80,11 +80,20 @@ function PolicyCard({ p }: { p: Policy }) {
                   value={`${p.max_nodes}노드 × ${p.procs_per_node}프로세스`}
                   sub={`최대 ${p.max_nodes * p.procs_per_node}개 프로세스`} />
         )}
-        <Metric label="우선순위(기본 / 최대)" value={`${p.default_priority} / ${p.max_priority}`}
-                sub="요청이 최대보다 높으면 최대로 낮춰집니다" />
+        {/* sync 의 기본 우선순위는 늘 dsync 정책 값이다(domain.resolve_priority -- 제출 시점엔 도구가 정해지지 않는다, 2026-11-11).
+            nsync 행의 기본값은 어디에서도 읽히지 않으니 값 대신 그 사실을 보이고, dsync 쪽엔 nsync 실행에도 적용됨을 단다. */}
+        <Metric label="우선순위(기본 / 최대)"
+                value={p.tool === "nsync" ? `dsync 따름 / ${p.max_priority}` : `${p.default_priority} / ${p.max_priority}`}
+                sub={p.tool === "nsync" ? "기본값은 dsync 정책 값을 씁니다 · 요청이 최대보다 높으면 최대로 낮춰집니다"
+                  : p.tool === "dsync" ? "기본값은 nsync 로 실행되는 sync 에도 적용 · 요청이 최대보다 높으면 최대로 낮춰집니다"
+                  : "요청이 최대보다 높으면 최대로 낮춰집니다"} />
         <Metric label="큐" value={p.queue} sub="Volcano 큐" />
+        {/* scan 은 미리보기가 없어 이 값이 쓰이지 않는다(stepper: 사전 점검 뒤 바로 실행, 사전 점검·재점검은 고정 10분 --
+            2026-11-04 결함 #5). 수정 창 캡션과 같게 값 대신 「쓰지 않음」(2026-11-11). */}
         <Metric label="미리보기 타임아웃"
-                value={p.preview_timeout_seconds === null ? "없음" : humanSeconds(p.preview_timeout_seconds)} />
+                value={p.tool === "scan" ? "쓰지 않음"
+                  : p.preview_timeout_seconds === null ? "없음" : humanSeconds(p.preview_timeout_seconds)}
+                sub={p.tool === "scan" ? "scan 은 미리보기가 없습니다" : undefined} />
         <Metric label="실행 타임아웃" value={humanSeconds(p.execution_timeout_seconds)} />
       </div>
       {(p.updated_at || p.updated_by) && (

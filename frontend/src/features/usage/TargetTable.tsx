@@ -4,6 +4,7 @@ import { Table } from "../../components/ui/Table";
 import { HelpTip } from "../../components/ui/HelpTip";
 import type { ScanTargetRow } from "../../lib/types";
 import { agoText, ageDays, kstStampOrDash } from "../../lib/datetime";
+import { pctText } from "../../lib/sizeBuckets";
 import type { UsageSort } from "./useUsage";
 import { Highlight } from "../../components/ui/Highlight";
 import { TERMS } from "../k8s/k8sTerms";
@@ -181,10 +182,13 @@ export function TargetTable({ rows, activeTarget, onOpen, buttonRefs, sort, orde
               <td className="whitespace-nowrap px-3 text-right tabular-nums">
                 {typeof files === "number" ? files.toLocaleString("ko-KR") : "—"}
               </td>
+              {/* hot·스캔 횟수 표기(2026-11-11 B90·B79): hot 은 시트 온도 툴팁과 같은 pctText(정수 반올림이면 0.3% 가 「0%」라
+                  진짜 0% 와 같아 보였다 -- 「낮은 순 = 정리 후보」 정렬에서), 스캔 횟수는 옆 「파일 수」처럼 천 단위 구분. */}
               <td className="whitespace-nowrap px-3 text-right tabular-nums">
-                {hot === null ? "—" : `${Math.round(hot * 100)}%`}
+                {hot === null ? "—" : pctText(hot * 100)}
               </td>
-              <td className="px-3 text-right tabular-nums">{r.scan_count}</td>
+              <td className="px-3 text-right tabular-nums">
+                {typeof r.scan_count === "number" ? r.scan_count.toLocaleString("ko-KR") : "—"}</td>
               {/* 경과(2026-10-02): 지금부터 얼마나 전인지 + 30일 주의색 · 90일 빨강. 정확한 시각은 넓은 화면(xl)에서만 옆에
                   -- 좁은 화면에선 가장 넓은 열이 됐다(title 로는 늘 볼 수 있다). */}
               <td className="whitespace-nowrap pl-6 pr-3" title={kstStampOrDash(r.last_scan_at)}>

@@ -243,6 +243,22 @@ test.describe("E3 레이아웃 불변식", () => {
     await assertTableOverflows(page);
     await assertLayoutSane(page, { sidebarFixed: false, minTableCells: 24 });
 
+    // 좁은 폭 메뉴(2026-11-11, BACKLOG 「모바일(375) 사이드바 접기」 해소): 메뉴·사용자 패널은 기본 닫힘이라 첫 화면이 본문이다
+    // (예전엔 관리자 사이드바 약 1,050px 블록 뒤 y≈1,200 에서 본문이 시작했다). 닫힌 채로는 nav 링크가 display:none 이라 위 L4 가
+    // 높이 0 으로 지나가므로, 한 번 열어 링크 한 줄·문서 넘침을 재고 다시 닫는다.
+    const h1Top = await page.getByRole("heading", { name: "계정", level: 1 })
+      .evaluate((el) => el.getBoundingClientRect().top);
+    expect(h1Top, "375 첫 화면 안에 본문 h1 이 없다 -- 사이드바가 본문 위를 차지했다").toBeLessThan(667);
+    const menu = page.getByRole("button", { name: "메뉴", exact: true });
+    await expect(menu).toHaveAttribute("aria-expanded", "false");
+    await expect(page.locator("aside").getByRole("link", { name: "전체 작업" })).toBeHidden();
+    await menu.click();
+    await expect(page.locator("aside").getByRole("link", { name: "전체 작업" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "로그아웃" })).toBeVisible();
+    await assertLayoutSane(page, { sidebarFixed: false, minTableCells: 24 });
+    await menu.click();
+    await expect(page.locator("aside").getByRole("link", { name: "전체 작업" })).toBeHidden();
+
     await visit(page, "/jobs", "전체 작업");
     await assertLayoutSane(page, { sidebarFixed: false, minTableCells: 4 });
 

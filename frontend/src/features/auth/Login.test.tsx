@@ -45,13 +45,14 @@ test("submits credentials and shows error on 401", async () => {
 
 test("네트워크 단절은 일반 한국어 문구를 보인다 -- 영어 원문 노출 금지", async () => {
   // fetch 는 네트워크 단절 시 TypeError("Failed to fetch") 로 reject 된다 --
-  // ApiError 무가드 캐스트는 그 영어 원문을 사용자에게 그대로 노출했다.
+  // ApiError 무가드 캐스트는 그 영어 원문을 사용자에게 그대로 노출했다. 2026-11-11 부터 request() 가 그 거부를
+  // ApiError(0, network_error)로 바꾸므로 화면 대체 문구가 아니라 공용 사유 문구다(다른 화면과 같은 말).
   server.use(http.post("/api/auth/login", () => HttpResponse.error()));
   renderLogin();
   await userEvent.type(screen.getByLabelText("사용자명"), "alice");
   await userEvent.type(screen.getByLabelText("비밀번호"), "pw");
   await userEvent.click(screen.getByRole("button", { name: "로그인" }));
-  expect(await screen.findByText("로그인 요청에 실패했습니다 — 네트워크 상태를 확인하세요"))
+  expect(await screen.findByText("서버에 연결하지 못했습니다 — 네트워크 상태를 확인하고 잠시 뒤 다시 시도하세요"))
     .toBeInTheDocument();
   expect(screen.queryByText(/Failed to fetch/i)).not.toBeInTheDocument();
 });
@@ -264,6 +265,40 @@ test("navigates to / on successful login", async () => {
   expect(await screen.findByRole("heading", { name: "홈" })).toBeInTheDocument();
 });
 
+// 2026-11-11: RequireRole 이 401 로 보낼 때 실은 원래 주소(state.from)로 돌아간다 -- 예전엔 늘 「/」라 딥링크를 잃었다.
+function renderLoginWithState(state: unknown) {
+  server.use(http.post("/api/auth/login", () => HttpResponse.json({ actor: "alice", role: "user" })));
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(
+    <QueryClientProvider client={qc}>
+      <MemoryRouter initialEntries={[{ pathname: "/login", state }]}>
+        <Routes>
+          <Route path="/login" element={<Login />} />
+          <Route path="/" element={<h1>홈</h1>} />
+          <Route path="/jobs/:id" element={<h1>요청 상세</h1>} />
+        </Routes>
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+}
+async function submitLogin() {
+  await userEvent.type(screen.getByLabelText("사용자명"), "alice");
+  await userEvent.type(screen.getByLabelText("비밀번호"), "good");
+  await userEvent.click(screen.getByRole("button", { name: "로그인" }));
+}
+
+test("로그인 성공 뒤 state.from(원래 열려던 내부 경로)으로 돌아간다", async () => {
+  renderLoginWithState({ from: "/jobs/r-1?tab=log" });
+  await submitLogin();
+  expect(await screen.findByRole("heading", { name: "요청 상세" })).toBeInTheDocument();
+});
+
+test("state.from 이 프로토콜 상대 주소면 「/」로 간다(앱 내부 경로만 -- 나머지 규칙은 navigation.test)", async () => {
+  renderLoginWithState({ from: "//evil.example/x" });
+  await submitLogin();
+  expect(await screen.findByRole("heading", { name: "홈" })).toBeInTheDocument();
+});
+
 test("인증번호 안내의 도메인은 서버 설정을 따른다(하드코딩 아님) -- Knox 메일이면 개발용 코드 안내가 없다", async () => {
   server.use(
     http.get("/api/auth/mail-info", () => HttpResponse.json({ email_domain: "corp.example", delivery: "knox_relay" })),
@@ -313,6 +348,148 @@ test("인증 메일 실패·상한은 한국어 사유로 보인다", async () =
     HttpResponse.json({ detail: "verification_email_failed" }, { status: 502 })));
   await userEvent.click(screen.getByRole("button", { name: "인증번호 받기" }));
   expect(await screen.findByText(/인증 메일을 보내지 못했습니다/)).toBeInTheDocument();
+});
+
+test("아이디 앞뒤 공백(자동완성·복사)이어도 발급·가입 제출이 같은 trim 값을 보낸다 -- 봉인 AAD 도 같은 값(2026-11-11)", async () => {
+  // 예전엔 발급만 trim 하고 제출은 원문이라 서버가 코드를 못 찾아 verification_not_found 가 끝없이 반복됐다.
+  const bodies: { username: string; password_enc?: unknown }[] = [];
+  server.use(
+    http.post("/api/auth/verification-codes", async ({ request }) => {
+      bodies.push(await request.json() as { username: string });
+      return HttpResponse.json({ email: "cocoa.song@samsung.com", expires_in_seconds: 300, stub_code: "123456" });
+    }),
+    http.post("/api/auth/signup", async ({ request }) => {
+      bodies.push(await request.json() as { username: string; password_enc: unknown });
+      return HttpResponse.json({ username: "cocoa.song" }, { status: 201 });
+    }),
+  );
+  renderLogin();
+  await userEvent.click(screen.getByRole("tab", { name: "계정 생성" }));
+  await userEvent.type(screen.getByLabelText("회사 아이디"), " cocoa.song ");
+  await userEvent.click(screen.getByRole("button", { name: "인증번호 받기" }));
+  await screen.findByText(/인증번호를 보냈습니다/);
+  await userEvent.type(screen.getByLabelText("인증번호"), "123456");
+  await userEvent.type(screen.getByLabelText("비밀번호"), "pw1");
+  await userEvent.click(screen.getByRole("button", { name: "계정 생성" }));
+  expect(await screen.findByText("계정이 생성됐습니다 — 로그인하세요")).toBeInTheDocument();
+  expect(bodies.map((b) => b.username)).toEqual(["cocoa.song", "cocoa.song"]);
+  expect(await openSealed(serverKey, bodies[1].password_enc as never, "signup", "cocoa.song")).toBe("pw1");
+});
+
+test("로그인도 아이디 앞뒤 공백을 지워 보낸다 -- 봉인 AAD 도 같은 값(2026-11-11)", async () => {
+  const bodies: { username: string; password_enc: unknown }[] = [];
+  server.use(http.post("/api/auth/login", async ({ request }) => {
+    bodies.push(await request.json() as { username: string; password_enc: unknown });
+    return HttpResponse.json({ actor: "alice", role: "user" });
+  }));
+  renderLogin();
+  await userEvent.type(screen.getByLabelText("사용자명"), "alice ");
+  await userEvent.type(screen.getByLabelText("비밀번호"), "s3cret");
+  await userEvent.click(screen.getByRole("button", { name: "로그인" }));
+  await waitFor(() => expect(bodies).toHaveLength(1));
+  expect(bodies[0].username).toBe("alice");
+  expect(await openSealed(serverKey, bodies[0].password_enc as never, "login", "alice")).toBe("s3cret");
+});
+
+test("비밀번호가 맞은 비활성 계정(401 account_disabled)은 「비활성」과 활성화 요청 안내를 보인다(2026-11-11)", async () => {
+  server.use(http.post("/api/auth/login",
+    () => HttpResponse.json({ detail: "account_disabled" }, { status: 401 })));
+  renderLogin();
+  await userEvent.type(screen.getByLabelText("사용자명"), "alice");
+  await userEvent.type(screen.getByLabelText("비밀번호"), "pw");
+  await userEvent.click(screen.getByRole("button", { name: "로그인" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("계정이 비활성화되었습니다 — 관리자에게 활성화를 요청하세요");
+});
+
+test("지난 로그인 오류는 탭을 오가거나 재설정을 마치고 로그인 탭으로 돌아오면 지워진다(2026-11-11)", async () => {
+  server.use(
+    http.post("/api/auth/login", () =>
+      HttpResponse.json({ detail: "login_rate_limited" }, { status: 429, headers: { "Retry-After": "42" } })),
+    http.post("/api/auth/verification-codes", () =>
+      HttpResponse.json({ email: "alice@samsung.com", expires_in_seconds: 300, stub_code: "123456" })),
+    http.post("/api/auth/password-reset", () => HttpResponse.json({ username: "alice" })),
+  );
+  renderLogin();
+  await userEvent.type(screen.getByLabelText("사용자명"), "alice");
+  await userEvent.type(screen.getByLabelText("비밀번호"), "bad");
+  await userEvent.click(screen.getByRole("button", { name: "로그인" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent(/로그인 시도가 너무 많습니다/);
+  // 탭을 오가면 지워진다
+  await userEvent.click(screen.getByRole("tab", { name: "계정 생성" }));
+  await userEvent.click(screen.getByRole("tab", { name: "로그인" }));
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  // 다시 실패한 뒤 셀프 재설정에 성공해 돌아오면 초록 안내만 -- 서버가 실패 카운터를 비웠으니 남은 429 는 거짓이다
+  await userEvent.click(screen.getByRole("button", { name: "로그인" }));
+  expect(await screen.findByRole("alert")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("tab", { name: "비밀번호 변경" }));
+  await userEvent.type(screen.getByLabelText("회사 아이디"), "alice");
+  await userEvent.click(screen.getByRole("button", { name: "인증번호 받기" }));
+  await screen.findByText(/인증번호를 보냈습니다/);
+  await userEvent.type(screen.getByLabelText("인증번호"), "123456");
+  await userEvent.type(screen.getByLabelText("새 비밀번호"), "new");
+  await userEvent.click(screen.getByRole("button", { name: "비밀번호 변경" }));
+  expect(await screen.findByText("비밀번호가 변경됐습니다 — 새 비밀번호로 로그인하세요")).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "로그인" })).toBeInTheDocument();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+});
+
+// 2026-11-11 리뷰: 진행 중인 로그인을 탭 전환이 reset 하면 observer 가 떨어져 200 이 와도 원래 화면으로 이동하지 않았다
+// (세션 쿠키는 심긴 채 로그인 화면에 남음). 끝난 결과만 비워야 한다.
+test("로그인 대기 중에 탭을 바꿔도 응답이 오면 원래 화면으로 이동한다", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  server.use(http.post("/api/auth/login", async () => {
+    await gate;
+    return HttpResponse.json({ actor: "alice", role: "user" });
+  }));
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(
+    <QueryClientProvider client={qc}>
+      <MemoryRouter initialEntries={["/login"]}>
+        <Routes>
+          <Route path="/login" element={<Login />} />
+          <Route path="/" element={<h1>홈</h1>} />
+        </Routes>
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+  await submitLogin();
+  expect(await screen.findByRole("button", { name: "로그인 중…" })).toBeDisabled();
+  await userEvent.click(screen.getByRole("tab", { name: "비밀번호 변경" }));
+  await userEvent.click(screen.getByRole("tab", { name: "로그인" }));
+  // 진행 중 표시가 이어진다 -- 비워졌다면 다시 누를 수 있는 「로그인」 버튼이 돌아와 줄을 더 늘린다
+  expect(screen.getByRole("button", { name: "로그인 중…" })).toBeDisabled();
+  await userEvent.click(screen.getByRole("tab", { name: "계정 생성" }));
+  release();
+  expect(await screen.findByRole("heading", { name: "홈" })).toBeInTheDocument();
+});
+
+test("다른 탭에 있는 동안 끝난 로그인 오류도 재설정을 마치고 돌아오면 지워진다", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  server.use(
+    http.post("/api/auth/login", async () => {
+      await gate;
+      return HttpResponse.json({ detail: "invalid_credentials" }, { status: 401 });
+    }),
+    http.post("/api/auth/verification-codes", () =>
+      HttpResponse.json({ email: "alice@samsung.com", expires_in_seconds: 300, stub_code: "123456" })),
+    http.post("/api/auth/password-reset", () => HttpResponse.json({ username: "alice" })),
+  );
+  renderLogin();
+  await submitLogin();
+  expect(await screen.findByRole("button", { name: "로그인 중…" })).toBeDisabled();
+  await userEvent.click(screen.getByRole("tab", { name: "비밀번호 변경" }));
+  release();
+  await userEvent.type(screen.getByLabelText("회사 아이디"), "alice");
+  await userEvent.click(screen.getByRole("button", { name: "인증번호 받기" }));
+  await screen.findByText(/인증번호를 보냈습니다/);
+  await userEvent.type(screen.getByLabelText("인증번호"), "123456");
+  await userEvent.type(screen.getByLabelText("새 비밀번호"), "new");
+  await userEvent.click(screen.getByRole("button", { name: "비밀번호 변경" }));
+  expect(await screen.findByText("비밀번호가 변경됐습니다 — 새 비밀번호로 로그인하세요")).toBeInTheDocument();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "로그인" })).toBeEnabled();
 });
 
 

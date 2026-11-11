@@ -23,6 +23,13 @@ MAX_SEARCH_TOKENS = 8
 # 낱말(「abc」·「dead」)과 우연히 겹쳐 엉뚱한 배치를 잡으므로 id 로 보지 않는다(6자 접두가 우연히 맞을 확률 16^-6).
 BATCH_ID_PREFIX_RE = re.compile(r"[0-9a-f]{6,32}")
 
+# 화면의 「PV 전체」 표기(frontend/src/lib/storagePaths.ts PV_WHOLE -- tests/test_k8s_submit.py 가 두 값을 대조한다). 하위경로가
+# 빈 PV 쪽을 화면은 「pvc — ns (sc) / (PV 전체)」로 그리지만 저장된 target_label(k8s_access.side_label)은 「 / …」를 통째로 뗀다
+# -- 대상 칸을 그대로 붙여 넣으면 「(PV」·「전체)」 토큰이 어디에도 없어 0건이었다(2026-11-11). 그래서 앞의 「/」와 함께 구분자로
+# 지운다(화살표와 같은 취급).
+PV_WHOLE_LABEL = "(PV 전체)"
+_PV_WHOLE_RE = re.compile(r"(?:/\s*)?" + re.escape(PV_WHOLE_LABEL))
+
 
 def escape_like(value: str) -> str:
     """LIKE 와일드카드를 리터럴로(`ESCAPE '\\'` 짝)."""
@@ -45,9 +52,9 @@ def search_tokens(text: str | None) -> list[str]:
 
     「일부 단어만 맞아도 보여 달라(exact match 완화)」(2026-10-25 사용자 요청): 토큰마다 **부분** 일치이고 토큰 사이는 AND 다
     -- 「이관 1차」가 「스토리지 이관(1차)」에, 「growth e2e」가 「cephfs-dms:e2e/growth」에 걸린다. 화면 대상 열에서 sync 표기
-    (「s1:a → s2:b」)를 통째로 붙여 넣어도 맞도록 화살표는 구분자로 본다. NUL 은 PG text 가 받지 못해(psycopg DataError →
-    500) 구분자로 지운다."""
+    (「s1:a → s2:b」)를 통째로 붙여 넣어도 맞도록 화살표는 구분자로 본다. PV 전체 표기(「 / (PV 전체)」)도 같은 이유로 구분자다
+    (PV_WHOLE_LABEL). NUL 은 PG text 가 받지 못해(psycopg DataError → 500) 구분자로 지운다."""
     if text is None:
         return []
-    cleaned = text.replace("\x00", " ").replace("→", " ")
+    cleaned = _PV_WHOLE_RE.sub(" ", text.replace("\x00", " ").replace("→", " "))
     return list(dict.fromkeys(cleaned.split()))[:MAX_SEARCH_TOKENS]

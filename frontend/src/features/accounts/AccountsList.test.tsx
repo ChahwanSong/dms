@@ -7,6 +7,7 @@ import { http, HttpResponse } from "msw";
 import { beforeAll, beforeEach, afterAll, afterEach, test, expect } from "vitest";
 import { AccountsList } from "./AccountsList";
 import { forgetTransportKey } from "../../lib/passwordTransport";
+import { reasonText } from "../../lib/api";
 import { isSealed, makeServerKey, openSealed, transportKeyHandler, type TestServerKey } from "../../test/transportKey";
 
 const server = setupServer();
@@ -102,6 +103,32 @@ test("shows the Korean message when a mutation returns 409 cannot_lock_self", as
   const row = (await screen.findByText("alice")).closest("tr")!;
   await userEvent.click(within(row).getByRole("button", { name: "활성화" }));
   expect(await screen.findByText("자기 계정의 역할 변경·비활성화는 할 수 없습니다")).toBeInTheDocument();
+});
+
+test("표 아래 오류 줄은 마지막 동작의 결과만 -- 역할 변경 실패 뒤 다른 동작이 성공하면 지워지고, 실패하면 새 사유로 바뀐다(2026-11-11)", async () => {
+  stubMe("root");
+  const roleMsg = reasonText("privileged_account_protected");
+  const toggleMsg = reasonText("cannot_lock_self");
+  server.use(
+    http.get("/api/admin/accounts", () => HttpResponse.json(ACCOUNTS)),
+    http.put("/api/admin/accounts/admin/role", () =>
+      HttpResponse.json({ detail: "privileged_account_protected" }, { status: 403 })),
+    http.put("/api/admin/accounts/alice/disabled", () => HttpResponse.json({ ...ACCOUNTS[1], disabled: 0 })));
+  wrap();
+  const aliceRow = (await screen.findByText("alice")).closest("tr")!;
+  await userEvent.selectOptions(screen.getByRole("combobox", { name: "admin 역할" }), "user");
+  expect(await screen.findByText(roleMsg)).toBeInTheDocument();
+  // 다른 계정의 상태 변경이 성공하면 낡은 역할 실패 문구는 사라진다(예전엔 남아 방금 동작이 실패한 것처럼 보였다)
+  await userEvent.click(within(aliceRow).getByRole("button", { name: "활성화" }));
+  await waitFor(() => expect(screen.queryByText(roleMsg)).not.toBeInTheDocument());
+  // 다시 역할 실패 → 이어진 상태 변경 실패: 새 사유가 보이고 낡은 역할 문구는 가리지 않는다
+  await userEvent.selectOptions(screen.getByRole("combobox", { name: "admin 역할" }), "user");
+  expect(await screen.findByText(roleMsg)).toBeInTheDocument();
+  server.use(http.put("/api/admin/accounts/alice/disabled", () =>
+    HttpResponse.json({ detail: "cannot_lock_self" }, { status: 409 })));
+  await userEvent.click(within(aliceRow).getByRole("button", { name: "활성화" }));
+  expect(await screen.findByText(toggleMsg)).toBeInTheDocument();
+  expect(screen.queryByText(roleMsg)).not.toBeInTheDocument();
 });
 
 test("자기 계정은 삭제 버튼 대신 비활성 사유를 보여준다", async () => {

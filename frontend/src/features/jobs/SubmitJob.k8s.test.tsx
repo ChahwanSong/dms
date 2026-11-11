@@ -7,7 +7,8 @@ import { http, HttpResponse } from "msw";
 import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from "vitest";
 import { SubmitJob } from "./SubmitJob";
 import { SYNC_INT_FIELDS } from "./optionRules";
-import { PRIV_ROOT_SYNC_DIRECT_BOTH, PRIV_ROOT_SYNC_PV, PRIV_ROOT_SYNC_PV_ROOT } from "./optionRules";
+import { PRIV_ROOT_HEAD, PRIV_ROOT_SYNC_DIRECT_BOTH, PRIV_ROOT_SYNC_PV, PRIV_ROOT_SYNC_PV_ROOT } from "./optionRules";
+import { REASON_MESSAGES } from "../../lib/api";
 import type { Me, UserStorage } from "../../lib/types";
 import type { ClusterFreshness, UserVolumesResponse, VolumeRow, VolumesResponse } from "../k8s/types";
 
@@ -595,4 +596,172 @@ test("운영자: 겸용 스토리지의 기본 소유 값이 올바르지 않아
   expect(summaryValue("목적지 소유"))
     .toHaveTextContent("PV 루트 아래면 목적지 스토리지 기본 소유자(uid:gid), 아니면 소스 그대로");
   await waitFor(() => expect(submitButton()).toBeEnabled());
+});
+
+// ---- 2026-11-11 포탈 전수조사 회귀(jobs-submit) -----------------------------------------------------------------
+
+test("사용자: rm 에서 켠 quiet 는 sync 로 돌아오면 바디에 실리지 않는다(sync 화면엔 quiet 칸이 없어 끌 수 없다)", async () => {
+  renderAs(meUser);
+  await choose("rm");
+  await userEvent.click(screen.getByLabelText("quiet"));
+  await userEvent.selectOptions(screen.getByLabelText("연산"), "sync");
+  expect(screen.queryByLabelText("quiet")).toBeNull();
+  await pick("소스 namespace (StorageClass)", "소스 PV 이름", "team-a (tb-gpfs)", "models — 1Gi · Bound");
+  await pick("목적지 namespace (StorageClass)", "목적지 PV 이름", "team-b (tb-nfs)", "scratch — 5Gi · Bound");
+  await userEvent.type(screen.getByLabelText("목적지 PV 안 경로"), "in");
+  expect(summaryValue("옵션")).not.toHaveTextContent("quiet");
+  const body = await submitAndBody() as Record<string, unknown>;
+  expect(body.options).toEqual(SYNC_DEFAULTS);
+});
+
+test("면제자: 권한 기준 사용자의 범위 목록 조회가 실패해도 양쪽이 직접 경로면 잠그지 않는다(PV 쪽이 있으면 잠근다)", async () => {
+  server.use(http.get("/api/admin/k8s/volumes", ({ request }) => {
+    adminVolumeUrls.push(request.url);
+    const url = new URL(request.url);
+    return url.searchParams.get("user") !== null
+      ? HttpResponse.json({ detail: "boom" }, { status: 500 })
+      : HttpResponse.json(adminVolumes(url));
+  }));
+  renderAs(meExempt);
+  await userEvent.type(await screen.findByLabelText("권한 기준 사용자"), "alice");
+  expect(await screen.findByText(/^PV 목록을 불러오지 못했습니다: /)).toBeInTheDocument();
+  // 양쪽이 PV(기본)인 동안은 잠그고 그 이유를 말한다
+  expect(submitButton()).toBeDisabled();
+  expect(hints()).toHaveTextContent("PV 목록 조회 실패 — 새로고침 후 다시 시도하세요");
+  for (const side of ["소스", "목적지"] as const)
+    await userEvent.click(within(screen.getByRole("group", { name: `${side} 지정 방식` }))
+      .getByRole("button", { name: "직접 경로" }));
+  const src = screen.getByLabelText("소스 스토리지");
+  await within(src).findByRole("option", { name: "cephfs-dms" });
+  await userEvent.selectOptions(src, "cephfs-dms");
+  await userEvent.type(screen.getByLabelText("소스 경로"), "a/b");
+  await userEvent.selectOptions(screen.getByLabelText("목적지 스토리지"), "cephfs-dms");
+  await userEvent.type(screen.getByLabelText("목적지 경로"), "c/d");
+  expect(hints()?.textContent ?? "").not.toContain("PV 목록 조회 실패");
+  expect(await submitAndBody()).toEqual({
+    operation: "sync", source_storage: "cephfs-dms", source: "a/b", destination_storage: "cephfs-dms", destination: "c/d",
+    options: SYNC_DEFAULTS, owner_username: "alice", run_as_root: true,
+  });
+});
+
+test("운영자: PV 목적지의 스토리지 기본 소유 값이 무효여도 chown 을 지정하면 잠그지 않는다(서버는 chown 이면 그 값을 안 본다)", async () => {
+  server.use(http.get("/api/admin/k8s/volumes", ({ request }) => {
+    const r = adminVolumes(new URL(request.url));
+    return HttpResponse.json({ ...r, volumes: r.volumes.map((v) => (v.pvc === "scratch" ? { ...v, storage_owner: null } : v)) });
+  }));
+  renderAs(meExempt);
+  await exemptPick("소스", "archive");
+  await exemptPick("목적지", "scratch");
+  await userEvent.type(screen.getByLabelText("목적지 PV 안 경로"), "in");
+  expect(submitButton()).toBeDisabled();
+  expect(hints()).toHaveTextContent("목적지 스토리지의 기본 소유 값이 올바르지 않습니다");
+  await userEvent.type(screen.getByLabelText("chown"), "7:7");
+  expect(hints()?.textContent ?? "").not.toContain("기본 소유 값이 올바르지 않습니다");
+  expect(ownerCard()).not.toHaveTextContent("저장된 기본 소유 값이 올바르지 않아 제출할 수 없습니다");
+  const body = await submitAndBody() as Record<string, unknown>;
+  expect(body.options).toEqual({ ...SYNC_DEFAULTS, chown: "7:7" });
+});
+
+test("목적지 경로가 서버가 거부할 모양이면 「상위 디렉토리」를 지어내지 않는다(PV '../x', 직접 경로 '/abs/x'), 직접 경로는 입력 그대로", async () => {
+  renderAs(meExempt);
+  await exemptPick("목적지", "scratch");
+  const sub = screen.getByLabelText("목적지 PV 안 경로");
+  await userEvent.type(sub, "in/run");
+  expect(ownerCard()).toHaveTextContent("이 요청에서는 /k8s_pv/nfs/team-b/scratch/in 가 이미 있어야 합니다");
+  await userEvent.clear(sub);
+  await userEvent.type(sub, "../x");
+  expect(ownerCard()).not.toHaveTextContent("이 요청에서는");
+  expect(summaryValue("목적지 조건")).toHaveTextContent("상위 디렉토리 (목적지 경로의 상위) 가 있어야 함");
+  await userEvent.click(within(screen.getByRole("group", { name: "목적지 지정 방식" })).getByRole("button", { name: "직접 경로" }));
+  const storage = screen.getByLabelText("목적지 스토리지");
+  await within(storage).findByRole("option", { name: "cephfs-dms" });
+  await userEvent.selectOptions(storage, "cephfs-dms");
+  const path = screen.getByLabelText("목적지 경로");
+  await userEvent.type(path, "/abs/x");
+  expect(ownerCard()).not.toHaveTextContent("이 요청에서는");
+  expect(summaryValue("목적지 조건")).toHaveTextContent("상위 디렉토리 (목적지 경로의 상위) 가 있어야 함");
+  // 앞 공백도 이름의 일부(서버는 다듬지 않는다) -- 「/cephfs/managed/a」로 지어 보이지 않는다
+  await userEvent.clear(path);
+  await userEvent.type(path, " a/b");
+  expect(summaryValue("목적지 조건").textContent).toContain("상위 디렉토리 /cephfs/managed/ a 가 있어야 함");
+});
+
+test("면제자: 권한 기준 사용자 거부 이유를 예약어·숫자만·형식으로 나눠 말한다(서버 username_reserved 와 같은 문구)", async () => {
+  renderAs(meExempt);
+  const scope = await screen.findByLabelText("권한 기준 사용자");
+  await userEvent.type(scope, "nobody");
+  expect(screen.getByText(REASON_MESSAGES.username_reserved)).toBeInTheDocument();
+  expect(screen.queryByText(/계정 아이디 형식이 아닙니다/)).toBeNull();
+  expect(hints()).toHaveTextContent("권한 기준 사용자에 시스템 계정 이름이 아닌 계정 아이디를 적으세요");
+  expect(submitButton()).toBeDisabled();
+  await userEvent.clear(scope);
+  await userEvent.type(scope, "1234");
+  expect(screen.getByText(REASON_MESSAGES.username_numeric_only)).toBeInTheDocument();
+  expect(hints()).toHaveTextContent("권한 기준 사용자에 숫자만이 아닌 계정 아이디를 적으세요");
+  await userEvent.clear(scope);
+  await userEvent.type(scope, "Bad");
+  expect(screen.getByText(/계정 아이디 형식이 아닙니다/)).toBeInTheDocument();
+  expect(hints()).toHaveTextContent("권한 기준 사용자를 계정 아이디 형식으로 고치세요");
+});
+
+test("머리말: 목록 밖 관리자에겐 쓸 수 없는 scan·배치 작업을 안내하지 않는다 -- 특권 운영자만 배치 안내", async () => {
+  const view = renderAs(meAdminListed);
+  expect(await screen.findByText(/^권한 있는 PV 에서 sync·rm 을 실행합니다/)).toBeInTheDocument();
+  expect(screen.queryByText(/배치 작업으로 묶어 요청하세요/)).toBeNull();
+  view.unmount();
+  renderAs(meExempt);
+  expect(await screen.findByText(
+    "경로 하나에 sync·scan·rm 을 실행합니다 — 여러 경로의 sync·scan·rm 은 배치 작업으로 묶어 요청하세요.")).toBeInTheDocument();
+});
+
+test("rm·scan 제출 요약의 「실행 권한」은 머리만(PRIV_ROOT_HEAD) -- sync 소유 결과 꼬리를 붙이지 않는다", async () => {
+  renderAs(meUser);
+  await choose("rm");
+  expect(summaryValue("실행 권한").textContent).toBe(PRIV_ROOT_HEAD);
+  await userEvent.selectOptions(screen.getByLabelText("연산"), "sync");
+  expect(summaryValue("실행 권한").textContent).toBe(PRIV_ROOT_SYNC_PV);
+});
+
+test("관리자: 정책 상한을 넘는 우선순위는 칸 아래와 요약에서 「상한으로 조정」을 미리 말한다(배치 생성과 같은 계산)", async () => {
+  const policy = (tool: string, def: string, cap: string) => ({
+    tool, max_nodes: 4, procs_per_node: 2, queue: "dms-data", default_priority: def, max_priority: cap,
+    preview_timeout_seconds: null, execution_timeout_seconds: 3600, enabled: 1, updated_at: "2026-11-11T00:00:00Z",
+    updated_by: "admin" });
+  server.use(http.get("/api/admin/policies", () => HttpResponse.json([policy("rm", "low", "mid")])));
+  renderAs(meAdminListed);
+  await choose("rm");
+  expect(await screen.findByText("정책 상한: mid — 상한을 넘는 선택은 배치 시 상한으로 조정됩니다")).toBeInTheDocument();
+  expect(summaryValue("우선순위").textContent).toBe("(정책 기본: low)");
+  await userEvent.selectOptions(screen.getByLabelText("우선순위"), "high");
+  expect(screen.getByText("정책 상한: mid — 선택한 high는 상한 mid로 조정됩니다")).toBeInTheDocument();
+  expect(summaryValue("우선순위").textContent).toBe("high — 선택한 high는 상한 mid로 조정됩니다");
+  await userEvent.selectOptions(screen.getByLabelText("우선순위"), "mid");
+  expect(summaryValue("우선순위").textContent).toBe("mid");
+});
+
+test("관리자 sync 우선순위 캡션: nsync 는 상한만 -- 쓰이지 않는 nsync 기본값을 찍지 않는다(정책 화면 「dsync 따름」과 같은 말)", async () => {
+  const policy = (tool: string, def: string, cap: string) => ({
+    tool, max_nodes: 4, procs_per_node: 2, queue: "dms-data", default_priority: def, max_priority: cap,
+    preview_timeout_seconds: null, execution_timeout_seconds: 3600, enabled: 1, updated_at: "2026-11-11T00:00:00Z",
+    updated_by: "admin" });
+  // 예전에 nsync 기본을 dsync 와 다르게 바꿔 둔 사이트(지금은 UI 로 못 고친다) -- 상한이 같으면 한 묶음, 기본은 dsync 값.
+  server.use(http.get("/api/admin/policies", () => HttpResponse.json([policy("dsync", "mid", "high"), policy("nsync", "low", "high")])));
+  renderAs(meAdminListed);
+  expect(await screen.findByText("정책 — dsync·nsync: 기본 mid · 상한 high. "
+    + "기본값 적용은 dsync 기준(제출 시점 도구 미정), 상한은 실행 도구 기준으로 조정됩니다")).toBeInTheDocument();
+  expect(screen.queryByText(/nsync: 기본 low/)).toBeNull();
+  expect(summaryValue("우선순위").textContent).toBe("(정책 기본: mid)");
+});
+
+test("제출 거부 문구는 폼을 고치면 지운다(옛 PV 의 거부가 새로 고른 PV 이야기처럼 남지 않게)", async () => {
+  server.use(http.post("/api/user/requests", () => HttpResponse.json({ detail: "k8s_access_denied" }, { status: 403 })));
+  renderAs(meUser);
+  await choose("rm");
+  await pick("namespace (StorageClass)", "PV 이름", "team-b (tb-nfs)", "scratch — 5Gi · Bound");
+  await userEvent.type(screen.getByLabelText("PV 안 경로"), "old");
+  await waitFor(() => expect(submitButton()).toBeEnabled());
+  await userEvent.click(submitButton());
+  expect(await screen.findByText(REASON_MESSAGES.k8s_access_denied)).toBeInTheDocument();
+  await userEvent.type(screen.getByLabelText("PV 안 경로"), "2");
+  expect(screen.queryByText(REASON_MESSAGES.k8s_access_denied)).toBeNull();
 });

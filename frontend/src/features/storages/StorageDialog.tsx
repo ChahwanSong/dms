@@ -61,7 +61,8 @@ export function ownerIdError(raw: string): string | null {
 }
 
 /** 수정 창의 「연결된 StorageClass」 -- 매핑이 있는 스토리지를 파일시스템으로 바꾸면 서버가 거부한다
- *  (storage_has_sc_mappings) -- 무엇이 걸려 있는지 창 안에서 보인다. */
+ *  (storage_has_sc_mappings) -- 무엇이 걸려 있는지 창 안에서 보인다. cluster null = 매핑만 남고 어느 클러스터에도 없는 이름
+ *  (2026-11-11 -- 「old-sc (null)」로 보간되던 것). */
 function MappedClasses({ name, enabled }: { name: string; enabled: boolean }) {
   const q = useStorageClasses(enabled);
   if (!enabled || q.isLoading) return null;
@@ -70,7 +71,7 @@ function MappedClasses({ name, enabled }: { name: string; enabled: boolean }) {
   return (
     <p className="text-xs text-ink/70 [overflow-wrap:anywhere]">
       {rows.length === 0 ? "연결된 StorageClass: 없음"
-        : `연결된 StorageClass: ${rows.map((r) => `${r.name} (${r.cluster})`).join(", ")}`}
+        : `연결된 StorageClass: ${rows.map((r) => `${r.name} (${r.cluster ?? "어느 클러스터에도 없음"})`).join(", ")}`}
     </p>
   );
 }

@@ -7,6 +7,8 @@ import { http, HttpResponse, delay } from "msw";
 import { beforeAll, afterAll, afterEach, test, expect } from "vitest";
 import { AppRouter } from "./router";
 import { ME_RETRY_LIMIT } from "../features/auth/useAuth";
+import { forgetTransportKey } from "../lib/passwordTransport";
+import { makeServerKey, transportKeyHandler } from "../test/transportKey";
 
 const server = setupServer();
 beforeAll(() => server.listen());
@@ -368,6 +370,46 @@ test("me 401 이면 보호 화면 딥링크는 여전히 /login 이다(오류 �
   expect(await screen.findByRole("button", { name: "로그인" })).toBeInTheDocument();
   expect(screen.queryByText(SESSION_CHECK_FAILED)).toBeNull();
   expect(screen.queryByRole("button", { name: "다시 시도" })).toBeNull();
+});
+
+// 2026-11-11 로그인 뒤 복귀: 예전엔 로그인하면 늘 「/」(→ 역할별 첫 화면)라 공유받은 딥링크·세션 만료 직전 화면을 잃었다.
+async function loginFlow(start: string, role: "admin" | "user") {
+  const key = await makeServerKey();
+  forgetTransportKey();
+  let authed = false;
+  let lastLoc = "";
+  function LocSpy() { const l = useLocation(); lastLoc = l.pathname + l.search; return null; }
+  server.use(
+    transportKeyHandler(key),
+    http.get("/api/auth/me", () => authed
+      ? HttpResponse.json({ actor: "u", role })
+      : HttpResponse.json({ detail: "not_authenticated" }, { status: 401 })),
+    http.post("/api/auth/login", () => { authed = true; return HttpResponse.json({ actor: "u", role }); }),
+    http.get("/api/admin/identity-denylist", () => HttpResponse.json([])),
+    // 로그인 화면·착지 화면의 나머지 조회들 -- 이 테스트들은 경로만 본다.
+    http.get("/api/*", () => HttpResponse.json({ detail: "http_503" }, { status: 503 })),
+  );
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(
+    <QueryClientProvider client={qc}>
+      <MemoryRouter initialEntries={[start]}><AppRouter /><LocSpy /></MemoryRouter>
+    </QueryClientProvider>,
+  );
+  await userEvent.type(await screen.findByLabelText("사용자명"), "u");
+  await userEvent.type(screen.getByLabelText("비밀번호"), "pw");
+  await userEvent.click(screen.getByRole("button", { name: "로그인" }));
+  return () => lastLoc;
+}
+
+test("me 401 딥링크 → 로그인 → 원래 화면(경로+쿼리)으로 돌아간다", async () => {
+  const loc = await loginFlow("/admin/denylist?q=x", "admin");
+  expect(await screen.findByRole("heading", { name: "denylist" })).toBeInTheDocument();
+  expect(loc()).toBe("/admin/denylist?q=x");
+});
+
+test("세션 없이 「/」로 들어온 관리자는 로그인 뒤 여전히 /admin/dashboard 다(/jobs 를 거쳐 from 이 실리지 않는다)", async () => {
+  const loc = await loginFlow("/", "admin");
+  await waitFor(() => expect(loc()).toBe("/admin/dashboard"));
 });
 
 test("확인된 세션이 있으면 me 재조회 500 은 보던 화면을 걷지 않는다(재조회 401 만 /login)", async () => {

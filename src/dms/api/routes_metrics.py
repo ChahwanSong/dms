@@ -47,9 +47,11 @@ def metrics_nodes(request: Request, window: int = Query(default=24)):
     for node in repos.agents.list_nodes(
             stale_seconds=settings.agent_report_stale_seconds):
         samples = repos.metrics.node_series(node["node_name"], start=start, end=end)
+        # 신선도 기준을 넘는 보고 간격은 공백 표지(null)로 끊는다(build_node_points docstring, 2026-11-11).
         nodes.append({"node_name": node["node_name"],
                       "reported_at": node["reported_at"], "fresh": node["fresh"],
-                      "points": build_node_points(samples)})
+                      "points": build_node_points(
+                          samples, gap_seconds=settings.agent_report_stale_seconds)})
     return {"window_hours": hours, "start": start, "end": end, "nodes": nodes}
 
 
@@ -97,6 +99,9 @@ def metrics_jobs(request: Request, window: int = Query(default=24)):
     # succeeded/failed/rejected/cancelled 는 repo 값 그대로 통과한다(정의는 MetricsRepository.job_stats 한 곳).
     stats["window_hours"] = hours
     stats["bucket"] = "hour" if chars == 13 else "day"
+    # 창 없는 비종단 집계(2026-11-11) -- KPI 「실행 중」·「대기」와 컨트롤 상태 「진행 중 작업」의 재료. by_state(창)로 세면
+    # 창보다 오래 도는·기다리는 잡이 빠진다(MetricsRepository.live_job_states).
+    stats["live_by_state"] = repos.metrics.live_job_states()
     return stats
 
 

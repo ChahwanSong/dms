@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
-import { ChevronDown, HardDrive } from "lucide-react";
+import { ChevronDown, HardDrive, Menu, X } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useMe } from "../features/auth/useAuth";
 import { NAVIGATION, activeNavPath } from "./navigation";
@@ -89,6 +89,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   // 상태 키는 렌더와 같은 `${section.label}:${group.label}` 이다.
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>(loadNavCollapsed);
   useEffect(() => { saveNavCollapsed(collapsed); }, [collapsed]);
+  // 좁은 폭(md 미만) 메뉴 여닫기(2026-11-11, BACKLOG 「모바일(375) 사이드바 접기」 해소): 예전엔 사이드바 전체(메뉴 + 사용자
+  // 패널, 관리자 약 1,050px)가 본문 위 블록이라 폰 첫 화면이 메뉴뿐이었다. 기본은 닫힘(브랜드 줄 + 「메뉴」 버튼만), md 이상은
+  // 늘 보인다(md:flex). 경로가 바뀌면 셸이 리마운트돼 닫히고(위 주석), 같은 경로 링크를 눌러도 닫는다(아래 onClick).
+  // CSS(hidden)로만 숨긴다 -- 링크를 DOM 에서 빼면 e2e L4 의 `aside a` 하한(≥1)이 375 에서 무너진다.
+  const [menuOpen, setMenuOpen] = useState(false);
 
   // adminOnly 는 그룹·항목 양쪽에서 걸러낸다. 항목이 다 걸러진 그룹은 헤더째
   // 숨긴다 -- 비관리자에게 빈 그룹 껍데기를 보이지 않기 위해서다(표시 게이트일
@@ -126,32 +131,46 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 </div>
               )}
             </div>
+            {/* 이름은 상태와 무관하게 「메뉴」 -- 열림·닫힘은 aria-expanded 가 말한다(이름이 바뀌면 찾는 쪽이 헷갈린다). */}
+            <button type="button" aria-expanded={menuOpen} aria-controls="app-menu"
+                    onClick={() => setMenuOpen((o) => !o)}
+                    className="ml-auto shrink-0 inline-flex items-center gap-1.5 rounded-lg border border-white/30 px-2.5 py-1.5
+                               text-sm leading-6 text-white hover:bg-white/10 md:hidden">
+              {menuOpen ? <X className="h-4 w-4" aria-hidden /> : <Menu className="h-4 w-4" aria-hidden />}
+              메뉴
+            </button>
           </div>
         </div>
-        <nav className="flex-1 overflow-y-auto p-3 space-y-1">
-          {NAVIGATION.map((section) =>
-            section.path !== undefined ? (
-              <NavItemLink key={section.label} path={section.path} label={section.label}
-                           icon={section.icon} active={section.path === activePath} />
-            ) : (
-              <div key={section.label}>
-                {/* 섹션 헤더도 div -- 셸에 h1 금지(전제 #4), a 금지(L4 셀렉터). */}
-                <div className="flex items-center gap-2 px-3 py-2 font-semibold text-ink">
-                  <section.icon className="h-4 w-4 shrink-0" aria-hidden />
-                  {section.label}
+        {/* 메뉴 + 사용자 패널 묶음: md 미만에선 menuOpen 일 때만, md 이상은 늘(md:flex). md 에서 flex-1 min-h-0 이라 nav 가 전처럼
+            h-screen 안에서 자체 스크롤한다. 링크를 누르면(같은 경로 포함) 닫는다 -- 다른 경로는 리마운트로도 닫힌다. */}
+        <div id="app-menu"
+             className={`${menuOpen ? "flex" : "hidden"} md:flex flex-col flex-1 min-h-0`}
+             onClick={(e) => { if ((e.target as Element).closest("a") !== null) setMenuOpen(false); }}>
+          <nav className="flex-1 overflow-y-auto p-3 space-y-1">
+            {NAVIGATION.map((section) =>
+              section.path !== undefined ? (
+                <NavItemLink key={section.label} path={section.path} label={section.label}
+                             icon={section.icon} active={section.path === activePath} />
+              ) : (
+                <div key={section.label}>
+                  {/* 섹션 헤더도 div -- 셸에 h1 금지(전제 #4), a 금지(L4 셀렉터). */}
+                  <div className="flex items-center gap-2 px-3 py-2 font-semibold text-ink">
+                    <section.icon className="h-4 w-4 shrink-0" aria-hidden />
+                    {section.label}
+                  </div>
+                  {visibleGroups(section).map((group) => {
+                    const key = `${section.label}:${group.label}`;
+                    return (
+                      <Group key={key} group={group} collapsed={collapsed[key] === true}
+                             activePath={activePath}
+                             onToggle={() => setCollapsed((c) => ({ ...c, [key]: c[key] !== true }))} />
+                    );
+                  })}
                 </div>
-                {visibleGroups(section).map((group) => {
-                  const key = `${section.label}:${group.label}`;
-                  return (
-                    <Group key={key} group={group} collapsed={collapsed[key] === true}
-                           activePath={activePath}
-                           onToggle={() => setCollapsed((c) => ({ ...c, [key]: c[key] !== true }))} />
-                  );
-                })}
-              </div>
-            ))}
-        </nav>
-        <UserPanel />
+              ))}
+          </nav>
+          <UserPanel />
+        </div>
       </aside>
       {/* min-w-0: flex 자식의 기본 min-width 는 auto 라 콘텐츠보다 좁아지지 못한다.
           그래서 안쪽 표의 overflow-x-auto 가 발동하지 못하고 레이아웃 전체가 넓어져

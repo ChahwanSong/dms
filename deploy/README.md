@@ -2594,7 +2594,8 @@ dms-k8s 는 **k8s 신원 모드 전용**이다. 동작의 근거는 `docs/ARCHIT
 - **사용자 셀프서비스**: 가입·비밀번호 재설정은 메일 인증번호(6자리·5분)로 한다. 받는 주소는 `<아이디>@<EMAIL_DOMAIN>` 파생이다.
 - **비밀번호**: 저장은 scrypt(`repositories.accounts._hash_password`), 전송은 포탈이 봉인한다(평문은 422 `password_encryption_required` — `x-admin-token` 부트스트랩만 예외).
 - **세션 끊기**: 비밀번호가 바뀌면(셀프·관리자 재설정) 그 계정의 세션 세대가 회전해 기존 로그인이 모두 끊긴다(401 `session_revoked` — `api.auth.current_identity`,
-  DB `accounts.session_epoch`). 비활성화한 계정은 401 `account_disabled` 다.
+  DB `accounts.session_epoch`). 비활성화한 계정은 401 `account_disabled` 다(로그인도 — 비밀번호가 맞을 때만, 실패로 세지 않는다; 셀프 비밀번호
+  재설정은 발급·변경 모두 403 `account_disabled`).
 
 ### 10-6. 세션·로그아웃·여러 포탈
 
@@ -2913,6 +2914,8 @@ kubectl --context <ctx> get pv | grep dms-pgdata                        # Releas
 - Prometheus 지표 엔드포인트는 없다. Envoy 의 stats 리스너(:19001)는 꺼 두었다(§2g-2 — hostNetwork 라 열면 전 인터페이스에 노출된다).
 - 지표 API(`require_admin` — 공유 토큰 Bearer·세션 관리자 모두 조회 가능): `GET /api/admin/metrics/jobs`·`/nodes`·`/infra`·`/queue`(`api/routes_metrics.py`). `metrics/jobs` 는 2026-10-28 부터
   `files_total`·`bytes_total` 대신 `sync_items_total`·`sync_bytes_total`·`rm_items_total` 을 낸다 — 옛 키를 읽는 외부 스크립트는 고친다.
+  2026-11-11 부터 창 없는 비종단 상태별 수 `live_by_state` 를 더 내고, `throughput` 의 일 버킷(`bucket: "day"`, 창 48h 초과)은
+  UTC 가 아니라 KST 날짜로 묶는다(시간 버킷은 그대로 UTC).
 - Envoy 접근 로그(요청마다 JSON 한 줄 — `client_ip`·`peer`·`x_forwarded_for`)는 사이트 로그 수집으로 보낸다(§2g-5).
 - 이벤트 보존 30일(`DMS_EVENT_RETENTION_DAYS`), 에이전트 보고 보존 30일(`DMS_AGENT_REPORT_RETENTION_DAYS`).
 

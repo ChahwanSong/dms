@@ -128,6 +128,37 @@ def test_summary_stops_counting_at_the_batch_delete_cap(client, monkeypatch):
         "batch_succeeded_scan_count": None}
 
 
+def test_request_detail_carries_batch_exists_and_name_for_admins(client):
+    # 요청 상세(GET /api/user/requests/{id})도 목록과 같은 batch_exists·batch_name 을 싣는다(2026-11-11, BACKLOG 「요청
+    # 상세·결과 카드의 배치 링크」) -- 예전엔 없어서 화면이 배치 기록만 지워진 묶음에도 404 배치 상세 링크를 달았다.
+    repos = client.app.state.repos
+    named = _batch(repos, name="성장 모니터링")
+    alive = _child(repos, named)
+    gone_bid = _batch(repos)
+    gone = _child(repos, gone_bid)
+    repos.batches.delete(gone_bid)                                     # 기록만 지움 -- 자식은 남는다
+    blank = _batch(repos, name=None)
+    unnamed = _child(repos, blank)
+    single = _child(repos, None)
+    mine = _child(repos, named, requester="alice", target="ta")
+    _login(client, "opadm", "admin")
+
+    def detail(rid):
+        r = client.get(f"/api/user/requests/{rid}")
+        assert r.status_code == 200, r.text
+        return r.json()
+    assert {k: detail(alive)[k] for k in ("batch_exists", "batch_name")} == {
+        "batch_exists": True, "batch_name": "성장 모니터링"}
+    assert {k: detail(gone)[k] for k in ("batch_exists", "batch_name")} == {"batch_exists": False, "batch_name": None}
+    assert {k: detail(unnamed)[k] for k in ("batch_exists", "batch_name")} == {"batch_exists": True, "batch_name": None}
+    assert not {"batch_exists", "batch_name"} & set(detail(single))      # 단건엔 키가 없다
+    # 비관리자 응답엔 싣지 않는다(목록과 같은 규칙 -- 배치 이름은 운영자 화면 정보)
+    client.post("/api/auth/logout")
+    _login(client, "alice", "user")
+    r = client.get(f"/api/user/requests/{mine}")
+    assert r.status_code == 200 and not {"batch_exists", "batch_name"} & set(r.json())
+
+
 def test_summary_carries_the_item_count_so_the_portal_can_lock_oversized_batches(client):
     # 자식은 적고 항목만 많은 배치(큰 CSV 를 일찍 취소)도 배치 단위 삭제 상한(항목 10000)에 걸린다 -- 요약에 항목 수가 없으면
     # 포탈이 선택 가능으로 보였다가 서버만 batch_delete_too_large 를 냈다(2026-10-11 검증 지적).

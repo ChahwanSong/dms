@@ -2,7 +2,7 @@ import httpx
 import pytest
 
 from dms import registry
-from dms.registry import delete_manifest, fetch_repo_tags, manifest_digest
+from dms.registry import delete_manifest, fetch_repo_tags, manifest_digest, manifest_digest_lookup
 
 V2 = {"Docker-Distribution-Api-Version": "registry/2.0"}
 
@@ -310,3 +310,24 @@ def test_token_realm_on_another_host_is_refused(monkeypatch, caplog):
             assert fetch_repo_tags("reg:5000", "dms") is None
         assert len(calls) == 1, realm                     # realm 으로 요청을 보내지 않는다
     assert "realm on another host refused" in caplog.text
+
+
+# ---- 2026-11-11 리뷰: 태그 digest 조회의 「없음 확정」과 「모름」을 가른다 ----
+
+def test_digest_lookup_separates_registry_not_found_from_unknown(monkeypatch):
+    # 삭제 라우트는 이 구분으로 404(이미 없음)와 502(레지스트리 오류)를 낸다 -- 무응답을 「없음」으로 접으면 아무것도 못 지운
+    # 삭제가 화면에서 성공 쪽(「이미 없음」)으로 세진다.
+    _serve(monkeypatch, lambda m, u, h: _resp(200, headers={"Docker-Content-Digest": "sha256:abc"}, method=m))
+    assert manifest_digest_lookup("reg:5000", "dms", "d1") == ("sha256:abc", False)
+    _serve(monkeypatch, lambda m, u, h: _resp(404, headers=V2, method=m))       # 레지스트리 자신의 404
+    assert manifest_digest_lookup("reg:5000", "dms", "d1") == (None, True)
+    _serve(monkeypatch, lambda m, u, h: _resp(404, method=m))                   # 레지스트리가 아닌 서버의 404
+    assert manifest_digest_lookup("reg:5000", "dms", "d1") == (None, False)
+    _serve(monkeypatch, lambda m, u, h: _resp(503, headers=V2, method=m))       # 5xx
+    assert manifest_digest_lookup("reg:5000", "dms", "d1") == (None, False)
+
+    def boom(m, u, h):
+        raise OSError("connection refused")
+    _serve(monkeypatch, boom)                                                    # 무응답
+    assert manifest_digest_lookup("reg:5000", "dms", "d1") == (None, False)
+    assert manifest_digest("reg:5000", "dms", "d1") is None                     # 옛 호출자 계약(None) 그대로

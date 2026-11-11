@@ -63,6 +63,10 @@ export function PlacementCell({ node }: { node: NodeInfo }) {
   const include = useIncludeNode();
   const excluded = !!node.exclusion;
   const tooLong = reason.trim().length > MAX_REASON;
+  // 서버(routes_nodes.exclude_node)는 C0 제어문자·DEL 을 거부한다. 텍스트 입력은 줄바꿈만 지우고 탭은 남겨, 스프레드시트에서
+  // 붙여 넣은 「디스크<TAB>점검」이 422 로 돌아왔다 -- 보내기 전에 같은 규칙으로 알린다(2026-11-11). 앞뒤는 trim 이 지운다.
+  // eslint-disable-next-line no-control-regex
+  const hasControl = /[\u0000-\u001f\u007f]/.test(reason.trim());
   const onOpen = (o: boolean) => {
     if (o) { setReason(""); exclude.reset(); include.reset(); }
     setOpen(o);
@@ -119,10 +123,11 @@ export function PlacementCell({ node }: { node: NodeInfo }) {
                      className="mt-1 w-full rounded-lg border border-line bg-surface px-3 py-1.5 text-sm" />
             </label>
             {tooLong && <p className="text-bad">사유는 500자 이하여야 합니다</p>}
+            {hasControl && <p className="text-bad">사유에 탭·제어문자를 넣을 수 없습니다 — 공백으로 바꿔 주세요</p>}
             {exclude.isError && <p role="alert" className="text-bad">{(exclude.error as ApiError).message}</p>}
             <div className="flex justify-end gap-2">
               <Button variant="ghost" onClick={() => onOpen(false)}>닫기</Button>
-              <Button disabled={exclude.isPending || tooLong}
+              <Button disabled={exclude.isPending || tooLong || hasControl}
                       onClick={() => exclude.mutate({ name: node.node_name, reason },
                                                      { onSuccess: () => setOpen(false) })}>
                 배치에서 제외

@@ -691,6 +691,50 @@ test("배치 자식의 ConfirmPending 잡: 컨펌 버튼 대신 배치 상세의
   expect(screen.getByRole("button", { name: "작업 컨펌 단계 설명" })).toHaveAccessibleDescription(/배치 확인/);
 });
 
+// B84(2026-11-11, BACKLOG 「요청 상세·결과 카드의 배치 링크」): 머리말 배치 링크는 작업 목록 BatchCell 과 같은 규칙.
+const BID = "504fb58ed0704897866b7fa7bb895377";
+test("배치 링크: 기록만 지워진 배치(batch_exists false)는 404 상세가 아니라 그 묶음의 작업 목록으로(관리자)", async () => {
+  server.use(
+    http.get("/api/auth/me", () => HttpResponse.json({ actor: "mason", role: "admin" })),
+    http.get("/api/user/requests/r1", () => HttpResponse.json({ ...REQUEST, state: "Planned", batch_id: BID,
+      batch_exists: false, batch_name: null })),
+    http.get("/api/user/requests/r1/jobs", () => HttpResponse.json([CONFIRM_JOB])),
+  );
+  renderAt();
+  const link = await screen.findByRole("link", { name: `배치 기록 없음 ${BID.slice(0, 12)}` });
+  expect(link).toHaveAttribute("href", `/jobs?batch=${BID}`);
+  // 결과 카드의 배치 확인 안내도 죽은 상세 링크를 달지 않는다
+  expect(screen.queryByRole("link", { name: "배치 상세" })).toBeNull();
+  expect(screen.getByRole("link", { name: "이 묶음의 작업 보기" })).toHaveAttribute("href", `/jobs?batch=${BID}`);
+  expect(document.querySelector(`a[href="/admin/batches/${BID}"]`)).toBeNull();
+});
+
+test("배치 링크: 살아 있는 배치는 상세로 이름(없으면 id 앞 12자 -- 목록과 같은 길이), 비관리자는 작업 목록 필터로", async () => {
+  server.use(
+    http.get("/api/auth/me", () => HttpResponse.json({ actor: "mason", role: "admin" })),
+    http.get("/api/user/requests/r1", () => HttpResponse.json({ ...REQUEST, batch_id: BID, batch_exists: true,
+      batch_name: "성장 모니터링" })),
+    http.get("/api/user/requests/r1/jobs", () => HttpResponse.json(JOBS)),
+  );
+  const view = renderAt();
+  expect(await screen.findByRole("link", { name: "배치 성장 모니터링" })).toHaveAttribute("href", `/admin/batches/${BID}`);
+  view.unmount();
+  server.use(http.get("/api/user/requests/r1", () => HttpResponse.json({ ...REQUEST, batch_id: BID, batch_exists: true,
+    batch_name: null })));
+  const v2 = renderAt();
+  // 역할(/api/auth/me)이 늦게 오면 잠깐 비관리자 링크다 -- 관리자로 확정된 뒤의 href 를 본다
+  await waitFor(() => expect(screen.getByRole("link", { name: `배치 ${BID.slice(0, 12)}` }))
+    .toHaveAttribute("href", `/admin/batches/${BID}`));
+  v2.unmount();
+  // 비관리자(기본 me = user): 배치 상세는 관리자 화면(403)이라 작업 목록 필터로
+  server.use(
+    http.get("/api/auth/me", () => HttpResponse.json({ actor: "alice", role: "user" })),
+    http.get("/api/user/requests/r1", () => HttpResponse.json({ ...REQUEST, batch_id: BID })));
+  renderAt();
+  const link = await screen.findByRole("link", { name: `배치 ${BID.slice(0, 12)}` });
+  await waitFor(() => expect(link).toHaveAttribute("href", `/jobs?batch=${BID}`));
+});
+
 test("단건(배치 아님) ConfirmPending 잡은 종전대로 컨펌할 수 있다", async () => {
   server.use(
     http.get("/api/user/requests/r1", () => HttpResponse.json({ ...REQUEST, state: "Planned", batch_id: null })),

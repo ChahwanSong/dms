@@ -6,6 +6,7 @@ from ..db import Database, iso_plus, load_json, utc_now_iso
 # metrics_series 와 같은 승격(슬라이스 17) -- 별칭 유지로 호출부 무변경.
 from ..db import iso_epoch as _epoch
 from ..domain import DataJobState, TERMINAL_DATA_JOB_STATES
+from ..metrics_series import kst_day_buckets
 from .text_search import contains_pattern
 
 # 종단 상태의 뜻별 묶음(2026-10-27 d192). 예전엔 「실패 = 종단 - Succeeded」 하나라 사람이 취소한 잡·확인을 기다리다
@@ -152,12 +153,16 @@ class MetricsRepository:
                 GROUP BY reason_code ORDER BY cnt DESC, reason_code ASC LIMIT 10""",
             {**params, **reason_params})
 
-        # ISO-8601 UTC 고정 포맷이라 SUBSTR 접두가 곧 시간 버킷이다(13자=시간, 10자=일)
-        throughput = self._db.query(
+        # ISO-8601 UTC 고정 포맷이라 SUBSTR 접두(13자)가 곧 UTC 시간 버킷이다. 일 버킷(bucket_chars=10)은 SQL 의 UTC 날짜
+        # 접두로 자르지 않는다 -- KST 00~09시에 만든 잡이 전날 막대에 들어갔다(2026-11-11). 시간 버킷을 화면 달력(KST)의
+        # 날짜로 접는다(metrics_series.kst_day_buckets). 시간 버킷 라벨의 KST 변환은 프런트가 한다(API 시각은 UTC).
+        throughput = [{"bucket": r["bucket"], "count": r["cnt"]} for r in self._db.query(
             """SELECT SUBSTR(created_at, 1, :c) AS bucket, COUNT(*) AS cnt
                FROM data_jobs WHERE created_at BETWEEN :s AND :e
                GROUP BY SUBSTR(created_at, 1, :c) ORDER BY bucket ASC""",
-            {**params, "c": bucket_chars})
+            {**params, "c": 13})]
+        if bucket_chars == 10:
+            throughput = kst_day_buckets(throughput)
 
         # 수행시간은 문자열 시각의 차라 SQL로는 이식성 있게 못 뺀다(julianday는
         # SQLite 전용, EXTRACT(EPOCH)는 PG 전용) -- 행을 가져와 앱측에서 계산한다.
@@ -319,8 +324,7 @@ class MetricsRepository:
             "plan_rejection_reasons": [
                 {"reason_code": r["reason_code"], "count": r["cnt"]}
                 for r in plan_rejection_reasons],
-            "throughput": [{"bucket": r["bucket"], "count": r["cnt"]}
-                           for r in throughput],
+            "throughput": throughput,
             "duration_seconds": duration_seconds,
             "exec_runtime_seconds": exec_runtime_seconds,
             "exec_runtime_excluded": exec_excluded["c"],
@@ -332,6 +336,17 @@ class MetricsRepository:
             "sync_bytes_total": total(sums["sync_bytes"]),
             "rm_items_total": total(sums["rm_items"]),
         }
+
+    def live_job_states(self) -> list[dict]:
+        """비종단 잡의 상태별 수 -- **시간 창 없음**(2026-11-11). 대시보드 KPI 「실행 중」·「대기」와 컨트롤 상태의 「진행 중
+        작업」이 이것을 센다: job_stats 의 by_state 는 created_at 창(기본 24h)이라 이틀째 도는 sync·하루 넘게 확인을 기다리는
+        잡이 「실행 중 0」으로 빠졌다 -- 드레인 전 영향 요약이 「영향 없음」으로 읽혔다. 모양은 by_state 와 같다(같은 접기
+        함수 kpiFromStates 를 쓴다). idx_data_jobs_state (state, updated_at) 가 덮는 인덱스 범위 집계다."""
+        lph, lparams = _in("l", _LIVE_JOB_STATES)
+        rows = self._db.query(
+            f"""SELECT state, COUNT(*) AS cnt FROM data_jobs WHERE state IN ({lph})
+                GROUP BY state ORDER BY state""", lparams)
+        return [{"state": r["state"], "count": int(r["cnt"])} for r in rows]
 
     # ---- 큐 현황 파이프라인(2026-10-16) -- 라우트(metrics_queue)가 축마다 독립 try 로 부른다. 조립은
     # queue_pipeline(순수)이 한다: 여기는 행과 집계만 낸다. 카운트는 COUNT(*) 정수 그대로(0 은 정상값), 시각은

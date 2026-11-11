@@ -196,7 +196,7 @@ test("c-F 배치 자식 계획 전: 배지 없음 + 배치 문구 + 노드 지�
   const region = await specRegion();
   expect(screen.queryByText(/^root\(특권\) (실행|요청)$/)).toBeNull();
   expect(cell(region, "실행 권한").textContent)
-    .toBe("배치 항목 — 배치를 만든 관리자에게 root 자격이 있으면 root(특권), 없으면 실행 신원 권한으로 실행됩니다(계획 단계에서 확정)");
+    .toBe("배치 항목 — 배치를 만든 관리자에게 root 자격이 있으면 root(특권)로 실행되고, 없으면 계획 단계에서 거부됩니다");
   expect(cell(region, "실행 신원").textContent).toBe("mason (요청자 본인) · uid/gid 는 계획 단계에서 정해집니다");
   // 계획 전이라 도구(dsync/nsync)를 모른다 -- nsync 면 면당 상한이라는 사실을 조건문으로
   expect(cell(region, "노드 지정").textContent).toBe("노드 4(nsync 로 돌면 출발·목적지 각각) · 노드당 프로세스 8 — 정책 상한까지만 적용");
@@ -377,9 +377,11 @@ test("n 공유 토큰 배치 자식, 계획 전: 비 root 확정 -- 「자격이
   renderAt();
   const region = await specRegion();
   const priv = cell(region, "실행 권한");
-  expect(priv.firstElementChild?.textContent).toBe(USER_HEAD);
-  expect(within(priv).getByText("배치 항목 — 공유 토큰(API)으로 만든 배치라 root 자격이 없어 실행 신원 권한으로 실행됩니다."))
-    .toHaveClass("text-ink/70");
+  // 머리 문장이 거부를 말한다(2026-11-11 -- 예전 머리 USER_HEAD 는 비 root 로 낮춰 실행된다는 말이라 「거부됩니다」 보조
+  // 줄과 한 칸에서 다른 말을 했다). 보조 줄은 중복이라 없다.
+  expect(priv.firstElementChild?.textContent)
+    .toBe("root 아님 — 공유 토큰(API)으로 만든 배치 항목이라 root 자격이 없어 계획 단계에서 거부됩니다");
+  expect(priv.textContent).not.toContain(USER_HEAD);
   expect(priv.textContent).not.toMatch(/자격이 있으면/);
   expect(screen.queryByText(/^root\(특권\) (실행|요청)$/)).toBeNull();
 });

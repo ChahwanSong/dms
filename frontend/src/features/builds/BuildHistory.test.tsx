@@ -51,6 +51,30 @@ describe("BuildHistory — 빌드 이력", () => {
     expect(await screen.findByRole("heading", { name: "빌드 이력" })).toBeInTheDocument();
   });
 
+  // 2026-11-11 B34: 서버 기본 limit 50 에서 조용히 잘리던 것 -- 상한+1 을 받아 잘림을 밝히고 상한까지만 센다.
+  const many = (n: number) => Array.from({ length: n }, (_, i) => ({
+    ...BUILD, build_id: `${String(i).padStart(4, "0")}${"a".repeat(28)}`, tag: `d${n - i}` }));
+
+  it("상한(50)+1 건을 요청하고, 넘치면 「최근 50건만 표시」를 밝히며 건수·페이지는 50건 기준이다", async () => {
+    let limit: string | null = null;
+    server.use(http.get("/api/admin/builds", ({ request }) => {
+      limit = new URL(request.url).searchParams.get("limit");
+      return HttpResponse.json(many(51));
+    }));
+    wrap();
+    expect(await screen.findByText(/최근 50건만 표시됩니다/)).toBeInTheDocument();
+    expect(limit).toBe("51");
+    expect(screen.getByText("50건")).toBeInTheDocument();
+    expect(screen.getByText("1 / 3 페이지")).toBeInTheDocument();
+  });
+
+  it("상한 이하면 잘림 고지가 없다", async () => {
+    server.use(http.get("/api/admin/builds", () => HttpResponse.json(many(50))));
+    wrap();
+    expect(await screen.findByText("50건")).toBeInTheDocument();
+    expect(screen.queryByText(/최근 50건만 표시됩니다/)).toBeNull();
+  });
+
   it("조회 오류를 한국어 메시지로 보여준다", async () => {
     server.use(http.get("/api/admin/builds", () =>
       HttpResponse.json({ detail: "admin_required" }, { status: 403 })));

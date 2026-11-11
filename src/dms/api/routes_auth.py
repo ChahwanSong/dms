@@ -178,13 +178,15 @@ def request_verification_code(body: VerificationBody, request: Request):
         raise HTTPException(status_code=422, detail="invalid_username")
     if body.purpose == "password_reset":
         _refuse_privileged_reset(request, body.username)
-    exists = repos.accounts.get(body.username) is not None
+    account = repos.accounts.get(body.username)
+    exists = account is not None
     # 존재 여부를 발급 시점에 정직하게 알린다(사내 포탈 -- 계정 열거 방어보다
     # "왜 안 되는지"가 우선): signup 은 이미 있으면 409, reset 은 없으면 404.
     if body.purpose == "signup" and exists:
         raise HTTPException(status_code=409, detail="account_exists")
     if body.purpose == "password_reset" and not exists:
         raise HTTPException(status_code=404, detail="account_not_found")
+    _refuse_disabled_reset(account, body.purpose)
     locked = repos.accounts.verification_lock_seconds(body.username, body.purpose)
     if locked is not None:
         raise HTTPException(status_code=429, detail="verification_locked",
@@ -259,9 +261,12 @@ def request_verification_code(body: VerificationBody, request: Request):
                 # 요청은 나갔고 응답만 못 받았다 -- 메일이 갔을 수 있으니 코드를 저장한다(보낸 척은 아니다:
                 # 화면이 "확인이 늦어지고 있다"고 알린다).
                 repos.accounts.issue_verification_code(body.username, body.purpose, code=code)
+                # payload 는 실패 이벤트와 같은 모양(수신자·용도·출발지·사유, 2026-11-11) -- 보안 이벤트 화면의 「메일」 묶음에
+                # 보이고 「메일이 안 왔다」 문의를 수신자로 찾을 수 있게.
                 repos.observability.record_event(
                     component="mailer", severity="warning", event_type="verification_email_uncertain",
-                    message=f"{email} ({body.purpose}) -- {exc}")
+                    message=f"{email} ({body.purpose}) -- {exc}",
+                    payload={**mail_payload, "reason": exc.reason})
                 return {**out, "delivery_uncertain": True}
             repos.observability.record_event(
                 component="mailer", severity="error", event_type="verification_email_failed",
@@ -385,6 +390,14 @@ def _refuse_privileged_reset(request: Request, username: str) -> None:
         raise HTTPException(status_code=403, detail="privileged_account_protected")
 
 
+def _refuse_disabled_reset(account: "dict | None", purpose: str) -> None:
+    """비활성 계정은 셀프 비밀번호 재설정(발급·변경 둘 다)을 403 account_disabled 로 막는다(2026-11-11). 예전엔 재설정이
+    성공해 화면이 「새 비밀번호로 로그인하세요」를 띄웠지만 로그인은 계속 막혀 있었다 -- 비밀번호가 아니라 활성화가 필요하다는
+    것을 발급 시점에 알린다(관리자에게 활성화 요청). 계정이 없으면 여기서 판정하지 않는다(발급은 404, 변경은 코드 소비가 답한다)."""
+    if purpose == "password_reset" and account is not None and account["disabled"]:
+        raise HTTPException(status_code=403, detail="account_disabled")
+
+
 @router.post("/api/auth/password-reset")
 def password_reset(body: PasswordResetBody, request: Request, background: BackgroundTasks):
     """인증번호 검증 후 비밀번호 변경(셀프서비스). 코드는 항상 필수 -- 이 흐름
@@ -394,6 +407,8 @@ def password_reset(body: PasswordResetBody, request: Request, background: Backgr
     repos = request.app.state.repos
     # 발급 전에 막았어도 업그레이드 전에 발급된 코드가 있을 수 있다 -- 소비·추측 카운터보다 먼저 거부한다.
     _refuse_privileged_reset(request, body.username)
+    # 발급 뒤에 비활성화됐을 수 있다 -- 같은 이유로 코드 소비·봉인 해제 전에 거부한다.
+    _refuse_disabled_reset(repos.accounts.get(body.username), "password_reset")
     # signup 과 같은 순서 이유: 코드 소비 전에 봉인을 연다.
     password = _password_from(request, body, purpose="password_reset")
     _consume_code(request, body.username, "password_reset", body.code)
@@ -459,8 +474,9 @@ async def login(body: LoginBody, request: Request):
     5. 슬롯 안에서 아이디 축 재확인: 기다리는 동안 같은 아이디의 다른 시도가 상한을 채웠으면 429. 없으면 대기 시간만큼
        상한을 넘긴다(판정과 기록 사이가 원자적이지 않다) -- 슬롯 안이라 넘치는 양이 슬롯 수 이하로 묶인다.
     6. 검증: 총 시도를 기록하고(성공·실패 모두) 스레드에서 authenticate(limiter 인자 없이 -- login_guard.LoginGate.slot).
-    7. 결과: 401 만 토큰을 쓴 채로 두고 아이디 실패·경보 카운터에 기록한다. 그 밖(성공·재확인 429·슬롯 503·예외)은
-       finally 에서 토큰을 돌려준다 -- 「실패만 센다」(login_limiter).
+    7. 결과: 401 invalid_credentials 만 토큰을 쓴 채로 두고 아이디 실패·경보 카운터에 기록한다. 그 밖(성공·비밀번호가 맞은
+       비활성 계정의 401 account_disabled(2026-11-11)·재확인 429·슬롯 503·예외)은 finally 에서 토큰을 돌려준다 -- 「실패만
+       센다」(login_limiter).
 
     원 IP(auth.client_ip)는 경보·이벤트 기록에만 쓴다 -- 어떤 단계도 IP 로 거절하지 않는다. 이벤트 DB 쓰기는 모두 스레드에서,
     가능하면 슬롯 밖에서 한다."""
@@ -558,6 +574,11 @@ async def login(body: LoginBody, request: Request):
             await _record_events(repos, pending)
             raise HTTPException(status_code=401, detail="invalid_credentials")
         await _record_events(repos, pending)
+        if auth.get("disabled") is True:
+            # 비밀번호가 맞은 비활성 계정(2026-11-11, accounts.authenticate): 추측 실패가 아니라 아이디 실패·경보 카운터에 세지
+            # 않고(spent 그대로 -- 전체 스위치 토큰은 finally 가 돌려준다) 세션도 만들지 않은 채 「비활성」을 그대로 알린다.
+            # 예전 401 invalid_credentials 는 사용자를 비밀번호 재설정으로 보냈고, 10번이면 429 까지 받았다.
+            raise HTTPException(status_code=401, detail="account_disabled")
         state.login_limiter.clear(user_key)
         request.session.clear()
         request.session["username"] = body.username

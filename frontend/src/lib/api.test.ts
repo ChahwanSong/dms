@@ -100,6 +100,49 @@ test("422 with FastAPI field-validation detail array maps to a korean message, n
     .rejects.toMatchObject({ status: 422, code: "http_422", message: "입력값이 올바르지 않습니다" });
 });
 
+// 2026-11-11: 네트워크 단절·게이트웨이 비 JSON 오류·성공 응답의 비 JSON 본문이 화면에 영문 원문(「Failed to fetch」·SyntaxError)이나
+// 원시 코드(「http_413」)로 보였다 -- request() 가 한국어 사유를 단 ApiError 로 올린다.
+test("fetch 거부(네트워크 단절)는 ApiError(0, network_error) + 한국어 문구 -- 브라우저 영문 원문이 아니다", async () => {
+  const spy = vi.fn();
+  window.addEventListener("dms:unauthorized", spy);
+  try {
+    server.use(http.post("/api/user/requests", () => HttpResponse.error()));
+    const err = await apiSend("POST", "/api/user/requests", { a: 1 }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err).toMatchObject({ status: 0, code: "network_error",
+      message: "서버에 연결하지 못했습니다 — 네트워크 상태를 확인하고 잠시 뒤 다시 시도하세요" });
+    expect((err as Error).message).not.toMatch(/fetch/i);
+    expect(spy).not.toHaveBeenCalled();   // 401 이 아니다 -- 로그인으로 튕기지 않는다
+  } finally {
+    window.removeEventListener("dms:unauthorized", spy);
+  }
+});
+
+test("성공 응답의 비 JSON 본문(SPA index.html·프록시 로그인 페이지)은 ApiError(0, invalid_response)", async () => {
+  server.use(http.get("/api/x", () => new HttpResponse("<!doctype html><html></html>",
+    { status: 200, headers: { "Content-Type": "text/html" } })));
+  await expect(apiGet("/api/x")).rejects.toMatchObject({ status: 0, code: "invalid_response",
+    message: reasonText("invalid_response") });
+  expect(reasonText("invalid_response")).not.toBe("invalid_response");
+});
+
+test("게이트웨이 비 JSON 413·502·504 는 원시 코드가 아니라 한국어 문구", async () => {
+  for (const status of [413, 502, 504]) {
+    server.use(http.post("/api/user/requests", () => new HttpResponse("<html>gw</html>",
+      { status, headers: { "Content-Type": "text/html" } })));
+    const err = await apiSend("POST", "/api/user/requests", {}).catch((e: unknown) => e);
+    expect(err).toMatchObject({ status, code: `http_${status}` });
+    expect((err as ApiError).message).not.toBe(`http_${status}`);
+    expect((err as ApiError).message).toMatch(/[가-힣]/);
+  }
+});
+
+test("본문 직렬화 오류는 네트워크 오류로 바뀌지 않는다(요청 전 프로그래밍 오류)", async () => {
+  const cyc: Record<string, unknown> = {};
+  cyc.self = cyc;
+  await expect(apiSend("POST", "/api/x", cyc)).rejects.toBeInstanceOf(TypeError);
+});
+
 describe("reasonText", () => {
   it("빈 값은 빈 문자열", () => {
     expect(reasonText(null)).toBe("");

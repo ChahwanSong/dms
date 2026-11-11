@@ -8,8 +8,14 @@ agent_reports의 report blob에서 노드 메트릭 포인트를 만든다. 계�
 - CPU 사용률은 예외로 에이전트가 차분까지 계산해 싣는다(2026-10-16) -- 여기는 0..100 검증만 하고 통과시킨다."""
 import math
 
+from .db import iso_plus
 # 사본이던 _epoch 를 db.iso_epoch 로 승격(슬라이스 17) -- 별칭 유지로 호출부 무변경.
 from .db import iso_epoch as _epoch
+
+# 화면 벽시계의 UTC 오프셋(시간) -- 프런트 lib/datetime.ts 의 KST_OFFSET_MS 와 같은 값이다(2026-08-24 사용자 결정: 사람에게
+# 보이는 시각은 KST, DST 가 없어 고정 오프셋이 정확하다). 저장·API 시각은 그대로 UTC 다 -- 이 값은 「날짜」라는 달력 개념을
+# 자를 때(처리량 일 버킷, kst_day_buckets)만 쓴다(2026-11-11).
+DISPLAY_UTC_OFFSET_HOURS = 9
 
 
 def clamp_window_hours(window, *, retention_days: int) -> int:
@@ -21,10 +27,26 @@ def clamp_window_hours(window, *, retention_days: int) -> int:
 
 
 def bucket_chars_for(window_hours: int) -> int:
-    """처리량 버킷의 SUBSTR 길이. ISO-8601 UTC 고정 포맷(utc_now_iso)이라 접두
-    절단이 곧 시간 절단이다: 13자="YYYY-MM-DDTHH"(시간), 10자="YYYY-MM-DD"(일).
-    48h 이하만 시간 버킷 -- 7일 창을 시간으로 쪼개면 막대 168개가 나온다."""
+    """처리량 버킷의 길이. 13자="YYYY-MM-DDTHH"(UTC 시간 -- ISO-8601 UTC 고정 포맷(utc_now_iso)이라 접두 절단이 곧 시간
+    절단이다), 10자="YYYY-MM-DD"(**KST 날짜** -- UTC 날짜 접두로 자르면 KST 00~09시 잡이 전날 막대에 들어가 저장소가 시간
+    버킷을 kst_day_buckets 로 접는다, 2026-11-11). 48h 이하만 시간 버킷 -- 7일 창을 시간으로 쪼개면 막대 168개가 나온다."""
     return 13 if window_hours <= 48 else 10
+
+
+def kst_day_buckets(hourly) -> list[dict]:
+    """UTC 시간 버킷 [{"bucket": "YYYY-MM-DDTHH", "count"}] -> KST 날짜 버킷 [{"bucket": "YYYY-MM-DD", "count"}](오름차순).
+
+    KST 는 UTC 와 시간 단위로만 어긋나므로(+9h) 시간 버킷을 접으면 날짜 경계가 정확하다 -- SQL 에서 시각에 9시간을 더하는
+    식은 두 방언 공통으로 쓸 수 없어(SQLite datetime·PG interval) 앱측에서 접는다(행 수는 창 시간 수 이하, 최대 720).
+    시각이 깨진 버킷(created_at 변조 -- DB 가 신뢰 경계다)은 그 버킷만 버린다(이 모듈의 fail-soft)."""
+    days: dict = {}
+    for row in hourly:
+        try:
+            day = iso_plus(f"{row['bucket']}:00:00Z", DISPLAY_UTC_OFFSET_HOURS * 3600)[:10]
+        except (TypeError, ValueError, KeyError):
+            continue
+        days[day] = days.get(day, 0) + int(row["count"])
+    return [{"bucket": day, "count": n} for day, n in sorted(days.items())]
 
 
 def _num(value):
@@ -131,10 +153,21 @@ def _rate(prev, cur, dt):
     return round((cur - prev) / dt, 1)
 
 
-def build_node_points(samples: list[dict]) -> list[dict]:
-    """MetricsRepository.node_series 출력(오름차순) -> 포인트 목록. 샘플 단위 fail-soft."""
+def _gap_point(at: str) -> dict:
+    # 보고 공백 표지(2026-11-11): 값이 전부 null 인 포인트 -- 프런트 Sparkline 은 null 에서 선을 끊는다.
+    return {"at": at, "cpu_used_pct": None, "cpu_iowait_pct": None, "load1": None, "load5": None, "load15": None,
+            "mem_used_pct": None, "net_rx_bps": None, "net_tx_bps": None, "disks": []}
+
+
+def build_node_points(samples: list[dict], *, gap_seconds: "float | None" = None) -> list[dict]:
+    """MetricsRepository.node_series 출력(오름차순) -> 포인트 목록. 샘플 단위 fail-soft.
+
+    gap_seconds(라우트는 보고 신선도 기준 agent_report_stale_seconds 를 넘긴다): 인접 샘플 간격이 이보다 길면 그 사이에
+    값이 전부 null 인 공백 표지를 끼우고(at = 공백의 가운데), 공백 직후의 수신·송신 차분도 null 로 둔다(2026-11-11). 보고가
+    끊긴 몇 시간이 선 한 마디로 이어져 그동안 정상 보고한 것처럼 보였고, 공백 뒤 첫 B/s 는 몇 시간 평균이라 거짓 저점이었다
+    -- 결측은 끊는다(카운터 리셋 null 과 같은 원칙). None 이면 끼우지 않는다(옛 호출부)."""
     points = []
-    prev_t = prev_rx = prev_tx = None
+    prev_t = prev_rx = prev_tx = prev_at = None
     for sample in samples:
         report = sample.get("report")
         os_block = report.get("os") if isinstance(report, dict) else None
@@ -149,8 +182,12 @@ def build_node_points(samples: list[dict]) -> list[dict]:
         net_rx = net_tx = None
         if prev_t is not None:
             dt = t - prev_t
-            net_rx = _rate(prev_rx, rx, dt)
-            net_tx = _rate(prev_tx, tx, dt)
+            if gap_seconds is not None and dt > gap_seconds:
+                # prev_at 은 위 _epoch 를 통과한 같은 고정 포맷이라 iso_plus 가 받는다.
+                points.append(_gap_point(iso_plus(prev_at, int(dt // 2))))
+            else:
+                net_rx = _rate(prev_rx, rx, dt)
+                net_tx = _rate(prev_tx, tx, dt)
         # os.cpu_count 는 여기 싣지 않는다: 코어 수는 사실상 불변이라 프론트가
         # 최신 리포트(/api/admin/nodes 의 report.os.cpu_count)에서 읽으면 충분하고,
         # 포인트마다 실으면 시계열 응답 폭만 는다.
@@ -172,7 +209,7 @@ def build_node_points(samples: list[dict]) -> list[dict]:
         })
         # 카운터가 None인 샘플을 지나면 prev도 None이 된다 -- 다음 구간도 null.
         # 마지막 유효 카운터를 기억하는 것보다 단순하고, 빈 구간 하나가 늘 뿐이다.
-        prev_t, prev_rx, prev_tx = t, rx, tx
+        prev_t, prev_rx, prev_tx, prev_at = t, rx, tx, sample["reported_at"]
     return points
 
 
@@ -183,7 +220,7 @@ DURATION_BUCKETS = (("<1m", 60), ("1-10m", 600), ("10-60m", 3600),
 
 # 제출 대기(슬라이스 17)의 버킷. 수행시간 버킷(<1m 시작)을 그대로 쓰면 플래너 틱
 # (10s)+스테퍼 틱(5s) 안에 끝나는 정상 대기가 전부 첫 버킷에 뭉쳐 분포가 사라진다 --
-# 정상(<30s), 유예·지연(30s-5m: 신원 전파 유예 기본 300s), 백로그(>5m)가 구분되는
+# 정상(<30s), 지연(30s-5m: 경계는 옛 LDAP 시절 신원 전파 유예 300s -- 2026-10-26 삭제), 백로그(>5m)가 구분되는
 # 경계로 자른다.
 SUBMIT_WAIT_BUCKETS = (("<10s", 10), ("10-30s", 30), ("30-60s", 60),
                        ("1-5m", 300), ("5-30m", 1800))

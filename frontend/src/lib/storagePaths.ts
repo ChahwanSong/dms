@@ -34,10 +34,13 @@ export function absolutePath(root: string | null | undefined,
  *  sync 도구(dsync)는 목적지가 이미 있어도 그 상위에 실행 신원의 쓰기 권한을 요구한다 --
  *  제출 화면이 "어느 디렉토리에" 권한이 필요한지 절대경로로 보여 주는 데 쓴다.
  *  목적지 상대경로가 비면(목적지 = 관리 디렉토리 자신) 상위는 관리 디렉토리의 부모다.
- *  뿌리를 모르면 null(absolutePath 와 같은 규칙 -- 지어내지 않는다). */
+ *  뿌리를 모르면 null(absolutePath 와 같은 규칙 -- 지어내지 않는다). ".." 성분이 있어도 null(2026-11-11 -- 글자로 접으면
+ *  「<뿌리>/..」 같은 경로를 「이미 있어야 합니다」로 지어냈다; 서버는 그 경로를 거부한다). 호출측은 서버가 거부할 입력이면
+ *  (relativePathProblem·pvSubProblem) 아예 부르지 않는다 -- 이건 마지막 방어다. */
 export function destinationParent(root: string | null | undefined, rel: unknown): string | null {
   if (typeof root !== "string" || root === "" || typeof rel !== "string") return null;
   const parts = rel.split("/").filter((p) => p !== "" && p !== ".");
+  if (parts.some((p) => p === "..")) return null;
   if (parts.length === 0) {
     const base = root.replace(/\/+$/, "");
     const up = base.replace(/\/[^/]*$/, "");
@@ -100,7 +103,8 @@ export function pathSummary(operation: string | undefined,
 // 밖이라 모양을 믿지 않는다: 객체가 아니면 PV 표기를 하지 않고(옛 문법으로), 칸이 문자열이 아니면 「?」.
 // path = PV 안 하위경로(제출 바디의 target/source/destination 그대로). 없으면 payload 의 물리 target 에서 root 를 떼어 짓는다.
 
-/** 「PV 전체」 -- 하위경로가 비었거나 '.'·'./' 처럼 정규화하면 PV 루트 자신인 경우. */
+/** 「PV 전체」 -- 하위경로가 비었거나 '.'·'./' 처럼 정규화하면 PV 루트 자신인 경우. 서버 경로 검색은 이 구절(앞의 「/」 포함)을
+ *  구분자로 지운다(text_search.PV_WHOLE_LABEL -- 저장 target_label 엔 없는 글자라, 2026-11-11). 바꾸면 그쪽도 함께(대조 테스트). */
 export const PV_WHOLE = "(PV 전체)";
 
 const _pvField = (v: unknown) => (typeof v === "string" ? v : v === null || v === undefined ? "—" : "?");

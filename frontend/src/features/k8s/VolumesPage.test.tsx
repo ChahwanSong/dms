@@ -1,7 +1,7 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useLocation } from "react-router-dom";
 import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
 import { afterAll, afterEach, beforeAll, expect, test } from "vitest";
@@ -28,9 +28,17 @@ function wrap(data: VolumesResponse | null = volumes(), at = "/admin/k8s/volumes
     }));
   }
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  render(<QueryClientProvider client={qc}><MemoryRouter initialEntries={[at]}><VolumesPage /></MemoryRouter></QueryClientProvider>);
+  render(<QueryClientProvider client={qc}>
+    <MemoryRouter initialEntries={[at]}><VolumesPage /><LocationProbe /></MemoryRouter>
+  </QueryClientProvider>);
   return asked;
 }
+
+// 지금 주소의 쿼리(화면과 주소가 맞는지 -- 2026-11-11)
+function LocationProbe() {
+  return <output data-testid="location-search">{useLocation().search}</output>;
+}
+const locationSearch = () => screen.getByTestId("location-search").textContent;
 
 const rowOf = (pvc: string) => screen.getByText(pvc, { selector: "span.font-medium" }).closest("tr") as HTMLElement;
 
@@ -48,6 +56,58 @@ test("표: PV 이름 + 볼륨, namespace (StorageClass), 상태, 실제 경로, 
   expect(within(pending).getByText(reasonText("pv_not_bound"))).toBeInTheDocument();
   expect(within(pending).getByText("없음")).toBeInTheDocument();                 // 권한 사용자 0명 = 「없음」
   expect(screen.getByText("스냅숏 기준")).toBeInTheDocument();
+});
+
+test("관리자 화면의 사유는 관리자 시점 -- 「관리자에게 요청하세요」 대신 StorageClass 탭 링크(2026-11-11)", async () => {
+  const unmapped = { ...volumes().volumes[0], pvc: "dms-pg-1", storage_class: "local-path", storage_name: null, root: null,
+                     abs_root: null, selectable: false, reason: "pv_storageclass_unmapped" };
+  const unresolved = { ...volumes().volumes[0], pvc: "odd", root: null, abs_root: null, selectable: false,
+                       reason: "pv_path_unresolved" };
+  wrap(volumes({ volumes: [unmapped, unresolved] }));
+  await screen.findByText("dms-pg-1", { selector: "span.font-medium" });
+  const row = rowOf("dms-pg-1");
+  expect(within(row).queryByText(/관리자에게/)).toBeNull();
+  const cell = within(row).getByRole("link", { name: "StorageClass 탭" });
+  expect(cell).toHaveAttribute("href", "/admin/k8s/storageclasses");
+  expect(cell.closest("span")).toHaveTextContent(
+    "이 PV 의 StorageClass 가 DMS 스토리지에 매핑돼 있지 않습니다 — StorageClass 탭에서 이 StorageClass 를 DMS 스토리지에 매핑하세요");
+  expect(within(rowOf("odd")).getByRole("link", { name: "StorageClass 탭" }).closest("span"))
+    .toHaveTextContent("이 PV 의 실제 경로를 계산할 수 없습니다(경로 템플릿·PV 정보 부족) — StorageClass 탭에서 이 StorageClass 의 경로 템플릿을 확인하세요");
+  // 상세 창(실제 경로 칸·아래 사유)도 같은 문구
+  await userEvent.click(within(row).getByRole("button", { name: "상세" }));
+  const dialog = await screen.findByRole("dialog");
+  expect(within(dialog).queryByText(/관리자에게/)).toBeNull();
+  expect(within(dialog).getAllByRole("link", { name: "StorageClass 탭" })).toHaveLength(2);
+});
+
+test("스냅숏 기준 줄: 경고 꼬리까지 한 줄로 묶지 않는다 -- 좁은 폭에서 본문을 넘지 않게(2026-11-11)", async () => {
+  wrap(volumes({ clusters: [{ name: "gpu-train-prod-a", synced_at: "2026-10-24T00:00:00Z", stale: true, status: "delayed" }] }));
+  const name = await screen.findByText("gpu-train-prod-a", { selector: "span.font-medium" });
+  const item = name.parentElement as HTMLElement;
+  expect(item).toHaveTextContent(/gpu-train-prod-a .* 성공 · 오래됨 · 이후 변경은 반영 안 됐을 수 있음 · 지연/);
+  expect(item).not.toHaveClass("whitespace-nowrap");
+  expect(item).toHaveClass("min-w-0");
+  expect(item.className).toContain("[overflow-wrap:anywhere]");
+  // 「n분 전 성공」만 한 덩어리
+  expect(within(item).getByText(/성공$/)).toHaveClass("whitespace-nowrap");
+});
+
+test("주소가 상태다: 필터를 바꾸면 주소에 남고, ?user= 로 들어온 뒤 탭 「PV 탐색」을 누르면 조건 없이 다시 시작한다(2026-11-11)", async () => {
+  const asked = wrap(volumes(), "/admin/k8s/volumes?user=alice");
+  await screen.findByText("models", { selector: "span.font-medium" });
+  expect(locationSearch()).toBe("?user=alice");
+  await userEvent.selectOptions(screen.getByLabelText("클러스터 필터"), "dmsk8s");
+  await waitFor(() => expect(locationSearch()).toBe("?user=alice&cluster=dmsk8s"));
+  // 탭을 누르면(같은 경로 -- 라우터가 다시 마운트하지 않는다) 주소와 화면이 같이 빈 조건이 된다
+  await userEvent.click(screen.getByRole("link", { name: "PV 탐색" }));
+  await waitFor(() => expect(screen.getByLabelText("권한 사용자 필터")).toHaveValue(""));
+  expect(screen.getByLabelText("클러스터 필터")).toHaveValue("");
+  expect(locationSearch()).toBe("");
+  await waitFor(() => {
+    const last = asked[asked.length - 1];
+    expect(last.get("user")).toBeNull();
+    expect(last.get("cluster")).toBeNull();
+  });
 });
 
 test("검색은 디바운스 뒤 ?q=, 필터는 쿼리로, 상한은 limit=200", async () => {

@@ -501,6 +501,25 @@ test("KPI 크기 칸은 title 에 정확한 바이트(2026-10-26 -- scan 「사�
   expect(unknown.find((x) => x.key === "bytes")?.title).toBeUndefined();
 });
 
+test("KPI scan 의 files 는 「스캔한 항목」(디렉터리·링크 포함 전체 항목 -- 「파일」이라 부르지 않는다, 2026-11-11)", () => {
+  // 라이브 085ec8f6: result_summary.files = summary.total_entries 11(파일 8 · 디렉터리 3)
+  const scan = job({ operation: "scan", state: "Succeeded", transitions: SYNC_OK_TR,
+                     result_summary: { files: 11, bytes: 100, returncode: 0 } });
+  const files = kpi({ operation: "scan" }, [scan]).find((x) => x.key === "files");
+  expect(files).toMatchObject({ label: "스캔한 항목", value: "11개", sub: "디렉터리·링크 포함" });
+  expect(kpi({ operation: "scan" }, [scan]).map((x) => x.label)).not.toContain("스캔한 파일");
+});
+
+test("KPI 제출 대기: 계획 전 취소(Pending→Cancelled)는 플래너 픽업이 아니다 -- 「—」 + 「배정 전 취소」(2026-11-11)", () => {
+  const cancelled = kpi({ state: "Cancelled",
+    transitions: [t(null, "Pending", 0), t("Pending", "Cancelled", 30, { actor: "alice" })] }, []);
+  expect(cancelled.find((x) => x.key === "submit_wait")).toMatchObject({ value: "—", sub: "배정 전 취소" });
+  // 배정 뒤 취소면 픽업은 Planned 전이 그대로
+  const later = kpi({ state: "Cancelled",
+    transitions: [t(null, "Pending", 0), t("Pending", "Planned", 2), t("Planned", "Cancelled", 30)] }, []);
+  expect(later.find((x) => x.key === "submit_wait")).toMatchObject({ value: "2초", sub: "플래너 배정까지" });
+});
+
 test("KPI v2 sync: 「반영한 항목」 + 종류별 내역 + 계획(nsync) / 소스 전체(dsync -- 크기 미리보기 없음)", () => {
   const ns = job({ state: "Failed", tool: "nsync", reason_code: "sync_items_failed", phase_refs: ALL, transitions: EXEC_TR,
     result_summary: NSYNC_FAILED, preview_summary: NSYNC_PREVIEW });

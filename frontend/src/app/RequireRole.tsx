@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Navigate } from "react-router-dom";
+import { Navigate, useLocation } from "react-router-dom";
 import { useMe } from "../features/auth/useAuth";
 import { Button } from "../components/ui/Button";
 import { ApiError } from "../lib/api";
@@ -12,6 +12,9 @@ import { ApiError } from "../lib/api";
 // 관찰자를 언마운트한다.
 export function RequireRole({ role, children }: { role?: "admin"; children: React.ReactNode }) {
   const me = useMe();
+  // /login 으로 보낼 때 원래 주소를 state.from 에 싣는다(2026-11-11) -- 로그인 성공 뒤 그 화면으로 돌아간다(navigation.loginReturnPath).
+  const loc = useLocation();
+  const toLogin = <Navigate to="/login" replace state={{ from: loc.pathname + loc.search + loc.hash }} />;
   // 사용자가 누른 「다시 시도」가 도는 동안은 오류 패널을 그대로 둔다. 데이터 없는 쿼리의 재조회는 status 를 pending·error 를 null
   // 로 되돌려(TanStack fetchState) 그냥 두면 「불러오는 중…」으로 바뀌며 버튼이 언마운트되고 키보드 포커스가 body 로 떨어진다 --
   // 같은 버튼 노드를 남겨 포커스를 지킨다(그래서 disabled 가 아니라 aria-disabled: disabled 버튼은 포커스를 놓는다).
@@ -19,7 +22,7 @@ export function RequireRole({ role, children }: { role?: "admin"; children: Reac
   // isPending = 아직 데이터도 오류도 없음: 첫 조회와 그 재시도 대기(useMe 의 5xx 재시도) + 오프라인 일시정지(networkMode online
   // -- 연결이 돌아오면 이어서 조회한다). 예전 isLoading 은 일시정지에서 거짓이라 아래 「데이터 없음 → /login」으로 샜다.
   if (me.isPending && !retrying) return <div className="p-6 text-muted">불러오는 중…</div>;
-  if (me.isError && me.error instanceof ApiError && me.error.status === 401) return <Navigate to="/login" replace />;
+  if (me.isError && me.error instanceof ApiError && me.error.status === 401) return toLogin;
   // 데이터가 있는데 재조회(창 포커스·화면 이동 재마운트)만 실패한 경우는 화면을 그대로 둔다 -- 마지막으로 확인된 세션이고, 화면을
   // 걷으면 작성 중이던 입력이 사라진다. 인가는 서버가 요청마다 다시 판정한다(화면 조회들은 자기 오류를 보인다).
   if ((me.isError || retrying) && me.data === undefined) {
@@ -37,7 +40,7 @@ export function RequireRole({ role, children }: { role?: "admin"; children: Reac
       </div>
     );
   }
-  if (!me.data) return <Navigate to="/login" replace />;
+  if (!me.data) return toLogin;
   if (role === "admin" && me.data.role !== "admin") return <Navigate to="/jobs" replace />;
   return <>{children}</>;
 }

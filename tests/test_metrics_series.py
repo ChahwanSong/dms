@@ -1,5 +1,5 @@
 from dms.metrics_series import (bucket_chars_for, build_node_points,
-                                clamp_window_hours, duration_histogram)
+                                clamp_window_hours, duration_histogram, kst_day_buckets)
 
 
 def _sample(at, **os_fields):
@@ -323,3 +323,36 @@ def test_storage_filesystem_rejects_tampered_values():
     good = _node("ok", mounts=[_mount("s")], disks=[_disk("s", 100, 100)])          # used == total 은 정상(가득 참)
     assert storage_filesystem("s", bad + [good])["node_name"] == "ok"
     assert storage_filesystem("s", None) is None
+
+
+def test_report_gap_beyond_threshold_inserts_null_marker_and_drops_rate():
+    # 2026-11-11: 보고가 몇 시간 끊긴 구간이 선 한 마디로 이어져 정상 보고처럼 보였다 -- 신선도 기준(gap_seconds)을 넘는
+    # 간격엔 값이 전부 null 인 표지(at = 공백의 가운데)를 끼우고, 공백 직후의 B/s(몇 시간 평균 -- 거짓 저점)는 null 이다.
+    samples = [
+        _sample("2026-08-09T00:00:00Z", load1=1.0, network_rx_bytes=0),
+        _sample("2026-08-09T00:01:00Z", load1=1.0, network_rx_bytes=6000),
+        _sample("2026-08-09T06:01:00Z", load1=2.0, network_rx_bytes=12000),   # 6시간 공백
+        _sample("2026-08-09T06:02:00Z", load1=2.0, network_rx_bytes=18000),
+    ]
+    pts = build_node_points(samples, gap_seconds=300)
+    assert [p["at"] for p in pts] == ["2026-08-09T00:00:00Z", "2026-08-09T00:01:00Z", "2026-08-09T03:01:00Z",
+                                      "2026-08-09T06:01:00Z", "2026-08-09T06:02:00Z"]
+    gap = pts[2]
+    assert all(gap[k] is None for k in ("cpu_used_pct", "cpu_iowait_pct", "load1", "load5", "load15",
+                                        "mem_used_pct", "net_rx_bps", "net_tx_bps")) and gap["disks"] == []
+    assert [p["net_rx_bps"] for p in pts] == [None, 100.0, None, None, 100.0]
+    # 기준과 같은 간격(60초)은 공백이 아니다(초과만) -- 그대로 잇는다.
+    assert len(build_node_points(samples[:2], gap_seconds=60)) == 2
+    # gap_seconds 없음(옛 호출부)은 예전 그대로 -- 표지 없이 차분을 잇는다.
+    assert [p["net_rx_bps"] for p in build_node_points(samples)] == [None, 100.0, 0.3, 100.0]
+
+
+def test_kst_day_buckets_fold_utc_hours_into_kst_calendar_days():
+    # 2026-11-11: 일 버킷을 UTC 날짜 접두로 자르면 KST 00~09시(UTC 15~24시) 잡이 전날 막대에 들어갔다.
+    hourly = [{"bucket": "2026-08-09T14", "count": 1},    # KST 08-09 23시
+              {"bucket": "2026-08-09T15", "count": 2},    # KST 08-10 00시
+              {"bucket": "2026-08-10T01", "count": 3},    # KST 08-10 10시
+              {"bucket": "garbage", "count": 9}]          # 깨진 시각(변조) -- 그 버킷만 버린다
+    assert kst_day_buckets(hourly) == [{"bucket": "2026-08-09", "count": 1},
+                                       {"bucket": "2026-08-10", "count": 5}]
+    assert kst_day_buckets([]) == []

@@ -446,9 +446,13 @@ export function deriveKpi(req: RequestDetail, jobs: DataJob[] | null, models: Jo
     // 포함) -- 하나라도 섞이면 「반영한」이라 하지 않고 실행 결과 타일(StageResults.executionTiles)과 같은 중립 라벨(리뷰
     // portal-jobs-20·contract-37: 같은 화면의 두 곳이 같은 수를 다른 이름으로 불렀다).
     const legacy = exec.some((s) => s !== null && !s.detailed);
+    // scan 의 files 는 러너 parse_scan_counts 가 싣는 summary.total_entries -- 디렉터리·링크까지 합한 **전체 항목 수**다
+    // (data_jobs.set_artifact: files 는 「항목」 뜻으로 통일). 「스캔한 파일」로 부르면 파일 8·디렉터리 3 인 트리가 「11개」로
+    // 보여 사용량 분석의 「파일 수」(total_files)와 어긋났다(2026-11-11) -- 배치 펼친 행(BatchDetail)과 같은 이름 「스캔한 항목」
+    // (rm 「삭제한 항목」·sync 「반영한 항목」과 같은 동사형; scan 의 실행 결과는 원 키 타일이라 이름이 겹칠 타일은 없다).
     const labels = op === "sync" ? (legacy ? { files: "항목 수", bytes: "크기" } : { files: "반영한 항목", bytes: "복사한 크기" })
       : op === "rm" ? { files: "삭제한 항목", bytes: "크기" }
-      : { files: "스캔한 파일", bytes: "사용량" };
+      : { files: "스캔한 항목", bytes: "사용량" };
     const pre = list.map((j) => previewOf(j));
     for (const key of ["files", "bytes"] as const) {
       const vals = exec.map((s) => (s === null ? null : s[key]));
@@ -463,8 +467,10 @@ export function deriveKpi(req: RequestDetail, jobs: DataJob[] | null, models: Jo
         const pSub = op === "scan" || pAll === null || word === null || (key === "bytes" && word === "소스 전체") ? null
           : `${word} ${fmt[key](pAll)}`;
         const breakdown = single && key === "files" && op === "sync" && exec[0] !== null ? breakdownOf(exec[0], list[0].tool) : null;
+        // scan 항목 수는 무엇을 셌는지 보조 줄로 밝힌다(위 labels 주석 -- 「파일 수」와 다른 수다).
+        const scanNote = op === "scan" && key === "files" ? "디렉터리·링크 포함" : null;
         tiles.push({ key, label: labels[key], value: fmt[key](sum(known)),
-          sub: breakdown !== null ? (pSub !== null ? `${breakdown} (${pSub})` : breakdown) : pSub,
+          sub: breakdown !== null ? (pSub !== null ? `${breakdown} (${pSub})` : breakdown) : scanNote ?? pSub,
           ...(key === "bytes" ? { title: exactBytes(sum(known)) } : {}) });
         continue;
       }
@@ -528,8 +534,11 @@ export function deriveKpi(req: RequestDetail, jobs: DataJob[] | null, models: Jo
       elapsedFrom: Number.isNaN(ms) ? undefined : req.created_at });
   }
   // 제출 대기(슬라이스 17 정정): 요청 Pending → 첫 비-Pending 전이(플래너 픽업)의 지연이지 Volcano 큐 대기가 아니다.
-  const pickup = tr.find((t) => t.to_state !== "Pending");
+  // Cancelled 로 가는 전이는 픽업이 아니다(2026-11-11): 계획 전 취소(cancel_if_pending)는 Pending→Cancelled 를 사용자
+  // actor 로 남겨, 예전엔 제출→취소 시간을 「플래너 배정까지」로 보였다. 배정 없이 취소됐으면 값은 「—」, 보조 줄이 그 사실을.
+  const pickup = tr.find((t) => t.to_state !== "Pending" && t.to_state !== "Cancelled");
+  const cancelledBeforePickup = pickup === undefined && tr.some((t) => t.to_state === "Cancelled");
   tiles.push({ key: "submit_wait", label: "제출 대기", value: spanText(req.created_at, pickup?.at) ?? "—",
-    sub: "플래너 배정까지" });
+    sub: cancelledBeforePickup ? "배정 전 취소" : "플래너 배정까지" });
   return tiles;
 }

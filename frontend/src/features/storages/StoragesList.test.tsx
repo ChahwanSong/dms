@@ -5,7 +5,11 @@ import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
 import { beforeAll, afterAll, afterEach, test, expect } from "vitest";
 import { StoragesList } from "./StoragesList";
-const server = setupServer();
+// 삭제 확인 창이 함께 지워질 StorageClass 매핑·sync 허용 쌍을 묻는다(2026-11-11) -- 기본은 빈 목록.
+const server = setupServer(
+  http.get("/api/admin/k8s/storage-classes", () => HttpResponse.json([])),
+  http.get("/api/admin/sync-pairs", () => HttpResponse.json([])),
+);
 beforeAll(() => server.listen()); afterEach(() => server.resetHandlers()); afterAll(() => server.close());
 const S = { storage_name:"cephfs", mount_path:"/cephfs", managed_root:"/cephfs/dms",
   backend_type:"ceph", enabled:1, status:"Healthy", status_detail:null };
@@ -145,6 +149,65 @@ test("종류 열에 글자 배지(점 없음), 범위를 바꿔도 지금 종류
     backend_type: S.backend_type, enabled: true, user_enabled: false, kind: "pv" }]));
 });
 
+
+// ---- 2026-11-11 전수조사 수정 -----------------------------------------------------------------------------------------
+test("목록 첫 조회가 실패하면 오류를 말하고 범례는 「–」(0 이 아님), 빈 목록이면 안내", async () => {
+  // 예전엔 둘 다 범례 0·0·0 + 머리줄만 있는 빈 표라 스토리지가 모두 사라진 것처럼 보였다(「모름」을 0 으로 뭉갬).
+  server.use(http.get("/api/admin/storages", () => HttpResponse.json({ detail: "http_500" }, { status: 500 })));
+  const first = wrap();
+  expect(await screen.findByText("서버 오류가 발생했습니다")).toHaveClass("text-bad");
+  const legend = screen.getByLabelText("사용 범위 안내");
+  expect(legend.textContent).toMatch(/전체 사용–/);
+  expect(legend.textContent).not.toMatch(/0/);
+  expect(screen.queryByRole("columnheader", { name: "이름" })).toBeNull();
+  first.unmount();
+
+  server.use(http.get("/api/admin/storages", () => HttpResponse.json([])));
+  wrap();
+  expect(await screen.findByText(/등록된 스토리지가 없습니다/)).toBeInTheDocument();
+  expect(screen.getByLabelText("사용 범위 안내").textContent).toMatch(/전체 사용0/);   // 받은 빈 목록의 0 은 정상값
+});
+
+test("삭제 확인 창은 함께 지워질 StorageClass 매핑·sync 허용 쌍과 재등록해도 돌아오지 않음을 말한다", async () => {
+  // 서버는 같은 트랜잭션에서 둘 다 지운다(StoragesRepository.delete) -- 말없이 지우면 PV 가 모두 「매핑 없음」이 된다.
+  server.use(
+    http.get("/api/admin/storages", () => HttpResponse.json([{ ...S, storage_name: "k8s-pv-nfs", kind: "pv" }])),
+    http.get("/api/admin/k8s/storage-classes", () => HttpResponse.json([
+      { cluster: "tb", name: "tb-nfs", storage_name: "k8s-pv-nfs" },
+      { cluster: "c2", name: "c2-nfs", storage_name: "k8s-pv-nfs" },
+      // 매핑만 남고 어느 클러스터에도 없는 이름(서버가 cluster: null 로 싣는다) -- 「(null)」이 아니라 사실을 말한다.
+      { cluster: null, name: "gone-nfs", storage_name: "k8s-pv-nfs" },
+      { cluster: "tb", name: "other", storage_name: "cephfs" }])),
+    http.get("/api/admin/sync-pairs", () => HttpResponse.json([
+      { source_storage: "cephfs", destination_storage: "k8s-pv-nfs" },
+      { source_storage: "cephfs", destination_storage: "cephfs" }])));
+  wrap();
+  await userEvent.click(await screen.findByRole("button", { name: "삭제" }));
+  const dialog = await screen.findByRole("dialog");
+  expect(within(dialog).getByText(/함께 삭제됩니다 — 같은 이름으로 다시 등록해도 돌아오지 않습니다/)).toBeInTheDocument();
+  expect(await within(dialog).findByText("StorageClass 매핑: tb-nfs (tb), c2-nfs (c2), gone-nfs (어느 클러스터에도 없음)"))
+    .toBeInTheDocument();
+  expect(within(dialog).queryByText(/\(null\)/)).toBeNull();
+  expect(await within(dialog).findByText("sync 허용 쌍 1개: cephfs → k8s-pv-nfs")).toBeInTheDocument();
+});
+
+test("수정 창의 경로 변경이 409 storage_in_use_path_change 로 막히면 삭제 문구가 아니라 수정 문구를 보인다", async () => {
+  // 예전엔 PUT 가드가 삭제와 같은 storage_in_use 라 「삭제할 수 없습니다(비활성화하세요)」가 떴고, 비활성화해도 가드는 그대로였다.
+  server.use(
+    http.get("/api/admin/storages", () => HttpResponse.json([S])),
+    http.put("/api/admin/storages/:name", () =>
+      HttpResponse.json({ detail: "storage_in_use_path_change" }, { status: 409 })));
+  wrap();
+  await userEvent.click(await screen.findByRole("button", { name: "수정" }));
+  const dialog = await screen.findByRole("dialog");
+  const root = within(dialog).getByLabelText("관리 루트");
+  await userEvent.clear(root);
+  await userEvent.type(root, "/cephfs/elsewhere");
+  await userEvent.click(within(dialog).getByRole("button", { name: "저장" }));
+  expect(await within(dialog).findByText(/진행 중인 작업이 쓰는 스토리지라 마운트 경로·관리 루트·백엔드를 바꿀 수 없습니다/))
+    .toBeInTheDocument();
+  expect(within(dialog).queryByText(/삭제할 수 없습니다/)).toBeNull();
+});
 
 // ---- 기본 소유(2026-10-26 -- PV 목적지 sync 결과 소유) ----------------------------------------------------------------
 test("PV·둘 다 행은 종류 배지 아래 「기본 소유 uid:gid」(0:0 은 root), 파일시스템 행엔 없고, 범위 PUT 은 기본 소유를 싣지 않는다", async () => {

@@ -50,6 +50,22 @@ test("행 → 시트: 머리(경로·위치) + 한 줄 수치·추이 차트·�
     && r.closest("[role=dialog]") === null)).toHaveLength(2);
 });
 
+test("hot 비율 표기는 온도 툴팁과 같은 pctText -- 수치 줄·이력 표가 0.3% 를 「0%」로 접지 않는다", async () => {
+  // 2026-11-11 B90: 같은 최신 scan 이 수치 줄·이력 표에선 「0%」(정수 반올림), 온도 열 툴팁에선 「0.3%」였다.
+  const atime = [{ bucket: "[0d,1d]", min_age_days: 0, max_age_days: 1, bytes: 3 },
+                 { bucket: "[181d,365d]", min_age_days: 181, max_age_days: 365, bytes: 997 }];
+  setup({ history: { storage_name: "cephfs-dms", target: "artifacts", skipped_unreadable: 0,
+                     points: [point({ job_id: "j1", request_id: "r1", total_bytes: 1000, time_histograms: { atime } })] } });
+  await userEvent.click(await screen.findByRole("button", { name: "artifacts" }));
+  const sheet = await sheetOf("artifacts");
+  const stat = (await within(sheet).findByText("hot 비율(180일)", { selector: "dt" })).nextElementSibling;
+  expect(stat).toHaveTextContent(/^0\.3%$/);
+  const summary = within(sheet).getByText("스캔 이력 1건");
+  await userEvent.click(summary);
+  const cells = within(summary.closest("details")!).getAllByRole("cell");
+  expect(cells[3]).toHaveTextContent(/^0\.3%$/);
+});
+
 test("시트 닫기는 storage 를 남긴다(기본 스토리지로 튀지 않게) -- 기본 스토리지에서 열면 storage 가 URL 에 실리고, 닫으면(뒤로) 보던 스토리지 그대로", async () => {
   setup({ storages: [st("a-first"), st("cephfs-dms")],
           summary: [sum("a-first"), sum("cephfs-dms")],

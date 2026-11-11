@@ -4,7 +4,7 @@ import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
 import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
 import { beforeAll, afterAll, afterEach, test, expect } from "vitest";
-import { NodeMetricsSection } from "./NodeMetricsSection";
+import { NodeMetricsSection, timeFractions } from "./NodeMetricsSection";
 
 const server = setupServer();
 beforeAll(() => server.listen());
@@ -215,6 +215,81 @@ test("nodes가 비배열이어도 죽지 않는다", async () => {
   expect(await screen.findByText("노드/리소스")).toBeInTheDocument();
 });
 
+
+// ---- 2026-11-11 전수조사 수정 ----
+
+function renderWith(metrics: Record<string, unknown> | 500, nodes: Record<string, unknown>[] = NODES) {
+  server.use(
+    http.get("/api/admin/metrics/nodes", () =>
+      metrics === 500 ? HttpResponse.json({ detail: "boom" }, { status: 500 }) : HttpResponse.json(metrics)),
+    http.get("/api/admin/nodes", () => HttpResponse.json(nodes)),
+  );
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(<QueryClientProvider client={qc}><NodeMetricsSection /></QueryClientProvider>);
+}
+
+test("신선도는 폴링되는 노드 목록 값으로 그린다 -- 시계열 스냅숏이 「정상」이어도 목록이 지연이면 지연", async () => {
+  // 시계열(/metrics/nodes)은 폴링하지 않아 처음 받은 값이 남는다: 정상 노드가 「정상 · 6분 전」으로 늙고, 멈춘 노드도
+  // 「정상」이었다(2026-11-11). 노드 목록(5초 폴링)이 신선도의 원천이다.
+  renderWith(METRICS, [{ ...NODES[0], fresh: false, reported_at: "2026-08-09T00:00:00Z" }]);
+  await screen.findByText("w1");
+  await waitFor(() => expect(screen.getByText(/^지연 · /)).toHaveClass("text-bad"));
+  expect(screen.queryByText(/^정상 · /)).toBeNull();
+});
+
+test("나이도 노드 목록의 reported_at 이다 -- 시계열 스냅숏이 오래돼도 방금 보고했으면 「정상 · 방금」", async () => {
+  const now = new Date().toISOString().replace(/\.\d+Z$/, "Z");
+  renderWith({ ...METRICS, nodes: [{ ...METRICS.nodes[0], fresh: false, reported_at: "2026-08-01T00:00:00Z" }] },
+             [{ ...NODES[0], fresh: true, reported_at: now }]);
+  await screen.findByText("w1");
+  await waitFor(() => expect(screen.getByText("정상 · 방금")).toHaveClass("text-ok"));
+});
+
+test("첫 조회 실패는 오류 한 줄이다 -- 머리줄만 남은 빈 카드가 아니다", async () => {
+  renderWith(500);
+  expect(await screen.findByText(/^노드 지표를 불러오지 못했습니다 — /)).toBeInTheDocument();
+});
+
+test("보고한 노드가 0대면 빈 상태 문구를 낸다", async () => {
+  renderWith({ ...METRICS, nodes: [] }, []);
+  expect(await screen.findByText(/^보고한 노드가 없습니다/)).toBeInTheDocument();
+});
+
+test("가로 위치는 창(start~end) 안의 시각 비율이다 -- 창 끝 2분의 점들은 오른쪽 끝에 모인다", async () => {
+  // 순번 균등 배치면 몇 시간 보고 공백도 한 칸이라 사라졌다(서버가 공백에 null 표지를 끼워 선도 끊는다).
+  renderWith(METRICS);
+  await screen.findByText("w1");
+  const load = screen.getByRole("img", { name: "w1 부하(load 1분)" }).querySelector("path")!.getAttribute("d")!;
+  const xs = [...load.matchAll(/[ML]([\d.]+),/g)].map((m) => Number(m[1]));
+  expect(xs).toHaveLength(3);
+  expect(Math.min(...xs)).toBeGreaterThan(119);                    // 23:58~23:59:30 / 24h 창 → 120 폭의 끝
+  expect(xs[2]).toBeGreaterThan(xs[1]);
+  expect(screen.queryByText(/보존 기간/)).toBeNull();             // 창이 접히지 않았으면(24 = 24) 알림 없음
+});
+
+test("timeFractions: 창 경계·시각을 모르면 undefined(순번 배치로 돌아간다)", () => {
+  const p = (at: string) => ({ ...METRICS.nodes[0].points[0], at });
+  expect(timeFractions([p("2026-08-09T06:00:00Z"), p("2026-08-09T18:00:00Z")],
+                       "2026-08-09T00:00:00Z", "2026-08-10T00:00:00Z")).toEqual([0.25, 0.75]);
+  expect(timeFractions([p("2026-08-09T06:00:00Z")], "", "2026-08-10T00:00:00Z")).toBeUndefined();
+  expect(timeFractions([p("broken")], "2026-08-09T00:00:00Z", "2026-08-10T00:00:00Z")).toBeUndefined();
+});
+
+test("서버가 창을 보존 기간으로 접었으면 한 줄로 알린다", async () => {
+  // 기본 24h 를 골랐는데 서버가 3h 로 접었다(DMS_AGENT_REPORT_RETENTION_DAYS 를 아주 줄인 사이트의 모양).
+  renderWith({ ...METRICS, window_hours: 3 });
+  await screen.findByText("w1");
+  expect(await screen.findByText(/최근 3시간만 보여 줍니다/)).toBeInTheDocument();
+});
+
+test("머리줄의 갱신 시각·새로고침 글자는 줄바꿈하지 않고, 묶음이 통째로 다음 줄로 내려간다(390px 「새로고/침」)", async () => {
+  renderWith(METRICS);
+  await screen.findByText("w1");
+  const button = screen.getByRole("button", { name: "노드/리소스 새로고침" });
+  expect(button.className).toContain("whitespace-nowrap");
+  expect(screen.getByLabelText("마지막 갱신").className).toContain("whitespace-nowrap");
+  expect(button.parentElement!.className).toContain("flex-wrap");
+});
 
 test("새로고침 버튼이 노드 메트릭(같은 기간)과 노드 목록을 다시 조회한다(2026-10-02)", async () => {
   const calls: (string | null)[] = [];

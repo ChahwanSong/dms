@@ -230,15 +230,19 @@ test("renders no warning banners when both flags are off", async () => {
 test("현재 상태 카드가 적용값 배지·사유·영향 요약을 보여준다", async () => {
   server.use(
     http.get("/api/admin/control-state", () => HttpResponse.json(CS)),
+    // 영향 요약은 창 없는 비종단 집계(live_by_state)를 센다(2026-11-11) -- 24h 창(by_state)이면 창보다 오래 도는 잡이 빠진다.
+    // by_state 는 다른 수로 둬 어느 쪽을 읽는지 가른다.
     http.get("/api/admin/metrics/jobs", () => HttpResponse.json({
-      by_state: [{ state: "Running", count: 2 }, { state: "Pending", count: 3 }] })),
+      by_state: [{ state: "Running", count: 7 }, { state: "Pending", count: 8 }],
+      live_by_state: [{ state: "Running", count: 2 }, { state: "Pending", count: 3 }] })),
   );
   wrap();
   expect(await screen.findByText("유지보수 ON")).toBeInTheDocument();   // 적용값 배지
   expect(screen.getByText("드레인 OFF")).toBeInTheDocument();
   expect(screen.getByText("점검")).toBeInTheDocument();                  // 사유
-  expect(screen.getByText("2")).toBeInTheDocument();                     // 실행 중
+  expect(await screen.findByText("2")).toBeInTheDocument();              // 실행 중
   expect(screen.getByText("3")).toBeInTheDocument();                     // 대기
+  expect(screen.queryByText("7")).not.toBeInTheDocument();
 });
 
 test("변경 이력이 diff 요약으로 나열된다", async () => {
@@ -255,6 +259,94 @@ test("변경 이력이 diff 요약으로 나열된다", async () => {
   expect(await screen.findByText("유지보수 OFF→ON · 사유 —→'테스트'")).toBeInTheDocument();
   expect(screen.getByText("초기 설정")).toBeInTheDocument();   // before 없음
   expect(screen.getByText("mason")).toBeInTheDocument();
+});
+
+// ── 2026-11-11 전수조사 B04·B74·B63 ─────────────────────────────────────────────
+
+test("재조회(창 포커스 등)로 q.data 가 바뀌어도 편집 중인 입력을 덮어쓰지 않는다", async () => {
+  // 컨트롤러가 30초마다 artifact_base_check_at 을 갱신해 재조회 응답이 늘 새 객체다 -- 그 필드만 바뀐 재조회.
+  let gets = 0;
+  server.use(http.get("/api/admin/control-state", () => {
+    gets += 1;
+    return HttpResponse.json({ ...CS, artifact_base_check_at: `2026-11-11T10:2${gets}:00Z` });
+  }));
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={qc}><ControlStatePage /></QueryClientProvider>);
+  await screen.findByLabelText("유지보수");
+  await userEvent.type(screen.getByLabelText("HTTP 프록시"), "http://proxy.corp:3128");
+  await userEvent.click(screen.getByLabelText("드레인"));
+  const before = gets;
+  await qc.invalidateQueries({ queryKey: ["control-state"] });
+  await waitFor(() => expect(gets).toBeGreaterThan(before));
+  expect(screen.getByLabelText("HTTP 프록시")).toHaveValue("http://proxy.corp:3128");
+  expect(screen.getByLabelText("드레인")).toBeChecked();
+});
+
+test("마운트 때 캐시가 낡았으면 폼은 재조회로 온 서버 값으로 확정되고, 그 전엔 저장할 수 없다(2026-11-11 리뷰)", async () => {
+  // ['control-state'] 캐시는 빌드 화면도 채운다 -- 그사이 남이 드레인·프록시를 바꿨으면 캐시는 낡은 값이다. 옛 캐시로 폼을
+  // 확정하면 그대로 「저장」할 때 남의 변경이 되돌려진다.
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  server.use(http.get("/api/admin/control-state", async () => {
+    await gate;
+    return HttpResponse.json({ ...CS, drain: 1, build_http_proxy: "http://new.proxy:3128" });
+  }));
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  qc.setQueryData(["control-state"], CS, { updatedAt: Date.now() - 60_000 });
+  render(<QueryClientProvider client={qc}><ControlStatePage /></QueryClientProvider>);
+  expect(await screen.findByLabelText("유지보수")).toBeChecked();       // 조회 중엔 캐시로 미리 채운다
+  expect(screen.getByLabelText("드레인")).not.toBeChecked();
+  expect(screen.getByRole("button", { name: "저장" })).toBeDisabled();  // 낡은 값 저장 금지
+  release();
+  await waitFor(() => expect(screen.getByLabelText("드레인")).toBeChecked());
+  expect(screen.getByLabelText("HTTP 프록시")).toHaveValue("http://new.proxy:3128");
+  expect(screen.getByRole("button", { name: "저장" })).toBeEnabled();
+});
+
+test("신선한 캐시(마운트 조회 없음)면 그 값으로 바로 확정해 저장할 수 있다", async () => {
+  // isFetchedAfterMount 로 기다리면 조회가 없는 이 경우 폼이 영영 빈 채로 남는다 -- 그 함정을 고정한다.
+  let gets = 0;
+  server.use(http.get("/api/admin/control-state", () => { gets += 1; return HttpResponse.json(CS); }));
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: 60_000 } } });
+  qc.setQueryData(["control-state"], { ...CS, build_http_proxy: "http://cached:3128" });
+  render(<QueryClientProvider client={qc}><ControlStatePage /></QueryClientProvider>);
+  expect(await screen.findByLabelText("HTTP 프록시")).toHaveValue("http://cached:3128");
+  await waitFor(() => expect(screen.getByRole("button", { name: "저장" })).toBeEnabled());
+  expect(gets).toBe(0);
+});
+
+test("저장에 성공하면 폼을 서버가 정규화해 돌려준 값으로 다시 맞춘다", async () => {
+  let state: any = CS;
+  server.use(
+    http.get("/api/admin/control-state", () => HttpResponse.json(state)),
+    http.put("/api/admin/control-state", async () => {
+      // 서버 정규화를 흉내낸다(예: 프록시 주소 끝 슬래시 정리).
+      state = { ...CS, build_http_proxy: "http://proxy.corp:3128" };
+      return HttpResponse.json(state);
+    }));
+  wrap();
+  await screen.findByLabelText("유지보수");
+  await userEvent.type(screen.getByLabelText("HTTP 프록시"), "http://proxy.corp:3128/");
+  await userEvent.click(screen.getByRole("button", { name: "저장" }));
+  await waitFor(() => expect(screen.getByLabelText("HTTP 프록시")).toHaveValue("http://proxy.corp:3128"));
+});
+
+test("현재 상태 카드의 경로·프록시 값은 좁은 폭에서 줄바꿈된다(break-all)", async () => {
+  const noProxy = "10.112.0.50,10.112.0.50:5000,localhost,127.0.0.1,.svc,.cluster.local,10.10.10.21,10.10.10.22";
+  server.use(http.get("/api/admin/control-state", () => HttpResponse.json({
+    ...CS, build_http_proxy: "http://proxy.corp:3128", build_no_proxy: noProxy,
+    build_proxy_ca_path: "/etc/pki/corp-proxy-ca.pem" })));
+  wrap();
+  const proxy = await screen.findByText(`http://proxy.corp:3128 / — (제외: ${noProxy})`);
+  expect(proxy).toHaveClass("break-all");
+  expect(screen.getByText("/home/mason/dms-dev/dms", { selector: "span" })).toHaveClass("break-all");
+  expect(screen.getByText("/etc/pki/corp-proxy-ca.pem", { selector: "span" })).toHaveClass("break-all");
+});
+
+test("빌드 소스 경로 안내가 실제 거절 조건('..' 불가·300자)을 말한다", async () => {
+  server.use(http.get("/api/admin/control-state", () => HttpResponse.json(CS)));
+  wrap();
+  expect(await screen.findByText(/300자 이하, '\.\.' 불가/)).toBeInTheDocument();
 });
 
 test("동일 값 재저장은 「변경 없음」으로 정직하게 표기한다", async () => {

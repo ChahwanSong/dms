@@ -34,7 +34,9 @@ const USER_HEAD = `root 아님 — ${PRIV_USER}`;
 // ---- 1·2 권한 판정표 + 배지 -------------------------------------------------------------------------------------
 const P = (over: Partial<PrivilegeInput>): PrivilegeInput => ({
   op: "sync", planned: null, askedRoot: false, batch: false, jobs: [], reqTerminal: false, authMethod: "session", ...over });
-const B1 = "배치 항목 — 배치를 만든 관리자에게 root 자격이 있으면 root(특권), 없으면 실행 신원 권한으로 실행됩니다(계획 단계에서 확정)";
+// dms-k8s: 자격 없는 배치 자식은 비 root 로 낮추지 않고 계획 단계에서 거부된다(identity.resolve_job_identity, 2026-11-11 --
+// 예전 기대값 「없으면 실행 신원 권한으로 실행」은 dms-ssc 문구를 그대로 고정하고 있었다).
+const B1 = "배치 항목 — 배치를 만든 관리자에게 root 자격이 있으면 root(특권)로 실행되고, 없으면 계획 단계에서 거부됩니다";
 const LEGACY_NOTE = "요청 기록에는 root 지정이 없습니다 — 2026-09-30 규칙 변경(root 는 명시 요청만) 전에 계획된 작업이거나 비정상 기록입니다.";
 const LEGACY_LIVE = "요청 기록에는 root 지정이 없습니다 — 2026-09-30 규칙 변경 전에 계획된 작업이거나 비정상 기록이며, 이 상태의 root 실행은 서버가 다음 단계 제출 전에 거부합니다.";
 
@@ -87,9 +89,15 @@ describe("resolvePrivilege", () => {
     for (const jobs of [[], null, [{}]]) {
       const v = resolvePrivilege(P({ batch: true, jobs, authMethod: "token" }));
       expect(v.kind).toBe("user");
-      expect(v.privilege.head).toEqual({ text: USER_HEAD, tone: "plain" });
-      expect(v.privilege.subs).toEqual([{ tone: "sub",
-        text: "배치 항목 — 공유 토큰(API)으로 만든 배치라 root 자격이 없어 실행 신원 권한으로 실행됩니다." }]);
+      // 머리 문장이 거부를 말한다(2026-11-11) -- 예전 머리 USER_HEAD 「실행 신원의 uid/gid(권한 그대로 적용)」는 비 root 로
+      // 낮춰 실행된다는 dms-ssc 식 주장이라 아래 「거부됩니다」 보조 줄과 한 칸에서 다른 말을 했다. 보조 줄은 중복이라 없다.
+      expect(v.privilege.head).toEqual({ tone: "plain",
+        text: "root 아님 — 공유 토큰(API)으로 만든 배치 항목이라 root 자격이 없어 계획 단계에서 거부됩니다" });
+      expect(v.privilege.subs).toEqual([]);
+      // 비 root 로 낮춰 실행된다고 말하지 않는다(dms-k8s 는 거부 -- 2026-11-11)
+      const all = [v.privilege.head, ...v.privilege.subs].map((l) => l.text).join("");
+      expect(all).not.toMatch(/실행 신원 권한으로 실행/);
+      expect(all).not.toContain(PRIV_USER);
       expect(v.badge).toBeNull();
     }
     // run_as_root 를 명시한 토큰 배치 자식은 「요청됨」(planner 가 privileged_not_authorized 로 거부한다)
@@ -502,8 +510,10 @@ describe("다듬기", () => {
     expect(resolvePrivilege(P({ jobs: null })).privilege.head)
       .toEqual({ tone: "plain", text: "root 지정 없음 — 작업 기록을 불러오지 못해 실제 실행 권한은 확인하지 못했습니다" });
     expect(resolvePrivilege(P({ jobs: null })).badge).toBeNull();
-    // 공유 토큰 배치는 root 자격이 없어 확정 그대로, 작업 없이 끝났으면 과거형
-    expect(resolvePrivilege(P({ batch: true, authMethod: "token", jobs: null })).privilege.head.text).toBe(USER_HEAD);
+    // 공유 토큰 배치는 root 자격이 없어 거부 문구 그대로, 작업 없이 끝났으면 과거형
+    expect(resolvePrivilege(P({ batch: true, authMethod: "token", jobs: null })).privilege.head.text)
+      .toBe("root 아님 — 공유 토큰(API)으로 만든 배치 항목이라 root 자격이 없어 계획 단계에서 거부됩니다");
+    expect(resolvePrivilege(P({ batch: true, authMethod: "token", jobs: [], reqTerminal: true })).privilege.head.text).toBe(USER_HEAD);
     expect(resolvePrivilege(P({ batch: true, authMethod: "token", jobs: [], reqTerminal: true })).privilege.subs).toEqual([{
       tone: "sub", text: "배치 항목 — 작업이 만들어지지 않아 실행되지 않았습니다(공유 토큰 배치라 root 자격 없음)." }]);
   });

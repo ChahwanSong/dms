@@ -643,6 +643,26 @@ test("V8 스케줄 대기 중인 실행: 실행 행은 「진행 중」이 아�
   expect(rows[1]).not.toHaveTextContent("시작 ·");
 });
 
+test("B48 실행 중 「시작」은 제출 + 스케줄 대기, 끝난 행의 소요는 대기 「포함」을 글로 밝힌다(2026-11-11)", () => {
+  server.use(http.get("/api/user/jobs/j1/artifacts", () => HttpResponse.json({ entries: [], truncated: false })));
+  const tr = [{ from_state: "ConfirmPending", to_state: "Executing", at: "2026-10-08T03:15:18Z" },
+    { from_state: "Executing", to_state: "Executing", at: "2026-10-08T03:15:27Z" }];
+  // 제출 03:15:27Z(KST 12:15:27) + 대기 5초 → 시작 12:15:32
+  const view = renderStages({ state: "Executing", phase_refs: ALL_REFS, exec_submitted_at: "2026-10-08T03:15:27Z",
+    sched_wait_seconds: 5, transitions: tr as never });
+  let rows = within(within(screen.getByRole("region", { name: "실행" })).getByRole("list", { name: "실행 단계" })).getAllByRole("listitem");
+  expect(rows[1]).toHaveTextContent("12:15:32 시작 · ");
+  expect(rows[1]).not.toHaveTextContent("12:15:27 시작");
+  expect(rows[1]).toHaveTextContent("스케줄 대기 5초");
+  view.unmount();
+  // 끝남: 제출 03:15:27 → 종단 03:15:38 = 소요 11초(대기 5초 포함) -- 「소요 11초 · 스케줄 대기 5초」로 나란히 두지 않는다
+  renderStages({ state: "Succeeded", phase_refs: ALL_REFS, exec_submitted_at: "2026-10-08T03:15:27Z", sched_wait_seconds: 5,
+    transitions: [...tr, { from_state: "Executing", to_state: "Succeeded", at: "2026-10-08T03:15:38Z" }] as never });
+  rows = within(within(screen.getByRole("region", { name: "실행" })).getByRole("list", { name: "실행 단계" })).getAllByRole("listitem");
+  expect(rows[1]).toHaveTextContent("소요 11초(스케줄 대기 5초 포함)");
+  expect(rows[1]).not.toHaveTextContent("소요 11초 · 스케줄 대기");
+});
+
 test("주석: 이 잡의 phase 이벤트만 그 단계 행에(행마다 3건 + 「외 N건」), job_id 없는 이벤트는 잡이 1개일 때만", async () => {
   server.use(http.get("/api/user/jobs/j1/artifacts", () => HttpResponse.json({ entries: [], truncated: false })));
   const ev = (id: number, payload: unknown, message: string) => ({

@@ -173,12 +173,37 @@ describe("BuildForm — 빌드하기(기본 하위 페이지)", () => {
 
   it("빌드 노드를 확인 박스에서 보여준다", async () => {
     wrap();
-    // control-state 가 도착하기 전에는 미설정 안내가 서 있다 -- 노드 이름을 기다려야
-    // 확인 박스의 "설정됨" 경로를 실제로 지나간다.
+    // control-state 가 도착하기 전에는 「확인 중」이 서 있다(2026-11-11 B26 -- 전에는 미설정 안내였다) -- 노드
+    // 이름을 기다려야 확인 박스의 "설정됨" 경로를 실제로 지나간다.
     expect(await ready()).toBeInTheDocument();
     // "빌드 노드" 문구는 안내 카드에도 나온다 -- 확인 박스의 것 하나만 고집하지
     // 않고 존재만 단언한다(노드 이름 자체는 ready() 가 이미 확인했다).
     expect(screen.getAllByText(/빌드 노드/).length).toBeGreaterThan(0);
+  });
+
+  // 2026-11-11 B26: 모름(로딩·조회 실패)을 미설정으로 단정하지 않는다.
+  it("컨트롤 상태가 오기 전에는 「확인 중」이고 미설정 경고를 띄우지 않는다", async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => { release = r; });
+    server.use(http.get("/api/admin/control-state", async () => {
+      await gate;
+      return HttpResponse.json({ maintenance: 0, drain: 0, reason: null, build_node_name: "dms-w1",
+                                 build_source_path: SRC, changed_by: null, changed_at: null });
+    }));
+    wrap();
+    expect(await screen.findByText(/확인 중…/)).toBeInTheDocument();
+    expect(screen.queryByText(/지정되지 않았습니다/)).not.toBeInTheDocument();
+    release();
+    expect(await ready()).toBeInTheDocument();
+  });
+
+  it("컨트롤 상태 조회가 실패하면 그 사실을 말하고 미설정으로 단정하지 않는다(제출은 서버 판정)", async () => {
+    server.use(http.get("/api/admin/control-state", () =>
+      HttpResponse.json({ detail: "internal_error" }, { status: 500 })));
+    wrap();
+    expect(await screen.findByText(/컨트롤 상태를 읽지 못했습니다/)).toBeInTheDocument();
+    expect(screen.queryByText(/지정되지 않았습니다/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "빌드 시작" })).toBeEnabled();
   });
 
   it("빌드 노드가 없으면 컨트롤 상태 화면으로 가는 링크를 준다", async () => {

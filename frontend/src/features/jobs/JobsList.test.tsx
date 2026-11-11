@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { setupServer } from "msw/node";
 import { http, HttpResponse, delay } from "msw";
 import { beforeAll, afterAll, afterEach, test, expect, vi } from "vitest";
@@ -123,10 +123,31 @@ test("한글 조합 중에도 멈추면 묻는다 — 끝의 미완성 자모만
   expect(names.filter((n) => n !== "이" && n !== "이관")).toEqual([]);
 });
 
-test("빈 결과는 전용 문구를 보인다", async () => {
+test("빈 결과는 전용 문구 -- 아무것도 거르지 않았으면 「아직 제출된 작업이 없습니다」, 거르면 「조건에 맞는」(2026-11-11)", async () => {
+  // 예전엔 필터 없이 들어온 새 사용자에게도 「조건에 맞는 작업이 없습니다」가 나와 필터를 건 것처럼 읽혔다.
   server.use(http.get("/api/user/requests", () => HttpResponse.json([])));
   wrap();
+  expect(await screen.findByText("아직 제출된 작업이 없습니다 — 「작업 제출」로 시작할 수 있습니다")).toBeInTheDocument();
+  expect(screen.queryByText("조건에 맞는 작업이 없습니다")).toBeNull();
+  await userEvent.selectOptions(screen.getByLabelText("상태 필터"), "Failed");
   expect(await screen.findByText("조건에 맞는 작업이 없습니다")).toBeInTheDocument();
+});
+
+test("「작업 제출」은 버튼 모양의 링크 하나 -- <a> 안에 <button> 을 넣지 않는다(Tab 두 번 멈춤, 2026-11-11)", async () => {
+  server.use(http.get("/api/user/requests", () => HttpResponse.json([row("r1")])));
+  wrap(meUser);
+  const link = await screen.findByRole("link", { name: "작업 제출" });
+  expect(link).toHaveAttribute("href", "/jobs/new");
+  expect(link.querySelector("button")).toBeNull();
+  expect(screen.queryByRole("button", { name: "작업 제출" })).toBeNull();
+});
+
+test("대상 칸은 overflow-wrap:anywhere -- break-all 로 짧은 경로 이름까지 글자 단위로 쪼개지 않는다(2026-11-11)", async () => {
+  server.use(http.get("/api/user/requests", () => HttpResponse.json([row("r1")])));
+  wrap(meUser);
+  const cell = (await screen.findByText("s1:a → s1:b")).closest("td")!;
+  expect(cell.className).toContain("[overflow-wrap:anywhere]");
+  expect(cell.className).not.toContain("break-all");
 });
 
 // --- 작업(요청) 선택 삭제(2026-10-08, 관리자 전용) -------------------------------------------------------------
@@ -262,11 +283,13 @@ test("검색어가 적용되면 선택이 비워진다(보이는 결과가 바�
   await waitFor(() => expect(bar()).toHaveTextContent(IDLE));
 });
 
-test("상태 필터는 요청 상태만 — 잡 상태(Previewing·ConfirmPending)는 고르면 늘 0건이라 없다", async () => {
+test("상태 필터는 요청 상태만 — 잡 상태(Previewing·ConfirmPending)와 요청이 거치지 않는 Running 은 고르면 늘 0건이라 없다", async () => {
+  // Running(2026-11-11): 열거에는 있지만 요청 상태를 바꾸는 서버 경로가 쓰지 않는다 -- 진행 중인 요청은 끝날 때까지 Planned.
+  // 예전 기대값은 열거를 그대로 미러해 Running 을 고정하고 있었다.
   wrapRows(mixed());
   await screen.findByText(A);
   const opts = Array.from((screen.getByLabelText("상태 필터") as HTMLSelectElement).options).map((o) => o.value);
-  expect(opts).toEqual(["", "Pending", "Planned", "Running", "Succeeded", "Failed", "Rejected", "Cancelled", "Conflict"]);
+  expect(opts).toEqual(["", "Pending", "Planned", "Succeeded", "Failed", "Rejected", "Cancelled", "Conflict"]);
 });
 
 test("폴링으로 사라진 행은 선택에서 자동 제거(유령 선택 방지)", async () => {
@@ -291,7 +314,9 @@ test("폴링으로 사라진 행은 선택에서 자동 제거(유령 선택 방
   expect(bar()).not.toHaveTextContent("사라져");
 });
 
-test("폴링 오류로 표가 내려갔다 돌아와도 전체 선택 칸의 indeterminate 가 살아 있다", async () => {
+test("폴링 한 번 실패해도 표는 그대로(띠만) -- 선택·indeterminate 유지, 복구되면 띠가 사라진다(2026-11-11)", async () => {
+  // 예전엔 재조회 실패 한 번에 표 전체가 오류 한 줄로 바뀌어 스크롤 위치를 잃었다(전역 retry:false). 이 테스트는 그때
+  // 「표가 내려갔다 돌아와도 indeterminate 가 산다」를 봤다 -- 이제 표가 내려가지 않는 것 자체를 본다.
   let fail = false;
   server.use(
     http.get("/api/user/requests", () => (fail ? HttpResponse.json({ detail: "boom" }, { status: 500 })
@@ -302,14 +327,176 @@ test("폴링 오류로 표가 내려갔다 돌아와도 전체 선택 칸의 ind
   await ready(A);
   await userEvent.click(box(B));
   expect(allBox().indeterminate).toBe(true);
+  const header = allBox();
   fail = true;
   await act(async () => { await qc.refetchQueries({ queryKey: ["requests"] }); });
-  await waitFor(() => expect(screen.queryByLabelText(ALL)).toBeNull());
-  fail = false;
-  await act(async () => { await qc.refetchQueries({ queryKey: ["requests"] }); });
-  await waitFor(() => expect(allBox()).toBeInTheDocument());
+  expect(await screen.findByText(/^자동 갱신에 실패했습니다 — .+ 기준 목록입니다\.$/)).toBeInTheDocument();
+  expect(screen.getByText(A)).toBeInTheDocument();                       // 행이 남는다
+  expect(allBox()).toBe(header);                                          // 표가 다시 마운트되지 않았다
+  expect(allBox().indeterminate).toBe(true);
   expect(bar()).toHaveTextContent("1개 선택됨");
-  expect(allBox().indeterminate).toBe(true);           // 새로 마운트된 input 에도 다시 걸린다(콜백 ref)
+  fail = false;
+  await userEvent.click(screen.getByRole("button", { name: "다시 시도" }));
+  await waitFor(() => expect(screen.queryByText(/자동 갱신에 실패했습니다/)).toBeNull());
+  expect(allBox().indeterminate).toBe(true);
+});
+
+test("첫 조회 실패(보여 줄 행 없음)는 여전히 표 자리에 오류 문구", async () => {
+  server.use(http.get("/api/user/requests", () => HttpResponse.json({ detail: "boom" }, { status: 500 })));
+  wrap(meUser);
+  await waitFor(() => expect(screen.queryByRole("table")).toBeNull());
+  expect(document.querySelector("p.text-bad")).not.toBeNull();
+});
+
+test("다음 쪽 실패는 표 아래에서 알리고(표 유지) 저절로 다시 당기지 않는다 -- 「다시 시도」로", async () => {
+  // 감시 노드가 보이는 동안 실패 → 재당김의 고리가 되지 않게(IntersectionObserver 를 흉내 -- 늘 보인다고 알린다).
+  const observers: IntersectionObserverCallback[] = [];
+  const IO = vi.fn((cb: IntersectionObserverCallback) => {
+    observers.push(cb);
+    return { observe: () => cb([{ isIntersecting: true } as IntersectionObserverEntry], {} as IntersectionObserver),
+             disconnect: () => undefined, unobserve: () => undefined, takeRecords: () => [] };
+  });
+  vi.stubGlobal("IntersectionObserver", IO);
+  try {
+    let page2 = 0;
+    let fail2 = true;
+    const first = Array.from({ length: 50 }, (_, i) => row(hex(100 - i), { commit_order: 100 - i }));
+    server.use(http.get("/api/user/requests", ({ request }) => {
+      if (new URL(request.url).searchParams.get("before") === null) return HttpResponse.json(first);
+      page2 += 1;
+      return fail2 ? HttpResponse.json({ detail: "boom" }, { status: 500 }) : HttpResponse.json([row(hex(1), { commit_order: 1 })]);
+    }));
+    wrap(meUser);
+    expect(await screen.findByText("더 불러오지 못했습니다")).toBeInTheDocument();
+    expect(screen.getByText(hex(100))).toBeInTheDocument();                // 표는 그대로
+    expect(screen.queryByText(/자동 갱신에 실패했습니다/)).toBeNull();      // 재조회 실패 띠와 다르다
+    await act(async () => { await new Promise((r) => setTimeout(r, 50)); });
+    expect(page2).toBe(1);                                                 // 저절로 다시 당기지 않는다
+    fail2 = false;
+    await userEvent.click(screen.getByRole("button", { name: "다시 시도" }));
+    expect(await screen.findByText(hex(1))).toBeInTheDocument();
+    expect(screen.getByText("마지막입니다")).toBeInTheDocument();
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+test("다음 쪽 실패는 폴링이 날아가는 동안에도 남는다 -- 띠 없음·다시 당기지 않음·폴링이 취소되지 않음(2026-11-11)", async () => {
+  // query-core 는 폴링이 시작되면 데이터가 있는 오류 상태에서 fetchMeta 만 null 로 되돌린다 -- isFetchNextPageError 만 보면
+  // 그 순간 「재조회 실패」로 바뀌어 띠가 깜빡이고, 가드가 풀린 감시 노드가 fetchNextPage(cancelRefetch)로 그 폴링을 취소해
+  // 첫 쪽이 끝내 갱신되지 않았다(새 제출이 안 보인다). 실패 시각(errorUpdatedAt)으로 기억하므로 폴링 중에도 그대로다.
+  const IO = vi.fn((cb: IntersectionObserverCallback) => ({
+    observe: () => cb([{ isIntersecting: true } as IntersectionObserverEntry], {} as IntersectionObserver),
+    disconnect: () => undefined, unobserve: () => undefined, takeRecords: () => [] }));
+  vi.stubGlobal("IntersectionObserver", IO);
+  const gate: { open: (() => void) | null } = { open: null };
+  try {
+    let page2 = 0;
+    let firstCalls = 0;
+    const first = Array.from({ length: 50 }, (_, i) => row(hex(100 - i), { commit_order: 100 - i }));
+    // 두 번째 첫 쪽(폴링) = 맨 위에 새 제출 hex(101) -- 폴링 결과가 실제로 반영됐는지(취소되지 않았는지) 이것으로 본다.
+    const polled = [row(hex(101), { commit_order: 101 }), ...first.slice(0, 49)];
+    server.use(
+      http.get("/api/user/requests", async ({ request }) => {
+        if (new URL(request.url).searchParams.get("before") === null) {
+          firstCalls += 1;
+          if (firstCalls === 1) return HttpResponse.json(first);
+          await new Promise<void>((r) => { gate.open = r; });
+          return HttpResponse.json(polled);
+        }
+        page2 += 1;
+        return HttpResponse.json({ detail: "boom" }, { status: 500 });
+      }),
+      http.get("/api/auth/me", () => HttpResponse.json(meUser)));
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={qc}><MemoryRouter><JobsList /></MemoryRouter></QueryClientProvider>);
+    expect(await screen.findByText("더 불러오지 못했습니다")).toBeInTheDocument();
+    expect(page2).toBe(1);
+    let refetch: Promise<void> = Promise.resolve();
+    act(() => { refetch = qc.refetchQueries({ queryKey: ["requests"] }); });
+    await waitFor(() => expect(gate.open).not.toBeNull());                 // 첫 쪽 폴링이 날아가는 중
+    await act(async () => { await new Promise((r) => setTimeout(r, 50)); });
+    expect(screen.queryByText(/자동 갱신에 실패했습니다/)).toBeNull();      // 실패한 재조회가 없다
+    expect(screen.getByText("더 불러오지 못했습니다")).toBeInTheDocument();
+    expect(screen.queryByText("스크롤하면 더 불러옵니다")).toBeNull();
+    expect(page2).toBe(1);                                                 // 감시 노드가 다시 당기지 않았다
+    gate.open?.();
+    await act(async () => { await refetch; });
+    expect(await screen.findByText(hex(101))).toBeInTheDocument();         // 폴링 결과가 반영됐다(취소되지 않음)
+  } finally {
+    gate.open?.();
+    vi.unstubAllGlobals();
+  }
+});
+
+// --- 필터·검색어는 주소에(2026-11-11) -------------------------------------------------------------------------------
+function LocationProbe() {
+  const loc = useLocation();
+  return <output data-testid="loc">{loc.pathname + loc.search}</output>;
+}
+function DetailStub() {
+  const nav = useNavigate();
+  return <button type="button" onClick={() => nav(-1)}>뒤로</button>;
+}
+function wrapRoutes(entry: string, me: Me = meAdmin) {
+  server.use(http.get("/api/auth/me", () => HttpResponse.json(me)));
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(
+    <QueryClientProvider client={qc}><MemoryRouter initialEntries={[entry]}>
+      <Routes>
+        <Route path="/jobs" element={<><JobsList /><LocationProbe /></>} />
+        <Route path="/jobs/:requestId" element={<DetailStub />} />
+      </Routes>
+    </MemoryRouter></QueryClientProvider>);
+}
+
+test("주소의 필터·검색어로 시작한다(첫 조회부터 서버 쿼리에 실린다)", async () => {
+  const urls: string[] = [];
+  server.use(http.get("/api/user/requests", ({ request }) => { urls.push(request.url); return HttpResponse.json([row("r1")]); }));
+  wrapRoutes("/jobs?operation=rm&state=Failed&requester=bob&batch_name=%EC%9D%B4%EA%B4%80&path=proof");
+  await screen.findByText("r1", { exact: false });
+  const first = new URL(urls[0]).searchParams;
+  expect([first.get("operation"), first.get("state"), first.get("requester"), first.get("batch_name"), first.get("path")])
+    .toEqual(["rm", "Failed", "bob", "이관", "proof"]);
+  expect(screen.getByLabelText("연산 필터")).toHaveValue("rm");
+  expect(screen.getByLabelText("상태 필터")).toHaveValue("Failed");
+  await waitFor(() => expect(screen.getByLabelText("요청자 필터")).toHaveValue("bob"));
+  expect(screen.getByLabelText("배치 이름 필터")).toHaveValue("이관");
+  expect(screen.getByLabelText("대상 경로 필터")).toHaveValue("proof");
+});
+
+test("필터를 바꾸면 주소에 실리고, 상세에 갔다가 뒤로 오면 필터·검색어가 그대로다", async () => {
+  const urls: string[] = [];
+  server.use(http.get("/api/user/requests", ({ request }) => {
+    urls.push(request.url); return HttpResponse.json([row("r1", { state: "Failed" })]);
+  }));
+  wrapRoutes("/jobs");
+  await screen.findByText("r1", { exact: false });
+  await userEvent.selectOptions(screen.getByLabelText("상태 필터"), "Failed");
+  await userEvent.type(screen.getByLabelText("대상 경로 필터"), "proof");
+  await waitFor(() => expect(screen.getByTestId("loc")).toHaveTextContent("/jobs?state=Failed&path=proof"));
+  await userEvent.click(screen.getByRole("link", { name: "r1" }));
+  await userEvent.click(await screen.findByRole("button", { name: "뒤로" }));
+  expect(await screen.findByLabelText("상태 필터")).toHaveValue("Failed");
+  expect(screen.getByLabelText("대상 경로 필터")).toHaveValue("proof");
+  await screen.findByText("r1", { exact: false });
+  const last = new URL(urls[urls.length - 1]).searchParams;
+  expect([last.get("state"), last.get("path")]).toEqual(["Failed", "proof"]);
+});
+
+test("주소가 밖에서 바뀌면(배치 「기록 없음」 링크 등) 검색칸도 따라간다 -- 주소와 칸이 어긋나지 않는다", async () => {
+  const BZ = "9".repeat(32);
+  server.use(http.get("/api/user/requests", () => HttpResponse.json([
+    row(hex(1), { batch_id: BZ, batch_exists: false, batch_name: null, batch_status: null, batch_request_count: 1,
+      batch_request_count_capped: false, batch_live_request_count: 0, batch_succeeded_scan_count: 0, batch_item_count: null }),
+  ])));
+  wrapRoutes("/jobs?path=proof");
+  await screen.findByText(hex(1));
+  await waitFor(() => expect(screen.getByLabelText("대상 경로 필터")).toHaveValue("proof"));
+  await userEvent.click(await screen.findByRole("link", { name: `기록 없음 ${BZ.slice(0, 12)}` }));
+  await waitFor(() => expect(screen.getByTestId("loc")).toHaveTextContent(`/jobs?batch=${BZ}`));
+  await waitFor(() => expect(screen.getByLabelText("대상 경로 필터")).toHaveValue(""));
+  expect(screen.getByTestId("loc").textContent).not.toContain("path=");
 });
 
 test("200개를 넘게 고르면 삭제 버튼이 잠기고 「한 번에 200개까지」를 말한다", async () => {

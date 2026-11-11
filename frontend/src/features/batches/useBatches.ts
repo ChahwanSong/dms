@@ -20,12 +20,30 @@ export const needsBatchConfirm = (op: string | undefined): boolean => op !== und
 // 연산이 자동 확인까지 저절로 얻지 않게(켜는 체크박스·「자동 실행 끄기」·자동 안내문이 이 술어 하나를 본다).
 const AUTO_CONFIRM_OPS: ReadonlySet<string> = new Set(["sync", "rm"]);
 export const autoConfirmable = (op: string | undefined): boolean => op !== undefined && AUTO_CONFIRM_OPS.has(op);
+// 목록 창(서버 list_batches 기본과 같은 최신 100건). 창 + 1 건을 받아 「더 오래된 배치가 있다」를 안다(2026-11-11 — 예전엔
+// 정확히 100건이 오면 잘린 것인지 알 수 없어, 탭 건수 「전체 (100)」을 전체로 보이고 오래된 배치는 안내 없이 사라졌다).
+// 캐시(["batches"])에는 받은 그대로(최대 창 + 1) 두고, 화면(BatchesList)이 창만큼 자르고 잘림을 알린다.
+export const BATCH_LIST_WINDOW = 100;
 export const useBatches = () =>
-  useQuery({ queryKey: ["batches"], queryFn: () => apiGet<Batch[]>("/api/admin/batches"),
+  useQuery({ queryKey: ["batches"],
+            queryFn: () => apiGet<Batch[]>(`/api/admin/batches?limit=${BATCH_LIST_WINDOW + 1}`),
             refetchInterval: 4000 });
+// 404(batch_not_found — 기록이 지워졌거나 없는 id)는 다시 읽어도 돌아오지 않는다(useJobs.requestGone 과 같은 판정).
+export const batchGone = (error: unknown): boolean => error instanceof ApiError && error.status === 404;
 export const useBatch = (id: string) =>
   useQuery({ queryKey: ["batch", id], queryFn: () => apiGet<BatchDetail>(`/api/admin/batches/${id}`),
-    refetchInterval: (q) => (BATCH_TERMINAL.has((q.state.data as BatchDetail | undefined)?.status ?? "") ? false : 2500) });
+    // 2026-11-11: 예전엔 데이터가 없으면 상태를 ""(비종단)로 보고 오류에도 2.5초마다 다시 읽어, 404 를 끝없이 폴링했다.
+    // 데이터 없는 오류에서 멈추는 이유가 하나 더 있다 — TanStack v5 는 데이터 없는 쿼리를 다시 읽을 때마다 status 를 pending
+    // 으로 되돌려, 화면(BatchDetail)이 오류 ↔ 불러오는 중으로 깜빡인다. 그래서 데이터 없는 오류는 「다시 시도」(수동)로만
+    // 다시 읽는다. 데이터가 있는 일시 오류(503 등)는 보던 화면을 남긴 채 계속 돈다 — 404 만 멈춘다.
+    refetchInterval: (q) => {
+      if (batchGone(q.state.error)) return false;
+      const d = q.state.data as BatchDetail | undefined;
+      if (d === undefined) return q.state.status === "error" ? false : 2500;
+      return BATCH_TERMINAL.has(d.status) ? false : 2500;
+    },
+    refetchOnWindowFocus: (q) => !batchGone(q.state.error),
+    refetchOnReconnect: (q) => !batchGone(q.state.error) });
 export interface CreateBatchBody {
   operation: string; max_concurrency: number; options: Record<string, unknown>;
   note: string | null; items: Record<string, string>[];

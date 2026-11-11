@@ -420,17 +420,33 @@ test("우선순위 상한 캡션(scan): max_priority 실값 + 조정 예고", as
     "정책 상한: mid — 상한을 넘는 선택은 배치 시 상한으로 조정됩니다")).toBeInTheDocument();
 });
 
-// sync 캡션은 도구별 묶음(기본+상한) — nsync 기본값도 **표기**하되, 기본값
-// **적용**은 dsync 정책 단독(resolve_priority — 제출 시점 도구 미정이라 dsync
-// 대표. nsync 폴백 실행이어도 요청에 박힌 기본값은 dsync 것)이고 nsync 는
-// 상한(clamp)만 실행 도구 기준으로 실제 적용됨을 그대로 말한다(화면 거짓말 금지).
-test("우선순위 캡션(sync): dsync·nsync 기본·상한 도구별 묶음 + 적용 기준 명시", async () => {
+// sync 캡션은 도구별 묶음 — 기본값 **적용**은 dsync 정책 단독(resolve_priority —
+// 제출 시점 도구 미정이라 dsync 대표. nsync 폴백 실행이어도 요청에 박힌 기본값은
+// dsync 것)이고 nsync 는 상한(clamp)만 실행 도구 기준으로 실제 적용됨을 그대로
+// 말한다(화면 거짓말 금지). 그래서 nsync 행은 상한만 — 저장된 nsync 기본값은
+// 쓰이지 않고 정책 화면도 「dsync 따름」으로 잠근다(2026-11-11 B59 후속).
+test("우선순위 캡션(sync): dsync 기본·상한 + nsync 상한만 + 적용 기준 명시", async () => {
   renderPage();
   await fillSync();
   expect(await screen.findByText(
-    "정책 — dsync: 기본 high · 상한 high / nsync: 기본 mid · 상한 mid. "
+    "정책 — dsync: 기본 high · 상한 high / nsync: 상한 mid. "
     + "기본값 적용은 dsync 기준(제출 시점 도구 미정), 상한은 실행 도구 기준으로 조정됩니다"))
     .toBeInTheDocument();
+  expect(screen.queryByText(/nsync: 기본/)).toBeNull();
+});
+
+test("우선순위 캡션(sync): 쓰이지 않는 nsync 기본값이 달라도 상한이 같으면 한 묶음 축약(기본은 dsync 값)", async () => {
+  renderPage([
+    policyRow("scan", 4, 8, "low", "mid"),
+    policyRow("dsync", 6, 4, "mid", "high"),
+    policyRow("nsync", 2, 2, "low", "high"),
+  ]);
+  await fillSync();
+  expect(await screen.findByText(
+    "정책 — dsync·nsync: 기본 mid · 상한 high. "
+    + "기본값 적용은 dsync 기준(제출 시점 도구 미정), 상한은 실행 도구 기준으로 조정됩니다"))
+    .toBeInTheDocument();
+  expect(screen.queryByText(/기본 low/)).toBeNull();
 });
 
 test("정직성 계약(sync): '기본값 적용은 dsync 기준' 문구는 형식 개편에도 남는다", async () => {
@@ -476,7 +492,7 @@ test("상한 초과 선택 즉답(sync): 넘는 도구만 실값으로 — 도�
   // dsync 상한 high 는 통과, nsync 상한 mid 만 초과 — 조정은 실제 배치 도구의
   // 정책으로만 일어나므로 넘는 도구만 구체화한다(a4c0e3e 즉답 회귀 방지).
   expect(await screen.findByText(
-    "정책 — dsync: 기본 high · 상한 high / nsync: 기본 mid · 상한 mid. "
+    "정책 — dsync: 기본 high · 상한 high / nsync: 상한 mid. "
     + "기본값 적용은 dsync 기준(제출 시점 도구 미정), "
     + "선택한 high는 배치 시 nsync 상한 mid로 조정됩니다")).toBeInTheDocument();
 });
@@ -517,14 +533,54 @@ test("동시 실행 상한을 지우면 빈 칸(0 아님) + 오류 + 생성 비�
   const mc = screen.getByLabelText("동시 실행 상한");
   await userEvent.clear(mc);
   // 결함 회귀 그물(정책 다이얼로그와 같은 유형): number 상태 시절엔 지우는
-  // 순간 Number("")=0 이 "0"으로 그려졌다.
-  expect(mc).toHaveValue(null);
+  // 순간 Number("")=0 이 "0"으로 그려졌다. 칸은 2026-11-11 부터 text + inputMode 라 값은 문자열이다(B14).
+  expect(mc).toHaveValue("");
   expect(screen.getByText("동시 실행 상한은 1..64 범위의 정수여야 합니다")).toBeInTheDocument();
   expect(createButton()).toBeDisabled();
   expect(screen.getByText("동시 상한").closest("div")).toHaveTextContent(/^동시 상한—$/);
   await userEvent.type(mc, "8");
-  expect(mc).toHaveValue(8);
+  expect(mc).toHaveValue("8");
   expect(createButton()).toBeEnabled();
+});
+
+test("숫자 칸(노드 수·노드당 프로세스·batch_files·broken_limit)의 잘못된 글자는 빈값으로 조용히 빠지지 않고 즉답으로 막힌다", async () => {
+  // 2026-11-11 (B14): type=number 시절엔 「8e」·(Firefox)「2,000,000」의 value 가 "" 라, 칸엔 친 글자가 남은 채 키가 빠져
+  // 정책·서버 기본으로 조용히 생성됐다. 이제 원문을 intFieldError 가 거른다.
+  const captured = captureCreate();
+  renderPage();
+  await fillScan();
+  for (const label of ["노드 수", "노드당 프로세스 수", "batch_files", "broken_limit", "동시 실행 상한"])
+    expect(screen.getByLabelText(label)).not.toHaveAttribute("type", "number");
+  await userEvent.type(screen.getByLabelText("노드 수"), "8e");
+  expect(screen.getByLabelText("노드 수")).toHaveValue("8e");
+  expect(screen.getByText("노드 수는 1..64 범위의 정수여야 합니다")).toBeInTheDocument();
+  expect(createButton()).toBeDisabled();
+  await userEvent.clear(screen.getByLabelText("노드 수"));
+  await userEvent.clear(screen.getByLabelText("batch_files"));
+  await userEvent.type(screen.getByLabelText("batch_files"), "2,000,000");
+  expect(screen.getByText("batch_files는 0..1000000000 범위의 정수여야 합니다")).toBeInTheDocument();
+  expect(createButton()).toBeDisabled();
+  await userEvent.clear(screen.getByLabelText("batch_files"));
+  await userEvent.type(screen.getByLabelText("batch_files"), "2000000");
+  await userEvent.click(createButton());
+  await screen.findByRole("heading", { name: "배치 b9" });
+  expect(captured.body.options.batch_files).toBe(2000000);
+  expect(captured.body).not.toHaveProperty("node_count");
+});
+
+test("메모는 trim 해서 싣고 공백뿐이면 null — 요약에도 빈 「메모」 행이 없다", async () => {
+  // 2026-11-11 (B81): 예전엔 "   " 을 그대로 보내(서버도 그대로 저장) 요약에 빈 메모 행이 보였다.
+  const captured = captureCreate();
+  renderPage();
+  await fillScan();
+  await userEvent.type(screen.getByLabelText("메모"), "  8월  ");
+  expect(screen.getByText("메모", { selector: "dt" }).nextElementSibling!.textContent).toBe("8월");
+  await userEvent.clear(screen.getByLabelText("메모"));
+  await userEvent.type(screen.getByLabelText("메모"), "   ");
+  expect(screen.queryByText("메모", { selector: "dt" })).toBeNull();
+  await userEvent.click(createButton());
+  await screen.findByRole("heading", { name: "배치 b9" });
+  expect(captured.body.note).toBeNull();
 });
 
 // 배치 sync open_noatime 기본 ON(사용자 승인): 배치는 통일 게이트로 항상 특권

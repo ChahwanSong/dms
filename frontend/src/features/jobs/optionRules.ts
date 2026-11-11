@@ -1,5 +1,6 @@
 import { CHOWN_NAME_ERROR } from "../../lib/syncOwnership";
 import { REASON_MESSAGES } from "../../lib/api";
+import type { Policy } from "../../lib/types";
 // 서버 검증의 클라이언트 미러(즉답용) — 최종 심판은 서버 422 invalid_option 이다.
 // SubmitJob(단건 sync)과 BatchCreate(배치 옵션 스텝)가 공유한다(슬라이스 32 T8) —
 // 파일별 사본이면 미러가 발산한다(슬라이스 31 T3 formFields 이사와 같은 이유).
@@ -169,7 +170,9 @@ export const SYNC_MAX_ERRORS_NOTE =
   + "다시 실행하면 이미 맞춘 항목은 건너뛰고 이어서 맞춥니다.";
 // 실행 권한 문구(제출 요약 「실행 권한」 ↔ 요청 상세 「요청 내용」의 「실행 권한」). root 의 어휘·색(text-bad)은 포탈 전체가 같다.
 // 요청 상세는 PRIV_ROOT_HEAD·PRIV_USER(옛 비 root 행 표시) 만 쓴다 -- sync 의 소유 결과는 같은 카드의 「목적지 소유」 행이 말하므로
-// PRIV_ROOT_SYNC(소유 결과를 덧붙인 꼬리)는 제출 요약 전용이다(한 화면에서 같은 사실을 두 번 말하지 않는다).
+// PRIV_ROOT_SYNC(소유 결과를 덧붙인 꼬리)는 제출 요약 전용이다(한 화면에서 같은 사실을 두 번 말하지 않는다). 제출 요약도 rm·scan 은
+// PRIV_ROOT_HEAD 만 쓴다(2026-11-11 -- sync 꼬리가 rm 요약에 붙어 관련 없는, 그리고 PV 목적지가 기본인 k8s 라인에선 낡은 「소스에
+// 맞춤」 설명이 보였다).
 export const PRIV_ROOT_HEAD = "root(특권) — 권한 검사 우회";
 export const PRIV_ROOT_SYNC = `${PRIV_ROOT_HEAD}, sync 는 목적지 소유·권한을 소스에 맞춤(chown·chmod 지정 시 그 값)`;
 // PV 목적지 root sync(2026-10-26 사용자 결정): 결과 소유는 목적지 스토리지 기본 소유자(사용자는 늘 이것), 운영자가 옵션으로
@@ -180,3 +183,56 @@ export const PRIV_ROOT_SYNC_PV_ROOT = `${PRIV_ROOT_HEAD}, sync 결과 소유는 
 // 소유자, 아니면 소스 소유 그대로(서버 k8s_access.direct_dest_owner). pv 종류 스토리지의 직접 경로는 PRIV_ROOT_SYNC_PV 와 같은 말이다.
 export const PRIV_ROOT_SYNC_DIRECT_BOTH = `${PRIV_ROOT_HEAD}, sync 결과 소유는 목적지가 PV 루트 아래면 목적지 스토리지 기본 소유자로, 아니면 소스에 맞춤·권한은 소스대로(chown·chmod 지정 시 그 값)`;
 export const PRIV_USER = "실행 신원의 uid/gid(권한 그대로 적용)";
+
+// 우선순위 상한 캡션 -- 상한부는 _clamp_priority(placement.py) 미러: fanout 이 상한 초과 선택을 **조용히** 상한으로 누르는 침묵을
+// 화면이 미리 말한다. 배치 생성과 단일 작업이 이 한 곳을 읽는다(2026-11-11 BatchCreate 에서 이사 -- 단일 작업엔 이 캡션이 없어
+// rm 정책 상한이 mid 인데 high 를 고르면 요약은 high 인 채 배치 때 mid 로 깎였다; 사본이면 미러가 발산한다).
+// sync 는 도구별 묶음인데, 기본값 **적용**은 dsync 정책 단독(resolve_priority -- 제출 시점 도구 미정이라 dsync 대표. nsync 폴백
+// 실행이어도 요청에 박힌 기본값은 dsync 것)이고 nsync 는 상한만 실행 도구 기준으로 실제 적용됨을 문장으로 명시한다(화면 거짓말 금지).
+// 그래서 nsync 행은 **상한만** 표기하고 축약 판정도 상한만 비교한다(2026-11-11 -- 정책 화면은 nsync 기본을 「dsync 따름」으로 잠갔는데
+// 캡션은 저장된 nsync 기본값을 의미 있는 값처럼 찍었다: 예전에 nsync 기본을 따로 바꿔 둔 사이트면 UI 로 고칠 수도 없는 쓰이지
+// 않는 값 때문에 캡션이 늘 갈라졌다). 미조회·행 부재는 거짓값 대신 null(캡션 생략, null≠0).
+// 우선순위 순서는 PRIORITIES(domain.py:61)의 미러 — 상한 초과 판정에 쓴다.
+export const PRIORITY_RANK: Record<string, number> = { low: 0, mid: 1, high: 2 };
+
+type PriorityPolicies = Map<string, Pick<Policy, "default_priority" | "max_priority">> | undefined;
+
+function priorityCapRows(byTool: NonNullable<PriorityPolicies>, op: string) {
+  const tools = op === "sync" ? ["dsync", "nsync"] : [op];
+  return tools.flatMap((tool) => {
+    const p = byTool.get(tool);
+    return p === undefined ? [] : [{ tool, def: p.default_priority, cap: p.max_priority }];
+  });
+}
+
+/** 고른 우선순위가 정책 상한에 깎이면 그 예고 한 문장, 아니면 null. ""(정책 기본)는 rank -1 이라 넘지 않는다. 미조회·행 부재도
+ *  null(모르면 말하지 않는다). 한쪽 상한만 넘거나 두 상한이 다르면 조정은 실제 배치 도구의 정책으로만 일어나므로 넘는 도구만 말한다. */
+export function priorityClampNote(byTool: PriorityPolicies, op: string, priority: string): string | null {
+  if (byTool === undefined) return null;
+  const rows = priorityCapRows(byTool, op);
+  const over = rows.filter((r) => (PRIORITY_RANK[priority] ?? -1) > (PRIORITY_RANK[r.cap] ?? Infinity));
+  if (over.length === 0) return null;
+  const overValues = [...new Set(over.map((r) => r.cap))];
+  return over.length === rows.length && overValues.length === 1
+    ? `선택한 ${priority}는 상한 ${overValues[0]}로 조정됩니다`
+    : `선택한 ${priority}는 배치 시 ${over.map((r) => `${r.tool} 상한 ${r.cap}`).join(" · ")}로 조정됩니다`;
+}
+
+/** 우선순위 칸 아래 캡션(정책 기본·상한 + 초과 선택이면 조정 예고). 미조회·행 부재는 null. */
+export function priorityCapText(byTool: PriorityPolicies, op: string, priority: string): string | null {
+  if (byTool === undefined) return null;
+  const rows = priorityCapRows(byTool, op);
+  if (rows.length === 0) return null;
+  // 초과 선택 즉답 — 오류가 아니라 조정 예고이므로 톤(text-muted)은 유지하되 실값으로 구체화한다.
+  const overTail = priorityClampNote(byTool, op, priority);
+  if (op !== "sync")
+    return `정책 상한: ${rows[0].cap} — ${overTail ?? "상한을 넘는 선택은 배치 시 상한으로 조정됩니다"}`;
+  // sync: 상한이 같으면 한 묶음으로 축약(같은 값 반복은 소음). 기본은 dsync 값만 -- nsync 실행에도 그 값이 박히므로(위 주석)
+  // 묶음의 「기본」은 두 도구 모두에 참이고, nsync 의 저장된 기본값은 비교에도 표기에도 넣지 않는다.
+  const dsyncRow = rows.find((r) => r.tool === "dsync");
+  const allSame = dsyncRow !== undefined && rows.length > 1 && rows.every((r) => r.cap === rows[0].cap);
+  const head = allSame
+    ? `${rows.map((r) => r.tool).join("·")}: 기본 ${dsyncRow.def} · 상한 ${rows[0].cap}`
+    : rows.map((r) => (r.tool === "dsync" ? `${r.tool}: 기본 ${r.def} · 상한 ${r.cap}` : `${r.tool}: 상한 ${r.cap}`)).join(" / ");
+  return `정책 — ${head}. 기본값 적용은 dsync 기준(제출 시점 도구 미정), ${overTail ?? "상한은 실행 도구 기준으로 조정됩니다"}`;
+}

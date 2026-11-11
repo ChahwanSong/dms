@@ -18,6 +18,9 @@ export interface StorageUpdateBody {
   user_enabled?: boolean; kind?: StorageKind;
   default_uid?: number; default_gid?: number;
 }
+// 사용량 경로별 행(["usage-targets"])의 PV 판정(소속 PV·「PV 밖」)은 서버가 스토리지 행·종류로 낸다(usage_attribution.collect)
+// -- 등록·수정·삭제 뒤 접두 무효화로 다시 읽는다(2026-11-11). 빠져 있으면 facets(["usage-storages"])는 새로 받아 「PV 이름」 열이
+// 생기는데 행(staleTime 30초)은 옛 판정이라 모두 「PV 밖」으로 보였다.
 export const useCreateStorage = () => {
   const qc = useQueryClient();
   // 등록하면 같은 이름의 옛 scan 기록이 더는 「미등록」이 아니다(사용량 분석 미등록 스토리지 목록, 2026-10-12) -- 사용량
@@ -25,7 +28,8 @@ export const useCreateStorage = () => {
   return useMutation({ mutationFn: (b: StorageCreateBody) => apiSend("POST", "/api/admin/storages", b),
     onSuccess: () => Promise.all([qc.invalidateQueries({ queryKey: ["storages"] }),
                                   qc.invalidateQueries({ queryKey: ["usage-unregistered"] }),
-                                  qc.invalidateQueries({ queryKey: ["usage-storages"] })]) });
+                                  qc.invalidateQueries({ queryKey: ["usage-storages"] }),
+                                  qc.invalidateQueries({ queryKey: ["usage-targets"] })]) });
 };
 export const useUpdateStorage = () => {
   const qc = useQueryClient();
@@ -33,17 +37,21 @@ export const useUpdateStorage = () => {
     apiSend("PUT", `/api/admin/storages/${v.name}`, v.body),
     // 사용량 분석 탭의 메타 줄(마운트·타입)도 요약에서 읽는다.
     onSuccess: () => Promise.all([qc.invalidateQueries({ queryKey: ["storages"] }),
-                                  qc.invalidateQueries({ queryKey: ["usage-storages"] })]) });
+                                  qc.invalidateQueries({ queryKey: ["usage-storages"] }),
+                                  qc.invalidateQueries({ queryKey: ["usage-targets"] })]) });
 };
 export const useDeleteStorage = () => {
   const qc = useQueryClient();
   // 삭제는 서버가 그 스토리지가 낀 sync 허용 쌍도 함께 지운다(StoragesRepository.delete) -- 쌍 목록도
-  // 다시 읽어야 정책 화면이 사라진 쌍을 "사용자 미적용" 으로 남겨 보이지 않는다.
+  // 다시 읽어야 정책 화면이 사라진 쌍을 "사용자 미적용" 으로 남겨 보이지 않는다. StorageClass 매핑도 같은 트랜잭션에서
+  // 지워지므로(delete_maps_for_storage_in_txn) k8s 조회(StorageClass·PV·권한 -- 접두 ["k8s"])도 같은 이유로 다시 읽는다(2026-11-11).
   return useMutation({ mutationFn: (name: string) => apiSend("DELETE", `/api/admin/storages/${name}`),
     onSuccess: () => Promise.all([
       qc.invalidateQueries({ queryKey: ["storages"] }),
       qc.invalidateQueries({ queryKey: ["sync-pairs"] }),
+      qc.invalidateQueries({ queryKey: ["k8s"] }),
       qc.invalidateQueries({ queryKey: ["usage-unregistered"] }),   // 지운 스토리지의 scan 기록이 「미등록」이 된다
       qc.invalidateQueries({ queryKey: ["usage-storages"] }),       // 그 탭이 미등록 탭으로 옮겨 가거나(기록 있음) 사라진다
+      qc.invalidateQueries({ queryKey: ["usage-targets"] }),
     ]) });
 };

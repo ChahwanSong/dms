@@ -72,6 +72,13 @@ function Count({ label, value, sub }: { label: string; value: number | null | un
   );
 }
 
+/** 「지금 동기화」를 걸 수 있나 — 켜짐·토큰 있음·동기화 중 아님·호출 노드 있음. 호출 노드가 없으면(no_node) 서버는 요청을 받아
+ *  두기만 하고 가져갈 노드가 없다(2026-11-11 — 예전에는 눌리고 「수 초 안에 가져갑니다」라고 했다). 카드 버튼과 「모두 지금
+ *  동기화」가 같은 판정을 쓴다. */
+function canSyncNow(c: ClusterSummary): boolean {
+  return c.enabled && c.token === "set" && c.status !== "syncing" && c.status !== "no_node";
+}
+
 /** 주소 해시(#cluster-<이름>, 인코딩됨) → 카드 id. 깨진 인코딩은 대상 없음. */
 function hashTarget(hash: string): string | null {
   if (hash.length <= 1) return null;
@@ -88,10 +95,22 @@ function ClusterCard({ c, offsetMs, targeted }: { c: ClusterSummary; offsetMs: n
   const run = c.last_run;
   const failing = c.status === "failing" || c.status === "token_unreadable"
     || (c.last_reason !== null && c.consecutive_failures > 0);
-  const canSync = c.enabled && c.token === "set" && c.status !== "syncing";
+  const canSync = canSyncNow(c);
   const syncHint = !c.enabled ? "동기화가 꺼진 클러스터입니다"
-    : c.token !== "set" ? "토큰이 있어야 동기화합니다" : c.status === "syncing" ? "이미 동기화 중입니다" : undefined;
+    : c.token !== "set" ? "토큰이 있어야 동기화합니다"
+    : c.status === "no_node" ? "호출 노드가 지정되지 않았습니다 — 개요 탭에서 지정하세요"
+    : c.status === "syncing" ? "이미 동기화 중입니다" : undefined;
   const nextDue = c.enabled ? plusSeconds(c.last_attempt_at, c.interval_seconds) : null;
+  // 「요청했습니다 — 수 초 안에 가져갑니다」는 호출 노드가 그 요청을 가져가면(정규·대체 claim 이 last_attempt_at 을 바꾸고
+  // sync_requested_at 을 지운다) 지운다(2026-11-11): 예전에는 카드가 「정상 · 방금」이 되고 그 뒤 실패해도 화면을 떠날 때까지
+  // 남았다. 오류 문구는 다음 동작까지 둔다.
+  const sentAt = useRef<string | null | undefined>(undefined);
+  useEffect(() => {
+    if (sync.isSuccess && sentAt.current !== undefined && sentAt.current !== c.last_attempt_at) {
+      sentAt.current = undefined;
+      sync.reset();
+    }
+  }, [sync.isSuccess, c.last_attempt_at]); // eslint-disable-line react-hooks/exhaustive-deps
   const expDays = daysUntil(c.token_expires_at, Date.now() + offsetMs);
   const warnings = run?.warnings ?? [];
 
@@ -130,6 +149,7 @@ function ClusterCard({ c, offsetMs, targeted }: { c: ClusterSummary; offsetMs: n
           <dt className="text-xs text-ink/70">다음 예정</dt>
           <dd className="font-medium">{!c.enabled ? <span className="text-ink/70">꺼짐</span>
             : c.token !== "set" ? <span className="text-ink/70">토큰 필요</span>
+            : c.status === "no_node" ? <span className="text-bad">호출 노드 없음</span>
             : <Until iso={nextDue} offsetMs={offsetMs} />}</dd>
         </div>
         <div className="min-w-0">
@@ -193,7 +213,7 @@ function ClusterCard({ c, offsetMs, targeted }: { c: ClusterSummary; offsetMs: n
 
       <div className="mt-auto flex flex-wrap items-center gap-2 border-t border-line pt-3">
         <Button variant="outline" className="whitespace-nowrap" disabled={!canSync || sync.isPending} title={syncHint}
-                onClick={() => sync.mutate(c.name)}>
+                onClick={() => { sentAt.current = c.last_attempt_at; sync.mutate(c.name); }}>
           {sync.isPending ? "요청 중…" : "지금 동기화"}
         </Button>
         <ClusterDialog mode="edit" cluster={c}
@@ -267,8 +287,21 @@ export function ClustersPage() {
   const ov = q.data;
   const offsetMs = serverOffsetMs(ov?.now, q.dataUpdatedAt);
   const clusters = Array.isArray(ov?.clusters) ? ov!.clusters : [];
-  const syncable = clusters.filter((c) => c.enabled && c.token === "set" && c.status !== "syncing").map((c) => c.name);
+  const syncable = clusters.filter(canSyncNow).map((c) => c.name);
   const noNode = clusters.some((c) => c.status === "no_node");
+  // 「n개 클러스터 동기화를 요청했습니다」도 요청한 클러스터를 모두 호출 노드가 가져가면(last_attempt_at 이 바뀜) 지운다(카드의
+  // 성공 문구와 같은 규칙, 2026-11-11). 실패한 이름이 있으면 그 사실은 다음 동작까지 둔다.
+  const syncAllSent = useRef<Map<string, string | null> | null>(null);
+  const attempts = clusters.map((c) => `${c.name}=${c.last_attempt_at ?? ""}`).join("|");
+  useEffect(() => {
+    const sent = syncAllSent.current;
+    if (!syncAll.data || sent === null || syncAll.data.failed.length > 0) return;
+    const picked = [...sent].every(([n, at]) => {
+      const c = clusters.find((x) => x.name === n);
+      return c === undefined || c.last_attempt_at !== at;
+    });
+    if (picked) { syncAllSent.current = null; syncAll.reset(); }
+  }, [syncAll.data, attempts]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // #cluster-<이름> 대상 카드로 한 번 옮긴다(같은 링크를 다시 누르면 location.key 가 바뀌어 다시) — 카드가 그려진 다음 프레임에,
   // 폴링으로 다시 그려질 때는 옮기지 않는다. 스크롤은 움직임 줄이기 설정을 따른다(JobStages 선례).
@@ -304,8 +337,12 @@ export function ClustersPage() {
         actions={<>
           {clusters.length > 0 && (
             <Button variant="outline" className="whitespace-nowrap" disabled={syncable.length === 0 || syncAll.isPending}
-                    title={syncable.length === 0 ? "지금 동기화할 수 있는(켜짐·토큰 있음·동기화 중 아님) 클러스터가 없습니다" : undefined}
-                    onClick={() => syncAll.mutate(syncable)}>
+                    title={syncable.length === 0 ? "지금 동기화할 수 있는(켜짐·토큰 있음·호출 노드 있음·동기화 중 아님) 클러스터가 없습니다" : undefined}
+                    onClick={() => {
+                      syncAllSent.current = new Map(clusters.filter((c) => syncable.includes(c.name))
+                        .map((c) => [c.name, c.last_attempt_at]));
+                      syncAll.mutate(syncable);
+                    }}>
               {syncAll.isPending ? "요청 중…" : "모두 지금 동기화"}
             </Button>
           )}

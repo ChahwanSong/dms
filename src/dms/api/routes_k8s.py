@@ -630,20 +630,26 @@ def admin_access(request: Request, q: "str | None" = Query(default=None, max_len
     k8s = state.repos.k8s
     accounts = {a["username"] for a in state.repos.accounts.list()}
     pvc_counts = k8s.pvc_counts_by_namespace()
+    # volume_count 는 검색(q)과 상관없이 그 사용자의 **모든** 권한 namespace 로 센다(2026-11-11): 화면의 그 숫자는 「PV 보기」 링크
+    # (/admin/k8s/volumes?user=…, namespace 조건 없음)와 같은 범위여야 한다 -- 예전에는 q 에 걸린 바인딩의 namespace 만 세어
+    # team-b 로 검색하면 2개라 하고 링크는 7건을 열었다. 걸러지는 것은 보이는 바인딩 줄(namespaces)뿐이다.
+    ns_by_user: dict = {}
+    for key, names in k8s.users_by_namespace().items():
+        for name in names:
+            ns_by_user.setdefault(name, set()).add(key)
     users: dict = {}
     for b in k8s.bindings(recognized=True, q=q):
         entry = users.setdefault(b["dms_user"], {"dms_user": b["dms_user"],
                                                  "account_exists": b["dms_user"] in accounts,
-                                                 "namespaces": [], "_ns": set()})
+                                                 "namespaces": []})
         entry["namespaces"].append({"cluster": b["cluster_name"], "namespace": b["namespace"], "access": b["access"],
                                     "binding": b["name"], "role_name": b["role_name"],
                                     "subject_mismatch": None if b["subject_mismatch"] is None
                                     else bool(b["subject_mismatch"]),
                                     "subjects": b["subjects"]})
-        entry["_ns"].add((b["cluster_name"], b["namespace"]))
     out_users = []
     for entry in users.values():
-        entry["volume_count"] = sum(pvc_counts.get(key, 0) for key in entry.pop("_ns"))
+        entry["volume_count"] = sum(pvc_counts.get(key, 0) for key in ns_by_user.get(entry["dms_user"], ()))
         out_users.append(entry)
     unrecognized = [{"cluster": b["cluster_name"], "namespace": b["namespace"], "name": b["name"],
                      "role_kind": b["role_kind"], "role_name": b["role_name"], "subjects": b["subjects"]}

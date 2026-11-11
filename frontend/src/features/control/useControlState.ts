@@ -15,8 +15,9 @@ export interface ControlStateBody {
 }
 export const useSetControlState = () => {
   const qc = useQueryClient();
+  // 응답은 저장 뒤 control_state 전체(routes_control.put_control_state) -- 화면이 폼을 서버 정규화 값으로 다시 맞춘다.
   return useMutation({ mutationFn: (b: ControlStateBody) =>
-    apiSend("PUT", "/api/admin/control-state", b),
+    apiSend<ControlState>("PUT", "/api/admin/control-state", b),
     // 이력도 함께 무효화 -- 저장 직후 방금 변경이 이력 표 맨 위에 서야 한다.
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["control-state"] });
                        qc.invalidateQueries({ queryKey: ["control-history"] }); } });

@@ -625,6 +625,10 @@ def test_admin_volumes_access_and_user_volumes(client, repos, db):
     assert sorted(b["name"] for b in acc["unrecognized"]) == ["bob-clusterrole-edit", "bob-clusterrole-view",
                                                              "default-editor", "namespaceAdmin"]
     assert [u["dms_user"] for u in admin.get("/api/admin/k8s/access?q=cocoa").json()["users"]] == ["cocoa.song"]
+    # 검색은 보이는 바인딩 줄만 거르고, PV 개수는 그 사용자의 전체 범위(「PV 보기」 링크 ?user= 와 같은 수) -- 2026-11-11
+    alice_q = {u["dms_user"]: u for u in admin.get("/api/admin/k8s/access?q=team-b").json()["users"]}["alice"]
+    assert [g["namespace"] for g in alice_q["namespaces"]] == ["team-b"]
+    assert alice_q["volume_count"] == 5 == len(alice_view)
     # 일반 사용자: 자기 맵핑 범위만
     _session(client, repos, "alice", "user")
     mine = client.get("/api/user/k8s/volumes").json()

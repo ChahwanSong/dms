@@ -297,12 +297,15 @@ export function StoragePanel({
                  hint={shownQ !== "" ? `검색 ‘${shownQ}’ 도 함께 걸려 있습니다` : undefined}
                  action={<Button type="button" variant="ghost" className="mt-1 py-1.5"
                                  onClick={() => changeAttr({})}>필터 지우기</Button>} />
-        ) : searchQ !== "" ? (
+        ) : shownQ !== "" ? (
           // 창 안에서 건 검색(PV 이름이 생길 수 있는 스토리지)이 판정 창을 넘었으면 PV 이름 쪽은 그 창 안에 없을 뿐이다 -- 「없다」를
           // 단정하지 않는다. 경로 쪽은 창 밖까지 찾았다(서버 _with_path_hits)는 것을 보조 줄로.
+          // 분기·제목은 이 빈 결과를 낸 검색(shownQ -- 자리표시면 봉투 메아리)으로 고른다(2026-11-11 B39, 필터 분기와 같은 규칙):
+          // 지금 입력(searchQ)으로 고르면 0건이던 검색어를 고친 순간 응답 전에 새 검색어로 「결과 없음」을 단정했고, ?q= 딥링크에서
+          // 검색을 지우면 응답 전까지 「아직 성공한 scan 이 없습니다」(기록 없음)라는 거짓 빈 상태로 떨어졌다.
           <Empty icon={<SearchX className="h-5 w-5" />}
-                 title={pvWindowed ? `${pvRange(page!.window_limit, narrowOf(shownQ))} 안에는 ‘${searchQ}’ 검색 결과가 없습니다`
-                   : `‘${searchQ}’ 검색 결과가 없습니다`}
+                 title={pvWindowed ? `${pvRange(page!.window_limit, narrowOf(shownQ))} 안에는 ‘${shownQ}’ 검색 결과가 없습니다`
+                   : `‘${shownQ}’ 검색 결과가 없습니다`}
                  hint={pvWindowed ? "검색어가 모두 경로에 든 대상은 범위 밖까지 찾았습니다" : undefined}
                  action={<Button type="button" variant="ghost" className="mt-1 py-1.5"
                                  onClick={() => setInput("")}>검색 지우기</Button>} />

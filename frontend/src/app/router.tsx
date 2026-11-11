@@ -59,7 +59,10 @@ function Home() {
       </div>
     );
   }
-  if (me.data?.role === "admin") return <Navigate to="/admin/dashboard" replace />;
+  // 세션 없음(401, 데이터 없음)은 /login 으로 바로 -- /jobs 를 거치면 RequireRole 이 state.from=/jobs 를 실어(2026-11-11 로그인 뒤
+  // 복귀) 관리자가 로그인 뒤 대시보드가 아니라 /jobs 에 내렸다. from 없이 가면 로그인 뒤 「/」 → 역할별 첫 화면이다.
+  if (me.data === undefined) return <Navigate to="/login" replace />;
+  if (me.data.role === "admin") return <Navigate to="/admin/dashboard" replace />;
   return <Navigate to="/jobs" replace />;
 }
 

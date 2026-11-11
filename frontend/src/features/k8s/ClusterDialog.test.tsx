@@ -7,7 +7,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } fr
 import { Button } from "../../components/ui/Button";
 import { forgetTransportKey } from "../../lib/passwordTransport";
 import { isSealed, makeServerKey, openSealed, transportKeyHandler, type TestServerKey } from "../../test/transportKey";
-import { ClusterDialog, apiServerError, caError, clusterNameError } from "./ClusterDialog";
+import { ClusterDialog, apiServerError, caError, clusterNameError, normalizeApiServer } from "./ClusterDialog";
 import { CLUSTER_OK } from "./k8sFixtures";
 import type { ClusterSummary } from "./types";
 
@@ -40,6 +40,13 @@ describe("검증 함수", () => {
     expect(apiServerError("http://10.10.10.20:6443")).not.toBeNull();
     expect(apiServerError("https://10.10.10.20:6443/api")).not.toBeNull();
     expect(apiServerError("https://u:p@host:6443")).not.toBeNull();
+    // 서버 validate_api_server 와 같은 모양(2026-11-11): 끝 / 하나는 받고(서버가 떼어 저장), 포트 자리가 빈 「host:」는 막는다
+    expect(apiServerError("https://10.10.10.20:6443/")).toBeNull();
+    expect(apiServerError("https://10.10.10.20:6443//")).not.toBeNull();
+    expect(apiServerError("https://10.0.0.1:")).not.toBeNull();
+    expect(apiServerError("https://10.0.0.1:/")).not.toBeNull();
+    expect(normalizeApiServer(" https://10.10.10.20:6443/ ")).toBe("https://10.10.10.20:6443");
+    expect(normalizeApiServer("https://10.10.10.20:6443")).toBe("https://10.10.10.20:6443");
   });
   test("이름·CA", () => {
     expect(clusterNameError("prod-a")).toBeNull();
@@ -147,6 +154,22 @@ test("편집: 주소·검증 그대로면 토큰 없이 저장(토큰 유지 —
   await openDialog("edit", CLUSTER_OK);
   await userEvent.click(screen.getByRole("button", { name: "저장" }));
   await waitFor(() => expect(sent).not.toBeNull());
+  expect("token_enc" in sent!).toBe(false);
+});
+
+test("편집: 같은 주소에 끝 / 만 붙이면 주소 변경이 아니다 — 토큰 없이 저장되고 / 를 뗀 주소를 싣는다(2026-11-11)", async () => {
+  let sent: Record<string, unknown> | null = null;
+  server.use(http.put("/api/admin/k8s/clusters/:name", async ({ request }) => {
+    sent = await request.json() as Record<string, unknown>;
+    return HttpResponse.json(CLUSTER_OK);
+  }));
+  await openDialog("edit", CLUSTER_OK);
+  await userEvent.type(screen.getByLabelText("API 서버 주소"), "/");
+  expect(screen.getByLabelText("API 서버 주소")).toHaveAttribute("aria-invalid", "false");
+  expect(screen.queryByText(/API 서버 주소를 바꾸려면/)).toBeNull();
+  await userEvent.click(screen.getByRole("button", { name: "저장" }));
+  await waitFor(() => expect(sent).not.toBeNull());
+  expect(sent!.api_server).toBe("https://10.10.10.20:6443");
   expect("token_enc" in sent!).toBe(false);
 });
 

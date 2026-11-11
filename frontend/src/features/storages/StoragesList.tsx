@@ -15,6 +15,8 @@ import { KIND_LABEL, storageKindOf, storageOwnerOf } from "../k8s/k8sTerms";
 import { ownerText } from "../../lib/syncOwnership";
 import { Tag } from "../k8s/parts";
 import type { StorageKind } from "../k8s/types";
+import { useStorageClasses } from "../k8s/useK8s";
+import { useSyncPairs } from "../policies/useSyncPairs";
 
 // 종류 배지(dms-k8s 설계 D11) -- 글자 배지(점 없음, 디자인 규약). PV 를 담는 종류(pv·both)는 파랑, 파일시스템은 중립.
 const KIND_TONE: Record<StorageKind, "neutral" | "info"> = { filesystem: "neutral", pv: "info", both: "info" };
@@ -28,6 +30,36 @@ function OwnerLine({ s }: { s: Storage }) {
   return <span className="mt-0.5 block whitespace-nowrap text-xs text-ink/70">{`기본 소유 ${ownerText(owner)}`}</span>;
 }
 
+/** 삭제 확인 창의 「함께 지워지는 것」(2026-11-11): 서버가 같은 트랜잭션에서 이 스토리지가 낀 sync 허용 쌍과 StorageClass 매핑을
+ *  지운다(StoragesRepository.delete -- 같은 이름 재등록이 옛 허용·매핑을 물려받지 않게, 의도된 동작). 말없이 지우면 PV 를 다시
+ *  등록하려던 관리자가 매핑을 잃고 그 PV 들이 모든 사용자에게 「매핑 없음」이 된다. 창이 열렸을 때만 마운트돼 묻는다(Dialog 내용). */
+function DeleteCascadeNote({ name }: { name: string }) {
+  const sc = useStorageClasses();
+  const pairs = useSyncPairs();
+  const line = "text-xs text-ink/70 [overflow-wrap:anywhere]";
+  const scRows = (sc.data ?? []).filter((r) => r.storage_name === name);
+  const pairRows = (pairs.data ?? []).filter((p) => p.source_storage === name || p.destination_storage === name);
+  return (
+    <div className="mb-3 space-y-1">
+      <p className="text-xs text-attn">
+        이 스토리지의 StorageClass 매핑과 sync 허용 쌍도 함께 삭제됩니다 — 같은 이름으로 다시 등록해도 돌아오지 않습니다.
+      </p>
+      <p className={line}>
+        {sc.isLoading ? "StorageClass 매핑: 불러오는 중…" : sc.isError ? "StorageClass 매핑: 불러오지 못했습니다"
+          : scRows.length === 0 ? "StorageClass 매핑: 없음"
+          // cluster null = 매핑만 남고 어느 클러스터에도 없는 이름(SC·클러스터를 지운 뒤, routes_k8s.list_storage_classes) --
+          // 「(null)」을 그리지 않게 수정 창(StorageDialog)과 같은 문구로.
+          : `StorageClass 매핑: ${scRows.map((r) => `${r.name} (${r.cluster ?? "어느 클러스터에도 없음"})`).join(", ")}`}
+      </p>
+      <p className={line}>
+        {pairs.isLoading ? "sync 허용 쌍: 불러오는 중…" : pairs.isError ? "sync 허용 쌍: 불러오지 못했습니다"
+          : pairRows.length === 0 ? "sync 허용 쌍: 없음"
+          : `sync 허용 쌍 ${pairRows.length}개: ${pairRows.map((p) => `${p.source_storage} → ${p.destination_storage}`).join(", ")}`}
+      </p>
+    </div>
+  );
+}
+
 function DeleteButton({ s }: { s: Storage }) {
   const [open, setOpen] = useState(false);
   const del = useDeleteStorage();
@@ -37,7 +69,8 @@ function DeleteButton({ s }: { s: Storage }) {
   return (
     <Dialog open={open} onOpenChange={setOpen} title="스토리지 삭제"
             trigger={<Button variant="ghost">삭제</Button>}>
-      <p className="text-sm text-muted mb-3">{s.storage_name} 을(를) 삭제할까요?</p>
+      <p className="text-sm text-muted mb-2">{s.storage_name} 을(를) 삭제할까요?</p>
+      <DeleteCascadeNote name={s.storage_name} />
       {del.isError && <p className="text-bad text-sm mb-2">{(del.error as ApiError).message}</p>}
       <div className="flex justify-end gap-2">
         <Button variant="ghost" onClick={() => setOpen(false)}>취소</Button>
@@ -77,7 +110,9 @@ export function StoragesList() {
     body: { mount_path: s.mount_path, managed_root: s.managed_root, backend_type: s.backend_type,
             ...flagsFor(scope), kind: storageKindOf(s) } });
   const rows = q.data ?? [];
-  const count = (scope: StorageScope) => rows.filter((s) => scopeOf(s) === scope).length;
+  // 개수는 목록을 받았을 때만 센다(2026-11-11): 첫 조회가 실패하면 data 가 없어 범례가 0·0·0 이 됐다 -- 「모름」을 정상값 0 으로
+  // 뭉개 스토리지가 모두 사라진 것처럼 보였다. 받기 전(불러오는 중·실패)은 「–」.
+  const count = (scope: StorageScope) => q.data === undefined ? "–" : rows.filter((s) => scopeOf(s) === scope).length;
   return (
     <section className="space-y-4">
       <div className="flex items-center justify-between">
@@ -92,7 +127,7 @@ export function StoragesList() {
               <span className={`flex items-center gap-2 text-sm font-semibold ${o.text}`}>
                 <span className={`h-2 w-2 rounded-full ${o.dot}`} aria-hidden />{o.label}
               </span>
-              <span className={`text-lg font-bold tabular-nums ${o.text}`}>{q.isLoading ? "–" : count(o.value)}</span>
+              <span className={`text-lg font-bold tabular-nums ${o.text}`}>{count(o.value)}</span>
             </div>
             <p className="mt-1 text-xs text-muted">{o.help}</p>
           </div>
@@ -100,7 +135,13 @@ export function StoragesList() {
       </div>
       {/* Card 구획(2026-08-19): 대시보드·릴리스 등과 같은 서피스 — 목록 화면 일관화 */}
       <Card>
-      {q.isLoading ? <p className="text-muted">불러오는 중…</p> : (
+      {/* 실패·빈 목록을 말한다(2026-11-11): 예전엔 둘 다 머리줄만 있는 빈 표였다(같은 관리 영역의 denylist·정책 목록처럼).
+          이미 받은 목록이 있으면(뒤 재조회만 실패) 그 표를 그대로 둔다. */}
+      {q.isLoading ? <p className="text-muted">불러오는 중…</p> : q.isError && q.data === undefined ? (
+        <p className="text-bad">{(q.error as ApiError).message}</p>
+      ) : rows.length === 0 ? (
+        <p className="text-muted">등록된 스토리지가 없습니다 — 「스토리지 등록」으로 추가하세요</p>
+      ) : (
         <Table>
           {/* 관리 디렉토리(managed_root)는 마운트 옆에 둔다: 잡이 실제로 도는 뿌리는
               마운트가 아니라 이쪽이고(입력 경로는 이 아래 상대경로다), 운영자가

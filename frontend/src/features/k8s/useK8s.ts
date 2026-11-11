@@ -49,6 +49,11 @@ export function serverOffsetMs(now: string | undefined, receivedAt: number): num
   return Number.isNaN(t) || receivedAt === 0 ? 0 : t - receivedAt;
 }
 
+/** 폴링 없는 개요(동기화 이력의 호출 노드 선택지 — 지정된 주·보조 노드). 같은 키라 개요·클러스터 탭에서 받은 값을 그대로 쓰고,
+ *  폴링 간격은 관찰자마다라 이 화면에서는 다시 읽지 않는다. */
+export const useK8sOverviewOnce = () =>
+  useQuery({ queryKey: OVERVIEW_KEY, queryFn: () => apiGet<K8sOverview>("/api/admin/k8s/overview") });
+
 /** 필터용 클러스터 목록(폴링 없음 — 동기화 이력의 클러스터 선택지). */
 export const useK8sClusters = () =>
   useQuery({ queryKey: ["k8s", "clusters"], queryFn: () => apiGet<ClusterSummary[]>("/api/admin/k8s/clusters") });

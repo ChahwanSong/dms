@@ -3,6 +3,14 @@ import pytest
 ADMIN = {"Authorization": "Bearer tok-shared"}
 
 
+def _patch_digests(monkeypatch, fn, *, absent=None):
+    """대상 태그 조회(manifest_digest_lookup)와 사용 중 태그 대조(manifest_digest)가 같은 digest 표를 보게 한다.
+    absent = None 일 때 대상 태그 조회가 「없음 확정」이냐(2026-11-11 -- 404 와 무응답 502 를 가르는 값)."""
+    monkeypatch.setattr("dms.api.routes_registry.registry_mod.manifest_digest", fn)
+    monkeypatch.setattr("dms.api.routes_registry.registry_mod.manifest_digest_lookup",
+                        lambda registry, repo, tag: (fn(registry, repo, tag), bool(absent)))
+
+
 class _FakeRunner:
     def __init__(self, images):
         self._images = images
@@ -63,6 +71,16 @@ def test_list_marks_in_use_tags(reg_client):
     assert mfu["b99d97238"] is False
 
 
+def test_list_orders_tags_newest_first_with_numbers_compared_as_numbers(reg_client, monkeypatch):
+    # 2026-11-11 B52: fetch_repo_tags 는 사전식(d1, d10, d11, d2, d9)이다 -- 그대로 내보내면 자릿수 경계에서 최신 태그가
+    # 목록 중간에 묻힌다. 릴리스 드롭다운과 같은 규칙(숫자 고려 내림차순)으로 낸다.
+    monkeypatch.setattr("dms.api.routes_registry.registry_mod.fetch_repo_tags",
+                        lambda registry, repo: sorted(["d1", "d10", "d100", "d11", "d2", "d9", "d99"]))
+    body = reg_client.get("/api/admin/registry/images", headers=ADMIN).json()
+    dms = next(x for x in body["repositories"] if x["repository"] == "dms")
+    assert [t["tag"] for t in dms["tags"]] == ["d100", "d99", "d11", "d10", "d9", "d2", "d1"]
+
+
 def test_list_reports_unreachable_repo_distinct_from_empty(reg_client, monkeypatch):
     # None(무응답) 과 [](태그 0개) 는 다른 값이다 -- 화면이 "조회 실패"를 말할 수 있어야.
     monkeypatch.setattr("dms.api.routes_registry.registry_mod.fetch_repo_tags",
@@ -76,6 +94,8 @@ def test_list_reports_unreachable_repo_distinct_from_empty(reg_client, monkeypat
 def test_delete_refuses_in_use_tag_before_touching_registry(reg_client, monkeypatch):
     called = {"digest": 0, "delete": 0}
     monkeypatch.setattr("dms.api.routes_registry.registry_mod.manifest_digest",
+                        lambda *a: called.__setitem__("digest", called["digest"] + 1))
+    monkeypatch.setattr("dms.api.routes_registry.registry_mod.manifest_digest_lookup",
                         lambda *a: called.__setitem__("digest", called["digest"] + 1))
     monkeypatch.setattr("dms.api.routes_registry.registry_mod.delete_manifest",
                         lambda *a: called.__setitem__("delete", called["delete"] + 1))
@@ -93,8 +113,7 @@ def test_delete_unknown_repo_is_422(reg_client):
 def test_delete_unused_tag_resolves_digest_then_deletes(reg_client, monkeypatch):
     seen = {}
     # 태그마다 다른 digest(사용 중 d74 와 공유하지 않음 — 공유는 test_delete_refuses_unused_tag_sharing_a_digest_… 가 본다).
-    monkeypatch.setattr("dms.api.routes_registry.registry_mod.manifest_digest",
-                        lambda registry, repo, tag: "sha256:" + ("a" if tag == "b99d97238" else "c") * 64)
+    _patch_digests(monkeypatch, lambda registry, repo, tag: "sha256:" + ("a" if tag == "b99d97238" else "c") * 64)
     def _del(registry, repo, digest):
         seen["digest"] = digest
         return "ok"
@@ -106,8 +125,7 @@ def test_delete_unused_tag_resolves_digest_then_deletes(reg_client, monkeypatch)
 
 
 def test_delete_maps_registry_delete_disabled_to_409(reg_client, monkeypatch):
-    monkeypatch.setattr("dms.api.routes_registry.registry_mod.manifest_digest",
-                        lambda registry, repo, tag: "sha256:" + ("b" if tag == "b99d97238" else "c") * 64)
+    _patch_digests(monkeypatch, lambda registry, repo, tag: "sha256:" + ("b" if tag == "b99d97238" else "c") * 64)
     monkeypatch.setattr("dms.api.routes_registry.registry_mod.delete_manifest",
                         lambda *a: "disabled")
     r = reg_client.delete("/api/admin/registry/images/dms/b99d97238")
@@ -115,10 +133,22 @@ def test_delete_maps_registry_delete_disabled_to_409(reg_client, monkeypatch):
 
 
 def test_delete_missing_tag_is_404(reg_client, monkeypatch):
-    monkeypatch.setattr("dms.api.routes_registry.registry_mod.manifest_digest",
-                        lambda *a: None)
+    # 레지스트리가 그 태그는 없다고 답했다 -- 이미 없음(같은 digest 의 별칭과 함께 지워졌을 수 있다).
+    _patch_digests(monkeypatch, lambda *a: None, absent=True)
     r = reg_client.delete("/api/admin/registry/images/dms/b99d97238")
     assert r.status_code == 404 and r.json()["detail"] == "registry_tag_not_found"
+
+
+def test_delete_with_unresponsive_registry_is_502_not_already_gone(reg_client, monkeypatch):
+    # 2026-11-11 리뷰: 무응답·5xx·인증 실패도 digest 가 None 이다 -- 이를 404 registry_tag_not_found 로 내면 화면이 아무것도
+    # 못 지운 삭제를 「이미 없음」(성공 쪽)으로 센다. 지웠는지 모르는 것은 레지스트리 오류(502)다.
+    deleted = []
+    _patch_digests(monkeypatch, lambda *a: None, absent=False)
+    monkeypatch.setattr("dms.api.routes_registry.registry_mod.delete_manifest",
+                        lambda registry, repo, digest: deleted.append(digest) or "ok")
+    r = reg_client.delete("/api/admin/registry/images/dms/b99d97238")
+    assert r.status_code == 502 and r.json()["detail"] == "registry_error"
+    assert deleted == []
 
 
 def test_list_and_delete_are_admin_only(client):
@@ -144,8 +174,7 @@ def test_delete_refuses_unused_tag_sharing_a_digest_with_an_in_use_tag(reg_clien
     # 레지스트리 삭제는 digest 단위 — 안 쓰는 별칭(b99d97238)이 사용 중 d74 와 같은 digest 면 지우면 d74 도 사라진다.
     digests = {("dms", "b99d97238"): "sha256:same", ("dms", "d74"): "sha256:same"}
     deleted = []
-    monkeypatch.setattr("dms.api.routes_registry.registry_mod.manifest_digest",
-                        lambda registry, repo, tag: digests.get((repo, tag)))
+    _patch_digests(monkeypatch, lambda registry, repo, tag: digests.get((repo, tag)))
     monkeypatch.setattr("dms.api.routes_registry.registry_mod.delete_manifest",
                         lambda registry, repo, digest: deleted.append(digest) or "ok")
     r = reg_client.delete("/api/admin/registry/images/dms/b99d97238")

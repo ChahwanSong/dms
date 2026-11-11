@@ -1,8 +1,8 @@
 import { useState, type ReactNode } from "react";
 import { RefreshCw } from "lucide-react";
-import { useNodeMetrics } from "./useMetrics";
+import { loadErrorText, useNodeMetrics } from "./useMetrics";
 import { useNodes } from "./useDashboard";
-import { WindowSelect } from "./WindowSelect";
+import { WindowClampNote, WindowSelect } from "./WindowSelect";
 import { Card } from "../../components/ui/Card";
 import { Sparkline, type SparklineDomain } from "../../components/ui/Sparkline";
 import type { Node, NodeInfo, NodeMetricPoint, NodeMetricSeries } from "../../lib/types";
@@ -59,8 +59,8 @@ function cpuCountOf(report: unknown): number | null {
 // 부하(load) 칸의 뜻 -- 칸 제목의 툴팁과 카드 아래 각주가 같은 문장을 쓴다(2026-10-16).
 const LOAD_HELP = "부하(load) = 실행 중·실행 대기·I/O 대기 스레드 수의 평균이라 코어 수를 넘을 수 있으며 CPU 사용률이 아닙니다.";
 
-function ageText(reportedAt: string): string {
-  const ms = Date.now() - Date.parse(reportedAt);
+function ageText(reportedAt: string, nowMs: number): string {
+  const ms = nowMs - Date.parse(reportedAt);
   if (!Number.isFinite(ms) || ms < 0) return "—";
   const m = Math.floor(ms / 60000);
   if (m < 1) return "방금";
@@ -72,9 +72,20 @@ function pick(points: NodeMetricPoint[], f: (p: NodeMetricPoint) => number | nul
   return points.map(f);
 }
 
-function Metric({ title, values, label, fmt, domain, capLabel }: {
+// 점마다의 가로 위치 = 창(start~end) 안 시각 비율(2026-11-11). 순번으로 놓으면 보고가 끊긴 몇 시간이 한 칸으로 줄어
+// 사라졌다(서버가 공백에 null 표지를 끼워 선도 끊는다 -- metrics_series.build_node_points). 창 경계나 어느 점의 시각을
+// 모르면 undefined -- Sparkline 이 순번 배치로 돌아간다(모르는 시각을 지어내지 않는다).
+export function timeFractions(points: NodeMetricPoint[], start: unknown, end: unknown): number[] | undefined {
+  const s = typeof start === "string" ? Date.parse(start) : NaN;
+  const e = typeof end === "string" ? Date.parse(end) : NaN;
+  if (!Number.isFinite(s) || !Number.isFinite(e) || e <= s) return undefined;
+  const xs = points.map((p) => (typeof p.at === "string" ? (Date.parse(p.at) - s) / (e - s) : NaN));
+  return xs.every((x) => Number.isFinite(x)) ? xs : undefined;
+}
+
+function Metric({ title, values, label, fmt, domain, capLabel, xs }: {
   title: ReactNode; values: (number | null)[]; label: string;
-  fmt: (v: number) => string; domain?: SparklineDomain; capLabel?: string;
+  fmt: (v: number) => string; domain?: SparklineDomain; capLabel?: string; xs?: number[];
 }) {
   // 현재값 = 마지막 유효점(마지막 점이 null 결측이어도 직전 실측이 "현재"다),
   // 최대값 = 창 내 유효점의 최대. 유효점이 없으면 병기도 "—" -- 0 으로 뭉개지
@@ -92,7 +103,7 @@ function Metric({ title, values, label, fmt, domain, capLabel }: {
             가로로 왜곡된다(Sparkline 주석 참조) */}
         {capLabel !== undefined && <span>{capLabel}</span>}
       </div>
-      <Sparkline values={values} label={label} domain={domain} />
+      <Sparkline values={values} label={label} domain={domain} xs={xs} />
       <div className="text-muted text-xs">
         {cur === null ? "—" : `${fmt(cur)} · 최대 ${fmt(Math.max(...valid))}`}
       </div>
@@ -116,22 +127,29 @@ export function NodeMetricsSection() {
     asArray<Node>(nodesQ.data).map((n) => [n.node_name, n.report] as const));
   // 배치 제외·cordon 배지(2026-10-02) -- 노드 목록 응답의 exclusion·report.k8s_node 를 그대로 쓴다.
   const nodeInfo = new Map(asArray<NodeInfo>(nodesQ.data).map((n) => [n.node_name, n] as const));
+  // 신선도 나이의 「지금」 = 마지막 노드 목록 폴링 시각(2026-11-11). dataUpdatedAt 을 읽어야 내용이 같은 재조회(보고가 멈춘
+  // 노드)에도 다시 그려져 나이가 자란다 -- Date.now() 만 쓰면 목록 data 가 바뀔 때까지 「지연 · 5분 전」이 굳는다.
+  const nowMs = nodesQ.dataUpdatedAt > 0 ? nodesQ.dataUpdatedAt : Date.now();
+  const winStart = metricsQ.data?.start;
+  const winEnd = metricsQ.data?.end;
   return (
     <Card>
       <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
         <h2 className="font-medium">노드/리소스</h2>
         {/* 새로고침(2026-10-02 사용자 요청): 시계열은 기간 재조회 위주라 폴링이 없다(useMetrics) -- 지금 값을
-            보고 싶을 때 누른다. 노드 목록(신선도·코어 수)도 함께 다시 읽는다. 마지막 갱신 시각을 옆에 둔다. */}
-        <div className="flex items-center gap-2">
+            보고 싶을 때 누른다. 노드 목록(신선도·코어 수)도 함께 다시 읽는다. 마지막 갱신 시각을 옆에 둔다.
+            안쪽 묶음도 flex-wrap + 글자 nowrap(2026-11-11): 390px 에서 한 줄 flex 가 줄어 「새로고/침」·「갱신/19:28:12」로
+            음절 중간에서 꺾였다(NodesList 의 9fbef86 규약과 같은 처방). */}
+        <div className="flex flex-wrap items-center justify-end gap-2">
           {metricsQ.dataUpdatedAt > 0 && (
-            <span className="text-xs text-muted" aria-label="마지막 갱신">
+            <span className="text-xs text-muted whitespace-nowrap" aria-label="마지막 갱신">
               {`갱신 ${kstStampEpoch(Math.floor(metricsQ.dataUpdatedAt / 1000)).slice(11, 19)}`}
             </span>
           )}
           <button type="button" aria-label="노드/리소스 새로고침" title="새로고침"
                   disabled={metricsQ.isFetching}
                   onClick={() => { void metricsQ.refetch(); void nodesQ.refetch(); }}
-                  className="inline-flex items-center gap-1 rounded-lg border border-line bg-panel px-2.5 py-1
+                  className="inline-flex items-center gap-1 whitespace-nowrap rounded-lg border border-line bg-panel px-2.5 py-1
                              text-xs text-muted hover:text-ink disabled:opacity-60">
             <RefreshCw className={`h-3.5 w-3.5 ${metricsQ.isFetching ? "animate-spin" : ""}`} aria-hidden />
             새로고침
@@ -140,9 +158,25 @@ export function NodeMetricsSection() {
         </div>
       </div>
       {metricsQ.isLoading && <p className="text-muted text-sm">불러오는 중…</p>}
+      {/* 첫 조회 실패·노드 0대(2026-11-11): 예전엔 둘 다 머리줄만 남은 빈 카드라 원인이 안 보였다. 노드 0대는 응답이 배열로
+          왔을 때만 말한다 -- 배열이 아닌 페이로드는 「없음」이 아니라 모름이다. */}
+      {metricsQ.isError && !metricsQ.data && (
+        <p className="text-bad text-sm">{loadErrorText("노드 지표를", metricsQ.error)}</p>
+      )}
+      {Array.isArray(metricsQ.data?.nodes) && metricsQ.data.nodes.length === 0 && (
+        <p className="text-muted text-sm break-keep">보고한 노드가 없습니다 — 에이전트(DaemonSet) 상태를 확인하세요.</p>
+      )}
+      {metricsQ.data && <WindowClampNote selected={windowH} served={metricsQ.data.window_hours} />}
       {series.map((n) => {
         const points = asArray<NodeMetricPoint>(n.points);
+        const xs = timeFractions(points, winStart, winEnd);
         const report = reports.get(n.node_name);
+        // 신선도·나이는 폴링되는(5초) 노드 목록 값으로 그린다(2026-11-11). 시계열 응답의 fresh·reported_at 은 처음 받은 순간의
+        // 값이라(이 쿼리는 폴링하지 않는다) 정상 노드가 「정상 · 6분 전」으로 늙고, 멈춘 노드도 초록 「정상」으로 남았다 --
+        // 같은 줄의 배치 제외·cordon 배지(노드 목록)와도 시점이 갈렸다. 노드 목록에 아직 없을 때만 시계열 값으로 돌아간다.
+        const info = nodeInfo.get(n.node_name);
+        const fresh = info?.fresh ?? n.fresh;
+        const reportedAt = info?.reported_at ?? n.reported_at;
         // 코어 수는 사실상 불변이라 시계열이 아닌 최신 리포트에서 읽는다
         // (metrics_series.py 의 같은 취지 주석). load 는 코어 수를 넘을 수 있으므로
         // 상한이 아니라 기준선이다 -- Sparkline 이 스케일을 max(코어수, 창 최대)로
@@ -156,10 +190,10 @@ export function NodeMetricsSection() {
             <div className="flex items-center justify-between">
               <span className="flex items-center gap-2">
                 <span className="font-medium">{n.node_name}</span>
-                {nodeInfo.has(n.node_name) && <PlacementBadges node={nodeInfo.get(n.node_name)!} />}
+                {info && <PlacementBadges node={info} />}
               </span>
-              <span className={`text-xs ${n.fresh ? "text-ok" : "text-bad"}`}>
-                {n.fresh ? "정상" : "지연"} · {ageText(n.reported_at)}
+              <span className={`text-xs ${fresh ? "text-ok" : "text-bad"}`}>
+                {fresh ? "정상" : "지연"} · {ageText(reportedAt, nowMs)}
               </span>
             </div>
             <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mt-2">
@@ -167,21 +201,21 @@ export function NodeMetricsSection() {
               <Metric title="CPU 사용률" label={`${n.node_name} CPU 사용률`} fmt={fmtPct}
                       domain={PCT_DOMAIN}
                       capLabel={iowait !== null ? `I/O 대기 ${fmtPct(iowait)}` : undefined}
-                      values={pick(points, (p) => pctOf(p.cpu_used_pct))} />
+                      values={pick(points, (p) => pctOf(p.cpu_used_pct))} xs={xs} />
               {/* load 는 코어 수를 넘을 수 있으므로 코어 수는 상한이 아니라 기준선이다(위 주석) */}
               <Metric title={<span title={LOAD_HELP}>부하(load 1분)</span>}
                       label={`${n.node_name} 부하(load 1분)`} fmt={fmtLoad}
                       domain={loadDomain} capLabel={loadCap}
-                      values={pick(points, (p) => p.load1)} />
+                      values={pick(points, (p) => p.load1)} xs={xs} />
               <Metric title="메모리 사용%" label={`${n.node_name} 메모리`} fmt={fmtPct}
                       domain={PCT_DOMAIN} capLabel="상한 100%"
-                      values={pick(points, (p) => p.mem_used_pct)} />
+                      values={pick(points, (p) => p.mem_used_pct)} xs={xs} />
               {/* 네트워크는 링크 속도 데이터가 없어(범위 밖) 자연 상한이 없다 --
                   0 하한 + 창 최대 스케일에 수치 병기가 절대량을 말한다 */}
               <Metric title="수신 B/s" label={`${n.node_name} 수신`} fmt={fmtBps}
-                      values={pick(points, (p) => p.net_rx_bps)} />
+                      values={pick(points, (p) => p.net_rx_bps)} xs={xs} />
               <Metric title="송신 B/s" label={`${n.node_name} 송신`} fmt={fmtBps}
-                      values={pick(points, (p) => p.net_tx_bps)} />
+                      values={pick(points, (p) => p.net_tx_bps)} xs={xs} />
             </div>
           </div>
         );

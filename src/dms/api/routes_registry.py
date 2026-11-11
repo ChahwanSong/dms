@@ -16,6 +16,7 @@ from ..manifest_tags import manifest_images, manifest_job_image, site_image
 from ..repositories.builds import BUILD_IMAGES
 from ..repositories.releases import COMPONENTS
 from .auth import Identity, audit_actor, require_admin, require_session_admin
+from .routes_releases import _natural_key
 
 router = APIRouter(dependencies=[Depends(require_admin)])
 
@@ -76,8 +77,11 @@ def list_registry_images(request: Request):
         # None(레지스트리 무응답) 은 [] 와 구분해 화면이 "조회 실패"를 말할 수 있게
         # reachable 플래그로 넘긴다(null≠0 -- 태그 0개와 무응답은 다르다).
         reachable = tags is not None
+        # 화면 순서 = 숫자를 고려한 내림차순(2026-11-11, 릴리스 드롭다운과 같은 규칙 routes_releases._natural_key).
+        # fetch_repo_tags 는 사전식이라 그대로 내보내면 d9→d10·d99→d100 경계에서 d1, d10, d11 … d2 가 돼 최신 태그가
+        # 목록 중간에 묻혔다(같은 문제를 릴리스 쪽만 2026-10-08 R4 에서 고쳤다).
         rows = [{"tag": t, "in_use": t in in_use.get(repo, set())}
-                for t in (tags or [])]
+                for t in sorted(tags or [], key=_natural_key, reverse=True)]
         out.append({"repository": repo, "reachable": reachable, "tags": rows})
     return {"registry": registry, "repositories": out}
 
@@ -92,10 +96,14 @@ def delete_registry_image(repository: str, tag: str, request: Request,
     in_use = _in_use_tags(request).get(repository, set())
     if tag in in_use:
         raise HTTPException(status_code=409, detail="registry_tag_in_use")
-    digest = registry_mod.manifest_digest(registry, repository, tag)
+    digest, absent = registry_mod.manifest_digest_lookup(registry, repository, tag)
     if digest is None:
-        # 태그가 없거나 레지스트리 무응답 -- 어느 쪽이든 지울 대상이 없다.
-        raise HTTPException(status_code=404, detail="registry_tag_not_found")
+        # 레지스트리가 「없음」이라 답했을 때만 404(이미 없음 -- 같은 digest 의 별칭과 함께 지워졌을 수 있다). 무응답·5xx·
+        # 인증 실패는 지웠는지 모르는 것이라 502 다(2026-11-11): 예전엔 둘 다 404 라 화면이 아무것도 못 지운 삭제를 「이미
+        # 없음」으로 성공 쪽에 셌다.
+        if absent:
+            raise HTTPException(status_code=404, detail="registry_tag_not_found")
+        raise HTTPException(status_code=502, detail="registry_error")
     # 레지스트리 삭제는 digest 단위라 그 digest 를 가리키는 태그가 **모두** 사라진다(2026-11-03 T4 실측 — 안 쓰는 별칭을 지우자 같은
     # digest 의 다른 태그도 없어졌다). 사용 중 태그가 같은 digest 면 거절한다(그 태그를 조회하지 못하면 공유 여부를 모르는 것 — 그
     # 태그가 이 레지스트리에 없다는 뜻이라 막지 않는다).

@@ -124,14 +124,18 @@ export function AccountsList() {
   const [resetDone, setResetDone] = useState<AdminPasswordResetResult | null>(null);
   const resetNoteRef = useRef<HTMLParagraphElement | null>(null);
 
-  const mutationError = setRole.isError
-    ? (setRole.error as ApiError).message
-    : setDisabled.isError
-    ? (setDisabled.error as ApiError).message
-    // 자격 빼기(바로 하는 동작)의 실패 -- 주기의 실패는 확인 창이 말한다.
-    : rootGrant.isError && rootGrant.variables?.granted === false
-    ? (rootGrant.error as ApiError).message
-    : null;
+  // 표 아래 오류 줄은 **마지막으로 시작한** 동작(역할·상태·자격 빼기)의 실패만 말한다(2026-11-11) -- 예전엔 세 동작의 isError 를
+  // 고정 순서(역할 → 상태 → 자격)로 골라, 역할 변경 403 뒤 다른 계정의 비활성화가 성공해도 빨간 줄이 남았고, 이어진 상태 변경
+  // 실패의 새 사유는 낡은 역할 문구에 가려졌다. submittedAt(동작 시작 시각)으로 가장 최근 것을 고르므로 다른 동작을 reset 하지
+  // 않는다(진행 중인 자격 주기 창의 상태를 건드리지 않게).
+  const latest = [setRole, setDisabled, rootGrant].reduce<{ submittedAt: number; isError: boolean; error: unknown } | null>(
+    (best, m) => (m.isIdle || (best !== null && best.submittedAt >= m.submittedAt) ? best : m), null);
+  const mutationError = latest === null || !latest.isError
+    ? null
+    // 자격 빼기(바로 하는 동작)의 실패만 -- 주기의 실패는 확인 창이 말한다.
+    : latest === rootGrant && rootGrant.variables?.granted !== false
+    ? null
+    : (latest.error as ApiError).message;
 
   const toggle = (a: Account) => {
     setResetDone(null);

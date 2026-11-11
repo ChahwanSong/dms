@@ -1251,13 +1251,15 @@ def purge_unregistered_storage(body: PurgeScanHistoryBody, request: Request,
 
 
 @router.get("/api/admin/usage/scan-history")
-def scan_history(request: Request, storage: str = Query(..., min_length=1),
+def scan_history(request: Request, storage: str = Query(..., max_length=512, pattern=_NO_NUL),
                  target: str = Query(..., min_length=1),
                  limit: int = Query(30, ge=1, le=_MAX_POINTS)):
     """한 (storage, target)의 scan 시계열. 포인트마다 실 사용량(total_bytes)·
     요약 수치·온도 히스토그램(모양 투영)을 싣는다. 시간 오름차순 — 차트가
     그대로 그린다. 성공 scan 이 없으면 빈 points(정상값)다: 목록 화면의 빈
-    상태이지 오류가 아니다(404 로 접으면 "타깃이 사라졌다"와 구별 불능)."""
+    상태이지 오류가 아니다(404 로 접으면 "타깃이 사라졌다"와 구별 불능).
+    storage 는 /targets 와 같은 규칙(_NO_NUL, 2026-11-11): 빈 문자열도 이름이다 -- 예전 min_length=1 이라 빈 이름 탭
+    (변조·구형 행, 목록·합계·CSV 는 storage="" 정확 일치로 선다)에서 행을 열면 상세 시트가 늘 422 였다."""
     repos = request.app.state.repos
     rows = repos.data_jobs.succeeded_scans_for_target(storage, target, limit=limit)
     digests = _digests(repos, _base(request), rows)

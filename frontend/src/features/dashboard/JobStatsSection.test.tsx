@@ -1,9 +1,10 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
 import { setupServer } from "msw/node";
-import { http, HttpResponse } from "msw";
+import { http, HttpResponse, delay } from "msw";
 import { beforeAll, afterAll, afterEach, test, expect } from "vitest";
-import { JobStatsSection, successRate, rateTone, humanSeconds } from "./JobStatsSection";
+import { JobStatsSection, successRate, rateTone, humanSeconds, bucketLabel } from "./JobStatsSection";
 import type { StateCount } from "../../lib/types";
 
 const server = setupServer();
@@ -283,4 +284,75 @@ test("요약 타일: 성공률·상태별 잡 수·처리 항목·계획 거부�
   expect(screen.getByText("처리 항목(실행 결과)")).toBeInTheDocument();
   expect(screen.getByText("계획 거부")).toBeInTheDocument();
   expect(screen.getByRole("img", { name: "성공률" })).toBeInTheDocument();
+});
+
+// ---- 2026-11-11 전수조사 수정 ----
+
+test("처리량 시간 버킷 라벨은 KST 벽시계다(UTC 01시 = 「10시」), 일 버킷은 서버가 접은 KST 날짜 그대로", async () => {
+  // 예전엔 UTC 버킷 글자를 잘라 KST 10:15 에 낸 잡이 「01시」 막대에 보였다(다른 화면은 KST).
+  expect(bucketLabel("2026-08-09T01", "hour")).toBe("10시");
+  expect(bucketLabel("2026-08-09T15", "hour")).toBe("00시");       // KST 다음날 0시
+  expect(bucketLabel("2026-08-10", "day")).toBe("08-10");
+  expect(bucketLabel("oops", "hour")).toBe("oops");                // 모양을 모르면 지어내지 않는다
+  renderSection();
+  const chart = await screen.findByRole("img", { name: "처리량" });
+  expect([...chart.querySelectorAll("[data-tip]")].map((el) => el.getAttribute("data-tip")))
+    .toEqual(["10시: 2", "11시: 1"]);
+});
+
+test("첫 조회가 실패하면 오류를 말하고 「집계된 잡 없음」·「집계 0건」을 정상값처럼 그리지 않는다", async () => {
+  server.use(http.get("/api/admin/metrics/jobs", () => HttpResponse.json({ detail: "boom" }, { status: 500 })));
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={qc}><JobStatsSection /></QueryClientProvider>);
+  expect(await screen.findByText(/^잡 통계를 불러오지 못했습니다 — /)).toBeInTheDocument();
+  expect(screen.queryByText("집계된 잡 없음")).toBeNull();
+  expect(screen.queryByText("해당 기간 잡 없음")).toBeNull();
+  expect(screen.queryByText(/집계 0건/)).toBeNull();
+  expect(screen.queryByRole("region", { name: "처리량 · 소요 시간" })).toBeNull();
+});
+
+test("기간을 바꾸는 동안 앞 기간 값을 두고 「불러오는 중…」을 함께 낸다 -- 0 으로 깜빡이지 않는다", async () => {
+  let calls = 0;
+  server.use(http.get("/api/admin/metrics/jobs", async ({ request }) => {
+    calls += 1;
+    const w = Number(new URL(request.url).searchParams.get("window"));
+    if (w === 168) await delay(80);
+    return HttpResponse.json({ ...STATS, window_hours: w, bucket: w > 48 ? "day" : "hour" });
+  }));
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={qc}><JobStatsSection /></QueryClientProvider>);
+  await screen.findByText("47%");
+  await userEvent.click(screen.getByRole("button", { name: "7d" }));
+  expect(await screen.findByText("불러오는 중…")).toBeInTheDocument();
+  expect(screen.getByText("47%")).toBeInTheDocument();             // 앞 기간 값이 남는다
+  expect(screen.queryByText("집계된 잡 없음")).toBeNull();
+  expect(screen.queryByText(/보존 기간/)).toBeNull();             // 앞 기간 window_hours(24)로 클램프를 알리지 않는다
+  await waitFor(() => expect(screen.queryByText("불러오는 중…")).toBeNull());
+  expect(calls).toBeGreaterThanOrEqual(2);
+});
+
+test("서버가 창을 보존 기간으로 접었으면(window_hours < 고른 값) 한 줄로 알린다", async () => {
+  // DMS_AGENT_REPORT_RETENTION_DAYS=3 인 사이트: 「7d」를 눌러도 서버는 72h 만 집계한다.
+  server.use(http.get("/api/admin/metrics/jobs", ({ request }) => {
+    const w = Number(new URL(request.url).searchParams.get("window"));
+    return HttpResponse.json({ ...STATS, window_hours: Math.min(w, 72), bucket: w > 48 ? "day" : "hour" });
+  }));
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={qc}><JobStatsSection /></QueryClientProvider>);
+  await screen.findByText("47%");
+  expect(screen.queryByText(/보존 기간/)).toBeNull();             // 24h 는 접히지 않았다
+  await userEvent.click(screen.getByRole("button", { name: "7d" }));
+  expect(await screen.findByText(/최근 72시간만 보여 줍니다/)).toBeInTheDocument();
+});
+
+test("처리 항목: 1 MiB 미만도 KiB 로 접는다(원시 「524288 B」 아님)", async () => {
+  renderSection({ ...STATS, sync_items_total: 3, sync_bytes_total: 512000, rm_items_total: 0 });
+  const tile = (await screen.findByText("처리 항목(실행 결과)")).parentElement!;
+  expect(within(tile).getByText("sync 반영").nextElementSibling).toHaveTextContent(/^3 항목 · 500\.0 KiB$/);
+});
+
+test("기간 안내는 위치(「오른쪽」)에 기대지 않는다 -- 좁은 폭에선 기간 선택이 아래로 내려간다", async () => {
+  renderSection();
+  expect(await screen.findByText(/기간 버튼\(1h·6h·24h·7d\)으로 바꿉니다/)).toBeInTheDocument();
+  expect(screen.queryByText(/오른쪽에서/)).toBeNull();
 });

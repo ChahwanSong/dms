@@ -48,7 +48,12 @@ export function PortalSettingsPage() {
           <input aria-label="서브네임" className={field} value={draft} maxLength={SUBTITLE_MAX + 20}
                  placeholder="예: SSC, DAI-CAE, DAI-OA (비우면 서브네임 없음)"
                  aria-invalid={tooLong} aria-describedby={tooLong ? "portal-subtitle-error" : undefined}
-                 onChange={(e) => { setSaved(false); setDraft(e.target.value); }} />
+                 onChange={(e) => {
+                   setSaved(false); setDraft(e.target.value);
+                   // 입력이 바뀌면 옛 값의 서버 거절(422) 문구는 거짓이 된다 -- 그 자리에서 지운다(2026-11-11,
+                   // ArtifactBasePage 「stale 문구 방지」와 같은 규칙). 저장 중에는 reset 하지 않는다(진행 중 결과를 떼어 낸다).
+                   if (save.isError) save.reset();
+                 }} />
         </label>
         {tooLong && (
           <p id="portal-subtitle-error" role="alert" className="text-sm text-bad">

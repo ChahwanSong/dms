@@ -27,11 +27,12 @@ def deny(subject_type: str, subject: str, body: DenyBody, request: Request,
     if subject_type == "group":
         raise HTTPException(status_code=422, detail="denylist_group_unsupported")
     try:
-        request.app.state.repos.control.deny(subject_type, subject, body.reason,
-                                             audit_actor(identity))
+        # 저장소가 정규화(앞뒤 공백 제거·소문자)한 대상을 응답한다 -- 공백만이면 422 denylist_subject_empty.
+        stored = request.app.state.repos.control.deny(subject_type, subject, body.reason,
+                                                      audit_actor(identity))
     except DomainValidationError as e:
         raise HTTPException(status_code=422, detail=e.reason_code)
-    return {"subject_type": subject_type, "subject": subject.lower()}
+    return {"subject_type": subject_type, "subject": stored}
 
 
 @router.delete("/api/admin/identity-denylist/{subject_type}/{subject}")

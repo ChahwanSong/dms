@@ -399,6 +399,16 @@ def get_request(request_id: str, request: Request,
         raise HTTPException(status_code=404, detail="request_not_found")
     row["transitions"] = repo.transitions(request_id)
     _attach_terminal_result(repo, row)
+    # 배치 자식의 배치 요약(2026-11-11, **관리자 응답만** -- 목록 list_requests 와 같은 키·같은 규칙). 예전엔 상세 응답에
+    # 배치 존재 여부가 없어 화면이 배치 기록만 지워진 묶음에도 /admin/batches/<id>(404) 링크를 달았다(BACKLOG 「요청
+    # 상세·결과 카드의 배치 링크」). 화면은 작업 목록 BatchCell 과 같은 규칙으로 그린다. 상세는 배치 하나라 PK 조회 하나다
+    # (자식 수 세기는 목록의 배치 단위 삭제용이라 싣지 않는다). batch_id "" 도 열쇠다(is not None -- 없는 배치로 접힌다).
+    if identity.role == "admin" and row.get("batch_id") is not None:
+        batch = request.app.state.repos.batches.get(row["batch_id"])
+        name = batch.get("name") if batch is not None else None
+        row["batch_exists"] = batch is not None
+        # 이름 없음의 표현은 None 하나(list_summaries 와 같다 -- DB 신뢰 경계라 빈 이름도 None 으로 접는다).
+        row["batch_name"] = name if isinstance(name, str) and name.strip() != "" else None
     # events_for_request 기본 limit(100)이 조용히 잘리면 운영자가 눈치채지 못한다 --
     # 스택된 요청이 매 컨트롤러 틱마다 같은 예외로 실패를 반복하면 100건을 넘기는 것도
     # 현실적이다(plan_error/step_error는 정확히 이런 루프에서 기록된다). 표시 상한보다

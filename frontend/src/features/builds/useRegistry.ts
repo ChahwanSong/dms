@@ -12,8 +12,13 @@ export const useRegistryImages = () =>
   });
 
 export interface RegistryTarget { repository: string; tag: string; }
+// gone(2026-11-11): 404 registry_tag_not_found -- 이미 없는 태그. 레지스트리 삭제는 digest 단위라 같은 이미지를
+// 가리키는 별칭 태그를 함께 고르면 먼저 처리된 쪽이 digest 를 지워 나머지가 404 가 된다(실제로는 다 지워졌는데
+// 「1개 실패」로 보고하던 버그). 실패와 섞지 않고 따로 센다 -- 남았는지의 진실은 삭제 뒤 재조회한 목록이 말한다.
+// 이 404 는 레지스트리가 「없음」이라 답했을 때뿐이다: 무응답·5xx·인증 실패는 서버가 502 registry_error 로 내 실패에 선다
+// (registry.manifest_digest_lookup, 2026-11-11 리뷰 -- 예전엔 무응답도 404 라 아무것도 못 지운 삭제가 「이미 없음」이 됐다).
 export interface BulkDeleteRegistryResult {
-  ok: RegistryTarget[]; failed: { target: RegistryTarget; message: string }[];
+  ok: RegistryTarget[]; gone: RegistryTarget[]; failed: { target: RegistryTarget; message: string }[];
 }
 const _deleteImage = (t: RegistryTarget) =>
   apiSend("DELETE", `/api/admin/registry/images/${t.repository}/${encodeURIComponent(t.tag)}`);
@@ -26,9 +31,10 @@ export const useDeleteRegistryImages = () => {
   return useMutation({
     mutationFn: async (targets: RegistryTarget[]): Promise<BulkDeleteRegistryResult> => {
       const settled = await Promise.allSettled(targets.map(_deleteImage));
-      const r: BulkDeleteRegistryResult = { ok: [], failed: [] };
+      const r: BulkDeleteRegistryResult = { ok: [], gone: [], failed: [] };
       settled.forEach((s, i) => {
         if (s.status === "fulfilled") r.ok.push(targets[i]);
+        else if (s.reason instanceof ApiError && s.reason.code === "registry_tag_not_found") r.gone.push(targets[i]);
         else r.failed.push({ target: targets[i], message: s.reason instanceof ApiError
                              ? s.reason.message : String(s.reason) });
       });

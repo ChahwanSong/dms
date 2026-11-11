@@ -125,4 +125,23 @@ describe("Sparkline", () => {
     expect(container.querySelector("circle")!.getAttribute("cx")).toBe("120");
     expect(container.querySelector("circle")!.getAttribute("cy")).toBe("0");
   });
+  it("null 사이에 낀 외딴 유효점이 여럿이어도 각각 점으로 그린다(2026-11-11)", () => {
+    // [5, null, 7]: path 는 "M0,yM120,y"(이동만)라 아무것도 안 보였고, 유효점이 2개라 단일점 규칙도 안 걸려 차트가 비었다 --
+    // 캡션만 「7 · 최대 7」. 이웃이 모두 결측인 점마다 circle. 이어진 점(뒤의 [8, 9])은 선이 그리므로 점이 없다.
+    const { container } = render(<Sparkline values={[5, null, 7, null, 8, 9]} width={100} height={20} />);
+    const circles = [...container.querySelectorAll("circle")];
+    expect(circles.map((c) => c.getAttribute("cx"))).toEqual(["0", "40"]);
+    // 0~9 스케일(높이 20): 5 → 20 − 5/9·20 = 8.89, 7 → 4.44 -- path 와 같은 yOf.
+    expect(circles.map((c) => c.getAttribute("cy"))).toEqual(["8.89", "4.44"]);
+  });
+  it("xs(0..1 시각 비율)가 오면 순번 대신 그 자리에 놓는다 -- 보고 공백이 공백의 폭으로 보인다(2026-11-11)", () => {
+    // 순번 배치면 몇 시간 공백도 한 칸이라 사라졌다. 길이가 다르거나 유한수가 아니면 순번(옛 동작)으로 돌아간다.
+    expect(sparklinePath([0, 5, 10], 100, 20, undefined, [0, 0.1, 1])).toBe("M0,20L10,10L100,0");
+    expect(sparklinePath([0, null, 10], 100, 20, undefined, [0.5, 0.6, 0.9])).toBe("M50,20M90,0");
+    expect(sparklinePath([0, 5, 10], 100, 20, undefined, [0, 1])).toBe("M0,20L50,10L100,0");
+    expect(sparklinePath([0, 5, 10], 100, 20, undefined, [0, NaN, 1])).toBe("M0,20L50,10L100,0");
+    expect(sparklinePath([0, 10], 100, 20, undefined, [-0.5, 1.5])).toBe("M0,20L100,0");   // 범위 밖은 가장자리로
+    const { container } = render(<Sparkline values={[null, 7, null]} xs={[0, 0.25, 1]} width={100} />);
+    expect(container.querySelector("circle")!.getAttribute("cx")).toBe("25");
+  });
 });

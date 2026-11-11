@@ -1,10 +1,11 @@
 import { useState } from "react";
-import { useJobMetrics } from "./useMetrics";
-import { WindowSelect } from "./WindowSelect";
+import { loadErrorText, useJobMetrics } from "./useMetrics";
+import { WindowClampNote, WindowSelect } from "./WindowSelect";
 import { Card } from "../../components/ui/Card";
 import { Table } from "../../components/ui/Table";
 import { BarChart, r2 } from "../../components/ui/BarChart";
 import { reasonText } from "../../lib/api";
+import { kstStampBare } from "../../lib/datetime";
 import type { BreakdownRow, JobMetrics, SecondsSummary, StateCount } from "../../lib/types";
 
 const asArray = <T,>(v: unknown): T[] => (Array.isArray(v) ? v : []);
@@ -71,9 +72,11 @@ function SuccessRateBar({ byState }: { byState: StateCount[] }) {
 }
 
 // NodesList.tsx의 humanBytes와 같은 로직의 국소 사본 -- 그쪽은 export하지 않고,
-// 이 표시 하나를 위해 공용 모듈을 만드는 것은 이르다.
+// 이 표시 하나를 위해 공용 모듈을 만드는 것은 이르다. 단 KiB 단계를 더한다(2026-11-11): NodesList 의 MiB 하한은 디스크
+// 총량 전용 관례인데, sync 반영 합계는 짧은 창·작은 sync 에서 1 MiB 미만이 정상이라 「524288 B」 같은 원시 숫자로 나왔다
+// (요청 상세 jobs/format.ts·NodeMetricsSection 과 같은 단위 집합).
 const BYTE_UNITS: [string, number][] = [
-  ["TiB", 1024 ** 4], ["GiB", 1024 ** 3], ["MiB", 1024 ** 2],
+  ["TiB", 1024 ** 4], ["GiB", 1024 ** 3], ["MiB", 1024 ** 2], ["KiB", 1024],
 ];
 function humanBytes(bytes: number | null): string {
   if (bytes === null || !Number.isFinite(bytes)) return "—";
@@ -113,9 +116,14 @@ function SummaryRow({ name, summary }: {
   );
 }
 
-// "2026-08-09T01" -> "01시", "2026-08-09" -> "08-09"
-function bucketLabel(bucket: string, kind: "hour" | "day"): string {
-  return kind === "hour" ? `${bucket.slice(11, 13)}시` : bucket.slice(5);
+// 시간 버킷은 UTC 시간이라 KST 벽시계로 바꾼다: "2026-08-09T01" -> "10시"(2026-11-11 -- 예전엔 글자를 그대로 잘라 KST 10:15
+// 잡이 「01시」 막대에 보였다; 화면 시각은 KST 로 통일, lib/datetime.ts). 일 버킷은 서버가 이미 KST 날짜로 접었다
+// (metrics_series.kst_day_buckets): "2026-08-09" -> "08-09". 모양을 모르는 버킷은 지어내지 않고 원문 그대로.
+export function bucketLabel(bucket: string, kind: "hour" | "day"): string {
+  if (kind === "day") return bucket.slice(5);
+  const iso = `${bucket}:00:00Z`;
+  if (Number.isNaN(Date.parse(iso))) return bucket;
+  return `${kstStampBare(iso).slice(11, 13)}시`;
 }
 
 // 대시보드 잡 통계 레이아웃(2026-09-30 사용자 보고: "내용별 구분이 안 돼 헷갈리고
@@ -297,13 +305,19 @@ export function JobStatsSection() {
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
           <h2 className="font-medium">잡 통계</h2>
-          <p className="text-xs text-muted">선택한 기간에 생성된 잡 기준 — 오른쪽에서 기간을 바꿉니다</p>
+          {/* 위치(「오른쪽에서」)에 기대지 않는다 -- 좁은 폭에선 기간 선택이 설명 아래 왼쪽으로 내려간다(2026-11-11). */}
+          <p className="text-xs text-muted">선택한 기간에 생성된 잡 기준 — 기간 버튼(1h·6h·24h·7d)으로 바꿉니다</p>
         </div>
         <WindowSelect value={windowH} onChange={setWindowH} />
       </div>
-      {q.isLoading && <p className="text-muted text-sm mt-3">불러오는 중…</p>}
+      {/* 기간 전환 중엔 앞 기간 값(placeholder)을 두고 이 줄을 함께 낸다(useJobMetrics 주석). 창 클램프 판정도 그동안 미룬다
+          -- 앞 기간의 window_hours 를 새로 고른 기간과 견주면 없는 클램프를 알린다. */}
+      {(q.isLoading || q.isPlaceholderData) && <p className="text-muted text-sm mt-3">불러오는 중…</p>}
+      {q.isError && !d && <p className="text-bad text-sm mt-3">{loadErrorText("잡 통계를", q.error)}</p>}
+      {d && !q.isPlaceholderData && <WindowClampNote selected={windowH} served={d.window_hours} />}
       {/* ① 요약. 로딩 중(d 없음)은 "모름"이라 요약 블록 자체를 내지 않는다 -- 착지 후
-          종단 0건일 때만 "종단 잡 없음"(정상값)을 명시한다. */}
+          종단 0건일 때만 "종단 잡 없음"(정상값)을 명시한다. ②~⑤ 구획도 같다(2026-11-11): 예전엔 d 없이도 그려 첫 조회
+          실패·기간 전환 중에 「집계된 잡 없음」·「집계 0건」·「해당 기간 잡 없음」이 정상값처럼 떴다. */}
       {d && (
         <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <StatTile label="성공률"><SuccessRateBar byState={byState} /></StatTile>
@@ -316,6 +330,7 @@ export function JobStatsSection() {
         </div>
       )}
 
+      {d && (<>
       {/* ② 처리량·소요 시간. 라벨 정직화(슬라이스 31): created_at→updated_at 는 실행이
           아니라 제출·확인(사람)·스케줄 대기까지 전부 합산한 수명이다 -- 「수행시간」이라
           부르면 실행이 느려 보인다. API 필드명(duration_histogram)은 소비자 호환으로 유지. */}
@@ -424,6 +439,7 @@ export function JobStatsSection() {
           </div>
         </Group>
       )}
+      </>)}
     </Card>
   );
 }

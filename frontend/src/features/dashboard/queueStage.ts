@@ -14,7 +14,7 @@ export function waitText(seconds: number | null): string {
   return m % 60 === 0 ? `${h}시간` : `${h}시간 ${m % 60}분`;
 }
 
-// running 을 그냥 「실행 중」이라 부르지 않는다: 같은 화면 KPI 타일 「실행 중」은 24h 창 잡 집계이고 확인 대기
+// running 을 그냥 「실행 중」이라 부르지 않는다: 같은 화면 KPI 타일 「실행 중」은 비종단 잡 집계라 사전 점검·확인 대기
 // (ConfirmPending)까지 센다 -- 같은 이름에 다른 숫자가 나란히 서면 어느 쪽도 못 믿게 된다. 이 칸은 Volcano 에서
 // 실제로 도는 잡이라 「Volcano 대기」와 짝을 맞춘다.
 export const STAGE_LABEL: Record<QueueStage, string> = {
@@ -26,7 +26,8 @@ export const STAGE_LABEL: Record<QueueStage, string> = {
 // 있다 -- 상태에 따라 뜨는 문구(드레인 배지·「알 수 없음」 등)와 같은 낱말을 여기 쓰면 그 문구의 있음/없음 판정이 흐려진다.
 // 그래서 pickup 은 「운영자가 잡 진행을 멈춰 두면」으로 말한다(옛 title 은 「드레인 중이면」).
 export const STAGE_HELP: Record<QueueStage, string> = {
-  planning: "요청이 접수돼 planner 가 도구·노드를 정하기를 기다립니다(10초 주기, 노드 신원 전파 유예 최대 5분).",
+  // 「노드 신원 전파 유예 최대 5분」은 옛 LDAP 시절 planner 의 동작이라 뺐다(2026-10-26 삭제, 2026-11-11 문구 정리).
+  planning: "요청이 접수돼 planner 가 도구·노드를 정하기를 기다립니다(10초 주기).",
   pickup: "계획된 잡을 stepper 가 집기를 기다립니다(5초 주기). 운영자가 잡 진행을 멈춰 두면 여기서 멈춥니다.",
   preflight: "노드 사전 점검 파드가 도는 중입니다. 확인 뒤 실행 직전의 재점검도 여기로 다시 들어옵니다.",
   volcano_wait: "Volcano 가 gang(필요한 파드 전부)을 아직 올리지 못했습니다(PodGroup Pending·Inqueue). 워커가 프로세스 "
@@ -39,7 +40,7 @@ export const STAGE_HELP: Record<QueueStage, string> = {
 };
 
 // 색 문턱(초) -- 가장 오래 기다린 시간이 attn 이상이면 주의(앰버), bad 이상이면 경고(적색). DMS 기계 단계는 주기가 초 단위라
-// 5분이면 이미 이상하다(planner 신원 전파 유예 상한도 5분). 확인 대기는 사람이 누르는 단계라 길다: 유효기간(기본 24시간)의
+// 5분이면 이미 이상하다. 확인 대기는 사람이 누르는 단계라 길다: 유효기간(기본 24시간)의
 // 1/6·1/2. 배치 대기는 큰 배치가 상한만큼씩 도는 정상 상태라 적색을 쓰지 않는다(알람 피로). Volcano 대기도 같다(2026-10-16
 // 리뷰): 워커가 프로세스 수만큼 CPU 를 요청한 뒤로는 앞선 잡이 노드를 다 쓰는 동안 다음 잡이 줄을 서는 것이 정상이라, 앞
 // 잡이 30분 넘게 돌면 정상 대기가 맨 위 히어로에 적색 「경고」로 떴다 -- 실행 시간 규모인 1시간에 주의만 낸다(멈춘 PodGroup

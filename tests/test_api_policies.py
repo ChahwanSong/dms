@@ -55,3 +55,30 @@ def test_procs_per_node_is_capped_at_the_worker_builder_limit(client):
     assert client.get("/api/admin/policies/scan", headers=ADMIN).json()["procs_per_node"] != 1025
     assert client.put("/api/admin/policies/scan", json={**BODY, "procs_per_node": 1024},
                       headers=ADMIN).status_code == 200
+
+
+@pytest.mark.parametrize("field", ["max_nodes", "preview_timeout_seconds", "execution_timeout_seconds"])
+def test_integer_fields_are_capped_at_int4(client, field):
+    # 2026-11-11: policies 의 정수 칸은 INTEGER(int4) -- 상한이 없으면 9999999999 가 검증을 다 통과한 뒤 PostgreSQL 22003 으로
+    # 처리되지 않은 500 이 됐다(SQLite 테스트 DB 는 그대로 받아 못 잡는다). 저장 전에 422 로 막는다.
+    from dms.api.routes_policies import INT4_MAX
+    assert INT4_MAX == 2147483647
+    assert client.put("/api/admin/policies/scan", json={**BODY, field: INT4_MAX + 1},
+                      headers=ADMIN).status_code == 422
+    assert client.put("/api/admin/policies/scan", json={**BODY, field: INT4_MAX},
+                      headers=ADMIN).status_code == 200
+
+
+@pytest.mark.parametrize("queue", ["", "   ", "dms data", "DMS-DATA", "-dms", "dms-", "x" * 254])
+def test_queue_must_be_a_k8s_name(client, queue):
+    # 2026-11-11: 빈 큐는 Volcano 가 default 큐로 채워 dms-data 한도 밖에서 돌고, 공백·대문자 섞인 이름은 없는 큐라 그 도구의
+    # 잡이 전부 생성 실패한다 -- 저장 시점에 422 invalid_policy.
+    before = client.get("/api/admin/policies/scan", headers=ADMIN).json()["queue"]
+    r = client.put("/api/admin/policies/scan", json={**BODY, "queue": queue}, headers=ADMIN)
+    assert r.status_code == 422 and r.json()["detail"] == "invalid_policy"
+    assert client.get("/api/admin/policies/scan", headers=ADMIN).json()["queue"] == before
+
+
+def test_queue_surrounding_whitespace_is_trimmed(client):
+    r = client.put("/api/admin/policies/scan", json={**BODY, "queue": "  dms-data.q1 "}, headers=ADMIN)
+    assert r.status_code == 200 and r.json()["queue"] == "dms-data.q1"

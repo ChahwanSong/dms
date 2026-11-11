@@ -232,16 +232,28 @@ _MANIFEST_ACCEPT = ", ".join((
 
 
 def manifest_digest(registry: str, repository: str, tag: str) -> "str | None":
-    """태그의 content digest(sha256:...) 또는 None(응답 불가/없음). 삭제의 전제다."""
+    """태그의 content digest(sha256:...) 또는 None(응답 불가/없음). 삭제의 전제다.
+    둘을 갈라야 하면 manifest_digest_lookup."""
+    return manifest_digest_lookup(registry, repository, tag)[0]
+
+
+def manifest_digest_lookup(registry: str, repository: str, tag: str) -> "tuple[str | None, bool]":
+    """(digest, 없음 확정). 없음 확정은 **레지스트리 자신이** 그 태그가 없다고 답했을 때(404 + v2 헤더/오류 본문,
+    _is_registry_not_found -- 태그 목록의 「리포 없음」과 같은 규칙)뿐이고, 연결 실패·5xx·인증 실패·레지스트리가 아닌
+    서버의 404 는 (None, False) = 모름이다. 삭제 라우트가 「이미 없음」(404)과 「레지스트리 오류」(502)를 이것으로
+    가른다(2026-11-11): 둘을 None 하나로 접던 때는 레지스트리가 응답하지 않아 아무것도 지우지 못했는데 화면이 「이미
+    없음」으로 성공 쪽에 셌다."""
     url = f"http://{registry}/v2/{repository}/manifests/{tag}"
     try:
         response = _head_manifest(url)
+        if response.status_code == 404 and _is_registry_not_found(response):
+            return None, True
         response.raise_for_status()
     except Exception as exc:
         logger.warning("registry digest fetch failed repo=%s tag=%s: %s",
                        repository, tag, exc)
-        return None
-    return response.headers.get("Docker-Content-Digest")
+        return None, False
+    return response.headers.get("Docker-Content-Digest"), False
 
 
 def _head_manifest(url: str):

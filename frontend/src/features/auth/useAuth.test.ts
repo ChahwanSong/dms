@@ -88,6 +88,10 @@ test("meRetry: 5xx·네트워크 오류만 짧게 재시도하고 4xx(특히 401
   const network = new TypeError("Failed to fetch");
   expect(meRetry(0, network)).toBe(true);
   expect(meRetry(ME_RETRY_LIMIT, network)).toBe(false);
+  // 2026-11-11: request() 는 fetch 거부를 ApiError(0, network_error)로 올린다 -- status 0 도 네트워크로 재시도해야 한다.
+  const wrapped = new ApiError(0, "network_error", "x");
+  expect(meRetry(0, wrapped)).toBe(true);
+  expect(meRetry(ME_RETRY_LIMIT, wrapped)).toBe(false);
   for (const [status, code] of [[401, "not_authenticated"], [401, "session_revoked"], [403, "forbidden"], [404, "http_404"]] as const) {
     expect(meRetry(0, new ApiError(status, code, "x"))).toBe(false);
   }

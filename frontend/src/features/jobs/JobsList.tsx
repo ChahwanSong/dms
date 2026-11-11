@@ -18,17 +18,25 @@ import { pathSummary } from "../../lib/storagePaths";
 import type { DeleteRequestsResult, PurgeStatus, RequestRow } from "../../lib/types";
 import { BATCH_BLOCK_LABEL, BATCH_ID_RE, MAX_DELETE_BATCHES, groupBatches, splitBatchName } from "./batchGroups";
 import type { BatchGroup, BatchSummary } from "./batchGroups";
+import { FOCUS_RING, SMALL_BTN } from "./ui";
+import { kstClock } from "./format";
 
 const field = "rounded-lg border border-line px-3 py-2 text-sm";
 // 검색칸(2026-10-25) -- 고정 폭. 클래스는 리터럴로 둔다(tailwind 는 조합 문자열을 만들지 않는다).
 const SEARCH_FIELD = "w-40 rounded-lg border border-line px-3 py-2 text-sm";
 const SEARCH_RULE = "대소문자는 가리지 않고, 띄어 쓴 단어는 모두 들어 있어야 합니다";
+// 「작업 제출」 -- 버튼 모양의 **링크 하나**(2026-11-11). 예전 <Link><Button/></Link> 는 <a> 안의 <button>(대화형 요소 중첩 --
+// HTML 규격 위반)이라 Tab 이 같은 이름에서 두 번 멈추고 보조기기는 링크·버튼 둘로 읽었다. 모양은 공용 Button primary 와 같다
+// (+ 포커스 링 -- 요청 상세 LINK_BTN 과 같은 관례).
+const SUBMIT_LINK = `inline-flex items-center justify-center rounded-lg bg-accent px-3 py-2 text-sm font-medium text-white hover:bg-accenthover ${FOCUS_RING}`;
 
 // 필터 select 값(빈 문자열 = 전체). 연산·상태는 도메인 열거의 미러 -- 서버는
 // 미지 값에 0건을 주므로 여기 목록이 곧 사용자에게 유효한 값 집합이다. 상태는 **요청** 상태(domain.RequestState
-// 8종)다 -- 잡 상태인 Previewing·ConfirmPending 이 섞여 있어 고르면 늘 0건이던 결함을 2026-10-08 에 뺐다.
+// 8종)다 -- 잡 상태인 Previewing·ConfirmPending 이 섞여 있어 고르면 늘 0건이던 결함을 2026-10-08 에 뺐다. Running 도 같은
+// 이유로 뺐다(2026-11-11): 열거에는 있지만 요청 상태를 바꾸는 길(Pending→Planned·플래너 거부·충돌·종단 finalize·계획 전
+// 취소)이 Running 을 쓰지 않아 고르면 늘 0건이었다 -- 진행 중인 요청은 끝날 때까지 Planned 다(stateHelp 의 Planned 설명).
 const OPERATIONS = ["sync", "scan", "rm"];
-const STATES = ["Pending", "Planned", "Running", "Succeeded", "Failed", "Rejected", "Cancelled", "Conflict"];
+const STATES = ["Pending", "Planned", "Succeeded", "Failed", "Rejected", "Cancelled", "Conflict"];
 
 // 작업(요청) 선택 삭제(2026-10-08, 관리자 전용 -- 일반 사용자에게는 체크 열·툴바를 그리지 않는다).
 // 한 번에 지울 수 있는 수 = 서버 MAX_DELETE(목록 API 상한 le=200 과 같다).
@@ -136,18 +144,50 @@ export function deletable(r: Pick<RequestRow, "state" | "batch_id">): boolean {
 export function JobsList() {
   const me = useMe();
   const isAdmin = me.data?.role === "admin";
-  const [operation, setOperation] = useState("");
-  const [state, setState] = useState("");
+  // 필터·검색어는 모두 **주소가 상태다**(2026-11-11): 예전엔 ?batch= 만 주소에 있고 연산·상태·검색어는 로컬 상태라, 행을
+  // 눌러 요청 상세(다른 라우트 -- 이 화면이 언마운트된다)에 갔다가 뒤로 오면 전부 비고 전체 목록으로 돌아갔다(새로고침·주소
+  // 공유도 같다). 사용량 분석·동기화 이력처럼 searchParams 에 싣고(replace -- 필터마다 방문 기록을 쌓지 않는다), 키 이름은
+  // 목록 API 의 쿼리 이름과 같다(operation·state·requester·batch_name·path).
+  const [params, setParams] = useSearchParams();
+  const operation = params.get("operation") ?? "";
+  const state = params.get("state") ?? "";
+  const urlRequester = params.get("requester") ?? "";
+  const urlBatchName = params.get("batch_name") ?? "";
+  const urlPath = params.get("path") ?? "";
+  const setParam = (key: string, v: string) => setParams((p) => {
+    const next = new URLSearchParams(p);
+    if (v === "") next.delete(key); else next.set(key, v);
+    return next;
+  }, { replace: true });
+  const setOperation = (v: string) => setParam("operation", v);
+  const setState = (v: string) => setParam("state", v);
   // 검색칸(2026-10-25): 요청자(관리자)·배치 이름(관리자)·대상 경로(누구나). 서버가 대소문자를 무시한 부분 일치로 거른다
-  // (띄어 쓴 단어는 모두 들어 있어야 한다). 쿼리는 **적용된** 값으로만 -- 타이핑이 멈춘 뒤(searchField).
-  const requesterSearch = useSearchField();
-  const batchSearch = useSearchField();
-  const pathSearch = useSearchField();
+  // (띄어 쓴 단어는 모두 들어 있어야 한다). 쿼리는 **적용된** 값으로만 -- 타이핑이 멈춘 뒤(searchField). 첫 값은 주소에서
+  // 읽고(디바운스 없이 첫 조회부터), 주소에는 적용된 값만 쓴다(키 입력마다 주소를 바꾸지 않는다).
+  const requesterSearch = useSearchField(urlRequester);
+  const batchSearch = useSearchField(urlBatchName);
+  const pathSearch = useSearchField(urlPath);
   const requester = requesterSearch.applied;
   const batchName = batchSearch.applied;
   const path = pathSearch.applied;
-  // 한 배치의 작업만(?batch=<id>) -- 주소가 상태다(배치 상세·「기록 없음」 칸의 링크가 그대로 들어온다).
-  const [params, setParams] = useSearchParams();
+  // 적용값 → 주소(세 칸을 한 번에 -- 함수형 setParams 도 같은 틱의 두 호출은 같은 옛 값을 보므로 나눠 쓰면 앞의 것이 지워진다).
+  useEffect(() => {
+    if (requester === urlRequester && batchName === urlBatchName && path === urlPath) return;
+    setParams((p) => {
+      const next = new URLSearchParams(p);
+      for (const [k, v] of [["requester", requester], ["batch_name", batchName], ["path", path]] as const) {
+        if (v === "") next.delete(k); else next.set(k, v);
+      }
+      return next;
+    }, { replace: true });
+  }, [requester, batchName, path]);  // eslint-disable-line react-hooks/exhaustive-deps
+  // 주소 → 칸(뒤로 가기·사이드바 「전체 작업」 링크처럼 밖에서 주소가 바뀌면 칸도 따라간다 -- 주소와 화면이 어긋나지 않게).
+  useEffect(() => {
+    if (urlRequester.trim() !== requester) requesterSearch.set(urlRequester);
+    if (urlBatchName.trim() !== batchName) batchSearch.set(urlBatchName);
+    if (urlPath.trim() !== path) pathSearch.set(urlPath);
+  }, [urlRequester, urlBatchName, urlPath]);  // eslint-disable-line react-hooks/exhaustive-deps
+  // 한 배치의 작업만(?batch=<id>) -- 배치 상세·「기록 없음」 칸의 링크가 그대로 들어온다.
   const batch = params.get("batch") ?? "";
   // 필터 객체는 쿼리 키라 -- 매 렌더 새 객체면 키가 흔들려 재조회가 폭주한다.
   // 값이 실제로 바뀔 때만 새 객체를 만든다(useMemo).
@@ -157,6 +197,8 @@ export function JobsList() {
              batchName: batchName || undefined, path: path || undefined }),
     [operation, state, requester, batch, batchName, path]);
   const q = useInfiniteRequests(filters);
+  // 무엇이든 거르는 중인가(빈 결과 문구를 가른다 -- 아래 표 끝).
+  const filtered = Object.values(filters).some((v) => v !== undefined);
   // q.data 를 그대로 dep 에 쓴다(react-query 구조적 공유 -- 내용이 같은 리페치는 같은 참조). 매 렌더 새 배열이면
   // 아래 유령 선택 정리 effect 가 무한 루프가 된다(BatchesList 관례).
   const rows = useMemo(() => q.data?.pages.flat() ?? [], [q.data]);
@@ -242,7 +284,8 @@ export function JobsList() {
   const someChecked = (selected.length + selectedBatches.length) > 0 && !allChecked;
   // indeterminate 는 속성이 아니라 DOM 프로퍼티라 ref 로만 설정된다. **콜백 ref** 로 매 렌더 다시 건다 -- effect 로 걸면
   // 폴링 오류 동안 표가 오류 문구로 바뀌어 헤더 input 이 새로 마운트돼도 dep(someChecked)가 그대로라 다시 걸리지 않아,
-  // 복구 뒤 일부 선택인데 빈 칸으로 보였다(2026-10-09 검증 지적).
+  // 복구 뒤 일부 선택인데 빈 칸으로 보였다(2026-10-09 검증 지적). 2026-11-11 부터 행이 있으면 오류에도 표가 남지만(아래 Card)
+  // 행이 없는 동안의 오류는 여전히 표를 바꾸므로 콜백 ref 를 둔다.
   const setAllIndeterminate = (el: HTMLInputElement | null) => { if (el) el.indeterminate = someChecked; };
   // 성공해 확인 창이 닫히면 포커스를 둘 자리 -- 「선택 삭제」는 선택이 비어 잠기므로(Radix 기본 복귀가 <body> 로
   // 떨어진다) 늘 있는 결과 줄로 옮긴다. 다음 Tab 은 표(전체 선택)로 이어진다.
@@ -291,7 +334,8 @@ export function JobsList() {
   // 검색칸도 같다(2026-10-25) -- **적용된** 검색어가 바뀌는 순간 비운다(키 입력마다가 아니다: 디바운스 창 안에서 고른
   // 행은 아직 보이는 결과의 행이다). 위 유령 정리 effect 보다 뒤에 둔다 -- 같은 렌더에서 새 쿼리 키로 rows 가 비면 유령
   // 정리가 「N개는 목록에서 사라져…」를 세는데, 이 effect 의 clearAll 이 그 알림까지 지운다(필터를 바꾼 것은 사용자다).
-  const searchKey = JSON.stringify([requester, batchName, path]);
+  // 연산·상태도 같은 키에 둔다(2026-11-11 -- 주소가 상태라 뒤로 가기·링크처럼 select 를 거치지 않고도 바뀐다).
+  const searchKey = JSON.stringify([requester, batchName, path, operation, state]);
   const seenSearch = useRef(searchKey);
   useEffect(() => {
     if (seenSearch.current === searchKey) return;
@@ -320,22 +364,34 @@ export function JobsList() {
   // 무한 스크롤: 표 끝 감시 노드가 보이면 다음 쪽을 당긴다. IntersectionObserver
   // 는 스크롤 이벤트보다 싸고(오버헤드 최소화 요청), 화면 밖이면 발화하지 않는다.
   const sentinel = useRef<HTMLDivElement | null>(null);
+  // 다음 쪽 실패는 **그 오류의 시각(errorUpdatedAt)으로 기억한다**(2026-11-11). q.isFetchNextPageError 만 보면 다음 폴링이
+  // 시작되는 순간 풀린다 -- query-core 의 'fetch' 리듀서는 데이터가 있으면 status=error 를 둔 채 fetchMeta 를 null 로 되돌려,
+  // 폴링이 날아가는 동안 isFetchNextPageError=false·isRefetchError=true 가 된다. 그러면 실패한 재조회가 없는데도 재조회 실패
+  // 띠가 주기마다 깜빡이고, 「더 불러오지 못했습니다」가 사라지고, 아래 IO 가드가 풀려 다시 당긴 fetchNextPage 가
+  // (cancelRefetch 기본 true) 막 시작한 폴링을 취소해 첫 쪽이 끝내 갱신되지 않았다. 새 오류(시각이 바뀐다)가 나거나 성공으로
+  // isError 가 풀리면 저절로 풀린다. 렌더 중 ref 쓰기는 멱등이다(요청 상세 lastJobsErr 와 같은 관례).
+  const nextErrAt = useRef<number | null>(null);
+  if (q.isFetchNextPageError) nextErrAt.current = q.errorUpdatedAt;
+  const nextPageErr = q.isError && q.errorUpdatedAt === nextErrAt.current;
   useEffect(() => {
     const el = sentinel.current;
     if (!el) return;
+    // 다음 쪽이 실패한 동안은 저절로 다시 당기지 않는다(2026-11-11): 이제 실패해도 표와 감시 노드가 남으므로, 실패 →
+    // isFetchingNextPage false → effect 재실행 → 아직 보이는 노드가 또 당기는 고리가 된다. 다시 시도는 버튼(또는 다음 폴링이
+    // 성공해 오류가 풀린 뒤)으로.
     const io = new IntersectionObserver((entries) => {
-      if (entries[0].isIntersecting && q.hasNextPage && !q.isFetchingNextPage)
+      if (entries[0].isIntersecting && q.hasNextPage && !q.isFetchingNextPage && !nextPageErr)
         q.fetchNextPage();
     }, { rootMargin: "200px" });   // 바닥 200px 전에 미리 당겨 끊김을 줄인다
     io.observe(el);
     return () => io.disconnect();
-  }, [q.hasNextPage, q.isFetchingNextPage, q]);
+  }, [q.hasNextPage, q.isFetchingNextPage, nextPageErr, q]);
 
   return (
     <section className="space-y-4">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold">전체 작업</h1>
-        <Link to="/jobs/new"><Button>작업 제출</Button></Link>
+        <Link to="/jobs/new" className={SUBMIT_LINK}>작업 제출</Link>
       </div>
       {/* 요청 상세의 단건 삭제가 이동하며 남긴 알림(2026-10-26 — NavNotice). */}
       <NavNotice />
@@ -387,8 +443,22 @@ export function JobsList() {
       )}
 
       <Card>
-        {q.isError ? <p className="text-bad">{(q.error as ApiError).message}</p> : (
+        {/* 오류 문구가 표를 대신하는 것은 **보여 줄 행이 없을 때만**(2026-11-11). 예전엔 q.isError 면 데이터가 있어도 표 전체를
+            오류 한 줄로 바꿨다 -- 전역 retry:false 라 3초 폴링 한 번(api 재시작 503·연결 끊김)이나 다음 쪽 한 번만 실패해도
+            표가 사라져 페이지 높이가 줄고 읽던 스크롤 위치(150행째)를 잃었다(다음 폴링에 표는 돌아와도 스크롤은 0). 요청 상세와
+            같은 원칙: 보던 화면은 남기고 언제 기준인지만 띠로 말한다(재조회 실패). 다음 쪽 실패는 표 아래 감시 노드 자리에서. */}
+        {q.isError && rows.length === 0 ? <p className="text-bad">{(q.error as ApiError).message}</p> : (
           <>
+          {/* 다음 쪽 실패가 남아 있는 동안(폴링이 날아가는 중 포함)은 재조회 실패가 아니다 -- 위 nextPageErr. */}
+          {q.isRefetchError && !nextPageErr && (
+            <div role="status" title={(q.error as ApiError | null)?.message}
+                 className="mb-3 flex flex-wrap items-center gap-2 rounded-lg border border-attn/30 bg-attnbg/60 px-3 py-2 text-xs text-ink">
+              <p className="min-w-0 flex-1 break-keep">
+                {`자동 갱신에 실패했습니다 — ${q.dataUpdatedAt > 0 ? kstClock(new Date(q.dataUpdatedAt).toISOString()) : "—"} 기준 목록입니다.`}
+              </p>
+              <button type="button" className={SMALL_BTN} onClick={() => { void q.refetch(); }}>다시 시도</button>
+            </div>
+          )}
           {/* 표 헤더는 항상 렌더한다 -- 빈 결과에도 헤더가 남아야 화면 구조가
               유지되고, e2e L2(표 셀 하한)도 지킨다. 로딩·빈 문구는 표 아래로. */}
           <Table>
@@ -482,10 +552,12 @@ export function JobsList() {
                   <td className="whitespace-nowrap">{r.requester_id}</td>
                   <td>{r.operation}</td>
                   {/* 대상 요약: sync 는 src→dst, scan/rm 은 storage:target (배치 항목
-                      요약과 같은 규칙 -- pathSummary 공용). break-all 로 길어도 접는다. */}
+                      요약과 같은 규칙 -- pathSummary 공용). 길어도 접는다 -- overflow-wrap:anywhere(2026-11-11): 공백(「 — 」·
+                      「 / 」·「 → 」)에서 먼저 접고 공백 없는 긴 토큰만 쪼갠다. 예전 break-all 은 줄을 꽉 채워 글자 단위로 잘라
+                      「… / x5」 다음 줄에 「b」가 와 목적지 x5b 가 x5 로 읽혔다(SummaryRow·RequestSpecCard 와 같은 규칙). */}
                   {/* min-w: 좁은 폭(375px)에서 체크 열이 더해지면 이 열이 두어 글자 폭으로 짓눌려 행 하나가 화면 높이를
                       넘었다(2026-10-09 검증 지적) -- 최소 폭을 지키고 넘치는 만큼은 표의 가로 스크롤(Table)에 맡긴다. */}
-                  <td className="text-muted break-all min-w-[8rem]">{pathSummary(r.operation, r.payload)}</td>
+                  <td className="text-muted [overflow-wrap:anywhere] min-w-[8rem]">{pathSummary(r.operation, r.payload)}</td>
                   <td className="text-muted">{r.priority}</td>
                   <td><StatusPill state={r.state} help={requestStateHelp(r.state)} /></td>
                   <td className="text-muted whitespace-nowrap pr-2">{kstStampBare(r.created_at)}</td>
@@ -495,11 +567,20 @@ export function JobsList() {
               })}
             </tbody>
           </Table>
+          {/* 빈 결과 문구는 필터·검색이 걸렸을 때만 「조건에 맞는」이다(2026-11-11) -- 아무것도 거르지 않았는데 0건이면 새
+              사용자에게 필터를 건 것처럼 읽혔다. 판정은 **적용된** 값(쿼리 키와 같은 값)으로. */}
           {q.isLoading ? <p className="text-muted pt-3">불러오는 중…</p>
-           : rows.length === 0 ? <p className="text-muted pt-3">조건에 맞는 작업이 없습니다</p> : (
-            /* 무한 스크롤 감시 노드 + 상태 문구(데이터 있을 때만). */
+           : rows.length === 0 ? <p className="text-muted pt-3">{filtered ? "조건에 맞는 작업이 없습니다"
+              : "아직 제출된 작업이 없습니다 — 「작업 제출」로 시작할 수 있습니다"}</p> : (
+            /* 무한 스크롤 감시 노드 + 상태 문구(데이터 있을 때만). 다음 쪽 실패는 여기서 말하고 다시 시도를 둔다 -- 표는 그대로. */
             <div ref={sentinel} className="pt-3 text-center text-xs text-muted">
               {q.isFetchingNextPage ? "더 불러오는 중…"
+               : nextPageErr ? (
+                <span role="status" className="inline-flex flex-wrap items-center justify-center gap-2 text-bad">
+                  더 불러오지 못했습니다
+                  <button type="button" className={SMALL_BTN} onClick={() => { void q.fetchNextPage(); }}>다시 시도</button>
+                </span>
+              )
                : q.hasNextPage ? "스크롤하면 더 불러옵니다" : "마지막입니다"}
             </div>
           )}

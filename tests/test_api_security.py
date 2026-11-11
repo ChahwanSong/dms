@@ -267,6 +267,17 @@ def test_events_filters_search_and_keyset(admin, repos):
         assert get(bad).status_code == 422, bad
 
 
+def test_uncertain_verification_mail_is_in_the_security_list(admin, repos):
+    # 2026-11-11: 릴레이 무응답(발송 불확실, warning)이 목록에서 빠져 「메일」로 걸러도 보이지 않았다.
+    repos.observability.record_event(
+        component="mailer", severity="warning", event_type="verification_email_uncertain",
+        message="a@samsung.com (signup) -- relay_no_response",
+        payload={"purpose": "signup", "recipient": "a@samsung.com", "reason": "relay_no_response"})
+    rows = admin.get("/api/admin/security/events?type=verification_email_uncertain").json()
+    assert [(e["severity"], e["payload"]["recipient"]) for e in rows] == [("warning", "a@samsung.com")]
+    assert [e["event_type"] for e in admin.get("/api/admin/security/events").json()] == ["verification_email_uncertain"]
+
+
 def test_login_failures_land_in_the_security_list(db, settings, repos):
     repos.accounts.create("boss", "pw", "admin")
     c = TestClient(create_app(replace(settings, login_alarm_failures=3), db))
@@ -288,4 +299,5 @@ def test_security_event_types_match_the_frontend_labels_exactly():
     keys = re.findall(r"^  ([a-z_]+): \"", block.group(1), re.M)
     assert len(keys) == len(set(keys))
     assert set(keys) == set(SECURITY_EVENT_TYPES)
-    assert len(SECURITY_EVENT_TYPES) == len(set(SECURITY_EVENT_TYPES)) == 20
+    # 21 = 2026-11-11 verification_email_uncertain(인증 메일 발송 불확실) 추가 -- 빠져 있어 그 경고가 화면 어디에도 안 보였다.
+    assert len(SECURITY_EVENT_TYPES) == len(set(SECURITY_EVENT_TYPES)) == 21

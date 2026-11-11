@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { isBatchTerminal, useBatches, useDeleteBatches } from "./useBatches";
+import { BATCH_LIST_WINDOW, isBatchTerminal, useBatches, useDeleteBatches } from "./useBatches";
 import { Table } from "../../components/ui/Table";
 import { Card } from "../../components/ui/Card";
 import { StatusPill } from "../../components/ui/StatusPill";
@@ -8,6 +8,12 @@ import { batchStateHelp } from "../../lib/stateHelp";
 import { Button } from "../../components/ui/Button";
 import { batchPillVariant, batchStatusLabel } from "../../lib/jobState";
 import { kstStampOrDash } from "../../lib/datetime";
+import { FOCUS_RING } from "../jobs/ui";
+
+// 「배치 생성」은 버튼 모양의 **링크**다(공용 Button primary 와 같은 모양 + 포커스 링). 2026-11-11: 예전엔 <Link><Button/></Link>
+// (a 안의 button — 중첩 대화형 요소)라 Tab 이 같은 이름에서 두 번 멈추고 보조기기는 링크·버튼 둘로 읽었다.
+const CREATE_LINK =
+  `inline-flex items-center justify-center rounded-lg bg-accent px-3 py-2 text-sm font-medium text-white hover:bg-accenthover ${FOCUS_RING}`;
 
 // 활성 배치 체크박스에 다는 사유. 서버 문구("먼저 취소하세요")와 같은 동선을 가리킨다
 // — 활성은 Previewing 도 포함이라 "실행 중"보다 "진행 중"이 정직하다.
@@ -44,37 +50,43 @@ export function BatchesList() {
   const [armed, setArmed] = useState(false);
   const [opTab, setOpTab] = useState<OpTab>("all");
 
+  // 서버는 창 + 1 건까지 준다(useBatches BATCH_LIST_WINDOW) — 화면은 창만큼만 보이고, 넘친 한 건은 「더 오래된 배치가 있다」는
+  // 신호로만 쓴다(2026-11-11 — 예전엔 100건이 오면 그것을 전체로 여겨 「전체 (100)」으로 보였다). undefined = 아직 모름.
   // q.data 를 그대로 dep 에 쓴다(`?? []` 를 dep 으로 쓰면 매 렌더 새 배열이라 아래
   // 정리 effect 가 무한 루프가 된다). react-query 의 구조적 공유 덕에 내용이 같은
   // 리페치는 같은 참조를 돌려준다.
+  const all = useMemo(() => q.data?.slice(0, BATCH_LIST_WINDOW), [q.data]);
+  const truncated = q.data !== undefined && q.data.length > BATCH_LIST_WINDOW;
   const rows = useMemo(
-    () => (q.data ?? []).filter((b) => opTab === "all" || b.operation === opTab),
-    [q.data, opTab]);
-  // 탭 라벨의 건수는 **전체 목록** 기준이다 — 탭에 들어가기 전에 어느 종류가
-  // 몇 개인지 보여야 탭이 내비게이션 구실을 한다.
+    () => (all ?? []).filter((b) => opTab === "all" || b.operation === opTab),
+    [all, opTab]);
+  // 탭 라벨의 건수는 **보이는 전체 목록** 기준이다 — 탭에 들어가기 전에 어느 종류가
+  // 몇 개인지 보여야 탭이 내비게이션 구실을 한다. 창이 잘렸으면 「+」를 붙인다(하한일 뿐이다).
   const opCounts = useMemo(() => {
     const c: Record<string, number> = {};
-    for (const b of q.data ?? []) c[b.operation] = (c[b.operation] ?? 0) + 1;
+    for (const b of all ?? []) c[b.operation] = (c[b.operation] ?? 0) + 1;
     return c;
-  }, [q.data]);
+  }, [all]);
   // 전체선택·삭제 대상은 **보이는(현재 탭) 행**만이다 — 숨은 탭의 배치까지
   // 골라지면 사용자가 확인한 것과 다른 것을 지우게 된다(armed 재확인과 같은 원칙).
   const deletableIds = useMemo(
     () => rows.filter((b) => isBatchTerminal(b.status)).map((b) => b.batch_id),
     [rows]);
-  const liveIds = useMemo(() => new Set((q.data ?? []).map((b) => b.batch_id)), [q.data]);
-  // 유령 선택 정리: 4s 폴링 리페치로 목록에서 사라진 배치(다른 세션이 지웠거나
-  // 100건 창 밖으로 밀렸거나)를 선택에서 뺀다 — 안 그러면 화면에 없는 id 에
-  // DELETE 를 쏘고 404 를 "실패"로 보고하게 된다. 부분집합이라 길이 비교로
-  // 동일성을 판정할 수 있고, 같으면 같은 참조를 돌려 재렌더 루프를 끊는다.
+  // 유령 선택 정리: 4s 폴링 리페치로 **지금 고를 수 없게 된** 배치를 선택에서 뺀다 — 목록에서 사라졌거나(다른 세션이 지웠거나
+  // 100건 창 밖으로 밀렸거나) 다른 관리자가 재실행해 활성이 된 배치(2026-11-11: 예전엔 존재만 봐서, 활성이 된 배치가 체크된 채
+  // 잠겨 개별 해제가 안 되고 일괄 삭제가 409 를 냈다). 안 그러면 화면에 없거나 지울 수 없는 id 에 DELETE 를 쏘고 "실패"로
+  // 보고하게 된다. 부분집합이라 길이 비교로 동일성을 판정할 수 있고, 같으면 같은 참조를 돌려 재렌더 루프를 끊는다.
   useEffect(() => {
+    const selectable = new Set(deletableIds);
     setSelected((prev) => {
-      const next = prev.filter((id) => liveIds.has(id));
+      const next = prev.filter((id) => selectable.has(id));
       return next.length === prev.length ? prev : next;
     });
-  }, [liveIds]);
+  }, [deletableIds]);
 
-  const allChecked = deletableIds.length > 0 && selected.length === deletableIds.length;
+  // 개수가 아니라 집합으로 판정한다 — 정리 effect 가 돌기 전 한 렌더엔 선택이 고를 수 있는 집합의 부분집합이 아닐 수 있다
+  // (개수만 같으면 「전체 선택됨」으로 보이고, 누르면 남은 배치를 담지 않고 선택을 비웠다).
+  const allChecked = deletableIds.length > 0 && deletableIds.every((id) => selected.includes(id));
   const someChecked = selected.length > 0 && !allChecked;
   // indeterminate 는 속성이 아니라 DOM 프로퍼티라 ref 로만 설정된다.
   const allRef = useRef<HTMLInputElement>(null);
@@ -113,7 +125,7 @@ export function BatchesList() {
     <section className="space-y-4">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold">배치 작업</h1>
-        <Link to="/admin/batches/new"><Button>배치 생성</Button></Link>
+        <Link to="/admin/batches/new" className={CREATE_LINK}>배치 생성</Link>
       </div>
       {/* 작업 종류 탭(BuildTabs 시각 관례 차용 — 단 이건 라우트가 아니라 필터라
           NavLink 대신 button+tablist). 건수는 전체 목록 기준(위 opCounts 주석). */}
@@ -128,9 +140,9 @@ export function BatchesList() {
                       ? "border-accent text-accent font-medium"
                       : "border-transparent text-muted hover:text-ink"}`}>
             {/* 건수는 데이터가 도착했을 때만 -- 로딩·오류 중 (0) 은 "없다"는
-                거짓말이다(모름 ≠ 0, 리뷰 확인). */}
-            {OP_LABEL[t]}{q.data
-              ? ` (${t === "all" ? q.data.length : opCounts[t] ?? 0})` : ""}
+                거짓말이다(모름 ≠ 0, 리뷰 확인). 창이 잘렸으면 「+」(보이는 수는 하한). */}
+            {OP_LABEL[t]}{all
+              ? ` (${t === "all" ? all.length : opCounts[t] ?? 0}${truncated ? "+" : ""})` : ""}
           </button>
         ))}
       </div>
@@ -203,7 +215,9 @@ export function BatchesList() {
                 aria-label="전체 선택"
                 checked={allChecked} disabled={deletableIds.length === 0 || del.isPending}
                 onChange={toggleAll} /></th>
-            <th className="py-2">배치</th><th>이름</th><th>작업</th><th>상태</th><th>진행</th>
+            {/* 「진행」이 아니라 세 수의 이름(2026-11-11): 「1/1/2」를 「2개 중 1개 진행」으로 오독했다 — 상세 헤더의
+                「성공 x/실패 y/전체 z」와 같은 순서·뜻이다(취소 항목은 어느 칸에도 세지 않는다). */}
+            <th className="py-2">배치</th><th>이름</th><th>작업</th><th>상태</th><th>성공/실패/전체</th>
             {/* 「최근 수행일」이 아니라 「최근 갱신」인 이유: 이 값(updated_at)은 실행
                 뿐 아니라 이름·메모 수정, 항목 편집, 취소까지 **모든 전이**가 민다 —
                 "수행"이라 부르면 마지막 실행 시각이라는 오독을 만든다. */}
@@ -234,13 +248,22 @@ export function BatchesList() {
                           : "미리보기가 끝나면 「배치 확인」 없이 실행"}>자동</span>
                 )}</td><td><StatusPill state={b.status} variant={batchPillVariant(b.status)} label={batchStatusLabel(b.status)}
                                  help={batchStateHelp(b.status)} /></td>
-                <td className="text-muted">{b.succeeded_count}/{b.failed_count}/{b.item_count}</td>
+                <td className="text-muted"
+                    title={`성공 ${b.succeeded_count} · 실패 ${b.failed_count} · 전체 ${b.item_count}`}>
+                  {b.succeeded_count}/{b.failed_count}/{b.item_count}</td>
                 {/* 시각은 저장소 관례대로 ISO 원문 그대로(AccountsList·JobsList·
                     구 최근 작업 카드와 같은 표기). 값 없음은 "—". */}
                 <td className="text-muted whitespace-nowrap">{kstStampOrDash(b.updated_at)}</td>
               </tr>))}
           </tbody>
         </Table>)}
+      {/* 창이 잘렸다는 사실(2026-11-11): 탭 건수 「+」만으로는 왜 오래된 배치가 안 보이는지 말하지 않는다. 오래된 배치도
+          전체 작업의 배치 링크·주소로는 상세에 닿는다. */}
+      {truncated && !q.isError && (
+        <p className="mt-2 text-xs text-ink/70 break-keep">
+          {`최근 생성된 ${BATCH_LIST_WINDOW}건만 표시합니다 — 그보다 오래된 배치는 이 목록과 탭 건수에 없습니다(전체 작업의 배치 링크로는 열 수 있습니다).`}
+        </p>
+      )}
       </Card>
     </section>
   );
