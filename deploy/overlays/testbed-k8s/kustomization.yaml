@@ -61,6 +61,7 @@
 #   d23 = 기능 전수 점검 결함 5건 수정(/api 404·보호 화면 5xx·390px 표 nowrap·vcjob 시한 초과 분류·사전 점검 시한) — 소스 7434e1c5 (d20~d22 는 시험 빌드, 삭제)
 #   d24 = 지운 k8s 클러스터의 동기화 이력 — 보존 정리·호출 노드 카드에서 제외 — 소스 079e7199
 #   d25 = k8s 연동 클러스터를 개요에서 별도 「클러스터」 탭으로 분리(소스 0ae6db14)
+#   d26 = 포탈 전수조사 버그 92건 수정(소스 73d29c1e)
 #   태그 bump = 아래 newTag(+ patch-config.yaml 의 DMS_JOB_IMAGE) 커밋 — **dms-k8s 에서만** 한다(2026-10-22 브랜치 분리 뒤
 #   빌드 소스는 /home/mason/dms-dev/dms-k8s 체크아웃 = origin/dms-k8s, main 은 이 클러스터와 무관).
 #   ssc 클러스터의 오버레이(overlays/testbed)는 dms-ssc 브랜치에만 있다(2026-10-26 이 브랜치에서 지웠다 — 체리픽 충돌·엉뚱한 태그 방지).
@@ -91,10 +92,10 @@ resources:
 images:
   - name: set-by-overlay.invalid/dms
     newName: 10.112.0.50:5000/dms
-    newTag: d25
+    newTag: d26
   - name: set-by-overlay.invalid/dms-agent
     newName: 10.112.0.50:5000/dms-agent
-    newTag: d25
+    newTag: d26
 
 patches:
   - path: patch-config.yaml
