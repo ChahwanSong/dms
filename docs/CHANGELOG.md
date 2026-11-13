@@ -53,6 +53,7 @@ dms-k8s 라인의 **완료 기록**이다. 각 항목에는 무엇을 만들었�
 
 | 날짜 | 태그·실증 | 제목 |
 |---|---|---|
+| 11-13 | — | OA 사이트(RKE2) 설치 — Gateway API 하한 v1.5.0·묶음 dry-run 오류 줄·control-plane 라벨 값(CONTROL_PLANE_LABEL_VALUE) |
 | 11-11 | d26 | 포탈 전수조사 — 버그 92건 수정(high 0 · medium 12 · low 80) d26 |
 | 11-11 | d25 | 포탈 k8s 연동 — 클러스터를 개요에서 별도 「클러스터」 탭으로 분리 d25 |
 | 11-11 | d24 | 지운 k8s 클러스터의 동기화 이력 — 보존 정리 결함·호출 노드 카드에서 제외 d24 |
@@ -91,6 +92,21 @@ dms-k8s 라인의 **완료 기록**이다. 각 항목에는 무엇을 만들었�
 ---
 
 ## 상세 기록 (최신순)
+
+### ✅ OA 사이트(RKE2) 설치 — Gateway API 하한 v1.5.0·묶음 dry-run 오류 줄·control-plane 라벨 값(CONTROL_PLANE_LABEL_VALUE) — **완료**(2026-11-13)
+
+OA 사이트(Rancher/RKE2) 운영 쪽이 설치 중 찾은 세 결함을 진단·패치 설명으로 넘겼다(패치 파일은 이 호스트에 없어 설명대로 구현). 이미지와 무관한
+배포 스크립트 변경이라 태그·릴리스 없음.
+
+- **Gateway API 재사용 하한 v1.6.0 → v1.5.0**(88746eee): RKE2 의 rke2-traefik-crd(Helm 소유)가 v1.5.1 을 미리 깔아 판정 X 로 S8 이 거부됐다.
+  `install-detect.GWAPI_FLOOR`·X 문구·docstring·deploy/README §2g 감지 줄. DMS 가 쓰는 GatewayClass·Gateway·HTTPRoute 는 v1 standard 라 v1.5 에도 있다.
+- **묶음 dry-run 오류 끝 줄**(88746eee): 없는 kind 가 둘 이상이면 kubectl 이 `[a, b, c]` 로 묶어 마지막 줄이 「ensure CRDs are installed first]」 —
+  첫 설치에서 EG CRD 3종이 한꺼번에 없으면 S3 계획이 FAIL 했다. `_classify` 가 `rstrip("]")` 로 비교한다.
+- **control-plane 라벨 값**(9d545216): RKE2 는 `node-role.kubernetes.io/control-plane=true` 인데 base·prod nodeSelector 는 `""` 라 레지스트리·PG·
+  Envoy·api/controller 가 Pending 이었다. values.env 선택 키 `CONTROL_PLANE_LABEL_VALUE`(기본 빈 값 = 기존 출력 그대로, k8s 라벨 값 문법 밖 FAIL)가
+  앱 patch-placement·platform/registry·platform/gateway(EnvoyProxy)·platform/db-cluster(`PG_PLACEMENT=control-plane`)의 그 값을 바꾼다. 키 존재로만
+  고르는 곳(DoesNotExist·preflight·프로브)은 무관. 문서: deploy/README §0·§2f-1·§3, values.env.example.
+- **검증**: 배포 계약 묶음 8개 파일 566 passed / 2 skipped(kubectl kustomize 실제 렌더로 네 층 nodeSelector "true" 확인 포함).
 
 ### ✅ 포탈 전수조사 — 버그 92건 수정(high 0 · medium 12 · low 80) d26 — **완료·실증**(2026-11-11)
 
