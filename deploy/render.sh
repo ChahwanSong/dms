@@ -9,10 +9,12 @@
 # 출력: deploy/.rendered/<site>/ (git 밖 — .gitignore)
 #   app/                      앱 오버레이 → `kubectl --context <ctx> apply -k`(client-side — 포탈 릴리스가 strategic-merge 로 image 를 바꾼다).
 #                             템플릿 오버레이(prod — REPLACE_* 토큰)는 값을 넣고, 고정 오버레이(testbed-k8s)는 그대로 복사한다. 둘 다
-#                             resources 의 ../../k8s 를 이 깊이(../../../k8s)로 고쳐 같은 base 를 가리킨다.
+#                             resources 의 ../../k8s 를 이 깊이(../../../k8s)로 고쳐 같은 base 를 가리킨다. CONTROL_PLANE_LABEL_VALUE 가
+#                             있으면 템플릿 오버레이는 patch-placement 의 control-plane nodeSelector 값을 바꾸고, 고정 오버레이에 그 ""(빈 값)
+#                             줄이 있으면 FAIL 이다(고정 오버레이는 파일에서 고친다).
 #   platform/priorityclass/   PriorityClass dms-addon-critical → SSA(--server-side --field-manager=dms-install)
 #   platform/registry/        클러스터 내 레지스트리(REGISTRY_CLUSTER_IP 가 있을 때만) → SSA. base(deploy/platform/registry)를 가리키고 사이트
-#                             값(이미지 호스트·clusterIP·포트·hostPath·센티널 기대값·선택 requests)만 덮는다.
+#                             값(이미지 호스트·clusterIP·포트·hostPath·센티널 기대값·선택 requests·선택 control-plane 라벨 값)만 덮는다.
 #   addons/cnpg/              CNPG 오퍼레이터(설계 6-1 A 경로, ⑤) → SSA. base(deploy/addons/cnpg/<CNPG_VERSION> — 상류 원본 + DMS 패치 층)를
 #                             가리키고 이미지·OPERATOR_IMAGE_NAME·POSTGRES_IMAGE_NAME 을 lock digest 로 덮는다(S9).
 #   platform/db-volumes/      SC dms-pg-shared + 정적 hostPath PV ×5(<SHARED_DIR>/dms/pgdata/dms-pgdata-0N, 용량 = PG_STORAGE_SIZE) → SSA(S10 첫째)
@@ -23,7 +25,8 @@
 #   addons/envoy-gateway/     Envoy Gateway 컨트롤러(⑥, S8 둘째) → SSA → rollout. base = deploy/addons/envoy-gateway/<ENVOY_GATEWAY_VERSION>(상류 원본
 #                             + DMS 패치 층) + 이미지(컨트롤러·certgen) lock digest + EG 설정(shutdown-manager·기본 Envoy 이미지)의 사이트 사본
 #   platform/gateway/         포탈 입구(⑥, S8 셋째): GatewayClass·Gateway·HTTPRoute·CTP·BTP·EnvoyProxy → SSA. base(deploy/platform/gateway)를
-#                             가리키고 Envoy·shutdown-manager 이미지·PROXY 모드·인증서 이름·선택 Envoy requests 만 덮는다(설계 4-3)
+#                             가리키고 Envoy·shutdown-manager 이미지·PROXY 모드(off 면 CTP 의 proxyProtocol 을 뺀다)·리스너 포트(GATEWAY_LISTEN_PORT
+#                             가 443 이 아닐 때)·인증서 이름·선택 Envoy requests·선택 control-plane 라벨 값(EnvoyProxy nodeSelector)만 덮는다(설계 4-3)
 #   render.env                해석된 값(REGISTRY·앱 태그·애드온 레지스트리·이미지 ref 등 — install.sh 의 in-cluster 게이트와 런북이 읽는다)
 #   (kube-context 가 있는 오버레이는 그 파일을 각 층 디렉터리에 복사한다 — guard-images.sh 가 같은 컨텍스트 고정을 본다)
 # 성공하면 층마다 `PLATFORM: <디렉터리>`(db 층은 S10 순서)·`GATEWAY: <디렉터리>`(S8 순서 — 위 셋, ⑥)·`ADDON: <디렉터리>`·`PROBE: <디렉터리>` 를,
@@ -40,8 +43,8 @@
 #   PG_PLACEMENT       (선택) control-plane(기본 — 마스터마다 1개, #27) | all-nodes(control-plane 이 1대뿐인 시험 클러스터 전용 — nodeSelector
 #                      를 빼 모든 노드에 하나씩; 예: 테스트베드 cp1·w1·w2. prod 에 쓰지 않는다)
 #   CONTROL_PLANE_LABEL_VALUE  (선택, 기본 빈 값 = base 그대로) control-plane 노드 라벨 node-role.kubernetes.io/control-plane 의 **값**.
-#                      base·prod 의 nodeSelector 는 kubeadm 관례인 ""(빈 값)를 고른다 — RKE2 는 "true" 를 달아 그대로면 레지스트리·PG·Envoy·
-#                      api/controller 가 Pending 이다(2026-11-13 OA 사이트). 값을 주면 앱 patch-placement(템플릿 오버레이)·platform/registry·
+#                      base·prod 의 nodeSelector 는 kubeadm 관례인 ""(빈 값)를 고른다 — RKE2 는 "true" 를 달아 그대로면 레지스트리·PG·
+#                      api/controller 가 Pending 이고 Envoy DaemonSet 은 파드 0 이다(2026-11-13 OA 사이트). 값을 주면 앱 patch-placement(템플릿 오버레이)·platform/registry·
 #                      platform/gateway(EnvoyProxy)·platform/db-cluster(PG_PLACEMENT=control-plane 일 때)의 그 nodeSelector 값을 바꾼다. k8s 라벨
 #                      값 문법(63자 이하, 영숫자로 시작·끝, 가운데 [-_.A-Za-z0-9]) 밖이면 FAIL. 키 존재로만 고르는 곳(DoesNotExist·preflight·
 #                      프로브)은 값과 무관하다. 확인: kubectl get nodes -L node-role.kubernetes.io/control-plane

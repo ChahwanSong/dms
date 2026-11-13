@@ -5,12 +5,13 @@
 # 사용:  sh deploy/verify.sh --context <ctx> [--rendered deploy/.rendered/<site>] [--no-probes]
 #        env PORTAL_DOMAIN(포탈 FQDN) · PORTAL_VIP(Avi VIP-A — 있으면 `curl --resolve <FQDN>:443:<VIP>`) · CACERT(사내 CA)
 #   --context 는 필수다(2026-11-03 ⑦ — --context <ctx> / --context=<ctx> / env KUBE_CONTEXT, 플래그가 이긴다; 둘 다 없으면 exit 2).
-#   --rendered 를 주면 render.env(PORTAL_DOMAIN·PORTAL_VIP·레지스트리)를 읽고, PG 경로 대조(pg-path-probe.py contrast — S10 과 같은 검사)와
+#   --rendered 를 주면 render.env(PORTAL_DOMAIN·PORTAL_VIP·레지스트리·GATEWAY_LISTEN_PORT)를 읽고, PG 경로 대조(pg-path-probe.py contrast — S10 과 같은 검사)와
 #   애드온 감지 요약(install-detect.py detect)을 더 한다.
-#   --no-probes 는 파드를 띄우는 검사(PG 경로 대조 DaemonSet·마스터 :443 일회용 파드)를 건너뛴다 — 순수 읽기(get·logs·서비스 프록시 GET)만.
+#   --no-probes 는 파드를 띄우는 검사(PG 경로 대조 DaemonSet·마스터 리스너 포트 일회용 파드)를 건너뛴다 — 순수 읽기(get·logs·서비스 프록시 GET)만.
 #   PORTAL_DOMAIN 이 없으면 VIP 경유 HTTPS 검사는 건너뛴다(앱·DB 의 readyz 는 apiserver 서비스 프록시로 늘 본다).
 # 검사(S12): 마이그레이션·워크로드 · 이미지 · CNPG(readyInstances·dms-pg-rw) · Available 여분 PV · PG 경로 대조 · CronJob 마지막 성공 ·
-#   Gateway Programmed · **마스터마다 :443**(host-net-probe.sh — Programmed 는 bind 실패를 못 잡는다) · 레지스트리 Ready·태그 · 애드온 요약 ·
+#   Gateway Programmed · **마스터마다 리스너 포트 LISTEN**(render.env GATEWAY_LISTEN_PORT, 없으면 443 —
+#   host-net-probe.sh --port; Programmed 는 bind 실패를 못 잡는다) · 레지스트리 Ready·태그 · 애드온 요약 ·
 #   readyz(apiserver 서비스 프록시 = 앱·DB 판정 · `--resolve <FQDN>:443:<VIP>` = 입구 — 응답 없음(000)은 Avi VS-443 미개통일 수 있어 WARN, 다른 코드는
 #   FAIL — 2026-11-03 ⑦ 리뷰 1) · 「80 불가 = 정상」. FAIL 이 있고 api·controller 로그에 EACCES·Permission denied 가 보이면 SELinux 노드 프로브(S2b)부터
 #   다시 돌리라고 안내한다(설계 2-3 — enforcing 이면 DMS 사유가 엉뚱하게 나온다).

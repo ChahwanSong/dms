@@ -18,14 +18,14 @@
 #   env ALLOW_IMAGE_CHANGE=1 / ALLOW_HOSTPATH_CHANGE=1  guard-images.sh 의 exit 3·5 를 연다(의도한 앱 이미지·hostPath 변경 — 전역이라 모든 층의
 #                    가드를 연다. 애드온·플랫폼 층의 이미지 교체는 --upgrade-addon <x> 로 그 층만, ⑦ 리뷰 2).
 #   env PORTAL_DOMAIN·PORTAL_VIP·CACERT  S12 의 `curl --resolve` 대상(없으면 render.env 의 값 — prod 는 values.env 의 PORTAL_DOMAIN·PORTAL_VIP).
-#   env VERIFY_NO_PROBES=1  S12 에서 파드를 띄우는 검사(PG 경로 대조·마스터 :443)를 건너뛴다(라이브 사이트를 순수 읽기로 다시 볼 때).
+#   env VERIFY_NO_PROBES=1  S12 에서 파드를 띄우는 검사(PG 경로 대조·마스터 리스너 포트)를 건너뛴다(라이브 사이트를 순수 읽기로 다시 볼 때).
 #   env SELINUX_PROBE_IMAGE=<ref>  S2b 프로브 이미지(모든 노드에 이미 있는 셸 포함 이미지 — 기본은 Cilium agent 이미지를 찾는다).
 #   env 시간(초): DB_WAIT_SECONDS(900 — S10 폴링·CNPG 업그레이드 뒤 healthy) · ROLLOUT_TIMEOUT(180) · MIGRATE_TIMEOUT(180) · DUMP_TIMEOUT(600) ·
 #       CNPG_ROLLOUT_TIMEOUT(300) · CERTGEN_TIMEOUT(120) · WEBHOOK_RETRIES(6 — S9 Cluster CR dry-run 의 웹훅 재시도) · POLL_INTERVAL. PYTHON(python3).
 #
 # 단계(설계 8-1 — 순서의 이유는 설계 「순서의 이유」):
 #   S1  preflight(preflight-cluster.sh — K8s minor 1.34~1.36·SHARED_DIR 형식·REGISTRY_CLUSTER_IP(ServiceCIDR·미사용·하단 정적 대역)·PSA·admission·
-#       노드 셸 체크리스트) + 감지(install-detect.py detect — 표). FAIL·P·X 면 중단.
+#       마스터 hostPort <리스너 포트> 충돌·노드 셸 체크리스트) + 감지(install-detect.py detect — 표). FAIL·P·X 면 중단.
 #   S2  deploy/k8s/00-namespace.yaml(PSA privileged) → dms-pg-app(pg-secrets ensure-app) → dms-secrets(없으면 init-secrets) → 4키·자리표시자·
 #       pg-secrets check(설계 6-3) → PORTAL_TLS_SECRET(render.env) 확인(없으면 WARN — 쓰는 곳인 S8 이 멈춘다, ⑦ 리뷰 1). 값은 출력하지 않는다.
 #   S2b SELinux 노드 프로브(selinux-probe.py — DMS 노드, privileged 임시 DS). FAIL·모름이면 중단.
@@ -35,8 +35,9 @@
 #   S5  lock 대조(images-lock.py compare-registry — port-forward) + DMS 앱 이미지(dms·dms-agent·dms-mpifileutils) 태그 확인. 없거나 다르면 push 명령
 #       (push-images.sh --print)을 보이고 — S4 에서 이어 왔으면 **PAUSE(exit 10, 인터넷 노드 push 뒤 `--stage S5`)**, 아니면 FAIL.
 #   S6  pull 프로브(pull-probe.py — 노드마다 실제 pull).            S7  공용 스토리지 프로브(shared-storage-probe.py — 3 WARN 은 계속, 1·4 중단).
-#   S8  Gateway API → EG(감지대로 — DMS 소유인데 적용하지 않으면 Ready·xDS 시크릿 확인만) → TLS 시크릿 → 마스터 sysctl ≤ 443(host-net-probe.sh)
-#       → platform/gateway → Programmed → 마스터마다 :443.
+#   S8  Gateway API → EG(감지대로 — DMS 소유인데 적용하지 않으면 Ready·xDS 시크릿 확인만) → TLS 시크릿 → 마스터 hostPort <리스너 포트> 충돌
+#       (비 hostNetwork 파드가 쓰면 멈춤) → 마스터 sysctl ≤ 리스너 포트(1024 미만일 때만, host-net-probe.sh) → platform/gateway → Programmed
+#       → 마스터마다 :<리스너 포트>. 리스너 포트 = render.env 의 GATEWAY_LISTEN_PORT(기본 443).
 #   S9  CNPG(감지대로: A 면 ns 먼저(DMS 라벨) → SSA → rollout) → Cluster CR server dry-run(9443 경로 — 「failed calling webhook」이면 9443 사유).
 #   S9b Volcano(감지대로 — C 면 건드리지 않는다) → DMS 모양 vcjob server dry-run(install-detect.py vcjob).
 #   S10 pv-check → db-volumes → precheck → db-cluster → 900초 폴링(readyInstances ≥ 1·dms-pg-rw Endpoints·currentPrimary Ready — 전부 Ready 를
@@ -45,7 +46,7 @@
 #       image 를 바꾼다) → migrate 완료·롤아웃 대기 → 설정(dms-config·dms-secrets 의 resourceVersion)이 바뀌었는데 파드가 그대로면 rollout restart
 #       → 마스터 `dms` 이미지 사전 pull(pull-probe.py --nodes <마스터>, 실패는 WARN).
 #   S12 verify.sh(--rendered) — readyz(apiserver 서비스 프록시 = 판정, --resolve VIP = Avi 미개통이면 WARN)·CNPG·여분 PV·경로 대조·CronJob·
-#       Gateway·마스터 :443·레지스트리·애드온 요약·「80 불가 = 정상」. FAIL 이어도 S13 체크리스트를 보이고 멈춘다.
+#       Gateway·마스터 리스너 포트·레지스트리·애드온 요약·「80 불가 = 정상」. FAIL 이어도 S13 체크리스트를 보이고 멈춘다.
 #   S13 사후 체크리스트(출력만 — 첫 관리자 부트스트랩 → 메일(Knox 릴레이) → 포탈 등록(컨트롤 상태·k8s 연동) → 사본 → 스모크 →
 #       DNS·Avi·S12. 상세는 deploy/README §6·§7).
 #
@@ -648,7 +649,7 @@ stage_S4() {
       -o 'custom-columns=OBJ:.involvedObject.name,NODE:.source.host,REASON:.reason,MSG:.message' --no-headers 2>/dev/null \
       | grep '^dms-registry' | grep -E 'Failed|BackOff' | tail -n 4 | cut -c1-300 | sed 's/^/    /' >&2
     kcn logs deploy/dms-registry -c sentinel-check --tail=5 2>/dev/null | sed 's/^/    init: /' >&2
-    die "dms-registry 가 Ready 가 아니다(파드 노드: ${_rnode:-배치 안 됨}) — 「FailedMount … hostPath type check」= 마스터 ${_rnode:-<노드>} 에 공용 디렉터리 없음(마운트·S0), 「ErrImagePull·ImagePullBackOff …/registry:<태그>」= 그 마스터에 S0-5 반입·고정 없음(그 노드에서 crictl images --digests · deploy/README §2e-4 의 2단계), 「FailedScheduling」= 마스터 자리·taint·PriorityClass, init 「센티널 없음」= S0 미실행·로컬 디렉터리, 「센티널 불일치」= values.env SHARED_DIR_ID(deploy/README §2e-3 표)"
+    die "dms-registry 가 Ready 가 아니다(파드 노드: ${_rnode:-배치 안 됨}) — 「FailedMount … hostPath type check」= 마스터 ${_rnode:-<노드>} 에 공용 디렉터리 없음(마운트·S0), 「ErrImagePull·ImagePullBackOff …/registry:<태그>」= 그 마스터에 S0-5 반입·고정 없음(그 노드에서 crictl images --digests · deploy/README §2e-4 의 2단계), 「FailedScheduling」= 마스터 자리·taint·PriorityClass 또는 control-plane 라벨 값 불일치(「didn't match Pod's node affinity/selector」 — RKE2 는 values.env CONTROL_PLANE_LABEL_VALUE=true, deploy/README §0-2·§2f-1), init 「센티널 없음」= S0 미실행·로컬 디렉터리, 「센티널 불일치」= values.env SHARED_DIR_ID(deploy/README §2e-3 표)"
   fi
   ok "dms-registry Ready"
   pf_open "$RPORT" || die "레지스트리 port-forward 가 열리지 않았다 — $(tr '\n' ' ' < "$WORK/pf.log" | cut -c1-200)"
@@ -766,7 +767,7 @@ stage_S8() {
   else
     info "Envoy Gateway: $(det envoy-gateway code) $_e — 건드리지 않는다(설계 8-2 — C 면 platform/gateway 만)"
     # DMS 가 설치한 EG(D=·D<·D>)는 적용하지 않아도 읽기 전용으로 확인한다 — 앞선 실행이 SSA 뒤 certgen·rollout 에서 멈췄으면 재실행 감지는 D=(none)라
-    # 확인 없이 지나가 「Programmed 아님」으로만 드러났다(2026-11-03 ⑦ 리뷰 1). C 는 남의 것이라 보지 않는다(Programmed·:443 이 최종 판정).
+    # 확인 없이 지나가 「Programmed 아님」으로만 드러났다(2026-11-03 ⑦ 리뷰 1). C 는 남의 것이라 보지 않는다(Programmed·마스터 리스너 포트 LISTEN 이 최종 판정).
     case "$(det envoy-gateway code)" in
       "D="|"D<"|"D>")
         if ! kc -n envoy-gateway-system rollout status deploy/envoy-gateway --timeout="${ROLLOUT_TIMEOUT:-180}s" >/dev/null 2>&1 \
@@ -1058,7 +1059,7 @@ config_rev() {
 }
 
 stage_S12() {
-  # VERIFY_NO_PROBES=1 이면 파드를 띄우는 검사(PG 경로 대조·마스터 :443)를 건너뛴다 — 라이브 사이트에서 순수 읽기로 다시 볼 때.
+  # VERIFY_NO_PROBES=1 이면 파드를 띄우는 검사(PG 경로 대조·마스터 리스너 포트)를 건너뛴다 — 라이브 사이트에서 순수 읽기로 다시 볼 때.
   if [ "${VERIFY_NO_PROBES:-0}" = 1 ]; then set -- --no-probes; else set --; fi
   helper "$WORK/verify.out" env PORTAL_DOMAIN="${PORTAL_DOMAIN:-$(rv PORTAL_DOMAIN)}" PORTAL_VIP="${PORTAL_VIP:-$(rv PORTAL_VIP)}" \
     CACERT="${CACERT:-}" sh "$HERE/verify.sh" --context "$CTX" --rendered "$RDIR" "$@"

@@ -101,6 +101,12 @@ k8s 신원 모드 → 포크 → 사용량 → ③~⑦ 설치 묶음 → 테스�
   상한)」)은 표시하지 않는다.
 - ~~**모바일(375) 사이드바 접기**~~ — 해소(2026-11-11 — md 미만에서 메뉴·사용자 패널을 `AppShell` 의 「메뉴」 버튼으로 여닫는다,
   기본 닫힘; e2e 03 모바일 spot check 가 첫 화면 h1·열린 메뉴를 잰다).
+- 🔧 **배치 목록 쪽 넘김·총수**(2026-11-11 CHANGELOG 「포탈 전수조사」의 범위 밖 — 잘림 안내만 넣었다) — 배치 목록(작업 → 배치 작업)은
+  최근 생성 100건 창이다(`useBatches.BATCH_LIST_WINDOW`, `routes_batches.list_batches` 의 `limit` 기본 100·상한 `_MAX_BATCH_LIST` 1000 —
+  포탈은 창 + 1 건을 받아 잘렸다는 것만 안다: 탭 건수의 「+」·목록 아래 안내문). 창 밖의 오래된 배치는 목록·탭 건수·목록의 「선택 삭제」
+  (기록만)에 없다 — 상세(「배치 삭제」 포함)는 전체 작업의 「배치」 열 링크나 주소 `/admin/batches/<id>` 로 연다. 처방 후보:
+  `(created_at, batch_id)` 커서 쪽 넘김(지금 정렬은 `BatchesRepository.list` 의 created_at DESC 하나라 동률을 batch_id 로 깬다) 또는 총수
+  (COUNT) 응답.
 - 🔧 **앱 전역 의미 글자 대비(WCAG AA 4.5:1)** — 요청 상세는 의미 있는 글자를 `text-ink/70`(흰 바탕 4.94:1)으로
   올렸지만(2026-10-08), 다른 화면은 아직 `text-muted`(#888 — 흰 바탕 3.54:1, canvas 3.28:1)를 본문·표 머리·안내문에
   쓴다: `features/jobs/JobsList.tsx`(표 머리·경로 요약·시각·빈 목록 안내), `SubmitJob.tsx`(「실제 경로」·공백 안내·
@@ -409,8 +415,9 @@ CHANGELOG 「⑦ 설치기」, 설계 v6 8-1·8-2·9 ⑦·10 T9, deploy/README �
 - 📝 **설치 흐름 밖에 남긴 사이트 확인** — `SHARED_DIR_ID` 를 values.env 에 손으로 옮긴다(S0 결과를 일회용 파드로 읽어 제안·대조하는 길은 없다 —
   틀리면 S4 가 「센티널 불일치」로 멈춘다), SHARED_DIR 변경 때 레지스트리 저장소 이동은 deploy/README §2e-5 손 절차(설치기는 S4·S11 가드 exit 5 로
   멈출 뿐), 클러스터 도메인 ≠ cluster.local 은 preflight WARN 뿐(EG `KUBERNETES_CLUSTER_DOMAIN` values 키 없음 — 설치기는 매 실행 다시 렌더하므로
-  `deploy/.rendered` 손 패치로는 못 넘는다; 렌더를 건너뛰는 길은 두지 않았다 — 값 키를 더하는 쪽), 마스터 :443·:19000~19003 비어 있음(K6)·
-  `crictl inspecti … pinned`·`fs.protected_*` 는 노드 셸 체크리스트(MANUAL)뿐, S12 의 413(21MiB)·15초 스트림·원 IP 는 deploy/README §2g-5 손 명령.
+  `deploy/.rendered` 손 패치로는 못 넘는다; 렌더를 건너뛰는 길은 두지 않았다 — 값 키를 더하는 쪽), 마스터 리스너 포트(`GATEWAY_LISTEN_PORT`,
+  기본 :443)·:19000~19003 비어 있음(K6)·`crictl inspecti … pinned`·`fs.protected_*` 는 노드 셸 체크리스트(MANUAL)뿐, S12 의 413(21MiB)·15초 스트림·
+  원 IP 는 deploy/README §2g-5 손 명령.
   앱 튜닝 키(메일·로그인 보호·보존일)의 values 키는 「2026-11-06 … 후속」 1.
 - 📝 **S6 판정 범위는 DMS 노드만**(설계 S6 행에는 범위가 없다): S2b·S10 과 같은 정의(`pg-path-probe.py` 의 `dms_nodes`)로 다른 팀 노드는 pull 은
   해 보되 정보로만 보인다. 모든 노드를 판정해야 한다면 `pull-probe.py` 의 판정 대상을 바꾼다 — 사용자 확인 대기.
@@ -596,6 +603,11 @@ testbed 저장소. 2026-11-06 신규 테스트베드 항목(9·10·12·13 워커
     않는다.
   - 프록시 없이 직접 닿는 배치(port-forward)는 XFF 를 클라이언트가 심을 수 있다. 위조 IP 로 출발지 경보를 부풀려도 이벤트는 창당 50건까지이고
     (그 뒤 출발지는 기록 안 됨 — 전체 실패 경보가 규모를 요약), 정작 진짜 출발지 경보가 그 몫에 밀려 빠질 수 있다.
+  - `GATEWAY_PROXY_PROTOCOL=off` 사이트(2026-11-14 — LB 가 PROXY v2 를 못 붙인다, deploy/README §2g-4)에는 그 계약이 없어 앱이 사용자 원 IP 를
+    모른다. 접근 로그·보안 이벤트의 `client_ip` 는 LB(SE) 주소이고, 출발지 경보(`DMS_LOGIN_ALARM_SOURCE_FAILURES`)는 prod 렌더가 0(끔)으로
+    넣는다(`deploy/render.sh` — 고정 오버레이는 patch-config.yaml 에 직접 넣고, 없으면 렌더가 note 로 알린다). 전체 실패 경보와 아이디 기준
+    상한·거절은 그대로라 막는 판정은 바뀌지 않는다. 원 IP 는 LB 의 VS 로그에서 시각으로 맞출 뿐이라, 출발지 단위 조사가 필요하면 LB 로그 보존을
+    사이트에 요청한다 — 근본 해결은 PROXY v2 를 붙이는 LB(deploy/README §2g-4 의 컷오버)다.
 - 📝 **비활성화는 세션 세대를 회전하지 않는다**(2026-11-03)
   - 비활성 계정의 세션은 요청마다 재검사로 401 이 되고, 그 요청에서 쿠키가 비워진다.
   - 그런데 비활성 기간에 한 번도 쓰이지 않은 쿠키는 다시 활성화하면 되살아난다(쿠키 수명 14일, starlette 기본 — 로그아웃도 같은 한계:

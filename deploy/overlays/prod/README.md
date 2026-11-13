@@ -70,7 +70,7 @@ current-context 를 읽는다**(설치기는 늘 `--context` 로 부른다 — �
    뒤 그 아이디의 PV 권한을 얻는다(`deploy/README.md` §6-2).
    **이 표를 못 맞추는 사이트**(2026-11-14): LB 가 PROXY v2 를 못 붙이면 values.env `GATEWAY_PROXY_PROTOCOL=off`, 마스터의 호스트 443 을 다른 것이
    쓰면(예: RKE2 Traefik 의 hostPort 443 — S1 이 찾아 멈춘다) `GATEWAY_LISTEN_PORT=<포트>`(예 10443)로 하고 풀 멤버·헬스·방화벽 포트를 그
-   포트로 맞춘다. 1024 이상이면 2번의 Envoy sysctl 이 필요 없다(`deploy/README.md` §2g-4).
+   포트로 맞춘다(`deploy/README.md` §2g-1·§2g-4). 1024 이상이면 5 의 Envoy sysctl(`90-dms-envoy.conf` — §2g-2)이 필요 없다.
 8. **데이터·PV 스토리지(워커)**: DMS 가 다룰 스토리지·PV 백엔드를 NoSchedule 없는 워커에 **포탈에 등록할 경로 그대로** 마운트하고(NFS 계열은
    `lookupcache=positive`), 각 `managed_root` 를 미리 만든다. `<SHARED_DIR>/dms` 와 겹치는 경로는 등록되지 않는다(422 `storage_overlaps_dms_state`)
    (`deploy/README.md` §2). export 는 DMS 워커에 root 를 허용한다(root squash 없음 — 모든 잡이 root 다, `deploy/README.md` §2 「root 접근」).
@@ -188,7 +188,8 @@ CACERT=<사내CA> sh deploy/install.sh --context <ctx> --only S12
 요약: 레지스트리(아래) · `DMS_TAG`/`DMS_AGENT_TAG`/`MFU_TAG`(push 한 태그 — 첫 설치는 셋 다 같게, 설치 뒤 `live` 가능) · `SHARED_DIR`
 (공용 디렉터리 절대 경로 — 아래) · `EMAIL_DOMAIN`(계정 아이디 = k8s 맵핑 ID 를 인증 메일이 보증) · `LOCAL_ADMIN`(특권 목록 — 전체 PV·직접 경로
 권한) · `PORTAL_DOMAIN`(포탈 FQDN) · `PORTAL_VIP`(Avi VIP-A — 둘 다 매니페스트가 아니라 `render.env` 로만 간다: 인증서 SAN·S12 `curl --resolve`
-의 기준) · (선택) 입구 `GATEWAY_PROXY_PROTOCOL`·`PORTAL_TLS_SECRET`·`GATEWAY_ENVOY_*_REQUEST`(`deploy/README.md` §2g-1), DB `PG_*`(§2f-1).
+의 기준) · (선택) 입구 `GATEWAY_PROXY_PROTOCOL`·`GATEWAY_LISTEN_PORT`·`PORTAL_TLS_SECRET`·`GATEWAY_ENVOY_*_REQUEST`(`deploy/README.md` §2g-1·
+§2g-4 — 위 0 의 7), DB `PG_*`(§2f-1), control-plane 라벨 값 `CONTROL_PLANE_LABEL_VALUE`(RKE2 = `true` — §2f-1, 아래 「선행조건」의 노드 수).
 옛 values.env 의 `LDAP_*`·`IDENTITY_SUPPLEMENTARY_GROUPS` 는 무시된다(렌더가 한 줄 알린다).
 
 **렌더가 형식을 보지 않는 값**: `EMAIL_DOMAIN`·`LOCAL_ADMIN`·`PORTAL_DOMAIN`·`PORTAL_VIP` 는 「비었나·자리표시자 그대로인가」만 본다(`render.sh` 의
@@ -245,11 +246,11 @@ values.env 키로 넣는다 — 키가 없으면 docs/BACKLOG.md 「⑦ 설치�
 | 항목 | 확인 |
 |---|---|
 | **Kubernetes** 1.34~1.36(설계 #4 — prod minor) / **CNI** 임의(Cilium KPR 없음 + kube-proxy 전제) / CRI-O | S1 preflight 「0. 클러스터 / 컨텍스트」(밖이면 FAIL) |
-| **노드 수** | control-plane **3대**(PG 인스턴스 required anti-affinity·Envoy·레지스트리·dms-api·controller — ≠ 3 이면 S1 WARN) + NoSchedule 없는 **워커 ≥ 2**(CNPG 오퍼레이터 2개·EG 컨트롤러·pg_dump·dms-agent·잡·빌드가 워커 전용 — `deploy/README.md` §0-2) |
+| **노드 수** | control-plane **3대**(PG 인스턴스 required anti-affinity·Envoy·레지스트리·dms-api·controller — ≠ 3 이면 S1 WARN) + NoSchedule 없는 **워커 ≥ 2**(CNPG 오퍼레이터 2개·EG 컨트롤러·pg_dump·dms-agent·잡·빌드가 워커 전용 — `deploy/README.md` §0-2). 마스터 배치는 라벨 `node-role.kubernetes.io/control-plane` 의 **값 `""`**(kubeadm 관례)로 고른다 — RKE2 처럼 `true` 를 다는 배포판이면 values.env `CONTROL_PLANE_LABEL_VALUE=true` 로 둔다. 아니면 마스터에 서는 레지스트리(S4)·PG(S10)·dms-api·controller(S11)는 Pending 이고, Envoy(S8) DaemonSet 은 파드가 생기지 않는다(DESIRED 0). S1 은 라벨 키만 세므로 PASS 한다 — 확인 `kubectl --context <ctx> get nodes -L node-role.kubernetes.io/control-plane`(`deploy/README.md` §0-2·§2f-1) |
 | **SELinux**(RHEL 계열 DMS 노드) | enforcing 아님(재부팅 뒤에도) — S0 사이트 몫, S2b 프로브가 노드마다 재고 FAIL·모름이면 멈춘다(위 「0. 사이트 준비」 2) |
-| **시간·방화벽** | 모든 노드 NTP 동기, 노드 간 CNI·apiserver → 워커 9443·8443·Avi SE → 마스터 :443 — 설치기는 보지 않는다(사이트 몫 — `deploy/README.md` §0-3). 방화벽이 막으면 S9(9443)·S9b(8443) dry-run·S12 가 실패로 드러난다 |
+| **시간·방화벽** | 모든 노드 NTP 동기, 노드 간 CNI·apiserver → 워커 9443·8443·Avi SE → 마스터 리스너 포트(기본 :443 — `GATEWAY_LISTEN_PORT`) — 설치기는 보지 않는다(사이트 몫 — `deploy/README.md` §0-3). 방화벽이 막으면 S9(9443)·S9b(8443) dry-run·S12 가 실패로 드러난다 |
 | **Volcano** (잡 gang 스케줄러) | ≥ v1.15(K8s 1.36 이면 v1.16) — **사이트가 설치**(DMS 층 미동봉, BACKLOG ⑦). S1 감지가 C 면 재사용, 없으면 S1 이 멈춘다. S9b 가 DMS 모양 vcjob 을 server dry-run(웹훅 8443) |
-| **입구(Envoy Gateway)** | MetalLB·ingress-nginx 는 **필요 없다**(2026-11-03 ⑥ — 오버레이가 Ingress·풀을 지운다). Gateway API v1.6.x CRD + EG v1.9.x(없으면 설치기 S8 이 설치 — A, 있으면 재사용 — C), 마스터 sysctl `ip_unprivileged_port_start=443`(S0-5 — S8 이 마스터마다 다시 잰다), ns `envoy-gateway-system` PSA privileged, Avi VS-443(PROXY v2 → 마스터 :443) — `deploy/README.md` §2g. 확인: S8·S12 가 Gateway Programmed + 마스터마다 :443 LISTEN(`deploy/host-net-probe.sh` — Programmed 는 sysctl 빠진 마스터를 못 잡는다) |
+| **입구(Envoy Gateway)** | MetalLB·ingress-nginx 는 **필요 없다**(2026-11-03 ⑥ — 오버레이가 Ingress·풀을 지운다). Gateway API CRD(없으면 설치기 S8 이 v1.6.1 standard 를 설치한다 — A. 이미 있으면 v1.5.0 이상을 재사용한다 — C, 더 낮으면 X — `deploy/README.md` §2g-3) + EG v1.9.x(없으면 S8 이 설치 — A, 있으면 재사용 — C), 마스터 sysctl `ip_unprivileged_port_start=443`(S0-5 — 리스너 포트 `GATEWAY_LISTEN_PORT` 가 1024 미만일 때만 필요하고, 그때 S8 이 마스터마다 다시 잰다), ns `envoy-gateway-system` PSA privileged, Avi VS-443(PROXY v2 → 마스터 리스너 포트, 기본 :443 — 못 맞추면 `GATEWAY_PROXY_PROTOCOL=off`·`GATEWAY_LISTEN_PORT`, 위 「0. 사이트 준비」 7) — `deploy/README.md` §2g. 확인: S1·S8(SSA 전)이 마스터에 hostPort <리스너 포트> 를 쓰는 다른 파드를 찾으면 멈추고, S8·S12 가 Gateway Programmed + 마스터마다 리스너 포트 LISTEN(`deploy/host-net-probe.sh` — Programmed 는 sysctl 빠진 마스터를 못 잡는다) |
 | **PSA** | `dms` 네임스페이스 `enforce: privileged`(00-namespace.yaml) — 사내 정책이 허용해야 잡 파드가 뜸(보안 승인 — `deploy/README.md` §0-4) |
 | **설치 자격** | 설치·재실행 컨텍스트 = **cluster-admin**(CRD·ClusterRole·웹훅·PV·Namespace·privileged 프로브·시크릿 값 읽기). 설치기는 미리 검사하지 않는다 — 모자라면 그 단계가 `Forbidden` 으로 멈춘다(`deploy/README.md` §0-2 「설치 호스트」) |
 | **데이터·PV 스토리지 root** | 모든 잡이 root(uid 0)다 — export 가 DMS 워커에 root 를 허용해야 한다(root squash 없음 — `deploy/README.md` §2 「root 접근」). 설치기는 보지 않는다 — squash 면 첫 잡의 미리보기·실행이 EACCES/EPERM 으로 실패한다 |

@@ -1,14 +1,14 @@
 #!/bin/sh
-# 마스터 호스트 netns 프로브(2026-11-03 ⑦, 설계 v6 4-3 「443 바인드」 — S8 마스터 전부 sysctl ≤ 443 재확인·S12 마스터마다 :443; 기록은
-# docs/CHANGELOG.md 「⑦ 설치기」).
+# 마스터 호스트 netns 프로브(2026-11-03 ⑦, 설계 v6 4-3 「443 바인드」 — S8 마스터 전부 sysctl ≤ 리스너 포트 재확인(1024 미만일 때만)·
+# S8/S12 마스터마다 :<리스너 포트>(--port, 기본 443); 기록은 docs/CHANGELOG.md 「⑦ 설치기」).
 #
 #   sh deploy/host-net-probe.sh --context <ctx> --image <ref> (--sysctl | --listen) [--port 443] [--nodes a,b] [--namespace dms] [--timeout 120]
 #
 #   --port    Envoy 리스너 포트(기본 443 — render.env 의 GATEWAY_LISTEN_PORT, 2026-11-14). --sysctl 은 「ip_unprivileged_port_start ≤ 포트」,
 #             --listen 은 「:포트 LISTEN」을 본다. 1024 이상이면 sysctl 은 볼 필요가 없다(설치기가 건너뛴다).
-#   --sysctl  노드마다 호스트 netns 의 net.ipv4.ip_unprivileged_port_start ≤ 443 인가(S8 — platform/gateway 적용 전). Envoy 는 비 root(65532)라
-#             이 값이 443 보다 크면 그 마스터만 443 bind 에 실패한다(설계 4-3 (i), deploy/README §2g-2).
-#   --listen  노드마다 호스트 netns 에 :443 LISTEN 소켓이 있는가(S8 Programmed 뒤·S12). 왜 따로 보는가(2026-11-03 ⑥ 리뷰 1): sysctl 이 빠진
+#   --sysctl  노드마다 호스트 netns 의 net.ipv4.ip_unprivileged_port_start ≤ --port(기본 443) 인가(S8 — platform/gateway 적용 전). Envoy 는
+#             비 root(65532)라 이 값이 포트보다 크면 그 마스터만 리스너 bind 에 실패한다(설계 4-3 (i), deploy/README §2g-2).
+#   --listen  노드마다 호스트 netns 에 :<--port> LISTEN 소켓이 있는가(S8 Programmed 뒤·S12). 왜 따로 보는가(2026-11-03 ⑥ 리뷰 1): sysctl 이 빠진
 #             마스터에서도 Envoy 는 리스너 bind 실패를 NACK 만 하고 Ready, Gateway 는 Programmed(EG 는 DaemonSet 가용 수만 본다) — 그 마스터만
 #             조용히 빠지고 Avi 헬스가 거른다. 고치는 길: sysctl(2g-2) → 그 노드의 Envoy 파드 삭제(EG 는 같은 설정을 다시 내려 주지 않는다).
 #   --nodes   기본 = control-plane 노드(라벨 node-role.kubernetes.io/control-plane — platform/gateway 의 Envoy DaemonSet 이 뜨는 곳).

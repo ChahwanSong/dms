@@ -57,8 +57,10 @@
 | 값 | 누가 정하나 | 어디에 박히나 | 나중에 바꿀 수 있나 | 상세 |
 |---|---|---|---|---|
 | 포탈 FQDN `<FQDN>`·Avi VIP-A `<VIP-A>` (values `PORTAL_DOMAIN`·`PORTAL_VIP`) | 사용자 + DNS·LB 담당 | `render.env` 에만 간다(인증서 SAN·S12 `curl --resolve` 기준). 매니페스트에는 없다 — Gateway 리스너에 hostname 이 없다 | 바꿀 수 있다: 인증서 재발급(§3b-2) → values → `--only S12` | §2g-1·§3b-2 |
+| 입구 PROXY 모드·리스너 포트(values `GATEWAY_PROXY_PROTOCOL`·`GATEWAY_LISTEN_PORT` — 기본 `required`·`443`) | 네트워크·LB 담당 + 클러스터 운영자 | ClientTrafficPolicy 의 proxyProtocol 은 LB 프로필의 PROXY v2 와 짝이다 — LB 가 PROXY v2 를 못 붙이면 `off`(기록되는 `client_ip` 는 SE 주소, 앱 출발지 경보 0). Gateway 리스너 포트 = Envoy 가 마스터 호스트에서 여는 포트 = LB 풀 멤버·헬스 모니터 포트 = SE 대역 → 마스터 방화벽 포트다(마스터 443 을 다른 파드의 hostPort 가 쓰면 바꾼다). Avi VS(§0-5 1f)를 만들기 전에 LB 담당과 맞춘다 | 바꿀 수 있다: values → `--only S8`(`off` 로(에서) 바꾸면 `S8,S11`). 포트는 LB 풀과 같은 작업 창에서 바꾼다(수 초 끊김) | §2g-1·§2g-4 |
 | 공용 디렉터리 `<SHARED_DIR>` (+ S0 가 내는 `SHARED_DIR_ID`) | 공용 스토리지 담당 | 아티팩트 base·allowlist·api/controller hostPath·PG PV 5개·덤프·레지스트리 저장소 | 어렵다 — 전환 런북(§2d-4) | §2d |
 | 레지스트리 모드·주소(`REGISTRY_MODE`·`REGISTRY_CLUSTER_IP`·`REGISTRY_PORT`, external 이면 `REGISTRY`) | 클러스터 운영자 | 모든 노드의 CRI-O 신뢰 drop-in, 마스터 고정 이미지 이름, 이미지 `newName`, `DMS_JOB_IMAGE`·`DMS_BUILD_REGISTRY`·`DMS_BUILD_BUILDER_IMAGE`, DB `control_state.job_image` | **바꾸지 않는다**(여섯 곳이 함께 바뀌어야 한다) | §2e-1 |
+| control-plane 라벨 값(values `CONTROL_PLANE_LABEL_VALUE` — 빈 값 = kubeadm 관례 `""`, RKE2 는 `true`) | 클러스터 운영자 | 레지스트리·Envoy·api/controller(PG 는 `PG_PLACEMENT=control-plane` 일 때)의 nodeSelector | 바꿀 수 있다: values → 전체 설치기 재실행(파드가 다시 배치된다 — §3-4 (c)) | §0-2·§2f-1 |
 | 인터넷(= 빌드) 노드 `<빌드 노드>` | 클러스터 운영자 | 이미지 반입(S0-5·S5), 포탈 빌드(컨트롤 상태 `build_node_name`). 그 노드의 프록시가 **TLS 를 가로채면**(사내 CA 로 재서명) 첫 부트스트랩 빌드(`build-and-push.sh`)는 사내 CA 를 넣지 못한다 — 미리 확인하고 §1 「실패하면」의 우회를 준비한다 | 컨트롤 상태에서 바꿀 수 있다(요건은 §0-2) | §1·§2e-4·§6-3·§8 |
 | 첫 관리자 이름 `<LOCAL_ADMIN>` | 사용자 | `DMS_PRIVILEGED_REQUESTERS = root,admin,<LOCAL_ADMIN>`(prod `patch-config.yaml`) | values → `--only S11`(env 목록). 다른 관리자는 계정 화면 부여로(§10-2) | §6-1·§10-2 |
 | 계정 메일 도메인 `<EMAIL_DOMAIN>` | 사용자 | `DMS_ACCOUNT_EMAIL_DOMAIN` — 인증 메일 받는 주소 `<아이디>@<EMAIL_DOMAIN>`, Kubeflow `namespaceAdmin` 바인딩 인식 조건(`k8s_rbac` 모듈 docstring) | values → `--only S11` | §6-2·§11 |
@@ -82,7 +84,8 @@
 - **control-plane 3대**. 0대면 FAIL, 3대가 아니면 WARN 이다. PG 인스턴스(마스터마다 1개, required anti-affinity)·Envoy DaemonSet·클러스터 내 레지스트리·
   dms-api·dms-controller 가 마스터에 선다(prod 렌더 — `platform/db-cluster`·`platform/gateway`·`platform/registry`·`patch-placement.yaml`).
   이들은 라벨 `node-role.kubernetes.io/control-plane` 의 **값 `""`**(kubeadm 관례)로 고른다 — RKE2 처럼 `true` 를 다는 배포판이면 values.env
-  `CONTROL_PLANE_LABEL_VALUE=true`(§2f-1 표; 확인 `kubectl get nodes -L node-role.kubernetes.io/control-plane`), 아니면 모두 Pending 이다.
+  `CONTROL_PLANE_LABEL_VALUE=true`(§2f-1 표; 확인 `kubectl --context <ctx> get nodes -L node-role.kubernetes.io/control-plane`). 아니면 레지스트리·PG·
+  api/controller 는 Pending 이고, Envoy DaemonSet 은 파드가 생기지 않는다(DESIRED 0).
 - **NoSchedule taint 없는 워커 2대 이상**(권장). 다음은 워커에만 뜬다:
   - CNPG 오퍼레이터 2개(`addons/cnpg/1.30.1/patch-operator.yaml` — control-plane `DoesNotExist`, 두 파드를 다른 노드에 선호).
   - EG 컨트롤러(`addons/envoy-gateway/v1.9.3/patch-controller.yaml`), pg_dump CronJob(`platform/db/backup/cronjob.yaml`).
@@ -138,7 +141,8 @@
 
 **마스터 3대**
 - skopeo·crictl(레지스트리 자기 이미지 반입 — §2e-4 2)).
-- `:443`·`:19000~19003` 이 비어 있어야 한다(Envoy hostNetwork — §2g-2).
+- 리스너 포트(`GATEWAY_LISTEN_PORT`, 기본 `:443`)·`:19000~19003` 이 비어 있어야 한다(Envoy hostNetwork — §2g-2). 다른 파드가 마스터에서 그 포트를
+  **hostPort** 로 쓰지 않아야 한다 — hostPort 는 `ss` 에 안 보이는 CNI DNAT 규칙이다(예: RKE2 Traefik 의 hostPort 443 — S1·S8 이 찾아 멈춘다, §2g-4).
 - `/etc/sysctl.d/90-dms-envoy.conf` = `net.ipv4.ip_unprivileged_port_start = 443`(§2g-2). 리스너 포트를 1024 이상으로 옮긴 사이트
   (`GATEWAY_LISTEN_PORT` — §2g-4 「PROXY v2 를 못 붙이는 LB·마스터 443 을 다른 것이 쓰는 클러스터」)는 필요 없다.
 
@@ -233,7 +237,7 @@
 | 1b | 공용 스토리지 마운트·S0 | 모든 노드(fstab) → 한 노드(root) | `sudo sh deploy/shared-dir-init.sh <SHARED_DIR>` → 다른 노드 `--check` | `RESULT: PASS`, 출력 `dms/.dms-shared-id = …` → values `SHARED_DIR_ID` | 사유 줄. §2d-2 |
 | 1c | SELinux·sysctl | 모든 DMS 노드 | `/etc/selinux/config` permissive + `setenforce 0`, `fs.protected_*=1` | `getenforce` ≠ Enforcing, `sysctl fs.protected_hardlinks fs.protected_symlinks` = 1 | prod README 「0. 사이트 준비」 2, 이 문서 §2b-2 |
 | 1d | 레지스트리 신뢰 | 모든 노드 | `/etc/containers/registries.conf.d/50-dms-registry.conf` → `systemctl reload crio` | `cat /etc/containers/registries.conf.d/50-dms-registry.conf` 가 `location="<REGISTRY>"`·`insecure=true`, `systemctl reload crio` exit 0 — 실제 pull 은 S6 pull 프로브가 판정 | §2e-2 |
-| 1e | 마스터 준비 | 마스터 ×3(+ 인터넷 노드) | 레지스트리 이미지 반입·`99-dms-pinned.conf`, `90-dms-envoy.conf` | `crictl inspecti <REGISTRY>/registry:<태그>` 에 pinned, `sysctl -n net.ipv4.ip_unprivileged_port_start` = 443 | §2e-4 2)·§2g-2 |
+| 1e | 마스터 준비 | 마스터 ×3(+ 인터넷 노드) | 레지스트리 이미지 반입·`99-dms-pinned.conf`, `90-dms-envoy.conf`(리스너 포트가 1024 미만일 때) | `crictl inspecti <REGISTRY>/registry:<태그>` 에 pinned, `sysctl -n net.ipv4.ip_unprivileged_port_start` = 443(리스너 포트 `GATEWAY_LISTEN_PORT` 가 1024 이상이면 `90-dms-envoy.conf`·이 확인이 필요 없다 — §2g-4) | §2e-4 2)·§2g-2 |
 | 1f | 방화벽·NTP·DNS·Avi VS-443 | 사이트 | §0-3 표, Avi 프로필(443 전용 L4·PROXY v2·풀 마스터 :443 — PROXY v2 를 못 붙이거나 마스터 443 을 다른 것이 쓰면 §2g-4 의 `off`·`GATEWAY_LISTEN_PORT`) | 포트 표대로 열림. Avi 풀은 S8 전까지 down 이 정상 | §0-3·§2g-4 |
 | 1g | Volcano | 클러스터 운영자 | 상류 설치(≥ v1.15) | S1 「Volcano CRD 존재」 | §0-2 |
 | 2 | values | 설치 호스트 | `cp deploy/overlays/prod/values.env.example deploy/overlays/prod/values.env` → `REPLACE_*` 채움 | 다음 단계의 렌더가 통과 | prod README 「values.env 값」 |
@@ -250,7 +254,7 @@
 
 | 주체 | 하는 일 |
 |---|---|
-| 사이트 IaC(노드 담당) | 공용·데이터·PV 스토리지 마운트, SELinux, sysctl(`fs.protected_*`, 마스터 443), CRI-O drop-in(신뢰·고정), 레지스트리 자기 이미지 반입, kubelet 예약, 방화벽, NTP |
+| 사이트 IaC(노드 담당) | 공용·데이터·PV 스토리지 마운트, SELinux, sysctl(`fs.protected_*`, 마스터 443 — 리스너 포트가 1024 미만일 때), CRI-O drop-in(신뢰·고정), 레지스트리 자기 이미지 반입, kubelet 예약, 방화벽, NTP |
 | 네트워크·LB·DNS 담당 | Avi VS-443(443 전용 L4 프로필·PROXY v2 — 못 붙이면 `GATEWAY_PROXY_PROTOCOL=off`·유휴 ≥ 3600초·풀 멤버 포트 = `GATEWAY_LISTEN_PORT`), SE 대역 방화벽, DNS |
 | 보안·PKI 담당 | 승인(§0-4), 포탈 서버 인증서, 공용 스토리지 밖 사본의 보관 책임 |
 | 공용 스토리지 담당 | 설계 3-2 의 G1~G12, 유지보수 전 DMS 상태 파드 비우기 합의(§2f-7) |
@@ -634,7 +638,7 @@ kill $PF
 | 「센티널 기대값 없음」 | 렌더하지 않은 base 를 적용했다 — `.rendered/<site>/platform/registry` 를 적용 |
 | Pod `CreateContainerConfigError` | Secret `dms-registry-http` 가 없다(위 명령) |
 | Service apply `provided IP is already allocated` | `REGISTRY_CLUSTER_IP` 를 다른 Service 가 쓴다(`kubectl --context C get ipaddresses.networking.k8s.io <IP>` 의 PARENTREF) — 아직 아무 데도 박히기 전이면 미사용 주소로 바꾼다(2e-1 의 확인 명령) |
-| 파드 Pending + 이벤트 `FailedScheduling` | control-plane 노드에 자리가 없거나 taint 키가 다르다(`describe` 의 사유). FailedMount 면 위 첫 줄 |
+| 파드 Pending + 이벤트 `FailedScheduling` | control-plane 노드에 자리가 없거나 taint 키가 다르다(`describe` 의 사유). 사유가 `didn't match Pod's node affinity/selector` 면 control-plane 라벨의 **값**이 `""` 가 아니다(RKE2 = `true` — values.env `CONTROL_PLANE_LABEL_VALUE`, §0-2·§2f-1; 확인 `kubectl --context C get nodes -L node-role.kubernetes.io/control-plane`). FailedMount 면 위 첫 줄 |
 | `ErrImagePull`·`ImagePullBackOff` `…IP:PORT/registry:<태그>` | 그 마스터에 S0-5 반입·고정이 없다(레지스트리는 자기 이미지를 자기에게서 받을 수 없다 — 태그 ref·IfNotPresent). 그 노드에서 `sudo crictl images --digests \| grep registry` · 2e-4 2) 를 그 마스터에 한다. 설치기 S4 는 실패 사유에 파드의 노드 이름을 함께 낸다 |
 
 ### 2e-4. 이미지 반입 — 인터넷 노드(S0-5·S5)·설치 호스트 대조(S5)·pull 확인(S6) (2026-11-03 ⑦)
@@ -868,7 +872,7 @@ cluster,backup,probe}` 를 함께 낸다(`ADDON:`·`PLATFORM:`(S10 순서)·`PRO
 | `PG_STORAGE_SIZE` | `20Gi` | Cluster `storage.size` **와** PV capacity(한 값이 두 곳 — 크면 맞는 PV 가 없어 새 PVC 가 Pending). 명목값(hostPath 는 강제하지 않는다). PV 를 만든 뒤에는 바꾸지 않는다 — PV 용량은 가변이라 SSA 가 조용히 바꾸지만 CNPG 는 `storage.size` 축소를 거절해 둘이 어긋난다(재생성 PVC Pending). 그래서 2f-4 0단계 `pv-check` 가 라이브 PV 와 다르면 FAIL 한다 |
 | `PG_CPU_REQUEST`·`PG_MEMORY`·`PG_SHARED_BUFFERS` | `1`·`4Gi`·`PG_MEMORY`/4 | 메모리는 requests == limits. `PG_SHARED_BUFFERS` 를 비우면 `PG_MEMORY` 의 1/4(둘 다 없으면 base 의 1GB = 4Gi/4) — shared_buffers 는 메모리 limit 안에서 채워지므로 `PG_MEMORY` 만 줄이고 1GB 를 남기면 부하 때 cgroup OOM 으로 재기동을 반복한다. 실효 메모리의 절반 이상이면 렌더 FAIL. (예: 테스트베드 50m/256Mi/64MB — `deploy/testbed/README.md` §3) |
 | `PG_PLACEMENT` | `control-plane` | 마스터마다 1개(#27). `all-nodes` 는 **control-plane 1대 시험 클러스터 전용**(nodeSelector 를 빼고 toleration·required anti-affinity 는 둔다) — prod 에 쓰지 않는다 |
-| `CONTROL_PLANE_LABEL_VALUE` | (빈 값) | control-plane 노드 라벨 `node-role.kubernetes.io/control-plane` 의 **값**. base 의 nodeSelector 는 kubeadm 관례인 `""` 를 고른다 — **RKE2 는 `true`** 라 그대로면 레지스트리·PG·Envoy·api/controller 가 Pending 이다. 값을 주면 앱 `patch-placement`·platform/registry·platform/gateway(EnvoyProxy)·platform/db-cluster(`PG_PLACEMENT=control-plane` 일 때)의 그 값을 바꾼다. 확인: `kubectl --context <ctx> get nodes -L node-role.kubernetes.io/control-plane` |
+| `CONTROL_PLANE_LABEL_VALUE` | (빈 값) | control-plane 노드 라벨 `node-role.kubernetes.io/control-plane` 의 **값**. base 의 nodeSelector 는 kubeadm 관례인 `""` 를 고른다 — **RKE2 는 `true`** 라 그대로면 레지스트리·PG·api/controller 가 Pending 이고 Envoy DaemonSet 은 파드 0 이다. 값을 주면 앱 `patch-placement`·platform/registry·platform/gateway(EnvoyProxy)·platform/db-cluster(`PG_PLACEMENT=control-plane` 일 때)의 그 값을 바꾼다. 확인: `kubectl --context <ctx> get nodes -L node-role.kubernetes.io/control-plane` |
 | `PG_BACKUP_KEEP` | `336` | pg_dump 보존 개수(매시간 → 14일). **개수**로 센다 — 시각 기준이면 덤프가 며칠 실패하는 동안 좋은 덤프가 전부 지워질 수 있다 |
 
 ### 2f-2. 시크릿(S2) — `dms-pg-app`·`DMS_DATABASE_URL`(값을 출력하지 않는다)
@@ -1164,7 +1168,8 @@ keepalive·`tcp_user_timeout`(2f-2 URL)이 없으면 DB 연결이 약 16분 매�
 설계 v6 #5·#13~#15(#14 「EG 기본값 세부」)·4-2·4-3·5 「원 IP 기록」·8-1(S0-5·S8·S12)·8-2(Gateway API·EG 행). **prod 의 포탈 입구는 이것
 하나다** — MetalLB·ingress-nginx 를 쓰지 않는다(prod 오버레이가 공용 base 의 Ingress·MetalLB 풀을 `$patch: delete` 로 지운다 —
 `deploy/overlays/prod/patch-remove-ingress.yaml`). 테스트베드의 입구(Avi 흉내 — 호스트 edge)는 `deploy/testbed/README.md` §2·§4(되돌림 입구 §7).
-설치기(§2h)의 S8·S12 가 아래를 감지 상태 기계(A 면 설치·C 면 platform/gateway 만)·마스터 sysctl·Programmed·마스터마다 :443 으로 한다 — install.sh 의
+설치기(§2h)의 S8·S12 가 아래를 감지 상태 기계(A 면 설치·C 면 platform/gateway 만)·마스터 hostPort 충돌·마스터 sysctl(리스너 포트 < 1024 일 때만)·
+Programmed·마스터마다 리스너 포트(기본 :443) LISTEN 으로 한다 — install.sh 의
 MetalLB·ingress 게이트는 없앴다(2026-11-03 ⑦, 설계 12 위험 19 해소). 아래는 손 판이다.
 
 ```
@@ -1179,7 +1184,7 @@ MetalLB·ingress 게이트는 없앴다(2026-11-03 ⑦, 설계 12 위험 19 해�
 |---|---|---|
 | Gateway API CRD | `deploy/addons/gateway-api/<GATEWAY_API_VERSION>/`(상류 `standard-install.yaml` 그대로 + `SOURCE`·sha256 + 라벨 층) → `.rendered/<site>/addons/gateway-api` | **v1.6.1 standard**(EG v1.9.3 의 go.mod 가 v1.6.1 — v1.6.3 과 스키마 같음, `SOURCE`). CRD 10개 + safe-upgrades VAP. 이미지 없음 |
 | Envoy Gateway | `deploy/addons/envoy-gateway/<ENVOY_GATEWAY_VERSION>/`(상류 `install.yaml` 그대로 + DMS 패치 층) → `addons/envoy-gateway` | **v1.9.3**(1.9.x 최신, 2026-10-26; v1.8 은 2026-11-08 EOL). 패치 층: Gateway API 실험 채널 CRD·VAP 를 **지운다**(원천은 위 standard), 이미지 = `<REG>/gateway:v1.9.3@sha256:<amd64>`(컨트롤러·certgen Job), EG 설정(ConfigMap `envoy-gateway-config`)의 shutdown-manager·기본 Envoy 이미지 = 레지스트리, 상류 ratelimit 이미지 줄 삭제, 런타임 플래그 `EnvoyProxyPatch` 명시, **watch = ns dms 하나**(2026-11-03 백그라운드 보안 리뷰 — 모든 네임스페이스를 보면 다른 네임스페이스의 Gateway + EnvoyProxy 패치로 PSA privileged 인 이 ns 에 임의의 특권 파드를 띄울 수 있다. 다른 네임스페이스의 class `dms` Gateway 는 무시된다 — 조건 `Unknown`·프록시 없음, 테스트베드 실측. DMS 가 설치한 EG 는 DMS 전용이다), 컨트롤러는 워커(required nodeAffinity control-plane `DoesNotExist`)·`dms-addon-critical`, ns `envoy-gateway-system` PSA privileged(Envoy 파드가 여기 hostNetwork 로 뜬다), 라벨 managed-by `dms-install`·`dms.io/addon-version=v1.9.3` |
-| 포탈 입구 | `deploy/platform/gateway`(DMS 소유) → `platform/gateway` | GatewayClass `dms`(controllerName EG 기본) · Gateway `dms-portal`(ns dms — HTTPS 443 리스너 하나, **hostname·80 리스너·HSTS 없음**, 인증서 `PORTAL_TLS_SECRET`, `infrastructure.parametersRef` → EnvoyProxy) · EnvoyProxy `dms-portal`(DaemonSet 을 control-plane 노드에, **hostNetwork + `dnsPolicy: ClusterFirstWithHostNet`**(EG 패치) + **`useListenerPortAsContainerPort: true`**, Service ClusterIP, concurrency 2, **`--disable-hot-restart`**(2g-2), 100m/256Mi..1/2Gi, `dms-addon-critical`, envoy preStop `host: 127.0.0.1`(2g-6), Envoy·shutdown-manager 이미지 명시, 접근 로그 JSON — 2g-5) · HTTPRoute `dms-portal`(/ → `dms-api:8080`, `timeouts.request: 3600s`) · ClientTrafficPolicy(PROXY **필수**, `earlyRequestHeaders.remove: [X-Real-IP]`, clientIPDetection **없음**, 밑줄 헤더는 지우고 받음) · BackendTrafficPolicy(`requestBuffer.limit: 20Mi` — 넘으면 413, 상류 유휴 `connectionIdleTimeout: 4s` — 앱 uvicorn keep-alive 5초보다 짧게: 상류가 먼저 닫으면 503 UC) |
+| 포탈 입구 | `deploy/platform/gateway`(DMS 소유) → `platform/gateway` | GatewayClass `dms`(controllerName EG 기본) · Gateway `dms-portal`(ns dms — HTTPS 리스너 하나(포트 = `GATEWAY_LISTEN_PORT`, 기본 443), **hostname·80 리스너·HSTS 없음**, 인증서 `PORTAL_TLS_SECRET`, `infrastructure.parametersRef` → EnvoyProxy) · EnvoyProxy `dms-portal`(DaemonSet 을 control-plane 노드에, **hostNetwork + `dnsPolicy: ClusterFirstWithHostNet`**(EG 패치) + **`useListenerPortAsContainerPort: true`**, Service ClusterIP, concurrency 2, **`--disable-hot-restart`**(2g-2), 100m/256Mi..1/2Gi, `dms-addon-critical`, envoy preStop `host: 127.0.0.1`(2g-6), Envoy·shutdown-manager 이미지 명시, 접근 로그 JSON — 2g-5) · HTTPRoute `dms-portal`(/ → `dms-api:8080`, `timeouts.request: 3600s`) · ClientTrafficPolicy(PROXY **필수**가 기본 — `GATEWAY_PROXY_PROTOCOL` 이 `optional`(컷오버 중에만)·`off`(proxyProtocol 을 뺀다)로 바꾼다, 아래 키 표·2g-4, `earlyRequestHeaders.remove: [X-Real-IP]`, clientIPDetection **없음**, 밑줄 헤더는 지우고 받음) · BackendTrafficPolicy(`requestBuffer.limit: 20Mi` — 넘으면 413, 상류 유휴 `connectionIdleTimeout: 4s` — 앱 uvicorn keep-alive 5초보다 짧게: 상류가 먼저 닫으면 503 UC) |
 | 버전·digest | `deploy/versions.env`(`GATEWAY_API_VERSION`·`ENVOY_GATEWAY_VERSION`·`ENVOY_GATEWAY_IMAGE`·`ENVOY_PROXY_IMAGE`) + `deploy/images.lock`(`gateway:v1.9.3`·`envoy:distroless-v1.39.5`) | shutdown-manager 는 상류에서 컨트롤러와 같은 `envoyproxy/gateway` 이미지라 lock 줄은 둘이다. Envoy 태그 = EG v1.9.3 의 `DefaultEnvoyProxyImage`(index `sha256:9d84a586…` 의 amd64 항목) |
 
 | values.env 키(전부 선택) | 기본 | 뜻 |
@@ -1194,6 +1199,10 @@ MetalLB·ingress 게이트는 없앴다(2026-11-03 ⑦, 설계 12 위험 19 해�
 `ENVOY_GATEWAY_REF`·`ENVOY_PROXY_REF`·`GATEWAY_PROXY_PROTOCOL`·`GATEWAY_LISTEN_PORT`·`PORTAL_TLS_SECRET`.
 
 ### 2g-2. 마스터 sysctl(S0-5, 사이트 IaC — 1회)
+
+리스너 포트(`GATEWAY_LISTEN_PORT`, 2g-1)가 1024 이상인 사이트는 아래 sysctl(`90-dms-envoy.conf`·`sysctl -n` 확인과 첫 두 항목 「빠뜨리면 조용히」·
+「root 로 올려 해결하지 않는다」)이 필요 없다 — 설치기 S8 도 sysctl 확인을 건너뛴다. 빈 포트 확인(K6)·hot restart·함께 열리는 포트·마스터 방화벽·
+클러스터 도메인은 그대로다. 아래 `:443` 은 기본 리스너 포트다 — 바꿨으면 그 포트로 읽는다.
 
 Envoy 는 **비 root(65532)** 다(EG 기본값 — DMS 는 바꾸지 않는다, 아래). k8s 는 ambient capability 를 주지 않아
 `NET_BIND_SERVICE` 로는 443 bind 가 안 된다(kubernetes#56374) — 마스터 3대의 호스트 netns 에서 비특권 포트 하한을 443 으로 내린다(설계 4-3 (i)).
@@ -1239,7 +1248,7 @@ ss -xlH | grep -c envoy_domain_socket       # 0 이 아니면 호스트 netns �
 ```bash
 kubectl --context C get crd gateways.gateway.networking.k8s.io \
   -o 'jsonpath={.metadata.annotations.gateway\.networking\.k8s\.io/bundle-version} {.metadata.annotations.gateway\.networking\.k8s\.io/channel}{"\n"}'
-#   없음 → A. v1.5.x 이상 → 재사용(OA 사이트 하한 v1.5.0 — RKE2 rke2-traefik-crd 가 v1.5.1; standard 든 experimental 이든 — DMS 는 standard 필드만 쓴다). 더 낮으면 X(소유자에게 올려 달라고)
+#   없음 → A. v1.5.x 이상 → 재사용(하한 v1.5.0 — `install-detect.py` 의 GWAPI_FLOOR. 예: RKE2 의 rke2-traefik-crd 가 v1.5.1 을 미리 깐다; standard 든 experimental 이든 — DMS 는 standard 필드만 쓴다). 더 낮으면 X(소유자에게 올려 달라고)
 kubectl --context C get crd envoyproxies.gateway.envoyproxy.io; kubectl --context C get deploy -A -l app.kubernetes.io/name=gateway-helm \
   -o 'custom-columns=NS:.metadata.namespace,NAME:.metadata.name,BY:.metadata.labels.app\.kubernetes\.io/managed-by,V:.metadata.labels.dms\.io/addon-version,IMG:.spec.template.spec.containers[0].image'
 #   없음 → A · BY=dms-install(V 같음 → D=, 낮음 → D< — 2g-6) · 남이 설치 → C(아래) · 둘 이상 → P(중단)
@@ -1270,12 +1279,15 @@ kubectl --context C -n envoy-gateway-system get secret envoy-gateway envoy   # c
 kubectl --context C -n envoy-gateway-system rollout status deploy/envoy-gateway --timeout=180s
 kubectl --context C -n envoy-gateway-system get pods -o wide        # 컨트롤러 1개 워커, IMAGE 가 레지스트리 주소
 # 3) 포탈 입구 — Secret(S2) 먼저: kubectl --context C -n dms get secret <PORTAL_TLS_SECRET>
-#    마스터 **전부**의 sysctl(S0-5): ssh <마스터> 'sysctl -n net.ipv4.ip_unprivileged_port_start'   # 마스터마다 443 이하 — 하나라도 크면 멈춘다(2g-2)
+#    마스터에 리스너 포트를 hostPort 로 쓰는 다른 파드가 없는지(S8 hostport_gate — hostPort 는 `ss` 에 안 보인다, 2g-4):
+#      kubectl --context C get pods -A -o wide 와 kubectl --context C get pods -A -o yaml | grep -n 'hostPort: <리스너 포트>'
+#      — 마스터에 뜬 비 hostNetwork 파드만 본다(hostNetwork 파드는 hostPort 가 자동으로 채워진다 — 재적용이면 DMS Envoy 자신도 걸린다. 마스터 밖 파드도 뺀다)
+#    (리스너 포트 < 1024 일 때만) 마스터 **전부**의 sysctl(S0-5): ssh <마스터> 'sysctl -n net.ipv4.ip_unprivileged_port_start'   # 마스터마다 리스너 포트 이하 — 하나라도 크면 멈춘다(2g-2)
 kubectl --context C apply --server-side --field-manager=dms-install --dry-run=server -k $RD/platform/gateway
 kubectl --context C apply --server-side --field-manager=dms-install -k $RD/platform/gateway
 kubectl --context C -n dms wait --for=condition=Programmed gateway/dms-portal --timeout=180s
 kubectl --context C -n envoy-gateway-system get ds,pods -o wide -l gateway.envoyproxy.io/owning-gateway-name=dms-portal   # 마스터마다 1개, Ready
-ssh <마스터> 'sudo ss -ltnpH "( sport = :443 )"'     # **마스터마다** envoy 가 LISTEN — Programmed·Ready 는 bind 실패를 못 잡는다(2g-2)
+ssh <마스터> 'sudo ss -ltnpH "( sport = :<리스너 포트> )"'     # 기본 443(render.env GATEWAY_LISTEN_PORT). **마스터마다** envoy 가 LISTEN — Programmed·Ready 는 bind 실패를 못 잡는다(2g-2)
 ```
 
 C 경로(남이 설치한 Gateway API·EG): CRD·컨트롤러는 건드리지 않고(`addons/*` 를 적용하지 않는다) `platform/gateway` 만 적용한다 — Gateway 의
@@ -1287,7 +1299,7 @@ C 경로(남이 설치한 Gateway API·EG): CRD·컨트롤러는 건드리지 �
 
 | 증상 | 뜻 · 할 일 |
 |---|---|
-| 파드 Ready·Gateway `Programmed: True` 인데 그 마스터 :443 이 LISTEN 아님, Envoy 로그 `cannot bind '0.0.0.0:443': Permission denied`·`config rejected` | 그 마스터에 sysctl(2g-2)이 없다 — 고친 뒤 그 노드의 Envoy 파드를 지운다(EG 가 같은 설정을 다시 내려 주지 않는다) |
+| 파드 Ready·Gateway `Programmed: True` 인데 그 마스터의 리스너 포트(기본 :443)가 LISTEN 아님, Envoy 로그 `cannot bind '0.0.0.0:<포트>': Permission denied`·`config rejected` | 그 마스터에 sysctl(2g-2)이 없다(리스너 포트가 1024 미만일 때만 생긴다) — 고친 뒤 그 노드의 Envoy 파드를 지운다(EG 가 같은 설정을 다시 내려 주지 않는다) |
 | Envoy 파드 CrashLoop(또는 cilium-envoy 가 죽음), 로그 `unable to bind domain socket with base_id=0 … errno=98` | hot restart 추상 소켓 충돌 — EnvoyProxy 의 `extraArgs: [--disable-hot-restart]` 가 빠졌다(렌더 결과만 적용, 2g-2) |
 | Envoy 파드 Ready 가 안 되고 로그에 xDS `envoy-gateway.envoy-gateway-system.svc.cluster.local` 해석 실패 | `dnsPolicy: ClusterFirstWithHostNet` 이 안 들어갔다(EnvoyProxyPatch 꺼짐 — C) 또는 호스트 → ClusterIP 경로 불가(S6 와 같은 원인 — kube-proxy·방화벽) |
 | Envoy 파드가 `FailedCreate … violates PodSecurity "baseline": host namespaces (hostNetwork=true)` | ns `envoy-gateway-system` 에 PSA privileged 가 없다(C 경로 — 소유자에게) |
@@ -1332,8 +1344,8 @@ Avi(설계 #5·#42·V2~V5 — 사이트 LB 담당 몫, DMS 는 값만 준다):
 - **hostPort 는 `ss` 에 안 보인다**: 다른 파드의 hostPort 는 호스트 소켓이 아니라 CNI 의 DNAT 규칙이다. Envoy 는 그 포트에 LISTEN 으로 보이고
   Gateway 도 Programmed, LB 풀도 up 인데 그 포트로 온 패킷은 Envoy 보다 먼저 그 파드로 넘어간다 — 포탈 주소에서 남의 인증서·404 가 나온다.
   S1(preflight)·S8(SSA 전)이 「마스터에 hostPort <리스너 포트> 를 쓰는 다른 파드」를 찾아 멈춘다. 손으로는:
-  `kubectl --context <ctx> get pods -A -o yaml | grep -n 'hostPort: 443'`,
-  `openssl s_client -connect <마스터IP>:443 -servername <FQDN> </dev/null 2>/dev/null | openssl x509 -noout -subject`(주체가 남의 것이면 그 파드가 받는다).
+  `kubectl --context <ctx> get pods -A -o yaml | grep -n 'hostPort: <리스너 포트>'`(마스터에 뜬 비 hostNetwork 파드만 본다 — 2g-3),
+  `openssl s_client -connect <마스터IP>:<리스너 포트> -servername <FQDN> </dev/null 2>/dev/null | openssl x509 -noout -subject`(주체가 남의 것이면 그 파드가 받는다).
 - **포트 고르기**: 1024 이상, NodePort 범위(30000~32767)·나가는 연결의 임시 포트 범위(32768~) 밖, 마스터에서 비어 있는 번호
   (`ss -ltnH '( sport = :<포트> )'` 가 빈 출력). 예 `10443`.
 - 적용: values.env 를 고치고 `sh deploy/install.sh --context <ctx> --site <site> --only S8`(Envoy 는 설정만 바뀐다 — 리스너 포트를 바꾸면 옛 포트는
@@ -1346,7 +1358,7 @@ Avi(설계 #5·#42·V2~V5 — 사이트 LB 담당 몫, DMS 는 값만 준다):
 ```bash
 kubectl --context C -n dms get gateway dms-portal                     # PROGRAMMED True, ADDRESS = Envoy Service ClusterIP
 kubectl --context C -n dms get httproute,clienttrafficpolicy,backendtrafficpolicy dms-portal -o yaml | grep -A3 'type: Accepted'
-ssh <마스터> 'sudo ss -ltnp "( sport = :443 )"'                         # **마스터마다** envoy, users:(("envoy",…)) — 비 root(65532)
+ssh <마스터> 'sudo ss -ltnp "( sport = :<리스너 포트> )"'               # 기본 443(GATEWAY_LISTEN_PORT). **마스터마다** envoy, users:(("envoy",…)) — 비 root(65532)
 curl -sS --resolve <FQDN>:443:<VIP-A> --cacert <사내 CA> https://<FQDN>/readyz           # 200
 curl -sS -o /dev/null -w '%{http_code}\n' -X POST --resolve <FQDN>:443:<VIP-A> --cacert <사내 CA> \
   -H 'Content-Type: application/json' --data-binary @<21MiB 파일> https://<FQDN>/api/auth/login    # 413(Envoy) — 19MiB 는 413 이 아니다(앱이 답한다)
@@ -1427,7 +1439,7 @@ sh deploy/install.sh --help                                      # 머리 주석
 
 | 단계 | 하는 일(도우미) | 멈춤 |
 |---|---|---|
-| S1 | `preflight-cluster.sh --render-env`(K8s 1.34~1.36·control-plane·Volcano 라벨 `app=volcano-scheduler`·클러스터 도메인·PSA·admission·SHARED_DIR 형식·REGISTRY_CLUSTER_IP 의 ServiceCIDR·IPAddress·하단 정적 대역·노드 셸 체크리스트) + `install-detect.py detect` | FAIL·P·X(감지), Volcano 를 설치해야 하는데 층 없음 |
+| S1 | `preflight-cluster.sh --render-env`(K8s 1.34~1.36·control-plane·Volcano 라벨 `app=volcano-scheduler`·클러스터 도메인·PSA·admission·SHARED_DIR 형식·REGISTRY_CLUSTER_IP 의 ServiceCIDR·IPAddress·하단 정적 대역·마스터의 hostPort <리스너 포트> 충돌(다른 비 hostNetwork 파드 — FAIL, 목록을 못 읽으면 WARN)·노드 셸 체크리스트) + `install-detect.py detect` | FAIL·P·X(감지), Volcano 를 설치해야 하는데 층 없음 |
 | S2 | `00-namespace.yaml` → `pg-secrets.py ensure-app`·(없으면) `init-secrets` → 4키·자리표시자·`pg-secrets.py check` → `PORTAL_TLS_SECRET` 확인(없으면 WARN — 쓰는 곳인 S8 이 멈춘다) | 키·URL 어긋남(읽기 실패는 모름) |
 | S2b | `selinux-probe.py`(privileged 임시 DS, DMS 노드만 판정) | FAIL·모름 |
 | S3 | `install-detect.py plan`(층별 SSA server dry-run — 첫 설치의 「ns 가 아직 없음」·「CRD 가 아직 없음」은 SKIP) | FAIL |
@@ -1435,7 +1447,7 @@ sh deploy/install.sh --help                                      # 머리 주석
 | S5 | `images-lock.py compare-registry`(port-forward) + DMS 3종 태그 HEAD → lock 이 다르면 `push-images.sh --print`(external TLS 면 `--dest-tls-verify true`), DMS 이미지만 없으면 그 빌드·복사 안내만 | S4 에서 이어 왔으면 PAUSE, 아니면 FAIL |
 | S6 | `pull-probe.py`(Always, 120초, DMS 노드만) | FAIL·모름 |
 | S7 | `shared-storage-probe.py`(①~⑥, ② 는 WARN) | 1·4(3 은 계속) |
-| S8 | gateway-api SSA → CRD Established → (ns 먼저 — DMS 라벨) EG SSA → certgen → rollout(DMS 소유 EG 를 적용하지 않을 때도 Ready·xDS 시크릿 확인) → TLS 시크릿 → `host-net-probe.sh --sysctl`(마스터 ≤ 443) → platform/gateway → Programmed → `host-net-probe.sh --listen`(마스터마다 :443) | 각 대기 실패, TLS 없음, 덜 설치된 EG(→ `--upgrade-addon envoy-gateway`) |
+| S8 | gateway-api SSA → CRD Established → (ns 먼저 — DMS 라벨) EG SSA → certgen → rollout(DMS 소유 EG 를 적용하지 않을 때도 Ready·xDS 시크릿 확인) → TLS 시크릿 → hostPort 충돌 확인(마스터에 hostPort `GATEWAY_LISTEN_PORT` 를 쓰는 비 hostNetwork 파드 — SSA 전, 목록을 못 읽으면 WARN) → `host-net-probe.sh --sysctl --port <리스너 포트>`(리스너 포트 < 1024 일 때만 — 마스터 ≤ 그 포트, 아니면 건너뜀) → platform/gateway → Programmed → `host-net-probe.sh --listen --port <리스너 포트>`(마스터마다, 기본 :443) | 각 대기 실패, TLS 없음, 마스터 hostPort 충돌(→ `GATEWAY_LISTEN_PORT`, §2g-4), 덜 설치된 EG(→ `--upgrade-addon envoy-gateway`) |
 | S9 | (ns 먼저 — DMS 라벨) CNPG SSA → rollout(업그레이드면 가드를 이 층에서 열고, Cluster 가 있으면 직전 덤프 → healthy 대기) → Cluster CR server dry-run(웹훅 9443, 막 뜬 웹훅은 재시도, `--adopt db` 면 `--force-conflicts`) | 「failed calling webhook」 |
 | S9b | (층이 있으면) Volcano SSA → `install-detect.py vcjob`(DMS 모양 vcjob dry-run) | FAIL |
 | S10 | `pg-path-probe.py pv-check` → db-volumes → `precheck` → db-cluster → 900초 폴링 → `contrast` → db-backup → 첫 덤프(Complete·Failed) | 각 판정 |
@@ -1676,7 +1688,8 @@ kubectl --context <ctx> -n dms create secret tls <PORTAL_TLS_SECRET> --cert=tls.
   openssl s_client -connect <VIP-A>:443 -servername <FQDN> -CAfile <사내CA> </dev/null 2>/dev/null | openssl x509 -noout -enddate -subject
   ```
 
-  Avi 를 거치지 않고 마스터 :443 에 바로 붙으면 PROXY 헤더가 없어 끊긴다(PROXY required — §2g-4). 확인은 VIP 로 한다.
+  Avi 를 거치지 않고 마스터 리스너 포트(기본 :443)에 바로 붙으면 PROXY 헤더가 없어 끊긴다(PROXY required — §2g-4; `off` 사이트는 열린다). 리스너 포트를
+  바꾼 사이트의 마스터 :443 에는 다른 파드가 답할 수 있다. 확인은 VIP 로 한다.
 - **만료 감시가 없다.** 설치기·`verify.sh` 는 인증서 만료일을 보지 않는다. §14-2 의 달력에 넣고, 사이트 감시에 등록한다(BACKLOG).
 
 ### 3b-3. 토큰의 뜻과 보관
@@ -1891,7 +1904,11 @@ dms-api·dms-controller 에는 initContainer `migrate` 가 있다(`deploy/k8s/40
 ### 5-4. 입구 되돌리기
 
 - **PROXY**: values.env 에 `GATEWAY_PROXY_PROTOCOL=optional` → `sh deploy/install.sh --context <ctx> --only S8`. Envoy 는 설정만 바뀌고 재기동하지 않는다(§2g-4).
-  원인을 고친 뒤 `required` 로 돌린다 — optional 로 오래 두면 「PROXY 가 빠진 LB 설정」이 조용히 통과한다.
+  원인을 고친 뒤 `required` 로 돌린다 — optional 로 오래 두면 「PROXY 가 빠진 LB 설정」이 조용히 통과한다. LB 가 PROXY v2 를 영영 못 붙이면
+  optional 로 두지 말고 `off` 로 한다(§2g-4 — PROXY 를 안 붙이는 LB 뒤의 optional 은 원 IP 위조를 연다). `off` 로(에서) 바꾸면 앱 출발지 경보도
+  바뀌므로 `--only S8,S11` 이다.
+- **리스너 포트**: values.env 의 `GATEWAY_LISTEN_PORT` 를 옛 값으로 → `sh deploy/install.sh --context <ctx> --only S8`. LB 풀 멤버·헬스 모니터·방화벽
+  포트를 같은 작업 창에서 되돌린다(전환 순간 수 초 끊김 — §2g-4). 443 으로 돌아가면 마스터 sysctl(§2g-2)이 다시 필요하고, S8 이 443 의 hostPort 충돌을 다시 본다.
 - **인증서**: 옛 인증서로 같은 이름의 Secret 을 다시 만든다(§3b-2 「교체」).
 - **EG·Gateway API 판**: 설치기는 다운그레이드하지 않는다(D> keep). 옛 판으로 돌리려면 입구 층을 걷고(제거 순서는 설치의 역순 — `platform/gateway` →
   Envoy Gateway → Gateway API, §2g-6) 옛 커밋으로 다시 설치한다. 이 경로는 **미검증**이다 — 포탈이 그동안 닿지 않는다.
@@ -2046,6 +2063,9 @@ GET 한 값에서 바꿀 칸만 고쳐 전 필드를 보낸다(빠진 칸은 NUL
 | 사용 범위 | 전체 / 관리자 전용(`user_enabled=false`) / 비활성(`enabled=false`) |
 
 - `<SHARED_DIR>/dms` 와 그 상위·하위는 등록할 수 없다(422 `storage_overlaps_dms_state` — §2d-1).
+- 진행 중인 작업이 쓰는 스토리지는 삭제가 409 `storage_in_use` 다(대신 사용 범위를 「비활성」으로). `mount_path`·`managed_root`·`backend_type` 변경도
+  409 `storage_in_use_path_change` 로 막힌다(미리보기와 실행 경로가 갈라지지 않게 — 작업이 끝난 뒤 다시, `routes_storages.update_storage`). 사용 범위·
+  종류·기본 소유는 진행 중에도 바꿀 수 있다(비상 차단 = 비활성화. 기본 소유를 바꾸면 아직 실행되지 않은 그 PV 목적지 sync 는 `storage_owner_changed` — 6-5).
 - API 로 할 때는 공유 토큰 Bearer 만 싣는다. **`x-dms-actor` 헤더는 넣지 않는다**(400 `invalid_actor` — §3b-3):
 
   ```sh
@@ -2066,9 +2086,9 @@ GET 한 값에서 바꿀 칸만 고쳐 전 필드를 보낸다(빠진 칸은 NUL
 |---|---|
 | `max_nodes` | 잡 하나가 쓰는 노드 수 상한 |
 | `procs_per_node` | 노드당 프로세스 = 워커가 **요청하는 CPU 코어 수**(1..1024). 노드 CPU 상한 = floor((allocatable − launcher 100m − `DMS_NODE_CPU_RESERVE_MILLICORES`(기본 500m)) / 1000) 보다 크면 그 상한으로 줄어들고, 한 코어도 못 담는 노드는 후보에서 빠진다(다 빠지면 `node_cpu_insufficient`). 의도대로 돌리려면 상한 이하로 둔다(예: 테스트베드 워커 allocatable 1800m → 상한 1) |
-| `queue` | `dms-data`(DMS 가 만드는 Volcano Queue) |
-| `default_priority`·`max_priority` | `low`·`mid`·`high` |
-| `execution_timeout_seconds`·`preview_timeout_seconds` | 실행·미리보기 시한(초, 1 이상) |
+| `queue` | `dms-data`(DMS 가 만드는 Volcano Queue). 저장할 때 앞뒤 공백을 지우고, k8s 이름 규칙(DNS-1123 subdomain, 253자 이하) 밖이면 422 `invalid_policy` |
+| `default_priority`·`max_priority` | `low`·`mid`·`high`. 우선순위를 생략한 sync 는 **dsync 정책의 `default_priority`** 를 쓴다(제출 때는 도구가 정해지지 않았다 — `domain.resolve_priority`). nsync 행의 `default_priority` 는 읽히지 않고 nsync 에는 `max_priority`(상한)만 걸린다(포탈은 그 칸을 잠그고 「dsync 따름」으로 보인다) |
+| `execution_timeout_seconds`·`preview_timeout_seconds` | 실행·미리보기 시한(초, 1 이상 2147483647 이하 — policies 의 int4). scan 은 미리보기가 없어 scan 행의 `preview_timeout_seconds` 는 쓰이지 않는다(사전 점검·실행 전 재점검은 정책과 무관한 고정 10분 — `stepper.PREFLIGHT_DEADLINE_SECONDS`) |
 | `enabled` | 끄면 그 도구의 잡이 계획되지 않는다 |
 
 정책 4개는 **migrate 가 이미 시드한다**(`migrations` 의 정책 시드 — 행이 없을 때만 넣고 고친 값은 덮지 않는다): `scan`·`rm` max_nodes 4,
@@ -2091,7 +2111,10 @@ curl --noproxy '*' -sf -X PUT "$API/api/admin/policies/$TOOL" -H @"$AUTH" -H 'co
 
 - **사용자 sync 허용 스토리지 쌍**은 dms-k8s 에서 실효가 없다. 일반 사용자는 PV 주소만 낼 수 있고 양쪽이 PV 면 쌍 검사가 면제되며
   (`k8s_access.pair_gate_exempt`), 관리자 역할은 쌍 검사를 받지 않는다(`routes_requests.submit`). 비워 둔다.
-- denylist 는 이름 규칙만 평가한다(그룹 규칙 추가는 422 `denylist_group_unsupported`).
+- denylist 는 이름 규칙만 평가한다(그룹 규칙 추가는 422 `denylist_group_unsupported`). 판정은 **계획 시점**이다(`identity.resolve_job_identity` ←
+  planner): 제출은 접수된 뒤 `identity_denied` 로 거부되고, 등재 전에 냈지만 아직 계획되지 않은 요청에도 걸린다. **이미 계획돼 확인 대기·실행 중인
+  작업은 막지 않는다** — 멈추려면 그 요청 상세에서 취소한다. 대상은 앞뒤 공백을 지우고 소문자로 저장한다(빈 값은 422 `denylist_subject_empty`).
+  이미 등재된 대상을 다른 사유로 다시 추가하면 사유만 바뀐다(감사 `denylist/update`).
 
 ### 6-5. k8s 연동 — 대상 클러스터·호출 노드·스토리지(PV)·StorageClass·계정
 
@@ -2153,6 +2176,11 @@ docstring).
 - 클러스터를 지우면(「클러스터」 탭 카드의 「삭제」) 그 클러스터의 성공·실패는 「개요」 탭 호출 노드 카드의 「마지막 성공」·「마지막 실패」에서 바로 빠진다(「마지막 호출」에는 남는다). 동기화 이력은
   보존일(`DMS_K8S_SYNC_RUN_RETENTION_DAYS`, 기본 30)이 지나면 지운다 — 등록된 클러스터와 달리 최근 50건을 남기지 않는다(`repositories.k8s` `prune_runs`).
   같은 이름으로 다시 등록하면 그 이름의 옛 실패가 호출 노드 카드에 다시 보이다가, 그 노드가 새 등록에 성공하면 「해결됨」이 된다.
+- 클러스터를 지워도 **StorageClass 매핑은 남는다**(매핑은 SC 이름 하나에 걸린다 — 지우는 곳은 스토리지 삭제와 매핑 해제뿐이다). 그 SC 이름이 남은
+  어느 클러스터에도(SC·PVC 모두) 보이지 않으면 StorageClass 탭에 클러스터 칸이 「어느 클러스터에도 보이지 않음 — 매핑 해제 가능」인 행이 생기고
+  「손볼 것」에 센다(대상에서 SC 를 지운 경우도 같다 — `routes_k8s.list_storage_classes`). 다시 등록하지 않을 클러스터라면 그 행의 「편집」에서
+  「매핑 해제」를 골라 저장한다. 남겨 두면 그 스토리지를 `filesystem` 으로 바꿀 때 422 `storage_has_sc_mappings` 가 난다. 그 이름의 SC 가 다시
+  보이면(같은 클러스터를 다시 등록하는 등) 남은 매핑이 그대로 다시 걸린다.
 - `DMS_SESSION_SECRET` 을 바꾸면 저장한 토큰이 열리지 않는다 — 클러스터마다 다시 넣는다(§3b-4).
 
 ### 6-6. 공용 스토리지 밖 사본
@@ -2678,7 +2706,9 @@ dms-k8s 는 **k8s 신원 모드 전용**이다. 동작의 근거는 `docs/ARCHIT
   - 켠 채 기동하면 보안 이벤트에 `login_pacing_enabled` 가 남는다.
 - `DMS_LOGIN_ALARM_WINDOW_SECONDS: "600"` / `_FAILURES: "30"` / `_ATTEMPTS: "300"` / `_SOURCE_FAILURES: "20"`: 경보 임계다(이벤트만).
   - 출발지 경보는 창당 50건까지만 남는다.
-  - 원 IP 가 한 주소로 모이는 배치(PROXY 없음 — §2g-4)는 SOURCE_FAILURES 를 0 으로 둔다.
+  - 원 IP 가 한 주소로 모이는 배치(PROXY 없음 — `GATEWAY_PROXY_PROTOCOL=off`, §2g-4)는 SOURCE_FAILURES 를 0 으로 둔다. prod 템플릿은 values.env
+    가 `off` 면 렌더가 0 을 넣고, `off` 가 아니면 그 줄을 지워 base 값을 쓴다(`render.sh` — `patch-config.yaml` 의 자리 `REPLACE_LOGIN_ALARM_SOURCE_FAILURES`).
+    그 줄을 손으로 숫자로 바꾸지 않는다(모드를 바꾸면 `--only S8,S11`). 고정 오버레이는 `patch-config.yaml` 에 직접 `"0"` 을 두고, 없으면 렌더가 note 로 알린다.
 - 확인은 포탈 **관리 → 보안 이벤트**에서 한다(보호 장치 현재 값·인증번호 잠금 해제·최근 이벤트·출발지 IP).
 - 검증(설치 뒤 한 번 — §7 과 함께): 평문 로그인
   `curl -sS --cacert <사내CA> -H 'content-type: application/json' -d '{"username":"u","password":"p"}' https://<FQDN>/api/auth/login` = HTTP 422 **이고 본문
@@ -2925,7 +2955,7 @@ kubectl --context <ctx> -n dms get cronjob dms-pg-dump                  # LAST S
 kubectl --context <ctx> get pv | grep dms-pgdata                        # Released 가 없다(있으면 §2f-5 재활용 런북)
 ```
 
-`VERIFY_NO_PROBES=1` 을 빼면 S12 가 프로브 파드(PG 경로 대조·마스터 :443)를 띄워 더 깊게 본다.
+`VERIFY_NO_PROBES=1` 을 빼면 S12 가 프로브 파드(PG 경로 대조·마스터 리스너 포트)를 띄워 더 깊게 본다.
 
 **포탈의 운영 신호**
 
@@ -2937,7 +2967,7 @@ kubectl --context <ctx> get pv | grep dms-pgdata                        # Releas
 | 운영 → 아티팩트 경로 | 3홉(API·컨트롤러·노드), DMS 상태 디렉터리와 겹치는 스토리지 경고, 결과 파일 보존·만료·정리 지연(§12b) |
 | 운영 → 릴리스 | 이미지 드리프트 배지, 「보안 설정 드리프트」(§9-8 — S11 로만 사라진다) |
 | 스토리지 → 노드 | 에이전트 보고 신선도·스토리지 상태·배치 제외 |
-| 스토리지 → k8s 연동 | 클러스터별 마지막 동기화 결과, 메일 stub 경고(§6-5) |
+| 스토리지 → k8s 연동 | 「개요」 탭: 클러스터 상태별 개수, 호출 노드 카드(마지막 호출·성공·실패). 「클러스터」 탭: 클러스터별 마지막 동기화 결과. 메일 stub 경고는 두 탭 모두(§6-5) |
 
 **모니터링 연계**
 - Prometheus 지표 엔드포인트는 없다. Envoy 의 stats 리스너(:19001)는 꺼 두었다(§2g-2 — hostNetwork 라 열면 전 인터페이스에 노출된다).
@@ -2945,6 +2975,9 @@ kubectl --context <ctx> get pv | grep dms-pgdata                        # Releas
   `files_total`·`bytes_total` 대신 `sync_items_total`·`sync_bytes_total`·`rm_items_total` 을 낸다 — 옛 키를 읽는 외부 스크립트는 고친다.
   2026-11-11 부터 창 없는 비종단 상태별 수 `live_by_state` 를 더 내고, `throughput` 의 일 버킷(`bucket: "day"`, 창 48h 초과)은
   UTC 가 아니라 KST 날짜로 묶는다(시간 버킷은 그대로 UTC).
+  `metrics/nodes` 의 `points` 에는 2026-11-11 부터 인접 보고 간격이 `DMS_AGENT_REPORT_STALE_SECONDS`(기본 300초)를 넘는 곳마다 공백 표지 점이 하나
+  낀다 — 값이 전부 null 이고(`disks: []`) `at` 은 공백의 가운데다. 공백 직후 점의 `net_rx_bps`·`net_tx_bps` 도 null 이다(`metrics_series.build_node_points`).
+  점 수를 보고 횟수로 세거나 값이 전부 null 인 점을 정상 보고로 읽는 외부 스크립트는 고친다.
 - Envoy 접근 로그(요청마다 JSON 한 줄 — `client_ip`·`peer`·`x_forwarded_for`)는 사이트 로그 수집으로 보낸다(§2g-5).
 - 이벤트 보존 30일(`DMS_EVENT_RETENTION_DAYS`), 에이전트 보고 보존 30일(`DMS_AGENT_REPORT_RETENTION_DAYS`).
 
@@ -2980,8 +3013,9 @@ kubectl --context <ctx> get pv | grep dms-pgdata                        # Releas
   PGDATA 를 두 서버가 연다.
 - 그 마스터의 Envoy 가 빠지면 Avi 헬스가 풀에서 뺀다. 레지스트리·api·controller 는 남은 마스터로 옮겨진다(레지스트리 약 10~20초 공백, 설계 2-2).
 - **마스터 교체**: 옛 VM 을 끈 뒤 Node 를 지운다. 새 마스터에 S0 을 다시 한다 — 공용 스토리지 마운트, SELinux, `fs.protected_*`, 레지스트리 신뢰 drop-in(§2e-2),
-  레지스트리 자기 이미지 반입·고정(§2e-4 2)), sysctl 443(§2g-2), `:443`·`:19000~19003` 비움. 클러스터에 붙인 뒤 Avi 풀을 고치고
-  `sh deploy/install.sh --context <ctx> --only S6,S12`(pull 프로브·검증)로 확인한다.
+  레지스트리 자기 이미지 반입·고정(§2e-4 2)), sysctl 443(§2g-2 — 리스너 포트 `GATEWAY_LISTEN_PORT` 가 1024 미만일 때만), 리스너 포트(기본 `:443`)·
+  `:19000~19003` 비움. 클러스터에 붙인 뒤 Avi 풀(멤버 포트 = 리스너 포트)을 고치고 `sh deploy/install.sh --context <ctx> --only S1,S6,S12`(S1 = 그 마스터에
+  hostPort <리스너 포트> 를 쓰는 다른 파드 — §2g-4, S6 = pull 프로브, S12 = 검증)로 확인한다.
 
 **공용 스토리지 유지보수**: 그 노드의 DMS 상태 파드(api·controller·registry·CNPG 인스턴스·pg_dump)를 먼저 비운다 — primary 면 switchover 뒤 cordon + 파드 삭제 →
 재마운트 → uncordon(§2f-7, 설계 3-2 「G2 보충」).
@@ -2997,8 +3031,8 @@ kubectl --context <ctx> get pv | grep dms-pgdata                        # Releas
 | api·controller 로그에 EACCES, 스토리지가 `not_a_mountpoint` 로 Missing(RHEL) | SELinux enforcing | `sh deploy/install.sh --context <ctx> --only S2b`, prod README 「0. 사이트 준비」 2 |
 | ImagePullBackOff | 노드 레지스트리 신뢰(S0-4)·마스터 레지스트리 이미지 고정(S0-5)·태그 없음(S5) | §2e-2·§2e-4, `--only S6` |
 | FailedMount `<SHARED_DIR>/dms/…` | 그 노드에 공용 디렉터리 마운트가 없다, 또는 S0 전 | §2d |
-| 포탈이 안 열린다(연결 실패·TLS 오류·502/503) | ① 앱부터: `kubectl --context <ctx> get --raw '/api/v1/namespaces/dms/services/http:dms-api:http/proxy/readyz'` — 실패면 앱·DB(아래 `/readyz` 행). ② 입구: `kubectl --context <ctx> -n dms get gateway dms-portal`(PROGRAMMED True), `kubectl --context <ctx> -n envoy-gateway-system get pods -o wide -l gateway.envoyproxy.io/owning-gateway-name=dms-portal`(마스터마다 Ready), 마스터마다 `sudo ss -ltnpH '( sport = :443 )'`. ③ LB: Avi 풀 멤버(TCP 443) — 모두 down 이면 SE 대역 → 마스터 :443 방화벽·Envoy, 일부만이면 그 마스터. ④ 인증서: `openssl s_client -connect <VIP-A>:443 -servername <FQDN> -CAfile <사내CA> </dev/null \| openssl x509 -noout -enddate`(만료 감시 없음 — §3b-2). ⑤ TLS 전에 연결이 끊김 = PROXY 헤더 없음(Avi 프로필의 PROXY v2 빠짐 — §2g-4; LB 가 PROXY v2 를 못 붙이면 `GATEWAY_PROXY_PROTOCOL=off`). 포탈 주소에서 **남의 인증서·404** 가 나오면 마스터의 그 포트를 다른 파드의 hostPort 가 가로챈다(예: RKE2 Traefik — `GATEWAY_LISTEN_PORT`, §2g-4). ⑥ 503 이면 접근 로그 `response_flags`(§2g-5): UH·UF = dms-api 엔드포인트 없음·연결 실패(①), UC = 상류 유휴 경쟁(§2g-1 BTP). EG 컨트롤러가 죽어도 Envoy 는 마지막 설정으로 돈다(§2g-6) | §2g-3·§2g-5·§3b-2 |
-| Gateway Programmed 인데 어느 마스터 :443 이 LISTEN 아님 | 그 마스터 sysctl 443 빠짐 — 고친 뒤 그 노드의 Envoy 파드를 지운다 | §2g-2 |
+| 포탈이 안 열린다(연결 실패·TLS 오류·502/503) | ① 앱부터: `kubectl --context <ctx> get --raw '/api/v1/namespaces/dms/services/http:dms-api:http/proxy/readyz'` — 실패면 앱·DB(아래 `/readyz` 행). ② 입구: `kubectl --context <ctx> -n dms get gateway dms-portal`(PROGRAMMED True), `kubectl --context <ctx> -n envoy-gateway-system get pods -o wide -l gateway.envoyproxy.io/owning-gateway-name=dms-portal`(마스터마다 Ready), 마스터마다 `sudo ss -ltnpH '( sport = :<리스너 포트> )'`(render.env `GATEWAY_LISTEN_PORT`, 기본 443). ③ LB: Avi 풀 멤버(TCP <리스너 포트>) — 모두 down 이면 SE 대역 → 마스터 <리스너 포트> 방화벽·Envoy, 일부만이면 그 마스터. ④ 인증서: `openssl s_client -connect <VIP-A>:443 -servername <FQDN> -CAfile <사내CA> </dev/null \| openssl x509 -noout -enddate`(만료 감시 없음 — §3b-2). ⑤ TLS 전에 연결이 끊김 = PROXY 헤더 없음(Avi 프로필의 PROXY v2 빠짐 — §2g-4; LB 가 PROXY v2 를 못 붙이면 `GATEWAY_PROXY_PROTOCOL=off`). 포탈 주소에서 **남의 인증서·404** 가 나오면 마스터의 그 포트를 다른 파드의 hostPort 가 가로챈다(예: RKE2 Traefik — `GATEWAY_LISTEN_PORT`, §2g-4). ⑥ 503 이면 접근 로그 `response_flags`(§2g-5): UH·UF = dms-api 엔드포인트 없음·연결 실패(①), UC = 상류 유휴 경쟁(§2g-1 BTP). EG 컨트롤러가 죽어도 Envoy 는 마지막 설정으로 돈다(§2g-6) | §2g-3·§2g-5·§3b-2 |
+| Gateway Programmed 인데 어느 마스터의 리스너 포트가 LISTEN 아님 | 리스너 포트가 1024 미만이면 그 마스터 sysctl 빠짐 — 고친 뒤 그 노드의 Envoy 파드를 지운다(1024 이상이면 sysctl 은 원인이 아니다 — Envoy 로그의 `cannot bind` 와 `ss -ltnp '( sport = :<리스너 포트> )'` 로 그 포트를 쥔 프로세스를 본다) | §2g-2·§2g-4 |
 | 잡이 오래 Pending(미리보기·실행 vcjob 이 시작하지 않음) | 포탈 운영 → 대시보드 「큐 현황」: 큐 `dms-data` 배지(Closed = Volcano 쪽에서 닫혔다 — 클러스터 운영자)와 「지금 대기 중」의 PodGroup 사유(`queue_reader`). 클러스터에서: `kubectl --context <ctx> get queue dms-data -o jsonpath='{.status.state}'`(Open 이어야 한다), `kubectl --context <ctx> -n dms get vcjob,podgroup \| grep <job id 앞 12자>` → `kubectl --context <ctx> -n dms describe vcjob <이름>`(이벤트의 Unschedulable 사유). 흔한 원인: 노드 CPU 상한(`procs_per_node`), 다른 잡이 코어를 차지함, 후보 노드 cordon·배치 제외, Volcano 스케줄러 장애. **DMS 의 시한(미리보기·실행·점검 600초)은 파드가 노드에 붙은 뒤부터 센다**(`execution_manifests._apply_task_deadlines`, `stepper.PREFLIGHT_DEADLINE_SECONDS`) — 노드 CPU 상한이 제출 크기보다 작다고 알려진 경우만 `node_cpu_insufficient` 로 끝내고(`stepper._raise_if_cpu_short`), 그 밖의 이유로 끝내 배치되지 않는 잡은 스스로 끝나지 않는다 — 원인을 풀거나 요청 상세에서 취소한다 | §6-4·§14-3 |
 | `node_cpu_insufficient` | 정책의 `procs_per_node` 를 노드 CPU 상한 이하로 | §6-4 |
 | `no_ready_sync_candidate` | 에이전트 보고가 오래됐거나 그 스토리지 마운트가 없다. 재부팅 직후면 1~2분 뒤 | 14-3 |
@@ -3009,7 +3043,7 @@ kubectl --context <ctx> get pv | grep dms-pgdata                        # Releas
 | 컨트롤 상태 저장 422 `unknown_build_node` | 빌드 노드는 에이전트가 보고한 워커여야 한다 | §6-3 |
 | 인증 메일 실패(`verification_email_failed`·`relay_*`) | 릴레이 주소·키·허용 IP·도메인 | §11 |
 | 메일 설정 「읽을 수 없습니다」·`relay_misconfigured` | `DMS_SESSION_SECRET` 이 바뀌었다 — 키 다시 입력 | §3b-4 |
-| k8s 연동 카드 「실패 · … 토큰을 거부했습니다(401)」·인증서 검증 실패 | 리더 토큰·CA·서버 이름 | §6-5 |
+| k8s 연동 「클러스터」 탭 카드 「실패 · … 토큰을 거부했습니다(401)」·인증서 검증 실패 | 리더 토큰·CA·서버 이름 | §6-5 |
 | 로그인 429 `login_rate_limited`·503 `login_busy` | 로그인 보호 장치 | §10-7 |
 | 401 `session_revoked` | 그 계정의 비밀번호가 바뀌었다 — 다시 로그인 | §10-5 |
 | 작업 삭제 뒤 정리가 멈춤 | 정리 상태의 `last_error` | §12 |

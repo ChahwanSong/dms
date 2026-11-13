@@ -18,7 +18,9 @@ sha256    24d931f22abd8e40c973264319ead7cfa09d0fb7716b7ab1ee2ff174cb063a73  (같
   - v1.6.1 → v1.6.3 의 standard-install.yaml 차이는 bundle-version 어노테이션 5줄과 HTTPRequestRedirect 설명문 13줄뿐이다(스키마 변경 0 —
     2026-11-03 diff). v1.6.2·v1.6.3 릴리스 노트도 conformance 테스트·빌드 수정뿐이다.
   - v1.7.0(2026-10-29)은 EG v1.9 가 따르지 않는 minor 다.
-설계 8-2 호환 규칙: 클러스터에 이미 있으면 bundle-version 이 v1.6.x 이상인지 본다(낮으면 X). C 경로에서는 다시 적용하지 않는다(⑦ 감지기).
+설계 8-2 호환 규칙(원래 v1.6.x 이상 → 2026-11-13 하한 v1.5.0 — RKE2 의 rke2-traefik-crd 가 v1.5.1 을 미리 깐다): 남이 깐 CRD 가 이미 있으면
+bundle-version 이 v1.5.0 이상인지 본다(낮으면 X — deploy/install-detect.py 의 GWAPI_FLOOR; DMS 가 깐 CRD 는 이 고정 버전과 견준다).
+C 경로에서는 다시 적용하지 않는다(⑦ 감지기).
 
 새 버전: 이 디렉터리를 복사(deploy/addons/gateway-api/<v>/)해 원본·SOURCE·sha256 을 바꾸고, kustomization.yaml 의 dms.io/addon-version·
 deploy/versions.env 의 GATEWAY_API_VERSION 을 한 커밋에서(tests/test_gateway_contract.py 가 맞물림을 본다). EG 의 go.mod 를 먼저 본다.
