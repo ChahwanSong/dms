@@ -116,7 +116,15 @@ VIP:443 → 마스터:443 이 DMS Envoy 에 닿지 않는다. DMS VIP 는 Ranche
   prod README 체크리스트 7, values.env.example.
 - **검증**: 배포 계약 묶음 15개 파일 741 passed / 2 skipped(새 테스트: off 렌더·포트 렌더·잘못된 포트·임시 포트 알림·프로브 --port·S8 hostPort 4건·preflight).
   dmsk8s 에 테스트베드 값 + off + 10443 렌더를 server dry-run — 6개 객체 통과, 라이브 무변경(443·PROXY 필수 그대로), 표준 렌더 복원·guard exit 0.
-  실제 트래픽 실증(LB 가 PROXY 없이 다른 포트로 붙는 경로)은 OA 사이트에서 한다 — 테스트베드 edge(haproxy send-proxy-v2)는 그대로 뒀다.
+- **테스트베드 실증**(2026-11-14 사용자 「테스트베드에서도 proxy v2 안쓰는 구성으로 실증해봐」): 호스트 edge haproxy 에서 `send-proxy-v2` 를 빼고 설치기
+  S8 로 단계별 적용, LAN 릴레이(원 IP 192.168.75.215 ≠ haproxy 주소 10.10.10.1)로 측정. 단계: ① 기준(PROXY v2·required) 200, client_ip=192.168.75.215,
+  위조 PROXY 헤더 → TLS 실패 ② optional + edge PROXY 없음: 200, client_ip=10.10.10.1 — 위조 헤더(6.6.6.6) **200 이고 client_ip=6.6.6.6 으로 기록**(optional
+  을 상시로 쓰면 안 되는 근거 실측) ③ off(443): 200, client_ip=10.10.10.1, 위조 헤더 → TLS 실패, VIP·Tailscale 200, 실 Chrome 30화면 × 1440·390 문제 0
+  ④ off + `GATEWAY_LISTEN_PORT=10443`(풀 멤버 :10443): S8 PASS(sysctl 건너뜀·:10443 LISTEN), S12 PASS, preflight 의 hostPort·포트 줄 정상, 200, 위조
+  → TLS 실패. 앱 보안 이벤트 client_ip=10.10.10.1 — 그리고 두 계정의 실패 20건이 LB 주소 하나로 묶여 `login_source_alarm` 이 실제로 울렸다
+  (테스트베드 고정 오버레이에는 경보 0 이 없다 — prod 렌더가 off 에서 0 을 넣는 이유). 포트 전환 중 3초 간격 요청 2건 실패(약 5~10초, LB 헬스체크
+  전환 — deploy/README §2g-4 적용 줄에 기록). 되돌림: 443 → edge 원본(send-proxy-v2) → required — `host-edge.sh status` 전부 OK(설정 = IaC 렌더),
+  client_ip=192.168.75.215, guard exit 0. Envoy 파드는 재시작하지 않았다(설정만 바뀜).
 
 ### ✅ OA 사이트(RKE2) 설치 — Gateway API 하한 v1.5.0·묶음 dry-run 오류 줄·control-plane 라벨 값(CONTROL_PLANE_LABEL_VALUE) — **완료**(2026-11-13)
 
