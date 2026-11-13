@@ -219,3 +219,62 @@ def test_prod_patch_config_overrides_every_site_key_of_the_base():
     assert values["DMS_PRIVILEGED_REQUESTERS"] == "root,admin,REPLACE_LOCAL_ADMIN"
     for key in ("DMS_JOB_IMAGE", "DMS_BUILD_REGISTRY", "DMS_BUILD_BUILDER_IMAGE"):
         assert values[key].startswith("REPLACE_REGISTRY"), (key, values[key])
+
+
+# --- control-plane 라벨 값(2026-11-13 OA 사이트 — RKE2 는 node-role.kubernetes.io/control-plane=true) ------------------------------------
+# base·prod 의 nodeSelector 는 kubeadm 관례인 "" 를 고른다. RKE2 에선 레지스트리·PG·Envoy·api/controller 가 Pending 이라 values.env 의
+# CONTROL_PLANE_LABEL_VALUE 로 네 곳(앱 patch-placement·platform/registry·platform/gateway·platform/db-cluster)의 값을 바꾼다.
+_CP_LAYERS = ("platform/registry", "platform/gateway", "platform/db-cluster")
+_CP_PTR = "node-role.kubernetes.io~1control-plane"
+
+
+def test_control_plane_label_value_patches_every_placement_layer(tmp_path):
+    base_dir = tmp_path / "default"
+    base_dir.mkdir()
+    r, out = _render(base_dir, _filled_example())
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    root = out.parent
+    for layer in _CP_LAYERS:                                          # 기본(키 없음) = 패치 없음 — 기존 출력과 같다
+        assert _CP_PTR not in (root / layer / "kustomization.yaml").read_text(), layer
+    assert 'node-role.kubernetes.io/control-plane: ""' in (out / "patch-placement.yaml").read_text()
+
+    cp_dir = tmp_path / "rke2"
+    cp_dir.mkdir()
+    r, out = _render(cp_dir, _filled_example("\nCONTROL_PLANE_LABEL_VALUE=true\n"))
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    root = out.parent
+    for layer in _CP_LAYERS:
+        text = (root / layer / "kustomization.yaml").read_text()
+        assert re.search(r'path: /spec/\S*/nodeSelector/%s\n\s*value: "true"' % re.escape(_CP_PTR), text), (layer, text)
+    placement = (out / "patch-placement.yaml").read_text()
+    assert 'node-role.kubernetes.io/control-plane: ""' not in placement
+    assert placement.count('node-role.kubernetes.io/control-plane: "true"') == 2      # api·controller
+    # PG_PLACEMENT=all-nodes 는 nodeSelector 를 통째로 빼므로 값 패치를 더하지 않는다(없는 경로 replace 는 kustomize 실패).
+    an_dir = tmp_path / "all-nodes"
+    an_dir.mkdir()
+    r, out = _render(an_dir, _filled_example("\nCONTROL_PLANE_LABEL_VALUE=true\nPG_PLACEMENT=all-nodes\n"))
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    db = (out.parent / "platform" / "db-cluster" / "kustomization.yaml").read_text()
+    assert _CP_PTR not in db and "path: /spec/affinity/nodeSelector\n" in db
+
+
+def test_control_plane_label_value_rejects_non_label_values(tmp_path):
+    for i, bad in enumerate(("a/b", "-true", "true.", "x" * 64, "tr ue")):
+        d = tmp_path / str(i)
+        d.mkdir()
+        r, _ = _render(d, _filled_example("\nCONTROL_PLANE_LABEL_VALUE='%s'\n" % bad))     # values.env 는 sh 가 읽는다 — 공백 값은 따옴표
+        assert r.returncode == 2 and "CONTROL_PLANE_LABEL_VALUE" in r.stdout, (bad, r.stdout, r.stderr)
+
+
+@needs_kubectl
+def test_control_plane_label_value_reaches_the_rendered_objects(tmp_path):
+    # JSON 포인터 경로가 base 와 맞는지는 실제 kustomize 렌더로만 확인된다(replace 는 없는 경로에서 실패한다).
+    r, out = _render(tmp_path, _filled_example("\nCONTROL_PLANE_LABEL_VALUE=true\n"))
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    env = {**os.environ, "KUBECONFIG": os.devnull}
+    root = out.parent
+    for layer in ("app",) + _CP_LAYERS:
+        k = subprocess.run([KUBECTL, "kustomize", str(root / layer)], capture_output=True, text=True, timeout=180, env=env)
+        assert k.returncode == 0, (layer, k.stderr)
+        assert re.search(r'nodeSelector:\n\s+node-role\.kubernetes\.io/control-plane: "true"', k.stdout), layer
+        assert 'node-role.kubernetes.io/control-plane: ""' not in k.stdout, layer

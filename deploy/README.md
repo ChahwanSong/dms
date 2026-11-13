@@ -81,6 +81,8 @@
 - Kubernetes **1.34~1.36**. 밖이면 S1 이 FAIL 한다(`preflight-cluster.sh` 「0. 클러스터 / 컨텍스트」). CNPG 1.30·EG v1.9·Volcano v1.16 의 지원 범위다.
 - **control-plane 3대**. 0대면 FAIL, 3대가 아니면 WARN 이다. PG 인스턴스(마스터마다 1개, required anti-affinity)·Envoy DaemonSet·클러스터 내 레지스트리·
   dms-api·dms-controller 가 마스터에 선다(prod 렌더 — `platform/db-cluster`·`platform/gateway`·`platform/registry`·`patch-placement.yaml`).
+  이들은 라벨 `node-role.kubernetes.io/control-plane` 의 **값 `""`**(kubeadm 관례)로 고른다 — RKE2 처럼 `true` 를 다는 배포판이면 values.env
+  `CONTROL_PLANE_LABEL_VALUE=true`(§2f-1 표; 확인 `kubectl get nodes -L node-role.kubernetes.io/control-plane`), 아니면 모두 Pending 이다.
 - **NoSchedule taint 없는 워커 2대 이상**(권장). 다음은 워커에만 뜬다:
   - CNPG 오퍼레이터 2개(`addons/cnpg/1.30.1/patch-operator.yaml` — control-plane `DoesNotExist`, 두 파드를 다른 노드에 선호).
   - EG 컨트롤러(`addons/envoy-gateway/v1.9.3/patch-controller.yaml`), pg_dump CronJob(`platform/db/backup/cronjob.yaml`).
@@ -865,6 +867,7 @@ cluster,backup,probe}` 를 함께 낸다(`ADDON:`·`PLATFORM:`(S10 순서)·`PRO
 | `PG_STORAGE_SIZE` | `20Gi` | Cluster `storage.size` **와** PV capacity(한 값이 두 곳 — 크면 맞는 PV 가 없어 새 PVC 가 Pending). 명목값(hostPath 는 강제하지 않는다). PV 를 만든 뒤에는 바꾸지 않는다 — PV 용량은 가변이라 SSA 가 조용히 바꾸지만 CNPG 는 `storage.size` 축소를 거절해 둘이 어긋난다(재생성 PVC Pending). 그래서 2f-4 0단계 `pv-check` 가 라이브 PV 와 다르면 FAIL 한다 |
 | `PG_CPU_REQUEST`·`PG_MEMORY`·`PG_SHARED_BUFFERS` | `1`·`4Gi`·`PG_MEMORY`/4 | 메모리는 requests == limits. `PG_SHARED_BUFFERS` 를 비우면 `PG_MEMORY` 의 1/4(둘 다 없으면 base 의 1GB = 4Gi/4) — shared_buffers 는 메모리 limit 안에서 채워지므로 `PG_MEMORY` 만 줄이고 1GB 를 남기면 부하 때 cgroup OOM 으로 재기동을 반복한다. 실효 메모리의 절반 이상이면 렌더 FAIL. (예: 테스트베드 50m/256Mi/64MB — `deploy/testbed/README.md` §3) |
 | `PG_PLACEMENT` | `control-plane` | 마스터마다 1개(#27). `all-nodes` 는 **control-plane 1대 시험 클러스터 전용**(nodeSelector 를 빼고 toleration·required anti-affinity 는 둔다) — prod 에 쓰지 않는다 |
+| `CONTROL_PLANE_LABEL_VALUE` | (빈 값) | control-plane 노드 라벨 `node-role.kubernetes.io/control-plane` 의 **값**. base 의 nodeSelector 는 kubeadm 관례인 `""` 를 고른다 — **RKE2 는 `true`** 라 그대로면 레지스트리·PG·Envoy·api/controller 가 Pending 이다. 값을 주면 앱 `patch-placement`·platform/registry·platform/gateway(EnvoyProxy)·platform/db-cluster(`PG_PLACEMENT=control-plane` 일 때)의 그 값을 바꾼다. 확인: `kubectl --context <ctx> get nodes -L node-role.kubernetes.io/control-plane` |
 | `PG_BACKUP_KEEP` | `336` | pg_dump 보존 개수(매시간 → 14일). **개수**로 센다 — 시각 기준이면 덤프가 며칠 실패하는 동안 좋은 덤프가 전부 지워질 수 있다 |
 
 ### 2f-2. 시크릿(S2) — `dms-pg-app`·`DMS_DATABASE_URL`(값을 출력하지 않는다)
@@ -1233,7 +1236,7 @@ ss -xlH | grep -c envoy_domain_socket       # 0 이 아니면 호스트 netns �
 ```bash
 kubectl --context C get crd gateways.gateway.networking.k8s.io \
   -o 'jsonpath={.metadata.annotations.gateway\.networking\.k8s\.io/bundle-version} {.metadata.annotations.gateway\.networking\.k8s\.io/channel}{"\n"}'
-#   없음 → A. v1.6.x 이상 → 재사용(standard 든 experimental 이든 — DMS 는 standard 필드만 쓴다). 더 낮으면 X(소유자에게 올려 달라고)
+#   없음 → A. v1.5.x 이상 → 재사용(OA 사이트 하한 v1.5.0 — RKE2 rke2-traefik-crd 가 v1.5.1; standard 든 experimental 이든 — DMS 는 standard 필드만 쓴다). 더 낮으면 X(소유자에게 올려 달라고)
 kubectl --context C get crd envoyproxies.gateway.envoyproxy.io; kubectl --context C get deploy -A -l app.kubernetes.io/name=gateway-helm \
   -o 'custom-columns=NS:.metadata.namespace,NAME:.metadata.name,BY:.metadata.labels.app\.kubernetes\.io/managed-by,V:.metadata.labels.dms\.io/addon-version,IMG:.spec.template.spec.containers[0].image'
 #   없음 → A · BY=dms-install(V 같음 → D=, 낮음 → D< — 2g-6) · 남이 설치 → C(아래) · 둘 이상 → P(중단)
@@ -1563,6 +1566,7 @@ S4(레지스트리)·S8(EG 컨트롤러)·S9(CNPG)·S9b(Volcano 층이 있을 �
 | `REGISTRY_CPU_REQUEST`·`REGISTRY_MEMORY_REQUEST` | platform/registry(S4) | 빌드·push 가 없을 때(§2e-5) |
 | `PG_CPU_REQUEST`·`PG_MEMORY`·`PG_SHARED_BUFFERS`·`PG_PLACEMENT` | platform/db-cluster(S10) | CNPG 가 롤링한다. 이미지와 한 번에 바꾸지 않는다(§2f-6). `PG_PLACEMENT=all-nodes` 는 control-plane 1대 시험 클러스터 전용 |
 | `PG_BACKUP_KEEP` | platform/db-backup(S10) | 개수로 센다 |
+| `CONTROL_PLANE_LABEL_VALUE` | app(S11)·platform/registry(S4)·platform/gateway(S8)·platform/db-cluster(S10) | 네 층을 다시 적용한다(`sh deploy/install.sh --context <ctx> --site <site>`) — nodeSelector 가 바뀌어 파드가 다시 배치된다 |
 | `PG_STORAGE_SIZE` | — | PV 를 만든 뒤에는 바꾸지 않는다(S10 `pv-check` 가 FAIL) |
 | `REGISTRY_MODE`·`REGISTRY_CLUSTER_IP`·`REGISTRY_PORT`·`REGISTRY` | — | 바꾸지 않는다(§2e-1) |
 | `SHARED_DIR`·`SHARED_DIR_ID` | 여러 층 | §2d-4 전환 런북 |

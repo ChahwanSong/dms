@@ -39,6 +39,12 @@
 #                      메모리의 절반 이상인 shared_buffers 는 FAIL. 테스트베드 100m / 256Mi / 64MB(설계 10)
 #   PG_PLACEMENT       (선택) control-plane(기본 — 마스터마다 1개, #27) | all-nodes(control-plane 이 1대뿐인 시험 클러스터 전용 — nodeSelector
 #                      를 빼 모든 노드에 하나씩; 예: 테스트베드 cp1·w1·w2. prod 에 쓰지 않는다)
+#   CONTROL_PLANE_LABEL_VALUE  (선택, 기본 빈 값 = base 그대로) control-plane 노드 라벨 node-role.kubernetes.io/control-plane 의 **값**.
+#                      base·prod 의 nodeSelector 는 kubeadm 관례인 ""(빈 값)를 고른다 — RKE2 는 "true" 를 달아 그대로면 레지스트리·PG·Envoy·
+#                      api/controller 가 Pending 이다(2026-11-13 OA 사이트). 값을 주면 앱 patch-placement(템플릿 오버레이)·platform/registry·
+#                      platform/gateway(EnvoyProxy)·platform/db-cluster(PG_PLACEMENT=control-plane 일 때)의 그 nodeSelector 값을 바꾼다. k8s 라벨
+#                      값 문법(63자 이하, 영숫자로 시작·끝, 가운데 [-_.A-Za-z0-9]) 밖이면 FAIL. 키 존재로만 고르는 곳(DoesNotExist·preflight·
+#                      프로브)은 값과 무관하다. 확인: kubectl get nodes -L node-role.kubernetes.io/control-plane
 #   PG_BACKUP_KEEP     (선택, 기본 336 = 14일 × 매시간) pg_dump 보존 개수
 #
 # 레지스트리(설계 v6 7, values 키):
@@ -101,7 +107,7 @@ fi
 # (아래 「무시함」 알림이 values.env 에서 온 것만 말하게). 의도된 env 입력은 VALUES_ENV·KUBE_CONTEXT·DMS_NS 뿐이다.
 unset SHARED_FS SHARED_DIR SHARED_DIR_ID REGISTRY REGISTRY_MODE REGISTRY_CLUSTER_IP REGISTRY_PORT REGISTRY_TLS_VERIFY \
       REGISTRY_CPU_REQUEST REGISTRY_MEMORY_REQUEST \
-      PG_STORAGE_SIZE PG_CPU_REQUEST PG_MEMORY PG_SHARED_BUFFERS PG_PLACEMENT PG_BACKUP_KEEP \
+      PG_STORAGE_SIZE PG_CPU_REQUEST PG_MEMORY PG_SHARED_BUFFERS PG_PLACEMENT PG_BACKUP_KEEP CONTROL_PLANE_LABEL_VALUE \
       CNPG_VERSION CNPG_OPERATOR_IMAGE PG_IMAGE \
       GATEWAY_PROXY_PROTOCOL PORTAL_TLS_SECRET GATEWAY_ENVOY_CPU_REQUEST GATEWAY_ENVOY_MEMORY_REQUEST \
       GATEWAY_API_VERSION ENVOY_GATEWAY_VERSION ENVOY_GATEWAY_IMAGE ENVOY_PROXY_IMAGE \
@@ -414,6 +420,15 @@ case "$PG_PLACEMENT" in
   control-plane|all-nodes) ;;
   *) fail "values.env 의 PG_PLACEMENT='$PG_PLACEMENT' — control-plane(기본, 마스터마다 1개) 또는 all-nodes(테스트베드)" ;;
 esac
+# control-plane 라벨 값(2026-11-13, 위 머리말): 비우면 base 그대로(""). 문자 목록은 로캘에 따라 범위([A-Z])가 달라지지 않게 글자로 쓴다.
+CPV=""
+if _set "${CONTROL_PLANE_LABEL_VALUE:-}"; then CPV=$CONTROL_PLANE_LABEL_VALUE; fi
+case "$CPV" in
+  "") ;;
+  *[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]*|[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789]*|*[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789])
+    fail "values.env 의 CONTROL_PLANE_LABEL_VALUE='$CPV' — k8s 라벨 값(영숫자로 시작·끝, 가운데 [-_.A-Za-z0-9]; 예: RKE2 는 true). 비우면 base 의 \"\"" ;;
+esac
+[ "${#CPV}" -le 63 ] || fail "values.env 의 CONTROL_PLANE_LABEL_VALUE 가 63자를 넘는다(k8s 라벨 값 상한)"
 _set "${PG_BACKUP_KEEP:-}" || PG_BACKUP_KEEP=336
 case "$PG_BACKUP_KEEP" in ""|0*|*[!0123456789]*) fail "values.env 의 PG_BACKUP_KEEP='$PG_BACKUP_KEEP' — 양의 정수(기본 336 = 14일 × 매시간)" ;; esac
 [ "${#PG_BACKUP_KEEP}" -le 5 ] || fail "values.env 의 PG_BACKUP_KEEP='$PG_BACKUP_KEEP' 가 너무 크다(5자리 이하)"
@@ -518,6 +533,15 @@ if [ "$TEMPLATE" = 1 ]; then
       "$f"
   done
 fi
+if [ -n "$CPV" ]; then
+  if [ "$TEMPLATE" = 1 ]; then
+    for f in "$TMP"/app/*.yaml; do
+      sed -i "s|node-role\.kubernetes\.io/control-plane: \"\"|node-role.kubernetes.io/control-plane: \"$CPV\"|g" "$f"
+    done
+  elif grep -h -v '^[[:space:]]*#' "$TMP"/app/*.yaml | grep -q 'node-role\.kubernetes\.io/control-plane: ""'; then
+    fail "$OV 는 고정 오버레이다 — 그 control-plane nodeSelector 는 오버레이 파일이 원천이니 CONTROL_PLANE_LABEL_VALUE 대신 파일에서 값을 바꾼다"
+  fi
+fi
 # base 참조를 이 깊이로: deploy/overlays/<site>/ 의 ../../k8s == deploy/.rendered/<site>/app/ 의 ../../../k8s.
 sed -i 's|^\([[:space:]]*-[[:space:]]*\)\.\./\.\./k8s[[:space:]]*$|\1../../../k8s|' "$TMP/app/kustomization.yaml"
 grep -q '^[[:space:]]*-[[:space:]]*\.\./\.\./\.\./k8s$' "$TMP/app/kustomization.yaml" \
@@ -602,6 +626,17 @@ patches:
         path: /spec/ports/0/port
         value: $REGISTRY_PORT
 EOF
+  if [ -n "$CPV" ]; then
+    cat >> "$TMP/platform/registry/kustomization.yaml" <<EOF
+  - target:
+      kind: Deployment
+      name: dms-registry
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/nodeSelector/node-role.kubernetes.io~1control-plane
+        value: "$CPV"
+EOF
+  fi
   # 설정 체크섬(2026-11-03 ④ 리뷰 2): Distribution 은 config.yml 을, init 은 expected-registry-id(configMapKeyRef env)를 **기동 때만**
   # 읽는다. ConfigMap 은 이름이 고정이라(GC 런북용 — 해시 접미 없음) 설정만 바뀐 SSA 재적용은 파드를 다시 띄우지 않고 옛 설정으로 계속
   # 돈다 — 그 차이는 다음 우연한 재시작 때 드러난다. 두 입력의 sha256 을 파드 템플릿 annotation 에 넣어 설정이 바뀌면 롤링 교체되게
@@ -777,6 +812,11 @@ _re() { printf '%s' "$1" | sed 's/[.]/\\./g'; }
     echo "        path: /spec/provider/kubernetes/envoyDaemonSet/container/resources/requests/memory"
     echo "        value: $GATEWAY_ENVOY_MEMORY_REQUEST"
   fi
+  if [ -n "$CPV" ]; then
+    echo "      - op: replace"
+    echo "        path: /spec/provider/kubernetes/envoyDaemonSet/pod/nodeSelector/node-role.kubernetes.io~1control-plane"
+    echo "        value: \"$CPV\""
+  fi
   echo "  - target:"
   echo "      group: gateway.envoyproxy.io"
   echo "      kind: ClientTrafficPolicy"
@@ -872,6 +912,10 @@ EOF
     # anti-affinity 는 그대로 둔다 — 노드마다 1개는 지킨다. prod 는 늘 control-plane(마스터마다 1개, #27).
     echo "      - op: remove"
     echo "        path: /spec/affinity/nodeSelector"
+  elif [ -n "$CPV" ]; then
+    echo "      - op: replace"
+    echo "        path: /spec/affinity/nodeSelector/node-role.kubernetes.io~1control-plane"
+    echo "        value: \"$CPV\""
   fi
 } > "$TMP/platform/db-cluster/kustomization.yaml"
 cat > "$TMP/platform/db-backup/kustomization.yaml" <<EOF
