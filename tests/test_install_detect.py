@@ -528,7 +528,8 @@ def test_cnpg_owned_watch_excluding_dms_is_x(kenv, capsys):
 # --- Gateway API ---------------------------------------------------------------------------------------------------------------
 
 @pytest.mark.parametrize("crds,code", [
-    (lambda: gwapi_crds("v1.5.1", is_owned=False), "X"),
+    (lambda: gwapi_crds("v1.5.1", is_owned=False), "C"),    # RKE2 rke2-traefik-crd 가 까는 버전(2026-11-13 하한 v1.5.0)
+    (lambda: gwapi_crds("v1.4.0", is_owned=False), "X"),
     (lambda: gwapi_crds("v1.7.0", is_owned=False, channel="experimental"), "C"),
     (lambda: gwapi_crds("v1.6.0", is_owned=False), "C"),
     (lambda: gwapi_crds("v1.6.1"), "D="),
@@ -988,6 +989,22 @@ def _no_kind(name, kind, group_version):
 
 _EG_KINDS = "".join(_no_kind("dms-portal", k, "gateway.envoyproxy.io/v1alpha1")
                     for k in ("BackendTrafficPolicy", "ClientTrafficPolicy", "EnvoyProxy"))
+
+
+def test_classify_bundled_missing_kinds_are_benign():
+    """없는 kind 가 둘 이상이면 kubectl 이 오류를 `[a, b, c]` 로 묶어 마지막 줄이 「ensure CRDs are installed first]」다(2026-11-13 OA 실측 —
+    첫 설치에서 EG CRD 3종이 한꺼번에 없을 때). 그 줄을 진짜 오류로 세면 S3 계획이 정상 첫 설치에서 FAIL 이었다."""
+    one = 'resource mapping not found for name: "dms-portal" namespace: "dms" from "x": no matches for kind "%s" in version ' \
+          '"gateway.envoyproxy.io/v1alpha1"'
+    err = ("error: [" + one % "BackendTrafficPolicy" + "\nensure CRDs are installed first, " + one % "ClientTrafficPolicy"
+           + "\nensure CRDs are installed first, " + one % "EnvoyProxy" + "\nensure CRDs are installed first]\n")
+    benign, real, deps = det._classify(err, {"dms": "S2"}, {"envoy-gateway"})
+    assert real == []
+    assert benign == sorted("CRD %s(gateway.envoyproxy.io) 는 envoy-gateway 설치가 만든다" % k
+                            for k in ("BackendTrafficPolicy", "ClientTrafficPolicy", "EnvoyProxy"))
+    # 묶음 끝 「]」만 무해다 — 진짜 오류 줄은 그대로 남는다.
+    benign, real, deps = det._classify(err + "Error from server (Forbidden): something real\n", {"dms": "S2"}, {"envoy-gateway"})
+    assert real == ["Error from server (Forbidden): something real"]
 
 
 def _eg_p_world():

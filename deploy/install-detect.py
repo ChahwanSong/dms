@@ -103,7 +103,9 @@ CNPG_FLOOR = (1, 25, 0)            # dataDurability(설계 #28 — preferred)가
 CNPG_DEFAULT_CONFIG = "cnpg-controller-manager-config"
 GWAPI_CRDS = ("gatewayclasses.gateway.networking.k8s.io", "gateways.gateway.networking.k8s.io",
               "httproutes.gateway.networking.k8s.io")    # DMS 가 쓰는 종류(platform/gateway)
-GWAPI_FLOOR = (1, 6, 0)            # 설계 8-2 「v1.6.x(낮으면 X)」 — 더 높은 남의 CRD 는 재사용(standard 필드만 쓴다, README §2g-3)
+# 재사용 하한(2026-11-13 v1.6.0 → v1.5.0): Rancher/RKE2 는 rke2-traefik-crd(Helm 소유)가 Gateway API v1.5.1 을 미리 깐다 — 하한이 1.6.0 이면
+# 판정 X 로 S8 이 거부됐다(OA 사이트 실측). DMS 가 쓰는 종류(GWAPI_CRDS)는 모두 v1 standard 라 v1.5 에도 있다.
+GWAPI_FLOOR = (1, 5, 0)            # 설계 8-2 의 하한(원래 v1.6.x) — 이상인 남의 CRD 는 재사용(standard 필드만 쓴다, README §2g-3)
 GWAPI_BUNDLE = "gateway.networking.k8s.io/bundle-version"
 GWAPI_CHANNEL = "gateway.networking.k8s.io/channel"
 EG_CRD = "envoyproxies.gateway.envoyproxy.io"
@@ -832,7 +834,7 @@ def detect_cnpg(kube, state, pins):
 # Gateway API ------------------------------------------------------------------------------------------------------------------
 
 def detect_gateway_api(state, pins):
-    """Gateway API CRD(S8 첫째) — 버전·채널은 상류 어노테이션 bundle-version·channel(설계 8-2). v1.6 미만이면 X, 그 이상 남의 CRD 는 재사용(C —
+    """Gateway API CRD(S8 첫째) — 버전·채널은 상류 어노테이션 bundle-version·channel(설계 8-2). v1.5 미만이면 X(GWAPI_FLOOR), 그 이상 남의 CRD 는 재사용(C —
     experimental 이어도 DMS 는 standard 필드만 쓴다). DMS 가 쓰는 CRD 셋 중 일부만 있거나 bundle-version 이 섞였으면 P."""
     pin = parse_version(pins["gateway-api"])
     f = Finding("gateway-api", pins["gateway-api"])
@@ -859,7 +861,7 @@ def detect_gateway_api(state, pins):
     if owned:
         return f.set(compare(ver, pin), "DMS 가 설치한 Gateway API %s %s — 고정 %s" % (text, channel, pins["gateway-api"]))
     if ver < GWAPI_FLOOR:
-        return f.set("X", "Gateway API %s 는 v1.6 미만이다(설계 8-2) — 소유자에게 v1.6.x 이상으로 올려 달라" % text)
+        return f.set("X", "Gateway API %s 는 v1.5 미만이다 — 소유자에게 v1.5.x 이상으로 올려 달라" % text)
     if channel != "standard":
         f.notes.append("채널 %s — DMS 는 standard 필드만 쓴다(재사용)" % channel)
     return f.set("C", "남이 설치한 Gateway API %s %s — 재사용(CRD 는 건드리지 않는다)" % (text, channel))
@@ -1367,7 +1369,9 @@ def _classify(stderr, will_create_ns, will_install, layer=None, blocked=None):
         line = line.strip()
         # stderr 의 줄은 경고·안내를 빼면 모두 오류다 — 「resource mapping not found … no matches for kind」 줄에는 error 라는 말이 없다
         # (2026-11-03 ⑦ dmsk8s 실측: 그 줄 + 「ensure CRDs are installed first」 + `Error from server (NotFound): namespaces "…" not found`).
-        if not line or line.startswith("Warning:") or line == "ensure CRDs are installed first" or line.endswith("(server dry run)"):
+        # 없는 kind 가 둘 이상이면 kubectl 이 오류를 `[a, b, c]` 로 묶어 마지막 줄이 「ensure CRDs are installed first]」가 된다(2026-11-13 OA 실측
+        # — 첫 설치에서 EG CRD 3종이 한꺼번에 없을 때). 가운데 줄은 「…first, resource mapping not found …」라 아래 _NO_KIND 가 판정한다.
+        if not line or line.startswith("Warning:") or line.rstrip("]") == "ensure CRDs are installed first" or line.endswith("(server dry run)"):
             continue
         # 앱 태그(또는 migrate 템플릿)를 바꾸면 이미 끝난 dms-migrate Job 의 dry-run 이 늘 `field is immutable` 이다 — S11 이 apply 전에 그 Job 을
         # 지우는 바로 그 이유다. 계획(S3·--plan)이 그보다 먼저 막으면 앱 업그레이드가 설치기로 진행되지 않는다(2026-11-03 ⑦ 리뷰 1 — dmsk8s
