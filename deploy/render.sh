@@ -64,8 +64,17 @@
 # ENVOY_GATEWAY_IMAGE·ENVOY_PROXY_IMAGE), 이미지 digest 는 deploy/images.lock — CNPG 와 같은 애드온 레지스트리에서 받는다. 입구 층은 늘 렌더한다
 # (prod 의 유일한 입구 — 앱 오버레이가 Ingress·MetalLB 풀을 지운다; 테스트베드 testbed-k8s 는 되돌림용 Ingress·MetalLB 를 소크 뒤 지울 때까지
 # 함께 렌더한다 — deploy/testbed/README.md). values(전부 선택):
-#   GATEWAY_PROXY_PROTOCOL  required(기본 — PROXY v2 헤더 없는 연결을 끊는다) | optional(**컷오버 중에만** — PROXY 없는 연결도 받는다, 설계 4-3).
-#                           ClientTrafficPolicy proxyProtocol.optional 한 칸이 이 값에서 나온다(deploy/README §2g 컷오버).
+#   GATEWAY_PROXY_PROTOCOL  required(기본 — PROXY v2 헤더 없는 연결을 끊는다) | optional(**컷오버 중에만** — PROXY 없는 연결도 받는다, 설계 4-3)
+#                           | off(2026-11-14 — LB 가 PROXY v2 를 못 붙이는 사이트의 **상시** 모드: ClientTrafficPolicy 의 proxyProtocol 을 빼
+#                           Envoy 가 PROXY 를 아예 해석하지 않는다. optional 을 상시로 쓰지 않는 이유: L4 LB 는 바이트를 그대로 넘기므로 클라이언트가
+#                           PROXY 헤더를 스스로 심어 「원 IP」 기록을 위조할 수 있다. off 면 원 IP 자리는 늘 실제 TCP 피어(LB 의 SE 주소)이고,
+#                           모든 사용자가 그 주소로 묶이므로 앱 출발지 경보 DMS_LOGIN_ALARM_SOURCE_FAILURES 를 0 으로 렌더한다 — 원 IP 는 LB 로그에서).
+#                           ClientTrafficPolicy proxyProtocol 이 이 값에서 나온다(deploy/README §2g-4).
+#   GATEWAY_LISTEN_PORT     (기본 443) Envoy 가 마스터 호스트에서 여는 포트 = Gateway 리스너 포트(hostNetwork + useListenerPortAsContainerPort).
+#                           LB 풀 멤버 포트가 이 값이다(VS 는 그대로 VIP:443 — 사용자는 https://<FQDN>). 마스터의 호스트 443 을 다른 것이 쓰는
+#                           사이트용(2026-11-14 OA: RKE2 Traefik 의 hostPort 443 — CNI 가 그 포트의 패킷을 Envoy 보다 먼저 Traefik 으로 넘긴다).
+#                           1024 이상이면 마스터 sysctl ip_unprivileged_port_start(S0-5)가 필요 없다. NodePort 범위(30000~32767)·Envoy 자체 포트
+#                           (19000~19003)·k8s 구성요소 포트는 FAIL, 32768 이상(나가는 연결의 임시 포트 범위)은 알림. 권장 예: 10443.
 #   PORTAL_TLS_SECRET       Gateway 리스너 인증서 Secret(ns dms, kubernetes.io/tls). 기본 dms-portal-tls(설계 #14).
 #   GATEWAY_ENVOY_CPU_REQUEST·GATEWAY_ENVOY_MEMORY_REQUEST  Envoy requests(기본 100m/256Mi, limits 1/2Gi 는 base — 테스트베드 50m/128Mi, 설계 10).
 #                           limits 를 넘으면 FAIL(EG 가 만드는 DaemonSet 을 apiserver 가 거절한다 — SSA 는 통과해 늦게 드러난다).
@@ -109,7 +118,7 @@ unset SHARED_FS SHARED_DIR SHARED_DIR_ID REGISTRY REGISTRY_MODE REGISTRY_CLUSTER
       REGISTRY_CPU_REQUEST REGISTRY_MEMORY_REQUEST \
       PG_STORAGE_SIZE PG_CPU_REQUEST PG_MEMORY PG_SHARED_BUFFERS PG_PLACEMENT PG_BACKUP_KEEP CONTROL_PLANE_LABEL_VALUE \
       CNPG_VERSION CNPG_OPERATOR_IMAGE PG_IMAGE \
-      GATEWAY_PROXY_PROTOCOL PORTAL_TLS_SECRET GATEWAY_ENVOY_CPU_REQUEST GATEWAY_ENVOY_MEMORY_REQUEST \
+      GATEWAY_PROXY_PROTOCOL GATEWAY_LISTEN_PORT PORTAL_TLS_SECRET GATEWAY_ENVOY_CPU_REQUEST GATEWAY_ENVOY_MEMORY_REQUEST \
       GATEWAY_API_VERSION ENVOY_GATEWAY_VERSION ENVOY_GATEWAY_IMAGE ENVOY_PROXY_IMAGE \
       DMS_TAG DMS_AGENT_TAG MFU_TAG EMAIL_DOMAIN LOCAL_ADMIN PORTAL_DOMAIN PORTAL_VIP \
       LDAP_HOST LDAP_USER_BASE LDAP_GROUP_BASE LDAP_BIND_DN IDENTITY_SUPPLEMENTARY_GROUPS
@@ -480,8 +489,33 @@ case "$GATEWAY_PROXY_PROTOCOL" in
   required) PROXY_OPTIONAL=false ;;
   optional) PROXY_OPTIONAL=true
             echo "note: GATEWAY_PROXY_PROTOCOL=optional — PROXY 헤더 없는 연결도 받는다(원 IP 자리에 직접 피어). **컷오버 중에만** 쓰고 끝나면 required 로 되돌린다(설계 4-3, deploy/README §2g)" >&2 ;;
-  *) fail "values.env 의 GATEWAY_PROXY_PROTOCOL='$GATEWAY_PROXY_PROTOCOL' — required(기본) 또는 optional(컷오버 중에만)" ;;
+  off) PROXY_OPTIONAL=""
+       echo "info: GATEWAY_PROXY_PROTOCOL=off — Envoy 가 PROXY 를 해석하지 않는다. 기록되는 원 IP 는 LB(SE) 주소다(원 IP 는 LB 로그에서 — deploy/README §2g-4). 앱 출발지 경보는 0(끔)으로 렌더한다" >&2 ;;
+  *) fail "values.env 의 GATEWAY_PROXY_PROTOCOL='$GATEWAY_PROXY_PROTOCOL' — required(기본) · optional(컷오버 중에만) · off(LB 가 PROXY v2 를 못 붙이는 사이트)" ;;
 esac
+# 출발지 경보 임계(앱 DMS_LOGIN_ALARM_SOURCE_FAILURES): off 면 0(끔) — 모든 사용자가 LB 주소 몇 개로 묶여 여러 사람의 실패가 한 「출발지」 경보로
+# 쌓인다(login_guard.LoginAlarms.note_failure 의 「원 IP 가 프록시 한 주소로 모이는 배치는 임계를 0 으로」).
+# off 면 템플릿의 자리(REPLACE_LOGIN_ALARM_SOURCE_FAILURES)에 0 을 넣고, 아니면 그 줄을 지워 base 값(k8s/20-config.yaml)이 그대로 배포된다 —
+# 평소 값의 원천은 base 하나이고 기본 렌더는 예전과 같다.
+if [ "$GATEWAY_PROXY_PROTOCOL" = off ]; then ALARM_SED='s|REPLACE_LOGIN_ALARM_SOURCE_FAILURES|0|g'
+else ALARM_SED='/REPLACE_LOGIN_ALARM_SOURCE_FAILURES/d'; fi
+# 리스너(호스트) 포트(2026-11-14, 위 머리말). 숫자는 로캘과 무관하게 글자 목록으로 본다.
+_set "${GATEWAY_LISTEN_PORT:-}" || GATEWAY_LISTEN_PORT=443
+case "$GATEWAY_LISTEN_PORT" in
+  ""|0*|*[!0123456789]*) fail "values.env 의 GATEWAY_LISTEN_PORT='$GATEWAY_LISTEN_PORT' — 포트 번호(1~65535, 기본 443 · 예: 10443)" ;;
+esac
+[ "${#GATEWAY_LISTEN_PORT}" -le 5 ] && [ "$GATEWAY_LISTEN_PORT" -le 65535 ] \
+  || fail "values.env 의 GATEWAY_LISTEN_PORT='$GATEWAY_LISTEN_PORT' — 65535 이하"
+case "$GATEWAY_LISTEN_PORT" in
+  19000|19001|19002|19003) fail "values.env 의 GATEWAY_LISTEN_PORT=$GATEWAY_LISTEN_PORT — Envoy 자체 포트(19000 admin·19001 stats·19002 shutdown-manager·19003 readiness)와 겹친다" ;;
+  22|2379|2380|2381|6443|9345|10248|10249|10250|10256|10257|10259) fail "values.env 의 GATEWAY_LISTEN_PORT=$GATEWAY_LISTEN_PORT — 노드·쿠버네티스 구성요소(ssh·etcd·apiserver·RKE2·kubelet·kube-proxy·controller-manager·scheduler)가 쓰는 포트다" ;;
+esac
+if [ "$GATEWAY_LISTEN_PORT" -ge 30000 ] && [ "$GATEWAY_LISTEN_PORT" -le 32767 ]; then
+  fail "values.env 의 GATEWAY_LISTEN_PORT=$GATEWAY_LISTEN_PORT — NodePort 범위(30000~32767)다. 어떤 Service 가 그 번호를 받으면 kube-proxy 가 그 포트의 패킷을 가로챈다(Envoy 는 LISTEN 으로 보여도 트래픽을 못 받는다). 예: 10443"
+fi
+if [ "$GATEWAY_LISTEN_PORT" -ge 32768 ]; then
+  echo "note: GATEWAY_LISTEN_PORT=$GATEWAY_LISTEN_PORT — 나가는 연결의 임시 포트 범위(기본 32768~60999)다. Envoy 재기동 때 그 번호를 다른 연결이 쓰고 있으면 bind 에 실패할 수 있다(마스터의 net.ipv4.ip_local_reserved_ports 에 넣거나 32768 미만으로 — 예: 10443)" >&2
+fi
 _set "${PORTAL_TLS_SECRET:-}" || PORTAL_TLS_SECRET=dms-portal-tls
 # Secret 이름 = DNS-1123 subdomain(소문자·숫자·. -, 점으로 나눈 라벨마다 처음·끝은 영숫자, 253자 이하).
 case "$PORTAL_TLS_SECRET" in
@@ -528,10 +562,16 @@ if [ "$TEMPLATE" = 1 ]; then
       -e "s|REPLACE_SHARED_DIR|$SHARED_DIR|g" \
       -e "s|REPLACE_EMAIL_DOMAIN|$EMAIL_DOMAIN|g" \
       -e "s|REPLACE_LOCAL_ADMIN|$LOCAL_ADMIN|g" \
+      -e "$ALARM_SED" \
       -e "s|REPLACE_PORTAL_DOMAIN|$PORTAL_DOMAIN|g" \
       -e "s|REPLACE_PORTAL_VIP|$PORTAL_VIP|g" \
       "$f"
   done
+fi
+# 고정 오버레이(값이 오버레이 파일에 커밋돼 있다)에서 off 를 쓰면 출발지 경보 0 도 그 파일에 있어야 한다 — 렌더는 고정 오버레이를 고치지 않는다.
+if [ "$TEMPLATE" != 1 ] && [ "$GATEWAY_PROXY_PROTOCOL" = off ] \
+   && ! grep -h -v '^[[:space:]]*#' "$TMP"/app/*.yaml | grep -q 'DMS_LOGIN_ALARM_SOURCE_FAILURES:[[:space:]]*"0"'; then
+  echo "note: GATEWAY_PROXY_PROTOCOL=off 인데 $OV/patch-config.yaml 에 DMS_LOGIN_ALARM_SOURCE_FAILURES: \"0\" 이 없다 — 모든 사용자가 LB 주소로 묶여 출발지 경보가 여러 사람의 실패로 뜬다(고정 오버레이는 파일에서 직접 고친다)" >&2
 fi
 if [ -n "$CPV" ]; then
   if [ "$TEMPLATE" = 1 ]; then
@@ -782,7 +822,7 @@ _re() { printf '%s' "$1" | sed 's/[.]/\\./g'; }
 {
   echo "$HEAD"
   echo "# 적용(S8 셋째, addons/envoy-gateway 가 Ready 된 뒤): kubectl --context <ctx> apply --server-side --field-manager=dms-install -k <이 디렉터리>"
-  echo "# → Gateway dms-portal Programmed 대기 → **마스터마다** \`ss -ltnp\` 에 :443(Programmed 는 bind 실패를 못 잡는다 — deploy/README §2g). PROXY 모드 = $GATEWAY_PROXY_PROTOCOL."
+  echo "# → Gateway dms-portal Programmed 대기 → **마스터마다** \`ss -ltnp\` 에 :$GATEWAY_LISTEN_PORT(Programmed 는 bind 실패를 못 잡는다 — deploy/README §2g). PROXY 모드 = $GATEWAY_PROXY_PROTOCOL."
   echo "apiVersion: kustomize.config.k8s.io/v1beta1"
   echo "kind: Kustomization"
   echo "resources:"
@@ -822,9 +862,15 @@ _re() { printf '%s' "$1" | sed 's/[.]/\\./g'; }
   echo "      kind: ClientTrafficPolicy"
   echo "      name: dms-portal"
   echo "    patch: |-"
-  echo "      - op: replace"
-  echo "        path: /spec/proxyProtocol/optional"
-  echo "        value: $PROXY_OPTIONAL"
+  if [ "$GATEWAY_PROXY_PROTOCOL" = off ]; then
+    # off: proxyProtocol 칸을 통째로 뺀다 — Envoy 리스너에 proxy_protocol 필터가 붙지 않는다(optional 과 달리 클라이언트가 심은 헤더도 읽지 않는다).
+    echo "      - op: remove"
+    echo "        path: /spec/proxyProtocol"
+  else
+    echo "      - op: replace"
+    echo "        path: /spec/proxyProtocol/optional"
+    echo "        value: $PROXY_OPTIONAL"
+  fi
   echo "  - target:"
   echo "      group: gateway.networking.k8s.io"
   echo "      kind: Gateway"
@@ -836,6 +882,12 @@ _re() { printf '%s' "$1" | sed 's/[.]/\\./g'; }
   echo "      - op: replace"
   echo "        path: /spec/listeners/0/tls/certificateRefs/0/name"
   echo "        value: $PORTAL_TLS_SECRET"
+  if [ "$GATEWAY_LISTEN_PORT" != 443 ]; then
+    # 리스너 포트 = Envoy 가 마스터 호스트에서 여는 포트(hostNetwork + useListenerPortAsContainerPort). 기본 443 이면 base 그대로(패치 없음).
+    echo "      - op: replace"
+    echo "        path: /spec/listeners/0/port"
+    echo "        value: $GATEWAY_LISTEN_PORT"
+  fi
 } > "$TMP/platform/gateway/kustomization.yaml"
 
 # --- DB 층(2026-11-03 ⑤, 설계 6-1·6-2·6-4·8-1 S10) — base(deploy/platform/db/*)를 가리키는 kustomization + 사이트 값 ----------------------
@@ -1022,6 +1074,7 @@ fi
   echo "ENVOY_GATEWAY_REF=$EG_REF"
   echo "ENVOY_PROXY_REF=$ENVOY_REF"
   echo "GATEWAY_PROXY_PROTOCOL=$GATEWAY_PROXY_PROTOCOL"
+  echo "GATEWAY_LISTEN_PORT=$GATEWAY_LISTEN_PORT"
   echo "PORTAL_TLS_SECRET=$PORTAL_TLS_SECRET"
   echo "PORTAL_DOMAIN=${PORTAL_DOMAIN:-}"
   echo "PORTAL_VIP=${PORTAL_VIP:-}"

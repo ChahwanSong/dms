@@ -56,3 +56,7 @@ data:
   # 특권 요청자: 로컬 운영자 계정. k8s 모드에서는 「맵핑 면제(전체 PV·직접 경로·사용자 지정)」의 기준이다(모든 잡이
   # root 라 root 자격이 아니다). 계정 화면의 「전체 PV·직접 경로 권한」 부여로도 넓힌다(root/admin 은 관례상 유지).
   DMS_PRIVILEGED_REQUESTERS: "root,admin,REPLACE_LOCAL_ADMIN"
+  # 출발지(원 IP)별 로그인 실패 경보 임계 — 렌더러가 다룬다(2026-11-14): GATEWAY_PROXY_PROTOCOL=off 면 "0"(끔)을 넣고, 아니면 이 줄을 지워
+  # base 값(20-config.yaml)이 그대로 배포된다.
+  # off 에서는 모든 사용자가 LB(SE) 주소 몇 개로 보여 여러 사람의 실패가 한 「출발지」 경보로 쌓인다(deploy/README §2g-4).
+  DMS_LOGIN_ALARM_SOURCE_FAILURES: "REPLACE_LOGIN_ALARM_SOURCE_FAILURES"

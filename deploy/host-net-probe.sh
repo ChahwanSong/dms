@@ -2,8 +2,10 @@
 # 마스터 호스트 netns 프로브(2026-11-03 ⑦, 설계 v6 4-3 「443 바인드」 — S8 마스터 전부 sysctl ≤ 443 재확인·S12 마스터마다 :443; 기록은
 # docs/CHANGELOG.md 「⑦ 설치기」).
 #
-#   sh deploy/host-net-probe.sh --context <ctx> --image <ref> (--sysctl | --listen) [--nodes a,b] [--namespace dms] [--timeout 120]
+#   sh deploy/host-net-probe.sh --context <ctx> --image <ref> (--sysctl | --listen) [--port 443] [--nodes a,b] [--namespace dms] [--timeout 120]
 #
+#   --port    Envoy 리스너 포트(기본 443 — render.env 의 GATEWAY_LISTEN_PORT, 2026-11-14). --sysctl 은 「ip_unprivileged_port_start ≤ 포트」,
+#             --listen 은 「:포트 LISTEN」을 본다. 1024 이상이면 sysctl 은 볼 필요가 없다(설치기가 건너뛴다).
 #   --sysctl  노드마다 호스트 netns 의 net.ipv4.ip_unprivileged_port_start ≤ 443 인가(S8 — platform/gateway 적용 전). Envoy 는 비 root(65532)라
 #             이 값이 443 보다 크면 그 마스터만 443 bind 에 실패한다(설계 4-3 (i), deploy/README §2g-2).
 #   --listen  노드마다 호스트 netns 에 :443 LISTEN 소켓이 있는가(S8 Programmed 뒤·S12). 왜 따로 보는가(2026-11-03 ⑥ 리뷰 1): sysctl 이 빠진
@@ -22,10 +24,10 @@
 # --context 를 붙인다(필수 — current-context 에 기대지 않는다).
 set -u
 usage() {
-  echo "usage: $0 --context <ctx> --image <ref> (--sysctl | --listen) [--nodes a,b] [--namespace dms] [--timeout 120]" >&2
+  echo "usage: $0 --context <ctx> --image <ref> (--sysctl | --listen) [--port 443] [--nodes a,b] [--namespace dms] [--timeout 120]" >&2
   exit 2
 }
-CTX="" IMG="" MODE="" NODES="" NS=dms TIMEOUT=120
+CTX="" IMG="" MODE="" NODES="" NS=dms TIMEOUT=120 PORT=443
 while [ $# -gt 0 ]; do
   case "$1" in
     --context) [ $# -ge 2 ] && [ -n "$2" ] || usage; CTX=$2; shift ;;
@@ -34,6 +36,7 @@ while [ $# -gt 0 ]; do
     --nodes) [ $# -ge 2 ] && [ -n "$2" ] || usage; NODES=$2; shift ;;
     --namespace) [ $# -ge 2 ] && [ -n "$2" ] || usage; NS=$2; shift ;;
     --timeout) [ $# -ge 2 ] || usage; TIMEOUT=$2; shift ;;
+    --port) [ $# -ge 2 ] || usage; PORT=$2; shift ;;
     --sysctl) MODE=sysctl ;;
     --listen) MODE=listen ;;
     *) usage ;;
@@ -42,6 +45,9 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$CTX" ] && [ -n "$IMG" ] && [ -n "$MODE" ] || usage
 case "$TIMEOUT" in ""|*[!0-9]*) usage ;; esac
+case "$PORT" in ""|0*|*[!0-9]*) usage ;; esac
+[ "${#PORT}" -le 5 ] && [ "$PORT" -le 65535 ] || usage
+PORT_HEX=$(printf '%04X' "$PORT")      # /proc/net/tcp 의 포트 표기(대문자 16진 4자리 — 443 = 01BB)
 # 이미지·노드 이름은 아래 JSON 에 그대로 들어간다 — 따옴표·역슬래시·공백이 없는 모양만 받는다.
 case "$IMG" in *[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:/@-]*) usage ;; esac
 case "$NODES" in *[!abcdefghijklmnopqrstuvwxyz0123456789.,-]*) usage ;; esac
@@ -71,7 +77,7 @@ cleanup     # 옛 프로브(중단된 실행)를 먼저 지운다 — 옛 결과
 if [ "$MODE" = sysctl ]; then
   SCRIPT="echo VALUE=\$(cat /proc/sys/net/ipv4/ip_unprivileged_port_start)"
 else
-  SCRIPT="echo VALUE=\$(cat /proc/net/tcp /proc/net/tcp6 2>/dev/null | grep -cE '^ *[0-9]+: [0-9A-F]+:01BB [0-9A-F]+:[0-9A-F]+ 0A ')"
+  SCRIPT="echo VALUE=\$(cat /proc/net/tcp /proc/net/tcp6 2>/dev/null | grep -cE '^ *[0-9]+: [0-9A-F]+:$PORT_HEX [0-9A-F]+:[0-9A-F]+ 0A ')"
 fi
 DEADLINE=$((TIMEOUT + 30))
 i=0
@@ -108,11 +114,11 @@ while read -r pod node phase why; do
     unk=$((unk + 1)); continue
   fi
   if [ "$MODE" = sysctl ]; then
-    if [ "$val" -le 443 ]; then echo "NODE $node PASS ip_unprivileged_port_start=$val"; pass=$((pass + 1))
-    else echo "NODE $node FAIL ip_unprivileged_port_start=$val > 443 — /etc/sysctl.d/90-dms-envoy.conf + sysctl --system(deploy/README §2g-2, S0-5)"; fail=$((fail + 1)); fi
+    if [ "$val" -le "$PORT" ]; then echo "NODE $node PASS ip_unprivileged_port_start=$val"; pass=$((pass + 1))
+    else echo "NODE $node FAIL ip_unprivileged_port_start=$val > $PORT — /etc/sysctl.d/90-dms-envoy.conf + sysctl --system(deploy/README §2g-2, S0-5)"; fail=$((fail + 1)); fi
   else
-    if [ "$val" -ge 1 ]; then echo "NODE $node PASS :443 LISTEN(${val}개)"; pass=$((pass + 1))
-    else echo "NODE $node FAIL :443 LISTEN 없음 — sysctl(§2g-2)을 고친 뒤 그 노드의 Envoy 파드를 지운다(EG 가 같은 설정을 다시 내려 주지 않는다)"; fail=$((fail + 1)); fi
+    if [ "$val" -ge 1 ]; then echo "NODE $node PASS :$PORT LISTEN(${val}개)"; pass=$((pass + 1))
+    else echo "NODE $node FAIL :$PORT LISTEN 없음 — sysctl(§2g-2)을 고친 뒤 그 노드의 Envoy 파드를 지운다(EG 가 같은 설정을 다시 내려 주지 않는다)"; fail=$((fail + 1)); fi
   fi
 done <<EOF
 $rows

@@ -779,13 +779,37 @@ stage_S8() {
   _g=$(det gateway action)
   if applies gateway; then
     tls_gate
-    master_probe --sysctl "마스터 sysctl ip_unprivileged_port_start ≤ 443(S0-5)"
+    hostport_gate
+    # 1024 이상 포트는 비 root 도 bind 한다 — sysctl(S0-5)은 리스너 포트가 1024 미만일 때만 본다(GATEWAY_LISTEN_PORT, 2026-11-14).
+    if [ "$(gw_port)" -lt 1024 ]; then master_probe --sysctl "마스터 sysctl ip_unprivileged_port_start ≤ $(gw_port)(S0-5)"
+    else info "리스너 포트 $(gw_port) ≥ 1024 — 마스터 sysctl(S0-5) 확인을 건너뛴다"; fi
     ssa platform/gateway "$_g"
   else info "platform/gateway: $(det gateway code) $_g — 적용하지 않는다(확인만)"; fi
   kcn wait --for=condition=Programmed gateway/dms-portal --timeout="${ROLLOUT_TIMEOUT:-180}s" >/dev/null 2>&1 \
     || die "Gateway dms-portal 이 Programmed 가 아니다 — kubectl --context $CTX -n $NS describe gateway dms-portal(deploy/README §2g-3 표)"
   ok "Gateway dms-portal Programmed"
-  master_probe --listen "마스터마다 :443 LISTEN(Programmed 는 bind 실패를 못 잡는다 — §2g-2)"
+  master_probe --listen "마스터마다 :$(gw_port) LISTEN(Programmed 는 bind 실패를 못 잡는다 — §2g-2)"
+}
+gw_port() {   # Envoy 리스너(마스터 호스트) 포트 — render.env 의 GATEWAY_LISTEN_PORT(옛 렌더에는 없다 → 443)
+  _p=$(rv GATEWAY_LISTEN_PORT)
+  case "$_p" in ""|*[!0123456789]*) _p=443 ;; esac
+  printf '%s' "$_p"
+}
+hostport_gate() {
+  # 마스터에 hostPort <리스너 포트> 를 쓰는 남의 파드가 있으면 멈춘다(2026-11-14 OA 실측 — RKE2 Traefik 의 hostPort 443). hostPort 는 호스트
+  # 소켓이 아니라 CNI 의 DNAT 규칙이라 `ss`·--listen 프로브에는 Envoy 만 보이는데, 그 포트로 온 패킷은 Envoy 보다 먼저 그 파드로 넘어간다 —
+  # Gateway 는 Programmed, LB 풀도 up 인데 포탈만 남의 것이 답한다. hostNetwork 파드(자기 Envoy 포함)는 hostPort 가 자동으로 채워질 뿐이라 뺀다.
+  _port=$(gw_port)
+  _cp=$(kc get nodes -l node-role.kubernetes.io/control-plane -o 'jsonpath={range .items[*]}{.metadata.name}{","}{end}' 2>/dev/null | tr ',' ' ') || _cp=""
+  if ! kc get pods -A -o 'jsonpath={range .items[*]}{.metadata.namespace}/{.metadata.name}{"\t"}{.spec.nodeName}{"\t"}{.spec.hostNetwork}{"\t"}{range .spec.containers[*]}{range .ports[*]}{.hostPort}{" "}{end}{end}{"\n"}{end}' > "$WORK/hostports.out" 2>/dev/null; then
+    warn "hostPort $_port 충돌을 확인하지 못했다(파드 목록 조회 실패) — kubectl --context $CTX get pods -A -o yaml | grep -n 'hostPort: $_port'"
+    return 0
+  fi
+  _hits=$(awk -F '\t' -v port="$_port" -v cps=" $_cp " '$3 != "true" && index(cps, " " $2 " ") { n = split($4, a, " "); for (i = 1; i <= n; i++) if (a[i] == port) { print $1 "@" $2; break } }' "$WORK/hostports.out" | sort -u | tr '\n' ' ')
+  if [ -n "$_hits" ]; then
+    die "마스터에 hostPort $_port 를 쓰는 다른 파드가 있다: ${_hits}— CNI 가 그 포트로 오는 패킷을 Envoy 보다 먼저 그 파드로 넘긴다(Envoy 는 LISTEN 으로 보여도 트래픽을 못 받는다). values.env 의 GATEWAY_LISTEN_PORT 를 비어 있는 포트(예: 10443)로 바꾸고 LB 풀 멤버 포트·방화벽을 그 포트로 맞춘 뒤 다시 실행한다(deploy/README §2g-1·§2g-4)"
+  fi
+  ok "마스터에 hostPort $_port 를 쓰는 다른 파드 없음"
 }
 eg_certgen_state() {
   _st=$(kc -n envoy-gateway-system get job eg-gateway-helm-certgen -o 'jsonpath={range .status.conditions[?(@.status=="True")]}{.type} {end}' 2>/dev/null) \
@@ -818,7 +842,7 @@ wait_job_ns_eg() {   # certgen Job — 끝나고 30초 뒤 TTL 로 지워진다(
 master_probe() {   # $1 = --sysctl|--listen, $2 = 무엇 — host-net-probe.sh(마스터 호스트 netns, dms 이미지)
   _img=$(dms_image)
   [ -n "$_img" ] || die "앱 렌더에서 dms 이미지를 찾지 못했다(마스터 프로브용)"
-  sh "$HERE/host-net-probe.sh" --context "$CTX" --namespace "$NS" --image "$_img" "$1" > "$WORK/hnp.out" 2>&1
+  sh "$HERE/host-net-probe.sh" --context "$CTX" --namespace "$NS" --image "$_img" --port "$(gw_port)" "$1" > "$WORK/hnp.out" 2>&1
   _rc=$?
   sed 's/^/    /' "$WORK/hnp.out"
   judge "$_rc" "$2"

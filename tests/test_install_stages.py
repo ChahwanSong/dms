@@ -41,6 +41,7 @@ for d in app platform/priorityclass platform/registry platform/gateway platform/
   echo "REGISTRY_CLUSTER_IP=${FAKE_RCIP-10.96.0.50}"; echo "REGISTRY_PORT=5000"; echo "REGISTRY_TLS_VERIFY=${FAKE_TLS:-false}"
   echo "ADDON_REGISTRY=${FAKE_ADDON_REGISTRY:-10.96.0.50:5000}"; echo "SHARED_DIR=/srv/shared"; echo "PORTAL_TLS_SECRET=dms-portal-tls"
   echo "PORTAL_DOMAIN="; echo "PORTAL_VIP="; } > "$OUT/render.env"
+[ -z "${FAKE_GWPORT:-}" ] || echo "GATEWAY_LISTEN_PORT=$FAKE_GWPORT" >> "$OUT/render.env"     # 옛 렌더에는 이 키가 없다(= 443)
 [ -z "${FAKE_PIN:-}" ] || echo "$FAKE_PIN" > "$OUT/app/kube-context"
 echo "PLATFORM: $OUT/platform/priorityclass"
 echo "RENDERED: $OUT/app"
@@ -573,6 +574,13 @@ _EVENTS = ("dms-registry-6d9f-abc   cp2      FailedMount        MountVolume.SetU
            "dms-registry-6d9f-xyz   <none>   FailedScheduling   0/3 nodes are available: 3 Insufficient cpu.\n"
            "other-pod-1             cp1      FailedMount        unrelated\n")
 
+# `kubectl get pods -A -o jsonpath=…` 의 줄 모양(S8 hostport_gate): ns/이름 \t 노드 \t hostNetwork \t 컨테이너들의 hostPort.
+# Traefik(hostPort 80·443)이 마스터 cp1 과 워커 w1 에, DMS 자기 Envoy(hostNetwork — hostPort 가 자동으로 채워진다)가 cp1 에 있는 모양.
+_TRAEFIK_ON_MASTER = ("kube-system/rke2-traefik-aaa\tcp1\t\t80 443 \n"
+                      "kube-system/rke2-traefik-bbb\tw1\t\t80 443 \n"
+                      "envoy-gateway-system/envoy-dms-portal-x\tcp1\ttrue\t443 19003 \n"
+                      "dms/dms-api-1\tcp1\t\t \n")
+
 # (id, 시작 단계, 시나리오, 세계 덮어쓰기, env, rc, 그 단계 판정, 출력에 있어야 할 말, 적용되면 안 되는 층(렌더 디렉터리 기준))
 STOPS = [
     ("S2-key-missing", "S2", {}, {"secret_data": "DMS_DATABASE_URL=x\nDMS_SHARED_TOKEN=x\nDMS_SESSION_SECRET=x\n"}, {}, 1, "FAIL",
@@ -589,6 +597,9 @@ STOPS = [
     ("S4-v2-not-200", "S4", {}, {}, {"FAKE_CURL_V2": "401"}, 1, "FAIL", ["/v2/ 가 200 이 아니다(HTTP 401)"], []),
     ("S6-pull-fail", "S6", {"pull-probe.py": {"rc": 1}}, {}, {}, 1, "FAIL", ["pull 프로브"], []),
     ("S8-sysctl", "S8", {"host-net-probe.sh --sysctl": {"rc": 1}}, {}, {}, 1, "FAIL", ["ip_unprivileged_port_start"], ["platform/gateway"]),
+    # 2026-11-14(OA — RKE2 Traefik): 마스터에 hostPort <리스너 포트> 를 쓰는 남의 파드가 있으면 SSA 전에 멈춘다(ss·LISTEN 프로브는 못 잡는다)
+    ("S8-hostport", "S8", {}, {"hostport_pods": _TRAEFIK_ON_MASTER}, {}, 1, "FAIL",
+     ["hostPort 443 를 쓰는 다른 파드", "kube-system/rke2-traefik-aaa@cp1", "GATEWAY_LISTEN_PORT"], ["platform/gateway"]),
     ("S8-programmed", "S8", {}, {"fail": {"wait --for=condition=Programmed": [1, "error: timed out"]}}, {}, 1, "FAIL",
      ["Programmed 가 아니다"], []),
     ("S9-webhook", "S9", {}, {"fail": {"--dry-run=server -k": [1, _WEBHOOK]}}, {"WEBHOOK_RETRIES": "2"}, 1, "FAIL",
@@ -1161,7 +1172,9 @@ case "$*" in
   "version -o json") printf '{"serverVersion": {"gitVersion": "%s"}}' "$FAKE_VER"; exit 0 ;;
   version) exit 0 ;;
   "get nodes -l node-role.kubernetes.io/control-plane --no-headers") printf 'cp1 Ready\ncp2 Ready\ncp3 Ready\n'; exit 0 ;;
+  "get nodes -l node-role.kubernetes.io/control-plane -o jsonpath={range .items[*]}{.metadata.name}{\",\"}{end}") printf 'cp1,cp2,cp3,'; exit 0 ;;
   "get nodes -l node-role.kubernetes.io/control-plane -o jsonpath="*) printf 'cp1:node-role.kubernetes.io/control-plane=NoSchedule, '; exit 0 ;;
+  "get pods -A -o jsonpath="*) printf '%b' "${FAKE_HOSTPORT_PODS:-}"; exit 0 ;;
   "get crd jobs.batch.volcano.sh -o jsonpath="*) printf 'v1alpha1'; exit 0 ;;
   "get crd jobs.batch.volcano.sh"|"get crd queues.scheduling.volcano.sh") [ -z "${FAKE_NO_VOLCANO:-}" ]; exit $? ;;
   "get ns dms") [ -n "${FAKE_NS_ENFORCE+x}" ]; exit $? ;;
@@ -1176,14 +1189,14 @@ exit 1
 
 
 def _preflight(tmp_path, ver="v1.34.6", cidrs="10.96.0.0/12 ", parent="", rcip="10.96.0.50", shared="/srv/shared", svcs="",
-               mode="in-cluster", registry="", tls="false", **env_over):
+               mode="in-cluster", registry="", tls="false", render_extra="", **env_over):
     b = tmp_path / "bin"
     b.mkdir(exist_ok=True)
     (b / "kubectl").write_text(_PREFLIGHT_KUBECTL)
     (b / "kubectl").chmod(0o755)
     renv = tmp_path / "render.env"
     renv.write_text(f"REGISTRY_MODE={mode}\nREGISTRY_CLUSTER_IP={rcip}\nREGISTRY_PORT=5000\nSHARED_DIR={shared}\n"
-                    f"REGISTRY={registry or (rcip + ':5000' if rcip else '')}\nREGISTRY_TLS_VERIFY={tls}\n")
+                    f"REGISTRY={registry or (rcip + ':5000' if rcip else '')}\nREGISTRY_TLS_VERIFY={tls}\n{render_extra}")
     log = tmp_path / "kube.log"
     if log.exists():
         log.unlink()
@@ -1206,7 +1219,32 @@ def test_preflight_passes_a_good_cluster_and_prints_the_node_checklist(tmp_path)
                    "findmnt -no TARGET,SOURCE,FSTYPE,OPTIONS -T /srv/shared", "ip_unprivileged_port_start", "signature_policy"):
         assert needle in r.stdout, needle
     assert "MetalLB 미설치" not in r.stdout and "IngressClass 'nginx' 없음" not in r.stdout
+    assert "[PASS] 마스터에 hostPort 443 를 쓰는 다른 파드 없음" in r.stdout              # 2026-11-14 — 기본 리스너 포트
     assert [c for c in calls if not (c.startswith("--context known ") or c.startswith("config get-contexts"))] == []
+
+
+_PF_TRAEFIK = "kube-system/rke2-traefik-aaa\\tcp1\\t\\t80 443 \\nkube-system/rke2-traefik-bbb\\tw1\\t\\t80 443 \\n" \
+              "envoy-gateway-system/envoy-dms-portal-x\\tcp2\\ttrue\\t443 19003 \\n"
+
+
+def test_preflight_stops_on_a_foreign_hostport_on_the_masters_and_follows_the_listen_port(tmp_path):
+    """2026-11-14(OA — RKE2 Traefik 의 hostPort 443): hostPort 는 CNI 의 DNAT 이라 `ss` 에 안 보이는데 그 포트의 패킷을 Envoy 보다 먼저
+    가져간다 — S1 에서 멈추고 GATEWAY_LISTEN_PORT 를 가리킨다. 워커의 파드·hostNetwork 파드(자기 Envoy)는 세지 않는다. 포트를 옮기면 통과하고
+    sysctl 안내가 빠지며 `ss` 안내의 포트가 따라간다."""
+    a = tmp_path / "default"
+    a.mkdir()
+    r, _ = _preflight(a, FAKE_HOSTPORT_PODS=_PF_TRAEFIK)
+    assert r.returncode != 0, r.stdout
+    assert "[FAIL] 마스터에 hostPort 443 를 쓰는 다른 파드가 있다: kube-system/rke2-traefik-aaa@cp1 —" in r.stdout, r.stdout
+    assert "GATEWAY_LISTEN_PORT" in r.stdout and "rke2-traefik-bbb" not in r.stdout and "envoy-dms-portal-x" not in r.stdout
+    b = tmp_path / "moved"
+    b.mkdir()
+    r, _ = _preflight(b, render_extra="GATEWAY_LISTEN_PORT=10443\nGATEWAY_PROXY_PROTOCOL=off\n", FAKE_HOSTPORT_PODS=_PF_TRAEFIK)
+    assert r.returncode == 0, r.stdout
+    assert "[PASS] 마스터에 hostPort 10443 를 쓰는 다른 파드 없음" in r.stdout
+    assert "PROXY 모드 off) → 마스터 :10443 의 Envoy" in r.stdout
+    assert "리스너 포트 10443 ≥ 1024" in r.stdout and "ip_unprivileged_port_start   # " not in r.stdout
+    assert "sport = :10443 or sport = :19000" in r.stdout
 
 
 @pytest.mark.parametrize("kw, needle", [
@@ -1279,3 +1317,36 @@ def test_preflight_in_cluster_checklist_is_unchanged_without_a_render_env(tmp_pa
     r = subprocess.run(["sh", str(DEPLOY / "preflight-cluster.sh"), "--context", "known"], env=env, capture_output=True, text=True,
                        timeout=60)
     assert r.returncode == 0 and "crictl inspecti <REGISTRY_CLUSTER_IP>:5000/registry:" in r.stdout, r.stdout
+
+
+# --- 리스너 포트·hostPort 충돌(2026-11-14 OA — RKE2 Traefik 이 hostPort 443 을 쥔 클러스터) -----------------------------------------------
+
+def test_s8_ignores_host_network_pods_and_workers_when_looking_for_hostport_conflicts(rig):
+    # 자기 Envoy(hostNetwork)와 워커의 hostPort 파드는 충돌이 아니다 — 마스터의 비 hostNetwork 파드만 본다.
+    rig.world(installed_world(hostport_pods="kube-system/rke2-traefik-bbb\tw1\t\t80 443 \n"
+                                            "envoy-gateway-system/envoy-dms-portal-x\tcp1\ttrue\t443 19003 \n"))
+    r = rig.run("--context", "known", "--site", "testbed-k8s", "--stage", "S8")
+    assert r.returncode == 0 and stages(r)[0] == ("S8", "PASS"), r.all
+    assert "hostPort 443 를 쓰는 다른 파드 없음" in r.all
+    assert [a[-1] for a in rig.helper_calls("host-net-probe.sh")] == ["--sysctl", "--listen"]
+    assert all(a[a.index("--port") + 1] == "443" for a in rig.helper_calls("host-net-probe.sh"))
+
+
+def test_s8_follows_the_rendered_listen_port_and_skips_the_sysctl_probe_above_1024(rig):
+    # GATEWAY_LISTEN_PORT=10443: Traefik 의 hostPort 443 은 더는 충돌이 아니고, 비특권 포트라 sysctl(S0-5) 프로브를 건너뛰며,
+    # LISTEN 프로브는 그 포트를 본다.
+    rig.world(installed_world(hostport_pods=_TRAEFIK_ON_MASTER))
+    r = rig.run("--context", "known", "--site", "testbed-k8s", "--stage", "S8", FAKE_GWPORT="10443")
+    assert r.returncode == 0 and stages(r)[0] == ("S8", "PASS"), r.all
+    assert "hostPort 10443 를 쓰는 다른 파드 없음" in r.all and "sysctl(S0-5) 확인을 건너뛴다" in r.all
+    calls = rig.helper_calls("host-net-probe.sh")
+    assert [a[-1] for a in calls] == ["--listen"] and calls[0][calls[0].index("--port") + 1] == "10443", calls
+    assert ":10443 LISTEN" in r.all
+
+
+def test_s8_hostport_check_that_cannot_list_pods_warns_and_goes_on(rig):
+    # 모름 ≠ 실패: 파드 목록을 못 읽으면 알리고 계속한다(Programmed·LISTEN 프로브가 남은 판정).
+    rig.world(installed_world(fail={"get pods -A": [1, "Error from server (Forbidden): pods is forbidden"]}))
+    r = rig.run("--context", "known", "--site", "testbed-k8s", "--stage", "S8")
+    assert stages(r)[0] == ("S8", "WARN"), r.all
+    assert "hostPort 443 충돌을 확인하지 못했다" in r.all

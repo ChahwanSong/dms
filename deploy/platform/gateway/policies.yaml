@@ -7,6 +7,7 @@
 #     때. optional 이면 PROXY 없는 연결의 원 IP 자리에 직접 피어(LB·SE)가 남고, 「PROXY 가 빠진 LB 설정」이 조용히 통과한다(필수면 접속 실패로
 #     바로 드러난다). 기록만 틀릴 뿐 차단 판정에는 쓰지 않는다(#15·12 위험 16). 렌더 값 GATEWAY_PROXY_PROTOCOL=optional 만 이 칸을 true 로
 #     바꾼다(deploy/render.sh — 기본 required, 컷오버 절차 deploy/README §2g).
+#     LB 가 PROXY v2 를 못 붙이는 사이트는 GATEWAY_PROXY_PROTOCOL=off — 렌더가 이 proxyProtocol 칸을 통째로 뺀다(상시 모드, 2026-11-14 — README §2g-4).
 #   headers.earlyRequestHeaders.remove X-Real-IP — 라우팅·XFF 처리 전에 지운다. 앱(src/dms/api/auth.py client_ip)은 X-Real-IP 를 읽지 않지만, 정책이
 #     빠진 배치에서 클라이언트가 보낸 위조값(실측 6.6.6.6)이 그대로 백엔드에 닿지 않게 두 겹으로 둔다.
 #   clientIPDetection 은 **두지 않는다** — 기본(use_remote_address, 신뢰 홉 0)에서 Envoy 는 PROXY 헤더로 얻은 원 IP 를 XFF **끝에** 덧붙인다

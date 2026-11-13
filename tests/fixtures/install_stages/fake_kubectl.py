@@ -227,6 +227,8 @@ if kind == "pod":
     if "-l" in rest:                                   # 레지스트리 파드의 노드(S4 실패 사유)
         out(W.get("pod_nodes", ""))
     out("True")
+if kind == "pods":                                      # S8 hostPort 충돌 감지(2026-11-14) — 「ns/이름\t노드\thostNetwork\thostPort들」 줄
+    out(W.get("hostport_pods", ""))
 if kind == "cronjob":
     out(W.get("cronjob_last", ""))
 if kind == "job":

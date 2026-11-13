@@ -433,8 +433,69 @@ def test_optional_proxy_only_through_the_explicit_value_and_it_says_so(tmp_path)
     assert _render_env(out)["GATEWAY_PROXY_PROTOCOL"] == "optional"
 
 
+def _app_config(out: Path) -> dict:
+    """앱 층 렌더(kustomize)의 ConfigMap dms-config data."""
+    cm = doc(_kustomize(out / "app"), "ConfigMap", "dms-config")
+    return dict(re.findall(r'(?m)^  (DMS_[A-Z0-9_]+): "?([^"\n]*)"?$', cm))
+
+
+@needs_kubectl
+def test_proxy_off_drops_the_proxy_filter_and_turns_the_source_alarm_off(tmp_path):
+    """2026-11-14(OA — Avi L4 가 PROXY v2 를 못 붙인다): off 는 **상시** 모드다. ClientTrafficPolicy 의 proxyProtocol 이 통째로 빠져 Envoy 가
+    PROXY 를 해석하지 않는다(optional 은 클라이언트가 심은 헤더를 읽어 원 IP 기록을 위조할 수 있다). 모든 사용자가 LB 주소로 묶이므로 앱의
+    출발지 경보 임계는 0(끔)이다 — 나머지 헤더 계약(X-Real-IP 제거·clientIPDetection 없음)은 그대로."""
+    base = tmp_path / "default"
+    r, out = _render(base, "prod", prod_values())
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    assert _app_config(out)["DMS_LOGIN_ALARM_SOURCE_FAILURES"] == "20"            # 평소 = base 값 그대로
+    off = tmp_path / "off"
+    r, out = _render(off, "prod", prod_values(GATEWAY_PROXY_PROTOCOL="off"))
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    assert "GATEWAY_PROXY_PROTOCOL=off" in r.stderr and "컷오버 중에만" not in r.stderr
+    text = _kustomize(out / "platform" / "gateway")
+    ctp = doc(text, "ClientTrafficPolicy", "dms-portal")
+    assert "proxyProtocol" not in ctp, ctp
+    assert re.search(r"(?m)^    earlyRequestHeaders:\n      remove:\n      - X-Real-IP$", ctp)
+    for forbidden in ("clientIPDetection", "enableProxyProtocol", "xForwardedFor", "numTrustedHops"):
+        assert forbidden not in text, forbidden
+    assert _render_env(out)["GATEWAY_PROXY_PROTOCOL"] == "off"
+    assert _app_config(out)["DMS_LOGIN_ALARM_SOURCE_FAILURES"] == "0"
+
+
+@needs_kubectl
+def test_listen_port_moves_the_gateway_listener_and_default_is_untouched(tmp_path):
+    """2026-11-14(OA — RKE2 Traefik 이 hostPort 443 을 쥔다): GATEWAY_LISTEN_PORT 가 Gateway 리스너 포트(= Envoy 가 마스터 호스트에서 여는
+    포트)를 바꾼다. 기본(키 없음)은 패치가 없어 기존 출력 그대로다."""
+    base = tmp_path / "default"
+    r, out = _render(base, "prod", prod_values())
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    assert "/spec/listeners/0/port" not in (out / "platform" / "gateway" / "kustomization.yaml").read_text()
+    assert _render_env(out)["GATEWAY_LISTEN_PORT"] == "443"
+    moved = tmp_path / "moved"
+    r, out = _render(moved, "prod", prod_values(GATEWAY_LISTEN_PORT="10443"))
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    assert "note:" not in r.stderr                                                # 10443 은 임시 포트 범위 밖
+    text = _kustomize(out / "platform" / "gateway")
+    gw = doc(text, "Gateway", "dms-portal")
+    assert re.findall(r"(?m)^    port: (\d+)$", gw) == ["10443"] and re.search(r"(?m)^    protocol: HTTPS$", gw)
+    assert "hostNetwork: true" in text and re.search(r"(?m)^\s*useListenerPortAsContainerPort: true$", text)
+    assert _render_env(out)["GATEWAY_LISTEN_PORT"] == "10443"
+    assert ":10443(" in (out / "platform" / "gateway" / "kustomization.yaml").read_text()   # 적용 안내 줄의 포트도 같은 값
+
+
+def test_listen_port_in_the_ephemeral_range_renders_with_a_note(tmp_path):
+    r, out = _render(tmp_path, "prod", prod_values(GATEWAY_LISTEN_PORT="40443"))
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    assert "note: GATEWAY_LISTEN_PORT=40443" in r.stderr and "임시 포트" in r.stderr
+
+
 @pytest.mark.parametrize("key, value", [
-    ("GATEWAY_PROXY_PROTOCOL", "off"), ("GATEWAY_PROXY_PROTOCOL", "Optional"), ("GATEWAY_PROXY_PROTOCOL", "true"),
+    ("GATEWAY_PROXY_PROTOCOL", "none"), ("GATEWAY_PROXY_PROTOCOL", "Optional"), ("GATEWAY_PROXY_PROTOCOL", "true"),
+    ("GATEWAY_PROXY_PROTOCOL", "Off"),
+    # 리스너 포트(2026-11-14): 숫자 아님·범위 밖·앞자리 0·NodePort 범위·Envoy 자체 포트·k8s 구성요소 포트
+    ("GATEWAY_LISTEN_PORT", "0"), ("GATEWAY_LISTEN_PORT", "abc"), ("GATEWAY_LISTEN_PORT", "70000"), ("GATEWAY_LISTEN_PORT", "08443"),
+    ("GATEWAY_LISTEN_PORT", "30443"), ("GATEWAY_LISTEN_PORT", "19002"), ("GATEWAY_LISTEN_PORT", "6443"), ("GATEWAY_LISTEN_PORT", "10250"),
+    ("GATEWAY_LISTEN_PORT", "123456"), ("GATEWAY_LISTEN_PORT", "10 443"),
     ("PORTAL_TLS_SECRET", "Dms-Portal"), ("PORTAL_TLS_SECRET", "-x"), ("PORTAL_TLS_SECRET", "a/b"), ("PORTAL_TLS_SECRET", "x|y"),
     ("PORTAL_TLS_SECRET", "a..b"), ("PORTAL_TLS_SECRET", "a.-b"), ("PORTAL_TLS_SECRET", "a-.b"),
     ("GATEWAY_ENVOY_CPU_REQUEST", "0"), ("GATEWAY_ENVOY_CPU_REQUEST", "0.5"), ("GATEWAY_ENVOY_MEMORY_REQUEST", "128M"),
@@ -467,10 +528,12 @@ def test_tls_secret_name_and_envoy_requests_come_from_values(tmp_path):
 
 def test_gateway_values_in_the_callers_environment_are_ignored(tmp_path):
     # values.env 만 원천(③④ 와 같은 이유) — 셸에 남은 값이 렌더를 바꾸지 않는다.
-    r, out = _render(tmp_path, "prod", prod_values(), GATEWAY_PROXY_PROTOCOL="optional", PORTAL_TLS_SECRET="from-shell")
+    r, out = _render(tmp_path, "prod", prod_values(), GATEWAY_PROXY_PROTOCOL="optional", PORTAL_TLS_SECRET="from-shell",
+                     GATEWAY_LISTEN_PORT="10443")
     assert r.returncode == 0, (r.stdout, r.stderr)
     env = _render_env(out)
     assert (env["GATEWAY_PROXY_PROTOCOL"], env["PORTAL_TLS_SECRET"]) == ("required", "dms-portal-tls")
+    assert env["GATEWAY_LISTEN_PORT"] == "443"
 
 
 @pytest.mark.parametrize("mutate, needle", [

@@ -68,6 +68,9 @@ current-context 를 읽는다**(설치기는 늘 `--context` 로 부른다 — �
    앱·DB 를 apiserver 서비스 프록시로 판정하고 VIP 경유 readyz 무응답은 WARN 으로만 알린다. **메일 게이트(5b) 전까지는 운영자 대역으로만**
    연다 — 리스너에 hostname 이 없고 인증서 SAN 에 VIP 가 있어 S8 뒤 `https://<VIP-A>` 가 DNS 없이도 열리고, 그 창의 stub 가입 계정은 k8s 연동
    뒤 그 아이디의 PV 권한을 얻는다(`deploy/README.md` §6-2).
+   **이 표를 못 맞추는 사이트**(2026-11-14): LB 가 PROXY v2 를 못 붙이면 values.env `GATEWAY_PROXY_PROTOCOL=off`, 마스터의 호스트 443 을 다른 것이
+   쓰면(예: RKE2 Traefik 의 hostPort 443 — S1 이 찾아 멈춘다) `GATEWAY_LISTEN_PORT=<포트>`(예 10443)로 하고 풀 멤버·헬스·방화벽 포트를 그
+   포트로 맞춘다. 1024 이상이면 2번의 Envoy sysctl 이 필요 없다(`deploy/README.md` §2g-4).
 8. **데이터·PV 스토리지(워커)**: DMS 가 다룰 스토리지·PV 백엔드를 NoSchedule 없는 워커에 **포탈에 등록할 경로 그대로** 마운트하고(NFS 계열은
    `lookupcache=positive`), 각 `managed_root` 를 미리 만든다. `<SHARED_DIR>/dms` 와 겹치는 경로는 등록되지 않는다(422 `storage_overlaps_dms_state`)
    (`deploy/README.md` §2). export 는 DMS 워커에 root 를 허용한다(root squash 없음 — 모든 잡이 root 다, `deploy/README.md` §2 「root 접근」).

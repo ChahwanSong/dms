@@ -19,6 +19,8 @@ spec:
   listeners:
     - name: https
       protocol: HTTPS
+      # 리스너 포트 = Envoy 가 마스터 호스트에서 여는 포트(hostNetwork + useListenerPortAsContainerPort). 사이트가 마스터의 443 을 못 쓰면
+      # 렌더 값 GATEWAY_LISTEN_PORT 가 이 칸을 바꾼다(deploy/render.sh — 기본 443, deploy/README §2g-4).
       port: 443
       tls:
         mode: Terminate

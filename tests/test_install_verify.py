@@ -188,7 +188,7 @@ def test_verify_no_probes_starts_no_pod(vrig):
 
 # --- host-net-probe.sh(S8 마스터 sysctl ≤ 443 · S8/S12 마스터마다 :443) -------------------------------------------------------------
 
-def _hostnet(tmp, mode, world):
+def _hostnet(tmp, mode, world, *extra):
     b = tmp / "hbin"
     b.mkdir(exist_ok=True)
     (b / "kubectl").write_text('#!/bin/sh\nexec python3 %s "$@"\n' % (FIX / "fake_kubectl_hostnet.py"))
@@ -199,7 +199,7 @@ def _hostnet(tmp, mode, world):
         log.unlink()
     env = {"PATH": f"{b}{os.pathsep}{os.environ.get('PATH', '/usr/bin:/bin')}", "HOME": str(tmp), "FAKE_WORLD": str(wp),
            "FAKE_KUBE_LOG": str(log)}
-    r = subprocess.run(["sh", str(DEPLOY / "host-net-probe.sh"), "--context", "known", "--image", "reg/dms:d7", mode, "--timeout", "2"],
+    r = subprocess.run(["sh", str(DEPLOY / "host-net-probe.sh"), "--context", "known", "--image", "reg/dms:d7", *extra, mode, "--timeout", "2"],
                        env=env, capture_output=True, text=True, timeout=60)
     return r, json.loads(wp.read_text())
 
@@ -228,10 +228,11 @@ def test_host_net_probe_image_pull_failure_is_unknown(tmp_path):
     assert r.returncode == 4 and "ImagePullBackOff" in r.stdout
 
 
-def _probe_regex():
+def _probe_regex(port=443):
+    # 스크립트는 포트를 /proc/net/tcp 표기(대문자 16진 4자리)로 바꿔 넣는다 — $PORT_HEX(--port, 기본 443 = 01BB, 2026-11-14).
     m = re.search(r"grep -cE '([^']+)'", (DEPLOY / "host-net-probe.sh").read_text(encoding="utf-8"))
-    assert m, "host-net-probe.sh 의 :443 LISTEN 정규식을 찾지 못했다"
-    return m.group(1)
+    assert m and "$PORT_HEX" in m.group(1), "host-net-probe.sh 의 :<포트> LISTEN 정규식을 찾지 못했다"
+    return m.group(1).replace("$PORT_HEX", "%04X" % port)
 
 
 def test_host_net_probe_listen_regex_counts_only_443_listen_sockets(tmp_path):
@@ -248,3 +249,28 @@ def test_host_net_probe_listen_regex_counts_only_443_listen_sockets(tmp_path):
     ]) + "\n"
     r = subprocess.run(["grep", "-cE", _probe_regex()], input=sample, capture_output=True, text=True)
     assert r.stdout.strip() == "2", r.stdout                                         # IPv4 LISTEN 1 + IPv6 LISTEN 1 (원격 443·:80·ESTABLISHED 제외)
+    # 다른 리스너 포트(--port 10443 = 28CB): 그 포트의 LISTEN 만 센다 — :443 LISTEN 은 세지 않는다.
+    moved = sample + "  11: 00000000:28CB 00000000:0000 0A 00000000:00000000 00:00000000 00000000 65532        0 41240 1 0000000000000000 100 0 0 10 0\n"
+    r = subprocess.run(["grep", "-cE", _probe_regex(10443)], input=moved, capture_output=True, text=True)
+    assert r.stdout.strip() == "1", r.stdout
+    r = subprocess.run(["grep", "-cE", _probe_regex()], input=moved, capture_output=True, text=True)
+    assert r.stdout.strip() == "2", r.stdout
+
+
+def test_host_net_probe_port_option_moves_both_checks(tmp_path):
+    """--port(2026-11-14 — render.env 의 GATEWAY_LISTEN_PORT): 파드 안 스크립트가 그 포트의 16진 표기로 LISTEN 을 세고, sysctl 판정의 기준도
+    그 포트다(1024 이상이면 기본값 1024 로도 PASS)."""
+    a = tmp_path / "listen"
+    a.mkdir()
+    r, w = _hostnet(a, "--listen", {"nodes": "cp1", "values": {"cp1": "1"}}, "--port", "10443")
+    assert r.returncode == 0 and "NODE cp1 PASS :10443 LISTEN(1개)" in r.stdout, (r.stdout, r.stderr)
+    assert ":28CB " in w["pods"][0]["script"] and ":01BB " not in w["pods"][0]["script"]
+    b = tmp_path / "sysctl"
+    b.mkdir()
+    r, _ = _hostnet(b, "--sysctl", {"nodes": "cp1", "values": {"cp1": "1024"}}, "--port", "10443")
+    assert r.returncode == 0 and "NODE cp1 PASS ip_unprivileged_port_start=1024" in r.stdout, (r.stdout, r.stderr)
+    for bad in ("0", "abc", "70000", "08443"):
+        c = tmp_path / ("bad-" + bad)
+        c.mkdir()
+        r, w = _hostnet(c, "--listen", {"nodes": "cp1", "values": {"cp1": "1"}}, "--port", bad)
+        assert r.returncode == 2 and not w.get("pods"), (bad, r.stdout, r.stderr)      # 사용법 오류 — 클러스터를 건드리기 전

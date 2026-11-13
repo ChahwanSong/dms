@@ -6,7 +6,7 @@
 # 사용:  sh deploy/preflight-cluster.sh --context <ctx> [--render-env deploy/.rendered/<site>/render.env]
 #        --context 는 필수다(2026-11-03 ⑦ — --context <ctx> / --context=<ctx> / env KUBE_CONTEXT, 플래그가 이긴다; 둘 다 없으면 exit 2).
 #        두 테스트베드가 같은 네임스페이스라 current-context 에 기대지 않는다.
-#        --render-env 를 주면 SHARED_DIR·REGISTRY_CLUSTER_IP·REGISTRY_PORT·REGISTRY_MODE·REGISTRY·REGISTRY_TLS_VERIFY 를 거기서 읽는다(없으면 같은 이름의 env —
+#        --render-env 를 주면 SHARED_DIR·REGISTRY_CLUSTER_IP·REGISTRY_PORT·REGISTRY_MODE·REGISTRY·REGISTRY_TLS_VERIFY·GATEWAY_LISTEN_PORT·GATEWAY_PROXY_PROTOCOL 를 거기서 읽는다(없으면 같은 이름의 env —
 #        REGISTRY·REGISTRY_TLS_VERIFY 는 external 사이트의 노드 셸 체크리스트용, 2026-11-03 ⑦ 리뷰 2).
 #
 # 판정: [PASS] 그대로 진행 가능 · [WARN] 조정/확인 필요(치명 아님) · [FAIL] 막힘
@@ -41,7 +41,11 @@ if [ -n "$RENDER_ENV" ]; then
   SHARED_DIR=$(_rv SHARED_DIR); REGISTRY_CLUSTER_IP=$(_rv REGISTRY_CLUSTER_IP)
   REGISTRY_PORT=$(_rv REGISTRY_PORT); REGISTRY_MODE=$(_rv REGISTRY_MODE); REGISTRY=$(_rv REGISTRY)
   REGISTRY_TLS_VERIFY=$(_rv REGISTRY_TLS_VERIFY)
+  GATEWAY_LISTEN_PORT=$(_rv GATEWAY_LISTEN_PORT); GATEWAY_PROXY_PROTOCOL=$(_rv GATEWAY_PROXY_PROTOCOL)
 fi
+# 입구 리스너(마스터 호스트) 포트·PROXY 모드(2026-11-14 — render.env, 없으면 같은 이름의 env, 그것도 없으면 443·required).
+GWPORT="${GATEWAY_LISTEN_PORT:-443}"; case "$GWPORT" in ""|*[!0123456789]*) GWPORT=443 ;; esac
+GWPROXY="${GATEWAY_PROXY_PROTOCOL:-required}"
 SHARED_DIR="${SHARED_DIR:-}"; REGISTRY_CLUSTER_IP="${REGISTRY_CLUSTER_IP:-}"
 REGISTRY_PORT="${REGISTRY_PORT:-5000}"; REGISTRY_MODE="${REGISTRY_MODE:-}"; REGISTRY="${REGISTRY:-}"
 REGISTRY_TLS_VERIFY="${REGISTRY_TLS_VERIFY:-}"
@@ -99,7 +103,21 @@ for pc in dms-low dms-mid dms-high dms-build; do
 done
 
 H "2. 입구 (Envoy Gateway — MetalLB·ingress-nginx 는 필요 없다)"
-I "prod 입구는 Avi VS-443(PROXY v2) → 마스터 :443 의 Envoy(설계 #13, 2026-11-03 ⑥) — MetalLB·ingress-nginx 는 확인하지 않는다(있어도 무관)"
+I "prod 입구는 LB VS-443(Avi L4 — PROXY 모드 $GWPROXY) → 마스터 :$GWPORT 의 Envoy(설계 #13, 2026-11-03 ⑥; 포트·모드는 values.env GATEWAY_LISTEN_PORT·GATEWAY_PROXY_PROTOCOL) — MetalLB·ingress-nginx 는 확인하지 않는다(있어도 무관)"
+# 마스터에 hostPort <리스너 포트> 를 쓰는 다른 파드(2026-11-14 OA 실측 — RKE2 Traefik 의 hostPort 443): hostPort 는 호스트 소켓이 아니라 CNI 의
+# DNAT 규칙이라 `ss` 에는 안 보이는데, 그 포트로 온 패킷은 Envoy 보다 먼저 그 파드로 넘어간다. hostNetwork 파드는 hostPort 가 자동으로 채워질
+# 뿐이라 뺀다(DMS 자기 Envoy 포함). 못 읽으면 모름(WARN) — install.sh S8 이 SSA 전에 다시 본다.
+CPN=$(kubectl get nodes -l node-role.kubernetes.io/control-plane -o 'jsonpath={range .items[*]}{.metadata.name}{","}{end}' 2>/dev/null | tr ',' ' ')
+if HPODS=$(kubectl get pods -A -o 'jsonpath={range .items[*]}{.metadata.namespace}/{.metadata.name}{"\t"}{.spec.nodeName}{"\t"}{.spec.hostNetwork}{"\t"}{range .spec.containers[*]}{range .ports[*]}{.hostPort}{" "}{end}{end}{"\n"}{end}' 2>/dev/null); then
+  HHITS=$(printf '%s\n' "$HPODS" | awk -F '\t' -v port="$GWPORT" -v cps=" $CPN " '$3 != "true" && index(cps, " " $2 " ") { n = split($4, a, " "); for (i = 1; i <= n; i++) if (a[i] == port) { print $1 "@" $2; break } }' | sort -u | tr '\n' ' ')
+  if [ -n "$HHITS" ]; then
+    F "마스터에 hostPort $GWPORT 를 쓰는 다른 파드가 있다: ${HHITS}— CNI 가 그 포트의 패킷을 Envoy 보다 먼저 그 파드로 넘긴다(Envoy 는 LISTEN 으로 보여도 트래픽을 못 받는다). values.env 의 GATEWAY_LISTEN_PORT 를 비어 있는 포트(예: 10443)로 바꾸고 LB 풀 멤버 포트·방화벽을 그 포트로 맞춘다(deploy/README §2g-1·§2g-4)"
+  else
+    P "마스터에 hostPort $GWPORT 를 쓰는 다른 파드 없음(Envoy 리스너 포트)"
+  fi
+else
+  W "마스터의 hostPort $GWPORT 충돌을 확인하지 못했다(파드 목록 조회 실패) — kubectl --context $CTX get pods -A -o yaml | grep -n 'hostPort: $GWPORT'"
+fi
 CORE=$(kubectl -n kube-system get configmap coredns -o jsonpath='{.data.Corefile}' 2>/dev/null)
 case "$CORE" in
   *"kubernetes cluster.local"*) P "클러스터 도메인 cluster.local(EG xDS 주소 envoy-gateway.envoy-gateway-system.svc.cluster.local)" ;;
@@ -257,8 +275,12 @@ else
   M "마스터 전부: sudo crictl inspecti $RIP:$REGISTRY_PORT/$RTAG | grep -i pinned   # \"pinned\": true — 반입·고정한 레지스트리 자기 이미지(S0-5, kubelet GC 제외)"
   M "전 노드: sudo systemctl show crio --property=Environment | tr ' ' '\\n' | grep -i proxy   # 런타임 프록시가 있으면 NO_PROXY 에 $RIP(설계 7-4)"
 fi
-M "마스터 전부: sysctl -n net.ipv4.ip_unprivileged_port_start   # 443 이하(/etc/sysctl.d/90-dms-envoy.conf, S0-5 — install.sh S8 이 다시 잰다)"
-M "마스터 전부(설치 전): ss -ltnH '( sport = :443 or sport = :19000 or sport = :19001 or sport = :19002 or sport = :19003 )'   # 비어 있어야 한다(K6)"
+if [ "$GWPORT" -lt 1024 ]; then
+  M "마스터 전부: sysctl -n net.ipv4.ip_unprivileged_port_start   # $GWPORT 이하(/etc/sysctl.d/90-dms-envoy.conf, S0-5 — install.sh S8 이 다시 잰다)"
+else
+  I "리스너 포트 $GWPORT ≥ 1024 — 마스터 sysctl ip_unprivileged_port_start(S0-5)는 필요 없다"
+fi
+M "마스터 전부(설치 전): ss -ltnH '( sport = :$GWPORT or sport = :19000 or sport = :19001 or sport = :19002 or sport = :19003 )'   # 비어 있어야 한다(K6)"
 M "전 노드: sysctl fs.protected_hardlinks fs.protected_symlinks   # 둘 다 1(G11)"
 M "공용 디렉터리 S0: 한 노드에서 root 로 sh deploy/shared-dir-init.sh $SD (이미 있으면 검사만) — 그 출력의 .dms-shared-id 가 values.env 의 SHARED_DIR_ID"
 M "각 스토리지 managed_root 가 mkdir 됐는지는 노드에서 직접 확인(스크립트 밖). $SD/dms 와 그 상위·하위는 스토리지로 등록할 수 없다"

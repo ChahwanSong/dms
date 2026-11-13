@@ -131,15 +131,18 @@ H "5. 입구 (Envoy Gateway — 설계 4-3)"
 prog=$(kubectl -n "$NS" get gateway dms-portal -o 'jsonpath={.status.conditions[?(@.type=="Programmed")].status}' 2>/dev/null)
 if [ "$prog" = True ]; then
   P "Gateway dms-portal Programmed"
-  if [ "$PROBES" = 0 ]; then I "마스터 :443 건너뜀(--no-probes) — ssh <마스터> 'sudo ss -ltnp \"( sport = :443 )\"'"
+  # 리스너 포트 = render.env 의 GATEWAY_LISTEN_PORT(없으면 443 — 옛 렌더·--rendered 없이 부른 경우, 2026-11-14).
+  GWPORT=""; [ -z "${RENV:-}" ] || GWPORT=$(sed -n "s/^GATEWAY_LISTEN_PORT=//p" "$RENV" | head -n 1 | tr -d '"')
+  case "$GWPORT" in ""|*[!0-9]*) GWPORT=443 ;; esac
+  if [ "$PROBES" = 0 ]; then I "마스터 :$GWPORT 건너뜀(--no-probes) — ssh <마스터> 'sudo ss -ltnp \"( sport = :$GWPORT )\"'"
   elif [ -n "$API_IMG" ]; then
-    out=$(sh "$HERE/host-net-probe.sh" --context "$CTX" --namespace "$NS" --image "$API_IMG" --listen 2>&1)
+    out=$(sh "$HERE/host-net-probe.sh" --context "$CTX" --namespace "$NS" --image "$API_IMG" --port "$GWPORT" --listen 2>&1)
     hrc=$?
     printf '%s\n' "$out" | sed 's/^/    /'
     case "$hrc" in
-      0) P "마스터마다 :443 LISTEN" ;;
-      1) F "마스터 :443 LISTEN 없음 — sysctl(deploy/README §2g-2) 고친 뒤 그 노드의 Envoy 파드 삭제" ;;
-      *) W "마스터 :443 을 재지 못했다(rc=$hrc) — ssh <마스터> 'sudo ss -ltnp \"( sport = :443 )\"'" ;;
+      0) P "마스터마다 :$GWPORT LISTEN" ;;
+      1) F "마스터 :$GWPORT LISTEN 없음 — sysctl(deploy/README §2g-2) 고친 뒤 그 노드의 Envoy 파드 삭제" ;;
+      *) W "마스터 :$GWPORT 을 재지 못했다(rc=$hrc) — ssh <마스터> 'sudo ss -ltnp \"( sport = :$GWPORT )\"'" ;;
     esac
   fi
 elif [ -n "$prog" ]; then
@@ -167,7 +170,7 @@ if [ -n "$PORTAL" ]; then
   code=$(curl --noproxy '*' -s "$@" -m5 -o /dev/null -w '%{http_code}' "https://$PORTAL/readyz" 2>/dev/null || true)
   case "$code" in
     200) P "readyz 200 via https://$PORTAL${VIP:+ (--resolve $PORTAL:443:$VIP)} — 입구(Avi·Envoy·TLS)까지" ;;
-    000|"") W "VIP 경유 readyz 응답 없음(연결·TLS 실패) — Avi VS-443 미개통이면 정상(S13 — 개통 뒤 install.sh --only S12). 개통했으면 PORTAL_VIP·CACERT(사내 CA)·Avi 풀 헬스·PROXY v2 확인" ;;
+    000|"") W "VIP 경유 readyz 응답 없음(연결·TLS 실패) — Avi VS-443 미개통이면 정상(S13 — 개통 뒤 install.sh --only S12). 개통했으면 PORTAL_VIP·CACERT(사내 CA)·Avi 풀 헬스(멤버 포트 = GATEWAY_LISTEN_PORT)·PROXY 모드(LB 가 PROXY v2 를 못 붙이면 GATEWAY_PROXY_PROTOCOL=off) 확인" ;;
     *) F "VIP 경유 readyz ${code} — 입구는 닿는데 앱이 ${code} 로 답한다(Envoy·HTTPRoute — deploy/README §2g-3 표)" ;;
   esac
   set --

@@ -139,7 +139,8 @@
 **마스터 3대**
 - skopeo·crictl(레지스트리 자기 이미지 반입 — §2e-4 2)).
 - `:443`·`:19000~19003` 이 비어 있어야 한다(Envoy hostNetwork — §2g-2).
-- `/etc/sysctl.d/90-dms-envoy.conf` = `net.ipv4.ip_unprivileged_port_start = 443`(§2g-2).
+- `/etc/sysctl.d/90-dms-envoy.conf` = `net.ipv4.ip_unprivileged_port_start = 443`(§2g-2). 리스너 포트를 1024 이상으로 옮긴 사이트
+  (`GATEWAY_LISTEN_PORT` — §2g-4 「PROXY v2 를 못 붙이는 LB·마스터 443 을 다른 것이 쓰는 클러스터」)는 필요 없다.
 
 **모든 DMS 노드 + 공용 스토리지를 마운트하는 모든 호스트**
 - `fs.protected_hardlinks=1`·`fs.protected_symlinks=1`(§2b-2).
@@ -151,7 +152,7 @@
 | 출발 → 도착 | 포트 | 왜 | 근거 |
 |---|---|---|---|
 | 사용자망 → `<VIP-A>` | 443/tcp | 포탈. 80 은 없다(「80 불가 = 정상」) | §2g-4·§2g-5 |
-| Avi SE 대역 → 마스터 ×3 | 443/tcp | Envoy. **마스터 :443 은 SE 대역에서만 받는다** — PROXY 헤더를 스스로 실은 위조 연결을 막는 것이 이 규칙이다 | §2g-4 |
+| Avi SE 대역 → 마스터 ×3 | 443/tcp(= `GATEWAY_LISTEN_PORT` — 바꿨으면 그 포트) | Envoy. **마스터의 이 포트는 SE 대역에서만 받는다** — PROXY 헤더를 스스로 실은 위조 연결을 막는 것이 이 규칙이다 | §2g-4 |
 | 노드 밖 → 마스터 | 19002·19003/tcp **차단** | Envoy shutdown-manager·readiness(hostNetwork). 19000 은 127.0.0.1, 19001(stats)은 꺼져 있다 | §2g-2 |
 | 설치 호스트·운영자 → apiserver | 6443/tcp | kubectl·port-forward·서비스 프록시 | §0-2 |
 | apiserver → 모든 노드 kubelet | 10250/tcp | logs·exec·port-forward | 설계 4-2 |
@@ -195,7 +196,7 @@
 - **설치·재실행에 쓰는 kube 자격 = cluster-admin**(누가 그 컨텍스트를 보관하나 — §0-2 「설치 호스트」).
 - RHEL 계열 DMS 노드의 SELinux 비 enforcing.
 - 클러스터 안 익명 평문 레지스트리(서비스 CIDR 이 사내망에 광고되지 않아 클러스터 안으로 한정), 인터넷 노드의 상류 이미지 반입.
-- ns `envoy-gateway-system` PSA privileged(hostNetwork)와 마스터 sysctl `ip_unprivileged_port_start=443`.
+- ns `envoy-gateway-system` PSA privileged(hostNetwork)와 마스터 sysctl `ip_unprivileged_port_start=443`(리스너 포트가 1024 미만일 때만).
 - 평문 통신: 메일 릴레이(http), 클러스터 내 레지스트리(http), **클러스터 안 앱 트래픽** — Envoy → `dms-api:8080`(TLS 는 Envoy 에서 끝난다 — 세션 쿠키가
   실린다, `platform/gateway/httproute.yaml`), 모든 dms-agent → `http://dms-api:8080`(`k8s/50-agent-daemonset.yaml` `DMS_AGENT_API_URL` — 매 요청에 공유 토큰
   Bearer, k8s 연동 호출 노드에는 대상 클러스터 리더 토큰이 응답으로 온다 — `routes_agent.k8s_sync_claim`). DMS 는 파드망 암호화를 켜지 않는다 — 필요하면
@@ -233,7 +234,7 @@
 | 1c | SELinux·sysctl | 모든 DMS 노드 | `/etc/selinux/config` permissive + `setenforce 0`, `fs.protected_*=1` | `getenforce` ≠ Enforcing, `sysctl fs.protected_hardlinks fs.protected_symlinks` = 1 | prod README 「0. 사이트 준비」 2, 이 문서 §2b-2 |
 | 1d | 레지스트리 신뢰 | 모든 노드 | `/etc/containers/registries.conf.d/50-dms-registry.conf` → `systemctl reload crio` | `cat /etc/containers/registries.conf.d/50-dms-registry.conf` 가 `location="<REGISTRY>"`·`insecure=true`, `systemctl reload crio` exit 0 — 실제 pull 은 S6 pull 프로브가 판정 | §2e-2 |
 | 1e | 마스터 준비 | 마스터 ×3(+ 인터넷 노드) | 레지스트리 이미지 반입·`99-dms-pinned.conf`, `90-dms-envoy.conf` | `crictl inspecti <REGISTRY>/registry:<태그>` 에 pinned, `sysctl -n net.ipv4.ip_unprivileged_port_start` = 443 | §2e-4 2)·§2g-2 |
-| 1f | 방화벽·NTP·DNS·Avi VS-443 | 사이트 | §0-3 표, Avi 프로필(443 전용 L4·PROXY v2·풀 마스터 :443) | 포트 표대로 열림. Avi 풀은 S8 전까지 down 이 정상 | §0-3·§2g-4 |
+| 1f | 방화벽·NTP·DNS·Avi VS-443 | 사이트 | §0-3 표, Avi 프로필(443 전용 L4·PROXY v2·풀 마스터 :443 — PROXY v2 를 못 붙이거나 마스터 443 을 다른 것이 쓰면 §2g-4 의 `off`·`GATEWAY_LISTEN_PORT`) | 포트 표대로 열림. Avi 풀은 S8 전까지 down 이 정상 | §0-3·§2g-4 |
 | 1g | Volcano | 클러스터 운영자 | 상류 설치(≥ v1.15) | S1 「Volcano CRD 존재」 | §0-2 |
 | 2 | values | 설치 호스트 | `cp deploy/overlays/prod/values.env.example deploy/overlays/prod/values.env` → `REPLACE_*` 채움 | 다음 단계의 렌더가 통과 | prod README 「values.env 값」 |
 | 3 | 계획 | 설치 호스트 | `sh deploy/install.sh --context <ctx> --plan` | 끝 줄 「계획 끝(변경 없음). 실제 설치: …」, `RESULT: PASS`(또는 이해한 WARN 만) | 그 줄의 사유. §2h·§14-4 |
@@ -250,7 +251,7 @@
 | 주체 | 하는 일 |
 |---|---|
 | 사이트 IaC(노드 담당) | 공용·데이터·PV 스토리지 마운트, SELinux, sysctl(`fs.protected_*`, 마스터 443), CRI-O drop-in(신뢰·고정), 레지스트리 자기 이미지 반입, kubelet 예약, 방화벽, NTP |
-| 네트워크·LB·DNS 담당 | Avi VS-443(443 전용 L4 프로필·PROXY v2·유휴 ≥ 3600초), SE 대역 방화벽, DNS |
+| 네트워크·LB·DNS 담당 | Avi VS-443(443 전용 L4 프로필·PROXY v2 — 못 붙이면 `GATEWAY_PROXY_PROTOCOL=off`·유휴 ≥ 3600초·풀 멤버 포트 = `GATEWAY_LISTEN_PORT`), SE 대역 방화벽, DNS |
 | 보안·PKI 담당 | 승인(§0-4), 포탈 서버 인증서, 공용 스토리지 밖 사본의 보관 책임 |
 | 공용 스토리지 담당 | 설계 3-2 의 G1~G12, 유지보수 전 DMS 상태 파드 비우기 합의(§2f-7) |
 | 클러스터 운영자 | K8s·CNI·CRI-O, **Volcano**, 이미 있는 공유 애드온(감지 C — 업그레이드는 그 소유자), 운영자 RBAC(ns `dms` 의 시크릿 읽기·`pods/exec`·`pods/attach`·파드 생성 제한 — 관리 토큰이 api·controller env 에도 있다, §3b-3) |
@@ -1168,6 +1169,7 @@ MetalLB·ingress 게이트는 없앴다(2026-11-03 ⑦, 설계 12 위험 19 해�
 
 ```
 사내 PC ─https://<FQDN>─▶ Avi VS-443(VIP-A, L4 TCP, PROXY v2) ─▶ 마스터 ×3 :443 = Envoy DaemonSet(hostNetwork, 비 root 65532, TLS 종단)
+         (마스터 쪽 포트 = GATEWAY_LISTEN_PORT, PROXY = GATEWAY_PROXY_PROTOCOL — 기본 443·required. 사이트가 못 맞추면 §2g-4)
                                                                   └─▶ svc dms-api:8080(HTTPRoute, 3600s) — 앱은 XFF 마지막 항목을 원 IP 로 기록
 ```
 
@@ -1182,13 +1184,14 @@ MetalLB·ingress 게이트는 없앴다(2026-11-03 ⑦, 설계 12 위험 19 해�
 
 | values.env 키(전부 선택) | 기본 | 뜻 |
 |---|---|---|
-| `GATEWAY_PROXY_PROTOCOL` | `required` | `optional` 은 **컷오버 중에만**(2g-4) — CTP `proxyProtocol.optional` 한 칸이 이 값에서 나온다. 렌더가 stderr 에 알린다 |
+| `GATEWAY_PROXY_PROTOCOL` | `required` | `optional` 은 **컷오버 중에만**(2g-4) — CTP `proxyProtocol.optional` 한 칸이 이 값에서 나온다. 렌더가 stderr 에 알린다. `off` 는 **LB 가 PROXY v2 를 못 붙이는 사이트의 상시 모드**다 — CTP 의 `proxyProtocol` 을 빼 Envoy 가 PROXY 를 해석하지 않고, 앱 출발지 경보(`DMS_LOGIN_ALARM_SOURCE_FAILURES`)를 `0` 으로 렌더한다(2g-4) |
+| `GATEWAY_LISTEN_PORT` | `443` | Envoy 가 마스터 호스트에서 여는 포트 = Gateway 리스너 포트 = **LB 풀 멤버 포트**(VS 는 그대로 VIP:443 — 사용자는 `https://<FQDN>`). 마스터의 호스트 443 을 다른 것이 쓰는 클러스터용(예: RKE2 Traefik 의 hostPort 443 — 2g-4). 1024 이상이면 마스터 sysctl(2g-2)이 필요 없다. NodePort 범위(30000~32767)·Envoy 자체 포트(19000~19003)·k8s 구성요소 포트는 렌더 FAIL, 32768 이상은 알림. 권장 예 `10443` |
 | `PORTAL_TLS_SECRET` | `dms-portal-tls` | Gateway 인증서 Secret(ns dms, kubernetes.io/tls, SAN = 포탈 FQDN + VIP-A — 보안 S3). install.sh S2 가 이 이름으로 존재·`kubernetes.io/tls` 를 본다(⑦) |
 | `GATEWAY_ENVOY_CPU_REQUEST`·`GATEWAY_ENVOY_MEMORY_REQUEST` | `100m`·`256Mi` | Envoy requests(limits 1/2Gi 는 base — **넘으면 렌더 FAIL**: EnvoyProxy CRD 는 받아도 EG 가 만드는 DaemonSet 을 apiserver 가 거절해 Gateway 가 뜨지 않는다). (예: 테스트베드 50m/128Mi) |
 
 `PORTAL_DOMAIN`·`PORTAL_VIP`(prod 필수 키)는 매니페스트에 들어가지 않는다 — `render.env` 로만 가서 인증서 SAN 과 S12 `curl --resolve` 의 기준이 된다.
 렌더러 출력: `GATEWAY: <렌더>/addons/gateway-api` → `…/addons/envoy-gateway` → `…/platform/gateway`(S8 순서), `render.env` 의 `GATEWAY_LAYERS`·
-`ENVOY_GATEWAY_REF`·`ENVOY_PROXY_REF`·`GATEWAY_PROXY_PROTOCOL`·`PORTAL_TLS_SECRET`.
+`ENVOY_GATEWAY_REF`·`ENVOY_PROXY_REF`·`GATEWAY_PROXY_PROTOCOL`·`GATEWAY_LISTEN_PORT`·`PORTAL_TLS_SECRET`.
 
 ### 2g-2. 마스터 sysctl(S0-5, 사이트 IaC — 1회)
 
@@ -1315,7 +1318,26 @@ Avi(설계 #5·#42·V2~V5 — 사이트 LB 담당 몫, DMS 는 값만 준다):
 3. 옛 경로가 비면 `GATEWAY_PROXY_PROTOCOL=required`(기본 — 줄을 지워도 된다) → 렌더 → SSA. 직접 접속(PROXY 없음)이 연결 단계에서 끊기는지 본다.
    optional 로 오래 두지 않는다 — 「PROXY 가 빠진 LB 설정」이 조용히 통과한다(필수면 접속 실패로 바로 드러난다).
 - 되돌림: 1단계 값으로 다시 렌더·SSA(Envoy 는 설정만 바뀌고 재기동하지 않는다). Avi 를 못 쓰게 되면(PROXY 옵션 없음) 원 IP 자리에 SE IP 가 남는다 —
-  원 IP 별 경보를 끄고 Avi VS 로그를 원 IP 출처로 쓴다(설계 4-3, V5).
+  원 IP 별 경보를 끄고 Avi VS 로그를 원 IP 출처로 쓴다(설계 4-3, V5) — 아래 `off` 가 그 모드다.
+
+**PROXY v2 를 못 붙이는 LB·마스터 443 을 다른 것이 쓰는 클러스터**(2026-11-14 — 위 표를 못 맞추는 사이트. 두 값은 서로 독립이다):
+
+| 사정 | values.env | LB·방화벽에서 바뀌는 것 | DMS 에서 바뀌는 것 |
+|---|---|---|---|
+| LB 가 PROXY v2 를 못 붙인다 | `GATEWAY_PROXY_PROTOCOL=off` | 프로필의 PROXY 는 끈 채로 둔다. 헬스 모니터는 TCP 대신 **HTTPS `GET /readyz`**(200)를 써도 된다 — PROXY 헤더가 없어도 Envoy 가 답한다 | Envoy 가 PROXY 를 해석하지 않는다. 접근 로그·보안 이벤트의 `client_ip` 는 **SE 주소**다(원 IP 는 LB 의 VS 로그에서 시각으로 맞춘다). 앱 출발지 경보는 `0`(끔) — 전체 실패 경보는 그대로. 로그인 상한·거절은 아이디 기준이라 그대로다 |
+| 마스터의 호스트 443 을 다른 것이 쓴다(예: RKE2 Traefik 의 hostPort 443) | `GATEWAY_LISTEN_PORT=<포트>`(예 `10443`) | VS 는 그대로 VIP:443, **풀 멤버 포트·헬스 모니터 포트·SE 대역 → 마스터 방화벽**을 그 포트로 | Gateway 리스너 = Envoy 가 마스터 호스트에서 여는 포트가 그 값이다. 1024 이상이면 마스터 sysctl(2g-2)이 필요 없고 설치기도 그 확인을 건너뛴다 |
+
+- **왜 `optional` 을 상시로 쓰지 않는가**: L4 LB 는 바이트를 그대로 넘긴다 — PROXY 를 안 붙이는 LB 뒤에서 `optional` 이면 클라이언트가 PROXY 헤더를
+  스스로 심어 「원 IP」 기록을 위조할 수 있다. `off` 는 그 헤더를 읽지 않는다(TLS 핸드셰이크가 깨질 뿐) — 기록되는 주소는 늘 실제 TCP 피어다.
+- **hostPort 는 `ss` 에 안 보인다**: 다른 파드의 hostPort 는 호스트 소켓이 아니라 CNI 의 DNAT 규칙이다. Envoy 는 그 포트에 LISTEN 으로 보이고
+  Gateway 도 Programmed, LB 풀도 up 인데 그 포트로 온 패킷은 Envoy 보다 먼저 그 파드로 넘어간다 — 포탈 주소에서 남의 인증서·404 가 나온다.
+  S1(preflight)·S8(SSA 전)이 「마스터에 hostPort <리스너 포트> 를 쓰는 다른 파드」를 찾아 멈춘다. 손으로는:
+  `kubectl --context <ctx> get pods -A -o yaml | grep -n 'hostPort: 443'`,
+  `openssl s_client -connect <마스터IP>:443 -servername <FQDN> </dev/null 2>/dev/null | openssl x509 -noout -subject`(주체가 남의 것이면 그 파드가 받는다).
+- **포트 고르기**: 1024 이상, NodePort 범위(30000~32767)·나가는 연결의 임시 포트 범위(32768~) 밖, 마스터에서 비어 있는 번호
+  (`ss -ltnH '( sport = :<포트> )'` 가 빈 출력). 예 `10443`.
+- 적용: values.env 를 고치고 `sh deploy/install.sh --context <ctx> --site <site> --only S8`(Envoy 는 설정만 바뀐다 — 리스너 포트를 바꾸면 옛 포트는
+  닫힌다. LB 풀 포트를 같은 작업 창에서 바꾼다). `off` 로 바꾸면 앱 설정(출발지 경보)도 바뀌므로 `--only S8,S11`.
 
 ### 2g-5. 검증(S12)·원 IP
 
@@ -1335,6 +1357,7 @@ kubectl --context C -n envoy-gateway-system logs -l gateway.envoyproxy.io/owning
 ```
 
 - **원 IP**: 접근 로그 `client_ip` = PROXY v2 헤더의 출발지(사용자 PC), `peer` = 실제 TCP 피어(Avi SE), `x_forwarded_for` 의 마지막 항목 = client_ip
+  (`GATEWAY_PROXY_PROTOCOL=off` 사이트는 `client_ip` 도 SE 주소다 — 정상. 원 IP 는 LB 의 VS 로그 — 2g-4)
   (예외: PROXY 출발지가 루프백이면 Envoy 는 자기 주소를 덧붙인다 — `conn_manager_utility.cc` appendXff. LB 흉내에 127.0.0.1 로 붙는 시험에서만 생긴다).
   앱 이벤트(보안 이벤트 payload `{client_ip, peer}`)의 client_ip 도 같은 값이다(앱은 XFF 마지막 항목 → 소켓 피어 — `src/dms/api/auth.py`; 앱의
   `peer` 는 SE 가 아니라 Envoy 가 뜬 마스터의 호스트 쪽 출발 주소다 — 이름만 같다. Cilium 이면 그 노드의 cilium_host(CiliumInternalIP)이고 노드 IP 가 아닐 수 있다 — 기록 전용 칸이라 노드 IP 와 대조하지 않는다). 위조
@@ -1562,7 +1585,7 @@ S4(레지스트리)·S8(EG 컨트롤러)·S9(CNPG)·S9b(Volcano 층이 있을 �
 | `DMS_TAG`·`DMS_AGENT_TAG`·`MFU_TAG` | app(S11) | 설치 뒤에는 `live`(렌더가 라이브 태그를 읽는다 — `render.sh _live_tag`). 명시 태그가 라이브와 다르면 가드 exit 3(§4) |
 | `EMAIL_DOMAIN`·`LOCAL_ADMIN` | app `dms-config`(S11 — 재시작 자동) | 형식 검사 없음(§0-1) |
 | `PORTAL_DOMAIN`·`PORTAL_VIP` | `render.env` 만(S12) | 인증서 SAN 과 맞춘다(§3b-2) |
-| `GATEWAY_PROXY_PROTOCOL`·`PORTAL_TLS_SECRET`·`GATEWAY_ENVOY_*_REQUEST` | platform/gateway(S8) | §2g-1·§2g-4 |
+| `GATEWAY_PROXY_PROTOCOL`·`GATEWAY_LISTEN_PORT`·`PORTAL_TLS_SECRET`·`GATEWAY_ENVOY_*_REQUEST` | platform/gateway(S8) | §2g-1·§2g-4. `off` 로(에서) 바꾸면 앱 설정(출발지 경보)도 바뀐다 — S11 도. 리스너 포트를 바꾸면 LB 풀 포트·방화벽을 같은 작업 창에서 |
 | `REGISTRY_CPU_REQUEST`·`REGISTRY_MEMORY_REQUEST` | platform/registry(S4) | 빌드·push 가 없을 때(§2e-5) |
 | `PG_CPU_REQUEST`·`PG_MEMORY`·`PG_SHARED_BUFFERS`·`PG_PLACEMENT` | platform/db-cluster(S10) | CNPG 가 롤링한다. 이미지와 한 번에 바꾸지 않는다(§2f-6). `PG_PLACEMENT=all-nodes` 는 control-plane 1대 시험 클러스터 전용 |
 | `PG_BACKUP_KEEP` | platform/db-backup(S10) | 개수로 센다 |
@@ -2972,7 +2995,7 @@ kubectl --context <ctx> get pv | grep dms-pgdata                        # Releas
 | api·controller 로그에 EACCES, 스토리지가 `not_a_mountpoint` 로 Missing(RHEL) | SELinux enforcing | `sh deploy/install.sh --context <ctx> --only S2b`, prod README 「0. 사이트 준비」 2 |
 | ImagePullBackOff | 노드 레지스트리 신뢰(S0-4)·마스터 레지스트리 이미지 고정(S0-5)·태그 없음(S5) | §2e-2·§2e-4, `--only S6` |
 | FailedMount `<SHARED_DIR>/dms/…` | 그 노드에 공용 디렉터리 마운트가 없다, 또는 S0 전 | §2d |
-| 포탈이 안 열린다(연결 실패·TLS 오류·502/503) | ① 앱부터: `kubectl --context <ctx> get --raw '/api/v1/namespaces/dms/services/http:dms-api:http/proxy/readyz'` — 실패면 앱·DB(아래 `/readyz` 행). ② 입구: `kubectl --context <ctx> -n dms get gateway dms-portal`(PROGRAMMED True), `kubectl --context <ctx> -n envoy-gateway-system get pods -o wide -l gateway.envoyproxy.io/owning-gateway-name=dms-portal`(마스터마다 Ready), 마스터마다 `sudo ss -ltnpH '( sport = :443 )'`. ③ LB: Avi 풀 멤버(TCP 443) — 모두 down 이면 SE 대역 → 마스터 :443 방화벽·Envoy, 일부만이면 그 마스터. ④ 인증서: `openssl s_client -connect <VIP-A>:443 -servername <FQDN> -CAfile <사내CA> </dev/null \| openssl x509 -noout -enddate`(만료 감시 없음 — §3b-2). ⑤ TLS 전에 연결이 끊김 = PROXY 헤더 없음(Avi 프로필의 PROXY v2 빠짐 — §2g-4). ⑥ 503 이면 접근 로그 `response_flags`(§2g-5): UH·UF = dms-api 엔드포인트 없음·연결 실패(①), UC = 상류 유휴 경쟁(§2g-1 BTP). EG 컨트롤러가 죽어도 Envoy 는 마지막 설정으로 돈다(§2g-6) | §2g-3·§2g-5·§3b-2 |
+| 포탈이 안 열린다(연결 실패·TLS 오류·502/503) | ① 앱부터: `kubectl --context <ctx> get --raw '/api/v1/namespaces/dms/services/http:dms-api:http/proxy/readyz'` — 실패면 앱·DB(아래 `/readyz` 행). ② 입구: `kubectl --context <ctx> -n dms get gateway dms-portal`(PROGRAMMED True), `kubectl --context <ctx> -n envoy-gateway-system get pods -o wide -l gateway.envoyproxy.io/owning-gateway-name=dms-portal`(마스터마다 Ready), 마스터마다 `sudo ss -ltnpH '( sport = :443 )'`. ③ LB: Avi 풀 멤버(TCP 443) — 모두 down 이면 SE 대역 → 마스터 :443 방화벽·Envoy, 일부만이면 그 마스터. ④ 인증서: `openssl s_client -connect <VIP-A>:443 -servername <FQDN> -CAfile <사내CA> </dev/null \| openssl x509 -noout -enddate`(만료 감시 없음 — §3b-2). ⑤ TLS 전에 연결이 끊김 = PROXY 헤더 없음(Avi 프로필의 PROXY v2 빠짐 — §2g-4; LB 가 PROXY v2 를 못 붙이면 `GATEWAY_PROXY_PROTOCOL=off`). 포탈 주소에서 **남의 인증서·404** 가 나오면 마스터의 그 포트를 다른 파드의 hostPort 가 가로챈다(예: RKE2 Traefik — `GATEWAY_LISTEN_PORT`, §2g-4). ⑥ 503 이면 접근 로그 `response_flags`(§2g-5): UH·UF = dms-api 엔드포인트 없음·연결 실패(①), UC = 상류 유휴 경쟁(§2g-1 BTP). EG 컨트롤러가 죽어도 Envoy 는 마지막 설정으로 돈다(§2g-6) | §2g-3·§2g-5·§3b-2 |
 | Gateway Programmed 인데 어느 마스터 :443 이 LISTEN 아님 | 그 마스터 sysctl 443 빠짐 — 고친 뒤 그 노드의 Envoy 파드를 지운다 | §2g-2 |
 | 잡이 오래 Pending(미리보기·실행 vcjob 이 시작하지 않음) | 포탈 운영 → 대시보드 「큐 현황」: 큐 `dms-data` 배지(Closed = Volcano 쪽에서 닫혔다 — 클러스터 운영자)와 「지금 대기 중」의 PodGroup 사유(`queue_reader`). 클러스터에서: `kubectl --context <ctx> get queue dms-data -o jsonpath='{.status.state}'`(Open 이어야 한다), `kubectl --context <ctx> -n dms get vcjob,podgroup \| grep <job id 앞 12자>` → `kubectl --context <ctx> -n dms describe vcjob <이름>`(이벤트의 Unschedulable 사유). 흔한 원인: 노드 CPU 상한(`procs_per_node`), 다른 잡이 코어를 차지함, 후보 노드 cordon·배치 제외, Volcano 스케줄러 장애. **DMS 의 시한(미리보기·실행·점검 600초)은 파드가 노드에 붙은 뒤부터 센다**(`execution_manifests._apply_task_deadlines`, `stepper.PREFLIGHT_DEADLINE_SECONDS`) — 노드 CPU 상한이 제출 크기보다 작다고 알려진 경우만 `node_cpu_insufficient` 로 끝내고(`stepper._raise_if_cpu_short`), 그 밖의 이유로 끝내 배치되지 않는 잡은 스스로 끝나지 않는다 — 원인을 풀거나 요청 상세에서 취소한다 | §6-4·§14-3 |
 | `node_cpu_insufficient` | 정책의 `procs_per_node` 를 노드 CPU 상한 이하로 | §6-4 |
