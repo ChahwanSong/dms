@@ -53,6 +53,7 @@ dms-k8s 라인의 **완료 기록**이다. 각 항목에는 무엇을 만들었�
 
 | 날짜 | 태그·실증 | 제목 |
 |---|---|---|
+| 11-14 | — | 입구 — 리스너 포트(GATEWAY_LISTEN_PORT)·PROXY off 모드·마스터 hostPort 충돌 감지(OA: Traefik 이 호스트 443, Avi PROXY v2 미지원) |
 | 11-13 | — | OA 사이트(RKE2) 설치 — Gateway API 하한 v1.5.0·묶음 dry-run 오류 줄·control-plane 라벨 값(CONTROL_PLANE_LABEL_VALUE) |
 | 11-11 | d26 | 포탈 전수조사 — 버그 92건 수정(high 0 · medium 12 · low 80) d26 |
 | 11-11 | d25 | 포탈 k8s 연동 — 클러스터를 개요에서 별도 「클러스터」 탭으로 분리 d25 |
@@ -92,6 +93,30 @@ dms-k8s 라인의 **완료 기록**이다. 각 항목에는 무엇을 만들었�
 ---
 
 ## 상세 기록 (최신순)
+
+### ✅ 입구 — 리스너 포트(GATEWAY_LISTEN_PORT)·PROXY off 모드·마스터 hostPort 충돌 감지(OA: Traefik 이 호스트 443, Avi PROXY v2 미지원) — **완료**(2026-11-14)
+
+사용자 보고(OA 프로덕션): Rancher + Traefik 이 있는 RKE2 클러스터에서 Traefik 이 노드 호스트 443 을 쥐고 있고, Avi L4 는 PROXY v2 를 지원하지 않는다 —
+VIP:443 → 마스터:443 이 DMS Envoy 에 닿지 않는다. DMS VIP 는 Rancher 와 별도. 이미지와 무관한 배포 층 변경이라 태그·릴리스 없음.
+
+- **원인**: Envoy 는 hostNetwork 로 마스터 :443 에 직접 bind 한다(Gateway 리스너 443 + `useListenerPortAsContainerPort`). 다른 파드의 hostPort 443 은
+  호스트 소켓이 아니라 CNI 의 DNAT 규칙이라 `ss`·S8 LISTEN 프로브에는 Envoy 만 보이는데, 그 포트의 패킷은 Envoy 보다 먼저 그 파드로 넘어간다.
+  게다가 기본 `GATEWAY_PROXY_PROTOCOL=required` 는 PROXY v2 헤더 없는 연결을 끊는다.
+- **`GATEWAY_LISTEN_PORT`**(values.env, 기본 443): Gateway 리스너 = Envoy 가 마스터 호스트에서 여는 포트 = LB 풀 멤버 포트(VS 는 그대로 VIP:443).
+  `render.sh` 가 Gateway JSON 패치로 넣고 render.env 로 내보낸다 — `install.sh` S8(1024 이상이면 sysctl 프로브를 건너뛴다)·`host-net-probe.sh --port`·
+  `verify.sh`·`preflight-cluster.sh` 가 그 값을 따른다. NodePort 범위(30000~32767)·Envoy 자체 포트(19000~19003)·k8s 구성요소 포트는 FAIL, 32768 이상은 알림.
+  기본(키 없음)은 패치가 없어 기존 출력 그대로다. 권장 예 10443.
+- **`GATEWAY_PROXY_PROTOCOL=off`**(상시 모드): ClientTrafficPolicy 의 `proxyProtocol` 을 통째로 빼 Envoy 가 PROXY 를 해석하지 않는다. `optional` 을 상시로
+  쓰지 않는 이유 — L4 LB 는 바이트를 그대로 넘겨 클라이언트가 PROXY 헤더를 심어 원 IP 기록을 위조할 수 있다. 모든 사용자가 LB(SE) 주소로 묶이므로 prod
+  템플릿의 `DMS_LOGIN_ALARM_SOURCE_FAILURES` 자리에 0 을 넣는다(평소에는 그 줄을 지워 base 값 그대로 — 원천 하나). 원 IP 는 기록·경보 전용이라
+  (`auth.client_ip`) 판정은 그대로다.
+- **hostPort 충돌 감지**: S1(preflight)·S8(SSA 전, `hostport_gate`)이 「마스터에 hostPort <리스너 포트> 를 쓰는 다른 파드」를 찾아 멈추고
+  `GATEWAY_LISTEN_PORT` 를 가리킨다. hostNetwork 파드(자기 Envoy)·워커의 파드는 세지 않고, 목록을 못 읽으면 WARN(모름 ≠ 실패).
+- **문서**: deploy/README §0(sysctl·방화벽·체크리스트)·§2g-1 values 표·§2g-4 「PROXY v2 를 못 붙이는 LB·마스터 443 을 다른 것이 쓰는 클러스터」·§2g-5·§3·§14,
+  prod README 체크리스트 7, values.env.example.
+- **검증**: 배포 계약 묶음 15개 파일 741 passed / 2 skipped(새 테스트: off 렌더·포트 렌더·잘못된 포트·임시 포트 알림·프로브 --port·S8 hostPort 4건·preflight).
+  dmsk8s 에 테스트베드 값 + off + 10443 렌더를 server dry-run — 6개 객체 통과, 라이브 무변경(443·PROXY 필수 그대로), 표준 렌더 복원·guard exit 0.
+  실제 트래픽 실증(LB 가 PROXY 없이 다른 포트로 붙는 경로)은 OA 사이트에서 한다 — 테스트베드 edge(haproxy send-proxy-v2)는 그대로 뒀다.
 
 ### ✅ OA 사이트(RKE2) 설치 — Gateway API 하한 v1.5.0·묶음 dry-run 오류 줄·control-plane 라벨 값(CONTROL_PLANE_LABEL_VALUE) — **완료**(2026-11-13)
 
