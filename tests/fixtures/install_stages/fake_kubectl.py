@@ -71,6 +71,13 @@ if jp is None and "-o" in rest:
     jp = nxt.split("=", 1)[1] if nxt.startswith("jsonpath=") else nxt
 ns = ns or "default"
 
+# 워크로드가 「있다」는 판정은 tmpl 하나로 한다(apply 의 처음 만듦·get .spec.template 의 NotFound). gen 은 그 워크로드의 generation 값일 뿐이라
+# 진짜 apiserver 처럼 늘 tmpl 과 같은 워크로드 집합이어야 한다 — 손으로 만든 세계가 둘을 어긋나게 두면(gen 만 있고 tmpl 이 없음 등) S11 이
+# 지문을 빈 값으로 읽어 「처음 만듦」으로 오판하고 재시작 없음 단언이 엉뚱한 이유로 통과한다. 그런 세계는 여기서 바로 거부한다(리뷰 2026-11-17).
+if set(W.get("gen") or {}) != set(W.get("tmpl") or {}):
+    err("fake kubectl: 세계의 gen·tmpl 워크로드 집합이 다르다(gen=%s tmpl=%s) — 둘을 함께 채워라"
+        % (sorted(W.get("gen") or {}), sorted(W.get("tmpl") or {})), 97)
+
 
 def key(kind, name):
     return "%s/%s/%s" % (ns, kind, name)
@@ -96,15 +103,32 @@ if verb == "port-forward":
     sys.exit(0)
 if verb in ("wait",):
     sys.exit(0)
+
+
+def bump_gen(w):
+    gen = W.setdefault("gen", {})
+    gen[w] = str(int(gen.get(w, "0")) + 1)
+
+
+def new_template(w):
+    """파드 템플릿이 바뀐다(새 RS·ControllerRevision → 파드 교체) — 진짜 apiserver 처럼 generation 도 함께 오른다."""
+    bump_gen(w)
+    W.setdefault("tmpl", {})[w] = "tmpl-%s-g%s" % (w, W["gen"][w])
+
+
 if verb == "rollout":
     if rest[1] == "restart":
         W.setdefault("restarts", []).extend(rest[2:])
+        for w in rest[2:]:                             # restart 는 템플릿 어노테이션 restartedAt 을 바꾼다
+            new_template(w)
         save()
     sys.exit(0)
 if verb == "annotate":
     target = rest[1]
     k, v = rest[2].split("=", 1)
     W.setdefault("annotations", {})[target] = v
+    if target.startswith("deploy/"):                   # Deployment 는 metadata.annotations 만 바뀌어도 generation 이 오른다(DS 는 spec 만)
+        bump_gen(target)
     save()
     sys.exit(0)
 if verb == "logs":
@@ -157,9 +181,15 @@ if verb == "apply":
         W["cluster"] = dict(W.get("cluster_after_apply") or {"instances": "3", "ready": "3", "primary": "dms-pg-1"})
     if path.endswith("/app"):
         W.setdefault("jobs", {})["dms-migrate"] = W.get("migrate_state", "Complete")
-        gen = W.setdefault("gen", {})
+        # app_bumps = 렌더가 파드 템플릿을 바꿨다(새 이미지 태그 등 — 파드 교체) · 처음 만든 워크로드도 새 템플릿.
+        # app_meta_only = 템플릿은 그대로인데 Deployment 메타데이터만 바뀐다 — 포탈 release(image 만 strategic-merge) 뒤 태그를 따라잡는 첫
+        # client-side apply 가 last-applied-configuration 어노테이션만 고친다(2026-11-16 d31). Deployment 는 그것만으로 generation 이 오르고
+        # (어노테이션이 RS 로 복사되므로) DaemonSet 은 spec 이 그대로면 오르지 않는다. 파드는 셋 다 그대로다.
         for w in ("deploy/dms-api", "deploy/dms-controller", "ds/dms-agent"):
-            gen[w] = str(int(gen.get(w, "0")) + (1 if W.get("app_bumps") or w not in gen else 0))
+            if W.get("app_bumps") or w not in W.setdefault("tmpl", {}):
+                new_template(w)
+            elif W.get("app_meta_only") and w.startswith("deploy/"):
+                bump_gen(w)
         if W.get("app_changes_config"):
             W["cm_rv"] = str(int(W.get("cm_rv", "1")) + 1)
     save()
@@ -177,6 +207,10 @@ if kind.startswith(("deploy/", "ds/")):
     target = kind
     if jp and "generation" in jp:
         out(W.get("gen", {}).get(target, ""), 0 if target in W.get("gen", {}) else 1)
+    if jp == "{.spec.template}":                       # 진짜는 키를 정렬한 JSON — 여기선 템플릿마다 다른 글자면 된다
+        if target not in W.get("tmpl", {}):
+            err('Error from server (NotFound): %s not found' % target)
+        out(W["tmpl"][target])
     if jp and "install-config-rev" in jp:
         out(W.get("annotations", {}).get(target, ""))
     out("")

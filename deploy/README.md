@@ -124,7 +124,7 @@
 - dms-api requests(100m/256Mi)는 설계 2-1 표의 250m/512Mi 와 다르다. 어느 쪽으로 할지는 BACKLOG 에 올렸다.
 
 **설치 호스트**(클러스터 밖이어도 된다)
-- kubectl(클러스터 minor ±1)·python3 ≥ 3.9(표준 라이브러리만)·curl·sha256sum·POSIX sh, 그리고 설치할 커밋의 DMS 체크아웃.
+- kubectl(클러스터 minor ±1)·python3 ≥ 3.9(표준 라이브러리만)·curl·sha256sum·cksum·POSIX sh, 그리고 설치할 커밋의 DMS 체크아웃.
 - apiserver(6443)에만 닿으면 된다. 레지스트리 확인은 port-forward, readyz 판정은 apiserver 서비스 프록시로 한다(`install.sh` S4·S5, `verify.sh`).
   VIP 경유 readyz 만 `<VIP-A>:443` 이 필요하고, 닿지 않으면 WARN 이다. S8·S12 의 ingress-probe 는 Traefik 이 도는 노드 :443 에 직접 붙는다 —
   닿지 않으면 UNKNOWN 이라 WARN 뒤 계속한다(§2g-3).
@@ -1617,7 +1617,9 @@ sh deploy/install.sh --help                                      # 머리 주석
   아예 없다(감지 traefik 에 A 가 없다 — §2g-3).
 - **멱등**: 같은 렌더로 다시 돌리면 SSA 는 no-op, 시크릿·Job·ns 는 만들지 않고(있으면 그대로), 첫 덤프는 CronJob 의 마지막 성공이 있으면 건너뛰고,
   rollout restart 는 `dms-config`·`dms-secrets` 의 resourceVersion 이 바뀌었는데 이번 apply 가 파드를 바꾸지 않은 경우에만 한다(워크로드 어노테이션
-  `dms.io/install-config-rev` — 값이 아니라 rev 만). `tests/test_install_stages.py` 가 심 kubectl 로 순서·PAUSE·재개·멱등·`--plan` 무변경을 고정한다.
+  `dms.io/install-config-rev` — 값이 아니라 rev 만). 「파드를 바꿨나」는 apply 전후 `.spec.template` 지문(cksum)으로 본다 — Deployment 의
+  generation 은 어노테이션만 바뀌어도 오르므로 쓰지 않는다(2026-11-16 d31, `install.sh` `stage_S11` 주석). `tests/test_install_stages.py` 가 심
+  kubectl 로 순서·PAUSE·재개·멱등·`--plan` 무변경을 고정한다.
 - 종료: 0 완료(WARN 포함) · 1 FAIL · 2 사용법·환경(빈 `--stage`·`--only` 포함) · 4 모름 · 10 PAUSE. 마지막 줄 `RESULT: …`, 단계마다 `STAGE: <S> <판정>`.
   preflight(S1)·verify(S12)의 `[WARN]` 줄은 rc 0 이어도 그 단계와 RESULT 를 WARN 으로 만든다(2026-11-03 ⑦ 리뷰 2). 도우미 출력은 4칸 들여 쓴다 — 0열의 `==`·`STAGE:`·`RESULT:` 는 설치기 자신의 줄뿐이라
   `grep '^RESULT:'` 는 설치 결과 하나만 잡는다. **control-plane 이 1대인 시험 클러스터에서는 `--plan` 도 `STAGE: S1 WARN`·
@@ -1733,6 +1735,8 @@ S4(레지스트리)·S9(CNPG)·S9b(Volcano 층이 있을 때)·S11(앱) 적용 �
 2. `sh deploy/install.sh --context <ctx> --plan` → `RESULT` 가 PASS(또는 이해한 WARN).
 3. `sh deploy/install.sh --context <ctx> --only S11`. S11 은 `dms-config`·`dms-secrets` 의 resourceVersion 이 바뀌었는데 파드 템플릿이 그대로면
    dms-api·dms-controller·dms-agent 를 `rollout restart` 한다(`install.sh stage_S11` 의 `config_rev`) — 성공이면 「설정이 바뀌어 다시 띄웠다」 줄.
+   포탈 릴리스 뒤 values 태그를 맞추는 S11 에 설정 변경이 섞여도 셋 다 다시 띄운다(그 apply 는 어노테이션만 바꿔 파드 템플릿이 그대로다 —
+   이 수정(2026-11-17) 전 설치기는 이때 api·controller 를 건너뛰었다).
 4. 확인: `kubectl --context <ctx> -n dms get cm dms-config -o jsonpath='{.data.DMS_MAILER_BACKEND}'`.
 5. 업그레이드 때 이 수정을 잃지 않게 한다. 추적 파일의 로컬 수정이라 `git pull` 이 충돌할 수 있다. 사이트 브랜치의 로컬 커밋으로 두거나
    `git diff deploy/overlays/prod/patch-config.yaml` 을 보관해 두고, 새 커밋으로 올린 뒤 `--plan` 전에 그 키가 있는지 본다
@@ -1787,7 +1791,9 @@ kubectl --context <ctx> -n dms rollout restart deploy/dms-api deploy/dms-control
 kubectl --context <ctx> -n dms rollout status deploy/dms-api deploy/dms-controller
 ```
 
-설치기(S11)는 이 일을 스스로 한다(3-4).
+설치기(S11)는 이 일을 스스로 한다(3-4). 판정은 apply 전후 파드 템플릿(`.spec.template`) 지문이라, 릴리스 뒤 태그를 따라잡는 apply 처럼
+Deployment 의 generation 만 오르고 템플릿이 그대로인 경우에도 다시 띄운다(2026-11-17 수정 — 그 전 설치기는 generation 으로 판정해
+api·controller 를 건너뛰었다).
 
 ### 3-6. `deploy/k8s/20-secret.example.yaml` 은 적용하지 않는다
 

@@ -54,7 +54,8 @@ dms-k8s 라인의 **완료 기록**이다. 각 항목에는 무엇을 만들었�
 
 | 날짜 | 태그·실증 | 제목 |
 |---|---|---|
-| 11-16 | d31(예정) | 스케줄 배치 회차 보존 기본 5 → 10 |
+| 11-17 | — | 설치기 S11 설정 재시작 누락 수정 — 포탈 릴리스 뒤 태그를 맞추는 S11 이 api·controller 를 다시 띄우지 않던 결함 |
+| 11-16 | d31 | 스케줄 배치 회차 보존 기본 5 → 10 d31 |
 | 11-16 | d29 | 스케줄 회차 최근 5회차 보존·배치 단위 삭제 상한 5000 d29 |
 | 11-16 | d28 | 포탈 개선 — 사용량 전체 목록·최신 scan 차트 · 배치 대상 스토리지 열·큰 배치 상세 쪽 넘김·검색 · 배치 스케줄러 d28 |
 | 11-16 | d27 | 입구 — Envoy Gateway 폐기, 클러스터의 Traefik 하나로 교체(테스트베드 영구 적용·실증) d27 |
@@ -99,7 +100,45 @@ dms-k8s 라인의 **완료 기록**이다. 각 항목에는 무엇을 만들었�
 
 ## 상세 기록 (최신순)
 
-### 🔧 스케줄 배치 회차 보존 기본 5 → 10 — **구현 완료**(2026-11-16, d31 배포·S11 적용 **예정**)
+### 🔧 설치기 S11 설정 재시작 누락 수정 — 포탈 릴리스 뒤 태그를 맞추는 S11 이 api·controller 를 다시 띄우지 않던 결함 — **수정 완료**(2026-11-17, 이미지 변경 없음)
+
+바로 아래 d31 배포의 S11 에서 드러난 설치기 결함이다(라이브 증거로 조사한 뒤 고쳤다).
+
+- **라이브 사례**(2026-11-16, 테스트베드): 포탈 릴리스 d31(23:48 KST) 뒤 오버레이 태그를 d31 로 맞춰 돌린
+  `sh deploy/install.sh --context dmsk8s --site testbed-k8s --only S11`(23:50 — 라이브 CM `DMS_BATCH_SCHEDULE_KEEP_ROUNDS` `"5"` → `"10"`)이
+  `STAGE: S11 PASS` 였는데 「설정이 바뀌어 다시 띄웠다: ds/dms-agent」만 했다. dms-api·dms-controller 는 env 5 그대로 남아
+  `kubectl --context dmsk8s -n dms rollout restart deploy/dms-api deploy/dms-controller`(23:52)로 손으로 복구했다. 그때 deploy/dms-api 는
+  generation 89 대 RS revision 61(generation 이 파드 교체보다 훨씬 자주 오른다), ds/dms-agent 는 generation 37 = templateGeneration 37 이었다.
+- **원인**: `stage_S11` 은 `apply -k` 전후 `metadata.generation` 을 비교해 「바뀜 = 템플릿이 바뀌어 이미 새 파드」로 보고 설정 재시작을
+  건너뛰었다(`[ "$_g0" = "$_g1" ] || continue`). 그런데 apiserver 는 Deployment 의 `metadata.annotations` 만 바뀌어도 generation 을 올린다
+  (어노테이션이 RS 로 복사되므로 — DaemonSet 은 spec 이 바뀔 때만). 포탈 release(`rollout_runner.image_patch_body` →
+  `execution_volcano.patch_workload`, strategic-merge 로 image 만) 뒤 태그를 따라잡는 첫 client-side apply 는 image 는 그대로 두고
+  `last-applied-configuration` 어노테이션만 고친다 → api·controller 는 generation 만 오르고 파드는 그대로 → 재시작을 건너뜀. DS 는 generation 이
+  그대로라 재시작됐다. 프로덕션도 같은 절차(릴리스 → values 태그 맞춤 → S11)라 같은 구멍이 있었다.
+- **수정**(`deploy/install.sh` `stage_S11`·`tmpl_sum`): 「이번 apply 가 파드를 바꿨나」를 `.spec.template` 지문으로 본다 —
+  `kubectl get … -o jsonpath={.spec.template}`(키를 정렬한 JSON — 테스트베드에서 두 번 읽어 같은 값임을 확인)을 `cksum` 해 apply 전후로 비교.
+  지문이 바뀜 ⇔ 새 ReplicaSet·ControllerRevision ⇔ 파드 교체. 워크로드가 없으면 빈 값 = 이번에 처음 만듦(건너뜀), apply 뒤에 못 읽으면 모름
+  (재시작 쪽). 지문 충돌은 재시작이 한 번 더 늘 뿐 빠뜨리지 않는다. 옛 `gen()` 은 S11 만 썼으므로 지웠다. 설치 호스트 전제에 `cksum`(POSIX —
+  coreutils·BusyBox): 없으면 앞뒤 지문이 모두 비어 재시작을 조용히 빠뜨리므로 kubectl·python3 처럼 `command -v` 로 확인해 exit 2(클러스터를
+  바꾸기 전). 매니페스트는 그대로라 릴리스를 되돌리지 않고 `guard-images.sh` 와도 무관하다.
+  - 택하지 않은 안: 파드 템플릿 어노테이션에 설정 해시를 렌더로 찍기 — `dms-secrets` 는 S2 가 만들어 렌더 때 모르고(비밀 원칙), 손 apply 도
+    재시작을 일으킨다.
+- **테스트**: 심 kubectl(`tests/fixtures/install_stages/fake_kubectl.py`)이 「generation 상승 = 템플릿 변경」이라는 같은 잘못된 가정을 흉내 내고
+  있었다. 이제 `get … -o jsonpath={.spec.template}` 에 답하고(세계 `tmpl`), apply 는 `app_bumps` 이거나 처음 만든 워크로드일 때만 템플릿·
+  generation 을 함께 바꾸며, 새 손잡이 `app_meta_only` 는 Deployment 의 generation 만 올린다(템플릿·DS 그대로 — 실 Deployment 동작).
+  `annotate`(Deployment generation)·`rollout restart`(템플릿 restartedAt)도 실제처럼 바꾼다. 새 테스트
+  `test_s11_release_then_config_change_restarts_deployments`(셋 다 재시작 — 옛 install.sh 로 돌리면 라이브와 같은 「다시 띄웠다: ds/dms-agent」로
+  빨간불임을 확인)·`test_s11_restart_decision_reads_pod_template_not_generation`(S11 코드가 `metadata.generation` 을 읽지 않고 `.spec.template`
+  지문을 쓴다는 계약). 기존 `test_s11_template_change_does_not_double_restart`·`test_s11_restarts_only_when_config_changed` 는 그대로 통과(새 심으로
+  옛·새 install.sh 모두). 돌린 것: `test_install_stages` 전체 + 배포 문서·스크립트 계약(`test_ingress_contract`·`test_addons_render`·
+  `test_install_verify`·`test_install_detect`·`test_platform_registry_contract`·`test_check_scripts_context`·`test_prod_k8s_overlay`·
+  `test_guard_images_context`·`test_testbed_k8s_overlay`·`test_build_and_push_script`·`test_release_manifest_contract`·`test_shared_dir_contract`·
+  `test_shared_dir_init`) 14파일 675 passed·2 skipped, `dash -n` 통과, cksum 을 뺀 PATH 에서 exit 2(클러스터 호출 없음) 손 확인.
+- **문서**: deploy/README §2h 멱등 줄·§3-4 (b) 3·§3-5(릴리스 뒤 S11 에 설정 변경이 섞여도 셋 다 다시 띄운다), 도구 목록(§0-2·prod README
+  「0. 사이트 준비」 6)에 cksum.
+- **적용**: 이미지 변경 없음 — 설치기 스크립트라 다음 S11 실행부터 적용된다. 테스트베드 라이브는 위 손 재시작으로 이미 새 설정이다.
+
+### ✅ 스케줄 배치 회차 보존 기본 5 → 10 d31 — **완료·배포**(2026-11-16)
 
 사용자 지시(2026-11-16, d30 배포 뒤): 「회차기록 최근 5회차에서 10회차 보존으로 변경해줘」 — 바로 아래 d29 항목의 「최근 5회차만 남기고
 나머지 정리」의 보존 수만 바꾼다(정리 규칙·경계 계산·닻·감사·상한 5000 은 그대로).
@@ -129,9 +168,13 @@ dms-k8s 라인의 **완료 기록**이다. 각 항목에는 무엇을 만들었�
   프런트 `batchSchedule`(K=10 에서 항목 500 → 경고 없음 · 501 → 경고, 보존 안내는 받은 숫자 그대로), `TargetSheet`(도움말에 숫자 없음),
   e2e 18 의 보존 안내 단언 「최근 10회차만 보존합니다」(실 백엔드 기본값). 돌린 것: 백엔드 관련 13파일 302 passed·4 skipped(PG 전용) +
   배포 문서·스크립트 계약 5파일 327 passed·1 skipped, vitest 5파일 84 passed, `tsc -b` 통과, e2e 18 3/3(빌드 포함, `dist/index.html` 외부 URL 0).
-- **배포(예정)**: 포탈 빌드·릴리스 d31 + 오버레이 태그 d30 → d31, 그다음 `sh deploy/install.sh --context dmsk8s --site testbed-k8s --only S11`
-  로 라이브 CM 의 `DMS_BATCH_SCHEDULE_KEEP_ROUNDS` 를 `"5"` → `"10"` 으로 바꾼다(설치기가 설정 변경을 보고 파드를 다시 띄운다). 확인할 것: `:preview`·스케줄 목록의 `keep_rounds 10`,
-  스케줄러 머리 「최근 10회차만 보존합니다」, 컨트롤러·api 로그 0줄.
+- **배포**(2026-11-16 KST): 포탈 빌드 d31(소스 0b5e7357, 3종, 225초) → 릴리스 dms-agent → dms-api → dms-controller → job-image 4종 모두
+  Applied(live == 동봉 d31) → 오버레이 태그 d30 → d31(b81fcc53) → `sh deploy/install.sh --context dmsk8s --site testbed-k8s --only S11`
+  `STAGE: S11 PASS`(23:50 — 라이브 CM `DMS_BATCH_SCHEDULE_KEEP_ROUNDS` `"5"` → `"10"`). **그러나 S11 은 ds/dms-agent 만 다시 띄우고 dms-api·
+  dms-controller 는 env 5 그대로 남겼다** — 설치기 결함(바로 위 항목, 릴리스 뒤 태그 맞춤 apply 가 Deployment generation 만 올려 「이미 새
+  파드」로 오판). `kubectl --context dmsk8s -n dms rollout restart deploy/dms-api deploy/dms-controller`(23:52)로 손으로 다시 띄운 뒤 확인:
+  `:preview` 의 `keep_rounds 10`, api·controller env `DMS_BATCH_SCHEDULE_KEEP_ROUNDS` 10, `prune_preview` {rounds_recorded 7, would_prune 0}
+  (기록 7회차 < 10 이라 정리 없음).
 
 ### ✅ 스케줄 회차 최근 5회차 보존·배치 단위 삭제 상한 5000 d29 — **완료·실증**(2026-11-16)
 

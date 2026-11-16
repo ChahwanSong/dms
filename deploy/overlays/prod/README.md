@@ -62,7 +62,7 @@ current-context 를 읽는다**(설치기는 늘 `--context` 로 부른다 — �
    memory=1Gi` · `evictionHard: memory.available<500Mi` → allocatable 약 7000m/29.5Gi)·`shutdownGracePeriod`(선택 — 값 미정, 클러스터 운영자).
    마스터의 sysctl·`:443` 은 이제 DMS 요건이 아니다(2026-11-16 — 노드 :443 은 Traefik 의 hostPort 다. 옛 Envoy 입구의 `90-dms-envoy.conf` 는
    은퇴 — 아래 「옛 Envoy Gateway 입구에서 오는 사이트」).
-6. **도구**: 설치 호스트 — kubectl(클러스터 minor ±1)·curl·python3(≥ 3.9, 표준 라이브러리만)·sha256sum·POSIX sh(+ 있으면 openssl), apiserver(6443)만
+6. **도구**: 설치 호스트 — kubectl(클러스터 minor ±1)·curl·python3(≥ 3.9, 표준 라이브러리만)·sha256sum·cksum·POSIX sh(+ 있으면 openssl), apiserver(6443)만
    닿으면 된다(레지스트리 확인은 port-forward). 노드 :443 에도 닿으면 S8·S12 의 `deploy/ingress-probe.sh` 가 노드마다 Traefik 경유를 직접 본다 — 못
    닿으면 모름(WARN 뒤 계속 — S12 의 VIP 경유 readyz 가 다시 본다), openssl 이 없으면 인증서 이름을 못 봐 `CACERT` 없이는 모름이다.
    **마스터 ×3** — skopeo·crictl(5 의 반입, airgap RHEL 이면 사내 저장소에서 미리 설치). **인터넷 노드**(외부

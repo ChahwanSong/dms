@@ -66,6 +66,8 @@ def installed_world(**over):
          "secrets": {"dms/dms-secrets": {"rv": "10"}, "dms/dms-pg-app": {}, "dms/dms-portal-tls": {"type": "kubernetes.io/tls"},
                      "dms/dms-registry-http": {}},
          "cm_rv": "5", "gen": {"deploy/dms-api": "3", "deploy/dms-controller": "3", "ds/dms-agent": "2"},
+         # .spec.template(파드 템플릿) — 심 kubectl 은 템플릿이 바뀔 때만(app_bumps·처음 만듦·rollout restart) 이 글자를 바꾼다.
+         "tmpl": {"deploy/dms-api": "tmpl-api-0", "deploy/dms-controller": "tmpl-controller-0", "ds/dms-agent": "tmpl-agent-0"},
          "annotations": {w: "cm=5,secret=10" for w in ("deploy/dms-api", "deploy/dms-controller", "ds/dms-agent")},
          "cronjob_last": "2026-11-03T07:17:04Z", "jobs": {}, "cluster": {"instances": "3", "ready": "3", "primary": "dms-pg-1"},
          "api_image": APP[0], "masters": "cp1", "app_images": list(APP)}
@@ -75,7 +77,7 @@ def installed_world(**over):
 
 def fresh_world(**over):
     w = {"contexts": ["known"], "ns": [], "secrets": {"dms/dms-portal-tls": {"type": "kubernetes.io/tls"}}, "cm_rv": "1",
-         "gen": {}, "annotations": {}, "cronjob_last": "", "jobs": {}, "cluster": None, "api_image": APP[0], "masters": "cp1",
+         "gen": {}, "tmpl": {}, "annotations": {}, "cronjob_last": "", "jobs": {}, "cluster": None, "api_image": APP[0], "masters": "cp1",
          "app_images": list(APP)}
     w.update(over)
     return w
@@ -558,6 +560,28 @@ def test_s11_template_change_does_not_double_restart(rig):
     r = rig.run("--context", "known", "--site", "testbed-k8s", "--only", "S11")
     assert r.returncode == 0, r.all
     assert not rig.world().get("restarts")                                       # 템플릿이 바뀌어 이미 새 파드로 돌았다
+
+
+def test_s11_release_then_config_change_restarts_deployments(rig):
+    # 2026-11-16 d31: 포탈 release(image 만 strategic-merge) 뒤 오버레이 태그를 따라잡는 첫 S11 — client-side apply 가 last-applied 어노테이션만
+    # 바꿔 Deployment 의 generation 만 오르고 파드 템플릿은 그대로다. 같이 바뀐 CM(KEEP_ROUNDS "5"→"10")을 보고 셋 다 다시 띄워야 한다 —
+    # generation 으로 판정하던 옛 S11 은 ds/dms-agent 만 다시 띄우고 api·controller 를 옛 env 로 남겼다.
+    rig.world(installed_world(app_meta_only=True, app_changes_config=True))
+    r = rig.run("--context", "known", "--site", "testbed-k8s", "--only", "S11")
+    assert r.returncode == 0, r.all
+    got = rig.world()
+    assert got["restarts"] == ["deploy/dms-api", "deploy/dms-controller", "ds/dms-agent"], r.all
+    assert "설정이 바뀌어 다시 띄웠다: deploy/dms-api deploy/dms-controller ds/dms-agent" in r.all
+    assert set(got["annotations"].values()) == {"cm=6,secret=10"}
+
+
+def test_s11_restart_decision_reads_pod_template_not_generation():
+    # 「이번 apply 가 파드를 바꿨나」는 .spec.template 지문으로만 본다 — Deployment 의 metadata.generation 은 어노테이션만 바뀌어도 오른다.
+    src = (DEPLOY / "install.sh").read_text(encoding="utf-8")
+    body = src[src.index("\nstage_S11() {"):src.index("\nstage_S12() {")]           # S11 과 그 도우미(tmpl_sum·config_rev)
+    body = "\n".join(ln for ln in body.splitlines() if not ln.lstrip().startswith("#"))   # 「왜」 주석은 generation 을 말한다
+    assert "metadata.generation" not in body
+    assert "jsonpath={.spec.template}'" in body and "cksum" in body
 
 
 def test_s11_guard_refusal_stops_before_apply(rig):

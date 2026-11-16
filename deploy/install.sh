@@ -76,7 +76,8 @@
 #   S1 이 아니면 그 항목의 단계가 센다 — 이번 실행에 없는 단계의 항목이면 RESULT 에만(2026-11-03 테스트베드 T9: `--only S9` 가 envoy-gateway U 로 S9 WARN 이었다).
 # 종료: 0 완료(WARN 포함) · 1 FAIL · 2 사용법·환경(클러스터를 바꾸기 전) · 4 모름(UNKNOWN — 확인 뒤 같은 단계부터) · 10 PAUSE(S4 뒤 push 대기).
 #   --help 는 이 머리 주석을 보이고 0.
-# 전제: 설치 호스트에 kubectl(클러스터 minor ±1)·python3(RHEL 9 = 3.9)·curl(설계 S0-7). 이 스크립트는 POSIX sh(dash -n).
+# 전제: 설치 호스트에 kubectl(클러스터 minor ±1)·python3(RHEL 9 = 3.9)·curl(설계 S0-7)·cksum(POSIX — coreutils·BusyBox, S11 파드 템플릿
+# 지문). 이 스크립트는 POSIX sh(dash -n).
 set -u
 HERE=$(CDPATH= cd "$(dirname "$0")" && pwd)      # deploy
 PY=${PYTHON:-python3}
@@ -247,6 +248,8 @@ KUBE_CONTEXT=$CTX; export KUBE_CONTEXT
 # python 도우미의 진행 줄이 파이프(helper 의 들여쓰기) 뒤에서 몇 분씩 묶이지 않게(stdout 이 tty 가 아니면 블록 버퍼 — ⑦ 리뷰 2).
 PYTHONUNBUFFERED=1; export PYTHONUNBUFFERED
 command -v "$PY" >/dev/null 2>&1 || { echo "install.sh: $PY 가 없다(RHEL 9 = python3.9 — 설계 S0-7)" >&2; exit 2; }
+# 없으면 S11 의 파드 템플릿 지문이 앞뒤 모두 빈 값 → 「처음 만듦」으로 읽혀 설정 변경 재시작을 조용히 빠뜨린다 — 클러스터를 바꾸기 전에 멈춘다.
+command -v cksum >/dev/null 2>&1 || { echo "install.sh: cksum 이 없다(POSIX 기본 도구 — coreutils·BusyBox, S11 파드 템플릿 지문)" >&2; exit 2; }
 
 WORK=$(mktemp -d 2>/dev/null) || { echo "install.sh: 임시 디렉터리를 만들지 못했다(mktemp)" >&2; exit 2; }
 PF_PID=""
@@ -973,7 +976,7 @@ stage_S11() {
   fi
   guard app
   _cfg_before=$(config_rev)
-  _gens="deploy/dms-api=$(gen deploy/dms-api) deploy/dms-controller=$(gen deploy/dms-controller) ds/dms-agent=$(gen ds/dms-agent)"
+  _tmpls="deploy/dms-api=$(tmpl_sum deploy/dms-api) deploy/dms-controller=$(tmpl_sum deploy/dms-controller) ds/dms-agent=$(tmpl_sum ds/dms-agent)"
   # migrate Job 은 spec 불변이라 이미지가 바뀌면 apply 가 못 고친다 — 다시 돌도록 먼저 지운다(멱등, 없으면 무시).
   kcn delete job dms-migrate --ignore-not-found >/dev/null 2>&1
   kc apply -k "$RDIR/app" > "$WORK/app.out" 2>&1 || { tail -n 15 "$WORK/app.out" >&2; die "앱 apply -k 실패(위 오류)"; }
@@ -989,15 +992,22 @@ stage_S11() {
   done
   ok "dms-api·dms-controller·dms-agent 롤아웃 끝"
   # 설정 해시(설계 S11): dms-config·dms-secrets 는 envFrom·KeyRef 라 바뀌어도 파드가 그대로다. 그 둘의 resourceVersion(값이 아니다 — 비밀을 다루지
-  # 않는다)을 워크로드 어노테이션에 남겨 두고, 바뀌었는데 이번 apply 가 파드를 바꾸지 않았으면(generation 그대로) rollout restart.
+  # 않는다)을 워크로드 어노테이션에 남겨 두고, 바뀌었는데 이번 apply 가 파드를 바꾸지 않았으면(파드 템플릿 그대로) rollout restart.
+  # 「파드를 바꿨나」는 apply 전후 .spec.template 지문(tmpl_sum)으로 본다 — 지문이 바뀜 ⇔ 새 ReplicaSet·ControllerRevision ⇔ 파드 교체.
+  # metadata.generation 으로 보지 않는다: Deployment 는 metadata.annotations 만 바뀌어도 generation 이 오른다(어노테이션이 RS 로 복사되므로 —
+  # DaemonSet 은 spec 이 바뀔 때만). 2026-11-16 d31: 포탈 release(image 만 strategic-merge) 뒤 오버레이 태그를 따라잡는 첫 S11 에서
+  # client-side apply 가 image 는 그대로 두고 last-applied-configuration 어노테이션만 고쳐 api·controller 의 generation 만 올랐고, 같이 바뀐
+  # dms-config(KEEP_ROUNDS "5"→"10")를 「이미 새 파드」로 건너뛰어 ds/dms-agent 만 다시 띄웠다(api·controller 는 옛 env — 손으로 rollout restart).
+  # 지문 충돌(다른 템플릿이 같은 지문)은 「그대로」로 읽혀 재시작이 한 번 더 늘 뿐이다 — 틀려도 재시작을 빠뜨리는 쪽이 아니다.
   _cfg=$(config_rev)
   _restart=""
-  for _pair in $_gens; do
-    _w=${_pair%%=*} _g0=${_pair#*=}
-    _g1=$(gen "$_w")
+  for _pair in $_tmpls; do
+    _w=${_pair%%=*} _t0=${_pair#*=}
+    _t1=$(tmpl_sum "$_w")
     _prev=$(kcn get "$_w" -o 'jsonpath={.metadata.annotations.dms\.io/install-config-rev}' 2>/dev/null)
-    [ -n "$_g0" ] || continue                       # 이번에 처음 만든 워크로드 — 새 설정으로 떴다
-    [ "$_g0" = "$_g1" ] || continue                 # 템플릿이 바뀌어 이미 새 파드로 돌았다
+    [ -n "$_t0" ] || continue                       # 이번에 처음 만든 워크로드 — 새 설정으로 떴다
+    # 파드 템플릿이 바뀌어 이미 새 파드로 돌았다. apply 뒤 지문을 못 읽었으면(빈 값 — 방금 rollout status 가 본 워크로드다) 모름 → 재시작 쪽으로.
+    [ -z "$_t1" ] || [ "$_t0" = "$_t1" ] || continue
     if [ "${_prev:-$_cfg_before}" != "$_cfg" ]; then _restart="$_restart $_w"; fi
   done
   if [ -n "$_restart" ]; then
@@ -1022,7 +1032,14 @@ stage_S11() {
     fi
   else warn "마스터 사전 pull 을 건너뛰었다(dms-api 이미지·control-plane 노드를 읽지 못함)"; fi
 }
-gen() { kcn get "$1" -o 'jsonpath={.metadata.generation}' 2>/dev/null; }
+# 파드 템플릿 지문(S11 재시작 판정): jsonpath={.spec.template} 은 키를 정렬한 JSON 이라 같은 템플릿이면 같은 글자다. 워크로드가 없거나 읽지
+# 못하면 빈 값 — 뜻은 부르는 쪽이 정한다(apply 전 = 이번에 처음 만듦, apply 뒤 = 모름). cksum 의 「CRC 길이」 사이 공백은 _tmpls 목록의
+# 구분자라 '-' 로 바꾼다.
+tmpl_sum() {
+  _ts=$(kcn get "$1" -o 'jsonpath={.spec.template}' 2>/dev/null) || return 0
+  [ -n "$_ts" ] || return 0
+  printf '%s' "$_ts" | cksum | tr ' ' '-'
+}
 config_rev() {
   printf 'cm=%s,secret=%s' "$(kcn get configmap dms-config -o 'jsonpath={.metadata.resourceVersion}' 2>/dev/null)" \
     "$(kcn get secret dms-secrets -o 'jsonpath={.metadata.resourceVersion}' 2>/dev/null)"
