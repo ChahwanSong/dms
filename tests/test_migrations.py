@@ -623,8 +623,9 @@ def test_migrate_creates_exactly_the_expected_indexes(tmp_path):
         "idx_data_jobs_gc",
         # 2026-10-20 사용량 분석 스토리지별 조회(storage_name, state, operation, target, updated_at).
         "idx_data_jobs_scan_target",
-        # 2026-11-16 배치 스케줄러: 컨트롤러 due 질의(enabled, next_run_at)와 스케줄별 회차 이력(최근 순·200건 정리).
-        "idx_batch_schedules_due", "idx_batch_schedule_runs_schedule",
+        # 2026-11-16 배치 스케줄러: 컨트롤러 due 질의(enabled, next_run_at)와 스케줄별 회차 이력(최근 순·200건 정리), 배치 삭제의
+        # 회차 이력 DELETE(batch_id).
+        "idx_batch_schedules_due", "idx_batch_schedule_runs_schedule", "idx_batch_schedule_runs_batch",
     }
 
 

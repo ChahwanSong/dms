@@ -297,5 +297,6 @@
   "batch_schedule_batch_changed",
   "batch_schedule_batch_running",
   "batch_schedule_awaiting_confirm",
-  "batch_schedule_batch_cancelling"
+  "batch_schedule_batch_cancelling",
+  "batch_schedule_batch_unreadable"
 ]

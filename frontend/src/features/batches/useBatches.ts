@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { useMutation, useQuery, useQueryClient,
          type QueryClient } from "@tanstack/react-query";
 import { ApiError, apiGet, apiSend } from "../../lib/api";
+import { scheduleEnabled } from "../../lib/batchSchedule";
 import type { Batch, BatchDetail, BatchSummary, RequestScanStats } from "../../lib/types";
 import { BATCH_ITEMS_PAGE_SIZE, headerOf, pageOf, payloadsOf, type BatchHeader,
          type BatchItemsParams } from "./batchView";
@@ -29,6 +30,25 @@ export const useBatches = ({ enabled = true }: { enabled?: boolean } = {}) =>
             enabled, refetchInterval: 4000 });
 // 상세 폴링 규칙(머리·항목 쪽 공용): 종단이면 멈추고, 모르면(로딩) 돈다.
 const pollWhile = (status: string | undefined) => (BATCH_TERMINAL.has(status ?? "") ? false : 2500);
+// 종단 배치 머리의 폴링(2026-11-16 리뷰): 켜진 스케줄이 있으면 멈추지 않는다 — 배치 스케줄러가 사람 없이 정해진 시각에 종단
+// 배치를 Running·Previewing 으로 되살리는데(예전엔 되살리는 길이 이 화면의 클릭뿐이라 무효화가 맡았다), 멈춘 화면은 회차가
+// 돌아도 「Completed · 다음 …(곧)」과 지난 회차의 항목을 그대로 보였다. 다음 회차가 멀면 30초마다(가벼운 summary), 슬롯 직전·
+// 직후(컨트롤러 틱 5초 + 리스 이양)는 2.5초 — 머리가 비종단을 보면 항목 쪽도 batchStatus 로 함께 깨어난다. 슬롯을 2분 넘게
+// 지났는데 그대로면(건너뜀·놓침이면 다음 회차가 앞으로 옮겨진다 — 컨트롤러가 멈춘 경우) 다시 30초로 물러선다.
+export const SCHEDULED_IDLE_POLL_MS = 30_000;
+const SCHEDULED_NEAR_MS = 5_000;
+const SCHEDULED_PAST_MS = 120_000;
+export function headerPollInterval(h: BatchHeader | undefined, now: number = Date.now()): number | false {
+  const first = pollWhile(h?.status);
+  if (first !== false) return first;
+  const s = h?.schedule;
+  if (s == null || !scheduleEnabled(s.enabled) || typeof s.next_run_at !== "string") return false;
+  const due = Date.parse(s.next_run_at);
+  if (Number.isNaN(due)) return false;                                  // 깨진 시각 — 회차를 지어내 기다리지 않는다
+  const until = due - now;
+  if (until > SCHEDULED_NEAR_MS) return Math.min(SCHEDULED_IDLE_POLL_MS, until - SCHEDULED_NEAR_MS + 2500);
+  return until > -SCHEDULED_PAST_MS ? 2500 : SCHEDULED_IDLE_POLL_MS;
+}
 // 상세 머리(2026-11-16 ?view=summary -- 배치 행 + 항목 집계, items 없음). 옛 파드는 view 를 무시하고 옛 전체 응답을 주므로
 // headerOf 가 그 items 에서 같은 모양을 파생한다(batchView 머리 주석). 키는 그대로 ["batch", id] -- 무효화·제거가 이 접두로
 // 걸리고(_refresh·useDeleteBatch·useJobs·useUsage), 항목 쪽·payloads 키가 그 아래에 있어 함께 걸린다.
@@ -36,7 +56,7 @@ export const useBatch = (id: string) =>
   useQuery({ queryKey: ["batch", id],
     queryFn: async (): Promise<BatchHeader> =>
       headerOf(await apiGet<BatchSummary>(`/api/admin/batches/${id}?view=summary`)),
-    refetchInterval: (q) => pollWhile((q.state.data as BatchHeader | undefined)?.status) });
+    refetchInterval: (q) => headerPollInterval(q.state.data as BatchHeader | undefined) });
 // 항목 한 쪽(?view=items). 키는 ["batch", id, "items", {page,q,status}] -- 접두 ["batch", id] 유지(위 주석). 쪽·검색·상태를
 // 바꾸는 동안 앞 쪽을 자리표시로 둔다(같은 배치일 때만 -- 다른 배치의 항목이 이 배치 머리 밑에 비치면 안 된다). 폴링은 머리와
 // 같은 규칙인데 항목 응답엔 배치 상태가 없어 호출측이 머리의 상태를 넘긴다. 옛 파드(전체 배치 응답)면 pageOf 가 화면에서
@@ -67,13 +87,14 @@ export const useBatchItems = (id: string, params: BatchItemsParams, batchStatus:
     refetchInterval: pollWhile(batchStatus) });
 };
 // 가벼운 전 항목(?view=payloads -- seq·payload·status): 현재 항목 CSV·rm 항목 추가의 겹침 즉답이 **창을 열었을 때만** 한 번
-// 받는다(enabled = 열림). 폴링하지 않고, 열 때마다 다시 받는다(staleTime 0). gcTime 0 이라 구독자가 없어지면(현재 항목 CSV 창
+// 받는다(enabled = 열림). 폴링하지 않고, 열 때마다 다시 받는다(staleTime 0 — 명시한다: 전역 기본 staleTime 5초면 5초 안에 다시
+// 연 창은 조회 없이 캐시를 쓰고 isFetching 도 서지 않아 아래 잠금이 걸리지 않는다). gcTime 0 이라 구독자가 없어지면(현재 항목 CSV 창
 // 본문은 열린 동안만 마운트) 캐시에서 버린다 -- 단 rm 항목 추가 창은 트리거와 함께 늘 마운트돼(비활성 구독) 지난 목록이 캐시에
 // 남는다: 그래서 그 창은 다시 받는 동안(isFetching) 낡은 목록으로 즉답하지 않고 「항목 추가」를 잠근다(AddItemDialog).
 export const useBatchPayloads = (id: string, enabled: boolean) =>
   useQuery({ queryKey: ["batch", id, "payloads"],
     queryFn: async () => payloadsOf(await apiGet<unknown>(`/api/admin/batches/${id}?view=payloads`)),
-    enabled, gcTime: 0, refetchOnWindowFocus: false });
+    enabled, staleTime: 0, gcTime: 0, refetchOnWindowFocus: false });
 // 배치 확인 창의 전체 조회(?view=all -- 옛 전체 응답과 같은 모양: 배치 + 조인된 전 항목). 창을 열 때 **한 번**만 받고, 그
 // 응답의 preview_round 를 확인 회차로 고정한다 -- 회차와 화면의 항목이 같은 응답에서 와야 본 적 없는 항목이 확인에 묻지
 // 않는다(서버는 배치 행을 먼저 읽고 항목을 읽는다; 그 뒤 바뀌면 confirm CAS 가 거부한다). 그래서 키를 ["batch", id] 접두

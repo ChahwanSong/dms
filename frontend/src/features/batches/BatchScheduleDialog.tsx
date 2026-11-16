@@ -262,7 +262,7 @@ export function BatchScheduleDialog({ open, onOpenChange, trigger, schedule, sch
             {confirmOp && (
               <p>{target.autoConfirm
                 ? "이 배치는 「미리보기 후 자동 실행」이 켜져 있어 회차마다 미리보기가 끝나면 사람 확인 없이 실행됩니다."
-                : "회차마다 사람이 확인해야 하며, 확인하지 않으면 24시간 뒤 만료되어 실패로 집계되고, 확인 대기 중의 다음 회차는 건너뜁니다."}</p>
+                : "회차마다 사람이 확인해야 하며, 확인하지 않으면 미리보기 만료 시간(사이트 설정, 기본 24시간)이 지나 실패로 집계되고, 확인 대기 중의 다음 회차는 건너뜁니다."}</p>
             )}
           </div>
         )}

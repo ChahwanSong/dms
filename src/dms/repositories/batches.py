@@ -33,6 +33,9 @@ _ITEM_STATUSES = ("Queued", "Materialized", "Succeeded", "Failed", "Rejected", "
 # 첫 항목 payload 에서 읽는 스토리지 키(scan·rm = storage, sync = 소스·목적지 쌍 -- domain.validate_batch 가 한 배치에 한
 # 종류·한 쌍만 허용하므로 첫 항목의 값이 배치의 값이다). 기존 batches 열과 이름이 겹치지 않는다.
 _STORAGE_KEYS = ("storage", "source_storage", "destination_storage")
+# 자식 잡 행의 tool 이 이 중 하나면 그것이 도구의 권위다(batch_orchestrator._PREVIEW_TOOLS 의 거울 -- 순환 import 를 피해 두
+# 벌이고, tests/test_batch_detail_views.py 가 같음을 고정한다). list_item_tools 가 이때 preview_summary 를 읽지 않는다.
+_AUTHORITATIVE_JOB_TOOLS = ("dscan", "drm", "dsync", "nsync")
 # list_items_detail 의 seq 부분 조회 한 문장의 IN 목록 상한(sqlite 바인딩 상한보다 넉넉히 작게 -- 상세 쪽 크기 상한과 같다).
 _SEQ_CHUNK = 500
 
@@ -54,6 +57,37 @@ def _storage_fields(payload_text) -> dict:
     문자열 아님·깨진 JSON·항목 없음)는 None -- 모름이다. 배치 목록 열(list)과 상세 요약(view=summary)이 이 한 판정을 쓴다."""
     p = _payload_or_none(payload_text) or {}
     return {k: (p[k] if isinstance(p.get(k), str) else None) for k in _STORAGE_KEYS}
+
+
+def _audit_schedule_delete(db, batch_id, *, actor, now) -> None:
+    """배치 삭제 두 경로(BatchesRepository.delete·RequestPurgesRepository.delete_batch)가 스케줄 행을 지우기 **전에**, 같은
+    트랜잭션에서 부른다: 그 배치에 스케줄이 있으면 ('batch_schedule', 'delete', batch_id) 감사 행을 남긴다 -- 스케줄 DELETE
+    라우트(BatchSchedulesRepository.delete)와 같은 mutation_class·operation·target_key 에, before 는 스케줄 상태 + 마지막 판정 +
+    동의 여부 + 함께 지운 회차 이력 수(run_count), after 는 NULL.
+    왜(2026-11-16 리뷰): 배치 삭제 라우트는 require_admin 이라 공유 Bearer 토큰으로도 되고, 예전엔 스케줄과 회차 이력 전체를
+    감사 행 없이 지웠다 -- 켜진 스케줄(armed_by·동의)이 흔적 없이 사라졌다. 잠금은 항목 → 배치 → 스케줄 순서 그대로(두 경로
+    모두 항목·배치를 먼저 쥐거나 지운 뒤에 부른다). 깨진 spec(DB 변조)은 None 으로 남긴다(감사가 삭제를 막지 않는다)."""
+    lock = " FOR UPDATE" if db.dialect == "postgresql" else ""
+    row = db.query_one(f"SELECT * FROM batch_schedules WHERE batch_id = :b{lock}", {"b": batch_id})
+    if row is None:
+        return
+    try:
+        spec = load_json(row["spec"]) if isinstance(row["spec"], str) else None
+    except ValueError:
+        spec = None
+    runs = db.query_one("SELECT COUNT(*) AS n FROM batch_schedule_runs WHERE schedule_id = :s",
+                        {"s": row["schedule_id"]})
+    before = {"schedule_id": row["schedule_id"], "batch_id": row["batch_id"], "kind": row["kind"],
+              "spec": spec if isinstance(spec, dict) else None, "enabled": row["enabled"] == 1,
+              "next_run_at": row["next_run_at"], "armed_by": row["armed_by"],
+              "acknowledged_irreversible": row["ack_fingerprint"] is not None,
+              "last_run_at": row["last_run_at"], "last_outcome": row["last_outcome"],
+              "last_reason_code": row["last_reason_code"], "paused_reason_code": row["paused_reason_code"],
+              "run_count": int(runs["n"]), "deleted_with_batch": True}
+    db.execute(
+        """INSERT INTO audit_log (mutation_class, operation, target_key, actor, before_state, after_state, at)
+           VALUES ('batch_schedule', 'delete', :key, :actor, :b, NULL, :at)""",
+        {"key": batch_id, "actor": actor, "b": dump_json(before), "at": now})
 
 
 def _hydrate(row):
@@ -186,19 +220,26 @@ class BatchesRepository:
     def list_item_tools(self, batch_id):
         """항목마다 상태 + 자식 최신 잡의 도구 재료(job_tool·preview_summary -- list_items_detail 과 같은 열·같은 「최신 잡
         하나」) -- 상세 요약의 direct 안내(batch_orchestrator.direct_tool_counts)용 가벼운 읽기. preview_summary 는
-        job_tool 을 모를 때만 쓰이므로 그때만 읽고, 깨진 JSON 은 None(모름 -- 요약 GET 이 500 이 되지 않게)."""
+        job_tool 이 권위 있는 도구(_AUTHORITATIVE_JOB_TOOLS)가 아닐 때만 쓰이므로(_preview_tool 의 순서) 그때만 읽는다 --
+        SQL 의 CASE 가 그 밖의 행에서 두 번째 상관 서브쿼리를 건너뛰고 원문도 싣지 않는다(2026-11-16 리뷰: direct 배치가
+        끝나기 전엔 2.5초 요약 폴링마다 항목 수만큼 돈다). 깨진 JSON 은 None(모름 -- 요약 GET 이 500 이 되지 않게)."""
+        tools = {f"t{i}": t for i, t in enumerate(_AUTHORITATIVE_JOB_TOOLS)}
+        in_list = ", ".join(":" + k for k in tools)
         rows = self._db.query(
-            """SELECT bi.seq, bi.status,
-                      (SELECT d.tool FROM data_jobs d
-                        WHERE d.request_id = bi.request_id
-                        ORDER BY d.created_at DESC, d.job_id DESC LIMIT 1)
-                          AS job_tool,
-                      (SELECT d.preview_summary FROM data_jobs d
-                        WHERE d.request_id = bi.request_id
-                        ORDER BY d.created_at DESC, d.job_id DESC LIMIT 1)
-                          AS preview_summary
-                 FROM batch_items bi
-                WHERE bi.batch_id = :b ORDER BY bi.seq""", {"b": batch_id})
+            f"""SELECT t.seq, t.status, t.job_tool,
+                       CASE WHEN t.job_tool IN ({in_list}) THEN NULL
+                            ELSE (SELECT d.preview_summary FROM data_jobs d
+                                   WHERE d.request_id = t.request_id
+                                   ORDER BY d.created_at DESC, d.job_id DESC LIMIT 1)
+                       END AS preview_summary
+                  FROM (SELECT bi.seq, bi.status, bi.request_id,
+                               (SELECT d.tool FROM data_jobs d
+                                 WHERE d.request_id = bi.request_id
+                                 ORDER BY d.created_at DESC, d.job_id DESC LIMIT 1)
+                                   AS job_tool
+                          FROM batch_items bi
+                         WHERE bi.batch_id = :b) t
+                 ORDER BY t.seq""", {"b": batch_id, **tools})
         for r in rows:
             text = r.get("preview_summary")
             try:
@@ -206,6 +247,19 @@ class BatchesRepository:
             except ValueError:
                 r["preview_summary"] = None
         return rows
+
+    def item_seq_page(self, batch_id, *, status, offset: int, limit: int) -> "tuple[int, list[int]]":
+        """view=items 의 검색어 없는 쪽(2026-11-16 리뷰 -- 기본 화면): (전체 수, [offset, offset+limit) 의 seq 목록)을 SQL 로만
+        센다(COUNT + ORDER BY seq LIMIT/OFFSET -- idx_batch_items_status·PK). list_item_heads 로 전 항목 payload 를 읽어 파이썬에서
+        거르던 것과 같은 결과다: status None 은 전체, 그 밖은 정확 일치(모르는 값은 0건). payload 를 읽지 않으니 깨진 payload 도
+        세어진다(heads 경로도 검색어가 없으면 거르지 않고 센다 -- 같다)."""
+        where, params = "batch_id = :b", {"b": batch_id}
+        if status is not None:
+            where, params = where + " AND status = :st", {**params, "st": status}
+        row = self._db.query_one(f"SELECT COUNT(*) AS n FROM batch_items WHERE {where}", params)
+        seqs = self._db.query(f"SELECT seq FROM batch_items WHERE {where} ORDER BY seq LIMIT :n OFFSET :o",
+                              {**params, "n": int(limit), "o": int(offset)})
+        return (0 if row is None else int(row["n"])), [r["seq"] for r in seqs]
 
     def list_item_heads(self, batch_id):
         """전 항목의 [{"seq", "payload", "status"}] -- 상세 쪽 조회(view=items)의 거르기(검색·상태) 단계용 가벼운 읽기. 상세
@@ -803,7 +857,7 @@ class BatchesRepository:
                  "a": dump_json({"auto_confirm_by": None}), "at": now})
         return True
 
-    def delete(self, batch_id, *, require_terminal: bool = False) -> bool:
+    def delete(self, batch_id, *, require_terminal: bool = False, actor=None) -> bool:
         """배치 삭제: batches 행 + batch_items 행만, 한 트랜잭션. 자식
         requests/data_jobs/results 는 **보존**한다 — 실행 감사 이력이고,
         requests.batch_id 는 역사적 표식으로 남는다(배치 역참조가 404 가 되는
@@ -820,7 +874,9 @@ class BatchesRepository:
 
         배치 스케줄(2026-11-16)과 그 회차 이력도 같은 트랜잭션에서 지운다(BATCH_DELETE_TABLES -- 배치 단위 삭제도 같다).
         잠금 순서는 항목 → 배치 → 스케줄: 스케줄 발사(BatchSchedulesRepository.fire)와 같은 방향이라 교착이 없다. 트랜잭션은
-        중첩되지 않으니(db.transaction) 스케줄 저장소를 부르지 않고 문장을 여기 둔다. 감사 행(batch_schedule 류)은 남는다.
+        중첩되지 않으니(db.transaction) 스케줄 저장소를 부르지 않고 문장을 여기 둔다. 감사 행(batch_schedule 류)은 남고, 스케줄이
+        있었으면 그 삭제도 ('batch_schedule', 'delete') 감사 행으로 남긴다(_audit_schedule_delete -- actor 는 라우트가 넘기는
+        audit_actor, 넘기지 않은 호출자(테스트 픽스처)는 "unknown").
 
         require_terminal=True(배치 삭제 라우트 전용, 2026-11-16): 종단(Completed/Cancelled) CAS -- 항목 → 배치를 잠근
         (_lock_items_then_batch) 행이 종단일 때만 지우고, 아니면(그 사이 스케줄 회차·다른 관리자의 :rescan·항목 추가로
@@ -837,6 +893,8 @@ class BatchesRepository:
                              {"b": batch_id})
             self._db.execute("DELETE FROM batches WHERE batch_id = :b",
                              {"b": batch_id})
+            _audit_schedule_delete(self._db, batch_id, actor=actor if actor is not None else "unknown",
+                                   now=utc_now_iso())
             self._db.execute("DELETE FROM batch_schedules WHERE batch_id = :b", {"b": batch_id})
             self._db.execute("DELETE FROM batch_schedule_runs WHERE batch_id = :b", {"b": batch_id})
         return True

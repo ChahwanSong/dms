@@ -4,8 +4,9 @@ KST = 고정 UTC+9, 저장은 UTC …Z. 경계: 월말(31→30/28/29 당김), �
 (UTC 15:00 = KST 다음 날 00:00), 「엄격히 뒤」(같은 순간은 다음 슬롯), 유예 창, 파괴적 판정·지문."""
 import pytest
 
-from dms.batch_scheduler import (INTERVAL_HOURS, KINDS, batch_fingerprint, grace_seconds, is_destructive, load_spec,
-                                 next_run_after, parse_utc, preview_runs, validate_schedule)
+from dms.batch_scheduler import (INTERVAL_HOURS, KINDS, batch_fingerprint, grace_seconds, is_destructive,
+                                 item_storage_names, load_spec, next_run_after, parse_utc, preview_runs,
+                                 validate_schedule)
 from dms.domain import DomainValidationError
 
 DAILY_2 = {"hour": 2, "minute": 0}
@@ -177,13 +178,28 @@ def test_destructive_is_rm_or_sync_with_delete_true():
 def test_fingerprint_ignores_item_order_but_not_content():
     batch = {"operation": "rm", "options": {"recursive": True}, "owner_username": None, "auto_confirm_by": None}
     a = [{"payload": {"storage": "s1", "target": "x"}}, {"payload": {"storage": "s1", "target": "y"}}]
-    fp = batch_fingerprint(batch, a)
+    st = {"s1": ["/mnt/s1", "/mnt/s1/managed"]}
+
+    def fp_of(b, items, storages=st):
+        return batch_fingerprint(b, items, storages=storages)
+    fp = fp_of(batch, a)
     assert fp.startswith("sha256:")
-    assert batch_fingerprint(batch, list(reversed(a))) == fp
-    assert batch_fingerprint(batch, a[:1]) != fp
-    assert batch_fingerprint(batch, a + [{"payload": {"storage": "s1", "target": "z"}}]) != fp
-    assert batch_fingerprint({**batch, "options": {"recursive": True, "lite": True}}, a) != fp
-    assert batch_fingerprint({**batch, "owner_username": "bob"}, a) != fp
+    assert fp_of(batch, list(reversed(a))) == fp
+    assert fp_of(batch, a[:1]) != fp
+    assert fp_of(batch, a + [{"payload": {"storage": "s1", "target": "z"}}]) != fp
+    assert fp_of({**batch, "options": {"recursive": True, "lite": True}}, a) != fp
+    assert fp_of({**batch, "owner_username": "bob"}, a) != fp
     # 자동 확인은 켜짐 여부만(켠 사람이 바뀌어도 같은 배치).
-    on = batch_fingerprint({**batch, "auto_confirm_by": "ops"}, a)
-    assert on != fp and batch_fingerprint({**batch, "auto_confirm_by": "other"}, a) == on
+    on = fp_of({**batch, "auto_confirm_by": "ops"}, a)
+    assert on != fp and fp_of({**batch, "auto_confirm_by": "other"}, a) == on
+    # 스토리지 바인딩(2026-11-16 리뷰): 같은 이름·같은 상대 경로라도 그 스토리지의 경로가 바뀌면 다른 배치다.
+    assert fp_of(batch, a, {"s1": ["/home", "/home"]}) != fp
+    assert fp_of(batch, a, {"s1": ["/mnt/s1", "/mnt/s1/other"]}) != fp
+    assert fp_of(batch, a, {"s1": None}) != fp                       # 스토리지 행이 사라졌다
+
+
+def test_item_storage_names_reads_every_storage_key_and_skips_garbage():
+    items = [{"payload": {"storage": "s1", "target": "x"}},
+             {"payload": {"source_storage": "s2", "source": "a", "destination_storage": "s3", "destination": "b"}},
+             {"payload": {"storage": 5}}, {"payload": "nope"}, {"payload": None}, {"payload": {"storage": "s1"}}]
+    assert item_storage_names(items) == ["s1", "s2", "s3"]

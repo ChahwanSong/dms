@@ -1368,6 +1368,14 @@ export function BatchDetail() {
   const filtered = pathQ !== "" || statusFilter !== null;
   const total = itemsQ.data?.total;
   const pageCount = total === undefined ? 0 : Math.max(1, Math.ceil(total / BATCH_ITEMS_PAGE_SIZE));
+  // 쪽을 넘기다 그 쪽 조회가 실패하면(일시 5xx·깨진 payload 가 든 쪽의 500 -- retry 없음) 오류 상태에선 자리표시가 없어 total 을
+  // 모르고 pageCount 가 0 이 되어 쪽 넘김이 사라졌다 -- 종단 배치는 폴링도 멈춰 그 쪽에 갇혔다(2026-11-16 리뷰). 넘기던 때의 쪽
+  // 수를 기억해(같은 검색·상태일 때만) 쪽 넘김을 남긴다(사용량 StoragePanel 의 pagerCount 와 같은 결).
+  const filterKey = `${pathQ}\u0000${statusFilter ?? ""}`;
+  const [paging, setPaging] = useState<{ key: string; count: number }>({ key: "", count: 0 });
+  const pagerCount = pageItems === undefined && itemsQ.isError && paging.key === filterKey
+    ? Math.max(paging.count, page) : pageCount;
+  const goPage = (p: number) => { setPaging({ key: filterKey, count: pagerCount }); setPage(p); };
   // 목록이 줄어(삭제·교체·다른 세션) 지금 쪽이 범위 밖이 되면 마지막 쪽으로 -- 빈 쪽에 「검색 결과가 없습니다」를 보이지 않게.
   useEffect(() => {
     if (itemsQ.isPlaceholderData || total === undefined) return;
@@ -1834,9 +1842,9 @@ export function BatchDetail() {
           <p className="text-muted text-sm mt-2">항목이 없어 스토리지를 물려받을 수 없습니다 — 항목 추가는 새 배치로 하세요</p>
         )}
         {/* 쪽 넘김은 목록 바로 아래(카드 안). 쪽을 넘기면 선택은 비워진다(위 선택 주석). */}
-        {pageCount > 1 && (
+        {pagerCount > 1 && (
           <div className="mt-3 border-t border-black/5 pt-3">
-            <Pager page={page} pageCount={pageCount} onPage={setPage} label="항목 쪽" />
+            <Pager page={page} pageCount={pagerCount} onPage={goPage} label="항목 쪽" />
           </div>
         )}
       </Card>

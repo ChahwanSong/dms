@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { Table } from "../../components/ui/Table";
 import { Card } from "../../components/ui/Card";
@@ -63,10 +63,20 @@ function EnableAckDialog({ target, onClose, onConfirm, busy, error }: {
 }) {
   const [ack, setAck] = useState(false);
   useEffect(() => { setAck(false); }, [target]);
+  // 닫힐 때 포커스(2026-11-16 리뷰): 이 창의 트리거는 포커스를 받을 수 없는 자리표시 span 이라 Radix 의 「트리거로 되돌리기」가
+  // <body> 로 떨어진다 — 키보드·스크린리더 사용자가 표에서 자리를 잃는다. 창을 연 행의 「사용」 체크박스로 직접 돌려준다(닫힐
+  // 때 target 은 이미 null 이라 마지막 대상의 id 를 기억한다). 행을 id 로 찾는다 — 이름(aria-label)은 겹칠 수 있다.
+  const lastId = useRef<string | null>(null);
+  useEffect(() => { if (target !== null) lastId.current = target.schedule_id; }, [target]);
+  const restoreFocus = (e: Event) => {
+    e.preventDefault();
+    Array.from(document.querySelectorAll<HTMLInputElement>("input[data-schedule-toggle]"))
+      .find((el) => el.dataset.scheduleToggle === lastId.current)?.focus();
+  };
   const rm = target?.batch?.operation === "rm";
   return (
     <Dialog open={target !== null} onOpenChange={(o) => { if (!o && !busy) onClose(); }} title="스케줄 켜기"
-            trigger={<span aria-hidden="true" />} busy={busy}>
+            trigger={<span aria-hidden="true" />} busy={busy} onCloseAutoFocus={restoreFocus}>
       {target !== null && (
         <div className="space-y-3 text-sm">
           <p>{`${labelOf(target)} — ${scheduleSummary(target.kind, target.spec)}`}</p>
@@ -219,6 +229,7 @@ export function BatchSchedulesPage() {
                   <td className="py-2 pr-2 min-w-[8rem]"><LastResult s={s} /></td>
                   <td className="py-2 pr-2">
                     <input type="checkbox" className={BOX} aria-label={`${label} 사용`}
+                           data-schedule-toggle={s.schedule_id}
                            checked={checked} disabled={busy || lockOn}
                            title={lockOn ? `켜기는 ${LOCKED_HINT}` : undefined}
                            onChange={(e) => onToggle(s, e.target.checked)} />

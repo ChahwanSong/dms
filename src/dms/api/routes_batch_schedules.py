@@ -4,8 +4,8 @@
   - 스케줄을 **무장**하는 라우트(생성·규칙 수정·켜기)는 배치 생성과 같은 특권 3중 게이트(_require_batch_privilege -- 허용
     설정 + 특권 목록 + 세션; 공유 Bearer 토큰은 403)와 유지보수 거부. 무장한 사람이 armed_by 로 남고 회차마다 그 사람의 자격을
     다시 본다. 파괴적 스케줄(rm, delete 켠 sync -- batch_scheduler.is_destructive)은 무장할 때마다 「되돌릴 수 없음」 동의
-    (acknowledge_irreversible: **명시 true** 만, StrictBool)를 받고 그 순간의 배치 지문을 남긴다 -- 회차의 배치가 그 지문과
-    다르면 자동 일시정지(사람이 다시 동의해야 돈다).
+    (acknowledge_irreversible: **명시 true** 만, StrictBool)를 받고 그 순간의 배치 지문(항목이 가리키는 스토리지의 경로 포함 --
+    batch_scheduler.armed_fingerprint)을 남긴다 -- 회차의 배치가 그 지문과 다르면 자동 일시정지(사람이 다시 동의해야 돈다).
   - 끄기·삭제는 require_admin(실행을 줄이기만 한다 -- 유지보수 중에도 받는다, :auto-confirm-off 와 같은 브레이크).
   - 조회·미리보기는 require_admin(토큰 조회 가능 -- 다른 관리 GET 과 같다).
 무장 판정(arm)은 저장소 트랜잭션 안, 항목 → 배치 잠금 뒤의 행으로 한다(batch_scheduler.arm_problem -- 회차 판정과 같은 술어):
@@ -22,7 +22,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, StrictBool
 
-from ..batch_scheduler import (arm_problem, batch_fingerprint, is_destructive, next_run_after, preview_runs,
+from ..batch_scheduler import (arm_problem, armed_fingerprint, is_destructive, next_run_after, preview_runs,
                                validate_schedule)
 from ..db import utc_now_iso
 from ..domain import DomainValidationError
@@ -85,7 +85,7 @@ def _arm(request: Request, acknowledge):
         if is_destructive(batch["operation"], batch.get("options")):
             if acknowledge is not True:
                 raise DomainValidationError("batch_schedule_ack_required")
-            return batch_fingerprint(batch, items)
+            return armed_fingerprint(repos, batch, items)
         return None
     return check
 

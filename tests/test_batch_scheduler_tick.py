@@ -5,7 +5,7 @@ import json
 import pytest
 
 from dms import batch_scheduler
-from dms.batch_scheduler import (SCHEDULER_ACTOR, BatchScheduler, batch_fingerprint, next_run_after,
+from dms.batch_scheduler import (SCHEDULER_ACTOR, BatchScheduler, armed_fingerprint, next_run_after,
                                  schedule_hold)
 from dms.repositories import Repositories
 from dms.repositories.batch_schedules import RUN_HISTORY_CAP
@@ -52,14 +52,11 @@ def _batch(repos, *, op="scan", status="Completed", n=2, options=None, requester
     return bid
 
 
-def _ack_of(batch, items):
-    return batch_fingerprint(batch, items)
-
-
 def _schedule(repos, bid, *, kind="daily", spec=None, next_at=SLOT, armed_by="ops", destructive=False):
+    # 파괴적 스케줄의 동의 지문 = 라우트의 arm 과 같은 함수(armed_fingerprint -- 스토리지 바인딩 포함).
     return repos.batch_schedules.create(
         batch_id=bid, kind=kind, spec=spec or DAILY, enabled=True, next_run_at=next_at, actor=armed_by,
-        arm=_ack_of if destructive else (lambda b, i: None))
+        arm=(lambda b, i: armed_fingerprint(repos, b, i)) if destructive else (lambda b, i: None))
 
 
 def _tick(repos, now=NOW, settings=_S):
@@ -400,6 +397,66 @@ def test_unchanged_destructive_batch_fires(repos):
     assert _tick(repos) == [(sid, "fired")]
 
 
+def _storage(repos, name, root):
+    repos.storages.create(storage_name=name, mount_path=root, managed_root=f"{root}/managed", backend_type="cephfs",
+                          actor="t")
+
+
+def _repoint(repos, name, root, actor="token:shared-token"):
+    # 공유 Bearer 토큰도 부를 수 있는 PUT /api/admin/storages/{name}(require_admin)과 같은 저장소 호출.
+    repos.storages.update(name, mount_path=root, managed_root=root, backend_type="cephfs", enabled=True, actor=actor)
+
+
+@pytest.mark.parametrize("op,options,name", [("rm", None, "s1"), ("sync", {"delete": True}, "s1"),
+                                             ("sync", {"delete": True}, "s2")])
+def test_destructive_schedule_pauses_when_a_storage_is_repointed_after_ack(repos, db, op, options, name):
+    # 2026-11-16 리뷰: payload 는 스토리지 이름 + 상대 경로뿐이고 절대 경로는 stepper 가 실행 때의 스토리지 행으로 만든다 --
+    # 동의 뒤 스토리지 경로를 바꾸면(토큰으로도 된다) 같은 지문으로 사람이 본 적 없는 경로를 root 로 지웠다. 자동 확인이 켜진
+    # rm 배치면 사람 없이 끝까지 간다. 소스·목적지 어느 쪽을 바꿔도 멈춘다.
+    _storage(repos, "s1", "/mnt/s1")
+    _storage(repos, "s2", "/mnt/s2")
+    bid = _batch(repos, op=op, options=options, auto_by="ops")
+    sid = _schedule(repos, bid, destructive=True)
+    _repoint(repos, name, "/home")
+    assert _tick(repos) == [(sid, "paused")]
+    _assert_paused(repos, db, sid, "batch_schedule_batch_changed")
+    b = repos.batches.get(bid)
+    assert b["status"] == "Completed" and b["auto_confirm_by"] == "ops"
+
+
+def test_destructive_schedule_with_untouched_storages_still_fires(repos):
+    # 바인딩은 항목이 가리키는 스토리지의 경로만 -- 다른 스토리지의 변경·같은 값의 재저장·enabled 토글은 지문을 바꾸지 않는다.
+    _storage(repos, "s1", "/mnt/s1")
+    _storage(repos, "s9", "/mnt/s9")
+    bid = _batch(repos, op="rm")
+    sid = _schedule(repos, bid, destructive=True)
+    _repoint(repos, "s9", "/home")
+    repos.storages.update("s1", mount_path="/mnt/s1", managed_root="/mnt/s1/managed", backend_type="gpfs",
+                          enabled=False, actor="t")
+    repos.storages.update("s1", mount_path="/mnt/s1", managed_root="/mnt/s1/managed", backend_type="cephfs",
+                          enabled=True, actor="t")
+    assert _tick(repos) == [(sid, "fired")]
+
+
+def test_storage_repointed_between_decision_and_fire_rolls_back(repos, monkeypatch):
+    # 판정은 옛 경로로 통과했는데 발사 직전 스토리지 경로 변경이 커밋됐다 -- 잠근 행으로 다시 본 지문(verify)이 달라 롤백.
+    _storage(repos, "s1", "/mnt/s1")
+    bid = _batch(repos, op="rm")
+    sid = _schedule(repos, bid, destructive=True)
+    real_fire = repos.batch_schedules.fire
+
+    def fire_after_repoint(row, **kw):
+        _repoint(repos, "s1", "/home")
+        return real_fire(row, **kw)
+
+    monkeypatch.setattr(repos.batch_schedules, "fire", fire_after_repoint)
+    assert _tick(repos) == [(sid, "lost")]
+    assert repos.batches.get(bid)["status"] == "Completed"
+    monkeypatch.setattr(repos.batch_schedules, "fire", real_fire)
+    assert _tick(repos) == [(sid, "paused")]
+    assert repos.batch_schedules.get(sid)["paused_reason_code"] == "batch_schedule_batch_changed"
+
+
 @pytest.mark.parametrize("column,value", [("spec", "{broken"), ("spec", '{"hour": 99, "minute": 0}'),
                                           ("kind", "yearly"), ("next_run_at", "0000")])
 def test_tampered_rule_pauses_as_invalid(repos, db, column, value):
@@ -456,6 +513,109 @@ def test_one_bad_row_does_not_stop_the_tick(repos, db, monkeypatch):
     [ev] = _events(db, "batch_schedule_error")
     assert ev["severity"] == "error" and "boom" in ev["message"]
     assert repos.batch_schedules.get(sid_bad)["next_run_at"] == "2026-11-16T16:59:00Z"   # 다음 틱이 다시 판정
+
+
+# --- 독 행(2026-11-16 리뷰): 예외로 끝나는 행이 next_run_at 을 넘기지 못해 틱마다 다시 집히고(오류 이벤트 5초마다), TICK_LIMIT
+# 개가 모이면 due 의 앞자리를 영영 차지해 다른 스케줄이 굶었다 ------------------------------------------------------------------
+
+def _poison(db, bid, where):
+    if where == "options":
+        db.execute("UPDATE batches SET options = '{bad' WHERE batch_id = :b", {"b": bid})
+    else:
+        db.execute("UPDATE batch_items SET payload = 'nope' WHERE batch_id = :b AND seq = 1", {"b": bid})
+
+
+@pytest.mark.parametrize("where", ["options", "payload"])
+def test_unreadable_batch_json_pauses_instead_of_erroring_every_tick(repos, db, where):
+    bid = _batch(repos)
+    sid = _schedule(repos, bid)
+    _poison(db, bid, where)
+    assert _tick(repos) == [(sid, "paused")]
+    _assert_paused(repos, db, sid, "batch_schedule_batch_unreadable")
+    assert _events(db, "batch_schedule_error") == []
+    [run] = _runs(repos, sid)
+    assert run["batch_status"] == (None if where == "options" else "Completed")    # 읽힌 만큼만 남긴다
+
+
+def test_unreadable_batch_keeps_the_hold_order(repos, db):
+    # 판정 순서 그대로: 유지보수는 일시정지 없이 건너뛴다(4' 는 1단계 뒤).
+    bid = _batch(repos)
+    sid = _schedule(repos, bid)
+    _poison(db, bid, "payload")
+    db.execute("UPDATE control_state SET maintenance = 1 WHERE id = 1")
+    assert _tick(repos) == [(sid, "skipped")]
+    assert repos.batch_schedules.get(sid)["enabled"] is True
+
+
+def test_unreadable_batches_do_not_starve_healthy_schedules(repos, db, monkeypatch):
+    monkeypatch.setattr(batch_scheduler, "TICK_LIMIT", 2)
+    poisoned = []
+    for where in ("options", "payload"):
+        bid = _batch(repos)
+        poisoned.append(_schedule(repos, bid, next_at="2026-11-16T16:59:00Z"))      # 먼저 집힌다
+        _poison(db, bid, where)
+    good = _batch(repos)
+    sid_good = _schedule(repos, good)
+    assert sorted(_tick(repos)) == sorted((sid, "paused") for sid in poisoned)    # 같은 예정 시각 -- id 순
+    assert _tick(repos) == [(sid_good, "fired")]
+    assert repos.batches.get(good)["status"] == "Running"
+
+
+def _always_failing(repos, monkeypatch, bad_ids):
+    real_get = repos.batches.get
+
+    def flaky(batch_id):
+        if batch_id in bad_ids:
+            raise RuntimeError("boom")
+        return real_get(batch_id)
+
+    monkeypatch.setattr(repos.batches, "get", flaky)
+
+
+def test_error_persisting_beyond_grace_is_missed_once_and_frees_the_due_window(repos, db, monkeypatch):
+    # 원인 모를 예외(일시적일 수 있다)는 유예 안에서는 그대로 다시 판정하고, 유예를 넘기면 정상 판정과 같은 missed 로 그 슬롯을
+    # 넘긴다 -- 실패하는 행이 due 의 앞자리를 영영 차지하지 못한다.
+    monkeypatch.setattr(batch_scheduler, "TICK_LIMIT", 1)
+    bad = _batch(repos)
+    sid_bad = _schedule(repos, bad, next_at="2026-11-16T16:59:00Z")
+    good = _batch(repos)
+    sid_good = _schedule(repos, good, next_at="2026-11-16T18:00:00Z")
+    _always_failing(repos, monkeypatch, {bad})
+    assert _tick(repos) == [(sid_bad, "error")]                                  # 유예 안 -- 그대로 둔다
+    assert repos.batch_schedules.get(sid_bad)["next_run_at"] == "2026-11-16T16:59:00Z"
+    late = "2026-11-16T18:30:00Z"                                                # bad 는 1h31m 지연, good 은 30분
+    assert _tick(repos, now=late) == [(sid_bad, "missed")]
+    s = repos.batch_schedules.get(sid_bad)
+    assert (s["enabled"], s["next_run_at"], s["last_outcome"], s["last_reason_code"]) == \
+        (True, NEXT, "missed", "batch_schedule_missed")
+    [run] = _runs(repos, sid_bad)
+    assert (run["outcome"], run["reason_code"], run["batch_status"]) == ("missed", "batch_schedule_missed", None)
+    assert len(_events(db, "batch_schedule_missed")) == 1
+    assert _tick(repos, now=late) == [(sid_good, "fired")]                       # 앞자리가 비었다
+
+
+def test_error_on_a_tampered_rule_pauses_as_invalid(repos, db, monkeypatch):
+    # 예외 경로에서도 다음 슬롯을 계산할 수 없으면(깨진 규칙) 0단계와 같은 일시정지 -- 넘길 슬롯이 없다.
+    bad = _batch(repos)
+    sid = _schedule(repos, bad)
+    db.execute("UPDATE batch_schedules SET spec = '{broken' WHERE schedule_id = :s", {"s": sid})
+    _always_failing(repos, monkeypatch, {bad})
+    assert _tick(repos) == [(sid, "paused")]
+    s = repos.batch_schedules.get(sid)
+    assert (s["enabled"], s["paused_reason_code"]) == (False, "invalid_batch_schedule")
+
+
+def test_error_events_are_rate_limited_per_schedule(repos, db, monkeypatch):
+    # batch_cancel._event 와 같은 결: 같은 스케줄의 오류 이벤트는 쿨다운 안에 한 번만(5초 틱마다 쌓이지 않게), 다른 스케줄은 따로.
+    a, b = _batch(repos), _batch(repos)
+    sid_a = _schedule(repos, a)
+    sid_b = _schedule(repos, b)
+    _always_failing(repos, monkeypatch, {a, b})
+    for _ in range(3):
+        assert sorted(_tick(repos)) == sorted([(sid_a, "error"), (sid_b, "error")])
+    events = _events(db, "batch_schedule_error")
+    assert len(events) == 2
+    assert {e["message"].split()[1] for e in events} == {sid_a, sid_b}
 
 
 def test_tick_limit(repos, monkeypatch):

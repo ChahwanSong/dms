@@ -178,6 +178,9 @@ def _apply_migrations(db: Database) -> None:
             prev_succeeded INTEGER,
             prev_failed INTEGER)""",
         "CREATE INDEX IF NOT EXISTS idx_batch_schedule_runs_schedule ON batch_schedule_runs (schedule_id, run_id)",
+        # 배치 삭제 두 경로(BatchesRepository.delete·RequestPurgesRepository.delete_batch)의 DELETE … WHERE batch_id 가 항목·배치
+        # 행을 잠근 채 돈다 -- 위 인덱스는 schedule_id 가 앞이라 쓸 수 없어 PG 가 회차 이력 전체(스케줄당 최대 200행)를 훑었다.
+        "CREATE INDEX IF NOT EXISTS idx_batch_schedule_runs_batch ON batch_schedule_runs (batch_id)",
         """CREATE TABLE IF NOT EXISTS plans (
             plan_id TEXT PRIMARY KEY,
             request_id TEXT NOT NULL,

@@ -7,7 +7,7 @@ from ..domain import (DataJobState, DomainValidationError, Operation, auto_confi
                       validate_batch_options, validate_owner_username)
 from ..execution import ExecutionError
 from ..privileged import privileged_names
-from .auth import Identity, require_admin
+from .auth import Identity, audit_actor, require_admin
 from .cancel import terminate_job
 from .routes_requests import reject_when_maintenance
 
@@ -289,7 +289,7 @@ def delete_batch(batch_id: str, request: Request,
         raise HTTPException(status_code=409, detail="batch_not_deletable")
     # 지우기는 잠근 행의 종단 CAS(repo.delete require_terminal): 위 읽기와 지우기 사이에 스케줄 회차·다른 관리자의 :rescan
     # 이 끼면 방금 되살아난 배치를 지우게 된다(2026-11-16 -- 스케줄러가 사람 없이 그 창을 연다). 진 쪽은 아무것도 쓰지 않는다.
-    if not repo.delete(batch_id, require_terminal=True):
+    if not repo.delete(batch_id, require_terminal=True, actor=audit_actor(identity)):
         if repo.get(batch_id) is None:
             raise HTTPException(status_code=404, detail="batch_not_found")   # 그 사이 다른 관리자가 지웠다
         raise HTTPException(status_code=409, detail="batch_not_deletable")
@@ -347,7 +347,8 @@ def get_batch(batch_id: str, request: Request,
                 머리). executing_count 는 확인 게이트 배치가 미리보기 단계(Previewing·PreviewReady)일 때만 세고 그 밖은
                 null(배너가 없다 -- null 은 「말할 것 없음」, 0 은 정상값). direct_tools 는 options.direct 가 명시 true 일
                 때만 {tools_known, nsync, undecided}, 아니면 null(포탈 directNote 의 첫 판정과 같다).
-      items     {total, offset, limit, items}: 가벼운 읽기(list_item_heads)로 거르고(q·status -- _item_matches) 센 뒤
+      items     {total, offset, limit, items}: 가벼운 읽기(list_item_heads)로 거르고(q·status -- _item_matches) 센 뒤 -- q 가
+                없으면 payload 를 읽지 않고 SQL 로 센다(item_seq_page, 같은 결과) --
                 [offset, offset+limit) 를 잘라 **그 쪽의 seq 만** 상세 조인(list_items_detail(seqs) -- 행 모양은 전체 조회와
                 같다). limit 은 1–500 으로 접는다(없으면 100), offset ≥ 0(음수 422). 쪽 행의 payload 는 지금처럼 읽는다 --
                 깨진 JSON 항목이 든 쪽만 view 없음과 같이 실패하고(행 payload 를 지어내지 않는다), 요약·다른 쪽·검색은 산다.
@@ -359,9 +360,15 @@ def get_batch(batch_id: str, request: Request,
         raise HTTPException(status_code=404, detail="batch_not_found")
     if view == "items":
         size = _ITEM_PAGE_DEFAULT if limit is None else max(1, min(_ITEM_PAGE_MAX, limit))
-        hits = [h for h in repo.list_item_heads(batch_id) if _item_matches(h, q, status)]
-        page = [h["seq"] for h in hits[offset:offset + size]]
-        return {"total": len(hits), "offset": offset, "limit": size,
+        if q is None or q == "":
+            # 검색어가 없으면(기본 화면·2.5초 폴링) 거르기에 payload 가 필요 없다 -- SQL 로 세고 그 쪽 seq 만(전 항목 payload 를
+            # 폴링마다 읽어 파싱하지 않는다, 2026-11-16 리뷰). 결과는 아래 경로와 같다(_item_matches 의 status 규칙 그대로).
+            total, page = repo.item_seq_page(batch_id, status=status if status not in (None, "") else None,
+                                             offset=offset, limit=size)
+        else:
+            hits = [h for h in repo.list_item_heads(batch_id) if _item_matches(h, q, status)]
+            total, page = len(hits), [h["seq"] for h in hits[offset:offset + size]]
+        return {"total": total, "offset": offset, "limit": size,
                 "items": repo.list_items_detail(batch_id, seqs=page)}
     if view == "payloads":
         return {"items": [{"seq": it["seq"], "payload": it["payload"], "status": it["status"]}

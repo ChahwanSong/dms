@@ -2458,6 +2458,30 @@ test("쪽 조회: 머리는 view=summary, 항목은 view=items 의 100개 한 �
   expect(within(nav).getByRole("button", { name: "다음" })).toBeDisabled();
 });
 
+test("넘긴 쪽의 조회가 실패해도 쪽 넘김이 남아 앞 쪽으로 돌아갈 수 있다(종단 배치 — 폴링 없음)", async () => {
+  // 오류 상태엔 자리표시가 없어 total 을 모르고 쪽 넘김이 사라져 그 쪽에 갇혔다(2026-11-16 리뷰: 일시 5xx, 깨진 payload 가 든
+  // 쪽의 영구 500). 넘기던 때의 쪽 수를 기억해 남긴다.
+  const fx = manyScan(250);
+  server.use(http.get("/api/admin/batches/b1", ({ request }) => {
+    const url = new URL(request.url);
+    if (url.searchParams.get("view") === "items" && url.searchParams.get("offset") === "100") {
+      return HttpResponse.json({ detail: "internal" }, { status: 500 });
+    }
+    return HttpResponse.json(viewResponse(fx, url));
+  }));
+  renderDetail();
+  expect(await screen.findByText("scan · s1:dir0")).toBeInTheDocument();
+  const nav = screen.getByRole("navigation", { name: "항목 쪽" });
+  await userEvent.click(within(nav).getByRole("button", { name: "다음" }));
+  await waitFor(() => expect(screen.queryByText("scan · s1:dir0")).toBeNull());
+  expect(screen.queryByText("불러오는 중…")).toBeNull();
+  const after = screen.getByRole("navigation", { name: "항목 쪽" });
+  expect(after).toHaveTextContent("2 / 3쪽");
+  await userEvent.click(within(after).getByRole("button", { name: "이전" }));
+  expect(await screen.findByText("scan · s1:dir0")).toBeInTheDocument();
+  expect(screen.getByRole("navigation", { name: "항목 쪽" })).toHaveTextContent("1 / 3쪽");
+});
+
 test("쪽 조회 요청: offset·limit 이 쪽에서, 검색 q 는 300ms 디바운스 뒤 1쪽부터, 상태 칩은 status", async () => {
   const seen = itemQueries(manyScan(250, (i) => ({ status: i % 50 === 0 ? "Failed" : "Succeeded" })));
   const last = () => seen[seen.length - 1];

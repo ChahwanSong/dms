@@ -31,6 +31,7 @@ import re
 
 from ..db import Database, dump_json, iso_plus, load_json, utc_now_iso
 from ..domain import TERMINAL_DATA_JOB_STATES, TERMINAL_REQUEST_STATES
+from .batches import _audit_schedule_delete
 from .requests import batch_match
 
 # 요청을 지울 때 그 요청·잡·plan 을 가리키는 행을 지우는 테이블(_purge_locked -- delete_terminal·delete_batch 공용 몸통 --
@@ -561,6 +562,8 @@ class RequestPurgesRepository:
                 # 배치 스케줄과 회차 이력(2026-11-16)도 같은 트랜잭션에서 -- 배치 기록 삭제(BatchesRepository.delete)와 같은
                 # 목록(batches.BATCH_DELETE_TABLES). 잠금은 항목 → 배치 → (요청·잡) → 스케줄 순이고, 스케줄을 쥐는 경로(발사·
                 # 스케줄 라우트)는 항목·배치를 먼저 쥐므로 교착이 없다. 배치 행이 없는 묶음도 지운다(남은 스케줄은 고아다).
+                # 스케줄이 있었으면 그 삭제를 감사 행으로 남긴다(배치의 ('batch', 'delete') 행은 스케줄을 담지 않는다).
+                _audit_schedule_delete(self._db, batch_id, actor=actor, now=now)
                 self._db.execute("DELETE FROM batch_schedules WHERE batch_id = :b", {"b": batch_id})
                 self._db.execute("DELETE FROM batch_schedule_runs WHERE batch_id = :b", {"b": batch_id})
                 if self._db.query_one(f"SELECT 1 AS x FROM requests WHERE {batch_match('b')} LIMIT 1", {"b": batch_id}):

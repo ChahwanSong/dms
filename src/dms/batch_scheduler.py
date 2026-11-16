@@ -25,7 +25,7 @@ import json
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 
-from .db import utc_now_iso
+from .db import iso_plus, like_escape, utc_now_iso
 from .domain import BATCH_OPERATIONS, DomainValidationError, Operation, validate_batch_options
 from .privileged import privileged_admin_problem
 
@@ -171,15 +171,35 @@ def _canonical(value) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
-def batch_fingerprint(batch, items) -> str:
-    """동의한 순간의 배치 = sha256(canonical JSON: 연산·옵션·항목 payload(정렬)·실행 신원·자동 확인 여부). 파괴적 스케줄은
-    회차마다 지금 지문이 동의 때(ack_fingerprint)와 같아야 쏜다 -- CSV 교체·옵션 변경·나중에 켠 자동 확인이 있으면, 동의한
-    사람이 본 적 없는 경로를 사람 없이 root 로 지우게 된다(사람의 :rescan 은 누르는 순간 그 사람이 본다). 항목 순서·seq 는
-    대상이 아니다(같은 경로 집합이면 같은 배치)."""
+# 항목 payload 에서 스토리지 이름을 읽는 키(scan·rm = storage, sync = 소스·목적지) -- 지문의 스토리지 바인딩 재료.
+_ITEM_STORAGE_KEYS = ("storage", "source_storage", "destination_storage")
+
+
+def item_storage_names(items) -> "list[str]":
+    """항목들이 가리키는 스토리지 이름(정렬·중복 없음). 문자열이 아닌 값·dict 가 아닌 payload 는 건너뛴다(지문의 항목 부분이
+    그 payload 를 그대로 담으므로 빠져도 변조는 지문에 드러난다)."""
+    names = set()
+    for it in items:
+        p = it.get("payload")
+        if isinstance(p, dict):
+            names.update(p[k] for k in _ITEM_STORAGE_KEYS if isinstance(p.get(k), str))
+    return sorted(names)
+
+
+def batch_fingerprint(batch, items, *, storages) -> str:
+    """동의한 순간의 배치 = sha256(canonical JSON: 연산·옵션·항목 payload(정렬)·실행 신원·자동 확인 여부·스토리지 바인딩).
+    파괴적 스케줄은 회차마다 지금 지문이 동의 때(ack_fingerprint)와 같아야 쏜다 -- CSV 교체·옵션 변경·나중에 켠 자동 확인이
+    있으면, 동의한 사람이 본 적 없는 경로를 사람 없이 root 로 지우게 된다(사람의 :rescan 은 누르는 순간 그 사람이 본다). 항목
+    순서·seq 는 대상이 아니다(같은 경로 집합이면 같은 배치).
+    storages = {스토리지 이름: [mount_path, managed_root] | None(행 없음)} -- 항목이 가리키는 스토리지 전부(storage_binding).
+    payload 에는 스토리지 **이름**과 상대 경로만 있고 절대 경로는 stepper 가 실행 때의 스토리지 행으로 만든다: 동의 뒤 스토리지의
+    경로를 바꾸면(PUT /api/admin/storages 는 require_admin -- 공유 Bearer 토큰도 된다) 같은 이름·같은 상대 경로가 동의한 사람이 본
+    적 없는 절대 경로를 가리키게 된다(2026-11-16 리뷰). 그래서 이름이 아니라 그 순간의 경로를 동의에 묶는다."""
     doc = {"operation": batch.get("operation"), "options": batch.get("options"),
            "items": sorted(_canonical(it.get("payload")) for it in items),
            "owner_username": batch.get("owner_username"),
-           "auto_confirm": batch.get("auto_confirm_by") is not None}
+           "auto_confirm": batch.get("auto_confirm_by") is not None,
+           "storages": storages}
     return "sha256:" + hashlib.sha256(_canonical(doc).encode()).hexdigest()
 
 
@@ -190,6 +210,8 @@ def batch_fingerprint(batch, items) -> str:
 SCHEDULER_ACTOR = "system:batch-scheduler"
 # 틱당 판정 상한(ARCH §3-9 루프 규약 -- 틱은 짧게 끝난다). 남은 due 는 다음 틱(기본 5초)이 집는다.
 TICK_LIMIT = 20
+# batch_schedule_error 이벤트의 스케줄별 쿨다운(batch_cancel._EVENT_COOLDOWN_SECONDS 와 같은 값).
+_ERROR_EVENT_COOLDOWN_SECONDS = 600
 _TERMINAL_BATCH = ("Completed", "Cancelled")
 
 
@@ -215,6 +237,25 @@ def _missed(*, reason_code: str) -> Verdict:
 
 def _pause(*, reason_code: str) -> Verdict:
     return Verdict("paused", reason_code)
+
+
+def storage_binding(repos, items) -> dict:
+    """항목이 가리키는 스토리지마다 **지금의** [mount_path, managed_root](행이 없으면 None) -- 지문의 storages(batch_fingerprint
+    docstring). enabled 는 묶지 않는다: 어디를 지우는지를 바꾸지 않고(꺼진 스토리지는 자식이 planner storage_disabled 로 막힌다),
+    묶으면 스토리지를 잠시 껐다 켜는 운영마다 파괴적 스케줄이 전부 멈춘다. 무장(라우트 트랜잭션)과 회차(판정·발사 트랜잭션)가
+    이 한 함수로 읽는다."""
+    out = {}
+    for name in item_storage_names(items):
+        row = repos.storages.get(name)
+        out[name] = None if row is None else [row.get("mount_path"), row.get("managed_root")]
+    return out
+
+
+def armed_fingerprint(repos, batch, items) -> str:
+    """무장·회차가 비교하는 지문 = batch_fingerprint(배치, 항목, 지금의 스토리지 바인딩). 라우트의 동의(routes_batch_schedules._arm)
+    와 회차(batch_hold·발사 verify)가 반드시 이 함수 하나를 쓴다 -- 한쪽만 스토리지를 묶으면 모든 파괴적 스케줄이 첫 회차에서
+    batch_schedule_batch_changed 로 멈춘다."""
+    return batch_fingerprint(batch, items, storages=storage_binding(repos, items))
 
 
 def arm_problem(repos, settings, batch) -> "Verdict | None":
@@ -252,13 +293,14 @@ def batch_hold(repos, settings, batch, items, *, ack_fingerprint) -> "Verdict | 
         # 쏘면 곧바로 Completed 가 되는 가짜 「실행됨」만 남는다 -- 항목이 생기면 다음 슬롯부터 돈다.
         return _skip(reason_code="batch_schedule_empty")
     if is_destructive(batch["operation"], batch.get("options")) and \
-            batch_fingerprint(batch, items) != ack_fingerprint:
+            armed_fingerprint(repos, batch, items) != ack_fingerprint:
         return _pause(reason_code="batch_schedule_batch_changed")
     status = batch.get("status")
     if status in _TERMINAL_BATCH:
         return None
     # 비종단은 그 회차만 건너뛴다(밀린 회차를 끝난 뒤 몰아 쏘지 않는다). 확인 대기(PreviewReady)는 운영자가 「확인하라」로
-    # 읽어야 해서 따로 -- 자동 확인이 꺼진 sync·rm 은 확인하지 않으면 24시간 뒤 만료(실패 집계)까지 다음 회차가 계속 건너뛴다.
+    # 읽어야 해서 따로 -- 자동 확인이 꺼진 sync·rm 은 확인하지 않으면 미리보기 만료(preview_ttl_seconds, 기본 24시간 -- 실패
+    # 집계)까지 다음 회차가 계속 건너뛴다.
     if status in ("Previewing", "Running"):
         return _skip(reason_code="batch_schedule_batch_running")
     if status == "PreviewReady":
@@ -268,7 +310,20 @@ def batch_hold(repos, settings, batch, items, *, ack_fingerprint) -> "Verdict | 
     return _skip(reason_code="batch_not_rescannable")          # 모르는 상태(변조) -- 쏘지 않는다
 
 
-def schedule_hold(repos, settings, schedule, batch, items, *, control, now) -> Verdict:
+def _rule_and_due(schedule):
+    """(정규화한 spec, 예정 시각) -- 깨졌으면(DB 변조) None. 판정 0단계와 틱의 예외 경로(error_verdict)가 같이 쓴다."""
+    try:
+        return validate_schedule(schedule.get("kind"), schedule.get("spec")), parse_utc(schedule.get("next_run_at"))
+    except (DomainValidationError, ValueError):
+        return None
+
+
+def _late(schedule, spec, due, now) -> bool:
+    """지연 > 유예(grace_seconds) -- 판정 2단계와 틱의 예외 경로(error_verdict)가 같이 쓴다."""
+    return (parse_utc(now) - due).total_seconds() > grace_seconds(schedule["kind"], spec)
+
+
+def schedule_hold(repos, settings, schedule, batch, items, *, control, now, unreadable: bool = False) -> Verdict:
     """due 스케줄 한 건의 회차 판정 -- 순서가 계약이다(첫 해당이 결과):
       0) 규칙·예정 시각이 깨졌다(DB 변조) → paused invalid_batch_schedule(다음 슬롯을 계산할 수 없다)
       1) 유지보수 → skipped maintenance_mode / drain → skipped batch_schedule_drain(일시정지 없음 -- 컨트롤러 루프는 유지보수를
@@ -277,25 +332,41 @@ def schedule_hold(repos, settings, schedule, batch, items, *, control, now) -> V
       3) 사이트 특권 실행 꺼짐 → skipped batch_schedule_privileged_disabled(켠 사람 탓이 아니다 -- 일시정지 없음)
       4) 켠 사람(armed_by)이 지금 자격 있는 활성 관리자가 아님 → paused batch_schedule_owner_not_privileged(자격이 돌아와도
          아무도 모르게 다시 돌지 않게 -- 다시 켠 사람이 새 주체다)
+      4') 배치 행·항목의 JSON 을 읽지 못했다(unreadable -- 호출자가 읽다가 디코드 오류를 만났다, DB 변조) → paused
+         batch_schedule_batch_unreadable. 예외로 두면 행이 next_run_at 을 넘기지 못해 틱마다 다시 집히고(오류 이벤트 5초마다),
+         그런 행이 TICK_LIMIT 개면 due 의 앞자리를 차지해 다른 스케줄이 영영 판정되지 않는다(2026-11-16 리뷰)
       5–11) batch_hold
       12) fired"""
-    try:
-        spec = validate_schedule(schedule.get("kind"), schedule.get("spec"))
-        due = parse_utc(schedule.get("next_run_at"))
-    except (DomainValidationError, ValueError):
+    rule = _rule_and_due(schedule)
+    if rule is None:
         return _pause(reason_code="invalid_batch_schedule")
+    spec, due = rule
     if control is not None and control.get("maintenance"):
         return _skip(reason_code="maintenance_mode")
     if control is not None and control.get("drain"):
         return _skip(reason_code="batch_schedule_drain")
-    if (parse_utc(now) - due).total_seconds() > grace_seconds(schedule["kind"], spec):
+    if _late(schedule, spec, due, now):
         return _missed(reason_code="batch_schedule_missed")
     if not settings.allow_privileged_requesters:
         return _skip(reason_code="batch_schedule_privileged_disabled")
     if privileged_admin_problem(settings, repos, schedule.get("armed_by")) is not None:
         return _pause(reason_code="batch_schedule_owner_not_privileged")
+    if unreadable:
+        return _pause(reason_code="batch_schedule_batch_unreadable")
     held = batch_hold(repos, settings, batch, items, ack_fingerprint=schedule.get("ack_fingerprint"))
     return FIRE if held is None else held
+
+
+def error_verdict(schedule, now) -> "Verdict | None":
+    """판정·발사가 예외로 끝난 행의 처분(BatchScheduler.run_once). None = 유예 안 -- 그대로 두고 다음 틱이 다시 판정한다(일시적
+    오류는 다음 틱에 풀린다). 원인이 무엇이든 유예를 넘겨 계속되면 정상 판정과 같은 missed 로 그 슬롯을 넘긴다 -- 실패하는
+    행은 슬롯마다 유예 창 동안만 시도되고 due 의 앞자리를 영영 차지하지 못한다. 규칙이 깨졌으면(다음 슬롯을 계산할 수 없다)
+    0단계와 같은 일시정지."""
+    rule = _rule_and_due(schedule)
+    if rule is None:
+        return _pause(reason_code="invalid_batch_schedule")
+    spec, due = rule
+    return _missed(reason_code="batch_schedule_missed") if _late(schedule, spec, due, now) else None
 
 
 class BatchScheduler:
@@ -308,44 +379,82 @@ class BatchScheduler:
 
     def run_once(self) -> "list[tuple[str, str]]":
         """due 스케줄(예정 시각 순, TICK_LIMIT 건)을 판정한다 -- (schedule_id, 결과) 목록(lost = CAS 패배, error = 예외).
-        한 행의 예외는 그 행만 실패시킨다(이벤트 batch_schedule_error, 트랜잭션 밖) -- 독 행 하나가 나머지를 막지 않게."""
+        한 행의 예외는 그 행만 실패시킨다(이벤트 batch_schedule_error, 트랜잭션 밖) -- 독 행 하나가 나머지를 막지 않게. 예외가
+        유예를 넘겨 계속되면 그 슬롯을 missed 로 넘기고(error_verdict), 오류 이벤트는 스케줄마다 쿨다운 안에 한 번만 남긴다."""
         now = self._now or utc_now_iso()
         done = []
         for row in self._repos.batch_schedules.due(now, limit=TICK_LIMIT):
             try:
                 done.append((row["schedule_id"], self._handle(row, now)))
             except Exception as exc:
-                done.append((row["schedule_id"], "error"))
-                self._repos.observability.record_event(
-                    component="batch-scheduler", severity="error", event_type="batch_schedule_error",
-                    message=f"schedule {row.get('schedule_id')} batch {row.get('batch_id')}: "
-                            f"{type(exc).__name__}: {exc}"[:500])
+                done.append((row["schedule_id"], self._after_error(row, now, exc)))
         return done
 
-    def _handle(self, row, now) -> str:
-        repos = self._repos
-        bid = row["batch_id"]
-        batch = repos.batches.get(bid)
-        items = repos.batches.list_items(bid) if batch is not None else []
-        verdict = schedule_hold(repos, self._settings, row, batch, items,
-                                control=repos.control.control_state(), now=now)
+    def _after_error(self, row, now, exc) -> str:
+        self._error_event(row, f"{type(exc).__name__}: {exc}")
+        try:
+            verdict = error_verdict(row, now)
+            if verdict is None:
+                return "error"
+            return self._record(row, verdict, now, batch_status=None)
+        except Exception as again:                  # 기록마저 실패(DB 단절 등) -- 다음 틱이 다시 본다
+            self._error_event(row, f"after error: {type(again).__name__}: {again}")
+            return "error"
+
+    def _error_event(self, row, detail):
+        """batch_schedule_error -- 같은 스케줄은 _ERROR_EVENT_COOLDOWN_SECONDS 안에 한 번만(batch_cancel._event 와 같은 결: 영구
+        실패하는 행이 5초 틱마다 events 를 채우지 않게). 스케줄은 요청이 아니라 request_id 로 못 찾으니 메시지 머리(「schedule
+        <id> 」)로 찾는다(like_escape -- 변조된 id 의 %·_ 가 다른 스케줄의 이벤트를 집지 않게). 이벤트 시각은 record_event 의
+        실제 시각이라 쿨다운도 실제 시각으로 잰다. 쿨다운 조회·이벤트 기록의 실패는 판정을 막지 않는다."""
+        head = f"schedule {row.get('schedule_id')} "
+        try:
+            if self._repos.db.query_one(
+                    "SELECT 1 AS x FROM events WHERE at > :since AND event_type = 'batch_schedule_error' "
+                    "AND message LIKE :head ESCAPE '\\' LIMIT 1",
+                    {"since": iso_plus(utc_now_iso(), -_ERROR_EVENT_COOLDOWN_SECONDS),
+                     "head": like_escape(head) + "%"}):
+                return
+        except Exception:
+            pass                                    # 쿨다운을 모르면 한 건 더 남길 뿐이다
+        self._repos.observability.record_event(
+            component="batch-scheduler", severity="error", event_type="batch_schedule_error",
+            message=f"{head}batch {row.get('batch_id')}: {detail}"[:500])
+
+    def _record(self, row, verdict, now, *, batch_status) -> str:
+        """쏘지 않은 회차(skipped·missed·paused)를 스케줄 CAS 로 남긴다 -- 진 쪽은 "lost"."""
         # 다음 슬롯은 max(예정, 지금) 보다 엄격히 뒤 -- 밀린 회차를 몰아 쏘지 않고, 시계가 뒤로 가도 같은 슬롯을 두 번 쏘지
         # 않는다. 일시정지는 다음이 없다(다시 켤 때 그 시각 뒤로 새로 잡는다).
         next_at = (None if verdict.outcome == "paused"
                    else next_run_after(row["kind"], row["spec"], max(row["next_run_at"], now)))
+        if not self._repos.batch_schedules.record(row, outcome=verdict.outcome, reason_code=verdict.reason_code,
+                                                  next_run_at=next_at, now=now, batch_status=batch_status):
+            return "lost"
+        if verdict.outcome in ("paused", "missed"):
+            # 건너뜀은 이벤트를 남기지 않는다(확인 대기 동안 회차마다 쌓인다 -- 이력 행으로 충분). 놓침은 다운타임마다
+            # 한 번, 일시정지는 사람이 다시 켜야 하는 전환이라 남긴다.
+            self._repos.observability.record_event(
+                component="batch-scheduler", severity="warning", event_type=f"batch_schedule_{verdict.outcome}",
+                message=(f"schedule {row['schedule_id']} batch {row['batch_id']}: {verdict.outcome} "
+                         f"({verdict.reason_code}) slot {row['next_run_at']}")[:500])
+        return verdict.outcome
+
+    def _handle(self, row, now) -> str:
+        repos = self._repos
+        bid = row["batch_id"]
+        batch, items, unreadable = None, [], False
+        try:
+            batch = repos.batches.get(bid)
+            items = repos.batches.list_items(bid) if batch is not None else []
+        except (ValueError, TypeError):
+            # 배치 options·항목 payload 의 깨진 JSON(DB 변조 -- load_json 은 json.loads 그대로)은 예외로 두지 않고 판정에
+            # 넘긴다(schedule_hold 4'). 배치 행이 읽혔으면 그 상태를 이력에 남긴다.
+            unreadable = True
+        verdict = schedule_hold(repos, self._settings, row, batch, items,
+                                control=repos.control.control_state(), now=now, unreadable=unreadable)
         batch_status = None if batch is None else batch.get("status")
         if verdict.outcome != "fired":
-            if not repos.batch_schedules.record(row, outcome=verdict.outcome, reason_code=verdict.reason_code,
-                                                next_run_at=next_at, now=now, batch_status=batch_status):
-                return "lost"
-            if verdict.outcome in ("paused", "missed"):
-                # 건너뜀은 이벤트를 남기지 않는다(확인 대기 동안 회차마다 쌓인다 -- 이력 행으로 충분). 놓침은 다운타임마다
-                # 한 번, 일시정지는 사람이 다시 켜야 하는 전환이라 남긴다.
-                repos.observability.record_event(
-                    component="batch-scheduler", severity="warning", event_type=f"batch_schedule_{verdict.outcome}",
-                    message=(f"schedule {row['schedule_id']} batch {bid}: {verdict.outcome} ({verdict.reason_code}) "
-                             f"slot {row['next_run_at']}")[:500])
-            return verdict.outcome
+            return self._record(row, verdict, now, batch_status=batch_status)
+        next_at = next_run_after(row["kind"], row["spec"], max(row["next_run_at"], now))
         env = frozenset(self._settings.privileged_requesters)
 
         def verify(locked_batch, locked_items):
@@ -354,7 +463,7 @@ class BatchScheduler:
             if batch_hold(repos, self._settings, locked_batch, locked_items,
                           ack_fingerprint=row.get("ack_fingerprint")) is not None:
                 return None
-            return batch_fingerprint(locked_batch, locked_items)
+            return armed_fingerprint(repos, locked_batch, locked_items)
 
         result = repos.batch_schedules.fire(
             row, next_run_at=next_at, now=now, verify=verify,

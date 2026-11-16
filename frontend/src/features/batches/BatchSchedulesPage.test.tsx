@@ -200,6 +200,29 @@ test("동의 창은 다시 열면 동의가 풀려 있다", async () => {
   expect(within(dlg).getByRole("checkbox")).not.toBeChecked();
 });
 
+test("동의 창을 닫으면(취소·켜기) 포커스가 연 행의 「사용」 체크박스로 돌아온다 — <body> 로 떨어지지 않는다", async () => {
+  // 트리거가 포커스를 받을 수 없는 자리표시 span 이라 Radix 의 기본 복귀가 <body> 였다(2026-11-16 리뷰). 같은 이름의 행이
+  // 둘이어도 연 행으로 돌아간다(id 로 찾는다).
+  const rmBatch = { name: "정리", operation: "rm", status: "Completed", item_count: 2, storage: "ceph" };
+  serve([sched({ schedule_id: "s1", enabled: 0, next_run_at: null, batch: rmBatch }),
+         sched({ schedule_id: "s2", batch_id: ID2, enabled: 0, next_run_at: null, batch: rmBatch })]);
+  renderPage();
+  await screen.findAllByRole("checkbox", { name: "정리 사용" });
+  const second = () => screen.getAllByRole("checkbox", { name: "정리 사용" })[1];
+  await userEvent.click(second());
+  let dlg = await screen.findByRole("dialog", { name: "스케줄 켜기" });
+  await userEvent.click(within(dlg).getByRole("button", { name: "취소" }));
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "스케줄 켜기" })).toBeNull());
+  await waitFor(() => expect(second()).toHaveFocus());
+  await userEvent.click(second());
+  dlg = await screen.findByRole("dialog", { name: "스케줄 켜기" });
+  await userEvent.click(within(dlg).getByRole("checkbox"));
+  await userEvent.click(within(dlg).getByRole("button", { name: "켜기" }));
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "스케줄 켜기" })).toBeNull());
+  await waitFor(() => expect(second()).toHaveFocus());
+  expect(document.body).not.toHaveFocus();
+});
+
 test("서버 판정은 행의 최상위 destructive — 옵션을 몰라도 그 판정으로 동의 창을 먼저 연다", async () => {
   // 실서버 응답 모양(routes_batch_schedules._out): destructive 는 batch 요약 안이 아니라 행의 최상위에 실린다.
   const calls = serve([sched({ enabled: 0, next_run_at: null, destructive: true,

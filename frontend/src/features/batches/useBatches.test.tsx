@@ -4,7 +4,9 @@ import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
 import { beforeAll, afterAll, afterEach, test, expect } from "vitest";
 import { useBatches, useUpdateBatch, useUpdateBatchItem, useDeleteBatch, useDeleteBatches,
-         useReplaceBatchItems, useRerunBatchItems, needsBatchConfirm } from "./useBatches";
+         useReplaceBatchItems, useRerunBatchItems, needsBatchConfirm, headerPollInterval, useBatch,
+         useBatchPayloads, SCHEDULED_IDLE_POLL_MS } from "./useBatches";
+import type { BatchHeader } from "./batchView";
 const server = setupServer();
 beforeAll(() => server.listen()); afterEach(() => server.resetHandlers()); afterAll(() => server.close());
 test("useUpdateBatch PATCHes and invalidates batch queries", async () => {
@@ -160,4 +162,60 @@ test("useDeleteBatches(목록 일괄 삭제)도 배치 스케줄 목록을 무�
     expect.objectContaining({ queryKey: ["batches"] }),
     expect.objectContaining({ queryKey: ["batch-schedules"] }),
   ]));
+});
+
+// --- 종단 배치 머리 폴링(2026-11-16 리뷰): 켜진 스케줄이 사람 없이 종단 배치를 되살리므로 멈추지 않는다 ---------------------
+const NOW = Date.parse("2026-11-16T16:00:00Z");
+const head = (status: string, schedule?: unknown) => ({ batch_id: "b1", status, schedule } as unknown as BatchHeader);
+const sch = (over: object = {}) => ({ schedule_id: "s1", kind: "daily", spec: { hour: 2, minute: 0 }, enabled: true,
+  next_run_at: "2026-11-16T17:00:00Z", last_run_at: null, last_outcome: null, last_reason_code: null,
+  paused_reason_code: null, ...over });
+const at = (ms: number) => new Date(NOW + ms).toISOString();
+
+test("headerPollInterval: 비종단·모름은 2.5초, 스케줄 없는 종단은 멈춤", () => {
+  expect(headerPollInterval(undefined, NOW)).toBe(2500);
+  expect(headerPollInterval(head("Running"), NOW)).toBe(2500);
+  expect(headerPollInterval(head("PreviewReady", sch()), NOW)).toBe(2500);
+  for (const s of [undefined, null, sch({ enabled: false }), sch({ enabled: 0 }), sch({ enabled: "1" }),
+                   sch({ next_run_at: null }), sch({ next_run_at: "garbage" })]) {
+    expect(headerPollInterval(head("Completed", s), NOW)).toBe(false);
+  }
+});
+
+test("headerPollInterval: 켜진 스케줄의 종단 배치는 다음 회차가 멀면 30초, 직전·직후는 2.5초, 한참 지나면 다시 30초", () => {
+  expect(headerPollInterval(head("Completed", sch({ next_run_at: at(3_600_000) })), NOW)).toBe(SCHEDULED_IDLE_POLL_MS);
+  expect(headerPollInterval(head("Cancelled", sch({ enabled: 1, next_run_at: at(20_000) })), NOW)).toBe(17_500);
+  expect(headerPollInterval(head("Completed", sch({ next_run_at: at(3_000) })), NOW)).toBe(2500);
+  expect(headerPollInterval(head("Completed", sch({ next_run_at: at(-60_000) })), NOW)).toBe(2500);
+  expect(headerPollInterval(head("Completed", sch({ next_run_at: at(-300_000) })), NOW)).toBe(SCHEDULED_IDLE_POLL_MS);
+});
+
+test("useBatch: 켜진 스케줄이 걸린 Completed 배치는 다시 조회해 스케줄러가 되살린 상태(Running)를 본다", async () => {
+  let n = 0;
+  server.use(http.get("/api/admin/batches/b1", () => {
+    n += 1;
+    return HttpResponse.json({ batch_id: "b1", operation: "scan", status: n === 1 ? "Completed" : "Running",
+      max_concurrency: 1, item_count: 1, succeeded_count: 0, failed_count: 0, note: null, created_at: "",
+      item_total: 1, status_counts: {}, first_payload: null, executing_count: null, direct_tools: null,
+      schedule: sch({ next_run_at: new Date(Date.now() + 1000).toISOString() }) });
+  }));
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const { result } = renderHook(() => useBatch("b1"), { wrapper: ({children}) =>
+    <QueryClientProvider client={qc}>{children}</QueryClientProvider> });
+  await waitFor(() => expect(result.current.data?.status).toBe("Completed"));
+  await waitFor(() => expect(result.current.data?.status).toBe("Running"), { timeout: 5000 });
+}, 10_000);
+
+test("useBatchPayloads: 전역 staleTime(5초) 안에 다시 열어도 다시 받는다(staleTime 0)", async () => {
+  let n = 0;
+  server.use(http.get("/api/admin/batches/b1", () => { n += 1; return HttpResponse.json({ items: [] }); }));
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: 5000 } } });
+  const { result, rerender } = renderHook(({ on }: { on: boolean }) => useBatchPayloads("b1", on), {
+    initialProps: { on: true },
+    wrapper: ({children}) => <QueryClientProvider client={qc}>{children}</QueryClientProvider> });
+  await waitFor(() => expect(result.current.isSuccess).toBe(true));
+  expect(n).toBe(1);
+  rerender({ on: false });
+  rerender({ on: true });
+  await waitFor(() => expect(n).toBe(2));
 });

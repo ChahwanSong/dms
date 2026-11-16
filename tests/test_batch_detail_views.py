@@ -264,6 +264,27 @@ def test_list_item_tools_tolerates_a_broken_preview_summary(db):
     assert direct_tool_counts(repos.batches.list_item_tools(bid)) == {"tools_known": 0, "nsync": 0, "undecided": 1}
 
 
+def test_list_item_tools_reads_preview_summary_only_when_the_job_tool_is_not_authoritative(db):
+    # 2026-11-16 리뷰: docstring 은 「job_tool 을 모를 때만 읽는다」였는데 SQL 이 늘 두 번째 상관 서브쿼리를 돌고 원문을 실어
+    # 파싱했다(direct 배치의 2.5초 요약 폴링마다 항목 수만큼). 잡 행 tool 이 권위면 preview_summary 는 None 이고 결과는 같다.
+    repos = Repositories(db)
+    bid = _create(repos, "sync", [dict(SYNC, destination=f"d{i}") for i in range(3)], status="Previewing",
+                  options={"direct": True})
+    _child(repos, bid, 0, tool="nsync", summary={"tool": "dsync", "files": 1})
+    _child(repos, bid, 1, tool="bogus", summary={"tool": "nsync", "files": 2})
+    rows = {r["seq"]: r for r in repos.batches.list_item_tools(bid)}
+    assert (rows[0]["job_tool"], rows[0]["preview_summary"]) == ("nsync", None)
+    assert (rows[1]["job_tool"], rows[1]["preview_summary"]) == ("bogus", {"tool": "nsync", "files": 2})
+    assert (rows[2]["job_tool"], rows[2]["preview_summary"]) == (None, None)
+    assert direct_tool_counts(rows.values()) == direct_tool_counts(repos.batches.list_items_detail(bid)) == \
+        {"tools_known": 2, "nsync": 2, "undecided": 1}
+
+
+def test_authoritative_job_tools_mirror_the_orchestrator_set():
+    from dms.batch_orchestrator import _PREVIEW_TOOLS
+    assert set(batches_mod._AUTHORITATIVE_JOB_TOOLS) == set(_PREVIEW_TOOLS)
+
+
 # --- 상세 라우트: view 별 응답 ---------------------------------------------------------------------------
 
 def _post_sync(client, n, **extra):
@@ -429,6 +450,30 @@ def test_view_items_joins_only_the_page_seqs(client, monkeypatch):
     calls.clear()
     client.get(f"/api/admin/batches/{bid}", params={"view": "items", "q": "nothing"})
     assert calls == [[]]                                    # 0건 쪽은 조인할 seq 가 없다
+
+
+def test_view_items_without_a_search_term_pages_in_sql_without_reading_payloads(client, monkeypatch):
+    # 2026-11-16 리뷰: 기본 화면(검색어 없음)의 2.5초 폴링마다 전 항목 payload 를 읽어 파싱했다 -- 검색어가 없으면 거르기에
+    # payload 가 필요 없으니 SQL 로 센다. 응답은 거르는 경로와 같다(상태 규칙: 빈 값 = 전체, 그 밖 정확 일치).
+    _admin(client)
+    bid = _post_sync(client, 7)
+    repo = client.app.state.repos.batches
+    repo.set_item_status(bid, 2, "Failed", reason_code="x")
+    repo.set_item_status(bid, 5, "Failed", reason_code="x")
+    expected = {qs: client.get(f"/api/admin/batches/{bid}?view=items&q=dst/{qs}").json()
+                for qs in ("&offset=2&limit=3", "&status=Failed", "&status=Failed&offset=1", "&status=nope",
+                           "&offset=50")}
+
+    def no_heads(batch_id):
+        raise AssertionError("payload read on the no-search path")
+    monkeypatch.setattr(repo, "list_item_heads", no_heads)
+    for qs, want in expected.items():
+        got = client.get(f"/api/admin/batches/{bid}?view=items{qs}")
+        assert got.status_code == 200 and got.json() == want, qs
+    assert client.get(f"/api/admin/batches/{bid}?view=items&status=").json()["total"] == 7   # 빈 상태 = 전체
+    # 검색어가 없으면 깨진 payload 도 세어진다(거르는 경로도 검색어가 없으면 거르지 않는다 -- 같다).
+    _set_payload_text(repo._db, bid, 6, "{broken")
+    assert client.get(f"/api/admin/batches/{bid}?view=items&limit=2").json()["total"] == 7
 
 
 def test_view_items_survives_a_broken_payload_outside_the_page(client):

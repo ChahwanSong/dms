@@ -6,7 +6,7 @@ import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
 import { beforeAll, afterAll, afterEach, test, expect } from "vitest";
 import { BatchScheduleDialog } from "./BatchScheduleDialog";
-import { reasonText } from "../../lib/api";
+import { REASON_MESSAGES, reasonText } from "../../lib/api";
 import type { BatchSchedule } from "../../lib/types";
 
 const server = setupServer();
@@ -167,7 +167,12 @@ test("sync: delete 를 켠 배치만 경고, 확인 흐름 안내는 자동 실�
   const dlg = await openDialog();
   await pick(dlg, SYNC);
   expect(within(dlg).queryByRole("note", { name: "반복 삭제 경고" })).toBeNull();
-  expect(within(dlg).getByText(/회차마다 사람이 확인해야 하며, 확인하지 않으면 24시간 뒤 만료/)).toBeInTheDocument();
+  // 만료 시간은 사이트 설정(DMS_PREVIEW_TTL_SECONDS)이다 -- 고정 「24시간 뒤」를 약속하지 않는다(2026-11-16 리뷰).
+  expect(within(dlg).getByText(/회차마다 사람이 확인해야 하며, 확인하지 않으면 미리보기 만료 시간\(사이트 설정, 기본 24시간\)이 지나/))
+    .toBeInTheDocument();
+  expect(within(dlg).queryByText(/24시간 뒤 만료/)).toBeNull();
+  expect(REASON_MESSAGES.batch_schedule_awaiting_confirm).not.toMatch(/24시간 뒤/);
+  expect(REASON_MESSAGES.batch_schedule_awaiting_confirm).toMatch(/미리보기 만료 시간\(사이트 설정, 기본 24시간\)/);
   expect(within(dlg).getByText("회차마다 자식 요청 5개가 새로 생깁니다.")).toBeInTheDocument();
   await userEvent.selectOptions(within(dlg).getByRole("combobox", { name: "배치" }), SYNC_DEL);
   expect(within(dlg).getByRole("note", { name: "반복 삭제 경고" })).toHaveTextContent("delete 옵션");

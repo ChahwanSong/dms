@@ -8,7 +8,7 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
-from dms.batch_scheduler import KST, batch_fingerprint, parse_utc
+from dms.batch_scheduler import KST, armed_fingerprint, parse_utc
 from dms.config import Settings
 from dms.repositories.batches import BATCH_DELETE_EXEMPT_TABLES, BATCH_DELETE_TABLES, BatchesRepository
 from dms.repositories.request_purges import RequestPurgesRepository
@@ -159,7 +159,7 @@ def test_destructive_schedule_needs_explicit_ack(client, db, op, options):
     assert r.json()["acknowledged_irreversible"] is True and r.json()["destructive"] is True
     repos = client.app.state.repos
     stored = repos.batch_schedules.get_by_batch(bid)["ack_fingerprint"]
-    assert stored == batch_fingerprint(repos.batches.get(bid), repos.batches.list_items(bid))
+    assert stored == armed_fingerprint(repos, repos.batches.get(bid), repos.batches.list_items(bid))
     after = json.loads(_audit(db, "create")[0]["after_state"])
     assert after["acknowledged_irreversible"] is True and after["fingerprint"] == stored
 
@@ -315,7 +315,7 @@ def test_reenabling_an_auto_paused_destructive_schedule_needs_a_fresh_ack(client
     s = repos.batch_schedules.get(sid)
     assert s["enabled"] is True and s["paused_reason_code"] is None and s["armed_by"] == "ops"
     assert s["ack_fingerprint"] != old
-    assert s["ack_fingerprint"] == batch_fingerprint(repos.batches.get(bid), repos.batches.list_items(bid))
+    assert s["ack_fingerprint"] == armed_fingerprint(repos, repos.batches.get(bid), repos.batches.list_items(bid))
     before = json.loads(_audit(db, "enable")[0]["before_state"])
     assert before["paused_reason_code"] == "batch_schedule_batch_changed"
 
@@ -493,6 +493,43 @@ def test_batch_unit_delete_cascades_schedules(client, db):
     assert out["deleted"] is True, out
     assert _schedule_rows(db, bid) == ([], [])
     assert repos.batches.get(bid) is None
+
+
+def _schedule_delete_audit(db, bid, sid, actor):
+    [row] = _audit(db, "delete")
+    assert (row["target_key"], row["actor"], row["after_state"]) == (bid, actor, None)
+    before = json.loads(row["before_state"])
+    assert (before["schedule_id"], before["batch_id"], before["kind"], before["spec"], before["armed_by"]) == \
+        (sid, bid, "daily", DAILY["spec"], "ops")
+    assert (before["enabled"], before["acknowledged_irreversible"], before["deleted_with_batch"]) == (True, False, True)
+    assert (before["run_count"], before["last_outcome"], before["last_reason_code"]) == (1, "skipped", "maintenance_mode")
+
+
+def test_batch_record_delete_audits_the_schedule_it_removes_even_via_the_shared_token(client, db):
+    # 2026-11-16 리뷰: 배치 삭제는 require_admin 이라 공유 Bearer 토큰으로도 되는데, 켜진 스케줄과 회차 이력 전체를 감사 행
+    # 없이 지웠다 -- 스케줄 DELETE 라우트와 같은 ('batch_schedule', 'delete') 행을 남긴다(토큰이면 actor 에 token: 표식).
+    bid = _batch(client)
+    sid = _with_schedule_and_run(client, bid)
+    assert TestClient(client.app).delete(f"/api/admin/batches/{bid}", headers=TOKEN).status_code == 200
+    assert _schedule_rows(db, bid) == ([], [])
+    _schedule_delete_audit(db, bid, sid, "token:shared-token")
+
+
+def test_batch_record_delete_without_a_schedule_writes_no_schedule_audit(client, db):
+    bid = _batch(client)
+    assert client.delete(f"/api/admin/batches/{bid}").status_code == 200
+    assert _audit(db, "delete") == []
+
+
+def test_batch_unit_delete_audits_the_schedule_it_removes(client, db):
+    repos = client.app.state.repos
+    bid = _batch(client)
+    sid = _with_schedule_and_run(client, bid)
+    out = repos.request_purges.delete_batch(bid, expected_request_count=0, actor="ops", artifact_base=None,
+                                            quiet_seconds=0, max_children=1000)
+    assert out["deleted"] is True, out
+    _schedule_delete_audit(db, bid, sid, "ops")
+    assert len(_audit(db, "delete", mutation_class="batch")) == 1               # 배치 자체의 감사 행은 그대로
 
 
 def test_every_batch_id_table_is_covered_by_both_batch_delete_paths(db):
