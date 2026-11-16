@@ -33,6 +33,10 @@ class _Off(_S):
 def repos(db):
     r = Repositories(db)
     r.accounts.create("ops", "p", "admin", actor="t")
+    # 항목이 가리키는 스토리지(s1·s2)가 있어야 무장·회차가 돈다(없으면 storage_missing -- batch_hold).
+    for name in ("s1", "s2"):
+        r.storages.create(storage_name=name, mount_path=f"/mnt/{name}", managed_root=f"/mnt/{name}/managed",
+                          backend_type="cephfs", actor="t")
     return r
 
 
@@ -398,6 +402,10 @@ def test_unchanged_destructive_batch_fires(repos):
 
 
 def _storage(repos, name, root):
+    if repos.storages.get(name) is not None:          # 픽스처가 만든 s1·s2 -- 이 테스트의 경로로 맞춘다
+        repos.storages.update(name, mount_path=root, managed_root=f"{root}/managed", backend_type="cephfs",
+                              enabled=True, actor="t")
+        return
     repos.storages.create(storage_name=name, mount_path=root, managed_root=f"{root}/managed", backend_type="cephfs",
                           actor="t")
 
@@ -476,6 +484,17 @@ def test_any_schedule_pauses_when_a_storage_is_repointed_after_arming(repos, db,
     assert _tick(repos) == [(sid, "paused")]
     _assert_paused(repos, db, sid, "batch_schedule_storage_changed")
     assert repos.batches.get(bid)["status"] == "Completed"                # 리셋하지 않았다
+
+
+def test_schedule_pauses_when_a_referenced_storage_is_deleted(repos, db):
+    # 지웠다가 같은 이름으로 다시 만들기(2026-11-16 리뷰): 없는 스토리지끼리(None == None) 바인딩이 같다고 쏘면, 그 사이 같은
+    # 이름으로 만든 새 경로에서 남은 항목이 돈다 -- 없으면 멈춘다.
+    bid = _batch(repos, op="scan")
+    sid = _schedule(repos, bid)
+    repos.storages.delete("s1", actor="token:shared-token")
+    assert _tick(repos) == [(sid, "paused")]
+    _assert_paused(repos, db, sid, "storage_missing")
+    assert repos.batches.get(bid)["status"] == "Completed"
 
 
 def test_scan_schedule_item_edits_do_not_pause(repos):

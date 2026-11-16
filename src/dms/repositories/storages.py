@@ -68,7 +68,9 @@ class StoragesRepository:
              "a": dump_json(after) if after else None, "at": utc_now_iso()})
 
     def create(self, *, storage_name, mount_path, managed_root, backend_type, actor,
-               enabled: bool = True, user_enabled: bool = True):
+               enabled: bool = True, user_enabled: bool = True, guard=None):
+        """guard() -- 사용 중 판정(routes_storages)을 INSERT 와 같은 트랜잭션에서. 진행 중인 요청·배치가 이 이름을 가리키는데
+        스토리지가 없던(지워진) 자리에 새 경로로 만들면, 남은 항목이 사람이 본 적 없는 경로에서 돈다(2026-11-16 리뷰)."""
         _validate(storage_name, mount_path, managed_root, backend_type)
         mount_path = posixpath.normpath(mount_path)
         managed_root = posixpath.normpath(managed_root)
@@ -76,6 +78,8 @@ class StoragesRepository:
         with self._db.transaction():
             if self.get(storage_name) is not None:
                 raise DomainValidationError("storage_exists", storage_name)
+            if guard is not None:
+                guard()
             self._db.execute(
                 """INSERT INTO storages (storage_name, mount_path, managed_root,
                        backend_type, enabled, user_enabled, status, created_at,

@@ -162,6 +162,25 @@ def test_sync_batch_holds_both_storages_and_unknown_status_counts_as_active(clie
     assert repos.batches.active_referencing_storage("s3") is True          # 모르는 상태(변조)는 활성으로 -- fail-closed
 
 
+def test_create_blocked_while_an_active_batch_references_the_missing_name(client):
+    # 지웠다가 같은 이름으로 다시 만들기(2026-11-16 리뷰): 활성 배치가 가리키는 (지워진) 이름으로 새 경로를 만들면 남은 항목이
+    # 그 경로에서 돈다 -- 만들기에도 사용 중 가드.
+    _admin(client)
+    _batch_on(client, "Running", items=[{"storage": "gone", "target": "a"}])
+    r = client.post("/api/admin/storages", json={"storage_name": "gone", "mount_path": "/gone",
+                                                 "managed_root": "/gone/dms", "backend_type": "cephfs"})
+    assert r.status_code == 409 and r.json()["detail"] == "storage_in_use"
+    assert client.app.state.repos.storages.get("gone") is None
+
+
+def test_create_allowed_when_only_terminal_batches_reference_the_name(client):
+    _admin(client)
+    _batch_on(client, "Completed", items=[{"storage": "gone", "target": "a"}])
+    r = client.post("/api/admin/storages", json={"storage_name": "gone", "mount_path": "/gone",
+                                                 "managed_root": "/gone/dms", "backend_type": "cephfs"})
+    assert r.status_code == 201
+
+
 def test_broken_item_payload_does_not_break_the_storage_guard(client):
     _admin(client); _seed_storage(client)
     bid = _batch_on(client, "Running")

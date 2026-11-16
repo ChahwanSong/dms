@@ -25,7 +25,13 @@ def _app(db, **overrides):
     base = {"DMS_DATABASE_URL": "unused", "DMS_SHARED_TOKEN": "tok-shared",
             "DMS_ADMIN_TOKEN": "tok-admin", "DMS_SESSION_SECRET": "sess",
             "DMS_ALLOW_PRIVILEGED_REQUESTERS": "true", "DMS_PRIVILEGED_REQUESTERS": "ops", **overrides}
-    return create_app(Settings.from_env(base), db)
+    app = create_app(Settings.from_env(base), db)
+    # 항목이 가리키는 스토리지(s1·s2) -- 없으면 무장이 422 storage_missing(없는 스토리지로 묶지 않는다).
+    for name in ("s1", "s2"):
+        if app.state.repos.storages.get(name) is None:
+            app.state.repos.storages.create(storage_name=name, mount_path=f"/mnt/{name}",
+                                            managed_root=f"/mnt/{name}/managed", backend_type="cephfs", actor="t")
+    return app
 
 
 def _login(client, username="ops", role="admin"):
@@ -93,6 +99,22 @@ def test_create_scan_schedule_returns_the_row_with_batch_summary(client, db):
     assert after["schedule_id"] == row["schedule_id"] and "acknowledged_irreversible" not in after
     # 목록도 같은 모양.
     assert client.get("/api/admin/batch-schedules").json() == [row]
+
+
+def test_arming_with_a_missing_storage_is_422_and_writes_nothing(client, db):
+    # 지웠다가 같은 이름으로 다시 만들기(2026-11-16 리뷰): 「없음」으로 묶인 스케줄은 None == None 으로 발사를 통과했고, 그 사이
+    # 같은 이름으로 만든 새 경로에서 돌았다 -- 생성·켜기 모두 거부한다.
+    bid = _batch(client)
+    sid = _create(client, bid).json()["schedule_id"]
+    assert client.post(f"/api/admin/batch-schedules/{sid}:disable").status_code == 200
+    client.app.state.repos.storages.delete("s1", actor="token:shared-token")
+    r = client.post(f"/api/admin/batch-schedules/{sid}:enable", json={})
+    assert r.status_code == 422 and r.json()["detail"] == "storage_missing"
+    assert client.app.state.repos.batch_schedules.get(sid)["enabled"] is False
+    other = _batch(client)
+    r = _create(client, other)
+    assert r.status_code == 422 and r.json()["detail"] == "storage_missing"
+    assert client.app.state.repos.batch_schedules.get_by_batch(other) is None
 
 
 def test_sync_storage_fields_and_disabled_create(client):

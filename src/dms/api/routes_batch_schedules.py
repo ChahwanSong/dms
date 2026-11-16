@@ -23,7 +23,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, StrictBool
 
 from ..batch_scheduler import (arm_problem, armed_fingerprint, is_destructive, next_run_after, preview_runs,
-                               storage_binding_digest, validate_schedule)
+                               binding_digest, storage_binding, validate_schedule)
 from ..db import utc_now_iso
 from ..domain import DomainValidationError
 from .auth import Identity, require_admin
@@ -83,7 +83,11 @@ def _arm(request: Request, acknowledge):
         held = arm_problem(repos, settings, batch)
         if held is not None:
             raise DomainValidationError(held.reason_code)
-        binding = storage_binding_digest(repos, items)
+        bound = storage_binding(repos, items)
+        if any(v is None for v in bound.values()):
+            # 없는 스토리지로 묶지 않는다(batch_hold 와 같은 판정 -- 같은 이름으로 다시 만든 경로를 사람 없이 쓰게 된다).
+            raise DomainValidationError("storage_missing")
+        binding = binding_digest(bound)
         if is_destructive(batch["operation"], batch.get("options")):
             if acknowledge is not True:
                 raise DomainValidationError("batch_schedule_ack_required")

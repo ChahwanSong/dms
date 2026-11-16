@@ -251,12 +251,17 @@ def storage_binding(repos, items) -> dict:
     return out
 
 
+def binding_digest(binding) -> str:
+    """storage_binding(dict)의 해시 -- 무장이 저장하고 회차가 비교하는 값(storage_binding_digest 와 같은 계산)."""
+    return "sha256:" + hashlib.sha256(_canonical(binding).encode()).hexdigest()
+
+
 def storage_binding_digest(repos, items) -> str:
     """**모든** 스케줄(연산 무관)이 무장 때 저장하고 회차마다 비교하는 스토리지 경로 바인딩 = sha256(canonical storage_binding).
     파괴적 지문(armed_fingerprint)은 rm·delete 켠 sync 만 묶는데, 자동 확인이 켜진 일반 sync 도 회차 사이 목적지 스토리지의
     경로를 바꾸면(PUT /api/admin/storages 는 require_admin -- 공유 Bearer 토큰도 된다) 사람 없이 root 로 엉뚱한 곳에 덮어쓴다
     (2026-11-16 보안 리뷰). 항목·옵션은 묶지 않는다(scan 배치는 항목을 자주 고친다 -- 그건 파괴적 지문만의 몫)."""
-    return "sha256:" + hashlib.sha256(_canonical(storage_binding(repos, items)).encode()).hexdigest()
+    return binding_digest(storage_binding(repos, items))
 
 
 def armed_fingerprint(repos, batch, items) -> str:
@@ -301,7 +306,13 @@ def batch_hold(repos, settings, batch, items, *, ack_fingerprint, bound_storages
     if len(items) == 0:
         # 쏘면 곧바로 Completed 가 되는 가짜 「실행됨」만 남는다 -- 항목이 생기면 다음 슬롯부터 돈다.
         return _skip(reason_code="batch_schedule_empty")
-    if storage_binding_digest(repos, items) != bound_storages:
+    binding = storage_binding(repos, items)
+    if any(v is None for v in binding.values()):
+        # 항목이 가리키는 스토리지가 없다 -- 그 이름으로 다시 만들면(POST storages 도 require_admin -- 공유 토큰도 된다) 남은
+        # 항목이 새 경로에서 돈다. 「없음」끼리 같다(None == None)는 바인딩으로는 쏘지 않는다(2026-11-16 리뷰 -- 지웠다가 같은
+        # 이름으로 다시 만들기). 무장도 같은 이유로 거부한다(routes_batch_schedules._arm).
+        return _pause(reason_code="storage_missing")
+    if binding_digest(binding) != bound_storages:
         # 연산 무관 -- 켠 사람이 본 경로가 아니다(자동 확인 sync 의 root 덮어쓰기, scan 의 root 읽기). 다시 켜면 그 순간의
         # 경로로 묶인다(파괴적이면 동의도 다시).
         return _pause(reason_code="batch_schedule_storage_changed")

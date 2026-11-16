@@ -35,15 +35,23 @@ def list_storages(request: Request):
 @router.post("/api/admin/storages", status_code=201)
 def create_storage(body: StorageCreate, request: Request,
                    identity: Identity = Depends(require_admin)):
+    repos = request.app.state.repos
+
+    # 진행 중인 요청·배치가 가리키는(지워진) 이름으로 새 경로를 만들지 않는다 -- 경로 변경·삭제 가드와 같은 판정(update_storage
+    # 주석). 2026-11-16 리뷰: 스토리지를 지웠다가 같은 이름으로 다시 만들면 활성 배치의 남은 항목이 새 경로에서 돌았다.
+    def guard():
+        if (repos.requests.active_referencing_storage(body.storage_name)
+                or repos.batches.active_referencing_storage(body.storage_name)):
+            raise DomainValidationError("storage_in_use")
     try:
-        return request.app.state.repos.storages.create(
+        return repos.storages.create(
             storage_name=body.storage_name, mount_path=body.mount_path,
             managed_root=body.managed_root, backend_type=body.backend_type,
             enabled=body.enabled, user_enabled=body.user_enabled,
-            actor=audit_actor(identity))
+            actor=audit_actor(identity), guard=guard)
     except DomainValidationError as e:
         raise HTTPException(
-            status_code=409 if e.reason_code == "storage_exists" else 422,
+            status_code=409 if e.reason_code in ("storage_exists", "storage_in_use") else 422,
             detail=e.reason_code)
 
 
