@@ -15,13 +15,20 @@ updated_at = 읽은 값` -- 리스는 시간 기반이고 파드별 시계를 �
 둘(롤링 재시작·긴 틱으로 리스가 겹침)이어도 같은 슬롯은 한쪽만 쏘고, 진 쪽은 아무것도 남기지 않는다(fire 는 리셋까지 통째
 롤백). 그 사이 사람이 끄거나 고쳤으면(updated_at -- 사람의 쓰기와 자동 일시정지만 민다) 역시 0 행이다.
 
-잠금 순서는 항목 → 배치 → 스케줄 → 회차 이력(PG FOR UPDATE·행 잠금): 발사·생성·수정·켜기·취소와 함께 끄기가
-BatchesRepository._lock_items_then_batch(또는 begin_cancel 의 항목·배치 UPDATE)로 항목·배치를 먼저 쥐고 스케줄을 그다음에,
-회차 이력(INSERT·상한 정리)을 마지막에 쥔다. 배치 삭제 두 경로(BatchesRepository.delete, RequestPurgesRepository.delete_batch)도
-batch_items → batches → batch_schedules → batch_schedule_runs 순서로 지워야 한다(batches.BATCH_DELETE_TABLES 순서 -- 설계 비판
-#10: 회차 이력을 스케줄보다 먼저 지우면 PG 에서 record·fire 와 서로 상대 행을 기다린다). 끄기·삭제·기록은 스케줄 행만 쥐고
-(그다음 회차 이력). 트랜잭션은 중첩되지 않으므로(db.transaction) 배치 저장소의 「호출자 트랜잭션 안에서만」 몸통
-(_lock_items_then_batch·_rescan_locked)을 부르고, 이 저장소의 *_locked 메서드도 호출자 트랜잭션 안에서만 부른다.
+잠금 순서는 항목 → 배치 → 회차 경계 → 스케줄 → 회차 이력(PG FOR UPDATE·행 잠금): 발사·생성·수정·켜기·취소와 함께 끄기가
+BatchesRepository._lock_items_then_batch(또는 begin_cancel 의 항목·배치 UPDATE)로 항목·배치를 먼저 쥐고, 발사는 _rescan_locked 의
+회차 경계(batch_rounds INSERT·상한 정리) 다음에 스케줄을, 회차 이력(INSERT·상한 정리)을 마지막에 쥔다. 배치 삭제 두 경로
+(BatchesRepository.delete, RequestPurgesRepository.delete_batch)도 batch_items → batches → batch_rounds → batch_schedules →
+batch_schedule_runs 순서로 지워야 한다(batches.BATCH_DELETE_TABLES 순서 -- 설계 비판 #10: 회차 이력을 스케줄보다 먼저 지우면 PG
+에서 record·fire 와 서로 상대 행을 기다린다). 끄기·삭제·기록은 스케줄 행만 쥐고(그다음 회차 이력). 트랜잭션은 중첩되지 않으므로
+(db.transaction) 배치 저장소의 「호출자 트랜잭션 안에서만」 몸통(_lock_items_then_batch·_rescan_locked)을 부르고, 이 저장소의
+*_locked 메서드도 호출자 트랜잭션 안에서만 부른다.
+
+**회차 보존 정리**(2026-11-16 사용자 결정 「최근 5회차만 남기고 나머지 정리」 -- batch_round_prune.py): 대상 고르기(prune_targets)와
+추가 창의 예측(prune_preview)이 **같은** 경계 계산(_round_cut)을 쓴다 -- 화면의 「곧 정리될 작업 수」와 실제 정리가 어긋나지 않게.
+정리 청크 자체는 RequestPurgesRepository.prune_round_children 이 한다(requests → data_jobs → batch_schedules 순 -- 스케줄 행은
+**맨 끝**에 카운터 갱신으로만 쥔다; 스케줄을 먼저 잡고 requests 를 나중에 잡는 경로를 만들지 마라 -- 배치 단위 삭제와 역순이라
+교착이다). 정리는 updated_at 을 밀지 않는다(발사·기록 CAS 표지).
 """
 import json
 import uuid
@@ -29,10 +36,50 @@ import uuid
 from ..db import Database, dump_json, utc_now_iso
 from ..batch_scheduler import SCHEDULER_ACTOR, next_run_after
 from ..domain import DomainValidationError, confirm_gated
-from .batches import BatchesRepository, _storage_fields
+from .batches import BATCH_ROUND_HISTORY_CAP, BatchesRepository, _storage_fields
+from .requests import batch_match
 
 # 스케줄당 남기는 회차 이력 수. 확인 대기 중 매시간 건너뛰는 스케줄도 이력이 끝없이 자라지 않는다.
 RUN_HISTORY_CAP = 200
+# 추가 창 예측(prune_preview)의 세기 상한 -- 넘으면 PRUNE_PREVIEW_CAP + 1 과 would_prune_capped(작업 삭제 호출 예산과 같은 크기).
+PRUNE_PREVIEW_CAP = 10000
+
+
+def _round_cols(batch_expr: str) -> str:
+    """배치 하나의 회차 경계 네 값(prune_targets·_round_cut 공용 SQL 조각 -- 한 벌만 둔다). :k1 = keep - 1.
+      cut       보존하는 가장 오래된 회차(최신에서 keep 번째)의 경계 -- 그 회차 전의 자식은 commit_order <= cut
+      cut_seq   그 회차의 round_seq(None = 기록된 회차가 keep 개 미만)
+      anchor    최신 회차의 경계(「닻」 -- 이 commit_order 의 자식은 지우지 않는다, batches._rescan_locked docstring 2))
+      last_seq  최신 회차의 round_seq(= 이 배치에서 기록된 회차 수)
+    PK (batch_id, round_seq) 역방향 범위만 읽는다."""
+    sub = f"FROM batch_rounds r WHERE r.batch_id = {batch_expr} ORDER BY r.round_seq DESC LIMIT 1"
+    return (f"(SELECT r.floor_order {sub} OFFSET :k1) AS cut, (SELECT r.round_seq {sub} OFFSET :k1) AS cut_seq, "
+            f"(SELECT r.floor_order {sub}) AS anchor, (SELECT r.round_seq {sub}) AS last_seq")
+
+
+def _keep_or_none(keep):
+    # 설정 검증(1–100)의 거울 -- 직접 생성·변조된 값은 아무것도 계산하지 않는다(fail-closed). 상한 100 = 회차 경계 행
+    # 보존 상한(BATCH_ROUND_HISTORY_CAP) 안에서 경계를 계산할 수 있는 범위.
+    return keep if isinstance(keep, int) and not isinstance(keep, bool) and 1 <= keep <= 100 \
+        and keep <= BATCH_ROUND_HISTORY_CAP else None
+
+
+def _cut_from(row) -> "dict | None":
+    """_round_cols 의 네 값 → {cut, cut_seq, anchor, last_seq, upto} | None(정리할 것 없음). DB 가 신뢰 경계라 모르면 거른다:
+      cut_seq None   기록된 회차가 keep 개 미만 -- 아직 아무것도 지우지 않는다(기록 이전 회차 포함, 설계 §2.4-4)
+      cut None       그 회차를 시작할 때 자식이 없었다 -- 그보다 오래된 자식이 없다
+      anchor 정수 아님 fail-closed
+      upto = min(cut, anchor - 1) -- 닻(최신 회차의 경계 자식)은 절대 지우지 않는다(commit_order 재사용 방지). upto < 1 이면
+      대상 아님."""
+    def _int(v):
+        return isinstance(v, int) and not isinstance(v, bool)
+    cut, anchor = row.get("cut"), row.get("anchor")
+    if row.get("cut_seq") is None or cut is None or not _int(cut) or not _int(anchor):
+        return None
+    upto = min(cut, anchor - 1)
+    if upto < 1:
+        return None
+    return {"cut": cut, "cut_seq": row["cut_seq"], "anchor": anchor, "last_seq": row.get("last_seq"), "upto": upto}
 
 
 def _load_json_or_none(text):
@@ -50,6 +97,9 @@ def _hydrate(row):
     spec = _load_json_or_none(row.get("spec"))
     row["spec"] = spec if isinstance(spec, dict) else None
     row["enabled"] = row.get("enabled") == 1
+    if "pruned_total" in row:
+        # 회차 보존 정리 누적(2026-11-16) -- NULL = 아직 정리 없음(0 과 다르다), 변조 값도 모름(None).
+        row["pruned_total"] = _count_or_none(row["pruned_total"])
     return row
 
 
@@ -140,10 +190,56 @@ class BatchSchedulesRepository:
             in_list = ", ".join(":" + k for k in names)
             for r in self._db.query(
                     f"""SELECT schedule_id, batch_id, kind, spec, enabled, next_run_at, last_outcome, last_reason_code,
-                               paused_reason_code FROM batch_schedules WHERE batch_id IN ({in_list})""", names):
+                               paused_reason_code, pruned_at, pruned_total
+                          FROM batch_schedules WHERE batch_id IN ({in_list})""", names):
                 row = _hydrate(r)
                 out[row.pop("batch_id")] = row
         return out
+
+    # --- 회차 보존 정리(2026-11-16 -- batch_round_prune.py, 모듈 docstring) ---------------------------------------------------
+
+    def _round_cut(self, batch_id, *, keep) -> "dict | None":
+        """배치 하나의 정리 경계 {cut, cut_seq, anchor, last_seq, upto} | None -- prune_targets 와 같은 SQL 조각(_round_cols)과
+        같은 거르기(_cut_from). 스케줄이 있는지는 보지 않는다(추가 창 예측은 스케줄이 아직 없는 배치를 본다)."""
+        k = _keep_or_none(keep)
+        if k is None:
+            return None
+        row = self._db.query_one(f"SELECT {_round_cols(':b')}", {"b": batch_id, "k1": k - 1})
+        return None if row is None else _cut_from(row)
+
+    def prune_targets(self, *, keep) -> "list[dict]":
+        """정리 대상 -- batch_schedules 행이 있는 배치(켜짐·꺼짐·일시정지 무관; 스케줄을 지우면 정리도 멈춘다) 중 경계가 있는
+        것, batch_id 순 [{schedule_id, batch_id, cut, cut_seq, anchor, last_seq, upto}]. 읽기 전용(잠그지 않는다 -- 회차 경계는
+        잠그지 않고 읽는 것이 잠금 순서 규약이다). 틱 시작에 읽은 cut 을 쓴다: 그 사이 새 회차가 생겨도 옛 cut ≤ 새 cut 이라
+        덜 지울 뿐이다."""
+        k = _keep_or_none(keep)
+        if k is None:
+            return []
+        out = []
+        for r in self._db.query(
+                f"SELECT s.schedule_id, s.batch_id, {_round_cols('s.batch_id')} FROM batch_schedules s ORDER BY s.batch_id",
+                {"k1": k - 1}):
+            cut = _cut_from(r)
+            if cut is not None:
+                out.append({"schedule_id": r["schedule_id"], "batch_id": r["batch_id"], **cut})
+        return out
+
+    def prune_preview(self, batch_id, *, keep) -> dict:
+        """추가 창 예측(:preview 의 prune_preview): 지금 스케줄이 걸려 있다고 쳤을 때 upto 이하 자식 수 -- {rounds_recorded,
+        would_prune, would_prune_capped}. 막힌 자식(비종단·조용한 창·항목 참조)까지 세는 근사치다(화면은 「약」). 경계가 없으면
+        (기록 K 미만·배치 없음) would_prune 0. PRUNE_PREVIEW_CAP 을 넘으면 PRUNE_PREVIEW_CAP + 1 에서 멈춘다."""
+        k = _keep_or_none(keep)
+        last = self._db.query_one(
+            "SELECT round_seq FROM batch_rounds WHERE batch_id = :b ORDER BY round_seq DESC LIMIT 1", {"b": batch_id})
+        recorded = 0 if last is None else _count_or_none(last["round_seq"])
+        cut = None if k is None else self._round_cut(batch_id, keep=k)
+        if cut is None:
+            return {"rounds_recorded": recorded, "would_prune": 0, "would_prune_capped": False}
+        n = int(self._db.query_one(
+            f"SELECT COUNT(*) AS n FROM (SELECT 1 AS x FROM requests WHERE {batch_match('b')} AND commit_order <= :upto "
+            "ORDER BY batch_id, commit_order LIMIT :lim) c",
+            {"b": batch_id, "upto": cut["upto"], "lim": PRUNE_PREVIEW_CAP + 1})["n"])
+        return {"rounds_recorded": recorded, "would_prune": n, "would_prune_capped": n > PRUNE_PREVIEW_CAP}
 
     def runs(self, schedule_id, *, limit: int) -> "list[dict]":
         return self._db.query(
@@ -378,10 +474,11 @@ class BatchSchedulesRepository:
                     raise _Lost()
                 prev = {k: batch.get(k) for k in ("status", "item_count", "succeeded_count", "failed_count")}
                 to_status = "Previewing" if confirm_gated(batch["operation"]) else "Running"
-                requeued = self._batches._rescan_locked(bid, to_status=to_status)
+                # 회차 경계(batch_rounds -- via schedule)도 이 몸통이 같은 트랜잭션에서 남긴다(리셋과 원자적이어야 한다).
+                requeued = self._batches._rescan_locked(bid, to_status=to_status, via="schedule", actor=SCHEDULER_ACTOR)
                 if requeued is None:
                     raise _Lost()
-                # 스케줄 행은 이 UPDATE 가 항목·배치 다음에 쥔다(항목 → 배치 → 스케줄 → 회차 이력).
+                # 스케줄 행은 이 UPDATE 가 항목·배치·회차 경계 다음에 쥔다(항목 → 배치 → 회차 경계 → 스케줄 → 회차 이력).
                 n = self._db.execute_count(
                     f"""UPDATE batch_schedules SET next_run_at = :next, last_run_at = :now, last_outcome = 'fired',
                             last_reason_code = NULL

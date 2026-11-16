@@ -22,8 +22,10 @@ null), armed_by, created_by, created_at, updated_at, last_run_at, last_outcome, 
 acknowledged_irreversible(bool -- 동의 지문이 있다) + destructive(bool | null -- 지금 배치 기준, 배치 행이 없으면 null) +
 batch(배치 요약 | null: batch_id, name, operation, status, item_count, requester_id, auto_confirm, auto_confirm_by, options,
 storage, source_storage, destination_storage) + **k8s 추가** child_count(재실행 이력 포함 자식 요청 수 -- capped 면 상한 + 1)·
-child_count_capped·child_count_limit(배치 단위 삭제 상한 request_purges.MAX_BATCH_DELETE_CHILDREN -- 화면의 80% 경고 기준;
-회차가 쌓은 자식은 자동 정리하지 않는다, 설계 §6 기본값) + confirm_wait(batch_scheduler.confirm_wait_note -- 자동 확인이 꺼진
+child_count_capped·child_count_limit(배치 단위 삭제 상한 request_purges.MAX_BATCH_DELETE_CHILDREN 5000 -- 화면의 80% 경고 기준) +
+keep_rounds(회차 보존 수 DMS_BATCH_SCHEDULE_KEEP_ROUNDS -- 2026-11-16 사용자 결정: 스케줄이 있는 배치는 최근 K회차의 자식만 남고
+그보다 오래된 회차의 자식은 컨트롤러 batch-round-prune 루프가 정리한다) + pruned_at(UTC …Z | null)·pruned_total(int | null --
+null = 아직 정리 없음, 0 과 다르다) + confirm_wait(batch_scheduler.confirm_wait_note -- 자동 확인이 꺼진
 sync·rm 의 주기가 미리보기 만료보다 짧거나 같으면 {period_seconds, preview_ttl_seconds, unconfirmed_every_seconds}, 아니면
 null -- 판정은 그대로 건너뜀 기록이고 이것은 경고일 뿐이다). 지문 원문은 싣지 않는다.
 """
@@ -121,6 +123,9 @@ def _out(row, *, settings, summary) -> dict:
     out["child_count"] = s.get("batch_request_count", 0)
     out["child_count_capped"] = s.get("batch_request_count_capped", False) is True
     out["child_count_limit"] = MAX_BATCH_DELETE_CHILDREN
+    out["keep_rounds"] = getattr(settings, "batch_schedule_keep_rounds", None)
+    out.setdefault("pruned_at", None)
+    out.setdefault("pruned_total", None)
     return out
 
 
@@ -145,10 +150,18 @@ def list_batch_schedules(request: Request, identity: Identity = Depends(require_
 @router.post("/api/admin/batch-schedules:preview")
 def preview_batch_schedule(body: SchedulePreviewBody, request: Request, identity: Identity = Depends(require_admin)):
     """규칙의 다음 5회(UTC) -- 포탈은 다음 실행을 계산하지 않는다(KST·말일 당김 규칙을 두 벌 두지 않는다). 읽기 전용 계산
-    (본문이 있어 POST). batch_id 를 주면 그 배치 기준 확인 대기 경고(confirm_wait)도 -- 배치가 없거나 읽지 못하면 null."""
+    (본문이 있어 POST). batch_id 를 주면 그 배치 기준 확인 대기 경고(confirm_wait)도 -- 배치가 없거나 읽지 못하면 null.
+    keep_rounds(회차 보존 수)·child_count_limit(배치 단위 삭제 상한)은 늘 싣는다(추가 창의 보존 안내·「항목 × K > 상한」 예측).
+    batch_id 를 주면 prune_preview = {rounds_recorded, would_prune, would_prune_capped}(BatchSchedulesRepository.prune_preview --
+    지금 스케줄이 걸려 있다고 쳤을 때 곧 정리될 자식 수, 실제 정리와 같은 경계 계산 _round_cut; 막힌 자식까지 세는 근사치,
+    배치가 없거나 기록 회차가 K 미만이면 0)."""
     rule = _validated_rule(body)
+    settings = request.app.state.settings
+    keep = getattr(settings, "batch_schedule_keep_rounds", None)
+    out = {"keep_rounds": keep, "child_count_limit": MAX_BATCH_DELETE_CHILDREN}
     note = None
     if body.batch_id is not None:
+        out["prune_preview"] = request.app.state.repos.batch_schedules.prune_preview(body.batch_id, keep=keep)
         try:
             batch = request.app.state.repos.batches.get(body.batch_id)
         except (ValueError, TypeError):
@@ -157,7 +170,7 @@ def preview_batch_schedule(body: SchedulePreviewBody, request: Request, identity
             note = confirm_wait_note(body.kind, rule, operation=batch.get("operation"),
                                      auto_confirm=batch.get("auto_confirm_by") is not None,
                                      preview_ttl_seconds=getattr(request.app.state.settings, "preview_ttl_seconds", None))
-    return {"next_runs": preview_runs(body.kind, rule, utc_now_iso(), 5), "confirm_wait": note}
+    return {"next_runs": preview_runs(body.kind, rule, utc_now_iso(), 5), "confirm_wait": note, **out}
 
 
 @router.get("/api/admin/batch-schedules/{schedule_id}/runs")

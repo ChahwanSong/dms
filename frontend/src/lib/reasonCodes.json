@@ -269,6 +269,7 @@
   "request_delete_failed",
   "delete_selection_too_large",
   "batch_delete_too_large",
+  "batch_delete_call_budget",
   "batch_changed",
   "batch_delete_failed",
   "batch_record_changed",

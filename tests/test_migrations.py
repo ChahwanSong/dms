@@ -548,6 +548,38 @@ def test_session_epoch_is_declared_in_the_create_table_block():
     assert re.search(r"^\s*session_epoch\s+TEXT\s*\)", sql, re.M)
 
 
+def test_migrate_adds_prune_columns_to_existing_batch_schedules(db):
+    # 2026-11-16 회차 보존 정리: batch_schedules 는 d28 에 배포된 표라 기배포 DB 는 CREATE 를 다시 안 탄다 -- _ensure_columns 를
+    # 빼먹으면 라이브에서만 pruned_at·pruned_total 이 없어 스케줄 목록·정리 청크가 500 이다. 기존 행은 NULL(= 아직 정리 없음).
+    db.execute("DROP TABLE batch_schedules")
+    db.execute("""CREATE TABLE batch_schedules (schedule_id TEXT PRIMARY KEY, batch_id TEXT NOT NULL UNIQUE,
+        kind TEXT NOT NULL, spec TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, next_run_at TEXT,
+        armed_by TEXT NOT NULL, ack_fingerprint TEXT, created_by TEXT NOT NULL, created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL, last_run_at TEXT, last_outcome TEXT, last_reason_code TEXT, paused_reason_code TEXT)""")
+    db.execute("""INSERT INTO batch_schedules (schedule_id, batch_id, kind, spec, armed_by, created_by, created_at, updated_at)
+                  VALUES ('s1', 'b1', 'daily', '{}', 'ops', 'ops', '2026-11-16T00:00:00Z', '2026-11-16T00:00:00Z')""")
+    from dms.migrations import _column_exists, migrate
+    migrate(db)
+    for col, typ in (("pruned_at", "TEXT"), ("pruned_total", "INTEGER")):
+        assert _column_exists(db, "batch_schedules", col)
+        if db.dialect == "sqlite":
+            assert _declared_type(db, "batch_schedules", col) == typ
+    row = db.query_one("SELECT pruned_at, pruned_total FROM batch_schedules WHERE schedule_id = 's1'")
+    assert row == {"pruned_at": None, "pruned_total": None}
+
+
+def test_prune_columns_are_declared_in_the_create_table_block():
+    import inspect
+    import re
+    from dms import migrations
+    src = inspect.getsource(migrations._apply_migrations)
+    block = re.search(r'CREATE TABLE IF NOT EXISTS batch_schedules \(.*?"""', src, re.S)
+    assert block is not None
+    sql = re.sub(r"--[^\n]*", "", block.group(0))
+    assert re.search(r"^\s*pruned_at\s+TEXT\s*,\s*$", sql, re.M)
+    assert re.search(r"^\s*pruned_total\s+INTEGER\s*\)", sql, re.M)
+
+
 def test_all_tables_is_nineteen_tables_not_columns():
     # len(ALL_TABLES) 는 **테이블** 수 계약이다(슬라이스 25 가 20 으로 박제,
     # 슬라이스 27 의 runs 제거로 19). 늘든 줄든 명시 결정 없이는 여기가 먼저
@@ -622,6 +654,7 @@ def test_migrate_creates_exactly_the_expected_tables(tmp_path):
     # request_purges(2026-10-08): 요청 삭제의 정리 아웃박스(행 = k8s·아티팩트 정리 대기).
     # k8s_*(2026-10-25 dms-k8s RBAC·PV 설계 §3): 외부 k8s 클러스터 등록·동기화 이력·스냅숏 4표·SC 매핑 + 호출 노드 설정.
     # batch_schedules·batch_schedule_runs(2026-11-16): 배치 스케줄러(배치당 스케줄 하나 + 회차 이력 -- batches 류처럼 명시 추가).
+    # batch_rounds(2026-11-16): 배치 회차 경계(회차 보존 정리 -- _rescan_locked 가 남긴다, batches 류처럼 명시 추가).
     assert actual == set(ALL_TABLES) | {"batches", "batch_items",
                                         "schema_migrations",
                                         "verification_codes", "sync_pairs",
@@ -631,7 +664,7 @@ def test_migrate_creates_exactly_the_expected_tables(tmp_path):
                                         "k8s_sync_settings", "k8s_clusters", "k8s_sync_runs",
                                         "k8s_storage_classes", "k8s_pvs", "k8s_pvcs",
                                         "k8s_role_bindings", "k8s_storage_class_maps",
-                                        "batch_schedules", "batch_schedule_runs"}
+                                        "batch_schedules", "batch_schedule_runs", "batch_rounds"}
 
 
 def test_migrate_creates_exactly_the_expected_indexes(tmp_path):
@@ -824,7 +857,7 @@ def test_every_post_v1_column_rides_both_migration_paths(tmp_path):
     db = Database.connect(f"sqlite:///{tmp_path}/t.db")
     migrate(db)
     pairs = _ensure_pairs()
-    assert len(pairs) == 53      # 추출 자기 검증 -- 0 매치면 등식이 공허해진다(프록시 3 + 호스트 네트워크 1 + CA 1 + storages.user_enabled 1 + portal_subtitle 1 + batches.preview_round 1 + batches.auto_confirm_by 1 + accounts.root_granted 1 + data_jobs.pods_gc_at 1 + storages.kind 1 + requests.target_label 1 + storages.default_uid·default_gid 2 + builds.pods_gc_at 1 + data_jobs.artifacts_expired_at·request_purges.kind 2 + k8s_clusters.check_requested_at 1 + accounts.session_epoch 1)
+    assert len(pairs) == 55      # 추출 자기 검증 -- 0 매치면 등식이 공허해진다(프록시 3 + 호스트 네트워크 1 + CA 1 + storages.user_enabled 1 + portal_subtitle 1 + batches.preview_round 1 + batches.auto_confirm_by 1 + accounts.root_granted 1 + data_jobs.pods_gc_at 1 + storages.kind 1 + requests.target_label 1 + storages.default_uid·default_gid 2 + builds.pods_gc_at 1 + data_jobs.artifacts_expired_at·request_purges.kind 2 + k8s_clusters.check_requested_at 1 + accounts.session_epoch 1 + batch_schedules.pruned_at·pruned_total 2)
     for table, v1 in _V1_COLUMNS.items():
         cols = {r["name"] for r in db.query(f"PRAGMA table_info({table})")}
         ensured = {c for t, c, _ in pairs if t == table}
@@ -841,7 +874,7 @@ def test_ensure_columns_types_match_create_declarations(tmp_path):
     pairs = _ensure_pairs()
     # 추출 자기 검증을 이 테스트에도 둔다 -- 위 등식 테스트가 지워지거나 홀로
     # 실행될 때 정규식이 0 매치면 아래 루프가 공허하게 통과하기 때문이다.
-    assert len(pairs) == 53
+    assert len(pairs) == 55
     for table, column, coltype in pairs:
         assert _declared_type(db, table, column) == coltype, (table, column)
 

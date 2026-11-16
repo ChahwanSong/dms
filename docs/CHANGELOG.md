@@ -54,6 +54,7 @@ dms-k8s 라인의 **완료 기록**이다. 각 항목에는 무엇을 만들었�
 
 | 날짜 | 태그·실증 | 제목 |
 |---|---|---|
+| 11-16 | d29(실증 예정) | 스케줄 회차 최근 5회차 보존·배치 단위 삭제 상한 5000 d29 |
 | 11-16 | d28 | 포탈 개선 — 사용량 전체 목록·최신 scan 차트 · 배치 대상 스토리지 열·큰 배치 상세 쪽 넘김·검색 · 배치 스케줄러 d28 |
 | 11-16 | d27 | 입구 — Envoy Gateway 폐기, 클러스터의 Traefik 하나로 교체(테스트베드 영구 적용·실증) d27 |
 | 11-14 | — | 입구 — 리스너 포트(GATEWAY_LISTEN_PORT)·PROXY off 모드·마스터 hostPort 충돌 감지(OA: Traefik 이 호스트 443, Avi PROXY v2 미지원) |
@@ -96,6 +97,89 @@ dms-k8s 라인의 **완료 기록**이다. 각 항목에는 무엇을 만들었�
 ---
 
 ## 상세 기록 (최신순)
+
+### 🔧 스케줄 회차 최근 5회차 보존·배치 단위 삭제 상한 5000 d29 — **구현 완료, d29 실증 예정**(2026-11-16)
+
+사용자 요청(2026-11-16, d28 출하 보고 직후): 「남겨둔것 정리해. 최근 5회차만 남기고 나머지 정리해. 배치 단위로 한번에 지우는것 상한
+5000개로 늘려줘.」 — d28 보고의 「스케줄 회차마다 자식 요청이 쌓여 배치 단위 삭제 상한(2000)을 넘으면 그 배치를 배치 단위로 못 지운다 —
+지금은 자동 정리 없음 + 80% 경고」에 대한 답이다. 설계는 세션 job tmp `prune/DESIGN.md`(§0~§14, 자체 비판 15건 반영).
+
+- **① 남겨둔 것 정리**: 구현 대상이 아니다 — 18:10–18:15 KST 정리 단계가 d28 실증 잔여물(scan 배치 78b7 자식 137 · sync 배치 2d25 자식 3 ·
+  픽스처 `/cephfs/managed/dms-proof-d28` 1,500 디렉터리)을 지웠다(job tmp `prune/CLEANUP.md`, 아티팩트 135개는 DMS 정리 루프가 지움). 남긴
+  배치 e5fe(scan, 자식 8)는 d29 라이브 실증 재료다.
+- **② 최근 5회차 보존 — 결정**:
+  - 보존 수 = env `DMS_BATCH_SCHEDULE_KEEP_ROUNDS`(기본 5, 1–100 밖이면 기동 거부 — 상한 100 은 회차 경계 행 보존 상한 200 안에서 경계를
+    계산할 수 있어야 해서). base `20-config.yaml` 에 `"5"`.
+  - 회차 = `BatchesRepository._rescan_locked` 한 번(사람 `:rescan` · 스케줄 회차). 실패분·선택 재실행·항목 추가는 그 회차에 속한다. 경계는 새 표
+    `batch_rounds`(batch_id·round_seq·started_at·floor_order·via·actor·requeued, PK batch_id+round_seq) — floor_order = 회차가 시작되는 순간
+    그 배치 자식의 `MAX(commit_order)`, 상태 CAS 와 같은 트랜잭션에서 그 몸통만 남긴다(배치당 200행). 오케스트레이터 hot path 는 그대로.
+  - 정확성: 회차 N 의 자식은 N+1 시작 전에 모두 커밋돼 있어(종단 배치에서만 이기고 자식 INSERT·항목 claim 이 한 트랜잭션) 경계가 정확하다.
+    commit_order 는 현존 행 기준 MAX+1 이라 최대 행이 지워지면 재사용될 수 있으므로 **최신 회차의 경계 자식(닻)을 절대 지우지 않는다**
+    (`upto = min(cut, anchor − 1)` — 변종 테스트가 닻 규칙을 빼면 깨지는 것까지 고정). K=1 이면 닻 1건이 다음 회차까지 남는다.
+  - 옛 행: 기록 이전 자식(첫 실행·배포 전 회차 전부)은 가장 오래된 회차 하나로 보고 기록된 회차가 K개가 되는 순간에만 한꺼번에 정리한다 —
+    배포 직후 대량 삭제는 구조적으로 없다(보수적).
+  - 대상은 `batch_schedules` 행이 있는 배치(켜짐·꺼짐·일시정지 무관 — 스케줄을 지우면 멈춘다). 절대 지우지 않는 것: 비종단 요청·비종단 잡이
+    있는 요청·조용한 창 안·어느 `batch_items` 든 가리키는 요청·보존/지금 회차·닻.
+  - 실행: 새 컨트롤러 루프 `batch-round-prune`(30초, 설정 키 아님, purge_runner 가 배선된 경우만 — artifact_expiry 선례). 발사 트랜잭션엔 경계
+    기록 문장 4개만 더했다. 사람 `:rescan` 회차도 같은 루프가 30초 안에 정리한다. 유지보수·drain 이면 쉰다.
+  - 삭제: 기존 `_purge_locked` 재사용 + `per_request_audit=False`(PURGED_TABLES 삭제·아웃박스 그대로, 자식별 스냅숏·`('request','delete')` 생략).
+    감사는 청크 트랜잭션마다 `('batch','prune_rounds', batch_id)` 1행(actor `system:batch-scheduler`, 자식별 최소 기록 — 32 KiB 넘으면 단계적으로
+    줄임). 청크 ≤ 100 자식, 이 루프의 정리 대기 행(requested_by = system:batch-scheduler) ≥ 100 이면 그 틱은 쉼, 틱당 실제 청크 ≤ 10, 배치마다
+    청크 하나씩 순환, 막힌 자식은 고르면서 건너뛴다(비종단 잔재가 진행을 막지 않게 — 경계 끝까지 훑고도 막힘만 남으면 `batch_round_prune_blocked`
+    1시간 1회). 고르기는 경계 이하 자식을 인덱스 순서 창(500 — LIMIT 을 품은 FROM 서브쿼리)으로 자른 바깥에서 판정하고 호출당 5000행까지만
+    훑는다 — 다 못 훑으면 배치별 커서(`batch_round_prune._SCAN_FROM`)로 다음 청크가 이어 본다(검증 지적: 판정을 한 WHERE 에 두면 PG16 이
+    Bitmap Heap Scan + top-N 정렬로 경계 이하 **전부**에 판정을 돌려, 경계 이하 2.5만에서 고르기 80ms·청크 ~100ms — 청크 비용이 대기량에
+    비례했다).
+  - 잠금 순서: 정리 = requests(request_id 순) → data_jobs → batch_schedules(맨 끝, 카운터). batch_rounds 는 잠그지 않고 읽는다(과제 문구의
+    「스케줄 → 회차 → 요청」 순서는 배치 단위 삭제와 역순이라 교착 — 따르지 않았다). `BATCH_DELETE_TABLES` = batch_items → batches → batch_rounds
+    → batch_schedules → batch_schedule_runs, 두 삭제 경로가 batch_rounds 를 스케줄보다 먼저 지운다.
+  - 스케줄 행에 `pruned_at`·`pruned_total`(CREATE TABLE·`_ensure_columns` 양쪽, NULL = 아직 정리 없음). 정리는 `updated_at` 을 밀지 않는다(밀면
+    발사·기록 CAS 가 그 회차를 lost 로 본다).
+- **③ 상한 5000 — 결정**: `MAX_BATCH_DELETE_CHILDREN` 2000 → **5000**, 항목 10000 그대로, 새 **호출당 자식 합 예산 `MAX_DELETE_CALL_CHILDREN`
+  = 10000**(넘는 배치는 새 사유 `batch_delete_call_budget` 로 건너뜀 — reasonCodes.json·REASON_MESSAGES 양쪽 등록; 미등록 스토리지 정리는 넘는
+  배치를 그 회차에서 빼고 `remaining_untried` 로 다음 회차에). 이유: 5000 × 배치 10 이면 RLock 을 35–40초 쥐어 readiness 를 연속으로 놓친다.
+  `list_summaries` 의 성공 scan 판정을 EXISTS → 스칼라 서브쿼리(`… LIMIT 1) IS NOT NULL`)로 — cap 5000 에서 PG16 이 Hash Semi Join + data_jobs
+  전체 Seq Scan 으로 바뀌는 회귀를 막는다(소스 형태 테스트).
+- **API**: 스케줄 행에 `keep_rounds`·`pruned_at`·`pruned_total`(`child_count_limit` 은 5000). `:preview` 는 `keep_rounds`·`child_count_limit` 을 늘,
+  `batch_id` 가 있으면 `prune_preview {rounds_recorded, would_prune, would_prune_capped}`(실제 정리와 같은 `_round_cut`). 배치 목록·상세 요약의
+  `schedule` 에 `pruned_*`·`keep_rounds`. 작업 목록(관리자)의 배치 자식 행에 `batch_request_count_limit`·`batch_item_count_limit`. `:rescan` 응답은
+  그대로(내부적으로 `batch_rounds` via rescan, actor = 세션 사용자).
+- **포탈**: 스케줄 화면 머리·추가 창·배치 상세 배지 아래에 「최근 K회차 보존」 안내, 스케줄 행 「정리」 열(「정리 누적 N건 · 마지막 …」 /
+  「아직 정리 없음」 — null ≠ 0), 추가 창의 「저장하면 … 작업 약 N개가 곧 정리됩니다」·「항목 × K > 상한」 예측 경고(저장은 막지 않는다),
+  80% 경고는 서버 `child_count_limit` 기준(= 4000). 작업 목록은 배치당 상한을 행의 서버 값으로 판정(`batchGroups.ts` 의 `MAX_BATCH_CHILDREN`·
+  `MAX_BATCH_ITEMS` 삭제 — 숫자가 없으면 「정보 없음」, fail-closed)하고 고른 배치의 작업 합 > 10000 이면 툴바가 잠근다
+  (`MAX_DELETE_CALL_CHILDREN` 거울). 사용량 상세 「실 사용량 추이」 도움말에 스케줄 배치 scan 이 최근 회차만 남는다는 한 줄.
+- **로컬 실측**(`tests/perf_batch_delete.py` — 합성 세계 단건 1만 + 자식 5500 배치 20 = 요청·잡 12만, 측정 배치는 그 위에 새로. 합성 자식은
+  전이·결과·이벤트·plan 이 없어 조사 B(PG16 unix 1.86–1.99초·sqlite 0.82–0.86초)보다 가볍다):
+  | 항목 | sqlite | PG16(unix 소켓) |
+  |---|---|---|
+  | `delete_batch` 자식 2000 / 5000(합성 하한 — 상한 근거는 조사 B 1.86–1.99초) | 0.17초 / 0.40초 | 0.52초 / 1.32초 |
+  | 5000 × 2 연속 — readyz 흉내 최대 대기 | 0.80초 — 0.36초 | 2.71초 — 1.31초 |
+  | `list_summaries` 성공 scan 갈래 자식 4000 / 4500 / 5000 — 옛 EXISTS | 5.9 / 6.9 / 7.4ms | 29.3 / 29.2 / 11.0ms(Hash Semi Join + Seq Scan) |
+  | 같은 갈래 — 새 스칼라 서브쿼리 | 5.8 / 6.7 / 8.0ms | 12.5 / 12.8 / 11.6ms(SubPlan + Index Scan — 목표 ≤ 15ms) |
+  | `list_summaries([1배치], cap 5000)` 전체 | 7.8 / 8.6 / 9.9ms | 14.3 / 15.7 / 17.0ms |
+  | 정리 청크 100(`prune_round_children`) — 최선(자식이 정확히 100인 배치) | 8ms(문장 117 — 같은 100자식 `delete_batch` 623) | 30ms |
+  | 같은 청크 — 경계 이하 대기 2.5만(자식 3만 배치, 커서로 5청크 중앙값; 옛 한 문장 고르기는 PG 청크 ~100ms) | 15ms | 18ms |
+  | 같은 대기 + 앞 2만이 막힘(8청크 — 처음 4청크는 예산만 훑고 0건, 그다음 100건씩) | 15ms(최대 19) | 13ms(최대 19) |
+  테스트베드 왕복 0.07ms 환산으로 5000 배치 하나 ≈ 3.5–4초(조사 B) — readiness 프로브 1회를 놓칠 수 있다(연속 3회가 아니면 파드는 빠지지 않는다).
+  expected 를 작게 속여 호출당 예산에 끼워 넣은 배치는 삭제 전 `batch_changed` 로 끝나고 그 앞의 잠금·읽기만 치른다(PG 자식 5000 배치 ≈ 22ms,
+  10개 ≈ 0.2초 — `within_call_budget` docstring).
+- **테스트**: 새 `tests/test_batch_round_prune.py`(31 — 5·6회차 경계·기록 이전 행·재실행 자식·비종단/조용한 창/항목 참조 보호(잠금 직전 경합
+  훅 포함)·K=1 닻·빈 보존 회차 닻·commit_order 재사용과 닻 규칙 변종 자기 검증·고르기 창·예산·커서(막힌 앞자리 뒤로 이어 감)·청크 100/100/50·대기 상한 100/70→30/다른 actor·공평 순환·
+  대상 범위·유지보수/drain·고아 없음 + finish·감사 요약·32 KiB 접기·스케줄 칸과 fire CAS·스케줄 삭제 경합·예외 격리·동시 rescan·예측=실제·
+  루프 배선, PG 동시성 4종 — 정리↔배치 단위 삭제 양방향·정리가 스케줄을 쥔 동안의 fire·정리 둘 동시), 기존 갱신(`test_repo_batch_schedules`
+  회차 경계·잠금 순서 스파이에 batch_rounds·정리 청크 순서, `test_api_batch_schedules` 응답·preview·그물 순서, `test_migrations` 표 등식·
+  `_ensure_columns`, `test_config_batch`, `test_api_request_delete` 예산 4, `test_api_usage_unregistered` 예산, `test_api_request_list_batches`
+  limit·스칼라 모양·판정 동치, `test_repo_request_purges` 문장 예산·삭제 집합 동일, `test_batch_delete_limits_mirror` 재작성,
+  `test_control_plane_static`·`test_cli` 배선). 프런트: batchGroups·JobsList(합계 잠금·사유 문구·5000 문구)·batchSchedule·BatchSchedulesPage·
+  BatchScheduleDialog·BatchDetail.schedule·TargetSheet, e2e 18 에 보존 안내·정리 열(수기 게이트).
+- **남은 위험**(BACKLOG 「포탈 개선·배치 스케줄러 후속」·「작업(요청) 삭제 후속」): 정리 경로의 자식별 감사 스냅숏 없음(결과 메시지·전이 전문
+  소실) · 배치 단위 삭제의 「자식 수 = 버전」 CAS 가 근사(최대 commit_order CAS 강화안) · 배포 전 이미 상한을 넘은 배치는 기록 K회차까지 못
+  지움 · 항목 1001개 이상 스케줄 배치는 정리 뒤에도 상한 초과(경고만) · 정리 처리량 = 아웃박스 처리량 · 5000 배치 하나 ≈ 3.5–4초 API 정지 ·
+  미등록 스토리지 정리 포탈 연속 회차의 readiness(기존 성질) · 사용량 분석의 과거 scan 점·수치가 줄어듦(의도) · 롤링 배포 중 옛 파드가 경계 없이
+  시작한 회차는 앞 회차와 합쳐져 더 오래 보존(안전한 방향).
+- **실증**: d29 실증 예정(설계 §11 — e5fe 에 스케줄 + 사람 `:rescan` × 4 → 스케줄 회차에서 옛 자식 8 정리·`batch / prune_rounds` 1행·`pruned_total`
+  8·아티팩트·vcjob 0 → `:rescan` 1회 더 → r_1 자식만 정리, 포탈 1280·390 스크린숏, 되돌림 = 스케줄 삭제).
 
 ### ✅ 포탈 개선 — 사용량 전체 목록·최신 scan 차트 · 배치 대상 스토리지 열·큰 배치 상세 쪽 넘김·검색 · 배치 스케줄러 d28 — **완료·실증**(2026-11-16)
 

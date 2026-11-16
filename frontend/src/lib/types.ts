@@ -31,12 +31,16 @@ export interface RequestRow {
   batch_name?: string | null;             // null = 이름 없음(또는 배치 행 없음)
   batch_status?: string | null;           // 배치 행이 없으면 null
   batch_request_count?: number;           // 재실행 이력을 포함한 전체 자식 수(capped 면 상한 + 1 에서 멈춘 값)
-  // 자식이 배치 단위 삭제 상한(1000)을 넘어 서버가 세기를 멈췄다(2026-10-11 -- 폴링마다 큰 배치 전부를 세지 않는다).
-  // 그 배치는 고를 수 없고(too_large) 아래 두 수는 null(세지 않았다 -- 모름).
+  // 자식이 배치 단위 삭제 상한(batch_request_count_limit)을 넘어 서버가 세기를 멈췄다(2026-10-11 -- 폴링마다 큰 배치 전부를
+  // 세지 않는다). 그 배치는 고를 수 없고(too_large) 아래 두 수는 null(세지 않았다 -- 모름).
   batch_request_count_capped?: boolean;
+  // 배치 단위 삭제의 자식·항목 상한(2026-11-16 -- 서버 MAX_BATCH_DELETE_CHILDREN 5000·MAX_BATCH_DELETE_ITEMS 10000). 포탈은 상수를
+  // 두지 않고 이 값으로 판정한다(batchGroups.batchBlock -- 숫자가 아니면 「정보 없음」, fail-closed).
+  batch_request_count_limit?: number;
+  batch_item_count_limit?: number;
   batch_live_request_count?: number | null;     // 비종단 자식 수 -- 0 은 정상값(모름이 아니다). null = capped
   batch_succeeded_scan_count?: number | null;   // 성공 scan 잡을 가진 자식 수(비 scan 배치는 0 -- 확정값). null = capped
-  // 배치 항목 수(2026-10-11) -- 배치 단위 삭제는 항목 수에도 상한(10000)이 있어 넘으면 고를 수 없다(too_large). null = 모름
+  // 배치 항목 수(2026-10-11) -- 배치 단위 삭제는 항목 수에도 상한(batch_item_count_limit)이 있어 넘으면 고를 수 없다(too_large). null = 모름
   // (배치 행이 없는 묶음·변조된 값) -- 모르면 막지 않고 서버가 판정한다(자식 수 상한이 주 게이트다).
   batch_item_count?: number | null;
   // 그 배치의 스케줄 요약(2026-11-16 배치 스케줄러 -- 배치 상세 schedule 과 같은 모양). null = 스케줄 없음. 배치 단위 삭제가 같은
@@ -327,6 +331,9 @@ export interface BatchScheduleSummary {
   schedule_id: string; kind: string; spec: Record<string, unknown> | null;
   enabled: boolean | number; next_run_at: string | null;
   last_outcome: string | null; last_reason_code: string | null; paused_reason_code: string | null;
+  // 회차 보존 정리(2026-11-16 -- 스케줄이 있는 배치는 최근 keep_rounds 회차만 남는다). pruned_total null = 아직 정리 없음(0 과
+  // 다르다). keep_rounds 는 배치 목록·상세 요약에만 실린다(작업 목록 행엔 없다). 옵션(?) = 옛 서버·fixture.
+  pruned_at?: string | null; pruned_total?: number | null; keep_rounds?: number | null;
 }
 export interface BatchItem {
   seq: number; payload: Record<string, unknown>; status: string;

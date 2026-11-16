@@ -13,7 +13,7 @@ from ..execution import ExecutionError
 from ..identity import owner_override_allowed, root_allowed
 from .. import k8s_access
 from ..privileged import privileged_names
-from ..repositories.request_purges import MAX_BATCH_DELETE_CHILDREN
+from ..repositories.request_purges import MAX_BATCH_DELETE_CHILDREN, MAX_BATCH_DELETE_ITEMS
 from ..repositories.storages import storage_open_to_users
 from ..repositories.sync_pairs import sync_pair_allowed
 from ..repositories.text_search import search_tokens
@@ -343,6 +343,9 @@ def list_requests(request: Request, identity: Identity = Depends(require_user),
     # batch_schedule(2026-11-16 배치 스케줄러): 그 배치의 스케줄 요약 | null(스케줄 없음) -- 배치 상세의 schedule 과 같은 모양
     # (BatchSchedulesRepository.summaries_for, 한 쪽에 질의 한 번). 배치 단위 삭제(request_purges.delete_batch)는 같은
     # 트랜잭션에서 스케줄·회차 이력을 함께 지우므로, 확인 창이 그 사실을 말할 재료다(배치 상세의 기록 삭제 창과 같은 안내).
+    # batch_request_count_limit·batch_item_count_limit(2026-11-16): 배치 단위 삭제의 자식·항목 상한(request_purges
+    # MAX_BATCH_DELETE_CHILDREN·MAX_BATCH_DELETE_ITEMS) -- 포탈이 상수를 두지 않고 이 값으로 「삭제 상한 초과」를 판정한다(상한을
+    # 바꿔도 포탈 빌드와 어긋나지 않는다). 요약을 붙이는 행(배치 자식 행)에만.
     if identity.role == "admin":
         bids = list(dict.fromkeys(r["batch_id"] for r in rows if r["batch_id"] is not None))
         if bids:
@@ -354,6 +357,8 @@ def list_requests(request: Request, identity: Identity = Depends(require_user),
                 s = summaries.get(row["batch_id"])
                 if s is not None:
                     row.update(s)
+                row["batch_request_count_limit"] = MAX_BATCH_DELETE_CHILDREN
+                row["batch_item_count_limit"] = MAX_BATCH_DELETE_ITEMS
                 row["batch_schedule"] = schedules.get(row["batch_id"])
     return rows
 

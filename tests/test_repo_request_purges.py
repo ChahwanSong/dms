@@ -1084,7 +1084,7 @@ def _bulk_children(db, bid, n, *, with_job=True):
 
 def test_batch_delete_statement_budget(repos, db):
     # 성능 회귀를 시간이 아니라 결정적으로 잡는다 -- 트랜잭션 동안 API 전체가 멈추므로(단일 커넥션 RLock) 자식당 문장
-    # 수가 늘면 상한(1000) 근처 배치가 readiness 를 넘긴다. 자식 200개(잡 각 1개) ≤ 6×200 + 60: 자식마다 감사 스냅숏
+    # 수가 늘면 상한(MAX_BATCH_DELETE_CHILDREN 5000, 2026-11-16) 근처 배치가 readiness 를 넘긴다. 자식 200개(잡 각 1개) ≤ 6×200 + 60: 자식마다 감사 스냅숏
     # 읽기 3(결과·요청 전이·잡 전이) + events DELETE 1 + 아웃박스 INSERT 1 + 감사 INSERT 1. 아웃박스의 기존 행 조회는
     # 묶음마다 한 번이다(자식마다 읽으면 PG 일반 계획이 아웃박스를 자식마다 훑었다 -- 2026-10-10 검증 지적).
     bid = _scan_batch(repos, n_items=1)
@@ -1099,6 +1099,43 @@ def test_batch_delete_statement_budget(repos, db):
     assert _batch_rows(db, bid) == {"batches": 0, "batch_items": 0, "requests": 0}
     assert db.query_one("SELECT COUNT(*) AS n FROM data_jobs")["n"] == 0
     assert repos.request_purges.pending_count() == len(children)
+
+
+def _deleted_tables(sql_list):
+    import re
+    return {m.group(1) for m in (re.match(r"\s*DELETE FROM (\w+)", s) for s in sql_list) if m}
+
+
+def test_prune_chunk_statement_budget_and_same_delete_set(repos, db):
+    # 회차 보존 정리 청크(prune_round_children, per_request_audit=False -- 2026-11-16): 자식별 스냅숏(읽기 3)·events 자식별
+    # DELETE·('request','delete') 감사 INSERT 가 없어 자식당 문장은 아웃박스 INSERT 1개뿐이다. 자식 100개(잡 각 1개) ≤ 100 + 40
+    # (실측 117 -- 같은 100자식 delete_batch 는 623: 고르기·잠금·스케줄·항목 참조·집합 DELETE·아웃박스 묶음 읽기·감사 1·카운터 1). 지우는 테이블 집합은 기본 경로
+    # (delete_batch)와 같다 -- 삭제 목록을 두 벌로 두지 않는다.
+    from dms.batch_scheduler import SCHEDULER_ACTOR
+    bid = _scan_batch(repos, n_items=1)
+    repos.accounts.create("ops", "p", "admin", actor="t")
+    repos.batch_schedules.create(batch_id=bid, kind="daily", spec={"hour": 2, "minute": 0}, enabled=False,
+                                 next_run_at=None, actor="ops", arm=lambda b, i: None)
+    children = _bulk_children(db, bid, 100)
+    counting = _Counting(db)
+    r = RequestPurgesRepository(counting).prune_round_children(
+        bid, upto_order=100000 + 99, limit=100, actor=SCHEDULER_ACTOR, artifact_base=BASE, quiet_seconds=60)
+    assert len(r["deleted"]) == 100 and len(r["job_ids"]) == 100
+    assert counting.n <= 100 + 40, counting.n
+    prune_tables = _deleted_tables(counting.sql)
+    assert set(PURGED_TABLES) <= prune_tables
+    assert db.query_one("SELECT COUNT(*) AS n FROM requests WHERE batch_id = :b", {"b": bid})["n"] == 0
+    assert repos.request_purges.pending_requested_by(SCHEDULER_ACTOR) == len(children)
+    # 기본 경로(배치 단위 삭제)가 지우는 요청 쪽 테이블과 같다
+    other = _scan_batch(repos, n_items=1)
+    _bulk_children(db, other, 3)
+    db.execute("UPDATE requests SET commit_order = commit_order + 1000 WHERE batch_id = :b", {"b": other})
+    spy = _Counting(db)
+    assert RequestPurgesRepository(spy).delete_batch(other, expected_request_count=3, actor="opadm", artifact_base=BASE,
+                                                     quiet_seconds=60, max_children=1000)["deleted"] is True
+    assert _deleted_tables(spy.sql) & set(PURGED_TABLES) == prune_tables & set(PURGED_TABLES)
+    assert db.query("SELECT 1 AS x FROM audit_log WHERE mutation_class = 'request' AND operation = 'delete' "
+                    "AND actor = :a", {"a": SCHEDULER_ACTOR}) == []
 
 
 class _RowCounting(_Counting):

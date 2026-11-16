@@ -165,6 +165,32 @@ test("자동 확인 꺼진 sync 의 짧은 주기: 서버 confirm_wait 경고(�
   expect(within(dlg).getByRole("button", { name: "추가" })).toBeEnabled();
 });
 
+test("회차 보존 안내: 서버 keep_rounds·prune_preview 로 「곧 정리될 작업」과 「항목 × K > 상한」 예측을 보인다 — 저장은 막지 않는다", async () => {
+  // 2026-11-16 사용자 결정(최근 5회차만 보존). prune_preview 는 실제 정리와 같은 경계 계산(서버 _round_cut)이다.
+  serve({ preview: (body) => HttpResponse.json({
+    next_runs: RUNS, confirm_wait: null, keep_rounds: 5, child_count_limit: 10,
+    ...(body.batch_id ? { prune_preview: { rounds_recorded: 6, would_prune: body.batch_id === SCAN ? 8 : 0 } } : {}) }) });
+  const dlg = await openDialog();
+  await pick(dlg, SCAN);
+  const note = await within(dlg).findByRole("note", { name: "회차 보존 안내" });
+  await waitFor(() => expect(note).toHaveTextContent("저장하면 기록된 회차 6개 중 오래된 회차의 작업 약 8개가 곧 정리됩니다"));
+  expect(note).toHaveTextContent("스케줄이 있는 배치는 최근 5회차만 보존합니다");
+  // 항목 3 × 5 = 15 > 상한 10(테스트용 작은 상한)
+  expect(note).toHaveTextContent("항목 3개 × 5회차 = 작업 최대 15개 — 정리 뒤에도 배치 단위 삭제 상한(10개)을 넘어");
+  expect(within(dlg).getByText(/회차마다 자식 요청 3개가 새로 생깁니다\(최근 5회차만 보존 — 오래된 회차는 자동으로 정리합니다\)/))
+    .toBeInTheDocument();
+  expect(within(dlg).getByRole("button", { name: "추가" })).toBeEnabled();
+});
+
+test("옛 서버(keep_rounds 없음)면 보존 안내를 지어내지 않는다", async () => {
+  serve();
+  const dlg = await openDialog();
+  await pick(dlg, SCAN);
+  await waitFor(() => expect(within(dlg).getByText("2026-11-17 02:00:00 KST")).toBeInTheDocument());
+  expect(within(dlg).queryByRole("note", { name: "회차 보존 안내" })).toBeNull();
+  expect(within(dlg).getByText("회차마다 자식 요청 3개가 새로 생깁니다.")).toBeInTheDocument();
+});
+
 test("자동 확인 배치는 켠 사람 둘의 자격을 각각 다시 본다고 말한다", async () => {
   serve();
   const dlg = await openDialog();

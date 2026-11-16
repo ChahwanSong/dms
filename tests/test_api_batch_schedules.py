@@ -106,6 +106,9 @@ def test_create_returns_the_row_without_the_raw_fingerprint(client):
     assert row["batch"]["storage"] == "s1" and row["batch"]["auto_confirm"] is False
     assert (row["child_count"], row["child_count_capped"], row["child_count_limit"]) == \
         (0, False, MAX_BATCH_DELETE_CHILDREN)
+    assert row["child_count_limit"] == 5000
+    # 회차 보존(2026-11-16): 설정값과 정리 결과 -- 아직 정리 없음은 null(0 이 아니다)
+    assert (row["keep_rounds"], row["pruned_at"], row["pruned_total"]) == (5, None, None)
     a = _audit(client, "batch_schedule", "create")
     assert len(a) == 1 and a[0]["actor"] == "ops" and a[0]["target_key"] == bid
     # KST 02:00 = UTC 17:00
@@ -298,6 +301,46 @@ def test_preview_with_a_batch_warns_about_confirm_wait(client):
     assert r.status_code == 200 and r.json()["confirm_wait"] is None
 
 
+def test_preview_carries_keep_rounds_limit_and_prune_preview(client):
+    """추가 창의 보존 안내 재료(2026-11-16): keep_rounds·child_count_limit 은 늘, batch_id 가 있으면 prune_preview(실제 정리와
+    같은 경계 계산 -- 기록 6회차 배치면 곧 정리될 작업 = 첫 회차(기록 이전) 자식 수)."""
+    r = client.post(f"{URL}:preview", json=DAILY).json()
+    assert r["keep_rounds"] == 5 and r["child_count_limit"] == MAX_BATCH_DELETE_CHILDREN and "prune_preview" not in r
+    repos = _repos(client)
+    bid = _batch(client, n=2)
+    first = [repos.requests.create(operation="scan", requester_id="ops", actor="ops", resource_key=f"f{i}",
+                                   payload=dict(SCAN_ITEM), priority="mid", batch_id=bid, auth_method="session")
+             for i in range(2)]
+    for rnd in range(6):
+        assert repos.batches.rescan_if_terminal(bid, actor="ops") is not None
+        for i in range(2):
+            repos.requests.create(operation="scan", requester_id="ops", actor="ops", resource_key=f"r{rnd}-{i}",
+                                  payload=dict(SCAN_ITEM), priority="mid", batch_id=bid, auth_method="session")
+        repos.db.execute("UPDATE batches SET status = 'Completed' WHERE batch_id = :b", {"b": bid})
+        repos.db.execute("UPDATE batch_items SET status = 'Succeeded' WHERE batch_id = :b", {"b": bid})
+    pp = client.post(f"{URL}:preview", json={**DAILY, "batch_id": bid}).json()["prune_preview"]
+    # 기록 6회차 · 보존 5 → 보존하는 가장 오래된 회차 = 2번째 기록 회차, 그 전 = 첫 실행 자식 2 + 1번째 기록 회차 자식 2
+    assert pp == {"rounds_recorded": 6, "would_prune": len(first) + 2, "would_prune_capped": False}
+    fresh = _batch(client)
+    assert client.post(f"{URL}:preview", json={**DAILY, "batch_id": fresh}).json()["prune_preview"] == \
+        {"rounds_recorded": 0, "would_prune": 0, "would_prune_capped": False}
+    assert client.post(f"{URL}:preview", json={**DAILY, "batch_id": "nope"}).json()["prune_preview"]["would_prune"] == 0
+
+
+def test_list_and_batch_summary_carry_prune_results(client):
+    bid = _batch(client)
+    sid = _create(client, bid).json()["schedule_id"]
+    repos = _repos(client)
+    repos.db.execute("UPDATE batch_schedules SET pruned_at = '2026-11-16T10:00:00Z', pruned_total = 0 "
+                     "WHERE schedule_id = :s", {"s": sid})
+    row = client.get(URL).json()[0]
+    assert row["pruned_at"] == "2026-11-16T10:00:00Z" and row["pruned_total"] == 0   # 0 은 정상값
+    sched = client.get(f"/api/admin/batches/{bid}?view=summary").json()["schedule"]
+    assert sched["pruned_total"] == 0 and sched["keep_rounds"] == 5
+    listed = {r["batch_id"]: r for r in client.get("/api/admin/batches").json()}
+    assert listed[bid]["schedule"]["keep_rounds"] == 5
+
+
 # --- 배치 삭제 캐스케이드 · 그물 ------------------------------------------------------------------------------------
 
 def _schedule_with_runs(client, bid):
@@ -315,13 +358,19 @@ def _schedule_rows(client, bid):
             db.query_one("SELECT COUNT(*) AS n FROM batch_schedule_runs WHERE batch_id = :b", {"b": bid})["n"])
 
 
+def _round_rows(client, bid):
+    return _repos(client).db.query_one("SELECT COUNT(*) AS n FROM batch_rounds WHERE batch_id = :b", {"b": bid})["n"]
+
+
 def test_batch_record_delete_cascades_schedule_and_runs(client):
     bid = _batch(client)
     _schedule_with_runs(client, bid)
-    assert _schedule_rows(client, bid) == (1, 1)
+    assert client.post(f"/api/admin/batches/{bid}:rescan").status_code == 200
+    _repos(client).db.execute("UPDATE batches SET status = 'Completed' WHERE batch_id = :b", {"b": bid})
+    assert _schedule_rows(client, bid) == (1, 1) and _round_rows(client, bid) == 1
     r = client.delete(f"/api/admin/batches/{bid}")
     assert r.status_code == 200, r.text
-    assert _schedule_rows(client, bid) == (0, 0)
+    assert _schedule_rows(client, bid) == (0, 0) and _round_rows(client, bid) == 0
     a = _audit(client, "batch_schedule", "delete")
     assert len(a) == 1 and json.loads(a[0]["before_state"])["run_count"] == 1
 
@@ -329,10 +378,12 @@ def test_batch_record_delete_cascades_schedule_and_runs(client):
 def test_batch_unit_delete_cascades_schedule_and_runs(client):
     bid = _batch(client)
     _schedule_with_runs(client, bid)
+    assert _repos(client).batches.rescan_if_terminal(bid, actor="ops") is not None
+    _repos(client).db.execute("UPDATE batches SET status = 'Completed' WHERE batch_id = :b", {"b": bid})
     r = _repos(client).request_purges.delete_batch(bid, expected_request_count=0, actor="ops", artifact_base=None,
                                                    quiet_seconds=60, max_children=MAX_BATCH_DELETE_CHILDREN)
     assert r["deleted"] is True, r
-    assert _schedule_rows(client, bid) == (0, 0)
+    assert _schedule_rows(client, bid) == (0, 0) and _round_rows(client, bid) == 0
     assert len(_audit(client, "batch_schedule", "delete")) == 1
 
 
@@ -354,16 +405,17 @@ def test_batch_delete_tables_cover_every_batch_id_column(db):
 
 @pytest.mark.parametrize("path", [BatchesRepository.delete, RequestPurgesRepository.delete_batch])
 def test_both_batch_delete_paths_delete_every_table_schedule_before_runs(path):
-    """두 경로 소스에 테이블마다 DELETE 가 있고, 스케줄을 회차 이력보다 먼저 지운다(record·fire 의 스케줄 → 회차 순서와 같게 --
-    거꾸로면 PG 에서 서로 상대 행을 기다린다)."""
+    """두 경로 소스에 테이블마다 DELETE 가 있고, 회차 경계를 스케줄보다, 스케줄을 회차 이력보다 먼저 지운다(fire 의 회차 경계 →
+    스케줄 → 회차, record 의 스케줄 → 회차 순서와 같게 -- 거꾸로면 PG 에서 서로 상대 행을 기다린다)."""
     src = inspect.getsource(path)
     pos = {}
     for t in BATCH_DELETE_TABLES:
         needle = f"DELETE FROM {t} "
         assert needle in src, f"{path.__qualname__} does not delete {t}"
         pos[t] = src.index(needle)
-    assert pos["batch_schedules"] < pos["batch_schedule_runs"]
-    assert BATCH_DELETE_TABLES.index("batch_schedules") < BATCH_DELETE_TABLES.index("batch_schedule_runs")
+    assert pos["batch_rounds"] < pos["batch_schedules"] < pos["batch_schedule_runs"]
+    order = [BATCH_DELETE_TABLES.index(t) for t in ("batch_rounds", "batch_schedules", "batch_schedule_runs")]
+    assert order == sorted(order)
 
 
 # --- 취소와 같은 요청의 스케줄 끄기(설계 비판 #4) · :rescan ----------------------------------------------------------
@@ -434,3 +486,6 @@ def test_rescan_route_is_a_state_cas(client):
     assert r.status_code == 200 and r.json() == {"status": "Running", "requeued": 2}
     r = client.post(f"/api/admin/batches/{bid}:rescan")
     assert r.status_code == 409 and r.json()["detail"] == "batch_not_rescannable"
+    # 회차 경계(2026-11-16): 이긴 쪽만 1행, 누른 세션 사용자가 actor(via rescan). 응답 모양은 그대로다.
+    rounds = _repos(client).db.query("SELECT via, actor, requeued FROM batch_rounds WHERE batch_id = :b", {"b": bid})
+    assert rounds == [{"via": "rescan", "actor": "ops", "requeued": 2}]

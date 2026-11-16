@@ -3,8 +3,12 @@
 // 진실이다: 화면은 **다음 실행을 계산하지 않는다**(말일 당기기·interval 슬롯을 따로 구현하면 서버와 어긋난다 — 미리보기는 서버
 // :preview). 여기 있는 것은 표시 문구와 저장 전 즉답(서버 422 invalid_batch_schedule 의 거울)뿐이다.
 //
+// 회차가 쌓는 자식 요청: 스케줄이 있는 배치는 최근 K회차(서버 keep_rounds, 기본 5)만 남고 오래된 회차는 컨트롤러가 자동으로
+// 정리한다(2026-11-16 사용자 결정 — 서버 batch_round_prune). 문구는 keepRoundsNotice 한 벌을 화면 셋이 같이 쓴다.
+//
 // dms-ssc WIP 의 lib/batchSchedule.ts 와 같은 export 이름이다. k8s 는 lib/types.ts 를 배치 목록 작업(#67)이 만지므로 응답
 // 타입을 이 파일에 둔다(나중에 합칠 때 types.ts 로 옮긴다).
+import { kstStampBare } from "../../lib/datetime";
 import { storageLabel } from "../usage/usageTabs";
 
 // --- 응답 타입(routes_batch_schedules 모듈 docstring) -------------------------------------------------------------------
@@ -43,6 +47,9 @@ export interface BatchSchedule {
   // k8s: 재실행 이력 포함 자식 요청 수 · 상한 초과로 세기를 멈춤 · 배치 단위 삭제 상한(서버 MAX_BATCH_DELETE_CHILDREN).
   child_count?: number; child_count_capped?: boolean; child_count_limit?: number;
   confirm_wait?: ConfirmWait | null;
+  // 회차 보존(2026-11-16 사용자 결정 — 서버 DMS_BATCH_SCHEDULE_KEEP_ROUNDS, 기본 5): 최근 keep_rounds 회차만 남고 오래된 회차의
+  // 작업은 컨트롤러가 정리한다. pruned_total null = 아직 정리한 적 없음(0 과 다르다), pruned_at = 마지막으로 정리한 시각(UTC).
+  keep_rounds?: number | null; pruned_at?: string | null; pruned_total?: number | null;
 }
 // 회차 기록(GET /api/admin/batch-schedules/{id}/runs, 최근 순). requeued·prev_* 는 fired 일 때만 값이 있다 — null = 해당 없음
 // (0 은 「0개」라는 정상값이다).
@@ -53,7 +60,14 @@ export interface BatchScheduleRun {
   requeued: number | null;
   prev_status: string | null; prev_item_count: number | null; prev_succeeded: number | null; prev_failed: number | null;
 }
-export interface SchedulePreview { next_runs: string[]; confirm_wait?: ConfirmWait | null }
+/** 추가 창 예측(:preview 의 prune_preview — 실제 정리와 같은 경계 계산). would_prune = 지금 스케줄을 걸면 곧 정리될 작업 수
+ *  (막힌 작업까지 세는 근사치 — 화면은 「약」), capped = 서버가 세기를 멈췄다(그보다 많다). */
+export interface PrunePreview { rounds_recorded: number | null; would_prune: number; would_prune_capped?: boolean }
+export interface SchedulePreview {
+  next_runs: string[]; confirm_wait?: ConfirmWait | null;
+  // 2026-11-16 — 옛 서버엔 없다(옵션). keep_rounds·child_count_limit 은 늘, prune_preview 는 batch_id 를 실었을 때만.
+  keep_rounds?: number | null; child_count_limit?: number | null; prune_preview?: PrunePreview | null;
+}
 
 // --- 프리셋 · 폼 ------------------------------------------------------------------------------------------------------
 
@@ -233,18 +247,58 @@ export function confirmWaitShort(w: ConfirmWait | null | undefined): string | nu
   return every !== null ? `확인 없으면 ${every}에 한 번` : "확인 없으면 주기보다 드물게";
 }
 
-// 배치 단위 삭제 상한의 80% — 회차가 쌓는 자식 요청은 자동으로 정리하지 않는다(설계 §6 기본값). 넘으면 곧 배치 단위로 지울 수
-// 없게 된다는 경고를 보인다. capped = 서버가 상한 + 1 에서 세기를 멈췄다(이미 넘었다).
+// 배치 단위 삭제 상한(서버 child_count_limit, 2026-11-16 5000)의 80% 경고. 오래된 회차의 작업은 자동 정리되지만(최근 K회차 보존 —
+// 2026-11-16 사용자 결정) 항목 수 × 보존 회차가 상한보다 크면 줄지 않는다. capped = 서버가 상한 + 1 에서 세기를 멈췄다(이미 넘었다).
 export const CHILD_WARN_RATIO = 0.8;
+const n0 = (n: number) => n.toLocaleString("ko-KR");
 export function childCountWarning(s: Pick<BatchSchedule, "child_count" | "child_count_capped" | "child_count_limit">): string | null {
   const limit = s.child_count_limit;
   if (typeof limit !== "number" || limit <= 0) return null;
   if (s.child_count_capped === true) {
-    return `자식 요청이 ${limit.toLocaleString("ko-KR")}개를 넘어 이 배치는 배치 단위로 지울 수 없습니다`;
+    return `자식 요청이 ${n0(limit)}개를 넘어 지금은 배치 단위로 지울 수 없습니다 — 오래된 회차는 자동 정리되지만 항목 수 × 보존 `
+      + "회차가 상한보다 크면 줄지 않습니다";
   }
   const n = s.child_count;
   if (typeof n !== "number" || n < limit * CHILD_WARN_RATIO) return null;
-  return `자식 요청 ${n.toLocaleString("ko-KR")}개 — ${limit.toLocaleString("ko-KR")}개를 넘으면 배치 단위로 지울 수 없게 됩니다`;
+  return `자식 요청 ${n0(n)}개 — 상한 ${n0(limit)}개의 80%를 넘었습니다`;
+}
+
+const keepOk = (k: unknown): k is number => typeof k === "number" && Number.isInteger(k) && k >= 1;
+
+/** 회차 보존 안내(2026-11-16 사용자 결정 「최근 5회차만 남기고 정리」 — 서버 batch_round_prune). keep 이 숫자가 아니면(옛 서버)
+ *  문장을 만들지 않는다(null — 지어내지 않는다). */
+export function keepRoundsNotice(keep: number | null | undefined): string | null {
+  if (!keepOk(keep)) return null;
+  return `스케줄이 있는 배치는 최근 ${keep}회차만 보존합니다 — 첫 실행·전체 재실행·스케줄 회차를 회차로 세고(실패분·선택 재실행은 그 `
+    + `회차에 속합니다), ${keep}회차를 넘으면 가장 오래된 회차의 작업(자식 요청·잡·결과 파일)을 곧 자동으로 정리합니다. 사용량 분석의 `
+    + `scan 이력(온도·용량 추이)도 이 배치 몫은 최근 ${keep}회차만 남습니다. 스케줄을 꺼도 정리는 계속되고, 스케줄을 지우면 멈춥니다.`;
+}
+
+/** 스케줄 행의 정리 결과 한 줄 — null(아직 정리 없음)과 0 을 가른다(null ≠ 0). */
+export function pruneText(s: Pick<BatchSchedule, "pruned_total" | "pruned_at">): string {
+  const n = s.pruned_total;
+  if (typeof n !== "number") return "아직 정리 없음";
+  const at = typeof s.pruned_at === "string" ? ` · 마지막 ${kstStampBare(s.pruned_at)}` : "";
+  return `정리 누적 ${n0(n)}건${at}`;
+}
+
+/** 「항목 × K > 상한」 예측 경고 — 보존 회차를 다 채우면 정리 뒤에도 배치 단위 삭제 상한을 넘는다. 셋 중 하나라도 모르면 null. */
+export function projectedChildrenWarning(itemCount: number | null | undefined, keep: number | null | undefined,
+                                         limit: number | null | undefined): string | null {
+  if (typeof itemCount !== "number" || !keepOk(keep) || typeof limit !== "number" || limit <= 0) return null;
+  const projected = itemCount * keep;
+  if (projected <= limit) return null;
+  return `항목 ${n0(itemCount)}개 × ${keep}회차 = 작업 최대 ${n0(projected)}개 — 정리 뒤에도 배치 단위 삭제 상한(${n0(limit)}개)을 `
+    + "넘어 이 배치는 배치 단위로 지울 수 없습니다(실패분 재실행이 더해지면 더 많습니다)";
+}
+
+/** 추가 창의 「저장하면 곧 정리될 작업」 안내(prune_preview). 0·모름이면 null. */
+export function prunePreviewText(p: PrunePreview | null | undefined): string | null {
+  if (!p || typeof p.would_prune !== "number" || p.would_prune <= 0) return null;
+  // capped = 서버가 상한 + 1 에서 세기를 멈췄다 — 「상한 이상」으로 말한다(지어낸 정확한 수가 아니다).
+  const n = p.would_prune_capped === true ? `${n0(p.would_prune - 1)}개 이상이` : `약 ${n0(p.would_prune)}개가`;
+  const r = typeof p.rounds_recorded === "number" ? `기록된 회차 ${n0(p.rounds_recorded)}개 중 ` : "";
+  return `저장하면 ${r}오래된 회차의 작업 ${n} 곧 정리됩니다`;
 }
 
 /** 남은 시간 한국어(「3시간 12분 뒤」·「2일 뒤」·「곧」). 파싱 불가면 빈 문자열(지어내지 않는다). */

@@ -172,6 +172,11 @@ data:
   # 기록과 결과 수치는 남고 포탈엔 「결과 파일 만료됨」이 뜬다(열람 API 410 artifact_expired). 0 = 끔. 바꾸면 dms-controller
   # 재시작(api 는 화면 표시용으로 읽는다 -- dms-api 도 재시작). 기본값과 같다(사이트 중립).
   DMS_ARTIFACT_RETENTION_DAYS: "1500"
+  # 배치 스케줄 회차 보존(2026-11-16, 컨트롤러 batch-round-prune 루프): 스케줄이 있는 배치는 최근 이 수의 회차(첫 실행·전체
+  # 재실행·스케줄 회차)의 작업만 남기고, 그보다 오래된 회차의 작업(자식 요청·잡·결과 파일)을 위 request-purge 루프로 정리한다.
+  # 1–100(밖이면 기동 거부). 바꾸면 dms-controller(정리)·dms-api(화면 표시) 재시작 -- S11 이 둘 다 다시 띄운다. 기본값과 같다
+  # (사이트 중립).
+  DMS_BATCH_SCHEDULE_KEEP_ROUNDS: "5"
 
   # --- agent report cadence (AgentSettings.from_env; consumed via
   #     configMapKeyRef in 50-agent-daemonset.yaml, NOT envFrom, since the

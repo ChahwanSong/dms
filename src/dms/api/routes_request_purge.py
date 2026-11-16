@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from ..artifact_base import resolve_artifact_base, strip_scheme
-from ..repositories.request_purges import MAX_BATCH_DELETE_CHILDREN, MAX_BATCH_DELETE_ITEMS
+from ..repositories.request_purges import MAX_BATCH_DELETE_CHILDREN, MAX_BATCH_DELETE_ITEMS, within_call_budget
 from .auth import Identity, audit_actor, require_admin, require_session_admin
 from .routes_requests import reject_when_maintenance
 
@@ -23,7 +23,8 @@ router = APIRouter()
 MAX_DELETE = 200
 # 한 번에 지울 수 있는 배치 수. 배치 하나의 크기 상한(자식 MAX_BATCH_DELETE_CHILDREN·항목 MAX_BATCH_DELETE_ITEMS)과 그
 # 근거는 repositories/request_purges.py 에 있다(목록 API 의 배치 요약도 같은 자식 상한에서 세기를 멈춘다). 배치와 배치
-# 사이에는 RLock 이 풀린다.
+# 사이에는 RLock 이 풀린다. 한 호출이 시도하는 배치의 자식 합은 MAX_DELETE_CALL_CHILDREN(10000)으로 따로 묶는다
+# (request_purges.within_call_budget -- 5000 × 10 이면 한 호출이 RLock 을 35–40초 쥐어 readiness 를 연속으로 놓친다).
 MAX_DELETE_BATCHES = 10
 # 요청 id 형식(uuid4().hex). 형식 밖은 DB 를 보지 않고 request_not_found -- 없음과 같은 의미라 존재 오라클이 없다.
 _RID_RE = re.compile(r"[0-9a-f]{32}")
@@ -86,8 +87,10 @@ def delete_requests(body: DeleteRequestsBody, request: Request,
     **배치 단위**(본문 batches -- [{batch_id, expected_request_count}], 2026-10-10): 같은 세션 관리자 전용 경계 안에서
     배치 하나 = 트랜잭션 하나 = 자식 요청 전부 + 항목 + 배치 행, 전부 아니면 전무(request_purges.delete_batch -- 판정
     순서·잠금 순서는 그 docstring). 배치 id 는 접는다(첫 항목의 expected 를 쓰고 순서 유지). 호출당 배치 ≤ 10, 배치당
-    자식 ≤ 2000·항목 ≤ 10000(request_purges 모듈 상수 -- 2026-10-26 자식 상한 1000 → 2000). 배치 하나의 DB 오류는 그 배치만 batch_delete_failed 로
-    제외한다(단건과 같은 이유).
+    자식 ≤ 5000·항목 ≤ 10000(request_purges 모듈 상수 -- 2026-10-26 자식 상한 1000 → 2000, 2026-11-16 → 5000). **호출당 자식
+    합 ≤ 10000**(MAX_DELETE_CALL_CHILDREN, 2026-11-16): 선택 순서대로 확인 창 자식 수(expected)를 더해 넘는 배치부터는 시도하지
+    않고 batch_delete_call_budget 로 싣는다(첫 배치는 늘 시도한다 -- 다시 삭제하면 다음 호출이 이어서 지운다). 배치 하나의 DB
+    오류는 그 배치만 batch_delete_failed 로 제외한다(단건과 같은 이유).
     응답의 deleted_batches·skipped_batches 는 본문에 batches 키를 실은 호출에만 싣는다(빈 목록이어도) -- batches 를
     모르는 옛 호출자(단건만 보내는 스크립트)의 응답 모양은 그대로다.
 
@@ -146,7 +149,11 @@ def delete_requests(body: DeleteRequestsBody, request: Request,
     # 무엇이든 지워졌으면 batch_child_shared 로 빠진 배치만 다시 시도한다(지운 배치가 없는 바퀴에서 멈춘다 -- 바퀴마다 하나
     # 이상 지워지므로 배치 수(≤ 10)만큼이 상한이다). 응답 순서는 선택 순서 그대로다.
     outcome: dict[str, dict] = {}
-    todo = batches
+    # 호출당 자식 합 예산(위 docstring) -- 담지 못한 배치는 시도하지 않는다. batch_child_shared 재시도 고리도 담은 것 안에서만.
+    take, over = within_call_budget(batches)
+    for bid, _ in over:
+        outcome[bid] = {"skipped": _skip_batch(bid, reason_code="batch_delete_call_budget")}
+    todo = take
     while todo:
         progressed, again = False, []
         for bid, expected in todo:

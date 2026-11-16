@@ -296,6 +296,8 @@ test.describe("E7 작업 삭제", () => {
     const kid = (n: number, bid: string, over: Record<string, unknown>) => single(n, {
       batch_id: bid, batch_exists: true, batch_name: LONG, batch_status: "Completed", batch_request_count: 10,
       batch_request_count_capped: false, batch_live_request_count: 0, batch_succeeded_scan_count: 0, batch_item_count: 10,
+      // 관리자 목록은 배치 자식 행마다 서버 상한을 싣는다(2026-11-16 -- 포탈은 상수 없이 이 값으로 판정, 없으면 「정보 없음」).
+      batch_request_count_limit: 5000, batch_item_count_limit: 10000,
       ...over,
     });
     const rows = () => [

@@ -18,7 +18,8 @@ const row = (over: Partial<BatchSchedule> = {}): BatchSchedule => ({
   acknowledged_irreversible: false, destructive: false,
   batch: { batch_id: "bscan00000000aaa", name: "야간 스캔", operation: "scan", status: "Completed", item_count: 2,
            storage: "ceph", auto_confirm: false, options: {} },
-  child_count: 4, child_count_capped: false, child_count_limit: 2000, confirm_wait: null,
+  child_count: 4, child_count_capped: false, child_count_limit: 5000, confirm_wait: null,
+  keep_rounds: 5, pruned_at: null, pruned_total: null,
   ...over,
 });
 
@@ -136,13 +137,27 @@ test("삭제는 2단 확인 뒤 DELETE", async () => {
   await waitFor(() => expect(calls.filter((c) => c.method === "DELETE")).toEqual([{ method: "DELETE", path: "s1" }]));
 });
 
-test("자식 요청이 상한의 80% 를 넘으면 배치 단위 삭제가 곧 막힌다고 경고한다(자동 정리 없음)", async () => {
-  serve([row({ child_count: 1700 }), row({ schedule_id: "s2", batch_id: "bcap000000000ccc", child_count: 2001,
+test("자식 요청이 상한(서버 5000)의 80% 를 넘으면 경고한다 — capped 면 지금은 배치 단위로 못 지운다", async () => {
+  serve([row({ child_count: 4200 }), row({ schedule_id: "s2", batch_id: "bcap000000000ccc", child_count: 5001,
                                           child_count_capped: true,
                                           batch: { ...row().batch!, batch_id: "bcap000000000ccc", name: "큰 배치" } })]);
   renderPage();
-  expect(await screen.findByText(/자식 요청 1,700개 — 2,000개를 넘으면 배치 단위로 지울 수 없게 됩니다/)).toBeInTheDocument();
-  expect(screen.getByText(/2,000개를 넘어 이 배치는 배치 단위로 지울 수 없습니다/)).toBeInTheDocument();
+  expect(await screen.findByText("자식 요청 4,200개 — 상한 5,000개의 80%를 넘었습니다")).toBeInTheDocument();
+  expect(screen.getByText(/5,000개를 넘어 지금은 배치 단위로 지울 수 없습니다 — 오래된 회차는 자동 정리되지만/)).toBeInTheDocument();
+});
+
+test("회차 보존 안내(머리 도움말)와 「정리」 열 — null(아직 없음) ≠ 0, 항목 × K > 상한 예측 경고", async () => {
+  serve([row(), row({ schedule_id: "s2", batch_id: "bdone00000000bbb", pruned_total: 0, pruned_at: "2026-11-16T09:30:00Z",
+                      batch: { ...row().batch!, batch_id: "bdone00000000bbb", name: "정리된 배치" } }),
+         row({ schedule_id: "s3", batch_id: "bbig000000000ddd", pruned_total: 12, pruned_at: "2026-11-16T09:30:00Z",
+               batch: { ...row().batch!, batch_id: "bbig000000000ddd", name: "큰 CSV", item_count: 1200 } })]);
+  renderPage();
+  expect(await screen.findByText(/스케줄이 있는 배치는 최근 5회차만 보존합니다/)).toBeInTheDocument();
+  expect(screen.getByRole("columnheader", { name: "정리" })).toBeInTheDocument();
+  expect(screen.getByText("아직 정리 없음")).toBeInTheDocument();
+  expect(screen.getByText("정리 누적 0건 · 마지막 2026-11-16 18:30:00")).toBeInTheDocument();
+  expect(screen.getByText(/항목 1,200개 × 5회차 = 작업 최대 6,000개 — 정리 뒤에도 배치 단위 삭제 상한\(5,000개\)을 넘어/))
+    .toBeInTheDocument();
 });
 
 test("자동 확인 꺼진 sync 의 짧은 주기는 목록에서도 「확인 없으면 2일에 한 번」을 보인다", async () => {

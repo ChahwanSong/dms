@@ -22,6 +22,10 @@ metrics_series.DISPLAY_UTC_OFFSET_HOURS·mailer.KST 와 같은 관례). 저장�
 배치 자식은 planner(IF_ELIGIBLE)가 privileged_not_authorized 로 **거부**한다 -- 미리 멈추지 않으면 사람이 보지 않는 회차마다
 전 항목이 거부된 배치가 쌓인다(사람이 누르는 :rescan 이면 그 사람이 결과를 본다). 같은 이유로 planner 가 배치 자식을 거부할
 **결정적** 원인(스토리지 삭제·끔·denylist)도 회차 전에 보고 멈춘다(arm_problem -- 2026-11-16 설계 비판 #6).
+
+회차가 쌓는 자식 요청은 스케줄이 있는 배치에 한해 최근 DMS_BATCH_SCHEDULE_KEEP_ROUNDS(기본 5)회차만 남는다(2026-11-16 사용자
+결정 -- batch_round_prune.py, 별도 컨트롤러 루프). 발사 트랜잭션은 회차 경계(batch_rounds)를 _rescan_locked 안에서 남길 뿐 정리를
+하지 않는다(정리는 다른 트랜잭션·다른 루프 -- 스케줄러 예외와 묶이지 않게).
 """
 import calendar
 import hashlib

@@ -70,11 +70,14 @@ PostgreSQL(제어면) + React 포탈 + 노드 에이전트 + Volcano gang-schedu
   배치 요청자의 자격을 `privileged.privileged_admin_problem` 으로 다시 본다. 스케줄 삭제는 `require_session_admin` 이다. 파괴적
   스케줄(rm, delete 를 켠 sync — `batch_scheduler.is_destructive`)은 무장할 때마다 「되돌릴 수 없음」 동의(`acknowledge_irreversible:
   true`)를 받고 배치 지문을 남긴다 — 지문이 바뀌면 자동 일시정지(`docs/ARCHITECTURE.md` 「배치 재검토·확인 게이트」의 「스케줄 회차」).
+  스케줄이 있는 배치는 최근 `DMS_BATCH_SCHEDULE_KEEP_ROUNDS`(기본 5)회차만 남는다(2026-11-16, `batch_round_prune` — 컨트롤러가
+  `_purge_locked` 로 지운다, 확인 게이트는 건드리지 않는다). 회차 경계(`batch_rounds`)는 `_rescan_locked` 만 남긴다 — 회차를 새로
+  시작하는 경로를 만들면 이 몸통을 거쳐라. 정리는 최신 회차의 경계 자식(닻)을 지우지 않는다(commit_order 재사용).
 - **새 DB 컬럼은 CREATE TABLE 과 `_ensure_columns` 양쪽**(구형 DB 업그레이드 경로).
   전수 열거 그물(`test_migrations.py`)이 테이블·인덱스 추가·삭제를 잡는다.
 - **배치(batch_id)를 가리키는 새 테이블은 배치 삭제 목록에도**(2026-11-16). `repositories/batches.py` 의 `BATCH_DELETE_TABLES`
-  (튜플 순서 = 잠금 순서 batch_items → batches → batch_schedules → batch_schedule_runs — 스케줄 발사와 같은 방향. DELETE 문 순서로
-  강제하는 것은 스케줄 → 회차 이력뿐)에 넣고 배치 삭제
+  (튜플 순서 = 잠금 순서 batch_items → batches → batch_rounds → batch_schedules → batch_schedule_runs — 스케줄 발사와 같은 방향.
+  DELETE 문 순서로 강제하는 것은 회차 경계 → 스케줄 → 회차 이력)에 넣고 배치 삭제
   두 경로(`BatchesRepository.delete`·`RequestPurgesRepository.delete_batch`) 모두에 같은 트랜잭션의 DELETE 를 넣거나, 이유와 함께
   `BATCH_DELETE_EXEMPT_TABLES` 에. 그물(`test_batch_delete_tables_cover_every_batch_id_column`)은 `batch_id` 이름의 컬럼만 본다.
   아래 요청 삭제 목록과는 별개다 — 요청·잡도 가리키면 둘 다에 넣는다.
@@ -172,8 +175,8 @@ PostgreSQL(제어면) + React 포탈 + 노드 에이전트 + Volcano gang-schedu
 
 ## 테스트·검증
 
-- 백엔드: `PYTHONPATH=<워크트리>/src <venv>/bin/python -m pytest tests -q` (~8분, 5884+ passed · 14 skipped — 2026-11-16 d28 기준)
-- 프론트: `cd frontend && npx vitest run` (2096+ passed, 122 파일 — 2026-11-16 d28 기준) · `npx tsc -b`
+- 백엔드: `PYTHONPATH=<워크트리>/src <venv>/bin/python -m pytest tests -q` (~9분, 5934+ passed · 18 skipped — 2026-11-16 d29 기준)
+- 프론트: `cd frontend && npx vitest run` (2108+ passed, 122 파일 — 2026-11-16 d29 기준) · `npx tsc -b`
 - e2e(실 브라우저): `cd frontend && npm run test:e2e` (38 passed, 18 spec — 빌드 포함) — **CI 없음, 수기 게이트**(이미지 빌드 전 게이트는
   `deploy/README.md` §8 「이미지 빌드 전 게이트」)
 - 배포 문서·스크립트 계약: 절 번호·출력 문구를 바꾸면 `tests/test_ingress_contract.py`·`test_install_stages.py`·`test_addons_render.py` 등이

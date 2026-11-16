@@ -56,6 +56,17 @@ test("켜진 스케줄: 머리에 주기·다음 실행(KST, 분 단위) 배지 
   expect(screen.queryByRole("button", { name: "스케줄 추가" })).toBeNull();
 });
 
+test("배지 아래 회차 보존 안내 -- 서버 keep_rounds 가 숫자일 때만(옛 서버면 말하지 않는다)", async () => {
+  const { unmount } = renderAt(head({ schedule: { ...DAILY, keep_rounds: 5, pruned_total: 3,
+                                                  pruned_at: "2026-11-16T09:00:00Z" } }));
+  expect(await screen.findByText("최근 5회차만 보존 — 전체 재실행하면 가장 오래된 회차가 정리될 수 있습니다"))
+    .toBeInTheDocument();
+  unmount();
+  renderAt(head({ schedule: DAILY }));
+  await screen.findByRole("link", { name: "스케줄 매일 02:00 (KST) · 다음 2026-11-17 02:00" });
+  expect(screen.queryByText(/회차만 보존/)).toBeNull();
+});
+
 test("자동 일시정지는 사유를, 사람이 끈 스케줄은 「꺼짐」을 말한다", async () => {
   const { unmount } = renderAt(head({ schedule: { ...DAILY, enabled: false, next_run_at: null,
                                                   paused_reason_code: "batch_schedule_batch_changed" } }));

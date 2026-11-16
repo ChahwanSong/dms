@@ -10,8 +10,8 @@ import { kstStampBare } from "../../lib/datetime";
 import { useNow } from "../../lib/useNow";
 import { useMe } from "../auth/useAuth";
 import {
-  childCountWarning, confirmWaitShort, confirmWaitText, isDestructiveBatch, outcomeLabel, outcomeTone, scheduleEnabled, scheduleSummary,
-  storageText, untilText, type BatchSchedule,
+  childCountWarning, confirmWaitShort, confirmWaitText, isDestructiveBatch, keepRoundsNotice, outcomeLabel, outcomeTone,
+  projectedChildrenWarning, pruneText, scheduleEnabled, scheduleSummary, storageText, untilText, type BatchSchedule,
 } from "./batchSchedule";
 import { BatchScheduleDialog } from "./BatchScheduleDialog";
 import { BatchScheduleRunsDialog } from "./BatchScheduleRunsDialog";
@@ -109,6 +109,8 @@ export function BatchSchedulesPage() {
   const [armedId, setArmedId] = useState<string | null>(null);
 
   const rows = q.data ?? [];
+  // 회차 보존 수는 서버 설정이라 행마다 같다 — 첫 행의 값을 쓴다(행이 없거나 옛 서버면 숫자 없는 안내).
+  const keepNotice = keepRoundsNotice(rows[0]?.keep_rounds);
   const scheduledBatchIds = useMemo(() => new Set((q.data ?? []).map((s) => s.batch_id)), [q.data]);
 
   // ?batch=<id>(배치 상세의 「스케줄 추가」 링크): 목록이 도착한 뒤 한 번 처리한다 — 그 배치에 스케줄이 있으면 그 스케줄의
@@ -165,7 +167,8 @@ export function BatchSchedulesPage() {
             회차도 건너뜁니다.</li>
           <li>만들거나 켠 관리자·배치를 만든 사람이 root 실행 자격을 잃거나, 대상 스토리지가 없어지거나 꺼지거나, 삭제 배치(rm,
             delete 옵션 sync)의 대상·옵션이 바뀌면 자동으로 일시정지됩니다 — 다시 켤 때 확인합니다.</li>
-          <li>회차마다 새 자식 요청이 생기고 자동으로 정리하지 않습니다 — 배치 단위 삭제 상한에 다가가면 경고합니다.</li>
+          <li>{keepNotice ?? "스케줄이 있는 배치는 최근 회차만 보존하고 오래된 회차의 작업을 자동으로 정리합니다."}
+            {" "}배치 단위 삭제 상한에 다가가면 경고합니다.</li>
         </ul>
         {!canArm && me.data !== undefined && (
           <p className="mt-2 text-muted">{`스케줄 추가·수정·켜기는 ${LOCKED_HINT} — 끄기는 모든 관리자가 할 수 있습니다.`}</p>
@@ -186,7 +189,7 @@ export function BatchSchedulesPage() {
           <thead><tr className="text-muted whitespace-nowrap">
             <th className="py-2 pr-2">배치</th><th className="pr-2">작업</th><th className="pr-2">대상 스토리지</th>
             <th className="pr-2">주기</th><th className="pr-2">다음 실행(KST)</th><th className="pr-2">마지막 결과</th>
-            <th className="pr-2">사용</th><th className="pr-2">켠 사람</th><th>관리</th>
+            <th className="pr-2">정리</th><th className="pr-2">사용</th><th className="pr-2">켠 사람</th><th>관리</th>
           </tr></thead>
           <tbody>
             {rows.map((s) => {
@@ -196,7 +199,8 @@ export function BatchSchedulesPage() {
               const label = labelOf(s);
               // 켜기는 특권 게이트라 자격이 없으면 잠근다. 끄기(이미 켜진 행)는 관리자면 된다.
               const lockOn = !on && !canArm;
-              const childWarn = childCountWarning(s);
+              const childWarn = childCountWarning(s) ?? projectedChildrenWarning(s.batch?.item_count, s.keep_rounds,
+                                                                                  s.child_count_limit);
               const waitText = confirmWaitText(s.confirm_wait);
               return (
                 <tr key={s.schedule_id} className="border-t border-black/5 align-top">
@@ -226,6 +230,8 @@ export function BatchSchedulesPage() {
                     {on && s.next_run_at !== null ? <NextRun iso={s.next_run_at} /> : "—"}
                   </td>
                   <td className="py-2 pr-2 min-w-[8rem]"><LastResult s={s} /></td>
+                  {/* 회차 보존 정리 결과(null = 아직 없음 — 0 과 다르다). 375·390 폭은 Table 래퍼의 가로 스크롤 안이다. */}
+                  <td className="py-2 pr-2 min-w-[7rem] text-xs" title={keepNotice ?? undefined}>{pruneText(s)}</td>
                   <td className="py-2 pr-2">
                     <input type="checkbox" className={BOX} aria-label={`${label} 사용`}
                            checked={checked} disabled={busy || lockOn}

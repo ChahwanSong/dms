@@ -146,8 +146,11 @@ def _apply_migrations(db: Database) -> None:
         #                       파괴적이 된 배치) 회차가 멈춘다
         #   last_outcome        fired|skipped|missed|paused, last_reason_code 와 함께 마지막 판정
         #   paused_reason_code  자동 일시정지 사유(사람이 끄면 NULL)
+        #   pruned_at           회차 보존 정리(2026-11-16, batch_round_prune.py)가 마지막으로 1건 이상 지운 시각(NULL = 아직 없음)
+        #   pruned_total        회차 보존 정리가 누적으로 지운 요청 수(NULL = 아직 없음 -- 0 과 다르다). 정리는 updated_at 을
+        #                       밀지 않는다(발사·기록 CAS 의 「사람이 그 사이 고쳤나」 표지)
         # request_id·job_id 이름의 컬럼을 두지 않는다(요청 삭제 그물 밖이 정상) -- batch_id 로 배치 삭제 두 경로가 함께 지운다
-        # (repositories/batches.BATCH_DELETE_TABLES). 새 테이블이라 _ensure_columns 불필요.
+        # (repositories/batches.BATCH_DELETE_TABLES). pruned_at·pruned_total 은 d28 배포 뒤에 더한 칸이라 _ensure_columns 에도.
         """CREATE TABLE IF NOT EXISTS batch_schedules (
             schedule_id TEXT PRIMARY KEY,
             batch_id TEXT NOT NULL UNIQUE,
@@ -163,8 +166,28 @@ def _apply_migrations(db: Database) -> None:
             last_run_at TEXT,
             last_outcome TEXT,
             last_reason_code TEXT,
-            paused_reason_code TEXT)""",
+            paused_reason_code TEXT,
+            pruned_at TEXT,
+            pruned_total INTEGER)""",
         "CREATE INDEX IF NOT EXISTS idx_batch_schedules_due ON batch_schedules (enabled, next_run_at)",
+        # 배치 회차 경계(2026-11-16 회차 보존 정리 -- batch_round_prune.py). 회차 = BatchesRepository._rescan_locked 한 번
+        # (사람 :rescan · 스케줄 회차). 첫 실행과 기록 이전의 실행은 행이 없다(가장 오래된 회차 하나로 본다).
+        #   round_seq    이 배치에서 기록된 N번째 회차 시작(1부터, 배치 안에서 단조 -- 보존 상한으로 앞 행이 지워져도 MAX+1)
+        #   floor_order  시작 순간 이 배치 자식의 MAX(commit_order). 이 회차와 그 뒤 회차의 자식은 모두 이보다 크다.
+        #                NULL = 그때 자식이 없었다(이보다 오래된 자식이 없다)
+        #   via/actor    'rescan'(사람 -- audit_actor) | 'schedule'(system:batch-scheduler)
+        #   requeued     되돌린 항목 수(0 은 정상값)
+        # request_id·job_id 칸이 없다(요청 삭제 그물 밖이 정상). batch_id 로 배치 삭제 두 경로가 함께 지운다(BATCH_DELETE_TABLES).
+        # PK (batch_id, round_seq) 가 모든 조회를 받는다(별도 인덱스 없음). 새 테이블이라 _ensure_columns 불필요.
+        """CREATE TABLE IF NOT EXISTS batch_rounds (
+            batch_id TEXT NOT NULL,
+            round_seq INTEGER NOT NULL,
+            started_at TEXT NOT NULL,
+            floor_order INTEGER,
+            via TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            requeued INTEGER,
+            PRIMARY KEY (batch_id, round_seq))""",
         # 회차 이력(스케줄당 최근 200건 -- INSERT 와 같은 트랜잭션에서 정리). fired 행은 리셋이 0 으로 만드는 직전 회차 결과
         # (prev_*)와 되돌린 항목 수(requeued)를 남긴다. NULL = 그 판정에 해당 없음(건너뜀엔 리셋이 없다 -- 0 이 아니다).
         f"""CREATE TABLE IF NOT EXISTS batch_schedule_runs (
@@ -994,6 +1017,10 @@ def _ensure_columns(db):
         # 세션 세대(2026-11-03) -- 이중 경로 규약. 기배포 행은 NULL = 옛 세션 유효(키 없는 세션과 같다). 백필하지 않는다 --
         # 채우면 배포 순간 모든 로그인이 끊긴다. 그 계정의 첫 비밀번호 변경부터 회전한다.
         ("accounts", "session_epoch", "TEXT"),
+        # 회차 보존 정리 결과(2026-11-16) -- batch_schedules 는 d28 에 배포된 표라 이중 경로 규약. 기배포 행은 NULL = 아직
+        # 정리 없음(0 과 다르다). 백필하지 않는다.
+        ("batch_schedules", "pruned_at", "TEXT"),
+        ("batch_schedules", "pruned_total", "INTEGER"),
     ):
         if not _column_exists(db, table, column):
             db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")

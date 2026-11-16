@@ -1,14 +1,18 @@
 import { expect, test } from "vitest";
-import { BATCH_BLOCK_LABEL, batchBlock, groupBatches, MAX_BATCH_CHILDREN, MAX_BATCH_ITEMS, splitBatchName } from "./batchGroups";
+import { BATCH_BLOCK_LABEL, batchBlock, groupBatches, MAX_DELETE_CALL_CHILDREN, splitBatchName } from "./batchGroups";
 import type { RequestRow } from "../../lib/types";
 
 const BID = "a".repeat(32);
+// 서버가 행마다 싣는 배치 단위 삭제 상한(2026-11-16 -- 포탈 상수 없음).
+const MAX_BATCH_CHILDREN = 5000;
+const MAX_BATCH_ITEMS = 10000;
 function r(id: string, over: Partial<RequestRow> = {}): RequestRow {
   return {
     request_id: id, operation: "scan", requester_id: "admin", resource_key: "k", priority: "mid", state: "Succeeded",
     created_at: "2026-10-10T00:00:00Z", updated_at: "2026-10-10T00:00:00Z", payload: {}, commit_order: 1,
     batch_id: BID, batch_exists: true, batch_name: "주간", batch_status: "Completed", batch_request_count: 3,
-    batch_live_request_count: 0, batch_succeeded_scan_count: 2, ...over,
+    batch_live_request_count: 0, batch_succeeded_scan_count: 2,
+    batch_request_count_limit: MAX_BATCH_CHILDREN, batch_item_count_limit: MAX_BATCH_ITEMS, ...over,
   };
 }
 
@@ -143,4 +147,17 @@ test("splitBatchName: 짧은 이름은 그대로, 긴 이름은 끝(가르는 �
   const solid = splitBatchName("monthly-report-2026-10-archive")!;
   expect(solid.tail).toBe("6-10-archive");
   expect(solid.head + solid.tail).toBe("monthly-report-2026-10-archive");
+});
+
+test("batchBlock: 상한은 행에 실린 서버 값으로 판정한다 -- 없으면(옛 서버·변조) 정보 없음(fail-closed)", () => {
+  // 2026-11-16(상한 2000 → 5000): 포탈 상수 MAX_BATCH_CHILDREN·MAX_BATCH_ITEMS 를 지웠다.
+  expect(batchBlock(r("1", { batch_request_count: 2001 }))).toBe("ok");
+  expect(batchBlock(r("1", { batch_request_count: 5001 }))).toBe("too_large");
+  expect(batchBlock(r("1", { batch_request_count: 3, batch_request_count_limit: 2 }))).toBe("too_large");
+  expect(batchBlock(r("1", { batch_item_count: 3, batch_item_count_limit: 2 }))).toBe("too_large");
+  expect(batchBlock(r("1", { batch_request_count_limit: undefined }))).toBe("unknown");
+  expect(batchBlock(r("1", { batch_item_count_limit: undefined }))).toBe("unknown");
+  // 진행 중인 배치는 상한을 몰라도 진행 중이라고 말한다(앞선 사유)
+  expect(batchBlock(r("1", { batch_request_count_limit: undefined, batch_status: "Running" }))).toBe("active");
+  expect(MAX_DELETE_CALL_CHILDREN).toBe(10000);
 });

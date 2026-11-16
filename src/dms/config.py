@@ -38,6 +38,12 @@ _SERVER_INT_KEYS = (
     # 이 일수가 지난 잡의 결과 파일(<base>/<job_id>)을 요청 삭제와 같은 정리 루프(떼어냄 + purge 파드)가 지운다. 요청·잡·전이·
     # 요약 행은 남는다. 0 = 끔(만료하지 않는다). 음수는 기동 거부. 컨트롤러가 읽고(만료 대상 고르기), api 는 화면 표시만.
     ("DMS_ARTIFACT_RETENTION_DAYS", "artifact_retention_days", 1500),
+    # 배치 스케줄 회차 보존(2026-11-16 사용자 결정 「최근 5회차만 남기고 나머지 정리」 -- batch_round_prune.py): 스케줄이 있는
+    # 배치는 최근 이 수의 회차(첫 실행·전체 재실행·스케줄 회차)의 자식 요청만 남기고, 그보다 오래된 회차의 자식을 요청 삭제와
+    # 같은 몸통·같은 정리 루프로 지운다. 1–100(밖이면 기동 거부) -- 상한 100 은 회차 경계 행 보존 상한
+    # (repositories/batches.BATCH_ROUND_HISTORY_CAP 200) 안에서 경계를 계산할 수 있어야 해서다. 컨트롤러가 읽고(정리),
+    # api 는 화면 표시만.
+    ("DMS_BATCH_SCHEDULE_KEEP_ROUNDS", "batch_schedule_keep_rounds", 5),
     ("DMS_BUILD_WATCHER_INTERVAL_SECONDS", "build_watcher_interval_seconds", 15),
     # 빌드 파드 activeDeadlineSeconds + BuildWatcher 나이 기반 회수 창(C2). 기본
     # 7200(2h) -- mpifileutils를 소스에서 컴파일하는 빌드가 가장 오래 걸린다.
@@ -326,6 +332,8 @@ class Settings:
     request_delete_quiet_seconds: int = 60
     request_purge_interval_seconds: int = 15
     artifact_retention_days: int = 1500
+    # 배치 스케줄 회차 보존 수(2026-11-16) -- _SERVER_INT_KEYS 의 주석 참고. 1–100.
+    batch_schedule_keep_rounds: int = 5
     build_registry: str = "pkg-01:5000"
     build_builder_image: str = "quay.io/buildah/stable:latest"
     build_watcher_interval_seconds: int = 15
@@ -397,6 +405,9 @@ class Settings:
         if extra["artifact_retention_days"] < 0:
             problems.append("DMS_ARTIFACT_RETENTION_DAYS must be >= 0 (0 = never expire): "
                             f"{environ.get('DMS_ARTIFACT_RETENTION_DAYS')!r}")
+        if not 1 <= extra["batch_schedule_keep_rounds"] <= 100:
+            problems.append("DMS_BATCH_SCHEDULE_KEEP_ROUNDS must be between 1 and 100: "
+                            f"{environ.get('DMS_BATCH_SCHEDULE_KEEP_ROUNDS')!r}")
         if extra["request_purge_interval_seconds"] < 1:
             problems.append("DMS_REQUEST_PURGE_INTERVAL_SECONDS must be >= 1: "
                             f"{environ.get('DMS_REQUEST_PURGE_INTERVAL_SECONDS')!r}")

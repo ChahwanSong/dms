@@ -243,15 +243,92 @@ def test_maintenance_set_after_judgement_blocks_fire(repos):
 
 def test_rescan_if_terminal_is_a_state_cas_with_set_based_reset(repos):
     bid = _batch(repos, n=3)
-    assert repos.batches.rescan_if_terminal(bid) == {"status": "Running", "requeued": 3}
+    assert repos.batches.rescan_if_terminal(bid, actor="ops") == {"status": "Running", "requeued": 3}
     # 이미 Running(사람 :rescan·회차가 먼저) -- 덮어쓰지 않는다
-    assert repos.batches.rescan_if_terminal(bid) is None
+    assert repos.batches.rescan_if_terminal(bid, actor="ops") is None
     assert repos.batches.get(bid)["status"] == "Running"
     sync = _batch(repos, op="sync")
-    assert repos.batches.rescan_if_terminal(sync)["status"] == "Previewing"
+    assert repos.batches.rescan_if_terminal(sync, actor="ops")["status"] == "Previewing"
     cancelling = _batch(repos, status="Cancelling")
-    assert repos.batches.rescan_if_terminal(cancelling) is None
+    assert repos.batches.rescan_if_terminal(cancelling, actor="ops") is None
     assert repos.batches.get(cancelling)["status"] == "Cancelling"
+
+
+# --- 회차 경계(2026-11-16 회차 보존 정리 -- batch_rounds) ---------------------------------------------------------------
+
+def _rounds(db, bid):
+    return db.query("SELECT round_seq, started_at, floor_order, via, actor, requeued FROM batch_rounds "
+                    "WHERE batch_id = :b ORDER BY round_seq", {"b": bid})
+
+
+def _child(repos, bid, n=1):
+    out = []
+    for i in range(n):
+        rid = repos.requests.create(operation="scan", requester_id="ops", actor="ops", resource_key=f"k-{bid}-{i}",
+                                    payload=dict(SCAN_ITEM), priority="mid", batch_id=bid, auth_method="session")
+        out.append(rid)
+    return out
+
+
+def test_rescan_records_one_round_boundary_with_via_actor_floor_and_requeued(repos):
+    bid = _batch(repos, n=2)
+    # 자식이 없을 때 -- floor NULL(그보다 오래된 자식이 없다)
+    assert repos.batches.rescan_if_terminal(bid, actor="alice")["requeued"] == 2
+    r = _rounds(repos.db, bid)
+    assert [(x["round_seq"], x["floor_order"], x["via"], x["actor"], x["requeued"]) for x in r] == \
+        [(1, None, "rescan", "alice", 2)]
+    # 자식이 생긴 뒤의 회차 -- floor = 그 순간 이 배치 자식의 MAX(commit_order)
+    kids = _child(repos, bid, 3)
+    top = max(repos.requests.get(k)["commit_order"] for k in kids)
+    repos.db.execute("UPDATE batches SET status = 'Completed' WHERE batch_id = :b", {"b": bid})
+    repos.db.execute("UPDATE batch_items SET status = 'Succeeded' WHERE batch_id = :b", {"b": bid})
+    other = _batch(repos)                                      # 다른 배치의 자식은 경계에 섞이지 않는다
+    _child(repos, other, 2)
+    assert repos.batches.rescan_if_terminal(bid, actor="bob") is not None
+    r = _rounds(repos.db, bid)
+    assert [(x["round_seq"], x["floor_order"], x["actor"]) for x in r] == [(1, None, "alice"), (2, top, "bob")]
+
+
+def test_losing_rescan_leaves_no_round_and_bad_via_is_refused(repos):
+    bid = _batch(repos, status="Running")
+    assert repos.batches.rescan_if_terminal(bid, actor="ops") is None
+    assert _rounds(repos.db, bid) == []
+    done = _batch(repos)
+    with pytest.raises(ValueError):
+        with repos.db.transaction():
+            repos.batches._rescan_locked(done, to_status="Running", via="other", actor="ops")
+    assert repos.batches.get(done)["status"] == "Completed" and _rounds(repos.db, done) == []
+
+
+def test_round_history_is_trimmed_to_the_cap(repos, monkeypatch):
+    from dms.repositories import batches as batches_mod
+    monkeypatch.setattr(batches_mod, "BATCH_ROUND_HISTORY_CAP", 3)
+    bid = _batch(repos)
+    for _ in range(5):
+        assert repos.batches.rescan_if_terminal(bid, actor="ops") is not None
+        repos.db.execute("UPDATE batches SET status = 'Completed' WHERE batch_id = :b", {"b": bid})
+    assert [x["round_seq"] for x in _rounds(repos.db, bid)] == [3, 4, 5]
+
+
+def test_fire_records_the_round_as_schedule(repos):
+    bid = _batch(repos)
+    _child(repos, bid, 2)
+    sid = _schedule(repos, bid)
+    assert _tick(repos) == [(sid, "fired")]
+    r = _rounds(repos.db, bid)
+    assert len(r) == 1 and r[0]["via"] == "schedule" and r[0]["actor"] == SCHEDULER_ACTOR and r[0]["requeued"] == 2
+    assert r[0]["floor_order"] is not None
+
+
+def test_lost_fire_rolls_back_the_round_boundary_too(repos):
+    bid = _batch(repos)
+    sid = _schedule(repos, bid)
+    row = repos.batch_schedules.get(sid)
+    # 사람의 수정이 끼었다(updated_at 이 다르다) -- 리셋과 회차 경계가 함께 롤백된다
+    stale = {**row, "updated_at": "2000-01-01T00:00:00Z"}
+    assert repos.batch_schedules.fire(stale, next_run_at=NEXT, now=NOW, verify=lambda b, i: "fp",
+                                      armed_env_listed=True, requester_env_listed=True) is None
+    assert _rounds(repos.db, bid) == [] and repos.batches.get(bid)["status"] == "Completed"
 
 
 # --- 건너뜀·놓침 ----------------------------------------------------------------------------------------------------
@@ -661,15 +738,15 @@ def _touch_order(sql_list):
 
 
 def test_every_path_locks_items_batch_schedule_then_runs_on_postgres(repos):
-    """항목 → 배치 → 스케줄 → 회차 이력(batches.BATCH_DELETE_TABLES 순서) -- 발사·기록·배치 기록 삭제·배치 단위 삭제·취소와 함께
-    끄기·스케줄 무장·스케줄 삭제가 모두 같은 방향이라 PG 에서 서로 상대 행을 기다리지 않는다(거꾸로인 경로가 하나라도 있으면
-    40P01 로 한쪽이 끊긴다)."""
+    """항목 → 배치 → 회차 경계 → 스케줄 → 회차 이력(batches.BATCH_DELETE_TABLES 순서) -- 발사·기록·배치 기록 삭제·배치 단위
+    삭제·취소와 함께 끄기·스케줄 무장·스케줄 삭제·사람 :rescan 이 모두 같은 방향이라 PG 에서 서로 상대 행을 기다리지 않는다(거꾸로인
+    경로가 하나라도 있으면 40P01 로 한쪽이 끊긴다). 회차 보존 정리 청크는 requests → data_jobs → batch_schedules(맨 끝)만 쥔다."""
     from dms.repositories.batch_schedules import BatchSchedulesRepository
     from dms.repositories.batches import BATCH_DELETE_TABLES, BatchesRepository
     from dms.repositories.request_purges import MAX_BATCH_DELETE_CHILDREN, RequestPurgesRepository
     db = repos.db
     full = list(BATCH_DELETE_TABLES)
-    assert full == ["batch_items", "batches", "batch_schedules", "batch_schedule_runs"]
+    assert full == ["batch_items", "batches", "batch_rounds", "batch_schedules", "batch_schedule_runs"]
 
     fired = _batch(repos)
     _schedule(repos, fired)
@@ -720,6 +797,40 @@ def test_every_path_locks_items_batch_schedule_then_runs_on_postgres(repos):
     spy = _PgSpy(db)
     BatchSchedulesRepository(spy).delete(sid, actor="ops")
     assert _touch_order(spy.sql) == ["batch_schedules", "batch_schedule_runs"]
+
+    rescanned = _batch(repos)
+    spy = _PgSpy(db)
+    assert BatchesRepository(spy).rescan_if_terminal(rescanned, actor="ops") is not None
+    assert _touch_order(spy.sql) == ["batch_items", "batches", "batch_rounds"]
+
+
+def test_prune_chunk_locks_requests_then_jobs_then_schedule_last_on_postgres(repos):
+    """회차 보존 정리 한 청크(RequestPurgesRepository.prune_round_children)의 잠금 순서: requests(request_id 순) → data_jobs →
+    batch_schedules(맨 끝 -- 배치 단위 삭제 꼬리와 같은 방향). batch_items·batches·batch_rounds 는 잠그지 않는다."""
+    import re
+    from dms.repositories.request_purges import RequestPurgesRepository
+    db = repos.db
+    bid = _batch(repos)
+    kids = _child(repos, bid, 3)
+    for k in kids:
+        repos.db.execute("UPDATE requests SET state = 'Succeeded', updated_at = '2000-01-01T00:00:00Z' "
+                         "WHERE request_id = :r", {"r": k})
+    _schedule(repos, bid)
+    upto = max(repos.requests.get(k)["commit_order"] for k in kids)
+    spy = _PgSpy(db)
+    res = RequestPurgesRepository(spy).prune_round_children(bid, upto_order=upto, limit=10, actor=SCHEDULER_ACTOR,
+                                                            artifact_base=None, quiet_seconds=60)
+    assert sorted(res["deleted"]) == sorted(kids)
+    locks = []
+    for q in spy.sql:
+        t = " ".join(q.split())
+        if t.endswith("FOR UPDATE"):
+            locks.append(re.search(r"FROM (\w+)", t).group(1))
+    assert locks[:3] == ["requests", "data_jobs", "batch_schedules"], locks
+    touched = {re.match(r"(?:UPDATE|DELETE FROM|INSERT INTO) (\w+)", " ".join(q.split())).group(1)
+               for q in spy.sql if re.match(r"(?:UPDATE|DELETE FROM|INSERT INTO) ", " ".join(q.split()))}
+    assert not touched & {"batch_items", "batches", "batch_rounds"}
+    assert "batch_schedules" in touched
 
 
 def test_schedule_hold_order_is_the_contract(repos):

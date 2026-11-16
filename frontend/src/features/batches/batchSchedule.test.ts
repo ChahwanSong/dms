@@ -1,6 +1,7 @@
 import { expect, test } from "vitest";
 import {
   childCountWarning, confirmWaitShort, confirmWaitText, durationText, formFromSchedule, isDestructiveBatch,
+  keepRoundsNotice, projectedChildrenWarning, prunePreviewText, pruneText,
   scheduleEnabled, scheduleFormErrors, scheduleSummary, specFromForm, storageText, untilText,
   DEFAULT_SCHEDULE_FORM,
 } from "./batchSchedule";
@@ -69,14 +70,49 @@ test("확인 대기 경고 — 매일 + 24시간 만료 = 이틀에 한 번, 고
   expect(durationText(null)).toBeNull();
 });
 
-test("자식 요청 경고 — 상한의 80% 부터, capped 면 이미 넘음, 모르면 경고 없음(지어내지 않는다)", () => {
-  expect(childCountWarning({ child_count: 1599, child_count_capped: false, child_count_limit: 2000 })).toBeNull();
-  expect(childCountWarning({ child_count: 1600, child_count_capped: false, child_count_limit: 2000 }))
-    .toContain("2,000개를 넘으면 배치 단위로 지울 수 없게 됩니다");
-  expect(childCountWarning({ child_count: 2001, child_count_capped: true, child_count_limit: 2000 }))
-    .toContain("배치 단위로 지울 수 없습니다");
-  expect(childCountWarning({ child_count: 0, child_count_capped: false, child_count_limit: 2000 })).toBeNull();
+test("자식 요청 경고 — 서버 상한(5000)의 80% 부터, capped 면 이미 넘음, 모르면 경고 없음(지어내지 않는다)", () => {
+  expect(childCountWarning({ child_count: 3999, child_count_capped: false, child_count_limit: 5000 })).toBeNull();
+  expect(childCountWarning({ child_count: 4000, child_count_capped: false, child_count_limit: 5000 }))
+    .toBe("자식 요청 4,000개 — 상한 5,000개의 80%를 넘었습니다");
+  // 자동 정리가 있다(2026-11-16) — 「자동 정리 없음」 함의를 뺐고, 줄지 않는 경우(항목 × 보존 회차 > 상한)를 말한다
+  expect(childCountWarning({ child_count: 5001, child_count_capped: true, child_count_limit: 5000 }))
+    .toBe("자식 요청이 5,000개를 넘어 지금은 배치 단위로 지울 수 없습니다 — 오래된 회차는 자동 정리되지만 항목 수 × 보존 "
+      + "회차가 상한보다 크면 줄지 않습니다");
+  expect(childCountWarning({ child_count: 0, child_count_capped: false, child_count_limit: 5000 })).toBeNull();
   expect(childCountWarning({})).toBeNull();
+});
+
+test("회차 보존 안내 — 숫자일 때만 문장을 만든다(옛 서버면 null)", () => {
+  const t = keepRoundsNotice(5)!;
+  expect(t).toContain("스케줄이 있는 배치는 최근 5회차만 보존합니다");
+  expect(t).toContain("5회차를 넘으면 가장 오래된 회차의 작업(자식 요청·잡·결과 파일)을 곧 자동으로 정리합니다");
+  expect(t).toContain("스케줄을 꺼도 정리는 계속되고, 스케줄을 지우면 멈춥니다");
+  for (const k of [null, undefined, 0, 1.5]) expect(keepRoundsNotice(k as number | null | undefined)).toBeNull();
+});
+
+test("정리 결과 — null(아직 없음)과 0 을 가른다", () => {
+  expect(pruneText({ pruned_total: null, pruned_at: null })).toBe("아직 정리 없음");
+  expect(pruneText({})).toBe("아직 정리 없음");
+  expect(pruneText({ pruned_total: 0, pruned_at: null })).toBe("정리 누적 0건");
+  expect(pruneText({ pruned_total: 1234, pruned_at: "2026-11-16T09:30:00Z" })).toBe("정리 누적 1,234건 · 마지막 2026-11-16 18:30:00");
+});
+
+test("항목 × K > 상한 예측 경고 — 셋 다 알 때만", () => {
+  expect(projectedChildrenWarning(1000, 5, 5000)).toBeNull();
+  expect(projectedChildrenWarning(1001, 5, 5000)).toBe(
+    "항목 1,001개 × 5회차 = 작업 최대 5,005개 — 정리 뒤에도 배치 단위 삭제 상한(5,000개)을 넘어 이 배치는 배치 단위로 지울 수 "
+    + "없습니다(실패분 재실행이 더해지면 더 많습니다)");
+  expect(projectedChildrenWarning(null, 5, 5000)).toBeNull();
+  expect(projectedChildrenWarning(2000, null, 5000)).toBeNull();
+  expect(projectedChildrenWarning(2000, 5, undefined)).toBeNull();
+});
+
+test("추가 창 예측 문구 — 0·모름이면 없음, capped 면 「이상」", () => {
+  expect(prunePreviewText({ rounds_recorded: 6, would_prune: 8 })).toBe("저장하면 기록된 회차 6개 중 오래된 회차의 작업 약 8개가 곧 정리됩니다");
+  expect(prunePreviewText({ rounds_recorded: 6, would_prune: 10001, would_prune_capped: true }))
+    .toBe("저장하면 기록된 회차 6개 중 오래된 회차의 작업 10,000개 이상이 곧 정리됩니다");
+  expect(prunePreviewText({ rounds_recorded: 2, would_prune: 0 })).toBeNull();
+  expect(prunePreviewText(null)).toBeNull();
 });
 
 test("남은 시간", () => {

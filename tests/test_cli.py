@@ -51,6 +51,8 @@ def test_controller_once(tmp_path, monkeypatch, capsys):
     assert "request-purge=ok" in out
     # 결과 파일 자동 만료(2026-10-26): purge_runner 가 있을 때만 조립된다 -- 같은 배선이 빠지면 보존 정책이 조용히 꺼진다.
     assert "artifact-expiry=ok" in out
+    # 회차 보존 정리(2026-11-16): 같은 purge_runner 조건 -- 배선이 빠지면 스케줄 배치의 자식이 끝없이 쌓인다.
+    assert "batch-round-prune=ok" in out
     # k8s 인벤토리(2026-10-25): 에이전트가 올린 동기화 결과를 적용하는 루프 -- 빠지면 결과가 received 로 영원히 쌓인다.
     assert "k8s-inventory=ok" in out
 

@@ -9,14 +9,11 @@ import { isBatchTerminal } from "../batches/useBatches";
 
 /** 서버 MAX_DELETE_BATCHES 의 거울(routes_request_purge) -- 넘으면 툴바가 잠근다(진짜 차단은 서버 422). */
 export const MAX_DELETE_BATCHES = 10;
-/** 서버 MAX_BATCH_DELETE_CHILDREN 의 거울(request_purges) -- 넘는 배치는 선택 불가(진짜 차단은 서버
- *  batch_delete_too_large). 목록 요약도 이 수 + 1 에서 세기를 멈춘다(batch_request_count_capped). 2026-10-26 사용자 결정으로
- *  1000 → 2000(tests/test_batch_delete_limits_mirror.py 가 서버 상수·api.ts 문구와 대조한다). */
-export const MAX_BATCH_CHILDREN = 2000;
-/** 서버 MAX_BATCH_DELETE_ITEMS 의 거울(request_purges) -- 항목이 이보다 많은 배치도 선택 불가(자식은 적고 항목만 많은
- *  배치: 큰 CSV 를 일찍 취소). 목록 요약의 batch_item_count 로 판정한다(2026-10-11 검증 지적 -- 예전엔 선택 가능으로
- *  보였다가 서버만 batch_delete_too_large 를 냈다). */
-export const MAX_BATCH_ITEMS = 10000;
+/** 서버 MAX_DELETE_CALL_CHILDREN 의 거울(request_purges, 2026-11-16) -- 고른 배치의 작업 합이 넘으면 툴바가 잠근다(진짜 차단은
+ *  서버가 넘는 배치를 batch_delete_call_budget 로 건너뛰는 것). tests/test_batch_delete_limits_mirror.py 가 대조한다.
+ *  배치 하나의 자식·항목 상한은 상수로 두지 않는다 -- 목록 응답이 행마다 서버 값(batch_request_count_limit·
+ *  batch_item_count_limit)을 싣는다(2026-11-16, 상한 2000 → 5000 때 거울을 없앴다: 서버만 바꾸면 화면이 다른 숫자로 막았다). */
+export const MAX_DELETE_CALL_CHILDREN = 10000;
 /** 배치 id 형식(uuid4 hex) -- 서버 _BID_RE 와 같다. 형식 밖("" 포함)은 묶음 선택 불가(서버는 batch_not_found). */
 export const BATCH_ID_RE = /^[0-9a-f]{32}$/;
 
@@ -28,7 +25,7 @@ export type BatchBlock = "ok" | "active" | "awaiting" | "live" | "too_large" | "
 
 /** 표시용 판정 -- **서버(delete_batch)와 같은 순서**로 본다(화면은 3초 낡은 스냅숏이고 서버가 재판정한다): 배치 행이
  *  있으면 종단(Completed·Cancelled)이어야 하고(아니면 PreviewReady 는 awaiting, 나머지(모르는 상태 포함)는 active --
- *  배치 행이 없는 묶음은 상태가 없다), 자식 수·항목 수가 상한 이하여야
+ *  배치 행이 없는 묶음은 상태가 없다), 자식 수·항목 수가 행에 실린 서버 상한 이하여야
  *  하고(서버의 batch_delete_too_large 가 자식 게이트보다 먼저다 -- 2026-10-11 에 순서를 맞췄다: 상한을 넘는 배치는
  *  서버가 세기를 멈춰 끝나지 않은 자식 수를 모른다. 항목 수는 모르면(null) 막지 않는다 -- 서버가 판정한다), 끝나지 않은
  *  자식이 0 이어야 한다(배치가 Cancelled 여도 취소 경합으로 Pending 자식이 남을 수 있다). 조용한 창(방금 끝난 자식)은
@@ -39,8 +36,11 @@ export function batchBlock(r: RequestRow): BatchBlock {
   if (r.batch_exists && !(typeof r.batch_status === "string" && isBatchTerminal(r.batch_status))) {
     return r.batch_status === "PreviewReady" ? "awaiting" : "active";
   }
-  if (r.batch_request_count_capped === true || r.batch_request_count > MAX_BATCH_CHILDREN) return "too_large";
-  if (typeof r.batch_item_count === "number" && r.batch_item_count > MAX_BATCH_ITEMS) return "too_large";
+  // 상한은 서버가 행마다 싣는다(2026-11-16) -- 숫자가 아니면(옛 서버·변조) 모른다: 고르지 못한다(fail-closed).
+  const childLimit = r.batch_request_count_limit, itemLimit = r.batch_item_count_limit;
+  if (typeof childLimit !== "number" || typeof itemLimit !== "number") return "unknown";
+  if (r.batch_request_count_capped === true || r.batch_request_count > childLimit) return "too_large";
+  if (typeof r.batch_item_count === "number" && r.batch_item_count > itemLimit) return "too_large";
   if (typeof r.batch_live_request_count !== "number" || typeof r.batch_succeeded_scan_count !== "number") {
     return "unknown";
   }

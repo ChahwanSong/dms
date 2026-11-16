@@ -714,9 +714,11 @@ const BX = "b".repeat(32), BY = "c".repeat(32), BZ = "d".repeat(32);
 const F = hex(6), G = hex(7), H = hex(8), J = hex(9);
 /** 배치 자식 행. 기본 = 종단 sync 배치(Completed · 이름 「e7 배치」 · 서버 수 7 · 끝나지 않은 자식 0 · 성공 scan 0). */
 function child(id: string, bid: string, over: Record<string, unknown> = {}) {
+  // 배치 단위 삭제 상한은 서버가 행마다 싣는다(2026-11-16 -- 작업 5000·항목 10000, 포탈 상수 없음).
   return row(id, { batch_id: bid, state: "Succeeded", batch_exists: true, batch_name: "e7 배치",
                    batch_status: "Completed", batch_request_count: 7, batch_live_request_count: 0,
-                   batch_succeeded_scan_count: 0, ...over });
+                   batch_succeeded_scan_count: 0, batch_request_count_limit: 5000, batch_item_count_limit: 10000,
+                   ...over });
 }
 /** 체크박스(배치 묶음 행은 aria-label 이 「… 선택 — 배치 X 전체(작업 N개)」로 길다 -- 앞부분으로 찾는다). */
 const anyBox = (id: string) =>
@@ -851,7 +853,7 @@ test("고를 수 없는 배치는 배치 칸 둘째 줄에 사유가 **보이고
   wrapRows([
     child(A, BX, { batch_status: "Running" }),
     child(B, BY, { batch_status: "Cancelled", batch_live_request_count: 1 }),
-    child(C, BZ, { batch_request_count: 2001, batch_request_count_capped: true, batch_live_request_count: null,
+    child(C, BZ, { batch_request_count: 5001, batch_request_count_capped: true, batch_live_request_count: null,
                    batch_succeeded_scan_count: null }),
     child(D, "e".repeat(32)),
     // 자식은 1개뿐인데 항목이 상한(10000)을 넘는 배치(큰 CSV 를 일찍 취소) -- 서버만 거부하던 것을 미리 잠근다(2026-10-11).
@@ -864,7 +866,7 @@ test("고를 수 없는 배치는 배치 칸 둘째 줄에 사유가 **보이고
   // live 는 「미완료 작업 있음」 -- 「작업 진행 중」은 같은 줄의 초록 Succeeded 와 모순돼 「이 작업이 진행 중」으로 읽혔다
   // (2026-10-11 검증 지적). 상한 초과는 자식·항목 어느 쪽이든 「삭제 상한 초과」(긴 말은 title).
   expect([A, B, C, E].map(label)).toEqual(["배치 진행 중", "미완료 작업 있음", "삭제 상한 초과", "삭제 상한 초과"]);
-  expect(why(E).title).toBe("작업이 2000개 또는 항목이 10000개를 넘는 배치는 아직 삭제할 수 없습니다");
+  expect(why(E).title).toBe("작업이 5000개 또는 항목이 10000개를 넘는 배치는 아직 삭제할 수 없습니다");
   for (const id of [A, B, C, E]) {
     expect(box(id)).toBeDisabled();
     expect(rowOf(id)).toContainElement(why(id));
@@ -876,10 +878,10 @@ test("고를 수 없는 배치는 배치 칸 둘째 줄에 사유가 **보이고
     expect(why(id).querySelector(".sr-only")).toHaveTextContent(why(id).title);
   }
   expect(box(C)).toHaveAccessibleDescription(
-    "삭제 상한 초과 — 작업이 2000개 또는 항목이 10000개를 넘는 배치는 아직 삭제할 수 없습니다");
+    "삭제 상한 초과 — 작업이 5000개 또는 항목이 10000개를 넘는 배치는 아직 삭제할 수 없습니다");
   expect(box(A)).toHaveAccessibleDescription(
     "배치 진행 중 — 진행 중인 배치입니다 — 배치가 끝난 뒤에(필요하면 배치 상세에서 먼저 취소) 배치 단위로 삭제하세요");
-  expect(why(C).title).toBe("작업이 2000개 또는 항목이 10000개를 넘는 배치는 아직 삭제할 수 없습니다");
+  expect(why(C).title).toBe("작업이 5000개 또는 항목이 10000개를 넘는 배치는 아직 삭제할 수 없습니다");
   // 고를 수 있는 배치엔 사유 줄이 없다.
   expect(document.getElementById(`batch-why-${D}`)).toBeNull();
   expect(anyBox(D)).toBeEnabled();
@@ -1080,11 +1082,11 @@ test("배치 묶음의 성공 scan 수(서버 수)가 툴바 문구에 더해진
   expect(status()).toHaveTextContent("1개 + 배치 1개(작업 4개) 선택됨 · 성공 scan 5개");
 });
 
-test("고를 수 없는 배치 묶음: 진행 중·끝나지 않은 작업·2000개 초과·요약 없음 -- disabled + 상태별 사유 title", async () => {
+test("고를 수 없는 배치 묶음: 진행 중·끝나지 않은 작업·5000개 초과·요약 없음 -- disabled + 상태별 사유 title", async () => {
   wrapRows([
     child(A, BX, { batch_status: "Running" }),
     child(B, BY, { batch_status: "Cancelled", batch_live_request_count: 1 }),     // 취소 경합으로 남은 Pending 자식
-    child(C, BZ, { batch_request_count: 2001 }),                                 // 상한 2000(2026-10-26) 초과
+    child(C, BZ, { batch_request_count: 5001 }),                                 // 상한 5000(2026-11-16, 행의 서버 값) 초과
     row(D, { batch_id: "e".repeat(32) }),                                         // 요약 없음(구형 응답)
     child(E, "f".repeat(32), { batch_status: "PreviewReady" }),
   ]);
@@ -1100,7 +1102,7 @@ test("고를 수 없는 배치 묶음: 진행 중·끝나지 않은 작업·2000
   expect(document.getElementById(`batch-why-${E}`)!.childNodes[0].textContent).toBe("배치 확인 대기");
   expect(document.getElementById(`batch-why-${A}`)!.childNodes[0].textContent).toBe("배치 진행 중");
   expect(box(B).title).toBe("끝나지 않은 작업이 남은 배치입니다 — 모두 끝난 뒤 배치 단위로 삭제하세요");
-  expect(box(C).title).toBe("작업이 2000개 또는 항목이 10000개를 넘는 배치는 아직 삭제할 수 없습니다");
+  expect(box(C).title).toBe("작업이 5000개 또는 항목이 10000개를 넘는 배치는 아직 삭제할 수 없습니다");
   expect(box(D).title).toBe("배치 정보를 확인할 수 없어 선택할 수 없습니다");
 });
 
@@ -1222,6 +1224,38 @@ test("배치 11개를 고르면 삭제 버튼이 잠기고 「배치는 10개까
   expect(screen.getByRole("button", { name: "선택 삭제" })).toBeDisabled();
   await userEvent.click(anyBox(hex(1)));
   expect(screen.getByRole("button", { name: "선택 삭제" })).toBeEnabled();
+});
+
+test("고른 배치의 작업 합이 10000개를 넘으면 삭제 버튼이 잠기고 「작업 합계 10000개까지」를 말한다(서버 호출당 예산의 거울)", async () => {
+  // 2026-11-16(상한 5000): 5000 × 10 배치면 한 호출이 API 를 35–40초 멈춘다 -- 서버는 넘는 배치를 batch_delete_call_budget 로
+  // 건너뛰고(진짜 차단), 화면은 미리 잠근다.
+  const bids = ["1", "2", "3"].map((c) => c.repeat(32));
+  wrapRows(bids.map((bid, i) => child(hex(i + 1), bid, { batch_name: `큰 배치${i}`, batch_request_count: 4000 })));
+  await readyAny(hex(1));
+  await userEvent.click(anyBox(hex(1)));
+  await userEvent.click(anyBox(hex(2)));
+  expect(screen.getByRole("button", { name: "선택 삭제" })).toBeEnabled();      // 8000 -- 예산 안
+  await userEvent.click(anyBox(hex(3)));
+  expect(status()).toHaveTextContent("작업 합계 10000개까지 — 나눠서 지우세요");
+  expect(status().className).toContain("text-bad");
+  expect(screen.getByRole("button", { name: "선택 삭제" })).toBeDisabled();
+});
+
+test("예산을 넘어 건너뛴 배치는 제외 줄에 서버 사유(batch_delete_call_budget)로 보인다", async () => {
+  server.use(http.post("/api/admin/requests:delete", () => HttpResponse.json({
+    deleted: [], skipped: [], purge_pending: 2,
+    deleted_batches: [{ batch_id: BX, request_ids: [B], job_ids: [], dangling: false }],
+    skipped_batches: [{ batch_id: BY, reason: "batch_delete_call_budget", request_id: null }] })));
+  wrapRows([child(B, BX, { batch_request_count: 1 }), child(D, BY, { batch_name: "둘째", batch_request_count: 1 })]);
+  await readyAny(B);
+  await userEvent.click(anyBox(B));
+  await userEvent.click(anyBox(D));
+  await userEvent.click(screen.getByRole("button", { name: "선택 삭제" }));
+  const dlg = await screen.findByRole("dialog");
+  await userEvent.click(within(dlg).getByLabelText("되돌릴 수 없음을 확인했습니다"));
+  await userEvent.click(within(dlg).getByRole("button", { name: "2개 영구 삭제" }));
+  await waitFor(() => expect(skipLine(
+    "배치 둘째: 한 번에 지울 수 있는 작업 수(10000개)를 넘어 이 배치는 이번에 지우지 않았습니다 — 다시 삭제하세요")).toBeInTheDocument());
 });
 
 test("배치 삭제: POST 본문에 batches(서버 수 = expected_request_count) → 「배치 1개(작업 7개) 삭제됨」, 묶음 행이 사라진다", async () => {

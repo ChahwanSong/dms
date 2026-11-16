@@ -10,7 +10,8 @@ import type { Batch } from "../../lib/types";
 import { useMe } from "../auth/useAuth";
 import {
   DEFAULT_SCHEDULE_FORM, INTERVAL_HOURS, SCHEDULE_KINDS, WEEKDAYS, confirmGatedOp, confirmWaitText, formFromSchedule,
-  isDestructiveBatch, scheduleFormErrors, scheduleSummary, schedulableOp, specFromForm, storageText,
+  isDestructiveBatch, keepRoundsNotice, projectedChildrenWarning, prunePreviewText, scheduleFormErrors, scheduleSummary,
+  schedulableOp, specFromForm, storageText,
   type BatchSchedule, type BatchStorageFields, type ScheduleForm, type ScheduleKind,
 } from "./batchSchedule";
 import {
@@ -143,6 +144,14 @@ export function BatchScheduleDialog({ open, onOpenChange, trigger, schedule, sch
   const previewFresh = debounced !== null && JSON.stringify(debounced) === reqKey;
   const waitText = previewFresh ? confirmWaitText(preview.data?.confirm_wait) : null;
   const armer = me.data?.actor ?? null;
+  // 회차 보존(2026-11-16 사용자 결정 — 서버 :preview 의 keep_rounds·child_count_limit·prune_preview). 보존 수·상한은 서버 설정이라
+  // 자리표시 데이터여도 같은 값이고, 「곧 정리될 작업 수」는 고른 배치의 것이라 미리보기가 지금 배치·규칙의 것일 때만 보인다.
+  // 저장은 막지 않는다(안내일 뿐 — 사용자 정책 결정).
+  const keep = preview.data?.keep_rounds;
+  const keepNotice = target !== null ? keepRoundsNotice(keep) : null;
+  const pruneNote = previewFresh ? prunePreviewText(preview.data?.prune_preview) : null;
+  const projectedWarn = target !== null
+    ? projectedChildrenWarning(target.itemCount, keep, preview.data?.child_count_limit) : null;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange} title={isEdit ? "스케줄 수정" : "스케줄 추가"} trigger={trigger} size="lg">
@@ -264,7 +273,8 @@ export function BatchScheduleDialog({ open, onOpenChange, trigger, schedule, sch
             {target.itemCount !== null && (
               <p>{target.itemCount === 0
                 ? "항목이 없는 배치라 회차가 건너뛰어집니다(항목을 추가하면 실행됩니다)."
-                : `회차마다 자식 요청 ${target.itemCount.toLocaleString("ko-KR")}개가 새로 생깁니다(자동으로 정리하지 않습니다).`}</p>
+                : `회차마다 자식 요청 ${target.itemCount.toLocaleString("ko-KR")}개가 새로 생깁니다${
+                  typeof keep === "number" ? `(최근 ${keep}회차만 보존 — 오래된 회차는 자동으로 정리합니다)` : ""}.`}</p>
             )}
             {confirmOp && !target.autoConfirm && (
               <p>회차마다 미리보기 뒤 사람의 「배치 확인」을 기다립니다. 확인하지 않으면 미리보기가 만료돼 그 회차는 실패로 끝나고,
@@ -277,6 +287,14 @@ export function BatchScheduleDialog({ open, onOpenChange, trigger, schedule, sch
             {target.requester !== null && (
               <p>{`배치를 만든 사람(${target.requester})의 root 실행 자격도 회차마다 다시 봅니다 — 잃으면 항목이 모두 거부되므로 스케줄이 멈춥니다.`}</p>
             )}
+          </div>
+        )}
+
+        {target !== null && targetError === null && (keepNotice !== null || pruneNote !== null || projectedWarn !== null) && (
+          <div role="note" aria-label="회차 보존 안내" className="space-y-1 rounded-lg border border-line px-3 py-2 text-xs">
+            {keepNotice !== null && <p className="text-ink/70">{keepNotice}</p>}
+            {pruneNote !== null && <p className="font-medium text-attn">{pruneNote}</p>}
+            {projectedWarn !== null && <p className="text-attn">{projectedWarn}</p>}
           </div>
         )}
 

@@ -665,3 +665,63 @@ def test_response_carries_batch_keys_only_when_the_caller_sent_batches(client, s
     assert set(client.post(PATH, json={"request_ids": [a]}).json()) == {"deleted", "skipped", "purge_pending"}
     body = client.post(PATH, json={"request_ids": [b], "batches": []}).json()
     assert body["deleted_batches"] == [] and body["skipped_batches"] == []
+
+
+# ---- 호출당 자식 합 예산(2026-11-16, 상한 5000 -- request_purges.MAX_DELETE_CALL_CHILDREN) ----
+
+def test_within_call_budget_takes_in_order_until_the_sum_exceeds():
+    from dms.repositories.request_purges import MAX_DELETE_CALL_CHILDREN, within_call_budget
+    assert MAX_DELETE_CALL_CHILDREN == 10000
+    assert within_call_budget([("a", 4000), ("b", 5000), ("c", 2000), ("d", 1)]) == \
+        ([("a", 4000), ("b", 5000)], [("c", 2000), ("d", 1)])          # 넘은 뒤의 작은 배치를 끼워 넣지 않는다
+    assert within_call_budget([("a", 12000), ("b", 1)]) == ([("a", 12000)], [("b", 1)])   # 첫 배치는 늘 담는다
+    assert within_call_budget([("a", 1), ("b", True), ("c", -1)], 10) == ([("a", 1)], [("b", True), ("c", -1)])
+    assert within_call_budget([]) == ([], [])
+
+
+def test_batches_beyond_the_call_budget_are_skipped_in_selection_order(client, db, session_admin, monkeypatch):
+    import dms.repositories.request_purges as rpm
+    monkeypatch.setattr(rpm, "MAX_DELETE_CALL_CHILDREN", 3)
+    repos = client.app.state.repos
+    a, _ = _terminal_batch(repos, n=2, name="A")
+    b, _ = _terminal_batch(repos, n=2, name="B")
+    c, _ = _terminal_batch(repos, n=1, name="C")
+    calls = []
+    real = repos.request_purges.delete_batch
+
+    def counting(bid, **kw):
+        calls.append(bid)
+        return real(bid, **kw)
+    monkeypatch.setattr(repos.request_purges, "delete_batch", counting)
+    body = client.post(PATH, json={"batches": [_sel(a, 2), _sel(b, 2), _sel(c, 1)]}).json()
+    assert [d["batch_id"] for d in body["deleted_batches"]] == [a]
+    assert body["skipped_batches"] == [
+        {"batch_id": b, "reason": "batch_delete_call_budget", "request_id": None},
+        {"batch_id": c, "reason": "batch_delete_call_budget", "request_id": None}]
+    assert calls == [a]                                   # 넘는 배치는 시도조차 하지 않는다
+    # 다시 삭제하면 다음 호출이 이어서 지운다(2 + 1 = 3 ≤ 예산)
+    body = client.post(PATH, json={"batches": [_sel(b, 2), _sel(c, 1)]}).json()
+    assert [d["batch_id"] for d in body["deleted_batches"]] == [b, c] and body["skipped_batches"] == []
+
+
+def test_first_batch_is_tried_even_if_it_alone_exceeds_the_budget(client, session_admin, monkeypatch):
+    import dms.repositories.request_purges as rpm
+    monkeypatch.setattr(rpm, "MAX_DELETE_CALL_CHILDREN", 1)
+    a, _ = _terminal_batch(client.app.state.repos, n=2, name="A")
+    body = client.post(PATH, json={"batches": [_sel(a, 2)]}).json()
+    assert [d["batch_id"] for d in body["deleted_batches"]] == [a] and body["skipped_batches"] == []
+
+
+def test_shared_child_retry_stays_inside_the_budgeted_batches(client, db, session_admin, monkeypatch):
+    import dms.repositories.request_purges as rpm
+    monkeypatch.setattr(rpm, "MAX_DELETE_CALL_CHILDREN", 1)
+    repos = client.app.state.repos
+    a, a_kids = _terminal_batch(repos, n=1, name="A")
+    b, _ = _terminal_batch(repos, n=1, name="B")
+    db.execute("UPDATE batch_items SET request_id = :r WHERE batch_id = :b", {"r": a_kids[0][0], "b": b})
+    body = client.post(PATH, json={"batches": [_sel(a, 1), _sel(b, 1)]}).json()
+    assert body["deleted_batches"] == []
+    assert body["skipped_batches"] == [
+        {"batch_id": a, "reason": "batch_child_shared", "request_id": a_kids[0][0]},
+        {"batch_id": b, "reason": "batch_delete_call_budget", "request_id": None}]
+    assert repos.batches.get(b) is not None

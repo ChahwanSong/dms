@@ -22,10 +22,16 @@ _SETTINGS_COLUMNS = ("max_concurrency", "priority", "node_count", "procs_per_nod
 # delete_batch)가 같은 트랜잭션에서 함께 지우는 것(2026-11-16 배치 스케줄러). FK 가 0건이라 빠지면 지운 배치의 스케줄이 고아로
 # 남아 컨트롤러가 batch_not_found 로 일시정지를 쓴다. tests/test_api_batch_schedules.py 의 그물이 스키마의 batch_id 컬럼
 # 전수를 이 목록 ∪ BATCH_DELETE_EXEMPT_TABLES 와 대조하고, 두 경로 소스에 테이블마다 DELETE 가 있는지 본다.
-# **순서가 잠금 순서다**(설계 비판 #10): 항목 → 배치 → 스케줄 → 회차 이력. 스케줄 발사(BatchSchedulesRepository.fire -- 항목 →
-# 배치 → 스케줄 UPDATE → 회차 INSERT·상한 정리)와 기록(record -- 스케줄 UPDATE → 회차)이 같은 방향이라, 두 삭제 경로도 스케줄을
-# 회차 이력보다 먼저 지운다(거꾸로면 PG 에서 서로 상대 행을 기다려 한쪽이 40P01 로 끊긴다 -- 그물이 소스 순서까지 본다).
-BATCH_DELETE_TABLES = ("batch_items", "batches", "batch_schedules", "batch_schedule_runs")
+# **순서가 잠금 순서다**(설계 비판 #10): 항목 → 배치 → 회차 경계 → 스케줄 → 회차 이력. 스케줄 발사(BatchSchedulesRepository.fire
+# -- 항목 → 배치 → 회차 경계 INSERT·상한 정리(_rescan_locked 안) → 스케줄 UPDATE → 회차 INSERT·상한 정리)와 기록(record -- 스케줄
+# UPDATE → 회차)이 같은 방향이라, 두 삭제 경로도 회차 경계(batch_rounds, 2026-11-16 회차 보존 정리)를 스케줄보다, 스케줄을 회차
+# 이력보다 먼저 지운다(거꾸로면 PG 에서 서로 상대 행을 기다려 한쪽이 40P01 로 끊긴다 -- 그물이 소스 순서까지 본다).
+BATCH_DELETE_TABLES = ("batch_items", "batches", "batch_rounds", "batch_schedules", "batch_schedule_runs")
+# 배치당 남기는 회차 경계(batch_rounds) 행 수 -- _rescan_locked 가 같은 트랜잭션에서 그보다 오래된 행을 지운다. 보존 정리는 최신
+# K행만 있으면 경계를 계산하므로 설정 상한(DMS_BATCH_SCHEDULE_KEEP_ROUNDS ≤ 100)의 두 배로 둔다.
+BATCH_ROUND_HISTORY_CAP = 200
+# 회차 경계의 via(누가 회차를 시작했나) -- 사람 :rescan(라우트) | 스케줄 회차(BatchSchedulesRepository.fire).
+ROUND_VIAS = ("rescan", "schedule")
 # batch_id 를 담지만 배치 기록 삭제(delete)가 지우지 않는 테이블: requests -- 자식 요청은 실행 감사 이력이라 보존하고(delete
 # docstring), 배치 단위 삭제(delete_batch)는 요청 삭제 몸통(_purge_locked)이 batch_id 로 전부 지운다.
 BATCH_DELETE_EXEMPT_TABLES = ("requests",)
@@ -80,6 +86,7 @@ def _audit_schedule_delete(db, batch_id, *, actor, now) -> None:
               "acknowledged_irreversible": row["ack_fingerprint"] is not None,
               "last_run_at": row["last_run_at"], "last_outcome": row["last_outcome"],
               "last_reason_code": row["last_reason_code"], "paused_reason_code": row["paused_reason_code"],
+              "pruned_total": row.get("pruned_total"), "pruned_at": row.get("pruned_at"),
               "run_count": int(runs["n"]), "deleted_with_batch": True}
     db.execute(
         """INSERT INTO audit_log (mutation_class, operation, target_key, actor, before_state, after_state, at)
@@ -277,9 +284,12 @@ class BatchesRepository:
         돈다. 예전엔 화면에 자식 행이 하나라도 보이는 배치의 자식 **전부**를 세고 그 전부로 성공 scan 세미조인을 돌아,
         재스캔이 쌓인 큰 성장 모니터링 배치(자식 2만)에서 PG 가 data_jobs 전체 Seq Scan + Hash Semi Join 으로 계획을 바꿨다
         -- 비용이 그 배치가 아니라 시스템 전체의 성공 scan 수에 비례했고, 문장 하나가 API 단일 커넥션 RLock 을 쥐는 동안
-        /readyz 까지 기다렸다. 그래서 배치마다 `LIMIT cap + 1` 서브쿼리로 센다(UNION ALL -- 배치 하나 = 갈래 하나, 갈래의
-        추정 행 수가 cap + 1 이하라 성공 scan 판정이 data_jobs(request_id) 인덱스 nested loop 로 묶인다). 성공 scan 은 cap
-        이하인 배치만 센다 -- 넘는 배치는 지울 수 없어 경고에 쓸 일이 없다.
+        /readyz 까지 기다렸다. 그래서 배치마다 `LIMIT cap + 1` 서브쿼리로 센다(UNION ALL -- 배치 하나 = 갈래 하나). 성공 scan
+        은 cap 이하인 배치만 센다 -- 넘는 배치는 지울 수 없어 경고에 쓸 일이 없다. 성공 scan 판정은 **스칼라 서브쿼리**
+        (`(SELECT 1 … LIMIT 1) IS NOT NULL`)다: 예전엔 「갈래 추정 행 수 ≤ cap + 1 이라 EXISTS 가 data_jobs(request_id) 인덱스
+        nested loop 로 묶인다」에 기댔는데, cap 5000(2026-11-16)에선 자식 ~4500 이상 갈래에서 PG16 이 EXISTS 를 Hash Semi Join +
+        data_jobs 전체 Seq Scan 으로 바꿨다(비용이 다시 시스템 전체 잡 수에 비례). 스칼라 서브쿼리는 PG 가 조인으로 끌어올리지
+        않아 갈래 크기와 무관하게 자식마다 인덱스 1행 탐침이다(tests/test_api_request_list_batches.py 가 모양을 고정한다).
 
         갈래의 자식 읽기는 batch_match(범위 표기) + `ORDER BY batch_id, commit_order` 다 -- `batch_id = :k LIMIT` 로 쓰면 PG
         가 큰 배치(테이블의 몇 %)에서 Seq Scan + LIMIT 를 골라 그 배치의 물리 위치 앞의 행 전부를 읽었다(자식 2만·32만 행에서
@@ -294,7 +304,7 @@ class BatchesRepository:
 
         묶음(_UNION_CHUNK)마다 문장 셋. SELECT * + LEFT JOIN 을 쓰지 않는 이유: requester_id·
         created_at·priority·auth_method·batch_id 같은 열 이름이 두 테이블에서 겹친다. 성공 scan 판정은 data_jobs 단독
-        EXISTS 서브쿼리다 -- _scan_target_where 의 열 이름엔 접두가 없는데, 바깥 갈래(파생 테이블)는 batch_id·request_id 만
+        스칼라 서브쿼리다 -- _scan_target_where 의 열 이름엔 접두가 없는데, 바깥 갈래(파생 테이블)는 batch_id·request_id 만
         내보내므로 operation·state·target 이 data_jobs 열로만 풀린다."""
         ids = [b for b in dict.fromkeys(batch_ids) if isinstance(b, str)]
         out = {b: {"batch_exists": False, "batch_name": None, "batch_status": None, "batch_request_count": 0,
@@ -340,11 +350,16 @@ class BatchesRepository:
                 continue
             params = {f"j{n}": b for n, b in enumerate(small)}
             where = DataJobsRepository._scan_target_where(params)
+            # 스칼라 서브쿼리(… LIMIT 1) IS NOT NULL -- EXISTS 로 「단순화」하지 마라(2026-11-16, 상한 5000): 갈래 추정 행 수가
+            # ~4500 을 넘으면 PG16 이 EXISTS(세미조인)를 Hash Semi Join + data_jobs 전체 Seq Scan 으로 끌어올렸다(13.4만 잡에서
+            # 갈래당 53–58ms, 폴링마다 RLock). 스칼라 서브쿼리(EXPR_SUBLINK)는 조인으로 끌어올려지지 않아 자식마다
+            # idx_data_jobs_request 1행 탐침으로 남는다. 결과는 같다(성공 scan 잡이 하나라도 있는 자식 수).
             arms = " UNION ALL ".join(
                 f"""SELECT batch_id, COUNT(*) AS n
                       FROM (SELECT batch_id, request_id FROM requests WHERE {batch_match('j' + str(n))}
                              ORDER BY batch_id, commit_order LIMIT :stop) c{n}
-                     WHERE EXISTS (SELECT 1 FROM data_jobs WHERE data_jobs.request_id = c{n}.request_id AND {where})
+                     WHERE (SELECT 1 FROM data_jobs WHERE data_jobs.request_id = c{n}.request_id AND {where}
+                             LIMIT 1) IS NOT NULL
                      GROUP BY batch_id""" for n in range(len(small)))
             for row in self._db.query(arms, {**params, "stop": stop}):
                 out[row["batch_id"]]["batch_succeeded_scan_count"] = int(row["n"])
@@ -869,9 +884,9 @@ class BatchesRepository:
         구별한다: 이쪽은 작업을 남기고 기록만 지웠다. actor 기본값 "system" 은 테스트 픽스처용이다 -- 라우트는 늘 세션 관리자를
         넘긴다.
 
-        배치 스케줄(2026-11-16)과 그 회차 이력도 같은 트랜잭션에서 지운다(BATCH_DELETE_TABLES -- 배치 단위 삭제도 같다). 잠금
-        순서는 항목 → 배치 → 스케줄 → 회차 이력: 스케줄 발사(BatchSchedulesRepository.fire)·기록(record)과 같은 방향이라 교착이
-        없다. 트랜잭션은 중첩되지 않으니(db.transaction) 스케줄 저장소를 부르지 않고 문장을 여기 둔다. 스케줄이 있었으면 그 삭제도
+        배치 스케줄(2026-11-16)과 그 회차 이력, 회차 경계(batch_rounds)도 같은 트랜잭션에서 지운다(BATCH_DELETE_TABLES -- 배치
+        단위 삭제도 같다). 잠금 순서는 항목 → 배치 → 회차 경계 → 스케줄 → 회차 이력: 스케줄 발사(BatchSchedulesRepository.fire)·
+        기록(record)과 같은 방향이라 교착이 없다. 트랜잭션은 중첩되지 않으니(db.transaction) 스케줄 저장소를 부르지 않고 문장을 여기 둔다. 스케줄이 있었으면 그 삭제도
         ('batch_schedule', 'delete') 감사 행으로 남긴다(_audit_schedule_delete). 종단 CAS 가 스케줄 회차와의 경합도 막는다 -- 위
         판정 뒤 회차가 배치를 되살렸으면(Previewing·Running) 여기서 False 다."""
         now = utc_now_iso()
@@ -888,6 +903,9 @@ class BatchesRepository:
                 return False
             self._db.execute("DELETE FROM batch_items WHERE batch_id = :b",
                              {"b": batch_id})
+            # 회차 경계(2026-11-16) -- BATCH_DELETE_TABLES 순서 = 잠금 순서: 스케줄보다 먼저(발사가 _rescan_locked 에서 회차 경계를
+            # 스케줄 UPDATE 보다 먼저 쥔다).
+            self._db.execute("DELETE FROM batch_rounds WHERE batch_id = :b", {"b": batch_id})
             _audit_schedule_delete(self._db, batch_id, actor=actor, now=now)
             self._db.execute("DELETE FROM batch_schedules WHERE batch_id = :b", {"b": batch_id})
             self._db.execute("DELETE FROM batch_schedule_runs WHERE batch_id = :b", {"b": batch_id})
@@ -1014,7 +1032,7 @@ class BatchesRepository:
                    failed_count = failed_count + :f, updated_at = :now WHERE batch_id = :b""",
             {"s": succeeded, "f": failed, "now": utc_now_iso(), "b": batch_id})
 
-    def _rescan_locked(self, batch_id, *, to_status) -> "int | None":
+    def _rescan_locked(self, batch_id, *, to_status, via, actor) -> "int | None":
         """전체 재실행의 몸통(2026-11-16) -- **호출자 트랜잭션 안, _lock_items_then_batch 뒤에서만** 부른다. 라우트
         (:rescan → rescan_if_terminal)와 배치 스케줄러의 회차(BatchSchedulesRepository.fire)가 같은 이 함수를 쓴다 -- 「스케줄
         회차 = 전체 재실행」을 복사본이 아니라 코드로 보장한다.
@@ -1026,29 +1044,61 @@ class BatchesRepository:
         API 단일 커넥션 RLock 을 쥐었다). 비종단(Queued/Materialized) 항목은 무접촉. 반환 = 되돌린 항목 수(0 은 정상값).
 
         예전 라우트는 상태를 읽고 → reset_all_items(자체 트랜잭션) → 무조건 set_status 라, 읽기와 쓰기 사이에 버튼 두 번·재실행
-        → 취소가 끼면 이미 확인돼 Running 인 배치를 Previewing 으로, Cancelling 을 Previewing 으로 덮었다(2026-11-16 리뷰)."""
+        → 취소가 끼면 이미 확인돼 Running 인 배치를 Previewing 으로, Cancelling 을 Previewing 으로 덮었다(2026-11-16 리뷰).
+
+        **회차 경계**(2026-11-16 회차 보존 정리 -- batch_round_prune.py): 상태 CAS 를 이긴 쪽만, 같은 트랜잭션에서 batch_rounds 에
+        1행(round_seq = 이 배치의 MAX+1, floor_order = 지금 이 배치 자식의 MAX(commit_order) -- 자식이 없으면 NULL, via·actor·
+        requeued)을 남기고 BATCH_ROUND_HISTORY_CAP 보다 오래된 행을 지운다. **회차를 세는 곳은 여기 하나다** -- 회차를 새로
+        시작하는 경로를 만들면 이 몸통을 거쳐야 보존 정리가 그 회차를 센다(실패분·선택 재실행·항목 추가는 회차를 만들지 않고
+        지금 회차에 붙는다). 정확성 전제(바꾸지 마라):
+          1) 회차 N 의 자식은 회차 N+1 이 시작되기 전에 모두 커밋돼 있다 -- 이 함수는 종단 배치에서만 이기고(Completed = 모든
+             항목 종단, Cancelled = Queued·Materialized 항목 없음), 자식 INSERT 와 항목 claim 은 한 트랜잭션이다
+             (batch_orchestrator._materialize). 항목·배치를 잠그고 종단을 확인한 뒤 MAX 를 읽으므로(PG READ COMMITTED 는 문장마다
+             그 전 커밋을 본다) 그 MAX 가 회차 N 자식 전부를 본다.
+          2) 회차 N+1 의 자식은 경계보다 크다 -- 되살린 Queued 항목에서만 생기고 insert_pending 은 전역 MAX(commit_order)+1 이다.
+             단 commit_order 는 「현존 행 기준」 단조라 경계 행(그 순간 이 배치의 최대 자식, 「닻」)이 지워지면 번호가 재사용될
+             수 있다 -- 그래서 보존 정리는 최신 회차의 경계 자식을 절대 지우지 않는다(BatchSchedulesRepository._round_cut 의
+             upto = min(cut, anchor - 1)).
+        경계가 실제보다 늦게 잡히는 오차(롤링 배포 중 옛 파드가 기록 없이 회차를 시작함 등)는 늘 「더 오래 보존」 쪽이다."""
+        if via not in ROUND_VIAS:
+            raise ValueError(f"unknown round via: {via!r}")
         now = utc_now_iso()
         if self._db.execute_count(
                 """UPDATE batches SET status = :st, succeeded_count = 0, failed_count = 0, updated_at = :now
                       WHERE batch_id = :b AND status IN ('Completed', 'Cancelled')""",
                 {"st": to_status, "now": now, "b": batch_id}) != 1:
             return None
-        return self._db.execute_count(
+        requeued = self._db.execute_count(
             # IN 목록 = batch_orchestrator._ITEM_TERMINAL 과 같은 집합
             """UPDATE batch_items SET status = 'Queued', request_id = NULL, reason_code = NULL, updated_at = :now
                   WHERE batch_id = :b AND status IN ('Succeeded','Failed','Rejected','Cancelled')""",
             {"now": now, "b": batch_id})
+        # 회차 경계 -- idx_requests_batch_order 역방향 1행(batch_match + 인덱스 순서, requests.batch_match docstring).
+        top = self._db.query_one(
+            f"SELECT commit_order FROM requests WHERE {batch_match('b')} "
+            "ORDER BY batch_id DESC, commit_order DESC LIMIT 1", {"b": batch_id})
+        seq = self._db.query_one(
+            "SELECT COALESCE(MAX(round_seq), 0) + 1 AS n FROM batch_rounds WHERE batch_id = :b", {"b": batch_id})["n"]
+        self._db.execute(
+            """INSERT INTO batch_rounds (batch_id, round_seq, started_at, floor_order, via, actor, requeued)
+               VALUES (:b, :seq, :now, :floor, :via, :actor, :rq)""",
+            {"b": batch_id, "seq": seq, "now": now, "floor": None if top is None else top["commit_order"],
+             "via": via, "actor": actor, "rq": requeued})
+        self._db.execute("DELETE FROM batch_rounds WHERE batch_id = :b AND round_seq <= :old",
+                         {"b": batch_id, "old": int(seq) - BATCH_ROUND_HISTORY_CAP})
+        return requeued
 
-    def rescan_if_terminal(self, batch_id) -> "dict | None":
-        """전체 재실행(:rescan) 한 트랜잭션: 항목 → 배치 잠금 → 종단(Completed/Cancelled)일 때만 _rescan_locked. 다음 상태는
-        잠근 배치 행의 연산으로 정한다(domain.confirm_gated -- sync·rm·미지 연산은 Previewing, scan 은 Running). 반환
-        {"status", "requeued"} | None(배치가 없거나 종단이 아니다 -- 아무것도 쓰지 않았다)."""
+    def rescan_if_terminal(self, batch_id, *, actor) -> "dict | None":
+        """전체 재실행(:rescan) 한 트랜잭션: 항목 → 배치 잠금 → 종단(Completed/Cancelled)일 때만 _rescan_locked(via "rescan",
+        actor = 누른 사람 -- 회차 경계 행에 남는다). 다음 상태는 잠근 배치 행의 연산으로 정한다(domain.confirm_gated -- sync·rm·
+        미지 연산은 Previewing, scan 은 Running). 반환 {"status", "requeued"} | None(배치가 없거나 종단이 아니다 -- 아무것도 쓰지
+        않았다)."""
         with self._db.transaction():
             batch, _ = self._lock_items_then_batch(batch_id, with_items=False)
             if batch is None or batch["status"] not in ("Completed", "Cancelled"):
                 return None
             to_status = "Previewing" if confirm_gated(batch["operation"]) else "Running"
-            requeued = self._rescan_locked(batch_id, to_status=to_status)
+            requeued = self._rescan_locked(batch_id, to_status=to_status, via="rescan", actor=actor)
             if requeued is None:
                 return None
         return {"status": to_status, "requeued": requeued}

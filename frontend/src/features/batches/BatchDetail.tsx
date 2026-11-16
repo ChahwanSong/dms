@@ -1112,9 +1112,16 @@ function ScheduleBadge({ batchId, schedule }: { batchId: string; schedule: Batch
     : schedule.paused_reason_code !== null
       ? [`스케줄 일시정지 — ${reasonText(schedule.paused_reason_code)}`, "text-bad"]
       : [`스케줄 꺼짐 — ${rule}`, "text-muted"];
+  // 회차 보존 안내(2026-11-16 — 서버 keep_rounds 가 숫자일 때만; 옛 서버면 말하지 않는다).
+  const keep = schedule.keep_rounds;
+  const keepLine = typeof keep === "number" && Number.isInteger(keep) && keep >= 1
+    ? `최근 ${keep}회차만 보존 — 전체 재실행하면 가장 오래된 회차가 정리될 수 있습니다` : null;
   return (
-    <Link className={`text-sm ${tone} [overflow-wrap:anywhere]`} to={schedulesPath(batchId)}
-          title="배치 스케줄러에서 보기">{text}</Link>
+    <span className="inline-flex flex-col">
+      <Link className={`text-sm ${tone} [overflow-wrap:anywhere]`} to={schedulesPath(batchId)}
+            title="배치 스케줄러에서 보기">{text}</Link>
+      {keepLine !== null && <span className="text-xs text-ink/70">{keepLine}</span>}
+    </span>
   );
 }
 

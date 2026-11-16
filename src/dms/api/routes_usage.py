@@ -66,7 +66,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from ..artifact_base import resolve_artifact_base
 from ..db import utc_now_iso
-from ..repositories.request_purges import MAX_BATCH_DELETE_CHILDREN, MAX_BATCH_DELETE_ITEMS
+from ..repositories.request_purges import MAX_BATCH_DELETE_CHILDREN, MAX_BATCH_DELETE_ITEMS, within_call_budget
 from .artifacts import ArtifactError, job_owner_uid, read_artifact, strip_scheme
 from .auth import Identity, audit_actor, require_admin, require_session_admin
 from .routes_request_purge import MAX_DELETE, MAX_DELETE_BATCHES
@@ -1216,7 +1216,8 @@ def purge_unregistered_storage(body: PurgeScanHistoryBody, request: Request,
       조용한 창·상한), 같은 감사·정리 아웃박스에 더해 잠근 행으로 미등록(storage_registered)·순수성
       (storage_history_mismatch·storage_history_batch_mixed)을 다시 판정한다. 여기서 먼저 등록 여부를 보는 409 는 빠른
       거절일 뿐이다(진짜 판정은 트랜잭션 안).
-    - 회차 상한 = 작업 삭제 API 와 같다(배치 10·단건 200) -- 한 HTTP 요청이 RLock 을 쥐는 시간을 묶는다. 응답의
+    - 회차 상한 = 작업 삭제 API 와 같다(배치 10·단건 200·배치 자식 합 10000 -- within_call_budget) -- 한 HTTP 요청이 RLock 을
+      쥐는 시간을 묶는다. 응답의
       remaining(남은 단건·배치 수 -- 건너뛴 것 포함)을 보고 포탈이 다시 부른다. 건너뛴 항목은 다음 회차의
       exclude_request_ids·exclude_batch_ids 로 돌아와 빠진다(본문 주석) -- 포탈은 시도할 것이 없는 회차에서 멈춘다.
     - 회차마다 묶음 감사 1행(storage_history/purge) -- 지운 요청·배치마다의 감사는 삭제 몸통이 남긴다.
@@ -1235,6 +1236,9 @@ def purge_unregistered_storage(body: PurgeScanHistoryBody, request: Request,
     sel = repos.request_purges.scan_storage_selection(name)
     skip_r, skip_b = set(body.exclude_request_ids), set(body.exclude_batch_ids)
     batches = [(b, n) for b, n in sel["batches"].items() if b not in skip_b][:MAX_DELETE_BATCHES]
+    # 회차당 자식 합 예산(request_purges.within_call_budget, 2026-11-16 -- 작업 삭제 API 와 같은 10000): 담지 못한 배치는 이
+    # 회차에 시도하지 않고 건너뛴 것으로도 세지 않는다 -- remaining_untried 에 남아 포탈이 다음 회차로 부른다.
+    batches = within_call_budget(batches)[0]
     singles = [r for r in sel["singles"] if r not in skip_r][:MAX_DELETE]
     deleted, deleted_batches, skipped, skipped_batches = [], [], [], []
     for bid, count in batches:

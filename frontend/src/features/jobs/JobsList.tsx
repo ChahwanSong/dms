@@ -16,7 +16,7 @@ import { kstStampBare } from "../../lib/datetime";
 import { REQUEST_TERMINAL_STATES } from "../../lib/jobState";
 import { pathSummary } from "../../lib/storagePaths";
 import type { DeleteRequestsResult, PurgeStatus, RequestRow } from "../../lib/types";
-import { BATCH_BLOCK_LABEL, BATCH_ID_RE, MAX_DELETE_BATCHES, groupBatches, splitBatchName } from "./batchGroups";
+import { BATCH_BLOCK_LABEL, BATCH_ID_RE, MAX_DELETE_BATCHES, MAX_DELETE_CALL_CHILDREN, groupBatches, splitBatchName } from "./batchGroups";
 import type { BatchGroup, BatchSummary } from "./batchGroups";
 import { FOCUS_RING, SMALL_BTN } from "./ui";
 import { kstClock } from "./format";
@@ -102,6 +102,9 @@ const ALL_TITLE = "불러온 단일 작업 중 삭제 가능한 것을 모두 �
 // 방금 누른 행이 포인터 밑에서 밀렸다(2026-10-10 검증 지적 -- 2026-10-09 자리 예약이 막으려던 패턴). 잠긴 「선택 삭제」와
 // text-bad 가 나머지를 말한다.
 const OVER_BATCHES = `배치는 ${MAX_DELETE_BATCHES}개까지`;
+// 고른 배치의 작업 합이 호출당 예산(서버 MAX_DELETE_CALL_CHILDREN, 2026-11-16)을 넘었을 때 -- 같은 이유로 짧게. 서버는 넘는 배치를
+// batch_delete_call_budget 로 건너뛴다(진짜 차단).
+const OVER_CHILDREN = `작업 합계 ${MAX_DELETE_CALL_CHILDREN}개까지 — 나눠서 지우세요`;
 /** 고를 수 있는 배치 묶음의 안내(title) -- 체크 하나가 무엇을 지우는지(화면 밖 자식까지)를 미리 말한다. */
 function batchPickHint(g: BatchSummary): string {
   return g.exists
@@ -613,8 +616,8 @@ export function JobsList() {
 // 작업 있음」·「삭제 상한 초과」)를 보인다: 묶음의 상태·수는 행의 상태 열에 없어 Succeeded 행의 잠긴 체크박스가 왜
 // 잠겼는지 키보드·터치로는 알 길이 없었다(2026-10-11 검증 지적). 체크박스가 aria-describedby 로 이 줄을 가리키고, 줄
 // 안의 화면 낭독기 전용 글자(sr-only)가 처방(긴 말)까지 읽힌다 -- describedby 가 있으면 title 은 설명으로 쓰이지 않아 「삭제
-// 상한 초과」만 들리고 어떤 상한인지(작업 2000·항목 10000 -- batchGroups 상수)는 마우스 전용이었다(2026-10-11 검증 지적). 읽혀야 하는 글자라
-// ink/70(AA).
+// 상한 초과」만 들리고 어떤 상한인지(작업·항목 상한 -- 행의 서버 값 batch_request_count_limit·batch_item_count_limit, 문구는
+// reasonText("batch_delete_too_large"))는 마우스 전용이었다(2026-10-11 검증 지적). 읽혀야 하는 글자라 ink/70(AA).
 //
 // **칸은 상태와 무관하게 두 줄 이하**(2026-10-11 검증 지적): 첫 줄 = 이름(짧으면 전체, 길면 앞 조각)·「기록 없음」, 둘째
 // 줄(text-xs) = 사유 **또는** 뒤 조각·id. 사유 줄을 덧붙이면(세 줄) 긴 이름 배치가 끝나거나(Running → Completed -- 관리자가
@@ -745,6 +748,7 @@ function DeleteToolbar({ selectedRows, selectedBatches, del, purge, dropped, dro
   const over = n > MAX_DELETE;
   const overBatches = nb > MAX_DELETE_BATCHES;
   const children = selectedBatches.reduce((a, b) => a + b.request_count, 0);
+  const overChildren = children > MAX_DELETE_CALL_CHILDREN;
   const scans = selectedRows.filter(isSucceededScan).length + selectedBatches.reduce((a, b) => a + b.scans, 0);
   const r = del.data;
   const droppedNote = droppedText(dropped, droppedBatches);
@@ -756,12 +760,13 @@ function DeleteToolbar({ selectedRows, selectedBatches, del, purge, dropped, dro
       + (droppedNote ? ` · ${droppedNote}` : "")
       + (over ? ` — ${reasonText("delete_selection_too_large")}` : "")
       + (overBatches ? ` — ${OVER_BATCHES}` : "")
+      + (overChildren ? ` — ${OVER_CHILDREN}` : "")
     : r ? deleteResultText(r)
     : droppedNote ? (dropped > 0 ? `선택한 작업 중 ${droppedNote}` : droppedNote)
     : IDLE_HINT;
   // 안내도 읽혀야 하는 글자다 -- text-muted(#888, 흰 3.54:1)는 장식 전용이라 ink/70(4.94:1, AA)(2026-10-09 검증 지적).
   const skippedBatches = r?.skipped_batches ?? [];
-  const barTone = !none ? (over || overBatches ? "text-bad" : droppedNote ? "text-attn" : "")
+  const barTone = !none ? (over || overBatches || overChildren ? "text-bad" : droppedNote ? "text-attn" : "")
     : r ? (r.skipped.length + skippedBatches.length > 0 ? "text-bad" : "text-ok")
     : droppedNote ? "text-attn" : "text-ink/70";
   // 정리 상태(결과 파일·파드 -- 컨트롤러가 비동기로). 바 안에는 **짧은 건수만**(「결과 파일·파드 정리 중 N건 · 지연
@@ -796,7 +801,7 @@ function DeleteToolbar({ selectedRows, selectedBatches, del, purge, dropped, dro
         {/* 두 버튼은 한 덩어리(줄바꿈 없음) -- 좁은 폭에서도 「선택 삭제」와 「선택 해제」가 두 행으로 갈라지지 않는다. */}
         <div className="flex shrink-0 items-center gap-2">
           <DeleteRequestsDialog rows={selectedRows} batches={selectedBatches}
-                                disabled={none || over || overBatches || del.isPending} del={del}
+                                disabled={none || over || overBatches || overChildren || del.isPending} del={del}
                                 onDeleted={onDeleted} focusAfterDelete={() => statusRef.current?.focus()} />
           <Button variant="ghost" disabled={none || del.isPending} onClick={onClear}>선택 해제</Button>
         </div>

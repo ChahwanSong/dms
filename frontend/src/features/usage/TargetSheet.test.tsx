@@ -272,6 +272,13 @@ test("목록이 오기 전엔 「목록 밖」이라 말하지 않는다(깜빡�
   dimmed(within(sheet).getByRole("button", { name: "다음 경로" }));
 });
 
+test("실 사용량 추이 도움말: 스케줄 배치의 scan 은 최근 회차만 남는다는 한 줄(2026-11-16 회차 보존 정리)", async () => {
+  setup({ path: "/admin/usage?storage=cephfs-dms&target=artifacts" });
+  const help = await screen.findByRole("button", { name: "실 사용량 추이 설명" });
+  expect(help).toHaveAccessibleDescription(
+    /스케줄이 있는 배치가 만든 scan 은 최근 회차\(보존 설정 기본 5회차\)만 남아, 그보다 오래된 추이 점·scan 수는 정리됩니다/);
+});
+
 test("온도 추이: atime 기본 + mtime 세그먼트(aria-pressed)", async () => {
   setup({ path: "/admin/usage?storage=cephfs-dms&target=artifacts" });
   expect(await screen.findByRole("img", { name: "데이터 온도 추이(atime)" })).toBeInTheDocument();

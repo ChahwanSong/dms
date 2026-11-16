@@ -188,9 +188,57 @@ def test_admin_rows_carry_the_batch_schedule_so_the_delete_dialog_can_say_it_goe
     rows = _rows(client)
     assert rows[a]["batch_schedule"] == {
         "schedule_id": sid, "kind": "daily", "spec": {"hour": 3, "minute": 0}, "enabled": True,
-        "next_run_at": "2026-11-17T18:00:00Z", "last_outcome": None, "last_reason_code": None, "paused_reason_code": None}
+        "next_run_at": "2026-11-17T18:00:00Z", "last_outcome": None, "last_reason_code": None, "paused_reason_code": None,
+        "pruned_at": None, "pruned_total": None}                       # 회차 보존 정리 결과(2026-11-16) -- 아직 없음 = null
     assert rows[b]["batch_schedule"] is None                            # 스케줄 없음 = null(키는 있다)
     assert "batch_schedule" not in rows[single]
     assert client.post("/api/auth/logout").status_code in (200, 204)
     _login(client, "alice", "user")
     assert "batch_schedule" not in _rows(client)[mine]
+
+
+def test_admin_batch_rows_carry_the_server_delete_limits(client):
+    # 2026-11-16(상한 5000): 포탈은 배치 단위 삭제 상한을 상수로 두지 않고 행마다 서버 값을 읽는다 -- 서버 상수만 바꾸면 화면이
+    # 다른 숫자로 고를 수 없게 막던 거울을 없앴다. 단건 행·비관리자 응답엔 키가 없다.
+    from dms.repositories.request_purges import MAX_BATCH_DELETE_CHILDREN, MAX_BATCH_DELETE_ITEMS
+    repos = client.app.state.repos
+    bid = _batch(repos)
+    kid = _child(repos, bid)
+    single = _child(repos, None)
+    mine = _child(repos, bid, requester="alice", target="mine")
+    _login(client, "opadm", "admin")
+    rows = _rows(client)
+    assert (rows[kid]["batch_request_count_limit"], rows[kid]["batch_item_count_limit"]) == \
+        (MAX_BATCH_DELETE_CHILDREN, MAX_BATCH_DELETE_ITEMS) == (5000, 10000)
+    assert "batch_request_count_limit" not in rows[single]
+    client.post("/api/auth/logout")
+    _login(client, "alice", "user")
+    assert "batch_request_count_limit" not in _rows(client)[mine]
+
+
+def test_succeeded_scan_count_uses_a_scalar_subquery_not_exists():
+    """list_summaries 의 성공 scan 판정 모양 고정(2026-11-16): `(SELECT 1 … LIMIT 1) IS NOT NULL` -- EXISTS 로 「단순화」하면
+    cap 5000 에서 자식 ~4500 이상 갈래가 PG16 Hash Semi Join + data_jobs 전체 Seq Scan 으로 바뀐다(폴링마다 RLock)."""
+    import inspect
+    from dms.repositories.batches import BatchesRepository
+    src = inspect.getsource(BatchesRepository.list_summaries)
+    assert "LIMIT 1) IS NOT NULL" in src
+    assert "WHERE EXISTS (SELECT 1 FROM data_jobs" not in src
+
+
+def test_succeeded_scan_count_matches_the_jobs_state(client):
+    # 판정 결과는 EXISTS 때와 같다: 성공 scan 잡을 하나라도 가진 자식 수(실패 잡만 가진 자식·잡 없는 자식은 세지 않는다).
+    repos = client.app.state.repos
+    bid = _batch(repos)
+    ok = [_child(repos, bid, target=f"ok{i}") for i in range(3)]
+    pending = _child(repos, bid, target="p", finish=False)
+    failed = repos.requests.create(operation="scan", requester_id="opadm", actor="opadm", resource_key="k:f",
+                                   payload={"storage": "s1", "target": "f"}, priority="mid", batch_id=bid)
+    repos.requests.set_state(failed, RequestState.PLANNED, actor="planner")
+    plan_id = repos.data_jobs.create_plan(failed, actor="planner")
+    jid = repos.data_jobs.create_job(failed, plan_id, operation="scan", priority="mid", storage_name="s1", target="f",
+                                     options={}, tool="dscan", precondition={}, actor="planner", worker_pool={})
+    repos.data_jobs.set_job_state(jid, DataJobState.FAILED, actor="stepper")
+    summary = repos.batches.list_summaries([bid], cap=5000)[bid]
+    assert summary["batch_succeeded_scan_count"] == len(ok) and summary["batch_request_count"] == 5
+    assert pending and summary["batch_live_request_count"] == 2
