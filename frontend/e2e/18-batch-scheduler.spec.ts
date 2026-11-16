@@ -71,11 +71,11 @@ test.describe("E18 — 배치 스케줄러", () => {
     // 다음 5회는 서버 계산(:preview) — 화면은 시각을 계산하지 않는다
     await expect(dlg.getByLabel("다음 실행 미리보기").getByRole("listitem")).toHaveCount(5);
     await expect(dlg.getByLabel("다음 실행 미리보기").getByRole("listitem").first()).toContainText(`${hh}:30:00 KST`);
-    // 회차 보존 안내(2026-11-16 — 서버 :preview 의 keep_rounds, 기본 5). 정리 자체는 컨트롤러 루프라 e2e 밖이다.
-    await expect(dlg.getByRole("note", { name: "회차 보존 안내" })).toContainText("최근 5회차만 보존합니다");
+    // 회차 보존 안내(2026-11-16 — 서버 :preview 의 keep_rounds, 기본 10(같은 날 5 → 10)). 정리 자체는 컨트롤러 루프라 e2e 밖이다.
+    await expect(dlg.getByRole("note", { name: "회차 보존 안내" })).toContainText("최근 10회차만 보존합니다");
     await dlg.getByRole("button", { name: "추가" }).click();
     await expect(page.getByRole("dialog", { name: "스케줄 추가" })).toHaveCount(0);
-    await expect(page.getByText(/스케줄이 있는 배치는 최근 5회차만 보존합니다/).first()).toBeVisible();
+    await expect(page.getByText(/스케줄이 있는 배치는 최근 10회차만 보존합니다/).first()).toBeVisible();
 
     const created = await scheduleOf(page, bid);
     expect(created, "만든 스케줄이 목록 API 에 없다").toBeDefined();

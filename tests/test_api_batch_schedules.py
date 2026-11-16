@@ -107,8 +107,8 @@ def test_create_returns_the_row_without_the_raw_fingerprint(client):
     assert (row["child_count"], row["child_count_capped"], row["child_count_limit"]) == \
         (0, False, MAX_BATCH_DELETE_CHILDREN)
     assert row["child_count_limit"] == 5000
-    # 회차 보존(2026-11-16): 설정값과 정리 결과 -- 아직 정리 없음은 null(0 이 아니다)
-    assert (row["keep_rounds"], row["pruned_at"], row["pruned_total"]) == (5, None, None)
+    # 회차 보존(2026-11-16): 설정값(기본 10 -- 같은 날 5 → 10)과 정리 결과 -- 아직 정리 없음은 null(0 이 아니다)
+    assert (row["keep_rounds"], row["pruned_at"], row["pruned_total"]) == (10, None, None)
     a = _audit(client, "batch_schedule", "create")
     assert len(a) == 1 and a[0]["actor"] == "ops" and a[0]["target_key"] == bid
     # KST 02:00 = UTC 17:00
@@ -303,24 +303,36 @@ def test_preview_with_a_batch_warns_about_confirm_wait(client):
 
 def test_preview_carries_keep_rounds_limit_and_prune_preview(client):
     """추가 창의 보존 안내 재료(2026-11-16): keep_rounds·child_count_limit 은 늘, batch_id 가 있으면 prune_preview(실제 정리와
-    같은 경계 계산 -- 기록 6회차 배치면 곧 정리될 작업 = 첫 회차(기록 이전) 자식 수)."""
+    같은 경계 계산 -- 기본 보존 10 에서 기록 11회차 배치면 곧 정리될 작업 = 첫 실행(기록 이전) 자식 + 1번째 기록 회차 자식)."""
     r = client.post(f"{URL}:preview", json=DAILY).json()
-    assert r["keep_rounds"] == 5 and r["child_count_limit"] == MAX_BATCH_DELETE_CHILDREN and "prune_preview" not in r
+    assert r["keep_rounds"] == 10 and r["child_count_limit"] == MAX_BATCH_DELETE_CHILDREN and "prune_preview" not in r
     repos = _repos(client)
     bid = _batch(client, n=2)
     first = [repos.requests.create(operation="scan", requester_id="ops", actor="ops", resource_key=f"f{i}",
                                    payload=dict(SCAN_ITEM), priority="mid", batch_id=bid, auth_method="session")
              for i in range(2)]
-    for rnd in range(6):
+
+    def _round(rnd):
         assert repos.batches.rescan_if_terminal(bid, actor="ops") is not None
         for i in range(2):
             repos.requests.create(operation="scan", requester_id="ops", actor="ops", resource_key=f"r{rnd}-{i}",
                                   payload=dict(SCAN_ITEM), priority="mid", batch_id=bid, auth_method="session")
         repos.db.execute("UPDATE batches SET status = 'Completed' WHERE batch_id = :b", {"b": bid})
         repos.db.execute("UPDATE batch_items SET status = 'Succeeded' WHERE batch_id = :b", {"b": bid})
+
+    for rnd in range(9):
+        _round(rnd)
+    # 회차가 정확히 K(10)개(첫 실행 = 기록 이전 회차 1 + 기록 9)면 아직 아무것도 정리하지 않는다
+    assert client.post(f"{URL}:preview", json={**DAILY, "batch_id": bid}).json()["prune_preview"] == \
+        {"rounds_recorded": 9, "would_prune": 0, "would_prune_capped": False}
+    _round(9)
+    # K+1 회차(기록 10) → 가장 오래된 회차 = 기록 이전 자식만 정리 대상
+    assert client.post(f"{URL}:preview", json={**DAILY, "batch_id": bid}).json()["prune_preview"] == \
+        {"rounds_recorded": 10, "would_prune": len(first), "would_prune_capped": False}
+    _round(10)
     pp = client.post(f"{URL}:preview", json={**DAILY, "batch_id": bid}).json()["prune_preview"]
-    # 기록 6회차 · 보존 5 → 보존하는 가장 오래된 회차 = 2번째 기록 회차, 그 전 = 첫 실행 자식 2 + 1번째 기록 회차 자식 2
-    assert pp == {"rounds_recorded": 6, "would_prune": len(first) + 2, "would_prune_capped": False}
+    # 기록 11회차 · 보존 10(기본) → 보존하는 가장 오래된 회차 = 2번째 기록 회차, 그 전 = 첫 실행 자식 2 + 1번째 기록 회차 자식 2
+    assert pp == {"rounds_recorded": 11, "would_prune": len(first) + 2, "would_prune_capped": False}
     fresh = _batch(client)
     assert client.post(f"{URL}:preview", json={**DAILY, "batch_id": fresh}).json()["prune_preview"] == \
         {"rounds_recorded": 0, "would_prune": 0, "would_prune_capped": False}
@@ -336,9 +348,9 @@ def test_list_and_batch_summary_carry_prune_results(client):
     row = client.get(URL).json()[0]
     assert row["pruned_at"] == "2026-11-16T10:00:00Z" and row["pruned_total"] == 0   # 0 은 정상값
     sched = client.get(f"/api/admin/batches/{bid}?view=summary").json()["schedule"]
-    assert sched["pruned_total"] == 0 and sched["keep_rounds"] == 5
+    assert sched["pruned_total"] == 0 and sched["keep_rounds"] == 10
     listed = {r["batch_id"]: r for r in client.get("/api/admin/batches").json()}
-    assert listed[bid]["schedule"]["keep_rounds"] == 5
+    assert listed[bid]["schedule"]["keep_rounds"] == 10
 
 
 # --- 배치 삭제 캐스케이드 · 그물 ------------------------------------------------------------------------------------

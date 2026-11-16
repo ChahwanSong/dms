@@ -276,7 +276,9 @@ test("실 사용량 추이 도움말: 스케줄 배치의 scan 은 최근 회차
   setup({ path: "/admin/usage?storage=cephfs-dms&target=artifacts" });
   const help = await screen.findByRole("button", { name: "실 사용량 추이 설명" });
   expect(help).toHaveAccessibleDescription(
-    /스케줄이 있는 배치가 만든 scan 은 최근 회차\(보존 설정 기본 5회차\)만 남아, 그보다 오래된 추이 점·scan 수는 정리됩니다/);
+    /스케줄이 있는 배치가 만든 scan 은 최근 보존 회차\(회차 수는 배치 스케줄러 화면 안내\)만 남아, 그보다 오래된 추이 점·scan 수는 정리됩니다/);
+  // 보존 회차 수는 서버 설정이라 이 화면에 숫자를 박지 않는다(2026-11-16 기본 5 → 10 — 「기본 5회차」가 낡은 숫자로 남았던 자리).
+  expect(help).not.toHaveAccessibleDescription(/\d+회차/);
 });
 
 test("온도 추이: atime 기본 + mtime 세그먼트(aria-pressed)", async () => {

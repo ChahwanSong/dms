@@ -24,8 +24,8 @@ batch_schedule_runs 순서로 지워야 한다(batches.BATCH_DELETE_TABLES 순�
 (db.transaction) 배치 저장소의 「호출자 트랜잭션 안에서만」 몸통(_lock_items_then_batch·_rescan_locked)을 부르고, 이 저장소의
 *_locked 메서드도 호출자 트랜잭션 안에서만 부른다.
 
-**회차 보존 정리**(2026-11-16 사용자 결정 「최근 5회차만 남기고 나머지 정리」 -- batch_round_prune.py): 대상 고르기(prune_targets)와
-추가 창의 예측(prune_preview)이 **같은** 경계 계산(_round_cut)을 쓴다 -- 화면의 「곧 정리될 작업 수」와 실제 정리가 어긋나지 않게.
+**회차 보존 정리**(2026-11-16 사용자 결정 「최근 5회차만 남기고 나머지 정리」, 같은 날 기본 10회차로 -- batch_round_prune.py):
+대상 고르기(prune_targets)와 추가 창의 예측(prune_preview)이 **같은** 경계 계산(_round_cut)을 쓴다 -- 화면의 「곧 정리될 작업 수」와 실제 정리가 어긋나지 않게.
 정리 청크 자체는 RequestPurgesRepository.prune_round_children 이 한다(requests → data_jobs → batch_schedules 순 -- 스케줄 행은
 **맨 끝**에 카운터 갱신으로만 쥔다; 스케줄을 먼저 잡고 requests 를 나중에 잡는 경로를 만들지 마라 -- 배치 단위 삭제와 역순이라
 교착이다). 정리는 updated_at 을 밀지 않는다(발사·기록 CAS 표지).

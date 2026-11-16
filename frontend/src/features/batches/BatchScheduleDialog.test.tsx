@@ -166,7 +166,8 @@ test("자동 확인 꺼진 sync 의 짧은 주기: 서버 confirm_wait 경고(�
 });
 
 test("회차 보존 안내: 서버 keep_rounds·prune_preview 로 「곧 정리될 작업」과 「항목 × K > 상한」 예측을 보인다 — 저장은 막지 않는다", async () => {
-  // 2026-11-16 사용자 결정(최근 5회차만 보존). prune_preview 는 실제 정리와 같은 경계 계산(서버 _round_cut)이다.
+  // 2026-11-16 사용자 결정(최근 K회차만 보존 — 기본 10, 여기 keep_rounds 5 는 서버 값 흉내: 화면은 받은 숫자를 그대로 쓴다).
+  // prune_preview 는 실제 정리와 같은 경계 계산(서버 _round_cut)이다.
   serve({ preview: (body) => HttpResponse.json({
     next_runs: RUNS, confirm_wait: null, keep_rounds: 5, child_count_limit: 10,
     ...(body.batch_id ? { prune_preview: { rounds_recorded: 6, would_prune: body.batch_id === SCAN ? 8 : 0 } } : {}) }) });

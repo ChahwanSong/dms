@@ -27,7 +27,7 @@ dangling)도 같은 메서드로 묶음째 지운다. 잠금 순서는 batch_ite
 있어 이제 근사다 -- 정리가 지운 수만큼 새 회차가 같은 수로 생기면 통과할 수 있다(새 회차가 끝나고 조용한 창까지 지나야 하고,
 배치 **전체** 삭제를 고른 상황이라 수용 -- 최대 commit_order CAS 강화안은 BACKLOG).
 
-**회차 보존 정리**(prune_round_children, 2026-11-16 사용자 결정 「스케줄 배치는 최근 5회차만」 -- batch_round_prune.py): 컨트롤러
+**회차 보존 정리**(prune_round_children, 2026-11-16 사용자 결정 「스케줄 배치는 최근 K회차만」(기본 10) -- batch_round_prune.py): 컨트롤러
 루프가 고른 경계(commit_order ≤ upto) 이하의 종단 자식을 청크(≤ 100)마다 한 트랜잭션으로 같은 몸통(_purge_locked,
 per_request_audit=False)에 맡긴다 -- 셋째 호출자. 잠금 순서 requests(request_id 순) → data_jobs → batch_schedules(맨 끝, 카운터)
 -- 배치 단위 삭제와 같은 방향이고 batch_items·batches·batch_rounds 는 잠그지 않는다. 감사는 자식별 행 대신 청크마다

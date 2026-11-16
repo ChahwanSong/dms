@@ -1120,7 +1120,7 @@ function ScheduleBadge({ batchId, schedule }: { batchId: string; schedule: Batch
     <span className="inline-flex flex-col">
       <Link className={`text-sm ${tone} [overflow-wrap:anywhere]`} to={schedulesPath(batchId)}
             title="배치 스케줄러에서 보기">{text}</Link>
-      {/* break-keep: 390 폭에서 어절 중간(「배/치」「최근 5/회차만」)에서 꺾이지 않게(d29 실증 뒤). */}
+      {/* break-keep: 390 폭에서 어절 중간(「배/치」「최근 10/회차만」)에서 꺾이지 않게(d29 실증 뒤). */}
       {keepLine !== null && <span className="break-keep text-xs text-ink/70">{keepLine}</span>}
     </span>
   );

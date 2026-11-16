@@ -175,8 +175,8 @@ data:
   # 배치 스케줄 회차 보존(2026-11-16, 컨트롤러 batch-round-prune 루프): 스케줄이 있는 배치는 최근 이 수의 회차(첫 실행·전체
   # 재실행·스케줄 회차)의 작업만 남기고, 그보다 오래된 회차의 작업(자식 요청·잡·결과 파일)을 위 request-purge 루프로 정리한다.
   # 1–100(밖이면 기동 거부). 바꾸면 dms-controller(정리)·dms-api(화면 표시) 재시작 -- S11 이 둘 다 다시 띄운다. 기본값과 같다
-  # (사이트 중립).
-  DMS_BATCH_SCHEDULE_KEEP_ROUNDS: "5"
+  # (사이트 중립 -- 같은 날 사용자 지시로 5 → 10. 올리면 이미 지운 회차는 돌아오지 않고, 새로 지워지는 것도 없다).
+  DMS_BATCH_SCHEDULE_KEEP_ROUNDS: "10"
 
   # --- agent report cadence (AgentSettings.from_env; consumed via
   #     configMapKeyRef in 50-agent-daemonset.yaml, NOT envFrom, since the

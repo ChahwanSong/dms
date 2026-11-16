@@ -176,7 +176,7 @@ export function BatchSchedulesPage() {
                              trigger={<Button disabled={!canArm} title={canArm ? undefined : LOCKED_HINT}>스케줄 추가</Button>} />
       </div>
       <InfoPanel>
-        {/* break-keep: 한국어 안내가 390 폭에서 「재/실행」「최근 5/회차만」처럼 어절 중간에서 꺾이지 않게(저장소 관례). */}
+        {/* break-keep: 한국어 안내가 390 폭에서 「재/실행」「최근 10/회차만」처럼 어절 중간에서 꺾이지 않게(저장소 관례). */}
         <ul className="list-disc space-y-1 pl-5 break-keep">
           <li>정해진 한국시간(KST)에 배치를 <span className="font-medium">「전체 재실행」</span>합니다 — 배치당 스케줄 하나.</li>
           <li>그 시각에 배치가 진행 중이면 그 회차는 건너뛰고 기록합니다(밀린 회차를 몰아서 실행하지 않습니다).</li>

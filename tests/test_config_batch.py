@@ -14,12 +14,19 @@ def test_batch_interval_override():
     assert s.batch_orchestrator_interval_seconds == 9
 
 
-# 배치 스케줄 회차 보존 수(2026-11-16 사용자 결정 「최근 5회차만 남기고 정리」 -- batch_round_prune.py). 1–100(상한은 회차 경계
-# 행 보존 상한 BATCH_ROUND_HISTORY_CAP 200 안에서 경계를 계산할 수 있어야 해서), 밖이면 기동 거부.
-def test_batch_schedule_keep_rounds_default_is_five():
-    assert Settings.from_env(VALID).batch_schedule_keep_rounds == 5
+# 배치 스케줄 회차 보존 수(2026-11-16 사용자 결정 「최근 5회차만 남기고 정리」, 같은 날 사용자 지시로 기본 5 → 10 --
+# batch_round_prune.py). 1–100(상한은 회차 경계 행 보존 상한 BATCH_ROUND_HISTORY_CAP 200 안에서 경계를 계산할 수 있어야
+# 해서), 밖이면 기동 거부.
+def test_batch_schedule_keep_rounds_default_is_ten():
+    assert Settings.from_env(VALID).batch_schedule_keep_rounds == 10
     assert Settings(database_url="x", shared_token="t", admin_token="a",
-                    session_secret="s").batch_schedule_keep_rounds == 5
+                    session_secret="s").batch_schedule_keep_rounds == 10
+
+
+def test_batch_schedule_keep_rounds_max_fits_the_round_history_cap():
+    # 설정 상한(100)의 경계를 계산하려면 회차 경계 행이 그만큼 남아 있어야 한다 -- 기본을 올려도 이 관계는 그대로다.
+    from dms.repositories.batches import BATCH_ROUND_HISTORY_CAP
+    assert Settings.from_env(VALID).batch_schedule_keep_rounds <= 100 <= BATCH_ROUND_HISTORY_CAP
 
 
 def test_batch_schedule_keep_rounds_bounds():
@@ -36,4 +43,5 @@ def test_batch_schedule_keep_rounds_bounds():
 def test_batch_schedule_keep_rounds_is_in_the_site_neutral_config():
     from pathlib import Path
     text = (Path(__file__).resolve().parent.parent / "deploy/k8s/20-config.yaml").read_text()
-    assert 'DMS_BATCH_SCHEDULE_KEEP_ROUNDS: "5"' in text
+    assert 'DMS_BATCH_SCHEDULE_KEEP_ROUNDS: "10"' in text            # 코드 기본과 같은 값(사이트 중립)
+    assert str(Settings.from_env(VALID).batch_schedule_keep_rounds) == "10"

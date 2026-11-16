@@ -3,8 +3,9 @@
 // 진실이다: 화면은 **다음 실행을 계산하지 않는다**(말일 당기기·interval 슬롯을 따로 구현하면 서버와 어긋난다 — 미리보기는 서버
 // :preview). 여기 있는 것은 표시 문구와 저장 전 즉답(서버 422 invalid_batch_schedule 의 거울)뿐이다.
 //
-// 회차가 쌓는 자식 요청: 스케줄이 있는 배치는 최근 K회차(서버 keep_rounds, 기본 5)만 남고 오래된 회차는 컨트롤러가 자동으로
-// 정리한다(2026-11-16 사용자 결정 — 서버 batch_round_prune). 문구는 keepRoundsNotice 한 벌을 화면 셋이 같이 쓴다.
+// 회차가 쌓는 자식 요청: 스케줄이 있는 배치는 최근 K회차(서버 keep_rounds, 기본 10 — 같은 날 5 → 10)만 남고 오래된 회차는
+// 컨트롤러가 자동으로 정리한다(2026-11-16 사용자 결정 — 서버 batch_round_prune). 문구는 keepRoundsNotice 한 벌을 화면 셋이 같이
+// 쓰고, 숫자는 늘 서버 값이다(화면에 기본값을 박지 않는다 — 옛 서버면 숫자 없는 문구).
 //
 // dms-ssc WIP 의 lib/batchSchedule.ts 와 같은 export 이름이다. k8s 는 lib/types.ts 를 배치 목록 작업(#67)이 만지므로 응답
 // 타입을 이 파일에 둔다(나중에 합칠 때 types.ts 로 옮긴다).
@@ -47,7 +48,7 @@ export interface BatchSchedule {
   // k8s: 재실행 이력 포함 자식 요청 수 · 상한 초과로 세기를 멈춤 · 배치 단위 삭제 상한(서버 MAX_BATCH_DELETE_CHILDREN).
   child_count?: number; child_count_capped?: boolean; child_count_limit?: number;
   confirm_wait?: ConfirmWait | null;
-  // 회차 보존(2026-11-16 사용자 결정 — 서버 DMS_BATCH_SCHEDULE_KEEP_ROUNDS, 기본 5): 최근 keep_rounds 회차만 남고 오래된 회차의
+  // 회차 보존(2026-11-16 사용자 결정 — 서버 DMS_BATCH_SCHEDULE_KEEP_ROUNDS, 기본 10): 최근 keep_rounds 회차만 남고 오래된 회차의
   // 작업은 컨트롤러가 정리한다. pruned_total null = 아직 정리한 적 없음(0 과 다르다), pruned_at = 마지막으로 정리한 시각(UTC).
   keep_rounds?: number | null; pruned_at?: string | null; pruned_total?: number | null;
 }
@@ -274,8 +275,8 @@ export function childCountWarning(s: Pick<BatchSchedule, "child_count" | "child_
 
 const keepOk = (k: unknown): k is number => typeof k === "number" && Number.isInteger(k) && k >= 1;
 
-/** 회차 보존 안내(2026-11-16 사용자 결정 「최근 5회차만 남기고 정리」 — 서버 batch_round_prune). keep 이 숫자가 아니면(옛 서버)
- *  문장을 만들지 않는다(null — 지어내지 않는다). */
+/** 회차 보존 안내(2026-11-16 사용자 결정 「최근 5회차만 남기고 정리」, 같은 날 기본 10 — 서버 batch_round_prune). keep 이
+ *  숫자가 아니면(옛 서버) 문장을 만들지 않는다(null — 지어내지 않는다). */
 export function keepRoundsNotice(keep: number | null | undefined): string | null {
   if (!keepOk(keep)) return null;
   return `스케줄이 있는 배치는 최근 ${keep}회차만 보존합니다 — 첫 실행·전체 재실행·스케줄 회차를 회차로 세고(실패분·선택 재실행은 그 `

@@ -87,6 +87,9 @@ test("회차 보존 안내 — 숫자일 때만 문장을 만든다(옛 서버�
   expect(t).toContain("스케줄이 있는 배치는 최근 5회차만 보존합니다");
   expect(t).toContain("5회차를 넘으면 가장 오래된 회차의 작업(자식 요청·잡·결과 파일)을 곧 자동으로 정리합니다");
   expect(t).toContain("스케줄을 꺼도 정리는 계속되고, 스케줄을 지우면 멈춥니다");
+  // 숫자는 늘 서버 값을 그대로 쓴다(기본 10 — 화면에 기본값을 박지 않는다)
+  expect(keepRoundsNotice(10)!).toContain("스케줄이 있는 배치는 최근 10회차만 보존합니다");
+  expect(keepRoundsNotice(10)!).not.toContain("5회차");
   for (const k of [null, undefined, 0, 1.5]) expect(keepRoundsNotice(k as number | null | undefined)).toBeNull();
 });
 
@@ -116,6 +119,11 @@ test("항목 × K > 상한 예측 경고 — 셋 다 알 때만", () => {
   expect(projectedChildrenWarning(1000, 5, 5000)).toBeNull();
   expect(projectedChildrenWarning(1001, 5, 5000)).toBe(
     "항목 1,001개 × 5회차 = 작업 최대 5,005개 — 정리 뒤에도 배치 단위 삭제 상한(5,000개)을 넘어 이 배치는 배치 단위로 지울 수 "
+    + "없습니다(실패분 재실행이 더해지면 더 많습니다)");
+  // 기본 보존 10회차(2026-11-16 5 → 10)면 상한 5000 에서 항목 501개부터 경고한다(500 × 10 = 5000 은 상한과 같아 아니다).
+  expect(projectedChildrenWarning(500, 10, 5000)).toBeNull();
+  expect(projectedChildrenWarning(501, 10, 5000)).toBe(
+    "항목 501개 × 10회차 = 작업 최대 5,010개 — 정리 뒤에도 배치 단위 삭제 상한(5,000개)을 넘어 이 배치는 배치 단위로 지울 수 "
     + "없습니다(실패분 재실행이 더해지면 더 많습니다)");
   expect(projectedChildrenWarning(null, 5, 5000)).toBeNull();
   expect(projectedChildrenWarning(2000, null, 5000)).toBeNull();

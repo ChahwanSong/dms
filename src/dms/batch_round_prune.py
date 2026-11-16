@@ -1,7 +1,8 @@
-"""컨트롤러 batch-round-prune 루프 -- 배치 스케줄 회차 보존 정리(2026-11-16 사용자 결정 「최근 5회차만 남기고 나머지 정리」).
+"""컨트롤러 batch-round-prune 루프 -- 배치 스케줄 회차 보존 정리(2026-11-16 사용자 결정 「최근 5회차만 남기고 나머지 정리」,
+같은 날 사용자 지시로 보존 기본 5 → 10회차).
 
 스케줄이 있는 배치(batch_schedules 행 -- 켜짐·꺼짐·일시정지 무관; 스케줄을 지우면 정리도 멈춘다)는 최근
-DMS_BATCH_SCHEDULE_KEEP_ROUNDS(기본 5)회차의 자식 요청만 남긴다. 회차 = BatchesRepository._rescan_locked 한 번(사람 :rescan ·
+DMS_BATCH_SCHEDULE_KEEP_ROUNDS(기본 10)회차의 자식 요청만 남긴다. 회차 = BatchesRepository._rescan_locked 한 번(사람 :rescan ·
 스케줄 회차 -- 실패분·선택 재실행·항목 추가는 그 회차에 속한다)이고, 회차 경계(batch_rounds -- 시작 순간 그 배치 자식의
 MAX(commit_order))는 그 몸통만 남긴다(정의·정확성 전제는 _rescan_locked docstring). 기록을 시작하기 전의 자식(첫 실행과 배포 전
 회차 전부)은 가장 오래된 회차 하나로 보고, 기록된 회차가 K개가 되는 순간에만 한꺼번에 정리한다(배포 직후 대량 삭제는 구조적으로

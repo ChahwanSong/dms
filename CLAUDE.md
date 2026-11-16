@@ -70,7 +70,7 @@ PostgreSQL(제어면) + React 포탈 + 노드 에이전트 + Volcano gang-schedu
   배치 요청자의 자격을 `privileged.privileged_admin_problem` 으로 다시 본다. 스케줄 삭제는 `require_session_admin` 이다. 파괴적
   스케줄(rm, delete 를 켠 sync — `batch_scheduler.is_destructive`)은 무장할 때마다 「되돌릴 수 없음」 동의(`acknowledge_irreversible:
   true`)를 받고 배치 지문을 남긴다 — 지문이 바뀌면 자동 일시정지(`docs/ARCHITECTURE.md` 「배치 재검토·확인 게이트」의 「스케줄 회차」).
-  스케줄이 있는 배치는 최근 `DMS_BATCH_SCHEDULE_KEEP_ROUNDS`(기본 5)회차만 남는다(2026-11-16, `batch_round_prune` — 컨트롤러가
+  스케줄이 있는 배치는 최근 `DMS_BATCH_SCHEDULE_KEEP_ROUNDS`(기본 10 — 같은 날 5 → 10)회차만 남는다(2026-11-16, `batch_round_prune` — 컨트롤러가
   `_purge_locked` 로 지운다, 확인 게이트는 건드리지 않는다). 회차 경계(`batch_rounds`)는 `_rescan_locked` 만 남긴다 — 회차를 새로
   시작하는 경로를 만들면 이 몸통을 거쳐라. 정리는 최신 회차의 경계 자식(닻)을 지우지 않는다(commit_order 재사용).
 - **새 DB 컬럼은 CREATE TABLE 과 `_ensure_columns` 양쪽**(구형 DB 업그레이드 경로).

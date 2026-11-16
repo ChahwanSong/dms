@@ -1,4 +1,4 @@
-"""배치 스케줄 회차 보존 정리(2026-11-16 사용자 결정 「최근 5회차만 남기고 나머지 정리」 -- batch_round_prune.py,
+"""배치 스케줄 회차 보존 정리(2026-11-16 사용자 결정 「최근 5회차만 남기고 나머지 정리」, 같은 날 기본 10 -- batch_round_prune.py,
 BatchSchedulesRepository.prune_targets/_round_cut, RequestPurgesRepository.prune_round_children).
 
 회차 = BatchesRepository._rescan_locked 한 번(여기선 사람 :rescan 경로 rescan_if_terminal 로 회차를 기록한다 -- 스케줄 회차도 같은
@@ -120,6 +120,8 @@ def _schedule(repos, bid, *, enabled=True):
 
 
 def _prune(repos, cfg, keep=5):
+    # K 를 명시한다(기본 설정은 2026-11-16 같은 날 5 → 10) -- 이 파일의 회차 수·삭제 수 시나리오는 K=5 기준으로 짰고, 경계 규칙은
+    # K 와 무관하다. 기본값 자체는 test_config_batch, 기본값으로 도는 응답·예측 경계는 test_api_batch_schedules 가 본다.
     return BatchRoundPruner(repos, settings=dataclasses.replace(cfg, batch_schedule_keep_rounds=keep)).run_once()
 
 
