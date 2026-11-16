@@ -11,10 +11,11 @@ beforeAll(() => server.listen()); afterEach(() => server.resetHandlers()); after
 
 // updated_at 은 서버가 늘 보낸다(batches.updated_at NOT NULL + SELECT *) — fixture 도
 // 그렇게 둔다. 「최근 갱신」이 비는 경우는 테스트가 명시적으로 null 을 줄 때뿐이라,
-// 다른 테스트의 "—" 단언(이름 없음)이 이 컬럼과 뒤섞이지 않는다.
+// 다른 테스트의 "—" 단언(이름 없음)이 이 컬럼과 뒤섞이지 않는다. 대상 스토리지(2026-11-16)도 같은 이유로 늘 싣는다(서버는
+// 항목이 있는 배치면 첫 항목에서 뽑아 준다) — 「—」는 그 칸을 시험하는 테스트가 명시적으로 뺄 때만 생긴다.
 const row = (over: object = {}) => ({ batch_id: "b1234567890abcdef", operation: "scan",
   status: "Running", max_concurrency: 2, item_count: 3, succeeded_count: 1,
-  failed_count: 0, note: null, created_at: "", updated_at: "2026-08-15T00:00:00Z", ...over });
+  failed_count: 0, note: null, created_at: "", updated_at: "2026-08-15T00:00:00Z", storage: "s1", ...over });
 
 function renderList(rows: object[] | (() => object[])) {
   server.use(http.get("/api/admin/batches",
@@ -302,4 +303,59 @@ test("조회 오류는 사유를 보이고 「배치가 없습니다」로 접�
   // 건수도 지어내지 않는다: 오류 중 탭 라벨에 (0) 이 붙으면 "없다"는 거짓말이다
   expect(screen.getByRole("tab", { name: "전체" })).toBeInTheDocument();
   expect(screen.queryByRole("tab", { name: "전체 (0)" })).toBeNull();
+});
+
+// --- 대상 스토리지 열(2026-11-16): 「작업」 바로 오른쪽 — 첫 항목 payload 에서 서버가 뽑은 값 ---------------------------
+
+test("열 순서: … 이름 · 작업 · 대상 스토리지 · 상태 …", async () => {
+  renderList([row()]);
+  await screen.findByText("s1");
+  const heads = screen.getAllByRole("columnheader").map((th) => th.textContent);
+  // 첫 열은 전체 선택 체크박스(글자 없음)
+  expect(heads.slice(1)).toEqual(["배치", "이름", "작업", "대상 스토리지", "상태", "진행", "최근 갱신"]);
+});
+
+test("scan·rm 은 storage, sync 는 「소스 → 목적지」(title 로 방향을 말한다)", async () => {
+  renderList([
+    row({ batch_id: ID1, operation: "scan", storage: "cephfs-a", name: "n1" }),
+    row({ batch_id: ID2, operation: "rm", storage: "gpfs-b", name: "n2" }),
+    row({ batch_id: ID3, operation: "sync", storage: null, source_storage: "s1", destination_storage: "s2", name: "n3" })]);
+  expect(await screen.findByText("cephfs-a")).toBeInTheDocument();
+  expect(screen.getByText("gpfs-b")).toBeInTheDocument();
+  const pair = screen.getByText("s1 → s2");
+  expect(pair).toHaveAttribute("title", "소스 → 목적지");
+  // 셀은 같은 행의 「작업」 바로 오른쪽이다
+  const cells = within(pair.closest("tr")!).getAllByRole("cell").map((td) => td.textContent);
+  expect(cells.indexOf("s1 → s2")).toBe(cells.indexOf("sync") + 1);
+  // 긴 자유 글자 이름도 접히고(break-all) 좁은 폭에서 짓눌리지 않는다(최소 폭)
+  expect(pair.className).toContain("break-all");
+  expect(pair.className).toMatch(/min-w-/);
+});
+
+test("모르면 「—」: 필드 부재(옛 서버)·문자열 아님 — sync 는 둘 다 모르면 「—」 하나, 한쪽만 알면 그쪽만", async () => {
+  renderList([
+    row({ batch_id: ID1, name: "n1", storage: undefined }),
+    row({ batch_id: ID2, name: "n2", operation: "sync", storage: null, source_storage: 7, destination_storage: null }),
+    row({ batch_id: ID3, name: "n3", operation: "sync", storage: null, source_storage: "s1", destination_storage: null })]);
+  await screen.findByText("n1");
+  const cellOf = (name: string) => {
+    const cells = within(screen.getByText(name).closest("tr")!).getAllByRole("cell");
+    return cells[4];                           // 체크 · 배치 · 이름 · 작업 · [대상 스토리지]
+  };
+  expect(cellOf("n1")).toHaveTextContent(/^—$/);
+  expect(cellOf("n2")).toHaveTextContent(/^—$/);                   // 「— → —」가 아니다
+  expect(cellOf("n2")).not.toHaveAttribute("title");               // 항목이 있는데 모른다 ≠ 항목 없음
+  expect(cellOf("n3")).toHaveTextContent(/^s1 → —$/);
+});
+
+test("항목 0개 배치는 「—」 + title 「항목이 없습니다」 — 모름과 구별한다", async () => {
+  renderList([row({ batch_id: ID1, name: "empty", item_count: 0, storage: null }),
+              row({ batch_id: ID2, name: "empty-sync", operation: "sync", item_count: 0, storage: null,
+                    source_storage: null, destination_storage: null })]);
+  await screen.findByText("empty");
+  for (const name of ["empty", "empty-sync"]) {
+    const cell = within(screen.getByText(name).closest("tr")!).getAllByRole("cell")[4];
+    expect(cell).toHaveTextContent(/^—$/);
+    expect(cell).toHaveAttribute("title", "항목이 없습니다");
+  }
 });

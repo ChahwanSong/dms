@@ -8,6 +8,7 @@ import { batchStateHelp } from "../../lib/stateHelp";
 import { Button } from "../../components/ui/Button";
 import { batchPillVariant, batchStatusLabel } from "../../lib/jobState";
 import { kstStampOrDash } from "../../lib/datetime";
+import type { Batch } from "../../lib/types";
 
 // 활성 배치 체크박스에 다는 사유. 서버 문구("먼저 취소하세요")와 같은 동선을 가리킨다
 // — 활성은 Previewing 도 포함이라 "실행 중"보다 "진행 중"이 정직하다.
@@ -34,6 +35,29 @@ const OP_TABS = ["all", "sync", "scan", "rm"] as const;
 type OpTab = (typeof OP_TABS)[number];
 const OP_LABEL: Record<OpTab, string> = {
   all: "전체", sync: "sync", scan: "scan", rm: "rm" };
+
+// 「대상 스토리지」 칸(2026-11-16): 서버가 첫 항목 payload 에서 뽑아 준 값(배치는 스토리지 한 종류 -- sync 는 한 쌍)을 그대로
+// 말한다. sync 는 「소스 → 목적지」(BatchCreate·작업 목록 대상 열과 같은 구분자), 그 밖(scan·rm)은 storage. 문자열이 아니면
+// 모름(null·부재·신뢰 경계 탈락) = 「—」 -- sync 둘 다 모르면 「— → —」 대신 「—」 하나. 항목이 0개면 모름과 구별되게 title 로
+// 「항목이 없습니다」(물려받을 첫 항목이 없어 서버도 null 이다).
+// 스토리지 이름은 형식 검증 없는 자유 글자라 break-all 로 접고, 좁은 폭에서 두어 글자 폭으로 짓눌리지 않게 최소 폭을 둔다(작업
+// 목록 「대상」 열 관례 -- 넘치는 만큼은 Table 가로 스크롤).
+const str = (v: unknown): string | null => (typeof v === "string" ? v : null);
+function storageCell(b: Batch): { text: string; title?: string } {
+  const empty = b.item_count === 0 ? "항목이 없습니다" : undefined;
+  if (b.operation === "sync") {
+    const src = str(b.source_storage);
+    const dst = str(b.destination_storage);
+    if (src === null && dst === null) return { text: "—", title: empty };
+    return { text: `${src ?? "—"} → ${dst ?? "—"}`, title: "소스 → 목적지" };
+  }
+  const st = str(b.storage);
+  return st === null ? { text: "—", title: empty } : { text: st };
+}
+function StorageCell({ b }: { b: Batch }) {
+  const c = storageCell(b);
+  return <td className="text-muted break-all min-w-[7rem]" title={c.title}>{c.text}</td>;
+}
 
 export function BatchesList() {
   const q = useBatches();
@@ -203,7 +227,7 @@ export function BatchesList() {
                 aria-label="전체 선택"
                 checked={allChecked} disabled={deletableIds.length === 0 || del.isPending}
                 onChange={toggleAll} /></th>
-            <th className="py-2">배치</th><th>이름</th><th>작업</th><th>상태</th><th>진행</th>
+            <th className="py-2">배치</th><th>이름</th><th>작업</th><th>대상 스토리지</th><th>상태</th><th>진행</th>
             {/* 「최근 수행일」이 아니라 「최근 갱신」인 이유: 이 값(updated_at)은 실행
                 뿐 아니라 이름·메모 수정, 항목 편집, 취소까지 **모든 전이**가 민다 —
                 "수행"이라 부르면 마지막 실행 시각이라는 오독을 만든다. */}
@@ -232,7 +256,9 @@ export function BatchesList() {
                   <span className={`ml-1 text-xs ${b.operation === "rm" ? "text-bad" : "text-accent"}`}
                         title={b.operation === "rm" ? "미리보기가 끝나면 「배치 확인」 없이 삭제"
                           : "미리보기가 끝나면 「배치 확인」 없이 실행"}>자동</span>
-                )}</td><td><StatusPill state={b.status} variant={batchPillVariant(b.status)} label={batchStatusLabel(b.status)}
+                )}</td>
+                <StorageCell b={b} />
+                <td><StatusPill state={b.status} variant={batchPillVariant(b.status)} label={batchStatusLabel(b.status)}
                                  help={batchStateHelp(b.status)} /></td>
                 <td className="text-muted">{b.succeeded_count}/{b.failed_count}/{b.item_count}</td>
                 {/* 시각은 저장소 관례대로 ISO 원문 그대로(AccountsList·JobsList·

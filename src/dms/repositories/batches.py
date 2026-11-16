@@ -27,6 +27,35 @@ BATCH_DELETE_TABLES = ("batch_items", "batches", "batch_schedules", "batch_sched
 # docstring), 배치 단위 삭제(delete_batch)는 요청 삭제 몸통(_purge_locked)이 batch_id 로 전부 지운다.
 BATCH_DELETE_EXEMPT_TABLES = ("requests",)
 
+# 배치 항목 상태(라우트·orchestrator 가 쓰는 전부). 상세 요약(view=summary)의 status_counts 가 이 키를 0 으로 먼저 깐다 --
+# 화면의 상태 칩이 「0개」를 「모름」과 구별해 보이게(0 은 정상값). 밖의 값(DB 변조)은 그 이름 그대로 센다.
+_ITEM_STATUSES = ("Queued", "Materialized", "Succeeded", "Failed", "Rejected", "Cancelled")
+# 첫 항목 payload 에서 읽는 스토리지 키(scan·rm = storage, sync = 소스·목적지 쌍 -- domain.validate_batch 가 한 배치에 한
+# 종류·한 쌍만 허용하므로 첫 항목의 값이 배치의 값이다). 기존 batches 열과 이름이 겹치지 않는다.
+_STORAGE_KEYS = ("storage", "source_storage", "destination_storage")
+# list_items_detail 의 seq 부분 조회 한 문장의 IN 목록 상한(sqlite 바인딩 상한보다 넉넉히 작게 -- 상세 쪽 크기 상한과 같다).
+_SEQ_CHUNK = 500
+
+
+def _payload_or_none(text):
+    """항목 payload JSON 을 dict 로 -- 깨진 JSON·dict 아님은 None(DB 가 신뢰 경계: 행 하나 때문에 목록·요약 전체가 500 이
+    되지 않게). 원문 문자열은 밖으로 내보내지 않는다."""
+    if not isinstance(text, str):
+        return None
+    try:
+        value = load_json(text)
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _storage_fields(payload_text) -> dict:
+    """첫 항목 payload(원문 JSON) → {"storage", "source_storage", "destination_storage"}: 문자열인 값만, 나머지(키 없음·
+    문자열 아님·깨진 JSON·항목 없음)는 None -- 모름이다. 배치 목록 열(list)과 상세 요약(view=summary)이 이 한 판정을 쓴다."""
+    p = _payload_or_none(payload_text) or {}
+    return {k: (p[k] if isinstance(p.get(k), str) else None) for k in _STORAGE_KEYS}
+
+
 def _hydrate(row):
     row["options"] = load_json(row["options"])
     # 자동 확인 여부는 켠 사람이 있느냐다(NULL = 꺼짐 -- 구형 행·기본). 화면·API 는 bool 로 읽는다.
@@ -99,9 +128,93 @@ class BatchesRepository:
         return None if row is None else _hydrate(row)
 
     def list(self, limit=100):
-        rows = self._db.query("SELECT * FROM batches ORDER BY created_at DESC LIMIT :n",
-                              {"n": limit})
-        return [_hydrate(r) for r in rows]
+        """배치 목록(최신 limit 건) + 「대상 스토리지」 열(_storage_fields -- 첫 항목 payload 에서).
+
+        첫 항목은 `ORDER BY seq LIMIT 1` 이다: 단건 삭제가 seq 를 다시 매기지 않아 구멍이 생기므로 seq = 0 으로 고르면
+        첫 항목을 지운 배치가 모름이 된다. 항목이 하나도 없는 배치(삭제로 비운 배치 -- 정상)는 세 값 모두 None.
+        파생 테이블로 감싸는 이유: `FROM batches b ... ORDER BY ... LIMIT` 로 쓰면 sqlite 가 정렬 전에 모든 배치 행에서 상관
+        서브쿼리를 돈다 -- 감싸면 고른 limit 행만큼만 batch_items PK 를 찾는다. JSON 추출을 SQL 에서 하지 않는 이유: 두
+        방언(sqlite·PG)을 같이 써서 json 함수를 쓰지 않는다(repositories/metrics 모듈 docstring) -- 파이썬에서 읽는다.
+        원문 payload(first_item_payload)는 응답에 싣지 않는다."""
+        rows = self._db.query(
+            """SELECT b.*, (SELECT bi.payload FROM batch_items bi
+                             WHERE bi.batch_id = b.batch_id ORDER BY bi.seq LIMIT 1) AS first_item_payload
+                 FROM (SELECT * FROM batches ORDER BY created_at DESC LIMIT :n) b
+                ORDER BY b.created_at DESC""",
+            {"n": limit})
+        out = []
+        for r in rows:
+            r.update(_storage_fields(r.pop("first_item_payload", None)))
+            out.append(_hydrate(r))
+        return out
+
+    def item_overview(self, batch_id) -> dict:
+        """배치 상세 요약(GET /api/admin/batches/{id}?view=summary)의 항목 몫 -- 항목 목록 없이 화면 머리가 쓰는 사실:
+          item_total     항목 수(행을 센다 -- 0 은 정상값: 삭제로 비운 배치)
+          status_counts  {상태: 수}. 알려진 상태(_ITEM_STATUSES)는 0 도 키로 싣는다(칩의 「0개」 = 정상값)
+          first_payload  seq 가 가장 작은 항목의 payload(dict) 또는 None(항목 없음·깨진 JSON). 화면이 항목 추가·교체의
+                         스토리지 상속에 쓴다 -- 거른 쪽(검색·상태)에서 파생하면 검색 0건이 「항목 없음」이 된다
+          storage·source_storage·destination_storage  목록 열과 같은 판정(_storage_fields)
+        상태 집계는 idx_batch_items_status(batch_id, status)로 센다."""
+        counts = {s: 0 for s in _ITEM_STATUSES}
+        total = 0
+        for row in self._db.query(
+                "SELECT status, COUNT(*) AS n FROM batch_items WHERE batch_id = :b GROUP BY status", {"b": batch_id}):
+            n = int(row["n"])
+            total += n
+            if isinstance(row["status"], str):
+                counts[row["status"]] = n
+        first = self._db.query_one(
+            "SELECT payload FROM batch_items WHERE batch_id = :b ORDER BY seq LIMIT 1", {"b": batch_id})
+        text = None if first is None else first["payload"]
+        return {"item_total": total, "status_counts": counts, "first_payload": _payload_or_none(text),
+                **_storage_fields(text)}
+
+    def count_executing_items(self, batch_id) -> int:
+        """Materialized 이고 자식의 최신 잡(list_items_detail 의 job_state 와 같은 「최신 잡 하나」 -- created_at DESC,
+        job_id DESC)이 Executing 인 항목 수. 확인 게이트 배치의 미리보기 단계 배너(「이미 실행 중인 항목 N개는 끝까지」)가
+        쓴다 -- 포탈이 전체 항목에서 세던 `status === "Materialized" && job_state === "Executing"` 의 서버 몫."""
+        row = self._db.query_one(
+            """SELECT COUNT(*) AS n FROM batch_items bi
+                WHERE bi.batch_id = :b AND bi.status = 'Materialized'
+                  AND (SELECT d.state FROM data_jobs d
+                        WHERE d.request_id = bi.request_id
+                        ORDER BY d.created_at DESC, d.job_id DESC LIMIT 1) = 'Executing'""",
+            {"b": batch_id})
+        return 0 if row is None else int(row["n"])
+
+    def list_item_tools(self, batch_id):
+        """항목마다 상태 + 자식 최신 잡의 도구 재료(job_tool·preview_summary -- list_items_detail 과 같은 열·같은 「최신 잡
+        하나」) -- 상세 요약의 direct 안내(batch_orchestrator.direct_tool_counts)용 가벼운 읽기. preview_summary 는
+        job_tool 을 모를 때만 쓰이므로 그때만 읽고, 깨진 JSON 은 None(모름 -- 요약 GET 이 500 이 되지 않게)."""
+        rows = self._db.query(
+            """SELECT bi.seq, bi.status,
+                      (SELECT d.tool FROM data_jobs d
+                        WHERE d.request_id = bi.request_id
+                        ORDER BY d.created_at DESC, d.job_id DESC LIMIT 1)
+                          AS job_tool,
+                      (SELECT d.preview_summary FROM data_jobs d
+                        WHERE d.request_id = bi.request_id
+                        ORDER BY d.created_at DESC, d.job_id DESC LIMIT 1)
+                          AS preview_summary
+                 FROM batch_items bi
+                WHERE bi.batch_id = :b ORDER BY bi.seq""", {"b": batch_id})
+        for r in rows:
+            text = r.get("preview_summary")
+            try:
+                r["preview_summary"] = load_json(text) if isinstance(text, str) else None
+            except ValueError:
+                r["preview_summary"] = None
+        return rows
+
+    def list_item_heads(self, batch_id):
+        """전 항목의 [{"seq", "payload", "status"}] -- 상세 쪽 조회(view=items)의 거르기(검색·상태) 단계용 가벼운 읽기. 상세
+        조인(list_items_detail)을 돌지 않는다. 깨진 payload JSON 은 None(_payload_or_none -- 그 항목은 어떤 검색어에도
+        걸리지 않고, 다른 쪽·검색은 산다). 응답 행으로 그대로 내보내지 않는다 -- 행의 payload 는 list_items·
+        list_items_detail 이 지금처럼 읽는다(지어낸 None 을 화면에 넘기지 않는다)."""
+        rows = self._db.query(
+            "SELECT seq, payload, status FROM batch_items WHERE batch_id = :b ORDER BY seq", {"b": batch_id})
+        return [{"seq": r["seq"], "payload": _payload_or_none(r["payload"]), "status": r["status"]} for r in rows]
 
     def list_summaries(self, batch_ids, *, cap: int) -> dict:
         """작업 목록(GET /api/user/requests, 관리자 응답)의 배치 자식 행에 붙이는 배치 요약 -- {batch_id: 요약}.
@@ -224,7 +337,7 @@ class BatchesRepository:
             r["payload"] = load_json(r["payload"])
         return rows
 
-    def list_items_detail(self, batch_id):
+    def list_items_detail(self, batch_id, seqs=None):
         """배치 상세 화면용 items + 자식 요청 조인 필드. list_items 와 별도인 이유:
         orchestrator 루프(5s 틱)는 이 조인이 필요 없다 — 화면 경로만 넓힌다.
         - request_state: 자식 요청의 현재 상태(LEFT JOIN — 미 materialize 는 NULL).
@@ -245,7 +358,23 @@ class BatchesRepository:
           달라(nsync 변경 예정 · dsync 소스 전체 · drm 지울 대상) 확인 합계·항목 라벨이 도구로 가른다(batch_orchestrator
           .preview_files 의 files_by_tool 도). preview_summary.tool 은 v2 러너의 미리보기에만 있다 -- 옛 미리보기도 가르려면 이
           열이고, 둘이 어긋나면 이 열이 권위다(batch_orchestrator._preview_tool·포탈 toolSummary.summaryTool 같은 순서). 다른
-          잡 조인 열과 같은 「최신 잡 하나」라 한 항목의 수와 도구가 서로 다른 잡에서 오지 않는다."""
+          잡 조인 열과 같은 「최신 잡 하나」라 한 항목의 수와 도구가 서로 다른 잡에서 오지 않는다.
+
+        seqs(2026-11-16, 상세 쪽 조회 view=items): 주면 그 seq 의 항목만 같은 조인으로 읽는다 -- 라우트가 가벼운 읽기
+        (list_item_heads)로 거르고 자른 **한 쪽**만 넘겨, 큰 배치(항목 1만+)에서 폴링마다 전 항목의 잡 서브쿼리를 돌지 않는다.
+        같은 SELECT 에 `AND bi.seq IN (...)` 만 더하므로 행은 전체 조회의 그 seq 행과 같다(순서도 seq). None = 전 항목(view
+        없음·all·확인 감사 -- 지금 그대로), 빈 목록 = 문장 없이 []. 없는 seq 는 조용히 빠진다(쪽을 고른 뒤 지워진 항목)."""
+        if seqs is None:
+            return self._item_detail_rows(batch_id, "", {})
+        wanted = sorted({int(s) for s in seqs})
+        rows = []
+        for i in range(0, len(wanted), _SEQ_CHUNK):
+            names = {f"s{n}": v for n, v in enumerate(wanted[i:i + _SEQ_CHUNK])}
+            rows.extend(self._item_detail_rows(
+                batch_id, " AND bi.seq IN (" + ", ".join(":" + k for k in names) + ")", names))
+        return rows
+
+    def _item_detail_rows(self, batch_id, seq_filter, params):
         rows = self._db.query(
             """SELECT bi.*, r.state AS request_state,
                       (SELECT d.files_count FROM data_jobs d
@@ -272,7 +401,7 @@ class BatchesRepository:
                  FROM batch_items bi
                  LEFT JOIN requests r ON r.request_id = bi.request_id
                  LEFT JOIN results res ON res.request_id = bi.request_id
-                WHERE bi.batch_id = :b ORDER BY bi.seq""", {"b": batch_id})
+                WHERE bi.batch_id = :b""" + seq_filter + " ORDER BY bi.seq", {"b": batch_id, **params})
         for r in rows:
             r["payload"] = load_json(r["payload"])
             r["preview_summary"] = (load_json(r["preview_summary"])

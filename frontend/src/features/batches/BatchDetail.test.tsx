@@ -10,6 +10,7 @@ import { BatchesList } from "./BatchesList";
 import { parseItemsCsv } from "../../lib/csv";
 import { DIRECT_HELP, QUIET_HELP, SYNC_OPTION_HELP } from "../jobs/optionRules";
 import { REASON_MESSAGES } from "../../lib/api";
+import { readSummary, summaryTool } from "../../lib/toolSummary";
 // 기본 스토리지 목록은 **빈 배열**이다: 화면이 절대경로 조합용으로 이 목록을
 // 부르는데(useStorageRoots), 기본이 없으면 모든 테스트가 MSW 미처리 경고를 뿜는다.
 // 빈 배열 = 뿌리 모름 = 절대경로 표시 없음이라 기존 단언에는 영향이 없다.
@@ -24,8 +25,62 @@ const batch = (over: any = {}) => ({ batch_id:"b1", operation:"sync", status:"Pr
   max_concurrency:2, item_count:1, succeeded_count:0, failed_count:0, note:null, created_at:"",
   items:[{seq:0, payload:{source:"a"}, status:"Materialized", request_id:"r1", reason_code:null}], ...over });
 
+// 2026-11-16 상세 쪽 조회: 화면은 같은 경로에 view 를 달아 머리(summary)·항목 한 쪽(items)·가벼운 전 항목(payloads)·확인 창의
+// 전체(all)를 따로 받는다. msw 는 쿼리스트링을 무시하므로 handler 안에서 view 로 갈라, **하나의 fixture**(옛 전체 응답 모양)로
+// 새 서버의 응답들을 만든다 -- 서버 routes_batches.get_batch 의 거울(집계 규칙도 서버와 같다: executing_count 는 sync·rm 의
+// 확인 단계에서만, direct_tools 는 options.direct === true 일 때만). view 없음·all 은 fixture 그대로(옛 전체 응답과 같은 모양).
+// fixture 자리에 함수를 주면 요청마다 부른다(상태 있는 핸들러) -- 인자는 그 요청의 view. views 를 주면 받은 view 를 적는다.
+// 옛 파드(view 를 모름) 물러서기 테스트만 이 도우미를 쓰지 않고 view 와 무관하게 전체 응답을 주는 핸들러를 직접 심는다.
+type Fixture = Record<string, any>;
+const strOrNull = (v: unknown) => (typeof v === "string" ? v : null);
+function viewResponse(fx: Fixture, url: URL) {
+  const view = url.searchParams.get("view");
+  const items: any[] = fx.items ?? [];
+  if (view === "summary") {
+    const { items: _omit, ...row } = fx;
+    const counts: Record<string, number> = {};
+    for (const it of items) counts[it.status] = (counts[it.status] ?? 0) + 1;
+    const confirmStage = (fx.operation === "sync" || fx.operation === "rm")
+      && (fx.status === "Previewing" || fx.status === "PreviewReady");
+    const first = items[0]?.payload ?? null;
+    let direct: unknown = null;
+    if (fx.options?.direct === true) {
+      const tools = items.map((it) => summaryTool(readSummary(it.preview_summary), it.job_tool));
+      direct = { tools_known: tools.filter((t) => t !== null).length, nsync: tools.filter((t) => t === "nsync").length,
+                 undecided: items.filter((it, i) => tools[i] === null
+                   && !["Rejected", "Failed", "Cancelled"].includes(it.status)).length };
+    }
+    // fixture 가 집계 키를 직접 주면 그 값이 이긴다(서버가 준 값을 화면이 그대로 쓰는지 가르는 테스트용).
+    return { storage: strOrNull(first?.storage), source_storage: strOrNull(first?.source_storage),
+             destination_storage: strOrNull(first?.destination_storage),
+             item_total: items.length, status_counts: counts, first_payload: first,
+             executing_count: confirmStage
+               ? items.filter((it) => it.status === "Materialized" && it.job_state === "Executing").length : null,
+             direct_tools: direct, ...row };
+  }
+  if (view === "items") {
+    const q = url.searchParams.get("q") ?? "";
+    const status = url.searchParams.get("status");
+    const offset = Number(url.searchParams.get("offset") ?? 0);
+    const limit = Number(url.searchParams.get("limit") ?? 100);
+    const hits = items.filter((it) => (status === null || it.status === status) && (q === ""
+      || ["target", "source", "destination"].some((k) => typeof it.payload?.[k] === "string" && it.payload[k].includes(q))));
+    return { total: hits.length, offset, limit, items: hits.slice(offset, offset + limit) };
+  }
+  if (view === "payloads") return { items: items.map(({ seq, payload, status }) => ({ seq, payload, status })) };
+  return fx;
+}
+function serveBatch(fx: Fixture | ((view: string | null) => Fixture | Promise<Fixture>), views?: (string | null)[]) {
+  return http.get("/api/admin/batches/b1", async ({ request }) => {
+    const url = new URL(request.url);
+    const view = url.searchParams.get("view");
+    views?.push(view);
+    return HttpResponse.json(viewResponse(typeof fx === "function" ? await fx(view) : fx, url));
+  });
+}
+
 function renderAt(state: string) {
-  server.use(http.get("/api/admin/batches/b1", () => HttpResponse.json(batch({status:state}))));
+  server.use(serveBatch(batch({status:state})));
   const qc = new QueryClient({ defaultOptions:{ queries:{ retry:false }}});
   return render(<QueryClientProvider client={qc}><MemoryRouter initialEntries={["/admin/batches/b1"]}>
     <Routes><Route path="/admin/batches/:batchId" element={<BatchDetail/>} /></Routes>
@@ -49,7 +104,7 @@ test("PreviewReady: 「배치 확인」은 대화상자를 열고 「실행 확�
 });
 
 test("배치 확인 대화상자: 실행할 항목 수·미리보기 합계(도구 미기록)·동시 실행 상한·delete 경고·소유권·가장 이른 만료를 보인다", async () => {
-  server.use(http.get("/api/admin/batches/b1", () => HttpResponse.json(batch({
+  server.use(serveBatch(batch({
     status: "PreviewReady", options: { delete: true, chown: "10003:10000" }, item_count: 3,
     items: [
       // d192 전 미리보기(3키, tool 없음) -- 변경 예정 수인지 소스 전체 수인지 가를 수 없다
@@ -59,7 +114,7 @@ test("배치 확인 대화상자: 실행할 항목 수·미리보기 합계(도�
       { seq: 1, payload: { source: "b" }, status: "Materialized", request_id: "r2", reason_code: null,
         job_state: "ConfirmPending", preview_summary: null, preview_expires_at: "2099-10-08T01:00:00Z" },
       { seq: 2, payload: { source: "c" }, status: "Rejected", request_id: "r3", reason_code: "destination_not_writable",
-        job_state: "Rejected", preview_summary: null, preview_expires_at: null }] }))));
+        job_state: "Rejected", preview_summary: null, preview_expires_at: null }] })));
   const qc = new QueryClient({ defaultOptions:{ queries:{ retry:false }}});
   render(<QueryClientProvider client={qc}><MemoryRouter initialEntries={["/admin/batches/b1"]}>
     <Routes><Route path="/admin/batches/:batchId" element={<BatchDetail/>} /></Routes>
@@ -91,7 +146,7 @@ test("배치 확인 대화상자: 실행할 항목 수·미리보기 합계(도�
 });
 
 function renderItems(over: any) {
-  server.use(http.get("/api/admin/batches/b1", () => HttpResponse.json(batch({ status: "PreviewReady", ...over }))));
+  server.use(serveBatch(batch({ status: "PreviewReady", ...over })));
   const qc = new QueryClient({ defaultOptions:{ queries:{ retry:false }}});
   return render(<QueryClientProvider client={qc}><MemoryRouter initialEntries={["/admin/batches/b1"]}>
     <Routes><Route path="/admin/batches/:batchId" element={<BatchDetail/>} /></Routes>
@@ -146,7 +201,7 @@ test("배치 확인 대화상자: 연 뒤 확인 회차가 바뀌면(다시 미�
   let round = 3;
   const posted: unknown[] = [];
   server.use(
-    http.get("/api/admin/batches/b1", () => HttpResponse.json(batch({ status: "PreviewReady", preview_round: round }))),
+    serveBatch(() => batch({ status: "PreviewReady", preview_round: round })),
     http.post("/api/admin/batches/b1:confirm", async ({ request }) => {
       posted.push(await request.json()); return HttpResponse.json({ status: "Running" }); }));
   const qc = new QueryClient({ defaultOptions:{ queries:{ retry:false }}});
@@ -365,7 +420,7 @@ test("배치 확인 409 뒤 배치가 미리보기로 돌아가 대화상자가 
   // 확인 대기 화면을 보고 누른 사이 항목이 추가돼 서버가 Previewing 으로 되돌렸다 -- 말하지 않으면 확인이 조용히 사라졌다.
   let status = "PreviewReady";
   server.use(
-    http.get("/api/admin/batches/b1", () => HttpResponse.json(batch({ status }))),
+    serveBatch(() => batch({ status })),
     http.post("/api/admin/batches/b1:confirm", () => {
       status = "Previewing";
       return HttpResponse.json({ detail: "batch_not_confirmable" }, { status: 409 });
@@ -435,7 +490,7 @@ const detailedBatch = () => batch({ operation: "scan", status: "Completed", item
 ]});
 
 function renderDetailed() {
-  server.use(http.get("/api/admin/batches/b1", () => HttpResponse.json(detailedBatch())));
+  server.use(serveBatch(detailedBatch()));
   const qc = new QueryClient({ defaultOptions:{ queries:{ retry:false }}});
   return render(<QueryClientProvider client={qc}><MemoryRouter initialEntries={["/admin/batches/b1"]}>
     <Routes><Route path="/admin/batches/:batchId" element={<BatchDetail/>} /></Routes>
@@ -516,8 +571,7 @@ test("Running 에선 전체 재실행 버튼 부재", async () => {
   expect(screen.queryByRole("button", { name: "전체 재실행" })).toBeNull();
 });
 test("owner_username 이 있으면 실행 신원 표시 + 특권 실행 문구", async () => {
-  server.use(http.get("/api/admin/batches/b1",
-    () => HttpResponse.json(batch({ owner_username: "alice" }))));
+  server.use(serveBatch(batch({ owner_username: "alice" })));
   const qc = new QueryClient({ defaultOptions:{ queries:{ retry:false }}});
   render(<QueryClientProvider client={qc}><MemoryRouter initialEntries={["/admin/batches/b1"]}>
     <Routes><Route path="/admin/batches/:batchId" element={<BatchDetail/>} /></Routes>
@@ -775,8 +829,7 @@ test("잡이 없으면(계획 전·미 materialize) 도구 행 자체를 생략�
 });
 
 test("이름이 있으면 헤더는 이름, 축약 batch_id 는 병기", async () => {
-  server.use(http.get("/api/admin/batches/b1",
-    () => HttpResponse.json(batch({ name: "8월 정기 스캔 1차" }))));
+  server.use(serveBatch(batch({ name: "8월 정기 스캔 1차" })));
   const qc = new QueryClient({ defaultOptions:{ queries:{ retry:false }}});
   render(<QueryClientProvider client={qc}><MemoryRouter initialEntries={["/admin/batches/b1"]}>
     <Routes><Route path="/admin/batches/:batchId" element={<BatchDetail/>} /></Routes>
@@ -828,7 +881,7 @@ test("편집 취소는 PATCH 없이 닫힌다", async () => {
 // --- 항목 편집(수정·삭제·추가): 종단 배치는 전 항목, 활성 배치는 Queued 만 ---
 
 function renderBatch(over: any) {
-  server.use(http.get("/api/admin/batches/b1", () => HttpResponse.json(batch(over))));
+  server.use(serveBatch(batch(over)));
   const qc = new QueryClient({ defaultOptions:{ queries:{ retry:false }}});
   return render(<QueryClientProvider client={qc}><MemoryRouter initialEntries={["/admin/batches/b1"]}>
     <Routes><Route path="/admin/batches/:batchId" element={<BatchDetail/>} /></Routes>
@@ -858,8 +911,7 @@ test("종단 배치: 펼치지 않은 행의 삭제 버튼 → 확인 클릭이 
   let deleted = false;
   let gets = 0;
   server.use(
-    http.get("/api/admin/batches/b1", () => { gets += 1;
-      return HttpResponse.json(detailedBatch()); }),
+    serveBatch(() => { gets += 1; return detailedBatch(); }),
     http.delete("/api/admin/batches/b1/items/1", () => {
       deleted = true; return HttpResponse.json({ deleted: 1 });
     }));
@@ -1012,7 +1064,7 @@ test("항목이 없으면 추가 폼 대신 안내 — 스토리지를 물려받
 // --- 배치 삭제: 종단 배치만 — 확인 다이얼로그 필수, 성공 시 목록으로 ---
 
 function renderWithList(over: any) {
-  server.use(http.get("/api/admin/batches/b1", () => HttpResponse.json(batch(over))));
+  server.use(serveBatch(batch(over)));
   const qc = new QueryClient({ defaultOptions:{ queries:{ retry:false }}});
   return render(<QueryClientProvider client={qc}><MemoryRouter initialEntries={["/admin/batches/b1"]}>
     <Routes>
@@ -1075,7 +1127,7 @@ test("배치 삭제: 목록 화면에 도착한 순간 지워진 배치가 이�
     http.get("/api/admin/batches", async () => { listGets += 1;
       if (listGets > 1) await delay(200);          // 삭제 후 재조회만 느리게
       return HttpResponse.json(state.rows); }),
-    http.get("/api/admin/batches/b1", () => HttpResponse.json(batch({ status: "Completed" }))),
+    serveBatch(batch({ status: "Completed" })),
     http.delete("/api/admin/batches/b1", () => {
       state.rows = state.rows.filter((r) => r.batch_id !== "b1");
       return HttpResponse.json({ deleted: "b1" }); }));
@@ -1180,7 +1232,7 @@ test("활성 배치: CSV 전체 교체 버튼 부재 — 종단 배치만", asyn
 test("현재 항목 CSV 팝업: serializeItemsCsv 텍스트를 읽기 전용으로 렌더 — 교체 파서와 왕복", async () => {
   renderDetailed();                              // scan 배치, 항목 team·proj
   const d = await openDialog("현재 항목 CSV");
-  const ta = d.getByLabelText("현재 항목 CSV");
+  const ta = await d.findByLabelText("현재 항목 CSV");     // 열 때 전 항목을 받는다(?view=payloads)
   expect(ta).toHaveValue("target\nteam\nproj");
   expect(ta).toHaveAttribute("readonly");
   // 왕복 계약: 이 텍스트를 교체 textarea 에 넣으면 같은 항목이 복원된다
@@ -1194,7 +1246,7 @@ test("sync 배치의 현재 항목 CSV: source,destination 2열 — 왕복 계�
         destination_storage: "s2", destination: "b" }, status: "Succeeded",
       request_id: "r1", reason_code: null }] });
   const d = await openDialog("현재 항목 CSV");
-  expect(d.getByLabelText("현재 항목 CSV")).toHaveValue("source,destination\na,b");
+  expect(await d.findByLabelText("현재 항목 CSV")).toHaveValue("source,destination\na,b");
   expect(parseItemsCsv("sync", "source,destination\na,b").rows)
     .toEqual([{ source: "a", destination: "b" }]);
 });
@@ -1351,10 +1403,9 @@ test("체크박스 클릭은 행 펼침을 토글하지 않는다", async () => 
 test("리페치로 사라진 항목은 선택에서 자동 제거된다(유령 선택 방지)", async () => {
   let deleted = false;
   server.use(
-    http.get("/api/admin/batches/b1", () => {
+    serveBatch(() => {
       const d = detailedBatch();
-      return HttpResponse.json(deleted
-        ? { ...d, items: d.items.filter((it: any) => it.seq !== 1) } : d); }),
+      return deleted ? { ...d, items: d.items.filter((it: any) => it.seq !== 1) } : d; }),
     http.delete("/api/admin/batches/b1/items/1", () => {
       deleted = true; return HttpResponse.json({ deleted: 1 }); }));
   const qc = new QueryClient({ defaultOptions:{ queries:{ retry:false }}});
@@ -1420,14 +1471,13 @@ test("활성 배치: 고를 수 있는 건 Queued 뿐이라 재실행 버튼은 
 test("선택 재실행: 결과 문구가 뜨는 시점엔 이미 재조회가 착지해 있다", async () => {
   // 삭제 경로와 같은 시점 계약(직전 커밋의 결함): onSettled 가 invalidate 프라미스를
   // 돌려주지 않으면 "끝났다"고 말한 뒤에도 화면은 옛 상태를 그린다.
-  const state = { items: detailedBatch().items as any[] };
-  let gets = 0;
+  const state = { items: detailedBatch().items as any[], mutated: false };
   server.use(
-    http.get("/api/admin/batches/b1", async () => {
-      gets += 1;
-      if (gets > 1) await delay(200);
-      return HttpResponse.json({ ...detailedBatch(), items: state.items }); }),
+    serveBatch(async () => {
+      if (state.mutated) await delay(200);           // 재실행 뒤의 재조회만 느리게(머리·항목 쪽 둘 다)
+      return { ...detailedBatch(), items: state.items }; }),
     http.post("/api/admin/batches/b1/items:rerun", () => {
+      state.mutated = true;
       state.items = state.items.map((it) =>
         it.seq === 0 ? { ...it, status: "Queued", reason_code: null } : it);
       return HttpResponse.json({ requeued: 1, skipped: [], status: "Running" }); }));
@@ -1490,15 +1540,13 @@ test("managed_root 를 못 읽으면 절대경로 행도 title 도 없다", asyn
 // renderDetailed 를 쓰지 않는 이유: 그 헬퍼가 정적 GET 핸들러를 다시 등록해
 // (msw 는 나중 등록이 우선) 여기서 심은 상태 있는 핸들러를 덮는다.
 function renderSlowRefetch(deletedSeq: number) {
-  const state = { items: detailedBatch().items as any[] };
-  let gets = 0;
+  const state = { items: detailedBatch().items as any[], mutated: false };
   server.use(
-    http.get("/api/admin/batches/b1", async () => {
-      gets += 1;
-      if (gets > 1) await delay(200);
-      return HttpResponse.json({ ...detailedBatch(), items: state.items,
-                                 item_count: state.items.length }); }),
+    serveBatch(async () => {
+      if (state.mutated) await delay(200);           // 삭제 뒤의 재조회만 느리게(머리·항목 쪽 둘 다)
+      return { ...detailedBatch(), items: state.items, item_count: state.items.length }; }),
     http.delete(`/api/admin/batches/b1/items/${deletedSeq}`, () => {
+      state.mutated = true;
       state.items = state.items.filter((it) => it.seq !== deletedSeq);
       return HttpResponse.json({ deleted: deletedSeq }); }));
   const qc = new QueryClient({ defaultOptions:{ queries:{ retry:false }}});
@@ -1563,8 +1611,7 @@ test("PreviewReady also shows cancel button and posts cancel", async () => {
 // 2026-10-01: chown 은 숫자 uid:gid 만 -- 이름이 든 옛 배치는 확인·재실행이 422 chown_name_not_supported 다. 버튼이
 // 죽은 것처럼 보이지 않게 거부 사유를 보이고, 헤더에 "더 이상 실행할 수 없다"를 미리 알린다.
 function renderLegacy(over: any) {
-  server.use(http.get("/api/admin/batches/b1", () =>
-    HttpResponse.json(batch({ options: { chown: "alice:users" }, ...over }))));
+  server.use(serveBatch(batch({ options: { chown: "alice:users" }, ...over })));
   const qc = new QueryClient({ defaultOptions:{ queries:{ retry:false }}});
   return render(<QueryClientProvider client={qc}><MemoryRouter initialEntries={["/admin/batches/b1"]}>
     <Routes><Route path="/admin/batches/:batchId" element={<BatchDetail/>} /></Routes>
@@ -1612,7 +1659,7 @@ test("숫자 chown 배치엔 이름 안내가 없다", async () => {
 
 // --- 실행 설정 변경(2026-10-02): 종단 배치만, 다음 재실행부터 적용 ---
 function renderExec(over: any) {
-  server.use(http.get("/api/admin/batches/b1", () => HttpResponse.json(batch(over))));
+  server.use(serveBatch(batch(over)));
   const qc = new QueryClient({ defaultOptions:{ queries:{ retry:false }}});
   return render(<QueryClientProvider client={qc}><MemoryRouter initialEntries={["/admin/batches/b1"]}>
     <Routes><Route path="/admin/batches/:batchId" element={<BatchDetail/>} /></Routes>
@@ -1832,7 +1879,7 @@ test("배치 확인 대화상자: 확인 대기 중에 끝난(아직 기록 전)
 test("409 batch_preview_changed 뒤에도 대화상자 경고는 하나다(회차 변경 경고와 겹치지 않는다)", async () => {
   let round = 3;
   server.use(
-    http.get("/api/admin/batches/b1", () => HttpResponse.json(batch({ status: "PreviewReady", preview_round: round }))),
+    serveBatch(() => batch({ status: "PreviewReady", preview_round: round })),
     http.post("/api/admin/batches/b1:confirm", () => {
       round = 4;                                   // 그 사이 다시 미리보기를 거쳐 확인 대기가 됐다
       return HttpResponse.json({ detail: "batch_preview_changed" }, { status: 409 });
@@ -1956,8 +2003,8 @@ test("확인 대화상자: 자동 실행이 곧 확인한다고 말한다(보류
 test("사람 확인이 자동 확인에 지면(409) 거짓 경보 대신 「이미 자동 확인돼 실행 중」", async () => {
   let status = "PreviewReady";
   server.use(
-    http.get("/api/admin/batches/b1", () => HttpResponse.json(batch({
-      status, auto_confirm: true, auto_confirm_by: "mason", auto_confirm_hold: null }))),
+    serveBatch(() => batch({
+      status, auto_confirm: true, auto_confirm_by: "mason", auto_confirm_hold: null })),
     http.post("/api/admin/batches/b1:confirm", () => {
       status = "Running";                                   // 그 사이 시스템이 먼저 확인했다
       return HttpResponse.json({ detail: "batch_not_confirmable" }, { status: 409 });
@@ -2113,7 +2160,7 @@ test("rm 배치 확인: dry-run 종료코드가 0 이 아니면 그 항목을 �
 
 test("rm 배치 확인: 회차가 바뀌면 체크와 무관하게 잠긴다(기존 ABA 계약 유지)", async () => {
   let round = 1;
-  server.use(http.get("/api/admin/batches/b1", () => HttpResponse.json(batch(rmBatch({ preview_round: round })))));
+  server.use(serveBatch(() => batch(rmBatch({ preview_round: round }))));
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(<QueryClientProvider client={qc}><MemoryRouter initialEntries={["/admin/batches/b1"]}>
     <Routes><Route path="/admin/batches/:batchId" element={<BatchDetail/>} /></Routes>
@@ -2208,6 +2255,8 @@ test("rm 항목 추가: 대상 경로 하나 + 진행 중엔 다시 확인 안�
   const dlg = await screen.findByRole("dialog", { name: "항목 추가" });
   expect(within(dlg).queryByLabelText("추가할 목적지 경로")).toBeNull();
   expect(dlg).toHaveTextContent("진행 중인 배치에 추가하면 배치가 다시 미리보기 단계로 돌아갑니다");
+  // 겹침 재료(기존 항목 전부)는 창을 열 때 받는다(?view=payloads) -- 받기 전엔 추가가 잠겨 있다.
+  await waitFor(() => expect(within(dlg).queryByText(/기존 항목을 불러오는 중/)).toBeNull());
   const input = within(dlg).getByLabelText("추가할 대상 경로");
   const add = within(dlg).getByRole("button", { name: "항목 추가" });
   await userEvent.type(input, ".");
@@ -2259,7 +2308,7 @@ test("rm 현재 항목 CSV·CSV 교체: target 1열 왕복 + {storage,target} PU
   renderItems(rmBatch({ status: "Completed", items: [rmItem(0, "old/a", { status: "Succeeded" })] }));
   await userEvent.click(await screen.findByRole("button", { name: "현재 항목 CSV" }));
   const cur = await screen.findByRole("dialog", { name: "현재 항목 CSV" });
-  expect(within(cur).getByLabelText("현재 항목 CSV")).toHaveValue("target\nold/a");
+  expect(await within(cur).findByLabelText("현재 항목 CSV")).toHaveValue("target\nold/a");
   await userEvent.click(within(cur).getByRole("button", { name: "닫기" }));
   await userEvent.click(screen.getByRole("button", { name: "CSV로 전체 교체" }));
   const dlg = await screen.findByRole("dialog", { name: "CSV로 전체 교체" });
@@ -2360,4 +2409,406 @@ test("배치 목록: rm 자동 배치의 「자동」은 빨강 + 「없이 삭�
   const mark = await screen.findByTitle("미리보기가 끝나면 「배치 확인」 없이 삭제");
   expect(mark).toHaveTextContent("자동");
   expect(mark).toHaveClass("text-bad");
+});
+
+// --- 상세 쪽 조회(2026-11-16): 머리 = ?view=summary, 항목 = ?view=items 한 쪽(100개), 대화상자 = ?view=all·payloads 1회 ---------
+// 1만 항목 배치를 2.5초마다 통째로 받아 전 행을 다시 그리던 것이 화면이 멈춘 원인이었다. 아래는 쪽·검색·상태 칩·쪽 단위 선택·
+// 확인 창의 회차 고정·옛 파드(view 를 모르는 서버) 물러서기를 못 박는다.
+const manyScan = (n: number, over: (i: number) => any = () => ({})) => batch({
+  operation: "scan", status: "Completed", item_count: n,
+  items: Array.from({ length: n }, (_, i) => ({ seq: i, payload: { storage: "s1", target: `dir${i}` }, status: "Succeeded",
+                                                request_id: `r${i}`, reason_code: null, ...over(i) })) });
+function renderDetail() {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const r = render(<QueryClientProvider client={qc}><MemoryRouter initialEntries={["/admin/batches/b1"]}>
+    <Routes><Route path="/admin/batches/:batchId" element={<BatchDetail/>} /></Routes>
+  </MemoryRouter></QueryClientProvider>);
+  return { ...r, qc };
+}
+// 항목 GET 의 쿼리스트링을 적는다(msw 는 쿼리를 무시하므로 handler 안에서 읽는다).
+function itemQueries(fx: Fixture | (() => Fixture)) {
+  const seen: URLSearchParams[] = [];
+  server.use(http.get("/api/admin/batches/b1", ({ request }) => {
+    const url = new URL(request.url);
+    if (url.searchParams.get("view") === "items") seen.push(url.searchParams);
+    return HttpResponse.json(viewResponse(typeof fx === "function" ? fx() : fx, url));
+  }));
+  return seen;
+}
+
+test("쪽 조회: 머리는 view=summary, 항목은 view=items 의 100개 한 쪽 — 쪽 넘김(Pager)이 offset 을 바꾼다", async () => {
+  const views: (string | null)[] = [];
+  server.use(serveBatch(manyScan(250), views));
+  renderDetail();
+  expect(await screen.findByText("scan · s1:dir0")).toBeInTheDocument();
+  expect(screen.getByText("scan · s1:dir99")).toBeInTheDocument();
+  expect(screen.queryByText("scan · s1:dir100")).toBeNull();          // 한 쪽 = 100개
+  expect(views).toContain("summary");
+  expect(views).toContain("items");
+  expect(views).not.toContain(null);                                  // 옛 「전체」 GET 은 더 쏘지 않는다
+  expect(views).not.toContain("all");                                 // 확인 창 전용
+  const nav = screen.getByRole("navigation", { name: "항목 쪽" });
+  expect(nav).toHaveTextContent("1 / 3쪽");
+  await userEvent.click(within(nav).getByRole("button", { name: "다음" }));
+  expect(await screen.findByText("scan · s1:dir100")).toBeInTheDocument();
+  expect(screen.queryByText("scan · s1:dir0")).toBeNull();
+  expect(nav).toHaveTextContent("2 / 3쪽");
+  await userEvent.click(within(nav).getByRole("button", { name: "마지막" }));
+  expect(await screen.findByText("scan · s1:dir249")).toBeInTheDocument();
+  expect(within(nav).getByRole("button", { name: "다음" })).toBeDisabled();
+});
+
+test("쪽 조회 요청: offset·limit 이 쪽에서, 검색 q 는 300ms 디바운스 뒤 1쪽부터, 상태 칩은 status", async () => {
+  const seen = itemQueries(manyScan(250, (i) => ({ status: i % 50 === 0 ? "Failed" : "Succeeded" })));
+  const last = () => seen[seen.length - 1];
+  renderDetail();
+  await screen.findByText("scan · s1:dir1");
+  expect(seen[0].get("offset")).toBe("0");
+  expect(seen[0].get("limit")).toBe("100");
+  expect(seen[0].has("q")).toBe(false);                               // 빈 검색은 싣지 않는다
+  expect(seen[0].has("status")).toBe(false);                          // 전체는 싣지 않는다
+  await userEvent.click(screen.getByRole("button", { name: "다음" }));
+  await waitFor(() => expect(last().get("offset")).toBe("100"));
+  await userEvent.type(screen.getByLabelText("항목 경로 검색"), "dir12");
+  await waitFor(() => expect(last().get("q")).toBe("dir12"));
+  expect(last().get("offset")).toBe("0");                       // 검색이 바뀌면 1쪽부터
+  // dir12·dir120~129 -- 11개, 한 쪽이라 쪽 넘김도 없다
+  expect(await screen.findByText("검색 결과 11개")).toBeInTheDocument();
+  expect(screen.queryByRole("navigation", { name: "항목 쪽" })).toBeNull();
+  await userEvent.click(screen.getByRole("button", { name: "실패 5" }));
+  await waitFor(() => expect(last().get("status")).toBe("Failed"));
+  expect(last().get("q")).toBe("dir12");                        // 검색과 함께 건다
+  expect(await screen.findByText("검색 결과 0개")).toBeInTheDocument();
+});
+
+test("상태 칩: 수는 머리 집계(배치 전체, 0 도 그대로) — 누르면 그 상태만, 「전체」로 돌아온다", async () => {
+  server.use(serveBatch(batch({ operation: "scan", status: "Running", item_count: 3, items: [
+    { seq: 0, payload: { storage: "s1", target: "a" }, status: "Queued", request_id: null, reason_code: null },
+    { seq: 1, payload: { storage: "s1", target: "b" }, status: "Materialized", request_id: "r1", reason_code: null },
+    { seq: 2, payload: { storage: "s1", target: "c" }, status: "Failed", request_id: "r2", reason_code: "execution_failed" }] })));
+  renderDetail();
+  await screen.findByText("scan · s1:a");
+  const group = screen.getByRole("group", { name: "항목 상태" });
+  expect(within(group).getAllByRole("button").map((b) => b.textContent))
+    .toEqual(["전체 3", "대기 1", "진행 1", "성공 0", "실패 1", "거부 0", "취소 0"]);
+  expect(within(group).getByRole("button", { name: "전체 3" })).toHaveAttribute("aria-pressed", "true");
+  await userEvent.click(within(group).getByRole("button", { name: "실패 1" }));
+  expect(within(group).getByRole("button", { name: "실패 1" })).toHaveAttribute("aria-pressed", "true");
+  await waitFor(() => expect(screen.queryByText("scan · s1:a")).toBeNull());
+  expect(screen.getByText("scan · s1:c")).toBeInTheDocument();
+  expect(screen.getByText("검색 결과 1개")).toBeInTheDocument();
+  // 칩의 수는 거른 쪽이 아니라 배치 전체다 -- 걸러도 그대로
+  expect(within(group).getByRole("button", { name: "대기 1" })).toBeInTheDocument();
+  await userEvent.click(within(group).getByRole("button", { name: "전체 3" }));
+  expect(await screen.findByText("scan · s1:a")).toBeInTheDocument();
+  expect(screen.queryByText(/^검색 결과/)).toBeNull();                // 거르지 않으면 건수 줄은 없다(머리가 말한다)
+});
+
+test("검색 0건은 「검색 결과가 없습니다」 — 「항목이 없어…」가 아니고 도구 버튼(CSV·추가)도 그대로", async () => {
+  server.use(serveBatch(detailedBatch()));
+  renderDetail();
+  await screen.findByText("scan · s1:team");
+  await userEvent.type(screen.getByLabelText("항목 경로 검색"), "zzz");
+  expect(await screen.findByText("검색 결과가 없습니다")).toBeInTheDocument();
+  expect(screen.queryByText(/항목이 없어/)).toBeNull();
+  expect(screen.getByRole("button", { name: "현재 항목 CSV" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "항목 추가" })).toBeInTheDocument();
+  expect(screen.getByLabelText("전체 선택")).toBeInTheDocument();
+  // 항목 추가는 여전히 배치 스토리지를 물려받는다(머리의 first_payload -- 거른 쪽이 비어도)
+  let sent: any = null;
+  server.use(http.post("/api/admin/batches/b1/items", async ({ request }) => {
+    sent = await request.json(); return HttpResponse.json({ seq: 2, status: "Running" }, { status: 202 }); }));
+  const d = await openDialog("항목 추가");
+  await userEvent.type(d.getByLabelText("추가할 대상 경로"), "newpath");
+  await userEvent.click(d.getByRole("button", { name: "항목 추가" }));
+  await waitFor(() => expect(sent).toEqual({ storage: "s1", target: "newpath" }));
+  // 「검색 지우기」가 검색을 비우고 전체로 돌린다
+  await userEvent.click(screen.getByRole("button", { name: "검색 지우기" }));
+  expect(await screen.findByText("scan · s1:team")).toBeInTheDocument();
+  expect(screen.getByLabelText("항목 경로 검색")).toHaveValue("");
+});
+
+test("쪽 단위 선택: 전체 선택은 이 쪽의 선택 가능한 행만 — 쪽·검색·상태가 바뀌면 선택이 비워진다", async () => {
+  server.use(serveBatch(manyScan(150)));
+  renderDetail();
+  await screen.findByText("scan · s1:dir0");
+  await userEvent.click(screen.getByLabelText("전체 선택"));
+  expect(screen.getByText("100개 선택됨")).toBeInTheDocument();        // 150개가 아니다
+  await userEvent.click(screen.getByRole("button", { name: "다음" }));
+  await screen.findByText("scan · s1:dir100");
+  expect(screen.queryByText(/개 선택됨/)).toBeNull();
+  expect(screen.getByLabelText("전체 선택")).not.toBeChecked();
+  await userEvent.click(screen.getByLabelText("항목 120 선택"));
+  expect(screen.getByText("1개 선택됨")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "실패 0" }));
+  await waitFor(() => expect(screen.queryByText(/개 선택됨/)).toBeNull());
+});
+
+test("쪽 단위 선택 삭제: 2단 확인이 이 쪽에서 고른 seq 만 보낸다", async () => {
+  const hit: number[] = [];
+  server.use(serveBatch(manyScan(150)),
+             http.delete("/api/admin/batches/b1/items/:seq", ({ params }) => {
+               hit.push(Number(params.seq)); return HttpResponse.json({ deleted: 1 }); }));
+  renderDetail();
+  await screen.findByText("scan · s1:dir0");
+  await userEvent.click(screen.getByRole("button", { name: "다음" }));
+  await screen.findByText("scan · s1:dir100");
+  await userEvent.click(screen.getByLabelText("전체 선택"));
+  expect(screen.getByText("50개 선택됨")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "선택 삭제" }));
+  await userEvent.click(screen.getByRole("button", { name: "50개 삭제 확인" }));
+  await waitFor(() => expect(hit).toHaveLength(50));
+  expect(Math.min(...hit)).toBe(100);                                 // 앞 쪽(0~99)은 하나도 나가지 않았다
+});
+
+test("편집 중인 행이 쪽 넘김으로 사라지면 편집 상태를 정리한다 — 돌아와도 폼이 남아 있지 않다", async () => {
+  server.use(serveBatch(manyScan(150)));
+  renderDetail();
+  await userEvent.click(await screen.findByRole("button", { name: "항목 0 수정" }));
+  expect(screen.getByLabelText("대상 경로")).toHaveValue("dir0");
+  await userEvent.click(screen.getByRole("button", { name: "다음" }));
+  await screen.findByText("scan · s1:dir100");
+  expect(screen.queryByLabelText("대상 경로")).toBeNull();
+  await userEvent.click(screen.getByRole("button", { name: "이전" }));
+  await screen.findByText("scan · s1:dir0");
+  expect(screen.queryByLabelText("대상 경로")).toBeNull();
+  expect(screen.getByRole("button", { name: "항목 0 수정" })).toBeInTheDocument();
+});
+
+test("항목이 줄어 지금 쪽이 범위 밖이 되면 마지막 쪽으로 물러선다", async () => {
+  let n = 150;
+  server.use(serveBatch(() => manyScan(n)));
+  const { qc } = renderDetail();
+  await screen.findByText("scan · s1:dir0");
+  await userEvent.click(screen.getByRole("button", { name: "다음" }));
+  await screen.findByText("scan · s1:dir100");
+  n = 40;                                                             // 다른 세션의 CSV 교체 등
+  await qc.invalidateQueries({ queryKey: ["batch", "b1"] });
+  expect(await screen.findByText("scan · s1:dir0")).toBeInTheDocument();
+  expect(screen.queryByText("검색 결과가 없습니다")).toBeNull();
+  // 1쪽의 옛 캐시(150개 시절)가 잠깐 비칠 수 있다 -- 재조회가 착지하면 한 쪽뿐이라 쪽 넘김이 사라진다.
+  await waitFor(() => expect(screen.queryByRole("navigation", { name: "항목 쪽" })).toBeNull());
+  expect(screen.queryByText("scan · s1:dir40")).toBeNull();
+});
+
+test("머리가 종단으로 넘어가면 항목 쪽을 한 번 더 받는다 — 항목의 마지막 폴링이 그보다 앞서도 끝 상태가 굳지 않는다", async () => {
+  // 머리와 항목은 따로 도는 두 폴링이다. 항목의 마지막 조회가 머리가 Completed 를 본 시점보다 앞서면(최대 한 주기) 종단이라
+  // 둘 다 멈춰 「Completed 배치 + Materialized 항목」으로 굳었다(리뷰). 여기선 머리만 다시 받아(정확 키) 그 순간을 만든다 --
+  // 항목 쪽의 다음 폴링(2.5초)은 아직 오지 않았다.
+  let done = false;
+  const views: (string | null)[] = [];
+  server.use(serveBatch(() => batch({
+    operation: "scan", status: done ? "Completed" : "Running", succeeded_count: done ? 1 : 0,
+    items: [{ seq: 0, payload: { storage: "s1", target: "a" }, status: done ? "Succeeded" : "Materialized",
+              request_id: "r1", reason_code: null }] }), views));
+  const { qc } = renderDetail();
+  expect(await screen.findByRole("button", { name: "항목 0 상세" })).toHaveTextContent("Materialized");
+  expect(views.filter((v) => v === "items")).toHaveLength(1);        // 처음 불러올 때는 쪽을 한 번만 받는다
+  done = true;
+  await qc.refetchQueries({ queryKey: ["batch", "b1"], exact: true });
+  await waitFor(() => expect(screen.getByRole("button", { name: "항목 0 상세" })).toHaveTextContent("Succeeded"));
+});
+
+test("행은 머리가 온 뒤에만 그린다 — 항목 쪽이 먼저 와도 연산·종단 여부를 모르는 행(수정·삭제 게이트)을 그리지 않는다", async () => {
+  let release: () => void = () => {};
+  const headerGate = new Promise<void>((r) => { release = r; });
+  const views: (string | null)[] = [];
+  server.use(serveBatch(async (view) => {
+    if (view === "summary") await headerGate;
+    return manyScan(2);                                              // 종단(Completed) -- 행마다 수정·삭제가 붙는다
+  }, views));
+  renderDetail();
+  await waitFor(() => expect(views).toContain("items"));
+  await new Promise((r) => setTimeout(r, 50));                       // 항목 응답이 착지할 틈
+  expect(screen.queryByRole("button", { name: "항목 0 상세" })).toBeNull();
+  release();
+  expect(await screen.findByRole("button", { name: "항목 0 상세" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "항목 0 수정" })).toBeInTheDocument();
+});
+
+test("거르지 않았는데 쪽이 0건이면(머리와 다른 순간에 읽힘) 「검색 결과가 없습니다」라 말하지 않는다", async () => {
+  server.use(http.get("/api/admin/batches/b1", ({ request }) => {
+    const url = new URL(request.url);
+    if (url.searchParams.get("view") === "items") return HttpResponse.json({ total: 0, offset: 0, limit: 100, items: [] });
+    return HttpResponse.json(viewResponse(manyScan(3), url));
+  }));
+  renderDetail();
+  expect(await screen.findByRole("group", { name: "항목 상태" })).toBeInTheDocument();   // 머리는 항목 3개
+  await waitFor(() => expect(screen.queryByText("불러오는 중…")).toBeNull());
+  expect(screen.queryByText("검색 결과가 없습니다")).toBeNull();
+  expect(screen.queryByText(/항목이 없어 스토리지를/)).toBeNull();
+});
+
+test("배치 확인 창: 열 때만 view=all 을 1회 받고(폴링 없음), 그 응답의 회차를 고정한다 — 다시 열면 다시 받는다", async () => {
+  // 머리(summary)는 회차 3 을 들고 있는데 창을 여는 사이 서버는 회차 4(항목 추가로 다시 미리보기 → 확인 대기)가 됐다. 창은
+  // 그 응답(회차 4)의 항목을 보여 주고 회차 4 를 보낸다 -- 보여 준 항목과 보내는 회차가 같은 응답이다. 머리가 아직 3 이라
+  // 「바뀌었다」로 잠그고, 머리가 4 로 따라오면 풀린다.
+  let round = 3;
+  const views: (string | null)[] = [];
+  const posted: unknown[] = [];
+  server.use(serveBatch(() => batch({ status: "PreviewReady", preview_round: round, item_count: round === 3 ? 1 : 2,
+                                      items: [
+                                        syncItem(0, NSYNC_PREVIEW_OK),
+                                        ...(round === 3 ? [] : [syncItem(1, NSYNC_PREVIEW_OK)])] }), views),
+             http.post("/api/admin/batches/b1:confirm", async ({ request }) => {
+               posted.push(await request.json()); return HttpResponse.json({ status: "Running" }); }));
+  const { qc } = renderDetail();
+  await screen.findByRole("button", { name: "배치 확인" });
+  expect(views).not.toContain("all");                                 // 닫혀 있는 동안 전체를 받지 않는다
+  round = 4;
+  let dlg = await openConfirmDialog();
+  expect(await within(dlg).findByText("2 / 전체 2")).toBeInTheDocument();   // 전체 응답의 항목(회차 4)
+  expect(views.filter((v) => v === "all")).toHaveLength(1);
+  expect(within(dlg).getByText(/이 대화상자를 연 뒤 배치 내용이 바뀌었습니다/)).toBeInTheDocument();
+  expect(within(dlg).getByRole("button", { name: "실행 확인" })).toBeDisabled();
+  await qc.invalidateQueries({ queryKey: ["batch", "b1"] });          // 머리가 4 로 따라온다
+  await waitFor(() => expect(within(dlg).getByRole("button", { name: "실행 확인" })).toBeEnabled());
+  expect(views.filter((v) => v === "all")).toHaveLength(1);           // 머리 무효화가 창의 전체 조회를 다시 쏘지 않는다
+  await userEvent.click(within(dlg).getByRole("button", { name: "실행 확인" }));
+  await waitFor(() => expect(posted).toEqual([{ preview_round: 4 }]));
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "배치 확인" })).toBeNull());
+  dlg = await openConfirmDialog();
+  await within(dlg).findByText("2 / 전체 2");
+  expect(views.filter((v) => v === "all")).toHaveLength(2);           // 다시 열면 새로 받는다
+});
+
+test("배치 확인 창: 받기 전엔 「불러오는 중」 + 「실행 확인」 잠금, 조회 실패는 사유를 보이고 잠긴 채", async () => {
+  let fail = false;
+  server.use(http.get("/api/admin/batches/b1", async ({ request }) => {
+    const url = new URL(request.url);
+    if (url.searchParams.get("view") === "all") {
+      await delay(150);
+      if (fail) return HttpResponse.json({ detail: "http_500" }, { status: 500 });
+    }
+    return HttpResponse.json(viewResponse(batch({ status: "PreviewReady" }), url));
+  }));
+  renderDetail();
+  let dlg = await openConfirmDialog();
+  expect(within(dlg).getByText("확인할 항목을 불러오는 중…")).toBeInTheDocument();
+  expect(within(dlg).getByRole("button", { name: "실행 확인" })).toBeDisabled();
+  expect(await within(dlg).findByText("0 / 전체 1")).toBeInTheDocument();
+  await userEvent.click(within(dlg).getByRole("button", { name: "취소" }));
+  fail = true;
+  dlg = await openConfirmDialog();
+  expect(await within(dlg).findByRole("alert")).toHaveTextContent("서버 오류가 발생했습니다");
+  expect(within(dlg).queryByRole("button", { name: "실행 확인" })).toBeNull();
+});
+
+test("배치 확인 창의 집계는 목록의 검색·쪽과 무관하게 전 항목이다", async () => {
+  renderItems({ item_count: 3, items: [syncItem(0, NSYNC_PREVIEW_OK), syncItem(1, NSYNC_PREVIEW_OK),
+                                       syncItem(2, null, { status: "Rejected", job_state: "Rejected" })] });
+  await screen.findByText(/src0/);
+  await userEvent.type(screen.getByLabelText("항목 경로 검색"), "src1");
+  expect(await screen.findByText("검색 결과 1개")).toBeInTheDocument();
+  const dlg = await openConfirmDialog();
+  expect(await within(dlg).findByText("2 / 전체 3")).toBeInTheDocument();
+});
+
+test("실행 설정의 direct 안내는 머리의 direct_tools(서버 셈)를 쓴다 — 쪽에 보이는 항목으로 다시 세지 않는다", async () => {
+  // 서버는 전 항목을 세고(4개 모두 nsync), 화면 첫 쪽엔 도구를 모르는 항목만 보인다고 해도 서버 셈이 진실이다.
+  server.use(serveBatch(batch({ status: "Completed", options: { direct: true },
+    direct_tools: { tools_known: 4, nsync: 4, undecided: 0 },
+    items: [{ seq: 0, payload: { source: "a" }, status: "Succeeded", request_id: "r1", reason_code: null }] })));
+  renderDetail();
+  await userEvent.click(await screen.findByText("실행 설정"));
+  expect(screen.getByText("옵션").nextElementSibling)
+    .toHaveTextContent("direct 는 적용되지 않습니다 — 항목이 모두 nsync 로 실행됩니다(dsync 만 O_DIRECT 로 읽고 씁니다)");
+});
+
+test("머리의 executing_count 가 null(서버가 세지 않음)이면 「이미 실행 중」을 말하지 않는다", async () => {
+  server.use(serveBatch(batch({ status: "PreviewReady", executing_count: null, items: [
+    { seq: 0, payload: { source: "a" }, status: "Materialized", request_id: "r1", reason_code: null, job_state: "Executing" }] })));
+  renderDetail();
+  expect(await screen.findByRole("status")).toHaveTextContent(
+    "미리보기가 끝났습니다 — 「배치 확인」을 눌러야 실행됩니다. 확인 전에는 어떤 항목도 실행되지 않습니다.");
+});
+
+test("rm 항목 추가: 겹침 재료는 창을 열 때 view=payloads 로 받고, 받는 동안 「항목 추가」가 잠긴다", async () => {
+  const views: (string | null)[] = [];
+  server.use(http.get("/api/admin/batches/b1", async ({ request }) => {
+    const url = new URL(request.url);
+    views.push(url.searchParams.get("view"));
+    if (url.searchParams.get("view") === "payloads") await delay(150);
+    return HttpResponse.json(viewResponse(batch(rmBatch({ status: "Completed" })), url));
+  }));
+  renderDetail();
+  await screen.findByText(/team\/old-a/);
+  expect(views).not.toContain("payloads");                            // 닫혀 있는 동안은 받지 않는다
+  await userEvent.click(screen.getByRole("button", { name: "항목 추가" }));
+  const dlg = await screen.findByRole("dialog", { name: "항목 추가" });
+  expect(within(dlg).getByText(/기존 항목을 불러오는 중/)).toBeInTheDocument();
+  expect(within(dlg).getByRole("button", { name: "항목 추가" })).toBeDisabled();
+  await waitFor(() => expect(within(dlg).queryByText(/기존 항목을 불러오는 중/)).toBeNull());
+  expect(views.filter((v) => v === "payloads")).toHaveLength(1);
+  await userEvent.type(within(dlg).getByLabelText("추가할 대상 경로"), "team/gone/x");   // 종단(거부) 항목의 자손
+  expect(within(dlg).getByRole("list", { name: "추가할 수 없는 삭제 경로" })).toHaveTextContent("기존 #3의 경로(team/gone) 아래입니다");
+});
+
+test("현재 항목 CSV 는 열 때만 view=payloads 로 받는다 — 검색으로 거른 쪽이 아니라 전 항목(왕복 계약)", async () => {
+  const views: (string | null)[] = [];
+  server.use(serveBatch(detailedBatch(), views));
+  renderDetail();
+  await screen.findByText("scan · s1:team");
+  expect(views).not.toContain("payloads");
+  await userEvent.type(screen.getByLabelText("항목 경로 검색"), "proj");
+  await screen.findByText("검색 결과 1개");
+  const d = await openDialog("현재 항목 CSV");
+  expect(await d.findByLabelText("현재 항목 CSV")).toHaveValue("target\nteam\nproj");
+  expect(views.filter((v) => v === "payloads")).toHaveLength(1);
+});
+
+// 옛 파드(롤링 중 view 를 모르는 서버): 어떤 view 를 달아도 옛 전체 응답(배치 + 전 항목, 집계 키 없음)을 준다. 화면은 그 items
+// 에서 머리 집계·쪽·검색·상태를 파생해 같은 화면을 그린다(batchView). 이 핸들러는 serveBatch 를 쓰지 않는다 -- view 를 무시한다.
+function serveOldPod(fx: Fixture) {
+  server.use(http.get("/api/admin/batches/b1", () => HttpResponse.json(fx)));
+}
+
+test("옛 파드 물러서기: 전체 응답만 와도 칩 수·쪽 나눔·검색·상태 거르기가 화면에서 같은 규칙으로 된다", async () => {
+  serveOldPod(manyScan(150, (i) => ({ status: i < 3 ? "Failed" : "Succeeded" })));
+  renderDetail();
+  expect(await screen.findByText("scan · s1:dir0")).toBeInTheDocument();
+  expect(screen.queryByText("scan · s1:dir100")).toBeNull();          // 화면이 100개로 자른다
+  expect(screen.getByRole("navigation", { name: "항목 쪽" })).toHaveTextContent("1 / 2쪽");
+  const group = screen.getByRole("group", { name: "항목 상태" });
+  expect(within(group).getByRole("button", { name: "전체 150" })).toBeInTheDocument();
+  expect(within(group).getByRole("button", { name: "실패 3" })).toBeInTheDocument();
+  expect(within(group).getByRole("button", { name: "대기 0" })).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "다음" }));
+  expect(await screen.findByText("scan · s1:dir149")).toBeInTheDocument();
+  await userEvent.click(within(group).getByRole("button", { name: "실패 3" }));
+  expect(await screen.findByText("검색 결과 3개")).toBeInTheDocument();
+  expect(screen.getByText("scan · s1:dir2")).toBeInTheDocument();
+  await userEvent.type(screen.getByLabelText("항목 경로 검색"), "dir1");
+  expect(await screen.findByText("검색 결과 1개")).toBeInTheDocument();     // 실패 ∧ dir1
+});
+
+test("옛 파드 물러서기: 머리 문구(실행 중 배너·direct 안내)·도구 버튼·확인 창이 items 에서 파생된다", async () => {
+  serveOldPod(batch({ status: "PreviewReady", options: { direct: true }, item_count: 2, items: [
+    { seq: 0, payload: { source_storage: "s1", source: "a", destination_storage: "s2", destination: "b" },
+      status: "Materialized", request_id: "r1", reason_code: null, job_state: "Executing", job_tool: "nsync" },
+    syncItem(1, NSYNC_PREVIEW_OK)] }));
+  renderDetail();
+  expect(await screen.findByRole("status")).toHaveTextContent("이미 확인돼 실행 중인 항목 1개만 계속 돌고");
+  await userEvent.click(screen.getByText("실행 설정"));
+  expect(screen.getByText("옵션").nextElementSibling)
+    .toHaveTextContent("direct 는 적용되지 않습니다 — 항목이 모두 nsync 로 실행됩니다");
+  expect(screen.getByRole("button", { name: "현재 항목 CSV" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "항목 추가" })).toBeInTheDocument();   // 첫 항목에서 물려받는다
+  const dlg = await openConfirmDialog();
+  expect(await within(dlg).findByText("1 / 전체 2")).toBeInTheDocument();
+  const d = await openDialogAfterClose(dlg, "현재 항목 CSV");
+  expect(await d.findByLabelText("현재 항목 CSV")).toHaveValue("source,destination\na,b\nsrc1,dst1");
+});
+async function openDialogAfterClose(dlg: HTMLElement, name: string) {
+  await userEvent.click(within(dlg).getByRole("button", { name: "취소" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  return openDialog(name);
+}
+
+test("옛 파드 물러서기: 항목이 0개인 전체 응답은 「항목이 없어…」(머리·쪽 모두 0)", async () => {
+  serveOldPod(batch({ operation: "scan", status: "Completed", item_count: 0, items: [] }));
+  renderDetail();
+  expect(await screen.findByText(/항목이 없어 스토리지를 물려받을 수 없습니다/)).toBeInTheDocument();
+  expect(screen.queryByRole("group", { name: "항목 상태" })).toBeNull();
+  expect(screen.queryByText("검색 결과가 없습니다")).toBeNull();
 });

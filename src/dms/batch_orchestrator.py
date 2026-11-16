@@ -113,6 +113,34 @@ def preview_files(items) -> dict:
             "files_by_tool": by_tool}
 
 
+# 도구 없이 끝난 항목 상태(거부·실패·취소 -- 잡이 만들어지지 않았을 수 있다). direct_tool_counts 의 「미정」에서 뺀다 --
+# 포탈 BatchDetail ITEM_NOT_RUN 과 같은 집합.
+_ITEM_NOT_RUN = _ITEM_TERMINAL - {"Succeeded"}
+
+
+def direct_tool_counts(items) -> dict:
+    """direct 옵션 안내(포탈 BatchDetail directNote)의 재료 -- {tools_known, nsync, undecided}. 배치 상세 요약
+    (GET .../batches/{id}?view=summary 의 direct_tools)이 항목 목록 없이 이것만 싣고, 포탈은 이 수로 같은 문구를 만든다.
+      tools_known  도구를 아는 항목 수(_preview_tool -- 잡 행 tool 먼저, 없으면 미리보기 summary v2 의 tool; 포탈
+                   summaryTool 과 같은 순서·같은 허용 집합)
+      nsync        그중 nsync 항목 수(direct 는 dsync 만 적용한다 -- 포크 db1e33c)
+      undecided    도구를 모르고 앞으로 돌 수 있는 항목 수 = 도구 None 이고 상태가 _ITEM_NOT_RUN 밖(도구 없이 끝난 항목은
+                   앞으로도 돌지 않으니 넣지 않는다 -- 넣으면 끝난 배치에서도 「모두 nsync」를 영영 못 말한다)
+    판정을 포탈과 서버가 따로 들면 한쪽만 바뀌는 순간 화면 문구가 실제 배치(placement)와 어긋난다 -- 그래서 도구 판정은
+    감사 행 files_by_tool 과 같은 _preview_tool 하나다. items = BatchesRepository.list_item_tools(또는 같은 키를 가진
+    list_items_detail 행)."""
+    tools_known = nsync = undecided = 0
+    for it in items:
+        tool = _preview_tool(it)
+        if tool is not None:
+            tools_known += 1
+            if tool == "nsync":
+                nsync += 1
+        elif it.get("status") not in _ITEM_NOT_RUN:
+            undecided += 1
+    return {"tools_known": tools_known, "nsync": nsync, "undecided": undecided}
+
+
 # 자동 확인 감사 행의 actor. 계정 이름 규칙(repositories/accounts._USERNAME_RE -- [a-z0-9][a-z0-9._-]*)에 없는 ':' 를
 # 넣어, 같은 이름의 사람 계정이 확인한 기록이 「자동 확인」으로 읽히는 일이 없게 한다. 켠 사람은 after_state 에 남는다.
 AUTO_CONFIRM_ACTOR = "system:auto-confirm"

@@ -289,7 +289,34 @@ export interface Batch {
   // 상세 GET 만: 자동 확인이 켜진 진행 중 sync·rm 배치가 지금 확인하면 보류될 사유 코드(null = 곧 자동 실행). 서버가
   // orchestrator 와 같은 술어로 판정한다(batch_orchestrator.auto_confirm_hold).
   auto_confirm_hold?: string | null;
+  // 대상 스토리지(2026-11-16, 목록·summary): 첫 항목(MIN(seq)) payload 에서 서버가 뽑은 값 -- 배치는 스토리지 한 종류(sync 는 한
+  // 쌍)라 첫 항목이 배치의 스토리지다. scan/rm 은 storage, sync 는 source_storage·destination_storage. null = 모름(항목 0개·깨진
+  // payload·문자열 아님). 옵션(?) = 옛 서버·기존 fixture 호환.
+  storage?: string | null;
+  source_storage?: string | null;
+  destination_storage?: string | null;
 }
+// 실행 설정의 direct 안내 재료(2026-11-16, ?view=summary): options.direct === true 일 때만 서버가 센다(아니면 null). 판정은
+// 화면 directNote 와 같은 규칙(도구 = job_tool 먼저, 없으면 미리보기 summary v2 의 tool; undecided = 도구 없음 ∧ 항목이 거부·
+// 실패·취소가 아님).
+export interface BatchDirectTools { tools_known: number; nsync: number; undecided: number }
+// 상세 머리(2026-11-16, GET /api/admin/batches/{id}?view=summary): 배치 행 + 집계. items 는 싣지 않는다 -- 항목은 쪽 조회
+// (?view=items)와 대화상자의 1회 조회(?view=all·payloads)가 따로 받는다. 집계 키가 옵션(?)인 이유: 롤링 중 옛 파드는 view 를
+// 모르고 옛 전체 응답(items 포함)을 준다 -- 화면(useBatch)이 그 items 에서 파생해 물러선다.
+export interface BatchSummary extends Batch {
+  item_total?: number;
+  // 상태별 항목 수 -- 0 도 값이다(없는 상태 키는 0 으로 읽는다).
+  status_counts?: Record<string, number>;
+  first_payload?: Record<string, unknown> | null;
+  // sync·rm 이 Previewing·PreviewReady 일 때만 센다(확인 단계 배너 재료) -- 그 밖 null(= 말할 것 없음, 0 과 다르다).
+  executing_count?: number | null;
+  direct_tools?: BatchDirectTools | null;
+  items?: BatchItem[];
+}
+// 항목 한 쪽(?view=items&offset=&limit=&q=&status=): total 은 거른 뒤의 수(쪽 수·「검색 결과 N개」의 재료).
+export interface BatchItemsPage { total: number; offset: number; limit: number; items: BatchItem[] }
+// 가벼운 전 항목(?view=payloads) -- 현재 항목 CSV·rm 겹침 즉답용. 조인 필드는 없다.
+export interface BatchPayloadItem { seq: number; payload: Record<string, unknown>; status: string }
 export interface BatchItem {
   seq: number; payload: Record<string, unknown>; status: string;
   request_id: string | null; reason_code: string | null;

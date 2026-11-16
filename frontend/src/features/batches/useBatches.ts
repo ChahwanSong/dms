@@ -1,7 +1,10 @@
+import { useEffect, useRef } from "react";
 import { useMutation, useQuery, useQueryClient,
          type QueryClient } from "@tanstack/react-query";
 import { ApiError, apiGet, apiSend } from "../../lib/api";
-import type { Batch, BatchDetail, RequestScanStats } from "../../lib/types";
+import type { Batch, BatchDetail, BatchSummary, RequestScanStats } from "../../lib/types";
+import { BATCH_ITEMS_PAGE_SIZE, headerOf, pageOf, payloadsOf, type BatchHeader,
+         type BatchItemsParams } from "./batchView";
 
 // 서버 routes_batches._TERMINAL_BATCH 의 거울. 상세 폴링 중지와 목록의 "삭제 가능"
 // 판정이 같은 한 벌을 쓴다 — 두 벌로 갈라지면 화면이 지우지 못할 배치를 지울 수
@@ -22,9 +25,63 @@ export const autoConfirmable = (op: string | undefined): boolean => op !== undef
 export const useBatches = () =>
   useQuery({ queryKey: ["batches"], queryFn: () => apiGet<Batch[]>("/api/admin/batches"),
             refetchInterval: 4000 });
+// 상세 폴링 규칙(머리·항목 쪽 공용): 종단이면 멈추고, 모르면(로딩) 돈다.
+const pollWhile = (status: string | undefined) => (BATCH_TERMINAL.has(status ?? "") ? false : 2500);
+// 상세 머리(2026-11-16 ?view=summary -- 배치 행 + 항목 집계, items 없음). 옛 파드는 view 를 무시하고 옛 전체 응답을 주므로
+// headerOf 가 그 items 에서 같은 모양을 파생한다(batchView 머리 주석). 키는 그대로 ["batch", id] -- 무효화·제거가 이 접두로
+// 걸리고(_refresh·useDeleteBatch·useJobs·useUsage), 항목 쪽·payloads 키가 그 아래에 있어 함께 걸린다.
 export const useBatch = (id: string) =>
-  useQuery({ queryKey: ["batch", id], queryFn: () => apiGet<BatchDetail>(`/api/admin/batches/${id}`),
-    refetchInterval: (q) => (BATCH_TERMINAL.has((q.state.data as BatchDetail | undefined)?.status ?? "") ? false : 2500) });
+  useQuery({ queryKey: ["batch", id],
+    queryFn: async (): Promise<BatchHeader> =>
+      headerOf(await apiGet<BatchSummary>(`/api/admin/batches/${id}?view=summary`)),
+    refetchInterval: (q) => pollWhile((q.state.data as BatchHeader | undefined)?.status) });
+// 항목 한 쪽(?view=items). 키는 ["batch", id, "items", {page,q,status}] -- 접두 ["batch", id] 유지(위 주석). 쪽·검색·상태를
+// 바꾸는 동안 앞 쪽을 자리표시로 둔다(같은 배치일 때만 -- 다른 배치의 항목이 이 배치 머리 밑에 비치면 안 된다). 폴링은 머리와
+// 같은 규칙인데 항목 응답엔 배치 상태가 없어 호출측이 머리의 상태를 넘긴다. 옛 파드(전체 배치 응답)면 pageOf 가 화면에서
+// 같은 규칙으로 거르고 자른다.
+// 머리가 종단으로 넘어가는 순간 항목 쪽을 **한 번 더** 받는다: 머리와 항목은 따로 도는 두 폴링이라 항목의 마지막 조회가 머리가
+// 종단을 본 시점보다 앞설 수 있고(최대 한 주기), 종단이면 둘 다 멈추므로 마지막 항목들의 끝 상태(성공·실패)를 영영 못 본 채
+// 「Completed 배치 + Materialized 항목」으로 굳는다(예전엔 한 응답이라 이 어긋남이 없었다). 처음 불러올 때(앞 상태 모름)는
+// 두 조회가 같은 순간에 떠서 받지 않는다 -- 쪽 하나를 두 번 받지 않게.
+export const useBatchItems = (id: string, params: BatchItemsParams, batchStatus: string | undefined) => {
+  const qc = useQueryClient();
+  const seen = useRef(batchStatus);
+  useEffect(() => {
+    const was = seen.current;
+    seen.current = batchStatus;
+    if (was !== undefined && was !== batchStatus && BATCH_TERMINAL.has(batchStatus ?? "")) {
+      void qc.invalidateQueries({ queryKey: ["batch", id, "items"] });
+    }
+  }, [qc, id, batchStatus]);
+  return useQuery({ queryKey: ["batch", id, "items", params],
+    queryFn: async () => {
+      const p = new URLSearchParams({ view: "items", offset: String((params.page - 1) * BATCH_ITEMS_PAGE_SIZE),
+                                      limit: String(BATCH_ITEMS_PAGE_SIZE) });
+      if (params.q !== "") p.set("q", params.q);
+      if (params.status !== null) p.set("status", params.status);
+      return pageOf(await apiGet<unknown>(`/api/admin/batches/${id}?${p}`), params);
+    },
+    placeholderData: (prev, prevQuery) => (prevQuery?.queryKey[1] === id ? prev : undefined),
+    refetchInterval: pollWhile(batchStatus) });
+};
+// 가벼운 전 항목(?view=payloads -- seq·payload·status): 현재 항목 CSV·rm 항목 추가의 겹침 즉답이 **창을 열었을 때만** 한 번
+// 받는다(enabled = 열림). 폴링하지 않고, 열 때마다 다시 받는다(staleTime 0). gcTime 0 이라 구독자가 없어지면(현재 항목 CSV 창
+// 본문은 열린 동안만 마운트) 캐시에서 버린다 -- 단 rm 항목 추가 창은 트리거와 함께 늘 마운트돼(비활성 구독) 지난 목록이 캐시에
+// 남는다: 그래서 그 창은 다시 받는 동안(isFetching) 낡은 목록으로 즉답하지 않고 「항목 추가」를 잠근다(AddItemDialog).
+export const useBatchPayloads = (id: string, enabled: boolean) =>
+  useQuery({ queryKey: ["batch", id, "payloads"],
+    queryFn: async () => payloadsOf(await apiGet<unknown>(`/api/admin/batches/${id}?view=payloads`)),
+    enabled, gcTime: 0, refetchOnWindowFocus: false });
+// 배치 확인 창의 전체 조회(?view=all -- 옛 전체 응답과 같은 모양: 배치 + 조인된 전 항목). 창을 열 때 **한 번**만 받고, 그
+// 응답의 preview_round 를 확인 회차로 고정한다 -- 회차와 화면의 항목이 같은 응답에서 와야 본 적 없는 항목이 확인에 묻지
+// 않는다(서버는 배치 행을 먼저 읽고 항목을 읽는다; 그 뒤 바뀌면 confirm CAS 가 거부한다). 그래서 키를 ["batch", id] 접두
+// **밖**에 둔다: 열린 동안 다른 변이의 무효화가 항목만 새로 받아 회차와 어긋나게 하지 않도록. nonce = 연 횟수 -- 다시 열면
+// 새 키라 반드시 새로 받는다(gcTime 0 + staleTime Infinity: 열린 동안 재조회 없음, 닫으면 버린다).
+export const useBatchAll = (id: string, nonce: number) =>
+  useQuery({ queryKey: ["batch-confirm", id, nonce],
+    queryFn: () => apiGet<BatchDetail>(`/api/admin/batches/${id}?view=all`),
+    staleTime: Infinity, gcTime: 0, refetchInterval: false,
+    refetchOnWindowFocus: false, refetchOnReconnect: false });
 export interface CreateBatchBody {
   operation: string; max_concurrency: number; options: Record<string, unknown>;
   note: string | null; items: Record<string, string>[];

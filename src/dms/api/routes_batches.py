@@ -1,6 +1,6 @@
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, StrictBool
-from ..batch_orchestrator import auto_confirm_hold, preview_files
+from ..batch_orchestrator import auto_confirm_hold, direct_tool_counts, preview_files
 from ..batch_cancel import mark_cancel_reached, record_item_terminal, settle_child
 from ..domain import (DataJobState, DomainValidationError, Operation, auto_confirmable, build_data_payload,
                       confirm_gated, validate_batch, validate_batch_controls,
@@ -278,19 +278,89 @@ def delete_batch(batch_id: str, request: Request,
     return {"deleted": batch_id}
 
 
+# 상세 조회 방식(2026-11-16 -- 큰 배치에서 폴링마다 전 항목 상세 조인·수 MB 응답을 내던 것을 쪼갰다). 밖의 값은 pydantic
+# pattern 422(http_422 일반 문구 -- 새 사유 코드 없음).
+_DETAIL_VIEW = "^(summary|items|payloads|all)$"
+# view=items 한 쪽 크기: 기본은 화면의 쪽 크기, 1–500 으로 접는다(거부하지 않는다 -- 상한은 상세 조인 한 번의 크기다).
+_ITEM_PAGE_DEFAULT = 100
+_ITEM_PAGE_MAX = 500
+# 진행 중 배너의 「이미 실행 중인 항목」을 셀 배치 상태(미리보기 단계로 돌아온 확인 게이트 배치만 그 문구가 있다).
+_PREVIEW_STATES = ("Previewing", "PreviewReady")
+# view=items 의 검색 대상 payload 키(경로만 -- 스토리지 이름은 배치에 한 종류라 거를 뜻이 없다).
+_ITEM_SEARCH_KEYS = ("target", "source", "destination")
+
+
+def _auto_confirm_hold_for(request, b):
+    """자동 확인이 켜진 진행 중 sync·rm 배치가 지금 확인하면 보류될 사유(없으면 null) -- orchestrator 와 같은 술어라 화면이
+    「곧 자동 실행」과 「보류 — 직접 확인 필요」를 실제 동작대로 말한다. 꺼졌거나 끝난 배치는 null(판정할 확인이 없다)."""
+    return (auto_confirm_hold(request.app.state.repos, request.app.state.settings, b)
+            if b["auto_confirm"] and b["status"] in _PREVIEW_STATES else None)
+
+
+def _item_matches(head, q, status) -> bool:
+    """view=items 거르기: status 는 항목 상태 정확 일치(모르는 값은 아무것도 걸리지 않는다 -- 빈 결과), q 는 경로
+    (target·source·destination) 부분 문자열 -- 대소문자를 접지 않는다(사용량 분석 검색과 같다). 둘 다 None·빈 문자열이면
+    거르지 않는다. 깨진 payload(None)는 어떤 검색어에도 걸리지 않는다."""
+    if status is not None and status != "" and head["status"] != status:
+        return False
+    if q is None or q == "":
+        return True
+    p = head["payload"] or {}
+    return any(isinstance(p.get(k), str) and q in p[k] for k in _ITEM_SEARCH_KEYS)
+
+
 @router.get("/api/admin/batches/{batch_id}")
-def get_batch(batch_id: str, request: Request, identity: Identity = Depends(require_admin)):
+def get_batch(batch_id: str, request: Request,
+              view: "str | None" = Query(None, pattern=_DETAIL_VIEW),
+              offset: int = Query(0, ge=0),
+              limit: "int | None" = Query(None),
+              q: "str | None" = Query(None, max_length=512),
+              status: "str | None" = Query(None),
+              identity: Identity = Depends(require_admin)):
+    """배치 상세. view 로 무게를 고른다(2026-11-16):
+      없음·all  배치 행 + items(전 항목 상세 조인) + auto_confirm_hold -- 지금 그대로. view 없음을 바꾸지 않는 이유: 롤링 중
+                옛 포탈 탭이 항목 없는 응답을 받으면 확인 창이 「0 / 전체 0」으로 열리고 그 확인을 서버가 받는다(회차·동의가
+                맞으니) -- root 삭제의 맹목 승인이다. all 은 새 포탈의 확인 창 전용 1회 조회(같은 코드 경로).
+                배치 행을 **먼저** 읽고 항목을 읽는다: 확인 창이 고정하는 회차(preview_round)가 보여 준 항목보다 오래되지 않게
+                -- 회차 뒤에 항목이 바뀌면(추가·재실행 → Previewing 복귀, 다음 PreviewReady 에서 회차 +1) :confirm 의 상태·
+                회차 CAS 가 거부한다. 반대 순서면 옛 항목에 새 회차가 붙어 본 적 없는 항목이 확인에 묻힌다.
+      summary   배치 행 + auto_confirm_hold + item_overview(item_total·status_counts·first_payload·스토리지 세 키) +
+                executing_count + direct_tools -- items 없음(2.5초 폴링의 머리). executing_count 는 확인 게이트 배치가
+                미리보기 단계(Previewing·PreviewReady)일 때만 세고 그 밖은 null(배너가 없다 -- null 은 「말할 것 없음」,
+                0 은 정상값). direct_tools 는 options.direct 가 명시 true 일 때만 {tools_known, nsync, undecided}, 아니면
+                null(포탈 directNote 의 첫 판정과 같다).
+      items     {total, offset, limit, items}: 가벼운 읽기(list_item_heads)로 거르고(q·status -- _item_matches) 센 뒤
+                [offset, offset+limit) 를 잘라 **그 쪽의 seq 만** 상세 조인(list_items_detail(seqs) -- 행 모양은 전체 조회와
+                같다). limit 은 1–500 으로 접는다(없으면 100), offset ≥ 0(음수 422). 쪽 행의 payload 는 지금처럼 읽는다 --
+                깨진 JSON 항목이 든 쪽만 view 없음과 같이 실패하고(행 payload 를 지어내지 않는다), 요약·다른 쪽·검색은 산다.
+      payloads  {items: [{seq, payload, status}]} 전 항목(상세 조인 없음) -- CSV 내보내기·rm 겹침 미리 검사가 열 때 1회.
+                행 payload 라 list_items 그대로 읽는다(깨진 JSON 이면 view 없음과 같이 실패 -- CSV 왕복에 None 을 섞지 않는다)."""
     repo = request.app.state.repos.batches
     b = repo.get(batch_id)
     if b is None:
         raise HTTPException(status_code=404, detail="batch_not_found")
+    if view == "items":
+        size = _ITEM_PAGE_DEFAULT if limit is None else max(1, min(_ITEM_PAGE_MAX, limit))
+        hits = [h for h in repo.list_item_heads(batch_id) if _item_matches(h, q, status)]
+        page = [h["seq"] for h in hits[offset:offset + size]]
+        return {"total": len(hits), "offset": offset, "limit": size,
+                "items": repo.list_items_detail(batch_id, seqs=page)}
+    if view == "payloads":
+        return {"items": [{"seq": it["seq"], "payload": it["payload"], "status": it["status"]}
+                          for it in repo.list_items(batch_id)]}
+    if view == "summary":
+        b["auto_confirm_hold"] = _auto_confirm_hold_for(request, b)
+        b.update(repo.item_overview(batch_id))
+        b["executing_count"] = (repo.count_executing_items(batch_id)
+                                if confirm_gated(b["operation"]) and b["status"] in _PREVIEW_STATES else None)
+        options = b["options"]
+        b["direct_tools"] = (direct_tool_counts(repo.list_item_tools(batch_id))
+                             if isinstance(options, dict) and options.get("direct") is True else None)
+        return b
     # 화면용 상세 조인(request_state/files_count/completed_at) — 실행 루프가 쓰는
     # list_items 와 분리돼 있다(repo docstring 참고).
     b["items"] = repo.list_items_detail(batch_id)
-    # 자동 확인이 켜진 진행 중 sync·rm 배치가 지금 확인하면 보류될 사유(없으면 null) -- orchestrator 와 같은 술어라 화면이
-    # 「곧 자동 실행」과 「보류 — 직접 확인 필요」를 실제 동작대로 말한다. 꺼졌거나 끝난 배치는 null(판정할 확인이 없다).
-    b["auto_confirm_hold"] = (auto_confirm_hold(request.app.state.repos, request.app.state.settings, b)
-                              if b["auto_confirm"] and b["status"] in ("Previewing", "PreviewReady") else None)
+    b["auto_confirm_hold"] = _auto_confirm_hold_for(request, b)
     return b
 
 
