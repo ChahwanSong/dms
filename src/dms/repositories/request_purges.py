@@ -558,6 +558,11 @@ class RequestPurgesRepository:
                         "DELETE FROM batches WHERE batch_id = :b AND status IN ('Completed', 'Cancelled')",
                         {"b": batch_id}) != 1:
                     raise _Lost()
+                # 배치 스케줄과 회차 이력(2026-11-16)도 같은 트랜잭션에서 -- 배치 기록 삭제(BatchesRepository.delete)와 같은
+                # 목록(batches.BATCH_DELETE_TABLES). 잠금은 항목 → 배치 → (요청·잡) → 스케줄 순이고, 스케줄을 쥐는 경로(발사·
+                # 스케줄 라우트)는 항목·배치를 먼저 쥐므로 교착이 없다. 배치 행이 없는 묶음도 지운다(남은 스케줄은 고아다).
+                self._db.execute("DELETE FROM batch_schedules WHERE batch_id = :b", {"b": batch_id})
+                self._db.execute("DELETE FROM batch_schedule_runs WHERE batch_id = :b", {"b": batch_id})
                 if self._db.query_one(f"SELECT 1 AS x FROM requests WHERE {batch_match('b')} LIMIT 1", {"b": batch_id}):
                     raise _Lost()                     # 유령 자식 -- 사용자가 보지 않은 자식은 지우지 않는다
                 self._db.execute(

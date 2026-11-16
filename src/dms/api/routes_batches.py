@@ -716,10 +716,15 @@ def rescan_batch(batch_id: str, request: Request, identity: Identity = Depends(r
     _reject_stale_options(b)
     # 성공 item 포함 전체 리셋: 용도가 성장 모니터링(같은 대상 재스캔)이라
     # "실패만"이 아니라 전부를 다시 돌린다(:rerun-failed 와의 차이).
-    n = repo.reset_all_items(batch_id)
-    status = "Previewing" if confirm_gated(b["operation"]) else "Running"
-    repo.set_status(batch_id, status)
-    return {"status": status, "requeued": n}
+    # 리셋·카운터·상태 전이는 저장소 한 트랜잭션의 종단 CAS 다(rescan_if_terminal -- 배치 스케줄러 회차와 같은 몸통
+    # _rescan_locked, 2026-11-16). 위 읽기 뒤 그 사이 다른 재실행·스케줄 회차가 먼저 되살렸으면 None = 409 -- 예전엔 읽기와
+    # 무조건 set_status 사이의 창에서 이미 확인돼 Running 인 배치를 Previewing 으로 되돌렸다.
+    done = repo.rescan_if_terminal(batch_id)
+    if done is None:
+        if repo.get(batch_id) is None:
+            raise HTTPException(status_code=404, detail="batch_not_found")
+        raise HTTPException(status_code=409, detail="batch_not_rescannable")
+    return {"status": done["status"], "requeued": done["requeued"]}
 
 
 _CANCELABLE = ("Previewing", "PreviewReady", "Running")

@@ -1,7 +1,7 @@
 import { matchPath } from "react-router-dom";
 import type { LucideIcon } from "lucide-react";
 import {
-  Ban, Boxes, Database, FilePlus, FolderCog, Hammer,
+  Ban, Boxes, CalendarClock, Database, FilePlus, FolderCog, Hammer,
   Layers, LayoutDashboard, ListTodo, Mail, Rocket, ScrollText,
   Server, Settings, Shield, SlidersHorizontal, TrendingUp, Users,
 } from "lucide-react";
@@ -54,10 +54,13 @@ export const NAVIGATION: NavSection[] = [
         // adminOnly -- 그룹은 모두에게 보이고 사용자에겐 단일·전체 두 항목만 남는다.
         // 「전체 작업」(구 「내 작업」, 개명 2026-08-22): 운영자는 전 요청, 사용자는 자기
         // 요청 -- 요청자 열·필터·무한 스크롤이 붙었다.
+        // 「배치 스케줄러」(2026-11-16 사용자 결정 「작업 > 배치 스케줄러」): 배치 작업 바로 아래. 경로가 /admin/batches/…
+        // 가 아니라 /admin/batch-schedules 인 이유: :batchId 패턴과 겹치지 않는다(new·history 같은 순서 함정 없음).
         label: "작업",
         items: [
           { path: "/jobs/new", label: "단일 작업", icon: FilePlus },
           { path: "/admin/batches", label: "배치 작업", icon: Layers, adminOnly: true },
+          { path: "/admin/batch-schedules", label: "배치 스케줄러", icon: CalendarClock, adminOnly: true },
           { path: "/jobs", label: "전체 작업", icon: ListTodo },
         ],
       },

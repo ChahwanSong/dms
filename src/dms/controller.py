@@ -6,6 +6,7 @@ from typing import Callable
 
 from .artifact_base import controller_check_once
 from .batch_orchestrator import BatchOrchestrator
+from .batch_scheduler import BatchScheduler
 from .build_watcher import BuildWatcher
 from .config import Settings
 from .db import utc_now_iso
@@ -80,6 +81,12 @@ def build_loops(settings: Settings, repos: Repositories, *, identity_resolver=No
              lambda: reconcile_storages_once(
                  repos, stale_seconds=settings.agent_report_stale_seconds)),
         Loop("retention", settings.retention_interval_seconds, _retention_step),
+        # 배치 스케줄러(2026-11-16, batch_scheduler.py): 오케스트레이터 **앞** -- 같은 패스에서 방금 되살린 배치를 오케스트레이터가
+        # 바로 굴린다. 간격은 새 설정 키 없이 오케스트레이터와 같다(같은 배치 계열 -- 운영자가 따로 튜닝할 값이 아니다). 별도
+        # 루프인 이유: 스케줄러 예외가 오케스트레이터 틱을 막지 않게(run_all_once 의 루프별 격리). 발사는 스케줄 CAS 라 리스가
+        # 겹쳐도 같은 슬롯을 두 번 쏘지 않는다.
+        Loop("batch-scheduler", settings.batch_orchestrator_interval_seconds,
+             lambda: BatchScheduler(repos, settings=settings).run_once()),
         Loop("batch-orchestrator", settings.batch_orchestrator_interval_seconds,
              lambda: BatchOrchestrator(repos, settings=settings, execution_adapter=adapter).run_once()),
         Loop("pod-gc", settings.pod_gc_interval_seconds, pod_gc.run_once),

@@ -16,10 +16,11 @@ function dmsItems(): { group: string; groupAdminOnly: boolean; item: NavItem }[]
     g.items.map((item) => ({ group: g.label, groupAdminOnly: g.adminOnly === true, item })));
 }
 
-test("현행 사이드바 17링크가 전부 데이터에 있다(전수 -- 초과도 누락도 없다)", () => {
+// 2026-11-16: 작업 그룹에 배치 스케줄러(/admin/batch-schedules, 관리자 전용) 추가 -- 18링크.
+test("현행 사이드바 18링크가 전부 데이터에 있다(전수 -- 초과도 누락도 없다)", () => {
   const paths = dmsItems().map((x) => x.item.path).sort();
   expect(paths).toEqual([
-    "/admin/accounts", "/admin/artifact-base", "/admin/audit", "/admin/batches",
+    "/admin/accounts", "/admin/artifact-base", "/admin/audit", "/admin/batch-schedules", "/admin/batches",
     "/admin/builds", "/admin/control", "/admin/dashboard", "/admin/denylist", "/admin/mail",
     "/admin/nodes", "/admin/policies", "/admin/portal", "/admin/releases",
     "/admin/storages", "/admin/usage", "/jobs", "/jobs/new",
@@ -49,7 +50,19 @@ test("그룹 순서는 운영·작업·스토리지·관리다(접힘은 AppShel
 
 test("작업 그룹은 단일 작업(제출)이 내 작업(목록)보다 위다(사용자 결정 2026-08-19)", () => {
   const jobs = (NAVIGATION[0].groups ?? []).find((g) => g.label === "작업")!;
-  expect(jobs.items.map((i) => i.label)).toEqual(["단일 작업", "배치 작업", "전체 작업"]);
+  expect(jobs.items.map((i) => i.label)).toEqual(["단일 작업", "배치 작업", "배치 스케줄러", "전체 작업"]);
+});
+
+test("배치 스케줄러는 작업 그룹의 관리자 전용 항목이고 배치 작업 바로 아래다(2026-11-16 사용자 결정)", () => {
+  const jobs = (NAVIGATION[0].groups ?? []).find((g) => g.label === "작업")!;
+  const paths = jobs.items.map((i) => i.path);
+  expect(paths.indexOf("/admin/batch-schedules")).toBe(paths.indexOf("/admin/batches") + 1);
+  expect(jobs.items.find((i) => i.path === "/admin/batch-schedules")?.adminOnly).toBe(true);
+  expect(breadcrumbFor("/admin/batch-schedules").map((c) => c.label)).toEqual(["HOME", "DMS", "작업", "배치 스케줄러"]);
+  // 자기 경로가 활성이고, 접두가 비슷한 배치 작업(/admin/batches)은 이 경로를 물지 않는다(경계 '/' 규칙).
+  expect(activeNavPath("/admin/batch-schedules")).toBe("/admin/batch-schedules");
+  expect(activeNavPath("/admin/batches/x")).toBe("/admin/batches");
+  expect(activeNavPath("/admin/batches")).toBe("/admin/batches");
 });
 
 describe("breadcrumbFor", () => {

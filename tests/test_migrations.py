@@ -587,12 +587,14 @@ def test_migrate_creates_exactly_the_expected_tables(tmp_path):
     # scan_report_digests(2026-10-02): 사용량 분석의 scan 리포트 요약 캐시(잡 단위, 불변 리포트의 투영).
     # node_exclusions(2026-10-02): 관리자 노드 배치 제외 목록(행 = 제외 중).
     # request_purges(2026-10-08): 요청 삭제의 정리 아웃박스(행 = k8s·아티팩트 정리 대기).
+    # batch_schedules·batch_schedule_runs(2026-11-16): 배치 스케줄러(배치당 스케줄 하나 + 회차 이력 -- batches 류처럼 명시 추가).
     assert actual == set(ALL_TABLES) | {"batches", "batch_items",
                                         "schema_migrations",
                                         "verification_codes", "sync_pairs",
                                         "mail_settings", "verification_failures",
                                         "scan_report_digests", "node_exclusions",
-                                        "request_purges"}
+                                        "request_purges",
+                                        "batch_schedules", "batch_schedule_runs"}
 
 
 def test_migrate_creates_exactly_the_expected_indexes(tmp_path):
@@ -621,6 +623,8 @@ def test_migrate_creates_exactly_the_expected_indexes(tmp_path):
         "idx_data_jobs_gc",
         # 2026-10-20 사용량 분석 스토리지별 조회(storage_name, state, operation, target, updated_at).
         "idx_data_jobs_scan_target",
+        # 2026-11-16 배치 스케줄러: 컨트롤러 due 질의(enabled, next_run_at)와 스케줄별 회차 이력(최근 순·200건 정리).
+        "idx_batch_schedules_due", "idx_batch_schedule_runs_schedule",
     }
 
 

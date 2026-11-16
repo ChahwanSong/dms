@@ -45,6 +45,27 @@ test("admin can open batches list", async () => {
   expect(await screen.findByRole("heading", { name: "배치 작업" })).toBeInTheDocument();
 });
 
+// 사이드바 라벨 = h1 짝(navigation.ts 주석) -- 「배치 스케줄러」 세 곳이 같은 문자열이다.
+test("admin can open batch schedules", async () => {
+  server.use(
+    http.get("/api/auth/me", () => HttpResponse.json({ actor: "admin", role: "admin" })),
+    http.get("/api/admin/batch-schedules", () => HttpResponse.json([])),
+  );
+  renderAt("/admin/batch-schedules");
+  expect(await screen.findByRole("heading", { name: "배치 스케줄러" })).toBeInTheDocument();
+  expect(await screen.findByText(/스케줄이 없습니다/)).toBeInTheDocument();
+});
+
+test("user visiting /admin/batch-schedules is redirected to /jobs", async () => {
+  server.use(
+    http.get("/api/auth/me", () => HttpResponse.json({ actor: "alice", role: "user" })),
+    http.get("/api/user/requests", () => HttpResponse.json([])),
+  );
+  renderAt("/admin/batch-schedules");
+  expect(await screen.findByRole("heading", { name: "전체 작업" })).toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: "배치 스케줄러" })).toBeNull();
+});
+
 test("admin can open audit log", async () => {
   server.use(
     http.get("/api/auth/me", () => HttpResponse.json({ actor: "admin", role: "admin" })),

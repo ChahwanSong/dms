@@ -40,9 +40,8 @@ Running 분기의 「도장 없는 미리보기면 Previewing 복귀」는 그�
 from .db import load_json, utc_now_iso
 from .domain import (DomainValidationError, TERMINAL_REQUEST_STATES, auto_confirmable, confirm_gated,
                      DataJobState, build_data_payload, resolve_priority, validate_batch_options)
-from .identity import privilege_eligible
 from .batch_cancel import record_item_terminal, sweep_cancelled
-from .privileged import privileged_names
+from .privileged import privileged_admin_problem
 
 _ITEM_TERMINAL = {"Succeeded", "Failed", "Rejected", "Cancelled"}
 # repositories.batches._ACTIVE(list_active 가 고르는 상태) + 확인 대기(기록만) -- _drive 의 재확인용.
@@ -147,15 +146,15 @@ def auto_confirm_hold(repos, settings, batch) -> str | None:
     by = batch.get("auto_confirm_by")
     if not auto_confirmable(batch.get("operation")):
         return _hold(reason_code="auto_confirm_sync_only")
-    if not settings.allow_privileged_requesters:
+    # 자격 판정은 배치 스케줄러(armed_by·배치 요청자)와 같은 술어(privileged.privileged_admin_problem, 2026-11-16) -- 사유
+    # 코드만 이 경로의 리터럴로 고른다.
+    problem = privileged_admin_problem(settings, repos, by)
+    if problem == "privileged_disabled":
         # 사이트 전체 특권(root) 실행이 꺼졌다 -- 켠 사람 탓이 아니라 사람이 확인해도 root 로 돌지 못한다(문구가 다르다).
         return _hold(reason_code="auto_confirm_privileged_disabled")
-    if not privilege_eligible(requester_id=by, allow_privileged=settings.allow_privileged_requesters,
-                              privileged_requesters=privileged_names(settings, repos),
-                              session_authenticated=True):
+    if problem == "not_privileged":
         return _hold(reason_code="auto_confirm_not_privileged")
-    account = repos.accounts.get(by)
-    if account is None or account["disabled"] or account["role"] != "admin":
+    if problem is not None:
         return _hold(reason_code="auto_confirm_not_admin")
     try:
         validate_batch_options(batch["operation"], batch["options"])

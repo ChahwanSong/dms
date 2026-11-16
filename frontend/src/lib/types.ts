@@ -313,6 +313,45 @@ export interface BatchItem {
   job_tool?: string | null;
 }
 export interface BatchDetail extends Batch { items: BatchItem[] }
+// 배치 스케줄러(2026-11-16): 배치당 하나, 정해진 KST 시각에 그 배치의 「전체 재실행」. 서버 GET /api/admin/batch-schedules 의 행.
+// kind/spec 은 서버 batch_scheduler 가 검증한 값이지만 화면은 DB 신뢰 경계로 읽는다(깨진 spec = 「알 수 없는 주기」,
+// lib/batchSchedule). enabled 는 INTEGER 컬럼이라 0/1 일 수도 있다(scheduleEnabled 로만 판정).
+export interface BatchSchedule {
+  schedule_id: string; batch_id: string;
+  kind: string; spec: Record<string, unknown> | null;
+  enabled: boolean | number;
+  next_run_at: string | null;              // UTC — 꺼졌거나 일시정지면 null
+  armed_by: string;                        // 마지막으로 만들거나 고치거나 켠 관리자(회차마다 자격을 다시 본다)
+  created_by: string; created_at: string; updated_at: string;
+  // 마지막 회차 판정. null = 아직 한 번도 판정하지 않았다(실패가 아니다).
+  last_run_at: string | null; last_outcome: string | null; last_reason_code: string | null;
+  paused_reason_code: string | null;       // 자동 일시정지 사유(사람이 끄면 null)
+  // 동의 지문이 저장돼 있는가(파괴적 스케줄을 동의하고 무장했다). 지문 원문은 응답에 싣지 않는다.
+  acknowledged_irreversible?: boolean;
+  // 「되돌릴 수 없음」 동의가 필요한 스케줄인가(rm, sync+delete — 서버 batch_scheduler.is_destructive 를 **지금** 배치로 판정).
+  // 행의 최상위 필드다(배치 요약 안이 아니다). null = 배치 행이 없어 모름, 부재 = 화면이 연산·옵션으로 판정(isDestructiveBatch).
+  destructive?: boolean | null;
+  // 배치 요약. null = 배치 행이 없다(정상 경로에선 배치 삭제가 스케줄도 지운다).
+  batch: BatchScheduleBatch | null;
+}
+export interface BatchScheduleBatch {
+  batch_id?: string;
+  // item_count null = 모름(변조된 값) — 0(항목 없음)과 다르다.
+  name: string | null; operation: string; status: string; item_count: number | null;
+  auto_confirm?: boolean;
+  options?: Record<string, unknown> | null;
+  // 대상 스토리지(첫 항목 payload — 서버가 모양 투영). null = 모름.
+  storage?: string | null; source_storage?: string | null; destination_storage?: string | null;
+}
+// 회차 기록(GET /api/admin/batch-schedules/{id}/runs, 최근 순). requeued·prev_* 는 fired 일 때만 값이 있다 -- null = 해당 없음
+// (0 은 「0개」라는 정상값이다).
+export interface BatchScheduleRun {
+  run_id: number; schedule_id: string; batch_id: string;
+  scheduled_for: string; at: string; outcome: string; reason_code: string | null;
+  batch_status: string | null;
+  requeued: number | null;
+  prev_status: string | null; prev_item_count: number | null; prev_succeeded: number | null; prev_failed: number | null;
+}
 // 요청 단위 scan 리포트 통계(항목별 데이터 온도 — 배치 합산은 제거됐다). 서버가
 // 모양 투영(숫자·구간 라벨만)을 거친 값만 준다 — ScanPathStats 에서 covered_by
 // 를 뺀 같은 계약(단일 리포트 서빙, 합산 카운트 없음).

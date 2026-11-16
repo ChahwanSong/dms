@@ -282,5 +282,20 @@
   "auto_confirm_not_privileged",
   "auto_confirm_not_admin",
   "auto_confirm_privileged_disabled",
-  "batch_rm_auto_confirm_ack_required"
+  "batch_rm_auto_confirm_ack_required",
+  "invalid_batch_schedule",
+  "batch_schedule_not_found",
+  "batch_schedule_exists",
+  "batch_schedule_ack_required",
+  "batch_schedule_unsupported_operation",
+  "batch_schedule_drain",
+  "batch_schedule_missed",
+  "batch_schedule_privileged_disabled",
+  "batch_schedule_owner_not_privileged",
+  "batch_schedule_requester_not_privileged",
+  "batch_schedule_empty",
+  "batch_schedule_batch_changed",
+  "batch_schedule_batch_running",
+  "batch_schedule_awaiting_confirm",
+  "batch_schedule_batch_cancelling"
 ]

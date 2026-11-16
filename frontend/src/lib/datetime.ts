@@ -67,3 +67,18 @@ export function agoText(iso: string | null | undefined, nowMs: number): string {
   if (d < 1) return `${Math.floor(d * 24)}시간 전`;
   return `${Math.floor(d).toLocaleString("ko-KR")}일 전`;
 }
+
+// 미래 시각까지 남은 시간 한국어(배치 스케줄러 「다음 실행」, 2026-11-16) -- agoText 의 미래판. 1분 미만(이미 지났지만
+// 스케줄러 틱이 아직 안 돈 경우 포함) 「곧」, 1시간 미만 「N분 후」, 하루 미만 「N시간 후」, 그 이상 「N일 후」. 내림이라
+// 「1시간 59분」은 「1시간 후」다(agoText 와 같은 규칙). 모르면(null·파싱 불가) "—" -- 지어내지 않는다.
+export function untilText(iso: string | null | undefined, nowMs: number): string {
+  if (!iso) return "—";
+  const ms = Date.parse(iso);
+  if (Number.isNaN(ms)) return "—";
+  const minutes = Math.floor((ms - nowMs) / 60_000);
+  if (minutes < 1) return "곧";
+  if (minutes < 60) return `${minutes}분 후`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}시간 후`;
+  return `${Math.floor(hours / 24).toLocaleString("ko-KR")}일 후`;
+}

@@ -1,6 +1,6 @@
 import uuid
 from ..db import Database, dump_json, load_json, utc_now_iso
-from ..domain import TERMINAL_REQUEST_STATES
+from ..domain import TERMINAL_REQUEST_STATES, confirm_gated
 from .data_jobs import DataJobsRepository
 from .requests import batch_match
 
@@ -18,6 +18,14 @@ _NO_QUEUED_ITEM = "NOT EXISTS (SELECT 1 FROM batch_items WHERE batch_id = :b AND
 # 밖이다 -- 실행 신원·특권 재료와 대상은 생성 시점 사실이다(항목은 항목 편집 라우트 몫). auto_confirm_by(sync·rm 자동
 # 확인을 켠 사람, NULL = 꺼짐)는 라우트가 본문 auto_confirm(bool)을 이 값으로 바꿔 넘긴다.
 _SETTINGS_COLUMNS = ("max_concurrency", "priority", "node_count", "procs_per_node", "options", "auto_confirm_by")
+# batch_id 로 배치에 딸린 행을 담는 테이블 중 **배치 삭제 두 경로**(BatchesRepository.delete, RequestPurgesRepository.
+# delete_batch)가 같은 트랜잭션에서 함께 지우는 것(2026-11-16 배치 스케줄러). FK 가 0건이라 빠지면 지운 배치의 스케줄이 고아로
+# 남아 컨트롤러가 batch_not_found 로 일시정지를 쓴다. tests/test_api_batch_schedules.py 의 그물이 스키마의 batch_id 컬럼
+# 전수를 이 목록 ∪ BATCH_DELETE_EXEMPT_TABLES 와 대조하고, 두 경로 소스에 테이블마다 DELETE 가 있는지 본다.
+BATCH_DELETE_TABLES = ("batch_items", "batches", "batch_schedules", "batch_schedule_runs")
+# batch_id 를 담지만 배치 기록 삭제(delete)가 지우지 않는 테이블: requests -- 자식 요청은 실행 감사 이력이라 보존하고(delete
+# docstring), 배치 단위 삭제(delete_batch)는 요청 삭제 몸통(_purge_locked)이 batch_id 로 전부 지운다.
+BATCH_DELETE_EXEMPT_TABLES = ("requests",)
 
 def _hydrate(row):
     row["options"] = load_json(row["options"])
@@ -679,12 +687,18 @@ class BatchesRepository:
         정체한다). 이 메서드로 배치 기록을 지운 뒤 남는 자식(배치 행이 없는 batch_id)은
         작업 목록의 배치 기록 없는 묶음(배치 칸 「기록 없음 xxxxxxxxxxxx」)으로 **배치 단위** 삭제할 수 있다
         (request_purges.delete_batch, 2026-10-10 -- 자식 전부 + 남은 항목을 한 트랜잭션).
-        그래서 이 메서드는 「배치 기록만 정리하고 실행 이력은 남긴다」는 쓰임새로 남는다."""
+        그래서 이 메서드는 「배치 기록만 정리하고 실행 이력은 남긴다」는 쓰임새로 남는다.
+
+        배치 스케줄(2026-11-16)과 그 회차 이력도 같은 트랜잭션에서 지운다(BATCH_DELETE_TABLES -- 배치 단위 삭제도 같다).
+        잠금 순서는 항목 → 배치 → 스케줄: 스케줄 발사(BatchSchedulesRepository.fire)와 같은 방향이라 교착이 없다. 트랜잭션은
+        중첩되지 않으니(db.transaction) 스케줄 저장소를 부르지 않고 문장을 여기 둔다. 감사 행(batch_schedule 류)은 남는다."""
         with self._db.transaction():
             self._db.execute("DELETE FROM batch_items WHERE batch_id = :b",
                              {"b": batch_id})
             self._db.execute("DELETE FROM batches WHERE batch_id = :b",
                              {"b": batch_id})
+            self._db.execute("DELETE FROM batch_schedules WHERE batch_id = :b", {"b": batch_id})
+            self._db.execute("DELETE FROM batch_schedule_runs WHERE batch_id = :b", {"b": batch_id})
 
     def set_status(self, batch_id, status):
         self._db.execute(
@@ -799,7 +813,47 @@ class BatchesRepository:
                    failed_count = failed_count + :f, updated_at = :now WHERE batch_id = :b""",
             {"s": succeeded, "f": failed, "now": utc_now_iso(), "b": batch_id})
 
+    def _rescan_locked(self, batch_id, *, to_status) -> "int | None":
+        """전체 재실행의 몸통(2026-11-16) -- **호출자 트랜잭션 안, _lock_items_then_batch 뒤에서만** 부른다. 라우트
+        (:rescan → rescan_if_terminal)와 배치 스케줄러의 회차(BatchSchedulesRepository.fire)가 같은 이 함수를 쓴다 -- 「스케줄
+        회차 = 전체 재실행」을 복사본이 아니라 코드로 보장한다.
+
+        배치 상태 CAS 가 먼저다(WHERE status IN 종단 → to_status, 카운터 0 -- 전체 재시작이라 절대값이 진실). 0 행이면(그 사이
+        재실행·항목 추가로 되살아났거나 취소 중) 아무것도 쓰지 않고 None -- 호출자가 409(라우트) 또는 롤백(스케줄)한다. 이긴
+        쪽만 종단 항목 전부를 Queued 로 되돌린다(request_id·reason_code NULL -- reset_item_to_queued 와 같은 모양; 성공 항목도
+        -- 용도가 성장 모니터링이다). 비종단(Queued/Materialized) 항목은 무접촉. 반환 = 되돌린 항목 수(0 은 정상값).
+
+        예전 라우트는 상태를 읽고 → reset_all_items(자체 트랜잭션) → 무조건 set_status 라, 읽기와 쓰기 사이에 버튼 두 번·재실행
+        → 취소가 끼면 이미 확인돼 Running 인 배치를 Previewing 으로, Cancelling 을 Previewing 으로 덮었다(2026-11-16 리뷰)."""
+        now = utc_now_iso()
+        if self._db.execute_count(
+                """UPDATE batches SET status = :st, succeeded_count = 0, failed_count = 0, updated_at = :now
+                      WHERE batch_id = :b AND status IN ('Completed', 'Cancelled')""",
+                {"st": to_status, "now": now, "b": batch_id}) != 1:
+            return None
+        return self._db.execute_count(
+            # IN 목록 = batch_orchestrator._ITEM_TERMINAL 과 같은 집합
+            """UPDATE batch_items SET status = 'Queued', request_id = NULL, reason_code = NULL, updated_at = :now
+                  WHERE batch_id = :b AND status IN ('Succeeded','Failed','Rejected','Cancelled')""",
+            {"now": now, "b": batch_id})
+
+    def rescan_if_terminal(self, batch_id) -> "dict | None":
+        """전체 재실행(:rescan) 한 트랜잭션: 항목 → 배치 잠금 → 종단(Completed/Cancelled)일 때만 _rescan_locked. 다음 상태는
+        잠근 배치 행의 연산으로 정한다(domain.confirm_gated -- sync·rm·미지 연산은 Previewing, scan 은 Running). 반환
+        {"status", "requeued"} | None(배치가 없거나 종단이 아니다 -- 아무것도 쓰지 않았다)."""
+        with self._db.transaction():
+            batch, _ = self._lock_items_then_batch(batch_id, with_items=False)
+            if batch is None or batch["status"] not in ("Completed", "Cancelled"):
+                return None
+            to_status = "Previewing" if confirm_gated(batch["operation"]) else "Running"
+            requeued = self._rescan_locked(batch_id, to_status=to_status)
+            if requeued is None:
+                return None
+        return {"status": to_status, "requeued": requeued}
+
     def reset_all_items(self, batch_id) -> int:
+        # (2026-11-16 부터 :rescan 라우트·스케줄러는 상태 CAS 와 한 트랜잭션인 rescan_if_terminal/_rescan_locked 를 쓴다 --
+        # 이건 상태를 보지 않는 항목 리셋만이다.)
         # 전체 재실행(:rescan): 종단 item 전부를 Queued 로 되돌린다. 성공 item 도
         # 포함하는 이유는 성장 모니터링(같은 대상 재스캔) 유스케이스. 비종단
         # (Queued/Materialized) item 은 무접촉 — 활성 자식과의 충돌은 라우트의
