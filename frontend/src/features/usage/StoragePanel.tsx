@@ -1,13 +1,14 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { Clock, Download, FolderTree, HardDrive, Layers, ScanSearch, Search, SearchX } from "lucide-react";
 import { Button } from "../../components/ui/Button";
+import { Pager } from "../../components/ui/Pager";
 import { Skeleton } from "../../components/ui/Skeleton";
 import type { ApiError } from "../../lib/api";
 import type { Storage } from "../../lib/types";
 import { agoText, kstStampOrDash } from "../../lib/datetime";
 import { downloadCsv, toCsv } from "../../lib/csvExport";
-import { LIST_LIMIT, fetchUsageExport, useScanTargets, usePurgeUnregisteredStorage, type TargetFilter,
+import { PAGE_SIZE, fetchUsageExport, useScanTargets, usePurgeUnregisteredStorage, type TargetFilter,
          type UsageSort } from "./useUsage";
 import { buildUsageCsv, usageCsvFilename } from "./usageCsv";
 import { DETAIL_ID, TargetTable } from "./TargetTable";
@@ -18,8 +19,9 @@ import { storageLabel, type StorageTab } from "./usageTabs";
 
 // 스토리지 하나의 패널(2026-10-20, 탭 패널 = 카드 하나). 위에서 아래로: 메타 한 줄(마운트 · 타입 · 대상 수 · 최근 스캔) 또는
 // 미등록 경고 띠 → 이 스토리지 합계(2026-10-21, StorageTotals) → 툴바(경로 검색 · 건수 · CSV) → 6열 표(행 아래 펼침 상세) →
-// 각주 한 줄 → 목록 밖 딥링크 폴백. 페이지가 key={storage} 로 그려 탭을 바꾸면 내보내기 상태가 새로 시작한다. 경로 검색·정렬은 페이지 상태라 탭을 바꿔도 남는다(sync
-// 쌍은 같은 트리를 미러하므로 스토리지끼리 같은 경로를 비교하기 쉽다 -- 검색창이 늘 보여 숨은 필터가 되지 않는다).
+// 쪽 넘김(2026-11-16, Pager -- 표의 가로 스크롤 래퍼 밖) → 각주 한 줄 → 목록 밖 딥링크 폴백. 페이지가 key={storage} 로 그려
+// 탭을 바꾸면 내보내기 상태·쪽 번호가 새로 시작한다. 경로 검색·정렬은 페이지 상태라 탭을 바꿔도 남는다(sync 쌍은 같은 트리를
+// 미러하므로 스토리지끼리 같은 경로를 비교하기 쉽다 -- 검색창이 늘 보여 숨은 필터가 되지 않는다).
 
 const METRIC_SORTS: UsageSort[] = ["bytes", "files", "hot"];
 const SEP = "\u00a0· ";
@@ -80,8 +82,17 @@ export function StoragePanel({
 }) {
   const storage = tab.name;
   const filter: TargetFilter = { storage, path: pathQ, order, sort };
-  const targets = useScanTargets(filter);
-  const rows = targets.data ?? [];
+  // 쪽(2026-11-16 사용자 요청: 상위 100개가 아니라 전부 -- 한 쪽 PAGE_SIZE 행, 1부터). 경로 검색·정렬이 바뀌면 1쪽: 쪽 번호를 그
+  // 필터와 한 덩어리로 들고, 필터가 달라졌으면 1쪽으로 읽는다(effect 로 되돌리면 옛 쪽 번호로 한 번 더 부른다). 탭이 바뀌면
+  // 페이지가 key={storage} 로 이 패널을 새로 그려 1쪽이다. URL 에 두지 않는다(검색·정렬과 같은 상태 -- 선택 행만 URL 이다).
+  const filterKey = `${pathQ}\u0000${sort}\u0000${order}`;
+  // count = 그 쪽을 고를 때 알던 쪽 수(아래 pagerCount -- 그 쪽을 못 불러왔을 때 쪽 넘김을 남기는 재료).
+  const [paging, setPaging] = useState({ key: filterKey, page: 1, count: 1 });
+  const page = paging.key === filterKey ? paging.page : 1;
+  const targets = useScanTargets(filter, page);
+  const data = targets.data;
+  const rows = data?.rows ?? [];
+  const listTop = useRef<HTMLDivElement>(null);
 
   // CSV 내보내기(2026-10-02 "사용량 분석 전체의 모든 정보, 항목당 한 줄" → 2026-10-20 탭 하나씩): 지금 탭의 스토리지 + 경로
   // 검색 + 정렬 그대로, 행 상한 없이(서버 상한을 넘으면 잘렸다고 말한다). 조립은 usageCsv(화면과 같은 hot 비율·구간 규칙).
@@ -104,30 +115,65 @@ export function StoragePanel({
     }
   };
 
-  // 건수 문구: 검색이 없으면 「9개」, 검색 중이면 「‘team’ 2개」, 목록 상한(100)에 닿으면 「상위 100개 표시 · 전체 N개」(전체 =
-  // 요약의 대상 수 -- 모르면 생략). 따로 있던 「상위 100개만」 문단을 대신한다.
-  const full = rows.length >= LIST_LIMIT;
-  const total = tab.targetCount;
-  const countText = targets.data === undefined ? null
-    : pathQ !== "" ? `‘${pathQ}’ ${full ? `상위 ${LIST_LIMIT}개 표시` : `${rows.length}개`}`
-    : full ? `상위 ${LIST_LIMIT}개 표시${total !== null && total > rows.length ? ` · 전체 ${total.toLocaleString("ko-KR")}개` : ""}`
-    : `${rows.length}개`;
+  // 전체 수·쪽 수: 서버 total(필터 반영 -- 검색 중에도 정확)과 windowed(지표 정렬이 창 안에서만 돈다 -- 창 밖은 어느 쪽에도
+  // 없어 쪽 수는 창까지). 옛 파드 응답(legacy)은 전체 수를 모른다 -- 쪽 넘김 없이 그 행들만(첫 쪽)이고 문구는 옛 추정으로
+  // 물러선다(아래). 모름을 0 으로 접지 않는다.
+  const n = (x: number) => x.toLocaleString("ko-KR");
+  const total = data?.total ?? null;
+  const windowLimitNow = data?.windowLimit ?? windowLimit;
+  const reachable = total === null ? null
+    : data?.windowed === true && windowLimitNow !== null ? Math.min(total, windowLimitNow) : total;
+  const pageCount = reachable === null ? 1 : Math.ceil(reachable / PAGE_SIZE);
+  // 이 쪽을 불러오지 못했으면(오류 -- 이 쪽은 캐시가 없어 data 가 비고 전체 수도 모른다) 넘기던 때의 쪽 수로 쪽 넘김을 남긴다:
+  // pageCount 로 접으면 Pager 가 사라져 그 쪽에 갇힌다(queryClient retry 없음 -- 검색·정렬·탭을 바꾸기 전엔 돌아갈 길이 없었다).
+  const pagerCount = data === undefined && targets.isError && paging.key === filterKey
+    ? Math.max(paging.count, page) : pageCount;
+  const setPage = (p: number) => setPaging({ key: filterKey, page: p, count: pagerCount });
+  // 렌더 중 상태 조정(effect 로 하면 빈 쪽이 한 번 그려진다): 옛 파드는 쪽을 몰라 늘 첫 행들을 준다 -- 쪽 번호를 1로 맞춘다.
+  // 보던 쪽이 끝을 넘었으면(그 사이 기록 삭제·검색 결과가 줄었다) 마지막 쪽으로. 조건이 다음 렌더에서 거짓이 되는 것만 고친다.
+  if (data !== undefined && !targets.isPlaceholderData) {
+    if (data.legacy && page !== 1) setPage(1);
+    else if (!data.legacy && rows.length === 0 && page > 1 && pageCount < page) setPage(Math.max(1, pageCount));
+  }
 
-  // 딥링크·검색으로 선택 타깃 행이 지금 목록에 없으면 펼칠 행이 없다 -- 표 아래로 폴백해 링크가 죽지 않게 한다(목록
+  // 건수 문구(쪽이 하나면 「9개」·검색 중 「‘team’ 2개」, 여럿이면 「101–200 / 2,345개」·검색 중 「검색 결과 2,345개 중 1–100」 --
+  // 검색어를 되풀이하지 않아 375 에서 짧다). 전체 수를 모르면(옛 파드) 예전 문구: 상한(PAGE_SIZE)에 닿으면 「상위 100개 표시 ·
+  // 전체 N개」(전체 = 탭 요약의 대상 수 -- 모르면 생략, 검색을 반영하지 않으므로 검색 중엔 생략).
+  const full = rows.length >= PAGE_SIZE;
+  const tabTotal = tab.targetCount;
+  const first = (page - 1) * PAGE_SIZE + 1;
+  const range = rows.length > 0 ? `${n(first)}–${n(first + rows.length - 1)}` : null;
+  const countText = data === undefined ? null
+    : total !== null ? (
+      pageCount <= 1 || range === null ? (pathQ !== "" ? `‘${pathQ}’ ${n(total)}개` : `${n(total)}개`)
+      : pathQ !== "" ? `검색 결과 ${n(total)}개 중 ${range}` : `${range} / ${n(total)}개`)
+    : pathQ !== "" ? `‘${pathQ}’ ${full ? `상위 ${PAGE_SIZE}개 표시` : `${rows.length}개`}`
+    : full ? `상위 ${PAGE_SIZE}개 표시${tabTotal !== null && tabTotal > rows.length ? ` · 전체 ${n(tabTotal)}개` : ""}`
+    : `${rows.length}개`;
+  const onPage = (p: number) => {
+    setPage(p);
+    // 쪽 넘김은 표 아래에 있다 -- 새 쪽의 첫 행이 보이게 목록 머리(툴바)로 올린다(이미 보이면 움직이지 않는다).
+    listTop.current?.scrollIntoView?.({ block: "nearest" });
+  };
+
+  // 딥링크·검색·쪽 넘김으로 선택 타깃 행이 지금 쪽에 없으면 펼칠 행이 없다 -- 표 아래로 폴백해 링크가 죽지 않게 한다(목록
   // 로딩 중엔 깜빡임 방지로 보류).
   const listed = activeTarget !== null && rows.some((r) => r.target === activeTarget);
-  const fallback = activeTarget !== null && targets.data !== undefined && !targets.isPlaceholderData && !listed;
+  const fallback = activeTarget !== null && data !== undefined && !targets.isPlaceholderData && !listed;
   const metricSort = METRIC_SORTS.includes(sort);
-  // 창 안 정렬 각주: 서버는 경로 검색을 건 **뒤의** 대상에서 창을 만든다. 검색이 없으면 스토리지 대상 수로 확정할 수 있고,
-  // 검색 중엔 결과가 목록 상한(100)보다 적으면 창에 닿지 않은 게 확실하다 -- 그 밖(검색 결과가 많음)은 조건부로 말한다(리뷰:
-  // 검색으로 좁힌 결과에도 「최근 스캔된 N개 안에서」라고 단정했다).
-  const overWindow = windowLimit !== null && total !== null && total > windowLimit;
-  const windowNote = !overWindow ? null
-    : pathQ === "" ? `최근 스캔된 ${windowLimit!.toLocaleString("ko-KR")}개 안에서 정렬`
-    : full ? `검색 결과가 ${windowLimit!.toLocaleString("ko-KR")}개를 넘으면 최근 스캔된 ${windowLimit!.toLocaleString("ko-KR")}개 안에서 정렬`
+  // 창 안 정렬 각주: 서버는 경로 검색을 건 **뒤의** 대상에서 창을 만든다. 쪽 응답은 그 사실을 windowed 로 단정한다(검색 중에도).
+  // 옛 파드(legacy)면 예전 추정: 검색이 없으면 스토리지 대상 수로 확정, 검색 중엔 결과가 상한보다 적으면 창에 닿지 않은 게
+  // 확실하고 그 밖은 조건부로 말한다(리뷰: 검색으로 좁힌 결과에도 「최근 스캔된 N개 안에서」라고 단정했다).
+  const wl = windowLimitNow === null ? null : n(windowLimitNow);
+  const windowNote = wl === null ? null
+    : data !== undefined && !data.legacy && data.windowed !== null
+      ? (data.windowed ? `최근 스캔된 ${wl}개 안에서 정렬` : null)
+    : !(windowLimit !== null && tabTotal !== null && tabTotal > windowLimit) ? null
+    : pathQ === "" ? `최근 스캔된 ${wl}개 안에서 정렬`
+    : full ? `검색 결과가 ${wl}개를 넘으면 최근 스캔된 ${wl}개 안에서 정렬`
     : null;
   const failedOnly = tab.unregistered !== null && tab.unregistered.target_count === 0;
-  const noRecords = targets.data !== undefined && !targets.isPlaceholderData && rows.length === 0
+  const noRecords = data !== undefined && !targets.isPlaceholderData && rows.length === 0 && page === 1
     && pathQ === "" && input === "";
 
   return (
@@ -142,7 +188,7 @@ export function StoragePanel({
       {tab.targetCount !== 0 && <StorageTotals storage={storage} now={now} />}
 
       {/* 기록이 하나도 없으면(검색 없이 빈 목록) 검색·CSV 는 할 일이 없다 -- 빈 상태 안내만. */}
-      {!noRecords && <div>
+      {!noRecords && <div ref={listTop}>
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
           <label className="relative min-w-0 flex-1 basis-full sm:max-w-sm sm:basis-auto">
             <span className="sr-only">경로 검색</span>
@@ -152,9 +198,10 @@ export function StoragePanel({
                    className="w-full rounded-lg border border-line bg-surface py-1.5 pl-8 pr-3 text-sm
                               placeholder:text-muted focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/20" />
           </label>
-          {/* 검색·정렬을 바꾸는 동안(이전 행이 자리표시) 건수는 옛 목록의 것이라 말하지 않는다. */}
-          <span className="whitespace-nowrap text-sm text-muted">
-            {targets.isPlaceholderData ? "검색 중…" : countText}
+          {/* 검색·정렬·쪽을 바꾸는 동안(이전 행이 자리표시) 건수는 옛 목록의 것이라 말하지 않는다. 긴 검색어는 칸 안에서
+              말줄임(375 에서 한 줄 문구가 문서 폭을 넓히지 않게). */}
+          <span className="min-w-0 max-w-full truncate whitespace-nowrap text-sm text-muted">
+            {targets.isPlaceholderData ? "불러오는 중…" : countText}
           </span>
           <Button type="button" variant="outline" className="ml-auto gap-1.5 whitespace-nowrap py-1.5"
                   disabled={exporting} onClick={() => { void exportCsv(); }}>
@@ -168,12 +215,12 @@ export function StoragePanel({
         )}
       </div>}
 
-      {targets.isLoading || (targets.data === undefined && !targets.isError) ? (
+      {targets.isLoading || (data === undefined && !targets.isError) ? (
         <div className="space-y-2.5 py-1">
           <span className="sr-only">불러오는 중…</span>
           {[0, 1, 2, 3].map((i) => <Skeleton key={i} className="h-5" />)}
         </div>
-      ) : targets.isError && targets.data === undefined ? (
+      ) : targets.isError && data === undefined ? (
         <p className="text-sm text-bad">{(targets.error as ApiError).message}</p>
       ) : rows.length === 0 ? (
         pathQ !== "" ? (
@@ -192,7 +239,10 @@ export function StoragePanel({
         <TargetTable storage={storage} rows={rows} activeTarget={activeTarget} onToggle={onToggle}
                      sort={sort} order={order} onSort={onSort} now={now} />
       )}
-      {targets.isError && targets.data !== undefined && (
+      {/* 쪽 넘김: 표(가로 스크롤 래퍼) 밖, 표 바로 아래. 전체 수를 모르면(옛 파드) 없다(pageCount 1) -- 쪽을 못 불러온 오류
+          때는 넘기던 때의 쪽 수로 남는다(pagerCount). */}
+      <Pager page={page} pageCount={pagerCount} onPage={onPage} label={`${storageLabel(storage)} 대상 목록 쪽`} />
+      {targets.isError && data !== undefined && (
         <p className="text-sm text-bad">{`목록을 새로 고치지 못했습니다 — ${(targets.error as ApiError).message}`}</p>
       )}
 
@@ -211,7 +261,7 @@ export function StoragePanel({
       {fallback && (
         <section className="space-y-3 border-t border-line pt-5">
           <p className="text-xs text-muted break-keep">
-            선택한 경로가 지금 목록(검색·상위 {LIST_LIMIT}개)에 없어 아래에 표시합니다.
+            선택한 경로가 지금 쪽(또는 검색 결과)에 없어 아래에 표시합니다.
           </p>
           <div id={DETAIL_ID} role="region" aria-label={`${storage}:${activeTarget} 상세`}>
             <TargetDetail storage={storage} target={activeTarget!} showTitle />

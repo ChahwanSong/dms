@@ -404,6 +404,12 @@ export interface ScanTargetRow {
   first_scan_at?: string | null;
   latest?: UsagePoint | null;
 }
+// 목록 쪽 응답(2026-11-16 -- scan-targets 에 offset 을 실으면, 0 포함). total = 필터에 맞는 대상 전체 수(쪽과 무관), windowed =
+// 지표 정렬(bytes·files·hot)이고 total 이 window_limit 을 넘는다 = 창 밖 대상은 그 정렬의 어느 쪽에도 없다. offset 이 없으면
+// 서버는 예전 배열(ScanTargetRow[])을 준다 -- 롤링 중 옛 파드도 offset 을 무시하고 배열을 준다(useUsage.toTargetPage).
+export interface ScanTargetsPaged {
+  rows: ScanTargetRow[]; total: number; offset: number; limit: number; window_limit: number; windowed: boolean;
+}
 // 사용량 분석 전체 내보내기(GET /api/admin/usage/export). previous = 최신 직전 성공 scan(증감 계산용).
 export interface UsageExportRow extends ScanTargetRow {
   latest: UsagePoint | null;

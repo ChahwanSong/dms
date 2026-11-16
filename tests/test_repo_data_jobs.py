@@ -374,3 +374,34 @@ def test_scan_target_heads_carry_the_latest_job_and_old_group_by_values(db):
         3, "2026-09-01T00:00:00Z", "2026-09-05T00:00:00Z")
     assert head["job_id"] == max(j2, j3) and head["job_id"] != j1
     assert [h["storage_name"] for h in repos.data_jobs.scan_target_heads()] == ["s2", "s1"]   # 최근 스캔 내림차순
+
+
+def test_scan_target_heads_offset_and_count_scan_targets(db):
+    # 쪽 나누기(2026-11-16): offset 은 정렬 뒤에 건너뛰고(동률은 이름순이라 쪽 경계가 결정적), count_scan_targets 는 같은
+    # 필터의 (storage_name, target) 쌍 수다 -- 빈 이름은 이름, NULL 스토리지 쌍도 머리처럼 한 행, 실패 scan 은 세지 않는다.
+    import pytest
+    repos = _repos(db)
+    for t, at in (("a", "2026-09-01"), ("b", "2026-09-03"), ("c", "2026-09-03"), ("d", "2026-09-05")):
+        _usage_scan(repos, db, storage="s1", target=t, at=f"{at}T00:00:00Z")
+    _usage_scan(repos, db, storage="s1", target="a", at="2026-09-02T00:00:00Z")          # 같은 대상 두 번째 scan
+    _usage_scan(repos, db, storage="s1", target="z", at="2026-09-09T00:00:00Z", state=DataJobState.FAILED)
+    _usage_scan(repos, db, storage="s2", target="a", at="2026-09-04T00:00:00Z")
+    blank = _usage_scan(repos, db, storage="s1", target="e", at="2026-09-06T00:00:00Z")
+    orphan = _usage_scan(repos, db, storage="s1", target="f", at="2026-09-07T00:00:00Z")
+    db.execute("UPDATE data_jobs SET storage_name = '' WHERE job_id = :j", {"j": blank})
+    db.execute("UPDATE data_jobs SET storage_name = NULL WHERE job_id = :j", {"j": orphan})
+    heads = repos.data_jobs.scan_target_heads
+    whole = [h["target"] for h in heads(storage="s1", limit=None)]
+    assert whole == ["d", "b", "c", "a"]                                                 # b·c 동률은 이름순
+    assert [h["target"] for h in heads(storage="s1", limit=2, offset=0)] == ["d", "b"]
+    assert [h["target"] for h in heads(storage="s1", limit=2, offset=1)] == ["b", "c"]
+    assert [h["target"] for h in heads(storage="s1", limit=2, offset=3)] == ["a"]
+    assert heads(storage="s1", limit=2, offset=4) == []
+    assert [h["target"] for h in heads(storage="s1", limit=3, offset=1, sort="scans")] == ["d", "b", "c"]
+    count = repos.data_jobs.count_scan_targets
+    assert count(storage="s1") == 4 and count(storage="s2") == 1 and count(storage="") == 1
+    assert count(storage="nope") == 0
+    assert count() == len(heads(limit=None)) == 7                                       # s1 넷 + s2 + 빈 이름 + NULL
+    assert count(storage="s1", path="a") == 1 and count(q="s2") == 1 and count(path="%") == 0
+    with pytest.raises(ValueError):
+        heads(storage="s1", limit=None, offset=1)

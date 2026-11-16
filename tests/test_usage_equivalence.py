@@ -438,6 +438,34 @@ def test_reference_fixture_exercises_the_edges(eq_client):
     assert truncated["truncated"] is False and truncated["count"] == 10
 
 
+@pytest.mark.parametrize("window", [10000, 3], ids=["window10000", "window3"])
+def test_paged_list_concatenates_to_the_reference(eq_client, monkeypatch, window):
+    # 쪽 나누기(2026-11-16): offset 을 실은 응답의 rows 를 끝까지 이으면 쪽 없는 참조(limit 200 -- 픽스처 전부)의 행과
+    # 바이트가 같고(데운 캐시), total 은 필터에 맞는 (storage, target) 쌍 전체 수(참조 GROUP BY 를 limit 없이)다. 창 3 의 지표
+    # 정렬은 창 안에서만 쪽이 이어지고(그 뒤 쪽은 빈다) windowed 가 그것을 말한다 -- 두 방언에서.
+    monkeypatch.setattr(ru, "_WINDOW_LIMIT", window)
+    client = eq_client
+    db = client.app.state.repos.db
+    seen_windowed = set()
+    for case in LIST_CASES:
+        _get(client, "/ref/scan-targets", {**case, "limit": 200})                     # 캐시를 데운다
+        ref = json.loads(_get(client, "/ref/scan-targets", {**case, "limit": 200}))
+        total = len(_ref_scan_targets(db, q=case.get("q"), storage=case.get("storage"), path=case.get("path"),
+                                      limit=None))
+        rows, off = [], 0
+        while off <= total + 3:
+            body = json.loads(_get(client, "/api/admin/usage/scan-targets", {**case, "limit": 3, "offset": off}))
+            assert (body["total"], body["offset"], body["limit"], body["window_limit"]) == (total, off, 3, window), case
+            assert body["windowed"] is (case["sort"] in METRIC_SORTS and total > window), case
+            seen_windowed.add(body["windowed"])
+            if not body["rows"]:
+                break
+            rows += body["rows"]
+            off += 3
+        assert json.dumps(rows, ensure_ascii=False) == json.dumps(ref, ensure_ascii=False), case
+    assert seen_windowed == ({True, False} if window == 3 else {False})
+
+
 # ======================================================================================================================
 # 두 방언에서 도는 새 SQL(put_many 의 VALUES·ON CONFLICT, 탭 요약 GROUP BY)
 # ======================================================================================================================

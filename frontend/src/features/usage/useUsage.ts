@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiGet, apiSend } from "../../lib/api";
-import type { PurgeStorageHistoryResult, ScanTargetRow, UnregisteredStorage, UsageExport,
+import type { PurgeStorageHistoryResult, ScanTargetRow, ScanTargetsPaged, UnregisteredStorage, UsageExport,
               UsageHistory, UsageStorageTotals, UsageStorages } from "../../lib/types";
 import { DELETE_REQUESTS_INVALIDATES } from "../jobs/useJobs";
 
@@ -15,8 +15,9 @@ import { DELETE_REQUESTS_INVALIDATES } from "../jobs/useJobs";
 export type UsageSort = "last_scan" | "scans" | "bytes" | "files" | "hot";
 export interface TargetFilter { storage: string; path: string; order: "desc" | "asc"; sort: UsageSort }
 
-// 목록 한 번에 받는 행 수(서버 기본 100과 같다) -- 다 차면 화면이 「상위 N개 표시 · 전체 M개」라고 말한다.
-export const LIST_LIMIT = 100;
+// 한 쪽의 행 수(2026-11-16 쪽 나누기 -- 예전 「상위 100개」 상한과 같은 값, 서버 limit 상한 200 안). 행마다 최신 scan 요약
+// (~3.6KB)이 실려 한 번에 수천 행이면 화면이 버벅인다 -- 전부는 쪽으로 넘겨 본다.
+export const PAGE_SIZE = 100;
 
 export function targetQuery(f: TargetFilter): string {
   const p = new URLSearchParams();
@@ -27,14 +28,35 @@ export function targetQuery(f: TargetFilter): string {
   return p.toString();
 }
 
-// 타깃 목록: 필터가 쿼리키에 들어가 조합별로 캐시된다. 4s 폴링은 불필요 --
-// scan 이 끝나야 목록이 변하는 저빈도 데이터라 staleTime 30s 로 왕복을 줄인다.
-// 같은 스토리지 안에서 정렬·검색을 바꿀 때만 이전 행을 자리표시로 남긴다(표가 「불러오는 중」으로 깜빡이지 않게) --
+// 목록 한 쪽(화면이 읽는 모양). total = 필터에 맞는 대상 전체 수, windowed = 지표 정렬이 창(window_limit) 안에서만 돈다(창 밖
+// 대상은 어느 쪽에도 없다) -- 둘 다 null = 모름: 롤링 배포 중 옛 api 파드는 offset 을 몰라 예전 배열(첫 100행)을 준다. 그때는
+// 0 으로 접지 않고 「그 행들, 전체 수 모름」으로 받아(legacy) 화면이 탭의 대상 수 기반 옛 문구로 물러선다.
+export interface ScanTargetPage {
+  rows: ScanTargetRow[]; total: number | null; windowed: boolean | null; windowLimit: number | null; legacy: boolean;
+}
+
+// 서버 응답 -> 한 쪽. 응답은 DB 를 거친 값이라(신뢰 경계) 모양을 다시 본다 -- 배열이면 옛 파드, rows 배열이 든 객체면 쪽 응답,
+// 그 밖은 오류로 던진다(빈 목록으로 접으면 「기록 없음」이라는 거짓이 된다).
+export function toTargetPage(body: unknown): ScanTargetPage {
+  if (Array.isArray(body)) return { rows: body as ScanTargetRow[], total: null, windowed: null, windowLimit: null, legacy: true };
+  const b = body as ScanTargetsPaged | null;
+  if (b === null || typeof b !== "object" || !Array.isArray(b.rows)) throw new Error("목록 응답의 모양이 올바르지 않습니다");
+  const count = (x: unknown) => (typeof x === "number" && Number.isInteger(x) && x >= 0 ? x : null);
+  return { rows: b.rows, total: count(b.total), windowed: typeof b.windowed === "boolean" ? b.windowed : null,
+           windowLimit: count(b.window_limit), legacy: false };
+}
+
+// 타깃 목록 한 쪽(page 는 1부터): 필터·쪽이 쿼리키에 들어가 조합별로 캐시된다. 4s 폴링은 불필요 --
+// scan 이 끝나야 목록이 변하는 저빈도 데이터라 staleTime 30s 로 왕복을 줄인다. 키 접두 ["usage-targets"] 는 그대로다 --
+// 작업 삭제·미등록 정리(DELETE_REQUESTS_INVALIDATES)가 그 접두로 모든 쪽을 무효화한다. 쪽 번호를 URL 에 두지 않는 것은 검색·
+// 정렬과 같다(StoragePanel 상태).
+// 같은 스토리지 안에서 정렬·검색·쪽을 바꿀 때만 이전 행을 자리표시로 남긴다(표가 「불러오는 중」으로 깜빡이지 않게) --
 // 다른 스토리지의 행을 새 탭 아래 잠깐이라도 보이면 「이 스토리지에 그 경로가 있다」는 거짓이 된다.
-export const useScanTargets = (f: TargetFilter) =>
+export const useScanTargets = (f: TargetFilter, page: number) =>
   useQuery({
-    queryKey: ["usage-targets", f.storage, f.path, f.order, f.sort],
-    queryFn: () => apiGet<ScanTargetRow[]>(`/api/admin/usage/scan-targets?${targetQuery(f)}&limit=${LIST_LIMIT}`),
+    queryKey: ["usage-targets", f.storage, f.path, f.order, f.sort, page],
+    queryFn: async () => toTargetPage(await apiGet<unknown>(
+      `/api/admin/usage/scan-targets?${targetQuery(f)}&offset=${(page - 1) * PAGE_SIZE}&limit=${PAGE_SIZE}`)),
     placeholderData: (prev, prevQuery) => (prevQuery?.queryKey[1] === f.storage ? prev : undefined),
     staleTime: 30_000,
   });

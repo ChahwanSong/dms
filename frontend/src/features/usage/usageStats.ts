@@ -2,7 +2,8 @@
 // 스택 비중·온도 색·나이 구간 라벨이 화면과 CSV 에서 갈라지면 같은 타깃이 두 숫자를 갖는다.
 import type { HistogramBucket, UsagePoint } from "../../lib/types";
 
-// NodesList/JobStats/RequestDetail 의 humanBytes 국소 사본 관례.
+// NodesList/JobStats/RequestDetail 의 humanBytes 국소 사본 관례. 배치 상세(scan 항목 히스토그램·실 사용량)도 이것을 쓴다
+// (2026-11-16 -- 한 패널 안에서 두 표기가 갈리지 않게; 옛 배치 사본과는 1 PiB 이상에서만 달랐다: 「1024.0 TiB」 → 「1.0 PiB」).
 export function humanBytes(bytes: number): string {
   const units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
   let v = bytes, i = 0;
@@ -69,7 +70,10 @@ export function stackLayout(buckets: HistogramBucket[] | undefined) {
   return (vals as number[]).map((v) => ({ pct: (v / total) * 100, bytes: v }));
 }
 
-// BatchDetail TEMP_PALETTE/tempColorOf 국소 사본(hot→cold 비례 사상).
+// 9버킷 hot→cold 온도 팔레트(웜→쿨 자연 그라디언트) -- 사용량 온도 추이·히스토그램과 배치 항목 히스토그램(ScanHistograms)의
+// 한 벌(2026-11-16 BatchDetail 의 사본을 지우고 여기로 합침). 정적 hex inline style -- airgap 무관(런타임 외부 로드가 아니라
+// 번들 안 문자열이다). 첫 막대=빨강(hot)·끝 막대=파랑(cold)이 막대 수와 무관하게 유지되게 비례 사상한다 -- 팔레트 인덱스
+// 직결이면 9 미만 히스토그램이 전부 웜톤이 된다.
 const TEMP_PALETTE = ["#dc2626", "#ea580c", "#f59e0b", "#eab308", "#84cc16",
                       "#22c55e", "#06b6d4", "#3b82f6", "#6366f1"];
 export const tempColorOf = (n: number) => (i: number) =>

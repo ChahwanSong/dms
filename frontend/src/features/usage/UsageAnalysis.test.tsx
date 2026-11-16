@@ -6,6 +6,7 @@ import { setupServer } from "msw/node";
 import { delay, http, HttpResponse } from "msw";
 import { afterAll, afterEach, beforeAll, expect, test, vi } from "vitest";
 import { UsageAnalysis, hotRatio, pointEpoch, stackLayout, staleClass } from "./UsageAnalysis";
+import { toTargetPage } from "./useUsage";
 import type { HistogramBucket, Storage, UnregisteredStorage, UsagePoint, UsageStorageSummary,
               UsageStorageTotals } from "../../lib/types";
 import { downloadCsv } from "../../lib/csvExport";
@@ -153,7 +154,14 @@ interface Setup {
   targets?: Record<string, unknown[]>;
   onTargets?: (u: URL) => void;
   slowTargets?: string;              // 이 스토리지의 목록 응답을 늦춘다
+  slowOffset?: string;               // 이 offset 의 쪽 응답을 늦춘다(쪽 넘김 중 자리표시)
+  failOffset?: string;               // 이 offset 의 쪽 응답은 500(그 쪽만 못 불러온다)
   filterPath?: boolean;              // path 파라미터로 행을 거른다(부분 문자열)
+  // 목록 응답 모양(2026-11-16): 기본은 지금 서버 -- offset 이 실리면 쪽 응답 {rows, total, offset, limit, window_limit,
+  // windowed}(rows 는 offset·limit 으로 자른다). legacyList = 롤링 중 옛 파드(offset 을 몰라 늘 배열). listTotal = 서버 total 을
+  // 덮는다(행 수보다 큰 스토리지를 흉내 -- 함수면 요청마다).
+  legacyList?: boolean;
+  listTotal?: number | ((u: URL, rows: unknown[]) => number);
   history?: unknown;
   onHistory?: (u: URL) => void;
   onExport?: (u: URL) => unknown;
@@ -184,9 +192,19 @@ function setup(o: Setup = {}) {
       o.onTargets?.(u);
       const s = u.searchParams.get("storage") ?? "";
       if (o.slowTargets === s) await delay("infinite");
-      const rows = ((o.targets ?? { "cephfs-dms": TARGETS })[s] ?? []) as { target: string }[];
+      const all = ((o.targets ?? { "cephfs-dms": TARGETS })[s] ?? []) as { target: string }[];
       const q = u.searchParams.get("path");
-      return HttpResponse.json(o.filterPath && q ? rows.filter((r) => r.target.includes(q)) : rows);
+      const rows = o.filterPath && q ? all.filter((r) => r.target.includes(q)) : all;
+      const off = u.searchParams.get("offset");
+      if (o.legacyList || off === null) return HttpResponse.json(rows);
+      if (o.slowOffset === off) await delay("infinite");
+      if (o.failOffset === off) return HttpResponse.json({ detail: "internal" }, { status: 500 });
+      const limit = Number(u.searchParams.get("limit") ?? "100"), offset = Number(off);
+      const total = typeof o.listTotal === "function" ? o.listTotal(u, rows) : o.listTotal ?? rows.length;
+      const windowLimit = o.windowLimit ?? 10000;
+      const metric = ["bytes", "files", "hot"].includes(u.searchParams.get("sort") ?? "");
+      return HttpResponse.json({ rows: rows.slice(offset, offset + limit), total, offset, limit, window_limit: windowLimit,
+                                 windowed: metric && total > windowLimit });
     }),
     http.get("/api/admin/usage/scan-history", ({ request }) => {
       o.onHistory?.(new URL(request.url));
@@ -553,7 +571,7 @@ test("리포트를 못 읽은 스캔만 있으면 「scan 이 없다」가 아�
 
 test("딥링크 타깃이 지금 목록에 없으면 패널 안 표 아래에 표시한다", async () => {
   setup({ path: "/admin/usage?storage=cephfs-dms&target=artifacts", targets: { "cephfs-dms": [TARGETS[1]] } });
-  expect(await screen.findByText(/지금 목록\(검색·상위 100개\)에 없어 아래에 표시합니다/)).toBeInTheDocument();
+  expect(await screen.findByText("선택한 경로가 지금 쪽(또는 검색 결과)에 없어 아래에 표시합니다.")).toBeInTheDocument();
   const region = screen.getByRole("region", { name: "cephfs-dms:artifacts 상세" });
   expect(screen.getByRole("tabpanel")).toContainElement(region);
   expect(await within(region).findByText("최신 실 사용량")).toBeInTheDocument();
@@ -771,18 +789,30 @@ test("열 정렬(2026-10-19): 머리글 -- 서버 sort·order(storage 함께), �
   expect(screen.queryByText("값 모름(—)은 맨 뒤")).toBeNull();
 });
 
-test("지표 정렬 창 안내: 그 스토리지의 대상 수가 서버 window_limit 을 넘을 때만(숫자는 서버 값)", async () => {
-  list(LIST, { summary: [sum("cephfs-dms", { target_count: 12345 })], windowLimit: 10000 });
+test("지표 정렬 창 안내: 서버 windowed(지표 정렬 ∧ 필터 결과 > window_limit)로 단정한다(숫자는 서버 값)", async () => {
+  list(LIST, { listTotal: 12345, windowLimit: 10000 });
   await screen.findByRole("button", { name: "fresh" });
-  expect(screen.queryByText(/개 안에서 정렬/)).toBeNull();          // 최근 스캔 정렬(SQL)엔 창이 없다
+  expect(screen.queryByText(/개 안에서 정렬/)).toBeNull();          // 최근 스캔 정렬(SQL)엔 창이 없다(windowed false)
   await userEvent.click(screen.getByRole("button", { name: "hot 비율 정렬" }));
   expect(await screen.findByText("최근 스캔된 10,000개 안에서 정렬")).toBeInTheDocument();
 });
 
-test("지표 정렬 창 안내 + 경로 검색: 결과가 목록 상한보다 적으면 안내 없음, 많으면 조건부로 말한다", async () => {
+test("지표 정렬 창 안내 + 경로 검색: 쪽 응답이면 검색 결과의 windowed 로 단정한다(조건부 문구 없음)", async () => {
+  // 서버는 경로 검색을 건 뒤의 대상에서 창을 만든다 -- total·windowed 도 검색을 반영한다(예전엔 전체 수를 몰라 「넘으면」이라 했다).
+  list(LIST, { summary: [sum("cephfs-dms", { target_count: 12345 })], windowLimit: 10000, filterPath: true,
+               listTotal: (u, rows) => (u.searchParams.get("path") === "t" ? 12000 : rows.length) });
+  await userEvent.click(await screen.findByRole("button", { name: "hot 비율 정렬" }));
+  await screen.findByText("3개");
+  expect(screen.queryByText(/개 안에서 정렬/)).toBeNull();          // 탭 요약이 12,345 여도 서버 결과(3개)가 창 안이다
+  await userEvent.type(screen.getByLabelText("경로 검색"), "t");
+  expect(await screen.findByText("최근 스캔된 10,000개 안에서 정렬")).toBeInTheDocument();
+  expect(screen.queryByText(/넘으면/)).toBeNull();
+});
+
+test("옛 파드(배열 응답): 창 안내는 탭 대상 수 기반 추정으로 물러선다 -- 검색 결과가 상한보다 적으면 없음, 많으면 조건부", async () => {
   const many = Array.from({ length: 100 }, (_, i) => ({ ...(LIST[0] as object), target: `t${i}` }));
   list([...many, { ...(LIST[0] as object), target: "solo" }],
-       { summary: [sum("cephfs-dms", { target_count: 12345 })], windowLimit: 10000, filterPath: true });
+       { summary: [sum("cephfs-dms", { target_count: 12345 })], windowLimit: 10000, filterPath: true, legacyList: true });
   await userEvent.click(await screen.findByRole("button", { name: "hot 비율 정렬" }));
   expect(await screen.findByText("최근 스캔된 10,000개 안에서 정렬")).toBeInTheDocument();
   await userEvent.type(screen.getByLabelText("경로 검색"), "solo");
@@ -793,10 +823,129 @@ test("지표 정렬 창 안내 + 경로 검색: 결과가 목록 상한보다 �
   expect(await screen.findByText("검색 결과가 10,000개를 넘으면 최근 스캔된 10,000개 안에서 정렬")).toBeInTheDocument();
 });
 
-test("목록이 상한(100)을 채우면 「상위 100개 표시 · 전체 N개」(전체 = 요약의 대상 수)", async () => {
+test("옛 파드(배열 응답): 상한(100)을 채우면 「상위 100개 표시 · 전체 N개」(전체 = 요약의 대상 수), 쪽 넘김 없음", async () => {
   const many = Array.from({ length: 100 }, (_, i) => ({ ...(LIST[0] as object), target: `t${i}` }));
-  list(many, { summary: [sum("cephfs-dms", { target_count: 12345 })] });
+  list(many, { summary: [sum("cephfs-dms", { target_count: 12345 })], legacyList: true });
   expect(await screen.findByText("상위 100개 표시 · 전체 12,345개")).toBeInTheDocument();
+  expect(screen.queryByRole("navigation")).toBeNull();               // 전체 수 모름 -- 쪽을 지어내지 않는다
+});
+
+// ---- 쪽 나누기(2026-11-16 -- 상위 100개가 아니라 전부를 쪽으로 넘겨 본다) ----
+
+const rowsN = (count: number) =>
+  Array.from({ length: count }, (_, i) => ({ ...(LIST[0] as object), target: `p${String(i).padStart(3, "0")}` }));
+
+test("쪽 나누기: offset·limit=100 으로 쪽마다 부르고, 건수는 서버 total 로 「범위 / 전체」 -- Pager 는 표 래퍼 밖", async () => {
+  const offsets: (string | null)[] = [];
+  list(rowsN(250), { onTargets: (u) => offsets.push(u.searchParams.get("offset")) });
+  expect(await screen.findByRole("button", { name: "p000" })).toBeInTheDocument();
+  expect(screen.getByText("1–100 / 250개")).toBeInTheDocument();
+  const nav = screen.getByRole("navigation", { name: "cephfs-dms 대상 목록 쪽" });
+  expect(nav).toHaveTextContent("1 / 3쪽");
+  expect(screen.getByRole("table").closest(".overflow-x-auto")).not.toContainElement(nav);
+  expect(offsets[0]).toBe("0");
+  await userEvent.click(within(nav).getByRole("button", { name: "다음" }));
+  expect(await screen.findByRole("button", { name: "p100" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "p000" })).toBeNull();
+  expect(screen.getByText("101–200 / 250개")).toBeInTheDocument();
+  expect(nav).toHaveTextContent("2 / 3쪽");
+  await userEvent.click(within(nav).getByRole("button", { name: "마지막" }));
+  expect(await screen.findByRole("button", { name: "p249" })).toBeInTheDocument();
+  expect(screen.getByText("201–250 / 250개")).toBeInTheDocument();
+  expect(within(nav).getByRole("button", { name: "다음" })).toBeDisabled();
+  expect(offsets).toEqual(["0", "100", "200"]);
+  // 쪽 번호는 URL 에 쓰지 않는다(검색·정렬처럼 상태 -- URL 은 탭·선택 행만)
+  expect(loc().get("page")).toBeNull();
+});
+
+test("쪽 나누기: 정렬·검색이 바뀌면 1쪽으로, 검색 중 건수는 「검색 결과 N개 중 범위」", async () => {
+  let last: URL | null = null;
+  list(rowsN(250), { filterPath: true, onTargets: (u) => { last = u; } });
+  await screen.findByRole("button", { name: "p000" });
+  await userEvent.click(screen.getByRole("button", { name: "다음" }));
+  await screen.findByRole("button", { name: "p100" });
+  await userEvent.click(screen.getByRole("button", { name: "실 사용량 정렬" }));
+  await waitFor(() => expect(last!.searchParams.get("sort")).toBe("bytes"));
+  expect(last!.searchParams.get("offset")).toBe("0");
+  expect(await screen.findByRole("button", { name: "p000" })).toBeInTheDocument();
+  expect(screen.getByRole("navigation", { name: /대상 목록 쪽/ })).toHaveTextContent("1 / 3쪽");
+  await userEvent.click(screen.getByRole("button", { name: "다음" }));
+  await screen.findByRole("button", { name: "p100" });
+  await userEvent.type(screen.getByLabelText("경로 검색"), "p");
+  await waitFor(() => expect(last!.searchParams.get("path")).toBe("p"));
+  expect(last!.searchParams.get("offset")).toBe("0");
+  expect(await screen.findByText("검색 결과 250개 중 1–100")).toBeInTheDocument();
+  expect(screen.getByRole("navigation", { name: /대상 목록 쪽/ })).toHaveTextContent("1 / 3쪽");
+  // 한 쪽에 다 들어가는 검색은 예전 문구(「‘q’ N개」) -- p1 = p100~p199 = 100개
+  await userEvent.type(screen.getByLabelText("경로 검색"), "1");
+  expect(await screen.findByText("‘p1’ 100개")).toBeInTheDocument();
+  expect(screen.queryByRole("navigation", { name: /대상 목록 쪽/ })).toBeNull();
+});
+
+test("쪽 나누기: 넘기는 동안은 이전 쪽을 둔 채 「불러오는 중…」(건수를 단정하지 않는다)", async () => {
+  list(rowsN(250), { slowOffset: "100" });
+  await screen.findByRole("button", { name: "p000" });
+  await userEvent.click(screen.getByRole("button", { name: "다음" }));
+  expect(await screen.findByText("불러오는 중…")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "p000" })).toBeInTheDocument();
+  expect(screen.queryByText(/ \/ 250개$/)).toBeNull();
+});
+
+test("쪽 나누기: 한 쪽을 못 불러와도 쪽 넘김은 넘기던 때의 쪽 수로 남는다 -- 그 쪽에 갇히지 않는다", async () => {
+  // 이 쪽은 캐시가 없어 오류 때 data 가 비고 전체 수도 모른다 -- 쪽 수를 1로 접으면 Pager 가 사라져 돌아갈 길이 없었다(리뷰).
+  list(rowsN(250), { failOffset: "100" });
+  await screen.findByRole("button", { name: "p000" });
+  await userEvent.click(screen.getByRole("button", { name: "다음" }));
+  expect(await screen.findByText("internal")).toHaveClass("text-bad");
+  expect(screen.queryByRole("button", { name: "p000" })).toBeNull();
+  const nav = screen.getByRole("navigation", { name: /대상 목록 쪽/ });
+  expect(nav).toHaveTextContent("2 / 3쪽");
+  await userEvent.click(within(nav).getByRole("button", { name: "다음" }));       // 다음 쪽(3)은 읽힌다
+  expect(await screen.findByRole("button", { name: "p200" })).toBeInTheDocument();
+  expect(screen.getByText("201–250 / 250개")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "이전" }));             // 다시 2쪽: 또 실패해도 쪽 수 3 유지
+  expect(await screen.findByText("internal")).toBeInTheDocument();
+  await userEvent.click(within(screen.getByRole("navigation", { name: /대상 목록 쪽/ })).getByRole("button", { name: "처음" }));
+  expect(await screen.findByRole("button", { name: "p000" })).toBeInTheDocument();
+  expect(screen.getByText("1–100 / 250개")).toBeInTheDocument();
+});
+
+test("쪽 나누기: 지표 정렬이 창에 걸리면(windowed) 쪽 수는 창까지 -- 창 밖 대상은 어느 쪽에도 없다", async () => {
+  list(rowsN(250), { listTotal: 12345, windowLimit: 10000 });
+  await screen.findByRole("button", { name: "p000" });
+  expect(screen.getByRole("navigation", { name: /대상 목록 쪽/ })).toHaveTextContent("1 / 124쪽");    // 12,345 / 100
+  expect(screen.getByText("1–100 / 12,345개")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "hot 비율 정렬" }));
+  await waitFor(() => expect(screen.getByRole("navigation", { name: /대상 목록 쪽/ })).toHaveTextContent("1 / 100쪽"));
+  expect(screen.getByText("최근 스캔된 10,000개 안에서 정렬")).toBeInTheDocument();
+});
+
+test("쪽 나누기: 선택한 행이 지금 쪽에 없으면 표 아래 폴백 칸 -- 그 쪽으로 돌아오면 행 아래 펼침", async () => {
+  setup({ path: "/admin/usage?storage=cephfs-dms&target=p000", targets: { "cephfs-dms": rowsN(150) } });
+  expect(await screen.findByRole("button", { name: "p000" })).toHaveAttribute("aria-expanded", "true");
+  await userEvent.click(screen.getByRole("button", { name: "다음" }));
+  expect(await screen.findByText("선택한 경로가 지금 쪽(또는 검색 결과)에 없어 아래에 표시합니다.")).toBeInTheDocument();
+  expect(screen.getByRole("region", { name: "cephfs-dms:p000 상세" })).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "이전" }));
+  expect(await screen.findByRole("button", { name: "p000" })).toHaveAttribute("aria-expanded", "true");
+  expect(screen.queryByText(/지금 쪽\(또는 검색 결과\)에 없어/)).toBeNull();
+});
+
+test("쪽 나누기: 전체 수를 모르면(옛 파드) 쪽 넘김 없이 그 행들 -- 0 으로 접지 않는다", async () => {
+  list(rowsN(30), { legacyList: true });
+  await screen.findByRole("button", { name: "p000" });
+  expect(within(screen.getByRole("tabpanel")).getByText("30개")).toBeInTheDocument();
+  expect(screen.queryByRole("navigation")).toBeNull();
+});
+
+test("toTargetPage: 배열 = 옛 파드(전체 수 모름), 쪽 객체는 모양을 다시 보고, rows 없는 객체는 오류", () => {
+  expect(toTargetPage([{ target: "a" }])).toEqual({ rows: [{ target: "a" }], total: null, windowed: null,
+                                                    windowLimit: null, legacy: true });
+  expect(toTargetPage({ rows: [], total: 0, offset: 0, limit: 100, window_limit: 10000, windowed: false }))
+    .toEqual({ rows: [], total: 0, windowed: false, windowLimit: 10000, legacy: false });       // 0 은 정상값
+  expect(toTargetPage({ rows: [], total: -1, window_limit: "x", windowed: "yes" }))
+    .toEqual({ rows: [], total: null, windowed: null, windowLimit: null, legacy: false });
+  for (const bad of [null, {}, { rows: "x" }, "<!doctype html>"]) expect(() => toTargetPage(bad)).toThrow();
 });
 
 test("최신 리포트를 못 읽은 행: 용량은 DB 기록값임을 표시, 파일 수·hot 은 —", async () => {
@@ -861,57 +1010,127 @@ test("CSV 내보내기는 지금 열 정렬(sort·order)과 경로 검색을 그
   expect(exportUrls[0].searchParams.get("order")).toBe("desc");
 });
 
-// ---- 파일 크기 분포(2026-10-21 「최근 스캔 기준 파일의 사이즈별 정보」) ----
+// ---- 최신 scan 의 온도·크기 분포(2026-10-21 크기 목록 → 2026-11-16 배치 항목과 같은 차트, ScanHistograms) ----
 
 const detailOf = (target: string) => screen.findByRole("region", { name: `cephfs-dms:${target} 상세` });
 // 상세의 분포: 이력의 다른 포인트(이전 scan)에 다른 분포를 심어, 기준이 무엇인지 가려낸다.
 const OLDER_SIZES = { ...HISTORY, points: HISTORY.points.map((p) => ({ ...p, file_size_histogram: sizeHist(pad10([1])) })) };
+const tip = (el: HTMLElement, t: string) => el.querySelector(`[data-tip="${t}"]`);
+const LATEST_ATIME = [{ bucket: "[0d,1d]", min_age_days: 0, max_age_days: 1, bytes: 3072 },
+                      { bucket: "[1d,2d]", min_age_days: 1, max_age_days: 2, bytes: 1024 }];
 
-test("펼친 상세: 「최신 scan」 블록 = 수치 줄 | 파일 크기 분포 -- 기준은 목록 행의 최신 scan(이력의 다른 포인트가 아님)", async () => {
-  setup({ targets: { "cephfs-dms": [{ ...TARGETS[0], latest: point({ file_size_histogram: sizeHist(pad10([22, 0, 0, 4])) }) },
-                                    TARGETS[1]] },
+test("펼친 상세: 최신 scan 의 온도 히스토그램·크기 분포(배치 항목과 같은 차트) -- 기준은 목록 행의 최신 scan, 수치 줄은 한 줄", async () => {
+  setup({ targets: { "cephfs-dms": [{ ...TARGETS[0], latest: point({
+            generated_at_epoch: 1787500000, file_size_histogram: sizeHist(pad10([22, 0, 0, 4])),
+            time_histograms: { atime: LATEST_ATIME as never, mtime: buckets([0, 2048]) as never } }) }, TARGETS[1]] },
           history: OLDER_SIZES });
   await userEvent.click(await screen.findByRole("button", { name: "artifacts" }));
   const region = await detailOf("artifacts");
-  const dist = await within(region).findByRole("list", { name: "파일 크기 분포" });
-  expect(within(dist).getAllByRole("listitem")).toHaveLength(10);              // 0개 구간도 줄로 남는다
-  expect(within(dist).getByText("4 KiB 이하 22개 85%")).toBeInTheDocument();
-  expect(within(dist).getByText("1–16 MiB 4개 15%")).toBeInTheDocument();
-  expect(within(dist).getByText("4 TiB 초과 0개 0%")).toBeInTheDocument();
-  expect(within(dist).queryByText(/4 KiB 이하 1개/)).toBeNull();               // 이력(이전 scan)의 분포가 아니다
+  // 수치 줄: 옆 칸 없이 한 줄 전체 폭(375 두 칸 → sm 네 칸)
+  const stats = region.querySelector<HTMLElement>('dl[aria-label="최신 scan 요약"]')!;
+  expect(stats.className).toMatch(/\bsm:grid-cols-4\b/);
+  expect(stats.className).not.toMatch(/lg:grid-cols-2/);
+  // 온도: 목록 행의 최신 scan 값(이력 포인트의 atime [1024, 0] 이 아니다), 머리 보조 글자 = 그 scan 의 생성 시각
+  const temp = await within(region).findByRole("img", { name: "데이터 온도(atime) 히스토그램" });
+  expect(tip(temp, "[0d,1d]: 3.0 KiB (75%)")).not.toBeNull();
+  expect(tip(temp, "[0d,1d]: 1.0 KiB (100%)")).toBeNull();
+  expect(within(region).getByText("최신 scan · 2026-08-24 00:46:40 KST")).toBeInTheDocument();
+  expect(within(region).getByText("선 = hot쪽부터의 누적 용량 비중 · 총 4.0 KiB · 막대에 마우스를 올리면 구간별 용량"))
+    .toBeInTheDocument();
+  // 긴 축 캡션은 본문이 아니라 제목 옆 설명(사용량 화면 정리 규칙)
+  expect(within(region).queryByText(/^왼쪽\(빨강\)=hot/, { selector: "p" })).toBeNull();
+  expect(within(region).getByRole("button", { name: "데이터 온도 설명" }))
+    .toHaveAccessibleDescription(/왼쪽\(빨강\)=hot·최근 접근, 오른쪽\(파랑\)=cold/);
+  // 크기: 세로 막대(단색 accent) 10구간, 축약 라벨, 툴팁 개수·비중 -- 이력(이전 scan)의 분포가 아니다
+  const size = within(region).getByRole("img", { name: "파일 크기 분포" });
+  expect(size.getElementsByClassName("bg-accent")).toHaveLength(10);
+  expect(tip(size, "0~4K: 22 (85%)")).not.toBeNull();
+  expect(tip(size, "1M~16M: 4 (15%)")).not.toBeNull();
+  expect(tip(size, "4T~: 0 (0%)")).not.toBeNull();
+  expect(tip(size, "0~4K: 1 (100%)")).toBeNull();
   expect(within(region).getByText("최신 scan · 파일 26개")).toBeInTheDocument();
   expect(within(region).getByRole("button", { name: "파일 크기 분포 설명" })).toBeInTheDocument();
-  // 수치 줄은 그대로 같은 블록에 있다
-  expect(within(region).getByRole("list", { name: "파일 크기 분포" })).toBeInTheDocument();
-  expect(within(region).getByText("최신 실 사용량", { selector: "dt" })).toBeInTheDocument();
+  // 순서: 수치 줄 → 온도 → 크기 → 실 사용량 추이 → 온도 추이
+  const order = [stats, temp, size, within(region).getByRole("group", { name: "실 사용량 추이" }),
+                 within(region).getByRole("img", { name: "데이터 온도 추이(atime)" })];
+  for (let i = 1; i < order.length; i++) {
+    expect(order[i - 1].compareDocumentPosition(order[i]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  }
+  // 온도 축 토글은 하나 -- 최신 scan 히스토그램과 추이가 함께 바뀐다
+  expect(within(region).getAllByRole("group", { name: "온도 축" })).toHaveLength(1);
+  await userEvent.click(within(region).getByRole("button", { name: "mtime" }));
+  expect(within(region).getByRole("img", { name: "데이터 온도(mtime) 히스토그램" })).toBeInTheDocument();
+  expect(within(region).getByRole("img", { name: "데이터 온도 추이(mtime)" })).toBeInTheDocument();
+  expect(within(region).getByText("mtime 기준")).toBeInTheDocument();
 });
 
 test("목록 행에 최신 정보가 없으면(딥링크 폴백 포함) 이력에서 시각이 가장 늦은 포인트의 분포(서버 순서가 아니다)", async () => {
   const pts = [
     point({ job_id: "j1", request_id: "r1", generated_at_epoch: 1787400000, file_size_histogram: sizeHist(pad10([1])) }),
-    point({ job_id: "j3", request_id: "r3", generated_at_epoch: 1787500000, file_size_histogram: sizeHist(pad10([5, 5])) }),
+    point({ job_id: "j3", request_id: "r3", generated_at_epoch: 1787500000, file_size_histogram: sizeHist(pad10([5, 5])),
+            time_histograms: { atime: LATEST_ATIME as never } }),
     point({ job_id: "j2", request_id: "r2", generated_at_epoch: 1787450000, file_size_histogram: sizeHist(pad10([9])) }),
   ];
   setup({ path: "/admin/usage?storage=cephfs-dms&target=artifacts", history: { ...HISTORY, points: pts } });
   const region = await detailOf("artifacts");
-  expect(await within(region).findByText("4 KiB 이하 5개 50%")).toBeInTheDocument();
+  const size = await within(region).findByRole("img", { name: "파일 크기 분포" });
+  expect(tip(size, "0~4K: 5 (50%)")).not.toBeNull();
   expect(within(region).getByText("최신 scan · 파일 10개")).toBeInTheDocument();
+  expect(tip(within(region).getByRole("img", { name: "데이터 온도(atime) 히스토그램" }), "[0d,1d]: 3.0 KiB (75%)"))
+    .not.toBeNull();
 });
 
-test("분포 모름: 최신 scan 리포트를 못 읽었으면 그렇게 말하고(옛 scan 분포로 대신하지 않는다), 구형 리포트면 「기록 없음」", async () => {
+test("분포 모름: 최신 scan 리포트를 못 읽었으면 두 차트 대신 한 줄(옛 scan 분포·빈 차트로 대신하지 않는다), 구형 리포트면 「기록 없음」", async () => {
   setup({ targets: { "cephfs-dms": [
             { ...TARGETS[0], latest: point({ report_readable: false, summary: {}, time_histograms: {}, file_size_histogram: [] }) },
             { ...TARGETS[1], latest: point({ file_size_histogram: [] }) }] },
           history: OLDER_SIZES });
   await userEvent.click(await screen.findByRole("button", { name: "artifacts" }));
   const region = await detailOf("artifacts");
-  expect(await within(region).findByText("최신 scan 의 리포트를 읽지 못해 크기 분포를 알 수 없습니다")).toBeInTheDocument();
-  expect(within(region).queryByRole("list", { name: "파일 크기 분포" })).toBeNull();
+  expect(await within(region).findByText("최신 scan 의 리포트를 읽지 못해 온도·크기 분포를 알 수 없습니다")).toBeInTheDocument();
+  expect(within(region).queryByRole("img", { name: /히스토그램$/ })).toBeNull();
+  expect(within(region).queryByRole("img", { name: "파일 크기 분포" })).toBeNull();
+  expect(within(region).queryByText("집계된 버킷 없음")).toBeNull();
   expect(within(region).queryByText(/최신 scan · 파일/)).toBeNull();
+  // 축 토글은 남는다(아래 추이가 같은 축을 쓴다 -- 이력의 다른 scan 은 읽혔다)
+  await userEvent.click(within(region).getByRole("button", { name: "mtime" }));
+  expect(within(region).getByRole("img", { name: "데이터 온도 추이(mtime)" })).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "team" }));
   const team = await detailOf("team");
   expect(await within(team).findByText("크기 분포 기록이 없습니다(구형 리포트)")).toBeInTheDocument();
-  expect(within(team).queryByRole("list", { name: "파일 크기 분포" })).toBeNull();     // 0 막대 10줄로 그리지 않는다
+  expect(within(team).queryByRole("img", { name: "파일 크기 분포" })).toBeNull();     // 0 막대 10개로 그리지 않는다
+  // 총 개수를 모르면 「파일 0개」라 하지 않는다(기록 없음 ≠ 0)
+  expect(within(team).getByText("최신 scan", { selector: "span" })).toBeInTheDocument();
+  expect(within(team).queryByText(/파일 0개/)).toBeNull();
+});
+
+test("온도 축 = 이력 ∪ 최신 scan 의 축 -- 고른 축이 최신 scan 에만 없으면 「이 축의 온도 분포 없음」, 값 누락은 「모름」", async () => {
+  setup({ targets: { "cephfs-dms": [
+            { ...TARGETS[0], latest: point({ time_histograms: { ctime: buckets([7, 0]) as never } }) },
+            { ...TARGETS[1], latest: point({ time_histograms: { atime: buckets([7, undefined]) as never } }) }] } });
+  await userEvent.click(await screen.findByRole("button", { name: "artifacts" }));
+  const region = await detailOf("artifacts");
+  const axis = within(region).getByRole("group", { name: "온도 축" });
+  expect(within(axis).getAllByRole("button").map((b) => b.textContent)).toEqual(["atime", "mtime", "ctime"]);
+  expect(await within(region).findByText("이 축의 온도 분포 없음")).toBeInTheDocument();      // atime: 이력엔 있고 최신엔 없다
+  await userEvent.click(within(axis).getByRole("button", { name: "ctime" }));
+  expect(within(region).getByRole("img", { name: "데이터 온도(ctime) 히스토그램" })).toBeInTheDocument();
+  expect(within(region).getByText("이 축의 온도 분포가 있는 스캔이 없습니다")).toBeInTheDocument();   // 추이(이력)는 ctime 없음
+  await userEvent.click(screen.getByRole("button", { name: "team" }));
+  const team = await detailOf("team");
+  // bytes 가 빠진 버킷이 있으면 부분합으로 그리지 않는다(빈 히스토그램 문구와도 다르다)
+  expect(await within(team).findByText("이 축의 온도 분포를 알 수 없습니다(리포트 값 누락)")).toBeInTheDocument();
+  expect(within(team).queryByRole("img", { name: "데이터 온도(atime) 히스토그램" })).toBeNull();
+});
+
+test("온도 버킷이 이력·최신 scan 어디에도 없으면 축 토글 없이 「온도 분포 기록이 없습니다」(「이 축」이라 하지 않는다)", async () => {
+  const bare = { ...HISTORY, points: HISTORY.points.map((p) => ({ ...p, time_histograms: {} })) };
+  setup({ targets: { "cephfs-dms": [{ ...TARGETS[0], latest: point({ time_histograms: {} }) }, TARGETS[1]] }, history: bare });
+  await userEvent.click(await screen.findByRole("button", { name: "artifacts" }));
+  const region = await detailOf("artifacts");
+  expect(await within(region).findByText("온도 분포 기록이 없습니다")).toBeInTheDocument();
+  expect(within(region).queryByText("이 축의 온도 분포 없음")).toBeNull();
+  expect(within(region).queryByRole("group", { name: "온도 축" })).toBeNull();
 });
 
 // ---- 이 스토리지 합계(2026-10-21 「스토리지별 사용량 및 정보들의 총합」) ----
@@ -930,9 +1149,12 @@ test("이 스토리지 합계: 실 사용량·파일·디렉터리·hot·df + �
   expect(valueOf(box, "디렉터리")).toHaveTextContent(/^243개$/);
   expect(valueOf(box, "hot 비율(180일)")).toHaveTextContent(/^100%$/);
   expect(valueOf(box, "파일시스템 사용(df)")).toHaveTextContent("36.0 MiB/ 22.8 GiB0.2%");
-  const dist = within(box).getByRole("list", { name: "파일 크기 분포" });
-  expect(within(dist).getByText("4 KiB 이하 590개 89%")).toBeInTheDocument();
-  expect(within(dist).getByText("4–64 KiB 66개 10.0%")).toBeInTheDocument();
+  // 크기 분포는 펼친 상세·배치 항목과 같은 세로 막대(2026-11-16) -- 수치 줄 아래 한 줄 전체 폭
+  const dist = within(box).getByRole("img", { name: "파일 크기 분포" });
+  expect(tip(dist, "0~4K: 590 (89%)")).not.toBeNull();
+  expect(tip(dist, "4K~64K: 66 (10%)")).not.toBeNull();
+  expect(dist.getElementsByClassName("bg-accent")).toHaveLength(10);
+  expect(box.querySelector('dl[aria-label="이 스토리지 합계"]')!.className).not.toMatch(/lg:grid-cols-2/);
   expect(box).toHaveTextContent("최상위 대상 4개 기준 · 하위 대상 5개 제외 · scan 시점 65일 전 ~ 18일 전");
   expect(within(box).getByText("65일 전")).toHaveClass("text-attn");            // 오래된 쪽은 표의 경과 색(30일↑ 주의)
   // 표·검색은 합계 아래에서 그대로
@@ -965,7 +1187,8 @@ test("각주 조각은 해당할 때만: 형식 오류·값 모름·창(1만) --
     "최상위 대상 4개 기준 · 형식이 잘못된 대상 2개 제외 · 값 모름 3개 · 최근 스캔된 10,000개 대상 기준 · scan 시점 5일 전");
   expect(box).not.toHaveTextContent("하위 대상");
   expect(box).not.toHaveTextContent("요약 읽는 중");
-  expect(box).not.toHaveTextContent("~");
+  // 같은 날이면 시점 하나(「~」 범위 없음) -- 각주만 본다(크기 분포 축 라벨 「0~4K」에도 「~」가 있다)
+  expect(within(box).getByText(/^최상위 대상/).closest("p")).not.toHaveTextContent("~");
 });
 
 test("요약 읽는 중(pending > 0 · progressed): 1초 뒤 다시 불러 이어 읽고, 다 읽으면 멈춘다", async () => {

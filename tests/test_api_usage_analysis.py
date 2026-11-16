@@ -506,6 +506,115 @@ def test_export_follows_the_same_sort(tmp_path):
     assert [r["target"] for r in rows] == ["old", "mid", "new", "broken"]
 
 
+# ---- 2026-11-16: 목록 쪽 나누기(offset -> {rows, total, offset, limit, window_limit, windowed}) ----
+
+def _paged(client, **p):
+    r = client.get("/api/admin/usage/scan-targets", params=p)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert isinstance(body, dict) and set(body) == {"rows", "total", "offset", "limit", "window_limit", "windowed"}
+    return body
+
+
+def _five_targets(tmp_path):
+    art = tmp_path / "artifacts"
+    client = _client(tmp_path, art)
+    _login(client, "admin", "admin")
+    for i, t in enumerate(["t1", "t2", "t3", "t4", "t5"]):
+        for n in range(i % 2 + 1):             # 스캔 횟수 1·2·1·2·1 -- scans 정렬의 동률이 쪽 경계에 걸린다
+            jid, _ = _scan_job(client, target=t, art_base=art)
+            _at(client, jid, f"2026-09-0{i + 1}T0{n}:00:00Z")
+    return client
+
+
+@pytest.mark.parametrize("sort,order", [("last_scan", "desc"), ("last_scan", "asc"), ("scans", "desc"), ("scans", "asc")])
+def test_sql_sort_pages_concatenate_to_the_unpaged_order(tmp_path, sort, order):
+    # SQL 정렬의 쪽 경계: LIMIT … OFFSET 으로 자른 쪽들을 이으면 쪽 없는 목록과 같은 순서다(빠짐·겹침 없음 -- 동률은 이름순).
+    client = _five_targets(tmp_path)
+    whole = [r["target"] for r in client.get("/api/admin/usage/scan-targets",
+                                             params={"sort": sort, "order": order}).json()]
+    assert len(whole) == 5
+    got = []
+    for off in (0, 2, 4):
+        body = _paged(client, sort=sort, order=order, limit=2, offset=off)
+        assert (body["total"], body["offset"], body["limit"], body["window_limit"], body["windowed"]) == (
+            5, off, 2, 10000, False)
+        got += [r["target"] for r in body["rows"]]
+        assert all("latest" in r and r["latest"]["job_id"] for r in body["rows"])    # 행 모양은 배열 경로와 같다
+    assert got == whole
+
+
+def test_metric_sort_pages_slice_the_ranked_window(tmp_path):
+    client = _metric_client(tmp_path)
+    first = _paged(client, sort="bytes", order="desc", limit=2, offset=0)
+    second = _paged(client, sort="bytes", order="desc", limit=2, offset=2)
+    assert [r["target"] for r in first["rows"]] == ["old", "mid"]
+    assert [r["target"] for r in second["rows"]] == ["new", "broken"]               # 모름은 맨 뒤 쪽
+    assert first["total"] == second["total"] == 4 and first["windowed"] is False
+    assert second["rows"][1]["latest"]["report_readable"] is False
+
+
+def test_paged_total_follows_the_filters_and_an_empty_page_still_tells_it(tmp_path):
+    client = _metric_client(tmp_path)
+    body = _paged(client, path="mi", offset=0)
+    assert [r["target"] for r in body["rows"]] == ["mid"] and body["total"] == 1
+    # 끝을 넘은 쪽: 행은 비고 전체 수는 그대로(0 으로 접지 않는다) -- 두 정렬 경로 모두
+    for sort in ("last_scan", "hot"):
+        body = _paged(client, sort=sort, limit=2, offset=4)
+        assert body["rows"] == [] and body["total"] == 4 and body["offset"] == 4
+    # 결과가 없는 필터의 전체 수는 정상값 0
+    body = _paged(client, path="nothing-here", offset=0)
+    assert body["rows"] == [] and body["total"] == 0
+
+
+def test_paged_windowed_is_metric_sort_over_the_window_only(tmp_path, monkeypatch):
+    # windowed = 지표 정렬 ∧ total > 창: 창 밖 대상은 그 정렬의 어느 쪽에도 없다(쪽 수를 total 로 세면 빈 쪽이 생긴다 --
+    # 포탈은 이 값으로 「최근 스캔된 N개 안에서」를 단정한다). SQL 정렬은 창이 없어 끝까지 닿는다.
+    from dms.api import routes_usage
+    monkeypatch.setattr(routes_usage, "_WINDOW_LIMIT", 2)
+    client = _metric_client(tmp_path)
+    body = _paged(client, sort="bytes", limit=2, offset=0)
+    assert body["windowed"] is True and body["total"] == 4 and body["window_limit"] == 2
+    assert [r["target"] for r in body["rows"]] == ["new", "broken"]                # 최근 스캔 2개 창 안의 순위
+    # 창 끝을 넘은 쪽은 창의 정렬 값 계산(1만이면 ~1.3초)을 건너뛴다 -- 빈 쪽 + 같은 total·windowed
+    def _no_rank(*a, **k):
+        raise AssertionError("past-window page must not rank the window")
+    monkeypatch.setattr(routes_usage, "_metric_order", _no_rank)
+    past = _paged(client, sort="bytes", limit=2, offset=2)
+    assert past["rows"] == [] and past["total"] == 4 and past["windowed"] is True
+    body = _paged(client, sort="last_scan", limit=2, offset=2)
+    assert body["windowed"] is False and [r["target"] for r in body["rows"]] == ["mid", "old"]
+
+
+def test_offset_is_validated_and_absent_offset_keeps_the_array(tmp_path):
+    client = _metric_client(tmp_path)
+    assert client.get("/api/admin/usage/scan-targets", params={"offset": -1}).status_code == 422
+    assert client.get("/api/admin/usage/scan-targets", params={"offset": 0, "limit": 201}).status_code == 422
+    assert client.get("/api/admin/usage/scan-targets", params={"offset": "x"}).status_code == 422
+    # 상한 밖 큰 정수는 DB 정수 넘침(500)이 아니라 입력 오류 422
+    assert client.get("/api/admin/usage/scan-targets", params={"offset": 10 ** 20}).status_code == 422
+    assert client.get("/api/admin/usage/scan-targets", params={"offset": 10 ** 9}).status_code == 200
+    # offset 이 없으면 예전 배열(옛 탭·바이트 동일 그물은 test_usage_equivalence)
+    arr = client.get("/api/admin/usage/scan-targets", params={"limit": 2}).json()
+    assert isinstance(arr, list) and [r["target"] for r in arr] == ["broken", "new"]
+    assert _paged(client, limit=2, offset=0)["rows"] == arr
+
+
+def test_paged_total_counts_the_empty_storage_name_as_its_own_storage(tmp_path):
+    # 빈 storage 이름도 이름이다(_scan_target_where -- None 일 때만 필터 없음). 수도 같은 규칙이어야 「/ N개」가 맞다.
+    art = tmp_path / "artifacts"
+    client = _client(tmp_path, art)
+    _login(client, "admin", "admin")
+    _scan_job(client, storage="s1", target="a", art_base=art)
+    _scan_job(client, storage="s1", target="a", art_base=art)
+    _scan_job(client, storage="s2", target="a", art_base=art)
+    blank, _ = _scan_job(client, storage="s1", target="b", art_base=art)
+    client.app.state.repos.db.execute("UPDATE data_jobs SET storage_name = '' WHERE job_id = :j", {"j": blank})
+    assert _paged(client, storage="", offset=0)["total"] == 1
+    assert _paged(client, storage="s1", offset=0)["total"] == 1                     # 같은 경로의 스캔 두 번은 대상 하나
+    assert _paged(client, offset=0)["total"] == 3                                   # 옛 「전체」: (스토리지, 경로) 쌍
+
+
 # ---- 2026-10-20: 스토리지별 분할·창 1만·묶음 스트리밍 내보내기·탭 요약 ----
 # 옛 구현과의 응답 동일성(바이트)과 두 방언의 새 SQL 은 tests/test_usage_equivalence.py 가 본다.
 

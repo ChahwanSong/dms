@@ -5,13 +5,13 @@ import { Table } from "../../components/ui/Table";
 import { TimeSeriesChart } from "../../components/ui/TimeSeriesChart";
 import { Segmented } from "../../components/ui/Segmented";
 import { HoverTip, placeBeside, useHoverAnchor, type Rect } from "../../components/ui/HoverTip";
-import { SizeDistribution } from "../../components/ui/SizeDistribution";
 import type { ApiError } from "../../lib/api";
 import type { HistogramBucket, UsagePoint } from "../../lib/types";
 import { kstStampEpoch, kstDay } from "../../lib/datetime";
-import { pctText, sizeDistribution } from "../../lib/sizeBuckets";
+import { pctText } from "../../lib/sizeBuckets";
 import { useScanHistory } from "./useUsage";
 import { SIZE_HELP, SectionHead, Stat } from "./UsageParts";
+import { HIST_TEMP_CAPTIONS, SizeHistogram, TEMP_AXES, TempHistogram, sizeHistogramTotal } from "./ScanHistograms";
 import {
   ATIME_APPROX_NOTE, AXIS_MEANING, HOT_AGE_MAX_DAYS, ageLabel, hotRatio, humanBytes, pointEpoch, stackLayout, tempColorOf,
 } from "./usageStats";
@@ -19,6 +19,8 @@ import {
 // 펼친 타깃 상세(2026-09-14 행 아래 펼침 → 2026-10-20 UsageAnalysis 에서 분리·정리). 2026-10-20 정리(사용자 요청 「깔끔하고
 // 심플하고 직관적으로」): 요약 타일 4개(카드 안의 카드) → 한 줄 수치(dl), 표시 창·온도 축은 공용 Segmented(aria-pressed),
 // 긴 캡션은 제목 옆 HelpTip, 스캔 이력 표는 <details> 기본 닫힘 -- 이력 29건 타깃의 펼침 높이가 1,823px 였다.
+// 2026-11-16(사용자 요청: 배치 scan 항목 펼침의 온도·크기 차트를 사용량에도): 「최신 scan」의 데이터 온도 히스토그램과 파일
+// 크기 분포를 배치 항목과 같은 차트(ScanHistograms)로 -- 시간 축 추이(실 사용량·온도)는 사용량에만 있는 가치라 그대로 둔다.
 //
 // 절대 시각은 공유 datetime 헬퍼(KST)로 통일했다 -- kstStampEpoch(초 -> KST 벽시계), kstDay(초 -> KST MM-DD). 온도 열 축
 // 라벨은 폭(max-w-12) 때문에 MM-DD 만 쓰고 분 단위는 툴팁이 든다(실화면 확인).
@@ -212,10 +214,10 @@ function newestPoint(points: UsagePoint[]): UsagePoint | null {
   return best;
 }
 
-// 타깃 1건의 상세(「최신 scan」 블록 = 수치 줄 | 파일 크기 분포 → 실 사용량 추이 → 온도 추이 → 스캔 이력). 목록의 **선택한 행
-// 바로 아래에 펼쳐진다**(expand). 표시 창·온도 축 state 는 여기 국소라 타깃을 바꾸면 초기화된다 -- 다른 타깃의 잔류 선택이 새
-// 타깃에 묻어 가지 않는다. showTitle 은 목록 밖 폴백 칸(선택 타깃이 지금 목록에 없을 때)에서만 켠다 -- 펼침 행 안에서는 행
-// 자체가 제목이다. latest = 목록 행의 최신 성공 scan(크기 분포의 기준 -- 폴백 칸엔 행이 없어 undefined).
+// 타깃 1건의 상세(「최신 scan」 수치 줄 → 최신 scan 의 데이터 온도 → 최신 scan 의 파일 크기 분포 → 실 사용량 추이 → 온도 추이 →
+// 스캔 이력). 목록의 **선택한 행 바로 아래에 펼쳐진다**(expand). 표시 창·온도 축 state 는 여기 국소라 타깃을 바꾸면 초기화된다 --
+// 다른 타깃의 잔류 선택이 새 타깃에 묻어 가지 않는다. showTitle 은 목록 밖 폴백 칸(선택 타깃이 지금 쪽에 없을 때)에서만 켠다 --
+// 펼침 행 안에서는 행 자체가 제목이다. latest = 목록 행의 최신 성공 scan(온도·크기 분포의 기준 -- 폴백 칸엔 행이 없어 undefined).
 export function TargetDetail({ storage, target, showTitle, latest }: {
   storage: string; target: string; showTitle: boolean; latest?: UsagePoint | null;
 }) {
@@ -243,16 +245,20 @@ export function TargetDetail({ storage, target, showTitle, latest }: {
   const latestHot = latestCharted !== null
     ? hotRatio(latestCharted.point.time_histograms["atime"]) : null;
 
-  // 파일 크기 분포(2026-10-21)의 기준 = 목록 행의 최신 성공 scan(표의 「파일 수」와 같은 scan -- 사용자 요청 「최근 스캔 기준」).
-  // 행이 없거나(목록 밖 폴백) 행에 최신 정보가 없으면 이력에서 가장 늦은 포인트(시각을 모르면 서버 순서의 마지막). 최신 scan 의
-  // 리포트를 못 읽었으면 더 오래된 scan 의 분포로 대신하지 않는다 -- 「최근」이라는 말이 거짓이 된다(표의 (DB) 표시와 같은 사실).
+  // 온도·크기 분포(2026-10-21 크기 → 2026-11-16 온도도)의 기준 = 목록 행의 최신 성공 scan(표의 「파일 수」·「hot 비율」과 같은
+  // scan -- 사용자 요청 「최근 스캔 기준」). 행이 없거나(목록 밖 폴백) 행에 최신 정보가 없으면 이력에서 가장 늦은 포인트(시각을
+  // 모르면 서버 순서의 마지막). 최신 scan 의 리포트를 못 읽었으면(report_readable false) 두 차트 대신 그 사실 한 줄이다 -- 더 오래된
+  // scan 의 분포로 대신하면 「최신」이라는 말이 거짓이 되고, 빈 차트(「집계된 버킷 없음」)로 그리면 0건이라는 거짓이 된다.
   const snapshot = useMemo(() => latest ?? newestPoint(points), [latest, points]);
-  const sizeTotal = sizeDistribution(snapshot?.file_size_histogram)?.total ?? null;
-  const sizeHeadId = useId();
+  const unreadable = snapshot?.report_readable === false;
+  const sizeTotal = sizeHistogramTotal(snapshot?.file_size_histogram);
+  const tempHeadId = useId(), sizeHeadId = useId();
 
+  // 온도 축 하나(최신 scan 히스토그램과 아래 추이가 같이 쓴다 -- 토글이 둘이면 둘이 다른 축을 보일 수 있다). 고를 수 있는 축 =
+  // 이력 포인트 ∪ 최신 scan 에서 버킷이 있는 축.
   const [tempKey, setTempKey] = useState("atime");
-  const tempKeys = ["atime", "mtime", "ctime"].filter(
-    (k) => points.some((p) => p.time_histograms[k]?.length));
+  const tempKeys: string[] = TEMP_AXES.filter(
+    (k) => points.some((p) => p.time_histograms[k]?.length) || (snapshot?.time_histograms?.[k]?.length ?? 0) > 0);
   // 선택 축이 이 타깃에 없으면(atime 없는 이력·타깃 전환 잔류 -- 리뷰 확인)
   // 첫 가용 축으로 대체한다. state 를 직접 고치는 useEffect 대신 파생값:
   // 렌더 한 번으로 정합하고, 사용자가 고른 값은 가용해지는 순간 되살아난다.
@@ -274,32 +280,51 @@ export function TargetDetail({ storage, target, showTitle, latest }: {
           ? `성공 scan ${skipped}건의 리포트를 읽지 못해 표시할 이력이 없습니다`
           : "이 타깃의 성공 scan 이 없습니다"}</p>
       ) : (<>
-        {/* 「최신 scan」 블록(2026-10-21): 수치 줄 | 파일 크기 분포. lg 에선 나란히(수치 2×2) -- 상세가 늘어나는 높이를 분포
-            높이로 묶는다. sm~lg 는 수치 4칸 한 줄 + 분포 아래(지금까지의 모양), 그 아래 폭은 2칸. 스토리지 합계와 같은 문법. */}
-        <div className="grid gap-x-8 gap-y-5 lg:grid-cols-[18rem_minmax(0,1fr)]">
-          {/* null ≠ 0: 모름은 "—" -- 0 B 로 그리면 "다 지워졌다"는 거짓이 된다 */}
-          <dl aria-label="최신 scan 요약"
-              className="grid grid-cols-2 content-start gap-x-6 gap-y-3 sm:grid-cols-4 lg:grid-cols-2">
-            <Stat label="최신 실 사용량" value={latestCharted !== null ? humanBytes(latestCharted.bytes) : "—"} />
-            <Stat label="직전 스캔 대비"
-                  value={delta === null ? "—" : `${delta >= 0 ? "+" : "−"}${humanBytes(Math.abs(delta))}`} />
-            {/* 라벨은 짧게(375 의 두 칸 배치에서 한 줄) -- atime 기준이라는 정의는 표 머리글 설명·온도 툴팁이 말한다. */}
-            <Stat label={`hot 비율(${HOT_AGE_MAX_DAYS}일)`}
-                  value={latestHot === null ? "—" : `${Math.round(latestHot * 100)}%`} />
-            <Stat label="스캔 이력" value={`${points.length}건`} />
-          </dl>
+        {/* 「최신 scan」 수치 줄(2026-11-16 한 줄 전체 폭 -- 옆에 두던 크기 분포는 아래 세로 막대 차트가 됐다: 10막대 차트를
+            18rem 옆 칸에 넣으면 데스크톱에서도 축 라벨이 잘린다). null ≠ 0: 모름은 "—" -- 0 B 로 그리면 "다 지워졌다"는 거짓이
+            된다. */}
+        <dl aria-label="최신 scan 요약" className="grid grid-cols-2 gap-x-6 gap-y-3 sm:grid-cols-4">
+          <Stat label="최신 실 사용량" value={latestCharted !== null ? humanBytes(latestCharted.bytes) : "—"} />
+          <Stat label="직전 스캔 대비"
+                value={delta === null ? "—" : `${delta >= 0 ? "+" : "−"}${humanBytes(Math.abs(delta))}`} />
+          {/* 라벨은 짧게(375 의 두 칸 배치에서 한 줄) -- atime 기준이라는 정의는 표 머리글 설명·온도 툴팁이 말한다. */}
+          <Stat label={`hot 비율(${HOT_AGE_MAX_DAYS}일)`}
+                value={latestHot === null ? "—" : `${Math.round(latestHot * 100)}%`} />
+          <Stat label="스캔 이력" value={`${points.length}건`} />
+        </dl>
+
+        {/* 최신 scan 의 데이터 온도(2026-11-16): 배치 항목 펼침과 같은 히스토그램(값 = 구간별 용량, 왼쪽 빨강 = hot, 누적선). 긴 축
+            캡션은 제목 옆 설명, 본문엔 누적 캡션만. 375 에서 두 차트를 나란히 두지 않는다(열당 ~25px 라 라벨이 잘린다) -- 세로로. */}
+        <section aria-labelledby={tempHeadId} className="min-w-0 space-y-2">
+          <SectionHead id={tempHeadId} title="데이터 온도" help={HIST_TEMP_CAPTIONS[effectiveTempKey]}>
+            <span className="text-xs text-muted">
+              {typeof snapshot?.generated_at_epoch === "number"
+                ? `최신 scan · ${kstStampEpoch(snapshot.generated_at_epoch)}` : "최신 scan"}</span>
+            {tempKeys.length > 0 && (
+              <Segmented label="온도 축" options={tempKeys.map((k) => ({ value: k, label: k }))}
+                         value={effectiveTempKey} onChange={setTempKey} />
+            )}
+          </SectionHead>
+          {unreadable ? (
+            <p className="text-xs text-muted break-keep">최신 scan 의 리포트를 읽지 못해 온도·크기 분포를 알 수 없습니다</p>
+          ) : (
+            // 고를 축이 하나도 없으면(이력·최신 scan 모두 온도 버킷 없음) 「이 축」이라 하지 않는다 -- 축 토글도 없는 화면이다.
+            <TempHistogram buckets={snapshot?.time_histograms?.[effectiveTempKey]} axis={effectiveTempKey}
+                           caption="none"
+                           emptyText={tempKeys.length > 0 ? "이 축의 온도 분포 없음" : "온도 분포 기록이 없습니다"} />
+          )}
+        </section>
+
+        {!unreadable && (
           <section aria-labelledby={sizeHeadId} className="min-w-0 space-y-2">
             <SectionHead id={sizeHeadId} title="파일 크기 분포" help={SIZE_HELP}>
-              {sizeTotal !== null && sizeTotal > 0 && (
-                <span className="text-xs text-muted">{`최신 scan · 파일 ${sizeTotal.toLocaleString("ko-KR")}개`}</span>
-              )}
+              {/* 총 개수: 0 은 정상값(빈 트리), 모르면(분포 없음·개수 누락) 「최신 scan」만 */}
+              <span className="text-xs text-muted">
+                {sizeTotal !== null ? `최신 scan · 파일 ${sizeTotal.toLocaleString("ko-KR")}개` : "최신 scan"}</span>
             </SectionHead>
-            <SizeDistribution buckets={snapshot?.file_size_histogram} labelledBy={sizeHeadId}
-                              missingText={snapshot?.report_readable === false
-                                ? "최신 scan 의 리포트를 읽지 못해 크기 분포를 알 수 없습니다"
-                                : "크기 분포 기록이 없습니다(구형 리포트)"} />
+            <SizeHistogram buckets={snapshot?.file_size_histogram} emptyText="크기 분포 기록이 없습니다(구형 리포트)" />
           </section>
-        </div>
+        )}
 
         <section className="space-y-2">
           <SectionHead title="실 사용량 추이"
@@ -334,11 +359,9 @@ export function TargetDetail({ storage, target, showTitle, latest }: {
         </section>
 
         <section className="space-y-3">
+          {/* 축은 위 「데이터 온도」의 토글 하나가 정한다(여기는 설명만 -- 보고 있는 축을 글자로 말한다). */}
           <SectionHead title="데이터 온도 추이" help={TEMP_CAPTIONS[effectiveTempKey]}>
-            {tempKeys.length > 0 && (
-              <Segmented label="온도 축" options={tempKeys.map((k) => ({ value: k, label: k }))}
-                         value={effectiveTempKey} onChange={setTempKey} />
-            )}
+            {tempKeys.length > 0 && <span className="text-xs text-muted">{`${effectiveTempKey} 기준`}</span>}
           </SectionHead>
           <TemperatureTrend points={points} tempKey={effectiveTempKey} />
         </section>

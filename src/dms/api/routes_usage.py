@@ -50,6 +50,9 @@ router = APIRouter(dependencies=[Depends(require_admin)])
 # 차트에 정직하게 그릴 수 있는 밀도의 상한(그 이상은 어차피 겹쳐 안 보인다).
 _MAX_POINTS = 60
 _TARGET_LIMIT = 200
+# 목록 쪽 offset 상한(2026-11-16) -- 대상 수가 닿을 수 없는 값. 상한이 없으면 큰 정수가 sqlite(정수 넘침)·PG(bigint 범위)에서
+# 500 이 된다 -- 입력 오류는 422 다.
+_OFFSET_MAX = 1_000_000_000
 # 창 상한(2026-10-20 사용자 요청: 「서버의 스캔 상한선도 5천개에서 1만개로」) -- 지표 정렬(bytes·files·hot)의 대상 창과
 # 내보내기 상한에 함께 쓴다. 전 타깃이 계약이지만 무한은 아니다 -- 내보내기는 넘으면 잘라 내고 truncated 로 말한다(조용한
 # 절단 금지), 포탈은 스토리지의 target_count 가 이 값을 넘을 때만 「최근 스캔된 N개 안에서 정렬」을 알린다(/storages 의
@@ -292,7 +295,8 @@ def scan_targets(request: Request, q: "str | None" = Query(None, max_length=512)
                  path: "str | None" = Query(None, max_length=512),
                  order: str = Query("desc", pattern=_ORDER),
                  limit: int = Query(100, ge=1, le=_TARGET_LIMIT),
-                 sort: str = Query("last_scan", pattern=SORT_PATTERN)):
+                 sort: str = Query("last_scan", pattern=SORT_PATTERN),
+                 offset: "int | None" = Query(None, ge=0, le=_OFFSET_MAX)):
     """성공 scan 이 있는 (storage, target) 목록 + 필터(storage 정확 일치·path 부분 문자열, 함께 걸림; q 는 구
     단일 검색) + 정렬(sort·order). 응답 행: storage_name/target/scan_count/first_scan_at/last_scan_at +
     latest(최신 성공 scan 1건의 포인트 -- 실 사용량·요약 수치·온도 히스토그램, 2026-10-02 목록 컬럼용).
@@ -305,17 +309,36 @@ def scan_targets(request: Request, q: "str | None" = Query(None, max_length=512)
     대상 창(최근 스캔 순 상한 _WINDOW_LIMIT, 내보내기와 같은 창)의 정렬 값을 화면과 같은 규칙으로 계산해 정렬한 뒤
     (_metric_order -- 값만, 포인트는 반환 행만) limit 만큼 자른다(usage_metrics). 받은 묶음만 화면이 정렬하면 「최근 N개
     안의 순위」라 그 밖의 큰 디렉터리가 상위에 안 나온다. 값은 리포트 요약 캐시로 만든다(캐시에 없는 잡만 아티팩트를 연다
-    -- 첫 정렬만 느리고 그 뒤는 DB 몇 번)."""
+    -- 첫 정렬만 느리고 그 뒤는 DB 몇 번).
+
+    쪽 나누기(2026-11-16 사용자 요청: 사용량 분석 대상을 상위 100개가 아니라 전부 -- 한 번에 수천 행이면 행마다 3.6KB 요약과
+    <tr> 수천 개로 화면이 버벅여 쪽으로 나눈다): offset 을 실으면(0 포함) 응답이 객체 {rows, total, offset, limit,
+    window_limit, windowed} 다. rows 는 같은 행 모양, total 은 필터에 맞는 대상 전체 수(count_scan_targets -- 지금 쪽과
+    무관, 끝을 넘은 쪽이면 rows 만 빈다), windowed 는 지표 정렬이고 total 이 창(_WINDOW_LIMIT)을 넘는다 = 창 밖 대상은 이
+    정렬의 어느 쪽에도 나오지 않는다(포탈이 추정하지 않고 이 값으로 말한다). SQL 정렬은 LIMIT … OFFSET, 지표 정렬은 창의
+    정렬 값 계산 뒤 [offset:offset+limit] -- 쪽마다 창 계산을 다시 한다(캐시가 데워져 있으면 DB 몇 번). offset 이 없으면
+    응답은 예전 배열 그대로다(바이트 동일 -- tests/test_usage_equivalence.py, 그리고 롤링 배포 중 열려 있던 옛 탭). 같은
+    경로에 선택 인자로 둔 이유: 새 경로면 롤링 중 옛 파드가 SPA 폴백 index.html 을 200 으로 줘 포탈이 JSON 파서 오류로
+    깨진다 -- 같은 경로면 옛 파드는 모르는 인자를 무시하고 배열을 주고, 포탈은 「그 행들, 전체 수 모름」으로 물러선다."""
     repos = request.app.state.repos
     flt = {"q": q or None, "storage": storage, "path": path or None}
     base = _base(request)
     unreadable: set = set()
-    if sort in METRIC_SORTS:
+    metric = sort in METRIC_SORTS
+    start = offset if offset is not None else 0
+    if metric:
         window = repos.data_jobs.scan_target_heads(**flt, order="desc", limit=_WINDOW_LIMIT)
-        page = _metric_order(repos, base, window, sort, order, unreadable)[:limit]
+        # 창 끝을 넘은 쪽은 정렬할 것도 없다(창 전체의 값 계산을 건너뛴다 -- 결과는 어차피 빈 쪽).
+        page = (_metric_order(repos, base, window, sort, order, unreadable)[start:start + limit]
+                if start < len(window) else [])
     else:
-        page = repos.data_jobs.scan_target_heads(**flt, order=order, limit=limit, sort=sort)
-    return _with_latest(repos, base, page, skip=unreadable)
+        page = repos.data_jobs.scan_target_heads(**flt, order=order, limit=limit, sort=sort, offset=start)
+    rows = _with_latest(repos, base, page, skip=unreadable)
+    if offset is None:
+        return rows
+    total = repos.data_jobs.count_scan_targets(**flt)
+    return {"rows": rows, "total": total, "offset": offset, "limit": limit, "window_limit": _WINDOW_LIMIT,
+            "windowed": metric and total > _WINDOW_LIMIT}
 
 
 def _storage_infos(repos, names) -> dict:

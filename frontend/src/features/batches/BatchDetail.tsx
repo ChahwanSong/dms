@@ -14,7 +14,6 @@ import { Card } from "../../components/ui/Card";
 import { Dialog } from "../../components/ui/Dialog";
 import { StatusPill } from "../../components/ui/StatusPill";
 import { batchStateHelp } from "../../lib/stateHelp";
-import { BarChart } from "../../components/ui/BarChart";
 import { Button } from "../../components/ui/Button";
 import { CancelButton } from "../../components/ui/CancelButton";
 import { field } from "../jobs/formFields";
@@ -30,91 +29,9 @@ import { chownHasName, syncOwnership } from "../../lib/syncOwnership";
 import { kstStampEpoch, kstStampOrDash } from "../../lib/datetime";
 import { kindsText, readSummary, RM_LINK_ONLY, sumKinds, summaryTool, type ActionKind } from "../../lib/toolSummary";
 import { SYNC_OPTION_HELP } from "../jobs/optionRules";
-import { ATIME_APPROX_NOTE } from "../usage/usageStats";
-import type { Batch, BatchDirectTools, BatchItem, BatchPayloadItem, HistogramBucket } from "../../lib/types";
-
-// NodesList/JobStats/NodeMetrics 의 humanBytes 국소 사본 관례 -- 값이 bytes 대
-// 전역(B~TiB)이라 KiB 단을 포함한다(NodeMetricsSection 판과 같은 단위 집합).
-const BYTE_UNITS: [string, number][] = [
-  ["TiB", 1024 ** 4], ["GiB", 1024 ** 3], ["MiB", 1024 ** 2], ["KiB", 1024],
-];
-function humanBytes(bytes: number): string {
-  for (const [unit, size] of BYTE_UNITS) {
-    if (bytes >= size) return `${(bytes / size).toFixed(1)} ${unit}`;
-  }
-  return `${Math.round(bytes)} B`;
-}
-
-// 투영 버킷 -> BarChart 데이터. 라벨·값이 실존하는 버킷만 그린다 -- 값 없는
-// 버킷을 0 으로 그리면 "빈 버킷"(정상값 0)과 "모름"이 섞인다(null≠0).
-function toBars(buckets: HistogramBucket[] | undefined,
-                key: "bytes" | "count",
-                labelOf: (b: HistogramBucket) => string = (b) => b.bucket as string) {
-  return (buckets ?? []).flatMap((b) =>
-    typeof b.bucket === "string" && typeof b[key] === "number"
-      ? [{ label: labelOf(b), value: b[key] as number }] : []);
-}
-
-// 크기 버킷 축 라벨용 초단축 표기(1024 단위). humanBytes 와 같은 단위 체계지만
-// 소수·공백·"iB" 를 떼서 축 라벨 폭을 줄인다 -- 원본 라벨("[1073741824,4294967296]")
-// 은 열 폭(max-w-16 = 4rem)에서 잘려 어느 구간인지 못 읽는다(사용자 지적). 축약이
-// KiB 계열임은 차트 캡션이 말한다(K 를 1000 으로 읽는 오독 방지).
-//
-// 반올림 규칙: 한 자리 소수로 적되 그 자리가 "X.0" 이 될 값은 정수로 적는다.
-// 실측(d63) dscan 버킷은 [직전 상한+1, 상한] 이라 하한이 늘 2의 거듭제곱+1 이다
-// -- 그대로 한 자리로 적으면 "64.0K~1M" 처럼 의미 없는 .0 이 붙어 라벨만 넓어진다
-// (1 바이트 차이를 소수 한 자리로는 어차피 못 보인다). 진짜 중간값(1.5K)은 그대로
-// "1.5K" 로 남는다 -- 반올림 폭이 표기 해상도(0.05)를 넘지 않는 값만 접는다.
-const LABEL_UNITS: [string, number][] = [
-  ["T", 1024 ** 4], ["G", 1024 ** 3], ["M", 1024 ** 2], ["K", 1024],
-];
-function shortBytes(bytes: number): string {
-  for (const [unit, size] of LABEL_UNITS) {
-    if (bytes >= size) {
-      const v = bytes / size;
-      const round = Math.round(v);
-      return `${Math.abs(v - round) < 0.05 ? round : v.toFixed(1)}${unit}`;
-    }
-  }
-  return String(Math.round(bytes));
-}
-// 하한·상한은 서버 투영이 넘기는 수치 필드가 1순위다(모양 검사를 통과한 숫자).
-// 없으면 구간 라벨("[0,4096]")에서 읽고, 그마저 아니면 원본 라벨을 그대로 둔다 --
-// 모르는 모양을 추측해 다시 쓰면 화면이 없는 사실을 지어낸다. 상한 없음(열린
-// 마지막 구간 "[1G,)")은 "1G~" -- 0(정상값)이나 임의 상한으로 뭉개지 않는다.
-const RANGE_RE = /^[[(]\s*(\d+)\s*,\s*(\d*)\s*[\])]$/;
-function sizeBucketLabel(b: HistogramBucket): string {
-  const raw = b.bucket as string;
-  const m = RANGE_RE.exec(raw);
-  const lower = typeof b.lower_inclusive === "number" ? b.lower_inclusive
-              : m ? Number(m[1]) : null;
-  if (lower === null) return raw;
-  const upper = typeof b.upper_inclusive === "number" ? b.upper_inclusive
-              : m && m[2] !== "" ? Number(m[2]) : null;
-  return upper === null ? `${shortBytes(lower)}~`
-                        : `${shortBytes(lower)}~${shortBytes(upper)}`;
-}
-
-// 시간축별 캡션: 색의 의미(왼쪽 빨강=hot, 오른쪽 파랑=cold)를 축마다 그 축의
-// 언어로 말한다. atime 만 근사 경고 -- mtime/ctime 은 마운트 옵션과 무관해 경고가 거짓이 된다.
-// atime 경고(2026-10-27 d192, 괴리 [C3]): 읽기가 atime 에 반영되는지는 마운트·스토리지에 달렸다(noatime 은 반영 안 함,
-// 테스트베드 CephFS 는 relatime 인데도 노드에서 읽어도 atime 이 바뀌지 않았다 -- CHANGELOG d190). 그런 곳에선 「hot」이 최근에
-// 읽힌 것이 아니라 최근에 쓰인 것에 가깝다. relatime 자체는 읽기를 하루 단위로 반영한다(2026-10-28 리뷰 portal-batch-27 --
-// 예전 문구는 relatime 을 반영 안 하는 쪽에 넣었다). 문장은 사용량 TargetDetail 과 같은 한 출처(usageStats ATIME_APPROX_NOTE).
-const TEMP_CAPTIONS: Record<string, string> = {
-  atime: `왼쪽(빨강)=hot·최근 접근, 오른쪽(파랑)=cold — atime 기준 용량 비중. ${ATIME_APPROX_NOTE}`,
-  mtime: "왼쪽(빨강)=최근 수정, 오른쪽(파랑)=오래됨 — mtime 기준 용량 비중",
-  ctime: "왼쪽(빨강)=최근 변경, 오른쪽(파랑)=오래됨 — ctime 기준 용량 비중",
-};
-
-// 9버킷 hot→cold 온도 팔레트(웜→쿨 자연 그라디언트). 정적 hex inline style --
-// airgap 무관(런타임 외부 로드가 아니라 그냥 번들 안 문자열이다).
-const TEMP_PALETTE = ["#dc2626", "#ea580c", "#f59e0b", "#eab308", "#84cc16",
-                      "#22c55e", "#06b6d4", "#3b82f6", "#6366f1"];
-// 첫 막대=빨강(hot)·끝 막대=파랑(cold)이 막대 수와 무관하게 유지되게 비례 사상
-// 한다 -- 팔레트 인덱스 직결이면 9 미만 히스토그램이 전부 웜톤이 된다.
-const tempColorOf = (n: number) => (i: number) =>
-  TEMP_PALETTE[n <= 1 ? 0 : Math.round((i / (n - 1)) * (TEMP_PALETTE.length - 1))];
+import { humanBytes } from "../usage/usageStats";
+import { SizeHistogram, TempHistogram, sizeHistogramTotal, tempAxes } from "../usage/ScanHistograms";
+import type { Batch, BatchDirectTools, BatchItem, BatchPayloadItem } from "../../lib/types";
 
 // 항목 행의 좌측 고정폭 합계 = 체크박스(w-5=1.25rem) + gap-3(0.75rem) +
 // 순번(w-8=2rem) + gap-3(0.75rem). 펼침 상세·행 오류 문구를 이만큼 들여써야 행
@@ -352,12 +269,9 @@ function ItemScanStats({ requestId, succeeded }: {
   }
   const stats = q.data;
   if (!stats) return null;               // 로딩 — 짧은 창이라 문구 없이 둔다
-  const tempKeys = ["atime", "mtime", "ctime"]
-    .filter((k) => stats.time_histograms[k] !== undefined);
-  const bars = toBars(stats.time_histograms[tempKey], "bytes");
-  const cumTotal = bars.reduce((acc, b) => acc + b.value, 0);
-  const sizeBars = toBars(stats.file_size_histogram, "count", sizeBucketLabel);
-  const sizeTotal = sizeBars.reduce((acc, b) => acc + b.value, 0);
+  // 차트 몸통(막대·캡션)은 사용량 상세와 공용(usage/ScanHistograms, 2026-11-16) -- 섹션 틀·축 버튼·요약은 여기 것이다.
+  const tempKeys = tempAxes(stats.time_histograms);
+  const sizeTotal = sizeHistogramTotal(stats.file_size_histogram);
   return (<>
     <section className={PANEL_SECTION}>
       <h3 className={PANEL_TITLE}>데이터 온도(hot/cold)</h3>
@@ -368,7 +282,7 @@ function ItemScanStats({ requestId, succeeded }: {
           : "scan 리포트 생성 시각을 알 수 없습니다"}
       </p>
       {/* 실 사용량(2026-08-23): 서버가 온도 히스토그램에서 투영한 파일 크기 합.
-          클라이언트 재합산(cumTotal)과 출처는 같지만 서버 한 값을 믿는다 --
+          클라이언트 재합산(차트 캡션의 총 용량)과 출처는 같지만 서버 한 값을 믿는다 --
           화면마다 다시 더하면 규칙(mtime 우선·오염 부적격)이 흩어진다.
           null/부재는 모름(구형 서버·오염 리포트)이라 "—"(null≠0). */}
       <p className="text-sm mb-2">
@@ -383,50 +297,16 @@ function ItemScanStats({ requestId, succeeded }: {
                   onClick={() => setTempKey(k)}>{k}</Button>
         ))}
       </div>
-      {/* 막대 위 용량 글자는 빼고 누적 % 만(2026-10-02 사용자 요청 -- 용량 글자가 길면 좁은 열에서 잘리거나
-          안 보였다). 버킷별 용량·비중은 막대에 마우스를 올리면 보인다(BarChart valueLabels=false 툴팁). */}
-      <BarChart data={bars}
-                label={`데이터 온도(${tempKey}) 히스토그램`}
-                formatValue={humanBytes}
-                colorOf={tempColorOf(bars.length)}
-                cumulative={{ format: humanBytes }}
-                valueLabels={false}
-                emptyText="집계된 버킷 없음" />
-      {TEMP_CAPTIONS[tempKey] && (
-        <p className="text-muted text-xs mt-1">{TEMP_CAPTIONS[tempKey]}</p>
-      )}
-      {/* 누적 캡션은 오버레이와 같은 조건(총합>0)으로만 -- 총합 0 이면 선이
-          없는데 "선 = ..." 은 거짓 캡션이 된다. 총 용량 값(bars 합)도 여기서
-          함께 말한다(선의 100% 가 몇 바이트인지). */}
-      {cumTotal > 0 && (
-        <p className="text-muted text-xs mt-1">
-          {`선 = hot쪽부터의 누적 용량 비중 · 총 ${humanBytes(cumTotal)} · 막대에 마우스를 올리면 구간별 용량`}
-        </p>
-      )}
+      <TempHistogram buckets={stats.time_histograms[tempKey]} axis={tempKey} />
     </section>
     <section className={PANEL_SECTION}>
-      {/* 온도 차트와 같은 문법(값 라벨·누적 오버레이)을 쓰되 **색은 안 물려받는다**:
-          크기는 hot/cold 축이 아니라 온도 그라디언트를 입히면 "작은 파일=hot"이라는
-          거짓 의미가 생긴다. 크기 자체를 색으로 다시 말할 이유도 없다 — 양은 막대
-          높이가, 순서는 x축이 이미 말한다. 그래서 단색 accent(BarChart 기본)다.
-          누적은 용량이 아니라 **개수** 비중이라 format 도 개수 표기다. */}
       {/* 총 개수는 제목에(2026-10-02 사용자 요청 -- 히스토그램 밑 회색 캡션에 묻혀 있었다), 버킷별 개수는 막대에
-          마우스를 올리면(온도 차트와 같은 valueLabels=false). */}
+          마우스를 올리면(온도 차트와 같은 valueLabels=false). 개수를 모르는 구간이 있으면(null) 총계를 말하지 않는다. */}
       <h3 className={PANEL_TITLE}>
-        {sizeTotal > 0 ? `파일 크기 분포(개수) · 총 ${sizeTotal.toLocaleString("ko-KR")}개` : "파일 크기 분포(개수)"}
+        {sizeTotal !== null && sizeTotal > 0
+          ? `파일 크기 분포(개수) · 총 ${sizeTotal.toLocaleString("ko-KR")}개` : "파일 크기 분포(개수)"}
       </h3>
-      <BarChart data={sizeBars} label="파일 크기 분포"
-                cumulative={{ format: (n) => `${n.toLocaleString("ko-KR")}개` }}
-                valueLabels={false}
-                emptyText="집계된 버킷 없음" />
-      {sizeBars.length > 0 && (
-        <p className="text-muted text-xs mt-1">가로축 = 파일 크기 구간(K=KiB·M=MiB·G=GiB·T=TiB, 1024 단위)</p>
-      )}
-      {sizeTotal > 0 && (
-        <p className="text-muted text-xs mt-1">
-          선 = 작은 파일부터의 누적 개수 비중 · 막대에 마우스를 올리면 구간별 개수
-        </p>
-      )}
+      <SizeHistogram buckets={stats.file_size_histogram} />
     </section>
     <section className={PANEL_SECTION}>
       <h3 className={PANEL_TITLE}>요약</h3>

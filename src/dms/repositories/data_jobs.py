@@ -216,7 +216,7 @@ class DataJobsRepository:
 
     def scan_target_heads(self, *, q: "str | None" = None, storage: "str | None" = None,
                           path: "str | None" = None, order: str = "desc",
-                          limit: "int | None" = 100, sort: str = "last_scan") -> list[dict]:
+                          limit: "int | None" = 100, sort: str = "last_scan", offset: int = 0) -> list[dict]:
         """성공 scan 이 있는 (storage, target) 목록 — **전 요청자 통합**(사용량
         분석, 2026-08-23 사용자 요청: "요청자에 관계없이 모든 작업"). 필터는
         _scan_target_where. 정렬은 최근 스캔 기준 — 기본 내림차순(화면의 기본 질문이
@@ -234,7 +234,13 @@ class DataJobsRepository:
         전부를 OR 300쌍 묶음으로 다시 물어(1만이면 34문장, 문장마다 성공 잡 전체를 훑음) 전체 잡 행을 메모리에 세웠다
         -- 머리에 job_id 가 있으면 라우트가 캐시를 job_id 로 바로 묻고 전체 행은 반환할 쪽만 읽는다. 필터가 target·
         storage_name 에만 걸리므로 파티션(같은 storage·target 의 잡 전부)은 필터에 잘리지 않는다 -- 최신 판정이 필터와
-        무관하다."""
+        무관하다.
+
+        offset(2026-11-16 목록 쪽 나누기): 정렬 뒤 앞의 offset 개를 건너뛴다(LIMIT … OFFSET, 두 방언 같음). 동률 정렬이
+        (storage_name, target)까지 결정적이라 쪽 경계에서 빠지거나 겹치는 행이 없다(그 사이 새 scan 이 끝나 순서가 움직인 경우
+        말고는). 키셋이 아닌 이유: 위 윈도 함수가 어차피 전체 파티션을 계산해 커서로 줄일 비용이 없고, 정렬 방향이 섞여(last_scan
+        {dir} 뒤 이름 ASC) 행 값 비교 커서를 쓸 수 없다. limit 없이 offset 만은 받지 않는다(sqlite 가 LIMIT 없는 OFFSET 을 모른다
+        -- 그런 호출자도 없다)."""
         params: dict = {}
         where = self._scan_target_where(params, q=q, storage=storage, path=path)
         direction = "ASC" if order == "asc" else "DESC"
@@ -244,6 +250,11 @@ class DataJobsRepository:
         if limit is not None:
             tail = " LIMIT :n"
             params["n"] = limit
+            if offset > 0:
+                tail += " OFFSET :o"
+                params["o"] = offset
+        elif offset > 0:
+            raise ValueError("scan_target_heads: offset needs limit")
         return self._db.query(
             f"""SELECT storage_name, target, scan_count, first_scan_at, last_scan_at,
                        job_id, request_id, bytes_count
@@ -257,6 +268,22 @@ class DataJobsRepository:
                 WHERE rn = 1
                 ORDER BY {order_by}, storage_name, target{tail}""",
             params)
+
+    def count_scan_targets(self, *, q: "str | None" = None, storage: "str | None" = None,
+                           path: "str | None" = None) -> int:
+        """scan_target_heads 가 limit 없이 돌려줄 행 수(필터에 맞는 (storage_name, target) 쌍의 수) -- 목록 쪽 나누기의
+        전체 수(2026-11-16). 필터는 같은 _scan_target_where 한 벌이다(빈 storage 이름도 이름, storage None 일 때만 필터 없음 --
+        머리와 수가 다른 집합을 세면 「1–100 / N개」가 거짓이 된다). 쌍으로 GROUP BY 하므로 storage 없는 옛 「전체」에서도
+        스토리지가 다른 같은 경로를 따로 세고, storage_name 이 NULL 인 쌍도 머리처럼 한 행으로 센다. 머리 질의 바깥의
+        COUNT(*) OVER () 로 합치지 않는 이유: 끝을 넘은 쪽(빈 행)에서는 수를 알 수 없다. 필요한 열이
+        idx_data_jobs_scan_target 에 다 있어 계획기가 인덱스만 읽을 수 있다(scan_storage_summary 와 같은 모양)."""
+        params: dict = {}
+        where = self._scan_target_where(params, q=q, storage=storage, path=path)
+        row = self._db.query_one(
+            f"""SELECT COUNT(*) AS n FROM (SELECT storage_name, target FROM data_jobs WHERE {where}
+                                          GROUP BY storage_name, target) t""",
+            params)
+        return int(row["n"]) if row is not None else 0
 
     def usage_scan_request_ids(self, request_ids) -> set:
         """이 요청들 중 사용량 분석의 지점이 되는 잡(성공 scan -- _scan_target_where 의 기본 조건 그대로)을 가진 것.

@@ -1,7 +1,6 @@
 import { useId } from "react";
 import { HelpTip } from "../../components/ui/HelpTip";
 import { Skeleton } from "../../components/ui/Skeleton";
-import { SizeDistribution } from "../../components/ui/SizeDistribution";
 import { ApiError } from "../../lib/api";
 import type { UsageStorageFilesystem, UsageStorageTotals, UsageTotalMetric } from "../../lib/types";
 import { agoText, ageDays, kstStampOrDash } from "../../lib/datetime";
@@ -9,6 +8,7 @@ import { pctText } from "../../lib/sizeBuckets";
 import { useStorageTotals } from "./useUsage";
 import { HOT_AGE_MAX_DAYS, humanBytes } from "./usageStats";
 import { SIZE_HELP, SectionHead, Stat } from "./UsageParts";
+import { SizeHistogram } from "./ScanHistograms";
 import { staleClass } from "./TargetTable";
 
 // 스토리지 합계(2026-10-21 사용자 요청 「스토리지별 사용량 및 정보들의 총합」). 패널 맨 위(메타 줄·미등록 띠 아래), 표·검색 위.
@@ -17,9 +17,12 @@ import { staleClass } from "./TargetTable";
 // 정의와 뺀 것(하위·형식 오류·모름·읽는 중·창)과 scan 시점 범위를 각주 한 줄로 늘 말한다 -- 합계는 한 시점의 스냅숏이 아니다.
 // 경로 검색과 무관하다(스토리지 전체 -- 검색어를 요청에 싣지 않는다).
 //
-// 모양은 펼친 상세의 「최신 scan」 블록과 같은 문법(수치 dl | 파일 크기 분포, lg 에서 나란히) -- 타일·그림자 없이(카드 안의 카드
-// 금지, 2026-10-20 정리). null ≠ 0: 값을 모르면 「—」, 모름을 뺀 합은 하한이라 값 뒤에 흐린 「이상」. 대상 0 이면 블록이 없다
-// (「0 B」는 「모름」을 0 으로 그리는 거짓 -- 빈 상태 안내가 이미 말한다). 실패해도 표를 막지 않는다(한 줄).
+// 모양은 펼친 상세의 「최신 scan」과 같은 문법(수치 dl 한 줄 → 그 아래 파일 크기 분포 세로 막대 -- 2026-11-16 배치 항목·펼친
+// 상세와 같은 차트(ScanHistograms.SizeHistogram)라 한 화면의 크기 분포가 한 모양이다) -- 타일·그림자 없이(카드 안의 카드
+// 금지, 2026-10-20 정리). 온도는 같은 차트로 맞추지 않는다: 서버 합계에 구간별 용량이 없고 bytes 가중 hot 비율 하나뿐이다
+// (usage_metrics.StorageTotals) -- 히스토그램과 데이터 모양이 달라 비율 칸 그대로다. null ≠ 0: 값을 모르면 「—」, 모름을 뺀
+// 합은 하한이라 값 뒤에 흐린 「이상」. 대상 0 이면 블록이 없다(「0 B」는 「모름」을 0 으로 그리는 거짓 -- 빈 상태 안내가 이미
+// 말한다). 실패해도 표를 막지 않는다(한 줄).
 //
 // 파일시스템(df)은 에이전트가 노드에서 잰 statvfs -- scan 하지 않은 경로·다른 스토리지·예약 블록이 섞여 scan 합계와 기준이 다르다.
 // 비율로 엮지 않고 나란히만 보인다. 여러 스토리지가 한 파일시스템일 수 있어 스토리지끼리 더하지 않는다(서버 계약).
@@ -142,12 +145,12 @@ export function FilesystemUse({ fs, now, compact = false }: { fs: UsageStorageFi
 }
 
 // 수치 칸 배치(리뷰: 768~860px 에서 4칸 고정 칸이 ~93px 라 「123,456,789개」가 옆 칸 숫자에 붙거나 겹쳤다 -- 사이드바가 패널을
-// 좁히는 md 폭). sm~lg 는 칸 최소 폭(9.5rem -- 9자리 개수 + 「이상」이 한 줄)으로 칸 수를 정한다(auto-fit: 넓으면 4칸, 좁으면 3·2칸).
-// lg 의 왼쪽 열은 18rem 이상 + 내용 폭(max-content)이라 2×2 가 큰 수에서도 「이상」을 한 줄에 둔다(분포 열이 나머지를 쓴다).
-// 375 는 2칸 그대로(칸 사이를 좁혀 10자리 개수까지 말줄임 없이). 그래도 넘치는 값(13자리 등)은 Stat 이 칸 안에서 말줄임하고
-// title 이 정확한 값을 준다 -- 옆 칸을 덮지 않는다.
-const LAYOUT = "grid gap-x-8 gap-y-5 lg:grid-cols-[minmax(18rem,max-content)_minmax(0,1fr)]";
-const STATS = "grid grid-cols-2 content-start gap-x-4 gap-y-3 sm:grid-cols-[repeat(auto-fit,minmax(9.5rem,1fr))] sm:gap-x-6 lg:grid-cols-2";
+// 좁히는 md 폭). sm 이상은 칸 최소 폭(9.5rem -- 9자리 개수 + 「이상」이 한 줄)으로 칸 수를 정한다(auto-fit: 넓으면 4칸 이상,
+// 좁으면 3·2칸). 크기 분포는 그 아래 한 줄 전체 폭(2026-11-16 -- 세로 막대 10개 차트를 수치 옆 칸에 넣으면 축 라벨이 잘린다;
+// 예전 lg 2열 배치는 가로 막대 목록 때의 것). 375 는 2칸 그대로(칸 사이를 좁혀 10자리 개수까지 말줄임 없이). 그래도 넘치는
+// 값(13자리 등)은 Stat 이 칸 안에서 말줄임하고 title 이 정확한 값을 준다 -- 옆 칸을 덮지 않는다.
+const LAYOUT = "space-y-5";
+const STATS = "grid grid-cols-2 content-start gap-x-4 gap-y-3 sm:grid-cols-[repeat(auto-fit,minmax(9.5rem,1fr))] sm:gap-x-6";
 
 export function StorageTotals({ storage, now }: { storage: string; now: number }) {
   const q = useStorageTotals(storage);
@@ -209,9 +212,9 @@ export function StorageTotals({ storage, now }: { storage: string; now: number }
             <span className="text-xs text-muted">{`대상 ${count(size?.known).toLocaleString("ko-KR")}개 기준`}</span>
           )}
         </SectionHead>
-        <SizeDistribution buckets={size?.buckets} labelledBy={sizeId}
-                          missingText={reading && count(size?.known) === 0
-                            ? "요약을 읽는 중입니다…" : "크기 분포를 아는 대상이 없습니다"} />
+        <SizeHistogram buckets={size?.buckets}
+                       emptyText={reading && count(size?.known) === 0
+                         ? "요약을 읽는 중입니다…" : "크기 분포를 아는 대상이 없습니다"} />
       </section>
     </div>
     <Footnote t={t} now={now} reading={reading} />

@@ -692,8 +692,11 @@ def test_usage_storage_queries_read_the_scan_target_index(tmp_path):
     repos.data_jobs.scan_target_heads(storage="s1", limit=100)
     repos.data_jobs.recent_scans_for_targets("s1", ["a", "b"], per_target=2)
     repos.data_jobs.succeeded_scans_for_target("s1", "a", limit=30)
+    # 2026-11-16 목록 쪽 나누기: 쪽(OFFSET)과 전체 수(쌍 GROUP BY)도 스토리지 하나로 좁혀 같은 인덱스를 탄다.
+    repos.data_jobs.scan_target_heads(storage="s1", limit=100, offset=100)
+    repos.data_jobs.count_scan_targets(storage="s1", path="a")
     db.query = orig
-    assert len(captured) == 3
+    assert len(captured) == 5
     for sql, params in captured:
         plan = " | ".join(r["detail"] for r in db.query("EXPLAIN QUERY PLAN " + sql, params))
         assert "idx_data_jobs_scan_target" in plan, (sql, plan)
