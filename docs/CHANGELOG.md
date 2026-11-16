@@ -137,6 +137,12 @@ dms-k8s 라인의 **완료 기록**이다. 각 항목에는 무엇을 만들었�
 - **문서**: deploy/README §2h 멱등 줄·§3-4 (b) 3·§3-5(릴리스 뒤 S11 에 설정 변경이 섞여도 셋 다 다시 띄운다), 도구 목록(§0-2·prod README
   「0. 사이트 준비」 6)에 cksum.
 - **적용**: 이미지 변경 없음 — 설치기 스크립트라 다음 S11 실행부터 적용된다. 테스트베드 라이브는 위 손 재시작으로 이미 새 설정이다.
+- **라이브 실증**(2026-11-17 00:29–00:31 KST, 커밋 72edc604 의 설치기, 테스트베드): ① 변화 없는 S11 → 「설정 변화 없음 — 재시작하지 않는다」, 파드
+  시작 시각 그대로. ② 사고 모양 재현 — dms-api·dms-controller 의 last-applied 어노테이션 image 만 `dms:d31` → `dms:d30`
+  (`kubectl apply set-last-applied` — 릴리스 뒤 태그가 뒤처진 상태, 실제 image·파드는 d31 그대로)으로 되돌리고 dms-config 의
+  `DMS_BATCH_SCHEDULE_KEEP_ROUNDS` 를 `"9"` 로 바꾼 뒤(설정 변경 흉내) S11 → apply 가 last-applied 만 고쳐 Deployment generation 이 90 에서
+  올랐는데도 「설정이 바뀌어 다시 띄웠다: deploy/dms-api deploy/dms-controller ds/dms-agent」, 새 파드 env·CM 모두 `10`, `STAGE: S11 PASS`,
+  `:preview` keep_rounds 10, 컨트롤러 로그 오류 0. 옛 설치기는 이 모양에서 agent 만 다시 띄운다(단위 테스트로 빨간불 재현 — 라이브 23:50 출력과 같음).
 
 ### ✅ 스케줄 배치 회차 보존 기본 5 → 10 d31 — **완료·배포**(2026-11-16)
 
