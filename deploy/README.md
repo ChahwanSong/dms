@@ -2030,6 +2030,9 @@ dms-api·dms-controller 에는 initContainer `migrate` 가 있다(`deploy/k8s/40
 - **스키마는 되돌아가지 않는다.** 새 이미지의 initContainer `migrate` 가 이미 스키마를 바꿨다. 옛 이미지가 새 스키마에서 도는지는 변경마다 다르다 —
   일반 보장은 없다(**미검증**). 그 커밋의 CHANGELOG 항목을 먼저 본다(예: §12 「정리 대기 중 이미지 롤백 금지」, §12b — api 와 controller 둘 다 새 이미지여야
   한다). 옛 이미지가 새 스키마에서 못 돌면 업그레이드 직전 덤프로 DB 를 되돌린다(5-3 — 그 뒤의 쓰기는 잃는다).
+  - 예: 배치 스케줄러(2026-11-16, 커밋 a5cc398f — 테이블 `batch_schedules`·`batch_schedule_runs`, 새 설정 키 없음)가 없는 옛 이미지로 내리면 회차만
+    멈추고 행은 남는다. 다시 올리면 유예를 넘긴 슬롯은 missed 로 한 번 기록하고 다음 슬롯부터 돈다. 그사이 옛 api 로 지운 배치의 스케줄은
+    `batch_not_found` 로 자동 일시정지되고, 작업 → 배치 스케줄러에서 세션 관리자가 지운다(코드 읽기 — **미검증**).
 - **포탈이나 컨트롤러가 깨져 릴리스를 낼 수 없을 때**(포탈을 쓰지 않는 되돌림 — §4-2 끝의 길과 같다). 릴리스를 실제로 patch 하는 것은 dms-controller 의
   RolloutWatcher 다(`controller.build_loops` 의 rollout-watcher) — 나쁜 릴리스가 dms-api(포탈)나 dms-controller 를 망가뜨렸으면 옛 태그 릴리스를 내지도,
   처리하지도 못한다.
@@ -2468,7 +2471,7 @@ cd frontend && npm run test:e2e
 # = npm run build && tsc -p tsconfig.e2e.json && playwright test  (빌드까지 한 방)
 ```
 
-- 시나리오 32건(17개 파일, 2026-11-06 기준 — `npx playwright test --list` 로 센다), 빌드를 포함해 몇 분이다. 하네스가 백엔드를 띄우고 끝나면 스스로
+- 시나리오 38건(18개 파일, 2026-11-16 기준 — `npx playwright test --list` 로 센다), 빌드를 포함해 몇 분이다. 하네스가 백엔드를 띄우고 끝나면 스스로
   죽인다(tmp DB 포함 정리).
 - **이 게이트는 수기다 — CI 는 없다.** 이 저장소에는 이 스위트를 자동으로 돌려주는 것이 없다. 사람이 빌드 전에 돌리는 것이 유일한 강제력이다.
 - **무엇을 잡는가**(프론트 단위 테스트 `npx vitest run` 이 구조적으로 못 보는 넷): 기하(넓은 표가 레이아웃을 밀어내는 회귀 — jsdom 에는 레이아웃이 없다),
@@ -2815,10 +2818,10 @@ dms-k8s 는 **k8s 신원 모드 전용**이다. 동작의 근거는 `docs/ARCHIT
 | 되는 것(`require_admin`) | 안 되는 것 |
 |---|---|
 | 관리 조회 전반(`GET /api/admin/...` — 계정·메일 설정·k8s 연동·릴리스 대상·작업 정리 상태 등) | 계정 변경 — 403 `accounts_session_required`(생성·역할·비활성화·삭제·root 부여·관리자 비밀번호 재설정·인증 잠금 해제) |
-| 스토리지 등록·수정·삭제, 정책, 허용 쌍 | 빌드·릴리스·컨트롤 상태·아티팩트 경로 변경·레지스트리 이미지 삭제·작업(요청) 삭제·배치 기록 삭제 — 403 `admin_session_required`(`auth.require_session_admin`) |
+| 스토리지 등록·수정·삭제, 정책, 허용 쌍 | 빌드·릴리스·컨트롤 상태·아티팩트 경로 변경·레지스트리 이미지 삭제·작업(요청) 삭제·배치 기록 삭제·배치 스케줄 삭제 — 403 `admin_session_required`(`auth.require_session_admin`) |
 | 노드 배치 제외(`PUT /api/admin/nodes/{name}/exclusion`), 포탈 부제 | 메일 설정 저장·연결 확인·테스트 메일 — 403 `mail_settings_session_required` |
 | k8s 연동 「지금 동기화」·보조 연결 확인 | k8s 연동 변경(호출 노드·클러스터·토큰·StorageClass 매핑) — `require_session_admin` |
-| 배치 CSV 해석·템플릿 | 잡 제출 — 403 `privileged_not_authorized`. 배치 생성 — 특권 세션만 |
+| 배치 CSV 해석·템플릿, 배치 스케줄 끄기(`:disable`) | 잡 제출 — 403 `privileged_not_authorized`. 배치 생성·배치 스케줄 무장(생성·수정·켜기) — 특권 세션만 |
 | 에이전트 API(`require_user` + `routes_agent._node_from`) — `x-dms-actor: node:<아무 노드>` 로 노드 사칭: 보고(노드·마운트 상태), k8s 동기화 claim(대상 클러스터 리더 토큰 수령), 결과 업로드(RoleBinding·PVC 인벤토리 → 사용자 PV 권한 맵핑 변경) | — |
 
 - 공유 토큰 경로의 `x-dms-actor` 는 `node:<이름>`(에이전트)만 받는다 — 스크립트가 다른 값을 실으면 400 `invalid_actor`.
@@ -3147,6 +3150,7 @@ kubectl --context <ctx> get pv | grep dms-pgdata                        # Releas
 | 운영 → 대시보드 | 큐·노드 부하, 유지보수·drain 표시 |
 | 관리 → 보안 이벤트 | 로그인 보호 장치의 현재 값, 인증번호 잠금, 최근 보안 이벤트·출발지 IP(§10-7) |
 | 작업 → 전체 작업 툴바 | 「결과 파일·파드 정리 중 N건 · 지연 M건」과 지연 사유(§12) |
+| 작업 → 배치 스케줄러 | 스케줄별 다음 실행(KST)·마지막 회차 결과·자동 일시정지 사유(회차 이력은 행의 「기록」 창 — 최근 50회). 회차가 쌓은 자식 요청이 배치 단위 삭제 상한(2000)의 80% 이상이거나 이미 넘었으면(capped) 경고 — 회차 자식은 자동으로 정리되지 않는다(§12) |
 | 운영 → 아티팩트 경로 | 3홉(API·컨트롤러·노드), DMS 상태 디렉터리와 겹치는 스토리지 경고, 결과 파일 보존·만료·정리 지연(§12b) |
 | 운영 → 릴리스 | 이미지 드리프트 배지, 「보안 설정 드리프트」(§9-8 — S11 로만 사라진다) |
 | 스토리지 → 노드 | 에이전트 보고 신선도·스토리지 상태·배치 제외 |

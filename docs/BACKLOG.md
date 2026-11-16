@@ -21,7 +21,7 @@
 ## 1. 기능 확장 (사용자가 보류 결정)
 
 포탈·잡 기능의 확장과 후속 — 결함이 아니라 아직 안 만든 기능·결정 대기다. 설치·운영 후속은 아래 소절에 있다(2026-11-06 신규 →
-k8s 신원 모드 → 포크 → 사용량 → ③~⑦ 설치 묶음 → 테스트베드).
+k8s 신원 모드 → 포크 → 사용량 → 포탈 개선·배치 스케줄러 → ③~⑦ 설치 묶음 → 테스트베드).
 
 - ~~**아티팩트 보존 정책(자동 만료)**~~ — 해소(2026-10-26, CHANGELOG 「BACKLOG 결정 묶음 구현」 — controller `artifact-expiry` 루프,
   `DMS_ARTIFACT_RETENTION_DAYS` 기본 1500·0 = 끔, 열람은 410 `artifact_expired`, 운영은 deploy/README §12b). 남은 후속:
@@ -36,8 +36,9 @@ k8s 신원 모드 → 포크 → 사용량 → ③~⑦ 설치 묶음 → 테스�
     `batch_delete_too_large` 로 거부한다(최대 배치 하나가 RLock 을 ~0.7–2초 쥐어 readiness 한 번을 놓칠 수 있다 — 연속 3회가
     아니면 파드는 빠지지 않는다; 목록 요약도 자식 수를 2001 에서 멈춘다). 운영 배치 규모(항목 수 × 재스캔 횟수) 확인 필요. 후보:
     묘비 상태 `Deleting`(배치를 먼저 그 상태로 CAS — 재실행·항목 추가가 되살리지 못하게) + 자식 청크 트랜잭션 + 마지막에 배치 행
-    삭제, 재개 의미(중간에 api 가 죽으면 다음 호출이 이어서). 함께: `:rescan` 의 무조건 `set_status`(`api.routes_batches.rescan_batch`)를
-    상태 CAS 로(지금은 삭제 직후 거짓 200 이 가능 — `update_meta` 도 같은 성질), 포탈 상태 라벨.
+    삭제, 재개 의미(중간에 api 가 죽으면 다음 호출이 이어서). 함께: `update_meta` 의 무조건 쓰기를 상태 CAS 로(삭제 직후 거짓 200 이
+    가능 — `:rescan` 은 2026-11-16 배치 스케줄러와 함께 상태 CAS `BatchesRepository.rescan_if_terminal` 로 바뀌었다), 포탈 상태 라벨.
+    배치 스케줄 회차가 자식을 쌓아 이 상한에 닿는 길이 생겼다 — 아래 「포탈 개선·배치 스케줄러 후속」의 회차 자식 정리.
   - 📝 **항목만 남은 배치 묶음은 화면에 안 보인다** — 배치 행·자식 없이 항목만 남은 묶음(옛 add_item·replace_items 경합, 롤링 업데이트
     겹침 동안 옛 api 파드의 add_item 잔재)도 `request_purges.delete_batch` 가 expected 0 으로 지우지만 자식 행이 없어 작업 목록에
     나오지 않는다 — API 로 batch_id 를 지정해야 한다(CHANGELOG 이관본 [`history/changelog-2026-09-to-10-21.md`](history/changelog-2026-09-to-10-21.md)
@@ -106,7 +107,7 @@ k8s 신원 모드 → 포크 → 사용량 → ③~⑦ 설치 묶음 → 테스�
   포탈은 창 + 1 건을 받아 잘렸다는 것만 안다: 탭 건수의 「+」·목록 아래 안내문). 창 밖의 오래된 배치는 목록·탭 건수·목록의 「선택 삭제」
   (기록만)에 없다 — 상세(「배치 삭제」 포함)는 전체 작업의 「배치」 열 링크나 주소 `/admin/batches/<id>` 로 연다. 처방 후보:
   `(created_at, batch_id)` 커서 쪽 넘김(지금 정렬은 `BatchesRepository.list` 의 created_at DESC 하나라 동률을 batch_id 로 깬다) 또는 총수
-  (COUNT) 응답.
+  (COUNT) 응답. (배치 **상세**의 항목은 2026-11-16 부터 서버 쪽 넘김이다 — 목록은 그대로.)
 - 🔧 **앱 전역 의미 글자 대비(WCAG AA 4.5:1)** — 요청 상세는 의미 있는 글자를 `text-ink/70`(흰 바탕 4.94:1)으로
   올렸지만(2026-10-08), 다른 화면은 아직 `text-muted`(#888 — 흰 바탕 3.54:1, canvas 3.28:1)를 본문·표 머리·안내문에
   쓴다: `features/jobs/JobsList.tsx`(표 머리·경로 요약·시각·빈 목록 안내), `SubmitJob.tsx`(「실제 경로」·공백 안내·
@@ -308,6 +309,49 @@ CHANGELOG 「사용량 분석 필터」. 이번 묶음이 **의도적으로 하�
   NUL 이 든 `path`·`q`·`storage` 는 PG 에서 500 이다. 옛 둘은 고치면 `test_usage_equivalence` 의 참조와 갈라지므로 옛 엔드포인트 제거와
   같은 묶음에서. 새 엔드포인트(`/targets`·`/targets/export`·`/facets`·`storage-totals`)는 storage·path 의 NUL 을 422 로 막고, 새 필터 값은
   제어문자 전부를 422 로 막는다.
+
+### 포탈 개선·배치 스케줄러 후속 — 2026-11-16
+
+CHANGELOG 의 2026-11-16 d28 항목(사용량 전체 목록·최신 scan 차트 · 배치 대상 스토리지 열·큰 배치 상세 쪽 넘김·검색 · 배치 스케줄러).
+지금 동작은 ARCHITECTURE §5 「batches」·「사용량 분석」·불변식 「배치를 가리키는 새 테이블은 배치 삭제 목록에도」, §7 「배치 재검토·확인
+게이트」의 「스케줄 회차」.
+
+- 🔧 **스케줄 회차가 쌓는 자식 요청의 정리 정책**(설계의 열린 결정 — 지금은 기본값 「자동 정리 없음 + 경고」) — 회차마다 새 자식 요청·잡이
+  생겨(100항목 scan × 매일이면 20일에 2,000개) 배치 단위 삭제 상한(`request_purges.MAX_BATCH_DELETE_CHILDREN` 2000)을 넘으면 그 배치는
+  배치 단위로 지울 수 없게 된다(위 「작업(요청) 삭제 후속」의 큰 배치 삭제). 지금은 스케줄 화면이 자식 수가 상한의 80% 이상이거나 capped 면
+  경고만 한다(응답의 `child_count`·`child_count_capped`·`child_count_limit` — 상한 숫자를 포탈에 하드코딩하지 않는다). 후보: 오래된 회차의
+  자식 기록을 지우는 자동 정리(예: 최근 K회차만 보존 — **기록 보존 결정이라 사용자 확인 필요**), 또는 상한을 넘는 배치의 청크 삭제(묘비
+  상태 + 자식 청크 트랜잭션 — 위 항목의 후보와 같다).
+- 🔧 **사람의 `:rescan` 감사 행** — 스케줄 회차는 `('batch','scheduled_rescan')` 감사 행을 남기지만 사람의 「전체 재실행」은 감사 행이 없다
+  (자식 요청의 actor 로만 보인다). 필요하면 `BatchesRepository.rescan_if_terminal` 트랜잭션에 한 행.
+- 🔧 **배치 목록에 스케줄 요약 표시** — 목록 행(`GET /api/admin/batches`)이 이미 `schedule` 요약을 싣지만 `BatchesList` 는 그리지 않는다
+  (상세 머리 배지·배치 스케줄러 화면에서만 보인다).
+- 🔧 **배치 항목 일괄 삭제 컬렉션 엔드포인트** — 상세의 「선택 삭제」는 지금 쪽(≤ 100개) 항목마다 병렬 `DELETE …/items/{seq}` 다(쪽을 넘기거나
+  결과가 바뀌면 보이지 않는 선택을 정리한다 — 확인한 집합만 지운다). 한 번에 수백 개를 지우려면 한 트랜잭션·한 감사 행의 컬렉션
+  엔드포인트(`POST …/items:delete` 꼴 — `…/items/{seq}` 와 세그먼트 수가 달라 라우트 충돌 없음).
+- 🧹 **배치 상세 view 없음(옛 탭 호환)의 정리 시점** — `GET /api/admin/batches/{id}` 의 view 없음은 롤링 배포 중 열린 옛 탭 때문에 전 항목 조인
+  그대로다(항목 없는 머리를 주면 옛 탭의 확인 창이 「0 / 전체 0」으로 열려 root 삭제를 맹목 승인한다 — `routes_batches.get_batch` docstring).
+  새 포탈은 `summary`·`items`·`payloads`·`all` 만 쓴다. 옛 탭이 없다고 볼 수 있을 때(d28 다음 배포 이후 등) view 없음을 걷고, 같은 때 포탈의
+  옛 파드 물러서기(`batchView` 의 전체 응답 파생 — 기존 `BatchDetail.test.tsx` fixture 가 그 경로를 시험한다)도 걷는다.
+- 🔍 **API 응답 압축(GZip) 검토** — 앱에 압축 미들웨어가 없어 큰 JSON 이 비압축이다(합성 측정: 옛 배치 상세 전체 응답 N=5000 sync 3.06 MB —
+  쪽 넘김 뒤 2.5초 폴링 한 번은 요약 + 한 쪽 ~62–71 KB). 입구 Traefik 의 압축은 사이트 몫이고 DMS 는 Traefik 을 바꾸지 않는다. 넣는다면
+  `RequestBodyLimit`(가장 바깥 미들웨어)과의 순서, 스트리밍 내보내기(`StreamingResponse`)·결과 파일 다운로드, CPU 비용을 함께 본다.
+- 🔧 **dms-ssc 역이식 후보**(이 라인의 세션은 dms-ssc 를 고치지 않는다 — dms-ssc 세션이 골라서 cherry-pick. 이름·모양은 구현할 때 dms-ssc
+  WIP 와 맞췄고, 아래 목록은 push 된 dms-ssc d197/d198(origin/dms-ssc e8786abe)과 다시 대조했다): 공용 `Pager` 의 null 모드(`pageCount: null` +
+  `hasMore` — 쪽 수 모름), `/targets` 봉투의 `has_more`·`pageable_count`(`offset` 메아리는 dms-ssc 에도 있다), 배치 상세 `view=items` 의 `filters`
+  메아리와 PV 이름 검색(`batch_item_search` — dms-ssc 는 경로 부분 문자열·대소문자 구분), 스케줄 삭제 = `require_session_admin`(dms-ssc d198 은
+  `require_admin`), 취소 + 스케줄 끄기를 `:cancel` 본문 `disable_schedule` 한 트랜잭션으로, 그 밖에 회차 예외 백오프(due `exclude`)·사전 판정의
+  스토리지 꺼짐·denylist(스토리지 없음은 dms-ssc 8516568d 가 이미 넣었다)·`confirm_wait` 경고·PG 잠금 순서 스파이 테스트. (k8s 전용 사유 문구 —
+  요청자 자격 상실 = 거부 — 는 dms-ssc 의 「비 root 강등」과 뜻이 달라 옮기지 않는다.)
+- 🔧 **dms-ssc 에서 골라 올 것 — 스토리지 사용 중 가드**: dms-ssc 14cb6741(활성 **배치**도 「사용 중」 — 경로 변경·삭제 가드가 비종단 배치 항목이
+  가리키는 스토리지도 보고, 스토리지 행 잠금과 배치 되살리기(회차 발사·`rescan_if_terminal`)의 잠금으로 직렬화)과 8516568d 의 스토리지 **생성**
+  가드(진행 중 요청·배치가 가리키는 이름이면 409 `storage_in_use`). dms-k8s 의 `routes_storages` 경로 변경·삭제 가드는 활성 요청
+  (`requests.active_referencing_storage`)만 보고 생성 가드는 없다. 스토리지 경로 바인딩은 **파괴적** 스케줄의 지문에만 있고 그것도 발사 순간의
+  비교라, 비파괴 스케줄과 발사 뒤 아직 요청이 되지 않은 항목은 그사이 바뀐 경로에서 돌 수 있다(dms-ssc 14cb6741 커밋 설명과 같은 틈 — 코드
+  읽기, **미검증**).
+- 🧹 **vite 빌드 청크 경고** — `npm run build` 가 `index-*.js` 1,095 kB(gzip 356 kB)로 「chunk > 500 kB」 경고를 낸다(실패 아님 — d28 게이트에서
+  확인, 그 전 빌드와는 비교하지 않았다). 후보: 무거운 화면(사용량 분석·배치 상세·차트)의 `React.lazy` 라우트 분할 또는 `manualChunks`. 번들
+  airgap 규칙(외부 URL 0)은 그대로.
 
 ### ③ 공용 디렉터리(SHARED_DIR) 후속 — 2026-11-03
 
@@ -534,8 +578,10 @@ testbed 저장소. 2026-11-06 신규 테스트베드 항목(9·10·12·13 워커
 
 - 📝 **파일 크기 분포에 구간별 용량이 없다**(2026-10-21, d183). dscan(포크 1b93d54)의 `file_size_histogram` 은 구간별 **개수**만
   쓴다(시간 히스토그램만 bytes). 그래서 사용량 화면은 개수·비중만 보인다 — 「1 GiB 넘는 파일이 용량의 몇 %」는 못 말한다. 해법:
-  포크 `acc_emit_entry` 에 `size_bytes[bin] += size` 와 JSON `"bytes"` 키 → 잡 이미지·에이전트 재빌드. 투영·캐시·CSV·
-  `SizeDistribution` 은 bytes 가 모든 구간에 있으면 자동으로 용량 열을 붙이게 이미 돼 있다.
+  포크 `acc_emit_entry` 에 `size_bytes[bin] += size` 와 JSON `"bytes"` 키 → 잡 이미지·에이전트 재빌드. 투영·캐시·CSV 는 bytes 가
+  구간에 있으면 자동으로 용량 열을 붙이게 이미 돼 있다. 화면 차트는 2026-11-16 부터 공용 `ScanHistograms.SizeHistogram`(옛
+  `SizeDistribution` 삭제 — 사용량 시트·스토리지 합계·배치 scan 항목이 같이 쓴다)이고 **개수 막대만** 그린다 — 용량을 보이려면 그
+  컴포넌트도 고친다(dms-ssc 와 같은 export 를 유지).
 - 📝 **스토리지끼리 파일시스템을 공유하는지 모른다**(같은 날). 에이전트 statvfs 보고에 `f_fsid` 가 없어, 같은 파일시스템을 다른
   경로로 등록한 스토리지들의 df 가 같은 값으로 나란히 보인다(예: 테스트베드 cephfs 셋). 그래서 스토리지별 비교는 df 를 더하지 않고
   각주로만 말한다. 해법: probes 가 fsid 를 함께 보내고 화면이 같은 fsid 를 묶어 표시.

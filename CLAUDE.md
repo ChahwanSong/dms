@@ -49,7 +49,7 @@ PostgreSQL(제어면) + React 포탈 + 노드 에이전트 + Volcano gang-schedu
   `passwordTransport.ts` 가 바이트 단위로 같아야 한다(대조 테스트 있음).
 - **공유 토큰은 계정·배포 경로를 못 만진다**(2026-10-07). 모든 노드 에이전트가 가진 Bearer 토큰(role admin,
   auth=token)으로 계정을 다시 만들거나 릴리스로 옛 이미지에 롤백하면 특권 게이트가 통째로 무효가 된다 — 계정 변경(관리자 비밀번호
-  재설정·인증 잠금 해제 포함, 2026-11-03)은 `accounts_session_required`, 빌드·릴리스·컨트롤 상태·레지스트리 삭제·artifact base 변경·작업(요청) 삭제·배치 기록 삭제(2026-10-26)는
+  재설정·인증 잠금 해제 포함, 2026-11-03)은 `accounts_session_required`, 빌드·릴리스·컨트롤 상태·레지스트리 삭제·artifact base 변경·작업(요청) 삭제·배치 기록 삭제(2026-10-26)·배치 스케줄 삭제(2026-11-16)는
   `auth.require_session_admin`(`admin_session_required`). 그런 새 변경 라우트를 만들면 `require_admin` 이 아니라
   이 의존성을 쓴다. 특권 목록(env `DMS_PRIVILEGED_REQUESTERS` ∪ 계정 화면 부여, 2026-10-12 — 자격 판정은 `privileged.privileged_names`,
   계정 보호는 `privileged.protected_names`(비활성 부여 계정 포함)를 거친다) 이름 계정은 특권 세션 관리자만
@@ -63,8 +63,21 @@ PostgreSQL(제어면) + React 포탈 + 노드 에이전트 + Volcano gang-schedu
   날의 「rm 은 늘 사람 확인」을 뒤집었다): sync 와 같은 게이트에 켤 때 「되돌릴 수 없음」 동의(`acknowledge_irreversible:
   true`, 없으면 422 `batch_rm_auto_confirm_ack_required`, 감사 행에 남는다)가 더 붙는다. 연산 집합은 `domain.auto_confirmable`
   하나(켜는 라우트·PreviewReady 분기·`auto_confirm_hold` 공용 — scan·미지 연산은 자동 확인 없음)다 — 세 곳에 따로 쓰지 마라.
+  **배치 스케줄러**(2026-11-16, `batch_scheduler`·`repositories/batch_schedules`·`routes_batch_schedules`)의 회차는 사람의
+  `:rescan` 과 같은 `BatchesRepository._rescan_locked` **만** 부른다(sync·rm 은 Previewing 으로만 — 확인은 회차마다 기존
+  orchestrator·`BatchesRepository.confirm` 경로) — 스케줄러에 confirm·`auto_confirm_by` 쓰기·Running 직행 지름길을 넣지 마라.
+  무장(생성·수정·켜기)은 배치 생성과 같은 특권 게이트(`_require_batch_privilege` — 공유 토큰은 403)를 거친다. 회차마다 켠 사람과
+  배치 요청자의 자격을 `privileged.privileged_admin_problem` 으로 다시 본다. 스케줄 삭제는 `require_session_admin` 이다. 파괴적
+  스케줄(rm, delete 를 켠 sync — `batch_scheduler.is_destructive`)은 무장할 때마다 「되돌릴 수 없음」 동의(`acknowledge_irreversible:
+  true`)를 받고 배치 지문을 남긴다 — 지문이 바뀌면 자동 일시정지(`docs/ARCHITECTURE.md` 「배치 재검토·확인 게이트」의 「스케줄 회차」).
 - **새 DB 컬럼은 CREATE TABLE 과 `_ensure_columns` 양쪽**(구형 DB 업그레이드 경로).
   전수 열거 그물(`test_migrations.py`)이 테이블·인덱스 추가·삭제를 잡는다.
+- **배치(batch_id)를 가리키는 새 테이블은 배치 삭제 목록에도**(2026-11-16). `repositories/batches.py` 의 `BATCH_DELETE_TABLES`
+  (튜플 순서 = 잠금 순서 batch_items → batches → batch_schedules → batch_schedule_runs — 스케줄 발사와 같은 방향. DELETE 문 순서로
+  강제하는 것은 스케줄 → 회차 이력뿐)에 넣고 배치 삭제
+  두 경로(`BatchesRepository.delete`·`RequestPurgesRepository.delete_batch`) 모두에 같은 트랜잭션의 DELETE 를 넣거나, 이유와 함께
+  `BATCH_DELETE_EXEMPT_TABLES` 에. 그물(`test_batch_delete_tables_cover_every_batch_id_column`)은 `batch_id` 이름의 컬럼만 본다.
+  아래 요청 삭제 목록과는 별개다 — 요청·잡도 가리키면 둘 다에 넣는다.
 - **요청·잡을 가리키는 새 테이블·컬럼은 요청 삭제 목록에도**(2026-10-08). FK 가 0건이라 빠지면 지운 요청의 행이 조용히
   고아가 된다 — `repositories/request_purges.py` 의 `PURGED_TABLES` + `_purge_locked`(delete_terminal·delete_batch 공용 몸통, 늦게 들어올 수 있으면 `finish` 의
   scrub 도)에 DELETE 를 넣거나, 지우지 않는 이유와 함께 `PURGE_EXEMPT_TABLES` 에. 그물
@@ -159,9 +172,9 @@ PostgreSQL(제어면) + React 포탈 + 노드 에이전트 + Volcano gang-schedu
 
 ## 테스트·검증
 
-- 백엔드: `PYTHONPATH=<워크트리>/src <venv>/bin/python -m pytest tests -q` (~8분, 5640+ passed · 15 skipped — 2026-11-11 d26 기준)
-- 프론트: `cd frontend && npx vitest run` (1999+ passed, 115 파일 — 2026-11-11 d26 기준) · `npx tsc -b`
-- e2e(실 브라우저): `cd frontend && npm run test:e2e` (32 passed, 17 spec — 빌드 포함) — **CI 없음, 수기 게이트**(이미지 빌드 전 게이트는
+- 백엔드: `PYTHONPATH=<워크트리>/src <venv>/bin/python -m pytest tests -q` (~8분, 5884+ passed · 14 skipped — 2026-11-16 d28 기준)
+- 프론트: `cd frontend && npx vitest run` (2096+ passed, 122 파일 — 2026-11-16 d28 기준) · `npx tsc -b`
+- e2e(실 브라우저): `cd frontend && npm run test:e2e` (38 passed, 18 spec — 빌드 포함) — **CI 없음, 수기 게이트**(이미지 빌드 전 게이트는
   `deploy/README.md` §8 「이미지 빌드 전 게이트」)
 - 배포 문서·스크립트 계약: 절 번호·출력 문구를 바꾸면 `tests/test_ingress_contract.py`·`test_install_stages.py`·`test_addons_render.py` 등이
   본다 — 번호를 옮기면 가리키는 곳(설치기 출력·주석·다른 문서)을 같은 커밋에서 고치고 `deploy/README.md` 부록 Z 에 대응을 남긴다.

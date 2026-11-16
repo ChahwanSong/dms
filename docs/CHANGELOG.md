@@ -54,6 +54,7 @@ dms-k8s 라인의 **완료 기록**이다. 각 항목에는 무엇을 만들었�
 
 | 날짜 | 태그·실증 | 제목 |
 |---|---|---|
+| 11-16 | d28 | 포탈 개선 — 사용량 전체 목록·최신 scan 차트 · 배치 대상 스토리지 열·큰 배치 상세 쪽 넘김·검색 · 배치 스케줄러 d28 |
 | 11-16 | d27 | 입구 — Envoy Gateway 폐기, 클러스터의 Traefik 하나로 교체(테스트베드 영구 적용·실증) d27 |
 | 11-14 | — | 입구 — 리스너 포트(GATEWAY_LISTEN_PORT)·PROXY off 모드·마스터 hostPort 충돌 감지(OA: Traefik 이 호스트 443, Avi PROXY v2 미지원) |
 | 11-13 | — | OA 사이트(RKE2) 설치 — Gateway API 하한 v1.5.0·묶음 dry-run 오류 줄·control-plane 라벨 값(CONTROL_PLANE_LABEL_VALUE) |
@@ -95,6 +96,257 @@ dms-k8s 라인의 **완료 기록**이다. 각 항목에는 무엇을 만들었�
 ---
 
 ## 상세 기록 (최신순)
+
+### ✅ 포탈 개선 — 사용량 전체 목록·최신 scan 차트 · 배치 대상 스토리지 열·큰 배치 상세 쪽 넘김·검색 · 배치 스케줄러 d28 — **완료·실증**(2026-11-16)
+
+사용자 요청(2026-11-16, 입구 Traefik 작업 뒤) 세 건(요지):
+- **#66 사용량 분석**: 스토리지를 누르면 상위 100개만 보인다 → 몇백~몇천 개여도 버벅이지 않는 전체 목록. 작업 화면(배치 scan 항목 펼침)의
+  「데이터 온도 히스토그램」·「파일 크기 분포」를 사용량 분석에서도 최신 scan 기준으로 같은 모양으로(「다르게 보일 이유가 없다」).
+- **#67 배치 작업**: 목록의 「작업」 오른쪽에 「대상 스토리지」 열. 상세는 항목이 수백 개 이상(scan 등)이면 느려지고 가끔 「응답 없음」이다 —
+  전체 배치를 한 번에 끌어오는 탓으로 보인다 → 해결. 사용량 분석처럼 상세에 검색.
+- **#68 배치 스케줄러**: 작업 메뉴에 「배치 스케줄러」 — 배치를 지정하고 주기마다 확인해 이전 회차가 끝났으면 다시 실행.
+
+설계는 세션 job tmp `portal3/DESIGN.md`(§0~§6). 구현은 단계 0(공용 부품) → A(#66)·B(#67)·C1(#68 새 파일) 병행 → C2(#68 공유 파일, B 뒤) →
+전체 게이트 → 리뷰 → 최종 게이트 순서였다(파일 소유 분담 — 같은 파일을 두 구현자가 동시에 만지지 않게).
+
+- **dms-ssc 와 정렬**: dms-ssc 세션이 같은 날 같은 세 건을 받았다(스케줄러 결정은 그 세션의 사용자 결정). 이 라인을 구현할 때 dms-ssc 는 그것을
+  미 push WIP 로 갖고 있었고, 그 뒤 dms-ssc d197/d198 로 push·출하했다(origin/dms-ssc e8786abe). dms-k8s 는 push 를 기다리지 않고 구현하되
+  **테이블·컬럼·API 경로·응답 키·사유 코드·컴포넌트 파일 이름을 그 WIP 와 맞췄다** — 나중 양쪽 cherry-pick 이 기계적으로 되게(push 된 판과 다시
+  대조한 차이는 BACKLOG 「dms-ssc 역이식 후보」·「dms-ssc 에서 골라 올 것 — 스토리지 사용 중 가드」). dms-k8s 차이는 셋: ① LDAP 이 없어 자격을 잃은 배치 요청자의 자식은 강등이 아니라
+  `privileged_not_authorized` 로 거부된다 → 스케줄러가 미리 멈춘다 ② 사용량 `/targets` 봉투(`offset`·`has_more`·`pageable_count`)와 Pager null 모드
+  ③ 검색이 경로와 PV 이름을 함께 본다(사용량 검색과 같은 뜻).
+- **결정(#68 — dms-ssc 사용자 결정 그대로)**:
+  - 회차 = 같은 배치 **전체 재실행**(사람의 `:rescan` 과 같은 몸통 `BatchesRepository._rescan_locked`).
+  - 회차 시각에 배치가 종단(Completed·Cancelled)이 아니면 **그 회차를 건너뛰고 상태별 사유를 기록**한다. 밀린 회차를 끝난 뒤 이어서·몰아서
+    돌리지 않는다.
+  - scan·sync·rm 모두. sync·rm 은 회차마다 기존 확인 게이트를 거친다(배치 자동 확인이 켜졌으면 자동, 아니면 PreviewReady 에서 사람 확인 대기).
+    스케줄러는 confirm·`auto_confirm_by` 쓰기·Running 직행을 하지 않는다. 단건 sync·rm 자동 컨펌 금지는 그대로다(스케줄 대상은 배치뿐).
+  - rm 스케줄은 무장할 때 「되돌릴 수 없음」 동의 — delete 를 켠 sync 도 같은 규칙(더 엄격한 쪽, 구현 시점 dms-ssc WIP 와 같다)이고, 동의 순간의 배치
+    지문을 남긴다.
+  - 주기 = **KST 프리셋 4종**: 매일 HH:MM · 매주 요일(여러 개) HH:MM · 매월 N일 HH:MM(그 달에 없으면 말일로 당김) · N시간마다(1·2·3·4·6·8·12,
+    기준 HH:MM 격자). **cron 입력 없음**.
+  - **회차 자식 자동 정리 없음**(설계의 열린 결정 — 기본값) + 스케줄 화면의 80% 경고(배치 단위 삭제 상한 2000 의 80%).
+  - 그 밖 기본값: 배치당 스케줄 1개(`batch_id UNIQUE`), 놓친 회차(지연 > 유예 = min(1시간, 주기/2))는 missed 로 한 번 기록하고 다음 슬롯,
+    「지금 실행」 버튼 없음(상세의 「전체 재실행」이 그 일), 루프 간격은 오케스트레이터와 같은 5초(새 설정 키 없음)·틱당 20건.
+- **#66 사용량 분석**:
+  - `/api/admin/usage/targets` 에 `offset`(0~10억, 밖은 422). 봉투에 `offset` 메아리·`has_more`·`pageable_count`(이 정렬로 쪽을 넘겨 닿을 수 있는
+    행 수 — SQL·비지표 정렬 = matched_count, 지표 정렬(bytes·files·hot) = 창 크기 min(matched, 1만), PV 경로 = 판정 결과 수). null 은 PV 이름
+    검색이 창을 넘어 경로 일치를 끝까지 읽지 못한 갈래(`_with_path_hits` 첫 갈래)뿐이고 0 으로 접지 않는다 — 설계는 「PV 창 넘침 = null」이었지만
+    PV 필터만 넘친 경우 닿을 수 있는 행이 정확히 창 안이라 수를 싣는다.
+  - `scan_target_heads(offset=)` 는 offset > 0 일 때만 바깥 `ORDER BY`·`LIMIT` 뒤에 `OFFSET` 을 붙인다 — offset 0 이면 문장이 글자 하나 바뀌지
+    않는다(`test_usage_equivalence`). 범위 밖 offset 은 행이 0 이라 `COUNT OVER` 가 사라지므로 같은 필터·같은 문장 모양으로 limit 1 을 한 번
+    더 물어 총수를 낸다(범위 밖 쪽에서만). 지표 정렬은 창 끝을 넘는 쪽이면 지표 계산을 건너뛴다. `/targets/export`·옛 `scan-targets` 는 그대로.
+    `scan-history` 에 `latest_job_id`(가장 최근 성공 scan — 리포트를 읽었는지와 무관, 없으면 null).
+  - 포탈: 공용 `components/ui/Pager.tsx`(dms-ssc 와 같은 props + k8s 확장 `pageCount: null`·`hasMore` — 쪽 수 모름), 쪽당 100행, 주소
+    `?page=`(정렬·검색·필터·스토리지가 바뀌면 1쪽, 쪽 넘김 = push, 범위 밖 = 마지막 쪽으로 replace — 그동안 빈 상태 대신 스켈레톤). 건수 문구
+    「1–100 / 전체 1,234개」·「필터에 맞는 N개 중 101–200」(옛 「상위 100개 표시」 삭제). 배포 틈: offset > 0 을 보냈는데 메아리가 없거나 다르면
+    `UsageContractError('page_unsupported')` — 롤링 중 옛 파드가 offset 을 무시하고 1쪽을 주면 「2쪽」이 1쪽 행을 보이는 조용한 거짓이 된다(라이브
+    d27 이 실제로 무시함을 확인). 경로 시트는 「목록 {offset+idx+1}/{pageable}번째」, 쪽 경계의 이전/다음은 이웃 쪽을 prefetch 해 쪽 번호와 행을
+    한 번에 replace 한다.
+  - 차트: 공용 `features/usage/ScanHistograms.tsx`(`TempHistogram`·`SizeHistogram`·`histBars`·`tempAxes`… — 코드는 구현 시점 dms-ssc WIP 와
+    diff 0, 주석만 다름; push 된 origin/dms-ssc e8786abe 와도 주석 줄 밖은 diff 0)를 배치 항목 펼침(`ItemScanStats` — 국소 사본 삭제)·시트 「최신 scan」·스토리지 합계 「파일 크기 분포」가 함께 쓴다. 온도 축
+    (atime·mtime·ctime)은 「데이터 온도 추이」와 한 상태다. **null≠0 교정**: 값이 하나라도 빠진 히스토그램은 막대 대신 「모름」이다(옛 `toBars` 는
+    빠진 버킷을 조용히 버려 누적 % 가 부풀었다). 시트는 `latest_job_id` 로 snapshot 을 골라, 최신 리포트를 못 읽었으면 옛 scan 을 「최신」으로
+    그리지 않고 「최신 scan 리포트를 읽지 못했습니다」를 보인다. 옛 `SizeDistribution`(+`lib/sizeBuckets` 의 두 번째 라벨 규칙) 삭제. 설계의
+    「스토리지 합계는 BACKLOG 보류」는 사용자의 「다르게 보일 이유가 없다」로 뒤집었다.
+- **#67 배치 목록·상세**:
+  - 목록 「대상 스토리지」 열(「작업」 바로 오른쪽): `GET /api/admin/batches` 행마다 `storage`·`source_storage`·`destination_storage` 를 **첫 항목**
+    (`ORDER BY seq LIMIT 1` — 단건 삭제가 seq 를 다시 매기지 않는다) payload 에서 읽을 때 파생한다(파생 테이블로 고른 n 행만, 문장 하나, 스키마
+    변경 없음 — `domain.validate_batch` 가 모든 쓰기 경로에서 한 배치에 스토리지 한 종·sync 는 한 쌍만 허용한다). 원문 payload 는 싣지 않고 모르면
+    null(「—」), sync 는 「출발 → 도착」, td 는 텍스트만.
+  - 상세 view 분리 `GET /api/admin/batches/{id}?view=summary|items|payloads|all`(dms-ssc 와 같은 모양). 2.5초 폴링은 summary(머리 — `item_total`·
+    `status_counts`(6상태 0 포함)·`first_payload`·스토리지 세 키·`executing_count`·`direct_tools`·`schedule`, items 없음)와 items(`{total, offset,
+    limit, items, filters}` — limit 기본 100·상한 500(밖은 접음), 그 쪽 seq 에만 상세 조인)뿐이다. payloads 는 「현재 항목 CSV」·rm 겹침 창을 열 때,
+    all 은 **확인 창을 열 때 1회**(rm 「삭제 대상 전부 나열」·감사 요약 일치를 쪽 데이터로 줄이지 않게). view 없음은 옛 응답 그대로 — 롤링 중 옛
+    탭의 확인 창이 「0 / 전체 0」으로 열려 root 삭제를 맹목 승인하는 일을 막는다.
+  - 검색 q(새 `batch_item_search` — k8s 전용 파일로 나눠 cherry-pick 충돌 회피): `search_tokens`(공백 분리·최대 8토큰·화살표 구분자), 토큰마다
+    대소문자 무시 부분 일치·토큰 사이 AND. 칸 = 경로 + 그 경로의 PV 이름(sync 는 출발·도착 합침, PV 를 담을 수 없는 스토리지는 경로만, 스토리지
+    이름은 칸이 아님). 상태 필터는 정확 일치(모르는 값은 빈 결과).
+  - 포탈: `useBatch` = summary(옛 파드의 전체 응답은 `headerOf` 로 정규화), `useBatchItems`(지금 쪽만), `useBatchPayloads`, `useBatchAll`. 행은
+    `BatchItemRow`(React.memo), 선택은 Set, 「이 쪽 전체 선택(n개)」. 일괄 동작은 `visibleSelected`(선택 ∩ 지금 쪽에서 고를 수 있는 seq)만 보낸다 —
+    쪽·검색·상태가 바뀌거나 폴링으로 쪽 내용이 바뀌면 선택을 줄이고 무장을 푼다(보이지 않는 선택이 확인한 것과 다른 집합을 지우거나 재실행하지
+    않게). 검색칸(300ms 디바운스·한글 조합, 「경로·PV 이름 검색」, 강조), 상태 칩 7개(0 도 표시), 주소 `?page=&q=&status=`, Pager 는 표 래퍼 밖.
+  - 같이 고친 것: `:rescan` 라우트는 읽기 → 리셋 → 무가드 `set_status` 라 사이에 낀 재실행·취소·회차를 Previewing 으로 덮을 수 있었다 → 상태 CAS
+    `rescan_if_terminal`(배치 상태 CAS 뒤 집합형 항목 리셋 한 문장 — 5,000 항목 = 5,000 문장이던 것). 지면 409 `batch_not_rescannable`, 응답 그대로.
+- **#68 배치 스케줄러**:
+  - DB: 새 테이블 `batch_schedules`(kind·spec JSON·enabled·`next_run_at`(UTC, 꺼짐이면 NULL)·`armed_by`·`ack_fingerprint`·last_*·
+    `paused_reason_code`)·`batch_schedule_runs`(scheduled_for·at·outcome fired|skipped|missed|paused·reason_code·batch_status·`requeued`(fired 만 —
+    건너뜀은 NULL, 0 아님)·prev_*), 인덱스 3. 새 테이블이라 CREATE 만(`_ensure_columns` 무변경, `_ensure_pairs` 53 그대로)·`test_migrations` 등식.
+    회차 이력은 스케줄당 200건. request_id·job_id 열이 없어 요청 삭제 그물 밖이 정상이고, 대신 **배치 삭제 목록** `BATCH_DELETE_TABLES`(순서 =
+    잠금 순서 batch_items → batches → batch_schedules → batch_schedule_runs)와 그물을 새로 두었다 — 배치 삭제 두 경로(`BatchesRepository.delete`·
+    `RequestPurgesRepository.delete_batch`)가 같은 트랜잭션에서 스케줄·이력을 지우고 감사 행(`batch_schedule/delete`, deleted_with_batch·run_count)을
+    남긴다. 8개 경로의 잠금 순서를 PG 스파이 테스트로 고정했다.
+  - 규칙(`batch_scheduler` — 라우트·컨트롤러 공용 순수 모듈): KST 고정 +9(zoneinfo 없음 — 이미지 tzdata 의존 없음, 서머타임 없음),
+    `validate_schedule`(키 집합 정확, bool 은 정수가 아님), `next_run_after`(**엄격히 뒤**의 첫 슬롯 — 시계가 뒤로 가도 같은 슬롯을 두 번 쏘지
+    않는다), `preview_runs`(포탈 「다음 5회」 — 포탈은 시각을 계산하지 않는다), `confirm_wait_note`.
+  - 회차 판정(처음 걸리는 것이 결과 — 순서 원문 `batch_scheduler.schedule_hold`·`batch_hold`): 깨진 규칙 → paused / 유지보수·drain → skipped /
+    지연 > 유예 → missed / 사이트 특권 실행 꺼짐 → skipped / 켠 사람(armed_by) 자격 → paused(`privileged.privileged_admin_problem` — 자동 확인
+    `auto_confirm_hold` 의 세 검사를 뽑아 둘이 같은 규칙을 쓴다) / 배치 JSON 읽기 실패 → paused `batch_schedule_batch_unreadable` / 배치 없음 →
+    paused `batch_not_found` / 배치 요청자 자격·세션 인증 배치 → paused / 연산 밖·옵션 검증 실패 → paused / planner 가 자식을 결정적으로 거부할
+    원인(스토리지 없음·꺼짐·denylist — 기존 코드 `storage_missing`·`storage_disabled`·`identity_denied`) → paused / 항목 0 → skipped / 지금 파괴적인데
+    지문(연산·옵션·항목 집합·실행 신원·자동 확인·스토리지 경로 바인딩)이 무장 때와 다르거나 동의 없이 무장됨 → paused `batch_schedule_batch_changed`
+    / 비종단 → skipped(Previewing·Running `batch_schedule_batch_running`, PreviewReady `batch_schedule_awaiting_confirm`, Cancelling
+    `batch_schedule_batch_cancelling`) / 스토리지 준비 안 됨 → skipped `storage_not_ready` / fired. 그래서 진행 중 배치는 스토리지가 준비 안 됐어도
+    `batch_schedule_batch_running` 으로 기록된다.
+  - 발사 = 한 트랜잭션: 항목 → 배치 잠금 → 잠근 행으로 재확인 → prev 스냅숏 → `_rescan_locked` → 스케줄 CAS(enabled·next_run_at·updated_at —
+    같은 문장에서 두 사람의 계정 상태와 유지보수·drain 을 EXISTS 로 재확인) → 이력 + 감사 `batch/scheduled_rescan`(actor `system:batch-scheduler`).
+    롤링 겹침으로 컨트롤러가 둘이어도 같은 슬롯은 한쪽만 쏜다. sync·rm 은 Previewing 으로만 간다.
+  - 컨트롤러 루프 `batch-scheduler`(batch-orchestrator 바로 앞 — 같은 틱에 오케스트레이터가 집는다). 행마다 격리하고, 예외 행은 60초 백오프로
+    due 질의에서 SQL 제외(독 행 20개가 정상 행을 굶기지 않게) — 유예 안이면 슬롯을 유지하고 넘으면 missed, 오류 이벤트는 슬롯당 1회. 깨진 JSON 은
+    예외가 아니라 paused `batch_schedule_batch_unreadable`.
+  - API `routes_batch_schedules`(`/api/admin/batch-schedules` — `/api/admin/batches/{id}` 와의 등록 순서 함정 회피): 조회·`:preview`·`{id}/runs`
+    (기본 50·상한 200) = `require_admin`. 무장(POST·PATCH·`:enable`) = `require_admin` + 유지보수 거부 + `_require_batch_privilege`(공유 토큰 403 —
+    모든 노드 에이전트가 주기적 root 실행을 심지 못하게), 파괴적이면 StrictBool `acknowledge_irreversible: true`(없으면 422
+    `batch_schedule_ack_required`). `:disable` = `require_admin`(실행을 줄이기만 하는 브레이크 — 유지보수 중에도 받고 멱등). DELETE =
+    **`require_session_admin`**(회차 이력 = 증거를 지우므로 배치 기록 삭제와 같은 경계 — dms-ssc(구현 시점 WIP·push 된 d198 모두)의 `require_admin` 보다 엄격). 응답 행에
+    `destructive`·`acknowledged_irreversible`·`child_count`·`child_count_capped`·`child_count_limit`(= 2000 — 포탈에 하드코딩하지 않음)·`confirm_wait`
+    (자동 확인 꺼진 sync·rm 의 고른 주기면 `{period_seconds, preview_ttl_seconds, unconfirmed_every_seconds}` — 미리보기 만료 24시간과 겹쳐 실제로는
+    격일이 될 수 있다는 경고 재료).
+  - **취소 + 스케줄 끄기 = `:cancel` 본문 `{disable_schedule: true}` 한 요청·한 트랜잭션**(취소 CAS 가 이긴 직후 같은 트랜잭션에서 끄고 응답에
+    `schedule_disabled`, 감사 after.via = batch_cancel; CAS 가 지면 끄지 않는다). 본문이 없으면 그대로다(Cancelled 도 종단이라 다음 회차가 돈다 —
+    사용자 결정). 설계의 「취소 뒤 포탈이 `:disable` 을 따로 부른다」는 원자성이 없어 설계 리뷰에서 바꿨다.
+  - 배치 목록 행·상세 summary 에 `schedule` 요약(view 없음·all 은 모양 그대로 — dms-ssc 와 같은 자리), 작업 목록의 배치 요약에 `batch_schedule`.
+  - 포탈: 작업 메뉴 「배치 스케줄러」(`/admin/batch-schedules`, 아이콘 CalendarClock — 번들 lucide-react). 목록(배치·작업·대상 스토리지·주기·다음
+    실행(KST)·마지막 결과·사용·켠 사람·관리, 15초 폴링, 자식 80% 경고·확인 대기 경고·자동 일시정지 사유, 회차 기록 창), 추가·수정 창(프리셋 4종,
+    `:preview` 300ms 디바운스 「다음 5회」, 파괴적이면 동의 체크 전 저장 비활성, 자동 확인 배치는 「자동 확인을 켠 사람 X · 스케줄을 켠 사람 Y」).
+    배치 상세: 머리 배지(켜짐 = 규칙·다음 실행 KST, 일시정지 = 사유, 꺼짐) + 「스케줄 추가」(같은 창, 배치 고정), 취소 창 「이 배치의 스케줄도 끄기」
+    (켜진 스케줄이 있을 때만 창 — 기본 체크, 없으면 예전처럼 바로 취소), 삭제 창 「스케줄과 회차 기록도 함께 삭제됩니다」(배치 상세·작업 목록의
+    배치 단위 삭제 두 창 — 문구 한 벌 `scheduleDeleteNotice`).
+  - 사유 코드 16개 양쪽 등록(`reasonCodes.json` + `api.ts` REASON_MESSAGES — 설계 15 + `batch_schedule_batch_unreadable`): `invalid_batch_schedule`·
+    `batch_schedule_not_found`·`batch_schedule_exists`·`batch_schedule_ack_required`·`batch_schedule_unsupported_operation`·`batch_schedule_drain`·
+    `batch_schedule_missed`·`batch_schedule_privileged_disabled`·`batch_schedule_owner_not_privileged`·`batch_schedule_requester_not_privileged`·
+    `batch_schedule_empty`·`batch_schedule_batch_changed`·`batch_schedule_batch_running`·`batch_schedule_awaiting_confirm`·
+    `batch_schedule_batch_cancelling`·`batch_schedule_batch_unreadable`. 요청자 문구는 k8s 뜻(「…지금 root 실행 자격이 없거나 비활성이거나,
+    배치가 로그인 세션으로 만들어지지 않아 회차의 항목이 모두 거부됩니다 — 스케줄로 돌릴 수 없어 멈췄습니다…」 — dms-ssc 의 「비 root 강등」이
+    아니다).
+- **커밋**: a5cc398f(코드 — `feat(portal)`, 82파일 +8,917/−946), 2efdb32d(testbed-k8s 오버레이 d27 → d28), 「문서」(이 항목, ARCHITECTURE §5·§7·
+  불변식 「배치를 가리키는 새 테이블은 배치 삭제 목록에도」, BACKLOG, CLAUDE.md, deploy/README)와 e2e 18 수정(아래).
+- **검증**: 백엔드 전체 5884 passed / 14 skipped, vitest 2096 passed(122 파일), tsc -b 0, build `dist/index.html` 외부 URL 0(CSS `url(http…)` 0),
+  e2e 38 passed(18 spec — 새 `18-batch-scheduler` 3건, `03-layout` 2건(배치 목록 열·상세 찾기 줄·쪽 넘김, 스케줄러 목록·상세 배지 — 1280·375),
+  `15-usage-filters` 1건(합성 250행 쪽 넘김·390 시트 차트)).
+  - 리뷰 3관점 지적 5건 반영(①~③ 은 옛 코드에서 새 vitest 가 빨간불인 것을 확인, ⑤ 는 vitest 추가, ④ 는 삭제): ① 「현재 항목 CSV」 창을 다시 열면 지난번 전 항목 목록이 새로 받는 동안
+    잠깐 보여, 바로 복사해 「CSV 로 전체 교체」하면 그 사이 바꾼 항목이 조용히 빠진다 → 받는 중에는 textarea 를 그리지 않음 ② 목록 밖 경로
+    시트의 「최신 scan」을 리포트 생성 시각 순(newestPoint)으로 골라 서버 `latest_job_id`(성공 기록 순)와 갈릴 수 있었다 → `latest_job_id` 로
+    고름 ③ 배치 상세 `?page=` 에 상한이 없어 큰 값이면 offset 이 「1e+21」로 직렬화돼 422 로 굳었다 → 10,000,000 상한(사용량과 같은 값)
+    ④ 안 쓰게 된 `SizeDistribution` 삭제(두 번째 크기 분포 구현이 다시 쓰이지 않게) ⑤ 작업 목록의 배치 단위 삭제 창에 스케줄 캐스케이드 안내가
+    없었다 → 추가.
+  - 구현 중 잡은 것: 배치 상세 검색어가 지워지는 경합(「새 q + 옛 page」 응답의 쪽 당김이 같은 틱의 주소 쓰기를 덮음 — react-router 함수형
+    `setSearchParams` 같은 틱 경합, vitest 로 재현 → 쿼리는 주소 값으로만). 첫 게이트의 e2e 15 실패는 테스트 전제 오류였다(하네스 가짜 dscan
+    리포트는 읽히지 않는다 → 그 scan 의 포인트를 읽힌 리포트 모양으로 합성).
+  - 실증 뒤 수정 — e2e `18-batch-scheduler` 의 시각 의존 불안정: 스케줄 시각이 고정(매주 월·수 03:30, rm 창 기본 매일 02:00, 6시간마다 00:30
+    기준)이라 돌리는 시각에 따라 테스트 중에 회차가 돌 수 있었다(그러면 「아직 없음」·기록 창 단언이 깨지고 끝난 배치가 실제로 전체 재실행된다)
+    → 모든 생성을 `farSlot()`(지금 KST 의 시 + 12 — 03-layout 과 같은 규칙, 다음 슬롯 최소 11시간 뒤)로, 하루 슬롯이 여럿인 interval 테스트는
+    「매월 31일」(요약이 가장 긴 꼴 — 넘침 검사에 더 맞다)로 바꾸고 머리 주석의 틀린 문장을 고쳤다. 테스트 파일만(앱·이미지 무관) — 그 spec
+    3 passed, `tsc -b`·`tsc -p tsconfig.e2e.json` 통과, `batchSchedule.test.ts` 8 passed.
+- **합성 성능**(로컬, 워크트리 코드):
+  - #66(`tests/perf_usage_paging.py` — pytest 수집 밖, 다시 잴 때 같은 조건): 한 스토리지 1만 대상 + 성공 scan 6.5만 잡 + 다른 스토리지 2천
+    대상(합 6.9만 잡), 요약 캐시 데움(~3.6 KiB/행), 케이스마다 새 프로세스·2회. sqlite — last_scan 1·50·100쪽 0.30~0.34 s(파이썬 힙 최대 2.9~3.0 MiB,
+    응답 362~368 KiB), 범위 밖 101쪽 0.46~0.47 s(재질의 포함); bytes 1·50·100쪽 1.27~1.34 s(힙 최대 24.1 MiB, RSS +20 MiB), bytes 101쪽 0.28~0.29 s
+    (지표 계산 생략). PG16(로컬, fsync off) — last_scan 0.20~0.23 s, 101쪽 0.27~0.28 s, bytes 1.24~1.30 s(힙 24.0 MiB), bytes 101쪽 0.18 s. 뒤 쪽도
+    1쪽과 같은 급이다(설계 기대치 0.25 s / 1.3~1.4 s 와 일치). 범위 밖 재질의 비용은 +0.15 s(sqlite)·+0.05 s(PG).
+  - #67(TestClient + sqlite, 항목 60% 에 자식·잡·v2 미리보기 요약, 중앙값): scan N=2000 옛 전체 70 ms·1.06 MB → 요약 2.5 ms·805 B, 항목 1쪽 12 ms·
+    61 KB, 마지막 쪽 10 ms·40 KB, 상태 필터 10 ms, q 15.6 ms(PV 이름 판정 포함 18.6 ms), payloads 25 ms·214 KB. scan N=5000 옛 193 ms·2.64 MB ↔ 요약
+    2.1 ms + 쪽 19.5 ms·61 KB. sync N=2000 옛 81 ms·1.22 MB ↔ 3.6 ms + 12.4 ms·70 KB, N=5000 옛 207 ms·3.06 MB ↔ 6 ms + 21 ms·70 KB. 2.5초 폴링 한 번의
+    전송량이 1.2~3 MB 에서 62~71 KB 로 15~40배 줄었고, 쪽 시간은 N 이 커져도 거의 늘지 않는다. 렌더(jsdom + React Profiler): 그리는 행은 N 과 무관하게
+    100개, N=2000 첫 로드 commit 20~25 ms·폴링 1회 2~3.4 ms·체크박스 하나 약 2 ms. (조사 때 옛 화면 실브라우저 4× 스로틀: N=800 로드 215 ms·폴링
+    121 ms, N=2000 로드 527 ms·폴링 ~290 ms + 잦은 긴 작업 — 환경이 달라 직접 비교하지 않는다.)
+- **배포**: 포탈 빌드 d28(소스 a5cc398f, 3종 dms-mpifileutils·dms·dms-agent, 210초) → 릴리스 dms-agent → dms-api → dms-controller → job-image 모두
+  Applied(live == 동봉 d28), 오버레이 bump 2efdb32d. 새 테이블은 기동 때 `CREATE … IF NOT EXISTS`, 새 설정 키 없음.
+- **라이브 실증**(d28, dmsk8s, 관리자 mason 세션 API·실 Chrome, kubectl 은 `--context dmsk8s` 읽기만 — 원자료 job tmp `portal3/live/`, 절은
+  `portal3/PROOF-d28.md` L1~L3):
+  - **L1 스케줄러**(15:37~16:02 KST):
+    - 배포 확인: `GET /api/admin/batch-schedules` 200 `[]`, 테이블 2·인덱스 4(UNIQUE 포함, psql 읽기), 리스 `loop:batch-scheduler` 갱신 중(30초 리스 —
+      오케스트레이터와 같은 holder), 컨트롤러 로그 40분 0줄(정상 틱은 로그를 남기지 않는다 = 루프 실패 0), 배치 목록 행에 스토리지 세 키·`schedule`.
+    - scan 회차: 배치 e5fe(cephfs-dms, 2항목, Completed ok1/fail1)에 매일 15:41 KST → 슬롯 06:41:00Z 에 06:41:01Z **fired**(지연 1초), requeued 2,
+      prev Completed/2/1/1 → Running → 06:41:55Z Completed ok2/fail0(발사 → 종단 약 54초), `next_run_at` = 다음날 같은 시각. 감사 806
+      `batch/scheduled_rescan`, actor `system:batch-scheduler`(after 에 schedule_id·armed_by·scheduled_for·requeued·지문·next_run_at). 사람의 생성·
+      수정·끄기도 감사 행(802·807·808·809).
+    - 건너뜀(실행 중): 스캔 한 회차가 약 54초라 분 단위 슬롯과 겹치게 하려고 슬롯 28초 전에 사람 `:rescan` → 06:45:04Z **skipped
+      `batch_schedule_batch_running`**, requeued null(0 아님), 이벤트 없음(설계대로 이력 행만). `:disable` 뒤 이력 2건 보존.
+    - sync 확인 게이트: 배치 9c36 회차 fired(지연 4초) → **Previewing**(Running 직행 없음). 다만 소스 `team-a/datasets/proof-*` 가 테스트베드에서
+      지워져 프리플라이트 `source_not_readable` 로 Rejected 됐다(테스트 데이터 탓 — 스케줄러 결함 아님). 새 sync 배치 2d25(k8s-pv-nfs
+      `team-a/datasets/sample` → `team-b/scratch/l1-sched-proof-d28`, 자동 확인 꺼짐)로 재현: 06:59:00Z fired(지연 0초) → Previewing → 06:59:27Z
+      **PreviewReady 에서 멈춤**(확인 0회) → 다음 슬롯 07:01:03Z **skipped `batch_schedule_awaiting_confirm`**(batch_status PreviewReady).
+    - 취소 + 끄기: `:cancel {disable_schedule: true}` → 200 `{status: Cancelled, schedule_disabled: "717ee685…"}` 한 응답(0.148 s), 상세·목록의
+      schedule enabled false·next null, 감사 817 after.via = batch_cancel. 세션 DELETE 200 → runs 404, 감사 818(before.run_count 2). 목적지는 끝까지
+      만들어지지 않았다.
+    - rm 동의 게이트(배치 2c0a): 동의 없음·`false` → 422 `batch_schedule_ack_required`, 문자열 `"true"` → 422 bool_type(StrictBool), `true` + 매월
+      1일 03:00 → 201(destructive true, next 2026-11-30T18:00:00Z = 12-01 03:00 KST) → 같은 초에 끔 → 회차 0건 → 세션 삭제. 감사 803(지문)·804·805.
+    - 공유 토큰(Bearer — 시크릿을 메모리로만 읽음): 생성·`:enable` 403 `privileged_not_authorized`, DELETE 403 `admin_session_required`, `:disable`
+      (이미 꺼짐) 200 멱등(감사 행 없음), runs 200.
+    - KST·경고(API 필드): 매일 15:41 → 06:41Z, 매월 31일 → … 2027-02-28(말일 당김), 매주 [4,1] → 월·목으로 정렬, 규칙 오류 5종(요일 0개·hour true·
+      every_hours 5·여분 키·kind cron) 모두 422 `invalid_batch_schedule`. `confirm_wait`: 자동 확인 꺼진 sync 매일 {86400, 86400, 172800}·6시간
+      {21600, 86400, 108000}, rm 매일 {86400, 86400, 172800}, 매주·scan 은 null. 이벤트 `batch_schedule_fired` 3건, error·missed·paused 0건. 이력 기록
+      지연 0~4초(루프 5초 안).
+  - **L2 큰 배치·사용량 API**(16:07~16:25 KST):
+    - 픽스처: cephfs-dms 아래 새 전용 디렉터리 `/cephfs/managed/dms-proof-d28`(p0001..p1500, 파일 4,784개, 175,716,256 B — 크기 0 B~4 MiB·mtime
+      0.5~4,000일 전을 섞음). dms-agent 파드는 호스트 `/` 를 읽기 전용으로만 마운트해 쓸 수 없어, k8s-w1 SSH sudo 로 생성 스크립트를 stdin 으로
+      실행했다(노드에 파일 안 남김).
+    - 큰 배치 78b7: scan 1,500 항목·max_concurrency 6 → 202, 0.201 s(본문 90,440 B). 잡 모양은 정책 기본(dscan node_count 2·procs_per_node 1).
+      첫 성공 27 s, 101번째 656 s, 131번째 842 s(전체 9.33건/분, 정상 구간 9.57건/분, 성공 간격 중앙값 5 s). 사용량 대상이 131개가 된 16:22:57 KST 에
+      `:cancel` 200, 0.761 s → Succeeded 131·Cancelled 1,369(실행 중이던 6건은 요청·잡 Cancelled). 진행 중 폴링(n=43): summary 중앙값 10 ms(최대
+      43 ms), `/targets limit=1&q=` 21 ms(최대 51 ms).
+    - view 별(취소 뒤 1,500 항목, 3회 중앙값, 비압축 — 서버는 `Accept-Encoding: gzip` 에도 압축하지 않는다): view 없음 625,536 B·58.2 ms,
+      all 625,536 B·56.9 ms, **summary 1,044 B·6.2 ms**, **items 100 45,772 B·14.5 ms**(offset 1400 41,385 B·14.3 ms), items 500 212,388 B·30.1 ms,
+      payloads 148,901 B·21.9 ms. 폴링 한 주기가 625,536 B → 46,816 B(summary + items 1쪽, **13.4배 작음**). 진행 중(Queued 1,490)도 같은 급.
+    - 검색·필터·범위: `p0123` → 1, `P0123` → 1, `p01` → 100, `p1` → 501, `p0123 p0124` → 0(AND), `p01→p0123` → 1, 9토큰은 9번째 무시, 스토리지
+      이름 → 0, sync 2d25 는 출발·도착 AND(`sample l1-sched` → 1, `sample zzz` → 0). 상태 Succeeded 131·Cancelled 1,369, 모르는 값 200 빈 결과, q +
+      상태 `p01`&Succeeded 32·&Cancelled 68. offset 1500·99999 → 행 0·total 유지, offset −1·q 513자·`view=bogus` → 422, limit 0 → 1·9999 → 500 으로
+      접음, 없는 배치 404 `batch_not_found`. 목록 `?limit=101` 9행 5,759 B·6.0 ms, 원문 payload 없음.
+    - #66 쪽 넘김: cephfs-dms 대상 134개(e2e 3 + 픽스처 131) limit 100 → 100행(has_more true, pageable 134)·34행(false)·범위 밖 0행(pageable·
+      matched 134 유지). last_scan·scans·bytes·files·hot × asc·desc **10가지 모두** 쪽(100·50) 이어 붙임 == offset 없는 전체 순서(중복·누락 0),
+      `q=dms-proof-d28`(131)도 같음. k8s-pv-nfs(5 대상) limit 2·offset 2/4/6 과 PV 갈래(PV 이름 검색·PV 축 필터)도 10가지 모두 같음. 422: limit 201·0,
+      offset −1·1000000001. 시간: limit 200 전체 66~69 ms(SQL)·81~88 ms(지표), 쪽 1쪽 51~54·66~74 ms, 2쪽 23~42 ms.
+    - 차트 동일성: 픽스처 131 경로 **전수**에서 `/targets` 행 `latest` == 배치 항목 요청의 `scan-stats`(summary·크기·온도 3축·total_bytes·
+      generated_at) 131/131, `scan-history.latest_job_id` == `latest.job_id` 14/14(10번째마다), 성공 scan 없는 p1499 → null·points 0.
+  - **L3 UI**(실 Chrome headless, 1440·390, 16:33~16:49 KST): 화면 묶음 10개에서 콘솔 오류·실패 요청·가로 넘침·이상 글자 0(스크린샷 56장).
+    - 사용량: 「1–100 / 전체 134개」, Pager 「1 / 2쪽」 한 줄(390 높이 34 px), 다음 → `?page=2` 34행 「101–134 / 전체 134개」(새로고침 유지, 뒤로
+      가기 = 1쪽), 딥링크 `?page=3` → page=2 로 replace, 정렬·검색은 page 를 지움(「필터에 맞는 131개 중 101–131」), k8s-pv-nfs 는 「5개」·Pager
+      없음. 시트 쪽 경계: 1쪽 끝 p0032 「목록 100/134번째」 → 다음 → `page=2&target=…/p0031`(「101/134번째」) → 이전으로 복귀. 시트 「최신 scan」
+      (p0123)의 막대 `data-tip`·누적 % 가 배치 78b7 항목 122 펼침과 **문자열까지 같다**(1440·390), 스토리지 합계 「파일 크기 분포」도 같은 차트.
+    - 배치 목록: 사이드바 단일 작업 → 배치 작업 → 배치 스케줄러 → 전체 작업, 머리줄 「작업」 다음 「대상 스토리지」(cephfs-dms / k8s-pv-nfs →
+      k8s-pv-nfs / k8s-pv-nfs), 390 은 표 래퍼 안 가로 스크롤(문서 넘침 0).
+    - 큰 배치 상세 성능(CDP CPU 4× 스로틀, 긴 작업 > 50 ms): 첫 로드(내비게이션 시작 → 쪽 전체 행 표시, 3회 중앙값) 78b7(1,500 항목, 100행)
+      401 ms(390)·426 ms(1440), 긴 작업 3~4개(최대 68~100 ms), JS 힙 GC 후 4.4~4.5 MB ↔ 작은 배치 e5fe(2 항목) 368·390 ms, 긴 작업 2개 — 큰 배치의
+      추가 비용 +33~36 ms. 첫 로드의 상세 API 는 summary 1,344 B + items 46,072 B 둘뿐(`view=all` 0). 상호작용(390/1440): 폴링 1주기 재현 38/31 ms·
+      긴 작업 0, 쪽 1→2 195/179 ms, 마지막 쪽(15쪽) 129/110 ms, 검색 `p0123`(디바운스 300 ms 포함) 402/402 ms, `p1`(「1 / 6쪽」) 417/442 ms, 상태 칩
+      127/125 ms, 항목 펼침(차트 2개) 152/138 ms(긴 작업 1개 51 ms). 실제 2.5초 폴링은 종단 배치라 멈춰 있어(5초 동안 요청 0 — 설계대로)
+      `page.route` 로 브라우저 안 응답만 고쳐(summary Running, 매 주기 100행 상태가 전부 바뀜 — 서버 무변경) 재현했다: 25초에 10주기, **긴 작업 0·
+      50 ms 넘는 프레임 0**(390·1440), 폴링 중 검색칸 입력 171~174 ms.
+    - 스케줄러 UI: L1 스케줄 행(「매일 15:45 (KST) · 건너뜀 · …」)·회차 기록 창 2행, 배치 상세 배지 「스케줄 꺼짐 — 매일 15:45 (KST)」 → 링크가 수정
+      창을 연다. 추가 창 프리셋 4종의 서버 「다음 5회」, rm 을 고르면 반복 삭제 경고 + 동의 체크 전 「추가」 disabled, 확인 대기 경고(6시간 →
+      「30시간에 한 번」, 매일 → 「2일에 한 번」). UI 로 L1 스케줄 2단 삭제 → 빈 목록 → e5fe 상세 「스케줄 추가」(매월 1일 03:00) → 배지 「스케줄 매월
+      1일 03:00 (KST) · 다음 2026-12-01 03:00」 → 전체 재실행 → 취소 창 「이 배치의 스케줄도 끄기」 기본 체크·주 버튼 「취소하고 스케줄 끄기」(닫음 —
+      `:cancel` 0건) → 삭제 창 스케줄 경고 → 스케줄 UI 삭제. 감사 819~821.
+    - 확인 창: 2d25 `:rescan` → PreviewReady(회차 3, 30.3초) → 「배치 확인」 창은 열 때마다 `view=all` 1회(닫은 뒤 추가 0), 그 회차 3 == 폴링 summary,
+      「실행할 항목 1 / 전체 1」 — 「실행 확인」은 누르지 않고 닫음(confirm 0건). UI 취소는 스케줄 없는 배치라 창 없이 바로 `:cancel`(본문 없음) →
+      Cancelled. 목적지 없음 확인.
+  - 실증에서 못 본 것: missed(설계 §3.9-4 — d28 롤아웃 때 스케줄 0건), 80% 경고가 켜진 상태(child_count 최대 6 — 필드만 확인, 화면 조건은
+    vitest), PV 창 넘침 `pageable_count: null`·`_with_path_hits`(대상 1만 초과 필요 — 단위 테스트), 「PV 이름에만 맞는」 검색(테스트베드 PVC 이름이
+    모두 경로에 들어 있다).
+  - 관측(결함 아님): 배치 상세의 `schedule` 은 summary·목록에만 있고 view 없는 전체 상세에는 없다(설계 문구와 다르지만 포탈 머리는 summary 를
+    쓴다), 서버 응답 비압축(`view=all` 625 KB — BACKLOG 「API 응답 압축(GZip) 검토」의 근거), 390 폭 차트 축 글자 말줄임(전체 구간은 툴팁),
+    확인 창은 회차 숫자를 글자로 보이지 않는다(변경 전과 같다), 사람의 「전체 재실행」은 감사 행이 없다(BACKLOG).
+- **실증 결함**: 0건(L1·L2·L3). 라이브에서 고칠 것이 없어 d28 을 다시 빌드하지 않는다 — 실증 뒤 수정은 위 e2e 하나뿐이고 테스트 파일이라
+  다음 빌드(d29) 이미지와도 무관하다.
+- **테스트베드에 남긴 것**(사용자 열람·다음 UI 실증용 — 지우지 않음):
+  - 픽스처 `/cephfs/managed/dms-proof-d28`(p0001..p1500, 파일 4,784개, 175,716,256 B, root:root — CephFS 라 k8s-w1·w2 모두에서 보인다). 전용
+    디렉터리 밖은 만들거나 바꾸지 않았다.
+  - 큰 배치 `78b727282fc04234bceacbf3d67d8d93`(「d28 실증 L2 — 큰 scan 배치 1,500 경로」, Cancelled, Succeeded 131(p0001–p0131)·Cancelled 1,369, 자식
+    요청 137 = scan Succeeded 131 + Cancelled 6, 100개씩 15쪽). 작업 목록의 배치 단위 삭제(자식 포함 — `request_purges.delete_batch`)로 지우면 자식
+    요청·data_jobs 가 함께 지워져 cephfs-dms 사용량 대상이 134 → 3개로 돌아간다(쪽 넘김을 보일 수 없게 된다 — 픽스처 디렉터리는 남는다). 배치 상세의
+    「배치 삭제」(기록만 — `BatchesRepository.delete`, 자식 보존)는 사용량에 영향이 없다.
+  - sync 배치 `2d25eb3e1b8b439a8be30c2a304e4bac`(「L1-d28-sched-proof」, 자동 확인 꺼짐, Cancelled, 확인 0회라 목적지 없음) — 소스가 있는 sync
+    배치라 확인 대기 UI(배지·「스케줄도 끄기」·확인 창)를 다시 보일 때 쓴다(PreviewReady 까지 약 20~30초). 기존 sync 배치 5개(9c36·e7a1·1a19·90a1·
+    379d)와 rm 배치 2c0a 의 대상 `team-a/datasets/proof-*` 는 지금 디스크에 없어 재실행·회차가 `source_not_readable` 로 Rejected 된다.
+  - 스케줄은 0건이다(L1 이 남긴 8e4155e7 은 L3 가 UI 로 지웠다). 오늘 생긴 자식 요청(지우지 않음): e5fe scan +6(회차 2·사람 전체 재실행 4) →
+    Completed ok2/fail0, 9c36 sync +1(Rejected), 2d25 sync +3(Cancelled). 감사 행 802~821(append-only). scan 잡의 dscan 리포트·Completed vcjob 은
+    DMS 보존 정리 몫. 클러스터 리소스·sync 쌍·계정·스토리지 설정·current-context(dms)는 바꾸지 않았다.
+- **남은 일**: BACKLOG 「포탈 개선·배치 스케줄러 후속 — 2026-11-16」 — 스케줄 회차가 쌓는 자식 요청의 정리 정책(**사용자 확인 필요** — 지금은
+  자동 정리 없음 + 80% 경고), 사람의 `:rescan` 감사 행, 배치 목록에 스케줄 요약 표시, 배치 항목 일괄 삭제 컬렉션 엔드포인트, 배치 상세 view
+  없음(옛 탭 호환)의 정리 시점, API 응답 압축(GZip) 검토, dms-ssc 역이식 후보(Pager null 모드·`/targets` 의 `has_more`·`pageable_count`·`filters` 메아리·PV
+  이름 검색·스케줄 삭제 = session admin·`:cancel disable_schedule`·회차 백오프·사전 판정의 꺼짐·denylist·`confirm_wait`), dms-ssc 에서 골라 올
+  스토리지 사용 중 가드(활성 배치·생성 — dms-ssc 14cb6741·8516568d), vite 빌드 청크 경고.
 
 ### ✅ 입구 — Envoy Gateway 폐기, 클러스터의 Traefik 하나로 교체(테스트베드 영구 적용·실증) d27 — **완료·실증**(2026-11-16)
 

@@ -5,7 +5,10 @@ import { apiLogin } from "./helpers/session";
 // E18 — 배치 스케줄러(2026-11-16 사용자 요청 「작업 메뉴에 배치 스케줄러 — 같은 배치를 주기마다 다시 실행」). 단위 테스트가
 // 못 보는 것을 여기서 본다: 실 서버의 특권 게이트·KST 다음 실행 계산(:preview)·파괴적 스케줄 동의(422 ↔ 체크)·끄기·삭제가
 // 화면과 같은 값으로 이어지는가. 실제 회차 발사는 하네스 시계를 앞당길 수 없어 백엔드 고정 시각 테스트
-// (tests/test_repo_batch_schedules.py)와 라이브 실증이 맡는다 — 여기서 만드는 스케줄은 다음 슬롯이 내일 이후라 돌지 않는다.
+// (tests/test_repo_batch_schedules.py)와 라이브 실증이 맡는다 — 여기서 만드는 스케줄은 테스트 동안 회차가 돌면 안 된다(돌면
+// 「마지막 결과: 아직 없음」·기록 창 단언이 깨지고, 끝난 배치는 실제로 전체 재실행된다). 그래서 모든 스케줄의 시각을 farSlot()
+// (지금 KST + 12시간의 「시」)으로 잡는다: 매일·매주·매월은 하루에 그 시각 한 번뿐이라 다음 슬롯이 최소 11시간 뒤다. N시간마다
+// (interval)는 하루에 슬롯이 여럿이라 이 규칙으로 피할 수 없어 쓰지 않는다(그 요약 문구는 vitest 가 본다).
 //
 // 하네스 전제(global-setup): admin 은 특권 목록 안(배치 생성·스케줄 무장의 3중 게이트), 세션 로그인.
 
@@ -28,6 +31,13 @@ async function scheduleOf(page: Page, bid: string): Promise<ScheduleRow | undefi
 
 // UTC …Z → KST 날짜(YYYY-MM-DD) — 목록의 「다음 실행」 첫 줄(kstStampBare 의 날짜 부분)과 대조한다.
 const kstDate = (iso: string) => new Date(Date.parse(iso) + 9 * 3600_000).toISOString().slice(0, 10);
+
+// 테스트 동안 오지 않는 슬롯의 「시」 — 지금 KST 의 시 + 12(03-layout 배치 스케줄러 시나리오와 같은 규칙). 분이 :00 이면 다음
+// 슬롯까지 11~12시간, :30 이면 11.5~12.5시간이다(서버 next_run_after 는 지금보다 엄격히 뒤의 첫 슬롯을 고른다). hh = 두 자리.
+function farSlot(): { hour: number; hh: string } {
+  const hour = (new Date(Date.now() + 9 * 3600_000).getUTCHours() + 12) % 24;
+  return { hour, hh: String(hour).padStart(2, "0") };
+}
 
 async function pickBatch(page: Page, bid: string) {
   const dlg = page.getByRole("dialog", { name: "스케줄 추가" });
@@ -52,13 +62,15 @@ test.describe("E18 — 배치 스케줄러", () => {
     await expect(page.getByRole("link", { name: "배치 스케줄러" })).toBeVisible();          // 작업 메뉴(사이드바)
     await page.getByRole("button", { name: "스케줄 추가" }).click();
     const dlg = await pickBatch(page, bid);
+    const { hh } = farSlot();
+    const rule = `매주 월·수 ${hh}:30 (KST)`;
     await dlg.getByRole("button", { name: "매주" }).click();
     await dlg.getByRole("checkbox", { name: "수" }).check();
-    await dlg.getByLabel("실행 시각(KST)").fill("03:30");
-    await expect(dlg.getByText("매주 월·수 03:30 (KST)")).toBeVisible();
+    await dlg.getByLabel("실행 시각(KST)").fill(`${hh}:30`);
+    await expect(dlg.getByText(rule)).toBeVisible();
     // 다음 5회는 서버 계산(:preview) — 화면은 시각을 계산하지 않는다
     await expect(dlg.getByLabel("다음 실행 미리보기").getByRole("listitem")).toHaveCount(5);
-    await expect(dlg.getByLabel("다음 실행 미리보기").getByRole("listitem").first()).toContainText("03:30:00 KST");
+    await expect(dlg.getByLabel("다음 실행 미리보기").getByRole("listitem").first()).toContainText(`${hh}:30:00 KST`);
     await dlg.getByRole("button", { name: "추가" }).click();
     await expect(page.getByRole("dialog", { name: "스케줄 추가" })).toHaveCount(0);
 
@@ -68,7 +80,7 @@ test.describe("E18 — 배치 스케줄러", () => {
     expect(created!.next_run_at).not.toBeNull();
     expect(Object.keys(created!)).not.toContain("ack_fingerprint");                      // 지문 원문은 싣지 않는다
     const tr = page.getByRole("row").filter({ has: page.getByRole("link", { name }) });
-    await expect(tr.getByText("매주 월·수 03:30 (KST)")).toBeVisible();
+    await expect(tr.getByText(rule)).toBeVisible();
     await expect(tr.getByText(kstDate(created!.next_run_at!))).toBeVisible();
     await expect(tr.getByText("아직 없음")).toBeVisible();
 
@@ -95,16 +107,20 @@ test.describe("E18 — 배치 스케줄러", () => {
     const name = `sched-rm-${stamp}`;
     const bid = await createBatch(page, { operation: "rm", options: { recursive: true }, name,
                                           items: [{ storage: STORAGE_NAME, target: `sched-rm-${stamp}` }] });
+    const { hour, hh } = farSlot();
     try {
-      // 서버도 동의 없는 무장을 거부한다(화면의 잠금은 표시일 뿐)
+      // 서버도 동의 없는 무장을 거부한다(화면의 잠금은 표시일 뿐). 시각도 farSlot — 거부가 회귀해 만들어져 버려도 돌지 않게.
       const refused = await page.request.post("/api/admin/batch-schedules", {
-        data: { batch_id: bid, kind: "daily", spec: { hour: 2, minute: 0 } } });
+        data: { batch_id: bid, kind: "daily", spec: { hour, minute: 0 } } });
       expect(refused.status()).toBe(422);
       expect(((await refused.json()) as { detail: string }).detail).toBe("batch_schedule_ack_required");
 
       await page.goto("/admin/batch-schedules");
       await page.getByRole("button", { name: "스케줄 추가" }).click();
       const dlg = await pickBatch(page, bid);
+      // 창 기본값(매일 02:00)은 테스트 시각에 따라 곧 돌 수 있다 — 시각을 farSlot 으로 바꾼다.
+      await dlg.getByLabel("실행 시각(KST)").fill(`${hh}:00`);
+      await expect(dlg.getByText(`매일 ${hh}:00 (KST)`)).toBeVisible();
       await expect(dlg.getByRole("note", { name: "반복 삭제 경고" })).toContainText("되돌릴 수 없습니다");
       const add = dlg.getByRole("button", { name: "추가" });
       await expect(add).toBeDisabled();
@@ -115,6 +131,7 @@ test.describe("E18 — 배치 스케줄러", () => {
       const created = await scheduleOf(page, bid);
       expect(created?.acknowledged_irreversible).toBe(true);
       expect(created?.destructive).toBe(true);
+      expect(created?.spec).toEqual({ hour, minute: 0 });
       await expect(page.getByRole("row").filter({ has: page.getByRole("link", { name }) })
         .getByText("rm", { exact: true })).toBeVisible();
     } finally {
@@ -129,14 +146,17 @@ test.describe("E18 — 배치 스케줄러", () => {
     const stamp = Date.now().toString(36);
     const bid = await createBatch(page, { operation: "scan", options: {}, name: `sched-narrow-${stamp}`,
                                           items: [{ storage: STORAGE_NAME, target: `narrow-${stamp}` }] });
+    // 매월 31일 + farSlot: 가장 긴 요약 꼴(「… (KST, 없는 달은 말일)」)이라 375 넘침을 보기에도 맞다. 이 배치 행만 집어 본다.
+    const { hour, hh } = farSlot();
     const made = await page.request.post("/api/admin/batch-schedules", {
-      data: { batch_id: bid, kind: "interval", spec: { every_hours: 6, hour: 0, minute: 30 } } });
+      data: { batch_id: bid, kind: "monthly", spec: { day: 31, hour, minute: 0 } } });
     expect(made.status(), await made.text()).toBe(201);
     const sid = ((await made.json()) as ScheduleRow).schedule_id;
     try {
       await page.setViewportSize({ width: 375, height: 800 });
       await page.goto("/admin/batch-schedules");
-      await expect(page.getByText("6시간마다 · 00:30 기준 (KST)").first()).toBeVisible();
+      const tr = page.getByRole("row").filter({ has: page.getByRole("link", { name: `sched-narrow-${stamp}` }) });
+      await expect(tr.getByText(`매월 31일 ${hh}:00 (KST, 없는 달은 말일)`)).toBeVisible();
       const [scroll, client] = await page.evaluate(() =>
         [document.documentElement.scrollWidth, document.documentElement.clientWidth]);
       expect(scroll, `375 에서 문서가 가로로 넘친다(${scroll} > ${client})`).toBeLessThanOrEqual(client);
