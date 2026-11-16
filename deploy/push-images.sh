@@ -5,7 +5,7 @@
 #                            [--dest-tls-verify <false|true>]
 #
 #   --registry   레지스트리 host:port — in-cluster 면 values.env 의 <REGISTRY_CLUSTER_IP>:<REGISTRY_PORT>, external 사이트면 그 REGISTRY
-#                (lock 전부를 사이트 레지스트리로 — deploy/README §2f-3·§2g-3). 경로 접두·스킴은 받지 않는다(DMS 계약: host:port 만).
+#                (lock 전부를 사이트 레지스트리로 — deploy/README §2f-3). 경로 접두·스킴은 받지 않는다(DMS 계약: host:port 만).
 #   --print(기본) 실행할 skopeo 명령만 출력한다(네트워크·skopeo 없이 — install.sh 가 S4 뒤에 멈추며 보여 준다). 출력은 그대로 붙여 넣을
 #                수 있는 sh 다(안내는 # 주석).
 #   --run        인터넷 노드에서 실제로 push 한다. 줄마다 레지스트리의 그 태그가 이미 lock digest 면 건너뛰고(멱등 — 끊겼으면 다시 돌린다),

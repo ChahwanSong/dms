@@ -54,6 +54,7 @@ dms-k8s 라인의 **완료 기록**이다. 각 항목에는 무엇을 만들었�
 
 | 날짜 | 태그·실증 | 제목 |
 |---|---|---|
+| 11-16 | d27 | 입구 — Envoy Gateway 폐기, 클러스터의 Traefik 하나로 교체(테스트베드 영구 적용·실증) d27 |
 | 11-14 | — | 입구 — 리스너 포트(GATEWAY_LISTEN_PORT)·PROXY off 모드·마스터 hostPort 충돌 감지(OA: Traefik 이 호스트 443, Avi PROXY v2 미지원) |
 | 11-13 | — | OA 사이트(RKE2) 설치 — Gateway API 하한 v1.5.0·묶음 dry-run 오류 줄·control-plane 라벨 값(CONTROL_PLANE_LABEL_VALUE) |
 | 11-11 | d26 | 포탈 전수조사 — 버그 92건 수정(high 0 · medium 12 · low 80) d26 |
@@ -94,6 +95,144 @@ dms-k8s 라인의 **완료 기록**이다. 각 항목에는 무엇을 만들었�
 ---
 
 ## 상세 기록 (최신순)
+
+### ✅ 입구 — Envoy Gateway 폐기, 클러스터의 Traefik 하나로 교체(테스트베드 영구 적용·실증) d27 — **완료·실증**(2026-11-16)
+
+사용자 결정(2026-11-16) 「envoy 사용방식은 폐기하고 traefik을 사용하도록」 — 병행 모드 없이 교체한다. 설계는 세션 job tmp `traefik/DESIGN.md`
+(D1~D11), 근거는 Traefik v3.7.4 소스·바이너리 실측(같은 폴더 `understand.json`). 옛 ⑥(11-03)·테스트베드 컷오버(11-04)·Gateway API 하한(11-13)·
+리스너 포트/off(11-14) 항목은 당시 기준으로 둔다.
+
+- **배경**: OA 프로덕션(Rancher/RKE2)에는 rke2-traefik 이 기본으로 깔려 있다 — v3.7.4 DaemonSet, 모든 노드 hostPort 80/443(web :8000·websecure
+  :8443, websecure `http.tls=true`), providers kubernetesingress·kubernetescrd(ingressClass traefik), IngressClass `traefik`(controller
+  `traefik.io/ingress-controller`). Envoy 입구(11-03 ⑥·11-14)는 그 옆에 DMS 가 따로 세운 두 번째 입구였다. 이번에 확인한 OA 의 Avi L4 VS(VIP:443 →
+  노드 :443)는 **PROXY v2 를 켰다**(11-14 항목의 「미지원」 보고와 다르다). Traefik 정적 설정(PROXY trustedIPs·타임아웃)은 사이트가 Rancher
+  chartValues·HelmChartConfig(`kube-system/rke2-traefik`)로만 바꾼다 — 그래서 **DMS 는 Traefik 을 설치·변경하지 않고 Ingress 하나만 만든다**.
+- **Traefik 동작(설계 근거)**: PROXY — trustedIPs 출발지는 헤더가 있으면 쓰고 없어도 받는다(USE), 비신뢰 출발지의 헤더는 읽어서 버리고 실제
+  피어를 쓴다(IGNORE — 위조 불가, 대신 「PROXY 필수」 강제는 불가능). `forwardedHeaders.trustedIPs` 가 비면 클라이언트가 보낸 X-Forwarded-*·
+  X-Real-Ip(밑줄 변형까지)를 지우고 원 IP 를 XFF 끝에 붙인다 → 앱 `auth.client_ip`(XFF 마지막 항목) 규칙 그대로(앱 코드 무변경 — docstring 만).
+  readTimeout 60s 는 요청 본문 읽기에만, writeTimeout·responseHeaderTimeout 0 → 긴 다운로드 OK. 상류 idleConnTimeout 90s > uvicorn 기본
+  keep-alive 5s → 본문 있는 POST 가 막 닫힌 재사용 연결에 실리면 502. Buffering 미들웨어는 응답 버퍼를 끌 수 없다 → 본문 상한은 앱에서.
+  `router.entrypoints` 가 없으면 :80 평문에도 붙고, 모르는 SNI·IP 는 TRAEFIK DEFAULT CERT + 404. Middleware·ServersTransport 에는 ingressClass
+  필터가 걸리지 않는다(IngressRoute 만) — 그래서 둘 다 쓰지 않는다.
+- **Ingress 하나**(새 플랫폼 층 `deploy/platform/ingress`): networking.k8s.io/v1 Ingress `dms/dms-portal-traefik` — base 앱 46-ingress 의
+  `dms-portal`(class nginx — testbed-k8s 되돌림 경로, prod 는 오버레이가 지운다)과 이름이 달라 한 클러스터에 함께 있어도 서로 덮지 않는다.
+  `ingressClassName` = `INGRESS_CLASS`(기본 traefik), 어노테이션 `traefik.ingress.kubernetes.io/router.entrypoints` = `TRAEFIK_ENTRYPOINT`(기본
+  websecure — :80 평문에 안 붙게)·`router.tls: "true"`, host·tls hosts = `PORTAL_DOMAIN`(**템플릿·고정 오버레이 모두 필수** — 소문자 호스트 이름
+  문법, 와일드카드·포트·IP 금지; host 없는 catch-all 은 공용 Traefik 에서 남의 미매칭 호스트를 가로채므로 두지 않는다), secretName =
+  `PORTAL_TLS_SECRET`(기본 dms-portal-tls), `/` Prefix → `dms-api:http`. Middleware·ServersTransport·IngressRoute 없음(kubernetescrd 의존 없음).
+  render.env 입구 키 `INGRESS_LAYERS="platform/ingress"`·`INGRESS_CLASS`·`TRAEFIK_ENTRYPOINT`·`PORTAL_TLS_SECRET`·`PORTAL_DOMAIN`·`PORTAL_VIP`,
+  stdout 은 `GATEWAY:` 세 줄 대신 `INGRESS: <OUT>/platform/ingress` 한 줄. 옛 `GATEWAY_PROXY_PROTOCOL`·`GATEWAY_LISTEN_PORT`·
+  `GATEWAY_ENVOY_CPU_REQUEST`·`GATEWAY_ENVOY_MEMORY_REQUEST` 가 values.env 에 남아 있으면 실패하지 않고 stderr 에 알림 한 줄
+  `note: values.env 의 … 는 더 쓰지 않는다(2026-11-16 — 입구는 클러스터의 Traefik) — 무시함(…)`(옛 LDAP 키 알림과 같은 방식).
+- **앱 — Envoy BackendTrafficPolicy 가 하던 두 가지**:
+  - 요청 본문 상한(`api/body_limit.py` 순수 ASGI 미들웨어 — 인증·라우팅보다 앞): `DMS_MAX_REQUEST_BODY_BYTES`(기본 20971520 = 20MiB = 옛 입구
+    값, 하한 1MiB — 아래면 기동 거부). Content-Length 가 넘으면 앱을 부르지 않고 413, 길이 머리가 없거나(chunked) 스트림이면 받은 바이트를 세어
+    넘는 순간 413 — 응답 `{"detail": "request_too_large"}`(사유 코드 `reasonCodes.json`·`REASON_MESSAGES` 양쪽 등록, 다운로드 **응답** 상한
+    413 `artifact_too_large` 와 다른 코드). Envoy 때는 입구 경유만 걸렸지만 이제 **dms-api 에 닿는 모든 요청**(클러스터 안 에이전트 포함)에
+    걸린다 — 스스로 더 큰 상한을 재는 k8s 동기화 결과 POST(`/api/agent/k8s-sync/runs/{run_id}` — `k8s_sync_max_bytes` + 1MiB, 넘으면 413
+    `k8s_sync_too_large`)만 뺀다. 413 에 Connection: close 를 붙이지 않는다(안 읽은 본문 때문에 RST 가 먼저 가면 프록시가 413 대신 502 를 낸다).
+  - keep-alive: `DMS_API_KEEP_ALIVE_SECONDS`(기본 120, 하한 1) → uvicorn `timeout_keep_alive`. 입구의 상류 유휴 타임아웃(Traefik 기본
+    idleConnTimeout 90s)보다 길어야 백엔드가 풀의 유휴 연결을 먼저 닫지 않는다 — Envoy 때(BTP connectionIdleTimeout 4s < 5s)와 같은 원칙을
+    반대쪽에서 지킨다. 사이트가 idleConnTimeout 을 120s 이상으로 올리면 이 값도 그보다 크게. 두 키 모두 base `20-config.yaml` 에 적지 않는다
+    (코드 기본이 계약 — 바꿀 사이트는 오버레이 patch-config 에 더하고 dms-api 재시작).
+- **설치기**:
+  - 감지(`install-detect.py`): 항목 `traefik`(S8, 남의 것) — IngressClass `<INGRESS_CLASS>` 의 controller 가 `traefik.io/ingress-controller` 이고
+    Traefik 워크로드(아무 ns 의 DaemonSet·Deployment — 이미지 이름 마지막 조각에 traefik)가 Ready ≥ 1 이면 C(reuse), IngressClass 없음·controller
+    다름 → X(「DMS 는 Traefik 을 설치하지 않는다」 — RKE2 는 rke2-traefik), 워크로드 없음·Ready 0 → U. 워크로드 args 로 판정:
+    `--providers.kubernetesingress`·`--entryPoints.<EP>.address` 가 없으면 X, http.tls 없음·`proxyProtocol.trustedIPs`·forwardedHeaders·readTimeout 은 notes,
+    trustedIPs 없음(LB 가 PROXY v2 를 붙이면 연결이 깨진다)·`proxyProtocol.insecure=true` 는 warning, args 밖(`--configFile` 등)이면 C!. 항목
+    `ingress`(S8, DMS 층 — 없음 A, DMS 라벨 D=, 라벨 없는 같은 이름 P). 옛 항목 이름 `gateway-api`·`envoy-gateway`·`gateway` 는 사용법 오류로
+    바뀐 이름을 알려 준다(install-detect·install.sh `--adopt`·`--upgrade-addon`).
+  - S8 「입구(Traefik)」: 감지 traefik 이 stop 이면 사유 그대로 멈춤 → TLS 게이트 → SSA platform/ingress → `deploy/ingress-probe.sh`. dms-api
+    Endpoints 가 비었으면(첫 설치 — 앱은 S11) `--tls-only`. 프로브 FAIL 은 멈추고, **UNKNOWN 은 WARN 후 계속**한다(설치 호스트 → 노드 :443 이
+    방화벽으로 막혔을 수 있다 — S12 의 VIP 경유 readyz 가 다시 본다). preflight 「2. 입구 (클러스터의 Traefik — DMS 는 설치하지 않는다)」:
+    IngressClass 없음·controller 다름 FAIL, Traefik 파드 Ready 수 INFO. verify 5절 「입구」: Ingress 존재·class, ingress-probe
+    (`INGRESS_PROBE_TIMEOUT` 기본 5초, UNKNOWN 은 WARN). 6절 「포탈」: VIP 경유 readyz(그대로), http 80 판정 — 404 INFO(Traefik web 에 DMS 라우터
+    없음 — 정상)·200 WARN(평문 노출 — `router.entrypoints` 확인)·응답 없음 INFO(옛 「80 불가 = 정상」 FAIL 대신). S13 체크리스트: LB VS-443
+    풀 = Traefik 이 도는 노드 :443, 헬스 = TCP 443 또는 SNI·Host 를 `PORTAL_DOMAIN` 으로 한 HTTPS /readyz, LB 가 PROXY v2 를 붙이면 Traefik
+    websecure 의 `proxyProtocol.trustedIPs` 에 LB 출발지(SE). 새 메시지가 가리키는 앵커는 `deploy/README §2g`.
+  - `deploy/ingress-probe.sh`(새 — 옛 host-net-probe.sh 의 출력·종료 관례): `--context <ctx> --domain <fqdn> [--nodes ip,…] [--port 443]
+    [--timeout 30] [--cacert <CA>] [--tls-only]`. 대상 = Traefik 파드의 hostIP(못 읽거나 없으면 노드 InternalIP 전부), 노드마다 `openssl s_client
+    -servername` 인증서 대조(주체·SAN 에 FQDN — TRAEFIK DEFAULT CERT 면 FAIL)와 `curl --resolve` readyz(200 PASS · 404 FAIL — Traefik 이 Ingress 를
+    안 집었다 · 연결 실패 000 UNKNOWN). `--timeout` 은 FAIL 노드만 다시 재는 총 시간(간격 env `PROBE_INTERVAL` 기본 2초, UNKNOWN 은 재지 않는다).
+    종료 0 PASS · 1 FAIL · 4 UNKNOWN · 2 사용법·환경, 줄 `NODE <이름|ip> <PASS|FAIL|UNKNOWN> <근거>`·마지막 `RESULT:`. kubectl 은 늘 `--context`
+    ·get 만. 설치 호스트는 PROXY 없이 붙지만 Traefik 은 비신뢰 출발지를 헤더 없이도 받는다 — 그래서 노드 직접 확인이 된다.
+- **제거**: `deploy/addons/gateway-api`(v1.6.1)·`deploy/addons/envoy-gateway`(v1.9.3)·`deploy/platform/gateway`·`deploy/host-net-probe.sh`,
+  versions.env 의 `GATEWAY_API_VERSION`·`ENVOY_GATEWAY_VERSION`·`ENVOY_GATEWAY_IMAGE`·`ENVOY_PROXY_IMAGE`, images.lock 의 gateway·envoy 두 줄,
+  render.sh 의 `GATEWAY_*` 렌더·`GATEWAY_LAYERS`·prod patch-config 의 `REPLACE_LOGIN_ALARM_SOURCE_FAILURES` 자리(출발지 경보는 base 값 그대로 —
+  LB 가 PROXY 를 못 붙이는 사이트는 patch-config 에 `DMS_LOGIN_ALARM_SOURCE_FAILURES: "0"` 을 더한다), install-detect 의 세 항목·Gateway API/EG
+  상수·핀 요구, install.sh S8 의 EG 단계·`hostport_gate`·sysctl·마스터 LISTEN 프로브·guard 의 envoy-gateway, preflight 의 마스터 :443·
+  :19000~19003·sysctl `90-dms-envoy`·hostPort 충돌, verify 의 Gateway Programmed·「80 불가 = 정상」 FAIL, guard-images.sh 의 EG 분기, PriorityClass
+  `dms-addon-critical` description 의 EG 컨트롤러, `tests/test_gateway_contract.py`(→ `test_ingress_contract.py`). `CONTROL_PLANE_LABEL_VALUE`
+  는 유지(레지스트리·PG·api/controller — EnvoyProxy 패치만 빠졌다). 코드 커밋 64파일 +2,746/−86,164.
+- **커밋**: aa26bbce(코드 — `feat(ingress)!`), f415eb84(testbed-k8s 오버레이 d26 → d27), 「문서」(이 항목, deploy/README §2g 를 「입구(Traefik)」로
+  — 옛 하위 절 번호 2g-1~2g-6 의 새 위치는 부록 Z, prod·testbed README, ARCHITECTURE, BACKLOG).
+- **검증**: 백엔드 전체 5716 passed / 14 skipped, vitest 2000 passed(115 파일), tsc -b 0, e2e 32 passed, deploy 셸 11개 `sh -n`/`bash -n`·Python
+  361개 py_compile 오류 0. 두 사이트 렌더·`kubectl kustomize` 9층 rc 0, Envoy·Gateway API 객체 0 — testbed-k8s 렌더의 platform/ingress = Ingress
+  하나(websecure·router.tls·class traefik·host dms-k8s.local·dms-portal-tls, `kube-context` = dmsk8s).
+- **배포**: 포탈 빌드 d27(소스 aa26bbce, 3종, 225초) → 릴리스 dms-agent → dms-api → dms-controller → job-image 모두 Applied(live == 동봉 d27),
+  오버레이 bump f415eb84(guard exit 0). 앱 본문 상한·keep-alive 는 Envoy 입구에서도 무해해 입구 전환 전에 먼저 출하했다.
+- **테스트베드 Traefik**(rke2-traefik 모양 — testbed IaC): `kube-system/traefik` DaemonSet, `docker.io/rancher/hardened-traefik:v3.7.4-build20260608`
+  (프로덕션과 같은 판), hostPort 80→:8000(web)·443→:8443(websecure, http.tls), providers kubernetescrd(ingressClass traefik)·kubernetesingress,
+  websecure `proxyProtocol.trustedIPs=10.10.10.1/32`(호스트 edge = Avi SE 흉내), forwardedHeaders 비움, IngressClass traefik(기본 클래스 아님),
+  control-plane toleration(테스트베드는 cp1 만 taint — RKE2 마스터는 taint 가 없다). 설치 `make traefik-dmsk8s`(태그 고정 CRD v3.7.4 install-once
+  + 템플릿 apply + 실행 이미지 assert, `--check` = dry-run=server). 실측: CRI-O 가 hostPort 를 직접 DNAT 한다(이 클러스터 Cilium 은 KPR=false·
+  portmap 체이닝 없음인데도) — 노드 `ss` 에 :443 이 안 보이고 INPUT 방화벽은 그 트래픽을 보지 못한다(PREROUTING DNAT → FORWARD).
+- **전환**(사용자 경로 readyz 2초 간격 — 단계마다 무중단): ① Traefik 을 w1·w2 에만(`-e traefik_tolerate_control_plane=false`) — hostPort 동작
+  (TRAEFIK DEFAULT CERT 404) ② 새 설치기 `install.sh --only S8` — 감지 traefik C(reuse)·ingress A → SSA → ingress-probe w1·w2 PASS(readyz 200·DMS
+  인증서) ③ 호스트에서 w1·w2:443 직접 PROXY — 신뢰 출발지(10.10.10.1) + clientip 192.0.2.7 → 앱 client_ip=192.0.2.7, 비신뢰 출발지
+  (192.168.75.215) + clientip 6.6.6.6 → 192.168.75.215 ④ d27 릴리스 뒤 edge 풀 cp1 → cp1·w1·w2(`make host-edge`, `portal_edge: traefik`, 백엔드
+  `dmsk8s_nodes`): **25/25 200** ⑤ toleration true(`make traefik-dmsk8s`) → cp1 인수 + w1·w2 파드 롤링: **90/90 200** ⑥ Envoy 정리(아래 런북):
+  **60/60 200** ⑦ cp443 은퇴 — `make baseline ANSIBLE='ansible-playbook --limit k8s-cp1 --tags cp443'`(cp1 sysctl `90-dms-envoy.conf` 삭제·런타임
+  1024, nft `dms_testbed_cp443`·유닛 제거; 첫 실행 make rc 2 → 재실행 rc 0·changed 0 으로 수렴, 원인 미확인), `make host-net`(설치본 주석만
+  달랐다) → `make validate-dmsk8s` **PASS=211 FAIL=0**, `post-boot-check.sh` **PASS=101 FAIL=0**.
+- **Envoy 정리 런북**(테스트베드에서 실행한 순서 — 프로덕션도 DMS 가 깐 것만): 1) DMS 입구 객체 — ns dms 의 HTTPRoute·Gateway·
+  ClientTrafficPolicy·BackendTrafficPolicy·EnvoyProxy `dms-portal`, GatewayClass `dms`(EG 컨트롤러가 Envoy DaemonSet 을 거둔다) 2) EG mutating
+  webhook `envoy-gateway-topology-injector.envoy-gateway-system`(컨트롤러보다 먼저 — 남으면 파드 생성에 걸릴 수 있다) 3) ns `envoy-gateway-system`·
+  cluster RBAC(`eg-gateway-helm-*` + binding) 4) EG CRD 8개(`*.gateway.envoyproxy.io`) 5) Gateway API CRD 는 라벨
+  `app.kubernetes.io/managed-by=dms-install` 인 것만(테스트베드 10개 — DMS 가 v1.6.1 을 깔았다) + VAP·binding `safe-upgrades.gateway.networking.k8s.io` — 프로덕션 RKE2 는
+  rke2-traefik-crd(Helm 소유)가 v1.5.1 을 깔았으니 **지우지 않는다**(라벨로 구분) 6) PriorityClass `dms-addon-critical` 은 남긴다(CNPG 오퍼레이터가
+  쓴다) 7) 노드 설정 은퇴 — 마스터 `/etc/sysctl.d/90-dms-envoy.conf` 삭제 + 런타임 1024. 마스터 :443 INPUT 방화벽(SE 대역만)은 Traefik
+  hostPort 트래픽에 무력하다(FORWARD 경로) — 위조 방지는 Traefik trustedIPs 가 한다. 라이브 확인: ns `envoy-gateway-system` 없음, Gateway API·EG
+  CRD 0.
+- **실증**(전환 뒤 d27, 모든 노드 Traefik):
+  - 경로: VIP-A `10.10.10.1:443`·LAN `192.168.75.215:8443`·Tailscale `100.65.195.106:8443` → 200(HTTP/2), 노드 셋 :443 직접(SNI dms-k8s.local) →
+    200·DMS 인증서.
+  - 원 IP(앱 보안 이벤트 `client_ip` / `peer`): LAN 경유(edge PROXY v2) → 192.168.75.215 / Traefik 파드 IP(옛 Envoy 의 마스터 호스트 주소 자리),
+    신뢰 출발지 PROXY 192.0.2.7 → 192.0.2.7, 비신뢰 출발지 PROXY 6.6.6.6 → 192.168.75.215. 모든 요청에 실은 위조 X-Forwarded-For 7.7.7.7·
+    X-Real-Ip 6.6.6.6 반영 0. edge 경유 연결에 클라이언트가 PROXY 헤더를 심으면 edge 의 진짜 헤더가 먼저 가고 심은 바이트는 TLS 자리 →
+    `SSL WRONG_VERSION_NUMBER`(막힘). 같은 원 IP 로 두 테스트 계정 실패 20건 → `login_source_alarm`(원 IP 가 살아 있어 경보도 의미 있다).
+  - 본문 상한(d27 앱): ≈21MiB POST → 413 `{"detail":"request_too_large"}`, ≈19MiB → 상한 통과(앱 422 — 평문 비밀번호 거절).
+  - 긴 응답: `/assets` JS 1,178,409B 를 15.7KB/s 로 65.7초 — 200·전량(HTTP/2). readTimeout 60s 는 요청 본문 읽기에만 걸린다.
+  - keep-alive 경합: 본문 있는 POST 40회를 5.5초 간격(옛 uvicorn keep-alive 5s 바로 뒤) → 401 40 · **502 0**.
+  - 라우팅: 모르는 Host(SNI unknown.example) → 404 + TRAEFIK DEFAULT CERT, IP 직접(SNI 없음) → 404 + 기본 인증서, `http://dms-k8s.local`(노드
+    :80) → 404(DMS 라우터는 websecure 에만), Host 에 포트(`dms-k8s.local:8443`) → 200.
+  - 설치기(새 코드, 라이브 — 단계 S1·S3·S8·S12): S1 WARN(control-plane 1대 — 테스트베드 정상)·「2. 입구」 IngressClass PASS·Traefik Ready 3/3,
+    S3 PASS(platform/ingress dry-run), S8 PASS(ingress-probe 노드 셋 readyz 200·인증서 OK), S12 PASS(5절 Ingress·ingress-probe, 6절 VIP readyz 200,
+    http 80 응답 없음 INFO — edge 에 80 VS 없음). 감지: traefik C reuse(Ready 3, trustedIPs 10.10.10.1/32, readTimeout 기본 60s note), ingress D=.
+  - 실 Chrome: 관리자 30화면 × 1440·390 — 콘솔 오류·실패 GET·넘침·이상 글자 0.
+- **testbed IaC**(`~/dms-dev/testbed` — 상세·게이트·라이브 결과는 그 저장소 `docs/ARCHITECTURE.md` §19.7, `README.md` 「Portal edge」): 새
+  `roles/traefik` + `playbooks/traefik.yml` + `make traefik-dmsk8s`(dmsk8s 전용 — `traefik_enabled` 아닌 클러스터 거부, helm 없이 CRD install-once +
+  템플릿 apply, 실행 이미지 ≠ 핀이면 거부), group_vars(`traefik_version`·`traefik_image`·`traefik_crd_url` 핀, dmsk8s `traefik_enabled`·
+  `traefik_proxy_trusted_ips`·`traefik_tolerate_control_plane`·`portal_edge: traefik`·`portal_ingress: dms/dms-portal-traefik`, `dms_envoy_*`
+  삭제), `tbinfo.py` EDGE_MODES = traefik·ingress(gateway·옛 키는 이유와 함께 거부, 풀 = 클러스터 모든 노드), `host-edge.sh` 백엔드
+  `<c>_masters` → `<c>_nodes`, roles/common 의 cp443 펜스·port floor 를 걷는 은퇴 블록(태그 cp443 — 노드에 DMS Envoy 가 있거나 못 읽으면
+  아무것도 걷지 않는다), validate·post-boot 의 traefik 모드 단언(노드마다 PROXY 없이 직접 readyz 200 — 예전 「PROXY 강제 curl 35/56」의 반대).
+  오프라인 게이트: tbinfo 변형 15/15·host-edge 8/8·`haproxy -c` valid·템플릿 dry-run=server·은퇴 블록 하네스 13/13. 작업 사본에서 고쳐 진짜
+  저장소에 sync(18경로)했고 **커밋은 사용자 몫**이다(job tmp `traefik/tb-tools/commit-testbed.sh` — 미커밋 경로가 기대 18개와 정확히 같을 때만
+  pathspec 커밋; 2026-11-16 현재 미커밋).
+- **남은 일 — 프로덕션(OA) 적용 순서**(사이트 운영 몫 포함):
+  ① 지금 상태 확인: LB VS(VIP:443) 풀 멤버·포트, PROXY v2(OA 는 켜짐), rke2-traefik 의 websecure `proxyProtocol.trustedIPs`.
+  ② Rancher 클러스터 편집 → chartValues 의 rke2-traefik(또는 HelmChartConfig `kube-system/rke2-traefik` 의 `spec.valuesContent`)에
+     `ports.websecure.proxyProtocol.trustedIPs: ["<SE 주소>/32", …]`(forwardedHeaders 는 비움; 예(OA): SE 12.201.53.242·12.201.53.243) — Traefik
+     DaemonSet 이 노드별로 롤링 재기동한다. **LB 가 PROXY v2 를 붙이는데 trustedIPs 가 없으면 Traefik 은 그 헤더를 TLS 바이트로 읽어 연결이
+     깨진다**(지금 OA 의 DMS VIP 가 깨져 있을 수 있는 이유).
+  ③ dms-k8s pull → values.env 에서 `GATEWAY_*` 줄 삭제(남아도 알림 뒤 무시)·`PORTAL_DOMAIN` 확인 → `sh deploy/install.sh --context <ctx> --site
+     <site>`(S8 이 Ingress 를 만들고 노드마다 확인한다) → 같은 커밋으로 포탈 빌드 → 릴리스(새 앱 — 본문 상한·keep-alive 120,
+     deploy/README §4-2 5·6). 태그가 `live` 라 설치기는 앱 이미지를 바꾸지 않으니 **LB 를 옮기기 전에** 릴리스까지 끝낸다(deploy/README §2g-8 3).
+  ④ LB 풀 = Traefik 이 도는 노드 전부 :443, 헬스 = TCP 443 또는 SNI·Host 가 `PORTAL_DOMAIN` 인 HTTPS /readyz(SNI 없는 HTTPS 모니터는 404 → DOWN).
+  ⑤ 실증: 로그인 실패 보안 이벤트의 `client_ip` 가 사용자 PC 인지 — SE 주소로 찍히면 PROXY 가 쓰이지 않는 것이다(trustedIPs·SNAT 확인).
+  ⑥ 그 뒤 옛 Envoy(DMS 가 깔았다면) 정리 — 위 런북 1~6. Gateway API CRD 는 Helm 소유(rke2-traefik-crd)라 남긴다.
 
 ### ✅ 입구 — 리스너 포트(GATEWAY_LISTEN_PORT)·PROXY off 모드·마스터 hostPort 충돌 감지(OA: Traefik 이 호스트 443, Avi PROXY v2 미지원) — **완료**(2026-11-14)
 

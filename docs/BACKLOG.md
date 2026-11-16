@@ -165,7 +165,8 @@ k8s 신원 모드 → 포크 → 사용량 → ③~⑦ 설치 묶음 → 테스�
    (= 인터넷 노드)는 NoSchedule taint 없는 워커여야 한다(deploy/README §8 0)). taint 를 건 전용 빌드 노드를 쓰려면 컨트롤 상태에
    tolerations(또는 그 노드의 taint 를 견디는 옵션)를 더한다.
 7. 🔧 **포탈 TLS 인증서 만료 감시** — `PORTAL_TLS_SECRET`(기본 `dms-portal-tls`)의 만료를 보는 곳이 없다(S12·포탈 둘 다). 만료되면
-   Avi 뒤 Envoy 의 TLS 핸드셰이크가 실패한다. 지금은 정기 작업 달력(deploy/README §14-2)뿐. 처방: S12 WARN(만료 30일 전) + 포탈 개요 경고.
+   LB 뒤 Traefik 이 SNI 로 고르는 그 인증서로 포탈 HTTPS 접속이 인증서 오류로 실패한다(2026-11-16 전에는 Envoy). 지금은 정기 작업 달력
+   (deploy/README §14-2)뿐. 처방: S12 WARN(만료 30일 전 — `ingress-probe.sh` 가 이미 s_client 로 인증서를 읽는다) + 포탈 개요 경고.
 8. 🧹 **빌드 레지스트리 코드 기본값 `pkg-01:5000`** — `config.Settings.build_registry` 의 코드 기본값이 테스트베드 주소다
    (`tests/test_config_phase3c.py` 가 고정). prod·testbed-k8s 렌더는 덮으므로 동작엔 영향이 없지만 env 가 빠지면 조용히 테스트베드 이름을
    쓴다. 처방: 기본을 빈 값 + 빌드 화면에서만 「빌드 레지스트리 미설정」 — 테스트 기대도 함께. (base `deploy/k8s/20-config.yaml` 의 값은
@@ -177,16 +178,18 @@ k8s 신원 모드 → 포크 → 사용량 → ③~⑦ 설치 묶음 → 테스�
    옛 deploy/README §0 은 지웠다) — 지울지 함께 결정.
 10. 🧹 (테스트베드·base) **base `46-ingress.yaml`·`47-metallb-public-pool.yaml` 의 ssc 값**(`dms.local`·`10.20.20.100/32`·pkg-01 미러 주석) —
     prod 는 `patch-remove-ingress.yaml` 로 지우고 testbed-k8s 는 패치로 덮는다. 소크 뒤 testbed-k8s 의 Ingress·MetalLB 를 지울 때 base 에서
-    파일째 걷는다 — ⑥ 「소크 뒤 Ingress·MetalLB 삭제」와 한 묶음.
+    파일째 걷는다 — ⑥ 「소크 뒤 Ingress·MetalLB 삭제」와 한 묶음. (입구 Ingress `dms-portal-traefik` 은 base 앱이 아니라 플랫폼 층
+    `deploy/platform/ingress` 라 이 정리와 무관하다.)
 11. 🔧 **dms-api·dms-controller requests 결정** — base `40-api.yaml`·`41-controller.yaml`(렌더 그대로)의 requests 는 100m/256Mi(limits
     1/1Gi)이고 설계 v6 2-1 표의 dms-api 250m/512Mi 와 다르다. 마스터 자원 예산(deploy/README §0-2)은 렌더 값을 인용한다. 실측(로그인
     scrypt 슬롯·큰 배치 삭제의 RLock·사용량 분석 창)으로 정한다.
 12. 🔒 (테스트베드) **testbed 저장소 후속**(`~/dms-dev/testbed` — 이 저장소의 세션은 고치지 않는다) — 옛 deploy/README 절 번호를
     가리키는 곳을 [`deploy/testbed/README.md`](../deploy/testbed/README.md)(부록 Z 대응표 — deploy/README)로: README `§13-2`·「Shared-FS
     layout: … (DMS README §2)」·dmsk8s DB URL(pkg-01 `dmsdb_k8s` — 낡음: T7 뒤 앱 DB 는 CNPG `dms-pg`, pkg-01 URL 은 `dms-secrets-prev` 의
-    되돌림 값), `docs/ARCHITECTURE.md` 의 `§2g-7`·`§13-6b`·`§2e-6` 참조와 §17 의 같은 DB URL·「아래 절 번호는 dms-ssc 판 기준」 문장,
-    `group_vars/dmsk8s.yml` 의 `2g-7` 주석. 그 저장소의 §2e·§2g 계열과 §1·§2·§3/§3b·§4/§5·§6·§8·§10-7 참조는 같은 주제의 일반판 절에
-    떨어지므로 그대로 둬도 된다(deploy/README 머리의 번호 정책).
+    되돌림 값), `docs/ARCHITECTURE.md` 의 `§2e-6` 참조(§19.6)와 §17 의 같은 DB URL·「아래 절 번호는 dms-ssc 판 기준」 문장. (`docs/ARCHITECTURE.md`
+    의 `§2g-7`·`§13-6b` 참조와 `group_vars/dmsk8s.yml` 의 `2g-7` 주석은 2026-11-16 Traefik 교체 판에서 해소 — 사본 sync, 커밋은 사용자. 이제 §2g 만
+    가리킨다.) 그 저장소의 §2e 계열·§2g(하위 번호 없이)와 §1·§2·§3/§3b·§4/§5·§6·§8·§10-7 참조는 같은 주제의 일반판 절에 떨어지므로 그대로 둬도
+    된다(deploy/README 머리의 번호 정책).
 13. 감사(2026-11-04~05 라이브 기능 전수 점검)에서 남긴 것:
     - 🔧 **실행 시한 초과의 전용 사유 코드가 없다** — vcjob 실행 시한 초과는 잡을 TimedOut 으로 끝내지만 사유는 `execution_failed` 다
       (`stepper.JobStepper._poll_execution` 의 TIMED_OUT 분기 — 2026-11-05 시한 분류 수정 전엔 이 분기에 닿지 못했다). 화면 제목은
@@ -373,19 +376,45 @@ CHANGELOG 「⑤ DB(CNPG)」, 설계 v6 6·8-1(S2·S9·S10·S12)·8-2·10 T6/T6'
 
 ### ⑥ 입구(Envoy Gateway) 후속 — 2026-11-03
 
-CHANGELOG 「⑥ 입구(Envoy Gateway)」, 설계 v6 #13~#15·4-3·8-1(S0-5·S8·S12)·8-2·10 T8, deploy/README §2g.
+CHANGELOG 「⑥ 입구(Envoy Gateway)」(2026-11-03 — 옛 입구), 설계 v6 #13~#15·4-3·8-1(S0-5·S8·S12)·8-2·10 T8, deploy/README §2g.
+**2026-11-16 입구를 Envoy Gateway 에서 클러스터에 이미 있는 Traefik 하나로 바꿨다**(사용자 결정 — 병행 없음;
+CHANGELOG 「입구 — Envoy Gateway 폐기, 클러스터의 Traefik 하나로 교체」,
+ARCHITECTURE §6 「입구는 클러스터에 이미 있는 Traefik 하나이고…」·「입구의 원 IP 계약」). 이 제목은 다른 파일이 「BACKLOG ⑥」으로 가리켜 그대로 둔다.
+Envoy·EG 전용 후속(EG 리스너 hostname·접근 로그 SNI, Envoy 접근 로그 수집처·stats :19001, EG rate limit, 남의 EG 설정의 shutdown-manager 이미지,
+`platform/gateway` 의 가드 제외)은 그 층과 함께 사라져 지웠다 — 입구 접근 로그·지표(K15)는 이제 사이트 Traefik 의 몫이다. 남은 입구 후속:
 
-- 📝 **소크 뒤 Ingress·MetalLB 삭제** — testbed-k8s 오버레이의 Ingress·MetalLB(되돌림용, testbed `portal_edge: ingress`)를 지운다 — 그때
-  testbed IaC 가 dmsk8s 의 ingress-nginx·MetalLB 를 걷고 되돌림 경로가 없어진다(deploy/testbed/README.md §7). 같은 묶음: base
-  `46-ingress.yaml`·`47-metallb-public-pool.yaml` 파일째 삭제 + prod `patch-remove-ingress.yaml`·`tests/test_testbed_k8s_overlay.py` 단언 정리
-  (2026-11-06 신규 10).
-- 📝 **EG 리스너에 hostname 이 없어 접근 로그에 SNI 가 없다** — `%REQUESTED_SERVER_NAME%` 는 늘 null 이라 필드를 지웠다(3fd7da9).
-  리스너에 hostname 을 두게 되면(지금은 hostname·80·HSTS 없음 — deploy/README §2g-1) 그때 다시 싣는다.
-- 📝 **설계 ⑥ 의 선택·뒤로 미룬 것** — Envoy 접근 로그 수집처·보존(K15·보안 S2 — 지금은 stdout), Envoy stats(:19001)는 끔(bd53e9b, EnvoyProxy
-  `telemetry.metrics.prometheus.disable`; 지표가 필요해지면 노드 밖을 막는 방화벽과 함께 다시 켠다), C 경로에서 남의 EG 설정이 shutdown-manager
-  이미지를 docker.io 로 두어도 DMS EnvoyProxy 가 이미지를 명시하므로 영향 없음(확인만), 전역 rate limit(EG `rateLimit`) 미사용 — 쓰게 되면
-  ratelimit 이미지를 lock 에. `platform/gateway`·`addons/gateway-api` 는 워크로드가 없어 `guard-images.sh` 대상이 아니다(Envoy 이미지 교체는
-  렌더 diff 로 본다).
+- 📝 **소크 뒤 Ingress·MetalLB 삭제** — testbed-k8s 오버레이의 nginx Ingress `dms-portal`·MetalLB 풀(되돌림용, testbed `portal_edge: ingress` — 2026-11-04
+  Envoy 컷오버 때 남겼고, 2026-11-16 Traefik 전환 뒤에도 testbed `validate` 가 되돌림 VIP 200 을 단언한다)을 **Traefik 입구 소크 뒤** 지운다 — 정리 시점은
+  결정 대기(Traefik 입구가 얼마나 무사고로 돌면 되돌림 길을 거둘지). 그때 testbed IaC 가 dmsk8s 의 ingress-nginx·MetalLB 를 걷고 되돌림 경로가 없어진다
+  (deploy/testbed/README.md §7). 같은 묶음: base `46-ingress.yaml`·`47-metallb-public-pool.yaml` 파일째 삭제 + prod `patch-remove-ingress.yaml`·
+  `tests/test_testbed_k8s_overlay.py` 단언 정리(2026-11-06 신규 10). 입구 Ingress `dms-portal-traefik`(플랫폼 층)은 이름이 달라 그대로다.
+- 🔒 **프로덕션 첫 Traefik 입구 적용**(사이트 운영 몫 포함 — deploy/README §2g): ① LB 가 PROXY v2 를 붙이면 Traefik websecure `proxyProtocol.trustedIPs` 에
+  LB 출발지(`<SE 주소>`)를 Rancher chartValues / HelmChartConfig(`kube-system/rke2-traefik`)로 넣는다(`forwardedHeaders` 는 비움 — trustedIPs 가 없으면 Traefik 이
+  PROXY 바이트를 TLS 로 읽어 연결이 깨진다), ② 사이트 체크아웃 pull → values.env 의 옛 `GATEWAY_*` 줄 정리(남아도 알림 뒤 무시)·`PORTAL_DOMAIN` 확인 → 설치기
+  (S8 이 Ingress 를 만들고 노드마다 확인) → 포탈 빌드 → 릴리스(새 앱 — 본문 상한·keep-alive 120; 설치기는 `live` 태그면 앱 이미지를 바꾸지
+  않는다 — LB 를 옮기기 전에, deploy/README §4-2 5·6·§2g-8 3), ③ LB 풀 = Traefik 이 도는 노드 전부 :443, 헬스 = TCP 443 또는 SNI·Host 를 `PORTAL_DOMAIN` 으로 한 HTTPS `/readyz`
+  (SNI 없는 HTTPS 모니터는 404 → DOWN), ④ 실증 — 로그인 실패 보안 이벤트의 `client_ip` 가 사용자 PC 인지(SE 주소면 trustedIPs·SNAT 확인). 그 뒤 아래 옛 Envoy
+  층 정리.
+- 📝 **옛 Envoy 층은 설치기가 걷지 않는다** — 2026-11-16 전에 DMS 가 Envoy 입구를 깔았던 클러스터에는 Gateway·HTTPRoute·CTP·BTP·EnvoyProxy `dms-portal`·
+  GatewayClass `dms`·EG 웹훅·ns `envoy-gateway-system`·EG CRD·cluster RBAC 가 남는다(설치기·감지는 더 보지 않는다 — 옛 항목 이름은 사용법 오류). 손 런북
+  (deploy/README §2g — 테스트베드에서 그 순서로 실행): DMS 입구 객체 → EG mutating webhook(컨트롤러보다 먼저) → ns·cluster RBAC → EG CRD → Gateway API CRD 는
+  **라벨 `app.kubernetes.io/managed-by=dms-install` 인 것만** + VAP(RKE2 는 rke2-traefik-crd 가 Helm 으로 Gateway API CRD 를 깔아 둘 수 있다 — 라벨로 가른다).
+  PriorityClass `dms-addon-critical` 은 남긴다(CNPG 가 쓴다). 노드 쪽(마스터 sysctl `90-dms-envoy.conf`·:443 INPUT 방화벽)은 사이트가 둔 경우 걷는다.
+- 📝 **Traefik 판 올림·보안 수정은 사이트 몫** — DMS 는 Traefik 을 설치·변경하지 않고 감지 `traefik` 도 판을 판정하지 않는다(설치 태그를 근거로만 적는다).
+  RKE2 는 rke2-traefik 이 RKE2 판을 따라간다. 테스트베드는 testbed IaC `traefik` 역할이 프로덕션과 같은 판(`hardened-traefik:v3.7.4-build20260608`)을
+  고정한다 — 프로덕션 판을 따라 올린다(testbed 저장소 몫).
+- 🔍 **느린 큰 업로드와 Traefik readTimeout 60s** — Traefik 기본 `respondingTimeouts.readTimeout` 60s 는 요청 본문 읽기 상한이라, 본문 상한(20MiB)에 가까운
+  업로드를 약 340KiB/s 보다 느리게 올리면 끊긴다(다운로드·스트리밍은 writeTimeout 0 이라 무관 — 테스트베드 65.7초 다운로드 200). 지금 큰 본문은 배치 JSON·CSV
+  (CSV 2MiB 상한)뿐이라 사내망에서는 닿지 않을 것으로 본다(미실측). 생기면 사이트가 HelmChartConfig 로 websecure `transport.respondingTimeouts.readTimeout` 을
+  올린다 — DMS 는 바꾸지 않는다(감지 `traefik` 이 현재 값을 note 로 보인다).
+- 🔧 **keep-alive 와 사이트 idleConnTimeout 의 대소를 아무도 보지 않는다** — `DMS_API_KEEP_ALIVE_SECONDS`(기본 120)는 입구의 상류 유휴 타임아웃(Traefik
+  기본 `serversTransport.forwardingTimeouts.idleConnTimeout` 90s)보다 길어야 한다(ARCHITECTURE §7 「요청 본문 상한·keep-alive 는 앱이 낸다」). 사이트가
+  Traefik 쪽을 120s 이상으로 올리면 본문 있는 POST 의 간헐 502 가 돌아오는데 감지 `traefik` 은 `readTimeout` 만 읽는다. 처방: 감지가 args 의
+  `--serversTransport.forwardingTimeouts.idleConnTimeout` 을 읽어 렌더 값(patch-config 에 키가 없으면 코드 기본 120) 이상이면 WARN.
+- 📝 **본문 상한이 클러스터 안 에이전트 요청에도 걸린다**(2026-11-16 — Envoy 때는 입구 경유만 걸렸다): 에이전트 보고(`POST /api/agent/report`) 등도
+  `DMS_MAX_REQUEST_BODY_BYTES`(기본 20MiB) 안이어야 한다. 예외는 스스로 상한을 재는 k8s 동기화 결과 POST 하나(`body_limit._SELF_LIMITED_PATHS`, 기본 33MiB).
+  보고는 노드 하나의 마운트·스토리지 프로브라 20MiB 에 닿을 일은 드물다고 보지만(미실측), 에이전트 로그에 413 `request_too_large` 가 보이면 상한을
+  올리거나(patch-config, dms-api 재시작) 그 라우트가 스스로 상한을 재게 해 `_SELF_LIMITED_PATHS` 에 넣는다(라우트 모양 전체 일치로만).
 
 ### ⑦ 설치기 후속 — 2026-11-03
 
@@ -409,15 +438,14 @@ CHANGELOG 「⑦ 설치기」, 설계 v6 8-1·8-2·9 ⑦·10 T9, deploy/README �
 - 🔧 **`kubectl-cnpg` 플러그인·checksums 반입**(K8 — 인터넷 노드 → 설치 호스트). 지금 설치기는 플러그인 없이 동작한다(switchover 는
   `status.targetPrimary`).
 - 🔧 **T9 에서 만들지 않은 감지 행 — D>·C!** — D>(DMS 소유인데 고정보다 높은 버전 → keep·WARN, 다운그레이드하지 않음)·C!(남이 설치한
-  EOL·범위 밖 → reuse + WARN·소유자 요청 문구)는 심 테스트(`tests/test_install_detect.py` — CNPG·EG 버전 표)로만 봤다. 실클러스터에서 볼 일이
-  생기면(예: 다음 CNPG·EG 업그레이드 리허설에서 옛 판으로 되돌린 테스트베드, EG v1.8 을 깐 일회용 클러스터) `--plan` 표·S8/S9 의 「건드리지
-  않는다」를 확인한다.
+  EOL·범위 밖 → reuse + WARN·소유자 요청 문구)는 심 테스트(`tests/test_install_detect.py` — CNPG 버전 표; 2026-11-16 전에는 EG 표도)로만 봤다.
+  실클러스터에서 볼 일이 생기면(예: 다음 CNPG 업그레이드 리허설에서 옛 판으로 되돌린 테스트베드) `--plan` 표·S9 의 「건드리지 않는다」를 확인한다.
+  (Traefik 의 C! — trustedIPs 없음·`proxyProtocol.insecure`·정적 설정이 configFile — 는 판이 아니라 설정 WARN 이다.)
 - 📝 **설치 흐름 밖에 남긴 사이트 확인** — `SHARED_DIR_ID` 를 values.env 에 손으로 옮긴다(S0 결과를 일회용 파드로 읽어 제안·대조하는 길은 없다 —
   틀리면 S4 가 「센티널 불일치」로 멈춘다), SHARED_DIR 변경 때 레지스트리 저장소 이동은 deploy/README §2e-5 손 절차(설치기는 S4·S11 가드 exit 5 로
-  멈출 뿐), 클러스터 도메인 ≠ cluster.local 은 preflight WARN 뿐(EG `KUBERNETES_CLUSTER_DOMAIN` values 키 없음 — 설치기는 매 실행 다시 렌더하므로
-  `deploy/.rendered` 손 패치로는 못 넘는다; 렌더를 건너뛰는 길은 두지 않았다 — 값 키를 더하는 쪽), 마스터 리스너 포트(`GATEWAY_LISTEN_PORT`,
-  기본 :443)·:19000~19003 비어 있음(K6)·`crictl inspecti … pinned`·`fs.protected_*` 는 노드 셸 체크리스트(MANUAL)뿐, S12 의 413(21MiB)·15초 스트림·
-  원 IP 는 deploy/README §2g-5 손 명령.
+  멈출 뿐), `crictl inspecti … pinned`·`fs.protected_*` 는 노드 셸 체크리스트(MANUAL)뿐, S12 의 413(21MiB — 2026-11-16 부터 앱의 JSON
+  `request_too_large`)·긴 스트림·원 IP 는 deploy/README §2g 손 명령. (옛 EG 의 클러스터 도메인 ≠ cluster.local 걱정과 마스터 리스너 포트·:19000~19003
+  확인은 2026-11-16 입구 교체로 사라졌다.)
   앱 튜닝 키(메일·로그인 보호·보존일)의 values 키는 「2026-11-06 … 후속」 1.
 - 📝 **S6 판정 범위는 DMS 노드만**(설계 S6 행에는 범위가 없다): S2b·S10 과 같은 정의(`pg-path-probe.py` 의 `dms_nodes`)로 다른 팀 노드는 pull 은
   해 보되 정보로만 보인다. 모든 노드를 판정해야 한다면 `pull-probe.py` 의 판정 대상을 바꾼다 — 사용자 확인 대기.
@@ -442,8 +470,9 @@ testbed 저장소. 2026-11-06 신규 테스트베드 항목(9·10·12·13 워커
   둔다.
 - 📝 **pkg-01 외부 PG(`dmsdb_k8s`) 정리 시점** — 결정 대기. ⑤ T7 이관 뒤로는 되돌림용이다(`dms-secrets-prev` → `pg-secrets.py restore-url`; 이관 뒤
   쓰기는 거기 없다 — deploy/testbed/README.md §7).
-- 📝 (선택) **testbed-k8s `values.env` 에 `PORTAL_DOMAIN=dms-k8s.local`·`PORTAL_VIP=10.10.10.1`** — 설치기 S12·`verify.sh` 의 VIP 경유 readyz 가
-  edge 경로를 보게(지금은 env 를 줄 때만 본다). 렌더·설치기 테스트 영향 확인 뒤.
+- 📝 (선택) **testbed-k8s `values.env` 에 `PORTAL_VIP=10.10.10.1`** — 설치기 S12·`verify.sh` 의 VIP 경유 readyz 가 edge 경로를 보게(지금은 env 를
+  줄 때만 본다). 렌더·설치기 테스트 영향 확인 뒤. (`PORTAL_DOMAIN=dms-k8s.local` 은 2026-11-16 부터 입구 Ingress host 라 고정 오버레이도 필수 — 이미 들어
+  있어 S8·S12 의 `ingress-probe.sh` 는 env 없이 돈다.)
 - 🔧 **테스트베드 `/data/k8s_pv` export 의 no_root_squash 노출 완화(보안 리뷰)** — testbed 저장소 `scripts/nfs-pv-export.sh` 가 dmsk8s 세 노드
   (10.10.10.20-22)에 rw·no_root_squash 로 연다(root 잡이 PV 디렉터리를 만지는 실증 전제). 같은 망의 그 세 IP 에서 root 로 마운트하면 모든 PV
   데이터를 읽고 쓸 수 있다. 처방 후보: 실증 기간에만 켜는 make 타깃, export 를 워커(.21·.22)로만 좁히기(cp1 제외), 실증 데이터 상한(1GiB) 유지.
@@ -455,10 +484,13 @@ testbed 저장소. 2026-11-06 신규 테스트베드 항목(9·10·12·13 워커
 - 📝 **T-SE 시험 흔적 정리**(사용자 확인 뒤) — `/cephfs-third/tse-w1`, `/cephfs-secondary/tse-w1-nsync`·`tse-w2*`, 레지스트리 `t4-gc:tse-w1`.
   w1 의 firewalld 는 꺼져 있지만 `--permanent` 포트 7개가 `/etc/firewalld/zones/public.xml` 에 남아 켜면 열린 채 시작한다(CHANGELOG
   「테스트베드 워커 EL9(T-SE)」).
+- 🔍 (testbed 저장소) **cp443 은퇴 태스크의 첫 실행 rc 2** — 2026-11-16 Traefik 전환 뒤 `make baseline ANSIBLE='ansible-playbook --limit k8s-cp1 --tags cp443'`
+  (cp1 sysctl `90-dms-envoy.conf`·nft `dms_testbed_cp443` 걷기)이 첫 실행에서 make rc 2 였고 재실행은 rc 0·changed 0 으로 수렴했다 — 원인 미확인. 결과
+  상태는 맞다(`make validate-dmsk8s`·`post-boot-check.sh` FAIL 0). 다시 돌릴 일이 있으면 첫 실행 로그를 남긴다(이 저장소의 세션은 testbed 를 고치지 않는다).
 
 ## 2. 의도적 보류 (결정 — "미구현"이 아님)
 
-- ⏸ **Prometheus/Grafana** — 포탈 대시보드로 대체(Envoy stats 도 꺼 둔다 — deploy/README §2g-2).
+- ⏸ **Prometheus/Grafana** — 포탈 대시보드로 대체(입구 Traefik 의 지표·접근 로그는 사이트 몫 — DMS 는 Traefik 을 바꾸지 않는다).
 - ⏸ **롤백 버튼** — 이력에서 옛 태그를 다시 골라 릴리스하는 것으로 갈음(deploy/README §5-1·§9). `kubectl rollout undo` 는 되돌림 수단이 아니다.
 - ⏸ **레지스트리 경로 접두 미지원** — `DMS_BUILD_REGISTRY` 는 `host:port` 만 된다: `registry` 모듈이 `http://{registry}/v2/{repo}/…` 로 URL 을
   만들고(`host:5000/k8s` 면 `/k8s/v2/…` 로 깨진다) `manifest_tags.image_registry` 는 첫 경로 조각만 레지스트리로 봐 `site_image` 가 늘 None(배지
@@ -599,15 +631,16 @@ testbed 저장소. 2026-11-06 신규 테스트베드 항목(9·10·12·13 워커
   로그·인증서 경고 무시 접속의 수동 도청이다. **x-admin-token 부트스트랩 경로는 평문 허용**(운영자 curl, 토큰 보유 = admin) — 봉인해 보내면
   그대로 받으므로 스크립트가 `seal_with_info` 를 쓰면 닫힌다(토큰의 상시성은 §1 「2026-11-06 … 후속」 5).
 - 📝 **원 IP 기록은 앞단 계약에 기댄다**(2026-11-03 — 원 IP 는 상한 키가 아니라 기록·경보 전용, X-Real-IP 무시, XFF 마지막 항목 → 피어)
-  - 앞단 계약(Envoy 가 X-Real-IP 를 지우고 PROXY 원 IP 를 XFF 끝에 덧붙임 — ⑥ 입구 묶음)이 깨지면 **기록된 IP 가 틀린다**. 막는 판정은 틀리지
-    않는다.
+  - 앞단 계약(입구 Traefik 이 `forwardedHeaders` 를 비운 채 클라이언트의 X-Forwarded-*·X-Real-Ip 를 지우고 원 IP 를 XFF 끝에 덧붙임 — 2026-11-16,
+    ARCHITECTURE §6 「입구의 원 IP 계약」; 그 전에는 Envoy 가 같은 일을 했다)이 깨지면 **기록된 IP 가 틀린다**. 막는 판정은 틀리지 않는다. 사이트가
+    Traefik `forwardedHeaders` 를 신뢰(trustedIPs·insecure)로 바꾸는 것이 그 대표다 — 감지 `traefik` 이 note 로 보인다.
   - 프록시 없이 직접 닿는 배치(port-forward)는 XFF 를 클라이언트가 심을 수 있다. 위조 IP 로 출발지 경보를 부풀려도 이벤트는 창당 50건까지이고
     (그 뒤 출발지는 기록 안 됨 — 전체 실패 경보가 규모를 요약), 정작 진짜 출발지 경보가 그 몫에 밀려 빠질 수 있다.
-  - `GATEWAY_PROXY_PROTOCOL=off` 사이트(2026-11-14 — LB 가 PROXY v2 를 못 붙인다, deploy/README §2g-4)에는 그 계약이 없어 앱이 사용자 원 IP 를
-    모른다. 접근 로그·보안 이벤트의 `client_ip` 는 LB(SE) 주소이고, 출발지 경보(`DMS_LOGIN_ALARM_SOURCE_FAILURES`)는 prod 렌더가 0(끔)으로
-    넣는다(`deploy/render.sh` — 고정 오버레이는 patch-config.yaml 에 직접 넣고, 없으면 렌더가 note 로 알린다). 전체 실패 경보와 아이디 기준
-    상한·거절은 그대로라 막는 판정은 바뀌지 않는다. 원 IP 는 LB 의 VS 로그에서 시각으로 맞출 뿐이라, 출발지 단위 조사가 필요하면 LB 로그 보존을
-    사이트에 요청한다 — 근본 해결은 PROXY v2 를 붙이는 LB(deploy/README §2g-4 의 컷오버)다.
+  - LB 가 PROXY v2 를 붙이지 않는 사이트(Traefik trustedIPs 를 두지 않는다 — 옛 `GATEWAY_PROXY_PROTOCOL=off` 모드는 2026-11-16 Envoy 와 함께 없앴다)
+    에서는 앱이 사용자 원 IP 를 모른다(LB 가 SNAT 하면). 접근 로그·보안 이벤트의 `client_ip` 는 LB(SE) 주소이고, 모든 사용자가 한 출발지로 묶이는
+    출발지 경보(`DMS_LOGIN_ALARM_SOURCE_FAILURES`)는 사이트가 patch-config 로 0(끔)을 넣는다 — 렌더가 더는 자동으로 넣지 않는다(`deploy/render.sh`
+    머리 주석 「입구」). 전체 실패 경보와 아이디 기준 상한·거절은 그대로라 막는 판정은 바뀌지 않는다. 원 IP 는 LB 의 VS 로그에서 시각으로 맞출 뿐이라,
+    출발지 단위 조사가 필요하면 LB 로그 보존을 사이트에 요청한다 — 근본 해결은 LB 의 PROXY v2 + Traefik trustedIPs(deploy/README §2g)다.
 - 📝 **비활성화는 세션 세대를 회전하지 않는다**(2026-11-03)
   - 비활성 계정의 세션은 요청마다 재검사로 401 이 되고, 그 요청에서 쿠키가 비워진다.
   - 그런데 비활성 기간에 한 번도 쓰이지 않은 쿠키는 다시 활성화하면 되살아난다(쿠키 수명 14일, starlette 기본 — 로그아웃도 같은 한계:

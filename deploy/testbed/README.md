@@ -16,7 +16,7 @@
 | NFS export(`/data/dms_shared`·`/data/k8s_pv`·빌드 소스 ro) | `docs/ARCHITECTURE.md` §5·§19.4·§22 · `README.md` 「Shared vs per-cluster」 |
 | CephFS `dmsfs:/k8s` 하위 트리·cephx·부팅 가드 | `docs/ARCHITECTURE.md` §13·§13.1·§13.2 |
 | pkg-01 PostgreSQL `dmsdb_k8s`(지금은 되돌림용 — §7) | `docs/ARCHITECTURE.md` §14 |
-| MetalLB·ingress-nginx(되돌림 입구)·호스트 VIP·릴레이·TLS CA·호스트 edge(haproxy)·`portal_edge` 스위치·cp1 :443 nft | `docs/ARCHITECTURE.md` §15.2~§15.5·§19.5 · `README.md` 「Portal edge」 |
+| 입구 Traefik(`roles/traefik`, `make traefik-dmsk8s`)·호스트 edge(haproxy)·`portal_edge` 스위치·MetalLB·ingress-nginx(되돌림 입구)·호스트 VIP·릴레이·TLS CA | `docs/ARCHITECTURE.md` §15.2~§15.5·§19.5·§19.7 · `README.md` 「Portal edge」 |
 | 빌드 소스 라우팅(`/home/mason/dms-dev/dms-k8s`, cron ff, worktree 금지) | `docs/ARCHITECTURE.md` §16 · `README.md` 「Build-source routing」 |
 | PV 스토리지·csi-driver-nfs·StorageClass `tb-*`·RBAC/PVC 픽스처·DMS 리더 SA | `docs/ARCHITECTURE.md` §22 · `README.md` 「PV storage」 |
 | 처음부터 재구축·호스트 재부팅·validate | `docs/ARCHITECTURE.md` §17·§18·§21 · `README.md` 「Rebuild from scratch」·「After a host reboot」·「Validation」 |
@@ -59,8 +59,9 @@ deploy/README 머리의 자리표시자가 이 테스트베드에서 무엇인�
 | `<ctx>` / `--site` | `dmsk8s` / `testbed-k8s` | `kube-context` |
 | `<REGISTRY>` | `10.112.0.50:5000` — in-cluster(`REGISTRY_CLUSTER_IP=10.112.0.50`·`REGISTRY_PORT=5000`, svc CIDR 10.112.0.0/12 하단), 평문 HTTP. 저장소 `/dms_shared/dms/registry` | `values.env` |
 | `<SHARED_DIR>` (+ `SHARED_DIR_ID`) | `/dms_shared` — 호스트 NFS `10.10.10.1:/data/dms_shared` 를 3노드가 fstab 으로(`lookupcache=positive`). id 는 `values.env` 의 `SHARED_DIR_ID` | `values.env` + `patch-config.yaml` 의 `DMS_ARTIFACT_BASE_URI`(둘이 같아야 한다 — §3) |
-| `<FQDN>` | `dms-k8s.local`(호스트 `/etc/hosts`) | testbed `group_vars/dmsk8s.yml` `portal_dns` |
-| `<VIP-A>` | `10.10.10.1:443` — 호스트 dmsbr0 주소 = 호스트 edge(배포판 haproxy, Avi VS-443 흉내: L4·`send-proxy-v2`·TCP 헬스체크·3600초). 외부 입구 `https://dms-k8s.local:8443`(LAN·Tailscale 주소의 :8443 — 같은 edge) | testbed `portal_edge_vip`, `README.md` 「Portal edge」 |
+| `<FQDN>` | `dms-k8s.local`(호스트 `/etc/hosts` → VIP-A). DMS 쪽은 `values.env` 의 `PORTAL_DOMAIN` — Ingress `dms/dms-portal-traefik` 의 host(2026-11-16 부터 고정 오버레이도 필수) | testbed `group_vars/dmsk8s.yml` `portal_dns` · `values.env` |
+| `<VIP-A>` | `10.10.10.1:443` — 호스트 dmsbr0 주소 = 호스트 edge(배포판 haproxy, Avi VS-443 흉내: L4·`send-proxy-v2`·TCP 헬스체크·3600초, 풀 = **노드 셋** :443 의 Traefik). 외부 입구 `https://dms-k8s.local:8443`(LAN·Tailscale 주소의 :8443 — 같은 edge). `values.env` 에 `PORTAL_VIP` 는 없다(고정 오버레이는 선택 — §4-10) | testbed `portal_edge_vip`, `README.md` 「Portal edge」 |
+| 입구 Traefik(DMS 는 설치·변경하지 않는다) | `kube-system/traefik` DaemonSet — rke2-traefik 모양(`docker.io/rancher/hardened-traefik:v3.7.4-build20260608`, 프로덕션과 같은 판). 노드 셋 hostPort 80 → web :8000·443 → websecure :8443(TLS), IngressClass `traefik`(기본 아님), websecure `proxyProtocol.trustedIPs` = `10.10.10.1/32`(호스트 edge = Avi SE 자리), forwardedHeaders 비움. cp1 의 taint 는 toleration 으로 넘는다(프로덕션 RKE2 마스터는 taint 가 없다) | testbed `roles/traefik`·`group_vars/dmsk8s.yml` 의 `traefik_*` |
 | (되돌림 입구) | MetalLB VIP `10.20.20.101` → ingress-nginx(testbed `portal_edge: ingress` — §7) | testbed `public_vip` · `patch-ingress.yaml`·`patch-metallb.yaml` |
 | `<마스터1..3>` | **`k8s-cp1` 10.10.10.20 한 대**(§10) | testbed 인벤토리 |
 | NoSchedule 없는 워커 | `k8s-w1` 10.10.10.21 · `k8s-w2` 10.10.10.22 | 〃 |
@@ -86,9 +87,9 @@ validate 가 확인). 인프라 전제 절의 `PORTAL_VIP=10.20.20.101 sh deploy
 |---|---|
 | `kustomization.yaml` | base(`deploy/k8s`) + `images`(dms·dms-agent 의 `newName`/`newTag`) + `patches`(아래 셋) + `replacements`(아티팩트 경로 — prod 와 같은 블록, 두 곳을 같이 고친다) |
 | `patch-config.yaml` | ConfigMap 사이트 값 — `DMS_JOB_IMAGE`·`DMS_BUILD_REGISTRY`·`DMS_BUILD_BUILDER_IMAGE`·`DMS_PRIVILEGED_REQUESTERS`·`DMS_ALLOW_PRIVILEGED_REQUESTERS`·`DMS_USER_ALLOWED_OPERATIONS`(`sync,rm` — scan 은 특권 운영자만)·`DMS_ACCOUNT_EMAIL_DOMAIN`·`DMS_ARTIFACT_BASE_URI` |
-| `values.env` | 플랫폼·애드온 층(레지스트리·DB·입구)의 **유일한 원천** + 앱 값(`SHARED_DIR`·`REGISTRY`)의 기록 |
+| `values.env` | 플랫폼·애드온 층(레지스트리·DB·입구)의 **유일한 원천** + 앱 값(`SHARED_DIR`·`REGISTRY`)의 기록. 입구 층(`platform/ingress`)의 값은 `PORTAL_DOMAIN`·`PORTAL_TLS_SECRET` 뿐이다(`INGRESS_CLASS`·`TRAEFIK_ENTRYPOINT` 는 기본 `traefik`·`websecure`) |
 | `kube-context` | `dmsk8s`(§1) |
-| `patch-ingress.yaml`·`patch-metallb.yaml` | 되돌림 입구(Ingress 호스트·MetalLB VIP `10.20.20.101`) — 소크 뒤 삭제(§7) |
+| `patch-ingress.yaml`·`patch-metallb.yaml` | 되돌림 입구(Ingress `dms-portal`(class nginx) 호스트·MetalLB VIP `10.20.20.101`) — 소크 뒤 삭제(§7). 입구 층의 Ingress `dms-portal-traefik` 과 이름이 달라 둘이 함께 있다 |
 
 - **고정 오버레이**: 값을 커밋한다(비밀이 아니다). prod 는 템플릿 오버레이(`REPLACE_*` 토큰)라 사이트의 values.env(커밋하지 않는다)로
   렌더한다. `sh deploy/render.sh testbed-k8s` 는 앱 오버레이를 그대로 복사하고 플랫폼·애드온 층만 values.env 로 낸다
@@ -104,8 +105,9 @@ validate 가 확인). 인프라 전제 절의 `PORTAL_VIP=10.20.20.101 sh deploy
 - **`SHARED_DIR_ID`** = `/dms_shared/dms/.dms-shared-id`(S0 가 쓴 센티널, `registry/.dms-registry-id` 와 같은 값). 레지스트리 init 이 대조한다 —
   공용 디렉터리를 새로 만들어 id 가 바뀌면 values.env 를 고쳐 커밋한다. 어긋나면 레지스트리가 「센티널 불일치」로 뜨지 않고 install.sh S4 가
   rollout 시간 초과로 멈춘다(deploy/README §2e-5 「저장소 이동」).
-- **축소 requests**(설계 v6 10 — cp1 여유가 작다): 레지스트리 50m/64Mi, PG 50m/256Mi·`shared_buffers` 64MB, Envoy 50m/128Mi. limits 는
-  base 그대로. PG CPU 는 T7 실측 뒤 100m → 50m 로 낮췄다(⑤ 뒤 워커마다 +200m 가 붙어 2노드 dscan gang 이 5m 모자라 Volcano 에서 대기했다 —
+- **축소 requests**(설계 v6 10 — cp1 여유가 작다): 레지스트리 50m/64Mi, PG 50m/256Mi·`shared_buffers` 64MB. limits 는
+  base 그대로. 옛 Envoy 50m/128Mi(`GATEWAY_ENVOY_*`)는 2026-11-16 입구와 함께 없어졌다 — 입구 Traefik 은 testbed IaC 가 깔고 requests 가
+  없다(차트 기본 `resources: {}`). PG CPU 는 T7 실측 뒤 100m → 50m 로 낮췄다(⑤ 뒤 워커마다 +200m 가 붙어 2노드 dscan gang 이 5m 모자라 Volcano 에서 대기했다 —
   `values.env` 주석).
 - **DB 배치**: `PG_PLACEMENT=all-nodes`(control-plane 이 cp1 하나라 인스턴스를 cp1·w1·w2 에 하나씩 — prod 는 늘 마스터마다 하나),
   `PG_BACKUP_KEEP=24`(호스트 `/data` 여유가 작다 — prod 기본 336).
@@ -122,7 +124,8 @@ validate 가 확인). 인프라 전제 절의 `PORTAL_VIP=10.20.20.101 sh deploy
 ## 4. 설치·재구축 순서
 
 **전제**: testbed 저장소에서 dmsk8s 인프라가 섰다 — `README.md` 「Rebuild from scratch」 0~2b(또는 `make all-dmsk8s`) 뒤 `make validate-dmsk8s`
-가 FAIL 0. 이 시점의 「portal TLS not issued yet」 INFO·edge 백엔드 DOWN INFO 는 정상이다(DMS 네임스페이스·Gateway 가 아직 없다).
+가 FAIL 0. 이 시점의 「portal TLS not issued yet」 INFO·「namespace dms absent」 INFO(edge 백엔드 DOWN 도 INFO, DMS Ingress·readyz 검사는
+건너뜀)는 정상이다(DMS 네임스페이스·Ingress 가 아직 없다 — Traefik 자체는 `all-dmsk8s` 의 `make traefik-dmsk8s` 가 이미 깔았다).
 **설치 호스트** = 개발 호스트(luminous — kubeconfig 에 `dmsk8s` 컨텍스트), 이 저장소의 dms-k8s 체크아웃. 프로덕션 판 전체 순서는 deploy/README §0-5.
 
 | # | 어디서 | 무엇 | 성공 판정 | 실패하면 |
@@ -134,7 +137,7 @@ validate 가 확인). 인프라 전제 절의 `PORTAL_VIP=10.20.20.101 sh deploy
 | 5 | 설치 호스트 | 시크릿(S2)·포탈 TLS | S2 `[OK] dms-secrets: 4키…`, `dms-portal-tls` 있음 | deploy/README §2f-2·§3b |
 | 6 | 설치 호스트 | `install.sh` 본 실행 | rc 0 `RESULT: PASS/WARN`, 또는 rc 10 PAUSE | 출력의 사유 줄 · deploy/README §2h |
 | 7 | k8s-w1 → 설치 호스트 | (PAUSE 때만) push·부트스트랩 빌드·태그 bump → `--stage S5` | S5 PASS 뒤 끝까지 | deploy/README §2e-4·§1 |
-| 8 | 호스트 | 입구 확인 | `host-edge.sh status` 의 백엔드 UP | testbed `README.md` 「After a host reboot」 표 |
+| 8 | 호스트·설치 호스트 | 입구 확인 | `host-edge.sh status` 의 백엔드 셋 UP, `ingress-probe.sh` 노드 셋 PASS | testbed `README.md` 「After a host reboot」 표 · §4-8 |
 | 9 | 포탈 | 첫 관리자·컨트롤 상태·시드·k8s 연동 | 로그인·Ready·동기화 성공 | deploy/README §6 |
 | 10 | 설치 호스트·호스트 | 최종 검증 | validate FAIL 0, S12 PASS | deploy/README §14 |
 
@@ -181,8 +184,10 @@ sh deploy/install.sh --context dmsk8s --site testbed-k8s --plan
 ```
 
 `RESULT: WARN`(rc 0)이 정상이다 — S1 의 `[WARN] control-plane 노드 1대 — prod 는 3대 … 테스트베드 1대는 정상`(`preflight-cluster.sh`) 하나뿐이어야
-한다. 감지 표에서 volcano 는 **C**(testbed IaC 가 설치한 v1.15.0 — 설치기가 건드리지 않는다), 이미 설치된 클러스터면 DMS 층들은 `D=`
-(2026-11-03 T9 실측 — CHANGELOG 「⑦ 설치기」). 다른 WARN·FAIL 은 deploy/README §2h 의 사유 표.
+한다. 감지 표에서 volcano 는 **C**(testbed IaC 가 설치한 v1.15.0 — 설치기가 건드리지 않는다), traefik 도 **C**(testbed IaC 가 설치한
+rke2-traefik 모양 — DMS 는 Traefik 을 설치·변경하지 않고 Ingress 하나만 만든다; 2026-11-16 실측 Ready 3, notes 에 `proxyProtocol.trustedIPs=10.10.10.1/32`·
+readTimeout 기본 60s), 이미 설치된 클러스터면 DMS 층들(입구 층 `ingress` 포함)은 `D=`(2026-11-03 T9 실측 — CHANGELOG 「⑦ 설치기」). S1 의
+preflight 「2. 입구」 는 IngressClass `traefik` PASS 와 「Traefik 파드 Ready 3/3」 INFO 다. 다른 WARN·FAIL 은 deploy/README §2h 의 사유 표.
 
 ### 4-5. 시크릿·포탈 TLS
 
@@ -214,7 +219,7 @@ sh deploy/install.sh --context dmsk8s --site testbed-k8s
 
 ```bash
 sudo dnf install -y podman                                           # 부트스트랩 빌드에만 필요 — testbed IaC 는 skopeo 만 깐다
-sh deploy/push-images.sh --registry 10.112.0.50:5000 --run           # lock 6줄(registry·buildah·CNPG·PG·EG·envoy) — RESULT: PASS
+sh deploy/push-images.sh --registry 10.112.0.50:5000 --run           # lock 4줄(registry·buildah·CNPG·PG — EG·envoy 줄은 2026-11-16 삭제) — RESULT: PASS
 REGISTRY=10.112.0.50:5000 TAG=<새 dN> ./deploy/docker/build-and-push.sh   # DMS 3종(dms-mpifileutils·dms·dms-agent), 세 태그 같게
 ```
 
@@ -228,15 +233,35 @@ REGISTRY=10.112.0.50:5000 TAG=<새 dN> ./deploy/docker/build-and-push.sh   # DMS
 
 ### 4-8. 입구 확인
 
-`dms-k8s.local` 은 호스트 edge → cp1 :443 의 Envoy 라, **Gateway 가 없으면 이름이 답하지 않는다**(edge 는 떠 있지만 백엔드
-DOWN 이라 연결을 끊는다). S8 의 마스터 sysctl 확인(비 root Envoy 의 443 bind — deploy/README §2g-2)이 보는 cp1 의 drop-in
-`/etc/sysctl.d/90-dms-envoy.conf` 와 cp1 :443 방화벽(edge 출발지만)은 testbed `roles/common` 이 둔다. S8 뒤:
+사용자 경로는 호스트 edge(haproxy — Avi VS-443 흉내, `send-proxy-v2`) → **노드 셋(cp1·w1·w2) :443 의 Traefik**(rke2-traefik 모양 — §2)
+→ DMS Ingress `dms/dms-portal-traefik`(host `dms-k8s.local`, 진입점 websecure 만) → dms-api 다. 2026-11-16 Envoy Gateway 입구를 폐기하고(병행
+없음) 앱 d27 과 함께 이 경로로 옮겼다(전환 순서·측정은 testbed `docs/ARCHITECTURE.md` §19.7, DMS 쪽 기록은 CHANGELOG). Traefik 은 DMS 가 깔지
+않는다 — testbed IaC 의 `make traefik-dmsk8s` 가 두고, 설치기 S8 「입구(Traefik)」 은 감지(traefik C — 건드리지 않음) → TLS 게이트 →
+`platform/ingress` SSA → `deploy/ingress-probe.sh`(Traefik 파드가 도는 노드마다 `--resolve dms-k8s.local:443:<노드>` readyz·인증서)다. Traefik 이
+뜨면 edge 백엔드는 TCP 체크로 UP 이지만 Ingress 가 없으면 `TRAEFIK DEFAULT CERT` + 404 다(DMS 라우트는 Host = 포탈 이름뿐). S8 뒤:
 
 ```bash
 bash ~/dms-dev/testbed/scripts/host-edge.sh status
-#   OK   dmsk8s backend k8s-cp1 10.10.10.20:443 UP (TCP check, PROXY v2)
+#   OK   dmsk8s backend k8s-cp1 10.10.10.20:443 UP (TCP check, PROXY v2)      — k8s-w1 10.10.10.21·k8s-w2 10.10.10.22 도 같은 줄
 curl -sS --cacert ~/dms-dev/testbed/files/tls/ca.crt https://dms-k8s.local/readyz
+sh deploy/ingress-probe.sh --context dmsk8s --domain dms-k8s.local --cacert ~/dms-dev/testbed/files/tls/ca.crt
+#   NODE k8s-cp1 PASS 10.10.10.20:443 readyz 200 · 인증서 OK(dms-k8s.local)   … w1·w2 도 PASS, 마지막 줄 RESULT: PASS
 ```
+
+- 설치 호스트가 노드 :443 에 PROXY 없이 직접 붙어도 Traefik 은 받는다 — 호스트(10.10.10.1)는 신뢰 출발지라 헤더가 없어도 받고, 다른 출발지의
+  PROXY 헤더는 읽고 버린다(원 IP 위조 불가). 그래서 노드 방화벽이 필요 없고, cp1 의 옛 nft :443 펜스와 Envoy port floor
+  (`/etc/sysctl.d/90-dms-envoy.conf`)는 은퇴했다(testbed `roles/common` 이 걷고 validate 가 부재를 단언 — `make baseline ANSIBLE='ansible-playbook
+  --limit k8s-cp1 --tags cp443'`).
+- hostPort 는 CRI-O 의 DNAT(PREROUTING → FORWARD)라 노드 `ss` 에 :443 이 보이지 않는다 — 리스너가 아니라 위 프로브로 본다.
+- 노드 :80 은 Traefik web 진입점이 404 로 답한다(DMS 라우터는 websecure 에만). edge 에는 80 이 없어 S12 6절은 「http://dms-k8s.local/ 응답 없음 —
+  80 VS 없음」 INFO 다(`verify.sh` 6절 판정: 응답 없음·404 = INFO, 200 = WARN — 평문 노출, router.entrypoints 어노테이션 확인).
+- ingress-probe 의 판정: 200 + 인증서 = PASS, 404 = FAIL(Traefik 이 Ingress 를 안 집었다 — ingressClassName·router.entrypoints·ns),
+  `TRAEFIK DEFAULT CERT` = FAIL(tls 시크릿·SNI), 연결 실패(000) = UNKNOWN(S8 은 WARN 후 계속 — S12 가 VIP 로 다시 본다). FAIL 노드는 `--timeout`(기본
+  30초, verify 안에서는 `INGRESS_PROBE_TIMEOUT` 기본 5초) 동안 다시 잰다. dms-api 가 아직 없으면 S8 은 `--tls-only`(인증서만)로 부른다.
+- Envoy 가 입구에서 하던 두 가지는 앱으로 옮겼다(d27): 요청 본문 상한 `DMS_MAX_REQUEST_BODY_BYTES`(기본 20MiB — 넘으면 413 `request_too_large`)와
+  uvicorn keep-alive `DMS_API_KEEP_ALIVE_SECONDS`(기본 120초 — Traefik 기본 idleConnTimeout 90초보다 길게). testbed-k8s 도 코드 기본 그대로다
+  (`patch-config.yaml`·base `20-config.yaml` 에 없다). 상한은 입구 경유뿐 아니라 클러스터 안 에이전트 요청에도 걸린다(k8s 동기화 결과 POST 만 자기
+  상한). 2026-11-16 실측: ≈21MiB POST → 413, ≈19MiB → 통과, 본문 있는 POST 40회를 5.5초 간격으로 → 502 0.
 
 그 전에 앱에 닿아야 하면 되돌림 경로로: `curl --cacert <CA> --resolve dms-k8s.local:443:10.20.20.101 https://dms-k8s.local/readyz`
 (MetalLB → ingress-nginx — testbed validate 가 늘 본다).
@@ -255,14 +280,18 @@ deploy/README §6 그대로, 값만 이 테스트베드의 것:
 ### 4-10. 최종 검증
 
 ```bash
-cd ~/dms-dev/testbed && make validate-dmsk8s        # FAIL 0 — 포탈 TLS(CA 검증)·edge 백엔드·PV 픽스처·리더 auth can-i 포함
+cd ~/dms-dev/testbed && make validate-dmsk8s        # FAIL 0 — 포탈 TLS(CA 검증)·edge 백엔드·Traefik·DMS Ingress·PV 픽스처·리더 auth can-i 포함
 cd <dms-k8s 체크아웃>
-PORTAL_DOMAIN=dms-k8s.local PORTAL_VIP=10.10.10.1 CACERT=$HOME/dms-dev/testbed/files/tls/ca.crt \
-  sh deploy/install.sh --context dmsk8s --site testbed-k8s --only S12
+CACERT=$HOME/dms-dev/testbed/files/tls/ca.crt sh deploy/install.sh --context dmsk8s --site testbed-k8s --only S12
 ```
 
-testbed-k8s 의 `values.env` 에는 `PORTAL_DOMAIN`·`PORTAL_VIP` 가 없어(넣을지는 BACKLOG) VIP 경유 readyz 를 보려면 env 로 준다(`verify.sh` 머리
-주석 — 없으면 그 검사만 건너뛴다).
+- `PORTAL_DOMAIN`(`dms-k8s.local`)은 2026-11-16 부터 testbed-k8s 의 `values.env` 에 있어 render.env 로 간다(Ingress host — 고정 오버레이도 필수).
+  `PORTAL_VIP` 는 없다(고정 오버레이는 선택) — 없으면 6절 readyz 는 `--resolve` 없이 이름으로 붙고, 호스트 `/etc/hosts` 가 그 이름을 VIP-A
+  (10.10.10.1)로 보내므로 같은 edge 를 지난다. 주소를 못 박으려면 `PORTAL_VIP=10.10.10.1` 을 env 로 더한다(`verify.sh` 머리 주석).
+- `CACERT` 를 빼면 6절 readyz 가 TLS 검증 실패(000)로 WARN 이 된다(입구 문제를 「Avi 미개통」으로 읽게 된다). ingress-probe 는 CA 없이도
+  인증서 이름을 openssl 로 본다.
+- 2026-11-16 실측(d27, 새 설치기): S12 PASS=17 WARN=0 FAIL=0 — 5절 Ingress `dms-portal-traefik`·ingress-probe 노드 셋 PASS, 6절 readyz 200
+  (`via https://dms-k8s.local`), http 80 「응답 없음 — 80 VS 없음」 INFO, 7절 감지 traefik C·ingress D=.
 
 ## 5. 시드·픽스처 값
 
@@ -391,7 +420,7 @@ testbed `make post-boot-check WAIT=900`(`README.md` 「After a host reboot」 �
 |---|---|---|---|
 | 옛 아티팩트 base `/cephfs/dms/artifacts`(CephFS — d17 까지 라이브 hostPath `/cephfs`) | T3(2026-11-03, d18) 전환은 **복사**였다(CHANGELOG ③). 옛 잡 산출물의 원본 | 아래 7-1 — 지금은 사실상 되돌림 경로가 아니다 | 사용자 결정(BACKLOG 「옛 base `/cephfs/dms/artifacts` 의 보존 기한·삭제 시점」) |
 | pkg-01 외부 PG `dmsdb_k8s`/`dmsapp_k8s` + 시크릿 `dms-secrets-prev`(T7 이관 전 URL) | T7(2026-11-03) 이관은 원본을 건드리지 않았다(CHANGELOG ⑤) | 7-2 | 사용자 결정(BACKLOG 「pkg-01 외부 PG(`dmsdb_k8s`) 정리 시점」) |
-| 되돌림 입구: MetalLB VIP `10.20.20.101` → ingress-nginx(오버레이 `patch-ingress.yaml`·`patch-metallb.yaml` + testbed IaC) | 2026-11-04 입구 영구 컷오버(호스트 edge → Envoy)의 소크 동안 | 7-3 | 소크 뒤(별도 결정 — BACKLOG ⑥ 「소크 뒤 Ingress·MetalLB 삭제」) |
+| 되돌림 입구: MetalLB VIP `10.20.20.101` → ingress-nginx(오버레이 `patch-ingress.yaml`·`patch-metallb.yaml` + testbed IaC) | 2026-11-04 입구 영구 컷오버(호스트 edge — 그때 뒤는 Envoy)의 소크 동안. 2026-11-16 edge 뒤를 Traefik 으로 바꾼 뒤에도 그대로 둔다 | 7-3 | 소크 뒤(별도 결정 — BACKLOG ⑥ 「소크 뒤 Ingress·MetalLB 삭제」) |
 | k8s-cp1 containers-storage 의 레지스트리 자기 이미지(손 반입·고정) | 레지스트리가 자기 이미지를 자기에게서 받을 수 없다 | cp1 재생성 때 §4-2 | 지우지 않는다 |
 
 ### 7-1. 옛 base 로 되돌리기 — 지금은 권하지 않는다
@@ -419,8 +448,11 @@ testbed `make post-boot-check WAIT=900`(`README.md` 「After a host reboot」 �
 ### 7-3. 입구를 ingress 로 되돌리기
 
 testbed `group_vars/dmsk8s.yml` 의 `portal_edge: ingress` + `make host-net host-hosts host-edge`(DNAT 먼저 → 이름 → frontend 제거 — 세 스크립트가
-틀린 순서를 거부한다). 앞으로는 `portal_edge: gateway` + `make host-edge host-net host-hosts`. 상세·검증: testbed `docs/ARCHITECTURE.md`
-§15.3·§15.5·§19.5, `README.md` 「Portal edge」. 확인: `curl --cacert <CA> --resolve dms-k8s.local:443:10.20.20.101 https://dms-k8s.local/` 200.
+틀린 순서를 거부한다). edge 로 다시 갈 때는 `portal_edge: traefik` + `make host-edge host-net host-hosts`(노드에 Traefik 이 떠 있어야 한다 — 가드
+`host-edge.sh ready`). 옛 값 `gateway` 는 은퇴했다(testbed `tbinfo.py` 가 이유와 함께 거부) — **Envoy 입구로의 되돌림은 없다**(DMS 쪽 입구 층은
+aa26bbce 가 지웠고, 라이브의 DMS Envoy·`envoy-gateway-system`·EG CRD·DMS 가 깐 Gateway API CRD 는 2026-11-16 정리했다. PriorityClass
+`dms-addon-critical` 은 CNPG 오퍼레이터가 써서 남는다). 상세·검증: testbed `docs/ARCHITECTURE.md` §15.3·§15.5·§19.5·§19.7, `README.md`
+「Portal edge」. 확인: `curl --cacert <CA> --resolve dms-k8s.local:443:10.20.20.101 https://dms-k8s.local/` 200.
 
 **소크 뒤 삭제할 때 DMS 쪽 할 일**: 오버레이에서 `patch-ingress.yaml`·`patch-metallb.yaml` 을 빼고 base 의 Ingress·MetalLB 풀을 지우는 패치(prod 의
 `deploy/overlays/prod/patch-remove-ingress.yaml` 모양)를 싣고, `tests/test_testbed_k8s_overlay.py` 의 `K8S_VIP`·`K8S_HOST` 단언을 같이 바꾼다. 그때
@@ -494,7 +526,8 @@ testbed IaC 가 dmsk8s 의 ingress-nginx·MetalLB 를 걷고 되돌림 경로는
 | 로컬 풀스택 e2e(`cd frontend && npm run test:e2e`) | 이미지 빌드 전 | deploy/README §8 「이미지 빌드 전 게이트」 — 수기, CI 없음 |
 | `make validate-dmsk8s` · `make post-boot-check`(testbed 저장소) | 인프라 변경·재부팅 뒤 | edge·PV 픽스처·리더 `auth can-i`·빌드 소스 마운트까지(testbed `README.md` 「Validation」) |
 | `kubectl --context dmsk8s get nodes -o wide` · `sh deploy/preflight-cluster.sh --context dmsk8s` | 언제든(읽기 전용) | 노드 3대 Ready, control-plane 1대 WARN 은 정상 |
-| `install.sh --only S12`(§4-10 의 env 와 함께) | 설치·업그레이드 뒤 | 클러스터를 순수하게 읽기만 하려면 `VERIFY_NO_PROBES=1`(파드를 띄우는 검사 생략) |
+| `install.sh --only S12`(§4-10 의 env 와 함께) | 설치·업그레이드 뒤 | 클러스터를 순수하게 읽기만 하려면 `VERIFY_NO_PROBES=1`(파드를 띄우는 검사 생략 — ingress-probe 는 HTTPS GET 뿐이라 그대로 돈다) |
+| `sh deploy/ingress-probe.sh --context dmsk8s --domain dms-k8s.local --cacert <CA>` | 입구를 의심할 때(읽기 전용 — kubectl 은 get 만, 파드를 띄우지 않는다) | 노드마다 `NODE <이름> PASS\|FAIL\|UNKNOWN <근거>`, 마지막 `RESULT:`. 종료 0 PASS · 1 FAIL · 4 UNKNOWN · 2 사용법. 판정은 §4-8 |
 | `python3 deploy/shared-storage-probe.py --context dmsk8s --overlay deploy/overlays/testbed-k8s` | 공용 디렉터리를 바꾼 뒤(S7 과 같은 검사) | testbed-k8s 는 렌더 단계 없는 고정 오버레이라 그 디렉터리에서 dms 이미지(newTag)를, 커밋된 `values.env` 에서 `SHARED_DIR` 를 읽는다. prod 형태(렌더 디렉터리 + `--shared-dir`)는 deploy/README §2d-3 |
 | 가짜 Knox 릴레이 `tests/fake_knox_relay.py` | 메일 경로를 실검증할 때만 | 아래 |
 | LDAP 0건 확인(선택 — 렌더 0건은 `tests/test_testbed_k8s_overlay.py` 가 고정) | 설정을 다른 라인에서 가져왔을 때 | 아래 |
@@ -526,13 +559,14 @@ kubectl --context dmsk8s -n dms get ds dms-agent -o jsonpath='{.spec.template.sp
 
 | 항목 | 테스트베드 | 프로덕션 | 뜻 |
 |---|---|---|---|
-| control-plane | k8s-cp1 **1대** | 마스터 3대 | S1 WARN 이 정상, PG anti-affinity 를 `all-nodes` 로 피함, Envoy·레지스트리가 한 노드 — 입구·레지스트리 HA 가 시험되지 않는다 |
+| control-plane | k8s-cp1 **1대** | 마스터 3대 | S1 WARN 이 정상, PG anti-affinity 를 `all-nodes` 로 피함, 레지스트리가 한 노드 — 레지스트리 HA 가 시험되지 않는다(입구는 2026-11-16 부터 노드 셋 모두 Traefik — edge 풀 3) |
 | 제어면 배치 | api·controller 가 워커(§3) | 마스터(`patch-placement.yaml`) | 메일·k8s 연동 호출의 출발 IP, 노드 사망 때 복귀 수치가 다르다 |
-| L4 입구 | 호스트 haproxy(Avi VS-443 흉내, 풀 = cp1) | Avi VS-443(VIP-A, 풀 = 마스터 3대) | 헬스 모니터·유휴 타임아웃·PROXY v2 동작만 흉내 낸다 |
-| 노드 방화벽 | cp1 :443 만 edge 출발지(nft `dms-testbed-cp443`), :19002·:19003 은 다른 노드에서도 열림. 워커 firewalld 꺼짐 | 마스터 방화벽(deploy/README §0-3·§2g-2), RHEL firewalld 기본 zone 주의 | 방화벽 규칙의 실수는 여기서 드러나지 않는다 |
+| L4 입구 | 호스트 haproxy(Avi VS-443 흉내, PROXY v2, 풀 = 노드 셋 :443 의 Traefik). 출발지 하나(10.10.10.1) | Avi VS-443(VIP-A, PROXY v2, 풀 = Traefik 이 도는 노드 :443 — RKE2 rke2-traefik 은 모든 노드). 출발지 = SE 들(`<SE 주소>`) | 헬스 모니터·유휴 타임아웃·PROXY v2 동작만 흉내 낸다. SE 가 여럿인 출발지를 trustedIPs 에 빠짐없이 넣었는지는 사이트에서 따로 확인한다(빠진 SE 를 지난 연결은 PROXY 바이트가 TLS 앞에 붙어 깨진다) |
+| Traefik | testbed IaC 가 깐 rke2-traefik 모양(같은 판, 차트 렌더 args 순서 그대로 — 이름은 `traefik`), trustedIPs 는 IaC 템플릿 값 | RKE2 `rke2-traefik`(Helm) — 정적 설정(websecure `proxyProtocol.trustedIPs`·타임아웃)은 사이트가 Rancher chartValues / HelmChartConfig 로 넣는다 | DMS 감지는 이미지 이름으로 찾아 둘이 같다. chartValues·HelmChartConfig 로 값을 넣는 경로와 그때의 롤링은 여기서 시험되지 않는다 |
+| 노드 방화벽 | 없음 — cp1 nft :443 펜스(`dms-testbed-cp443`)는 2026-11-16 은퇴. 워커 firewalld 꺼짐 | 사이트 방화벽(deploy/README §0-3), RHEL firewalld 기본 zone 주의 | 방화벽 규칙의 실수는 여기서 드러나지 않는다. Traefik hostPort 는 CRI-O DNAT(PREROUTING → FORWARD)라 노드 :443 을 SE 대역으로 좁히는 INPUT 규칙은 그 트래픽을 보지 못한다(testbed `docs/ARCHITECTURE.md` §15.2) — 원 IP 위조 방지는 trustedIPs 가 한다 |
 | SELinux | 워커 permissive(Rocky 9.6) | permissive 전제(deploy/README §2h S2b — enforcing 실측: 스토리지 전부 Missing) | 같다. enforcing 근거는 이 테스트베드의 T-SE 실측이다 |
 | 노드 OS | cp1 Ubuntu 24.04 + 워커 Rocky 9.6 혼합 | 사이트 RHEL 계열 | 패키지 경로가 다르다(아래 skopeo 메모) |
-| 노드 크기 | 워커 2 vCPU/3GiB, cp1 2 vCPU/4GiB | 설계 가정 8 vCPU/32GB 예 | requests 축소(§3), 잡이 노드당 1코어(§6-3). cp1 2.5GiB 는 EG·GW API CRD 뒤 apiserver RSS ≈1GB 로 MemoryPressure → 4GiB(T8, deploy/README §2g-6 「마스터 메모리 예산」) |
+| 노드 크기 | 워커 2 vCPU/3GiB, cp1 2 vCPU/4GiB | 설계 가정 8 vCPU/32GB 예 | requests 축소(§3), 잡이 노드당 1코어(§6-3). cp1 2.5GiB 는 EG·GW API CRD 뒤 apiserver RSS ≈1GB 로 MemoryPressure → 4GiB(T8 — 2026-11-16 그 CRD 들을 걷은 뒤에도 4GiB 그대로) |
 | 실측 수치 | NFS 공용 스토리지·VM 3대(fsync 비교는 둘 다 같은 호스트 디스크 — fdatasync 328 대 319 ops/s) | 사이트 스토리지·네트워크 | deploy/README 의 「테스트베드 실측」 수치(장애조치 시간·롤링 공백·fsync)는 프로덕션을 대표하지 않는다 |
 | Volcano | testbed IaC 설치(v1.15.0) — 감지 **C**, 설치기가 건드리지 않음 | 클러스터 운영자가 선설치 | `images.lock` 에 Volcano 줄은 없다. 생기면 설치기는 C 일 때 S5 push·대조에서 뺀다(`install.sh` `lock_skips`); 손 `images-lock.py compare-registry` 는 `--skip` 을 직접 준다 |
 | 메일 | stub | knox_relay 필수(deploy/README §6-2) | 가입 인증 메일이 신원 증명이 아니다 — 테스트베드에서만 허용 |
@@ -566,7 +600,7 @@ deploy/README 부록 Z.
 | §2d-5 k8s 테스트베드 — 지금 배치·T3 전환 명령·음성 대조·되돌림 | §2·§3·§4-1·§7-1(전환·음성 대조 기록은 CHANGELOG ③) |
 | §2e-6 k8s 테스트베드 — T4·앱 전환 | §2·§3·§4-2·§7-4(CHANGELOG ④) |
 | §2f-8 k8s 테스트베드 — T6·T6'·T7·용량·걷어내기 | §3·§7-2(CHANGELOG ⑤) |
-| §2g-7 k8s 테스트베드 — 호스트 edge·스위치·T8·컷오버 | §2·§4-8·§7-3·§10 + testbed `README.md` 「Portal edge」·`docs/ARCHITECTURE.md` §15.5·§19.5(CHANGELOG ⑥·「테스트베드 정식 구축」) |
+| §2g-7 k8s 테스트베드 — 호스트 edge·스위치·T8·컷오버 | §2·§4-8·§7-3·§10 + testbed `README.md` 「Portal edge」·`docs/ARCHITECTURE.md` §15.5·§19.5(CHANGELOG ⑥·「테스트베드 정식 구축」). 2026-11-16 Traefik 교체는 §19.7 |
 | §3·§3b 의 테스트베드 명령(raw apply·손 시크릿) | §4-5(시크릿은 설치기 S2) · 규칙은 deploy/README §3·§3b |
 | §4·5 오버레이 적용 | §6-2 |
 | §6 시드의 테스트베드 값 | §5 |
@@ -590,7 +624,8 @@ deploy/README 부록 Z.
 - `README.md` 「Then the DMS application」: 옛 DMS README §1·§2·§3/§3b·§4/§5·§6·§8-0·§10-7·§13-2 를 가리킨다 — dmsk8s 의 순서는 이 문서 §4 다.
   그 목록 3 의 dmsk8s DB URL(`postgresql://dmsapp_k8s:…@10.10.10.30:5432/dmsdb_k8s`)은 T7 전 값이다(지금 시크릿은 설치기 S2 가 CNPG URL 로 만든다).
   목록 2 의 「Shared-FS layout(DMS README §2)」는 dmsk8s 에서 데이터 root·픽스처만이다(DMS 상태는 `/dms_shared` S0 — §4-1).
-- `docs/ARCHITECTURE.md` §17 5단계: 「아래 절 번호는 dms-ssc 판 기준」이라면서 dms-k8s 판 번호(§13-6b·§2e-4)를 섞어 쓴다. §2g-7·§13-6b·§2e-6
-  참조는 이 문서(§7·§4-8·§7-4)로.
-- `group_vars/dmsk8s.yml` 의 「§2g-7」 주석 → 이 문서 §7-3.
-- 같은 주제의 일반 절(§1·§2e-4·§2e-5·§2g-2·§2g-3·§2g-4·§10-7)을 가리키는 참조는 번호가 유지돼 그대로 맞다.
+- `docs/ARCHITECTURE.md` §17 5단계: 「아래 절 번호는 dms-ssc 판 기준」이라면서 dms-k8s 판 번호(§2e-4·§2g)를 섞어 쓴다(옛 §13-6b 는 2026-11-16
+  판에서 §2g 「입구(Traefik)」 로 바뀌었다). §19.6 의 §2e-6 참조는 이 문서 §7-4 로.
+- (해소) `group_vars/dmsk8s.yml` 의 「§2g-7」 주석은 2026-11-16 Traefik 교체 판에서 없어졌다.
+- 같은 주제의 일반 절(§1·§2e-4·§2e-5·§10-7)을 가리키는 참조는 번호가 유지돼 그대로 맞다. 옛 §2g-2·§2g-3·§2g-4(Envoy 입구)는 2026-11-16 입구
+  교체로 §2g 「입구(Traefik)」 아래 다시 썼다(하위 번호는 주제가 바뀌었다 — 옛 하위 번호의 대응은 deploy/README 부록 Z). testbed 저장소는 이제 하위 번호 없이 §2g 만 가리킨다.
