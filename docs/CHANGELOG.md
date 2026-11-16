@@ -150,7 +150,7 @@ KST 프리셋(매일·매주 요일·매월 N일(없는 달은 말일)·N시간�
   | 건너뛰기 | 확인 대기 중 06:06 회차 → skipped `batch_schedule_awaiting_confirm`, 스케줄은 켜진 채 다음 = 내일 |
   | 스토리지 가드 | 활성 rm 배치가 쓰는 `cephfs-dms` 경로 변경 → 409 `storage_in_use`(값 그대로) |
   | 배치 단위 삭제 | 배치·자식·스케줄 삭제 + `batch_schedule/delete` 감사(deleted_with_batch, run_count) |
-- **검증**: 백엔드 3942+ passed(최종 8516568 전체 실행은 아래 수치), vitest 1642, tsc·tsc e2e, e2e 30(07·11·12 확인 창
+- **검증**: 백엔드 3961 passed·31 skipped(최종 8516568 전체), vitest 1642, tsc·tsc e2e, e2e 30(최종 f95a426 — 07·11·12 확인 창
   view=all·E15 스케줄러 포함), dist 외부 URL 0, PG 16: 새 SQL 이 닿는 테스트 10파일 통과(실패 3건은 sqlite_master·PRAGMA 테스트
   전용 가정), 경합(같은 슬롯 이중 발사·발사 대 삭제·끄기·경로 변경) 위반·교착 0.
 - 남는 것(BACKLOG): 자동 확인 동의가 스토리지 경로에 묶이지 않음(우선), 스토리지 경로 API 가 공유 토큰에 열림, 잠금 없는 다른
