@@ -9,7 +9,8 @@ import { ApiError, reasonText } from "../../lib/api";
 import { kstStampBare, untilText } from "../../lib/datetime";
 import { useNow } from "../../lib/useNow";
 import {
-  isDestructiveBatch, outcomeLabel, outcomeTone, scheduleEnabled, scheduleSummary,
+  SCHEDULE_DELETE_HINT, isDestructiveBatch, keepRoundsNotice, outcomeLabel, outcomeTone, projectedChildrenWarning, pruneParts,
+  scheduleEnabled, scheduleSummary,
 } from "../../lib/batchSchedule";
 import { storageText } from "../../lib/batchStorage";
 import type { BatchSchedule } from "../../lib/types";
@@ -54,6 +55,21 @@ function LastResult({ s }: { s: BatchSchedule }) {
     <span className={`block whitespace-nowrap ${outcomeTone(s.last_outcome)}`}>{outcomeLabel(s.last_outcome)}</span>
     {s.last_reason_code !== null && <span className="block text-xs">{reasonText(s.last_reason_code)}</span>}
     {s.last_run_at !== null && <span className="block text-xs text-muted tabular-nums">{kstStampBare(s.last_run_at)}</span>}
+  </>);
+}
+
+// 「정리」 칸 — 회차 보존 정리 누적 / 마지막 시각 두 줄(LastResult 와 같은 모양). null = 아직 정리 없음(0 과 다르다). 둘째 줄
+// 「마지막 <시각>」 전체가 한 덩어리(whitespace-nowrap)라 하이픈에서도(「마지막 2026-11-」/「16 21:42:00」), 「마지막」과 시각 사이
+// 공백에서도 꺾이지 않는다(dms-k8s d29·d30 실증: 390 에서 세 줄). 칸은 Table 래퍼의 가로 스크롤 안이라 문서 넘침은 없고, 칸의
+// break-keep 이 첫 줄의 어절 중간 꺾임을 막는다.
+function PruneResult({ s }: { s: BatchSchedule }) {
+  const p = pruneParts(s);
+  if (p === null) return <span className="text-muted">아직 정리 없음</span>;
+  return (<>
+    <span className="block">{p.total}</span>
+    {p.at !== null && (
+      <span className="block whitespace-nowrap text-muted">마지막 <span className="tabular-nums">{p.at}</span></span>
+    )}
   </>);
 }
 
@@ -122,6 +138,8 @@ export function BatchSchedulesPage() {
   const [armedId, setArmedId] = useState<string | null>(null);
 
   const rows = q.data ?? [];
+  // 회차 보존 수는 서버 설정이라 행마다 같다 — 첫 행의 값을 쓴다(행이 없거나 옛 서버면 숫자 없는 안내).
+  const keepNotice = keepRoundsNotice(rows[0]?.keep_rounds);
   const scheduledBatchIds = useMemo(() => new Set((q.data ?? []).map((s) => s.batch_id)), [q.data]);
 
   // ?batch=<id>(배치 상세의 「스케줄 추가」 링크): 목록이 도착한 뒤 한 번 처리한다 — 그 배치에 스케줄이 있으면 그 스케줄의
@@ -171,13 +189,17 @@ export function BatchSchedulesPage() {
                              trigger={<Button disabled={!canArm} title={canArm ? undefined : LOCKED_HINT}>스케줄 추가</Button>} />
       </div>
       <InfoPanel>
-        <ul className="list-disc space-y-1 pl-5">
+        {/* break-keep: 한국어 안내가 375·390 폭에서 「재/실행」「최근 10/회차만」처럼 어절 중간에서 꺾이지 않게(저장소 관례). */}
+        <ul className="list-disc space-y-1 pl-5 break-keep">
           <li>정해진 한국시간(KST)에 배치를 <span className="font-medium">「전체 재실행」</span>합니다 — 배치당 스케줄 하나.</li>
           <li>그 시각에 배치가 진행 중이면 그 회차는 건너뛰고 기록합니다(밀린 회차를 몰아서 실행하지 않습니다).</li>
           <li>sync·rm 은 회차마다 미리보기 → 「배치 확인」을 거칩니다(미리보기 후 자동 실행 배치는 자동). 확인 대기 중에는 이후
             회차도 건너뜁니다.</li>
           <li>만들거나 켠 관리자가 root 실행 자격을 잃거나, 대상 스토리지의 경로가 바뀌거나 스토리지가 없어지거나, 삭제
             배치(rm, delete 옵션 sync)의 대상·옵션이 바뀌면 자동으로 일시정지됩니다 — 다시 켤 때 확인합니다.</li>
+          {/* 회차 보존(2026-11-16 사용자 결정 「최근 10회차만 누적」) — 보존 수는 서버 keep_rounds(행이 없으면 숫자 없이). */}
+          <li>{keepNotice ?? "스케줄이 있는 배치는 최근 회차만 보존하고 오래된 회차의 작업을 자동으로 정리합니다."}
+            {" "}항목 수 × 보존 회차가 배치 단위 삭제 상한을 넘으면 경고합니다.</li>
         </ul>
         {!canArm && me.data !== undefined && (
           <p className="mt-2 text-muted">{`스케줄 추가·수정·켜기는 ${LOCKED_HINT} — 끄기·삭제는 모든 관리자가 할 수 있습니다.`}</p>
@@ -198,7 +220,7 @@ export function BatchSchedulesPage() {
           <thead><tr className="text-muted whitespace-nowrap">
             <th className="py-2 pr-2">배치</th><th className="pr-2">작업</th><th className="pr-2">대상 스토리지</th>
             <th className="pr-2">주기</th><th className="pr-2">다음 실행(KST)</th><th className="pr-2">마지막 결과</th>
-            <th className="pr-2">사용</th><th className="pr-2">소유</th><th>관리</th>
+            <th className="pr-2">정리</th><th className="pr-2">사용</th><th className="pr-2">소유</th><th>관리</th>
           </tr></thead>
           <tbody>
             {rows.map((s) => {
@@ -208,6 +230,9 @@ export function BatchSchedulesPage() {
               const label = labelOf(s);
               // 켜기는 특권 게이트라 자격이 없으면 잠근다. 끄기(이미 켜진 행)는 관리자면 된다.
               const lockOn = !on && !canArm;
+              // 「항목 × K > 상한」 — 보존 회차를 다 채우면 정리 뒤에도 배치 단위로 지울 수 없다(서버 child_count_limit 이
+              // 없으면 말하지 않는다 — 상한을 지어내지 않는다).
+              const childWarn = projectedChildrenWarning(s.batch?.item_count, s.keep_rounds, s.child_count_limit);
               return (
                 <tr key={s.schedule_id} className="border-t border-black/5 align-top">
                   {/* 최소 폭: 표가 좁아지면 긴 배치 이름 열이 한 글자 폭으로 접혀 세로로 늘어선다(실측) — JobsList 대상 열 관례. */}
@@ -215,6 +240,7 @@ export function BatchSchedulesPage() {
                     {s.batch === null
                       ? <span className="text-muted">{`기록 없음 ${s.batch_id.slice(0, 12)}`}</span>
                       : <Link className="text-accent [overflow-wrap:anywhere]" to={`/admin/batches/${s.batch_id}`}>{label}</Link>}
+                    {childWarn !== null && <span role="note" className="block break-keep text-xs text-attn">{childWarn}</span>}
                   </td>
                   <td className="py-2 pr-2 whitespace-nowrap">{s.batch?.operation ?? "—"}{s.batch?.auto_confirm === true && (
                     <span className={`ml-1 text-xs ${s.batch.operation === "rm" ? "text-bad" : "text-accent"}`}
@@ -227,6 +253,10 @@ export function BatchSchedulesPage() {
                     {on && s.next_run_at !== null ? <NextRun iso={s.next_run_at} /> : "—"}
                   </td>
                   <td className="py-2 pr-2 min-w-[8rem]"><LastResult s={s} /></td>
+                  {/* 회차 보존 정리 결과(null = 아직 없음 — 0 과 다르다). 375·390 폭은 Table 래퍼의 가로 스크롤 안이다. */}
+                  <td className="py-2 pr-2 min-w-[7rem] text-xs break-keep" title={keepNotice ?? undefined}>
+                    <PruneResult s={s} />
+                  </td>
                   <td className="py-2 pr-2">
                     <input type="checkbox" className={BOX} aria-label={`${label} 사용`}
                            data-schedule-toggle={s.schedule_id}
@@ -247,9 +277,9 @@ export function BatchSchedulesPage() {
                                                             title={canArm ? undefined : LOCKED_HINT}>수정</Button>} />
                       <BatchScheduleRunsDialog scheduleId={s.schedule_id} label={label} />
                       {armedId === s.schedule_id
-                        ? <Button aria-label={`${label} 삭제 확인`} disabled={del.isPending}
+                        ? <Button aria-label={`${label} 삭제 확인`} disabled={del.isPending} title={SCHEDULE_DELETE_HINT}
                                   onClick={() => del.mutate(s.schedule_id, { onSettled: () => setArmedId(null) })}>삭제 확인</Button>
-                        : <Button variant="ghost" aria-label={`${label} 삭제`}
+                        : <Button variant="ghost" aria-label={`${label} 삭제`} title={SCHEDULE_DELETE_HINT}
                                   onClick={() => { del.reset(); setArmedId(s.schedule_id); }}>삭제</Button>}
                     </div>
                   </td>

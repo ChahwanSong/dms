@@ -2860,6 +2860,20 @@ test("스케줄이 있으면 머리 링크 줄에 「반복 실행: 주기 · �
   expect(screen.queryByRole("link", { name: "스케줄 추가" })).toBeNull();
 });
 
+test("링크 아래 회차 보존 안내 — 서버 keep_rounds 가 숫자일 때만(옛 서버면 말하지 않는다)", async () => {
+  const { unmount } = renderFx(batch({ status: "Completed", operation: "scan", items: [], item_count: 0,
+                                       schedule: { ...SCHED, keep_rounds: 10, pruned_total: 3,
+                                                   pruned_at: "2026-11-16T09:00:00Z" } }));
+  const line = await screen.findByText("최근 10회차만 보존 — 전체 재실행하면 가장 오래된 회차가 정리될 수 있습니다");
+  // 링크 밖(링크 이름에 섞이지 않는다) · 어절 중간에서 꺾이지 않게 break-keep
+  expect(screen.getByRole("link", { name: /^반복 실행/ })).not.toHaveTextContent(/회차만 보존/);
+  expect(line.className).toContain("break-keep");
+  unmount();
+  renderFx(batch({ status: "Completed", operation: "scan", items: [], item_count: 0, schedule: SCHED }));
+  await screen.findByRole("link", { name: /^반복 실행/ });
+  expect(screen.queryByText(/회차만 보존/)).toBeNull();
+});
+
 test("꺼진 스케줄은 「반복 실행(꺼짐) … 다음 —」, 자동 일시정지는 사유를 title 로", async () => {
   const { unmount } = renderFx(batch({ status: "Completed", operation: "scan", items: [], item_count: 0,
                                        schedule: { ...SCHED, enabled: false, next_run_at: null } }));
@@ -2890,16 +2904,17 @@ test("스케줄이 없으면(null) scan·sync·rm 은 「스케줄 추가」 —
   expect(screen.queryByRole("link", { name: "스케줄 추가" })).toBeNull();
 });
 
-test("배치 삭제 확인 창: 스케줄이 있으면 「이 배치의 스케줄도 함께 삭제됩니다.」, 없으면 말하지 않는다", async () => {
+test("배치 삭제 확인 창: 스케줄이 있으면 스케줄·실행 기록·보존 회차 기록도 함께 지워진다고 말한다, 없으면 말하지 않는다", async () => {
   const { unmount } = renderFx(batch({ status: "Completed", operation: "scan", schedule: SCHED }));
   await userEvent.click(await screen.findByRole("button", { name: "배치 삭제" }));
   expect(within(await screen.findByRole("dialog", { name: "배치 삭제" }))
-    .getByText("이 배치의 스케줄도 함께 삭제됩니다.")).toBeInTheDocument();
+    .getByText("이 배치의 스케줄(매일 02:00 (KST) · 사용 중)과 실행 기록·보존 회차 기록도 함께 삭제됩니다(감사 기록은 남습니다)."))
+    .toBeInTheDocument();
   unmount();
   renderFx(batch({ status: "Completed", operation: "scan", schedule: null }));
   await userEvent.click(await screen.findByRole("button", { name: "배치 삭제" }));
   const dlg = await screen.findByRole("dialog", { name: "배치 삭제" });
-  expect(within(dlg).queryByText("이 배치의 스케줄도 함께 삭제됩니다.")).toBeNull();
+  expect(within(dlg).queryByText(/이 배치의 스케줄/)).toBeNull();
 });
 
 test("반복 스케줄이 켜진 진행 중 배치의 취소: 이번 회차만 멈춘다고 말한다(버튼 title + 한 줄) — 꺼진 스케줄은 말하지 않는다", async () => {

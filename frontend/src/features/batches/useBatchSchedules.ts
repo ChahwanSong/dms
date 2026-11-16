@@ -1,6 +1,6 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { apiGet, apiSend } from "../../lib/api";
-import type { Batch, BatchSchedule, BatchScheduleRun } from "../../lib/types";
+import type { Batch, BatchSchedule, BatchScheduleRun, SchedulePreview } from "../../lib/types";
 
 // 배치 스케줄러(2026-11-16) 훅. 서버 routes_batch_schedules — 생성·수정·켜기는 배치 생성과 같은 특권 3중 게이트, 끄기·삭제는
 // 관리자면 된다(유지보수 중에도 끌 수 있어야 한다). 화면의 버튼 잠금은 표시일 뿐 진짜 차단은 서버 403 이다.
@@ -21,14 +21,17 @@ export const useBatchForSchedule = (id: string | null, enabled: boolean) =>
              queryFn: () => apiGet<Batch>(`/api/admin/batches/${encodeURIComponent(id ?? "")}?view=summary`) });
 
 // 다음 5회 미리보기 — 서버가 계산한다(말일 당기기·interval 슬롯을 화면이 따로 구현하지 않는다). 입력이 바뀌는 동안 직전
-// 결과를 남겨 깜빡이지 않게 한다(호출측이 디바운스한 값을 넘긴다).
-export const useSchedulePreview = (req: { kind: string; spec: Record<string, unknown> } | null) =>
+// 결과를 남겨 깜빡이지 않게 한다(호출측이 디바운스한 값을 넘긴다). 배치를 알면 batch_id 를 실어 서버가 그 배치의 회차 보존 예측
+// (prune_preview — 저장하면 곧 정리될 작업 수, 2026-11-16)을 같이 계산하게 한다. 모르는 옛 서버는 batch_id 를 무시한다
+// (pydantic 기본 extra=ignore — 미리보기는 그대로 온다).
+export interface PreviewRequest { kind: string; spec: Record<string, unknown>; batch_id?: string }
+export const useSchedulePreview = (req: PreviewRequest | null) =>
   useQuery({
     queryKey: ["batch-schedule-preview", req === null ? null : JSON.stringify(req)],
     enabled: req !== null,
     placeholderData: keepPreviousData,
     staleTime: 30_000,
-    queryFn: () => apiSend<{ next_runs: string[] }>("POST", "/api/admin/batch-schedules:preview", req),
+    queryFn: () => apiSend<SchedulePreview>("POST", "/api/admin/batch-schedules:preview", req),
   });
 
 // mutation 뒤 갱신: 스케줄 목록 + 배치 목록·상세(배치 응답에 스케줄 요약이 실리면 거기도 바뀐다). 무효화 promise 를 돌려줘

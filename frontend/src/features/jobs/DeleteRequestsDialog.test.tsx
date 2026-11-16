@@ -322,6 +322,17 @@ test("섞임: 첫 줄·두 목록·연산별 합·성공 scan 합(단건 + 배�
   expect(jobCap.nextElementSibling).toBe(within(dlg).getByRole("list", { name: "삭제할 작업" }));
 });
 
+test("배치 단위 삭제는 스케줄·실행 기록·보존 회차 기록도 함께 지운다고 말한다 -- 기록이 남은 배치가 있을 때만", async () => {
+  // 2026-11-16 회차 보존: delete_batch 가 batch_rounds·스케줄·실행 기록까지 지운다.
+  const NOTE = "배치에 스케줄이 있으면 스케줄·실행 기록·보존 회차 기록도 함께 삭제됩니다.";
+  const { unmount } = renderDialog([], undefined, undefined, [batch(1, { request_count: 2, scans: 0 })]);
+  expect(within(await open()).getByText(NOTE)).toBeInTheDocument();
+  unmount();
+  renderDialog([], undefined, undefined, [
+    batch(1, { label: "01eeeeeeeeee", named: false, exists: false, status: null, request_count: 2, scans: 0 })]);
+  expect(within(await open()).queryByText(NOTE)).toBeNull();
+});
+
 test("배치 기록이 없는 묶음만 고르면 「배치 기록도 함께 지워져…」를 말하지 않는다(이미 일어난 일)", async () => {
   // 2026-10-11 검증 지적: 같은 창의 목록 항목이 「배치 기록 없음」인데 안내는 기록이 지워져 화면에서 사라진다고 했다.
   renderDialog([], undefined, undefined, [

@@ -1251,7 +1251,8 @@ positional 인자(32자 hex 가 아니면 아무것도 지우지 않고 exit 2),
   거른 목록(`/jobs?batch=<id>`, API `GET /api/user/requests?batch_id=`)을 연다 — 재실행 이력까지 한자리에 보인다.
 - 상한: 한 번에 배치 10개(`delete_batch_selection_too_large`), 배치 하나에 작업 1000개·항목 10000개(`batch_delete_too_large`
   — 배치 하나가 한 트랜잭션이라 그동안 api 가 멈춘다; 넘는 배치를 지우는 청크 삭제는 BACKLOG). 확인 창을 연 뒤 재실행 등으로
-  작업 수가 바뀌었으면 `batch_changed`(무변화 — 목록을 다시 보고 다시 시도).
+  작업 수가 바뀌었으면 `batch_changed`(무변화 — 목록을 다시 보고 다시 시도). 스케줄이 있는 배치는 회차 보존 정리(아래)가 작업
+  수를 줄일 수 있어 같은 사유가 날 수 있다.
 - 큰 배치의 파일·파드 정리는 오래 걸린다 — 정리 루프는 틱(15초)마다 20행을 진행하고, 파드가 남은 작업은 지운 파드가 끝났는지
   한 번 더 봐야 해서(작업마다 k8s 스윕 두 번) 작업 1000개면 **30분 안팎**(가짜 k8s 실측 27분), 한 번에 고를 수 있는 최대(배치
   10개 × 1000)면 4~5시간이다. 그동안 다른 삭제의 정리도 같은 줄에 선다. 툴바 「정리 중 N건」이 줄어드는 것으로 본다. 줄을
@@ -1265,18 +1266,37 @@ positional 인자(32자 hex 가 아니면 아무것도 지우지 않고 exit 2),
   지운다. 두 배치를 한 번에 함께 고르면 서버가 그 배치를 지운 뒤 이 배치를 다시 시도하므로 선택 순서와 무관하게 둘 다
   지워진다.
 
-**env(둘 다 `deploy/k8s/20-config.yaml`, 기본값과 같은 값):**
+**스케줄 회차 보존 정리**(2026-11-16 사용자 결정 「배치 회차가 계속 누적되는걸 원하지 않아 최근 10회차만」, 컨트롤러
+`batch-round-prune` 루프 30초 — dms-k8s 라인의 같은 기능을 옮겼다): 스케줄이 있는 배치(켜짐·꺼짐·일시정지 무관 — 스케줄을 지우면
+정리도 멈춘다)는 최근 `DMS_BATCH_SCHEDULE_KEEP_ROUNDS`(기본 10)회차의 작업만 남는다. 회차 = 첫 실행·「전체 재실행」(사람
+`:rescan`)·스케줄 회차(실패분·선택 재실행은 그 회차에 속한다). 그보다 오래된 회차의 작업은 위 1·2 단계와 **같은 몸통**으로
+지워지고 같은 정리 줄(아웃박스)에 선다 — 다만 이 루프가 넣은 정리 대기 행이 100건 이상이면 그 틱은 쉰다(사람이 지운 작업의 정리를
+굶기지 않게). 감사는 작업마다가 아니라 청크(≤ 100 작업)마다 `audit_log` `batch / prune_rounds` 1행(actor `system:batch-scheduler`,
+지운 작업 id·상태·생성 시각·실행 신원 지정(owner_username)·sync 결과 소유(chown)·잡 id·도구)이다 — 정리된 작업의 결과 메시지·전이
+전문은 남지 않는다. 지우지 않는 것: 끝나지 않은 작업·끝나지 않은 잡이 있는 작업·조용한 창 안의 작업·항목이 가리키는 작업·보존
+회차의 작업·최신 회차의 경계 작업 1건. 끝나지 않은 잔재만 남아 진행하지 못하면 이벤트 `batch_round_prune_blocked`(배치마다 1시간
+1회 — 그 작업을 취소하면 풀린다). 배포 직후 대량 삭제는 없다: 배포 전 회차는 기록(`batch_rounds`)이 없어 가장 오래된 회차 하나로
+보고, 배포 뒤 기록된 회차가 10개가 될 때(일일 스케줄이면 10일 뒤) 한꺼번에 정리된다. 사용량 분석의 그 배치 몫 scan 이력(추이 점·
+scan 수)도 함께 줄어든다(의도한 결과). 정리 현황은 스케줄의 `pruned_total`(누적 건수 — null 은 아직 정리 없음, 0 과 다르다)·
+`pruned_at`(작업 → 배치 스케줄러)과 툴바 「정리 중 N건」이다. 남는 상한: 항목 수 × 보존 회차가 배치 단위 삭제 상한(작업 1000개)을
+넘으면(예: 항목 101개 이상 × 10회차) 정리가 돌아도 그 배치를 **배치 단위로는** 지울 수 없다 — 스케줄 추가 창이 경고한다(BACKLOG).
+옛 이미지로 내리면 정리만 멈추고 회차 경계 표(`batch_rounds`)·정리 칸(`batch_schedules.pruned_at`·`pruned_total`)은 남는다(코드 읽기
+— **미검증**).
+
+**env(앞의 둘은 `deploy/k8s/20-config.yaml`, 기본값과 같은 값):**
 
 | env | 기본 | 소비자 | 뜻 |
 |---|---|---|---|
 | `DMS_REQUEST_DELETE_QUIET_SECONDS` | 60 | api | 요청·잡의 마지막 갱신 후 이 초가 지나야 지울 수 있다(`request_recently_finished`). 음수는 기동 거부, 0 은 e2e 전용 |
 | `DMS_REQUEST_PURGE_INTERVAL_SECONDS` | 15 | controller | request-purge 루프 간격 = 실패 백오프의 기준 단위. 1 미만은 기동 거부 |
+| `DMS_BATCH_SCHEDULE_KEEP_ROUNDS` | 10 | controller(정리)·api(표시) | 스케줄이 있는 배치의 보존 회차 수(2026-11-16, 1–100 — 밖이면 기동 거부) — 위 「스케줄 회차 보존 정리」. **base `20-config.yaml` 엔 키가 없다**(dms-k8s 라인과 같이 쓰는 공용 base — 기본값 10 은 `config.py` Settings). 바꾸려면 사이트 오버레이의 ConfigMap 패치에 넣는다(api·controller 둘 다 같은 값 — 표시와 정리가 어긋나지 않게; ConfigMap 만 바뀐 apply 뒤엔 rollout restart). dms-k8s 의 base 20-config 는 자기 라인 값을 싣는다(처음 `"5"`, 같은 날 `"10"`) — 공용 base 를 맞추려고 그 파일을 가져올 때 값이 이 라인 기본(10)과 다르면 보존 수가 조용히 바뀐다(ConfigMap 이 코드 기본보다 우선 — `tests/test_config_batch.py` 가 「키 없음 또는 코드 기본과 같음」만 통과시킨다) |
 
 마이그레이션은 자동이다(`migrate` 가 `request_purges` 테이블과 `idx_data_jobs_request`·`idx_plans_request`·
 `idx_batch_items_request` 인덱스를 만든다). 배치 단위 삭제(2026-10-11)는 `idx_requests_batch(batch_id)` 를
 `idx_requests_batch_order(batch_id, commit_order)` 로 바꾼다(새 것을 만든 뒤 옛 것을 지운다 — 한 배치만 거른 목록이 큰
 테이블에서 전체를 훑지 않게). 새 인덱스를 만드는 동안 `requests` 쓰기가 기다린다(테이블 크기에 비례 — 다른 인덱스
-추가와 같은 성질).
+추가와 같은 성질). 회차 보존 정리(2026-11-16)는 `batch_rounds` 테이블과 `batch_schedules.pruned_at`·`pruned_total` 칸을 더한다
+(기배포 행은 NULL = 아직 정리 없음, 백필 없음).
 
 ---
 

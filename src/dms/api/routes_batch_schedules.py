@@ -12,10 +12,14 @@
 라우트가 트랜잭션 밖 스냅숏으로 지문을 찍으면 그 사이 CSV 교체가 동의 없이 지문에 묻는다.
 
 응답 행 모양(목록·생성·수정·켜기·끄기 공통): 스케줄 열(schedule_id, batch_id, kind, spec, enabled(bool), next_run_at(UTC …Z |
-null), armed_by, created_by, created_at, updated_at, last_run_at, last_outcome, last_reason_code, paused_reason_code) +
+null), armed_by, created_by, created_at, updated_at, last_run_at, last_outcome, last_reason_code, paused_reason_code,
+pruned_at(UTC …Z | null), pruned_total(int | null -- 회차 보존 정리의 마지막 시각·누적 수, null = 아직 정리 없음, 0 과 다르다)) +
 acknowledged_irreversible(bool -- 동의 지문이 있다) + destructive(bool | null -- 지금 배치 기준, 배치 행이 없으면 null) +
 batch(배치 요약 | null: batch_id, name, operation, status, item_count,
-auto_confirm, options, storage, source_storage, destination_storage). 지문 원문은 싣지 않는다.
+auto_confirm, options, storage, source_storage, destination_storage) + keep_rounds(회차 보존 수 DMS_BATCH_SCHEDULE_KEEP_ROUNDS --
+2026-11-16 사용자 결정: 스케줄이 있는 배치는 최근 K회차의 자식만 남고 그보다 오래된 회차의 자식은 컨트롤러 batch-round-prune
+루프가 정리한다) + child_count_limit(배치 단위 삭제 자식 상한 request_purges.MAX_BATCH_DELETE_CHILDREN -- 화면의 「항목 × K >
+상한」 경고 기준; 상한을 바꿔도 포탈 빌드와 어긋나지 않게 서버 값을 싣는다). 지문 원문은 싣지 않는다.
 """
 from typing import Any
 
@@ -26,6 +30,7 @@ from ..batch_scheduler import (arm_problem, armed_fingerprint, is_destructive, n
                                binding_digest, storage_binding, validate_schedule)
 from ..db import utc_now_iso
 from ..domain import DomainValidationError
+from ..repositories.request_purges import MAX_BATCH_DELETE_CHILDREN
 from .auth import Identity, require_admin
 from .routes_batches import _require_batch_privilege
 from .routes_requests import reject_when_maintenance
@@ -43,6 +48,11 @@ class ScheduleRule(BaseModel):
     # 문구가 되는데, 규칙 오류는 invalid_batch_schedule 하나로 말해야 포탈 폼이 같은 문구를 보인다.
     kind: Any = None
     spec: Any = None
+
+
+class SchedulePreviewBody(ScheduleRule):
+    # 고른 배치(선택, 2026-11-16 회차 보존 정리) -- 있으면 그 배치의 prune_preview(곧 정리될 작업 수 예측)를 함께 준다.
+    batch_id: str | None = None
 
 
 class ScheduleCreateBody(ScheduleRule):
@@ -96,12 +106,17 @@ def _arm(request: Request, acknowledge):
     return check
 
 
-def _out(row) -> dict:
+def _out(row, settings) -> dict:
     out = {k: v for k, v in row.items() if k not in ("ack_fingerprint", "storage_binding")}
     out["acknowledged_irreversible"] = row.get("ack_fingerprint") is not None
     # 파괴적 판정은 지금 배치로(batch_scheduler.is_destructive -- 저장하지 않는다). 배치 행이 없으면 모름(None).
     batch = row.get("batch")
     out["destructive"] = None if batch is None else is_destructive(batch.get("operation"), batch.get("options"))
+    # 회차 보존(2026-11-16): 설정값·정리 결과·배치 단위 삭제 상한. 아직 정리 없음은 null(0 이 아니다).
+    out["keep_rounds"] = getattr(settings, "batch_schedule_keep_rounds", None)
+    out.setdefault("pruned_at", None)
+    out.setdefault("pruned_total", None)
+    out["child_count_limit"] = MAX_BATCH_DELETE_CHILDREN
     return out
 
 
@@ -109,19 +124,29 @@ def _detail(request: Request, schedule_id: str) -> dict:
     rows = request.app.state.repos.batch_schedules.list(schedule_id=schedule_id)
     if not rows:
         raise HTTPException(status_code=404, detail="batch_schedule_not_found")
-    return _out(rows[0])
+    return _out(rows[0], request.app.state.settings)
 
 
 @router.get("/api/admin/batch-schedules")
 def list_batch_schedules(request: Request, identity: Identity = Depends(require_admin)):
-    return [_out(r) for r in request.app.state.repos.batch_schedules.list()]
+    settings = request.app.state.settings
+    return [_out(r, settings) for r in request.app.state.repos.batch_schedules.list()]
 
 
 @router.post("/api/admin/batch-schedules:preview")
-def preview_batch_schedule(body: ScheduleRule, request: Request, identity: Identity = Depends(require_admin)):
-    """규칙의 다음 5회(UTC) -- 포탈은 다음 실행을 계산하지 않는다(KST·말일 당김 규칙을 두 벌 두지 않는다)."""
+def preview_batch_schedule(body: SchedulePreviewBody, request: Request, identity: Identity = Depends(require_admin)):
+    """규칙의 다음 5회(UTC) -- 포탈은 다음 실행을 계산하지 않는다(KST·말일 당김 규칙을 두 벌 두지 않는다). 읽기 전용 계산
+    (본문이 있어 POST). keep_rounds(회차 보존 수)·child_count_limit(배치 단위 삭제 자식 상한)은 늘 싣는다(추가 창의 보존 안내·
+    「항목 × K > 상한」 예측). batch_id 를 주면 prune_preview = {rounds_recorded, would_prune, would_prune_capped}
+    (BatchSchedulesRepository.prune_preview -- 지금 스케줄이 걸려 있다고 쳤을 때 곧 정리될 자식 수, 실제 정리와 같은 경계 계산
+    _round_cut; 막힌 자식까지 세는 근사치, 배치가 없거나 기록 회차가 K 미만이면 0). batch_id 가 없으면 prune_preview 키가 없다."""
     rule = _validated_rule(body)
-    return {"next_runs": preview_runs(body.kind, rule, utc_now_iso(), 5)}
+    keep = getattr(request.app.state.settings, "batch_schedule_keep_rounds", None)
+    out = {"next_runs": preview_runs(body.kind, rule, utc_now_iso(), 5),
+           "keep_rounds": keep, "child_count_limit": MAX_BATCH_DELETE_CHILDREN}
+    if body.batch_id is not None:
+        out["prune_preview"] = request.app.state.repos.batch_schedules.prune_preview(body.batch_id, keep=keep)
+    return out
 
 
 @router.get("/api/admin/batch-schedules/{schedule_id}/runs")
@@ -193,7 +218,8 @@ def disable_batch_schedule(schedule_id: str, request: Request, identity: Identit
 
 @router.delete("/api/admin/batch-schedules/{schedule_id}")
 def delete_batch_schedule(schedule_id: str, request: Request, identity: Identity = Depends(require_admin)):
-    """스케줄 삭제(회차 이력 포함, 감사 행은 남는다) -- 실행을 줄이기만 해 require_admin, 유지보수 중에도."""
+    """스케줄 삭제(회차 이력 포함, 감사 행은 남는다) -- 실행을 줄이기만 해 require_admin, 유지보수 중에도. 보존 회차 경계와 이미
+    남은 작업은 그대로이고 회차 보존 정리만 멈춘다(정리는 스케줄 행이 있는 배치만 본다 -- 저장소 delete docstring)."""
     try:
         request.app.state.repos.batch_schedules.delete(schedule_id, actor=identity.actor)
     except DomainValidationError as e:

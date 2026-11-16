@@ -108,6 +108,15 @@ function TempTooltip({ point, buckets, tempKey, anchor, onClose }: {
   );
 }
 
+// 배치 스케줄 회차 보존(2026-11-16 사용자 결정 「최근 10회차만 누적」 — 서버 batch_round_prune): 스케줄이 있는 배치가 만든 scan 은
+// 최근 회차만 남는다 — 그 배치 몫의 추이 점·scan 수가 줄어드는 것은 의도한 결과라 도움말이 미리 말한다(사용자가 「이력이
+// 사라졌다」로 놀라지 않게). 보존 회차 수는 숫자로 쓰지 않는다 — 이 화면엔 서버 keep_rounds 가 없고(사이트가 바꿀 수 있는
+// 설정 DMS_BATCH_SCHEDULE_KEEP_ROUNDS), 숫자는 배치 스케줄러 화면이 서버 값으로 말한다(dms-k8s 0b5e7357 — 기본값을 바꿀 때
+// 박아 둔 「기본 5회차」가 낡았던 것을 같은 문구로 걷어냈다; 포탈은 K 를 상수로 두지 않는다).
+const SCHEDULE_RETENTION_NOTE =
+  "스케줄이 있는 배치가 만든 scan 은 최근 보존 회차(회차 수는 배치 스케줄러 화면 안내)만 남아, 그보다 오래된 추이 점·scan 수는 "
+  + "정리됩니다.";
+
 // 온도 추이: 스캔별 100% 스택 열(위=hot). 시간순 정렬은 부모(서버 정렬)가 보장.
 // 호버/포커스 즉시 툴팁(2026-08-29 사용자 요청): 열에 커서를 대면 바로 뜬다(기본 title 지연 제거).
 // 2026-10-02: 툴팁을 열 옆에 붙이고(placeTooltip), 시각·요청자·용량·파일 수·hot 비율 + 색별 구간·용량·비중 범례.
@@ -328,7 +337,8 @@ export function TargetDetail({ storage, target, showTitle, latest }: {
 
         <section className="space-y-2">
           <SectionHead title="실 사용량 추이"
-                       help="점 = 성공 scan 1회 — 누르면 그 요청 상세로 갑니다. x 축은 시간 비례라 점 간격이 곧 스캔 간격입니다.">
+                       help={`점 = 성공 scan 1회 — 누르면 그 요청 상세로 갑니다. x 축은 시간 비례라 점 간격이 곧 스캔 간격입니다. ${
+                         SCHEDULE_RETENTION_NOTE}`}>
             {history.data?.window_full === true && (
               <span className="text-xs text-muted">이전 이력 있음</span>
             )}

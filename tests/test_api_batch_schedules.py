@@ -11,10 +11,11 @@ from fastapi.testclient import TestClient
 from dms.batch_scheduler import KST, armed_fingerprint, parse_utc
 from dms.config import Settings
 from dms.repositories.batches import BATCH_DELETE_EXEMPT_TABLES, BATCH_DELETE_TABLES, BatchesRepository
-from dms.repositories.request_purges import RequestPurgesRepository
+from dms.repositories.request_purges import MAX_BATCH_DELETE_CHILDREN, RequestPurgesRepository
 
 TOKEN = {"Authorization": "Bearer tok-shared"}
-DAILY = {"kind": "daily", "spec": {"hour": 2, "minute": 0}}
+URL = "/api/admin/batch-schedules"
+DAILY ={"kind": "daily", "spec": {"hour": 2, "minute": 0}}
 SCAN_ITEM = {"storage": "s1", "target": "a"}
 SYNC_ITEM = {"source_storage": "s1", "source": "a", "destination_storage": "s2", "destination": "b"}
 RM_ITEM = {"storage": "s1", "target": "old"}
@@ -93,6 +94,9 @@ def test_create_scan_schedule_returns_the_row_with_batch_summary(client, db):
     assert row["batch"] == {"batch_id": bid, "name": None, "operation": "scan", "status": "Completed", "item_count": 1,
                             "auto_confirm": False, "options": {}, "storage": "s1", "source_storage": None,
                             "destination_storage": None}
+    # 회차 보존(2026-11-16): 설정값(기본 10)과 정리 결과 -- 아직 정리 없음은 null(0 이 아니다) -- + 배치 단위 삭제 상한(서버 값).
+    assert (row["keep_rounds"], row["pruned_at"], row["pruned_total"]) == (10, None, None)
+    assert row["child_count_limit"] == MAX_BATCH_DELETE_CHILDREN == 1000
     [audit] = _audit(db, "create")
     assert audit["actor"] == "ops" and audit["target_key"] == bid
     after = json.loads(audit["after_state"])
@@ -398,11 +402,13 @@ def test_summaries_for(client):
     assert set(out) == {a}
     assert out[a]["schedule_id"] == sid and out[a]["enabled"] is True and out[a]["kind"] == "daily"
     assert set(out[a]) == {"schedule_id", "kind", "spec", "enabled", "next_run_at", "last_run_at", "last_outcome",
-                           "last_reason_code", "paused_reason_code"}
+                           "last_reason_code", "paused_reason_code", "pruned_at", "pruned_total"}
+    assert (out[a]["pruned_at"], out[a]["pruned_total"]) == (None, None)        # 아직 정리 없음 = null(0 이 아니다)
 
 
+# 라우트(_with_schedules)는 저장소 요약에 보존 회차 수 설정(keep_rounds)을 더한다(2026-11-16 회차 보존 정리).
 SUMMARY_KEYS = {"schedule_id", "kind", "spec", "enabled", "next_run_at", "last_run_at", "last_outcome",
-                "last_reason_code", "paused_reason_code"}
+                "last_reason_code", "paused_reason_code", "pruned_at", "pruned_total", "keep_rounds"}
 
 
 def test_batch_list_and_summary_carry_the_schedule_summary(client, db):
@@ -475,11 +481,11 @@ def test_rescan_if_terminal_shape(client, db):
     bid = _batch(client, op="rm")
     repos.batches.set_item_status(bid, 0, "Failed")
     db.execute("UPDATE batches SET failed_count = 1 WHERE batch_id = :b", {"b": bid})
-    assert repos.batches.rescan_if_terminal(bid) == {"status": "Previewing", "requeued": 1}
+    assert repos.batches.rescan_if_terminal(bid, actor="ops") == {"status": "Previewing", "requeued": 1}
     b = repos.batches.get(bid)
     assert (b["status"], b["failed_count"]) == ("Previewing", 0)
-    assert repos.batches.rescan_if_terminal(bid) is None                      # 이제 비종단
-    assert repos.batches.rescan_if_terminal("nope") is None
+    assert repos.batches.rescan_if_terminal(bid, actor="ops") is None         # 이제 비종단
+    assert repos.batches.rescan_if_terminal("nope", actor="ops") is None
 
 
 # --- 배치 삭제 두 경로의 연쇄 삭제 -----------------------------------------------------------------------------------------
@@ -570,3 +576,167 @@ def test_every_batch_id_table_is_covered_by_both_batch_delete_paths(db):
         src = inspect.getsource(entry)
         for t in BATCH_DELETE_TABLES:
             assert f"DELETE FROM {t} " in src, (entry.__qualname__, t)
+
+
+@pytest.mark.parametrize("path", [BatchesRepository.delete, RequestPurgesRepository.delete_batch])
+def test_both_batch_delete_paths_delete_rounds_then_schedule_then_runs(path):
+    """회차 경계를 스케줄보다, 스케줄을 회차 이력보다 먼저 지운다(2026-11-16 -- fire 의 회차 경계(_rescan_locked) → 스케줄 →
+    회차 이력 순서와 같게; 거꾸로면 PG 에서 서로 상대 행을 기다린다). BATCH_DELETE_TABLES 순서가 곧 그 잠금 순서다."""
+    src = inspect.getsource(path)
+    pos = {t: src.index(f"DELETE FROM {t} ") for t in ("batch_rounds", "batch_schedules", "batch_schedule_runs")}
+    assert pos["batch_rounds"] < pos["batch_schedules"] < pos["batch_schedule_runs"], path.__qualname__
+    order = [BATCH_DELETE_TABLES.index(t) for t in ("batch_rounds", "batch_schedules", "batch_schedule_runs")]
+    assert order == sorted(order)
+
+
+# --- 회차 보존(2026-11-16 -- 「배치 회차가 계속 누적되는걸 원하지 않아 최근 10회차만」) ---------------------------------------
+
+def _repos(client):
+    return client.app.state.repos
+
+
+def _rounds_rows(db, bid):
+    return db.query_one("SELECT COUNT(*) AS n FROM batch_rounds WHERE batch_id = :b", {"b": bid})["n"]
+
+
+def _finish_round(db, bid):
+    db.execute("UPDATE batches SET status = 'Completed' WHERE batch_id = :b", {"b": bid})
+    db.execute("UPDATE batch_items SET status = 'Succeeded' WHERE batch_id = :b", {"b": bid})
+
+
+def test_rescan_route_records_one_round_boundary_with_the_session_actor(client, db):
+    # 이긴 :rescan 만 1행(via rescan, actor = 누른 세션 사용자, requeued = 되돌린 항목 수). 응답 모양은 그대로다.
+    bid = _batch(client, n=2)
+    db.execute("UPDATE batch_items SET status = 'Succeeded' WHERE batch_id = :b", {"b": bid})
+    r = client.post(f"/api/admin/batches/{bid}:rescan")
+    assert r.status_code == 200 and r.json() == {"status": "Running", "requeued": 2}
+    assert client.post(f"/api/admin/batches/{bid}:rescan").status_code == 409        # 진 쪽은 행을 남기지 않는다
+    rounds = db.query("SELECT round_seq, via, actor, requeued, floor_order FROM batch_rounds WHERE batch_id = :b",
+                      {"b": bid})
+    assert rounds == [{"round_seq": 1, "via": "rescan", "actor": "ops", "requeued": 2, "floor_order": None}]
+
+
+def test_preview_carries_keep_rounds_limit_and_prune_preview(client):
+    """추가 창의 보존 안내 재료: keep_rounds·child_count_limit 은 늘, batch_id 가 있으면 prune_preview(실제 정리와 같은 경계 계산
+    -- 기록 11회차 배치면 곧 정리될 작업 = 첫 실행(기록 이전) 자식 + 1번째 기록 회차 자식)."""
+    r = client.post(f"{URL}:preview", json=DAILY).json()
+    assert r["keep_rounds"] == 10 and r["child_count_limit"] == MAX_BATCH_DELETE_CHILDREN and "prune_preview" not in r
+    repos = _repos(client)
+    bid = _batch(client, n=2)
+    first = [repos.requests.create(operation="scan", requester_id="ops", actor="ops", resource_key=f"f{i}",
+                                   payload=dict(SCAN_ITEM), priority="mid", batch_id=bid, auth_method="session")
+             for i in range(2)]
+    for rnd in range(11):
+        assert repos.batches.rescan_if_terminal(bid, actor="ops") is not None
+        for i in range(2):
+            repos.requests.create(operation="scan", requester_id="ops", actor="ops", resource_key=f"r{rnd}-{i}",
+                                  payload=dict(SCAN_ITEM), priority="mid", batch_id=bid, auth_method="session")
+        _finish_round(repos.db, bid)
+    pp = client.post(f"{URL}:preview", json={**DAILY, "batch_id": bid}).json()["prune_preview"]
+    # 기록 11 · 보존 10 → 보존하는 가장 오래된 회차 = 2번째 기록 회차, 그 전 = 첫 실행 자식 2 + 1번째 기록 회차 자식 2
+    assert pp == {"rounds_recorded": 11, "would_prune": len(first) + 2, "would_prune_capped": False}
+    fresh = _batch(client)
+    assert client.post(f"{URL}:preview", json={**DAILY, "batch_id": fresh}).json()["prune_preview"] == \
+        {"rounds_recorded": 0, "would_prune": 0, "would_prune_capped": False}
+    assert client.post(f"{URL}:preview", json={**DAILY, "batch_id": "nope"}).json()["prune_preview"]["would_prune"] == 0
+
+
+def test_list_and_batch_summary_carry_prune_results(client):
+    bid = _batch(client)
+    sid = _create(client, bid).json()["schedule_id"]
+    _repos(client).db.execute("UPDATE batch_schedules SET pruned_at = '2026-11-16T10:00:00Z', pruned_total = 0 "
+                              "WHERE schedule_id = :s", {"s": sid})
+    row = client.get(URL).json()[0]
+    assert row["pruned_at"] == "2026-11-16T10:00:00Z" and row["pruned_total"] == 0   # 0 은 정상값
+    assert row["keep_rounds"] == 10 and row["child_count_limit"] == MAX_BATCH_DELETE_CHILDREN
+    sched = client.get(f"/api/admin/batches/{bid}?view=summary").json()["schedule"]
+    assert sched["pruned_total"] == 0 and sched["keep_rounds"] == 10
+    listed = {r["batch_id"]: r for r in client.get("/api/admin/batches").json()}
+    assert listed[bid]["schedule"]["keep_rounds"] == 10
+    # 변조 값(음수·문자열)은 모름(null)으로 읽는다
+    _repos(client).db.execute("UPDATE batch_schedules SET pruned_total = -3 WHERE schedule_id = :s", {"s": sid})
+    assert client.get(URL).json()[0]["pruned_total"] is None
+
+
+def test_keep_rounds_follows_the_setting(db):
+    c = TestClient(_app(db, DMS_BATCH_SCHEDULE_KEEP_ROUNDS="3"))
+    _login(c)
+    assert c.post(f"{URL}:preview", json=DAILY).json()["keep_rounds"] == 3
+
+
+def test_record_and_unit_delete_remove_round_boundaries(client, db):
+    repos = _repos(client)
+    for delete in ("record", "unit"):
+        bid = _batch(client)
+        _with_schedule_and_run(client, bid)
+        assert repos.batches.rescan_if_terminal(bid, actor="ops") is not None
+        _finish_round(db, bid)
+        assert _rounds_rows(db, bid) == 1
+        if delete == "record":
+            assert client.delete(f"/api/admin/batches/{bid}").status_code == 200
+        else:
+            out = repos.request_purges.delete_batch(bid, expected_request_count=0, actor="ops", artifact_base=None,
+                                                    quiet_seconds=0, max_children=MAX_BATCH_DELETE_CHILDREN)
+            assert out["deleted"] is True, out
+        assert _rounds_rows(db, bid) == 0 and _schedule_rows(db, bid) == ([], [])
+
+
+def test_schedule_route_delete_keeps_round_boundaries(client, db):
+    # 스케줄만 지우면 회차 경계는 배치에 남는다(정리만 멈춘다 -- 다시 스케줄을 걸면 그 기록으로 이어서 센다).
+    bid = _batch(client)
+    sid = _create(client, bid).json()["schedule_id"]
+    assert _repos(client).batches.rescan_if_terminal(bid, actor="ops") is not None
+    assert client.delete(f"{URL}/{sid}").status_code == 200
+    assert _rounds_rows(db, bid) == 1
+
+
+# ('batch_schedule', 'delete') 감사 before 의 키 -- 세 경로(스케줄 DELETE 라우트·배치 기록 삭제·배치 단위 삭제)가 같은 한 벌
+# (batches.schedule_delete_audit_before). dms-k8s d29 실증: 라우트 쪽 감사에 pruned_total·pruned_at 이 없었다.
+_SCHEDULE_DELETE_AUDIT_KEYS = {
+    "schedule_id", "batch_id", "kind", "spec", "enabled", "next_run_at", "armed_by", "acknowledged_irreversible",
+    "last_run_at", "last_outcome", "last_reason_code", "paused_reason_code", "pruned_total", "pruned_at", "run_count",
+    "deleted_with_batch"}
+
+
+def _delete_schedule_route(client, bid, sid):
+    assert client.delete(f"{URL}/{sid}").status_code == 200
+
+
+def _delete_batch_record(client, bid, sid):
+    r = client.delete(f"/api/admin/batches/{bid}")
+    assert r.status_code == 200, r.text
+
+
+def _delete_batch_unit(client, bid, sid):
+    r = _repos(client).request_purges.delete_batch(bid, expected_request_count=0, actor="ops", artifact_base=None,
+                                                   quiet_seconds=60, max_children=MAX_BATCH_DELETE_CHILDREN)
+    assert r["deleted"] is True, r
+
+
+@pytest.mark.parametrize("delete,with_batch", [(_delete_schedule_route, False), (_delete_batch_record, True),
+                                               (_delete_batch_unit, True)])
+def test_schedule_delete_audit_has_the_same_before_shape_on_every_path(client, db, delete, with_batch):
+    bid = _batch(client)
+    sid = _with_schedule_and_run(client, bid)
+    db.execute("UPDATE batch_schedules SET pruned_total = 12, pruned_at = '2026-11-16T12:42:00Z' "
+               "WHERE schedule_id = :s", {"s": sid})
+    delete(client, bid, sid)
+    a = _audit(db, "delete")
+    assert len(a) == 1 and a[0]["target_key"] == bid and a[0]["after_state"] is None
+    before = json.loads(a[0]["before_state"])
+    assert set(before) == _SCHEDULE_DELETE_AUDIT_KEYS
+    assert before["pruned_total"] == 12 and before["pruned_at"] == "2026-11-16T12:42:00Z"
+    assert before["schedule_id"] == sid and before["spec"] == DAILY["spec"] and before["enabled"] is True
+    assert before["run_count"] == 1 and before["deleted_with_batch"] is with_batch
+    assert before["last_outcome"] == "skipped" and before["acknowledged_irreversible"] is False
+
+
+def test_schedule_delete_audit_keeps_never_pruned_as_null_not_zero(client, db):
+    """정리 전에 지운 스케줄 -- pruned_total null(아직 정리 없음)은 0 으로 바뀌지 않는다(null ≠ 0). 변조 값도 모름(None)."""
+    for raw, want in ((None, None), (0, 0), (-1, None)):
+        bid = _batch(client)
+        sid = _create(client, bid).json()["schedule_id"]
+        db.execute("UPDATE batch_schedules SET pruned_total = :n WHERE schedule_id = :s", {"n": raw, "s": sid})
+        assert client.delete(f"{URL}/{sid}").status_code == 200
+        before = json.loads([r for r in _audit(db, "delete") if r["target_key"] == bid][0]["before_state"])
+        assert before["pruned_total"] == want and before["pruned_at"] is None and before["run_count"] == 0

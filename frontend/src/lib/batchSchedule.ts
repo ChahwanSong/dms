@@ -2,8 +2,14 @@
 // (매일·매주·매월·N시간마다 — cron 식 없음). 서버 src/dms/batch_scheduler.py 가 kind/spec 검증과 다음 실행 계산의 진실이다:
 // 화면은 **다음 실행을 계산하지 않는다**(말일 당기기·interval 슬롯을 따로 구현하면 서버와 어긋난다 — 미리보기는 서버
 // :preview). 여기 있는 것은 표시 문구와 저장 전 즉답(서버 422 invalid_batch_schedule 의 거울)뿐이다.
+//
+// 회차가 쌓는 자식 요청: 스케줄이 있는 배치는 최근 K회차(서버 keep_rounds — DMS_BATCH_SCHEDULE_KEEP_ROUNDS, 기본 10)만 남고 오래된
+// 회차는 컨트롤러가 자동으로 정리한다(2026-11-16 사용자 결정 「최근 10회차만 누적」 — 서버 batch_round_prune, dms-k8s 이식).
+// 보존 문구는 keepRoundsNotice 한 벌을 스케줄 화면·추가 창이 같이 쓴다. K·상한은 서버가 실어 준 값만 쓴다(포탈 상수 없음 —
+// 모르면 숫자를 지어내지 않는다).
 
 import { kstStampBare } from "./datetime";
+import type { BatchSchedule, PrunePreview } from "./types";
 
 export type ScheduleKind = "daily" | "weekly" | "monthly" | "interval";
 
@@ -133,4 +139,70 @@ export function nextRunStamp(enabled: unknown, iso: string | null | undefined): 
   if (!scheduleEnabled(enabled) || !iso) return "—";
   const stamp = kstStampBare(iso);
   return /^\d{4}-\d\d-\d\d \d\d:\d\d/.test(stamp) ? stamp.slice(0, 16) : stamp;
+}
+
+// 「기록」 낱말(dms-k8s d29 실증 뒤 다듬기 — 같은 화면에서 「회차」가 두 가지를 가리켜 헷갈렸다): 「실행 기록」 = 스케줄 회차 판정 이력
+// (batch_schedule_runs — 행의 「기록」 창 이름도 「실행 기록」), 「보존 회차」 = 최근 K회차 보존의 회차 경계(batch_rounds — 배치에
+// 속한다). 스케줄만 지우면 실행 기록만 지워지고 보존 회차 경계·남은 작업은 그대로라(정리는 멈춘다) 다시 만들면 쌓인 기록으로 곧
+// 정리가 돈다. 배치를 지우면 둘 다 지워진다.
+
+/** 스케줄 행 「삭제」·「삭제 확인」 버튼의 title — 스케줄 DELETE(BatchSchedulesRepository.delete)가 지우는 것과 남기는 것. */
+export const SCHEDULE_DELETE_HINT =
+  "실행 기록도 함께 지웁니다 — 보존 회차 셈과 이미 남은 작업은 그대로, 정리는 멈춥니다(감사 기록은 남습니다)";
+
+/** 배치 삭제 확인 창의 스케줄 안내 한 줄 — 배치 기록 삭제(BatchesRepository.delete)와 작업 목록의 배치 단위 삭제
+ *  (request_purges.delete_batch)가 같은 트랜잭션에서 그 배치의 스케줄·실행 기록·보존 회차 경계를 지운다(BATCH_DELETE_TABLES).
+ *  감사 기록(스케줄 삭제 행)은 남는다. */
+export const scheduleDeleteNotice = (s: { kind: unknown; spec: unknown; enabled: unknown }): string =>
+  `이 배치의 스케줄(${scheduleSummary(s.kind, s.spec)}${scheduleEnabled(s.enabled) ? " · 사용 중" : ""})과 실행 기록·보존 회차 `
+  + "기록도 함께 삭제됩니다(감사 기록은 남습니다).";
+
+const n0 = (n: number) => n.toLocaleString("ko-KR");
+
+/** 서버가 실어 준 보존 회차 수가 쓸 만한가(1 이상 정수). 옛 서버(부재)·변조 값이면 false — 보존 문구를 지어내지 않는다. */
+export const keepRoundsKnown = (k: unknown): k is number => typeof k === "number" && Number.isInteger(k) && k >= 1;
+
+/** 회차 보존 안내(2026-11-16 사용자 결정 「최근 10회차만 누적」 — 서버 batch_round_prune). keep 이 숫자가 아니면(옛 서버) 문장을
+ *  만들지 않는다(null). 회차 = 첫 실행·전체 재실행(사람 :rescan)·스케줄 회차 — 실패분·선택 재실행은 그 회차에 속한다(서버
+ *  _rescan_locked 한 곳에서 경계를 쓴다). 정리 대상은 스케줄 행이 있는 배치(켜짐·꺼짐 무관)라 끄면 계속되고 지우면 멈춘다. */
+export function keepRoundsNotice(keep: number | null | undefined): string | null {
+  if (!keepRoundsKnown(keep)) return null;
+  return `스케줄이 있는 배치는 최근 ${keep}회차만 보존합니다 — 첫 실행·전체 재실행·스케줄 회차를 회차로 세고(실패분·선택 재실행은 그 `
+    + `회차에 속합니다), ${keep}회차를 넘으면 가장 오래된 회차의 작업(자식 요청·잡·결과 파일)을 곧 자동으로 정리합니다. 사용량 분석의 `
+    + `scan 이력(온도·용량 추이)도 이 배치 몫은 최근 ${keep}회차만 남습니다. 스케줄을 꺼도 정리는 계속되고, 스케줄을 지우면 멈춥니다.`;
+}
+
+/** 스케줄 행의 정리 결과 조각 — null = 아직 정리 없음(0 과 다르다, null ≠ 0). at = 마지막 정리 시각(KST, 모르면 null). 표 칸은
+ *  시각을 한 덩어리(whitespace-nowrap)로 그리려고 조각을 쓰고, 한 줄 글은 pruneText 가 같은 조각으로 만든다(둘이 갈라지지 않게). */
+export function pruneParts(s: Pick<BatchSchedule, "pruned_total" | "pruned_at">): { total: string; at: string | null } | null {
+  const n = s.pruned_total;
+  if (typeof n !== "number") return null;
+  return { total: `정리 누적 ${n0(n)}건`, at: typeof s.pruned_at === "string" ? kstStampBare(s.pruned_at) : null };
+}
+
+/** 스케줄 행의 정리 결과 한 줄 — null(아직 정리 없음)과 0 을 가른다(null ≠ 0). */
+export function pruneText(s: Pick<BatchSchedule, "pruned_total" | "pruned_at">): string {
+  const p = pruneParts(s);
+  if (p === null) return "아직 정리 없음";
+  return p.at === null ? p.total : `${p.total} · 마지막 ${p.at}`;
+}
+
+/** 「항목 × K > 상한」 예측 경고 — 보존 회차를 다 채우면 정리 뒤에도 배치 단위 삭제 상한(서버 child_count_limit =
+ *  MAX_BATCH_DELETE_CHILDREN)을 넘는다. 셋 중 하나라도 모르면 null(상한을 지어내지 않는다). 저장을 막지 않는 안내다. */
+export function projectedChildrenWarning(itemCount: number | null | undefined, keep: number | null | undefined,
+                                         limit: number | null | undefined): string | null {
+  if (typeof itemCount !== "number" || !keepRoundsKnown(keep) || typeof limit !== "number" || limit <= 0) return null;
+  const projected = itemCount * keep;
+  if (projected <= limit) return null;
+  return `항목 ${n0(itemCount)}개 × ${keep}회차 = 작업 최대 ${n0(projected)}개 — 정리 뒤에도 배치 단위 삭제 상한(${n0(limit)}개)을 `
+    + "넘어 이 배치는 배치 단위로 지울 수 없습니다(실패분 재실행이 더해지면 더 많습니다)";
+}
+
+/** 추가·수정 창의 「저장하면 곧 정리될 작업」 안내(서버 :preview 의 prune_preview). 0·모름이면 null. */
+export function prunePreviewText(p: PrunePreview | null | undefined): string | null {
+  if (!p || typeof p.would_prune !== "number" || p.would_prune <= 0) return null;
+  // capped = 서버가 상한 + 1 에서 세기를 멈췄다 — 「상한 이상」으로 말한다(지어낸 정확한 수가 아니다).
+  const n = p.would_prune_capped === true ? `${n0(p.would_prune - 1)}개 이상이` : `약 ${n0(p.would_prune)}개가`;
+  const r = typeof p.rounds_recorded === "number" ? `기록된 회차 ${n0(p.rounds_recorded)}개 중 ` : "";
+  return `저장하면 ${r}오래된 회차의 작업 ${n} 곧 정리됩니다`;
 }

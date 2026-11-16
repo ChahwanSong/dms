@@ -1002,7 +1002,7 @@ def test_delete_loses_to_a_revival_between_read_and_delete(client, monkeypatch):
 
     def then_revived(request, batch_id):
         b = real(request, batch_id)
-        assert repo.rescan_if_terminal(batch_id) is not None          # 읽은 직후 회차가 시작됐다
+        assert repo.rescan_if_terminal(batch_id, actor="ops") is not None   # 읽은 직후 회차가 시작됐다
         return b
     monkeypatch.setattr(routes_batches, "_get_batch_or_404", then_revived)
     r = client.request("DELETE", f"/api/admin/batches/{bid}")

@@ -49,6 +49,8 @@ def test_controller_once(tmp_path, monkeypatch, capsys):
     # 요청 삭제 정리(2026-10-08): cli.py 가 build_purge_runner 를 build_loops 에 넘기지 않으면 request-purge 루프가
     # 없어 삭제한 요청의 파드·결과 파일이 영원히 남는다.
     assert "request-purge=ok" in out
+    # 회차 보존 정리(2026-11-16): 같은 purge_runner 조건 -- 배선이 빠지면 스케줄 배치의 자식이 끝없이 쌓인다.
+    assert "batch-round-prune=ok" in out
 
 
 def test_agent_once_uses_agent_settings(monkeypatch):

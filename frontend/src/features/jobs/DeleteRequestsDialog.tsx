@@ -146,6 +146,12 @@ export function DeleteRequestsDialog({ rows, batches = [], disabled, del, onDele
             ))}
           </ul>
         )}
+        {/* 배치 단위 삭제는 배치 기록과 함께 스케줄·실행 기록·보존 회차 기록도 지운다(request_purges.delete_batch -- 2026-11-16
+            회차 보존). 묶음 요약엔 스케줄 유무가 없어 「있으면」으로 말하고, 배치 기록이 남은 묶음이 있을 때만(기록만 지워진
+            묶음은 그때 스케줄도 함께 지워졌다). */}
+        {snapBatches.some((b) => b.exists) && (
+          <p className="text-xs">배치에 스케줄이 있으면 스케줄·실행 기록·보존 회차 기록도 함께 삭제됩니다.</p>
+        )}
         {/* 높이 상한 -- 375px 에서 경로 10줄이 1200px 가까이 차지해 scan 경고·「스토리지 데이터는 그대로」 문구를 화면
             밖으로 밀었다(2026-10-09 검증 지적). 넘치면 목록 안에서 스크롤한다. 단건이 없으면(배치만) 그리지 않는다. */}
         {n > 0 && nb > 0 && <p className="text-xs font-medium text-ink">{`삭제할 작업 ${n}개`}</p>}

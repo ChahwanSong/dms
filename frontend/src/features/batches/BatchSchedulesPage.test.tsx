@@ -94,7 +94,7 @@ test("목록 열: 배치 링크·작업·대상 스토리지·주기·다음 실
   expect(within(tr).getByText("root-admin")).toHaveAttribute("title", "만든 사람 maker");
   // 머리줄 순서(열이 빠지거나 뒤바뀌면 문다)
   expect(screen.getAllByRole("columnheader").map((h) => h.textContent)).toEqual(
-    ["배치", "작업", "대상 스토리지", "주기", "다음 실행(KST)", "마지막 결과", "사용", "소유", "관리"]);
+    ["배치", "작업", "대상 스토리지", "주기", "다음 실행(KST)", "마지막 결과", "정리", "사용", "소유", "관리"]);
 });
 
 test("sync 는 src → dst, 자동 실행 표식, 이름 없는 배치는 id 12자", async () => {
@@ -259,11 +259,63 @@ test("토글 실패는 어느 스케줄의 무엇이 왜 실패했는지 말한�
 test("삭제는 2단 확인 — 1단은 무장만, 2단이 DELETE", async () => {
   const calls = serve([sched()]);
   renderPage();
-  await userEvent.click(await screen.findByRole("button", { name: "정기 스캔 삭제" }));
+  const arm = await screen.findByRole("button", { name: "정기 스캔 삭제" });
+  // 스케줄 삭제가 지우는 것은 실행 기록이고 보존 회차 셈·남은 작업은 그대로다(정리는 멈춘다) — 맨 「회차 기록」은 보존 회차
+  // (batch_rounds)와 헷갈렸다(dms-k8s d29 실증 뒤 낱말 통일).
+  expect(arm.getAttribute("title"))
+    .toBe("실행 기록도 함께 지웁니다 — 보존 회차 셈과 이미 남은 작업은 그대로, 정리는 멈춥니다(감사 기록은 남습니다)");
+  await userEvent.click(arm);
   expect(calls).toEqual([]);
+  expect(screen.getByRole("button", { name: "정기 스캔 삭제 확인" }).getAttribute("title")).toBe(arm.getAttribute("title"));
   await userEvent.click(screen.getByRole("button", { name: "정기 스캔 삭제 확인" }));
   await waitFor(() => expect(calls).toEqual([{ method: "DELETE", path: "s1", body: null }]));
   expect(await screen.findByText(/스케줄이 없습니다/)).toBeInTheDocument();
+});
+
+test("회차 보존 안내(머리 도움말)와 「정리」 열 — null(아직 없음) ≠ 0, 누적 / 마지막 시각 두 줄", async () => {
+  serve([sched({ keep_rounds: 10, pruned_total: null, pruned_at: null, child_count_limit: 1000 }),
+         sched({ schedule_id: "s2", batch_id: ID2, keep_rounds: 10, pruned_total: 0, pruned_at: "2026-11-16T09:30:00Z",
+                 child_count_limit: 1000,
+                 batch: { name: "정리된 배치", operation: "scan", status: "Completed", item_count: 3 } }),
+         sched({ schedule_id: "s3", batch_id: "b333333333333ccc", keep_rounds: 10, pruned_total: 12,
+                 pruned_at: "2026-11-16T09:30:00Z", child_count_limit: 1000,
+                 batch: { name: "큰 CSV", operation: "scan", status: "Completed", item_count: 120 } })]);
+  renderPage();
+  const head = await screen.findByText(/스케줄이 있는 배치는 최근 10회차만 보존합니다/);
+  expect(head).toHaveTextContent("항목 수 × 보존 회차가 배치 단위 삭제 상한을 넘으면 경고합니다.");
+  // 머리 안내는 break-keep(어절 중간에서 꺾이지 않게)
+  expect(head.closest("ul")!.className).toContain("break-keep");
+  expect(screen.getByRole("columnheader", { name: "정리" })).toBeInTheDocument();
+  expect(within(rowOf("정기 스캔")).getByText("아직 정리 없음")).toBeInTheDocument();
+  // 누적 / 마지막 시각 두 줄 — 둘째 줄 「마지막 <시각>」 전체가 한 덩어리(whitespace-nowrap)라 390 폭에서 하이픈에서도, 「마지막」과
+  // 시각 사이 공백에서도 꺾이지 않는다(dms-k8s d29·d30 실증)
+  const total = screen.getByText("정리 누적 0건");
+  const cell = total.closest("td")!;
+  expect(cell).toHaveTextContent("정리 누적 0건마지막 2026-11-16 18:30:00");
+  expect(cell.className).toContain("break-keep");
+  expect(cell).toHaveAttribute("title", expect.stringContaining("최근 10회차만 보존합니다"));
+  const lastLine = within(cell).getByText("마지막");
+  expect(lastLine.tagName).toBe("SPAN");
+  expect(lastLine).toHaveTextContent("마지막 2026-11-16 18:30:00");
+  expect(lastLine.className).toContain("whitespace-nowrap");
+  expect(lastLine.className).toContain("block");
+  expect(within(lastLine).getByText("2026-11-16 18:30:00").className).toContain("tabular-nums");
+  expect(screen.getByText("정리 누적 12건").closest("td")).toHaveTextContent("정리 누적 12건마지막 2026-11-16 18:30:00");
+  // 항목 120 × 10 = 1,200 > 상한 1,000(서버 child_count_limit) — 배치 이름 아래 경고. 3 × 10 은 상한 안이라 없다
+  const warn = within(rowOf("큰 CSV")).getByRole("note");
+  expect(warn).toHaveTextContent(/항목 120개 × 10회차 = 작업 최대 1,200개 — 정리 뒤에도 배치 단위 삭제 상한\(1,000개\)을 넘어/);
+  expect(within(rowOf("정기 스캔")).queryByRole("note")).toBeNull();
+});
+
+test("옛 서버(keep_rounds·child_count_limit 없음): 머리 안내는 숫자 없이, 예측 경고는 지어내지 않는다", async () => {
+  serve([sched({ batch: { name: "정기 스캔", operation: "scan", status: "Completed", item_count: 5000 } })]);
+  renderPage();
+  await screen.findByRole("link", { name: "정기 스캔" });
+  expect(screen.getByText(/스케줄이 있는 배치는 최근 회차만 보존하고 오래된 회차의 작업을 자동으로 정리합니다/))
+    .toBeInTheDocument();
+  expect(screen.queryByText(/회차만 보존합니다/)).toBeNull();
+  expect(within(rowOf("정기 스캔")).queryByRole("note")).toBeNull();          // 상한을 모르면 경고 없음
+  expect(within(rowOf("정기 스캔")).getByText("아직 정리 없음")).toBeInTheDocument();
 });
 
 test("root 자격이 없는 관리자: 추가·수정·켜기는 잠기고 끄기·삭제·기록은 된다", async () => {

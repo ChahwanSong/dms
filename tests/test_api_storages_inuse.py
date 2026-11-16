@@ -143,7 +143,7 @@ def test_revived_batch_holds_the_storage_from_the_same_commit(client):
     # -- 「발사 직후 첫 자식 전」 창(2026-11-16 리뷰 창 A)이 없다.
     _admin(client); _seed_storage(client)
     bid = _batch_on(client, "Completed", op="rm")
-    assert client.app.state.repos.batches.rescan_if_terminal(bid)["status"] == "Previewing"
+    assert client.app.state.repos.batches.rescan_if_terminal(bid, actor="ops")["status"] == "Previewing"
     r = client.put("/api/admin/storages/s1", json={
         "mount_path": "/s1", "managed_root": "/s1/home", "backend_type": "cephfs", "enabled": True})
     assert r.status_code == 409 and r.json()["detail"] == "storage_in_use"

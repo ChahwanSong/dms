@@ -1,7 +1,8 @@
 import { describe, expect, test } from "vitest";
 import {
-  DEFAULT_SCHEDULE_FORM, formFromSchedule, isDestructiveBatch, outcomeLabel, outcomeTone, scheduleEnabled,
-  nextRunStamp, scheduleFormErrors, scheduleFormInvalid, scheduleSummary, schedulableOp, specFromForm,
+  DEFAULT_SCHEDULE_FORM, SCHEDULE_DELETE_HINT, formFromSchedule, isDestructiveBatch, keepRoundsKnown, keepRoundsNotice,
+  outcomeLabel, outcomeTone, projectedChildrenWarning, pruneParts, prunePreviewText, pruneText, scheduleDeleteNotice,
+  scheduleEnabled, nextRunStamp, scheduleFormErrors, scheduleFormInvalid, scheduleSummary, schedulableOp, specFromForm,
   type ScheduleForm,
 } from "./batchSchedule";
 import { batchStorageLabel, storageText } from "./batchStorage";
@@ -148,5 +149,71 @@ describe("배치 판정 도우미", () => {
     expect(nextRunStamp(false, "2026-11-16T17:00:00Z")).toBe("—");       // 꺼진 스케줄은 예정이 없다
     expect(nextRunStamp(true, null)).toBe("—");
     expect(nextRunStamp(true, "garbage")).toBe("garbage");
+  });
+});
+
+// 회차 보존(2026-11-16 사용자 결정 「최근 10회차만 누적」 — dms-k8s 9166b8e2·0ec5f33b 이식). K·상한은 서버가 실어 준 값만 쓴다.
+describe("회차 보존 문구 — 서버 keep_rounds·child_count_limit·prune_preview 로만", () => {
+  test("보존 안내는 1 이상 정수일 때만 만든다(옛 서버·변조 값이면 null — 지어내지 않는다)", () => {
+    const t = keepRoundsNotice(10)!;
+    expect(t).toContain("스케줄이 있는 배치는 최근 10회차만 보존합니다");
+    expect(t).toContain("첫 실행·전체 재실행·스케줄 회차를 회차로 세고(실패분·선택 재실행은 그 회차에 속합니다)");
+    expect(t).toContain("10회차를 넘으면 가장 오래된 회차의 작업(자식 요청·잡·결과 파일)을 곧 자동으로 정리합니다");
+    expect(t).toContain("사용량 분석의 scan 이력(온도·용량 추이)도 이 배치 몫은 최근 10회차만 남습니다");
+    expect(t).toContain("스케줄을 꺼도 정리는 계속되고, 스케줄을 지우면 멈춥니다");
+    for (const k of [null, undefined, 0, -1, 1.5, "10", true]) {
+      expect(keepRoundsNotice(k as number | null | undefined)).toBeNull();
+      expect(keepRoundsKnown(k)).toBe(false);
+    }
+    expect(keepRoundsKnown(1)).toBe(true);
+  });
+
+  test("정리 결과 — null(아직 없음)과 0 을 가른다(null ≠ 0), 표 칸 조각과 한 줄 글이 같은 재료", () => {
+    expect(pruneText({ pruned_total: null, pruned_at: null })).toBe("아직 정리 없음");
+    expect(pruneText({})).toBe("아직 정리 없음");
+    expect(pruneText({ pruned_total: 0, pruned_at: null })).toBe("정리 누적 0건");
+    expect(pruneText({ pruned_total: 1234, pruned_at: "2026-11-16T09:30:00Z" }))
+      .toBe("정리 누적 1,234건 · 마지막 2026-11-16 18:30:00");
+    // 시각만 있고 누적이 null 이면 「아직 없음」 — 시각만으로 정리 수를 지어내지 않는다
+    expect(pruneParts({ pruned_total: null, pruned_at: "2026-11-16T09:30:00Z" })).toBeNull();
+    expect(pruneParts({ pruned_total: 0, pruned_at: null })).toEqual({ total: "정리 누적 0건", at: null });
+    expect(pruneParts({ pruned_total: 1234, pruned_at: "2026-11-16T09:30:00Z" }))
+      .toEqual({ total: "정리 누적 1,234건", at: "2026-11-16 18:30:00" });
+  });
+
+  test("「항목 × K > 상한」 예측 경고 — 셋 다 알 때만, 같으면 경고 없음(이 라인 상한 1000)", () => {
+    expect(projectedChildrenWarning(100, 10, 1000)).toBeNull();               // 100 × 10 = 1000 — 상한과 같으면 지울 수 있다
+    expect(projectedChildrenWarning(101, 10, 1000)).toBe(
+      "항목 101개 × 10회차 = 작업 최대 1,010개 — 정리 뒤에도 배치 단위 삭제 상한(1,000개)을 넘어 이 배치는 배치 단위로 지울 수 "
+      + "없습니다(실패분 재실행이 더해지면 더 많습니다)");
+    expect(projectedChildrenWarning(0, 10, 1000)).toBeNull();
+    expect(projectedChildrenWarning(null, 10, 1000)).toBeNull();
+    expect(projectedChildrenWarning(undefined, 10, 1000)).toBeNull();
+    expect(projectedChildrenWarning(500, null, 1000)).toBeNull();
+    expect(projectedChildrenWarning(500, 10, undefined)).toBeNull();           // 옛 서버 — 상한을 지어내지 않는다
+    expect(projectedChildrenWarning(500, 10, 0)).toBeNull();
+  });
+
+  test("추가 창 예측 문구 — 0·모름이면 없음, capped 면 「이상」, 회차 수를 모르면 그 조각을 뺀다", () => {
+    expect(prunePreviewText({ rounds_recorded: 11, would_prune: 8 }))
+      .toBe("저장하면 기록된 회차 11개 중 오래된 회차의 작업 약 8개가 곧 정리됩니다");
+    expect(prunePreviewText({ rounds_recorded: 11, would_prune: 10001, would_prune_capped: true }))
+      .toBe("저장하면 기록된 회차 11개 중 오래된 회차의 작업 10,000개 이상이 곧 정리됩니다");
+    expect(prunePreviewText({ rounds_recorded: null, would_prune: 3 })).toBe("저장하면 오래된 회차의 작업 약 3개가 곧 정리됩니다");
+    expect(prunePreviewText({ rounds_recorded: 2, would_prune: 0 })).toBeNull();
+    expect(prunePreviewText(null)).toBeNull();
+    expect(prunePreviewText(undefined)).toBeNull();
+  });
+
+  test("삭제 문구의 「기록」 — 스케줄 삭제는 실행 기록만, 배치 삭제는 실행 기록·보존 회차 기록까지(맨 「회차 기록」은 쓰지 않는다)", () => {
+    expect(SCHEDULE_DELETE_HINT)
+      .toBe("실행 기록도 함께 지웁니다 — 보존 회차 셈과 이미 남은 작업은 그대로, 정리는 멈춥니다(감사 기록은 남습니다)");
+    expect(scheduleDeleteNotice({ kind: "daily", spec: { hour: 2, minute: 0 }, enabled: 1 }))
+      .toBe("이 배치의 스케줄(매일 02:00 (KST) · 사용 중)과 실행 기록·보존 회차 기록도 함께 삭제됩니다(감사 기록은 남습니다).");
+    expect(scheduleDeleteNotice({ kind: "daily", spec: { hour: 2, minute: 0 }, enabled: 0 }))
+      .toBe("이 배치의 스케줄(매일 02:00 (KST))과 실행 기록·보존 회차 기록도 함께 삭제됩니다(감사 기록은 남습니다).");
+    for (const t of [SCHEDULE_DELETE_HINT, scheduleDeleteNotice({ kind: "daily", spec: { hour: 2, minute: 0 }, enabled: 0 })]) {
+      expect(t).not.toMatch(/(?<!보존 )회차 기록/);
+    }
   });
 });

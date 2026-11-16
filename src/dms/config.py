@@ -39,6 +39,13 @@ _SERVER_INT_KEYS = (
     ("DMS_REQUEST_DELETE_QUIET_SECONDS", "request_delete_quiet_seconds", 60),
     # 컨트롤러 request-purge 루프 간격(삭제한 요청의 남은 파드·결과 파일 정리, 실패 백오프의 기준 단위). 1 이상.
     ("DMS_REQUEST_PURGE_INTERVAL_SECONDS", "request_purge_interval_seconds", 15),
+    # 배치 스케줄 회차 보존(2026-11-16 사용자 결정 「배치 회차가 계속 누적되는걸 원하지 않아 최근 10회차만」 -- batch_round_prune.py):
+    # 스케줄이 있는 배치는 최근 이 수의 회차(첫 실행·전체 재실행·스케줄 회차)의 자식 요청만 남기고, 그보다 오래된 회차의 자식을
+    # 요청 삭제와 같은 몸통·같은 정리 루프로 지운다. 1–100(밖이면 기동 거부) -- 상한 100 은 회차 경계 행 보존 상한
+    # (repositories/batches.BATCH_ROUND_HISTORY_CAP 200) 안에서 경계를 계산할 수 있어야 해서다. 컨트롤러가 읽고(정리), api 는
+    # 화면 표시만. base 20-config 에는 싣지 않는다(공용 base -- dms-k8s 라인은 자기 라인 값을 싣는다: 처음 "5", 같은 날 0b5e7357 부터
+    # "10"); 바꾸려면 오버레이에서.
+    ("DMS_BATCH_SCHEDULE_KEEP_ROUNDS", "batch_schedule_keep_rounds", 10),
     ("DMS_BUILD_WATCHER_INTERVAL_SECONDS", "build_watcher_interval_seconds", 15),
     # 빌드 파드 activeDeadlineSeconds + BuildWatcher 나이 기반 회수 창(C2). 기본
     # 7200(2h) -- mpifileutils를 소스에서 컴파일하는 빌드가 가장 오래 걸린다.
@@ -261,6 +268,8 @@ class Settings:
     pod_gc_interval_seconds: int = 600
     request_delete_quiet_seconds: int = 60
     request_purge_interval_seconds: int = 15
+    # 배치 스케줄 회차 보존 수(2026-11-16) -- _SERVER_INT_KEYS 의 주석 참고. 1–100.
+    batch_schedule_keep_rounds: int = 10
     build_registry: str = "pkg-01:5000"
     build_builder_image: str = "quay.io/buildah/stable:latest"
     build_watcher_interval_seconds: int = 15
@@ -303,6 +312,9 @@ class Settings:
         if extra["request_purge_interval_seconds"] < 1:
             problems.append("DMS_REQUEST_PURGE_INTERVAL_SECONDS must be >= 1: "
                             f"{environ.get('DMS_REQUEST_PURGE_INTERVAL_SECONDS')!r}")
+        if not 1 <= extra["batch_schedule_keep_rounds"] <= 100:
+            problems.append("DMS_BATCH_SCHEDULE_KEEP_ROUNDS must be between 1 and 100: "
+                            f"{environ.get('DMS_BATCH_SCHEDULE_KEEP_ROUNDS')!r}")
         artifact_base_allowed_prefixes = _parse_path_prefixes(
             environ, "DMS_ARTIFACT_BASE_ALLOWED_PREFIXES", problems)
         # if problems 검사보다 앞에서 파싱해야 잘못된 값이 조용히 기본값으로 바뀌지 않는다.

@@ -20,8 +20,18 @@ batch_child_not_deletable). 대신 배치 하나 = 자식 요청 **전부**(`req
 "일부만 지워진 살아 있는 배치" 가 남는다. 배치 행이 없는 자식 묶음(배치 기록만 지운 BatchesRepository.delete 의 잔재,
 dangling)도 같은 메서드로 묶음째 지운다. 잠금 순서는 batch_items → batches → requests(request_id 순) → data_jobs --
 오케스트레이터 _record_terminal·reject_queued_item(batch_items → batches)과 planner·요청 삭제(requests → data_jobs)를 둘 다
-지키는 방향이다. 역순으로 함께 잠그는 경로를 새로 만들면 교착이다. 감사는 자식마다 기존 ('request','delete') 행(스냅숏에
-batch_id) + 배치마다 ('batch','delete') 행 1개(_batch_bounded -- 배치 이름·옵션·실행 신원·항목은 다른 어디에도 남지 않는다).
+지키는 방향이다. 역순으로 함께 잠그는 경로를 새로 만들면 교착이다. 회차 경계 → 배치 스케줄 → 회차 이력(2026-11-16)은 맨
+끝이다 -- 스케줄 발사(항목 → 배치 → 회차 경계 → 스케줄 → 회차 이력, batches.BATCH_DELETE_TABLES)와 같은 방향. 감사는 자식마다
+기존 ('request','delete') 행(스냅숏에 batch_id) + 배치마다 ('batch','delete') 행 1개(_batch_bounded -- 배치 이름·옵션·실행
+신원·항목은 다른 어디에도 남지 않는다). 확인 창의 자식 수가 CAS(「자식 수 = 버전」)인데, 회차 보존 정리(아래)가 수를 줄일 수
+있어 이제 근사다 -- 정리가 지운 수만큼 새 회차가 같은 수로 생기면 통과할 수 있다(새 회차가 끝나고 조용한 창까지 지나야 하고,
+배치 **전체** 삭제를 고른 상황이라 수용 -- 최대 commit_order CAS 강화안은 BACKLOG).
+
+**회차 보존 정리**(prune_round_children, 2026-11-16 사용자 결정 「배치 회차가 계속 누적되는걸 원하지 않아 최근 10회차만」 --
+batch_round_prune.py): 컨트롤러 루프가 고른 경계(commit_order ≤ upto) 이하의 종단 자식을 청크(≤ 100)마다 한 트랜잭션으로 같은
+몸통(_purge_locked, per_request_audit=False)에 맡긴다 -- 셋째 호출자. 잠금 순서 requests(request_id 순) → data_jobs →
+batch_schedules(맨 끝, 카운터) -- 배치 단위 삭제와 같은 방향이고 batch_items·batches·batch_rounds 는 잠그지 않는다. 감사는
+자식별 행 대신 청크마다 ('batch','prune_rounds', batch_id) 1행(actor system:batch-scheduler, 자식별 최소 기록 -- _prune_bounded).
 
 **삭제 목록이 곧 일관성의 전부다** -- 저장소 전체에 FK 가 0건이라, request_id·job_id 를 담는 테이블을 새로 만들고 여기
 (PURGED_TABLES·_purge_locked·finish)에 넣지 않으면 그 행은 조용히 고아가 된다. tests/test_repo_request_purges.py 가
@@ -65,6 +75,12 @@ _TERMINAL_BATCH = ("Completed", "Cancelled")
 # (deploy/README 「배치 단위 삭제」).
 MAX_BATCH_DELETE_CHILDREN = 1000
 MAX_BATCH_DELETE_ITEMS = 10000
+
+# 회차 보존 정리 고르기(_prune_pick, 2026-11-16 -- dms-k8s 검증 지적 이식): 경계 이하 자식을 인덱스 순서로 창(PRUNE_PICK_WINDOW)만큼
+# 잘라 그 안에서만 판정하고, 한 호출은 PRUNE_PICK_SCAN_BUDGET 행까지만 훑는다(넘으면 커서를 돌려 다음 호출이 이어서) -- 청크 비용을
+# 남은 정리 대기량이 아니라 이 두 수에 묶는다. 판정 1행 ≈ 4µs(dms-k8s 로컬 PG16)라 최악(앞이 전부 막힘)도 호출당 ~20ms.
+PRUNE_PICK_WINDOW = 500
+PRUNE_PICK_SCAN_BUDGET = 5000
 
 STAGES = ("k8s", "files", "purging")
 BACKOFF_CAP_SECONDS = 900
@@ -112,6 +128,18 @@ def _batch_skip(*, reason_code, request_id=None) -> dict:
 def _clip(value):
     # 감사 골격용: 변조로 거대해진 문자열 값을 원문 앞부분으로 접는다(증거 보존 + 상한).
     return value[:_RAW_MAX] if isinstance(value, str) else value
+
+
+def _short_str(value):
+    # 정리 감사 자식 기록용(_prune_summary): 문자열만 _ID_MAX 로 접고, 나머지(부재·변조 타입)는 None.
+    return value[:_ID_MAX] if isinstance(value, str) else None
+
+
+def _prune_chown(payload) -> "str | None":
+    """자식 payload 의 options.chown(sync 결과 소유 -- domain.chown_problem 이 숫자 uid:gid 만 허용) → 정리 감사용 문자열 | None.
+    None = 해당 없음(scan·rm·chown 없는 sync -- 키 부재) 또는 문자열이 아닌 변조 값. 값은 _ID_MAX 로 접는다."""
+    options = payload.get("options")
+    return _short_str(options.get("chown")) if isinstance(options, dict) else None
 
 
 def _parse(text):
@@ -391,20 +419,27 @@ class RequestPurgesRepository:
             return _skip(reason_code="request_not_deletable")
         return {"deleted": True, "job_ids": job_ids}
 
-    def _purge_locked(self, reqs, jobs_by_rid, *, actor, artifact_base, now, batch_id) -> list[str]:
+    def _purge_locked(self, reqs, jobs_by_rid, *, actor, artifact_base, now, batch_id,
+                      per_request_audit: bool = True) -> list[str]:
         """reqs(이미 잠그고 게이트를 통과한 요청 행들, request_id 순)와 그 잡들을 지운다. 반환 = 지운 job_id 전부(reqs
         순서, 요청 안에선 jobs_by_rid 의 순서). batch_id None = 단건 경로(CAS 에 batch_id IS NULL), 문자열 = 배치 경로
         (CAS 에 batch_id = :bid -- 그 배치의 자식만).
 
-        **트랜잭션을 열지 않는다** -- delete_terminal·delete_batch 가 소유한다(Database.transaction 은 중첩되지 않는다).
-        순서: 감사 스냅숏(지우기 전에 읽는다) → 집합 DELETE(_in 묶음) → 자식마다 events(감사의 events_deleted 를 정확히
-        남기려고 자식마다) → 마지막 CAS DELETE(합이 len(reqs) 가 아니면 _Lost -- 잠금이 없는 sqlite 경로와 잠금 누락에
-        대한 이중 가드, 진 쪽은 전부 롤백) → 자식마다 정리 아웃박스 행 + 감사 행."""
+        **트랜잭션을 열지 않는다** -- delete_terminal·delete_batch·prune_round_children 이 소유한다(Database.transaction 은
+        중첩되지 않는다). 순서: 감사 스냅숏(지우기 전에 읽는다) → 집합 DELETE(_in 묶음) → 자식마다 events(감사의
+        events_deleted 를 정확히 남기려고 자식마다) → 마지막 CAS DELETE(합이 len(reqs) 가 아니면 _Lost -- 잠금이 없는 sqlite
+        경로와 잠금 누락에 대한 이중 가드, 진 쪽은 전부 롤백) → 자식마다 정리 아웃박스 행 + 감사 행.
+
+        per_request_audit=False(회차 보존 정리 -- prune_round_children 만, 2026-11-16): 자식별 스냅숏(_snapshot -- 자식당 읽기
+        3개)과 ('request','delete') 감사 행을 남기지 않고, events 는 묶음으로 지운다(events_deleted 를 셀 필요가 없다). 감사는
+        호출자가 청크마다 ('batch','prune_rounds') 요약 1행으로 남긴다. **같은 것**: PURGED_TABLES 삭제 집합·순서, requests
+        CAS·_Lost, 정리 아웃박스 _enqueue -- 삭제 목록을 두 벌로 두지 않는다."""
         rids = [r["request_id"] for r in reqs]
         plan_ids = [r["plan_id"] for r in self._query_in(
             "SELECT plan_id FROM plans WHERE request_id IN ({})", rids)]
         job_ids = [j["job_id"] for rid in rids for j in jobs_by_rid.get(rid, [])]
-        snapshots = {r["request_id"]: self._snapshot(r, jobs_by_rid.get(r["request_id"], [])) for r in reqs}
+        snapshots = ({r["request_id"]: self._snapshot(r, jobs_by_rid.get(r["request_id"], [])) for r in reqs}
+                     if per_request_audit else {})
         for kind, ids in (("data_job", job_ids), ("plan", plan_ids), ("request", rids)):
             self._in("DELETE FROM state_transitions WHERE entity_kind = :k AND entity_id IN ({})",
                      ids, {"k": kind})
@@ -412,9 +447,12 @@ class RequestPurgesRepository:
         self._in("DELETE FROM data_jobs WHERE request_id IN ({})", rids)
         self._in("DELETE FROM plans WHERE request_id IN ({})", rids)
         self._in("DELETE FROM results WHERE request_id IN ({})", rids)
-        for rid in rids:
-            snapshots[rid]["events_deleted"] = self._db.execute_count(
-                "DELETE FROM events WHERE request_id = :r", {"r": rid})
+        if per_request_audit:
+            for rid in rids:
+                snapshots[rid]["events_deleted"] = self._db.execute_count(
+                    "DELETE FROM events WHERE request_id = :r", {"r": rid})
+        else:
+            self._in("DELETE FROM events WHERE request_id IN ({})", rids)
         states = sorted(_TERMINAL_REQ)
         params = {f"s{i}": s for i, s in enumerate(states)}
         if batch_id is None:
@@ -438,6 +476,8 @@ class RequestPurgesRepository:
             jobs = jobs_by_rid.get(rid, [])
             self._enqueue(rid, [self._outbox_job(j) for j in jobs], old=old_rows.get(rid),
                           artifact_base=artifact_base, actor=actor, now=now)
+            if not per_request_audit:
+                continue
             self._db.execute(
                 """INSERT INTO audit_log (mutation_class, operation, target_key, actor,
                        before_state, after_state, at)
@@ -457,8 +497,9 @@ class RequestPurgesRepository:
           batch_not_found            배치 행도 자식도 남은 항목도 없다
           batch_delete_too_large     자식 > max_children 또는 항목 > max_items -- 트랜잭션 동안 API 단일 커넥션 RLock 이
                                      API 전체를 멈추므로 한 트랜잭션의 크기를 묶는다(모듈 상수 MAX_BATCH_DELETE_*)
-          batch_changed              자식 수 != expected_request_count(확인 창이 본 수 -- 자식은 늘어나기만 하므로 수가 곧
-                                     버전이다), 또는 마지막 CAS·유령 자식 재확인 패배
+          batch_changed              자식 수 != expected_request_count(확인 창이 본 수 -- 자식 수가 버전이다. 2026-11-16
+                                     부터는 회차 보존 정리가 수를 줄일 수 있어 근사다 -- 모듈 docstring·BACKLOG 의 최대
+                                     commit_order CAS 강화안), 또는 마지막 CAS·유령 자식 재확인 패배
           batch_child_shared         자식을 **다른** 배치의 항목이 가리킨다(비정상 DB -- fail-closed). 단건 경로의
                                      batch_child_not_deletable(「배치 단위로 선택해 삭제하세요」)을 쓰지 않는다 -- 이미
                                      배치 단위로 고른 사람에게 같은 말을 돌려주게 된다(2026-10-11 검증 지적). 처방은 그
@@ -559,10 +600,13 @@ class RequestPurgesRepository:
                         "DELETE FROM batches WHERE batch_id = :b AND status IN ('Completed', 'Cancelled')",
                         {"b": batch_id}) != 1:
                     raise _Lost()
-                # 배치 스케줄과 회차 이력(2026-11-16)도 같은 트랜잭션에서 -- 배치 기록 삭제(BatchesRepository.delete)와 같은
-                # 목록(batches.BATCH_DELETE_TABLES). 잠금은 항목 → 배치 → (요청·잡) → 스케줄 순이고, 스케줄을 쥐는 경로(발사·
-                # 스케줄 라우트)는 항목·배치를 먼저 쥐므로 교착이 없다. 배치 행이 없는 묶음도 지운다(남은 스케줄은 고아다).
-                # 스케줄이 있었으면 그 삭제를 감사 행으로 남긴다(배치의 ('batch', 'delete') 행은 스케줄을 담지 않는다).
+                # 회차 경계·배치 스케줄·회차 이력(2026-11-16)도 같은 트랜잭션에서 -- 배치 기록 삭제(BatchesRepository.delete)와
+                # 같은 목록(batches.BATCH_DELETE_TABLES 순서 = 잠금 순서: 회차 경계를 스케줄보다, 스케줄을 회차 이력보다 먼저).
+                # 잠금은 항목 → 배치 → (요청·잡) → 회차 경계 → 스케줄 순이고, 스케줄을 쥐는 다른 경로(발사·스케줄 라우트)는
+                # 항목·배치를 먼저 쥐거나 스케줄만 쥐고, 회차 보존 정리는 요청·잡 → 스케줄 순이라 교착이 없다. 배치 행이 없는
+                # 묶음도 지운다(남은 스케줄은 고아다). 스케줄이 있었으면 그 삭제를 감사 행으로 남긴다(배치의 ('batch', 'delete')
+                # 행은 스케줄을 담지 않는다).
+                self._db.execute("DELETE FROM batch_rounds WHERE batch_id = :b", {"b": batch_id})
                 _audit_schedule_delete(self._db, batch_id, actor=actor, now=now)
                 self._db.execute("DELETE FROM batch_schedules WHERE batch_id = :b", {"b": batch_id})
                 self._db.execute("DELETE FROM batch_schedule_runs WHERE batch_id = :b", {"b": batch_id})
@@ -578,6 +622,236 @@ class RequestPurgesRepository:
             # 그 사이 상태가 바뀌었거나 다른 관리자가 지웠다 -- 조용한 성공이 아니다. 다시 시도하면 된다.
             return _batch_skip(reason_code="batch_changed")
         return {"deleted": True, "request_ids": rids, "job_ids": job_ids, "dangling": batch is None}
+
+    # ---- 회차 보존 정리(2026-11-16 -- 컨트롤러 batch-round-prune 루프 전용, 모듈 docstring) ----
+
+    def _prune_pick(self, batch_id, *, upto_order, limit, quiet_cut, after=None) -> "tuple[list[dict], int | None]":
+        """고르기(잠그지 않음): 경계 이하 자식 중 **지금 지울 수 있어 보이는 것**만 commit_order 순 limit 건 + 다음 훑기 시작점.
+        반환 (고른 행들, scan_next) -- after·scan_next 는 commit_order 커서(그 번호 **초과**부터 훑는다), scan_next None = 경계까지
+        다 훑었다(다음 호출은 처음부터).
+
+        막힘 조건(요청 비종단·조용한 창·비종단 잡·창 안의 잡·항목 참조)인 자식은 고르면서 건너뛴다 -- 지울 수 없는 자식이 앞자리를
+        차지해 진행이 막히지 않게(비종단 잔재 100개가 앞에 있으면 영원히 진행하지 못한다). 잠근 뒤 재판정은 경합 방어다.
+
+        **창 모양**(dms-k8s 2026-11-16 검증 지적): 경계 이하 자식을 `ORDER BY batch_id, commit_order LIMIT 창`
+        (idx_requests_batch_order 를 창만큼만 읽는다)으로 먼저 자른 FROM 서브쿼리 **바깥에서** 판정한다. 판정을 같은 WHERE 에 두면
+        PG16 이 판정 서브쿼리의 선택도를 모른 채 Bitmap Heap Scan + top-N 정렬을 골라 경계 이하 **전부**에 판정을 돌렸다(청크
+        비용이 청크 크기가 아니라 남은 대기량에 비례). LIMIT 을 품은 서브쿼리는 PG 가 바깥 조건을 안으로 밀어 넣지 못해 창 크기가
+        판정 횟수의 상한이다. 한 호출은 창을 넘겨 가며 PRUNE_PICK_SCAN_BUDGET 행까지만 훑고, 다 못 훑었으면 scan_next 를 돌려
+        루프(batch_round_prune._SCAN_FROM)가 다음 호출을 그 뒤부터 시작한다 -- 막힌 자식이 앞에 아무리 많아도 호출마다 비용이
+        묶이고 진행이 멈추지 않는다(건너뛴 막힌 자식은 경계 끝까지 훑은 뒤 처음부터 다시 본다). limit 건을 채우면 마지막으로 고른
+        자식이 scan_next 다(그 뒤는 아직 안 봤다). 판정 꼴이 스칼라 서브쿼리(… LIMIT 1) IS NULL 인 이유: PG 가 anti-join 을
+        Hash + data_jobs 전체 Seq Scan 으로 바꾸지 못하게. 시각을 모르는 행(updated_at NULL)은 고르지 않는다(CASE 의 NULL 은
+        ELSE 0 -- _recently_touched 와 같은 fail-closed)."""
+        rt, jt = sorted(_TERMINAL_REQ), sorted(_TERMINAL_JOB)
+        window = PRUNE_PICK_WINDOW
+        lo = after if isinstance(after, int) and not isinstance(after, bool) and after >= 0 else 0
+        params = {"b": batch_id, "upto": int(upto_order), "cut": quiet_cut, "w": window,
+                  **{f"t{i}": s for i, s in enumerate(rt)}, **{f"j{i}": s for i, s in enumerate(jt)}}
+        sql = f"""SELECT c.request_id, c.commit_order,
+                         CASE WHEN c.state IN ({", ".join(f":t{i}" for i in range(len(rt)))})
+                                   AND c.updated_at <= :cut
+                                   AND (SELECT 1 FROM data_jobs j WHERE j.request_id = c.request_id
+                                          AND (j.state NOT IN ({", ".join(f":j{i}" for i in range(len(jt)))})
+                                               OR j.updated_at IS NULL OR j.updated_at > :cut) LIMIT 1) IS NULL
+                                   AND (SELECT 1 FROM batch_items bi WHERE bi.request_id = c.request_id LIMIT 1) IS NULL
+                              THEN 1 ELSE 0 END AS ok
+                    FROM (SELECT batch_id, request_id, commit_order, state, updated_at FROM requests
+                           WHERE {batch_match('b')} AND commit_order > :lo AND commit_order <= :upto
+                           ORDER BY batch_id, commit_order LIMIT :w) c
+                   ORDER BY c.batch_id, c.commit_order"""
+        picked: list[dict] = []
+        scanned = 0
+        while True:
+            rows = self._db.query(sql, {**params, "lo": lo})
+            for row in rows:
+                if row["ok"] == 1:
+                    picked.append(row)
+                    if len(picked) >= limit:
+                        return picked, row["commit_order"]
+            scanned += len(rows)
+            last = rows[-1]["commit_order"] if rows else None
+            if len(rows) < window or isinstance(last, bool) or not isinstance(last, int):
+                return picked, None           # 경계까지 다 훑었다
+            lo = last
+            if scanned >= PRUNE_PICK_SCAN_BUDGET:
+                return picked, lo
+
+    def _prune_lock(self, rids) -> "tuple[list[dict], dict]":
+        """잠금(삭제 경로와 같은 순서 -- requests(request_id 순) → data_jobs). (잠근 요청 행들, {request_id: 잡들}). 테스트가
+        이 메서드를 감싸 「고른 뒤·잠그기 전」 경합을 흉내 낸다."""
+        lock = self._lock()
+        reqs = self._query_in("SELECT * FROM requests WHERE request_id IN ({}) ORDER BY request_id" + lock, rids)
+        jobs_by_rid: dict[str, list] = {}
+        for j in self._query_in(
+                f"SELECT {_JOB_COLUMNS} FROM data_jobs WHERE request_id IN ({{}}) "
+                f"ORDER BY request_id, created_at, job_id{lock}", rids):
+            jobs_by_rid.setdefault(j["request_id"], []).append(j)
+        return sorted(reqs, key=lambda r: r["request_id"]), jobs_by_rid
+
+    def prune_round_children(self, batch_id, *, upto_order, limit, actor, artifact_base, quiet_seconds,
+                             audit_extra=None, now=None, scan_after=None) -> dict:
+        """회차 보존 정리 한 청크 = 한 트랜잭션(batch_round_prune 루프가 고른 경계 upto_order 이하의 그 배치 자식 ≤ limit 개).
+        반환 {"deleted": [request_id], "job_ids": [...], "picked": 고른 수, "limit": limit, "skipped": {사유: 수},
+        "schedule_gone": bool, "lost": bool, "scan_next": commit_order | None} -- 아무것도 못 지웠으면 아무것도 쓰지 않았다
+        (감사·카운터 없음). scan_after·scan_next 는 고르기 커서(_prune_pick docstring -- 루프가 배치마다 들고 다음 호출에 넘긴다,
+        None = 처음부터 / 경계까지 다 훑음). _Lost 면 scan_next = scan_after(롤백된 자식을 건너뛰지 않는다).
+
+          1) 고르기(_prune_pick -- 잠그지 않음, 창 단위로 훑으며 막힌 자식은 건너뛴다). 없으면 끝.
+          2) 잠금 requests(request_id 순) → data_jobs(_prune_lock)
+          3) 스케줄 확인 batch_schedules FOR UPDATE -- 잠금 순서의 **맨 끝**(배치 단위 삭제 꼬리와 같은 방향; 스케줄을 먼저 잡으면
+             requests → … → batch_schedules 인 배치 단위 삭제와 역순이라 PG 40P01). 행이 없으면(그 사이 스케줄·배치를 지웠다)
+             schedule_gone -- 아무것도 지우지 않는다(스케줄을 지우면 정리도 멈춘다).
+          4) 잠근 행으로 다시 판정(fail-closed, 첫 해당이 사유 -- 감사 JSON 의 키로만 남는다): 사라진 행 request_not_found ·
+             batch_id 다름/commit_order > upto batch_changed · 어느 항목이든 가리킴 batch_child_not_deletable · 요청 비종단
+             request_not_deletable · 비종단 잡 request_job_active · 조용한 창 안(시각 모름 포함) request_recently_finished
+          5) _purge_locked(per_request_audit=False) -- PURGED_TABLES 삭제 + 정리 아웃박스(requested_by = actor), CAS 패배는 _Lost
+          6) 감사 1행 ('batch', 'prune_rounds', batch_id) -- before = _prune_bounded(요약 + audit_extra)
+          7) 스케줄 칸 pruned_at·pruned_total(누적) -- **updated_at 은 절대 건드리지 않는다**(발사·기록 CAS 의 「사람이 그 사이
+             고쳤나」 표지라 밀면 다음 회차가 lost 가 된다)
+        _Lost 면 롤백하고 lost(루프가 다음 틱에 다시 고른다). 트랜잭션을 이 메서드가 소유한다."""
+        now = now or utc_now_iso()
+        out = {"deleted": [], "job_ids": [], "picked": 0, "limit": limit, "skipped": {},
+               "schedule_gone": False, "lost": False, "scan_next": None}
+        if (isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0
+                or isinstance(upto_order, bool) or not isinstance(upto_order, int) or upto_order < 1):
+            return out
+        lock = self._lock()
+        quiet_cut = iso_plus(now, -int(quiet_seconds))
+        skipped: dict[str, int] = {}
+
+        def skip(reason):
+            skipped[reason] = skipped.get(reason, 0) + 1
+
+        try:
+            with self._db.transaction():
+                picked, out["scan_next"] = self._prune_pick(batch_id, upto_order=upto_order, limit=limit,
+                                                            quiet_cut=quiet_cut, after=scan_after)
+                out["picked"] = len(picked)
+                if not picked:
+                    return out
+                rids = sorted(r["request_id"] for r in picked)
+                reqs, jobs_by_rid = self._prune_lock(rids)
+                sched = self._db.query_one(
+                    f"SELECT schedule_id FROM batch_schedules WHERE batch_id = :b{lock}", {"b": batch_id})
+                if sched is None:
+                    out["schedule_gone"] = True
+                    return out
+                found = {r["request_id"] for r in reqs}
+                for rid in rids:
+                    if rid not in found:
+                        skip("request_not_found")
+                referenced = {x["request_id"] for x in self._query_in(
+                    "SELECT request_id FROM batch_items WHERE request_id IN ({})", rids)}
+                keep = []
+                for r in reqs:
+                    jobs = jobs_by_rid.get(r["request_id"], [])
+                    co = r["commit_order"]
+                    if (r["batch_id"] != batch_id or isinstance(co, bool) or not isinstance(co, int)
+                            or co > upto_order):
+                        skip("batch_changed")
+                    elif r["request_id"] in referenced:
+                        skip("batch_child_not_deletable")
+                    elif r["state"] not in _TERMINAL_REQ:
+                        skip("request_not_deletable")
+                    elif any(j["state"] not in _TERMINAL_JOB for j in jobs):
+                        skip("request_job_active")
+                    elif self._recently_touched(r, jobs, now=now, quiet_seconds=quiet_seconds):
+                        skip("request_recently_finished")
+                    else:
+                        keep.append(r)
+                out["skipped"] = skipped
+                if not keep:
+                    return out
+                kept_jobs = {r["request_id"]: jobs_by_rid.get(r["request_id"], []) for r in keep}
+                job_ids = self._purge_locked(keep, kept_jobs, actor=actor, artifact_base=artifact_base, now=now,
+                                             batch_id=batch_id, per_request_audit=False)
+                summary = {"batch_id": batch_id, **(audit_extra or {}),
+                           **self._prune_summary(keep, kept_jobs, job_ids), "skipped": dict(skipped)}
+                self._db.execute(
+                    """INSERT INTO audit_log (mutation_class, operation, target_key, actor, before_state, after_state, at)
+                       VALUES ('batch', 'prune_rounds', :b, :actor, :before, NULL, :at)""",
+                    {"b": batch_id, "actor": actor, "before": self._prune_bounded(summary), "at": now})
+                self._db.execute(
+                    """UPDATE batch_schedules SET pruned_at = :now, pruned_total = COALESCE(pruned_total, 0) + :n
+                        WHERE batch_id = :b""", {"now": now, "n": len(keep), "b": batch_id})
+        except _Lost:
+            again = scan_after if isinstance(scan_after, int) and not isinstance(scan_after, bool) else None
+            return {**out, "deleted": [], "job_ids": [], "skipped": skipped, "lost": True, "scan_next": again}
+        out["deleted"] = [r["request_id"] for r in keep]
+        out["job_ids"] = job_ids
+        return out
+
+    @staticmethod
+    def _prune_summary(reqs, jobs_by_rid, job_ids) -> dict:
+        """정리 감사의 본문: 지운 수·잡 수·상태별 수·생성 시각 범위 + 자식마다 최소 기록(id·상태·생성 시각·owner_username·
+        chown·잡 {id, 상태, tool}). 자식별 32 KiB 스냅숏(_snapshot)은 남기지 않는다(결과 메시지·전이 전문은 사라진다).
+
+        실행 근거 칸이 run_as_root 가 아닌 이유(dms-k8s d29 라이브 실증 -- 그 칸이 늘 null 이었다): 정리 대상은 배치 자식뿐인데
+        orchestrator 는 자식 payload 에 run_as_root 를 싣지 않는다(실려 있으면 DB 변조 -- identity.privilege_policy). 배치 자식의
+        root 근거는 privilege_policy 의 배치 자식 판정이라 칸에 담을 정보가 없다. 대신 자식 payload 에 얼린 값 중 지우면 사라지는
+        둘을 남긴다(이 라인의 payload 에 실제로 있는 칸만 -- dms-k8s 의 dest_owner 블록은 이 라인에 없다):
+          owner_username -- 배치의 실행 신원 지정(_materialize 가 batches.owner_username 을 옮긴다). None = 지정 없음(키 부재 --
+                            비특권 배치의 정상 모양, 모름이 아니다) 또는 문자열이 아닌 변조 값.
+          chown          -- sync 결과 소유 옵션(payload options.chown, 숫자 uid:gid -- 배치 옵션은 종단 배치에서 바뀔 수 있어 그
+                            회차에 실제로 쓴 값은 자식 payload 에만 남는다). None = 해당 없음(scan·rm·chown 없는 sync) 또는 변조 값.
+        값은 _ID_MAX 로 접는다(정상 값은 계정 아이디·"uid:gid" 라 짧다 -- 변조로 거대해진 값이 32 KiB 를 혼자 채우지 않게)."""
+        states: dict = {}
+        children = []
+        for r in reqs:
+            st = r.get("state")
+            states[str(st)] = states.get(str(st), 0) + 1
+            payload = _parse(r.get("payload"))
+            payload = payload if isinstance(payload, dict) else {}
+            children.append({
+                "request_id": _clip(r["request_id"]), "state": _clip(st), "created_at": _clip(r.get("created_at")),
+                "owner_username": _short_str(payload.get("owner_username")),
+                "chown": _prune_chown(payload),
+                "jobs": [{"job_id": _clip(j["job_id"]), "state": _clip(j["state"]), "tool": _clip(j["tool"])}
+                         for j in jobs_by_rid.get(r["request_id"], [])]})
+        stamps = [r.get("created_at") for r in reqs if isinstance(r.get("created_at"), str)]
+        return {"deleted_count": len(reqs), "job_count": len(job_ids), "states": states,
+                "oldest_created_at": min(stamps) if stamps else None,
+                "newest_created_at": max(stamps) if stamps else None,
+                "children": children, "truncated": False}
+
+    @staticmethod
+    def _prune_bounded(summary) -> str:
+        """정리 감사 before_state -- 32 KiB 상한(감사가 정리를 막는 일은 없다, _bounded 원칙). 넘으면 단계적으로 줄인다:
+        children[].jobs 를 뺀다(id·상태·생성 시각·owner_username·chown 은 남는다 -- 둘은 _ID_MAX 로 접혀 있어 청크 100 이면 이
+        단계에서 들어간다) → children 을 request_id 목록으로 → 목록을 비우고 수만 남긴다(truncated). 그래도 넘으면(변조로
+        거대해진 값) 고정 키의 짧은 값만."""
+        text = _fits(summary)
+        if text is not None:
+            return text
+        snap = {**summary, "truncated": True}
+        children = summary.get("children") or []
+        for level in ([{k: v for k, v in c.items() if k != "jobs"} for c in children],
+                      [c["request_id"] for c in children],
+                      []):
+            snap["children"] = level
+            text = _fits(snap)
+            if text is not None:
+                return text
+        keys = ("batch_id", "schedule_id", "keep_rounds", "rounds_recorded", "cut_round_seq", "upto_order",
+                "anchor_order", "deleted_count", "job_count")
+        return dump_json({**{k: _clip(summary.get(k)) if isinstance(summary.get(k), str) else summary.get(k)
+                             for k in keys if not isinstance(summary.get(k), (dict, list))},
+                          "children": [], "truncated": True})
+
+    def round_children_exist(self, batch_id, *, upto_order) -> bool:
+        """경계 이하 자식이 하나라도 있나(거르기 없이 LIMIT 1 탐침) -- 루프의 막힘 경고(고를 수 있는 것이 0 인데 자식은 남음 =
+        비종단 잔재·항목 참조)용."""
+        return self._db.query_one(
+            f"SELECT 1 AS x FROM requests WHERE {batch_match('b')} AND commit_order <= :upto "
+            "ORDER BY batch_id, commit_order LIMIT 1", {"b": batch_id, "upto": int(upto_order)}) is not None
+
+    def pending_requested_by(self, actor) -> int:
+        """이 actor 가 넣은 정리 대기 행 수 -- 회차 보존 정리 루프가 자기 대기 행을 상한(BACKLOG_MAX) 아래로 묶는다(사람이
+        지운 작업의 정리를 굶기지 않게). 새 아웃박스 표·kind 를 만들지 않는 이유: 정리 행은 요청 삭제와 같은 끝(finish scrub)을
+        가져야 한다. 아웃박스는 정리 대기 행만 담는 작은 표라 전수 COUNT 로 충분하다."""
+        return int(self._db.query_one(
+            "SELECT COUNT(*) AS n FROM request_purges WHERE requested_by = :a", {"a": actor})["n"])
 
     def _enqueue(self, request_id, out_jobs, *, old, artifact_base, actor, now) -> None:
         """아웃박스 행 INSERT -- 호출자 트랜잭션 안. 같은 request_id 의 행이 이미 있으면(지운 요청이 DB 복원으로 되살아나

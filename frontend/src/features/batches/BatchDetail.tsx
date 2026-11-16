@@ -28,12 +28,14 @@ import { batchPillVariant, batchStatusLabel } from "../../lib/jobState";
 import { chownHasName, syncOwnership } from "../../lib/syncOwnership";
 import { kstStampEpoch, kstStampOrDash, untilText } from "../../lib/datetime";
 import { useNow } from "../../lib/useNow";
-import { nextRunStamp, schedulableOp, scheduleEnabled, scheduleSummary } from "../../lib/batchSchedule";
+import {
+  keepRoundsKnown, nextRunStamp, schedulableOp, scheduleDeleteNotice, scheduleEnabled, scheduleSummary,
+} from "../../lib/batchSchedule";
 import { kindsText, readSummary, RM_LINK_ONLY, sumKinds, summaryTool, type ActionKind } from "../../lib/toolSummary";
 import { SYNC_OPTION_HELP } from "../jobs/optionRules";
 import { humanBytes } from "../usage/usageStats";
 import { SizeHistogram, TempHistogram, sizeHistogramTotal, tempAxes } from "../usage/ScanHistograms";
-import type { Batch, BatchDirectTools, BatchItem, BatchPayloadItem } from "../../lib/types";
+import type { Batch, BatchDirectTools, BatchItem, BatchPayloadItem, BatchScheduleSummary } from "../../lib/types";
 
 // 항목 행의 좌측 고정폭 합계 = 체크박스(w-5=1.25rem) + gap-3(0.75rem) +
 // 순번(w-8=2rem) + gap-3(0.75rem). 펼침 상세·행 오류 문구를 이만큼 들여써야 행
@@ -1032,8 +1034,9 @@ function ConfirmBatchBody({ b: header, nonce, confirm, absOf, onClose }: {
 // (/jobs?batch=<id>)으로 가는 **링크**다(2026-10-11 검증 지적 — 오래된 배치의 작업은 무한
 // 스크롤 수십 쪽 아래라 말로만 보내면 찾을 길이 없었다). 안내는 읽혀야 하는 글자라
 // text-muted(장식 전용, 3.54:1)가 아니라 ink/70(4.94:1, AA).
-// 스케줄이 있는 배치면 그 스케줄·회차 기록도 함께 지워진다(repositories/batches.delete -- 같은 트랜잭션)는 것을 말한다.
-function DeleteBatchButton({ batchId, hasSchedule }: { batchId: string; hasSchedule: boolean }) {
+// 스케줄이 있는 배치면 그 스케줄·실행 기록·보존 회차 경계도 함께 지워진다(repositories/batches.delete -- 같은 트랜잭션,
+// BATCH_DELETE_TABLES)는 것을 말한다(scheduleDeleteNotice -- 「회차 기록」만으로는 보존 회차와 헷갈렸다, dms-k8s d29 실증 뒤).
+function DeleteBatchButton({ batchId, schedule }: { batchId: string; schedule: BatchScheduleSummary | null | undefined }) {
   const [open, setOpen] = useState(false);
   const del = useDeleteBatch(batchId);
   const navigate = useNavigate();
@@ -1050,7 +1053,7 @@ function DeleteBatchButton({ batchId, hasSchedule }: { batchId: string; hasSched
           배치 단위로 삭제하세요(배치 기록도 함께 지워집니다).
         </p>
         <p>기록을 먼저 지우면 남은 작업은 전체 작업에서 배치 이름 없이 「기록 없음 {batchId.slice(0, 12)}」로 표시됩니다.</p>
-        {hasSchedule && <p>이 배치의 스케줄도 함께 삭제됩니다.</p>}
+        {schedule != null && <p>{scheduleDeleteNotice(schedule)}</p>}
       </div>
       {del.isError && <p className="text-bad text-sm mb-2">{(del.error as ApiError).message}</p>}
       <div className="flex justify-end gap-2">
@@ -1263,12 +1266,21 @@ function ScheduleLink({ b }: { b: BatchHeader }) {
   }
   const next = nextRunStamp(s.enabled, s.next_run_at);
   const state = on ? "" : s.paused_reason_code !== null ? "(자동 일시정지)" : "(꺼짐)";
+  // 회차 보존 안내(2026-11-16 사용자 결정 「최근 10회차만 누적」 — 서버 keep_rounds 가 숫자일 때만; 옛 서버면 말하지 않는다).
+  // 사람의 「전체 재실행」도 한 회차라 누르기 전에 가장 오래된 회차가 정리될 수 있다는 것을 링크 바로 아래에서 말한다.
+  const keep = s.keep_rounds;
+  const keepLine = keepRoundsKnown(keep)
+    ? `최근 ${keep}회차만 보존 — 전체 재실행하면 가장 오래된 회차가 정리될 수 있습니다` : null;
   return (
-    <Link className="text-accent text-sm" to={to}
-          title={!on && s.paused_reason_code !== null ? reasonText(s.paused_reason_code) : undefined}>
-      {`반복 실행${state}: ${scheduleSummary(s.kind, s.spec)} · 다음 ${
-        next === "—" ? next : `${next} (${untilText(s.next_run_at, now)})`}`}
-    </Link>
+    <span className="inline-flex min-w-0 flex-col">
+      <Link className="text-accent text-sm" to={to}
+            title={!on && s.paused_reason_code !== null ? reasonText(s.paused_reason_code) : undefined}>
+        {`반복 실행${state}: ${scheduleSummary(s.kind, s.spec)} · 다음 ${
+          next === "—" ? next : `${next} (${untilText(s.next_run_at, now)})`}`}
+      </Link>
+      {/* break-keep: 375·390 폭에서 어절 중간(「최근 10/회차만」)에서 꺾이지 않게. 읽혀야 하는 글자라 ink/70(AA). */}
+      {keepLine !== null && <span className="break-keep text-xs text-ink/70">{keepLine}</span>}
+    </span>
   );
 }
 
@@ -1518,7 +1530,7 @@ export function BatchDetail() {
             {/* 실행 설정 변경(2026-10-02): 재실행 버튼들과 같은 종단 게이트(서버 409 batch_settings_locked 미러) --
                 취소·완료 뒤 노드·프로세스 수·옵션을 바꾸고 다시 돌리는 동선 */}
             {b && terminal && <BatchExecutionSettingsDialog b={b} />}
-            {(b?.status === "Completed" || b?.status === "Cancelled") && <DeleteBatchButton batchId={batchId} hasSchedule={b.schedule != null} />}
+            {(b?.status === "Completed" || b?.status === "Cancelled") && <DeleteBatchButton batchId={batchId} schedule={b.schedule} />}
             {/* 자동 실행 끄기(2026-10-11): 진행 중 브레이크 — 미리보기를 보고 직접 확인하겠다. 종단 배치는 「실행 설정 변경」. */}
             {autoConfirmable(b?.operation) && b?.auto_confirm === true && !terminal && (
               <Button variant="ghost" disabled={autoOff.isPending} onClick={() => autoOff.mutate()}>자동 실행 끄기</Button>

@@ -146,17 +146,21 @@ def create_batch(body: BatchBody, request: Request, identity: Identity = Depends
 def list_batches(request: Request, identity: Identity = Depends(require_admin)):
     """배치 목록(최신 100건, BatchesRepository.list) + 행마다 schedule(배치 스케줄 요약 | null -- _with_schedules)."""
     repos = request.app.state.repos
-    return _with_schedules(repos, repos.batches.list())
+    return _with_schedules(repos, repos.batches.list(), request.app.state.settings)
 
 
-def _with_schedules(repos, rows):
+def _with_schedules(repos, rows, settings):
     """배치 행에 스케줄 요약을 싣는다(2026-11-16 배치 스케줄러): schedule = {schedule_id, kind, spec, enabled, next_run_at,
-    last_run_at, last_outcome, last_reason_code, paused_reason_code} | null(스케줄 없음). 목록 한 쪽이 질의 한 번이다
-    (summaries_for -- 행마다 묻지 않는다). 목록과 상세 머리(view=summary)만 싣는다 -- view 없음·all 은 옛 탭·확인 창 응답이라
-    모양을 바꾸지 않는다."""
+    last_run_at, last_outcome, last_reason_code, paused_reason_code, pruned_at, pruned_total, keep_rounds} | null(스케줄 없음).
+    목록 한 쪽이 질의 한 번이다(summaries_for -- 행마다 묻지 않는다). 목록과 상세 머리(view=summary)만 싣는다 -- view 없음·all 은
+    옛 탭·확인 창 응답이라 모양을 바꾸지 않는다. pruned_at·pruned_total = 회차 보존 정리의 마지막 시각·누적 수(NULL = 아직 정리
+    없음 -- 0 과 다르다), keep_rounds = 보존 회차 수 설정(DMS_BATCH_SCHEDULE_KEEP_ROUNDS -- 배치 상세의 「최근 K회차만 보존」
+    안내, 2026-11-16 회차 보존 정리)."""
     summaries = repos.batch_schedules.summaries_for([r["batch_id"] for r in rows])
+    keep = getattr(settings, "batch_schedule_keep_rounds", None)
     for r in rows:
-        r["schedule"] = summaries.get(r["batch_id"])
+        s = summaries.get(r["batch_id"])
+        r["schedule"] = None if s is None else {**s, "keep_rounds": keep}
     return rows
 
 
@@ -381,7 +385,7 @@ def get_batch(batch_id: str, request: Request,
         options = b["options"]
         b["direct_tools"] = (direct_tool_counts(repo.list_item_tools(batch_id))
                              if isinstance(options, dict) and options.get("direct") is True else None)
-        return _with_schedules(request.app.state.repos, [b])[0]
+        return _with_schedules(request.app.state.repos, [b], request.app.state.settings)[0]
     # 화면용 상세 조인(request_state/files_count/completed_at) — 실행 루프가 쓰는
     # list_items 와 분리돼 있다(repo docstring 참고).
     b["items"] = repo.list_items_detail(batch_id)
@@ -814,7 +818,9 @@ def rescan_batch(batch_id: str, request: Request, identity: Identity = Depends(r
     # 리셋·카운터·상태 전이는 저장소 한 트랜잭션의 종단 CAS 다(rescan_if_terminal -- 배치 스케줄러 회차와 같은 몸통
     # _rescan_locked, 2026-11-16). 위 읽기 뒤 그 사이 다른 재실행·스케줄 회차가 먼저 되살렸으면 None = 409 -- 예전엔 읽기와
     # 무조건 set_status 사이의 창에서 이미 확인돼 Running 인 배치를 Previewing 으로 되돌렸다.
-    done = repo.rescan_if_terminal(batch_id)
+    # 회차 경계(batch_rounds -- 회차 보존 정리가 센다)에 누른 사람을 남긴다(via rescan). 사람 :rescan 도 한 회차다 -- 스케줄이
+    # 있는 배치면 컨트롤러 batch-round-prune 루프가 30초 안에 보존 회차 밖의 가장 오래된 회차를 정리할 수 있다.
+    done = repo.rescan_if_terminal(batch_id, actor=audit_actor(identity))
     if done is None:
         if repo.get(batch_id) is None:
             raise HTTPException(status_code=404, detail="batch_not_found")

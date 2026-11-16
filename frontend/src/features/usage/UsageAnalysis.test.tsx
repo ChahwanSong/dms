@@ -578,6 +578,16 @@ test("딥링크 타깃이 지금 목록에 없으면 패널 안 표 아래에 �
   expect(within(region).getByRole("heading", { name: "artifacts" })).toBeInTheDocument();
 });
 
+test("실 사용량 추이 도움말: 스케줄 배치의 scan 은 최근 회차만 남는다는 한 줄(2026-11-16 회차 보존 정리)", async () => {
+  setup({ path: "/admin/usage?storage=cephfs-dms&target=artifacts" });
+  const help = await screen.findByRole("button", { name: "실 사용량 추이 설명" });
+  expect(help).toHaveAccessibleDescription(/점 = 성공 scan 1회 — 누르면 그 요청 상세로 갑니다/);
+  expect(help).toHaveAccessibleDescription(
+    /스케줄이 있는 배치가 만든 scan 은 최근 보존 회차\(회차 수는 배치 스케줄러 화면 안내\)만 남아, 그보다 오래된 추이 점·scan 수는 정리됩니다/);
+  // 회차 수는 서버 설정이라 이 화면(keep_rounds 없음)은 숫자를 박지 않는다 — 기본값이 바뀌면 조용히 낡는다(dms-k8s 0b5e7357).
+  expect(help).not.toHaveAccessibleDescription(/\d+회차/);
+});
+
 test("온도 추이: atime 기본 + mtime 세그먼트(aria-pressed)", async () => {
   setup({ path: "/admin/usage?storage=cephfs-dms&target=artifacts" });
   expect(await screen.findByRole("img", { name: "데이터 온도 추이(atime)" })).toBeInTheDocument();

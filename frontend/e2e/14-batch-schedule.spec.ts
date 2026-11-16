@@ -9,6 +9,10 @@ import { assertLayoutSane } from "./helpers/layout";
 // schedule 필드) → 끄기(다음 실행 「—」) → 삭제, 그리고 rm 배치는 「되돌릴 수 없음」 동의 전엔 저장이 잠긴다는 것. 회차가
 // 실제로 쏘이는 것(컨트롤러 batch-scheduler 루프)은 기다리지 않는다 — 시각 규칙·발사·일시정지는 pytest 몫이다. 시각은 지금으로부터
 // 약 12시간 뒤(KST)로 골라 이 시나리오 도중에 회차가 오지 않게 한다.
+// 회차 보존(2026-11-16 사용자 결정 「최근 10회차만 누적」): 안내 문구의 10 은 서버 :preview·목록의 keep_rounds(하네스는
+// DMS_BATCH_SCHEDULE_KEEP_ROUNDS 를 주지 않아 기본 10)다. 정리 자체(컨트롤러 batch-round-prune 루프)는 e2e 밖(pytest 몫)이다.
+
+interface ScheduleRow { schedule_id: string; batch_id: string; [k: string]: unknown }
 
 async function createBatch(page: Page, body: Record<string, unknown>): Promise<string> {
   const response = await page.request.post("/api/admin/batches", { data: { max_concurrency: 1, ...body } });
@@ -57,9 +61,28 @@ test.describe("E15 배치 스케줄러", () => {
     // 재시도 단언으로 본다).
     const preview = dialog.getByLabel("다음 실행 미리보기").getByRole("listitem");
     await expect(preview).toHaveText(Array.from({ length: 5 }, () => new RegExp(`^\\d{4}-\\d\\d-\\d\\d ${time}:00 KST$`)));
-    await expect(dialog.getByText("회차마다 자식 요청 1개가 새로 생깁니다.")).toBeVisible();
+    await expect(dialog.getByText("회차마다 자식 요청 1개가 새로 생깁니다(최근 10회차만 보존 — 오래된 회차는 자동으로 정리합니다)."))
+      .toBeVisible();
+    // 회차 보존 안내(서버 :preview 의 keep_rounds). 새 배치라 기록 회차가 K 미만 — 「곧 정리될 작업」 예측은 없다.
+    const keepNote = dialog.getByRole("note", { name: "회차 보존 안내" });
+    await expect(keepNote).toContainText("스케줄이 있는 배치는 최근 10회차만 보존합니다");
+    await expect(keepNote).not.toContainText("곧 정리됩니다");
+    // 375 폭에서도 보존 안내 상자(break-keep — 공백에서만 꺾인다)가 창 안에 들어가고 글이 상자를 넘지 않는다, 문서도 넘치지 않는다.
+    await page.setViewportSize({ width: 375, height: 667 });
+    await expect(keepNote).toBeVisible();
+    const fit = await keepNote.evaluate((el) => {
+      const box = el.getBoundingClientRect();
+      const dlg = el.closest('[role="dialog"]')!.getBoundingClientRect();
+      return { overflow: el.scrollWidth - el.clientWidth, inset: Math.min(box.left - dlg.left, dlg.right - box.right),
+               doc: document.documentElement.scrollWidth - document.documentElement.clientWidth };
+    });
+    expect(fit.overflow, "375 에서 보존 안내 글이 상자 밖으로 넘친다").toBeLessThanOrEqual(0);
+    expect(fit.inset, "375 에서 보존 안내 상자가 창 밖으로 나간다").toBeGreaterThanOrEqual(0);
+    expect(fit.doc, "375 에서 문서가 가로로 넘친다").toBeLessThanOrEqual(0);
+    await page.setViewportSize({ width: 1280, height: 800 });
     await dialog.getByRole("button", { name: "추가", exact: true }).click();
     await expect(dialog).toHaveCount(0);
+    await expect(page.getByText(/스케줄이 있는 배치는 최근 10회차만 보존합니다/)).toBeVisible();   // 머리 안내(목록 keep_rounds)
 
     const row = page.locator("tbody tr", { has: page.getByRole("link", { name, exact: true }) });
     await expect(row).toHaveCount(1);
@@ -68,11 +91,12 @@ test.describe("E15 배치 스케줄러", () => {
     const next = row.locator("td").nth(4);                                                 // 다음 실행(KST)
     await expect(next).toHaveText(new RegExp(`^\\d{4}-\\d\\d-\\d\\d${time} · \\d+시간 후$`));
     await expect(row.locator("td").nth(5)).toHaveText("아직 없음");                          // 마지막 결과 -- 판정 전
+    await expect(row.locator("td").nth(6)).toHaveText("아직 정리 없음");                     // 정리 -- null ≠ 0
     await expect(row.getByLabel(`${name} 사용`)).toBeChecked();
-    // 행이 있는 표의 불변식(td = table-cell, 표 안 버튼 한 줄, 문서 가로 넘침 없음): th 9 + td 9.
-    await assertLayoutSane(page, { minTableCells: 18 });
+    // 행이 있는 표의 불변식(td = table-cell, 표 안 버튼 한 줄, 문서 가로 넘침 없음): th 10 + td 10.
+    await assertLayoutSane(page, { minTableCells: 20 });
     await page.setViewportSize({ width: 375, height: 667 });
-    await assertLayoutSane(page, { sidebarFixed: false, minTableCells: 18 });
+    await assertLayoutSane(page, { sidebarFixed: false, minTableCells: 20 });
     await page.setViewportSize({ width: 1280, height: 800 });
 
     // 배치 쪽 응답에도 스케줄 요약이 실린다 — 목록 「반복」 표식과 상세 머리 링크.
@@ -82,9 +106,13 @@ test.describe("E15 배치 스케줄러", () => {
     await page.goto(`/admin/batches/${bid}`);
     const link = page.getByRole("link", { name: new RegExp(`^반복 실행: ${esc(summary)} · 다음 `) });
     await expect(link).toHaveAttribute("href", `/admin/batch-schedules?batch=${bid}`);
-    // 머리 줄에 붙은 긴 「반복 실행: …」 링크도 375 에서 문서를 넓히지 않는다(머리 줄은 flex-wrap -- 줄바꿈으로 접힌다).
+    // 링크 아래 회차 보존 안내(배치 응답 schedule.keep_rounds).
+    const keepLine = page.getByText("최근 10회차만 보존 — 전체 재실행하면 가장 오래된 회차가 정리될 수 있습니다", { exact: true });
+    await expect(keepLine).toBeVisible();
+    // 머리 줄에 붙은 긴 「반복 실행: …」 링크·보존 안내도 375 에서 문서를 넓히지 않는다(머리 줄은 flex-wrap -- 줄바꿈으로 접힌다).
     await page.setViewportSize({ width: 375, height: 667 });
     await expect(link).toBeVisible();
+    await expect(keepLine).toBeVisible();
     await assertLayoutSane(page, { sidebarFixed: false, minTableCells: 0 });
     await page.setViewportSize({ width: 1280, height: 800 });
 
@@ -99,6 +127,49 @@ test.describe("E15 배치 스케줄러", () => {
     await expect(row).toHaveCount(0);
     await page.goto(`/admin/batches/${bid}`);
     await expect(page.getByRole("link", { name: "스케줄 추가" })).toHaveAttribute("href", `/admin/batch-schedules?batch=${bid}`);
+  });
+
+  test("375 폭에서 「정리」 칸은 누적 / 「마지막 <시각>」 두 줄 — 시각이 꺾이지 않고 문서도 넘치지 않는다", async ({ page }) => {
+    const name = `e15-prune-${Date.now().toString(36)}`;
+    const bid = await createBatch(page, { operation: "scan", options: {}, name,
+                                          items: [{ storage: STORAGE_NAME, target: `${name}/a` }] });
+    const hour = (new Date().getUTCHours() + 9 + 12) % 24;                                  // 위 시나리오와 같은 먼 시각
+    const made = await page.request.post("/api/admin/batch-schedules", {
+      data: { batch_id: bid, kind: "daily", spec: { hour, minute: 30 } } });
+    expect(made.status(), await made.text()).toBe(201);
+    const sid = ((await made.json()) as ScheduleRow).schedule_id;
+    // 「정리」 칸의 채워진 모양은 컨트롤러 정리 루프가 돌아야 생겨 e2e 로 만들 수 없다 — 이 스케줄 행만 목록 응답에서
+    // pruned_total·pruned_at 을 합성한다(나머지는 실 서버 값, 13-jobs-search 와 같은 page.route 수법).
+    await page.route(/\/api\/admin\/batch-schedules(\?.*)?$/, async (route) => {
+      if (route.request().method() !== "GET") return route.fallback();
+      const upstream = await route.fetch();
+      const rows = (await upstream.json()) as ScheduleRow[];
+      await route.fulfill({ response: upstream, json: rows.map((s) => s.schedule_id === sid
+        ? { ...s, pruned_total: 1234, pruned_at: "2026-11-16T12:42:00Z" } : s) });
+    });
+    try {
+      await page.setViewportSize({ width: 375, height: 800 });
+      await page.goto("/admin/batch-schedules");
+      const row = page.locator("tbody tr", { has: page.getByRole("link", { name, exact: true }) });
+      await expect(row.getByText("정리 누적 1,234건")).toBeVisible();
+      const [scroll, client] = await page.evaluate(() =>
+        [document.documentElement.scrollWidth, document.documentElement.clientWidth]);
+      expect(scroll, `375 에서 문서가 가로로 넘친다(${scroll} > ${client})`).toBeLessThanOrEqual(client);
+      // 둘째 줄 「마지막 2026-11-16 21:42:00」이 한 덩어리라 하이픈·「마지막」 뒤 공백에서 꺾이지 않는다(dms-k8s d29·d30 실증:
+      // 390 에서 세 줄). 「마지막」 글자와 시각 조각의 줄(top)이 같고 시각 조각이 한 줄인지 본다.
+      const last = row.getByText("마지막 2026-11-16 21:42:00", { exact: true });
+      await expect(last).toBeVisible();
+      const geo = await last.evaluate((el) => {
+        const label = document.createRange();
+        label.selectNodeContents(el.firstChild!);           // 「마지막 」 글자 노드
+        const stampRects = el.querySelector("span")!.getClientRects();
+        return { labelTop: label.getClientRects()[0].top, stampTops: Array.from(stampRects, (r) => r.top) };
+      });
+      expect(geo.stampTops, "시각이 여러 줄로 꺾였다").toHaveLength(1);
+      expect(Math.abs(geo.stampTops[0] - geo.labelTop), "「마지막」과 시각이 다른 줄이다").toBeLessThan(2);
+    } finally {
+      await page.request.delete(`/api/admin/batch-schedules/${sid}`);
+    }
   });
 
   test("rm 배치의 스케줄은 「되돌릴 수 없음」 동의 전엔 저장할 수 없다(저장은 하지 않는다)", async ({ page }) => {

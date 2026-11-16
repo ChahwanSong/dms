@@ -33,16 +33,19 @@ const BATCHES = [
 ];
 
 interface Call { method: string; path: string; body: unknown }
-function serve(opts: { create?: () => Response; preview?: () => Response; batches?: object[] } = {}) {
+const RUNS = ["2026-11-16T17:00:00Z", "2026-11-17T17:00:00Z", "2026-11-18T17:00:00Z", "2026-11-19T17:00:00Z",
+              "2026-11-20T17:00:00Z"];
+function serve(opts: {
+  create?: () => Response; preview?: (body: Record<string, unknown>) => Response; batches?: object[];
+} = {}) {
   const calls: Call[] = [];
   server.use(
     http.get("/api/admin/batches", () => HttpResponse.json(opts.batches ?? BATCHES)),
     http.get("/api/admin/batch-schedules", () => HttpResponse.json([])),
     http.post(/\/api\/admin\/batch-schedules:preview$/, async ({ request }) => {
-      calls.push({ method: "PREVIEW", path: "", body: await request.json() });
-      return opts.preview ? opts.preview() : HttpResponse.json({ next_runs: [
-        "2026-11-16T17:00:00Z", "2026-11-17T17:00:00Z", "2026-11-18T17:00:00Z", "2026-11-19T17:00:00Z",
-        "2026-11-20T17:00:00Z"] });
+      const body = await request.json() as Record<string, unknown>;
+      calls.push({ method: "PREVIEW", path: "", body });
+      return opts.preview ? opts.preview(body) : HttpResponse.json({ next_runs: RUNS });
     }),
     http.post("/api/admin/batch-schedules", async ({ request }) => {
       calls.push({ method: "POST", path: "", body: await request.json() });
@@ -198,6 +201,87 @@ test("다음 5회 미리보기는 서버 :preview(디바운스) — KST 로 보�
   await userEvent.click(within(dlg).getByRole("button", { name: "N시간마다" }));
   await waitFor(() => expect(lastPreview())
     .toEqual({ kind: "interval", spec: { every_hours: 6, hour: 2, minute: 0 } }));
+});
+
+test("배치를 고르면 미리보기에 batch_id 를 싣는다(서버가 그 배치의 회차 보존 예측을 같이 계산) — 고르기 전엔 규칙만", async () => {
+  const calls = serve();
+  const dlg = await openDialog();
+  const lastPreview = () => calls.filter((c) => c.method === "PREVIEW").slice(-1)[0]?.body;
+  await waitFor(() => expect(lastPreview()).toEqual({ kind: "daily", spec: { hour: 2, minute: 0 } }));
+  await pick(dlg, SCAN);
+  await waitFor(() => expect(lastPreview()).toEqual({ kind: "daily", spec: { hour: 2, minute: 0 }, batch_id: SCAN }));
+});
+
+test("회차 보존 안내: 서버 keep_rounds·prune_preview 로 「곧 정리될 작업」과 「항목 × K > 상한」 예측을 보인다 — 저장은 막지 않는다", async () => {
+  // 2026-11-16 사용자 결정(최근 10회차만 누적). prune_preview 는 실제 정리와 같은 경계 계산(서버 _round_cut)이다. 상한은 테스트용
+  // 작은 값(20) — 화면은 상수를 두지 않고 서버 child_count_limit 을 그대로 쓴다.
+  serve({ preview: (body) => HttpResponse.json({
+    next_runs: RUNS, keep_rounds: 10, child_count_limit: 20,
+    ...(body.batch_id ? { prune_preview: { rounds_recorded: 11, would_prune: body.batch_id === SCAN ? 8 : 0 } } : {}) }) });
+  const dlg = await openDialog();
+  await pick(dlg, SCAN);
+  const note = await within(dlg).findByRole("note", { name: "회차 보존 안내" });
+  await waitFor(() => expect(note).toHaveTextContent("저장하면 기록된 회차 11개 중 오래된 회차의 작업 약 8개가 곧 정리됩니다"));
+  expect(note).toHaveTextContent("스케줄이 있는 배치는 최근 10회차만 보존합니다");
+  // 항목 3 × 10 = 30 > 상한 20
+  expect(note).toHaveTextContent("항목 3개 × 10회차 = 작업 최대 30개 — 정리 뒤에도 배치 단위 삭제 상한(20개)을 넘어");
+  expect(note.className).toContain("break-keep");
+  expect(within(dlg).getByText("회차마다 자식 요청 3개가 새로 생깁니다(최근 10회차만 보존 — 오래된 회차는 자동으로 정리합니다)."))
+    .toBeInTheDocument();
+  expect(within(dlg).getByRole("button", { name: "추가" })).toBeEnabled();
+  // 다른 배치로 바꾸면 그 배치의 예측(0 — 문구 없음)으로 바뀐다. 항목 5 × 10 = 50 > 20 은 그대로 경고
+  await userEvent.selectOptions(within(dlg).getByRole("combobox", { name: "배치" }), SYNC);
+  await waitFor(() => expect(within(dlg).getByRole("note", { name: "회차 보존 안내" })).not.toHaveTextContent(/곧 정리됩니다/));
+  expect(within(dlg).getByRole("note", { name: "회차 보존 안내" })).toHaveTextContent("항목 5개 × 10회차 = 작업 최대 50개");
+});
+
+test("배치를 바꾼 뒤 새 미리보기가 오기 전엔 직전 배치의 「곧 정리될 작업 수」를 보이지 않는다(자리표시 데이터)", async () => {
+  // keepPreviousData 라 키가 바뀌어도 직전 응답이 남는다 — 보존 수·상한(서버 설정)은 그대로 써도 되지만 정리 예측은 배치마다라
+  // 지금 배치의 응답이 올 때까지 숨긴다(다른 배치의 수를 이 배치의 것처럼 말하지 않는다).
+  let release: () => void = () => {};
+  const gate = new Promise<void>((r) => { release = r; });
+  serve({ preview: (body) => HttpResponse.json({
+    next_runs: RUNS, keep_rounds: 10, child_count_limit: 1000,
+    ...(body.batch_id ? { prune_preview: { rounds_recorded: 11, would_prune: body.batch_id === SCAN ? 8 : 4 } } : {}) }) });
+  server.use(http.post(/\/api\/admin\/batch-schedules:preview$/, async ({ request }) => {
+    // clone: 넘겨 줄 때 serve 의 처리기가 본문을 다시 읽는다
+    const body = await request.clone().json() as Record<string, unknown>;
+    if (body.batch_id !== SYNC) return undefined;               // 나머지는 serve 의 처리기로
+    await gate;
+    return HttpResponse.json({ next_runs: RUNS, keep_rounds: 10, child_count_limit: 1000,
+                               prune_preview: { rounds_recorded: 11, would_prune: 4 } });
+  }));
+  const dlg = await openDialog();
+  await pick(dlg, SCAN);
+  const note = () => within(dlg).getByRole("note", { name: "회차 보존 안내" });
+  await waitFor(() => expect(note()).toHaveTextContent("작업 약 8개가 곧 정리됩니다"));
+  await userEvent.selectOptions(within(dlg).getByRole("combobox", { name: "배치" }), SYNC);
+  await new Promise((r) => setTimeout(r, 500));                  // 디바운스(300ms)가 지나 SYNC 요청이 걸려 있는 동안
+  expect(note()).not.toHaveTextContent(/곧 정리됩니다/);
+  expect(note()).toHaveTextContent("스케줄이 있는 배치는 최근 10회차만 보존합니다");   // 서버 설정은 그대로
+  release();
+  await waitFor(() => expect(note()).toHaveTextContent("작업 약 4개가 곧 정리됩니다"));
+});
+
+test("항목 × K 가 상한 안이면 예측 경고는 없고 보존 안내만", async () => {
+  serve({ preview: (body) => HttpResponse.json({
+    next_runs: RUNS, keep_rounds: 10, child_count_limit: 1000,
+    ...(body.batch_id ? { prune_preview: { rounds_recorded: 3, would_prune: 0 } } : {}) }) });
+  const dlg = await openDialog();
+  await pick(dlg, SCAN);
+  const note = await within(dlg).findByRole("note", { name: "회차 보존 안내" });
+  expect(note).toHaveTextContent("스케줄이 있는 배치는 최근 10회차만 보존합니다");
+  expect(note).not.toHaveTextContent(/작업 최대/);
+  expect(note).not.toHaveTextContent(/곧 정리됩니다/);
+});
+
+test("옛 서버(keep_rounds 없음)면 보존 안내를 지어내지 않는다", async () => {
+  serve();
+  const dlg = await openDialog();
+  await pick(dlg, SCAN);
+  await waitFor(() => expect(within(dlg).getByText("2026-11-17 02:00:00 KST")).toBeInTheDocument());
+  expect(within(dlg).queryByRole("note", { name: "회차 보존 안내" })).toBeNull();
+  expect(within(dlg).getByText("회차마다 자식 요청 3개가 새로 생깁니다.")).toBeInTheDocument();
 });
 
 test("미리보기 실패는 사유를 말한다(저장은 막지 않는다 — 최종 심판은 저장 응답)", async () => {

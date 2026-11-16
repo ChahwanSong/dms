@@ -306,6 +306,10 @@ export interface BatchScheduleSummary {
   enabled: boolean | number; next_run_at: string | null;
   last_run_at: string | null; last_outcome: string | null; last_reason_code: string | null;
   paused_reason_code: string | null;
+  // 회차 보존 정리(2026-11-16 -- 스케줄이 있는 배치는 최근 keep_rounds 회차만 남고 오래된 회차의 자식은 컨트롤러가 정리한다).
+  // pruned_total null = 아직 정리 없음(0 과 다르다), pruned_at = 마지막 정리 시각(UTC). keep_rounds = 서버 설정
+  // DMS_BATCH_SCHEDULE_KEEP_ROUNDS(배치 상세 「최근 K회차만 보존」 안내). 옵션(?) = 옛 서버·기존 fixture.
+  pruned_at?: string | null; pruned_total?: number | null; keep_rounds?: number | null;
 }
 // 실행 설정의 direct 안내 재료(2026-11-16, ?view=summary): options.direct === true 일 때만 서버가 센다(아니면 null). 판정은
 // 화면 directNote 와 같은 규칙(도구 = job_tool 먼저, 없으면 미리보기 summary v2 의 tool; undecided = 도구 없음 ∧ 항목이 거부·
@@ -371,6 +375,12 @@ export interface BatchSchedule {
   destructive?: boolean | null;
   // 배치 요약. null = 배치 행이 없다(정상 경로에선 배치 삭제가 스케줄도 지운다).
   batch: BatchScheduleBatch | null;
+  // 회차 보존(2026-11-16 사용자 결정 「최근 10회차만 누적」 -- 서버 DMS_BATCH_SCHEDULE_KEEP_ROUNDS, 기본 10): 최근 keep_rounds
+  // 회차만 남고 오래된 회차의 작업은 컨트롤러 batch-round-prune 이 정리한다. pruned_total null = 아직 정리한 적 없음(0 과
+  // 다르다), pruned_at = 마지막으로 정리한 시각(UTC). child_count_limit = 배치 단위 삭제의 자식 상한(서버
+  // MAX_BATCH_DELETE_CHILDREN -- 「항목 × K > 상한」 예측 경고의 기준, 포탈은 상수를 두지 않는다). 옵션(?) = 옛 서버·fixture.
+  keep_rounds?: number | null; pruned_at?: string | null; pruned_total?: number | null;
+  child_count_limit?: number | null;
 }
 export interface BatchScheduleBatch {
   batch_id?: string;
@@ -390,6 +400,16 @@ export interface BatchScheduleRun {
   requeued: number | null;
   prev_status: string | null; prev_item_count: number | null; prev_succeeded: number | null; prev_failed: number | null;
 }
+// 추가·수정 창의 서버 미리보기(POST /api/admin/batch-schedules:preview). next_runs = 다음 5회(UTC). keep_rounds·child_count_limit
+// 은 늘(서버 설정), prune_preview 는 batch_id 를 실었을 때만 온다(2026-11-16 회차 보존 -- 옛 서버엔 셋 다 없다, 옵션).
+export interface SchedulePreview {
+  next_runs: string[];
+  keep_rounds?: number | null; child_count_limit?: number | null; prune_preview?: PrunePreview | null;
+}
+/** 저장하면 곧 정리될 작업 예측(서버 BatchSchedulesRepository.prune_preview -- 실제 정리와 같은 경계 계산). would_prune 은 막힌
+ *  작업(비종단·조용한 창·항목 참조)까지 세는 근사치라 화면은 「약」으로 말하고, capped = 서버가 상한 + 1 에서 세기를 멈췄다.
+ *  rounds_recorded = 기록된 회차 경계 수(null = 모름 -- 0 과 다르다). */
+export interface PrunePreview { rounds_recorded: number | null; would_prune: number; would_prune_capped?: boolean }
 // 요청 단위 scan 리포트 통계(항목별 데이터 온도 — 배치 합산은 제거됐다). 서버가
 // 모양 투영(숫자·구간 라벨만)을 거친 값만 준다 — ScanPathStats 에서 covered_by
 // 를 뺀 같은 계약(단일 리포트 서빙, 합산 카운트 없음).

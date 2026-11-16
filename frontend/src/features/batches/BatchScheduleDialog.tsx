@@ -7,15 +7,15 @@ import { ApiError } from "../../lib/api";
 import { kstStamp } from "../../lib/datetime";
 import { batchStatusLabel } from "../../lib/jobState";
 import {
-  DEFAULT_SCHEDULE_FORM, INTERVAL_HOURS, SCHEDULE_KINDS, WEEKDAYS, formFromSchedule, isDestructiveBatch,
-  scheduleFormErrors, scheduleSummary, schedulableOp, specFromForm,
+  DEFAULT_SCHEDULE_FORM, INTERVAL_HOURS, SCHEDULE_KINDS, WEEKDAYS, formFromSchedule, isDestructiveBatch, keepRoundsKnown,
+  keepRoundsNotice, projectedChildrenWarning, prunePreviewText, scheduleFormErrors, scheduleSummary, schedulableOp, specFromForm,
   type ScheduleForm, type ScheduleKind,
 } from "../../lib/batchSchedule";
 import { storageText } from "../../lib/batchStorage";
 import type { Batch, BatchSchedule } from "../../lib/types";
 import { useBatches } from "./useBatches";
 import {
-  useBatchForSchedule, useCreateBatchSchedule, useSchedulePreview, useUpdateBatchSchedule,
+  useBatchForSchedule, useCreateBatchSchedule, useSchedulePreview, useUpdateBatchSchedule, type PreviewRequest,
 } from "./useBatchSchedules";
 
 // 스케줄 추가·수정 겸용 창(2026-11-16). 회차 = 그 배치의 「전체 재실행」 — sync·rm 은 회차마다 기존 확인 게이트(미리보기 →
@@ -104,9 +104,10 @@ export function BatchScheduleDialog({ open, onOpenChange, trigger, schedule, sch
 
   const errors = scheduleFormErrors(form);
   const req = specFromForm(form);
-  // 미리보기는 입력이 멈춘 뒤에(300ms) — 시각을 한 글자씩 고칠 때마다 서버를 부르지 않는다.
-  const [debounced, setDebounced] = useState<typeof req>(null);
-  const reqKey = req === null ? null : JSON.stringify(req);
+  // 미리보기는 입력이 멈춘 뒤에(300ms) — 시각을 한 글자씩 고칠 때마다 서버를 부르지 않는다. 배치를 알면 실어 서버가 그 배치의
+  // 회차 보존 예측(prune_preview)을 같이 계산하게 한다(2026-11-16 — dms-k8s 와 같은 요청 모양).
+  const [debounced, setDebounced] = useState<PreviewRequest | null>(null);
+  const reqKey = req === null ? null : JSON.stringify(target === null ? req : { ...req, batch_id: target.id });
   useEffect(() => {
     if (!open) { setDebounced(null); return; }
     const t = setTimeout(() => setDebounced(reqKey === null ? null : JSON.parse(reqKey)), 300);
@@ -135,6 +136,17 @@ export function BatchScheduleDialog({ open, onOpenChange, trigger, schedule, sch
     ...f, weekdays: f.weekdays.includes(d) ? f.weekdays.filter((x) => x !== d) : [...f.weekdays, d] }));
   const err = (e: string | null) => e && <span className="mt-1 block text-sm text-bad">{e}</span>;
   const confirmOp = target !== null && (target.operation === "sync" || target.operation === "rm");
+  // 회차 보존(2026-11-16 사용자 결정 「최근 10회차만 누적」 — 서버 :preview 의 keep_rounds·child_count_limit·prune_preview). 보존
+  // 수·상한은 서버 설정이라 자리표시 데이터(디바운스 중 직전 응답)여도 같은 값이고, 「곧 정리될 작업 수」는 고른 배치의 것이라
+  // 미리보기가 지금 배치·규칙의 것일 때만 보인다. 저장은 막지 않는다(안내일 뿐 — 사용자 정책 결정).
+  const previewFresh = debounced !== null && JSON.stringify(debounced) === reqKey && !preview.isPlaceholderData;
+  const keep = preview.data?.keep_rounds;
+  const keepNotice = target !== null ? keepRoundsNotice(keep) : null;
+  // 「저장하면 … 곧 정리됩니다」는 새 스케줄에만 맞다 -- 이미 스케줄이 있는 배치(수정 창)는 저장과 무관하게 정리 루프가 돌고
+  // 있어서, 회차가 막 끝난 짧은 창에 수가 보이면 저장이 정리를 일으키는 것처럼 읽힌다(2026-11-16 리뷰).
+  const pruneNote = previewFresh && !isEdit ? prunePreviewText(preview.data?.prune_preview) : null;
+  const projectedWarn = target !== null
+    ? projectedChildrenWarning(target.itemCount, keep, preview.data?.child_count_limit) : null;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange} title={isEdit ? "스케줄 수정" : "스케줄 추가"} trigger={trigger} size="lg">
@@ -257,13 +269,24 @@ export function BatchScheduleDialog({ open, onOpenChange, trigger, schedule, sch
             {target.itemCount !== null && (
               <p>{target.itemCount === 0
                 ? "항목이 없는 배치라 회차가 건너뛰어집니다(항목을 추가하면 실행됩니다)."
-                : `회차마다 자식 요청 ${target.itemCount.toLocaleString("ko-KR")}개가 새로 생깁니다.`}</p>
+                : `회차마다 자식 요청 ${target.itemCount.toLocaleString("ko-KR")}개가 새로 생깁니다${
+                  keepRoundsKnown(keep) ? `(최근 ${keep}회차만 보존 — 오래된 회차는 자동으로 정리합니다)` : ""}.`}</p>
             )}
             {confirmOp && (
               <p>{target.autoConfirm
                 ? "이 배치는 「미리보기 후 자동 실행」이 켜져 있어 회차마다 미리보기가 끝나면 사람 확인 없이 실행됩니다."
                 : "회차마다 사람이 확인해야 하며, 확인하지 않으면 미리보기 만료 시간(사이트 설정, 기본 24시간)이 지나 실패로 집계되고, 확인 대기 중의 다음 회차는 건너뜁니다."}</p>
             )}
+          </div>
+        )}
+
+        {/* break-keep: 375·390 폭에서 「재/실행」「정/리될」처럼 어절 중간에서 꺾이지 않게(저장소 관례). */}
+        {target !== null && targetError === null && (keepNotice !== null || pruneNote !== null || projectedWarn !== null) && (
+          <div role="note" aria-label="회차 보존 안내"
+               className="space-y-1 break-keep rounded-lg border border-line px-3 py-2 text-xs">
+            {keepNotice !== null && <p className="text-ink/70">{keepNotice}</p>}
+            {pruneNote !== null && <p className="font-medium text-attn">{pruneNote}</p>}
+            {projectedWarn !== null && <p className="text-attn">{projectedWarn}</p>}
           </div>
         )}
 

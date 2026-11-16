@@ -18,7 +18,8 @@ _FORBIDDEN_OS = {"access", "chown", "fchown", "lchown", "chmod", "fchmod", "lchm
                  "execlpe", "execvp", "execvpe", "spawnl", "spawnle", "spawnlp", "spawnlpe", "spawnv", "spawnve",
                  "spawnvp", "spawnvpe", "startfile"}
 _DELETE_OS = {"unlink", "remove", "rmdir", "removedirs", "truncate", "ftruncate"}
-_PURGE_MODULES = ("artifact_trash.py", "request_purger.py", "purge_runner.py")
+# batch_round_prune(2026-11-16 스케줄 회차 보존 정리): 고르고 요청 삭제 몸통에 맡기기만 한다 -- 지우는 것은 같은 정리 루프다.
+_PURGE_MODULES = ("artifact_trash.py", "request_purger.py", "purge_runner.py", "batch_round_prune.py")
 
 
 def _control_plane_files():

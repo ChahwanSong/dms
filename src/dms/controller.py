@@ -6,6 +6,7 @@ from typing import Callable
 
 from .artifact_base import controller_check_once
 from .batch_orchestrator import BatchOrchestrator
+from .batch_round_prune import INTERVAL_SECONDS as BATCH_ROUND_PRUNE_INTERVAL_SECONDS, BatchRoundPruner
 from .batch_scheduler import BatchScheduler
 from .build_watcher import BuildWatcher
 from .config import Settings
@@ -121,6 +122,11 @@ def build_loops(settings: Settings, repos: Repositories, *, identity_resolver=No
     if purge_runner is not None:
         loops.append(Loop("request-purge", settings.request_purge_interval_seconds,
                           lambda: RequestPurger(repos, purge_runner, settings=settings).run_once()))
+        # 배치 스케줄 회차 보존 정리(2026-11-16, batch_round_prune.py): 스케줄이 있는 배치의 오래된 회차 자식을 고르고 요청 삭제
+        # 몸통(_purge_locked, 요약 감사)에 맡기기만 한다 -- 파일·파드 정리는 위 request-purge 루프다. 그래서 같은 조건(purge_runner)
+        # 에서만 넣는다(정리 루프 없이 아웃박스만 쌓지 않는다). DB 전용 -- 리스 max(30*3, 30)=90s.
+        loops.append(Loop("batch-round-prune", BATCH_ROUND_PRUNE_INTERVAL_SECONDS,
+                          lambda: BatchRoundPruner(repos, settings=settings).run_once()))
     return loops
 
 
