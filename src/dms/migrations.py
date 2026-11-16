@@ -140,10 +140,12 @@ def _apply_migrations(db: Database) -> None:
         #   enabled/next_run_at 꺼지면(사람 끄기·자동 일시정지) next_run_at NULL. due 질의 = (enabled, next_run_at) 인덱스
         #   armed_by            마지막으로 특권 3중 게이트를 통과해 생성·수정·켜기 한 사람 -- 회차마다 자격을 다시 본다
         #   ack_fingerprint     파괴적 스케줄(rm, delete 켠 sync)의 동의 시점 배치 지문(그 밖 NULL) -- 다르면 회차가 멈춘다
+        #   storage_binding     **모든** 스케줄의 무장 시점 스토리지 경로 바인딩 해시(batch_scheduler.storage_binding_digest) --
+        #                       다르면(스토리지 경로가 바뀜) 회차가 멈춘다. 같은 날 추가라 _ensure_columns 에도 있다.
         #   last_outcome        fired|skipped|missed|paused, last_reason_code 와 함께 마지막 판정
         #   paused_reason_code  자동 일시정지 사유(사람이 끄면 NULL)
         # request_id·job_id 이름의 컬럼을 두지 않는다(요청 삭제 그물 밖이 정상) -- batch_id 로 배치 삭제 두 경로가 함께 지운다
-        # (repositories/batches.BATCH_DELETE_TABLES). 새 테이블이라 _ensure_columns 불필요.
+        # (repositories/batches.BATCH_DELETE_TABLES). 새 테이블이라 처음 열들은 _ensure_columns 불필요(storage_binding 만 있다).
         """CREATE TABLE IF NOT EXISTS batch_schedules (
             schedule_id TEXT PRIMARY KEY,
             batch_id TEXT NOT NULL UNIQUE,
@@ -153,6 +155,7 @@ def _apply_migrations(db: Database) -> None:
             next_run_at TEXT,
             armed_by TEXT NOT NULL,
             ack_fingerprint TEXT,
+            storage_binding TEXT,
             created_by TEXT NOT NULL,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
@@ -801,6 +804,9 @@ def _ensure_columns(db):
         ("storages", "user_enabled", "INTEGER"),
         # root 실행 자격 부여(2026-10-12) -- 이중 경로 규약. 기배포 행은 NULL = 부여 없음(종전 동작: env 목록만).
         ("accounts", "root_granted", "INTEGER"),
+        # 스케줄의 스토리지 경로 바인딩(2026-11-16, 테이블과 같은 날 추가) -- 이중 경로 규약. 이 열 없이 만든 스케줄 행은 NULL =
+        # 바인딩 모름 → 회차가 batch_schedule_storage_changed 로 멈춘다(fail-closed, 다시 켜면 그 순간의 경로로 묶인다).
+        ("batch_schedules", "storage_binding", "TEXT"),
     ):
         if not _column_exists(db, table, column):
             db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")

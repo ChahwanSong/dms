@@ -76,7 +76,10 @@ def test_create_scan_schedule_returns_the_row_with_batch_summary(client, db):
     assert row["batch_id"] == bid and row["kind"] == "daily" and row["spec"] == {"hour": 2, "minute": 0}
     assert row["enabled"] is True and row["armed_by"] == "ops" and row["created_by"] == "ops"
     assert row["acknowledged_irreversible"] is False and row["destructive"] is False
-    assert "ack_fingerprint" not in row
+    assert "ack_fingerprint" not in row and "storage_binding" not in row
+    # 비파괴 스케줄도 무장 순간의 스토리지 경로 바인딩을 저장한다(회차가 비교 -- batch_scheduler.storage_binding_digest).
+    assert db.query_one("SELECT storage_binding FROM batch_schedules WHERE schedule_id = :s",
+                        {"s": row["schedule_id"]})["storage_binding"].startswith("sha256:")
     assert (row["last_outcome"], row["last_run_at"], row["paused_reason_code"]) == (None, None, None)
     # 다음 실행 = 지금 뒤 첫 02:00 KST(= 17:00 UTC).
     nxt = parse_utc(row["next_run_at"])
@@ -181,7 +184,7 @@ def test_shared_token_cannot_arm_but_can_read(db):
     r = c.post("/api/admin/batch-schedules", json={"batch_id": bid, **DAILY}, headers=TOKEN)
     assert (r.status_code, r.json()["detail"]) == (403, "privileged_not_authorized")
     sid = c.app.state.repos.batch_schedules.create(batch_id=bid, kind="daily", spec=DAILY["spec"], enabled=False,
-                                                   next_run_at=None, actor="ops", arm=lambda b, i: None)
+                                                   next_run_at=None, actor="ops", arm=lambda b, i: (None, None))
     assert c.patch(f"/api/admin/batch-schedules/{sid}", json=DAILY, headers=TOKEN).status_code == 403
     assert c.post(f"/api/admin/batch-schedules/{sid}:enable", headers=TOKEN).status_code == 403
     assert c.get("/api/admin/batch-schedules", headers=TOKEN).status_code == 200

@@ -23,7 +23,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, StrictBool
 
 from ..batch_scheduler import (arm_problem, armed_fingerprint, is_destructive, next_run_after, preview_runs,
-                               validate_schedule)
+                               storage_binding_digest, validate_schedule)
 from ..db import utc_now_iso
 from ..domain import DomainValidationError
 from .auth import Identity, require_admin
@@ -75,23 +75,25 @@ def _domain_error(e: DomainValidationError) -> HTTPException:
 
 def _arm(request: Request, acknowledge):
     """저장소에 넘기는 무장 판정 콜백(repositories/batch_schedules 의 arm 계약): 잠근 배치·항목으로 회차 판정 6–8단계
-    (요청자 자격·세션, 연산, 옵션 -- batch_scheduler.arm_problem)를 보고, 파괴적이면 동의를 요구하고 지문을 돌려준다."""
+    (요청자 자격·세션, 연산, 옵션 -- batch_scheduler.arm_problem)를 보고, 파괴적이면 동의를 요구한다. 돌려주는 것 =
+    (파괴적이면 동의 지문 아니면 None, 그 순간의 스토리지 경로 바인딩 -- 연산 무관)."""
     repos, settings = request.app.state.repos, request.app.state.settings
 
     def check(batch, items):
         held = arm_problem(repos, settings, batch)
         if held is not None:
             raise DomainValidationError(held.reason_code)
+        binding = storage_binding_digest(repos, items)
         if is_destructive(batch["operation"], batch.get("options")):
             if acknowledge is not True:
                 raise DomainValidationError("batch_schedule_ack_required")
-            return armed_fingerprint(repos, batch, items)
-        return None
+            return armed_fingerprint(repos, batch, items), binding
+        return None, binding
     return check
 
 
 def _out(row) -> dict:
-    out = {k: v for k, v in row.items() if k != "ack_fingerprint"}
+    out = {k: v for k, v in row.items() if k not in ("ack_fingerprint", "storage_binding")}
     out["acknowledged_irreversible"] = row.get("ack_fingerprint") is not None
     # 파괴적 판정은 지금 배치로(batch_scheduler.is_destructive -- 저장하지 않는다). 배치 행이 없으면 모름(None).
     batch = row.get("batch")

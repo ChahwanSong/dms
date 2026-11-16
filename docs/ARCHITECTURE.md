@@ -531,7 +531,11 @@ FastAPI 앱(create_app) 하나가 세션 쿠키·공유 토큰 이중 인증 뒤
     실행 신원, 세션 배치여야 함) 둘 다 지금 자격 있는 활성 관리자여야 한다(`privileged.privileged_admin_problem` — 자동 확인과
     같은 술어, 스케줄 CAS 에도 `batches.confirm` 과 같은 EXISTS 절) — 아니면 자동 일시정지(자격이 돌아와도 저절로 다시 돌지
     않는다; 사이트 특권 실행 꺼짐만 일시정지 없는 건너뜀). **유지보수·drain 이면 건너뜀**(컨트롤러 루프 중 유일하게 유지보수를
-    본다 — 「관리자도 예외 없음」인 신규 유입이라). **파괴적 지문**: rm·delete 켠 sync 는 무장할 때마다 「되돌릴 수 없음」 동의
+    본다 — 「관리자도 예외 없음」인 신규 유입이라). **스토리지 경로 바인딩(연산 무관)**: 무장할 때마다 항목이 가리키는
+    스토리지의 **지금** mount_path·managed_root 해시(`batch_scheduler.storage_binding_digest` → `batch_schedules.storage_binding`)를
+    남기고, 회차·발사 verify 의 값이 다르면(또는 NULL) 일시정지(`batch_schedule_storage_changed`) — payload 는 스토리지 이름 +
+    상대 경로뿐이라 회차 사이 경로를 바꾸면(PUT storages 는 require_admin — 공유 토큰도 된다) 자동 확인 sync 가 사람 없이 root 로
+    엉뚱한 곳에 덮어쓴다(2026-11-16 보안 리뷰). 항목·옵션은 묶지 않는다(scan 배치는 항목을 자주 고친다). **파괴적 지문**: rm·delete 켠 sync 는 무장할 때마다 「되돌릴 수 없음」 동의
     (`acknowledge_irreversible` 명시 true, 없으면 422 `batch_schedule_ack_required`)와 그 순간의 배치 지문(`batch_scheduler.
     armed_fingerprint` — 연산·옵션·항목 payload·실행 신원·자동 확인 여부 + 항목이 가리키는 스토리지의 **지금** mount_path·
     managed_root: payload 는 스토리지 이름 + 상대 경로뿐이라 동의 뒤 스토리지 경로를 바꾸면(PUT storages 는 require_admin — 공유

@@ -6,7 +6,7 @@ import pytest
 
 from dms import batch_scheduler
 from dms.batch_scheduler import (SCHEDULER_ACTOR, BatchScheduler, armed_fingerprint, next_run_after,
-                                 schedule_hold)
+                                 schedule_hold, storage_binding_digest)
 from dms.repositories import Repositories
 from dms.repositories.batch_schedules import RUN_HISTORY_CAP
 
@@ -56,7 +56,7 @@ def _schedule(repos, bid, *, kind="daily", spec=None, next_at=SLOT, armed_by="op
     # 파괴적 스케줄의 동의 지문 = 라우트의 arm 과 같은 함수(armed_fingerprint -- 스토리지 바인딩 포함).
     return repos.batch_schedules.create(
         batch_id=bid, kind=kind, spec=spec or DAILY, enabled=True, next_run_at=next_at, actor=armed_by,
-        arm=(lambda b, i: armed_fingerprint(repos, b, i)) if destructive else (lambda b, i: None))
+        arm=(lambda b, i: (armed_fingerprint(repos, b, i) if destructive else None, storage_binding_digest(repos, i))))
 
 
 def _tick(repos, now=NOW, settings=_S):
@@ -419,7 +419,8 @@ def test_destructive_schedule_pauses_when_a_storage_is_repointed_after_ack(repos
     sid = _schedule(repos, bid, destructive=True)
     _repoint(repos, name, "/home")
     assert _tick(repos) == [(sid, "paused")]
-    _assert_paused(repos, db, sid, "batch_schedule_batch_changed")
+    # 연산 무관 바인딩 검사(storage_binding_digest)가 파괴적 지문보다 먼저 잡는다 -- 사유도 「경로가 바뀜」으로 구체적이다.
+    _assert_paused(repos, db, sid, "batch_schedule_storage_changed")
     b = repos.batches.get(bid)
     assert b["status"] == "Completed" and b["auto_confirm_by"] == "ops"
 
@@ -454,7 +455,53 @@ def test_storage_repointed_between_decision_and_fire_rolls_back(repos, monkeypat
     assert repos.batches.get(bid)["status"] == "Completed"
     monkeypatch.setattr(repos.batch_schedules, "fire", real_fire)
     assert _tick(repos) == [(sid, "paused")]
-    assert repos.batch_schedules.get(sid)["paused_reason_code"] == "batch_schedule_batch_changed"
+    assert repos.batch_schedules.get(sid)["paused_reason_code"] == "batch_schedule_storage_changed"
+
+
+@pytest.mark.parametrize("op,options,auto_by,name", [
+    ("scan", None, None, "s1"),
+    ("sync", {}, None, "s2"),
+    # 2026-11-16 보안 리뷰: 자동 확인이 켜진 일반 sync 는 파괴적 지문 밖이었다 -- 회차 사이 목적지 스토리지 경로를 바꾸면
+    # (공유 토큰도 된다) 사람 없이 root 로 엉뚱한 곳에 덮어썼다.
+    ("sync", {}, "ops", "s2"),
+    ("sync", {}, "ops", "s1"),
+])
+def test_any_schedule_pauses_when_a_storage_is_repointed_after_arming(repos, db, op, options, auto_by, name):
+    _storage(repos, "s1", "/mnt/s1")
+    _storage(repos, "s2", "/mnt/s2")
+    bid = _batch(repos, op=op, options=options, auto_by=auto_by)
+    sid = _schedule(repos, bid)
+    assert repos.batch_schedules.get(sid)["ack_fingerprint"] is None      # 비파괴 -- 동의 지문은 없다
+    _repoint(repos, name, "/etc")
+    assert _tick(repos) == [(sid, "paused")]
+    _assert_paused(repos, db, sid, "batch_schedule_storage_changed")
+    assert repos.batches.get(bid)["status"] == "Completed"                # 리셋하지 않았다
+
+
+def test_scan_schedule_item_edits_do_not_pause(repos):
+    # 바인딩은 경로만 묶는다 -- scan 배치는 항목을 자주 고친다(항목 추가·교체로 멈추면 안 된다, 그건 파괴적 지문만의 몫).
+    _storage(repos, "s1", "/mnt/s1")
+    bid = _batch(repos, op="scan")
+    sid = _schedule(repos, bid)
+    repos.db.execute("UPDATE batch_items SET payload = :p WHERE batch_id = :b AND seq = 0",
+                     {"p": '{"storage": "s1", "target": "elsewhere"}', "b": bid})
+    assert _tick(repos) == [(sid, "fired")]
+
+
+def test_schedule_without_a_storage_binding_pauses_fail_closed(repos, db):
+    # 열 이전에 만든 행·변조(NULL) -- 지금 바인딩과 같을 수 없어 멈춘다. 다시 켜면 그 순간의 경로로 묶여 다시 돈다.
+    _storage(repos, "s1", "/mnt/s1")
+    bid = _batch(repos, op="scan")
+    sid = _schedule(repos, bid)
+    db.execute("UPDATE batch_schedules SET storage_binding = NULL WHERE schedule_id = :s", {"s": sid})
+    assert _tick(repos) == [(sid, "paused")]
+    _assert_paused(repos, db, sid, "batch_schedule_storage_changed")
+    assert repos.batch_schedules.enable(
+        sid, actor="ops", arm=lambda b, i: (None, storage_binding_digest(repos, i))) is True
+    row = repos.batch_schedules.get(sid)
+    assert row["storage_binding"] == storage_binding_digest(repos, repos.batches.list_items(bid))
+    db.execute("UPDATE batch_schedules SET next_run_at = :t WHERE schedule_id = :s", {"t": SLOT, "s": sid})
+    assert _tick(repos) == [(sid, "fired")]
 
 
 @pytest.mark.parametrize("column,value", [("spec", "{broken"), ("spec", '{"hour": 99, "minute": 0}'),

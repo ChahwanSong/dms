@@ -148,9 +148,9 @@ class BatchSchedulesRepository:
         return [_hydrate(r) for r in rows]
 
     # --- 사람의 쓰기(라우트) ----------------------------------------------------------------------------------------------
-    # arm(batch, items) -> ack_fingerprint | None: 잠근 배치 행·항목으로 「이 배치를 스케줄로 돌려도 되나」를 판정하는 콜백
-    # (routes_batch_schedules._arm -- batch_scheduler.arm_problem·파괴적 동의). 거부는 DomainValidationError 로 던진다
-    # (트랜잭션째 롤백, 라우트가 422). 반환값은 파괴적 스케줄의 동의 지문(그 밖 None).
+    # arm(batch, items) -> (ack_fingerprint | None, storage_binding): 잠근 배치 행·항목으로 「이 배치를 스케줄로 돌려도 되나」를
+    # 판정하는 콜백(routes_batch_schedules._arm -- batch_scheduler.arm_problem·파괴적 동의). 거부는 DomainValidationError 로
+    # 던진다(트랜잭션째 롤백, 라우트가 422). 반환값 = (파괴적 스케줄의 동의 지문 | None, 연산 무관 스토리지 경로 바인딩).
 
     def _lock_schedule(self, schedule_id):
         lock = " FOR UPDATE" if self._db.dialect == "postgresql" else ""
@@ -189,13 +189,13 @@ class BatchSchedulesRepository:
             # 배치 행 잠금이 직렬화 지점이다 -- 같은 배치의 두 생성은 여기서 줄을 서고 뒤쪽이 앞쪽의 행을 본다(UNIQUE 가 백스톱).
             if self._db.query_one("SELECT 1 AS x FROM batch_schedules WHERE batch_id = :b", {"b": batch_id}):
                 raise DomainValidationError("batch_schedule_exists", batch_id)
-            ack = arm(batch, items)
+            ack, binding = arm(batch, items)
             self._db.execute(
                 """INSERT INTO batch_schedules (schedule_id, batch_id, kind, spec, enabled, next_run_at, armed_by,
-                       ack_fingerprint, created_by, created_at, updated_at)
-                   VALUES (:s, :b, :k, :spec, :en, :next, :actor, :ack, :actor, :now, :now)""",
+                       ack_fingerprint, storage_binding, created_by, created_at, updated_at)
+                   VALUES (:s, :b, :k, :spec, :en, :next, :actor, :ack, :bind, :actor, :now, :now)""",
                 {"s": sid, "b": batch_id, "k": kind, "spec": dump_json(spec), "en": 1 if enabled else 0,
-                 "next": next_run_at if enabled else None, "actor": actor, "ack": ack, "now": now})
+                 "next": next_run_at if enabled else None, "actor": actor, "ack": ack, "bind": binding, "now": now})
             row = self._lock_schedule(sid)
             self._audit("create", row, actor=actor, before=None, after=_audit_state(row, **_ack_extra(ack)), now=now)
         return sid
@@ -208,12 +208,12 @@ class BatchSchedulesRepository:
             row, batch, items = self._lock_for_arm(schedule_id)
             if batch is None:
                 raise DomainValidationError("batch_not_found", row["batch_id"])
-            ack = arm(batch, items)
+            ack, binding = arm(batch, items)
             self._db.execute(
                 """UPDATE batch_schedules SET kind = :k, spec = :spec, next_run_at = :next, armed_by = :actor,
-                       ack_fingerprint = :ack, updated_at = :now WHERE schedule_id = :s""",
+                       ack_fingerprint = :ack, storage_binding = :bind, updated_at = :now WHERE schedule_id = :s""",
                 {"k": kind, "spec": dump_json(spec), "next": next_run_at if row["enabled"] else None,
-                 "actor": actor, "ack": ack, "now": now, "s": schedule_id})
+                 "actor": actor, "ack": ack, "bind": binding, "now": now, "s": schedule_id})
             after = self._lock_schedule(schedule_id)
             self._audit("update", row, actor=actor, before=_audit_state(row),
                         after=_audit_state(after, **_ack_extra(ack)), now=now)
@@ -232,11 +232,11 @@ class BatchSchedulesRepository:
             if batch is None:
                 raise DomainValidationError("batch_not_found", row["batch_id"])
             next_run_at = next_run_after(row["kind"], row["spec"], now)
-            ack = arm(batch, items)
+            ack, binding = arm(batch, items)
             self._db.execute(
                 """UPDATE batch_schedules SET enabled = 1, next_run_at = :next, armed_by = :actor, ack_fingerprint = :ack,
-                       paused_reason_code = NULL, updated_at = :now WHERE schedule_id = :s""",
-                {"next": next_run_at, "actor": actor, "ack": ack, "now": now, "s": schedule_id})
+                       storage_binding = :bind, paused_reason_code = NULL, updated_at = :now WHERE schedule_id = :s""",
+                {"next": next_run_at, "actor": actor, "ack": ack, "bind": binding, "now": now, "s": schedule_id})
             after = self._lock_schedule(schedule_id)
             self._audit("enable", row, actor=actor, before=_audit_state(row, paused_reason_code=row["paused_reason_code"]),
                         after=_audit_state(after, **_ack_extra(ack)), now=now)

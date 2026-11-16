@@ -295,6 +295,7 @@
   "batch_schedule_requester_not_privileged",
   "batch_schedule_empty",
   "batch_schedule_batch_changed",
+  "batch_schedule_storage_changed",
   "batch_schedule_batch_running",
   "batch_schedule_awaiting_confirm",
   "batch_schedule_batch_cancelling",

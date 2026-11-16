@@ -251,6 +251,14 @@ def storage_binding(repos, items) -> dict:
     return out
 
 
+def storage_binding_digest(repos, items) -> str:
+    """**모든** 스케줄(연산 무관)이 무장 때 저장하고 회차마다 비교하는 스토리지 경로 바인딩 = sha256(canonical storage_binding).
+    파괴적 지문(armed_fingerprint)은 rm·delete 켠 sync 만 묶는데, 자동 확인이 켜진 일반 sync 도 회차 사이 목적지 스토리지의
+    경로를 바꾸면(PUT /api/admin/storages 는 require_admin -- 공유 Bearer 토큰도 된다) 사람 없이 root 로 엉뚱한 곳에 덮어쓴다
+    (2026-11-16 보안 리뷰). 항목·옵션은 묶지 않는다(scan 배치는 항목을 자주 고친다 -- 그건 파괴적 지문만의 몫)."""
+    return "sha256:" + hashlib.sha256(_canonical(storage_binding(repos, items)).encode()).hexdigest()
+
+
 def armed_fingerprint(repos, batch, items) -> str:
     """무장·회차가 비교하는 지문 = batch_fingerprint(배치, 항목, 지금의 스토리지 바인딩). 라우트의 동의(routes_batch_schedules._arm)
     와 회차(batch_hold·발사 verify)가 반드시 이 함수 하나를 쓴다 -- 한쪽만 스토리지를 묶으면 모든 파괴적 스케줄이 첫 회차에서
@@ -280,9 +288,10 @@ def arm_problem(repos, settings, batch) -> "Verdict | None":
     return None
 
 
-def batch_hold(repos, settings, batch, items, *, ack_fingerprint) -> "Verdict | None":
+def batch_hold(repos, settings, batch, items, *, ack_fingerprint, bound_storages) -> "Verdict | None":
     """배치에 걸린 판정(5–11단계). None 이면 이 배치는 지금 쏠 수 있다. fire 가 잠근 행으로 **한 번 더** 부른다(판정과 발사
-    사이 배치가 바뀌었으면 롤백 -- 다음 틱이 새 값으로 판정한다)."""
+    사이 배치가 바뀌었으면 롤백 -- 다음 틱이 새 값으로 판정한다). bound_storages = 스케줄 행의 storage_binding(무장 때의
+    storage_binding_digest) -- NULL(열 이전 행·변조)은 지금 값과 같을 수 없어 멈춘다(fail-closed)."""
     if batch is None:
         # 정상 경로에선 배치 삭제(두 경로 모두)가 스케줄도 지운다 -- 여기 오는 것은 경합·변조의 잔재다.
         return _pause(reason_code="batch_not_found")
@@ -292,6 +301,10 @@ def batch_hold(repos, settings, batch, items, *, ack_fingerprint) -> "Verdict | 
     if len(items) == 0:
         # 쏘면 곧바로 Completed 가 되는 가짜 「실행됨」만 남는다 -- 항목이 생기면 다음 슬롯부터 돈다.
         return _skip(reason_code="batch_schedule_empty")
+    if storage_binding_digest(repos, items) != bound_storages:
+        # 연산 무관 -- 켠 사람이 본 경로가 아니다(자동 확인 sync 의 root 덮어쓰기, scan 의 root 읽기). 다시 켜면 그 순간의
+        # 경로로 묶인다(파괴적이면 동의도 다시).
+        return _pause(reason_code="batch_schedule_storage_changed")
     if is_destructive(batch["operation"], batch.get("options")) and \
             armed_fingerprint(repos, batch, items) != ack_fingerprint:
         return _pause(reason_code="batch_schedule_batch_changed")
@@ -353,7 +366,8 @@ def schedule_hold(repos, settings, schedule, batch, items, *, control, now, unre
         return _pause(reason_code="batch_schedule_owner_not_privileged")
     if unreadable:
         return _pause(reason_code="batch_schedule_batch_unreadable")
-    held = batch_hold(repos, settings, batch, items, ack_fingerprint=schedule.get("ack_fingerprint"))
+    held = batch_hold(repos, settings, batch, items, ack_fingerprint=schedule.get("ack_fingerprint"),
+                      bound_storages=schedule.get("storage_binding"))
     return FIRE if held is None else held
 
 
@@ -461,7 +475,8 @@ class BatchScheduler:
             # 잠근 행으로 5–11단계를 다시 본다 -- 판정 뒤 CSV 교체·옵션 변경(지문)·항목 삭제가 커밋됐으면 롤백(다음 틱이 새
             # 값으로 판정해 일시정지·건너뜀을 남긴다). 쏠 수 있으면 감사 행에 남길 지금 지문을 돌려준다.
             if batch_hold(repos, self._settings, locked_batch, locked_items,
-                          ack_fingerprint=row.get("ack_fingerprint")) is not None:
+                          ack_fingerprint=row.get("ack_fingerprint"),
+                          bound_storages=row.get("storage_binding")) is not None:
                 return None
             return armed_fingerprint(repos, locked_batch, locked_items)
 
