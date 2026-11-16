@@ -65,6 +65,7 @@
 #   d27 = 입구 Envoy 폐기 → 클러스터 Traefik + 앱 본문 상한·keep-alive(소스 aa26bbce)
 #   d28 = 포탈 개선 3건(사용량 전체 목록·최신 scan 차트, 배치 대상 스토리지 열·큰 배치 상세 쪽 넘김·검색, 배치 스케줄러 — a5cc398f)
 #   d29 = 스케줄 배치 최근 5회차 보존(batch-round-prune)·배치 단위 삭제 상한 5000 — 9166b8e2
+#   d30 = d29 실증 지적 다듬기(정리 감사 자식 기록·스케줄 삭제 감사 한 벌·삭제 문구·390 줄바꿈) — 0ec5f33b
 #   태그 bump = 아래 newTag(+ patch-config.yaml 의 DMS_JOB_IMAGE) 커밋 — **dms-k8s 에서만** 한다(2026-10-22 브랜치 분리 뒤
 #   빌드 소스는 /home/mason/dms-dev/dms-k8s 체크아웃 = origin/dms-k8s, main 은 이 클러스터와 무관).
 #   ssc 클러스터의 오버레이(overlays/testbed)는 dms-ssc 브랜치에만 있다(2026-10-26 이 브랜치에서 지웠다 — 체리픽 충돌·엉뚱한 태그 방지).
@@ -95,10 +96,10 @@ resources:
 images:
   - name: set-by-overlay.invalid/dms
     newName: 10.112.0.50:5000/dms
-    newTag: d29
+    newTag: d30
   - name: set-by-overlay.invalid/dms-agent
     newName: 10.112.0.50:5000/dms-agent
-    newTag: d29
+    newTag: d30
 
 patches:
   - path: patch-config.yaml
