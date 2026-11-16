@@ -54,7 +54,7 @@ dms-k8s 라인의 **완료 기록**이다. 각 항목에는 무엇을 만들었�
 
 | 날짜 | 태그·실증 | 제목 |
 |---|---|---|
-| 11-16 | d29(실증 예정) | 스케줄 회차 최근 5회차 보존·배치 단위 삭제 상한 5000 d29 |
+| 11-16 | d29 | 스케줄 회차 최근 5회차 보존·배치 단위 삭제 상한 5000 d29 |
 | 11-16 | d28 | 포탈 개선 — 사용량 전체 목록·최신 scan 차트 · 배치 대상 스토리지 열·큰 배치 상세 쪽 넘김·검색 · 배치 스케줄러 d28 |
 | 11-16 | d27 | 입구 — Envoy Gateway 폐기, 클러스터의 Traefik 하나로 교체(테스트베드 영구 적용·실증) d27 |
 | 11-14 | — | 입구 — 리스너 포트(GATEWAY_LISTEN_PORT)·PROXY off 모드·마스터 hostPort 충돌 감지(OA: Traefik 이 호스트 443, Avi PROXY v2 미지원) |
@@ -98,7 +98,7 @@ dms-k8s 라인의 **완료 기록**이다. 각 항목에는 무엇을 만들었�
 
 ## 상세 기록 (최신순)
 
-### 🔧 스케줄 회차 최근 5회차 보존·배치 단위 삭제 상한 5000 d29 — **구현 완료, d29 실증 예정**(2026-11-16)
+### ✅ 스케줄 회차 최근 5회차 보존·배치 단위 삭제 상한 5000 d29 — **완료·실증**(2026-11-16)
 
 사용자 요청(2026-11-16, d28 출하 보고 직후): 「남겨둔것 정리해. 최근 5회차만 남기고 나머지 정리해. 배치 단위로 한번에 지우는것 상한
 5000개로 늘려줘.」 — d28 보고의 「스케줄 회차마다 자식 요청이 쌓여 배치 단위 삭제 상한(2000)을 넘으면 그 배치를 배치 단위로 못 지운다 —
@@ -178,8 +178,73 @@ dms-k8s 라인의 **완료 기록**이다. 각 항목에는 무엇을 만들었�
   지움 · 항목 1001개 이상 스케줄 배치는 정리 뒤에도 상한 초과(경고만) · 정리 처리량 = 아웃박스 처리량 · 5000 배치 하나 ≈ 3.5–4초 API 정지 ·
   미등록 스토리지 정리 포탈 연속 회차의 readiness(기존 성질) · 사용량 분석의 과거 scan 점·수치가 줄어듦(의도) · 롤링 배포 중 옛 파드가 경계 없이
   시작한 회차는 앞 회차와 합쳐져 더 오래 보존(안전한 방향).
-- **실증**: d29 실증 예정(설계 §11 — e5fe 에 스케줄 + 사람 `:rescan` × 4 → 스케줄 회차에서 옛 자식 8 정리·`batch / prune_rounds` 1행·`pruned_total`
-  8·아티팩트·vcjob 0 → `:rescan` 1회 더 → r_1 자식만 정리, 포탈 1280·390 스크린숏, 되돌림 = 스케줄 삭제).
+- **커밋**: 9166b8e2(기능), 68bf89b7(testbed-k8s 오버레이 d28 → d29).
+- **배포**: 포탈 빌드 d29(210초) → 릴리스 4종(dms-agent·dms-api·dms-controller·job-image) 모두 Applied(라이브 api·controller `dms:d29`, agent
+  `dms-agent:d29`, 둘 다 재시작 0). 새 표·칸은 기동 때 만든다. 새 설정 키 `DMS_BATCH_SCHEDULE_KEEP_ROUNDS` 는 라이브 ConfigMap 에 아직 없다(아래 결함 ②).
+- **테스트베드 정리**(d28 잔여물, 18:10–18:15 KST — job tmp `prune/CLEANUP.md`): 배치 78b7(자식 137)·2d25(자식 3)를 배치 단위 삭제(감사 822–963),
+  픽스처 `/cephfs/managed/dms-proof-d28` 1,500 디렉터리(파일 4,784개·175,716,256 B)를 k8s-w1 SSH 로 삭제, 아티팩트 135개는 손대지 않고
+  request-purge 루프가 지웠다(pending 140 → 0). cephfs-dms 사용량 대상 134 → 3(`e2e/dest`·`e2e/growth`·`e2e/victim-protected`).
+- **라이브 실증**(d29, dmsk8s, 관리자 mason 세션 API·실 Chrome, kubectl 은 `--context dmsk8s` 읽기만, DB 는 CNPG 복제본 `dms-pg-1` 에서 읽기 전용
+  SELECT 만 — 원자료 job tmp `prune/live29/`, 절은 `prune/PROOF-d29.md` P1·U1). 대상은 scan 배치 e5fe(cephfs-dms, 항목 2 `e2e/growth`·`e2e/dest`,
+  자식 8 = 배포 전 회차 4개 몫) 하나뿐이다:
+  - **P1 API·루프**(21:22–21:46 KST):
+    - 배포 확인: 리스 `loop:batch-round-prune` 를 새 컨트롤러 파드가 쥐고 갱신 중(90초 리스), 컨트롤러 로그 30분 0줄, `batch_rounds` 표와
+      `batch_schedules.pruned_at`·`pruned_total` 칸 있음. 작업 목록 관리자 응답의 배치 자식 행 `batch_request_count_limit 5000`·
+      `batch_item_count_limit 10000`, 스케줄 생성 응답·`:preview` 의 `child_count_limit 5000`·`keep_rounds 5`, preview `prune_preview {rounds_recorded 0,
+      would_prune 0}`.
+    - 스케줄 생성: scan 이라 동의 없이 201(`2db35cc2…`, monthly, next 2026-11-30T18:00Z), `pruned_total` 은 0 이 아니라 null.
+    - 회차 7개(사람 `:rescan` 6번 + 스케줄 회차 1번): `batch_rounds` 7행 — via rescan·actor mason 6행, via schedule·actor `system:batch-scheduler`
+      1행. floor_order 248 → 250 → … → 260 이 매번 직전 회차의 마지막 자식 commit_order 와 정확히 같다. 모든 `:rescan` 은 200 `requeued 2`.
+    - r1–r4(기록 1–4개)는 하나도 지우지 않았다(prune 감사 0행, `pruned_total` null 유지, 자식 8 → 16, r4 뒤 preview `{4, 0}`).
+    - r5(기록 5개)에서 경계 기록 전 옛 자식 8개(commit_order 4·5·103–106·247·248 — Conflict 1·Succeeded 7, 잡 7)가 `:rescan` 18초 뒤 한 번에
+      정리됐다(감사 971). 그 뒤로는 회차마다 가장 오래된 회차 몫만: r6 → r1 몫 249·250(29초 뒤, 972), 스케줄 회차 r7 → r2 몫 251·252(발사와 같은
+      초, 975). 셋 다 30초 루프 주기 안이다.
+    - 최종 자식 10 = 정확히 최근 5회차 몫(commit_order 253–262 = r3–r7, 회차당 2개, 모두 Succeeded). 닻 규칙: upto 248·250·252 =
+      `min(cut, anchor − 1)`, 닻 자식 256·258·260 은 지워지지 않았다. 정리 순간마다 진행 중이던 지금 회차 자식(257 Planned/잡 Running, 260·261
+      Pending)은 무접촉, 감사 `skipped {}`.
+    - 감사 `('batch','prune_rounds', e5fe)` 3행: actor `system:batch-scheduler`, deleted 8/2/2·job 7/2/2·cut_round_seq 1/2/3·rounds_recorded 5/6/7·
+      upto/anchor 248/256·250/258·252/260, keep_rounds 5, truncated false(2,171/862/862 B). 자식별 `('request','delete')` 감사는 0행. 요약 이벤트
+      `batch_round_prune_done` 3건, 막힘 경고 0.
+    - 스케줄 `updated_at` 은 정리로 밀리지 않았다(사람의 PATCH·disable 때만 바뀜). 스케줄 회차 발사 CAS 는 lost 없이 fired(run_id 6, 지연 0초).
+    - 정리 아웃박스(requested_by `system:batch-scheduler`) 8 → 7 → 0, 2 → 0, 2 → 0, `request_purged` 이벤트는 정리 2–19초 뒤. 지운 잡 11개의
+      `/dms_shared/dms/artifacts/<job_id>` 11/11 사라짐(남은 자식 잡 10개는 10/10 그대로), 지운 잡의 vcjob·Pod 0, DB requests·data_jobs·events·
+      results 에 지운 id 행 0. 예외(기존 동작): 10-25 잡 `773e8bc3…` 은 옛 base 사본이라 `artifact_left_at_old_base`(이벤트 1387)로 설계대로 남았다.
+    - `pruned_total` null(r1–r4) → 8 → 10 → 12, `pruned_at` 12:42:00Z, child_count 10 / 5000, 배치 summary `schedule.keep_rounds 5`. 마지막 preview
+      `{rounds_recorded 7, would_prune 0}` 으로 실제와 일치.
+    - 사용량 scan-history 점: growth 4 → 8 → 6, dest 4 → 8 → 5(scan_count 도 같음). growth 의 e5fe 밖 scan `61cc10b4…` 는 그대로라 first_scan_at
+      이 10-25 로 유지, dest 의 first_scan_at 은 r3 자식(12:31:06Z)으로 당겨졌다(의도).
+    - 스케줄 삭제 뒤 정리 정지는 자식을 늘리지 않으려고 코드로만 확인했다(`prune_targets` 가 `FROM batch_schedules`, 청크는 스케줄 FOR UPDATE
+      재확인에서 행이 없으면 `schedule_gone`).
+  - **U1 UI**(실 Chrome headless, 1440·390, 21:50–21:59 KST — 페이지마다 GET 이 아닌 요청을 끊는 가드, `:preview` 와 마지막 DELETE 만 통과):
+    - 화면 11종 × 폭 2 = 22개, 스크린샷 32장에서 콘솔 오류·실패 요청·HTTP≥400·문서 가로 넘침 0(감사 화면의 `null` 1건은 null≠모름 표기 —
+      결함 아님).
+    - 스케줄러: 머리 안내 「최근 5회차만 보존 … 스케줄을 꺼도 정리는 계속되고, 스케줄을 지우면 멈춥니다」(서버 keep_rounds), 정리 열 「정리
+      누적 12건 · 마지막 2026-11-16 21:42:00」(390 은 표 래퍼 안 가로 스크롤), 실행 기록 창 1행. 수정 창은 preview `{7, 0}` 이라 「곧 정리될 작업」·
+      「항목 × 5회차」 경고 0(정상) — 가로채기 I1(브라우저에서 preview 응답만 would_prune 4·limit 5)로 두 줄이 그려지는 것을 확인(390 넘침 0).
+    - 배치 상세 배지 「스케줄 꺼짐 — 매일 21:42 (KST)」 아래 「최근 5회차만 보존 — 전체 재실행하면 가장 오래된 회차가 정리될 수 있습니다」.
+    - 작업 목록: 행 limit 5000 → 배치 체크박스 10/10 활성, 툴바 「배치 1개 선택됨(작업 10개 · 성공 scan 10개)」, 삭제 창은 열고 닫기만
+      (`requests:delete` 0). 가로채기 I2: 행 limit 을 5 로 → 「삭제 상한 초과」로 잠김, 키 삭제 → 「정보 없음」(fail-closed) — 판정은 행의 서버 값.
+      배포 번들에 「2000개」 0건.
+    - 사용량 경로 시트 `e2e/growth`(스캔 이력 6건)의 「실 사용량 추이 설명」 도움말에 보존 한 줄.
+    - UI 로 스케줄 삭제(2단 확인 → DELETE 200, 12:57:18Z) → 빈 목록, 감사 977, 추가 창에서 e5fe 를 다시 고를 수 있음(preview `{7, 0}` —
+      `batch_rounds` 7행은 남음), 그 스케줄의 실행 기록 1 → 0, 977 뒤 prune_rounds 0, 컨트롤러·api 로그 0줄.
+  - 라이브로 못 본 것: 꺼진 스케줄에서 정리가 계속되는지(스케줄 회차의 정리가 발사와 같은 초에 끝나 끄기보다 먼저였다 — 코드로만), upto
+    이하 비종단 잔재 건너뛰기, 조용한 창이 정리를 미루는 순간, BACKLOG_MAX·청크 100 상한 — 라이브에 생기지 않아 단위·PG 테스트 몫.
+- **실증 결함**: must 0, should 5건(실증 단계에서는 고치지 않았다):
+  - ① 정리 감사(`batch / prune_rounds`)의 자식 기록 `run_as_root` 가 구조적으로 늘 null(라이브 14행 전부) — 배치 자식 payload 에 그 키가 없다
+    (배치 자식의 root 근거는 `privilege_policy` 의 배치 자식 판정). 남길 가치가 있는 것은 payload 의 `owner_username`. 설계 §3.3-6 예시와도 다르다.
+  - ② 운영: 라이브 ConfigMap `dms-config` 에 `DMS_BATCH_SCHEDULE_KEEP_ROUNDS` 가 없다(포탈 릴리스는 이미지만 바꾼다 — CM 은 d19 이후 미적용,
+    `DMS_JOB_IMAGE` 가 d19). 코드 기본 5 와 같아 지금 동작 영향은 없지만, 다음 `sh deploy/install.sh --context dmsk8s --site testbed-k8s --only S11`
+    전에는 CM 으로 보존 수를 바꿀 수 없다(설계 §11-0 확인 항목과 어긋남).
+  - ③ 스케줄 DELETE 라우트 감사(`batch_schedule / delete`, 라이브 977)의 before 에 `pruned_total`·`pruned_at` 이 없다 — 배치 삭제 경로
+    `_audit_schedule_delete` 는 싣는다(같은 감사 행인데 경로에 따라 모양이 다름). 누적은 prune_rounds 감사 합(8+2+2 = 12)으로 복원 가능.
+  - ④ 스케줄 행 「삭제」 title 「회차 기록도 함께 지웁니다」의 「회차 기록」은 실행 기록(`batch_schedule_runs`)이라, 같은 화면 보존 안내의 「회차」
+    (`batch_rounds` — 스케줄을 지워도 남는다)와 헷갈린다.
+  - ⑤ 외형: 정리 칸 시각이 하이픈에서 꺾이고(1440 「마지막 2026-11-」/「16 21:42:00」), 새 안내 줄에 break-keep 이 없어 390 에서 어절 중간에서
+    꺾인다(d28 기존 문구도 같은 상태 — 저장소 관례 DeleteRequestsDialog 의 break-keep 과 어긋남).
+- **테스트베드에 남긴 것**: 배치 e5fe(Completed, 자식 10 = commit_order 253–262·잡 10·vcjob 10 — vcjob 은 DMS GC 몫)와 `batch_rounds` 7행, 감사
+  970–977. 스케줄은 0건(2db35cc2 는 UI 단계가 지웠다). 옛 base 사본 k8s-w1 `/cephfs/dms/artifacts/773e8bc3c05c4917ab004f5a95057147` 은 손대지
+  않았다. 클러스터 리소스(ConfigMap 포함)·계정·스토리지·sync 쌍·sync/rm 배치·current-context(dms)는 바꾸지 않았다.
 
 ### ✅ 포탈 개선 — 사용량 전체 목록·최신 scan 차트 · 배치 대상 스토리지 열·큰 배치 상세 쪽 넘김·검색 · 배치 스케줄러 d28 — **완료·실증**(2026-11-16)
 
@@ -413,7 +478,7 @@ dms-k8s 라인의 **완료 기록**이다. 각 항목에는 무엇을 만들었�
     확인 창은 회차 숫자를 글자로 보이지 않는다(변경 전과 같다), 사람의 「전체 재실행」은 감사 행이 없다(BACKLOG).
 - **실증 결함**: 0건(L1·L2·L3). 라이브에서 고칠 것이 없어 d28 을 다시 빌드하지 않는다 — 실증 뒤 수정은 위 e2e 하나뿐이고 테스트 파일이라
   다음 빌드(d29) 이미지와도 무관하다.
-- **테스트베드에 남긴 것**(사용자 열람·다음 UI 실증용 — 지우지 않음):
+- **테스트베드에 남긴 것**(사용자 열람·다음 UI 실증용 — 지우지 않음. 픽스처·78b7·2d25 는 **11-16 정리됨(d29 항목)**):
   - 픽스처 `/cephfs/managed/dms-proof-d28`(p0001..p1500, 파일 4,784개, 175,716,256 B, root:root — CephFS 라 k8s-w1·w2 모두에서 보인다). 전용
     디렉터리 밖은 만들거나 바꾸지 않았다.
   - 큰 배치 `78b727282fc04234bceacbf3d67d8d93`(「d28 실증 L2 — 큰 scan 배치 1,500 경로」, Cancelled, Succeeded 131(p0001–p0131)·Cancelled 1,369, 자식
