@@ -63,6 +63,7 @@
 #   d25 = k8s 연동 클러스터를 개요에서 별도 「클러스터」 탭으로 분리(소스 0ae6db14)
 #   d26 = 포탈 전수조사 버그 92건 수정(소스 73d29c1e)
 #   d27 = 입구 Envoy 폐기 → 클러스터 Traefik + 앱 본문 상한·keep-alive(소스 aa26bbce)
+#   d28 = 포탈 개선 3건(사용량 전체 목록·최신 scan 차트, 배치 대상 스토리지 열·큰 배치 상세 쪽 넘김·검색, 배치 스케줄러 — a5cc398f)
 #   태그 bump = 아래 newTag(+ patch-config.yaml 의 DMS_JOB_IMAGE) 커밋 — **dms-k8s 에서만** 한다(2026-10-22 브랜치 분리 뒤
 #   빌드 소스는 /home/mason/dms-dev/dms-k8s 체크아웃 = origin/dms-k8s, main 은 이 클러스터와 무관).
 #   ssc 클러스터의 오버레이(overlays/testbed)는 dms-ssc 브랜치에만 있다(2026-10-26 이 브랜치에서 지웠다 — 체리픽 충돌·엉뚱한 태그 방지).
@@ -93,10 +94,10 @@ resources:
 images:
   - name: set-by-overlay.invalid/dms
     newName: 10.112.0.50:5000/dms
-    newTag: d27
+    newTag: d28
   - name: set-by-overlay.invalid/dms-agent
     newName: 10.112.0.50:5000/dms-agent
-    newTag: d27
+    newTag: d28
 
 patches:
   - path: patch-config.yaml
