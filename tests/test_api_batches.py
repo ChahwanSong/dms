@@ -991,6 +991,41 @@ def test_delete_batch_404_and_maintenance(client):
     assert r.status_code == 503 and r.json()["detail"] == "maintenance_mode"
 
 
+def test_delete_loses_to_a_revival_between_read_and_delete(client, monkeypatch):
+    # 2026-11-16: 라우트가 종단을 읽은 뒤 지우기 전에 배치가 되살아나면(배치 스케줄 회차·다른 관리자의 :rescan) 지우지
+    # 않는다 -- 잠근 행의 종단 CAS(repo.delete require_terminal). 예전엔 되살아난 배치를 지워 살아 있는 자식이 고아가 됐다.
+    from dms.api import routes_batches
+    _admin(client)
+    bid = _completed_scan_batch(client)
+    repo = client.app.state.repos.batches
+    real = routes_batches._get_batch_or_404
+
+    def then_revived(request, batch_id):
+        b = real(request, batch_id)
+        assert repo.rescan_if_terminal(batch_id) is not None          # 읽은 직후 회차가 시작됐다
+        return b
+    monkeypatch.setattr(routes_batches, "_get_batch_or_404", then_revived)
+    r = client.request("DELETE", f"/api/admin/batches/{bid}")
+    assert (r.status_code, r.json()["detail"]) == (409, "batch_not_deletable")
+    assert repo.get(bid)["status"] == "Running" and len(repo.list_items(bid)) == 2
+
+
+def test_delete_racing_another_delete_is_404(client, monkeypatch):
+    from dms.api import routes_batches
+    _admin(client)
+    bid = _completed_scan_batch(client)
+    repo = client.app.state.repos.batches
+    real = routes_batches._get_batch_or_404
+
+    def then_deleted(request, batch_id):
+        b = real(request, batch_id)
+        repo.delete(batch_id)                                          # 읽은 직후 다른 관리자가 지웠다
+        return b
+    monkeypatch.setattr(routes_batches, "_get_batch_or_404", then_deleted)
+    r = client.request("DELETE", f"/api/admin/batches/{bid}")
+    assert (r.status_code, r.json()["detail"]) == (404, "batch_not_found")
+
+
 def test_cancel_running_batch_succeeds(client):
     _admin(client)
     bid = client.post("/api/admin/batches", json={"operation": "scan", "max_concurrency": 1,

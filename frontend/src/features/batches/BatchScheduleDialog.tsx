@@ -8,12 +8,14 @@ import { kstStamp } from "../../lib/datetime";
 import { batchStatusLabel } from "../../lib/jobState";
 import {
   DEFAULT_SCHEDULE_FORM, INTERVAL_HOURS, SCHEDULE_KINDS, WEEKDAYS, formFromSchedule, isDestructiveBatch,
-  scheduleFormErrors, scheduleSummary, schedulableOp, specFromForm, storageText,
-  type BatchStorageFields, type ScheduleForm, type ScheduleKind,
+  scheduleFormErrors, scheduleSummary, schedulableOp, specFromForm,
+  type ScheduleForm, type ScheduleKind,
 } from "../../lib/batchSchedule";
+import { storageText } from "../../lib/batchStorage";
 import type { Batch, BatchSchedule } from "../../lib/types";
+import { useBatches } from "./useBatches";
 import {
-  useBatchForSchedule, useBatchOptions, useCreateBatchSchedule, useSchedulePreview, useUpdateBatchSchedule,
+  useBatchForSchedule, useCreateBatchSchedule, useSchedulePreview, useUpdateBatchSchedule,
 } from "./useBatchSchedules";
 
 // 스케줄 추가·수정 겸용 창(2026-11-16). 회차 = 그 배치의 「전체 재실행」 — sync·rm 은 회차마다 기존 확인 게이트(미리보기 →
@@ -31,8 +33,8 @@ function targetFromBatch(b: Batch): Target {
   return {
     id: b.batch_id, name: b.name ?? null, operation: b.operation, status: b.status, itemCount: b.item_count,
     autoConfirm: b.auto_confirm === true, destructive: isDestructiveBatch(b.operation, b.options),
-    // 배치 목록의 스토리지 필드는 서버가 실을 때만 있다(없으면 「—」).
-    storage: storageText(b.operation, b as Batch & BatchStorageFields),
+    // 배치 목록의 스토리지 필드는 서버가 실을 때만 있다(옛 서버면 「—」).
+    storage: storageText(b.operation, b),
   };
 }
 function targetFromSchedule(s: BatchSchedule): Target | null {
@@ -48,7 +50,7 @@ function targetFromSchedule(s: BatchSchedule): Target | null {
 }
 
 const optionLabel = (b: Batch, scheduled: boolean) => {
-  const storage = storageText(b.operation, b as Batch & BatchStorageFields);
+  const storage = storageText(b.operation, b);
   const parts = [b.name ?? b.batch_id.slice(0, 12), b.operation, ...(storage === "—" ? [] : [storage]),
                  batchStatusLabel(b.status)];
   const why = !schedulableOp(b.operation) ? " (반복 실행할 수 없는 연산)" : scheduled ? " (스케줄 있음)" : "";
@@ -90,7 +92,9 @@ export function BatchScheduleDialog({ open, onOpenChange, trigger, schedule, sch
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
-  const batchesQ = useBatchOptions(open && !isEdit);
+  // 배치 선택지 = 배치 목록과 같은 조회(["batches"] — 캐시를 나눠 쓰고 배치 mutation 의 무효화도 닿는다). 추가 창이 열렸을
+  // 때만 읽는다(닫힌 창·수정 창은 조회도 폴링도 없다).
+  const batchesQ = useBatches({ enabled: open && !isEdit });
   const listed = useMemo(() => (batchesQ.data ?? []).find((b) => b.batch_id === batchId), [batchesQ.data, batchId]);
   // 최근 100건 창 밖의 ?batch= 는 단건 조회로 보충한다(목록이 도착한 뒤에도 없을 때만).
   const extraQ = useBatchForSchedule(batchId === "" ? null : batchId,

@@ -26,7 +26,9 @@ import { toolSummary } from "../../lib/jobTool";
 import { useStorageRoots } from "../storages/useUserStorages";
 import { batchPillVariant, batchStatusLabel } from "../../lib/jobState";
 import { chownHasName, syncOwnership } from "../../lib/syncOwnership";
-import { kstStampEpoch, kstStampOrDash } from "../../lib/datetime";
+import { kstStampEpoch, kstStampOrDash, untilText } from "../../lib/datetime";
+import { useNow } from "../../lib/useNow";
+import { nextRunStamp, schedulableOp, scheduleEnabled, scheduleSummary } from "../../lib/batchSchedule";
 import { kindsText, readSummary, RM_LINK_ONLY, sumKinds, summaryTool, type ActionKind } from "../../lib/toolSummary";
 import { SYNC_OPTION_HELP } from "../jobs/optionRules";
 import { humanBytes } from "../usage/usageStats";
@@ -55,6 +57,8 @@ const PANEL_TITLE = "font-semibold text-sm mb-2";
 // (grid-cols-[9rem_1fr])과도 같은 눈금이 된다. 두 dl 이 한 상수를 공유해야
 // 섹션이 늘어도 기준이 한 곳에 남는다(ITEM_INDENT·PANEL_SECTION 과 같은 규약).
 const PANEL_DL = "grid grid-cols-[9rem_1fr] gap-y-1 text-sm";
+// 반복 스케줄이 켜진 배치의 취소 안내(버튼 title + 버튼 줄 아래 한 줄).
+const REPEAT_CANCEL_NOTE = "이번 회차만 중단합니다 — 다음 예정 시각에 다시 실행됩니다. 반복을 멈추려면 스케줄을 끄세요.";
 // 선택 불가 체크박스에 다는 사유(목록 화면 ACTIVE_HINT 관례 — disabled 로 끝내지
 // 않고 이유와 동선을 남긴다). 표시 게이트일 뿐이고 진짜 차단은 서버 409 다.
 const ITEM_LOCK_HINT = "진행 중인 배치에선 대기(Queued) 항목만 삭제할 수 있습니다";
@@ -1028,7 +1032,8 @@ function ConfirmBatchBody({ b: header, nonce, confirm, absOf, onClose }: {
 // (/jobs?batch=<id>)으로 가는 **링크**다(2026-10-11 검증 지적 — 오래된 배치의 작업은 무한
 // 스크롤 수십 쪽 아래라 말로만 보내면 찾을 길이 없었다). 안내는 읽혀야 하는 글자라
 // text-muted(장식 전용, 3.54:1)가 아니라 ink/70(4.94:1, AA).
-function DeleteBatchButton({ batchId }: { batchId: string }) {
+// 스케줄이 있는 배치면 그 스케줄·회차 기록도 함께 지워진다(repositories/batches.delete -- 같은 트랜잭션)는 것을 말한다.
+function DeleteBatchButton({ batchId, hasSchedule }: { batchId: string; hasSchedule: boolean }) {
   const [open, setOpen] = useState(false);
   const del = useDeleteBatch(batchId);
   const navigate = useNavigate();
@@ -1045,6 +1050,7 @@ function DeleteBatchButton({ batchId }: { batchId: string }) {
           배치 단위로 삭제하세요(배치 기록도 함께 지워집니다).
         </p>
         <p>기록을 먼저 지우면 남은 작업은 전체 작업에서 배치 이름 없이 「기록 없음 {batchId.slice(0, 12)}」로 표시됩니다.</p>
+        {hasSchedule && <p>이 배치의 스케줄도 함께 삭제됩니다.</p>}
       </div>
       {del.isError && <p className="text-bad text-sm mb-2">{(del.error as ApiError).message}</p>}
       <div className="flex justify-end gap-2">
@@ -1242,6 +1248,30 @@ const BatchItemRow = memo(function BatchItemRow({
   );
 });
 
+// 머리 링크 줄의 배치 스케줄(2026-11-16 배치 스케줄러): 있으면 「반복 실행: 주기 · 다음 …」, 없으면(서버가 null 이라고 말할 때만
+// -- 부재 = 옛 서버라 모른다) 스케줄을 걸 수 있는 연산(scan·sync·rm)에 「스케줄 추가」. 둘 다 배치 스케줄러의 ?batch= 로 간다
+// (그 화면이 이 배치의 수정·추가 창을 연다 -- 자격(root 실행 자격) 잠금도 그 화면과 서버 403 몫이라 여기서 판정하지 않는다).
+// 남은 시간이 흐르므로 이 잎만 30초마다 다시 그린다(useNow 관례).
+function ScheduleLink({ b }: { b: BatchHeader }) {
+  const s = b.schedule;
+  const on = s != null && scheduleEnabled(s.enabled);
+  const now = useNow(30_000, on && s?.next_run_at != null);
+  const to = `/admin/batch-schedules?batch=${encodeURIComponent(b.batch_id)}`;
+  if (s == null) {
+    return s === null && schedulableOp(b.operation)
+      ? <Link className="text-accent text-sm" to={to}>스케줄 추가</Link> : null;
+  }
+  const next = nextRunStamp(s.enabled, s.next_run_at);
+  const state = on ? "" : s.paused_reason_code !== null ? "(자동 일시정지)" : "(꺼짐)";
+  return (
+    <Link className="text-accent text-sm" to={to}
+          title={!on && s.paused_reason_code !== null ? reasonText(s.paused_reason_code) : undefined}>
+      {`반복 실행${state}: ${scheduleSummary(s.kind, s.spec)} · 다음 ${
+        next === "—" ? next : `${next} (${untilText(s.next_run_at, now)})`}`}
+    </Link>
+  );
+}
+
 export function BatchDetail() {
   const { batchId = "" } = useParams();
   const q = useBatch(batchId);
@@ -1272,6 +1302,8 @@ export function BatchDetail() {
   // 배치(Completed/Cancelled)는 전 항목 편집 가능 — legacy "편집 후 재실행" 흐름
   // (전체 재실행과 결합)이다.
   const terminal = b?.status === "Completed" || b?.status === "Cancelled";
+  const cancellable = b?.status === "Running" || b?.status === "Previewing" || b?.status === "PreviewReady";
+  const repeating = b?.schedule != null && scheduleEnabled(b.schedule.enabled);
   const canEditItem = useCallback((it: BatchItem) => terminal || it.status === "Queued", [terminal]);
   const isSync = b?.operation === "sync";
   // 미리보기 단계로 돌아온 sync 배치에서도 이미 실행 중인 자식은 끝까지 돈다(서버 _reopen_after_new_queued) -- 배너가
@@ -1427,6 +1459,7 @@ export function BatchDetail() {
         {/* 이 배치의 작업(재실행 이력 포함)만 거른 전체 작업 목록 -- 작업까지 지우는 배치 단위 삭제는 거기서 시작한다
             (2026-10-11 검증 지적: 작업 목록에 배치 필터·링크가 없어 오래된 배치의 작업을 찾을 수 없었다). */}
         <Link className="text-accent text-sm" to={batchJobsPath(batchId)}>전체 작업에서 이 배치의 작업 보기</Link>
+        {b && <ScheduleLink b={b} />}
       </div>
       <Card>
         {/* 헤더 세 줄은 줄바꿈된다(2026-10-11 375 실측): 끝난 배치의 버튼 넷(편집·전체 재실행·실행 설정 변경·배치 삭제)이
@@ -1477,14 +1510,18 @@ export function BatchDetail() {
             {/* 실행 설정 변경(2026-10-02): 재실행 버튼들과 같은 종단 게이트(서버 409 batch_settings_locked 미러) --
                 취소·완료 뒤 노드·프로세스 수·옵션을 바꾸고 다시 돌리는 동선 */}
             {b && terminal && <BatchExecutionSettingsDialog b={b} />}
-            {(b?.status === "Completed" || b?.status === "Cancelled") && <DeleteBatchButton batchId={batchId} />}
+            {(b?.status === "Completed" || b?.status === "Cancelled") && <DeleteBatchButton batchId={batchId} hasSchedule={b.schedule != null} />}
             {/* 자동 실행 끄기(2026-10-11): 진행 중 브레이크 — 미리보기를 보고 직접 확인하겠다. 종단 배치는 「실행 설정 변경」. */}
             {autoConfirmable(b?.operation) && b?.auto_confirm === true && !terminal && (
               <Button variant="ghost" disabled={autoOff.isPending} onClick={() => autoOff.mutate()}>자동 실행 끄기</Button>
             )}
-            {(b?.status === "Running" || b?.status === "Previewing" || b?.status === "PreviewReady") && <CancelButton disabled={cancel.isPending} onClick={() => cancel.mutate()}>취소</CancelButton>}
+            {cancellable && <CancelButton disabled={cancel.isPending} onClick={() => cancel.mutate()}
+                                          title={repeating ? REPEAT_CANCEL_NOTE : undefined}>취소</CancelButton>}
           </div>
         </div>
+        {/* 반복 스케줄이 켜진 배치의 취소(2026-11-16): 취소는 이번 회차만 멈춘다 -- 스케줄은 그대로라 다음 예정 시각에 다시 돈다.
+            확인 창 없는 버튼이라 title 만으로는 터치 화면에서 안 보여 버튼 줄 아래 한 줄로 말한다. */}
+        {cancellable && repeating && <p className="mt-2 text-xs text-ink/70 break-keep">{`취소는 ${REPEAT_CANCEL_NOTE}`}</p>}
         {/* 메모는 편집 밖에서도 보인다 — 없으면 행 자체 생략(빈칸 소음 방지).
             라벨("메모 ")은 붙이지 않는다(사용자 조정 2026-08-15): 헤더 카드에서
             이름 아래 한 줄은 문맥상 메모임이 자명한데, 접두어가 매번 내용 앞을

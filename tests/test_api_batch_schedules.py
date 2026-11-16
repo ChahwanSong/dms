@@ -372,8 +372,53 @@ def test_summaries_for(client):
     out = repos.batch_schedules.summaries_for([a, b, a])
     assert set(out) == {a}
     assert out[a]["schedule_id"] == sid and out[a]["enabled"] is True and out[a]["kind"] == "daily"
-    assert set(out[a]) == {"schedule_id", "kind", "spec", "enabled", "next_run_at", "last_outcome",
+    assert set(out[a]) == {"schedule_id", "kind", "spec", "enabled", "next_run_at", "last_run_at", "last_outcome",
                            "last_reason_code", "paused_reason_code"}
+
+
+SUMMARY_KEYS = {"schedule_id", "kind", "spec", "enabled", "next_run_at", "last_run_at", "last_outcome",
+                "last_reason_code", "paused_reason_code"}
+
+
+def test_batch_list_and_summary_carry_the_schedule_summary(client, db):
+    # 통합(2026-11-16): 배치 목록 행과 상세 머리(view=summary)에 schedule(요약 | null). view 없음·all 은 모양을 바꾸지 않는다
+    # (옛 탭·확인 창 응답 -- 바이트 단위로 그대로).
+    a, b = _batch(client), _batch(client)
+    row = _create(client, a).json()
+    repo = client.app.state.repos.batch_schedules
+    repo.record(repo.get(row["schedule_id"]), outcome="skipped", reason_code="batch_schedule_batch_running",
+                next_run_at="2099-01-01T00:00:00Z", now="2026-11-16T00:00:00Z", batch_status="Running")
+    rows = {r["batch_id"]: r for r in client.get("/api/admin/batches").json()}
+    sch = rows[a]["schedule"]
+    assert set(sch) == SUMMARY_KEYS
+    assert sch["schedule_id"] == row["schedule_id"] and sch["kind"] == "daily" and sch["spec"] == {"hour": 2, "minute": 0}
+    assert sch["enabled"] is True and sch["next_run_at"] == "2099-01-01T00:00:00Z"
+    assert (sch["last_run_at"], sch["last_outcome"], sch["last_reason_code"], sch["paused_reason_code"]) == (
+        "2026-11-16T00:00:00Z", "skipped", "batch_schedule_batch_running", None)
+    assert rows[b]["schedule"] is None                                        # 없음 = null(키는 있다)
+    summary = client.get(f"/api/admin/batches/{a}?view=summary").json()
+    assert summary["schedule"] == sch
+    assert client.get(f"/api/admin/batches/{b}?view=summary").json()["schedule"] is None
+    plain = client.get(f"/api/admin/batches/{a}").json()
+    assert "schedule" not in plain and "schedule" not in client.get(f"/api/admin/batches/{a}?view=all").json()
+    # 끄면 꺼진 요약(next_run_at null)이 실린다.
+    client.post(f"/api/admin/batch-schedules/{row['schedule_id']}:disable", json={})
+    off = client.get(f"/api/admin/batches/{a}?view=summary").json()["schedule"]
+    assert off["enabled"] is False and off["next_run_at"] is None and off["paused_reason_code"] is None
+
+
+def test_batch_list_reads_schedules_in_one_call(client, monkeypatch):
+    # 목록 한 쪽 = 스케줄 질의 한 번(행마다 묻지 않는다).
+    ids = [_batch(client) for _ in range(3)]
+    for bid in ids[:2]:
+        assert _create(client, bid).status_code == 201
+    repo = client.app.state.repos.batch_schedules
+    calls = []
+    real = repo.summaries_for
+    monkeypatch.setattr(repo, "summaries_for", lambda batch_ids: (calls.append(list(batch_ids)), real(batch_ids))[1])
+    rows = client.get("/api/admin/batches").json()
+    assert len(calls) == 1 and set(calls[0]) == {r["batch_id"] for r in rows} >= set(ids)
+    assert sum(r["schedule"] is not None for r in rows) == 2
 
 
 def test_broken_first_payload_does_not_500(client, db):

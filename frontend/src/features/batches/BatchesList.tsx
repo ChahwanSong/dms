@@ -8,7 +8,10 @@ import { batchStateHelp } from "../../lib/stateHelp";
 import { Button } from "../../components/ui/Button";
 import { batchPillVariant, batchStatusLabel } from "../../lib/jobState";
 import { kstStampOrDash } from "../../lib/datetime";
-import type { Batch } from "../../lib/types";
+import { reasonText } from "../../lib/api";
+import { batchStorageLabel } from "../../lib/batchStorage";
+import { nextRunStamp, scheduleEnabled, scheduleSummary } from "../../lib/batchSchedule";
+import type { Batch, BatchScheduleSummary } from "../../lib/types";
 
 // 활성 배치 체크박스에 다는 사유. 서버 문구("먼저 취소하세요")와 같은 동선을 가리킨다
 // — 활성은 Previewing 도 포함이라 "실행 중"보다 "진행 중"이 정직하다.
@@ -37,22 +40,28 @@ const OP_LABEL: Record<OpTab, string> = {
   all: "전체", sync: "sync", scan: "scan", rm: "rm" };
 
 // 「대상 스토리지」 칸(2026-11-16): 서버가 첫 항목 payload 에서 뽑아 준 값(배치는 스토리지 한 종류 -- sync 는 한 쌍)을 그대로
-// 말한다. sync 는 「소스 → 목적지」(BatchCreate·작업 목록 대상 열과 같은 구분자), 그 밖(scan·rm)은 storage. 문자열이 아니면
-// 모름(null·부재·신뢰 경계 탈락) = 「—」 -- sync 둘 다 모르면 「— → —」 대신 「—」 하나. 항목이 0개면 모름과 구별되게 title 로
-// 「항목이 없습니다」(물려받을 첫 항목이 없어 서버도 null 이다).
-// 스토리지 이름은 형식 검증 없는 자유 글자라 break-all 로 접고, 좁은 폭에서 두어 글자 폭으로 짓눌리지 않게 최소 폭을 둔다(작업
-// 목록 「대상」 열 관례 -- 넘치는 만큼은 Table 가로 스크롤).
-const str = (v: unknown): string | null => (typeof v === "string" ? v : null);
+// 말한다. 표기 규칙은 배치 스케줄러와 한 벌(lib/batchStorage -- sync 「소스 → 목적지」, 모르는 쪽 「—」, 둘 다 모르면 「—」
+// 하나). 하나도 모르면 「—」이고, 항목이 0개면 모름과 구별되게 title 로 「항목이 없습니다」(물려받을 첫 항목이 없어 서버도
+// null 이다). 스토리지 이름은 형식 검증 없는 자유 글자라 break-all 로 접고, 좁은 폭에서 두어 글자 폭으로 짓눌리지 않게 최소
+// 폭을 둔다(작업 목록 「대상」 열 관례 -- 넘치는 만큼은 Table 가로 스크롤).
 function storageCell(b: Batch): { text: string; title?: string } {
-  const empty = b.item_count === 0 ? "항목이 없습니다" : undefined;
-  if (b.operation === "sync") {
-    const src = str(b.source_storage);
-    const dst = str(b.destination_storage);
-    if (src === null && dst === null) return { text: "—", title: empty };
-    return { text: `${src ?? "—"} → ${dst ?? "—"}`, title: "소스 → 목적지" };
-  }
-  const st = str(b.storage);
-  return st === null ? { text: "—", title: empty } : { text: st };
+  const label = batchStorageLabel(b.operation, b);
+  if (label === null) return { text: "—", title: b.item_count === 0 ? "항목이 없습니다" : undefined };
+  return { text: label, title: b.operation === "sync" ? "소스 → 목적지" : undefined };
+}
+// 「반복」 표식(2026-11-16 배치 스케줄러): 스케줄이 있는 배치를 목록에서 가린다 -- 새 열 없이 「작업」 칸의 「자동」 옆. 꺼졌거나
+// 자동 일시정지면 흐린 「반복 꺼짐」(사유는 title). 주기·다음 실행은 title 로(전부 보려면 배치 스케줄러). 스케줄이 없거나 옛
+// 서버(필드 부재)면 그리지 않는다.
+function ScheduleBadge({ s }: { s: BatchScheduleSummary }) {
+  const on = scheduleEnabled(s.enabled);
+  const next = nextRunStamp(s.enabled, s.next_run_at);
+  const paused = !on && s.paused_reason_code !== null ? ` · 자동 일시정지: ${reasonText(s.paused_reason_code)}` : "";
+  return (
+    <span className={`ml-1 whitespace-nowrap text-xs ${on ? "text-accent" : "text-muted"}`}
+          title={`${scheduleSummary(s.kind, s.spec)} · 다음 ${next === "—" ? next : `${next} KST`}${paused}`}>
+      {on ? "반복" : "반복 꺼짐"}
+    </span>
+  );
 }
 function StorageCell({ b }: { b: Batch }) {
   const c = storageCell(b);
@@ -256,7 +265,7 @@ export function BatchesList() {
                   <span className={`ml-1 text-xs ${b.operation === "rm" ? "text-bad" : "text-accent"}`}
                         title={b.operation === "rm" ? "미리보기가 끝나면 「배치 확인」 없이 삭제"
                           : "미리보기가 끝나면 「배치 확인」 없이 실행"}>자동</span>
-                )}</td>
+                )}{b.schedule && <ScheduleBadge s={b.schedule} />}</td>
                 <StorageCell b={b} />
                 <td><StatusPill state={b.status} variant={batchPillVariant(b.status)} label={batchStatusLabel(b.status)}
                                  help={batchStateHelp(b.status)} /></td>

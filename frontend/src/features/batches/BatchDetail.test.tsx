@@ -2812,3 +2812,80 @@ test("옛 파드 물러서기: 항목이 0개인 전체 응답은 「항목이 �
   expect(screen.queryByRole("group", { name: "항목 상태" })).toBeNull();
   expect(screen.queryByText("검색 결과가 없습니다")).toBeNull();
 });
+
+// --- 배치 스케줄(2026-11-16 배치 스케줄러): 머리 링크 · 삭제 안내 · 취소 안내 -------------------------------------------------
+// summary 응답의 schedule(요약 | null). 부재 = 옛 서버(모름) -- 「스케줄 추가」를 권하지 않는다.
+
+const SCHED = { schedule_id: "sch1", kind: "daily", spec: { hour: 2, minute: 0 }, enabled: true,
+  next_run_at: "2099-01-01T00:00:00Z", last_run_at: null, last_outcome: null, last_reason_code: null,
+  paused_reason_code: null };
+
+function renderFx(fx: Fixture) {
+  server.use(serveBatch(fx));
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(<QueryClientProvider client={qc}><MemoryRouter initialEntries={["/admin/batches/b1"]}>
+    <Routes><Route path="/admin/batches/:batchId" element={<BatchDetail/>} /></Routes>
+  </MemoryRouter></QueryClientProvider>);
+}
+
+test("스케줄이 있으면 머리 링크 줄에 「반복 실행: 주기 · 다음 KST (남은 시간)」 — 배치 스케줄러 ?batch= 로 간다", async () => {
+  renderFx(batch({ status: "Completed", operation: "scan", items: [], item_count: 0, schedule: SCHED }));
+  const link = await screen.findByRole("link", { name: /^반복 실행/ });
+  expect(link).toHaveTextContent(/^반복 실행: 매일 02:00 \(KST\) · 다음 2099-01-01 09:00 \(.+일 후\)$/);
+  expect(link).toHaveAttribute("href", "/admin/batch-schedules?batch=b1");
+  expect(screen.queryByRole("link", { name: "스케줄 추가" })).toBeNull();
+});
+
+test("꺼진 스케줄은 「반복 실행(꺼짐) … 다음 —」, 자동 일시정지는 사유를 title 로", async () => {
+  const { unmount } = renderFx(batch({ status: "Completed", operation: "scan", items: [], item_count: 0,
+                                       schedule: { ...SCHED, enabled: false, next_run_at: null } }));
+  expect(await screen.findByRole("link", { name: /^반복 실행/ }))
+    .toHaveTextContent(/^반복 실행\(꺼짐\): 매일 02:00 \(KST\) · 다음 —$/);
+  unmount();
+  renderFx(batch({ status: "Completed", operation: "scan", items: [], item_count: 0,
+                   schedule: { ...SCHED, enabled: 0, next_run_at: null,
+                               paused_reason_code: "batch_schedule_batch_changed" } }));
+  const link = await screen.findByRole("link", { name: /^반복 실행/ });
+  expect(link).toHaveTextContent(/^반복 실행\(자동 일시정지\): 매일 02:00 \(KST\) · 다음 —$/);
+  expect(link).toHaveAttribute("title", REASON_MESSAGES.batch_schedule_batch_changed);
+});
+
+test("스케줄이 없으면(null) scan·sync·rm 은 「스케줄 추가」 — 옛 서버(필드 부재)·반복할 수 없는 연산은 링크 없음", async () => {
+  for (const op of ["scan", "sync", "rm"]) {
+    const { unmount } = renderFx(batch({ status: "Completed", operation: op, schedule: null }));
+    expect(await screen.findByRole("link", { name: "스케줄 추가" })).toHaveAttribute("href", "/admin/batch-schedules?batch=b1");
+    unmount();
+  }
+  const { unmount } = renderFx(batch({ status: "Completed", operation: "scan" }));    // 옛 서버: schedule 키 없음
+  await screen.findByRole("link", { name: "전체 작업에서 이 배치의 작업 보기" });
+  expect(screen.queryByRole("link", { name: "스케줄 추가" })).toBeNull();
+  expect(screen.queryByRole("link", { name: /^반복 실행/ })).toBeNull();
+  unmount();
+  renderFx(batch({ status: "Completed", operation: "bogus", schedule: null }));
+  await screen.findByRole("link", { name: "전체 작업에서 이 배치의 작업 보기" });
+  expect(screen.queryByRole("link", { name: "스케줄 추가" })).toBeNull();
+});
+
+test("배치 삭제 확인 창: 스케줄이 있으면 「이 배치의 스케줄도 함께 삭제됩니다.」, 없으면 말하지 않는다", async () => {
+  const { unmount } = renderFx(batch({ status: "Completed", operation: "scan", schedule: SCHED }));
+  await userEvent.click(await screen.findByRole("button", { name: "배치 삭제" }));
+  expect(within(await screen.findByRole("dialog", { name: "배치 삭제" }))
+    .getByText("이 배치의 스케줄도 함께 삭제됩니다.")).toBeInTheDocument();
+  unmount();
+  renderFx(batch({ status: "Completed", operation: "scan", schedule: null }));
+  await userEvent.click(await screen.findByRole("button", { name: "배치 삭제" }));
+  const dlg = await screen.findByRole("dialog", { name: "배치 삭제" });
+  expect(within(dlg).queryByText("이 배치의 스케줄도 함께 삭제됩니다.")).toBeNull();
+});
+
+test("반복 스케줄이 켜진 진행 중 배치의 취소: 이번 회차만 멈춘다고 말한다(버튼 title + 한 줄) — 꺼진 스케줄은 말하지 않는다", async () => {
+  const note = "이번 회차만 중단합니다 — 다음 예정 시각에 다시 실행됩니다. 반복을 멈추려면 스케줄을 끄세요.";
+  const { unmount } = renderFx(batch({ status: "Running", operation: "scan", schedule: SCHED }));
+  const cancel = await screen.findByRole("button", { name: "취소" });
+  expect(cancel).toHaveAttribute("title", note);
+  expect(screen.getByText(`취소는 ${note}`)).toBeInTheDocument();
+  unmount();
+  renderFx(batch({ status: "Running", operation: "scan", schedule: { ...SCHED, enabled: false, next_run_at: null } }));
+  expect(await screen.findByRole("button", { name: "취소" })).not.toHaveAttribute("title");
+  expect(screen.queryByText(`취소는 ${note}`)).toBeNull();
+});

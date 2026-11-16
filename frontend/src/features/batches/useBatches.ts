@@ -22,9 +22,11 @@ export const needsBatchConfirm = (op: string | undefined): boolean => op !== und
 // 연산이 자동 확인까지 저절로 얻지 않게(켜는 체크박스·「자동 실행 끄기」·자동 안내문이 이 술어 하나를 본다).
 const AUTO_CONFIRM_OPS: ReadonlySet<string> = new Set(["sync", "rm"]);
 export const autoConfirmable = (op: string | undefined): boolean => op !== undefined && AUTO_CONFIRM_OPS.has(op);
-export const useBatches = () =>
+// 배치 목록(최근 100건). enabled = false 면 조회도 폴링도 없다 — 배치 스케줄러의 추가 창이 열렸을 때만 같은 키로 읽는다(배치
+// 선택지 — 캐시·무효화를 목록 화면과 나눠 쓴다).
+export const useBatches = ({ enabled = true }: { enabled?: boolean } = {}) =>
   useQuery({ queryKey: ["batches"], queryFn: () => apiGet<Batch[]>("/api/admin/batches"),
-            refetchInterval: 4000 });
+            enabled, refetchInterval: 4000 });
 // 상세 폴링 규칙(머리·항목 쪽 공용): 종단이면 멈추고, 모르면(로딩) 돈다.
 const pollWhile = (status: string | undefined) => (BATCH_TERMINAL.has(status ?? "") ? false : 2500);
 // 상세 머리(2026-11-16 ?view=summary -- 배치 행 + 항목 집계, items 없음). 옛 파드는 view 를 무시하고 옛 전체 응답을 주므로
@@ -240,13 +242,17 @@ export const useReplaceBatchItems = (id: string) =>
 // 그리고 — 데이터가 있으니 isLoading 은 false 라 로딩 표시조차 없다 — 마운트 후
 // 재조회가 착지해야 사라진다. 훅 onSuccess 는 호출측 onSuccess(목록으로 이동)보다
 // 먼저 await 되므로, 여기서 기다리면 이동한 목록은 이미 갱신된 목록이다.
+//
+// 배치 스케줄 목록(["batch-schedules"], 2026-11-16)도 무효화한다: 배치 삭제가 그 배치의 스케줄·회차 이력을 같은 트랜잭션에서
+// 지운다(repositories/batches.delete) — 스케줄러 화면이 지운 배치의 스케줄을 「기록 없음」으로 남겨 보이지 않게.
 const _deleteBatch = (id: string) => apiSend("DELETE", `/api/admin/batches/${id}`);
 export const useDeleteBatch = (id: string) => {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: () => _deleteBatch(id),
     onSuccess: async () => { qc.removeQueries({ queryKey: ["batch", id] });
-                             await qc.refetchQueries({ queryKey: ["batches"] }); },
+                             await Promise.all([qc.refetchQueries({ queryKey: ["batches"] }),
+                                                qc.invalidateQueries({ queryKey: ["batch-schedules"] })]); },
     // 실패(409 = 그 사이 재실행돼 활성이 됐다)는 화면이 낡았다는 뜻이라 양쪽을
     // 다시 맞춘다 — 상세는 살아 있으므로 제거가 아니라 재조회다.
     onError: () => _refresh(qc, id),
@@ -282,7 +288,9 @@ export const useDeleteBatches = () => {
     // 목록 화면에서 쏘는 삭제라 목록 쿼리는 **활성**이다 — invalidate 로 재조회가
     // 돌고, 프라미스를 돌려줘 그 착지까지 기다린다(_refresh 와 같은 시점 계약):
     // 결과 문구("N개 삭제됨")가 뜨는 순간엔 표에서 그 행이 이미 사라져 있다.
-    onSettled: () => qc.invalidateQueries({ queryKey: ["batches"] }),
+    // 스케줄 목록은 단건 삭제와 같은 이유(지운 배치의 스케줄도 지워졌다)로 함께.
+    onSettled: () => Promise.all([qc.invalidateQueries({ queryKey: ["batches"] }),
+                                  qc.invalidateQueries({ queryKey: ["batch-schedules"] })]),
   });
 };
 // 확인은 대화상자를 연 회차(preview_round)를 싣는다 -- 서버가 다른 회차면 409 batch_preview_changed(ABA 방지).

@@ -14,11 +14,6 @@ export const useBatchScheduleRuns = (id: string, enabled: boolean) =>
   useQuery({ queryKey: ["batch-schedules", id, "runs"], enabled,
              queryFn: () => apiGet<BatchScheduleRun[]>(`/api/admin/batch-schedules/${encodeURIComponent(id)}/runs?limit=50`) });
 
-// 배치 선택기용 목록 — 다이얼로그가 열렸을 때만 읽는다(목록 화면의 4초 폴링을 이 화면에 들이지 않는다). 키는 배치 목록과
-// 같은 ["batches"] 라 캐시를 나눠 쓰고 배치 mutation 의 무효화도 그대로 닿는다.
-export const useBatchOptions = (enabled: boolean) =>
-  useQuery({ queryKey: ["batches"], enabled, queryFn: () => apiGet<Batch[]>("/api/admin/batches") });
-
 // 목록(최근 100건) 창 밖의 배치를 ?batch= 로 미리 채울 때의 보충 조회. view=summary 는 항목을 싣지 않는 가벼운 응답이다
 // (모르는 옛 서버는 파라미터를 무시하고 전체를 준다 -- 배치 행 필드는 같다).
 export const useBatchForSchedule = (id: string | null, enabled: boolean) =>

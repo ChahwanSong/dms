@@ -1,9 +1,10 @@
 import { describe, expect, test } from "vitest";
 import {
   DEFAULT_SCHEDULE_FORM, formFromSchedule, isDestructiveBatch, outcomeLabel, outcomeTone, scheduleEnabled,
-  scheduleFormErrors, scheduleFormInvalid, scheduleSummary, schedulableOp, specFromForm, storageText,
+  nextRunStamp, scheduleFormErrors, scheduleFormInvalid, scheduleSummary, schedulableOp, specFromForm,
   type ScheduleForm,
 } from "./batchSchedule";
+import { batchStorageLabel, storageText } from "./batchStorage";
 
 describe("scheduleSummary — 주기 한 줄 요약(KST)", () => {
   test("네 주기의 문구", () => {
@@ -110,10 +111,17 @@ describe("배치 판정 도우미", () => {
   test("대상 스토리지: scan·rm 은 storage, sync 는 src → dst, 모르면 —", () => {
     expect(storageText("scan", { storage: "ceph" })).toBe("ceph");
     expect(storageText("sync", { source_storage: "a", destination_storage: "b" })).toBe("a → b");
-    expect(storageText("sync", { source_storage: "a", destination_storage: null })).toBe("a → ?");
+    // 모르는 쪽은 배치 목록 「대상 스토리지」 열과 같은 「—」(두 화면이 한 규칙 — lib/batchStorage).
+    expect(storageText("sync", { source_storage: "a", destination_storage: null })).toBe("a → —");
+    expect(storageText("sync", { source_storage: 7 as never, destination_storage: "b" })).toBe("— → b");
+    expect(storageText("scan", { storage: "" })).toBe("—");
     expect(storageText("sync", { source_storage: null, destination_storage: null })).toBe("—");
     expect(storageText("rm", { storage: null })).toBe("—");
     expect(storageText("rm", null)).toBe("—");
+    // 하나도 모르면 null(호출측이 「—」·「항목이 없습니다」로 말한다 — 배치 목록 열)
+    expect(batchStorageLabel("sync", { source_storage: null, destination_storage: null })).toBeNull();
+    expect(batchStorageLabel("scan", {})).toBeNull();
+    expect(batchStorageLabel("sync", { source_storage: "a", destination_storage: "b" })).toBe("a → b");
   });
 
   test("판정 라벨·색, 모르는 값은 원문", () => {
@@ -132,5 +140,13 @@ describe("배치 판정 도우미", () => {
     expect(scheduleEnabled(false)).toBe(false);
     expect(scheduleEnabled("1")).toBe(false);
     expect(scheduleEnabled(null)).toBe(false);
+  });
+
+  test("다음 실행 표기: KST 분까지, 꺼짐·null 은 —, 파싱 못 하면 원문(배치 목록 「반복」·상세 머리)", () => {
+    expect(nextRunStamp(true, "2026-11-16T17:00:00Z")).toBe("2026-11-17 02:00");
+    expect(nextRunStamp(1, "2026-11-16T17:00:00Z")).toBe("2026-11-17 02:00");
+    expect(nextRunStamp(false, "2026-11-16T17:00:00Z")).toBe("—");       // 꺼진 스케줄은 예정이 없다
+    expect(nextRunStamp(true, null)).toBe("—");
+    expect(nextRunStamp(true, "garbage")).toBe("garbage");
   });
 });

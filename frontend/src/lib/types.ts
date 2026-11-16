@@ -295,6 +295,17 @@ export interface Batch {
   storage?: string | null;
   source_storage?: string | null;
   destination_storage?: string | null;
+  // 배치 스케줄 요약(2026-11-16, 목록·summary 만 -- view 없음·all 응답엔 없다). null = 스케줄 없음, 부재 = 모름(옛 서버) --
+  // 화면은 null 일 때만 「스케줄 추가」를 권한다.
+  schedule?: BatchScheduleSummary | null;
+}
+// 배치 응답에 실리는 스케줄 요약(routes_batches._with_schedules -- BatchSchedule 행의 일부). enabled 는 INTEGER 컬럼이라 0/1 일
+// 수도 있다(scheduleEnabled 로만 판정). next_run_at null = 꺼짐·일시정지, last_* null = 아직 판정한 회차 없음.
+export interface BatchScheduleSummary {
+  schedule_id: string; kind: string; spec: Record<string, unknown> | null;
+  enabled: boolean | number; next_run_at: string | null;
+  last_run_at: string | null; last_outcome: string | null; last_reason_code: string | null;
+  paused_reason_code: string | null;
 }
 // 실행 설정의 direct 안내 재료(2026-11-16, ?view=summary): options.direct === true 일 때만 서버가 센다(아니면 null). 판정은
 // 화면 directNote 와 같은 규칙(도구 = job_tool 먼저, 없으면 미리보기 summary v2 의 tool; undecided = 도구 없음 ∧ 항목이 거부·

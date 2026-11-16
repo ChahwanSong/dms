@@ -803,12 +803,12 @@ class BatchesRepository:
                  "a": dump_json({"auto_confirm_by": None}), "at": now})
         return True
 
-    def delete(self, batch_id):
+    def delete(self, batch_id, *, require_terminal: bool = False) -> bool:
         """배치 삭제: batches 행 + batch_items 행만, 한 트랜잭션. 자식
         requests/data_jobs/results 는 **보존**한다 — 실행 감사 이력이고,
         requests.batch_id 는 역사적 표식으로 남는다(배치 역참조가 404 가 되는
         것은 수용 — 화면 소비처 실측상 요청→배치 링크는 없다). 종단 배치 한정
-        가드는 라우트 몫(batch_not_deletable).
+        가드는 라우트 몫(batch_not_deletable — 라우트는 아래 require_terminal CAS 로 부른다).
 
         자식 요청은 관리자의 작업(요청) **개별** 삭제(request_purges.delete_terminal,
         2026-10-08) 대상이 아니다 — batch_id 가 NULL 이 아니면 batch_child_not_deletable
@@ -820,14 +820,26 @@ class BatchesRepository:
 
         배치 스케줄(2026-11-16)과 그 회차 이력도 같은 트랜잭션에서 지운다(BATCH_DELETE_TABLES -- 배치 단위 삭제도 같다).
         잠금 순서는 항목 → 배치 → 스케줄: 스케줄 발사(BatchSchedulesRepository.fire)와 같은 방향이라 교착이 없다. 트랜잭션은
-        중첩되지 않으니(db.transaction) 스케줄 저장소를 부르지 않고 문장을 여기 둔다. 감사 행(batch_schedule 류)은 남는다."""
+        중첩되지 않으니(db.transaction) 스케줄 저장소를 부르지 않고 문장을 여기 둔다. 감사 행(batch_schedule 류)은 남는다.
+
+        require_terminal=True(배치 삭제 라우트 전용, 2026-11-16): 종단(Completed/Cancelled) CAS -- 항목 → 배치를 잠근
+        (_lock_items_then_batch) 행이 종단일 때만 지우고, 아니면(그 사이 스케줄 회차·다른 관리자의 :rescan·항목 추가로
+        되살아났거나 이미 지워졌다) 아무것도 쓰지 않고 False. 라우트가 상태를 읽고 무조건 지우면 그 몇 ms 사이에 되살아난
+        배치를 지워 살아 있는 자식이 배치 없는 고아로 돈다(스케줄러의 회차가 사람 없이 그 창을 연다). 잠금
+        순서는 위와 같은 항목 → 배치 → 스케줄. 기본(False)은 상태를 보지 않는다 -- 다른 호출자(테스트 픽스처·경합 재현)는
+        그대로. 반환 = 배치 행을 지웠나(기본 경로는 늘 True -- 없는 배치도 no-op 으로 끝난다)."""
         with self._db.transaction():
+            if require_terminal:
+                batch, _ = self._lock_items_then_batch(batch_id, with_items=False)
+                if batch is None or batch["status"] not in ("Completed", "Cancelled"):
+                    return False
             self._db.execute("DELETE FROM batch_items WHERE batch_id = :b",
                              {"b": batch_id})
             self._db.execute("DELETE FROM batches WHERE batch_id = :b",
                              {"b": batch_id})
             self._db.execute("DELETE FROM batch_schedules WHERE batch_id = :b", {"b": batch_id})
             self._db.execute("DELETE FROM batch_schedule_runs WHERE batch_id = :b", {"b": batch_id})
+        return True
 
     def set_status(self, batch_id, status):
         self._db.execute(

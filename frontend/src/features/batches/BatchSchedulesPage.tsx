@@ -9,8 +9,9 @@ import { ApiError, reasonText } from "../../lib/api";
 import { kstStampBare, untilText } from "../../lib/datetime";
 import { useNow } from "../../lib/useNow";
 import {
-  isDestructiveBatch, outcomeLabel, outcomeTone, scheduleEnabled, scheduleSummary, storageText,
+  isDestructiveBatch, outcomeLabel, outcomeTone, scheduleEnabled, scheduleSummary,
 } from "../../lib/batchSchedule";
+import { storageText } from "../../lib/batchStorage";
 import type { BatchSchedule } from "../../lib/types";
 import { useMe } from "../auth/useAuth";
 import { BatchScheduleDialog } from "./BatchScheduleDialog";

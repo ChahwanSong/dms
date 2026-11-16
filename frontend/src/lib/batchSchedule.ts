@@ -3,6 +3,8 @@
 // 화면은 **다음 실행을 계산하지 않는다**(말일 당기기·interval 슬롯을 따로 구현하면 서버와 어긋난다 — 미리보기는 서버
 // :preview). 여기 있는 것은 표시 문구와 저장 전 즉답(서버 422 invalid_batch_schedule 의 거울)뿐이다.
 
+import { kstStampBare } from "./datetime";
+
 export type ScheduleKind = "daily" | "weekly" | "monthly" | "interval";
 
 export const SCHEDULE_KINDS: readonly { value: ScheduleKind; label: string }[] = [
@@ -29,22 +31,6 @@ export const schedulableOp = (op: string | null | undefined): boolean => op != n
 // 배치 값으로 한다 — 동의 뒤 배치가 바뀌면 서버가 지문으로 잡아 일시정지한다.
 export function isDestructiveBatch(op: string | null | undefined, options: Record<string, unknown> | null | undefined): boolean {
   return op === "rm" || (op === "sync" && options?.delete === true);
-}
-
-// 배치 요약의 대상 스토리지(서버가 첫 항목 payload 에서 뽑아 준다 — 동질성은 서버가 강제). 모르면 「—」: sync 는 한쪽만
-// 알아도 아는 쪽을 보여 주고 모르는 쪽은 「?」, 둘 다 모르면 「—」 하나다.
-export interface BatchStorageFields {
-  storage?: string | null; source_storage?: string | null; destination_storage?: string | null;
-}
-export function storageText(op: string | null | undefined, f: BatchStorageFields | null | undefined): string {
-  if (!f) return "—";
-  const str = (v: unknown) => (typeof v === "string" && v !== "" ? v : null);
-  if (op === "sync") {
-    const src = str(f.source_storage), dst = str(f.destination_storage);
-    if (src === null && dst === null) return "—";
-    return `${src ?? "?"} → ${dst ?? "?"}`;
-  }
-  return str(f.storage) ?? "—";
 }
 
 const pad2 = (n: number) => String(n).padStart(2, "0");
@@ -140,3 +126,11 @@ export const outcomeTone = (o: string): string => OUTCOME_TONE[o] ?? "text-ink";
 
 // 서버 enabled 는 INTEGER(0/1) 컬럼이라 응답이 1 일 수도 true 일 수도 있다 -- 켜짐은 둘 중 하나로만 판정한다(그 밖 = 꺼짐).
 export const scheduleEnabled = (v: unknown): boolean => v === true || v === 1;
+
+/** 다음 실행 시각 「YYYY-MM-DD HH:MM」(KST — 회차는 분 단위라 초는 덜어 낸다). 꺼짐·일시정지(next_run_at null)·켜짐이 아님은
+ *  「—」, 파싱 못 하는 값은 원문 그대로(kstStampBare 규칙 — 지어내지 않는다). 배치 목록 「반복」 표식·배치 상세 머리가 쓴다. */
+export function nextRunStamp(enabled: unknown, iso: string | null | undefined): string {
+  if (!scheduleEnabled(enabled) || !iso) return "—";
+  const stamp = kstStampBare(iso);
+  return /^\d{4}-\d\d-\d\d \d\d:\d\d/.test(stamp) ? stamp.slice(0, 16) : stamp;
+}

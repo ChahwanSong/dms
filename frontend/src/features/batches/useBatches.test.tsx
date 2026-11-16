@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
 import { beforeAll, afterAll, afterEach, test, expect } from "vitest";
-import { useBatches, useUpdateBatch, useUpdateBatchItem,
+import { useBatches, useUpdateBatch, useUpdateBatchItem, useDeleteBatch, useDeleteBatches,
          useReplaceBatchItems, useRerunBatchItems, needsBatchConfirm } from "./useBatches";
 const server = setupServer();
 beforeAll(() => server.listen()); afterEach(() => server.resetHandlers()); afterAll(() => server.close());
@@ -109,4 +109,55 @@ test("needsBatchConfirm: 확인 흐름은 sync·rm 명시 집합 — scan·모�
   expect(needsBatchConfirm("sync")).toBe(true);
   expect(needsBatchConfirm("rm")).toBe(true);
   for (const op of ["scan", "bogus", "", undefined]) expect(needsBatchConfirm(op)).toBe(false);
+});
+
+test("useBatches({enabled:false}) 는 조회하지 않는다 — 배치 스케줄러 추가 창이 열렸을 때만 같은 키로 읽는다", async () => {
+  let hits = 0;
+  server.use(http.get("/api/admin/batches", () => { hits += 1; return HttpResponse.json([]); }));
+  const qc = new QueryClient({ defaultOptions:{ queries:{ retry:false }}});
+  const wrapper = ({children}: {children: React.ReactNode}) => <QueryClientProvider client={qc}>{children}</QueryClientProvider>;
+  const { result, rerender } = renderHook(({ on }) => useBatches({ enabled: on }), { wrapper, initialProps: { on: false } });
+  await new Promise((r) => setTimeout(r, 50));
+  expect(hits).toBe(0);
+  expect(result.current.fetchStatus).toBe("idle");
+  rerender({ on: true });
+  await waitFor(() => expect(result.current.data).toEqual([]));
+  expect(hits).toBe(1);
+  // 같은 키(["batches"]) -- 배치 목록 화면과 캐시를 나눠 쓴다
+  expect(qc.getQueryData(["batches"])).toEqual([]);
+});
+
+// 배치 삭제는 그 배치의 스케줄·회차 기록도 지운다(서버 같은 트랜잭션) -- 스케줄러 화면이 지운 배치의 스케줄을 남겨 보이지 않게
+// 두 삭제 훅 모두 ["batch-schedules"] 를 무효화한다(2026-11-16).
+function spyInvalidate(qc: QueryClient) {
+  const calls: unknown[] = [];
+  const orig = qc.invalidateQueries.bind(qc);
+  qc.invalidateQueries = ((opts: unknown) => { calls.push(opts); return orig(opts as never); }) as never;
+  return calls;
+}
+
+test("useDeleteBatch 는 성공하면 배치 스케줄 목록도 무효화한다", async () => {
+  server.use(http.delete("/api/admin/batches/b1", () => HttpResponse.json({ deleted: "b1" })),
+             http.get("/api/admin/batches", () => HttpResponse.json([])));
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const calls = spyInvalidate(qc);
+  const { result } = renderHook(() => useDeleteBatch("b1"), { wrapper: ({children}) =>
+    <QueryClientProvider client={qc}>{children}</QueryClientProvider> });
+  result.current.mutate();
+  await waitFor(() => expect(result.current.isSuccess).toBe(true));
+  expect(calls).toEqual(expect.arrayContaining([expect.objectContaining({ queryKey: ["batch-schedules"] })]));
+});
+
+test("useDeleteBatches(목록 일괄 삭제)도 배치 스케줄 목록을 무효화한다", async () => {
+  server.use(http.delete("/api/admin/batches/:id", () => HttpResponse.json({ deleted: "x" })));
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const calls = spyInvalidate(qc);
+  const { result } = renderHook(() => useDeleteBatches(), { wrapper: ({children}) =>
+    <QueryClientProvider client={qc}>{children}</QueryClientProvider> });
+  result.current.mutate(["b1", "b2"]);
+  await waitFor(() => expect(result.current.isSuccess).toBe(true));
+  expect(calls).toEqual(expect.arrayContaining([
+    expect.objectContaining({ queryKey: ["batches"] }),
+    expect.objectContaining({ queryKey: ["batch-schedules"] }),
+  ]));
 });

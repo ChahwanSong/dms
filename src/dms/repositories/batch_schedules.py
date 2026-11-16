@@ -23,29 +23,11 @@ import uuid
 from ..db import Database, dump_json, utc_now_iso
 from ..batch_scheduler import SCHEDULER_ACTOR, next_run_after
 from ..domain import DomainValidationError, confirm_gated
-from .batches import BatchesRepository
+# 「대상 스토리지」 판정은 배치 목록 열(B1)과 한 함수다(첫 항목 payload -- 깨진 JSON·dict 아님·문자열 아님은 None).
+from .batches import BatchesRepository, _storage_fields
 
 # 스케줄당 남기는 회차 이력 수. 확인 대기 중 매시간 건너뛰는 스케줄도 이력이 끝없이 자라지 않는다.
 RUN_HISTORY_CAP = 200
-
-
-def _storage_fields(payload_text) -> dict:
-    """배치 첫 항목 payload(저장 문자열)의 스토리지 이름 -- {"storage", "source_storage", "destination_storage"}. 깨진 JSON·dict
-    아님·문자열 아닌 값은 None(DB 가 신뢰 경계 -- 500 을 내지 않는다). 배치 목록 「대상 스토리지」 열(B1)과 같은 규칙이다 --
-    병합 때 하나로 합친다. 원문 payload 는 응답에 싣지 않는다."""
-    out = {"storage": None, "source_storage": None, "destination_storage": None}
-    if not isinstance(payload_text, str):
-        return out
-    try:
-        payload = json.loads(payload_text)
-    except ValueError:
-        return out
-    if not isinstance(payload, dict):
-        return out
-    for key in out:
-        value = payload.get(key)
-        out[key] = value if isinstance(value, str) else None
-    return out
 
 
 def _load_json_or_none(text):
@@ -137,16 +119,18 @@ class BatchSchedulesRepository:
         return out
 
     def summaries_for(self, batch_ids) -> dict:
-        """배치 목록·상세 응답에 붙일 스케줄 요약 {batch_id: {...}} -- 스케줄이 없는 배치는 키가 없다(호출자가 None 으로 읽는다).
-        병합 뒤 통합 단계가 배치 응답의 schedule 필드로 싣는다."""
+        """배치 목록·상세 머리(view=summary) 응답의 schedule 필드(routes_batches._with_schedules) -- {batch_id: {schedule_id,
+        kind, spec, enabled, next_run_at, last_run_at, last_outcome, last_reason_code, paused_reason_code}}. 스케줄이 없는 배치는
+        키가 없다(호출자가 None 으로 읽는다). 목록 한 쪽이 IN 질의 한 번(500개씩 끊는다 -- 목록은 100건이라 보통 한 번)."""
         ids = [b for b in dict.fromkeys(batch_ids) if isinstance(b, str)]
         out: dict = {}
         for i in range(0, len(ids), 500):
             names = {f"i{n}": v for n, v in enumerate(ids[i:i + 500])}
             in_list = ", ".join(":" + k for k in names)
             for r in self._db.query(
-                    f"""SELECT schedule_id, batch_id, kind, spec, enabled, next_run_at, last_outcome, last_reason_code,
-                               paused_reason_code FROM batch_schedules WHERE batch_id IN ({in_list})""", names):
+                    f"""SELECT schedule_id, batch_id, kind, spec, enabled, next_run_at, last_run_at, last_outcome,
+                               last_reason_code, paused_reason_code FROM batch_schedules WHERE batch_id IN ({in_list})""",
+                    names):
                 row = _hydrate(r)
                 out[row.pop("batch_id")] = row
         return out

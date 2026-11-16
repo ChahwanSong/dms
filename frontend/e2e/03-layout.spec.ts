@@ -66,6 +66,12 @@ async function visitBatches(page: Page): Promise<void> {
   await expect(page.locator("main table").first().or(page.getByText("배치가 없습니다"))).toBeVisible();
 }
 
+// 배치 스케줄러(2026-11-16): 표(스케줄이 있을 때)나 빈 상태 문구 어느 쪽이든 그려진 뒤에 잰다 -- 목록은 heading 보다 늦게 온다.
+async function visitSchedules(page: Page): Promise<void> {
+  await visit(page, "/admin/batch-schedules", "배치 스케줄러");
+  await expect(page.locator("main table").first().or(page.getByText(/^스케줄이 없습니다/))).toBeVisible();
+}
+
 // 각 화면의 minTableCells 는 **소스 실측치**다(완화가 아니라 실측으로 정한다):
 //   /admin/accounts  th 6 + (admin 1 + e2ewide 3)행 × td 6 = 30 >= 24
 //   /jobs            th 10(관리자 선택 열 1 + 관리자 배치 열 1 + 요청·요청자·작업·대상·우선순위·상태·생성·갱신 8)
@@ -84,6 +90,9 @@ async function visitBatches(page: Page): Promise<void> {
 //   /admin/batches   표는 배치가 있을 때만 그려진다(이 파일 시점엔 배치가 없다 -- 07 이 처음 만든다) -> 하한 0. 2026-11-16
 //                    「대상 스토리지」 열(자유 글자 스토리지 이름, break-all + 최소 폭)로 8열이 돼 375 에서 표가 넘치는 자리라
 //                    순회에 넣는다 -- 넘쳐도 Table 래퍼 안에서만 스크롤하고 문서는 넘치지 않아야 한다(L1).
+//   /admin/batch-schedules
+//                    표는 스케줄이 있을 때만 그려진다(이 파일 시점엔 없다 -- E15(14)가 처음 만들고 그 행의 표 불변식도 잰다) ->
+//                    하한 0. 2026-11-16 새 화면(9열 표 + 안내 패널 + 「스케줄 추가」 머리줄)이라 L1/L3/L4 를 여기서 진다.
 //   /admin/usage     표는 고른 스토리지 탭에 성공 scan 이 있을 때만 그려진다(이 파일 시점엔 보통 없다) -> 하한 0.
 //                    2026-10-20 스토리지 탭 줄(가로 스크롤)이 새 L1 위험이라 순회에 넣는다 -- 탭 안 sr-only 노드가 화면
 //                    밖으로 문서를 넓히던 유형(StatusPill 619/375). 행·펼침 상세의 375 불변식은 E10(09)이 기록과 함께 잰다.
@@ -140,6 +149,9 @@ test.describe("E3 레이아웃 불변식", () => {
     await visitBatches(page);
     await assertLayoutSane(page, { minTableCells: 0 });
 
+    await visitSchedules(page);
+    await assertLayoutSane(page, { minTableCells: 0 });
+
     await visitUsage(page);
     await assertLayoutSane(page, { minTableCells: 0 });
   });
@@ -180,6 +192,9 @@ test.describe("E3 레이아웃 불변식", () => {
     expect(wrapped, "입력 방식 세그먼트 라벨이 두 줄로 접혔다").toEqual([]);
 
     await visitBatches(page);
+    await assertLayoutSane(page, { sidebarFixed: false, minTableCells: 0 });
+
+    await visitSchedules(page);
     await assertLayoutSane(page, { sidebarFixed: false, minTableCells: 0 });
 
     // 사용량 분석 스토리지 탭 줄은 375 에서 줄바꿈 없이 가로 스크롤한다 -- 줄 자체만 넘치고 문서는 넘치지 않아야 한다(L1).

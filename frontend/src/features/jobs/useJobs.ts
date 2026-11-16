@@ -174,10 +174,11 @@ export function useCancelRequest(requestId: string) {
 // 빠지고 기간 통계가 소급해 줄며 감사에 삭제 행이 생긴다). artifact-base 의 잠금 건수(잡 + 정리 대기)도 바뀐다.
 // 배치 목록(["batches"])은 배치 단위 삭제가 배치 행까지 지우므로(2026-10-10) 함께 무효화한다. 사용량 분석의 미등록
 // 스토리지 목록(["usage-unregistered"], 2026-10-12)과 스토리지 탭 요약(["usage-storages"], 2026-10-20 -- 탭의 대상 수·미등록
-// 탭 자체)도 지운 scan 에서 센다.
+// 탭 자체)도 지운 scan 에서 센다. 배치 스케줄 목록(["batch-schedules"], 2026-11-16)은 배치 단위 삭제가 그 배치의 스케줄·회차
+// 이력도 지우므로(request_purges.delete_batch) 함께.
 export const DELETE_REQUESTS_INVALIDATES: readonly (readonly string[])[] = [
   ["requests"], ["request-purges"], ["usage-targets"], ["usage-storages"], ["usage-scan-storages"], ["usage-history"],
-  ["usage-unregistered"], ["metrics", "jobs"], ["audit"], ["artifact-base"], ["batches"],
+  ["usage-unregistered"], ["metrics", "jobs"], ["audit"], ["artifact-base"], ["batches"], ["batch-schedules"],
 ];
 // 한 번의 POST 에 단건과 배치 단위를 함께 싣는다(2026-10-10). expected_request_count = 확인 창을 연 순간 서버가 센
 // 그 배치의 자식 수 -- 삭제 CAS(다르면 batch_changed: 창을 연 뒤 재실행이 늘린 자식은 지우지 않는다).

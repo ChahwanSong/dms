@@ -236,6 +236,22 @@ def test_delete_batch_removes_batch_and_items(db):
     assert repos.batches.list_items(bid) == []
 
 
+def test_delete_require_terminal_only_deletes_a_terminal_batch(db):
+    # 2026-11-16: 배치 삭제 라우트 전용 종단 CAS -- 잠근 행이 Completed/Cancelled 가 아니면 아무것도 지우지 않고 False.
+    # 기본(require_terminal=False)은 상태를 보지 않는다(다른 호출자 무변경).
+    repos = Repositories(db)
+    live = _edit_batch(repos, n=2, status="Running")
+    assert repos.batches.delete(live, require_terminal=True) is False
+    assert repos.batches.get(live)["status"] == "Running" and len(repos.batches.list_items(live)) == 2
+    assert repos.batches.delete("nope", require_terminal=True) is False
+    for status in ("Completed", "Cancelled"):
+        bid = _edit_batch(repos, n=1, status=status)
+        assert repos.batches.delete(bid, require_terminal=True) is True
+        assert repos.batches.get(bid) is None and repos.batches.list_items(bid) == []
+    assert repos.batches.delete(live) is True                       # 기본 경로는 상태를 보지 않는다
+    assert repos.batches.get(live) is None
+
+
 def test_delete_batch_preserves_child_requests(db):
     repos = Repositories(db)
     bid = _edit_batch(repos, n=1, status="Completed")

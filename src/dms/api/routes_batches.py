@@ -144,7 +144,20 @@ def create_batch(body: BatchBody, request: Request, identity: Identity = Depends
 
 @router.get("/api/admin/batches")
 def list_batches(request: Request, identity: Identity = Depends(require_admin)):
-    return request.app.state.repos.batches.list()
+    """배치 목록(최신 100건, BatchesRepository.list) + 행마다 schedule(배치 스케줄 요약 | null -- _with_schedules)."""
+    repos = request.app.state.repos
+    return _with_schedules(repos, repos.batches.list())
+
+
+def _with_schedules(repos, rows):
+    """배치 행에 스케줄 요약을 싣는다(2026-11-16 배치 스케줄러): schedule = {schedule_id, kind, spec, enabled, next_run_at,
+    last_run_at, last_outcome, last_reason_code, paused_reason_code} | null(스케줄 없음). 목록 한 쪽이 질의 한 번이다
+    (summaries_for -- 행마다 묻지 않는다). 목록과 상세 머리(view=summary)만 싣는다 -- view 없음·all 은 옛 탭·확인 창 응답이라
+    모양을 바꾸지 않는다."""
+    summaries = repos.batch_schedules.summaries_for([r["batch_id"] for r in rows])
+    for r in rows:
+        r["schedule"] = summaries.get(r["batch_id"])
+    return rows
 
 
 class BatchPatchBody(BaseModel):
@@ -274,7 +287,12 @@ def delete_batch(batch_id: str, request: Request,
     b = _get_batch_or_404(request, batch_id)
     if b["status"] not in _TERMINAL_BATCH:
         raise HTTPException(status_code=409, detail="batch_not_deletable")
-    repo.delete(batch_id)
+    # 지우기는 잠근 행의 종단 CAS(repo.delete require_terminal): 위 읽기와 지우기 사이에 스케줄 회차·다른 관리자의 :rescan
+    # 이 끼면 방금 되살아난 배치를 지우게 된다(2026-11-16 -- 스케줄러가 사람 없이 그 창을 연다). 진 쪽은 아무것도 쓰지 않는다.
+    if not repo.delete(batch_id, require_terminal=True):
+        if repo.get(batch_id) is None:
+            raise HTTPException(status_code=404, detail="batch_not_found")   # 그 사이 다른 관리자가 지웠다
+        raise HTTPException(status_code=409, detail="batch_not_deletable")
     return {"deleted": batch_id}
 
 
@@ -325,10 +343,10 @@ def get_batch(batch_id: str, request: Request,
                 -- 회차 뒤에 항목이 바뀌면(추가·재실행 → Previewing 복귀, 다음 PreviewReady 에서 회차 +1) :confirm 의 상태·
                 회차 CAS 가 거부한다. 반대 순서면 옛 항목에 새 회차가 붙어 본 적 없는 항목이 확인에 묻힌다.
       summary   배치 행 + auto_confirm_hold + item_overview(item_total·status_counts·first_payload·스토리지 세 키) +
-                executing_count + direct_tools -- items 없음(2.5초 폴링의 머리). executing_count 는 확인 게이트 배치가
-                미리보기 단계(Previewing·PreviewReady)일 때만 세고 그 밖은 null(배너가 없다 -- null 은 「말할 것 없음」,
-                0 은 정상값). direct_tools 는 options.direct 가 명시 true 일 때만 {tools_known, nsync, undecided}, 아니면
-                null(포탈 directNote 의 첫 판정과 같다).
+                executing_count + direct_tools + schedule(스케줄 요약 | null -- _with_schedules) -- items 없음(2.5초 폴링의
+                머리). executing_count 는 확인 게이트 배치가 미리보기 단계(Previewing·PreviewReady)일 때만 세고 그 밖은
+                null(배너가 없다 -- null 은 「말할 것 없음」, 0 은 정상값). direct_tools 는 options.direct 가 명시 true 일
+                때만 {tools_known, nsync, undecided}, 아니면 null(포탈 directNote 의 첫 판정과 같다).
       items     {total, offset, limit, items}: 가벼운 읽기(list_item_heads)로 거르고(q·status -- _item_matches) 센 뒤
                 [offset, offset+limit) 를 잘라 **그 쪽의 seq 만** 상세 조인(list_items_detail(seqs) -- 행 모양은 전체 조회와
                 같다). limit 은 1–500 으로 접는다(없으면 100), offset ≥ 0(음수 422). 쪽 행의 payload 는 지금처럼 읽는다 --
@@ -356,7 +374,7 @@ def get_batch(batch_id: str, request: Request,
         options = b["options"]
         b["direct_tools"] = (direct_tool_counts(repo.list_item_tools(batch_id))
                              if isinstance(options, dict) and options.get("direct") is True else None)
-        return b
+        return _with_schedules(request.app.state.repos, [b])[0]
     # 화면용 상세 조인(request_state/files_count/completed_at) — 실행 루프가 쓰는
     # list_items 와 분리돼 있다(repo docstring 참고).
     b["items"] = repo.list_items_detail(batch_id)

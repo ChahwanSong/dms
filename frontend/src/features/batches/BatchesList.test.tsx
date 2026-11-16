@@ -6,6 +6,7 @@ import { setupServer } from "msw/node";
 import { http, HttpResponse, delay } from "msw";
 import { beforeAll, afterAll, afterEach, test, expect } from "vitest";
 import { BatchesList } from "./BatchesList";
+import { reasonText } from "../../lib/api";
 const server = setupServer();
 beforeAll(() => server.listen()); afterEach(() => server.resetHandlers()); afterAll(() => server.close());
 
@@ -358,4 +359,42 @@ test("항목 0개 배치는 「—」 + title 「항목이 없습니다」 — �
     expect(cell).toHaveTextContent(/^—$/);
     expect(cell).toHaveAttribute("title", "항목이 없습니다");
   }
+});
+
+// --- 「반복」 표식(2026-11-16 배치 스케줄러): 새 열 없이 「작업」 칸의 「자동」 옆 ---------------------------------------------
+
+const SCHED = { schedule_id: "sch1", kind: "daily", spec: { hour: 2, minute: 0 }, enabled: true,
+  next_run_at: "2026-11-16T17:00:00Z", last_run_at: null, last_outcome: null, last_reason_code: null,
+  paused_reason_code: null };
+
+test("스케줄이 켜진 배치는 「작업」 칸에 「반복」(title = 주기 · 다음 실행 KST) — 없음·옛 서버는 표식 없음, 열은 그대로", async () => {
+  renderList([row({ batch_id: ID1, name: "on", schedule: SCHED }),
+              row({ batch_id: ID2, name: "none", schedule: null }),
+              row({ batch_id: ID3, name: "old" })]);                        // 옛 서버(필드 부재)
+  const badge = await screen.findByText("반복");
+  expect(badge).toHaveAttribute("title", "매일 02:00 (KST) · 다음 2026-11-17 02:00 KST");
+  expect(badge.className).toContain("text-accent");
+  expect(badge.className).toContain("whitespace-nowrap");
+  expect(badge.closest("td")!.textContent).toBe("scan반복");
+  expect(screen.getAllByText(/^반복/)).toHaveLength(1);
+  const heads = screen.getAllByRole("columnheader").map((th) => th.textContent);
+  expect(heads.slice(1)).toEqual(["배치", "이름", "작업", "대상 스토리지", "상태", "진행", "최근 갱신"]);
+});
+
+test("꺼졌거나 자동 일시정지면 흐린 「반복 꺼짐」 — 다음 실행 「—」, 일시정지 사유는 title(enabled 0/1 정수도 읽는다)", async () => {
+  renderList([
+    row({ batch_id: ID1, name: "off", schedule: { ...SCHED, enabled: false, next_run_at: null } }),
+    row({ batch_id: ID2, name: "paused", schedule: { ...SCHED, enabled: 0, next_run_at: null,
+                                                      paused_reason_code: "batch_schedule_owner_not_privileged" } }),
+    row({ batch_id: ID3, name: "int-on", operation: "rm", auto_confirm: true, schedule: { ...SCHED, enabled: 1 } })]);
+  await screen.findByText("off");
+  const badgeOf = (name: string) => within(screen.getByText(name).closest("tr")!).getByText(/^반복/);
+  expect(badgeOf("off")).toHaveTextContent(/^반복 꺼짐$/);
+  expect(badgeOf("off").className).toContain("text-muted");
+  expect(badgeOf("off")).toHaveAttribute("title", "매일 02:00 (KST) · 다음 —");
+  expect(badgeOf("paused")).toHaveAttribute("title",
+    `매일 02:00 (KST) · 다음 — · 자동 일시정지: ${reasonText("batch_schedule_owner_not_privileged")}`);
+  // 「자동」 옆에 같이 선다
+  expect(badgeOf("int-on")).toHaveTextContent(/^반복$/);
+  expect(badgeOf("int-on").closest("td")!.textContent).toBe("rm자동반복");
 });
