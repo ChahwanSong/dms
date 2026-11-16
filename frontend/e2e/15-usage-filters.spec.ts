@@ -137,4 +137,109 @@ test.describe("E15 — 사용량 분석 필터", () => {
     await expect(rowsOf(page, THEIRS)).toHaveCount(1);
     await expect(rowsOf(page, MINE).locator("mark")).toHaveCount(0);
   });
+
+  // 2026-11-16 사용자 요청 「상위 100개만이 아니라 전체 목록(몇백~몇천 개여도 버벅이지 않게)」 + 「작업 화면의 데이터 온도 히스토그램·파일
+  // 크기 분포를 사용량에서도 최신 scan 기준으로 같은 모양으로」. 실 scan 101회는 비용이 커서 목록 봉투(/targets)만 page.route 로 합성한다
+  // (실 scan 하나의 실제 행을 250개로 복제 -- 실 행은 2쪽 첫 줄, 쪽마다 offset 메아리·has_more·pageable_count). 합계 등 나머지 API 는
+  // 실 하네스. 다만 하네스의 가짜 dscan 리포트는 읽히지 않는다(E10 주석 -- 행은 DB 용량, 이력은 skipped_unreadable 로 비어 시트는
+  // 「표시할 이력 없음」 한 줄). 그래서 두 차트를 실 브라우저 폭(390)으로 재려고, 그 실 scan 의 포인트(같은 job_id·request_id)를 읽힌
+  // 리포트 모양(온도 9구간 × atime·mtime·ctime, 크기 10구간 -- 라이브 dscan 과 같은 구간 수)으로 바꿔 목록 행의 latest 와 이력
+  // (scan-history) 양쪽에 싣는다. 단위 테스트(TargetSheet.test)가 못 보는 것은 값이 아니라 실 폭의 넘침·축 토글이다.
+  test("쪽 넘김(합성 250행): Pager 375 한 줄·?page= · 2쪽의 실 경로 시트에 최신 scan 온도·크기 차트(390 가로 넘침 없음) · 쪽 경계 이전", async ({
+    page }) => {
+    await apiLogin(page);
+    const real = `e15-page-${RUN}`;
+    await scan(page.request, real);
+    const requested: number[] = [];
+    const AGES: [number, number | null][] = [[0, 1], [1, 7], [7, 30], [30, 90], [90, 180], [180, 365], [365, 730], [730, 1825],
+                                             [1825, null]];
+    const temp = AGES.map(([lo, hi], i) => ({ bucket: hi === null ? `[${lo}d,)` : `[${lo}d,${hi}d]`, min_age_days: lo,
+                                              ...(hi === null ? {} : { max_age_days: hi }), count: i + 1, bytes: (i + 1) * 1_048_576 }));
+    // 크기 구간 = 라이브 dscan 실측(ScanHistograms.test LIVE_SIZE 와 같은 경계 -- 0~4K … 4T~, 마지막은 상한 없음)
+    const BOUNDS: [number, number | null][] = [[0, 4096], [4097, 65536], [65537, 1048576], [1048577, 16777216],
+      [16777217, 268435456], [268435457, 1073741824], [1073741825, 17179869184], [17179869185, 274877906944],
+      [274877906945, 4398046511104], [4398046511105, null]];
+    const size = BOUNDS.map(([lo, hi], i) => ({ bucket: hi === null ? `[${lo},)` : `[${lo},${hi}]`, lower_inclusive: lo,
+                                                ...(hi === null ? {} : { upper_inclusive: hi }), count: 10 - i }));
+    const totalBytes = temp.reduce((s, b) => s + b.bytes, 0);
+    // 실 scan 포인트(못 읽음) → 같은 잡의 읽힌 포인트
+    const readable = (p: Record<string, unknown>) => ({
+      ...p, report_readable: true, generated_at_epoch: Math.floor(Date.now() / 1000), total_bytes: totalBytes,
+      summary: { total_bytes: totalBytes, total_files: 55, total_dirs: 3 },
+      time_histograms: { atime: temp, mtime: temp, ctime: temp }, file_size_histogram: size,
+      broken_paths_total: 0, broken_paths_limit: 100, invalid_name_entries: 0 });
+    let realLatest: Record<string, unknown> | null = null;
+    await page.route(/\/api\/admin\/usage\/scan-history\?/, async (route) => {
+      const url = new URL(route.request().url());
+      if (url.searchParams.get("target") !== real) return route.continue();
+      const upstream = await route.fetch();
+      const body = (await upstream.json()) as { latest_job_id?: string | null; points: unknown[] };
+      expect(realLatest, "목록 행보다 이력을 먼저 불렀다").not.toBeNull();
+      expect(body.latest_job_id, "이력의 최신 scan 이 목록 행의 latest 와 다르다").toBe(realLatest!.job_id);
+      await route.fulfill({ response: upstream, json: { ...body, points: [readable(realLatest!)], skipped_unreadable: 0 } });
+    });
+    await page.route(/\/api\/admin\/usage\/targets\?/, async (route) => {
+      const url = new URL(route.request().url());
+      const offset = Number(url.searchParams.get("offset") ?? "0");
+      const limit = Number(url.searchParams.get("limit") ?? "100");
+      requested.push(offset);
+      // 실 서버에서 실 행(그 경로만 걸러)과 메아리를 받아 쓴다 -- 검색 없이 보낸 것으로(합성 행의 이름이 검색과 무관하게)
+      url.searchParams.set("q", real); url.searchParams.set("offset", "0");
+      const upstream = await route.fetch({ url: url.toString() });
+      const body = (await upstream.json()) as { rows: { target: string; latest?: Record<string, unknown> | null }[];
+                                               filters: Record<string, unknown> };
+      const found = body.rows.find((r) => r.target === real);
+      expect(found, "실 scan 행이 목록에 없다").toBeTruthy();
+      expect(found!.latest, "실 scan 행에 latest 가 없다").toBeTruthy();
+      realLatest = found!.latest!;
+      const realRow = { ...found!, latest: readable(realLatest) };
+      const all = Array.from({ length: 250 }, (_, i) => (i === 100 ? realRow : { ...realRow, target: `e15-syn-${String(i).padStart(3, "0")}` }));
+      await route.fulfill({ response: upstream, json: {
+        ...body, rows: all.slice(offset, offset + limit), matched_count: 250, window_truncated: false,
+        filters: { ...body.filters, q: null }, offset, has_more: offset + limit < 250, pageable_count: 250 } });
+    });
+    await page.goto(`/admin/usage?storage=${STORAGE_NAME}`);
+    const panel = panelOf(page);
+    await expect(rowsOf(page, "e15-syn-000")).toHaveCount(1);
+    await expect(panel.getByText("1–100 / 전체 250개", { exact: true })).toBeVisible();
+    const pager = panel.getByRole("navigation", { name: "경로 목록 쪽" });
+    await expect(pager).toContainText("1 / 3쪽");
+    await expect(panel.locator("table tbody tr")).toHaveCount(100);
+    // 375: 표(가로 스크롤 래퍼) 밖 가운데 한 줄 -- 높이가 버튼 한 줄, 문서 가로 넘침 없음
+    await page.setViewportSize({ width: 375, height: 667 });
+    await expect(pager).toBeVisible();
+    const box = (await pager.boundingBox())!;
+    expect(box.height, "Pager 가 375 에서 두 줄로 꺾였다").toBeLessThan(48);
+    expect(box.x).toBeGreaterThanOrEqual(0);
+    expect(box.x + box.width).toBeLessThanOrEqual(375);
+    expect(await pager.evaluate((el) => el.closest(".overflow-x-auto") === null)).toBe(true);
+    await assertLayoutSane(page, { sidebarFixed: false, minTableCells: 12 });
+    await page.setViewportSize({ width: 1280, height: 800 });
+    // 다음 쪽 → ?page=2, 실 행이 첫 줄
+    await pager.getByRole("button", { name: "다음" }).click();
+    await expect(page).toHaveURL(/[?&]page=2(&|$)/);
+    await expect(rowsOf(page, real)).toHaveCount(1);
+    await expect(panel.getByText("101–200 / 전체 250개", { exact: true })).toBeVisible();
+    expect(requested).toContain(100);
+    // 390: 실 경로의 시트(md 미만 전체 화면) -- 최신 scan 의 온도 히스토그램·크기 분포(배치 scan 항목과 같은 차트), 가로 넘침 없음
+    await page.setViewportSize({ width: 390, height: 844 });
+    await panel.getByRole("button", { name: real, exact: true }).click();
+    const sheet = page.getByRole("dialog", { name: real });
+    await expect(sheet).toBeVisible();
+    await expect(sheet.getByText(/목록 101\/250번째/)).toBeVisible();
+    await expect(sheet.getByRole("img", { name: /^데이터 온도\((atime|mtime|ctime)\) 히스토그램$/ })).toBeVisible();
+    await expect(sheet.getByRole("img", { name: "파일 크기 분포" })).toBeVisible();
+    const overflow = await page.evaluate(() => {
+      const body = document.querySelector<HTMLElement>("[data-sheet-body]");
+      return { doc: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+               sheet: body === null ? 0 : body.scrollWidth - body.clientWidth };
+    });
+    expect(overflow, "390 시트에 가로 넘침").toEqual({ doc: 0, sheet: 0 });
+    // 쪽의 첫 행에서 이전 경로 = 1쪽 끝 행(쪽과 경로를 한 번에)
+    await sheet.getByRole("button", { name: "이전 경로" }).click();
+    await expect(page.getByRole("dialog", { name: "e15-syn-099" })).toBeVisible();
+    await expect(page).not.toHaveURL(/[?&]page=/);
+    await expect(page).toHaveURL(/[?&]target=e15-syn-099(&|$)/);
+    await page.setViewportSize({ width: 1280, height: 800 });
+  });
 });

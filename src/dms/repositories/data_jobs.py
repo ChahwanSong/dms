@@ -224,7 +224,7 @@ class DataJobsRepository:
                           path: "str | None" = None, order: str = "desc",
                           limit: "int | None" = 100, sort: str = "last_scan",
                           requester: "str | None" = None, with_matched: bool = False,
-                          tokens: "list[str] | None" = None) -> list[dict]:
+                          tokens: "list[str] | None" = None, offset: int = 0) -> list[dict]:
         """성공 scan 이 있는 (storage, target) 목록 — **전 요청자 통합**(사용량
         분석, 2026-08-23 사용자 요청: "요청자에 관계없이 모든 작업"). 필터는
         _scan_target_where. 정렬은 최근 스캔 기준 — 기본 내림차순(화면의 기본 질문이
@@ -255,7 +255,17 @@ class DataJobsRepository:
         를 AND 로(작업 목록 검색과 같은 뜻 -- 부분 일치·대소문자 무시·와일드카드 리터럴, 낮추기는 컬럼과 패턴 양쪽 같은 DB lower()).
         target 에만 걸리므로 안쪽 WHERE 에 둬도 파티션이 잘리지 않는다(path 와 같다). 경로만 보는 검색이다 -- PV 이름까지 보는 검색은
         라우트가 판정 창에서 한다(routes_usage._select_heads). 공용 술어(_scan_target_where)는 바꾸지 않는다(batches·동일성 참조가 쓴다).
-        세 인자가 기본값(빈 tokens 포함)이면 문장이 예전과 글자 하나 다르지 않다(계획 테스트·tests/test_usage_equivalence.py)."""
+        offset(2026-11-16 사용량 목록 쪽 넘김 -- 사용자 요청 「상위 100개만이 아니라 전체 목록」): 바깥 ORDER BY 뒤 앞의 offset 개를
+        건너뛴다(LIMIT … OFFSET, 두 방언 같음). 바깥에만 붙는 이유는 필터와 같다 -- 안쪽에 걸면 파티션이 잘려 scan_count·최신 잡이
+        달라진다. 동률 정렬이 (storage_name, target)까지 결정적이라 쪽 경계에서 빠지거나 겹치는 행이 없다(그 사이 scan 이 끝나 순서가
+        움직인 경우 말고는). 키셋이 아닌 이유: 윈도 함수가 어차피 파티션 전체를 계산해 커서로 줄일 비용이 없고, 정렬 방향이 섞여(last_scan
+        {방향} 뒤 이름 ASC) 행 값 비교 커서를 쓸 수 없다. limit 없는 offset 은 받지 않는다(sqlite 가 LIMIT 없는 OFFSET 을 모른다 -- 그런
+        호출자도 없다). matched_count(COUNT(*) OVER ())는 OFFSET 앞의 값이라 쪽과 무관하지만, 범위 밖 쪽이면 행이 없어 함께 사라진다 --
+        호출자가 따로 구한다(routes_usage._select_heads).
+        네 인자가 기본값(빈 tokens·offset 0 포함)이면 문장이 예전과 글자 하나 다르지 않다(계획 테스트·tests/test_usage_equivalence.py)
+        -- 그래서 OFFSET 은 offset > 0 일 때만 붙인다(dms-ssc 라인의 같은 인자와 같은 모양)."""
+        if offset > 0 and limit is None:
+            raise ValueError("scan_target_heads: offset needs limit")
         params: dict = {}
         where = self._scan_target_where(params, q=q, storage=storage, path=path)
         for i, tok in enumerate(tokens or ()):
@@ -268,6 +278,9 @@ class DataJobsRepository:
         if limit is not None:
             tail = " LIMIT :n"
             params["n"] = limit
+            if offset > 0:
+                tail += " OFFSET :o"
+                params["o"] = offset
         hit_col = hit_where = matched = ""
         if requester is not None:
             hit_col = (""",

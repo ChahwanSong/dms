@@ -1,6 +1,6 @@
 import uuid
 from ..db import Database, dump_json, load_json, utc_now_iso
-from ..domain import TERMINAL_REQUEST_STATES
+from ..domain import TERMINAL_REQUEST_STATES, confirm_gated
 from .data_jobs import DataJobsRepository
 from .requests import batch_match
 
@@ -18,6 +18,74 @@ _NO_QUEUED_ITEM = "NOT EXISTS (SELECT 1 FROM batch_items WHERE batch_id = :b AND
 # 밖이다 -- 실행 신원·특권 재료와 대상은 생성 시점 사실이다(항목은 항목 편집 라우트 몫). auto_confirm_by(sync·rm 자동
 # 확인을 켠 사람, NULL = 꺼짐)는 라우트가 본문 auto_confirm(bool)을 이 값으로 바꿔 넘긴다.
 _SETTINGS_COLUMNS = ("max_concurrency", "priority", "node_count", "procs_per_node", "options", "auto_confirm_by")
+# batch_id 로 배치에 딸린 행을 담는 테이블 중 **배치 삭제 두 경로**(BatchesRepository.delete, RequestPurgesRepository.
+# delete_batch)가 같은 트랜잭션에서 함께 지우는 것(2026-11-16 배치 스케줄러). FK 가 0건이라 빠지면 지운 배치의 스케줄이 고아로
+# 남아 컨트롤러가 batch_not_found 로 일시정지를 쓴다. tests/test_api_batch_schedules.py 의 그물이 스키마의 batch_id 컬럼
+# 전수를 이 목록 ∪ BATCH_DELETE_EXEMPT_TABLES 와 대조하고, 두 경로 소스에 테이블마다 DELETE 가 있는지 본다.
+# **순서가 잠금 순서다**(설계 비판 #10): 항목 → 배치 → 스케줄 → 회차 이력. 스케줄 발사(BatchSchedulesRepository.fire -- 항목 →
+# 배치 → 스케줄 UPDATE → 회차 INSERT·상한 정리)와 기록(record -- 스케줄 UPDATE → 회차)이 같은 방향이라, 두 삭제 경로도 스케줄을
+# 회차 이력보다 먼저 지운다(거꾸로면 PG 에서 서로 상대 행을 기다려 한쪽이 40P01 로 끊긴다 -- 그물이 소스 순서까지 본다).
+BATCH_DELETE_TABLES = ("batch_items", "batches", "batch_schedules", "batch_schedule_runs")
+# batch_id 를 담지만 배치 기록 삭제(delete)가 지우지 않는 테이블: requests -- 자식 요청은 실행 감사 이력이라 보존하고(delete
+# docstring), 배치 단위 삭제(delete_batch)는 요청 삭제 몸통(_purge_locked)이 batch_id 로 전부 지운다.
+BATCH_DELETE_EXEMPT_TABLES = ("requests",)
+
+# 배치 항목 상태(라우트·orchestrator 가 쓰는 전부). 상세 요약(view=summary)의 status_counts 가 이 키를 0 으로 먼저 깐다 --
+# 화면의 상태 칩이 「0개」를 「모름」과 구별해 보이게(0 은 정상값). 밖의 값(DB 변조)은 그 이름 그대로 센다.
+_ITEM_STATUSES = ("Queued", "Materialized", "Succeeded", "Failed", "Rejected", "Cancelled")
+# 첫 항목 payload 에서 읽는 스토리지 키(scan·rm = storage, sync = 소스·목적지 쌍 -- domain.validate_batch 가 한 배치에 한
+# 종류·한 쌍만 허용하므로 첫 항목의 값이 배치의 값이다). 기존 batches 열과 이름이 겹치지 않는다.
+_STORAGE_KEYS = ("storage", "source_storage", "destination_storage")
+# list_items_detail 의 seq 부분 조회 한 문장의 IN 목록 상한(sqlite 바인딩 상한보다 넉넉히 작게 -- 상세 쪽 크기 상한과 같다).
+_SEQ_CHUNK = 500
+
+
+def _payload_or_none(text):
+    """항목 payload JSON 을 dict 로 -- 깨진 JSON·dict 아님은 None(DB 가 신뢰 경계: 행 하나 때문에 목록·요약 전체가 500 이
+    되지 않게). 원문 문자열은 밖으로 내보내지 않는다."""
+    if not isinstance(text, str):
+        return None
+    try:
+        value = load_json(text)
+    except (ValueError, RecursionError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _storage_fields(payload_text) -> dict:
+    """첫 항목 payload(원문 JSON) → {"storage", "source_storage", "destination_storage"}: 문자열인 값만, 나머지(키 없음·
+    문자열 아님·깨진 JSON·항목 없음)는 None -- 모름이다. 배치 목록 열(list)과 상세 요약(view=summary)이 이 한 판정을 쓴다.
+    빈 문자열은 문자열이라 그대로 둔다(스토리지 이름으로 받아 온 값 -- 화면이 「(이름 없음)」으로 그린다, 모름이 아니다)."""
+    p = _payload_or_none(payload_text) or {}
+    return {k: (p[k] if isinstance(p.get(k), str) else None) for k in _STORAGE_KEYS}
+
+
+def _audit_schedule_delete(db, batch_id, *, actor, now) -> None:
+    """배치 삭제 두 경로(BatchesRepository.delete·RequestPurgesRepository.delete_batch)가 스케줄 행을 지우기 **전에**, 같은
+    트랜잭션에서 부른다: 그 배치에 스케줄이 있으면 ('batch_schedule', 'delete', batch_id) 감사 행을 남긴다 -- 스케줄 DELETE
+    라우트(BatchSchedulesRepository.delete)와 같은 mutation_class·operation·target_key 에, before 는 스케줄 상태 + 마지막 판정 +
+    동의 여부 + 함께 지운 회차 이력 수(run_count) + deleted_with_batch, after 는 NULL. 켜진 스케줄(armed_by·동의)이 배치와
+    함께 흔적 없이 사라지지 않게. 잠금은 항목 → 배치 → 스케줄 순서 그대로(두 경로 모두 항목·배치를 먼저 쥐거나 지운 뒤에
+    부른다 -- BATCH_DELETE_TABLES). 깨진 spec(DB 변조)은 None 으로 남긴다(감사가 삭제를 막지 않는다)."""
+    lock = " FOR UPDATE" if db.dialect == "postgresql" else ""
+    row = db.query_one(f"SELECT * FROM batch_schedules WHERE batch_id = :b{lock}", {"b": batch_id})
+    if row is None:
+        return
+    spec = _payload_or_none(row["spec"])
+    runs = db.query_one("SELECT COUNT(*) AS n FROM batch_schedule_runs WHERE schedule_id = :s",
+                        {"s": row["schedule_id"]})
+    before = {"schedule_id": row["schedule_id"], "batch_id": row["batch_id"], "kind": row["kind"],
+              "spec": spec, "enabled": row["enabled"] == 1,
+              "next_run_at": row["next_run_at"], "armed_by": row["armed_by"],
+              "acknowledged_irreversible": row["ack_fingerprint"] is not None,
+              "last_run_at": row["last_run_at"], "last_outcome": row["last_outcome"],
+              "last_reason_code": row["last_reason_code"], "paused_reason_code": row["paused_reason_code"],
+              "run_count": int(runs["n"]), "deleted_with_batch": True}
+    db.execute(
+        """INSERT INTO audit_log (mutation_class, operation, target_key, actor, before_state, after_state, at)
+           VALUES ('batch_schedule', 'delete', :key, :actor, :b, NULL, :at)""",
+        {"key": batch_id, "actor": actor, "b": dump_json(before), "at": now})
+
 
 def _hydrate(row):
     row["options"] = load_json(row["options"])
@@ -91,9 +159,95 @@ class BatchesRepository:
         return None if row is None else _hydrate(row)
 
     def list(self, limit=100):
-        rows = self._db.query("SELECT * FROM batches ORDER BY created_at DESC LIMIT :n",
-                              {"n": limit})
-        return [_hydrate(r) for r in rows]
+        """배치 목록(최신 limit 건) + 「대상 스토리지」 열(_storage_fields -- 첫 항목 payload 에서, 2026-11-16).
+
+        첫 항목은 `ORDER BY seq LIMIT 1` 이다: 단건 삭제가 seq 를 다시 매기지 않아 구멍이 생기므로 seq = 0 으로 고르면
+        첫 항목을 지운 배치가 모름이 된다. 항목이 하나도 없는 배치(삭제로 비운 배치 -- 정상)는 세 값 모두 None.
+        파생 테이블로 감싸는 이유: `FROM batches b ... ORDER BY ... LIMIT` 로 쓰면 sqlite 가 정렬 전에 모든 배치 행에서 상관
+        서브쿼리를 돈다 -- 감싸면 고른 limit 행만큼만 batch_items PK(batch_id, seq)를 찾는다. JSON 추출을 SQL 에서 하지 않는
+        이유: 두 방언(sqlite·PG)을 같이 써서 json 함수를 쓰지 않는다(repositories/metrics 모듈 docstring) -- 파이썬에서 읽는다.
+        원문 payload(first_item_payload)는 응답에 싣지 않는다. 문장은 하나다(배치마다 따로 묻지 않는다 -- 4초 폴링 목록).
+        읽을 때 파생하는 이유(비정규화 열을 두지 않는다): replace_items 가 배치 스토리지를 바꿀 수 있어, 같은 트랜잭션 갱신을
+        빠뜨리면 열이 조용히 어긋난다 -- 첫 항목이 늘 진실이다(validate_batch 가 모든 쓰기 경로에서 동질성을 강제한다)."""
+        rows = self._db.query(
+            """SELECT b.*, (SELECT bi.payload FROM batch_items bi
+                             WHERE bi.batch_id = b.batch_id ORDER BY bi.seq LIMIT 1) AS first_item_payload
+                 FROM (SELECT * FROM batches ORDER BY created_at DESC LIMIT :n) b
+                ORDER BY b.created_at DESC""",
+            {"n": limit})
+        out = []
+        for r in rows:
+            r.update(_storage_fields(r.pop("first_item_payload", None)))
+            out.append(_hydrate(r))
+        return out
+
+    def item_overview(self, batch_id) -> dict:
+        """배치 상세 요약(GET /api/admin/batches/{id}?view=summary)의 항목 몫 -- 항목 목록 없이 화면 머리가 쓰는 사실:
+          item_total     항목 수(행을 센다 -- 0 은 정상값: 삭제로 비운 배치)
+          status_counts  {상태: 수}. 알려진 상태(_ITEM_STATUSES)는 0 도 키로 싣는다(칩의 「0개」 = 정상값)
+          first_payload  seq 가 가장 작은 항목의 payload(dict) 또는 None(항목 없음·깨진 JSON). 화면이 항목 추가·교체의
+                         스토리지 상속에 쓴다 -- 거른 쪽(검색·상태)에서 파생하면 검색 0건이 「항목 없음」이 된다
+          storage·source_storage·destination_storage  목록 열과 같은 판정(_storage_fields)
+        상태 집계는 idx_batch_items_status(batch_id, status)로 센다."""
+        counts = {s: 0 for s in _ITEM_STATUSES}
+        total = 0
+        for row in self._db.query(
+                "SELECT status, COUNT(*) AS n FROM batch_items WHERE batch_id = :b GROUP BY status", {"b": batch_id}):
+            n = int(row["n"])
+            total += n
+            if isinstance(row["status"], str):
+                counts[row["status"]] = n
+        first = self._db.query_one(
+            "SELECT payload FROM batch_items WHERE batch_id = :b ORDER BY seq LIMIT 1", {"b": batch_id})
+        text = None if first is None else first["payload"]
+        return {"item_total": total, "status_counts": counts, "first_payload": _payload_or_none(text),
+                **_storage_fields(text)}
+
+    def count_executing_items(self, batch_id) -> int:
+        """Materialized 이고 자식의 최신 잡(list_items_detail 의 job_state 와 같은 「최신 잡 하나」 -- created_at DESC,
+        job_id DESC)이 Executing 인 항목 수. 확인 게이트 배치의 미리보기 단계 배너(「이미 실행 중인 항목 N개는 끝까지」)가
+        쓴다 -- 포탈이 전체 항목에서 세던 `status === "Materialized" && job_state === "Executing"` 의 서버 몫."""
+        row = self._db.query_one(
+            """SELECT COUNT(*) AS n FROM batch_items bi
+                WHERE bi.batch_id = :b AND bi.status = 'Materialized'
+                  AND (SELECT d.state FROM data_jobs d
+                        WHERE d.request_id = bi.request_id
+                        ORDER BY d.created_at DESC, d.job_id DESC LIMIT 1) = 'Executing'""",
+            {"b": batch_id})
+        return 0 if row is None else int(row["n"])
+
+    def list_item_tools(self, batch_id):
+        """항목마다 상태 + 자식 최신 잡의 도구 재료(job_tool·preview_summary -- list_items_detail 과 같은 열·같은 「최신 잡
+        하나」) -- 상세 요약의 direct 안내(batch_orchestrator.direct_tool_counts)용 가벼운 읽기. 깨진 preview_summary JSON 은
+        None(모름 -- 요약 GET 이 500 이 되지 않게)."""
+        rows = self._db.query(
+            """SELECT bi.seq, bi.status,
+                      (SELECT d.tool FROM data_jobs d
+                        WHERE d.request_id = bi.request_id
+                        ORDER BY d.created_at DESC, d.job_id DESC LIMIT 1)
+                          AS job_tool,
+                      (SELECT d.preview_summary FROM data_jobs d
+                        WHERE d.request_id = bi.request_id
+                        ORDER BY d.created_at DESC, d.job_id DESC LIMIT 1)
+                          AS preview_summary
+                 FROM batch_items bi
+                WHERE bi.batch_id = :b ORDER BY bi.seq""", {"b": batch_id})
+        for r in rows:
+            text = r.get("preview_summary")
+            try:
+                r["preview_summary"] = load_json(text) if isinstance(text, str) else None
+            except (ValueError, RecursionError):
+                r["preview_summary"] = None
+        return rows
+
+    def list_item_heads(self, batch_id):
+        """전 항목의 [{"seq", "payload", "status"}] -- 상세 쪽 조회(view=items)의 거르기(검색·상태) 단계용 가벼운 읽기. 상세
+        조인(list_items_detail)을 돌지 않는다. 깨진 payload JSON 은 None(_payload_or_none -- 그 항목은 어떤 검색어에도
+        걸리지 않고, 다른 쪽·검색은 산다). 응답 행으로 그대로 내보내지 않는다 -- 행의 payload 는 list_items·
+        list_items_detail 이 지금처럼 읽는다(지어낸 None 을 화면에 넘기지 않는다)."""
+        rows = self._db.query(
+            "SELECT seq, payload, status FROM batch_items WHERE batch_id = :b ORDER BY seq", {"b": batch_id})
+        return [{"seq": r["seq"], "payload": _payload_or_none(r["payload"]), "status": r["status"]} for r in rows]
 
     def list_summaries(self, batch_ids, *, cap: int) -> dict:
         """작업 목록(GET /api/user/requests, 관리자 응답)의 배치 자식 행에 붙이는 배치 요약 -- {batch_id: 요약}.
@@ -216,7 +370,7 @@ class BatchesRepository:
             r["payload"] = load_json(r["payload"])
         return rows
 
-    def list_items_detail(self, batch_id):
+    def list_items_detail(self, batch_id, seqs=None):
         """배치 상세 화면용 items + 자식 요청 조인 필드. list_items 와 별도인 이유:
         orchestrator 루프(5s 틱)는 이 조인이 필요 없다 — 화면 경로만 넓힌다.
         - request_state: 자식 요청의 현재 상태(LEFT JOIN — 미 materialize 는 NULL).
@@ -237,7 +391,24 @@ class BatchesRepository:
           달라(nsync 변경 예정 · dsync 소스 전체 · drm 지울 대상) 확인 합계·항목 라벨이 도구로 가른다(batch_orchestrator
           .preview_files 의 files_by_tool 도). preview_summary.tool 은 v2 러너의 미리보기에만 있다 -- 옛 미리보기도 가르려면 이
           열이고, 둘이 어긋나면 이 열이 권위다(batch_orchestrator._preview_tool·포탈 toolSummary.summaryTool 같은 순서). 다른
-          잡 조인 열과 같은 「최신 잡 하나」라 한 항목의 수와 도구가 서로 다른 잡에서 오지 않는다."""
+          잡 조인 열과 같은 「최신 잡 하나」라 한 항목의 수와 도구가 서로 다른 잡에서 오지 않는다.
+
+        seqs(2026-11-16, 상세 쪽 조회 view=items): 주면 그 seq 의 항목만 같은 조인으로 읽는다 -- 라우트가 가벼운 읽기
+        (list_item_heads)로 거르고 자른 **한 쪽**만 넘겨, 큰 배치(항목 수천)에서 폴링마다 전 항목의 잡 서브쿼리를 돌지 않는다.
+        같은 SELECT 에 `AND bi.seq IN (...)` 만 더하므로 행은 전체 조회의 그 seq 행과 같다(순서도 seq). None = 전 항목(view
+        없음·all·확인 감사·CSV 내보내기 -- 지금 그대로), 빈 목록 = 문장 없이 []. 없는 seq 는 조용히 빠진다(쪽을 고른 뒤 지워진
+        항목). IN 목록은 _SEQ_CHUNK 개씩 나눠 묻는다(sqlite 바인딩 상한)."""
+        if seqs is None:
+            return self._item_detail_rows(batch_id, "", {})
+        wanted = sorted({int(s) for s in seqs})
+        rows = []
+        for i in range(0, len(wanted), _SEQ_CHUNK):
+            names = {f"s{n}": v for n, v in enumerate(wanted[i:i + _SEQ_CHUNK])}
+            rows.extend(self._item_detail_rows(
+                batch_id, " AND bi.seq IN (" + ", ".join(":" + k for k in names) + ")", names))
+        return rows
+
+    def _item_detail_rows(self, batch_id, seq_filter, params):
         rows = self._db.query(
             """SELECT bi.*, r.state AS request_state,
                       (SELECT d.files_count FROM data_jobs d
@@ -264,7 +435,7 @@ class BatchesRepository:
                  FROM batch_items bi
                  LEFT JOIN requests r ON r.request_id = bi.request_id
                  LEFT JOIN results res ON res.request_id = bi.request_id
-                WHERE bi.batch_id = :b ORDER BY bi.seq""", {"b": batch_id})
+                WHERE bi.batch_id = :b""" + seq_filter + " ORDER BY bi.seq", {"b": batch_id, **params})
         for r in rows:
             r["payload"] = load_json(r["payload"])
             r["preview_summary"] = (load_json(r["preview_summary"])
@@ -483,7 +654,7 @@ class BatchesRepository:
                   WHERE batch_id = :b AND seq = :s AND status = 'Materialized'""",
             {"st": status, "rc": reason_code, "now": utc_now_iso(), "b": batch_id, "s": seq}) == 1
 
-    def begin_cancel(self, batch_id, *, from_states) -> bool:
+    def begin_cancel(self, batch_id, *, from_states, in_txn=None) -> bool:
         """배치 취소의 시작(2026-10-16 사용자 보고: 「배치작업 Cancel 했는데 몇분 후에 ... 아직 돌아가고 있는 launcher/worker
         pod」 -- batch_cancel 모듈 docstring): **한 트랜잭션**으로 Queued 항목을 Cancelled 로 막고(orchestrator 의
         claim_queued_item -- Queued 가드 -- 이 0 행이 되어 자식 요청 INSERT 까지 롤백된다) 배치를 Cancelling 으로 CAS 한다.
@@ -493,7 +664,12 @@ class BatchesRepository:
 
         Cancelling 은 **비종단**이다: orchestrator 가 굴리지 않고(list_active 밖), 종단 배치 전용 경로(기록 삭제·재실행·항목
         교체·실행 설정 변경·배치 단위 삭제)가 받지 않는다 -- 예전엔 Cancelled 를 먼저 보여 취소 도중 배치 기록을 지우면 남은
-        자식이 그물 밖으로 빠졌다(검증 지적). 자식이 다 끝나면 finish_cancel_if_settled 가 Cancelled 로 넘긴다."""
+        자식이 그물 밖으로 빠졌다(검증 지적). 자식이 다 끝나면 finish_cancel_if_settled 가 Cancelled 로 넘긴다.
+
+        in_txn(now)(선택, 2026-11-16 배치 스케줄러 -- 설계 비판 #4): 배치 CAS 를 이긴 **같은 트랜잭션** 안에서 부르는 콜백
+        (취소 라우트의 「이 배치의 스케줄도 끄기」 = BatchSchedulesRepository.disable_for_batch_locked). 취소 뒤 :disable 을 따로
+        부르면 그 사이 Cancelled(종단)를 본 회차가 다시 쏘거나 두 번째 호출이 실패해 켜진 채 남는다. 잠금 순서는 항목 → 배치 →
+        스케줄(콜백이 마지막에 쥔다). 던지면 취소까지 통째 롤백되고 예외가 호출자로 간다. CAS 를 지면 부르지 않는다."""
         names = [f"f{i}" for i in range(len(from_states))]
         try:
             with self._db.transaction():
@@ -507,6 +683,8 @@ class BatchesRepository:
                     {"now": now, "b": batch_id, **dict(zip(names, from_states))})
                 if moved != 1:
                     raise _CancelLost()
+                if in_txn is not None:
+                    in_txn(now)
         except _CancelLost:
             return False
         return True
@@ -689,7 +867,13 @@ class BatchesRepository:
         _record_terminal 과 같은 방향이라 교착이 없다). 감사 행 ('batch','delete_record') 의 before = 지운 기록의 요약(이름·상태·
         연산·항목 수·성공/실패 수·요청자·생성 시각) -- 배치 단위 삭제(request_purges.delete_batch 의 ('batch','delete'))와
         구별한다: 이쪽은 작업을 남기고 기록만 지웠다. actor 기본값 "system" 은 테스트 픽스처용이다 -- 라우트는 늘 세션 관리자를
-        넘긴다."""
+        넘긴다.
+
+        배치 스케줄(2026-11-16)과 그 회차 이력도 같은 트랜잭션에서 지운다(BATCH_DELETE_TABLES -- 배치 단위 삭제도 같다). 잠금
+        순서는 항목 → 배치 → 스케줄 → 회차 이력: 스케줄 발사(BatchSchedulesRepository.fire)·기록(record)과 같은 방향이라 교착이
+        없다. 트랜잭션은 중첩되지 않으니(db.transaction) 스케줄 저장소를 부르지 않고 문장을 여기 둔다. 스케줄이 있었으면 그 삭제도
+        ('batch_schedule', 'delete') 감사 행으로 남긴다(_audit_schedule_delete). 종단 CAS 가 스케줄 회차와의 경합도 막는다 -- 위
+        판정 뒤 회차가 배치를 되살렸으면(Previewing·Running) 여기서 False 다."""
         now = utc_now_iso()
         with self._db.transaction():
             batch, _ = self._lock_items_then_batch(batch_id, with_items=False)
@@ -704,6 +888,9 @@ class BatchesRepository:
                 return False
             self._db.execute("DELETE FROM batch_items WHERE batch_id = :b",
                              {"b": batch_id})
+            _audit_schedule_delete(self._db, batch_id, actor=actor, now=now)
+            self._db.execute("DELETE FROM batch_schedules WHERE batch_id = :b", {"b": batch_id})
+            self._db.execute("DELETE FROM batch_schedule_runs WHERE batch_id = :b", {"b": batch_id})
             self._db.execute(
                 """INSERT INTO audit_log (mutation_class, operation, target_key, actor,
                        before_state, after_state, at)
@@ -827,7 +1014,48 @@ class BatchesRepository:
                    failed_count = failed_count + :f, updated_at = :now WHERE batch_id = :b""",
             {"s": succeeded, "f": failed, "now": utc_now_iso(), "b": batch_id})
 
+    def _rescan_locked(self, batch_id, *, to_status) -> "int | None":
+        """전체 재실행의 몸통(2026-11-16) -- **호출자 트랜잭션 안, _lock_items_then_batch 뒤에서만** 부른다. 라우트
+        (:rescan → rescan_if_terminal)와 배치 스케줄러의 회차(BatchSchedulesRepository.fire)가 같은 이 함수를 쓴다 -- 「스케줄
+        회차 = 전체 재실행」을 복사본이 아니라 코드로 보장한다.
+
+        배치 상태 CAS 가 먼저다(WHERE status IN 종단 → to_status, 카운터 0 -- 전체 재시작이라 절대값이 진실). 0 행이면(그 사이
+        재실행·항목 추가로 되살아났거나 취소 중) 아무것도 쓰지 않고 None -- 호출자가 409(라우트) 또는 롤백(스케줄)한다. 이긴
+        쪽만 종단 항목 전부를 Queued 로 되돌린다(request_id·reason_code NULL -- reset_item_to_queued 와 같은 모양; 성공 항목도
+        -- 용도가 성장 모니터링이다). **집합형 한 문장**이다(reset_all_items 는 항목마다 UPDATE 라 5,000 항목 = 5,000 문장 동안
+        API 단일 커넥션 RLock 을 쥐었다). 비종단(Queued/Materialized) 항목은 무접촉. 반환 = 되돌린 항목 수(0 은 정상값).
+
+        예전 라우트는 상태를 읽고 → reset_all_items(자체 트랜잭션) → 무조건 set_status 라, 읽기와 쓰기 사이에 버튼 두 번·재실행
+        → 취소가 끼면 이미 확인돼 Running 인 배치를 Previewing 으로, Cancelling 을 Previewing 으로 덮었다(2026-11-16 리뷰)."""
+        now = utc_now_iso()
+        if self._db.execute_count(
+                """UPDATE batches SET status = :st, succeeded_count = 0, failed_count = 0, updated_at = :now
+                      WHERE batch_id = :b AND status IN ('Completed', 'Cancelled')""",
+                {"st": to_status, "now": now, "b": batch_id}) != 1:
+            return None
+        return self._db.execute_count(
+            # IN 목록 = batch_orchestrator._ITEM_TERMINAL 과 같은 집합
+            """UPDATE batch_items SET status = 'Queued', request_id = NULL, reason_code = NULL, updated_at = :now
+                  WHERE batch_id = :b AND status IN ('Succeeded','Failed','Rejected','Cancelled')""",
+            {"now": now, "b": batch_id})
+
+    def rescan_if_terminal(self, batch_id) -> "dict | None":
+        """전체 재실행(:rescan) 한 트랜잭션: 항목 → 배치 잠금 → 종단(Completed/Cancelled)일 때만 _rescan_locked. 다음 상태는
+        잠근 배치 행의 연산으로 정한다(domain.confirm_gated -- sync·rm·미지 연산은 Previewing, scan 은 Running). 반환
+        {"status", "requeued"} | None(배치가 없거나 종단이 아니다 -- 아무것도 쓰지 않았다)."""
+        with self._db.transaction():
+            batch, _ = self._lock_items_then_batch(batch_id, with_items=False)
+            if batch is None or batch["status"] not in ("Completed", "Cancelled"):
+                return None
+            to_status = "Previewing" if confirm_gated(batch["operation"]) else "Running"
+            requeued = self._rescan_locked(batch_id, to_status=to_status)
+            if requeued is None:
+                return None
+        return {"status": to_status, "requeued": requeued}
+
     def reset_all_items(self, batch_id) -> int:
+        # (2026-11-16 부터 :rescan 라우트·스케줄러는 상태 CAS 와 한 트랜잭션인 rescan_if_terminal/_rescan_locked 를 쓴다 --
+        # 이건 상태를 보지 않는 항목 리셋만이다.)
         # 전체 재실행(:rescan): 종단 item 전부를 Queued 로 되돌린다. 성공 item 도
         # 포함하는 이유는 성장 모니터링(같은 대상 재스캔) 유스케이스. 비종단
         # (Queued/Materialized) item 은 무접촉 — 활성 자식과의 충돌은 라우트의

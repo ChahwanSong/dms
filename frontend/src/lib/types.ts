@@ -39,6 +39,9 @@ export interface RequestRow {
   // 배치 항목 수(2026-10-11) -- 배치 단위 삭제는 항목 수에도 상한(10000)이 있어 넘으면 고를 수 없다(too_large). null = 모름
   // (배치 행이 없는 묶음·변조된 값) -- 모르면 막지 않고 서버가 판정한다(자식 수 상한이 주 게이트다).
   batch_item_count?: number | null;
+  // 그 배치의 스케줄 요약(2026-11-16 배치 스케줄러 -- 배치 상세 schedule 과 같은 모양). null = 스케줄 없음. 배치 단위 삭제가 같은
+  // 트랜잭션에서 스케줄·회차 기록을 지우므로 확인 창이 그 사실을 말할 재료다. 부재 = 구형 응답(스케줄 테이블이 없는 서버 -- 지울 것 없음).
+  batch_schedule?: BatchScheduleSummary | null;
 }
 // events는 state_transitions가 담지 못하는 것 -- 일어나지 않은 전이 -- 를 담는
 // 진단 이벤트다(plan_error/step_error/terminate_failed/terminal_guard_skip/summary_unreadable).
@@ -308,6 +311,22 @@ export interface Batch {
   // 상세 GET 만: 자동 확인이 켜진 진행 중 sync·rm 배치가 지금 확인하면 보류될 사유 코드(null = 곧 자동 실행). 서버가
   // orchestrator 와 같은 술어로 판정한다(batch_orchestrator.auto_confirm_hold).
   auto_confirm_hold?: string | null;
+  // 대상 스토리지(2026-11-16 -- 목록 GET·상세 요약 GET): 서버가 첫 항목 payload 에서 읽을 때 파생한다(배치는 스토리지 한 종류·한
+  // 쌍이라 첫 항목이 배치의 스토리지다 -- domain.validate_batch). scan·rm 은 storage, sync 는 source_storage·destination_storage.
+  // null = 모름(항목 0개·깨진 payload·문자열 아님) -- 빈 문자열로 접지 않는다. 옵션(?) = 옛 서버·fixture 호환(부재 = 모름).
+  storage?: string | null;
+  source_storage?: string | null;
+  destination_storage?: string | null;
+  // 배치 스케줄 요약(2026-11-16 -- 목록 GET·상세 요약 GET, 서버 routes_batches._with_schedules). null = 스케줄 없음, 부재 = 모름
+  // (옛 서버·view 없음 응답 -- 화면은 아무 말도 하지 않는다).
+  schedule?: BatchScheduleSummary | null;
+}
+/** 배치 행에 실리는 스케줄 요약(전체 행은 features/batches/batchSchedule.ts 의 BatchSchedule). enabled 는 서버가 bool 로 접는다
+ *  (INTEGER 1 만 켜짐). next_run_at null = 꺼짐·일시정지. last_outcome null = 아직 판정한 회차 없음(실패가 아니다). */
+export interface BatchScheduleSummary {
+  schedule_id: string; kind: string; spec: Record<string, unknown> | null;
+  enabled: boolean | number; next_run_at: string | null;
+  last_outcome: string | null; last_reason_code: string | null; paused_reason_code: string | null;
 }
 export interface BatchItem {
   seq: number; payload: Record<string, unknown>; status: string;

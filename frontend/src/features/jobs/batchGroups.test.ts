@@ -54,6 +54,16 @@ test("groupBatches: batch_id 별 첫 행 값 · 단건 제외 · 이름 없으�
   expect("request_count" in odd).toBe(false);
 });
 
+test("groupBatches: 고를 수 있는 묶음은 서버 요약의 스케줄을 싣는다(삭제 확인 창 안내) -- 키 없는 구형 응답은 null(지울 것 없음)", () => {
+  const sched = { schedule_id: "s1", kind: "daily", spec: { hour: 2, minute: 0 }, enabled: true,
+                  next_run_at: null, last_outcome: null, last_reason_code: null, paused_reason_code: null };
+  const other = "b".repeat(32);
+  const g = groupBatches([r("1", { batch_schedule: sched }), r("2", { batch_id: other })]);
+  const a = g.get(BID)!, b = g.get(other)!;
+  expect(a.block === "ok" && a.schedule).toEqual(sched);
+  expect(b.block === "ok" && b.schedule).toBeNull();
+});
+
 test("groupBatches: 불러온 행이 하나라도 끝나지 않았으면 서버 요약이 0 이어도 live(행 상태로 한 번 더) — active·unknown 은 그대로", () => {
   // 2026-10-10 검증 지적: 목록 API 의 행 SELECT 와 요약 집계는 한 트랜잭션이 아니라 같은 응답에서 행은 Running, 요약은 0
   // 일 수 있다 -- 그 묶음을 고를 수 있게 그리면 「진행 중인 작업은 선택할 수 없습니다」와 모순된다.

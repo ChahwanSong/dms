@@ -18,6 +18,7 @@ import { StoragesPage } from "../features/usage/StoragesPage";
 import { BreakdownPage } from "../features/usage/BreakdownPage";
 import { BatchCreate } from "../features/batches/BatchCreate";
 import { BatchDetail } from "../features/batches/BatchDetail";
+import { BatchSchedulesPage } from "../features/batches/BatchSchedulesPage";
 import { AuditLog } from "../features/audit/AuditLog";
 import { SecurityPage } from "../features/security/SecurityPage";
 import { MailSettingsPage } from "../features/mail/MailSettingsPage";
@@ -94,6 +95,9 @@ export function AppRouter() {
           <Route path="/admin/usage/breakdown" element={<RequireRole role="admin"><AppShell><BreakdownPage /></AppShell></RequireRole>} />
           <Route path="/admin/batches/new" element={<RequireRole role="admin"><AppShell><BatchCreate /></AppShell></RequireRole>} />
           <Route path="/admin/batches/:batchId" element={<RequireRole role="admin"><AppShell><BatchDetail /></AppShell></RequireRole>} />
+          {/* 배치 스케줄러(2026-11-16): /admin/batches/:batchId 와 겹치지 않는 별도 정적 경로(서버 /api/admin/batch-schedules 와
+              같은 이유 -- 순서 함정 없음). ?batch=<id> 는 배치 상세의 「스케줄 추가」가 그 배치를 고른 창을 연다. */}
+          <Route path="/admin/batch-schedules" element={<RequireRole role="admin"><AppShell><BatchSchedulesPage /></AppShell></RequireRole>} />
           <Route path="/admin/audit" element={<RequireRole role="admin"><AppShell><AuditLog /></AppShell></RequireRole>} />
           <Route path="/admin/security" element={<RequireRole role="admin"><AppShell><SecurityPage /></AppShell></RequireRole>} />
           <Route path="/admin/mail" element={<RequireRole role="admin"><AppShell><MailSettingsPage /></AppShell></RequireRole>} />

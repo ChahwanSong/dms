@@ -26,8 +26,34 @@ export interface TargetFilter {
   storage: string; q: string; order: "desc" | "asc"; sort: UsageSort; attr: UsageAttrFilter;
 }
 
-// 목록 한 번에 받는 행 수(서버 기본 100과 같다) -- 다 차면 화면이 「상위 N개 표시 · 전체 M개」라고 말한다.
+// 목록 한 쪽의 행 수(서버 기본 100과 같다). 2026-11-16 부터 번호 쪽 넘김의 쪽 크기다(사용자 요청 「상위 100개만이 아니라 전체 목록 --
+// 몇백~몇천 개여도 버벅이지 않게」): 쪽마다 서버가 그 쪽의 행만(리포트 요약 ~4KB/행) 보내고 표는 늘 100행 이하다 -- 무한 스크롤처럼
+// 쪽이 쌓여 <tr> 수천 개가 메모리에 남지 않는다(components/ui/Pager 머리 주석).
 export const LIST_LIMIT = 100;
+
+// 쪽 봉투(2026-11-16 -- 서버 /targets 의 offset 메아리·has_more·pageable_count). 공용 타입(lib/types UsageTargetsPage)은 그대로 두고
+// 여기서 넓힌다(배치 화면 작업과 lib/types 를 함께 고치지 않게).
+// - offset: 받은 offset 의 메아리. null = 옛 서버(키 없음 -- 쪽 넘김을 모른다: 1쪽만 그리고 쪽 넘김을 숨긴다).
+// - has_more: 이 쪽 뒤에 **알려진** 맞는 대상이 더 있다(지표 정렬은 창 밖도 세므로 쪽으로 닿지 않을 수 있다 -- hasNextPage 는 쪽 수를
+//   알면 그것으로 경계를 정한다).
+// - pageable_count: 이 정렬로 쪽을 넘겨 닿을 수 있는 행 수. null = 모름(PV 이름 검색이 판정 창을 넘어 서버도 끝까지 세지 않았다) --
+//   0쪽·1쪽으로 접지 않는다(null≠0).
+export interface UsageTargetsPaged extends UsageTargetsPage {
+  offset: number | null; has_more: boolean; pageable_count: number | null;
+}
+// URL 의 쪽 번호 상한: offset((쪽-1)×100)이 서버 상한(routes_usage._OFFSET_MAX = 10억) 안에 들게 -- 손으로 친 거대한 ?page= 가 422 가
+// 아니라 빈 쪽 → 마지막 쪽 당김이 되게.
+export const PAGE_MAX = 10_000_000;
+export const pageOffset = (page: number) => (page - 1) * LIST_LIMIT;
+// 쪽 수(null = 모름). 0 개도 1쪽(빈 쪽 하나 -- 빈 상태가 말한다).
+export const pageCountOf = (pageable: number | null | undefined): number | null =>
+  (typeof pageable === "number" ? Math.max(1, Math.ceil(pageable / LIST_LIMIT)) : null);
+// 다음 쪽이 있나 -- components/ui/Pager 와 같은 규칙: 쪽 수를 알면 그것이 경계(has_more 는 보지 않는다), 모르면 has_more 참일 때만.
+export function hasNextPage(page: number, p: UsageTargetsPaged | undefined): boolean {
+  if (p === undefined || p.offset === null) return false;
+  const count = pageCountOf(p.pageable_count);
+  return count === null ? p.has_more : page < count;
+}
 
 // 필터 키의 고정 순서 -- 쿼리 문자열·쿼리키·URL 이 같은 순서라 같은 조합이 늘 같은 문자열이다. 이름은 서버 쿼리 파라미터 =
 // URL 키 = PV 탐색 화면(VolumesPage)의 키(후속 딥링크가 그대로 걸리게).
@@ -78,9 +104,13 @@ export function targetQuery(f: TargetFilter): string {
 // 그대로라 StoragePanel·StorageTotals 가 .message 를 그대로 보인다. 서버 사유 코드가 아니다(reasonCodes 무관 -- 포탈 판정).
 export const USAGE_API_UNKNOWN = "서버가 새 사용량 API 를 아직 모릅니다(배포 중일 수 있음) — 잠시 뒤 새로고침하세요";
 export const USAGE_FILTER_MISMATCH = "서버가 적용한 필터가 화면과 다릅니다 — 새로고침하세요";
+// 쪽 넘김의 배포 틈(2026-11-16): 옛 파드는 offset 을 모르는 파라미터로 무시하고 1쪽을 준다 -- 2쪽 이상을 청했는데 offset 메아리가 없거나
+// 다르면 「n쪽」 화면에 1쪽 행이 보이는 조용한 거짓이라 오류로 말한다.
+export const USAGE_PAGE_UNSUPPORTED = "서버가 쪽 넘김을 아직 모릅니다(배포 중일 수 있음) — 잠시 뒤 새로고침하세요";
 export class UsageContractError extends Error {
-  constructor(public kind: "unknown_api" | "filter_mismatch") {
-    super(kind === "unknown_api" ? USAGE_API_UNKNOWN : USAGE_FILTER_MISMATCH);
+  constructor(public kind: "unknown_api" | "filter_mismatch" | "page_unsupported") {
+    super(kind === "unknown_api" ? USAGE_API_UNKNOWN : kind === "filter_mismatch" ? USAGE_FILTER_MISMATCH
+      : USAGE_PAGE_UNSUPPORTED);
   }
 }
 
@@ -112,26 +142,37 @@ function echoMatches(echo: unknown, storage: string, attr: UsageAttrFilter, q?: 
 // 타깃 목록(2026-10-29 새 봉투 엔드포인트 /targets -- 옛 scan-targets 는 옛 탭 호환으로 동결): 필터가 쿼리키에 들어가 조합별로
 // 캐시된다. 4s 폴링은 불필요 -- scan 이 끝나야 목록이 변하는 저빈도 데이터라 staleTime 30s 로 왕복을 줄인다. 쿼리키의 storage 는
 // 늘 인덱스 1, 필터 조각은 끝(attrKey) -- 접두 ["usage-targets"] 무효화(작업 삭제 등)가 그대로 걸린다.
-// 같은 스토리지·같은 필터 안에서 정렬·검색을 바꿀 때만 이전 행을 자리표시로 남긴다(표가 「불러오는 중」으로 깜빡이지 않게) --
+// 같은 스토리지·같은 필터 안에서 정렬·검색·쪽을 바꿀 때만 이전 행을 자리표시로 남긴다(표가 「불러오는 중」으로 깜빡이지 않게) --
 // 다른 스토리지·다른 필터의 행을 잠깐이라도 보이면 「이 스토리지(이 필터)에 그 경로가 있다」는 거짓이 된다.
-export const useScanTargets = (f: TargetFilter) => {
+// 쪽(2026-11-16): page 는 1부터, 쿼리키 끝(인덱스 6 -- 자리표시 규칙이 보는 storage 1·필터 5 는 그대로). 쿼리 옵션으로 둬 상세 시트가
+// 쪽 경계에서 이웃 쪽을 같은 키로 미리 받는다(prefetchQuery·fetchQuery -- StoragePanel).
+export const scanTargetsOptions = (f: TargetFilter, page = 1) => {
   const ak = attrKey(f.attr);
-  return useQuery({
-    queryKey: ["usage-targets", f.storage, f.q, f.order, f.sort, ak],
-    queryFn: async (): Promise<UsageTargetsPage> => {
-      const body = await getNew(`/api/admin/usage/targets?${targetQuery(f)}&limit=${LIST_LIMIT}`);
+  const offset = pageOffset(page);
+  return queryOptions({
+    queryKey: ["usage-targets", f.storage, f.q, f.order, f.sort, ak, page],
+    queryFn: async (): Promise<UsageTargetsPaged> => {
+      const body = await getNew(`/api/admin/usage/targets?${targetQuery(f)}&limit=${LIST_LIMIT}&offset=${offset}`);
       if (!isObj(body) || !Array.isArray(body.rows) || !isObj(body.filters)) throw new UsageContractError("unknown_api");
       if (!echoMatches(body.filters, f.storage, f.attr, f.q)) throw new UsageContractError("filter_mismatch");
-      const page = body as unknown as UsageTargetsPage;
-      // 모르는 수는 null(모름 ≠ 0) -- 구형·부분 응답의 부재를 0 으로 접지 않는다.
-      return { ...page, matched_count: typeof page.matched_count === "number" ? page.matched_count : null,
-               window_truncated: page.window_truncated === true };
+      // offset 메아리(위 USAGE_PAGE_UNSUPPORTED): 있으면 보낸 값과 같아야 하고, 없으면(옛 서버) 1쪽만 믿는다 -- 1쪽은 옛 화면처럼 쪽 넘김
+      // 없이 그린다(offset null → Pager 숨김).
+      const echoed = typeof body.offset === "number" ? body.offset : null;
+      if (echoed !== null ? echoed !== offset : offset > 0) throw new UsageContractError("page_unsupported");
+      const page_ = body as unknown as UsageTargetsPage;
+      const count = (x: unknown) => (typeof x === "number" && Number.isFinite(x) && x >= 0 ? x : null);
+      // 모르는 수는 null(모름 ≠ 0) -- 구형·부분 응답의 부재를 0 으로 접지 않는다. has_more 는 아는 참만 참이다.
+      return { ...page_, matched_count: typeof page_.matched_count === "number" ? page_.matched_count : null,
+               window_truncated: page_.window_truncated === true,
+               offset: echoed, has_more: echoed !== null && body.has_more === true,
+               pageable_count: echoed === null ? null : count(body.pageable_count) };
     },
     placeholderData: (prev, prevQuery) =>
       (prevQuery?.queryKey[1] === f.storage && prevQuery?.queryKey[5] === ak ? prev : undefined),
     staleTime: 30_000,
   });
 };
+export const useScanTargets = (f: TargetFilter, page = 1) => useQuery(scanTargetsOptions(f, page));
 
 // 필터 선택지(2026-10-29): 옵션마다 대상 수. ["usage-storages"] 접두 아래라 작업 삭제·스토리지 변경 무효화에 함께 걸린다.
 // 실패하면 필터 줄을 그리지 않는다(StoragePanel) -- 자동 재시도로 매번 기다리게 하지 않는다(retry false).
@@ -292,11 +333,14 @@ export async function fetchUsageExport(f: TargetFilter): Promise<UsageExport> {
 // usage-targets·usage-storages·usage-history 를 무효화한다(2026-10-08). limit(표시 창)은 쿼리키에 들어가
 // 창별로 캐시된다 -- 30→60→30 왕복이 재조회 없이 즉시다. 창을 처음 넓힐 때는 같은 타깃의 이전 창을 자리표시로 남긴다
 // (2026-10-20 -- 상세 전체가 「불러오는 중」 한 줄로 접혔다 펴지며 화면이 튀지 않게). 다른 타깃의 이력은 남기지 않는다.
+// latest_job_id(2026-11-16, 서버 scan_history): 이 대상의 가장 최근 성공 scan 의 job_id(리포트를 읽었는지와 무관, 없으면 null).
+// 옵션(?) = 옛 서버 호환(없으면 모름 -- 화면은 그 대조를 하지 않는다). 공용 타입은 그대로 두고 여기서 넓힌다(UsageTargetsPaged 와 같은 이유).
+export interface UsageHistoryWithLatest extends UsageHistory { latest_job_id?: string | null }
 export const useScanHistory = (storage: string | null, target: string | null,
                                limit = 30) =>
   useQuery({
     queryKey: ["usage-history", storage, target, limit],
-    queryFn: () => apiGet<UsageHistory>(
+    queryFn: () => apiGet<UsageHistoryWithLatest>(
       `/api/admin/usage/scan-history?storage=${encodeURIComponent(storage as string)}`
       + `&target=${encodeURIComponent(target as string)}&limit=${limit}`),
     enabled: storage !== null && target !== null,

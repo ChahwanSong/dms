@@ -40,6 +40,7 @@ from .routes_nodes import router as nodes_router
 from .routes_policies import router as policies_router
 from .routes_denylist import router as denylist_router
 from .routes_batches import router as batches_router
+from .routes_batch_schedules import router as batch_schedules_router
 from .routes_artifact_base import router as artifact_base_router
 from .routes_control import router as control_router
 from .routes_builds import router as builds_router
@@ -222,6 +223,8 @@ def create_app(settings: Settings, db: Database, exit_fn=None) -> FastAPI:
     app.include_router(policies_router)
     app.include_router(denylist_router)
     app.include_router(batches_router)
+    # 배치 스케줄러(2026-11-16) -- 경로가 /api/admin/batch-schedules 라 /api/admin/batches/{batch_id} 와 순서 함정이 없다.
+    app.include_router(batch_schedules_router)
     app.include_router(control_router)
     app.include_router(artifact_base_router)
     app.include_router(builds_router)

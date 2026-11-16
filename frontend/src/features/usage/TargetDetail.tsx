@@ -5,14 +5,14 @@ import { Table } from "../../components/ui/Table";
 import { TimeSeriesChart } from "../../components/ui/TimeSeriesChart";
 import { Segmented } from "../../components/ui/Segmented";
 import { HoverTip, placeBeside, useHoverAnchor, type Rect } from "../../components/ui/HoverTip";
-import { SizeDistribution } from "../../components/ui/SizeDistribution";
 import type { ApiError } from "../../lib/api";
 import type { HistogramBucket, UsageAttrFilter, UsagePoint, UsagePv } from "../../lib/types";
 import { kstStampEpoch, kstDay } from "../../lib/datetime";
-import { pctText, sizeDistribution } from "../../lib/sizeBuckets";
+import { pctText } from "../../lib/sizeBuckets";
 import { HelpTip } from "../../components/ui/HelpTip";
 import { exactBytes, INVALID_NAMES_HELP, INVALID_NAMES_LABEL, invalidNamesText, scanCount } from "../../lib/scanCounters";
 import { useScanHistory } from "./useUsage";
+import { HIST_TEMP_CAPTIONS, SizeHistogram, TempHistogram, sizeHistogramTotal } from "./ScanHistograms";
 import { PvHead, SIZE_HELP, SectionHead, Stat } from "./UsageParts";
 import {
   ATIME_APPROX_NOTE, AXIS_MEANING, HOT_AGE_MAX_DAYS, ageLabel, hotRatio, humanBytes, pointEpoch, stackLayout, tempColorOf,
@@ -215,7 +215,8 @@ function newestPoint(points: UsagePoint[]): UsagePoint | null {
   return best;
 }
 
-// 타깃 1건의 상세(소속 → 「최신 scan」 블록 = 수치 줄 + 파일 크기 분포 → 실 사용량 추이 → 온도 추이 → 스캔 이력). 오른쪽 시트
+// 타깃 1건의 상세(소속 → 「최신 scan」 블록 = 수치 줄 + 데이터 온도 히스토그램 + 파일 크기 분포 → 실 사용량 추이 → 온도 추이 → 스캔
+// 이력). 오른쪽 시트
 // (TargetSheet) 안에서 한 번에 스크롤한다 -- 제목(경로)은 시트 머리가 말한다. 표시 창·온도 축 state 는 여기 국소다: 시트가
 // ↑↓로 경로를 바꾸면 key={target} 로 새로 그려 초기화한다 -- 다른 타깃의 잔류 선택이 새 타깃에 묻어 가지 않는다.
 // latest = 목록 행의 최신 성공 scan(크기 분포의 기준 -- 목록 밖 경로면 행이 없어 undefined).
@@ -252,12 +253,26 @@ export function TargetDetail({ storage, target, latest, pv = null, multiCluster 
   const latestHot = latestCharted !== null
     ? hotRatio(latestCharted.point.time_histograms["atime"]) : null;
 
-  // 파일 크기 분포(2026-10-21)의 기준 = 목록 행의 최신 성공 scan(표의 「파일 수」와 같은 scan -- 사용자 요청 「최근 스캔 기준」).
-  // 행이 없거나(목록 밖 폴백) 행에 최신 정보가 없으면 이력에서 가장 늦은 포인트(시각을 모르면 서버 순서의 마지막). 최신 scan 의
-  // 리포트를 못 읽었으면 더 오래된 scan 의 분포로 대신하지 않는다 -- 「최근」이라는 말이 거짓이 된다(표의 (DB) 표시와 같은 사실).
-  const snapshot = useMemo(() => latest ?? newestPoint(points), [latest, points]);
-  const sizeTotal = sizeDistribution(snapshot?.file_size_histogram)?.total ?? null;
+  // 「최신 scan」 차트(2026-10-21 파일 크기 분포 → 2026-11-16 배치 scan 항목 펼침과 같은 두 차트 -- 사용자 요청 「작업 화면의 데이터 온도
+  // 히스토그램·파일 크기 분포를 사용량 분석에서도 최신 scan 기준으로 같은 모양으로」, 공용 ScanHistograms)의 기준 = 목록 행의 최신 성공
+  // scan(표의 「파일 수」와 같은 scan). 행이 없거나(목록 밖 -- 다른 쪽의 경로·딥링크) 행에 최신 정보가 없으면 이력에서 고른다: 서버
+  // 이력의 latest_job_id(가장 최근 성공 scan -- 읽었는지와 무관, `updated_at DESC, job_id DESC` 라 목록 행의 최신 판정과 같은 근거)의
+  // 포인트다. 생성 시각 최대(newestPoint)로 고르지 않는 이유: 같은 경로에 scan 이 겹쳐 리포트 생성 순서와 성공 기록 순서가 갈리면 두
+  // job 이 달라져 최신 리포트를 읽었는데도 「읽지 못했습니다」가 뜨거나 목록 행과 다른 scan 을 그린다(리뷰). 그 포인트가 이력에 없으면
+  // (못 읽은 scan -- 이력은 skipped 로 뺀다) 더 오래된 scan 의 분포로 대신하지 않고 차트 대신 「읽지 못했습니다」라고 말한다 -- 「최근」
+  // 이라는 말이 거짓이 된다(표의 (DB) 표시와 같은 사실). 행이 있으면 그 행의 report_readable 이 말한다. latest_job_id 를 모르는 옛
+  // 서버(키 없음)나 null(성공 scan 없음 -- 이력이 있으면 어긋난 응답)이면 예전처럼 가장 늦은 포인트(시각을 모르면 서버 순서의 마지막)다.
+  const latestJob = history.data?.latest_job_id;
+  const fromHistory = useMemo(
+    () => (typeof latestJob === "string" ? points.find((p) => p.job_id === latestJob) ?? null : newestPoint(points)),
+    [points, latestJob]);
+  const snapshot = latest ?? fromHistory;
+  const latestUnread = (latest === undefined || latest === null) && typeof latestJob === "string" && fromHistory === null;
+  const snap = latestUnread ? null : snapshot;
+  const sizeTotal = sizeHistogramTotal(snap?.file_size_histogram);
   const sizeHeadId = useId();
+  const tempHeadId = useId();
+  const unreadable = snap?.report_readable === false;
 
   const [tempKey, setTempKey] = useState("atime");
   const tempKeys = ["atime", "mtime", "ctime"].filter(
@@ -288,8 +303,10 @@ export function TargetDetail({ storage, target, latest, pv = null, multiCluster 
           ? `성공 scan ${skipped}건의 리포트를 읽지 못해 표시할 이력이 없습니다`
           : "이 타깃의 성공 scan 이 없습니다"}</p>
       ) : (<>
-        {/* 「최신 scan」 블록(2026-10-21): 수치 줄 + 파일 크기 분포. 시트(640px, 2026-10-29)에선 수치 4칸 한 줄 + 분포 아래 --
-            뷰포트 lg 의 나란히 배치는 시트 폭에서 분포를 280px 로 눌렀다. sm 아래(전체 화면 시트)는 2칸. 스토리지 합계와 같은 문법. */}
+        {/* 「최신 scan」 블록(2026-10-21 → 2026-11-16): 수치 줄 + 데이터 온도 히스토그램 + 파일 크기 분포(배치 scan 항목 펼침과 같은
+            두 차트 -- 공용 ScanHistograms). 시트(640px, 2026-10-29)에선 수치 4칸 한 줄 + 차트 아래 -- 뷰포트 lg 의 나란히 배치는 시트
+            폭에서 분포를 280px 로 눌렀다. sm 아래(전체 화면 시트)는 2칸. 온도 축은 아래 「데이터 온도 추이」와 한 상태다(축을 바꾸면 두
+            차트가 함께 바뀐다 -- 같은 축의 최신 분포와 추이를 나란히 읽게). */}
         <div className="grid gap-y-5">
           {/* null ≠ 0: 모름은 "—" -- 0 B 로 그리면 "다 지워졌다"는 거짓이 된다 */}
           <dl aria-label="최신 scan 요약"
@@ -304,23 +321,39 @@ export function TargetDetail({ storage, target, latest, pv = null, multiCluster 
                   value={latestHot === null ? "—" : pctText(latestHot * 100)} />
             <Stat label="스캔 이력" value={`${points.length}건`} />
           </dl>
-          <section aria-labelledby={sizeHeadId} className="min-w-0 space-y-2">
-            <SectionHead id={sizeHeadId} title="파일 크기 분포" help={SIZE_HELP}>
-              {sizeTotal !== null && sizeTotal > 0 && (
-                <span className="text-xs text-muted">{`최신 scan · 파일 ${sizeTotal.toLocaleString("ko-KR")}개`}</span>
-              )}
-            </SectionHead>
-            <SizeDistribution buckets={snapshot?.file_size_histogram} labelledBy={sizeHeadId}
-                              missingText={snapshot?.report_readable === false
-                                ? "최신 scan 의 리포트를 읽지 못해 크기 분포를 알 수 없습니다"
-                                : "크기 분포 기록이 없습니다(구형 리포트)"} />
-          </section>
+          {latestUnread ? (
+            // 목록 밖 경로에서 가장 늦은 읽힌 포인트가 최신 scan 이 아니다 -- 옛 scan 의 분포를 「최신」이라 그리지 않는다.
+            <p className="text-sm text-muted break-keep">
+              최신 scan 리포트를 읽지 못했습니다 — 온도·크기 분포는 리포트를 읽은 최신 scan 이 생기면 보입니다</p>
+          ) : (<>
+            <section aria-labelledby={tempHeadId} className="min-w-0 space-y-2">
+              <SectionHead id={tempHeadId} title="데이터 온도 히스토그램" help={HIST_TEMP_CAPTIONS[effectiveTempKey]}>
+                {tempKeys.length > 0 && (
+                  <Segmented label="온도 히스토그램 축" options={tempKeys.map((k) => ({ value: k, label: k }))}
+                             value={effectiveTempKey} onChange={setTempKey} />
+                )}
+              </SectionHead>
+              <TempHistogram buckets={snap?.time_histograms[effectiveTempKey]} axis={effectiveTempKey} caption="none"
+                             emptyText={unreadable ? "최신 scan 의 리포트를 읽지 못해 온도 분포를 알 수 없습니다"
+                               : "이 축의 온도 분포 기록이 없습니다"} />
+            </section>
+            <section aria-labelledby={sizeHeadId} className="min-w-0 space-y-2">
+              <SectionHead id={sizeHeadId} title="파일 크기 분포" help={SIZE_HELP}>
+                {sizeTotal !== null && sizeTotal > 0 && (
+                  <span className="text-xs text-muted">{`최신 scan · 파일 ${sizeTotal.toLocaleString("ko-KR")}개`}</span>
+                )}
+              </SectionHead>
+              <SizeHistogram buckets={snap?.file_size_histogram}
+                             emptyText={unreadable ? "최신 scan 의 리포트를 읽지 못해 크기 분포를 알 수 없습니다"
+                               : "크기 분포 기록이 없습니다(구형 리포트)"} />
+            </section>
+          </>)}
         </div>
         {/* 잘못된 인코딩 이름(2026-10-26, 사용자 결정 「카운터만 둠」): 크기 분포와 같은 기준(최신 scan)의 카운터. 1개 이상일 때만
             한 줄로 말한다 -- 0·모름(구형 리포트)까지 펼침마다 줄을 두면 상세가 길어진다(전수 값은 CSV 의 invalid_name_entries 열). */}
-        {(scanCount(snapshot?.invalid_name_entries) ?? 0) > 0 && (
+        {(scanCount(snap?.invalid_name_entries) ?? 0) > 0 && (
           <p className="flex items-center gap-0.5 text-sm text-attn">
-            {`최신 scan: ${invalidNamesText(snapshot?.invalid_name_entries)}`}
+            {`최신 scan: ${invalidNamesText(snap?.invalid_name_entries)}`}
             <HelpTip label={`${INVALID_NAMES_LABEL} 설명`} head={INVALID_NAMES_LABEL} help={INVALID_NAMES_HELP} />
           </p>
         )}

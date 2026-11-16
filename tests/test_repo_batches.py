@@ -560,3 +560,123 @@ def test_validate_failure_rolls_back_the_write(db):
         repos.batches.replace_items(bid, [{"storage": "s1", "target": "r"}], validate=refuse)
     assert [it["payload"]["target"] for it in repos.batches.list_items(bid)] == ["t0"]
     assert repos.batches.get(bid)["item_count"] == 1
+
+
+# --- 배치 목록의 「대상 스토리지」 열 · 상세 쪽 조회 재료(2026-11-16) ---
+
+def _spy_queries(db):
+    seen, real = [], db.query
+
+    def spy(sql, params=None):
+        seen.append(sql)
+        return real(sql, params)
+    db.query = spy
+    return seen, (lambda: setattr(db, "query", real))
+
+
+def test_list_carries_the_target_storage_of_the_first_item_in_one_statement(db):
+    # 「작업」 열 오른쪽 「대상 스토리지」 -- 읽을 때 첫 항목(seq 가 가장 작은 것)의 payload 에서 파생한다(스키마 무변경). 첫 항목을
+    # 지우면 다음 seq 의 값(seq = 0 으로 고르면 모름이 된다), 항목 없는 배치·깨진 JSON·문자열 아닌 값은 None(모름 -- 0·빈 값 아님).
+    repos = Repositories(db)
+    scan = repos.batches.create(operation="scan", requester_id="a", actor="a", max_concurrency=1, options={}, note=None,
+                                items=[{"storage": "s1", "target": "a"}, {"storage": "s1", "target": "b"}], status="Running")
+    sync = repos.batches.create(operation="sync", requester_id="a", actor="a", max_concurrency=1, options={}, note=None,
+                                items=[{"source_storage": "src", "source": "a", "destination_storage": "dst",
+                                        "destination": "b"}], status="Previewing")
+    empty = repos.batches.create(operation="rm", requester_id="a", actor="a", max_concurrency=1, options={}, note=None,
+                                 items=[{"storage": "s2", "target": "x"}], status="Completed")
+    broken = repos.batches.create(operation="scan", requester_id="a", actor="a", max_concurrency=1, options={}, note=None,
+                                  items=[{"storage": "s3", "target": "y"}], status="Completed")
+    odd = repos.batches.create(operation="scan", requester_id="a", actor="a", max_concurrency=1, options={}, note=None,
+                               items=[{"storage": 7, "target": "y"}], status="Completed")
+    repos.batches.delete_item(scan, 0, only_queued=False)              # 첫 항목을 지워도 다음 seq 가 배치의 스토리지다
+    repos.batches.delete_item(empty, 0, only_queued=False)
+    db.execute("UPDATE batch_items SET payload = '{not json' WHERE batch_id = :b", {"b": broken})
+    seen, restore = _spy_queries(db)
+    try:
+        rows = {r["batch_id"]: r for r in repos.batches.list(limit=10)}
+    finally:
+        restore()
+    assert len(seen) == 1                                              # 배치마다 따로 묻지 않는다(4초 폴링 목록)
+
+    def pick(b):
+        return {k: rows[b][k] for k in ("storage", "source_storage", "destination_storage")}
+    assert pick(scan) == {"storage": "s1", "source_storage": None, "destination_storage": None}
+    assert pick(sync) == {"storage": None, "source_storage": "src", "destination_storage": "dst"}
+    assert pick(empty) == pick(broken) == pick(odd) == {"storage": None, "source_storage": None,
+                                                        "destination_storage": None}
+    assert "first_item_payload" not in rows[scan]                     # 원문 payload 는 응답에 싣지 않는다
+    assert rows[scan]["options"] == {} and rows[scan]["auto_confirm"] is False     # 기존 hydrate 그대로
+
+
+def test_list_keeps_the_newest_first_window(db):
+    repos = Repositories(db)
+    ids = [repos.batches.create(operation="scan", requester_id="a", actor="a", max_concurrency=1, options={}, note=None,
+                                items=[{"storage": f"s{i}", "target": "t"}], status="Running") for i in range(3)]
+    for i, bid in enumerate(ids):
+        db.execute("UPDATE batches SET created_at = :c WHERE batch_id = :b", {"c": f"2026-11-1{i}T00:00:00Z", "b": bid})
+    got = repos.batches.list(limit=2)
+    assert [r["batch_id"] for r in got] == [ids[2], ids[1]] and [r["storage"] for r in got] == ["s2", "s1"]
+
+
+def test_item_overview_counts_every_known_status_and_reads_the_first_payload(db):
+    repos = Repositories(db)
+    bid = repos.batches.create(operation="scan", requester_id="a", actor="a", max_concurrency=1, options={}, note=None,
+                               items=[{"storage": "s1", "target": f"t{i}"} for i in range(4)], status="Running")
+    repos.batches.set_item_status(bid, 1, "Succeeded")
+    repos.batches.set_item_status(bid, 2, "Failed", reason_code="x")
+    repos.batches.delete_item(bid, 0, only_queued=False)
+    o = repos.batches.item_overview(bid)
+    assert o["item_total"] == 3
+    # 알려진 상태는 0 도 키(칩의 「0개」는 정상값), 첫 항목은 seq 0 을 지운 뒤의 seq 1
+    assert o["status_counts"] == {"Queued": 1, "Materialized": 0, "Succeeded": 1, "Failed": 1, "Rejected": 0,
+                                  "Cancelled": 0}
+    assert o["first_payload"] == {"storage": "s1", "target": "t1"} and o["storage"] == "s1"
+    empty = repos.batches.create(operation="scan", requester_id="a", actor="a", max_concurrency=1, options={}, note=None,
+                                 items=[{"storage": "s1", "target": "a"}], status="Completed")
+    repos.batches.delete_item(empty, 0, only_queued=False)
+    e = repos.batches.item_overview(empty)
+    assert e["item_total"] == 0 and e["first_payload"] is None and e["storage"] is None
+    assert set(e["status_counts"].values()) == {0}
+
+
+def test_list_items_detail_seqs_reads_only_that_page_with_the_same_rows(db):
+    repos = Repositories(db)
+    bid = repos.batches.create(operation="scan", requester_id="a", actor="a", max_concurrency=1, options={}, note=None,
+                               items=[{"storage": "s1", "target": f"t{i}"} for i in range(1203)], status="Running")
+    full = repos.batches.list_items_detail(bid)
+    by_seq = {r["seq"]: r for r in full}
+    want = [5, 3, 1200, 700, 3, 9999]                                  # 순서·중복 무관, 없는 seq 는 조용히 빠진다
+    assert repos.batches.list_items_detail(bid, seqs=want) == [by_seq[s] for s in (3, 5, 700, 1200)]
+    assert repos.batches.list_items_detail(bid, seqs=[]) == []
+    seen, restore = _spy_queries(db)
+    try:
+        page = repos.batches.list_items_detail(bid, seqs=range(0, 1203))
+    finally:
+        restore()
+    assert page == full
+    assert len(seen) == 3                                              # IN 목록은 500개씩(sqlite 바인딩 상한)
+
+
+def test_item_heads_tools_and_executing_count(db):
+    repos = Repositories(db)
+    bid = repos.batches.create(operation="sync", requester_id="a", actor="a", max_concurrency=2, options={}, note=None,
+                               status="Previewing",
+                               items=[{"source_storage": "s1", "source": f"a{i}", "destination_storage": "s2",
+                                       "destination": f"b{i}"} for i in range(3)])
+    rid = repos.requests.create(operation="sync", requester_id="a", actor="a", resource_key="k-x-0",
+                                payload={}, priority="mid", batch_id=bid)
+    repos.batches.set_item_materialized(bid, 0, rid)
+    plan = repos.data_jobs.create_plan(rid, actor="planner")
+    jid = repos.data_jobs.create_job(rid, plan, operation="sync", priority="mid", source_storage="s1",
+                                     destination_storage="s2", source="a0", destination="b0", options={},
+                                     tool="nsync", worker_pool={}, precondition={}, actor="planner")
+    db.execute("UPDATE data_jobs SET state = 'Executing', preview_summary = '{broken' WHERE job_id = :j", {"j": jid})
+    db.execute("UPDATE batch_items SET payload = 'nope' WHERE batch_id = :b AND seq = 2", {"b": bid})
+    heads = repos.batches.list_item_heads(bid)
+    assert [h["seq"] for h in heads] == [0, 1, 2] and heads[2]["payload"] is None    # 깨진 payload 는 None(검색에 안 걸림)
+    assert heads[0]["payload"]["source"] == "a0" and heads[0]["status"] == "Materialized"
+    tools = repos.batches.list_item_tools(bid)
+    assert [(t["seq"], t["job_tool"], t["preview_summary"]) for t in tools] == [(0, "nsync", None), (1, None, None),
+                                                                               (2, None, None)]
+    assert repos.batches.count_executing_items(bid) == 1

@@ -3,7 +3,8 @@ import re
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, StrictBool
 from ..batch_csv import MAX_CSV_BYTES, export_items_csv, parse_items_csv, template_csv
-from ..batch_orchestrator import auto_confirm_hold, preview_files
+from ..batch_item_search import matching_heads
+from ..batch_orchestrator import auto_confirm_hold, direct_tool_counts, preview_files
 from ..batch_cancel import mark_cancel_reached, record_item_terminal, settle_child
 from ..domain import (DataJobState, DomainValidationError, Operation, auto_confirmable, build_data_payload,
                       confirm_gated, validate_batch, validate_batch_controls,
@@ -163,8 +164,22 @@ def list_batches(request: Request, limit: int = Query(100, ge=1, le=_MAX_BATCH_L
                  identity: Identity = Depends(require_admin)):
     """최신순 배치 목록(기본 100건 -- 종전과 같다). limit 은 2026-11-11 에 열었다: 포탈이 창(100) + 1 건을 받아 「더 오래된
     배치가 있다」를 안다(그 전엔 정확히 100건이 왔을 때 잘린 것인지 알 수 없어 탭 건수 「전체 (100)」을 전체로 보였다).
-    상한은 폴링 목록이 한 번에 끌어올 수 있는 위생값이다."""
-    return request.app.state.repos.batches.list(limit=limit)
+    상한은 폴링 목록이 한 번에 끌어올 수 있는 위생값이다. 행마다 「대상 스토리지」(storage·source_storage·destination_storage
+    -- 첫 항목 payload 에서 읽을 때 파생, 모르면 null; 2026-11-16 BatchesRepository.list)와 schedule(배치 스케줄 요약 | null --
+    _with_schedules)을 싣는다."""
+    repos = request.app.state.repos
+    return _with_schedules(repos, repos.batches.list(limit=limit))
+
+
+def _with_schedules(repos, rows):
+    """배치 행에 스케줄 요약을 싣는다(2026-11-16 배치 스케줄러): schedule = {schedule_id, kind, spec, enabled, next_run_at,
+    last_outcome, last_reason_code, paused_reason_code} | null(스케줄 없음). 목록 한 쪽이 질의 한 번이다
+    (BatchSchedulesRepository.summaries_for -- 행마다 묻지 않는다). 목록과 상세 머리(view=summary)만 싣는다 -- view 없음·all 은
+    옛 탭·확인 창 응답이라 모양을 바꾸지 않는다(dms-ssc 라인과 같은 자리)."""
+    summaries = repos.batch_schedules.summaries_for([r["batch_id"] for r in rows])
+    for r in rows:
+        r["schedule"] = summaries.get(r["batch_id"])
+    return rows
 
 
 # --- 항목 CSV(2026-10-26 BACKLOG C -- 해석·검증은 batch_csv 모듈 docstring) -------------------------------------------
@@ -369,19 +384,88 @@ def export_batch_items_csv(batch_id: str, request: Request, identity: Identity =
     return _csv_response(text, f"dms-batch-{re.sub(r'[^0-9A-Za-z_-]', '_', batch_id[:12])}-items.csv")
 
 
+# 상세 조회 방식(2026-11-16 -- 큰 배치에서 폴링마다 전 항목 상세 조인·수 MB 비압축 응답을 내던 것을 쪼갰다). 밖의 값은 pydantic
+# pattern 422(http_422 일반 문구 -- 새 사유 코드 없음). 이름·모양은 dms-ssc 라인과 같다(골라서 cherry-pick).
+_DETAIL_VIEW = "^(summary|items|payloads|all)$"
+# view=items 한 쪽 크기: 기본은 화면의 쪽 크기, 1–500 으로 접는다(거부하지 않는다 -- 상한은 상세 조인 한 번의 크기다).
+_ITEM_PAGE_DEFAULT = 100
+_ITEM_PAGE_MAX = 500
+# 진행 중 배너의 「이미 실행 중인 항목」을 셀 배치 상태(미리보기 단계로 돌아온 확인 게이트 배치만 그 문구가 있다).
+_PREVIEW_STATES = ("Previewing", "PreviewReady")
+
+
+def _auto_confirm_hold_for(request, b):
+    """자동 확인이 켜진 진행 중 sync·rm 배치가 지금 확인하면 보류될 사유(없으면 null) -- orchestrator 와 같은 술어라 화면이
+    「곧 자동 실행」과 「보류 — 직접 확인 필요」를 실제 동작대로 말한다. 꺼졌거나 끝난 배치는 null(판정할 확인이 없다)."""
+    return (auto_confirm_hold(request.app.state.repos, request.app.state.settings, b)
+            if b["auto_confirm"] and b["status"] in _PREVIEW_STATES else None)
+
+
 @router.get("/api/admin/batches/{batch_id}")
-def get_batch(batch_id: str, request: Request, identity: Identity = Depends(require_admin)):
-    repo = request.app.state.repos.batches
+def get_batch(batch_id: str, request: Request,
+              view: "str | None" = Query(None, pattern=_DETAIL_VIEW),
+              offset: int = Query(0, ge=0),
+              limit: "int | None" = Query(None),
+              q: "str | None" = Query(None, max_length=512),
+              status: "str | None" = Query(None, max_length=64),
+              identity: Identity = Depends(require_admin)):
+    """배치 상세. view 로 무게를 고른다(2026-11-16 사용자 보고 「항목이 수백 개를 넘으면 느려지고 응답 없음」 -- 전 항목 상세 조인
+    (항목당 잡 서브쿼리 5개)을 2.5초마다 받아 전 행을 다시 그리던 것이 원인이었다):
+      없음·all  배치 행 + items(전 항목 상세 조인) + auto_confirm_hold -- 지금 그대로. view 없음을 바꾸지 않는 이유: 롤링 중
+                옛 포탈 탭이 항목 없는 응답을 받으면 확인 창이 「0 / 전체 0」으로 열리고 그 확인을 서버가 받는다(회차·동의가
+                맞으니) -- root 삭제의 맹목 승인이다. all 은 새 포탈의 확인 창 전용 1회 조회(같은 코드 경로) -- 확인 창의
+                집계·rm 삭제 대상 목록은 쪽이 아니라 전체여야 한다(감사 행 preview_files 와 같은 집합).
+                배치 행을 **먼저** 읽고 항목을 읽는다: 확인 창이 고정하는 회차(preview_round)가 보여 준 항목보다 오래되지 않게
+                -- 회차 뒤에 항목이 바뀌면(추가·재실행 → Previewing 복귀, 다음 PreviewReady 에서 회차 +1) :confirm 의 상태·
+                회차 CAS 가 거부한다. 반대 순서면 옛 항목에 새 회차가 붙어 본 적 없는 항목이 확인에 묻힌다.
+      summary   배치 행 + auto_confirm_hold + item_overview(item_total·status_counts·first_payload·스토리지 세 키) +
+                executing_count + direct_tools -- items 없음(2.5초 폴링의 머리). executing_count 는 확인 게이트 배치가
+                미리보기 단계(Previewing·PreviewReady)일 때만 세고 그 밖은 null(배너가 없다 -- null 은 「말할 것 없음」,
+                0 은 정상값). direct_tools 는 options.direct 가 명시 true 일 때만 {tools_known, nsync, undecided}, 아니면
+                null(포탈 directNote 의 첫 판정과 같다). schedule = 배치 스케줄 요약 | null(_with_schedules -- 상세 머리의
+                스케줄 배지·취소 창의 「스케줄도 끄기」·삭제 창의 「스케줄도 함께 삭제」 재료).
+      items     {total, offset, limit, items, filters:{q, status}}: 가벼운 읽기(list_item_heads)로 거르고(status = 항목 상태
+                정확 일치 -- 모르는 값이면 빈 결과, q = batch_item_search 의 경로·PV 이름 검색) 센 뒤 seq 순 [offset,
+                offset+limit) 를 잘라 **그 쪽의 seq 만** 상세 조인(list_items_detail(seqs) -- 행 모양은 전체 조회와 같다).
+                total = 거른 뒤의 수(0 = 결과 없음 -- 정상값). limit 은 1–500 으로 접는다(없으면 100), offset ≥ 0(음수 422),
+                범위 밖 offset 은 빈 쪽(total 은 그대로 -- 화면이 마지막 쪽으로 당긴다). filters 는 받은 값의 메아리다(dms-k8s
+                -- 새 포탈이 view 를 무시하는 옛 파드의 전체 응답을 알아채는 표지). 쪽 행의 payload 는 지금처럼 읽는다 -- 깨진
+                JSON 항목이 든 쪽만 view 없음과 같이 실패하고(행 payload 를 지어내지 않는다), 요약·다른 쪽·검색은 산다.
+      payloads  {items: [{seq, payload, status}]} 전 항목(상세 조인 없음) -- 「현재 항목 CSV」·rm 항목 추가의 겹침 즉답이 창을
+                열 때 1회. 행 payload 라 list_items 그대로 읽는다(깨진 JSON 이면 view 없음과 같이 실패 -- CSV 왕복에 None 을
+                섞지 않는다).
+    모두 읽기라 require_admin 이고 유지보수 중에도 받는다(다른 관리 GET 과 같다)."""
+    repos = request.app.state.repos
+    repo = repos.batches
     b = repo.get(batch_id)
     if b is None:
         raise HTTPException(status_code=404, detail="batch_not_found")
+    if view == "items":
+        size = _ITEM_PAGE_DEFAULT if limit is None else max(1, min(_ITEM_PAGE_MAX, limit))
+        heads = repo.list_item_heads(batch_id)
+        if status is not None and status != "":
+            heads = [h for h in heads if h["status"] == status]
+        hits = matching_heads(repos, heads, q)
+        page = [h["seq"] for h in hits[offset:offset + size]]
+        return {"total": len(hits), "offset": offset, "limit": size,
+                "items": repo.list_items_detail(batch_id, seqs=page),
+                "filters": {"q": q, "status": status}}
+    if view == "payloads":
+        return {"items": [{"seq": it["seq"], "payload": it["payload"], "status": it["status"]}
+                          for it in repo.list_items(batch_id)]}
+    if view == "summary":
+        b["auto_confirm_hold"] = _auto_confirm_hold_for(request, b)
+        b.update(repo.item_overview(batch_id))
+        b["executing_count"] = (repo.count_executing_items(batch_id)
+                                if confirm_gated(b["operation"]) and b["status"] in _PREVIEW_STATES else None)
+        options = b["options"]
+        b["direct_tools"] = (direct_tool_counts(repo.list_item_tools(batch_id))
+                             if isinstance(options, dict) and options.get("direct") is True else None)
+        return _with_schedules(repos, [b])[0]
     # 화면용 상세 조인(request_state/files_count/completed_at) — 실행 루프가 쓰는
     # list_items 와 분리돼 있다(repo docstring 참고).
     b["items"] = repo.list_items_detail(batch_id)
-    # 자동 확인이 켜진 진행 중 sync·rm 배치가 지금 확인하면 보류될 사유(없으면 null) -- orchestrator 와 같은 술어라 화면이
-    # 「곧 자동 실행」과 「보류 — 직접 확인 필요」를 실제 동작대로 말한다. 꺼졌거나 끝난 배치는 null(판정할 확인이 없다).
-    b["auto_confirm_hold"] = (auto_confirm_hold(request.app.state.repos, request.app.state.settings, b)
-                              if b["auto_confirm"] and b["status"] in ("Previewing", "PreviewReady") else None)
+    b["auto_confirm_hold"] = _auto_confirm_hold_for(request, b)
     return b
 
 
@@ -584,8 +668,8 @@ def replace_batch_items(batch_id: str, body: ReplaceItemsBody, request: Request,
     Materialized/실행 중 항목의 기록까지 지우는 위조가 되고, 단건 편집의 Queued
     원자 가드로는 "전체" 교체의 원자성을 지킬 수 없다(일부 행만 가드를 통과하면
     부분 교체) — fail-closed 거부가 정직하다. 교체 후에도 배치는 **종단 유지** —
-    교체가 곧 실행은 아니다. 재실행은 기존 :rescan(전체 재실행) 몫: reset_all_items
-    는 종단 항목만 만지므로 신규 Queued 전량엔 무접촉으로 상태만 올리고,
+    교체가 곧 실행은 아니다. 재실행은 기존 :rescan(전체 재실행) 몫: 그 리셋(rescan_if_terminal → _rescan_locked)
+    은 종단 항목만 만지므로 신규 Queued 전량엔 무접촉으로 상태만 올리고,
     orchestrator 가 Queued 를 집는다. 검증은 생성(create_batch)과 같은 두 겹 —
     validate_batch(empty_batch·단일 스토리지 동질성 재사용) + item 별
     build_data_payload(옵션은 배치 행의 것 — DB 신뢰 경계라 저장값도 재검증 대상).
@@ -807,17 +891,31 @@ def rescan_batch(batch_id: str, request: Request, identity: Identity = Depends(r
     _reject_stale_options(b)
     # 성공 item 포함 전체 리셋: 용도가 성장 모니터링(같은 대상 재스캔)이라
     # "실패만"이 아니라 전부를 다시 돌린다(:rerun-failed 와의 차이).
-    n = repo.reset_all_items(batch_id)
-    status = "Previewing" if confirm_gated(b["operation"]) else "Running"
-    repo.set_status(batch_id, status)
-    return {"status": status, "requeued": n}
+    # 리셋·카운터·상태 전이는 저장소 한 트랜잭션의 종단 CAS 다(rescan_if_terminal -- 배치 스케줄러 회차와 같은 몸통
+    # _rescan_locked, 2026-11-16). 위 읽기 뒤 그 사이 다른 재실행·스케줄 회차가 먼저 되살렸으면 None = 409 -- 예전엔 읽기와
+    # 무조건 set_status 사이의 창에서 이미 확인돼 Running 인 배치를 Previewing 으로 되돌렸다.
+    done = repo.rescan_if_terminal(batch_id)
+    if done is None:
+        if repo.get(batch_id) is None:
+            raise HTTPException(status_code=404, detail="batch_not_found")
+        raise HTTPException(status_code=409, detail="batch_not_rescannable")
+    return {"status": done["status"], "requeued": done["requeued"]}
 
 
 _CANCELABLE = ("Previewing", "PreviewReady", "Running")
 
 
+class CancelBatchBody(BaseModel):
+    # 「이 배치의 스케줄도 끄기」(2026-11-16 배치 스케줄러 -- 설계 비판 #4): 명시 true 면 취소와 **같은 트랜잭션**에서 그 배치의
+    # 켜진 스케줄을 끈다(begin_cancel in_txn → BatchSchedulesRepository.disable_for_batch_locked). 포탈이 취소 뒤 :disable 을
+    # 따로 부르면 그 사이 Cancelled(종단)를 본 회차가 다시 쏘거나, 두 번째 호출이 실패해 켜진 채 남는다. 본문 없음·false =
+    # 지금처럼 취소만(Cancelled 도 종단이라 다음 회차가 돈다 -- 사용자 결정 그대로).
+    disable_schedule: StrictBool = False
+
+
 @router.post("/api/admin/batches/{batch_id}:cancel")
-def cancel_batch(batch_id: str, request: Request, identity: Identity = Depends(require_admin)):
+def cancel_batch(batch_id: str, request: Request, body: CancelBatchBody | None = None,
+                 identity: Identity = Depends(require_admin)):
     """배치 취소(2026-10-16 사용자 보고: 「배치작업 Cancel 했는데 몇분 후에 ... 아직 돌아가고 있는 launcher/worker pod 들이
     보여」 -- batch_cancel 모듈 docstring). 순서가 계약이다:
       0) 한 트랜잭션으로 Queued 항목 장벽 + 배치 Cancelling(begin_cancel) -- 새 자식이 생기지 않고, orchestrator 는 굴리지
@@ -829,7 +927,9 @@ def cancel_batch(batch_id: str, request: Request, identity: Identity = Depends(r
          500 이 거짓이 됐다(검증 지적).
       2) 끝낸 자식마다 기록(settle_child)하고 항목은 자식의 결과로 CAS 기록(record_item_terminal -- 취소 전에 성공한 형제는
          Succeeded, 취소가 죽인 자식은 Cancelled). 남은 게 없으면 Cancelled 로(finish_cancel_if_settled).
-    응답 status: Cancelled(다 끝남) | Cancelling(종료 실패 자식이 남아 그물이 마저 끝낸다 -- pending 수)."""
+    응답 status: Cancelled(다 끝남) | Cancelling(종료 실패 자식이 남아 그물이 마저 끝낸다 -- pending 수).
+    본문 disable_schedule: true(CancelBatchBody)면 0) 의 같은 트랜잭션에서 스케줄도 끄고 응답에 schedule_disabled(끈 스케줄
+    id | null -- 스케줄이 없거나 이미 꺼져 있었다)를 싣는다. 취소 CAS 를 지면(409) 스케줄도 그대로다."""
     repos = request.app.state.repos
     repo = repos.batches
     b = repo.get(batch_id)
@@ -838,8 +938,15 @@ def cancel_batch(batch_id: str, request: Request, identity: Identity = Depends(r
     if b["status"] not in _CANCELABLE:
         raise HTTPException(status_code=409, detail="batch_not_cancelable")
     adapter = request.app.state.execution_adapter
-    if not repo.begin_cancel(batch_id, from_states=_CANCELABLE):
+    want_disable = body is not None and body.disable_schedule is True
+    disabled: dict = {}
+
+    def disable_in_txn(now):
+        disabled["id"] = repos.batch_schedules.disable_for_batch_locked(batch_id, actor=audit_actor(identity), now=now)
+
+    if not repo.begin_cancel(batch_id, from_states=_CANCELABLE, in_txn=disable_in_txn if want_disable else None):
         raise HTTPException(status_code=409, detail="batch_not_cancelable")    # 그 사이 종단(완료·다른 취소)
+    extra = {"schedule_disabled": disabled.get("id")} if want_disable else {}
     items = repo.list_items(batch_id)
     pending = 0
     for it in items:
@@ -865,9 +972,9 @@ def cancel_batch(batch_id: str, request: Request, identity: Identity = Depends(r
         if state is not None:
             record_item_terminal(repos, batch_id, it["seq"], rid, state, reason_code=why)
     if repo.finish_cancel_if_settled(batch_id):
-        return {"status": "Cancelled"}
+        return {"status": "Cancelled", **extra}
     # CAS 를 졌으면 다시 읽는다 -- 그 사이 그물이 마저 끝냈으면(오래 걸린 취소) 실제 상태를 말한다.
     now_b = repo.get(batch_id)
     if now_b is not None and now_b["status"] == "Cancelled":
-        return {"status": "Cancelled"}
-    return {"status": "Cancelling", "pending": pending}
+        return {"status": "Cancelled", **extra}
+    return {"status": "Cancelling", "pending": pending, **extra}

@@ -13,10 +13,13 @@
 집합이 둘이다 -- **효력**(privileged_names: env ∪ 부여된 활성 admin)과 **보호**(protected_names: env ∪ 부여 플래그가 선
 모든 계정). 효력을 읽는 곳(전부 privileged_names 를 거친다 -- 한 곳이라도 settings.privileged_requesters 를 직접 보면 그 경로만
 부여를 모른다): api.auth.can_run_as_root(제출 게이트·/api/auth/me·자격 부여 라우트의 호출자 판정), routes_requests 의 실행 신원
-지정, routes_batches._require_batch_privilege, planner(실행 신원 지정·root 계획), batch_orchestrator(자동 확인). 보호를 읽는 곳:
+지정, routes_batches._require_batch_privilege, planner(실행 신원 지정·root 계획), privileged_admin_problem(아래 -- 사람 없이
+도는 두 자동 경로의 공용 자격 술어: batch_orchestrator 자동 확인의 켠 사람, batch_scheduler 회차의 스케줄을 켠 사람(armed_by)과
+배치 요청자 -- 2026-11-16), 스케줄 라우트(routes_batch_schedules -- 생성·수정·켜기의 요청자 판정). 보호를 읽는 곳:
 routes_accounts.guard_privileged_account, routes_auth._refuse_privileged_reset -- 비활성화된 부여 계정도 특권 관리자만 다시 켤
 수 있어야 한다(효력 집합으로 지키면 목록 밖 관리자가 다시 켜는 것만으로 자격을 되살렸다).
 """
+from .identity import privilege_eligible
 
 
 def privileged_names(settings, repos) -> frozenset:
@@ -40,3 +43,25 @@ def protected_names(settings, repos) -> frozenset:
     if accounts is None:
         return env
     return env | accounts.root_grant_flagged_names()
+
+
+def privileged_admin_problem(settings, repos, username) -> "str | None":
+    """사람 없이 그 사람의 이름으로 root 실행을 시작하는 자동 경로가 **그 순간** 다시 보는 자격(2026-11-16 -- 자동 확인의
+    술어를 뽑아 배치 스케줄러와 같이 쓴다). None 이면 자격 있음, 아니면 문제 종류:
+      "privileged_disabled"  사이트 전체 특권(root) 실행이 꺼졌다(DMS_ALLOW_PRIVILEGED_REQUESTERS=false) -- 그 사람 탓이 아니다
+      "not_privileged"       이름이 효력 집합(privileged_names) 밖이다(None·빈 이름 포함 -- 모름은 자격이 아니다)
+      "not_admin"            계정이 없거나 비활성이거나 admin 이 아니다(env 목록 이름이어도 -- 활성 관리자만)
+    세션 조건은 켜는 라우트(_require_batch_privilege)가 그 순간 봤다 -- 여기서는 이미 켠 사람이라 session_authenticated=True.
+    사유 코드는 호출자가 각자 `reason_code=` 키워드 리터럴로 고른다(포탈 문구가 경로마다 다르다 -- 사유 코드 추출기는 반환값을
+    읽지 못한다). 두 곳이 같은 함수를 쓰는 이유: 자격 규칙(효력 집합·활성·역할)이 바뀌는 순간 한쪽만 옛 규칙으로 root 를
+    시작하지 않게."""
+    if not settings.allow_privileged_requesters:
+        return "privileged_disabled"
+    if not privilege_eligible(requester_id=username, allow_privileged=settings.allow_privileged_requesters,
+                              privileged_requesters=privileged_names(settings, repos),
+                              session_authenticated=True):
+        return "not_privileged"
+    account = repos.accounts.get(username)
+    if account is None or account["disabled"] or account["role"] != "admin":
+        return "not_admin"
+    return None

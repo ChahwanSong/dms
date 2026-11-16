@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
 import { beforeAll, afterAll, afterEach, test, expect } from "vitest";
-import { useBatches, useUpdateBatch, useUpdateBatchItem,
+import { useBatch, useBatchItems, useBatches, useUpdateBatch, useUpdateBatchItem,
          useReplaceBatchItems, useRerunBatchItems, needsBatchConfirm } from "./useBatches";
 const server = setupServer();
 beforeAll(() => server.listen()); afterEach(() => server.resetHandlers()); afterAll(() => server.close());
@@ -103,6 +103,40 @@ test("useBatches fetches list", async () => {
   const { result } = renderHook(() => useBatches(), { wrapper: ({children}) =>
     <QueryClientProvider client={qc}>{children}</QueryClientProvider> });
   await waitFor(() => expect(result.current.data?.[0].batch_id).toBe("b1"));
+});
+
+// --- 상세 쪽 조회(2026-11-16): 머리 ?view=summary · 항목 ?view=items -- 옛 파드(view 무시 → 전체 응답)는 같은 모양으로 물러선다 ---
+const fullBatch = { batch_id: "b1", operation: "scan", status: "Running", max_concurrency: 1, item_count: 2,
+  succeeded_count: 0, failed_count: 0, note: null, created_at: "", options: {},
+  items: [{ seq: 3, payload: { storage: "s1", target: "a" }, status: "Queued", request_id: null, reason_code: null },
+          { seq: 4, payload: { storage: "s1", target: "b" }, status: "Failed", request_id: null, reason_code: "x" }] };
+const wrap = (qc: QueryClient) => ({ wrapper: ({ children }: { children: React.ReactNode }) =>
+  <QueryClientProvider client={qc}>{children}</QueryClientProvider> });
+
+test("useBatch: ?view=summary 로 묻고, 옛 파드의 전체 응답이면 items 에서 머리를 파생한다(items 는 버린다)", async () => {
+  const seen: string[] = [];
+  server.use(http.get("/api/admin/batches/b1", ({ request }) => {
+    seen.push(new URL(request.url).search); return HttpResponse.json(fullBatch); }));
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const { result } = renderHook(() => useBatch("b1"), wrap(qc));
+  await waitFor(() => expect(result.current.data?.item_total).toBe(2));
+  expect(seen[0]).toBe("?view=summary");
+  expect(result.current.data?.status_counts).toEqual({ Queued: 1, Failed: 1 });
+  expect(result.current.data?.first_payload).toEqual({ storage: "s1", target: "a" });
+  expect("items" in (result.current.data ?? {})).toBe(false);
+});
+
+test("useBatchItems: 쪽·검색·상태를 쿼리로 싣고, 옛 파드의 전체 응답은 화면에서 거르고 자른다", async () => {
+  const seen: URLSearchParams[] = [];
+  server.use(http.get("/api/admin/batches/b1", ({ request }) => {
+    seen.push(new URL(request.url).searchParams); return HttpResponse.json(fullBatch); }));
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const { result } = renderHook(() => useBatchItems("b1", { page: 1, q: "B", status: "Failed" }, "Running"), wrap(qc));
+  await waitFor(() => expect(result.current.data?.total).toBe(1));
+  expect(result.current.data?.items.map((it) => it.seq)).toEqual([4]);
+  const p = seen[0];
+  expect([p.get("view"), p.get("offset"), p.get("limit"), p.get("q"), p.get("status")])
+    .toEqual(["items", "0", "100", "B", "Failed"]);
 });
 
 test("needsBatchConfirm: 확인 흐름은 sync·rm 명시 집합 — scan·모르는 연산·부재는 아니다(DB 신뢰 경계)", () => {

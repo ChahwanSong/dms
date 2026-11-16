@@ -18,10 +18,11 @@ function dmsItems(): { group: string; groupAdminOnly: boolean; item: NavItem }[]
 
 // 2026-10-25(dms-k8s): 스토리지 그룹에 「k8s 연동」(/admin/k8s) -- 하위 넷은 화면 안 탭이라 링크 수엔 하나만 더한다.
 // 2026-11-03: 관리 그룹에 「보안 이벤트」(/admin/security) -- 19링크.
-test("현행 사이드바 19링크가 전부 데이터에 있다(전수 -- 초과도 누락도 없다)", () => {
+// 2026-11-16: 작업 그룹에 「배치 스케줄러」(/admin/batch-schedules) -- 20링크.
+test("현행 사이드바 20링크가 전부 데이터에 있다(전수 -- 초과도 누락도 없다)", () => {
   const paths = dmsItems().map((x) => x.item.path).sort();
   expect(paths).toEqual([
-    "/admin/accounts", "/admin/artifact-base", "/admin/audit", "/admin/batches",
+    "/admin/accounts", "/admin/artifact-base", "/admin/audit", "/admin/batch-schedules", "/admin/batches",
     "/admin/builds", "/admin/control", "/admin/dashboard", "/admin/denylist", "/admin/k8s", "/admin/mail",
     "/admin/nodes", "/admin/policies", "/admin/portal", "/admin/releases", "/admin/security",
     "/admin/storages", "/admin/usage", "/jobs", "/jobs/new",
@@ -66,7 +67,15 @@ test("그룹 순서는 운영·작업·스토리지·관리다(접힘은 AppShel
 
 test("작업 그룹은 단일 작업(제출)이 내 작업(목록)보다 위다(사용자 결정 2026-08-19)", () => {
   const jobs = (NAVIGATION[0].groups ?? []).find((g) => g.label === "작업")!;
-  expect(jobs.items.map((i) => i.label)).toEqual(["단일 작업", "배치 작업", "전체 작업"]);
+  expect(jobs.items.map((i) => i.label)).toEqual(["단일 작업", "배치 작업", "배치 스케줄러", "전체 작업"]);
+});
+
+test("배치 스케줄러는 작업 그룹의 관리자 전용 항목이다(2026-11-16, 배치 작업 바로 아래)", () => {
+  const jobs = (NAVIGATION[0].groups ?? []).find((g) => g.label === "작업")!;
+  expect(jobs.items.find((i) => i.path === "/admin/batch-schedules")?.adminOnly).toBe(true);
+  expect(breadcrumbFor("/admin/batch-schedules").map((c) => c.label)).toEqual(["HOME", "DMS", "작업", "배치 스케줄러"]);
+  // 「/admin/batches」의 접두가 아니다 -- 배치 작업 항목이 함께 켜지지 않는다(최장 일치).
+  expect(activeNavPath("/admin/batch-schedules")).toBe("/admin/batch-schedules");
 });
 
 describe("breadcrumbFor", () => {

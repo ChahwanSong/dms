@@ -201,6 +201,11 @@ export interface Setup {
   filterQ?: boolean;                 // q 파라미터로 행을 거른다(searchHit -- 서버 검색 흉내)
   // 봉투의 matched_count(기본 = 거른 행 수) · window_truncated · 메아리 덮어쓰기 · 봉투 대신 줄 응답(배포 틈)
   matched?: number | null | ((u: URL, rows: Row[]) => number | null);
+  // 쪽 넘김(2026-11-16): offset 으로 행을 자르고 메아리·has_more·pageable_count 를 싣는다. pageable 기본 = matched(수일 때) 또는 거른 행
+  // 수, hasMore 기본 = 이 쪽 뒤에 거른 행(또는 matched)이 더 있나. legacyTargets = 옛 서버(세 키 없음 -- offset 을 모른다: 늘 첫 쪽).
+  pageable?: number | null | ((u: URL, rows: Row[]) => number | null);
+  hasMore?: boolean | ((u: URL, rows: Row[]) => boolean);
+  legacyTargets?: boolean;
   windowTruncated?: boolean;
   echo?: (u: URL) => unknown;
   targetsRaw?: () => Response;
@@ -251,10 +256,18 @@ export function setup(o: Setup = {}) {
       if (o.filterQ && q) rows = rows.filter((r) => searchHit(r, q));
       rows = serverFilter(rows, u);
       const matched = typeof o.matched === "function" ? o.matched(u, rows) : o.matched !== undefined ? o.matched : rows.length;
+      const limit = Number(u.searchParams.get("limit") ?? 100);
+      const offset = o.legacyTargets ? 0 : Number(u.searchParams.get("offset") ?? 0);
+      const shown = rows.slice(offset, offset + limit);
+      const pageable = typeof o.pageable === "function" ? o.pageable(u, rows)
+        : o.pageable !== undefined ? o.pageable : typeof matched === "number" ? matched : rows.length;
+      const hasMore = typeof o.hasMore === "function" ? o.hasMore(u, rows) : o.hasMore !== undefined ? o.hasMore
+        : offset + shown.length < Math.max(rows.length, typeof matched === "number" ? matched : 0);
       return HttpResponse.json({
-        rows: rows.slice(0, Number(u.searchParams.get("limit") ?? 100)).map(strip), matched_count: matched,
+        rows: shown.map(strip), matched_count: matched,
         window_limit: o.windowLimit ?? 10000, window_truncated: o.windowTruncated ?? false,
-        filters: o.echo ? o.echo(u) : echoOf(u) });
+        filters: o.echo ? o.echo(u) : echoOf(u),
+        ...(o.legacyTargets ? {} : { offset, has_more: hasMore, pageable_count: pageable }) });
     }),
     http.get("/api/admin/usage/facets", ({ request }) => {
       const u = new URL(request.url);

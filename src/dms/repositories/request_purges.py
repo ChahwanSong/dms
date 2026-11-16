@@ -20,7 +20,8 @@ batch_child_not_deletable). 대신 배치 하나 = 자식 요청 **전부**(`req
 "일부만 지워진 살아 있는 배치" 가 남는다. 배치 행이 없는 자식 묶음(배치 기록만 지운 BatchesRepository.delete 의 잔재,
 dangling)도 같은 메서드로 묶음째 지운다. 잠금 순서는 batch_items → batches → requests(request_id 순) → data_jobs --
 오케스트레이터 _record_terminal·reject_queued_item(batch_items → batches)과 planner·요청 삭제(requests → data_jobs)를 둘 다
-지키는 방향이다. 역순으로 함께 잠그는 경로를 새로 만들면 교착이다. 감사는 자식마다 기존 ('request','delete') 행(스냅숏에
+지키는 방향이다. 역순으로 함께 잠그는 경로를 새로 만들면 교착이다. 배치 스케줄 → 회차 이력(2026-11-16)은 맨 끝이다 --
+스케줄 발사·기록(항목 → 배치 → 스케줄 → 회차, batches.BATCH_DELETE_TABLES)과 같은 방향. 감사는 자식마다 기존 ('request','delete') 행(스냅숏에
 batch_id) + 배치마다 ('batch','delete') 행 1개(_batch_bounded -- 배치 이름·옵션·실행 신원·항목은 다른 어디에도 남지 않는다).
 
 **결과 파일 자동 만료**(kind 'expiry', 2026-10-26 -- 사용자 결정 「파일만 만료하고 행은 남김」, artifact_expiry 루프): 같은
@@ -39,6 +40,7 @@ import re
 
 from ..db import Database, dump_json, iso_plus, load_json, utc_now_iso
 from ..domain import TERMINAL_DATA_JOB_STATES, TERMINAL_REQUEST_STATES
+from .batches import _audit_schedule_delete
 from .requests import batch_match
 
 # 요청을 지울 때 그 요청·잡·plan 을 가리키는 행을 지우는 테이블(_purge_locked -- delete_terminal·delete_batch 공용 몸통 --
@@ -573,6 +575,11 @@ class RequestPurgesRepository:
                         "DELETE FROM batches WHERE batch_id = :b AND status IN ('Completed', 'Cancelled')",
                         {"b": batch_id}) != 1:
                     raise _Lost()
+                # 배치 스케줄 + 회차 이력(2026-11-16 -- batches.BATCH_DELETE_TABLES 순서 = 잠금 순서: 스케줄을 회차 이력보다 먼저,
+                # 스케줄 발사·기록과 같은 방향). 스케줄이 있었으면 그 삭제를 감사 행으로 남긴다(_audit_schedule_delete).
+                _audit_schedule_delete(self._db, batch_id, actor=actor, now=now)
+                self._db.execute("DELETE FROM batch_schedules WHERE batch_id = :b", {"b": batch_id})
+                self._db.execute("DELETE FROM batch_schedule_runs WHERE batch_id = :b", {"b": batch_id})
                 if self._db.query_one(f"SELECT 1 AS x FROM requests WHERE {batch_match('b')} LIMIT 1", {"b": batch_id}):
                     raise _Lost()                     # 유령 자식 -- 사용자가 보지 않은 자식은 지우지 않는다
                 self._db.execute(

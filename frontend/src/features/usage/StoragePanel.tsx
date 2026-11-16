@@ -1,16 +1,19 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { Link } from "react-router-dom";
+import { useQueryClient } from "@tanstack/react-query";
 import { Download, FilterX, ScanSearch, Search, SearchX } from "lucide-react";
 import { Button } from "../../components/ui/Button";
 import { HelpTip } from "../../components/ui/HelpTip";
 import { searchTokens } from "../../components/ui/Highlight";
+import { Pager } from "../../components/ui/Pager";
 import { Skeleton } from "../../components/ui/Skeleton";
 import { storageKindOf } from "../k8s/k8sTerms";
 import type { ApiError } from "../../lib/api";
 import type { Storage, UsageAttrFilter } from "../../lib/types";
 import { downloadCsv, toCsv } from "../../lib/csvExport";
-import { LIST_LIMIT, UsageContractError, attrKey, cleanAttr, fetchUsageExport, hasAttr, hasPvAxis, useScanTargets,
-         useUsageFacets, usePurgeUnregisteredStorage, type TargetFilter, type UsageSort } from "./useUsage";
+import { UsageContractError, attrKey, cleanAttr, fetchUsageExport, hasAttr, hasNextPage, hasPvAxis, pageCountOf,
+         scanTargetsOptions, useScanTargets, useUsageFacets, usePurgeUnregisteredStorage, type TargetFilter,
+         type UsageSort } from "./useUsage";
 import { buildUsageCsv, usageCsvFilename } from "./usageCsv";
 import { TargetTable, type PvDisplay } from "./TargetTable";
 import { TargetSheet } from "./TargetSheet";
@@ -29,6 +32,12 @@ import { Empty } from "./UsageParts";
 // 스토리지를 바꾸면 내보내기 상태가 새로 시작한다. 검색·정렬·필터는 URL 이라 스토리지를 바꿔도 남는다(sync 쌍은 같은 트리를
 // 미러하므로 스토리지끼리 같은 경로를 비교하기 쉽다 -- 검색창·필터 줄이 늘 보여 숨은 필터가 되지 않는다).
 // 패널은 스토리지 이름으로 이름 붙은 구역이다(예전 탭 패널 -- 포커스가 갈 데가 없을 때의 마지막 자리, 아래 refocus).
+//
+// 쪽 넘김(2026-11-16 사용자 요청 「상위 100개만이 아니라 전체 목록, 몇백~몇천 개여도 버벅이지 않게」): 표는 한 쪽(100행)이고 표
+// 아래(가로 스크롤 래퍼 밖)에 번호 쪽 넘김(Pager). 쪽 번호는 페이지의 URL(?page= -- pageNo·onPage), 쪽 수는 서버 봉투의 pageable_count
+// (null = 모름 -- Pager 가 「n쪽」과 다음 쪽 있음만 말한다). 응답이 범위 밖 쪽이면(데이터가 줄었거나 딥링크) 마지막 쪽으로 replace 하고,
+// 그동안은 빈 상태 대신 불러오는 중으로 둔다(「기록이 없다」·「결과 없음」은 거짓이다). 시트의 이전·다음은 쪽 경계에서 이웃 쪽으로
+// 넘긴다(그 쪽을 같은 쿼리키로 미리 받아 쪽과 경로를 한 번에 쓴다 -- TargetSheet).
 
 const METRIC_SORTS: UsageSort[] = ["bytes", "files", "hot"];
 // 검색칸(2026-10-29 사용자 요청 「경로로 검색할 뿐 아니라, pv 이름도 검색 … 일부 단어만 포함해도」): 이름·규칙. 규칙은 서버가 거는
@@ -39,18 +48,21 @@ const SEP = "\u00a0· ";
 const n = (x: number) => x.toLocaleString("ko-KR");
 
 export function StoragePanel({
-  tab, windowLimit, input, setInput, searchQ, sort, order, onSort, attr, onAttrChange, activeTarget, sheet, storages,
-  purge, progress, setProgress, onResultFocus, now,
+  tab, windowLimit, input, setInput, searchQ, pageNo = 1, onPage, sort, order, onSort, attr, onAttrChange, activeTarget,
+  sheet, storages, purge, progress, setProgress, onResultFocus, now,
 }: {
   tab: StorageTab;
   windowLimit: number | null;
   input: string; setInput: (s: string) => void; searchQ: string;
+  // 목록 쪽(URL ?page= -- 페이지가 소유한다): Pager 는 push, 범위 밖 당김은 replace.
+  pageNo?: number; onPage?: (p: number, o?: { replace?: boolean }) => void;
   sort: UsageSort; order: "desc" | "asc"; onSort: (c: UsageSort) => void;
   attr: UsageAttrFilter; onAttrChange: (a: UsageAttrFilter) => void;
-  // 상세 시트의 URL 동작(페이지가 정한다 -- UsageAnalysis): 열기 push · 이웃으로 replace · 닫기 -1 또는 replace · 시트 안 필터는
-  // 필터 + 시트 닫기를 한 번의 replace.
+  // 상세 시트의 URL 동작(페이지가 정한다 -- UsageAnalysis): 열기 push · 이웃으로 replace(쪽 경계면 쪽 번호도 함께) · 닫기 -1 또는
+  // replace · 시트 안 필터는 필터 + 시트 닫기를 한 번의 replace.
   activeTarget: string | null;
-  sheet: { open: (t: string) => void; move: (t: string) => void; close: () => void; filter: (a: UsageAttrFilter) => void };
+  sheet: { open: (t: string) => void; move: (t: string, toPage?: number) => void; close: () => void;
+           filter: (a: UsageAttrFilter) => void };
   storages: Storage[] | undefined;
   purge: ReturnType<typeof usePurgeUnregisteredStorage>;
   progress: number | null; setProgress: (n: number | null) => void; onResultFocus: () => void;
@@ -59,9 +71,12 @@ export function StoragePanel({
   const storage = tab.name;
   const searchRuleId = useId();
   const filter: TargetFilter = { storage, q: searchQ, order, sort, attr };
-  const targets = useScanTargets(filter);
+  const targets = useScanTargets(filter, pageNo);
   const page = targets.data;
   const rows = page?.rows ?? [];
+  // 범위 밖 쪽(서버가 빈 쪽 -- 데이터가 줄었거나 ?page= 딥링크): 아래 효과가 마지막 쪽으로 당긴다. 그동안(당긴 쪽을 받는 자리표시 포함)은
+  // 빈 상태가 아니라 불러오는 중이다 -- 「기록이 없다」·「결과 없음」은 거짓이고, 기록 없음 판정은 툴바까지 숨긴다.
+  const beyond = page !== undefined && rows.length === 0 && (page.offset ?? 0) > 0;
   const filtersOn = hasAttr(attr);
   // 필터 선택지: 기록이 있거나(대상 수 > 0·모름) 필터가 켜졌을 때만(기록 0 스토리지는 빈 상태만 보인다).
   const facetsQ = useUsageFacets(storage, tab.targetCount !== 0 || filtersOn);
@@ -185,20 +200,31 @@ export function StoragePanel({
     }
   };
 
-  // 건수 문구(2026-10-29 -- 서버 봉투의 matched_count, 스토리지의 대상 수가 아니다: 필터·검색이 걸리면 그 수는 거짓이다). 필터·검색이
-  // 없으면 「9개」 또는 목록 상한(100)에 닿아 「상위 100개 표시 · 전체 N개」, 있으면 「필터에 맞는 N개」(+ 「· 상위 100개 표시」).
-  // matched 모름(PV 필터·창 안 검색이 판정 창을 넘은 스토리지)이면 건수 대신 그 사실을 한 문단으로(아래 pvWindowNote).
-  const full = rows.length >= LIST_LIMIT;
+  // 건수 문구(2026-10-29 -- 서버 봉투의 matched_count, 스토리지의 대상 수가 아니다: 필터·검색이 걸리면 그 수는 거짓이다; 2026-11-16 쪽
+  // 넘김 -- 「상위 100개 표시」 대신 지금 쪽의 범위). 필터·검색이 없으면 「9개」(한 쪽에 다) 또는 「101–200 / 전체 1,234개」, 있으면
+  // 「필터에 맞는 N개」(+ 「 중 101–200」). 지표 정렬이 창(최근 스캔 N개)을 넘으면 범위는 창 안의 위치고 각주가 「최근 스캔된 N개 안에서
+  // 정렬」을 말한다. matched 모름(PV 필터·창 안 검색이 판정 창을 넘은 스토리지)이면 건수 대신 그 사실을 한 문단으로(아래 pvWindowNote)
+  // 말하고, 이 줄은 닿을 수 있는 수(pageable)를 알면 범위 / 그 수, 모르면 「n쪽 · 다음 쪽 있음/없음」만(null≠0 -- 수를 지어내지 않는다).
   const matched = page?.matched_count ?? null;
+  const pageable = page?.pageable_count ?? null;
+  const offset = page?.offset ?? 0;
   const narrowed = filtersOn || searchQ !== "";
-  const countText = page === undefined || matched === null ? null
-    : !narrowed ? (rows.length < matched ? `상위 ${n(rows.length)}개 표시 · 전체 ${n(matched)}개` : `${n(matched)}개`)
-    : `필터에 맞는 ${n(matched)}개${rows.length < matched ? ` · 상위 ${n(rows.length)}개 표시` : ""}`;
-  // 자리표시(같은 필터 안에서 검색·정렬을 바꿔 응답을 기다리는 동안 남긴 이전 결과)는 건수처럼 수를 말하지 않는다(2차 리뷰:
+  const range = rows.length === 0 ? null : `${n(offset + 1)}–${n(offset + rows.length)}`;
+  const countText = page === undefined || beyond ? null
+    : matched !== null ? (
+      offset === 0 && rows.length >= matched ? (narrowed ? `필터에 맞는 ${n(matched)}개` : `${n(matched)}개`)
+      : narrowed ? `필터에 맞는 ${n(matched)}개${range !== null ? ` 중 ${range}` : ""}`
+      : range !== null ? `${range} / 전체 ${n(matched)}개` : `전체 ${n(matched)}개`)
+    : pageable !== null ? ((offset === 0 && rows.length >= pageable) || range === null ? null : `${range} / ${n(pageable)}개`)
+    : page.offset !== null ? `${n(pageNo)}쪽 · 다음 쪽 ${page.has_more ? "있음" : "없음"}` : null;
+  // 자리표시(같은 필터 안에서 검색·정렬·쪽을 바꿔 응답을 기다리는 동안 남긴 이전 결과)는 건수처럼 수를 말하지 않는다(2차 리뷰:
   // 문단·각주가 이전 결과의 「N개 맞음」을 지금 입력의 범위 이름으로 말했다 -- 아무도 확인하지 않은 수와 이유). settled = 지금
-  // 필터·검색의 응답일 때만의 봉투.
+  // 필터·검색·쪽의 응답일 때만의 봉투.
   const settled = targets.isPlaceholderData ? undefined : page;
-  const shownCount = full ? `${n(LIST_LIMIT)}개 이상` : `${n(rows.length)}개`;
+  // 창 안에서 맞는 수: 닿을 수 있는 수를 알면 그것(PV 필터만이면 창 안의 맞는 대상 전부), 모르면(창 밖 경로 일치를 끝까지 세지 않았다)
+  // 지금까지 본 수 + 「이상」.
+  const seen = offset + rows.length;
+  const shownCount = pageable !== null ? `${n(pageable)}개` : settled?.has_more ? `${n(seen)}개 이상` : `${n(seen)}개`;
   const pvWindowNote = settled === undefined || matched !== null ? null
     : !searchInWindow
       ? `${pvRange(settled.window_limit)} 안에서 ${shownCount} 맞음 — ${pvOver(settled.window_limit)} ${windowedTopic} 이 범위에서만 `
@@ -227,8 +253,34 @@ export function StoragePanel({
   const failedOnly = tab.unregistered !== null && tab.unregistered.target_count === 0;
   // 기록이 하나도 없다 = 검색도 필터도 없이 빈 목록. 필터가 켜진 빈 목록은 「필터에 맞는 대상이 없다」 -- 툴바(필터 줄)를 남겨
   // 풀 수 있게 한다.
-  const noRecords = page !== undefined && !targets.isPlaceholderData && rows.length === 0
+  const noRecords = page !== undefined && !targets.isPlaceholderData && rows.length === 0 && !beyond
     && searchQ === "" && input === "" && !filtersOn;
+
+  // 범위 밖 쪽 → 마지막 쪽(replace). 쪽 수를 모르면(null -- 서버가 경로 일치를 끝까지 세지 않았다; 범위 밖이면 끝까지 읽었으니 실제로는
+  // 수가 온다) 한 쪽씩 물러선다.
+  useEffect(() => {
+    if (settled === undefined || settled.offset === null || !beyond) return;
+    onPage?.(pageCountOf(settled.pageable_count) ?? Math.max(1, pageNo - 1), { replace: true });
+  }, [settled, beyond, pageNo]);  // eslint-disable-line react-hooks/exhaustive-deps
+
+  // 시트의 쪽 경계 이동(TargetSheet): 이웃 쪽을 같은 쿼리키로 받아(미리 받아 뒀으면 캐시 그대로) 그 쪽의 첫 행(다음)·끝 행(이전)과 쪽
+  // 번호를 한 번에 쓴다 -- 표가 빈 쪽을 거치지 않는다. 시트가 쪽의 첫·끝 행에 오면 그 이웃 쪽을 미리 받는다(prefetch).
+  const qc = useQueryClient();
+  const neighbor = (delta: -1 | 1) => scanTargetsOptions(filter, pageNo + delta);
+  const sheetEdge = async (delta: -1 | 1): Promise<string | null> => {
+    if (pageNo + delta < 1) return null;
+    try {
+      const next = await qc.fetchQuery(neighbor(delta));
+      const r = delta > 0 ? next.rows[0] : next.rows[next.rows.length - 1];
+      if (r === undefined) return null;
+      sheet.move(r.target, pageNo + delta);
+      return r.target;
+    } catch {
+      return null;
+    }
+  };
+  const sheetPrefetch = (delta: -1 | 1) => { if (pageNo + delta >= 1) void qc.prefetchQuery(neighbor(delta)); };
+  const paged = page !== undefined && page.offset !== null;
 
   return (
     <section ref={panelRef} tabIndex={-1} aria-label={storageLabel(storage)} className="space-y-4 outline-none">
@@ -258,7 +310,7 @@ export function StoragePanel({
           </div>
           {/* 검색·정렬을 바꾸는 동안(이전 행이 자리표시) 건수는 옛 목록의 것이라 말하지 않는다. */}
           <span className="order-3 basis-full whitespace-nowrap text-sm text-muted sm:order-2 sm:basis-auto">
-            {targets.isPlaceholderData ? "검색 중…" : countText}
+            {!targets.isPlaceholderData ? countText : (page?.filters.q ?? "") !== searchQ ? "검색 중…" : "불러오는 중…"}
           </span>
           {/* 375 는 아이콘 버튼(글자는 sr-only 로 남아 이름이 된다 -- 「내보내는 중…」도 낭독된다). */}
           <Button type="button" variant="outline" className="order-2 ml-auto gap-1.5 whitespace-nowrap py-1.5 sm:order-3"
@@ -281,7 +333,7 @@ export function StoragePanel({
           자리가 필터 합계가 된다(검색은 반영하지 않는다 -- 검색어가 있으면 줄이 그렇게 말한다). */}
       {tab.targetCount !== 0 && <TotalsLine storage={storage} now={now} attr={attr} searchQ={searchQ} />}
 
-      {targets.isLoading || (page === undefined && !targets.isError) ? (
+      {targets.isLoading || (page === undefined && !targets.isError) || (beyond && !targets.isError) ? (
         <div className="space-y-2.5 py-1">
           <span className="sr-only">불러오는 중…</span>
           {[0, 1, 2, 3].map((i) => <Skeleton key={i} className="h-5" />)}
@@ -321,6 +373,15 @@ export function StoragePanel({
         <TargetTable rows={rows} activeTarget={activeTarget} onOpen={sheet.open} buttonRefs={rowButtons}
                      sort={sort} order={order} onSort={onSort} now={now} pvDisplay={pvDisplay} highlight={highlight} />
       )}
+      {/* 쪽 넘김: 표(가로 스크롤 래퍼) 밖, 가운데 한 줄. 쪽 수 = 서버 pageable_count(모르면 「n쪽」 + 다음 쪽 있음만). 한 쪽이면 Pager 가
+          그리지 않는다. 옛 서버(offset 메아리 없음)는 1쪽만이라 그리지 않는다. */}
+      {/* 쪽을 넘기면 도구 줄(건수 = 지금 쪽 범위)이 보이게 올린다 -- 100행 표 아래의 Pager 를 누른 자리에 머물면 새 쪽의 첫 행이 화면
+          밖이다. 포커스는 누른 버튼에 그대로(연달아 넘길 수 있게). */}
+      {paged && rows.length > 0 && (
+        <Pager page={pageNo} pageCount={pageCountOf(page.pageable_count)} hasMore={page.has_more}
+               onPage={(p) => { onPage?.(p); toolbarRef.current?.scrollIntoView?.({ block: "nearest" }); }}
+               label="경로 목록 쪽" />
+      )}
       {targets.isError && page !== undefined && (
         <p className="text-sm text-bad">{`목록을 새로 고치지 못했습니다 — ${(targets.error as Error).message}`}</p>
       )}
@@ -339,7 +400,10 @@ export function StoragePanel({
 
       {/* 경로 상세 시트(?target=). 목록 밖 경로(옛 딥링크·검색으로 빠진 경로)도 target 만으로 열린다 -- 예전의 표 아래 폴백
           칸 대신 시트가 「지금 목록 밖」이라 말한다. 목록이 자리 잡기 전(첫 응답·자리표시)엔 그 판정을 미룬다. */}
-      <TargetSheet storage={storage} target={activeTarget} rows={rows} listSettled={settled !== undefined}
+      <TargetSheet storage={storage} target={activeTarget} rows={rows} listSettled={settled !== undefined && !beyond}
+                   offset={offset} total={page !== undefined && page.offset === null ? rows.length : pageable}
+                   prevPage={paged && pageNo > 1} nextPage={hasNextPage(pageNo, settled)}
+                   onEdge={sheetEdge} onPrefetch={sheetPrefetch}
                    pvDisplay={pvDisplay} onMove={sheet.move} onClose={sheet.close} onFilter={sheetFilter}
                    onCloseAutoFocus={returnFocus} />
     </section>

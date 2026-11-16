@@ -1030,7 +1030,10 @@ def test_batch_delete_lock_order_on_postgres(repos, db):
     locked = [re.search(r"FROM (\w+)", q).group(1) for q in spy.sql if q.rstrip().endswith("FOR UPDATE")]
     order = list(dict.fromkeys(locked))
     assert order[:4] == ["batch_items", "batches", "requests", "data_jobs"], locked
-    assert set(order[4:]) <= {"request_purges"}                       # 아웃박스 행(_enqueue)만 뒤에 온다
+    # 뒤에 오는 것: 아웃박스 행(_enqueue)과 배치 스케줄(2026-11-16 -- _audit_schedule_delete 가 스케줄을 지우기 전에 잠근다).
+    # 스케줄은 맨 끝이다 -- 스케줄 발사(항목 → 배치 → 스케줄 → 회차 이력)와 같은 방향(batches.BATCH_DELETE_TABLES 순서).
+    assert set(order[4:]) <= {"request_purges", "batch_schedules"}, locked
+    assert order[-1] == "batch_schedules", locked
 
 
 class _Counting:

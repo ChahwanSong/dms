@@ -1,4 +1,4 @@
-import type { RequestRow } from "../../lib/types";
+import type { BatchScheduleSummary, RequestRow } from "../../lib/types";
 import { REQUEST_TERMINAL_STATES } from "../../lib/jobState";
 import { isBatchTerminal } from "../batches/useBatches";
 
@@ -82,6 +82,9 @@ export interface BatchSummary {
   live: number;
   /** 성공 scan 잡을 가진 자식 수(확인 창의 사용량 경고). */
   scans: number;
+  /** 그 배치의 스케줄(2026-11-16) -- 배치 단위 삭제가 스케줄·회차 기록도 함께 지운다는 확인 창 안내의 재료. null·부재 = 없음
+   *  (구형 응답엔 키가 없다 -- 스케줄 테이블이 없는 서버라 지울 것도 없다). */
+  schedule?: BatchScheduleSummary | null;
 }
 /** 목록의 배치 묶음. 고를 수 있는 묶음(ok)만 수를 싣는다 -- 고를 수 없는 묶음은 수를 모를 수 있다(요약 없음, 상한을
  *  넘어 세기를 멈춤 -- 모름 ≠ 0 이라 0 으로 짓지 않는다). */
@@ -122,6 +125,7 @@ export function groupBatches(rows: RequestRow[]): Map<string, BatchGroup> {
       request_count: r.batch_request_count as number,
       live: r.batch_live_request_count as number,
       scans: r.batch_succeeded_scan_count as number,
+      schedule: r.batch_schedule ?? null,
     });
   }
   return groups;

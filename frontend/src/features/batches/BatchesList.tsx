@@ -9,6 +9,7 @@ import { Button } from "../../components/ui/Button";
 import { batchPillVariant, batchStatusLabel } from "../../lib/jobState";
 import { kstStampOrDash } from "../../lib/datetime";
 import { FOCUS_RING } from "../jobs/ui";
+import { batchStorageText } from "./batchView";
 
 // 「배치 생성」은 버튼 모양의 **링크**다(공용 Button primary 와 같은 모양 + 포커스 링). 2026-11-11: 예전엔 <Link><Button/></Link>
 // (a 안의 button — 중첩 대화형 요소)라 Tab 이 같은 이름에서 두 번 멈추고 보조기기는 링크·버튼 둘로 읽었다.
@@ -217,7 +218,9 @@ export function BatchesList() {
                 onChange={toggleAll} /></th>
             {/* 「진행」이 아니라 세 수의 이름(2026-11-11): 「1/1/2」를 「2개 중 1개 진행」으로 오독했다 — 상세 헤더의
                 「성공 x/실패 y/전체 z」와 같은 순서·뜻이다(취소 항목은 어느 칸에도 세지 않는다). */}
-            <th className="py-2">배치</th><th>이름</th><th>작업</th><th>상태</th><th>성공/실패/전체</th>
+            {/* 「대상 스토리지」는 「작업」 바로 오른쪽(2026-11-16 사용자 요청). */}
+            <th className="py-2">배치</th><th>이름</th><th>작업</th><th className="whitespace-nowrap">대상 스토리지</th>
+            <th>상태</th><th>성공/실패/전체</th>
             {/* 「최근 수행일」이 아니라 「최근 갱신」인 이유: 이 값(updated_at)은 실행
                 뿐 아니라 이름·메모 수정, 항목 편집, 취소까지 **모든 전이**가 민다 —
                 "수행"이라 부르면 마지막 실행 시각이라는 오독을 만든다. */}
@@ -246,7 +249,11 @@ export function BatchesList() {
                   <span className={`ml-1 text-xs ${b.operation === "rm" ? "text-bad" : "text-accent"}`}
                         title={b.operation === "rm" ? "미리보기가 끝나면 「배치 확인」 없이 삭제"
                           : "미리보기가 끝나면 「배치 확인」 없이 실행"}>자동</span>
-                )}</td><td><StatusPill state={b.status} variant={batchPillVariant(b.status)} label={batchStatusLabel(b.status)}
+                )}</td>
+                {/* 대상 스토리지: 일반 텍스트 td + title(전체 이름) -- td 안에 래퍼·버튼·flex 를 넣지 않는다(e2e L2: computed
+                    display=table-cell). 줄바꿈 없이 표의 가로 스크롤 래퍼(Table) 안에서 넘친다(문서 L1 아님). */}
+                <td className="whitespace-nowrap" title={batchStorageText(b) ?? undefined}>{batchStorageText(b) ?? "—"}</td>
+                <td><StatusPill state={b.status} variant={batchPillVariant(b.status)} label={batchStatusLabel(b.status)}
                                  help={batchStateHelp(b.status)} /></td>
                 <td className="text-muted"
                     title={`성공 ${b.succeeded_count} · 실패 ${b.failed_count} · 전체 ${b.item_count}`}>

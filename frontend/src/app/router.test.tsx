@@ -52,6 +52,27 @@ test("admin can open batches list", async () => {
   expect(await screen.findByRole("heading", { name: "배치 작업" })).toBeInTheDocument();
 });
 
+// 배치 스케줄러(2026-11-16): 사이드바 라벨 = h1 = 크럼 끝 「배치 스케줄러」(작업 그룹, 배치 작업 아래).
+test("admin can open batch scheduler", async () => {
+  server.use(
+    http.get("/api/auth/me", () => HttpResponse.json({ actor: "admin", role: "admin" })),
+    http.get("/api/admin/batch-schedules", () => HttpResponse.json([])),
+  );
+  renderAt("/admin/batch-schedules");
+  expect(await screen.findByRole("heading", { name: "배치 스케줄러", level: 1 })).toBeInTheDocument();
+  expect(await screen.findByText(/스케줄이 없습니다/)).toBeInTheDocument();
+  expect(screen.getByRole("navigation", { name: "breadcrumb" })).toHaveTextContent("HOME>DMS>작업>배치 스케줄러");
+});
+
+test("user visiting /admin/batch-schedules is redirected to /jobs", async () => {
+  server.use(
+    http.get("/api/auth/me", () => HttpResponse.json({ actor: "alice", role: "user" })),
+    http.get("/api/user/requests", () => HttpResponse.json([])),
+  );
+  renderAt("/admin/batch-schedules");
+  expect(await screen.findByRole("heading", { name: "전체 작업" })).toBeInTheDocument();
+});
+
 test("admin can open audit log", async () => {
   server.use(
     http.get("/api/auth/me", () => HttpResponse.json({ actor: "admin", role: "admin" })),

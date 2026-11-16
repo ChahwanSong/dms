@@ -46,6 +46,9 @@
   _read_top_summaries 를 storage-totals 와 함께 쓴다). 그래서 행 값 = 경로별에서 그 행의 filter 를 건 storage-totals 다(오라클 --
   usage_breakdown docstring, tests/test_api_usage_breakdown.py). 키가 필터 파라미터 규칙 밖인(변조·이상 DB 행) 묶음은 filter null
   행이다(링크 아님 -- filter_value_ok; /facets 도 같은 술어로 그 선택지를 뺀다, 2026-10-30 리뷰).
+- 쪽 넘김(2026-11-16 사용자 요청 「상위 100개만이 아니라 전체 목록 -- 몇백~몇천 개여도 버벅이지 않게」): /targets 의 offset(번호 쪽 --
+  포탈은 쪽당 100행). SQL·비지표 정렬은 바깥 ORDER BY 뒤 OFFSET(파티션을 자르지 않는다 -- 필터와 같은 이유), 지표 정렬·PV 경로는 창
+  안의 계산한 순서를 자른다. 봉투에 offset 메아리·has_more·pageable_count 가 붙는다(usage_targets). 내보내기는 그대로 전부(상한 창).
 - **옛 탭 호환 동결**: scan-targets·export 는 본문을 바꾸지 않는다(봉투 없는 배열이라 메아리를 실을 자리가 없다 -- 옛 탭 JS 가
   그 모양을 읽는다; tests/test_usage_equivalence.py 가 바이트를 고정한다). 새 포탈은 /targets 를 쓴다 -- 다음 정리 때 제거한다
   (docs/BACKLOG.md).
@@ -84,6 +87,9 @@ router = APIRouter(dependencies=[Depends(require_admin)])
 # 차트에 정직하게 그릴 수 있는 밀도의 상한(그 이상은 어차피 겹쳐 안 보인다).
 _MAX_POINTS = 60
 _TARGET_LIMIT = 200
+# 목록 쪽 offset 상한(2026-11-16) -- 대상 수가 닿을 수 없는 값. 상한이 없으면 큰 정수가 sqlite(정수 넘침)·PG(bigint 범위)에서
+# 500 이 된다 -- 입력 오류는 422 다(dms-ssc 라인과 같은 값).
+_OFFSET_MAX = 1_000_000_000
 # 창 상한(2026-10-20 사용자 요청: 「서버의 스캔 상한선도 5천개에서 1만개로」) -- 지표 정렬(bytes·files·hot)의 대상 창과
 # 내보내기 상한에 함께 쓴다(2026-10-29 부터 PV 필터의 판정 창·/facets·필터 합계의 창도, 2026-10-30 부터 소속별의 창도).
 # 전 타깃이 계약이지만 무한은 아니다 -- 내보내기는 넘으면 잘라 내고 truncated(알려진 일치를 잘랐으면 capped 도)로 말한다(조용한 절단 금지), 포탈은 /targets 봉투의
@@ -564,14 +570,25 @@ def _window_order(heads: list, sort: str, order: str) -> list:
 
 
 def _select_heads(repos, *, base: str, unreadable: set, storage: str, path: "str | None", requester: "str | None",
-                  pvf: PvFilter, order: str, sort: str, limit_rows: int, tokens=()) -> tuple:
-    """필터에 맞는 머리를 요청한 순서로 최대 limit_rows 개 → (heads, matched_count | None, window_truncated, capped, attrs). 목록·
-    내보내기·합계가 이 한 벌을 쓴다. attrs = 이 함수가 판정한 대상의 소속(target → usage_attribution.attribute) -- SQL 경로는 비어 있다.
-    tokens = 검색(q)의 토큰(search_tokens -- 빈 것 = 검색 없음, 합계는 넘기지 않는다). capped = **알려진** 맞는 대상이 돌려준 것보다
-    많다(limit_rows 또는 지표 정렬의 창에서 잘랐다 -- 2026-10-29 2차 리뷰): SQL 경로는 matched_count > 행 수, PV 경로는 판정한 결과가
-    limit_rows 를 넘음. 창이 넘쳐 판정하지 않은 대상(모름)은 세지 않는다 -- 그건 window_truncated 의 몫이다. 창 넘침이 아닌 PV 경로의
+                  pvf: PvFilter, order: str, sort: str, limit_rows: int, tokens=(), offset: int = 0) -> tuple:
+    """필터에 맞는 머리를 요청한 순서로 offset 개 건너 최대 limit_rows 개 → (heads, matched_count | None, window_truncated, capped,
+    attrs, pageable). 목록·내보내기·합계가 이 한 벌을 쓴다(내보내기·합계는 offset 0). attrs = 이 함수가 판정한 대상의 소속(target →
+    usage_attribution.attribute) -- SQL 경로는 비어 있다. tokens = 검색(q)의 토큰(search_tokens -- 빈 것 = 검색 없음, 합계는 넘기지
+    않는다). capped = **알려진** 맞는 대상이 offset + 돌려준 것보다 많다(limit_rows 또는 지표 정렬의 창에서 잘랐다 -- 2026-10-29 2차
+    리뷰; 2026-11-16 부터 /targets 의 has_more): SQL 경로는 matched_count > offset + 행 수, PV 경로는 판정한 결과가 offset + limit_rows 를
+    넘음. 창이 넘쳐 판정하지 않은 대상(모름)은 세지 않는다 -- 그건 window_truncated 의 몫이다. 창 넘침이 아닌 PV 경로의
     내보내기(limit_rows = 창)는 잘릴 수 없고, 창 밖 경로 일치를 더하는 _with_path_hits 만 상한을 넘길 수 있다(내보내기가 이 둘을 따로
     말한다 -- export_targets).
+
+    쪽 넘김(2026-11-16 사용자 요청 「상위 100개만이 아니라 전체 목록 -- 몇백~몇천 개여도 버벅이지 않게」): offset 은 **요청한 순서**의
+    위치다. SQL·비지표 정렬은 바깥 ORDER BY 뒤 OFFSET(scan_target_heads -- 파티션을 자르지 않는다), 지표 정렬·PV 경로는 계산한 순서
+    목록(창 ≤ _WINDOW_LIMIT)을 [offset:offset+limit_rows] 로 자른다(비용은 1쪽과 같다 -- 창 계산이 지배; 창 끝을 넘은 쪽은 지표 값
+    계산을 건너뛴다). pageable = 이 정렬로 쪽을 넘겨 닿을 수 있는 행 수 -- 포탈의 마지막 쪽 계산(null = 모름, 0 으로 접지 않는다):
+    SQL·비지표 = matched_count, SQL·지표 = 창 크기(min(matched, _WINDOW_LIMIT) -- 창 밖은 이 정렬의 어느 쪽에도 없다), PV 경로 = 판정한
+    결과 수(창이 넘쳐도 판정한 결과는 셀 수 있다 -- 순서 목록 전부가 그것이다), _with_path_hits 의 첫 갈래만 경로 일치를 끝까지 읽지
+    않았으면 null(has_more 로만 말한다). matched_count 는 COUNT(*) OVER () 라 행에 붙어 오는데 범위 밖 쪽(데이터가 줄었거나 ?page=
+    딥링크)이면 행이 0 개라 값도 사라진다 -- 그때는 같은 필터로 첫 행 하나를 다시 물어 구한다(2026-11-16 설계 비판 -- 사라진 값을 0 으로
+    접으면 「전체 0개」·마지막 쪽 당김 근거 없음이 된다). 다시 물어도 0 행이면 그때의 0 은 정상값이다(맞는 대상이 정말 없다).
 
     - SQL 경로(PV 축·구분이 없고, 검색이 없거나 그 스토리지에 PV 이름이 생길 수 없음 -- may_attribute_pv False): path·requester·
       검색 토큰(경로만 -- scan_target_heads(tokens=))은 SQL 의 LIMIT 앞이라 정확하다. matched_count = COUNT(*) OVER()(필터에 맞는
@@ -590,15 +607,26 @@ def _select_heads(repos, *, base: str, unreadable: set, storage: str, path: "str
     pv_search = bool(tokens) and may_attribute_pv(repos, storage)
     flt = {"storage": storage, "path": path, "requester": requester,
            "tokens": list(tokens) if tokens and not pv_search else None}
+    end = offset + limit_rows
     if not pvf.active and not pv_search:
         if metric:
             window = repos.data_jobs.scan_target_heads(**flt, order="desc", limit=_WINDOW_LIMIT, with_matched=True)
-            heads = _metric_order(repos, base, window, sort, order, unreadable)[:limit_rows]
+            heads = (_metric_order(repos, base, window, sort, order, unreadable)[offset:end] if offset < len(window)
+                     else [])
+            matched = window[0]["matched_count"] if window else 0
+            pageable = len(window)
         else:
-            window = heads = repos.data_jobs.scan_target_heads(**flt, order=order, sort=sort, limit=limit_rows,
-                                                               with_matched=True)
-        matched = window[0]["matched_count"] if window else 0
-        return heads, matched, False, matched > len(heads), {}
+            heads = repos.data_jobs.scan_target_heads(**flt, order=order, sort=sort, limit=limit_rows, offset=offset,
+                                                      with_matched=True)
+            if heads:
+                matched = heads[0]["matched_count"]
+            elif offset > 0:
+                probe = repos.data_jobs.scan_target_heads(**flt, order=order, sort=sort, limit=1, with_matched=True)
+                matched = probe[0]["matched_count"] if probe else 0
+            else:
+                matched = 0
+            pageable = matched
+        return heads, matched, False, matched > offset + len(heads), {}, pageable
     cand = repos.data_jobs.scan_target_heads(**flt, order="desc", limit=_WINDOW_LIMIT + 1)
     window_truncated = len(cand) > _WINDOW_LIMIT
     cand = cand[:_WINDOW_LIMIT]
@@ -607,44 +635,53 @@ def _select_heads(repos, *, base: str, unreadable: set, storage: str, path: "str
     kept = [h for h in cand if matches(attrs[h["target"]], pvf, inputs.users)
             and (not pv_search or search_matches(h["target"], attrs[h["target"]], tokens))]
     if pv_search and window_truncated:
-        ordered, cut = _with_path_hits(repos, base=base, unreadable=unreadable, storage=storage,
-                                       flt={**flt, "tokens": list(tokens)}, pvf=pvf, order=order, sort=sort,
-                                       limit_rows=limit_rows, window=cand, kept=kept, attrs=attrs)
-        return ordered[:limit_rows], None, True, cut or len(ordered) > limit_rows, attrs
-    ordered = (_metric_order(repos, base, kept, sort, order, unreadable) if metric
-               else _window_order(kept, sort, order))
-    return (ordered[:limit_rows], (None if window_truncated else len(kept)), window_truncated, len(ordered) > limit_rows,
-            attrs)
+        ordered, cut, complete = _with_path_hits(repos, base=base, unreadable=unreadable, storage=storage,
+                                                 flt={**flt, "tokens": list(tokens)}, pvf=pvf, order=order, sort=sort,
+                                                 limit_rows=limit_rows, offset=offset, window=cand, kept=kept,
+                                                 attrs=attrs)
+        return (ordered[offset:end], None, True, cut or len(ordered) > end, attrs,
+                len(ordered) if complete else None)
+    if metric and offset >= len(kept):
+        ordered = kept                      # 창 끝을 넘은 쪽 -- 지표 값 계산을 건너뛴다(어차피 빈 쪽, 순서는 상관없다)
+    else:
+        ordered = (_metric_order(repos, base, kept, sort, order, unreadable) if metric
+                   else _window_order(kept, sort, order))
+    return (ordered[offset:end], (None if window_truncated else len(kept)), window_truncated, len(ordered) > end,
+            attrs, len(ordered))
 
 
 def _with_path_hits(repos, *, base: str, unreadable: set, storage: str, flt: dict, pvf: PvFilter, order: str, sort: str,
-                    limit_rows: int, window: list, kept: list, attrs: dict) -> tuple:
+                    limit_rows: int, window: list, kept: list, attrs: dict, offset: int = 0) -> tuple:
     """PV 이름까지 보는 검색의 판정 창이 넘쳤을 때(2026-10-29 리뷰): 창 안의 결과(kept -- 최근 스캔 순)에 **창 밖의 경로 일치**(모든
     토큰이 경로에 든 대상 -- flt 의 tokens 를 실은 scan_target_heads, SQL 이라 창과 무관)를 더해 요청한 순서로 놓는다. 포탈이 path 대신
     q 를 보내면서 경로로 찾던 오래된 대상이 창 밖이라 안 걸렸다(예전 path 는 SQL 의 LIMIT 앞이라 정확했다 -- 사용자 요청은 「경로로
     검색할 뿐 아니라」) -- 이제 판정 창에 묶이는 것은 PV 이름이 있어야 맞는 대상뿐이다(그래서 맞는 수는 여전히 모름). attrs 에 새로
     판정한 소속을 더한다.
 
-    - PV 축·구분이 없고 정렬이 last_scan·scans: 창 밖 일치를 요청한 정렬 그대로 limit_rows(+ 1, 아래 →) 개 SQL 로 읽어 _merge_outside 로
-      합친다.
-      맞는 대상의 앞 limit_rows 개는 「창 안 결과 ∪ 경로 일치의 앞 limit_rows 개」 안에 있다(경로 일치 중 그 밖의 것 앞에는 맞는
-      대상이 이미 limit_rows 개다) -- 경로 일치 수와 무관하게 예전 path 와 같은 순서·같은 앞부분이다.
+    - PV 축·구분이 없고 정렬이 last_scan·scans: 창 밖 일치를 요청한 정렬 그대로 offset + limit_rows(+ 1, 아래 →) 개 SQL 로 읽어
+      _merge_outside 로 합친다.
+      맞는 대상의 앞 K 개는 「창 안 결과 ∪ 경로 일치의 앞 K 개」 안에 있다(경로 일치 중 그 밖의 것 앞에는 맞는 대상이 이미 K 개다 --
+      창 안의 경로 일치는 PV 필터가 없으니 모두 창 안 결과다) -- 경로 일치 수와 무관하게 예전 path 와 같은 순서·같은 앞부분이다.
     - 그 밖(PV 축·구분 -- 창 밖 대상도 소속을 판정해야 한다, 또는 지표 정렬 -- 맞는 대상 중 최근 창 안에서 정렬한다): 경로 일치끼리의
       최근 스캔 순 창(_WINDOW_LIMIT -- 예전 「path + PV 필터」의 판정 창과 같다)에서 창 밖 대상을 PV 필터로 거르고 최근 스캔 순으로
       이어 붙인다(창은 최근 스캔 순의 앞부분이라 창 안의 어느 대상도 창 밖의 어느 대상보다 그 순서에서 앞이다 -- 이어 붙인 것이 곧
       최근 스캔 순이다). 지표 정렬은 그 앞 _WINDOW_LIMIT 개(SQL 경로의 「맞는 대상 중 최근 N개 안에서 정렬」과 같은 범위).
 
-    → (ordered, cut). 호출자는 ordered 를 limit_rows 에서 자르고 capped = cut 또는 len(ordered) > limit_rows 다(_select_heads -- 알려진
-    맞는 대상을 잘랐나, 2026-10-29 2차 리뷰: 내보내기의 상한 = 창이라 경로 일치를 더하면 넘을 수 있다). 그래서 경로 일치는 **하나 더**
-    읽는다 -- 첫 갈래는 limit_rows + 1 개(앞 limit_rows 개의 순서는 그대로다: 위 논증이 어느 앞부분에도 선다)라 len(ordered) 가 상한을
-    넘는 것으로 더 있음을 안다(창 안에 맞는 것이 없으면 ordered 가 꼭 limit_rows 개라 하나 덜 읽으면 못 안다). 둘째 갈래는 경로 일치끼리의
-    창(_WINDOW_LIMIT)을 넘었는지 보려고 + 1 개를 읽고 창은 그대로 쓴다: PV 필터가 없으면 그 밖의 경로 일치도 맞는 대상이라 cut 이고
-    (지표 정렬이 앞 _WINDOW_LIMIT 개로 자른 것도 cut), PV 필터가 있으면 그 밖은 판정하지 않은 것(모름)이라 cut 이 아니다."""
+    → (ordered, cut, complete). 호출자는 ordered 를 [offset:offset+limit_rows] 로 자르고 capped = cut 또는 len(ordered) > offset +
+    limit_rows 다(_select_heads -- 알려진 맞는 대상을 잘랐나, 2026-10-29 2차 리뷰: 내보내기의 상한 = 창이라 경로 일치를 더하면 넘을 수
+    있다). 그래서 경로 일치는 **하나 더** 읽는다 -- 첫 갈래는 offset + limit_rows + 1 개(앞 offset + limit_rows 개의 순서는 그대로다: 위
+    논증이 어느 앞부분에도 선다 -- 2026-11-16 쪽 넘김은 앞부분을 쪽 끝까지 늘릴 뿐이다)라 len(ordered) 가 쪽 끝을 넘는 것으로 더 있음을
+    안다(창 안에 맞는 것이 없으면 ordered 가 꼭 쪽 끝만큼이라 하나 덜 읽으면 못 안다). 둘째 갈래는 경로 일치끼리의 창(_WINDOW_LIMIT)을
+    넘었는지 보려고 + 1 개를 읽고 창은 그대로 쓴다: PV 필터가 없으면 그 밖의 경로 일치도 맞는 대상이라 cut 이고(지표 정렬이 앞
+    _WINDOW_LIMIT 개로 자른 것도 cut), PV 필터가 있으면 그 밖은 판정하지 않은 것(모름)이라 cut 이 아니다. complete = ordered 가 이 정렬로
+    닿을 수 있는 행 **전부**인가(_select_heads 의 pageable): 둘째 갈래는 늘 그렇고, 첫 갈래는 읽은 경로 일치가 요청한 수보다 적을 때만
+    (경로 일치를 끝까지 읽었다)."""
     inside = {h["target"] for h in window}
     if not pvf.active and sort not in METRIC_SORTS:
-        outside = [h for h in repos.data_jobs.scan_target_heads(**flt, order=order, sort=sort, limit=limit_rows + 1)
-                   if h["target"] not in inside]
-        return _merge_outside(_window_order(kept, sort, order), outside, sort, order), False
+        want = offset + limit_rows + 1
+        hits = repos.data_jobs.scan_target_heads(**flt, order=order, sort=sort, limit=want)
+        outside = [h for h in hits if h["target"] not in inside]
+        return _merge_outside(_window_order(kept, sort, order), outside, sort, order), False, len(hits) < want
     hits = repos.data_jobs.scan_target_heads(**flt, order="desc", limit=_WINDOW_LIMIT + 1)
     beyond = len(hits) > _WINDOW_LIMIT and not pvf.active
     extra = [h for h in hits[:_WINDOW_LIMIT] if h["target"] not in inside]
@@ -655,8 +692,8 @@ def _with_path_hits(repos, *, base: str, unreadable: set, storage: str, flt: dic
     merged = kept + extra
     if sort in METRIC_SORTS:
         return (_metric_order(repos, base, merged[:_WINDOW_LIMIT], sort, order, unreadable),
-                beyond or len(merged) > _WINDOW_LIMIT)
-    return _window_order(merged, sort, order), beyond
+                beyond or len(merged) > _WINDOW_LIMIT, True)
+    return _window_order(merged, sort, order), beyond, True
 
 
 def _merge_outside(inside: list, outside: list, sort: str, order: str) -> list:
@@ -715,6 +752,7 @@ def usage_targets(request: Request, storage: str = Query(..., max_length=512, pa
                   q: "str | None" = Query(None, max_length=512, pattern=_NO_NUL),
                   order: str = Query("desc", pattern=_ORDER),
                   limit: int = Query(100, ge=1, le=_TARGET_LIMIT),
+                  offset: int = Query(0, ge=0, le=_OFFSET_MAX),
                   sort: str = Query("last_scan", pattern=SORT_PATTERN),
                   flt: AttrFilter = Depends(_filter_params)):
     """사용량 목록(새 포탈 -- scan-targets 의 뒤를 잇는 봉투). storage 필수(정확 일치, 빈 문자열도 이름), path 는 scan-targets 와
@@ -722,20 +760,31 @@ def usage_targets(request: Request, storage: str = Query(..., max_length=512, pa
     빈 값·공백뿐 = 없음, path 와 함께 걸린다), 필터는 _filter_params. 응답: {rows:[{storage_name, target, scan_count, first_scan_at,
     last_scan_at, latest, pv:{source, root, volumes, users}}], matched_count(필터에 맞는 대상 수 -- null = 창이 넘쳐 모름),
     window_limit, window_truncated(PV 축·PV 이름 검색 판정이 최근 스캔 순 창 안에서만 이뤄졌나), filters(서버가 적용한 값의 메아리 --
-    q 포함)}. 행의 pv 는 필터가 없어도 싣는다(반환 행 ≤ _TARGET_LIMIT 만 판정한다). 정렬·latest 규칙은 scan-targets 그대로다."""
+    q 포함), offset, has_more, pageable_count}. 행의 pv 는 필터가 없어도 싣는다(반환 행 ≤ _TARGET_LIMIT 만 판정한다). 정렬·latest
+    규칙은 scan-targets 그대로다.
+
+    쪽 넘김(2026-11-16 사용자 요청 「스토리지를 누르면 상위 100개만 보인다 -- 전체 목록이, 몇백~몇천 개여도 버벅이지 않게」): offset =
+    요청한 순서에서 건너뛸 행 수(0 이상 _OFFSET_MAX 이하 -- 밖이면 422). 응답의 offset 은 받은 값의 메아리다 -- 롤링 배포 중 옛 파드는
+    offset 을 모르는 파라미터로 무시하고 1쪽을 주는데, 메아리가 없으면 포탈이 그것을 알아챈다(「2쪽」 버튼이 1쪽 행을 보이는 조용한
+    거짓 방지). has_more = 이 순서에서 offset + 행 수 뒤에 **알려진** 맞는 대상이 더 있다(_select_heads 의 capped -- 지표 정렬은 창 밖의
+    맞는 대상도 세므로 쪽으로 닿지 않을 수 있다: 포탈은 pageable_count 가 수이면 그것으로 경계를 정한다). pageable_count = 이 정렬로 쪽을
+    넘겨 닿을 수 있는 행 수(마지막 쪽 계산용, null = 모름 -- _select_heads). 범위 밖 offset 은 rows [] · has_more false 이고
+    pageable_count 는 그대로 실어 포탈이 마지막 쪽으로 당길 수 있게 한다. 리포트 요약·소속 판정(_with_latest·_attach_attrs)은 지금처럼
+    반환하는 쪽의 행에만 돈다(쪽당 최대 limit 개)."""
     repos = request.app.state.repos
     path, q = path or None, q or None
     base = _base(request)
     unreadable: set = set()
-    heads, matched, window_truncated, _, attrs = _select_heads(
+    heads, matched, window_truncated, has_more, attrs, pageable = _select_heads(
         repos, base=base, unreadable=unreadable, storage=storage, path=path, requester=flt.requester, pvf=flt.pv,
-        order=order, sort=sort, limit_rows=limit, tokens=search_tokens(q))
+        order=order, sort=sort, limit_rows=limit, tokens=search_tokens(q), offset=offset)
     attrs = _attach_attrs(repos, storage, heads, attrs)
     rows = _with_latest(repos, base, heads, skip=unreadable)
     for row in rows:
         row["pv"] = attrs[row["target"]]
     return {"rows": rows, "matched_count": matched, "window_limit": _WINDOW_LIMIT,
-            "window_truncated": window_truncated, "filters": _echo(storage, path, q, flt)}
+            "window_truncated": window_truncated, "filters": _echo(storage, path, q, flt),
+            "offset": offset, "has_more": has_more, "pageable_count": pageable}
 
 
 @router.get("/api/admin/usage/targets/export")
@@ -757,7 +806,7 @@ def export_targets(request: Request, storage: str = Query(..., max_length=512, p
     path, q = path or None, q or None
     base = _base(request)
     unreadable: set = set()
-    heads, matched, window_truncated, capped, attrs = _select_heads(
+    heads, matched, window_truncated, capped, attrs, _ = _select_heads(
         repos, base=base, unreadable=unreadable, storage=storage, path=path, requester=flt.requester, pvf=flt.pv,
         order=order, sort=sort, limit_rows=_WINDOW_LIMIT, tokens=search_tokens(q))
     truncated = window_truncated or capped
@@ -907,7 +956,7 @@ def storage_totals(request: Request, storage: str = Query(..., max_length=512, p
             filesystem = storage_filesystem(
                 storage, repos.agents.list_nodes(stale_seconds=settings.agent_report_stale_seconds))
         return {**body, "filesystem": filesystem}
-    heads, _, window_truncated, capped, _ = _select_heads(
+    heads, _, window_truncated, capped, _, _ = _select_heads(
         repos, base=_base(request), unreadable=set(), storage=storage, path=None, requester=flt.requester, pvf=flt.pv,
         order="desc", sort="last_scan", limit_rows=_WINDOW_LIMIT)
     truncated = window_truncated or capped
@@ -1259,7 +1308,13 @@ def scan_history(request: Request, storage: str = Query(..., max_length=512, pat
     그대로 그린다. 성공 scan 이 없으면 빈 points(정상값)다: 목록 화면의 빈
     상태이지 오류가 아니다(404 로 접으면 "타깃이 사라졌다"와 구별 불능).
     storage 는 /targets 와 같은 규칙(_NO_NUL, 2026-11-11): 빈 문자열도 이름이다 -- 예전 min_length=1 이라 빈 이름 탭
-    (변조·구형 행, 목록·합계·CSV 는 storage="" 정확 일치로 선다)에서 행을 열면 상세 시트가 늘 422 였다."""
+    (변조·구형 행, 목록·합계·CSV 는 storage="" 정확 일치로 선다)에서 행을 열면 상세 시트가 늘 422 였다.
+
+    latest_job_id(2026-11-16): 이 대상의 가장 최근 성공 scan 의 job_id -- 리포트를 읽었는지와 무관하다(succeeded_scans_for_target 의 첫
+    행 -- `updated_at DESC, job_id DESC` 라 목록 머리(scan_target_heads)의 최신 판정과 같은 근거). 성공 scan 이 없으면 null. 왜: 목록이
+    쪽으로 나뉘면서 다른 쪽의 경로를 딥링크·이웃 이동으로 열면 시트에 목록 행(latest)이 없다 -- 포탈은 이력의 가장 늦은 **읽힌** 포인트로
+    「최신 scan」 차트를 대신하는데, 최신 리포트를 못 읽었으면(이력은 skipped 로 뺀다) 더 오래된 scan 을 최신이라 그리게 된다. 포탈은
+    그 포인트의 job_id 가 이 값과 다르면 차트 대신 「최신 scan 리포트를 읽지 못했습니다」라고 말한다."""
     repos = request.app.state.repos
     rows = repos.data_jobs.succeeded_scans_for_target(storage, target, limit=limit)
     digests = _digests(repos, _base(request), rows)
@@ -1284,4 +1339,5 @@ def scan_history(request: Request, storage: str = Query(..., max_length=512, pat
             # 창 고지(2026-08-23 리뷰): 이력은 최신 limit 건 창이다. 행 수가 창을
             # 꽉 채웠으면 그 너머가 있을 수 있다 -- 화면이 "전체 이력"인 척하면
             # 타깃 목록의 전수 scan_count 와 한 화면에서 모순된다.
-            "window_limit": limit, "window_full": len(rows) == limit}
+            "window_limit": limit, "window_full": len(rows) == limit,
+            "latest_job_id": rows[0]["job_id"] if rows else None}

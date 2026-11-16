@@ -136,6 +136,55 @@ def _apply_migrations(db: Database) -> None:
         # 전체 스캔 200회가 된다(idx_data_jobs_request·idx_plans_request 와 같은 이유). batch_items.request_id 는
         # 테이블 첫 판부터 있던 컬럼이라 CREATE 목록에 바로 둔다.
         "CREATE INDEX IF NOT EXISTS idx_batch_items_request ON batch_items (request_id)",
+        # 배치 스케줄러(2026-11-16, repositories/batch_schedules.py · batch_scheduler.py): 배치당 스케줄 하나(UNIQUE batch_id --
+        # 두 스케줄이 서로의 회차를 건너뛰게 만드는 혼란을 막는다). 정해진 KST 시각에 컨트롤러 batch-scheduler 루프가 그
+        # 배치의 「전체 재실행」을 한다. 시각은 UTC …Z 문자열(db.utc_now_iso 형식 -- 문자열 비교 = 시간 비교).
+        #   kind/spec           daily|weekly|monthly|interval + JSON(batch_scheduler.validate_schedule 가 정규화한 모양)
+        #   enabled/next_run_at 꺼지면(사람 끄기·자동 일시정지) next_run_at NULL. due 질의 = (enabled, next_run_at) 인덱스
+        #   armed_by            마지막으로 특권 3중 게이트를 통과해 생성·수정·켜기 한 사람 -- 회차마다 자격을 다시 본다
+        #   ack_fingerprint     파괴적 스케줄(rm, delete 켠 sync)의 동의 시점 배치 지문(그 밖 NULL) -- 다르면(NULL 포함, 무장 뒤
+        #                       파괴적이 된 배치) 회차가 멈춘다
+        #   last_outcome        fired|skipped|missed|paused, last_reason_code 와 함께 마지막 판정
+        #   paused_reason_code  자동 일시정지 사유(사람이 끄면 NULL)
+        # request_id·job_id 이름의 컬럼을 두지 않는다(요청 삭제 그물 밖이 정상) -- batch_id 로 배치 삭제 두 경로가 함께 지운다
+        # (repositories/batches.BATCH_DELETE_TABLES). 새 테이블이라 _ensure_columns 불필요.
+        """CREATE TABLE IF NOT EXISTS batch_schedules (
+            schedule_id TEXT PRIMARY KEY,
+            batch_id TEXT NOT NULL UNIQUE,
+            kind TEXT NOT NULL,
+            spec TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            next_run_at TEXT,
+            armed_by TEXT NOT NULL,
+            ack_fingerprint TEXT,
+            created_by TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            last_run_at TEXT,
+            last_outcome TEXT,
+            last_reason_code TEXT,
+            paused_reason_code TEXT)""",
+        "CREATE INDEX IF NOT EXISTS idx_batch_schedules_due ON batch_schedules (enabled, next_run_at)",
+        # 회차 이력(스케줄당 최근 200건 -- INSERT 와 같은 트랜잭션에서 정리). fired 행은 리셋이 0 으로 만드는 직전 회차 결과
+        # (prev_*)와 되돌린 항목 수(requeued)를 남긴다. NULL = 그 판정에 해당 없음(건너뜀엔 리셋이 없다 -- 0 이 아니다).
+        f"""CREATE TABLE IF NOT EXISTS batch_schedule_runs (
+            run_id {auto_pk},
+            schedule_id TEXT NOT NULL,
+            batch_id TEXT NOT NULL,
+            scheduled_for TEXT NOT NULL,
+            at TEXT NOT NULL,
+            outcome TEXT NOT NULL,
+            reason_code TEXT,
+            batch_status TEXT,
+            requeued INTEGER,
+            prev_status TEXT,
+            prev_item_count INTEGER,
+            prev_succeeded INTEGER,
+            prev_failed INTEGER)""",
+        "CREATE INDEX IF NOT EXISTS idx_batch_schedule_runs_schedule ON batch_schedule_runs (schedule_id, run_id)",
+        # 배치 삭제 두 경로(BatchesRepository.delete·RequestPurgesRepository.delete_batch)의 DELETE … WHERE batch_id 가 항목·배치
+        # 행을 잠근 채 돈다 -- 위 인덱스는 schedule_id 가 앞이라 쓸 수 없어 PG 가 회차 이력 전체(스케줄당 최대 200행)를 훑었다.
+        "CREATE INDEX IF NOT EXISTS idx_batch_schedule_runs_batch ON batch_schedule_runs (batch_id)",
         """CREATE TABLE IF NOT EXISTS plans (
             plan_id TEXT PRIMARY KEY,
             request_id TEXT NOT NULL,

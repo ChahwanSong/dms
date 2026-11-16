@@ -340,14 +340,21 @@ def list_requests(request: Request, identity: Identity = Depends(require_user),
     # 단건 행(batch_id NULL)과 비관리자 응답엔 키가 없다. batch_id "" 도 열쇠다(is not None -- truthy 검사 금지).
     # 자식 수는 배치 단위 삭제의 상한 + 1 에서 세기를 멈춘다(폴링마다 큰 배치의 자식 전부를 세지 않는다 --
     # list_summaries docstring).
+    # batch_schedule(2026-11-16 배치 스케줄러): 그 배치의 스케줄 요약 | null(스케줄 없음) -- 배치 상세의 schedule 과 같은 모양
+    # (BatchSchedulesRepository.summaries_for, 한 쪽에 질의 한 번). 배치 단위 삭제(request_purges.delete_batch)는 같은
+    # 트랜잭션에서 스케줄·회차 이력을 함께 지우므로, 확인 창이 그 사실을 말할 재료다(배치 상세의 기록 삭제 창과 같은 안내).
     if identity.role == "admin":
         bids = list(dict.fromkeys(r["batch_id"] for r in rows if r["batch_id"] is not None))
         if bids:
             summaries = repos.batches.list_summaries(bids, cap=MAX_BATCH_DELETE_CHILDREN)
+            schedules = repos.batch_schedules.summaries_for(bids)
             for row in rows:
-                s = summaries.get(row["batch_id"]) if row["batch_id"] is not None else None
+                if row["batch_id"] is None:
+                    continue
+                s = summaries.get(row["batch_id"])
                 if s is not None:
                     row.update(s)
+                row["batch_schedule"] = schedules.get(row["batch_id"])
     return rows
 
 

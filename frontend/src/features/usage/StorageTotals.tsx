@@ -1,6 +1,5 @@
 import { useId } from "react";
 import { HelpTip } from "../../components/ui/HelpTip";
-import { SizeDistribution } from "../../components/ui/SizeDistribution";
 import type { UsageAttrFilter, UsageStorageFilesystem, UsageStorageTotals, UsageTotalMetric } from "../../lib/types";
 import { agoText, ageDays, kstStampOrDash } from "../../lib/datetime";
 import { pctText } from "../../lib/sizeBuckets";
@@ -8,6 +7,7 @@ import { INVALID_NAMES_HELP, INVALID_NAMES_LABEL } from "../../lib/scanCounters"
 import { hasAttr, useStorageTotals } from "./useUsage";
 import { attrSummary } from "./UsageFilters";
 import { HOT_AGE_MAX_DAYS, humanBytes } from "./usageStats";
+import { SizeHistogram } from "./ScanHistograms";
 import { SIZE_HELP, SectionHead, Stat } from "./UsageParts";
 import { staleClass } from "./TargetTable";
 
@@ -24,6 +24,9 @@ import { staleClass } from "./TargetTable";
 // 모양은 경로 상세의 「최신 scan」 블록과 같은 문법(수치 dl | 파일 크기 분포, lg 에서 나란히) -- 타일·그림자 없이(카드 안의 카드
 // 금지, 2026-10-20 정리). null ≠ 0: 값을 모르면 「—」, 모름을 뺀 합은 하한이라 값 뒤에 흐린 「이상」. 대상 0 이면 블록이 없다
 // (「0 B」는 「모름」을 0 으로 그리는 거짓 -- 빈 상태 안내가 이미 말한다).
+// 파일 크기 분포(2026-11-16): 경로 상세·배치 scan 항목과 같은 세로 막대 차트(ScanHistograms.SizeHistogram -- 사용자 「다르게 보일 이유가
+// 없다」; 예전 가로 막대 목록 SizeDistribution 을 대신한다). 합계의 버킷도 경로마다 최신 scan 의 분포를 더한 같은 모양이다. 버킷 값이
+// 하나라도 빠지면 차트 대신 「모름」 한 줄(null≠0), 분포가 없으면(읽는 중·아는 대상 없음) 아래 문구 한 줄.
 //
 // 파일시스템(df)은 에이전트가 노드에서 잰 statvfs -- scan 하지 않은 경로·다른 스토리지·예약 블록이 섞여 scan 합계와 기준이 다르다.
 // 비율로 엮지 않고 나란히만 보인다. 여러 스토리지가 한 파일시스템일 수 있어 스토리지끼리 더하지 않는다(서버 계약).
@@ -223,9 +226,9 @@ export function StorageTotals({ storage, now, attr }: { storage: string; now: nu
             <span className="text-xs text-muted">{`대상 ${count(size?.known).toLocaleString("ko-KR")}개 기준`}</span>
           )}
         </SectionHead>
-        <SizeDistribution buckets={size?.buckets} labelledBy={sizeId}
-                          missingText={reading && count(size?.known) === 0
-                            ? "요약을 읽는 중입니다…" : "크기 분포를 아는 대상이 없습니다"} />
+        <SizeHistogram buckets={size?.buckets}
+                       emptyText={reading && count(size?.known) === 0
+                         ? "요약을 읽는 중입니다…" : "크기 분포를 아는 대상이 없습니다"} />
       </section>
     </div>
     <Footnote t={t} now={now} reading={reading} />

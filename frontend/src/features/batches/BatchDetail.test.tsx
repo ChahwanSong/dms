@@ -1496,7 +1496,8 @@ test("전체 선택: 선택 가능한 항목만 켠다 — 불가 항목은 그�
       request_id: null, reason_code: null },
     { seq: 1, payload: { storage: "s1", target: "b" }, status: "Materialized",
       request_id: "r2", reason_code: null }] });
-  await userEvent.click(await screen.findByLabelText("전체 선택"));
+  // 2026-11-16: 전체 선택의 범위는 「이 쪽」이고 이름이 그 수를 말한다(선택 가능한 1개)
+  await userEvent.click(await screen.findByLabelText("이 쪽 전체 선택(1개)"));
   expect(screen.getByLabelText("항목 0 선택")).toBeChecked();
   expect(screen.getByLabelText("항목 1 선택")).not.toBeChecked();
   expect(screen.getByText("1개 선택됨")).toBeInTheDocument();
@@ -1580,7 +1581,7 @@ test("고른 사이 Materialized 가 된 항목은 선택에서 빠지고, 전�
   expect(await screen.findByText("1개 선택됨")).toBeInTheDocument();
   expect(screen.getByLabelText("항목 3 선택")).toBeDisabled();
   expect(screen.getByLabelText("항목 3 선택")).not.toBeChecked();
-  const all = screen.getByLabelText("전체 선택") as HTMLInputElement;
+  const all = screen.getByLabelText(/^이 쪽 전체 선택/) as HTMLInputElement;
   expect(all).not.toBeChecked();
   expect(all.indeterminate).toBe(true);
   await userEvent.click(all);                     // 남은 선택 가능 집합(#4·#5)을 담는다

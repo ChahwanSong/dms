@@ -4,7 +4,7 @@ import { Info } from "lucide-react";
 import { Skeleton } from "../../components/ui/Skeleton";
 import type { ApiError } from "../../lib/api";
 import type { UsageAttrFilter } from "../../lib/types";
-import { ATTR_KEYS, USAGE_SORTS, cleanAttr, usePurgeUnregisteredStorage, type UsageSort } from "./useUsage";
+import { ATTR_KEYS, PAGE_MAX, USAGE_SORTS, cleanAttr, usePurgeUnregisteredStorage, type UsageSort } from "./useUsage";
 import { useActiveStorage } from "./useActiveStorage";
 import { storageLabel } from "./usageTabs";
 import { rememberPaths } from "./usageMemory";
@@ -30,19 +30,31 @@ export { staleClass } from "./TargetTable";
 //
 // URL 이 진실이다: ?storage= = 보는 스토리지(useActiveStorage -- 없으면 기본 스토리지를 파생·붙잡기, URL 에 쓰지 않는다), 필터 일곱
 // (키 = 서버 쿼리 이름 = PV 탐색 화면의 키, useUsage.ATTR_KEYS), q = 검색(경로·PV 이름 -- 2026-10-29 전엔 경로만이었다, 같은 키라 옛
-// 링크의 q 가 그대로 걸린다), sort·order = 열 정렬(기본값 last_scan·desc 는 생략),
+// 링크의 q 가 그대로 걸린다), sort·order = 열 정렬(기본값 last_scan·desc 는 생략), page = 목록 쪽(2026-11-16 -- 1쪽은 생략, 스토리지·
+// 검색·정렬·필터가 바뀌면 지운다; 쪽 넘김은 push 라 뒤로 가기가 이전 쪽으로, 범위 밖이면 패널이 마지막 쪽으로 replace),
 // &target= = 그 위에 열린 경로 상세 시트. 새로고침·딥링크·링크 공유에서 같은 화면이 나온다(옛 링크 ?storage=&target= 은 같은
 // 라우트라 리다이렉트 없이 시트가 열린 채로). URL 쓰기는 늘 지금 파라미터에서 바꿀 키만 고친다(동기화 이력 화면 관용 -- 통째로 덮으면
 // 스토리지 전환·시트 열기가 필터를 조용히 지웠다). 기록 방식: 스토리지 = push(select 300ms 디바운스), 필터·검색·정렬 = replace(뒤로
 // 가기가 선택·타이핑 하나하나를 되짚지 않게), 시트 = 아래 sheet 주석. 지금 쿼리(target 제외)는 sessionStorage 에도 적는다(usageMemory
 // -- 「경로별」 탭 링크가 다른 탭에서 돌아올 때 복원한다).
 
-// 시트를 이 세션에서 push 로 열었다는 히스토리 항목 표지(location.state 의 키) -- 닫기가 뒤로 갈지 replace 할지 가른다.
+// 시트를 이 세션에서 push 로 열었다는 히스토리 항목 표지(location.state 의 키) -- 닫기가 뒤로 갈지 replace 할지 가른다. 연 순간의 쪽
+// 번호(SHEET_PAGE)도 함께 둔다: 시트의 이전·다음이 쪽 경계를 넘어 이웃 쪽으로 가면(replace) 뒤 화면의 쪽이 바뀌므로, 닫기를 뒤로(-1)
+// 하면 연 쪽으로 돌아가 보던 경로가 표에 없다 -- 그때는 target 만 지우는 replace 로 닫는다(지금 쪽에 남는다).
 const SHEET_STATE = "usageSheet";
+const SHEET_PAGE = "usageSheetPage";
 const isSort = (x: string | null): x is UsageSort => x !== null && (USAGE_SORTS as readonly string[]).includes(x);
+// 쪽 번호(2026-11-16 ?page= -- 1부터, 없거나 숫자가 아니면 1). 상한은 서버 offset 상한 안(useUsage.PAGE_MAX) -- 그 위는 빈 쪽이 되고
+// 패널이 마지막 쪽으로 당긴다.
+const parsePage = (x: string | null): number => {
+  const n = x !== null && /^\d+$/.test(x) ? Number(x) : 1;
+  return Math.min(Math.max(1, n), PAGE_MAX);
+};
+// 쪽은 그 목록(스토리지·검색·정렬·필터)의 위치라 그것들이 바뀌면 지운다(1쪽부터) -- 남기면 「필터에 맞는 3개」의 7쪽 같은 빈 화면이 된다.
 const withQ = (p: URLSearchParams, v: string) => {
   const next = new URLSearchParams(p);
   if (v === "") next.delete("q"); else next.set("q", v);
+  next.delete("page");
   return next;
 };
 
@@ -69,7 +81,16 @@ export function UsageAnalysis() {
     const next = new URLSearchParams(params);
     if (col === "last_scan") next.delete("sort"); else next.set("sort", col);
     if (nextOrder === "desc") next.delete("order"); else next.set("order", nextOrder);
+    next.delete("page");
     setParams(next, { replace: true });
+  };
+
+  // 쪽(2026-11-16): Pager 는 push(뒤로 가기 = 이전 쪽), 범위 밖 당김은 replace(패널 -- 죽은 칸을 남기지 않게). 1쪽은 URL 에서 생략.
+  const page = parsePage(params.get("page"));
+  const setPage = (p: number, { replace = false }: { replace?: boolean } = {}) => {
+    const next = new URLSearchParams(params);
+    if (p <= 1) next.delete("page"); else next.set("page", String(p));
+    setParams(next, replace ? { replace: true, state: location.state } : undefined);
   };
 
   // 검색(경로·PV 이름, 토큰마다 부분 일치 -- useUsage.TargetFilter. 300ms 디바운스 -- 타이핑마다 GROUP BY 를 쏘지 않는다): 입력칸은
@@ -124,6 +145,7 @@ export function UsageAnalysis() {
   const attrParams = (a: UsageAttrFilter) => {
     const next = new URLSearchParams(params);
     for (const k of ATTR_KEYS) { const v = a[k]; if (v !== undefined && v !== "") next.set(k, v); else next.delete(k); }
+    next.delete("page");
     return next;
   };
   const setAttr = (a: UsageAttrFilter) => setParams(attrParams(a), { replace: true });
@@ -133,7 +155,8 @@ export function UsageAnalysis() {
   // 없고, 「늘 replace 로 닫기」는 뒤로 가기에 죽은 한 칸을 남긴다), 없으면(옛 딥링크·새로고침한 다른 탭) target 만 지우는
   // replace. 기본 스토리지에서 열면 storage 도 URL 에 적는다(딥링크 닫기가 남기는 URL 이 기본 스토리지로 튀지 않게 -- 뒤로 닫으면
   // 열기 전 URL 이고, 그 기본 스토리지는 붙잡혀 있어 같은 스토리지다).
-  const pushedSheet = (location.state as { [SHEET_STATE]?: boolean } | null)?.[SHEET_STATE] === true;
+  const sheetState = location.state as { [SHEET_STATE]?: boolean; [SHEET_PAGE]?: number } | null;
+  const pushedSheet = sheetState?.[SHEET_STATE] === true;
   const sheet = {
     open: (t: string) => {
       if (active === null) return;
@@ -144,15 +167,19 @@ export function UsageAnalysis() {
       if (v !== searchQ) { wrote.current = v; setParams(base, { replace: true, state: location.state }); }
       const next = new URLSearchParams(base);
       next.set("storage", active); next.set("target", t);
-      setParams(next, { state: { [SHEET_STATE]: true } });
+      setParams(next, { state: { [SHEET_STATE]: true, [SHEET_PAGE]: parsePage(next.get("page")) } });
     },
-    move: (t: string) => {
-      const next = new URLSearchParams(params);
+    // 이웃으로(replace, 표지 유지). toPage = 쪽 경계를 넘을 때 그 쪽 번호 -- 쪽과 경로를 한 번에 쓴다(깜빡임 없음 -- 패널이 그 쪽을
+    // 먼저 받아 둔다). 쪽 경계 이동은 이웃 쪽을 받은 **뒤에** 부르므로 그때의 URL 위에서 쓴다(latest -- 검색 디바운스와 같은 이유).
+    move: (t: string, toPage?: number) => {
+      const { params: cur, setParams: set, state } = latest.current;
+      const next = new URLSearchParams(cur);
       next.set("target", t);
-      setParams(next, { replace: true, state: location.state });
+      if (toPage !== undefined) { if (toPage <= 1) next.delete("page"); else next.set("page", String(toPage)); }
+      set(next, { replace: true, state });
     },
     close: () => {
-      if (pushedSheet) { navigate(-1); return; }
+      if (pushedSheet && (sheetState?.[SHEET_PAGE] ?? 1) === page) { navigate(-1); return; }
       const next = new URLSearchParams(params);
       next.delete("target");
       setParams(next, { replace: true });
@@ -204,7 +231,7 @@ export function UsageAnalysis() {
           </div>
         ) : (
           <StoragePanel key={activeTab.name} tab={activeTab} windowLimit={s.windowLimit}
-                        input={input} setInput={setInput} searchQ={searchQ}
+                        input={input} setInput={setInput} searchQ={searchQ} pageNo={page} onPage={setPage}
                         sort={sort} order={order} onSort={sortBy} attr={attr} onAttrChange={setAttr}
                         activeTarget={activeTarget} sheet={sheet} storages={s.storagesQ.data}
                         purge={purge} progress={progress} setProgress={setProgress}

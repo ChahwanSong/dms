@@ -621,6 +621,7 @@ def test_migrate_creates_exactly_the_expected_tables(tmp_path):
     # node_exclusions(2026-10-02): 관리자 노드 배치 제외 목록(행 = 제외 중).
     # request_purges(2026-10-08): 요청 삭제의 정리 아웃박스(행 = k8s·아티팩트 정리 대기).
     # k8s_*(2026-10-25 dms-k8s RBAC·PV 설계 §3): 외부 k8s 클러스터 등록·동기화 이력·스냅숏 4표·SC 매핑 + 호출 노드 설정.
+    # batch_schedules·batch_schedule_runs(2026-11-16): 배치 스케줄러(배치당 스케줄 하나 + 회차 이력 -- batches 류처럼 명시 추가).
     assert actual == set(ALL_TABLES) | {"batches", "batch_items",
                                         "schema_migrations",
                                         "verification_codes", "sync_pairs",
@@ -629,7 +630,8 @@ def test_migrate_creates_exactly_the_expected_tables(tmp_path):
                                         "request_purges",
                                         "k8s_sync_settings", "k8s_clusters", "k8s_sync_runs",
                                         "k8s_storage_classes", "k8s_pvs", "k8s_pvcs",
-                                        "k8s_role_bindings", "k8s_storage_class_maps"}
+                                        "k8s_role_bindings", "k8s_storage_class_maps",
+                                        "batch_schedules", "batch_schedule_runs"}
 
 
 def test_migrate_creates_exactly_the_expected_indexes(tmp_path):
@@ -665,6 +667,8 @@ def test_migrate_creates_exactly_the_expected_indexes(tmp_path):
         # 2026-10-25 k8s 인벤토리: 동기화 이력(클러스터·상태·노드별)·PVC 의 볼륨 역조회·사용자별 바인딩.
         "idx_k8s_sync_runs_cluster", "idx_k8s_sync_runs_status", "idx_k8s_sync_runs_node",
         "idx_k8s_pvcs_volume", "idx_k8s_role_bindings_user",
+        # 2026-11-16 배치 스케줄러: due 질의(enabled, next_run_at)·스케줄별 회차 이력·배치 삭제 캐스케이드의 batch_id.
+        "idx_batch_schedules_due", "idx_batch_schedule_runs_schedule", "idx_batch_schedule_runs_batch",
     }
 
 

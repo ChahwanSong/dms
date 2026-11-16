@@ -343,4 +343,102 @@ test.describe("E3 레이아웃 불변식", () => {
     await assertLayoutSane(page, { sidebarFixed: false, minTableCells: 12 });
     await assertCellsOneLine(page, "main table tbody tr td:nth-child(2)", "감사 로그 시각 칸");
   });
+
+  // 배치 목록 「대상 스토리지」 열 + 상세 찾기 줄(검색칸·상태 칩)·쪽 넘김(2026-11-16, 설계 #67). 목록 열은 일반 텍스트 td(L2 --
+  // computed display=table-cell)이고 줄바꿈 없이(한 줄) 표의 가로 스크롤 래퍼 안에서 넘친다(문서 L1 아님). 상세의 찾기 줄은
+  // 375 에서 검색칸이 자기 행·칩이 줄바꿈으로 접혀 문서를 넘치지 않아야 한다. 항목 101개라야 쪽 넘김(Pager)이 생긴다 -- 실제로
+  // 돌지 않게 만들자마자 취소한다(취소는 항목 장벽 + 자식 정리 -- 하네스 1초 틱이 그 사이 자식 1~2개를 만들 수 있다).
+  // 셀 하한(소스 실측): /admin/batches th 8(선택·배치·이름·작업·대상 스토리지·상태·성공/실패/전체·최근 갱신) + 이 배치 1행 td 8 = 16.
+  test("배치 목록 「대상 스토리지」 열 · 상세 찾기 줄과 쪽 넘김(1280·375)", async ({ page }) => {
+    test.setTimeout(60_000);
+    await apiLogin(page);
+    const tag = `lay${Date.now().toString(36)}`;
+    const created = await page.request.post("/api/admin/batches", {
+      data: { operation: "scan", max_concurrency: 1, options: {}, name: `${tag} 레이아웃`,
+              items: Array.from({ length: 101 }, (_, i) => ({ storage: STORAGE_NAME, target: `${tag}/item-${i}` })) },
+    });
+    expect(created.status(), await created.text()).toBe(202);
+    const bid = ((await created.json()) as { batch_id: string }).batch_id;
+    const cancel = await page.request.post(`/api/admin/batches/${bid}:cancel`);
+    expect(cancel.status(), await cancel.text()).toBe(200);
+
+    for (const [width, height, sidebarFixed] of [[1280, 800, true], [375, 667, false]] as const) {
+      await page.setViewportSize({ width, height });
+      await visit(page, "/admin/batches", "배치 작업");
+      const head = page.getByRole("columnheader", { name: "대상 스토리지", exact: true });
+      await expect(head).toBeVisible();
+      const heads = await page.getByRole("columnheader").allTextContents();
+      expect(heads.indexOf("대상 스토리지"), "「대상 스토리지」는 「작업」 바로 오른쪽").toBe(heads.indexOf("작업") + 1);
+      const col = heads.indexOf("대상 스토리지") + 1;
+      await expect(page.locator(`main table tbody tr td:nth-child(${col})`).first()).toHaveText(STORAGE_NAME);
+      await assertLayoutSane(page, { sidebarFixed, minTableCells: 16 });
+      await assertCellsOneLine(page, `main table tbody tr td:nth-child(${col})`, "배치 목록 대상 스토리지 칸");
+
+      await visit(page, `/admin/batches/${bid}`, `${tag} 레이아웃`);
+      await expect(page.getByPlaceholder("경로·PV 이름 검색…")).toBeVisible();
+      await expect(page.getByRole("group", { name: "항목 상태" })).toBeVisible();
+      const pager = page.getByRole("navigation", { name: "항목 쪽" });
+      await expect(pager).toContainText("1 / 2쪽");
+      await assertLayoutSane(page, { sidebarFixed, minTableCells: 0 });
+      // Pager 는 한 줄(375 에서도 -- flex-nowrap·whitespace-nowrap)
+      const [ph, lh] = await pager.evaluate((el) => {
+        const span = el.querySelector("span:not(.sr-only)") as HTMLElement;
+        return [el.getBoundingClientRect().height, span.getBoundingClientRect().height * 2.5];
+      });
+      expect(ph, "항목 쪽 넘김이 두 줄 이상으로 접혔다").toBeLessThan(lh);
+      // 검색은 서버로 묻는다 -- 한 항목으로 좁혀지고 쪽 넘김은 사라진다
+      await page.getByPlaceholder("경로·PV 이름 검색…").fill(`${tag} item-100`);
+      await expect(page.getByRole("button", { name: "항목 100 상세", exact: true })).toBeVisible();
+      await expect(page.getByRole("button", { name: "항목 0 상세", exact: true })).toHaveCount(0);
+      await expect(pager).toHaveCount(0);
+      await assertLayoutSane(page, { sidebarFixed, minTableCells: 0 });
+    }
+  });
+
+  // 배치 스케줄러(2026-11-16, 설계 #68): 스케줄 목록 표(텍스트·링크 td -- L2, 관리 칸만 안쪽 div 가 flex)와 배치 상세 머리의 스케줄
+  // 배지(긴 문구 링크 -- 375 에서 줄바꿈으로 접혀 문서를 넘치지 않아야 한다, L1). 주기는 가장 긴 요약(매주 일곱 요일)이고 시각은
+  // 지금 KST + 12시간이라 테스트 동안 회차가 돌지 않는다. 배치는 만들자마자 취소한다(실행하지 않게). 끝에 스케줄을 지운다.
+  // 셀 하한(소스 실측): /admin/batch-schedules th 9(배치·작업·대상 스토리지·주기·다음 실행(KST)·마지막 결과·사용·켠 사람·관리) +
+  // 이 스케줄 1행 td 9 = 18(다른 시나리오가 남긴 스케줄이 있으면 더 많다 -- 하한이다).
+  test("배치 스케줄러 목록 · 배치 상세의 스케줄 배지(1280·375)", async ({ page }) => {
+    test.setTimeout(60_000);
+    await apiLogin(page);
+    const tag = `sch${Date.now().toString(36)}`;
+    const name = `${tag} 스케줄 레이아웃`;
+    const created = await page.request.post("/api/admin/batches", {
+      data: { operation: "scan", max_concurrency: 1, options: {}, name,
+              items: [{ storage: STORAGE_NAME, target: `${tag}/a` }] },
+    });
+    expect(created.status(), await created.text()).toBe(202);
+    const bid = ((await created.json()) as { batch_id: string }).batch_id;
+    const cancel = await page.request.post(`/api/admin/batches/${bid}:cancel`);
+    expect(cancel.status(), await cancel.text()).toBe(200);
+    const hour = (new Date(Date.now() + 9 * 3600_000).getUTCHours() + 12) % 24;
+    const made = await page.request.post("/api/admin/batch-schedules", {
+      data: { batch_id: bid, kind: "weekly", spec: { weekdays: [1, 2, 3, 4, 5, 6, 7], hour, minute: 0 } },
+    });
+    expect(made.status(), await made.text()).toBe(201);
+    const sid = ((await made.json()) as { schedule_id: string }).schedule_id;
+    const rule = `매주 월·화·수·목·금·토·일 ${String(hour).padStart(2, "0")}:00 (KST)`;
+    try {
+      for (const [width, height, sidebarFixed] of [[1280, 800, true], [375, 667, false]] as const) {
+        await page.setViewportSize({ width, height });
+        await visit(page, "/admin/batch-schedules", "배치 스케줄러");
+        const row = page.getByRole("row").filter({ has: page.getByRole("link", { name, exact: true }) });
+        await expect(row.getByText(rule)).toBeVisible();
+        await expect(row.getByRole("checkbox", { name: `${name} 사용` })).toBeChecked();
+        await assertLayoutSane(page, { sidebarFixed, minTableCells: 18 });
+        await assertCellsOneLine(page, "main table tbody tr td:nth-child(2)", "스케줄 표 작업 칸");
+
+        await visit(page, `/admin/batches/${bid}`, name);
+        const badge = page.getByRole("link", { name: new RegExp(`^스케줄 ${rule.replace(/[()]/g, "\\$&")} · 다음 `) });
+        await expect(badge).toBeVisible();
+        await expect(badge).toHaveAttribute("href", `/admin/batch-schedules?batch=${bid}`);
+        await assertLayoutSane(page, { sidebarFixed, minTableCells: 0 });
+      }
+    } finally {
+      const removed = await page.request.delete(`/api/admin/batch-schedules/${sid}`);
+      expect(removed.status(), await removed.text()).toBe(200);
+    }
+  });
 });

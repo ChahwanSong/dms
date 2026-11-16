@@ -1330,8 +1330,10 @@ _NO_FILTERS = dict.fromkeys(("cluster", "namespace", "pvc", "storage_class", "us
 
 def test_targets_envelope_echoes_filters_and_carries_pv_on_every_row(uw):
     body = _page(uw)
-    assert list(body) == ["rows", "matched_count", "window_limit", "window_truncated", "filters"]
+    assert list(body) == ["rows", "matched_count", "window_limit", "window_truncated", "filters",
+                          "offset", "has_more", "pageable_count"]
     assert (body["matched_count"], body["window_limit"], body["window_truncated"]) == (8, 10000, False)
+    assert (body["offset"], body["has_more"], body["pageable_count"]) == (0, False, 8)
     assert body["filters"] == {"storage": NFS, "path": None, "q": None, **_NO_FILTERS}
     rows = {r["target"]: r for r in body["rows"]}
     assert [r["target"] for r in body["rows"]] == NFS_DESC
@@ -1396,7 +1398,8 @@ def test_requester_filter_is_per_target_and_rows_keep_their_latest(uw):
     assert _page(uw, ONEFS, requester="junwoo.song")["rows"] == [row]
     assert _page(uw, ONEFS, requester="nobody") == {
         "rows": [], "matched_count": 0, "window_limit": 10000, "window_truncated": False,
-        "filters": {"storage": ONEFS, "path": None, "q": None, **_NO_FILTERS, "requester": "nobody"}}
+        "filters": {"storage": ONEFS, "path": None, "q": None, **_NO_FILTERS, "requester": "nobody"},
+        "offset": 0, "has_more": False, "pageable_count": 0}
 
 
 def test_unsynced_cluster_makes_the_rest_unknown_and_deleted_clusters_fall_back_to_records(uw):
@@ -2053,3 +2056,220 @@ def test_facets_and_storage_totals_do_not_take_q(uw):
     r = uw.client.get(TOTALS, params={"storage": NFS, "q": "nothing-matches"}).json()
     assert "filters" not in r and (r["target_count"], r["total_bytes"]) == (whole["target_count"], whole["total_bytes"])
     assert uw.client.get(FACETS, params={"storage": NFS, "q": "nothing-matches"}).json()["target_count"] == 8
+
+
+# ---- 2026-11-16: 목록 쪽 넘김(offset·has_more·pageable_count) · 이력의 latest_job_id ----
+# 사용자 요청 「스토리지를 누르면 상위 100개만 보인다 -- 전체 목록이, 몇백~몇천 개여도 버벅이지 않게」. 포탈은 쪽당 100행 번호 쪽이고,
+# 다음 쪽 판단은 pageable_count 가 수이면 그것(쪽 수가 곧 경계), null 이면 has_more 다(Pager·TargetSheet 와 같은 규칙).
+
+SORTS = ("last_scan", "scans", "bytes", "files", "hot")
+
+
+def _walk(uw, storage, *, limit, **params):
+    """offset 0, limit, 2·limit … 로 쪽을 다 넘겨 이은 행 + 쪽 봉투들. 쪽마다 offset 메아리·행 수 상한을 본다."""
+    rows, bodies, offset = [], [], 0
+    while True:
+        body = _page(uw, storage, limit=limit, offset=offset, **params)
+        assert body["offset"] == offset and len(body["rows"]) <= limit, (params, offset)
+        rows += body["rows"]
+        bodies.append(body)
+        reach = body["pageable_count"]
+        if not (offset + limit < reach if reach is not None else body["has_more"]):
+            return rows, bodies
+        offset += limit
+        assert offset < 200, params                                    # 끝나지 않는 쪽 넘김 방지
+
+
+@pytest.mark.parametrize("order", ("desc", "asc"))
+@pytest.mark.parametrize("sort", SORTS)
+def test_pages_join_into_the_unpaged_order_on_every_branch(uw, monkeypatch, sort, order):
+    # 모든 쪽의 합집합 = offset 없는 전체 순서(중복·누락 없음, 행 내용까지 같다) -- 갈래마다: SQL 경로(창과 무관·지표 정렬은 창 안),
+    # SQL 검색(PV 이름이 생길 수 없는 스토리지), PV 경로 창 안(PV 필터·PV 이름 검색), PV 창 넘침(PV 필터만), PV 이름 검색 창 넘침 +
+    # 창 밖 경로 일치(_with_path_hits 첫 갈래 -- 경로 일치를 쪽 끝 + 1 개까지 읽는다, 지표 정렬은 둘째 갈래), PV 필터 + 검색 창 넘침(둘째
+    # 갈래). 창 상한은 작게 둔다(테스트베드 모양 8 대상).
+    from dms.api import routes_usage
+    cases = [(10000, NFS, {}), (3, NFS, {}), (1, CEPH, {"q": "proj"}), (10000, NFS, {"requester": "mason"}),
+             (10000, NFS, {"scope": "pv"}), (10000, NFS, {"q": "proof"}), (5, NFS, {"scope": "outside"}),
+             (3, NFS, {"q": "proof"}), (3, NFS, {"q": "proof", "namespace": "team-a"}), (2, GPFS, {"q": "models"})]
+    for window, storage, params in cases:
+        monkeypatch.setattr(routes_usage, "_WINDOW_LIMIT", window)
+        full = _page(uw, storage, sort=sort, order=order, limit=200, **params)
+        want = [r["target"] for r in full["rows"]]
+        assert want, (window, storage, params)
+        for limit in (1, 3):
+            rows, bodies = _walk(uw, storage, limit=limit, sort=sort, order=order, **params)
+            assert rows == full["rows"], (window, storage, params, limit)
+            for b in bodies:
+                # 닿을 수 있는 행 수는 전체 순서의 길이이거나 모름(null -- 첫 갈래가 경로 일치를 끝까지 읽지 않았을 때만)
+                assert b["pageable_count"] in (None, len(want)), (window, storage, params, limit)
+                if b["pageable_count"] is None:
+                    assert window == 3 and params == {"q": "proof"} and sort in ("last_scan", "scans")
+                # 닿을 수 있는 행이 뒤에 남았으면 has_more 는 참이다(거짓 「끝」 없음)
+                assert b["has_more"] or b["offset"] + len(b["rows"]) >= len(want)
+                assert (b["matched_count"], b["window_truncated"]) == (full["matched_count"], full["window_truncated"])
+
+
+def test_has_more_and_pageable_count_per_branch(uw, monkeypatch):
+    from dms.api import routes_usage
+    # SQL·비지표: pageable = matched_count, has_more = 이 쪽 뒤에 더 있다
+    b = _page(uw, limit=3)
+    assert ([r["target"] for r in b["rows"]], b["matched_count"], b["pageable_count"], b["has_more"]) == \
+        (NFS_DESC[:3], 8, 8, True)
+    b = _page(uw, limit=3, offset=3)
+    assert ([r["target"] for r in b["rows"]], b["has_more"]) == (NFS_DESC[3:6], True)
+    b = _page(uw, limit=3, offset=6)                                  # 마지막 쪽(부분)
+    assert ([r["target"] for r in b["rows"]], b["has_more"], b["pageable_count"]) == (NFS_DESC[6:], False, 8)
+    b = _page(uw, limit=4, offset=4)                                  # 마지막 쪽(꼭 맞음)
+    assert ([r["target"] for r in b["rows"]], b["has_more"]) == (NFS_DESC[4:], False)
+    # SQL·지표 + 창 3: pageable = 창 크기(창 밖은 이 정렬의 어느 쪽에도 없다 -- 포탈 「최근 스캔된 N개 안에서 정렬」), has_more 는
+    # 알려진 맞는 대상(창 밖 포함)이 더 있다는 뜻 그대로라 창 끝에서도 참이다(포탈은 pageable 이 수이면 그것으로 경계를 정한다).
+    monkeypatch.setattr(routes_usage, "_WINDOW_LIMIT", 3)
+    b = _page(uw, sort="bytes", limit=3)
+    assert ([r["target"] for r in b["rows"]], b["matched_count"], b["pageable_count"], b["has_more"]) == \
+        (["c2/lab-y", "team-a/datasets/proof-ov", "proof-nl/a/selfnl"], 8, 3, True)
+    b = _page(uw, sort="bytes", limit=2, offset=2)
+    assert ([r["target"] for r in b["rows"]], b["pageable_count"]) == (["proof-nl/a/selfnl"], 3)
+    # PV 창 넘침(PV 필터만): 맞는 수는 모름(null)이지만 판정한 결과(창 안의 맞는 대상)는 셀 수 있다 -- 그것이 닿을 수 있는 행 전부다
+    monkeypatch.setattr(routes_usage, "_WINDOW_LIMIT", 5)
+    b = _page(uw, scope="outside", limit=2)
+    assert (b["matched_count"], b["window_truncated"], b["pageable_count"], b["has_more"]) == (None, True, 3, True)
+    assert [r["target"] for r in b["rows"]] == ["c2/lab-y", "proof-nl/a/selfnl"]
+    # PV 이름 검색 창 넘침 + 창 밖 경로 일치(첫 갈래): 경로 일치를 끝까지 읽지 않았으면 닿을 수 있는 수도 모름 -- has_more 로만 말한다
+    monkeypatch.setattr(routes_usage, "_WINDOW_LIMIT", 3)
+    proof = [t for t in NFS_DESC if "proof" in t]
+    b = _page(uw, q="proof", limit=1)
+    assert ([r["target"] for r in b["rows"]], b["matched_count"], b["pageable_count"], b["has_more"]) == \
+        (proof[:1], None, None, True)
+    b = _page(uw, q="proof", limit=100)                               # 101 개를 청해 5 개 -- 끝까지 읽었다
+    assert ([r["target"] for r in b["rows"]], b["pageable_count"], b["has_more"]) == (proof, 5, False)
+    b = _page(uw, q="proof", limit=2, offset=4)                       # 마지막 쪽에선 끝까지 읽어 수를 안다
+    assert ([r["target"] for r in b["rows"]], b["pageable_count"], b["has_more"]) == (proof[4:], 5, False)
+    # 둘째 갈래(PV 필터와 함께)는 늘 안다
+    b = _page(uw, q="proof", namespace="team-a", limit=1)
+    assert ([r["target"] for r in b["rows"]], b["matched_count"], b["pageable_count"], b["has_more"]) == \
+        (["team-a/datasets/proof-ov"], None, 1, False)
+
+
+def test_out_of_range_offset_is_an_empty_page_that_keeps_the_counts(uw, monkeypatch):
+    # 설계 비판(2026-11-16, must): matched_count 는 COUNT(*) OVER () 라 행에 붙어 온다 -- 범위 밖 쪽(데이터가 줄었거나 ?page= 딥링크)이면
+    # 행이 0 개라 값도 사라져 「전체 0개」·pageable 0(모름을 0 으로 접음)·포탈이 마지막 쪽으로 당길 근거 없음이 됐다. 같은 필터로 첫 행
+    # 하나를 다시 물어 구한다(범위 안 쪽에선 다시 묻지 않는다).
+    calls = []
+    _spy(monkeypatch, uw.client.app.state.repos.data_jobs, "scan_target_heads", calls)
+    for params in ({}, {"sort": "scans", "order": "asc"}, {"requester": "mason"}, {"order": "asc", "requester": "alice"}):
+        whole = _page(uw, **params)
+        calls.clear()
+        body = _page(uw, offset=50, **params)
+        assert (body["rows"], body["has_more"], body["offset"]) == ([], False, 50), params
+        assert body["matched_count"] == whole["matched_count"] == body["pageable_count"] == len(whole["rows"]) > 0, params
+        assert [(c[1]["limit"], c[1].get("offset", 0)) for c in calls] == [(100, 50), (1, 0)], params
+        calls.clear()
+        _page(uw, offset=1, **params)
+        assert [(c[1]["limit"], c[1]["offset"]) for c in calls] == [(100, 1)], params   # 범위 안 -- 다시 묻지 않는다
+    body = _page(uw, CEPH, q="proj", offset=2)                        # SQL 검색(토큰)도 같다
+    assert (body["rows"], body["matched_count"], body["pageable_count"], body["has_more"]) == ([], 2, 2, False)
+    # 정말 맞는 대상이 없으면 그 0 은 정상값이다(offset 없이 다시 물어도 0 행)
+    body = _page(uw, requester="nobody", offset=10)
+    assert (body["rows"], body["matched_count"], body["pageable_count"], body["has_more"]) == ([], 0, 0, False)
+    # 지표 정렬·PV 경로도 범위 밖이면 빈 쪽, 수는 그대로(지표 정렬은 창 끝을 넘으면 값 계산을 건너뛴다)
+    for params in ({"sort": "bytes"}, {"sort": "hot", "order": "asc"}, {"scope": "pv"}, {"q": "proof"},
+                   {"scope": "pv", "sort": "files"}):
+        whole = _page(uw, **params)
+        body = _page(uw, offset=len(whole["rows"]) + 5, **params)
+        assert (body["rows"], body["has_more"]) == ([], False), params
+        assert (body["matched_count"], body["pageable_count"]) == (whole["matched_count"], whole["pageable_count"]), params
+        assert body["pageable_count"] == len(whole["rows"]), params
+    from dms.api import routes_usage
+    monkeypatch.setattr(routes_usage, "_metric_order", lambda *a, **k: pytest.fail("창 끝을 넘은 쪽에서 지표 값을 계산했다"))
+    assert _page(uw, sort="bytes", offset=8)["rows"] == []                       # SQL 경로 창 = 8
+    assert _page(uw, scope="pv", sort="bytes", offset=5)["rows"] == []           # PV 경로 판정 결과 = 5
+
+
+def test_offset_is_validated_and_echoed(uw):
+    from dms.api.routes_usage import _OFFSET_MAX
+    for bad in (-1, _OFFSET_MAX + 1, "x", 1.5):
+        assert uw.client.get(TARGETS, params={"storage": NFS, "offset": bad}).status_code == 422, bad
+    for params in ({}, {"sort": "bytes"}, {"scope": "pv"}, {"q": "proof"}):
+        body = _page(uw, offset=_OFFSET_MAX, **params)                # 상한 자체는 받는다(빈 쪽 -- 큰 정수가 500 이 되지 않는다)
+        assert (body["rows"], body["offset"], body["has_more"]) == ([], _OFFSET_MAX, False), params
+    # limit 은 그대로 1..200
+    assert uw.client.get(TARGETS, params={"storage": NFS, "limit": 201}).status_code == 422
+    assert uw.client.get(TARGETS, params={"storage": NFS, "limit": 0}).status_code == 422
+    # 동결된 옛 엔드포인트·내보내기는 offset 을 모른다(조용히 무시 -- 본문 모양 그대로)
+    assert uw.client.get("/api/admin/usage/scan-targets", params={"storage": NFS, "offset": 3}).json() == \
+        uw.client.get("/api/admin/usage/scan-targets", params={"storage": NFS}).json()
+    r = uw.client.get(TARGETS + "/export", params={"storage": NFS, "offset": 3})
+    assert r.status_code == 200 and [x["target"] for x in r.json()["rows"]] == NFS_DESC
+
+
+def test_heads_offset_is_an_outer_tail_and_zero_leaves_the_statement(uw, monkeypatch):
+    # offset 0(기본)이면 머리 문장이 글자 하나 다르지 않다(계획 테스트·tests/test_usage_equivalence.py 가 기대는 모양) -- OFFSET 은 offset > 0
+    # 일 때만, 바깥 ORDER BY·LIMIT 뒤에 하나(안쪽에 걸면 파티션이 잘려 scan_count·최신 잡이 바뀐다). limit 없는 offset 은 거절.
+    repos, db = uw.repos, uw.db
+    seen = []
+    real = db.query
+    monkeypatch.setattr(db, "query", lambda sql, params=None: (seen.append((sql, params)), real(sql, params))[1])
+    plain = repos.data_jobs.scan_target_heads(storage=NFS, limit=100)
+    repos.data_jobs.scan_target_heads(storage=NFS, limit=100, offset=0)
+    assert seen[0] == seen[1] and "OFFSET" not in seen[0][0]
+    for kw in ({}, {"with_matched": True, "requester": "mason"}, {"tokens": ["a"], "sort": "scans", "order": "asc"}):
+        seen.clear()
+        repos.data_jobs.scan_target_heads(storage=NFS, limit=2, offset=3, **kw)
+        sql, params = seen[0]
+        assert sql.count("OFFSET") == 1 and " ".join(sql.split()).endswith("storage_name, target LIMIT :n OFFSET :o"), kw
+        assert (params["n"], params["o"]) == (2, 3)
+    with pytest.raises(ValueError):
+        repos.data_jobs.scan_target_heads(storage=NFS, limit=None, offset=1)
+    assert repos.data_jobs.scan_target_heads(storage=NFS, limit=None, offset=0) == plain
+    # 쪽 = 전체의 자른 조각(정렬 × 방향 × 요청자 필터), 파티션 값(scan_count·최신 잡)·맞는 수는 쪽과 무관
+    for sort in ("last_scan", "scans"):
+        for order in ("desc", "asc"):
+            for kw in ({}, {"requester": "mason"}):
+                whole = repos.data_jobs.scan_target_heads(storage=NFS, sort=sort, order=order, limit=None,
+                                                          with_matched=True, **kw)
+                for off in range(len(whole) + 1):
+                    page = repos.data_jobs.scan_target_heads(storage=NFS, sort=sort, order=order, limit=2, offset=off,
+                                                             with_matched=True, **kw)
+                    assert page == whole[off:off + 2], (sort, order, kw, off)
+
+
+def test_heads_offset_keeps_the_scan_target_index(tmp_path):
+    # OFFSET 은 바깥 꼬리라 접근 경로가 같다 -- idx_data_jobs_scan_target 으로 스토리지 하나에 내려간다(sqlite 계획; PG generic plan 은
+    # 리뷰 단계 몫 -- routes_usage._WINDOW_LIMIT 주석).
+    from dms.repositories import Repositories
+    db = Database.connect(f"sqlite:///{tmp_path}/t.db")
+    migrate(db)
+    repos = Repositories(db)
+    captured = []
+    orig = db.query
+    db.query = lambda sql, params=None: (captured.append((sql, params)), orig(sql, params))[1]
+    repos.data_jobs.scan_target_heads(storage="s1", limit=100, offset=900, with_matched=True)
+    repos.data_jobs.scan_target_heads(storage="s1", requester="alice", sort="scans", limit=100, offset=100)
+    db.query = orig
+    for sql, params in captured:
+        plan = " | ".join(r["detail"] for r in db.query("EXPLAIN QUERY PLAN " + sql, params))
+        assert "idx_data_jobs_scan_target" in plan, (sql, plan)
+
+
+def test_history_latest_job_id_is_the_newest_success_even_when_its_report_is_unreadable(tmp_path):
+    # 쪽 넘김 뒤엔 다른 쪽의 경로를 딥링크·이웃 이동으로 열면 시트에 목록 행(latest)이 없다 -- 포탈은 이력의 가장 늦은 **읽힌** 포인트로
+    # 「최신 scan」 차트를 대신하므로, 최신 리포트를 못 읽었으면 그 job_id 가 latest_job_id 와 달라 「읽지 못했습니다」라고 말한다.
+    art = tmp_path / "artifacts"
+    client = _client(tmp_path, art)
+    _login(client, "admin", "admin")
+    old, _ = _scan_job(client, target="team", art_base=art)
+    new, _ = _scan_job(client, target="team", art_base=art, raw_report="{bro")
+    _at(client, old, "2026-11-01T00:00:00Z")
+    _at(client, new, "2026-11-02T00:00:00Z")
+    hist = lambda **p: client.get("/api/admin/usage/scan-history",   # noqa: E731
+                                  params={"storage": "s1", "target": "team", **p}).json()
+    body = hist()
+    assert [p["job_id"] for p in body["points"]] == [old] and body["skipped_unreadable"] == 1
+    assert body["latest_job_id"] == new
+    assert hist(limit=1)["latest_job_id"] == new                      # 창과 무관하게 최신 하나
+    # 목록 머리(최신 판정)와 같은 근거 -- 같은 시각이면 job_id 가 큰 쪽(updated_at DESC, job_id DESC)
+    _at(client, old, "2026-11-02T00:00:00Z")
+    [row] = client.get(TARGETS, params={"storage": "s1"}).json()["rows"]
+    assert hist()["latest_job_id"] == row["latest"]["job_id"] == max(old, new)
+    # 성공 scan 이 없으면 null(0·빈 문자열이 아니다)
+    assert hist(target="nope")["latest_job_id"] is None

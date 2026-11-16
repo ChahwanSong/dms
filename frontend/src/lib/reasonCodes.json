@@ -362,5 +362,21 @@
   "pv_owner_not_applicable",
   "pv_owner_root_not_allowed",
   "storage_owner_changed",
-  "storage_overlaps_dms_state"
+  "storage_overlaps_dms_state",
+  "invalid_batch_schedule",
+  "batch_schedule_not_found",
+  "batch_schedule_exists",
+  "batch_schedule_ack_required",
+  "batch_schedule_unsupported_operation",
+  "batch_schedule_drain",
+  "batch_schedule_missed",
+  "batch_schedule_privileged_disabled",
+  "batch_schedule_owner_not_privileged",
+  "batch_schedule_requester_not_privileged",
+  "batch_schedule_empty",
+  "batch_schedule_batch_changed",
+  "batch_schedule_batch_running",
+  "batch_schedule_awaiting_confirm",
+  "batch_schedule_batch_cancelling",
+  "batch_schedule_batch_unreadable"
 ]

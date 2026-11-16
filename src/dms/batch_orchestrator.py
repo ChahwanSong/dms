@@ -41,9 +41,8 @@ from . import k8s_access
 from .db import load_json, utc_now_iso
 from .domain import (DomainValidationError, TERMINAL_REQUEST_STATES, auto_confirmable, confirm_gated,
                      DataJobState, build_data_payload, resolve_priority, validate_batch_options)
-from .identity import privilege_eligible
 from .batch_cancel import record_item_terminal, sweep_cancelled
-from .privileged import privileged_names
+from .privileged import privileged_admin_problem
 
 _ITEM_TERMINAL = {"Succeeded", "Failed", "Rejected", "Cancelled"}
 # repositories.batches._ACTIVE(list_active 가 고르는 상태) + 확인 대기(기록만) -- _drive 의 재확인용.
@@ -84,6 +83,34 @@ def _preview_tool(item) -> "str | None":
         if isinstance(v, str) and v in _PREVIEW_TOOLS:
             return v
     return None
+
+
+# 도구 없이 끝난 항목 상태(거부·실패·취소 -- 잡이 만들어지지 않았을 수 있다). direct_tool_counts 의 「미정」에서 뺀다 --
+# 포탈 batchView.ITEM_NOT_RUN 의 거울.
+_ITEM_NOT_RUN = _ITEM_TERMINAL - {"Succeeded"}
+
+
+def direct_tool_counts(items) -> dict:
+    """direct 옵션 안내(포탈 BatchDetail directNote)의 재료 -- {tools_known, nsync, undecided}. 배치 상세 요약
+    (GET .../batches/{id}?view=summary 의 direct_tools)이 항목 목록 없이 이것만 싣고, 포탈은 이 수로 같은 문구를 만든다.
+      tools_known  도구를 아는 항목 수(_preview_tool -- 잡 행 tool 먼저, 없으면 미리보기 summary v2 의 tool; 포탈
+                   summaryTool 과 같은 순서·같은 허용 집합)
+      nsync        그중 nsync 항목 수(direct 는 dsync 만 적용한다 -- 포크 db1e33c)
+      undecided    도구를 모르고 앞으로 돌 수 있는 항목 수 = 도구 None 이고 상태가 _ITEM_NOT_RUN 밖(도구 없이 끝난 항목은
+                   앞으로도 돌지 않으니 넣지 않는다 -- 넣으면 끝난 배치에서도 「모두 nsync」를 영영 못 말한다)
+    판정을 포탈과 서버가 따로 들면 한쪽만 바뀌는 순간 화면 문구가 실제 배치(placement)와 어긋난다 -- 그래서 도구 판정은
+    감사 행 files_by_tool 과 같은 _preview_tool 하나다. items = BatchesRepository.list_item_tools(또는 같은 키를 가진
+    list_items_detail 행). 2026-11-16 routes_batches._direct_tool_counts 에서 옮겼다(dms-ssc 라인과 같은 자리·같은 몸통)."""
+    tools_known = nsync = undecided = 0
+    for it in items:
+        tool = _preview_tool(it)
+        if tool is not None:
+            tools_known += 1
+            if tool == "nsync":
+                nsync += 1
+        elif it.get("status") not in _ITEM_NOT_RUN:
+            undecided += 1
+    return {"tools_known": tools_known, "nsync": nsync, "undecided": undecided}
 
 
 def preview_files(items) -> dict:
@@ -148,15 +175,15 @@ def auto_confirm_hold(repos, settings, batch) -> str | None:
     by = batch.get("auto_confirm_by")
     if not auto_confirmable(batch.get("operation")):
         return _hold(reason_code="auto_confirm_sync_only")
-    if not settings.allow_privileged_requesters:
+    # 자격 판정은 배치 스케줄러(armed_by·배치 요청자)와 같은 술어(privileged.privileged_admin_problem, 2026-11-16) -- 사유
+    # 코드만 이 경로의 리터럴로 고른다.
+    problem = privileged_admin_problem(settings, repos, by)
+    if problem == "privileged_disabled":
         # 사이트 전체 특권(root) 실행이 꺼졌다 -- 켠 사람 탓이 아니라 사람이 확인해도 root 로 돌지 못한다(문구가 다르다).
         return _hold(reason_code="auto_confirm_privileged_disabled")
-    if not privilege_eligible(requester_id=by, allow_privileged=settings.allow_privileged_requesters,
-                              privileged_requesters=privileged_names(settings, repos),
-                              session_authenticated=True):
+    if problem == "not_privileged":
         return _hold(reason_code="auto_confirm_not_privileged")
-    account = repos.accounts.get(by)
-    if account is None or account["disabled"] or account["role"] != "admin":
+    if problem is not None:
         return _hold(reason_code="auto_confirm_not_admin")
     try:
         validate_batch_options(batch["operation"], batch["options"])

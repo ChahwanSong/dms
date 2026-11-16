@@ -71,15 +71,16 @@ export function useActiveStorage({ purged }: { purged: string | null }) {
     if (storageParam === null || !judgeable) return;
     setNotice(purged === storageParam ? null : storageParam);
     const next = new URLSearchParams(params);
-    next.delete("storage"); next.delete("target");
+    next.delete("storage"); next.delete("target"); next.delete("page");
     setParams(next, { replace: true });
   }, [storageParam, judgeable, inTabs]);  // eslint-disable-line react-hooks/exhaustive-deps
 
+  // 쪽(?page=, 2026-11-16)은 그 스토리지 목록의 위치라 스토리지가 바뀌면 지운다(필터·검색·정렬은 위 주석대로 남긴다).
   const select = (name: string) => {
     if (name === active && storageParam !== null) return;
     setNotice(null);
     const next = new URLSearchParams(params);
-    next.set("storage", name); next.delete("target");
+    next.set("storage", name); next.delete("target"); next.delete("page");
     setParams(next);
   };
   return { ...src, storageParam, active, activeTab, notice, select };

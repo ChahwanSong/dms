@@ -17,6 +17,7 @@ from .scan_digests import ScanDigestsRepository
 from .node_exclusions import NodeExclusionsRepository
 from .request_purges import RequestPurgesRepository
 from .k8s import K8sRepository
+from .batch_schedules import BatchSchedulesRepository
 
 
 class Repositories:
@@ -41,3 +42,5 @@ class Repositories:
         self.node_exclusions = NodeExclusionsRepository(db)
         self.request_purges = RequestPurgesRepository(db)
         self.k8s = K8sRepository(db)
+        # 배치 스케줄러(2026-11-16) -- 규칙·판정은 dms.batch_scheduler, 회차는 컨트롤러 batch-scheduler 루프.
+        self.batch_schedules = BatchSchedulesRepository(db)

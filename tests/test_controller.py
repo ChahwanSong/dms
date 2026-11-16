@@ -13,6 +13,8 @@ def test_build_loops_names_and_intervals(db, settings):
         ("job-stepper", settings.stepper_interval_seconds),
         ("storage-reconciler", settings.reconcile_interval_seconds),
         ("retention", settings.retention_interval_seconds),
+        # 2026-11-16 배치 스케줄러: 오케스트레이터 바로 앞, 같은 간격(새 설정 키 없음).
+        ("batch-scheduler", settings.batch_orchestrator_interval_seconds),
         ("batch-orchestrator", settings.batch_orchestrator_interval_seconds),
         ("pod-gc", settings.pod_gc_interval_seconds),
         ("artifact-base-check", settings.reconcile_interval_seconds),

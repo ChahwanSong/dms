@@ -11,10 +11,12 @@ beforeAll(() => server.listen()); afterEach(() => server.resetHandlers()); after
 
 // updated_at 은 서버가 늘 보낸다(batches.updated_at NOT NULL + SELECT *) — fixture 도
 // 그렇게 둔다. 「최근 갱신」이 비는 경우는 테스트가 명시적으로 null 을 줄 때뿐이라,
-// 다른 테스트의 "—" 단언(이름 없음)이 이 컬럼과 뒤섞이지 않는다.
+// 다른 테스트의 "—" 단언(이름 없음)이 이 컬럼과 뒤섞이지 않는다. 대상 스토리지 세 키(2026-11-16)도 서버가 늘 싣는다(첫 항목에서
+// 파생 -- scan 이면 storage) — 같은 이유로 fixture 기본은 아는 값이다(모름 「—」은 그 테스트가 명시한다).
 const row = (over: object = {}) => ({ batch_id: "b1234567890abcdef", operation: "scan",
   status: "Running", max_concurrency: 2, item_count: 3, succeeded_count: 1,
-  failed_count: 0, note: null, created_at: "", updated_at: "2026-08-15T00:00:00Z", ...over });
+  failed_count: 0, note: null, created_at: "", updated_at: "2026-08-15T00:00:00Z",
+  storage: "s1", source_storage: null, destination_storage: null, ...over });
 
 function renderList(rows: object[] | (() => object[])) {
   server.use(http.get("/api/admin/batches",
@@ -40,6 +42,36 @@ test("이름 컬럼: 있으면 이름, 없으면 — (빈칸으로 뭉개지 않
   expect(await screen.findByText("8월 정기 스캔 1차")).toBeInTheDocument();
   expect(screen.getByText("이름")).toBeInTheDocument();       // 헤더
   expect(screen.getByText("—")).toBeInTheDocument();          // 이름 없음
+});
+
+// --- 「대상 스토리지」 열(2026-11-16 사용자 요청 -- 「작업」 열 오른쪽) ---------------------------------------
+test("대상 스토리지 열: 작업 바로 오른쪽 · scan/rm 은 이름 · sync 는 화살표 · 모름은 — · 칸은 글자뿐(title)", async () => {
+  renderList([row({ batch_id: "b111111111111aaa", storage: "k8s-pv-nfs" }),
+              row({ batch_id: "b222222222222bbb", operation: "sync", storage: null,
+                    source_storage: "k8s-pv-nfs", destination_storage: "k8s-pv-nfs" }),
+              row({ batch_id: "b333333333333ccc", operation: "rm", storage: null, name: "있음" }),
+              row({ batch_id: "b444444444444ddd", operation: "rm", storage: "", name: "빈이름" }),
+              row({ batch_id: "b555555555555eee", operation: "sync", storage: undefined, source_storage: undefined,
+                    destination_storage: undefined, name: "옛서버" })]);
+  const table = await screen.findByRole("table");
+  const heads = within(table).getAllByRole("columnheader").map((th) => th.textContent);
+  expect(heads.indexOf("대상 스토리지")).toBe(heads.indexOf("작업") + 1);
+  const cellOf = (id: string) => {
+    const tr = within(table).getByLabelText(`배치 ${id.slice(0, 12)} 선택`).closest("tr")!;
+    return within(tr).getAllByRole("cell")[heads.indexOf("대상 스토리지")];
+  };
+  expect(cellOf("b111111111111aaa")).toHaveTextContent(/^k8s-pv-nfs$/);
+  expect(cellOf("b111111111111aaa")).toHaveAttribute("title", "k8s-pv-nfs");
+  // 같은 스토리지끼리여도 화살표(규칙 하나)
+  expect(cellOf("b222222222222bbb")).toHaveTextContent(/^k8s-pv-nfs → k8s-pv-nfs$/);
+  // 모름(항목 0개·깨진 payload·옛 서버의 키 부재) = 「—」, 빈 문자열 이름은 사용량과 같은 「(이름 없음)」
+  expect(cellOf("b333333333333ccc")).toHaveTextContent(/^—$/);
+  expect(cellOf("b333333333333ccc")).not.toHaveAttribute("title");
+  expect(cellOf("b444444444444ddd")).toHaveTextContent(/^\(이름 없음\)$/);
+  expect(cellOf("b555555555555eee")).toHaveTextContent(/^—$/);
+  // td 안에 래퍼·버튼이 없다(e2e L2 -- computed display=table-cell 불변식) + 줄바꿈 없음
+  expect(cellOf("b222222222222bbb").children).toHaveLength(0);
+  expect(cellOf("b222222222222bbb").className).toMatch(/\bwhitespace-nowrap\b/);
 });
 
 // slice(0,12) 가 서로 달라야 체크박스 aria-label 이 구분된다.

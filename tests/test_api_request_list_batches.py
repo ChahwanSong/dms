@@ -169,3 +169,28 @@ def test_summary_carries_the_item_count_so_the_portal_can_lock_oversized_batches
     rid = _child(repos, bid)
     _login(client, "opadm", "admin")
     assert _rows(client)[rid]["batch_item_count"] == 4
+
+
+def test_admin_rows_carry_the_batch_schedule_so_the_delete_dialog_can_say_it_goes_too(client):
+    # 2026-11-16 리뷰: 작업 목록의 배치 단위 삭제(request_purges.delete_batch)는 같은 트랜잭션에서 스케줄·회차 이력을 지운다 --
+    # 확인 창이 그 사실을 말하려면 목록 요약에 스케줄이 실려야 한다(배치 상세 schedule 과 같은 모양, 없으면 null). 단건·비관리자는
+    # 키가 없다.
+    repos = client.app.state.repos
+    scheduled = _batch(repos, name="매일 스캔")
+    plain = _batch(repos, name="일회성")
+    a = _child(repos, scheduled, target="a")
+    b = _child(repos, plain, target="b")
+    single = _child(repos, None, target="single")
+    mine = _child(repos, scheduled, requester="alice", target="mine")
+    sid = repos.batch_schedules.create(batch_id=scheduled, kind="daily", spec={"hour": 3, "minute": 0}, enabled=True,
+                                       next_run_at="2026-11-17T18:00:00Z", actor="opadm", arm=lambda batch, items: None)
+    _login(client, "opadm", "admin")
+    rows = _rows(client)
+    assert rows[a]["batch_schedule"] == {
+        "schedule_id": sid, "kind": "daily", "spec": {"hour": 3, "minute": 0}, "enabled": True,
+        "next_run_at": "2026-11-17T18:00:00Z", "last_outcome": None, "last_reason_code": None, "paused_reason_code": None}
+    assert rows[b]["batch_schedule"] is None                            # 스케줄 없음 = null(키는 있다)
+    assert "batch_schedule" not in rows[single]
+    assert client.post("/api/auth/logout").status_code in (200, 204)
+    _login(client, "alice", "user")
+    assert "batch_schedule" not in _rows(client)[mine]
