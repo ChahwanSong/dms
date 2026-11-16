@@ -313,7 +313,7 @@ controller.run_forever가 monotonic 스케줄로 루프별 리스(loop:<name>)�
 - db.Database.on_reconnect 훅은 wiring.py가 record_event(events 테이블)로 배선한다; reconnect_count/last_reconnect_at은 /readyz 200 본문이 읽는다(db.py:53-57).
 - data_jobs.claim_steppable/set_job_state/mark_exec_submitted/record_sched_wait/archive_diag_logs는 stepper.py가 소비한다; set_job_state의 submit_wait 엣지와 stepper 틱이 짝이다.
 - data_jobs.terminal_jobs_older_than은 pod_gc.py(Volcano/preflight 파드 회수), terminal_jobs_with_live_request는 controller.py 고아 스윕(finalize_from_job 재시도)이 소비한다.
-- requests.finalize_from_job/set_state_with_result는 각각 스테퍼 종단화·planner의 Rejected/Conflict 판정이 부른다; requests.active_referencing_storage는 storages 삭제/변경 가드(storage_in_use)가 쓴다.
+- requests.finalize_from_job/set_state_with_result는 각각 스테퍼 종단화·planner의 Rejected/Conflict 판정이 부른다; requests.active_referencing_storage는 storages 삭제/변경 가드(storage_in_use)가 쓴다 — 2026-11-16 부터 batches.active_referencing_storage(비종단 배치의 항목 payload)도 함께 보고, 판정은 `StoragesRepository.update/delete` 가 스토리지 행을 배타 잠금(PG FOR UPDATE)한 같은 트랜잭션의 guard 로 한다. 배치 되살리기(회차 발사·`:rescan`)는 항목이 가리키는 스토리지 행을 공유 잠금(`BatchesRepository._lock_item_storages`, FOR SHARE)한 뒤 판정하므로 둘이 직렬화된다 — 요청만 보던 가드는 배치의 자식 묶음 사이·발사 직후 창에서 경로 바꿔치기를 통과시켰다(자동 확인 배치면 사람 없이 root).
 - builds/releases 리포지토리는 build_runner.py·build_watcher.py·rollout_runner.py·rollout_watcher.py(controller.build_loops)가 상태기계 저장소로 쓴다; releases.COMPONENTS/ROLLOUT_ORDER가 k8s 매니페스트의 워크로드·컨테이너 이름과 결합돼 있다.
 - control.try_acquire_lease(component_leases)가 컨트롤러 리더 리스의 실체 — db.transaction() BEGIN 시점 재연결 허용이 컨트롤러 무크래시 같은-틱 복구를 만든다(db.py:175-180).
 - metrics.job_stats/node_series는 대시보드 API가 소비하고, idx_data_jobs_created(_sched) 커버링 인덱스(migrations.py:383-394)와 짝이다; agent_reports/agent_nodes는 agent/ 리포트 ingest 경로가 생산한다.

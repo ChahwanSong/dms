@@ -318,7 +318,7 @@ class BatchSchedulesRepository:
 
     def fire(self, schedule, *, next_run_at, now, verify, armed_env_listed: bool, requester_env_listed: bool) -> "dict | None":
         """회차 발사 = 배치 「전체 재실행」, 한 트랜잭션(모듈 docstring):
-          1) 항목 → 배치 잠금(BatchesRepository._lock_items_then_batch)
+          1) 항목 → 배치 잠금(BatchesRepository._lock_items_then_batch) → 항목이 가리키는 스토리지 공유 잠금(_lock_item_storages)
           2) verify(잠근 배치, 잠근 항목) -> 지문 | None -- 판정(batch_scheduler.batch_hold)을 잠근 행으로 다시 본다. None 이면
              롤백(판정 뒤 CSV 교체·옵션 변경·항목 삭제가 커밋됐다 -- 다음 틱이 새 값으로 판정한다)
           3) 직전 회차 결과 스냅숏(리셋이 카운터를 0 으로 만든다)
@@ -335,6 +335,8 @@ class BatchSchedulesRepository:
                 batch, items = self._batches._lock_items_then_batch(bid)
                 if batch is None:
                     raise _Lost()
+                # verify 가 읽는 스토리지 경로(바인딩)를 커밋까지 고정 -- 경로 변경과 직렬화(_lock_item_storages docstring).
+                self._batches._lock_item_storages(bid)
                 fingerprint = verify(batch, items)
                 if fingerprint is None:
                     raise _Lost()

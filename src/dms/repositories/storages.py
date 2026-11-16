@@ -88,21 +88,32 @@ class StoragesRepository:
             self._audit("create", storage_name, None, after, actor)
         return after
 
+    def _lock_row(self, storage_name):
+        """호출자 트랜잭션 안에서 스토리지 행을 배타 잠금(PG FOR UPDATE)으로 읽는다 -- 배치 되살리기(_lock_item_storages 의 FOR
+        SHARE)와 직렬화. sqlite 는 단일 커넥션이 직렬화한다."""
+        lock = " FOR UPDATE" if self._db.dialect == "postgresql" else ""
+        return self._db.query_one(f"SELECT * FROM storages WHERE storage_name = :n{lock}", {"n": storage_name})
+
     def update(self, storage_name, *, mount_path, managed_root, backend_type,
-               enabled: bool, actor, user_enabled: bool | None = None):
+               enabled: bool, actor, user_enabled: bool | None = None, guard=None):
         """user_enabled=None 은 "건드리지 않음"(현재 값 유지) -- 필드를 모르는 옛 클라이언트가
-        경로만 고치는 PUT 이 관리자 전용 스토리지를 조용히 사용자에게 다시 열지 않게 한다."""
+        경로만 고치는 PUT 이 관리자 전용 스토리지를 조용히 사용자에게 다시 열지 않게 한다.
+        guard(잠근 현재 행, 정규화한 새 mount_path, 새 managed_root) -- 사용 중 판정(routes_storages)을 행 잠금과 **같은
+        트랜잭션**에서 부른다(거부는 예외 -- 트랜잭션째 롤백). 예전엔 라우트가 잠그지 않고 판정한 뒤 썼다(check-then-act): 그
+        사이 배치 회차·:rescan 이 배치를 되살리면 남은 항목이 바뀐 경로에서 root 로 돌았다(2026-11-16 리뷰)."""
         _validate(storage_name, mount_path, managed_root, backend_type)
         mount_path = posixpath.normpath(mount_path)
         managed_root = posixpath.normpath(managed_root)
-        before = self.get(storage_name)
-        if before is None:
-            raise KeyError(storage_name)
-        if user_enabled is None:
-            user_flag = 0 if before.get("user_enabled") == 0 else 1
-        else:
-            user_flag = 1 if user_enabled else 0
         with self._db.transaction():
+            before = self._lock_row(storage_name)
+            if before is None:
+                raise KeyError(storage_name)
+            if guard is not None:
+                guard(before, mount_path, managed_root)
+            if user_enabled is None:
+                user_flag = 0 if before.get("user_enabled") == 0 else 1
+            else:
+                user_flag = 1 if user_enabled else 0
             self._db.execute(
                 """UPDATE storages SET mount_path = :m, managed_root = :r,
                        backend_type = :b, enabled = :e, user_enabled = :u,
@@ -115,11 +126,14 @@ class StoragesRepository:
             self._audit("update", storage_name, before, after, actor)
         return after
 
-    def delete(self, storage_name, actor):
-        before = self.get(storage_name)
-        if before is None:
-            raise KeyError(storage_name)
+    def delete(self, storage_name, actor, guard=None):
+        """guard(잠근 현재 행) -- 사용 중 판정을 행 잠금과 같은 트랜잭션에서(update docstring)."""
         with self._db.transaction():
+            before = self._lock_row(storage_name)
+            if before is None:
+                raise KeyError(storage_name)
+            if guard is not None:
+                guard(before)
             # 사용자 sync 허용 쌍(repositories/sync_pairs.py)도 같은 트랜잭션에서 지운다 -- 같은
             # 이름으로 다시 등록된 스토리지가 옛 허용을 물려받지 않게. 트랜잭션이 중첩되지 않아
             # (db.transaction) SyncPairsRepository.remove 대신 여기서 직접 지우고 감사를 남긴다.

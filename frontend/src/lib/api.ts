@@ -141,7 +141,7 @@ export const REASON_MESSAGES: Record<string, string> = {
   // 같은 문구를 쓰면 사용자가 두 상황을 구분할 수 없다.
   no_ready_sync_candidate: "소스와 목적지를 함께 다룰 수 있는 노드가 없습니다",
   storage_exists: "이미 존재하는 스토리지입니다",
-  storage_in_use: "사용 중인 스토리지는 삭제할 수 없습니다 (비활성화하세요)",
+  storage_in_use: "진행 중인 작업(요청·배치)이 쓰는 스토리지는 경로를 바꾸거나 삭제할 수 없습니다 — 끝나거나 취소한 뒤 다시 하세요(급하면 비활성화)",
   storage_not_found: "스토리지를 찾을 수 없습니다",
   // 제출만이 아니다 -- 작업 삭제·배치 생성/확인/취소·빌드·릴리스도 같은 503 을 받는다(reject_when_maintenance 호출처).
   maintenance_mode: "유지보수 중입니다 — 작업 제출·삭제·빌드 같은 변경이 일시 중단되었습니다",

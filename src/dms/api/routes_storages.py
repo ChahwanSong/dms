@@ -1,4 +1,3 @@
-import posixpath
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from ..domain import DomainValidationError
@@ -52,28 +51,28 @@ def create_storage(body: StorageCreate, request: Request,
 def update_storage(name: str, body: StorageUpdate, request: Request,
                    identity: Identity = Depends(require_admin)):
     repos = request.app.state.repos
-    current = repos.storages.get(name)
-    if current is None:
-        raise HTTPException(status_code=404, detail="storage_not_found")
     # 슬라이스 24 §2.4: 진행 중 잡이 참조하는 스토리지의 경로·백엔드 변경을 막는다
     # -- preview 에서 확인한 경로와 execution 이 도는 경로가 갈라지는 TOCTOU(확인
     # 게이트 우회)의 봉인이다. enabled 토글은 가드 없이 통과: 진행 중 잡의 비상
     # 차단(비활성화) 경로를 막으면 안 된다. 비교는 저장값과 같은 normpath 정규화
-    # (후행 슬래시만 다른 PUT 의 409 오탐 방지). delete 가드와 같은 요청 레벨
-    # check-then-act 라 원자적이지 않다 -- 잔여 창은 stepper._abs fail-closed 가
-    # 최종 방어이고, 이 가드는 창을 좁힐 뿐 없애지 못한다(설계 §2.4 정직한 한계).
-    changed = (posixpath.normpath(body.mount_path) != current["mount_path"]
-               or posixpath.normpath(body.managed_root) != current["managed_root"]
-               or body.backend_type != current["backend_type"])
-    if changed and repos.requests.active_referencing_storage(name):
-        raise HTTPException(status_code=409, detail="storage_in_use")
+    # (후행 슬래시만 다른 PUT 의 409 오탐 방지).
+    # 2026-11-16: 활성 **배치**(항목이 가리키는 스토리지)도 본다 -- 요청만 보면 배치의 자식 묶음 사이·회차 발사 직후엔 「쓰는
+    # 요청 없음」이라 남은 항목이 바뀐 경로에서 root 로 돌았다(자동 확인 배치·스케줄이면 사람 없이). 판정은 저장소가 스토리지
+    # 행을 잠근 같은 트랜잭션에서 부른다(guard) -- 배치 되살리기(회차·:rescan 의 FOR SHARE)와 직렬화된다. 단건 요청의 생성은
+    # 스토리지를 잠그지 않으므로 요청 쪽은 여전히 창을 좁힐 뿐이다(잔여 창은 stepper._abs fail-closed, 설계 §2.4).
+    def guard(current, mount_path, managed_root):
+        changed = (mount_path != current["mount_path"] or managed_root != current["managed_root"]
+                   or body.backend_type != current["backend_type"])
+        if changed and (repos.requests.active_referencing_storage(name)
+                        or repos.batches.active_referencing_storage(name)):
+            raise DomainValidationError("storage_in_use")
     try:
         return repos.storages.update(
             name, mount_path=body.mount_path, managed_root=body.managed_root,
             backend_type=body.backend_type, enabled=body.enabled,
-            user_enabled=body.user_enabled, actor=audit_actor(identity))
+            user_enabled=body.user_enabled, actor=audit_actor(identity), guard=guard)
     except DomainValidationError as e:
-        raise HTTPException(status_code=422, detail=e.reason_code)
+        raise HTTPException(status_code=409 if e.reason_code == "storage_in_use" else 422, detail=e.reason_code)
     except KeyError:
         raise HTTPException(status_code=404, detail="storage_not_found")
 
@@ -81,10 +80,16 @@ def update_storage(name: str, body: StorageUpdate, request: Request,
 @router.delete("/api/admin/storages/{name}")
 def delete_storage(name: str, request: Request,
                    identity: Identity = Depends(require_admin)):
-    if request.app.state.repos.requests.active_referencing_storage(name):
-        raise HTTPException(status_code=409, detail="storage_in_use")
+    repos = request.app.state.repos
+
+    # 경로 변경 가드와 같은 판정(요청 ∪ 활성 배치), 같은 트랜잭션(update_storage 주석).
+    def guard(current):
+        if repos.requests.active_referencing_storage(name) or repos.batches.active_referencing_storage(name):
+            raise DomainValidationError("storage_in_use")
     try:
-        return request.app.state.repos.storages.delete(name, actor=audit_actor(identity))
+        return repos.storages.delete(name, actor=audit_actor(identity), guard=guard)
+    except DomainValidationError as e:
+        raise HTTPException(status_code=409, detail=e.reason_code)
     except KeyError:
         raise HTTPException(status_code=404, detail="storage_not_found")
 

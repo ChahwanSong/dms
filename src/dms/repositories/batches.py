@@ -1036,6 +1036,37 @@ class BatchesRepository:
                   WHERE batch_id = :b AND status IN ('Succeeded','Failed','Rejected','Cancelled')""",
             {"now": now, "b": batch_id})
 
+    def active_referencing_storage(self, storage_name) -> bool:
+        """비종단 배치(Completed/Cancelled 밖 -- 모르는 상태도 활성으로 본다)의 항목 payload 가 이 스토리지를 가리키나 --
+        스토리지 경로 변경·삭제 가드(routes_storages)가 요청 가드(RequestsRepository.active_referencing_storage)와 함께 본다.
+        요청만 보면 배치의 자식 묶음 사이(한 묶음이 끝나고 다음 묶음이 아직 안 생긴 틈 -- 스토리지를 껐다 켜서 일부러 만들 수도
+        있다)와 회차 발사 직후 첫 자식 전에는 「쓰는 요청 없음」이라, 남은 항목이 바뀐 경로에서 root 로 돌았다(2026-11-16 리뷰 --
+        자동 확인 배치면 사람 없이 끝까지). 깨진 payload(DB 변조)는 건너뛴다(가드가 500 이 되지 않게)."""
+        rows = self._db.query(
+            """SELECT bi.payload FROM batch_items bi JOIN batches b ON b.batch_id = bi.batch_id
+                WHERE b.status NOT IN ('Completed', 'Cancelled')""")
+        for r in rows:
+            p = _payload_or_none(r["payload"])
+            if p is not None and storage_name in tuple(p.get(k) for k in _STORAGE_KEYS):
+                return True
+        return False
+
+    def _lock_item_storages(self, batch_id) -> None:
+        """이 배치 항목이 가리키는 스토리지 행을 공유 잠금(PG FOR SHARE) -- 호출자 트랜잭션 안에서만, 항목 → 배치 잠금 **뒤**에
+        부른다. 회차 발사(batch_schedules.fire)·사람의 :rescan(rescan_if_terminal)이 배치를 되살리는 순간과 스토리지 경로 변경
+        (StoragesRepository.update 의 FOR UPDATE + 사용 중 판정)을 직렬화한다: 변경이 먼저 잠그면 되살리기가 기다렸다가 새 경로를
+        읽어 바인딩 판정에서 멈추고, 되살리기가 먼저 잠그면 변경이 기다렸다가 비종단 배치를 보고 storage_in_use 로 거부된다.
+        sqlite 는 단일 커넥션 + RLock 이 이미 직렬화한다(잠금 구문이 없다). 이름순으로 잠근다(두 되살리기 사이 순서 고정)."""
+        if self._db.dialect != "postgresql":
+            return
+        names = set()
+        for r in self._db.query("SELECT payload FROM batch_items WHERE batch_id = :b", {"b": batch_id}):
+            p = _payload_or_none(r["payload"])
+            if p is not None:
+                names.update(v for v in (p.get(k) for k in _STORAGE_KEYS) if isinstance(v, str))
+        for name in sorted(names):
+            self._db.query("SELECT storage_name FROM storages WHERE storage_name = :n FOR SHARE", {"n": name})
+
     def rescan_if_terminal(self, batch_id) -> "dict | None":
         """전체 재실행(:rescan) 한 트랜잭션: 항목 → 배치 잠금 → 종단(Completed/Cancelled)일 때만 _rescan_locked. 다음 상태는
         잠근 배치 행의 연산으로 정한다(domain.confirm_gated -- sync·rm·미지 연산은 Previewing, scan 은 Running). 반환
@@ -1044,6 +1075,7 @@ class BatchesRepository:
             batch, _ = self._lock_items_then_batch(batch_id, with_items=False)
             if batch is None or batch["status"] not in ("Completed", "Cancelled"):
                 return None
+            self._lock_item_storages(batch_id)
             to_status = "Previewing" if confirm_gated(batch["operation"]) else "Running"
             requeued = self._rescan_locked(batch_id, to_status=to_status)
             if requeued is None:

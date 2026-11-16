@@ -55,7 +55,7 @@ test("delete shows in-use error on 409", async () => {
   wrap();
   await userEvent.click(await screen.findByRole("button", { name: "삭제" }));
   await userEvent.click(await screen.findByRole("button", { name: "삭제 확인" }));
-  expect(await screen.findByText("사용 중인 스토리지는 삭제할 수 없습니다 (비활성화하세요)")).toBeInTheDocument();
+  expect(await screen.findByText("진행 중인 작업(요청·배치)이 쓰는 스토리지는 경로를 바꾸거나 삭제할 수 없습니다 — 끝나거나 취소한 뒤 다시 하세요(급하면 비활성화)")).toBeInTheDocument();
 });
 test("사용 범위 셀렉트: 관리자 전용·완전 비활성을 고르면 즉시 PUT 한다", async () => {
   // 옛 "비활성화/활성화" 토글의 자리(2026-09-30): 비활성이 두 종류다. 완전 비활성은
@@ -113,7 +113,7 @@ test("cancelling the delete dialog clears the stale 409 error", async () => {
   wrap();
   await userEvent.click(await screen.findByRole("button", { name: "삭제" }));
   await userEvent.click(await screen.findByRole("button", { name: "삭제 확인" }));
-  const msg = "사용 중인 스토리지는 삭제할 수 없습니다 (비활성화하세요)";
+  const msg = "진행 중인 작업(요청·배치)이 쓰는 스토리지는 경로를 바꾸거나 삭제할 수 없습니다 — 끝나거나 취소한 뒤 다시 하세요(급하면 비활성화)";
   expect(await screen.findByText(msg)).toBeInTheDocument();
   // "취소"는 setOpen(false)를 직접 부른다 — Radix의 onOpenChange가 발화하지 않는 경로다.
   await userEvent.click(screen.getByRole("button", { name: "취소" }));
