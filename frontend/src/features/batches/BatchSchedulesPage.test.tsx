@@ -131,8 +131,14 @@ test("root 실행 자격이 없으면 추가·수정·켜기를 잠그고 끄기
 test("삭제는 2단 확인 뒤 DELETE", async () => {
   const calls = serve([row()]);
   renderPage();
-  await userEvent.click(await screen.findByRole("button", { name: "야간 스캔 삭제" }));
+  const arm = await screen.findByRole("button", { name: "야간 스캔 삭제" });
+  // d29 실증 뒤: 「회차 기록」은 보존 회차(batch_rounds)와 헷갈렸다 — 스케줄 삭제가 지우는 것은 실행 기록이고 보존 회차 셈은 남는다
+  expect(arm.getAttribute("title"))
+    .toBe("실행 기록도 함께 지웁니다 — 보존 회차 셈과 이미 남은 작업은 그대로, 정리는 멈춥니다(감사 기록은 남습니다)");
+  expect(arm.getAttribute("title")).not.toContain("회차 기록");
+  await userEvent.click(arm);
   expect(calls.filter((c) => c.method === "DELETE")).toEqual([]);
+  expect(screen.getByRole("button", { name: "야간 스캔 삭제 확인" }).getAttribute("title")).toBe(arm.getAttribute("title"));
   await userEvent.click(screen.getByRole("button", { name: "야간 스캔 삭제 확인" }));
   await waitFor(() => expect(calls.filter((c) => c.method === "DELETE")).toEqual([{ method: "DELETE", path: "s1" }]));
 });
@@ -155,7 +161,21 @@ test("회차 보존 안내(머리 도움말)와 「정리」 열 — null(아직
   expect(await screen.findByText(/스케줄이 있는 배치는 최근 5회차만 보존합니다/)).toBeInTheDocument();
   expect(screen.getByRole("columnheader", { name: "정리" })).toBeInTheDocument();
   expect(screen.getByText("아직 정리 없음")).toBeInTheDocument();
-  expect(screen.getByText("정리 누적 0건 · 마지막 2026-11-16 18:30:00")).toBeInTheDocument();
+  // 누적 / 마지막 시각 두 줄 — 둘째 줄 「마지막 <시각>」 전체가 한 덩어리(whitespace-nowrap)라 390 폭에서 하이픈(d29)에서도,
+  // 「마지막」과 시각 사이 공백(d30 — 「마지막」만 떨어져 세 줄)에서도 꺾이지 않는다
+  const total = screen.getByText("정리 누적 0건");
+  const cell = total.closest("td")!;
+  expect(cell).toHaveTextContent("정리 누적 0건마지막 2026-11-16 18:30:00");
+  expect(cell.className).toContain("break-keep");
+  const lastLine = within(cell).getByText("마지막");
+  expect(lastLine.tagName).toBe("SPAN");
+  expect(lastLine).toHaveTextContent("마지막 2026-11-16 18:30:00");
+  expect(lastLine.className).toContain("whitespace-nowrap");
+  expect(lastLine.className).toContain("block");
+  expect(within(lastLine).getByText("2026-11-16 18:30:00").className).toContain("tabular-nums");
+  expect(screen.getByText("정리 누적 12건").closest("td")).toHaveTextContent("정리 누적 12건마지막 2026-11-16 18:30:00");
+  // 머리 안내도 break-keep(어절 중간에서 꺾이지 않게)
+  expect(screen.getByText(/스케줄이 있는 배치는 최근 5회차만 보존합니다/).closest("ul")!.className).toContain("break-keep");
   expect(screen.getByText(/항목 1,200개 × 5회차 = 작업 최대 6,000개 — 정리 뒤에도 배치 단위 삭제 상한\(5,000개\)을 넘어/))
     .toBeInTheDocument();
 });

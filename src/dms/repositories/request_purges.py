@@ -176,6 +176,22 @@ def _clip(value):
     return value[:_RAW_MAX] if isinstance(value, str) else value
 
 
+def _short_str(value):
+    # 정리 감사 자식 기록용(_prune_summary): 문자열만 _ID_MAX 로 접고, 나머지(부재·변조 타입)는 None.
+    return value[:_ID_MAX] if isinstance(value, str) else None
+
+
+def _prune_dest_owner(block):
+    """자식 payload dest_owner(k8s_access.direct_dest_owner 블록) → 정리 감사용 {"rule", "owner"?} | None. dict 가 아니면
+    None(해당 없음·변조). owner 는 문자열일 때만 키를 둔다(rule "none" 블록엔 owner 가 없다 -- 없는 값을 null 로 지어내지 않는다)."""
+    if not isinstance(block, dict):
+        return None
+    out = {"rule": _short_str(block.get("rule"))}
+    if isinstance(block.get("owner"), str):
+        out["owner"] = _short_str(block["owner"])
+    return out
+
+
 def _parse(text):
     """DB 의 JSON 텍스트 -- 깨졌으면 None(신뢰 경계: 변조된 한 행이 삭제 트랜잭션 전체를 500 으로 만들지 않게).
     RecursionError: 깊게 중첩된 변조 JSON(`[[[[…`)은 디코더가 재귀 한도에서 던진다 -- 깨진 것과 같다."""
@@ -817,18 +833,31 @@ class RequestPurgesRepository:
 
     @staticmethod
     def _prune_summary(reqs, jobs_by_rid, job_ids) -> dict:
-        """정리 감사의 본문: 지운 수·잡 수·상태별 수·생성 시각 범위 + 자식마다 최소 기록(id·상태·생성 시각·run_as_root·잡
-        {id, 상태, tool}). 자식별 32 KiB 스냅숏(_snapshot)은 남기지 않는다(설계 §14 -- 결과 메시지·전이 전문은 사라진다)."""
+        """정리 감사의 본문: 지운 수·잡 수·상태별 수·생성 시각 범위 + 자식마다 최소 기록(id·상태·생성 시각·owner_username·
+        dest_owner·잡 {id, 상태, tool}). 자식별 32 KiB 스냅숏(_snapshot)은 남기지 않는다(설계 §14 -- 결과 메시지·전이 전문은
+        사라진다).
+
+        실행 근거 칸이 run_as_root 가 아닌 이유(d29 라이브 실증 -- 감사 971·972·975 의 14행이 모두 null 이었다): 정리 대상은
+        배치 자식뿐인데 orchestrator 는 자식 payload 에 run_as_root 를 싣지 않는다(실려 있으면 DB 변조 -- identity.privilege_policy).
+        배치 자식의 root 근거는 privilege_policy 의 배치 자식 판정(특권 목록, 자식마다 같은 값)이라 칸에 담을 정보가 없다. 대신
+        자식 payload 에 얼린 값 중 지우면 사라지는 둘을 남긴다:
+          owner_username -- 배치의 실행 신원 지정(_materialize 가 batches.owner_username 을 옮긴다). None = 지정 없음(키 부재 --
+                            비특권 배치의 정상 모양, 모름이 아니다) 또는 문자열이 아닌 변조 값.
+          dest_owner     -- 직접 경로 sync 목적지의 결과 소유 블록(k8s_access.direct_dest_owner)에서 {"rule", "owner"} 만
+                            (owner 는 rule "storage" 일 때의 "uid:gid"). None = 해당 없음(scan·rm·명시 chown -- 키 부재) 또는
+                            dict 가 아닌 변조 값. storage·pv_root 는 싣지 않는다(목적지 경로를 싣지 않는 최소 기록 원칙).
+        값은 _ID_MAX 로 접는다(정상 값은 계정 아이디·"uid:gid" 라 짧다 -- 변조로 거대해진 값이 32 KiB 를 혼자 채우지 않게)."""
         states: dict = {}
         children = []
         for r in reqs:
             st = r.get("state")
             states[str(st)] = states.get(str(st), 0) + 1
             payload = _parse(r.get("payload"))
-            rar = payload.get("run_as_root") if isinstance(payload, dict) else None
+            payload = payload if isinstance(payload, dict) else {}
             children.append({
                 "request_id": _clip(r["request_id"]), "state": _clip(st), "created_at": _clip(r.get("created_at")),
-                "run_as_root": rar if isinstance(rar, bool) else None,
+                "owner_username": _short_str(payload.get("owner_username")),
+                "dest_owner": _prune_dest_owner(payload.get("dest_owner")),
                 "jobs": [{"job_id": _clip(j["job_id"]), "state": _clip(j["state"]), "tool": _clip(j["tool"])}
                          for j in jobs_by_rid.get(r["request_id"], [])]})
         stamps = [r.get("created_at") for r in reqs if isinstance(r.get("created_at"), str)]
@@ -840,7 +869,8 @@ class RequestPurgesRepository:
     @staticmethod
     def _prune_bounded(summary) -> str:
         """정리 감사 before_state -- 32 KiB 상한(감사가 정리를 막는 일은 없다, _bounded 원칙). 넘으면 단계적으로 줄인다:
-        children[].jobs 를 뺀다 → children 을 request_id 목록으로 → 목록을 비우고 수만 남긴다(truncated). 그래도 넘으면
+        children[].jobs 를 뺀다(id·상태·생성 시각·owner_username·dest_owner 는 남는다 -- 둘은 _ID_MAX 로 접혀 있어 청크 100 이면
+        이 단계에서 들어간다) → children 을 request_id 목록으로 → 목록을 비우고 수만 남긴다(truncated). 그래도 넘으면
         (변조로 거대해진 값) 고정 키의 짧은 값만."""
         text = _fits(summary)
         if text is not None:

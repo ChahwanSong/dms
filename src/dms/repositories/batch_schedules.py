@@ -36,7 +36,7 @@ import uuid
 from ..db import Database, dump_json, utc_now_iso
 from ..batch_scheduler import SCHEDULER_ACTOR, next_run_after
 from ..domain import DomainValidationError, confirm_gated
-from .batches import BATCH_ROUND_HISTORY_CAP, BatchesRepository, _storage_fields
+from .batches import BATCH_ROUND_HISTORY_CAP, BatchesRepository, _storage_fields, schedule_delete_audit_before
 from .requests import batch_match
 
 # 스케줄당 남기는 회차 이력 수. 확인 대기 중 매시간 건너뛰는 스케줄도 이력이 끝없이 자라지 않는다.
@@ -387,20 +387,20 @@ class BatchSchedulesRepository:
         return row["schedule_id"] if self._disable_locked(row, actor=actor, now=now, via="batch_cancel") else None
 
     def delete(self, schedule_id, *, actor) -> None:
-        """스케줄 + 회차 이력 삭제(감사 행은 남는다). 스케줄 → 회차 이력 순(모듈 docstring 의 잠금 순서)."""
+        """스케줄 + 실행 기록(회차 이력) 삭제(감사 행은 남는다). 스케줄 → 회차 이력 순(모듈 docstring 의 잠금 순서). 보존 회차
+        경계(batch_rounds)·남은 자식은 지우지 않는다 -- 배치에 속한다(배치 삭제 두 경로만 지운다); 스케줄이 없으니 정리만 멈춘다.
+        감사 before 는 배치 삭제 경로와 같은 한 벌(batches.schedule_delete_audit_before, deleted_with_batch False) -- 그래서 행을
+        수화(_hydrate)하지 않고 원행으로 잠근다(_lock_schedule 과 같은 문장)."""
         now = utc_now_iso()
+        lock = " FOR UPDATE" if self._db.dialect == "postgresql" else ""
         with self._db.transaction():
-            row = self._lock_schedule(schedule_id)
+            row = self._db.query_one(f"SELECT * FROM batch_schedules WHERE schedule_id = :s{lock}", {"s": schedule_id})
             if row is None:
                 raise DomainValidationError("batch_schedule_not_found", schedule_id)
-            n = self._db.query_one("SELECT COUNT(*) AS n FROM batch_schedule_runs WHERE schedule_id = :s",
-                                   {"s": schedule_id})
+            before = schedule_delete_audit_before(self._db, row, deleted_with_batch=False)
             self._db.execute("DELETE FROM batch_schedules WHERE schedule_id = :s", {"s": schedule_id})
             self._db.execute("DELETE FROM batch_schedule_runs WHERE schedule_id = :s", {"s": schedule_id})
-            self._audit("delete", row, actor=actor,
-                        before=_audit_state(row, acknowledged_irreversible=row["ack_fingerprint"] is not None,
-                                            last_outcome=row["last_outcome"], run_count=int(n["n"])),
-                        after=None, now=now)
+            self._audit("delete", row, actor=actor, before=before, after=None, now=now)
 
     # --- 회차(컨트롤러) ---------------------------------------------------------------------------------------------------
 

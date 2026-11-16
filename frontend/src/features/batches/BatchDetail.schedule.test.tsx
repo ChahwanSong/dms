@@ -164,13 +164,13 @@ test("꺼진 스케줄·스케줄 없음이면 취소는 지금처럼 바로 보
   expect(screen.queryByRole("dialog", { name: "배치 취소" })).toBeNull();
 });
 
-test("배치 삭제 창: 스케줄이 있으면 스케줄·회차 기록도 함께 지워진다고 말한다", async () => {
+test("배치 삭제 창: 스케줄이 있으면 스케줄·실행 기록·보존 회차 기록도 함께 지워진다고 말한다", async () => {
   server.use(http.get("/api/auth/me", () => HttpResponse.json({ actor: "ops", role: "admin", can_run_as_root: true })));
   const { unmount } = renderAt(head({ schedule: DAILY }));
   await userEvent.click(await screen.findByRole("button", { name: "배치 삭제" }));
   const dialog = await screen.findByRole("dialog", { name: "배치 삭제" });
   expect(within(dialog).getByRole("note", { name: "스케줄도 함께 삭제" }))
-    .toHaveTextContent("이 배치의 스케줄(매일 02:00 (KST) · 사용 중)과 회차 기록도 함께 삭제됩니다(감사 기록은 남습니다).");
+    .toHaveTextContent("이 배치의 스케줄(매일 02:00 (KST) · 사용 중)과 실행 기록·보존 회차 기록도 함께 삭제됩니다(감사 기록은 남습니다).");
   unmount();
   renderAt(head({ schedule: null }));
   await userEvent.click(await screen.findByRole("button", { name: "배치 삭제" }));

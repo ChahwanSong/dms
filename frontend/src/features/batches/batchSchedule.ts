@@ -213,12 +213,21 @@ export const outcomeTone = (o: string): string => OUTCOME_TONE[o] ?? "text-ink";
 // 서버 enabled 는 INTEGER(0/1) 컬럼이라 응답이 1 일 수도 true 일 수도 있다 — 켜짐은 둘 중 하나로만 판정한다(그 밖 = 꺼짐).
 export const scheduleEnabled = (v: unknown): boolean => v === true || v === 1;
 
+// 「기록」 낱말(d29 실증 뒤 다듬기 — 같은 화면에서 「회차」가 두 가지를 가리켜 헷갈렸다): 「실행 기록」 = 스케줄 회차 판정 이력
+// (batch_schedule_runs — 행의 「기록」 창 이름도 「실행 기록」), 「보존 회차」 = 최근 K회차 보존의 회차 경계(batch_rounds — 배치에 속한다).
+// 스케줄만 지우면 실행 기록만 지워지고 보존 회차 경계·남은 작업은 그대로라(정리는 멈춘다) 다시 만들면 쌓인 기록으로 곧 정리가 돈다.
+// 배치를 지우면 둘 다 지워진다.
+
+/** 스케줄 행 「삭제」·「삭제 확인」 버튼의 title — 스케줄 DELETE(BatchSchedulesRepository.delete)가 지우는 것과 남기는 것. */
+export const SCHEDULE_DELETE_HINT =
+  "실행 기록도 함께 지웁니다 — 보존 회차 셈과 이미 남은 작업은 그대로, 정리는 멈춥니다(감사 기록은 남습니다)";
+
 /** 배치 삭제 확인 창의 스케줄 안내 한 줄 — 배치 삭제의 두 경로(배치 상세의 기록 삭제 = BatchesRepository.delete, 작업 목록의 배치
- *  단위 삭제 = request_purges.delete_batch)가 모두 같은 트랜잭션에서 그 배치의 스케줄·회차 기록을 지운다(BATCH_DELETE_TABLES).
- *  두 창이 같은 말을 하도록 한 벌로 둔다. 감사 기록(스케줄 삭제 행)은 남는다. */
+ *  단위 삭제 = request_purges.delete_batch)가 모두 같은 트랜잭션에서 그 배치의 스케줄·실행 기록·보존 회차 경계를 지운다
+ *  (BATCH_DELETE_TABLES). 두 창이 같은 말을 하도록 한 벌로 둔다. 감사 기록(스케줄 삭제 행)은 남는다. */
 export const scheduleDeleteNotice = (s: { kind: unknown; spec: unknown; enabled: unknown }): string =>
-  `이 배치의 스케줄(${scheduleSummary(s.kind, s.spec)}${scheduleEnabled(s.enabled) ? " · 사용 중" : ""})과 회차 기록도 `
-  + "함께 삭제됩니다(감사 기록은 남습니다).";
+  `이 배치의 스케줄(${scheduleSummary(s.kind, s.spec)}${scheduleEnabled(s.enabled) ? " · 사용 중" : ""})과 실행 기록·보존 회차 `
+  + "기록도 함께 삭제됩니다(감사 기록은 남습니다).";
 
 /** 초 → 「2일」「30시간」「90분」 — 경고 문구용(정확히 나눠떨어지는 가장 큰 단위). 0 이하·비정수는 null(지어내지 않는다). */
 export function durationText(seconds: number | null | undefined): string | null {
@@ -274,12 +283,19 @@ export function keepRoundsNotice(keep: number | null | undefined): string | null
     + `scan 이력(온도·용량 추이)도 이 배치 몫은 최근 ${keep}회차만 남습니다. 스케줄을 꺼도 정리는 계속되고, 스케줄을 지우면 멈춥니다.`;
 }
 
+/** 스케줄 행의 정리 결과 조각 — null = 아직 정리 없음(0 과 다르다, null ≠ 0). at = 마지막 정리 시각(KST, 모르면 null). 표 칸은
+ *  시각을 한 덩어리(whitespace-nowrap)로 그리려고 조각을 쓰고, 한 줄 글은 pruneText 가 같은 조각으로 만든다(둘이 갈라지지 않게). */
+export function pruneParts(s: Pick<BatchSchedule, "pruned_total" | "pruned_at">): { total: string; at: string | null } | null {
+  const n = s.pruned_total;
+  if (typeof n !== "number") return null;
+  return { total: `정리 누적 ${n0(n)}건`, at: typeof s.pruned_at === "string" ? kstStampBare(s.pruned_at) : null };
+}
+
 /** 스케줄 행의 정리 결과 한 줄 — null(아직 정리 없음)과 0 을 가른다(null ≠ 0). */
 export function pruneText(s: Pick<BatchSchedule, "pruned_total" | "pruned_at">): string {
-  const n = s.pruned_total;
-  if (typeof n !== "number") return "아직 정리 없음";
-  const at = typeof s.pruned_at === "string" ? ` · 마지막 ${kstStampBare(s.pruned_at)}` : "";
-  return `정리 누적 ${n0(n)}건${at}`;
+  const p = pruneParts(s);
+  if (p === null) return "아직 정리 없음";
+  return p.at === null ? p.total : `${p.total} · 마지막 ${p.at}`;
 }
 
 /** 「항목 × K > 상한」 예측 경고 — 보존 회차를 다 채우면 정리 뒤에도 배치 단위 삭제 상한을 넘는다. 셋 중 하나라도 모르면 null. */

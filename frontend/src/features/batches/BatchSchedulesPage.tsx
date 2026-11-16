@@ -11,7 +11,8 @@ import { useNow } from "../../lib/useNow";
 import { useMe } from "../auth/useAuth";
 import {
   childCountWarning, confirmWaitShort, confirmWaitText, isDestructiveBatch, keepRoundsNotice, outcomeLabel, outcomeTone,
-  projectedChildrenWarning, pruneText, scheduleEnabled, scheduleSummary, storageText, untilText, type BatchSchedule,
+  projectedChildrenWarning, pruneParts, SCHEDULE_DELETE_HINT, scheduleEnabled, scheduleSummary, storageText, untilText,
+  type BatchSchedule,
 } from "./batchSchedule";
 import { BatchScheduleDialog } from "./BatchScheduleDialog";
 import { BatchScheduleRunsDialog } from "./BatchScheduleRunsDialog";
@@ -52,6 +53,21 @@ function LastResult({ s }: { s: BatchSchedule }) {
     <span className={`block whitespace-nowrap ${outcomeTone(s.last_outcome)}`}>{outcomeLabel(s.last_outcome)}</span>
     {s.last_reason_code !== null && <span className="block text-xs">{reasonText(s.last_reason_code)}</span>}
     {s.last_run_at !== null && <span className="block text-xs text-muted tabular-nums">{kstStampBare(s.last_run_at)}</span>}
+  </>);
+}
+
+// 「정리」 칸 — 회차 보존 정리 누적 / 마지막 시각 두 줄(LastResult 와 같은 모양). null = 아직 정리 없음(0 과 다르다). 둘째 줄
+// 「마지막 <시각>」 전체가 한 덩어리(whitespace-nowrap)라 하이픈에서 꺾이지 않고(d29 실증: 「마지막 2026-11-」/「16 21:42:00」),
+// 「마지막」과 시각 사이 공백에서도 꺾이지 않는다(d30 실증: 390 에서 「마지막」만 한 줄로 떨어져 세 줄). 칸은 Table 래퍼의 가로 스크롤
+// 안이라 문서 넘침은 없다. 칸의 break-keep 이 첫 줄의 「마/지막」 같은 어절 중간 꺾임을 막는다.
+function PruneResult({ s }: { s: BatchSchedule }) {
+  const p = pruneParts(s);
+  if (p === null) return <>아직 정리 없음</>;
+  return (<>
+    <span className="block">{p.total}</span>
+    {p.at !== null && (
+      <span className="block whitespace-nowrap text-muted">마지막 <span className="tabular-nums">{p.at}</span></span>
+    )}
   </>);
 }
 
@@ -160,7 +176,8 @@ export function BatchSchedulesPage() {
                              trigger={<Button disabled={!canArm} title={canArm ? undefined : LOCKED_HINT}>스케줄 추가</Button>} />
       </div>
       <InfoPanel>
-        <ul className="list-disc space-y-1 pl-5">
+        {/* break-keep: 한국어 안내가 390 폭에서 「재/실행」「최근 5/회차만」처럼 어절 중간에서 꺾이지 않게(저장소 관례). */}
+        <ul className="list-disc space-y-1 pl-5 break-keep">
           <li>정해진 한국시간(KST)에 배치를 <span className="font-medium">「전체 재실행」</span>합니다 — 배치당 스케줄 하나.</li>
           <li>그 시각에 배치가 진행 중이면 그 회차는 건너뛰고 기록합니다(밀린 회차를 몰아서 실행하지 않습니다).</li>
           <li>sync·rm 은 회차마다 미리보기 → 「배치 확인」을 거칩니다(미리보기 후 자동 실행 배치는 자동). 확인 대기 중에는 이후
@@ -231,7 +248,9 @@ export function BatchSchedulesPage() {
                   </td>
                   <td className="py-2 pr-2 min-w-[8rem]"><LastResult s={s} /></td>
                   {/* 회차 보존 정리 결과(null = 아직 없음 — 0 과 다르다). 375·390 폭은 Table 래퍼의 가로 스크롤 안이다. */}
-                  <td className="py-2 pr-2 min-w-[7rem] text-xs" title={keepNotice ?? undefined}>{pruneText(s)}</td>
+                  <td className="py-2 pr-2 min-w-[7rem] text-xs break-keep" title={keepNotice ?? undefined}>
+                    <PruneResult s={s} />
+                  </td>
                   <td className="py-2 pr-2">
                     <input type="checkbox" className={BOX} aria-label={`${label} 사용`}
                            checked={checked} disabled={busy || lockOn}
@@ -254,9 +273,10 @@ export function BatchSchedulesPage() {
                       <BatchScheduleRunsDialog scheduleId={s.schedule_id} label={label} />
                       {armedId === s.schedule_id
                         ? <Button variant="danger" aria-label={`${label} 삭제 확인`} disabled={del.isPending}
+                                  title={SCHEDULE_DELETE_HINT}
                                   onClick={() => del.mutate(s.schedule_id, { onSettled: () => setArmedId(null) })}>삭제 확인</Button>
                         : <Button variant="ghost" aria-label={`${label} 삭제`}
-                                  title="회차 기록도 함께 지웁니다(감사 기록은 남습니다)"
+                                  title={SCHEDULE_DELETE_HINT}
                                   onClick={() => { del.reset(); setArmedId(s.schedule_id); }}>삭제</Button>}
                     </div>
                   </td>

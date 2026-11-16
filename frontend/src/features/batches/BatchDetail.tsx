@@ -1075,7 +1075,7 @@ function DeleteBatchButton({ batchId, schedule }: { batchId: string; schedule?: 
           배치 단위로 삭제하세요(배치 기록도 함께 지워집니다).
         </p>
         <p>기록을 먼저 지우면 남은 작업은 전체 작업에서 배치 이름 없이 「기록 없음 {batchId.slice(0, 12)}」로 표시됩니다.</p>
-        {/* 배치 삭제는 그 배치의 스케줄·회차 기록도 같은 트랜잭션에서 지운다(2026-11-16 — 서버 BATCH_DELETE_TABLES). 켜진
+        {/* 배치 삭제는 그 배치의 스케줄·실행 기록·보존 회차 경계도 같은 트랜잭션에서 지운다(2026-11-16 — 서버 BATCH_DELETE_TABLES). 켜진
             스케줄이 있는 배치를 모른 채 지우지 않게 지우기 전에 말한다. 감사 기록(스케줄 삭제 행)은 남는다. */}
         {schedule != null && (
           <p role="note" aria-label="스케줄도 함께 삭제" className="font-medium text-bad">
@@ -1120,7 +1120,8 @@ function ScheduleBadge({ batchId, schedule }: { batchId: string; schedule: Batch
     <span className="inline-flex flex-col">
       <Link className={`text-sm ${tone} [overflow-wrap:anywhere]`} to={schedulesPath(batchId)}
             title="배치 스케줄러에서 보기">{text}</Link>
-      {keepLine !== null && <span className="text-xs text-ink/70">{keepLine}</span>}
+      {/* break-keep: 390 폭에서 어절 중간(「배/치」「최근 5/회차만」)에서 꺾이지 않게(d29 실증 뒤). */}
+      {keepLine !== null && <span className="break-keep text-xs text-ink/70">{keepLine}</span>}
     </span>
   );
 }

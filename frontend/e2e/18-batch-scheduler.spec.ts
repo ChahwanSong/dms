@@ -156,6 +156,15 @@ test.describe("E18 — 배치 스케줄러", () => {
       data: { batch_id: bid, kind: "monthly", spec: { day: 31, hour, minute: 0 } } });
     expect(made.status(), await made.text()).toBe(201);
     const sid = ((await made.json()) as ScheduleRow).schedule_id;
+    // 「정리」 칸의 채워진 모양(누적 / 「마지막 <시각>」)은 컨트롤러 정리 루프가 돌아야 생겨 e2e 로 만들 수 없다 — 이 스케줄 행만
+    // 목록 응답에서 pruned_total·pruned_at 을 합성한다(나머지는 실 서버 값, 15-usage-filters 와 같은 page.route 수법).
+    await page.route(/\/api\/admin\/batch-schedules(\?.*)?$/, async (route) => {
+      if (route.request().method() !== "GET") return route.fallback();
+      const upstream = await route.fetch();
+      const rows = (await upstream.json()) as ScheduleRow[];
+      await route.fulfill({ response: upstream, json: rows.map((s) => s.schedule_id === sid
+        ? { ...s, pruned_total: 1234, pruned_at: "2026-11-16T12:42:00Z" } : s) });
+    });
     try {
       await page.setViewportSize({ width: 375, height: 800 });
       await page.goto("/admin/batch-schedules");
@@ -164,6 +173,19 @@ test.describe("E18 — 배치 스케줄러", () => {
       const [scroll, client] = await page.evaluate(() =>
         [document.documentElement.scrollWidth, document.documentElement.clientWidth]);
       expect(scroll, `375 에서 문서가 가로로 넘친다(${scroll} > ${client})`).toBeLessThanOrEqual(client);
+      // 「정리」 칸은 두 줄 — 둘째 줄 「마지막 2026-11-16 21:42:00」이 한 덩어리라 하이픈(d29)·「마지막」 뒤 공백(d30 리뷰: 390 에서
+      // 「마지막」만 따로 떨어져 세 줄)에서 꺾이지 않는다. 「마지막」 글자와 시각 조각의 줄(top)이 같고 시각 조각이 한 줄인지 본다.
+      await expect(tr.getByText("정리 누적 1,234건")).toBeVisible();
+      const last = tr.getByText("마지막 2026-11-16 21:42:00", { exact: true });
+      await expect(last).toBeVisible();
+      const geo = await last.evaluate((el) => {
+        const label = document.createRange();
+        label.selectNodeContents(el.firstChild!);           // 「마지막 」 글자 노드
+        const stampRects = el.querySelector("span")!.getClientRects();
+        return { labelTop: label.getClientRects()[0].top, stampTops: Array.from(stampRects, (r) => r.top) };
+      });
+      expect(geo.stampTops, "시각이 여러 줄로 꺾였다").toHaveLength(1);
+      expect(Math.abs(geo.stampTops[0] - geo.labelTop), "「마지막」과 시각이 다른 줄이다").toBeLessThan(2);
     } finally {
       await page.request.delete(`/api/admin/batch-schedules/${sid}`);
     }

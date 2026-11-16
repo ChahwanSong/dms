@@ -66,28 +66,38 @@ def _storage_fields(payload_text) -> dict:
     return {k: (p[k] if isinstance(p.get(k), str) else None) for k in _STORAGE_KEYS}
 
 
+def schedule_delete_audit_before(db, row, *, deleted_with_batch: bool) -> dict:
+    """('batch_schedule', 'delete') 감사 행의 before -- 스케줄 DELETE 라우트(BatchSchedulesRepository.delete)와 배치 삭제 두
+    경로(_audit_schedule_delete)가 **이 한 벌**을 쓴다(d29 라이브 실증: 라우트 쪽 감사 977 에 pruned_total·pruned_at 이 없어 같은
+    감사 행인데 경로마다 모양이 달랐다). row = batch_schedules 원행(SELECT * -- _hydrate 전, 호출자가 잠근 행). 스케줄 상태 + 마지막
+    판정 + 동의 여부 + 회차 보존 정리 누적(pruned_total·pruned_at -- NULL = 아직 정리 없음, 0 과 다르다; 변조 값은 None) + 함께
+    지운 실행 기록 수(run_count) + deleted_with_batch(배치 삭제가 함께 지웠나). 깨진 spec(DB 변조)은 None 으로 남긴다(감사가
+    삭제를 막지 않는다). 보존 회차 경계(batch_rounds)는 스케줄 삭제로 지우지 않으므로 여기 싣지 않는다."""
+    runs = db.query_one("SELECT COUNT(*) AS n FROM batch_schedule_runs WHERE schedule_id = :s",
+                        {"s": row["schedule_id"]})
+    pruned = row.get("pruned_total")
+    return {"schedule_id": row["schedule_id"], "batch_id": row["batch_id"], "kind": row["kind"],
+            "spec": _payload_or_none(row["spec"]), "enabled": row["enabled"] == 1,
+            "next_run_at": row["next_run_at"], "armed_by": row["armed_by"],
+            "acknowledged_irreversible": row["ack_fingerprint"] is not None,
+            "last_run_at": row["last_run_at"], "last_outcome": row["last_outcome"],
+            "last_reason_code": row["last_reason_code"], "paused_reason_code": row["paused_reason_code"],
+            "pruned_total": pruned if isinstance(pruned, int) and not isinstance(pruned, bool) and pruned >= 0 else None,
+            "pruned_at": row.get("pruned_at"),
+            "run_count": int(runs["n"]), "deleted_with_batch": bool(deleted_with_batch)}
+
+
 def _audit_schedule_delete(db, batch_id, *, actor, now) -> None:
     """배치 삭제 두 경로(BatchesRepository.delete·RequestPurgesRepository.delete_batch)가 스케줄 행을 지우기 **전에**, 같은
     트랜잭션에서 부른다: 그 배치에 스케줄이 있으면 ('batch_schedule', 'delete', batch_id) 감사 행을 남긴다 -- 스케줄 DELETE
-    라우트(BatchSchedulesRepository.delete)와 같은 mutation_class·operation·target_key 에, before 는 스케줄 상태 + 마지막 판정 +
-    동의 여부 + 함께 지운 회차 이력 수(run_count) + deleted_with_batch, after 는 NULL. 켜진 스케줄(armed_by·동의)이 배치와
-    함께 흔적 없이 사라지지 않게. 잠금은 항목 → 배치 → 스케줄 순서 그대로(두 경로 모두 항목·배치를 먼저 쥐거나 지운 뒤에
-    부른다 -- BATCH_DELETE_TABLES). 깨진 spec(DB 변조)은 None 으로 남긴다(감사가 삭제를 막지 않는다)."""
+    라우트(BatchSchedulesRepository.delete)와 같은 mutation_class·operation·target_key·before 모양(schedule_delete_audit_before,
+    deleted_with_batch True), after 는 NULL. 켜진 스케줄(armed_by·동의)이 배치와 함께 흔적 없이 사라지지 않게. 잠금은 항목 →
+    배치 → 스케줄 순서 그대로(두 경로 모두 항목·배치를 먼저 쥐거나 지운 뒤에 부른다 -- BATCH_DELETE_TABLES)."""
     lock = " FOR UPDATE" if db.dialect == "postgresql" else ""
     row = db.query_one(f"SELECT * FROM batch_schedules WHERE batch_id = :b{lock}", {"b": batch_id})
     if row is None:
         return
-    spec = _payload_or_none(row["spec"])
-    runs = db.query_one("SELECT COUNT(*) AS n FROM batch_schedule_runs WHERE schedule_id = :s",
-                        {"s": row["schedule_id"]})
-    before = {"schedule_id": row["schedule_id"], "batch_id": row["batch_id"], "kind": row["kind"],
-              "spec": spec, "enabled": row["enabled"] == 1,
-              "next_run_at": row["next_run_at"], "armed_by": row["armed_by"],
-              "acknowledged_irreversible": row["ack_fingerprint"] is not None,
-              "last_run_at": row["last_run_at"], "last_outcome": row["last_outcome"],
-              "last_reason_code": row["last_reason_code"], "paused_reason_code": row["paused_reason_code"],
-              "pruned_total": row.get("pruned_total"), "pruned_at": row.get("pruned_at"),
-              "run_count": int(runs["n"]), "deleted_with_batch": True}
+    before = schedule_delete_audit_before(db, row, deleted_with_batch=True)
     db.execute(
         """INSERT INTO audit_log (mutation_class, operation, target_key, actor, before_state, after_state, at)
            VALUES ('batch_schedule', 'delete', :key, :actor, :b, NULL, :at)""",

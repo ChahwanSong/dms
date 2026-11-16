@@ -146,7 +146,7 @@ export function DeleteRequestsDialog({ rows, batches = [], disabled, del, onDele
                   ? <StatusPill state={b.status} variant={batchPillVariant(b.status)} label={batchStatusLabel(b.status)} />
                   : <span className="text-xs">배치 기록 없음</span>}
                 <span aria-hidden>·</span><span>{`작업 ${b.request_count}개`}</span>
-                {/* 배치 단위 삭제는 그 배치의 스케줄·회차 기록도 같은 트랜잭션에서 지운다(2026-11-16 -- request_purges.delete_batch,
+                {/* 배치 단위 삭제는 그 배치의 스케줄·실행 기록·보존 회차 경계도 같은 트랜잭션에서 지운다(2026-11-16 -- request_purges.delete_batch,
                     BATCH_DELETE_TABLES). 켜진 스케줄을 모른 채 지우지 않게 그 배치 줄에서 말한다 -- 배치 상세의 기록 삭제 창과 같은
                     문구(scheduleDeleteNotice). 스냅숏은 연 순간의 목록 요약이다(서버는 스케줄 유무로 거부하지 않는다 -- 감사 행이 남는다). */}
                 {b.schedule != null && (

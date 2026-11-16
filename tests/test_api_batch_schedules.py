@@ -387,6 +387,60 @@ def test_batch_unit_delete_cascades_schedule_and_runs(client):
     assert len(_audit(client, "batch_schedule", "delete")) == 1
 
 
+# ('batch_schedule', 'delete') 감사 before 의 키 -- 세 경로(스케줄 DELETE 라우트·배치 기록 삭제·배치 단위 삭제)가 같은 한 벌
+# (batches.schedule_delete_audit_before). d29 라이브 실증: 라우트 쪽 감사 977 에 pruned_total·pruned_at 이 없었다.
+_SCHEDULE_DELETE_AUDIT_KEYS = {
+    "schedule_id", "batch_id", "kind", "spec", "enabled", "next_run_at", "armed_by", "acknowledged_irreversible",
+    "last_run_at", "last_outcome", "last_reason_code", "paused_reason_code", "pruned_total", "pruned_at", "run_count",
+    "deleted_with_batch"}
+
+
+def _delete_schedule_route(client, bid, sid):
+    assert client.delete(f"{URL}/{sid}").status_code == 200
+
+
+def _delete_batch_record(client, bid, sid):
+    r = client.delete(f"/api/admin/batches/{bid}")
+    assert r.status_code == 200, r.text
+
+
+def _delete_batch_unit(client, bid, sid):
+    r = _repos(client).request_purges.delete_batch(bid, expected_request_count=0, actor="ops", artifact_base=None,
+                                                   quiet_seconds=60, max_children=MAX_BATCH_DELETE_CHILDREN)
+    assert r["deleted"] is True, r
+
+
+@pytest.mark.parametrize("delete,with_batch", [(_delete_schedule_route, False), (_delete_batch_record, True),
+                                               (_delete_batch_unit, True)])
+def test_schedule_delete_audit_has_the_same_before_shape_on_every_path(client, delete, with_batch):
+    bid = _batch(client)
+    sid = _schedule_with_runs(client, bid)
+    _repos(client).db.execute("UPDATE batch_schedules SET pruned_total = 12, pruned_at = '2026-11-16T12:42:00Z' "
+                              "WHERE schedule_id = :s", {"s": sid})
+    delete(client, bid, sid)
+    a = _audit(client, "batch_schedule", "delete")
+    assert len(a) == 1 and a[0]["target_key"] == bid and a[0]["after_state"] is None
+    before = json.loads(a[0]["before_state"])
+    assert set(before) == _SCHEDULE_DELETE_AUDIT_KEYS
+    assert before["pruned_total"] == 12 and before["pruned_at"] == "2026-11-16T12:42:00Z"
+    assert before["schedule_id"] == sid and before["spec"] == DAILY["spec"] and before["enabled"] is True
+    assert before["run_count"] == 1 and before["deleted_with_batch"] is with_batch
+    assert before["last_outcome"] is None and before["acknowledged_irreversible"] is False
+
+
+def test_schedule_delete_audit_keeps_never_pruned_as_null_not_zero(client):
+    """정리 전에 지운 스케줄 -- pruned_total null(아직 정리 없음)은 0 으로 바뀌지 않는다(null ≠ 0). 변조 값도 모름(None)."""
+    for raw, want in ((None, None), (0, 0), (-1, None)):
+        bid = _batch(client)
+        sid = _create(client, bid).json()["schedule_id"]
+        _repos(client).db.execute("UPDATE batch_schedules SET pruned_total = :n WHERE schedule_id = :s",
+                                  {"n": raw, "s": sid})
+        assert client.delete(f"{URL}/{sid}").status_code == 200
+        before = json.loads([r for r in _audit(client, "batch_schedule", "delete") if r["target_key"] == bid][0]
+                            ["before_state"])
+        assert before["pruned_total"] == want and before["pruned_at"] is None and before["run_count"] == 0
+
+
 def test_batch_delete_tables_cover_every_batch_id_column(db):
     """batch_id 로 배치를 가리키는 새 테이블은 배치 삭제 두 경로에도(BATCH_DELETE_TABLES) -- 아니면 지운 배치의 스케줄이 고아로
     남아 컨트롤러가 batch_not_found 로 일시정지를 쓴다."""

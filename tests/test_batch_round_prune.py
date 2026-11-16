@@ -66,10 +66,11 @@ def _batch(repos, n=2):
 
 def _kid(repos, bid, *, job_state=DataJobState.SUCCEEDED, with_job=True, age=True, request_state=None):
     """그 배치의 자식 요청 1개(+ 잡 1개). job_state 가 비종단이면 요청은 request_state(기본 Cancelled -- 취소 경합 잔재)로
-    둔다. with_job=False·request_state=None 이면 요청은 Pending(비종단)."""
+    둔다. with_job=False·request_state=None 이면 요청은 Pending(비종단). payload 는 실제 배치 자식 모양 -- orchestrator 는
+    run_as_root 를 싣지 않는다(identity.privilege_policy: 실려 있으면 변조)."""
     rid = repos.requests.create(operation="scan", requester_id="ops", actor="batch-orchestrator",
                                 resource_key=f"k-{uuid.uuid4().hex[:8]}",
-                                payload={**SCAN_ITEM, "run_as_root": True}, priority="mid", batch_id=bid,
+                                payload=dict(SCAN_ITEM), priority="mid", batch_id=bid,
                                 auth_method="session")
     if with_job:
         repos.requests.set_state(rid, RequestState.PLANNED, actor="planner")
@@ -470,6 +471,15 @@ def test_one_summary_audit_row_per_chunk_and_no_per_request_rows(repos, cfg):
     bid, old = _old_batch(repos, 3)
     sid = repos.batch_schedules.get_by_batch(bid)["schedule_id"]
     top = max(repos.requests.get(r)["commit_order"] for r in old)
+    # 자식 payload 에 orchestrator 가 얼리는 값(_materialize -- owner_username·dest_owner) 흉내: 하나는 둘 다, 하나는 rule none,
+    # 하나는 둘 다 없음(비특권 scan 배치의 정상 모양 -- 키 부재)
+    owned, ruled, bare = sorted(old)
+    for rid, extra in ((owned, {"owner_username": "alice",
+                                "dest_owner": {"rule": "storage", "owner": "1000:1000", "storage": "s1",
+                                               "pv_root": None}}),
+                       (ruled, {"dest_owner": {"rule": "none", "storage": "s1"}})):
+        repos.db.execute("UPDATE requests SET payload = :p WHERE request_id = :r",
+                         {"p": json.dumps({**SCAN_ITEM, **extra}), "r": rid})
     _prune(repos, cfg)
     rows = _audits(repos.db, "batch", "prune_rounds")
     assert len(rows) == 1 and rows[0]["target_key"] == bid and rows[0]["actor"] == SCHEDULER_ACTOR
@@ -480,16 +490,45 @@ def test_one_summary_audit_row_per_chunk_and_no_per_request_rows(repos, cfg):
                                 {"b": bid})["floor_order"]
     assert a["upto_order"] == floor1 == top
     assert {c["request_id"] for c in a["children"]} == set(old)
-    assert all(c["run_as_root"] is True and len(c["jobs"]) == 1 and c["jobs"][0]["tool"] == "dscan"
-               for c in a["children"])
+    assert all(len(c["jobs"]) == 1 and c["jobs"][0]["tool"] == "dscan" for c in a["children"])
+    # 실행 근거 칸은 run_as_root 가 아니다(d29 실증 -- 배치 자식 payload 엔 그 키가 없어 늘 null 이었다)
+    assert all("run_as_root" not in c for c in a["children"])
+    by = {c["request_id"]: c for c in a["children"]}
+    assert by[owned]["owner_username"] == "alice"
+    assert by[owned]["dest_owner"] == {"rule": "storage", "owner": "1000:1000"}     # storage·pv_root 는 싣지 않는다
+    assert by[ruled]["owner_username"] is None and by[ruled]["dest_owner"] == {"rule": "none"}   # owner 를 지어내지 않는다
+    assert by[bare]["owner_username"] is None and by[bare]["dest_owner"] is None
     assert a["truncated"] is False
     assert _audits(repos.db, "request", "delete") == []
 
 
+def test_prune_summary_clips_and_drops_tampered_owner_fields():
+    """변조된 payload(거대한 owner_username·dict 아닌 dest_owner·깨진 JSON)가 정리 감사를 거대하게 만들거나 500 으로 끊지 않는다."""
+    reqs = [{"request_id": "a" * 32, "state": "Succeeded", "created_at": "t",
+             "payload": json.dumps({"owner_username": "u" * 5000, "dest_owner": {"rule": "r" * 5000, "owner": 7}})},
+            {"request_id": "b" * 32, "state": "Succeeded", "created_at": "t",
+             "payload": json.dumps({"owner_username": 1, "dest_owner": "0:0"})},
+            {"request_id": "c" * 32, "state": "Succeeded", "created_at": "t", "payload": "{broken"}]
+    kids = {c["request_id"]: c for c in RequestPurgesRepository._prune_summary(reqs, {}, [])["children"]}
+    assert kids["a" * 32]["owner_username"] == "u" * 64 and kids["a" * 32]["dest_owner"] == {"rule": "r" * 64}
+    assert kids["b" * 32]["owner_username"] is None and kids["b" * 32]["dest_owner"] is None
+    assert kids["c" * 32]["owner_username"] is None and kids["c" * 32]["dest_owner"] is None
+
+
 def test_prune_audit_folds_into_32k():
-    kids = [{"request_id": f"{i:032x}", "state": "Succeeded", "created_at": "x" * 900, "run_as_root": True,
+    # 첫 단계(잡을 뺀다)면 들어가는 경우 -- 자식 기록의 owner_username·dest_owner 는 남는다
+    kids = [{"request_id": f"{i:032x}", "state": "Succeeded", "created_at": "2026-11-16T12:34:53Z",
+             "owner_username": "alice", "dest_owner": {"rule": "storage", "owner": "0:0"},
              "jobs": [{"job_id": f"{i:032x}", "state": "Succeeded", "tool": "dscan" * 100}]} for i in range(100)]
     summary = {"batch_id": "b" * 32, "deleted_count": 100, "children": kids, "truncated": False}
+    text = RequestPurgesRepository._prune_bounded(summary)
+    out = json.loads(text)
+    assert len(text.encode()) <= SNAPSHOT_MAX_BYTES and out["truncated"] is True
+    assert out["children"] == [{k: v for k, v in c.items() if k != "jobs"} for c in kids]
+    assert out["children"][0]["owner_username"] == "alice" and out["children"][0]["dest_owner"]["owner"] == "0:0"
+    # 둘째 단계(id 목록)까지 가는 경우
+    kids = [{**c, "created_at": "x" * 900} for c in kids]
+    summary = {**summary, "children": kids}
     text = RequestPurgesRepository._prune_bounded(summary)
     out = json.loads(text)
     assert len(text.encode()) <= SNAPSHOT_MAX_BYTES and out["truncated"] is True

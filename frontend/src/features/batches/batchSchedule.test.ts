@@ -1,8 +1,8 @@
 import { expect, test } from "vitest";
 import {
   childCountWarning, confirmWaitShort, confirmWaitText, durationText, formFromSchedule, isDestructiveBatch,
-  keepRoundsNotice, projectedChildrenWarning, prunePreviewText, pruneText,
-  scheduleEnabled, scheduleFormErrors, scheduleSummary, specFromForm, storageText, untilText,
+  keepRoundsNotice, projectedChildrenWarning, prunePreviewText, pruneParts, pruneText, SCHEDULE_DELETE_HINT,
+  scheduleDeleteNotice, scheduleEnabled, scheduleFormErrors, scheduleSummary, specFromForm, storageText, untilText,
   DEFAULT_SCHEDULE_FORM,
 } from "./batchSchedule";
 
@@ -95,6 +95,21 @@ test("정리 결과 — null(아직 없음)과 0 을 가른다", () => {
   expect(pruneText({})).toBe("아직 정리 없음");
   expect(pruneText({ pruned_total: 0, pruned_at: null })).toBe("정리 누적 0건");
   expect(pruneText({ pruned_total: 1234, pruned_at: "2026-11-16T09:30:00Z" })).toBe("정리 누적 1,234건 · 마지막 2026-11-16 18:30:00");
+  // 표 칸 조각(시각을 한 덩어리로 그린다) — 한 줄 글과 같은 재료
+  expect(pruneParts({ pruned_total: null, pruned_at: "2026-11-16T09:30:00Z" })).toBeNull();
+  expect(pruneParts({ pruned_total: 0, pruned_at: null })).toEqual({ total: "정리 누적 0건", at: null });
+  expect(pruneParts({ pruned_total: 1234, pruned_at: "2026-11-16T09:30:00Z" }))
+    .toEqual({ total: "정리 누적 1,234건", at: "2026-11-16 18:30:00" });
+});
+
+test("삭제 문구의 「기록」 — 스케줄 삭제는 실행 기록만, 배치 삭제는 실행 기록·보존 회차 기록까지(d29 실증 뒤 낱말 통일)", () => {
+  expect(SCHEDULE_DELETE_HINT)
+    .toBe("실행 기록도 함께 지웁니다 — 보존 회차 셈과 이미 남은 작업은 그대로, 정리는 멈춥니다(감사 기록은 남습니다)");
+  expect(scheduleDeleteNotice({ kind: "daily", spec: { hour: 2, minute: 0 }, enabled: 1 }))
+    .toBe("이 배치의 스케줄(매일 02:00 (KST) · 사용 중)과 실행 기록·보존 회차 기록도 함께 삭제됩니다(감사 기록은 남습니다).");
+  for (const t of [SCHEDULE_DELETE_HINT, scheduleDeleteNotice({ kind: "daily", spec: { hour: 2, minute: 0 }, enabled: 0 })]) {
+    expect(t).not.toMatch(/(?<!보존 )회차 기록/);      // 맨 「회차 기록」(어느 회차인지 모름)은 쓰지 않는다
+  }
 });
 
 test("항목 × K > 상한 예측 경고 — 셋 다 알 때만", () => {

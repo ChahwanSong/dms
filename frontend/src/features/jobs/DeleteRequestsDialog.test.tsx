@@ -322,7 +322,7 @@ test("섞임: 첫 줄·두 목록·연산별 합·성공 scan 합(단건 + 배�
   expect(jobCap.nextElementSibling).toBe(within(dlg).getByRole("list", { name: "삭제할 작업" }));
 });
 
-test("리뷰: 스케줄이 있는 배치 줄은 「스케줄과 회차 기록도 함께 삭제」를 말한다(배치 상세 기록 삭제 창과 같은 문구) -- 없는 배치는 말하지 않는다", async () => {
+test("리뷰: 스케줄이 있는 배치 줄은 「스케줄과 실행 기록·보존 회차 기록도 함께 삭제」를 말한다(배치 상세 기록 삭제 창과 같은 문구) -- 없는 배치는 말하지 않는다", async () => {
   // 배치 단위 삭제(request_purges.delete_batch)는 같은 트랜잭션에서 batch_schedules·batch_schedule_runs 를 지운다(2026-11-16).
   renderDialog([], undefined, undefined, [
     batch(1, { schedule: { schedule_id: "s1", kind: "daily", spec: { hour: 2, minute: 0 }, enabled: true,
@@ -336,9 +336,9 @@ test("리뷰: 스케줄이 있는 배치 줄은 「스케줄과 회차 기록도
   const dlg = await open();
   const items = within(within(dlg).getByRole("list", { name: "삭제할 배치" })).getAllByRole("listitem");
   expect(within(items[0]).getByRole("note", { name: "스케줄도 함께 삭제" }))
-    .toHaveTextContent("이 배치의 스케줄(매일 02:00 (KST) · 사용 중)과 회차 기록도 함께 삭제됩니다(감사 기록은 남습니다).");
+    .toHaveTextContent("이 배치의 스케줄(매일 02:00 (KST) · 사용 중)과 실행 기록·보존 회차 기록도 함께 삭제됩니다(감사 기록은 남습니다).");
   expect(within(items[1]).getByRole("note", { name: "스케줄도 함께 삭제" }))
-    .toHaveTextContent("이 배치의 스케줄(매주 월·목 03:00 (KST))과 회차 기록도 함께 삭제됩니다");   // 꺼짐은 「사용 중」 없음
+    .toHaveTextContent("이 배치의 스케줄(매주 월·목 03:00 (KST))과 실행 기록·보존 회차 기록도 함께 삭제됩니다");   // 꺼짐은 「사용 중」 없음
   expect(within(items[2]).queryByRole("note")).toBeNull();
   // 사용량 경고(성공 scan)는 그대로 따로 있다
   expect(within(dlg).getAllByRole("note").filter((n) => n.textContent?.includes("성공한 scan"))).toHaveLength(1);

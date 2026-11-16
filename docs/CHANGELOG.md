@@ -245,6 +245,21 @@ dms-k8s 라인의 **완료 기록**이다. 각 항목에는 무엇을 만들었�
 - **테스트베드에 남긴 것**: 배치 e5fe(Completed, 자식 10 = commit_order 253–262·잡 10·vcjob 10 — vcjob 은 DMS GC 몫)와 `batch_rounds` 7행, 감사
   970–977. 스케줄은 0건(2db35cc2 는 UI 단계가 지웠다). 옛 base 사본 k8s-w1 `/cephfs/dms/artifacts/773e8bc3c05c4917ab004f5a95057147` 은 손대지
   않았다. 클러스터 리소스(ConfigMap 포함)·계정·스토리지·sync 쌍·sync/rm 배치·current-context(dms)는 바꾸지 않았다.
+- **실증 뒤 다듬기(d30)** — 위 실증 결함 ①③④⑤(②는 운영 — 다음 설치기 S11 적용 몫):
+  - ① 정리 감사 자식 기록에서 `run_as_root` 칸을 뺐다. 대신 자식 payload 에 얼린 `owner_username`(None = 지정 없음)과 `dest_owner`
+    (`{rule, owner}` 만 — None = 해당 없음)를 `_ID_MAX`(64) 로 접어 남긴다(`request_purges._prune_summary`). 32 KiB 축소 첫 단계(잡 빼기)에서도
+    두 칸은 남는다. 테스트 픽스처의 배치 자식 payload 에서도 `run_as_root` 를 뺐다(실제 모양).
+  - ③ 스케줄 DELETE 라우트와 배치 삭제 두 경로의 `('batch_schedule','delete')` before 를 한 도우미 `batches.schedule_delete_audit_before` 로
+    맞췄다(pruned_total·pruned_at·last_run_at·last_reason_code·paused_reason_code·run_count·deleted_with_batch). 세 경로 키 집합이 같다는 것과
+    pruned_total null ≠ 0 을 `test_api_batch_schedules` 가 고정한다.
+  - ④ 낱말 통일: 스케줄 행 「삭제」·「삭제 확인」 title = 「실행 기록도 함께 지웁니다 — 보존 회차 셈과 이미 남은 작업은 그대로, 정리는
+    멈춥니다(감사 기록은 남습니다)」(`SCHEDULE_DELETE_HINT`). 배치 삭제 창 두 곳(배치 상세·작업 목록 배치 단위)은 「…과 실행 기록·보존 회차
+    기록도 함께 삭제됩니다」이고, deploy/README §14-1 화면 표도 같은 낱말로 고쳤다.
+  - ⑤ 390 줄바꿈: 「정리」 칸을 누적 / 「마지막 <시각>」 두 줄로 나누고 둘째 줄 전체를 `whitespace-nowrap` 로 묶었다(시각만 묶으면
+    390 에서 「마지막」과 시각 사이 공백에서 꺾여 세 줄이 됐다 — 리뷰 실 Chrome 실증; 시각 span 은 `tabular-nums` 만). 칸·머리 안내 목록·
+    추가/수정 창 「회차 보존 안내」·배치 상세 보존 줄에 `break-keep` 를 넣었다. e2e 18 의 375 시나리오가 목록 응답의 그 행에만
+    pruned_total 1234·pruned_at 을 page.route 로 합성해 「마지막」 글자와 시각 조각이 같은 줄이고 시각이 한 줄인지 본다(시각만 묶은
+    옛 모양에선 16px 어긋나 빨간불을 확인). e2e 03-layout·18-batch-scheduler 7/7 통과(넘침 단언 그대로).
 
 ### ✅ 포탈 개선 — 사용량 전체 목록·최신 scan 차트 · 배치 대상 스토리지 열·큰 배치 상세 쪽 넘김·검색 · 배치 스케줄러 d28 — **완료·실증**(2026-11-16)
 

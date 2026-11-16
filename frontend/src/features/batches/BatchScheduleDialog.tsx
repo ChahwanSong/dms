@@ -290,8 +290,10 @@ export function BatchScheduleDialog({ open, onOpenChange, trigger, schedule, sch
           </div>
         )}
 
+        {/* break-keep: 390 폭에서 「재/실행」「정/리될」처럼 어절 중간에서 꺾이지 않게(d29 실증 뒤 — 저장소 관례). */}
         {target !== null && targetError === null && (keepNotice !== null || pruneNote !== null || projectedWarn !== null) && (
-          <div role="note" aria-label="회차 보존 안내" className="space-y-1 rounded-lg border border-line px-3 py-2 text-xs">
+          <div role="note" aria-label="회차 보존 안내"
+               className="space-y-1 break-keep rounded-lg border border-line px-3 py-2 text-xs">
             {keepNotice !== null && <p className="text-ink/70">{keepNotice}</p>}
             {pruneNote !== null && <p className="font-medium text-attn">{pruneNote}</p>}
             {projectedWarn !== null && <p className="text-attn">{projectedWarn}</p>}
