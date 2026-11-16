@@ -158,6 +158,9 @@ export const REASON_MESSAGES: Record<string, string> = {
   policy_not_found: "정책을 찾을 수 없습니다",
   artifact_not_found: "아티팩트를 찾을 수 없습니다",
   artifact_too_large: "파일이 다운로드 상한을 넘습니다 — 관리자에게 문의하세요",
+  // 요청 본문 상한(2026-11-16 입구 교체 -- api/body_limit.py, DMS_MAX_REQUEST_BODY_BYTES 기본 20MiB): Envoy 입구의 비 JSON 413
+  // 대신 앱이 JSON 413 으로 낸다. 위 artifact_too_large(다운로드 **응답** 상한)와 다른 코드다 -- 큰 배치 제출이 주로 닿는다.
+  request_too_large: "요청 본문이 서버 상한(기본 20 MiB)을 넘습니다 — 배치는 여러 개로 나눠 제출하세요",
   // 결과 파일 자동 만료(2026-10-26, DMS_ARTIFACT_RETENTION_DAYS) -- 410. 요청·잡 기록과 결과 수치는 남는다.
   artifact_expired: "결과 파일이 보존 기간이 지나 만료(삭제)되었습니다 — 작업 기록과 결과 수치는 그대로 남아 있습니다",
   invalid_phase: "알 수 없는 실행 단계입니다",
@@ -289,9 +292,10 @@ export const REASON_MESSAGES: Record<string, string> = {
   http_401: "인증이 필요합니다",
   http_500: "서버 오류가 발생했습니다",
   http_503: "서비스를 일시적으로 사용할 수 없습니다",
-  // 게이트웨이(Envoy)가 백엔드 앞에서 만드는 비 JSON 오류(2026-11-11) -- 등록하지 않으면 화면에 「http_413」 원시 코드가 보였다.
-  // 413 은 policies.yaml 의 requestBuffer.limit(20Mi) 초과다.
-  http_413: "요청 본문이 너무 큽니다(게이트웨이 상한 20 MiB) — 입력을 줄이거나 나눠서 보내세요",
+  // 입구 프록시가 백엔드 앞에서 만드는 비 JSON 오류(2026-11-11) -- 등록하지 않으면 화면에 「http_413」 원시 코드가 보였다.
+  // 2026-11-16 입구 교체(Envoy → 클러스터의 Traefik)부터 본문 상한은 앱이 JSON 413 request_too_large 로 낸다 -- 비 JSON 413 은
+  // 앱 앞의 다른 프록시(전환 중의 옛 Envoy 입구·사이트 프록시)가 낸 것뿐이라 상한 값을 단정하지 않는다.
+  http_413: "요청 본문이 너무 큽니다(입구 프록시 상한) — 입력을 줄이거나 나눠서 보내세요",
   http_502: "게이트웨이가 서버 응답을 받지 못했습니다(502) — API 가 재시작 중일 수 있습니다. 잠시 뒤 다시 시도하세요",
   http_504: "게이트웨이가 서버 응답을 기다리다 시간이 초과됐습니다(504) — 잠시 뒤 다시 시도하세요(제출·변경이었다면 반영됐는지 먼저 확인하세요)",
   // 프론트 전용 코드다(registry_unreachable 과 같은 관례, 2026-11-11): request() 가 fetch 거부(네트워크 단절)·성공 응답의 비 JSON

@@ -6,7 +6,8 @@
   FAKE_SCENARIO    JSON 파일 {"<이름>" 또는 "<이름> <모드>": {"rc": n, "out": "…"}} — 없으면 rc 0·빈 출력.
                    install-detect.py 의 detect·plan 은 "detect": {"<항목>": "<코드> <action> <apply> <판정>"} 로 DETECT 줄을 만든다.
   FAKE_HELPER_LOG  호출마다 JSON 한 줄 {"name", "argv", "applied"(그 순간 세계의 적용된 층), "dms_ns"(물려받은 env)}.
-모드 = 인자 가운데 detect·plan·vcjob·ensure-app·init-secrets·check·compare-registry 같은 하위 명령 또는 --mode 값·--sysctl/--listen·--print/--run.
+모드 = 인자 가운데 detect·plan·vcjob·ensure-app·init-secrets·check·compare-registry 같은 하위 명령 또는 --mode 값·--tls-only·--print/--run.
+install-detect.py 의 표 줄(`  [<항목>] <코드> <판정> — <사유>`)도 흉내 낸다 — install.sh 가 사유를 읽는다(det_reason).
 """
 import json
 import os
@@ -26,7 +27,7 @@ if os.environ.get("FAKE_SCENARIO") and os.path.exists(os.environ["FAKE_SCENARIO"
         scenario = json.load(fh)
 
 SUBCOMMANDS = ("detect", "plan", "vcjob", "ensure-app", "init-secrets", "check", "set-url", "compare-registry",
-               "--sysctl", "--listen", "--print", "--run")
+               "--tls-only", "--print", "--run")
 mode = next((a for a in args if a in SUBCOMMANDS), None)
 if "--mode" in args:
     mode = args[args.index("--mode") + 1]
@@ -50,12 +51,15 @@ if spec.get("add_secrets"):                  # 예: pg-secrets.py init-secrets �
         json.dump(world, fh)
 
 if name == "install-detect.py" and mode in ("detect", "plan", "vcjob"):
-    items = ("priorityclass", "registry", "gateway-api", "envoy-gateway", "gateway", "cnpg", "volcano", "db")
-    default = {"priorityclass": "D= reapply 1 PASS", "registry": "D= reapply 1 PASS", "gateway-api": "D= none 0 PASS",
-               "envoy-gateway": "D= none 0 PASS", "gateway": "D= reapply 1 PASS", "cnpg": "D= none 0 PASS",
-               "volcano": "C reuse 0 PASS", "db": "D= reapply 1 PASS"}
+    items = ("priorityclass", "registry", "traefik", "ingress", "cnpg", "volcano", "db")
+    default = {"priorityclass": "D= reapply 1 PASS", "registry": "D= reapply 1 PASS", "traefik": "C reuse 0 PASS",
+               "ingress": "D= reapply 1 PASS", "cnpg": "D= none 0 PASS", "volcano": "C reuse 0 PASS", "db": "D= reapply 1 PASS"}
     default.update(scenario.get("detect", {}))
+    reasons = scenario.get("detect_reason", {})
     lines = ["== install-detect %s (fake) ==" % mode]
+    for i in items:
+        code, _action, _apply, level = default[i].split()
+        lines.append("  [%s] %s %s — %s" % (i, code, level, reasons.get(i, "(fake) %s 사유" % i)))
     if mode == "plan":
         lines.append("== 층별 server dry-run (fake) ==")
     lines += ["DETECT: %s %s" % (i, default[i]) for i in items]
@@ -65,6 +69,9 @@ if name == "install-detect.py" and mode in ("detect", "plan", "vcjob"):
         lines.append("PLAN: vcjob PASS volcano")
     lines.append("RESULT: %s" % {0: "PASS", 3: "WARN", 1: "FAIL", 4: "UNKNOWN"}.get(rc, "UNKNOWN"))
     text = "\n".join(lines) + "\n" + text
+elif name == "ingress-probe.sh":
+    verdict = {0: "PASS", 1: "FAIL", 4: "UNKNOWN"}.get(rc, "UNKNOWN")
+    text = "NODE cp1 %s 10.0.0.1:443 (fake)\nRESULT: %s\n%s" % (verdict, verdict, text)
 elif name == "push-images.sh" and mode in (None, "--print"):
     reg = args[args.index("--registry") + 1] if "--registry" in args else "?"
     text = "# fake push-images --print\nskopeo copy --preserve-digests docker://src@sha256:x docker://%s/dest:tag\n%s" % (reg, text)

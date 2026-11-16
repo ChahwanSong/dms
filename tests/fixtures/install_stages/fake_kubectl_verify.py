@@ -101,9 +101,11 @@ if kind == "svc":
     if s is None:
         err('Error from server (NotFound): services "dms-registry" not found')
     out(s.get("clusterIP", "") if jp else "")
-if kind == "gateway":
-    g = W.get("gateway")
+if kind == "ingress":                                   # 5절(2026-11-16): Ingress dms-portal-traefik 의 ingressClassName
+    g = W.get("ingress")
     if g is None:
-        err('Error from server (NotFound): gateways.gateway.networking.k8s.io "dms-portal" not found')
+        err('Error from server (NotFound): ingresses.networking.k8s.io "%s" not found' % name)
+    if g == "forbidden":
+        err('Error from server (Forbidden): ingresses.networking.k8s.io "%s" is forbidden' % name)
     out(g)
 out("")

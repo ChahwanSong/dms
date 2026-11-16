@@ -126,6 +126,18 @@ test("성공 응답의 비 JSON 본문(SPA index.html·프록시 로그인 페�
   expect(reasonText("invalid_response")).not.toBe("invalid_response");
 });
 
+// 2026-11-16 입구 교체: 본문 상한은 앱(api/body_limit.py)이 JSON 413 {"detail":"request_too_large"} 로 낸다 -- 사유 코드 그대로
+// 읽혀 한국어 문구가 붙어야 한다(비 JSON 413 의 http_413 과 다른 문구, 다운로드 상한 artifact_too_large 와도 다르다).
+test("앱의 JSON 413 request_too_large 는 사유 코드 그대로 + 한국어 문구", async () => {
+  server.use(http.post("/api/admin/batches", () => HttpResponse.json({ detail: "request_too_large" }, { status: 413 })));
+  const err = await apiSend("POST", "/api/admin/batches", {}).catch((e: unknown) => e);
+  expect(err).toBeInstanceOf(ApiError);
+  expect(err).toMatchObject({ status: 413, code: "request_too_large", message: reasonText("request_too_large") });
+  expect(reasonText("request_too_large")).toMatch(/[가-힣]/);
+  expect(reasonText("request_too_large")).not.toBe(reasonText("http_413"));
+  expect(reasonText("request_too_large")).not.toBe(reasonText("artifact_too_large"));
+});
+
 test("게이트웨이 비 JSON 413·502·504 는 원시 코드가 아니라 한국어 문구", async () => {
   for (const status of [413, 502, 504]) {
     server.use(http.post("/api/user/requests", () => new HttpResponse("<html>gw</html>",

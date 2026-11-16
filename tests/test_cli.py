@@ -97,3 +97,22 @@ def test_controller_once_wires_the_reconnect_event_hook(tmp_path, monkeypatch):
                         lambda db, repos: wired.append(real(db, repos)))
     assert main(["controller", "--once"]) == 0
     assert len(wired) == 1
+
+
+def test_api_passes_keep_alive_to_uvicorn(tmp_path, monkeypatch):
+    # 2026-11-16 입구 교체: uvicorn timeout_keep_alive = settings.api_keep_alive_seconds(기본 120 > Traefik 기본
+    # idleConnTimeout 90s). 배선이 빠지면 uvicorn 기본 5초로 돌아가 본문 있는 POST 가 간헐 502 -- 아무 테스트도 안 깨진다.
+    monkeypatch.setenv("DMS_DATABASE_URL", f"sqlite:///{tmp_path}/api.db")
+    monkeypatch.setenv("DMS_SHARED_TOKEN", "t")
+    monkeypatch.setenv("DMS_ADMIN_TOKEN", "a")
+    monkeypatch.setenv("DMS_SESSION_SECRET", "s")
+    monkeypatch.delenv("DMS_API_KEEP_ALIVE_SECONDS", raising=False)
+    assert main(["migrate"]) == 0
+    import uvicorn
+    calls = []
+    monkeypatch.setattr(uvicorn, "run", lambda app, **kw: calls.append(kw))
+    assert main(["api"]) == 0
+    assert calls[-1] == {"host": "0.0.0.0", "port": 8080, "timeout_keep_alive": 120}
+    monkeypatch.setenv("DMS_API_KEEP_ALIVE_SECONDS", "150")
+    assert main(["api"]) == 0
+    assert calls[-1]["timeout_keep_alive"] == 150

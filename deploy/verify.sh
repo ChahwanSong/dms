@@ -5,16 +5,18 @@
 # 사용:  sh deploy/verify.sh --context <ctx> [--rendered deploy/.rendered/<site>] [--no-probes]
 #        env PORTAL_DOMAIN(포탈 FQDN) · PORTAL_VIP(Avi VIP-A — 있으면 `curl --resolve <FQDN>:443:<VIP>`) · CACERT(사내 CA)
 #   --context 는 필수다(2026-11-03 ⑦ — --context <ctx> / --context=<ctx> / env KUBE_CONTEXT, 플래그가 이긴다; 둘 다 없으면 exit 2).
-#   --rendered 를 주면 render.env(PORTAL_DOMAIN·PORTAL_VIP·레지스트리·GATEWAY_LISTEN_PORT)를 읽고, PG 경로 대조(pg-path-probe.py contrast — S10 과 같은 검사)와
-#   애드온 감지 요약(install-detect.py detect)을 더 한다.
-#   --no-probes 는 파드를 띄우는 검사(PG 경로 대조 DaemonSet·마스터 리스너 포트 일회용 파드)를 건너뛴다 — 순수 읽기(get·logs·서비스 프록시 GET)만.
-#   PORTAL_DOMAIN 이 없으면 VIP 경유 HTTPS 검사는 건너뛴다(앱·DB 의 readyz 는 apiserver 서비스 프록시로 늘 본다).
+#   --rendered 를 주면 render.env(PORTAL_DOMAIN·PORTAL_VIP·INGRESS_CLASS·레지스트리)를 읽고, PG 경로 대조(pg-path-probe.py contrast — S10 과 같은
+#   검사)와 애드온 감지 요약(install-detect.py detect)을 더 한다.
+#   --no-probes 는 파드를 띄우는 검사(PG 경로 대조 DaemonSet)를 건너뛴다 — 순수 읽기(get·logs·서비스 프록시 GET)만. ingress-probe.sh 는 파드를
+#   띄우지 않는 HTTPS GET(설치 호스트 → 노드 :443)이라 그대로 돈다.
+#   PORTAL_DOMAIN 이 없으면 Traefik·VIP 경유 HTTPS 검사는 건너뛴다(앱·DB 의 readyz 는 apiserver 서비스 프록시로 늘 본다).
 # 검사(S12): 마이그레이션·워크로드 · 이미지 · CNPG(readyInstances·dms-pg-rw) · Available 여분 PV · PG 경로 대조 · CronJob 마지막 성공 ·
-#   Gateway Programmed · **마스터마다 리스너 포트 LISTEN**(render.env GATEWAY_LISTEN_PORT, 없으면 443 —
-#   host-net-probe.sh --port; Programmed 는 bind 실패를 못 잡는다) · 레지스트리 Ready·태그 · 애드온 요약 ·
+#   레지스트리 Ready·태그 · 입구(2026-11-16 — 클러스터의 Traefik: Ingress dms/dms-portal-traefik 존재·class, ingress-probe.sh = Traefik 이 도는
+#   노드마다 :443 readyz·인증서 — UNKNOWN(설치 호스트가 노드 :443 에 못 닿음)은 WARN) · 애드온 요약 ·
 #   readyz(apiserver 서비스 프록시 = 앱·DB 판정 · `--resolve <FQDN>:443:<VIP>` = 입구 — 응답 없음(000)은 Avi VS-443 미개통일 수 있어 WARN, 다른 코드는
-#   FAIL — 2026-11-03 ⑦ 리뷰 1) · 「80 불가 = 정상」. FAIL 이 있고 api·controller 로그에 EACCES·Permission denied 가 보이면 SELinux 노드 프로브(S2b)부터
-#   다시 돌리라고 안내한다(설계 2-3 — enforcing 이면 DMS 사유가 엉뚱하게 나온다).
+#   FAIL — 2026-11-03 ⑦ 리뷰 1) · http 80(404 = Traefik web 진입점에 DMS 라우터 없음 — 정상 INFO, 200 = 평문 노출 WARN — router.entrypoints 어노테이션).
+#   FAIL 이 있고 api·controller 로그에 EACCES·Permission denied 가 보이면 SELinux 노드 프로브(S2b)부터 다시 돌리라고 안내한다(설계 2-3 — enforcing
+#   이면 DMS 사유가 엉뚱하게 나온다).
 set -u
 CTX="${KUBE_CONTEXT:-}"
 RDIR=""
@@ -128,28 +130,33 @@ else
   I "클러스터 내 레지스트리 없음(external 사이트)"
 fi
 
-H "5. 입구 (Envoy Gateway — 설계 4-3)"
-prog=$(kubectl -n "$NS" get gateway dms-portal -o 'jsonpath={.status.conditions[?(@.type=="Programmed")].status}' 2>/dev/null)
-if [ "$prog" = True ]; then
-  P "Gateway dms-portal Programmed"
-  # 리스너 포트 = render.env 의 GATEWAY_LISTEN_PORT(없으면 443 — 옛 렌더·--rendered 없이 부른 경우, 2026-11-14).
-  GWPORT=""; [ -z "${RENV:-}" ] || GWPORT=$(sed -n "s/^GATEWAY_LISTEN_PORT=//p" "$RENV" | head -n 1 | tr -d '"')
-  case "$GWPORT" in ""|*[!0-9]*) GWPORT=443 ;; esac
-  if [ "$PROBES" = 0 ]; then I "마스터 :$GWPORT 건너뜀(--no-probes) — ssh <마스터> 'sudo ss -ltnp \"( sport = :$GWPORT )\"'"
-  elif [ -n "$API_IMG" ]; then
-    out=$(sh "$HERE/host-net-probe.sh" --context "$CTX" --namespace "$NS" --image "$API_IMG" --port "$GWPORT" --listen 2>&1)
-    hrc=$?
-    printf '%s\n' "$out" | sed 's/^/    /'
-    case "$hrc" in
-      0) P "마스터마다 :$GWPORT LISTEN" ;;
-      1) F "마스터 :$GWPORT LISTEN 없음 — sysctl(deploy/README §2g-2) 고친 뒤 그 노드의 Envoy 파드 삭제" ;;
-      *) W "마스터 :$GWPORT 을 재지 못했다(rc=$hrc) — ssh <마스터> 'sudo ss -ltnp \"( sport = :$GWPORT )\"'" ;;
-    esac
-  fi
-elif [ -n "$prog" ]; then
-  F "Gateway dms-portal Programmed=$prog — kubectl --context $CTX -n $NS describe gateway dms-portal"
+H "5. 입구 (클러스터의 Traefik — DMS 는 Ingress 하나만 만든다, deploy/README §2g)"
+# 2026-11-16(설계 D8): Envoy Gateway·Gateway Programmed·마스터 리스너 포트 검사를 Traefik 경로로 바꿨다. Traefik 자체는 DMS 가 설치·변경하지 않는다.
+WANT_IC=$(_rv INGRESS_CLASS); WANT_IC=${WANT_IC:-traefik}
+if ing=$(kubectl -n "$NS" get ingress dms-portal-traefik -o 'jsonpath={.spec.ingressClassName}' 2>&1); then
+  if [ "$ing" = "$WANT_IC" ]; then P "Ingress $NS/dms-portal-traefik(class $ing)"
+  else W "Ingress $NS/dms-portal-traefik 의 class 가 ${ing:-없음} — 렌더는 $WANT_IC(Traefik 이 안 집을 수 있다 — install.sh --only S8 로 다시 적용)"; fi
 else
-  F "Gateway dms-portal 없음(S8)"
+  case "$ing" in
+    *NotFound*|*"not found"*) F "Ingress $NS/dms-portal-traefik 없음(S8 — install.sh --only S8)" ;;
+    *) W "Ingress $NS/dms-portal-traefik 를 읽지 못했다($(printf '%s' "$ing" | tr '\n' ' ' | cut -c1-120)) — 모름" ;;
+  esac
+fi
+if [ -n "$PORTAL" ]; then
+  # Traefik 이 도는 노드마다 :443 — SNI·Host = PORTAL_DOMAIN(ingress-probe.sh). 파드를 띄우지 않는 HTTPS GET 이라 --no-probes 에서도 돈다.
+  set -- --context "$CTX" --domain "$PORTAL" --timeout "${INGRESS_PROBE_TIMEOUT:-5}"
+  [ -z "$CACERT" ] || set -- "$@" --cacert "$CACERT"
+  out=$(sh "$HERE/ingress-probe.sh" "$@" 2>&1)
+  prc=$?
+  printf '%s\n' "$out" | sed 's/^/    /'
+  case "$prc" in
+    0) P "Traefik 경유 readyz 200·인증서 OK — 노드마다 :443(ingress-probe)" ;;
+    1) F "Traefik 경유 FAIL(위 NODE 줄 — 404 = Traefik 이 Ingress 를 안 집었다: ingressClassName·router.entrypoints·ns, TRAEFIK DEFAULT CERT = tls 시크릿·SNI, 5xx = dms-api; deploy/README §2g)" ;;
+    4) W "Traefik 경유 모름(위 NODE 줄 — 설치 호스트에서 노드 :443 에 닿지 않는다: 방화벽일 수 있다. 6절 VIP 경유가 다시 본다)" ;;
+    *) W "ingress-probe 를 돌리지 못했다(rc=$prc — 위 줄)" ;;
+  esac
+else
+  I "PORTAL_DOMAIN 미설정 — Traefik 경유 검사(ingress-probe) 건너뜀(PORTAL_DOMAIN=<FQDN> 로 다시)"
 fi
 
 H "6. 포탈 (readyz 는 DB 까지 확인)"
@@ -170,16 +177,20 @@ if [ -n "$PORTAL" ]; then
   [ -z "$VIP" ] || set -- "$@" --resolve "$PORTAL:443:$VIP"
   code=$(curl --noproxy '*' -s "$@" -m5 -o /dev/null -w '%{http_code}' "https://$PORTAL/readyz" 2>/dev/null || true)
   case "$code" in
-    200) P "readyz 200 via https://$PORTAL${VIP:+ (--resolve $PORTAL:443:$VIP)} — 입구(Avi·Envoy·TLS)까지" ;;
-    000|"") W "VIP 경유 readyz 응답 없음(연결·TLS 실패) — Avi VS-443 미개통이면 정상(S13 — 개통 뒤 install.sh --only S12). 개통했으면 PORTAL_VIP·CACERT(사내 CA)·Avi 풀 헬스(멤버 포트 = GATEWAY_LISTEN_PORT)·PROXY 모드(LB 가 PROXY v2 를 못 붙이면 GATEWAY_PROXY_PROTOCOL=off) 확인" ;;
-    *) F "VIP 경유 readyz ${code} — 입구는 닿는데 앱이 ${code} 로 답한다(Envoy·HTTPRoute — deploy/README §2g-3 표)" ;;
+    200) P "readyz 200 via https://$PORTAL${VIP:+ (--resolve $PORTAL:443:$VIP)} — 입구(LB·Traefik·TLS)까지" ;;
+    000|"") W "VIP 경유 readyz 응답 없음(연결·TLS 실패) — Avi VS-443 미개통이면 정상(S13 — 개통 뒤 install.sh --only S12). 개통했으면 PORTAL_VIP·CACERT(사내 CA)·LB 풀 헬스(멤버 = Traefik 이 도는 노드 :443)·PROXY(LB 가 PROXY v2 를 붙이면 Traefik websecure 의 proxyProtocol.trustedIPs 에 LB 출발지 — 없으면 TLS 가 깨진다) 확인(deploy/README §2g)" ;;
+    *) F "VIP 경유 readyz ${code} — 입구는 닿는데 ${code} 로 답한다(404 = Traefik 이 Ingress 를 안 집었다·다른 Traefik, 5xx = dms-api — 5절·deploy/README §2g)" ;;
   esac
+  # http 80(2026-11-16 설계 D8): Traefik web(:80) 진입점은 열려 있을 수 있다 — DMS 라우터는 websecure 에만 붙으므로(router.entrypoints 어노테이션)
+  # 404 가 정상이다. 200 이면 포탈이 평문으로도 서빙된다(Secure 쿠키 로그인이 소리 없이 깨진다). 응답 없음은 LB 에 80 VS 가 없는 것.
   set --
   [ -z "$VIP" ] || set -- --resolve "$PORTAL:80:$VIP"
   rc=$(curl --noproxy '*' -s "$@" -m5 -o /dev/null -w '%{http_code}' "http://$PORTAL/" 2>/dev/null || true)
   case "$rc" in
-    000|"") P "80 불가 = 정상(80 리스너·80 VS 없음 — 안내는 https://$PORTAL 하나)" ;;
-    *) I "http://$PORTAL/ 가 $rc 로 답한다 — 옛 입구(ingress) 병행 중이면 정상, 아니면 80 을 누가 받는지 확인" ;;
+    000|"") I "http://$PORTAL/ 응답 없음 — 80 VS 없음(안내는 https://$PORTAL 하나)" ;;
+    404) I "http://$PORTAL/ 404 — Traefik web 진입점에 DMS 라우터 없음(정상 — DMS 는 websecure 에만)" ;;
+    200) W "http://$PORTAL/ 가 200 — 포탈이 평문(:80)으로도 서빙된다: Ingress dms-portal-traefik 의 router.entrypoints 어노테이션(TRAEFIK_ENTRYPOINT) 확인" ;;
+    *) I "http://$PORTAL/ 가 $rc 로 답한다(리다이렉트 등 — LB·Traefik 의 80 설정)" ;;
   esac
 else
   I "PORTAL_DOMAIN 미설정 — HTTPS 검증 건너뜀(PORTAL_DOMAIN=<FQDN> PORTAL_VIP=<VIP-A> 로 다시)"

@@ -1,0 +1,53 @@
+# Ingress dms-portal-traefik(2026-11-16 — Envoy Gateway 폐기, 클러스터에 이미 있는 Traefik 하나로).
+#
+# 이름이 base 앱 46-ingress 의 dms-portal(class nginx — testbed-k8s 의 되돌림 경로, prod 는 오버레이가 지운다)과 다르다 — 두 경로가 한
+# 클러스터에 함께 있어도 서로 덮지 않는다. 설치기·런북·테스트가 이 이름으로 찾는 계약이다(deploy/install-detect.py 항목 ingress).
+#
+# 아래 넷은 사이트 값이고 렌더러가 JSON 패치로 바꾼다(여기 값은 기본값 또는 자리표시자):
+#   router.entrypoints  TRAEFIK_ENTRYPOINT(기본 websecure). 어노테이션이 없으면 Traefik 라우터가 **모든** 진입점에 붙는다 — :80(web) 평문으로도
+#                       포탈이 서빙돼 Secure 쿠키 로그인이 소리 없이 깨진다. 그래서 늘 websecure(TLS) 하나만.
+#   ingressClassName    INGRESS_CLASS(기본 traefik — spec.controller traefik.io/ingress-controller). 공용 Traefik 이 이 클래스만 집는다.
+#   host · tls.hosts    PORTAL_DOMAIN(자리표시자 — 렌더 필수). host 없는 catch-all 은 두지 않는다: 공용 Traefik 에서 다른 팀의 미매칭
+#                       호스트를 DMS 가 가로챈다. Traefik 의 Host 매처는 Host 헤더의 포트를 떼고 본다(dms.example:8443 도 맞는다). 모르는
+#                       SNI·IP 직접 접속은 Traefik 기본 인증서(TRAEFIK DEFAULT CERT) + 404 다 — 사용자는 이름으로 붙는다.
+#   tls.secretName      PORTAL_TLS_SECRET(기본 dms-portal-tls, ns dms — 사이트가 만든다; SAN = PORTAL_DOMAIN + PORTAL_VIP).
+#
+# 표준 Ingress 만 쓴다 — Middleware·ServersTransport·IngressRoute(kubernetescrd)에 기대지 않는다. Middleware·ServersTransport 에는
+# ingressClass 필터가 걸리지 않아(IngressRoute 만) 공용 Traefik 에 DMS 가 만든 정책이 다른 팀 라우터에 섞일 수 있고, 지금 필요한 것도 없다:
+#   요청 본문 상한(옛 Envoy requestBuffer 20Mi·Ingress proxy-body-size 20m 자리) → 앱(DMS_MAX_REQUEST_BODY_BYTES, 413 request_too_large).
+#     Traefik Buffering 미들웨어는 응답 버퍼를 끌 수 없어 전체 경로에 걸면 큰 다운로드가 다 쌓인 뒤에야 나간다.
+#   상류 유휴 연결(Traefik 기본 idleConnTimeout 90s) → 앱 keep-alive 를 그보다 길게(DMS_API_KEEP_ALIVE_SECONDS 기본 120) — 백엔드가 풀의
+#     유휴 연결을 먼저 닫으면 본문 있는 POST 가 막 닫힌 연결에 실려 502.
+#   타임아웃·PROXY v2·전달 헤더 → Traefik 정적 설정(entryPoints.websecure.transport·proxyProtocol·forwardedHeaders — RKE2 는 HelmChartConfig
+#     kube-system/rke2-traefik, 사이트 몫). 기본 readTimeout 60s 는 요청 본문 읽기에만, writeTimeout 0 이라 긴 다운로드·스트리밍은 끊기지 않는다.
+#     forwardedHeaders.trustedIPs 가 비면 Traefik 이 클라이언트가 보낸 X-Forwarded-*·X-Real-Ip 를 지우고 원 IP 를 XFF 끝에 붙인다 —
+#     앱(auth.client_ip = XFF 마지막 항목)은 그대로 원 IP 를 본다.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: dms-portal-traefik
+  namespace: dms
+  labels:
+    app.kubernetes.io/name: dms-portal-traefik
+    app.kubernetes.io/part-of: dms
+    app.kubernetes.io/managed-by: dms-install
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - portal.set-by-overlay.invalid
+      secretName: dms-portal-tls
+  rules:
+    - host: portal.set-by-overlay.invalid
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: dms-api
+                port:
+                  name: http

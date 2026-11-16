@@ -99,8 +99,9 @@ images:
 
 patches:
   - path: patch-config.yaml
-  # 입구(2026-11-03 ⑥): 포탈 사용자 경로는 testbed IaC 의 호스트 edge(haproxy, PROXY v2) → Envoy Gateway(렌더러의 platform/gateway — cp1
-  # hostNetwork :443)다(testbed `portal_edge: gateway`, 2026-11-04 정식 구축). 아래 Ingress + MetalLB VIP 10.20.20.101 은 되돌림용으로 남긴다.
+  # 입구(2026-11-16 — Envoy Gateway 폐기): 포탈 사용자 경로는 testbed IaC 의 호스트 edge(haproxy, PROXY v2) → 노드 :443 의 Traefik → 렌더러의
+  # platform/ingress(Ingress dms-portal-traefik — host 는 values.env 의 PORTAL_DOMAIN)다. 아래 Ingress(dms-portal, class nginx) + MetalLB VIP
+  # 10.20.20.101 은 되돌림용으로 남긴다(이름이 달라 두 Ingress 가 함께 있다).
   # 소크 뒤(별도 결정)에는 prod 처럼 아래 둘을 빼고 Ingress·MetalLB 풀을 지우는 패치를 싣는다(deploy/testbed/README.md §7-3).
   - path: patch-ingress.yaml
   - path: patch-metallb.yaml

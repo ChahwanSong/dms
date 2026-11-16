@@ -13,9 +13,10 @@
 항목 x(설치 순서 — S4 → S8 → S9 → S9b → S10):
   priorityclass  PriorityClass dms-addon-critical(platform/priorityclass)        — 늘 DMS 소유
   registry       Deployment·Service dms-registry(platform/registry, in-cluster 만) — 늘 DMS 소유. 버전 = 라벨 dms.io/addon-version
-  gateway-api    CRD gateways·gatewayclasses·httproutes(addons/gateway-api)      — 서드파티. 버전 = bundle-version·channel 어노테이션
-  envoy-gateway  CRD envoyproxies + 컨트롤러 Deployment + 설정 ConfigMap(addons/envoy-gateway) — 서드파티
-  gateway        GatewayClass dms·Gateway dms-portal(platform/gateway)            — 늘 DMS 소유(C 경로에서도 이 층만 적용한다)
+  traefik        클러스터의 Traefik(IngressClass + DaemonSet/Deployment)          — 남의 것. **DMS 는 설치·변경하지 않는다**(2026-11-16 —
+                 입구는 클러스터에 이미 있는 Traefik 하나; Envoy Gateway 경로 폐기). 있으면 C(재사용), IngressClass 가 없거나 Traefik 이
+                 아니면 X(운영자에게 — RKE2 는 rke2-traefik), 워크로드를 못 찾거나 Ready 0 이면 U(최종 판정은 S8 의 ingress-probe)
+  ingress        Ingress dms/dms-portal-traefik(platform/ingress)                — 늘 DMS 소유(Traefik 이 집는 DMS 객체는 이것 하나)
   cnpg           CRD clusters.postgresql.cnpg.io + 오퍼레이터(addons/cnpg)        — 서드파티. 고정 = versions.env CNPG_VERSION
   volcano        CRD 3종 + volcano-scheduler·controllers(addons/volcano)          — 서드파티. 고정 = versions.env VOLCANO_VERSION
   db             Cluster dms-pg·SC dms-pg-shared·PV dms-pgdata-*·CronJob dms-pg-dump(platform/db-*) — 늘 DMS 소유
@@ -46,13 +47,14 @@ plan(S3): 감지 뒤 렌더된 사이트 디렉터리(deploy/render.sh 의 deplo
 층은 `kubectl apply --server-side --dry-run=server --field-manager=dms-install -k <층>`(adopt 면 --force-conflicts), 앱 오버레이는 지금처럼
 client-side(`apply --dry-run=server -k app` — 포탈 릴리스가 strategic-merge 로 image 를 바꾼다, 설계 8-2). Volcano 는 렌더 층 대신 DMS 모양
 vcjob 을 `create --dry-run=server`(S9b — 웹훅 8443 경로). 그 층의 action 이 적용이 아니면(none·keep·reuse·verify·stop) 건너뛴다 — **C 인 서드파티
-층에는 dry-run 조차 부르지 않는다**. 단 소비 층(gateway-api·envoy-gateway → platform/gateway, cnpg → platform/db-cluster, volcano → vcjob)의
-dry-run 은 그 애드온의 최종 판정이다(설계 8-2 「최종 판정은 DMS 가 만들 CR 의 server-side dry-run」): 실패하면 C·D·U 라도 FAIL, U 는 통과해야 WARN.
+층에는 dry-run 조차 부르지 않는다**(Traefik 은 층 자체가 없다 — DMS 가 설치하지 않는다). 단 소비 층(traefik → platform/ingress, cnpg →
+platform/db-cluster, volcano → vcjob)의 dry-run 은 그 애드온의 최종 판정이다(설계 8-2 「최종 판정은 DMS 가 만들 CR 의 server-side dry-run」):
+실패하면 C·D·U 라도 FAIL, U 는 통과해야 WARN(Traefik 의 U 는 Ingress dry-run 이 Traefik 을 확인하지 못하므로 S8 ingress-probe 가 최종 판정).
 **첫 설치 함정**(kubernetes#83562 — server dry-run 은 같은 묶음의 Namespace 를 저장하지 않는다): `namespaces "X" not found` 가 그 층 자신이 만들
 네임스페이스(Namespace 객체가 층 안에 있음)이거나 S2 가 만드는 DMS 네임스페이스면 실패가 아니라 `SKIP — ns X will be created`, 아직 설치 전인
 애드온의 CRD 때문인 `no matches for kind` 도 같은 SKIP 이다(그 밖의 객체는 통과했다는 뜻). 판정이 stop 인 애드온(ADDON_INSTALL=never 의 A·P·X·?)의
-CRD 때문인 `no matches for kind` 는 날것의 FAIL 이 아니라 그 애드온 이름을 단 SKIP 이다(「envoy-gateway 판정 FAIL(P stop) — EnvoyProxy… 는 확인하지
-않는다」 — vcjob 층과 같은 처리, 그 애드온의 FAIL 이 이미 사유다; 2026-11-03 T9 — 그 층이 FAIL 이면 같은 소비 층의 멀쩡한 애드온(D= gateway-api)까지
+CRD 때문인 `no matches for kind` 는 날것의 FAIL 이 아니라 그 애드온 이름을 단 SKIP 이다(「cnpg 판정 FAIL(P stop) — Cluster 는 확인하지
+않는다」 — vcjob 층과 같은 처리, 그 애드온의 FAIL 이 이미 사유다; 2026-11-03 T9 — 그 층이 FAIL 이면 같은 소비 층의 멀쩡한 애드온까지
 「최종 판정 FAIL」로 번졌다). **앱 업그레이드 함정**(2026-11-03 ⑦ 리뷰 1): 앱 층의
 이미 끝난 Job dms-migrate 는 spec 을 바꿀 수 없어 태그를 올린 dry-run 이 `field is immutable` 이다 — S11 이 apply 전에 지우고 다시 만드는 그
 Job 이라 앱 층은 PASS(그 사유를 적어서)로 본다.
@@ -66,10 +68,14 @@ Job 이라 앱 층은 PASS(그 사유를 적어서)로 본다.
     Secret 은 WATCH_NAMESPACE 키 하나만 jsonpath 로 읽는다(다른 값은 읽지도 찍지도 않는다).
   - Volcano 스케줄러는 이름 volcano-scheduler · 라벨 app=volcano-scheduler(상류 매니페스트의 실제 라벨) · 이미지 vc-scheduler 로 찾는다 —
     preflight-cluster.sh 가 보던 app.kubernetes.io/name=volcano-scheduler 는 상류에 없는 라벨이라 늘 빈 결과였다(2026-11-03 ⑦ 버그 수정).
-  - Envoy Gateway 설정(YAML 문자열)은 표준 라이브러리만으로 읽는다(설치 호스트 RHEL 9 의 python3.9 에 PyYAML 이 없을 수 있다 — 작은 블록 YAML
-    파서, 못 읽으면 PyYAML 이 있으면 그것, 둘 다 안 되면 「설정 모름」 WARN).
+  - Traefik(2026-11-16)은 IngressClass <INGRESS_CLASS>(render.env, 기본 traefik)의 spec.controller == traefik.io/ingress-controller 와, 아무
+    ns 의 DaemonSet·Deployment 중 컨테이너 이미지 이름(저장소 경로의 마지막 조각)에 traefik 이 든 워크로드로 찾는다(RKE2 rke2-traefik =
+    kube-system DaemonSet, 이미지 rancher/hardened-traefik). 정적 설정은 그 컨테이너의 args 로 읽는다(차트·RKE2 는 args 로 준다 — 플래그는 대소문자를
+    가리지 않는다): --providers.kubernetesingress·--entryPoints.<TRAEFIK_ENTRYPOINT>.address 가 없으면 X, http.tls·proxyProtocol·forwardedHeaders·
+    readTimeout 은 근거(notes)와 경고. --configFile 등 args 밖이면 판정하지 않고 경고(C!). Traefik 은 바꾸지 않는다 — 고칠 곳은 사이트의 Traefik
+    설정(Rancher chartValues·HelmChartConfig kube-system/rke2-traefik — deploy/README §2g).
   - 플랫폼 항목은 이름이 같은데 DMS 라벨이 없으면 P(이름 충돌 — --adopt 로만 채택), 바꿀 수 없는 필드(PriorityClass value·preemptionPolicy,
-    GatewayClass controllerName, Service clusterIP, SC·PV — pg-path-probe.py 의 pv-check 를 그대로 부른다)가 다르면 X — **조용히 다시 만들지
+    Service clusterIP, SC·PV — pg-path-probe.py 의 pv-check 를 그대로 부른다)가 다르면 X — **조용히 다시 만들지
     않는다**(설계 8-2 「레지스트리·DB 층·PriorityClass」 행).
 kubectl 은 모든 클러스터 호출에 --context 를 붙인다(필수 — 두 테스트베드가 같은 네임스페이스라 current-context 에 기대지 않는다). --context 가 없으면
 KUBE_CONTEXT, 둘 다 없으면 2. 설치 호스트의 python3(RHEL 9 = 3.9), 표준 라이브러리만.
@@ -81,7 +87,6 @@ import base64
 import importlib.util
 import json
 import os
-import posixpath
 import re
 import subprocess
 import sys
@@ -93,33 +98,29 @@ OWNER = "dms-install"
 MANAGED_BY = "app.kubernetes.io/managed-by"
 ADDON_VERSION = "dms.io/addon-version"
 
-ITEMS = ("priorityclass", "registry", "gateway-api", "envoy-gateway", "gateway", "cnpg", "volcano", "db")
-THIRD_PARTY = ("gateway-api", "envoy-gateway", "cnpg", "volcano")
-STAGES = {"priorityclass": "S4", "registry": "S4", "gateway-api": "S8", "envoy-gateway": "S8", "gateway": "S8",
-          "cnpg": "S9", "volcano": "S9b", "db": "S10"}
+ITEMS = ("priorityclass", "registry", "traefik", "ingress", "cnpg", "volcano", "db")
+THIRD_PARTY = ("traefik", "cnpg", "volcano")
+STAGES = {"priorityclass": "S4", "registry": "S4", "traefik": "S8", "ingress": "S8", "cnpg": "S9", "volcano": "S9b", "db": "S10"}
+# 2026-11-16 에 없앤 항목(Envoy Gateway 입구 — Gateway API CRD·EG·platform/gateway). --upgrade-addon·--adopt 에 오면 바뀐 이름을 알려 준다.
+RETIRED_ITEMS = ("gateway-api", "envoy-gateway", "gateway")
 
 CNPG_CRD = "clusters.postgresql.cnpg.io"
 CNPG_FLOOR = (1, 25, 0)            # dataDurability(설계 #28 — preferred)가 들어온 버전. 그 아래는 DMS Cluster 를 못 만든다 → X
 CNPG_DEFAULT_CONFIG = "cnpg-controller-manager-config"
-GWAPI_CRDS = ("gatewayclasses.gateway.networking.k8s.io", "gateways.gateway.networking.k8s.io",
-              "httproutes.gateway.networking.k8s.io")    # DMS 가 쓰는 종류(platform/gateway)
-# 재사용 하한(2026-11-13 v1.6.0 → v1.5.0): Rancher/RKE2 는 rke2-traefik-crd(Helm 소유)가 Gateway API v1.5.1 을 미리 깐다 — 하한이 1.6.0 이면
-# 판정 X 로 S8 이 거부됐다(OA 사이트 실측). DMS 가 쓰는 종류(GWAPI_CRDS)는 모두 v1 standard 라 v1.5 에도 있다.
-GWAPI_FLOOR = (1, 5, 0)            # 설계 8-2 의 하한(원래 v1.6.x) — 이상인 남의 CRD 는 재사용(standard 필드만 쓴다, README §2g-3)
-GWAPI_BUNDLE = "gateway.networking.k8s.io/bundle-version"
-GWAPI_CHANNEL = "gateway.networking.k8s.io/channel"
-EG_CRD = "envoyproxies.gateway.envoyproxy.io"
-EG_DEFAULT_CONTROLLER = "gateway.envoyproxy.io/gatewayclass-controller"
-EG_DEFAULT_CONFIG = ("envoy-gateway-config", "/config/envoy-gateway.yaml")
+# 입구(2026-11-16 — 클러스터의 Traefik 하나). IngressClass·진입점 이름은 render.env(values.env INGRESS_CLASS·TRAEFIK_ENTRYPOINT)가 이긴다.
+TRAEFIK_CONTROLLER = "traefik.io/ingress-controller"
+DEFAULT_INGRESS_CLASS = "traefik"
+DEFAULT_ENTRYPOINT = "websecure"
+INGRESS_NAME = "dms-portal-traefik"   # platform/ingress — base 앱의 Ingress dms-portal(class nginx, 테스트베드 되돌림)과 다른 이름
 VOLCANO_CRDS = ("jobs.batch.volcano.sh", "queues.scheduling.volcano.sh", "podgroups.scheduling.volcano.sh")
 VOLCANO_FLOOR = (1, 15, 0)         # 설계 8-2 「≥ v1.15」(테스트베드 실증 v1.15.0)
 VOLCANO_FOR_K8S_136 = (1, 16, 0)   # 「1.36 은 v1.16 부터」(6-5)
 VOLCANO_SCHEDULER_NAME = "volcano"  # DMS vcjob 의 schedulerName(execution_manifests.py)
 # versions.env 에 VOLCANO_VERSION 이 아직 없을 때의 고정값(설계 8-1 S9b·7-5 ③ — ⑦ 의 Volcano 층이 versions.env 에 덧붙이면 그 값이 이긴다).
 VOLCANO_DEFAULT_PIN = "v1.16.0"
-ALL_CRDS = (CNPG_CRD,) + GWAPI_CRDS + (EG_CRD,) + VOLCANO_CRDS
-# DMS 애드온 층이 만들고 라벨(PSA 등)을 붙이는 네임스페이스(addons/<x> — 설계 8-1 S1 「ns envoy-gateway-system 을 남이 쓰는지」).
-ADDON_NAMESPACES = {"cnpg": "cnpg-system", "envoy-gateway": "envoy-gateway-system", "volcano": "volcano-system"}
+ALL_CRDS = (CNPG_CRD,) + VOLCANO_CRDS
+# DMS 애드온 층이 만들고 라벨(PSA 등)을 붙이는 네임스페이스(addons/<x> — 설계 8-1 S1 「애드온 ns 를 남이 쓰는지」).
+ADDON_NAMESPACES = {"cnpg": "cnpg-system", "volcano": "volcano-system"}
 
 PC_NAME = "dms-addon-critical"
 REGISTRY_NAME = "dms-registry"
@@ -127,10 +128,8 @@ PG_CLUSTER = "dms-pg"
 PG_SC = "dms-pg-shared"
 PG_PVS = tuple("dms-pgdata-0%d" % n for n in range(1, 6))
 PG_CRON = "dms-pg-dump"
-GW_CLASS = "dms"
-GW_NAME = "dms-portal"
-# 지원 K8s minor(고정 버전을 **설치할 때**의 경고 — S1 이 K8s 1.34~1.36 을 따로 본다). CNPG 1.30 = 1.34~1.36(6-5), EG v1.9 = 1.33~1.36(versions.env).
-K8S_RANGE = {"cnpg": {(1, 30): (34, 36)}, "envoy-gateway": {(1, 9): (33, 36)}}
+# 지원 K8s minor(고정 버전을 **설치할 때**의 경고 — S1 이 K8s 1.34~1.36 을 따로 본다). CNPG 1.30 = 1.34~1.36(6-5).
+K8S_RANGE = {"cnpg": {(1, 30): (34, 36)}}
 
 BASE_LEVEL = {"A": "PASS", "D=": "PASS", "D<": "WARN", "D>": "WARN", "C": "PASS", "C!": "WARN", "X": "FAIL", "U": "WARN",
               "P": "FAIL", "-": "INFO", "?": "UNKNOWN"}
@@ -157,10 +156,6 @@ def _labels(obj):
     return _meta(obj).get("labels") or {}
 
 
-def _annotations(obj):
-    return _meta(obj).get("annotations") or {}
-
-
 def _owned(obj):
     return _labels(obj).get(MANAGED_BY) == OWNER
 
@@ -178,14 +173,6 @@ def _containers(dep):
     return _podspec(dep).get("containers") or []
 
 
-def _dig(data, *keys):
-    for key in keys:
-        if not isinstance(data, dict):
-            return None
-        data = data.get(key)
-    return data
-
-
 _VER = re.compile(r"^v?(\d+)\.(\d+)(?:\.(\d+))?")
 
 
@@ -201,13 +188,6 @@ def image_tag(image):
     """「reg:5000/a/b:1.2@sha256:…」 → 「1.2」. 태그가 없으면(digest 만) None. 레지스트리 포트의 : 는 태그가 아니다."""
     last = str(image or "").split("@", 1)[0].rsplit("/", 1)[-1]
     return last.split(":", 1)[1] if ":" in last else None
-
-
-def image_repo(image):
-    """「reg:5000/envoyproxy/gateway:v1@sha256:…」 → 「reg:5000/envoyproxy/gateway」(태그·digest 를 뗀다 — 레지스트리 포트의 : 는 남긴다)."""
-    ref = str(image or "").split("@", 1)[0]
-    head, sep, last = ref.rpartition("/")
-    return head + sep + last.split(":", 1)[0]
 
 
 def image_base(image):
@@ -247,210 +227,11 @@ def read_env_file(path):
     return values
 
 
-def selector_matches(sel, labels):
-    """LabelSelector(matchLabels·matchExpressions) 평가. 모르는 연산자면 ValueError."""
-    for key, value in (sel.get("matchLabels") or {}).items():
-        if labels.get(key) != str(value):
-            return False
-    for expr in sel.get("matchExpressions") or []:
-        op, key = expr.get("operator"), expr.get("key")
-        values = [str(v) for v in expr.get("values") or []]
-        if op == "In":
-            ok = key in labels and labels[key] in values
-        elif op == "NotIn":
-            ok = not (key in labels and labels[key] in values)
-        elif op == "Exists":
-            ok = key in labels
-        elif op == "DoesNotExist":
-            ok = key not in labels
-        else:
-            raise ValueError("모르는 연산자 %r" % op)
-        if not ok:
-            return False
-    return True
-
-
-# --- 작은 블록 YAML 파서(EG 설정용 — 표준 라이브러리만) ---------------------------------------------------------------------------
-# 왜(2026-11-03 ⑦): EG 설정은 ConfigMap 안의 YAML 문자열이고, 설치 호스트(RHEL 9 python3.9)에 PyYAML 이 있다는 보장이 없다. 필요한 것은
-# gateway.controllerName·runtimeFlags·provider.kubernetes.{watch,deploy} 뿐이라 블록 매핑·블록 시퀀스(들여쓰지 않은 시퀀스 포함)·단순 흐름
-# ({}·[a, b])·따옴표·주석만 읽는다. 앵커·태그·여러 줄 흐름 같은 모르는 모양은 ValueError — 호출자가 PyYAML(있으면)로 다시 하거나 「설정 모름」.
-
-_KEY = re.compile(r"""^(?P<k>"[^"]*"|'[^']*'|[^\s"'\-\[{#][^:]*?|-[^\s:][^:]*?)\s*:(?:\s+(?P<v>.*))?$""")
-
-
-def _strip_comment(line):
-    quote = None
-    for i, ch in enumerate(line):
-        if quote:
-            if ch == quote:
-                quote = None
-        elif ch in "\"'":
-            quote = ch
-        elif ch == "#" and (i == 0 or line[i - 1] in " \t"):
-            return line[:i]
-    return line
-
-
 def _unquote(text):
     t = text.strip()
     if len(t) >= 2 and t[0] == t[-1] and t[0] in "\"'":
         return t[1:-1]
     return t
-
-
-def _split_flow(text):
-    parts, depth, cur, quote = [], 0, "", None
-    for ch in text:
-        if quote:
-            cur += ch
-            if ch == quote:
-                quote = None
-            continue
-        if ch in "\"'":
-            quote = ch
-        elif ch in "[{":
-            depth += 1
-        elif ch in "]}":
-            depth -= 1
-        elif ch == "," and depth == 0:
-            parts.append(cur)
-            cur = ""
-            continue
-        cur += ch
-    if cur.strip():
-        parts.append(cur)
-    return parts
-
-
-def _scalar(text):
-    t = text.strip()
-    if t in ("", "~", "null", "Null", "NULL"):
-        return None
-    if t[0] in "&*!|>@`":
-        raise ValueError("지원하지 않는 YAML 모양: %r" % t)
-    if t.startswith("["):
-        if not t.endswith("]"):
-            raise ValueError("여러 줄 흐름 시퀀스")
-        return [_scalar(x) for x in _split_flow(t[1:-1])]
-    if t.startswith("{"):
-        if not t.endswith("}"):
-            raise ValueError("여러 줄 흐름 매핑")
-        out = {}
-        for part in _split_flow(t[1:-1]):
-            key, sep, value = part.partition(":")
-            if not sep:
-                raise ValueError("흐름 매핑 항목: %r" % part)
-            out[_unquote(key)] = _scalar(value)
-        return out
-    if t in ("true", "True", "TRUE"):
-        return True
-    if t in ("false", "False", "FALSE"):
-        return False
-    return _unquote(t)
-
-
-def _is_seq(text):
-    return text == "-" or text.startswith("- ")
-
-
-def mini_yaml(text):
-    """블록 YAML 문서 하나 → dict/list/스칼라(스칼라는 문자열·bool·None — 숫자도 문자열). 모르는 모양이면 ValueError."""
-    lines = []
-    for raw in text.splitlines():
-        body = _strip_comment(raw).rstrip()
-        if not body.strip() or body.strip() in ("---", "..."):
-            continue
-        indent = len(body) - len(body.lstrip(" "))
-        if body[indent:indent + 1] == "\t":
-            raise ValueError("탭 들여쓰기")
-        lines.append([indent, body.strip()])
-    if not lines:
-        return None
-    value, pos = _parse_block(lines, 0, lines[0][0])
-    if pos != len(lines):
-        raise ValueError("해석하지 못한 줄: %r" % lines[pos][1])
-    return value
-
-
-def _parse_block(lines, pos, indent):
-    if _is_seq(lines[pos][1]):
-        return _parse_seq(lines, pos, indent)
-    if not _KEY.match(lines[pos][1]):
-        if pos + 1 < len(lines) and lines[pos + 1][0] >= indent:
-            raise ValueError("여러 줄 스칼라: %r" % lines[pos][1])
-        return _scalar(lines[pos][1]), pos + 1
-    return _parse_map(lines, pos, indent)
-
-
-def _parse_map(lines, pos, indent):
-    out = {}
-    while pos < len(lines):
-        ind, text = lines[pos]
-        if ind < indent or (ind == indent and _is_seq(text)):
-            break
-        if ind > indent:
-            raise ValueError("들여쓰기: %r" % text)
-        m = _KEY.match(text)
-        if not m:
-            raise ValueError("매핑 항목이 아니다: %r" % text)
-        key, rest = _unquote(m.group("k")), (m.group("v") or "").strip()
-        pos += 1
-        if rest[:1] in ("|", ">"):
-            buf = []
-            while pos < len(lines) and lines[pos][0] > indent:
-                buf.append(lines[pos][1])
-                pos += 1
-            out[key] = "\n".join(buf)
-        elif rest:
-            out[key] = _scalar(rest)
-        elif pos < len(lines) and lines[pos][0] > indent:
-            out[key], pos = _parse_block(lines, pos, lines[pos][0])
-        elif pos < len(lines) and lines[pos][0] == indent and _is_seq(lines[pos][1]):
-            out[key], pos = _parse_seq(lines, pos, indent)      # 들여쓰지 않은 시퀀스(`key:` 다음 줄이 같은 칸의 `- …`)
-        else:
-            out[key] = None
-    return out, pos
-
-
-def _parse_seq(lines, pos, indent):
-    out = []
-    while pos < len(lines):
-        ind, text = lines[pos]
-        if ind < indent or (ind == indent and not _is_seq(text)):
-            break
-        if ind > indent:
-            raise ValueError("들여쓰기: %r" % text)
-        item = text[1:].lstrip(" ")
-        if not item:
-            pos += 1
-            if pos < len(lines) and lines[pos][0] > indent:
-                value, pos = _parse_block(lines, pos, lines[pos][0])
-                out.append(value)
-            else:
-                out.append(None)
-        elif _KEY.match(item) or _is_seq(item):
-            # `- key: 값` 다음 줄들은 key 가 시작한 칸에 이어진다 — 그 줄을 그 칸의 블록 첫 줄로 바꿔 읽는다.
-            lines[pos] = [ind + (len(text) - len(item)), item]
-            value, pos = _parse_block(lines, pos, lines[pos][0])
-            out.append(value)
-        else:
-            out.append(_scalar(item))
-            pos += 1
-    return out, pos
-
-
-def parse_yaml(text):
-    try:
-        return mini_yaml(text)
-    except ValueError as exc:
-        try:
-            import yaml  # noqa: PLC0415 — 있으면 쓰는 대안(없어도 된다)
-        except ImportError:
-            raise exc
-        try:
-            return yaml.safe_load(text)
-        except Exception as yexc:  # noqa: BLE001 — 어떤 오류든 「설정 모름」 하나로
-            raise ValueError(str(yexc))
 
 
 # --- kubectl(읽기 전용 래퍼) ------------------------------------------------------------------------------------------------------
@@ -522,16 +303,15 @@ def _grep(path, pattern):
 
 
 def load_pins(versions_env=None):
-    """설치할 버전·값의 원천: deploy/versions.env(CNPG·Gateway API·EG·PG·Volcano) + platform 매니페스트(레지스트리 라벨·PriorityClass·
-    GatewayClass controllerName). 하나라도 못 읽으면 UsageError(2) — 고정값 없이 D=/D< 를 가를 수 없다."""
+    """설치할 버전·값의 원천: deploy/versions.env(CNPG·PG·Volcano) + platform 매니페스트(레지스트리 라벨·PriorityClass). 하나라도 못 읽으면
+    UsageError(2) — 고정값 없이 D=/D< 를 가를 수 없다. 입구(Traefik)는 DMS 가 설치하지 않으므로 고정값이 없다(2026-11-16 — 옛
+    Gateway API·Envoy Gateway 버전 키는 요구하지 않는다)."""
     path = versions_env or os.path.join(HERE, "versions.env")
     try:
         env = read_env_file(path)
         pg_image = env.get("PG_IMAGE") or ""
         pins = {
             "cnpg": env.get("CNPG_VERSION"),
-            "gateway-api": env.get("GATEWAY_API_VERSION"),
-            "envoy-gateway": env.get("ENVOY_GATEWAY_VERSION"),
             "volcano": env.get("VOLCANO_VERSION") or VOLCANO_DEFAULT_PIN,
             "db": image_tag(pg_image) if image_base(pg_image) == "postgresql" else None,
             "registry": _grep(os.path.join(HERE, "platform", "registry", "deployment.yaml"),
@@ -539,15 +319,13 @@ def load_pins(versions_env=None):
             "pc_value": _grep(os.path.join(HERE, "platform", "priorityclass", "priorityclass.yaml"), r"^value:\s*(\d+)"),
             "pc_preemption": _grep(os.path.join(HERE, "platform", "priorityclass", "priorityclass.yaml"),
                                    r"^preemptionPolicy:\s*(\S+)"),
-            "gateway_controller": _grep(os.path.join(HERE, "platform", "gateway", "gatewayclass.yaml"),
-                                        r"^\s+controllerName:\s*(\S+)"),
         }
     except OSError as exc:
         raise UsageError("고정값 파일을 읽지 못했다: %s" % exc)
     missing = [k for k, v in pins.items() if not v]
     if missing:
         raise UsageError("고정값을 읽지 못했다: %s (versions.env = %s)" % (", ".join(missing), path))
-    for key in ("cnpg", "gateway-api", "envoy-gateway", "volcano", "registry"):
+    for key in ("cnpg", "volcano", "registry"):
         if parse_version(pins[key]) is None:
             raise UsageError("고정 버전 모양이 아니다: %s=%r" % (key, pins[key]))
     pins["pc_value"] = int(pins["pc_value"])
@@ -622,14 +400,22 @@ def decide(f, addon_install, upgrade, adopt):
             f.notes.append("--adopt 는 P 에만 — 남이 설치한 호환 애드온은 채택하지 않고 재사용한다")
         if f.item in upgrade:
             f.notes.append("남이 설치한 애드온의 업그레이드는 소유자 몫(설계 6-5)")
-        if code == "C!":
+        if code == "C!" and f.pinned:
             f.notes.append("소유자에게 요청: %s 을(를) DMS 고정 %s 와 같은 지원 범위로 올려 달라(DMS 는 실행할 때마다 경고한다)"
-                           % (f.item, f.pinned or ""))
+                           % (f.item, f.pinned))
+        elif code == "C!":
+            # 고정 버전이 없는 남의 것(traefik — DMS 는 설치·변경하지 않는다): 버전이 아니라 위 WARN 의 설정을 소유자가 고친다.
+            f.notes.append("소유자에게 요청: 위 WARN 을 해소해 달라 — DMS 는 %s 을(를) 바꾸지 않는다(실행할 때마다 경고한다)" % f.item)
     elif code == "X":
         action = "stop"
     elif code == "U":
         action = "verify"
-        f.notes.append("버전을 모른다 — 최종 판정은 DMS 가 만들 CR 의 server dry-run(plan): 통과하면 WARN")
+        if f.item == "traefik":
+            # Ingress 의 server dry-run 은 Traefik 을 부르지 않는다(Traefik 웹훅 없음) — 노드 :443 경유 실측이 최종 판정이다.
+            f.notes.append("Traefik 을 확인하지 못했다 — 최종 판정은 S8 의 ingress-probe(Traefik 이 도는 노드 :443 경유 readyz·인증서, "
+                           "deploy/README §2g)")
+        else:
+            f.notes.append("버전을 모른다 — 최종 판정은 DMS 가 만들 CR 의 server dry-run(plan): 통과하면 WARN")
     elif code == "P":
         if f.item in adopt and f.adoptable:
             action, level = "adopt", "WARN"
@@ -651,7 +437,10 @@ def decide(f, addon_install, upgrade, adopt):
 # --- 클러스터 상태 ----------------------------------------------------------------------------------------------------------------
 
 class State:
-    """감지 공통 읽기(한 번씩): 서버 버전, 관심 CRD, 모든 Deployment, 모든 Namespace."""
+    """감지 공통 읽기(한 번씩): 서버 버전, 관심 CRD, 모든 Deployment, 모든 Namespace + (traefik 항목용) IngressClass·모든 DaemonSet.
+
+    IngressClass·DaemonSet 읽기 실패(권한 등)는 공통 실패(모름 4 — 어느 항목도 판정 못 함)로 번지지 않게 담아 두었다가 그것을 쓰는 항목(traefik)만
+    「?」로 만든다(read() — 모름 ≠ 실패)."""
 
     def __init__(self, kube, namespace):
         self.kube = kube
@@ -668,6 +457,19 @@ class State:
         self.crds = {_meta(c).get("name"): c for c in kube.items("get", "crd", *ALL_CRDS, "--ignore-not-found")}
         self.deploys = kube.items("get", "deploy", "-A")
         self.namespaces = {_meta(n).get("name"): n for n in kube.items("get", "ns")}
+        self._optional = {}
+        for key, args in (("ingressclasses", ("get", "ingressclass")), ("daemonsets", ("get", "ds", "-A"))):
+            try:
+                self._optional[key] = kube.items(*args)
+            except (KubeError, ValueError) as exc:
+                self._optional[key] = KubeError(str(exc))
+
+    def read(self, key):
+        """IngressClass·DaemonSet 목록(공통 읽기 때 담아 둔 것) — 읽기 실패였으면 그때의 KubeError 를 다시 던진다(그 항목만 「?」)."""
+        value = self._optional[key]
+        if isinstance(value, Exception):
+            raise value
+        return value
 
     def deploy(self, ns, name):
         for d in self.deploys:
@@ -831,192 +633,164 @@ def detect_cnpg(kube, state, pins):
     return f.set("C", "남이 설치한 CNPG %s(%s) — 재사용(오퍼레이터·CRD 는 건드리지 않는다, 두 번째를 설치하지 않는다)" % (text, _ref(op)))
 
 
-# Gateway API ------------------------------------------------------------------------------------------------------------------
+# Traefik(입구 — 2026-11-16: Envoy Gateway 폐기, 클러스터에 이미 있는 Traefik 하나) -----------------------------------------------------
 
-def detect_gateway_api(state, pins):
-    """Gateway API CRD(S8 첫째) — 버전·채널은 상류 어노테이션 bundle-version·channel(설계 8-2). v1.5 미만이면 X(GWAPI_FLOOR), 그 이상 남의 CRD 는 재사용(C —
-    experimental 이어도 DMS 는 standard 필드만 쓴다). DMS 가 쓰는 CRD 셋 중 일부만 있거나 bundle-version 이 섞였으면 P."""
-    pin = parse_version(pins["gateway-api"])
-    f = Finding("gateway-api", pins["gateway-api"])
-    present = [n for n in GWAPI_CRDS if n in state.crds]
-    if not present:
-        return f.set("A", "Gateway API CRD 없음 — 고정 %s standard 를 설치한다" % pins["gateway-api"])
-    anchor = state.crds.get(GWAPI_CRDS[1]) or state.crds[present[0]]
-    owned = _owned(anchor)
-    f.set(None, "", where=_meta(anchor).get("name"), owner="dms-install" if owned else "foreign")
-    if len(present) < len(GWAPI_CRDS):
-        missing = [n for n in GWAPI_CRDS if n not in present]
-        return f.set("P", "Gateway API CRD 일부만 있다(없음: %s)" % ", ".join(missing), adoptable=True)
-    bundles = {n: _annotations(state.crds[n]).get(GWAPI_BUNDLE) for n in GWAPI_CRDS}
-    if len(set(bundles.values())) > 1:
-        return f.set("P", "Gateway API CRD 의 bundle-version 이 섞였다(%s) — 부분 업그레이드"
-                     % ", ".join("%s=%s" % (n.split(".")[0], v) for n, v in bundles.items()), adoptable=False)
-    bundle = bundles[GWAPI_CRDS[1]]
-    channel = _annotations(anchor).get(GWAPI_CHANNEL) or "?"
-    text = (_labels(anchor).get(ADDON_VERSION) if owned else None) or bundle
-    f.installed = "%s(%s)" % (text, channel) if text else None
-    ver = parse_version(text)
-    if ver is None:
-        return f.set("U", "Gateway API CRD 에 bundle-version 어노테이션이 없다 — 버전 모름")
-    if owned:
-        return f.set(compare(ver, pin), "DMS 가 설치한 Gateway API %s %s — 고정 %s" % (text, channel, pins["gateway-api"]))
-    if ver < GWAPI_FLOOR:
-        return f.set("X", "Gateway API %s 는 v1.5 미만이다 — 소유자에게 v1.5.x 이상으로 올려 달라" % text)
-    if channel != "standard":
-        f.notes.append("채널 %s — DMS 는 standard 필드만 쓴다(재사용)" % channel)
-    return f.set("C", "남이 설치한 Gateway API %s %s — 재사용(CRD 는 건드리지 않는다)" % (text, channel))
+def _is_traefik(workload):
+    """컨테이너 이미지 이름(저장소 경로의 마지막 조각)에 traefik 이 든 워크로드 — rancher/hardened-traefik(RKE2)·traefik(상류·차트) 모두.
+    레지스트리 호스트 이름에 traefik 이 든 남의 이미지를 잡지 않게 마지막 조각만 본다."""
+    return any("traefik" in image_base(c.get("image")).lower() for c in _containers(workload))
 
 
-# Envoy Gateway ----------------------------------------------------------------------------------------------------------------
-
-def _is_eg_controller(dep):
-    if _meta(dep).get("name") == "envoy-gateway" or _labels(dep).get("control-plane") == "envoy-gateway":
-        return True
-    for c in _containers(dep):
-        if image_repo(c.get("image")).endswith("envoyproxy/gateway") and (c.get("args") or [None])[0] == "server":
-            return True
-    return False
-
-
-def _eg_container(dep):
-    for c in _containers(dep):
-        if c.get("name") == "envoy-gateway":
+def _traefik_container(workload):
+    for c in _containers(workload):
+        if "traefik" in image_base(c.get("image")).lower():
             return c
-    return (_containers(dep) or [{}])[0]
+    return (_containers(workload) or [{}])[0]
 
 
-def eg_config(kube, dep):
-    """컨트롤러가 읽는 EnvoyGateway 설정 → (dict, 출처) 또는 (None, 사유). --config-path(기본 /config/envoy-gateway.yaml)를 마운트한 볼륨의
-    ConfigMap(기본 envoy-gateway-config)에서 그 파일 이름의 키를 읽는다."""
-    c = _eg_container(dep)
-    ns = _meta(dep).get("namespace")
-    path = (_flag_values([str(t) for t in c.get("args") or []], "--config-path") or [EG_DEFAULT_CONFIG[1]])[-1]
-    directory, key = posixpath.split(path)
-    vol = None
-    for m in c.get("volumeMounts") or []:
-        mount = str(m.get("mountPath") or "").rstrip("/")
-        if mount == path and m.get("subPath"):
-            vol, key = m.get("name"), m.get("subPath")
-        elif mount == directory.rstrip("/"):
-            vol = m.get("name")
-    cm = EG_DEFAULT_CONFIG[0]
-    for v in _podspec(dep).get("volumes") or []:
-        if v.get("name") == vol and v.get("configMap"):
-            cm = v["configMap"].get("name") or cm
-    obj = kube.one("get", "configmap", cm, "-n", ns)
-    text = ((obj or {}).get("data") or {}).get(key)
-    if text is None:
-        return None, "설정 ConfigMap %s/%s 의 %s 를 읽지 못했다" % (ns, cm, key)
+def _ready_count(kind, workload):
+    """DaemonSet numberReady · Deployment readyReplicas(없으면 0 — 아직 상태가 없는 새 워크로드)."""
+    status = workload.get("status") or {}
+    value = status.get("numberReady") if kind == "DaemonSet" else status.get("readyReplicas")
     try:
-        cfg = parse_yaml(text)
-    except ValueError as exc:
-        return None, "설정 %s/%s 를 해석하지 못했다(%s)" % (ns, cm, exc)
-    return (cfg if isinstance(cfg, dict) else {}), "ConfigMap %s/%s" % (ns, cm)
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
-def _eg_watch(cfg, state):
-    watch = _dig(cfg, "provider", "kubernetes", "watch") or {}
-    if not watch:
-        return True, "watch 없음(모든 네임스페이스)"
-    kind = watch.get("type")
-    if kind == "Namespaces":
-        names = [str(n) for n in watch.get("namespaces") or []]
-        return state.ns in names, "Namespaces %s" % ",".join(names)
-    if kind == "NamespaceSelector":
-        try:
-            ok = selector_matches(watch.get("namespaceSelector") or {}, _labels(state.namespaces.get(state.ns)))
-        except ValueError as exc:
-            return None, "NamespaceSelector(%s)" % exc
-        return ok, "NamespaceSelector %s" % json.dumps(watch.get("namespaceSelector"), sort_keys=True)
-    return None, "모르는 watch.type %r" % kind
+def traefik_static(tokens):
+    """컨테이너 command+args 의 Traefik 정적 설정 → {소문자 키: 값}. `--a.b=값`·`--a.b 값`·`--a.b`(참). Traefik 플래그는 대소문자를 가리지
+    않는다(차트는 --entryPoints.websecure.…, 옛 차트·손 설치는 --entrypoints.… 를 쓴다)."""
+    out = {}
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok.startswith("--") and len(tok) > 2:
+            key, sep, value = tok[2:].partition("=")
+            if not sep:
+                if i + 1 < len(tokens) and not tokens[i + 1].startswith("-"):
+                    value = tokens[i + 1]
+                    i += 1
+                else:
+                    value = "true"
+            out[key.lower()] = value
+        i += 1
+    return out
 
 
-def _psa_hostnetwork(ns_obj, name):
-    """Envoy(hostNetwork) 파드가 뜨는 네임스페이스의 PSA → (True 허용 | False 거절 | None 모름, 설명)."""
-    if ns_obj is None:
-        return None, "네임스페이스 %s 가 없다" % name
-    enforce = _labels(ns_obj).get("pod-security.kubernetes.io/enforce")
-    if enforce == "privileged":
-        return True, "ns %s PSA enforce=privileged" % name
-    if enforce in ("baseline", "restricted"):
-        return False, "ns %s PSA enforce=%s — hostNetwork Envoy 파드가 거절된다(설계 4-3)" % (name, enforce)
-    if enforce is None:
-        return None, ("ns %s 에 PSA enforce 라벨이 없다 — 클러스터 기본(AdmissionConfiguration)이 privileged 가 아니면 hostNetwork Envoy 파드가 "
-                      "거절된다" % name)
-    return None, "ns %s PSA enforce=%r(모르는 값)" % (name, enforce)
+def _flag_on(cfg, key):
+    """그 절이 켜졌는가 — 키 자체(값 false 가 아님) 또는 그 아래 키가 하나라도 있으면(Traefik 은 하위 옵션을 주면 그 절이 켜진다)."""
+    if key in cfg:
+        return str(cfg[key]).lower() != "false"
+    return any(k.startswith(key + ".") for k in cfg)
 
 
-def detect_envoy_gateway(kube, state, pins):
-    """Envoy Gateway(S8 둘째, 설계 8-2 EG 행·README §2g-3 C 경로).
+def _static_known(cfg):
+    """정적 설정을 args 로 읽을 수 있는가 — --configFile 이 있거나 진입점·공급자 플래그가 하나도 없으면 설정이 args 밖(파일·env)이다."""
+    if "configfile" in cfg:
+        return False
+    return any(k.startswith(("entrypoints.", "providers.")) for k in cfg)
 
-    컨트롤러(이름 envoy-gateway·라벨 control-plane=envoy-gateway·`server` 로 도는 envoyproxy/gateway 이미지)의 설정에서 controllerName 이 DMS
-    GatewayClass 와 같은 것만 「그 EG」 다 — 없으면 X(GatewayClass dms 가 Accepted 가 되지 않는다), 둘 이상이면 P. X 사유: runtimeFlags.disabled 에
-    EnvoyProxyPatch(hostNetwork 패치가 조용히 무시돼 마스터 :443 이 빈다 — enabled 에 있어도 disabled 가 이긴다), watch 가 dms 를 빼면, Envoy 파드
-    네임스페이스(컨트롤러 ns, deploy.type GatewayNamespace 면 dms)의 PSA 가 baseline·restricted. 버전: v1.9.x = C, v1.8 이하 = C!(v1.8 은
-    2026-11-08 EOL), 고정보다 새 minor = C!. C 면 DMS 는 platform/gateway 만 적용한다(Gateway 의 parametersRef 가 DMS EnvoyProxy 만 붙인다)."""
-    pin = parse_version(pins["envoy-gateway"])
-    f = Finding("envoy-gateway", pins["envoy-gateway"])
-    crd = state.crds.get(EG_CRD)
-    ctrls = [d for d in state.deploys if _is_eg_controller(d)]
-    if not crd and not ctrls:
-        if _ns_conflict(f, state, "envoy-gateway"):
-            return f
-        f.set("A", "Envoy Gateway 없음(CRD %s·컨트롤러 0) — 고정 %s 를 설치한다" % (EG_CRD, pins["envoy-gateway"]))
-        _k8s_note(f, state, "envoy-gateway", pin)
-        return f
-    if not ctrls:
-        return f.set("P", "CRD %s 는 있는데 EG 컨트롤러가 없다(부분 설치·삭제 잔재)" % EG_CRD, where=EG_CRD,
-                     owner="dms-install" if _owned(crd) else "foreign", adoptable=True)
-    configs = [(d,) + eg_config(kube, d) for d in ctrls]
-    want = pins["gateway_controller"]
-    matching = [(d, cfg, src) for d, cfg, src in configs if cfg is None or (_dig(cfg, "gateway", "controllerName") or EG_DEFAULT_CONTROLLER) == want]
-    if not matching:
-        names = ", ".join("%s=%s" % (_ref(d), _dig(cfg, "gateway", "controllerName") or EG_DEFAULT_CONTROLLER) for d, cfg, _ in configs)
-        return f.set("X", "EG 컨트롤러의 controllerName 이 GatewayClass %s 의 %s 와 다르다(%s) — GatewayClass 가 Accepted 가 되지 않는다"
-                     % (GW_CLASS, want, names), where=", ".join(_ref(d) for d in ctrls))
-    if len(matching) >= 2:
-        return f.set("P", "controllerName %s 인 EG 컨트롤러가 %d개다(%s) — 같은 GatewayClass 를 둘이 다룬다"
-                     % (want, len(matching), ", ".join(_ref(d) for d, _, _ in matching)), where=", ".join(_ref(d) for d, _, _ in matching))
-    dep, cfg, src = matching[0]
-    owned = _owned(dep)
-    text, ver = _version_of(dep, _eg_container(dep), owned)
-    f.set(None, "", where=_ref(dep), owner="dms-install" if owned else "foreign", installed=text)
-    if not crd:
-        return f.set("P", "EG 컨트롤러 %s 는 있는데 CRD %s 가 없다(부분 설치)" % (_ref(dep), EG_CRD), adoptable=owned)
-    problems = []
-    if cfg is None:
-        f.warnings.append("EG 설정 모름(%s) — runtimeFlags·watch 를 확인하지 못했다" % src)
+
+def detect_traefik(state, render):
+    """클러스터의 Traefik(S8, 2026-11-16 설계 D5) — **DMS 는 Traefik 을 설치·변경하지 않는다**(있으면 C, 없으면 X·U 뿐 — A 는 없다).
+
+    IngressClass <INGRESS_CLASS>(render.env, 기본 traefik)가 없거나 spec.controller 가 traefik.io/ingress-controller 가 아니면 X(운영자에게 —
+    RKE2 는 rke2-traefik). 워크로드(아무 ns 의 DaemonSet·Deployment 중 이미지 이름에 traefik)를 못 찾거나 Ready 0 이면 U(최종 판정은 S8
+    ingress-probe). args 의 정적 설정: --providers.kubernetesingress 없음(또는 --providers.kubernetesingress.ingressClass 가 다른 이름)·
+    --entryPoints.<TRAEFIK_ENTRYPOINT>.address 없음 → X. http.tls 없음 → note(DMS Ingress 의 router.tls 어노테이션이 켠다), proxyProtocol.trustedIPs
+    → note(없으면 warning — LB 가 PROXY v2 를 붙이면 그 출발지가 있어야 한다), proxyProtocol.insecure=true → warning, forwardedHeaders·readTimeout →
+    note. 고칠 곳은 사이트의 Traefik 설정(Rancher chartValues·HelmChartConfig kube-system/rke2-traefik)이다."""
+    ic = (render or {}).get("INGRESS_CLASS") or DEFAULT_INGRESS_CLASS
+    ep = ((render or {}).get("TRAEFIK_ENTRYPOINT") or DEFAULT_ENTRYPOINT).lower()
+    f = Finding("traefik")
+    owner_note = ("입구는 클러스터의 Traefik 하나다(2026-11-16) — 클러스터 운영자가 Traefik(IngressClass %s, controller %s)을 설치·관리한다. "
+                  "RKE2 는 rke2-traefik(kube-system DaemonSet). DMS 는 Ingress %s/%s 만 만든다(deploy/README §2g)"
+                  % (ic, TRAEFIK_CONTROLLER, state.ns, INGRESS_NAME))
+    classes = {_meta(c).get("name"): c for c in state.read("ingressclasses")}
+    obj = classes.get(ic)
+    if obj is None:
+        have = ", ".join("%s(%s)" % (n, (c.get("spec") or {}).get("controller") or "?") for n, c in sorted(classes.items())) or "없음"
+        f.notes.append(owner_note)
+        return f.set("X", "IngressClass %s 없음(있는 IngressClass: %s) — DMS 는 Traefik 을 설치하지 않는다. 클러스터 운영자에게 요청하거나 "
+                          "values.env INGRESS_CLASS 를 Traefik 의 IngressClass 이름으로" % (ic, have), where="ingressclass " + ic)
+    controller = (obj.get("spec") or {}).get("controller")
+    if controller != TRAEFIK_CONTROLLER:
+        f.notes.append(owner_note)
+        return f.set("X", "IngressClass %s 의 controller 가 %s 다 — Traefik(%s)이 아니다(values.env INGRESS_CLASS 를 Traefik 의 IngressClass "
+                          "이름으로)" % (ic, controller or "없음", TRAEFIK_CONTROLLER), where="ingressclass " + ic)
+    workloads = [("DaemonSet", d) for d in state.read("daemonsets") if _is_traefik(d)] + \
+                [("Deployment", d) for d in state.deploys if _is_traefik(d)]
+    if not workloads:
+        return f.set("U", "IngressClass %s(%s)는 있는데 Traefik 워크로드(이미지 이름에 traefik 이 든 DaemonSet·Deployment)를 찾지 못했다"
+                     % (ic, TRAEFIK_CONTROLLER), where="ingressclass " + ic)
+    judged = []
+    for kind, w in workloads:
+        c = _traefik_container(w)
+        judged.append((kind, w, c, traefik_static([str(t) for t in (c.get("command") or []) + (c.get("args") or [])])))
+
+    def label(j):
+        return "%s(%s)" % (_ref(j[1]), j[0])
+
+    def serves(cfg):
+        wanted = cfg.get("providers.kubernetesingress.ingressclass")
+        return _flag_on(cfg, "providers.kubernetesingress") and (not wanted or wanted == ic)
+    known = [j for j in judged if _static_known(j[3])]
+    unknown = [j for j in judged if not _static_known(j[3])]
+    serving = [j for j in known if serves(j[3])]
+    if not serving and not unknown:
+        why = []
+        for j in known:
+            if not _flag_on(j[3], "providers.kubernetesingress"):
+                why.append("%s 에 --providers.kubernetesingress 가 없다(Ingress 를 읽지 않는다)" % label(j))
+            else:
+                why.append("%s 의 --providers.kubernetesingress.ingressClass=%s(DMS Ingress 의 class 는 %s)"
+                           % (label(j), j[3].get("providers.kubernetesingress.ingressclass"), ic))
+        f.notes.append(owner_note)
+        return f.set("X", "Traefik 이 Ingress(class %s)를 처리하지 않는다: %s — 사이트의 Traefik 설정에서 켠다(Rancher chartValues·HelmChartConfig "
+                          "— DMS 는 바꾸지 않는다)" % (ic, "; ".join(why)), where=", ".join(label(j) for j in known), owner="foreign")
+    pick = serving[0] if serving else unknown[0]
+    kind, w, c, cfg = pick
+    f.set(None, "", where=label(pick), owner="foreign", installed=image_tag(c.get("image")))
+    if len(serving) > 1:
+        f.warnings.append("Ingress(class %s)를 처리하는 Traefik 워크로드가 둘 이상이다(%s) — LB 풀이 어느 것을 가리키는지 확인"
+                          % (ic, ", ".join(label(j) for j in serving)))
+    if serving:
+        p = "entrypoints.%s." % ep
+        address = cfg.get(p + "address")
+        if not address:
+            others = sorted({k.split(".")[1] for k in cfg if k.startswith("entrypoints.") and k.endswith(".address")})
+            f.notes.append(owner_note)
+            return f.set("X", "%s 에 진입점 %s 가 없다(--entryPoints.%s.address 없음; 있는 진입점: %s) — values.env TRAEFIK_ENTRYPOINT 를 TLS "
+                              "진입점 이름으로" % (label(pick), ep, ep, ", ".join(others) or "없음"))
+        f.notes.append("진입점 %s address %s · IngressClass %s(%s)" % (ep, address, ic, TRAEFIK_CONTROLLER))
+        if not _flag_on(cfg, p + "http.tls"):
+            f.notes.append("진입점 %s 에 http.tls 가 없다 — DMS Ingress 의 router.tls 어노테이션이 그 라우터의 TLS 를 켠다" % ep)
+        trusted = cfg.get(p + "proxyprotocol.trustedips")
+        if trusted:
+            f.notes.append("proxyProtocol.trustedIPs=%s — 이 출발지(LB SE)의 PROXY v2 헤더만 원 IP 로 쓴다(헤더 없는 연결도 받는다)" % trusted)
+        else:
+            f.warnings.append("진입점 %s 에 proxyProtocol.trustedIPs 가 없다 — LB 가 PROXY v2 를 붙이면 trustedIPs 에 LB 출발지(SE)가 있어야 한다"
+                              "(없으면 PROXY 바이트가 TLS 앞에 붙어 연결이 깨진다). LB 가 PROXY 를 붙이지 않으면 그대로 둔다 — Rancher chartValues·"
+                              "HelmChartConfig(사이트 몫, deploy/README §2g)" % ep)
+        if str(cfg.get(p + "proxyprotocol.insecure", "")).lower() == "true":
+            f.warnings.append("진입점 %s 의 proxyProtocol.insecure=true — 아무 출발지의 PROXY 헤더를 믿는다(원 IP 위조 가능)" % ep)
+        if str(cfg.get(p + "forwardedheaders.insecure", "")).lower() == "true":
+            f.notes.append("forwardedHeaders.insecure=true — 클라이언트의 X-Forwarded-* 를 지우지 않는다(앱은 XFF 마지막 항목 = Traefik 이 덧붙인 "
+                           "실제 피어를 쓴다)")
+        if cfg.get(p + "forwardedheaders.trustedips"):
+            f.notes.append("forwardedHeaders.trustedIPs=%s" % cfg[p + "forwardedheaders.trustedips"])
+        f.notes.append("readTimeout %s(요청 본문 읽기 상한 — 느린 큰 업로드만 끊긴다)"
+                       % (cfg.get(p + "transport.respondingtimeouts.readtimeout") or "기본 60s"))
     else:
-        f.notes.append("설정: %s, controllerName %s" % (src, want))
-        if "EnvoyProxyPatch" in [str(x) for x in _dig(cfg, "runtimeFlags", "disabled") or []]:
-            problems.append("runtimeFlags.disabled 에 EnvoyProxyPatch — DMS EnvoyProxy 의 hostNetwork·dnsPolicy 패치가 조용히 무시돼 마스터 :443 이 "
-                            "빈다(enabled 에 있어도 disabled 가 이긴다)")
-        ok, how = _eg_watch(cfg, state)
-        if ok is False:
-            problems.append("watch(%s)에 %s 가 없다 — Gateway %s 를 처리하지 않는다" % (how, state.ns, GW_NAME))
-        elif ok is None:
-            f.warnings.append("watch 범위 확인 불가(%s)" % how)
-        proxy_ns = state.ns if _dig(cfg, "provider", "kubernetes", "deploy", "type") == "GatewayNamespace" else _meta(dep).get("namespace")
-        ok, how = _psa_hostnetwork(state.namespaces.get(proxy_ns), proxy_ns)
-        if ok is False:
-            problems.append(how)
-        elif ok is None:
-            f.warnings.append(how)
-    if problems and not owned:
-        return f.set("X", "남이 설치한 EG %s(%s): %s" % (text or "?", _ref(dep), "; ".join(problems)))
-    if problems:
-        f.warnings.extend("드리프트 — %s(--upgrade-addon envoy-gateway 로 DMS 설정을 다시 적용)" % p for p in problems)
-    if ver is None:
-        return f.set("U", "EG 컨트롤러 %s 의 버전을 모른다(이미지 %s)" % (_ref(dep), _eg_container(dep).get("image")))
-    if owned:
-        _k8s_note(f, state, "envoy-gateway", pin)
-        return f.set(compare(ver, pin), "DMS 가 설치한 Envoy Gateway %s(%s) — 고정 %s" % (text, _ref(dep), pins["envoy-gateway"]))
-    if ver[:2] < pin[:2]:
-        f.warnings.append("v%d.%d 는 EOL 이거나 곧 EOL(v1.8 = 2026-11-08) — 고정 %s" % (ver[0], ver[1], pins["envoy-gateway"]))
-    elif ver[:2] > pin[:2]:
-        f.warnings.append("DMS 고정 %s 보다 새 minor 다(검증 범위 밖)" % pins["envoy-gateway"])
-    return f.set("C", "남이 설치한 Envoy Gateway %s(%s) — 재사용: 컨트롤러·CRD 는 건드리지 않고 platform/gateway(parametersRef → DMS "
-                      "EnvoyProxy)만 적용한다" % (text, _ref(dep)))
+        f.warnings.append("%s 의 정적 설정이 args 밖이다(--configFile·env) — providers.kubernetesingress·진입점 %s 를 소유자에게 확인(판정하지 "
+                          "않았다)" % (label(pick), ep))
+    group = serving or [pick]
+    ready = sum(_ready_count(k, wl) for k, wl, _, _ in group)
+    if ready == 0:
+        return f.set("U", "Traefik %s 의 Ready 파드가 0 이다" % ", ".join(label(j) for j in group))
+    return f.set("C", "클러스터의 Traefik %s(%s, Ready %d) — 재사용: DMS 는 Traefik 을 설치·변경하지 않고 Ingress %s/%s(class %s, 진입점 %s)만 "
+                      "만든다" % (f.installed or "?", label(pick), ready, state.ns, INGRESS_NAME, ic, ep))
 
 
 # Volcano ----------------------------------------------------------------------------------------------------------------------
@@ -1146,28 +920,28 @@ def detect_registry(kube, state, pins, render):
     return f.set(compare(ver, parse_version(pins["registry"])), "DMS 레지스트리 %s(%s) — 고정 %s" % (text, _ref(dep), pins["registry"]))
 
 
-def detect_gateway(kube, state, pins):
-    """포탈 입구 층(platform/gateway, S8 셋째) — GatewayClass dms·Gateway dms-portal. GatewayClass 의 controllerName 은 바꿀 수 없다(다르면 X),
-    DMS 라벨 없는 같은 이름은 P. Gateway API CRD 가 아직 없으면 A(S8 첫째가 만든다)."""
-    f = Finding("gateway")
-    if GWAPI_CRDS[0] not in state.crds:
-        return f.set("A", "Gateway API CRD 가 아직 없다 — S8 의 gateway-api 뒤에 GatewayClass %s·Gateway %s 를 만든다" % (GW_CLASS, GW_NAME))
-    gc = kube.one("get", "gatewayclasses.gateway.networking.k8s.io", GW_CLASS)
-    gw = None
-    if GWAPI_CRDS[1] in state.crds and state.ns in state.namespaces:
-        gw = kube.one("get", "gateways.gateway.networking.k8s.io", GW_NAME, "-n", state.ns)
-    if gc is not None and (gc.get("spec") or {}).get("controllerName") != pins["gateway_controller"]:
-        return f.set("X", "GatewayClass %s 의 controllerName %s 가 렌더(%s)와 다르다 — 바꿀 수 없는 필드다(조용히 다시 만들지 않는다)"
-                     % (GW_CLASS, (gc.get("spec") or {}).get("controllerName"), pins["gateway_controller"]), where=GW_CLASS)
-    if gc is None and gw is None:
-        return f.set("A", "GatewayClass %s·Gateway %s/%s 없음 — 만든다" % (GW_CLASS, state.ns, GW_NAME))
-    foreign = [("GatewayClass " + GW_CLASS) for o in [gc] if o is not None and not _owned(o)] + \
-              [("Gateway " + _ref(o)) for o in [gw] if o is not None and not _owned(o)]
-    f.set(None, "", where=", ".join(x for x in [GW_CLASS if gc is not None else None, _ref(gw) if gw is not None else None] if x),
-          owner="foreign" if foreign else "dms-install")
-    if foreign:
-        return f.set("P", "같은 이름이 있다(DMS 라벨 없음 — 이름 충돌): %s" % ", ".join(foreign), adoptable=True)
-    return f.set("D=", "DMS 입구 층(GatewayClass %s%s)" % (GW_CLASS, ", Gateway %s" % _ref(gw) if gw is not None else " — Gateway 는 아직 없음"))
+def detect_ingress(kube, state, render):
+    """포탈 입구 층(platform/ingress, S8 — 2026-11-16) — Ingress dms/dms-portal-traefik(Traefik 이 집는 DMS 객체는 이것 하나). 없으면 A, DMS 라벨이면
+    D=(SSA 멱등 재적용 — 사이트 값 변경 반영), 같은 이름에 DMS 라벨이 없으면 P(이름 충돌 — --adopt ingress 로만 채택). ingressClassName·host 는
+    바꿀 수 있는 필드라 렌더와 달라도 SSA 가 맞춘다(근거로만 적는다)."""
+    f = Finding("ingress")
+    want = (render or {}).get("INGRESS_CLASS") or DEFAULT_INGRESS_CLASS
+    if state.ns not in state.namespaces:
+        return f.set("A", "Ingress %s/%s 없음(ns %s 는 S2 가 만든다) — S8 이 만든다(class %s)" % (state.ns, INGRESS_NAME, state.ns, want))
+    ing = kube.one("get", "ingresses.networking.k8s.io", INGRESS_NAME, "-n", state.ns)
+    if ing is None:
+        return f.set("A", "Ingress %s/%s 없음 — S8 이 만든다(class %s)" % (state.ns, INGRESS_NAME, want))
+    spec = ing.get("spec") or {}
+    cls = spec.get("ingressClassName")
+    hosts = ",".join(str(r.get("host")) for r in spec.get("rules") or [] if r.get("host")) or "-"
+    owned = _owned(ing)
+    f.set(None, "", where=_ref(ing), owner="dms-install" if owned else "foreign", installed="class %s" % (cls or "-"))
+    if not owned:
+        return f.set("P", "같은 이름의 Ingress %s 가 있다(DMS 라벨 없음 — 이름 충돌, class %s, host %s)" % (_ref(ing), cls or "-", hosts),
+                     adoptable=True)
+    if cls != want:
+        f.notes.append("ingressClassName %s → 렌더 %s(SSA 가 렌더 값으로 바꾼다)" % (cls or "없음", want))
+    return f.set("D=", "DMS Ingress %s(class %s, host %s)" % (_ref(ing), cls or "-", hosts))
 
 
 _PG_TAG = re.compile(r"^(\d+)\.(\d+)(?:-(\d{8,14}))?")
@@ -1254,9 +1028,8 @@ def detect_all(kube, state, pins, render):
     out = {}
     for item, fn in (("priorityclass", lambda: detect_priorityclass(kube, pins)),
                      ("registry", lambda: detect_registry(kube, state, pins, render)),
-                     ("gateway-api", lambda: detect_gateway_api(state, pins)),
-                     ("envoy-gateway", lambda: detect_envoy_gateway(kube, state, pins)),
-                     ("gateway", lambda: detect_gateway(kube, state, pins)),
+                     ("traefik", lambda: detect_traefik(state, render)),
+                     ("ingress", lambda: detect_ingress(kube, state, render)),
                      ("cnpg", lambda: detect_cnpg(kube, state, pins)),
                      ("volcano", lambda: detect_volcano(state, pins)),
                      ("db", lambda: detect_db(kube, state, pins, render))):
@@ -1273,9 +1046,7 @@ def detect_all(kube, state, pins, render):
 LAYERS = (  # (층 — 렌더 디렉터리 기준, 항목) 설치 순서. vcjob 은 렌더 층이 아니라 DMS 모양 vcjob(S9b).
     ("platform/priorityclass", "priorityclass"),
     ("platform/registry", "registry"),
-    ("addons/gateway-api", "gateway-api"),
-    ("addons/envoy-gateway", "envoy-gateway"),
-    ("platform/gateway", "gateway"),
+    ("platform/ingress", "ingress"),        # Traefik 은 층이 없다(DMS 가 설치하지 않는다) — 이 층의 dry-run 이 traefik 의 소비 층 판정
     ("addons/cnpg", "cnpg"),
     ("addons/volcano", "volcano"),
     ("platform/db-volumes", "db"),
@@ -1284,15 +1055,13 @@ LAYERS = (  # (층 — 렌더 디렉터리 기준, 항목) 설치 순서. vcjob 
     ("vcjob", "volcano"),
     ("app", "app"),
 )
-CONSUMERS = {"gateway-api": "platform/gateway", "envoy-gateway": "platform/gateway", "cnpg": "platform/db-cluster", "volcano": "vcjob"}
-CRD_GROUP_ADDON = {"postgresql.cnpg.io": "cnpg", "gateway.networking.k8s.io": "gateway-api", "gateway.envoyproxy.io": "envoy-gateway",
-                   "batch.volcano.sh": "volcano", "scheduling.volcano.sh": "volcano", "bus.volcano.sh": "volcano",
+CONSUMERS = {"traefik": "platform/ingress", "cnpg": "platform/db-cluster", "volcano": "vcjob"}
+CRD_GROUP_ADDON = {"postgresql.cnpg.io": "cnpg", "batch.volcano.sh": "volcano", "scheduling.volcano.sh": "volcano", "bus.volcano.sh": "volcano",
                    "flow.volcano.sh": "volcano", "topology.volcano.sh": "volcano"}
 _NS_MISSING = re.compile(r'namespaces? "([^"]+)" not found')
 _NO_KIND = re.compile(r'no matches for kind "([^"]+)" in version "([^"/]+)/')
 _WEBHOOK_HINT = {"cnpg": "apiserver → 워커 파드 9443(CNPG 웹훅 — 설계 #7: 방화벽·NetworkPolicy·CNI), 오퍼레이터 파드 Ready 먼저",
-                 "volcano": "apiserver → volcano-admission 8443(설계 #7)",
-                 "envoy-gateway": "apiserver → EG 웹훅(설계 #7)"}
+                 "volcano": "apiserver → volcano-admission 8443(설계 #7)"}
 
 
 class LayerResult:
@@ -1347,7 +1116,7 @@ MIGRATE_NOTE = "Job %s 의 spec 은 바꿀 수 없다 — S11 이 지우고 다�
 
 def _dep_note(addon, f, kinds=()):
     """의존 애드온의 판정이 stop(FAIL·모름)이라 그 애드온 CRD 의 객체는 확인하지 않는다는 SKIP 사유 — vcjob 층과 소비 층·앱 층이 같은 문구를 쓴다
-    (2026-11-03 T9: 일회용 k3s 에서 EG·CNPG·Volcano 가 stop 이면 platform/gateway·db-cluster·app 이 날것의 `no matches for kind` 로 FAIL 이었다)."""
+    (2026-11-03 T9: 일회용 k3s 에서 애드온(CNPG·Volcano 등)이 stop 이면 소비 층·app 이 날것의 `no matches for kind` 로 FAIL 이었다)."""
     what = " — %s 는" % "·".join(kinds) if kinds else " —"
     return "%s 판정 %s(%s %s)%s 확인하지 않는다" % (addon, f.level, f.code, f.action, what)
 
@@ -1488,9 +1257,11 @@ def consumer_verdicts(findings, by_layer):
             f.level = "FAIL"
             f.notes.append("최종 판정: %s server dry-run 실패 — %s" % (layer, r.detail))
         elif f.code == "U":
-            f.notes.append("최종 판정: %s server dry-run %s → %s" % (layer, r.status, "WARN(버전 모름)" if r.status == "PASS" else "모름 유지(WARN)"))
+            # Traefik 의 U 는 「버전 모름」이 아니라 워크로드·Ready 를 못 본 것이다 — Ingress dry-run 은 Traefik 을 부르지 않는다(웹훅 없음).
+            what = "Traefik 은 S8 ingress-probe 가 본다" if addon == "traefik" else "버전 모름"
+            f.notes.append("최종 판정: %s server dry-run %s → %s" % (layer, r.status, "WARN(%s)" % what if r.status == "PASS" else "모름 유지(WARN)"))
         elif r.status == "PASS" and f.code in ("C", "C!"):
-            f.notes.append("최종 판정: %s server dry-run 통과" % layer)
+            f.notes.append("최종 판정: %s server dry-run 통과%s" % (layer, " — Traefik 경유 실측은 S8 ingress-probe" if addon == "traefik" else ""))
 
 
 def _layer_result(layer, item, args, rc, err, will_create_ns, will_install, blocked=None, finding=None, context="<ctx>"):
@@ -1507,10 +1278,10 @@ def _layer_result(layer, item, args, rc, err, will_create_ns, will_install, bloc
     if dep_notes:
         detail += " (또 %s)" % "; ".join(dep_notes)
     if "failed calling webhook" in (err or ""):
-        # 웹훅 이름(mcluster.cnpg.io · validatejob.volcano.sh · …envoyproxy…)이나 층으로 어느 애드온인지 고른다.
+        # 웹훅 이름(mcluster.cnpg.io · validatejob.volcano.sh)이나 층으로 어느 애드온인지 고른다.
         low = (err or "").lower()
-        group = next((a for mark, a in (("cnpg", "cnpg"), ("volcano", "volcano"), ("envoy", "envoy-gateway")) if mark in low), None) \
-            or {"platform/db-cluster": "cnpg", "platform/db-backup": "cnpg", "vcjob": "volcano", "platform/gateway": "envoy-gateway"}.get(layer)
+        group = next((a for mark, a in (("cnpg", "cnpg"), ("volcano", "volcano")) if mark in low), None) \
+            or {"platform/db-cluster": "cnpg", "platform/db-backup": "cnpg", "vcjob": "volcano"}.get(layer)
         if group in _WEBHOOK_HINT:
             detail += " — 힌트: " + _WEBHOOK_HINT[group]
     if "conflict" in (err or "").lower() and "--server-side" in (args or []) and "--force-conflicts" not in args:
@@ -1599,6 +1370,9 @@ def _names(values):
         for name in str(v).split(","):
             name = name.strip()
             if name:
+                if name in RETIRED_ITEMS:
+                    raise UsageError("항목 %r 은 2026-11-16 에 없앴다 — 입구는 클러스터의 Traefik(DMS 는 설치하지 않는다): 항목 traefik(판정만)·"
+                                     "ingress(Ingress dms/%s)" % (name, INGRESS_NAME))
                 if name not in ITEMS:
                     raise UsageError("모르는 항목 %r — %s 중 하나" % (name, ", ".join(ITEMS)))
                 out.add(name)

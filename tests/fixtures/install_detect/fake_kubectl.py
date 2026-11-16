@@ -27,11 +27,12 @@ ALIASES = {
     "secret": "secrets", "secrets": "secrets",
     "cronjob": "cronjobs", "cronjobs": "cronjobs",
     "clusters.postgresql.cnpg.io": "clusters",
-    "gatewayclasses.gateway.networking.k8s.io": "gatewayclasses", "gatewayclass": "gatewayclasses",
-    "gateways.gateway.networking.k8s.io": "gateways", "gateway": "gateways",
+    "ds": "daemonsets", "daemonset": "daemonsets", "daemonsets": "daemonsets",
+    "ingressclass": "ingressclasses", "ingressclasses": "ingressclasses", "ingressclasses.networking.k8s.io": "ingressclasses",
+    "ingress": "ingresses", "ingresses": "ingresses", "ingresses.networking.k8s.io": "ingresses",
     "queues.scheduling.volcano.sh": "queues", "queue": "queues",
 }
-CLUSTER_SCOPED = {"crds", "namespaces", "priorityclasses", "storageclasses", "persistentvolumes", "gatewayclasses", "queues"}
+CLUSTER_SCOPED = {"crds", "namespaces", "priorityclasses", "storageclasses", "persistentvolumes", "ingressclasses", "queues"}
 
 
 def _name(obj):

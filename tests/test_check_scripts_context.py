@@ -88,26 +88,28 @@ def test_without_context_scripts_refuse_before_touching_a_cluster(tmp_path, scri
     assert _calls(log) == []
 
 
-def test_host_net_probe_sends_every_call_to_the_named_context(tmp_path):
+def test_ingress_probe_sends_every_call_to_the_named_context(tmp_path):
+    # 2026-11-16(설계 D6): 옛 host-net-probe.sh(마스터 프로브 파드) 자리 — ingress-probe.sh 는 Traefik 파드·노드를 읽기만 한다(get).
     env, log = _env(tmp_path)
-    r = subprocess.run(["sh", str(DEPLOY / "host-net-probe.sh"), "--context", "known", "--image", "reg/dms:d7", "--listen",
-                        "--nodes", "cp1", "--timeout", "1"], env=env, capture_output=True, text=True, timeout=60)
-    assert r.returncode == 4 and r.stdout.strip().endswith("RESULT: UNKNOWN"), (r.stdout, r.stderr)   # 심은 파드 상태를 주지 않는다 — 모름
+    r = subprocess.run(["sh", str(DEPLOY / "ingress-probe.sh"), "--context", "known", "--domain", "portal.example", "--timeout", "0"],
+                       env=env, capture_output=True, text=True, timeout=60)
+    assert r.returncode == 4 and r.stdout.strip().endswith("RESULT: UNKNOWN"), (r.stdout, r.stderr)   # 심은 파드·노드를 주지 않는다 — 모름
     calls = _cluster_calls(log)
     assert calls and all(c.startswith("--context known ") for c in calls), calls
-    assert any(" create -f -" in c for c in calls) and any("delete pod -l app.kubernetes.io/name=dms-hostnet-probe" in c for c in calls)
-    for bad in ([], ["--context", "known", "--image", "x"], ["--context", "known", "--sysctl", "--image", 'a"b']):
-        r = subprocess.run(["sh", str(DEPLOY / "host-net-probe.sh"), *bad], env=env, capture_output=True, text=True, timeout=30)
+    assert any(" get pods -A " in f" {c} " for c in calls) and any(" get nodes " in f" {c} " for c in calls), calls
+    assert not [c for c in calls if re.search(r" (create|apply|delete|patch|label|annotate|run) ", f" {c} ")], calls
+    for bad in ([], ["--context", "known"], ["--context", "known", "--domain", 'a"b'], ["--domain", "portal.example"]):
+        r = subprocess.run(["sh", str(DEPLOY / "ingress-probe.sh"), *bad], env=env, capture_output=True, text=True, timeout=30)
         assert r.returncode == 2, bad
 
 
-# 정적(2026-11-03 ⑦ 설계 8-1 「모든 kubectl 에 --context C」): 설치기·마스터 프로브는 kubectl 을 함수로 감싸지 않고 kc·kcn 또는
+# 정적(2026-11-03 ⑦ 설계 8-1 「모든 kubectl 에 --context C」): 설치기·입구 프로브는 kubectl 을 함수로 감싸지 않고 kc·kcn 또는
 # `command kubectl --context` 로만 부른다 — 명령 자리의 kubectl 다음 낱말은 --context(또는 컨텍스트 존재 확인 config get-contexts)뿐이다.
 # (preflight·verify 는 kubectl() 함수가 --context 를 붙이는 방식이라 위 실행 테스트가 본다.)
 _CMD_KUBECTL = re.compile(r"(?:^|[;&|({]\s*|\bcommand\s+|\bexec\s+|\bthen\s+|\bdo\s+|\belse\s+)kubectl\s+(\S+)")
 
 
-@pytest.mark.parametrize("script", ["install.sh", "host-net-probe.sh"])
+@pytest.mark.parametrize("script", ["install.sh", "ingress-probe.sh"])
 def test_every_kubectl_command_in_the_installer_names_the_context(script):
     bad = []
     for n, line in enumerate((DEPLOY / script).read_text(encoding="utf-8").splitlines(), 1):
@@ -171,6 +173,7 @@ def _values(tmp_path, mfu_tag):
     text = re.sub(r"^MFU_TAG=.*$", f"MFU_TAG={mfu_tag}", text, flags=re.M)
     text = re.sub(r"^SHARED_DIR=\S+", "SHARED_DIR=/v-shared-dir", text, flags=re.M)   # 절대 경로(2026-11-03 ③ 형식 검사)
     text = re.sub(r"^REGISTRY_CLUSTER_IP=\S+", "REGISTRY_CLUSTER_IP=10.96.0.50", text, flags=re.M)   # IPv4(④)
+    text = re.sub(r"^PORTAL_DOMAIN=\S*", "PORTAL_DOMAIN=portal.example", text, flags=re.M)   # 호스트 이름(2026-11-16 — Ingress host, 필수)
     vals = tmp_path / "values.env"
     vals.write_text(text)
     return vals

@@ -80,6 +80,8 @@ def test_the_k8s_testbed_keeps_its_own_registry_vip_host_and_context():
     assert K8S_VIP in _code(K8S / "patch-metallb.yaml")
     assert K8S_VIP not in _code(REPO_ROOT / "deploy" / "k8s" / "47-metallb-public-pool.yaml")
     assert K8S_HOST in _code(K8S / "patch-ingress.yaml")
+    # 입구 층(2026-11-16 platform/ingress — 클러스터의 Traefik)의 host 원천은 values.env 다(고정 오버레이도 필수) — 되돌림 Ingress 와 같은 이름.
+    assert re.search(rf"(?m)^PORTAL_DOMAIN={re.escape(K8S_HOST)}$", (K8S / "values.env").read_text())
     assert expected_context(K8S) == "dmsk8s"
 
 

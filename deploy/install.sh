@@ -12,20 +12,24 @@
 #   --stage <S>      S 부터 끝까지(재개 — 예: S4 뒤 멈춘 설치를 인터넷 노드 push 뒤 `--stage S5` 로).
 #   --only <S>[,…]   그 단계만(설치 순서대로). 이미 끝난 단계를 다시 돌리면 no-op 이거나 검증이다(아래 「멱등」).
 #   --upgrade-addon <x>  D<(DMS 가 설치한 낮은 버전)를 올린다 / D= 를 다시 적용한다(설계 6-5 — 점검 창에서). x(감지 항목, 쉼표 가능) =
-#                    priorityclass·registry·gateway-api·envoy-gateway·gateway·cnpg·volcano·db — 그 층의 이미지 가드(exit 3)를 그 층에서만 연다.
+#                    priorityclass·registry·traefik·ingress·cnpg·volcano·db — 그 층의 이미지 가드(exit 3)를 그 층에서만 연다. traefik 은 판정만
+#                    한다(남의 것 — DMS 는 설치·변경하지 않는다). 옛 gateway-api·envoy-gateway·gateway(2026-11-16 입구 교체로 없앴다)는 사용법 오류.
 #   --adopt <x>      P(부분 설치·이름 충돌) 가운데 채택할 수 있는 모양만 dms-install 소유로(SSA --force-conflicts).
 #   env ADDON_INSTALL=never  서드파티 애드온이 없으면(A) 설치하지 않고 FAIL + 「클러스터 운영자에게 요청」(기본 auto).
 #   env ALLOW_IMAGE_CHANGE=1 / ALLOW_HOSTPATH_CHANGE=1  guard-images.sh 의 exit 3·5 를 연다(의도한 앱 이미지·hostPath 변경 — 전역이라 모든 층의
 #                    가드를 연다. 애드온·플랫폼 층의 이미지 교체는 --upgrade-addon <x> 로 그 층만, ⑦ 리뷰 2).
-#   env PORTAL_DOMAIN·PORTAL_VIP·CACERT  S12 의 `curl --resolve` 대상(없으면 render.env 의 값 — prod 는 values.env 의 PORTAL_DOMAIN·PORTAL_VIP).
-#   env VERIFY_NO_PROBES=1  S12 에서 파드를 띄우는 검사(PG 경로 대조·마스터 리스너 포트)를 건너뛴다(라이브 사이트를 순수 읽기로 다시 볼 때).
+#   env PORTAL_DOMAIN·PORTAL_VIP·CACERT  S8 ingress-probe(Traefik 이 도는 노드 :443 — SNI·Host = PORTAL_DOMAIN)와 S12 의 `curl --resolve` 대상
+#                    (없으면 render.env 의 값 — values.env 의 PORTAL_DOMAIN·PORTAL_VIP). CACERT 를 주면 curl 이 인증서 체인까지 검증한다.
+#   env VERIFY_NO_PROBES=1  S12 에서 파드를 띄우는 검사(PG 경로 대조)를 건너뛴다(라이브 사이트를 순수 읽기로 다시 볼 때 — ingress-probe 는
+#                    파드를 띄우지 않는 HTTPS GET 이라 그대로 돈다).
 #   env SELINUX_PROBE_IMAGE=<ref>  S2b 프로브 이미지(모든 노드에 이미 있는 셸 포함 이미지 — 기본은 Cilium agent 이미지를 찾는다).
 #   env 시간(초): DB_WAIT_SECONDS(900 — S10 폴링·CNPG 업그레이드 뒤 healthy) · ROLLOUT_TIMEOUT(180) · MIGRATE_TIMEOUT(180) · DUMP_TIMEOUT(600) ·
-#       CNPG_ROLLOUT_TIMEOUT(300) · CERTGEN_TIMEOUT(120) · WEBHOOK_RETRIES(6 — S9 Cluster CR dry-run 의 웹훅 재시도) · POLL_INTERVAL. PYTHON(python3).
+#       CNPG_ROLLOUT_TIMEOUT(300) · WEBHOOK_RETRIES(6 — S9 Cluster CR dry-run 의 웹훅 재시도) · POLL_INTERVAL. PYTHON(python3).
 #
 # 단계(설계 8-1 — 순서의 이유는 설계 「순서의 이유」):
-#   S1  preflight(preflight-cluster.sh — K8s minor 1.34~1.36·SHARED_DIR 형식·REGISTRY_CLUSTER_IP(ServiceCIDR·미사용·하단 정적 대역)·PSA·admission·
-#       마스터 hostPort <리스너 포트> 충돌·노드 셸 체크리스트) + 감지(install-detect.py detect — 표). FAIL·P·X 면 중단.
+#   S1  preflight(preflight-cluster.sh — K8s minor 1.34~1.36·IngressClass(Traefik)·SHARED_DIR 형식·REGISTRY_CLUSTER_IP(ServiceCIDR·미사용·
+#       하단 정적 대역)·PSA·admission·노드 셸 체크리스트) + 감지(install-detect.py detect — 표). FAIL·P·X 면 중단(Traefik 이 없으면 여기서 —
+#       DMS 는 Traefik 을 설치하지 않는다).
 #   S2  deploy/k8s/00-namespace.yaml(PSA privileged) → dms-pg-app(pg-secrets ensure-app) → dms-secrets(없으면 init-secrets) → 4키·자리표시자·
 #       pg-secrets check(설계 6-3) → PORTAL_TLS_SECRET(render.env) 확인(없으면 WARN — 쓰는 곳인 S8 이 멈춘다, ⑦ 리뷰 1). 값은 출력하지 않는다.
 #   S2b SELinux 노드 프로브(selinux-probe.py — DMS 노드, privileged 임시 DS). FAIL·모름이면 중단.
@@ -35,9 +39,10 @@
 #   S5  lock 대조(images-lock.py compare-registry — port-forward) + DMS 앱 이미지(dms·dms-agent·dms-mpifileutils) 태그 확인. 없거나 다르면 push 명령
 #       (push-images.sh --print)을 보이고 — S4 에서 이어 왔으면 **PAUSE(exit 10, 인터넷 노드 push 뒤 `--stage S5`)**, 아니면 FAIL.
 #   S6  pull 프로브(pull-probe.py — 노드마다 실제 pull).            S7  공용 스토리지 프로브(shared-storage-probe.py — 3 WARN 은 계속, 1·4 중단).
-#   S8  Gateway API → EG(감지대로 — DMS 소유인데 적용하지 않으면 Ready·xDS 시크릿 확인만) → TLS 시크릿 → 마스터 hostPort <리스너 포트> 충돌
-#       (비 hostNetwork 파드가 쓰면 멈춤) → 마스터 sysctl ≤ 리스너 포트(1024 미만일 때만, host-net-probe.sh) → platform/gateway → Programmed
-#       → 마스터마다 :<리스너 포트>. 리스너 포트 = render.env 의 GATEWAY_LISTEN_PORT(기본 443).
+#   S8  입구(Traefik — 2026-11-16, Envoy Gateway 폐기): 감지 traefik 이 stop 이면 멈춤(사유 그대로 — DMS 는 Traefik 을 설치·변경하지 않는다)
+#       → TLS 시크릿 → platform/ingress(Ingress dms/dms-portal-traefik) SSA → ingress-probe.sh: Traefik 이 도는 노드마다 :443 으로
+#       `curl --resolve <PORTAL_DOMAIN>:443:<노드>` readyz 와 인증서(SNI = PORTAL_DOMAIN — TRAEFIK DEFAULT CERT 면 FAIL). dms-api 가 아직
+#       없으면(첫 설치 — 앱은 S11) 인증서만 본다(--tls-only). 설치 호스트가 노드 :443 에 닿지 않으면 모름(WARN — S12 가 VIP 로 다시 본다).
 #   S9  CNPG(감지대로: A 면 ns 먼저(DMS 라벨) → SSA → rollout) → Cluster CR server dry-run(9443 경로 — 「failed calling webhook」이면 9443 사유).
 #   S9b Volcano(감지대로 — C 면 건드리지 않는다) → DMS 모양 vcjob server dry-run(install-detect.py vcjob).
 #   S10 pv-check → db-volumes → precheck → db-cluster → 900초 폴링(readyInstances ≥ 1·dms-pg-rw Endpoints·currentPrimary Ready — 전부 Ready 를
@@ -46,9 +51,10 @@
 #       image 를 바꾼다) → migrate 완료·롤아웃 대기 → 설정(dms-config·dms-secrets 의 resourceVersion)이 바뀌었는데 파드가 그대로면 rollout restart
 #       → 마스터 `dms` 이미지 사전 pull(pull-probe.py --nodes <마스터>, 실패는 WARN).
 #   S12 verify.sh(--rendered) — readyz(apiserver 서비스 프록시 = 판정, --resolve VIP = Avi 미개통이면 WARN)·CNPG·여분 PV·경로 대조·CronJob·
-#       Gateway·마스터 리스너 포트·레지스트리·애드온 요약·「80 불가 = 정상」. FAIL 이어도 S13 체크리스트를 보이고 멈춘다.
+#       Ingress dms-portal-traefik·ingress-probe(노드 :443 경유)·레지스트리·애드온 요약·http 80(404 = Traefik web 에 DMS 라우터 없음 — 정상,
+#       200 = 평문 노출 WARN). FAIL 이어도 S13 체크리스트를 보이고 멈춘다.
 #   S13 사후 체크리스트(출력만 — 첫 관리자 부트스트랩 → 메일(Knox 릴레이) → 포탈 등록(컨트롤 상태·k8s 연동) → 사본 → 스모크 →
-#       DNS·Avi·S12. 상세는 deploy/README §6·§7).
+#       DNS·LB VS-443(풀 = Traefik 이 도는 노드 :443)·S12. 상세는 deploy/README §6·§7).
 #
 # 재개 안내(PAUSE·모름·FAIL 줄의 명령)는 이번 실행의 --upgrade-addon·--adopt 와 판정을 바꾸는 env(ADDON_INSTALL·ALLOW_*·SELINUX_PROBE_IMAGE·
 # VALUES_ENV·S12 의 CACERT·PORTAL_DOMAIN·PORTAL_VIP·VERIFY_NO_PROBES)를 그대로 싣는다(⑦ 리뷰 1·2). --plan 이 보이는 다시 확인 명령은 늘 --plan 이다
@@ -96,7 +102,23 @@ EOF
 show_help() { awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; exit 0; }
 
 CTX="" SITE=prod PLAN=0 START="" ONLY="" ONLY_SET=0 DETECT_ARGS=""
-_addon_ok() { case "$1" in ""|*[!abcdefghijklmnopqrstuvwxyz,-]*) return 1 ;; esac; return 0; }
+# 감지 항목(install-detect.py ITEMS 와 같다). 이름은 클러스터에 붙기 전에 여기서 거른다 — 감지가 돌지 않는 --only(예: S11)에서 틀린 이름이
+# 조용히 무시되지 않게(2026-11-16: 옛 gateway-api·envoy-gateway·gateway 는 입구 교체로 없앴다 — 바뀐 이름을 알려 준다).
+ADDON_ITEMS="priorityclass registry traefik ingress cnpg volcano db"
+_addon_ok() {
+  case "$1" in ""|*[!abcdefghijklmnopqrstuvwxyz,-]*) return 1 ;; esac
+  for _n in $(printf '%s' "$1" | tr ',' ' '); do
+    case " $ADDON_ITEMS " in
+      *" $_n "*) ;;
+      *) case "$_n" in
+           gateway-api|envoy-gateway|gateway) echo "install.sh: 항목 '$_n' 은 2026-11-16 에 없앴다 — 입구는 클러스터의 Traefik(DMS 는 설치하지 않는다): 항목 traefik(판정만)·ingress(Ingress dms/dms-portal-traefik)" >&2 ;;
+           *) echo "install.sh: 모르는 항목 '$_n' — $ADDON_ITEMS 중 하나" >&2 ;;
+         esac
+         return 1 ;;
+    esac
+  done
+  return 0
+}
 # --stage·--only 의 빈 값은 사용법 오류다 — 래퍼가 빈 변수를 넘기면 부분 실행 의도가 전체 설치(변경)나 「아무것도 안 하고 PASS」가 됐다
 # (2026-11-03 ⑦ 리뷰 1: `--only ""` = S1~S13 전부, `--only ,` = RESULT PASS).
 _nonblank() { case "$1" in *[!\ ,]*) return 0 ;; esac; return 1; }
@@ -294,7 +316,10 @@ detect_gate() {   # $1 = 감지 rc — 설계 8-1 S1 「FAIL·P·X 면 중단」
   case "$1" in
     0) ok "감지 PASS" ;;
     3) det_warn_gate ;;
-    1) _f=$(det_items FAIL); die "감지 FAIL${_f:+ — $_f} — 위 표의 FAIL·P·X 를 먼저 해소한다(P 는 --adopt <x> 로만 채택, 설계 8-2)" ;;
+    # Traefik 이 FAIL 이면 그 사유를 줄에 싣는다 — DMS 가 고칠 수 없는(설치하지 않는) 항목이라 표를 뒤지지 않고 누구에게 갈지 알게(2026-11-16).
+    1) _f=$(det_items FAIL); _tr=""
+       [ "$(det traefik level)" != FAIL ] || _tr=$(det_reason traefik)
+       die "감지 FAIL${_f:+ — $_f} — 위 표의 FAIL·P·X 를 먼저 해소한다(P 는 --adopt <x> 로만 채택, 설계 8-2)${_tr:+. traefik: $_tr}" ;;
     4) _f=$(det_items UNKNOWN); unknown "감지 모름${_f:+ — $_f}(읽기 실패 — 권한·연결). 확인한 뒤: $(again)" ;;
     *) envfail "install-detect.py 사용법·환경 오류(rc=$1)" ;;
   esac
@@ -302,8 +327,11 @@ detect_gate() {   # $1 = 감지 rc — 설계 8-1 S1 「FAIL·P·X 면 중단」
 }
 item_stage() {   # 감지 항목 → 그 항목을 적용하는 단계(install-detect.py STAGES 와 같다)
   case "$1" in
-    priorityclass|registry) echo S4 ;; gateway-api|envoy-gateway|gateway) echo S8 ;; cnpg) echo S9 ;; volcano) echo S9b ;; db) echo S10 ;; *) echo '?' ;;
+    priorityclass|registry) echo S4 ;; traefik|ingress) echo S8 ;; cnpg) echo S9 ;; volcano) echo S9b ;; db) echo S10 ;; *) echo '?' ;;
   esac
+}
+det_reason() {   # $1 = 항목 → 감지 표의 사유(`  [<항목>] <코드> <판정> — <사유>` 줄의 사유)
+  sed -n "s/^  \[$1\] [^ ]* [A-Z]* — //p" "$DET" | head -n 1
 }
 det_items() {   # $1 = 판정(WARN·FAIL·UNKNOWN) → 「항목(단계 코드 동작), …」 — 감지 표의 그 판정 항목(사람용 — 어느 항목의 판정인지 줄에 싣는다)
   awk -v l="$1" '$1 == "DETECT:" && $6 == l { print $2, $3, $4 }' "$DET" | while read -r _i _c _a; do
@@ -430,8 +458,7 @@ guard() {   # $1 = 렌더 층(Deployment 가 있는 층) — 이미지(3)·컨�
 }
 guard_addon() {   # $1 = 렌더 층 → --upgrade-addon 이름(install-detect 항목)
   case "$1" in
-    platform/registry) echo registry ;; addons/envoy-gateway) echo envoy-gateway ;; addons/cnpg) echo cnpg ;;
-    addons/volcano) echo volcano ;; *) echo "${1##*/}" ;;
+    platform/registry) echo registry ;; addons/cnpg) echo cnpg ;; addons/volcano) echo volcano ;; *) echo "${1##*/}" ;;
   esac
 }
 job_state() {   # $1 = Job 이름 → Complete | Failed | Running | None(없음). 1.31+ 의 SuccessCriteriaMet·FailureTarget 앞섬은 단어로 맞춘다.
@@ -500,8 +527,8 @@ stage_S1() {
   info "preflight: sh deploy/preflight-cluster.sh --context $CTX --render-env $RENV (읽기 전용)"
   helper "$WORK/preflight.out" env PREFLIGHT_SKIP_DETECT=1 sh "$HERE/preflight-cluster.sh" --context "$CTX" --render-env "$RENV"
   _rc=$?
-  # preflight 는 WARN 이 있어도 rc 0 이다 — 그 줄(정책 엔진·envoy-gateway-system PSA·cluster.local 아님·하단 정적 대역 밖·ServiceCIDR 모름 등 뒤
-  # 단계 실패를 예고하는 것)이 STAGE·RESULT 에서 빠지지 않게 센다(2026-11-03 ⑦ 리뷰 2 — 테스트베드 dmsk8s --plan 이 「WARN 1」인데 RESULT PASS 였다).
+  # preflight 는 WARN 이 있어도 rc 0 이다 — 그 줄(정책 엔진·Traefik 파드 못 찾음·하단 정적 대역 밖·ServiceCIDR 모름 등 뒤 단계 실패를
+  # 예고하는 것)이 STAGE·RESULT 에서 빠지지 않게 센다(2026-11-03 ⑦ 리뷰 2 — 테스트베드 dmsk8s --plan 이 「WARN 1」인데 RESULT PASS 였다).
   _n=$(warn_lines "$WORK/preflight.out")
   case $_rc in
     0) if [ "${_n:-0}" -gt 0 ]; then warn "preflight WARN ${_n}건(위 [WARN] 줄 — 설치는 계속한다)"; else ok "preflight 통과"; fi ;;
@@ -526,7 +553,7 @@ stage_S2() {
     helper "$WORK/pgs.out" "$PY" "$HERE/pg-secrets.py" --context "$CTX" --namespace "$NS" init-secrets || die "dms-secrets(pg-secrets.py init-secrets) 실패"
   fi
   secrets_gate
-  # 포탈 인증서는 S8(platform/gateway)만 쓴다 — 여기서는 알리기만 하고 S8 이 SSA 직전에 멈춘다. 사내 CA 발급을 기다리는 동안에도 S2b~S7(레지스트리·
+  # 포탈 인증서는 S8(platform/ingress — Traefik 이 Ingress 의 tls 로 읽는다)만 쓴다 — 여기서는 알리기만 하고 S8 이 SSA 직전에 멈춘다. 사내 CA 발급을 기다리는 동안에도 S2b~S7(레지스트리·
   # push·프로브)을 먼저 끝내 둘 수 있게(설계 8-1 S2 판정 칸 「—」, 2026-11-03 ⑦ 리뷰 1).
   tls_gate warn
 }
@@ -554,14 +581,14 @@ secrets_gate() {
   helper "$WORK/pgs.out" "$PY" "$HERE/pg-secrets.py" --context "$CTX" --namespace "$NS" check \
     || die "DMS_DATABASE_URL 이 CNPG(dms-pg)·dms-pg-app 과 어긋난다 — 외부 DB 에서 옮기는 사이트면 deploy/README §2f-2 「이관 순서」(pg-secrets.py set-url), 새 사이트면 dms-secrets 를 지우고 S2 를 다시(init-secrets)"
 }
-tls_gate() {   # 포탈 인증서(Gateway 리스너) — render.env 의 PORTAL_TLS_SECRET(⑥, 옛 dms-portal-tls 고정 게이트를 대체).
-  # $1 = plan|warn(S2 — 알리기만) · 없음(S8 — platform/gateway SSA 직전에 멈춘다)
+tls_gate() {   # 포탈 인증서(Ingress dms-portal-traefik 의 tls — Traefik 이 SNI 로 고른다) — render.env 의 PORTAL_TLS_SECRET(⑥).
+  # $1 = plan|warn(S2 — 알리기만) · 없음(S8 — platform/ingress SSA 직전에 멈춘다). 없거나 type 이 다르면 Traefik 은 TRAEFIK DEFAULT CERT 로 답한다.
   _tls=$(rv PORTAL_TLS_SECRET); _tls=${_tls:-dms-portal-tls}
   _type=$(kcn get secret "$_tls" -o 'jsonpath={.type}' 2>/dev/null || true)
   if [ "$_type" = kubernetes.io/tls ]; then ok "TLS 시크릿 $_tls(kubernetes.io/tls)"; return; fi
   _how="kubectl --context $CTX -n $NS create secret tls $_tls --cert=<tls.crt> --key=<tls.key>  (SAN: PORTAL_DOMAIN + PORTAL_VIP)"
   if [ -n "$_type" ]; then
-    [ -n "${1:-}" ] && { warn "TLS 시크릿 $_tls 의 type 이 $_type — kubernetes.io/tls 여야 Gateway 리스너가 쓴다(S8 이 멈춘다 — 그 전에 다시 만든다)"; return; }
+    [ -n "${1:-}" ] && { warn "TLS 시크릿 $_tls 의 type 이 $_type — kubernetes.io/tls 여야 Traefik 이 쓴다(S8 이 멈춘다 — 그 전에 다시 만든다)"; return; }
     die "TLS 시크릿 $_tls 의 type 이 $_type 다 — kubernetes.io/tls 로 다시 만든다: $_how ; $(again S8)"
   fi
   [ -n "${1:-}" ] && { warn "TLS 시크릿 $_tls 가 아직 없다 — S8(입구) 전에 만든다(없으면 S8 이 멈춘다)$([ "$1" = plan ] && echo '. ns 를 만든 뒤'): $_how"; return; }
@@ -740,82 +767,47 @@ stage_S7() {
 }
 
 stage_S8() {
+  # 입구(2026-11-16 설계 D6 — Envoy Gateway 폐기, 클러스터에 이미 있는 Traefik 하나). DMS 는 Traefik 을 설치·변경하지 않는다: 감지가 Traefik 을
+  # 판정하고(IngressClass·워크로드 args — install-detect.py 항목 traefik), DMS 는 Ingress dms/dms-portal-traefik 하나만 SSA 한 뒤 노드 경유로 본다.
   need_detect
-  _a=$(det gateway-api action)
-  if applies gateway-api; then
-    ssa addons/gateway-api "$_a"
-    kc wait --for=condition=Established crd/gatewayclasses.gateway.networking.k8s.io crd/gateways.gateway.networking.k8s.io \
-      crd/httproutes.gateway.networking.k8s.io --timeout=60s >/dev/null 2>&1 || die "Gateway API CRD 가 Established 가 아니다"
-    ok "Gateway API CRD Established"
-  else info "Gateway API: $(det gateway-api code) $_a — 건드리지 않는다(설계 8-2)"; fi
-  _e=$(det envoy-gateway action)
-  if applies envoy-gateway; then
-    # Job spec 은 바꿀 수 없다(§2g-6) — 업그레이드면 지우고, 앞선 실행이 남긴 실패한 certgen 도 지워 다시 돌게 한다(재실행 복구, ⑦ 리뷰 1).
-    if [ "$_e" = upgrade ] || [ "$(eg_certgen_state)" = Failed ]; then
-      kc -n envoy-gateway-system delete job eg-gateway-helm-certgen --ignore-not-found >/dev/null 2>&1
-    fi
-    # --upgrade-addon envoy-gateway 의 D=(같은 버전·lock digest 만 바뀜)는 reapply 다 — 그것도 의도한 교체라 이 층에서 연다(⑦ 리뷰 2).
-    if allow_image envoy-gateway "$_e"; then guard addons/envoy-gateway allow-image
-    else guard addons/envoy-gateway; fi
-    # 첫 설치면 ns 먼저 — server dry-run·SSA 가 묶음 안의 Namespace 를 저장하기 전에 그 안 객체를 보지 않게(kubernetes#83562, ⑤ 함정).
-    own_ns envoy-gateway-system
-    ssa addons/envoy-gateway "$_e"
-    wait_job_ns_eg
-    kc -n envoy-gateway-system rollout status deploy/envoy-gateway --timeout="${ROLLOUT_TIMEOUT:-180}s" >/dev/null 2>&1 \
-      || die "EG 컨트롤러 rollout 시간 초과 — kubectl --context $CTX -n envoy-gateway-system describe rs(PriorityClass·이미지·자리, deploy/README §2g-3 표)"
-    ok "Envoy Gateway 컨트롤러 Ready"
-  else
-    info "Envoy Gateway: $(det envoy-gateway code) $_e — 건드리지 않는다(설계 8-2 — C 면 platform/gateway 만)"
-    # DMS 가 설치한 EG(D=·D<·D>)는 적용하지 않아도 읽기 전용으로 확인한다 — 앞선 실행이 SSA 뒤 certgen·rollout 에서 멈췄으면 재실행 감지는 D=(none)라
-    # 확인 없이 지나가 「Programmed 아님」으로만 드러났다(2026-11-03 ⑦ 리뷰 1). C 는 남의 것이라 보지 않는다(Programmed·마스터 리스너 포트 LISTEN 이 최종 판정).
-    case "$(det envoy-gateway code)" in
-      "D="|"D<"|"D>")
-        if ! kc -n envoy-gateway-system rollout status deploy/envoy-gateway --timeout="${ROLLOUT_TIMEOUT:-180}s" >/dev/null 2>&1 \
-          || ! kc -n envoy-gateway-system get secret envoy-gateway envoy >/dev/null 2>&1; then
-          die "Envoy Gateway(DMS 설치)가 덜 설치됐다(컨트롤러 Ready·xDS 시크릿 envoy-gateway·envoy 중 하나가 없다 — 앞선 실행이 certgen·rollout 에서 멈춤). 다시 적용(certgen 재실행): $(base_cmd) --only S8 --upgrade-addon envoy-gateway"
-        fi
-        ok "Envoy Gateway(DMS 설치) 컨트롤러 Ready·xDS 시크릿 있음(확인만)" ;;
-    esac
-  fi
-  _g=$(det gateway action)
-  if applies gateway; then
-    tls_gate
-    hostport_gate
-    # 1024 이상 포트는 비 root 도 bind 한다 — sysctl(S0-5)은 리스너 포트가 1024 미만일 때만 본다(GATEWAY_LISTEN_PORT, 2026-11-14).
-    if [ "$(gw_port)" -lt 1024 ]; then master_probe --sysctl "마스터 sysctl ip_unprivileged_port_start ≤ $(gw_port)(S0-5)"
-    else info "리스너 포트 $(gw_port) ≥ 1024 — 마스터 sysctl(S0-5) 확인을 건너뛴다"; fi
-    ssa platform/gateway "$_g"
-  else info "platform/gateway: $(det gateway code) $_g — 적용하지 않는다(확인만)"; fi
-  kcn wait --for=condition=Programmed gateway/dms-portal --timeout="${ROLLOUT_TIMEOUT:-180}s" >/dev/null 2>&1 \
-    || die "Gateway dms-portal 이 Programmed 가 아니다 — kubectl --context $CTX -n $NS describe gateway dms-portal(deploy/README §2g-3 표)"
-  ok "Gateway dms-portal Programmed"
-  master_probe --listen "마스터마다 :$(gw_port) LISTEN(Programmed 는 bind 실패를 못 잡는다 — §2g-2)"
-}
-gw_port() {   # Envoy 리스너(마스터 호스트) 포트 — render.env 의 GATEWAY_LISTEN_PORT(옛 렌더에는 없다 → 443)
-  _p=$(rv GATEWAY_LISTEN_PORT)
-  case "$_p" in ""|*[!0123456789]*) _p=443 ;; esac
-  printf '%s' "$_p"
-}
-hostport_gate() {
-  # 마스터에 hostPort <리스너 포트> 를 쓰는 남의 파드가 있으면 멈춘다(2026-11-14 OA 실측 — RKE2 Traefik 의 hostPort 443). hostPort 는 호스트
-  # 소켓이 아니라 CNI 의 DNAT 규칙이라 `ss`·--listen 프로브에는 Envoy 만 보이는데, 그 포트로 온 패킷은 Envoy 보다 먼저 그 파드로 넘어간다 —
-  # Gateway 는 Programmed, LB 풀도 up 인데 포탈만 남의 것이 답한다. hostNetwork 파드(자기 Envoy 포함)는 hostPort 가 자동으로 채워질 뿐이라 뺀다.
-  _port=$(gw_port)
-  _cp=$(kc get nodes -l node-role.kubernetes.io/control-plane -o 'jsonpath={range .items[*]}{.metadata.name}{","}{end}' 2>/dev/null | tr ',' ' ') || _cp=""
-  if ! kc get pods -A -o 'jsonpath={range .items[*]}{.metadata.namespace}/{.metadata.name}{"\t"}{.spec.nodeName}{"\t"}{.spec.hostNetwork}{"\t"}{range .spec.containers[*]}{range .ports[*]}{.hostPort}{" "}{end}{end}{"\n"}{end}' > "$WORK/hostports.out" 2>/dev/null; then
-    warn "hostPort $_port 충돌을 확인하지 못했다(파드 목록 조회 실패) — kubectl --context $CTX get pods -A -o yaml | grep -n 'hostPort: $_port'"
+  if [ "$(det traefik action)" = stop ]; then
+    _r=$(det_reason traefik)
+    die "Traefik 판정 $(det traefik code)${_r:+ — $_r} — DMS 는 Traefik 을 설치·변경하지 않는다(클러스터 운영자에게 — RKE2 는 rke2-traefik, deploy/README §2g). 고친 뒤: $(again S8)"
     return 0
   fi
-  _hits=$(awk -F '\t' -v port="$_port" -v cps=" $_cp " '$3 != "true" && index(cps, " " $2 " ") { n = split($4, a, " "); for (i = 1; i <= n; i++) if (a[i] == port) { print $1 "@" $2; break } }' "$WORK/hostports.out" | sort -u | tr '\n' ' ')
-  if [ -n "$_hits" ]; then
-    die "마스터에 hostPort $_port 를 쓰는 다른 파드가 있다: ${_hits}— CNI 가 그 포트로 오는 패킷을 Envoy 보다 먼저 그 파드로 넘긴다(Envoy 는 LISTEN 으로 보여도 트래픽을 못 받는다). values.env 의 GATEWAY_LISTEN_PORT 를 비어 있는 포트(예: 10443)로 바꾸고 LB 풀 멤버 포트·방화벽을 그 포트로 맞춘 뒤 다시 실행한다(deploy/README §2g-1·§2g-4)"
-  fi
-  ok "마스터에 hostPort $_port 를 쓰는 다른 파드 없음"
+  info "Traefik: $(det traefik code) $(det traefik action) — 건드리지 않는다(DMS 는 Ingress 만 만든다)"
+  _ia=$(det ingress action)
+  if applies ingress; then
+    tls_gate
+    ssa platform/ingress "$_ia"
+  else info "platform/ingress: $(det ingress code) $_ia — 적용하지 않는다(확인만)"; fi
+  ingress_probe
 }
-eg_certgen_state() {
-  _st=$(kc -n envoy-gateway-system get job eg-gateway-helm-certgen -o 'jsonpath={range .status.conditions[?(@.status=="True")]}{.type} {end}' 2>/dev/null) \
-    || { echo None; return; }
-  case " $_st" in *" Complete "*) echo Complete ;; *" Failed "*) echo Failed ;; *) echo Running ;; esac
+ingress_probe() {   # S8 — Traefik 이 도는 노드마다 :443(SNI·Host = PORTAL_DOMAIN) readyz·인증서(deploy/ingress-probe.sh, 2026-11-16 설계 D6)
+  _dom=${PORTAL_DOMAIN:-$(rv PORTAL_DOMAIN)}
+  if [ -z "$_dom" ]; then
+    warn "PORTAL_DOMAIN 을 모른다(render.env·env) — Traefik 경유 확인(ingress-probe)을 건너뛴다. 값을 넣고 다시: PORTAL_DOMAIN=<FQDN> $(again S8)"
+    return 0
+  fi
+  set -- --context "$CTX" --domain "$_dom"
+  [ -z "${CACERT:-}" ] || set -- "$@" --cacert "$CACERT"
+  # 첫 설치면 dms-api 가 아직 없다(앱은 S11) — Traefik 은 백엔드 없는 라우터를 만들지 않아 readyz 가 404 다. 그때는 인증서만 본다: Traefik 은
+  # class 가 맞는 Ingress 의 tls 시크릿만 읽으므로 SNI 에 DMS 인증서가 나오면 Ingress 를 집은 것이다(readyz 는 S12 가 본다).
+  _eps=$(kcn get endpoints dms-api -o 'jsonpath={.subsets[*].addresses[*].ip}' 2>/dev/null)
+  if [ -z "$_eps" ]; then
+    info "dms-api 가 아직 Ready 가 아니다(첫 설치면 앱은 S11) — 인증서만 본다(--tls-only, readyz 는 S12)"
+    set -- "$@" --tls-only
+  fi
+  info "Traefik 경유: sh deploy/ingress-probe.sh $*"
+  helper "$WORK/iprobe.out" sh "$HERE/ingress-probe.sh" "$@"
+  _rc=$?
+  case "$_rc" in
+    0) ok "Traefik 경유 PASS — 노드마다 :443 SNI $_dom 인증서$([ -z "$_eps" ] || printf '·readyz 200')" ;;
+    1) die "Traefik 경유 FAIL(위 NODE 줄) — 404 = Traefik 이 Ingress 를 안 집었다(ingressClassName·router.entrypoints·ns), TRAEFIK DEFAULT CERT = tls 시크릿·SNI(PORTAL_TLS_SECRET·PORTAL_DOMAIN), 5xx = 백엔드 dms-api(deploy/README §2g). 고친 뒤: $(again S8)" ;;
+    # 설치 호스트 → 노드 :443 은 방화벽으로 막힐 수 있다(LB SE 만 허용) — 모름 ≠ 실패라 멈추지 않는다. S12 의 VIP 경유 readyz 가 다시 본다.
+    4) warn "Traefik 경유 모름(위 NODE 줄 — 설치 호스트에서 노드 :443 에 닿지 않는다: 방화벽일 수 있다). 설치는 계속한다 — S12 의 VIP 경유 readyz 가 다시 본다" ;;
+    *) envfail "ingress-probe.sh 사용법·환경 오류(rc=$_rc, 위 사유)" ;;
+  esac
 }
 own_ns() {   # $1 = 애드온 네임스페이스 — 없으면 DMS 라벨(managed-by=dms-install)을 붙여 SSA 로 만든다.
   # 라벨 없이 만들고 SSA 전에 끊기면(Ctrl-C·apiserver 일시 오류) 다음 실행의 감지가 그 빈 ns 를 「남이 쓴다」(P)로 보고 S1 에서 멈췄다
@@ -825,28 +817,6 @@ own_ns() {   # $1 = 애드온 네임스페이스 — 없으면 DMS 라벨(manage
     | kc apply --server-side --field-manager="$FM" -f - >/dev/null 2>"$WORK/ns.err" \
     || { sed 's/^/    /' "$WORK/ns.err" | tail -n 3 >&2; die "ns $1 을 만들지 못했다"; }
   ok "ns $1 만들었다(DMS 라벨 — 층 SSA 가 나머지 라벨을 붙인다)"
-}
-wait_job_ns_eg() {   # certgen Job — 끝나고 30초 뒤 TTL 로 지워진다(그 뒤면 None — 시크릿으로 본다)
-  _end=$(( $(date +%s) + ${CERTGEN_TIMEOUT:-120} ))
-  while :; do
-    _st=$(kc -n envoy-gateway-system get job eg-gateway-helm-certgen -o 'jsonpath={range .status.conditions[?(@.status=="True")]}{.type} {end}' 2>/dev/null) || _st=None
-    case " $_st" in
-      *" Complete "*|" None") break ;;
-      *" Failed "*) die "EG certgen Job 실패 — kubectl --context $CTX -n envoy-gateway-system logs job/eg-gateway-helm-certgen" ;;
-    esac
-    [ "$(date +%s)" -lt "$_end" ] || die "EG certgen Job 이 끝나지 않았다(${CERTGEN_TIMEOUT:-120}초)"
-    sleep "${POLL_INTERVAL:-5}"
-  done
-  kc -n envoy-gateway-system get secret envoy-gateway envoy >/dev/null 2>&1 || die "certgen 이 만든 xDS mTLS 시크릿(envoy-gateway·envoy)이 없다"
-  ok "EG certgen 끝(xDS 시크릿 있음)"
-}
-master_probe() {   # $1 = --sysctl|--listen, $2 = 무엇 — host-net-probe.sh(마스터 호스트 netns, dms 이미지)
-  _img=$(dms_image)
-  [ -n "$_img" ] || die "앱 렌더에서 dms 이미지를 찾지 못했다(마스터 프로브용)"
-  sh "$HERE/host-net-probe.sh" --context "$CTX" --namespace "$NS" --image "$_img" --port "$(gw_port)" "$1" > "$WORK/hnp.out" 2>&1
-  _rc=$?
-  sed 's/^/    /' "$WORK/hnp.out"
-  judge "$_rc" "$2"
 }
 
 stage_S9() {
@@ -871,7 +841,7 @@ stage_S9() {
     if [ "$_c" = upgrade ] && [ "$_has_cluster" = 1 ]; then wait_cluster_healthy; fi
   else
     info "CNPG: $(det cnpg code) $_c — 건드리지 않는다(설계 8-2 — 어디에든 있으면 두 번째를 설치하지 않는다)"
-    # DMS 가 설치한 오퍼레이터(D=·D<·D>)는 적용하지 않아도 Ready 인지 읽기로 본다(앞선 실행이 rollout 에서 멈춘 경우 — EG 와 같은 이유, ⑦ 리뷰 1).
+    # DMS 가 설치한 오퍼레이터(D=·D<·D>)는 적용하지 않아도 Ready 인지 읽기로 본다(앞선 실행이 rollout 에서 멈춘 경우, ⑦ 리뷰 1).
     case "$(det cnpg code)" in
       "D="|"D<"|"D>")
         kc -n cnpg-system rollout status deploy/cnpg-controller-manager --timeout="${CNPG_ROLLOUT_TIMEOUT:-300}s" >/dev/null 2>&1 \
@@ -1059,7 +1029,7 @@ config_rev() {
 }
 
 stage_S12() {
-  # VERIFY_NO_PROBES=1 이면 파드를 띄우는 검사(PG 경로 대조·마스터 리스너 포트)를 건너뛴다 — 라이브 사이트에서 순수 읽기로 다시 볼 때.
+  # VERIFY_NO_PROBES=1 이면 파드를 띄우는 검사(PG 경로 대조)를 건너뛴다 — 라이브 사이트에서 순수 읽기로 다시 볼 때(ingress-probe 는 HTTPS GET 뿐이라 돈다).
   if [ "${VERIFY_NO_PROBES:-0}" = 1 ]; then set -- --no-probes; else set --; fi
   helper "$WORK/verify.out" env PORTAL_DOMAIN="${PORTAL_DOMAIN:-$(rv PORTAL_DOMAIN)}" PORTAL_VIP="${PORTAL_VIP:-$(rv PORTAL_VIP)}" \
     CACERT="${CACERT:-}" sh "$HERE/verify.sh" --context "$CTX" --rendered "$RDIR" "$@"
@@ -1101,7 +1071,10 @@ stage_S13() {
     [ ] 공용 스토리지 밖 사본: pg_dump(<SHARED_DIR>/dms/backup/pg)·dms-secrets·dms-pg-app(암호화) — 보관처(설계 6-4, deploy/README §2f-5)
     [ ] 현장 빌드 DMS 태그의 레지스트리 밖 사본(skopeo sync --dest dir — 설계 7-6 「백업」, deploy/README §2e-5)
     [ ] 스모크 시험(일반 사용자 가입·PV sync·rm — deploy/README §7)
-    [ ] Avi VS-443(설치 전 사이트 준비 7 — deploy/README §2g-4) 풀 마스터 3/3 헬스 up 확인. 그 뒤 VIP 경유 검증(--resolve 라 DNS 가 필요 없다):
+    [ ] LB VS-443(Avi VS-443 — 설치 전 사이트 준비 7, deploy/README §2g): 풀 = Traefik 이 도는 노드 :443(hostPort), 헬스 = TCP 443 또는
+        SNI·Host 를 PORTAL_DOMAIN 으로 한 HTTPS /readyz. LB 가 PROXY v2 를 붙이면 Traefik websecure 의 proxyProtocol.trustedIPs 에 LB 출발지(SE)
+        (Rancher chartValues·HelmChartConfig kube-system/rke2-traefik — 사이트 몫, DMS 는 Traefik 을 바꾸지 않는다). 풀 헬스 up 확인 뒤 VIP 경유 검증
+        (--resolve 라 DNS 가 필요 없다):
           $([ -n "${CACERT:-}" ] || printf "CACERT=<사내CA> ")$(base_cmd) --only S12      (FQDN·VIP 는 render.env — values.env 의 PORTAL_DOMAIN·PORTAL_VIP)
     [ ] 사용자에게 열기 전 확인표(deploy/README §6-8) → 그다음 DNS(포탈 FQDN → VIP-A) 등록 → 사용자에게 공지(deploy/README §6-7)
     [ ] 레지스트리 주소를 바꾸거나 DB 를 이관했으면 잡 이미지 재릴리스(control_state.job_image — 설계 7-4)
@@ -1114,7 +1087,7 @@ title() {
   case "$1" in
     S1) echo "preflight·감지(읽기 전용)" ;; S2) echo "값·시크릿$([ "$PLAN" = 1 ] && echo '(확인만)')" ;; S2b) echo "SELinux 노드 프로브" ;;
     S3) echo "계획(server dry-run — 변경 없음)" ;; S4) echo "플랫폼·레지스트리" ;; S5) echo "push 대조(lock·DMS 이미지)" ;;
-    S6) echo "pull 프로브" ;; S7) echo "공용 스토리지 프로브" ;; S8) echo "Gateway API·Envoy Gateway·입구" ;; S9) echo "CNPG" ;;
+    S6) echo "pull 프로브" ;; S7) echo "공용 스토리지 프로브" ;; S8) echo "입구(Traefik)" ;; S9) echo "CNPG" ;;
     S9b) echo "Volcano" ;; S10) echo "DB 층" ;; S11) echo "DMS 앱" ;; S12) echo "verify" ;; S13) echo "사후" ;;
   esac
 }

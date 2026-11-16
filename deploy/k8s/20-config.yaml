@@ -46,7 +46,12 @@ data:
   # --- api server bind ---
   DMS_API_HOST: "0.0.0.0"
   DMS_API_PORT: "8080"
-  # 프로덕션 자세(2026-08-19): 접속은 TLS 를 끝내는 포탈 입구(prod 렌더 = Envoy Gateway, deploy/README §2g) 경유뿐이라
+  # 요청 본문 상한 DMS_MAX_REQUEST_BODY_BYTES(기본 20MiB, 넘으면 413 request_too_large)와 uvicorn keep-alive
+  # DMS_API_KEEP_ALIVE_SECONDS(기본 120초)는 일부러 여기 두지 않는다(2026-11-16 입구 교체 -- Envoy BTP 의 requestBuffer 20Mi·
+  # connectionIdleTimeout 4s 를 앱이 대신한다, src/dms/config.py 주석): 코드 기본이 곧 계약이고(keep-alive 는 입구 Traefik 의
+  # 기본 idleConnTimeout 90s 보다 길어야 한다) base 에 같은 값을 적으면 고칠 곳이 둘이 된다. 사이트가 입구의 유휴 타임아웃을
+  # 올렸거나 더 큰 본문이 필요하면 오버레이 patch-config 에 키를 더한다(바꾸면 dms-api 재시작).
+  # 프로덕션 자세(2026-08-19): 접속은 TLS 를 끝내는 포탈 입구(prod 렌더 = 클러스터의 Traefik + DMS Ingress, deploy/README §2g) 경유뿐이라
   # 세션 쿠키에 Secure 를 붙인다. 이걸 켠 뒤로 평문 HTTP 로그인(포트포워딩 등)은
   # 쿠키가 실리지 않아 동작하지 않는다 -- 자동화·비상 접근은 Bearer 토큰 경로
   # (shared/admin token)를 쓰거나 https://<PORTAL_DOMAIN>(values.env) 로 간다.

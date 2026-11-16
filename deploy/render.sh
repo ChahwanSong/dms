@@ -1,7 +1,7 @@
 #!/bin/sh
 # 사이트 렌더러(2026-08-30 overlays/prod/render.sh → 2026-11-03 ④ 일반화 — 설계 v6 9 「③ 공유 FS 세부」(render.sh 일반화)·④·⑤·8-2
-# 「층 배치」). 같은 렌더러가 앱 오버레이와 플랫폼 층(platform/{priorityclass,registry,db-*,gateway})·애드온 층(addons/{cnpg,gateway-api,
-# envoy-gateway} — ⑥ 2026-11-03)을 렌더한다.
+# 「층 배치」). 같은 렌더러가 앱 오버레이와 플랫폼 층(platform/{priorityclass,registry,db-*,ingress})·애드온 층(addons/cnpg)을 렌더한다
+# (입구는 2026-11-16 부터 클러스터의 Traefik — 옛 Envoy Gateway 층 addons/{gateway-api,envoy-gateway}·platform/gateway 는 없앴다).
 #
 #   sh deploy/render.sh <site> [--context <ctx>]      # site = deploy/overlays/<site>(kustomization.yaml 이 있는 디렉터리 이름)
 #
@@ -21,15 +21,12 @@
 #   platform/db-cluster/      CNPG Cluster dms-pg(imageName = lock digest, storage.size = PV 용량, 선택 자원·배치) → SSA(S10, 사전 검사 뒤)
 #   platform/db-backup/       pg_dump CronJob(이미지·hostPath <SHARED_DIR>/dms/backup/pg·보존 개수) → SSA(S10, 경로 대조 뒤)
 #   platform/db-probe/        일회용 경로 프로브 DaemonSet — deploy/pg-path-probe.py 가 띄우고 지운다(S10 사전 검사·경로 대조)
-#   addons/gateway-api/       Gateway API CRD v1.6.x standard(⑥, S8 첫째) → SSA. base = deploy/addons/gateway-api/<GATEWAY_API_VERSION>(상류 원본 + 라벨)
-#   addons/envoy-gateway/     Envoy Gateway 컨트롤러(⑥, S8 둘째) → SSA → rollout. base = deploy/addons/envoy-gateway/<ENVOY_GATEWAY_VERSION>(상류 원본
-#                             + DMS 패치 층) + 이미지(컨트롤러·certgen) lock digest + EG 설정(shutdown-manager·기본 Envoy 이미지)의 사이트 사본
-#   platform/gateway/         포탈 입구(⑥, S8 셋째): GatewayClass·Gateway·HTTPRoute·CTP·BTP·EnvoyProxy → SSA. base(deploy/platform/gateway)를
-#                             가리키고 Envoy·shutdown-manager 이미지·PROXY 모드(off 면 CTP 의 proxyProtocol 을 뺀다)·리스너 포트(GATEWAY_LISTEN_PORT
-#                             가 443 이 아닐 때)·인증서 이름·선택 Envoy requests·선택 control-plane 라벨 값(EnvoyProxy nodeSelector)만 덮는다(설계 4-3)
-#   render.env                해석된 값(REGISTRY·앱 태그·애드온 레지스트리·이미지 ref 등 — install.sh 의 in-cluster 게이트와 런북이 읽는다)
+#   platform/ingress/         포탈 입구(2026-11-16, S8): 클러스터의 Traefik 이 집는 Ingress dms/dms-portal-traefik 하나 → SSA. base
+#                             (deploy/platform/ingress)를 가리키고 host·tls hosts(PORTAL_DOMAIN)·secretName(PORTAL_TLS_SECRET)·ingressClassName
+#                             (INGRESS_CLASS)·router.entrypoints 어노테이션(TRAEFIK_ENTRYPOINT)만 JSON 패치로 덮는다. Traefik 자체는 DMS 가 깔지 않는다
+#   render.env                해석된 값(REGISTRY·앱 태그·애드온 레지스트리·이미지 ref·입구 값 등 — install.sh 의 게이트와 런북이 읽는다)
 #   (kube-context 가 있는 오버레이는 그 파일을 각 층 디렉터리에 복사한다 — guard-images.sh 가 같은 컨텍스트 고정을 본다)
-# 성공하면 층마다 `PLATFORM: <디렉터리>`(db 층은 S10 순서)·`GATEWAY: <디렉터리>`(S8 순서 — 위 셋, ⑥)·`ADDON: <디렉터리>`·`PROBE: <디렉터리>` 를,
+# 성공하면 층마다 `PLATFORM: <디렉터리>`(db 층은 S10 순서)·`INGRESS: <디렉터리>`(S8 — platform/ingress)·`ADDON: <디렉터리>`·`PROBE: <디렉터리>` 를,
 # 마지막 줄에 `RENDERED: <app 디렉터리>` 를 찍는다(install.sh 가 파싱). 실패는 한 줄 사유 + exit 2 이고 결과 디렉터리를 바꾸지 않는다(임시
 # 디렉터리에 렌더한 뒤 끝에서만 바꿔 넣는다).
 #
@@ -44,8 +41,8 @@
 #                      를 빼 모든 노드에 하나씩; 예: 테스트베드 cp1·w1·w2. prod 에 쓰지 않는다)
 #   CONTROL_PLANE_LABEL_VALUE  (선택, 기본 빈 값 = base 그대로) control-plane 노드 라벨 node-role.kubernetes.io/control-plane 의 **값**.
 #                      base·prod 의 nodeSelector 는 kubeadm 관례인 ""(빈 값)를 고른다 — RKE2 는 "true" 를 달아 그대로면 레지스트리·PG·
-#                      api/controller 가 Pending 이고 Envoy DaemonSet 은 파드 0 이다(2026-11-13 OA 사이트). 값을 주면 앱 patch-placement(템플릿 오버레이)·platform/registry·
-#                      platform/gateway(EnvoyProxy)·platform/db-cluster(PG_PLACEMENT=control-plane 일 때)의 그 nodeSelector 값을 바꾼다. k8s 라벨
+#                      api/controller 가 Pending 이다(2026-11-13 OA 사이트). 값을 주면 앱 patch-placement(템플릿 오버레이)·platform/registry·
+#                      platform/db-cluster(PG_PLACEMENT=control-plane 일 때)의 그 nodeSelector 값을 바꾼다(입구 platform/ingress 는 배치가 없다 — Traefik 은 사이트 것). k8s 라벨
 #                      값 문법(63자 이하, 영숫자로 시작·끝, 가운데 [-_.A-Za-z0-9]) 밖이면 FAIL. 키 존재로만 고르는 곳(DoesNotExist·preflight·
 #                      프로브)은 값과 무관하다. 확인: kubectl get nodes -L node-role.kubernetes.io/control-plane
 #   PG_BACKUP_KEEP     (선택, 기본 336 = 14일 × 매시간) pg_dump 보존 개수
@@ -63,24 +60,23 @@
 #   SHARED_DIR_ID        S0 가 쓴 <SHARED_DIR>/dms/.dms-shared-id 값 = 레지스트리 센티널(.dms-registry-id) 기대값(7-3). 레지스트리를 렌더할 때 필수.
 #   REGISTRY_CPU_REQUEST·REGISTRY_MEMORY_REQUEST  (선택) 레지스트리 requests(기본 100m/128Mi — 테스트베드는 50m/64Mi, 설계 10).
 #
-# 입구(Envoy Gateway, 2026-11-03 ⑥ — 설계 v6 #13·#14·#15·4-3·8-1 S8). 버전은 deploy/versions.env(GATEWAY_API_VERSION·ENVOY_GATEWAY_VERSION·
-# ENVOY_GATEWAY_IMAGE·ENVOY_PROXY_IMAGE), 이미지 digest 는 deploy/images.lock — CNPG 와 같은 애드온 레지스트리에서 받는다. 입구 층은 늘 렌더한다
-# (prod 의 유일한 입구 — 앱 오버레이가 Ingress·MetalLB 풀을 지운다; 테스트베드 testbed-k8s 는 되돌림용 Ingress·MetalLB 를 소크 뒤 지울 때까지
-# 함께 렌더한다 — deploy/testbed/README.md). values(전부 선택):
-#   GATEWAY_PROXY_PROTOCOL  required(기본 — PROXY v2 헤더 없는 연결을 끊는다) | optional(**컷오버 중에만** — PROXY 없는 연결도 받는다, 설계 4-3)
-#                           | off(2026-11-14 — LB 가 PROXY v2 를 못 붙이는 사이트의 **상시** 모드: ClientTrafficPolicy 의 proxyProtocol 을 빼
-#                           Envoy 가 PROXY 를 아예 해석하지 않는다. optional 을 상시로 쓰지 않는 이유: L4 LB 는 바이트를 그대로 넘기므로 클라이언트가
-#                           PROXY 헤더를 스스로 심어 「원 IP」 기록을 위조할 수 있다. off 면 원 IP 자리는 늘 실제 TCP 피어(LB 의 SE 주소)이고,
-#                           모든 사용자가 그 주소로 묶이므로 앱 출발지 경보 DMS_LOGIN_ALARM_SOURCE_FAILURES 를 0 으로 렌더한다 — 원 IP 는 LB 로그에서).
-#                           ClientTrafficPolicy proxyProtocol 이 이 값에서 나온다(deploy/README §2g-4).
-#   GATEWAY_LISTEN_PORT     (기본 443) Envoy 가 마스터 호스트에서 여는 포트 = Gateway 리스너 포트(hostNetwork + useListenerPortAsContainerPort).
-#                           LB 풀 멤버 포트가 이 값이다(VS 는 그대로 VIP:443 — 사용자는 https://<FQDN>). 마스터의 호스트 443 을 다른 것이 쓰는
-#                           사이트용(2026-11-14 OA: RKE2 Traefik 의 hostPort 443 — CNI 가 그 포트의 패킷을 Envoy 보다 먼저 Traefik 으로 넘긴다).
-#                           1024 이상이면 마스터 sysctl ip_unprivileged_port_start(S0-5)가 필요 없다. NodePort 범위(30000~32767)·Envoy 자체 포트
-#                           (19000~19003)·k8s 구성요소 포트는 FAIL, 32768 이상(나가는 연결의 임시 포트 범위)은 알림. 권장 예: 10443.
-#   PORTAL_TLS_SECRET       Gateway 리스너 인증서 Secret(ns dms, kubernetes.io/tls). 기본 dms-portal-tls(설계 #14).
-#   GATEWAY_ENVOY_CPU_REQUEST·GATEWAY_ENVOY_MEMORY_REQUEST  Envoy requests(기본 100m/256Mi, limits 1/2Gi 는 base — 테스트베드 50m/128Mi, 설계 10).
-#                           limits 를 넘으면 FAIL(EG 가 만드는 DaemonSet 을 apiserver 가 거절한다 — SSA 는 통과해 늦게 드러난다).
+# 입구(클러스터의 Traefik, 2026-11-16 — 사용자 결정 「envoy 사용방식은 폐기하고 traefik을 사용하도록」, 병행 모드 없음). DMS 는 Traefik 을
+# 설치·변경하지 않는다(RKE2 는 rke2-traefik — DaemonSet, 모든 노드 hostPort 80/443 → web/websecure). DMS 객체는 platform/ingress 의 Ingress
+# 하나이고 늘 렌더한다(prod 의 유일한 입구 — 앱 오버레이가 옛 Ingress·MetalLB 풀을 지운다; testbed-k8s 는 되돌림용 nginx Ingress·MetalLB 를
+# 함께 렌더한다 — deploy/testbed/README.md). 버전 고정·이미지 lock 줄이 없다(Traefik 은 클러스터의 것). values:
+#   PORTAL_DOMAIN           (**필수** — 템플릿·고정 오버레이 모두) 포탈 FQDN = Ingress host·tls hosts(Traefik Host 규칙). 소문자 호스트 이름만 —
+#                           와일드카드·포트·IP 는 FAIL(host 없는 catch-all 은 공용 Traefik 에서 다른 팀의 미매칭 호스트를 가로채 두지 않는다).
+#   PORTAL_TLS_SECRET       (선택, 기본 dms-portal-tls) Ingress 인증서 Secret(ns dms, kubernetes.io/tls — SAN = PORTAL_DOMAIN + PORTAL_VIP).
+#   INGRESS_CLASS           (선택, 기본 traefik) spec.ingressClassName — 그 IngressClass 의 controller 가 traefik.io/ingress-controller 여야 한다
+#                           (S8 install-detect 가 본다). DNS-1123 label.
+#   TRAEFIK_ENTRYPOINT      (선택, 기본 websecure) 어노테이션 traefik.ingress.kubernetes.io/router.entrypoints — 없으면 Traefik 라우터가 :80(web)
+#                           평문에도 붙는다. 문자 [a-z0-9-](영숫자로 시작).
+#   PORTAL_VIP              (템플릿 필수, 고정 오버레이는 선택) LB VS-443 의 VIP — 매니페스트에 들어가지 않고 render.env 로만(인증서 SAN·S12
+#                           `curl --resolve <PORTAL_DOMAIN>:443:<PORTAL_VIP>`).
+#   옛 GATEWAY_PROXY_PROTOCOL·GATEWAY_LISTEN_PORT·GATEWAY_ENVOY_CPU_REQUEST·GATEWAY_ENVOY_MEMORY_REQUEST 는 values.env 에 남아 있어도 실패하지 않고
+#   stderr 알림 한 줄 뒤 무시한다(옛 LDAP 키와 같은 방식). PROXY v2 수용·타임아웃은 Traefik 정적 설정(사이트 몫 — deploy/README §2g), 요청 본문
+#   상한·상류 keep-alive 는 앱(DMS_MAX_REQUEST_BODY_BYTES·DMS_API_KEEP_ALIVE_SECONDS)이 맡는다. 옛 off 모드가 하던 출발지 경보 0 렌더도 없앴다
+#   (prod patch-config 의 그 줄을 지웠다 — base 값 그대로; 원 IP 가 LB 주소로 묶이는 사이트는 patch-config 「튜닝 키」로 직접 0).
 set -eu
 usage() { echo "usage: $0 <site> [--context <ctx>]" >&2; exit 2; }
 fail() { echo "FAIL: $*"; exit 2; }
@@ -115,14 +111,15 @@ fi
 # 운영자 셸에 export 돼 있을 수 있다 -- 그대로 두면 SHARED_DIR 줄이 빠진 values.env 가 「미치환」 FAIL 대신 셸 값으로 렌더돼
 # hostPath·base·allowlist 가 사이트 원천(values.env)에 없는 경로가 된다. 레지스트리 키(④)도 같은 이유로 values.env 만 원천이다.
 # 템플릿 키(태그·도메인·VIP — 2026-11-03 ④ 리뷰)도 같다: prod README 가 `REGISTRY_MODE=… REGISTRY_CLUSTER_IP=… sh preflight-cluster.sh`(§0 의 0)·
-# `PORTAL_DOMAIN=… PORTAL_VIP=… sh install.sh --only S12` 처럼 같은 이름을 env 로 쓰게 하므로 셸에 남아 있을 수 있다 — 그대로 두면 줄이 빠진 values.env 가 「미치환」 FAIL 대신 셸 값으로 렌더된다. 옛 LDAP 키도
-# (아래 「무시함」 알림이 values.env 에서 온 것만 말하게). 의도된 env 입력은 VALUES_ENV·KUBE_CONTEXT·DMS_NS 뿐이다.
+# `PORTAL_DOMAIN=… PORTAL_VIP=… sh install.sh --only S12` 처럼 같은 이름을 env 로 쓰게 하므로 셸에 남아 있을 수 있다 — 그대로 두면 줄이 빠진 values.env 가 「미치환」 FAIL 대신 셸 값으로 렌더된다. 입구 키(2026-11-16
+# INGRESS_CLASS·TRAEFIK_ENTRYPOINT)도 같다. 옛 LDAP 키·옛 GATEWAY_* 키도(아래 「무시함」 알림이 values.env 에서 온 것만 말하게). 의도된 env 입력은
+# VALUES_ENV·KUBE_CONTEXT·DMS_NS 뿐이다.
 unset SHARED_FS SHARED_DIR SHARED_DIR_ID REGISTRY REGISTRY_MODE REGISTRY_CLUSTER_IP REGISTRY_PORT REGISTRY_TLS_VERIFY \
       REGISTRY_CPU_REQUEST REGISTRY_MEMORY_REQUEST \
       PG_STORAGE_SIZE PG_CPU_REQUEST PG_MEMORY PG_SHARED_BUFFERS PG_PLACEMENT PG_BACKUP_KEEP CONTROL_PLANE_LABEL_VALUE \
       CNPG_VERSION CNPG_OPERATOR_IMAGE PG_IMAGE \
-      GATEWAY_PROXY_PROTOCOL GATEWAY_LISTEN_PORT PORTAL_TLS_SECRET GATEWAY_ENVOY_CPU_REQUEST GATEWAY_ENVOY_MEMORY_REQUEST \
-      GATEWAY_API_VERSION ENVOY_GATEWAY_VERSION ENVOY_GATEWAY_IMAGE ENVOY_PROXY_IMAGE \
+      PORTAL_TLS_SECRET INGRESS_CLASS TRAEFIK_ENTRYPOINT \
+      GATEWAY_PROXY_PROTOCOL GATEWAY_LISTEN_PORT GATEWAY_ENVOY_CPU_REQUEST GATEWAY_ENVOY_MEMORY_REQUEST \
       DMS_TAG DMS_AGENT_TAG MFU_TAG EMAIL_DOMAIN LOCAL_ADMIN PORTAL_DOMAIN PORTAL_VIP \
       LDAP_HOST LDAP_USER_BASE LDAP_GROUP_BASE LDAP_BIND_DN IDENTITY_SUPPLEMENTARY_GROUPS
 # shellcheck disable=SC1090
@@ -238,11 +235,12 @@ fi
 # dms-k8s: k8s 신원 모드 전용(2026-10-26 LDAP 코드 삭제) -- LDAP 키 없음. 옛 values.env 의 LDAP_*·IDENTITY_SUPPLEMENTARY_GROUPS
 # 는 쓰지 않는다(아래 알림 한 줄, stderr — stdout 의 마지막 `RENDERED:` 파싱을 흐리지 않게).
 # 템플릿 오버레이(prod)의 필수 키 -- 템플릿의 REPLACE_<키> 와 같은 집합(어긋나면 아래 잔여 토큰 그물이 잡는다). 예외 둘(2026-11-03 ⑥):
-# PORTAL_DOMAIN·PORTAL_VIP 는 prod 가 Ingress·MetalLB 풀을 지워 템플릿에 더는 없지만 사이트 사실(포탈 FQDN·Avi VIP-A — 인증서 SAN 과 S12
-# `curl --resolve` 의 대상)이라 필수로 두고 render.env 로만 낸다(Gateway 리스너는 hostname 이 없다 — 설계 #14).
+# PORTAL_DOMAIN·PORTAL_VIP 는 prod 앱 오버레이가 옛 Ingress·MetalLB 풀을 지워 템플릿에 더는 없지만 사이트 사실(포탈 FQDN·LB VIP-A — 인증서
+# SAN 과 S12 `curl --resolve` 의 대상)이라 필수로 둔다. PORTAL_DOMAIN 은 2026-11-16 부터 입구 층 platform/ingress 의 Ingress host 이기도 하다.
 KEYS="REGISTRY DMS_TAG DMS_AGENT_TAG MFU_TAG SHARED_DIR EMAIL_DOMAIN LOCAL_ADMIN PORTAL_DOMAIN PORTAL_VIP"
-# 고정 오버레이(testbed-k8s)는 값이 오버레이에 커밋돼 있다 -- values.env 는 그 기록이고 렌더러가 아래에서 둘이 같은지 본다.
-[ "$TEMPLATE" = 1 ] || KEYS="REGISTRY SHARED_DIR"
+# 고정 오버레이(testbed-k8s)는 값이 오버레이에 커밋돼 있다 -- values.env 는 그 기록이고 렌더러가 아래에서 둘이 같은지 본다. 입구 층의 host
+# (PORTAL_DOMAIN)는 오버레이에 없는 값이라 고정 오버레이도 values.env 가 원천이다(2026-11-16 — 필수).
+[ "$TEMPLATE" = 1 ] || KEYS="REGISTRY SHARED_DIR PORTAL_DOMAIN"
 [ "$REGISTRY_MODE" = in-cluster ] && KEYS="$KEYS REGISTRY_CLUSTER_IP"
 if [ "$REGISTRY_MODE" = in-cluster ] || [ -n "$RCIP" ]; then KEYS="$KEYS SHARED_DIR_ID"; fi
 # in-cluster 에서 REGISTRY 를 비웠으면 원천은 REGISTRY_CLUSTER_IP 다 — REGISTRY 를 미치환으로 지목하지 않는다(2026-11-03 ④ 리뷰 2: 비워 두라던
@@ -260,12 +258,21 @@ if [ -n "$bad" ]; then
     case "$k" in
       REGISTRY_CLUSTER_IP) echo "  REGISTRY_CLUSTER_IP — ServiceCIDR 안의 미사용 IP(예: 10.96.0.50). 고르는 법·확인 명령은 values.env.example 주석(deploy/README §2e-1)" ;;
       SHARED_DIR_ID) echo "  SHARED_DIR_ID — S0 출력의 「dms/.dms-shared-id = …」(이미 있었으면 「이미 있음(= …)」), 또는 아무 노드에서 sudo cat <SHARED_DIR>/dms/.dms-shared-id" ;;
+      PORTAL_DOMAIN) echo "  PORTAL_DOMAIN — 포탈 FQDN = 입구 Ingress host(예: dms.corp.example — 사용자가 브라우저에 치는 이름, 인증서 SAN). 2026-11-16 부터 고정 오버레이도 필수(deploy/README §2g)" ;;
     esac
   done
   exit 2
 fi
 if [ -n "${LDAP_HOST:-}${LDAP_USER_BASE:-}${LDAP_GROUP_BASE:-}${LDAP_BIND_DN:-}${IDENTITY_SUPPLEMENTARY_GROUPS:-}" ]; then
   echo "note: values.env 의 LDAP_*·IDENTITY_SUPPLEMENTARY_GROUPS 는 dms-k8s(k8s 신원 모드 전용)에서 쓰지 않는다 — 무시함" >&2
+fi
+# 옛 Envoy Gateway 입구 키(2026-11-16 폐기): 남아 있어도 실패하지 않는다(값이 이상해도 — 읽지 않는다). 줄이 있으면(빈 값 포함) 알림 한 줄.
+_old_gw=""
+for k in GATEWAY_PROXY_PROTOCOL GATEWAY_LISTEN_PORT GATEWAY_ENVOY_CPU_REQUEST GATEWAY_ENVOY_MEMORY_REQUEST; do
+  if [ "$(eval "printf '%s' \"\${$k+set}\"")" = set ]; then _old_gw="$_old_gw $k"; fi
+done
+if [ -n "$_old_gw" ]; then
+  echo "note: values.env 의${_old_gw} 는 더 쓰지 않는다(2026-11-16 — 입구는 클러스터의 Traefik) — 무시함(줄을 지워도 된다; PROXY·타임아웃은 Traefik 정적 설정 — deploy/README §2g)" >&2
 fi
 
 # 형식. 글자를 나열한다(범위식은 로케일 따라 다른 글자를 품는다). 아래 값은 sed 의 '|' 구분자·YAML·sh 에 그대로 들어간다.
@@ -446,104 +453,59 @@ case "$PG_BACKUP_KEEP" in ""|0*|*[!0123456789]*) fail "values.env 의 PG_BACKUP_
 [ "${#PG_BACKUP_KEEP}" -le 5 ] || fail "values.env 의 PG_BACKUP_KEEP='$PG_BACKUP_KEEP' 가 너무 크다(5자리 이하)"
 DB_LAYERS="db-volumes db-cluster db-backup"
 
-# --- 입구(Envoy Gateway) 값(2026-11-03 ⑥, 설계 v6 #13·#14·4-3·8-1 S8 — 머리 주석 「입구」) -------------------------------------------------------
-# 버전·digest 의 원천은 CNPG 와 같은 두 커밋 파일이다. 디렉터리 이름 = 상류 태그(v 접두 — 이미지 태그도 v1.9.3 이라 태그 == 버전 검사가 그대로 선다).
-GATEWAY_API_VERSION=$(_ver GATEWAY_API_VERSION) || { echo "$GATEWAY_API_VERSION"; exit 2; }
-ENVOY_GATEWAY_VERSION=$(_ver ENVOY_GATEWAY_VERSION) || { echo "$ENVOY_GATEWAY_VERSION"; exit 2; }
-ENVOY_GATEWAY_IMAGE=$(_ver ENVOY_GATEWAY_IMAGE) || { echo "$ENVOY_GATEWAY_IMAGE"; exit 2; }
-ENVOY_PROXY_IMAGE=$(_ver ENVOY_PROXY_IMAGE) || { echo "$ENVOY_PROXY_IMAGE"; exit 2; }
-for _v in "GATEWAY_API_VERSION=$GATEWAY_API_VERSION" "ENVOY_GATEWAY_VERSION=$ENVOY_GATEWAY_VERSION"; do
-  _n=${_v#*=v}
-  case "$_v" in *=v[0123456789]*) ;; *) fail "$VERS 의 ${_v%%=*}='${_v#*=}' — 상류 태그(예: v1.9.3)" ;; esac
-  case "$_n" in ""|.*|*.|*..*|*[!0123456789.]*) fail "$VERS 의 ${_v%%=*}='${_v#*=}' — 상류 태그(예: v1.9.3)" ;; esac
-done
-for _img in "$ENVOY_GATEWAY_IMAGE" "$ENVOY_PROXY_IMAGE"; do
-  case "$_img" in
-    *[!abcdefghijklmnopqrstuvwxyz0123456789._:/-]*|*:*:*|:*|*:|*/|/*) fail "$VERS 의 이미지 '$_img' — lock 의 DEST(<이름>:<태그>, 호스트 없이)" ;;
-    *:*) ;;
-    *) fail "$VERS 의 이미지 '$_img' 에 태그가 없다 — lock 의 DEST(<이름>:<태그>)" ;;
-  esac
-done
-[ "${ENVOY_GATEWAY_IMAGE##*:}" = "$ENVOY_GATEWAY_VERSION" ] \
-  || fail "$VERS 의 ENVOY_GATEWAY_IMAGE='$ENVOY_GATEWAY_IMAGE' 태그가 ENVOY_GATEWAY_VERSION='$ENVOY_GATEWAY_VERSION' 과 다르다(한 커밋에서 같이 올린다)"
-GWAPI_BASE="$HERE/addons/gateway-api/$GATEWAY_API_VERSION"
-EG_BASE="$HERE/addons/envoy-gateway/$ENVOY_GATEWAY_VERSION"
-GW_BASE="$HERE/platform/gateway"
-for _b in "$GWAPI_BASE=$GATEWAY_API_VERSION" "$EG_BASE=$ENVOY_GATEWAY_VERSION"; do
-  [ -f "${_b%=*}/kustomization.yaml" ] || fail "애드온 base 없음: ${_b%=*}/kustomization.yaml (deploy/versions.env 의 버전 — deploy/addons/<애드온>/<v>)"
-  grep -q "^      dms.io/addon-version: \"${_b##*=}\"\$" "${_b%=*}/kustomization.yaml" \
-    || fail "${_b%=*}/kustomization.yaml 의 라벨 dms.io/addon-version 이 '${_b##*=}' 가 아니다"
-done
-[ -f "$GW_BASE/kustomization.yaml" ] || fail "플랫폼 base 없음: $GW_BASE/kustomization.yaml"
-# 이미지 자리표시자는 글자 그대로 바꾼다(EG 설정 문자열 안에도 있다 — kustomize images 가 못 닿는다). base 의 자리표시자 태그가 versions.env 와
-# 다르면 치환이 조용히 무동작이 되므로 여기서 멈춘다(설정·EnvoyProxy 두 파일 — 업그레이드 때 같이 바꾼다).
-for _f in "$EG_BASE/patch-config.yaml" "$GW_BASE/envoyproxy.yaml"; do
-  for _img in "$ENVOY_GATEWAY_IMAGE" "$ENVOY_PROXY_IMAGE"; do
-    grep -qF "image: set-by-overlay.invalid/$_img" "$_f" \
-      || fail "$_f 에 자리표시자 'set-by-overlay.invalid/$_img' 가 없다 — versions.env 와 base 의 태그를 한 커밋에서 맞춘다"
-  done
-done
-EG_DG=$(_lock_digest "$ENVOY_GATEWAY_IMAGE") || { echo "$EG_DG"; exit 2; }
-ENVOY_DG=$(_lock_digest "$ENVOY_PROXY_IMAGE") || { echo "$ENVOY_DG"; exit 2; }
-EG_REF="$ADDON_REGISTRY/$ENVOY_GATEWAY_IMAGE@$EG_DG"
-ENVOY_REF="$ADDON_REGISTRY/$ENVOY_PROXY_IMAGE@$ENVOY_DG"
-_set "${GATEWAY_PROXY_PROTOCOL:-}" || GATEWAY_PROXY_PROTOCOL=required
-case "$GATEWAY_PROXY_PROTOCOL" in
-  required) PROXY_OPTIONAL=false ;;
-  optional) PROXY_OPTIONAL=true
-            echo "note: GATEWAY_PROXY_PROTOCOL=optional — PROXY 헤더 없는 연결도 받는다(원 IP 자리에 직접 피어). **컷오버 중에만** 쓰고 끝나면 required 로 되돌린다(설계 4-3, deploy/README §2g)" >&2 ;;
-  off) PROXY_OPTIONAL=""
-       echo "info: GATEWAY_PROXY_PROTOCOL=off — Envoy 가 PROXY 를 해석하지 않는다. 기록되는 원 IP 는 LB(SE) 주소다(원 IP 는 LB 로그에서 — deploy/README §2g-4). 앱 출발지 경보는 0(끔)으로 렌더한다" >&2 ;;
-  *) fail "values.env 의 GATEWAY_PROXY_PROTOCOL='$GATEWAY_PROXY_PROTOCOL' — required(기본) · optional(컷오버 중에만) · off(LB 가 PROXY v2 를 못 붙이는 사이트)" ;;
-esac
-# 출발지 경보 임계(앱 DMS_LOGIN_ALARM_SOURCE_FAILURES): off 면 0(끔) — 모든 사용자가 LB 주소 몇 개로 묶여 여러 사람의 실패가 한 「출발지」 경보로
-# 쌓인다(login_guard.LoginAlarms.note_failure 의 「원 IP 가 프록시 한 주소로 모이는 배치는 임계를 0 으로」).
-# off 면 템플릿의 자리(REPLACE_LOGIN_ALARM_SOURCE_FAILURES)에 0 을 넣고, 아니면 그 줄을 지워 base 값(k8s/20-config.yaml)이 그대로 배포된다 —
-# 평소 값의 원천은 base 하나이고 기본 렌더는 예전과 같다.
-if [ "$GATEWAY_PROXY_PROTOCOL" = off ]; then ALARM_SED='s|REPLACE_LOGIN_ALARM_SOURCE_FAILURES|0|g'
-else ALARM_SED='/REPLACE_LOGIN_ALARM_SOURCE_FAILURES/d'; fi
-# 리스너(호스트) 포트(2026-11-14, 위 머리말). 숫자는 로캘과 무관하게 글자 목록으로 본다.
-_set "${GATEWAY_LISTEN_PORT:-}" || GATEWAY_LISTEN_PORT=443
-case "$GATEWAY_LISTEN_PORT" in
-  ""|0*|*[!0123456789]*) fail "values.env 의 GATEWAY_LISTEN_PORT='$GATEWAY_LISTEN_PORT' — 포트 번호(1~65535, 기본 443 · 예: 10443)" ;;
-esac
-[ "${#GATEWAY_LISTEN_PORT}" -le 5 ] && [ "$GATEWAY_LISTEN_PORT" -le 65535 ] \
-  || fail "values.env 의 GATEWAY_LISTEN_PORT='$GATEWAY_LISTEN_PORT' — 65535 이하"
-case "$GATEWAY_LISTEN_PORT" in
-  19000|19001|19002|19003) fail "values.env 의 GATEWAY_LISTEN_PORT=$GATEWAY_LISTEN_PORT — Envoy 자체 포트(19000 admin·19001 stats·19002 shutdown-manager·19003 readiness)와 겹친다" ;;
-  22|2379|2380|2381|6443|9345|10248|10249|10250|10256|10257|10259) fail "values.env 의 GATEWAY_LISTEN_PORT=$GATEWAY_LISTEN_PORT — 노드·쿠버네티스 구성요소(ssh·etcd·apiserver·RKE2·kubelet·kube-proxy·controller-manager·scheduler)가 쓰는 포트다" ;;
-esac
-if [ "$GATEWAY_LISTEN_PORT" -ge 30000 ] && [ "$GATEWAY_LISTEN_PORT" -le 32767 ]; then
-  fail "values.env 의 GATEWAY_LISTEN_PORT=$GATEWAY_LISTEN_PORT — NodePort 범위(30000~32767)다. 어떤 Service 가 그 번호를 받으면 kube-proxy 가 그 포트의 패킷을 가로챈다(Envoy 는 LISTEN 으로 보여도 트래픽을 못 받는다). 예: 10443"
-fi
-if [ "$GATEWAY_LISTEN_PORT" -ge 32768 ]; then
-  echo "note: GATEWAY_LISTEN_PORT=$GATEWAY_LISTEN_PORT — 나가는 연결의 임시 포트 범위(기본 32768~60999)다. Envoy 재기동 때 그 번호를 다른 연결이 쓰고 있으면 bind 에 실패할 수 있다(마스터의 net.ipv4.ip_local_reserved_ports 에 넣거나 32768 미만으로 — 예: 10443)" >&2
-fi
+# --- 입구 값(2026-11-16 — 클러스터의 Traefik, 머리 주석 「입구」) ---------------------------------------------------------------------------
+# 버전·이미지 핀이 없다(Traefik 은 클러스터의 것 — DMS 는 설치·변경하지 않는다). 아래 값은 JSON 패치의 따옴표 문자열에 그대로 들어간다 —
+# 글자를 나열해 본다(범위식은 로캘 따라 다른 글자를 품는다).
 _set "${PORTAL_TLS_SECRET:-}" || PORTAL_TLS_SECRET=dms-portal-tls
 # Secret 이름 = DNS-1123 subdomain(소문자·숫자·. -, 점으로 나눈 라벨마다 처음·끝은 영숫자, 253자 이하).
 case "$PORTAL_TLS_SECRET" in
   *[!abcdefghijklmnopqrstuvwxyz0123456789.-]*|[.-]*|*[.-]|*..*|*.-*|*-.*) fail "values.env 의 PORTAL_TLS_SECRET='$PORTAL_TLS_SECRET' — Secret 이름(소문자·숫자·. -, 예: dms-portal-tls)" ;;
 esac
 [ "${#PORTAL_TLS_SECRET}" -le 253 ] || fail "values.env 의 PORTAL_TLS_SECRET 이 253자를 넘는다"
-# Envoy requests 는 base 의 limits(cpu 1·memory 2Gi — platform/gateway/envoyproxy.yaml, 설계 #14) 이하여야 한다(2026-11-03 ⑥ 리뷰 1): EnvoyProxy
-# CRD 에는 requests ≤ limits 규칙이 없어 SSA 는 통과하고, EG 가 만드는 DaemonSet 을 apiserver 가 거절해 Gateway 가 뜨지 않는다(첫 설치 — 마스터
-# :443 이 빈다) 또는 옛 spec 에 머문다(재적용) — 원인은 EG 로그에만 남는다. 레지스트리·PG 와 달리 server dry-run 이 못 잡으니 여기서 멈춘다.
-# base limits 를 바꾸면 이 두 상한도 같이 바꾼다(tests/test_gateway_contract.py 가 base limits 를 1/2Gi 로 고정한다).
-if _set "${GATEWAY_ENVOY_CPU_REQUEST:-}"; then
-  _num=${GATEWAY_ENVOY_CPU_REQUEST%m}
-  case "$_num" in ""|0*|*[!0123456789]*) fail "values.env 의 GATEWAY_ENVOY_CPU_REQUEST='$GATEWAY_ENVOY_CPU_REQUEST' — 예: 100m 또는 1" ;; esac
-  [ "${#_num}" -le 9 ] || fail "values.env 의 GATEWAY_ENVOY_CPU_REQUEST='$GATEWAY_ENVOY_CPU_REQUEST' 가 너무 크다(9자리 이하)"
-  case "$GATEWAY_ENVOY_CPU_REQUEST" in *m) _mcpu=$_num ;; *) _mcpu=$((_num * 1000)) ;; esac
-  [ "$_mcpu" -le 1000 ] \
-    || fail "values.env 의 GATEWAY_ENVOY_CPU_REQUEST='$GATEWAY_ENVOY_CPU_REQUEST' 가 base limits(cpu 1 — 설계 #14)를 넘는다 — EG 가 만드는 DaemonSet 을 apiserver 가 거절해 Gateway 가 뜨지 않는다"
-else GATEWAY_ENVOY_CPU_REQUEST=""; fi
-if _set "${GATEWAY_ENVOY_MEMORY_REQUEST:-}"; then
-  _qty GATEWAY_ENVOY_MEMORY_REQUEST "$GATEWAY_ENVOY_MEMORY_REQUEST" "Mi Gi" 256Mi
-  _env_k=$(_kib "$GATEWAY_ENVOY_MEMORY_REQUEST") || fail "values.env 의 GATEWAY_ENVOY_MEMORY_REQUEST='$GATEWAY_ENVOY_MEMORY_REQUEST' 가 너무 크다(9자리 이하)"
-  [ "$_env_k" -le 2097152 ] \
-    || fail "values.env 의 GATEWAY_ENVOY_MEMORY_REQUEST='$GATEWAY_ENVOY_MEMORY_REQUEST' 가 base limits(memory 2Gi — 설계 #14)를 넘는다 — EG 가 만드는 DaemonSet 을 apiserver 가 거절해 Gateway 가 뜨지 않는다"
-else GATEWAY_ENVOY_MEMORY_REQUEST=""; fi
-GATEWAY_LAYERS="addons/gateway-api addons/envoy-gateway platform/gateway"
+# IngressClass 이름(DNS-1123 label). 그 클래스의 controller 가 traefik.io/ingress-controller 인지는 S8(install-detect 항목 traefik)이 클러스터에서 본다.
+_set "${INGRESS_CLASS:-}" || INGRESS_CLASS=traefik
+case "$INGRESS_CLASS" in
+  *[!abcdefghijklmnopqrstuvwxyz0123456789-]*|-*|*-)
+    fail "values.env 의 INGRESS_CLASS='$INGRESS_CLASS' — IngressClass 이름(DNS-1123 label: 소문자·숫자·-, 영숫자로 시작·끝; 기본 traefik). 확인: kubectl --context <ctx> get ingressclass" ;;
+esac
+[ "${#INGRESS_CLASS}" -le 63 ] || fail "values.env 의 INGRESS_CLASS 가 63자를 넘는다(DNS-1123 label)"
+# Traefik 진입점 이름(router.entrypoints 어노테이션). websecure 가 아니면 그 진입점이 TLS 포트(:443 → hostPort)인지 사이트가 확인한다 — :80(web)에
+# 붙이면 포탈이 평문 포트로 나간다. 진입점이 실제로 있는지는 S8 이 Traefik args(--entryPoints.<이름>.address)로 본다.
+_set "${TRAEFIK_ENTRYPOINT:-}" || TRAEFIK_ENTRYPOINT=websecure
+case "$TRAEFIK_ENTRYPOINT" in
+  *[!abcdefghijklmnopqrstuvwxyz0123456789-]*|-*)
+    fail "values.env 의 TRAEFIK_ENTRYPOINT='$TRAEFIK_ENTRYPOINT' — Traefik 진입점 이름(소문자·숫자·-, 영숫자로 시작; 기본 websecure). 확인: Traefik 워크로드 args 의 --entryPoints.<이름>.address" ;;
+esac
+[ "${#TRAEFIK_ENTRYPOINT}" -le 63 ] || fail "values.env 의 TRAEFIK_ENTRYPOINT 가 63자를 넘는다"
+# 포탈 FQDN = Ingress host(RFC 1123 소문자 호스트 이름, 253자·라벨 63자 이하). 위 KEYS 검사가 빈 값·REPLACE_* 를 먼저 막는다. 와일드카드·포트·IP 는
+# 이유를 따로 말한다: 공용 Traefik 에서 넓은 host 는 다른 팀의 이름을 가로채고, Ingress host 는 포트·IP 를 받지 않는다(apiserver 거절 — SSA 에서야
+# 드러난다). 한 라벨 이름(예: dms)도 Ingress host 로는 맞는 문법이라 받는다.
+_host_problem() {
+  case "$1" in
+    *'*'*) echo "와일드카드(*)는 쓰지 않는다 — 포탈 FQDN 하나"; return ;;
+    *:*) echo "':' — 포트·스킴·IPv6 를 붙이지 않는다(이름만 — Traefik Host 매처는 Host 헤더의 포트를 떼고 본다)"; return ;;
+    */*) echo "경로·스킴을 붙이지 않는다(이름만)"; return ;;
+    *[ABCDEFGHIJKLMNOPQRSTUVWXYZ]*) echo "대문자 — 소문자로 쓴다(Ingress host 는 소문자만 받는다)"; return ;;
+    *[!abcdefghijklmnopqrstuvwxyz0123456789.-]*) echo "허용 밖 문자(소문자·숫자·. - 만)"; return ;;
+    *[!0123456789.]*) ;;
+    *) echo "IP 주소는 Ingress host 가 될 수 없다 — 사용자가 치는 FQDN(사내 DNS → LB VIP; VIP 는 PORTAL_VIP)"; return ;;
+  esac
+  case "$1" in
+    .*|*.|*..*) echo "점으로 시작·끝나거나 빈 라벨이 있다"; return ;;
+    -*|*-|*.-*|*-.*) echo "라벨이 - 로 시작하거나 끝난다"; return ;;
+  esac
+  [ "${#1}" -le 253 ] || { echo "253자를 넘는다"; return; }
+  _rest=$1
+  while :; do
+    _lab=${_rest%%.*}
+    [ "${#_lab}" -le 63 ] || { echo "라벨이 63자를 넘는다"; return; }
+    case "$_rest" in *.*) _rest=${_rest#*.} ;; *) break ;; esac
+  done
+}
+_why=$(_host_problem "$PORTAL_DOMAIN")
+[ -z "$_why" ] || fail "values.env 의 PORTAL_DOMAIN='$PORTAL_DOMAIN' — $_why (예: dms.corp.example)"
+INGRESS_LAYERS="platform/ingress"
+[ -f "$HERE/platform/ingress/kustomization.yaml" ] || fail "플랫폼 base 없음: $HERE/platform/ingress/kustomization.yaml"
 
 # --- 렌더(임시 디렉터리 — 끝에서만 OUT 을 바꾼다) ----------------------------------------------------------------------------
 mkdir -p "$HERE/.rendered"
@@ -565,16 +527,10 @@ if [ "$TEMPLATE" = 1 ]; then
       -e "s|REPLACE_SHARED_DIR|$SHARED_DIR|g" \
       -e "s|REPLACE_EMAIL_DOMAIN|$EMAIL_DOMAIN|g" \
       -e "s|REPLACE_LOCAL_ADMIN|$LOCAL_ADMIN|g" \
-      -e "$ALARM_SED" \
       -e "s|REPLACE_PORTAL_DOMAIN|$PORTAL_DOMAIN|g" \
       -e "s|REPLACE_PORTAL_VIP|$PORTAL_VIP|g" \
       "$f"
   done
-fi
-# 고정 오버레이(값이 오버레이 파일에 커밋돼 있다)에서 off 를 쓰면 출발지 경보 0 도 그 파일에 있어야 한다 — 렌더는 고정 오버레이를 고치지 않는다.
-if [ "$TEMPLATE" != 1 ] && [ "$GATEWAY_PROXY_PROTOCOL" = off ] \
-   && ! grep -h -v '^[[:space:]]*#' "$TMP"/app/*.yaml | grep -q 'DMS_LOGIN_ALARM_SOURCE_FAILURES:[[:space:]]*"0"'; then
-  echo "note: GATEWAY_PROXY_PROTOCOL=off 인데 $OV/patch-config.yaml 에 DMS_LOGIN_ALARM_SOURCE_FAILURES: \"0\" 이 없다 — 모든 사용자가 LB 주소로 묶여 출발지 경보가 여러 사람의 실패로 뜬다(고정 오버레이는 파일에서 직접 고친다)" >&2
 fi
 if [ -n "$CPV" ]; then
   if [ "$TEMPLATE" = 1 ]; then
@@ -756,142 +712,41 @@ spec:
               value: $PG_REF
 EOF
 
-# --- 입구 층(2026-11-03 ⑥, 설계 4-3·8-1 S8 — 순서: gateway-api → envoy-gateway(rollout) → platform/gateway) ----------------------------------------
-mkdir -p "$TMP/addons/gateway-api" "$TMP/addons/envoy-gateway" "$TMP/platform/gateway"
-cat > "$TMP/addons/gateway-api/kustomization.yaml" <<EOF
+# --- 입구 층(2026-11-16, S8) — base(deploy/platform/ingress)를 가리키고 사이트 값 넷을 JSON 패치로 -------------------------------------------
+# tls·rules 는 목록이라 전략적 머지로 한 칸만 바꾸기 어렵다 — 경로로 정확히 바꾼다(base 의 모양이 바뀌어 경로가 없으면 replace 가 실패해 렌더
+# (kustomize)가 멈춘다). 기본값과 같아도 늘 쓴다 — 렌더 결과만 보고 사이트 값을 읽을 수 있게.
+mkdir -p "$TMP/platform/ingress"
+cat > "$TMP/platform/ingress/kustomization.yaml" <<EOF
 $HEAD
-# 적용(S8 첫째): kubectl --context <ctx> apply --server-side --field-manager=dms-install -k <이 디렉터리> → CRD Established 대기(deploy/README §2g).
-# base = deploy/addons/gateway-api/$GATEWAY_API_VERSION(상류 standard 채널 원본 + 라벨). 사이트 값이 없다.
+# 적용(S8 — IngressClass $INGRESS_CLASS·Traefik 확인 뒤, install-detect 항목 traefik): kubectl --context <ctx> apply --server-side --field-manager=dms-install -k <이 디렉터리>
+# → 노드마다 https://$PORTAL_DOMAIN/readyz·인증서 대조(deploy/ingress-probe.sh — deploy/README §2g). DMS 는 Traefik 을 설치·변경하지 않는다.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
-  - ../../../../addons/gateway-api/$GATEWAY_API_VERSION
-EOF
-cat > "$TMP/addons/envoy-gateway/kustomization.yaml" <<EOF
-$HEAD
-# 적용(S8 둘째): kubectl --context <ctx> apply --server-side --field-manager=dms-install -k <이 디렉터리> → rollout status deploy/envoy-gateway
-# (ns envoy-gateway-system) → certgen Job 완료(deploy/README §2g). base = deploy/addons/envoy-gateway/$ENVOY_GATEWAY_VERSION(상류 원본 + DMS 패치 층).
-apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-resources:
-  - ../../../../addons/envoy-gateway/$ENVOY_GATEWAY_VERSION
+  - ../../../../platform/ingress
 patches:
-  - path: site-patch.yaml
-  - path: site-config.yaml
+  - target:
+      group: networking.k8s.io
+      version: v1
+      kind: Ingress
+      name: dms-portal-traefik
+    patch: |-
+      - op: replace
+        path: /metadata/annotations/traefik.ingress.kubernetes.io~1router.entrypoints
+        value: "$TRAEFIK_ENTRYPOINT"
+      - op: replace
+        path: /spec/ingressClassName
+        value: "$INGRESS_CLASS"
+      - op: replace
+        path: /spec/tls/0/hosts/0
+        value: "$PORTAL_DOMAIN"
+      - op: replace
+        path: /spec/tls/0/secretName
+        value: "$PORTAL_TLS_SECRET"
+      - op: replace
+        path: /spec/rules/0/host
+        value: "$PORTAL_DOMAIN"
 EOF
-cat > "$TMP/addons/envoy-gateway/site-patch.yaml" <<EOF
-$HEAD
-# 이미지 = <애드온 레지스트리>/<lock DEST>@<amd64 매니페스트 digest>(deploy/versions.env + deploy/images.lock) — 컨트롤러와 certgen Job 이 같은 이미지다.
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: envoy-gateway
-  namespace: envoy-gateway-system
-spec:
-  template:
-    spec:
-      containers:
-        - name: envoy-gateway
-          image: $EG_REF
----
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: eg-gateway-helm-certgen
-  namespace: envoy-gateway-system
-spec:
-  template:
-    spec:
-      containers:
-        - name: envoy-gateway-certgen
-          image: $EG_REF
-EOF
-# EG 설정(ConfigMap)은 base 의 patch-config.yaml 을 원천으로 두 자리표시자만 글자 그대로 바꾼 사본이다(설정 문자열 안 — kustomize images 가 못
-# 닿는다). 점은 정규식 메타라 이스케이프한다. 바꾼 뒤 자리표시자가 남으면 멈춘다(base 와 versions.env 를 위에서 대조했지만 그물 한 겹 더).
-_re() { printf '%s' "$1" | sed 's/[.]/\\./g'; }
-{
-  echo "$HEAD"
-  echo "# EnvoyGateway 설정 = deploy/addons/envoy-gateway/$ENVOY_GATEWAY_VERSION/patch-config.yaml 의 이미지 두 줄을 lock digest ref 로 바꾼 것(기동 때만"
-  echo "# 읽힌다 — 바뀌면 kubectl --context <ctx> -n envoy-gateway-system rollout restart deploy/envoy-gateway, deploy/README §2g)."
-  sed -e '/^#/d' \
-      -e "s|set-by-overlay\\.invalid/$(_re "$ENVOY_GATEWAY_IMAGE")\$|$EG_REF|" \
-      -e "s|set-by-overlay\\.invalid/$(_re "$ENVOY_PROXY_IMAGE")\$|$ENVOY_REF|" \
-      "$EG_BASE/patch-config.yaml"
-} > "$TMP/addons/envoy-gateway/site-config.yaml"
-! grep -q 'set-by-overlay' "$TMP/addons/envoy-gateway/site-config.yaml" \
-  || fail "EG 설정 사본에 자리표시자가 남았다 — $EG_BASE/patch-config.yaml 의 이미지 줄 모양(\`image: set-by-overlay.invalid/<DEST>\`)을 확인"
-# platform/gateway: JSON 패치(EnvoyProxy·정책은 CRD 라 전략적 머지의 목록 병합 키가 없다 — 경로로 정확히 바꾼다). shutdown-manager 는 패치 목록의
-# 둘째 항목이다 — test op 가 이름을 확인해 base 의 순서가 바뀌면 렌더(kustomize)가 실패한다.
-{
-  echo "$HEAD"
-  echo "# 적용(S8 셋째, addons/envoy-gateway 가 Ready 된 뒤): kubectl --context <ctx> apply --server-side --field-manager=dms-install -k <이 디렉터리>"
-  echo "# → Gateway dms-portal Programmed 대기 → **마스터마다** \`ss -ltnp\` 에 :$GATEWAY_LISTEN_PORT(Programmed 는 bind 실패를 못 잡는다 — deploy/README §2g). PROXY 모드 = $GATEWAY_PROXY_PROTOCOL."
-  echo "apiVersion: kustomize.config.k8s.io/v1beta1"
-  echo "kind: Kustomization"
-  echo "resources:"
-  echo "  - ../../../../platform/gateway"
-  echo "patches:"
-  echo "  - target:"
-  echo "      group: gateway.envoyproxy.io"
-  echo "      kind: EnvoyProxy"
-  echo "      name: dms-portal"
-  echo "    patch: |-"
-  echo "      - op: replace"
-  echo "        path: /spec/provider/kubernetes/envoyDaemonSet/container/image"
-  echo "        value: $ENVOY_REF"
-  echo "      - op: test"
-  echo "        path: /spec/provider/kubernetes/envoyDaemonSet/patch/value/spec/template/spec/containers/1/name"
-  echo "        value: shutdown-manager"
-  echo "      - op: replace"
-  echo "        path: /spec/provider/kubernetes/envoyDaemonSet/patch/value/spec/template/spec/containers/1/image"
-  echo "        value: $EG_REF"
-  if [ -n "$GATEWAY_ENVOY_CPU_REQUEST" ]; then
-    echo "      - op: replace"
-    echo "        path: /spec/provider/kubernetes/envoyDaemonSet/container/resources/requests/cpu"
-    echo "        value: \"$GATEWAY_ENVOY_CPU_REQUEST\""
-  fi
-  if [ -n "$GATEWAY_ENVOY_MEMORY_REQUEST" ]; then
-    echo "      - op: replace"
-    echo "        path: /spec/provider/kubernetes/envoyDaemonSet/container/resources/requests/memory"
-    echo "        value: $GATEWAY_ENVOY_MEMORY_REQUEST"
-  fi
-  if [ -n "$CPV" ]; then
-    echo "      - op: replace"
-    echo "        path: /spec/provider/kubernetes/envoyDaemonSet/pod/nodeSelector/node-role.kubernetes.io~1control-plane"
-    echo "        value: \"$CPV\""
-  fi
-  echo "  - target:"
-  echo "      group: gateway.envoyproxy.io"
-  echo "      kind: ClientTrafficPolicy"
-  echo "      name: dms-portal"
-  echo "    patch: |-"
-  if [ "$GATEWAY_PROXY_PROTOCOL" = off ]; then
-    # off: proxyProtocol 칸을 통째로 뺀다 — Envoy 리스너에 proxy_protocol 필터가 붙지 않는다(optional 과 달리 클라이언트가 심은 헤더도 읽지 않는다).
-    echo "      - op: remove"
-    echo "        path: /spec/proxyProtocol"
-  else
-    echo "      - op: replace"
-    echo "        path: /spec/proxyProtocol/optional"
-    echo "        value: $PROXY_OPTIONAL"
-  fi
-  echo "  - target:"
-  echo "      group: gateway.networking.k8s.io"
-  echo "      kind: Gateway"
-  echo "      name: dms-portal"
-  echo "    patch: |-"
-  echo "      - op: test"
-  echo "        path: /spec/listeners/0/name"
-  echo "        value: https"
-  echo "      - op: replace"
-  echo "        path: /spec/listeners/0/tls/certificateRefs/0/name"
-  echo "        value: $PORTAL_TLS_SECRET"
-  if [ "$GATEWAY_LISTEN_PORT" != 443 ]; then
-    # 리스너 포트 = Envoy 가 마스터 호스트에서 여는 포트(hostNetwork + useListenerPortAsContainerPort). 기본 443 이면 base 그대로(패치 없음).
-    echo "      - op: replace"
-    echo "        path: /spec/listeners/0/port"
-    echo "        value: $GATEWAY_LISTEN_PORT"
-  fi
-} > "$TMP/platform/gateway/kustomization.yaml"
 
 # --- DB 층(2026-11-03 ⑤, 설계 6-1·6-2·6-4·8-1 S10) — base(deploy/platform/db/*)를 가리키는 kustomization + 사이트 값 ----------------------
 PGDATA_DIR="$SHARED_DIR/dms/pgdata"
@@ -1041,7 +896,7 @@ EOF
 if [ -f "$OV/kube-context" ]; then
   for layer in $LAYERS $DB_LAYERS db-probe; do cp "$OV/kube-context" "$TMP/platform/$layer/"; done
   cp "$OV/kube-context" "$TMP/addons/cnpg/"
-  for layer in $GATEWAY_LAYERS; do cp "$OV/kube-context" "$TMP/$layer/"; done
+  for layer in $INGRESS_LAYERS; do cp "$OV/kube-context" "$TMP/$layer/"; done
 fi
 {
   echo "# deploy/render.sh $SITE 의 해석값 — 손으로 고치지 않는다(설치기·런북이 읽는다; sh 로 . 해도 된다)."
@@ -1069,17 +924,13 @@ fi
   echo "PG_STORAGE_SIZE=$PG_STORAGE_SIZE"
   echo "PG_PLACEMENT=$PG_PLACEMENT"
   echo "PG_BACKUP_KEEP=$PG_BACKUP_KEEP"
-  # 입구(⑥) — S8 순서의 층(렌더 디렉터리 기준 상대 경로)·버전·이미지 ref·사이트 값. PORTAL_DOMAIN·PORTAL_VIP 는 템플릿 오버레이(prod)만 있다
-  # (S12 `curl --resolve <PORTAL_DOMAIN>:443:<PORTAL_VIP>` 의 대상 — 인증서 SAN 도 이 둘).
-  echo "GATEWAY_LAYERS=\"$GATEWAY_LAYERS\""
-  echo "GATEWAY_API_VERSION=$GATEWAY_API_VERSION"
-  echo "ENVOY_GATEWAY_VERSION=$ENVOY_GATEWAY_VERSION"
-  echo "ENVOY_GATEWAY_REF=$EG_REF"
-  echo "ENVOY_PROXY_REF=$ENVOY_REF"
-  echo "GATEWAY_PROXY_PROTOCOL=$GATEWAY_PROXY_PROTOCOL"
-  echo "GATEWAY_LISTEN_PORT=$GATEWAY_LISTEN_PORT"
+  # 입구(2026-11-16 — 클러스터의 Traefik) — S8 의 층(렌더 디렉터리 기준 상대 경로)·사이트 값. PORTAL_VIP 는 매니페스트에 없다(S12
+  # `curl --resolve <PORTAL_DOMAIN>:443:<PORTAL_VIP>` 의 대상 — 인증서 SAN 도 이 둘). 고정 오버레이는 PORTAL_VIP 가 선택이라 비어 있을 수 있다.
+  echo "INGRESS_LAYERS=\"$INGRESS_LAYERS\""
+  echo "INGRESS_CLASS=$INGRESS_CLASS"
+  echo "TRAEFIK_ENTRYPOINT=$TRAEFIK_ENTRYPOINT"
   echo "PORTAL_TLS_SECRET=$PORTAL_TLS_SECRET"
-  echo "PORTAL_DOMAIN=${PORTAL_DOMAIN:-}"
+  echo "PORTAL_DOMAIN=$PORTAL_DOMAIN"
   echo "PORTAL_VIP=${PORTAL_VIP:-}"
 } > "$TMP/render.env"
 
@@ -1087,7 +938,7 @@ rm -rf "$OUT"
 mv "$TMP" "$OUT"
 trap - EXIT
 for layer in $LAYERS; do echo "PLATFORM: $OUT/platform/$layer"; done
-for layer in $GATEWAY_LAYERS; do echo "GATEWAY: $OUT/$layer"; done
+for layer in $INGRESS_LAYERS; do echo "INGRESS: $OUT/$layer"; done
 echo "ADDON: $OUT/addons/cnpg"
 for layer in $DB_LAYERS; do echo "PLATFORM: $OUT/platform/$layer"; done
 echo "PROBE: $OUT/platform/db-probe"

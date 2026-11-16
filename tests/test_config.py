@@ -89,6 +89,39 @@ def test_artifact_download_max_bytes_env_override():
     assert s.artifact_download_max_bytes == 1048576
 
 
+def test_ingress_replacement_api_settings_defaults_and_env_override():
+    # 2026-11-16 입구 교체(Envoy → 클러스터의 Traefik): 본문 상한(api/body_limit.py)·uvicorn keep-alive(cli.py). 튜플·필드
+    # 양쪽 배선을 고정한다(빌드 프리플라이트 선례) -- 필드만 넣으면 env 가 조용히 무시되고, 튜플만 넣으면 **extra 가 기동을 깬다.
+    s = Settings.from_env(VALID)
+    assert (s.max_request_body_bytes, s.api_keep_alive_seconds) == (20971520, 120)
+    d = Settings(database_url="u", shared_token="t", admin_token="a", session_secret="s")
+    assert (d.max_request_body_bytes, d.api_keep_alive_seconds) == (20971520, 120)
+    # 하한 값 자체는 받는다(경계).
+    s = Settings.from_env({**VALID, "DMS_MAX_REQUEST_BODY_BYTES": "1048576", "DMS_API_KEEP_ALIVE_SECONDS": "1"})
+    assert (s.max_request_body_bytes, s.api_keep_alive_seconds) == (1048576, 1)
+    s = Settings.from_env({**VALID, "DMS_MAX_REQUEST_BODY_BYTES": "52428800", "DMS_API_KEEP_ALIVE_SECONDS": "300"})
+    assert (s.max_request_body_bytes, s.api_keep_alive_seconds) == (52428800, 300)
+
+
+def test_keep_alive_default_outlives_the_ingress_idle_pool():
+    # 백엔드 keep-alive 는 입구의 상류 유휴 타임아웃(Traefik ServersTransport 기본 idleConnTimeout 90s)보다 길어야 한다 --
+    # 짧으면 백엔드가 먼저 닫은 재사용 연결에 실린 본문 있는 POST 가 502(config.py 주석). 기본을 낮추는 변경을 여기서 멈춘다.
+    assert Settings.from_env(VALID).api_keep_alive_seconds > 90
+
+
+@pytest.mark.parametrize("env", [{"DMS_MAX_REQUEST_BODY_BYTES": "1048575"},
+                                 {"DMS_MAX_REQUEST_BODY_BYTES": "0"},
+                                 {"DMS_MAX_REQUEST_BODY_BYTES": "-1"},
+                                 {"DMS_MAX_REQUEST_BODY_BYTES": "20MiB"},
+                                 {"DMS_API_KEEP_ALIVE_SECONDS": "0"},
+                                 {"DMS_API_KEEP_ALIVE_SECONDS": "-5"},
+                                 {"DMS_API_KEEP_ALIVE_SECONDS": "2m"}])
+def test_ingress_replacement_api_settings_reject_bad_values(env):
+    with pytest.raises(SettingsError) as e:
+        Settings.from_env({**VALID, **env})
+    assert next(iter(env)) in str(e.value)
+
+
 def test_request_delete_settings_defaults_and_env_override():
     # 요청 삭제(2026-10-08): 조용한 창(api)·정리 루프 간격(controller). 튜플·필드 양쪽 배선을 고정한다(빌드 프리플라이트
     # 선례) -- 필드만 넣으면 env 가 조용히 무시되고, 튜플만 넣으면 **extra 가 기동을 깬다.

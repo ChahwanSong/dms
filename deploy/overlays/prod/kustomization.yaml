@@ -1,6 +1,7 @@
-# DMS 프로덕션 오버레이(2026-08-20, 사용자 결정: MetalLB 유지 + prod 오버레이 → 2026-11-03 ⑥ 설계 v6 #13: prod 입구는 Envoy Gateway —
-# MetalLB·ingress-nginx 를 쓰지 않는다. 공용 base 의 Ingress·MetalLB 풀은 patch-remove-ingress.yaml 이 지우고, 포탈 입구는 렌더러가 내는
-# 플랫폼 층 deploy/.rendered/prod/platform/gateway(+ addons/gateway-api·envoy-gateway)다 — deploy/README §2g).
+# DMS 프로덕션 오버레이(2026-08-20, 사용자 결정: MetalLB 유지 + prod 오버레이 → 2026-11-03 ⑥ 설계 v6 #13: MetalLB·ingress-nginx 를 쓰지
+# 않는다 → 2026-11-16 입구는 클러스터에 이미 있는 Traefik(Envoy Gateway 폐기). 공용 base 의 Ingress·MetalLB 풀은 patch-remove-ingress.yaml 이
+# 지우고, 포탈 입구는 렌더러가 내는 플랫폼 층 deploy/.rendered/prod/platform/ingress(Ingress dms-portal-traefik — host = values.env 의
+# PORTAL_DOMAIN)다 — deploy/README §2g).
 #
 # 사이트 중립 base(deploy/k8s/*.yaml — 이미지·아티팩트 경로는 자리표시자 set-by-overlay.invalid)를 두고, 사이트별 값만 여기서
 # 덮는다. 이 파일은 **템플릿**이다(REPLACE_* 토큰) -- 직접 `kubectl apply -k deploy/overlays/prod` 하면 REPLACE_ 이미지가 들어가

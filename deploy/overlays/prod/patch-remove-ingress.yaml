@@ -1,5 +1,6 @@
-# prod 는 MetalLB + ingress-nginx 를 쓰지 않는다(2026-11-03 ⑥, 설계 v6 #13·9 ⑥ — 「Ingress $patch: delete, prod MetalLB 삭제」). 포탈은 Avi
-# VS-443(L4, PROXY v2) → 마스터 ×3 :443 의 Envoy(deploy/platform/gateway — Gateway·HTTPRoute 가 옛 Ingress 의 자리)로 들어온다.
+# prod 는 MetalLB + ingress-nginx 를 쓰지 않는다(2026-11-03 ⑥, 설계 v6 #13·9 ⑥ — 「Ingress $patch: delete, prod MetalLB 삭제」). 포탈은 LB
+# VS-443(L4) → Traefik 이 도는 노드 :443 → 플랫폼 층의 Ingress dms-portal-traefik(deploy/platform/ingress — 2026-11-16, 클러스터의 Traefik 이
+# 집는다; 이름이 달라 이 패치가 지우는 dms-portal 과 겹치지 않는다)으로 들어온다.
 #
 # 공용 base(deploy/k8s/46-ingress.yaml·47-metallb-public-pool.yaml)는 고치지 않는다 — 테스트베드(testbed-k8s)는 소크 뒤 Ingress·MetalLB 를
 # 지울 때까지 되돌림용으로 그것을 그대로 쓰고(BACKLOG ⑥ 「소크 뒤 Ingress·MetalLB 삭제」), main·dms-ssc 라인과 같은 파일이다(설계 9 「공통 규칙」). 그래서 prod 렌더에서만 세 객체를 지운다: 지우지 않으면 MetalLB·ingress-nginx 가 없는 prod 에

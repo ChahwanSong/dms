@@ -155,8 +155,6 @@ if verb == "apply":
     W.setdefault("applied", []).append(path)
     if path.endswith("platform/db-cluster") and not W.get("cluster"):
         W["cluster"] = dict(W.get("cluster_after_apply") or {"instances": "3", "ready": "3", "primary": "dms-pg-1"})
-    if path.endswith("addons/envoy-gateway"):
-        W.setdefault("secrets", {}).update({"envoy-gateway-system/envoy-gateway": {}, "envoy-gateway-system/envoy": {}})
     if path.endswith("/app"):
         W.setdefault("jobs", {})["dms-migrate"] = W.get("migrate_state", "Complete")
         gen = W.setdefault("gen", {})
@@ -222,13 +220,13 @@ if kind == "clusters.postgresql.cnpg.io":
         out(c.get("phase", "Cluster in healthy state"))
     out("")
 if kind == "endpoints":
+    if names == ["dms-api"]:                           # S8 ingress-probe 의 --tls-only 판단(앱이 아직 없으면 인증서만)
+        out(W.get("api_eps", "10.0.0.7" if W.get("gen") else ""))
     out("10.0.0.9" if W.get("cluster") else "")
 if kind == "pod":
     if "-l" in rest:                                   # 레지스트리 파드의 노드(S4 실패 사유)
         out(W.get("pod_nodes", ""))
     out("True")
-if kind == "pods":                                      # S8 hostPort 충돌 감지(2026-11-14) — 「ns/이름\t노드\thostNetwork\thostPort들」 줄
-    out(W.get("hostport_pods", ""))
 if kind == "cronjob":
     out(W.get("cronjob_last", ""))
 if kind == "job":

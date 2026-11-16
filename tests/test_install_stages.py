@@ -3,11 +3,12 @@ S7 종료 코드 처리, in-cluster 대 external, 멱등 재실행, `--plan` 무
 리뷰 1(2026-11-03): 단계별 멈춤 조건 표(STOPS — 판정·사유 문구·다음 단계 없음·적용되면 안 되는 층), S10 「사전 검사 → Cluster」 순서, migrate
 선삭제 순서, 재개 명령의 플래그·env, env DMS_NS 차단, 가드 allow-image(레지스트리·CNPG), --adopt db 의 S9 dry-run, 빈 --stage·--only, S12 의
 verify 인자·FAIL 뒤 S13, S13 첫 관리자. T9(2026-11-03): SSA 충돌 안내(관리자 이름·--force-conflicts — --adopt 는 P 에만), 감지 WARN 을 그 항목의
-단계가 센다, 감지 FAIL 줄의 항목 이름. verify.sh·host-net-probe.sh 의 판정 자체는 test_install_verify.py.
+단계가 센다, 감지 FAIL 줄의 항목 이름. 2026-11-16(설계 D6 — 입구 = 클러스터의 Traefik): S8 = traefik 판정 stop 이면 멈춤(사유) → TLS →
+platform/ingress SSA → ingress-probe.sh(앱 전이면 --tls-only). verify.sh·ingress-probe.sh 의 판정 자체는 test_install_verify.py.
 
 실제 sh(dash)로 install.sh 를 돌린다. 클러스터·도우미는 전부 가짜다:
   - PATH 앞의 kubectl 심(fixtures/install_stages/fake_kubectl.py) — 세계 JSON 을 읽고 고쳐 써서 apply·create·annotate 가 다음 실행에 보인다.
-  - deploy/ 의 도우미(install-detect.py·pg-secrets.py·…·push-images.sh·verify.sh·host-net-probe.sh·guard-images.sh)는 같은 가짜
+  - deploy/ 의 도우미(install-detect.py·pg-secrets.py·…·push-images.sh·verify.sh·ingress-probe.sh·guard-images.sh)는 같은 가짜
     (fixtures/install_stages/fake_helper.py)로 바꿔 놓고 인자·모드를 기록한다 — 판정 로직 자체는 각 도우미의 테스트가 본다.
   - render.sh 도 가짜(층 디렉터리와 render.env 만) — 렌더 계약은 test_platform_registry_contract·test_addons_render 가 본다.
   - curl 심(레지스트리 HEAD — FAKE_CURL_404 의 repo:tag 만 404, `/v2/` 는 FAKE_CURL_V2(기본 200)).
@@ -27,7 +28,7 @@ DEPLOY = REPO / "deploy"
 FIX = REPO / "tests" / "fixtures" / "install_stages"
 PY_HELPERS = ("install-detect.py", "pg-secrets.py", "selinux-probe.py", "pull-probe.py", "shared-storage-probe.py",
               "pg-path-probe.py", "images-lock.py")
-SH_HELPERS = ("preflight-cluster.sh", "verify.sh", "push-images.sh", "host-net-probe.sh", "overlays/guard-images.sh")
+SH_HELPERS = ("preflight-cluster.sh", "verify.sh", "push-images.sh", "ingress-probe.sh", "overlays/guard-images.sh")
 ALL = ["S1", "S2", "S2b", "S3", "S4", "S5", "S6", "S7", "S8", "S9", "S9b", "S10", "S11", "S12", "S13"]
 
 FAKE_RENDER = r'''#!/bin/sh
@@ -35,15 +36,17 @@ echo "$*" >> "$FAKE_RENDER_LOG"
 site=$1
 HERE=$(CDPATH= cd "$(dirname "$0")" && pwd)
 OUT="$HERE/.rendered/$site"
-for d in app platform/priorityclass platform/registry platform/gateway platform/db-volumes platform/db-cluster platform/db-backup \
-         platform/db-probe addons/cnpg addons/gateway-api addons/envoy-gateway; do mkdir -p "$OUT/$d"; done
+for d in app platform/priorityclass platform/registry platform/ingress platform/db-volumes platform/db-cluster platform/db-backup \
+         platform/db-probe addons/cnpg; do mkdir -p "$OUT/$d"; done
+# render.env 의 입구 키(2026-11-16 설계 D3): INGRESS_LAYERS·INGRESS_CLASS·TRAEFIK_ENTRYPOINT·PORTAL_TLS_SECRET·PORTAL_DOMAIN(필수)·PORTAL_VIP.
 { echo "SITE=$site"; echo "REGISTRY_MODE=${FAKE_RMODE:-in-cluster}"; echo "REGISTRY=${FAKE_REGISTRY:-10.96.0.50:5000}"
   echo "REGISTRY_CLUSTER_IP=${FAKE_RCIP-10.96.0.50}"; echo "REGISTRY_PORT=5000"; echo "REGISTRY_TLS_VERIFY=${FAKE_TLS:-false}"
-  echo "ADDON_REGISTRY=${FAKE_ADDON_REGISTRY:-10.96.0.50:5000}"; echo "SHARED_DIR=/srv/shared"; echo "PORTAL_TLS_SECRET=dms-portal-tls"
-  echo "PORTAL_DOMAIN="; echo "PORTAL_VIP="; } > "$OUT/render.env"
-[ -z "${FAKE_GWPORT:-}" ] || echo "GATEWAY_LISTEN_PORT=$FAKE_GWPORT" >> "$OUT/render.env"     # 옛 렌더에는 이 키가 없다(= 443)
+  echo "ADDON_REGISTRY=${FAKE_ADDON_REGISTRY:-10.96.0.50:5000}"; echo "SHARED_DIR=/srv/shared"
+  echo 'INGRESS_LAYERS="platform/ingress"'; echo "INGRESS_CLASS=traefik"; echo "TRAEFIK_ENTRYPOINT=websecure"
+  echo "PORTAL_TLS_SECRET=dms-portal-tls"; echo "PORTAL_DOMAIN=${FAKE_DOMAIN-portal.example}"; echo "PORTAL_VIP=${FAKE_VIP-}"; } > "$OUT/render.env"
 [ -z "${FAKE_PIN:-}" ] || echo "$FAKE_PIN" > "$OUT/app/kube-context"
 echo "PLATFORM: $OUT/platform/priorityclass"
+echo "INGRESS: $OUT/platform/ingress"
 echo "RENDERED: $OUT/app"
 '''
 
@@ -59,9 +62,9 @@ APP = ["10.96.0.50:5000/dms:d7", "10.96.0.50:5000/dms-agent:d7", "10.96.0.50:500
 
 
 def installed_world(**over):
-    w = {"contexts": ["known"], "ns": ["dms", "cnpg-system", "envoy-gateway-system"],
+    w = {"contexts": ["known"], "ns": ["dms", "cnpg-system"],
          "secrets": {"dms/dms-secrets": {"rv": "10"}, "dms/dms-pg-app": {}, "dms/dms-portal-tls": {"type": "kubernetes.io/tls"},
-                     "dms/dms-registry-http": {}, "envoy-gateway-system/envoy-gateway": {}, "envoy-gateway-system/envoy": {}},
+                     "dms/dms-registry-http": {}},
          "cm_rv": "5", "gen": {"deploy/dms-api": "3", "deploy/dms-controller": "3", "ds/dms-agent": "2"},
          "annotations": {w: "cm=5,secret=10" for w in ("deploy/dms-api", "deploy/dms-controller", "ds/dms-agent")},
          "cronjob_last": "2026-11-03T07:17:04Z", "jobs": {}, "cluster": {"instances": "3", "ready": "3", "primary": "dms-pg-1"},
@@ -78,9 +81,9 @@ def fresh_world(**over):
     return w
 
 
-FRESH_DETECT = {"priorityclass": "A install 1 PASS", "registry": "A install 1 PASS", "gateway-api": "A install 1 PASS",
-                "envoy-gateway": "A install 1 PASS", "gateway": "A install 1 PASS", "cnpg": "A install 1 PASS",
-                "volcano": "C reuse 0 PASS", "db": "A install 1 PASS"}
+# 새 클러스터 — 입구(Traefik)는 클러스터 운영자가 이미 깔아 둔 것(C, 2026-11-16 전제 — DMS 는 설치하지 않는다).
+FRESH_DETECT = {"priorityclass": "A install 1 PASS", "registry": "A install 1 PASS", "traefik": "C reuse 0 PASS",
+                "ingress": "A install 1 PASS", "cnpg": "A install 1 PASS", "volcano": "C reuse 0 PASS", "db": "A install 1 PASS"}
 
 
 class Rig:
@@ -270,9 +273,8 @@ def test_resume_with_stage_s5_continues_to_the_end(rig):
     modes = [a[a.index("--mode") + 1] for a in rig.helper_calls("pg-path-probe.py")]
     assert modes == ["pv-check", "precheck", "contrast"]
     applied = [p.split("/.rendered/testbed-k8s/")[-1] for p in w["applied"]]
-    # 설치 순서: 입구 → CNPG → DB 층(volumes → cluster → backup) → 앱
-    order = ["addons/gateway-api", "addons/envoy-gateway", "platform/gateway", "addons/cnpg", "platform/db-volumes",
-             "platform/db-cluster", "platform/db-backup", "app"]
+    # 설치 순서: 입구(DMS Ingress — Traefik 은 건드리지 않는다) → CNPG → DB 층(volumes → cluster → backup) → 앱
+    order = ["platform/ingress", "addons/cnpg", "platform/db-volumes", "platform/db-cluster", "platform/db-backup", "app"]
     assert [p for p in applied if p in order] == order, applied
     pp = rig.helper_calls("pull-probe.py")
     assert pp[0][:6] == ["--context", "known", "--namespace", "dms", "--render-env", pp[0][5]] and pp[0][5].endswith("render.env")
@@ -293,7 +295,7 @@ def test_rerun_on_an_installed_cluster_is_idempotent(rig):
         assert not [c for c in muts if "rollout restart" in c], muts                # 설정이 그대로면 재시작 없음
         assert not [c for c in muts if "/addons/" in c], muts                       # D= 서드파티는 no-op
         ssa = sorted(c.split("/.rendered/testbed-k8s/")[-1] for c in muts if "--server-side" in c)
-        assert ssa == ["platform/db-backup", "platform/db-cluster", "platform/db-volumes", "platform/gateway",
+        assert ssa == ["platform/db-backup", "platform/db-cluster", "platform/db-volumes", "platform/ingress",
                        "platform/priorityclass", "platform/registry"], ssa
         assert all("--field-manager=dms-install" in c for c in muts if "--server-side" in c)
         app = [c for c in muts if c.endswith("/app") and " apply " in f" {c} "]
@@ -395,7 +397,7 @@ def test_external_registry_site_skips_the_registry_layer_and_compares_the_site_r
 
 def test_c_cnpg_lock_line_is_skipped_and_never_installed(rig):
     rig.world(installed_world())
-    rig.scenario({"detect": {"cnpg": "C reuse 0 PASS", "gateway-api": "C reuse 0 PASS", "envoy-gateway": "C! reuse 0 WARN"}})
+    rig.scenario({"detect": {"cnpg": "C reuse 0 PASS", "traefik": "C! reuse 0 WARN"}})
     r = rig.run("--context", "known", "--site", "testbed-k8s", "--only", "S5,S8,S9")
     assert r.returncode == 0, r.all
     cr = rig.helper_calls("images-lock.py")[0]
@@ -403,7 +405,8 @@ def test_c_cnpg_lock_line_is_skipped_and_never_installed(rig):
     muts = mutations(rig)
     assert not [c for c in muts if "/addons/" in c], muts                           # C 는 다시 설치하지 않는다(설계 8-2)
     assert not [c for c in muts if "create namespace" in c]
-    assert [c for c in muts if c.endswith("platform/gateway")]                      # C 경로에서도 DMS 소유 입구 층은 적용한다
+    assert not [c for c in muts if "traefik" in c.lower() or "kube-system" in c], muts   # Traefik 은 DMS 가 바꾸지 않는다(2026-11-16)
+    assert [c for c in muts if c.endswith("platform/ingress")]                      # DMS 소유 입구 층(Ingress)은 적용한다
     dry = [c for c in cluster_calls(rig) if "--dry-run=server" in c]
     assert len(dry) == 1 and dry[0].endswith("platform/db-cluster")              # 9443 경로 = Cluster CR dry-run(최종 판정)
 
@@ -411,25 +414,25 @@ def test_c_cnpg_lock_line_is_skipped_and_never_installed(rig):
 def test_a_addons_are_installed_in_order_with_namespaces_first(rig):
     w = installed_world()
     w["ns"] = ["dms"]
-    w["secrets"] = {k: v for k, v in w["secrets"].items() if not k.startswith("envoy-gateway-system/")}
     rig.world(w)
-    rig.scenario({"detect": {"gateway-api": "A install 1 PASS", "envoy-gateway": "A install 1 PASS", "cnpg": "A install 1 PASS"}})
+    rig.scenario({"detect": {"ingress": "A install 1 PASS", "cnpg": "A install 1 PASS"}})
     r = rig.run("--context", "known", "--site", "testbed-k8s", "--only", "S8,S9")
     assert r.returncode == 0, r.all
     muts = mutations(rig)
     # ns 는 처음부터 DMS 라벨로 SSA(2026-11-03 ⑦ 리뷰 1 — 라벨 없이 만들고 층 SSA 전에 끊기면 다음 감지가 그 ns 를 「남의 것」(P)으로 봤다)
     ns_ssa = [i for i, c in enumerate(muts) if c.endswith("apply --server-side --field-manager=dms-install -f -")]
-    i_eg = next(i for i, c in enumerate(muts) if c.endswith("addons/envoy-gateway"))
+    i_ing = next(i for i, c in enumerate(muts) if c.endswith("platform/ingress"))
     i_cnpg = next(i for i, c in enumerate(muts) if c.endswith("addons/cnpg"))
-    assert len(ns_ssa) == 2 and ns_ssa[0] < i_eg < ns_ssa[1] < i_cnpg, muts
+    assert len(ns_ssa) == 1 and i_ing < ns_ssa[0] < i_cnpg, muts
     assert not [c for c in muts if "create namespace" in c]
     w = rig.world()
-    assert w["ns_applied"] == ["envoy-gateway-system", "cnpg-system"]
+    assert w["ns_applied"] == ["cnpg-system"]
     assert all(w["ns_labels"][n] == {"app.kubernetes.io/managed-by": "dms-install"} for n in w["ns_applied"])
-    probes = [a for a in rig.helper_calls("host-net-probe.sh")]
-    assert [a[-1] for a in probes] == ["--sysctl", "--listen"]                       # sysctl 은 platform/gateway 전에, :443 은 Programmed 뒤
+    probes = [h for h in rig.helpers() if h["name"] == "ingress-probe.sh"]
+    assert len(probes) == 1                                                          # 입구 층 SSA 뒤 Traefik 경유 확인 한 번
+    assert any(p.endswith("platform/ingress") for p in probes[0]["applied"])
     guards = [a[0].split("/.rendered/testbed-k8s/")[-1] for a in rig.helper_calls("guard-images.sh")]
-    assert guards == ["addons/envoy-gateway", "addons/cnpg"]
+    assert guards == ["addons/cnpg"]                                                 # Ingress 층에는 이미지가 없다 — 가드 없음
 
 
 def test_upgrade_and_adopt_flags_reach_detection_and_ssa(rig):
@@ -492,8 +495,9 @@ def test_plan_reports_a_bad_secret_but_still_shows_the_plan(rig):
 
 # --- S2 · S10 · S11 ------------------------------------------------------------------------------------------------------------
 
-def test_missing_tls_secret_warns_at_s2_and_stops_at_s8_before_the_gateway_layer(rig):
-    # 2026-11-03 ⑦ 리뷰 1: 인증서를 쓰는 곳은 S8(platform/gateway) 뿐이다(설계 8-1 S2 판정 「—」) — S2 는 알리기만, S8 이 SSA 전에 멈춘다.
+def test_missing_tls_secret_warns_at_s2_and_stops_at_s8_before_the_ingress_layer(rig):
+    # 2026-11-03 ⑦ 리뷰 1: 인증서를 쓰는 곳은 S8(입구 층) 뿐이다(설계 8-1 S2 판정 「—」) — S2 는 알리기만, S8 이 SSA 전에 멈춘다.
+    # 2026-11-16: 입구 층 = platform/ingress(Traefik 이 Ingress 의 tls 로 읽는다 — 없으면 TRAEFIK DEFAULT CERT).
     w = installed_world()
     del w["secrets"]["dms/dms-portal-tls"]
     rig.world(w)
@@ -503,8 +507,8 @@ def test_missing_tls_secret_warns_at_s2_and_stops_at_s8_before_the_gateway_layer
     r = rig.run("--context", "known", "--site", "testbed-k8s", "--stage", "S8")
     assert r.returncode == 1 and stages(r) == [("S8", "FAIL")], r.all
     assert "create secret tls dms-portal-tls" in r.all and "--stage S8" in r.all
-    assert not [c for c in mutations(rig) if c.endswith("platform/gateway")]
-    assert rig.helper_calls("host-net-probe.sh") == []
+    assert not [c for c in mutations(rig) if c.endswith("platform/ingress")]
+    assert rig.helper_calls("ingress-probe.sh") == []
 
 
 def test_s2b_selinux_fail_and_unknown_stop(rig):
@@ -574,12 +578,9 @@ _EVENTS = ("dms-registry-6d9f-abc   cp2      FailedMount        MountVolume.SetU
            "dms-registry-6d9f-xyz   <none>   FailedScheduling   0/3 nodes are available: 3 Insufficient cpu.\n"
            "other-pod-1             cp1      FailedMount        unrelated\n")
 
-# `kubectl get pods -A -o jsonpath=…` 의 줄 모양(S8 hostport_gate): ns/이름 \t 노드 \t hostNetwork \t 컨테이너들의 hostPort.
-# Traefik(hostPort 80·443)이 마스터 cp1 과 워커 w1 에, DMS 자기 Envoy(hostNetwork — hostPort 가 자동으로 채워진다)가 cp1 에 있는 모양.
-_TRAEFIK_ON_MASTER = ("kube-system/rke2-traefik-aaa\tcp1\t\t80 443 \n"
-                      "kube-system/rke2-traefik-bbb\tw1\t\t80 443 \n"
-                      "envoy-gateway-system/envoy-dms-portal-x\tcp1\ttrue\t443 19003 \n"
-                      "dms/dms-api-1\tcp1\t\t \n")
+# 감지 traefik X 의 사유(install-detect.py 의 실제 문구 모양) — S1·S8 의 멈춤 줄이 그대로 싣는다(2026-11-16 설계 D6 「사유 그대로」).
+_NO_TRAEFIK = ("IngressClass traefik 없음(있는 IngressClass: nginx(k8s.io/ingress-nginx)) — DMS 는 Traefik 을 설치하지 않는다. "
+               "클러스터 운영자에게 요청하거나 values.env INGRESS_CLASS 를 Traefik 의 IngressClass 이름으로")
 
 # (id, 시작 단계, 시나리오, 세계 덮어쓰기, env, rc, 그 단계 판정, 출력에 있어야 할 말, 적용되면 안 되는 층(렌더 디렉터리 기준))
 STOPS = [
@@ -596,12 +597,16 @@ STOPS = [
       "ImagePullBackOff", "S0-5 반입"], []),
     ("S4-v2-not-200", "S4", {}, {}, {"FAKE_CURL_V2": "401"}, 1, "FAIL", ["/v2/ 가 200 이 아니다(HTTP 401)"], []),
     ("S6-pull-fail", "S6", {"pull-probe.py": {"rc": 1}}, {}, {}, 1, "FAIL", ["pull 프로브"], []),
-    ("S8-sysctl", "S8", {"host-net-probe.sh --sysctl": {"rc": 1}}, {}, {}, 1, "FAIL", ["ip_unprivileged_port_start"], ["platform/gateway"]),
-    # 2026-11-14(OA — RKE2 Traefik): 마스터에 hostPort <리스너 포트> 를 쓰는 남의 파드가 있으면 SSA 전에 멈춘다(ss·LISTEN 프로브는 못 잡는다)
-    ("S8-hostport", "S8", {}, {"hostport_pods": _TRAEFIK_ON_MASTER}, {}, 1, "FAIL",
-     ["hostPort 443 를 쓰는 다른 파드", "kube-system/rke2-traefik-aaa@cp1", "GATEWAY_LISTEN_PORT"], ["platform/gateway"]),
-    ("S8-programmed", "S8", {}, {"fail": {"wait --for=condition=Programmed": [1, "error: timed out"]}}, {}, 1, "FAIL",
-     ["Programmed 가 아니다"], []),
+    # 2026-11-16(설계 D6): Traefik 이 없으면(감지 X — 감지 FAIL) DMS Ingress 를 적용하기 전에 멈추고 감지 사유를 그대로 싣는다
+    ("S8-traefik-x", "S8", {"install-detect.py detect": {"rc": 1}, "detect": {"traefik": "X stop 0 FAIL"},
+                            "detect_reason": {"traefik": _NO_TRAEFIK}}, {}, {}, 1, "FAIL",
+     ["감지 FAIL — traefik(S8 X stop)", "traefik: IngressClass traefik 없음", "Traefik 을 설치하지 않는다"], ["platform/ingress"]),
+    # 감지 rc 와 상관없이 traefik action 이 stop 이면 S8 이 SSA 전에 멈춘다(방어 — 사유 그대로)
+    ("S8-traefik-stop", "S8", {"detect": {"traefik": "X stop 0 FAIL"}, "detect_reason": {"traefik": _NO_TRAEFIK}}, {}, {}, 1, "FAIL",
+     ["Traefik 판정 X — IngressClass traefik 없음", "rke2-traefik", "--stage S8"], ["platform/ingress"]),
+    # Ingress 를 적용한 뒤 Traefik 경유가 FAIL(404·기본 인증서·5xx)이면 멈춘다 — 고칠 곳(class·entrypoint·tls 시크릿)을 함께
+    ("S8-probe-fail", "S8", {"ingress-probe.sh": {"rc": 1}}, {}, {}, 1, "FAIL",
+     ["Traefik 경유 FAIL", "TRAEFIK DEFAULT CERT", "router.entrypoints", "NODE cp1 FAIL"], []),
     ("S9-webhook", "S9", {}, {"fail": {"--dry-run=server -k": [1, _WEBHOOK]}}, {"WEBHOOK_RETRIES": "2"}, 1, "FAIL",
      ["failed calling webhook", "9443"], []),
     ("S9-dry-run", "S9", {}, {"fail": {"--dry-run=server -k": [1, 'The Cluster "dms-pg" is invalid: spec.instances: Invalid value']}},
@@ -640,8 +645,10 @@ def test_each_stage_stops_on_its_failure_with_the_reason(rig, case):
         assert len([c for c in cluster_calls(rig) if "--dry-run=server -k" in c]) == 2   # 웹훅 인증서가 늦을 수 있어 다시(WEBHOOK_RETRIES)
     if _id == "S9-dry-run":
         assert len([c for c in cluster_calls(rig) if "--dry-run=server -k" in c]) == 1   # 웹훅이 아닌 오류는 다시 하지 않는다
-    if _id == "S8-programmed":
-        assert [a[-1] for a in rig.helper_calls("host-net-probe.sh")] == ["--sysctl"]   # :443 은 Programmed 뒤
+    if _id.startswith("S8-traefik"):
+        assert rig.helper_calls("ingress-probe.sh") == []                         # 입구 확인까지 가지 않는다
+    if _id == "S8-probe-fail":
+        assert "platform/ingress" in [p.split("/.rendered/testbed-k8s/")[-1] for p in rig.world()["applied"]]   # 적용 뒤의 판정
     if _id == "S10-contrast":
         assert rig.world().get("created_jobs") is None                             # 첫 덤프도 없다
     if _id.startswith("S2-"):
@@ -696,9 +703,9 @@ def test_pause_resume_command_keeps_the_upgrade_flags_and_env(rig):
 def test_unknown_resume_command_keeps_the_flags(rig):
     rig.world(installed_world())
     rig.scenario({"images-lock.py compare-registry": {"rc": 4}})
-    r = rig.run("--context", "known", "--site", "testbed-k8s", "--only", "S5", "--upgrade-addon", "envoy-gateway")
+    r = rig.run("--context", "known", "--site", "testbed-k8s", "--only", "S5", "--upgrade-addon", "cnpg")
     assert r.returncode == 4
-    assert "sh deploy/install.sh --context known --site testbed-k8s --stage S5 --upgrade-addon envoy-gateway" in r.all, r.all
+    assert "sh deploy/install.sh --context known --site testbed-k8s --stage S5 --upgrade-addon cnpg" in r.all, r.all
 
 
 def test_env_dms_ns_never_reaches_the_helpers(rig):
@@ -753,13 +760,13 @@ def test_adopt_db_dry_runs_the_cluster_cr_with_force_conflicts(rig):
 
 # --- T9 고침(2026-11-03 — 라이브 테스트베드·일회용 k3s 실증에서 나온 것) -------------------------------------------------------------
 
-_CONFLICT_1 = ('error: Apply failed with 1 conflict: conflict with "kubectl-edit" using gateway.networking.k8s.io/v1: .spec.listeners\n'
+_CONFLICT_1 = ('error: Apply failed with 1 conflict: conflict with "kubectl-edit" using networking.k8s.io/v1: .spec.rules\n'
                'Please review the fields above--they currently have other managers. Here\n'
                'are the ways you can resolve this warning:\n'
                '* If you intend to manage all of these fields, please re-run the apply\n'
                '  command with the `--force-conflicts` flag.')
-_CONFLICT_2 = ('error: Apply failed with 2 conflicts: conflicts with "kubectl-patch" using gateway.networking.k8s.io/v1:\n'
-               '- .spec.listeners\nconflicts with "helm" using gateway.networking.k8s.io/v1:\n- .metadata.labels.team\n'
+_CONFLICT_2 = ('error: Apply failed with 2 conflicts: conflicts with "kubectl-patch" using networking.k8s.io/v1:\n'
+               '- .spec.rules\nconflicts with "helm" using networking.k8s.io/v1:\n- .metadata.labels.team\n'
                'Please review the fields above--they currently have other managers.')
 
 
@@ -770,9 +777,9 @@ def test_ssa_conflict_on_a_dms_owned_layer_names_the_managers_not_adopt(rig, std
     rig.world(installed_world(fail={"--field-manager=dms-install -k": [1, stderr]}))
     r = rig.run("--context", "known", "--site", "testbed-k8s", "--only", "S8")
     assert r.returncode == 1 and stages(r) == [("S8", "FAIL")], r.all
-    line = next(ln for ln in r.stderr.splitlines() if "[FAIL] platform/gateway SSA 실패" in ln)
+    line = next(ln for ln in r.stderr.splitlines() if "[FAIL] platform/ingress SSA 실패" in ln)
     assert f"field manager({managers})" in line and "감지 D= reapply" in line, line
-    layer = rig.deploy / ".rendered" / "testbed-k8s" / "platform" / "gateway"
+    layer = rig.deploy / ".rendered" / "testbed-k8s" / "platform" / "ingress"
     assert f"kubectl --context known apply --server-side --field-manager=dms-install --force-conflicts -k {layer}" in line, line
     assert "--adopt 는 감지 P 에만" in line and "채택은 --adopt" not in line, line
     assert "다시: sh deploy/install.sh --context known --site testbed-k8s --stage S8" in line, line
@@ -780,37 +787,51 @@ def test_ssa_conflict_on_a_dms_owned_layer_names_the_managers_not_adopt(rig, std
 
 
 def test_detection_warn_names_the_item_and_counts_in_the_stage_that_owns_it(rig):
-    """T9: 감지는 처음 부른 단계에서 한 번 돈다 — `--only S9` 에서 envoy-gateway U(S8 몫)가 「STAGE: S9 WARN」이었다(일회용 k3s C1b 실측).
-    줄에 항목 이름을 싣고, 그 항목의 단계가 센다(뒤에 돌 단계면 그 단계에서, 이번 실행에 없는 단계면 RESULT 에만)."""
+    """T9: 감지는 처음 부른 단계에서 한 번 돈다 — `--only S9` 에서 S8 몫 항목의 U 가 「STAGE: S9 WARN」이었다(일회용 k3s C1b 실측 — 그때는
+    envoy-gateway, 2026-11-16 부터는 traefik). 줄에 항목 이름을 싣고, 그 항목의 단계가 센다(뒤에 돌 단계면 그 단계에서, 이번 실행에 없는
+    단계면 RESULT 에만)."""
     rig.world(installed_world())
-    rig.scenario({"install-detect.py detect": {"rc": 3}, "detect": {"envoy-gateway": "U verify 0 WARN"}})
+    rig.scenario({"install-detect.py detect": {"rc": 3}, "detect": {"traefik": "U verify 0 WARN"}})
     r = rig.run("--context", "known", "--site", "testbed-k8s", "--only", "S9")
     assert r.returncode == 0 and stages(r) == [("S9", "PASS")], r.all
     assert r.stdout.strip().splitlines()[-1] == "RESULT: WARN"
-    assert "[WARN] 감지 WARN — envoy-gateway(S8 U verify) — S8 는 이번 실행에 없다" in r.stdout, r.stdout
+    assert "[WARN] 감지 WARN — traefik(S8 U verify) — S8 는 이번 실행에 없다" in r.stdout, r.stdout
 
     r = rig.run("--context", "known", "--site", "testbed-k8s", "--only", "S5,S8")
     assert r.returncode == 0 and stages(r) == [("S5", "PASS"), ("S8", "WARN")], r.all
     s5, s8 = r.stdout.split("== S8 ")
-    assert "[INFO] 감지 WARN — envoy-gateway(S8 U verify) — S8 의 판정으로 센다" in s5 and "[WARN]" not in s5, s5
-    assert "[WARN] 감지 WARN — envoy-gateway(S8 U verify)(감지는 S5 에서" in s8, s8
+    assert "[INFO] 감지 WARN — traefik(S8 U verify) — S8 의 판정으로 센다" in s5 and "[WARN]" not in s5, s5
+    assert "[WARN] 감지 WARN — traefik(S8 U verify)(감지는 S5 에서" in s8, s8
+    assert rig.helper_calls("ingress-probe.sh")                                     # U 의 최종 판정은 S8 의 ingress-probe
 
     # 지금 단계의 항목이면 지금 단계가, S1(preflight·감지)이면 표 전체가 S1 의 판정이다
-    rig.scenario({"install-detect.py detect": {"rc": 3}, "detect": {"cnpg": "D< keep 0 WARN", "envoy-gateway": "U verify 0 WARN"}})
+    rig.scenario({"install-detect.py detect": {"rc": 3}, "detect": {"cnpg": "D< keep 0 WARN", "traefik": "U verify 0 WARN"}})
     r = rig.run("--context", "known", "--site", "testbed-k8s", "--only", "S9")
     assert stages(r) == [("S9", "WARN")] and "[WARN] 감지 WARN — cnpg(S9 D< keep)(위 표" in r.stdout, r.all
     r = rig.run("--context", "known", "--site", "testbed-k8s", "--plan")
     assert ("S1", "WARN") in stages(r), r.all
     s1 = r.stdout.split("== S2 ")[0]
-    assert "감지 WARN — envoy-gateway(S8 U verify)" in s1 and "감지 WARN — cnpg(S9 D< keep)" in s1, s1
+    assert "감지 WARN — traefik(S8 U verify)" in s1 and "감지 WARN — cnpg(S9 D< keep)" in s1, s1
 
 
 def test_detection_fail_line_names_the_items(rig):
     rig.world(installed_world())
-    rig.scenario({"install-detect.py detect": {"rc": 1}, "detect": {"envoy-gateway": "P stop 0 FAIL", "priorityclass": "X stop 0 FAIL"}})
+    rig.scenario({"install-detect.py detect": {"rc": 1}, "detect": {"ingress": "P stop 0 FAIL", "priorityclass": "X stop 0 FAIL"}})
     r = rig.run("--context", "known", "--site", "testbed-k8s", "--only", "S1")
     assert r.returncode == 1 and stages(r) == [("S1", "FAIL")], r.all
-    assert "[FAIL] 감지 FAIL — priorityclass(S4 X stop), envoy-gateway(S8 P stop) — 위 표의" in r.stderr, r.stderr
+    assert "[FAIL] 감지 FAIL — priorityclass(S4 X stop), ingress(S8 P stop) — 위 표의" in r.stderr, r.stderr
+    assert "traefik:" not in r.stderr                                               # 사유를 싣는 것은 traefik 이 FAIL 일 때만
+
+
+def test_detection_fail_for_a_missing_traefik_carries_the_reason_at_s1(rig):
+    # 2026-11-16: DMS 는 Traefik 을 설치하지 않는다 — 표를 뒤지지 않아도 누구에게 갈지(운영자·INGRESS_CLASS) 알게 S1 줄에 사유를 싣는다.
+    rig.world(installed_world())
+    rig.scenario({"install-detect.py detect": {"rc": 1}, "detect": {"traefik": "X stop 0 FAIL"},
+                  "detect_reason": {"traefik": _NO_TRAEFIK}})
+    r = rig.run("--context", "known", "--site", "testbed-k8s")
+    assert r.returncode == 1 and stages(r) == [("S1", "FAIL")], r.all
+    assert "[FAIL] 감지 FAIL — traefik(S8 X stop) — 위 표의" in r.stderr and "traefik: " + _NO_TRAEFIK in r.stderr, r.stderr
+    assert mutations(rig) == []
 
 
 def test_plan_secret_read_failure_is_unknown_and_never_printed_ok(rig):
@@ -821,27 +842,6 @@ def test_plan_secret_read_failure_is_unknown_and_never_printed_ok(rig):
     rig.world(installed_world(secret_data="DMS_DATABASE_URL=x\n"))
     r = rig.run("--context", "known", "--site", "testbed-k8s", "--plan")
     assert r.returncode == 1 and "키가 없다" in r.all and "4키·자리표시자 없음" not in r.stdout
-
-
-def test_rerun_after_an_interrupted_eg_install_checks_and_points_to_the_upgrade_flag(rig):
-    # 앞선 실행이 EG SSA 뒤 certgen 에서 멈췄으면 재실행 감지는 D=(none) — 확인 없이 지나가 「Programmed 아님」으로만 드러났다.
-    w = installed_world()
-    w["secrets"] = {k: v for k, v in w["secrets"].items() if not k.startswith("envoy-gateway-system/")}
-    rig.world(w)
-    r = rig.run("--context", "known", "--site", "testbed-k8s", "--only", "S8")
-    assert r.returncode == 1 and "--only S8 --upgrade-addon envoy-gateway" in r.all, r.all
-    assert not [c for c in mutations(rig) if c.endswith("platform/gateway")]
-    # 그 길로 다시: 실패한 certgen Job 을 지운 뒤 SSA(Job spec 은 바꿀 수 없다)
-    w["jobs"] = {"eg-gateway-helm-certgen": "Failed"}
-    rig.world(w)
-    rig.reset_logs()
-    rig.scenario({"detect": {"envoy-gateway": "D= reapply 1 PASS"}})
-    r = rig.run("--context", "known", "--site", "testbed-k8s", "--only", "S8", "--upgrade-addon", "envoy-gateway")
-    assert r.returncode == 0, r.all
-    calls = cluster_calls(rig)
-    i_del = next(i for i, c in enumerate(calls) if "delete job eg-gateway-helm-certgen" in c)
-    i_eg = next(i for i, c in enumerate(calls) if c.endswith("addons/envoy-gateway") and "--dry-run" not in c)
-    assert i_del < i_eg
 
 
 def test_s2b_without_cilium_points_to_the_installer_env(rig):
@@ -986,7 +986,7 @@ def test_verify_warn_makes_s12_and_the_result_warn(rig):
 def test_s12_resume_line_keeps_the_verify_env(rig):
     # 재개 줄에서 CACERT 가 빠지면 VIP readyz 가 TLS 실패(000)로 WARN — 입구 문제를 「Avi 미개통」으로 읽게 했다.
     rig.world(installed_world())
-    rig.scenario({"verify.sh": {"rc": 1, "out": "  [FAIL] Gateway dms-portal Programmed 아님"}})
+    rig.scenario({"verify.sh": {"rc": 1, "out": "  [FAIL] Ingress dms/dms-portal-traefik 없음(S8)"}})
     r = rig.run("--context", "known", "--site", "testbed-k8s", "--only", "S12", CACERT="/etc/pki/corp-ca.pem",
                 PORTAL_DOMAIN="dms.corp.example", PORTAL_VIP="10.0.0.9", VERIFY_NO_PROBES="1")
     assert r.returncode == 1, r.all
@@ -999,13 +999,12 @@ def test_s12_resume_line_keeps_the_verify_env(rig):
 def test_addon_guard_refusal_points_to_the_layer_flag_not_the_global_switch(rig):
     # 전역 ALLOW_IMAGE_CHANGE=1 은 _envp 로 이후 재개 줄에 실려 S11 의 앱 가드(포탈 릴리스 되돌림 방지)까지 연다.
     rig.world(installed_world())
-    rig.scenario({"detect": {"envoy-gateway": "D< upgrade 1 PASS"}, "guard-images.sh": {"rc": 3}})
-    r = rig.run("--context", "known", "--site", "testbed-k8s", "--only", "S8", "--adopt", "db")
-    assert r.returncode == 1 and stages(r) == [("S8", "FAIL")], r.all
-    # (감지가 upgrade 면 allow-image 로 부르므로 이 경로는 rc 3 을 흉내 낸 것 — 안내 문구만 본다)
-    assert "--only S8 --adopt db --upgrade-addon envoy-gateway" in r.all, r.all
+    rig.scenario({"detect": {"cnpg": "D= reapply 1 PASS"}, "guard-images.sh": {"rc": 3}})
+    r = rig.run("--context", "known", "--site", "testbed-k8s", "--only", "S9", "--adopt", "db")
+    assert r.returncode == 1 and stages(r) == [("S9", "FAIL")], r.all
+    assert "--only S9 --adopt db --upgrade-addon cnpg" in r.all, r.all
     assert "S11 의 앱 가드까지" in r.all and "ALLOW_IMAGE_CHANGE=1 로 다시" not in r.all
-    assert not [c for c in mutations(rig) if "addons/envoy-gateway" in c]
+    assert not [c for c in mutations(rig) if "addons/cnpg" in c]
 
 
 def test_app_guard_refusal_keeps_the_app_advice(rig):
@@ -1017,7 +1016,6 @@ def test_app_guard_refusal_keeps_the_app_advice(rig):
 
 
 @pytest.mark.parametrize("stage, item, layer, det_key", [
-    ("S8", "envoy-gateway", "addons/envoy-gateway", "envoy-gateway"),
     ("S9", "cnpg", "addons/cnpg", "cnpg"),
     ("S4", "registry", "platform/registry", "registry"),
 ])
@@ -1097,16 +1095,22 @@ def _code(path):
 
 def test_installer_is_posix_sh():
     dash = shutil.which("dash") or "sh"
-    for name in ("install.sh", "preflight-cluster.sh", "verify.sh", "host-net-probe.sh", "push-images.sh"):
+    for name in ("install.sh", "preflight-cluster.sh", "verify.sh", "ingress-probe.sh", "push-images.sh"):
         r = subprocess.run([dash, "-n", str(DEPLOY / name)], capture_output=True, text=True)
         assert r.returncode == 0, (name, r.stderr)
 
 
 def test_old_ingress_gates_and_host_push_are_gone():
-    code = _code(DEPLOY / "install.sh")
-    for gone in ("metallb", "ingressclass", "ingress-nginx", "podman", "docker push", "--dry-run\" ]"):
-        assert gone not in code.lower(), gone
-    assert "PORTAL_TLS_SECRET" in code                                           # TLS 게이트는 render.env 의 이름으로
+    # 원래 뜻(2026-11-03 ⑦): MetalLB·ingress-nginx 를 설치기의 게이트로 다시 넣지 않는다. 2026-11-16(설계 D7)에 입구가 클러스터의 Traefik
+    # (IngressClass traefik)이 되어 「ingressclass」 낱말 자체는 정당하다 — 그 낱말 대신 nginx 클래스·MetalLB 를 막는다. 옛 Envoy 입구
+    # (Gateway API·EG·host-net-probe·리스너 포트·hostPort 게이트)도 남기지 않는다.
+    code = _code(DEPLOY / "install.sh").lower()
+    for gone in ("metallb", "ingress-nginx", "ingressclass nginx", "class nginx", "podman", "docker push", "--dry-run\" ]",
+                 "envoy-gateway-system", "gateway.networking.k8s.io", "host-net-probe", "gateway_listen_port", "hostport_gate",
+                 "addons/envoy-gateway", "addons/gateway-api", "platform/gateway"):
+        assert gone not in code, gone
+    assert "PORTAL_TLS_SECRET" in _code(DEPLOY / "install.sh")                  # TLS 게이트는 render.env 의 이름으로
+    assert not (DEPLOY / "host-net-probe.sh").exists()
 
 
 # --- 실제 렌더러와 이어서(옛 install.sh in-cluster 게이트 테스트 — 2026-11-03 ④ 리뷰 2 — 를 S5·S11 로 옮김) ------------------------------
@@ -1116,6 +1120,7 @@ def _prod_values(tmp_path):
     text = re.sub(r"\bREPLACE_([A-Z_]+)", lambda m: "v-" + m.group(1).lower().replace("_", "-"), text)
     text = re.sub(r"(?m)^SHARED_DIR=\S+", "SHARED_DIR=/v-shared-dir", text)
     text = re.sub(r"(?m)^REGISTRY_CLUSTER_IP=\S+", "REGISTRY_CLUSTER_IP=10.96.0.50", text)
+    text = re.sub(r"(?m)^PORTAL_DOMAIN=\S*", "PORTAL_DOMAIN=portal.example", text)      # 호스트 이름 문법 검사(2026-11-16 — 필수)
     path = tmp_path / "prod.values.env"
     path.write_text(text)
     return str(path)
@@ -1174,7 +1179,15 @@ case "$*" in
   "get nodes -l node-role.kubernetes.io/control-plane --no-headers") printf 'cp1 Ready\ncp2 Ready\ncp3 Ready\n'; exit 0 ;;
   "get nodes -l node-role.kubernetes.io/control-plane -o jsonpath={range .items[*]}{.metadata.name}{\",\"}{end}") printf 'cp1,cp2,cp3,'; exit 0 ;;
   "get nodes -l node-role.kubernetes.io/control-plane -o jsonpath="*) printf 'cp1:node-role.kubernetes.io/control-plane=NoSchedule, '; exit 0 ;;
-  "get pods -A -o jsonpath="*) printf '%b' "${FAKE_HOSTPORT_PODS:-}"; exit 0 ;;
+  "get pods -A -o jsonpath="*) printf '%b' "${FAKE_PODS:-}"; exit 0 ;;
+  "get ingressclass "*)
+    nf="Error from server (NotFound): ingressclasses.networking.k8s.io \"$3\" not found"
+    [ "$3" = "${FAKE_IC_NAME:-traefik}" ] || { echo "$nf" >&2; exit 1; }
+    case "${FAKE_IC:-traefik.io/ingress-controller}" in
+      missing) echo "$nf" >&2; exit 1 ;;
+      forbidden) echo 'Error from server (Forbidden): ingressclasses.networking.k8s.io is forbidden' >&2; exit 1 ;;
+      *) printf '%s' "${FAKE_IC:-traefik.io/ingress-controller}"; exit 0 ;;
+    esac ;;
   "get crd jobs.batch.volcano.sh -o jsonpath="*) printf 'v1alpha1'; exit 0 ;;
   "get crd jobs.batch.volcano.sh"|"get crd queues.scheduling.volcano.sh") [ -z "${FAKE_NO_VOLCANO:-}" ]; exit $? ;;
   "get ns dms") [ -n "${FAKE_NS_ENFORCE+x}" ]; exit $? ;;
@@ -1186,6 +1199,13 @@ case "$*" in
 esac
 exit 1
 '''
+
+
+# `kubectl get pods -A -o jsonpath=…` 의 줄 모양(preflight 2절): 노드 \t phase \t 컨테이너 ready들 \t 이미지들 — RKE2 Traefik DaemonSet 파드 둘 +
+# 다른 파드 하나(이미지 이름이 traefik 이 아니면 세지 않는다). printf %b 가 펼친다.
+_PF_PODS = ("cp1\\tRunning\\ttrue \\tdocker.io/rancher/hardened-traefik:v3.7.4-build20260608 \\n"
+            "w1\\tRunning\\ttrue \\tdocker.io/rancher/hardened-traefik:v3.7.4-build20260608 \\n"
+            "cp1\\tRunning\\ttrue \\t10.96.0.50:5000/dms:d7 \\n")
 
 
 def _preflight(tmp_path, ver="v1.34.6", cidrs="10.96.0.0/12 ", parent="", rcip="10.96.0.50", shared="/srv/shared", svcs="",
@@ -1201,7 +1221,8 @@ def _preflight(tmp_path, ver="v1.34.6", cidrs="10.96.0.0/12 ", parent="", rcip="
     if log.exists():
         log.unlink()
     env = {"PATH": f"{b}{os.pathsep}{os.environ.get('PATH', '/usr/bin:/bin')}", "HOME": str(tmp_path), "FAKE_KUBE_LOG": str(log),
-           "FAKE_VER": ver, "FAKE_CIDRS": cidrs, "FAKE_PARENT": parent, "FAKE_SVCS": svcs, "PREFLIGHT_SKIP_DETECT": "1", **env_over}
+           "FAKE_VER": ver, "FAKE_CIDRS": cidrs, "FAKE_PARENT": parent, "FAKE_SVCS": svcs, "PREFLIGHT_SKIP_DETECT": "1",
+           "FAKE_PODS": _PF_PODS, **env_over}
     r = subprocess.run(["sh", str(DEPLOY / "preflight-cluster.sh"), "--context", "known", "--render-env", str(renv)],
                        env=env, capture_output=True, text=True, timeout=60)
     return r, log.read_text().splitlines()
@@ -1216,35 +1237,37 @@ def test_preflight_passes_a_good_cluster_and_prints_the_node_checklist(tmp_path)
     assert any("-l app=volcano-scheduler" in c for c in calls)                    # 상류 라벨(옛 app.kubernetes.io/name 은 늘 빈 결과)
     assert not any("app.kubernetes.io/name=volcano-scheduler" in c for c in calls)
     for needle in ("getenforce", "pinned_images", "crictl inspecti 10.96.0.50:5000/registry:", "NO_PROXY 에 10.96.0.50",
-                   "findmnt -no TARGET,SOURCE,FSTYPE,OPTIONS -T /srv/shared", "ip_unprivileged_port_start", "signature_policy"):
+                   "findmnt -no TARGET,SOURCE,FSTYPE,OPTIONS -T /srv/shared", "signature_policy"):
         assert needle in r.stdout, needle
     assert "MetalLB 미설치" not in r.stdout and "IngressClass 'nginx' 없음" not in r.stdout
-    assert "[PASS] 마스터에 hostPort 443 를 쓰는 다른 파드 없음" in r.stdout              # 2026-11-14 — 기본 리스너 포트
+    # 2026-11-16(설계 D7): 입구 = 클러스터의 Traefik — IngressClass 대조 + Traefik 파드 Ready 수. 옛 Envoy 리스너 점검(마스터 :443·:19000~19003·
+    # sysctl ip_unprivileged_port_start·hostPort 충돌)은 없다.
+    assert "[PASS] IngressClass traefik(controller traefik.io/ingress-controller)" in r.stdout
+    assert "[INFO] Traefik 파드 Ready 2/2 (노드: cp1,w1)" in r.stdout
+    for gone in ("ip_unprivileged_port_start", "19000", "hostPort 443 를 쓰는", "Envoy", "envoy-gateway-system", "cluster.local"):
+        assert gone not in r.stdout, gone
     assert [c for c in calls if not (c.startswith("--context known ") or c.startswith("config get-contexts"))] == []
 
 
-_PF_TRAEFIK = "kube-system/rke2-traefik-aaa\\tcp1\\t\\t80 443 \\nkube-system/rke2-traefik-bbb\\tw1\\t\\t80 443 \\n" \
-              "envoy-gateway-system/envoy-dms-portal-x\\tcp2\\ttrue\\t443 19003 \\n"
+@pytest.mark.parametrize("env, rc, needle", [
+    ({"FAKE_IC": "missing"}, 1, "[FAIL] IngressClass traefik 없음 — DMS 는 Traefik 을 설치하지 않는다"),
+    ({"FAKE_IC": "k8s.io/ingress-nginx"}, 1, "[FAIL] IngressClass traefik 의 controller 가 k8s.io/ingress-nginx"),
+    ({"FAKE_IC": "forbidden"}, 0, "[WARN] IngressClass traefik 를 읽지 못했다"),                # 모름 ≠ 실패
+    ({"FAKE_PODS": ""}, 0, "[WARN] Traefik 파드(이미지 이름에 traefik)를 찾지 못했다"),
+    ({"FAKE_PODS": "cp1\\tRunning\\ttrue \\tdocker.io/rancher/hardened-traefik:v3.7.4 \\n"
+                   "w1\\tRunning\\tfalse \\tdocker.io/rancher/hardened-traefik:v3.7.4 \\n"}, 0, "[INFO] Traefik 파드 Ready 1/2 (노드: cp1)"),
+])
+def test_preflight_checks_the_traefik_ingress_class_and_pods(tmp_path, env, rc, needle):
+    """2026-11-16(설계 D7): DMS 는 Traefik 을 설치하지 않는다 — IngressClass 가 없거나 Traefik 이 아니면 S1 에서 멈춘다(운영자에게 — RKE2 는
+    rke2-traefik). 읽기 실패는 WARN(감지의 traefik 항목이 다시 본다), Traefik 파드 Ready 수는 INFO."""
+    r, calls = _preflight(tmp_path, **env)
+    assert r.returncode == rc and needle in r.stdout, r.stdout
+    assert any(c == "--context known get ingressclass traefik -o jsonpath={.spec.controller}" for c in calls), calls
 
 
-def test_preflight_stops_on_a_foreign_hostport_on_the_masters_and_follows_the_listen_port(tmp_path):
-    """2026-11-14(OA — RKE2 Traefik 의 hostPort 443): hostPort 는 CNI 의 DNAT 이라 `ss` 에 안 보이는데 그 포트의 패킷을 Envoy 보다 먼저
-    가져간다 — S1 에서 멈추고 GATEWAY_LISTEN_PORT 를 가리킨다. 워커의 파드·hostNetwork 파드(자기 Envoy)는 세지 않는다. 포트를 옮기면 통과하고
-    sysctl 안내가 빠지며 `ss` 안내의 포트가 따라간다."""
-    a = tmp_path / "default"
-    a.mkdir()
-    r, _ = _preflight(a, FAKE_HOSTPORT_PODS=_PF_TRAEFIK)
-    assert r.returncode != 0, r.stdout
-    assert "[FAIL] 마스터에 hostPort 443 를 쓰는 다른 파드가 있다: kube-system/rke2-traefik-aaa@cp1 —" in r.stdout, r.stdout
-    assert "GATEWAY_LISTEN_PORT" in r.stdout and "rke2-traefik-bbb" not in r.stdout and "envoy-dms-portal-x" not in r.stdout
-    b = tmp_path / "moved"
-    b.mkdir()
-    r, _ = _preflight(b, render_extra="GATEWAY_LISTEN_PORT=10443\nGATEWAY_PROXY_PROTOCOL=off\n", FAKE_HOSTPORT_PODS=_PF_TRAEFIK)
-    assert r.returncode == 0, r.stdout
-    assert "[PASS] 마스터에 hostPort 10443 를 쓰는 다른 파드 없음" in r.stdout
-    assert "PROXY 모드 off) → 마스터 :10443 의 Envoy" in r.stdout
-    assert "리스너 포트 10443 ≥ 1024" in r.stdout and "ip_unprivileged_port_start   # " not in r.stdout
-    assert "sport = :10443 or sport = :19000" in r.stdout
+def test_preflight_reads_the_ingress_class_from_the_render(tmp_path):
+    r, calls = _preflight(tmp_path, render_extra="INGRESS_CLASS=edge\n", FAKE_IC_NAME="edge")
+    assert r.returncode == 0 and "[PASS] IngressClass edge(controller traefik.io/ingress-controller)" in r.stdout, r.stdout
 
 
 @pytest.mark.parametrize("kw, needle", [
@@ -1319,34 +1342,100 @@ def test_preflight_in_cluster_checklist_is_unchanged_without_a_render_env(tmp_pa
     assert r.returncode == 0 and "crictl inspecti <REGISTRY_CLUSTER_IP>:5000/registry:" in r.stdout, r.stdout
 
 
-# --- 리스너 포트·hostPort 충돌(2026-11-14 OA — RKE2 Traefik 이 hostPort 443 을 쥔 클러스터) -----------------------------------------------
+# --- S8 입구(Traefik — 2026-11-16 설계 D6) ---------------------------------------------------------------------------------------------
 
-def test_s8_ignores_host_network_pods_and_workers_when_looking_for_hostport_conflicts(rig):
-    # 자기 Envoy(hostNetwork)와 워커의 hostPort 파드는 충돌이 아니다 — 마스터의 비 hostNetwork 파드만 본다.
-    rig.world(installed_world(hostport_pods="kube-system/rke2-traefik-bbb\tw1\t\t80 443 \n"
-                                            "envoy-gateway-system/envoy-dms-portal-x\tcp1\ttrue\t443 19003 \n"))
+def test_s8_applies_the_ingress_layer_then_probes_the_traefik_nodes(rig):
+    rig.world(installed_world())
+    r = rig.run("--context", "known", "--site", "testbed-k8s", "--only", "S8", CACERT="/etc/pki/corp-ca.pem")
+    assert r.returncode == 0 and stages(r) == [("S8", "PASS")], r.all
+    probes = [h for h in rig.helpers() if h["name"] == "ingress-probe.sh"]
+    assert len(probes) == 1 and probes[0]["argv"] == ["--context", "known", "--domain", "portal.example", "--cacert",
+                                                      "/etc/pki/corp-ca.pem"], probes
+    assert any(p.endswith("platform/ingress") for p in probes[0]["applied"])        # SSA 뒤에 잰다
+    assert "    NODE cp1 PASS" in r.stdout and "Traefik 경유 PASS" in r.stdout and "readyz 200" in r.stdout
+    ssa = [c for c in mutations(rig) if "--server-side" in c]
+    assert [c.split("/.rendered/testbed-k8s/")[-1] for c in ssa] == ["platform/ingress"], ssa
+    assert all("--field-manager=dms-install" in c for c in ssa)
+    assert not [c for c in cluster_calls(rig) if "traefik" in c.lower() and "get" not in c.split()], cluster_calls(rig)  # Traefik 은 읽지도 바꾸지도
+    assert_context(rig)
+
+
+def test_s8_before_the_app_exists_checks_only_the_certificate(rig):
+    # 첫 설치: dms-api 가 아직 없으면(앱은 S11) Traefik 이 라우터를 만들지 않아 readyz 가 404 다 — 인증서만 본다(--tls-only).
+    rig.world(installed_world(api_eps=""))
+    r = rig.run("--context", "known", "--site", "testbed-k8s", "--only", "S8")
+    assert r.returncode == 0 and stages(r) == [("S8", "PASS")], r.all
+    argv = rig.helper_calls("ingress-probe.sh")[0]
+    assert argv[-1] == "--tls-only" and "--cacert" not in argv, argv
+    assert "인증서만 본다" in r.stdout and "readyz 200" not in r.stdout
+
+
+def test_s8_probe_unknown_warns_and_the_install_goes_on(rig):
+    # 설치 호스트 → 노드 :443 이 방화벽으로 막힌 사이트(LB SE 만 허용) — 모름 ≠ 실패: WARN 하고 다음 단계로(S12 가 VIP 로 다시 본다).
+    rig.world(installed_world())
+    rig.scenario({"ingress-probe.sh": {"rc": 4}})
     r = rig.run("--context", "known", "--site", "testbed-k8s", "--stage", "S8")
-    assert r.returncode == 0 and stages(r)[0] == ("S8", "PASS"), r.all
-    assert "hostPort 443 를 쓰는 다른 파드 없음" in r.all
-    assert [a[-1] for a in rig.helper_calls("host-net-probe.sh")] == ["--sysctl", "--listen"]
-    assert all(a[a.index("--port") + 1] == "443" for a in rig.helper_calls("host-net-probe.sh"))
+    assert r.returncode == 0 and ("S8", "WARN") in stages(r) and ("S9", "PASS") in stages(r), r.all
+    assert "Traefik 경유 모름" in r.stdout and "방화벽" in r.stdout and r.stdout.strip().splitlines()[-1] == "RESULT: WARN"
 
 
-def test_s8_follows_the_rendered_listen_port_and_skips_the_sysctl_probe_above_1024(rig):
-    # GATEWAY_LISTEN_PORT=10443: Traefik 의 hostPort 443 은 더는 충돌이 아니고, 비특권 포트라 sysctl(S0-5) 프로브를 건너뛰며,
-    # LISTEN 프로브는 그 포트를 본다.
-    rig.world(installed_world(hostport_pods=_TRAEFIK_ON_MASTER))
-    r = rig.run("--context", "known", "--site", "testbed-k8s", "--stage", "S8", FAKE_GWPORT="10443")
-    assert r.returncode == 0 and stages(r)[0] == ("S8", "PASS"), r.all
-    assert "hostPort 10443 를 쓰는 다른 파드 없음" in r.all and "sysctl(S0-5) 확인을 건너뛴다" in r.all
-    calls = rig.helper_calls("host-net-probe.sh")
-    assert [a[-1] for a in calls] == ["--listen"] and calls[0][calls[0].index("--port") + 1] == "10443", calls
-    assert ":10443 LISTEN" in r.all
+def test_s8_probe_usage_error_is_an_environment_failure(rig):
+    rig.world(installed_world())
+    rig.scenario({"ingress-probe.sh": {"rc": 2}})
+    r = rig.run("--context", "known", "--site", "testbed-k8s", "--only", "S8")
+    assert r.returncode == 2 and stages(r) == [("S8", "FAIL")], r.all
 
 
-def test_s8_hostport_check_that_cannot_list_pods_warns_and_goes_on(rig):
-    # 모름 ≠ 실패: 파드 목록을 못 읽으면 알리고 계속한다(Programmed·LISTEN 프로브가 남은 판정).
-    rig.world(installed_world(fail={"get pods -A": [1, "Error from server (Forbidden): pods is forbidden"]}))
-    r = rig.run("--context", "known", "--site", "testbed-k8s", "--stage", "S8")
-    assert stages(r)[0] == ("S8", "WARN"), r.all
-    assert "hostPort 443 충돌을 확인하지 못했다" in r.all
+def test_s8_without_a_portal_domain_warns_and_skips_the_probe(rig):
+    rig.world(installed_world())
+    r = rig.run("--context", "known", "--site", "testbed-k8s", "--only", "S8", FAKE_DOMAIN="")
+    assert r.returncode == 0 and stages(r) == [("S8", "WARN")], r.all
+    assert rig.helper_calls("ingress-probe.sh") == [] and "PORTAL_DOMAIN 을 모른다" in r.stdout
+    assert [c for c in mutations(rig) if c.endswith("platform/ingress")]            # 입구 층은 그래도 적용한다
+    # env PORTAL_DOMAIN 이 render.env 보다 이긴다(S12 와 같은 규칙)
+    r = rig.run("--context", "known", "--site", "testbed-k8s", "--only", "S8", FAKE_DOMAIN="", PORTAL_DOMAIN="dms.corp.example")
+    assert rig.helper_calls("ingress-probe.sh")[-1][:4] == ["--context", "known", "--domain", "dms.corp.example"]
+
+
+def test_s8_traefik_u_still_applies_and_lets_the_probe_decide(rig):
+    # 감지 traefik U(워크로드·Ready 를 못 봄) — 최종 판정은 ingress-probe 다(Ingress dry-run 은 Traefik 을 부르지 않는다).
+    rig.world(installed_world())
+    rig.scenario({"install-detect.py detect": {"rc": 3}, "detect": {"traefik": "U verify 0 WARN"}})
+    r = rig.run("--context", "known", "--site", "testbed-k8s", "--only", "S8")
+    assert r.returncode == 0 and stages(r) == [("S8", "WARN")], r.all
+    assert [c for c in mutations(rig) if c.endswith("platform/ingress")] and rig.helper_calls("ingress-probe.sh")
+
+
+def test_s8_ingress_p_is_adopted_only_with_the_flag(rig):
+    rig.world(installed_world())
+    rig.scenario({"detect": {"ingress": "P adopt 1 WARN"}})
+    r = rig.run("--context", "known", "--site", "testbed-k8s", "--only", "S8", "--adopt", "ingress")
+    assert r.returncode == 0, r.all
+    det = rig.helper_calls("install-detect.py")[0]
+    assert det[det.index("--adopt") + 1] == "ingress"
+    ing = [c for c in mutations(rig) if c.endswith("platform/ingress")]
+    assert ing and "--force-conflicts" in ing[0], ing
+
+
+@pytest.mark.parametrize("flag, name, needle", [
+    ("--upgrade-addon", "envoy-gateway", "2026-11-16 에 없앴다"),
+    ("--adopt", "gateway", "2026-11-16 에 없앴다"),
+    ("--upgrade-addon", "cnpg,gateway-api", "2026-11-16 에 없앴다"),
+    ("--adopt", "bogus", "모르는 항목 'bogus'"),
+])
+def test_retired_and_unknown_item_names_are_usage_errors_before_the_cluster(rig, flag, name, needle):
+    # 감지가 돌지 않는 --only(S11 등)에서도 틀린 이름이 조용히 무시되지 않게 클러스터에 붙기 전에 거른다.
+    rig.world(installed_world())
+    r = rig.run("--context", "known", "--site", "testbed-k8s", "--only", "S11", flag, name)
+    assert r.returncode == 2 and needle in r.stderr, r.all
+    assert cluster_calls(rig) == [] and rig.helpers() == []
+    if "없앴다" in needle:
+        assert "traefik" in r.stderr and "ingress" in r.stderr
+
+
+def test_traefik_and_ingress_are_known_item_names(rig):
+    rig.world(installed_world())
+    r = rig.run("--context", "known", "--site", "testbed-k8s", "--only", "S8", "--upgrade-addon", "traefik", "--adopt", "ingress")
+    assert r.returncode == 0, r.all
+    det = rig.helper_calls("install-detect.py")[0]
+    assert det[det.index("--upgrade-addon") + 1] == "traefik" and det[det.index("--adopt") + 1] == "ingress"

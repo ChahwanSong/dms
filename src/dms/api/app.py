@@ -15,6 +15,7 @@ from ..repositories import Repositories
 from ..wiring import (build_build_runner, build_execution_adapter,
                      build_node_lister, build_queue_reader,
                      build_rollout_runner, wire_reconnect_event)
+from .body_limit import RequestBodyLimit
 from .login_guard import GlobalPacer, LoginAlarms, LoginGate
 from .login_limiter import LoginRateLimiter
 from .password_transport import PasswordTransport
@@ -158,6 +159,10 @@ def create_app(settings: Settings, db: Database, exit_fn=None) -> FastAPI:
     app.add_middleware(SessionMiddleware, secret_key=settings.session_secret,
                        session_cookie="dms_session",
                        https_only=settings.session_cookie_secure)
+    # 요청 본문 상한(2026-11-16 입구 교체 -- Envoy BTP requestBuffer 20Mi 를 대체, api/body_limit.py docstring). 마지막에 더해
+    # 사용자 미들웨어 중 가장 바깥에서 판정한다(add_middleware 는 앞에 끼운다): 413 은 세션 쿠키를 읽지도 쓰지도 않고, 라우팅·
+    # 인증보다 먼저다(옛 입구 상한과 같은 자리).
+    app.add_middleware(RequestBodyLimit, max_bytes=settings.max_request_body_bytes)
 
     # async(2026-11-03): 동기 def 는 스레드풀(기본 40)에서 돈다 -- 로그인 폭주·릴레이 지연이 스레드를 잡아도 liveness 가
     # 그 줄에 서지 않고 이벤트 루프에서 바로 답한다(로그인은 슬롯을 이벤트 루프에서 기다린다, api/login_guard.py).

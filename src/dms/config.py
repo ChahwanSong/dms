@@ -114,6 +114,19 @@ _SERVER_INT_KEYS = (
     # 동기화 이력 보존일(등록된 클러스터의 최근 50건·마지막 성공 run 은 보존일과 무관하게 남는다 -- 지운 클러스터의 run 은
     # 보존일이 지나면 전부 지운다, repositories.k8s.prune_runs). 1 이상.
     ("DMS_K8S_SYNC_RUN_RETENTION_DAYS", "k8s_sync_run_retention_days", 30),
+    # 아래 둘은 2026-11-16 입구 교체(Envoy Gateway 폐기 → 클러스터의 Traefik)로 Envoy BackendTrafficPolicy 가 하던 일을 앱이
+    # 맡은 것이다 -- 하한은 _API_INT_FLOORS 한 곳에서 검사한다. api 만 읽는다.
+    # 요청 본문 상한(바이트, api/body_limit.py docstring): BTP requestBuffer.limit 20Mi(옛 Ingress proxy-body-size 20m -- 대량
+    # 배치 JSON)를 대체한다. Traefik 은 기본 상한이 없고 Buffering 미들웨어는 응답 버퍼를 끌 수 없어(포탈 전체에 걸면 큰
+    # 다운로드가 Traefik 에 다 쌓인 뒤 나간다) 입구가 아니라 앱이 413 request_too_large 를 낸다. 입구 경유뿐 아니라 dms-api 에
+    # 닿는 모든 요청에 걸린다 -- 스스로 더 큰 상한을 재는 k8s 동기화 결과 POST(k8s_sync_max_bytes + 1MiB)만 뺀다.
+    ("DMS_MAX_REQUEST_BODY_BYTES", "max_request_body_bytes", 20971520),
+    # uvicorn timeout_keep_alive(초, cli.py): 응답 뒤 유휴 연결을 이만큼 둔다. **입구의 상류 유휴 타임아웃보다 길어야 한다** --
+    # Traefik(ServersTransport) 기본 idleConnTimeout 90s. uvicorn 기본 5초로 두면 백엔드가 프록시 풀의 유휴 연결을 먼저 닫고,
+    # 막 닫힌 연결에 실린 본문 있는 POST 를 Go Transport 는 재시도하지 않아(본문 없는 GET 만 자동 재시도) 간헐 502 가 난다.
+    # Envoy 때는 같은 원칙을 반대쪽에서 지켰다(BTP connectionIdleTimeout 4s < 5s) -- DMS 는 사이트의 Traefik 설정을 바꾸지
+    # 않으므로 앱 쪽을 길게 잡는다. 입구를 바꾸면(사이트가 idleConnTimeout 을 올리면) 이 값을 그보다 크게.
+    ("DMS_API_KEEP_ALIVE_SECONDS", "api_keep_alive_seconds", 120),
 )
 
 # k8s 동기화 정수 키의 하한(기동 거부) -- 아래 from_env 가 한 곳에서 검사한다.
@@ -143,6 +156,13 @@ _AUTH_INT_FLOORS = (
     ("DMS_LOGIN_ALARM_SOURCE_FAILURES", "login_alarm_source_failures", 0),
     ("DMS_VERIFICATION_GUESS_GLOBAL_LIMIT", "verification_guess_global_limit", 0),
     ("DMS_VERIFICATION_GUESS_GLOBAL_WINDOW_SECONDS", "verification_guess_global_window_seconds", 1),
+)
+# api 서버 정수 키의 하한(2026-11-16 입구 교체, 기동 거부) -- 같은 모양으로 from_env 가 한 곳에서 검사한다. 본문 상한은 끄는
+# 값(0)이 없다: 오타("20" -- MiB 를 뜻했을 것)가 모든 쓰기 요청을 413 으로 만드는 것을 기동에서 막는 1MiB(k8s 동기화 상한
+# 하한과 같은 값). keep-alive 0 은 연결 재사용을 끄는 셈이라 1.
+_API_INT_FLOORS = (
+    ("DMS_MAX_REQUEST_BODY_BYTES", "max_request_body_bytes", 1048576),
+    ("DMS_API_KEEP_ALIVE_SECONDS", "api_keep_alive_seconds", 1),
 )
 # 재시도 설정은 두지 않는다: 상위 스펙에 재시도 요구가 없고, 실패한 rm/sync 를 자동으로
 # 재실행하는 것은 파괴적이다. 재실행은 배치 :rerun-failed 와 사용자 재제출로 한다.
@@ -345,6 +365,9 @@ class Settings:
     k8s_sync_max_bytes: int = 33554432
     k8s_inventory_interval_seconds: int = 10
     k8s_sync_run_retention_days: int = 30
+    # 입구 교체(2026-11-16) -- _SERVER_INT_KEYS 의 주석 참고. 기본은 from_env 와 같은 한 층이다(테스트도 같은 상한을 본다).
+    max_request_body_bytes: int = 20971520
+    api_keep_alive_seconds: int = 120
 
     @classmethod
     def from_env(cls, environ: Mapping) -> "Settings":
@@ -380,7 +403,7 @@ class Settings:
         for env_key, field, floor in _K8S_INT_FLOORS:
             if extra[field] < floor:
                 problems.append(f"{env_key} must be >= {floor}: {environ.get(env_key)!r}")
-        for env_key, field, floor in _AUTH_INT_FLOORS:
+        for env_key, field, floor in _AUTH_INT_FLOORS + _API_INT_FLOORS:
             if extra[field] < floor:
                 problems.append(f"{env_key} must be >= {floor}: {environ.get(env_key)!r}")
         if extra["k8s_sync_page_limit"] > 5000:

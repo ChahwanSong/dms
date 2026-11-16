@@ -1,0 +1,22 @@
+# 플랫폼 층(DMS 소유) — 포탈 입구: 클러스터에 이미 있는 Traefik 이 집는 Ingress 하나(2026-11-16 — Envoy Gateway 경로 폐기, 병행 모드 없음).
+#
+#   사내 PC ─https─▶ LB VS-443(L4, PROXY v2 는 사이트 선택) ─▶ Traefik 이 도는 노드 :443(hostPort → websecure, TLS 종단) ─▶ svc dms-api:8080
+#
+# DMS 는 Traefik 을 설치·변경하지 않는다(RKE2 는 rke2-traefik — 클러스터 운영자 몫). Traefik 정적 설정(PROXY trustedIPs·타임아웃·전달 헤더)은
+# Rancher chartValues / HelmChartConfig(kube-system/rke2-traefik)로만 바뀐다. LB 가 PROXY v2 를 붙이면 websecure 의 proxyProtocol.trustedIPs 에
+# LB 출발지(SE 주소)가 있어야 한다 — 없으면 Traefik 이 PROXY 헤더를 읽지 않아 그 바이트가 TLS 앞에 붙어 연결이 깨진다. 신뢰 출발지 밖의
+# PROXY 헤더는 Traefik 이 읽고 버린다(위조 불가). 설치기 S8 이 IngressClass·Traefik 워크로드(args)를 읽어 판정하고(deploy/install-detect.py
+# 항목 traefik), 이 층을 적용한 뒤 노드마다 readyz·인증서를 본다(deploy/ingress-probe.sh) — deploy/README §2g.
+#
+# 객체: Ingress dms-portal-traefik(ns dms) 하나 — ingress.yaml 머리 주석.
+#
+# 사이트 중립 base: host·tls.hosts 는 자리표시자(portal.set-by-overlay.invalid)다 — 사이트 값(PORTAL_DOMAIN·PORTAL_TLS_SECRET·INGRESS_CLASS·
+# TRAEFIK_ENTRYPOINT)은 렌더러가 JSON 패치로 넣는다:
+#   sh deploy/render.sh <site>      # → deploy/.rendered/<site>/platform/ingress (이 base 를 가리키는 kustomization + 패치)
+#   kubectl --context <ctx> apply --server-side --field-manager=dms-install -k deploy/.rendered/<site>/platform/ingress
+#
+# overlays/·k8s/ 밖에 두는 이유: 그 아래 디렉터리를 모두 도는 계약 테스트를 피한다(설계 v6 8-2). 이 층의 계약은 tests/test_ingress_contract.py.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ingress.yaml

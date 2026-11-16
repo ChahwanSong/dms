@@ -107,6 +107,7 @@
   "log_not_available",
   "artifact_not_found",
   "artifact_too_large",
+  "request_too_large",
   "artifact_expired",
   "account_disabled",
   "maintenance_mode",

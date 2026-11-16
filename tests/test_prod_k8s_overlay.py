@@ -47,7 +47,8 @@ def test_kustomization_wires_the_site_patches_only():
     for patch in ("patch-config.yaml", "patch-remove-ingress.yaml", "patch-placement.yaml"):
         assert f"- path: {patch}" in text, patch
     assert "patch-agent" not in text and not (PROD / "patch-agent.yaml").exists()   # base 가 `dms agent`
-    # 2026-11-03 ⑥(설계 #13·9 ⑥): prod 입구는 Envoy Gateway — 옛 Ingress 도메인·MetalLB VIP 패치는 없어졌다(삭제 패치가 대신한다).
+    # 2026-11-03 ⑥(설계 #13·9 ⑥): prod 앱 오버레이에는 옛 Ingress 도메인·MetalLB VIP 패치가 없다(삭제 패치가 대신한다). 입구는 플랫폼 층
+    # platform/ingress(2026-11-16 — 클러스터의 Traefik)다.
     for gone in ("patch-ingress.yaml", "patch-metallb.yaml"):
         assert gone not in text and not (PROD / gone).exists(), gone
 
@@ -78,12 +79,14 @@ def test_values_render_and_install_need_no_ldap():
 
 
 def test_installer_and_preflight_no_longer_gate_on_metallb_or_ingress_nginx():
-    # 2026-11-03 ⑦(설계 9 ⑦ — install.sh :74-80·135-138): prod 입구는 Envoy Gateway — MetalLB·IngressClass nginx 가 없다고 멈추거나
-    # ingress-nginx Service 에 풀 어노테이션을 다는 줄이 설치기·preflight 에 남아 있으면 prod 에서 install.sh 를 쓸 수 없다(설계 12 위험 19).
+    # 2026-11-03 ⑦(설계 9 ⑦ — install.sh :74-80·135-138): prod 는 MetalLB·ingress-nginx 를 쓰지 않는다 — MetalLB·IngressClass nginx 가 없다고
+    # 멈추거나 ingress-nginx Service 에 풀 어노테이션을 다는 줄이 설치기·preflight 에 남아 있으면 prod 에서 install.sh 를 쓸 수 없다(설계 12 위험 19).
+    # 2026-11-16: 입구가 클러스터의 Traefik 이 되어 S1·S8 은 IngressClass(INGRESS_CLASS, 기본 traefik)를 **읽는다** — 그래서 「ingressclass」 낱말
+    # 자체가 아니라 옛 게이트의 모양(IngressClass nginx 를 요구)만 막는다(원래 뜻: MetalLB·ingress-nginx 를 게이트로 다시 넣지 않는다).
     for path in (INSTALL, REPO_ROOT / "deploy" / "preflight-cluster.sh"):
         code = _code(path)
-        for gone in ("get ns metallb-system", "ingressclass", "ipaddresspools.metallb.io", "metallb.io/address-pool",
-                     "ingress-nginx-controller", "PORTAL_VIP=<"):
+        for gone in ("get ns metallb-system", "ingressclass nginx", "ingressclasses nginx", "ingressclass/nginx", "IngressClass nginx",
+                     "ipaddresspools.metallb.io", "metallb.io/address-pool", "ingress-nginx-controller", "PORTAL_VIP=<"):
             assert gone not in code, (path.name, gone)
     assert "rv PORTAL_TLS_SECRET" in _code(INSTALL)                                 # TLS 게이트는 render.env 의 이름(⑥)
 
@@ -160,9 +163,10 @@ def test_rendered_overlay_has_no_ldap_and_boots_in_k8s_mode(tmp_path):
 
 
 @needs_kubectl
-def test_rendered_prod_has_no_ingress_or_metallb_and_the_gateway_is_rendered(tmp_path):
+def test_rendered_prod_has_no_ingress_or_metallb_and_the_traefik_ingress_is_rendered(tmp_path):
     # 2026-11-03 ⑥(설계 v6 #13 — prod 는 MetalLB·ingress-nginx 의존을 없앤다): 앱 렌더에 Ingress·MetalLB CR 0건(metallb CRD 가 없는 prod 에서
-    # apply 가 「no matches for kind」로 실패하던 자리), 입구는 플랫폼 층 platform/gateway 의 Gateway·HTTPRoute 다(PROXY 필수가 기본).
+    # apply 가 「no matches for kind」로 실패하던 자리). 입구는 플랫폼 층 platform/ingress 의 Ingress dms-portal-traefik 하나(2026-11-16 — 클러스터의
+    # Traefik 이 집는다; Envoy·Gateway API 층은 없다).
     r, out = _render(tmp_path, _filled_example())
     assert r.returncode == 0, (r.stdout, r.stderr)
     env = {**os.environ, "KUBECONFIG": os.devnull}
@@ -171,15 +175,19 @@ def test_rendered_prod_has_no_ingress_or_metallb_and_the_gateway_is_rendered(tmp
     kinds = re.findall(r"(?m)^kind: (\S+)$", k.stdout)
     assert not {"Ingress", "IPAddressPool", "L2Advertisement"} & set(kinds), kinds
     assert "metallb" not in k.stdout.lower() and "ingress" not in k.stdout.lower()
-    doc(k.stdout, "Service", "dms-api")                                   # HTTPRoute 의 백엔드는 그대로 있다
-    gw_dir = out.parent / "platform" / "gateway"
-    assert f"GATEWAY: {gw_dir}" in r.stdout
-    g = subprocess.run([KUBECTL, "kustomize", str(gw_dir)], capture_output=True, text=True, timeout=120, env=env)
+    doc(k.stdout, "Service", "dms-api")                                   # Ingress 의 백엔드는 그대로 있다
+    ing_dir = out.parent / "platform" / "ingress"
+    assert f"INGRESS: {ing_dir}" in r.stdout and "GATEWAY: " not in r.stdout
+    assert not (out.parent / "platform" / "gateway").exists() and not (out.parent / "addons" / "envoy-gateway").exists()
+    g = subprocess.run([KUBECTL, "kustomize", str(ing_dir)], capture_output=True, text=True, timeout=120, env=env)
     assert g.returncode == 0, g.stderr
-    assert re.search(r"(?m)^kind: Gateway$", g.stdout) and re.search(r"(?m)^kind: HTTPRoute$", g.stdout)
-    assert re.search(r"(?m)^  proxyProtocol:\n    optional: false$", g.stdout)
+    assert re.findall(r"(?m)^kind: (\S+)$", g.stdout) == ["Ingress"]
+    ing = doc(g.stdout, "Ingress", "dms-portal-traefik")
+    assert re.search(r"(?m)^  - host: v-portal-domain$", ing)                                 # PORTAL_DOMAIN 이 Ingress host 가 된다
+    assert re.search(r"(?m)^  ingressClassName: traefik$", ing)
     renv = (out.parent / "render.env").read_text()
-    assert "PORTAL_DOMAIN=v-portal-domain" in renv and "PORTAL_VIP=v-portal-vip" in renv   # 매니페스트가 아니라 render.env 로만
+    assert "PORTAL_DOMAIN=v-portal-domain" in renv and "PORTAL_VIP=v-portal-vip" in renv
+    assert "v-portal-vip" not in g.stdout                                                      # VIP 는 매니페스트가 아니라 render.env 로만
 
 
 # --- 사이트 중립(2026-11-06 문서 감사 — 「배포 문서는 실제 프로덕션 기준, 테스트베드에 국한되지 않게」) ------------------------------
@@ -197,7 +205,7 @@ def test_rendered_prod_layers_carry_no_testbed_value(tmp_path):
     env = {**os.environ, "KUBECONFIG": os.devnull}
     root = out.parent
     layers = sorted(p.parent for p in root.rglob("kustomization.yaml"))
-    assert out in layers and (root / "platform" / "gateway") in layers and (root / "platform" / "db-cluster") in layers, layers
+    assert out in layers and (root / "platform" / "ingress") in layers and (root / "platform" / "db-cluster") in layers, layers
     offenders = []
     for layer in layers:
         k = subprocess.run([KUBECTL, "kustomize", str(layer)], capture_output=True, text=True, timeout=180, env=env)
@@ -222,9 +230,10 @@ def test_prod_patch_config_overrides_every_site_key_of_the_base():
 
 
 # --- control-plane 라벨 값(2026-11-13 OA 사이트 — RKE2 는 node-role.kubernetes.io/control-plane=true) ------------------------------------
-# base·prod 의 nodeSelector 는 kubeadm 관례인 "" 를 고른다. RKE2 에선 레지스트리·PG·Envoy·api/controller 가 Pending 이라 values.env 의
-# CONTROL_PLANE_LABEL_VALUE 로 네 곳(앱 patch-placement·platform/registry·platform/gateway·platform/db-cluster)의 값을 바꾼다.
-_CP_LAYERS = ("platform/registry", "platform/gateway", "platform/db-cluster")
+# base·prod 의 nodeSelector 는 kubeadm 관례인 "" 를 고른다. RKE2 에선 레지스트리·PG·api/controller 가 Pending 이라 values.env 의
+# CONTROL_PLANE_LABEL_VALUE 로 세 곳(앱 patch-placement·platform/registry·platform/db-cluster)의 값을 바꾼다. 입구(2026-11-16 platform/ingress —
+# Ingress 하나)는 배치가 없다(Traefik 은 사이트 것) — 옛 platform/gateway(EnvoyProxy nodeSelector)는 없앴다.
+_CP_LAYERS = ("platform/registry", "platform/db-cluster")
 _CP_PTR = "node-role.kubernetes.io~1control-plane"
 
 
@@ -246,6 +255,7 @@ def test_control_plane_label_value_patches_every_placement_layer(tmp_path):
     for layer in _CP_LAYERS:
         text = (root / layer / "kustomization.yaml").read_text()
         assert re.search(r'path: /spec/\S*/nodeSelector/%s\n\s*value: "true"' % re.escape(_CP_PTR), text), (layer, text)
+    assert "control-plane" not in (root / "platform" / "ingress" / "kustomization.yaml").read_text()
     placement = (out / "patch-placement.yaml").read_text()
     assert 'node-role.kubernetes.io/control-plane: ""' not in placement
     assert placement.count('node-role.kubernetes.io/control-plane: "true"') == 2      # api·controller

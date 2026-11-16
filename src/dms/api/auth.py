@@ -45,6 +45,10 @@ def client_ip(request: Request) -> str | None:
     정규화 표기) → 없거나 IP 가 아니면 소켓 피어(request.client.host, 검증 안 함 -- TestClient 는 "testclient") → 둘 다
     없으면 None.
 
+    입구(2026-11-16 -- Envoy Gateway 폐기, 클러스터의 Traefik 하나): Traefik 은 forwardedHeaders.trustedIPs 가 비어 있으면(기본)
+    클라이언트가 보낸 X-Forwarded-*·X-Real-Ip 를 지우고 XFF 끝에 원 IP(websecure proxyProtocol.trustedIPs 가 LB 출발지를 믿으면
+    사용자 PC, 아니면 실제 피어)를 덧붙인다 -- 아래 규칙이 그대로 맞아 이 함수는 바꾸지 않았다. 아래의 Envoy 설명은 그 전 입구의 근거다.
+
     「왜」(2026-11-03):
     - 앞단 프록시는 1개라는 계약이다 -- Envoy 가 XFF 끝에 PROXY 프로토콜로 받은 원 IP 를 덧붙인다(clientIPDetection
       미설정 = use_remote_address). 그래서 클라이언트가 심을 수 있는 앞 항목이 아니라 마지막 항목을 쓴다. ingress-nginx
