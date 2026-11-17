@@ -287,6 +287,21 @@ def test_main_nodes_option_pins_the_daemonset_and_judges_only_those(capsys):
     assert terms == [{"matchFields": [{"key": "metadata.name", "operator": "In", "values": ["cp1"]}]}]
 
 
+def test_main_several_nodes_get_one_selector_term_each(capsys):
+    # 2026-11-17 프로덕션(K8s 1.35, 마스터 3대): 한 term 에 metadata.name In [3개] 를 넣어 apiserver 가 DS 생성을 거부했다
+    # (「must be only one value when `operator` is 'In'」). 노드 필드 셀렉터는 In 값이 하나여야 하므로 노드마다 term 을 둔다(OR).
+    rc, cluster = _main(["--nodes", "w1,cp1"], pods={"cp1": OK, "w1": OK})
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0 and sorted(n["node"] for n in out["nodes"]) == ["cp1", "w1"]
+    terms = cluster.created[0]["spec"]["template"]["spec"]["affinity"]["nodeAffinity"][
+        "requiredDuringSchedulingIgnoredDuringExecution"]["nodeSelectorTerms"]
+    assert terms == [{"matchFields": [{"key": "metadata.name", "operator": "In", "values": ["cp1"]}]},
+                     {"matchFields": [{"key": "metadata.name", "operator": "In", "values": ["w1"]}]}]
+    for term in terms:
+        for req in term["matchFields"]:
+            assert req["operator"] != "In" or len(req["values"]) == 1
+
+
 def test_main_not_ready_node_is_unknown(capsys):
     rc, _ = _main([], nodes=[NODES[0], _node("w1", ready=False)], pods={"cp1": OK})
     out = json.loads(capsys.readouterr().out)

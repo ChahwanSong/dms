@@ -117,6 +117,9 @@ def new_template(w):
 
 
 if verb == "rollout":
+    if rest[1] == "status" and rest[2] in (W.get("restarts") or []) and rest[2] in (W.get("fail_rollout_after_restart") or []):
+        # 재시작 뒤 대기에서만 시간 초과(본 대기와 argv 가 같아 「fail」 부분 문자열로는 가를 수 없다 — 2026-11-17 리뷰: 재시작 대기 시간 초과 뒤 재실행)
+        err("error: timed out waiting for the condition")
     if rest[1] == "restart":
         W.setdefault("restarts", []).extend(rest[2:])
         for w in rest[2:]:                             # restart 는 템플릿 어노테이션 restartedAt 을 바꾼다
@@ -213,6 +216,15 @@ if kind.startswith(("deploy/", "ds/")):
         out(W["tmpl"][target])
     if jp and "install-config-rev" in jp:
         out(W.get("annotations", {}).get(target, ""))
+    if target.startswith("ds/") and jp in ("{.status.desiredNumberScheduled}",
+                                           "{.spec.updateStrategy.rollingUpdate.maxUnavailable}"):
+        # S11 DaemonSet 대기(2026-11-17). 진짜 apiserver 는 있는 DS 에 maxUnavailable 을 늘 채우고(기본 1 — 정수 또는 "25%" 문자열), DS 컨트롤러가
+        # desiredNumberScheduled(taint·셀렉터를 반영한 노드 수)를 곧 채운다. 기본은 라이브 테스트베드 모양(2노드·1). 세계 ds_status[target] =
+        # {"desired": "6", "max_unavailable": "25%"} — 빈 문자열은 그 필드가 비어 있는 것(모름). 없는 DS 는 NotFound.
+        if target not in W.get("tmpl", {}):
+            err('Error from server (NotFound): %s not found' % target)
+        field = "desired" if "desiredNumberScheduled" in jp else "max_unavailable"
+        out(str(((W.get("ds_status") or {}).get(target) or {}).get(field, {"desired": "2", "max_unavailable": "1"}[field])))
     out("")
 if kind == "ns":
     if all(n in W.get("ns", []) for n in names):

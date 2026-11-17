@@ -1584,6 +1584,8 @@ sh deploy/install.sh --context C [--site prod] --only S7,S12     # 그 단계만
 #   env ALLOW_IMAGE_CHANGE=1·ALLOW_HOSTPATH_CHANGE=1(가드 3·5) · VERIFY_NO_PROBES=1(S12 순수 읽기) · PORTAL_DOMAIN·CACERT(S8 ingress-probe·S12) · PORTAL_VIP(S12)
 #   env INGRESS_PROBE_TIMEOUT(S12 ingress-probe 의 --timeout, 기본 5초) · PROBE_INTERVAL(ingress-probe 재측정 간격, 기본 2초)
 #   env SELINUX_PROBE_IMAGE=<ref>(S2b — Cilium 이 없는 클러스터: 모든 노드에 이미 있는 셸 포함 이미지)
+#   env ROLLOUT_TIMEOUT(S4 레지스트리·S9b Volcano·S11 api·controller 롤아웃 대기, 기본 180초 — DaemonSet 대기의 하한)
+#   env ROLLOUT_TIMEOUT_PER_NODE(S11 ds/dms-agent 대기 상한 = max(ROLLOUT_TIMEOUT, ceil(노드 수 ÷ maxUnavailable) × 이 값), 기본 150초 — 2026-11-17)
 sh deploy/install.sh --help                                      # 머리 주석(env·--upgrade-addon 이름·종료 코드) — exit 0
 ```
 
@@ -1601,7 +1603,7 @@ sh deploy/install.sh --help                                      # 머리 주석
 | S9 | (ns 먼저 — DMS 라벨) CNPG SSA → rollout(업그레이드면 가드를 이 층에서 열고, Cluster 가 있으면 직전 덤프 → healthy 대기) → Cluster CR server dry-run(웹훅 9443, 막 뜬 웹훅은 재시도, `--adopt db` 면 `--force-conflicts`) | 「failed calling webhook」 |
 | S9b | (층이 있으면) Volcano SSA → `install-detect.py vcjob`(DMS 모양 vcjob dry-run) | FAIL |
 | S10 | `pg-path-probe.py pv-check` → db-volumes → `precheck` → db-cluster → 900초 폴링 → `contrast` → db-backup → 첫 덤프(Complete·Failed) | 각 판정 |
-| S11 | 시크릿 게이트 → 앱 이미지 확인 → `guard-images.sh` → migrate 지움 → `apply -k`(client-side) → migrate·rollout → 설정 rev 바뀌면 restart → 마스터 사전 pull(WARN) | 가드 3·4·5, migrate |
+| S11 | 시크릿 게이트 → 앱 이미지 확인 → `guard-images.sh` → migrate 지움 → `apply -k`(client-side) → migrate·rollout(아래 「S11 롤아웃 대기」) → 설정 rev 바뀌면 restart(같은 대기) → 마스터 사전 pull(WARN) | 가드 3·4·5, migrate, rollout 시간 초과(줄에 더 기다리게 다시 돌 명령) |
 | S12 | `verify.sh --rendered`(§2g-5 의 검사 — 5절 Ingress `dms-portal-traefik`·ingress-probe(env `INGRESS_PROBE_TIMEOUT`, 기본 5초 — UNKNOWN 은 WARN), 6절 readyz·http 80(404 = 정상 INFO, 200 = 평문 노출 WARN) — + CNPG·여분 PV·경로 대조·CronJob·레지스트리 태그·애드온 요약·EACCES 힌트). readyz 판정은 apiserver 서비스 프록시(`get --raw …/services/http:dms-api:http/proxy/readyz`), VIP 경유(`--resolve`)는 응답 없음이면 WARN(Avi VS-443 미개통 — 첫 설치) | FAIL(이때도 S13 체크리스트를 보인다) |
 | S13 | 사후 체크리스트 출력(순서대로 — §6): 첫 관리자 부트스트랩(port-forward + `x-admin-token` 파일, 토큰·비밀번호를 출력·argv 에 싣지 않는다) → **메일(Knox 릴레이 — 사용자 게이트, §6-2)** → 컨트롤 상태 → k8s 연동 → 사본 → 스모크 → LB VS-443(풀 = Traefik 이 도는 노드 :443·헬스·PROXY v2 ↔ trustedIPs — §2g-4)·`--only S12` → 확인표 → DNS·공지 | — |
 
@@ -1618,8 +1620,23 @@ sh deploy/install.sh --help                                      # 머리 주석
 - **멱등**: 같은 렌더로 다시 돌리면 SSA 는 no-op, 시크릿·Job·ns 는 만들지 않고(있으면 그대로), 첫 덤프는 CronJob 의 마지막 성공이 있으면 건너뛰고,
   rollout restart 는 `dms-config`·`dms-secrets` 의 resourceVersion 이 바뀌었는데 이번 apply 가 파드를 바꾸지 않은 경우에만 한다(워크로드 어노테이션
   `dms.io/install-config-rev` — 값이 아니라 rev 만). 「파드를 바꿨나」는 apply 전후 `.spec.template` 지문(cksum)으로 본다 — Deployment 의
-  generation 은 어노테이션만 바뀌어도 오르므로 쓰지 않는다(2026-11-16 d31, `install.sh` `stage_S11` 주석). `tests/test_install_stages.py` 가 심
-  kubectl 로 순서·PAUSE·재개·멱등·`--plan` 무변경을 고정한다.
+  generation 은 어노테이션만 바뀌어도 오르므로 쓰지 않는다(2026-11-16 d31, `install.sh` `stage_S11` 주석). 표지는 **대기 전에** 쓴다(2026-11-17):
+  새 파드 템플릿·처음 만든 워크로드·설정 그대로면 apply 직후, 재시작할 워크로드는 `rollout restart` 가 성공한 직후(그 전에는 쓰지 않는다 — 그
+  사이에 멈추면 다음 실행이 재시작을 다시 고른다). 그래서 롤아웃 대기에서 시간 초과로 멈춘 뒤 다시 돌아도 이미 한 재시작을 되풀이하지 않는다.
+  `tests/test_install_stages.py` 가 심 kubectl 로 순서·PAUSE·재개·멱등·`--plan` 무변경을 고정한다.
+- **S11 롤아웃 대기**(2026-11-17, `install.sh` `wait_rollout`·`ds_wait_plan`): dms-api·dms-controller(Deployment, replicas 1)는 `ROLLOUT_TIMEOUT`(기본
+  180초). ds/dms-agent 는 **노드 수에 비례**한다 — RollingUpdate 가 `maxUnavailable` 대씩 차례로 바꾸고(노드마다 옛 파드 종료 유예 + 새 태그 pull·기동),
+  `kubectl rollout status --timeout` 은 진행과 무관한 총 시간이라, 고정 180초는 6노드 사이트의 정상 롤링(약 600초 — 노드당 ~100초)을 「시간 초과」로
+  끊었다. 대기 = max(`ROLLOUT_TIMEOUT`, ceil(노드 수 ÷ 동시 교체 수) × `ROLLOUT_TIMEOUT_PER_NODE`(기본 150초)). 노드 수 = `.status.desiredNumberScheduled`
+  (DS 가 실제로 도는 노드), 동시 교체 수 = `maxUnavailable`(퍼센트는 노드 수 기준 올림, 최소 1). 예: 6노드·maxUnavailable 1 → 900초, 테스트베드 2노드 →
+  300초, 1노드 → 하한 180초. 노드 수를 못 읽으면 하한이다. 이 값은 **상한**이다 — 롤링이 끝나면 바로 넘어가고, 설정 변화 없는 재실행처럼 이미
+  수렴했으면 곧바로 끝난다. 본 대기와 설정 재시작 뒤 대기가 같은 계산을 쓰고, 기다리기 전에
+  `[INFO] ds/dms-agent: 최대 900초 기다린다(노드 6대 ÷ 동시 1 → 6차례 × 150초)` 를 보인다. 시간 초과 줄은 대기 상한·계산과 더 기다리게 다시 돌
+  명령을 싣는다(`[FAIL] ds/dms-agent rollout 시간 초과(대기 상한 900초: … — kubectl … describe ds/dms-agent; 롤링은 클러스터에서 계속된다). …
+  더 기다리게 다시: ROLLOUT_TIMEOUT_PER_NODE=300 sh deploy/install.sh … --only S11` — 하한이 이긴 경우는 `ROLLOUT_TIMEOUT=…`). 시간 초과는 감시만
+  끝낸다 — 롤링은 클러스터에서 계속된다. 그 명령으로 다시 돌아도 설정 재시작은 되풀이하지 않는다(위 「멱등」 — 표지를 대기 전에 쓴다).
+  `ROLLOUT_TIMEOUT=0` 은 시간 제한 없이 기다리고, 그래도 실패하면 시간 초과가 아니라(apiserver 연결·권한 등) `rollout 대기 실패(…)` 로 멈추며 다시
+  돌 명령을 싣지 않는다. 포탈 릴리스(§9)는 진행이 보이면 시계를 다시 걸므로 이 계산이 필요 없다.
 - 종료: 0 완료(WARN 포함) · 1 FAIL · 2 사용법·환경(빈 `--stage`·`--only` 포함) · 4 모름 · 10 PAUSE. 마지막 줄 `RESULT: …`, 단계마다 `STAGE: <S> <판정>`.
   preflight(S1)·verify(S12)의 `[WARN]` 줄은 rc 0 이어도 그 단계와 RESULT 를 WARN 으로 만든다(2026-11-03 ⑦ 리뷰 2). 도우미 출력은 4칸 들여 쓴다 — 0열의 `==`·`STAGE:`·`RESULT:` 는 설치기 자신의 줄뿐이라
   `grep '^RESULT:'` 는 설치 결과 하나만 잡는다. **control-plane 이 1대인 시험 클러스터에서는 `--plan` 도 `STAGE: S1 WARN`·
@@ -2728,8 +2745,11 @@ kubectl --context <ctx> auth can-i list deployments.apps \
 레지스트리가 다운이면 태그 검증이
 fail-open이라(설계 §7) 존재하지 않는 태그가 통과할 수 있다. 그 경우 파드가
 `ImagePullBackOff`에 빠지고, Deployment는 `ProgressDeadlineExceeded`로, DaemonSet은
-`DMS_ROLLOUT_TIMEOUT_SECONDS` 벽시계로 `Failed`가 된다(DaemonSet에는
-`progressDeadlineSeconds`가 없어 이 값이 유일한 실패 수단이다). 실패하면 배치의 남은
+`DMS_ROLLOUT_TIMEOUT_SECONDS`(기본 600초) 정체 시계로 `Failed`가 된다(DaemonSet에는
+`progressDeadlineSeconds`가 없어 이 값이 유일한 실패 수단이다). 이 시계는 **마지막 진행 뒤**부터 잰다 — 새 파드가 노드 하나에
+더 생길 때마다(`updatedNumberScheduled` 증가) 다시 걸리므로(`rollout_watcher._note_daemonset_progress`) 노드가 몇 대든 노드 한 대
+교체가 600초 안에 끝나면 회수되지 않는다(6노드 × 노드당 ~100초 롤링은 정상 `Applied`). 노드 수에 비례하는 계산은 진행과 무관한 총
+시간으로 기다리는 설치기 S11 에만 있다(§2h 「S11 롤아웃 대기」). 실패하면 배치의 남은
 컴포넌트는 `rollout_aborted`로 닫히고 반쯤 섞인 버전 조합이 생기지 않는다 — 복구는
 이력에서 옛 태그를 골라 다시 롤아웃하면 된다(별도 롤백 버튼이 없는 이유). `kubectl rollout undo` 는 쓰지 않는다(§5-1).
 

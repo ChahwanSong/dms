@@ -54,6 +54,8 @@ dms-k8s 라인의 **완료 기록**이다. 각 항목에는 무엇을 만들었�
 
 | 날짜 | 태그·실증 | 제목 |
 |---|---|---|
+| 11-17 | — | pull-probe 노드 여러 대 지정 수정 — 마스터 3대 사전 pull 에서 apiserver 가 DaemonSet 생성을 거부하던 것 |
+| 11-17 | — | 설치기 S11 에이전트 DaemonSet 대기를 노드 수 비례로 — 6노드 사이트의 정상 롤링(약 600초)을 고정 180초가 끊던 것 + 시간 초과 뒤 재실행이 설정 재시작을 되풀이하던 것 |
 | 11-17 | — | 설치기 S11 설정 재시작 누락 수정 — 포탈 릴리스 뒤 태그를 맞추는 S11 이 api·controller 를 다시 띄우지 않던 결함 |
 | 11-16 | d31 | 스케줄 배치 회차 보존 기본 5 → 10 d31 |
 | 11-16 | d29 | 스케줄 회차 최근 5회차 보존·배치 단위 삭제 상한 5000 d29 |
@@ -99,6 +101,92 @@ dms-k8s 라인의 **완료 기록**이다. 각 항목에는 무엇을 만들었�
 ---
 
 ## 상세 기록 (최신순)
+
+### 🔧 pull-probe 노드 여러 대 지정 수정 — 마스터 3대 사전 pull 에서 apiserver 가 DaemonSet 생성을 거부하던 것 — **수정 완료**(2026-11-17, 이미지 변경 없음)
+
+- **증상**(2026-11-17 프로덕션, K8s 1.35, 마스터 3대): 설치기 S11 끝의 마스터 `dms` 이미지 사전 pull(`pull-probe.py --nodes <마스터 쉼표 목록>`)이
+  임시 DaemonSet 을 만들지 못했다 — apiserver 거부 문구 「must be only one value when `operator` is 'In'」. S11 은 이 실패를 WARN(「마스터 사전 pull
+  실패 — 앱은 떴다」)으로만 다루므로 설치는 끝났지만, 장애조치 때 새 마스터에 `dms` 이미지가 캐시돼 있다는 전제(설계 6-3)가 깨져 있었다.
+- **원인**: `deploy/pull-probe.py` `ds_manifest` 가 `--nodes` 의 노드 전부를 nodeAffinity 의 **한 term** 에 `matchFields: [{key: metadata.name,
+  operator: In, values: [노드 여러 개]}]` 로 넣었다(2026-11-03 ⑦ 설치기 e8dcb28e 부터). K8s 는 노드 **필드** 셀렉터(`matchFields` `metadata.name`)의
+  `In`·`NotIn` 값을 하나로 제한한다(라벨 셀렉터 `matchExpressions` 와 다르다). 테스트베드 dmsk8s 는 control-plane 이 1대라 값이 늘 하나여서 드러나지
+  않았고, 기존 테스트(`test_main_nodes_option_pins_the_daemonset_and_judges_only_those`)도 노드 하나만 줬다.
+- **수정**: 노드마다 term 하나(`nodeSelectorTerms` 끼리는 OR) — `[{matchFields: [{metadata.name In [cp1]}]}, {matchFields: [{metadata.name In [cp2]}]}, …]`.
+  `kubernetes.io/hostname` 라벨(`matchExpressions` — 값 여러 개 허용)은 노드 이름과 다를 수 있어 쓰지 않았다. S6 pull 프로브(`--nodes` 없이 모든
+  노드)는 affinity 를 싣지 않으므로 영향이 없다.
+- **테스트**: `tests/test_pull_probe.py` `test_main_several_nodes_get_one_selector_term_each`(노드 두 대 → term 두 개, 어느 `In` 도 값이 하나, 두 노드 모두
+  판정).
+- **적용**: 이미지 변경 없음 — 설치기 도우미라 다음 S11 실행부터. 사이트는 이 커밋으로 체크아웃을 올린 뒤 `--only S11` 을 다시 돌리면 사전 pull 이 다시 돈다.
+- **검증**: `test_pull_probe` 를 바로 아래 항목 「검증」의 22파일 실행에 넣어 돌렸다(884 passed·2 skipped). 테스트베드는 control-plane 이 1대라 노드 여러 대
+  지정은 라이브로 실증하지 못했다 — 다음 프로덕션 S11 의 「마스터 사전 pull」 줄이 OK 인지 본다.
+
+### 🔧 설치기 S11 에이전트 DaemonSet 대기를 노드 수 비례로 — 6노드 사이트의 정상 롤링(약 600초)을 고정 180초가 끊던 것 + 시간 초과 뒤 재실행이 설정 재시작을 되풀이하던 것 — **수정 완료**(2026-11-17, 이미지 변경 없음 · 테스트베드 실증 예정)
+
+- **사용자 사례**(2026-11-17): 「Daemon rollout 기본 대기시간이 180초로 되있어? 실제로는 더 오래걸리는거 같은데 6개 노드에서 600초가
+  걸렸어. Daemonset 대기 시간을 노드수에 비례하게 할수있어?」 — 6노드 사이트에서 ds/dms-agent 롤링이 약 600초(노드당 ~100초) 걸렸다.
+- **원인**: 설치기 S11 은 dms-api·dms-controller·ds/dms-agent 를 모두 `kubectl rollout status --timeout=${ROLLOUT_TIMEOUT:-180}s` 로 기다렸다(본 대기와
+  설정 재시작 뒤 대기 두 곳 — 2026-11-03 단계 설치기부터 고정값). 에이전트 DS 는 `deploy/k8s/50-agent-daemonset.yaml` 에 updateStrategy 가 없어
+  apiserver 기본값(RollingUpdate maxUnavailable 1·maxSurge 0)으로 노드를 하나씩 바꾸고, `--timeout` 은 진행과 무관한 총 시간이다. 그래서 노드 수 ×
+  노드당 시간이 180초(+ 앞의 migrate·api·controller 대기 — DS 는 apply 순간부터 돈다)를 넘으면 정상 롤아웃도 `ds/dms-agent rollout 시간 초과` 로
+  멈췄다. 설치기에서 노드 수를 따지지 않고 DaemonSet 을 기다리는 곳은 이 두 대기뿐이다(S2b·S6·S10 의 일회용 프로브 DS 는 모든 노드에 한꺼번에
+  만들어 폴링하므로 노드 수 비례가 아니다). 노드당 시간은 테스트베드 라이브 실측(revision 38)이 약 31초이고 그중 30초가 옛 파드 종료 유예다(에이전트
+  PID 1 에 SIGTERM 처리기가 없어 terminationGracePeriodSeconds 30초를 채운다). 사이트의 ~100초는 여기에 새 태그 pull(태그마다 바뀌는 앱 레이어 약
+  73 MiB)·기동이 더해진 것으로 보인다(추정 — 미검증).
+- **포탈 릴리스는 바꾸지 않았다**: `rollout_watcher._note_daemonset_progress` 가 DaemonSet 의 `updatedNumberScheduled` 가 늘 때마다 시계를 다시
+  걸어(「마지막 진행 뒤 `DMS_ROLLOUT_TIMEOUT_SECONDS`=600초」) 이미 노드 수와 무관하게 정상 롤링을 통과시킨다. 조사 때 실제 RolloutWatcher·
+  ReleasesRepository 에 가짜 러너로 6노드 × 노드당 100초를 돌려 600초에 Applied, 노드 한 주기 610초에서만 `rollout_timeout` 임을 확인했다(기존
+  `test_daemonset_progress_pushes_back_the_wallclock` 이 같은 규칙을 고정). 노드 수 × 상한 같은 절대 상한은 오히려 한 노드 정체(ImagePullBackOff)를
+  늦게 잡고 새 컬럼이 필요하다. 그래서 포탈 쪽은 설명만 고쳤다(`deploy/README.md` §9-7·`20-config.yaml` 주석 — 「벽시계 상한」 → 「마지막 진행 뒤의
+  정체 상한」, 값은 그대로).
+- **수정**(`deploy/install.sh` `wait_rollout`·`ds_wait_plan` — 두 대기 자리의 공용 도우미): Deployment 는 `ROLLOUT_TIMEOUT`(180) 그대로이고,
+  DaemonSet 대기 상한 = **max(`ROLLOUT_TIMEOUT`, ceil(노드 수 ÷ 동시 교체 수) × `ROLLOUT_TIMEOUT_PER_NODE`)**. 노드 수 = `.status.desiredNumberScheduled`
+  (taint·셀렉터를 반영한, DS 가 실제로 도는 노드 수 — `get nodes` 는 NoSchedule 마스터까지 센다). 동시 교체 수 = `.spec.updateStrategy.rollingUpdate.
+  maxUnavailable`: 정수는 그대로, 퍼센트는 노드 수 기준 올림(DS 컨트롤러와 같다), 최소 1. maxSurge 는 세지 않는다 — 켜면 더 빨리 끝날 뿐이라
+  더 기다리는 쪽(안전)이다. 못 읽은 값은 모름(≠ 0): 노드 수 모름 → 하한, 동시 교체 수 모름 → 1. 노드 0대는 정상값(→ 하한), `ROLLOUT_TIMEOUT=0`
+  (kubectl: 끝날 때까지)은 그대로 존중한다. 이 값은 상한(kubectl `--timeout`)이라 롤링이 끝나면 바로 넘어간다. 기다리기 전에
+  `[INFO] ds/dms-agent: 최대 900초 기다린다(노드 6대 ÷ 동시 1 → 6차례 × 150초)` 를 보이고(하한이 이기면 `최대 180초 기다린다(노드 1대 ÷ 동시 1 →
+  1차례 × 150초 = 150초 < 하한 ROLLOUT_TIMEOUT)`), 시간 초과 줄 `ds/dms-agent rollout 시간 초과(대기 상한 900초: <계산> — kubectl … describe
+  ds/dms-agent; 롤링은 클러스터에서 계속된다)` 는 더 기다리게 다시 돌 명령(노드 비례가 이겼으면 `ROLLOUT_TIMEOUT_PER_NODE=<두 배> … --only S11`,
+  하한이 이겼거나 노드 수를 몰랐으면 `ROLLOUT_TIMEOUT=<두 배> …`)을 싣는다. `ROLLOUT_TIMEOUT=0` 인데 실패하면 시간 초과가 아니므로(apiserver 연결·
+  권한 등) `rollout 대기 실패(ROLLOUT_TIMEOUT=0 — 시간 제한 없이 기다렸는데 실패: …)` 로 멈추고 다시 돌 명령을 싣지 않는다(Deployment 대기도 같다).
+  두 손잡이는 셸 산술에 들어가므로 정수가 아니거나 앞자리 0(8진수)이면 클러스터에 붙기 전에 exit 2.
+- **재실행이 설정 재시작을 되풀이하던 것**(같은 날 리뷰 — 심 kubectl 재현): 설정 표지(`dms.io/install-config-rev`)를 모든 대기가 끝난 뒤(S11 끝
+  annotate 루프)에만 썼다. 그래서 대기에서 시간 초과로 멈춘 실행은 옛 rev 를 남겼고, 시간 초과 줄의 안내대로 다시 돈 `--only S11` 은 apply 가 바꾸는
+  것이 없어 지문이 같으니(`rollout restart` 의 `restartedAt` 도 client-side apply 가 지우지 않는다) 표지 ≠ 현재 rev 로 셋 다 한 번 더 재시작했다 —
+  6노드면 에이전트 롤링을 통째로 한 번 더 하고 에이전트 대기도 두 번(노드당 300초면 1800 + 1800초). 본 대기 시간 초과·재시작 대기 시간 초과 둘 다
+  같았다. 고친 모양(`stage_S11` 「왜」 주석): 재시작 판정을 apply 직후로 옮기고, 표지는 재시작이 필요 없다고 확정되는 즉시(처음 만듦·새 파드
+  템플릿 = 새 파드가 새 설정으로 뜬다, 설정 그대로 — 대기 전), 재시작할 워크로드는 `rollout restart` 가 성공한 직후(대기 전) 쓴다(`mark_cfg`).
+  재시작 전에 미리 쓰지는 않는다 — 그 사이에 멈추면 다음 실행이 필요한 재시작을 놓친다. 표지가 이미 현재 rev 면 다시 쓰지 않는다.
+- **기본값·손잡이**: 새 env `ROLLOUT_TIMEOUT_PER_NODE`(기본 **150초** — 사용자 사례 노드당 ~100초에 50% 여유. 6노드 900초, 테스트베드 2노드 300초,
+  1노드는 하한 180초). 기존 `ROLLOUT_TIMEOUT`(180)은 S4 레지스트리·S9b Volcano·S11 api·controller 대기와 DaemonSet 하한으로 그대로다(기본을 올리면
+  그 대기까지 늘어나므로 손대지 않았다). 지금 사이트에서의 우회(이 커밋 전): `ROLLOUT_TIMEOUT=900 sh deploy/install.sh --context <ctx> --site <site>
+  --only S11`.
+- **테스트**: 심 kubectl(`tests/fixtures/install_stages/fake_kubectl.py`)이 `get ds/<이름> -o jsonpath={.status.desiredNumberScheduled}`·
+  `{.spec.updateStrategy.rollingUpdate.maxUnavailable}` 에 답한다(세계 `ds_status` — 기본은 라이브 테스트베드 모양 2노드·1, 빈 문자열 = 모름, 없는
+  DS 는 NotFound — 라이브 dmsk8s 에서 같은 jsonpath 가 `2`·`1`·NotFound rc 1 임을 읽기로 확인). 새 테스트(`tests/test_install_stages.py`):
+  `test_s11_daemonset_wait_scales_with_node_count`(2·6·1노드, 25%·10%, maxUnavailable 0·빈 값·`08%`, 노드 수 빈 값·0, 손잡이 200·하한 1000·하한 0 —
+  13경우, Deployment 대기는 늘 `ROLLOUT_TIMEOUT` 인지와 [INFO] 줄까지)·`test_s11_daemonset_node_count_read_error_falls_back_to_the_floor`(kubectl 오류도
+  모름)·`test_s11_config_restart_waits_for_the_daemonset_by_node_count_too`(재시작 뒤 대기도 900초)·`test_s11_daemonset_timeout_says_how_to_wait_longer`
+  (세 경우의 안내 명령·「대기 상한」)·`test_s11_no_time_limit_failure_is_not_called_a_timeout`(`ROLLOUT_TIMEOUT=0` + rollout status 실패 — DS·Deployment,
+  「시간 초과」·「더 기다리게 다시」 없음)·`test_rollout_timeout_knobs_must_be_integers_before_touching_the_cluster`(클러스터 호출 0), 멈춤 표 STOPS 에
+  `S11-agent-rollout`, `--help` 에 새 손잡이. 재실행 반복: `test_s11_rerun_after_rollout_timeout_does_not_restart_again`(1회차 = 6노드에서 본 대기
+  시간 초과(새 템플릿 + 설정 변경) 또는 재시작 대기 시간 초과(템플릿 그대로 + 설정 변경 — 심 kubectl 세계 `fail_rollout_after_restart` 로 재시작 뒤
+  대기만 실패) → 표지가 이미 새 rev, 2회차 = 시간 초과 줄의 명령(`ROLLOUT_TIMEOUT_PER_NODE=300 … --only S11`) 그대로 → 재시작 없음·에이전트 대기 1800초
+  한 번)·`test_s11_config_marker_waits_for_a_successful_restart`(재시작 전에 멈추면 표지는 옛 rev 그대로 → 다음 실행이 재시작 — 표지를 apply 직후
+  일괄로 쓰는 「고침」을 막는 그물). 옛 install.sh 로 돌리면 노드 비례 쪽 새 테스트 24건이 빨간불이었고, 리뷰 반영 전 install.sh 로는 재실행 테스트
+  2건이 1회차 표지(cm=5 그대로)에서, 표지 단언을 빼면 2회차 재시작 셋·1800초 두 번에서 빨간불임을 확인했다. 돌린 것은 아래 「검증」.
+- **문서**: `deploy/README.md` §2h(env 목록에 `ROLLOUT_TIMEOUT`·`ROLLOUT_TIMEOUT_PER_NODE`, S11 행의 멈춤 칸에 rollout 시간 초과, 「멱등」 줄에 표지는
+  대기 전, 새 줄 「S11 롤아웃 대기」 — 상한·재실행 때 재시작 되풀이 없음·`ROLLOUT_TIMEOUT=0`)·§9-7(DaemonSet 시계는 마지막 진행 뒤부터 — 노드 수와
+  무관), prod README 「설치 뒤 운영」의 설정 바꾸기 줄, `install.sh` 머리 주석(`--help`).
+- **적용**: 이미지 변경 없음 — 설치기 스크립트라 다음 S11 실행부터 적용된다(`20-config.yaml` 은 주석만 바뀌었다).
+- **검증**: `test_install_stages`(178 passed)·`test_pull_probe` + 배포 문서·스크립트 계약과 롤아웃 판정(`test_ingress_contract`·`test_addons_render`·
+  `test_install_verify`·`test_install_detect`·`test_platform_registry_contract`·`test_check_scripts_context`·`test_prod_k8s_overlay`·
+  `test_guard_images_context`·`test_testbed_k8s_overlay`·`test_build_and_push_script`·`test_release_manifest_contract`·`test_shared_dir_contract`·
+  `test_shared_dir_init`·`test_agent_daemonset_contract`·`test_config_batch`·`test_manifest_tags`·`test_pod_gc`·`test_rollout_watcher`·
+  `test_rollout_status`·`test_planner_path_conflict`) 22파일 884 passed·2 skipped, `dash -n` 통과. 라이브 dmsk8s 에서 `ds_wait_plan` 만 떼어 읽기
+  전용으로 돌려 상한 300초(`노드 2대 ÷ 동시 1 → 2차례 × 150초`, 안내 `ROLLOUT_TIMEOUT_PER_NODE=300`), `ROLLOUT_TIMEOUT=0` 이면 0(제한 없음)·안내 없음,
+  없는 DS 는 모름 → 180초(안내 `ROLLOUT_TIMEOUT=360`)를 확인했다. **테스트베드 실증은 예정**이다 — 설정 재시작이 걸리는 `--only S11` 에서 [INFO] 줄의
+  「최대 300초」와 에이전트 롤링 완료를 보고, 같은 명령을 한 번 더 돌려 재시작이 없는지 본다.
 
 ### 🔧 설치기 S11 설정 재시작 누락 수정 — 포탈 릴리스 뒤 태그를 맞추는 S11 이 api·controller 를 다시 띄우지 않던 결함 — **수정 완료**(2026-11-17, 이미지 변경 없음)
 

@@ -314,7 +314,10 @@ not-ready·unreachable `tolerationSeconds: 30`). 이 오버레이가 제어면 D
 
 - **설정 바꾸기**(`deploy/README.md` §3-4): 메일·정책·허용 쌍·k8s 연동·컨트롤 상태는 포탈 화면(DB — 재시작 없음). 튜닝 키(로그인 보호·경보·
   보존일 등 base `20-config.yaml` 의 키, 또는 base 에 없고 코드 기본값만 있는 키 — 예: `DMS_MAILER_BACKEND`, 더하면 새 키가 생긴다)는 **사이트 체크아웃의 `deploy/overlays/prod/patch-config.yaml` 에 키를 더하고**
-  `sh deploy/install.sh --context <ctx> --only S11`(설정이 바뀌면 S11 이 api·controller·agent 를 다시 띄운다). ConfigMap 손수정은 다음 설치기
+  `sh deploy/install.sh --context <ctx> --only S11`(설정이 바뀌면 S11 이 api·controller·agent 를 다시 띄운다 — 에이전트는 노드를 하나씩 바꾸므로
+  S11 은 노드 수에 비례해 기다린다: 노드당 `ROLLOUT_TIMEOUT_PER_NODE`(기본 150초 — 6노드 900초), 하한 `ROLLOUT_TIMEOUT`(180초), `deploy/README.md`
+  §2h 「S11 롤아웃 대기」 — 상한이라 끝나면 바로 넘어간다. 노드 한 대가 그보다 오래 걸리는 사이트는 시간 초과 줄의 명령으로 다시 돈다 — 다시 돌아도
+  재시작은 되풀이하지 않는다). ConfigMap 손수정은 다음 설치기
   실행이 되돌린다. 추적 파일의 로컬 수정이므로 새 DMS 커밋으로 올릴 때 그 줄을 다시 얹는다. values.env 키는 `--plan` 뒤 해당 단계.
 - **옛 Envoy 가 하던 두 값 — 앱 튜닝 키**(2026-11-16, base 에 없고 코드 기본값만 있다 — 바꿀 때만 위 길로 `patch-config.yaml` 에 더한다):
   `DMS_MAX_REQUEST_BODY_BYTES`(기본 `20971520` = 20MiB, 하한 1MiB) — 넘는 요청은 413 `request_too_large`(대량 배치는 나눠 제출). 입구 경유뿐 아니라

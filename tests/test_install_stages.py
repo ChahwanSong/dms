@@ -592,6 +592,159 @@ def test_s11_guard_refusal_stops_before_apply(rig):
     assert not [c for c in mutations(rig) if " apply " in f" {c} "]
 
 
+# --- S11 DaemonSet 대기 — 노드 수 비례(2026-11-17: 6노드 사이트에서 ds/dms-agent 롤링 ~600초가 고정 180초 대기에 「시간 초과」로 끊겼다) ----------
+
+def _rollout_timeouts(rig, target):
+    """심 kubectl 로그에서 `rollout status <target> --timeout=<N>s` 의 N 들(부른 순서)."""
+    return [int(re.search(r"--timeout=(\d+)s", c).group(1)) for c in cluster_calls(rig) if f" rollout status {target} " in f" {c} "]
+
+
+# [INFO] 줄의 값은 상한(kubectl --timeout)이다 — 「최대 N초」로 보인다(리뷰 2026-11-17: 「N초 기다린다」는 이미 수렴해 바로 끝나는 재실행에서도 늘
+# 그만큼 기다린다고 읽혔다).
+@pytest.mark.parametrize("desired, max_unavailable, env, want, why", [
+    ("2", "1", {}, 300, "ds/dms-agent: 최대 300초 기다린다(노드 2대 ÷ 동시 1 → 2차례 × 150초)"),     # 라이브 테스트베드 모양
+    ("6", "1", {}, 900, "ds/dms-agent: 최대 900초 기다린다(노드 6대 ÷ 동시 1 → 6차례 × 150초)"),     # 사용자 사례(노드당 ~100초 × 6 = ~600초)
+    ("1", "1", {}, 180, "최대 180초 기다린다(노드 1대 ÷ 동시 1 → 1차례 × 150초 = 150초 < 하한 ROLLOUT_TIMEOUT)"),
+    ("6", "25%", {}, 450, "최대 450초 기다린다(노드 6대 ÷ 동시 2 → 3차례 × 150초)"),                # 퍼센트는 노드 수 기준 올림(1.5 → 2) — DS 컨트롤러와 같다
+    ("10", "10%", {}, 1500, "노드 10대 ÷ 동시 1 → 10차례"),
+    ("6", "0", {}, 900, "동시 1 → 6차례"),                                                 # 0 은 컨트롤러도 1 로 쓴다
+    ("6", "", {}, 900, "동시 1 → 6차례"),                                                  # 못 읽음 → 1(더 기다리는 쪽)
+    ("6", "08%", {}, 900, "동시 1 → 6차례"),                                               # 앞자리 0 은 8진수 산술에 넣지 않는다(모름 → 1)
+    ("", "1", {}, 180, "최대 180초 기다린다(노드 수를 읽지 못했다(모름) — 하한 ROLLOUT_TIMEOUT)"),    # 모름 ≠ 0
+    ("0", "1", {}, 180, "최대 180초 기다린다(노드 0대 ÷ 동시 1 → 0차례 × 150초 = 0초 < 하한"),       # 0 은 정상값 → 하한
+    ("6", "1", {"ROLLOUT_TIMEOUT_PER_NODE": "200"}, 1200, "최대 1200초 기다린다(노드 6대 ÷ 동시 1 → 6차례 × 200초)"),
+    ("6", "1", {"ROLLOUT_TIMEOUT": "1000"}, 1000, "최대 1000초 기다린다(노드 6대 ÷ 동시 1 → 6차례 × 150초 = 900초 < 하한 ROLLOUT_TIMEOUT)"),
+    ("6", "1", {"ROLLOUT_TIMEOUT": "0"}, 0, "ds/dms-agent: 시간 제한 없이 기다린다(ROLLOUT_TIMEOUT=0)"),  # kubectl --timeout=0s = 끝날 때까지 — 그대로 존중
+], ids=["testbed-2", "user-6", "floor-1", "pct-25", "pct-10", "mu-0", "mu-unreadable", "mu-octal", "n-unreadable", "n-0",
+        "per-node-200", "floor-1000", "floor-0"])
+def test_s11_daemonset_wait_scales_with_node_count(rig, desired, max_unavailable, env, want, why):
+    rig.world(installed_world(ds_status={"ds/dms-agent": {"desired": desired, "max_unavailable": max_unavailable}}))
+    r = rig.run("--context", "known", "--site", "testbed-k8s", "--only", "S11", **env)
+    assert r.returncode == 0 and stages(r) == [("S11", "PASS")], r.all
+    assert _rollout_timeouts(rig, "ds/dms-agent") == [want], r.all
+    floor = int(env.get("ROLLOUT_TIMEOUT", "180"))                                 # Deployment 대기는 그대로 ROLLOUT_TIMEOUT
+    assert _rollout_timeouts(rig, "deploy/dms-api") == [floor] and _rollout_timeouts(rig, "deploy/dms-controller") == [floor]
+    assert "  [INFO] ds/dms-agent: " in r.stdout and why in r.stdout, r.stdout     # 기다리기 전에 계산을 보인다
+
+
+def test_s11_daemonset_node_count_read_error_falls_back_to_the_floor(rig):
+    # 읽기 실패(빈 값이 아니라 kubectl 오류)도 모름 — 0 으로 읽어 「노드 0대」로 만들지 않는다.
+    rig.world(installed_world(ds_status={"ds/dms-agent": {"desired": "6"}},
+                              fail={"desiredNumberScheduled": [1, 'Error from server (Forbidden): daemonsets.apps "dms-agent" is forbidden']}))
+    r = rig.run("--context", "known", "--site", "testbed-k8s", "--only", "S11")
+    assert r.returncode == 0, r.all
+    assert _rollout_timeouts(rig, "ds/dms-agent") == [180] and "최대 180초 기다린다(노드 수를 읽지 못했다(모름)" in r.stdout
+
+
+def test_s11_config_restart_waits_for_the_daemonset_by_node_count_too(rig):
+    # 설정 재시작(rollout restart 셋)도 에이전트가 모든 노드를 다시 굴린다 — 본 대기와 같은 계산.
+    w = installed_world(ds_status={"ds/dms-agent": {"desired": "6", "max_unavailable": "1"}})
+    w["annotations"] = {k: "cm=4,secret=10" for k in w["annotations"]}
+    rig.world(w)
+    r = rig.run("--context", "known", "--site", "testbed-k8s", "--only", "S11")
+    assert r.returncode == 0, r.all
+    assert rig.world()["restarts"] == ["deploy/dms-api", "deploy/dms-controller", "ds/dms-agent"]
+    assert _rollout_timeouts(rig, "ds/dms-agent") == [900, 900], r.all
+    assert _rollout_timeouts(rig, "deploy/dms-api") == [180, 180] and _rollout_timeouts(rig, "deploy/dms-controller") == [180, 180]
+
+
+@pytest.mark.parametrize("desired, why, hint", [
+    ("6", "대기 상한 900초: 노드 6대 ÷ 동시 1 → 6차례 × 150초", "ROLLOUT_TIMEOUT_PER_NODE=300"),     # 노드 비례가 이겼다 → 노드당 시간을 올린다
+    ("1", "대기 상한 180초: 노드 1대 ÷ 동시 1 → 1차례 × 150초 = 150초 < 하한 ROLLOUT_TIMEOUT", "ROLLOUT_TIMEOUT=360"),   # 하한이 이겼다 → 하한을
+    ("", "대기 상한 180초: 노드 수를 읽지 못했다(모름) — 하한 ROLLOUT_TIMEOUT", "ROLLOUT_TIMEOUT=360"),
+])
+def test_s11_daemonset_timeout_says_how_to_wait_longer(rig, desired, why, hint):
+    rig.world(installed_world(ds_status={"ds/dms-agent": {"desired": desired, "max_unavailable": "1"}},
+                              fail={"rollout status ds/dms-agent": [1, "error: timed out waiting for the condition"]}))
+    r = rig.run("--context", "known", "--site", "testbed-k8s", "--only", "S11")
+    assert r.returncode == 1 and stages(r) == [("S11", "FAIL")], r.all
+    assert f"ds/dms-agent rollout 시간 초과({why} — kubectl --context known -n dms describe ds/dms-agent" in r.all, r.all
+    assert f"{hint} sh deploy/install.sh --context known --site testbed-k8s --only S11" in r.all, r.all
+
+
+@pytest.mark.parametrize("target", ["ds/dms-agent", "deploy/dms-api"])
+def test_s11_no_time_limit_failure_is_not_called_a_timeout(rig, target):
+    # ROLLOUT_TIMEOUT=0(끝날 때까지)인데 rollout status 가 실패했다면 시간 초과가 아니다(apiserver 연결 등) — 「시간 초과 … 더 기다리게 다시:
+    # ROLLOUT_TIMEOUT=0 …」은 같은 명령을 「더 기다리게」 권하는 모순이었다(리뷰 2026-11-17). 시간 초과라 부르지 않고 다시 돌 명령도 싣지 않는다.
+    rig.world(installed_world(ds_status={"ds/dms-agent": {"desired": "6", "max_unavailable": "1"}},
+                              fail={f"rollout status {target}": [1, "error: unable to connect to the server"]}))
+    r = rig.run("--context", "known", "--site", "testbed-k8s", "--only", "S11", ROLLOUT_TIMEOUT="0")
+    assert r.returncode == 1 and stages(r) == [("S11", "FAIL")], r.all
+    assert _rollout_timeouts(rig, target) == [0], r.all
+    assert f"{target} rollout 대기 실패(ROLLOUT_TIMEOUT=0 — 시간 제한 없이 기다렸는데 실패: 시간 초과가 아니라" in r.all, r.all
+    assert f"kubectl --context known -n dms describe {target}" in r.all, r.all
+    assert "시간 초과(" not in r.all and "더 기다리게 다시" not in r.all, r.all
+
+
+@pytest.mark.parametrize("first", [
+    # 새 이미지(파드 템플릿 바뀜) + 설정 변경 — 재시작은 필요 없고, 본 대기(에이전트 롤링)에서 시간 초과.
+    {"app_bumps": True, "app_changes_config": True, "fail": {"rollout status ds/dms-agent": [1, "error: timed out waiting for the condition"]}},
+    # 템플릿 그대로 + 설정 변경 — 셋 다 rollout restart 하고, 재시작 뒤 대기(에이전트)에서 시간 초과.
+    {"app_changes_config": True, "fail_rollout_after_restart": ["ds/dms-agent"]},
+], ids=["timeout-in-main-wait", "timeout-in-restart-wait"])
+def test_s11_rerun_after_rollout_timeout_does_not_restart_again(rig, first):
+    # 리뷰 2026-11-17(must): 설정 표지를 모든 대기가 끝난 뒤에만 쓰면, 대기에서 멈춘 실행이 옛 rev 를 남겨 시간 초과 줄의 안내대로 다시 돈
+    # --only S11 이 셋 다 한 번 더 재시작했다(6노드면 에이전트 롤링을 통째로 한 번 더 — 에이전트 대기도 두 번). 표지는 대기 전에 쓴다: 새 템플릿·
+    # 처음 만듦은 apply 직후, 재시작한 워크로드는 rollout restart 성공 직후.
+    rig.world(installed_world(ds_status={"ds/dms-agent": {"desired": "6", "max_unavailable": "1"}}, **first))
+    r1 = rig.run("--context", "known", "--site", "testbed-k8s", "--only", "S11")
+    assert r1.returncode == 1 and stages(r1) == [("S11", "FAIL")], r1.all
+    assert "시간 초과(대기 상한 900초: 노드 6대" in r1.all, r1.all
+    w = rig.world()
+    assert set(w["annotations"].values()) == {"cm=6,secret=10"}, w["annotations"]      # 멈추기 전에 새 rev — 파드는 새 설정으로 뜬다(뜨는 중)
+    restarts_before = list(w.get("restarts") or [])
+    if "fail_rollout_after_restart" in first:
+        assert restarts_before == ["deploy/dms-api", "deploy/dms-controller", "ds/dms-agent"]
+        assert _rollout_timeouts(rig, "ds/dms-agent") == [900, 900]                     # 본 대기 통과 → 재시작 → 재시작 대기에서 멈춤
+        assert "ds/dms-agent 재시작 rollout 시간 초과(" in r1.all
+    else:
+        assert restarts_before == [] and _rollout_timeouts(rig, "ds/dms-agent") == [900]
+        assert "ds/dms-agent rollout 시간 초과(" in r1.all
+    hint = re.search(r"더 기다리게 다시: (ROLLOUT_TIMEOUT_PER_NODE)=(\d+) sh deploy/install\.sh --context known --site testbed-k8s --only S11",
+                     r1.all)
+    assert hint and hint.group(2) == "300", r1.all
+    # 같은 렌더로(새 이미지·설정 변화 없음) 안내대로 다시 — 그 사이 롤링은 클러스터에서 끝났다.
+    for k in ("app_bumps", "app_changes_config", "fail", "fail_rollout_after_restart"):
+        w.pop(k, None)
+    rig.world(w)
+    rig.reset_logs()
+    r2 = rig.run("--context", "known", "--site", "testbed-k8s", "--only", "S11", **{hint.group(1): hint.group(2)})
+    assert r2.returncode == 0 and stages(r2) == [("S11", "PASS")], r2.all
+    assert list(rig.world().get("restarts") or []) == restarts_before, r2.all             # 재시작을 되풀이하지 않는다
+    assert not [c for c in mutations(rig) if "rollout restart" in c]
+    assert _rollout_timeouts(rig, "ds/dms-agent") == [1800], r2.all                       # 에이전트 대기는 한 번(노드당 300초 × 6)
+    assert "설정 변화 없음(또는 이미 새 파드) — 재시작하지 않는다" in r2.stdout
+    assert set(rig.world()["annotations"].values()) == {"cm=6,secret=10"}
+
+
+def test_s11_config_marker_waits_for_a_successful_restart(rig):
+    # 템플릿이 그대로라 재시작이 필요한 워크로드의 표지는 rollout restart 가 성공한 뒤에만 쓴다 — 그 전(본 대기)에 멈추면 옛 rev 로 남아 다음
+    # 실행이 필요한 재시작을 놓치지 않는다(표지를 apply 직후 일괄로 쓰는 「고침」을 막는 그물).
+    rig.world(installed_world(app_changes_config=True, fail={"rollout status ds/dms-agent": [1, "error: timed out waiting for the condition"]}))
+    r1 = rig.run("--context", "known", "--site", "testbed-k8s", "--only", "S11")
+    assert r1.returncode == 1 and not rig.world().get("restarts"), r1.all
+    w = rig.world()
+    assert set(w["annotations"].values()) == {"cm=5,secret=10"}, w["annotations"]      # 아직 재시작하지 않았다 — 옛 rev 그대로
+    for k in ("fail", "app_changes_config"):
+        w.pop(k)
+    rig.world(w)
+    r2 = rig.run("--context", "known", "--site", "testbed-k8s", "--only", "S11")
+    assert r2.returncode == 0, r2.all
+    got = rig.world()
+    assert got["restarts"] == ["deploy/dms-api", "deploy/dms-controller", "ds/dms-agent"], r2.all
+    assert set(got["annotations"].values()) == {"cm=6,secret=10"}
+
+
+@pytest.mark.parametrize("var, val", [("ROLLOUT_TIMEOUT_PER_NODE", "abc"), ("ROLLOUT_TIMEOUT_PER_NODE", "090"),
+                                      ("ROLLOUT_TIMEOUT", "10m"), ("ROLLOUT_TIMEOUT", "-1")])
+def test_rollout_timeout_knobs_must_be_integers_before_touching_the_cluster(rig, var, val):
+    # S11 의 DaemonSet 대기 계산은 셸 산술이다 — 숫자가 아니면 dash 가 셸을 끝내고, 앞자리 0 은 8진수다. 클러스터에 붙기 전에 사용법 오류.
+    rig.world(installed_world())
+    r = rig.run("--context", "known", "--site", "testbed-k8s", "--only", "S11", **{var: val})
+    assert r.returncode == 2 and f"env {var}=" in r.stderr, r.all
+    assert rig.kube() == [] and rig.helpers() == []
+
+
 # --- 단계별 멈춤 조건(설계 8-1 판정 칸 — 2026-11-03 ⑦ 리뷰 1: 각 멈춤을 die→warn·judge 0 으로 바꿔도 통과하던 16건) ------------------------
 
 _WEBHOOK = ('Error from server (InternalError): Internal error occurred: failed calling webhook "mcluster.cnpg.io": failed to call '
@@ -648,6 +801,9 @@ STOPS = [
      {}, 1, "FAIL", ["migrate 실패", "psycopg.OperationalError"], []),
     ("S11-guard-context", "S11", {"guard-images.sh": {"rc": 4}}, {}, {}, 2, "FAIL", ["가드 거부(컨텍스트)"], ["app"]),
     ("S11-guard-hostpath", "S11", {"guard-images.sh": {"rc": 5}}, {}, {}, 1, "FAIL", ["ALLOW_HOSTPATH_CHANGE"], ["app"]),
+    # 에이전트 DaemonSet 롤아웃이 노드 비례 대기(기본 2노드 × 150초 = 300초) 안에 끝나지 않으면 멈추고, 더 기다리게 다시 돌 명령을 싣는다(2026-11-17)
+    ("S11-agent-rollout", "S11", {}, {"fail": {"rollout status ds/dms-agent": [1, "error: timed out waiting for the condition"]}}, {}, 1,
+     "FAIL", ["ds/dms-agent rollout 시간 초과(대기 상한 300초: 노드 2대", "롤링은 클러스터에서 계속된다", "ROLLOUT_TIMEOUT_PER_NODE=300"], []),
 ]
 
 
@@ -1103,7 +1259,7 @@ def test_only_the_installer_writes_result_at_column_0(rig):
 def test_help_shows_the_header_and_exits_0(rig):
     r = rig.run("--help")
     assert r.returncode == 0, r.all
-    for needle in ("--upgrade-addon", "ADDON_INSTALL", "SELINUX_PROBE_IMAGE", "VERIFY_NO_PROBES", "10 PAUSE", "S9b"):
+    for needle in ("--upgrade-addon", "ADDON_INSTALL", "SELINUX_PROBE_IMAGE", "VERIFY_NO_PROBES", "10 PAUSE", "S9b", "ROLLOUT_TIMEOUT_PER_NODE"):
         assert needle in r.stdout, needle
     assert not r.stdout.startswith("#!") and "\n# " not in r.stdout                  # 주석 기호를 떼어 보인다
     assert rig.kube() == [] and rig.helpers() == []

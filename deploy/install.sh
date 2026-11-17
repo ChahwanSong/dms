@@ -23,8 +23,10 @@
 #   env VERIFY_NO_PROBES=1  S12 에서 파드를 띄우는 검사(PG 경로 대조)를 건너뛴다(라이브 사이트를 순수 읽기로 다시 볼 때 — ingress-probe 는
 #                    파드를 띄우지 않는 HTTPS GET 이라 그대로 돈다).
 #   env SELINUX_PROBE_IMAGE=<ref>  S2b 프로브 이미지(모든 노드에 이미 있는 셸 포함 이미지 — 기본은 Cilium agent 이미지를 찾는다).
-#   env 시간(초): DB_WAIT_SECONDS(900 — S10 폴링·CNPG 업그레이드 뒤 healthy) · ROLLOUT_TIMEOUT(180) · MIGRATE_TIMEOUT(180) · DUMP_TIMEOUT(600) ·
-#       CNPG_ROLLOUT_TIMEOUT(300) · WEBHOOK_RETRIES(6 — S9 Cluster CR dry-run 의 웹훅 재시도) · POLL_INTERVAL. PYTHON(python3).
+#   env 시간(초): DB_WAIT_SECONDS(900 — S10 폴링·CNPG 업그레이드 뒤 healthy) · ROLLOUT_TIMEOUT(180 — Deployment 롤아웃 대기·DaemonSet 대기의 하한) ·
+#       ROLLOUT_TIMEOUT_PER_NODE(150 — S11 ds/dms-agent 대기 상한 = max(ROLLOUT_TIMEOUT, ceil(노드 수 ÷ maxUnavailable) × 이 값), 2026-11-17) ·
+#       MIGRATE_TIMEOUT(180) · DUMP_TIMEOUT(600) · CNPG_ROLLOUT_TIMEOUT(300) · WEBHOOK_RETRIES(6 — S9 Cluster CR dry-run 의 웹훅 재시도) · POLL_INTERVAL.
+#       PYTHON(python3).
 #
 # 단계(설계 8-1 — 순서의 이유는 설계 「순서의 이유」):
 #   S1  preflight(preflight-cluster.sh — K8s minor 1.34~1.36·IngressClass(Traefik)·SHARED_DIR 형식·REGISTRY_CLUSTER_IP(ServiceCIDR·미사용·
@@ -48,8 +50,9 @@
 #   S10 pv-check → db-volumes → precheck → db-cluster → 900초 폴링(readyInstances ≥ 1·dms-pg-rw Endpoints·currentPrimary Ready — 전부 Ready 를
 #       기다리되 시간 초과에 ≥ 1 이면 WARN, 0 이면 FAIL) → 경로 대조(contrast) → db-backup → 첫 덤프(Complete·Failed 를 함께 본다).
 #   S11 시크릿 게이트 → 앱 이미지 확인 → guard-images(3·4·5) → migrate Job 지움 → `apply -k`(client-side — 포탈 릴리스가 strategic-merge 로
-#       image 를 바꾼다) → migrate 완료·롤아웃 대기 → 설정(dms-config·dms-secrets 의 resourceVersion)이 바뀌었는데 파드가 그대로면 rollout restart
-#       → 마스터 `dms` 이미지 사전 pull(pull-probe.py --nodes <마스터>, 실패는 WARN).
+#       image 를 바꾼다) → 설정(dms-config·dms-secrets 의 resourceVersion)이 바뀌었는데 파드가 그대로인 워크로드를 고르고 나머지는 설정 표지를
+#       바로 쓴다 → migrate 완료·롤아웃 대기(ds/dms-agent 는 노드 수 비례 상한 — 계산을 [INFO] 로 보인다) → 고른 워크로드 rollout restart(성공 즉시
+#       표지, 같은 대기) → 마스터 `dms` 이미지 사전 pull(pull-probe.py --nodes <마스터>, 실패는 WARN).
 #   S12 verify.sh(--rendered) — readyz(apiserver 서비스 프록시 = 판정, --resolve VIP = Avi 미개통이면 WARN)·CNPG·여분 PV·경로 대조·CronJob·
 #       Ingress dms-portal-traefik·ingress-probe(노드 :443 경유)·레지스트리·애드온 요약·http 80(404 = Traefik web 에 DMS 라우터 없음 — 정상,
 #       200 = 평문 노출 WARN). FAIL 이어도 S13 체크리스트를 보이고 멈춘다.
@@ -158,6 +161,15 @@ elif [ -n "$START" ]; then
   on=0; for s in $ALL_STAGES; do [ "$s" = "$START" ] && on=1; [ "$on" = 1 ] && RUN="$RUN $s"; done
 else RUN=$ALL_STAGES; fi
 _nonblank "$RUN" || usage       # 돌 단계가 하나도 없으면 PASS 가 아니라 사용법 오류
+# 롤아웃 시간 손잡이는 S11 의 DaemonSet 대기 계산(산술)에 쓴다 — 숫자가 아니면 dash 산술 오류가 셸을 끝내고, 앞자리 0 은 8진수로 읽힌다
+# (2026-11-17). 클러스터에 붙기 전에 사용법 오류로 멈춘다. 빈 값은 기본값이다.
+for _v in ROLLOUT_TIMEOUT ROLLOUT_TIMEOUT_PER_NODE; do
+  eval "_x=\${$_v-}"
+  case "$_x" in
+    ""|0) ;;
+    *[!0123456789]*|0*) echo "install.sh: env $_v='$_x' 는 초 단위 정수여야 한다(0 또는 앞자리 0 없는 수)" >&2; exit 2 ;;
+  esac
+done
 
 # --- 출력·판정 -------------------------------------------------------------------------------------------------------------
 WARNS=0 STAGE_WARN=0 STAGE_SKIP=0 STAGE_FAIL="" CUR="" SOFT=0 SOFT_FAILS=0 SOFT_UNKNOWN=0
@@ -981,44 +993,45 @@ stage_S11() {
   kcn delete job dms-migrate --ignore-not-found >/dev/null 2>&1
   kc apply -k "$RDIR/app" > "$WORK/app.out" 2>&1 || { tail -n 15 "$WORK/app.out" >&2; die "앱 apply -k 실패(위 오류)"; }
   ok "앱 apply -k $RDIR/app(client-side)"
-  wait_job dms-migrate "${MIGRATE_TIMEOUT:-180}"
-  case $? in
-    0) ok "migrate 완료" ;;
-    1) kcn logs job/dms-migrate --tail=5 2>/dev/null | sed 's/^/    /' >&2; die "migrate 실패(위 로그 — DB 연결·URL 은 S2 게이트, DB Ready 는 S10)" ;;
-    *) die "migrate 가 ${MIGRATE_TIMEOUT:-180}초 안에 끝나지 않았다(kubectl --context $CTX -n $NS describe job/dms-migrate — 이미지 pull·DB)" ;;
-  esac
-  for _w in deploy/dms-api deploy/dms-controller ds/dms-agent; do
-    kcn rollout status "$_w" --timeout="${ROLLOUT_TIMEOUT:-180}s" >/dev/null 2>&1 || die "$_w rollout 시간 초과(kubectl --context $CTX -n $NS describe $_w)"
-  done
-  ok "dms-api·dms-controller·dms-agent 롤아웃 끝"
   # 설정 해시(설계 S11): dms-config·dms-secrets 는 envFrom·KeyRef 라 바뀌어도 파드가 그대로다. 그 둘의 resourceVersion(값이 아니다 — 비밀을 다루지
-  # 않는다)을 워크로드 어노테이션에 남겨 두고, 바뀌었는데 이번 apply 가 파드를 바꾸지 않았으면(파드 템플릿 그대로) rollout restart.
+  # 않는다)을 워크로드 어노테이션(설정 표지)에 남겨 두고, 바뀌었는데 이번 apply 가 파드를 바꾸지 않았으면(파드 템플릿 그대로) rollout restart.
   # 「파드를 바꿨나」는 apply 전후 .spec.template 지문(tmpl_sum)으로 본다 — 지문이 바뀜 ⇔ 새 ReplicaSet·ControllerRevision ⇔ 파드 교체.
   # metadata.generation 으로 보지 않는다: Deployment 는 metadata.annotations 만 바뀌어도 generation 이 오른다(어노테이션이 RS 로 복사되므로 —
   # DaemonSet 은 spec 이 바뀔 때만). 2026-11-16 d31: 포탈 release(image 만 strategic-merge) 뒤 오버레이 태그를 따라잡는 첫 S11 에서
   # client-side apply 가 image 는 그대로 두고 last-applied-configuration 어노테이션만 고쳐 api·controller 의 generation 만 올랐고, 같이 바뀐
   # dms-config(KEEP_ROUNDS "5"→"10")를 「이미 새 파드」로 건너뛰어 ds/dms-agent 만 다시 띄웠다(api·controller 는 옛 env — 손으로 rollout restart).
   # 지문 충돌(다른 템플릿이 같은 지문)은 「그대로」로 읽혀 재시작이 한 번 더 늘 뿐이다 — 틀려도 재시작을 빠뜨리는 쪽이 아니다.
+  # 판정과 표지는 apply 직후, 대기보다 먼저다(2026-11-17 리뷰): 표지를 모든 대기가 끝난 뒤에만 쓰면 대기에서 시간 초과로 멈춘 실행이 옛 rev 를
+  # 남기고, 안내대로 다시 돈 --only S11 은 apply 가 바꾸는 것이 없어 지문이 같으니(rollout restart 의 restartedAt 도 client-side apply 가 지우지
+  # 않는다) 셋 다 한 번 더 재시작했다 — 6노드면 에이전트 롤링을 통째로 한 번 더. 그래서 표지는 재시작이 필요 없다고 확정되는 즉시(처음 만듦·
+  # 새 템플릿 = 새 파드가 이미 새 설정으로 뜬다, 설정 그대로) 쓰고, 재시작할 워크로드는 rollout restart 가 성공한 직후(대기 전에) 쓴다. 재시작
+  # 전에 미리 쓰지는 않는다 — 그 사이에 멈추면 다음 실행이 필요한 재시작을 놓친다.
   _cfg=$(config_rev)
   _restart=""
   for _pair in $_tmpls; do
     _w=${_pair%%=*} _t0=${_pair#*=}
     _t1=$(tmpl_sum "$_w")
     _prev=$(kcn get "$_w" -o 'jsonpath={.metadata.annotations.dms\.io/install-config-rev}' 2>/dev/null)
-    [ -n "$_t0" ] || continue                       # 이번에 처음 만든 워크로드 — 새 설정으로 떴다
-    # 파드 템플릿이 바뀌어 이미 새 파드로 돌았다. apply 뒤 지문을 못 읽었으면(빈 값 — 방금 rollout status 가 본 워크로드다) 모름 → 재시작 쪽으로.
-    [ -z "$_t1" ] || [ "$_t0" = "$_t1" ] || continue
-    if [ "${_prev:-$_cfg_before}" != "$_cfg" ]; then _restart="$_restart $_w"; fi
+    # 처음 만든 워크로드(_t0 빈 값)·파드 템플릿이 바뀐 워크로드는 새 파드가 새 설정으로 뜬다. apply 뒤 지문을 못 읽었으면(빈 값) 모름 → 재시작 쪽으로.
+    if [ -n "$_t0" ] && { [ -z "$_t1" ] || [ "$_t0" = "$_t1" ]; } && [ "${_prev:-$_cfg_before}" != "$_cfg" ]; then
+      _restart="$_restart $_w"
+    elif [ "$_prev" != "$_cfg" ]; then mark_cfg "$_w"; fi
   done
+  wait_job dms-migrate "${MIGRATE_TIMEOUT:-180}"
+  case $? in
+    0) ok "migrate 완료" ;;
+    1) kcn logs job/dms-migrate --tail=5 2>/dev/null | sed 's/^/    /' >&2; die "migrate 실패(위 로그 — DB 연결·URL 은 S2 게이트, DB Ready 는 S10)" ;;
+    *) die "migrate 가 ${MIGRATE_TIMEOUT:-180}초 안에 끝나지 않았다(kubectl --context $CTX -n $NS describe job/dms-migrate — 이미지 pull·DB)" ;;
+  esac
+  for _w in deploy/dms-api deploy/dms-controller ds/dms-agent; do wait_rollout "$_w" "rollout"; done
+  ok "dms-api·dms-controller·dms-agent 롤아웃 끝"
   if [ -n "$_restart" ]; then
     # shellcheck disable=SC2086
     kcn rollout restart $_restart >/dev/null 2>&1 || die "rollout restart 실패:$_restart"
-    for _w in $_restart; do kcn rollout status "$_w" --timeout="${ROLLOUT_TIMEOUT:-180}s" >/dev/null 2>&1 || die "$_w 재시작 rollout 시간 초과"; done
+    for _w in $_restart; do mark_cfg "$_w"; done
+    for _w in $_restart; do wait_rollout "$_w" "재시작 rollout"; done
     ok "설정이 바뀌어 다시 띄웠다:$_restart"
   else info "설정 변화 없음(또는 이미 새 파드) — 재시작하지 않는다"; fi
-  for _w in deploy/dms-api deploy/dms-controller ds/dms-agent; do
-    kcn annotate "$_w" "dms.io/install-config-rev=$_cfg" --overwrite >/dev/null 2>&1 || warn "$_w 에 설정 표지를 남기지 못했다(다음 실행이 재시작 여부를 덜 정확히 안다)"
-  done
   # 마스터 사전 pull(설계 6-3 — dms-api 가 있던 마스터가 죽으면 새 마스터에 dms 이미지가 캐시돼 있어야 1.5~2.5분에 복구).
   _img=$(kcn get deploy dms-api -o 'jsonpath={.spec.template.spec.containers[0].image}' 2>/dev/null)
   _masters=$(kc get nodes -l node-role.kubernetes.io/control-plane -o 'jsonpath={range .items[*]}{.metadata.name}{","}{end}' 2>/dev/null)
@@ -1043,6 +1056,61 @@ tmpl_sum() {
 config_rev() {
   printf 'cm=%s,secret=%s' "$(kcn get configmap dms-config -o 'jsonpath={.metadata.resourceVersion}' 2>/dev/null)" \
     "$(kcn get secret dms-secrets -o 'jsonpath={.metadata.resourceVersion}' 2>/dev/null)"
+}
+# S11 롤아웃 대기(본 대기·설정 재시작 뒤 대기 공용, 2026-11-17). Deployment(api·controller — replicas 1)는 ROLLOUT_TIMEOUT(기본 180초) 그대로.
+# DaemonSet 은 노드 수에 비례한다: 6노드 사이트에서 ds/dms-agent 롤링이 약 600초(노드당 ~100초) 걸렸는데 고정 180초 대기가 정상 롤아웃을
+# 「시간 초과」로 끊었다. RollingUpdate 는 maxUnavailable 개씩 차례로 바꾸고(옛 파드 종료 유예·새 태그 pull·기동이 노드마다 직렬 — 테스트베드는
+# 노드당 약 31초 중 30초가 종료 유예), kubectl rollout status --timeout 은 진행과 무관한 총 시간이다. 포탈 릴리스(rollout_watcher)는 진행이
+# 보이면 시계를 다시 걸어 노드 수와 무관하다 — 이 계산은 설치기에만 있다.
+wait_rollout() {   # $1 = deploy/<이름>|ds/<이름>, $2 = 무엇(「rollout」·「재시작 rollout」 — 실패 줄 앞머리)
+  case "$1" in
+    ds/*)
+      ds_wait_plan "$1"
+      # 계산값은 상한(kubectl --timeout)이다 — 롤링이 끝나면 바로 넘어간다(설정 변화 없는 재실행처럼 이미 수렴했으면 즉시). 「최대」로 보인다.
+      if [ "$DS_WAIT" = 0 ]; then info "$1: 시간 제한 없이 기다린다($DS_WAIT_WHY)"
+      else info "$1: 최대 ${DS_WAIT}초 기다린다($DS_WAIT_WHY)"; fi
+      kcn rollout status "$1" --timeout="${DS_WAIT}s" >/dev/null 2>&1 && return 0
+      # 시간 제한이 없었는데 실패했으면 시간 초과가 아니다(apiserver 연결·권한 등) — 「더 기다리게 다시」는 같은 명령이라 싣지 않는다.
+      if [ -z "$DS_HINT" ]; then die "$1 $2 대기 실패($(_no_limit_fail "$1"))"
+      else die "$1 $2 시간 초과(대기 상한 ${DS_WAIT}초: $DS_WAIT_WHY — kubectl --context $CTX -n $NS describe $1; 롤링은 클러스터에서 계속된다). 노드가 더 오래 걸리는 사이트면 더 기다리게 다시: $DS_HINT $(base_cmd) --only S11"; fi ;;
+    *)
+      kcn rollout status "$1" --timeout="${ROLLOUT_TIMEOUT:-180}s" >/dev/null 2>&1 && return 0
+      if [ "${ROLLOUT_TIMEOUT:-180}" = 0 ]; then die "$1 $2 대기 실패($(_no_limit_fail "$1"))"
+      else die "$1 $2 시간 초과(대기 상한 ROLLOUT_TIMEOUT ${ROLLOUT_TIMEOUT:-180}초 — kubectl --context $CTX -n $NS describe $1)"; fi ;;
+  esac
+}
+_no_limit_fail() { printf 'ROLLOUT_TIMEOUT=0 — 시간 제한 없이 기다렸는데 실패: 시간 초과가 아니라 apiserver 연결·권한 같은 다른 이유. kubectl --context %s -n %s describe %s' "$CTX" "$NS" "$1"; }
+# DaemonSet 대기 상한(초) = max(ROLLOUT_TIMEOUT, ceil(노드 수 ÷ 동시 교체 수) × ROLLOUT_TIMEOUT_PER_NODE) — 노드당 기본 150초(사용자 사례 노드당 ~100초에
+# 50% 여유: 6노드 900초, 테스트베드 2노드 300초). 노드 수 = .status.desiredNumberScheduled(DS 가 실제로 도는 노드 — taint·셀렉터를 반영한다; get
+# nodes 는 NoSchedule 마스터까지 센다). 동시 교체 수 = .spec.updateStrategy.rollingUpdate.maxUnavailable(apiserver 가 늘 채운다): 정수는 그대로,
+# 퍼센트는 노드 수 기준 올림(DS 컨트롤러와 같다), 최소 1(둘 다 0 이면 컨트롤러도 1 로 쓴다). maxSurge 는 세지 않는다 — 켜면 더 빨리 끝날 뿐이라
+# 더 기다리는 쪽(안전)이다. 못 읽은 값은 모름(≠ 0): 노드 수 모름 → 하한 ROLLOUT_TIMEOUT, 동시 교체 수 모름 → 1(더 기다리는 쪽). 노드 0대는 정상값
+# (→ 하한). ROLLOUT_TIMEOUT=0(kubectl: 끝날 때까지)은 그대로 존중하고 DS_HINT 를 비운다(더 기다리게 할 값이 없다). 앞자리 0 인 값은 산술(8진수)에
+# 넣지 않고 모름으로 읽는다.
+ds_wait_plan() {   # $1 = ds/<이름> → DS_WAIT(초 — 상한, 0 = 제한 없음)·DS_WAIT_WHY(계산 한 줄)·DS_HINT(시간 초과 때 더 기다리게 할 env 하나, 빈 값 = 없음)
+  _floor=${ROLLOUT_TIMEOUT:-180} _per=${ROLLOUT_TIMEOUT_PER_NODE:-150}
+  if [ "$_floor" = 0 ]; then DS_WAIT=0 DS_WAIT_WHY="ROLLOUT_TIMEOUT=0" DS_HINT=""; return 0; fi
+  DS_HINT="ROLLOUT_TIMEOUT=$((_floor * 2))"
+  _n=$(kcn get "$1" -o 'jsonpath={.status.desiredNumberScheduled}' 2>/dev/null)
+  case "$_n" in
+    ""|*[!0123456789]*|0?*) DS_WAIT=$_floor DS_WAIT_WHY="노드 수를 읽지 못했다(모름) — 하한 ROLLOUT_TIMEOUT"; return 0 ;;
+  esac
+  _mu=$(kcn get "$1" -o 'jsonpath={.spec.updateStrategy.rollingUpdate.maxUnavailable}' 2>/dev/null)
+  case "$_mu" in
+    *%) _p=${_mu%\%}
+        case "$_p" in ""|*[!0123456789]*|0?*) _mu=1 ;; *) _mu=$(( (_n * _p + 99) / 100 )) ;; esac ;;
+    ""|*[!0123456789]*|0?*) _mu=1 ;;
+  esac
+  [ "$_mu" -ge 1 ] || _mu=1
+  _waves=$(( (_n + _mu - 1) / _mu ))
+  _t=$(( _waves * _per ))
+  DS_WAIT_WHY="노드 ${_n}대 ÷ 동시 ${_mu} → ${_waves}차례 × ${_per}초"
+  if [ "$_t" -ge "$_floor" ]; then DS_WAIT=$_t DS_HINT="ROLLOUT_TIMEOUT_PER_NODE=$((_per * 2))"
+  else DS_WAIT=$_floor DS_WAIT_WHY="$DS_WAIT_WHY = ${_t}초 < 하한 ROLLOUT_TIMEOUT"; fi
+}
+# 설정 표지(dms.io/install-config-rev)를 이번 실행의 rev($_cfg — stage_S11 이 apply 직후 읽는다)로 쓴다. 언제 부르는지는 stage_S11 주석(대기 전).
+mark_cfg() {   # $1 = 워크로드
+  kcn annotate "$1" "dms.io/install-config-rev=$_cfg" --overwrite >/dev/null 2>&1 || warn "$1 에 설정 표지를 남기지 못했다(다음 실행이 재시작 여부를 덜 정확히 안다)"
 }
 
 stage_S12() {

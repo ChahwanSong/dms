@@ -217,8 +217,11 @@ def ds_manifest(*, name: str, nonce: str, image: str, namespace: str, nodes=None
         }],
     }
     if nodes:
+        # 노드마다 term 하나(term 끼리는 OR). 노드 필드 셀렉터(matchFields metadata.name)는 In 의 값이 하나여야 한다 — 한 term 에
+        # 여러 이름을 넣으면 apiserver 가 「must be only one value when `operator` is 'In'」로 DS 생성을 거부한다(2026-11-17 프로덕션
+        # K8s 1.35, 마스터 3대 사전 pull). hostname 라벨(matchExpressions)은 노드 이름과 다를 수 있어 쓰지 않는다.
         spec["affinity"] = {"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [
-            {"matchFields": [{"key": "metadata.name", "operator": "In", "values": sorted(nodes)}]}]}}}
+            {"matchFields": [{"key": "metadata.name", "operator": "In", "values": [n]}]} for n in sorted(nodes)]}}}
     return {
         "apiVersion": "apps/v1", "kind": "DaemonSet",
         "metadata": {"name": name, "namespace": namespace, "labels": labels},
