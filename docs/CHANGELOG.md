@@ -120,7 +120,7 @@ dms-k8s 라인의 **완료 기록**이다. 각 항목에는 무엇을 만들었�
 - **검증**: `test_pull_probe` 를 바로 아래 항목 「검증」의 22파일 실행에 넣어 돌렸다(884 passed·2 skipped). 테스트베드는 control-plane 이 1대라 노드 여러 대
   지정은 라이브로 실증하지 못했다 — 다음 프로덕션 S11 의 「마스터 사전 pull」 줄이 OK 인지 본다.
 
-### 🔧 설치기 S11 에이전트 DaemonSet 대기를 노드 수 비례로 — 6노드 사이트의 정상 롤링(약 600초)을 고정 180초가 끊던 것 + 시간 초과 뒤 재실행이 설정 재시작을 되풀이하던 것 — **수정 완료**(2026-11-17, 이미지 변경 없음 · 테스트베드 실증 예정)
+### 🔧 설치기 S11 에이전트 DaemonSet 대기를 노드 수 비례로 — 6노드 사이트의 정상 롤링(약 600초)을 고정 180초가 끊던 것 + 시간 초과 뒤 재실행이 설정 재시작을 되풀이하던 것 — **수정 완료·실증**(2026-11-17, 이미지 변경 없음)
 
 - **사용자 사례**(2026-11-17): 「Daemon rollout 기본 대기시간이 180초로 되있어? 실제로는 더 오래걸리는거 같은데 6개 노드에서 600초가
   걸렸어. Daemonset 대기 시간을 노드수에 비례하게 할수있어?」 — 6노드 사이트에서 ds/dms-agent 롤링이 약 600초(노드당 ~100초) 걸렸다.
@@ -185,8 +185,13 @@ dms-k8s 라인의 **완료 기록**이다. 각 항목에는 무엇을 만들었�
   `test_shared_dir_init`·`test_agent_daemonset_contract`·`test_config_batch`·`test_manifest_tags`·`test_pod_gc`·`test_rollout_watcher`·
   `test_rollout_status`·`test_planner_path_conflict`) 22파일 884 passed·2 skipped, `dash -n` 통과. 라이브 dmsk8s 에서 `ds_wait_plan` 만 떼어 읽기
   전용으로 돌려 상한 300초(`노드 2대 ÷ 동시 1 → 2차례 × 150초`, 안내 `ROLLOUT_TIMEOUT_PER_NODE=300`), `ROLLOUT_TIMEOUT=0` 이면 0(제한 없음)·안내 없음,
-  없는 DS 는 모름 → 180초(안내 `ROLLOUT_TIMEOUT=360`)를 확인했다. **테스트베드 실증은 예정**이다 — 설정 재시작이 걸리는 `--only S11` 에서 [INFO] 줄의
-  「최대 300초」와 에이전트 롤링 완료를 보고, 같은 명령을 한 번 더 돌려 재시작이 없는지 본다.
+  없는 DS 는 모름 → 180초(안내 `ROLLOUT_TIMEOUT=360`)를 확인했다.
+- **테스트베드 실증**(2026-11-17 11:20–11:23 KST, 커밋 6b99a1b4 의 설치기, 프로덕션 결함 1 재현): dms-config 의 `DMS_BATCH_SCHEDULE_KEEP_ROUNDS` 를
+  `"9"` 로 바꿔(설정 변경 흉내) `ROLLOUT_TIMEOUT=1 ROLLOUT_TIMEOUT_PER_NODE=1 … --only S11` → api·controller·agent `rollout restart` 직후 세 표지가 새
+  rev(`cm=8021893`)로 바뀐 뒤 「[FAIL] deploy/dms-api 재시작 rollout 시간 초과(대기 상한 ROLLOUT_TIMEOUT 1초 …)」 `STAGE: S11 FAIL`(DS 줄은 「최대 2초
+  기다린다(노드 2대 ÷ 동시 1 → 2차례 × 1초)」). 이어서 기본값으로 같은 명령 → 「설정 변화 없음(또는 이미 새 파드) — 재시작하지 않는다」·「ds/dms-agent: 최대
+  300초 기다린다(노드 2대 ÷ 동시 1 → 2차례 × 150초)」·`STAGE: S11 PASS` — 파드 교체는 1회차 한 번뿐(api·controller 02:21:21Z, agent 02:21:51Z·
+  02:22:23Z), CM·새 파드 env `10`. 옛 설치기라면 2회차가 셋을 다시 재시작했다(표지가 옛 rev 로 남으므로 — 단위 테스트로 빨간불 재현).
 
 ### 🔧 설치기 S11 설정 재시작 누락 수정 — 포탈 릴리스 뒤 태그를 맞추는 S11 이 api·controller 를 다시 띄우지 않던 결함 — **수정 완료**(2026-11-17, 이미지 변경 없음)
 
