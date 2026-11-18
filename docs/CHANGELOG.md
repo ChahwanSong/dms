@@ -134,6 +134,9 @@ dms-k8s 라인의 **완료 기록**이다. 각 항목에는 무엇을 만들었�
      create_app 이 한 번만 붙임)가 `/api/auth/oidc/callback?<redacted>` 로 바꾼다.
   - 문서 정정: §6-9 의 client secret 확인법 — Keycloak 26 은 비밀이 맞아도 틀려도 401 `unauthorized_client` 라 `error_description` 으로 가른다(테스트베드
     실측), 확인 명령은 비밀을 argv 대신 파일(curl `-K`)로.
+  - **d33 재실증**(커밋 124d51a0, 빌드 225초, 릴리스 4종 Applied, 오버레이 d32 → d33): 로그아웃(SPA 이동) 직후 `/login` 에 SSO 버튼 보임 — 요청 순서는
+    그대로(logout 시작 → sso-info 시작 → logout 끝)인데 버튼이 남는다, 다시 SSO 는 IdP 세션으로 1초. dms-api 로그 `sso: sso.alice email_verified=False …`
+    4줄(WARNING). 콜백 접근 로그 6줄 모두 `/api/auth/oidc/callback?<redacted>`, `code=`·`state=` 0건. 새 로그인·쿠키 속성·콜백 재전송 거절도 다시 통과.
 - **알아둘 점**: SSO 는 호스트 브라우저에서만(IdP·redirect 가 호스트 경로 — LAN·Tailscale 기기는 비밀번호 로그인). 로그인 실패 뒤 다시 누르면 IdP 세션이
   남아 같은 AD 계정으로 같은 오류가 난다(다른 계정으로 바꾸려면 IdP 로그아웃 — `end_session` 은 남은 일). 새 SSO 사용자는 RoleBinding 맵핑 전에는
   PV 를 고를 수 없다(설계대로). 테스트베드 CA 에 keyUsage 가 없어 Python 3.13 의 엄격 검증이면 거부된다(지금 이미지 3.11 — 판 올릴 때 CA 재발급 필요).
