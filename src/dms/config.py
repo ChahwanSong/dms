@@ -221,6 +221,34 @@ def _parse_bool(environ, key, default=False):
     return value.strip().lower() in ("true", "1")
 
 
+_OIDC_REQUIRED = (("DMS_OIDC_ISSUER", "oidc_issuer"), ("DMS_OIDC_CLIENT_ID", "oidc_client_id"),
+                  ("DMS_OIDC_CLIENT_SECRET", "oidc_client_secret"), ("DMS_OIDC_REDIRECT_URI", "oidc_redirect_uri"))
+
+
+def _oidc_values(environ, problems) -> dict:
+    """사내 SSO 설정(2026-11-18). 넷 다 비면 꺼짐, 넷 다 있으면 켜짐, 일부만 있으면 기동 거부 -- 반쯤 채운 Secret 이
+    「버튼은 보이는데 늘 실패」로 늦게 드러나지 않게. issuer·redirect_uri 는 https 만(토큰·세션이 오가는 길)."""
+    values = {field: (environ.get(key) or "").strip() for key, field in _OIDC_REQUIRED}
+    present = [key for key, field in _OIDC_REQUIRED if values[field]]
+    if present and len(present) != len(_OIDC_REQUIRED):
+        missing = [key for key, field in _OIDC_REQUIRED if not values[field]]
+        problems.append(f"SSO(OIDC) is partly configured -- missing {', '.join(missing)}")
+    if present:
+        for key, field in (("DMS_OIDC_ISSUER", "oidc_issuer"), ("DMS_OIDC_REDIRECT_URI", "oidc_redirect_uri")):
+            if values[field] and not values[field].startswith("https://"):
+                problems.append(f"{key} must be an https:// URL: {values[field]!r}")
+        if _is_placeholder(values["oidc_client_secret"]):
+            problems.append("DMS_OIDC_CLIENT_SECRET is a placeholder")
+    values["oidc_issuer"] = values["oidc_issuer"].rstrip("/")
+    values["oidc_ca_pem"] = (environ.get("DMS_OIDC_CA_PEM") or "").strip()
+    if values["oidc_ca_pem"] and "BEGIN CERTIFICATE" not in values["oidc_ca_pem"]:
+        problems.append("DMS_OIDC_CA_PEM is not a PEM certificate")
+    values["oidc_button_label"] = (environ.get("DMS_OIDC_BUTTON_LABEL") or "").strip() or "Sign in with SSO"
+    values["oidc_auto_provision"] = _parse_bool(environ, "DMS_OIDC_AUTO_PROVISION", default=True)
+    values["oidc_require_email_verified"] = _parse_bool(environ, "DMS_OIDC_REQUIRE_EMAIL_VERIFIED", default=False)
+    return values
+
+
 def _parse_csv_set(environ, key, default=frozenset()):
     # 미설정(absent)이면 default. 명시적 빈 문자열("")은 "비활성"으로 default를
     # 덮어써 빈 집합을 준다(운영자가 특권을 끄고 싶을 때).
@@ -322,6 +350,25 @@ class Settings:
     # 릴레이 env 의 KNOX_CONNECT_TIMEOUT_SECONDS(3) + KNOX_TIMEOUT_SECONDS(10) 보다 길게.
     mail_relay_timeout_seconds: float = 20.0
     mail_service_name: str = "Supercom 포털"  # 메일 제목·본문에 표시할 서비스명
+    # 사내 SSO(OIDC Authorization Code + PKCE, 2026-11-18, api/oidc.py). issuer·client_id·client_secret·redirect_uri 넷이
+    # 모두 있어야 켜진다(oidc_enabled) -- 일부만 있으면 기동 거부(_oidc_values). 값은 선택 Secret dms-oidc 의 envFrom 으로 온다.
+    oidc_issuer: str = ""
+    oidc_client_id: str = ""
+    oidc_client_secret: str = ""
+    oidc_redirect_uri: str = ""
+    oidc_ca_pem: str = ""                    # IdP TLS 를 서명한 사내 CA(PEM). 비면 이미지의 시스템 신뢰만 쓴다
+    oidc_button_label: str = "Sign in with SSO"
+    # 처음 SSO 로 들어온 아이디의 계정을 user 역할로 만든다. 특권 목록 이름은 이 값과 무관하게 만들지 않는다.
+    oidc_auto_provision: bool = True
+    # IdP 가 email_verified: true 로 표시한 이메일만 계정 아이디로 받는다(2026-11-18 반영 때 더함 — 보안 리뷰). 기본 끔: Keycloak 의 AD(LDAP)
+    # 연동은 「Trust Email」 을 켜지 않으면 AD 에서 온 메일도 email_verified=false 라, 켜 두면 그런 IdP 에서 SSO 가 통째로 막힌다. 끔이면
+    # 「사용자가 IdP 에서 자기 email 을 바꿀 수 없다」는 IdP 설정이 결속을 지킨다(deploy/README.md §6-9).
+    oidc_require_email_verified: bool = False
+
+    @property
+    def oidc_enabled(self) -> bool:
+        return bool(self.oidc_issuer and self.oidc_client_id and self.oidc_client_secret and self.oidc_redirect_uri)
+
     execution_backend: str = "stub"
     job_image: str = ""
     k8s_namespace: str = "dms"
@@ -450,9 +497,11 @@ class Settings:
         if not _parse_bool(environ, "DMS_ALLOW_PRIVILEGED_REQUESTERS", default=True):
             problems.append("dms-k8s runs every job as root -- "
                             "DMS_ALLOW_PRIVILEGED_REQUESTERS must not be false")
+        oidc = _oidc_values(environ, problems)
         if problems:
             raise SettingsError(problems)
         return cls(
+            **oidc,
             database_url=values["DMS_DATABASE_URL"],
             shared_token=values["DMS_SHARED_TOKEN"],
             admin_token=values["DMS_ADMIN_TOKEN"],

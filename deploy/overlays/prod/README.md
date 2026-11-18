@@ -171,6 +171,9 @@ rm -f "$H"; unset PW
 # 6) 설치 뒤 설정·개통 = deploy/README.md §6 차례대로: §6-3 컨트롤 상태(빌드 노드 = 인터넷 노드·로컬 체크아웃 경로·프록시) → §6-4 스토리지·
 #    정책 → §6-5 k8s 연동 → §6-6 공용 스토리지 밖 사본 → §7 스모크 → §6-7 개통(Avi 풀 멤버 전부 up → 아래 7) S12 — DNS 전에 된다 → §6-8 열기 전
 #    확인표 → DNS 등록 → 사용자 공지).
+#    (선택) 사내 SSO 버튼(OIDC — Keycloak 등이 AD 대행) = deploy/README.md §6-9: IdP 담당이 client·redirect URI(https://<FQDN>/api/auth/oidc/callback)를
+#    등록 → Secret dms-oidc 를 클러스터에 직접 만들고(client secret 은 저장소 밖 파일에서 --from-file — 이 체크아웃·values.env 에 넣지 않는다)
+#    → kubectl --context <ctx> -n dms rollout restart deploy/dms-api → /api/auth/sso-info 가 enabled:true.
 
 # 7) [설치 호스트] 다시 검증만(언제든 — 읽기 전용으로는 VERIFY_NO_PROBES=1). FQDN·VIP 는 render.env(values.env 의 PORTAL_DOMAIN·PORTAL_VIP)가 기본:
 CACERT=<사내CA> sh deploy/install.sh --context <ctx> --only S12
@@ -325,7 +328,8 @@ not-ready·unreachable `tolerationSeconds: 30`). 이 오버레이가 제어면 D
   하한 1) — uvicorn keep-alive 는 Traefik 의 상류 유휴 타임아웃(기본 idleConnTimeout 90s)보다 길어야 본문 있는 POST 의 간헐 502 가 없다. 사이트가
   Traefik 쪽 그 값을 120s 이상으로 올렸으면 이 값을 그보다 크게 한다.
 - **시크릿·인증서·토큰**(§3b): 포탈 TLS 교체(만료 감시 없음 — §14-2 달력에), `DMS_SESSION_SECRET` 회전 시 포탈 저장 메일 키·k8s 토큰 재입력,
-  공용 스토리지 밖 사본(§2f-5).
+  공용 스토리지 밖 사본(§2f-5). 사내 SSO(§6-9)의 client secret 재발급·SSO 끄기 = Secret `dms-oidc` 를 다시 만들거나 지우고
+  `rollout restart deploy/dms-api`(S11 의 설정 재시작은 이 Secret 을 보지 않는다).
 - **업그레이드**(§4)·**롤백·복구**(§5)·**포탈 빌드·릴리스**(§8·§9)·**계정·인증**(§10)·**메일**(§11)·**작업 삭제·결과 만료**(§12·§12b).
 - **일상 점검·문제 해결**(§14): `VERIFY_NO_PROBES=1 CACERT=<사내CA> sh deploy/install.sh --context <ctx> --only S12`(읽기만), 포탈의 보안 이벤트·
   작업 정리 상태·아티팩트 경로·릴리스 드리프트 배지, 증상별 색인. 입구만 다시 볼 때는 `sh deploy/ingress-probe.sh --context <ctx> --domain <FQDN>

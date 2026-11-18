@@ -379,5 +379,17 @@
   "batch_schedule_batch_running",
   "batch_schedule_awaiting_confirm",
   "batch_schedule_batch_cancelling",
-  "batch_schedule_batch_unreadable"
+  "batch_schedule_batch_unreadable",
+  "sso_not_configured",
+  "sso_denied",
+  "sso_state_invalid",
+  "sso_upstream_unreachable",
+  "sso_upstream_error",
+  "sso_token_invalid",
+  "sso_email_missing",
+  "sso_email_domain_mismatch",
+  "sso_email_unverified",
+  "sso_username_invalid",
+  "sso_account_not_found",
+  "sso_privileged_account_missing"
 ]

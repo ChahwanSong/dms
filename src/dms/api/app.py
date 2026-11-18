@@ -23,6 +23,7 @@ from .routes_accounts import router as accounts_router
 from .routes_auth import (router as auth_router, VERIFICATION_MAIL_CONCURRENCY,
                           VERIFICATION_MAIL_GLOBAL_LIMIT, VERIFICATION_MAIL_LIMIT,
                           VERIFICATION_MAIL_WINDOW_SECONDS)
+from .routes_oidc import router as oidc_router
 from .routes_security import router as security_router
 from .routes_mail_settings import router as mail_settings_router
 from .routes_portal import public_router as portal_public_router, router as portal_router
@@ -203,6 +204,7 @@ def create_app(settings: Settings, db: Database, exit_fn=None) -> FastAPI:
                 "last_reconnect_at": db.last_reconnect_at}
 
     app.include_router(auth_router)
+    app.include_router(oidc_router)
     app.include_router(accounts_router)
     app.include_router(security_router)
     app.include_router(storages_router)

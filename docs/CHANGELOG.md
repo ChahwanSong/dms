@@ -54,6 +54,7 @@ dms-k8s 라인의 **완료 기록**이다. 각 항목에는 무엇을 만들었�
 
 | 날짜 | 태그·실증 | 제목 |
 |---|---|---|
+| 11-18 | — | 사내 AD SSO 로그인(OIDC Authorization Code + PKCE — 「Sign in with … SSO」 버튼, 선택 Secret `dms-oidc`) |
 | 11-17 | — | pull-probe 노드 여러 대 지정 수정 — 마스터 3대 사전 pull 에서 apiserver 가 DaemonSet 생성을 거부하던 것 |
 | 11-17 | — | 설치기 S11 에이전트 DaemonSet 대기를 노드 수 비례로 — 6노드 사이트의 정상 롤링(약 600초)을 고정 180초가 끊던 것 + 시간 초과 뒤 재실행이 설정 재시작을 되풀이하던 것 |
 | 11-17 | — | 설치기 S11 설정 재시작 누락 수정 — 포탈 릴리스 뒤 태그를 맞추는 S11 이 api·controller 를 다시 띄우지 않던 결함 |
@@ -101,6 +102,47 @@ dms-k8s 라인의 **완료 기록**이다. 각 항목에는 무엇을 만들었�
 ---
 
 ## 상세 기록 (최신순)
+
+### ✅ 사내 AD SSO 로그인(OIDC Authorization Code + PKCE) — **구현 완료**(2026-11-18, 프로덕션 사이트에서 먼저 구현·실 AD 로그인 검증 → 이 브랜치 반영)
+
+사용자 요청(2026-11-18): 「프로덕션 클러스터에서 AD SSO 인증 방식이 필요해서 구현 후 검증까지 했어. 첨부한 내용 토대로 구현해줘. 보안 및
+비밀번호가 깃허브에 올라가지 않도록 주의하고, 설치 문서도 업데이트해」 — 사이트(사내망, 원격 push 불가)에서 만든 인계 문서(base 2365ae61, 14파일
+패치·설계 결정·검증 결과)를 이 브랜치에 그대로 반영했다.
+
+- **동작**: 로그인 화면에 아이디·비밀번호와 함께 SSO 버튼(글자 = `DMS_OIDC_BUTTON_LABEL`). 인증은 IdP(Keycloak — 사내 AD 대행)가 하고 DMS 는 OIDC 만
+  말한다(AD·LDAP 에 붙지 않음 — dms-k8s 의 LDAP 코드 삭제 원칙 그대로). 이메일 `<아이디>@<DMS_ACCOUNT_EMAIL_DOMAIN>` 의 `<아이디>`(소문자)가 계정
+  아이디(다른 도메인 거절). 계정이 없으면 user 로 만들고(`DMS_OIDC_AUTO_PROVISION`, 기본 true — 비밀번호는 아무도 모르는 무작위 값), 특권 목록 이름은
+  만들지 않으며(`sso_privileged_account_missing` — 이미 있는 특권 계정은 그 역할로 로그인), root·admin·예약어는 막고(`sso_username_invalid`), 비활성은
+  `account_disabled`. 세션은 비밀번호 로그인과 같은 username + epoch(비밀번호 변경·재생성이면 SSO 세션도 `session_revoked`). 로그아웃은 DMS 세션만.
+- **프로토콜**(`src/dms/api/oidc.py`, 표준 라이브러리만): Authorization Code + PKCE S256 + state + nonce, confidential client(client_secret_basic),
+  discovery(issuer 일치·https 끝점·1시간 캐시), id_token 은 클레임(iss·aud·azp·exp·iat·nonce) 대조 — 토큰 끝점에서 인증서를 검증한 TLS 로 직접 받은
+  id_token 은 OIDC Core 3.1.3.7(6)이 서명 대신 TLS 검증을 허용하므로 **TLS 검증을 끄는 옵션은 없다**(사내 CA = `DMS_OIDC_CA_PEM`). 프록시 env 무시
+  (`ProxyHandler({})`). interaction(state·nonce·verifier·시각·next)은 서명된 세션 쿠키에 얼리고 콜백에서 pop(재전송 차단, 10분 TTL).
+- **라우트**(`src/dms/api/routes_oidc.py`): GET `/api/auth/sso-info`·`/api/auth/oidc/login?next=`(302)·`/api/auth/oidc/callback`(303). 실패는 모두
+  `/login?sso_error=<사유>` → 로그인 화면이 사유 문구로 보이고 주소창에서 지운다. `next` 는 같은 출처 포탈 경로만(`//`·`\`·`/api/`·`/login`·제어문자·
+  512자 초과 → `/`).
+- **설정**: 선택 Secret `dms-oidc` 를 dms-api 컨테이너만 `envFrom`(optional)으로 읽는다(`deploy/k8s/40-api.yaml` — migrate init 에는 안 붙음). 넷
+  (ISSUER·CLIENT_ID·CLIENT_SECRET·REDIRECT_URI)이 다 있어야 켜지고 일부만·http·PEM 아님·자리표시자면 기동 거부(`config._oidc_values`). Secret 이
+  없는 사이트는 지금과 같다(버튼 없음). 값 변경 뒤엔 `rollout restart deploy/dms-api`(S11 의 설정 재시작은 dms-config·dms-secrets 만 본다).
+- **사유 코드 12개** 양쪽 등록(`reasonCodes.json` + `api.ts`): sso_not_configured·sso_denied·sso_state_invalid·sso_upstream_unreachable·
+  sso_upstream_error·sso_token_invalid·sso_email_missing·sso_email_domain_mismatch·sso_email_unverified·sso_username_invalid·
+  sso_account_not_found·sso_privileged_account_missing(`account_disabled` 는 기존). 추출기 `_EXCEPTION_CTORS` 에 `OidcError`.
+- **반영 때 더한 것 — email_verified**(보안 리뷰: IdP 가 사용자에게 email 수정을 허용하면 남의 메일로 그 계정에 들어온다): 선택 키
+  `DMS_OIDC_REQUIRE_EMAIL_VERIFIED`(켜면 IdP 가 `email_verified: true` 로 표시한 메일만 받는다 — 아니면 계정을 만들기 전에 `sso_email_unverified`).
+  email_verified 는 email 과 같은 출처(id_token 또는 userinfo)에서 읽는다. **기본은 끔** — Keycloak 의 AD(LDAP) 연동은 「Trust Email」 없이는 AD
+  메일도 false 라 켜 두면 검증된 사이트 SSO 가 막힐 수 있다. 끈 상태에서는 확인되지 않은 메일 로그인을 dms-api 로그(`sso: <아이디> email_verified=…`)
+  에 남겨 운영자가 IdP 표시를 보고 켜게 하고, 결속은 「사용자가 IdP 에서 자기 email 을 못 바꾼다」는 IdP 설정이 지킨다(런북 §6-9). IdP `sub` 를
+  계정에 묶는 안은 DB 칸이 필요하고 첫 연결을 먼저 한 쪽을 막지 못해 하지 않았다(남은 것).
+- **비밀이 저장소에 들어가지 않게**: 패치에 client secret 은 없다(사이트 Secret 에만). 이 브랜치 반영 때 런북의 사이트 실제 값(사내 IdP 주소·client
+  이름·포탈 FQDN) 예시는 일반 자리표시자로 바꿨다(런북은 사이트 중립 — 저장소에 사내 호스트 이름이 없던 상태 유지). `.gitignore` 에 `*.secret`·
+  `.secret`·`*.secret.txt` 를 더했다(비밀 파일은 저장소 밖이 원칙 — 그물). 런북에 비밀 파일 위치(저장소 밖 0700)·`--from-file` 만·셸 기록 금지를 적었다.
+- **문서**: deploy/README §6 머리(6-9 는 선택)·§6-8 확인표 한 줄·새 §6-9(규칙 표, IdP 쪽 준비 — **사용자가 IdP 에서 자기 email 을 바꿀 수 없어야
+  한다**(바꿀 수 있으면 남의 메일로 그 사람 계정에 들어온다 — 인계 패치에 없던 주의, 이 반영에서 더함), Secret 만들기·회전·끄기, 확인·문제 해결),
+  prod README 설치 순서 6) 의 선택 줄·운영 「시크릿」 줄, ARCHITECTURE 모듈 표 2행·인증 불변식 한 줄.
+- **검증**(이 브랜치): `tests/test_oidc_sso.py` 38 passed, Login.test 31 passed(새 3개), `tsc -b`, 백엔드·프런트 전체·e2e(아래 커밋 메시지). 사이트 쪽
+  검증(인계 문서): 이 패치로 수동 빌드한 시험 이미지로 실 IdP·실 AD 로그인 성공(2026-11-18).
+- **남은 것(선택)**: 로그아웃 때 IdP `end_session_endpoint`, SSO 로그인 성공·실패를 보안 이벤트로, 계정 화면에 「SSO 로 만든 계정」 표시. 사이트는
+  이 브랜치를 pull 한 뒤 포탈에서 정식 태그로 빌드·릴리스하면 된다(Secret `dms-oidc` 는 그대로).
 
 ### 🔧 pull-probe 노드 여러 대 지정 수정 — 마스터 3대 사전 pull 에서 apiserver 가 DaemonSet 생성을 거부하던 것 — **수정 완료**(2026-11-17, 이미지 변경 없음)
 

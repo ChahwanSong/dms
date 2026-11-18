@@ -144,6 +144,11 @@ spec:
                 name: dms-config
             - secretRef:
                 name: dms-secrets
+            # 사내 SSO(OIDC, 2026-11-18, api/oidc.py) -- 사이트가 만드는 선택 Secret(DMS_OIDC_* 키). 없으면 SSO 버튼이 없다.
+            # 바꾼 뒤에는 kubectl rollout restart deploy/dms-api (S11 의 설정 재시작은 dms-config·dms-secrets 만 본다).
+            - secretRef:
+                name: dms-oidc
+                optional: true
           ports:
             - name: http
               containerPort: 8080

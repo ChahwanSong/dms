@@ -2165,6 +2165,7 @@ dms-api·dms-controller 에는 initContainer `migrate` 가 있다(`deploy/k8s/40
 
 S12 가 끝나면 S13 이 사후 체크리스트를 찍는다(`install.sh stage_S13`). 이 장은 그 항목을 순서대로 푼다. **순서가 중요하다**: 6-1(첫 관리자) → 6-2(메일 —
 사용자 게이트) → 6-3 → 6-4 → 6-5 → 6-6 → 6-7(개통 — 그 안에서 S12 → 6-8 확인표 → DNS → 공지). 6-8 의 확인표를 모두 채우기 전에는 DNS 등록·사용자 공지를 하지 않는다.
+6-9(사내 SSO)는 선택이고 6-1 뒤 언제든 켤 수 있다.
 
 **이 단계에서 포탈에 들어가는 법**(공식 DNS 전):
 - Avi VS-443 이 열려 있으면 운영자 PC 의 hosts 에 `<VIP-A> <FQDN>` 를 넣고 `https://<FQDN>` 으로 연다(권장 — 실제 경로 그대로).
@@ -2420,6 +2421,62 @@ S13 의 두 줄이다. 처음 한 번 만들고 주기를 정한다(§14-2).
 - [ ] `CACERT=<사내CA> sh deploy/install.sh --context <ctx> --only S12` 가 PASS(6-7 2 — DNS 등록 전).
 - [ ] (LB 가 PROXY v2 를 붙이는 사이트) 원 IP 가 살아 있다 — 보안 이벤트의 `client_ip` 가 운영자 PC 주소이고 SE 주소가 아니다(확인법 §2g-5).
 - [ ] 관리 토큰 보관·회전 방침을 정했다(§3b-3), 인증서 만료일을 달력에 넣었다(§3b-2·§14-2).
+- [ ] (사내 SSO 를 켠 사이트) 로그인 화면의 SSO 버튼으로 사내 계정 로그인이 되고 `/api/auth/me` 의 actor 가 메일 아이디다(6-9).
+
+### 6-9. 사내 SSO(OIDC — Keycloak 등이 사내 AD 를 대행) — 선택 (2026-11-18)
+
+로그인 화면에 아이디·비밀번호와 함께 「SSO 로그인」 버튼을 낸다(`api/oidc.py`·`api/routes_oidc.py`). DMS 는 AD·LDAP 에 붙지 않고
+IdP 와 OIDC Authorization Code + PKCE(S256) 로만 말한다(confidential client — `client_secret_basic`). 이메일 `<아이디>@<EMAIL_DOMAIN>` 의
+`<아이디>` 가 DMS 계정 아이디다(메일 인증과 같은 결속 — 다른 도메인은 거절). 끄면(Secret 없음) 지금과 같다. 6-1(첫 관리자) 뒤 언제든 켤 수 있다.
+
+| 동작 | 규칙 |
+|---|---|
+| 계정이 없다 | user 역할로 만든다(`DMS_OIDC_AUTO_PROVISION`, 기본 `true`). 비밀번호는 아무도 모르는 무작위 값 — 비밀번호 로그인이 필요하면 셀프 재설정(6-2) |
+| 특권 목록 이름(`DMS_PRIVILEGED_REQUESTERS`·부여) | 계정이 있으면 로그인된다(그 역할 그대로). 없으면 만들지 않는다(`sso_privileged_account_missing`). 6-1 로 먼저 만든다 |
+| `root`·`admin` | SSO 로 들어오지 못한다(`sso_username_invalid`) — 비상 계정 이름 |
+| 비활성 계정 | `account_disabled` |
+| 세션 | 비밀번호 로그인과 같다(세대 포함 — 비밀번호를 바꾸면 SSO 세션도 끝난다). 로그아웃은 DMS 세션만 끝낸다(IdP 세션은 남는다) |
+
+**IdP(Keycloak) 쪽 준비**(IdP 담당): client(confidential, Standard flow 켬, PKCE S256 허용), Valid redirect URI =
+`https://<FQDN>/api/auth/oidc/callback`, scope `openid email profile` 의 `email` 클레임(사내 메일). **사용자가 IdP 에서 자기 email 을 바꿀 수
+없어야 한다**(AD/LDAP 연동은 읽기 전용, 프로필의 email 수정 끔) — DMS 는 email 의 아이디를 계정으로 쓰므로, 바꿀 수 있으면 남의 메일 주소를
+적어 그 사람으로 들어올 수 있다. IdP 가 AD 에서 온 메일을 `email_verified: true` 로 내면(Keycloak LDAP 공급자의 「Trust Email」 켬) DMS 쪽
+`DMS_OIDC_REQUIRE_EMAIL_VERIFIED=true` 로 확인되지 않은 메일을 거절하게 한다(`sso_email_unverified` — 권장. 기본은 끔: 그 표시가 없는 IdP 에서 켜면
+SSO 가 통째로 막힌다. 끈 상태에서는 dms-api 로그 `sso: <아이디> email_verified=…` 줄로 IdP 가 무엇을 내는지 보고 정한다). 확인(마스터에서): `curl -sS -u '<client_id>:<secret>' -d grant_type=client_credentials
+<issuer>/protocol/openid-connect/token` 가 `invalid_client` 면 비밀이 틀렸다(`unauthorized_client` 는 비밀이 맞고 그 grant 만 꺼진 것 — 정상).
+
+**DMS 쪽**: Secret `dms-oidc`(ns dms) 하나 — dms-api 가 `envFrom`(optional)으로 읽는다(`deploy/k8s/40-api.yaml`). 넷(ISSUER·CLIENT_ID·
+CLIENT_SECRET·REDIRECT_URI)이 모두 있어야 켜지고, 일부만 있거나 https 가 아니면 dms-api 가 기동을 거부한다(`config._oidc_values`).
+IdP 인증서를 사내 CA 가 서명했으면 `DMS_OIDC_CA_PEM` 에 그 CA 를 넣는다(이미지의 시스템 신뢰에는 사내 CA 가 없다 — TLS 검증은 끄는
+길이 없다: id_token 을 서명 대신 TLS 로 믿는다, `api/oidc.py` 머리 주석). 프록시 env 는 쓰지 않는다 — dms-api(마스터) → IdP :443 이 직접 열려 있어야 한다.
+
+**client secret 은 저장소에 들어가지 않는다**: Secret 은 사이트가 클러스터에 직접 만든다(오버레이·values.env·렌더 산출물에 넣지 않는다).
+비밀 파일은 저장소 **밖**(예 `~/.dms-secrets/`, 0700)에 만들고 `--from-file` 로만 넘긴다 — 화면·셸 기록·argv 에 싣지 않는다. 저장소의 `.gitignore`
+는 `*.secret`·`.secret` 도 막지만 그것에 기대지 않는다.
+
+```sh
+umask 077; install -d -m 0700 ~/.dms-secrets
+# ~/.dms-secrets/oidc-client.secret 에 비밀 한 줄(끝 줄바꿈 없이 — printf '%s' 로), 사내 루트 CA 는 ~/.dms-secrets/idp-ca.pem
+kubectl --context <ctx> -n dms create secret generic dms-oidc \
+  --from-literal=DMS_OIDC_ISSUER='<issuer — discovery 의 issuer 와 글자까지 같게>' \
+  --from-literal=DMS_OIDC_CLIENT_ID='<client_id>' \
+  --from-file=DMS_OIDC_CLIENT_SECRET=$HOME/.dms-secrets/oidc-client.secret \
+  --from-literal=DMS_OIDC_REDIRECT_URI='https://<FQDN>/api/auth/oidc/callback' \
+  --from-literal=DMS_OIDC_BUTTON_LABEL='<버튼 글자 — 기본 Sign in with SSO>' \
+  --from-file=DMS_OIDC_CA_PEM=$HOME/.dms-secrets/idp-ca.pem \
+  --dry-run=client -o yaml | kubectl --context <ctx> apply -f -
+kubectl --context <ctx> -n dms rollout restart deploy/dms-api      # S11 의 설정 재시작은 dms-config·dms-secrets 만 본다
+curl -sS --resolve <FQDN>:443:<VIP-A> https://<FQDN>/api/auth/sso-info   # {"enabled":true,"label":"…"}
+```
+
+선택 키: `DMS_OIDC_AUTO_PROVISION`(`false` 면 계정이 있는 사람만 — `sso_account_not_found`), `DMS_OIDC_BUTTON_LABEL`,
+`DMS_OIDC_REQUIRE_EMAIL_VERIFIED`(`true` 면 IdP 가 확인한 메일만 — 위 「IdP 쪽 준비」, Secret 에 `--from-literal=DMS_OIDC_REQUIRE_EMAIL_VERIFIED=true`).
+비밀을 바꾸면(IdP 에서 재발급) 같은 명령으로 Secret 을 다시 만들고 `rollout restart deploy/dms-api` 한다. 끄려면 Secret 을 지우고 재시작한다.
+실패는 `/login?sso_error=<사유>` 로 돌아와 화면에 보이고, 원인(IdP 응답의 error·error_description 등 — 비밀·code 는 남기지 않는다)은 dms-api 로그
+`sso login failed: …` 줄에 있다(`kubectl --context <ctx> -n dms logs deploy/dms-api | grep -i sso`).
+
+> 예: issuer `https://idp.example.com/realms/<realm>`, client `dms-<site>`, CA = 사내 루트 CA, 버튼 `Sign in with <사내> SSO`. 사이트의 실제 값은
+> 사이트 운영 문서에만 둔다(이 런북은 사이트 중립).
 
 ## 7. 스모크 시험 — 설치 뒤 권한·경로 확인
 

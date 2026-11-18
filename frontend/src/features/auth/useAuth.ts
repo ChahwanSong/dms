@@ -2,7 +2,15 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, apiGet, apiSend } from "../../lib/api";
 import { postWithSealedPassword } from "../../lib/passwordTransport";
 import { resetNavCollapsed } from "../../lib/navState";
-import type { Me } from "../../lib/types";
+import type { Me, SsoInfo } from "../../lib/types";
+
+// 사내 SSO 버튼(2026-11-18). 조회가 실패하면 버튼을 그리지 않는다(비밀번호 로그인은 그대로).
+export const useSsoInfo = () =>
+  useQuery({ queryKey: ["sso-info"], queryFn: () => apiGet<SsoInfo>("/api/auth/sso-info"),
+             staleTime: 5 * 60_000, retry: false });
+
+// SSO 시작 주소 -- 페이지 이동(fetch 아님)이다: IdP 로그인 화면으로 가서 /api/auth/oidc/callback 으로 돌아온다.
+export const ssoLoginHref = (next: string) => `/api/auth/oidc/login?next=${encodeURIComponent(next)}`;
 
 // /me 만 짧게 재시도한다(2026-11-04 기능 점검 #2): 5xx·네트워크 오류(fetch 거부 -- 아래 status 0)는 최대 2회, 0.5초·1초
 // 뒤에 -- 롤아웃·연결 끊김 같은 한 번짜리 실패를 흡수하고, 그래도 실패하면 약 1.5초 안에 RequireRole·Home 의 「세션 확인에

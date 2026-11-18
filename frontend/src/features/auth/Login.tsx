@@ -1,7 +1,7 @@
 import { useEffect, useId, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { loginReturnPath } from "../../app/navigation";
-import { useLogin, useRequestCode, useSignup, usePasswordReset } from "./useAuth";
+import { ssoLoginHref, useLogin, useRequestCode, useSignup, usePasswordReset, useSsoInfo } from "./useAuth";
 import { useMailInfo } from "../mail/useMailSettings";
 import { portalTitle, usePortalDocumentTitle } from "../portal/usePortal";
 import { Button } from "../../components/ui/Button";
@@ -143,6 +143,15 @@ export function Login() {
   const nav = useNavigate();
   // RequireRole 이 401 로 보낼 때 실은 원래 주소(state.from) -- 로그인 뒤 그 화면으로 돌아간다(2026-11-11, 없으면 「/」).
   const location = useLocation();
+  // 사내 SSO(2026-11-18): 콜백 실패는 /login?sso_error=<사유> 로 돌아온다 -- 한 번 보이고 주소창에서는 지운다(새로고침에 다시 뜨지 않게).
+  const sso = useSsoInfo();
+  const [ssoError, setSsoError] = useState<string | null>(
+    () => new URLSearchParams(location.search).get("sso_error"));
+  useEffect(() => {
+    if (new URLSearchParams(location.search).has("sso_error")) {
+      nav(location.pathname, { replace: true, state: location.state });
+    }
+  }, [location.search, location.pathname, location.state, nav]);
   const subtitle = usePortalDocumentTitle();
   const [slow, setSlow] = useState(false);
   useEffect(() => {
@@ -176,7 +185,7 @@ export function Login() {
                         mode === t.mode
                           ? "border-accent text-accent font-medium"
                           : "border-transparent text-muted hover:text-ink"}`}
-                      onClick={() => { setMode(t.mode); setNotice(null); setAuthNotice(null); clearLoginResult(); }}>
+                      onClick={() => { setMode(t.mode); setNotice(null); setAuthNotice(null); setSsoError(null); clearLoginResult(); }}>
                 {t.label}
               </button>
             ))}
@@ -211,6 +220,21 @@ export function Login() {
                 {login.isPending ? "로그인 중…" : "로그인"}
               </Button>
             </form>
+          )}
+          {mode === "login" && ssoError && (
+            <p role="alert" className="text-bad text-sm mt-3">{reasonText(ssoError)}</p>
+          )}
+          {mode === "login" && sso.data?.enabled && (
+            <>
+              <div className="flex items-center gap-3 my-4 text-xs text-muted" aria-hidden="true">
+                <span className="h-px flex-1 bg-line" />또는<span className="h-px flex-1 bg-line" />
+              </div>
+              <Button type="button" variant="outline" className="w-full"
+                      disabled={login.isPending}
+                      onClick={() => window.location.assign(ssoLoginHref(loginReturnPath(location.state)))}>
+                {sso.data.label}
+              </Button>
+            </>
           )}
           {mode === "signup" && (
             <VerifiedForm purpose="signup" submitLabel="계정 생성"

@@ -47,6 +47,10 @@ PostgreSQL(제어면) + React 포탈 + 노드 에이전트 + Volcano gang-schedu
   반드시 이 통로를 거친다 — `apiSend` 에 password 를 직접 실으면 그 경로만 평문이
   되고 아무 테스트도 빨간불이 아니다. 봉인 상수는 `password_transport.py` 와
   `passwordTransport.ts` 가 바이트 단위로 같아야 한다(대조 테스트 있음).
+- **사내 SSO(OIDC, 2026-11-18 — `api/oidc.py`·`routes_oidc.py`)의 설정은 사이트가 클러스터에 직접 만드는 선택 Secret `dms-oidc` 에만**
+  있다 — client secret·사내 IdP 주소를 저장소·base·오버레이·values.env·로그에 넣지 마라(런북 `deploy/README.md` §6-9 는 자리표시자만). id_token
+  서명 대신 토큰 끝점 TLS 검증을 믿는 설계라 **TLS 검증을 끄는 옵션을 만들지 마라**(사내 CA 는 `DMS_OIDC_CA_PEM`). SSO 세션은 비밀번호 로그인과
+  같은 username + epoch 이고, 특권 목록 이름은 자동 생성하지 않으며 root·admin 은 SSO 로 막는다.
 - **공유 토큰은 계정·배포 경로를 못 만진다**(2026-10-07). 모든 노드 에이전트가 가진 Bearer 토큰(role admin,
   auth=token)으로 계정을 다시 만들거나 릴리스로 옛 이미지에 롤백하면 특권 게이트가 통째로 무효가 된다 — 계정 변경(관리자 비밀번호
   재설정·인증 잠금 해제 포함, 2026-11-03)은 `accounts_session_required`, 빌드·릴리스·컨트롤 상태·레지스트리 삭제·artifact base 변경·작업(요청) 삭제·배치 기록 삭제(2026-10-26)·배치 스케줄 삭제(2026-11-16)는
@@ -175,8 +179,8 @@ PostgreSQL(제어면) + React 포탈 + 노드 에이전트 + Volcano gang-schedu
 
 ## 테스트·검증
 
-- 백엔드: `PYTHONPATH=<워크트리>/src <venv>/bin/python -m pytest tests -q` (~9분, 5934+ passed · 18 skipped — 2026-11-16 d29 기준)
-- 프론트: `cd frontend && npx vitest run` (2108+ passed, 122 파일 — 2026-11-16 d29 기준) · `npx tsc -b`
+- 백엔드: `PYTHONPATH=<워크트리>/src <venv>/bin/python -m pytest tests -q` (~10분, 6018+ passed · 18 skipped — 2026-11-18 사내 SSO 기준)
+- 프론트: `cd frontend && npx vitest run` (2112+ passed, 122 파일 — 2026-11-18 사내 SSO 기준) · `npx tsc -b`
 - e2e(실 브라우저): `cd frontend && npm run test:e2e` (38 passed, 18 spec — 빌드 포함) — **CI 없음, 수기 게이트**(이미지 빌드 전 게이트는
   `deploy/README.md` §8 「이미지 빌드 전 게이트」)
 - 배포 문서·스크립트 계약: 절 번호·출력 문구를 바꾸면 `tests/test_ingress_contract.py`·`test_install_stages.py`·`test_addons_render.py` 등이

@@ -4,7 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { setupServer } from "msw/node";
 import { delay, http, HttpResponse } from "msw";
-import { beforeAll, beforeEach, afterAll, afterEach, test, expect } from "vitest";
+import { beforeAll, beforeEach, afterAll, afterEach, test, expect, vi } from "vitest";
 import { Login } from "./Login";
 import { forgetTransportKey } from "../../lib/passwordTransport";
 import { AUTH_NOTICE_KEY } from "../../lib/api";
@@ -19,7 +19,8 @@ beforeEach(() => {
   forgetTransportKey();
   // 안내 문구의 도메인은 서버 설정(GET /api/auth/mail-info, 2026-10-01)에서 온다.
   server.use(transportKeyHandler(serverKey),
-             http.get("/api/auth/mail-info", () => HttpResponse.json({ email_domain: "samsung.com", delivery: "stub" })));
+             http.get("/api/auth/mail-info", () => HttpResponse.json({ email_domain: "samsung.com", delivery: "stub" })),
+             http.get("/api/auth/sso-info", () => HttpResponse.json({ enabled: false, label: "" })));
 });
 afterEach(() => server.resetHandlers());
 afterAll(() => server.close());
@@ -498,4 +499,38 @@ test("로그인 화면 브랜드에 서브네임이 붙는다(AI Storage Portal 
   renderLogin();
   expect(await screen.findByText("AI Storage Portal - SSC")).toBeInTheDocument();
   await waitFor(() => expect(document.title).toBe("AI Storage Portal - SSC"));
+});
+
+// 사내 SSO(2026-11-18): 버튼은 서버가 켰을 때만, 누르면 페이지 이동(/api/auth/oidc/login?next=…), 콜백 실패는 sso_error 로 돌아온다.
+test("SSO 버튼은 서버가 켰을 때만 보이고 누르면 원래 화면을 next 로 실어 이동한다", async () => {
+  server.use(http.get("/api/auth/sso-info",
+                      () => HttpResponse.json({ enabled: true, label: "Sign in with DS AD SSO" })));
+  const assign = vi.fn();
+  const original = window.location;
+  Object.defineProperty(window, "location", { configurable: true, value: { ...original, assign } });
+  try {
+    renderLoginWithState({ from: "/jobs" });
+    await userEvent.click(await screen.findByRole("button", { name: "Sign in with DS AD SSO" }));
+    expect(assign).toHaveBeenCalledWith("/api/auth/oidc/login?next=%2Fjobs");
+  } finally {
+    Object.defineProperty(window, "location", { configurable: true, value: original });
+  }
+});
+
+test("SSO 가 꺼져 있으면 SSO 버튼이 없다", async () => {
+  renderLogin();
+  await screen.findByRole("button", { name: "로그인" });
+  await waitFor(() => expect(screen.queryByRole("button", { name: /SSO/ })).toBeNull());
+});
+
+test("SSO 콜백 실패(sso_error)는 로그인 화면에 사유로 보인다", async () => {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(
+    <QueryClientProvider client={qc}>
+      <MemoryRouter initialEntries={["/login?sso_error=sso_email_domain_mismatch"]}>
+        <Routes><Route path="/login" element={<Login />} /></Routes>
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+  expect(await screen.findByText("SSO 계정의 이메일 도메인이 이 포탈의 계정 도메인과 다릅니다")).toBeInTheDocument();
 });

@@ -34,8 +34,9 @@ SRC_DIR = REPO_ROOT / "src" / "dms"
 REASON_CODES_FILE = REPO_ROOT / "frontend" / "src" / "lib" / "reasonCodes.json"
 
 # PurgeError·TrashError(2026-10-08): 요청 삭제 정리 루프(request_purger·artifact_trash)의 사유 코드 예외.
+# OidcError(2026-11-18): 사내 SSO(api/oidc.py·routes_oidc.py) -- /login?sso_error=<사유> 로 로그인 화면에 보인다.
 _EXCEPTION_CTORS = {"IdentityRejected", "DomainValidationError", "ExecutionError",
-                    "PlacementError", "PurgeError", "TrashError"}
+                    "PlacementError", "PurgeError", "TrashError", "OidcError"}
 _LITERAL_KEYWORDS = {"detail", "reason_code"}
 
 

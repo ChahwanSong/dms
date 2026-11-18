@@ -25,3 +25,7 @@ frontend/test-results/
 deploy/.rendered/
 deploy/overlays/.prod-rendered/
 deploy/overlays/prod/values.env
+# 비밀 파일(2026-11-18 사내 SSO client secret 등) — 저장소 밖에 두는 것이 원칙(deploy/README.md §6-9), 실수로 안에 만들었을 때의 그물
+*.secret
+.secret
+*.secret.txt

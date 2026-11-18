@@ -170,6 +170,19 @@ export const REASON_MESSAGES: Record<string, string> = {
   operation_admin_only: "이 연산은 관리자만 가능합니다",
   // 로그인(비밀번호가 맞을 때)·셀프 비밀번호 재설정도 이 사유로 답한다(2026-11-11) -- 비밀번호가 아니라 활성화가 필요하다고 안내한다.
   account_disabled: "계정이 비활성화되었습니다 — 관리자에게 활성화를 요청하세요",
+  // 사내 SSO(2026-11-18, api/oidc.py·routes_oidc.py) -- 콜백 실패는 /login?sso_error=<사유> 로 로그인 화면에 보인다.
+  sso_not_configured: "사내 SSO 로그인이 설정되어 있지 않습니다 — 아이디·비밀번호로 로그인하세요",
+  sso_denied: "SSO 로그인이 취소되었거나 거절되었습니다 — 다시 시도하세요",
+  sso_state_invalid: "SSO 로그인 요청이 만료되었거나 올바르지 않습니다 — 로그인 화면에서 다시 시도하세요",
+  sso_upstream_unreachable: "사내 SSO 서버에 연결할 수 없습니다 — 잠시 뒤 다시 시도하거나 아이디·비밀번호로 로그인하세요",
+  sso_upstream_error: "사내 SSO 서버가 오류로 응답했습니다 — 잠시 뒤 다시 시도하세요(계속되면 관리자에게 알리세요)",
+  sso_token_invalid: "SSO 로그인 정보를 확인하지 못했습니다 — 다시 시도하세요(계속되면 관리자에게 알리세요)",
+  sso_email_missing: "SSO 계정에서 사내 이메일을 받지 못했습니다 — 관리자에게 알리세요",
+  sso_email_domain_mismatch: "SSO 계정의 이메일 도메인이 이 포탈의 계정 도메인과 다릅니다",
+  sso_email_unverified: "SSO 계정의 이메일이 사내 SSO 서버에서 확인(verified)되지 않았습니다 — 관리자에게 알리세요",
+  sso_username_invalid: "SSO 계정의 아이디를 이 포탈의 계정으로 쓸 수 없습니다 — 관리자에게 문의하세요",
+  sso_account_not_found: "이 포탈에 계정이 없습니다 — 관리자에게 계정 생성을 요청하세요",
+  sso_privileged_account_missing: "운영자 계정은 SSO 로 처음 만들 수 없습니다 — 관리자가 먼저 계정을 만들어야 합니다",
   node_not_found: "노드를 찾을 수 없습니다",
   // 노드 배치 제외(2026-10-02, repositories/node_exclusions.py). nodes_excluded = 계획 거부(쓸 수 있는 노드가 전부
   // 막힘), node_excluded_at_step = 계획 뒤 배정 노드가 막혀 종단, node_excluded = 컨펌 시점에 같은 이유로 종단.
