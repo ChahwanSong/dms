@@ -36,7 +36,10 @@ current-context 를 읽는다**(설치기는 늘 `--context` 로 부른다 — �
 먼저 `deploy/README.md` §0 을 연다 — 설치 전에 정할 값(§0-1)·클러스터·노드·호스트 요건(§0-2: control-plane 3대 + NoSchedule 없는 워커 ≥ 2)·
 방화벽·NTP·DNS(§0-3)·보안 승인 항목과 DMS 가 만드는 클러스터 범위 객체(§0-4). 아래 0~13 은 사이트·클러스터 운영자가 설치 전에 하는 일이다
 (설치기는 하지 않는다 — `--plan` 의 `[MANUAL]` 노드 셸 체크리스트와 설치기 S1·S2b·S6·S7·S8 이 결과를 다시 잰다). **DMS 노드** = 마스터 + NoSchedule taint 없는 워커
-(dms-agent·잡·포탈 빌드는 그 워커에만 뜬다 — 에이전트의 toleration 은 NoExecute 뿐이라 마스터에 뜨지 않는다).
+(dms-agent·잡·포탈 빌드는 **마스터에 control-plane NoSchedule taint 가 있으면** 그 워커에만 뜬다 — 에이전트의 toleration 은 NoExecute 뿐이다.
+RKE2 서버 노드는 기본으로 taint 가 없어 에이전트가 마스터에도 뜨고, 그러면 마스터도 잡·빌드·k8s 연동 호출 노드 후보가 된다 — 워커에만 두려면 마스터에
+NoSchedule taint 를 단다. 확인: `kubectl --context <ctx> get nodes -o custom-columns=NAME:.metadata.name,TAINTS:.spec.taints[*].key` 와
+`-n dms get ds dms-agent` 의 DESIRED).
 
 0. **레지스트리 주소 고르기·확인(in-cluster — 4·5 보다 먼저, 설치 호스트)**: `REGISTRY_CLUSTER_IP` 는 4(전 노드 drop-in)·5(마스터 반입 이름·고정
    패턴)에 박히므로 박기 전에 고른다 — 렌더 없이 env 만으로 S1 의 주소 검사를 돌려, preflight 출력 「5. 공용 디렉터리 · 레지스트리 값」 절의

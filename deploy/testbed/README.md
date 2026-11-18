@@ -112,7 +112,8 @@ validate 가 확인). 인프라 전제 절의 `PORTAL_VIP=10.20.20.101 sh deploy
 - **DB 배치**: `PG_PLACEMENT=all-nodes`(control-plane 이 cp1 하나라 인스턴스를 cp1·w1·w2 에 하나씩 — prod 는 늘 마스터마다 하나),
   `PG_BACKUP_KEEP=24`(호스트 `/data` 여유가 작다 — prod 기본 336).
 - **api·controller 는 워커에 뜬다**: prod 의 `patch-placement.yaml`(마스터 배치)이 이 오버레이에는 없다 — cp1(4GiB)에 메모리가 모자라다.
-  그래서 메일·k8s 연동 호출의 출발 노드와 장애 시 복귀 수치가 prod 와 다르다(§10).
+  그래서 메일(dms-api → 릴레이)의 출발 노드와 장애 시 복귀 수치가 prod 와 다르다(§10). k8s 연동 호출(대상 apiserver)은 api·controller 배치와
+  무관하다 — 포탈 「호출 노드와 주기」에서 지정한 노드의 dms-agent 가 직접 부른다(`agent/k8s_fetch.py`, 테스트베드 = 주 k8s-w1·보조 k8s-w2 — §5-3).
 - **Deployment 는 패치하지 않는다** — securityContext 는 base 가 유일한 진실이다
   (`tests/test_release_manifest_contract.py::test_overlays_do_not_patch_control_plane_deployments`). 예외는 `replacements` 의 아티팩트 경로 두 필드.
 - **잡 이미지**: `DMS_JOB_IMAGE` 는 「DB 오버라이드가 없을 때의 기본」이자 드리프트 배지의 기준이다. 라이브 잡 이미지는 포탈 릴리스의
@@ -585,7 +586,7 @@ kubectl --context dmsk8s -n dms get ds dms-agent -o jsonpath='{.spec.template.sp
 | 항목 | 테스트베드 | 프로덕션 | 뜻 |
 |---|---|---|---|
 | control-plane | k8s-cp1 **1대** | 마스터 3대 | S1 WARN 이 정상, PG anti-affinity 를 `all-nodes` 로 피함, 레지스트리가 한 노드 — 레지스트리 HA 가 시험되지 않는다(입구는 2026-11-16 부터 노드 셋 모두 Traefik — edge 풀 3) |
-| 제어면 배치 | api·controller 가 워커(§3) | 마스터(`patch-placement.yaml`) | 메일·k8s 연동 호출의 출발 IP, 노드 사망 때 복귀 수치가 다르다 |
+| 제어면 배치 | api·controller 가 워커(§3) | 마스터(`patch-placement.yaml`) | 메일 발송의 출발 IP, 노드 사망 때 복귀 수치가 다르다. k8s 연동 호출의 출발지는 배치와 무관하다 — 둘 다 지정한 호출 노드의 dms-agent(테스트베드 k8s-w1) |
 | L4 입구 | 호스트 haproxy(Avi VS-443 흉내, PROXY v2, 풀 = 노드 셋 :443 의 Traefik). 출발지 하나(10.10.10.1) | Avi VS-443(VIP-A, PROXY v2, 풀 = Traefik 이 도는 노드 :443 — RKE2 rke2-traefik 은 모든 노드). 출발지 = SE 들(`<SE 주소>`) | 헬스 모니터·유휴 타임아웃·PROXY v2 동작만 흉내 낸다. SE 가 여럿인 출발지를 trustedIPs 에 빠짐없이 넣었는지는 사이트에서 따로 확인한다(빠진 SE 를 지난 연결은 PROXY 바이트가 TLS 앞에 붙어 깨진다) |
 | Traefik | testbed IaC 가 깐 rke2-traefik 모양(같은 판, 차트 렌더 args 순서 그대로 — 이름은 `traefik`), trustedIPs 는 IaC 템플릿 값 | RKE2 `rke2-traefik`(Helm) — 정적 설정(websecure `proxyProtocol.trustedIPs`·타임아웃)은 사이트가 Rancher chartValues / HelmChartConfig 로 넣는다 | DMS 감지는 이미지 이름으로 찾아 둘이 같다. chartValues·HelmChartConfig 로 값을 넣는 경로와 그때의 롤링은 여기서 시험되지 않는다 |
 | 사내 SSO IdP | 호스트 docker 의 Samba AD DC + Keycloak 26.8(§6-7), 인증서 = 테스트베드 CA, 호스트 브라우저에서만 | 사내 AD + 사이트 Keycloak(사내 CA), 사용자 PC 어디서나 | AD 의 실제 스키마·그룹·정책(계정 잠금·만료), 사이트 Keycloak 판·realm 설정(Trust Email 등)은 시험되지 않는다 — DMS 가 보는 OIDC 계약(issuer·PKCE·client_secret_basic·email 클레임)만 같다 |

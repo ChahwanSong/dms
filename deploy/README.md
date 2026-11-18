@@ -90,8 +90,11 @@
 - **NoSchedule taint 없는 워커 2대 이상**(권장). 다음은 워커에만 뜬다:
   - CNPG 오퍼레이터 2개(`addons/cnpg/1.30.1/patch-operator.yaml` — control-plane `DoesNotExist`, 두 파드를 다른 노드에 선호).
   - pg_dump CronJob(`platform/db/backup/cronjob.yaml`).
-  - dms-agent DaemonSet. 이 DaemonSet 은 NoExecute 만 견딘다(`k8s/50-agent-daemonset.yaml` tolerations). 그래서 NoSchedule taint 가 있는 노드에는
-    뜨지 않고, 잡·빌드도 에이전트가 보고한 노드에서만 돈다.
+  - dms-agent DaemonSet. 이 DaemonSet 은 NoExecute 만 견딘다(`k8s/50-agent-daemonset.yaml` tolerations — nodeSelector 없음). 그래서 NoSchedule
+    taint 가 있는 노드에는 뜨지 않고, 잡·빌드도 에이전트가 보고한 노드에서만 돈다. **워커에만 뜨는 것은 마스터에 control-plane NoSchedule taint 가 있을
+    때뿐이다** — RKE2 서버 노드는 기본으로 taint 가 없어(§2g-4) 에이전트가 마스터에도 뜨고, 그 마스터가 잡·빌드·k8s 연동 호출 노드(§6-5) 후보가 된다.
+    빈 key 의 NoExecute toleration 이라 `CriticalAddonsOnly=true:NoExecute` 같은 NoExecute taint 로는 빠지지 않는다 — 마스터에서 빼려면 NoSchedule
+    taint 를 단다(확인: `kubectl --context <ctx> -n dms get ds dms-agent` 의 DESIRED = 워커 수인지).
   - 워커가 1대면 그 워커를 정비하는 동안 CNPG 웹훅(failurePolicy Fail)·덤프·잡이 함께 멈춘다.
 - 런타임은 **CRI-O** 다(노드 준비가 `registries.conf.d`·`crio.conf.d` drop-in 이다 — containerd 판은 없다).
 - CNI 는 무엇이든 되지만 **kube-proxy 가 있어야** 한다. hostNetwork 파드와 인터넷 노드가 ClusterIP 로 레지스트리에 닿는 경로다.
