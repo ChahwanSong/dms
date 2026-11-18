@@ -22,9 +22,13 @@ function wrapperFor(qc: QueryClient) {
     createElement(QueryClientProvider, { client: qc }, children);
 }
 
-test("logout clears the entire cache even when the request fails", async () => {
+test("logout clears every session query even when the request fails (public pre-login queries stay)", async () => {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   qc.setQueryData(["requests"], [{}]);
+  qc.setQueryData(["me"], { actor: "alice", role: "user" });
+  qc.setQueryData(["sso-info"], { enabled: true, label: "SSO" });
+  qc.setQueryData(["mail-info"], { email_domain: "example.com", delivery: "stub" });
+  qc.setQueryData(["portal-info"], { subtitle: null });
   server.use(http.post("/api/auth/logout",
     () => HttpResponse.json({ detail: "server_error" }, { status: 500 })));
 
@@ -33,6 +37,33 @@ test("logout clears the entire cache even when the request fails", async () => {
 
   await waitFor(() => expect(result.current.isError).toBe(true));
   expect(qc.getQueryData(["requests"])).toBeUndefined();
+  expect(qc.getQueryData(["me"])).toBeUndefined();
+  expect(qc.getQueryData(["sso-info"])).toEqual({ enabled: true, label: "SSO" });
+  expect(qc.getQueryData(["mail-info"])).toEqual({ email_domain: "example.com", delivery: "stub" });
+  expect(qc.getQueryData(["portal-info"])).toEqual({ subtitle: null });
+});
+
+// 2026-11-18 테스트베드 SSO 실증: 로그아웃 클릭 → 즉시 /login(UserPanel) → 로그인 화면이 sso-info 를 막 조회하는 중에 로그아웃이 끝나
+// 캐시를 비우면 그 조회가 지워져 SSO 버튼이 사라졌다. 진행 중인 공개 조회는 로그아웃 정리를 지나도 결과가 캐시에 남아야 한다.
+test("logout keeps an in-flight sso-info query so the login screen still gets the SSO button", async () => {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  let release: () => void = () => {};
+  const gate = new Promise<void>((r) => { release = r; });
+  server.use(
+    http.post("/api/auth/logout", () => new HttpResponse(null, { status: 204 })),
+    http.get("/api/auth/sso-info", async () => {
+      await gate;
+      return HttpResponse.json({ enabled: true, label: "Sign in with SSO" });
+    }),
+  );
+  const pending = qc.fetchQuery({ queryKey: ["sso-info"],
+                                  queryFn: () => fetch("/api/auth/sso-info").then((r) => r.json()) });
+  const { result } = renderHook(() => useLogout(), { wrapper: wrapperFor(qc) });
+  result.current.mutate();
+  await waitFor(() => expect(result.current.isSuccess).toBe(true));
+  release();
+  await pending;
+  expect(qc.getQueryData(["sso-info"])).toEqual({ enabled: true, label: "Sign in with SSO" });
 });
 
 test("login clears the previous user's cached data on success", async () => {

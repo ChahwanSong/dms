@@ -54,6 +54,7 @@ dms-k8s 라인의 **완료 기록**이다. 각 항목에는 무엇을 만들었�
 
 | 날짜 | 태그·실증 | 제목 |
 |---|---|---|
+| 11-18 | d32·d33 | 테스트베드 사내 AD SSO 환경(Samba AD DC + Keycloak, 호스트 docker) 구축·실 Chrome 실증 + 실증에서 찾은 결함 3건 수정 |
 | 11-18 | — | 사내 AD SSO 로그인(OIDC Authorization Code + PKCE — 「Sign in with … SSO」 버튼, 선택 Secret `dms-oidc`) |
 | 11-17 | — | pull-probe 노드 여러 대 지정 수정 — 마스터 3대 사전 pull 에서 apiserver 가 DaemonSet 생성을 거부하던 것 |
 | 11-17 | — | 설치기 S11 에이전트 DaemonSet 대기를 노드 수 비례로 — 6노드 사이트의 정상 롤링(약 600초)을 고정 180초가 끊던 것 + 시간 초과 뒤 재실행이 설정 재시작을 되풀이하던 것 |
@@ -102,6 +103,41 @@ dms-k8s 라인의 **완료 기록**이다. 각 항목에는 무엇을 만들었�
 ---
 
 ## 상세 기록 (최신순)
+
+### ✅ 테스트베드 사내 AD SSO 환경 구축·실증 + 실증 결함 3건 수정 — **완료**(2026-11-18, d32 → d33)
+
+사용자 요청(2026-11-18): 「테스트베드에 ad sso 환경을 구축하고 실증까지 완료해줘」(답변·문서는 한국어로).
+
+- **환경**(testbed IaC — 커밋은 사용자, `make idp-up`·`idp-config`·`idp-check`·`idp-dms-secret`·`idp-down`, testbed `docs/ARCHITECTURE.md` §24, 이
+  저장소 deploy/testbed/README §6-7): 호스트 docker 에 Samba AD DC 4.22(`dms-idp-dc` — docker 내부망만) + PostgreSQL 17 + Keycloak 26.8.1
+  (`dms-idp-kc`, `https://idp.dms-k8s.local:8444/realms/dms-testbed`, `10.10.10.1:8444` 에만, 인증서 = 테스트베드 CA). Keycloak 이 AD 를 LDAPS·
+  READ_ONLY 로 연동(아이디 = sAMAccountName, `mail` → email, Trust Email 끔), client `dms-k8s`(confidential·Standard flow·PKCE S256 필수·redirect
+  `https://dms-k8s.local/api/auth/oidc/callback`). 이름 `idp.dms-k8s.local → 10.10.10.1` 은 호스트 `/etc/hosts` 와 dmsk8s CoreDNS hosts 블록(IaC 확장).
+  비밀(client secret·AD/Keycloak 관리자·시험 계정 비밀번호)은 testbed `files/idp/`(0600, git 제외)에만 — 이 저장소에는 없다. IdP 인수 검사 59/0,
+  `validate.sh dmsk8s` 268/0.
+- **DMS 배포**: 사내 SSO 코드(55cf39cc)를 d32 로 빌드·릴리스(오버레이 bad91f2a), dms-api 의 `envFrom` 선택 Secret 은 설치기 `--only S11` 로 적용
+  (포탈 릴리스는 이미지만 바꾼다), Secret `dms/dms-oidc`(`make idp-dms-secret`) 뒤 `rollout restart deploy/dms-api` → `sso-info` enabled.
+- **실 Chrome 실증**(Chrome 147, 테스트베드 CA 신뢰 — TLS 검증 켬, 시나리오마다 새 컨텍스트, 1280·390): 로그인 화면 SSO 버튼 · 새 AD 계정 `sso.alice`
+  → Keycloak 화면 → 포탈(계정 user 로 자동 생성, email sso.alice@example.com, 감사 actor `sso`) · 딥링크 복귀(`/jobs/new`) · 기존 특권 계정 `mason`
+  → role admin 그대로 · `admin` → `sso_username_invalid` · `@other.example` → `sso_email_domain_mismatch`(계정 안 생김) · DMS 에서 비활성화한
+  `sso.disabled` → 기존 세션도 401, 다시 SSO → `account_disabled` · 로그아웃 → 401, 다시 SSO 는 IdP 세션으로 비밀번호 없이 1초 · email_verified:
+  `DMS_OIDC_REQUIRE_EMAIL_VERIFIED=true` → `sso_email_unverified`, Keycloak Trust Email 켬 → 통과(id_token `email_verified: true`), 기본값으로 복원 뒤
+  다시 통과 · 쿠키 `dms_session` Secure·HttpOnly·SameSite=Lax · 콜백 재전송 → `sso_state_invalid` · 49화면 예상 밖 콘솔 오류·실패 요청·가로 넘침 0 ·
+  사용자가 Keycloak account API 로 자기 email 을 바꾸려 하면 400(READ_ONLY). 로그에 client secret·비밀번호 없음.
+- **실증에서 찾아 고친 결함(d33)**:
+  1. 로그아웃 직후 로그인 화면에 SSO 버튼이 없었다(3/3 재현, 새로고침해야 보임) — 로그아웃은 nav 를 먼저 하고(2026-10-16 me 재조회 루프 수정) 훅의
+     `qc.clear()` 가 로그인 화면이 막 시작한 `sso-info` 조회를 지웠다. SSO 로 만든 계정은 비밀번호가 없어 다시 들어올 길이 없어지는 결함. 로그아웃
+     정리를 「공개 조회(`sso-info`·`mail-info`·`portal-info`)는 남기고 나머지만 지움」으로(`useAuth.PUBLIC_QUERY_KEYS`) — 테스트 2개(옛 코드 빨간불 확인).
+  2. dms 로거의 INFO 가 출력되지 않아(dms 에 로깅 설정이 없고 uvicorn 은 자기 로거만 설정) 런북 §6-9 가 판단 근거로 든 `sso: <아이디> email_verified=…`
+     줄이 0건이었다 → 그 줄을 WARNING 으로.
+  3. uvicorn 접근 로그가 콜백 URL 을 쿼리째(code·state·session_state·iss) 남겼다 → `uvicorn.access` 로거 필터(`routes_oidc.RedactCallbackQuery`,
+     create_app 이 한 번만 붙임)가 `/api/auth/oidc/callback?<redacted>` 로 바꾼다.
+  - 문서 정정: §6-9 의 client secret 확인법 — Keycloak 26 은 비밀이 맞아도 틀려도 401 `unauthorized_client` 라 `error_description` 으로 가른다(테스트베드
+    실측), 확인 명령은 비밀을 argv 대신 파일(curl `-K`)로.
+- **알아둘 점**: SSO 는 호스트 브라우저에서만(IdP·redirect 가 호스트 경로 — LAN·Tailscale 기기는 비밀번호 로그인). 로그인 실패 뒤 다시 누르면 IdP 세션이
+  남아 같은 AD 계정으로 같은 오류가 난다(다른 계정으로 바꾸려면 IdP 로그아웃 — `end_session` 은 남은 일). 새 SSO 사용자는 RoleBinding 맵핑 전에는
+  PV 를 고를 수 없다(설계대로). 테스트베드 CA 에 keyUsage 가 없어 Python 3.13 의 엄격 검증이면 거부된다(지금 이미지 3.11 — 판 올릴 때 CA 재발급 필요).
+- **남긴 것**: DMS 계정 `sso.alice`(user)·`sso.disabled`(user, 비활성), Secret `dms-oidc`(키 6개 — 기본값), Keycloak Trust Email 끔.
 
 ### ✅ 사내 AD SSO 로그인(OIDC Authorization Code + PKCE) — **구현 완료**(2026-11-18, 프로덕션 사이트에서 먼저 구현·실 AD 로그인 검증 → 이 브랜치 반영)
 

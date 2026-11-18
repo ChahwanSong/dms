@@ -412,6 +412,31 @@ testbed `make post-boot-check WAIT=900`(`README.md` 「After a host reboot」 �
 있어 VM 재부팅에도 남는다. 재부팅 직후 첫 잡은 에이전트 첫 보고(30초)·프로브(60초) 전이면 `no_ready_sync_candidate` 로 거부될 수 있다 —
 1~2분 뒤 다시 낸다.
 
+### 6-7. 사내 AD SSO 시험 환경 (2026-11-18)
+
+프로덕션 모양(사내 AD → Keycloak(OIDC IdP, LDAP 연동) → DMS 「Sign in with … SSO」 — deploy/README §6-9)을 테스트베드에 그대로 세웠다. IdP 는 클러스터가
+아니라 **호스트 docker**(워커 자원을 쓰지 않는다)이고 testbed IaC 가 관리한다(`make idp-up`·`idp-config`·`idp-check`·`idp-dms-secret`·`idp-down`,
+`scripts/idp.sh`, 설계·실측은 testbed `docs/ARCHITECTURE.md` §24).
+
+| 요소 | 테스트베드 값 |
+|---|---|
+| AD | Samba AD DC 컨테이너(`dms-idp-dc`, `ad.dms-k8s.local`) — docker 내부망에만, 호스트·LAN 에 포트 없음 |
+| IdP | Keycloak 컨테이너(`dms-idp-kc`), issuer `https://idp.dms-k8s.local:8444/realms/dms-testbed`(`10.10.10.1:8444` 에만 열림), 인증서 = 테스트베드 CA |
+| AD 연동 | vendor AD · LDAPS(인증서 검증) · 아이디 = sAMAccountName · `mail` → email · **READ_ONLY**(사용자가 email 을 못 바꾼다) · Trust Email 끔(`email_verified: false`) |
+| client | `dms-k8s` — confidential, Standard flow 만, PKCE S256 필수, redirect `https://dms-k8s.local/api/auth/oidc/callback` |
+| 이름 해석 | `idp.dms-k8s.local → 10.10.10.1` — 호스트 `/etc/hosts`(`make host-hosts`)와 dmsk8s 파드(CoreDNS hosts 블록, `make coredns-hosts-dmsk8s`) |
+| DMS 쪽 | Secret `dms/dms-oidc`(`make idp-dms-secret` — 비밀은 testbed `files/idp/` 의 파일에서, 저장소 밖), 버튼 글자 `Sign in with Testbed AD SSO` |
+| AD 시험 계정 | `sso.alice`(새 계정 → user 로 자동 생성) · `mason`(기존 특권 계정 → admin 그대로) · `admin`(차단) · `sso.other`(@other.example — 도메인 불일치) · `sso.disabled`(DMS 에서 비활성화해 `account_disabled` 시험). 비밀번호는 testbed `files/idp/users/<이름>.pw`(0600, git 제외) |
+
+- **호스트 브라우저에서만** 된다: IdP(`10.10.10.1:8444`)와 redirect(`https://dms-k8s.local` = 10.10.10.1:443)가 호스트 경로라, LAN·Tailscale 기기의
+  브라우저는 IdP 에 닿지 않는다(그 기기는 비밀번호 로그인을 쓴다).
+- 켜고 끄기: Secret 이 있으면 켜짐 — 끄려면 `kubectl --context dmsk8s -n dms delete secret dms-oidc` 뒤 `rollout restart deploy/dms-api`. Secret 을
+  바꾼 뒤에도 늘 `rollout restart deploy/dms-api`(S11 의 설정 재시작은 이 Secret 을 보지 않는다).
+- email_verified 시험: `bash scripts/idp.sh trust-email on|off`(testbed) — 켜면 id_token 이 `email_verified: true`. DMS 쪽 `DMS_OIDC_REQUIRE_EMAIL_VERIFIED=true`
+  를 Secret 에 더하면 확인되지 않은 메일을 거절한다(`sso_email_unverified`). 기본은 둘 다 끔(IaC 기본값 — `make idp-config` 가 Trust Email 을 끔으로 되돌린다).
+- 호스트 재부팅 뒤 Keycloak 이 안 떠 있으면(docker 가 `dmsbr0` 보다 먼저 떠 `10.10.10.1:8444` 를 못 붙인 경우) testbed `make idp-up`.
+- 로그아웃은 DMS 세션만 끝낸다 — IdP 세션이 남아 버튼을 다시 누르면 비밀번호 없이 들어온다(프로덕션과 같다, deploy/README §6-9).
+
 ## 7. 되돌림 상태·보존물
 
 지우거나 덮기 전에 보는 목록이다. 「삭제 시점」이 사용자 결정인 것은 BACKLOG 의 그 항목이 진실이다.
@@ -563,6 +588,7 @@ kubectl --context dmsk8s -n dms get ds dms-agent -o jsonpath='{.spec.template.sp
 | 제어면 배치 | api·controller 가 워커(§3) | 마스터(`patch-placement.yaml`) | 메일·k8s 연동 호출의 출발 IP, 노드 사망 때 복귀 수치가 다르다 |
 | L4 입구 | 호스트 haproxy(Avi VS-443 흉내, PROXY v2, 풀 = 노드 셋 :443 의 Traefik). 출발지 하나(10.10.10.1) | Avi VS-443(VIP-A, PROXY v2, 풀 = Traefik 이 도는 노드 :443 — RKE2 rke2-traefik 은 모든 노드). 출발지 = SE 들(`<SE 주소>`) | 헬스 모니터·유휴 타임아웃·PROXY v2 동작만 흉내 낸다. SE 가 여럿인 출발지를 trustedIPs 에 빠짐없이 넣었는지는 사이트에서 따로 확인한다(빠진 SE 를 지난 연결은 PROXY 바이트가 TLS 앞에 붙어 깨진다) |
 | Traefik | testbed IaC 가 깐 rke2-traefik 모양(같은 판, 차트 렌더 args 순서 그대로 — 이름은 `traefik`), trustedIPs 는 IaC 템플릿 값 | RKE2 `rke2-traefik`(Helm) — 정적 설정(websecure `proxyProtocol.trustedIPs`·타임아웃)은 사이트가 Rancher chartValues / HelmChartConfig 로 넣는다 | DMS 감지는 이미지 이름으로 찾아 둘이 같다. chartValues·HelmChartConfig 로 값을 넣는 경로와 그때의 롤링은 여기서 시험되지 않는다 |
+| 사내 SSO IdP | 호스트 docker 의 Samba AD DC + Keycloak 26.8(§6-7), 인증서 = 테스트베드 CA, 호스트 브라우저에서만 | 사내 AD + 사이트 Keycloak(사내 CA), 사용자 PC 어디서나 | AD 의 실제 스키마·그룹·정책(계정 잠금·만료), 사이트 Keycloak 판·realm 설정(Trust Email 등)은 시험되지 않는다 — DMS 가 보는 OIDC 계약(issuer·PKCE·client_secret_basic·email 클레임)만 같다 |
 | 노드 방화벽 | 없음 — cp1 nft :443 펜스(`dms-testbed-cp443`)는 2026-11-16 은퇴. 워커 firewalld 꺼짐 | 사이트 방화벽(deploy/README §0-3), RHEL firewalld 기본 zone 주의 | 방화벽 규칙의 실수는 여기서 드러나지 않는다. Traefik hostPort 는 CRI-O DNAT(PREROUTING → FORWARD)라 노드 :443 을 SE 대역으로 좁히는 INPUT 규칙은 그 트래픽을 보지 못한다(testbed `docs/ARCHITECTURE.md` §15.2) — 원 IP 위조 방지는 trustedIPs 가 한다 |
 | SELinux | 워커 permissive(Rocky 9.6) | permissive 전제(deploy/README §2h S2b — enforcing 실측: 스토리지 전부 Missing) | 같다. enforcing 근거는 이 테스트베드의 T-SE 실측이다 |
 | 노드 OS | cp1 Ubuntu 24.04 + 워커 Rocky 9.6 혼합 | 사이트 RHEL 계열 | 패키지 경로가 다르다(아래 skopeo 메모) |

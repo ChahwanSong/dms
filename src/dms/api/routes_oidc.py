@@ -30,6 +30,28 @@ log = logging.getLogger(__name__)
 SESSION_KEY = "oidc"
 SSO_BLOCKED_NAMES = frozenset({"root", "admin"})
 _LOGIN_PATH = "/login"
+CALLBACK_PATH = "/api/auth/oidc/callback"
+
+
+class RedactCallbackQuery(logging.Filter):
+    """uvicorn 접근 로그에서 콜백 URL 의 쿼리(code·state·session_state·iss)를 지운다(2026-11-18 테스트베드 실증 -- 접근 로그가
+    콜백을 쿼리째 남겼다). code 는 1회용이고 PKCE·client secret 이 있어야 쓰지만, 로그에 남기지 않는다는 원칙(§6-9)을 지킨다.
+    uvicorn.access 의 record.args = (client, method, path_with_query, http_version, status)."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if (isinstance(args, tuple) and len(args) >= 3 and isinstance(args[2], str)
+                and args[2].startswith(CALLBACK_PATH + "?")):
+            record.args = args[:2] + (CALLBACK_PATH + "?<redacted>",) + args[3:]
+        return True
+
+
+def install_access_log_redaction() -> None:
+    """uvicorn.access 로거에 RedactCallbackQuery 를 한 번만 붙인다(create_app 이 부른다 -- 로거 필터는 uvicorn 의 dictConfig 가 지우지
+    않는다: 핸들러만 갈아 끼운다)."""
+    access = logging.getLogger("uvicorn.access")
+    if not any(isinstance(f, RedactCallbackQuery) for f in access.filters):
+        access.addFilter(RedactCallbackQuery())
 
 
 def _safe_next(raw) -> str:
@@ -95,7 +117,7 @@ def _ensure_account(settings, repos, username: str) -> dict:
     return state
 
 
-@router.get("/api/auth/oidc/callback")
+@router.get(CALLBACK_PATH)
 def oidc_callback(request: Request, code: str | None = None, state: str | None = None,
                   error: str | None = None):
     settings = request.app.state.settings
@@ -112,8 +134,9 @@ def oidc_callback(request: Request, code: str | None = None, state: str | None =
         username = oidc.username_from_email(claims.get("email"), settings.account_email_domain)
         if not verified:
             # DMS_OIDC_REQUIRE_EMAIL_VERIFIED 꺼짐 -- 운영자가 IdP 가 email_verified 를 내는지 보고 켤지 정하게 남긴다(§6-9).
-            log.info("sso: %s email_verified=%r (DMS_OIDC_REQUIRE_EMAIL_VERIFIED off -- the IdP must not let users edit "
-                     "their email)", username, claims.get("email_verified"))
+            # WARNING 인 이유: dms 로거에는 핸들러 설정이 없어 INFO 는 출력되지 않는다(2026-11-18 테스트베드 실증 -- uvicorn 은 자기 로거만 설정).
+            log.warning("sso: %s email_verified=%r (DMS_OIDC_REQUIRE_EMAIL_VERIFIED off -- the IdP must not let users edit "
+                        "their email)", username, claims.get("email_verified"))
         account = _ensure_account(settings, request.app.state.repos, username)
     except OidcError as e:
         log.warning("sso login failed: %s", e)

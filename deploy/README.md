@@ -2442,8 +2442,18 @@ IdP 와 OIDC Authorization Code + PKCE(S256) 로만 말한다(confidential clien
 없어야 한다**(AD/LDAP 연동은 읽기 전용, 프로필의 email 수정 끔) — DMS 는 email 의 아이디를 계정으로 쓰므로, 바꿀 수 있으면 남의 메일 주소를
 적어 그 사람으로 들어올 수 있다. IdP 가 AD 에서 온 메일을 `email_verified: true` 로 내면(Keycloak LDAP 공급자의 「Trust Email」 켬) DMS 쪽
 `DMS_OIDC_REQUIRE_EMAIL_VERIFIED=true` 로 확인되지 않은 메일을 거절하게 한다(`sso_email_unverified` — 권장. 기본은 끔: 그 표시가 없는 IdP 에서 켜면
-SSO 가 통째로 막힌다. 끈 상태에서는 dms-api 로그 `sso: <아이디> email_verified=…` 줄로 IdP 가 무엇을 내는지 보고 정한다). 확인(마스터에서): `curl -sS -u '<client_id>:<secret>' -d grant_type=client_credentials
-<issuer>/protocol/openid-connect/token` 가 `invalid_client` 면 비밀이 틀렸다(`unauthorized_client` 는 비밀이 맞고 그 grant 만 꺼진 것 — 정상).
+SSO 가 통째로 막힌다. 끈 상태에서는 dms-api 로그 `sso: <아이디> email_verified=…` 줄로 IdP 가 무엇을 내는지 보고 정한다).
+
+비밀이 맞는지 확인(마스터에서 — 비밀은 파일에서 읽어 argv 에 싣지 않는다):
+
+```sh
+printf 'user = "%s:%s"\n' '<client_id>' "$(cat ~/.dms-secrets/oidc-client.secret)" > ~/.dms-secrets/curl-auth.conf   # 0600(umask 077)
+curl -sS -K ~/.dms-secrets/curl-auth.conf -d grant_type=client_credentials <issuer>/protocol/openid-connect/token; rm -f ~/.dms-secrets/curl-auth.conf
+```
+
+Keycloak 26 은 비밀이 맞아도 틀려도 **둘 다** 401 `unauthorized_client` 다 — `error_description` 으로 가른다: `Client not enabled to retrieve
+service account` 면 비밀이 맞다(그 grant 만 꺼진 것 — 정상), `Invalid client or Invalid client credentials` 면 비밀이 틀렸다(2026-11-18 테스트베드
+Keycloak 26.8 실측 — 판마다 문구가 다를 수 있다).
 
 **DMS 쪽**: Secret `dms-oidc`(ns dms) 하나 — dms-api 가 `envFrom`(optional)으로 읽는다(`deploy/k8s/40-api.yaml`). 넷(ISSUER·CLIENT_ID·
 CLIENT_SECRET·REDIRECT_URI)이 모두 있어야 켜지고, 일부만 있거나 https 가 아니면 dms-api 가 기동을 거부한다(`config._oidc_values`).

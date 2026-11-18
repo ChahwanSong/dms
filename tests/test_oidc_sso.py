@@ -307,6 +307,34 @@ def test_email_verified_is_read_from_the_same_source_as_the_email(db, settings, 
         assert _sso_error(r) == "sso_email_unverified"
 
 
+# --- 로그(2026-11-18 테스트베드 실증에서 찾음) -------------------------------------------------------------------------
+
+def test_access_log_redacts_callback_query(client):
+    import logging
+    from dms.api.routes_oidc import RedactCallbackQuery
+    access = logging.getLogger("uvicorn.access")
+    assert sum(isinstance(f, RedactCallbackQuery) for f in access.filters) == 1    # create_app 이 붙인다, 여러 번 불러도 하나
+    rec = logging.LogRecord("uvicorn.access", logging.INFO, __file__, 1, '%s - "%s %s HTTP/%s" %d',
+                            ("10.0.0.1:1", "GET", "/api/auth/oidc/callback?state=S&session_state=X&code=C", "1.1", 303), None)
+    assert RedactCallbackQuery().filter(rec) is True
+    assert "code=" not in rec.getMessage() and "state=" not in rec.getMessage()
+    assert "/api/auth/oidc/callback?<redacted>" in rec.getMessage()
+    other = logging.LogRecord("uvicorn.access", logging.INFO, __file__, 1, '%s - "%s %s HTTP/%s" %d',
+                              ("10.0.0.1:1", "GET", "/api/admin/batches?view=summary", "1.1", 200), None)
+    RedactCallbackQuery().filter(other)
+    assert "/api/admin/batches?view=summary" in other.getMessage()
+
+
+def test_unverified_email_login_is_logged_at_warning(sso_client, idp, caplog):
+    # dms 로거에는 핸들러 설정이 없어 INFO 는 출력되지 않는다 -- 운영자가 보는 이 줄은 WARNING 이어야 한다(§6-9).
+    import logging
+    idp.claims_override = {"email_verified": False}
+    q = _start(sso_client, idp)
+    with caplog.at_level(logging.WARNING, logger="dms.api.routes_oidc"):
+        _callback(sso_client, code="abc", state=q["state"])
+    assert any(r.levelno == logging.WARNING and "email_verified=False" in r.getMessage() for r in caplog.records)
+
+
 def test_username_from_email_rules():
     assert oidc.username_from_email("Cocoa.Song@SAMSUNG.com", "samsung.com") == "cocoa.song"
     with pytest.raises(oidc.OidcError) as e:

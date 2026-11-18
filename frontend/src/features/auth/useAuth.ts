@@ -76,10 +76,19 @@ export const usePasswordReset = () =>
         "/api/auth/password-reset", "password_reset", withTrimmedUsername(b)),
   });
 
+// 로그인 전 화면이 쓰는 공개 조회(사용자와 무관 — 비밀 없음). 로그아웃은 nav 를 먼저 하므로(UserPanel — 2026-10-16 me 재조회 루프 수정)
+// 로그인 화면이 이 조회를 막 시작한 순간에 캐시를 통째로 비우면 진행 중 조회가 지워져, 새로고침 전까지 SSO 버튼·메일 도메인 안내·부제가
+// 사라진다(2026-11-18 테스트베드 SSO 실증 — SSO 로 만든 계정은 비밀번호가 없어 다시 들어올 길이 없어진다). 이 셋만 남기고 나머지(세션 데이터)는 지운다.
+export const PUBLIC_QUERY_KEYS: ReadonlySet<string> = new Set(["sso-info", "mail-info", "portal-info"]);
+
 export function useLogout() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: () => apiSend("POST", "/api/auth/logout"),
-    onSettled: () => { qc.clear(); resetNavCollapsed(); },
+    onSettled: () => {
+      qc.removeQueries({ predicate: (q) => !PUBLIC_QUERY_KEYS.has(String(q.queryKey[0])) });
+      qc.getMutationCache().clear();
+      resetNavCollapsed();
+    },
   });
 }
