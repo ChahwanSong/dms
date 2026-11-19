@@ -70,6 +70,7 @@
 #   d32 = 사내 AD SSO 로그인(OIDC + PKCE, 선택 Secret dms-oidc) — 55cf39cc
 #   d33 = 테스트베드 AD SSO 실증 결함 3건 수정(로그아웃 뒤 SSO 버튼·email_verified 로그·콜백 code 로그) — 124d51a0
 #   d35 = 배치 단위 삭제 상한 기본 50000(묘비 + 컨트롤러 청크 삭제)·삭제 화면 상한 표시·「삭제 불가」 — 14ee820c·cc52a7e3 (d34 는 보안 리뷰 수정 전 빌드라 건너뜀)
+#   d36 = 삭제 확인 창 연산별 줄 「이상」(d35 실증 다듬기) — 06427f15
 #   태그 bump = 아래 newTag(+ patch-config.yaml 의 DMS_JOB_IMAGE) 커밋 — **dms-k8s 에서만** 한다(2026-10-22 브랜치 분리 뒤
 #   빌드 소스는 /home/mason/dms-dev/dms-k8s 체크아웃 = origin/dms-k8s, main 은 이 클러스터와 무관).
 #   ssc 클러스터의 오버레이(overlays/testbed)는 dms-ssc 브랜치에만 있다(2026-10-26 이 브랜치에서 지웠다 — 체리픽 충돌·엉뚱한 태그 방지).
@@ -100,10 +101,10 @@ resources:
 images:
   - name: set-by-overlay.invalid/dms
     newName: 10.112.0.50:5000/dms
-    newTag: d35
+    newTag: d36
   - name: set-by-overlay.invalid/dms-agent
     newName: 10.112.0.50:5000/dms-agent
-    newTag: d35
+    newTag: d36
 
 patches:
   - path: patch-config.yaml
