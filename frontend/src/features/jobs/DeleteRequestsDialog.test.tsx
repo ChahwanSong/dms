@@ -275,6 +275,9 @@ test("순수 함수: 첫 줄 세 변형 · 연산별 줄은 배치 자식 수(�
   expect(deleteHeadline(2, 3, 120004, true))
     .toBe("선택한 작업 2개와 배치 3개의 작업 120,004개 이상을 영구 삭제합니다. 되돌릴 수 없습니다.");
   expect(opCountLine([{ operation: "scan", count: 50000 }])).toBe("scan 50,000");
+  // 2026-11-19 테스트베드 실증: 상한을 넘은 배치(하한 수)는 연산별 줄에도 「이상」(첫 줄·버튼과 같게).
+  expect(opCountLine([{ operation: "scan", count: 6, atLeast: true }, { operation: "sync", count: 2 }]))
+    .toBe("sync 2 · scan 6 이상");
 });
 
 test("배치만: 첫 줄·배치 목록(이름·연산·상태·수)·안내 두 줄·사용량 경고(서버의 성공 scan 수) · 단건 목록 없음 · 주 버튼은 자식 수", async () => {

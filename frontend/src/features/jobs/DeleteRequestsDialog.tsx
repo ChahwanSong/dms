@@ -106,11 +106,18 @@ export const isSucceededScan = (r: Pick<RequestRow, "operation" | "state" | "has
 
 /** 「sync 2 · scan 1」 -- 0개 연산은 빼고, 알려진 연산 순서 뒤에 모르는 연산을 붙인다. count 는 가중치(배치 묶음 =
  *  그 배치의 자식 수), 없으면 1(단건 행). */
-export function opCountLine(rows: { operation: string; count?: number }[]): string {
+// atLeast = 그 행의 수가 하한(상한을 넘은 배치 — 미리보기가 다시 세지 않는다). 한 연산에 하한 행이 하나라도 있으면 「… 이상」
+// (2026-11-19 테스트베드 실증: 첫 줄·버튼은 「6개 이상」인데 연산별 줄만 「scan 6」이었다).
+export function opCountLine(rows: { operation: string; count?: number; atLeast?: boolean }[]): string {
   const c = new Map<string, number>();
-  for (const r of rows) c.set(r.operation, (c.get(r.operation) ?? 0) + (r.count ?? 1));
+  const lower = new Set<string>();
+  for (const r of rows) {
+    c.set(r.operation, (c.get(r.operation) ?? 0) + (r.count ?? 1));
+    if (r.atLeast) lower.add(r.operation);
+  }
   const keys = [...OP_ORDER.filter((o) => c.has(o)), ...[...c.keys()].filter((o) => !OP_ORDER.includes(o))];
-  return keys.filter((o) => c.get(o) !== 0).map((o) => `${o} ${n0(c.get(o) ?? 0)}`).join(" · ");
+  return keys.filter((o) => c.get(o) !== 0)
+    .map((o) => `${o} ${n0(c.get(o) ?? 0)}${lower.has(o) ? " 이상" : ""}`).join(" · ");
 }
 
 /** 첫 줄(무엇을 몇 개). 단건만이면 기존 문구 그대로(e2e 06). atLeast = 배치 자식 수가 하한인 배치가 있다(「…개 이상」). */
@@ -239,7 +246,7 @@ export function DeleteRequestsDialog({ rows, batches = [], disabled, del, onDele
       <div className="space-y-3 text-sm text-ink/70 break-keep">
         <p className="font-medium text-ink">{deleteHeadline(n, nb, shownKids, kidsAtLeast)}</p>
         {/* 연산별 수는 배치 자식까지 함께 센다(배치 묶음 = 그 배치의 연산 × 서버가 센 자식 수). */}
-        <p>{`연산별: ${opCountLine([...snap, ...sendable.map((e) => ({ operation: e.b.operation, count: e.shown }))])}`}</p>
+        <p>{`연산별: ${opCountLine([...snap, ...sendable.map((e) => ({ operation: e.b.operation, count: e.shown, atLeast: e.atLeast }))])}`}</p>
         {/* 상한 상자(2026-11-19 -- 배치가 있거나 단건 2개 이상일 때): 서버 값으로만. */}
         {(snapBatches.length > 0 || n >= 2) && (
           <p className="rounded-lg border border-line bg-surface px-3 py-2 text-xs" data-testid="delete-dialog-limits">
