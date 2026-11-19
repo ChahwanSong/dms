@@ -297,6 +297,8 @@ test.describe("E7 작업 삭제", () => {
     const kid = (n: number, bid: string, over: Record<string, unknown>) => single(n, {
       batch_id: bid, batch_exists: true, batch_name: LONG, batch_status: "Completed", batch_request_count: 10,
       batch_request_count_capped: false, batch_live_request_count: 0, batch_succeeded_scan_count: 0, batch_item_count: 10,
+      // 관리자 목록은 배치 자식 행마다 서버 상한을 싣는다(2026-11-16 -- 포탈은 상수 없이 이 값으로 판정, 없으면 「정보 없음」).
+      batch_request_count_limit: 5000, batch_item_count_limit: 10000,
       ...over,
     });
     const rows = () => [
@@ -540,5 +542,110 @@ test.describe("E7 작업 삭제", () => {
     await expect(row).toHaveCount(0);
     expect((await page.request.get(`/api/user/requests/${children[0]}`)).status()).toBe(404);
     await purgeIdle(page);
+  });
+});
+
+// E7 상한 표시·「삭제 불가」(2026-11-19 사용자 요청 「포탈에서 상한 값도 삭제 시 보여지고 값을 넘어서는 요청에 대해서 삭제 불가 메시지
+// 띄우게 해줘」 -- 같은 날 상한 기본 50000·청크 삭제). 실 브라우저에서만 보이는 것: 늘 있는 상한 줄이 체크 순간 role=alert 로 바뀌어도
+// 툴바 높이가 그대로(414·768·1280), 확인 창의 미리보기 판정·문제 상자·제출 잠금, 백그라운드 시작 결과 줄, 서버 거절의 같은 문구.
+// 목록·정리 현황·미리보기·삭제 응답은 흉내 낸다(page.route -- 5만 자식 배치를 하네스에 만들지 않는다). 인증·나머지는 진짜.
+test.describe("E7 상한 표시", () => {
+  test("상한 줄(서버 limits) → 상한 초과 배치 체크 = alert(높이 불변) → 창의 문제 상자·제출 잠금 → 백그라운드 결과 · 서버 거절 문구", async ({ page }) => {
+    test.setTimeout(90_000);
+    await apiLogin(page);
+    const hex = (n: number) => `${n.toString(16).padStart(4, "0")}${"cd".repeat(14)}`;
+    const BIG = "b".repeat(32), OK = "c".repeat(32);
+    const LIMITS = { requests_per_call: 200, batches_per_call: 10, batch_request_count: 50000, batch_item_count: 10000,
+                     call_request_count: 100000, sync_request_count: 500, list_count_cap: 5000 };
+    const base = (n: number, over: Record<string, unknown> = {}) => ({
+      request_id: hex(n), operation: "scan", state: "Succeeded", priority: "mid", requester_id: "e7", actor: "e7",
+      resource_key: `k${n}`, commit_order: n, created_at: "2026-10-09T03:04:05Z", updated_at: "2026-10-09T03:05:06Z",
+      payload: { storage: STORAGE_NAME, target: `/e7-limit/p${n}` }, batch_id: null, ...over,
+    });
+    const kid = (n: number, bid: string, name: string, count: number) => base(n, {
+      batch_id: bid, batch_exists: true, batch_name: name, batch_status: "Completed", batch_request_count: count,
+      batch_request_count_capped: false, batch_live_request_count: 0, batch_succeeded_scan_count: 0, batch_item_count: 3,
+      batch_request_count_limit: 50000, batch_item_count_limit: 10000, batch_schedule: null,
+    });
+    await page.route(/\/api\/user\/requests\?/, (route) => route.fulfill({ json: [
+      base(100), kid(90, BIG, "큰 배치", 60000), kid(80, OK, "보통 배치", 3), base(70)] }));
+    await page.route("**/api/admin/request-purges", (route) => route.fulfill({ json: {
+      pending: 0, stalled: 0, oldest_requested_at: null, items: [], batch_deletions: [], limits: LIMITS } }));
+    const toolbar = page.getByRole("toolbar", { name: "작업 일괄 처리" });
+    const limitsLine = page.getByTestId("delete-limits");
+    const rowOf = (n: number) => page.getByRole("row").filter({ hasText: hex(n) });
+
+    for (const width of [414, 768, 1280]) {
+      await page.setViewportSize({ width, height: 900 });
+      await page.goto("/jobs");
+      await expect(limitsLine).toContainText("한 번에 작업 200개");
+      await expect(limitsLine).toContainText("배치당 작업 50,000개");
+      await expect(rowOf(90)).toContainText("삭제 불가·상한");
+      const idle = (await toolbar.boundingBox())!.height;
+      // 상한 초과 배치도 고를 수 있다(조용히 잠그지 않는다) -- 같은 자리가 alert 로 바뀌고 높이는 그대로.
+      await rowOf(90).getByRole("checkbox").check();
+      await expect(toolbar.getByRole("alert")).toHaveText(
+        "삭제 불가 — 작업 60,000개가 한 번에 지울 수 있는 상한 50,000개를 넘습니다");
+      await expect(toolbar.getByRole("status")).toContainText("· 삭제 불가");
+      expect((await toolbar.boundingBox())!.height, `w=${width} 체크 뒤 툴바 높이`).toBe(idle);
+      await rowOf(90).getByRole("checkbox").uncheck();
+      await expect(toolbar.getByRole("alert")).toHaveCount(0);
+      expect((await toolbar.boundingBox())!.height, `w=${width} 해제 뒤 툴바 높이`).toBe(idle);
+    }
+
+    // 창: 미리보기가 막힘을 말하고 제출을 잠근다.
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.route("**/api/admin/requests:delete-preview", async (route) => {
+      const ids = ((route.request().postDataJSON() as { batch_ids: string[] }).batch_ids);
+      await route.fulfill({ json: { limits: LIMITS, batches: ids.map((id) => id === BIG
+        ? { batch_id: BIG, exists: true, name: "큰 배치", status: "Completed", operation: "scan", request_count: 50001,
+            request_count_capped: true, max_commit_order: null, item_count: 3, item_count_capped: false, verdict: "blocked",
+            reason: "batch_delete_too_large", request_id: null, limit: 50000, count: 60000, count_at_least: null,
+            deleting: null, schedule: null }
+        : { batch_id: OK, exists: true, name: "보통 배치", status: "Completed", operation: "scan", request_count: 3,
+            request_count_capped: false, max_commit_order: 80, item_count: 3, item_count_capped: false, verdict: "async",
+            reason: null, request_id: null, limit: null, count: null, count_at_least: null, deleting: null,
+            schedule: null }) } });
+    });
+    await rowOf(90).getByRole("checkbox").check();
+    await toolbar.getByRole("button", { name: "선택 삭제" }).click();
+    const dlg = page.getByRole("dialog");
+    await expect(dlg.getByRole("alert")).toContainText(
+      "배치 큰 배치: 삭제 불가 — 작업 60,000개가 한 번에 지울 수 있는 상한 50,000개를 넘습니다");
+    await dlg.getByLabel("되돌릴 수 없음을 확인했습니다").check();
+    await expect(dlg.getByRole("button", { name: /개 영구 삭제$/ })).toBeDisabled();
+    await dlg.getByRole("button", { name: "닫기", exact: true }).click();
+    await rowOf(90).getByRole("checkbox").uncheck();
+
+    // 백그라운드 시작(미리보기 async → 응답 deleting_batches) → 결과 줄.
+    let sent: unknown = null;
+    await page.route("**/api/admin/requests:delete", async (route) => {
+      sent = route.request().postDataJSON();
+      await route.fulfill({ json: { deleted: [], skipped: [], purge_pending: 0, deleted_batches: [],
+                                    deleting_batches: [{ batch_id: OK, request_count: 3, already: false }],
+                                    skipped_batches: [] } });
+    });
+    await rowOf(80).getByRole("checkbox").check();
+    await toolbar.getByRole("button", { name: "선택 삭제" }).click();
+    await expect(dlg.getByText("백그라운드 삭제", { exact: true })).toBeVisible();
+    await dlg.getByLabel("되돌릴 수 없음을 확인했습니다").check();
+    await dlg.getByRole("button", { name: "3개 영구 삭제" }).click();
+    await expect(toolbar.getByRole("status")).toHaveText("배치 1개(작업 3개) 백그라운드 삭제 시작");
+    expect(sent).toEqual({ request_ids: [], batches: [{ batch_id: OK, expected_request_count: 3, expected_max_commit_order: 80 }] });
+
+    // 경합으로 서버가 상한 사유로 거절해도 같은 문구(서버 숫자).
+    await page.unroute("**/api/admin/requests:delete");
+    await page.route("**/api/admin/requests:delete", (route) => route.fulfill({ json: {
+      deleted: [], skipped: [], purge_pending: 0, deleted_batches: [], deleting_batches: [],
+      skipped_batches: [{ batch_id: OK, reason: "batch_delete_too_large", request_id: null, limit: 50000, count: null,
+                          count_at_least: 50001 }] } }));
+    await rowOf(80).getByRole("checkbox").check();
+    await toolbar.getByRole("button", { name: "선택 삭제" }).click();
+    await expect(dlg.getByText("백그라운드 삭제", { exact: true })).toBeVisible();
+    await dlg.getByLabel("되돌릴 수 없음을 확인했습니다").check();
+    await dlg.getByRole("button", { name: "3개 영구 삭제" }).click();
+    await expect(page.getByText(
+      "배치 보통 배치: 삭제 불가 — 작업이 한 번에 지울 수 있는 상한 50,000개를 넘습니다(50,001개 이상)")).toBeVisible();
+    await page.unrouteAll({ behavior: "ignoreErrors" });
   });
 });

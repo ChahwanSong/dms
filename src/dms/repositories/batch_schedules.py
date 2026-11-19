@@ -14,9 +14,10 @@ updated_at = 읽은 값` -- 컨트롤러가 둘(롤링 재시작·긴 틱으로 
 
 잠금 순서는 항목 → 배치 → 회차 경계 → 스케줄 → 회차 이력(PG FOR UPDATE·행 잠금): 발사·생성·수정·켜기가
 BatchesRepository._lock_items_then_batch 로 항목·배치를 먼저 쥐고, 발사는 _rescan_locked 의 회차 경계(batch_rounds INSERT·상한
-정리) 다음에 스케줄을, 회차 이력을 마지막에 쥔다 -- 배치 삭제 두 경로(BatchesRepository.delete, RequestPurgesRepository.
-delete_batch)도 batch_items → batches → batch_rounds → batch_schedules → batch_schedule_runs 순서라(batches.BATCH_DELETE_TABLES)
-교착이 없다. 끄기·삭제·기록은 스케줄 행만 쥔다(그다음 회차 이력). 트랜잭션은 중첩되지 않으므로(db.transaction) 배치 저장소의
+정리) 다음에 스케줄을, 회차 이력을 마지막에 쥔다 -- 배치 삭제 경로(BatchesRepository.delete, RequestPurgesRepository.
+delete_batch, 2026-11-19 백그라운드 삭제의 묘비 _begin_batch_delete·마무리 finish_batch_delete -- 묘비 batch_deletions 는 batches
+다음)도 batch_items → batches → batch_rounds → batch_schedules → batch_schedule_runs 순서라(batches.BATCH_DELETE_TABLES) 교착이
+없다. 묘비가 선 배치(상태 Deleting)엔 생성·수정·켜기가 batch_deleting 으로 거부된다(잠근 배치 행으로 -- 라우트 409). 끄기·삭제·기록은 스케줄 행만 쥔다(그다음 회차 이력). 트랜잭션은 중첩되지 않으므로(db.transaction) 배치 저장소의
 「호출자 트랜잭션 안에서만」 몸통(_lock_items_then_batch·_rescan_locked)을 부른다.
 
 **회차 보존 정리**(2026-11-16 사용자 결정 「배치 회차가 계속 누적되는걸 원하지 않아 최근 10회차만」 -- batch_round_prune.py):
@@ -32,7 +33,7 @@ from ..db import Database, dump_json, utc_now_iso
 from ..batch_scheduler import SCHEDULER_ACTOR, next_run_after
 from ..domain import DomainValidationError, confirm_gated
 # 「대상 스토리지」 판정은 배치 목록 열(B1)과 한 함수다(첫 항목 payload -- 깨진 JSON·dict 아님·문자열 아님은 None).
-from .batches import BATCH_ROUND_HISTORY_CAP, BatchesRepository, _storage_fields, schedule_delete_audit_before
+from .batches import BATCH_ROUND_HISTORY_CAP, DELETING, BatchesRepository, _storage_fields, schedule_delete_audit_before
 from .requests import batch_match
 
 # 스케줄당 남기는 회차 이력 수. 확인 대기 중 매시간 건너뛰는 스케줄도 이력이 끝없이 자라지 않는다.
@@ -290,6 +291,9 @@ class BatchSchedulesRepository:
             batch, items = self._batches._lock_items_then_batch(batch_id)
             if batch is None:
                 raise DomainValidationError("batch_not_found", batch_id)
+            if batch["status"] == DELETING:
+                # 묘비가 선 배치(2026-11-19 -- 백그라운드 배치 단위 삭제 중)엔 스케줄을 무장하지 않는다(라우트 409 batch_deleting).
+                raise DomainValidationError("batch_deleting", batch_id)
             # 배치 행 잠금이 직렬화 지점이다 -- 같은 배치의 두 생성은 여기서 줄을 서고 뒤쪽이 앞쪽의 행을 본다(UNIQUE 가 백스톱).
             if self._db.query_one("SELECT 1 AS x FROM batch_schedules WHERE batch_id = :b", {"b": batch_id}):
                 raise DomainValidationError("batch_schedule_exists", batch_id)
@@ -312,6 +316,8 @@ class BatchSchedulesRepository:
             row, batch, items = self._lock_for_arm(schedule_id)
             if batch is None:
                 raise DomainValidationError("batch_not_found", row["batch_id"])
+            if batch["status"] == DELETING:
+                raise DomainValidationError("batch_deleting", row["batch_id"])
             ack, binding = arm(batch, items)
             self._db.execute(
                 """UPDATE batch_schedules SET kind = :k, spec = :spec, next_run_at = :next, armed_by = :actor,
@@ -335,6 +341,8 @@ class BatchSchedulesRepository:
                 return False
             if batch is None:
                 raise DomainValidationError("batch_not_found", row["batch_id"])
+            if batch["status"] == DELETING:
+                raise DomainValidationError("batch_deleting", row["batch_id"])
             next_run_at = next_run_after(row["kind"], row["spec"], now)
             ack, binding = arm(batch, items)
             self._db.execute(
@@ -365,7 +373,7 @@ class BatchSchedulesRepository:
 
     def delete(self, schedule_id, *, actor) -> None:
         """스케줄 + 실행 기록(회차 이력) 삭제(감사 행은 남는다). 스케줄 → 회차 이력 순(모듈 docstring 의 잠금 순서). 보존 회차
-        경계(batch_rounds)·남은 자식은 지우지 않는다 -- 배치에 속한다(배치 삭제 두 경로만 지운다); 스케줄이 없으니 정리만 멈춘다
+        경계(batch_rounds)·남은 자식은 지우지 않는다 -- 배치에 속한다(배치 삭제 경로만 지운다); 스케줄이 없으니 정리만 멈춘다
         (batch_round_prune 은 스케줄 행이 있는 배치만 본다). 감사 before 는 배치 삭제 경로와 같은 한 벌(batches.
         schedule_delete_audit_before, deleted_with_batch False -- 2026-11-16 이식) -- 그래서 행을 수화(_hydrate)하지 않고 원행으로
         잠근다(_lock_schedule 과 같은 문장)."""

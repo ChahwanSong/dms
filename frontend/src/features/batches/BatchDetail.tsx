@@ -19,14 +19,16 @@ import { CancelButton } from "../../components/ui/CancelButton";
 import { field } from "../jobs/formFields";
 import { BatchExecutionSettingsDialog } from "./BatchExecutionSettingsDialog";
 import { batchJobsPath, useRequestJobs } from "../jobs/useJobs";
-import { reasonText, ApiError } from "../../lib/api";
+import { reasonText, ApiError, apiSend } from "../../lib/api";
+import { blockText, parseLimits } from "../../lib/deleteLimits";
+import { n0 } from "../../lib/format";
 import { absSummary, pathSummary, relativePathProblem } from "../../lib/storagePaths";
 import { rmTargetOverlaps, type RmTargetEntry } from "../../lib/rmTargets";
 import { toolSummary } from "../../lib/jobTool";
 import { useStorageRoots } from "../storages/useUserStorages";
 import { batchPillVariant, batchStatusLabel } from "../../lib/jobState";
 import { chownHasName, syncOwnership } from "../../lib/syncOwnership";
-import { kstStampEpoch, kstStampOrDash, untilText } from "../../lib/datetime";
+import { kstStampBare, kstStampEpoch, kstStampOrDash, untilText } from "../../lib/datetime";
 import { useNow } from "../../lib/useNow";
 import {
   keepRoundsKnown, nextRunStamp, schedulableOp, scheduleDeleteNotice, scheduleEnabled, scheduleSummary,
@@ -35,7 +37,8 @@ import { kindsText, readSummary, RM_LINK_ONLY, sumKinds, summaryTool, type Actio
 import { SYNC_OPTION_HELP } from "../jobs/optionRules";
 import { humanBytes } from "../usage/usageStats";
 import { SizeHistogram, TempHistogram, sizeHistogramTotal, tempAxes } from "../usage/ScanHistograms";
-import type { Batch, BatchDirectTools, BatchItem, BatchPayloadItem, BatchScheduleSummary } from "../../lib/types";
+import type { Batch, BatchDeletionRow, BatchDirectTools, BatchItem, BatchPayloadItem, BatchScheduleSummary,
+              DeletePreview } from "../../lib/types";
 
 // 항목 행의 좌측 고정폭 합계 = 체크박스(w-5=1.25rem) + gap-3(0.75rem) +
 // 순번(w-8=2rem) + gap-3(0.75rem). 펼침 상세·행 오류 문구를 이만큼 들여써야 행
@@ -1040,9 +1043,20 @@ function DeleteBatchButton({ batchId, schedule }: { batchId: string; schedule: B
   const [open, setOpen] = useState(false);
   const del = useDeleteBatch(batchId);
   const navigate = useNavigate();
+  // 작업까지 지우는 배치 단위 삭제의 상한 정보 줄(2026-11-19 사용자 요청 「상한 값도 삭제 시 보여지고」): 이 창(기록만 삭제)은 상한이
+  // 걸리지 않는 경로라 막지 않는다 -- 창을 열 때 미리보기(배치 1개)로 이 배치의 작업·항목 수와 상한을 말한다(실패하면 줄을 숨긴다).
+  const [info, setInfo] = useState<DeletePreview | null>(null);
+  useEffect(() => {
+    if (!open) { setInfo(null); return; }
+    let live = true;
+    apiSend<DeletePreview>("POST", "/api/admin/requests:delete-preview", { batch_ids: [batchId] })
+      .then((r) => { if (live) setInfo(r); }).catch(() => { if (live) setInfo(null); });
+    return () => { live = false; };
+  }, [open, batchId]);
   // 닫힐 때마다 에러를 비운다(StoragesList DeleteButton 선례) — "취소"는
   // setOpen(false)를 직접 불러 Radix onOpenChange 가 발화하지 않는다.
   useEffect(() => { if (!open) del.reset(); }, [open]);
+  const infoLine = recordDeleteInfo(info);
   return (
     <Dialog open={open} onOpenChange={setOpen} title="배치 삭제"
             trigger={<Button variant="ghost">배치 삭제</Button>}>
@@ -1053,6 +1067,9 @@ function DeleteBatchButton({ batchId, schedule }: { batchId: string; schedule: B
           배치 단위로 삭제하세요(배치 기록도 함께 지워집니다).
         </p>
         <p>기록을 먼저 지우면 남은 작업은 전체 작업에서 배치 이름 없이 「기록 없음 {batchId.slice(0, 12)}」로 표시됩니다.</p>
+        {infoLine !== null && (
+          <p role="note" aria-label="배치 단위 삭제 상한" className={infoLine.over ? "text-attn" : ""}>{infoLine.text}</p>
+        )}
         {schedule != null && <p>{scheduleDeleteNotice(schedule)}</p>}
       </div>
       {del.isError && <p className="text-bad text-sm mb-2">{(del.error as ApiError).message}</p>}
@@ -1063,6 +1080,43 @@ function DeleteBatchButton({ batchId, schedule }: { batchId: string; schedule: B
                   { onSuccess: () => navigate("/admin/batches") })}>삭제 확인</Button>
       </div>
     </Dialog>
+  );
+}
+
+/** 기록 삭제 창의 상한 정보 줄(미리보기 → 문구). 넘으면 「…는 삭제 불가 — …(기록 삭제는 상한과 관계없이 됩니다)」(text-attn, 제출은
+ *  막지 않는다 -- 이 창은 상한이 걸리지 않는 경로다). 모르면 null(줄 없음). */
+export function recordDeleteInfo(info: DeletePreview | null): { text: string; over: boolean } | null {
+  const lim = parseLimits(info?.limits);
+  const row = info?.batches[0];
+  if (lim === null || row === undefined) return null;
+  const items = row.item_count;
+  if (row.reason === "batch_delete_too_large" || row.reason === "batch_delete_too_many_items") {
+    const msg = blockText(row.reason, { limit: row.limit, count: row.count, count_at_least: row.count_at_least });
+    return { text: `작업까지 지우는 배치 단위 삭제는 ${msg}(기록 삭제는 상한과 관계없이 됩니다)`, over: true };
+  }
+  return { text: `작업까지 지우는 배치 단위 삭제: 이 배치 작업 ${n0(row.request_count)}개`
+    + (items !== null ? `·항목 ${n0(items)}개` : "")
+    + ` — 상한 작업 ${n0(lim.batch_request_count)}개·항목 ${n0(lim.batch_item_count)}개`, over: false };
+}
+
+/** 백그라운드 배치 단위 삭제 진행 카드(2026-11-19, role=status). */
+function DeletingCard({ d }: { d: BatchDeletionRow | null }) {
+  return (
+    <div className="mt-2 rounded-lg bg-infobg px-3 py-2 text-sm" role="status" aria-label="배치 삭제 진행">
+      <p>
+        {d === null ? "배치 단위 삭제를 백그라운드에서 진행하고 있습니다 — 끝나면 배치가 사라집니다."
+          : `작업 ${n0(d.deleted_request_count)} / ${n0(d.expected_request_count)}개 삭제됨 · ${kstStampBare(d.requested_at)}에 ${d.requested_by} 시작`}
+      </p>
+      {d !== null && d.last_error !== null && (
+        <p className="text-attn">
+          {`지연: ${reasonText(d.last_error)}`}
+          {d.blocked_request_id !== null && <>{" (작업 "}<Link className="text-accent underline" to={`/jobs/${d.blocked_request_id}`}>
+            {d.blocked_request_id.slice(0, 12)}</Link>{")"}</>}
+        </p>
+      )}
+      <p className="text-xs text-ink/70">되돌릴 수 없습니다 — 그동안 실행·항목·스케줄을 바꿀 수 없습니다. 유지보수·드레인 중에는 삭제가 잠시
+        멈췄다가 풀리면 이어집니다.</p>
+    </div>
   );
 }
 
@@ -1261,7 +1315,8 @@ function ScheduleLink({ b }: { b: BatchHeader }) {
   const now = useNow(30_000, on && s?.next_run_at != null);
   const to = `/admin/batch-schedules?batch=${encodeURIComponent(b.batch_id)}`;
   if (s == null) {
-    return s === null && schedulableOp(b.operation)
+    // 백그라운드 배치 단위 삭제 중(2026-11-19 -- 묘비 Deleting)엔 스케줄을 걸지 않는다(서버도 409 batch_deleting).
+    return s === null && schedulableOp(b.operation) && b.status !== "Deleting"
       ? <Link className="text-accent text-sm" to={to}>스케줄 추가</Link> : null;
   }
   const next = nextRunStamp(s.enabled, s.next_run_at);
@@ -1316,7 +1371,10 @@ export function BatchDetail() {
   const terminal = b?.status === "Completed" || b?.status === "Cancelled";
   const cancellable = b?.status === "Running" || b?.status === "Previewing" || b?.status === "PreviewReady";
   const repeating = b?.schedule != null && scheduleEnabled(b.schedule.enabled);
-  const canEditItem = useCallback((it: BatchItem) => terminal || it.status === "Queued", [terminal]);
+  // 백그라운드 배치 단위 삭제 중(2026-11-19 -- 묘비 Deleting): 바꾸는 버튼을 모두 숨긴다(서버도 409 batch_deleting).
+  const deleting = b?.status === "Deleting";
+  const canEditItem = useCallback((it: BatchItem) => !deleting && (terminal || it.status === "Queued"),
+                                  [terminal, deleting]);
   const isSync = b?.operation === "sync";
   // 미리보기 단계로 돌아온 sync 배치에서도 이미 실행 중인 자식은 끝까지 돈다(서버 _reopen_after_new_queued) -- 배너가
   // "아직 아무것도 안 돈다" 로 읽히지 않게 센다. 셈은 서버 summary(executing_count -- 확인 단계에서만 센다, 그 밖 null)가
@@ -1521,7 +1579,7 @@ export function BatchDetail() {
                 이름"/"메모")이 말한다(사용자 조정 2026-08-15). "메모 편집"은 폼이
                 이름까지 고치는데 메모만 말해 어색했고 "이름·메모 편집"은 길다.
                 PATCH {name, note} 계약·폼 구조는 무변경. */}
-            {b && !editing && <Button variant="ghost" onClick={startEdit}>편집</Button>}
+            {b && !editing && !deleting && <Button variant="ghost" onClick={startEdit}>편집</Button>}
             {b?.status === "PreviewReady" && <ConfirmBatchDialog b={b} confirm={confirm} absOf={absOf} />}
             {b?.status === "Completed" && (b?.failed_count ?? 0) > 0 && <Button disabled={rerun.isPending} onClick={() => rerun.mutate()}>실패분 재실행</Button>}
             {/* 전체 재실행(:rescan): 종단 배치 한정(서버 가드 미러) — 성공 item 포함
@@ -1532,7 +1590,7 @@ export function BatchDetail() {
             {b && terminal && <BatchExecutionSettingsDialog b={b} />}
             {(b?.status === "Completed" || b?.status === "Cancelled") && <DeleteBatchButton batchId={batchId} schedule={b.schedule} />}
             {/* 자동 실행 끄기(2026-10-11): 진행 중 브레이크 — 미리보기를 보고 직접 확인하겠다. 종단 배치는 「실행 설정 변경」. */}
-            {autoConfirmable(b?.operation) && b?.auto_confirm === true && !terminal && (
+            {autoConfirmable(b?.operation) && b?.auto_confirm === true && !terminal && !deleting && (
               <Button variant="ghost" disabled={autoOff.isPending} onClick={() => autoOff.mutate()}>자동 실행 끄기</Button>
             )}
             {cancellable && <CancelButton disabled={cancel.isPending} onClick={() => cancel.mutate()}
@@ -1614,6 +1672,8 @@ export function BatchDetail() {
         )}
         {/* 취소 처리 중(2026-10-16): 라우트가 자식마다 k8s 를 끝내는 동안, 또는 종료가 실패한 자식을 컨트롤러가 다시
             시도하는 동안. 버튼은 없다(이미 취소했다) -- 무엇을 기다리는지만 말한다. */}
+        {/* 백그라운드 배치 단위 삭제(2026-11-19 -- 묘비): 진행·시작한 사람·지연 사유. 끝나면 다음 폴링에 404 → 「배치가 없습니다」. */}
+        {deleting && <DeletingCard d={b?.deleting ?? null} />}
         {b?.status === "Cancelling" && (
           <p className="mt-2 rounded-lg bg-infobg px-3 py-2 text-sm" role="status">
             취소하는 중입니다 — 새 항목은 시작되지 않고, 실행 중이던 항목의 작업을 종료하고 있습니다. 종료하지 못한 작업은
@@ -1694,7 +1754,7 @@ export function BatchDetail() {
             {b && hasItems && (
               <CurrentItemsCsvDialog batchId={batchId} operation={csvOp(b.operation)} />
             )}
-            {b && firstPayload && (
+            {b && firstPayload && !deleting && (
               <AddItemDialog batchId={batchId} isSync={isSync} status={b.status}
                              auto={b.auto_confirm === true && !b.auto_confirm_hold}
                              confirmFlow={needsBatchConfirm(b.operation)}

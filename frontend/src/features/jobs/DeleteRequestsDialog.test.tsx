@@ -270,6 +270,14 @@ test("순수 함수: 첫 줄 세 변형 · 연산별 줄은 배치 자식 수(�
   expect(deleteHeadline(1, 1, 4)).toBe("선택한 작업 1개와 배치 1개의 작업 4개를 영구 삭제합니다. 되돌릴 수 없습니다.");
   expect(opCountLine([req(1), { operation: "scan", count: 4 }, { operation: "sync", count: 2 }]))
     .toBe("sync 3 · scan 4");
+  // 천 단위 구분(2026-11-19 검증 지적 -- 상한 5만에서 같은 창의 숫자 표기가 섞였다) · 하한이면 「이상을」(조사는 끝 글자에 맞춘다).
+  expect(deleteHeadline(0, 1, 50000)).toBe("선택한 배치 1개의 작업 50,000개를 영구 삭제합니다. 되돌릴 수 없습니다.");
+  expect(deleteHeadline(2, 3, 120004, true))
+    .toBe("선택한 작업 2개와 배치 3개의 작업 120,004개 이상을 영구 삭제합니다. 되돌릴 수 없습니다.");
+  expect(opCountLine([{ operation: "scan", count: 50000 }])).toBe("scan 50,000");
+  // 2026-11-19(dms-k8s 06427f15): 상한을 넘은 배치(하한 수)는 연산별 줄에도 「이상」(첫 줄·버튼과 같게).
+  expect(opCountLine([{ operation: "scan", count: 6, atLeast: true }, { operation: "sync", count: 2 }]))
+    .toBe("sync 2 · scan 6 이상");
 });
 
 test("배치만: 첫 줄·배치 목록(이름·연산·상태·수)·안내 두 줄·사용량 경고(서버의 성공 scan 수) · 단건 목록 없음 · 주 버튼은 자식 수", async () => {
@@ -370,4 +378,140 @@ test("POST 본문의 expected_request_count = 창을 연 순간의 수 — 열�
   await userEvent.click(within(dlg).getByRole("button", { name: "5개 영구 삭제" }));
   await waitFor(() => expect(body).toEqual({
     request_ids: [hex(1)], batches: [{ batch_id: b1.batch_id, expected_request_count: 4 }] }));
+});
+
+// ---- 미리보기·상한·「삭제 불가」(2026-11-19 사용자 요청 「상한 값도 삭제 시 보여지고 넘으면 삭제 불가 메시지」) ----
+
+const LIMITS = { requests_per_call: 200, batches_per_call: 10, batch_request_count: 50000, batch_item_count: 10000,
+                 call_request_count: 100000, sync_request_count: 500, list_count_cap: 5000 };
+function pv(b: BatchSummary, over: Record<string, unknown> = {}) {
+  return { batch_id: b.batch_id, exists: true, name: b.label, status: "Completed", operation: "scan",
+           request_count: b.request_count ?? 0, request_count_capped: false, max_commit_order: 900, item_count: 3,
+           item_count_capped: false, verdict: "sync", reason: null, request_id: null, limit: null, count: null,
+           count_at_least: null, deleting: null, schedule: null, live_request_count: 0, succeeded_scan_count: 0, ...over };
+}
+
+test("미리보기: 로딩 중엔 제출 잠금 → 판정 칩·정확한 수·상한 상자 → 보내는 expected = 미리보기 수 + expected_max_commit_order", async () => {
+  const big = batch(1, { request_count: null, request_count_at_least: 5001, scans: null });
+  const small = batch(2, { label: "작은 배치" });
+  let body: unknown = null;
+  server.use(
+    http.post("/api/admin/requests:delete-preview", async () => {
+      await delay(50);
+      return HttpResponse.json({ limits: LIMITS, batches: [
+        pv(big, { request_count: 48210, max_commit_order: 777, verdict: "async", item_count: 4821 }), pv(small)] });
+    }),
+    http.post("/api/admin/requests:delete", async ({ request }) => {
+      body = await request.json();
+      return HttpResponse.json({ deleted: [], skipped: [], purge_pending: 0, deleted_batches: [],
+                                 deleting_batches: [{ batch_id: big.batch_id, request_count: 48210, already: false }],
+                                 skipped_batches: [] });
+    }));
+  renderDialog([], undefined, undefined, [big, small]);
+  const dlg = await open();
+  await userEvent.click(within(dlg).getByLabelText(ACK));
+  expect(within(dlg).getByRole("status")).toHaveTextContent("상한과 작업 수를 확인하는 중…");
+  await waitFor(() => expect(within(dlg).getAllByText(/백그라운드 삭제/).length).toBeGreaterThan(0));
+  const items = within(within(dlg).getByRole("list", { name: "삭제할 배치" })).getAllByRole("listitem");
+  expect(items[0]).toHaveTextContent("작업 48,210개 · 항목 4,821개");
+  expect(items[0]).toHaveTextContent("백그라운드 삭제");
+  expect(items[1]).toHaveTextContent("바로 삭제");
+  expect(within(dlg).getByTestId("delete-dialog-limits")).toHaveTextContent(
+    "한 번에 지울 수 있는 상한: 한 번에 작업 200개·배치 10개 · 배치당 작업 50,000개·항목 10,000개 · 합계 작업 100,000개 · 작업 500개를 넘는 배치는 백그라운드에서 나눠 지웁니다");
+  expect(within(dlg).queryByRole("alert")).toBeNull();
+  expect(within(dlg).getByText("선택한 배치 2개의 작업 48,214개를 영구 삭제합니다. 되돌릴 수 없습니다.")).toBeInTheDocument();
+  expect(within(dlg).getByText("연산별: scan 48,214")).toBeInTheDocument();
+  await userEvent.click(within(dlg).getByRole("button", { name: "48,214개 영구 삭제" }));
+  await waitFor(() => expect(body).toEqual({ request_ids: [], batches: [
+    { batch_id: big.batch_id, expected_request_count: 48210, expected_max_commit_order: 777 },
+    { batch_id: small.batch_id, expected_request_count: 4, expected_max_commit_order: 900 }] }));
+});
+
+test("미리보기 판정 blocked → role=alert 문제 상자(서버 숫자) + 제출 잠금 · 이미 삭제 중·이미 지워짐은 수·전송에서 뺀다", async () => {
+  const over = batch(1, { label: "너무 큰" }), going = batch(2, { label: "지우는 중" }), gone = batch(3, { label: "없는" });
+  server.use(http.post("/api/admin/requests:delete-preview", () => HttpResponse.json({ limits: LIMITS, batches: [
+    pv(over, { verdict: "blocked", reason: "batch_delete_too_large", limit: 50000, count: 60000, request_count: 50001,
+               request_count_capped: true }),
+    pv(going, { verdict: "deleting", deleting: { batch_id: going.batch_id, expected_request_count: 200,
+                                                  deleted_request_count: 74 } }),
+    pv(gone, { verdict: "gone", exists: false })] })));
+  renderDialog([], undefined, undefined, [over, going, gone]);
+  const dlg = await open();
+  const alert = await within(dlg).findByRole("alert");
+  expect(alert).toHaveTextContent("삭제 불가 — 아래를 선택에서 빼고 다시 시도하세요");
+  expect(alert).toHaveTextContent("배치 너무 큰: 삭제 불가 — 작업 60,000개가 한 번에 지울 수 있는 상한 50,000개를 넘습니다");
+  const items = within(within(dlg).getByRole("list", { name: "삭제할 배치" })).getAllByRole("listitem");
+  expect(items[0]).toHaveTextContent("삭제 불가");
+  expect(items[1]).toHaveTextContent("이미 삭제 중 37%");
+  expect(items[2]).toHaveTextContent("이미 지워짐");
+  expect(within(dlg).getByText("삭제할 배치 1개")).toBeInTheDocument();
+  await userEvent.click(within(dlg).getByLabelText(ACK));
+  expect(within(dlg).getByRole("button", { name: /개 영구 삭제$/ })).toBeDisabled();
+});
+
+test("상한을 넘은 배치 줄은 미리보기가 센 수를 보인다(목록의 낡은 하한이 아니라) -- 첫 줄·버튼도 같은 수, 정확한 수를 모르면 「이상」", async () => {
+  // 2026-11-19 검증 지적: 같은 줄에 「작업 5,001개 이상」(목록)과 「삭제 불가 — 작업 73,210개가 …」(미리보기)가 함께 보였다.
+  const over = batch(1, { label: "너무 큰", request_count: null, request_count_at_least: 5001, scans: null });
+  const huge = batch(2, { label: "아주 큰", request_count: null, request_count_at_least: 5001, scans: null });
+  const ok = batch(3, { label: "보통", request_count: 4003 });
+  server.use(http.post("/api/admin/requests:delete-preview", () => HttpResponse.json({ limits: LIMITS, batches: [
+    pv(over, { verdict: "blocked", reason: "batch_delete_too_large", limit: 50000, count: 73210, request_count: 50001,
+               request_count_capped: true, max_commit_order: null }),
+    pv(huge, { verdict: "blocked", reason: "batch_delete_too_large", limit: 50000, count: null, count_at_least: 500001,
+               request_count: 50001, request_count_capped: true, max_commit_order: null }),
+    pv(ok, { request_count: 4003, verdict: "async" })] })));
+  renderDialog([], undefined, undefined, [over, huge, ok]);
+  const dlg = await open();
+  const alert = await within(dlg).findByRole("alert");
+  expect(alert).toHaveTextContent("배치 너무 큰: 삭제 불가 — 작업 73,210개가 한 번에 지울 수 있는 상한 50,000개를 넘습니다");
+  const items = within(within(dlg).getByRole("list", { name: "삭제할 배치" })).getAllByRole("listitem");
+  expect(items[0]).toHaveTextContent("작업 73,210개 · 항목 3개");
+  expect(items[0]).not.toHaveTextContent("5,001");
+  expect(items[0]).toHaveTextContent("삭제 불가 — 작업 73,210개가");
+  expect(items[1]).toHaveTextContent("작업 500,001개 이상 · 항목 3개");
+  expect(items[2]).toHaveTextContent("작업 4,003개");
+  expect(within(dlg).getByText("선택한 배치 3개의 작업 577,214개 이상을 영구 삭제합니다. 되돌릴 수 없습니다."))
+    .toBeInTheDocument();
+  await userEvent.click(within(dlg).getByLabelText(ACK));
+  expect(within(dlg).getByRole("button", { name: "577,214개 이상 영구 삭제" })).toBeDisabled();
+});
+
+test("미리보기 404(옛 서버): 목록의 수로 확인한다 -- 정확한 수를 모르는 배치(5,000개 이상)는 막는다", async () => {
+  server.use(http.post("/api/admin/requests:delete-preview", () => new HttpResponse(null, { status: 404 })));
+  const capped = batch(1, { request_count: null, request_count_at_least: 5001, scans: null });
+  renderDialog([], undefined, undefined, [capped]);
+  const dlg = await open();
+  // 보이는 글자 + 버튼 줄의 status 가 같은 말을 읽는다.
+  await waitFor(() => expect(within(dlg).getByRole("status")).toHaveTextContent(
+    "상한을 서버에서 확인하지 못했습니다(서버가 옛 버전) — 목록의 수로 확인합니다"));
+  expect(within(dlg).getAllByText("상한을 서버에서 확인하지 못했습니다(서버가 옛 버전) — 목록의 수로 확인합니다")).toHaveLength(2);
+  expect(within(dlg).getByRole("alert")).toHaveTextContent(
+    "삭제 불가 — 작업 수를 확인할 수 없습니다(5,001개 이상) — 이 서버에서는 지울 수 없습니다");
+});
+
+test("미리보기 405 + 정확한 수: 목록 수로 보낸다(expected_max_commit_order 키 없음)", async () => {
+  let body: unknown = null;
+  server.use(
+    http.post("/api/admin/requests:delete-preview", () => new HttpResponse(null, { status: 405 })),
+    http.post("/api/admin/requests:delete", async ({ request }) => {
+      body = await request.json();
+      return HttpResponse.json({ deleted: [], skipped: [], purge_pending: 0, deleted_batches: [], skipped_batches: [] });
+    }));
+  const b1 = batch(1);
+  renderDialog([], undefined, undefined, [b1]);
+  const dlg = await open();
+  await waitFor(() => expect(within(dlg).getByRole("status")).toHaveTextContent(/서버가 옛 버전/));
+  await userEvent.click(within(dlg).getByLabelText(ACK));
+  await userEvent.click(within(dlg).getByRole("button", { name: "4개 영구 삭제" }));
+  await waitFor(() => expect(body).toEqual({ request_ids: [], batches: [{ batch_id: b1.batch_id, expected_request_count: 4 }] }));
+});
+
+test("호출 합계 상한(서버 limits) -- 미리보기 수의 합이 넘으면 문제 상자", async () => {
+  const a = batch(1), b = batch(2);
+  server.use(http.post("/api/admin/requests:delete-preview", () => HttpResponse.json({
+    limits: { ...LIMITS, call_request_count: 7 }, batches: [pv(a), pv(b)] })));
+  renderDialog([], undefined, undefined, [a, b]);
+  const dlg = await open();
+  expect(await within(dlg).findByRole("alert")).toHaveTextContent(
+    "삭제 불가 — 고른 배치의 작업 합계 8개가 한 번에 지울 수 있는 상한 7개를 넘습니다 — 나눠서 지우세요");
 });

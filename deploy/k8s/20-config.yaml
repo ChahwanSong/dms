@@ -159,6 +159,12 @@ data:
   # 간격(초, 실패 백오프의 기준 단위 -- 상한 900초). 둘 다 기본값과 같다.
   DMS_REQUEST_DELETE_QUIET_SECONDS: "60"
   DMS_REQUEST_PURGE_INTERVAL_SECONDS: "15"
+  # 배치 단위 삭제(2026-11-19 사용자 결정 「상한 기본 50000」 -- deploy/README §12 「배치 단위 삭제」). MAX_CHILDREN: 배치 하나를
+  # 작업까지 지울 수 있는 자식 요청(재실행 이력 포함) 상한, 1–50000(밖이면 기동 거부 -- 낮추는 길만 연다). SYNC_MAX_CHILDREN:
+  # 이 수 이하 배치는 즉시(api 한 트랜잭션) 지우고, 넘으면 묘비를 세운 뒤 dms-controller 의 batch-delete 루프가 100개씩 나눠
+  # 지운다(1–2분, 배치는 「삭제 중」). 0–1000. 둘 다 api 가 읽는다 -- 바꾸면 dms-api 재시작(S11). 기본값과 같다(사이트 중립).
+  DMS_BATCH_DELETE_MAX_CHILDREN: "50000"
+  DMS_BATCH_DELETE_SYNC_MAX_CHILDREN: "500"
 
   # --- agent report cadence (AgentSettings.from_env; consumed via
   #     configMapKeyRef in 50-agent-daemonset.yaml, NOT envFrom, since the

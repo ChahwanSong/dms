@@ -273,13 +273,14 @@ test("삭제는 2단 확인 — 1단은 무장만, 2단이 DELETE", async () => 
 });
 
 test("회차 보존 안내(머리 도움말)와 「정리」 열 — null(아직 없음) ≠ 0, 누적 / 마지막 시각 두 줄", async () => {
-  serve([sched({ keep_rounds: 10, pruned_total: null, pruned_at: null, child_count_limit: 1000 }),
+  // 상한 = 서버 child_count_limit(2026-11-19 부터 설정 DMS_BATCH_DELETE_MAX_CHILDREN, 기본 50000).
+  serve([sched({ keep_rounds: 10, pruned_total: null, pruned_at: null, child_count_limit: 50000 }),
          sched({ schedule_id: "s2", batch_id: ID2, keep_rounds: 10, pruned_total: 0, pruned_at: "2026-11-16T09:30:00Z",
-                 child_count_limit: 1000,
+                 child_count_limit: 50000,
                  batch: { name: "정리된 배치", operation: "scan", status: "Completed", item_count: 3 } }),
          sched({ schedule_id: "s3", batch_id: "b333333333333ccc", keep_rounds: 10, pruned_total: 12,
-                 pruned_at: "2026-11-16T09:30:00Z", child_count_limit: 1000,
-                 batch: { name: "큰 CSV", operation: "scan", status: "Completed", item_count: 120 } })]);
+                 pruned_at: "2026-11-16T09:30:00Z", child_count_limit: 50000,
+                 batch: { name: "큰 CSV", operation: "scan", status: "Completed", item_count: 5001 } })]);
   renderPage();
   const head = await screen.findByText(/스케줄이 있는 배치는 최근 10회차만 보존합니다/);
   expect(head).toHaveTextContent("항목 수 × 보존 회차가 배치 단위 삭제 상한을 넘으면 경고합니다.");
@@ -301,9 +302,9 @@ test("회차 보존 안내(머리 도움말)와 「정리」 열 — null(아직
   expect(lastLine.className).toContain("block");
   expect(within(lastLine).getByText("2026-11-16 18:30:00").className).toContain("tabular-nums");
   expect(screen.getByText("정리 누적 12건").closest("td")).toHaveTextContent("정리 누적 12건마지막 2026-11-16 18:30:00");
-  // 항목 120 × 10 = 1,200 > 상한 1,000(서버 child_count_limit) — 배치 이름 아래 경고. 3 × 10 은 상한 안이라 없다
+  // 항목 5,001 × 10 = 50,010 > 상한 50,000(서버 child_count_limit) — 배치 이름 아래 경고. 3 × 10 은 상한 안이라 없다
   const warn = within(rowOf("큰 CSV")).getByRole("note");
-  expect(warn).toHaveTextContent(/항목 120개 × 10회차 = 작업 최대 1,200개 — 정리 뒤에도 배치 단위 삭제 상한\(1,000개\)을 넘어/);
+  expect(warn).toHaveTextContent(/항목 5,001개 × 10회차 = 작업 최대 50,010개 — 정리 뒤에도 배치 단위 삭제 상한\(50,000개\)을 넘어/);
   expect(within(rowOf("정기 스캔")).queryByRole("note")).toBeNull();
 });
 

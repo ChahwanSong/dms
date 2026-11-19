@@ -9,6 +9,7 @@
 // 모르면 숫자를 지어내지 않는다).
 
 import { kstStampBare } from "./datetime";
+import { n0 } from "./format";
 import type { BatchSchedule, PrunePreview } from "./types";
 
 export type ScheduleKind = "daily" | "weekly" | "monthly" | "interval";
@@ -157,8 +158,6 @@ export const scheduleDeleteNotice = (s: { kind: unknown; spec: unknown; enabled:
   `이 배치의 스케줄(${scheduleSummary(s.kind, s.spec)}${scheduleEnabled(s.enabled) ? " · 사용 중" : ""})과 실행 기록·보존 회차 `
   + "기록도 함께 삭제됩니다(감사 기록은 남습니다).";
 
-const n0 = (n: number) => n.toLocaleString("ko-KR");
-
 /** 서버가 실어 준 보존 회차 수가 쓸 만한가(1 이상 정수). 옛 서버(부재)·변조 값이면 false — 보존 문구를 지어내지 않는다. */
 export const keepRoundsKnown = (k: unknown): k is number => typeof k === "number" && Number.isInteger(k) && k >= 1;
 
@@ -187,8 +186,8 @@ export function pruneText(s: Pick<BatchSchedule, "pruned_total" | "pruned_at">):
   return p.at === null ? p.total : `${p.total} · 마지막 ${p.at}`;
 }
 
-/** 「항목 × K > 상한」 예측 경고 — 보존 회차를 다 채우면 정리 뒤에도 배치 단위 삭제 상한(서버 child_count_limit =
- *  MAX_BATCH_DELETE_CHILDREN)을 넘는다. 셋 중 하나라도 모르면 null(상한을 지어내지 않는다). 저장을 막지 않는 안내다. */
+/** 「항목 × K > 상한」 예측 경고 — 보존 회차를 다 채우면 정리 뒤에도 배치 단위 삭제 상한(서버 child_count_limit = 설정
+ *  DMS_BATCH_DELETE_MAX_CHILDREN, 기본 50000 -- 2026-11-19)을 넘는다. 셋 중 하나라도 모르면 null(상한을 지어내지 않는다). 저장을 막지 않는 안내다. */
 export function projectedChildrenWarning(itemCount: number | null | undefined, keep: number | null | undefined,
                                          limit: number | null | undefined): string | null {
   if (typeof itemCount !== "number" || !keepRoundsKnown(keep) || typeof limit !== "number" || limit <= 0) return null;

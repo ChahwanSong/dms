@@ -11,7 +11,10 @@ from fastapi.testclient import TestClient
 from dms.batch_scheduler import KST, armed_fingerprint, parse_utc
 from dms.config import Settings
 from dms.repositories.batches import BATCH_DELETE_EXEMPT_TABLES, BATCH_DELETE_TABLES, BatchesRepository
-from dms.repositories.request_purges import MAX_BATCH_DELETE_CHILDREN, RequestPurgesRepository
+from dms.repositories.request_purges import RequestPurgesRepository
+
+# 배치 단위 삭제 상한(2026-11-19 -- 설정 DMS_BATCH_DELETE_MAX_CHILDREN 의 기본값; 모듈 상수는 없앴다).
+MAX_BATCH_DELETE_CHILDREN = 50000
 
 TOKEN = {"Authorization": "Bearer tok-shared"}
 URL = "/api/admin/batch-schedules"
@@ -96,7 +99,7 @@ def test_create_scan_schedule_returns_the_row_with_batch_summary(client, db):
                             "destination_storage": None}
     # 회차 보존(2026-11-16): 설정값(기본 10)과 정리 결과 -- 아직 정리 없음은 null(0 이 아니다) -- + 배치 단위 삭제 상한(서버 값).
     assert (row["keep_rounds"], row["pruned_at"], row["pruned_total"]) == (10, None, None)
-    assert row["child_count_limit"] == MAX_BATCH_DELETE_CHILDREN == 1000
+    assert row["child_count_limit"] == MAX_BATCH_DELETE_CHILDREN == 50000
     [audit] = _audit(db, "create")
     assert audit["actor"] == "ops" and audit["target_key"] == bid
     after = json.loads(audit["after_state"])
@@ -572,20 +575,27 @@ def test_every_batch_id_table_is_covered_by_both_batch_delete_paths(db):
     with_batch_id = {t for t in tables if "batch_id" in {c["name"] for c in db.query(f"PRAGMA table_info({t})")}}
     assert with_batch_id == set(BATCH_DELETE_TABLES) | set(BATCH_DELETE_EXEMPT_TABLES)
     assert not set(BATCH_DELETE_TABLES) & set(BATCH_DELETE_EXEMPT_TABLES)
-    for entry in (BatchesRepository.delete, RequestPurgesRepository.delete_batch):
+    # 세 경로(2026-11-19 -- 백그라운드 배치 단위 삭제의 마무리 finish_batch_delete 추가)가 모두 테이블마다 DELETE 를 갖는다.
+    for entry in (BatchesRepository.delete, RequestPurgesRepository.delete_batch,
+                  RequestPurgesRepository.finish_batch_delete):
         src = inspect.getsource(entry)
         for t in BATCH_DELETE_TABLES:
             assert f"DELETE FROM {t} " in src, (entry.__qualname__, t)
 
 
-@pytest.mark.parametrize("path", [BatchesRepository.delete, RequestPurgesRepository.delete_batch])
+@pytest.mark.parametrize("path", [BatchesRepository.delete, RequestPurgesRepository.delete_batch,
+                                  RequestPurgesRepository.finish_batch_delete])
 def test_both_batch_delete_paths_delete_rounds_then_schedule_then_runs(path):
     """회차 경계를 스케줄보다, 스케줄을 회차 이력보다 먼저 지운다(2026-11-16 -- fire 의 회차 경계(_rescan_locked) → 스케줄 →
-    회차 이력 순서와 같게; 거꾸로면 PG 에서 서로 상대 행을 기다린다). BATCH_DELETE_TABLES 순서가 곧 그 잠금 순서다."""
+    회차 이력 순서와 같게; 거꾸로면 PG 에서 서로 상대 행을 기다린다). BATCH_DELETE_TABLES 순서가 곧 그 잠금 순서다. 묘비
+    (batch_deletions, 2026-11-19)는 배치 다음·회차 경계 앞 -- 세 경로(마무리 finish_batch_delete 포함) 모두."""
     src = inspect.getsource(path)
-    pos = {t: src.index(f"DELETE FROM {t} ") for t in ("batch_rounds", "batch_schedules", "batch_schedule_runs")}
-    assert pos["batch_rounds"] < pos["batch_schedules"] < pos["batch_schedule_runs"], path.__qualname__
-    order = [BATCH_DELETE_TABLES.index(t) for t in ("batch_rounds", "batch_schedules", "batch_schedule_runs")]
+    pos = {t: src.index(f"DELETE FROM {t} ") for t in ("batch_deletions", "batch_rounds", "batch_schedules",
+                                                        "batch_schedule_runs")}
+    assert pos["batch_deletions"] < pos["batch_rounds"] < pos["batch_schedules"] < pos["batch_schedule_runs"], \
+        path.__qualname__
+    order = [BATCH_DELETE_TABLES.index(t) for t in ("batches", "batch_deletions", "batch_rounds", "batch_schedules",
+                                                    "batch_schedule_runs")]
     assert order == sorted(order)
 
 

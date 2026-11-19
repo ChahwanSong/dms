@@ -11,7 +11,7 @@ from ..domain import (
 from ..execution import ExecutionError
 from ..identity import owner_override_allowed
 from ..privileged import privileged_names
-from ..repositories.request_purges import MAX_BATCH_DELETE_CHILDREN
+from ..repositories.request_purges import MAX_BATCH_DELETE_ITEMS, list_count_cap
 from ..repositories.requests import MAX_SEARCH_TERMS
 from ..repositories.storages import storage_open_to_users
 from ..repositories.sync_pairs import sync_pair_allowed
@@ -282,16 +282,26 @@ def list_requests(request: Request, identity: Identity = Depends(require_user),
     # 배치 자식 행의 배치 요약(2026-10-10, **관리자 응답만**) -- 작업 목록의 「배치」 열과 배치 단위 삭제(선택·확인 창의
     # 자식 수 = 삭제 CAS 의 expected_request_count)가 쓴다. 서버가 세는 이유는 BatchesRepository.list_summaries.
     # 단건 행(batch_id NULL)과 비관리자 응답엔 키가 없다. batch_id "" 도 열쇠다(is not None -- truthy 검사 금지).
-    # 자식 수는 배치 단위 삭제의 상한 + 1 에서 세기를 멈춘다(폴링마다 큰 배치의 자식 전부를 세지 않는다 --
-    # list_summaries docstring).
+    # 자식 수는 min(5000, 배치 단위 삭제 상한) + 1 에서 세기를 멈춘다(2026-11-19 -- request_purges.list_count_cap: 폴링마다 큰
+    # 배치의 자식 전부를 세지 않는다, dms-k8s 실측 상한 50000 으로 세면 큰 배치 하나에 폴링당 PG 190–197ms). capped 의 뜻은 「목록이
+    # 센 최대를 넘음 -- 정확한 수 모름」이고, 정확한 수·판정은 확인 창의 미리보기(POST /api/admin/requests:delete-preview)가 받는다.
+    # batch_max_commit_order·batch_deleting(2026-11-19) -- list_summaries docstring.
+    # batch_request_count_limit·batch_item_count_limit(2026-11-19, dms-k8s 9166b8e2·14ee820c 이식): 배치 단위 삭제의 자식·항목 상한
+    # (설정 DMS_BATCH_DELETE_MAX_CHILDREN·request_purges.MAX_BATCH_DELETE_ITEMS) -- 포탈이 상수를 두지 않고 이 값으로 「삭제 상한
+    # 초과」를 판정한다(count > limit -- 상한을 바꿔도 포탈 빌드와 어긋나지 않는다). 요약을 붙이는 행(배치 자식 행)에만.
     if identity.role == "admin":
         bids = list(dict.fromkeys(r["batch_id"] for r in rows if r["batch_id"] is not None))
         if bids:
-            summaries = repos.batches.list_summaries(bids, cap=MAX_BATCH_DELETE_CHILDREN)
+            cap = request.app.state.settings.batch_delete_max_children
+            summaries = repos.batches.list_summaries(bids, cap=list_count_cap(cap))
             for row in rows:
-                s = summaries.get(row["batch_id"]) if row["batch_id"] is not None else None
+                if row["batch_id"] is None:
+                    continue
+                s = summaries.get(row["batch_id"])
                 if s is not None:
                     row.update(s)
+                row["batch_request_count_limit"] = cap
+                row["batch_item_count_limit"] = MAX_BATCH_DELETE_ITEMS
     return rows
 
 

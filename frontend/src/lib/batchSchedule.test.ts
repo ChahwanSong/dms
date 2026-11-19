@@ -181,15 +181,18 @@ describe("회차 보존 문구 — 서버 keep_rounds·child_count_limit·prune_
       .toEqual({ total: "정리 누적 1,234건", at: "2026-11-16 18:30:00" });
   });
 
-  test("「항목 × K > 상한」 예측 경고 — 셋 다 알 때만, 같으면 경고 없음(이 라인 상한 1000)", () => {
-    expect(projectedChildrenWarning(100, 10, 1000)).toBeNull();               // 100 × 10 = 1000 — 상한과 같으면 지울 수 있다
-    expect(projectedChildrenWarning(101, 10, 1000)).toBe(
-      "항목 101개 × 10회차 = 작업 최대 1,010개 — 정리 뒤에도 배치 단위 삭제 상한(1,000개)을 넘어 이 배치는 배치 단위로 지울 수 "
+  test("「항목 × K > 상한」 예측 경고 — 셋 다 알 때만, 같으면 경고 없음(상한 = 서버 설정, 기본 50000 -- 2026-11-19)", () => {
+    // 2026-11-19 상한 1000 → 설정 DMS_BATCH_DELETE_MAX_CHILDREN(기본 50000): 기본 10회차면 항목 5,001개부터 경고.
+    expect(projectedChildrenWarning(5000, 10, 50000)).toBeNull();             // 5000 × 10 = 50000 — 상한과 같으면 지울 수 있다
+    expect(projectedChildrenWarning(5001, 10, 50000)).toBe(
+      "항목 5,001개 × 10회차 = 작업 최대 50,010개 — 정리 뒤에도 배치 단위 삭제 상한(50,000개)을 넘어 이 배치는 배치 단위로 지울 수 "
       + "없습니다(실패분 재실행이 더해지면 더 많습니다)");
-    expect(projectedChildrenWarning(0, 10, 1000)).toBeNull();
-    expect(projectedChildrenWarning(null, 10, 1000)).toBeNull();
-    expect(projectedChildrenWarning(undefined, 10, 1000)).toBeNull();
-    expect(projectedChildrenWarning(500, null, 1000)).toBeNull();
+    // 사이트가 상한을 낮춰도 서버 값 그대로
+    expect(projectedChildrenWarning(101, 10, 1000)).toContain("상한(1,000개)을 넘어");
+    expect(projectedChildrenWarning(0, 10, 50000)).toBeNull();
+    expect(projectedChildrenWarning(null, 10, 50000)).toBeNull();
+    expect(projectedChildrenWarning(undefined, 10, 50000)).toBeNull();
+    expect(projectedChildrenWarning(500, null, 50000)).toBeNull();
     expect(projectedChildrenWarning(500, 10, undefined)).toBeNull();           // 옛 서버 — 상한을 지어내지 않는다
     expect(projectedChildrenWarning(500, 10, 0)).toBeNull();
   });

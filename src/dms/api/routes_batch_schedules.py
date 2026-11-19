@@ -18,8 +18,8 @@ acknowledged_irreversible(bool -- 동의 지문이 있다) + destructive(bool | 
 batch(배치 요약 | null: batch_id, name, operation, status, item_count,
 auto_confirm, options, storage, source_storage, destination_storage) + keep_rounds(회차 보존 수 DMS_BATCH_SCHEDULE_KEEP_ROUNDS --
 2026-11-16 사용자 결정: 스케줄이 있는 배치는 최근 K회차의 자식만 남고 그보다 오래된 회차의 자식은 컨트롤러 batch-round-prune
-루프가 정리한다) + child_count_limit(배치 단위 삭제 자식 상한 request_purges.MAX_BATCH_DELETE_CHILDREN -- 화면의 「항목 × K >
-상한」 경고 기준; 상한을 바꿔도 포탈 빌드와 어긋나지 않게 서버 값을 싣는다). 지문 원문은 싣지 않는다.
+루프가 정리한다) + child_count_limit(배치 단위 삭제 자식 상한 = 설정 DMS_BATCH_DELETE_MAX_CHILDREN, 기본 50000 -- 2026-11-19;
+화면의 「항목 × K > 상한」 경고 기준; 상한을 바꿔도 포탈 빌드와 어긋나지 않게 서버 값을 싣는다). 지문 원문은 싣지 않는다.
 """
 from typing import Any
 
@@ -30,7 +30,6 @@ from ..batch_scheduler import (arm_problem, armed_fingerprint, is_destructive, n
                                binding_digest, storage_binding, validate_schedule)
 from ..db import utc_now_iso
 from ..domain import DomainValidationError
-from ..repositories.request_purges import MAX_BATCH_DELETE_CHILDREN
 from .auth import Identity, require_admin
 from .routes_batches import _require_batch_privilege
 from .routes_requests import reject_when_maintenance
@@ -40,7 +39,9 @@ router = APIRouter()
 _RUNS_DEFAULT = 50
 _RUNS_CAP = 200
 # 저장소가 던지는 사유 → HTTP 상태(밖의 사유는 422 -- 무장 판정·규칙 검증).
-_STATUS = {"batch_not_found": 404, "batch_schedule_not_found": 404, "batch_schedule_exists": 409}
+_STATUS = {"batch_not_found": 404, "batch_schedule_not_found": 404, "batch_schedule_exists": 409,
+           # 묘비가 선 배치(2026-11-19 -- 백그라운드 배치 단위 삭제 중)엔 무장하지 않는다(저장소 원자 가드).
+           "batch_deleting": 409}
 
 
 class ScheduleRule(BaseModel):
@@ -116,7 +117,7 @@ def _out(row, settings) -> dict:
     out["keep_rounds"] = getattr(settings, "batch_schedule_keep_rounds", None)
     out.setdefault("pruned_at", None)
     out.setdefault("pruned_total", None)
-    out["child_count_limit"] = MAX_BATCH_DELETE_CHILDREN
+    out["child_count_limit"] = settings.batch_delete_max_children
     return out
 
 
@@ -141,9 +142,10 @@ def preview_batch_schedule(body: SchedulePreviewBody, request: Request, identity
     (BatchSchedulesRepository.prune_preview -- 지금 스케줄이 걸려 있다고 쳤을 때 곧 정리될 자식 수, 실제 정리와 같은 경계 계산
     _round_cut; 막힌 자식까지 세는 근사치, 배치가 없거나 기록 회차가 K 미만이면 0). batch_id 가 없으면 prune_preview 키가 없다."""
     rule = _validated_rule(body)
-    keep = getattr(request.app.state.settings, "batch_schedule_keep_rounds", None)
+    settings = request.app.state.settings
+    keep = getattr(settings, "batch_schedule_keep_rounds", None)
     out = {"next_runs": preview_runs(body.kind, rule, utc_now_iso(), 5),
-           "keep_rounds": keep, "child_count_limit": MAX_BATCH_DELETE_CHILDREN}
+           "keep_rounds": keep, "child_count_limit": settings.batch_delete_max_children}
     if body.batch_id is not None:
         out["prune_preview"] = request.app.state.repos.batch_schedules.prune_preview(body.batch_id, keep=keep)
     return out

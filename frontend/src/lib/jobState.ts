@@ -46,7 +46,8 @@ export function batchPillVariant(status: string): PillVariant {
   if (status === "Completed") return "ok";
   if (status === "PreviewReady") return "action";
   // Cancelling(2026-10-16): 취소를 받아 남은 작업을 종료하는 중 -- 아직 끝나지 않았다(비종단).
-  if (["Running", "Previewing", "Cancelling"].includes(status)) return "busy";
+  // Deleting(2026-11-19): 백그라운드 배치 단위 삭제 중(묘비) -- 끝나면 배치가 사라진다(비종단, 되돌리기 없음).
+  if (["Running", "Previewing", "Cancelling", "Deleting"].includes(status)) return "busy";
   return "neutral";
 }
 
@@ -56,6 +57,7 @@ export function batchPillVariant(status: string): PillVariant {
 export function batchStatusLabel(status: string): string {
   if (status === "PreviewReady") return "확인 대기";
   if (status === "Cancelling") return "취소 중";
+  if (status === "Deleting") return "삭제 중";
   return status;
 }
 

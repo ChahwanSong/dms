@@ -7,6 +7,7 @@ from ..domain import (DataJobState, DomainValidationError, Operation, auto_confi
                       validate_batch_options, validate_owner_username)
 from ..execution import ExecutionError
 from ..privileged import privileged_names
+from ..repositories.batches import DELETING
 from .auth import Identity, audit_actor, require_admin
 from .cancel import terminate_job
 from .routes_requests import reject_when_maintenance
@@ -184,8 +185,10 @@ def patch_batch(batch_id: str, body: BatchPatchBody, request: Request,
     policies 처럼 repo 가 남기는 자원만 audit_entries 에 실린다)."""
     reject_when_maintenance(request)
     repo = request.app.state.repos.batches
-    if repo.get(batch_id) is None:
+    b = repo.get(batch_id)
+    if b is None:
         raise HTTPException(status_code=404, detail="batch_not_found")
+    _reject_frozen(b, cancelling=False)
     fields = {}
     sent = body.model_dump(exclude_unset=True)
     if "name" in sent:
@@ -195,7 +198,11 @@ def patch_batch(batch_id: str, body: BatchPatchBody, request: Request,
         # NULL/"" 두 표현으로 갈라지는 것을 막는 동일 규칙.
         note = (sent["note"] or "").strip()
         fields["note"] = note if note != "" else None
-    repo.update_meta(batch_id, **fields)
+    if repo.update_meta(batch_id, **fields) == 0:
+        # 0행 = 그 사이 배치가 지워졌거나(404) 묘비가 섰다(Deleting -- 저장소 조건, 409).
+        if repo.get(batch_id) is None:
+            raise HTTPException(status_code=404, detail="batch_not_found")
+        raise HTTPException(status_code=409, detail="batch_deleting")
     return repo.get(batch_id)
 
 
@@ -239,6 +246,7 @@ def patch_batch_execution(batch_id: str, body: BatchExecutionBody, request: Requ
     _require_batch_privilege(request, identity)
     repo = request.app.state.repos.batches
     b = _get_batch_or_404(request, batch_id)
+    _reject_frozen(b, cancelling=False)
     if b["status"] not in _TERMINAL_BATCH:
         raise HTTPException(status_code=409, detail="batch_settings_locked")
     sent = body.model_dump(exclude_unset=True)
@@ -289,13 +297,17 @@ def delete_batch(batch_id: str, request: Request,
     reject_when_maintenance(request)
     repo = request.app.state.repos.batches
     b = _get_batch_or_404(request, batch_id)
+    _reject_frozen(b, cancelling=False)
     if b["status"] not in _TERMINAL_BATCH:
         raise HTTPException(status_code=409, detail="batch_not_deletable")
     # 지우기는 잠근 행의 종단 CAS(repo.delete require_terminal): 위 읽기와 지우기 사이에 스케줄 회차·다른 관리자의 :rescan
     # 이 끼면 방금 되살아난 배치를 지우게 된다(2026-11-16 -- 스케줄러가 사람 없이 그 창을 연다). 진 쪽은 아무것도 쓰지 않는다.
     if not repo.delete(batch_id, require_terminal=True, actor=audit_actor(identity)):
-        if repo.get(batch_id) is None:
+        fresh = repo.get(batch_id)
+        if fresh is None:
             raise HTTPException(status_code=404, detail="batch_not_found")   # 그 사이 다른 관리자가 지웠다
+        if fresh["status"] == DELETING:
+            raise HTTPException(status_code=409, detail="batch_deleting")    # 읽은 뒤 묘비가 섰다(2026-11-19)
         raise HTTPException(status_code=409, detail="batch_not_deletable")
     return {"deleted": batch_id}
 
@@ -362,6 +374,10 @@ def get_batch(batch_id: str, request: Request,
     b = repo.get(batch_id)
     if b is None:
         raise HTTPException(status_code=404, detail="batch_not_found")
+    # 백그라운드 배치 단위 삭제 진행(2026-11-19): Deleting 이면 {requested_by, requested_at, expected_request_count,
+    # deleted_request_count, last_error, blocked_request_id, updated_at}, 아니면 null -- 상세의 진행 카드 재료.
+    b["deleting"] = (request.app.state.repos.request_purges.batch_deletions_for([batch_id]).get(batch_id)
+                     if b["status"] == DELETING else None)
     if view == "items":
         size = _ITEM_PAGE_DEFAULT if limit is None else max(1, min(_ITEM_PAGE_MAX, limit))
         if q is None or q == "":
@@ -400,10 +416,14 @@ def disable_batch_auto_confirm(batch_id: str, request: Request,
     진행 중에 쓸 수 있어야 한다(켜기는 생성·실행 설정 변경 -- 특권 게이트·종단 한정). 실행을 줄이기만 하는 라우트라
     require_admin 그대로다(항목 삭제·취소와 같은 블록 주석의 규칙). 유지보수 중에도 받는다 -- 취소처럼 멈추는 쪽의
     동작이다. 이미 꺼져 있으면 아무것도 쓰지 않고 지금 배치를 돌려준다(멱등). 이미 확인된 회차(Running)는 되돌리지
-    않는다 -- 다음 확인(항목 추가·재실행 뒤)부터 사람이 한다."""
+    않는다 -- 다음 확인(항목 추가·재실행 뒤)부터 사람이 한다. 삭제 중(묘비) 배치는 409 batch_deleting -- 다시 확인할 일이 없고
+    (되살릴 수 없다), 쓰면 사라질 배치에 감사 행만 남는다(_reject_frozen docstring 목록과 맞춘다)."""
     repo = request.app.state.repos.batches
-    if repo.get(batch_id) is None:
+    cur = repo.get(batch_id)
+    if cur is None:
         raise HTTPException(status_code=404, detail="batch_not_found")
+    if cur["status"] == DELETING:
+        raise HTTPException(status_code=409, detail="batch_deleting")
     repo.disable_auto_confirm(batch_id, actor=identity.actor)
     b = repo.get(batch_id)
     if b is None:
@@ -451,11 +471,17 @@ def _get_batch_or_404(request, batch_id):
     return b
 
 
-def _reject_cancelling(b) -> None:
-    """취소 중(Cancelling, 2026-10-16) 배치에 항목을 다시 Queued 로 만드는 변경(추가·항목 재실행·실패분 재실행)은 받지 않는다 --
-    orchestrator 가 굴리지 않는 상태라 그 항목은 영영 돌지 않고, 배치도 Cancelled 로 넘어가지 못한다(남은 Queued). 취소가
-    끝난(Cancelled) 뒤에는 종전대로 재활성화가 된다. 그 사이 경합으로 끼어든 Queued 는 컨트롤러 그물이 다시 막는다."""
-    if b["status"] == "Cancelling":
+def _reject_frozen(b, *, cancelling: bool = True) -> None:
+    """얼어 있는 배치를 바꾸는 요청을 받지 않는다.
+    - 취소 중(Cancelling, 2026-10-16): 항목을 다시 Queued 로 만드는 변경(추가·항목 재실행·실패분 재실행)만 -- orchestrator 가
+      굴리지 않는 상태라 그 항목은 영영 돌지 않고, 배치도 Cancelled 로 넘어가지 못한다(남은 Queued). 취소가 끝난(Cancelled) 뒤에는
+      종전대로 재활성화가 된다. 그 사이 경합으로 끼어든 Queued 는 컨트롤러 그물이 다시 막는다. cancelling=False 면 보지 않는다.
+    - 삭제 중(Deleting, 2026-11-19 -- 백그라운드 배치 단위 삭제의 묘비): 모든 변경(항목 추가·수정·삭제·교체·재실행·메타·실행
+      설정·자동 확인·rescan·기록 삭제)이 409 batch_deleting -- 되돌릴 수 없는 삭제가 진행 중이다(끝나면 배치가 사라진다). 라우트가
+      읽은 뒤 묘비가 서는 경합은 저장소 원자 가드(sentinel DELETING·0행)가 같은 사유로 접는다."""
+    if b["status"] == DELETING:
+        raise HTTPException(status_code=409, detail="batch_deleting")
+    if cancelling and b["status"] == "Cancelling":
         raise HTTPException(status_code=409, detail="batch_cancelling")
 
 
@@ -545,6 +571,7 @@ def update_batch_item(batch_id: str, seq: int, body: dict, request: Request,
     _require_batch_privilege(request, identity)
     repo = request.app.state.repos.batches
     b = _get_batch_or_404(request, batch_id)
+    _reject_frozen(b, cancelling=False)
     if repo.get_item(batch_id, seq) is None:
         raise HTTPException(status_code=404, detail="batch_item_not_found")
     only_queued = b["status"] not in _TERMINAL_BATCH
@@ -554,6 +581,8 @@ def update_batch_item(batch_id: str, seq: int, body: dict, request: Request,
                                            validate=_item_validator(body, replace_seq=seq))
     except DomainValidationError as e:
         raise HTTPException(status_code=422, detail=e.reason_code)
+    if updated == DELETING:
+        raise HTTPException(status_code=409, detail="batch_deleting")       # 읽은 뒤 묘비가 섰다(원자 가드)
     if not updated:
         # 존재는 위에서 확인했으니 영향 행 0 = Queued 가드 패배(materialize 경합
         # 포함) — 종단 배치 경로(가드 없음)에선 동시 삭제의 극소 창뿐이다.
@@ -570,12 +599,16 @@ def delete_batch_item(batch_id: str, seq: int, request: Request,
     reject_when_maintenance(request)
     repo = request.app.state.repos.batches
     b = _get_batch_or_404(request, batch_id)
+    _reject_frozen(b, cancelling=False)
     if repo.get_item(batch_id, seq) is None:
         raise HTTPException(status_code=404, detail="batch_item_not_found")
     only_queued = b["status"] not in _TERMINAL_BATCH
     # 카운터(item/succeeded/failed)는 repo 가 삭제와 같은 트랜잭션에서 절대값
     # 재계산한다(감산 분기 복제 대신 행이 진실 — repo._recount 주석).
-    if not repo.delete_item(batch_id, seq, only_queued=only_queued):
+    done = repo.delete_item(batch_id, seq, only_queued=only_queued)
+    if done == DELETING:
+        raise HTTPException(status_code=409, detail="batch_deleting")       # 읽은 뒤 묘비가 섰다(원자 가드)
+    if not done:
         raise HTTPException(status_code=409, detail="batch_item_not_editable")
     return {"deleted": seq}
 
@@ -603,6 +636,7 @@ def replace_batch_items(batch_id: str, body: ReplaceItemsBody, request: Request,
     _require_batch_privilege(request, identity)
     repo = request.app.state.repos.batches
     b = _get_batch_or_404(request, batch_id)
+    _reject_frozen(b, cancelling=False)
     if b["status"] not in _TERMINAL_BATCH:
         raise HTTPException(status_code=409, detail="batch_items_not_replaceable")
     # 위의 읽기와 쓰기 사이에 배치가 지워졌거나(None) 다시 돌기 시작했으면(False) repo 가 아무것도 쓰지 않았다 --
@@ -612,6 +646,8 @@ def replace_batch_items(batch_id: str, body: ReplaceItemsBody, request: Request,
         done = repo.replace_items(batch_id, body.items, validate=_items_validator(body.items))
     except DomainValidationError as e:
         raise HTTPException(status_code=422, detail=e.reason_code)
+    if done == DELETING:
+        raise HTTPException(status_code=409, detail="batch_deleting")       # 읽은 뒤 묘비가 섰다(원자 가드)
     if done is None:
         raise HTTPException(status_code=404, detail="batch_not_found")
     if done is False:
@@ -626,12 +662,14 @@ def add_batch_item(batch_id: str, body: dict, request: Request,
     _require_batch_privilege(request, identity)
     repo = request.app.state.repos.batches
     b = _get_batch_or_404(request, batch_id)
-    _reject_cancelling(b)
+    _reject_frozen(b)
     try:
         # 검증은 저장소 트랜잭션 안, 배치 잠금 뒤의 목록으로(_item_validator docstring).
         seq = repo.add_item(batch_id, body, validate=_item_validator(body))
     except DomainValidationError as e:
         raise HTTPException(status_code=422, detail=e.reason_code)
+    if seq == DELETING:
+        raise HTTPException(status_code=409, detail="batch_deleting")       # 읽은 뒤 묘비가 섰다(원자 가드)
     if seq is None:
         # 위에서 읽은 뒤 INSERT 전에 배치가 지워졌다(배치 단위 삭제·배치 기록 삭제) -- repo 가 아무것도 쓰지 않았다.
         raise HTTPException(status_code=404, detail="batch_not_found")
@@ -680,7 +718,7 @@ def rerun_batch_items(batch_id: str, body: RerunItemsBody, request: Request,
     _require_batch_privilege(request, identity)
     repo = request.app.state.repos.batches
     b = _get_batch_or_404(request, batch_id)
-    _reject_cancelling(b)
+    _reject_frozen(b)
     _reject_stale_options(b)
     # 빈 선택은 422 — empty_batch("배치에 항목이 없습니다")를 재사용하지 않는 이유:
     # 배치엔 항목이 있고 비어 있는 건 **선택**이라, 그 문구는 화면에서 거짓이 된다.
@@ -701,6 +739,8 @@ def rerun_batch_items(batch_id: str, body: RerunItemsBody, request: Request,
         else:
             candidates.append(seq)
     requeued = repo.reset_items_to_queued(batch_id, candidates)
+    if requeued == DELETING:
+        raise HTTPException(status_code=409, detail="batch_deleting")       # 읽은 뒤 묘비가 섰다(원자 가드)
     # 위 스냅샷에선 종단이었는데 UPDATE 가 못 잡은 항목 = 그 사이 상태가 바뀐
     # 경합 패배(또는 동시 삭제) — 성공으로 셀 수 없으니 같은 사유로 보고한다.
     lost = set(candidates) - set(requeued)
@@ -786,9 +826,11 @@ def rerun_failed(batch_id: str, request: Request, identity: Identity = Depends(r
     b = repo.get(batch_id)
     if b is None:
         raise HTTPException(status_code=404, detail="batch_not_found")
-    _reject_cancelling(b)
+    _reject_frozen(b)
     _reject_stale_options(b)
     n = repo.reset_failed_items(batch_id)
+    if n == DELETING:
+        raise HTTPException(status_code=409, detail="batch_deleting")       # 읽은 뒤 묘비가 섰다(원자 가드)
     if n == 0:
         raise HTTPException(status_code=409, detail="no_failed_items")
     # 상태 분기는 items:rerun 과 같다(_reopen_after_new_queued): scan 은 활성이 아니면 Running, sync·rm 은 언제나
@@ -805,6 +847,7 @@ def rescan_batch(batch_id: str, request: Request, identity: Identity = Depends(r
     b = repo.get(batch_id)
     if b is None:
         raise HTTPException(status_code=404, detail="batch_not_found")
+    _reject_frozen(b, cancelling=False)
     # 종단 배치(Completed/Cancelled) 한정: 종단 배치 ⇒ 전 item 종단 ⇒ 살아있는
     # 자식이 없다 — cancel 선례의 "실행면 먼저 종료" 단계가 공집합으로 성립한다
     # (거짓 취소 방지 정합). 비종단에서 허용하면 활성 자식과 리셋 item 이 충돌
@@ -822,8 +865,10 @@ def rescan_batch(batch_id: str, request: Request, identity: Identity = Depends(r
     # 있는 배치면 컨트롤러 batch-round-prune 루프가 30초 안에 보존 회차 밖의 가장 오래된 회차를 정리할 수 있다.
     done = repo.rescan_if_terminal(batch_id, actor=audit_actor(identity))
     if done is None:
-        if repo.get(batch_id) is None:
+        fresh = repo.get(batch_id)
+        if fresh is None:
             raise HTTPException(status_code=404, detail="batch_not_found")
+        _reject_frozen(fresh, cancelling=False)             # 읽은 뒤 묘비가 섰다 -- batch_deleting 이 더 정확하다
         raise HTTPException(status_code=409, detail="batch_not_rescannable")
     return {"status": done["status"], "requeued": done["requeued"]}
 

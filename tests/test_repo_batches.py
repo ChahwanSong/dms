@@ -381,11 +381,12 @@ def test_list_summaries_counts_children_live_and_successful_scans(db):
     assert s[named] == {"batch_exists": True, "batch_name": "성장", "batch_status": "Running",
                         "batch_request_count": 4, "batch_request_count_capped": False,
                         "batch_live_request_count": 1, "batch_succeeded_scan_count": 2,
-                        "batch_item_count": 1}
+                        "batch_item_count": 1, "batch_max_commit_order": 4, "batch_deleting": None}
     assert s[unnamed] == {"batch_exists": True, "batch_name": None, "batch_status": "Completed",
                           "batch_request_count": 1, "batch_request_count_capped": False,
                           "batch_live_request_count": 0,
-                          "batch_succeeded_scan_count": 0, "batch_item_count": 1}
+                          "batch_succeeded_scan_count": 0, "batch_item_count": 1,
+                          "batch_max_commit_order": 5, "batch_deleting": None}
 
 
 def test_list_summaries_dangling_unknown_state_and_empty_id(db):
@@ -400,7 +401,8 @@ def test_list_summaries_dangling_unknown_state_and_empty_id(db):
     assert s[gone] == {"batch_exists": False, "batch_name": None, "batch_status": None,
                        "batch_request_count": 2, "batch_request_count_capped": False,
                        "batch_live_request_count": 1, "batch_succeeded_scan_count": 1,
-                       "batch_item_count": None}                     # 배치 행이 없다 -- 항목 수는 모름
+                       "batch_item_count": None,                     # 배치 행이 없다 -- 항목 수는 모름
+                       "batch_max_commit_order": 2, "batch_deleting": None}
     assert s[""]["batch_exists"] is False and s[""]["batch_request_count"] == 1
     assert s[blank]["batch_name"] is None
     assert s["never"]["batch_request_count"] == 0 and s["never"]["batch_exists"] is False
@@ -460,8 +462,10 @@ def test_list_summaries_stops_counting_past_the_cap(db):
 
 
 def test_list_summaries_reads_each_batch_through_a_bounded_subquery(db):
-    # 문장 모양 고정: 배치마다 `LIMIT :stop` 갈래(UNION ALL)로 세고, 성공 scan 판정은 그 갈래 안의 자식별 EXISTS 다 --
-    # IN (자식 전부) 세미조인으로 되돌아가면 큰 배치에서 data_jobs 해시 조인이 돌아온다.
+    # 문장 모양 고정: 배치마다 `LIMIT :stop` 갈래(UNION ALL)로 세고, 성공 scan 판정은 그 갈래 안의 자식별 스칼라 서브쿼리
+    # `(SELECT 1 … LIMIT 1) IS NOT NULL` 이다 -- IN (자식 전부) 세미조인으로 되돌아가면 큰 배치에서 data_jobs 해시 조인이
+    # 돌아오고, EXISTS 로 「단순화」하면 큰 cap 의 자식 ~4500 이상 갈래에서 PG16 이 Hash Semi Join + data_jobs 전체 Seq Scan 으로
+    # 끌어올린다(2026-11-19 dms-k8s 9166b8e2 이식 -- test_api_request_list_batches 의 소스 형태 테스트와 같은 고정).
     repos = Repositories(db)
     bid = "c" * 32
     _insert_child(db, bid, order=1, job=("scan", "Succeeded", "a"))
@@ -483,7 +487,9 @@ def test_list_summaries_reads_each_batch_through_a_bounded_subquery(db):
     # Seq Scan + LIMIT 를 골라 그 배치의 물리 위치 앞의 행 전부를 읽었다(2026-10-11 검증 지적).
     assert all(q.count("ORDER BY batch_id, commit_order LIMIT :stop") == q.count("LIMIT :stop") for q in counting)
     assert all("batch_id = :" not in q for q in counting)
-    assert "EXISTS (SELECT 1 FROM data_jobs" in counting[1] and "request_id IN (SELECT" not in counting[1]
+    assert "(SELECT 1 FROM data_jobs WHERE data_jobs.request_id = c0.request_id" in counting[1]
+    assert "LIMIT 1) IS NOT NULL" in counting[1]
+    assert "EXISTS" not in counting[1] and "request_id IN (SELECT" not in counting[1]
 
 
 def test_add_item_to_a_vanished_batch_writes_nothing(db):

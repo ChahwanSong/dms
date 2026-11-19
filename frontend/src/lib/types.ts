@@ -30,14 +30,23 @@ export interface RequestRow {
   batch_name?: string | null;             // null = 이름 없음(또는 배치 행 없음)
   batch_status?: string | null;           // 배치 행이 없으면 null
   batch_request_count?: number;           // 재실행 이력을 포함한 전체 자식 수(capped 면 상한 + 1 에서 멈춘 값)
-  // 자식이 배치 단위 삭제 상한(1000)을 넘어 서버가 세기를 멈췄다(2026-10-11 -- 폴링마다 큰 배치 전부를 세지 않는다).
-  // 그 배치는 고를 수 없고(too_large) 아래 두 수는 null(세지 않았다 -- 모름).
+  // 서버가 세기를 멈췄다(2026-10-11 -- 폴링마다 큰 배치 전부를 세지 않는다). 2026-11-19 부터 목록의 세기 상한은 min(5000, 삭제
+  // 상한)이라 뜻이 「목록이 센 최대(limits.list_count_cap)를 넘음 -- 정확한 수 모름」이다(상한 초과 판정은 count > limit 하나 --
+  // batchGroups.batchBlock). 아래 두 수는 null(세지 않았다 -- 모름). 정확한 수는 확인 창의 미리보기가 센다.
   batch_request_count_capped?: boolean;
+  // 배치 단위 삭제의 자식·항목 상한(2026-11-19 -- 자식 상한은 설정 DMS_BATCH_DELETE_MAX_CHILDREN, 기본 50000·항목 10000). 포탈은
+  // 상수를 두지 않고 이 값으로 판정한다(batchGroups.batchBlock -- 숫자가 아니면 「정보 없음」, fail-closed).
+  batch_request_count_limit?: number;
+  batch_item_count_limit?: number;
   batch_live_request_count?: number | null;     // 비종단 자식 수 -- 0 은 정상값(모름이 아니다). null = capped
   batch_succeeded_scan_count?: number | null;   // 성공 scan 잡을 가진 자식 수(비 scan 배치는 0 -- 확정값). null = capped
-  // 배치 항목 수(2026-10-11) -- 배치 단위 삭제는 항목 수에도 상한(10000)이 있어 넘으면 고를 수 없다(too_large). null = 모름
+  // 배치 항목 수(2026-10-11) -- 배치 단위 삭제는 항목 수에도 상한(batch_item_count_limit)이 있어 넘으면 too_large. null = 모름
   // (배치 행이 없는 묶음·변조된 값) -- 모르면 막지 않고 서버가 판정한다(자식 수 상한이 주 게이트다).
   batch_item_count?: number | null;
+  // 그 배치 자식의 최대 commit_order(2026-11-19 -- 삭제 CAS 의 둘째 열쇠, 미리보기가 정본). capped·자식 0 이면 null.
+  batch_max_commit_order?: number | null;
+  // 백그라운드 배치 단위 삭제 진행(2026-11-19 -- 묘비). null = 아님, 부재 = 옛 서버.
+  batch_deleting?: BatchDeletingSummary | null;
 }
 // events는 state_transitions가 담지 못하는 것 -- 일어나지 않은 전이 -- 를 담는
 // 진단 이벤트다(plan_error/step_error/terminate_failed/terminal_guard_skip/summary_unreadable).
@@ -71,13 +80,42 @@ export interface RequestDetail extends RequestRow {
 // batches 를 싣지 않은 옛 호출·가로채 만든 응답(e2e 06)에는 없다. 배치 하나 = 트랜잭션 하나(전부 아니면 전무) --
 // request_ids·job_ids 는 그 배치에서 지운 자식 요청·잡 전부(캐시 제거용), dangling = 배치 행 없이 자식만 남은 묶음이었다.
 // skipped_batches.request_id = 문제가 된 자식(자식 게이트 사유일 때), 배치 수준 사유면 null.
+// 백그라운드 배치 단위 삭제의 진행(목록 요약의 batch_deleting -- 2026-11-19). expected = 묘비가 센 수, deleted = 지운 수.
+export interface BatchDeletingSummary {
+  expected: number; deleted: number; requested_at: string; requested_by: string;
+  last_error: string | null; blocked_request_id: string | null;
+}
+// 배치 상세·정리 현황의 진행 행(서버 batch_deletions -- 2026-11-19).
+export interface BatchDeletionRow {
+  batch_id: string; name?: string | null; dangling: boolean; requested_by: string; requested_at: string;
+  expected_request_count: number; deleted_request_count: number; last_error: string | null;
+  blocked_request_id: string | null; updated_at: string;
+}
+// 거절 줄의 상한 숫자(2026-11-19 -- 상한 사유일 때만 실린다: limit·count|count_at_least).
+export interface SkippedBatch {
+  batch_id: string; reason: string; request_id: string | null;
+  limit?: number | null; count?: number | null; count_at_least?: number | null;
+}
 export interface DeleteRequestsResult {
   deleted: { request_id: string; job_ids: string[] }[];
   skipped: { request_id: string; reason: string }[];
   purge_pending: number | null;
   deleted_batches?: { batch_id: string; request_ids: string[]; job_ids: string[]; dangling: boolean }[];
-  skipped_batches?: { batch_id: string; reason: string; request_id: string | null }[];
+  // 백그라운드로 지우기 시작했거나 이미 지우는 중(2026-11-19 -- 자식 id 는 싣지 않는다). 부재 = 옛 서버.
+  deleting_batches?: { batch_id: string; request_count: number; already: boolean }[];
+  skipped_batches?: SkippedBatch[];
 }
+// POST /api/admin/requests:delete-preview(2026-11-19) -- 확인 창이 열릴 때 1회.
+export type DeleteVerdict = "sync" | "async" | "blocked" | "deleting" | "gone";
+export interface DeletePreviewBatch {
+  batch_id: string; exists: boolean; name: string | null; status: string | null; operation: string | null;
+  request_count: number; request_count_capped: boolean; max_commit_order: number | null;
+  item_count: number | null; item_count_capped: boolean; verdict: DeleteVerdict; reason: string | null;
+  request_id: string | null; limit: number | null; count: number | null; count_at_least: number | null;
+  deleting: BatchDeletionRow | null;
+  live_request_count?: number | null; succeeded_scan_count?: number | null;
+}
+export interface DeletePreview { limits: unknown; batches: DeletePreviewBatch[] }
 // GET /api/admin/request-purges -- 정리 대기 현황(유일한 운영 표면). stalled = last_error 가 있는 행 수(실패 백오프
 // 중이거나 오래 대기). items 는 오래된 순 최대 50건. last_error null = 지연 사유 없음(정상 대기).
 export interface PurgeStatusItem {
@@ -86,6 +124,9 @@ export interface PurgeStatusItem {
 }
 export interface PurgeStatus {
   pending: number; stalled: number; oldest_requested_at: string | null; items: PurgeStatusItem[];
+  // 2026-11-19: 삭제 상한(서버 delete_limits -- lib/deleteLimits.parseLimits 로 읽는다)·진행 중인 백그라운드 배치 삭제. 부재 = 옛 서버.
+  limits?: unknown;
+  batch_deletions?: BatchDeletionRow[];
 }
 // 플래너가 배치 시점에 확정한 워커 배치(planner.py: resolve_fanout 결과 + 후보·
 // 신원). 화면이 읽는 건 수치 몇 개와 identity(요청 상세 「요청 내용」의 실행 권한·신원·
@@ -261,6 +302,8 @@ export interface NodeExclusion {
 }
 export interface NodeReport { reported_at: string; report: NodeReportBody }
 export interface Batch {
+  // 백그라운드 배치 단위 삭제 진행(2026-11-19 -- 상세 응답, status Deleting 일 때만 객체). 부재 = 옛 서버.
+  deleting?: BatchDeletionRow | null;
   batch_id: string; operation: string; status: string; max_concurrency: number;
   item_count: number; succeeded_count: number; failed_count: number;
   note: string | null; created_at: string;
@@ -377,8 +420,9 @@ export interface BatchSchedule {
   batch: BatchScheduleBatch | null;
   // 회차 보존(2026-11-16 사용자 결정 「최근 10회차만 누적」 -- 서버 DMS_BATCH_SCHEDULE_KEEP_ROUNDS, 기본 10): 최근 keep_rounds
   // 회차만 남고 오래된 회차의 작업은 컨트롤러 batch-round-prune 이 정리한다. pruned_total null = 아직 정리한 적 없음(0 과
-  // 다르다), pruned_at = 마지막으로 정리한 시각(UTC). child_count_limit = 배치 단위 삭제의 자식 상한(서버
-  // MAX_BATCH_DELETE_CHILDREN -- 「항목 × K > 상한」 예측 경고의 기준, 포탈은 상수를 두지 않는다). 옵션(?) = 옛 서버·fixture.
+  // 다르다), pruned_at = 마지막으로 정리한 시각(UTC). child_count_limit = 배치 단위 삭제의 자식 상한(서버 설정
+  // DMS_BATCH_DELETE_MAX_CHILDREN, 기본 50000 -- 2026-11-19; 「항목 × K > 상한」 예측 경고의 기준, 포탈은 상수를 두지 않는다).
+  // 옵션(?) = 옛 서버·fixture.
   keep_rounds?: number | null; pruned_at?: string | null; pruned_total?: number | null;
   child_count_limit?: number | null;
 }
@@ -502,7 +546,9 @@ export interface PurgeStorageHistoryResult {
   deleted: { request_id: string; job_ids: string[] }[];
   deleted_batches: { batch_id: string; request_ids: string[]; job_ids: string[]; dangling: boolean }[];
   skipped: { request_id: string; reason: string }[];
-  skipped_batches: { batch_id: string; reason: string; request_id: string | null }[];
+  skipped_batches: SkippedBatch[];
+  // 백그라운드로 정리하기 시작한 배치(2026-11-19). 부재 = 옛 서버.
+  deleting_batches?: { batch_id: string; request_count: number; already: boolean }[];
   remaining: { requests: number; batches: number } | null;
   // 남은 것 중 다음 회차가 시도할 것(이번 본문의 exclude_* 와 이번 회차에 건너뛴 것을 뺀 수). null = 모름.
   remaining_untried: { requests: number; batches: number } | null;

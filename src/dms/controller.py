@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from typing import Callable
 
 from .artifact_base import controller_check_once
+from .batch_deleter import (COMPONENT as BATCH_DELETE_COMPONENT, INTERVAL_SECONDS as BATCH_DELETE_INTERVAL_SECONDS,
+                            BatchDeleter)
 from .batch_orchestrator import BatchOrchestrator
 from .batch_round_prune import INTERVAL_SECONDS as BATCH_ROUND_PRUNE_INTERVAL_SECONDS, BatchRoundPruner
 from .batch_scheduler import BatchScheduler
@@ -90,6 +92,11 @@ def build_loops(settings: Settings, repos: Repositories, *, identity_resolver=No
              lambda: BatchScheduler(repos, settings=settings).run_once()),
         Loop("batch-orchestrator", settings.batch_orchestrator_interval_seconds,
              lambda: BatchOrchestrator(repos, settings=settings, execution_adapter=adapter).run_once()),
+        # 배치 단위 백그라운드 삭제(2026-11-19, batch_deleter.py -- dms-k8s 14ee820c 이식): API 가 세운 묘비(Deleting +
+        # batch_deletions)를 청크로 지운다. **조건 없이** 넣는다 -- 사람이 시작한 삭제라 반드시 끝나야 한다(purge_runner 가 없어도
+        # 아웃박스만 쌓이고 파일·파드 정리는 그 루프가 배선될 때 한다). DB 전용 -- 틱 예산 2초 < 리스 max(5*3, 30)=30초.
+        Loop(BATCH_DELETE_COMPONENT, BATCH_DELETE_INTERVAL_SECONDS,
+             lambda: BatchDeleter(repos, settings=settings).run_once()),
         Loop("pod-gc", settings.pod_gc_interval_seconds, pod_gc.run_once),
         # 슬라이스 18(설계 §2.4c): 컨트롤러 관점의 아티팩트 base 검증. 간격은 새
         # 설정 키를 만들지 않고 storage-reconciler 와 같은 값을 쓴다 -- 같은

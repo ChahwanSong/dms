@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient, useInfiniteQuery } from "@tanstack/react-query";
 import { ApiError, apiGet, apiSend } from "../../lib/api";
 import { REQUEST_TERMINAL_STATES, isTerminal } from "../../lib/jobState";
@@ -182,9 +183,10 @@ export const DELETE_REQUESTS_INVALIDATES: readonly (readonly string[])[] = [
 ];
 // 한 번의 POST 에 단건과 배치 단위를 함께 싣는다(2026-10-10). expected_request_count = 확인 창을 연 순간 서버가 센
 // 그 배치의 자식 수 -- 삭제 CAS(다르면 batch_changed: 창을 연 뒤 재실행이 늘린 자식은 지우지 않는다).
+// expected_max_commit_order(2026-11-19, 선택): 미리보기가 준 최대 commit_order -- 수와 함께 CAS(없으면 키를 싣지 않는다).
 export interface DeleteSelection {
   request_ids: string[];
-  batches: { batch_id: string; expected_request_count: number }[];
+  batches: { batch_id: string; expected_request_count: number; expected_max_commit_order?: number }[];
 }
 export function useDeleteRequests() {
   const qc = useQueryClient();
@@ -218,10 +220,33 @@ export function useDeleteRequests() {
 
 // 정리 대기 현황(결과 파일·파드 정리, 컨트롤러 request-purge 루프). 대기가 있으면 5초, 없으면 30초 -- 삭제 직후의
 // 진행을 따라가되 평소엔 거의 쉰다. enabled = 관리자 화면에서만(일반 사용자는 403 이라 부르지 않는다).
+// 2026-11-19: 백그라운드 배치 단위 삭제(batch_deletions)가 진행 중이어도 5초 -- 「배치 삭제 중 k건」과 끝(목록 무효화)을 따라간다.
 export const usePurgeStatus = (enabled: boolean) =>
   useQuery({
     queryKey: ["request-purges"],
     queryFn: () => apiGet<PurgeStatus>("/api/admin/request-purges"),
     enabled,
-    refetchInterval: (q) => ((q.state.data as PurgeStatus | undefined)?.pending ?? 0) > 0 ? 5000 : 30000,
+    refetchInterval: (q) => {
+      const d = q.state.data as PurgeStatus | undefined;
+      return (d?.pending ?? 0) > 0 || (d?.batch_deletions?.length ?? 0) > 0 ? 5000 : 30000;
+    },
   });
+
+/** 백그라운드 배치 삭제가 끝나면(정리 현황의 batch_deletions 에서 빠지면) 삭제와 같은 쿼리 집합 + 그 배치 상세·스케줄 목록을
+ *  무효화한다(2026-11-19 -- 자식 행은 목록 3초 폴링이 저절로 줄이지만 배치 목록·사용량·스케줄은 그렇지 않다). */
+export function useBatchDeletionsDone(purge: PurgeStatus | undefined) {
+  const qc = useQueryClient();
+  const seen = useRef<Set<string> | null>(null);
+  useEffect(() => {
+    if (purge === undefined) return;
+    const now = new Set((purge.batch_deletions ?? []).map((d) => d.batch_id));
+    const before = seen.current;
+    seen.current = now;
+    if (before === null) return;
+    const done = [...before].filter((b) => !now.has(b));
+    if (done.length === 0) return;
+    for (const k of DELETE_REQUESTS_INVALIDATES) void qc.invalidateQueries({ queryKey: [...k] });
+    void qc.invalidateQueries({ queryKey: ["batch-schedules"] });
+    for (const b of done) void qc.invalidateQueries({ queryKey: ["batch", b] });
+  }, [purge, qc]);
+}

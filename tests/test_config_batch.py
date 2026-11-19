@@ -44,3 +44,38 @@ def test_batch_schedule_keep_rounds_in_the_shared_base_never_differs_from_the_co
     values = re.findall(r'^\s*DMS_BATCH_SCHEDULE_KEEP_ROUNDS:\s*"?([^"\s#]*)"?', text, re.M)
     assert all(v == str(Settings.batch_schedule_keep_rounds) for v in values), values
     assert ("DMS_BATCH_SCHEDULE_KEEP_ROUNDS" in text) == bool(values)     # 다른 모양으로 실린 키를 놓치지 않는다
+
+
+# 배치 단위 삭제 상한·동기 문턱(2026-11-19 사용자 결정 「배치 단위 삭제 상한 기본 50000개로」 -- dms-k8s 14ee820c 이식).
+def test_batch_delete_limits_default_and_bounds():
+    import pytest
+    from dms.config import SettingsError
+    s = Settings.from_env(VALID)
+    assert (s.batch_delete_max_children, s.batch_delete_sync_max_children) == (50000, 500)
+    assert (Settings.batch_delete_max_children, Settings.batch_delete_sync_max_children) == (50000, 500)
+    for key, ok, attr in (("DMS_BATCH_DELETE_MAX_CHILDREN", "1", "batch_delete_max_children"),
+                          ("DMS_BATCH_DELETE_MAX_CHILDREN", "50000", "batch_delete_max_children"),
+                          ("DMS_BATCH_DELETE_SYNC_MAX_CHILDREN", "0", "batch_delete_sync_max_children"),
+                          ("DMS_BATCH_DELETE_SYNC_MAX_CHILDREN", "1000", "batch_delete_sync_max_children")):
+        assert getattr(Settings.from_env({**VALID, key: ok}), attr) == int(ok)
+    for key, bad in (("DMS_BATCH_DELETE_MAX_CHILDREN", "0"), ("DMS_BATCH_DELETE_MAX_CHILDREN", "50001"),
+                     ("DMS_BATCH_DELETE_MAX_CHILDREN", "x"), ("DMS_BATCH_DELETE_SYNC_MAX_CHILDREN", "-1"),
+                     ("DMS_BATCH_DELETE_SYNC_MAX_CHILDREN", "1001"), ("DMS_BATCH_DELETE_SYNC_MAX_CHILDREN", "5.5")):
+        with pytest.raises(SettingsError) as e:
+            Settings.from_env({**VALID, key: bad})
+        assert key in str(e.value)
+
+
+def test_batch_delete_keys_in_the_shared_base_never_differ_from_the_code_defaults():
+    # 위 KEEP_ROUNDS 그물과 같은 판단: base 20-config 는 dms-k8s 와 바이트 동일을 목표로 하는 공용 base 라 dms-k8s 가 실은 두 키
+    # (14ee820c -- "50000"·"500")를 그대로 옮겼다. 그 값이 이 라인의 코드 기본과 다르면 ConfigMap 이 코드 기본을 조용히 덮는다 --
+    # 키가 없거나, 있으면 코드 기본과 같아야 한다(여기가 빨개지면 그 줄을 빼거나 오버레이에서 덮는다).
+    import re
+    from pathlib import Path
+    text = (Path(__file__).resolve().parent.parent / "deploy/k8s/20-config.yaml").read_text()
+    for key, attr in (("DMS_BATCH_DELETE_MAX_CHILDREN", "batch_delete_max_children"),
+                      ("DMS_BATCH_DELETE_SYNC_MAX_CHILDREN", "batch_delete_sync_max_children")):
+        values = re.findall(rf'^\s*{key}:\s*"?([^"\s#]*)"?', text, re.M)
+        assert all(v == str(getattr(Settings, attr)) for v in values), (key, values)
+        assert (re.search(rf"\b{key}\b", text) is not None) == bool(values), key   # 다른 모양으로 실린 키를 놓치지 않는다
+

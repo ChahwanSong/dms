@@ -51,6 +51,8 @@ def test_controller_once(tmp_path, monkeypatch, capsys):
     assert "request-purge=ok" in out
     # 회차 보존 정리(2026-11-16): 같은 purge_runner 조건 -- 배선이 빠지면 스케줄 배치의 자식이 끝없이 쌓인다.
     assert "batch-round-prune=ok" in out
+    # 배치 단위 백그라운드 삭제(2026-11-19): 조건 없이 조립 -- 빠지면 묘비(「삭제 중」) 배치가 영원히 끝나지 않는다.
+    assert "batch-delete=ok" in out
 
 
 def test_agent_once_uses_agent_settings(monkeypatch):

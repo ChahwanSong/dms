@@ -3,6 +3,11 @@ import { Trash2, TriangleAlert, X } from "lucide-react";
 import { Button } from "../../components/ui/Button";
 import { Dialog } from "../../components/ui/Dialog";
 import { reasonText, type ApiError } from "../../lib/api";
+import { blockText, parseLimits } from "../../lib/deleteLimits";
+import type { DeleteLimits } from "../../lib/deleteLimits";
+// 상한·백그라운드 정리 문구의 천 단위 구분(2026-11-19 -- 상한 50,000·작업 수가 5자리라 삭제 화면과 같은 표기).
+import { n0 as n } from "../../lib/format";
+import { usePurgeStatus } from "../jobs/useJobs";
 import { agoText, kstStampOrDash } from "../../lib/datetime";
 import type { UnregisteredStorage, UsageStorageSummary } from "../../lib/types";
 import { usePurgeUnregisteredStorage, type StorageHistoryPurgeSummary } from "./useUsage";
@@ -61,7 +66,8 @@ export function PurgeResult({ r, innerRef, onDismiss }: {
           {r.skipped.slice(0, SKIP_PREVIEW).map((s) => (
             <li key={`${s.kind}:${s.id}`} className="[overflow-wrap:anywhere]">
               <span className="font-mono text-xs text-ink">{`${s.kind === "batch" ? "배치" : "작업"} ${s.id.slice(0, 12)}`}</span>
-              {`: ${reasonText(s.reason)}`}
+              {/* 배치 거절은 작업 삭제 화면과 같은 포매터(blockText -- 상한이면 서버 숫자, 2026-11-19). */}
+              {`: ${s.kind === "batch" ? blockText(s.reason, s, { server: true }) : reasonText(s.reason)}`}
               {s.kind === "batch" && s.request_id !== null && (
                 <span className="font-mono text-xs">{` (작업 ${s.request_id.slice(0, 12)})`}</span>
               )}
@@ -75,6 +81,12 @@ export function PurgeResult({ r, innerRef, onDismiss }: {
           함께 말한다(그 스토리지 탭은 기록이 남는 동안 남아 다시 정리할 수 있다). */}
       {r.error === null && r.untried !== null && r.untried > 0 && (
         <p>{`아직 정리하지 않은 기록 ${r.untried}개 — 다시 정리하면 이어서 지웁니다.`}</p>
+      )}
+      {r.deletingBatches > 0 && (
+        <p>{`백그라운드 정리 시작 배치 ${n(r.deletingBatches)}개(작업 ${n(r.deletingRequests)}개) — 진행은 전체 작업의 배치 칸에 보입니다.`}</p>
+      )}
+      {r.alreadyDeletingBatches > 0 && (
+        <p>{`이미 백그라운드에서 삭제 중인 배치 ${n(r.alreadyDeletingBatches)}개 — 진행은 전체 작업의 배치 칸에 보입니다.`}</p>
       )}
       {r.deletedRequests > 0 && <p>결과 파일·파드 정리는 백그라운드에서 이어집니다.</p>}
     </div>
@@ -104,6 +116,11 @@ export function PurgeDialog({ row, purge, progress, setProgress, onResultFocus }
   const nb = snap.batches.length;
   const children = snap.batches.reduce((a, b) => a + b.request_count, 0);
   const nm = snap.mixed_batches.length;
+  // 상한(2026-11-19 사용자 요청 「상한 값도 삭제 시 보여지고」) -- 정리 현황의 서버 limits. 목록은 배치마다 정확한 수를 이미 안다.
+  // 넘는 배치가 있어도 정리 자체는 막지 않는다(「이 스토리지 전부」의 부분 성공 작업 -- 하나 때문에 전부를 막으면 더 나쁘다).
+  const purgeStatus = usePurgeStatus(open);
+  const limits: DeleteLimits | null = parseLimits(purgeStatus.data?.limits);
+  const overBatches = limits === null ? 0 : snap.batches.filter((b) => b.request_count > limits.batch_request_count).length;
   const confirm = () => {
     if (sending.current || purge.isPending) return;
     sending.current = true;
@@ -139,6 +156,18 @@ export function PurgeDialog({ row, purge, progress, setProgress, onResultFocus }
           </p>
         </div>
         {nb > 0 && <p>배치는 배치 기록(항목 목록·이름·실행 설정)과 함께 지워집니다.</p>}
+        {limits !== null && (
+          <p className="text-xs" data-testid="purge-limits">
+            {`한 번에 정리: 단일 작업 ${n(limits.requests_per_call)}개·배치 ${n(limits.batches_per_call)}개(배치마다 작업 `
+              + `${n(limits.batch_request_count)}개·항목 ${n(limits.batch_item_count)}개) · 작업 ${n(limits.sync_request_count)}개를 `
+              + "넘는 배치는 백그라운드"}
+          </p>
+        )}
+        {limits !== null && overBatches > 0 && (
+          <p role="alert" className="text-bad">
+            {`삭제 불가 배치 ${n(overBatches)}개 — 작업이 상한 ${n(limits.batch_request_count)}개를 넘어 이 정리로 지울 수 없습니다(나머지는 정리합니다)`}
+          </p>
+        )}
         {nm > 0 && (
           <p>
             {`다른 스토리지 항목이나 다른 작업이 섞인 배치 ${nm}개(작업 `

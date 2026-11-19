@@ -34,7 +34,8 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from ..artifact_base import resolve_artifact_base
 from ..db import utc_now_iso
-from ..repositories.request_purges import MAX_BATCH_DELETE_CHILDREN, MAX_BATCH_DELETE_ITEMS
+from ..repositories.request_purges import (LIMIT_REASONS, MAX_BATCH_DELETE_ITEMS, RLOCK_YIELD_SECONDS,
+                                           SYNC_CALL_FACTOR, within_call_budget)
 from .artifacts import ArtifactError, job_owner_uid, read_artifact, strip_scheme
 from .auth import Identity, audit_actor, require_admin, require_session_admin
 from .routes_request_purge import MAX_DELETE, MAX_DELETE_BATCHES
@@ -616,12 +617,17 @@ def purge_unregistered_storage(body: PurgeScanHistoryBody, request: Request,
       조용한 창·상한), 같은 감사·정리 아웃박스에 더해 잠근 행으로 미등록(storage_registered)·순수성
       (storage_history_mismatch·storage_history_batch_mixed)을 다시 판정한다. 여기서 먼저 등록 여부를 보는 409 는 빠른
       거절일 뿐이다(진짜 판정은 트랜잭션 안).
-    - 회차 상한 = 작업 삭제 API 와 같다(배치 10·단건 200) -- 한 HTTP 요청이 RLock 을 쥐는 시간을 묶는다. 응답의
+    - 회차 상한 = 작업 삭제 API 와 같다(배치 10·단건 200·배치 자식 합 100000 -- within_call_budget) -- 한 HTTP 요청이 RLock 을
+      쥐는 시간을 묶는다. 배치는 작업 삭제와 같은 진입점(delete_batch_auto, 2026-11-19 -- dms-k8s 14ee820c 이식)이라 동기 문턱
+      (기본 500)을 넘거나 회차의 동기 합(2 × 문턱)을 넘는 배치는 묘비를 세우고 컨트롤러가 청크로 지운다(deleting_batches -- 묘비
+      행의 scan_storage 로 청크마다 순수성을 다시 판정한다). 배치 트랜잭션 사이에는 RLOCK_YIELD_SECONDS 양보. 응답의
       remaining(남은 단건·배치 수 -- 건너뛴 것 포함)을 보고 포탈이 다시 부른다. 건너뛴 항목은 다음 회차의
       exclude_request_ids·exclude_batch_ids 로 돌아와 빠진다(본문 주석) -- 포탈은 시도할 것이 없는 회차에서 멈춘다.
     - 회차마다 묶음 감사 1행(storage_history/purge) -- 지운 요청·배치마다의 감사는 삭제 몸통이 남긴다.
     응답: {storage_name, deleted:[{request_id, job_ids}], deleted_batches:[{batch_id, request_ids, job_ids, dangling}],
-    skipped:[{request_id, reason}], skipped_batches:[{batch_id, reason, request_id}], remaining:{requests, batches}(남은
+    deleting_batches:[{batch_id, request_count, already}](2026-11-19 -- 백그라운드로 지우기 시작했거나 이미 지우는 중 -- 「시도함」
+    으로 센다), skipped:[{request_id, reason}], skipped_batches:[{batch_id, reason, request_id}(상한 사유면 + limit·count·
+    count_at_least)], remaining:{requests, batches}(남은
     전부 -- 건너뛴 것 포함), remaining_untried:{requests, batches}(남은 것 중 이번 본문의 exclude_* 와 이번 회차에 건너뛴
     것을 뺀 수 = 다음 회차가 시도할 것 -- 포탈은 이것이 0 이면 멈춘다. 건너뛴 id 의 **개수**와 remaining 을 비교하면, 건너뛴
     뒤 다른 곳에서 지워진 id 만큼 아직 시도하지 않은 기록을 남긴 채 멈췄다), purge_pending}."""
@@ -635,23 +641,38 @@ def purge_unregistered_storage(body: PurgeScanHistoryBody, request: Request,
     sel = repos.request_purges.scan_storage_selection(name)
     skip_r, skip_b = set(body.exclude_request_ids), set(body.exclude_batch_ids)
     batches = [(b, n) for b, n in sel["batches"].items() if b not in skip_b][:MAX_DELETE_BATCHES]
+    # 회차당 자식 합 예산(request_purges.within_call_budget -- 작업 삭제 API 와 같은 MAX_DELETE_CALL_CHILDREN): 담지 못한 배치는
+    # 이 회차에 시도하지 않고 건너뛴 것으로도 세지 않는다 -- remaining_untried 에 남아 포탈이 다음 회차로 부른다.
+    batches = within_call_budget(batches)[0]
     singles = [r for r in sel["singles"] if r not in skip_r][:MAX_DELETE]
-    deleted, deleted_batches, skipped, skipped_batches = [], [], [], []
+    deleted, deleted_batches, deleting_batches, skipped, skipped_batches = [], [], [], [], []
+    cap, sync_max = settings.batch_delete_max_children, settings.batch_delete_sync_max_children
+    sync_used = 0
     for bid, count in batches:
+        eligible = count <= sync_max and sync_used + count <= SYNC_CALL_FACTOR * sync_max
         try:
-            r = repos.request_purges.delete_batch(
+            r = repos.request_purges.delete_batch_auto(
                 bid, expected_request_count=count, actor=actor, artifact_base=base,
-                quiet_seconds=settings.request_delete_quiet_seconds, max_children=MAX_BATCH_DELETE_CHILDREN,
-                max_items=MAX_BATCH_DELETE_ITEMS, scan_storage=name)
+                quiet_seconds=settings.request_delete_quiet_seconds, cap=cap, sync_max=sync_max,
+                allow_sync=eligible, max_items=MAX_BATCH_DELETE_ITEMS, scan_storage=name)
         except Exception as exc:       # 한 배치가 회차 전체를 500 으로 만들지 않는다(작업 삭제 API 와 같은 이유)
             print(f"storage history purge: batch {bid} failed: {type(exc).__name__}: {exc}", file=sys.stderr)
             skipped_batches.append({"batch_id": bid, "reason": "batch_delete_failed", "request_id": None})
             continue
+        finally:
+            time.sleep(RLOCK_YIELD_SECONDS)        # 배치 트랜잭션 사이 양보(작업 삭제 API 와 같다)
         if r["deleted"]:
+            sync_used += count
             deleted_batches.append({"batch_id": bid, "request_ids": r["request_ids"], "job_ids": r["job_ids"],
                                     "dangling": r["dangling"]})
+        elif r.get("deleting"):
+            n = r.get("request_count")
+            deleting_batches.append({"batch_id": bid, "request_count": count if n is None else n,
+                                     "already": r["already"] is True})
         else:
-            skipped_batches.append({"batch_id": bid, "reason": r["reason"], "request_id": r["request_id"]})
+            lim = ({k: r.get(k) for k in ("limit", "count", "count_at_least")}
+                   if r["reason"] in LIMIT_REASONS else {})
+            skipped_batches.append({"batch_id": bid, "reason": r["reason"], "request_id": r["request_id"], **lim})
     for rid in singles:
         try:
             r = repos.request_purges.delete_terminal(
@@ -667,7 +688,7 @@ def purge_unregistered_storage(body: PurgeScanHistoryBody, request: Request,
             skipped.append({"request_id": rid, "reason": r["reason"]})
     # 아래는 덤이다 -- 무엇을 지웠는지(이미 커밋)가 응답의 본체라, 세다가·감사를 쓰다가 DB 가 끊겨도 500 으로 그것을
     # 숨기지 않는다(작업 삭제 API 의 pending_count 와 같은 이유). remaining None = 모름(포탈은 멈춘다).
-    if deleted or deleted_batches or skipped or skipped_batches:
+    if deleted or deleted_batches or deleting_batches or skipped or skipped_batches:
         reasons: dict = {}
         for s in skipped + skipped_batches:
             reasons[s["reason"]] = reasons.get(s["reason"], 0) + 1
@@ -676,6 +697,7 @@ def purge_unregistered_storage(body: PurgeScanHistoryBody, request: Request,
                 "deleted_request_ids": [d["request_id"] for d in deleted],
                 "deleted_batch_ids": [d["batch_id"] for d in deleted_batches],
                 "deleted_batch_request_count": sum(len(d["request_ids"]) for d in deleted_batches),
+                "deleting_batch_ids": [d["batch_id"] for d in deleting_batches],
                 "skipped_reasons": reasons})
         except Exception as exc:
             print(f"storage history purge: audit failed for {name}: {type(exc).__name__}: {exc}", file=sys.stderr)
@@ -683,7 +705,8 @@ def purge_unregistered_storage(body: PurgeScanHistoryBody, request: Request,
         after = repos.request_purges.scan_storage_selection(name)
         remaining = {"requests": len(after["singles"]), "batches": len(after["batches"])}
         tried_r = skip_r | {x["request_id"] for x in skipped}
-        tried_b = skip_b | {x["batch_id"] for x in skipped_batches}
+        # 백그라운드로 지우는 중인 배치도 「시도함」 -- 다음 회차가 같은 배치를 다시 부르지 않고 포탈 회차 고리가 멈춘다.
+        tried_b = skip_b | {x["batch_id"] for x in skipped_batches} | {x["batch_id"] for x in deleting_batches}
         untried = {"requests": sum(1 for r in after["singles"] if r not in tried_r),
                    "batches": sum(1 for b in after["batches"] if b not in tried_b)}
     except Exception as exc:
@@ -694,7 +717,8 @@ def purge_unregistered_storage(body: PurgeScanHistoryBody, request: Request,
     except Exception as exc:
         print(f"storage history purge: pending_count failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         pending = None
-    return {"storage_name": name, "deleted": deleted, "deleted_batches": deleted_batches, "skipped": skipped,
+    return {"storage_name": name, "deleted": deleted, "deleted_batches": deleted_batches,
+            "deleting_batches": deleting_batches, "skipped": skipped,
             "skipped_batches": skipped_batches, "remaining": remaining, "remaining_untried": untried,
             "purge_pending": pending}
 

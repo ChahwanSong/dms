@@ -1245,17 +1245,48 @@ positional 인자(32자 hex 가 아니면 아무것도 지우지 않고 exit 2),
 배치 1행(`audit_log` 'batch'/'delete' — 배치 이름·옵션·실행 신원·항목·자식 id)이 더해진다.
 - 고를 수 있는 배치: 완료·취소된 배치이고 끝나지 않은 작업이 0 이어야 한다(확인 대기·실행 중이면 배치 상세에서 먼저 취소).
   고를 수 없으면 배치 칸 둘째 줄에 이유가 보인다(「배치 진행 중」·「미완료 작업 있음」(그 배치의 다른 작업이 아직 안
-  끝났다)·「삭제 상한 초과」(아래 상한 — 마우스를 올리면 긴 말)). 배치가 취소됐는데
+  끝났다)·「삭제 중 N%」(백그라운드로 지우는 중 — 아래)). 상한을 넘는 배치는 「삭제 불가·상한」으로 보이지만 **고를 수는 있다**
+  (2026-11-19 — 고르면 툴바의 상한 줄이 「삭제 불가 — 작업 N개가 한 번에 지울 수 있는 상한 M개를 넘습니다」로 바뀌고 확인 창이
+  제출을 막는다). 배치가 취소됐는데
   작업이 남아 있으면(`request_not_deletable` + 그 작업 id) 그 작업의 상세에서 취소한 뒤 다시 지운다.
 - 오래된 배치의 작업 찾기: 배치 상세 머리줄의 「전체 작업에서 이 배치의 작업 보기」(또는 「기록 없음」 칸)가 그 배치의 작업만
   거른 목록(`/jobs?batch=<id>`, API `GET /api/user/requests?batch_id=`)을 연다 — 재실행 이력까지 한자리에 보인다.
-- 상한: 한 번에 배치 10개(`delete_batch_selection_too_large`), 배치 하나에 작업 1000개·항목 10000개(`batch_delete_too_large`
-  — 배치 하나가 한 트랜잭션이라 그동안 api 가 멈춘다; 넘는 배치를 지우는 청크 삭제는 BACKLOG). 확인 창을 연 뒤 재실행 등으로
-  작업 수가 바뀌었으면 `batch_changed`(무변화 — 목록을 다시 보고 다시 시도). 스케줄이 있는 배치는 회차 보존 정리(아래)가 작업
-  수를 줄일 수 있어 같은 사유가 날 수 있다.
+- 상한(2026-11-19 사용자 결정 「배치 단위 삭제 상한 기본 50000개로」 — dms-k8s 14ee820c 이식): 한 번에 단일 작업 200개·배치 10개
+  (`delete_selection_too_large`·`delete_batch_selection_too_large`), 배치 하나에 작업 **50000개**(`DMS_BATCH_DELETE_MAX_CHILDREN` —
+  1–50000, 낮추는 길만 연다; 그 전엔 한 트랜잭션 상한 1000)·항목 10000개(넘으면 `batch_delete_too_large`·
+  `batch_delete_too_many_items`), 한 번에 고른 배치의 작업 합 100000개(`batch_delete_call_budget` — 넘는 배치는 그 호출에서 시도하지
+  않는다, 첫 배치는 늘 시도; 다시 삭제하면 이어서 지운다). 포탈은 이 값을 **서버에서 받아** 작업 목록 툴바의 늘 있는 상한 줄·확인 창의
+  상한 상자에 보이고(`GET /api/admin/request-purges` 의 `limits`), 선택이 넘으면 같은 자리에 「삭제 불가 — …」(이유와 숫자)를 띄우고
+  확인 창이 제출을 막는다. 경합으로 서버가 거절해도(`skipped_batches[]` 의 `limit`·`count`·`count_at_least`) 같은 문구다.
+- **즉시 삭제와 백그라운드 삭제**(2026-11-19): 작업이 `DMS_BATCH_DELETE_SYNC_MAX_CHILDREN`(기본 500) 이하인 배치는 지금처럼 api 한
+  트랜잭션으로 **즉시** 지워진다(응답 `deleted_batches`). 그보다 큰 배치는 api 가 짧은 트랜잭션으로 **묘비**만 세우고(배치 상태
+  「삭제 중」(`Deleting`) + `batch_deletions` 행 — 응답 `deleting_batches[{batch_id, request_count, already}]`), dms-controller 의
+  `batch-delete` 루프(5초, 틱 예산 2초)가 작업 100개씩 청크로 지운다 — 5만 작업이면 **1–2분**(dms-k8s 테스트베드 환산, 이 라인의
+  로컬 실측은 CHANGELOG). 그동안 배치 칸 「삭제 중 N%」, 툴바 「배치 삭제 중 k건」, 배치 상세의 진행 카드가 보이고, 남은 작업이
+  목록·사용량에 잠시 보이며 줄어든다(일시 불일치 — 끝나면 배치가 사라진다). 한 호출의 즉시 삭제 합이 2 × 문턱을 넘는 작은 배치도
+  백그라운드로 간다. 같은 배치를 다시 누르면 `already: true`(멱등). **되돌릴 수 없다** — 그동안 그 배치의 항목 추가·수정·삭제·CSV
+  교체·재실행·이름·실행 설정·`:rescan`·스케줄 무장·기록 삭제는 409 `batch_deleting` 이다(스케줄·보존 회차 기록은 묘비 때 지워진다).
+  「삭제 중」 배치는 끝나지 않은 배치라 그 항목이 가리키는 스토리지의 경로 변경·삭제는 삭제가 끝날 때까지 `storage_in_use` 다.
+  확인 창은 열릴 때 `POST /api/admin/requests:delete-preview` 로 배치마다 정확한 수·최대 commit_order·판정(바로 삭제·백그라운드
+  삭제·이미 삭제 중·이미 지워짐·삭제 불가)을 받는다(목록은 5000 에서 세기를 멈춘다 — 「5,000개 이상」; 상한을 넘는 배치는
+  미리보기도 다시 세지 않고 「상한 + 1 개 이상」만 보인다).
+- **삭제 지연**: 청크가 지울 수 없는 작업을 만나면(끝나지 않은 잡·방금 끝남·다른 배치 항목 참조·묘비 뒤에 생긴 작업) 그 작업은
+  지우지 않고 그 배치 삭제가 「삭제 지연」으로 남아 백오프(15·30·…·900초)로 저절로 다시 시도한다 — 사유와 문제 작업은 배치 상세의
+  진행 카드·`GET /api/admin/request-purges` 의 `batch_deletions[].last_error`·`blocked_request_id`·컨트롤러 이벤트
+  `batch_delete_blocked` 에 있다(그 작업을 취소하거나 조용한 창이 지나면 풀린다).
+- **감사**: 즉시 삭제는 그대로(작업마다 `request / delete` + 배치 `batch / delete` 1행). 백그라운드 삭제는 시작 `batch / delete_start`
+  1행(시작한 관리자) + 청크(≤ 100 작업)마다 `batch / delete_chunk` 1행(지운 작업 id·상태·잡 id·실행 신원 지정(owner_username)·sync
+  결과 소유(chown) — 회차 보존 정리와 같은 최소 기록, `executor: system:batch-delete`) + 끝에 `batch / delete` 1행(배치 스냅숏 +
+  `chunked: true`)이다 — 500개 이하 배치는 작업별 행이, 501개 이상은 청크 요약이 남는 경계가 있다(작업별 결과 메시지·전이 전문은
+  백그라운드 경로에선 남지 않는다).
+- 확인 창을 연 뒤 재실행 등으로 작업 수가 바뀌었으면(또는 최대 commit_order 가 바뀌었으면 — 2026-11-19 확인 창이 함께 보낸다)
+  `batch_changed`(무변화 — 목록을 다시 보고 다시 시도). 스케줄이 있는 배치는 회차 보존 정리(아래)가 작업 수를 줄일 수 있어 같은
+  사유가 날 수 있다.
 - 큰 배치의 파일·파드 정리는 오래 걸린다 — 정리 루프는 틱(15초)마다 20행을 진행하고, 파드가 남은 작업은 지운 파드가 끝났는지
-  한 번 더 봐야 해서(작업마다 k8s 스윕 두 번) 작업 1000개면 **30분 안팎**(가짜 k8s 실측 27분), 한 번에 고를 수 있는 최대(배치
-  10개 × 1000)면 4~5시간이다. 그동안 다른 삭제의 정리도 같은 줄에 선다. 툴바 「정리 중 N건」이 줄어드는 것으로 본다. 줄을
+  한 번 더 봐야 해서(작업마다 k8s 스윕 두 번) 작업 1000개면 **30분 안팎**(가짜 k8s 실측 27분), 50000개(상한)면 ~25시간(같은 비율
+  외삽 — 미측정)이다. 백그라운드 배치 삭제가 넣은 정리 행은 배치마다 별도 줄(레인 — `request_purges.purge_group`)에 서고 정리 루프가
+  줄을 돌아가며 집어(2026-11-19), 큰 배치 뒤에 지운 다른 작업의 정리가 그 배치의 첫 스윕을 다 기다리지 않는다. 툴바 「정리 중 N건」이
+  줄어드는 것으로 본다. 줄을
   서 기다린 시간은 지연이 아니다 — 「지연」(`purge_waiting_pods`)은 그 작업의 첫 k8s 스윕부터 10분이 지나도 파드가 남을
   때만이다.
 - 배치 화면의 「배치 삭제」(`DELETE /api/admin/batches/{id}`)는 그대로 **배치 기록만** 지운다(작업은 남는다). 그렇게 남은
@@ -1278,25 +1309,33 @@ positional 인자(32자 hex 가 아니면 아무것도 지우지 않고 exit 2),
 1회 — 그 작업을 취소하면 풀린다). 배포 직후 대량 삭제는 없다: 배포 전 회차는 기록(`batch_rounds`)이 없어 가장 오래된 회차 하나로
 보고, 배포 뒤 기록된 회차가 10개가 될 때(일일 스케줄이면 10일 뒤) 한꺼번에 정리된다. 사용량 분석의 그 배치 몫 scan 이력(추이 점·
 scan 수)도 함께 줄어든다(의도한 결과). 정리 현황은 스케줄의 `pruned_total`(누적 건수 — null 은 아직 정리 없음, 0 과 다르다)·
-`pruned_at`(작업 → 배치 스케줄러)과 툴바 「정리 중 N건」이다. 남는 상한: 항목 수 × 보존 회차가 배치 단위 삭제 상한(작업 1000개)을
-넘으면(예: 항목 101개 이상 × 10회차) 정리가 돌아도 그 배치를 **배치 단위로는** 지울 수 없다 — 스케줄 추가 창이 경고한다(BACKLOG).
+`pruned_at`(작업 → 배치 스케줄러)과 툴바 「정리 중 N건」이다. 남는 상한: 항목 수 × 보존 회차가 배치 단위 삭제 상한(기본 50000 —
+`DMS_BATCH_DELETE_MAX_CHILDREN`, 2026-11-19 전엔 1000)을 넘으면(예: 기본 10회차면 항목 5001개 이상) 정리가 돌아도 그 배치를 **배치
+단위로는** 지울 수 없다 — 스케줄 추가 창이 경고한다(BACKLOG).
 옛 이미지로 내리면 정리만 멈추고 회차 경계 표(`batch_rounds`)·정리 칸(`batch_schedules.pruned_at`·`pruned_total`)은 남는다(코드 읽기
 — **미검증**).
 
-**env(앞의 둘은 `deploy/k8s/20-config.yaml`, 기본값과 같은 값):**
+**env(`DMS_BATCH_SCHEDULE_KEEP_ROUNDS` 밖의 넷은 `deploy/k8s/20-config.yaml`, 기본값과 같은 값):**
 
 | env | 기본 | 소비자 | 뜻 |
 |---|---|---|---|
 | `DMS_REQUEST_DELETE_QUIET_SECONDS` | 60 | api | 요청·잡의 마지막 갱신 후 이 초가 지나야 지울 수 있다(`request_recently_finished`). 음수는 기동 거부, 0 은 e2e 전용 |
 | `DMS_REQUEST_PURGE_INTERVAL_SECONDS` | 15 | controller | request-purge 루프 간격 = 실패 백오프의 기준 단위. 1 미만은 기동 거부 |
 | `DMS_BATCH_SCHEDULE_KEEP_ROUNDS` | 10 | controller(정리)·api(표시) | 스케줄이 있는 배치의 보존 회차 수(2026-11-16, 1–100 — 밖이면 기동 거부) — 위 「스케줄 회차 보존 정리」. **base `20-config.yaml` 엔 키가 없다**(dms-k8s 라인과 같이 쓰는 공용 base — 기본값 10 은 `config.py` Settings). 바꾸려면 사이트 오버레이의 ConfigMap 패치에 넣는다(api·controller 둘 다 같은 값 — 표시와 정리가 어긋나지 않게; ConfigMap 만 바뀐 apply 뒤엔 rollout restart). dms-k8s 의 base 20-config 는 자기 라인 값을 싣는다(처음 `"5"`, 같은 날 `"10"`) — 공용 base 를 맞추려고 그 파일을 가져올 때 값이 이 라인 기본(10)과 다르면 보존 수가 조용히 바뀐다(ConfigMap 이 코드 기본보다 우선 — `tests/test_config_batch.py` 가 「키 없음 또는 코드 기본과 같음」만 통과시킨다) |
+| `DMS_BATCH_DELETE_MAX_CHILDREN` | 50000 | api | 배치 하나를 배치 단위로 지울 수 있는 작업(재실행 이력 포함) 상한(2026-11-19, 1–50000 — 밖이면 기동 거부). 넘으면 `batch_delete_too_large`. 포탈 상한 줄·스케줄 화면 경고가 이 값을 쓴다. base 20-config 의 값은 dms-k8s 와 바이트 동일한 줄(코드 기본과 같다 — 같은 그물이 지킨다) |
+| `DMS_BATCH_DELETE_SYNC_MAX_CHILDREN` | 500 | api | 이 수 이하 배치는 즉시(api 한 트랜잭션), 넘으면 백그라운드(컨트롤러 `batch-delete` 청크) — 위 「즉시 삭제와 백그라운드 삭제」(2026-11-19, 0–1000 — 0 = 늘 백그라운드; 1000 을 넘는 한 트랜잭션은 readiness 1초 타임아웃에 닿아 막는다) |
+
+**롤백 노트(2026-11-19 백그라운드 배치 삭제)**: 옛 이미지로 되돌리기 전에 `GET /api/admin/request-purges` 의 `batch_deletions` 가
+비었는지 확인한다 — 진행 중인 묘비(배치 상태 `Deleting`)는 옛 컨트롤러가 끝내지 못한다(옛 api 는 그 배치를 진행 중으로 보고 지우지
+않는다). 새 이미지로 다시 올리면 이어서 끝난다. `batch_deletions` 테이블·`request_purges.purge_group` 칸은 남는다(코드 읽기 — **미검증**).
 
 마이그레이션은 자동이다(`migrate` 가 `request_purges` 테이블과 `idx_data_jobs_request`·`idx_plans_request`·
 `idx_batch_items_request` 인덱스를 만든다). 배치 단위 삭제(2026-10-11)는 `idx_requests_batch(batch_id)` 를
 `idx_requests_batch_order(batch_id, commit_order)` 로 바꾼다(새 것을 만든 뒤 옛 것을 지운다 — 한 배치만 거른 목록이 큰
 테이블에서 전체를 훑지 않게). 새 인덱스를 만드는 동안 `requests` 쓰기가 기다린다(테이블 크기에 비례 — 다른 인덱스
 추가와 같은 성질). 회차 보존 정리(2026-11-16)는 `batch_rounds` 테이블과 `batch_schedules.pruned_at`·`pruned_total` 칸을 더한다
-(기배포 행은 NULL = 아직 정리 없음, 백필 없음).
+(기배포 행은 NULL = 아직 정리 없음, 백필 없음). 배치 단위 삭제 상한 50000(2026-11-19)은 `batch_deletions` 테이블과
+`request_purges.purge_group` 칸(기배포 행은 NULL = 기본 정리 줄)을 더한다.
 
 ---
 

@@ -94,6 +94,15 @@ PostgreSQL(제어면) + React 포탈 + 노드 에이전트 + Volcano gang-schedu
   하나(켜는 라우트·PreviewReady 분기·`auto_confirm_hold` 공용 — scan·미지 연산은 자동 확인 없음)다 — 세 곳에 따로 쓰지 마라.
 - **새 DB 컬럼은 CREATE TABLE 과 `_ensure_columns` 양쪽**(구형 DB 업그레이드 경로).
   전수 열거 그물(`test_migrations.py`)이 테이블·인덱스 추가·삭제를 잡는다.
+- **배치(batch_id)를 가리키는 새 테이블은 배치 삭제 목록에도**(2026-11-16). `repositories/batches.py` 의 `BATCH_DELETE_TABLES`
+  (튜플 순서 = 잠금 순서 batch_items → batches → batch_deletions → batch_rounds → batch_schedules → batch_schedule_runs — 스케줄
+  발사와 같은 방향, 묘비 `batch_deletions` 는 2026-11-19; 발사만 그 사이에 스토리지 공유 잠금을 쥔다)에 넣고 배치 삭제 세 경로
+  (`BatchesRepository.delete`·`RequestPurgesRepository.delete_batch`·`RequestPurgesRepository.finish_batch_delete` — 백그라운드 배치
+  단위 삭제의 마무리) 모두에 같은 트랜잭션의 DELETE 를 넣거나, 이유와 함께 `BATCH_DELETE_EXEMPT_TABLES` 에. 그물
+  (`test_batch_delete_tables_cover_every_batch_id_column`)은 `batch_id` 이름의 컬럼만 본다. 아래 요청 삭제 목록과는 별개다.
+  **배치 단위 삭제의 API 한 트랜잭션은 동기 문턱(`DMS_BATCH_DELETE_SYNC_MAX_CHILDREN`, 기본 500) 이하로 묶는다**(2026-11-19 상한 기본
+  50000 — 큰 배치는 묘비(상태 `Deleting`) + 컨트롤러 `batch-delete` 청크): 5만을 한 트랜잭션으로 지우는 경로를 되살리지 말고, 묘비가
+  선 배치를 바꾸는 새 경로는 `_reject_frozen` + 저장소 원자 가드(409 `batch_deleting`)를 같이 둔다(`docs/ARCHITECTURE.md` 「불변식」).
 - **요청·잡을 가리키는 새 테이블·컬럼은 요청 삭제 목록에도**(2026-10-08). FK 가 0건이라 빠지면 지운 요청의 행이 조용히
   고아가 된다 — `repositories/request_purges.py` 의 `PURGED_TABLES` + `_purge_locked`(delete_terminal·delete_batch 공용 몸통, 늦게 들어올 수 있으면 `finish` 의
   scrub 도)에 DELETE 를 넣거나, 지우지 않는 이유와 함께 `PURGE_EXEMPT_TABLES` 에. 그물

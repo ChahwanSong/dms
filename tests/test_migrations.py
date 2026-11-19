@@ -589,13 +589,15 @@ def test_migrate_creates_exactly_the_expected_tables(tmp_path):
     # request_purges(2026-10-08): 요청 삭제의 정리 아웃박스(행 = k8s·아티팩트 정리 대기).
     # batch_schedules·batch_schedule_runs(2026-11-16): 배치 스케줄러(배치당 스케줄 하나 + 회차 이력 -- batches 류처럼 명시 추가).
     # batch_rounds(2026-11-16): 배치 회차 경계(회차 보존 정리 -- _rescan_locked 가 남긴다, batches 류처럼 명시 추가).
+    # batch_deletions(2026-11-19): 배치 단위 백그라운드 삭제의 묘비·진행 장부(batches 류처럼 명시 추가).
     assert actual == set(ALL_TABLES) | {"batches", "batch_items",
                                         "schema_migrations",
                                         "verification_codes", "sync_pairs",
                                         "mail_settings", "verification_failures",
                                         "scan_report_digests", "node_exclusions",
                                         "request_purges",
-                                        "batch_schedules", "batch_schedule_runs", "batch_rounds"}
+                                        "batch_schedules", "batch_schedule_runs", "batch_rounds",
+                                        "batch_deletions"}
 
 
 def test_migrate_adds_prune_columns_to_existing_batch_schedules(db):
@@ -628,6 +630,33 @@ def test_prune_columns_are_declared_in_the_create_table_block():
     sql = re.sub(r"--[^\n]*", "", block.group(0))
     assert re.search(r"^\s*pruned_at\s+TEXT\s*,\s*$", sql, re.M)
     assert re.search(r"^\s*pruned_total\s+INTEGER\s*\)", sql, re.M)
+
+
+def test_purge_group_is_declared_in_the_create_table_block():
+    # 2026-11-19 정리 아웃박스 레인(request_purges.purge_group -- 배치 청크 삭제의 due() 공평성): diag_logs 와 같은 이유로 CREATE
+    # 쪽 선언을 소스로 고정한다(_ensure_columns 쪽은 위 등식·형 테스트가 본다).
+    import inspect
+    import re
+    from dms import migrations
+    src = inspect.getsource(migrations._apply_migrations)
+    block = re.search(r'CREATE TABLE IF NOT EXISTS request_purges \(.*?"""', src, re.S)
+    assert block is not None
+    sql = re.sub(r"--[^\n]*", "", block.group(0))
+    assert re.search(r"^\s*updated_at\s+TEXT NOT NULL\s*,\s*$", sql, re.M)
+    assert re.search(r"^\s*purge_group\s+TEXT\)", sql, re.M)
+
+
+def test_purge_group_backfills_null_on_an_old_request_purges_table(tmp_path):
+    # 기배포 DB(purge_group 이전 request_purges)를 migrate 하면 열이 생기고 기존 행은 NULL(= 기본 레인)이다.
+    db = Database.connect(f"sqlite:///{tmp_path}/old.db")
+    db.execute("""CREATE TABLE request_purges (request_id TEXT PRIMARY KEY, jobs TEXT NOT NULL, artifact_base TEXT,
+        stage TEXT NOT NULL, outcomes TEXT, attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT,
+        next_attempt_at TEXT NOT NULL, requested_by TEXT NOT NULL, requested_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
+    db.execute("""INSERT INTO request_purges (request_id, jobs, stage, next_attempt_at, requested_by, requested_at, updated_at)
+                  VALUES ('r1', '[]', 'k8s', 'x', 'o', 'x', 'x')""")
+    migrate(db)
+    assert _declared_type(db, "request_purges", "purge_group") == "TEXT"
+    assert db.query_one("SELECT purge_group FROM request_purges WHERE request_id = 'r1'") == {"purge_group": None}
 
 
 def test_migrate_creates_exactly_the_expected_indexes(tmp_path):
@@ -783,7 +812,7 @@ def test_every_post_v1_column_rides_both_migration_paths(tmp_path):
     db = Database.connect(f"sqlite:///{tmp_path}/t.db")
     migrate(db)
     pairs = _ensure_pairs()
-    assert len(pairs) == 47      # 추출 자기 검증 -- 0 매치면 등식이 공허해진다(프록시 3 + 호스트 네트워크 1 + CA 1 + storages.user_enabled 1 + portal_subtitle 1 + batches.preview_round 1 + batches.auto_confirm_by 1 + accounts.root_granted 1 + data_jobs.pods_gc_at 1 + batch_schedules.storage_binding 1 + batch_schedules.pruned_at·pruned_total 2)
+    assert len(pairs) == 48      # 추출 자기 검증 -- 0 매치면 등식이 공허해진다(프록시 3 + 호스트 네트워크 1 + CA 1 + storages.user_enabled 1 + portal_subtitle 1 + batches.preview_round 1 + batches.auto_confirm_by 1 + accounts.root_granted 1 + data_jobs.pods_gc_at 1 + batch_schedules.storage_binding 1 + batch_schedules.pruned_at·pruned_total 2 + request_purges.purge_group 1)
     for table, v1 in _V1_COLUMNS.items():
         cols = {r["name"] for r in db.query(f"PRAGMA table_info({table})")}
         ensured = {c for t, c, _ in pairs if t == table}
@@ -800,7 +829,7 @@ def test_ensure_columns_types_match_create_declarations(tmp_path):
     pairs = _ensure_pairs()
     # 추출 자기 검증을 이 테스트에도 둔다 -- 위 등식 테스트가 지워지거나 홀로
     # 실행될 때 정규식이 0 매치면 아래 루프가 공허하게 통과하기 때문이다.
-    assert len(pairs) == 47
+    assert len(pairs) == 48
     for table, column, coltype in pairs:
         assert _declared_type(db, table, column) == coltype, (table, column)
 

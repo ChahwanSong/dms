@@ -342,6 +342,44 @@ def test_purge_excludes_previously_skipped_so_later_rows_are_reached(client, ses
     assert r2["remaining"] == {"requests": 1, "batches": 1}            # 건너뛴 것은 남은 수에 그대로 센다
 
 
+def test_batches_beyond_the_call_budget_stay_untried_for_the_next_round(client, session_admin, monkeypatch):
+    # 2026-11-19(dms-k8s 9166b8e2·14ee820c 이식): 회차의 배치 자식 합도 작업 삭제 API 와 같은 예산(MAX_DELETE_CALL_CHILDREN)으로
+    # 묶는다 -- 담지 못한 배치는 이 회차에 시도하지 않고 건너뛴 것으로도 세지 않아 remaining_untried 에 남고, 다음 회차가 지운다.
+    import dms.repositories.request_purges as rpm
+    monkeypatch.setattr(rpm, "MAX_DELETE_CALL_CHILDREN", 2)
+    repos = client.app.state.repos
+    first, _ = _batch(repos, storage="old", n=2)
+    second, _ = _batch(repos, storage="old", n=2)
+    r = client.post(PURGE, json={"storage_name": "old"}).json()
+    assert [d["batch_id"] for d in r["deleted_batches"]] == [first] and r["skipped_batches"] == []
+    assert r["deleting_batches"] == []
+    assert r["remaining"] == {"requests": 0, "batches": 1}
+    assert r["remaining_untried"] == {"requests": 0, "batches": 1}
+    r = client.post(PURGE, json={"storage_name": "old"}).json()
+    assert [d["batch_id"] for d in r["deleted_batches"]] == [second]
+    assert r["remaining_untried"] == {"requests": 0, "batches": 0}
+
+
+def test_big_batch_goes_to_the_background_and_counts_as_tried(client, session_admin, monkeypatch):
+    # 2026-11-19: 동기 문턱을 넘는 배치는 묘비(scan_storage 를 묘비 행에 -- 청크마다 순수성 재판정)를 세우고 deleting_batches 로
+    # 알린다. 「시도함」으로 세어 포탈 회차 고리가 멈추고, 같은 배치를 다시 부르면 already(멱등).
+    import dataclasses
+    monkeypatch.setattr(client.app.state, "settings",
+                        dataclasses.replace(client.app.state.settings, batch_delete_sync_max_children=1))
+    repos = client.app.state.repos
+    bid, kids = _batch(repos, storage="old", n=2)
+    r = client.post(PURGE, json={"storage_name": "old"}).json()
+    assert r["deleted_batches"] == [] and r["skipped_batches"] == []
+    assert r["deleting_batches"] == [{"batch_id": bid, "request_count": 2, "already": False}]
+    assert r["remaining_untried"] == {"requests": 0, "batches": 0}
+    d = repos.db.query_one("SELECT scan_storage, expected_request_count FROM batch_deletions WHERE batch_id = :b",
+                           {"b": bid})
+    assert d == {"scan_storage": "old", "expected_request_count": 2}
+    assert repos.batches.get(bid)["status"] == "Deleting"
+    r = client.post(PURGE, json={"storage_name": "old"}).json()
+    assert r["deleting_batches"] == [{"batch_id": bid, "request_count": 2, "already": True}]
+
+
 def test_remaining_untried_ignores_excluded_ids_that_vanished(client, session_admin, monkeypatch):
     """리뷰: 포탈이 건너뛴 id 의 **개수**와 remaining 을 비교해 멈추면, 건너뛴 뒤 다른 곳에서 지워진 id 만큼 시도하지 않은
     기록을 남긴 채 멈췄다. 서버가 「다음 회차가 시도할 수」를 직접 센다."""

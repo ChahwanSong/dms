@@ -18,7 +18,8 @@ def test_request_and_job_help_cover_every_server_state():
 
 def test_batch_help_covers_every_batch_state():
     # Cancelling(2026-10-16): 취소 라우트가 쓰는 비종단 상태 -- orchestrator 가 굴리지 않고 종단도 아니라 위 두 목록 밖이다.
-    assert set(HELP["batch"]) == set(_BATCH_DRIVEN) | set(_TERMINAL_BATCH) | {"Cancelling"}
+    # Deleting(2026-11-19): 배치 단위 백그라운드 삭제의 묘비 -- 비종단, 되돌리기 없음(repositories/batches.DELETING).
+    assert set(HELP["batch"]) == set(_BATCH_DRIVEN) | set(_TERMINAL_BATCH) | {"Cancelling", "Deleting"}
 
 
 def test_stage_help_keys():
