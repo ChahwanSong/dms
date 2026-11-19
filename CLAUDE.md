@@ -53,7 +53,8 @@ PostgreSQL(제어면) + React 포탈 + 노드 에이전트 + Volcano gang-schedu
   같은 username + epoch 이고, 특권 목록 이름은 자동 생성하지 않으며 root·admin 은 SSO 로 막는다.
 - **공유 토큰은 계정·배포 경로를 못 만진다**(2026-10-07). 모든 노드 에이전트가 가진 Bearer 토큰(role admin,
   auth=token)으로 계정을 다시 만들거나 릴리스로 옛 이미지에 롤백하면 특권 게이트가 통째로 무효가 된다 — 계정 변경(관리자 비밀번호
-  재설정·인증 잠금 해제 포함, 2026-11-03)은 `accounts_session_required`, 빌드·릴리스·컨트롤 상태·레지스트리 삭제·artifact base 변경·작업(요청) 삭제·배치 기록 삭제(2026-10-26)·배치 스케줄 삭제(2026-11-16)는
+  재설정·인증 잠금 해제 포함, 2026-11-03)은 `accounts_session_required`, 빌드·릴리스·컨트롤 상태·레지스트리 삭제·artifact base 변경·작업(요청) 삭제·배치 기록 삭제(2026-10-26)·배치 스케줄 삭제(2026-11-16)·
+  k8s 연동 변경(호출 노드·주기, 클러스터 등록·주소·토큰·TLS·삭제, StorageClass 매핑 — 2026-10-25, `routes_k8s`)은
   `auth.require_session_admin`(`admin_session_required`). 그런 새 변경 라우트를 만들면 `require_admin` 이 아니라
   이 의존성을 쓴다. 특권 목록(env `DMS_PRIVILEGED_REQUESTERS` ∪ 계정 화면 부여, 2026-10-12 — 자격 판정은 `privileged.privileged_names`,
   계정 보호는 `privileged.protected_names`(비활성 부여 계정 포함)를 거친다) 이름 계정은 특권 세션 관리자만
@@ -90,8 +91,8 @@ PostgreSQL(제어면) + React 포탈 + 노드 에이전트 + Volcano gang-schedu
   컨트롤러 `batch-delete` 청크): 5만을 한 트랜잭션으로 지우는 경로를 되살리지 말고, 묘비가 선 배치를 바꾸는 새 경로는 `_reject_frozen` +
   저장소 원자 가드(409 `batch_deleting`)를 같이 둔다(`docs/ARCHITECTURE.md` 「불변식」).
 - **요청·잡을 가리키는 새 테이블·컬럼은 요청 삭제 목록에도**(2026-10-08). FK 가 0건이라 빠지면 지운 요청의 행이 조용히
-  고아가 된다 — `repositories/request_purges.py` 의 `PURGED_TABLES` + `_purge_locked`(delete_terminal·delete_batch 공용 몸통, 늦게 들어올 수 있으면 `finish` 의
-  scrub 도)에 DELETE 를 넣거나, 지우지 않는 이유와 함께 `PURGE_EXEMPT_TABLES` 에. 그물
+  고아가 된다 — `repositories/request_purges.py` 의 `PURGED_TABLES` + `_purge_locked`(delete_terminal·delete_batch·prune_round_children(2026-11-16 회차 보존 정리)·
+  delete_batch_chunk(2026-11-19 백그라운드 배치 삭제) 공용 몸통, 늦게 들어올 수 있으면 `finish` 의 scrub 도)에 DELETE 를 넣거나, 지우지 않는 이유와 함께 `PURGE_EXEMPT_TABLES` 에. 그물
   (`test_request_delete_covers_every_reference_table`)은 `request_id`·`job_id`·`entity_id` 이름의 컬럼만 본다 — 다른 이름으로
   요청·잡 id 를 담으면 그물 밖이다.
 - **base 매니페스트는 사이트 중립, 실 태그는 오버레이에**(2026-09-14). `deploy/k8s` 의

@@ -16,11 +16,12 @@
 | NFS export(`/data/dms_shared`·`/data/k8s_pv`·빌드 소스 ro) | `docs/ARCHITECTURE.md` §5·§19.4·§22 · `README.md` 「Shared vs per-cluster」 |
 | CephFS `dmsfs:/k8s` 하위 트리·cephx·부팅 가드 | `docs/ARCHITECTURE.md` §13·§13.1·§13.2 |
 | pkg-01 PostgreSQL `dmsdb_k8s`(지금은 되돌림용 — §7) | `docs/ARCHITECTURE.md` §14 |
-| 입구 Traefik(`roles/traefik`, `make traefik-dmsk8s`)·호스트 edge(haproxy)·`portal_edge` 스위치·MetalLB·ingress-nginx(되돌림 입구)·호스트 VIP·릴레이·TLS CA | `docs/ARCHITECTURE.md` §15.2~§15.5·§19.5·§19.7 · `README.md` 「Portal edge」 |
+| 입구 Traefik(`roles/traefik`, `make traefik-dmsk8s`)·호스트 edge(haproxy)·`portal_edge` 스위치·IP 직접 접속(`traefik_portal_ip_access`, IngressRoute `dms/dms-portal-ip`)·MetalLB·ingress-nginx(되돌림 입구)·호스트 VIP·릴레이·TLS CA | `docs/ARCHITECTURE.md` §15.2~§15.5·§19.5·§19.7·§19.8 · `README.md` 「Portal edge」 |
 | 빌드 소스 라우팅(`/home/mason/dms-dev/dms-k8s`, cron ff, worktree 금지) | `docs/ARCHITECTURE.md` §16 · `README.md` 「Build-source routing」 |
 | PV 스토리지·csi-driver-nfs·StorageClass `tb-*`·RBAC/PVC 픽스처·DMS 리더 SA | `docs/ARCHITECTURE.md` §22 · `README.md` 「PV storage」 |
 | 처음부터 재구축·호스트 재부팅·validate | `docs/ARCHITECTURE.md` §17·§18·§21 · `README.md` 「Rebuild from scratch」·「After a host reboot」·「Validation」 |
-| 비밀(SSH 키·CA·kubeconfig·DB 비밀번호·리더 토큰)의 위치 | `README.md` 「Secrets — where they live」 |
+| 사내 AD SSO 시험 IdP(호스트 docker — Samba AD DC `dms-idp-dc`·Keycloak `dms-idp-kc`·PostgreSQL `dms-idp-db`, `make idp-*`) | `docs/ARCHITECTURE.md` §24 · `README.md` 「테스트베드 AD SSO」 |
+| 비밀(SSH 키·CA·kubeconfig·DB 비밀번호·리더 토큰·IdP 비밀 `files/idp/`·IdP 인증서 키 `files/tls/idp/`)의 위치 | `README.md` 「Secrets — where they live」 |
 
 testbed 저장소의 「Then the DMS application」 목록과 `docs/ARCHITECTURE.md` §17 5단계는 옛 deploy/README 절 번호(§13-x 등)를 가리킨다 —
 지금 어디에 있는지는 §11.
@@ -61,6 +62,7 @@ deploy/README 머리의 자리표시자가 이 테스트베드에서 무엇인�
 | `<SHARED_DIR>` (+ `SHARED_DIR_ID`) | `/dms_shared` — 호스트 NFS `10.10.10.1:/data/dms_shared` 를 3노드가 fstab 으로(`lookupcache=positive`). id 는 `values.env` 의 `SHARED_DIR_ID` | `values.env` + `patch-config.yaml` 의 `DMS_ARTIFACT_BASE_URI`(둘이 같아야 한다 — §3) |
 | `<FQDN>` | `dms-k8s.local`(호스트 `/etc/hosts` → VIP-A). DMS 쪽은 `values.env` 의 `PORTAL_DOMAIN` — Ingress `dms/dms-portal-traefik` 의 host(2026-11-16 부터 고정 오버레이도 필수) | testbed `group_vars/dmsk8s.yml` `portal_dns` · `values.env` |
 | `<VIP-A>` | `10.10.10.1:443` — 호스트 dmsbr0 주소 = 호스트 edge(배포판 haproxy, Avi VS-443 흉내: L4·`send-proxy-v2`·TCP 헬스체크·3600초, 풀 = **노드 셋** :443 의 Traefik). 외부 입구 `https://dms-k8s.local:8443`(LAN·Tailscale 주소의 :8443 — 같은 edge). `values.env` 에 `PORTAL_VIP` 는 없다(고정 오버레이는 선택 — §4-10) | testbed `portal_edge_vip`, `README.md` 「Portal edge」 |
+| IP 직접 접속(테스트베드 전용, 2026-11-17 — DMS 는 설치·변경하지 않는다) | testbed `traefik_portal_ip_access: true` → `roles/traefik` 의 IngressRoute `dms/dms-portal-ip`(ingressClassName `traefik`, websecure 만, Host 가 VIP-A·`host_ext_ips`(= `tbinfo.py portal-ip-hosts dmsk8s`) 가운데 하나와 정확히 같을 때 → `dms-api:http`, `tls: {}`) + 같은 주소의 IP SAN(아래 `<PORTAL_TLS_SECRET>`). hosts 를 둘 수 없는 기기(Tailscale 휴대폰)는 테스트베드 CA(`files/tls/ca.crt` 만 — `ca.key` 는 옮기지 않는다)를 신뢰한 뒤 `https://<Tailscale 주소>:8443/` 로 연다. LAN 은 `https://<LAN 주소>:8443/`, 호스트는 `https://10.10.10.1/` 이다. `http://` 와 그 밖의 이름·주소는 404 다. ns `dms` 가 없으면 역할이 적용을 건너뛰므로 DMS 설치 때 `make traefik-dmsk8s` 를 한 번 더 돈다(§4-5). 끄기: `traefik_portal_ip_access: false` + `make traefik-dmsk8s`(라벨로 지운다 — 늘어난 SAN 은 다음 재발급까지 남지만 무해) | testbed `README.md` 「Portal edge」 Bare-IP access · `docs/ARCHITECTURE.md` §15.5 「IP 접속」·§19.8 |
 | 입구 Traefik(DMS 는 설치·변경하지 않는다) | `kube-system/traefik` DaemonSet — rke2-traefik 모양(`docker.io/rancher/hardened-traefik:v3.7.4-build20260608`, 프로덕션과 같은 판). 노드 셋 hostPort 80 → web :8000·443 → websecure :8443(TLS), IngressClass `traefik`(기본 아님), websecure `proxyProtocol.trustedIPs` = `10.10.10.1/32`(호스트 edge = Avi SE 자리), forwardedHeaders 비움. cp1 의 taint 는 toleration 으로 넘는다(프로덕션 RKE2 마스터는 taint 가 없다) | testbed `roles/traefik`·`group_vars/dmsk8s.yml` 의 `traefik_*` |
 | (되돌림 입구) | MetalLB VIP `10.20.20.101` → ingress-nginx(testbed `portal_edge: ingress` — §7) | testbed `public_vip` · `patch-ingress.yaml`·`patch-metallb.yaml` |
 | `<마스터1..3>` | **`k8s-cp1` 10.10.10.20 한 대**(§10) | testbed 인벤토리 |
@@ -72,7 +74,7 @@ deploy/README 머리의 자리표시자가 이 테스트베드에서 무엇인�
 | 메일 발송 방식 | `stub`(코드 기본 — `config.py` `mailer_backend`; 사내 릴레이에 닿지 않는다). 「k8s 연동」 「개요」·「클러스터」 탭의 stub 경고가 **정상**이다 | 코드 기본 |
 | `<DMS_TAG>` | `dN` 계열(2026-10-26 d1 부터). **현재 값은 `kustomization.yaml` 의 `newTag`(dms·dms-agent 두 항목)와 `patch-config.yaml` 의 `DMS_JOB_IMAGE`** 를 본다. 그 전의 `k0`~`k4` 이력은 `kustomization.yaml` 머리 주석·CHANGELOG 「테스트베드 분리」 | 오버레이 |
 | `<사내CA>` | 테스트베드 CA `~/dms-dev/testbed/files/tls/ca.crt`(gitignore, 영구 사본 `/data/dms-testbed/backup-20261021/tls/`) | testbed `README.md` 「Secrets」·`docs/ARCHITECTURE.md` §15.4 |
-| `<PORTAL_TLS_SECRET>` | `dms-portal-tls` — testbed `make portal-tls-dmsk8s` 가 같은 CA 로 만든다(SAN `dms-k8s.local`·`10.20.20.101`·`PORTAL_TLS_EXTRA_IPS`) | `values.env` 의 `PORTAL_TLS_SECRET` |
+| `<PORTAL_TLS_SECRET>` | `dms-portal-tls` — testbed `make portal-tls-dmsk8s` 가 같은 CA 로 만든다. SAN = `dms-k8s.local`·`10.20.20.101`(`public_vip`)·`PORTAL_TLS_EXTRA_IPS`(testbed Makefile 기본 = 호스트의 Tailscale 주소)·`tbinfo.py portal-ip-hosts dmsk8s`(`traefik_portal_ip_access` 클러스터만 — VIP-A 10.10.10.1 + `host_ext_ips`). 2026-11-17 재발급 뒤 라이브 SAN 은 DNS 하나·IP 넷(10.20.20.101·10.10.10.1·LAN·Tailscale). 요청한 SAN 이 하나라도 빠지면 `make portal-tls-dmsk8s` 가 `FORCE` 없이 스스로 재발급한다(`CHECK=1` 미리보기). IP 로 붙는 연결은 SNI 가 없어서 Traefik 이 접속한 주소(edge 경유면 PROXY v2 목적지)가 IP SAN 인 인증서를 고른다 — 그래서 IP 접속 주소는 모두 SAN 이어야 한다 | `values.env` 의 `PORTAL_TLS_SECRET` · testbed `docs/ARCHITECTURE.md` §15.4 |
 | DB | CNPG `dms-pg`(DB·사용자 `dms`, 인스턴스 3개 = cp1·w1·w2) — 2026-11-03 T7 부터. 옛 pkg-01 `dmsdb_k8s` 는 되돌림용(§7) | `values.env` 의 `PG_*` |
 | 포탈 부제 | 「K8S 테스트베드」(`PUT /api/admin/portal-settings` — 두 포탈을 구분한다, §6-5) | DB |
 
@@ -127,6 +129,9 @@ validate 가 확인). 인프라 전제 절의 `PORTAL_VIP=10.20.20.101 sh deploy
 **전제**: testbed 저장소에서 dmsk8s 인프라가 섰다 — `README.md` 「Rebuild from scratch」 0~2b(또는 `make all-dmsk8s`) 뒤 `make validate-dmsk8s`
 가 FAIL 0. 이 시점의 「portal TLS not issued yet」 INFO·「namespace dms absent」 INFO(edge 백엔드 DOWN 도 INFO, DMS Ingress·readyz 검사는
 건너뜀)는 정상이다(DMS 네임스페이스·Ingress 가 아직 없다 — Traefik 자체는 `all-dmsk8s` 의 `make traefik-dmsk8s` 가 이미 깔았다).
+dmsk8s 는 `idp_enabled: true` 라 validate-dmsk8s 의 「testbed AD SSO」 절은 IdP 컨테이너 셋이 떠 있어야 FAIL 0 이다 — `make all-dmsk8s` 에는
+idp 타겟이 없으므로 새 호스트면 `make idp-up idp-config` 를 먼저 한다(이 시점의 「no deploy/dms-api」·「Secret dms/dms-oidc not created yet」 는
+info 라 정상).
 **설치 호스트** = 개발 호스트(luminous — kubeconfig 에 `dmsk8s` 컨텍스트), 이 저장소의 dms-k8s 체크아웃. 프로덕션 판 전체 순서는 deploy/README §0-5.
 
 | # | 어디서 | 무엇 | 성공 판정 | 실패하면 |
@@ -135,12 +140,17 @@ validate 가 확인). 인프라 전제 절의 `PORTAL_VIP=10.20.20.101 sh deploy
 | 2 | k8s-w1 → k8s-cp1 | (cp1 을 새로 만들었을 때만) 레지스트리 자기 이미지 반입 S0-5 | cp1 `crictl images` 에 `10.112.0.50:5000/registry` | deploy/README §2e-4 2) |
 | 3 | 설치 호스트 | 데이터 root·e2e 픽스처 플레이북 | PLAY RECAP `failed=0` | testbed `make cephfs-dmsk8s` |
 | 4 | 설치 호스트 | `install.sh --plan` | `RESULT: WARN`(S1 WARN 1건 — 아래) | deploy/README §2h·§14-4 |
-| 5 | 설치 호스트 | 시크릿(S2)·포탈 TLS | S2 `[OK] dms-secrets: 4키…`, `dms-portal-tls` 있음 | deploy/README §2f-2·§3b |
+| 5 | 설치 호스트 | 시크릿(S2)·포탈 TLS·IP 접속 라우트 | S2 `[OK] dms-secrets: 4키…`, `dms-portal-tls` 있음, IngressRoute `dms-portal-ip` 있음 | deploy/README §2f-2·§3b · §4-5 |
 | 6 | 설치 호스트 | `install.sh` 본 실행 | rc 0 `RESULT: PASS/WARN`, 또는 rc 10 PAUSE | 출력의 사유 줄 · deploy/README §2h |
 | 7 | k8s-w1 → 설치 호스트 | (PAUSE 때만) push·부트스트랩 빌드·태그 bump → `--stage S5` | S5 PASS 뒤 끝까지 | deploy/README §2e-4·§1 |
 | 8 | 호스트·설치 호스트 | 입구 확인 | `host-edge.sh status` 의 백엔드 셋 UP, `ingress-probe.sh` 노드 셋 PASS | testbed `README.md` 「After a host reboot」 표 · §4-8 |
 | 9 | 포탈 | 첫 관리자·컨트롤 상태·시드·k8s 연동 | 로그인·Ready·동기화 성공 | deploy/README §6 |
+| 9b | 호스트·설치 호스트 | (선택) SSO 복원 — testbed `make idp-up idp-config idp-check idp-dms-secret` → `rollout restart deploy/dms-api` | `sso-info` 가 `"enabled":true` | §6-7 |
 | 10 | 설치 호스트·호스트 | 최종 검증 | validate FAIL 0, S12 PASS | deploy/README §14 |
+
+9b 는 클러스터(ns `dms`)만 새로 세웠을 때 빠뜨리기 쉽다: IdP 는 호스트 docker 라 VM·클러스터를 다시 세워도 남지만 Secret `dms/dms-oidc` 는
+클러스터와 함께 없어진다(그때는 `make idp-check idp-dms-secret` + dms-api 재시작이면 된다). Secret 이 없을 때 idp check 는 info 만 내므로
+validate 가 잡지 못하고, 포탈의 SSO 버튼만 조용히 사라진다 — 확인은 `curl --cacert <CA> https://dms-k8s.local/api/auth/sso-info`(§6-7).
 
 ### 4-1. `/dms_shared` S0
 
@@ -200,7 +210,14 @@ preflight 「2. 입구」 는 IngressClass `traefik` PASS 와 「Traefik 파드 
 sh deploy/install.sh --context dmsk8s --site testbed-k8s --only S2   # ns dms + 시크릿 — [OK] dms-secrets: 4키·자리표시자 없음
 cd ~/dms-dev/testbed && make portal-tls-dmsk8s                       # dms-portal-tls(같은 테스트베드 CA — INIT_CA=1 은 새 CA 라 쓰지 않는다)
 kubectl --context dmsk8s -n dms get secret dms-portal-tls -o jsonpath='{.type}{"\n"}'   # kubernetes.io/tls
+cd ~/dms-dev/testbed && make traefik-dmsk8s   # 테스트베드 전용 IP 접속 IngressRoute dms/dms-portal-ip — IaC 단계에서는 ns dms 가 없어 건너뛰었다
+                                              #   (결과 줄 「NOT applied -- run make traefik-dmsk8s again after the DMS install」). DaemonSet 층은 unchanged, 파드 교체 없음
+kubectl --context dmsk8s -n dms get ingressroutes.traefik.io dms-portal-ip
 ```
+
+이 `make traefik-dmsk8s` 가 없으면 10단계 `make validate-dmsk8s` 가 `portal IP access: IngressRoute(s) '' (want dms/dms-portal-ip; make
+traefik-dmsk8s)` 로 FAIL 이다. 라우트는 ns 만 있으면 걸리지만, bare IP readyz 200 은 S8(Ingress — Traefik 이 그 tls 로 인증서를 싣는다)과
+S11(dms-api) 뒤에야 나온다(§2 「IP 직접 접속」).
 
 (`--only S2` 를 먼저 도는 이 순서는 이 문서가 권하는 조합이다 — 각 단계는 `install.sh` `stage_S2`·`tls_gate` 로 확인했지만 이 조합 그대로
 돌려 본 기록은 없다(**미검증**). TLS 없이 본 실행을 했다면 S8 이 「TLS 시크릿 … 가 없다」로 멈추고 재개 명령(`--stage S8`)을 보인다 —
@@ -277,11 +294,13 @@ deploy/README §6 그대로, 값만 이 테스트베드의 것:
   바로 나간다 — testbed `README.md` 「Topology」). PUT 은 전체 치환이라 GET 한 값에서 바꿀 칸만 고친다.
 - 포탈 부제 「K8S 테스트베드」(관리 → 포탈 설정, `PUT /api/admin/portal-settings`).
 - 6-4 스토리지·정책, 6-5 k8s 연동: §5 의 값.
+- 6-9 SSO(선택): 이 문서 §6-7(IdP 는 testbed IaC 가 호스트 docker 로 — §4 표 9b).
 
 ### 4-10. 최종 검증
 
 ```bash
-cd ~/dms-dev/testbed && make validate-dmsk8s        # FAIL 0 — 포탈 TLS(CA 검증)·edge 백엔드·Traefik·DMS Ingress·PV 픽스처·리더 auth can-i 포함
+cd ~/dms-dev/testbed && make validate-dmsk8s        # FAIL 0 — 포탈 TLS(CA 검증)·edge 백엔드·Traefik·DMS Ingress·PV 픽스처·리더 auth can-i·
+                                                    #   IP 접속·모르는 이름 404·testbed AD SSO 절 포함(아래)
 cd <dms-k8s 체크아웃>
 CACERT=$HOME/dms-dev/testbed/files/tls/ca.crt sh deploy/install.sh --context dmsk8s --site testbed-k8s --only S12
 ```
@@ -289,6 +308,10 @@ CACERT=$HOME/dms-dev/testbed/files/tls/ca.crt sh deploy/install.sh --context dms
 - `PORTAL_DOMAIN`(`dms-k8s.local`)은 2026-11-16 부터 testbed-k8s 의 `values.env` 에 있어 render.env 로 간다(Ingress host — 고정 오버레이도 필수).
   `PORTAL_VIP` 는 없다(고정 오버레이는 선택) — 없으면 6절 readyz 는 `--resolve` 없이 이름으로 붙고, 호스트 `/etc/hosts` 가 그 이름을 VIP-A
   (10.10.10.1)로 보내므로 같은 edge 를 지난다. 주소를 못 박으려면 `PORTAL_VIP=10.10.10.1` 을 env 로 더한다(`verify.sh` 머리 주석).
+- validate-dmsk8s 가 DMS 설치 뒤에 더 보는 것(testbed `scripts/validate.sh`): ① IP 접속 — IngressRoute `dms/dms-portal-ip`, 주소마다
+  `dms-portal-tls` 의 IP SAN, bare IP readyz 200(SNI 없음·CA 검증); ② 모르는 이름은 404 + `TRAEFIK DEFAULT CERT`(catch-all·TLSStore default 없음 —
+  스위치와 무관하게 늘); ③ 「testbed AD SSO」 절(`scripts/idp.sh check` — IdP 컨테이너·LDAPS·시험 사용자 로그인·dms-api 파드에서 discovery·Secret
+  `dms-oidc` 값 대조; `READ_ONLY=1` 이면 로그인을 생략한다). PASS 수는 판마다 바뀐다(예: testbed `docs/ARCHITECTURE.md` §19.8 실측 PASS=219).
 - `CACERT` 를 빼면 6절 readyz 가 TLS 검증 실패(000)로 WARN 이 된다(입구 문제를 「Avi 미개통」으로 읽게 된다). ingress-probe 는 CA 없이도
   인증서 이름을 openssl 로 본다.
 - 2026-11-16 실측(d27, 새 설치기): S12 PASS=17 WARN=0 FAIL=0 — 5절 Ingress `dms-portal-traefik`·ingress-probe 노드 셋 PASS, 6절 readyz 200
@@ -326,7 +349,10 @@ CACERT=$HOME/dms-dev/testbed/files/tls/ca.crt sh deploy/install.sh --context dms
 
 ### 5-3. k8s 연동 (deploy/README §6-5 의 테스트베드 값)
 
-이 테스트베드는 **자기 자신(dmsk8s)을 대상 클러스터로** 등록한다.
+대상 클러스터는 둘이다. 자기 자신 **`dmsk8s`** 와, 두 번째 **`dmsk8s2`** = 호스트 docker 의 k3s 컨테이너 `dms-k3s2`(`rancher/k3s:v1.31.4-k3s1`,
+API `https://10.10.10.1:6444` — **testbed IaC 밖**, 2026-10-26 d3 멀티 클러스터 실증용 — CHANGELOG 「d3 라이브 실증」). dmsk8s2 의 픽스처는 ns
+`lab-x`·`lab-y`, StorageClass `c2-nfs` → 매핑 `k8s-pv-nfs`, 템플릿 `c2/{namespace}/{pvc}`(데이터는 호스트 `/data/k8s_pv/nfs/c2/<ns>/<pvc>` — 워커의
+`/k8s_pv/nfs/c2/…`)다. 재생성 절차는 어디에도 기록돼 있지 않다(§7).
 
 | 항목 | 값 |
 |---|---|
@@ -335,7 +361,7 @@ CACERT=$HOME/dms-dev/testbed/files/tls/ca.crt sh deploy/install.sh --context dms
 | 클러스터 등록(「클러스터」 탭) | 이름 `dmsk8s`, API 서버 `https://k8s-cp1:6443`(CoreDNS 가 `k8s-cp1` → 10.10.10.20 — testbed `coredns-hosts-dmsk8s`), TLS 「지정한 CA」(위 `ca.crt`), 토큰 → 카드의 「지금 동기화」 |
 | StorageClass 매핑 | `tb-nfs → k8s-pv-nfs`, `tb-gpfs → k8s-pv-gpfs`, `tb-onefs → k8s-pv-onefs`(템플릿 비움 = 백엔드 프리셋). 「예시 경로」가 워커의 실제 디렉터리인지 `ssh k8s-w1 ls -d <예시 경로>` |
 | 계정 | 픽스처 RoleBinding(ns `team-a`·`team-b`·`team-c`, ClusterRole `kubeflow-admin/edit/view`)의 ID 와 같은 아이디 — 예: `junwoo-song-clusterrole-admin` → `junwoo.song`. stub 메일이라 인증번호가 화면에 나온다(테스트베드만) |
-| 기대값(2026-10-26 k3 실측) | PV 탐색 PVC 7 · Bound 6, 사용자 권한 인식 바인딩 5 · 사용자 4. 픽스처를 바꾸면 달라진다(testbed `make pv-fixtures-dmsk8s`) |
+| 기대값(2026-11-19 DB 실측 — 클러스터 카드가 보이는 개수) | **dmsk8s**: PV 이름(PVC) 10 · Bound 9, RoleBinding 37 · 인식 8, 권한 사용자 5. **dmsk8s2**: PVC 2 · Bound 2, RoleBinding 13 · 인식 3, 권한 사용자 3. dmsk8s 의 PVC 는 픽스처 7(Bound 6)에 2026-11-03 T7 의 CNPG PVC 3개(ns `dms` 의 `dms-pg-1`~`3`)를 더한 것이다 — 에이전트는 PVC 를 클러스터 전체에서 읽고 카운트는 namespace 를 거르지 않는다(`repositories/k8s.py` `cluster_counts`). 인식 8 은 2026-10-26 d3 의 namespaceAdmin 인식(5 → 8) 뒤 값이다. 픽스처(testbed `make pv-fixtures-dmsk8s`)나 DB 인스턴스 수를 바꾸면 달라진다 |
 
 ### 5-4. e2e 픽스처 (`dms-shared-fs.yml`, root 소유)
 
@@ -365,11 +391,16 @@ CACERT=$HOME/dms-dev/testbed/files/tls/ca.crt sh deploy/install.sh --context dms
    ```
 
    bump 를 빠뜨리면 다음 S11·가드가 「렌더 이미지 ≠ 라이브」로 exit 3 거부한다(옛 태그로 조용히 되돌리지는 않는다).
+   포탈 릴리스는 라이브 ConfigMap 의 `DMS_JOB_IMAGE` 를 바꾸지 않는다(런타임 잡 이미지는 DB `job-image` 행이다). 그래서 bump 커밋 뒤 첫 S11 은
+   `dms-config` 를 바꾸고, 파드 템플릿이 그대로인 dms-api·dms-controller·dms-agent 셋을 모두 rollout restart 한다(템플릿 지문 + 워크로드
+   어노테이션 `dms.io/install-config-rev` — §6-2). 에이전트 롤링이 돌므로 조용한 시각에 돌린다.
 
 ### 6-2. 오버레이·설정 변경 적용
 
-- **권장**: `sh deploy/install.sh --context dmsk8s --site testbed-k8s --only S11` — 렌더 → 시크릿 게이트 → 가드 → migrate → `apply -k` → 롤아웃,
-  `dms-config`·`dms-secrets` 의 resourceVersion 이 바뀌었는데 파드가 그대로면 rollout restart 까지 한다(`install.sh` `stage_S11`).
+- **권장**: `sh deploy/install.sh --context dmsk8s --site testbed-k8s --only S11` — (매 실행 렌더) → 시크릿 게이트 → 앱 이미지 확인 →
+  guard-images(3·4·5) → migrate Job 삭제 → `apply -k`(client-side) → 재시작 판정과 설정 표지(대기 전에 — `dms-config`·`dms-secrets` 의
+  resourceVersion 이 바뀌었는데 파드 템플릿 지문이 그대로인 워크로드를 고른다) → migrate 완료·롤아웃 대기(ds/dms-agent 는 노드 수 비례) →
+  고른 워크로드 rollout restart → 마스터(k8s-cp1) `dms` 이미지 사전 pull(실패는 WARN)(`install.sh` 머리 S11 줄·`stage_S11`).
 - **손 판**(`kustomization.yaml` 머리 주석과 같다):
 
   ```bash
@@ -404,8 +435,10 @@ CACERT=$HOME/dms-dev/testbed/files/tls/ca.crt sh deploy/install.sh --context dms
 
 ### 6-5. 한 호스트의 두 포탈
 
-ssc(`dms.local`)와 이 테스트베드(`dms-k8s.local`)의 세션 쿠키 이름이 같다(`dms_session` — `dms.api.app`). 같은 IP 의 다른 포트로 둘을 열면 서로
-로그아웃시킨다 — 늘 호스트 이름으로 연다. 포탈 부제(「K8S 테스트베드」)로 화면을 구분한다.
+ssc(`dms.local`)와 이 테스트베드(`dms-k8s.local`)의 세션 쿠키 이름이 같다(`dms_session` — `dms.api.app`). 쿠키는 포트가 아니라 호스트 단위라,
+같은 IP 의 다른 포트로 둘을 열면 서로 로그아웃시킨다. hosts 를 둘 수 있는 기기는 늘 호스트 이름으로 연다. hosts 가 없는 기기(Tailscale 휴대폰)는
+dmsk8s 를 IP 로 연다(`https://<그 주소>:8443/` — §2 「IP 직접 접속」). 그 IP 의 :443 이 ssc 포탈이므로, 그런 기기에서 두 포탈을 다 IP 로 쓰면 서로
+로그아웃시킨다 — 하나는 이름으로 연다. 포탈 부제(「K8S 테스트베드」)로 화면을 구분한다.
 
 ### 6-6. 재부팅 뒤
 
@@ -421,8 +454,8 @@ testbed `make post-boot-check WAIT=900`(`README.md` 「After a host reboot」 �
 
 | 요소 | 테스트베드 값 |
 |---|---|
-| AD | Samba AD DC 컨테이너(`dms-idp-dc`, `ad.dms-k8s.local`) — docker 내부망에만, 호스트·LAN 에 포트 없음 |
-| IdP | Keycloak 컨테이너(`dms-idp-kc`), issuer `https://idp.dms-k8s.local:8444/realms/dms-testbed`(`10.10.10.1:8444` 에만 열림), 인증서 = 테스트베드 CA |
+| AD | Samba AD DC 컨테이너(`dms-idp-dc`) — realm `AD.DMS-K8S.LOCAL`(DNS 도메인 `ad.dms-k8s.local`), DC `dc1.ad.dms-k8s.local`(LDAPS 인증서 SAN). docker 내부망 `dms-idp` 에만, 호스트·LAN 에 포트 없음 |
+| IdP | Keycloak 컨테이너(`dms-idp-kc`) + PostgreSQL 17.10 `dms-idp-db`(Keycloak DB — 내부망 `dms-idp` 에만, publish 없음), issuer `https://idp.dms-k8s.local:8444/realms/dms-testbed`(`10.10.10.1:8444` 에만 열림), 인증서 = 테스트베드 CA |
 | AD 연동 | vendor AD · LDAPS(인증서 검증) · 아이디 = sAMAccountName · `mail` → email · **READ_ONLY**(사용자가 email 을 못 바꾼다) · Trust Email 끔(`email_verified: false`) |
 | client | `dms-k8s` — confidential, Standard flow 만, PKCE S256 필수, redirect `https://dms-k8s.local/api/auth/oidc/callback` |
 | 이름 해석 | `idp.dms-k8s.local → 10.10.10.1` — 호스트 `/etc/hosts`(`make host-hosts`)와 dmsk8s 파드(CoreDNS hosts 블록, `make coredns-hosts-dmsk8s`) |
@@ -435,7 +468,13 @@ testbed `make post-boot-check WAIT=900`(`README.md` 「After a host reboot」 �
   바꾼 뒤에도 늘 `rollout restart deploy/dms-api`(S11 의 설정 재시작은 이 Secret 을 보지 않는다).
 - email_verified 시험: `bash scripts/idp.sh trust-email on|off`(testbed) — 켜면 id_token 이 `email_verified: true`. DMS 쪽 `DMS_OIDC_REQUIRE_EMAIL_VERIFIED=true`
   를 Secret 에 더하면 확인되지 않은 메일을 거절한다(`sso_email_unverified`). 기본은 둘 다 끔(IaC 기본값 — `make idp-config` 가 Trust Email 을 끔으로 되돌린다).
+- **클러스터를 다시 세우면 Secret `dms/dms-oidc` 가 없어진다**(IdP 컨테이너는 호스트에 남는다): testbed `make idp-check idp-dms-secret` →
+  `kubectl --context dmsk8s -n dms rollout restart deploy/dms-api` → `curl --cacert <CA> https://dms-k8s.local/api/auth/sso-info` 가 `"enabled":true`.
+  Secret 이 없을 때 idp check 는 info 만 내므로 validate 가 잡지 못하고 SSO 버튼만 조용히 사라진다(§4 표 9b).
 - 호스트 재부팅 뒤 Keycloak 이 안 떠 있으면(docker 가 `dmsbr0` 보다 먼저 떠 `10.10.10.1:8444` 를 못 붙인 경우) testbed `make idp-up`.
+- `make idp-down` 은 컨테이너만 지운다(볼륨·네트워크·`files/idp/` 유지 — `idp-up` 이 같은 AD·Keycloak 을 되살린다). `make idp-down PURGE=1` 은
+  볼륨까지 지워 다음 `idp-up` 이 새 AD·새 Keycloak 이 되고 client secret 도 새로 나온다 — 그때는 `make idp-config idp-dms-secret` +
+  `rollout restart deploy/dms-api` 를 한다.
 - 로그아웃은 DMS 세션만 끝낸다 — IdP 세션이 남아 버튼을 다시 누르면 비밀번호 없이 들어온다(프로덕션과 같다, deploy/README §6-9).
 
 ## 7. 되돌림 상태·보존물
@@ -448,6 +487,7 @@ testbed `make post-boot-check WAIT=900`(`README.md` 「After a host reboot」 �
 | pkg-01 외부 PG `dmsdb_k8s`/`dmsapp_k8s` + 시크릿 `dms-secrets-prev`(T7 이관 전 URL) | T7(2026-11-03) 이관은 원본을 건드리지 않았다(CHANGELOG ⑤) | 7-2 | 사용자 결정(BACKLOG 「pkg-01 외부 PG(`dmsdb_k8s`) 정리 시점」) |
 | 되돌림 입구: MetalLB VIP `10.20.20.101` → ingress-nginx(오버레이 `patch-ingress.yaml`·`patch-metallb.yaml` + testbed IaC) | 2026-11-04 입구 영구 컷오버(호스트 edge — 그때 뒤는 Envoy)의 소크 동안. 2026-11-16 edge 뒤를 Traefik 으로 바꾼 뒤에도 그대로 둔다 | 7-3 | 소크 뒤(별도 결정 — BACKLOG ⑥ 「소크 뒤 Ingress·MetalLB 삭제」) |
 | k8s-cp1 containers-storage 의 레지스트리 자기 이미지(손 반입·고정) | 레지스트리가 자기 이미지를 자기에게서 받을 수 없다 | cp1 재생성 때 §4-2 | 지우지 않는다 |
+| 두 번째 대상 클러스터 `dmsk8s2`(호스트 docker 컨테이너 `dms-k3s2` — §5-3) | IaC 밖 실험 클러스터(2026-10-26 d3 멀티 클러스터 실증). 재구축 절차가 어디에도 기록돼 있지 않다(**미검증**) | 없다 — 호스트를 새로 세우면 다시 생기지 않는다. 그 클러스터 카드가 실패하면 포탈 「k8s 연동」 「클러스터」 탭에서 끄거나 지운다 | 사용자 결정 |
 
 ### 7-1. 옛 base 로 되돌리기 — 지금은 권하지 않는다
 
@@ -491,8 +531,10 @@ testbed IaC 가 dmsk8s 의 ingress-nginx·MetalLB 를 걷고 되돌림 경로는
   이미지를 받을 곳이 없다. 노드 CRI-O 는 `10.112.0.50:5000` 하나만 신뢰한다(testbed crio 롤의 `50-dms-registry.conf`).
 - 옛 태그로 돌아가기 = 포탈 릴리스 이력에서 **이 레지스트리에 있는 태그**를 다시 고른다. d18 은 전환 때 옮긴 같은 digest 사본이고, d18 이하의
   동봉 매니페스트는 `pkg-01:5001` 로 스탬프돼 있어 그 태그로 릴리스하면 드리프트 배지가 「모름」이다. d1~d17·kN 이미지는 더 없다.
-- **`kubectl rollout undo`(`--to-revision` 포함)로 되돌리지 않는다**: 롤아웃 이력(dms-api·dms-controller 의 0-replica ReplicaSet, dms-agent
-  ControllerRevision — 2026-11-04 기준 d10~d18)이 옛 `pkg-01:5001/…` 를 가리켜 `ImagePullBackOff` 다. 되돌림은 포탈 릴리스로만(deploy/README §5-1).
+- **`kubectl rollout undo`(`--to-revision` 포함)로 되돌리지 않는다**: 포탈 릴리스 기록·드리프트 판정·오버레이 태그가 모르는 상태가 되고, 다음
+  S11 가드가 「렌더 이미지 ≠ 라이브」로 exit 3 거부한다(deploy/README §5-1). 되돌림은 포탈 릴리스로만 한다. (2026-11-04 무렵에는 롤아웃 이력 —
+  dms-api·dms-controller 의 0-replica ReplicaSet, dms-agent ControllerRevision — 이 옛 `pkg-01:5001/…` 를 가리켜 `ImagePullBackOff` 이기도 했다.
+  지금 이력은 revisionHistoryLimit 10 이라 모두 `10.112.0.50:5000` 이다.)
 
 ## 8. 시나리오 — 실 클러스터 확인
 
@@ -550,7 +592,7 @@ testbed IaC 가 dmsk8s 의 ingress-nginx·MetalLB 를 걷고 되돌림 경로는
 | 도구 | 언제 | 메모 |
 |---|---|---|
 | 로컬 풀스택 e2e(`cd frontend && npm run test:e2e`) | 이미지 빌드 전 | deploy/README §8 「이미지 빌드 전 게이트」 — 수기, CI 없음 |
-| `make validate-dmsk8s` · `make post-boot-check`(testbed 저장소) | 인프라 변경·재부팅 뒤 | edge·PV 픽스처·리더 `auth can-i`·빌드 소스 마운트까지(testbed `README.md` 「Validation」) |
+| `make validate-dmsk8s` · `make post-boot-check`(testbed 저장소) | 인프라 변경·재부팅 뒤 | edge·PV 픽스처·리더 `auth can-i`·빌드 소스 마운트, IP 접속(IngressRoute `dms/dms-portal-ip`·주소마다 IP SAN·bare IP readyz 200 CA 검증), 모르는 이름 404 + `TRAEFIK DEFAULT CERT`(catch-all·TLSStore default 없음 — 늘), 「testbed AD SSO」 절(`scripts/idp.sh check` — `READ_ONLY=1` 이면 로그인 생략)까지(testbed `README.md` 「Validation」 — §4-10) |
 | `kubectl --context dmsk8s get nodes -o wide` · `sh deploy/preflight-cluster.sh --context dmsk8s` | 언제든(읽기 전용) | 노드 3대 Ready, control-plane 1대 WARN 은 정상 |
 | `install.sh --only S12`(§4-10 의 env 와 함께) | 설치·업그레이드 뒤 | 클러스터를 순수하게 읽기만 하려면 `VERIFY_NO_PROBES=1`(파드를 띄우는 검사 생략 — ingress-probe 는 HTTPS GET 뿐이라 그대로 돈다) |
 | `sh deploy/ingress-probe.sh --context dmsk8s --domain dms-k8s.local --cacert <CA>` | 입구를 의심할 때(읽기 전용 — kubectl 은 get 만, 파드를 띄우지 않는다) | 노드마다 `NODE <이름> PASS\|FAIL\|UNKNOWN <근거>`, 마지막 `RESULT:`. 종료 0 PASS · 1 FAIL · 4 UNKNOWN · 2 사용법. 판정은 §4-8 |
@@ -587,9 +629,11 @@ kubectl --context dmsk8s -n dms get ds dms-agent -o jsonpath='{.spec.template.sp
 |---|---|---|---|
 | control-plane | k8s-cp1 **1대** | 마스터 3대 | S1 WARN 이 정상, PG anti-affinity 를 `all-nodes` 로 피함, 레지스트리가 한 노드 — 레지스트리 HA 가 시험되지 않는다(입구는 2026-11-16 부터 노드 셋 모두 Traefik — edge 풀 3) |
 | 제어면 배치 | api·controller 가 워커(§3) | 마스터(`patch-placement.yaml`) | 메일 발송의 출발 IP, 노드 사망 때 복귀 수치가 다르다. k8s 연동 호출의 출발지는 배치와 무관하다 — 둘 다 지정한 호출 노드의 dms-agent(테스트베드 k8s-w1) |
+| 에이전트 배치 | k8s-cp1 은 control-plane NoSchedule taint 라 dms-agent 가 k8s-w1·w2 에만 뜬다(toleration 은 빈 key NoExecute 하나) | RKE2 서버 노드는 기본으로 taint 가 없어 마스터에도 뜨고, 잡·빌드·k8s 연동 호출 노드 후보가 된다(deploy/README §0-2) | 마스터에 에이전트가 있을 때의 후보 선택·자원 경합은 여기서 시험되지 않는다 |
 | L4 입구 | 호스트 haproxy(Avi VS-443 흉내, PROXY v2, 풀 = 노드 셋 :443 의 Traefik). 출발지 하나(10.10.10.1) | Avi VS-443(VIP-A, PROXY v2, 풀 = Traefik 이 도는 노드 :443 — RKE2 rke2-traefik 은 모든 노드). 출발지 = SE 들(`<SE 주소>`) | 헬스 모니터·유휴 타임아웃·PROXY v2 동작만 흉내 낸다. SE 가 여럿인 출발지를 trustedIPs 에 빠짐없이 넣었는지는 사이트에서 따로 확인한다(빠진 SE 를 지난 연결은 PROXY 바이트가 TLS 앞에 붙어 깨진다) |
 | Traefik | testbed IaC 가 깐 rke2-traefik 모양(같은 판, 차트 렌더 args 순서 그대로 — 이름은 `traefik`), trustedIPs 는 IaC 템플릿 값 | RKE2 `rke2-traefik`(Helm) — 정적 설정(websecure `proxyProtocol.trustedIPs`·타임아웃)은 사이트가 Rancher chartValues / HelmChartConfig 로 넣는다 | DMS 감지는 이미지 이름으로 찾아 둘이 같다. chartValues·HelmChartConfig 로 값을 넣는 경로와 그때의 롤링은 여기서 시험되지 않는다 |
 | 사내 SSO IdP | 호스트 docker 의 Samba AD DC + Keycloak 26.8(§6-7), 인증서 = 테스트베드 CA, 호스트 브라우저에서만 | 사내 AD + 사이트 Keycloak(사내 CA), 사용자 PC 어디서나 | AD 의 실제 스키마·그룹·정책(계정 잠금·만료), 사이트 Keycloak 판·realm 설정(Trust Email 등)은 시험되지 않는다 — DMS 가 보는 OIDC 계약(issuer·PKCE·client_secret_basic·email 클레임)만 같다 |
+| IP 직접 접속 | 테스트베드 전용 IngressRoute `dms/dms-portal-ip` + IP SAN 이라 bare IP 가 200(§2) | DMS 는 Host = FQDN 인 Ingress 하나뿐이다(IngressRoute·catch-all 은 쓰지 않는다 — deploy/README §2g-1). bare IP 는 404 다 | 테스트베드에서 IP 로 열린다고 프로덕션에서도 열리는 것이 아니다 |
 | 노드 방화벽 | 없음 — cp1 nft :443 펜스(`dms-testbed-cp443`)는 2026-11-16 은퇴. 워커 firewalld 꺼짐 | 사이트 방화벽(deploy/README §0-3), RHEL firewalld 기본 zone 주의 | 방화벽 규칙의 실수는 여기서 드러나지 않는다. Traefik hostPort 는 CRI-O DNAT(PREROUTING → FORWARD)라 노드 :443 을 SE 대역으로 좁히는 INPUT 규칙은 그 트래픽을 보지 못한다(testbed `docs/ARCHITECTURE.md` §15.2) — 원 IP 위조 방지는 trustedIPs 가 한다 |
 | SELinux | 워커 permissive(Rocky 9.6) | permissive 전제(deploy/README §2h S2b — enforcing 실측: 스토리지 전부 Missing) | 같다. enforcing 근거는 이 테스트베드의 T-SE 실측이다 |
 | 노드 OS | cp1 Ubuntu 24.04 + 워커 Rocky 9.6 혼합 | 사이트 RHEL 계열 | 패키지 경로가 다르다(아래 skopeo 메모) |
@@ -597,7 +641,7 @@ kubectl --context dmsk8s -n dms get ds dms-agent -o jsonpath='{.spec.template.sp
 | 실측 수치 | NFS 공용 스토리지·VM 3대(fsync 비교는 둘 다 같은 호스트 디스크 — fdatasync 328 대 319 ops/s) | 사이트 스토리지·네트워크 | deploy/README 의 「테스트베드 실측」 수치(장애조치 시간·롤링 공백·fsync)는 프로덕션을 대표하지 않는다 |
 | Volcano | testbed IaC 설치(v1.15.0) — 감지 **C**, 설치기가 건드리지 않음 | 클러스터 운영자가 선설치 | `images.lock` 에 Volcano 줄은 없다. 생기면 설치기는 C 일 때 S5 push·대조에서 뺀다(`install.sh` `lock_skips`); 손 `images-lock.py compare-registry` 는 `--skip` 을 직접 준다 |
 | 메일 | stub | knox_relay 필수(deploy/README §6-2) | 가입 인증 메일이 신원 증명이 아니다 — 테스트베드에서만 허용 |
-| k8s 연동 대상 | 자기 자신(dmsk8s) | 다른 클러스터일 수 있다 | 호출 노드 → 대상 apiserver 의 방화벽·DNS 경로가 시험되지 않는다 |
+| k8s 연동 대상 | 자기 자신(dmsk8s) + 호스트 k3s(dmsk8s2 — 다른 apiserver 를 호스트 주소로, §5-3) | 다른 클러스터일 수 있다 | 호출 노드 → 대상 apiserver 의 방화벽·DNS 경로가 시험되지 않는다(dmsk8s2 도 같은 호스트망의 IP 주소로 부른다) |
 | 빌드 소스 | 호스트 체크아웃의 읽기 전용 NFS | 빌드 노드의 로컬 체크아웃 | 「push 해야 빌드된다」(§6-1)는 테스트베드 사정이다 |
 | 인터넷 | libvirt NAT 직결(프록시 없음) | 사내 프록시·사내 CA | 빌드 프록시·사내 CA 경로는 따로 시험해야 한다(deploy/README §8) |
 | 포탈 | 한 호스트에 둘(§6-5) | 사이트마다 FQDN | 쿠키 충돌은 테스트베드 사정이다 |

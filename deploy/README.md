@@ -23,7 +23,7 @@
 | `<LOCAL_ADMIN>` / `<EMAIL_DOMAIN>` | 첫 관리자 이름 / 계정 메일 도메인 | values.env `LOCAL_ADMIN` / `EMAIL_DOMAIN` |
 | `<DMS_TAG>` | DMS 이미지 3종(`dms`·`dms-agent`·`dms-mpifileutils`)의 태그 — 첫 설치는 셋을 같게 | values.env `DMS_TAG`·`DMS_AGENT_TAG`·`MFU_TAG` |
 | `<PORTAL_TLS_SECRET>` | 포탈 인증서 Secret 이름(기본 `dms-portal-tls`) | values.env `PORTAL_TLS_SECRET` |
-| `<빌드 노드>` | 인터넷 노드 = 설치 뒤 포탈 빌드 노드(NoSchedule taint 없는 워커) | 운영자 |
+| `<빌드 노드>` | 인터넷 노드 = 설치 뒤 포탈 빌드 노드(NoSchedule taint 없는 노드 — 워커 권장, §0-2) | 운영자 |
 | `<사내CA>` | 포탈 서버 인증서를 발급한 CA 파일 | 사이트 PKI |
 | `<마스터>` | control-plane 노드(3대) | 사이트 |
 
@@ -118,7 +118,7 @@
 | 마스터 1대 | dms-registry(+ init 10m/16Mi) | 100m / 128Mi | 1 / 512Mi |
 | 워커 | CNPG 오퍼레이터 ×2 | 100m / 100Mi | 100m / 200Mi |
 | 워커(매시간) | pg_dump | 100m / 256Mi | 1 / 1Gi |
-| 워커마다 | dms-agent | 25m / 64Mi | 250m / 256Mi |
+| DMS 노드마다(taint 없는 마스터 포함) | dms-agent | 25m / 64Mi | 250m / 256Mi |
 | 빌드 노드 | 포탈 빌드 파드 | 250m / 128Mi(임시 저장소 10Gi) | 1000m / 1Gi(12Gi) |
 | 워커 | 데이터 잡 | 노드당 `procs_per_node` 코어 + launcher 100m | — |
 
@@ -127,7 +127,8 @@
 - dms-api requests(100m/256Mi)는 설계 2-1 표의 250m/512Mi 와 다르다. 어느 쪽으로 할지는 BACKLOG 에 올렸다.
 
 **설치 호스트**(클러스터 밖이어도 된다)
-- kubectl(클러스터 minor ±1)·python3 ≥ 3.9(표준 라이브러리만)·curl·sha256sum·cksum·POSIX sh, 그리고 설치할 커밋의 DMS 체크아웃.
+- kubectl(클러스터 minor ±1)·python3 ≥ 3.9(표준 라이브러리만)·curl·sha256sum·cksum·POSIX sh, (있으면) openssl·timeout, 그리고 설치할 커밋의 DMS
+  체크아웃. openssl 이 없고 `CACERT` 도 주지 않으면 S8·S12 의 ingress-probe 가 노드마다 UNKNOWN(WARN)이다(§2g-3).
 - apiserver(6443)에만 닿으면 된다. 레지스트리 확인은 port-forward, readyz 판정은 apiserver 서비스 프록시로 한다(`install.sh` S4·S5, `verify.sh`).
   VIP 경유 readyz 만 `<VIP-A>:443` 이 필요하고, 닿지 않으면 WARN 이다. S8·S12 의 ingress-probe 는 Traefik 이 도는 노드 :443 에 직접 붙는다 —
   닿지 않으면 UNKNOWN 이라 WARN 뒤 계속한다(§2g-3).
@@ -139,8 +140,9 @@
   클러스터 범위 객체(Namespace·PriorityClass·Queue·ClusterRole)가 있어 같은 자격으로 돈다.
 
 **인터넷(= 빌드) 노드** — 설치 때는 이미지 반입, 설치 뒤에는 포탈 빌드 노드다.
-- 클러스터의 **NoSchedule taint 없는 워커**여야 한다. 빌드·프리플라이트 파드에 toleration 이 없고 nodeSelector `kubernetes.io/hostname` 만 쓴다
-  (`build_manifests.py` 의 두 Pod 매니페스트). 컨트롤 상태는 에이전트가 보고한 노드만 받는다(`routes_control.put_control_state` — 422 `unknown_build_node`).
+- 클러스터의 **NoSchedule taint 없는 노드**(= 에이전트가 보고한 노드)여야 한다. 빌드·프리플라이트 파드에 toleration 이 없고 nodeSelector
+  `kubernetes.io/hostname` 만 쓴다(`build_manifests.py` 의 두 Pod 매니페스트). 컨트롤 상태는 에이전트가 보고한 노드만 받는다
+  (`routes_control.put_control_state` — 422 `unknown_build_node`). taint 없는 RKE2 마스터도 받지만, 빌드 부하가 제어면에 얹히지 않게 워커를 권한다.
 - 빌드 파드는 **privileged** 다(`build_manifests.py` — buildah). 사이트 정책이 허용해야 한다.
 - skopeo·podman·python3·bash, 그리고 **로컬 체크아웃**(git worktree 금지 — 빌드 파드가 `.git` 밖 gitdir 를 못 따라가 SHA 가 `unknown` 이 된다, §8 1)).
 - 프록시: `HTTPS_PROXY` 와 함께 `NO_PROXY=<REGISTRY 의 IP>`. 레지스트리 주소가 NO_PROXY 에 없으면 `push-images.sh --run` 이 아무것도 하지 않고 멈춘다.
@@ -173,14 +175,17 @@
 | 인터넷 노드 → 레지스트리 ClusterIP | `<REGISTRY>` 포트(기본 5000)/tcp | push(kube-proxy 경로) | §2e-4 |
 | 인터넷 노드 → 마스터 ×3 | ssh 등 | 레지스트리 자기 이미지 파일 전달(S0-5 — 처음 한 번) | §2e-4 2) |
 | dms-api(마스터) → 메일 릴레이 | 8025/tcp(http) | 인증 메일. 메일은 api 만 보낸다(`api/mailer.py`) | §6-2·§11 |
-| 호출 노드(워커의 dms-agent) → 대상 클러스터 apiserver | 등록한 URL 의 포트(보통 6443)/tcp | k8s 연동 인벤토리(`agent/k8s_fetch.py fetch_inventory`) | §6-5 |
+| 호출 노드(포탈 「k8s 연동 → 호출 노드와 주기」에서 지정한 주·보조 노드의 dms-agent — 에이전트가 보고한 노드이고, RKE2 처럼 마스터에 NoSchedule taint 가 없으면 마스터일 수도 있다, §0-2) → 대상 클러스터 apiserver | 등록한 URL 의 포트(보통 6443)/tcp | k8s 연동 인벤토리(`agent/k8s_fetch.py fetch_inventory`) | §6-5 |
+| (SSO 를 켠 사이트) dms-api(마스터) → 사내 IdP | issuer URL 의 포트(보통 443)/tcp. discovery 가 알려 주는 token_endpoint(id_token 에 email 이 없으면 userinfo_endpoint 도)의 호스트·포트가 다르면 그것도 | 사내 SSO(선택) — discovery·code 교환. 프록시 env 를 타지 않고 직접 닿아야 한다(`api/oidc.py` — `ProxyHandler({})`) | §6-9 |
+| (SSO 를 켠 사이트) 사용자망(브라우저) → 사내 IdP authorization 끝점 | 443/tcp | SSO 로그인 리디렉트 | §6-9 |
 | 워커 → 데이터·PV 스토리지, 워커 ↔ 워커 | 사이트 기존 | 잡의 스토리지 접근, MPI(파드망) | §2 |
 
 - **RHEL firewalld**: 기본 public zone 을 켠 채 두면 노드 간 CNI 흐름이 막힌다. 위 표의 노드 간 포트를 연다. 설치기·preflight 는 firewalld 를 보지 않는다(S0 사이트 몫).
   테스트베드 실측(Rocky 9·Cilium vxlan, 2026-11-03): 10250/tcp·8472/udp·4240/tcp·4244/tcp·7946/tcp+udp·30000-32767/tcp 를 열자 파드 DNS·ClusterIP·에이전트 보고가
   돌아왔다. 프로덕션의 포트는 CNI 설정에 따라 다르다.
 - **서비스·파드 CIDR** 이 사내 대역(메일 릴레이·PV 백엔드·대상 apiserver·DNS)과 겹치지 않아야 한다. 겹치면 파드가 그 주소에 닿지 못한다(설계 §11 K5).
-- **시간 동기(NTP)**: 모든 노드·설치 호스트·인터넷 노드·메일 릴레이. 인증서·etcd·토큰·로그 시각이 걸린다(설계 §11 X1).
+- **시간 동기(NTP)**: 모든 노드·설치 호스트·인터넷 노드·메일 릴레이. 인증서·etcd·토큰·로그 시각이 걸린다(설계 §11 X1). (SSO 를 켠 사이트) dms-api 가
+  도는 마스터와 IdP 도 — id_token 의 exp·iat 를 ±120초 여유로 대조한다(어긋나면 `sso_token_invalid`, `api/oidc.py` `CLOCK_SKEW_SECONDS`).
   DMS 는 시간 동기를 검사하지 않는다(`preflight-cluster.sh`·`verify.sh` 에 없음) — 사이트 IaC 가 보장한다.
 - **DNS**: `<FQDN>` → `<VIP-A>`(사내 DNS). 등록과 공지는 §6-8 의 확인을 마친 뒤에 한다. 그 전에는 `curl --resolve <FQDN>:443:<VIP-A>` 나 운영자 PC 의 hosts 로 쓴다.
 
@@ -189,7 +194,9 @@
 **승인받을 것**(설계 §11 「S1 승인 항목」)
 - ns `dms` PSA privileged, root 컨테이너(api·controller — cap 전부 drop, §2b), hostPath(artifacts·registry·backup)와 hostPath PV(pgdata ×5),
   **공용·데이터·PV 스토리지 모두 DMS 노드에 root 보존(squash 없음)** — 공용은 §2d, 데이터·PV 는 §2 「root 접근」.
-- **dms-agent DaemonSet**(NoSchedule 없는 워커마다): **uid 0**(`k8s/50-agent-daemonset.yaml` 은 `runAsUser: 0` 만 준다 — capability 는 런타임 기본 그대로).
+- **dms-agent DaemonSet**(NoSchedule taint 없는 노드마다 — 마스터에 control-plane NoSchedule taint 가 없는 RKE2 는 **마스터 포함**, §0-2): **uid 0**
+  (`k8s/50-agent-daemonset.yaml` 은 `runAsUser: 0` 만 준다 — capability 는 런타임 기본 그대로). 그래서 이 파드(아래 호스트 `/` 포함)가 etcd·apiserver 가 있는
+  마스터에도 설 수 있다 — 빼려면 마스터에 NoSchedule taint 를 단다.
   호스트 `/` 를 `/host/root` 에 붙인다. `readOnly` 는 최상위 바인드(호스트 루트 fs)에만 걸리고, 전파된 하위 마운트(데이터·PV 스토리지, `<SHARED_DIR>` —
   PG 데이터·덤프·레지스트리·결과 파일 포함)는 호스트 옵션 그대로 **쓰기 가능**하다(recursiveReadOnly 는 HostToContainer 와 함께 쓸 수 없다 — 그 파일의
   머리 주석). 그래서 에이전트 컨테이너는 노드의 모든 파일(kubelet 자격·다른 파드의 시크릿 볼륨 포함)을 읽을 수 있고, 공유 토큰(admin Bearer — §3b-3)을
@@ -281,6 +288,7 @@
 | 되돌리기·DB 복구·재해 복구 | §5 |
 | 포탈 입구(Traefik·LB·인증서·원 IP) 점검·문제 해결 | §2g-5·§2g-6 |
 | 계정·권한·로그인 보호 | §10 |
+| 사내 SSO 켜기·끄기·client secret 교체 | §6-9(·§3b) |
 | 인증 메일 | §11 |
 | 작업 삭제·결과 파일 만료 | §12·§12b |
 | 일상 점검·정기 작업·노드 정비·문제 해결 | §14 |
@@ -329,10 +337,10 @@ DMS 는 데이터 스토리지를 마운트하지 않는다. 사이트가 노드
   매니페스트를 고치지 않는다(계약 테스트가 막는다).
 - **전제: 호스트 `/` 가 shared 마운트**다(systemd 기본 — `findmnt -no PROPAGATION /` 가 `shared`). 아니면 그 노드는 `propagation_stale` 을 보고한다 —
   `mount --make-rshared /` 뒤 그 노드의 에이전트 파드를 다시 띄운다.
-- **어느 노드에**: 잡이 도는 워커(NoSchedule taint 없는 워커 — dms-agent 가 뜨는 노드)에, **포탈에 등록할 경로 그대로** 마운트한다. 노드마다 마운트한
+- **어느 노드에**: 잡이 도는 노드(NoSchedule taint 없는 노드 — dms-agent 가 뜨는 노드, 보통 워커. taint 없는 RKE2 마스터도 후보다 — §0-2)에, **포탈에 등록할 경로 그대로** 마운트한다. 노드마다 마운트한
   스토리지가 달라도 된다 — 두 스토리지를 함께 마운트한 노드가 있으면 dsync, 없으면 nsync 로 돈다(§7-3).
-- **root 접근**: 모든 잡이 uid 0 으로 돈다(§10-1, `execution_manifests._container`). 데이터·PV 스토리지는 DMS 워커(NoSchedule 없는 워커 전부)에서
-  root 가 root 로 보여야 한다 — NFS export 는 그 워커 IP 에 `no_root_squash`, OneFS 등은 export 의 root 사용자 매핑을 root 로. squash 면 미리보기가 읽지
+- **root 접근**: 모든 잡이 uid 0 으로 돈다(§10-1, `execution_manifests._container`). 데이터·PV 스토리지는 그것을 마운트한 DMS 노드(에이전트가 뜨는 노드) 전부에서
+  root 가 root 로 보여야 한다 — NFS export 는 그 노드 IP 에 `no_root_squash`, OneFS 등은 export 의 root 사용자 매핑을 root 로. squash 면 미리보기가 읽지
   못한 경로로 실패하고(`preview_scan_incomplete`), 실행은 쓰기·`--chown`(PV 목적지 결과 소유 — §10-1, `execution_manifests._auto_chown`)·남의 파일 rm 이
   EACCES/EPERM 으로 실패한다. 스토리지 담당의 승인 항목이다(§0-4).
 - **NFS 계열(OneFS 포함)은 `lookupcache=positive`** 로 마운트한다. 기본 `all` 이면 다중 노드 dsync 에서 한 노드가 막 만든 디렉터리를 다른 노드가 음성 캐시
@@ -995,7 +1003,7 @@ kubectl --context C apply --server-side --field-manager=dms-install --dry-run=se
 kubectl --context C apply --server-side --field-manager=dms-install -k $RD/platform/db-cluster
 ```
 
-4) **900초 폴링** — `kubectl wait --for=condition=Ready` 는 쓰지 않는다(인스턴스가 **모두** healthy 일 때만 서는 조건이라(테스트베드 실측 —
+4) **900초 폴링**(설치기는 env `DB_WAIT_SECONDS`) — `kubectl wait --for=condition=Ready` 는 쓰지 않는다(인스턴스가 **모두** healthy 일 때만 서는 조건이라(테스트베드 실측 —
 switchover 중에도 `ClusterIsNotReady`) 하나가 늦으면 끝없이 기다린다). 세 조건이 모두 서면 「DB 사용 가능」이다:
 
 ```bash
@@ -1290,7 +1298,8 @@ kubectl --context C -n <Traefik ns> get ds <Traefik DaemonSet> -o 'jsonpath={ran
 sh deploy/install.sh --context C --site <site> --plan    # 감지 traefik 줄의 note(proxyProtocol.trustedIPs=… · readTimeout …)·WARN(trustedIPs 없음)
 ```
 
-> 예(OA): Avi SE `12.201.53.242/32`·`12.201.53.243/32` 를 Rancher chartValues 의 `rke2-traefik` 에 넣는다(forwardedHeaders 는 비움).
+> 예(RKE2 + Avi L4 사이트): Avi SE 두 대의 주소 `<SE 주소 1>/32`·`<SE 주소 2>/32` 를 Rancher chartValues 의 `rke2-traefik` 에 넣는다(forwardedHeaders 는 비움).
+> 실제 주소는 사이트 운영 문서에만 둔다.
 >
 > 예(테스트베드): testbed IaC 가 rke2-traefik 모양의 `kube-system/traefik` DaemonSet 을 깔고 trustedIPs = `10.10.10.1/32`(호스트 edge 의 출발지), forwardedHeaders 비움 — `deploy/testbed/README.md` §2.
 
@@ -1421,7 +1430,7 @@ traefik WARN 「… proxyProtocol.trustedIPs 가 없다 …」(C!)는 실행할 
 쌓이니 사이트 `patch-config.yaml` 에 `DMS_LOGIN_ALARM_SOURCE_FAILURES: "0"` 을 더한다(§3-4 (b) → `--only S11`. 전체 실패 경보는 그대로이고, 로그인 상한·
 거절은 아이디 기준이라 그대로다).
 
-> 예(OA): Avi L4 VS VIP:443, PROXY v2 켬, 풀 = rke2-traefik 이 도는 노드 :443, SE `12.201.53.242`·`12.201.53.243` = rke2-traefik websecure 의 trustedIPs.
+> 예(RKE2 + Avi L4 사이트): Avi L4 VS VIP:443, PROXY v2 켬, 풀 = rke2-traefik 이 도는 노드 :443, SE 두 대(`<SE 주소 1>`·`<SE 주소 2>`) = rke2-traefik websecure 의 trustedIPs.
 >
 > 예(테스트베드): 호스트 edge(haproxy — LB 흉내, `send-proxy-v2`)가 VIP-A `10.10.10.1:443` → 노드 셋(cp1·w1·w2) :443, trustedIPs `10.10.10.1/32` — `deploy/testbed/README.md` §2·§4-8.
 
@@ -1525,8 +1534,8 @@ curl -sS -m 5 -o /dev/null -w '%{http_code}\n' http://<FQDN>/                   
 되돌림: 전환 7(정리) 전이면 LB 풀을 옛 멤버로 되돌리면 옛 Envoy 가 그대로 받는다(옛 객체가 남아 있고, 새 앱은 Envoy 뒤에서도 무해하다). 정리 뒤에는
 옛 커밋의 설치기로 Envoy 층을 다시 깔아야 한다(§5-4).
 
-> 예(OA): ① Avi VS(VIP:443) 풀 멤버·포트·PROXY v2(켜짐)·rke2-traefik 의 trustedIPs 확인 ② Rancher chartValues `rke2-traefik` 에 trustedIPs
-> `["12.201.53.242/32","12.201.53.243/32"]`(forwardedHeaders 비움) ③ dms-k8s pull(설치 호스트·빌드 노드 같은 커밋) → values.env 의 `GATEWAY_*` 정리 → `install.sh` → 포탈 빌드·릴리스(새 앱 — §4-2 5·6, Avi 풀을 옮기기 전) ④ Avi 풀 = Traefik 이
+> 예(RKE2 + Avi L4 사이트): ① Avi VS(VIP:443) 풀 멤버·포트·PROXY v2(켜짐)·rke2-traefik 의 trustedIPs 확인 ② Rancher chartValues `rke2-traefik` 에 trustedIPs
+> `["<SE 주소 1>/32","<SE 주소 2>/32"]`(Avi SE 두 대 — 실제 주소는 사이트 운영 문서, forwardedHeaders 비움) ③ dms-k8s pull(설치 호스트·빌드 노드 같은 커밋) → values.env 의 `GATEWAY_*` 정리 → `install.sh` → 포탈 빌드·릴리스(새 앱 — §4-2 5·6, Avi 풀을 옮기기 전) ④ Avi 풀 = Traefik 이
 > 도는 노드 :443, 헬스 TCP 443 또는 SNI·Host 를 FQDN 으로 한 HTTPS /readyz ⑤ 로그인 실패 보안 이벤트의 client_ip 가 사용자 PC 인지 ⑥ 옛 Envoy(DMS 가
 > 깔았다면) 정리 — Gateway API CRD 는 rke2-traefik-crd(Helm) 소유라 남긴다.
 
@@ -1589,6 +1598,9 @@ sh deploy/install.sh --context C [--site prod] --only S7,S12     # 그 단계만
 #   env SELINUX_PROBE_IMAGE=<ref>(S2b — Cilium 이 없는 클러스터: 모든 노드에 이미 있는 셸 포함 이미지)
 #   env ROLLOUT_TIMEOUT(S4 레지스트리·S9b Volcano·S11 api·controller 롤아웃 대기, 기본 180초 — DaemonSet 대기의 하한)
 #   env ROLLOUT_TIMEOUT_PER_NODE(S11 ds/dms-agent 대기 상한 = max(ROLLOUT_TIMEOUT, ceil(노드 수 ÷ maxUnavailable) × 이 값), 기본 150초 — 2026-11-17)
+#     (이 둘은 초 단위 정수 — 정수가 아니거나 앞자리가 0 이면 클러스터에 붙기 전 exit 2. 빈 값 = 기본, ROLLOUT_TIMEOUT=0 = 제한 없음)
+#   env 시간 손잡이 DB_WAIT_SECONDS(900 — S10 폴링·CNPG 업그레이드 뒤 healthy) · MIGRATE_TIMEOUT(180) · DUMP_TIMEOUT(600) · CNPG_ROLLOUT_TIMEOUT(300)
+#     · WEBHOOK_RETRIES(6 — S9 Cluster CR dry-run 의 웹훅 재시도) · POLL_INTERVAL — 자세한 것은 --help
 sh deploy/install.sh --help                                      # 머리 주석(env·--upgrade-addon 이름·종료 코드) — exit 0
 ```
 
@@ -1736,9 +1748,9 @@ S4(레지스트리)·S9(CNPG)·S9b(Volcano 층이 있을 때)·S11(앱) 적용 �
 | 길 | 무엇 | 반영 | 영구성 |
 |---|---|---|---|
 | (a) 포탈(DB) | 메일 설정, 스토리지·정책·노드 배치 제외, k8s 연동, 컨트롤 상태, 아티팩트 경로, 포탈 부제, 계정의 root 자격 부여, 잡 이미지(릴리스) | 즉시(재시작 없음) | 영구(DB). 메일·아티팩트 경로·잡 이미지는 **DB 값이 env 를 이긴다**(`mail_config.resolve_mail_config`, `artifact_base.resolve_artifact_base`, `job_image.resolve_job_image`) |
-| (b) `dms-config` 튜닝 키 | base `deploy/k8s/20-config.yaml` 의 키(로그인 보호·경보·보존일·루프 간격 등), 또는 base 에 없고 코드 기본값만 있는 키(예: `DMS_MAILER_BACKEND`·`DMS_MAX_REQUEST_BODY_BYTES`·`DMS_API_KEEP_ALIVE_SECONDS` — 더하면 새 키가 생긴다) | 아래 「영구」 절차 | 사이트 `patch-config.yaml` 에 두면 영구 |
+| (b) `dms-config` 튜닝 키 | base `deploy/k8s/20-config.yaml` 의 키(로그인 보호·경보·보존일·루프 간격 등), 또는 base 에 없고 코드 기본값만 있는 키(예: `DMS_MAILER_BACKEND`·`DMS_MAX_REQUEST_BODY_BYTES`·`DMS_API_KEEP_ALIVE_SECONDS`·k8s 동기화 튜닝 키(§6-5)·`DMS_BATCH_ORCHESTRATOR_INTERVAL_SECONDS`(기본 5초 — 배치 오케스트레이터와 배치 스케줄러 루프가 같이 쓰는 간격, 스케줄러 전용 키는 없다) — 더하면 새 키가 생긴다). 정수 키 전체 목록은 `src/dms/config.py` 의 `_SERVER_INT_KEYS`(키·기본값), 하한은 `_K8S_INT_FLOORS`·`_AUTH_INT_FLOORS`·`_API_INT_FLOORS` | 아래 「영구」 절차 | 사이트 `patch-config.yaml` 에 두면 영구 |
 | (c) `values.env` 키 | 태그·도메인·레지스트리·DB·입구 값 | 아래 표의 단계 | 영구 |
-| (d) 시크릿 | `dms-secrets`·TLS 등 | §3b | — |
+| (d) 시크릿 | `dms-secrets`·TLS·(선택) `dms-oidc` 등 | §3b | — |
 
 **(b) 튜닝 키 — 영구로 바꾸기.** prod 에는 이 키들의 values 키가 없다(values 키로 올리는 일은 BACKLOG). 지금 영구 경로는 사이트 체크아웃의
 템플릿에 키를 더하는 것이다:
@@ -1832,10 +1844,13 @@ api·controller 를 건너뛰었다).
 | `dms-pg-app` | `username`(`dms`)·`password`(basic-auth) | S2 `pg-secrets.py ensure-app` — **이미 있으면 덮지 않는다** | CNPG initdb, pg_dump CronJob |
 | `dms-registry-http` | `http-secret` | S4(없을 때만, stdin) | 클러스터 내 레지스트리 |
 | `<PORTAL_TLS_SECRET>`(기본 `dms-portal-tls`, `kubernetes.io/tls`) | `tls.crt`·`tls.key` | **사이트**(3b-2) | 클러스터의 Traefik(Ingress `dms-portal-traefik` 의 `spec.tls` — class 가 맞는 Ingress 와 같은 ns 의 시크릿만 읽고 SNI 로 고른다, §2g-1) |
+| `dms-oidc`(선택 — 사내 SSO) | `DMS_OIDC_ISSUER`·`DMS_OIDC_CLIENT_ID`·`DMS_OIDC_CLIENT_SECRET`·`DMS_OIDC_REDIRECT_URI`(넷 다 있어야 켜진다 — 일부만 있으면 dms-api 기동 거부). 선택 키 `DMS_OIDC_CA_PEM`·`DMS_OIDC_BUTTON_LABEL`·`DMS_OIDC_AUTO_PROVISION`·`DMS_OIDC_REQUIRE_EMAIL_VERIFIED` | **사이트**(§6-9 — 설치기는 만들지도 검사하지도 않는다) | dms-api(`envFrom` optional — `k8s/40-api.yaml`) |
 
-이 표 밖에도 설치가 만드는 비밀이 있다(값을 다루지 않는다 — 각 오퍼레이터가 만들고 돌린다): CNPG 오퍼레이터의 PG 서버·복제 인증서와 그 CA(개인키 포함,
-ns `dms` — 이름은 CNPG 판에 따른다, 미검증), Volcano ssh 플러그인이 잡마다 만드는 SSH 키(ns `dms` — 잡 매니페스트의 `plugins.ssh`, vcjob 과 함께
-지워진다). 전체 목록: `kubectl --context <ctx> -n dms get secret`. ns `dms` 의 시크릿 읽기 권한을 좁히는 이유가 여기에도 있다(§3b-3). 포탈 TLS
+이 표 밖에도 설치가 만드는 비밀이 있다(값을 다루지 않는다 — 각 오퍼레이터가 만들고 돌린다): CNPG 오퍼레이터가 만든 PG 인증서 시크릿
+`dms-pg-ca`(CA — 개인키 포함)·`dms-pg-server`·`dms-pg-replication`(ns `dms`. 이름은 Cluster 이름 `dms-pg` 에서 파생된다 — CNPG 1.30.1 테스트베드 실측),
+Volcano ssh 플러그인이 잡마다 만드는 SSH 키(ns `dms` — 잡 매니페스트의 `plugins.ssh`, vcjob 과 함께 지워진다). 외부 PG 에서 옮겨 `pg-secrets.py set-url`
+을 돌린 사이트에는 `dms-secrets-prev`(옛 `DMS_DATABASE_URL` — 옛 DB 비밀번호 포함, `restore-url` 의 되돌림 재료)도 남는다 — §2f-2 「이관 순서」.
+전체 목록: `kubectl --context <ctx> -n dms get secret`. ns `dms` 의 시크릿 읽기 권한을 좁히는 이유가 여기에도 있다(§3b-3). 포탈 TLS
 개인키는 클러스터 공용 Traefik 의 서비스 계정도 읽는다(§0-4 승인 항목).
 
 DB 안에도 비밀이 둘 있다 — 포탈에 넣은 메일 릴레이 인증 키와 k8s 연동 클러스터 토큰이다. 둘 다 `DMS_SESSION_SECRET` 에서 유도한 키로 봉인해
@@ -1918,6 +1933,7 @@ sh deploy/install.sh --context <ctx> --only S11      # 「설정이 바뀌어 �
 | `DMS_SESSION_SECRET` | 모든 세션 쿠키의 서명이 틀어져 **전원 다시 로그인**. 포탈은 봉인 키를 다시 받는다(kid 불일치 422 → 재수신). DB 의 메일 키·k8s 토큰이 열리지 않는다 — 메일 설정에 「읽을 수 없습니다」, knox_relay 발송은 `relay_misconfigured`, 클러스터 동기화 실패 | 포탈 메일 설정에서 키를 다시 넣는다(§11). 「k8s 연동」에서 클러스터마다 토큰을 다시 넣는다(§6-5). 옛 값은 암호화한 사본으로 남겨 둔다(옛 덤프 복원용) |
 | DB 비밀번호 | `dms-pg-app`·DB 롤·`DMS_DATABASE_URL` 셋이 함께 바뀌어야 한다 | 회전 절차는 아직 없다(**미검증** — BACKLOG). `pg-secrets.py` 는 이미 있는 `dms-pg-app` 을 덮지 않는다 |
 | 포탈 TLS | 없음(재기동 없음 — 미검증, §2g-6) | 3b-2 |
+| `dms-oidc`(client secret 재발급·SSO 끄기) | 다음 dms-api 재시작 전까지 옛 값을 쓴다 | Secret 을 다시 만들거나 지운 뒤 `kubectl --context <ctx> -n dms rollout restart deploy/dms-api`. **`--only S11` 로는 다시 뜨지 않는다**(S11 의 설정 rev 는 `dms-config`·`dms-secrets` 만 본다 — §6-9) |
 | 대상 클러스터 리더 토큰 | 다음 동기화부터 401 | 「k8s 연동」에서 새 토큰(§6-5) |
 
 ### 3b-5. 공용 스토리지 밖 사본
@@ -2029,9 +2045,12 @@ dms-api·dms-controller 에는 initContainer `migrate` 가 있다(`deploy/k8s/40
       §2f-4 6) 의 Complete·Failed 루프(`job/dms-pg-dump-first` 자리에 `"$J"`, 600초 — `wait --for=condition=complete` 는 Failed 를 못 알아채 쓰지 않는다)가
       PASS → `kubectl --context <ctx> -n dms logs "job/$J"` 의 덤프 파일 이름을 적어 둔다(`<SHARED_DIR>/dms/backup/pg/`).
 - [ ] 공용 스토리지 밖 사본이 최신이다(§3b-5).
+- [ ] 진행 중인 삭제·정리가 없다 — **유지보수·drain 을 켜기 전에** 본다(켜져 있으면 `batch-delete` 는 유지보수·drain 에서, `request-purge` 는
+      drain 에서 쉬어 줄지 않는다): 작업 목록 툴바 아래 정리 줄이 비어 있다(「배치 삭제 중 N건」·「결과 파일·파드 정리 중 N건」은 0 이면 보이지
+      않는다). 또는 `GET /api/admin/request-purges` 가 `pending: 0` 이고 `batch_deletions: []` 다. 롤백 가능성에 대비하는 것이다 — §12 「정리 대기
+      중 이미지 롤백 금지」·「롤백 노트(2026-11-19 백그라운드 배치 삭제)」.
 - [ ] 진행 중인 잡·빌드가 없다(포탈 전체 작업·빌드 이력, `kubectl --context <ctx> -n dms get vcjob,pods`). 새 제출을 막으려면 컨트롤 상태의 「유지보수」
       (신규 제출 503 `maintenance_mode` — `routes_requests.reject_when_maintenance`), 잡 진행까지 세우려면 「drain」(stepper 정지 — `stepper.JobStepper.run_once`).
-- [ ] 작업 삭제 정리 대기가 0 이다(작업 목록 툴바 「정리 중 0건」 — 롤백 가능성 대비, §12 「정리 대기 중 이미지 롤백 금지」).
 - [ ] 레지스트리가 정상이다(`kubectl --context <ctx> -n dms get deploy dms-registry` Ready — 릴리스는 레지스트리가 정상일 때만, §2e-5).
 - [ ] 점검 창을 사용자에게 알렸다.
 
@@ -2054,8 +2073,8 @@ dms-api·dms-controller 에는 initContainer `migrate` 가 있다(`deploy/k8s/40
   옛 securityContext 를 담고 있을 수 있다(레지스트리를 옮긴 사이트에서는 받을 곳이 없는 이미지로 돌아간다).
 - 명시 태그 사이트는 values.env 의 태그도 되돌린다(아니면 다음 S11 가드 exit 3).
 - **스키마는 되돌아가지 않는다.** 새 이미지의 initContainer `migrate` 가 이미 스키마를 바꿨다. 옛 이미지가 새 스키마에서 도는지는 변경마다 다르다 —
-  일반 보장은 없다(**미검증**). 그 커밋의 CHANGELOG 항목을 먼저 본다(예: §12 「정리 대기 중 이미지 롤백 금지」, §12b — api 와 controller 둘 다 새 이미지여야
-  한다). 옛 이미지가 새 스키마에서 못 돌면 업그레이드 직전 덤프로 DB 를 되돌린다(5-3 — 그 뒤의 쓰기는 잃는다).
+  일반 보장은 없다(**미검증**). 그 커밋의 CHANGELOG 항목을 먼저 본다(예: §12 「정리 대기 중 이미지 롤백 금지」, §12 「롤백 노트(2026-11-19 백그라운드
+  배치 삭제)」 — 묘비 `Deleting` 은 옛 컨트롤러가 끝내지 못한다, §12b — api 와 controller 둘 다 새 이미지여야 한다). 옛 이미지가 새 스키마에서 못 돌면 업그레이드 직전 덤프로 DB 를 되돌린다(5-3 — 그 뒤의 쓰기는 잃는다).
   - 예: 배치 스케줄러(2026-11-16, 커밋 a5cc398f — 테이블 `batch_schedules`·`batch_schedule_runs`, 새 설정 키 없음)가 없는 옛 이미지로 내리면 회차만
     멈추고 행은 남는다. 다시 올리면 유예를 넘긴 슬롯은 missed 로 한 번 기록하고 다음 슬롯부터 돈다. 그사이 옛 api 로 지운 배치의 스케줄은
     `batch_not_found` 로 자동 일시정지되고, 작업 → 배치 스케줄러에서 세션 관리자가 지운다(코드 읽기 — **미검증**).
@@ -2245,12 +2264,12 @@ GET 한 값에서 바꿀 칸만 고쳐 전 필드를 보낸다(빠진 칸은 NUL
 
 | 칸 | 값 | 확인 |
 |---|---|---|
-| `build_node_name` | 인터넷 노드. **에이전트가 보고한 노드만** 받는다(아니면 422 `unknown_build_node`) — 곧 NoSchedule taint 없는 워커다. 빌드 파드는 toleration 없이 이 노드의 hostname 으로만 뜬다(`build_manifests.py`) | 스토리지 → 노드 화면에 그 노드 |
+| `build_node_name` | 인터넷 노드. **에이전트가 보고한 노드만** 받는다(아니면 422 `unknown_build_node`) — NoSchedule taint 없는 노드(보통 워커 — taint 없는 RKE2 마스터도 받는다, §0-2). 빌드 부하가 제어면에 얹히지 않게 워커를 권한다. 빌드 파드는 toleration 없이 이 노드의 hostname 으로만 뜬다(`build_manifests.py`) | 스토리지 → 노드 화면에 그 노드 |
 | `build_source_path` | 그 노드의 **로컬 체크아웃** 절대 경로(git worktree 금지 — SHA `unknown`, §8 1)). 설치한 커밋과 같게 둔다 | 빌드 프리플라이트(`build_source_unavailable`) |
 | 빌드 프록시(`build_http_proxy`·`build_https_proxy`·`build_no_proxy`) | 사내 프록시. 인증 프록시(`user:pass@`)는 저장이 거절된다. 레지스트리·localhost·127.0.0.1 은 서버가 no_proxy 에 보탠다 | 프리플라이트(`build_node_no_egress`·`build_proxy_unreachable`) |
 | `build_proxy_ca_path` | TLS 를 가로채는 사내 프록시면 빌드 노드 위 사내 CA PEM 의 절대 경로 | 프리플라이트(`build_proxy_ca_missing`·`build_proxy_tls_failed`) |
 | `build_host_network` | 프록시가 그 노드에서만 닿는 주소일 때. loopback 프록시는 자동으로 켜진다 | §8 3b-1) |
-| 유지보수·drain | 평소 꺼짐. 유지보수 = 신규 제출 503 `maintenance_mode`, drain = 잡 진행 정지(§4-5) | 대시보드 |
+| 유지보수·drain | 평소 꺼짐. 유지보수 = 신규 제출 503 `maintenance_mode` + 배치 스케줄 회차 skipped(`maintenance_mode`) + 백그라운드 배치 삭제(`batch-delete`)·회차 보존 정리(`batch-round-prune`) 쉼. drain = 잡 진행 정지 + 파일·파드 정리(`request-purge`)·결과 파일 만료(`artifact-expiry`)·배치 삭제·회차 정리 쉼 + 스케줄 회차 skipped(`batch_schedule_drain`)(§4-5). 유지보수 중에는 작업 삭제(`POST /api/admin/requests:delete` — 단건·배치, 백그라운드 삭제 시작 포함)와 미등록 스토리지 기록 삭제도 503 `maintenance_mode` 다(`routes_request_purge`·`routes_usage` → `routes_requests.reject_when_maintenance`). drain 만 켜면 즉시 삭제는 api 가 그대로 하고, 파일·파드 정리(`request-purge`)와 묘비 청크(`batch-delete`)만 drain 을 끌 때까지 쉰다 | 대시보드 |
 
 - 설치 뒤 첫 빌드는 업그레이드 때 해도 되지만, 열기 전에 한 번 제출해 프리플라이트(소스·egress·레지스트리 `DMS_BUILD_REGISTRY` 도달·디스크)가 통과하는지 보기를
   권한다(§8 3b)). 빌드는 레지스트리에 태그를 하나 만든다.
@@ -2362,7 +2381,7 @@ docstring).
 2. **PV 스토리지**(6-4 — 종류 `pv` 또는 `both`, `backend_type` 은 PV 백엔드에 맞게). **기본 소유 uid:gid** 는 그 PV 를 실제로 쓰는 파드의 uid/fsGroup 에
    맞춘다. 그 스토리지의 PV 를 목적지로 하는 sync 결과가 이 소유로 `--chown` 된다(일반 사용자는 늘 이 값, 특권 운영자만 「PV 루트 소유자」를 고른다 —
    `execution_manifests._auto_chown`). 바꾸면 이미 제출됐지만 아직 실행되지 않은 그 PV 목적지 sync 는 `storage_owner_changed` 로 멈춘다(다시 제출).
-3. **호출 노드·주기**(「개요」 탭 「호출 노드와 주기」): 주·보조 = 대상 API 에 닿는 DMS 워커(에이전트가 보고한 노드). 주기 기본 300초(`DMS_K8S_SYNC_INTERVAL_SECONDS`, 하한 60) — 포탈 값이 이긴다.
+3. **호출 노드·주기**(「개요」 탭 「호출 노드와 주기」): 주·보조 = 대상 API 에 닿는, 에이전트가 보고한 노드(taint 없는 RKE2 마스터도 후보 — §0-2). 주기 기본 300초(`DMS_K8S_SYNC_INTERVAL_SECONDS`, 하한 60) — 포탈 값이 이긴다.
 4. **클러스터 등록**(「클러스터」 탭 → 「클러스터 등록」): 이름(소문자 DNS 라벨), API 서버 `https://<호스트>[:<포트>]`(경로 없음), TLS = 「지정한 CA」(`reader-ca.crt`) 권장 — 서버 이름(SNI)이 인증서와
    다르면 지정한다. 검증 끄기는 쓰지 않는다. 토큰 = `reader.token` → 그 클러스터 카드의 「지금 동기화」. 첫 run 은 폴링 주기(15초) 안에 시작한다.
    같은 클러스터를 다른 주소로 또 등록하면 「클러스터」 탭의 카드가 「같은 클러스터로 보입니다」로 경고한다(지문 = `kube-system` namespace uid).
@@ -2392,6 +2411,19 @@ docstring).
   「매핑 해제」를 골라 저장한다. 남겨 두면 그 스토리지를 `filesystem` 으로 바꿀 때 422 `storage_has_sc_mappings` 가 난다. 그 이름의 SC 가 다시
   보이면(같은 클러스터를 다시 등록하는 등) 남은 매핑이 그대로 다시 걸린다.
 - `DMS_SESSION_SECRET` 을 바꾸면 저장한 토큰이 열리지 않는다 — 클러스터마다 다시 넣는다(§3b-4).
+
+**동기화 튜닝 키**(전부 base `20-config.yaml` 에 없고 코드 기본만 있다 — 바꾸려면 §3-4 (b) 영구 절차로 사이트 `patch-config.yaml` 에 더한다. 하한 밑이면
+api·controller 기동 거부 — `config.py` `_K8S_INT_FLOORS`):
+
+| 키 | 기본(하한) | 뜻 |
+|---|---|---|
+| `DMS_K8S_SYNC_INTERVAL_SECONDS` | 300(≥ 60) | 동기화 주기 기본값 — 포탈 「호출 노드와 주기」 값이 이긴다 |
+| `DMS_K8S_SYNC_POLL_SECONDS` | 15(≥ 5) | 호출 노드 에이전트의 claim 폴링 간격 = 「지금 동기화」 지연 상한 |
+| `DMS_K8S_SYNC_RUN_DEADLINE_SECONDS` | 120(≥ 10) | run 하나의 에이전트 측 기한. 서버는 +30초 유예 뒤 expired 로 본다 |
+| `DMS_K8S_SYNC_PAGE_LIMIT` | 500(1–5000) | 대상 API 목록 한 쪽 크기(`?limit=`) |
+| `DMS_K8S_SYNC_MAX_BYTES` | 33554432(≥ 1MiB) | 투영한 인벤토리 상한 = 결과 POST 본문 상한. 넘으면 `k8s_sync_too_large`(에이전트 메모리 256Mi 보호) |
+| `DMS_K8S_INVENTORY_INTERVAL_SECONDS` | 10(≥ 1) | 컨트롤러 k8s-inventory 루프 간격(적용·만료·정리 — DB 전용) |
+| `DMS_K8S_SYNC_RUN_RETENTION_DAYS` | 30(≥ 1) | 동기화 이력 보존일(위 「장애 표시」) |
 
 ### 6-6. 공용 스토리지 밖 사본
 
@@ -2537,7 +2569,7 @@ VERIFY_NO_PROBES=1 CACERT=<사내CA> sh deploy/install.sh --context <ctx> --only
 ```
 
 - 포탈 운영 → 아티팩트 경로: 3홉(API·컨트롤러·노드)이 모두 정상, 「DMS 상태 디렉터리」가 `<SHARED_DIR>/dms`, 겹치는 스토리지 경고 없음.
-- 스토리지 → 노드: 모든 워커의 에이전트 보고가 신선하다.
+- 스토리지 → 노드: 모든 DMS 노드(에이전트가 뜬 노드)의 보고가 신선하다.
 - 요청 상세의 결과 화면·실행 로그가 열린다(결과 파일이 공용 디렉터리에 써졌다는 뜻).
 
 끝나면 정리한다: 시험 작업은 관리자가 전체 작업에서 지운다(§12 — 세션 관리자). 시험 PVC·바인딩·namespace 를 대상 클러스터에서 지우고 「클러스터」 탭 카드의 「지금 동기화」.
@@ -2564,7 +2596,7 @@ cd frontend && npm run test:e2e
 # = npm run build && tsc -p tsconfig.e2e.json && playwright test  (빌드까지 한 방)
 ```
 
-- 시나리오 38건(18개 파일, 2026-11-16 기준 — `npx playwright test --list` 로 센다), 빌드를 포함해 몇 분이다. 하네스가 백엔드를 띄우고 끝나면 스스로
+- 시나리오 39건(18개 파일, 2026-11-19 기준 — `npx playwright test --list` 로 센다), 빌드를 포함해 몇 분이다. 하네스가 백엔드를 띄우고 끝나면 스스로
   죽인다(tmp DB 포함 정리).
 - **이 게이트는 수기다 — CI 는 없다.** 이 저장소에는 이 스위트를 자동으로 돌려주는 것이 없다. 사람이 빌드 전에 돌리는 것이 유일한 강제력이다.
 - **무엇을 잡는가**(프론트 단위 테스트 `npx vitest run` 이 구조적으로 못 보는 넷): 기하(넓은 표가 레이아웃을 밀어내는 회귀 — jsdom 에는 레이아웃이 없다),
@@ -2583,8 +2615,8 @@ cd frontend && npm run test:e2e
 `control_state` 테이블에 저장된다 — ConfigMap이 아니다, 운영자가 포탈에서 언제든
 바꾸는 값이라 재적용마다 되돌아가면 안 되기 때문이다. 지정 전에 「빌드」 화면에서
 제출하면 API가 `422 build_node_not_set`/`build_source_not_set`으로 거절한다.
-**빌드 노드의 조건**: (1) **NoSchedule taint 없는 워커** — 빌드·프리플라이트 파드에 toleration 이 없고 nodeSelector `kubernetes.io/hostname` 만 쓴다
-(`build_manifests.py`). 에이전트가 보고한 노드만 저장된다(422 `unknown_build_node`). (2) **privileged 파드 허용** — 빌드 파드는 privileged(buildah)다.
+**빌드 노드의 조건**: (1) **NoSchedule taint 없는 노드**(워커 권장 — taint 없는 RKE2 마스터도 되지만 빌드 부하가 제어면에 얹힌다, §0-2) — 빌드·프리플라이트
+파드에 toleration 이 없고 nodeSelector `kubernetes.io/hostname` 만 쓴다(`build_manifests.py`). 에이전트가 보고한 노드만 저장된다(422 `unknown_build_node`). (2) **privileged 파드 허용** — 빌드 파드는 privileged(buildah)다.
 (3) 빌드 소스는 그 노드의 **로컬 체크아웃**(git worktree 금지 — 아래 1)). (4) 인터넷 egress(직접 또는 프록시 — 아래 3)·3b-1)). 설치 때의 인터넷 노드를
 그대로 쓰는 것이 보통이다(§0-2).
 
@@ -2930,6 +2962,8 @@ dms-k8s 는 **k8s 신원 모드 전용**이다. 동작의 근거는 `docs/ARCHIT
 - **인증 잠금 해제**(관리 → 보안 이벤트 — 세션 관리자): 아이디별 「잠금 해제」(DB 의 인증 실패 기록 삭제)와 「전체 잠금 해제」(api 메모리). 둘 다 감사 로그와
   이벤트에 누가 했는지 남는다. 상한 값은 §11.
 - **사용자 셀프서비스**: 가입·비밀번호 재설정은 메일 인증번호(6자리·5분)로 한다. 받는 주소는 `<아이디>@<EMAIL_DOMAIN>` 파생이다.
+- **사내 SSO**(켠 사이트 — §6-9): SSO 로 처음 들어온 사람은 user 계정이 자동으로 생긴다(무작위 비밀번호 — `DMS_OIDC_AUTO_PROVISION`, 기본 켬). 특권
+  목록 이름의 계정은 만들지 않고(먼저 6-1·10-2 로 만든다), `root`·`admin` 은 SSO 로 들어오지 못한다(`routes_oidc._ensure_account`).
 - **비밀번호**: 저장은 scrypt(`repositories.accounts._hash_password`), 전송은 포탈이 봉인한다(평문은 422 `password_encryption_required` — `x-admin-token` 부트스트랩만 예외).
 - **세션 끊기**: 비밀번호가 바뀌면(셀프·관리자 재설정) 그 계정의 세션 세대가 회전해 기존 로그인이 모두 끊긴다(401 `session_revoked` — `api.auth.current_identity`,
   DB `accounts.session_epoch`). 비활성화한 계정은 401 `account_disabled` 다(로그인도 — 비밀번호가 맞을 때만, 실패로 세지 않는다; 셀프 비밀번호
@@ -2943,6 +2977,8 @@ dms-k8s 는 **k8s 신원 모드 전용**이다. 동작의 근거는 `docs/ARCHIT
   유휴 만료는 없다. (이미지의 Starlette 판은 고정돼 있지 않다 — `pyproject.toml` 의 `fastapi>=0.115`. 위 동작은 개발 환경의 Starlette 1.3.1 로 확인했다.)
 - **로그아웃은 그 브라우저의 쿠키만 지운다**(`/api/auth/logout` — `session.clear()`). 서버에 세션 표가 없어서, 복사된 쿠키 값은 14일 동안 유효하다.
   서버 쪽에서 끊는 길은 셋이다: 그 계정의 비밀번호 변경(세션 세대 회전), 계정 비활성화, `DMS_SESSION_SECRET` 회전(전원 — §3b-4). 이 한계는 BACKLOG 에 적었다.
+- **SSO 세션도 같은 쿠키다**(username + 세션 세대, 14일 — `routes_oidc.oidc_callback`). DMS 로그아웃은 IdP 세션을 끝내지 않고, DMS 는 로그인 뒤 IdP 쪽
+  상태를 다시 보지 않는다 — **IdP 에서 사용자를 막아도 이미 받은 DMS 세션은 남는다**. 끊으려면 DMS 계정을 비활성화하거나 비밀번호를 바꾼다(위 세 길).
 - **한 브라우저에서 여러 포탈**: 쿠키 이름이 같고 쿠키는 포트가 아니라 호스트 이름으로 갈린다. 같은 호스트의 다른 포트로 두 포탈을 열면 서로 로그아웃시킨다 —
   포탈마다 다른 FQDN 을 쓴다.
 - **포탈 부제**: 관리 → 포탈 설정의 부제(`PUT /api/admin/portal-settings` — `routes_portal`)가 사이드바·로그인 화면·브라우저 탭 제목에 「메인 - 부제」로 보인다.
@@ -3076,7 +3112,7 @@ dms-k8s 는 **k8s 신원 모드 전용**이다. 동작의 근거는 `docs/ARCHIT
 **배치 단위**로만 지운다(아래 「배치 단위 삭제」). 한 건은 요청 상세의 「작업 삭제」로도 지운다(2026-10-26 — 같은 API·같은
 확인 창, 배치 자식·진행 중 잡이 있으면 버튼이 잠기고 이유를 보인다; 지우면 작업 목록으로 돌아가 결과를 알린다). 삭제는 두 단계다:
 
-1. **DB — 즉시**(api, `POST /api/admin/requests:delete`): 요청·결과·plan·잡·상태 이력·진단 이벤트·사용량 요약을 한
+1. **DB — 즉시**(api, `POST /api/admin/requests:delete` — 배치 단위의 큰 배치는 백그라운드, 아래 「배치 단위 삭제」): 요청·결과·plan·잡·상태 이력·진단 이벤트·사용량 요약을 한
    트랜잭션으로 지우고, 같은 트랜잭션에서 감사 1행(`audit_log` 'request'/'delete' — 누가·언제·무엇을, 컨펌·취소 actor·
    root 여부·실행 신원 스냅숏)과 **정리 아웃박스** `request_purges` 1행(잡 id·ref·삭제 시점 artifact base)을 남긴다.
    커밋 순간 목록·상세·아티팩트·로그·사용량·지표에서 사라진다. api 는 파일·k8s 를 만지지 않는다. 요청마다 자기
@@ -3094,7 +3130,10 @@ dms-k8s 는 **k8s 신원 모드 전용**이다. 동작의 근거는 `docs/ARCHIT
 curl --noproxy '*' -sf "$API/api/admin/request-purges" -H @"$AUTH" | python3 -m json.tool     # API·AUTH 는 §6-4(헤더 파일)
 # {"pending": 대기 행 수, "stalled": last_error 가 있는 행 수, "oldest_requested_at": ...,
 #  "items": [{"request_id", "stage": k8s|files|purging, "attempts", "last_error", "requested_at",
-#             "requested_by", "next_attempt_at"}]}   # 오래된 순 최대 50건
+#             "requested_by", "next_attempt_at"}],   # 오래된 순 최대 50건
+#  "batch_deletions": [{"batch_id", "name", "requested_by", "requested_at", "expected_request_count",
+#             "deleted_request_count", "last_error", "blocked_request_id", …}],   # 진행 중인 백그라운드 배치 삭제(2026-11-19), 오래된 순 최대 50
+#  "limits": {…}}   # 삭제 상한(2026-11-19 — 툴바 상한 줄의 재료, 아래 「배치 단위 삭제」의 상한)
 kubectl --context <ctx> -n dms get pods -l dms.io/purge=1 -o wide          # purge 파드(언제나 최대 1개, dms-artifact-purge-<hash>)
 kubectl --context <ctx> -n dms logs deploy/dms-controller -c controller | grep request-purge   # 예기치 못한 예외(stderr)
 ```
@@ -3149,9 +3188,12 @@ positional 인자(32자 hex 가 아니면 아무것도 지우지 않고 exit 2),
 
 **배치 단위 삭제**(2026-10-10). 작업 목록의 「배치」 열(관리자만)이 행마다 배치 이름(상세 링크)을 보이고, 배치 항목
 작업의 체크박스는 **배치 전체** 토글이다 — 그 배치의 작업 전부(재실행·재스캔 이력 포함, 화면에 안 보이는 것까지)와 배치
-기록(항목 목록·이름·메모·실행 설정)이 한 트랜잭션으로 함께 지워진다(전부 아니면 전무, 같은 `POST
-/api/admin/requests:delete` 의 `batches`). 작업마다 위 1·2 단계가 그대로 일어나고(아웃박스 행·감사 행이 작업마다), 감사에
-배치 1행(`audit_log` 'batch'/'delete' — 배치 이름·옵션·실행 신원·항목·자식 id)이 더해진다.
+기록(항목 목록·이름·메모·실행 설정)이 함께 지워진다(같은 `POST /api/admin/requests:delete` 의 `batches`). 작업이
+`DMS_BATCH_DELETE_SYNC_MAX_CHILDREN`(기본 500) 이하인 배치는 api 한 트랜잭션(전부 아니면 전무)이고, 감사는 작업마다
+`request / delete` 와 배치 `batch / delete` 1행(배치 이름·옵션·실행 신원·항목·자식 id)이다. 그보다 큰 배치(또는 한 호출의 즉시 삭제 합이
+2 × 문턱을 넘는 배치)는 묘비(`Deleting`) 뒤 컨트롤러 `batch-delete` 가 100개 청크로 지운다 — 청크마다 커밋하므로 전부 아니면 전무가
+아니고 되돌릴 수 없으며, 감사는 청크 요약이다(아래 「즉시 삭제와 백그라운드 삭제」·「감사」). 어느 길이든 위 2단계(파일·파드 정리
+아웃박스)는 작업마다 생긴다.
 - 고를 수 있는 배치: 완료·취소된 배치이고 끝나지 않은 작업이 0 이어야 한다(확인 대기·실행 중이면 배치 상세에서 먼저 취소).
   고를 수 없으면 배치 칸 둘째 줄에 이유가 보인다(「배치 진행 중」·「미완료 작업 있음」(그 배치의 다른 작업이 아직 안
   끝났다)·「삭제 중 N%」(백그라운드로 지우는 중 — 아래)). 상한을 넘는 배치는 「삭제 불가·상한」으로 보이지만 **고를 수는 있다**
@@ -3176,7 +3218,8 @@ positional 인자(32자 hex 가 아니면 아무것도 지우지 않고 exit 2),
   배치를 다시 누르면 `already: true`(멱등). **되돌릴 수 없다** — 그동안 그 배치의 항목 추가·수정·삭제·CSV 교체·재실행·이름·실행 설정·
   `:rescan`·스케줄 무장·기록 삭제는 409 `batch_deleting` 이다(스케줄·보존 회차 기록은 묘비 때 지워진다). 확인 창은 열릴 때
   `POST /api/admin/requests:delete-preview` 로 배치마다 정확한 수·최대 commit_order·판정(바로 삭제·백그라운드 삭제·이미 삭제 중·
-  이미 지워짐·삭제 불가)을 받는다(목록은 5000 에서 세기를 멈춘다 — 「5,000개 이상」).
+  이미 지워짐·삭제 불가)을 받는다(목록은 5000 에서 세기를 멈춘다 — 「5,000개 이상」). 컨트롤 상태 유지보수·drain 동안 묘비가 선
+  배치는 「삭제 중」에 머문다(`batch-delete` 루프가 쉰다 — 지연 사유가 아니다, 끄면 이어서 끝난다 — §6-3).
 - **삭제 지연**: 청크가 지울 수 없는 작업을 만나면(끝나지 않은 잡·방금 끝남·다른 배치 항목 참조·묘비 뒤에 생긴 작업) 그 작업은
   지우지 않고 그 배치 삭제가 「삭제 지연」으로 남아 백오프(15·30·…·900초)로 저절로 다시 시도한다 — 사유와 문제 작업은 배치 상세의
   진행 카드·`GET /api/admin/request-purges` 의 `batch_deletions[].last_error`·`blocked_request_id`·컨트롤러 이벤트
@@ -3215,6 +3258,7 @@ positional 인자(32자 hex 가 아니면 아무것도 지우지 않고 exit 2),
 작업의 결과 메시지·전이 전문은 남지 않는다. 지우지 않는
 것: 끝나지 않은 작업·끝나지 않은 잡이 있는 작업·조용한 창 안의 작업·항목이 가리키는 작업·보존 회차의 작업·최신 회차의 경계 작업 1건.
 끝나지 않은 잔재만 남아 진행하지 못하면 이벤트 `batch_round_prune_blocked`(배치마다 1시간 1회 — 그 작업을 취소하면 풀린다).
+컨트롤 상태 유지보수·drain 동안에는 정리가 쉰다(스케줄 회차도 skipped — §6-3). 끄면 다음 틱부터 이어서 정리한다.
 배포 직후 대량 삭제는 없다: 배포 전 회차는 기록이 없어 가장 오래된 회차 하나로 보고, 배포 뒤 기록된 회차가 보존 수(기본 10)만큼
 될 때(일일 스케줄이면 10일 뒤) 한꺼번에 정리된다. 보존 수를 올리면 이미 지운 회차는 돌아오지 않고 새로 지워지는 것도 없다(회차가
 새 보존 수를 넘을 때까지 정리가 쉰다); 내리면 컨트롤러 재시작 뒤 첫 틱부터 새 경계 밖 회차가 정리된다. 항목 수 × 보존 수가 배치 단위
@@ -3256,6 +3300,7 @@ positional 인자(32자 hex 가 아니면 아무것도 지우지 않고 exit 2),
 - controller `artifact-expiry` 루프(5분 — `request-purge` 와 같은 조건에서만 조립)가 대상(잡·요청 둘 다 종단, 종단 시각
   ≈ `data_jobs.updated_at` 이 N일 전보다 오래됨)을 골라 `data_jobs.artifacts_expired_at` 을 찍고 정리 아웃박스에
   `kind='expiry'` 행을 넣는다. 지우는 것은 위 2단계와 **같은 정리 루프**(파드 0 확인 → `.dms-trash` 떼어냄 → purge 파드)다.
+  컨트롤 상태 drain 동안에는 고르지도 지우지도 않는다(`artifact-expiry`·`request-purge` 둘 다 쉼 — 끄면 이어서 끝난다, §6-3). 유지보수만으로는 쉬지 않는다.
 - 정리 대기 중인 만료 행은 50개까지만 넣는다(작업 삭제 정리가 그 뒤에 오래 서지 않게) — 오래된 이력이 많아도 하루
   최대 ~1.4만 건씩 따라잡는다.
 - 현황: 포탈 **아티팩트 경로** 화면의 「결과 파일 보존: … · 만료됨 N건 · 정리 대기 · 지연(사유)」 한 줄
@@ -3385,13 +3430,17 @@ kubectl --context <ctx> get pv | grep dms-pgdata                        # Releas
 | 제출 503 `maintenance_mode` | 컨트롤 상태 유지보수가 켜져 있다 | §6-3 |
 | 잡이 전혀 진행하지 않는다 | 컨트롤 상태 drain 이 켜져 있다(stepper 정지) | §6-3 |
 | 빌드 실패 `build_registry_unreachable`·`build_node_no_egress`·`build_source_unavailable`·`build_node_disk_low`·`build_proxy_*` | 빌드 프리플라이트 | §8 3b) |
-| 컨트롤 상태 저장 422 `unknown_build_node` | 빌드 노드는 에이전트가 보고한 워커여야 한다 | §6-3 |
+| 컨트롤 상태 저장 422 `unknown_build_node` | 빌드 노드는 에이전트가 보고한 노드여야 한다(NoSchedule taint 없는 노드 — §0-2) | §6-3 |
 | 인증 메일 실패(`verification_email_failed`·`relay_*`) | 릴레이 주소·키·허용 IP·도메인 | §11 |
 | 메일 설정 「읽을 수 없습니다」·`relay_misconfigured` | `DMS_SESSION_SECRET` 이 바뀌었다 — 키 다시 입력 | §3b-4 |
 | k8s 연동 「클러스터」 탭 카드 「실패 · … 토큰을 거부했습니다(401)」·인증서 검증 실패 | 리더 토큰·CA·서버 이름 | §6-5 |
 | 로그인 429 `login_rate_limited`·503 `login_busy` | 로그인 보호 장치 | §10-7 |
 | 401 `session_revoked` | 그 계정의 비밀번호가 바뀌었다 — 다시 로그인 | §10-5 |
+| SSO 로그인 실패 `/login?sso_error=<사유>` | dms-api 로그 `sso login failed:` 줄(`kubectl --context <ctx> -n dms logs deploy/dms-api \| grep -i sso`). `sso_upstream_unreachable`(IdP 에 못 닿음 — 방화벽·이름·CA. 프록시를 타지 않는다, §0-3) · `sso_upstream_error`(discovery issuer 불일치·끝점이 https 아님·토큰 끝점 4xx — client secret·redirect URI) · `sso_token_invalid`(iss·aud·azp·nonce·시계 ±120초) · `sso_state_invalid`(로그인 시작 뒤 10분 초과·쿠키 유실) · `sso_denied`(IdP 에서 취소·거절) · `sso_email_missing`·`sso_email_domain_mismatch`·`sso_email_unverified`(IdP 의 email 클레임) · `sso_account_not_found`(자동 생성 꺼짐) · `sso_privileged_account_missing`(특권 이름 — 먼저 계정 생성) · `sso_username_invalid`(`root`·`admin`·형식) · `account_disabled`(DMS 계정이 비활성 — 관리 → 계정에서 활성화, §10) · `sso_not_configured`(Secret `dms-oidc` 없음·재시작 전) | §6-9 |
 | 작업 삭제 뒤 정리가 멈춤 | 정리 상태의 `last_error` | §12 |
+| 배치 변경·재실행·`:rescan`·스케줄 무장이 409 `batch_deleting` | 그 배치가 백그라운드 삭제 중이다(묘비 — 되돌릴 수 없다) | §12 |
+| 배치가 오래 「삭제 중」 | 배치 상세 진행 카드·`GET /api/admin/request-purges` 의 `batch_deletions[].last_error`·`blocked_request_id`, 컨트롤러 이벤트 `batch_delete_blocked`. 컨트롤 상태 유지보수·drain 이 켜져 있으면 루프가 쉰다 | §12·§6-3 |
+| 배치 스케줄 회차가 skipped `maintenance_mode`·`batch_schedule_drain` | 컨트롤 상태 유지보수·drain 이 켜져 있다 | §6-3 |
 | `/readyz` 503, DB 연결 오류 | `kubectl --context <ctx> -n dms get cluster dms-pg`, `python3 deploy/pg-secrets.py --context <ctx> check` | §2f·§2f-7 |
 | 릴리스 화면 드리프트·보안 설정 드리프트 | 매니페스트가 라이브와 다르다 | §9-8, `--only S11` |
 | 잡이 실패 — 원인 | 요청 상세 「실행 로그」(launcher 로그)의 `DMS_EXEC_REASON=<코드>` 줄이 사유, 그 아래 `DMS_JR_TOOL_OUTPUT` 의 `  \| ` 줄이 도구 출력 발췌(stdout 끝 80·stderr 끝 20줄, 합계 10 KiB). 전체는 stdout.log·stderr.log(결과 파일 만료 전), 결과 화면 「실패 항목」은 표본(최대 10개) | §12b |

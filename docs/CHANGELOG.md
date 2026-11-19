@@ -55,13 +55,13 @@ dms-k8s 라인의 **완료 기록**이다. 각 항목에는 무엇을 만들었�
 | 날짜 | 태그·실증 | 제목 |
 |---|---|---|
 | 11-19 | d35·d36 | 배치 단위 삭제 상한 기본 50000 + 청크(백그라운드) 삭제 + 삭제 화면 상한 표시·「삭제 불가」 |
-| 11-18 | d32·d33 | 테스트베드 사내 AD SSO 환경(Samba AD DC + Keycloak, 호스트 docker) 구축·실 Chrome 실증 + 실증에서 찾은 결함 3건 수정 |
-| 11-18 | — | 사내 AD SSO 로그인(OIDC Authorization Code + PKCE — 「Sign in with … SSO」 버튼, 선택 Secret `dms-oidc`) |
+| 11-18 | d32·d33 | 테스트베드 사내 AD SSO 환경 구축·실증 + 실증 결함 3건 수정 |
+| 11-18 | — | 사내 AD SSO 로그인(OIDC Authorization Code + PKCE) |
 | 11-17 | — | pull-probe 노드 여러 대 지정 수정 — 마스터 3대 사전 pull 에서 apiserver 가 DaemonSet 생성을 거부하던 것 |
 | 11-17 | — | 설치기 S11 에이전트 DaemonSet 대기를 노드 수 비례로 — 6노드 사이트의 정상 롤링(약 600초)을 고정 180초가 끊던 것 + 시간 초과 뒤 재실행이 설정 재시작을 되풀이하던 것 |
 | 11-17 | — | 설치기 S11 설정 재시작 누락 수정 — 포탈 릴리스 뒤 태그를 맞추는 S11 이 api·controller 를 다시 띄우지 않던 결함 |
 | 11-16 | d31 | 스케줄 배치 회차 보존 기본 5 → 10 d31 |
-| 11-16 | d29 | 스케줄 회차 최근 5회차 보존·배치 단위 삭제 상한 5000 d29 |
+| 11-16 | d29·d30(본문) | 스케줄 회차 최근 5회차 보존·배치 단위 삭제 상한 5000 d29 |
 | 11-16 | d28 | 포탈 개선 — 사용량 전체 목록·최신 scan 차트 · 배치 대상 스토리지 열·큰 배치 상세 쪽 넘김·검색 · 배치 스케줄러 d28 |
 | 11-16 | d27 | 입구 — Envoy Gateway 폐기, 클러스터의 Traefik 하나로 교체(테스트베드 영구 적용·실증) d27 |
 | 11-14 | — | 입구 — 리스너 포트(GATEWAY_LISTEN_PORT)·PROXY off 모드·마스터 hostPort 충돌 감지(OA: Traefik 이 호스트 443, Avi PROXY v2 미지원) |
@@ -202,8 +202,12 @@ controller·agent 재시작)** — 실 Chrome(테스트베드 CA 신뢰), 20화�
 새 소형 배치 → 68ms 에 「배치 1개(작업 2개) 삭제됨」(동기 — 「삭제 중」 없음, 감사 작업별 2 + 배치 1, `purge_group` NULL). 끝에 설치기 S11 로 원복
 (CM `50000 500`, 파드 Ready, `/readyz` 200). 실증이 만든 배치 5개는 모두 지웠고 e5fe 는 그대로.
 - 실증 뒤 다듬기(d36): 확인 창 「연산별」 줄이 상한 초과 배치의 하한 수에 「이상」을 빠뜨렸다(첫 줄·버튼은 「6개 이상」인데 「scan 6」) →
-  `opCountLine` 이 하한 행을 받아 「scan 6 이상」(vitest 1건). 이미 열려 있던 **끝난 배치 상세 탭**은 폴링하지 않아 「삭제 중」이 뜨지 않는 기존 동작 —
-  그 탭의 버튼은 서버가 409/404 로 막는다(BACKLOG).
+  `opCountLine` 이 하한 행을 받아 「scan 6 이상」(vitest 1건). 이미 열려 있던 **끝난 배치 상세 탭**은 주기 폴링을 멈춰(탭 복귀·재연결 때만 다시 읽는다)
+  계속 보는 동안 「삭제 중」이 뜨지 않는 기존 동작 — 그 탭의 버튼은 서버가 409/404 로 막는다(BACKLOG).
+- d36 배포 — 포탈 빌드 d36(소스 06427f15, 3종, 210초) → 릴리스 dms-agent → dms-api → dms-controller → job-image 모두 Applied(live == 동봉 d36) →
+  오버레이 d35 → d36(293f4043). 설치기 S11 은 돌리지 않았다 — 그래서 라이브 ConfigMap `DMS_JOB_IMAGE` 는 d35 로 남아 있고, 실제로 쓰는 잡 이미지는 DB
+  `control_state.job_image`(릴리스 d36 — `job_image.resolve_job_image` 는 DB 가 env 를 이긴다)다. 다음 `--only S11` 이 CM 을 d36 으로 맞춘다(guard-images.sh 는
+  `DMS_JOB_IMAGE` 를 대조하지 않아 S11 이 멈추지 않는다).
 
 ### ✅ 테스트베드 사내 AD SSO 환경 구축·실증 + 실증 결함 3건 수정 — **완료**(2026-11-18, d32 → d33)
 
@@ -999,7 +1003,7 @@ controller·agent 재시작)** — 실 Chrome(테스트베드 CA 신뢰), 20화�
 - **남은 일 — 프로덕션(OA) 적용 순서**(사이트 운영 몫 포함):
   ① 지금 상태 확인: LB VS(VIP:443) 풀 멤버·포트, PROXY v2(OA 는 켜짐), rke2-traefik 의 websecure `proxyProtocol.trustedIPs`.
   ② Rancher 클러스터 편집 → chartValues 의 rke2-traefik(또는 HelmChartConfig `kube-system/rke2-traefik` 의 `spec.valuesContent`)에
-     `ports.websecure.proxyProtocol.trustedIPs: ["<SE 주소>/32", …]`(forwardedHeaders 는 비움; 예(OA): SE 12.201.53.242·12.201.53.243) — Traefik
+     `ports.websecure.proxyProtocol.trustedIPs: ["<SE 주소>/32", …]`(forwardedHeaders 는 비움; 예: SE 두 대 <SE 주소 1>·<SE 주소 2> — 실제 주소는 사이트 운영 문서) — Traefik
      DaemonSet 이 노드별로 롤링 재기동한다. **LB 가 PROXY v2 를 붙이는데 trustedIPs 가 없으면 Traefik 은 그 헤더를 TLS 바이트로 읽어 연결이
      깨진다**(지금 OA 의 DMS VIP 가 깨져 있을 수 있는 이유).
   ③ dms-k8s pull → values.env 에서 `GATEWAY_*` 줄 삭제(남아도 알림 뒤 무시)·`PORTAL_DOMAIN` 확인 → `sh deploy/install.sh --context <ctx> --site

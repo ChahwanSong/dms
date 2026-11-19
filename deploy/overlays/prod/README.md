@@ -91,11 +91,14 @@ NoSchedule taint 를 단다. 확인: `kubectl --context <ctx> get nodes -o custo
    (`deploy/README.md` §2). export 는 DMS 워커에 root 를 허용한다(root squash 없음 — 모든 잡이 root 다, `deploy/README.md` §2 「root 접근」).
 9. **`fs.protected_hardlinks=1`·`fs.protected_symlinks=1`**: 공용·데이터 스토리지를 마운트하고 사용자가 링크를 만들 수 있는 **모든** 호스트(워커만이
    아니다 — `deploy/README.md` §2b-2).
-10. **방화벽·시간·DNS**(`deploy/README.md` §0-3): 노드 간 CNI 포트, apiserver → 워커 파드 9443(CNPG 웹훅)·8443(Volcano 웹훅), LB SE → Traefik 이
+10. **방화벽·시간·DNS**(`deploy/README.md` §0-3): 노드 간 CNI 포트, apiserver → 워커 파드 9443(CNPG 웹훅)·Volcano 웹훅 파드 8443(Volcano 는
+    사이트가 설치한다 — 그 파드가 어느 노드에 뜨는지는 사이트 배치를 따른다), LB SE → Traefik 이
     도는 노드 :443(풀 멤버. hostPort 는 PREROUTING DNAT → FORWARD 경로라 호스트 INPUT 규칙이 보지 못한다 — 테스트베드 실측. 원 IP 위조는 방화벽이
     아니라 Traefik trustedIPs 가 막는다 — 신뢰 출발지 밖의 PROXY 헤더는 버린다), (선택) 설치 호스트 → 노드 :443(S8·S12 의 `ingress-probe.sh`),
-    dms-api(마스터) → 메일 릴레이 :8025, k8s 연동 호출 노드(워커) → 대상 클러스터 API 서버
-    (프록시를 타지 않는다), 인터넷 노드 → 상류(프록시). RHEL firewalld 기본 zone 은 그 포트를 열지 않으면 노드 간 흐름을 막는다. 모든 노드 **NTP**
+    dms-api(마스터) → 메일 릴레이 :8025, k8s 연동 호출 노드(포탈 「k8s 연동」 「개요」 탭 「호출 노드와 주기」에서 고른 노드의 dms-agent —
+    보통 워커, 마스터에 NoSchedule taint 가 없으면(RKE2 기본) 마스터도 후보) → 대상 클러스터 API 서버(프록시를 타지 않는다), (선택 — 사내 SSO,
+    §6-9) dms-api(마스터) → IdP(issuer URL 의 포트, 보통 443 — discovery·토큰·userinfo 끝점. 프록시를 타지 않는 직접 경로이고, IdP 인증서가 사내
+    CA 서명이면 Secret `dms-oidc` 의 `DMS_OIDC_CA_PEM`), 인터넷 노드 → 상류(프록시). RHEL firewalld 기본 zone 은 그 포트를 열지 않으면 노드 간 흐름을 막는다. 모든 노드 **NTP**
     동기. 포탈 FQDN → VIP-A DNS 는 개통 때 연다(§6-7).
 11. **Volcano(클러스터 운영자, 설치 전)**: ≥ v1.15(K8s 1.36 이면 v1.16). DMS 층에 아직 동봉하지 않는다 — 없으면 S1 이 멈춘다(docs/BACKLOG.md
     「⑦ 설치기 후속」). DMS 는 그 위에 Queue `dms-data`·PriorityClass 를 만든다(`deploy/README.md` §0-4).
@@ -112,15 +115,16 @@ NoSchedule taint 를 단다. 확인: `kubectl --context <ctx> get nodes -o custo
     LB 출발지를 넣는다 — Rancher 관리 클러스터는 클러스터 편집의 chartValues `rke2-traefik`, 아니면 HelmChartConfig `kube-system/rke2-traefik` 의
     `spec.valuesContent`: `ports.websecure.proxyProtocol.trustedIPs: ["<SE 주소>/32", …]`(`forwardedHeaders` 는 비워 둔다 — Traefik 이 클라이언트가
     보낸 X-Forwarded-*·X-Real-Ip 를 지우고 원 IP 를 덧붙여, 앱이 그것을 본다). 넣으면 Traefik DaemonSet 이 노드별로 롤링 재기동한다.
-    예(OA): `["12.201.53.242/32","12.201.53.243/32"]`(Avi SE 두 대 — VS VIP:443 은 PROXY v2 켬).
+    예: `["<SE1 주소>/32","<SE2 주소>/32"]`(LB SE 두 대 — VS VIP:443 은 PROXY v2 켬. 사이트의 실제 주소는 사이트 운영 문서에만 둔다).
 
-## 1~6. 설치
+## 1~7. 설치
 
 ```sh
 # 1) [설치 호스트] 값 — 파일 하나(비밀 아님, git 에 커밋하지 않는다). REPLACE_* 를 실값으로(아래 「values.env 값」)
 cp deploy/overlays/prod/values.env.example deploy/overlays/prod/values.env
 $EDITOR deploy/overlays/prod/values.env
 #    (저장소 밖에 두려면 env VALUES_ENV=<경로> — install.sh·render.sh 가 같은 규칙으로 읽는다)
+#    RKE2 면 CONTROL_PLANE_LABEL_VALUE=true 주석 해제(deploy/README.md §0-2 — 확인 kubectl --context <ctx> get nodes -L node-role.kubernetes.io/control-plane)
 
 # 2) [설치 호스트] 계획 — 변경 없음: S1 preflight(K8s 1.34~1.36·IngressClass(Traefik)·SHARED_DIR 형식·REGISTRY_CLUSTER_IP·PSA·admission·
 #    애드온 감지 표·노드 셸 체크리스트) + S2 확인 + S3 층별 server dry-run. 성공 = 끝 줄 「계획 끝(변경 없음). 실제 설치: …」 + RESULT PASS·WARN(exit 0).
@@ -194,9 +198,10 @@ CACERT=<사내CA> sh deploy/install.sh --context <ctx> --only S12
   롤백은 §5(앱은 옛 태그 재릴리스 — `kubectl rollout undo` 금지). 애드온은 `--upgrade-addon cnpg`(minor 하나씩 — 직전 덤프 → SSA → rollout →
   healthy 대기 — §2f-6), `--upgrade-addon registry`(마스터 pull·고정 목록 먼저 — §2e-5). 이미지 교체를
   막는 가드(exit 3)는 이 플래그일 때만 그 층에서 열린다(전역 `ALLOW_IMAGE_CHANGE=1` 은 S11 의 앱 가드까지 열므로 애드온 업그레이드에 쓰지 않는다).
-  Traefik 판 올림은 클러스터 운영자 몫이다(RKE2 차트 — `--upgrade-addon traefik` 은 판정만 한다). 옛 항목 이름 `gateway-api`·`envoy-gateway`·
+  Traefik 판 올림·보안 패치(수정판 v3.7.18 이상 — `deploy/README.md` §2g-6)는 클러스터 운영자 몫이다(RKE2 차트 — `--upgrade-addon traefik` 은
+  판정만 한다). 올린 뒤 `sh deploy/install.sh --context <ctx> --only S8,S12` 로 다시 본다(롤링 공백 — §2g-6). 옛 항목 이름 `gateway-api`·`envoy-gateway`·
   `gateway`(`--upgrade-addon`·`--adopt`)는 사용법 오류다.
-- **옛 Envoy Gateway 입구에서 오는 사이트**(2026-11-16 전 설치 — 순서·정리 런북은 `deploy/README.md` §2g): ① 위 0 의 13(LB 가 PROXY v2 를
+- **옛 Envoy Gateway 입구에서 오는 사이트**(2026-11-16 전 설치 — 순서·정리 런북은 `deploy/README.md` §2g-8): ① 위 0 의 13(LB 가 PROXY v2 를
   붙이면 trustedIPs 먼저) → ② 새 커밋으로 `--plan` → `sh deploy/install.sh --context <ctx>`(values.env 의 옛
   `GATEWAY_*` 줄은 지운다 — 남아도 렌더가 알림 한 줄 뒤 무시한다. S8 이 Ingress 를 만들고 노드마다 확인한다 — 설치기는 옛 Envoy 객체를 건드리지
   않는다. 태그가 `live` 라 S11 은 매니페스트·설정만 넣고 이미지는 그대로다) → ③ 같은 커밋으로 포탈 빌드 → 릴리스(새 앱 — 본문 상한·keep-alive
@@ -296,11 +301,11 @@ values.env 키로 넣는다 — 키가 없으면 docs/BACKLOG.md 「⑦ 설치�
 | 항목 | 확인 |
 |---|---|
 | **Kubernetes** 1.34~1.36(설계 #4 — prod minor) / **CNI** 임의(Cilium KPR 없음 + kube-proxy 전제) / CRI-O | S1 preflight 「0. 클러스터 / 컨텍스트」(밖이면 FAIL) |
-| **노드 수** | control-plane **3대**(PG 인스턴스 required anti-affinity·레지스트리·dms-api·controller — ≠ 3 이면 S1 WARN) + NoSchedule 없는 **워커 ≥ 2**(CNPG 오퍼레이터 2개·pg_dump·dms-agent·잡·빌드가 워커 전용 — `deploy/README.md` §0-2). 마스터 배치는 라벨 `node-role.kubernetes.io/control-plane` 의 **값 `""`**(kubeadm 관례)로 고른다 — RKE2 처럼 `true` 를 다는 배포판이면 values.env `CONTROL_PLANE_LABEL_VALUE=true` 로 둔다. 아니면 마스터에 서는 레지스트리(S4)·PG(S10)·dms-api·controller(S11)가 Pending 이다. S1 은 라벨 키만 세므로 PASS 한다 — 확인 `kubectl --context <ctx> get nodes -L node-role.kubernetes.io/control-plane`(`deploy/README.md` §0-2·§2f-1). Traefik 이 어느 노드에 뜨는지는 DMS 가 정하지 않는다(위 0 의 13 — 그 노드들이 LB 풀) |
+| **노드 수** | control-plane **3대**(PG 인스턴스 required anti-affinity·레지스트리·dms-api·controller — ≠ 3 이면 S1 WARN) + NoSchedule 없는 **워커 ≥ 2**(CNPG 오퍼레이터 2개·pg_dump 는 워커 전용이다 — control-plane 라벨 `DoesNotExist` affinity. dms-agent·잡·빌드는 **마스터에 control-plane NoSchedule taint 가 있을 때만** 워커 전용이다. RKE2 서버 노드는 기본으로 taint 가 없어 마스터도 잡·빌드·k8s 연동 호출 노드 후보가 된다 — 위 「0. 사이트 준비」 머리, `deploy/README.md` §0-2). 마스터 배치는 라벨 `node-role.kubernetes.io/control-plane` 의 **값 `""`**(kubeadm 관례)로 고른다 — RKE2 처럼 `true` 를 다는 배포판이면 values.env `CONTROL_PLANE_LABEL_VALUE=true` 로 둔다. 아니면 마스터에 서는 레지스트리(S4)·PG(S10)·dms-api·controller(S11)가 Pending 이다. S1 은 라벨 키만 세므로 PASS 한다 — 확인 `kubectl --context <ctx> get nodes -L node-role.kubernetes.io/control-plane`(`deploy/README.md` §0-2·§2f-1). Traefik 이 어느 노드에 뜨는지는 DMS 가 정하지 않는다(위 0 의 13 — 그 노드들이 LB 풀) |
 | **SELinux**(RHEL 계열 DMS 노드) | enforcing 아님(재부팅 뒤에도) — S0 사이트 몫, S2b 프로브가 노드마다 재고 FAIL·모름이면 멈춘다(위 「0. 사이트 준비」 2) |
-| **시간·방화벽** | 모든 노드 NTP 동기, 노드 간 CNI·apiserver → 워커 9443·8443·LB SE → Traefik 이 도는 노드 :443 — 설치기는 보지 않는다(사이트 몫 — `deploy/README.md` §0-3). 방화벽이 막으면 S9(9443)·S9b(8443) dry-run·S12 가 실패로 드러난다(설치 호스트 → 노드 :443 이 막히면 S8·S12 의 노드 경유 확인은 모름 WARN) |
+| **시간·방화벽** | 모든 노드 NTP 동기, 노드 간 CNI·apiserver → 워커 9443(CNPG)·Volcano 웹훅 파드 8443·LB SE → Traefik 이 도는 노드 :443 — 설치기는 보지 않는다(사이트 몫 — `deploy/README.md` §0-3). 방화벽이 막으면 S9(9443)·S9b(8443) dry-run·S12 가 실패로 드러난다(설치 호스트 → 노드 :443 이 막히면 S8·S12 의 노드 경유 확인은 모름 WARN) |
 | **Volcano** (잡 gang 스케줄러) | ≥ v1.15(K8s 1.36 이면 v1.16) — **사이트가 설치**(DMS 층 미동봉, BACKLOG ⑦). S1 감지가 C 면 재사용, 없으면 S1 이 멈춘다. S9b 가 DMS 모양 vcjob 을 server dry-run(웹훅 8443) |
-| **입구(클러스터의 Traefik)** | MetalLB·ingress-nginx 는 **필요 없다**(2026-11-03 ⑥ — 오버레이가 Ingress·풀을 지운다). **DMS 는 Traefik 을 설치·변경하지 않는다**(2026-11-16 — Envoy Gateway 입구 폐기): 클러스터 운영자가 미리 IngressClass `traefik`(controller `traefik.io/ingress-controller` — 다른 이름이면 `INGRESS_CLASS`)·Ready 인 Traefik(RKE2 `rke2-traefik` — 모든 노드 hostPort 443 → websecure)·`--providers.kubernetesingress`·진입점 `websecure`(`TRAEFIK_ENTRYPOINT`)를 두고, LB 가 PROXY v2 를 붙이면 websecure `proxyProtocol.trustedIPs` 에 LB 출발지(위 「0. 사이트 준비」 13). DMS 객체는 Ingress `dms/dms-portal-traefik` 하나(S8 SSA — host `PORTAL_DOMAIN`, 인증서 `PORTAL_TLS_SECRET`). LB VS-443 = 풀 Traefik 노드 :443(위 7) — `deploy/README.md` §2g. 확인: S1 preflight 「2. 입구」(IngressClass 없음·controller 다름 = FAIL, Traefik 파드 Ready 수 INFO)·감지 `traefik`(C 재사용 / X 멈춤 / U 모름 — args 의 trustedIPs·readTimeout 을 notes, trustedIPs 없음 = WARN), S8 이 SSA 뒤 `deploy/ingress-probe.sh`(노드마다 SNI `PORTAL_DOMAIN` 인증서 + readyz — TRAEFIK DEFAULT CERT·(readyz 를 볼 때) 404 = FAIL, 못 닿음 = 모름 WARN 뒤 계속), S12 5절(Ingress·ingress-probe — FAIL 재측정 시간 env `INGRESS_PROBE_TIMEOUT`, 기본 5초)·6절(VIP 경유 readyz)·http 80(404 = 정상 INFO — DMS 라우터는 websecure 에만, 200 = 평문 노출 WARN) |
+| **입구(클러스터의 Traefik)** | MetalLB·ingress-nginx 는 **필요 없다**(2026-11-03 ⑥ — 오버레이가 Ingress·풀을 지운다). **DMS 는 Traefik 을 설치·변경하지 않는다**(2026-11-16 — Envoy Gateway 입구 폐기): 클러스터 운영자가 미리 IngressClass `traefik`(controller `traefik.io/ingress-controller` — 다른 이름이면 `INGRESS_CLASS`)·Ready 인 Traefik(RKE2 `rke2-traefik` — 모든 노드 hostPort 443 → websecure)·`--providers.kubernetesingress`·진입점 `websecure`(`TRAEFIK_ENTRYPOINT`)를 두고, LB 가 PROXY v2 를 붙이면 websecure `proxyProtocol.trustedIPs` 에 LB 출발지(위 「0. 사이트 준비」 13). DMS 객체는 Ingress `dms/dms-portal-traefik` 하나(S8 SSA — host `PORTAL_DOMAIN`, 인증서 `PORTAL_TLS_SECRET`). LB VS-443 = 풀 Traefik 노드 :443(위 7) — `deploy/README.md` §2g. 확인: S1 preflight 「2. 입구」(IngressClass 없음·controller 다름 = FAIL, Traefik 파드 Ready 수 INFO)·감지 `traefik`(C 재사용 / C! 재사용 + WARN — trustedIPs 없음·`proxyProtocol.insecure=true`·정적 설정이 args 밖·Ingress 를 처리하는 워크로드 둘 이상 / X 멈춤 / U 모름 — args 의 trustedIPs·readTimeout 은 notes), S8 이 SSA 뒤 `deploy/ingress-probe.sh`(노드마다 SNI `PORTAL_DOMAIN` 인증서 + readyz — TRAEFIK DEFAULT CERT·(readyz 를 볼 때) 404 = FAIL, 못 닿음 = 모름 WARN 뒤 계속), S12 5절(Ingress·ingress-probe — FAIL 재측정 시간 env `INGRESS_PROBE_TIMEOUT`, 기본 5초)·6절(VIP 경유 readyz)·http 80(404 = 정상 INFO — DMS 라우터는 websecure 에만, 200 = 평문 노출 WARN) |
 | **PSA** | `dms` 네임스페이스 `enforce: privileged`(00-namespace.yaml) — 사내 정책이 허용해야 잡 파드가 뜸(보안 승인 — `deploy/README.md` §0-4) |
 | **설치 자격** | 설치·재실행 컨텍스트 = **cluster-admin**(CRD·ClusterRole·웹훅·PV·Namespace·privileged 프로브·시크릿 값 읽기). 설치기는 미리 검사하지 않는다 — 모자라면 그 단계가 `Forbidden` 으로 멈춘다(`deploy/README.md` §0-2 「설치 호스트」) |
 | **데이터·PV 스토리지 root** | 모든 잡이 root(uid 0)다 — export 가 DMS 워커에 root 를 허용해야 한다(root squash 없음 — `deploy/README.md` §2 「root 접근」). 설치기는 보지 않는다 — squash 면 첫 잡의 미리보기·실행이 EACCES/EPERM 으로 실패한다 |

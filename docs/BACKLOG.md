@@ -21,7 +21,7 @@
 ## 1. 기능 확장 (사용자가 보류 결정)
 
 포탈·잡 기능의 확장과 후속 — 결함이 아니라 아직 안 만든 기능·결정 대기다. 설치·운영 후속은 아래 소절에 있다(2026-11-06 신규 →
-k8s 신원 모드 → 포크 → 사용량 → 포탈 개선·배치 스케줄러 → ③~⑦ 설치 묶음 → 테스트베드).
+k8s 신원 모드 → 포크 → 사용량 → 포탈 개선·배치 스케줄러 → 사내 SSO → ③~⑦ 설치 묶음 → 테스트베드).
 
 - ~~**아티팩트 보존 정책(자동 만료)**~~ — 해소(2026-10-26, CHANGELOG 「BACKLOG 결정 묶음 구현」 — controller `artifact-expiry` 루프,
   `DMS_ARTIFACT_RETENTION_DAYS` 기본 1500·0 = 끔, 열람은 410 `artifact_expired`, 운영은 deploy/README §12b). 남은 후속:
@@ -34,9 +34,10 @@ k8s 신원 모드 → 포크 → 사용량 → 포탈 개선·배치 스케줄�
     CHANGELOG 같은 날 항목): 상한은 설정 `DMS_BATCH_DELETE_MAX_CHILDREN`(기본 50000, 1–50000), 작은 배치(≤ `DMS_BATCH_DELETE_SYNC_MAX_CHILDREN`
     기본 500)는 지금처럼 한 트랜잭션, 큰 배치는 묘비(상태 `Deleting` + `batch_deletions`) + 컨트롤러 `batch-delete` 청크(≤ 100) — 재개는
     묘비 행의 커서·백오프. 함께 해소: `update_meta` 의 무조건 쓰기 → `status <> 'Deleting'` 조건(0행 = 409 `batch_deleting`), 포탈 상태
-    라벨 「삭제 중」. 남은 후속(아래 📝 넷).
+    라벨 「삭제 중」. 남은 후속(아래 2026-11-19 📝 다섯).
   - 📝 **이미 열려 있던 끝난 배치 상세 탭에 「삭제 중」이 뜨지 않는다**(2026-11-19 d35 테스트베드 실증) — 끝난(Completed·Cancelled) 배치 상세는
-    `useBatch` 가 폴링하지 않아, 다른 탭·다른 사람이 그 배치를 지우기 시작해도 미리 열어 둔 화면은 편집·재실행 버튼이 있는 옛 모습 그대로다(그
+    `useBatch` 가 주기 폴링을 멈춘다. 탭 복귀(visibilitychange)·재연결 때는 5초 staleTime 이 지났으면 요약을 다시 읽어 「삭제 중」·404 를 보므로,
+    옛 모습(편집·재실행 버튼이 있는 화면)은 그 화면이 **계속 보이는 동안**만 남는다 — 나란히 띄운 창, 다른 사람이 지우는 동안 계속 보는 화면(그
     버튼은 서버가 409 `batch_deleting`/404 로 막는다 — 데이터 위험 없음). 고친다면 상세가 상태 `Deleting` 을 받았을 때만 짧게 폴링하거나, 끝난
     배치도 느린 주기(예 30초)로 요약만 다시 읽기.
   - 📝 **묘비는 되돌릴 수 없다**(2026-11-19 설계 C9) — 「삭제 취소」를 넣으면 반쯤 지워진 살아 있는 배치가 생긴다. 막히면 「삭제 지연」으로
@@ -339,7 +340,8 @@ CHANGELOG 의 2026-11-16 d28 항목(사용량 전체 목록·최신 scan 차트 
 - ~~**스케줄 회차가 쌓는 자식 요청의 정리 정책**~~ — 해소(2026-11-16 d29, 사용자 결정 「최근 5회차만 남기고 나머지 정리」 — CHANGELOG
   「스케줄 회차 최근 5회차 보존·배치 단위 삭제 상한 5000」, 같은 날 기본 5 → 10 — CHANGELOG 「스케줄 배치 회차 보존 기본 5 → 10」): 스케줄이
   있는 배치는 최근 `DMS_BATCH_SCHEDULE_KEEP_ROUNDS`(기본 10)회차만 남고 컨트롤러 `batch-round-prune` 루프가 오래된 회차의 자식을 요청
-  삭제와 같은 몸통으로 지운다(회차 경계 `batch_rounds`, 감사 청크 요약 `('batch','prune_rounds')`). 배치 단위 삭제 상한도 2000 → 5000.
+  삭제와 같은 몸통으로 지운다(회차 경계 `batch_rounds`, 감사 청크 요약 `('batch','prune_rounds')`). 배치 단위 삭제 상한도 2000 → 5000(당시 —
+  2026-11-19 부터 설정 `DMS_BATCH_DELETE_MAX_CHILDREN` 기본 50000).
 - 🔧 **사람의 `:rescan` 감사 행**(축소, 2026-11-16) — 사람의 「전체 재실행」도 회차 경계 `batch_rounds` 에 via rescan·actor(세션 사용자)·시각·
   되돌린 항목 수가 남는다(배치당 최근 200회차). `audit_log` 행은 여전히 없다(스케줄 회차만 `('batch','scheduled_rescan')`) — 배치를 지우면
   경계 행도 함께 지워지므로 영구 감사가 필요하면 `rescan_if_terminal` 트랜잭션에 한 행.
@@ -347,8 +349,12 @@ CHANGELOG 의 2026-11-16 d28 항목(사용량 전체 목록·최신 scan 차트 
   청크 요약 1행에 자식별 최소 기록(id·상태·생성 시각·owner_username·dest_owner {rule, owner}·잡 id·상태·tool — d30 부터; d29 의 run_as_root 칸은
   배치 자식 payload 에 그 키가 없어 늘 null 이었다)만 싣는다 — 정리된 회차 자식의 결과 메시지·전이 전문은
   사라진다(배치 정의·회차 발사·확인 감사는 그대로). 필요해지면 설정으로 자식별 감사를 켜는 옵션.
-- 🔧 **미등록 스토리지 정리 포탈 연속 회차의 readiness**(기존 성질) — 회차당 배치 자식 합은 10000(`within_call_budget`)으로 묶었지만
-  포탈(`useUsage` 정리 루프)이 회차 사이 쉼 없이 다시 부르므로 큰 배치가 많으면 RLock 을 연달아 쥔다. 회차 사이 쉼 또는 서버 쪽 간격.
+- 🔧 **미등록 스토리지 정리 포탈 연속 회차의 readiness**(기존 성질) — 회차 상한은 배치 10·단건 200·배치 자식 합 100000
+  (`request_purges.within_call_budget`, 2026-11-19)이다. 2026-11-19 부터 배치는 작업 삭제와 같은 진입점 `delete_batch_auto` 로 가고, API 한
+  트랜잭션(동기) 몫은 한 회차에 2 × `DMS_BATCH_DELETE_SYNC_MAX_CHILDREN`(기본 1000 자식)까지다 — 나머지는 묘비 + 컨트롤러 청크로 넘어간다. 배치
+  트랜잭션 사이에는 2ms 양보(`request_purges.RLOCK_YIELD_SECONDS`)가 있다. 그래도 포탈(`useUsage` 정리 루프)은 회차 사이에 쉬지 않고 다시
+  부르므로, 회차마다 RLock 몫(동기 ≤ 1000 자식 + 배치마다 A단계 세기·B단계 묘비 + 단건 ≤ 200)을 연달아 쥔다. 처방은 그대로 회차 사이 쉼
+  또는 서버 쪽 간격.
 - 🔧 **회차 보존 정리 처리량** — 정리 행은 아웃박스 처리량(틱당 ~10행 ≈ 40행/분)에 묶이고 루프는 자기 대기 행 100(`BACKLOG_MAX`)에서
   쉰다 — 항목 수천 개를 시간 단위로 도는 스케줄은 정리가 따라가지 못해 자식이 쌓일 수 있다(스케줄 화면의 80% 경고에 보인다).
 - 🔧 **배포 전에 이미 상한을 넘은 스케줄 배치** — 옛 회차(기록 이전)는 기록된 회차가 K개가 된 뒤에야 정리되므로(보수적 선택 — 배포 직후
@@ -366,15 +372,17 @@ CHANGELOG 의 2026-11-16 d28 항목(사용량 전체 목록·최신 scan 차트 
   쪽 넘김 뒤 2.5초 폴링 한 번은 요약 + 한 쪽 ~62–71 KB). 입구 Traefik 의 압축은 사이트 몫이고 DMS 는 Traefik 을 바꾸지 않는다. 넣는다면
   `RequestBodyLimit`(가장 바깥 미들웨어)과의 순서, 스트리밍 내보내기(`StreamingResponse`)·결과 파일 다운로드, CPU 비용을 함께 본다.
 - 🔧 **dms-ssc 역이식 후보**(이 라인의 세션은 dms-ssc 를 고치지 않는다 — dms-ssc 세션이 골라서 cherry-pick. 이름·모양은 구현할 때 dms-ssc
-  WIP 와 맞췄고, 아래 목록은 push 된 dms-ssc d197/d198(origin/dms-ssc e8786abe)과 다시 대조했다): 공용 `Pager` 의 null 모드(`pageCount: null` +
+  WIP 와 맞췄고, 아래 목록은 push 된 dms-ssc d197/d198(origin/dms-ssc e8786abe)과 대조한 뒤 2026-11-19 origin/dms-ssc bd6f8613 까지 다시 확인했다 —
+  `Pager` null 모드·`pageable_count`·`batch_item_search`·`disable_schedule`·`confirm_wait` 는 bd6f8613 에도 없다): 공용 `Pager` 의 null 모드(`pageCount: null` +
   `hasMore` — 쪽 수 모름), `/targets` 봉투의 `has_more`·`pageable_count`(`offset` 메아리는 dms-ssc 에도 있다), 배치 상세 `view=items` 의 `filters`
-  메아리와 PV 이름 검색(`batch_item_search` — dms-ssc 는 경로 부분 문자열·대소문자 구분), 스케줄 삭제 = `require_session_admin`(dms-ssc d198 은
-  `require_admin`), 취소 + 스케줄 끄기를 `:cancel` 본문 `disable_schedule` 한 트랜잭션으로, 그 밖에 회차 예외 백오프(due `exclude`)·사전 판정의
+  메아리와 PV 이름 검색(`batch_item_search` — dms-ssc 는 경로 부분 문자열·대소문자 구분), 스케줄 삭제 = `require_session_admin`(dms-ssc 는 bd6f8613
+  에서도 `require_admin`), 취소 + 스케줄 끄기를 `:cancel` 본문 `disable_schedule` 한 트랜잭션으로, 그 밖에 회차 예외 백오프(due `exclude`)·사전 판정의
   스토리지 꺼짐·denylist(스토리지 없음은 dms-ssc 8516568d 가 이미 넣었다)·`confirm_wait` 경고·PG 잠금 순서 스파이 테스트. (k8s 전용 사유 문구 —
-  요청자 자격 상실 = 거부 — 는 dms-ssc 의 「비 root 강등」과 뜻이 달라 옮기지 않는다.) 2026-11-16 d29 추가분: 회차 경계(`batch_rounds`·
-  `_rescan_locked` via/actor)·회차 보존 정리(`batch_round_prune`·`prune_round_children`·`_purge_locked(per_request_audit)`)·배치 단위 삭제 상한
-  5000 + 호출당 자식 합 예산(`within_call_budget`·`batch_delete_call_budget`)·`list_summaries` 스칼라 서브쿼리·포탈 상한 상수 제거(행의
-  `batch_request_count_limit`·`batch_item_count_limit`).
+  요청자 자격 상실 = 거부 — 는 dms-ssc 의 「비 root 강등」과 뜻이 달라 옮기지 않는다.) 2026-11-16 d29·2026-11-19 추가분은 dms-ssc 가 이식해
+  후보에서 뺐다: 회차 경계(`batch_rounds`)·회차 보존 정리(`batch_round_prune`·`prune_round_children`)·스케줄 행 `child_count_limit`(dms-ssc
+  4269c900 = d199), 배치 단위 삭제 상한 설정 키 50000·동기 문턱·묘비(`Deleting` + `batch_deletions`) + 컨트롤러 `batch-delete` 청크·
+  `requests:delete-preview`·호출당 예산(`within_call_budget`)·`list_summaries` 스칼라 서브쿼리·목록 행의 상한 키·사유 `batch_delete_too_many_items`·
+  `batch_deleting`·정리 아웃박스 `purge_group` 레인·포탈 `lib/deleteLimits.ts`(dms-ssc bd6f8613 — 2026-11-19).
 - 🔧 **dms-ssc 에서 골라 올 것 — 스토리지 사용 중 가드**: dms-ssc 14cb6741(활성 **배치**도 「사용 중」 — 경로 변경·삭제 가드가 비종단 배치 항목이
   가리키는 스토리지도 보고, 스토리지 행 잠금과 배치 되살리기(회차 발사·`rescan_if_terminal`)의 잠금으로 직렬화)과 8516568d 의 스토리지 **생성**
   가드(진행 중 요청·배치가 가리키는 이름이면 409 `storage_in_use`). dms-k8s 의 `routes_storages` 경로 변경·삭제 가드는 활성 요청
@@ -384,6 +392,28 @@ CHANGELOG 의 2026-11-16 d28 항목(사용량 전체 목록·최신 scan 차트 
 - 🧹 **vite 빌드 청크 경고** — `npm run build` 가 `index-*.js` 1,095 kB(gzip 356 kB)로 「chunk > 500 kB」 경고를 낸다(실패 아님 — d28 게이트에서
   확인, 그 전 빌드와는 비교하지 않았다). 후보: 무거운 화면(사용량 분석·배치 상세·차트)의 `React.lazy` 라우트 분할 또는 `manualChunks`. 번들
   airgap 규칙(외부 URL 0)은 그대로.
+
+### 사내 SSO(OIDC) 후속 — 2026-11-18
+
+CHANGELOG 「사내 AD SSO 로그인(OIDC Authorization Code + PKCE)」·「테스트베드 사내 AD SSO 환경 구축·실증 + 실증 결함 3건 수정」, deploy/README
+§6-9. 지금 동작은 `api.oidc`·`api.routes_oidc` 모듈 docstring(설정은 사이트가 만드는 선택 Secret `dms-oidc` 에만 — CLAUDE.md). (테스트베드 CA 항목은
+「테스트베드(dmsk8s) 후속」.)
+
+- 💡 **로그아웃 때 IdP `end_session_endpoint`** — 지금 로그아웃(`routes_auth.logout`)은 DMS 세션만 끝낸다. IdP 세션이 남아 다시 SSO 를 누르면 같은
+  AD 계정으로 비밀번호 없이 들어오므로(로그인 실패 뒤 다시 눌러도 같은 계정·같은 오류), 다른 AD 계정으로 바꾸려면 IdP 에서 따로 로그아웃해야 한다.
+- 💡 **SSO 로그인 성공·실패를 보안 이벤트로** — `routes_oidc.oidc_callback` 의 실패는 `/login?sso_error=<사유>` 로 돌려보낼 뿐이고 보안 이벤트 화면
+  (비밀번호 로그인 실패·경보)에는 남지 않는다.
+- 💡 **계정 화면에 「SSO 로 만든 계정」 표시** — 자동 생성(`routes_oidc._ensure_account` — 감사 actor `sso`, 아무도 모르는 무작위 비밀번호)한 계정이
+  계정 화면에서 구별되지 않는다.
+- ⏸ **IdP `sub` 를 계정에 묶는 안** — 하지 않음: DB 칸이 필요하고 첫 연결을 먼저 한 쪽(선점)을 막지 못한다. 메일 ↔ 계정 결속은 「사용자가 IdP 에서
+  자기 email 을 바꿀 수 없다」는 IdP 설정과 선택 키 `DMS_OIDC_REQUIRE_EMAIL_VERIFIED` 가 지킨다(deploy/README §6-9).
+- 🔧 (선택) **S11 설정 재시작 판정이 Secret `dms-oidc` 를 보지 않는다** — 설치기 S11 은 dms-config·dms-secrets 의 resourceVersion(`install.sh`
+  `config_rev`)만 비교하므로 `dms-oidc` 만 바꾼 실행은 dms-api 를 다시 띄우지 않는다. 지금은 런북 §6-9 의 손 `rollout restart deploy/dms-api` 가
+  대신한다. 판정에 dms-oidc resourceVersion(dms-api 만 읽는다 — 없으면 빈 값)을 더할지 정한다.
+- 🔧 (선택) **SSO 의 INFO 로그가 찍히지 않는다** — `dms` 로거에 로깅 설정이 없어(`cli.py` 의 `uvicorn.run` 은 uvicorn 로거만 설정) 루트 기본
+  WARNING 아래 줄은 버려진다. 그래서 `routes_oidc` 의 계정 자동 생성(`sso: created account …`)·로그인 성공·IdP error 줄은 출력되지 않는다
+  (2026-11-18 d33 은 운영자가 봐야 하는 email_verified 줄만 WARNING 으로 올렸고, 로그인 실패 `sso login failed:` 는 원래 WARNING). 자동 생성
+  기록은 감사(actor `sso`)에 남는다. 필요하면 계정 생성 줄도 WARNING 으로 올리거나 `dms` 로거 레벨을 설정으로 연다.
 
 ### ③ 공용 디렉터리(SHARED_DIR) 후속 — 2026-11-03
 
@@ -473,7 +503,7 @@ Envoy·EG 전용 후속(EG 리스너 hostname·접근 로그 SNI, Envoy 접근 �
   층 정리.
 - 📝 **옛 Envoy 층은 설치기가 걷지 않는다** — 2026-11-16 전에 DMS 가 Envoy 입구를 깔았던 클러스터에는 Gateway·HTTPRoute·CTP·BTP·EnvoyProxy `dms-portal`·
   GatewayClass `dms`·EG 웹훅·ns `envoy-gateway-system`·EG CRD·cluster RBAC 가 남는다(설치기·감지는 더 보지 않는다 — 옛 항목 이름은 사용법 오류). 손 런북
-  (deploy/README §2g — 테스트베드에서 그 순서로 실행): DMS 입구 객체 → EG mutating webhook(컨트롤러보다 먼저) → ns·cluster RBAC → EG CRD → Gateway API CRD 는
+  (deploy/README §2g-8 「Envoy 정리 런북」 1~7 — 테스트베드에서 그 순서로 실행): DMS 입구 객체 → EG mutating webhook(컨트롤러보다 먼저) → ns·cluster RBAC → EG CRD → Gateway API CRD 는
   **라벨 `app.kubernetes.io/managed-by=dms-install` 인 것만** + VAP(RKE2 는 rke2-traefik-crd 가 Helm 으로 Gateway API CRD 를 깔아 둘 수 있다 — 라벨로 가른다).
   PriorityClass `dms-addon-critical` 은 남긴다(CNPG 가 쓴다). 노드 쪽(마스터 sysctl `90-dms-envoy.conf`·:443 INPUT 방화벽)은 사이트가 둔 경우 걷는다.
 - 📝 **Traefik 판 올림·보안 수정은 사이트 몫** — DMS 는 Traefik 을 설치·변경하지 않고 감지 `traefik` 도 판을 판정하지 않는다(설치 태그를 근거로만 적는다).
@@ -533,6 +563,11 @@ CHANGELOG 「⑦ 설치기」, 설계 v6 8-1·8-2·9 ⑦·10 T9, deploy/README �
   계정을 만드는 변경이라 테스트베드에서 돌리지 않았다), 실패 certgen 재실행·`--upgrade-addon registry`(T9 일회용 k3s 는 external 레지스트리)·`--adopt db`
   의 S9 dry-run(T9 의 db 는 늘 A). 실측한 것: 태그를 올린 `--plan`(dms-migrate immutable → 앱 층 PASS)·verify 의 서비스 프록시 readyz·VIP 무응답
   WARN, 라벨 붙인 애드온 ns SSA·`--upgrade-addon cnpg`·`--adopt priorityclass`·`--adopt cnpg`(`--force-conflicts` SSA 뒤 D=).
+- 🔧 **에이전트 SIGTERM 처리**(2026-11-17 S11 노드 비례 대기 조사에서 확인 — CHANGELOG 「설치기 S11 에이전트 DaemonSet 대기를 노드 수 비례로」) —
+  `dms agent`(컨테이너 PID 1, 셸 없이 바로 실행 — `deploy/k8s/50-agent-daemonset.yaml` command·args)에 SIGTERM 처리기가 없어(`agent` 패키지에
+  `signal` 처리 0건) 옛 파드가 종료 유예 30초(terminationGracePeriodSeconds 기본)를 다 채운다. 그래서 ds/dms-agent 롤링이 노드당 ~30초 길다
+  (테스트베드 실측 노드당 ~31초 중 30초, 6노드면 ≈ 3분 — 설치기 S11 노드 비례 대기·포탈 릴리스 모두). 처리기를 넣을 때는 보고 루프 중단과 진행 중
+  보고 마무리 순서를 먼저 본다.
 
 ### 테스트베드(dmsk8s) 후속
 
@@ -563,6 +598,9 @@ testbed 저장소. 2026-11-06 신규 테스트베드 항목(9·10·12·13 워커
 - 🔍 (testbed 저장소) **cp443 은퇴 태스크의 첫 실행 rc 2** — 2026-11-16 Traefik 전환 뒤 `make baseline ANSIBLE='ansible-playbook --limit k8s-cp1 --tags cp443'`
   (cp1 sysctl `90-dms-envoy.conf`·nft `dms_testbed_cp443` 걷기)이 첫 실행에서 make rc 2 였고 재실행은 rc 0·changed 0 으로 수렴했다 — 원인 미확인. 결과
   상태는 맞다(`make validate-dmsk8s`·`post-boot-check.sh` FAIL 0). 다시 돌릴 일이 있으면 첫 실행 로그를 남긴다(이 저장소의 세션은 testbed 를 고치지 않는다).
+- 📝 (testbed 저장소) **테스트베드 CA 에 keyUsage 가 없다**(2026-11-18 사내 SSO 실증) — 지금 이미지의 Python 3.11 은 받아들이지만 Python 3.13 의 엄격 검증
+  (`ssl.create_default_context` 의 `VERIFY_X509_STRICT` 기본 — `oidc._ssl_context`)이면 그 CA 가 서명한 인증서(Keycloak — dms-api 의 `DMS_OIDC_CA_PEM`)를
+  거부해 SSO 가 `sso_upstream_unreachable` 로 깨진다. 이미지의 Python 판을 올릴 때 CA 를 keyUsage(keyCertSign·cRLSign) 포함으로 재발급한다.
 
 ## 2. 의도적 보류 (결정 — "미구현"이 아님)
 

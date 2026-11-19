@@ -26,9 +26,14 @@ npx tsc -b          # 타입체크만
   인라인 SVG). CDN `<link>`·외부 fetch 금지. 빌드 뒤 `dist/index.html` 에 외부 URL(`http://`·`https://`)이 0건인지 보는 것이 배포 게이트다.
 - **사유 코드는 양쪽 등록** — 백엔드가 새 `reason_code` 를 내면 `src/lib/reasonCodes.json` 과 `src/lib/api.ts` 의 `REASON_MESSAGES` 둘 다에
   넣는다(양방향 계약 — `src/lib/reasonCodes.test.ts` ↔ 백엔드 `tests/test_reason_codes_coverage.py`).
-- **비밀번호(와 k8s 클러스터 토큰)는 봉인 통로로만 보낸다** — `src/lib/passwordTransport.ts` 의 `postWithSealedPassword`(백엔드
-  `_password_from`). `apiSend` 에 password 를 직접 실으면 그 경로만 평문이 되고 아무 테스트도 빨간불이 아니다. 봉인 상수는 백엔드
-  `password_transport.py` 와 바이트 단위로 같아야 한다(대조 테스트).
+- **비밀번호와 비밀번호가 아닌 비밀은 봉인 통로로만 보낸다** — `src/lib/passwordTransport.ts` 하나에 짝이 둘이다:
+  - 비밀번호: `postWithSealedPassword`(본문 `password_enc`) ↔ 백엔드 `routes_auth._password_from`.
+  - 비밀번호가 아닌 비밀: `sendWithSealedSecret` — k8s 클러스터 토큰은 `features/k8s/useK8s.ts`(본문 `token_enc` ↔ `routes_k8s._token_from`),
+    메일 릴레이 토큰은 `features/mail/useMailSettings.ts`(본문 `relay_token_enc` ↔ `routes_mail_settings._token_from`).
+  - 공통: `apiSend` 에 password·토큰을 직접 실으면 그 경로만 평문이 되고 아무 테스트도 빨간불이 아니다. 봉인 상수는 백엔드
+    `password_transport.py` 와 바이트 단위로 같아야 한다(대조 테스트).
+- **상태 설명은 서버 상태와 같은 키** — 서버에 요청·잡·배치 상태를 더하거나 빼면 `src/lib/stateHelp.json` 도 맞춘다(백엔드
+  `tests/test_state_help_contract.py` 가 RequestState·DataJobState·배치 상태 집합과 키를 대조 — 2026-11-19 배치 `Deleting` 이 그 예).
 - **null(모름) ≠ 0 ≠ 실패** — 서버가 null 로 준 칸을 0 이나 실패로 그리지 않는다.
 
 ## 의존성 권고(npm audit)
