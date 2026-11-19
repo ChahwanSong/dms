@@ -70,15 +70,19 @@ test("확인 대기 경고 — 매일 + 24시간 만료 = 이틀에 한 번, 고
   expect(durationText(null)).toBeNull();
 });
 
-test("자식 요청 경고 — 서버 상한(5000)의 80% 부터, capped 면 이미 넘음, 모르면 경고 없음(지어내지 않는다)", () => {
-  expect(childCountWarning({ child_count: 3999, child_count_capped: false, child_count_limit: 5000 })).toBeNull();
+test("자식 요청 경고 — 서버 상한(기본 50000, 설정값)의 80% 부터, capped 면 이미 넘음, 모르면 경고 없음(지어내지 않는다)", () => {
+  // 2026-11-19: 상한은 설정 DMS_BATCH_DELETE_MAX_CHILDREN(기본 50000) -- 화면은 서버 child_count_limit 을 그대로 쓴다(80% = 40,000).
+  expect(childCountWarning({ child_count: 39999, child_count_capped: false, child_count_limit: 50000 })).toBeNull();
+  expect(childCountWarning({ child_count: 40000, child_count_capped: false, child_count_limit: 50000 }))
+    .toBe("자식 요청 40,000개 — 상한 50,000개의 80%를 넘었습니다");
+  // 자동 정리가 있다(2026-11-16) — 「자동 정리 없음」 함의를 뺐고, 줄지 않는 경우(항목 × 보존 회차 > 상한)를 말한다
+  expect(childCountWarning({ child_count: 50001, child_count_capped: true, child_count_limit: 50000 }))
+    .toBe("자식 요청이 50,000개를 넘어 지금은 배치 단위로 지울 수 없습니다 — 오래된 회차는 자동 정리되지만 항목 수 × 보존 "
+      + "회차가 상한보다 크면 줄지 않습니다");
+  expect(childCountWarning({ child_count: 0, child_count_capped: false, child_count_limit: 50000 })).toBeNull();
+  // 사이트가 상한을 낮춰도 서버 값 그대로
   expect(childCountWarning({ child_count: 4000, child_count_capped: false, child_count_limit: 5000 }))
     .toBe("자식 요청 4,000개 — 상한 5,000개의 80%를 넘었습니다");
-  // 자동 정리가 있다(2026-11-16) — 「자동 정리 없음」 함의를 뺐고, 줄지 않는 경우(항목 × 보존 회차 > 상한)를 말한다
-  expect(childCountWarning({ child_count: 5001, child_count_capped: true, child_count_limit: 5000 }))
-    .toBe("자식 요청이 5,000개를 넘어 지금은 배치 단위로 지울 수 없습니다 — 오래된 회차는 자동 정리되지만 항목 수 × 보존 "
-      + "회차가 상한보다 크면 줄지 않습니다");
-  expect(childCountWarning({ child_count: 0, child_count_capped: false, child_count_limit: 5000 })).toBeNull();
   expect(childCountWarning({})).toBeNull();
 });
 

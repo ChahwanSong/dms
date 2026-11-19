@@ -366,7 +366,10 @@ export interface StorageHistoryPurgeSummary {
   storage_name: string;
   deletedRequests: number;          // 단건 + 배치 자식
   deletedBatches: number;
-  skipped: { id: string; kind: "request" | "batch"; reason: string; request_id: string | null }[];
+  skipped: { id: string; kind: "request" | "batch"; reason: string; request_id: string | null;
+             limit?: number | null; count?: number | null; count_at_least?: number | null }[];
+  // 백그라운드로 정리하기 시작한 배치(2026-11-19 -- 서버 deleting_batches, 이미 진행 중 포함). 자식 수 = 묘비가 센 수.
+  deletingBatches: number; deletingRequests: number;
   remaining: { requests: number; batches: number } | null;
   // 멈춘 때 아직 시도하지 않은 수(회차 상한·중간 오류로 멈췄을 때만 0 이 아니다). null = 모름.
   untried: number | null;
@@ -377,6 +380,7 @@ export interface StorageHistoryPurgeSummary {
 export async function purgeStorageHistory(storage_name: string,
                                           onProgress?: (deleted: number) => void): Promise<StorageHistoryPurgeSummary> {
   const out: StorageHistoryPurgeSummary = { storage_name, deletedRequests: 0, deletedBatches: 0, skipped: [],
+                                            deletingBatches: 0, deletingRequests: 0,
                                             remaining: null, untried: null, requestIds: [], jobIds: [], batchIds: [],
                                             error: null };
   const exR = new Set<string>(), exB = new Set<string>();
@@ -402,14 +406,22 @@ export async function purgeStorageHistory(storage_name: string,
     }
     for (const s of r.skipped_batches) {
       exB.add(s.batch_id);
-      out.skipped.push({ id: s.batch_id, kind: "batch", reason: s.reason, request_id: s.request_id });
+      out.skipped.push({ id: s.batch_id, kind: "batch", reason: s.reason, request_id: s.request_id,
+                         limit: s.limit, count: s.count, count_at_least: s.count_at_least });
+    }
+    // 백그라운드 몫(2026-11-19) -- 「시도함」으로 센다(서버 remaining_untried 도 같다 -- 회차 고리가 멈춘다). 옛 응답은 키가 없다.
+    for (const d of r.deleting_batches ?? []) {
+      exB.add(d.batch_id);
+      out.deletingBatches += 1;
+      out.deletingRequests += d.request_count;
     }
     out.remaining = r.remaining;
     // 구형 응답(키 없음)은 모름 -- 멈춘다.
     const u = r.remaining_untried ?? null;
     out.untried = u === null ? null : u.requests + u.batches;
     onProgress?.(out.deletedRequests);
-    const tried = r.deleted.length + r.deleted_batches.length + r.skipped.length + r.skipped_batches.length;
+    const tried = r.deleted.length + r.deleted_batches.length + r.skipped.length + r.skipped_batches.length
+      + (r.deleting_batches?.length ?? 0);
     if (tried === 0 || out.untried === null || out.untried === 0) break;
   }
   return out;

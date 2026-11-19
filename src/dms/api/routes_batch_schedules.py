@@ -22,7 +22,7 @@ null), armed_by, created_by, created_at, updated_at, last_run_at, last_outcome, 
 acknowledged_irreversible(bool -- 동의 지문이 있다) + destructive(bool | null -- 지금 배치 기준, 배치 행이 없으면 null) +
 batch(배치 요약 | null: batch_id, name, operation, status, item_count, requester_id, auto_confirm, auto_confirm_by, options,
 storage, source_storage, destination_storage) + **k8s 추가** child_count(재실행 이력 포함 자식 요청 수 -- capped 면 상한 + 1)·
-child_count_capped·child_count_limit(배치 단위 삭제 상한 request_purges.MAX_BATCH_DELETE_CHILDREN 5000 -- 화면의 80% 경고 기준) +
+child_count_capped·child_count_limit(배치 단위 삭제 상한 = 설정 DMS_BATCH_DELETE_MAX_CHILDREN, 기본 50000 -- 화면의 80% 경고 기준) +
 keep_rounds(회차 보존 수 DMS_BATCH_SCHEDULE_KEEP_ROUNDS -- 2026-11-16 사용자 결정: 스케줄이 있는 배치는 최근 K회차의 자식만 남고
 그보다 오래된 회차의 자식은 컨트롤러 batch-round-prune 루프가 정리한다) + pruned_at(UTC …Z | null)·pruned_total(int | null --
 null = 아직 정리 없음, 0 과 다르다) + confirm_wait(batch_scheduler.confirm_wait_note -- 자동 확인이 꺼진
@@ -38,7 +38,6 @@ from ..batch_scheduler import (arm_problem, armed_fingerprint, confirm_wait_note
                                preview_runs, validate_schedule)
 from ..db import utc_now_iso
 from ..domain import DomainValidationError
-from ..repositories.request_purges import MAX_BATCH_DELETE_CHILDREN
 from .auth import Identity, audit_actor, require_admin, require_session_admin
 from .routes_batches import _require_batch_privilege
 from .routes_requests import reject_when_maintenance
@@ -49,7 +48,9 @@ _RUNS_DEFAULT = 50
 # 회차 이력 조회 상한 = 저장소 보존 상한(RUN_HISTORY_CAP)과 같은 값.
 _RUNS_CAP = 200
 # 저장소가 던지는 사유 → HTTP 상태(밖의 사유는 422 -- 무장 판정·규칙 검증).
-_STATUS = {"batch_not_found": 404, "batch_schedule_not_found": 404, "batch_schedule_exists": 409}
+_STATUS = {"batch_not_found": 404, "batch_schedule_not_found": 404, "batch_schedule_exists": 409,
+           # 묘비가 선 배치(2026-11-19 -- 백그라운드 배치 단위 삭제 중)엔 무장하지 않는다(저장소 원자 가드).
+           "batch_deleting": 409}
 
 
 class ScheduleRule(BaseModel):
@@ -122,7 +123,7 @@ def _out(row, *, settings, summary) -> dict:
     s = summary or {}
     out["child_count"] = s.get("batch_request_count", 0)
     out["child_count_capped"] = s.get("batch_request_count_capped", False) is True
-    out["child_count_limit"] = MAX_BATCH_DELETE_CHILDREN
+    out["child_count_limit"] = settings.batch_delete_max_children
     out["keep_rounds"] = getattr(settings, "batch_schedule_keep_rounds", None)
     out.setdefault("pruned_at", None)
     out.setdefault("pruned_total", None)
@@ -131,7 +132,10 @@ def _out(row, *, settings, summary) -> dict:
 
 def _rows_out(request: Request, rows) -> list:
     repos, settings = request.app.state.repos, request.app.state.settings
-    summaries = repos.batches.list_summaries([r["batch_id"] for r in rows], cap=MAX_BATCH_DELETE_CHILDREN)
+    # 세기는 삭제 상한 + 1 까지(정확한 「항목 × K > 상한」 경고 재료 -- 큰 스케줄 배치마다 로컬 ~22ms, 15초 폴링). 성공 scan 갈래는
+    # 이 화면이 쓰지 않아 건너뛴다(with_scans=False, 2026-11-19).
+    summaries = repos.batches.list_summaries([r["batch_id"] for r in rows], cap=settings.batch_delete_max_children,
+                                             with_scans=False)
     return [_out(r, settings=settings, summary=summaries.get(r["batch_id"])) for r in rows]
 
 
@@ -158,7 +162,7 @@ def preview_batch_schedule(body: SchedulePreviewBody, request: Request, identity
     rule = _validated_rule(body)
     settings = request.app.state.settings
     keep = getattr(settings, "batch_schedule_keep_rounds", None)
-    out = {"keep_rounds": keep, "child_count_limit": MAX_BATCH_DELETE_CHILDREN}
+    out = {"keep_rounds": keep, "child_count_limit": settings.batch_delete_max_children}
     note = None
     if body.batch_id is not None:
         out["prune_preview"] = request.app.state.repos.batch_schedules.prune_preview(body.batch_id, keep=keep)

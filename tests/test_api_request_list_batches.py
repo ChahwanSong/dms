@@ -113,10 +113,12 @@ def test_batch_id_filter_lists_only_that_batchs_jobs(client):
 
 
 def test_summary_stops_counting_at_the_batch_delete_cap(client, monkeypatch):
-    # 라우트는 배치 단위 삭제의 자식 상한(MAX_BATCH_DELETE_CHILDREN)을 cap 으로 넘긴다 -- 넘는 배치는 상한 + 1 에서
-    # 세기를 멈추고 capped(화면은 「1000개 초과」, 선택 불가). 상한을 작게 바꿔 확인한다(2026-10-11 검증 지적).
-    import dms.api.routes_requests as rr
-    monkeypatch.setattr(rr, "MAX_BATCH_DELETE_CHILDREN", 2)
+    # 라우트는 min(5000, 배치 단위 삭제 상한)(request_purges.list_count_cap, 2026-11-19 -- 상한은 설정
+    # DMS_BATCH_DELETE_MAX_CHILDREN)을 cap 으로 넘긴다 -- 넘는 배치는 그 + 1 에서 세기를 멈추고 capped. 상한을 작게 바꿔
+    # 확인한다(2026-10-11 검증 지적).
+    import dataclasses
+    monkeypatch.setattr(client.app.state, "settings",
+                        dataclasses.replace(client.app.state.settings, batch_delete_max_children=2))
     repos = client.app.state.repos
     bid = _batch(repos)
     kids = [_child(repos, bid, target=f"t{i}") for i in range(3)]
@@ -199,8 +201,9 @@ def test_admin_rows_carry_the_batch_schedule_so_the_delete_dialog_can_say_it_goe
 
 def test_admin_batch_rows_carry_the_server_delete_limits(client):
     # 2026-11-16(상한 5000): 포탈은 배치 단위 삭제 상한을 상수로 두지 않고 행마다 서버 값을 읽는다 -- 서버 상수만 바꾸면 화면이
-    # 다른 숫자로 고를 수 없게 막던 거울을 없앴다. 단건 행·비관리자 응답엔 키가 없다.
-    from dms.repositories.request_purges import MAX_BATCH_DELETE_CHILDREN, MAX_BATCH_DELETE_ITEMS
+    # 다른 숫자로 고를 수 없게 막던 거울을 없앴다. 단건 행·비관리자 응답엔 키가 없다. 2026-11-19: 자식 상한은 설정 키(기본 50000).
+    from dms.repositories.request_purges import MAX_BATCH_DELETE_ITEMS
+    MAX_BATCH_DELETE_CHILDREN = client.app.state.settings.batch_delete_max_children
     repos = client.app.state.repos
     bid = _batch(repos)
     kid = _child(repos, bid)
@@ -209,7 +212,7 @@ def test_admin_batch_rows_carry_the_server_delete_limits(client):
     _login(client, "opadm", "admin")
     rows = _rows(client)
     assert (rows[kid]["batch_request_count_limit"], rows[kid]["batch_item_count_limit"]) == \
-        (MAX_BATCH_DELETE_CHILDREN, MAX_BATCH_DELETE_ITEMS) == (5000, 10000)
+        (MAX_BATCH_DELETE_CHILDREN, MAX_BATCH_DELETE_ITEMS) == (50000, 10000)
     assert "batch_request_count_limit" not in rows[single]
     client.post("/api/auth/logout")
     _login(client, "alice", "user")

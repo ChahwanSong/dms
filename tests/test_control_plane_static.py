@@ -19,8 +19,9 @@ _FORBIDDEN_OS = {"access", "chown", "fchown", "lchown", "chmod", "fchmod", "lchm
                  "spawnvp", "spawnvpe", "startfile"}
 _DELETE_OS = {"unlink", "remove", "rmdir", "removedirs", "truncate", "ftruncate"}
 # artifact_expiry(2026-10-26 결과 파일 자동 만료): 고르고 표시만 한다 -- 지우는 것은 같은 정리 루프(떼어냄 + purge 파드)다.
+# batch_deleter(2026-11-19 배치 단위 백그라운드 삭제): DB 행만 지우고 아웃박스에 맡긴다 -- 파일·파드는 같은 정리 루프 몫.
 _PURGE_MODULES = ("artifact_trash.py", "request_purger.py", "purge_runner.py", "artifact_expiry.py",
-                  "batch_round_prune.py")
+                  "batch_round_prune.py", "batch_deleter.py")
 
 
 def _control_plane_files():

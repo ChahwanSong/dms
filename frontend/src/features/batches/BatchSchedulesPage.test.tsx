@@ -18,7 +18,7 @@ const row = (over: Partial<BatchSchedule> = {}): BatchSchedule => ({
   acknowledged_irreversible: false, destructive: false,
   batch: { batch_id: "bscan00000000aaa", name: "야간 스캔", operation: "scan", status: "Completed", item_count: 2,
            storage: "ceph", auto_confirm: false, options: {} },
-  child_count: 4, child_count_capped: false, child_count_limit: 5000, confirm_wait: null,
+  child_count: 4, child_count_capped: false, child_count_limit: 50000, confirm_wait: null,
   keep_rounds: 5, pruned_at: null, pruned_total: null,
   ...over,
 });
@@ -143,20 +143,20 @@ test("삭제는 2단 확인 뒤 DELETE", async () => {
   await waitFor(() => expect(calls.filter((c) => c.method === "DELETE")).toEqual([{ method: "DELETE", path: "s1" }]));
 });
 
-test("자식 요청이 상한(서버 5000)의 80% 를 넘으면 경고한다 — capped 면 지금은 배치 단위로 못 지운다", async () => {
-  serve([row({ child_count: 4200 }), row({ schedule_id: "s2", batch_id: "bcap000000000ccc", child_count: 5001,
+test("자식 요청이 상한(서버 child_count_limit -- 2026-11-19 기본 50000)의 80% 를 넘으면 경고한다 — capped 면 지금은 배치 단위로 못 지운다", async () => {
+  serve([row({ child_count: 42000 }), row({ schedule_id: "s2", batch_id: "bcap000000000ccc", child_count: 50001,
                                           child_count_capped: true,
                                           batch: { ...row().batch!, batch_id: "bcap000000000ccc", name: "큰 배치" } })]);
   renderPage();
-  expect(await screen.findByText("자식 요청 4,200개 — 상한 5,000개의 80%를 넘었습니다")).toBeInTheDocument();
-  expect(screen.getByText(/5,000개를 넘어 지금은 배치 단위로 지울 수 없습니다 — 오래된 회차는 자동 정리되지만/)).toBeInTheDocument();
+  expect(await screen.findByText("자식 요청 42,000개 — 상한 50,000개의 80%를 넘었습니다")).toBeInTheDocument();
+  expect(screen.getByText(/50,000개를 넘어 지금은 배치 단위로 지울 수 없습니다 — 오래된 회차는 자동 정리되지만/)).toBeInTheDocument();
 });
 
 test("회차 보존 안내(머리 도움말)와 「정리」 열 — null(아직 없음) ≠ 0, 항목 × K > 상한 예측 경고", async () => {
   serve([row(), row({ schedule_id: "s2", batch_id: "bdone00000000bbb", pruned_total: 0, pruned_at: "2026-11-16T09:30:00Z",
                       batch: { ...row().batch!, batch_id: "bdone00000000bbb", name: "정리된 배치" } }),
          row({ schedule_id: "s3", batch_id: "bbig000000000ddd", pruned_total: 12, pruned_at: "2026-11-16T09:30:00Z",
-               batch: { ...row().batch!, batch_id: "bbig000000000ddd", name: "큰 CSV", item_count: 1200 } })]);
+               batch: { ...row().batch!, batch_id: "bbig000000000ddd", name: "큰 CSV", item_count: 12000 } })]);
   renderPage();
   expect(await screen.findByText(/스케줄이 있는 배치는 최근 5회차만 보존합니다/)).toBeInTheDocument();
   expect(screen.getByRole("columnheader", { name: "정리" })).toBeInTheDocument();
@@ -176,7 +176,8 @@ test("회차 보존 안내(머리 도움말)와 「정리」 열 — null(아직
   expect(screen.getByText("정리 누적 12건").closest("td")).toHaveTextContent("정리 누적 12건마지막 2026-11-16 18:30:00");
   // 머리 안내도 break-keep(어절 중간에서 꺾이지 않게)
   expect(screen.getByText(/스케줄이 있는 배치는 최근 5회차만 보존합니다/).closest("ul")!.className).toContain("break-keep");
-  expect(screen.getByText(/항목 1,200개 × 5회차 = 작업 최대 6,000개 — 정리 뒤에도 배치 단위 삭제 상한\(5,000개\)을 넘어/))
+  // 2026-11-19 상한 50000: 항목 × 5회차가 넘으려면 항목 10,001개부터(설계 §12.2 -- 기본 10회차면 5,001개부터).
+  expect(screen.getByText(/항목 12,000개 × 5회차 = 작업 최대 60,000개 — 정리 뒤에도 배치 단위 삭제 상한\(50,000개\)을 넘어/))
     .toBeInTheDocument();
 });
 

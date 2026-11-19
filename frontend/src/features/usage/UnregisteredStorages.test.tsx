@@ -315,3 +315,35 @@ test("받은 뒤의 재조회 실패는 스토리지·결과를 지우지 않는
   expect(optionNames()).toContain("old-gpfs · 미등록 · 대상 3개");
   expect(screen.getByRole("note", { name: "미등록 스토리지" })).toBeInTheDocument();
 });
+
+// ---- 상한 표시·「삭제 불가」·백그라운드 정리(2026-11-19) ----
+
+test("정리 창: 서버 상한 줄 · 상한을 넘는 배치는 role=alert 로 미리 말하되 정리 자체는 막지 않는다 · 결과의 백그라운드 몫", async () => {
+  const big = { ...OLD, batches: [{ batch_id: BID, request_count: 60000 }, { batch_id: "c".repeat(32), request_count: 700 }],
+                request_count: 60704 };
+  server.use(
+    http.get("/api/admin/request-purges", () => HttpResponse.json({
+      pending: 0, stalled: 0, oldest_requested_at: null, items: [], batch_deletions: [],
+      limits: { requests_per_call: 200, batches_per_call: 10, batch_request_count: 50000, batch_item_count: 10000,
+                call_request_count: 100000, sync_request_count: 500, list_count_cap: 5000 } })),
+    http.post(PURGE_URL, () => HttpResponse.json({ ...empty, storage_name: "old-gpfs",
+      deleted: [{ request_id: RID(1), job_ids: [] }],
+      deleting_batches: [{ batch_id: "c".repeat(32), request_count: 700, already: false }],
+      skipped_batches: [{ batch_id: BID, reason: "batch_delete_too_large", request_id: null, limit: 50000, count: null,
+                          count_at_least: 50001 }],
+      remaining: { requests: 0, batches: 2 }, remaining_untried: { requests: 0, batches: 0 } })));
+  renderPage(() => [big]);
+  const note = await openTab("old-gpfs");
+  await userEvent.click(within(note).getByRole("button", { name: "old-gpfs 기록 정리" }));
+  const dlg = await screen.findByRole("dialog", { name: "미등록 스토리지 기록 정리" });
+  expect(await within(dlg).findByTestId("purge-limits")).toHaveTextContent(
+    "한 번에 정리: 단일 작업 200개·배치 10개(배치마다 작업 50,000개·항목 10,000개) · 작업 500개를 넘는 배치는 백그라운드");
+  expect(within(dlg).getByRole("alert")).toHaveTextContent(
+    "삭제 불가 배치 1개 — 작업이 상한 50,000개를 넘어 이 정리로 지울 수 없습니다(나머지는 정리합니다)");
+  await userEvent.click(within(dlg).getByLabelText("되돌릴 수 없음을 확인했습니다"));
+  await userEvent.click(within(dlg).getByRole("button", { name: /영구 삭제$/ }));
+  const result = await screen.findByRole("status", { name: "정리 결과" });
+  expect(result).toHaveTextContent("백그라운드 정리 시작 배치 1개(작업 700개)");
+  expect(result).toHaveTextContent(
+    `배치 ${BID.slice(0, 12)}: 삭제 불가 — 작업이 한 번에 지울 수 있는 상한 50,000개를 넘습니다(50,001개 이상)`);
+});

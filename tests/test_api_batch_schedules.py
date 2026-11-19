@@ -1,6 +1,7 @@
 """배치 스케줄 API(2026-11-16, routes_batch_schedules): 게이트(무장 = 특권 3중 게이트 + 유지보수 거부, 끄기 = require_admin,
 삭제 = require_session_admin) · 파괴적 스케줄 동의 · 응답 모양(지문 원문 없음, k8s child_count·confirm_wait) · 미리보기 ·
-배치 삭제 두 경로의 캐스케이드와 BATCH_DELETE_TABLES 그물(잠금 순서 스케줄 → 회차 -- 설계 비판 #10) · 취소와 같은 요청의
+배치 삭제 경로(기록 삭제·배치 단위 삭제·2026-11-19 백그라운드 마무리 -- 세 경로)의 캐스케이드와 BATCH_DELETE_TABLES 그물(잠금 순서
+스케줄 → 회차 -- 설계 비판 #10) · 취소와 같은 요청의
 스케줄 끄기(설계 비판 #4) · :rescan 의 상태 CAS."""
 import inspect
 import json
@@ -12,7 +13,10 @@ from dms.batch_scheduler import parse_utc
 from dms.config import Settings
 from dms.db import utc_now_iso
 from dms.repositories.batches import BATCH_DELETE_EXEMPT_TABLES, BATCH_DELETE_TABLES, BatchesRepository
-from dms.repositories.request_purges import MAX_BATCH_DELETE_CHILDREN, RequestPurgesRepository
+from dms.repositories.request_purges import RequestPurgesRepository
+
+# 배치 단위 삭제 상한(2026-11-19 -- 설정 DMS_BATCH_DELETE_MAX_CHILDREN 의 기본값; 모듈 상수는 없앴다).
+MAX_BATCH_DELETE_CHILDREN = 50000
 
 TOKEN = {"Authorization": "Bearer tok-shared"}
 SCAN_ITEM = {"storage": "s1", "target": "a"}
@@ -106,7 +110,7 @@ def test_create_returns_the_row_without_the_raw_fingerprint(client):
     assert row["batch"]["storage"] == "s1" and row["batch"]["auto_confirm"] is False
     assert (row["child_count"], row["child_count_capped"], row["child_count_limit"]) == \
         (0, False, MAX_BATCH_DELETE_CHILDREN)
-    assert row["child_count_limit"] == 5000
+    assert row["child_count_limit"] == 50000
     # 회차 보존(2026-11-16): 설정값(기본 10 -- 같은 날 5 → 10)과 정리 결과 -- 아직 정리 없음은 null(0 이 아니다)
     assert (row["keep_rounds"], row["pruned_at"], row["pruned_total"]) == (10, None, None)
     a = _audit(client, "batch_schedule", "create")
@@ -454,7 +458,7 @@ def test_schedule_delete_audit_keeps_never_pruned_as_null_not_zero(client):
 
 
 def test_batch_delete_tables_cover_every_batch_id_column(db):
-    """batch_id 로 배치를 가리키는 새 테이블은 배치 삭제 두 경로에도(BATCH_DELETE_TABLES) -- 아니면 지운 배치의 스케줄이 고아로
+    """batch_id 로 배치를 가리키는 새 테이블은 배치 삭제 세 경로에도(BATCH_DELETE_TABLES) -- 아니면 지운 배치의 스케줄이 고아로
     남아 컨트롤러가 batch_not_found 로 일시정지를 쓴다."""
     if db.dialect == "postgresql":
         tables = {r["table_name"] for r in db.query(
@@ -469,10 +473,12 @@ def test_batch_delete_tables_cover_every_batch_id_column(db):
     assert not set(BATCH_DELETE_TABLES) & set(BATCH_DELETE_EXEMPT_TABLES)
 
 
-@pytest.mark.parametrize("path", [BatchesRepository.delete, RequestPurgesRepository.delete_batch])
+@pytest.mark.parametrize("path", [BatchesRepository.delete, RequestPurgesRepository.delete_batch,
+                                  RequestPurgesRepository.finish_batch_delete])
 def test_both_batch_delete_paths_delete_every_table_schedule_before_runs(path):
-    """두 경로 소스에 테이블마다 DELETE 가 있고, 회차 경계를 스케줄보다, 스케줄을 회차 이력보다 먼저 지운다(fire 의 회차 경계 →
-    스케줄 → 회차, record 의 스케줄 → 회차 순서와 같게 -- 거꾸로면 PG 에서 서로 상대 행을 기다린다)."""
+    """세 경로(2026-11-19 -- 백그라운드 배치 단위 삭제의 마무리 finish_batch_delete 추가) 소스에 테이블마다 DELETE 가 있고, 회차
+    경계를 스케줄보다, 스케줄을 회차 이력보다 먼저 지운다(fire 의 회차 경계 → 스케줄 → 회차, record 의 스케줄 → 회차 순서와 같게 --
+    거꾸로면 PG 에서 서로 상대 행을 기다린다). 묘비(batch_deletions)는 배치 다음 -- 세 경로 모두 DELETE 를 갖는다."""
     src = inspect.getsource(path)
     pos = {}
     for t in BATCH_DELETE_TABLES:
@@ -480,7 +486,9 @@ def test_both_batch_delete_paths_delete_every_table_schedule_before_runs(path):
         assert needle in src, f"{path.__qualname__} does not delete {t}"
         pos[t] = src.index(needle)
     assert pos["batch_rounds"] < pos["batch_schedules"] < pos["batch_schedule_runs"]
-    order = [BATCH_DELETE_TABLES.index(t) for t in ("batch_rounds", "batch_schedules", "batch_schedule_runs")]
+    assert pos["batch_deletions"] < pos["batch_rounds"]
+    order = [BATCH_DELETE_TABLES.index(t) for t in ("batch_deletions", "batch_rounds", "batch_schedules",
+                                                    "batch_schedule_runs")]
     assert order == sorted(order)
 
 

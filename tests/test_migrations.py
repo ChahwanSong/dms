@@ -655,6 +655,7 @@ def test_migrate_creates_exactly_the_expected_tables(tmp_path):
     # k8s_*(2026-10-25 dms-k8s RBAC·PV 설계 §3): 외부 k8s 클러스터 등록·동기화 이력·스냅숏 4표·SC 매핑 + 호출 노드 설정.
     # batch_schedules·batch_schedule_runs(2026-11-16): 배치 스케줄러(배치당 스케줄 하나 + 회차 이력 -- batches 류처럼 명시 추가).
     # batch_rounds(2026-11-16): 배치 회차 경계(회차 보존 정리 -- _rescan_locked 가 남긴다, batches 류처럼 명시 추가).
+    # batch_deletions(2026-11-19): 배치 단위 백그라운드 삭제의 묘비·진행 장부(batches 류처럼 명시 추가).
     assert actual == set(ALL_TABLES) | {"batches", "batch_items",
                                         "schema_migrations",
                                         "verification_codes", "sync_pairs",
@@ -664,7 +665,8 @@ def test_migrate_creates_exactly_the_expected_tables(tmp_path):
                                         "k8s_sync_settings", "k8s_clusters", "k8s_sync_runs",
                                         "k8s_storage_classes", "k8s_pvs", "k8s_pvcs",
                                         "k8s_role_bindings", "k8s_storage_class_maps",
-                                        "batch_schedules", "batch_schedule_runs", "batch_rounds"}
+                                        "batch_schedules", "batch_schedule_runs", "batch_rounds",
+                                        "batch_deletions"}
 
 
 def test_migrate_creates_exactly_the_expected_indexes(tmp_path):
@@ -857,7 +859,7 @@ def test_every_post_v1_column_rides_both_migration_paths(tmp_path):
     db = Database.connect(f"sqlite:///{tmp_path}/t.db")
     migrate(db)
     pairs = _ensure_pairs()
-    assert len(pairs) == 55      # 추출 자기 검증 -- 0 매치면 등식이 공허해진다(프록시 3 + 호스트 네트워크 1 + CA 1 + storages.user_enabled 1 + portal_subtitle 1 + batches.preview_round 1 + batches.auto_confirm_by 1 + accounts.root_granted 1 + data_jobs.pods_gc_at 1 + storages.kind 1 + requests.target_label 1 + storages.default_uid·default_gid 2 + builds.pods_gc_at 1 + data_jobs.artifacts_expired_at·request_purges.kind 2 + k8s_clusters.check_requested_at 1 + accounts.session_epoch 1 + batch_schedules.pruned_at·pruned_total 2)
+    assert len(pairs) == 56      # 추출 자기 검증 -- 0 매치면 등식이 공허해진다(프록시 3 + 호스트 네트워크 1 + CA 1 + storages.user_enabled 1 + portal_subtitle 1 + batches.preview_round 1 + batches.auto_confirm_by 1 + accounts.root_granted 1 + data_jobs.pods_gc_at 1 + storages.kind 1 + requests.target_label 1 + storages.default_uid·default_gid 2 + builds.pods_gc_at 1 + data_jobs.artifacts_expired_at·request_purges.kind 2 + k8s_clusters.check_requested_at 1 + accounts.session_epoch 1 + batch_schedules.pruned_at·pruned_total 2 + request_purges.purge_group 1)
     for table, v1 in _V1_COLUMNS.items():
         cols = {r["name"] for r in db.query(f"PRAGMA table_info({table})")}
         ensured = {c for t, c, _ in pairs if t == table}
@@ -874,7 +876,7 @@ def test_ensure_columns_types_match_create_declarations(tmp_path):
     pairs = _ensure_pairs()
     # 추출 자기 검증을 이 테스트에도 둔다 -- 위 등식 테스트가 지워지거나 홀로
     # 실행될 때 정규식이 0 매치면 아래 루프가 공허하게 통과하기 때문이다.
-    assert len(pairs) == 55
+    assert len(pairs) == 56
     for table, column, coltype in pairs:
         assert _declared_type(db, table, column) == coltype, (table, column)
 
@@ -958,7 +960,8 @@ def test_artifact_expiry_columns_are_declared_in_the_create_table_blocks():
     from dms import migrations
     src = inspect.getsource(migrations._apply_migrations)
     for table, line in (("data_jobs", r"^\s*artifacts_expired_at\s+TEXT\s*,\s*$"),
-                        ("request_purges", r"^\s*kind\s+TEXT\)\s*\"\"\",?\s*$")):
+                        ("request_purges", r"^\s*kind\s+TEXT\s*,\s*$"),
+                        ("request_purges", r"^\s*purge_group\s+TEXT\)\s*\"\"\",?\s*$")):
         block = re.search(rf'CREATE TABLE IF NOT EXISTS {table} .*?"""', src, re.S)
         assert block is not None, table
         assert re.search(line, re.sub(r"--[^\n]*", "", block.group(0)), re.M), table

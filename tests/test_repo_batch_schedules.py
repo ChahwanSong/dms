@@ -743,10 +743,13 @@ def test_every_path_locks_items_batch_schedule_then_runs_on_postgres(repos):
     경로가 하나라도 있으면 40P01 로 한쪽이 끊긴다). 회차 보존 정리 청크는 requests → data_jobs → batch_schedules(맨 끝)만 쥔다."""
     from dms.repositories.batch_schedules import BatchSchedulesRepository
     from dms.repositories.batches import BATCH_DELETE_TABLES, BatchesRepository
-    from dms.repositories.request_purges import MAX_BATCH_DELETE_CHILDREN, RequestPurgesRepository
+    from dms.repositories.request_purges import RequestPurgesRepository
+    MAX_BATCH_DELETE_CHILDREN = 50000           # 설정 기본값(2026-11-19 -- 모듈 상수는 없앴다)
     db = repos.db
     full = list(BATCH_DELETE_TABLES)
-    assert full == ["batch_items", "batches", "batch_rounds", "batch_schedules", "batch_schedule_runs"]
+    assert full == ["batch_items", "batches", "batch_deletions", "batch_rounds", "batch_schedules", "batch_schedule_runs"]
+    # 스케줄 발사·기록은 묘비 표(batch_deletions, 2026-11-19)를 만지지 않는다 -- 나머지는 같은 순서.
+    fire_order = [t for t in full if t != "batch_deletions"]
 
     fired = _batch(repos)
     _schedule(repos, fired)
@@ -754,7 +757,7 @@ def test_every_path_locks_items_batch_schedule_then_runs_on_postgres(repos):
     spy = _PgSpy(db)
     assert BatchSchedulesRepository(spy).fire(row, next_run_at=NEXT, now=NOW, verify=lambda b, i: "fp",
                                               armed_env_listed=True, requester_env_listed=True) is not None
-    assert _touch_order(spy.sql) == full
+    assert _touch_order(spy.sql) == fire_order
 
     skipped = _batch(repos, status="Running")
     _schedule(repos, skipped)
@@ -775,6 +778,20 @@ def test_every_path_locks_items_batch_schedule_then_runs_on_postgres(repos):
         spy = _PgSpy(db)
         assert delete(spy, bid)
         assert _touch_order(spy.sql) == full
+
+    # 백그라운드 배치 단위 삭제(2026-11-19): 묘비(B단계)와 마무리(셋째 배치 삭제 경로)도 같은 방향이다.
+    bid = _batch(repos)
+    sid = _schedule(repos, bid)
+    repos.batch_schedules._insert_run(repos.batch_schedules.get(sid), outcome="skipped", reason_code="x", now=NOW,
+                                      batch_status="Running")
+    spy = _PgSpy(db)
+    assert RequestPurgesRepository(spy).delete_batch_auto(
+        bid, expected_request_count=0, actor="ops", artifact_base=None, quiet_seconds=60,
+        cap=MAX_BATCH_DELETE_CHILDREN, sync_max=0, allow_sync=False)["deleting"] is True
+    assert _touch_order(spy.sql) == full
+    spy = _PgSpy(db)
+    assert RequestPurgesRepository(spy).finish_batch_delete(bid)["done"] is True
+    assert _touch_order(spy.sql) == full
 
     cancelled = _batch(repos, status="Running", item_status="Queued")
     _schedule(repos, cancelled, next_at=None)

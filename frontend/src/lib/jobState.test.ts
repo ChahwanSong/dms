@@ -92,6 +92,7 @@ test("M5: batchPillVariant — 배치 상태 전용 매핑, 공유 pillVariant �
   expect(batchPillVariant("Cancelled")).toBe("neutral");
   // 취소 처리 중(2026-10-16)은 아직 끝나지 않았다 -- busy.
   expect(batchPillVariant("Cancelling")).toBe("busy");
+  expect(batchPillVariant("Deleting")).toBe("busy");          // 2026-11-19 백그라운드 배치 단위 삭제(묘비)
   expect(batchPillVariant("NotAStatus")).toBe("neutral");
   // 공유 pillVariant 는 불변(잡/요청 배지 회귀 없음) — 겹치는 문자열 재확인.
   expect(pillVariant("Running")).toBe("neutral");
@@ -111,5 +112,6 @@ test("잔여 상태 매핑(슬라이스 1~4 부채): PreviewExpired=bad, Preflig
 test("batchStatusLabel — 확인 대기·취소 중만 한글 라벨, 나머지는 서버 상태 그대로", () => {
   expect(batchStatusLabel("PreviewReady")).toBe("확인 대기");
   expect(batchStatusLabel("Cancelling")).toBe("취소 중");
+  expect(batchStatusLabel("Deleting")).toBe("삭제 중");
   for (const st of ["Previewing", "Running", "Completed", "Cancelled"]) expect(batchStatusLabel(st)).toBe(st);
 });

@@ -51,7 +51,7 @@ _SPEC_KEYS = {
 KINDS = tuple(_SPEC_KEYS)
 # N시간마다의 N -- 24 의 약수만(설계 §3.2): 기준 시각에서 N시간 간격이 날마다 같은 슬롯이 된다(자정을 넘어도 어긋나지
 # 않는다). 하한 1시간 -- 그보다 잦은 전체 재실행은 자식 요청만 쌓는다(배치 단위 삭제의 자식 상한
-# request_purges.MAX_BATCH_DELETE_CHILDREN).
+# 설정 DMS_BATCH_DELETE_MAX_CHILDREN, 기본 50000 -- 2026-11-19).
 INTERVAL_HOURS = (1, 2, 3, 4, 6, 8, 12)
 # next_run_after 가 훑는 날 수 상한. 최악은 monthly(31일 → 말일로 당김): 다음 슬롯이 늘 두 달 안에 있다.
 _SEARCH_DAYS = 70
@@ -388,6 +388,10 @@ def batch_hold(repos, settings, batch, items, *, ack_fingerprint) -> "Verdict | 
             return _skip(reason_code="batch_schedule_awaiting_confirm")
         if status == "Cancelling":
             return _skip(reason_code="batch_schedule_batch_cancelling")
+        # 묘비(Deleting, 2026-11-19 -- 백그라운드 배치 단위 삭제 중)는 명시적으로 쏘지 않는다. 묘비 트랜잭션이 스케줄 행을 지우므로
+        # 보통은 여기 오지 않는다(이미 판정 중이던 회차의 그물).
+        if status == "Deleting":
+            return _skip(reason_code="batch_not_rescannable")
         return _skip(reason_code="batch_not_rescannable")          # 모르는 상태(변조) -- 쏘지 않는다
     for name in item_storage_names(items):
         row = repos.storages.get(name)

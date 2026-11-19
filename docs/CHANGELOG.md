@@ -54,6 +54,7 @@ dms-k8s 라인의 **완료 기록**이다. 각 항목에는 무엇을 만들었�
 
 | 날짜 | 태그·실증 | 제목 |
 |---|---|---|
+| 11-19 | d34+ 예정 | 배치 단위 삭제 상한 기본 50000 + 청크(백그라운드) 삭제 + 삭제 화면 상한 표시·「삭제 불가」 |
 | 11-18 | d32·d33 | 테스트베드 사내 AD SSO 환경(Samba AD DC + Keycloak, 호스트 docker) 구축·실 Chrome 실증 + 실증에서 찾은 결함 3건 수정 |
 | 11-18 | — | 사내 AD SSO 로그인(OIDC Authorization Code + PKCE — 「Sign in with … SSO」 버튼, 선택 Secret `dms-oidc`) |
 | 11-17 | — | pull-probe 노드 여러 대 지정 수정 — 마스터 3대 사전 pull 에서 apiserver 가 DaemonSet 생성을 거부하던 것 |
@@ -103,6 +104,93 @@ dms-k8s 라인의 **완료 기록**이다. 각 항목에는 무엇을 만들었�
 ---
 
 ## 상세 기록 (최신순)
+
+### 🔧 배치 단위 삭제 상한 기본 50000 + 청크(백그라운드) 삭제 + 삭제 화면 상한 표시·「삭제 불가」 — **구현**(2026-11-19, 라이브 실증 **예정** — 다음 태그 d34+)
+
+사용자 결정 둘(2026-11-19): 「배치 단위 삭제 상한 기본 50000개로 올려줘.」 · 같은 날 작업 중 「포탈에서 상한 값도 삭제 시 보여지고 값을
+넘어서는 요청에 대해서 삭제 불가 메시지 띄우게 해줘」. 설계 원문은 job 산출물(`cap50k/DESIGN.md` — D1–D14·자기 비판 C1–C15).
+
+**왜 한 트랜잭션을 버렸나**(조사, 설계 §2): 지금의 `delete_batch` 로 현실 모양 자식 5만을 지우면 로컬 PG16 20.9–22.9초·테스트베드 환산
+35.9–42.9초 동안 API 단일 커넥션 RLock 을 쥐어 readiness(10s/1s/×3)를 3–5회 연속 놓치고(NotReady — 포탈 503) RSS +674MiB 다.
+
+**백엔드**
+- 상한은 설정 키: `DMS_BATCH_DELETE_MAX_CHILDREN`(기본 50000, 1–50000 — 밖이면 기동 거부, 모듈 상수 `MAX_BATCH_DELETE_CHILDREN` 삭제)·
+  `DMS_BATCH_DELETE_SYNC_MAX_CHILDREN`(기본 500, 0–1000). base `20-config.yaml` 에 기본값과 같은 값.
+- 진입점 `RequestPurgesRepository.delete_batch_auto`: 작은 배치(≤ 문턱, 호출의 동기 합 ≤ 2 × 문턱)는 기존 `delete_batch` 한 트랜잭션(자식별
+  감사 그대로 — 세기 직후 자식을 잠그기 전에 CAS 를 보는 「일찍 CAS」, 최대 commit_order CAS 선택 인자, 항목 초과는 새 사유
+  `batch_delete_too_many_items`, 상한 사유는 `limit`·`count`·`count_at_least` 를 싣는다). 큰 배치는 A단계 `batch_delete_check`(트랜잭션 밖,
+  같은 사유 순서 — 패리티 테스트) → B단계 묘비 `_begin_batch_delete`(배치 상태 `Deleting` + 새 테이블 `batch_deletions` + 회차 경계·스케줄·
+  회차 이력 삭제 + `('batch','delete_start')`) → 컨트롤러 새 루프 `batch-delete`(`batch_deleter.py` — 5초, 틱 예산 2초, 조건 없이 조립):
+  `delete_batch_chunk`(≤ 100 자식 = 한 트랜잭션, 잠근 행으로 전부 재판정, `_purge_locked(per_request_audit=False, purge_group=batch_id)` +
+  `('batch','delete_chunk')` 요약) → `finish_batch_delete`(배치 삭제 셋째 경로 — `('batch','delete')` 배치 스냅숏). 막히면 「삭제 지연」
+  (`defer_batch_delete` 15→900초 백오프, 사유가 바뀔 때만 이벤트). 커서·진행·사유는 묘비 행에 영속.
+- 잠금 순서 하나: `batch_items → batches → batch_deletions → requests → data_jobs → batch_rounds → batch_schedules → batch_schedule_runs`
+  (`BATCH_DELETE_TABLES` 에 `batch_deletions`, 세 경로 모두 DELETE — PG 잠금 순서 그물에 묘비·마무리 추가).
+- 묘비 뒤 되살림 금지: 라우트 `_reject_frozen`(409 `batch_deleting` — 항목 추가·수정·삭제·CSV 교체·재실행·이름·실행 설정·`:rescan`·기록
+  삭제) + 저장소 원자 가드(sentinel·`update_meta` 0행·스케줄 무장 `DomainValidationError`), 스케줄러 판정은 `Deleting` 을 건너뛴다.
+- 정리 아웃박스 레인: `request_purges.purge_group`(CREATE + `_ensure_columns`), `due()` 가 `ROW_NUMBER() OVER (PARTITION BY
+  COALESCE(purge_group, ''))` 로 돌아가며 집는다.
+- API: `POST /api/admin/requests:delete` 응답에 `deleting_batches[{batch_id, request_count, already}]`, 호출 합 예산 10000 → 100000(상수),
+  배치 트랜잭션 사이 2ms 양보, 본문 `expected_max_commit_order`(strict). 새 `POST /api/admin/requests:delete-preview`(require_admin — limits +
+  배치마다 정확한 수·최대 commit_order·항목 수·판정 sync|async|blocked|deleting|gone). `GET /api/admin/request-purges` 에 `limits`·
+  `batch_deletions`. 목록 요약은 min(5000, 상한)에서 세기를 멈추고(폴링 비용 그대로) `batch_max_commit_order`·`batch_deleting` 을 싣는다.
+  배치 상세 `deleting`. 스케줄 `child_count_limit` = 설정값(목록은 성공 scan 갈래 생략). 미등록 스토리지 정리도 같은 진입점.
+- 새 사유 `batch_delete_too_many_items`·`batch_deleting`(양쪽 등록). 상한 사유 문구에서 숫자를 뺐다(설정값이라 — 숫자는 포매터).
+
+**포탈**(추가 요청)
+- `lib/deleteLimits.ts`(`parseLimits`·`limitsLine`·`blockText` — 미리 판정과 서버 거절이 같은 포매터), `lib/format.ts`(`n0`).
+- 작업 목록 툴바에 늘 있는 상한 줄(「한 번에 작업 200개·배치 10개 · 배치당 작업 50,000개·항목 10,000개 · 합계 작업 100,000개」 — 서버
+  값). 선택이 상한을 넘으면 같은 자리가 role=alert 「삭제 불가 — 작업 N개가 한 번에 지울 수 있는 상한 M개를 넘습니다」로 바뀐다(예약
+  높이·두 줄 접기 — 툴바 높이 불변). 상한 초과 배치는 「삭제 불가·상한」이지만 **고를 수 있다**(조용히 잠그지 않음), 트리거도 잠그지
+  않는다. 상태 줄 꼬리는 「· 삭제 불가」로 짧게. 호출 합 판정은 서버처럼 첫 배치를 늘 통과(예전 어긋남 수정).
+- 확인 창: 열 때 미리보기 → 상한 상자·판정 칩(바로 삭제·백그라운드 삭제·이미 삭제 중 N%·이미 지워짐·삭제 불가)·문제 상자(role=alert)·
+  제출 잠금(로딩 중 포함), 보내는 expected = 미리보기 수 + `expected_max_commit_order`, 「이미 삭제 중·지워짐」은 전송에서 뺀다. 미리보기
+  404/405·실패면 목록 수로 대신하고 정확한 수를 모르는 배치(5,000개 이상)는 막는다.
+- 결과 줄 「배치 N개(작업 M개) 백그라운드 삭제 시작」, 제외 줄은 서버 숫자를 끼운 같은 문구, 정리 줄 「배치 삭제 중 k건」(5초 폴링 —
+  끝나면 목록·배치·스케줄·사용량 무효화). 배치 칸 「삭제 중 37%」/「삭제 지연」, 배치 상세 알약 「삭제 중」 + 진행 카드(지연 사유·문제 작업
+  링크) + 바꾸는 버튼 숨김, 「배치 삭제」(기록만) 창의 상한 정보 줄(막지 않음), 미등록 스토리지 정리 창의 상한 줄·넘는 배치 경고(정리는
+  막지 않음)·백그라운드 몫 결과, `stateHelp` 「Deleting」.
+
+**리뷰 반영**(같은 날 독립 리뷰 — 원문 job 산출물 `cap50k/review_*`):
+- 백그라운드 청크가 「끝까지 훑었는데 고를 것이 없음」을 커서부터 훑은 바퀴 끝에서도 막힘으로 판정한다(`delete_batch_chunk`) — 예전엔
+  되감기만 해서, 고를 수 없는 자식이 훑기 예산(5000)보다 많으면 「처음부터 → 예산 소진 → 끝까지 → 되감기」가 끝없이 돌고 blocked·백오프·
+  `last_error`·경고 이벤트가 없었다(포탈엔 「삭제 지연」 대신 「삭제 중 N%」). 커서가 없을 때 하한(`commit_order > 0`)도 없앴다(commit_order 0
+  자식이 늘 빠지던 구멍 — 음수는 고른 뒤 `batch_changed` 로 막힘). 재판정은 지울 수 있다는데 고르기 술어가 못 고르는 자식(술어 어긋남)은
+  `_pick_ok` 로 경합과 갈라 막힘(`request_recently_finished`)으로 표면화. 회귀 5건(5001 자식 실 상수 포함, sqlite·PG).
+- 미리보기(`delete_preview`)의 목록 요약을 배치마다 따로 센다 — 고른 배치 전부를 한 UNION ALL 문장으로 세면 5만 자식 배치 10개에서 그
+  한 문장이 로컬 1.67–1.71초 API RLock 을 쥐었다(테스트베드 환산 ~1.9–2.5초 — readiness 1초를 넘는다). `perf_cap50k.py` 에 라우트 그대로의
+  `preview` 단계를 넣었다(아래).
+- 정리 아웃박스 `due()` 는 키 열로만 순위를 매기고 LIMIT 한 뒤 전체 열을 조인한다(같은 순서 — BACKLOG 「정리 루프 틱 비용」에 실측).
+- 확인 창: 상한을 넘은 배치 줄이 목록의 낡은 하한(「작업 5,001개 이상」) 대신 미리보기가 센 수(「작업 73,210개」, 모르면 「…개 이상」)를
+  보이고 첫 줄·버튼도 같은 수다. 같은 화면의 숫자(첫 줄·연산별·버튼·결과 줄·정리 줄·선택 줄의 성공 scan)를 `n0` 천 단위 구분으로 통일.
+- 문서: 그물 불릿·`BATCH_DELETE_TABLES` 주석·감사 함수 docstring 의 「두 경로」 → 세 경로(+ 묘비가 스케줄·회차를 지운다), 실측 줄 정정(A단계
+  문장 수 16 → 7, 「가장 긴 단위」 → 동기 500 트랜잭션).
+
+**실측**(로컬 PG16 unix 소켓, `tests/perf_cap50k.py` — 세계 단건 1만 + 5500 × 10, 측정 배치 자식 5만·항목 5000 **현실 모양**(요청·잡·plan·
+결과·이벤트·전이 8·scan 요약), 리뷰 반영 뒤 재측정 — 결과 원문 job 산출물 `cap50k/c5_perf_50000.pg.jsonl`):
+- API: A단계 벽시계 0.344초(문장 7개, 가장 긴 문장 133.2ms — 잡 게이트), 묘비 B단계 트랜잭션 **55.6ms**, 그동안 같은 API 커넥션의
+  readyz 흉내 최대 대기 **123.2ms**, RSS +124KiB. 동기 500(현실 모양) 한 트랜잭션 0.199초.
+- 확인 창 미리보기(라우트 함수 그대로 — 자식 5만 배치 10개를 더 만든 요청 56.5만 세계): 10개 선택이면 문장 112개·가장 긴 문장
+  **155.9–187.4ms**·같은 커넥션 readyz 흉내 최대 145.9–177.8ms·벽시계 5.1–6.2초(문장 사이에 RLock 이 풀린다), 2개 143–150ms, 1개 146–153ms.
+- 컨트롤러: 5만을 **12.2초**에 다 지움(7틱 · 트랜잭션 502 — 청크 최대 65.6ms · 중앙 19.0ms), 그동안 **API 커넥션** readyz 흉내 최대 23.8ms
+  (p99 1.2ms — 같은 프로세스의 GIL 몫, 별 프로세스면 더 작다), RSS +2.9MiB.
+- 감사: start 1 + chunk 500(12.8MB) + delete 1(32KB). 아웃박스 5만 행 전부 `purge_group = batch_id`, 그 대기열(50,500행)에서 `due(limit 20)`
+  104–106ms(컨트롤러 커넥션).
+- 판정 기준 (2) 충족: API 가 RLock 을 쥐는 가장 긴 단위는 동기 500 한 트랜잭션 0.199초(로컬 0.20–0.22초 · 테스트베드 환산 0.36–0.43초),
+  그다음이 미리보기 문장 ≤ 187ms·A단계 문장 ≤ 133ms — 모두 1초 프로브 타임아웃 미만이고, 한 트랜잭션 방식의 20.9–22.9초 대비 ~100배 짧다.
+
+**검증**: 백엔드 관련 파일 sqlite + 로컬 PG16(새 `tests/test_batch_delete_background.py` 33 — PG 동시 묘비 1승 포함; PG 의 기존 batch·purge
+계열 18파일 668 passed — 실패 7건은 sqlite 전용 SQL(AUTOINCREMENT) 마이그레이션 테스트로 HEAD 와 같다), vitest 전체 녹색, `tsc -b` 0,
+빌드 외부 URL 0, e2e 39 passed(06 에 「E7 상한 표시」 추가 — 414·768·1280 툴바 높이 불변·창 문제 상자·백그라운드 결과·서버 거절 문구).
+리뷰 반영 뒤 최종 게이트(순차): 백엔드 전체 `-x` **6062 passed · 19 skipped**(첫 회는 기존 시간 경계 테스트 `test_api_metrics` 0.505초 > 0.5초 1건
+— 단독 재실행 통과, 전체 재실행 녹색), 로컬 PG16 관련 9파일 **403 passed**(새 회귀 6건 포함 — `test_batch_delete_background.py` 39), vitest
+**2136 passed**(124 파일), `tsc -b` 0, 빌드 외부 URL 0, e2e **39 passed**. 리뷰 프로브(`cap50k/review_c5_probe_rewind.py` — 「5001 자식이면 끝내
+blocked 가 없다」)는 이제 둘째 호출마다 `request_job_active` 로 막혀 그 단언이 깨진다(`cap50k/c5_probe_rewind_after_fix.txt`).
+
+**라이브 실증(예정 — 설계 §16)**: ① `kubectl --context dmsk8s -n dms get cm dms-config` 의 두 키, `GET /api/admin/request-purges` 의 limits,
+기존 배치 `:delete-preview`. ② 작은 배치 동기 삭제(감사 자식별 + 배치 1). ③ 테스트베드 오버레이에 **잠시** `SYNC=0`·`MAX=2` → 배치 A(2,
+백그라운드: 「삭제 중」 → 진행 카드 → 사라짐, 감사 start·chunk·delete·`purge_group`)·B(3, 「삭제 불가 — 작업 3개가 … 상한 2개」 375·768·1280
+스크린숏·창 제출 잠금·낡은 expected 거절 문구), 그동안 `/readyz` 0.5초 기록, 끝나면 두 키를 되돌린다. ④ `kubectl top pod` 전후.
 
 ### ✅ 테스트베드 사내 AD SSO 환경 구축·실증 + 실증 결함 3건 수정 — **완료**(2026-11-18, d32 → d33)
 

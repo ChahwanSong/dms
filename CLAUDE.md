@@ -80,11 +80,15 @@ PostgreSQL(제어면) + React 포탈 + 노드 에이전트 + Volcano gang-schedu
 - **새 DB 컬럼은 CREATE TABLE 과 `_ensure_columns` 양쪽**(구형 DB 업그레이드 경로).
   전수 열거 그물(`test_migrations.py`)이 테이블·인덱스 추가·삭제를 잡는다.
 - **배치(batch_id)를 가리키는 새 테이블은 배치 삭제 목록에도**(2026-11-16). `repositories/batches.py` 의 `BATCH_DELETE_TABLES`
-  (튜플 순서 = 잠금 순서 batch_items → batches → batch_rounds → batch_schedules → batch_schedule_runs — 스케줄 발사와 같은 방향.
-  DELETE 문 순서로 강제하는 것은 회차 경계 → 스케줄 → 회차 이력)에 넣고 배치 삭제
-  두 경로(`BatchesRepository.delete`·`RequestPurgesRepository.delete_batch`) 모두에 같은 트랜잭션의 DELETE 를 넣거나, 이유와 함께
+  (튜플 순서 = 잠금 순서 batch_items → batches → batch_deletions → batch_rounds → batch_schedules → batch_schedule_runs — 스케줄
+  발사와 같은 방향, 묘비 `batch_deletions` 는 2026-11-19. DELETE 문 순서로 강제하는 것은 회차 경계 → 스케줄 → 회차 이력)에 넣고 배치 삭제
+  세 경로(`BatchesRepository.delete`·`RequestPurgesRepository.delete_batch`·`RequestPurgesRepository.finish_batch_delete` — 백그라운드
+  배치 단위 삭제의 마무리) 모두에 같은 트랜잭션의 DELETE 를 넣거나, 이유와 함께
   `BATCH_DELETE_EXEMPT_TABLES` 에. 그물(`test_batch_delete_tables_cover_every_batch_id_column`)은 `batch_id` 이름의 컬럼만 본다.
-  아래 요청 삭제 목록과는 별개다 — 요청·잡도 가리키면 둘 다에 넣는다.
+  아래 요청 삭제 목록과는 별개다 — 요청·잡도 가리키면 둘 다에 넣는다. **배치 단위 삭제의 API 한 트랜잭션은 동기 문턱
+  (`DMS_BATCH_DELETE_SYNC_MAX_CHILDREN`, 기본 500) 이하로 묶는다**(2026-11-19 상한 기본 50000 — 큰 배치는 묘비(상태 `Deleting`) +
+  컨트롤러 `batch-delete` 청크): 5만을 한 트랜잭션으로 지우는 경로를 되살리지 말고, 묘비가 선 배치를 바꾸는 새 경로는 `_reject_frozen` +
+  저장소 원자 가드(409 `batch_deleting`)를 같이 둔다(`docs/ARCHITECTURE.md` 「불변식」).
 - **요청·잡을 가리키는 새 테이블·컬럼은 요청 삭제 목록에도**(2026-10-08). FK 가 0건이라 빠지면 지운 요청의 행이 조용히
   고아가 된다 — `repositories/request_purges.py` 의 `PURGED_TABLES` + `_purge_locked`(delete_terminal·delete_batch 공용 몸통, 늦게 들어올 수 있으면 `finish` 의
   scrub 도)에 DELETE 를 넣거나, 지우지 않는 이유와 함께 `PURGE_EXEMPT_TABLES` 에. 그물
@@ -179,9 +183,9 @@ PostgreSQL(제어면) + React 포탈 + 노드 에이전트 + Volcano gang-schedu
 
 ## 테스트·검증
 
-- 백엔드: `PYTHONPATH=<워크트리>/src <venv>/bin/python -m pytest tests -q` (~10분, 6018+ passed · 18 skipped — 2026-11-18 사내 SSO 기준)
-- 프론트: `cd frontend && npx vitest run` (2112+ passed, 122 파일 — 2026-11-18 사내 SSO 기준) · `npx tsc -b`
-- e2e(실 브라우저): `cd frontend && npm run test:e2e` (38 passed, 18 spec — 빌드 포함) — **CI 없음, 수기 게이트**(이미지 빌드 전 게이트는
+- 백엔드: `PYTHONPATH=<워크트리>/src <venv>/bin/python -m pytest tests -q` (~10분, 6062+ passed · 19 skipped — 2026-11-19 배치 삭제 상한 50000 기준)
+- 프론트: `cd frontend && npx vitest run` (2136+ passed, 124 파일 — 2026-11-19 배치 삭제 상한 50000 기준) · `npx tsc -b`
+- e2e(실 브라우저): `cd frontend && npm run test:e2e` (39 passed, 18 spec — 빌드 포함) — **CI 없음, 수기 게이트**(이미지 빌드 전 게이트는
   `deploy/README.md` §8 「이미지 빌드 전 게이트」)
 - 배포 문서·스크립트 계약: 절 번호·출력 문구를 바꾸면 `tests/test_ingress_contract.py`·`test_install_stages.py`·`test_addons_render.py` 등이
   본다 — 번호를 옮기면 가리키는 곳(설치기 출력·주석·다른 문서)을 같은 커밋에서 고치고 `deploy/README.md` 부록 Z 에 대응을 남긴다.

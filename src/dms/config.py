@@ -9,6 +9,11 @@ from .node_cpu import DEFAULT_NODE_CPU_RESERVE_MILLICORES
 
 AGENT_TOOL_NAMES = ("dscan", "dsync", "nsync", "drm")
 
+# DMS_BATCH_DELETE_MAX_CHILDREN 의 설정 범위 상한(2026-11-19) -- 측정 근거의 끝(설계 §2: 5만 자식 묘비·청크 삭제를 쟀다).
+# repositories/request_purges.MAX_BATCH_DELETE_CHILDREN_CEILING 이 이 값을 그대로 쓴다(불변식 CEILING ≤ MAX_DELETE_CALL_CHILDREN).
+BATCH_DELETE_MAX_CHILDREN_CEILING = 50000
+_BATCH_DELETE_CEILING = BATCH_DELETE_MAX_CHILDREN_CEILING
+
 _SERVER_INT_KEYS = (
     ("DMS_AGENT_REPORT_STALE_SECONDS", "agent_report_stale_seconds", 300),
     ("DMS_AGENT_REPORT_INTERVAL_SECONDS", "agent_report_interval_seconds", 60),
@@ -45,6 +50,15 @@ _SERVER_INT_KEYS = (
     # (repositories/batches.BATCH_ROUND_HISTORY_CAP 200) 안에서 경계를 계산할 수 있어야 해서다. 컨트롤러가 읽고(정리),
     # api 는 화면 표시만.
     ("DMS_BATCH_SCHEDULE_KEEP_ROUNDS", "batch_schedule_keep_rounds", 10),
+    # 배치 단위 삭제 상한(2026-11-19 사용자 결정 「배치 단위 삭제 상한 기본 50000개로」 -- repositories/request_purges.py 모듈
+    # docstring): 배치 하나를 배치 단위로 지울 수 있는 자식 요청(재실행 이력 포함) 수. 넘으면 batch_delete_too_large. 1–50000
+    # (밖이면 기동 거부) -- 50000 이 넘는 값은 측정 근거 밖이다(request_purges.MAX_BATCH_DELETE_CHILDREN_CEILING). 낮추는 길만 연다.
+    # api 가 읽는다(컨트롤러 batch-delete 루프는 이미 세운 묘비만 처리하므로 읽지 않는다).
+    ("DMS_BATCH_DELETE_MAX_CHILDREN", "batch_delete_max_children", 50000),
+    # 동기 경로 문턱(같은 날): 자식이 이 수 이하인 배치는 지금처럼 API 한 트랜잭션으로 즉시 지우고(자식별 감사), 넘으면 묘비를
+    # 세우고 컨트롤러 batch-delete 루프가 100개씩 청크로 지운다(청크 요약 감사). 0 = 늘 백그라운드(실증·느린 DB). 0–1000(밖이면
+    # 기동 거부) -- 1000 이 넘는 한 트랜잭션은 테스트베드 환산 1초 readiness 프로브 타임아웃에 닿는다(설계 §2 -- 500 은 0.36–0.43초).
+    ("DMS_BATCH_DELETE_SYNC_MAX_CHILDREN", "batch_delete_sync_max_children", 500),
     ("DMS_BUILD_WATCHER_INTERVAL_SECONDS", "build_watcher_interval_seconds", 15),
     # 빌드 파드 activeDeadlineSeconds + BuildWatcher 나이 기반 회수 창(C2). 기본
     # 7200(2h) -- mpifileutils를 소스에서 컴파일하는 빌드가 가장 오래 걸린다.
@@ -382,6 +396,9 @@ class Settings:
     artifact_retention_days: int = 1500
     # 배치 스케줄 회차 보존 수(2026-11-16, 기본 10 -- 같은 날 5 → 10) -- _SERVER_INT_KEYS 의 주석 참고. 1–100.
     batch_schedule_keep_rounds: int = 10
+    # 배치 단위 삭제 상한·동기 문턱(2026-11-19, 기본 50000·500) -- _SERVER_INT_KEYS 의 주석 참고. 1–50000 · 0–1000.
+    batch_delete_max_children: int = 50000
+    batch_delete_sync_max_children: int = 500
     build_registry: str = "pkg-01:5000"
     build_builder_image: str = "quay.io/buildah/stable:latest"
     build_watcher_interval_seconds: int = 15
@@ -456,6 +473,12 @@ class Settings:
         if not 1 <= extra["batch_schedule_keep_rounds"] <= 100:
             problems.append("DMS_BATCH_SCHEDULE_KEEP_ROUNDS must be between 1 and 100: "
                             f"{environ.get('DMS_BATCH_SCHEDULE_KEEP_ROUNDS')!r}")
+        if not 1 <= extra["batch_delete_max_children"] <= _BATCH_DELETE_CEILING:
+            problems.append(f"DMS_BATCH_DELETE_MAX_CHILDREN must be between 1 and {_BATCH_DELETE_CEILING}: "
+                            f"{environ.get('DMS_BATCH_DELETE_MAX_CHILDREN')!r}")
+        if not 0 <= extra["batch_delete_sync_max_children"] <= 1000:
+            problems.append("DMS_BATCH_DELETE_SYNC_MAX_CHILDREN must be between 0 and 1000: "
+                            f"{environ.get('DMS_BATCH_DELETE_SYNC_MAX_CHILDREN')!r}")
         if extra["request_purge_interval_seconds"] < 1:
             problems.append("DMS_REQUEST_PURGE_INTERVAL_SECONDS must be >= 1: "
                             f"{environ.get('DMS_REQUEST_PURGE_INTERVAL_SECONDS')!r}")

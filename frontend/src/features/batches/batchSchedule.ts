@@ -11,6 +11,7 @@
 // 타입을 이 파일에 둔다(나중에 합칠 때 types.ts 로 옮긴다).
 import { kstStampBare } from "../../lib/datetime";
 import { storageLabel } from "../usage/usageTabs";
+import { n0 } from "../../lib/format";
 
 // --- 응답 타입(routes_batch_schedules 모듈 docstring) -------------------------------------------------------------------
 
@@ -45,7 +46,7 @@ export interface BatchSchedule {
   // 「되돌릴 수 없음」 동의가 필요한 스케줄인가(rm, sync+delete — 서버가 **지금** 배치로 판정). null = 배치 행이 없어 모름.
   destructive?: boolean | null;
   batch: BatchScheduleBatch | null;        // null = 배치 행이 없다
-  // k8s: 재실행 이력 포함 자식 요청 수 · 상한 초과로 세기를 멈춤 · 배치 단위 삭제 상한(서버 MAX_BATCH_DELETE_CHILDREN).
+  // k8s: 재실행 이력 포함 자식 요청 수 · 상한 초과로 세기를 멈춤 · 배치 단위 삭제 상한(서버 설정 DMS_BATCH_DELETE_MAX_CHILDREN, 기본 50000 -- 2026-11-19).
   child_count?: number; child_count_capped?: boolean; child_count_limit?: number;
   confirm_wait?: ConfirmWait | null;
   // 회차 보존(2026-11-16 사용자 결정 — 서버 DMS_BATCH_SCHEDULE_KEEP_ROUNDS, 기본 10): 최근 keep_rounds 회차만 남고 오래된 회차의
@@ -257,10 +258,9 @@ export function confirmWaitShort(w: ConfirmWait | null | undefined): string | nu
   return every !== null ? `확인 없으면 ${every}에 한 번` : "확인 없으면 주기보다 드물게";
 }
 
-// 배치 단위 삭제 상한(서버 child_count_limit, 2026-11-16 5000)의 80% 경고. 오래된 회차의 작업은 자동 정리되지만(최근 K회차 보존 —
+// 배치 단위 삭제 상한(서버 child_count_limit -- 2026-11-19 부터 설정 DMS_BATCH_DELETE_MAX_CHILDREN, 기본 50000)의 80% 경고. 오래된 회차의 작업은 자동 정리되지만(최근 K회차 보존 —
 // 2026-11-16 사용자 결정) 항목 수 × 보존 회차가 상한보다 크면 줄지 않는다. capped = 서버가 상한 + 1 에서 세기를 멈췄다(이미 넘었다).
 export const CHILD_WARN_RATIO = 0.8;
-const n0 = (n: number) => n.toLocaleString("ko-KR");
 export function childCountWarning(s: Pick<BatchSchedule, "child_count" | "child_count_capped" | "child_count_limit">): string | null {
   const limit = s.child_count_limit;
   if (typeof limit !== "number" || limit <= 0) return null;

@@ -5,6 +5,10 @@ from .data_jobs import DataJobsRepository
 from .requests import batch_match
 
 _ACTIVE = ("Previewing", "Running")
+# 배치 단위 삭제의 묘비 상태(2026-11-19 -- request_purges 「백그라운드 경로」). 비종단·되돌리기 없음: 종단 전용 경로(재실행·
+# rescan·기록 삭제·실행 설정)는 상태 CAS 로 저절로 막히고, 항목 쓰기(추가·수정·삭제·교체)는 잠근 행으로 이 값을 보고 sentinel
+# DELETING 을 돌려준다(라우트 409 batch_deleting). 오케스트레이터·스케줄러는 모르는 상태로 건너뛴다(_ACTIVE 밖).
+DELETING = "Deleting"
 # 요청 종단 상태 문자열(list_summaries 의 「살아 있는 자식」 판정). 집합 밖 = 비종단(fail-closed -- 모르는 상태는 살아
 # 있다고 센다).
 _TERMINAL_REQUEST_VALUES = tuple(sorted(s.value for s in TERMINAL_REQUEST_STATES))
@@ -18,15 +22,20 @@ _NO_QUEUED_ITEM = "NOT EXISTS (SELECT 1 FROM batch_items WHERE batch_id = :b AND
 # 밖이다 -- 실행 신원·특권 재료와 대상은 생성 시점 사실이다(항목은 항목 편집 라우트 몫). auto_confirm_by(sync·rm 자동
 # 확인을 켠 사람, NULL = 꺼짐)는 라우트가 본문 auto_confirm(bool)을 이 값으로 바꿔 넘긴다.
 _SETTINGS_COLUMNS = ("max_concurrency", "priority", "node_count", "procs_per_node", "options", "auto_confirm_by")
-# batch_id 로 배치에 딸린 행을 담는 테이블 중 **배치 삭제 두 경로**(BatchesRepository.delete, RequestPurgesRepository.
-# delete_batch)가 같은 트랜잭션에서 함께 지우는 것(2026-11-16 배치 스케줄러). FK 가 0건이라 빠지면 지운 배치의 스케줄이 고아로
-# 남아 컨트롤러가 batch_not_found 로 일시정지를 쓴다. tests/test_api_batch_schedules.py 의 그물이 스키마의 batch_id 컬럼
-# 전수를 이 목록 ∪ BATCH_DELETE_EXEMPT_TABLES 와 대조하고, 두 경로 소스에 테이블마다 DELETE 가 있는지 본다.
+# batch_id 로 배치에 딸린 행을 담는 테이블 중 **배치 삭제 경로**(BatchesRepository.delete, RequestPurgesRepository.
+# delete_batch, 2026-11-19 부터 RequestPurgesRepository.finish_batch_delete -- 아래)가 같은 트랜잭션에서 함께 지우는 것(2026-11-16
+# 배치 스케줄러). FK 가 0건이라 빠지면 지운 배치의 스케줄이 고아로 남아 컨트롤러가 batch_not_found 로 일시정지를 쓴다.
+# tests/test_api_batch_schedules.py 의 그물이 스키마의 batch_id 컬럼 전수를 이 목록 ∪ BATCH_DELETE_EXEMPT_TABLES 와 대조하고, 세 경로
+# 소스에 테이블마다 DELETE 가 있는지 본다(묘비 _begin_batch_delete 도 회차 경계·스케줄·회차 이력을 지운다).
 # **순서가 잠금 순서다**(설계 비판 #10): 항목 → 배치 → 회차 경계 → 스케줄 → 회차 이력. 스케줄 발사(BatchSchedulesRepository.fire
 # -- 항목 → 배치 → 회차 경계 INSERT·상한 정리(_rescan_locked 안) → 스케줄 UPDATE → 회차 INSERT·상한 정리)와 기록(record -- 스케줄
-# UPDATE → 회차)이 같은 방향이라, 두 삭제 경로도 회차 경계(batch_rounds, 2026-11-16 회차 보존 정리)를 스케줄보다, 스케줄을 회차
+# UPDATE → 회차)이 같은 방향이라, 삭제 경로도 회차 경계(batch_rounds, 2026-11-16 회차 보존 정리)를 스케줄보다, 스케줄을 회차
 # 이력보다 먼저 지운다(거꾸로면 PG 에서 서로 상대 행을 기다려 한쪽이 40P01 로 끊긴다 -- 그물이 소스 순서까지 본다).
-BATCH_DELETE_TABLES = ("batch_items", "batches", "batch_rounds", "batch_schedules", "batch_schedule_runs")
+# batch_deletions(2026-11-19 청크 삭제의 묘비·진행 장부)는 batches 바로 다음이다 -- 묘비(_begin_batch_delete)·청크·마무리가 항목 →
+# 배치 → 묘비 → (requests → data_jobs) → 회차 경계 → 스케줄 → 회차 이력 순으로 잡는다. 배치 삭제 **세 경로**(위 둘 +
+# RequestPurgesRepository.finish_batch_delete)가 모두 DELETE 를 갖는다(앞의 둘에선 no-op -- 묘비가 선 배치는 지우지 않는다).
+BATCH_DELETE_TABLES = ("batch_items", "batches", "batch_deletions", "batch_rounds", "batch_schedules",
+                       "batch_schedule_runs")
 # 배치당 남기는 회차 경계(batch_rounds) 행 수 -- _rescan_locked 가 같은 트랜잭션에서 그보다 오래된 행을 지운다. 보존 정리는 최신
 # K행만 있으면 경계를 계산하므로 설정 상한(DMS_BATCH_SCHEDULE_KEEP_ROUNDS ≤ 100)의 두 배로 둔다.
 BATCH_ROUND_HISTORY_CAP = 200
@@ -67,8 +76,8 @@ def _storage_fields(payload_text) -> dict:
 
 
 def schedule_delete_audit_before(db, row, *, deleted_with_batch: bool) -> dict:
-    """('batch_schedule', 'delete') 감사 행의 before -- 스케줄 DELETE 라우트(BatchSchedulesRepository.delete)와 배치 삭제 두
-    경로(_audit_schedule_delete)가 **이 한 벌**을 쓴다(d29 라이브 실증: 라우트 쪽 감사 977 에 pruned_total·pruned_at 이 없어 같은
+    """('batch_schedule', 'delete') 감사 행의 before -- 스케줄 DELETE 라우트(BatchSchedulesRepository.delete)와 배치 삭제
+    경로(_audit_schedule_delete -- 기록 삭제·동기 배치 단위 삭제·묘비·마무리)가 **이 한 벌**을 쓴다(d29 라이브 실증: 라우트 쪽 감사 977 에 pruned_total·pruned_at 이 없어 같은
     감사 행인데 경로마다 모양이 달랐다). row = batch_schedules 원행(SELECT * -- _hydrate 전, 호출자가 잠근 행). 스케줄 상태 + 마지막
     판정 + 동의 여부 + 회차 보존 정리 누적(pruned_total·pruned_at -- NULL = 아직 정리 없음, 0 과 다르다; 변조 값은 None) + 함께
     지운 실행 기록 수(run_count) + deleted_with_batch(배치 삭제가 함께 지웠나). 깨진 spec(DB 변조)은 None 으로 남긴다(감사가
@@ -88,11 +97,12 @@ def schedule_delete_audit_before(db, row, *, deleted_with_batch: bool) -> dict:
 
 
 def _audit_schedule_delete(db, batch_id, *, actor, now) -> None:
-    """배치 삭제 두 경로(BatchesRepository.delete·RequestPurgesRepository.delete_batch)가 스케줄 행을 지우기 **전에**, 같은
-    트랜잭션에서 부른다: 그 배치에 스케줄이 있으면 ('batch_schedule', 'delete', batch_id) 감사 행을 남긴다 -- 스케줄 DELETE
+    """배치 삭제 경로(BatchesRepository.delete·RequestPurgesRepository.delete_batch, 2026-11-19 부터 백그라운드 삭제의 묘비
+    _begin_batch_delete·마무리 finish_batch_delete -- 묘비가 스케줄을 지우므로 마무리에선 보통 no-op)가 스케줄 행을 지우기 **전에**,
+    같은 트랜잭션에서 부른다: 그 배치에 스케줄이 있으면 ('batch_schedule', 'delete', batch_id) 감사 행을 남긴다 -- 스케줄 DELETE
     라우트(BatchSchedulesRepository.delete)와 같은 mutation_class·operation·target_key·before 모양(schedule_delete_audit_before,
     deleted_with_batch True), after 는 NULL. 켜진 스케줄(armed_by·동의)이 배치와 함께 흔적 없이 사라지지 않게. 잠금은 항목 →
-    배치 → 스케줄 순서 그대로(두 경로 모두 항목·배치를 먼저 쥐거나 지운 뒤에 부른다 -- BATCH_DELETE_TABLES)."""
+    배치 → 스케줄 순서 그대로(모든 경로가 항목·배치(백그라운드면 그다음 묘비)를 먼저 쥐거나 지운 뒤에 부른다 -- BATCH_DELETE_TABLES)."""
     lock = " FOR UPDATE" if db.dialect == "postgresql" else ""
     row = db.query_one(f"SELECT * FROM batch_schedules WHERE batch_id = :b{lock}", {"b": batch_id})
     if row is None:
@@ -266,7 +276,7 @@ class BatchesRepository:
             "SELECT seq, payload, status FROM batch_items WHERE batch_id = :b ORDER BY seq", {"b": batch_id})
         return [{"seq": r["seq"], "payload": _payload_or_none(r["payload"]), "status": r["status"]} for r in rows]
 
-    def list_summaries(self, batch_ids, *, cap: int) -> dict:
+    def list_summaries(self, batch_ids, *, cap: int, with_scans: bool = True) -> dict:
         """작업 목록(GET /api/user/requests, 관리자 응답)의 배치 자식 행에 붙이는 배치 요약 -- {batch_id: 요약}.
         화면이 /api/admin/batches(최신 100건)와 조인하면 「오래된 배치」와 「배치 기록이 없는 묶음」을 구별하지 못하고, 목록 한
         쪽(50건)엔 배치 자식이 일부만 있어 수를 셀 수 없다 -- 그래서 서버가 센다(배치 단위 삭제의 확인 창이 보이는 수 =
@@ -278,8 +288,13 @@ class BatchesRepository:
           batch_status               행이 없으면 None
           batch_request_count        재실행 이력을 포함한 전체 자식 수(requests.batch_id -- 항목 참조가 아니다). **cap 을
                                      넘으면 cap + 1 에서 멈춘다**(아래 batch_request_count_capped)
-          batch_request_count_capped 자식이 cap 을 넘어 세기를 멈췄다 -- 그 배치는 어차피 배치 단위로 지울 수 없다
-                                     (delete_batch 의 batch_delete_too_large). 화면은 「삭제 상한 초과」로 보인다
+          batch_request_count_capped 자식이 cap 을 넘어 세기를 멈췄다. 2026-11-19 부터 목록의 cap 은 min(5000, 삭제 상한)
+                                     (request_purges.list_count_cap)이라 뜻이 「상한 초과」가 아니라 「목록이 센 최대를 넘음 --
+                                     정확한 수 모름」이다(포탈은 count > limit 로만 상한 초과를 판정하고, 정확한 수는 확인 창의
+                                     미리보기가 센다)
+          batch_max_commit_order     그 배치 자식의 최대 commit_order(2026-11-19 -- 삭제 CAS 의 둘째 열쇠). capped·자식 0 이면 None
+          batch_deleting             진행 중인 백그라운드 배치 삭제(batch_deletions 행 -- {expected, deleted, requested_at,
+                                     requested_by, last_error, blocked_request_id}) 또는 None. dangling 묶음도 받는다
           batch_live_request_count   비종단 자식 수(0 은 정상값). capped 면 None(세지 않았다 -- 모름)
           batch_succeeded_scan_count 성공 scan 잡(사용량 분석 지점 -- data_jobs._scan_target_where)을 가진 자식 수.
                                      비 scan 배치는 0(모름이 아니라 확정값). capped 면 None(세지 않았다)
@@ -319,7 +334,8 @@ class BatchesRepository:
         ids = [b for b in dict.fromkeys(batch_ids) if isinstance(b, str)]
         out = {b: {"batch_exists": False, "batch_name": None, "batch_status": None, "batch_request_count": 0,
                    "batch_request_count_capped": False, "batch_live_request_count": 0,
-                   "batch_succeeded_scan_count": 0, "batch_item_count": None} for b in ids}
+                   "batch_succeeded_scan_count": 0 if with_scans else None, "batch_item_count": None,
+                   "batch_max_commit_order": None, "batch_deleting": None} for b in ids}
         terminal = {f"t{i}": s for i, s in enumerate(_TERMINAL_REQUEST_VALUES)}
         terminal_in = ", ".join(":" + k for k in terminal)
         stop = int(cap) + 1
@@ -339,9 +355,9 @@ class BatchesRepository:
                 s["batch_name"] = name if isinstance(name, str) and name.strip() != "" else None
                 s["batch_status"] = row["status"]
             arms = " UNION ALL ".join(
-                f"""SELECT batch_id, COUNT(*) AS n,
+                f"""SELECT batch_id, COUNT(*) AS n, MAX(commit_order) AS top,
                            SUM(CASE WHEN state IN ({terminal_in}) THEN 0 ELSE 1 END) AS live
-                      FROM (SELECT batch_id, state FROM requests WHERE {batch_match(k)}
+                      FROM (SELECT batch_id, state, commit_order FROM requests WHERE {batch_match(k)}
                              ORDER BY batch_id, commit_order LIMIT :stop) c{n}
                      GROUP BY batch_id""" for n, k in enumerate(names))
             small = []
@@ -353,10 +369,21 @@ class BatchesRepository:
                              batch_live_request_count=None, batch_succeeded_scan_count=None)
                     continue
                 s["batch_request_count"] = n
+                top = row["top"]
+                s["batch_max_commit_order"] = top if isinstance(top, int) and not isinstance(top, bool) else None
                 # SUM 의 NULL 은 「행 없음」이다(GROUP BY 라 실제로는 생기지 않는다) -- 모름이 아니라 0.
                 s["batch_live_request_count"] = 0 if row["live"] is None else int(row["live"])
                 small.append(row["batch_id"])
-            if not small:
+            # 진행 중인 백그라운드 배치 삭제(2026-11-19) -- 묶음마다 한 문장(행은 진행 중인 삭제뿐이라 작다).
+            for row in self._db.query(
+                    "SELECT batch_id, expected_request_count, deleted_request_count, requested_at, requested_by, "
+                    f"last_error, blocked_request_id FROM batch_deletions WHERE batch_id IN ({in_list})", names):
+                out[row["batch_id"]]["batch_deleting"] = {
+                    "expected": row["expected_request_count"], "deleted": row["deleted_request_count"],
+                    "requested_at": row["requested_at"], "requested_by": row["requested_by"],
+                    "last_error": row["last_error"], "blocked_request_id": row["blocked_request_id"]}
+            # with_scans=False(스케줄 목록 15초 폴링 -- 2026-11-19): 성공 scan 갈래를 건너뛴다(그 화면은 쓰지 않는다 -- None = 세지 않음).
+            if not small or not with_scans:
                 continue
             params = {f"j{n}": b for n, b in enumerate(small)}
             where = DataJobsRepository._scan_target_where(params)
@@ -535,6 +562,8 @@ class BatchesRepository:
             batch, items = self._lock_items_then_batch(batch_id)
             if batch is None:
                 return False
+            if batch["status"] == DELETING:
+                return DELETING                # 묘비 뒤(2026-11-19) -- 쓰지 않는다(라우트 409 batch_deleting)
             if validate is not None:
                 validate(batch, items)
             n = self._db.execute_count(
@@ -556,6 +585,9 @@ class BatchesRepository:
         only_queued 원자 가드는 update_item_payload 와 같은 이유."""
         guard = " AND status = 'Queued'" if only_queued else ""
         with self._db.transaction():
+            batch, _ = self._lock_items_then_batch(batch_id, with_items=False)
+            if batch is not None and batch["status"] == DELETING:
+                return DELETING                # 묘비 뒤(2026-11-19) -- 항목은 마무리가 지운다(라우트 409 batch_deleting)
             n = self._db.execute_count(
                 f"DELETE FROM batch_items WHERE batch_id = :b AND seq = :s{guard}",
                 {"b": batch_id, "s": seq})
@@ -581,6 +613,8 @@ class BatchesRepository:
             batch, items = self._lock_items_then_batch(batch_id)
             if batch is None:
                 return None
+            if batch["status"] == DELETING:
+                return DELETING                # 묘비 뒤(2026-11-19) -- 라우트 409 batch_deleting
             if validate is not None:
                 validate(batch, items)
             row = self._db.query_one(
@@ -619,6 +653,8 @@ class BatchesRepository:
             batch, _ = self._lock_items_then_batch(batch_id, with_items=False)
             if batch is None:
                 return None
+            if batch["status"] == DELETING:
+                return DELETING                # 묘비 뒤(2026-11-19) -- 라우트 409 batch_deleting
             if batch["status"] not in ("Completed", "Cancelled"):
                 return False
             if validate is not None:
@@ -804,11 +840,14 @@ class BatchesRepository:
         끝낸 값만 넘긴다). items·실행 제어 컬럼은 여기로 못 들어온다 — 라우트가
         메타 두 키만 추려 넘기는 계약(즉시 실행 모델, routes_batches 주석)."""
         if not fields:
-            return
+            return 1
         fields["updated_at"] = utc_now_iso()
         sets = ", ".join(f"{k} = :{k}" for k in fields)
-        self._db.execute(f"UPDATE batches SET {sets} WHERE batch_id = :b",
-                         {**fields, "b": batch_id})
+        # 묘비가 선 배치(Deleting, 2026-11-19)는 고치지 않는다 -- 반환 = 영향 행 수(0 = 행 없음 또는 Deleting, 라우트가 가른다).
+        # IS NULL OR: 상태가 NULL 인 변조 행에서 `status <> 'Deleting'` 은 NULL(거짓)이라 이전 동작(무조건 쓰기)을 지킨다.
+        return self._db.execute_count(
+            f"UPDATE batches SET {sets} WHERE batch_id = :b AND (status IS NULL OR status <> 'Deleting')",
+            {**fields, "b": batch_id})
 
     def update_execution_settings(self, batch_id, fields, *, before, actor, audit_extra=None) -> bool:
         """종단 배치의 실행 설정(_SETTINGS_COLUMNS) 부분 갱신 + 감사 행, 한 트랜잭션.
@@ -913,6 +952,9 @@ class BatchesRepository:
                 return False
             self._db.execute("DELETE FROM batch_items WHERE batch_id = :b",
                              {"b": batch_id})
+            # 묘비(2026-11-19) -- 종단 CAS 를 통과했으니 묘비가 선 배치(Deleting)가 아니다: no-op 이지만 그물(세 경로 모두
+            # BATCH_DELETE_TABLES 의 테이블마다 DELETE)이 보는 모양을 지킨다.
+            self._db.execute("DELETE FROM batch_deletions WHERE batch_id = :b", {"b": batch_id})
             # 회차 경계(2026-11-16) -- BATCH_DELETE_TABLES 순서 = 잠금 순서: 스케줄보다 먼저(발사가 _rescan_locked 에서 회차 경계를
             # 스케줄 UPDATE 보다 먼저 쥔다).
             self._db.execute("DELETE FROM batch_rounds WHERE batch_id = :b", {"b": batch_id})

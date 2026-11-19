@@ -30,7 +30,7 @@ def test_planner_loop_registered_first(db):
     assert loops[0].name == "planner"
     assert loops[0].interval_seconds == 10
     assert {l.name for l in loops} == {"planner", "job-stepper", "storage-reconciler",
-                                       "retention", "batch-scheduler", "batch-orchestrator", "pod-gc",
+                                       "retention", "batch-scheduler", "batch-orchestrator", "batch-delete", "pod-gc",
                                        "artifact-base-check", "k8s-inventory"}
 
 

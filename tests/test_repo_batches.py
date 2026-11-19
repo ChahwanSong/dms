@@ -365,11 +365,12 @@ def test_list_summaries_counts_children_live_and_successful_scans(db):
     assert s[named] == {"batch_exists": True, "batch_name": "성장", "batch_status": "Running",
                         "batch_request_count": 4, "batch_request_count_capped": False,
                         "batch_live_request_count": 1, "batch_succeeded_scan_count": 2,
-                        "batch_item_count": 1}
+                        "batch_item_count": 1, "batch_max_commit_order": 4, "batch_deleting": None}
     assert s[unnamed] == {"batch_exists": True, "batch_name": None, "batch_status": "Completed",
                           "batch_request_count": 1, "batch_request_count_capped": False,
                           "batch_live_request_count": 0,
-                          "batch_succeeded_scan_count": 0, "batch_item_count": 1}
+                          "batch_succeeded_scan_count": 0, "batch_item_count": 1,
+                          "batch_max_commit_order": 5, "batch_deleting": None}
 
 
 def test_list_summaries_dangling_unknown_state_and_empty_id(db):
@@ -384,7 +385,8 @@ def test_list_summaries_dangling_unknown_state_and_empty_id(db):
     assert s[gone] == {"batch_exists": False, "batch_name": None, "batch_status": None,
                        "batch_request_count": 2, "batch_request_count_capped": False,
                        "batch_live_request_count": 1, "batch_succeeded_scan_count": 1,
-                       "batch_item_count": None}                     # 배치 행이 없다 -- 항목 수는 모름
+                       "batch_item_count": None,                     # 배치 행이 없다 -- 항목 수는 모름
+                       "batch_max_commit_order": 2, "batch_deleting": None}
     assert s[""]["batch_exists"] is False and s[""]["batch_request_count"] == 1
     assert s[blank]["batch_name"] is None
     assert s["never"]["batch_request_count"] == 0 and s["never"]["batch_exists"] is False

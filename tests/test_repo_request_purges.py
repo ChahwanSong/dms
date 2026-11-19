@@ -502,7 +502,7 @@ def test_finish_does_nothing_when_the_target_came_back(repos, db):
 
 def test_status_counts_pending_and_stalled_oldest_first(repos):
     p = repos.request_purges
-    assert p.status() == {"pending": 0, "stalled": 0, "oldest_requested_at": None, "items": []}
+    assert p.status() == {"pending": 0, "stalled": 0, "oldest_requested_at": None, "items": [], "batch_deletions": []}
     (r1, _), = _queued(repos, now="2026-10-08T11:00:00Z")
     (r2, _), = _queued(repos, now="2026-10-08T12:00:00Z")
     p.fail(r2, reason_code="purge_no_node", interval=15)
@@ -859,8 +859,11 @@ def test_batch_delete_refuses_more_children_than_the_cap(repos, db):
     bid = _scan_batch(repos, n_items=1)
     children = [_batch_child(repos, bid, target=f"t{i}") for i in range(3)]
     before = _state_of(db, bid, children)
+    # 2026-11-19: 상한 사유는 숫자를 싣는다(포탈 「삭제 불가 — 작업 N개가 … 상한 M개를 넘습니다」) -- 상한 + 1 까지만 세므로
+    # 정확한 수 대신 하한(count_at_least).
     assert _delete_batch(repos, bid, max_children=2) == {
-        "deleted": False, "reason": "batch_delete_too_large", "request_id": None}
+        "deleted": False, "reason": "batch_delete_too_large", "request_id": None,
+        "limit": 2, "count": None, "count_at_least": 3}
     assert _state_of(db, bid, children) == before
     assert _delete_batch(repos, bid, max_children=3)["deleted"] is True
 
@@ -911,12 +914,14 @@ def test_batch_delete_refuses_a_child_that_another_batch_points_at(repos, db):
 
 def test_batch_delete_refuses_more_items_than_the_cap(repos, db):
     # 자식은 적어도 항목이 많은 배치(큰 CSV 를 일찍 취소) -- 항목 전부를 잠그고 감사에 직렬화하고 지우는 트랜잭션도
-    # RLock 을 쥔다. 항목 상한도 batch_delete_too_large(2026-10-11 검증 지적).
+    # RLock 을 쥔다. 항목 상한(2026-10-11 검증 지적) -- 2026-11-19 부터 사유를 갈랐다(batch_delete_too_many_items, 배치 행의
+    # item_count 가 정확한 수).
     bid = _scan_batch(repos, n_items=4, status="Cancelled")
     children = [_batch_child(repos, bid, seq=0, target="t0")]
     before = _state_of(db, bid, children)
     assert _delete_batch(repos, bid, max_items=3) == {
-        "deleted": False, "reason": "batch_delete_too_large", "request_id": None}
+        "deleted": False, "reason": "batch_delete_too_many_items", "request_id": None,
+        "limit": 3, "count": 4, "count_at_least": None}
     assert _state_of(db, bid, children) == before
     assert _delete_batch(repos, bid, max_items=4)["deleted"] is True
 
@@ -1029,10 +1034,11 @@ def test_batch_delete_lock_order_on_postgres(repos, db):
                                                      quiet_seconds=60, max_children=1000)["deleted"] is True
     locked = [re.search(r"FROM (\w+)", q).group(1) for q in spy.sql if q.rstrip().endswith("FOR UPDATE")]
     order = list(dict.fromkeys(locked))
-    assert order[:4] == ["batch_items", "batches", "requests", "data_jobs"], locked
+    # 묘비 표(batch_deletions, 2026-11-19)는 배치 다음 -- 잠금 순서 D6(request_purges 모듈 docstring).
+    assert order[:5] == ["batch_items", "batches", "batch_deletions", "requests", "data_jobs"], locked
     # 뒤에 오는 것: 아웃박스 행(_enqueue)과 배치 스케줄(2026-11-16 -- _audit_schedule_delete 가 스케줄을 지우기 전에 잠근다).
     # 스케줄은 맨 끝이다 -- 스케줄 발사(항목 → 배치 → 스케줄 → 회차 이력)와 같은 방향(batches.BATCH_DELETE_TABLES 순서).
-    assert set(order[4:]) <= {"request_purges", "batch_schedules"}, locked
+    assert set(order[5:]) <= {"request_purges", "batch_schedules"}, locked
     assert order[-1] == "batch_schedules", locked
 
 
@@ -1084,7 +1090,7 @@ def _bulk_children(db, bid, n, *, with_job=True):
 
 def test_batch_delete_statement_budget(repos, db):
     # 성능 회귀를 시간이 아니라 결정적으로 잡는다 -- 트랜잭션 동안 API 전체가 멈추므로(단일 커넥션 RLock) 자식당 문장
-    # 수가 늘면 상한(MAX_BATCH_DELETE_CHILDREN 5000, 2026-11-16) 근처 배치가 readiness 를 넘긴다. 자식 200개(잡 각 1개) ≤ 6×200 + 60: 자식마다 감사 스냅숏
+    # 수가 늘면 동기 문턱(DMS_BATCH_DELETE_SYNC_MAX_CHILDREN 500, 2026-11-19 -- 그보다 큰 배치는 청크) 근처 배치가 readiness 를 넘긴다. 자식 200개(잡 각 1개) ≤ 6×200 + 60: 자식마다 감사 스냅숏
     # 읽기 3(결과·요청 전이·잡 전이) + events DELETE 1 + 아웃박스 INSERT 1 + 감사 INSERT 1. 아웃박스의 기존 행 조회는
     # 묶음마다 한 번이다(자식마다 읽으면 PG 일반 계획이 아웃박스를 자식마다 훑었다 -- 2026-10-10 검증 지적).
     bid = _scan_batch(repos, n_items=1)
@@ -1164,8 +1170,9 @@ def test_refusing_an_oversized_batch_reads_at_most_cap_plus_one_rows(repos, db):
     counting = _RowCounting(db)
     r = RequestPurgesRepository(counting).delete_batch(bid, expected_request_count=60, actor="opadm",
                                                        artifact_base=BASE, quiet_seconds=60, max_children=10)
-    assert r == {"deleted": False, "reason": "batch_delete_too_large", "request_id": None}
-    assert counting.rows <= 1 + 1 + 1, (counting.rows, counting.sql)   # 항목 1 + 배치 1 + 세기 1 -- 자식 행은 읽지 않는다
+    assert r == {"deleted": False, "reason": "batch_delete_too_large", "request_id": None,
+                 "limit": 10, "count": None, "count_at_least": 11}
+    assert counting.rows <= 1 + 1 + 1 + 1, (counting.rows, counting.sql)   # + 묘비 행 확인(없음 -- 0행)   # 항목 1 + 배치 1 + 세기 1 -- 자식 행은 읽지 않는다
     assert not any(sql.lstrip().startswith("SELECT *") and "FROM requests" in sql for sql in counting.sql)
     # 세기는 범위 표기 + 인덱스 순서(requests.batch_match) -- `batch_id = :b LIMIT` 면 PG 가 큰 배치에서 Seq Scan + LIMIT 를
     # 골라 그 배치의 물리 위치 앞의 행 전부를 읽었다(이 판정이 막으려는 바로 그 큰 배치에서).
@@ -1177,8 +1184,9 @@ def test_refusing_an_oversized_batch_reads_at_most_cap_plus_one_rows(repos, db):
     r = RequestPurgesRepository(counting).delete_batch(big, expected_request_count=0, actor="opadm",
                                                        artifact_base=BASE, quiet_seconds=60, max_children=10,
                                                        max_items=5)
-    assert r == {"deleted": False, "reason": "batch_delete_too_large", "request_id": None}
-    assert counting.rows <= 6 + 1 + 1, (counting.rows, counting.sql)
+    assert r == {"deleted": False, "reason": "batch_delete_too_many_items", "request_id": None,
+                 "limit": 5, "count": 50, "count_at_least": None}
+    assert counting.rows <= 6 + 1 + 1 + 1, (counting.rows, counting.sql)
     # 상한 안이면 전부 잠그고 지운다(LIMIT 에 닿지 않는다 -- 의미 그대로).
     assert _delete_batch(repos, big, expected_request_count=0, max_items=50)["deleted"] is True
     assert _delete_batch(repos, bid, max_children=60)["deleted"] is True

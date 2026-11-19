@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { batchJobsPath, useDeleteRequests, useInfiniteRequests, usePurgeStatus } from "./useJobs";
+import { batchJobsPath, useBatchDeletionsDone, useDeleteRequests, useInfiniteRequests, usePurgeStatus } from "./useJobs";
 import type { RequestFilters } from "./useJobs";
 import { useSearchField } from "./searchField";
 import { DeleteRequestsDialog, isSucceededScan } from "./DeleteRequestsDialog";
@@ -16,7 +16,10 @@ import { kstStampBare } from "../../lib/datetime";
 import { REQUEST_TERMINAL_STATES } from "../../lib/jobState";
 import { pathSummary } from "../../lib/storagePaths";
 import type { DeleteRequestsResult, PurgeStatus, RequestRow } from "../../lib/types";
-import { BATCH_BLOCK_LABEL, BATCH_ID_RE, MAX_DELETE_BATCHES, MAX_DELETE_CALL_CHILDREN, groupBatches, splitBatchName } from "./batchGroups";
+import { BATCH_BLOCK_LABEL, BATCH_ID_RE, MAX_DELETE_BATCHES, groupBatches, pickable as isPickable, splitBatchName } from "./batchGroups";
+import { blockText, fallbackLimitsLine, limitsLine, parseLimits } from "../../lib/deleteLimits";
+import type { BlockDetail, DeleteLimits } from "../../lib/deleteLimits";
+import { n0 } from "../../lib/format";
 import type { BatchGroup, BatchSummary } from "./batchGroups";
 import { FOCUS_RING, SMALL_BTN } from "./ui";
 import { kstClock } from "./format";
@@ -87,9 +90,24 @@ function batchBlockHint(g: BatchGroup): string | undefined {
     case "active": return BATCH_ACTIVE_HINT;
     case "awaiting": return BATCH_AWAITING_HINT;
     case "live": return BATCH_LIVE_HINT;
-    case "too_large": return reasonText("batch_delete_too_large");
+    // 상한 초과(2026-11-19): 고를 수는 있다(조용히 잠그지 않는다) -- 이유와 숫자를 서버 값으로(「삭제 불가 — 작업 N개가 …」).
+    case "too_large": return g.over ? blockText(g.over.reason, g.over) : reasonText("batch_delete_too_large");
+    case "deleting": return deletingHint(g.deleting ?? null);
     default: return BATCH_UNKNOWN_HINT;
   }
+}
+/** 백그라운드 배치 단위 삭제의 진행 문구(배치 칸 title·sr-only). */
+function deletingHint(d: { expected: number; deleted: number; last_error: string | null } | null): string {
+  if (d === null) return "백그라운드에서 배치 단위 삭제 중입니다";
+  return `백그라운드에서 배치 단위 삭제 중 — 작업 ${n0(d.deleted)}/${n0(d.expected)}개 지움`
+    + (d.last_error !== null ? ` · 지연: ${reasonText(d.last_error)}` : "");
+}
+/** 배치 칸의 「삭제 중 37%」/「삭제 지연」(expected 0 이면 「삭제 중」). */
+function deletingLabel(d: { expected: number; deleted: number; last_error: string | null } | null | undefined): string {
+  if (d == null) return BATCH_BLOCK_LABEL.deleting;
+  if (d.last_error !== null) return "삭제 지연";
+  if (!(d.expected > 0)) return BATCH_BLOCK_LABEL.deleting;
+  return `삭제 중 ${Math.min(100, Math.floor((d.deleted / d.expected) * 100))}%`;
 }
 // 헤더 「전체 선택」은 단일 작업만 고른다(배치 묶음은 행의 체크박스로) -- 이름이 「삭제 가능한 것 전체」면 고를 수 있는
 // 배치까지 켜지는 것처럼 읽히는데 헤더가 checked 로 보여도 배치는 남는다(2026-10-10 검증 지적). 이름(보조기기)과
@@ -97,19 +115,41 @@ function batchBlockHint(g: BatchGroup): string | undefined {
 // 2026-10-11 검증 지적).
 const ALL_LABEL = "불러온 단일 작업 중 삭제 가능한 것 전체 선택(배치 제외)";
 const ALL_TITLE = "불러온 단일 작업 중 삭제 가능한 것을 모두 선택합니다 — 배치는 행의 체크박스로 배치 단위로 고릅니다";
-// 고른 배치 수 상한을 넘었을 때 상태 줄에 붙이는 말. 짧게 둔다 -- 서버 문구(delete_batch_selection_too_large, 「한 번에
-// 배치 10개까지 삭제할 수 있습니다」)를 붙이면 넓은 선택 문구와 함께 1024px 에서 툴바가 두 줄로, 375px 에서 세 줄로 늘어
-// 방금 누른 행이 포인터 밑에서 밀렸다(2026-10-10 검증 지적 -- 2026-10-09 자리 예약이 막으려던 패턴). 잠긴 「선택 삭제」와
-// text-bad 가 나머지를 말한다.
-const OVER_BATCHES = `배치는 ${MAX_DELETE_BATCHES}개까지`;
-// 고른 배치의 작업 합이 호출당 예산(서버 MAX_DELETE_CALL_CHILDREN, 2026-11-16)을 넘었을 때 -- 같은 이유로 짧게. 서버는 넘는 배치를
-// batch_delete_call_budget 로 건너뛴다(진짜 차단).
-const OVER_CHILDREN = `작업 합계 ${MAX_DELETE_CALL_CHILDREN}개까지 — 나눠서 지우세요`;
+// 상한을 넘는 선택(2026-11-19 사용자 요청 「값을 넘어서는 요청에 대해서 삭제 불가 메시지」): 예전엔 상태 줄 끝에 짧은 꼬리(「배치는
+// 10개까지」·「작업 합계 10000개까지」)를 붙이고 「선택 삭제」를 잠갔다. 이제 툴바의 **늘 있는 상한 줄**(예약 높이)의 내용이 role=alert
+// 「삭제 불가 — …」로 바뀌고(숫자는 서버 limits), 상태 줄엔 「· 삭제 불가」만 붙고, 트리거는 잠그지 않는다(확인 창이 자세한 목록을
+// 보이고 제출을 막는다). 새 줄을 끼워 넣지 않는다 -- 체크 순간 표가 포인터 밑에서 밀리지 않게(2026-10-09·10-10 검증 지적).
+/** 작업 수 표기 -- 목록이 센 최대를 넘어 정확한 수를 모르면 「5,000개 이상」. */
+function countText(g: Pick<BatchSummary, "request_count" | "request_count_at_least">): string {
+  return g.request_count !== null ? `${n0(g.request_count)}개` : `${n0(g.request_count_at_least ?? 0)}개 이상`;
+}
 /** 고를 수 있는 배치 묶음의 안내(title) -- 체크 하나가 무엇을 지우는지(화면 밖 자식까지)를 미리 말한다. */
 function batchPickHint(g: BatchSummary): string {
   return g.exists
-    ? `배치 단위로 선택됩니다 — 이 배치의 작업 ${g.request_count}개(재실행 이력 포함)와 배치 기록이 함께 삭제됩니다`
-    : `배치 단위로 선택됩니다 — 배치 기록이 없는 묶음의 작업 ${g.request_count}개(재실행 이력 포함)가 함께 삭제됩니다`;
+    ? `배치 단위로 선택됩니다 — 이 배치의 작업 ${countText(g)}(재실행 이력 포함)와 배치 기록이 함께 삭제됩니다`
+    : `배치 단위로 선택됩니다 — 배치 기록이 없는 묶음의 작업 ${countText(g)}(재실행 이력 포함)가 함께 삭제됩니다`;
+}
+
+/** 선택의 상한 문제(툴바 상한 줄·확인 창의 미리 판정). 서버 within_call_budget 과 같은 규칙 -- 첫 배치는 늘 담는다(합계 예산은 배치가
+ *  둘 이상일 때만). limits 를 모르면(옛 서버) 기본 200·10 만 보고 합계는 판정하지 않는다(서버가 본다). */
+export interface LimitProblem { reason: string; detail: BlockDetail; label?: string }
+export function selectionProblems(n: number, batches: BatchSummary[], limits: DeleteLimits | null): LimitProblem[] {
+  const out: LimitProblem[] = [];
+  const reqLimit = limits?.requests_per_call ?? MAX_DELETE, batchLimit = limits?.batches_per_call ?? MAX_DELETE_BATCHES;
+  if (n > reqLimit) out.push({ reason: "delete_selection_too_large", detail: { limit: reqLimit, count: n } });
+  if (batches.length > batchLimit) {
+    out.push({ reason: "delete_batch_selection_too_large", detail: { limit: batchLimit, count: batches.length } });
+  }
+  for (const b of batches) {
+    if (b.over) out.push({ reason: b.over.reason, detail: b.over, label: b.label });
+  }
+  if (limits !== null && batches.length > 1) {
+    const sum = batches.reduce((a, b) => a + (b.request_count ?? b.request_count_at_least ?? 0), 0);
+    if (sum > limits.call_request_count) {
+      out.push({ reason: "batch_delete_call_budget", detail: { limit: limits.call_request_count, count: sum } });
+    }
+  }
+  return out;
 }
 
 /** 제외 목록 → [사유, request_id 목록] (사유가 처음 나온 순서). 결과 요약 아래 사유별 한 줄용. */
@@ -209,6 +249,8 @@ export function JobsList() {
   // --- 선택 삭제(관리자) ---
   const del = useDeleteRequests();
   const purge = usePurgeStatus(isAdmin);
+  // 백그라운드 배치 삭제가 끝나면(정리 현황에서 빠지면) 목록·배치·스케줄·사용량 쿼리를 무효화한다(2026-11-19).
+  useBatchDeletionsDone(purge.data);
   const [selected, setSelected] = useState<string[]>([]);
   // 유령 정리로 선택에서 빠진 수(사용자가 선택을 다시 만지면 0) -- 말없이 줄지 않게 상태 줄이 알린다(아래).
   const [dropped, setDropped] = useState(0);
@@ -244,8 +286,9 @@ export function JobsList() {
   // 유령 정리로 선택에서 빠진 배치 수(알림용 -- 단건 dropped 와 같은 규칙). 두 갈래를 따로 센다(아래 effect).
   const [droppedBatches, setDroppedBatches] = useState<DroppedBatches>(NO_DROPPED_BATCHES);
   const batchGroups = useMemo(() => groupBatches(rows), [rows]);
+  // 고를 수 있는 묶음 = ok·too_large(2026-11-19 -- 상한 초과도 고를 수 있다: 툴바 상한 줄이 「삭제 불가」로 바뀌고 확인 창이 막는다).
   const deletableBatchIds = useMemo(
-    () => [...batchGroups.values()].filter((g) => g.block === "ok").map((g) => g.batch_id), [batchGroups]);
+    () => [...batchGroups.values()].filter(isPickable).map((g) => g.batch_id), [batchGroups]);
   // 유령 배치 정리: 단건 effect 와 같은 패턴(함수형 갱신 · 삭제 진행 중·결과가 떠 있는 동안은 세지 않음). 배치가 목록
   // 에서 사라졌거나(새 제출에 밀려 불러온 범위 밖으로 나감·다른 관리자가 지움) 고를 수 없게 됐으면(재실행으로 다시 활성화
   // -- 확인 창이 보인 수와 달라진다) 선택에서 뺀다 -- 보지 않은 상태의 배치를 지우지 않는다. 알림은 두 갈래를 나눈다:
@@ -265,7 +308,7 @@ export function JobsList() {
   const selectedBatchGroups = useMemo(
     () => selectedBatches.flatMap((id) => {
       const g = batchGroups.get(id);
-      return g && g.block === "ok" ? [g] : [];
+      return isPickable(g) ? [g] : [];
     }), [batchGroups, selectedBatches]);
   const batchSel = new Set(selectedBatches);
   // 키보드 포커스를 쥔 배치 체크박스가 폴링으로 잠기면(다른 관리자가 재실행 → 배치 Running) 브라우저가 disabled 가 된
@@ -297,7 +340,7 @@ export function JobsList() {
     const fb = focusedBatch.current;
     if (fb === null) return;
     const g = batchGroups.get(fb.batch);
-    if (g !== undefined && g.block === "ok") return;
+    if (isPickable(g)) return;
     focusedBatch.current = null;
     const ae = document.activeElement;
     if (ae === null || ae === document.body || (ae instanceof HTMLElement && ae.dataset.batchId === fb.batch)) {
@@ -439,6 +482,7 @@ export function JobsList() {
 
       {isAdmin && (
         <DeleteToolbar selectedRows={selectedRows} selectedBatches={selectedBatchGroups} del={del} purge={purge.data}
+                       rowLimits={rows.find((r) => typeof r.batch_request_count_limit === "number")}
                        dropped={dropped} droppedBatches={droppedBatches} statusRef={statusRef}
                        batchLabel={(bid) => batchGroups.get(bid)?.label ?? bid.slice(0, 12)}
                        onDeleted={clearAll}
@@ -497,7 +541,7 @@ export function JobsList() {
             <tbody>
               {rows.map((r) => {
                 const group = r.batch_id != null ? batchGroups.get(r.batch_id) : undefined;
-                const pickable = group !== undefined && group.block === "ok" ? group : null;
+                const pickable = isPickable(group) ? group : null;
                 const groupOn = group !== undefined && batchSel.has(group.batch_id);
                 return (
                 <tr key={r.request_id}
@@ -515,10 +559,11 @@ export function JobsList() {
                          onChange={() => toggleRow(r.request_id)} /></td>
                   ) : pickable !== null ? (
                     <td className="px-3 py-2"><input type="checkbox" className={BOX}
-                         aria-label={`작업 ${r.request_id.slice(0, 12)} 선택 — 배치 ${pickable.label} 전체(작업 ${pickable.request_count}개)`}
+                         aria-label={`작업 ${r.request_id.slice(0, 12)} 선택 — 배치 ${pickable.label} 전체(작업 ${countText(pickable)})`}
+                         aria-describedby={pickable.block === "too_large" ? batchWhyId(r.request_id) : undefined}
                          checked={groupOn}
                          disabled={del.isPending}
-                         title={batchPickHint(pickable)}
+                         title={pickable.block === "too_large" ? batchBlockHint(pickable) : batchPickHint(pickable)}
                          data-batch-id={pickable.batch_id}
                          onFocus={() => { focusedBatch.current = { batch: pickable.batch_id, row: r.request_id }; }}
                          onBlur={(e) => {
@@ -651,10 +696,17 @@ function BatchCell({ row, group }: { row: RequestRow; group: BatchGroup | undefi
     );
   }
   const blocked = group !== undefined && group.block !== "ok" ? group : null;
-  // 사유 줄은 한 줄(truncate -- 짧은 말이라 실제로는 잘리지 않지만 두 줄로 접혀 행이 커지는 일은 구조로 막는다).
+  // 사유 줄은 한 줄(truncate -- 짧은 말이라 실제로는 잘리지 않지만 두 줄로 접혀 행이 커지는 일은 구조로 막는다). 상한 초과는
+  // text-bad(「삭제 불가·상한」), 삭제 중은 진행률(「삭제 중 37%」, 지연이면 「삭제 지연」 -- text-attn).
+  const whyText = blocked === null ? "" : blocked.block === "deleting"
+    ? deletingLabel("deleting" in blocked ? blocked.deleting : null)
+    : (BATCH_BLOCK_LABEL as Record<string, string>)[blocked.block];
+  const whyTone = blocked === null ? "" : blocked.block === "too_large" ? "text-bad"
+    : blocked.block === "deleting" && "deleting" in blocked && blocked.deleting?.last_error != null ? "text-attn"
+    : "text-ink/70";
   const why = blocked !== null ? (
-    <span id={whyId} className="block truncate text-xs text-ink/70" title={batchBlockHint(blocked)}>
-      {BATCH_BLOCK_LABEL[blocked.block]}<WhyHint hint={batchBlockHint(blocked)} />
+    <span id={whyId} className={`block truncate text-xs ${whyTone}`} title={batchBlockHint(blocked)}>
+      {whyText}<WhyHint hint={batchBlockHint(blocked)} />
     </span>
   ) : null;
   if (row.batch_exists === false) {
@@ -707,10 +759,13 @@ function RequestLink({ id }: { id: string }) {
 // 표 **밖**이다 -- td 안에 버튼·flex 를 넣으면 e2e L2 가 문다.
 /** 선택 중 문구. n = 단건 수, batches = 배치 묶음 수, children = 배치 자식 수 합(서버 수), scans = 성공 scan 수
  *  (단건 + 배치 자식). 단건만이면 기존 문구 그대로(e2e 06). */
-export function selectionText(n: number, batches: number, children: number, scans: number): string {
-  if (batches === 0) return `${n}개 선택됨${scans > 0 ? `(성공 scan ${scans}개)` : ""}`;
-  if (n === 0) return `배치 ${batches}개 선택됨(작업 ${children}개${scans > 0 ? ` · 성공 scan ${scans}개` : ""})`;
-  return `${n}개 + 배치 ${batches}개(작업 ${children}개) 선택됨${scans > 0 ? ` · 성공 scan ${scans}개` : ""}`;
+export function selectionText(n: number, batches: number, children: number, scans: number, more = false): string {
+  // more = 목록이 센 최대를 넘은 배치가 있다(정확한 합을 모름 -- 「작업 5,000개 이상」, 정확한 수는 확인 창).
+  const kids = `작업 ${n0(children)}개${more ? " 이상" : ""}`;
+  const sc = n0(scans);
+  if (batches === 0) return `${n0(n)}개 선택됨${scans > 0 ? `(성공 scan ${sc}개)` : ""}`;
+  if (n === 0) return `배치 ${batches}개 선택됨(${kids}${scans > 0 ? ` · 성공 scan ${sc}개` : ""})`;
+  return `${n0(n)}개 + 배치 ${batches}개(${kids}) 선택됨${scans > 0 ? ` · 성공 scan ${sc}개` : ""}`;
 }
 
 /** 직전 삭제 결과 한 줄. 단건만 보낸 응답이면 기존 세 문구(「N개 삭제됨」「삭제된 작업 없음 · N개 제외」「N개 삭제됨 ·
@@ -719,15 +774,25 @@ export function deleteResultText(r: DeleteRequestsResult): string {
   const d = r.deleted.length, s = r.skipped.length;
   const bd = r.deleted_batches ?? [], bs = r.skipped_batches ?? [];
   const children = bd.reduce((a, x) => a + x.request_ids.length, 0);
-  const done = [d > 0 ? `${d}개` : "", bd.length > 0 ? `배치 ${bd.length}개(작업 ${children}개)` : ""].filter(Boolean);
-  const head = done.length > 0 ? `${done.join(" · ")} 삭제됨` : "삭제된 작업 없음";
-  const tail = [s > 0 ? `${s}개 제외` : "", bs.length > 0 ? `배치 ${bs.length}개 제외` : ""].filter(Boolean);
-  return [head, ...tail].join(" · ");
+  // 백그라운드 몫(2026-11-19 -- deleting_batches): 새로 시작한 것과 이미 삭제 중이던 것을 나눠 말한다(자식 수 = 묘비가 센 수).
+  const started = (r.deleting_batches ?? []).filter((x) => !x.already);
+  const already = (r.deleting_batches ?? []).filter((x) => x.already);
+  const bg = [
+    started.length > 0
+      ? `배치 ${started.length}개(작업 ${n0(started.reduce((a, x) => a + x.request_count, 0))}개) 백그라운드 삭제 시작` : "",
+    already.length > 0 ? `배치 ${already.length}개 이미 삭제 중` : "",
+  ].filter(Boolean);
+  const done = [d > 0 ? `${n0(d)}개` : "", bd.length > 0 ? `배치 ${bd.length}개(작업 ${n0(children)}개)` : ""].filter(Boolean);
+  const head = done.length > 0 ? [`${done.join(" · ")} 삭제됨`] : bg.length > 0 ? [] : ["삭제된 작업 없음"];
+  const tail = [s > 0 ? `${n0(s)}개 제외` : "", bs.length > 0 ? `배치 ${bs.length}개 제외` : ""].filter(Boolean);
+  return [...head, ...bg, ...tail].join(" · ");
 }
 
-function DeleteToolbar({ selectedRows, selectedBatches, del, purge, dropped, droppedBatches, statusRef, batchLabel,
-                         onDeleted, onClear }: {
+function DeleteToolbar({ selectedRows, selectedBatches, del, purge, rowLimits, dropped, droppedBatches, statusRef,
+                         batchLabel, onDeleted, onClear }: {
   selectedRows: RequestRow[];
+  /** 옛 서버(정리 현황에 limits 없음)의 상한 줄 재료 -- 배치 상한을 실은 목록 행 하나(없으면 undefined). */
+  rowLimits?: RequestRow;
   /** 고른 배치 묶음(전부 고를 수 있는 것 -- 유령 정리가 보장). */
   selectedBatches: BatchSummary[];
   del: ReturnType<typeof useDeleteRequests>;
@@ -745,28 +810,28 @@ function DeleteToolbar({ selectedRows, selectedBatches, del, purge, dropped, dro
   const n = selectedRows.length;
   const nb = selectedBatches.length;
   const none = n === 0 && nb === 0;
-  const over = n > MAX_DELETE;
-  const overBatches = nb > MAX_DELETE_BATCHES;
-  const children = selectedBatches.reduce((a, b) => a + b.request_count, 0);
-  const overChildren = children > MAX_DELETE_CALL_CHILDREN;
-  const scans = selectedRows.filter(isSucceededScan).length + selectedBatches.reduce((a, b) => a + b.scans, 0);
+  // 상한(2026-11-19 -- 서버 값으로만): 정리 현황의 limits, 없으면(옛 서버) 목록 행의 배치 상한 + 기본 200·10.
+  const limits = parseLimits(purge?.limits);
+  const children = selectedBatches.reduce((a, b) => a + (b.request_count ?? b.request_count_at_least ?? 0), 0);
+  const more = selectedBatches.some((b) => b.request_count === null);
+  const problems = selectionProblems(n, selectedBatches, limits);
+  const blocked = problems.length > 0;
+  const scans = selectedRows.filter(isSucceededScan).length + selectedBatches.reduce((a, b) => a + (b.scans ?? 0), 0);
   const r = del.data;
   const droppedNote = droppedText(dropped, droppedBatches);
   // 한 줄은 넷 중 하나다(선택 > 직전 결과 > 선택에서 빠짐 알림 > 안내). 새로 고르기 시작하면 disarm() 이 결과를 지우므로
   // 실제로는 배타적이다. 성공 scan 수는 확인 창 경고의 예고다(사용량 분석 지점이 사라진다 -- 0 이면 소음이라 생략).
   // 배치는 서버가 센 자식 수(재실행 이력 포함)를 말한다 -- 체크 하나에 화면 밖 작업까지 걸린다는 것이 여기서 보인다.
   const barText = !none
-    ? selectionText(n, nb, children, scans)
+    ? selectionText(n, nb, children, scans, more)
       + (droppedNote ? ` · ${droppedNote}` : "")
-      + (over ? ` — ${reasonText("delete_selection_too_large")}` : "")
-      + (overBatches ? ` — ${OVER_BATCHES}` : "")
-      + (overChildren ? ` — ${OVER_CHILDREN}` : "")
+      + (blocked ? " · 삭제 불가" : "")
     : r ? deleteResultText(r)
     : droppedNote ? (dropped > 0 ? `선택한 작업 중 ${droppedNote}` : droppedNote)
     : IDLE_HINT;
   // 안내도 읽혀야 하는 글자다 -- text-muted(#888, 흰 3.54:1)는 장식 전용이라 ink/70(4.94:1, AA)(2026-10-09 검증 지적).
   const skippedBatches = r?.skipped_batches ?? [];
-  const barTone = !none ? (over || overBatches || overChildren ? "text-bad" : droppedNote ? "text-attn" : "")
+  const barTone = !none ? (blocked ? "text-bad" : droppedNote ? "text-attn" : "")
     : r ? (r.skipped.length + skippedBatches.length > 0 ? "text-bad" : "text-ok")
     : droppedNote ? "text-attn" : "text-ink/70";
   // 정리 상태(결과 파일·파드 -- 컨트롤러가 비동기로). 바 안에는 **짧은 건수만**(「결과 파일·파드 정리 중 N건 · 지연
@@ -776,6 +841,18 @@ function DeleteToolbar({ selectedRows, selectedBatches, del, purge, dropped, dro
   // 남는다(아래 정리 자리 주석).
   const stalledItem = purge?.items.find((i) => i.last_error !== null);
   const pendingNow = purge !== undefined && purge.pending > 0;
+  // 진행 중인 백그라운드 배치 삭제(2026-11-19 -- 정리 현황의 batch_deletions). 지연(last_error)은 배치 칸·배치 상세가 사유를 말한다.
+  const deletingNow = purge?.batch_deletions?.length ?? 0;
+  // 늘 있는 상한 줄(예약 높이 -- 375·414 두 줄, 768 이상 한 줄): 평소엔 상한, 선택이 상한을 넘으면 같은 자리가 role=alert 「삭제 불가 —
+  // …」로 바뀐다(문제 1건이면 그 문구, 여러 건이면 요약 -- 자세한 목록은 확인 창). 불러오기 전에는 자리 문구(높이는 같다).
+  const limitsText = limits !== null ? limitsLine(limits)
+    : purge === undefined ? "상한을 불러오는 중…"
+    : fallbackLimitsLine(MAX_DELETE, MAX_DELETE_BATCHES, rowLimits?.batch_request_count_limit,
+                         rowLimits?.batch_item_count_limit);
+  // 배치 이름은 붙이지 않는다(긴 이름이 줄 수를 늘린다 -- 어느 배치인지는 배치 칸의 「삭제 불가·상한」과 확인 창이 말한다).
+  const alertText = !blocked ? null : problems.length === 1
+    ? blockText(problems[0].reason, problems[0].detail)
+    : `삭제 불가 — 상한을 넘는 선택 ${problems.length}건 · 「선택 삭제」에서 자세히 보세요`;
   return (
     <>
       <div role="toolbar" aria-label="작업 일괄 처리"
@@ -795,18 +872,29 @@ function DeleteToolbar({ selectedRows, selectedBatches, del, purge, dropped, dro
             선택 문구와 정리 문구가 한 행을 나누면 두 행으로 접혀 28px 튀었다 -- 그래서 **모든 폭에서** 자기 행(맨 아래 --
             order-last, 비어 있어도 한 줄 높이)이다. */}
         <span className="order-last min-h-[1rem] basis-full break-keep text-xs text-ink/70">
-          {pendingNow && `결과 파일·파드 정리 중 ${purge.pending}건`}
-          {pendingNow && purge.stalled > 0 && <span className="text-attn">{` · 지연 ${purge.stalled}건`}</span>}
+          {deletingNow > 0 && `배치 삭제 중 ${n0(deletingNow)}건${pendingNow ? " · " : ""}`}
+          {pendingNow && `결과 파일·파드 정리 중 ${n0(purge.pending)}건`}
+          {pendingNow && purge.stalled > 0 && <span className="text-attn">{` · 지연 ${n0(purge.stalled)}건`}</span>}
         </span>
         {/* 두 버튼은 한 덩어리(줄바꿈 없음) -- 좁은 폭에서도 「선택 삭제」와 「선택 해제」가 두 행으로 갈라지지 않는다. */}
         <div className="flex shrink-0 items-center gap-2">
+          {/* 상한을 넘어도 트리거는 잠그지 않는다(2026-11-19) -- 창이 자세한 이유를 보이고 제출을 막는다. */}
           <DeleteRequestsDialog rows={selectedRows} batches={selectedBatches}
-                                disabled={none || over || overBatches || overChildren || del.isPending} del={del}
+                                disabled={none || del.isPending} del={del} limits={limits}
+                                limitsFallback={limitsText}
                                 onDeleted={onDeleted} focusAfterDelete={() => statusRef.current?.focus()} />
           <Button variant="ghost" disabled={none || del.isPending} onClick={onClear}>선택 해제</Button>
         </div>
         {/* 선택 규칙(늘 있다 -- 위 IDLE_HINT 주석). 자기 행이라 상태 문구가 바뀌어도 높이가 그대로다. */}
         <p className="basis-full break-keep text-xs text-ink/70">{RULE_HINT}</p>
+        {/* 상한 줄(늘 있다 -- 2026-11-19 사용자 요청 「상한 값도 삭제 시 보여지고」). 규칙 줄 **뒤**(e2e 가 규칙 줄을 툴바의 첫 p 로
+            찾는다). role=alert 는 안쪽 span 을 넣을 때 읽힌다(자리 p 는 늘 있다). */}
+        {/* 높이: lg 미만은 두 줄(768 의 줄 폭은 ~460px 라 상한 문구가 두 줄이다), lg 이상은 한 줄을 예약하고, 어떤 문구도 두 줄을
+            넘지 않게 접는다(line-clamp-2 -- 체크 순간 툴바 높이가 바뀌지 않는다, e2e E7; 전문은 title·화면 낭독기·확인 창). */}
+        <p className="line-clamp-2 min-h-[2rem] basis-full break-keep text-xs text-ink/70 lg:min-h-[1rem]"
+           data-testid="delete-limits" title={alertText ?? limitsText}>
+          {alertText !== null ? <span role="alert" className="text-bad">{alertText}</span> : limitsText}
+        </p>
       </div>
       {purge !== undefined && purge.stalled > 0 && stalledItem && (
         <p className="break-keep text-sm text-attn">{`정리 지연: ${reasonText(stalledItem.last_error)}`}</p>
@@ -835,7 +923,8 @@ function DeleteToolbar({ selectedRows, selectedBatches, del, purge, dropped, dro
           ))}
           {skippedBatches.map((s) => (
             <p key={`batch-${s.batch_id}`} className="text-ink/70">
-              {`배치 ${batchLabel(s.batch_id)}: ${reasonText(s.reason)}`}
+              {/* 서버 거절도 미리 판정과 같은 문구(blockText -- 상한 사유면 서버가 실은 limit·count 를 끼운다, 2026-11-19). */}
+              {`배치 ${batchLabel(s.batch_id)}: ${blockText(s.reason, s, { server: true })}`}
               {typeof s.request_id === "string" && <>{" (작업 "}<RequestLink id={s.request_id} />{")"}</>}
             </p>
           ))}

@@ -482,6 +482,9 @@ def _apply_migrations(db: Database) -> None:
         #   kind          NULL = 요청 삭제(원래 의미 -- 기배포 행도 NULL), 'expiry' = 결과 파일 자동 만료(2026-10-26,
         #                 artifact_expiry -- 원 요청·잡 행이 **살아 있다**, 파일만 지운다). 그 밖의 값 = 변조(루프가 멈춘다).
         #                 만료 중인 요청을 삭제하면 그 행이 요청 삭제 행으로 바뀐다(_enqueue 가 kind 를 NULL 로).
+        #   purge_group   정리 레인(2026-11-19): 배치 청크 삭제(batch-delete 루프)가 넣은 행 = 그 batch_id, 나머지 NULL. due() 가
+        #                 레인을 돌아가며 집는다(큰 배치 삭제가 다른 삭제의 정리를 굶기지 않게). 배치보다 오래 사는 묶음 키라
+        #                 이름이 batch_id 가 아니다(배치 삭제 그물이 「배치와 함께 지워라」를 요구하지 않게).
         """CREATE TABLE IF NOT EXISTS request_purges (
             request_id TEXT PRIMARY KEY,
             jobs TEXT NOT NULL,
@@ -494,7 +497,38 @@ def _apply_migrations(db: Database) -> None:
             requested_by TEXT NOT NULL,
             requested_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
-            kind TEXT)""",
+            kind TEXT,
+            purge_group TEXT)""",
+        # 배치 단위 삭제의 묘비·진행 장부(2026-11-19 -- repositories/request_purges.py 「백그라운드 경로」). 행 = 컨트롤러
+        # batch-delete 루프가 청크로 지우는 중인 배치(배치 행이 없는 dangling 묶음도 이 행이 묘비다). 배치 행이 있으면 그 상태도
+        # 'Deleting' 이다(이중 표지). 마무리 트랜잭션이 배치 행·항목과 함께 지운다. batch_id 컬럼이라 BATCH_DELETE_TABLES 에 있다.
+        #   requested_by        시작한 세션 관리자(audit_actor) -- 청크·마무리 감사와 정리 아웃박스의 actor
+        #   prior_status        묘비 전 배치 상태(Completed|Cancelled), dangling 은 NULL
+        #   max_commit_order    묘비 순간 자식의 최대 commit_order(자식 0 이면 NULL) -- 이보다 큰 자식은 지우지 않는다
+        #   scan_storage        미등록 스토리지 정리에서 왔으면 그 이름(청크마다 순수성 재판정)
+        #   scan_after          청크 고르기 커서(commit_order, NULL = 처음부터)
+        #   last_error          막힘·실패 사유 코드(NULL = 정상 진행) -- 「삭제 지연」으로 보인다
+        #   blocked_request_id  막힘의 문제 자식(진단 포인터 -- 요청 id 를 담지만 이름이 request_id 가 아니라 요청 삭제 그물
+        #                       밖이다: 그 자식이 지워지면 가리킬 대상이 사라지는 것이 정상이고, 진행하면 NULL 로 지운다)
+        # 인덱스 없음(PK 와 소수 행 전체 읽기). 새 테이블이라 _ensure_columns 불필요.
+        """CREATE TABLE IF NOT EXISTS batch_deletions (
+            batch_id TEXT PRIMARY KEY,
+            requested_by TEXT NOT NULL,
+            requested_at TEXT NOT NULL,
+            prior_status TEXT,
+            dangling INTEGER NOT NULL,
+            expected_request_count INTEGER NOT NULL,
+            max_commit_order INTEGER,
+            item_count INTEGER NOT NULL,
+            scan_storage TEXT,
+            deleted_request_count INTEGER NOT NULL DEFAULT 0,
+            chunks INTEGER NOT NULL DEFAULT 0,
+            scan_after INTEGER,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT,
+            blocked_request_id TEXT,
+            next_attempt_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL)""",
         # 노드 배치 제외(2026-10-02, repositories/node_exclusions.py): 관리자가 고른 노드를 DMS 잡 배치 후보에서 뺀다.
         # 행 = 제외 중. 빈 테이블 = 제외 없음(업그레이드 무해 -- sync_pairs 의 "빈 테이블 = 전부 거부"와 반대 방향).
         # agent_nodes 에 플래그를 두지 않는 이유: 그 행은 보고마다 지우고 다시 넣는다(agents.ingest). 새 테이블이라
@@ -945,6 +979,8 @@ def _ensure_columns(db):
         # 2026-10-26 결과 파일 자동 만료 -- 이중 경로 규약(기배포 DB 는 CREATE 를 다시 안 탄다).
         ("data_jobs", "artifacts_expired_at", "TEXT"),
         ("request_purges", "kind", "TEXT"),
+        # 2026-11-19 정리 아웃박스 레인(청크 삭제가 넣은 행 = 그 batch_id, 나머지 NULL -- due() 공평성) -- 이중 경로 규약.
+        ("request_purges", "purge_group", "TEXT"),
         # 2026-09-17 미리보기 요약 사본 -- 같은 이유로 양쪽 선언.
         ("data_jobs", "preview_summary", "TEXT"),
         ("requests", "batch_id", "TEXT"),

@@ -1,10 +1,10 @@
 import { expect, test } from "vitest";
-import { BATCH_BLOCK_LABEL, batchBlock, groupBatches, MAX_DELETE_CALL_CHILDREN, splitBatchName } from "./batchGroups";
+import { BATCH_BLOCK_LABEL, batchBlock, groupBatches, pickable, splitBatchName } from "./batchGroups";
 import type { RequestRow } from "../../lib/types";
 
 const BID = "a".repeat(32);
-// 서버가 행마다 싣는 배치 단위 삭제 상한(2026-11-16 -- 포탈 상수 없음).
-const MAX_BATCH_CHILDREN = 5000;
+// 서버가 행마다 싣는 배치 단위 삭제 상한(2026-11-16 -- 포탈 상수 없음; 2026-11-19 부터 설정 기본 50000).
+const MAX_BATCH_CHILDREN = 50000;
 const MAX_BATCH_ITEMS = 10000;
 function r(id: string, over: Partial<RequestRow> = {}): RequestRow {
   return {
@@ -58,14 +58,45 @@ test("groupBatches: batch_id 별 첫 행 값 · 단건 제외 · 이름 없으�
   expect("request_count" in odd).toBe(false);
 });
 
+test("2026-11-19: too_large = count > limit 하나 · 목록이 센 최대(5000)를 넘은 capped 는 상한 이하면 고를 수 있다(수 모름)", () => {
+  const capped = { batch_request_count: 5001, batch_request_count_capped: true,
+                   batch_live_request_count: null, batch_succeeded_scan_count: null };
+  expect(batchBlock(r("1", capped))).toBe("ok");
+  const g = groupBatches([r("1", capped)]).get(BID)!;
+  expect(pickable(g)).toBe(true);
+  if (pickable(g)) {
+    expect([g.request_count, g.request_count_at_least, g.live, g.scans, g.over]).toEqual([null, 5001, null, null, null]);
+  }
+  // 옛 서버(상한 5000 · capped 5001)는 count > limit 라 too_large -- 고를 수 있고 이유·숫자를 싣는다.
+  const old = groupBatches([r("1", { ...capped, batch_request_count_limit: 5000 })]).get(BID)!;
+  expect(old.block).toBe("too_large");
+  if (pickable(old)) expect(old.over).toEqual({ reason: "batch_delete_too_large", limit: 5000, count: null, count_at_least: 5001 });
+  const exact = groupBatches([r("1", { batch_request_count: 60000 })]).get(BID)!;
+  if (pickable(exact)) expect(exact.over).toEqual({ reason: "batch_delete_too_large", limit: 50000, count: 60000, count_at_least: null });
+  const items = groupBatches([r("1", { batch_item_count: 10001 })]).get(BID)!;
+  if (pickable(items)) expect(items.over).toEqual({ reason: "batch_delete_too_many_items", limit: 10000, count: 10001, count_at_least: null });
+});
+
+test("2026-11-19: 백그라운드 삭제 중(batch_deleting 또는 Deleting)은 deleting -- 가장 먼저, 고를 수 없다", () => {
+  const d = { expected: 100, deleted: 37, requested_at: "t", requested_by: "a", last_error: null, blocked_request_id: null };
+  expect(batchBlock(r("1", { batch_deleting: d }))).toBe("deleting");
+  expect(batchBlock(r("1", { batch_status: "Deleting" }))).toBe("deleting");
+  expect(batchBlock(r("1", { batch_deleting: d, batch_exists: false }))).toBe("deleting");
+  const g = groupBatches([r("1", { batch_deleting: d, batch_status: "Deleting" })]).get(BID)!;
+  expect(g.block).toBe("deleting");
+  expect(pickable(g)).toBe(false);
+  expect("deleting" in g && g.deleting).toEqual(d);
+  expect(BATCH_BLOCK_LABEL.deleting).toBe("삭제 중");
+});
+
 test("groupBatches: 고를 수 있는 묶음은 서버 요약의 스케줄을 싣는다(삭제 확인 창 안내) -- 키 없는 구형 응답은 null(지울 것 없음)", () => {
   const sched = { schedule_id: "s1", kind: "daily", spec: { hour: 2, minute: 0 }, enabled: true,
                   next_run_at: null, last_outcome: null, last_reason_code: null, paused_reason_code: null };
   const other = "b".repeat(32);
   const g = groupBatches([r("1", { batch_schedule: sched }), r("2", { batch_id: other })]);
   const a = g.get(BID)!, b = g.get(other)!;
-  expect(a.block === "ok" && a.schedule).toEqual(sched);
-  expect(b.block === "ok" && b.schedule).toBeNull();
+  expect(pickable(a) && a.schedule).toEqual(sched);
+  expect(pickable(b) && b.schedule).toBeNull();
 });
 
 test("groupBatches: 불러온 행이 하나라도 끝나지 않았으면 서버 요약이 0 이어도 live(행 상태로 한 번 더) — active·unknown 은 그대로", () => {
@@ -88,9 +119,10 @@ test("groupBatches: 불러온 행이 하나라도 끝나지 않았으면 서버 
   expect(g.get("f".repeat(32))!.block).toBe("ok");
 });
 
-test("batchBlock: 서버가 상한에서 세기를 멈춘 배치(capped)는 too_large -- 끝나지 않은 자식·성공 scan 수가 null(모름)이어도", () => {
+test("batchBlock: 서버가 상한에서 세기를 멈춘 배치(capped, 수 > 상한)는 too_large -- 끝나지 않은 자식·성공 scan 수가 null(모름)이어도", () => {
   // 2026-10-11 검증 지적: 목록 요약이 폴링마다 큰 배치의 자식 전부를 셌다 -- 서버는 상한 + 1 에서 멈추고 나머지 수를 null 로.
-  const capped = { batch_request_count: MAX_BATCH_CHILDREN + 1, batch_request_count_capped: true,
+  // (2026-11-19: 상한이 5000 이하로 설정된 사이트 -- 목록의 세기 상한 = 삭제 상한이라 capped 가 곧 상한 초과다.)
+  const capped = { batch_request_count: 5001, batch_request_count_capped: true, batch_request_count_limit: 5000,
                    batch_live_request_count: null, batch_succeeded_scan_count: null };
   expect(batchBlock(r("1", capped))).toBe("too_large");
   expect(batchBlock(r("1", { ...capped, batch_status: "Running" }))).toBe("active");     // 진행 중이 더 앞선 사유
@@ -98,7 +130,8 @@ test("batchBlock: 서버가 상한에서 세기를 멈춘 배치(capped)는 too_
   expect(batchBlock(r("1", { batch_live_request_count: null }))).toBe("unknown");
   const g = groupBatches([r("1", capped)]).get(BID)!;
   expect(g.block).toBe("too_large");
-  expect("request_count" in g).toBe(false);                                    // 고를 수 없는 묶음엔 수를 싣지 않는다
+  // 2026-11-19: 상한 초과는 조용히 잠그지 않는다 -- 고를 수 있고(툴바가 「삭제 불가」), 정확한 수를 모르면 null(하한은 at_least).
+  expect(pickable(g) && [g.request_count, g.request_count_at_least]).toEqual([null, 5001]);
 });
 
 test("batchBlock: 항목이 상한(10000)을 넘는 배치도 too_large -- 항목 수를 모르면(null·부재) 막지 않는다", () => {
@@ -114,7 +147,7 @@ test("batchBlock: 항목이 상한(10000)을 넘는 배치도 too_large -- 항�
 
 test("BATCH_BLOCK_LABEL: live 는 그 배치의 다른 작업 얘기다 -- 「작업 진행 중」(같은 줄 Succeeded 와 모순)이 아니다", () => {
   expect(BATCH_BLOCK_LABEL.live).toBe("미완료 작업 있음");
-  expect(BATCH_BLOCK_LABEL.too_large).toBe("삭제 상한 초과");               // 자식·항목 어느 상한이든
+  expect(BATCH_BLOCK_LABEL.too_large).toBe("삭제 불가·상한");               // 자식·항목 어느 상한이든(2026-11-19)
   expect(Object.values(BATCH_BLOCK_LABEL)).not.toContain("작업 진행 중");
   // 확인 대기는 배치 화면(batchStatusLabel)의 「확인 대기」와 같은 말.
   expect(BATCH_BLOCK_LABEL.awaiting).toBe("배치 확인 대기");
@@ -150,14 +183,13 @@ test("splitBatchName: 짧은 이름은 그대로, 긴 이름은 끝(가르는 �
 });
 
 test("batchBlock: 상한은 행에 실린 서버 값으로 판정한다 -- 없으면(옛 서버·변조) 정보 없음(fail-closed)", () => {
-  // 2026-11-16(상한 2000 → 5000): 포탈 상수 MAX_BATCH_CHILDREN·MAX_BATCH_ITEMS 를 지웠다.
-  expect(batchBlock(r("1", { batch_request_count: 2001 }))).toBe("ok");
-  expect(batchBlock(r("1", { batch_request_count: 5001 }))).toBe("too_large");
+  // 2026-11-16(상한 2000 → 5000): 포탈 상수 MAX_BATCH_CHILDREN·MAX_BATCH_ITEMS 를 지웠다. 2026-11-19: 기본 50000(설정).
+  expect(batchBlock(r("1", { batch_request_count: 5001 }))).toBe("ok");
+  expect(batchBlock(r("1", { batch_request_count: 50001 }))).toBe("too_large");
   expect(batchBlock(r("1", { batch_request_count: 3, batch_request_count_limit: 2 }))).toBe("too_large");
   expect(batchBlock(r("1", { batch_item_count: 3, batch_item_count_limit: 2 }))).toBe("too_large");
   expect(batchBlock(r("1", { batch_request_count_limit: undefined }))).toBe("unknown");
   expect(batchBlock(r("1", { batch_item_count_limit: undefined }))).toBe("unknown");
   // 진행 중인 배치는 상한을 몰라도 진행 중이라고 말한다(앞선 사유)
   expect(batchBlock(r("1", { batch_request_count_limit: undefined, batch_status: "Running" }))).toBe("active");
-  expect(MAX_DELETE_CALL_CHILDREN).toBe(10000);
 });

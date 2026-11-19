@@ -16,6 +16,8 @@ def test_build_loops_names_and_intervals(db, settings):
         # 2026-11-16 배치 스케줄러: 오케스트레이터 바로 앞, 같은 간격(새 설정 키 없음).
         ("batch-scheduler", settings.batch_orchestrator_interval_seconds),
         ("batch-orchestrator", settings.batch_orchestrator_interval_seconds),
+        # 2026-11-19 배치 단위 백그라운드 삭제: 조건 없이(사람이 시작한 삭제 -- 반드시 끝나야 한다), 5초(설정 키 없음).
+        ("batch-delete", 5),
         ("pod-gc", settings.pod_gc_interval_seconds),
         ("artifact-base-check", settings.reconcile_interval_seconds),
         ("k8s-inventory", settings.k8s_inventory_interval_seconds)]
