@@ -271,7 +271,7 @@ class DeletePreviewBody(BaseModel):
 @router.post("/api/admin/requests:delete-preview")
 def delete_preview(body: DeletePreviewBody, request: Request, identity: Identity = Depends(require_admin)):
     """삭제 확인 창의 미리보기(2026-11-19 -- 읽기 전용, 토큰 조회 가능): 상한(limits)과 배치마다 정확한 수(≤ cap + 1, 넘으면
-    10·cap 까지 세어 count)·최대 commit_order(삭제 CAS 의 둘째 열쇠)·항목 수·서버 판정(verdict). 작업 목록 3초 폴링은
+    상한을 넘으면 하한 count_at_least = cap + 1 — 다시 세지 않는다)·최대 commit_order(삭제 CAS 의 둘째 열쇠)·항목 수·서버 판정(verdict). 작업 목록 3초 폴링은
     min(5000, cap) 에서 세기를 멈추므로(폴링 비용) 5000 이 넘는 배치의 정확한 수와 「삭제 불가」 사유는 여기서만 안다.
     verdict: deleting(이미 백그라운드로 지우는 중) · gone(배치·자식·항목 없음) · blocked(A단계 사유 -- reason·request_id·상한이면
     limit·count·count_at_least) · sync(즉시 -- 수 ≤ 동기 문턱이고 이 선택의 동기 합 예산 안, 선택 순서대로) · async(백그라운드).
@@ -308,8 +308,7 @@ def delete_preview(body: DeletePreviewBody, request: Request, identity: Identity
             out.append(row)
             continue
         chk = repos.request_purges.batch_delete_check(
-            bid, cap=cap, quiet_seconds=settings.request_delete_quiet_seconds, max_items=MAX_BATCH_DELETE_ITEMS,
-            exact_over=True)
+            bid, cap=cap, quiet_seconds=settings.request_delete_quiet_seconds, max_items=MAX_BATCH_DELETE_ITEMS)
         row.update({k: chk[k] for k in ("exists", "name", "status", "operation", "request_count",
                                         "request_count_capped", "max_commit_order", "item_count",
                                         "item_count_capped", "reason", "request_id")})

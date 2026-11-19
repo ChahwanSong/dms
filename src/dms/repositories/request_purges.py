@@ -788,7 +788,7 @@ class RequestPurgesRepository:
 
     def batch_delete_check(self, batch_id, *, cap, quiet_seconds, max_items=MAX_BATCH_DELETE_ITEMS,
                            expected_request_count=None, expected_max_commit_order=None, now=None,
-                           scan_storage=None, exact_over=False) -> dict:
+                           scan_storage=None) -> dict:
         """A단계 판정(2026-11-19) -- **트랜잭션 없이**, 문장마다 RLock 을 따로 잡는다(5만 자식 배치에서 문장당 로컬 PG16 ≤ ~0.16초 --
         잡 게이트·조용한 창이 가장 비싸다, tests/perf_cap50k.py api_a·preview). 백그라운드 경로의 사전 판정과 확인 창 미리보기(POST /api/admin/requests:delete-preview)가 같은 함수를 쓴다.
         판정 순서는 동기 delete_batch 의 사유 순서와 같다(첫 해당이 사유 -- 패리티 테스트):
@@ -799,7 +799,8 @@ class RequestPurgesRepository:
         창 질의는 상한 판정(n ≤ cap) 뒤에만 돈다 -- 그래서 창(cap + 1)이 자식 전부를 덮는다. 문제 자식은 request_id 가 가장
         작은 것(동기 경로가 request_id 순으로 보는 것과 같은 자식).
 
-        exact_over(미리보기만): 상한을 넘으면 10·cap + 1 까지 한 번 더 세어 정확한 count 를 싣는다(거부 경로라 드물다).
+        상한을 넘으면 정확한 수를 다시 세지 않고 하한(count_at_least = cap + 1)만 싣는다 -- 미리보기도 같다(2026-11-19 커밋 보안 리뷰:
+        미리보기가 10·cap + 1 까지 다시 세면 자식이 아주 많은 배치에서 한 문장이 RLock 을 수 초 쥘 수 있었다. 포탈은 「N개 이상」으로 보인다).
         반환 {"reason": 코드|None, "request_id", "limit", "count", "count_at_least", "exists", "status", "operation", "name",
         "request_count", "request_count_capped", "max_commit_order", "item_count", "item_count_capped"} -- 판정이 멈춘 자리까지
         채운 값이다(미리보기가 수·이름을 보인다)."""
@@ -837,11 +838,6 @@ class RequestPurgesRepository:
         if batch is None and n == 0 and ic == 0:
             return stop("batch_not_found")
         if n > cap:
-            if exact_over:
-                m, _ = self._head(batch_id, 10 * int(cap) + 1)
-                if m <= 10 * cap:
-                    return stop("batch_delete_too_large", **_limit_fields(cap, count=m))
-                return stop("batch_delete_too_large", **_limit_fields(cap, count_at_least=10 * int(cap) + 1))
             return stop("batch_delete_too_large", **_limit_fields(cap, count_at_least=int(cap) + 1))
         if ic > max_items:
             if out["item_count_capped"]:

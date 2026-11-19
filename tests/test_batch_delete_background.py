@@ -149,9 +149,9 @@ def test_boundary_49999_50000_50001_at_the_default_cap(repos, db):
     assert repos.batches.get(b)["status"] == "Completed" and _kids(db, b) == 50001
     assert _count(db, "SELECT COUNT(*) AS n FROM audit_log") == audit_before
     assert db.query_one("SELECT 1 AS x FROM batch_deletions WHERE batch_id = :b", {"b": b}) is None
-    # 미리보기는 상한을 넘은 배치도 10·cap 까지 정확히 센다.
-    chk = repos.request_purges.batch_delete_check(b, cap=50000, quiet_seconds=60, exact_over=True)
-    assert (chk["reason"], chk["count"], chk["limit"]) == ("batch_delete_too_large", 50001, 50000)
+    # 미리보기(같은 판정 함수)도 상한을 넘으면 다시 세지 않고 하한만 싣는다(2026-11-19 커밋 보안 리뷰 — 한 문장의 락 보유를 cap + 1 창으로 묶는다).
+    chk = repos.request_purges.batch_delete_check(b, cap=50000, quiet_seconds=60)
+    assert (chk["reason"], chk["count"], chk["count_at_least"], chk["limit"]) == ("batch_delete_too_large", None, 50001, 50000)
 
 
 def test_lower_cap_setting_and_item_cap(repos, db):
@@ -653,8 +653,9 @@ def test_preview_shape_verdicts_and_limits(client, db):
     v = {row["batch_id"]: row for row in body["batches"]}
     assert v[small]["verdict"] == "sync" and v[small]["request_count"] == 2 and v[small]["max_commit_order"] is not None
     assert v[big]["verdict"] == "async"
-    assert (v[over]["verdict"], v[over]["reason"], v[over]["limit"], v[over]["count"]) == \
-        ("blocked", "batch_delete_too_large", 10, 12)
+    # 상한을 넘으면 정확한 수(12)를 다시 세지 않고 하한 cap + 1 만 싣는다(2026-11-19 커밋 보안 리뷰 — 락 보유를 cap + 1 창으로 묶는다).
+    assert (v[over]["verdict"], v[over]["reason"], v[over]["limit"], v[over]["count"], v[over]["count_at_least"]) == \
+        ("blocked", "batch_delete_too_large", 10, None, 11)
     assert v[live]["verdict"] == "blocked" and v[live]["reason"] == "request_not_deletable"
     assert v[deleting]["verdict"] == "deleting" and v[deleting]["deleting"]["expected_request_count"] == 1
     assert v["f" * 32]["verdict"] == "gone" and v["bad"]["verdict"] == "gone"
