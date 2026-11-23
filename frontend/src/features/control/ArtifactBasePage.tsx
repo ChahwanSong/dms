@@ -3,68 +3,24 @@ import { Card } from "../../components/ui/Card";
 import { Button } from "../../components/ui/Button";
 import { Dialog } from "../../components/ui/Dialog";
 import { Table } from "../../components/ui/Table";
-import { StatusPill } from "../../components/ui/StatusPill";
 import { WarnTooltip } from "../../components/ui/WarnTooltip";
-import { ApiError, reasonText } from "../../lib/api";
-import type { ArtifactBaseInfo, ArtifactBaseNodeCheck } from "../../lib/types";
-import { relTime } from "./ControlStatePage";
+import { ApiError } from "../../lib/api";
 import { kstStamp } from "../../lib/datetime";
+import { ArtifactBaseChecks } from "./ArtifactBaseChecks";
 import { useArtifactBase, useArtifactBaseHistory, useSetArtifactBase,
          useValidateArtifactBase } from "./useArtifactBase";
 import type { ArtifactBaseHistoryEntry } from "./useArtifactBase";
 
 const field = "mt-1 w-full rounded-lg border border-black/10 px-3 py-2";
 
-/** 3홉 요약 배지: 실패가 하나라도 있으면 "문제 N건" -- 대기(모름)와 뭉개지
-    않는다(설계 §4). 실패 없이 대기만 있으면 "확인 대기 N건", 다 통과면
-    "모두 정상". */
-export function hopSummary(checks: ArtifactBaseInfo["checks"]):
-    { label: string; variant: "ok" | "bad" | "busy" } {
-  let bad = 0, pending = 0;
-  if (!checks.api.ok) bad += 1;
-  if (checks.controller.pending) pending += 1;
-  else if (!checks.controller.ok) bad += 1;
-  for (const n of checks.nodes) {
-    if (n.pending) pending += 1;
-    else if (!n.exists || !n.writable) bad += 1;
-  }
-  if (bad > 0) return { label: `문제 ${bad}건`, variant: "bad" };
-  if (pending > 0) return { label: `확인 대기 ${pending}건`, variant: "busy" };
-  return { label: "모두 정상", variant: "ok" };
-}
+// 3홉 요약 배지는 검증 카드(ArtifactBaseChecks)로 옮겼다(2026-11-23) -- 기존 import 경로 호환을 위해 다시 내보낸다.
+export { hopSummary } from "./ArtifactBaseChecks";
 
 /** 이력 한 행의 "무엇→무엇". before 의 uri 가 null 이면 당시엔 env 기본이
     유효했다 -- 값을 지어내지 않고 그 사실을 밝힌다. */
 export function histText(e: ArtifactBaseHistoryEntry): string {
   const b = e.before?.artifact_base_uri ?? "(env 기본)";
   return `${b} → ${e.after?.artifact_base_uri ?? "—"}`;
-}
-
-function Hop({ ok, pending, reason }: { ok: boolean | null; pending: boolean; reason: string | null }) {
-  // null(모름)과 실패를 뭉개지 않는다(설계 §4) -- "확인 대기 중"은 실패가 아니다.
-  if (pending) return <span className="text-muted">확인 대기 중</span>;
-  return (
-    <span>
-      {ok ? <span className="text-ok">정상</span> : <span className="text-bad">실패</span>}
-      {reason && <span className="ml-2 text-muted">{reasonText(reason)}</span>}
-    </span>
-  );
-}
-
-function NodeRow({ n, now }: { n: ArtifactBaseNodeCheck; now: number }) {
-  return (
-    <tr>
-      <td className="py-1 pr-6">{n.node_name}</td>
-      <td className="py-1 pr-6">{n.pending ? "확인 대기 중" : n.exists ? "있음" : "없음"}</td>
-      <td className="py-1 pr-6">{n.pending ? "확인 대기 중" : n.writable ? "가능" : "불가"}</td>
-      {/* 보고 시각이 있어야 "확인 대기 중"이 왜 대기인지 보인다 -- 오래된 보고
-          (fresh=false)는 에이전트가 죽었다는 신호라 실패색으로 구분한다 */}
-      <td className="py-1 text-muted whitespace-nowrap">
-        {relTime(n.reported_at, now) || "—"}
-        {!n.fresh && <span className="text-bad"> · 오래됨</span>}
-      </td>
-    </tr>
-  );
 }
 
 export function ArtifactBasePage() {
@@ -124,50 +80,8 @@ export function ArtifactBasePage() {
               )}
             </p>
           </Card>
-          <Card>
-            <div className="flex items-center gap-2 mb-1">
-              <h2 className="font-medium">3홉 검증</h2>
-              <StatusPill state={hopSummary(d.checks).label}
-                          variant={hopSummary(d.checks).variant} />
-            </div>
-            <p className="text-xs text-muted mb-3">
-              같은 경로를 세 관점에서 확인합니다 — API 파드(조회 시 즉석, 쓰기 왕복) ·
-              컨트롤러(30초 주기, 쓰기 왕복) · 노드 에이전트(60초 주기, 디렉터리 존재·쓰기
-              권한). API·컨트롤러는 root(uid 0, 권한 없음)로 돌므로 root:root 경로가 정상이며,
-              허용 접두(DMS_ARTIFACT_BASE_ALLOWED_PREFIXES) 밖 경로는 저장되지 않습니다.
-            </p>
-            <dl className="text-sm space-y-1">
-              <div className="flex gap-2">
-                <dt className="text-muted w-28">API(즉석)</dt>
-                <dd><Hop ok={d.checks.api.ok} pending={false} reason={d.checks.api.reason} /></dd>
-              </div>
-              <div className="flex gap-2">
-                <dt className="text-muted w-28">컨트롤러</dt>
-                <dd>
-                  <Hop ok={d.checks.controller.ok} pending={d.checks.controller.pending}
-                       reason={d.checks.controller.reason} />
-                  {!d.checks.controller.pending && d.checks.controller.checked_at && (
-                    <span className="ml-2 text-muted text-xs">
-                      ({relTime(d.checks.controller.checked_at, q.dataUpdatedAt)})
-                    </span>
-                  )}
-                </dd>
-              </div>
-            </dl>
-            {d.checks.nodes.length > 0 && (
-              <table className="text-sm mt-3">
-                <thead><tr className="text-left text-muted">
-                  <th className="pr-6 font-medium">노드</th>
-                  <th className="pr-6 font-medium">디렉터리 존재</th>
-                  <th className="pr-6 font-medium">쓰기</th>
-                  <th className="font-medium">보고</th></tr></thead>
-                <tbody>{d.checks.nodes.map((n) =>
-                  <NodeRow key={n.node_name} n={n} now={q.dataUpdatedAt} />)}</tbody>
-              </table>
-            )}
-            {/* 정직한 한계 표기(설계 §2.4b): W_OK 판정 주체를 화면에 그대로 적는다 */}
-            <p className="text-xs text-muted mt-2">쓰기 가능 여부는 에이전트 프로세스(uid) 기준입니다 — 잡 파드 요청자 권한과 다를 수 있습니다</p>
-          </Card>
+          {/* API 파드·컨트롤러 두 관점 + 노드 에이전트(2026-11-23 개편 -- ArtifactBaseChecks 머리 주석). */}
+          <ArtifactBaseChecks d={d} now={q.dataUpdatedAt} />
           <Card>
             <div className="flex flex-wrap items-center gap-2 mb-2">
               <h2 className="font-medium">경로 변경</h2>

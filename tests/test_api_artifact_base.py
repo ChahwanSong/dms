@@ -41,6 +41,12 @@ def _make_rejected_job(repos):
     return jid
 
 
+def _hop(api: dict) -> dict:
+    # 2026-11-23: checks.api 는 가용성·자세·출처·파드·노드·게이트를 더 싣는다(routes_artifact_base._api_check) -- 옛
+    # 테스트가 고정한 한 줄 요약(ok·reason)은 그대로 호환이다.
+    return {"ok": api["ok"], "reason": api["reason"]}
+
+
 def test_requires_admin(client):
     assert client.get("/api/admin/artifact-base").status_code == 401
 
@@ -53,10 +59,15 @@ def test_get_reports_env_source_when_db_null(client):
     assert body["env_value"] == "file:///artifacts/dms"
     assert body["locked_by_jobs"] == 0
     # 기본 env 경로는 테스트 머신에 없다 -- api 홉은 정직하게 실패를 낸다
-    assert body["checks"]["api"] == {"ok": False, "reason": "artifact_base_missing"}
+    assert _hop(body["checks"]["api"]) == {"ok": False, "reason": "artifact_base_missing"}
+    # 모니터가 돌지 않는 앱(테스트의 create_app)은 즉석 점검이고 쓰기 없는 가용성이 그 사유를 낸다
+    assert body["checks"]["api"]["source"] == "instant"
+    assert body["checks"]["api"]["availability"]["reason"] == "artifact_base_missing"
+    assert body["checks"]["api"]["gate"] == {"enabled": False, "state": "off", "at": None}
+    assert body["checks"]["api_pods"] == []
     # 컨트롤러는 아직 아무것도 기록하지 않았다 -- 실패가 아니라 "확인 대기 중"
     assert body["checks"]["controller"] == {"pending": True, "ok": None,
-                                            "reason": None, "checked_at": None}
+                                            "reason": None, "checked_at": None, "node_name": None}
     assert body["checks"]["nodes"] == []
 
 
@@ -68,7 +79,7 @@ def test_put_normalizes_validates_and_saves(client, db, artifact_base_dir, sessi
     body = r.json()
     assert body["source"] == "db"
     assert body["db_value"] == f"file://{base}"     # 후행 슬래시 제거(정규형)
-    assert body["checks"]["api"] == {"ok": True, "reason": None}
+    assert _hop(body["checks"]["api"]) == {"ok": True, "reason": None}
     row = db.query_one("SELECT artifact_base_uri FROM control_state WHERE id = 1")
     assert row["artifact_base_uri"] == f"file://{base}"
 
@@ -197,7 +208,12 @@ def test_controller_hop_pending_until_checked_for_current_base(client, db, artif
     body = client.get("/api/admin/artifact-base", headers=ADMIN).json()
     assert body["checks"]["controller"] == {
         "pending": False, "ok": True, "reason": None,
-        "checked_at": "2026-08-10T00:01:00Z"}
+        "checked_at": "2026-08-10T00:01:00Z", "node_name": None}
+    # 점검 노드를 남기면 그대로 싣는다(엇갈림 상자 -- 「노드 X 만 못 본다」)
+    repos.control.set_artifact_base_check(uri=f"file://{base}", ok=True, reason=None,
+                                          now_iso="2026-08-10T00:02:00Z", node="w2")
+    body = client.get("/api/admin/artifact-base", headers=ADMIN).json()
+    assert body["checks"]["controller"]["node_name"] == "w2"
 
 
 def test_controller_loop_unblocks_api_controller_hop(client, db, artifact_base_dir,
@@ -296,7 +312,7 @@ def test_validate_and_put_reject_paths_outside_allowlist(db, tmp_path):
     inner.mkdir(parents=True)
     inner.chmod(0o755)      # 운영 base 와 같은 모드(tmp 기본 0775 는 g+w 로 거부)
     r = client.put("/api/admin/artifact-base", json={"uri": f"file://{inner}"})
-    assert r.status_code == 200 and r.json()["checks"]["api"] == {"ok": True, "reason": None}
+    assert r.status_code == 200 and _hop(r.json()["checks"]["api"]) == {"ok": True, "reason": None}
 
 
 def test_get_surfaces_allowlist_violation_of_the_effective_base(db, tmp_path):
@@ -305,7 +321,10 @@ def test_get_surfaces_allowlist_violation_of_the_effective_base(db, tmp_path):
     repos.control.set_artifact_base(f"file://{tmp_path}", actor="ops")
     client = _allow_client(db, tmp_path, [str(tmp_path / "cephfs")])
     body = client.get("/api/admin/artifact-base", headers=ADMIN).json()
-    assert body["checks"]["api"] == {"ok": False, "reason": "artifact_base_outside_allowlist"}
+    assert _hop(body["checks"]["api"]) == {"ok": False, "reason": "artifact_base_outside_allowlist"}
+    # 가용성은 정상이고(디렉터리는 보인다) 사유는 자세(posture) 쪽이다 -- 게이트·503 은 자세를 보지 않는다
+    assert body["checks"]["api"]["availability"]["ok"] is True
+    assert body["checks"]["api"]["posture"] == "artifact_base_outside_allowlist"
 
 
 def test_put_rejects_world_writable_base(client, db, tmp_path, session_admin):
@@ -346,4 +365,7 @@ def test_get_surfaces_group_writable_saved_base(client, db, artifact_base_dir):
     Repositories(db).control.set_artifact_base(f"file://{artifact_base_dir}", actor="ops")
     artifact_base_dir.chmod(0o775)
     body = client.get("/api/admin/artifact-base", headers=ADMIN).json()
-    assert body["checks"]["api"] == {"ok": False, "reason": "artifact_base_group_writable"}
+    assert _hop(body["checks"]["api"]) == {"ok": False, "reason": "artifact_base_group_writable"}
+    assert body["checks"]["api"]["posture"] == "artifact_base_group_writable"
+    # GET 은 더는 쓰기 왕복을 하지 않는다(2026-11-23) -- base 에 프로브 파일을 만들지 않는다
+    assert not list(artifact_base_dir.glob(".dms-base-check-*"))

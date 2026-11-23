@@ -136,6 +136,30 @@ test("admin can open nodes dashboard", async () => {
   expect(await screen.findByRole("heading", { name: "노드" })).toBeInTheDocument();
 });
 
+// 사이드바 라벨 = h1 짝(navigation.ts 주석) -- 「마운트 현황」(2026-11-23) 세 곳이 같은 문자열이다.
+test("admin can open mounts overview", async () => {
+  server.use(
+    http.get("/api/auth/me", () => HttpResponse.json({ actor: "admin", role: "admin" })),
+    http.get("/api/admin/mounts", () => HttpResponse.json({
+      generated_at: "2026-11-23T00:00:00Z", artifact_base: null, storages: [], nodes: [],
+      summary: { node_count: 0, fresh_node_count: 0, storage_count: 0, problem_cells: 0, problem_nodes: 0 } })),
+  );
+  renderAt("/admin/mounts");
+  expect(await screen.findByRole("heading", { name: "마운트 현황" })).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "마운트 현황" })).toBeInTheDocument();
+  expect(await screen.findByText("보고한 노드가 없습니다")).toBeInTheDocument();
+});
+
+test("user visiting /admin/mounts is redirected to /jobs", async () => {
+  server.use(
+    http.get("/api/auth/me", () => HttpResponse.json({ actor: "alice", role: "user" })),
+    http.get("/api/user/requests", () => HttpResponse.json([])),
+  );
+  renderAt("/admin/mounts");
+  expect(await screen.findByRole("heading", { name: "전체 작업" })).toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: "마운트 현황" })).toBeNull();
+});
+
 test("admin can open builds screen", async () => {
   server.use(
     http.get("/api/auth/me", () => HttpResponse.json({ actor: "admin", role: "admin" })),

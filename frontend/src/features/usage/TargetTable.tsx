@@ -7,6 +7,8 @@ import { agoText, ageDays, kstStampOrDash } from "../../lib/datetime";
 import type { UsageSort } from "./useUsage";
 import { ATIME_READ_RULE, HOT_AGE_MAX_DAYS, hotRatio, humanBytes } from "./usageStats";
 import { TargetDetail } from "./TargetDetail";
+import { BASE_DOWN_SHORT } from "./UsageParts";
+import { reasonOf } from "./useUsage";
 
 // 한 스토리지의 타깃 표(2026-10-20 UsageAnalysis 에서 분리). 6열 -- 「스토리지」 열과 행의 「미등록」 배지는 없앴다: 탭이 그
 // 정보를 말한다(옛 화면은 모든 행에 같은 스토리지 이름을 되풀이했다).
@@ -156,9 +158,11 @@ export function TargetTable({ storage, rows, activeTarget, onToggle, sort, order
                   {typeof p?.total_bytes === "number" ? humanBytes(p.total_bytes) : "—"}
                   {/* 리포트를 못 읽은 최신 스캔: 용량은 러너가 DB 에 남긴 값(같은 규칙)이고 파일 수·hot 은 모름이다.
                       펼친 상세의 "최신" 수치는 읽을 수 있는 리포트 기준이라 다를 수 있다 -- 그 사실을 표시한다(리뷰). */}
+                  {/* 원인이 작업 기록 저장소 접근 불가면(2026-11-23, 행 latest.unreadable_reason) title 에 덧붙인다 -- 표 칸은 그대로. */}
                   {p?.report_readable === false && typeof p.total_bytes === "number" && (
                     <span className="ml-1 text-[10px] text-muted"
-                          title="최신 스캔 리포트를 읽지 못해 잡 기록(DB)의 용량을 표시합니다">(DB)</span>
+                          title={`최신 스캔 리포트를 읽지 못해 잡 기록(DB)의 용량을 표시합니다${
+                            reasonOf(p.unreadable_reason) !== null ? ` ${BASE_DOWN_SHORT}` : ""}`}>(DB)</span>
                   )}
                 </td>
                 <td className="whitespace-nowrap px-3 text-right tabular-nums">

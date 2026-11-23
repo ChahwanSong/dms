@@ -148,6 +148,52 @@ def _parse_bool(environ, key, default=False):
     return value.strip().lower() in ("true", "1")
 
 
+# API 파드 artifact base 점검(2026-11-23, api/base_monitor.py)의 두 키 -- **관대 파싱**이다(_SERVER_INT_KEYS 가 아니다).
+# api·controller·migrate initContainer 가 같은 from_env 를 쓰므로 엄격 파싱이면 비상구를 쓰려던 운영자의 오타 하나
+# (GATE=off, 범위 밖 값)가 셋을 다 크래시시킨다 -- 잘못된 값은 기본값 + stderr 경고. 공용 base ConfigMap 에는 넣지
+# 않는다(코드 기본값 + deploy/README 의 비상구 안내).
+API_BASE_CHECK_DEFAULT_SECONDS = 60
+API_BASE_CHECK_MIN_SECONDS = 10
+API_BASE_CHECK_MAX_SECONDS = 3600
+
+
+def _warn_setting(key, raw, used):
+    import sys
+    print(f"settings warning: {key}={raw!r} is invalid -- using {used!r}", file=sys.stderr)
+
+
+def _lenient_check_seconds(environ, key="DMS_API_ARTIFACT_BASE_CHECK_SECONDS"):
+    """0 = 모니터 끔, 그 밖은 10–3600 으로 클램프. 정수가 아니면 기본 60 + 경고."""
+    raw = environ.get(key)
+    if raw is None or raw.strip() == "":
+        return API_BASE_CHECK_DEFAULT_SECONDS
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        _warn_setting(key, raw, API_BASE_CHECK_DEFAULT_SECONDS)
+        return API_BASE_CHECK_DEFAULT_SECONDS
+    if value == 0:
+        return 0
+    clamped = min(max(value, API_BASE_CHECK_MIN_SECONDS), API_BASE_CHECK_MAX_SECONDS)
+    if clamped != value:
+        _warn_setting(key, raw, clamped)
+    return clamped
+
+
+def _lenient_flag(environ, key, default=True):
+    """1/true/yes/on → True, 0/false/no/off → False, 그 밖은 기본값 + 경고(오타가 비상구를 조용히 반대로 돌리지 않게)."""
+    raw = environ.get(key)
+    if raw is None or raw.strip() == "":
+        return default
+    value = raw.strip().lower()
+    if value in ("1", "true", "yes", "on"):
+        return True
+    if value in ("0", "false", "no", "off"):
+        return False
+    _warn_setting(key, raw, default)
+    return default
+
+
 def _parse_csv_set(environ, key, default=frozenset()):
     # 미설정(absent)이면 default. 명시적 빈 문자열("")은 "비활성"으로 default를
     # 덮어써 빈 집합을 준다(운영자가 특권을 끄고 싶을 때).
@@ -303,6 +349,10 @@ class Settings:
     # 로그인 감속(2026-09-07): 사용자명·IP 별 창 안 실패 상한. 0 은 명시적 비활성.
     login_rate_limit_attempts: int = 10
     login_rate_limit_window_seconds: int = 60
+    # API 파드 artifact base 점검(2026-11-23) -- 관대 파싱(_lenient_check_seconds·_lenient_flag 주석). 주기 0 = 모니터 끔
+    # (게이트도 없음), 게이트 False = 시작 게이트만 끔(점검·기록은 계속, 비상구).
+    api_artifact_base_check_seconds: int = API_BASE_CHECK_DEFAULT_SECONDS
+    api_artifact_base_startup_gate: bool = True
 
     @classmethod
     def from_env(cls, environ: Mapping) -> "Settings":
@@ -422,6 +472,9 @@ class Settings:
             build_registry=environ.get("DMS_BUILD_REGISTRY", "pkg-01:5000"),
             build_builder_image=environ.get(
                 "DMS_BUILD_BUILDER_IMAGE", "quay.io/buildah/stable:latest"),
+            api_artifact_base_check_seconds=_lenient_check_seconds(environ),
+            api_artifact_base_startup_gate=_lenient_flag(
+                environ, "DMS_API_ARTIFACT_BASE_STARTUP_GATE", default=True),
         )
 
 

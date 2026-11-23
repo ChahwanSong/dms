@@ -104,6 +104,14 @@ _CONTROL_PLANE_LABELS = ("node-role.kubernetes.io/control-plane",
                          "node-role.kubernetes.io/master")
 
 
+def _pod_ready(pod) -> bool:
+    """V1Pod 의 status.conditions 에 Ready == "True" 가 있는가. 조건 목록이 없거나 모양이 다르면 False."""
+    for cond in (getattr(pod.status, "conditions", None) or []):
+        if getattr(cond, "type", None) == "Ready":
+            return getattr(cond, "status", None) == "True"
+    return False
+
+
 def node_addresses_from(node_list: dict) -> list:
     """V1NodeList.to_dict() -> [{"name", "ip", "control_plane"}]. 순수 함수(테스트용).
     InternalIP 가 없는 노드는 ip=None 으로 남긴다(모름 ≠ 없음 -- 지어내지 않는다)."""
@@ -543,6 +551,9 @@ class KubernetesClient:  # pragma: no cover - 실증 대상
                 "waiting_reason": reason,
                 # Terminating(삭제 요청됨, 아직 존재) -- 요청 삭제 정리가 「남은 객체」로 센다.
                 "deleting": pod.metadata.deletion_timestamp is not None,
+                # 파드 Ready 조건(2026-11-23) -- API 시작 게이트가 「서비스 중인 형제 파드가 있나」를 본다(api/base_monitor).
+                # 다른 소비자(RolloutWatcher·purge)는 이 키를 읽지 않는다. 조건이 없으면 False(모름을 Ready 로 접지 않는다).
+                "ready": _pod_ready(pod),
             })
         return briefs
 

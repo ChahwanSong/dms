@@ -1,10 +1,10 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
 import { beforeAll, afterAll, afterEach, test, expect } from "vitest";
-import { Dashboard } from "./Dashboard";
+import { Dashboard, artifactBaseWarning } from "./Dashboard";
 
 // 「최근 작업」 카드는 제거됐다(2026-08-23 사용자 결정 -- 전체 작업 화면과 중복).
 // 그 카드의 표·검색·페이지네이션 테스트도 함께 걷어냈다.
@@ -178,3 +178,48 @@ test("큐 현황 카드가 잡 통계 앞에 뜬다", async () => {
          & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 });
 
+// ---- 아티팩트 경로 점검 경고 줄(2026-11-23 사고 -- API 파드가 공유 스토리지 미마운트 노드에 떠 작업 출력이 「없음」으로만 보였다) ----
+const WITH_CTRL = {
+  ...INFRA,
+  components: [...INFRA.components,
+    { component: "dms-controller", kind: "Deployment", workload: "dms-controller",
+      image: "pkg-01:5000/dms:d200", ready: 1, desired: 1, verdict: "applied", detail: null, manifest_image: null }],
+};
+
+test("artifactBaseWarning: 실패만 경고 -- 모름(null)·확인 대기는 실패가 아니다, 다른 API 파드 실패 수는 따로", () => {
+  const ok = { api: { ok: true, reason: null, node_name: "n1", instance: "a" }, api_pods_failing: 0,
+               controller: { pending: false, ok: true, reason: null, node_name: "n2" } };
+  expect(artifactBaseWarning("dms-api", ok)).toBeNull();
+  expect(artifactBaseWarning("dms-controller", ok)).toBeNull();
+  expect(artifactBaseWarning("dms-api", undefined)).toBeNull();                        // 옛 서버
+  expect(artifactBaseWarning("dms-api", { ...ok, api: null })).toBeNull();              // 모름
+  expect(artifactBaseWarning("dms-api", { ...ok, api: { ...ok.api, ok: null } })).toBeNull();
+  expect(artifactBaseWarning("dms-controller",
+    { ...ok, controller: { pending: true, ok: null, reason: null, node_name: null } })).toBeNull();
+  expect(artifactBaseWarning("dms-api", { ...ok, api: { ...ok.api, ok: false, reason: null, node_name: null } }))
+    .toBe("API 파드(노드 모름)가 아티팩트 경로를 읽지 못합니다 — 작업 출력·scan 리포트가 보이지 않을 수 있습니다");
+  expect(artifactBaseWarning("dms-api", { ...ok, api_pods_failing: 2 }))
+    .toBe("다른 API 파드 2개가 아티팩트 경로 점검에 실패했습니다 — 그 파드로 간 조회는 작업 출력이 보이지 않을 수 있습니다");
+  expect(artifactBaseWarning("dms-agent", { ...ok, api: { ...ok.api, ok: false } })).toBeNull();
+});
+
+test("컴포넌트 카드: API·컨트롤러 점검 실패면 그 행 아래 경고 줄 + 아티팩트 경로 링크", async () => {
+  renderDash({ infra: { ...WITH_CTRL, artifact_base: {
+    api: { ok: false, reason: "artifact_base_jobs_missing", node_name: "s-ssc-dms-26001", instance: "dms-api-x" },
+    api_pods_failing: 0,
+    controller: { pending: false, ok: false, reason: "artifact_base_missing", node_name: "ion2110" } } } });
+  const api = await screen.findByText(/^API 파드\(노드 s-ssc-dms-26001\)가 아티팩트 경로를 읽지 못합니다/);
+  expect(api.closest("li")).toHaveTextContent("dms-api");
+  expect(api).toHaveTextContent("최근 작업의 기록 디렉터리가 이 경로에 없습니다");
+  expect(within(api).getByRole("link", { name: "점검 결과 보기" })).toHaveAttribute("href", "/admin/artifact-base");
+  const ctrl = screen.getByText(/^컨트롤러\(노드 ion2110\)가 아티팩트 경로 점검에 실패했습니다 — 경로가 존재하지 않습니다/);
+  expect(ctrl.closest("li")).toHaveTextContent("dms-controller");
+});
+
+test("컴포넌트 카드: 점검이 정상이거나 옛 서버(필드 없음)면 경고 줄이 없다", async () => {
+  renderDash({ infra: { ...WITH_CTRL, artifact_base: {
+    api: { ok: true, reason: null, node_name: "n1", instance: "a" }, api_pods_failing: 0,
+    controller: { pending: false, ok: true, reason: null, node_name: "n2" } } } });
+  await screen.findByText("dms-controller");
+  expect(screen.queryByRole("link", { name: "점검 결과 보기" })).toBeNull();
+});

@@ -7,12 +7,14 @@ from fastapi.exceptions import RequestValidationError
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.responses import FileResponse, JSONResponse, Response
 from starlette.staticfiles import StaticFiles
+from ..artifact_base import BaseCheckRunner
 from ..config import Settings
 from ..db import Database
 from ..repositories import Repositories
 from ..wiring import (build_build_runner, build_execution_adapter,
                      build_identity_resolver, build_node_lister, build_queue_reader,
                      build_rollout_runner, wire_reconnect_event)
+from .base_monitor import ApiBaseMonitor
 from .login_limiter import LoginRateLimiter
 from .password_transport import PasswordTransport
 from .routes_accounts import router as accounts_router
@@ -37,6 +39,7 @@ from .routes_denylist import router as denylist_router
 from .routes_batches import router as batches_router
 from .routes_batch_schedules import router as batch_schedules_router
 from .routes_artifact_base import router as artifact_base_router
+from .routes_mounts import router as mounts_router
 from .routes_control import router as control_router
 from .routes_builds import router as builds_router
 from .routes_registry import router as registry_router
@@ -45,10 +48,13 @@ from .routes_metrics import router as metrics_router
 from .routes_usage import ReportReadFailures, router as usage_router
 
 
-def create_app(settings: Settings, db: Database, exit_fn=None) -> FastAPI:
+def create_app(settings: Settings, db: Database, exit_fn=None,
+               start_base_monitor: bool = False) -> FastAPI:
     # exit_fn: readyz 연속 실패 자기 종료의 실행부(슬라이스 22 §2.4). 기본은
     # 자신에게 SIGTERM -- uvicorn graceful 종료 -> 컨테이너 종료 -> restartPolicy
     # 재시작이다. 주입은 테스트용(실 SIGTERM 없이 발화를 검증한다).
+    # start_base_monitor: API 파드 자체 artifact base 점검 모니터(api/base_monitor.py)의 스레드를 띄울지. cli.py 의
+    # `dms api` 만 True 를 넘긴다(test_cli 가 고정) -- 테스트의 create_app 은 미시작 = 시작 게이트 없음(readyz 기존 동작).
     if exit_fn is None:
         def exit_fn():
             os.kill(os.getpid(), signal.SIGTERM)
@@ -91,6 +97,15 @@ def create_app(settings: Settings, db: Database, exit_fn=None) -> FastAPI:
     # 2026-10-21 리뷰: 스토리지 합계의 리포트 읽기 실패 기억(프로세스 메모리, TTL) -- 같은 실패가 호출마다 읽기 예산을 먼저
     # 써서 뒤의 읽을 수 있는 대상에 닿지 못하는 것을 막는다(routes_usage.storage_totals 규칙 4).
     app.state.report_read_failures = ReportReadFailures()
+    # 2026-11-23 API 자체 artifact base 점검: FS 점검은 전부 이 프로세스 단일 runner 안(single-flight·10초 타임아웃·짧은
+    # 캐시)이다 -- 모니터·요청 프로브(base_probe)·관리 GET 이 공유해 서로를 timeout 으로 오진하거나 D 상태 스레드를 쌓지
+    # 않는다. 모니터는 늘 만들되(관리 화면·readyz 가 읽는다) start 는 start_base_monitor 일 때만.
+    app.state.base_check_runner = BaseCheckRunner()
+    app.state.base_monitor = ApiBaseMonitor(settings=settings, repos=app.state.repos,
+                                            rollout_runner=app.state.rollout_runner,
+                                            runner=app.state.base_check_runner)
+    if start_base_monitor:
+        app.state.base_monitor.start()
 
     @app.exception_handler(RequestValidationError)
     async def _validation_error(request, exc: RequestValidationError):
@@ -107,8 +122,10 @@ def create_app(settings: Settings, db: Database, exit_fn=None) -> FastAPI:
                        session_cookie="dms_session",
                        https_only=settings.session_cookie_secure)
 
+    # async(2026-11-23): 동기 def 는 스레드풀에서 돈다 -- 멈춘 마운트에 매달린 요청들이 스레드풀을 고갈시키면 liveness 까지
+    # 굶어 재시작 루프가 된다(재시작해도 같은 노드·같은 마운트). 이벤트 루프에서 바로 답한다.
     @app.get("/healthz")
-    def healthz():
+    async def healthz():
         return {"status": "ok"}
 
     # 연속 readyz 실패 카운터(슬라이스 22 §2.4). 리스트에 담는 이유는 클로저에서
@@ -137,10 +154,21 @@ def create_app(settings: Settings, db: Database, exit_fn=None) -> FastAPI:
             # 503 본문은 기존 그대로 -- 프로브 계약을 건드리지 않는다.
             return JSONResponse(status_code=503, content={"status": "degraded"})
         _readyz_fails[0] = 0   # **연속** 실패만 센다 -- 성공 한 번이면 리셋
+        # artifact base 시작 게이트(2026-11-23, api/base_monitor.py): DB 검사·카운터 **뒤**, 메모리만 읽는다. 막는 503 은
+        # 카운터를 올리지 않고 exit_fn 도 부르지 않는다 -- 나쁜 노드에서 자기 종료는 같은 노드에서 다시 뜰 뿐이다. 막는
+        # 조건(시작 래치 + 형제 파드)은 ApiBaseMonitor.gate_blocking. 한 번 200 을 낸 프로세스는 다시 막지 않는다.
+        monitor = app.state.base_monitor
+        if monitor.gate_blocking():
+            return JSONResponse(status_code=503, content={"status": "starting"})
+        monitor.mark_served_ready()
         # kubelet 은 상태 코드만 본다 -- 본문 카운터는 운영자용이다(curl 한 번으로
         # 재연결 빈도를 본다). 조용한 재연결을 만들지 않기 위한 창구(§2.6).
-        return {"status": "ok", "reconnects": db.reconnect_count,
+        body = {"status": "ok", "reconnects": db.reconnect_count,
                 "last_reconnect_at": db.last_reconnect_at}
+        if monitor.degraded():
+            # /readyz 는 인증 없이 공개(ingress /)라 사유·노드는 싣지 않는다 -- 관리 화면(/api/admin/artifact-base)이 말한다.
+            body["artifact_base"] = "degraded"
+        return body
 
     app.include_router(auth_router)
     app.include_router(accounts_router)
@@ -164,6 +192,7 @@ def create_app(settings: Settings, db: Database, exit_fn=None) -> FastAPI:
     app.include_router(batch_schedules_router)
     app.include_router(control_router)
     app.include_router(artifact_base_router)
+    app.include_router(mounts_router)
     app.include_router(builds_router)
     app.include_router(registry_router)
     app.include_router(releases_router)

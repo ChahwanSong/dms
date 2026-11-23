@@ -2,7 +2,7 @@ import { matchPath } from "react-router-dom";
 import type { LucideIcon } from "lucide-react";
 import {
   Ban, Boxes, CalendarClock, Database, FilePlus, FolderCog, Hammer,
-  Layers, LayoutDashboard, ListTodo, Mail, Rocket, ScrollText,
+  Layers, LayoutDashboard, ListTodo, Mail, Network, Rocket, ScrollText,
   Server, Settings, Shield, SlidersHorizontal, TrendingUp, Users,
 } from "lucide-react";
 
@@ -68,6 +68,8 @@ export const NAVIGATION: NavSection[] = [
         label: "스토리지", adminOnly: true,
         items: [
           { path: "/admin/storages", label: "스토리지", icon: Database },
+          // 마운트 현황(2026-11-23 사용자 요청 「스토리지 하위 마운트 현황 메뉴」): 노드 × 스토리지 표 -- 스토리지와 노드 사이.
+          { path: "/admin/mounts", label: "마운트 현황", icon: Network },
           { path: "/admin/nodes", label: "노드", icon: Server },
         ],
       },

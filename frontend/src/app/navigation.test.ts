@@ -17,14 +17,24 @@ function dmsItems(): { group: string; groupAdminOnly: boolean; item: NavItem }[]
 }
 
 // 2026-11-16: 작업 그룹에 배치 스케줄러(/admin/batch-schedules, 관리자 전용) 추가 -- 18링크.
-test("현행 사이드바 18링크가 전부 데이터에 있다(전수 -- 초과도 누락도 없다)", () => {
+// 2026-11-23: 스토리지 그룹에 마운트 현황(/admin/mounts) 추가 -- 19링크.
+test("현행 사이드바 19링크가 전부 데이터에 있다(전수 -- 초과도 누락도 없다)", () => {
   const paths = dmsItems().map((x) => x.item.path).sort();
   expect(paths).toEqual([
     "/admin/accounts", "/admin/artifact-base", "/admin/audit", "/admin/batch-schedules", "/admin/batches",
     "/admin/builds", "/admin/control", "/admin/dashboard", "/admin/denylist", "/admin/mail",
-    "/admin/nodes", "/admin/policies", "/admin/portal", "/admin/releases",
+    "/admin/mounts", "/admin/nodes", "/admin/policies", "/admin/portal", "/admin/releases",
     "/admin/storages", "/admin/usage", "/jobs", "/jobs/new",
   ].sort());
+});
+
+test("스토리지 그룹은 스토리지 → 마운트 현황 → 노드 순서다(2026-11-23 사용자 요청 「스토리지 하위 마운트 현황」)", () => {
+  const storage = (NAVIGATION[0].groups ?? []).find((g) => g.label === "스토리지")!;
+  expect(storage.adminOnly).toBe(true);
+  expect(storage.items.map((i) => i.label)).toEqual(["스토리지", "마운트 현황", "노드"]);
+  expect(storage.items.map((i) => i.path)).toEqual(["/admin/storages", "/admin/mounts", "/admin/nodes"]);
+  expect(breadcrumbFor("/admin/mounts").map((c) => c.label)).toEqual(["HOME", "DMS", "스토리지", "마운트 현황"]);
+  expect(activeNavPath("/admin/mounts")).toBe("/admin/mounts");
 });
 
 test("adminOnly 표시가 기존 isAdmin 게이트와 일치한다", () => {

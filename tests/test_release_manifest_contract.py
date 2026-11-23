@@ -251,3 +251,58 @@ def test_every_overlay_maps_the_placeholder_image_names():
                  if line.strip().startswith("- name:")]
         assert set(names) >= {f"{PLACEHOLDER_REGISTRY}/dms", f"{PLACEHOLDER_REGISTRY}/dms-agent"}, (
             f"{kust.relative_to(REPO_ROOT)}: images.name={names}")
+
+
+# --- API artifact base 시작 게이트(2026-11-23) ----------------------------------------------------------------------
+# WHY: API 의 시작 게이트(api/base_monitor.py)는 「서비스 중인 형제 파드가 있을 때만」 새 파드를 Ready 로 올리지 않는다 --
+# 롤링 때 옛 정상 파드가 남는 것은 maxSurge 1 / maxUnavailable 0 덕분이다(replicas 1 의 지금 기본값과 같지만, 기본값에
+# 기대면 replicas 를 늘리거나 누가 25%/25% 를 적어 넣는 순간 옛 파드가 먼저 내려가 게이트가 포탈 전면 장애가 된다).
+# DMS_NODE_NAME(downward API)은 점검 기록의 노드 표시다(없어도 코드는 자기 파드 조회로 폴백한다).
+from dms.manifest_tags import _block, _find, _indent, _mapping  # noqa: E402
+
+
+def _spec_block(doc):
+    at = _find(doc, "spec", indent=0)
+    assert at is not None
+    return _block(doc, at)
+
+
+def test_api_deployment_pins_surge_rolling_update():
+    spec = COMPONENTS["dms-api"]
+    doc = workload_doc(MANIFESTS["dms-api"], spec["kind"], spec["workload"])
+    body = _spec_block(doc)
+    at = _find(body, "strategy", indent=2)
+    assert at is not None, "40-api.yaml 에 strategy 가 없다 -- 기본값에 기대지 않고 명시한다"
+    assert _mapping(_block(body, at)) == {"type": "RollingUpdate",
+                                          "rollingUpdate": {"maxSurge": "1", "maxUnavailable": "0"}}
+
+
+def _container_env_lines(doc, container):
+    at = _find(doc, "containers")
+    body = _block(doc, at)
+    item = min(_indent(line) for line in body)
+    current, out = None, []
+    for line in body:
+        if _indent(line) == item and line.strip().startswith("- name:"):
+            current = line.strip()[2:].split(":", 1)[1].strip()
+            continue
+        if current == container:
+            out.append(line.strip())
+    return out
+
+
+@pytest.mark.parametrize("component", sorted(ROOT_CONTROL_PLANE))
+def test_control_plane_carries_node_name_from_the_downward_api(component):
+    spec = COMPONENTS[component]
+    doc = workload_doc(MANIFESTS[component], spec["kind"], spec["workload"])
+    lines = _container_env_lines(doc, ROOT_CONTROL_PLANE[component])
+    at = lines.index("- name: DMS_NODE_NAME")
+    assert lines[at + 1:at + 4] == ["valueFrom:", "fieldRef:", "fieldPath: spec.nodeName"], lines[at:at + 4]
+
+
+def test_api_header_forbids_directory_or_create():
+    # DirectoryOrCreate 는 빈 로컬 디렉터리를 만들어 존재·쓰기 점검을 통과시킨다(2026-11-23 사고 모양) -- 권고가 되살아나지 않게.
+    text = MANIFESTS["dms-api"].read_text()
+    assert "switch to DirectoryOrCreate to degrade" not in text
+    assert "NEVER\n# switch to DirectoryOrCreate" in text
+    assert "type: Directory\n" in text and "type: DirectoryOrCreate" not in text

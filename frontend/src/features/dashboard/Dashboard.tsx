@@ -1,3 +1,4 @@
+import { Link } from "react-router-dom";
 import { useInfraMetrics, useJobMetrics } from "./useMetrics";
 import { NodeMetricsSection } from "./NodeMetricsSection";
 import { JobStatsSection } from "./JobStatsSection";
@@ -6,7 +7,8 @@ import { MetricTile } from "../../components/ui/MetricTile";
 import { Card } from "../../components/ui/Card";
 import { StatusPill } from "../../components/ui/StatusPill";
 import type { PillVariant } from "../../lib/jobState";
-import type { InfraComponent, StateCount } from "../../lib/types";
+import type { InfraArtifactBase, InfraComponent, StateCount } from "../../lib/types";
+import { reasonText } from "../../lib/api";
 
 // KPI는 잡 상태의 집합 합산이다. 옛 스텁의 요청 목록 즉석 계산은 페이지네이션
 // 상한(50건)에 걸려 총계가 거짓이 됐다 -- 백엔드 GROUP BY 집계로 바꾼다(설계 §4.1).
@@ -35,6 +37,31 @@ const VERDICT_VARIANT: Record<string, PillVariant> = {
   applied: "ok", progressing: "busy", failed: "bad",
 };
 
+// 아티팩트 경로 점검 경고 줄(2026-11-23 사고 -- API 파드가 공유 스토리지 미마운트 노드에 떠 작업 출력·scan 리포트가 「없음」으로만
+// 보였고, 이 화면엔 아무 신호가 없었다). 실패일 때만 컴포넌트 행 아래 한 줄(드리프트 줄과 같은 모양) + 점검 화면 링크. 모름(null·
+// 확인 대기)은 경고하지 않는다 -- 실패가 아니다. api_pods_failing = 보고가 살아 있는 다른 API 파드 중 실패 수(서버가 fresh 만 센다).
+export function artifactBaseWarning(component: string, ab: InfraArtifactBase | null | undefined): string | null {
+  if (!ab) return null;
+  if (component === "dms-api") {
+    const self = ab.api?.ok === false;
+    const others = typeof ab.api_pods_failing === "number" && ab.api_pods_failing > 0 ? ab.api_pods_failing : 0;
+    if (self) {
+      const where = ab.api?.node_name ? `노드 ${ab.api.node_name}` : "노드 모름";
+      return `API 파드(${where})가 아티팩트 경로를 읽지 못합니다 — 작업 출력·scan 리포트가 보이지 않을 수 있습니다`
+        + (ab.api?.reason ? ` (${reasonText(ab.api.reason)})` : "");
+    }
+    if (others > 0) return `다른 API 파드 ${others}개가 아티팩트 경로 점검에 실패했습니다 — 그 파드로 간 조회는 작업 출력이 보이지 않을 수 있습니다`;
+    return null;
+  }
+  if (component === "dms-controller") {
+    const c = ab.controller;
+    if (!c || c.pending || c.ok !== false) return null;
+    const where = c.node_name ? `노드 ${c.node_name}` : "노드 모름";
+    return `컨트롤러(${where})가 아티팩트 경로 점검에 실패했습니다${c.reason ? ` — ${reasonText(c.reason)}` : ""}`;
+  }
+  return null;
+}
+
 export function Dashboard() {
   const jobsQ = useJobMetrics(24);
   const infraQ = useInfraMetrics();
@@ -44,6 +71,7 @@ export function Dashboard() {
   const components = Array.isArray(infraQ.data?.components)
     ? infraQ.data.components : [];
   const jobImage = infraQ.data?.job_image;
+  const artifactBase = infraQ.data?.artifact_base;
   // 드리프트 = live(워크로드 파드템플릿)와 동봉 매니페스트가 "둘 다 있고" 다르다.
   // 어느 한쪽이 null 이면 비교하지 않는다 -- 추측 금지(설계 §4).
   const drifted = (c: InfraComponent) =>
@@ -95,6 +123,12 @@ export function Dashboard() {
               {drifted(c) && (
                 <p className="text-xs text-bad">
                   {`매니페스트 ${c.manifest_image} — 다음 kubectl apply가 이 태그로 되돌립니다`}
+                </p>
+              )}
+              {artifactBaseWarning(c.component, artifactBase) !== null && (
+                <p className="text-xs text-bad break-keep">
+                  {artifactBaseWarning(c.component, artifactBase)}{" "}
+                  <Link to="/admin/artifact-base" className="whitespace-nowrap text-accent hover:underline">점검 결과 보기</Link>
                 </p>
               )}
             </li>

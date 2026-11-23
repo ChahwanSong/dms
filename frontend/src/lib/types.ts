@@ -484,6 +484,9 @@ export interface ScanTargetRow {
 // 서버는 예전 배열(ScanTargetRow[])을 준다 -- 롤링 중 옛 파드도 offset 을 무시하고 배열을 준다(useUsage.toTargetPage).
 export interface ScanTargetsPaged {
   rows: ScanTargetRow[]; total: number; offset: number; limit: number; window_limit: number; windowed: boolean;
+  // 이 요청에서 작업 기록 저장소(artifact base)에 접근하지 못해 리포트를 못 읽은 행이 있다(2026-11-23). 값은 공개 코드
+  // artifact_base_unavailable 하나. 부재·null = 그런 일 없음(정상 경로 바이트 동일).
+  unreadable_reason?: string | null;
 }
 // 사용량 분석 전체 내보내기(GET /api/admin/usage/export). previous = 최신 직전 성공 scan(증감 계산용).
 export interface UsageExportRow extends ScanTargetRow {
@@ -523,6 +526,8 @@ export interface UsageStorageTotals {
   storage_name: string; computed_at: string; truncated: boolean; window_limit: number;
   target_count: number; summed_target_count: number; nested_target_count: number; invalid_target_count: number;
   unreadable_count: number; pending_count: number; progressed: boolean;
+  // base 접근 불가로 이번 호출이 읽기를 멈췄다(남은 미스는 pending 으로 셈 -- 2026-11-23). 부재·null = 정상.
+  unreadable_reason?: string | null;
   total_bytes: UsageTotalMetric; total_files: UsageTotalMetric; total_directories: UsageTotalMetric;
   total_symlinks: UsageTotalMetric; total_other: UsageTotalMetric; total_entries: UsageTotalMetric;
   scan_errors: UsageTotalMetric; broken_paths_total: UsageTotalMetric;
@@ -572,10 +577,14 @@ export interface UsagePoint {
   broken_paths_total?: number | null;
   broken_paths_limit?: number | null;
   report_readable?: boolean;
+  // 목록 행(latest)에만: 이 요청에서 base 접근 불가로 못 읽은 행(2026-11-23). 키가 없으면 정상(바이트 동일).
+  unreadable_reason?: string | null;
 }
 export interface UsageHistory {
   storage_name: string; target: string; points: UsagePoint[];
   skipped_unreadable: number;
+  // skipped 의 원인이 base 접근 불가면 "artifact_base_unavailable", 개별 리포트 문제·정상이면 null. 옵션(?) = 구형 서버.
+  unreadable_reason?: string | null;
   // 이력은 최신 window_limit 건 창이다. window_full 이면 그 너머가 있을 수 있어
   // 화면이 "전체 이력"인 척하지 않도록 고지한다(타깃 목록의 전수 scan_count 와
   // 한 화면에서 모순되지 않게). 옵션(?) = 구형 서버 호환.
@@ -663,14 +672,88 @@ export interface ArtifactBaseNodeCheck {
 export interface ArtifactBaseControllerCheck {
   pending: boolean; ok: boolean | null; reason: string | null;
   checked_at: string | null;
+  // 컨트롤러 파드가 뜬 노드(2026-11-23 -- 두 관점 엇갈림 상자가 노드를 짚는다). 옵션(?) = 구형 서버, null = 모름.
+  node_name?: string | null;
+}
+// API 파드 자체 점검(2026-11-23 사고: dms-api 가 공유 스토리지 미마운트 노드에 떠 아티팩트를 못 읽었는데 컨트롤러 점검은
+// 정상이었다 -- 설계 apibase v2 §F). 새 필드는 전부 옵션(?) = 구형 서버(옛 checks.api 는 {ok, reason} 뿐) 호환.
+// ok = availability.ok ∧ posture 없음, reason = availability.reason ?? posture(호환 -- hopSummary 는 ok 하나만 센다).
+export interface ArtifactBaseAvailability {
+  ok: boolean; reason: string | null;
+  // jobs_found null = 확인할 최근 잡이 없어 판정 생략(모름 ≠ 0).
+  jobs_checked: number; jobs_found: number | null;
+}
+// 시작 점검 상태(서버 base_monitor.gate_state): off = 주기 점검 꺼짐, disabled = 비상구(env 게이트 0), waiting = Ready 를 막는
+// 중, passed = 정상으로 Ready, started_degraded = 형제 파드가 없어 실패인 채 Ready(부분 장애가 전면 장애가 되지 않게).
+export type ApiGateState = "off" | "disabled" | "waiting" | "passed" | "started_degraded";
+export interface ArtifactBaseApiCheck {
+  ok: boolean; reason: string | null;
+  availability?: ArtifactBaseAvailability | null;
+  posture?: string | null;              // 소유자·o+w·정적 검사 사유(가용성과 별개 -- 게이트·503 에 쓰지 않는다)
+  source?: "monitor" | "instant";       // monitor = 주기 점검 스냅숏, instant = 조회 시 즉석
+  instance?: string | null; node_name?: string | null; checked_at?: string | null;
+  fstype?: string | null; local_fs?: boolean | null;
+  interval_seconds?: number | null;
+  gate?: { enabled: boolean; state: ApiGateState | null; at: string | null } | null;
+}
+// API 파드별 최근 점검(서버 api_base_checks 24h 행 -- this_pod 먼저, 실패·waiting, 최근 확인순). ok null = 아직 점검 전.
+export interface ArtifactBaseApiPod {
+  instance: string; node_name: string | null; uri: string | null;
+  ok: boolean | null; reason: string | null; posture: string | null;
+  fstype: string | null; local_fs: boolean | null; gate_state: ApiGateState | null;
+  started_at: string; checked_at: string | null; ready_at: string | null;
+  fresh: boolean; this_pod: boolean;
 }
 export interface ArtifactBaseInfo {
   effective: string; source: "db" | "env"; db_value: string | null; env_value: string;
   locked_by_jobs: number;
   checks: {
-    api: { ok: boolean; reason: string | null };
+    api: ArtifactBaseApiCheck;
     controller: ArtifactBaseControllerCheck;
     nodes: ArtifactBaseNodeCheck[];
+    api_pods?: ArtifactBaseApiPod[];
+  };
+}
+// GET /api/admin/artifact-base/health -- 요청을 받은 API 파드의 메모리 스냅숏만(가벼움, 사용량 화면의 복구 감시용).
+// ok null = 아직 점검 전(모름).
+export interface ArtifactBaseHealth {
+  ok: boolean | null; reason: string | null; checked_at: string | null;
+  instance: string | null; node_name: string | null;
+}
+
+// 마운트 현황(GET /api/admin/mounts, 2026-11-23 -- 서버 routes_mounts: DB 만 읽는 노드 × 스토리지 표). 셀 status:
+// ready = 마운트됨(쓰기 가능), readonly = 마운트됐지만 쓰기 불가, missing = 없음(reason = 에이전트 사유), unreported = 그
+// 스토리지 보고 없음(옛 프로브·에이전트 없음), disabled = 비활성 스토리지(문제 아님).
+export type MountCellStatus = "ready" | "readonly" | "missing" | "unreported" | "disabled";
+export interface MountCell {
+  status: MountCellStatus; reason: string | null;
+  exists?: boolean | null; is_mountpoint?: boolean | null; readable?: boolean | null; writable?: boolean | null;
+}
+export interface MountBaseApiCheck {
+  instance: string; ok: boolean | null; reason: string | null; checked_at: string | null; gate_state: ApiGateState | null;
+}
+export interface MountBaseCell {
+  // missing 의 reason 은 에이전트 사유 또는 "covering_storage_missing:<스토리지>"(base 를 덮는 스토리지가 그 노드에 없다).
+  status: Exclude<MountCellStatus, "disabled">; reason: string | null;
+  agent: { exists: boolean | null; writable: boolean | null; path_matches: boolean | null } | null;
+  api: MountBaseApiCheck[];
+  controller: { ok: boolean | null; reason: string | null; checked_at: string | null } | null;
+}
+export interface MountNode {
+  node_name: string; has_agent: boolean; fresh: boolean; reported_at: string | null; probe_mode: string | null;
+  schedulable: boolean | null; schedulable_reason: string | null; excluded: boolean;
+  roles: ("api" | "controller")[];
+  cells: Record<string, MountCell>;
+  artifact_base: MountBaseCell | null;
+}
+export interface MountsOverview {
+  generated_at: string;
+  artifact_base: { uri: string | null; path: string | null; covering_storage: string | null } | null;
+  storages: { storage_name: string; mount_path: string; enabled: boolean }[];
+  nodes: MountNode[];
+  summary: {
+    node_count: number; fresh_node_count: number; storage_count: number; problem_cells: number; problem_nodes: number;
+    stale_node_count?: number;
   };
 }
 
@@ -815,8 +898,16 @@ export interface InfraComponent {
   // null = 동봉 없음/파싱 실패 -- 비교 자체를 하지 않는다(무배지).
   manifest_image: string | null;
 }
+// 대시보드의 아티팩트 경로 점검 요약(2026-11-23, metrics/infra -- 메모리·DB 만). api = 요청을 받은 파드의 스냅숏(null = 모름),
+// api_pods_failing = 보고가 살아 있는(fresh) 다른 API 파드 중 실패 수. 옵션(?) = 구형 서버.
+export interface InfraArtifactBase {
+  api: { ok: boolean | null; reason: string | null; node_name: string | null; instance: string | null } | null;
+  api_pods_failing?: number | null;
+  controller: { pending: boolean; ok: boolean | null; reason: string | null; node_name: string | null } | null;
+}
 export interface InfraMetrics {
   components: InfraComponent[];
+  artifact_base?: InfraArtifactBase | null;
   // live = 유효값(DB 오버라이드 → env). source 가 "db" 면 릴리스의 job-image 가
   // 설정한 값이라 kubectl apply 로 되돌아가지 않는다(문구 분기 근거).
   job_image: { live: string | null; manifest: string | null; source?: "db" | "env" };

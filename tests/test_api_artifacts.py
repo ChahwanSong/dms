@@ -151,17 +151,31 @@ def test_other_users_job_404_admin_can_access(tmp_path):
     assert len(r2.json()["entries"]) == 1
 
 
-def test_missing_artifact_base_dir_list_empty_body_404(tmp_path):
+def test_missing_artifact_base_dir_is_503_not_an_empty_list(tmp_path):
+    # 2026-11-23 사고 동작(200 빈 목록 + 404 -- 포탈엔 「실행 아티팩트 없음」)을 뒤집는다: base 자체가 안 보이면 base 수준
+    # 판정(api/base_probe.py)으로 503 artifact_base_unavailable. 404 는 「base 는 보이는데 그 파일이 없음」에만 남는다.
     art_base = tmp_path / "does-not-exist"
     client = _client(tmp_path, artifact_base=str(art_base))
     repos = client.app.state.repos
     rid, jid = _confirmpending_job(repos, requester="alice")
     _login(client, "alice")
     r = client.get(f"/api/user/jobs/{jid}/artifacts")
-    assert r.status_code == 200
-    assert r.json() == {"entries": [], "truncated": False}
+    assert (r.status_code, r.json()["detail"]) == (503, "artifact_base_unavailable")
     r2 = client.get(f"/api/user/jobs/{jid}/artifacts/execution/stdout.log")
-    assert r2.status_code == 404
+    assert (r2.status_code, r2.json()["detail"]) == (503, "artifact_base_unavailable")
+
+
+def test_existing_base_without_job_dir_keeps_empty_list_and_404(tmp_path):
+    # base 는 보이는데 그 잡 디렉터리가 아직 없다(실행 전) -- 빈 목록·404 가 정상값이다.
+    art_base = tmp_path / "artifacts"
+    art_base.mkdir()
+    client = _client(tmp_path, artifact_base=str(art_base))
+    rid, jid = _confirmpending_job(client.app.state.repos, requester="alice")
+    _login(client, "alice")
+    r = client.get(f"/api/user/jobs/{jid}/artifacts")
+    assert r.status_code == 200 and r.json() == {"entries": [], "truncated": False}
+    r2 = client.get(f"/api/user/jobs/{jid}/artifacts/execution/stdout.log")
+    assert (r2.status_code, r2.json()["detail"]) == (404, "artifact_not_found")
 
 
 # --- 보안 회귀 테스트 (슬라이스 5 Task 2 리뷰) -------------------------------

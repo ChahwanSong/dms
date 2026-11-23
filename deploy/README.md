@@ -1339,6 +1339,61 @@ scan 수)도 함께 줄어든다(의도한 결과). 정리 현황은 스케줄�
 
 ---
 
+## 12b. 아티팩트 경로 — API 파드 자체 점검·시작 게이트·마운트 현황 (2026-11-23)
+
+사고: dms-api 가 CephFS 미마운트 노드(`/mgmt_storage` = 로컬 빈 디렉터리)에 떠 모든 잡의 아티팩트·scan 리포트를 「없음」으로
+보였는데, 아티팩트 경로 화면의 컨트롤러 점검(마운트된 다른 노드)은 정상이었다. `hostPath type: Directory` 는 경로 **존재**만
+보므로 빈 로컬 디렉터리 노드에서도 파드가 뜬다(그래서 `DirectoryOrCreate` 로 바꾸지 마라 — 40-api.yaml 헤더).
+
+**API 파드 자체 점검**(`api/base_monitor.py`, `dms api` 만 돈다): API 프로세스가 **자기 노드에서** 아티팩트 경로를 60초마다(첫
+성공 전 5초, 실패 중 15초) 쓰기 없이 본다 — 디렉터리 열기·첫 항목 읽기·**최근 성공 잡 디렉터리**(DB 의 최근 성공 잡 최대 5건 중
+`<base>/<job_id>` 가 하나라도 있는가 — 하나도 없으면 `artifact_base_jobs_missing` = 빈 로컬 디렉터리의 서명, 대상 잡이 0건이면
+판정 생략). 결과는 메모리·DB(`api_base_checks`, 파드별 1행·24시간)·이벤트(`api-artifact-base`, 상태가 바뀔 때만)·stderr 1줄에
+남는다. 컨트롤러 점검(30초)도 같은 잡 디렉터리 판정과 **점검 노드**를 더한다(`control_state.artifact_base_check_node`). **점검**
+(모니터·실패 경로 프로브·관리 화면 GET·컨트롤러 점검·stepper 요약 지연 판정)은 10초 타임아웃 single-flight 안이라 그 점검 자체가 멈춘
+마운트에 매달리지 않고, 멈춘 마운트가 감지되면 아티팩트 라우트는 파일을 열기 전에 503 을 낸다. 다만 **실제 읽기·쓰기 경로는 여전히
+base 를 직접 만진다** — 아티팩트 열람의 첫 열기(감지 전), 경로 저장·검증(PUT/validate 의 쓰기 왕복), 컨트롤러의 요약·로그 읽기. 그래서
+요약 확정 지연은 **빠진·오류 내는** base(미마운트·EIO)에서 효과가 있고, D 상태로 멈춘 CephFS 에서는 컨트롤러 루프가 요약 읽기에서
+설 수 있다(마운트부터 복구).
+
+**시작 게이트**(`/readyz`): 새 API 파드는 아래 경우에만 Ready 를 미룬다 — (첫 점검이 아직 안 끝났고 시작 60초 이내) 또는 (마지막
+점검 실패 **이고 서비스 중인 형제 dms-api 파드가 있음**). 그래서 포탈 릴리스(롤링, `maxSurge 1 / maxUnavailable 0` — 계약 테스트
+고정)로 새 파드가 나쁜 노드에 뜨면 옛 정상 파드가 계속 서비스하고 릴리스는 `rollout_failed`/`rollout_timeout` 으로 끝난다(옛 파드
+유지). 형제가 없으면(replicas 1 의 재시작·eviction·노드 재부팅·새 설치·공유 스토리지 전체 장애) **막지 않는다** — 실패인 채
+Ready(`started_degraded`), 아티팩트 읽기만 503 이고 나머지 포탈은 산다. 한 번 Ready 가 된 파드는 런타임 실패로 내리지 않는다(경고만).
+게이트 503(`{"status":"starting"}`)은 readyz 자기 종료 카운터를 올리지 않는다. 200 본문의 `"artifact_base":"degraded"` 는 점검
+실패 표시(사유·노드는 공개 `/readyz` 에 싣지 않는다).
+
+| 확인 | 방법 |
+|---|---|
+| 지금 이 파드가 보는가 | `GET /api/admin/artifact-base/health` → `{ok, reason, checked_at, instance, node_name}`(메모리만, 포탈 폴링용) |
+| 두 관점·파드별 | `GET /api/admin/artifact-base` 의 `checks.api`(`source` monitor/instant·`availability`·`posture`·`gate.state`)·`checks.api_pods`(Ready 못 된 새 파드 포함 — `fresh`·`this_pod`)·`checks.controller.node_name` |
+| 지금 다시 점검 | `POST /api/admin/artifact-base:recheck`(관리자, 최대 12초 대기 후 같은 모양) — 포탈 「지금 다시 점검」 |
+| 노드 × 스토리지 | 포탈 **스토리지 → 마운트 현황**(`GET /api/admin/mounts`, DB 만 — 에이전트 보고 + API·컨트롤러 점검) |
+| Ready 안 되는 새 파드 | `kubectl --context dms -n dms get pods -l app.kubernetes.io/name=dms-api -o wide` 로 노드 확인 → 그 노드의 `findmnt -T <base>`(공유 스토리지가 마운트돼 있는가). 마운트하면 재시작 없이 다음 점검에서 Ready(HostToContainer 전파) |
+
+**사용자 화면**: base 접근 불가면 아티팩트 목록·보기·다운로드·scan 리포트·경로 통계는 404 대신 **503 `artifact_base_unavailable`**
+(판정은 base 수준뿐 — 파일별 errno 로 가르지 않는다). 사용량 분석은 원인(`unreadable_reason`)을 싣고, 실패를 리포트 요약 캐시·실패
+기억에 넣지 않는다(복구되면 바로 다시 읽는다). 컨트롤러 쪽이 base 를 못 보면 성공 잡의 요약 확정을 최대 20분(vcjob TTL 의 절반
+이하) 미룬다(이벤트 `summary_deferred_base_unavailable`) — 그 뒤엔 예전처럼 `summary_unavailable` 로 확정.
+
+**비상구 env**(관대 파싱 — 잘못된 값은 기본값 + stderr 경고, 기동 거부 없음. 공용 base `20-config.yaml` 엔 넣지 않는다):
+
+| env | 기본 | 뜻 |
+|---|---|---|
+| `DMS_API_ARTIFACT_BASE_STARTUP_GATE` | `1` | `0`/`false`/`off` = 시작 게이트만 끈다(점검·기록은 계속, 화면 「비상구로 꺼짐」) |
+| `DMS_API_ARTIFACT_BASE_CHECK_SECONDS` | `60` | 점검 주기(10–3600 으로 클램프). `0` = 모니터 끔(게이트도 없음 — 화면은 조회 시 즉석 점검) |
+
+넣는 곳은 사이트 오버레이의 ConfigMap 패치(api 만 읽는다) 뒤 `kubectl --context <ctx> -n dms rollout restart deploy/dms-api`.
+`kubectl set env` 로 넣으면 `apply -k` 가 지우지 않아 **조용히 영구**가 된다 — 쓰고 나면 반드시 되돌린다.
+
+매니페스트(공용 base): 40-api.yaml 에 `strategy`(명시)·`DMS_NODE_NAME`(downward API), 41-controller.yaml 에 `DMS_NODE_NAME`. 포탈
+릴리스는 이미지만 바꾸므로 이 둘은 `apply -k` 전엔 라이브에 없다 — 없어도 동작한다(노드 이름은 자기 파드 조회로 폴백, strategy 는
+replicas 1 의 기본값과 같다). 마이그레이션은 자동(`api_base_checks` 테이블, `control_state.artifact_base_check_node` 칸 — 기배포
+행은 NULL = 노드 모름). 옛 이미지로 내리면 게이트·점검만 멈추고 테이블·칸은 남는다(코드 읽기 — **미검증**).
+
+---
+
 ## 13. 두 번째 클러스터(`dmsk8s`) — dms-k8s 브랜치 소관 (2026-10-21 구축, 2026-10-22 브랜치 분리)
 
 같은 호스트의 k8s 클러스터(컨텍스트 `dmsk8s`, https://dms-k8s.local VIP 10.20.20.101, `pkg-01:5001`, 태그 `kN`, LDAP 없음)의

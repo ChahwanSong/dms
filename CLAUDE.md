@@ -161,6 +161,12 @@ PostgreSQL(제어면) + React 포탈 + 노드 에이전트 + Volcano gang-schedu
   - root 는 매니페스트 **컨테이너 수준**(40-api/41-controller)에만 — Dockerfile `USER
     65532`·migrate 는 유지하고 `test_release_manifest_contract.py` 가 모양을 고정한다.
     "강화" 한답시고 runAsNonRoot/65532 를 넣으면 운영 base 에서 즉시 회귀한다.
+  - **「공유 스토리지(base) 접근 불가」는 base 수준 판정으로만 가른다**(2026-11-23 — dms-api 가 CephFS 미마운트 노드에 떠
+    모든 잡을 「아티팩트 없음」으로 보인 사고): 아티팩트·리포트를 여는 새 라우트는 실패 경로에서 `api/base_probe.BaseProbe`
+    를 물어 down 이면 503 `detail="artifact_base_unavailable"`(리터럴), 아니면 기존 404 — 파일 open 의 errno 로 가르지 마라(존재
+    오라클). base 를 만지는 새 **점검** 코드는 `artifact_base.BaseCheckRunner` 안에서만(멈춘 마운트). 일시 장애 결과를
+    scan_report_digests·ReportReadFailures 같은 캐시에 넣지 마라. API 시작 게이트는 형제 조건(`ApiBaseMonitor.gate_blocking`) —
+    무조건 게이트로 「강화」하지 마라(홀로 뜬 파드가 부분 장애를 포탈 전면 장애로 키운다). 불변식 16.
   - 전체 규칙은 `docs/ARCHITECTURE.md` §7 「root 제어면」.
 
 ## legacy (제거됨 — git 히스토리에서 열람)

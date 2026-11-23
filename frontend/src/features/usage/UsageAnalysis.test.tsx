@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, useLocation } from "react-router-dom";
@@ -950,11 +950,17 @@ test("쪽 나누기: 전체 수를 모르면(옛 파드) 쪽 넘김 없이 그 �
 
 test("toTargetPage: 배열 = 옛 파드(전체 수 모름), 쪽 객체는 모양을 다시 보고, rows 없는 객체는 오류", () => {
   expect(toTargetPage([{ target: "a" }])).toEqual({ rows: [{ target: "a" }], total: null, windowed: null,
-                                                    windowLimit: null, legacy: true });
+                                                    windowLimit: null, legacy: true, unreadableReason: null });
   expect(toTargetPage({ rows: [], total: 0, offset: 0, limit: 100, window_limit: 10000, windowed: false }))
-    .toEqual({ rows: [], total: 0, windowed: false, windowLimit: 10000, legacy: false });       // 0 은 정상값
+    .toEqual({ rows: [], total: 0, windowed: false, windowLimit: 10000, legacy: false,
+               unreadableReason: null });                                                       // 0 은 정상값
   expect(toTargetPage({ rows: [], total: -1, window_limit: "x", windowed: "yes" }))
-    .toEqual({ rows: [], total: null, windowed: null, windowLimit: null, legacy: false });
+    .toEqual({ rows: [], total: null, windowed: null, windowLimit: null, legacy: false, unreadableReason: null });
+  // 작업 기록 저장소 접근 불가(2026-11-23): 최상위 사유를 싣는다 -- 빈 문자열·문자열 아닌 값은 모름(null).
+  expect(toTargetPage({ rows: [], total: 0, window_limit: 1, windowed: false,
+                        unreadable_reason: "artifact_base_unavailable" }).unreadableReason).toBe("artifact_base_unavailable");
+  expect(toTargetPage({ rows: [], total: 0, unreadable_reason: "" }).unreadableReason).toBeNull();
+  expect(toTargetPage({ rows: [], total: 0, unreadable_reason: 3 }).unreadableReason).toBeNull();
   for (const bad of [null, {}, { rows: "x" }, "<!doctype html>"]) expect(() => toTargetPage(bad)).toThrow();
 });
 
@@ -1420,4 +1426,136 @@ test("스토리지별 비교: 요약이 없으면 대상 칸은 합계의 수 --
   await waitFor(() => expect(within(rowOf("weka")).getAllByRole("cell")[6]).toHaveTextContent(/^10,000\+$/));
   expect(within(rowOf("cephfs-dms")).getAllByRole("cell")[6]).toHaveTextContent(/^9$/);
   expect(toggle.closest("details")!).toHaveTextContent("최근 스캔된 창 안의 대상만 더한 부분 합");
+});
+
+// ---- 작업 기록 저장소(artifact base) 접근 불가(2026-11-23 사고) ----
+// 서버는 base 수준 점검이 실패한 요청에서만 unreadable_reason 을 싣는다. 화면은 그때만 원인을 덧붙이고(없으면 기존 정확 문자열 --
+// 위 테스트들이 고정한다), 데이터 쿼리를 폴링하지 않고 health 만 보다가 ok 로 바뀌면 사용량 쿼리를 한 번 새로 부른다.
+const BASE_DOWN = "작업 기록 저장소(공유 스토리지)에 접근할 수 없습니다(일시 장애일 수 있음)";
+const DOWN = "artifact_base_unavailable";
+
+test("이력 0건 + base 접근 불가: 기존 문장 뒤에 원인과 점검 화면 링크(실패색)", async () => {
+  setup({ path: "/admin/usage?storage=cephfs-dms&target=artifacts",
+          history: { ...HISTORY, points: [], skipped_unreadable: 2, unreadable_reason: DOWN } });
+  const p = await screen.findByText(`성공 scan 2건의 리포트를 읽지 못해 표시할 이력이 없습니다 — ${BASE_DOWN}`);
+  expect(p.className).toContain("text-bad");
+  expect(within(p).getByRole("link", { name: "아티팩트 경로 점검 보기" })).toHaveAttribute("href", "/admin/artifact-base");
+});
+
+test("이력 있음 + 빠진 scan + base 접근 불가: 요약 위 주의 줄(role=status) -- 사유가 없으면 그 줄은 없다", async () => {
+  setup({ path: "/admin/usage?storage=cephfs-dms&target=artifacts",
+          history: { ...HISTORY, skipped_unreadable: 1, unreadable_reason: DOWN } });
+  const region = await screen.findByRole("region", { name: "cephfs-dms:artifacts 상세" });
+  const note = await within(region).findByRole("status");
+  expect(note).toHaveTextContent(`최근 성공 scan 1건의 리포트를 읽지 못해 이력·최신 수치에서 빠졌습니다 — ${BASE_DOWN}`);
+  // 요약(dl)보다 앞 -- 남은 점이 「최신」처럼 읽히기 전에 말한다
+  expect(note.compareDocumentPosition(within(region).getByLabelText("최신 scan 요약"))
+    & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  cleanup();
+  setup({ path: "/admin/usage?storage=cephfs-dms&target=artifacts", history: HISTORY });     // skipped 1, 사유 없음
+  const plain = await screen.findByRole("region", { name: "cephfs-dms:artifacts 상세" });
+  await within(plain).findByText("최신 실 사용량");
+  expect(within(plain).queryByRole("status")).toBeNull();
+});
+
+test("최신 리포트를 못 읽은 행 + base 접근 불가: (DB) title 과 펼친 상세의 문장에 원인, 패널 위 안내 한 줄", async () => {
+  setup({ targets: { "cephfs-dms": [{ storage_name: "cephfs-dms", target: "dbonly", scan_count: 1, last_scan_at: isoAgo(1),
+          latest: point({ total_bytes: 2048, summary: {}, time_histograms: {}, report_readable: false,
+                          unreadable_reason: DOWN }) }] } });
+  const btn = await screen.findByRole("button", { name: "dbonly" });
+  const row = btn.closest("tr")!;
+  expect(within(row).getByText("(DB)")).toHaveAttribute(
+    "title", "최신 스캔 리포트를 읽지 못해 잡 기록(DB)의 용량을 표시합니다 (공유 스토리지 접근 불가)");
+  // 행 키만으로도 패널이 한 번 말한다(최상위 사유가 없는 응답이어도 행 키가 진실)
+  expect(screen.getByText(`일부 대상의 최신 scan 리포트를 읽지 못했습니다 — ${BASE_DOWN}`)).toBeInTheDocument();
+  await userEvent.click(btn);
+  const region = await screen.findByRole("region", { name: "cephfs-dms:dbonly 상세" });
+  expect(await within(region).findByText(
+    `최신 scan 의 리포트를 읽지 못해 온도·크기 분포를 알 수 없습니다 — ${BASE_DOWN}`)).toBeInTheDocument();
+});
+
+test("목록 최상위 unreadable_reason 이 있으면 표 위에 안내 한 줄 -- 없으면 없다", async () => {
+  setup();
+  await screen.findByRole("button", { name: "artifacts" });
+  expect(screen.queryByText(/일부 대상의 최신 scan 리포트를 읽지 못했습니다/)).toBeNull();
+  cleanup();
+  setup();
+  // setup 이 붙인 목록 핸들러를 덮는다(나중에 붙은 핸들러가 먼저 문다)
+  server.use(http.get("/api/admin/usage/scan-targets", () => HttpResponse.json({
+    rows: TARGETS, total: 2, offset: 0, limit: 100, window_limit: 10000, windowed: false, unreadable_reason: DOWN })));
+  expect(await screen.findByText(`일부 대상의 최신 scan 리포트를 읽지 못했습니다 — ${BASE_DOWN}`)).toBeInTheDocument();
+});
+
+test("합계가 base 접근 불가로 멈추면: 「읽는 중」이 아니라 「값 모름 N개(공유 스토리지 접근 불가)」, 1초 이어 읽기도 없다", async () => {
+  const calls: number[] = [];
+  setup({ totals: (s, call) => {
+    calls.push(call);
+    return totalsOf(s, { pending_count: 2, progressed: true, total_files: m(600, 2, 2), unreadable_reason: DOWN });
+  } });
+  const box = await totalsBox();
+  expect(await within(box).findByText(/값 모름 2개\(공유 스토리지 접근 불가\)/)).toBeInTheDocument();
+  expect(box).not.toHaveTextContent("요약 읽는 중");
+  await new Promise((r) => setTimeout(r, 1300));
+  expect(calls).toEqual([1]);
+});
+
+test("스토리지별 비교: 합계가 base 접근 불가로 멈춘 행은 이름 옆 표식(낭독 문장·title 에 원인)", async () => {
+  setup({ storages: [st("cephfs-dms"), st("weka")], summary: [sum("cephfs-dms"), sum("weka")],
+          totals: { "cephfs-dms": totalsOf("cephfs-dms"),
+                    weka: totalsOf("weka", { total_bytes: m(1024, 1, 1), unreadable_reason: DOWN }) } });
+  await within(await totalsBox()).findByText("17.0 MiB");
+  const toggle = screen.getByText("스토리지별 비교");
+  await userEvent.click(toggle);
+  const table = await within(toggle.closest("details")!).findByRole("table");
+  const rowOf = (name: string) => within(table).getByRole("button", { name: `${name} 탭 열기` }).closest("tr")!;
+  await waitFor(() => expect(rowOf("weka")).toHaveTextContent("1.0 KiB이상"));
+  expect(within(rowOf("weka")).getByText("(공유 스토리지 접근 불가 — 합계가 일부만 읽혔습니다)")).toBeInTheDocument();
+  expect(within(rowOf("weka")).getAllByRole("cell")[1].getAttribute("title")).toContain(BASE_DOWN);
+  expect(within(rowOf("cephfs-dms")).queryByText(/공유 스토리지 접근 불가/)).toBeNull();
+});
+
+test("복구 감시: 사유가 없으면 health 를 묻지 않는다", async () => {
+  let health = 0;
+  setup({ path: "/admin/usage?storage=cephfs-dms&target=artifacts" });
+  server.use(http.get("/api/admin/artifact-base/health", () => { health += 1; return HttpResponse.json({ ok: true }); }));
+  const region = await screen.findByRole("region", { name: "cephfs-dms:artifacts 상세" });
+  await within(region).findByText("최신 실 사용량");
+  await new Promise((r) => setTimeout(r, 200));
+  expect(health).toBe(0);
+});
+
+test("복구 감시: 사유가 있는 동안 health 만 15초마다 보고(데이터 쿼리 폴링 없음), ok 로 바뀌면 사용량 쿼리를 한 번 새로 부른다", async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  try {
+    let healthOk = false, healthCalls = 0, historyCalls = 0;
+    setup({ path: "/admin/usage?storage=cephfs-dms&target=artifacts" });
+    server.use(
+      http.get("/api/admin/artifact-base/health", () => {
+        healthCalls += 1;
+        return HttpResponse.json({ ok: healthOk, reason: healthOk ? null : "artifact_base_jobs_missing",
+                                   checked_at: null, instance: "dms-api-1", node_name: "n1" });
+      }),
+      http.get("/api/admin/usage/scan-history", () => {
+        historyCalls += 1;
+        return HttpResponse.json(healthOk ? HISTORY
+          : { ...HISTORY, points: [], skipped_unreadable: 3, unreadable_reason: DOWN });
+      }),
+    );
+    expect(await screen.findByText(`성공 scan 3건의 리포트를 읽지 못해 표시할 이력이 없습니다 — ${BASE_DOWN}`)).toBeInTheDocument();
+    await waitFor(() => expect(healthCalls).toBe(1));
+    await act(async () => { await vi.advanceTimersByTimeAsync(15_100); });
+    await waitFor(() => expect(healthCalls).toBe(2));
+    expect(historyCalls).toBe(1);                       // 실패 중엔 데이터 쿼리를 다시 부르지 않는다
+    healthOk = true;
+    await act(async () => { await vi.advanceTimersByTimeAsync(15_100); });
+    await waitFor(() => expect(historyCalls).toBe(2));  // ok 로 바뀐 순간 한 번
+    const region = await screen.findByRole("region", { name: "cephfs-dms:artifacts 상세" });
+    expect(await within(region).findByText("최신 실 사용량")).toBeInTheDocument();
+    // 사유가 사라졌으니 감시도 꺼진다
+    const settled = healthCalls;
+    await act(async () => { await vi.advanceTimersByTimeAsync(15_100); });
+    expect(healthCalls).toBe(settled);
+  } finally {
+    vi.useRealTimers();
+  }
 });

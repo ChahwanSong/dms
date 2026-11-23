@@ -231,6 +231,9 @@ interface RowCtx {
   selectedKey: string | null; slot: NavSlot; viewerId: string;
   entrySize: (item: OutputItem) => number | null;
   listLoading: boolean;
+  // 목록 조회가 실패했고 보일 데이터도 없다(2026-11-23 -- 503 artifact_base_unavailable 등). 그때 단계마다 「출력 없음」을
+  // 말하면 아래 「출력 파일 목록을 불러오지 못했습니다」와 모순이다(모름 ≠ 없음).
+  listFailed: boolean;
   onSelect: (slot: NavSlot, key: string) => void;
   onClose: (slot: NavSlot) => void;
   chipRef: (key: string, el: HTMLButtonElement | null) => void;
@@ -266,7 +269,7 @@ function StepRow({ step, items, notes, last, ctx }: {
         {items.length > 0 ? (
           <OutputChips label={STEP_COPY[step.id]} items={items} slot={ctx.slot} selectedKey={ctx.selectedKey}
                        live={live} onSelect={ctx.onSelect} chipRef={ctx.chipRef} viewerId={ctx.viewerId} />
-        ) : ended && !ctx.listLoading ? (
+        ) : ended && !ctx.listLoading && !ctx.listFailed ? (
           <p className="mt-1 text-xs text-ink/70">출력 없음</p>
         ) : null}
       </div>
@@ -444,6 +447,7 @@ export function JobStages({ job, events, requestTerminal = false, jobCount = 1, 
     return e && typeof e.size === "number" && Number.isFinite(e.size) ? e.size : null;
   };
   const listLoading = artifacts.isLoading;
+  const listFailed = artifacts.isError && !artifacts.data;
   const onClose = (slot: NavSlot) => {
     const key = nav.selected[slot];
     nav.close(slot);
@@ -452,7 +456,7 @@ export function JobStages({ job, events, requestTerminal = false, jobCount = 1, 
   };
   const ctxFor = (slot: NavSlot): RowCtx => ({
     job, model, refIso, slot, selectedKey: nav.selected[slot], viewerId: viewerId(slot),
-    entrySize, listLoading, onSelect: nav.select, onClose, chipRef,
+    entrySize, listLoading, listFailed, onSelect: nav.select, onClose, chipRef,
   });
 
   const renderSteps = (stage: StageModel) => {

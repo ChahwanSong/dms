@@ -26,6 +26,7 @@ import { ControlStatePage } from "../features/control/ControlStatePage";
 import { ArtifactBasePage } from "../features/control/ArtifactBasePage";
 import { AccountsList } from "../features/accounts/AccountsList";
 import { NodesList } from "../features/nodes/NodesList";
+import { MountsPage } from "../features/mounts/MountsPage";
 import { BuildForm } from "../features/builds/BuildForm";
 import { BuildHistory } from "../features/builds/BuildHistory";
 import { RegistryImages } from "../features/builds/RegistryImages";
@@ -86,6 +87,7 @@ export function AppRouter() {
           <Route path="/admin/artifact-base" element={<RequireRole role="admin"><AppShell><ArtifactBasePage /></AppShell></RequireRole>} />
           <Route path="/admin/accounts" element={<RequireRole role="admin"><AppShell><AccountsList /></AppShell></RequireRole>} />
           <Route path="/admin/nodes" element={<RequireRole role="admin"><AppShell><NodesList /></AppShell></RequireRole>} />
+          <Route path="/admin/mounts" element={<RequireRole role="admin"><AppShell><MountsPage /></AppShell></RequireRole>} />
           {/* 빌드는 하위 페이지 셋: 기본(/admin/builds)이 빌드하기, /history 가 이력,
               /images 가 이미지 관리. 「history」·「images」는 :buildId 패턴에도
               매칭되므로 **먼저** 와야 한다(/admin/batches/new vs :batchId 와 같은

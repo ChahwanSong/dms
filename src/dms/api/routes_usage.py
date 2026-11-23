@@ -32,12 +32,13 @@ from typing import Iterator
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from ..artifact_base import resolve_artifact_base
+from ..artifact_base import ARTIFACT_BASE_UNAVAILABLE, resolve_artifact_base
 from ..db import utc_now_iso
 from ..repositories.request_purges import (LIMIT_REASONS, MAX_BATCH_DELETE_ITEMS, RLOCK_YIELD_SECONDS,
                                            SYNC_CALL_FACTOR, within_call_budget)
 from .artifacts import ArtifactError, job_owner_uid, read_artifact, strip_scheme
 from .auth import Identity, audit_actor, require_admin, require_session_admin
+from .base_probe import BaseProbe
 from .routes_request_purge import MAX_DELETE, MAX_DELETE_BATCHES
 from .routes_requests import reject_when_maintenance
 from .routes_scan_paths import (_buckets, _is_number, _numbers, _time_histograms,
@@ -177,27 +178,64 @@ def _cached_digests(repos, job_ids) -> dict:
     return {jid: _project_report(d) for jid, d in repos.scan_digests.get_many(job_ids).items()}
 
 
-def _read_and_cache(repos, base: str, jobs: list) -> dict:
+def _read_and_cache(repos, base: str, jobs: list, probe: "BaseProbe | None" = None) -> dict:
     """캐시에 없던 잡들의 리포트를 읽어 투영하고 한 번에(put_many) 캐시에 둔다. job_id -> 요약, 못 읽은 잡은 결과에 없다
-    (캐시에도 두지 않는다 -- 일시 오류를 영구 "모름"으로 굳히지 않게)."""
+    (캐시에도 두지 않는다 -- 일시 오류를 영구 "모름"으로 굳히지 않게).
+
+    probe(2026-11-23, api/base_probe.py): 읽기가 실패하면(_read_digest None) 그때 한 번 base 수준 판정을 묻고, base 접근
+    불가면 **남은 잡을 열지 않고 멈춘다**(probe.halted) -- 멈춘·빠진 마운트에서 수백 건을 하나씩 실패시키지 않는다. 열지
+    않은 잡·실패한 잡은 probe.unread 에 모아 응답이 그 행에 원인(unreadable_reason)을 붙인다. 멈춘 마운트(hung)면 아예 열지
+    않는다. _read_digest 의 시그니처는 그대로다(테스트가 routes_usage._read_digest 를 바꿔 끼우는 이음새)."""
     fresh = {}
-    for job in jobs:
+    if not jobs:
+        # 열 것이 없으면 판정도 하지 않는다 -- 다 캐시인 응답에 halted(→ 최상위 unreadable_reason)가 서면 포탈이 거짓
+        # 「일부 대상을 읽지 못했습니다」를 띄우고 복구 감시를 돌린다(2026-11-23 리뷰).
+        return fresh
+    if probe is not None and (probe.halted or probe.hung()):
+        probe.halted = True
+        probe.unread.update(j["job_id"] for j in jobs)
+        return fresh
+    for i, job in enumerate(jobs):
         digest = _read_digest(base, job)
         if digest is not None:
             fresh[job["job_id"]] = digest
+            if probe is not None:
+                probe.note_success()
+        elif probe is not None:
+            probe.unread.add(job["job_id"])
+            if probe.down:
+                probe.halted = True
+                probe.unread.update(j["job_id"] for j in jobs[i + 1:])
+                break
     if fresh:
         repos.scan_digests.put_many(fresh)
     return fresh
 
 
-def _digests(repos, base: str, jobs: list, *, skip=frozenset()) -> dict:
+def _digests(repos, base: str, jobs: list, *, skip=frozenset(), probe: "BaseProbe | None" = None) -> dict:
     """job_id -> digest. 캐시에 있으면 그것(재투영), 없으면 리포트를 읽어 투영하고 캐시에 둔다. 못 읽은 잡은 결과에
     없다. skip = 같은 요청의 앞 단계(지표 정렬 값 계산)가 이미 읽다 실패한 잡 -- 다시 열지 않는다(한 응답 안에서 정렬 값과
-    보이는 값이 같은 읽기에서 나오게, 크기 초과 리포트를 두 번 256KiB 씩 읽지 않게)."""
+    보이는 값이 같은 읽기에서 나오게, 크기 초과 리포트를 두 번 256KiB 씩 읽지 않게). 캐시 적중은 base 상태와 무관하게
+    준다(불변 산출물 -- 장애 중에도 목록 대부분이 산다)."""
     cached = _cached_digests(repos, [j["job_id"] for j in jobs])
     cached.update(_read_and_cache(repos, base, [j for j in jobs
-                                                if j["job_id"] not in cached and j["job_id"] not in skip]))
+                                                if j["job_id"] not in cached and j["job_id"] not in skip],
+                                  probe))
     return cached
+
+
+def _latest_point(job: dict, digest: "dict | None", probe: "BaseProbe | None", skip=frozenset()) -> dict:
+    """목록·내보내기 행의 latest 포인트. 이 요청에서 base 접근 불가로 못 읽은 행에만 "unreadable_reason" 키를 단다 --
+    정상 경로의 바이트는 그대로다(tests/test_usage_equivalence.py)."""
+    point = _point(job, digest)
+    if (digest is None and probe is not None and probe.halted
+            and (job["job_id"] in probe.unread or job["job_id"] in skip)):
+        point["unreadable_reason"] = ARTIFACT_BASE_UNAVAILABLE
+    return point
+
+
+def _unreadable_reason(probe: "BaseProbe | None") -> "str | None":
+    return ARTIFACT_BASE_UNAVAILABLE if probe is not None and probe.halted else None
 
 
 def _point(job: dict, digest: "dict | None") -> dict:
@@ -232,6 +270,12 @@ def _base(request: Request) -> str:
                                               request.app.state.settings))
 
 
+def _base_and_probe(request: Request) -> "tuple[str, BaseProbe]":
+    uri = resolve_artifact_base(request.app.state.repos.control, request.app.state.settings)
+    probe = BaseProbe(request.app.state, uri)
+    return probe.path, probe
+
+
 def _public(head: dict) -> dict:
     """머리 행(DataJobsRepository.scan_target_heads) -> 목록·내보내기 행의 공개 열. 열과 순서는 옛 GROUP BY 질의 그대로다
     (응답 바이트가 같게 -- tests/test_usage_equivalence.py). job_id·bytes_count 같은 정렬 재료는 싣지 않는다."""
@@ -252,20 +296,22 @@ def _recent_jobs(repos, heads: list, per_target: int) -> dict:
     return out
 
 
-def _with_latest(repos, base: str, heads: list, *, skip=frozenset()) -> list:
+def _with_latest(repos, base: str, heads: list, *, skip=frozenset(), probe: "BaseProbe | None" = None) -> list:
     """반환할 행마다 latest(최신 성공 scan 1건의 포인트)를 붙인다. 리포트 요약은 캐시에서 오고, 캐시에 없는 잡만
     아티팩트를 연다. 호출자는 limit(≤ _TARGET_LIMIT) 뒤의 행만 넘긴다 -- 한 묶음이다."""
     recent = _recent_jobs(repos, heads, 1)
-    digests = _digests(repos, base, [jobs[0] for jobs in recent.values()], skip=skip)
+    digests = _digests(repos, base, [jobs[0] for jobs in recent.values()], skip=skip, probe=probe)
     out = []
     for h in heads:
         jobs = recent.get((h["storage_name"], h["target"])) or []
         out.append({**_public(h),
-                    "latest": _point(jobs[0], digests.get(jobs[0]["job_id"])) if jobs else None})
+                    "latest": (_latest_point(jobs[0], digests.get(jobs[0]["job_id"]), probe, skip)
+                               if jobs else None)})
     return out
 
 
-def _metric_order(repos, base: str, heads: list, sort: str, order: str, unreadable: set) -> list:
+def _metric_order(repos, base: str, heads: list, sort: str, order: str, unreadable: set,
+                  probe: "BaseProbe | None" = None) -> list:
     """창(머리 행들)을 지표 값(bytes·files·hot)으로 정렬한다 -- 화면과 같은 값(usage_metrics.metric_value 를 latest 포인트에
     거는 것과 같은 결과)이지만 포인트는 남기지 않는다. _CHUNK 묶음마다: 최신 잡 job_id 로 캐시를 묻고, 없는 잡만 전체 행
     (요청자 uid)을 읽어 리포트를 열고 한 번에 캐시에 넣은 뒤(put_many), 값만 남기고 요약은 버린다. 못 읽은 잡은
@@ -273,15 +319,21 @@ def _metric_order(repos, base: str, heads: list, sort: str, order: str, unreadab
 
     storage_name 이 NULL 인 머리는 값이 없다(모름 -- 리포트도 열지 않는다): 반환 행의 latest 는 (storage, target) 으로 잡을
     찾는데 NULL 은 아무것도 맞지 않는다(recent_scans_for_targets). 정렬 값과 보이는 값이 한 판정이어야 「모름은 맨 뒤」가
-    화면과 맞는다."""
+    화면과 맞는다.
+
+    probe 가 base 접근 불가로 멈추면(halted) 남은 묶음은 잡 행 조회·아티팩트 열기를 건너뛴다 -- 값은 캐시만으로 정하고 못
+    읽은 것은 unreadable(=모름, 맨 뒤)이다."""
     keys = []
     for i in range(0, len(heads), _CHUNK):
         chunk = heads[i:i + _CHUNK]
         ids = [h["job_id"] for h in chunk if h["storage_name"] is not None]
         digests = _cached_digests(repos, ids)
         missing = [jid for jid in ids if jid not in digests]
-        if missing:
-            fresh = _read_and_cache(repos, base, list(repos.data_jobs.jobs_by_ids(missing).values()))
+        if missing and probe is not None and probe.halted:
+            unreadable.update(missing)
+            probe.unread.update(missing)
+        elif missing:
+            fresh = _read_and_cache(repos, base, list(repos.data_jobs.jobs_by_ids(missing).values()), probe)
             unreadable.update(jid for jid in missing if jid not in fresh)
             digests.update(fresh)
         for h in chunk:
@@ -323,23 +375,26 @@ def scan_targets(request: Request, q: "str | None" = Query(None, max_length=512)
     깨진다 -- 같은 경로면 옛 파드는 모르는 인자를 무시하고 배열을 주고, 포탈은 「그 행들, 전체 수 모름」으로 물러선다."""
     repos = request.app.state.repos
     flt = {"q": q or None, "storage": storage, "path": path or None}
-    base = _base(request)
+    # probe(2026-11-23): base 접근 불가면 남은 리포트를 열지 않고, 그 요청에서 못 읽은 행의 latest 에만
+    # unreadable_reason 을 단다(정상 경로 바이트 동일). 객체 응답(offset)은 최상위 unreadable_reason 도 싣는다 -- 배열
+    # 응답(옛 탭)의 최상위 모양은 그대로다.
+    base, probe = _base_and_probe(request)
     unreadable: set = set()
     metric = sort in METRIC_SORTS
     start = offset if offset is not None else 0
     if metric:
         window = repos.data_jobs.scan_target_heads(**flt, order="desc", limit=_WINDOW_LIMIT)
         # 창 끝을 넘은 쪽은 정렬할 것도 없다(창 전체의 값 계산을 건너뛴다 -- 결과는 어차피 빈 쪽).
-        page = (_metric_order(repos, base, window, sort, order, unreadable)[start:start + limit]
+        page = (_metric_order(repos, base, window, sort, order, unreadable, probe)[start:start + limit]
                 if start < len(window) else [])
     else:
         page = repos.data_jobs.scan_target_heads(**flt, order=order, limit=limit, sort=sort, offset=start)
-    rows = _with_latest(repos, base, page, skip=unreadable)
+    rows = _with_latest(repos, base, page, skip=unreadable, probe=probe)
     if offset is None:
         return rows
     total = repos.data_jobs.count_scan_targets(**flt)
     return {"rows": rows, "total": total, "offset": offset, "limit": limit, "window_limit": _WINDOW_LIMIT,
-            "windowed": metric and total > _WINDOW_LIMIT}
+            "windowed": metric and total > _WINDOW_LIMIT, "unreadable_reason": _unreadable_reason(probe)}
 
 
 def _storage_infos(repos, names) -> dict:
@@ -372,7 +427,8 @@ def _previous(job: dict, cached: "dict | None") -> dict:
             "finished_at": job.get("updated_at"), "total_bytes": total}
 
 
-def _export_body(repos, base: str, heads: list, infos: dict, opening: bytes, skip) -> Iterator[bytes]:
+def _export_body(repos, base: str, heads: list, infos: dict, opening: bytes, skip,
+                 probe: "BaseProbe | None" = None) -> Iterator[bytes]:
     """내보내기 본문을 _CHUNK 타깃 묶음씩 흘린다. 묶음마다 최근 두 잡(최신 + 직전)·최신의 요약(캐시, 없으면 읽고 put_many)·
     직전의 캐시 요약만 읽어 행 JSON 을 만들고 버린다 -- 피크 메모리가 묶음 하나다. 행의 바이트는 옛 통짜 본문의 그 행과
     같다(json.dumps 같은 인자 -- 목록 안 객체의 인코딩은 단독 인코딩과 같다).
@@ -385,7 +441,7 @@ def _export_body(repos, base: str, heads: list, infos: dict, opening: bytes, ski
     for i in range(0, len(heads), _CHUNK):
         chunk = heads[i:i + _CHUNK]
         recent = _recent_jobs(repos, chunk, 2)
-        digests = _digests(repos, base, [js[0] for js in recent.values()], skip=skip)
+        digests = _digests(repos, base, [js[0] for js in recent.values()], skip=skip, probe=probe)
         prev_cached = repos.scan_digests.get_many([js[1]["job_id"] for js in recent.values() if len(js) > 1])
         parts = []
         for h in chunk:
@@ -393,7 +449,8 @@ def _export_body(repos, base: str, heads: list, infos: dict, opening: bytes, ski
             parts.append(json.dumps({
                 **_public(h),
                 "storage": infos.get(h["storage_name"]),
-                "latest": _point(js[0], digests.get(js[0]["job_id"])) if js else None,
+                # base 접근 불가로 못 읽은 행만 latest 에 unreadable_reason(꼬리 `],"count":N}` 바이트는 그대로).
+                "latest": _latest_point(js[0], digests.get(js[0]["job_id"]), probe, skip) if js else None,
                 "previous": _previous(js[1], prev_cached.get(js[1]["job_id"])) if len(js) > 1 else None},
                 separators=(",", ":")))
         yield (("," if n else "") + ",".join(parts)).encode()
@@ -428,14 +485,14 @@ def export_usage(request: Request, q: "str | None" = Query(None, max_length=512)
                                               sort="last_scan" if metric else sort)
     truncated = len(heads) > _WINDOW_LIMIT
     heads = heads[:_WINDOW_LIMIT]
-    base = _base(request)
+    base, probe = _base_and_probe(request)
     unreadable: set = set()
     if metric:
-        heads = _metric_order(repos, base, heads, sort, order, unreadable)
+        heads = _metric_order(repos, base, heads, sort, order, unreadable, probe)
     infos = _storage_infos(repos, dict.fromkeys(h["storage_name"] for h in heads))
     opening = (f'{{"generated_at":{json.dumps(utc_now_iso())},"truncated":{json.dumps(truncated)},'
                f'"rows":[').encode()
-    return StreamingResponse(_export_body(repos, base, heads, infos, opening, unreadable),
+    return StreamingResponse(_export_body(repos, base, heads, infos, opening, unreadable, probe),
                              media_type="application/json")
 
 
@@ -530,7 +587,7 @@ def storage_totals(request: Request, storage: str = Query(..., max_length=512)):
     truncated = len(heads) > _WINDOW_LIMIT
     heads = heads[:_WINDOW_LIMIT]
     top, nested, invalid = maximal_targets(heads)
-    base = _base(request)
+    base, probe = _base_and_probe(request)
     acc = StorageTotals()
     failures: ReportReadFailures = request.app.state.report_read_failures
     budget, pending, unreadable, read_ok, noted = _TOTALS_READ_BUDGET, 0, 0, 0, 0
@@ -545,12 +602,20 @@ def storage_totals(request: Request, storage: str = Query(..., max_length=512)):
         take, later = untried[:budget], untried[budget:]
         budget -= len(take)
         pending += len(later)
-        if take:
-            fresh = _read_and_cache(repos, base, list(repos.data_jobs.jobs_by_ids(take).values()))
+        if take and probe.halted:
+            pending += len(take)                   # base 접근 불가 -- 열지 않고 다음 호출로(실패로 기억하지 않는다)
+        elif take:
+            fresh = _read_and_cache(repos, base, list(repos.data_jobs.jobs_by_ids(take).values()), probe)
             read_ok += len(fresh)
             failed = [jid for jid in take if jid not in fresh]      # 그 사이 지워진 잡도 못 읽은 것이다
-            unreadable += len(failed)
-            noted += failures.record(failed)
+            if probe.halted:
+                # 2026-11-23: base 접근 불가(일시 장애일 수 있다)는 「이 리포트를 못 읽음」이 아니다 -- 처음 실패한 잡까지
+                # pending 으로 세고 실패 기억(TTL 10분)에 넣지 않는다. 넣으면 복구 뒤에도 그 대상들이 「못 읽음」으로
+                # 남고, progressed 가 거짓 True 가 돼 포탈이 창 전체를 헛돈다.
+                pending += len(failed)
+            else:
+                unreadable += len(failed)
+                noted += failures.record(failed)
             digests.update(fresh)
         for h in chunk:
             d = digests.get(h["job_id"])           # 못 읽음·지연 = None -> 실 사용량은 bytes_count(목록 열과 같은 대체)
@@ -564,7 +629,9 @@ def storage_totals(request: Request, storage: str = Query(..., max_length=512)):
     return {"storage_name": storage, "computed_at": utc_now_iso(), "truncated": truncated,
             "window_limit": _WINDOW_LIMIT, "target_count": len(heads), "summed_target_count": len(top),
             "nested_target_count": nested, "invalid_target_count": invalid, "unreadable_count": unreadable,
-            "pending_count": pending, "progressed": read_ok > 0 or noted > 0, **acc.result(), "filesystem": filesystem}
+            "pending_count": pending, "progressed": read_ok > 0 or noted > 0, **acc.result(), "filesystem": filesystem,
+            # base 접근 불가로 이번 호출이 읽기를 멈췄으면 그 원인(포탈의 「값 모름 N개」 옆 설명) -- 아니면 null.
+            "unreadable_reason": _unreadable_reason(probe)}
 
 
 @router.get("/api/admin/usage/unregistered-storages")
@@ -733,7 +800,8 @@ def scan_history(request: Request, storage: str = Query(..., min_length=1),
     상태이지 오류가 아니다(404 로 접으면 "타깃이 사라졌다"와 구별 불능)."""
     repos = request.app.state.repos
     rows = repos.data_jobs.succeeded_scans_for_target(storage, target, limit=limit)
-    digests = _digests(repos, _base(request), rows)
+    base, probe = _base_and_probe(request)
+    digests = _digests(repos, base, rows, probe=probe)
     points, skipped = [], 0
     for row in rows:
         digest = digests.get(row["job_id"])
@@ -752,6 +820,9 @@ def scan_history(request: Request, storage: str = Query(..., min_length=1),
         p["job_id"]))
     return {"storage_name": storage, "target": target,
             "points": points, "skipped_unreadable": skipped,
+            # 2026-11-23: 건너뛴 포인트의 원인이 base 접근 불가(일시 장애일 수 있음)면 그 코드, 아니면 null -- 「성공 scan N건의
+            # 리포트를 읽지 못해…」 문구가 원인을 말하게(TargetDetail).
+            "unreadable_reason": _unreadable_reason(probe),
             # 창 고지(2026-08-23 리뷰): 이력은 최신 limit 건 창이다. 행 수가 창을
             # 꽉 채웠으면 그 너머가 있을 수 있다 -- 화면이 "전체 이력"인 척하면
             # 타깃 목록의 전수 scan_count 와 한 화면에서 모순된다.

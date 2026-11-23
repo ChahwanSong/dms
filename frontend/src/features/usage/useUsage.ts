@@ -1,5 +1,7 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useCallback, useEffect, useRef, useSyncExternalStore } from "react";
+import { useMutation, useQuery, useQueryClient, type Query } from "@tanstack/react-query";
 import { apiGet, apiSend } from "../../lib/api";
+import { useArtifactBaseHealth } from "../control/useArtifactBase";
 import type { PurgeStorageHistoryResult, ScanTargetRow, ScanTargetsPaged, UnregisteredStorage, UsageExport,
               UsageHistory, UsageStorageTotals, UsageStorages } from "../../lib/types";
 import { DELETE_REQUESTS_INVALIDATES } from "../jobs/useJobs";
@@ -31,19 +33,49 @@ export function targetQuery(f: TargetFilter): string {
 // 목록 한 쪽(화면이 읽는 모양). total = 필터에 맞는 대상 전체 수, windowed = 지표 정렬이 창(window_limit) 안에서만 돈다(창 밖
 // 대상은 어느 쪽에도 없다) -- 둘 다 null = 모름: 롤링 배포 중 옛 api 파드는 offset 을 몰라 예전 배열(첫 100행)을 준다. 그때는
 // 0 으로 접지 않고 「그 행들, 전체 수 모름」으로 받아(legacy) 화면이 탭의 대상 수 기반 옛 문구로 물러선다.
+// unreadableReason(2026-11-23) = 이 요청에서 작업 기록 저장소(artifact base)에 접근하지 못해 리포트를 못 읽은 행이 있다(서버 최상위
+// unreadable_reason -- 공개 코드 하나). 옛 배열 응답·정상이면 null.
 export interface ScanTargetPage {
   rows: ScanTargetRow[]; total: number | null; windowed: boolean | null; windowLimit: number | null; legacy: boolean;
+  unreadableReason: string | null;
 }
 
 // 서버 응답 -> 한 쪽. 응답은 DB 를 거친 값이라(신뢰 경계) 모양을 다시 본다 -- 배열이면 옛 파드, rows 배열이 든 객체면 쪽 응답,
 // 그 밖은 오류로 던진다(빈 목록으로 접으면 「기록 없음」이라는 거짓이 된다).
 export function toTargetPage(body: unknown): ScanTargetPage {
-  if (Array.isArray(body)) return { rows: body as ScanTargetRow[], total: null, windowed: null, windowLimit: null, legacy: true };
+  if (Array.isArray(body)) {
+    return { rows: body as ScanTargetRow[], total: null, windowed: null, windowLimit: null, legacy: true, unreadableReason: null };
+  }
   const b = body as ScanTargetsPaged | null;
   if (b === null || typeof b !== "object" || !Array.isArray(b.rows)) throw new Error("목록 응답의 모양이 올바르지 않습니다");
   const count = (x: unknown) => (typeof x === "number" && Number.isInteger(x) && x >= 0 ? x : null);
   return { rows: b.rows, total: count(b.total), windowed: typeof b.windowed === "boolean" ? b.windowed : null,
-           windowLimit: count(b.window_limit), legacy: false };
+           windowLimit: count(b.window_limit), legacy: false, unreadableReason: reasonOf(b.unreadable_reason) };
+}
+
+// ---- 작업 기록 저장소(artifact base) 접근 불가(2026-11-23 사고) ----
+// 서버는 base 수준 점검이 실패한 요청에서만 unreadable_reason 을 싣는다(정상 경로 바이트 동일). 이 응답은 일시 장애의 산물이라
+// 캐시에 굳히지 않는다: staleTime 은 사유가 있는 캐시만 0(다음 마운트·포커스에 다시 묻는다), 데이터 쿼리 자체는 폴링하지 않는다
+// (스토리지마다·지표 정렬 창마다 서버가 DB 를 다시 돈다) -- 가벼운 health 만 보다가 복구되면 사용량 쿼리를 한 번 무효화한다
+// (useUsageBaseRecovery).
+export const reasonOf = (x: unknown): string | null => (typeof x === "string" && x !== "" ? x : null);
+// 목록 한 쪽의 사유: 최상위 값, 없으면 행 latest 의 키(옛 서버가 최상위 없이 행에만 실을 일은 없지만 행 키가 진실이다).
+export function pageReason(p: ScanTargetPage | undefined): string | null {
+  if (p === undefined) return null;
+  return p.unreadableReason ?? p.rows.reduce<string | null>((acc, r) => acc ?? reasonOf(r.latest?.unreadable_reason), null);
+}
+const freshFor = (ms: number, reason: string | null) => (reason !== null ? 0 : ms);
+// 사용량 쿼리 키 접두 -- 복구 때 무효화하는 범위(작업 삭제의 DELETE_REQUESTS_INVALIDATES 와 같은 접두).
+const USAGE_ROOTS = ["usage-targets", "usage-storages", "usage-history"] as const;
+function cachedReason(q: Query): string | null {
+  const d = q.state.data as unknown;
+  if (d === undefined || d === null || typeof d !== "object") return null;
+  switch (q.queryKey[0]) {
+    case "usage-targets": return pageReason(d as ScanTargetPage);
+    case "usage-history": return reasonOf((d as UsageHistory).unreadable_reason);
+    case "usage-storages": return q.queryKey[1] === "totals" ? reasonOf((d as UsageStorageTotals).unreadable_reason) : null;
+    default: return null;
+  }
 }
 
 // 타깃 목록 한 쪽(page 는 1부터): 필터·쪽이 쿼리키에 들어가 조합별로 캐시된다. 4s 폴링은 불필요 --
@@ -58,7 +90,7 @@ export const useScanTargets = (f: TargetFilter, page: number) =>
     queryFn: async () => toTargetPage(await apiGet<unknown>(
       `/api/admin/usage/scan-targets?${targetQuery(f)}&offset=${(page - 1) * PAGE_SIZE}&limit=${PAGE_SIZE}`)),
     placeholderData: (prev, prevQuery) => (prevQuery?.queryKey[1] === f.storage ? prev : undefined),
-    staleTime: 30_000,
+    staleTime: (q) => freshFor(30_000, pageReason(q.state.data)),
   });
 
 // 스토리지 탭 요약(2026-10-20): 탭 집합·대상 수·메타 줄·지표 정렬 창 상한의 원천 하나(서버 집계 한 번). 스토리지
@@ -80,10 +112,12 @@ export const useStorageTotals = (storage: string) =>
     queryKey: ["usage-storages", "totals", storage],
     queryFn: () => apiGet<UsageStorageTotals>(
       `/api/admin/usage/storage-totals?storage=${encodeURIComponent(storage)}`),
-    staleTime: 30_000,
+    staleTime: (q) => freshFor(30_000, reasonOf(q.state.data?.unreadable_reason)),
+    // base 접근 불가로 멈춘 응답(unreadable_reason)은 이어 읽지 않는다 -- progressed 가 참이어도 다음 호출은 같은 벽에 부딪힌다.
     refetchInterval: (q) => {
       const d = q.state.data;
-      return q.state.status !== "error" && d !== undefined && d.pending_count > 0 && d.progressed === true ? 1_000 : false;
+      return q.state.status !== "error" && d !== undefined && d.pending_count > 0 && d.progressed === true
+        && reasonOf(d.unreadable_reason) === null ? 1_000 : false;
     },
   });
 
@@ -114,8 +148,40 @@ export const useScanHistory = (storage: string | null, target: string | null,
     enabled: storage !== null && target !== null,
     placeholderData: (prev, prevQuery) =>
       (prevQuery?.queryKey[1] === storage && prevQuery?.queryKey[2] === target ? prev : undefined),
-    staleTime: 60_000,
+    staleTime: (q) => freshFor(60_000, reasonOf(q.state.data?.unreadable_reason)),
   });
+
+// 복구 감시(2026-11-23): 사용량 캐시 중 하나라도 base 접근 불가 사유를 들고 있는 동안만 health(15초, 메모리 스냅숏)를 보고, ok 가
+// 참으로 **바뀌는** 순간 사용량 쿼리를 한 번 무효화한다. 사용량 화면에서 한 번만 부른다(컴포넌트마다 부르면 관찰자마다 15초 타이머가
+// 생긴다). 「바뀜」만 보는 이유: health 는 요청을 받은 파드의 스냅숏이라 데이터를 준 파드와 다를 수 있다 -- ok 인 동안 매번
+// 무효화하면 사유가 남는 한 15초마다 데이터 쿼리를 다시 부르는 폴링이 된다. 사유가 사라지면 감시를 끄고 기억도 지운다(다음
+// 장애에서 첫 ok 를 다시 「바뀜」으로 본다).
+export function useUsageBaseRecovery(): boolean {
+  const qc = useQueryClient();
+  const cache = qc.getQueryCache();
+  const subscribe = useCallback((cb: () => void) => cache.subscribe(cb), [cache]);
+  const anyReason = useSyncExternalStore(subscribe, () =>
+    cache.findAll({ predicate: (q) => (USAGE_ROOTS as readonly unknown[]).includes(q.queryKey[0]) })
+      .some((q) => cachedReason(q) !== null));
+  const health = useArtifactBaseHealth(anyReason);
+  const prevOk = useRef<boolean | null>(null);
+  // 사유가 나타난 시각 -- 그보다 오래된 health 캐시(지난 장애의 끝에 받은 ok:true)는 보지 않는다. 안 그러면 새 장애가
+  // 시작되자마자 낡은 ok 를 「바뀜」으로 읽어 사용량 쿼리를 헛되이 한 번 다시 부른다(2026-11-23 리뷰).
+  const since = useRef<number | null>(null);
+  if (anyReason && since.current === null) since.current = Date.now();
+  if (!anyReason) since.current = null;
+  const stamp = health.dataUpdatedAt;
+  const fresh = anyReason && since.current !== null && stamp >= since.current;
+  const ok = fresh ? health.data?.ok ?? null : null;
+  useEffect(() => {
+    if (!anyReason) { prevOk.current = null; return; }
+    if (ok === true && prevOk.current !== true) {
+      for (const k of USAGE_ROOTS) void qc.invalidateQueries({ queryKey: [k] });
+    }
+    prevOk.current = ok === true ? true : ok === false ? false : prevOk.current;
+  }, [anyReason, ok, stamp, qc]);
+  return anyReason;
+}
 
 // 미등록 스토리지(2026-10-12 사용자 요청: 「미등록 스토리지 항목들은 스토리지 항목별로 전체 clean up」). 판정·규모는 서버가
 // 한다(등록 목록 로딩 여부와 무관). 목록과 같은 저빈도 데이터라 staleTime 30s.

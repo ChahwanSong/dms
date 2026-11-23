@@ -167,6 +167,7 @@ def test_scan_without_succeeded_job_404_no_scan_report(tmp_path):
 
 def test_report_file_absent_404_no_scan_report(tmp_path):
     art_base = tmp_path / "artifacts"
+    art_base.mkdir()        # base 는 보이고 그 파일만 없다(2026-11-23 -- base 자체가 없으면 503, 아래)
     client = _client(tmp_path, art_base)
     _admin(client)
     rid = _request(client)
@@ -267,3 +268,15 @@ def test_batch_level_aggregate_route_removed(tmp_path):
     _admin(client)
     r = client.get("/api/admin/batches/whatever/scan-stats")
     assert r.status_code == 404 and r.json()["detail"] == "Not Found"
+
+
+def test_unreachable_base_is_503_not_no_scan_report(tmp_path):
+    # 2026-11-23: base 자체가 안 보이면(미마운트 노드) 「리포트 없음」이 아니라 503 artifact_base_unavailable -- 일시 장애가
+    # 화면에 「리포트 없음」으로 굳지 않게(BatchDetail ItemScanStats 는 404 만 「리포트 없음」).
+    art_base = tmp_path / "not-mounted"
+    client = _client(tmp_path, art_base)
+    _admin(client)
+    rid = _request(client)
+    _succeed_job(client, rid, art_base=art_base, write_report=False)
+    r = client.get(f"/api/admin/requests/{rid}/scan-stats")
+    assert (r.status_code, r.json()["detail"]) == (503, "artifact_base_unavailable")

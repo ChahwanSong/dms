@@ -17,6 +17,7 @@ from .scan_digests import ScanDigestsRepository
 from .node_exclusions import NodeExclusionsRepository
 from .request_purges import RequestPurgesRepository
 from .batch_schedules import BatchSchedulesRepository
+from .api_base_checks import ApiBaseChecksRepository
 
 
 class Repositories:
@@ -41,3 +42,4 @@ class Repositories:
         self.node_exclusions = NodeExclusionsRepository(db)
         self.request_purges = RequestPurgesRepository(db)
         self.batch_schedules = BatchSchedulesRepository(db)
+        self.api_base_checks = ApiBaseChecksRepository(db)

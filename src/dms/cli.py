@@ -46,7 +46,9 @@ def main(argv=None) -> int:
     if args.command == "api":
         import uvicorn
         from .api.app import create_app
-        uvicorn.run(create_app(settings, db), host=settings.api_host,
+        # start_base_monitor: API 자체 artifact base 점검·시작 게이트(api/base_monitor.py)는 실 서버에서만 돈다 --
+        # 테스트의 create_app 은 미시작(test_cli 가 이 배선을 고정한다).
+        uvicorn.run(create_app(settings, db, start_base_monitor=True), host=settings.api_host,
                     port=settings.api_port)
         return 0
 

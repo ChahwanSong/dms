@@ -7,7 +7,8 @@ import { Tabs, type TabItem } from "../../components/ui/Tabs";
 import type { ApiError } from "../../lib/api";
 import { useStorages } from "../storages/useStorages";
 import {
-  usePurgeUnregisteredStorage, useScanStorages, useUnregisteredStorages, useUsageStorages, type UsageSort,
+  usePurgeUnregisteredStorage, useScanStorages, useUnregisteredStorages, useUsageBaseRecovery, useUsageStorages,
+  type UsageSort,
 } from "./useUsage";
 import { buildStorageTabs, defaultStorage, storageLabel, type StorageTab } from "./usageTabs";
 import { StoragePanel } from "./StoragePanel";
@@ -85,6 +86,9 @@ export function UsageAnalysis() {
   // 있으면 재조회가 실패해도 그것을 쓴다 -- isError 만 보면 백그라운드 재조회 한 번의 실패에 패널이 자리표시로 돌아갔다(리뷰).
   const storagesQ = useStorages();
   const summaryQ = useUsageStorages();
+  // 작업 기록 저장소 접근 불가 사유가 캐시에 있는 동안만 health 를 보다가 복구되면 사용량 쿼리를 한 번 새로 부른다(2026-11-23 --
+  // 화면에 한 번만, useUsage 주석).
+  useUsageBaseRecovery();
   const unregQ = useUnregisteredStorages();
   const summaryMissing = summaryQ.isError && summaryQ.data === undefined;
   const scanQ = useScanStorages(summaryMissing);

@@ -512,7 +512,9 @@ def _paged(client, **p):
     r = client.get("/api/admin/usage/scan-targets", params=p)
     assert r.status_code == 200, r.text
     body = r.json()
-    assert isinstance(body, dict) and set(body) == {"rows", "total", "offset", "limit", "window_limit", "windowed"}
+    # unreadable_reason(2026-11-23): base 접근 불가로 읽기를 멈췄을 때의 원인(아니면 null) -- 객체 응답에만(배열 응답은 그대로)
+    assert isinstance(body, dict) and set(body) == {"rows", "total", "offset", "limit", "window_limit", "windowed",
+                                                    "unreadable_reason"}
     return body
 
 
@@ -907,7 +909,9 @@ _TOTAL_KEYS = ["storage_name", "computed_at", "truncated", "window_limit", "targ
                "nested_target_count", "invalid_target_count", "unreadable_count", "pending_count", "progressed",
                "total_bytes", "total_files", "total_directories", "total_symlinks", "total_other", "total_entries",
                "scan_errors", "broken_paths_total", "hot_ratio", "file_size_histogram", "oldest_scan_at",
-               "newest_scan_at", "filesystem"]
+               "newest_scan_at", "filesystem",
+               # 2026-11-23: base 접근 불가로 읽기를 멈췄으면 그 원인(아니면 null) -- routes_usage._unreadable_reason
+               "unreadable_reason"]
 
 
 def _totals(client, storage="s1"):
@@ -1090,6 +1094,7 @@ def test_storage_totals_unrecorded_failure_is_not_progress(tmp_path):
     # 다시 연다(옛 동작으로 돌아갈 뿐, 끝없는 재조회는 없다).
     from dms.api.routes_usage import ReportReadFailures
     art = tmp_path / "artifacts"
+    art.mkdir()     # base 는 보이고 그 리포트만 없다(2026-11-23 -- base 자체가 없으면 pending, test_api_usage_base_unavailable)
     client = _client(tmp_path, art)
     _login(client, "admin", "admin")
     full = ReportReadFailures(cap=1)

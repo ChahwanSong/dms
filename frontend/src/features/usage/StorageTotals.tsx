@@ -5,9 +5,9 @@ import { ApiError } from "../../lib/api";
 import type { UsageStorageFilesystem, UsageStorageTotals, UsageTotalMetric } from "../../lib/types";
 import { agoText, ageDays, kstStampOrDash } from "../../lib/datetime";
 import { pctText } from "../../lib/sizeBuckets";
-import { useStorageTotals } from "./useUsage";
+import { reasonOf, useStorageTotals } from "./useUsage";
 import { HOT_AGE_MAX_DAYS, humanBytes } from "./usageStats";
-import { SIZE_HELP, SectionHead, Stat } from "./UsageParts";
+import { BASE_DOWN_SHORT, SIZE_HELP, SectionHead, Stat } from "./UsageParts";
 import { SizeHistogram } from "./ScanHistograms";
 import { staleClass } from "./TargetTable";
 
@@ -67,7 +67,8 @@ function Footnote({ t, now, reading }: { t: UsageStorageTotals; now: number; rea
     `최상위 대상 ${n(count(t.summed_target_count))}개 기준`,
     count(t.nested_target_count) > 0 && `하위 대상 ${n(count(t.nested_target_count))}개 제외`,
     count(t.invalid_target_count) > 0 && `형식이 잘못된 대상 ${n(count(t.invalid_target_count))}개 제외`,
-    unknown > 0 && `값 모름 ${n(unknown)}개`,
+    // 원인이 작업 기록 저장소 접근 불가면(2026-11-23 -- 서버가 읽기를 멈추고 남은 것을 모름으로 셌다) 그 원인을 붙인다.
+    unknown > 0 && `값 모름 ${n(unknown)}개${reasonOf(t.unreadable_reason) !== null ? BASE_DOWN_SHORT : ""}`,
     reading && `요약 읽는 중 ${n(count(t.pending_count))}개`,
     t.truncated === true && `최근 스캔된 ${n(count(t.window_limit))}개 대상 기준`,
   ];
@@ -183,7 +184,8 @@ export function StorageTotals({ storage, now }: { storage: string; now: number }
   const bytes = sumOf(t.total_bytes), files = sumOf(t.total_files), dirs = sumOf(t.total_directories);
   const size = t.file_size_histogram;
   const fs = fsShape(t.filesystem);
-  const reading = isReading(t) && !q.isError;
+  // base 접근 불가로 멈춘 응답은 「읽는 중」이 아니다(이어 읽지 않는다 -- useStorageTotals) -- 남은 것은 「값 모름」으로 센다.
+  const reading = isReading(t) && !q.isError && reasonOf(t.unreadable_reason) === null;
   const exact = (n: number | null) => (n === null ? undefined : countText(n));
   return wrap(<>
     <div className={LAYOUT}>

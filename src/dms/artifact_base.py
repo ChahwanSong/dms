@@ -8,11 +8,17 @@
 """
 import errno
 import os
+import socket
 import stat
 import struct
+import threading
+import time
 import uuid
 
-from .domain import DomainValidationError
+from .artifact_files import JOB_ID_RE
+from .db import utc_now_iso
+from .domain import DataJobState, DomainValidationError
+from .mountinfo import covering_mount, parse_mount_table
 
 
 # 잡 파드 **안**에서 아티팩트 base 가 보이는 고정 경로(2026-09-09). 공용 디렉터리(base 의
@@ -236,14 +242,344 @@ def roundtrip_artifact_base(path: str) -> "str | None":
     return None
 
 
-def controller_check_once(repos, settings) -> dict:
+# ---- base 가용성(2026-11-23 사고: dms-api 가 CephFS 미마운트 노드에 떠 /mgmt_storage = 빈 로컬 디렉터리) ----------------
+# 쓰기 왕복(roundtrip_artifact_base)은 로컬의 root:root 755 디렉터리에서도 통과한다 -- 「진짜 공유 스토리지인가」를 모른다.
+# 그래서 쓰기 없는 가용성 판정을 따로 둔다: 디렉터리 열기 + 첫 dirent + **최근 잡 디렉터리**(자연 센티넬). 심는 센티넬 파일은
+# 낡음(dotfile 빠진 복사·스냅숏 롤백)·나쁜 노드 오심기·재설정 흐름이라는 새 장애 모드를 만들어 쓰지 않는다(설계 v2).
+# 이 판정은 **base 수준**이다 -- 파일별 errno 로 「base 접근 불가」를 가르면 요청자가 자기 <phase> 를 chmod 000·심링크로
+# 바꿔 응답을 고르는 존재 오라클이 된다(artifact_files 모듈 docstring). base 와 <base>/<job_id> 는 root 소유라 요청자가
+# 판정을 움직일 수 없고, 대상 job_id 는 DB 가 고른다(요청자 입력 아님).
+
+# 이 모듈(과 그 판정을 싣는 라우트·모니터)이 내는 점검 사유 전부 -- return·dict 로 흘러 AST 그물(detail=/reason_code=) 밖이라
+# tests/test_artifact_base_availability.py 가 이 집합 ⊆ reasonCodes.json 을 따로 고정한다.
+ARTIFACT_BASE_CHECK_REASONS = frozenset({
+    "artifact_base_missing", "artifact_base_not_directory", "artifact_base_unreadable",
+    "artifact_base_check_timeout", "artifact_base_jobs_missing",
+    "artifact_base_outside_allowlist", "artifact_base_not_owned", "artifact_base_world_writable",
+    "artifact_base_group_writable", "artifact_base_not_traversable", "artifact_base_not_writable",
+})
+# 사용자 라우트의 공개 코드는 이것 하나다(503) -- 세부 사유는 관리 화면·로그 전용.
+ARTIFACT_BASE_UNAVAILABLE = "artifact_base_unavailable"
+
+# base 를 덮는 마운트가 이 계열이면 「로컬 디스크로 보임」 경고(진단 전용 -- 판정·게이트에 쓰지 않는다: 사이트마다 공유
+# 스토리지 종류가 다르고, 이름만으로 공유/로컬을 확정할 수 없다).
+LOCAL_FSTYPES = frozenset({"ext2", "ext3", "ext4", "xfs", "btrfs", "overlay", "tmpfs", "zfs", "f2fs"})
+# 최근 잡 표본 크기와 그 표본을 고르는 창(성공 잡 최신 N건). 창을 두는 이유: force 로 base 를 바꾼 직후엔 최근 잡이 전부 옛
+# base 것이라 현재 base 의 잡을 찾으려 성공 잡 전체를 훑게 된다 -- 창 안에 없으면 판정 생략(모름)이 맞다.
+RECENT_JOB_SAMPLE = 5
+RECENT_JOB_WINDOW = 200
+CHECK_TIMEOUT_SECONDS = 10.0
+CHECK_CACHE_SECONDS = 3.0
+
+
+def identity_job_ids(repos_or_db, settings, base_uri: str) -> list:
+    """잡 디렉터리 교차 확인에 쓸 잡 id -- **실 실행 백엔드(volcano)에서만**. stub 백엔드(개발·e2e)는 잡을 성공시키고
+    artifact_uri 를 남기지만 러너가 없어 <base>/<job_id> 를 만들지 않는다 -- 거기서 교차 확인하면 멀쩡한 base 가
+    jobs_missing 이 돼 아티팩트 열람이 전부 503 이 된다. settings 에 필드가 없으면(테스트 스텁) volcano 로 본다."""
+    if getattr(settings, "execution_backend", "volcano") != "volcano":
+        return []
+    return recent_job_ids(repos_or_db, base_uri, since=last_base_change_at(repos_or_db))
+
+
+def last_base_change_at(repos_or_db) -> "str | None":
+    """마지막 artifact base 변경(PUT 감사 행) 시각. force 변경 때 진행 중이던 잡은 **옛 base** 에 쓰지만 stepper 가 확정
+    시점의 새 base 로 artifact_uri 를 남긴다 -- 그 잡들을 교차 확인에 넣으면 멀쩡한 새 base 가 jobs_missing 이 된다
+    (2026-11-23 리뷰). 그래서 변경 **뒤에 만든** 잡만 표본으로 쓴다. 감사 행이 없거나(env 만 쓰는 배포) 못 읽으면 None."""
+    db = getattr(repos_or_db, "db", repos_or_db)
+    try:
+        row = db.query_one(
+            """SELECT at FROM audit_log WHERE mutation_class = 'artifact_base' AND operation = 'set'
+               ORDER BY id DESC LIMIT 1""")
+    except Exception:       # noqa: BLE001 -- 모름 = 거르지 않음(정확 일치가 다른 base 의 잡은 이미 뺀다)
+        return None
+    return row["at"] if row else None
+
+
+def recent_job_ids(repos_or_db, base_uri: str, limit: int = RECENT_JOB_SAMPLE, *, since: "str | None" = None) -> list:
+    """현재 base 아래 아티팩트 디렉터리를 가졌을 최근 성공 잡 id(최신순, 최대 limit).
+
+    성공 잡만 본다: stepper 는 성공 경로에서 artifact_uri = f"{base_uri}/{job_id}" 를 남기고, 그 잡의 <base>/<job_id> 는
+    러너가 root 로 만든 디렉터리다(요청 삭제는 행을 먼저 지우므로 행이 있으면 디렉터리도 있어야 한다). 비교는 파이썬의
+    정확 일치다 -- SQL LIKE 는 '_' 가 와일드카드라 다른 base 의 잡이 섞인다. 질의는 idx_data_jobs_state(state, updated_at) 를
+    역순으로 RECENT_JOB_WINDOW 건만 읽는다(data_jobs 가 수만 행이어도 비용 일정). job_id 는 JOB_ID_RE fullmatch 만 통과
+    (DB 가 신뢰 경계 -- 변조 id 로 base 밖을 fstatat 하지 않게)."""
+    db = getattr(repos_or_db, "db", repos_or_db)
+    rows = db.query(
+        """SELECT job_id, artifact_uri, created_at FROM data_jobs WHERE state = :s
+           ORDER BY updated_at DESC LIMIT :n""",
+        {"s": DataJobState.SUCCEEDED.value, "n": RECENT_JOB_WINDOW})
+    out = []
+    for r in rows:
+        jid = r["job_id"]
+        if (isinstance(jid, str) and JOB_ID_RE.fullmatch(jid)
+                and r["artifact_uri"] == f"{base_uri}/{jid}"
+                and (since is None or (isinstance(r["created_at"], str) and r["created_at"] > since))):
+            out.append(jid)
+            if len(out) >= limit:
+                break
+    return out
+
+
+def availability_check(path: str, job_ids) -> dict:
+    """쓰기 없는 base 가용성 판정. {"ok", "reason", "jobs_checked", "jobs_found"}.
+
+    1) base 를 디렉터리로 연다(O_NONBLOCK -- artifact_files 와 같은 습관). ENOENT → artifact_base_missing, ENOTDIR →
+       artifact_base_not_directory, 그 밖(EACCES·EIO·ESTALE·ENOTCONN) → artifact_base_unreadable.
+    2) 첫 dirent 하나만 읽는다(getdents 의 EIO/ESTALE 를 잡는다). listdir 금지 -- base 아래 잡 디렉터리는 수십만일 수 있다.
+    3) job_ids 마다 fstatat(base fd, job_id, AT_SYMLINK_NOFOLLOW) 가 디렉터리면 found. ENOENT/ENOTDIR 은 없음, 그 밖 →
+       _unreadable. 하나 이상 확인했는데 하나도 없으면 artifact_base_jobs_missing(빈 로컬 디렉터리 = 사고 서명). job_ids
+       가 비면 판정 생략(jobs_found None -- 모름 ≠ 실패: 새 설치·force 변경 직후)."""
+    def result(ok, reason, checked=0, found=None):
+        return {"ok": ok, "reason": reason, "jobs_checked": checked, "jobs_found": found}
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NONBLOCK | os.O_CLOEXEC)
+    except FileNotFoundError:
+        return result(False, "artifact_base_missing")
+    except NotADirectoryError:
+        return result(False, "artifact_base_not_directory")
+    except OSError:
+        return result(False, "artifact_base_unreadable")
+    try:
+        try:
+            with os.scandir(fd) as it:
+                next(it, None)
+        except OSError:
+            return result(False, "artifact_base_unreadable")
+        ids = [j for j in (job_ids or ()) if isinstance(j, str) and JOB_ID_RE.fullmatch(j)]
+        if not ids:
+            return result(True, None)
+        found = 0
+        for jid in ids:
+            try:
+                st = os.stat(jid, dir_fd=fd, follow_symlinks=False)
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+            except OSError:
+                return result(False, "artifact_base_unreadable", len(ids), None)
+            if stat.S_ISDIR(st.st_mode):
+                found += 1
+        if found == 0:
+            return result(False, "artifact_base_jobs_missing", len(ids), 0)
+        return result(True, None, len(ids), found)
+    finally:
+        os.close(fd)
+
+
+def posture_problem(path: str, prefixes) -> "str | None":
+    """쓰기 없는 보안 자세(API 홉 표시용): allowlist → 소유자 == euid → o+w 없음 → static_base_problem(g+w·ACL·o+x).
+    roundtrip_artifact_base 의 쓰기 직전까지와 같은 규칙이다(저장 뒤 바뀐 g+w 를 API 홉이 계속 드러낸다). stat 실패는 None --
+    존재·읽기는 availability_check 의 몫이라 두 번 말하지 않는다. 게이트·503 판정에는 쓰지 않는다(경고 전용)."""
+    reason = allowlist_reason(path, prefixes)
+    if reason is not None:
+        return reason
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    if st.st_uid != os.geteuid():
+        return "artifact_base_not_owned"
+    if st.st_mode & stat.S_IWOTH:
+        return "artifact_base_world_writable"
+    try:
+        return static_base_problem(path)
+    except OSError:
+        return None
+
+
+def covering_fstype(path: str, *, mountinfo_path: str = "/proc/self/mountinfo") -> "str | None":
+    """base 를 덮는 마운트의 파일시스템 종류(진단 전용, 실패 None). mountinfo 는 procfs 라 멈추지 않지만 realpath 는 마운트를
+    건드리므로 이 함수도 runner 안에서만 부른다."""
+    try:
+        with open(mountinfo_path, encoding="utf-8", errors="replace") as f:
+            table = parse_mount_table(f.read())
+        point = covering_mount(table, os.path.realpath(path))
+    except OSError:
+        return None
+    if point is None:
+        return None
+    return table[point]["fstype"] or None
+
+
+def api_view_check(path: str, job_ids, prefixes) -> dict:
+    """API 홉 한 번(쓰기 없음): 가용성 + 자세 + 파일시스템. 모니터·요청 프로브·관리 GET 이 같은 함수를 같은 runner 키로
+    부른다 -- 진행 중 호출에 합류해 같은 답을 받는다(joiner 의 job_ids 가 조금 달라도 base 에 대한 같은 사실이다)."""
+    availability = availability_check(path, job_ids)
+    posture = posture_problem(path, prefixes)
+    fstype = covering_fstype(path)
+    return {"availability": availability, "posture": posture, "fstype": fstype,
+            "local_fs": (fstype in LOCAL_FSTYPES) if fstype is not None else None}
+
+
+def is_timeout(result) -> bool:
+    return (isinstance(result, dict) and result.get("timed_out") is True
+            and result.get("reason") == "artifact_base_check_timeout")
+
+
+def normalize_api_check(result: dict) -> dict:
+    """runner 결과(api_view_check 또는 타임아웃) → api_view_check 모양. 타임아웃은 가용성 실패(artifact_base_check_timeout)
+    이고 자세·fstype 은 모름이다."""
+    if is_timeout(result):
+        return {"availability": {"ok": False, "reason": "artifact_base_check_timeout",
+                                 "jobs_checked": 0, "jobs_found": None},
+                "posture": None, "fstype": None, "local_fs": None,
+                "stuck_since": result.get("stuck_since")}
+    return result
+
+
+class _Call:
+    __slots__ = ("started", "started_at", "done", "result", "error")
+
+    def __init__(self, started):
+        self.started = started
+        self.started_at = utc_now_iso()
+        self.done = threading.Event()
+        self.result = None
+        self.error = None
+
+
+class BaseCheckRunner:
+    """FS 점검의 프로세스 단일 single-flight + 타임아웃(데몬 워커 스레드).
+
+    멈춘 마운트(CephFS MDS 장애·evict)에서 stat·scandir 는 D 상태로 영원히 블록할 수 있다 -- 요청 스레드·readyz·컨트롤러
+    단일 루프가 거기 매달리면 안 된다. 규칙:
+      - 같은 key 의 진행 중 호출이 있으면 새로 띄우지 않고 **그 호출에 남은 마감까지 합류**한다(동시 프로브가 서로를
+        timeout 으로 오진하지 않는다 -- 정상 점검은 수십 ms).
+      - 진행 중 호출이 시작 후 timeout 을 넘겼으면(stuck) 즉시 타임아웃 결과 -- 새 스레드를 띄우지 않는다(D 상태 스레드가
+        요청 수만큼 쌓이지 않게. 키당 최대 1개).
+      - 끝난 결과는 cache_seconds 동안 재사용(실패 요청 반복이 MDS 를 두드리지 않게). 0 이면 캐시를 읽지 않는다(지금 점검).
+    fn 의 예외(코드 결함·DB 오류)는 합류한 모두에게 다시 던진다 -- 「읽기 불가」로 위장하지 않는다."""
+
+    def __init__(self, *, clock=time.monotonic):
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._inflight: dict = {}
+        self._cache: dict = {}
+
+    def run(self, key, fn, *, timeout: float = CHECK_TIMEOUT_SECONDS,
+            cache_seconds: float = CHECK_CACHE_SECONDS):
+        with self._lock:
+            now = self._clock()
+            hit = self._cache.get(key)
+            if hit is not None and cache_seconds > 0 and now - hit[0] < cache_seconds:
+                return hit[1]
+            call = self._inflight.get(key)
+            if call is None:
+                call = _Call(now)
+                self._inflight[key] = call
+                try:
+                    threading.Thread(target=self._work, args=(key, call, fn),
+                                     name="dms-base-check", daemon=True).start()
+                except BaseException:
+                    # 스레드 생성 실패(pids 한도·메모리 압박의 RuntimeError)면 등록을 되돌린다 -- 남겨 두면 done 이 영영
+                    # set 되지 않아 이 키가 「멈춤」으로 굳고 아티팩트 라우트가 재시작까지 503 이다(2026-11-23 리뷰).
+                    self._inflight.pop(key, None)
+                    raise
+            elif now - call.started >= timeout:
+                return self._timeout(call)
+            remaining = max(0.0, call.started + timeout - now)
+        if call.done.wait(remaining):
+            if call.error is not None:
+                raise call.error
+            return call.result
+        return self._timeout(call)
+
+    def stuck_since(self, key, timeout: float = CHECK_TIMEOUT_SECONDS) -> "str | None":
+        """진행 중 호출이 마감을 넘겼으면 그 시작 시각(ISO), 아니면 None -- 라우트가 FS 를 열기 **전에** 보는 단락 신호."""
+        with self._lock:
+            call = self._inflight.get(key)
+            if call is not None and self._clock() - call.started >= timeout:
+                return call.started_at
+        return None
+
+    def peek(self, key, cache_seconds: float = CHECK_CACHE_SECONDS):
+        """캐시에 신선한 결과가 있으면 그것, 없으면 None(점검을 시작하지 않는다) -- 호출자가 점검 재료(DB 질의)를 만들기
+        전에 본다."""
+        if cache_seconds <= 0:
+            return None
+        with self._lock:
+            hit = self._cache.get(key)
+            if hit is not None and self._clock() - hit[0] < cache_seconds:
+                return hit[1]
+        return None
+
+    def busy(self, key) -> bool:
+        """같은 key 의 점검이 진행 중인가(나이 무관)."""
+        with self._lock:
+            return key in self._inflight
+
+    def _timeout(self, call) -> dict:
+        return {"ok": False, "reason": "artifact_base_check_timeout", "timed_out": True,
+                "stuck_since": call.started_at}
+
+    def _work(self, key, call, fn):
+        try:
+            call.result = fn()
+        except BaseException as exc:      # noqa: BLE001 -- 합류자에게 그대로 다시 던진다
+            call.error = exc
+        finally:
+            with self._lock:
+                if self._inflight.get(key) is call:
+                    del self._inflight[key]
+                if call.error is None:
+                    self._cache[key] = (self._clock(), call.result)
+            call.done.set()
+
+
+# 컨트롤러 프로세스의 runner(컨트롤러 점검·stepper 요약 지연 공용). API 는 create_app 이 app.state 에 자기 것을 둔다.
+PROCESS_RUNNER = BaseCheckRunner()
+
+
+class NodeNameResolver:
+    """이 파드가 떠 있는 노드 이름(표시 전용). env DMS_NODE_NAME(downward API, 40·41 매니페스트) → 없으면 rollout_runner.
+    pod_briefs(selector) 에서 이름 == 호스트명인 파드의 node. 성공은 영구 캐시(파드는 노드를 옮기지 않는다), 실패(None)는
+    ttl 동안 캐시해 k8s 목록 조회를 틱마다 하지 않는다. 매니페스트가 아직 apply 되지 않은 사이트(포탈 릴리스는 이미지만
+    바꾼다)도 폴백으로 산다."""
+
+    def __init__(self, rollout_runner, selector: str, *, environ=None, hostname=None,
+                 clock=time.monotonic, ttl_seconds: float = 600.0):
+        self._runner = rollout_runner
+        self._selector = selector
+        self._environ = os.environ if environ is None else environ
+        self._hostname = hostname
+        self._clock = clock
+        self._ttl = ttl_seconds
+        self._cached = None        # (at, name)
+
+    def get(self) -> "str | None":
+        env = (self._environ.get("DMS_NODE_NAME") or "").strip()
+        if env:
+            return env
+        now = self._clock()
+        if self._cached is not None and (self._cached[1] is not None or now - self._cached[0] < self._ttl):
+            return self._cached[1]
+        host = self._hostname or socket.gethostname()
+        name = None
+        if self._runner is not None:
+            try:
+                for b in self._runner.pod_briefs(selector=self._selector) or []:
+                    node = b.get("node")
+                    if b.get("name") == host and isinstance(node, str) and node:
+                        name = node
+                        break
+            except Exception:       # noqa: BLE001 -- 진단 표시용이라 실패는 None(모름)
+                name = None
+        self._cached = (now, name)
+        return name
+
+
+def controller_check_once(repos, settings, *, runner=None, node_name=None) -> dict:
     """(c) 컨트롤러 자기 관점 검증(설계 §2.4c)의 루프 본체. 컨트롤러는
     read_summary 로 실제 **읽기**를 하는 유일한 프로세스다 -- 마운트가 없으면
     read_text 가 OSError 를 None 으로 접고(wiring) stepper 는 SUCCEEDED 를 유지한
     채 summary_unavailable 경고만 남긴다(§1-3, 실패가 조용하다). 그 실패를 사전에,
     화면에 보이게 주기적으로 자기 파일시스템에서 왕복 검증해 결과를 control_state
     에 남긴다. 검증한 uri 를 함께 남겨 GET 라우트가 "옛 base 의 결과"를 "확인
-    대기 중"으로 구분한다(설계 §4)."""
+    대기 중"으로 구분한다(설계 §4).
+
+    2026-11-23: 왕복 통과 뒤 가용성(availability_check -- 최근 잡 디렉터리)도 본다. 쓰기 왕복은 빈 로컬 디렉터리에서도
+    통과하므로 컨트롤러가 미마운트 노드에 떠도 jobs_missing 으로 드러난다(표시 전용 -- 잡 제출은 이 값을 읽지 않는다).
+    점검 전체는 runner(10초 타임아웃) 안이다 -- 컨트롤러는 모든 루프를 한 스레드로 돌아(run_forever) 멈춘 마운트의 stat 이
+    전 루프를 세운다. node_name 은 어느 노드에서 본 결과인지(관리 화면의 엇갈림 상자·마운트 현황)."""
     base = resolve_artifact_base(repos.control, settings)
     path = strip_scheme(base)
     # allowlist 는 라우트(validate/PUT)와 **여기 양쪽**에서 본다 -- env 만 바꾼
@@ -252,7 +588,16 @@ def controller_check_once(repos, settings) -> dict:
     # getattr: 컨트롤러 루프 테스트의 설정 스텁 클래스들은 이 필드가 없다 -- 없으면
     # 무제한(() 과 같은 뜻)이지 오류가 아니다.
     prefixes = getattr(settings, "artifact_base_allowed_prefixes", ())
-    reason = allowlist_reason(path, prefixes) or roundtrip_artifact_base(path)
+    job_ids = identity_job_ids(repos, settings, base)       # DB 는 runner 밖(멈추는 것은 FS 다)
+
+    def work():
+        reason = allowlist_reason(path, prefixes) or roundtrip_artifact_base(path)
+        if reason is None:
+            reason = availability_check(path, job_ids)["reason"]
+        return {"reason": reason}
+
+    result = (runner or PROCESS_RUNNER).run(("controller", path), work, cache_seconds=0)
+    reason = result["reason"]
     repos.control.set_artifact_base_check(uri=base, ok=reason is None,
-                                          reason=reason)
+                                          reason=reason, node=node_name)
     return {"uri": base, "ok": reason is None, "reason": reason}

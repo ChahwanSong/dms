@@ -310,6 +310,20 @@
 
 ## 4. 알려진 해석·잔여 리스크 (문서)
 
+- 📝 **API 자체 artifact base 점검 후속**(2026-11-23 — ARCHITECTURE §7 불변식 16, deploy/README §12b). 남은 것:
+  - 에이전트의 `artifact_base` 프로브에 fstype(덮는 마운트의 파일시스템)을 더해 마운트 현황의 「아티팩트 경로」 칸이 빈 로컬 디렉터리를
+    exists/writable 만으로 정상으로 보지 않게(지금은 덮는 등록 스토리지 셀이 missing 일 때만 겹쳐 잡는다 — base 를 덮는 스토리지가
+    등록돼 있지 않으면 못 잡는다). 에이전트 재빌드 필요.
+  - 미리보기 단계의 같은 굳음: `stepper._poll_preview` 의 summary None 은 지금도 즉시 `empty_preview`(Rejected)로 끝난다 — 실행 단계와
+    같은 유한 지연(`_defer_summary`)을 걸지 결정. 실행 단계 지연은 컨트롤러 프로세스 메모리라 재시작마다 상한 한 번이 더 붙는다(TTL/2
+    여유가 그 몫 — 재시작이 TTL 안에 여러 번이면 GC 뒤 FAILED 로 둔갑할 수 있다; 지속하려면 잡 행에 처음 미룬 시각).
+  - 릴리스 실패 사유에 API 시작 게이트 정보: 게이트에 막힌 새 파드는 Running·unready 라 `rollout_failed:ProgressDeadlineExceeded…`
+    만 남는다. rollout_watcher 가 `api_base_checks` 의 신선·waiting 행(「새 파드 X(노드 Y): 아티팩트 경로 점검 실패 — 사유」)을 덧붙이는
+    것은 사유 문자열 형식(200자 절단·포탈 prefix 번역)과 맞물려 이번엔 뺐다 — 관리 화면의 API 파드 목록이 그 사실을 보인다.
+  - 지연 중 잡이 클레임 앞자리를 차지한다: 요약을 미룬 잡은 폴링 중 실행 잡처럼 `updated_at` 을 갱신하지 않아 `claim_steppable`(10건)
+    앞에 선다 — 컨트롤러 쪽 base 장애 동안 끝난 잡이 10건을 넘으면 다른 잡의 진행이 최대 상한(20분)까지 늦을 수 있다(장시간 실행 잡
+    10건과 같은 기존 성질).
+
 - 📝 **파일 크기 분포에 구간별 용량이 없다**(2026-10-21, d183). dscan(포크 1b93d54)의 `file_size_histogram` 은 구간별 **개수**만
   쓴다(시간 히스토그램만 bytes). 그래서 사용량 화면은 개수·비중만 보인다 — 「1 GiB 넘는 파일이 용량의 몇 %」는 못 말한다. 해법:
   포크 `acc_emit_entry` 에 `size_bytes[bin] += size` 와 JSON `"bytes"` 키 → 잡 이미지·에이전트 재빌드. 투영·캐시·CSV 는 bytes 를

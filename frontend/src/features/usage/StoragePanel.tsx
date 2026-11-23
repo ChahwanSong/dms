@@ -8,8 +8,9 @@ import type { ApiError } from "../../lib/api";
 import type { Storage } from "../../lib/types";
 import { agoText, kstStampOrDash } from "../../lib/datetime";
 import { downloadCsv, toCsv } from "../../lib/csvExport";
-import { PAGE_SIZE, fetchUsageExport, useScanTargets, usePurgeUnregisteredStorage, type TargetFilter,
+import { PAGE_SIZE, fetchUsageExport, pageReason, useScanTargets, usePurgeUnregisteredStorage, type TargetFilter,
          type UsageSort } from "./useUsage";
+import { BaseCheckLink, baseDownText } from "./UsageParts";
 import { buildUsageCsv, usageCsvFilename } from "./usageCsv";
 import { DETAIL_ID, TargetTable } from "./TargetTable";
 import { TargetDetail } from "./TargetDetail";
@@ -173,6 +174,9 @@ export function StoragePanel({
     : full ? `검색 결과가 ${wl}개를 넘으면 최근 스캔된 ${wl}개 안에서 정렬`
     : null;
   const failedOnly = tab.unregistered !== null && tab.unregistered.target_count === 0;
+  // 이 쪽을 읽는 동안 작업 기록 저장소(base)에 접근하지 못했다(2026-11-23) -- 몇몇 행의 파일 수·hot 이 「—」이고 용량이 (DB)인
+  // 이유를 표 위에서 한 번 말한다(행마다 되풀이하지 않는다). 자리표시(옛 쪽)의 사유는 말하지 않는다.
+  const listReason = targets.isPlaceholderData ? null : pageReason(data);
   const noRecords = data !== undefined && !targets.isPlaceholderData && rows.length === 0 && page === 1
     && pathQ === "" && input === "";
 
@@ -214,6 +218,12 @@ export function StoragePanel({
              className={`mt-2 text-right text-xs ${exportMsg.ok ? "text-muted" : "text-bad"}`}>{exportMsg.text}</p>
         )}
       </div>}
+
+      {listReason !== null && rows.length > 0 && (
+        <p role="status" className="rounded-lg border border-attn/30 bg-attnbg px-3 py-2 text-xs text-attn break-keep">
+          {`일부 대상의 최신 scan 리포트를 읽지 못했습니다 — ${baseDownText(listReason)}`}{" "}<BaseCheckLink />
+        </p>
+      )}
 
       {targets.isLoading || (data === undefined && !targets.isError) ? (
         <div className="space-y-2.5 py-1">

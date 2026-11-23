@@ -191,11 +191,14 @@ class _NullSummaryAdapter(StubExecutionAdapter):
         return None
 
 
-def test_summary_unreadable_event_is_recorded_outside_any_open_transaction(spy):
+def test_summary_unreadable_event_is_recorded_outside_any_open_transaction(spy, tmp_path):
     repos = Repositories(spy)
     rid, jid = _scan_job(repos)
     adapter = _NullSummaryAdapter()
-    stepper = JobStepper(repos, adapter, settings=_StepperSettings())
+    # base 가 보여야(존재하는 디렉터리) 요약 없음이 즉시 확정된다 -- 안 보이면 유한 지연(stepper._defer_summary).
+    settings = _StepperSettings()
+    settings.artifact_base_uri = f"file://{tmp_path}"
+    stepper = JobStepper(repos, adapter, settings=settings)
     stepper.run_once()  # Pending -> Preflight
     stepper.run_once()  # Preflight poll Succeeded -> Running (exec submit)
     stepper.run_once()  # Running poll Succeeded, read_summary() -> None

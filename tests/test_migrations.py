@@ -336,7 +336,7 @@ def test_migrate_adds_artifact_base_columns_to_existing_control_state(db):
     migrate(db)
     for column in ("artifact_base_uri", "artifact_base_check_uri",
                    "artifact_base_check_ok", "artifact_base_check_reason",
-                   "artifact_base_check_at"):
+                   "artifact_base_check_at", "artifact_base_check_node"):
         assert _column_exists(db, "control_state", column), column
     # 싱글톤 시드가 살아 있고 새 컬럼은 NULL(미설정 = env 사용, 하위호환)이다
     row = db.query_one("SELECT * FROM control_state WHERE id = 1")
@@ -590,6 +590,7 @@ def test_migrate_creates_exactly_the_expected_tables(tmp_path):
     # batch_schedules·batch_schedule_runs(2026-11-16): 배치 스케줄러(배치당 스케줄 하나 + 회차 이력 -- batches 류처럼 명시 추가).
     # batch_rounds(2026-11-16): 배치 회차 경계(회차 보존 정리 -- _rescan_locked 가 남긴다, batches 류처럼 명시 추가).
     # batch_deletions(2026-11-19): 배치 단위 백그라운드 삭제의 묘비·진행 장부(batches 류처럼 명시 추가).
+    # api_base_checks(2026-11-23): API 파드별 artifact base 점검 기록(시작 게이트에 걸린 새 파드도 보이게 -- 명시 추가).
     assert actual == set(ALL_TABLES) | {"batches", "batch_items",
                                         "schema_migrations",
                                         "verification_codes", "sync_pairs",
@@ -597,7 +598,7 @@ def test_migrate_creates_exactly_the_expected_tables(tmp_path):
                                         "scan_report_digests", "node_exclusions",
                                         "request_purges",
                                         "batch_schedules", "batch_schedule_runs", "batch_rounds",
-                                        "batch_deletions"}
+                                        "batch_deletions", "api_base_checks"}
 
 
 def test_migrate_adds_prune_columns_to_existing_batch_schedules(db):
@@ -812,7 +813,7 @@ def test_every_post_v1_column_rides_both_migration_paths(tmp_path):
     db = Database.connect(f"sqlite:///{tmp_path}/t.db")
     migrate(db)
     pairs = _ensure_pairs()
-    assert len(pairs) == 48      # 추출 자기 검증 -- 0 매치면 등식이 공허해진다(프록시 3 + 호스트 네트워크 1 + CA 1 + storages.user_enabled 1 + portal_subtitle 1 + batches.preview_round 1 + batches.auto_confirm_by 1 + accounts.root_granted 1 + data_jobs.pods_gc_at 1 + batch_schedules.storage_binding 1 + batch_schedules.pruned_at·pruned_total 2 + request_purges.purge_group 1)
+    assert len(pairs) == 49      # 추출 자기 검증 -- 0 매치면 등식이 공허해진다(프록시 3 + 호스트 네트워크 1 + CA 1 + storages.user_enabled 1 + portal_subtitle 1 + batches.preview_round 1 + batches.auto_confirm_by 1 + accounts.root_granted 1 + data_jobs.pods_gc_at 1 + batch_schedules.storage_binding 1 + batch_schedules.pruned_at·pruned_total 2 + request_purges.purge_group 1 + control_state.artifact_base_check_node 1)
     for table, v1 in _V1_COLUMNS.items():
         cols = {r["name"] for r in db.query(f"PRAGMA table_info({table})")}
         ensured = {c for t, c, _ in pairs if t == table}
@@ -829,7 +830,7 @@ def test_ensure_columns_types_match_create_declarations(tmp_path):
     pairs = _ensure_pairs()
     # 추출 자기 검증을 이 테스트에도 둔다 -- 위 등식 테스트가 지워지거나 홀로
     # 실행될 때 정규식이 0 매치면 아래 루프가 공허하게 통과하기 때문이다.
-    assert len(pairs) == 48
+    assert len(pairs) == 49      # + control_state.artifact_base_check_node(2026-11-23)
     for table, column, coltype in pairs:
         assert _declared_type(db, table, column) == coltype, (table, column)
 

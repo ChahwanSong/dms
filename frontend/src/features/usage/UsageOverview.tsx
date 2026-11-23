@@ -1,9 +1,10 @@
 import { useState } from "react";
-import { ChevronRight } from "lucide-react";
+import { AlertTriangle, ChevronRight } from "lucide-react";
 import { Card } from "../../components/ui/Card";
 import { Skeleton } from "../../components/ui/Skeleton";
 import { Table } from "../../components/ui/Table";
-import { useStorageTotals } from "./useUsage";
+import { reasonOf, useStorageTotals } from "./useUsage";
+import { BASE_DOWN_TEXT } from "./UsageParts";
 import { humanBytes } from "./usageStats";
 import { storageLabel, type StorageTab } from "./usageTabs";
 import type { UsageStorageTotals, UsageTotalMetric } from "../../lib/types";
@@ -53,6 +54,9 @@ function CompareRow({ tab, selected, onSelect, now }: {
   const label = storageLabel(tab.name);
   const bg = selected ? "bg-infobg" : "bg-surface group-hover:bg-panel";
   const num = (n: number | null) => (n === null ? "—" : n.toLocaleString("ko-KR"));
+  // 이번 합계가 작업 기록 저장소 접근 불가로 멈췄다(2026-11-23) -- 「이상」(모름을 뺀 합)의 원인을 이름 옆 표식 하나로 말한다
+  // (칸마다 되풀이하지 않는다 -- 표식 title·낭독 문장이 원인, 숫자 칸의 「이상」 title 도 같은 원인).
+  const down = t !== undefined && reasonOf(t.unreadable_reason) !== null;
   const cells = (() => {
     if (t === undefined) {
       return q.isError
@@ -66,7 +70,8 @@ function CompareRow({ tab, selected, onSelect, now }: {
     const partial = (m: UsageTotalMetric | null | undefined, sum: number | null) =>
       sum !== null && (t.truncated === true || lowerBound(m, sum));
     return [
-      <td key="b" className={TD} title={bytes === null ? undefined : `${bytes.toLocaleString("ko-KR")} B`}>
+      <td key="b" className={TD} title={bytes === null ? (down ? BASE_DOWN_TEXT : undefined)
+        : `${bytes.toLocaleString("ko-KR")} B${down ? ` · ${BASE_DOWN_TEXT}` : ""}`}>
         {bytes === null ? "—" : humanBytes(bytes)}{partial(t.total_bytes, bytes) && MORE}</td>,
       <td key="f" className={TD}>{num(files)}{partial(t.total_files, files) && MORE}</td>,
       <td key="d" className={TD}>{num(dirs)}{partial(t.total_directories, dirs) && MORE}</td>,
@@ -90,6 +95,12 @@ function CompareRow({ tab, selected, onSelect, now }: {
           </button>
           {!tab.registered && (
             <span className="shrink-0 rounded border border-attn/30 bg-attnbg px-1 text-[11px] leading-4 text-attn">미등록</span>
+          )}
+          {down && (
+            <span className="relative shrink-0 text-attn" title={BASE_DOWN_TEXT}>
+              <AlertTriangle aria-hidden className="h-3.5 w-3.5" />
+              <span className="sr-only">(공유 스토리지 접근 불가 — 합계가 일부만 읽혔습니다)</span>
+            </span>
           )}
         </span>
       </td>

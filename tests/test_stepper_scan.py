@@ -81,11 +81,15 @@ class _NullSummaryAdapter(StubExecutionAdapter):
         return None
 
 
-def test_execution_succeeded_with_none_summary_is_visible(db):
+def test_execution_succeeded_with_none_summary_is_visible(db, tmp_path):
+    # 2026-11-23: 컨트롤러 쪽 base 가 보이는데(존재하는 디렉터리 -- 판정할 최근 잡 없음) 요약만 없으면 지금처럼 즉시
+    # 확정한다. base 가 안 보일 때의 유한 지연은 tests/test_stepper_summary_deferral.py.
     repos = Repositories(db)
     rid, jid = _scan_job(repos)
     adapter = _NullSummaryAdapter()
-    stepper = _stepper(repos, adapter)
+    settings = _Settings()
+    settings.artifact_base_uri = f"file://{tmp_path}"
+    stepper = JobStepper(repos, adapter, settings=settings)
     stepper.run_once()  # Pending → Preflight
     stepper.run_once()  # Preflight poll Succeeded → Running (exec submit)
     stepper.run_once()  # Running poll Succeeded, read_summary() -> None

@@ -20,9 +20,23 @@
 # ('Pending','Applying') before replicas > 1.
 #
 # /cephfs hostPath is REQUIRED and read-write: routes_artifact_base.py creates
-# and unlinks a probe file under the artifact base (3-hop check), and
-# routes_artifacts.py / routes_scan_paths.py / routes_usage.py read files in
-# the requester-owned <base>/<job_id>/<phase>/ directories.
+# and unlinks a probe file under the artifact base on PUT/validate (write
+# round-trip), and routes_artifacts.py / routes_scan_paths.py / routes_usage.py
+# read files in the requester-owned <base>/<job_id>/<phase>/ directories.
+#
+# Artifact base self-check + startup gate (2026-11-23, api/base_monitor.py):
+# the api process checks the base from ITS OWN node (open dir, first dirent,
+# recent job directories exist -- an empty local directory on a node without
+# the shared mount fails as artifact_base_jobs_missing) and records it in
+# api_base_checks. /readyz holds a NEW pod unready only while a sibling dms-api
+# pod is Ready (rolling surge keeps the old healthy pod serving); once Ready it
+# never goes unready because of the base (warnings only). That relies on the
+# explicit RollingUpdate maxSurge 1 / maxUnavailable 0 below -- pinned by
+# tests/test_release_manifest_contract.py. Break-glass env (lenient parsing,
+# NOT in the shared ConfigMap): DMS_API_ARTIFACT_BASE_STARTUP_GATE=0 turns off
+# only the gate, DMS_API_ARTIFACT_BASE_CHECK_SECONDS=0 turns off the monitor.
+# DMS_NODE_NAME (downward API) labels the check with the node; without it the
+# code falls back to looking up its own pod.
 #
 # root (2026-09-09): the `api` container runs as uid 0 (container-level
 # securityContext below). Production artifact bases are root:root, so 65532
@@ -61,8 +75,12 @@
 # NOTE: `type: Directory` means this pod FAILS to start on any node without a
 # real /cephfs mount. That's fine as long as dms-api only schedules onto the
 # w1-5 workers (all of which mount cephfs-dms per the testbed) -- if the
-# cluster grows a non-cephfs worker, add a nodeSelector/affinity here (or
-# switch to DirectoryOrCreate to degrade instead of failing).
+# cluster grows a non-cephfs worker, add a nodeSelector/affinity here. NEVER
+# switch to DirectoryOrCreate: it creates an empty LOCAL directory that looks
+# healthy to existence/write checks (the 2026-11-23 incident shape -- the api
+# served "no artifacts" for every job). Note `Directory` only proves the path
+# exists: a node whose /cephfs (or /mgmt_storage) is a plain local directory
+# still starts -- the startup gate above is what catches that.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -70,6 +88,15 @@ metadata:
   namespace: dms
 spec:
   replicas: 1
+  # Explicit (same as the replicas-1 default today): the new pod must come up
+  # BESIDE the old one and the old one must stay until the new one is Ready --
+  # the artifact base startup gate (header) only protects a rollout because of
+  # this. Pinned by tests/test_release_manifest_contract.py.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   selector:
     matchLabels:
       app.kubernetes.io/name: dms-api
@@ -131,6 +158,13 @@ spec:
             # already sets this, listed here explicitly for visibility.
             - name: DMS_STATIC_DIR
               value: /app/static
+            # Node this pod runs on -- labels the artifact base self-check
+            # (api_base_checks, admin "mounts" page). Optional: the code falls
+            # back to looking up its own pod.
+            - name: DMS_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
           envFrom:
             - configMapRef:
                 name: dms-config
