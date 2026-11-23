@@ -70,6 +70,19 @@ test("기본은 전 그룹 펼침: 대시보드 마운트에도 작업·스토�
     expect(screen.getByRole("button", { name: group })).toHaveAttribute("aria-expanded", "true");
 });
 
+test("aria-current 는 최장 일치 항목 하나에만 -- 하위 경로 항목(마운트 현황·단일 작업)이 켜지면 부모 접두 항목은 아니다", async () => {
+  // 2026-11-23 d38 실증: NavLink 가 음영(activeNavPath)과 별개로 접두 일치마다 aria-current="page" 를 붙여 /admin/storages/mounts 에서
+  // 「스토리지」까지 현재 페이지로 읽혔다(/jobs/new 의 /jobs 도 같았다).
+  for (const [at, label] of [["/admin/storages/mounts", "마운트 현황"], ["/jobs/new", "단일 작업"], ["/admin/storages", "스토리지"]] as const) {
+    const { unmount, container } = renderShell("admin", at);
+    expect(await screen.findByRole("link", { name: "대시보드" })).toBeInTheDocument();
+    const current = [...container.querySelectorAll('aside [aria-current="page"]')].map((a) => a.textContent);
+    expect(current).toEqual([label]);
+    expect(container.querySelector("aside a.active")).toBeNull();
+    unmount();
+  }
+});
+
 test("독립 토글: 스토리지를 접어도 운영은 열린 채다", async () => {
   renderShell("admin", "/admin/dashboard");
   await screen.findByRole("link", { name: "노드" });

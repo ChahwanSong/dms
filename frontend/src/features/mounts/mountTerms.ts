@@ -174,10 +174,12 @@ export function usageDetail(disk: MountDisk | null): string | null {
 
 /** 쓰기 여부 글자. 「(읽기 전용)」은 대상이 실제로 붙어 있을 때(mounted -- 칸은 cellMounted, 공용 디렉터리는 exists === true)만
  *  붙인다: 에이전트는 경로가 없거나 마운트 지점이 아니어도 writable=false 를 보고한다(probe_mounts·probe_artifact_base 의
- *  `exists and …`) -- 그 칸을 읽기 전용이라 말하면 ro 마운트 옵션을 의심하게 만든다(진짜 원인은 빠진 마운트). */
+ *  `exists and …`) -- 그 칸을 읽기 전용이라 말하면 ro 마운트 옵션을 의심하게 만든다(진짜 원인은 빠진 마운트). 붙지 않았으면 「—」. */
 export function writableText(v: boolean | null, mounted: boolean): string {
+  // 붙지 않은 대상은 쓰기 여부를 따질 수 없다 -- 「불가」 대신 「—」(2026-11-23 d38 실증: 경로가 없는 칸이 「쓰기 불가」로 읽혔다).
+  if (!mounted) return "—";
   if (v === true) return "가능";
-  if (v === false) return mounted ? "불가(읽기 전용)" : "불가";
+  if (v === false) return "불가(읽기 전용)";
   return "모름";
 }
 

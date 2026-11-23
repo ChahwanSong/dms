@@ -83,9 +83,10 @@ test("쓰기·사용량 표기(모름 ≠ 0)", () => {
   expect(writableText(null, true)).toBe("모름");
   expect(writableText(true, true)).toBe("가능");
   expect(writableText(false, true)).toBe("불가(읽기 전용)");
-  // 붙지 않은 대상(경로 없음·마운트 빠짐·공용 없음)의 writable=false 는 ro 마운트가 아니다 -- 「읽기 전용」을 붙이지 않는다
-  expect(writableText(false, false)).toBe("불가");
-  expect(writableText(null, false)).toBe("모름");
+  // 붙지 않은 대상(경로 없음·마운트 빠짐·공용 없음)의 writable=false 는 ro 마운트가 아니다 -- 쓰기 여부를 따질 수 없어 「—」
+  expect(writableText(false, false)).toBe("—");
+  expect(writableText(true, false)).toBe("—");
+  expect(writableText(null, false)).toBe("—");
   expect(usageText(null)).toBeNull();
   expect(usageText({ total_bytes: 0, used_bytes: 0 })).toBeNull();
   expect(usageText({ total_bytes: 1000, used_bytes: 410 })).toBe("사용 41%");

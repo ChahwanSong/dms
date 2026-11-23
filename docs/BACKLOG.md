@@ -427,10 +427,7 @@ CHANGELOG 「사내 AD SSO 로그인(OIDC Authorization Code + PKCE)」·「테�
 CHANGELOG 「스토리지 > 마운트 현황(노드 × 스토리지 매트릭스) + 에이전트 공용 디렉터리 덮는 마운트 보고」. 지금 동작은 `mount_status`·
 `mount_status_k8s`·`api.routes_mount_status` 모듈 docstring 과 `frontend/src/features/mounts/` 파일 머리 주석.
 
-- 🧪 **라이브 실증** — 에이전트 이미지를 포함한 포탈 빌드(다음 태그 d37) → 오버레이 bump → 설치기(롤아웃 순서 에이전트 → api·controller).
-  기대: 행 k8s-w1·k8s-w2, w1/cephfs-secondary·w2/cephfs-third 「없음」, 공용 칸 「정상 · nfs4」(과반 `/dms_shared nfs4 (2)`), 각주 에이전트
-  없는 노드 k8s-cp1(control-plane), 열 메타 k8s-pv-gpfs PV 2개·k8s-pv-nfs PV 5개·클러스터 2·k8s-pv-onefs PV 1개, w1 「k8s 호출 주」·w2
-  「k8s 호출 보조」. 실 Chrome 1280·390 에서 고정 칸 겹침 순서(모서리 > 머리 > 행 머리)·툴팁·시트가 표 위에 오는지.
+- ✅ **라이브 실증** — d38 에서 끝냈다(CHANGELOG 「스토리지 > 마운트 현황」 의 「배포·라이브 실증(d38)」 — 기대값 일치, 사고 유형 가짜 보고 탐지·정리).
 - 💡 **API·컨트롤러 파드가 뜬 노드 꼬리표** — dms-ssc 의 API 파드 base 점검을 이식할 때 행 `roles` 에 `api_pod`·`controller_pod` 를 더한다
   (`rollout_runner.pod_briefs(selector=app.kubernetes.io/name=dms-api|dms-controller)`, dms-api Role 의 pods list 권한은 이미 있다 — 포탈은
   모르는 역할을 원문으로 보이므로 라벨만 더하면 된다).

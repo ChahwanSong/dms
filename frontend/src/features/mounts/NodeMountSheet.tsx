@@ -1,6 +1,5 @@
 import { Link } from "react-router-dom";
 import { Dialog } from "../../components/ui/Dialog";
-import { Table } from "../../components/ui/Table";
 import { agoText, kstStamp } from "../../lib/datetime";
 import { useNow } from "../../lib/useNow";
 import { MountCellChip, NodeTags, SharedCellChip } from "./MountCell";
@@ -55,34 +54,35 @@ export function NodeMountSheet({ row, data, roleLabels, onClose, onCloseAutoFocu
           {data.storages.length === 0 ? (
             <p className="text-muted">점검할(활성) 스토리지가 없습니다.</p>
           ) : (
-            <Table boxed>
-              <caption className="sr-only">{`${row.node_name} 스토리지별 마운트`}</caption>
-              <thead>
-                <tr className="text-muted">
-                  <th>스토리지</th><th>상태</th><th>마운트 경로</th><th>쓰기</th><th>사용량</th><th>사유</th>
-                </tr>
-              </thead>
-              <tbody>
-                {data.storages.map((col) => {
-                  const cell = row.cells[col.storage_name];
-                  if (cell === undefined) return null;
-                  return (
-                    <tr key={col.storage_name}>
-                      <td className="whitespace-nowrap font-mono text-xs font-medium">{col.storage_name}</td>
-                      <td><MountCellChip cell={cell} className="!items-start"
-                                         aria-label={cellAriaLabel(row.node_name, col.storage_name, cellLabel(cell))} /></td>
-                      <td className="font-mono text-xs break-all">{col.mount_path}</td>
-                      <td className="whitespace-nowrap">{cell.status === null ? "—" : writableText(cell.writable, cellMounted(cell))}</td>
-                      <td className="whitespace-nowrap tabular-nums">{usageDetail(cell.disk) ?? "—"}</td>
-                      <td className="min-w-[12rem] text-xs">
-                        {cell.state === "ready" ? "—" : cellHelp(cell, { mountPath: col.mount_path, ago: agoText(row.reported_at, nowMs) })}
+            // 스토리지별 목록은 표가 아니라 세로 쌓임이다(2026-11-23 d38 실증): 640px 시트(모바일은 더 좁다)에 6열 표를 넣으면
+            // 경로 열이 한 글자 폭까지 줄어 「/c ep hf s」처럼 끊기고 사유 열은 가로로 밀어야 보였다. 줄 하나 = 스토리지 하나.
+            <ul aria-label={`${row.node_name} 스토리지별 마운트`} className="space-y-2">
+              {data.storages.map((col) => {
+                const cell = row.cells[col.storage_name];
+                if (cell === undefined) return null;
+                const usage = usageDetail(cell.disk);
+                return (
+                  <li key={col.storage_name} className="rounded-lg border border-line px-3 py-2.5 space-y-1">
+                    <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+                      <span className="font-mono text-xs font-medium break-all">{col.storage_name}</span>
+                      <MountCellChip cell={cell} className="!items-end"
+                                     aria-label={cellAriaLabel(row.node_name, col.storage_name, cellLabel(cell))} />
+                    </div>
+                    <p className="font-mono text-xs text-muted break-all">{col.mount_path}</p>
+                    <p className="text-xs tabular-nums">
+                      {`쓰기 ${cell.status === null ? "—" : writableText(cell.writable, cellMounted(cell))}`}
+                      {usage !== null && ` · ${usage}`}
+                    </p>
+                    {cell.state !== "ready" && (
+                      <p className="text-xs">
+                        {cellHelp(cell, { mountPath: col.mount_path, ago: agoText(row.reported_at, nowMs) })}
                         {cell.reason !== null && <span className="mt-0.5 block font-mono text-muted">{cell.reason}</span>}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </Table>
+                      </p>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
           )}
           <Link to="/admin/nodes" className="inline-block text-accent hover:underline">
             노드 화면에서 보기 — 배치 제외·도구 상태

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { NavLink, useLocation } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import { ChevronDown, HardDrive, Menu, X } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useMe } from "../features/auth/useAuth";
@@ -22,15 +22,17 @@ const linkCls = (active: boolean) =>
  *
  *  활성 판정은 NavLink 의 isActive(접두 일치)가 아니라 activeNavPath(최장 일치
  *  하나)다: /jobs/new 에서 /jobs(내 작업)까지 함께 음영되던 결함(사용자 보고)의
- *  수리이고, 상세 경로(/jobs/:id 등)에서는 여전히 부모 항목이 켜진다. */
+ *  수리이고, 상세 경로(/jobs/:id 등)에서는 여전히 부모 항목이 켜진다.
+ *  aria-current 도 같은 판정 하나로 단다(2026-11-23 — NavLink 는 음영과 별개로 접두 일치마다 aria-current="page"·active
+ *  클래스를 붙여 /admin/storages/mounts 에서 「스토리지」까지, /jobs/new 에서 /jobs 까지 화면 낭독기에 현재 페이지가 둘로 읽혔다). */
 function NavItemLink({ path, label, icon: Icon, active }: {
   path: string; label: string; icon: LucideIcon; active: boolean;
 }) {
   return (
-    <NavLink to={path} className={linkCls(active)}>
+    <Link to={path} className={linkCls(active)} aria-current={active ? "page" : undefined}>
       <Icon className="h-4 w-4 shrink-0" aria-hidden />
       {label}
-    </NavLink>
+    </Link>
   );
 }
 
