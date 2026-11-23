@@ -41,3 +41,20 @@ def test_build_tsconfig_excludes_tests_and_test_helpers():
         assert pattern in cfg["exclude"]
     base = _jsonc(FRONTEND / "tsconfig.json")
     assert base["include"] == ["src"]                       # 개발 게이트는 테스트 포함
+
+
+def test_node_heap_is_pinned_and_fits_the_build_pod_limit():
+    # 힙을 Node 의 자동 계산(cgroup 상한의 약 절반 — 판마다 다를 수 있다)에 맡기지 않는다. 빌드 파드 memory limit(build_manifests)
+    # 안에 힙 + buildah·RSS 여유가 남아야 한다 — 상한을 내리거나 힙을 올릴 때 둘을 같이 본다(2026-11-23 1Gi → 2Gi, 힙 1024MB).
+    dockerfile = (REPO_ROOT / "deploy" / "docker" / "Dockerfile.dms").read_text()
+    m = re.search(r"^ENV NODE_OPTIONS=--max-old-space-size=(\d+)$", dockerfile, re.M)
+    assert m, "Dockerfile.dms 의 web 단계가 NODE_OPTIONS 힙을 고정해야 한다"
+    heap_mib = int(m.group(1))
+    assert dockerfile.index("ENV NODE_OPTIONS") < dockerfile.index("RUN npm run build:image")
+    src = (REPO_ROOT / "src" / "dms" / "build_manifests.py").read_text()
+    lim = re.search(r'"limits": \{"cpu": "1000m", "memory": "(\d+)Gi"', src)
+    assert lim, "빌드 컨테이너 memory limit 을 찾지 못했다"
+    limit_mib = int(lim.group(1)) * 1024
+    assert heap_mib >= 768                      # build:image 는 힙 ~400MB(350 에서 실패) — 넉넉히
+    assert limit_mib - heap_mib >= 768          # buildah·Node 비힙 RSS 여유
+

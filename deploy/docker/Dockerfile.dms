@@ -15,9 +15,11 @@ WORKDIR /web
 COPY frontend/package.json frontend/package-lock.json* /web/
 RUN npm ci || npm install
 COPY frontend/ /web/
-# build:image = 앱 코드만 타입 검사(frontend/tsconfig.build.json) + vite build. 빌드 파드 memory limit 1Gi 의 Node 힙 자동 상한
-# (약 505MB) 안에서 돌게 하려는 것 — 테스트까지 보는 `npm run build`(tsc -b)는 2026-11-23 d37 에서 heap out of memory 였다.
-# 테스트 타입 검사는 개발 게이트(npx tsc -b)의 몫이다.
+# build:image = 앱 코드만 타입 검사(frontend/tsconfig.build.json) + vite build(힙 약 400MB) — 테스트까지 보는 `npm run build`
+# (tsc -b, 힙 510~550MB)는 2026-11-23 d37 에서 빌드 파드 1Gi 의 Node 힙 자동 상한(약 505MB)을 넘어 heap out of memory 였다.
+# 테스트 타입 검사는 개발 게이트(npx tsc -b)의 몫이다. 힙은 자동 계산(cgroup 상한의 약 절반 — Node 판마다 다를 수 있다)에 맡기지
+# 않고 1024MB 로 고정한다 — 빌드 파드 memory limit 2Gi(build_manifests) 안에서 buildah·RSS 여유를 남긴다. 둘은 같이 바꾼다.
+ENV NODE_OPTIONS=--max-old-space-size=1024
 RUN npm run build:image
 
 # Pin bookworm: bare python:3.11-slim now resolves to Debian trixie. Nothing

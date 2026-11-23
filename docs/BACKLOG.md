@@ -417,10 +417,10 @@ CHANGELOG 「사내 AD SSO 로그인(OIDC Authorization Code + PKCE)」·「테�
 
 ### 포탈 이미지 빌드 메모리 — 2026-11-23
 
-- 🔧 **빌드 파드 Node 힙 여유 약 25%** — 이미지 빌드의 앱 코드 타입 검사(`build:image`)는 힙 약 400MB 가 필요하고 빌드 파드(1Gi)의 Node 힙 자동
-  상한은 약 505MB 다(CHANGELOG 「포탈 이미지 빌드의 프런트 타입 검사 heap OOM」). 포탈이 계속 커져 다시 heap OOM 이면 빌드 파드 memory limit
-  (`build_manifests` — 노드 보호 1차 방어라 노드 메모리와 함께 정한다)과 Dockerfile `NODE_OPTIONS=--max-old-space-size` 를 같이 올린다.
-  확인: `NODE_OPTIONS=--max-old-space-size=400 npm run build:image` 가 통과하는지(여유 측정).
+- ✅ **빌드 파드 Node 힙 여유** — 2026-11-23 해소: 빌드 파드 memory limit 1Gi → 2Gi + Dockerfile `NODE_OPTIONS=--max-old-space-size=1024`
+  (CHANGELOG 「빌드 파드 메모리 상한 1Gi → 2Gi」). 힙 필요량은 `build:image` 약 400MB·테스트 포함 tsc 약 550MB 라 여유 약 2.5배. 다시 모자라면
+  둘을 같이 올린다(`tests/test_portal_image_build.py` 가 힙 ≥ 768MB·상한 − 힙 ≥ 768MB 를 고정). 여유 측정:
+  `NODE_OPTIONS=--max-old-space-size=400 npm run build:image`.
 
 ### 마운트 현황 후속 — 2026-11-23
 
