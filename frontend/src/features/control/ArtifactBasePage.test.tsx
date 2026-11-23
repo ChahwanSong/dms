@@ -424,6 +424,28 @@ test("API 파드별 카드: 다른 파드가 있을 때만, 보고 끊김은 흐
   expect(screen.getByText("문제 1건")).toBeInTheDocument();
 });
 
+test("엇갈림 상자: 실패한 API 파드의 노드에 정상 파드(컨트롤러·옛 API 파드)가 있으면 노드 마운트가 아니라 파드 쪽을 짚는다", async () => {
+  // 2026-11-23 d40 실증: 같은 k8s-w1 의 컨트롤러·옛 API 파드는 정상인데 「노드 k8s-w1 에 공유 스토리지가 마운트돼 있는지」라고 했다.
+  const pod = (o: Record<string, unknown>) => ({
+    instance: "p", node_name: "n", uri: "file:///cephfs/dms/artifacts", ok: true, reason: null, posture: null,
+    fstype: "nfs4", local_fs: false, gate_state: "passed", started_at: ago(7200), checked_at: ago(30), ready_at: ago(7100),
+    fresh: true, this_pod: false, ...o });
+  server.use(http.get("/api/admin/artifact-base", () => HttpResponse.json(withChecks({
+    api: { ...API_OK, node_name: "k8s-w1" }, controller: { ...CTRL_OK, node_name: "k8s-w1" },
+    api_pods: [
+      pod({ instance: "dms-api-old", node_name: "k8s-w1", this_pod: true }),
+      pod({ instance: "dms-api-new", node_name: "k8s-w1", ok: 0, reason: "artifact_base_jobs_missing", gate_state: "waiting",
+            ready_at: null, fstype: "xfs", local_fs: true }),
+    ],
+  }))));
+  wrap();
+  await screen.findByText("env 기본");
+  const note = screen.getByRole("note");
+  expect(note).toHaveTextContent("API 파드(노드 k8s-w1)만 아티팩트 경로를 읽지 못합니다");
+  expect(note).toHaveTextContent("노드 마운트가 아니라 그 파드의 hostPath·마운트 전파");
+  expect(note).not.toHaveTextContent("공유 스토리지가 마운트돼 있는지 확인하세요");
+});
+
 test("응답한 파드 하나뿐이면 파드 카드 목록을 그리지 않는다(패널과 같은 내용)", async () => {
   server.use(http.get("/api/admin/artifact-base", () => HttpResponse.json(withChecks({
     api: API_OK, controller: CTRL_OK,

@@ -213,10 +213,10 @@ def _artifact_base_summary(request: Request, row: dict) -> dict:
     """대시보드 컴포넌트 카드의 아티팩트 경로 경고(2026-11-23) -- api 행·controller 행 아래 「실패일 때만」 한 줄. 메모리
     (이 파드의 모니터 스냅숏)·DB(api_base_checks·control_state)만 읽는다(5초 폴링 -- FS·k8s 를 건드리지 않는다).
     api: 이 파드의 스냅숏(없으면 null -- 모니터 미시작·첫 회차 전). api_pods_failing: **다른** 파드의 신선 행 중 ok False 인
-    수(이 파드는 api 가 말한다 -- 두 번 세지 않는다; Ready 못 된 새 파드의 실패도 센다). 읽기 실패는 그 축만 null(대시보드
-    fail-soft)."""
+    수(이 파드는 api 가 말한다 -- 두 번 세지 않는다; Ready 못 된 새 파드의 실패도 센다), api_pods_failing_waiting: 그중
+    시작 게이트 대기(gate_state waiting -- 서비스 밖) 수. 읽기 실패는 그 축만 null(대시보드 fail-soft)."""
     from ..artifact_base import resolve_artifact_base
-    from .base_monitor import fresh_window_seconds
+    from .base_monitor import GATE_WAITING, fresh_window_seconds
     from .routes_artifact_base import _controller_check
     state = request.app.state
     monitor = state.base_monitor
@@ -224,13 +224,17 @@ def _artifact_base_summary(request: Request, row: dict) -> dict:
     api = (None if snap is None else
            {"ok": snap["ok"], "reason": snap["reason"], "node_name": snap["node_name"],
             "instance": monitor.instance})
-    failing = None
+    failing = failing_waiting = None
     try:
         now = utc_now_iso()
         cutoff = iso_plus(now, -fresh_window_seconds(monitor.interval))
-        failing = sum(1 for r in state.repos.api_base_checks.list_recent(now_iso=now)
-                      if r["ok"] is False and r["instance"] != monitor.instance
-                      and (r["checked_at"] or r["started_at"]) >= cutoff)
+        rows = [r for r in state.repos.api_base_checks.list_recent(now_iso=now)
+                if r["ok"] is False and r["instance"] != monitor.instance
+                and (r["checked_at"] or r["started_at"]) >= cutoff]
+        failing = len(rows)
+        # 그중 시작 게이트에 막혀 Ready 를 기다리는(서비스 밖) 파드 수(2026-11-23 d40 실증 -- 대시보드가 그 파드에도 「그 파드로 간
+        # 조회는 …」이라고 했다; 게이트 대기 파드로는 조회가 가지 않고, 운영자에게는 「롤아웃이 멈춤」이 맞는 말이다).
+        failing_waiting = sum(1 for r in rows if r.get("gate_state") == GATE_WAITING)
     except Exception as exc:       # noqa: BLE001
         logger.warning("metrics/infra api_base_checks failed: %s", exc)
     try:
@@ -239,7 +243,7 @@ def _artifact_base_summary(request: Request, row: dict) -> dict:
     except Exception as exc:       # noqa: BLE001
         logger.warning("metrics/infra controller artifact base failed: %s", exc)
         controller = None
-    return {"api": api, "api_pods_failing": failing, "controller": controller}
+    return {"api": api, "api_pods_failing": failing, "api_pods_failing_waiting": failing_waiting, "controller": controller}
 
 
 @router.get("/api/admin/metrics/queue")

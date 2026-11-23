@@ -4,7 +4,7 @@ import { HoverTip, useHoverAnchor } from "../../components/ui/HoverTip";
 import { agoText, kstStamp } from "../../lib/datetime";
 import { useNow } from "../../lib/useNow";
 import { Chip, MountCellChip, MountTipBody, NodeTags, ProblemTag, SharedCellChip, SharedTipBody } from "./MountCell";
-import { cellAriaLabel, cellLabel, podFailedOn, podsOn, sharedDisplay } from "./mountTerms";
+import { cellAriaLabel, cellLabel, podFailedOn, podFailedRoles, podsOn, sharedDisplay } from "./mountTerms";
 import type { MountRow, MountStatusResponse, StorageColumn } from "./types";
 
 // 노드 × 스토리지 표(2026-11-23). 노드 = 행(수십 대까지 늘어난다), 열 = [보고] + [DMS 공용] + 활성 스토리지(응답 순서).
@@ -53,7 +53,7 @@ export function MountMatrix({ data, rows, renderStorageMeta, roleLabels, onOpenN
     if (key === SHARED_KEY) {
       if (row.shared_dir === null || shared === null) return null;
       return <SharedTipBody nodeName={row.node_name} path={shared.path} cell={row.shared_dir} majority={shared.majority}
-                            reportedAt={row.reported_at} nowMs={nowMs} podFailed={podFailedOn(data, row.node_name)} />;
+                            reportedAt={row.reported_at} nowMs={nowMs} failedRoles={podFailedRoles(data, row.node_name)} />;
     }
     const col = cols.find((c) => c.storage_name === key);
     const cell = row.cells[key];

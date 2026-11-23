@@ -5,7 +5,7 @@ import { agoText, kstStamp } from "../../lib/datetime";
 import { PlacementBadges } from "../nodes/NodePlacement";
 import {
   CELL_META, SHARED_META, TONE_CLASS, cellHelp, cellIcon, cellLabel, cellMounted, cellSub, coverText, isPodRole, podTag,
-  roleLabel, sharedHelp, sharedDisplay, sharedSub, usageDetail, writableText, yesNo,
+  roleLabel, sharedHelp, podFailedHelp, sharedDisplay, sharedSub, usageDetail, writableText, yesNo,
 } from "./mountTerms";
 import type { PodTagView, Tone } from "./mountTerms";
 import type { ControlPod, MountCellData, MountRow, SharedCellData, SharedMajority, StorageColumn } from "./types";
@@ -161,11 +161,12 @@ export function MountTipBody({ nodeName, col, cell, reportedAt, nowMs }: {
 }
 
 /** 공용 디렉터리 칸 툴팁 내용. */
-export function SharedTipBody({ nodeName, path, cell, majority, reportedAt, nowMs, podFailed = false }: {
+export function SharedTipBody({ nodeName, path, cell, majority, reportedAt, nowMs, failedRoles = [] }: {
   nodeName: string; path: string; cell: SharedCellData; majority: SharedMajority | null; reportedAt: string; nowMs: number;
-  podFailed?: boolean;
+  failedRoles?: readonly string[];
 }) {
-  const { meta, overridden } = sharedDisplay(cell, podFailed);
+  const { meta: base, overridden } = sharedDisplay(cell, failedRoles.length > 0);
+  const meta = overridden ? { ...base, help: podFailedHelp(failedRoles) } : base;
   const ago = agoText(reportedAt, nowMs);
   return (
     <div className="max-w-xs space-y-1.5">

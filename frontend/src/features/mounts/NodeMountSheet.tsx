@@ -4,8 +4,8 @@ import { agoText, kstStamp } from "../../lib/datetime";
 import { useNow } from "../../lib/useNow";
 import { MountCellChip, NodeTags, PodTag, SharedCellChip } from "./MountCell";
 import {
-  cellAriaLabel, cellHelp, cellLabel, cellMounted, coverText, podFailedOn, podTag, podsOn, probeModeText, sharedDisplay,
-  sharedHelp, usageDetail, writableText, yesNo,
+  cellAriaLabel, cellHelp, cellLabel, cellMounted, coverText, podFailedHelp, podFailedOn, podFailedRoles, podTag, podsOn, probeModeText,
+  sharedDisplay, sharedHelp, usageDetail, writableText, yesNo,
 } from "./mountTerms";
 import type { MountRow, MountStatusResponse } from "./types";
 
@@ -43,6 +43,9 @@ export function NodeMountSheet({ row, data, roleLabels, onClose, onCloseAutoFocu
                   <SharedCellChip cell={row.shared_dir} className="!items-start" podFailed={podFailedOn(data, row.node_name)}
                                   aria-label={cellAriaLabel(row.node_name, "DMS 공용",
                                     sharedDisplay(row.shared_dir, podFailedOn(data, row.node_name)).meta.label)} />
+                  {podFailedOn(data, row.node_name) && sharedDisplay(row.shared_dir, true).overridden && (
+                    <p className="text-xs text-bad">{podFailedHelp(podFailedRoles(data, row.node_name))}</p>
+                  )}
                   <p className="font-mono text-xs break-all">{shared.path}</p>
                   <p className="text-xs text-muted">
                     {`존재 ${yesNo(row.shared_dir.exists)} · `

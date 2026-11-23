@@ -205,8 +205,19 @@ function MismatchNote({ checks }: { checks: ArtifactBaseInfo["checks"] }) {
   if (apiDown && !ctrlDown && ctrlOk) {
     const known = [...new Set(apiNodes.filter((n): n is string => !!n))];
     const who = known.length > 0 ? known.map((n) => `노드 ${n}`).join(", ") : "노드 모름";
-    text = `API 파드(${who})만 아티팩트 경로를 읽지 못합니다. 컨트롤러(${nodeLabel(c.node_name)})는 같은 경로를 정상으로 봅니다 — `
-      + `${known.length > 0 ? `${known.map((n) => `노드 ${n}`).join(", ")} 에` : "API 파드가 뜬 노드에"} 공유 스토리지가 마운트돼 있는지 확인하세요`;
+    // 실패한 API 파드의 노드마다 같은 노드에서 정상인 파드(컨트롤러·이 파드·다른 API 파드)가 있으면 노드 마운트가 아니라 그 파드
+    // 쪽(hostPath·마운트 전파 — 파드가 공유 스토리지 마운트보다 먼저 떴는지)이다(2026-11-23 d40 실증: 같은 k8s-w1 의 컨트롤러·옛 API
+    // 파드는 정상인데 「노드 k8s-w1 에 공유 스토리지가 마운트돼 있는지」라고 했다).
+    const healthy = new Set<string>();
+    if (c.node_name) healthy.add(c.node_name);
+    if (apiOk && api.node_name) healthy.add(api.node_name);
+    for (const p of checks.api_pods ?? []) if (!p.this_pod && p.fresh && tri(p.ok) === true && p.node_name) healthy.add(p.node_name);
+    const podSide = known.length > 0 && known.every((n) => healthy.has(n));
+    text = podSide
+      ? `API 파드(${who})만 아티팩트 경로를 읽지 못합니다. 같은 노드의 다른 DMS 파드(컨트롤러 ${nodeLabel(c.node_name)})는 정상입니다 — `
+        + "노드 마운트가 아니라 그 파드의 hostPath·마운트 전파(파드가 공유 스토리지 마운트보다 먼저 떴는지)를 확인하세요"
+      : `API 파드(${who})만 아티팩트 경로를 읽지 못합니다. 컨트롤러(${nodeLabel(c.node_name)})는 같은 경로를 정상으로 봅니다 — `
+        + `${known.length > 0 ? `${known.map((n) => `노드 ${n}`).join(", ")} 에` : "API 파드가 뜬 노드에"} 공유 스토리지가 마운트돼 있는지 확인하세요`;
   } else if (ctrlDown && apiOk && !apiDown) {
     text = `컨트롤러(${nodeLabel(c.node_name)})만 아티팩트 경로를 읽지 못합니다. API 파드(${nodeLabel(api.node_name)})는 같은 경로를 `
       + `정상으로 봅니다 — ${c.node_name ? `노드 ${c.node_name} 에` : "컨트롤러가 뜬 노드에"} 공유 스토리지가 마운트돼 있는지 확인하세요`;

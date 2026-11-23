@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "vitest";
 import {
   CELL_META, REASON_TEXT, SHARED_META, SHARED_PROBLEM_STATES, TONE_CLASS, cellHelp, cellLabel, cellMounted, cellSub, isPodRole,
-  podCheckText, podFailedOn, podLine, podTag, podsOn, roleLabel, sharedDisplay, sharedHelp, sharedSub, usageDetail, usageText,
+  podCheckText, podFailedHelp, podFailedOn, podFailedRoles, podLine, podTag, podsOn, roleLabel, sharedDisplay, sharedHelp, sharedSub, usageDetail, usageText,
   writableText,
 } from "./mountTerms";
 import { pod, row as mkRow, sharedOk } from "./mountFixtures";
@@ -246,4 +246,18 @@ test("공용 칸 표시(sharedDisplay): 파드 점검 실패는 에이전트 정
   expect(podFailedOn(data, "n1")).toBe(true);
   expect(podFailedOn(data, "n2")).toBe(false);   // 권한(posture) 사유만이면 경로 점검 실패가 아니다
   expect(podFailedOn(data, "n3")).toBe(false);
+});
+
+test("파드 점검 실패 도움말은 실패한 역할을 이름으로(podFailedRoles·podFailedHelp — d40 실증)", () => {
+  const data = { control_pods: [
+    { role: "api_pod", instance: "a1", node_name: "n1", ok: false, reason: "artifact_base_jobs_missing", read_failed: true,
+      checked_at: null, gate_state: "waiting", in_table: true },
+    { role: "api_pod", instance: "a2", node_name: "n1", ok: true, reason: null, read_failed: false,
+      checked_at: null, gate_state: "passed", in_table: true },
+    { role: "controller_pod", instance: "c", node_name: "n1", ok: true, reason: null, read_failed: false,
+      checked_at: null, gate_state: null, in_table: true },
+  ] } as never;
+  expect(podFailedRoles(data, "n1")).toEqual(["dms-api"]);
+  expect(podFailedHelp(podFailedRoles(data, "n1"))).toMatch(/^이 노드의 dms-api 파드가 아티팩트 경로를 점검하지 못했습니다/);
+  expect(podFailedHelp([])).toMatch(/^이 노드의 dms-api·컨트롤러 파드가/);
 });

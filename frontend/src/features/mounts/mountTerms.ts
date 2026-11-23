@@ -213,9 +213,16 @@ export const SHARED_PROBLEM_STATES: readonly SharedState[] = ["local", "differs"
  *  68dcbcdb 와 같은 원칙: 「문제 있는 노드」로 세면서 칸은 초록이면 모순이다). 파드 hostPath·마운트 전파·옛 에이전트일 수 있다. */
 export const POD_FAILED_META: StateMeta = {
   label: "파드 점검 실패", Icon: CircleX, tone: "bad",
-  help: "이 노드의 dms-api·컨트롤러 파드가 아티팩트 경로를 점검하지 못했습니다 — 에이전트는 공용 디렉터리를 정상으로 봅니다. 파드의 "
-    + "hostPath·마운트 전파·노드의 공유 스토리지 마운트를 확인하세요(아티팩트 경로 화면에 파드별 사유).",
+  help: podFailedHelp([]),
 };
+
+/** 공용 칸 「파드 점검 실패」 도움말 — 실패한 역할을 이름으로(2026-11-23 d40 실증: 고정 문구 「dms-api·컨트롤러」는 dms-api 만 실패해도
+ *  둘 다로 읽혔다). roles 가 비면(모름) 둘 다. */
+export function podFailedHelp(roles: readonly string[]): string {
+  const who = roles.length > 0 ? roles.join("·") : "dms-api·컨트롤러";
+  return `이 노드의 ${who} 파드가 아티팩트 경로를 점검하지 못했습니다 — 에이전트는 공용 디렉터리를 정상으로 봅니다. 파드의 `
+    + "hostPath·마운트 전파·노드의 공유 스토리지 마운트를 확인하세요(아티팩트 경로 화면에 파드별 사유).";
+}
 
 /** 공용 디렉터리 칸의 표시. 에이전트 판정이 이미 문제거나 리포트 지연이면 그대로, 아니면 파드 점검 실패(podFailed)가 칸을 덮는다
  *  (에이전트 판정은 보조 줄). podFailed = 이 노드 파드 중 read_failed 가 있다(podsOn — 서버 mount_status_pods 와 같은 가름). */
@@ -234,6 +241,11 @@ export function podsOn(data: Pick<MountStatusResponse, "control_pods">, node: st
 /** 이 노드의 DMS 파드 중 아티팩트 경로 점검이 실패한 것이 있나(공용 칸 표시 — sharedDisplay). */
 export function podFailedOn(data: Pick<MountStatusResponse, "control_pods">, node: string): boolean {
   return podsOn(data, node).some((p) => p.read_failed);
+}
+
+/** 이 노드에서 경로 점검이 실패한 DMS 파드의 역할 라벨(중복 없이 — 「dms-api」·「컨트롤러」). */
+export function podFailedRoles(data: Pick<MountStatusResponse, "control_pods">, node: string): string[] {
+  return [...new Set(podsOn(data, node).filter((p) => p.read_failed).map((p) => roleLabel(p.role)))];
 }
 
 /** 파드 자신의 아티팩트 경로 점검 한 마디. 권한(posture) 사유만인 실패는 경로 점검 실패와 섞지 않는다(read_failed -- 서버 판정).

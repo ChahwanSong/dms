@@ -193,7 +193,7 @@ PostgreSQL(제어면) + React 포탈 + 노드 에이전트 + Volcano gang-schedu
 ## 테스트·검증
 
 - 백엔드: `PYTHONPATH=<워크트리>/src <venv>/bin/python -m pytest tests -q` (~10분, 6255+ passed · 19 skipped — 2026-11-23 API 파드 artifact base 점검 이식 기준)
-- 프론트: `cd frontend && npx vitest run` (2210+ passed, 130 파일 — 2026-11-23 API 파드 artifact base 점검 이식 기준) · `npx tsc -b`
+- 프론트: `cd frontend && npx vitest run` (2212+ passed, 130 파일 — 2026-11-23 API 파드 artifact base 점검 이식 기준) · `npx tsc -b`
 - e2e(실 브라우저): `cd frontend && npm run test:e2e` (41 passed, 19 spec — 빌드 포함) — **CI 없음, 수기 게이트**(이미지 빌드 전 게이트는
   `deploy/README.md` §8 「이미지 빌드 전 게이트」)
 - 배포 문서·스크립트 계약: 절 번호·출력 문구를 바꾸면 `tests/test_ingress_contract.py`·`test_install_stages.py`·`test_addons_render.py` 등이

@@ -315,6 +315,7 @@ def test_metrics_infra_carries_artifact_base_summary(tmp_path):
     ab = client.get("/api/admin/metrics/infra", headers=ADMIN).json()["artifact_base"]
     assert ab["api"] is None                                     # 모니터 미시작 = 모름
     assert ab["api_pods_failing"] == 1                           # 신선 행만
+    assert ab["api_pods_failing_waiting"] == 1                   # 그 파드는 시작 게이트 대기(서비스 밖)
     assert ab["controller"] == {"pending": False, "ok": True, "reason": None, "node_name": "n1"}
     mon = client.app.state.base_monitor
     mon.instance = "api-me"
@@ -326,3 +327,4 @@ def test_metrics_infra_carries_artifact_base_summary(tmp_path):
     mon.instance = "api-x"
     ab = client.get("/api/admin/metrics/infra", headers=ADMIN).json()["artifact_base"]
     assert ab["api_pods_failing"] == 0
+    assert ab["api_pods_failing_waiting"] == 0
