@@ -1,0 +1,93 @@
+import { agoText, kstStamp } from "../../lib/datetime";
+import { useNow } from "../../lib/useNow";
+import { Chip, MountCellChip, NodeTags, ProblemTag, SharedCellChip } from "./MountCell";
+import { CELL_META, SHARED_META, cellAriaLabel, cellLabel } from "./mountTerms";
+import type { CellState, MountRow, MountStatusResponse } from "./types";
+
+// 좁은 화면(390·375)의 노드별 카드(2026-11-23). 표를 CSS 로 숨기지 않고 이 보기를 **조건부로** 그린다(MountStatusPage) -- 숨은 표가
+// DOM 에 남으면 칸 수 측정(e2e)이 공허해진다. 카드는 정상이 아닌 칸만 먼저 보이고(문제 → 읽기 전용 → 확인 대기 → 모름 → 없음),
+// 정상 칸은 접어 둔다. 리포트 지연 카드는 글자를 text-ink/70 으로 흐리되(opacity 금지 -- mountTerms TONE_CLASS) 노드 이름은 흐리지
+// 않는다.
+
+const ORDER: CellState[] = ["broken", "read_only", "pending", "stale", "absent"];
+const LINE = "flex items-center justify-between gap-2 border-t border-line py-1.5";
+
+export function NodeMountCards({ data, rows, roleLabels, onOpenNode, registerButton }: {
+  data: MountStatusResponse;
+  rows: MountRow[];
+  roleLabels?: Record<string, string>;
+  onOpenNode: (name: string) => void;
+  registerButton: (name: string) => (el: HTMLButtonElement | null) => void;
+}) {
+  const nowMs = useNow(15_000, true);
+  return (
+    <ul aria-label="노드별 마운트 현황" className="space-y-3">
+      {rows.map((row) => {
+        const cells = data.storages
+          .map((col) => ({ col, cell: row.cells[col.storage_name] }))
+          .filter((x) => x.cell !== undefined);
+        const odd = cells.filter((x) => x.cell.state !== "ready")
+          .sort((a, b) => ORDER.indexOf(a.cell.state) - ORDER.indexOf(b.cell.state));
+        const ready = cells.filter((x) => x.cell.state === "ready");
+        const counts = new Map<CellState, number>();
+        for (const x of cells) counts.set(x.cell.state, (counts.get(x.cell.state) ?? 0) + 1);
+        const summary = (["ready", ...ORDER] as CellState[])
+          .filter((s) => (counts.get(s) ?? 0) > 0)
+          .map((s) => `${CELL_META[s].label} ${counts.get(s)}`).join(" · ");
+        return (
+          <li key={row.node_name}
+              className={`rounded-card border border-line bg-surface p-3 ${row.fresh ? "" : "text-ink/70"}`}>
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <div className="min-w-0 space-y-1">
+                <div className="flex max-w-full items-center gap-1.5">
+                  <button type="button" ref={registerButton(row.node_name)} onClick={() => onOpenNode(row.node_name)}
+                          className="min-w-0 truncate whitespace-nowrap rounded text-left font-mono text-[13px] font-semibold
+                                     text-ink hover:underline focus-visible:outline-none focus-visible:ring-2
+                                     focus-visible:ring-accent">
+                    {row.node_name}
+                  </button>
+                  <ProblemTag row={row} showStale={false} />
+                </div>
+                <NodeTags row={row} roleLabels={roleLabels} />
+              </div>
+              <span className="whitespace-nowrap text-xs" title={kstStamp(row.reported_at)}>
+                {row.fresh
+                  ? <span className="text-muted">{agoText(row.reported_at, nowMs)}</span>
+                  : <Chip tone="bad">{`리포트 지연 · ${agoText(row.reported_at, nowMs)}`}</Chip>}
+              </span>
+            </div>
+            <div className="mt-2">
+              {data.shared_dir !== null && row.shared_dir !== null && (
+                <div className={LINE}>
+                  <span className="text-xs text-muted">DMS 공용</span>
+                  <SharedCellChip cell={row.shared_dir}
+                                  aria-label={cellAriaLabel(row.node_name, "DMS 공용", SHARED_META[row.shared_dir.state].label)} />
+                </div>
+              )}
+              {odd.map(({ col, cell }) => (
+                <div key={col.storage_name} className={LINE}>
+                  <span className="min-w-0 truncate font-mono text-xs" title={col.mount_path}>{col.storage_name}</span>
+                  <MountCellChip cell={cell} className="!items-end"
+                                 aria-label={cellAriaLabel(row.node_name, col.storage_name, cellLabel(cell))} />
+                </div>
+              ))}
+              {summary !== "" && <p className="border-t border-line pt-1.5 text-xs text-muted">{summary}</p>}
+              {ready.length > 0 && (
+                <details className="mt-1 text-xs">
+                  <summary className="cursor-pointer text-muted">{`정상 ${ready.length}개 보기`}</summary>
+                  {ready.map(({ col, cell }) => (
+                    <div key={col.storage_name} className={LINE}>
+                      <span className="min-w-0 truncate font-mono" title={col.mount_path}>{col.storage_name}</span>
+                      <MountCellChip cell={cell} className="!items-end"
+                                     aria-label={cellAriaLabel(row.node_name, col.storage_name, cellLabel(cell))} />
+                    </div>
+                  ))}
+                </details>
+              )}
+            </div>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}

@@ -54,6 +54,7 @@ dms-k8s 라인의 **완료 기록**이다. 각 항목에는 무엇을 만들었�
 
 | 날짜 | 태그·실증 | 제목 |
 |---|---|---|
+| 11-23 | — | 스토리지 > 마운트 현황(노드 × 스토리지 매트릭스) + 에이전트 공용 디렉터리 덮는 마운트 보고 |
 | 11-19 | d35·d36 | 배치 단위 삭제 상한 기본 50000 + 청크(백그라운드) 삭제 + 삭제 화면 상한 표시·「삭제 불가」 |
 | 11-18 | d32·d33 | 테스트베드 사내 AD SSO 환경 구축·실증 + 실증 결함 3건 수정 |
 | 11-18 | — | 사내 AD SSO 로그인(OIDC Authorization Code + PKCE) |
@@ -104,6 +105,59 @@ dms-k8s 라인의 **완료 기록**이다. 각 항목에는 무엇을 만들었�
 ---
 
 ## 상세 기록 (최신순)
+
+### ✨ 스토리지 > 마운트 현황(노드 × 스토리지 매트릭스) + 에이전트 공용 디렉터리 덮는 마운트 보고 — **구현 완료**(2026-11-23, 라이브 실증 전)
+
+사용자 요청(2026-11-23): 「노드들의 스토리지 마운트 현황을 한눈에 보고 싶어. 스토리지 하위에 마운트 현황 메뉴를 추가하고 테이블로
+노드 - 스토리지 마운트 현황 예쁘게 보여지게 해줘. … dms-k8s 는 pv 및 k8s 환경도 고려해야 되니까 잘 고민해서 동일하게 갈지 별도로
+구현 할지는 너가 선택해서 진행해.」 같은 날 사고(공용 스토리지가 마운트되지 않은 노드에 dms-api 가 떠 아티팩트를 못 읽음)의 그런
+노드를 한눈에 찾는 도구이기도 하다.
+
+**결정 — 공용 코어는 dms-ssc 와 같게, k8s 정보는 별도 파일로 덧붙인다.** 칸 판정의 재료(에이전트 mounts·artifact_base, reconciler)가
+두 라인에서 바이트 단위로 같아 판정 규칙도 같아야 한다(따로 지으면 두 화면이 갈라진다). PV 를 따로 다룰 근거가 없다: 잡 파드는 PVC 를
+CSI 로 붙이지 않고 스토리지 mount_path 를 hostPath 로 붙여 PV 디렉터리에 접근하므로 칸 하나가 그 노드에서 그 스토리지의 PV 전부에
+접근 가능한지를 말하고, 에이전트는 PV 별 점검을 하지 않는다. k8s 덧붙임은 스토리지 열의 종류·지금 고를 수 있는 PV 수·StorageClass·
+클러스터와 노드 행의 k8s 호출 노드(주·보조)뿐이다.
+
+**에이전트**: `probe_artifact_base` 가 공용 디렉터리를 덮는 마운트 지점·fstype 을 더 싣는다(호스트 루트 모드 — direct·못 찾음은 null).
+exists·writable 만으로는 공유 마운트가 빠지고 같은 경로의 로컬 디렉터리만 남은 노드가 정상으로 보였다(덮는 마운트 '/' 가 rw). 반영은
+에이전트 롤아웃 뒤 — 그 전의 옛 에이전트는 「있음(공유 여부 모름)」으로 정직하게 보인다.
+
+**백엔드**: `GET /api/admin/mount-status`(require_admin) — 공용 코어 `mount_status`(순수, k8s·PV·LDAP import 0건 AST 그물) + dms-k8s
+`mount_status_k8s.decorate` 한 줄. 칸 상태 ready·read_only·absent(경로 없음 — 안 붙인 노드면 정상이라 문제로 세지 않음)·broken·
+pending(보고 없음·경로 바뀜 — 에이전트는 직전 응답 목록으로 점검)·stale, 공용 디렉터리 ok·ok_unverified·local·differs(신선한 ok 행의
+엄격한 과반과 다름)·missing·read_only·pending·stale. 열 머리 요약은 reconciler 에서 추출한 `summarize_mount_statuses` 를 공유한다(스토리지
+목록 배지와 같은 숫자 — 교차 검사 테스트). k8s 노드 목록은 30초 메모·fail-soft 로 에이전트 없는 노드(control-plane)·「클러스터에 없음」
+(퇴역 노드의 옛 보고)을 보인다. 경로가 `/api/admin/storages/mounts` 가 아닌 것은 스토리지 이름 `mounts` 와 모호해서. 새 HTTPException 사유
+없음(reasonCodes 변경 없음).
+
+**포탈**: 사이드바 스토리지 그룹 「스토리지」 바로 아래 「마운트 현황」(`/admin/storages/mounts`, Grid3x3). 요약 타일 넷(노드·마운트 문제·
+읽기 전용·공용 디렉터리), 보기 범위(전체/문제 있는 노드)·보기 방식(표/노드별) — URL 에 남는다, 범례(칸과 같은 칩 + 개수), 노드 × 스토리지
+표(고정 머리·첫 열, 래퍼 `isolate` 로 z 를 가둬 시트·툴팁 포털 아래), 칸에 올리면 즉시 툴팁, 노드 버튼 → 측면 시트(닫으면 그 버튼으로
+포커스), 좁은 화면은 노드별 카드(조건부 렌더 — 문제 칸 먼저, 정상은 접음), 각주(비활성 스토리지·에이전트 없는 노드·노드 목록 모름·
+마운트 지점 모름·배치는 노드 화면). 칸은 아이콘 + 글자 + 면색, 마운트 사유는 `mountTerms` 로컬 맵(원문 코드는 툴팁·시트 끝).
+공용 코어 8파일은 `features/k8s` 를 import 하지 않는다(그물 `mountTerms.test`) — k8s 덧붙임은 `k8sMountParts`(K8sMountStatusPage 슬롯 셋).
+`NodePlacement` 의 배지 함수는 인자 타입만 넓혔다(투영 행을 넘긴다 — 동작 불변).
+
+**ssc 이식 메모**: 코어 파일 — 서버 `reconciler.summarize_mount_statuses`·`mount_status.py`·`api/routes_mount_status.py`(decorate 한 줄만
+지움)·`agent/probes.py` 의 `probe_artifact_base`, 포탈 `features/mounts/` 의 types·useMountStatus·mountTerms·MountCell·MountMatrix·
+NodeMountCards·NodeMountSheet·MountStatusPage(+ 테스트·픽스처), 경로 `/admin/storages/mounts`, API `/api/admin/mount-status`, 응답 모양
+동일. ssc 는 `mount_status_k8s.py`·`k8sMountParts.tsx` 를 빼고, 라우터는 `MountStatusPage` 를 바로 쓴다. ssc 가 다른 모양으로 먼저 들어가면
+공용 코어를 그쪽 계약에 맞추고 덧붙인 파일만 유지한다.
+
+**검증**: 백엔드 새 테스트 `test_mount_status.py`(칸·공용·differs·메타·totals·reconciler 교차 검사·이식 경계)·`test_mount_status_k8s.py`·
+`test_api_mount_status.py`(권한·응답 계약·노드 목록 메모·fail-soft·실 인벤토리 PV 수·미적용 클러스터 = null) + 에이전트·reconciler 기존
+테스트 갱신. vitest `mountTerms.test`·`MountStatusPage.test`·`k8sMountParts.test` + navigation(21링크)·router·AppShell. e2e E19
+(`19-mount-status.spec.ts`, 고정 칸이 측면 시트·덮개 아래 — `isolate` 를 지운 뮤테이션이 1280·375 둘 다 빨개짐을 확인; 모달이 뒤 화면에
+거는 pointer-events: none 을 잴 때만 되돌려야 쌓임 순서가 재진다) + E3(03-layout) 1280·375 순회에 표·카드 보기.
+
+**리뷰 반영**(같은 날): ① 읽기 전용 칸은 같은 스토리지를 다른 신선한 노드가 쓰기 가능(ready)으로 붙였을 때만 「문제 있는 노드」로 센다
+(이관 소스를 모든 노드에 ro 로 붙인 구성이면 필터가 전체와 같아졌다 — absent 를 세지 않는 것과 같은 이유; 칸·집계의 읽기 전용 수는
+그대로). 행에 `problem_count`(지연 행은 null — 모름)를 더해 표의 고정 첫 열·노드별 카드 머리에 「문제 n」·「지연」 꼬리표(아이콘 + 글자). ② 쓰기
+여부 「불가(읽기 전용)」는 붙어 있는 칸(정상·읽기 전용, 공용은 exists)에서만 — 에이전트는 경로 없음·마운트 지점 아님에도 writable=false
+라 그 칸을 읽기 전용이라 말하던 것을 「불가」로. ③ 리포트 지연 흐림 text-ink/50(2.8:1) → /70(약 4.9:1), 노드 이름은 흐리지 않음. ④ 열 머리
+bg-surface + 스토리지·공용 열 가운데 정렬(중립 꼬리표가 머리 면색에 묻혔다), 범례 수에 「칸」 단위, 공용 타일 줄바꿈, 「SC 매핑 없음」 →
+「StorageClass 매핑 없음」(기존 화면 용어 + 설명).
 
 ### 🔧 배치 단위 삭제 상한 기본 50000 + 청크(백그라운드) 삭제 + 삭제 화면 상한 표시·「삭제 불가」 — **완료·실증**(2026-11-19, d35 → d36)
 

@@ -415,6 +415,31 @@ CHANGELOG 「사내 AD SSO 로그인(OIDC Authorization Code + PKCE)」·「테�
   (2026-11-18 d33 은 운영자가 봐야 하는 email_verified 줄만 WARNING 으로 올렸고, 로그인 실패 `sso login failed:` 는 원래 WARNING). 자동 생성
   기록은 감사(actor `sso`)에 남는다. 필요하면 계정 생성 줄도 WARNING 으로 올리거나 `dms` 로거 레벨을 설정으로 연다.
 
+### 마운트 현황 후속 — 2026-11-23
+
+CHANGELOG 「스토리지 > 마운트 현황(노드 × 스토리지 매트릭스) + 에이전트 공용 디렉터리 덮는 마운트 보고」. 지금 동작은 `mount_status`·
+`mount_status_k8s`·`api.routes_mount_status` 모듈 docstring 과 `frontend/src/features/mounts/` 파일 머리 주석.
+
+- 🧪 **라이브 실증** — 에이전트 이미지를 포함한 포탈 빌드(다음 태그 d37) → 오버레이 bump → 설치기(롤아웃 순서 에이전트 → api·controller).
+  기대: 행 k8s-w1·k8s-w2, w1/cephfs-secondary·w2/cephfs-third 「없음」, 공용 칸 「정상 · nfs4」(과반 `/dms_shared nfs4 (2)`), 각주 에이전트
+  없는 노드 k8s-cp1(control-plane), 열 메타 k8s-pv-gpfs PV 2개·k8s-pv-nfs PV 5개·클러스터 2·k8s-pv-onefs PV 1개, w1 「k8s 호출 주」·w2
+  「k8s 호출 보조」. 실 Chrome 1280·390 에서 고정 칸 겹침 순서(모서리 > 머리 > 행 머리)·툴팁·시트가 표 위에 오는지.
+- 💡 **API·컨트롤러 파드가 뜬 노드 꼬리표** — dms-ssc 의 API 파드 base 점검을 이식할 때 행 `roles` 에 `api_pod`·`controller_pod` 를 더한다
+  (`rollout_runner.pod_briefs(selector=app.kubernetes.io/name=dms-api|dms-controller)`, dms-api Role 의 pods list 권한은 이미 있다 — 포탈은
+  모르는 역할을 원문으로 보이므로 라벨만 더하면 된다).
+- 💡 **`/api/admin/artifact-base` 의 checks.nodes 에 mount_point·fstype** — 아티팩트 경로 화면의 「3홉 검증」 노드 표도 로컬 디렉터리를 구별하게.
+- 💡 **공유 마운트 source(서버:경로) 비교** — 지금 「다른 노드와 다름」은 (마운트 지점, fstype) 과반만 본다. 같은 nfs4 라도 다른 서버를 붙인
+  노드는 못 가린다(에이전트가 mountinfo 의 source 를 더 실어야 한다).
+- 💡 **로컬 파티션 위 디렉터리** — 덮는 마운트가 '/' 가 아니라 /data 같은 로컬 파티션이면 local 이 아니라 과반과의 비교(differs)로만 드러난다
+  (과반이 없는 2노드 구성에선 둘 다 「정상」).
+- ⏸ **PV 단위 행·열** — 하지 않음: 에이전트가 PV 별 점검을 하지 않아 데이터가 없고, 잡 파드는 스토리지 mount_path 를 hostPath 로 붙여 칸 하나가
+  그 스토리지의 PV 접근 가능성을 말한다.
+- 💡 (선택) **칸 안 용량 막대** — 지금은 보조 줄 「사용 41%」와 툴팁·시트의 바이트뿐.
+- 🔧 (선택) **`agent_nodes` 퇴역 행 정리** — 지우는 경로가 없어 퇴역한 노드가 리포트 지연 행으로 영원히 남는다. 화면은 「클러스터에 없음」
+  꼬리표로 드러내기만 한다.
+- 🔧 (선택) **노드 화면 마운트 사유 원문** — 노드 상세의 「마운트」 표는 아직 원문 사유 코드(not_a_mountpoint 등)를 그대로 찍는다 — `mountTerms`
+  의 문구를 쓸지(공용 코어 import 방향 주의).
+
 ### ③ 공용 디렉터리(SHARED_DIR) 후속 — 2026-11-03
 
 CHANGELOG 「③ 공용 디렉터리」, 설계 v6(`docs/history/specs/2026-11-03-dms-k8s-prod-design.md`) 9절 「③ 공유 FS 세부」·10절 T3,

@@ -159,11 +159,20 @@ def probe_artifact_base(path, *, isdir=os.path.isdir, access=os.access,
     잡 파드의 쓰기 판정과 같다 -- 화면 문구도 그렇게 말한다(2026-11-11 갱신; 옛 문구
     「잡 파드 요청자 uid 와 다를 수 있다」는 요청자 uid 로 잡이 돌던 모델 기준). probe_mounts 의 status 판정이
     writable 을 반영하지 않는 것과 같은 이유로, 소비자는 status 같은 요약이 아니라
-    이 두 필드를 직접 본다."""
+    이 두 필드를 직접 본다.
+
+    mount_point·fstype(2026-11-23 마운트 현황): base 를 덮는 가장 깊은 마운트 지점과 그 파일시스템 종류(호스트 루트
+    모드에서만 -- 호스트 mountinfo 로 안다). exists·writable 만으로는 공유 스토리지가 빠지고 같은 경로의 **로컬
+    디렉터리만 남은 노드**가 정상으로 보인다(덮는 마운트가 '/' 이고 rw) -- 같은 날 사고: 공용 스토리지가 마운트되지
+    않은 노드에 dms-api 가 떠 아티팩트를 못 읽었다. mount_point 가 '/' 이면 그런 노드다. fstype 이름으로 공유 여부를
+    판정하지 않는다 -- 사이트마다 NFS·CephFS·GPFS 다(화면은 다른 노드 대다수와 같은지를 본다, mount_status). exists 가
+    거짓이어도 덮는 마운트는 계산해 싣는다(정보용 -- 판정은 exists 가 먼저다). direct(레거시) 모드와 덮는 마운트를 못
+    찾은 경우("/" 조차 없는 mountinfo)는 둘 다 None(모름) -- 지어내지 않는다. 다섯 키는 늘 싣는다."""
     if not path:
         return None    # 서버가 아직 대상을 내리지 않았다(부트스트랩) -- 모름
     probe = host_path(host_root, path)
     exists = bool(isdir(probe))
+    mount_point = fstype = None
     if host_root:
         # 호스트 루트는 ro 바인드라 W_OK 는 항상 거짓 -- base 를 덮는 마운트의
         # 옵션(rw/ro)이 답이다(probe_mounts 와 같은 이유). 덮는 마운트를 못 찾으면
@@ -171,9 +180,12 @@ def probe_artifact_base(path, *, isdir=os.path.isdir, access=os.access,
         table = parse_mount_table(mountinfo_text)
         cover = _covering_mount(table, path)
         writable = exists and cover is not None and _mount_rw(table[cover])
+        mount_point = cover
+        fstype = (table[cover]["fstype"] or None) if cover is not None else None
     else:
         writable = exists and bool(access(probe, os.W_OK))
-    return {"path": path, "exists": exists, "writable": writable}
+    return {"path": path, "exists": exists, "writable": writable,
+            "mount_point": mount_point, "fstype": fstype}
 
 
 CPU_COUNTER_KEYS = ("cpu_total_jiffies", "cpu_idle_jiffies", "cpu_iowait_jiffies")

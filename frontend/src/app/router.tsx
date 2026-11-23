@@ -29,6 +29,7 @@ import { ControlStatePage } from "../features/control/ControlStatePage";
 import { ArtifactBasePage } from "../features/control/ArtifactBasePage";
 import { AccountsList } from "../features/accounts/AccountsList";
 import { NodesList } from "../features/nodes/NodesList";
+import { K8sMountStatusPage } from "../features/mounts/k8sMountParts";
 import { BuildForm } from "../features/builds/BuildForm";
 import { BuildHistory } from "../features/builds/BuildHistory";
 import { RegistryImages } from "../features/builds/RegistryImages";
@@ -85,6 +86,9 @@ export function AppRouter() {
           <Route path="/jobs/new" element={<RequireRole><AppShell><SubmitJob /></AppShell></RequireRole>} />
           <Route path="/jobs/:requestId" element={<RequireRole><AppShell><RequestDetail /></AppShell></RequireRole>} />
           <Route path="/admin/storages" element={<RequireRole role="admin"><AppShell><StoragesList /></AppShell></RequireRole>} />
+          {/* 마운트 현황(2026-11-23): 노드 × 스토리지 매트릭스. dms-k8s 판(K8sMountStatusPage -- 공용 MountStatusPage + 스토리지 종류·
+              PV 수·k8s 호출 노드). dms-ssc 는 MountStatusPage 를 바로 쓴다. */}
+          <Route path="/admin/storages/mounts" element={<RequireRole role="admin"><AppShell><K8sMountStatusPage /></AppShell></RequireRole>} />
           <Route path="/admin/dashboard" element={<RequireRole role="admin"><AppShell><Dashboard /></AppShell></RequireRole>} />
           <Route path="/admin/batches" element={<RequireRole role="admin"><AppShell><BatchesList /></AppShell></RequireRole>} />
           {/* 사용량 분석(2026-10-29 하위 메뉴): 경로별(기본) + 스토리지별 + 소속별(2026-10-30 2단계, 탭 UsageTabs). 평평한 라우트다

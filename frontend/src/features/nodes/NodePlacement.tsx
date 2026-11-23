@@ -15,9 +15,11 @@ import { useExcludeNode, useIncludeNode } from "./useNodes";
 
 const MAX_REASON = 500;
 
-export function k8sNodeState(node: Pick<NodeInfo, "report">):
+// 인자 모양은 「report 와 exclusion 만 있는 무엇이든」(2026-11-23 마운트 현황이 노드 보고 전체 대신 투영 행 { report: { k8s_node },
+// exclusion }을 넘긴다 -- 동작은 같다). report 는 검증 없이 저장된 보고라 unknown 으로 받는다.
+export function k8sNodeState(node: { report?: unknown }):
     { schedulable: boolean | null; reason: string | null; transient: boolean } {
-  const k = (node.report as Record<string, unknown> | null)?.k8s_node;
+  const k = (node.report as Record<string, unknown> | null | undefined)?.k8s_node;
   if (k === null || typeof k !== "object") return { schedulable: null, reason: null, transient: false };
   const o = k as Record<string, unknown>;
   return {
@@ -28,14 +30,14 @@ export function k8sNodeState(node: Pick<NodeInfo, "report">):
   };
 }
 
-export const exclusionTitle = (n: NodeInfo) => n.exclusion
+export const exclusionTitle = (n: Pick<NodeInfo, "exclusion">) => n.exclusion
   ? `사유: ${n.exclusion.reason ?? "(없음)"} · ${n.exclusion.created_by} · ${kstStamp(n.exclusion.created_at)}`
   : "";
 
 const pill = "inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold whitespace-nowrap";
 
 // 상태 배지만(대시보드·상세 공용): 배치 제외(빨강) / cordon(주황). 둘 다 아니면 아무것도 그리지 않는다.
-export function PlacementBadges({ node }: { node: NodeInfo }) {
+export function PlacementBadges({ node }: { node: Pick<NodeInfo, "exclusion"> & { report?: unknown } }) {
   const k8s = k8sNodeState(node);
   return (
     <>

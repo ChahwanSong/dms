@@ -115,6 +115,34 @@ test("user visiting /admin/security is redirected to /jobs", async () => {
   expect(await screen.findByRole("heading", { name: "전체 작업" })).toBeInTheDocument();
 });
 
+// 마운트 현황(2026-11-23): 사이드바 라벨 = h1 = 크럼 끝 「마운트 현황」(스토리지 그룹, 스토리지 바로 아래).
+test("admin can open mount status", async () => {
+  server.use(
+    http.get("/api/auth/me", () => HttpResponse.json({ actor: "admin", role: "admin" })),
+    http.get("/api/admin/mount-status", () => HttpResponse.json({
+      generated_at: "2026-11-23T00:30:00Z", stale_seconds: 300, report_interval_seconds: 60, shared_dir: null,
+      storages: [], disabled_storages: [], nodes: [],
+      totals: { nodes: 0, fresh_nodes: 0, stale_nodes: 0, ready: 0, read_only: 0, absent: 0, broken: 0, pending: 0,
+                shared_ok: 0, shared_unverified: 0, shared_problem: 0, shared_pending: 0, problem_nodes: 0 },
+      cluster: { known: false, reason: "no_nodes_listed", observed_at: null, agentless_nodes: [] },
+    })),
+  );
+  renderAt("/admin/storages/mounts");
+  expect(await screen.findByRole("heading", { name: "마운트 현황", level: 1 })).toBeInTheDocument();
+  expect(await screen.findByText(/보고한 노드가 없습니다/)).toBeInTheDocument();
+  expect(screen.getByRole("navigation", { name: "breadcrumb" })).toHaveTextContent("HOME>DMS>스토리지>마운트 현황");
+  expect(screen.getByRole("link", { name: "마운트 현황" })).toHaveAttribute("href", "/admin/storages/mounts");
+});
+
+test("user visiting /admin/storages/mounts is redirected to /jobs", async () => {
+  server.use(
+    http.get("/api/auth/me", () => HttpResponse.json({ actor: "alice", role: "user" })),
+    http.get("/api/user/requests", () => HttpResponse.json([])),
+  );
+  renderAt("/admin/storages/mounts");
+  expect(await screen.findByRole("heading", { name: "전체 작업" })).toBeInTheDocument();
+});
+
 test("admin can open policies list", async () => {
   server.use(
     http.get("/api/auth/me", () => HttpResponse.json({ actor: "admin", role: "admin" })),

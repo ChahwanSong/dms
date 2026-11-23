@@ -1,7 +1,7 @@
 import { matchPath } from "react-router-dom";
 import type { LucideIcon } from "lucide-react";
 import {
-  Ban, Boxes, CalendarClock, Database, FilePlus, FolderCog, Hammer,
+  Ban, Boxes, CalendarClock, Database, FilePlus, FolderCog, Grid3x3, Hammer,
   Layers, LayoutDashboard, ListTodo, Mail, Rocket, ScrollText,
   Server, Settings, Shield, ShieldAlert, ShipWheel, SlidersHorizontal, TrendingUp, Users,
 } from "lucide-react";
@@ -69,6 +69,9 @@ export const NAVIGATION: NavSection[] = [
         label: "스토리지", adminOnly: true,
         items: [
           { path: "/admin/storages", label: "스토리지", icon: Database },
+          // 2026-11-23 노드×스토리지 마운트 매트릭스 — 스토리지 바로 아래(스토리지의 하위 관점, 사용자 요청 「스토리지 하위에 마운트
+          // 현황 메뉴」). 경로가 /admin/storages 의 하위라 최장 접두 일치로 이 항목만 켜진다. 아이콘은 HardDrive 가 아니다(브랜드 로고).
+          { path: "/admin/storages/mounts", label: "마운트 현황", icon: Grid3x3 },
           // k8s 연동(dms-k8s, 2026-10-25 설계 §7): 호출 노드·클러스터 등록·StorageClass 매핑·PV 탐색·사용자 권한·동기화
           // 이력 -- 하위 여섯 화면은 사이드바가 아니라 화면 안 탭(K8sTabs)이다(빌드 선례). 스토리지와 노드 사이: PV 는
           // 스토리지의 한 종류이고, 호출 노드는 노드 화면의 노드다.

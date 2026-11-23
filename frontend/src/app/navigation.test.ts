@@ -19,13 +19,14 @@ function dmsItems(): { group: string; groupAdminOnly: boolean; item: NavItem }[]
 // 2026-10-25(dms-k8s): 스토리지 그룹에 「k8s 연동」(/admin/k8s) -- 하위 넷은 화면 안 탭이라 링크 수엔 하나만 더한다.
 // 2026-11-03: 관리 그룹에 「보안 이벤트」(/admin/security) -- 19링크.
 // 2026-11-16: 작업 그룹에 「배치 스케줄러」(/admin/batch-schedules) -- 20링크.
-test("현행 사이드바 20링크가 전부 데이터에 있다(전수 -- 초과도 누락도 없다)", () => {
+// 2026-11-23: 스토리지 그룹에 「마운트 현황」(/admin/storages/mounts) -- 21링크.
+test("현행 사이드바 21링크가 전부 데이터에 있다(전수 -- 초과도 누락도 없다)", () => {
   const paths = dmsItems().map((x) => x.item.path).sort();
   expect(paths).toEqual([
     "/admin/accounts", "/admin/artifact-base", "/admin/audit", "/admin/batch-schedules", "/admin/batches",
     "/admin/builds", "/admin/control", "/admin/dashboard", "/admin/denylist", "/admin/k8s", "/admin/mail",
     "/admin/nodes", "/admin/policies", "/admin/portal", "/admin/releases", "/admin/security",
-    "/admin/storages", "/admin/usage", "/jobs", "/jobs/new",
+    "/admin/storages", "/admin/storages/mounts", "/admin/usage", "/jobs", "/jobs/new",
   ].sort());
 });
 
@@ -38,10 +39,16 @@ test("관리 그룹(관리자 전용) 순서: 보안 이벤트는 감사 로그 
   expect(activeNavPath("/admin/security")).toBe("/admin/security");
 });
 
-test("k8s 연동은 스토리지 그룹(관리자 전용)의 스토리지와 노드 사이다", () => {
+test("스토리지 그룹(관리자 전용) 순서: 스토리지 → 마운트 현황 → k8s 연동 → 노드", () => {
   const storage = (NAVIGATION[0].groups ?? []).find((g) => g.label === "스토리지")!;
   expect(storage.adminOnly).toBe(true);
-  expect(storage.items.map((i) => i.label)).toEqual(["스토리지", "k8s 연동", "노드"]);
+  expect(storage.items.map((i) => i.label)).toEqual(["스토리지", "마운트 현황", "k8s 연동", "노드"]);
+});
+
+test("마운트 현황은 스토리지의 하위 경로지만 자기 항목만 켜진다(2026-11-23, 최장 접두 일치)", () => {
+  expect(breadcrumbFor("/admin/storages/mounts").map((c) => c.label)).toEqual(["HOME", "DMS", "스토리지", "마운트 현황"]);
+  expect(activeNavPath("/admin/storages/mounts")).toBe("/admin/storages/mounts");
+  expect(activeNavPath("/admin/storages")).toBe("/admin/storages");
 });
 
 test("adminOnly 표시가 기존 isAdmin 게이트와 일치한다", () => {

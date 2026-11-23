@@ -38,6 +38,7 @@ from .routes_artifacts import router as artifacts_router
 from .routes_agent import router as agent_router
 from .routes_k8s import router as k8s_router
 from .routes_nodes import router as nodes_router
+from .routes_mount_status import router as mount_status_router
 from .routes_policies import router as policies_router
 from .routes_denylist import router as denylist_router
 from .routes_batches import router as batches_router
@@ -223,6 +224,8 @@ def create_app(settings: Settings, db: Database, exit_fn=None) -> FastAPI:
     app.include_router(agent_router)
     app.include_router(k8s_router)
     app.include_router(nodes_router)
+    # 마운트 현황(2026-11-23): 노드 × 스토리지 매트릭스 읽기 전용 투영 -- 독립 경로라 /api/admin/storages/{name} 과 순서 함정이 없다.
+    app.include_router(mount_status_router)
     app.include_router(policies_router)
     app.include_router(denylist_router)
     app.include_router(batches_router)

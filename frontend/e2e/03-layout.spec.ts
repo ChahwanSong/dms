@@ -71,6 +71,15 @@ async function visitSecurity(page: Page): Promise<void> {
   await expect(page.getByText(/^카운터는 dms-api 프로세스 메모리에 있습니다/)).toBeVisible();
 }
 
+// 마운트 현황(2026-11-23): 노드 × 스토리지 표(고정 머리·첫 열, 래퍼 안 가로·세로 스크롤). 노드 버튼(행 머리)이 그려진 뒤에 잰다.
+// 셀 하한은 소스 실측: 머리 th 4(모서리 노드·보고·DMS 공용·e2e-store) + e2e-node 1행(행 머리 th·보고·공용·e2e-store) 4 = 8.
+// view 를 URL 로 고정한다 -- 없으면 640 미만에서 노드별 카드가 기본이다(그 보기는 375 에서 따로 잰다).
+async function visitMounts(page: Page, view: "table" | "cards"): Promise<void> {
+  await visit(page, `/admin/storages/mounts?view=${view}`, "마운트 현황");
+  const scope = view === "table" ? page.getByRole("table") : page.getByRole("list", { name: "노드별 마운트 현황" });
+  await expect(scope.getByRole("button", { name: "e2e-node", exact: true })).toBeVisible();
+}
+
 async function visitK8s(page: Page, path: string, heading: string): Promise<void> {
   await visit(page, path, heading);
   await expect(page.getByText("불러오는 중…", { exact: true })).toHaveCount(0);
@@ -192,6 +201,9 @@ test.describe("E3 레이아웃 불변식", () => {
     // 기록)은 슬라이스 26 이 수리했다 -- td 안 div 로 flex 이동(9fbef86 형태).
     await visit(page, "/admin/storages", "스토리지");
     await assertLayoutSane(page, { minTableCells: 12 });
+
+    await visitMounts(page, "table");
+    await assertLayoutSane(page, { minTableCells: 8 });
 
     // 빌드는 하위 페이지 둘이다(빌드하기·빌드 이력). 폼 화면에는 표가 없으므로
     // 하한을 0 으로 두되 **순회에서 빼지는 않는다** -- L1(가로 오버플로)·L3·L4 는
@@ -324,6 +336,15 @@ test.describe("E3 레이아웃 불변식", () => {
     await assertCellsOneLine(page, "main table tbody tr td:first-child", "노드 표 노드명 칸");
     // 맨 끝 「마지막 리포트」 칸은 의도된 두 블록(경과 + 시각)이라 칸 전체가 아니라 시각 줄 하나만 잰다(LastReport).
     await assertCellsOneLine(page, "main table tbody tr td:last-child > div > div:last-child", "노드 표 마지막 리포트 시각");
+
+    // 마운트 현황(2026-11-23): 표는 래퍼 안에서만 가로로 넘치고(L1), 노드 이름 버튼(L4 table button)·보고 시각 칸은 한 줄이다.
+    // 노드별 카드 보기(640 미만 기본)도 문서를 넘치지 않는다 -- 표가 없어 하한 0.
+    await visitMounts(page, "table");
+    await assertLayoutSane(page, { sidebarFixed: false, minTableCells: 8 });
+    await assertCellsOneLine(page, "main table tbody tr > th button", "마운트 현황 노드 이름");
+    await assertCellsOneLine(page, "main table tbody tr > td:nth-child(2)", "마운트 현황 보고 시각");
+    await visitMounts(page, "cards");
+    await assertLayoutSane(page, { sidebarFixed: false, minTableCells: 0 });
 
     // denylist 는 이 파일 시점엔 비어 있다 -- 아무 시나리오도 쓰지 않는 이름으로 하나 심고 끝에 지운다(감사 기록도 하나 는다).
     const denyPath = "/api/admin/identity-denylist/requester/e2e-layout-nobody";

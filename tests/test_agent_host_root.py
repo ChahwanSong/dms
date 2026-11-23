@@ -103,13 +103,46 @@ def test_legacy_direct_mode_is_unchanged_without_host_root():
 def test_artifact_base_writable_from_covering_mount_options():
     base = probe_artifact_base("/mgmt_storage/dms/artifacts", isdir=_isdir_base,
                                access=_access_ro_bind, host_root=ROOT, mountinfo_text=HOST_MI)
-    assert base == {"path": "/mgmt_storage/dms/artifacts", "exists": True, "writable": True}
+    assert base == {"path": "/mgmt_storage/dms/artifacts", "exists": True, "writable": True,
+                    "mount_point": "/mgmt_storage", "fstype": "ceph"}
     base = probe_artifact_base("/archive/dms", isdir=_isdir_base, access=_access_ro_bind,
                                host_root=ROOT, mountinfo_text=HOST_MI)
     assert base["writable"] is False        # 덮는 마운트 /archive 가 ro
+    assert (base["mount_point"], base["fstype"]) == ("/archive", "nfs4")
     base = probe_artifact_base("/nowhere/x", isdir=lambda p: False, access=_access_ro_bind,
                                host_root=ROOT, mountinfo_text=HOST_MI)
-    assert base == {"path": "/nowhere/x", "exists": False, "writable": False}
+    # 없는 경로여도 덮는 마운트('/')는 정보로 싣는다 -- 판정은 exists 가 먼저다(mount_status.classify_shared)
+    assert base == {"path": "/nowhere/x", "exists": False, "writable": False,
+                    "mount_point": "/", "fstype": "ext4"}
+
+
+def test_artifact_base_reports_covering_shared_mount_and_fstype():
+    # 2026-11-23 마운트 현황: 공용 디렉터리(SHARED_DIR)가 공유 마운트(nfs4) 아래면 그 지점·종류를 싣는다
+    mi = HOST_MI + "50 22 0:40 / /dms_shared rw,relatime shared:9 - nfs4 10.10.10.1:/data/dms_shared rw\n"
+    base = probe_artifact_base("/dms_shared/dms/artifacts",
+                               isdir=lambda p: p == "/host/root/dms_shared/dms/artifacts",
+                               access=_access_ro_bind, host_root=ROOT, mountinfo_text=mi)
+    assert base == {"path": "/dms_shared/dms/artifacts", "exists": True, "writable": True,
+                    "mount_point": "/dms_shared", "fstype": "nfs4"}
+
+
+def test_artifact_base_local_directory_without_shared_mount_reports_root():
+    # 같은 날 사고의 모양: 공유 마운트가 빠지고 같은 경로의 로컬 디렉터리만 남은 노드 -- exists·writable 은 참이라
+    # 정상으로 보이지만 덮는 마운트가 '/'(루트 fs) 다. 화면은 이것을 「로컬 디렉터리」로 드러낸다.
+    base = probe_artifact_base("/dms_shared/dms/artifacts",
+                               isdir=lambda p: p == "/host/root/dms_shared/dms/artifacts",
+                               access=_access_ro_bind, host_root=ROOT, mountinfo_text=HOST_MI)
+    assert base == {"path": "/dms_shared/dms/artifacts", "exists": True, "writable": True,
+                    "mount_point": "/", "fstype": "ext4"}
+
+
+def test_artifact_base_without_any_covering_mount_is_unknown():
+    # '/' 조차 없는 mountinfo -- 덮는 마운트를 모르면 지어내지 않는다(둘 다 None, writable 은 종전대로 False)
+    mi = "40 22 0:33 / /mgmt_storage rw,relatime shared:2 - ceph 10.0.0.1:/ rw\n"
+    base = probe_artifact_base("/dms_shared/dms/artifacts", isdir=lambda p: True,
+                               access=_access_ro_bind, host_root=ROOT, mountinfo_text=mi)
+    assert base == {"path": "/dms_shared/dms/artifacts", "exists": True, "writable": False,
+                    "mount_point": None, "fstype": None}
 
 
 def _isdir_base(p):

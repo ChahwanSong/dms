@@ -73,8 +73,10 @@ def test_artifact_base_report_field_does_not_touch_storages(db):
     # 여기서 잡는다. (현행 고정 테스트라 RED 없이 통과한다 -- 의도된 것.)
     repos = _setup(db, {"n1": [_mount("Ready")]})
     repos.agents.ingest("n2", {"node_name": "n2", "mounts": [],
+                               # 2026-11-23 새 키(mount_point·fstype)도 판정 밖이다
                                "artifact_base": {"path": "/cephfs/dms/artifacts",
-                                                 "exists": True, "writable": True}},
+                                                 "exists": True, "writable": True,
+                                                 "mount_point": "/", "fstype": "ext4"}},
                         reported_at="2026-08-02T09:59:00Z")
     result = reconcile_storages_once(repos, stale_seconds=300, now_iso=NOW)
     # n2 의 base 프로브는 ceph-a 판정에 아무 영향이 없다: mounts 증거는 n1 뿐.
