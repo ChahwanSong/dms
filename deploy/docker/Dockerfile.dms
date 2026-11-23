@@ -15,7 +15,10 @@ WORKDIR /web
 COPY frontend/package.json frontend/package-lock.json* /web/
 RUN npm ci || npm install
 COPY frontend/ /web/
-RUN npm run build
+# build:image = 앱 코드만 타입 검사(frontend/tsconfig.build.json) + vite build. 빌드 파드 memory limit 1Gi 의 Node 힙 자동 상한
+# (약 505MB) 안에서 돌게 하려는 것 — 테스트까지 보는 `npm run build`(tsc -b)는 2026-11-23 d37 에서 heap out of memory 였다.
+# 테스트 타입 검사는 개발 게이트(npx tsc -b)의 몫이다.
+RUN npm run build:image
 
 # Pin bookworm: bare python:3.11-slim now resolves to Debian trixie. Nothing
 # here needs OpenMPI, but keeping the whole image set on one Debian release

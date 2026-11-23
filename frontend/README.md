@@ -9,6 +9,8 @@ API·포탈의 불변식은 [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md) §
 npm install
 npm run dev         # vite 개발 서버
 npm run build       # tsc -b && vite build → dist/
+npm run build:image # 이미지 빌드용(Dockerfile.dms) — 앱 코드만 타입 검사(tsconfig.build.json) + vite build. 빌드 파드 1Gi 의 Node
+                    #   힙(약 505MB) 안에서 돌게 하려는 것 — 테스트까지 보는 tsc -b 는 2026-11-23 d37 에서 heap OOM 이었다
 npm test            # vitest run(단위·화면 테스트)
 npm run test:watch  # vitest 감시 모드
 npm run test:e2e    # 빌드 + e2e 타입체크 + playwright(실 브라우저 풀스택)

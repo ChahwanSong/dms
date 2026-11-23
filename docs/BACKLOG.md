@@ -415,6 +415,13 @@ CHANGELOG 「사내 AD SSO 로그인(OIDC Authorization Code + PKCE)」·「테�
   (2026-11-18 d33 은 운영자가 봐야 하는 email_verified 줄만 WARNING 으로 올렸고, 로그인 실패 `sso login failed:` 는 원래 WARNING). 자동 생성
   기록은 감사(actor `sso`)에 남는다. 필요하면 계정 생성 줄도 WARNING 으로 올리거나 `dms` 로거 레벨을 설정으로 연다.
 
+### 포탈 이미지 빌드 메모리 — 2026-11-23
+
+- 🔧 **빌드 파드 Node 힙 여유 약 25%** — 이미지 빌드의 앱 코드 타입 검사(`build:image`)는 힙 약 400MB 가 필요하고 빌드 파드(1Gi)의 Node 힙 자동
+  상한은 약 505MB 다(CHANGELOG 「포탈 이미지 빌드의 프런트 타입 검사 heap OOM」). 포탈이 계속 커져 다시 heap OOM 이면 빌드 파드 memory limit
+  (`build_manifests` — 노드 보호 1차 방어라 노드 메모리와 함께 정한다)과 Dockerfile `NODE_OPTIONS=--max-old-space-size` 를 같이 올린다.
+  확인: `NODE_OPTIONS=--max-old-space-size=400 npm run build:image` 가 통과하는지(여유 측정).
+
 ### 마운트 현황 후속 — 2026-11-23
 
 CHANGELOG 「스토리지 > 마운트 현황(노드 × 스토리지 매트릭스) + 에이전트 공용 디렉터리 덮는 마운트 보고」. 지금 동작은 `mount_status`·
