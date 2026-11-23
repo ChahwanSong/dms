@@ -54,6 +54,7 @@ dms-k8s 라인의 **완료 기록**이다. 각 항목에는 무엇을 만들었�
 
 | 날짜 | 태그·실증 | 제목 |
 |---|---|---|
+| 11-23 | — (실증 전 — 다음 태그 d40+) | API 파드 자체 아티팩트 경로 점검·시작 게이트·「base 접근 불가」 503 사유 + 관리 화면 API/컨트롤러 분리 + 마운트 현황 DMS 파드 꼬리표(dms-ssc 4add57bf 이식) |
 | 11-23 | d38(d37 건너뜀) | 포탈 이미지 빌드의 프런트 타입 검사 heap OOM — 이미지 빌드는 앱 코드만 타입 검사 |
 | 11-23 | d38 | 스토리지 > 마운트 현황(노드 × 스토리지 매트릭스) + 에이전트 공용 디렉터리 덮는 마운트 보고 |
 | 11-19 | d35·d36 | 배치 단위 삭제 상한 기본 50000 + 청크(백그라운드) 삭제 + 삭제 화면 상한 표시·「삭제 불가」 |
@@ -106,6 +107,95 @@ dms-k8s 라인의 **완료 기록**이다. 각 항목에는 무엇을 만들었�
 ---
 
 ## 상세 기록 (최신순)
+
+### ✨ API 파드 자체 아티팩트 경로 점검·시작 게이트·「base 접근 불가」 503 사유 + 관리 화면 API/컨트롤러 분리 + 마운트 현황 DMS 파드 꼬리표(dms-ssc 4add57bf 이식) — **구현 완료·라이브 실증 전**(2026-11-23)
+
+사용자 요청(2026-11-23): 프로덕션 사고 — dms-api 가 CephFS 미마운트 노드(`/mgmt_storage` 가 로컬 빈 디렉터리)에 떠 모든 잡의
+아티팩트·scan 리포트를 「없음」으로 보였는데, 아티팩트 경로 화면의 base 점검은 컨트롤러 파드(마운트된 다른 노드) 기준이라 정상이었다 —
+의 코드 방어. 목표 넷: ① API 파드 자체 base 점검 기록·노출(컨트롤러 점검 유지) ② 시작 점검 실패면 Ready 안 됨(롤링 때 옛 파드 유지),
+런타임 일시 실패로는 죽이거나 내리지 않음 ③ 「base 불가」와 「아티팩트 없음」 구분(별도 사유 코드·포탈 문구·TargetDetail 원인, 일시
+장애를 scan_report_digests 등에 영구 저장 금지) ④ 관리 화면에 컨트롤러·API 점검 분리 표시. 사용자: 「dms-ssc 에서 검토·구현 중이니 완료
+후 동일하게 진행, 검증은 필수」 — dms-ssc 가 origin/dms-ssc `4add57bf` 로 먼저 구현했고 이 항목은 그것을 `cherry-pick -n` 으로 가져와
+dms-k8s 에 맞춘 것이다.
+
+**가져온 것(dms-ssc 설계 그대로 — 코드·모듈 docstring 이 진실, 요지는 ARCHITECTURE §7 불변식 16·deploy/README §12e)**:
+- 판정 `artifact_base.availability_check` — 쓰기 없음: base 디렉터리 열기·첫 dirent·**최근 성공 잡 디렉터리**(DB 가 고른 최대 5건의
+  `<base>/<job_id>` fstatat — 하나도 없으면 `artifact_base_jobs_missing` = 빈 로컬 디렉터리의 서명; 실 실행 백엔드에서만, 마지막 base
+  변경 뒤 만든 잡만). 센티넬 파일 없음. FS 점검은 프로세스 단일 `BaseCheckRunner`(single-flight·10초 타임아웃·짧은 캐시) 안에서만.
+  mountinfo 파서는 중립 `mountinfo.py` 로(agent.probes 가 재수출).
+- API 모니터 `api/base_monitor.py`(`dms api` 만 start) — 60초(첫 성공 전 5초·실패 중 15초) → 메모리 스냅숏·`api_base_checks`(파드별
+  1행·새 테이블)·이벤트 `api-artifact-base`. `/readyz` 시작 게이트 = (첫 회차 미완료 ∧ 60초 이내) ∨ (실패 ∧ 서비스 중인 건강한 형제
+  dms-api 파드) — 홀로 뜬 파드는 막지 않고, 한 번 Ready 면 다시 안 막는다. 게이트 503 은 자기 종료 카운터와 무관. 비상구
+  `DMS_API_ARTIFACT_BASE_STARTUP_GATE=0`·`DMS_API_ARTIFACT_BASE_CHECK_SECONDS`(관대 파싱). `/healthz` async.
+- 읽기 실패 분류(`api/base_probe.BaseProbe`): 아티팩트 목록·보기·다운로드·scan-stats·scan-path-stats 는 base 수준 판정이 실패일 때만
+  503 `artifact_base_unavailable`(파일별 errno 로 가르지 않는다 — 존재 오라클), 멈춘 마운트는 파일을 열기 전에 503. 사용량은 base 불가면
+  남은 리포트를 열지 않고 `unreadable_reason` 을 싣고 실패를 `scan_report_digests`·`ReportReadFailures` 에 넣지 않는다(pending).
+- stepper: `summary_unavailable` 영구 기록을 컨트롤러 쪽 base 불가인 동안 min(20분, vcjob TTL/2) 미룬다(`_defer_summary`).
+- 관리 API: `checks.api` 새 모양(가용성·posture·노드·파일시스템·시작 게이트)·`checks.api_pods`·컨트롤러 점검 노드
+  (`control_state.artifact_base_check_node`)·`GET …/artifact-base/health`·`POST …/artifact-base:recheck`·metrics/infra `artifact_base`, API 홉
+  쓰기 왕복 제거(PUT/validate 는 그대로). 포탈: 사유 코드 4종(reasonCodes.json + api.ts 양쪽), 작업 단계·OutputViewer·ItemScanStats·사용량
+  원인 문구와 복구 감시(health → 한 번 무효화), 아티팩트 경로 화면 API/컨트롤러 두 패널·파드 카드·엇갈림 상자·「지금 다시 점검」, 대시보드
+  경고 줄.
+- 매니페스트(공용 base): 40-api `strategy` RollingUpdate maxSurge 1 / maxUnavailable 0 명시(게이트 이점의 전제 — 계약 테스트)·
+  `DMS_NODE_NAME`(downward), 41-controller `DMS_NODE_NAME`.
+
+**이식 결정**:
+- **마운트 화면은 dms-k8s 것을 유지**한다 — dms-ssc 의 `GET /api/admin/mounts`(routes_mounts)·`MountsPage`·`mountView`·`useMounts`·
+  `/admin/mounts` 라우트·사이드바 항목은 가져오지 않았다(이 브랜치엔 같은 목적의 「스토리지 → 마운트 현황」 `/admin/storages/mounts` ·
+  `GET /api/admin/mount-status` 가 먼저 있다). 아티팩트 경로 화면의 「마운트 현황」 링크는 `/admin/storages/mounts` 로 바꿨다.
+- 런북 절: dms-ssc §12b → 이 브랜치 **§12e**(§12b 는 결과 파일 자동 만료, §12c·§12d 는 은퇴 번호 — 부록 Z). prod 오버레이 README 의 운영 색인에
+  §12e 한 줄.
+- 40-api 헤더의 DirectoryOrCreate 금지는 이 브랜치의 한국어 문장(2026-11-03 ③)을 유지하고 계약 테스트 단언을 그 문장으로(dms-ssc 의 영어
+  「NEVER switch to DirectoryOrCreate」 대신). stepper 의 큐 뒤로 밀기는 이 브랜치의 `touch_held`(dms-ssc `touch`).
+- dms-k8s 전용 소속별 사용량(`/api/admin/usage/breakdown`·BreakdownPage)에도 같은 `unreadable_reason`·원인 줄·복구 감시를 넣었다(스토리지별
+  TotalsLine·StoragesPage 포함 — 사용량 세 화면이 같은 규칙).
+- LDAP 관련 코드는 들여오지 않았다(k8s 신원 모드 전용 — 해당 hunk 없음 확인).
+
+**확장 — 마운트 현황에 DMS 파드 꼬리표**(`mount_status_pods`, 두 라인 공용 재료 — BACKLOG 💡 「API·컨트롤러 파드가 뜬 노드 꼬리표」 해소):
+재료는 k8s 파드 목록이 아니라 DB(`api_base_checks` 신선 행·`control_state` 의 컨트롤러 점검 노드 — 화면이 10초마다 묻는데 요청마다 k8s API 를
+부르지 않는다). 행 `roles` 에 `api_pod`·`controller_pod`(포탈 「dms-api」·「컨트롤러」), 최상위 `control_pods`(파드별 점검·시작 게이트 상태).
+공용 디렉터리 칸이 문제인 노드거나 그 파드의 경로 점검이 실패하면(권한 사유 제외) 꼬리표가 경고(빨강 — 사고 서명), 그런 행은 「문제 있는
+노드」에 든다(DMS 공용 열 한 칸 — dms-ssc routes_mounts 와 같은 규칙). 표 밖 노드(prod 마스터 — 에이전트 DaemonSet 이 control-plane taint 를
+견디지 않는다)의 파드는 각주. 신선 창은 관리 화면 API 파드 목록과 같은 `fresh_window_seconds`.
+
+**리뷰 반영**(같은 날, 이식 diff 리뷰):
+- **만료 잡을 표본에서 뺀다**(dms-k8s 고유 — dms-ssc 엔 만료가 없어 diff 대조로는 안 보이는 것). `expire_artifacts` 는 행·상태·
+  artifact_uri 를 남기고 `artifacts_expired_at` 만 찍은 뒤 정리 루프가 `<base>/<job_id>` 를 trash 로 떼어 내므로, 보존일
+  (`DMS_ARTIFACT_RETENTION_DAYS`) 안에 성공 잡이 없던 사이트에서 멀쩡한 base 가 `artifact_base_jobs_missing` 이 됐다(거짓 503·사용량
+  멈춤·요약 지연, 그리고 이 버전으로 올리는 롤링에서 새 dms-api 가 게이트에 막혀 릴리스 시간 초과). `recent_job_ids` 가
+  `artifacts_expired_at` 을 함께 읽고 파이썬에서 거른다(SQL WHERE 로 넣으면 전부 만료인 사이트에서 Postgres 가 성공 잡 인덱스 전체를 훑는다 —
+  창 `RECENT_JOB_WINDOW` 로 비용 일정 유지, 질의 계획 테스트 그대로). 테스트 `test_recent_job_ids_skip_jobs_whose_artifacts_expired`.
+  dms-ssc 로 되돌려 보낼 때는 그쪽에 칸이 없으니 이 거름은 빼고.
+- 파드 꼬리표 문구 「아티팩트 경로 읽기 실패」 → 「아티팩트 경로 **점검** 실패」 — `read_failed` 에는 컨트롤러 쓰기 왕복 실패
+  (`artifact_base_not_writable`)·점검 시간 초과도 든다(무엇이 실패했는지는 사유 문장이 말한다). `mount_status_pods` docstring·테스트 단언 추가.
+- deploy/README §12e: 이 버전 뒤 **첫 S11** 이 40·41 파드 템플릿 변경으로 api·controller 를 한 번 더 롤링한다(게이트 포함 — 시간 초과면 「Ready
+  안 되는 새 파드」), 멈춘 마운트 감지 전 창(최대 ~70초)에서 readyz 가 스레드풀 고갈로 굶을 수 있다(복구 뒤 `rollout restart`), 컨트롤러 노드의
+  base 가 비면 삭제·만료 정리가 파일을 못 지운 채 끝날 수 있다(아래 남은 것) — 세 문단.
+- 잡·preflight 파드 hostPath 가 모두 `type: Directory` 임을 고정하는 테스트(`test_every_job_and_preflight_hostpath_is_type_directory` — dict 엔
+  type 이 없고 `execution_manifests._pod_volumes` 가 붙인다; 그 type 을 지운 뮤테이션에서 빨개짐 확인). 잡 파드 hostPath 는 사고 원인이
+  아니다(무타입 아님).
+
+**남은 것**(BACKLOG §4 「API 자체 artifact base 점검 후속」): 🐞 **(최우선) 미마운트 노드 컨트롤러의 정리 루프가 「없음 → 완료」** — 요청·배치
+삭제·회차 정리·만료가 빈 base 에서 정리 행을 끝내 공유 스토리지의 진짜 디렉터리가 고아가 된다(dms-ssc 와 공통 — 가드 모양은 BACKLOG,
+사용자 지시대로 dms-ssc 선행 → 동일 이식). 📝 멈춘 마운트 감지 전 readyz 굶음. 그 밖에 미리보기 단계 summary None 의 같은 굳음·릴리스 실패
+사유에 게이트 정보(dms-ssc 원문 후속).
+
+**검증**(로컬): 백엔드 전체 6255 passed · 19 skipped(595초, TMPDIR·basetemp /dev/shm), vitest 2209 passed(130 파일)·`npx tsc -b` 0·
+`npm run build:image` 통과(`dist/index.html` 외부 URL 0건), e2e 41 passed(19 spec — 빌드 포함). 새·바뀐 테스트: `test_artifact_base_availability`·
+`test_api_base_monitor`·`test_api_artifact_base_unavailable`·`test_api_usage_base_unavailable`·`test_stepper_summary_deferral`·`test_mount_status_pods`·
+`test_release_manifest_contract`(strategy·DMS_NODE_NAME·DirectoryOrCreate 금지)·`test_execution_volcano`(hostPath type)·`test_migrations`(`api_base_checks`)
++ vitest ArtifactBasePage·Dashboard·JobStages·OutputViewer·UsageAnalysis·UsageBaseDown·useUsageBaseRecovery·mountTerms·MountStatusPage.
+
+**dms-ssc 후속 68dcbcdb 반영**(그쪽 d201 실증에서 찾은 모순 둘, 같은 원칙): ① 아티팩트 경로 화면 머리 배지(`hopSummary`)가 응답한
+파드만 세어, 롤링 중 Ready 를 기다리는 새 파드가 실패해도 「모두 정상」이었다 → 다른 API 파드(fresh)의 실패도 센다(보고 끊긴 파드 제외).
+② 마운트 현황의 공용 칸이 에이전트 「정상」(초록)인데 그 노드의 dms-api·컨트롤러 점검은 실패 — dms-k8s 화면은 이미 그 행을 「문제 있는
+노드」로 세고 파드 꼬리표를 경고로 바꿨지만 칸은 초록으로 남았다 → `mountTerms.sharedDisplay`: 이 노드 파드 중 경로 점검 실패
+(read_failed — 권한 사유만이면 아님)가 있고 에이전트 판정이 문제·지연이 아니면 칸을 「파드 점검 실패」(빨강)로, 에이전트 판정은 보조 줄·
+툴팁의 「에이전트 보고」로(표·카드·노드 시트 공통). dms-ssc판 마운트 화면 파일(MountsPage)은 가져오지 않았으니 그 부분은 dms-k8s 화면에
+같은 규칙을 새로 쓴 것이다.
+
+**라이브 실증 전**: testbed-k8s 다음 태그(d40+)에서 — 정상 롤링(게이트 통과 → 옛 파드 교체), 아티팩트 경로 화면 두 패널·파드 카드, 마운트
+현황 꼬리표, 미마운트 흉내(빈 디렉터리 노드) 롤링에서 새 파드가 Ready 안 됨·옛 파드 유지·꼬리표 경고. 첫 S11 의 한 번 더 롤링도 그때 본다.
 
 ### 🔧 포탈 이미지 빌드의 프런트 타입 검사 heap OOM — 이미지 빌드는 앱 코드만 타입 검사 — **수정 완료**(2026-11-23)
 

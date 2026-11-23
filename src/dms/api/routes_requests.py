@@ -19,6 +19,7 @@ from ..repositories.sync_pairs import sync_pair_allowed
 from ..repositories.text_search import search_tokens
 from .artifacts import ArtifactError, job_owner_uid, read_artifact, strip_scheme
 from .auth import Identity, can_run_as_root, require_admin, require_user
+from .base_probe import BaseProbe
 from .cancel import sweep_after_cancel, terminate_job
 from .routes_jobs import _owned_request
 # 모양 투영은 scan_path_stats 와 **한 벌**을 공유한다(routes_scan_paths.py:19-73 의
@@ -463,15 +464,22 @@ def request_scan_stats(request_id: str, request: Request,
     if job is None:
         raise HTTPException(status_code=404, detail="no_scan_report")
     # 슬라이스 18: DB 우선 해석(설계 §2.1) -- routes_artifacts._base 와 같은 이유.
-    base = strip_scheme(resolve_artifact_base(repos.control,
-                                              request.app.state.settings))
+    uri = resolve_artifact_base(repos.control, request.app.state.settings)
+    base = strip_scheme(uri)
     owner_uid = job_owner_uid(job)
     if owner_uid is None:
         raise HTTPException(status_code=404, detail="no_scan_report")
+    # 2026-11-23: 「리포트 없음(404)」과 「base 접근 불가(503)」를 base 수준 프로브로 가른다(api/base_probe.py) -- 일시
+    # 장애가 화면에 「리포트 없음」으로 굳지 않게. 멈춘 마운트면 열기 전에 503.
+    probe = BaseProbe(request.app.state, uri)
+    if probe.hung():
+        raise HTTPException(status_code=503, detail="artifact_base_unavailable")
     try:
         f = read_artifact(base, job["job_id"], "execution", "dscan-report.json",
                           owner_uid=owner_uid)
     except ArtifactError:
+        if probe.down:
+            raise HTTPException(status_code=503, detail="artifact_base_unavailable")
         raise HTTPException(status_code=404, detail="no_scan_report")
     if f["truncated"]:
         raise HTTPException(status_code=503, detail="scan_report_too_large")

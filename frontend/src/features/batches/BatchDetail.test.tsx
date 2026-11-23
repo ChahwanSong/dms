@@ -768,6 +768,22 @@ test("404 no_scan_report 도 '리포트 없음' — 성공 항목인데 리포�
   expect(await screen.findByText("리포트 없음")).toBeInTheDocument();
 });
 
+// 2026-11-23 사고: 작업 기록 저장소(공유 스토리지)를 못 읽는 API 파드는 503 artifact_base_unavailable 을 낸다 -- 「리포트
+// 없음」(영구 사실)이 아니라 사유 문구 + 「다시 시도」(일시 장애, queryClient retry 없음).
+test("503 artifact_base_unavailable 은 '리포트 없음'이 아니라 사유 문구 + 다시 시도", async () => {
+  let calls = 0;
+  server.use(http.get("/api/admin/requests/r1/scan-stats", () => {
+    calls += 1;
+    return HttpResponse.json({ detail: "artifact_base_unavailable" }, { status: 503 });
+  }));
+  renderDetailed();
+  await userEvent.click(await screen.findByRole("button", { name: "항목 0 상세" }));
+  expect(await screen.findByText(/^작업 기록이 저장된 공유 스토리지에 지금 접근할 수 없습니다/)).toBeInTheDocument();
+  expect(screen.queryByText("리포트 없음")).toBeNull();
+  await userEvent.click(screen.getByRole("button", { name: "다시 시도" }));
+  await waitFor(() => expect(calls).toBe(2));
+});
+
 test("sync 배치 항목 펼침: 온도 섹션 자체가 없다(조회 없음)", async () => {
   const c = { calls: 0 };
   server.use(statsHandler("r1", c));

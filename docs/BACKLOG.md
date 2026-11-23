@@ -428,9 +428,12 @@ CHANGELOG 「스토리지 > 마운트 현황(노드 × 스토리지 매트릭스
 `mount_status_k8s`·`api.routes_mount_status` 모듈 docstring 과 `frontend/src/features/mounts/` 파일 머리 주석.
 
 - ✅ **라이브 실증** — d38 에서 끝냈다(CHANGELOG 「스토리지 > 마운트 현황」 의 「배포·라이브 실증(d38)」 — 기대값 일치, 사고 유형 가짜 보고 탐지·정리).
-- 💡 **API·컨트롤러 파드가 뜬 노드 꼬리표** — dms-ssc 의 API 파드 base 점검을 이식할 때 행 `roles` 에 `api_pod`·`controller_pod` 를 더한다
-  (`rollout_runner.pod_briefs(selector=app.kubernetes.io/name=dms-api|dms-controller)`, dms-api Role 의 pods list 권한은 이미 있다 — 포탈은
-  모르는 역할을 원문으로 보이므로 라벨만 더하면 된다).
+- ✅ **API·컨트롤러 파드가 뜬 노드 꼬리표** — 2026-11-23 API 파드 base 점검 이식과 함께 끝냈다(`mount_status_pods`). 재료는 k8s 파드 목록이
+  아니라 **DB**(api_base_checks 파드별 신선 행·control_state 의 컨트롤러 점검 노드 — 화면이 10초마다 묻는데 요청마다 k8s API 를 부르지
+  않는다): 행 `roles` 의 `api_pod`·`controller_pod`(포탈 「dms-api」·「컨트롤러」), 최상위 `control_pods`(파드별 점검), 공용 디렉터리 칸이
+  문제인 노드거나 파드의 경로 점검이 실패하면(권한 사유 제외 — 컨트롤러 쓰기 왕복 실패 포함) 꼬리표가 경고(그 조합이 사고 서명), 그런
+  행은 「문제 있는 노드」에 든다(공용 열 한 칸), 표 밖 노드(prod 마스터 — 에이전트 없음)의 파드는 각주. 라이브 실증은 아직(testbed-k8s 다음 태그 — 롤링 때 새 파드가 시작 게이트에
+  막힌 노드의 꼬리표가 보이는지).
 - 💡 **`/api/admin/artifact-base` 의 checks.nodes 에 mount_point·fstype** — 아티팩트 경로 화면의 「3홉 검증」 노드 표도 로컬 디렉터리를 구별하게.
 - 💡 **공유 마운트 source(서버:경로) 비교** — 지금 「다른 노드와 다름」은 (마운트 지점, fstype) 과반만 본다. 같은 nfs4 라도 다른 서버를 붙인
   노드는 못 가린다(에이전트가 mountinfo 의 source 를 더 실어야 한다).
@@ -674,6 +677,37 @@ testbed 저장소. 2026-11-06 신규 테스트베드 항목(9·10·12·13 워커
 - 🔒 **testbed 저장소 후속** — 다른 저장소다(위 「2026-11-06 … 후속」 12).
 
 ## 4. 알려진 해석·잔여 리스크 (문서)
+
+- 📝 **API 자체 artifact base 점검 후속**(2026-11-23 dms-ssc 4add57bf 이식 — ARCHITECTURE §7 불변식 16, deploy/README §12e). 남은 것:
+  - 🐞 **(최우선) 미마운트 노드 컨트롤러의 정리 루프가 「없음 → 완료」로 끝난다**(2026-11-23 이식 리뷰 — dms-ssc 와 공통, 만료는 이
+    브랜치에만). 41-controller 의 hostPath `type: Directory` 는 경로 존재만 보고 prod 는 api·controller 를 같은 마스터 집합에 두므로
+    (`patch-placement`), 사고 노드(로컬 빈 `<SHARED_DIR>/dms/artifacts`, root:root 0755)에 컨트롤러도 뜰 수 있다. 그 디렉터리는
+    `artifact_trash._open_base` 를 통과하고(소유자 = euid, g+w·o+w 없음) `detach` 가 'absent' → `entry_states` (False, False) →
+    `request_purger._complete` 가 `_finish`(만료는 `_finish_expiry`)로 아웃박스 행을 지운다(한 틱 — `test_absent_artifact_dir_is_outcome_absent` 가 고정하는 동작).
+    같은 길: 사람의 요청 삭제·`batch_deleter`·`batch_round_prune`(스케줄 배치는 자동)·`artifact_expiry`. 공유 스토리지의 진짜
+    `<base>/<job_id>` 는 영구 고아(설계 D12 — 고아를 추론해 지우지 않는다), 흔적은 `request_purged` 의 outcomes 'absent' 뿐(이벤트 보존 30일).
+    가드 모양: `RequestPurger.run_once` 의 drain 검사 바로 뒤에서 `PROCESS_RUNNER.run(("purger", path), lambda: availability_check(path,
+    identity_job_ids(repos, settings, uri)))` — ok 가 True 가 아니면 `_reap`·due·`_settle` 전에 return(아무 행도 끝내지 않음), 사유는 이미
+    등록된 `purge_base_unavailable`, 전이 때만 stderr·이벤트. 테스트: 빈 base + 최근 성공 잡 → 아웃박스 행이 남고 `request_purged` 없음.
+    사용자 지시(dms-ssc 선행 → 동일 이식)대로 다음 묶음에서 두 라인에 같이 넣는다. 그때까지 운영 신호는 컨트롤러 점검(§12e 「컨트롤러
+    노드의 base 가 비면」).
+  - 📝 **멈춘 마운트 감지 전 창에서 readyz 가 굶을 수 있다**(이식 리뷰 — 이번 변경 전부터 있었고 이번에 줄었다). readyz·모니터는 메모리만
+    읽고 FS 점검은 `BaseCheckRunner`(키당 작업 스레드 1개·10초)라 멈춘 마운트에 매달리지 않지만, hung 단락은 모니터 회차가 멈춘 뒤 10초가
+    지나야 켜진다 — 그 전(최대 ~70초)의 아티팩트·사용량·scan-stats 첫 열기는 요청 스레드를 D 상태로 영구히 묶는다. 묶인 스레드가 anyio
+    스레드풀(기본 40)을 다 쓰면 동기 def 인 readyz 가 굶어 NotReady(replicas 1 이면 포탈 전체가 Service 에서 빠짐; `/healthz` 는 async 라
+    재시작 루프는 없음). readyz 를 async 로 바꾸면 DB RLock 대기가 이벤트 루프를 막아 이번엔 안 바꾼다 — 운영: 마운트 복구 뒤
+    `rollout restart deploy/dms-api`(§12e).
+  - ✅ 마운트 현황(`GET /api/admin/mount-status`)에 API 파드·컨트롤러 점검을 겹치기 — 2026-11-23 `mount_status_pods` 로 끝냈다(위 「마운트
+    현황 후속」의 꼬리표 항목 — 행 꼬리표·`control_pods`·문제 노드 한 칸 규칙, dms-ssc routes_mounts 와 같은 재료·규칙). 남은 차이: 표
+    밖 노드(에이전트 없음)의 파드는 각주 한 줄이라 그 노드의 마운트 상태는 여전히 모른다(에이전트를 그 노드에 띄우지 않는 한).
+  - 미리보기 단계의 같은 굳음: `stepper._poll_preview` 의 summary None 은 지금도 즉시 `empty_preview`(Rejected)로 끝난다 — 실행 단계와
+    같은 유한 지연(`_defer_summary`)을 걸지 결정. 실행 단계 지연은 컨트롤러 프로세스 메모리라 재시작마다 상한 한 번이 더 붙는다(TTL/2
+    여유가 그 몫 — 재시작이 TTL 안에 여러 번이면 GC 뒤 FAILED 로 둔갑할 수 있다; 지속하려면 잡 행에 처음 미룬 시각).
+  - 릴리스 실패 사유에 API 시작 게이트 정보: 게이트에 막힌 새 파드는 Running·unready 라 `rollout_failed:ProgressDeadlineExceeded…`
+    만 남는다. rollout_watcher 가 `api_base_checks` 의 신선·waiting 행(「새 파드 X(노드 Y): 아티팩트 경로 점검 실패 — 사유」)을 덧붙이는
+    것은 사유 문자열 형식(200자 절단·포탈 prefix 번역)과 맞물려 이번엔 뺐다 — 관리 화면의 API 파드 목록이 그 사실을 보인다.
+  - (dms-ssc 원문의 「지연 중 잡이 클레임 앞자리를 차지한다」는 같은 커밋의 `touch`(이 브랜치는 `touch_held`)로 이미 닫혔다 —
+    `test_deferred_job_moves_to_the_back_of_the_claim_queue`. 이식 때 뺐다.)
 
 - 📝 **파일 크기 분포에 구간별 용량이 없다**(2026-10-21, d183). dscan(포크 1b93d54)의 `file_size_histogram` 은 구간별 **개수**만
   쓴다(시간 히스토그램만 bytes). 그래서 사용량 화면은 개수·비중만 보인다 — 「1 GiB 넘는 파일이 용량의 몇 %」는 못 말한다. 해법:

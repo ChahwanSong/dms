@@ -3,9 +3,11 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "vitest";
 import {
-  CELL_META, REASON_TEXT, SHARED_META, TONE_CLASS, cellHelp, cellLabel, cellMounted, cellSub, roleLabel, sharedHelp,
-  sharedSub, usageDetail, usageText, writableText,
+  CELL_META, REASON_TEXT, SHARED_META, SHARED_PROBLEM_STATES, TONE_CLASS, cellHelp, cellLabel, cellMounted, cellSub, isPodRole,
+  podCheckText, podFailedOn, podLine, podTag, podsOn, roleLabel, sharedDisplay, sharedHelp, sharedSub, usageDetail, usageText,
+  writableText,
 } from "./mountTerms";
+import { pod, row as mkRow, sharedOk } from "./mountFixtures";
 import type { CellState, MountCellData, SharedCellData, SharedState } from "./types";
 
 const cell = (over: Partial<MountCellData> = {}): MountCellData => ({
@@ -124,7 +126,80 @@ test("공용 디렉터리 보조 줄·설명", () => {
 test("역할 꼬리표: 사이트 덧붙임 > 공용 > 원문", () => {
   expect(roleLabel("build")).toBe("빌드 노드");
   expect(roleLabel("k8s_primary", { k8s_primary: "k8s 호출 주" })).toBe("k8s 호출 주");
-  expect(roleLabel("api_pod")).toBe("api_pod");
+  expect(roleLabel("api_pod")).toBe("dms-api");                   // DMS 파드 꼬리표는 공용(두 라인 공용 재료)
+  expect(roleLabel("controller_pod")).toBe("컨트롤러");
+  expect(roleLabel("someday_pod")).toBe("someday_pod");
+  expect([isPodRole("api_pod"), isPodRole("controller_pod"), isPodRole("build"), isPodRole("toString")])
+    .toEqual([true, true, false, false]);
+});
+
+describe("DMS 파드 꼬리표(podTag)", () => {
+  const local = sharedOk({ state: "local", mount_point: "/", fstype: "ext4" });
+
+  test("사고 서명: 공용 디렉터리가 로컬인 노드의 dms-api 는 파드 점검이 정상이어도 경고", () => {
+    const v = podTag(mkRow("w1", {}, { shared_dir: local, roles: ["api_pod"] }), "api_pod", [pod("api_pod", "w1")]);
+    expect(v).toMatchObject({ role: "api_pod", label: "dms-api", alert: true });
+    expect(v.lines[0]).toBe("이 노드의 DMS 공용 디렉터리: 로컬 디렉터리 — 여기 뜬 dms-api 는 다른 노드가 쓴 아티팩트·scan 리포트를 "
+      + "읽지 못합니다(포탈에 「공유 스토리지 접근 불가」).");
+    expect(v.lines[1]).toBe("dms-api-w1: 아티팩트 경로 점검 정상");
+    // 컨트롤러는 영향 문장이 다르다
+    const c = podTag(mkRow("w1", {}, { shared_dir: local }), "controller_pod", [pod("controller_pod", "w1")]);
+    expect(c.alert).toBe(true);
+    expect(c.lines[0]).toMatch(/여기 뜬 컨트롤러는 작업 결과 요약을 읽지 못합니다/);
+    expect(c.lines[1]).toBe("컨트롤러: 아티팩트 경로 점검 정상");
+  });
+
+  test("공용 디렉터리 문제 넷 모두 경고 -- 다름은 「못 볼 수 있습니다」, 쓰기 불가는 공용 설명", () => {
+    for (const state of SHARED_PROBLEM_STATES) {
+      const v = podTag(mkRow("w1", {}, { shared_dir: sharedOk({ state }) }), "api_pod", [pod("api_pod", "w1")]);
+      expect(v.alert, state).toBe(true);
+    }
+    const differs = podTag(mkRow("w1", {}, { shared_dir: sharedOk({ state: "differs" }) }), "api_pod", []);
+    expect(differs.lines[0]).toMatch(/못 볼 수 있습니다/);
+    const ro = podTag(mkRow("w1", {}, { shared_dir: sharedOk({ state: "read_only" }) }), "api_pod", []);
+    expect(ro.lines[0]).toContain(SHARED_META.read_only.help);
+  });
+
+  test("공용 디렉터리가 정상이어도 파드가 경로를 못 읽으면 경고, 권한 문제·모름은 경고가 아니다", () => {
+    const failed = pod("api_pod", "w1", { ok: false, reason: "artifact_base_jobs_missing", read_failed: true,
+                                         gate_state: "waiting" });
+    const v = podTag(mkRow("w1", {}), "api_pod", [failed]);
+    expect(v.alert).toBe(true);
+    expect(v.lines).toHaveLength(1);
+    expect(v.lines[0]).toMatch(/^dms-api-w1: 아티팩트 경로 점검 실패 — 최근 작업의 기록 디렉터리가 이 경로에 없습니다/);
+    expect(v.lines[0]).toMatch(/· 시작 점검에 막혀 Ready 대기 중\(서비스 밖\)$/);
+    const posture = pod("api_pod", "w1", { ok: false, reason: "artifact_base_not_owned", read_failed: false });
+    expect(podTag(mkRow("w1", {}), "api_pod", [posture]).alert).toBe(false);
+    expect(podCheckText(posture)).toMatch(/^아티팩트 경로 권한 문제 — /);
+    const unknown = pod("api_pod", "w1", { ok: null });
+    expect(podTag(mkRow("w1", {}), "api_pod", [unknown]).alert).toBe(false);
+    expect(podCheckText(unknown)).toBe("아티팩트 경로 점검 결과 모름");
+    expect(podCheckText(pod("api_pod", "w1", { ok: false, reason: null, read_failed: true })))
+      .toBe("아티팩트 경로 점검 실패 — 사유 모름");
+  });
+
+  test("리포트 지연 행은 공용 디렉터리의 마지막 값으로 경고하지 않는다(지금 상태 모름)", () => {
+    const stale = mkRow("w1", {}, { fresh: false, shared_dir: { ...local, state: "stale", last: "local" } });
+    expect(podTag(stale, "api_pod", [pod("api_pod", "w1")]).alert).toBe(false);
+    const staleLocal = mkRow("w1", {}, { fresh: false, shared_dir: local });
+    expect(podTag(staleLocal, "api_pod", [pod("api_pod", "w1")]).alert).toBe(false);
+  });
+
+  test("같은 노드의 dms-api 둘은 꼬리표 하나(×2)에 파드별 줄, 다른 역할 파드는 섞지 않는다", () => {
+    const v = podTag(mkRow("w1", {}), "api_pod",
+                     [pod("api_pod", "w1", { instance: "a" }), pod("api_pod", "w1", { instance: "b" }),
+                      pod("controller_pod", "w1")]);
+    expect(v.label).toBe("dms-api ×2");
+    expect(v.lines).toEqual(["a: 아티팩트 경로 점검 정상", "b: 아티팩트 경로 점검 정상"]);
+    expect(podLine(pod("api_pod", "w1", { gate_state: "started_degraded" })))
+      .toBe("dms-api-w1: 아티팩트 경로 점검 정상 · 형제 파드가 없어 점검 실패인 채 서비스 시작");
+  });
+
+  test("podsOn: 덧붙임이 없는 응답(control_pods 없음)이면 빈 목록", () => {
+    expect(podsOn({}, "w1")).toEqual([]);
+    expect(podsOn({ control_pods: [pod("api_pod", "w1"), pod("api_pod", "w2")] }, "w2").map((p) => p.node_name))
+      .toEqual(["w2"]);
+  });
 });
 
 test("화면 문구에 영문 원문 상태(Ready/Missing)를 쓰지 않는다", () => {
@@ -147,4 +222,28 @@ test("공용 코어 파일은 features/k8s 를 import 하지 않는다", () => {
     expect(imports.length, file).toBeGreaterThan(0);
     expect(imports.filter((p) => /(^|\/)k8s(\/|$)|k8sMountParts/.test(p)), file).toEqual([]);
   }
+});
+
+test("공용 칸 표시(sharedDisplay): 파드 점검 실패는 에이전트 정상·있음을 덮고, 이미 문제·지연이면 그대로(68dcbcdb 원칙)", () => {
+  const ok = { state: "ok", exists: true, writable: true, reported_path: "/s", mount_point: "/s", fstype: "nfs4" } as never;
+  const over = sharedDisplay(ok, true);
+  expect(over.overridden).toBe(true);
+  expect(over.meta.label).toBe("파드 점검 실패");
+  expect(over.meta.tone).toBe("bad");
+  expect(over.sub).toBe("에이전트: 정상");
+  expect(sharedDisplay(ok, false).meta.label).toBe("정상");
+  for (const state of ["local", "missing", "differs", "read_only", "stale"] as const) {
+    const d = sharedDisplay({ ...(ok as object), state } as never, true);
+    expect(d.overridden).toBe(false);
+    expect(d.meta.label).toBe(SHARED_META[state].label);
+  }
+  const data = { control_pods: [
+    { role: "api_pod", instance: "a", node_name: "n1", ok: false, reason: "artifact_base_jobs_missing", read_failed: true,
+      checked_at: null, gate_state: null, in_table: true },
+    { role: "controller_pod", instance: "c", node_name: "n2", ok: false, reason: "artifact_base_world_writable", read_failed: false,
+      checked_at: null, gate_state: null, in_table: true },
+  ] } as never;
+  expect(podFailedOn(data, "n1")).toBe(true);
+  expect(podFailedOn(data, "n2")).toBe(false);   // 권한(posture) 사유만이면 경로 점검 실패가 아니다
+  expect(podFailedOn(data, "n3")).toBe(false);
 });

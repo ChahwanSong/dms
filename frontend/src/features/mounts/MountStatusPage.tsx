@@ -10,7 +10,7 @@ import { StateChip } from "./MountCell";
 import { MountMatrix } from "./MountMatrix";
 import { NodeMountCards } from "./NodeMountCards";
 import { NodeMountSheet } from "./NodeMountSheet";
-import { CELL_META } from "./mountTerms";
+import { CELL_META, POD_ROLE_LABELS, podCheckText } from "./mountTerms";
 import type { CellState, MountStatusResponse, MountTotals, StorageColumn } from "./types";
 import { useMountStatus } from "./useMountStatus";
 
@@ -20,8 +20,10 @@ import { useMountStatus } from "./useMountStatus";
 // 그물 mountTerms.test).
 //
 // 같은 날 사고(공용 스토리지가 마운트되지 않은 노드에 dms-api 가 떠 아티팩트를 못 읽음)의 그런 노드를 찾는 도구이기도 하다 -- 「DMS
-// 공용」 열이 노드마다 공용 디렉터리를 덮는 마운트를 보고, 로컬 디렉터리·다른 노드와 다름을 문제로 센다. (API·컨트롤러 파드가 뜬
-// 노드 꼬리표는 dms-ssc 의 API 파드 base 점검을 이식할 때 roles 에 api_pod·controller_pod 로 더한다.)
+// 공용」 열이 노드마다 공용 디렉터리를 덮는 마운트를 보고, 로컬 디렉터리·다른 노드와 다름을 문제로 센다. dms-api·컨트롤러 파드가 뜬
+// 노드는 행 꼬리표(roles 의 api_pod·controller_pod -- 서버 mount_status_pods, 재료는 각 파드의 아티팩트 경로 점검 기록)로 보이고,
+// 공용 디렉터리 칸이 문제인 노드거나 그 파드가 경로를 못 읽으면 꼬리표가 경고(빨강 + 아이콘)가 된다 -- 그 조합이 사고의 서명이다.
+// 표에 없는 노드(에이전트 없음 -- 예: prod 의 control-plane 마스터)에 뜬 파드는 각주가 따로 말한다.
 //
 // 보기 상태(문제 있는 노드만·표/노드별)는 URL 에 남긴다(?only=problems·?view=table|cards -- 공유·새로고침에 유지). 표와 카드는 조건부로
 // 그린다(CSS 로 숨기지 않는다 -- 숨은 표가 DOM 에 남으면 e2e 칸 수 측정이 공허해진다). view 가 없으면 첫 렌더의 화면 폭(640 미만 =
@@ -223,6 +225,24 @@ function Footnotes({ data }: { data: MountStatusResponse }) {
       + "정상이고, taint 가 없는데 여기 있으면 dms-agent 파드를 확인하세요.");
   if (!data.cluster.known)
     notes.push("k8s 노드 목록을 읽지 못해 에이전트 없는 노드·control-plane 여부를 표시하지 않습니다.");
+  // 표 밖 노드의 DMS 파드: 행이 없으니 꼬리표를 달 곳이 없다(prod 는 제어면을 control-plane 마스터에 두고 에이전트는 그 taint 를
+  // 견디지 않는다). 그 노드의 마운트는 모르고, 파드 자신의 점검만 안다 -- 못 읽는 파드는 빨갛게.
+  const outside = (data.control_pods ?? []).filter((p) => !p.in_table);
+  if (outside.length > 0)
+    notes.push(<>
+      {"표에 없는 노드(에이전트 보고 없음)에 뜬 DMS 파드: "}
+      {outside.map((p, i) => (
+        <span key={`${p.role}-${p.instance ?? ""}-${p.node_name}`}>
+          {i > 0 && ", "}
+          <span className={p.read_failed ? "font-medium text-bad" : undefined}>
+            {`${POD_ROLE_LABELS[p.role] ?? p.role} ${p.node_name}(${podCheckText(p)})`}
+          </span>
+        </span>
+      ))}
+      {" — 이 노드의 마운트는 DMS 가 모릅니다(파드 자신의 점검은 "}
+      <Link to="/admin/artifact-base" className="text-accent hover:underline">아티팩트 경로</Link>
+      {" 화면)."}
+    </>);
   if (data.totals.shared_unverified > 0)
     notes.push("일부 노드는 공용 디렉터리의 마운트 지점을 보고하지 않습니다(에이전트 업데이트 전) — 같은 경로의 로컬 디렉터리도 "
       + "「있음」으로 보일 수 있습니다.");

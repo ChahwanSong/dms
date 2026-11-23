@@ -265,8 +265,9 @@ function ItemTool({ requestId }: { requestId: string | null }) {
 // 훅 enabled 가 2차로 성공 요청만 통과시킨다). 성공 요청만 리포트를 가지므로
 // 미성공 항목은 조회 없이 "리포트 없음"이 정직하고, 404 no_scan_report(성공인데
 // 리포트 부재·유실)도 화면엔 같은 사실이라 같은 문구다 — 그 외 오류(503 등)는
-// 사유 문구를 그대로 보인다. 온도 토글 상태는 컴포넌트 지역(단일 펼침이라 행
-// 전환 시 atime 기본으로 리셋되는 게 자연스럽다).
+// 사유 문구를 그대로 보인다. 그 외 오류는 일시 장애일 수 있어(503 artifact_base_unavailable -- 2026-11-23 사고) 「다시
+// 시도」를 둔다(queryClient retry 없음 -- 펼침을 닫았다 열기 전엔 다시 부를 길이 없었다). 온도 토글 상태는 컴포넌트 지역
+// (단일 펼침이라 행 전환 시 atime 기본으로 리셋되는 게 자연스럽다).
 function ItemScanStats({ requestId, succeeded }: {
   requestId: string | null; succeeded: boolean;
 }) {
@@ -278,7 +279,13 @@ function ItemScanStats({ requestId, succeeded }: {
     return <section className={PANEL_SECTION}><p className="text-muted text-sm">리포트 없음</p></section>;
   }
   if (q.isError) {
-    return <section className={PANEL_SECTION}><p className="text-bad text-sm">{(q.error as ApiError).message}</p></section>;
+    return (
+      <section className={`${PANEL_SECTION} flex flex-wrap items-start gap-2`}>
+        <p className="min-w-0 flex-1 text-bad text-sm break-keep">{(q.error as ApiError).message}</p>
+        <Button type="button" variant="ghost" className="shrink-0 px-2.5 py-1 text-xs"
+                disabled={q.isFetching} onClick={() => { void q.refetch(); }}>다시 시도</Button>
+      </section>
+    );
   }
   const stats = q.data;
   if (!stats) return null;               // 로딩 — 짧은 창이라 문구 없이 둔다

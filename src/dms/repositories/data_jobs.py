@@ -689,7 +689,8 @@ class DataJobsRepository:
         """실행 관문에서 보류한 잡(2026-10-27, stepper._overlap_hold)의 updated_at 만 지금으로 -- claim_steppable 이
         updated_at 오름차순 LIMIT 이라, 시각이 그대로인 보류 잡이 앞자리를 차지하면 그 보류를 풀어 줄 잡(실행 중인 상대)이
         클레임되지 못해 영영 풀리지 않는다(보류 잡 10건이면 교착). 조건부(state = expected_state) -- 그 사이 취소·종단된 잡은
-        no-op. 비종단 잡의 updated_at 은 클레임 순서 말고 쓰는 곳이 없다(GC·만료·삭제의 나이는 종단 뒤 값이다)."""
+        no-op. 비종단 잡의 updated_at 은 클레임 순서 말고 쓰는 곳이 없다(GC·만료·삭제의 나이는 종단 뒤 값이다). 요약 확정을
+        미루는 잡(2026-11-23, stepper._defer_summary -- 컨트롤러 쪽 base 접근 불가)도 같은 이유로 이것을 부른다."""
         return self._db.execute_count(
             "UPDATE data_jobs SET updated_at = :now WHERE job_id = :j AND state = :s",
             {"now": utc_now_iso(), "j": job_id, "s": expected_state}) == 1

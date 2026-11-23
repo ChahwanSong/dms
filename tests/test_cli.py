@@ -113,10 +113,16 @@ def test_api_passes_keep_alive_to_uvicorn(tmp_path, monkeypatch):
     monkeypatch.delenv("DMS_API_KEEP_ALIVE_SECONDS", raising=False)
     assert main(["migrate"]) == 0
     import uvicorn
+    from dms.api.base_monitor import ApiBaseMonitor
     calls = []
+    started = []
     monkeypatch.setattr(uvicorn, "run", lambda app, **kw: calls.append(kw))
+    # 2026-11-23: `dms api` 만 API 자체 artifact base 점검 모니터를 시작한다(create_app(start_base_monitor=True)) --
+    # 배선이 빠지면 시작 게이트·API 점검 기록이 조용히 사라진다. 실 스레드는 띄우지 않는다.
+    monkeypatch.setattr(ApiBaseMonitor, "start", lambda self, **kw: started.append(self))
     assert main(["api"]) == 0
     assert calls[-1] == {"host": "0.0.0.0", "port": 8080, "timeout_keep_alive": 120}
+    assert len(started) == 1
     monkeypatch.setenv("DMS_API_KEEP_ALIVE_SECONDS", "150")
     assert main(["api"]) == 0
     assert calls[-1]["timeout_keep_alive"] == 150

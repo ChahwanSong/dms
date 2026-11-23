@@ -6,14 +6,14 @@ import dataclasses
 
 import pytest
 
-from dms.db import utc_now_iso
+from dms.db import iso_plus, utc_now_iso
 from dms.repositories import Repositories
 from test_k8s_submit import _login, kclient, world  # noqa: F401 -- dmsk8s 실데이터 세계(스토리지 4종·SC 매핑·k8s-w1 보고)
 
 URL = "/api/admin/mount-status"
 ADMIN = {"Authorization": "Bearer tok-shared"}
 TOP_KEYS = {"generated_at", "stale_seconds", "report_interval_seconds", "shared_dir", "storages", "disabled_storages",
-            "nodes", "totals", "cluster"}
+            "nodes", "totals", "cluster", "control_pods"}
 CELL_STATES = {"ready", "read_only", "absent", "broken", "pending", "stale"}
 
 
@@ -84,6 +84,7 @@ def test_shape_freshness_disabled_and_base(client, db):
         2, 1, 1, 1, 1, 1)
     # 스텁 백엔드 노드 목록은 빈 목록 -- 「노드 없음」이 아니라 모름
     assert body["cluster"] == {"known": False, "agentless_nodes": [], "reason": "no_nodes_listed", "observed_at": None}
+    assert body["control_pods"] == []                                  # 점검 기록이 없으면 꼬리표도 없다(지어내지 않는다)
 
 
 def test_no_artifact_base_means_no_shared_column(client, db):
@@ -124,6 +125,56 @@ def test_cluster_node_list_failure_is_fail_soft(client, db):
     assert r.status_code == 200
     assert r.json()["cluster"] == {"known": False, "agentless_nodes": [], "reason": "list_failed", "observed_at": None}
     assert all(row["in_cluster"] is None for row in r.json()["nodes"])
+
+
+class _NoK8s:
+    """rollout_runner 대역 -- 파드 꼬리표는 DB 기록만 읽는다(요청마다 k8s 파드 목록을 부르면 여기서 터진다)."""
+    def __getattr__(self, name):
+        raise AssertionError(f"mount-status must not call rollout_runner.{name}")
+
+
+def _api_row(repos, instance, node, *, ok=True, reason=None, uri="file:///dms_shared/dms/artifacts", at=None,
+             gate_state="passed"):
+    at = at or utc_now_iso()
+    repos.api_base_checks.upsert({"instance": instance, "node_name": node, "uri": uri, "ok": ok, "reason": reason,
+                                  "posture": None, "fstype": "nfs4", "gate_state": gate_state, "started_at": at,
+                                  "checked_at": at, "first_ok_at": at, "ready_at": at})
+
+
+def test_api_and_controller_pod_tags_come_from_fresh_db_records(client, db):
+    # 사고 서명의 두 반쪽: w1 의 dms-api 가 아티팩트 경로를 못 읽는다(에이전트는 공용 디렉터리를 정상으로 본다 -- 파드 쪽 문제),
+    # 컨트롤러는 w1, 표 밖 노드(cp1 -- 에이전트 없음)에 다른 dms-api. 죽은 파드의 옛 행은 꼬리표가 되지 않는다.
+    repos = _seed(db)
+    client.app.state.rollout_runner = _NoK8s()
+    _api_row(repos, "dms-api-new", "w1", ok=False, reason="artifact_base_jobs_missing", gate_state="waiting")
+    _api_row(repos, "dms-api-old", "cp1")
+    _api_row(repos, "dms-api-dead", "w2", at=iso_plus(utc_now_iso(), -3600))
+    repos.control.set_artifact_base_check(uri="file:///dms_shared/dms/artifacts", ok=True, reason=None, node="w1")
+    body = client.get(URL, headers=ADMIN).json()
+    w1, w2 = body["nodes"]
+    assert w1["roles"] == ["api_pod", "controller_pod"] and w2["roles"] == []
+    assert [(p["role"], p["instance"], p["node_name"], p["ok"], p["read_failed"], p["in_table"], p["gate_state"])
+            for p in body["control_pods"]] == [
+        ("api_pod", "dms-api-old", "cp1", True, False, False, "passed"),
+        ("api_pod", "dms-api-new", "w1", False, True, True, "waiting"),
+        ("controller_pod", None, "w1", True, False, True, None)]
+    assert body["control_pods"][1]["reason"] == "artifact_base_jobs_missing"
+    # 공용 디렉터리 칸은 에이전트 보고 그대로(정상)지만 이 노드의 dms-api 가 못 읽으므로 「문제 있는 노드」에 든다(공용 열 한 칸)
+    assert (w1["shared_dir"]["state"], w1["problem"], w1["problem_count"]) == ("ok", True, 1)
+    assert body["totals"]["problem_nodes"] == 2 and body["totals"]["shared_problem"] == 0
+
+
+def test_stale_controller_record_and_other_base_results(client, db):
+    repos = _seed(db)
+    repos.control.set_artifact_base_check(uri="file:///dms_shared/dms/artifacts", ok=False,
+                                          reason="artifact_base_jobs_missing", node="w1",
+                                          now_iso=iso_plus(utc_now_iso(), -600))   # 멈춘·옮겨 간 컨트롤러의 옛 기록
+    _api_row(repos, "dms-api-a", "w1", ok=False, reason="artifact_base_jobs_missing", uri="file:///old/base")
+    body = client.get(URL, headers=ADMIN).json()
+    assert [(p["role"], p["ok"], p["reason"], p["read_failed"]) for p in body["control_pods"]] == [
+        ("api_pod", None, None, False)]                                  # 옛 base 를 본 결과는 모름 -- 꼬리표만
+    w1 = body["nodes"][0]
+    assert (w1["roles"], w1["problem_count"]) == (["api_pod"], 0)
 
 
 def test_pv_storages_carry_selectable_pv_counts_and_caller_roles(kclient, world):

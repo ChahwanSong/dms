@@ -3,10 +3,12 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
-from ..artifact_base import (allowlist_reason, dms_state_roots, normalize_artifact_base,
+from ..artifact_base import (LOCAL_FSTYPES, allowlist_reason, dms_state_roots, normalize_artifact_base,
                              overlaps_dms_state, roundtrip_artifact_base, strip_scheme)
+from ..db import iso_plus, utc_now_iso
 from ..domain import DomainValidationError
 from .auth import Identity, audit_actor, require_admin, require_session_admin
+from .base_monitor import GATE_WAITING, fresh_window_seconds, run_api_check
 
 router = APIRouter(dependencies=[Depends(require_admin)])
 
@@ -44,10 +46,12 @@ def _controller_check(row, effective) -> dict:
         # 컨트롤러가 아직 **이** base 를 검증하지 않았다(막 저장했거나 구버전
         # 컨트롤러) -- null(모름)이지 실패가 아니다(설계 §4). check_uri 대조가
         # 없으면 옛 base 의 성공/실패가 새 base 의 것으로 오독된다.
-        return {"pending": True, "ok": None, "reason": None, "checked_at": None}
+        return {"pending": True, "ok": None, "reason": None, "checked_at": None, "node_name": None}
+    # node_name(2026-11-23): 어느 노드에서 본 결과인지 -- API 파드 관점과 엇갈릴 때 화면이 「노드 X 만 못 본다」를 말한다.
     return {"pending": False, "ok": bool(row["artifact_base_check_ok"]),
             "reason": row["artifact_base_check_reason"],
-            "checked_at": row["artifact_base_check_at"]}
+            "checked_at": row["artifact_base_check_at"],
+            "node_name": row.get("artifact_base_check_node")}
 
 
 def _node_checks(repos, settings, effective_path) -> list[dict]:
@@ -94,18 +98,71 @@ def _check_path(path: str, settings) -> "str | None":
             or roundtrip_artifact_base(path))
 
 
-def _payload(request: Request) -> dict:
+def _api_check(request: Request, effective: str, *, instant_cache_seconds: "float | None" = None) -> dict:
+    """(a) API 파드 관점(2026-11-23 개정). GET 은 더는 쓰기 왕복을 하지 않는다 -- 쓰기는 빈 로컬 디렉터리에서도 통과해
+    「진짜 공유 스토리지인가」를 말하지 못하고(사고), 10초 폴링마다 base 에 파일을 만들 이유도 없다(PUT/validate 는 왕복
+    그대로). 대신 쓰기 없는 가용성(디렉터리 열기·첫 dirent·최근 잡 디렉터리) + 자세(allowlist·소유자·o+w·g+w/ACL·o+x --
+    저장 뒤 바뀐 g+w 를 계속 드러낸다) + 파일시스템 종류. 모니터가 돌고 현재 uri 스냅숏이 있으면 그것(source monitor),
+    아니면 runner 로 즉석(source instant -- 쓰기 없음, 같은 single-flight·타임아웃). ok = 가용성 ∧ 자세 없음, reason =
+    가용성 사유 우선(옛 화면 호환 -- 한 줄 요약)."""
+    state = request.app.state
+    monitor = state.base_monitor
+    snap = monitor.snapshot()
+    if instant_cache_seconds is None and monitor.started and snap is not None and snap["uri"] == effective:
+        source = "monitor"
+        availability = {"ok": snap["ok"], "reason": snap["reason"],
+                        "jobs_checked": snap["jobs_checked"], "jobs_found": snap["jobs_found"]}
+        posture, fstype, local_fs = snap["posture"], snap["fstype"], snap["local_fs"]
+        checked_at, node_name = snap["checked_at"], snap["node_name"]
+    else:
+        source = "instant"
+        kwargs = {} if instant_cache_seconds is None else {"cache_seconds": instant_cache_seconds}
+        res = run_api_check(state, effective, **kwargs)
+        availability = res["availability"]
+        posture, fstype, local_fs = res["posture"], res["fstype"], res["local_fs"]
+        checked_at, node_name = utc_now_iso(), monitor.node_name()
+    return {"ok": availability["ok"] is True and posture is None,
+            "reason": availability["reason"] or posture,
+            "availability": availability, "posture": posture, "source": source,
+            "instance": monitor.instance, "node_name": node_name, "checked_at": checked_at,
+            "fstype": fstype, "local_fs": local_fs, "interval_seconds": monitor.interval,
+            "gate": {"enabled": monitor.enabled and monitor.gate_on and monitor.started,
+                     "state": monitor.gate_state(), "at": monitor.ready_at}}
+
+
+def _desc(text: str) -> tuple:
+    # 문자열 내림차순 정렬 키(ISO 시각) -- 코드포인트를 뒤집는다.
+    return tuple(-ord(c) for c in text)
+
+
+def _api_pods(request: Request) -> list[dict]:
+    """API 파드별 점검 기록(api_base_checks, 24시간 행). Ready 가 아닌 파드(시작 게이트에 걸린 새 파드)는 Service 밖이라
+    이 기록으로만 보인다. fresh = 마지막 활동(checked_at, 없으면 started_at)이 신선 창(주기 3배·최소 180초) 안. 순서:
+    이 파드 → 실패·대기 → 최근 확인."""
+    state = request.app.state
+    monitor = state.base_monitor
+    now = utc_now_iso()
+    cutoff = iso_plus(now, -fresh_window_seconds(monitor.interval))
+    pods = []
+    for r in state.repos.api_base_checks.list_recent(now_iso=now):
+        last = r["checked_at"] or r["started_at"]
+        pods.append({**{k: r[k] for k in ("instance", "node_name", "uri", "ok", "reason", "posture", "fstype",
+                                           "gate_state", "started_at", "checked_at", "ready_at")},
+                     "local_fs": None if r["fstype"] is None else r["fstype"] in LOCAL_FSTYPES,
+                     "fresh": last >= cutoff, "this_pod": r["instance"] == monitor.instance})
+    pods.sort(key=lambda p: (not p["this_pod"],
+                             not (p["ok"] is False or p["gate_state"] == GATE_WAITING),
+                             _desc(p["checked_at"] or p["started_at"] or "")))
+    return pods
+
+
+def _payload(request: Request, *, instant_cache_seconds: "float | None" = None) -> dict:
     repos = request.app.state.repos
     settings = request.app.state.settings
     row = repos.control.control_state()
     db_value = row.get("artifact_base_uri") if row else None
     effective = db_value or settings.artifact_base_uri
     path = strip_scheme(effective)
-    # (a) API 즉석 홉은 GET 에서도 실파일 왕복으로 산다 -- 저장 시점 스냅숏이
-    # 아니라 "지금 이 파드에서 되는가"가 화면이 답할 질문이다(설계 §2.4).
-    # 왕복은 임시 파일 1개라 10s 폴링에도 무해하다. allowlist(2026-09-09, root
-    # 전환)는 왕복보다 먼저 -- 허용 밖 경로에는 프로브 파일도 만들지 않는다.
-    api_reason = _check_path(path, settings)
     return {
         "effective": effective,
         "source": "db" if db_value else "env",
@@ -118,7 +175,8 @@ def _payload(request: Request) -> dict:
                                **repos.request_purges.expiry_status()},
         "dms_state": _dms_state(repos, settings),
         "checks": {
-            "api": {"ok": api_reason is None, "reason": api_reason},
+            "api": _api_check(request, effective, instant_cache_seconds=instant_cache_seconds),
+            "api_pods": _api_pods(request),
             "controller": _controller_check(row, effective),
             "nodes": _node_checks(repos, settings, path),
         },
@@ -128,6 +186,38 @@ def _payload(request: Request) -> dict:
 @router.get("/api/admin/artifact-base")
 def get_artifact_base(request: Request):
     return _payload(request)
+
+
+@router.get("/api/admin/artifact-base/health")
+def get_artifact_base_health(request: Request):
+    """포탈 폴링용 가벼운 상태(2026-11-23): 사용량 화면이 「공유 스토리지 접근 불가」를 받은 동안만 15초로 보다가 ok 로
+    바뀌면 무거운 사용량 쿼리를 다시 부른다(데이터 쿼리 자체를 폴링하지 않는다). 모니터 스냅숏(메모리)만 읽는다 -- 모니터가
+    돌지 않을 때(주기 0 비상구·로컬)만 runner 로 즉석 점검(쓰기 없음·3초 캐시). ok null = 모름."""
+    state = request.app.state
+    monitor = state.base_monitor
+    if monitor.started:
+        snap = monitor.snapshot()
+        if snap is None:
+            return {"ok": None, "reason": None, "checked_at": None, "instance": monitor.instance,
+                    "node_name": None}
+        return {"ok": snap["ok"], "reason": snap["reason"], "checked_at": snap["checked_at"],
+                "instance": monitor.instance, "node_name": snap["node_name"]}
+    row = state.repos.control.control_state() or {}
+    effective = row.get("artifact_base_uri") or state.settings.artifact_base_uri
+    avail = run_api_check(state, effective)["availability"]
+    return {"ok": avail["ok"], "reason": avail["reason"], "checked_at": utc_now_iso(),
+            "instance": monitor.instance, "node_name": monitor.node_name()}
+
+
+@router.post("/api/admin/artifact-base:recheck")
+def recheck_artifact_base(request: Request):
+    """「지금 다시 점검」(2026-11-23). 설정 변경이 아니라 require_admin(라우터)만. 모니터가 돌면 지금 시작하는 회차를 최대
+    12초 기다린 뒤 GET 과 같은 payload, 꺼져 있으면 캐시 없는 즉석 점검으로 같은 payload."""
+    monitor = request.app.state.base_monitor
+    if monitor.started:
+        monitor.check_now()
+        return _payload(request)
+    return _payload(request, instant_cache_seconds=0)
 
 
 @router.get("/api/admin/artifact-base/history")
@@ -176,4 +266,6 @@ def put_artifact_base(body: ArtifactBaseBody, request: Request,
     repos.control.set_artifact_base(normalized, actor=audit_actor(identity),
                                     forced=bool(affected and body.force),
                                     affected_jobs=affected)
+    # 새 base 를 API 모니터가 바로 보게(다음 주기까지 옛 base 스냅숏으로 남지 않게 -- 그동안 화면은 instant 로 본다).
+    request.app.state.base_monitor.kick()
     return _payload(request)

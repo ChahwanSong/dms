@@ -8,17 +8,32 @@ from .artifacts import (ArtifactError, MAX_BYTES, PHASES, job_owner_uid,
                         list_artifacts, open_artifact_stream, read_artifact,
                         strip_scheme, stream_artifact_fd, tail_lines)
 from .auth import Identity, require_user
+from .base_probe import BaseProbe
 from .routes_jobs import _owned_job
 
 router = APIRouter()
 
 
-def _base(request: Request) -> str:
+def _base_uri(request: Request) -> str:
     # 슬라이스 18: 설정 스냅숏이 아니라 DB 우선 해석(설계 §2.1). 읽기 라우트는 잡
     # 행이 아니라 현재 base 로 경로를 조립한다(설계 §1-5) -- base 는 잠금(§2.3)
     # 탓에 잡이 존재하는 한 바뀌지 않으므로 이 조립은 여전히 안전하다.
-    return strip_scheme(resolve_artifact_base(request.app.state.repos.control,
-                                              request.app.state.settings))
+    return resolve_artifact_base(request.app.state.repos.control, request.app.state.settings)
+
+
+def _base(request: Request) -> str:
+    return strip_scheme(_base_uri(request))
+
+
+def _probe(request: Request) -> "tuple[str, BaseProbe]":
+    """(base 경로, 요청 프로브). 2026-11-23: 「그 잡의 아티팩트 없음(404)」과 「base 접근 불가(503
+    artifact_base_unavailable)」를 base 수준 판정으로만 가른다(api/base_probe.py -- 파일 errno 로 가르면 존재 오라클).
+    멈춘 마운트면 FS 를 열기 **전에** 503(hung 단락)."""
+    uri = _base_uri(request)
+    probe = BaseProbe(request.app.state, uri)
+    if probe.hung():
+        raise HTTPException(status_code=503, detail="artifact_base_unavailable")
+    return probe.path, probe
 
 
 def _owner_uid(job) -> int:
@@ -59,12 +74,19 @@ def list_job_artifacts(job_id: str, request: Request,
         days = request.app.state.settings.artifact_retention_days
         return {"entries": [], "truncated": False, "expired_at": expired,
                 "retention_days": days if isinstance(days, int) and days > 0 else None}
+    owner_uid = _owner_uid(job)
+    base, probe = _probe(request)
     try:
         # {"entries": [...], "truncated": bool} — 사용자가 phase 디렉터리 소유자라
         # 항목 수를 묶어야 한다(MAX_ENTRIES). 잘렸는지는 호출자가 알 수 있어야 한다.
-        return list_artifacts(_base(request), job_id, owner_uid=_owner_uid(job))
+        result = list_artifacts(base, job_id, owner_uid=owner_uid)
     except ArtifactError as e:
         raise HTTPException(status_code=422, detail=e.reason_code)
+    if not result["entries"] and probe.down:
+        # 빈 목록은 「아직 실행 전(phase 디렉터리 없음)」이 정상값이지만, base 자체가 안 보이면 거짓 「출력 없음」이다
+        # (2026-11-23 사고 -- 200 빈 목록이 「실행 아티팩트 없음」으로 그려졌다). base 수준 판정이 실패일 때만 503.
+        raise HTTPException(status_code=503, detail="artifact_base_unavailable")
+    return result
 
 
 @router.get("/api/user/jobs/{job_id}/artifacts/{phase}/{name}")
@@ -73,14 +95,18 @@ def get_job_artifact(job_id: str, phase: str, name: str, request: Request,
                      identity: Identity = Depends(require_user)):
     job = _owned_job(request, job_id, identity)
     _reject_expired(job)
+    owner_uid = _owner_uid(job)
+    base, probe = _probe(request)
     try:
-        return read_artifact(_base(request), job_id, phase, name, tail=tail,
-                             owner_uid=_owner_uid(job))
+        return read_artifact(base, job_id, phase, name, tail=tail, owner_uid=owner_uid)
     except ArtifactError as e:
         if e.reason_code in ("artifact_not_found", "artifact_forbidden"):
             # 봉쇄 실패(탈출 시도)와 단순 미존재는 클라이언트에게 완전히 같아야 한다 —
             # 403/404가 갈리면 팟 안의 임의 절대경로 존재 여부를 캐는 오라클이 된다.
-            # (artifact_forbidden은 서버 내부 구분용으로만 남긴다.)
+            # (artifact_forbidden은 서버 내부 구분용으로만 남긴다.) base 접근 불가(503)도 같은
+            # 프로브(base 수준 -- 이 파일과 무관)라 두 갈래 모두 같은 판정을 받는다.
+            if probe.down:
+                raise HTTPException(status_code=503, detail="artifact_base_unavailable")
             raise HTTPException(status_code=404, detail="artifact_not_found")
         raise HTTPException(status_code=422, detail=e.reason_code)
 
@@ -90,21 +116,25 @@ def download_job_artifact(job_id: str, phase: str, name: str, request: Request,
                           identity: Identity = Depends(require_user)):
     job = _owned_job(request, job_id, identity)
     _reject_expired(job)
+    owner_uid = _owner_uid(job)
+    base, probe = _probe(request)
     try:
         # 봉쇄 사슬은 뷰(read_artifact)와 같은 함수 하나다 — 검사를 통과한 fd 를
         # 그대로 스트림해야 TOCTOU 가 없다(경로 문자열을 두 번 해석하지 않는다).
         fd, size = open_artifact_stream(
-            _base(request), job_id, phase, name,
+            base, job_id, phase, name,
             max_bytes=request.app.state.settings.artifact_download_max_bytes,
-            owner_uid=_owner_uid(job))
+            owner_uid=owner_uid)
     except ArtifactError as e:
         if e.reason_code == "artifact_too_large":
             # open_artifact_stream 이 봉쇄 통과 뒤에만 이 코드를 내므로(순서 계약),
             # 413 이 봉쇄 밖 파일의 크기를 캐는 오라클이 될 수 없다.
             raise HTTPException(status_code=413, detail="artifact_too_large")
         if e.reason_code in ("artifact_not_found", "artifact_forbidden"):
-            # 뷰 라우트(:42-47)와 body 까지 동일해야 한다 — 라우트 간에 404 가
-            # 갈리면 그 차이 자체가 존재 오라클이 된다.
+            # 뷰 라우트와 body 까지 동일해야 한다 — 라우트 간에 404 가
+            # 갈리면 그 차이 자체가 존재 오라클이 된다(503 도 뷰와 같은 base 수준 프로브).
+            if probe.down:
+                raise HTTPException(status_code=503, detail="artifact_base_unavailable")
             raise HTTPException(status_code=404, detail="artifact_not_found")
         # invalid_phase 등 화이트리스트 거부는 공개 지식이라 오라클이 아니다(뷰와 동일).
         raise HTTPException(status_code=422, detail=e.reason_code)

@@ -338,7 +338,8 @@ not-ready·unreachable `tolerationSeconds: 30`). 이 오버레이가 제어면 D
 - **시크릿·인증서·토큰**(§3b): 포탈 TLS 교체(만료 감시 없음 — §14-2 달력에), `DMS_SESSION_SECRET` 회전 시 포탈 저장 메일 키·k8s 토큰 재입력,
   공용 스토리지 밖 사본(§2f-5). 사내 SSO(§6-9)의 client secret 재발급·SSO 끄기 = Secret `dms-oidc` 를 다시 만들거나 지우고
   `rollout restart deploy/dms-api`(S11 의 설정 재시작은 이 Secret 을 보지 않는다).
-- **업그레이드**(§4)·**롤백·복구**(§5)·**포탈 빌드·릴리스**(§8·§9)·**계정·인증**(§10)·**메일**(§11)·**작업 삭제·결과 만료**(§12·§12b).
+- **업그레이드**(§4)·**롤백·복구**(§5)·**포탈 빌드·릴리스**(§8·§9)·**계정·인증**(§10)·**메일**(§11)·**작업 삭제·결과 만료**(§12·§12b)·
+  **아티팩트 경로 API 파드 점검·시작 게이트**(§12e — 새 dms-api 파드가 Ready 가 안 되면 그 마스터의 공용 디렉터리 마운트부터).
 - **일상 점검·문제 해결**(§14): `VERIFY_NO_PROBES=1 CACERT=<사내CA> sh deploy/install.sh --context <ctx> --only S12`(읽기만), 포탈의 보안 이벤트·
   작업 정리 상태·아티팩트 경로·릴리스 드리프트 배지, 증상별 색인. 입구만 다시 볼 때는 `sh deploy/ingress-probe.sh --context <ctx> --domain <FQDN>
   [--cacert <사내CA>]`(get 과 HTTPS GET 뿐 — 노드마다 `NODE <이름> PASS|FAIL|UNKNOWN <근거>`, 끝 줄 `RESULT:`, 종료 0 PASS · 1 FAIL · 4 모름 · 2 사용법.

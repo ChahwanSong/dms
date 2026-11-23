@@ -68,6 +68,16 @@ class RolloutRunner:
             logger.warning("pod briefs failed selector=%s: %s", selector, exc)
             return []
 
+    def try_pod_briefs(self, *, selector) -> "list[dict] | None":
+        """pod_briefs 와 같되 실패를 None(모름)으로 구분한다(2026-11-23) -- API 시작 게이트가 「형제 파드 없음」과 「k8s 를
+        못 봄」을 갈라야 한다(못 보면 DB 의 api_base_checks 로 대신 판정한다). pod_briefs 의 [] 접기는 RolloutWatcher 계약
+        그대로 둔다."""
+        try:
+            return self._k8s.list_pod_briefs(self._ns, selector)
+        except Exception as exc:
+            logger.warning("pod briefs failed selector=%s: %s", selector, exc)
+            return None
+
 
 class StubRolloutRunner:
     """클러스터가 없을 때(execution_backend != "volcano") 쓰는 결정적 페어.
@@ -103,3 +113,6 @@ class StubRolloutRunner:
 
     def pod_briefs(self, *, selector) -> list[dict]:
         return []
+
+    def try_pod_briefs(self, *, selector) -> "list[dict] | None":
+        return None        # 클러스터가 없다 -- 형제 파드를 모른다(게이트는 DB 기록으로만 판정)

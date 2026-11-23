@@ -4,11 +4,11 @@ import type { UsageAttrFilter, UsageStorageFilesystem, UsageStorageTotals, Usage
 import { agoText, ageDays, kstStampOrDash } from "../../lib/datetime";
 import { pctText } from "../../lib/sizeBuckets";
 import { INVALID_NAMES_HELP, INVALID_NAMES_LABEL } from "../../lib/scanCounters";
-import { hasAttr, useStorageTotals } from "./useUsage";
+import { hasAttr, reasonOf, useStorageTotals } from "./useUsage";
 import { attrSummary } from "./UsageFilters";
 import { HOT_AGE_MAX_DAYS, humanBytes } from "./usageStats";
 import { SizeHistogram } from "./ScanHistograms";
-import { SIZE_HELP, SectionHead, Stat } from "./UsageParts";
+import { BASE_DOWN_SHORT, SIZE_HELP, SectionHead, Stat } from "./UsageParts";
 import { staleClass } from "./TargetTable";
 
 // 스토리지 합계(2026-10-21 사용자 요청 「스토리지별 사용량 및 정보들의 총합」).
@@ -67,7 +67,9 @@ export const dfAttn = (pct: number) => Math.round(pct) >= 90;
 // 읽는 중 = 서버가 이번 호출에서 진전했고 남은 것이 있다(useStorageTotals 가 1초 뒤 다시 부른다). 응답 값만 보는 판정이다 --
 // 화면은 여기에 「재조회가 실패하지 않았다」를 더한다(StorageTotals 의 reading): 재조회가 실패하면 폴링이 멈추는데(useStorageTotals
 // -- 오류 중엔 멈춘다) 캐시에 남은 응답은 여전히 읽는 중이라 말해, 「요약 읽는 중 240개」가 아무것도 읽지 않는 동안 남았다(리뷰).
-export const isReading = (t: UsageStorageTotals) => count(t.pending_count) > 0 && t.progressed === true;
+// base 접근 불가로 멈춘 응답(unreadable_reason, 2026-11-23)도 읽는 중이 아니다 -- 이어 읽지 않는다(useUsage.storageTotalsOptions).
+export const isReading = (t: UsageStorageTotals) =>
+  count(t.pending_count) > 0 && t.progressed === true && reasonOf(t.unreadable_reason) === null;
 
 // 「값 모름」 대상 수: 지표마다의 unknown 중 가장 큰 것. 읽는 중이면 아직 안 읽은 대상(pending -- 리포트 값 모름으로 세어 있다)을
 // 따로 「요약 읽는 중」으로 말하므로 뺀다. 진전이 멈추면(재조회 실패 포함) 그것도 모름이다.
@@ -87,7 +89,8 @@ function Footnote({ t, now, reading }: { t: UsageStorageTotals; now: number; rea
     `최상위 대상 ${n(count(t.summed_target_count))}개 기준`,
     count(t.nested_target_count) > 0 && `하위 대상 ${n(count(t.nested_target_count))}개 제외`,
     count(t.invalid_target_count) > 0 && `형식이 잘못된 대상 ${n(count(t.invalid_target_count))}개 제외`,
-    unknown > 0 && `값 모름 ${n(unknown)}개`,
+    // 원인이 작업 기록 저장소 접근 불가면(2026-11-23 -- 서버가 읽기를 멈추고 남은 것을 모름으로 셌다) 그 원인을 붙인다.
+    unknown > 0 && `값 모름 ${n(unknown)}개${reasonOf(t.unreadable_reason) !== null ? BASE_DOWN_SHORT : ""}`,
     reading && `요약 읽는 중 ${n(count(t.pending_count))}개`,
     t.truncated === true && `최근 스캔된 ${n(count(t.window_limit))}개 대상 기준`,
   ];
@@ -196,7 +199,8 @@ export function StorageTotals({ storage, now, attr }: { storage: string; now: nu
   const size = t.file_size_histogram;
   // 필터 합계엔 df 가 없다(서버도 null -- 부분 집합의 파일시스템 사용량은 뜻이 없다). 서버가 실어 와도 그리지 않는다.
   const fs = filtered ? null : fsShape(t.filesystem);
-  const reading = isReading(t) && !q.isError;
+  // base 접근 불가로 멈춘 응답은 「읽는 중」이 아니다(이어 읽지 않는다 -- useStorageTotals) -- 남은 것은 「값 모름」으로 센다.
+  const reading = isReading(t) && !q.isError && reasonOf(t.unreadable_reason) === null;
   const exact = (n: number | null) => (n === null ? undefined : countText(n));
   return (<div className="space-y-3">
     {filtered && <p className="text-xs text-ink/70 [overflow-wrap:anywhere]">{`적용 필터: ${attrSummary(attr!)}`}</p>}

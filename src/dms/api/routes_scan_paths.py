@@ -14,6 +14,7 @@ from ..repositories.scan_paths import covers
 from ..repositories.storages import storage_open_to_users
 from .artifacts import ArtifactError, job_owner_uid, read_artifact, strip_scheme
 from .auth import Identity, can_run_as_root, require_user
+from .base_probe import BaseProbe
 
 router = APIRouter()
 
@@ -182,8 +183,11 @@ def scan_path_stats(path_id: int, request: Request,
         raise HTTPException(status_code=404, detail="scan_path_not_found")
     _require_unrestricted(request, identity)
     # 슬라이스 18: DB 우선 해석(설계 §2.1) -- routes_artifacts._base 와 같은 이유.
-    base = strip_scheme(resolve_artifact_base(repos.control,
-                                              request.app.state.settings))
+    uri = resolve_artifact_base(repos.control, request.app.state.settings)
+    base = strip_scheme(uri)
+    # 2026-11-23: base 접근 불가면 「커버하는 scan 없음(404)」이 거짓이다 -- base 수준 프로브(api/base_probe.py)가 실패면
+    # 남은 후보를 열지 않고 503. 멈춘 마운트면 첫 열기 전에 503(hung 단락).
+    probe = BaseProbe(request.app.state, uri)
     attempts = 0
     for job in repos.data_jobs.succeeded_scans(row["storage_name"],
                                                limit=_CANDIDATE_LIMIT):
@@ -195,12 +199,17 @@ def scan_path_stats(path_id: int, request: Request,
             continue            # 요청자 uid 없는 잡은 열지 않는다(fail-closed) -- 예산 밖
         if attempts >= _MAX_READ_ATTEMPTS:
             break               # 예산 소진: 더 뒤지지 않고 "없음"으로 답한다
+        if attempts == 0 and probe.hung():
+            raise HTTPException(status_code=503, detail="artifact_base_unavailable")
         attempts += 1
         try:
             f = read_artifact(base, job["job_id"], "execution", "dscan-report.json",
                               owner_uid=owner_uid)
         except ArtifactError:
+            if probe.down:
+                raise HTTPException(status_code=503, detail="artifact_base_unavailable")
             continue            # 이 후보는 읽을 수 없다 — 다음 후보로
+        probe.note_success()    # base 는 보였다 -- 뒤 후보의 실패는 그 파일의 일이다
         if f["truncated"]:
             # 읽기 상한을 넘은 리포트는 꼬리만 와서 JSON이 깨진다. 이걸 "커버하는
             # scan이 없다"로 뭉개면 거짓말이다 — 운영자가 고칠 수 있게 드러낸다.

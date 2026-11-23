@@ -23,7 +23,9 @@ from test_api_usage_analysis import (CEPH, FACETS, GPFS, NFS, NFS_DESC, ONEFS, T
 BREAKDOWN = "/api/admin/usage/breakdown"
 _KEYS = ["storage_name", "computed_at", "by", "requested_by", "window_limit", "window_truncated", "target_count", "scope",
          "cluster_count", "storage_total", "rows", "rows_truncated", "extras", "pending_count", "unreadable_count",
-         "progressed"]
+         "progressed",
+         # 2026-11-23: base 접근 불가로 읽기를 멈췄으면 그 원인(아니면 null) -- storage-totals 와 같은 뜻
+         "unreadable_reason"]
 _VALUE_KEYS = ["target_count", "summed_target_count", "nested_target_count", "total_bytes", "total_files", "hot_ratio",
                "oldest_scan_at", "newest_scan_at"]
 _ROW_KEYS = {"user": ["dms_user"], "requester": ["requester_id"], "namespace": ["cluster", "namespace"],
@@ -433,6 +435,9 @@ def test_requester_lookup_keeps_every_id_list_within_the_real_chunk(tmp_path, mo
     _login(client, "admin", "admin")
     repos = client.app.state.repos
     _bulk_jobs(repos.db, 1100, reports_for=0, art=art)
+    # base 자체는 보이게 둔다(2026-11-23): 없는 base 는 「base 접근 불가」라 읽기를 멈추고 pending 으로 센다(실패 기억 없음) --
+    # 이 테스트가 보는 것은 보이는 base 에서 리포트만 없는 대상의 예산·실패 기억 셈이다.
+    art.mkdir(parents=True, exist_ok=True)
     rows = repos.db.query("SELECT request_id, target FROM data_jobs ORDER BY target")
     with repos.db.transaction():
         for i, r in enumerate(rows[:550]):

@@ -357,6 +357,25 @@ test("아티팩트 목록이 실패해도(422) 로그 칩은 쓸 수 있고, 실
   await waitFor(() => expect(listCalls).toBe(2));
 });
 
+// 2026-11-23: 목록이 503(작업 기록 저장소 접근 불가)이면 종료 단계마다 「출력 없음」을 말하지 않는다 -- 아래 「불러오지
+// 못했습니다」와 모순(모름 ≠ 없음). 목록을 다시 받으면(빈 목록) 그때는 「출력 없음」이 정직하다.
+test("목록 503 이면 단계별 「출력 없음」을 숨기고 사유 문구를 보인다 -- 다시 받은 빈 목록에선 「출력 없음」", async () => {
+  let calls = 0;
+  server.use(http.get("/api/user/jobs/j1/artifacts", () => {
+    calls += 1;
+    return calls === 1
+      ? HttpResponse.json({ detail: "artifact_base_unavailable" }, { status: 503 })
+      : HttpResponse.json({ entries: [], truncated: false });
+  }));
+  renderStages({ phase_refs: {} });
+  expect(await screen.findByText(
+    /^출력 파일 목록을 불러오지 못했습니다 — 작업 기록이 저장된 공유 스토리지에 지금 접근할 수 없습니다/)).toBeInTheDocument();
+  expect(screen.queryByText("출력 없음")).toBeNull();
+  await userEvent.click(screen.getByRole("button", { name: "다시 시도" }));
+  await waitFor(() => expect(screen.queryByText(/^출력 파일 목록을 불러오지 못했습니다/)).toBeNull());
+  expect((await screen.findAllByText("출력 없음")).length).toBeGreaterThan(0);
+});
+
 test("「출력 닫기」 = 뷰어 사라짐 + 포커스는 칩으로, 그 뒤 실패로 바뀌어도 자동으로 다시 열지 않는다(touched)", async () => {
   server.use(
     http.get("/api/user/jobs/j1/artifacts", () => HttpResponse.json({ entries: [], truncated: false })),

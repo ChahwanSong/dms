@@ -59,7 +59,9 @@ def main(argv=None) -> int:
         # timeout_keep_alive(2026-11-16 입구 교체): 입구의 상류 유휴 타임아웃(Traefik 기본 idleConnTimeout 90s)보다 길어야
         # 백엔드가 프록시 풀의 유휴 연결을 먼저 닫지 않는다 -- 먼저 닫으면 그 연결에 실린 본문 있는 POST 가 502(config.py
         # DMS_API_KEEP_ALIVE_SECONDS 주석, 기본 120). Envoy 때의 BTP connectionIdleTimeout 4s 를 대체한다.
-        uvicorn.run(create_app(settings, db), host=settings.api_host,
+        # start_base_monitor: API 자체 artifact base 점검·시작 게이트(api/base_monitor.py)는 실 서버에서만 돈다 --
+        # 테스트의 create_app 은 미시작(test_cli 가 이 배선을 고정한다).
+        uvicorn.run(create_app(settings, db, start_base_monitor=True), host=settings.api_host,
                     port=settings.api_port,
                     timeout_keep_alive=settings.api_keep_alive_seconds)
         return 0

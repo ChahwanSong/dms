@@ -1,11 +1,12 @@
 import { Fragment, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useQueries, type UseQueryResult } from "@tanstack/react-query";
-import { ArrowDown, ArrowUp, ArrowUpDown } from "lucide-react";
+import { AlertTriangle, ArrowDown, ArrowUp, ArrowUpDown } from "lucide-react";
 import { Skeleton } from "../../components/ui/Skeleton";
 import { Table } from "../../components/ui/Table";
 import { agoText, ageDays, kstStampOrDash } from "../../lib/datetime";
-import { storageTotalsOptions } from "./useUsage";
+import { reasonOf, storageTotalsOptions } from "./useUsage";
+import { BASE_DOWN_TEXT } from "./UsageParts";
 import { humanBytes } from "./usageStats";
 import { storageLabel, type StorageTab } from "./usageTabs";
 import type { UsageStorageTotals } from "../../lib/types";
@@ -131,6 +132,9 @@ function CompareRow({ r, current, now }: { r: RowModel; current: boolean; now: n
   const type = tab.summary?.backend_type ?? tab.info?.backend_type ?? null;
   const bg = current ? "bg-infobg" : "bg-surface group-hover:bg-panel";
   const num = (n: number | null) => (n === null ? "—" : n.toLocaleString("ko-KR"));
+  // 이번 합계가 작업 기록 저장소 접근 불가로 멈췄다(2026-11-23) -- 「이상」(모름을 뺀 합)의 원인을 이름 옆 표식 하나로 말한다
+  // (칸마다 되풀이하지 않는다 -- 표식 title·낭독 문장이 원인, 숫자 칸의 「이상」 title 도 같은 원인).
+  const down = t !== undefined && reasonOf(t.unreadable_reason) !== null;
   const cells = (() => {
     if (t === undefined) {
       return q.isError
@@ -144,7 +148,8 @@ function CompareRow({ r, current, now }: { r: RowModel; current: boolean; now: n
     const none = isCount(t.target_count) && t.target_count === 0;
     return [
       <td key="b" className={`${TD} ${bytes === null ? "text-muted" : ""}`}
-          title={bytes !== null ? `${bytes.toLocaleString("ko-KR")} B` : none ? "아직 성공한 scan 없음" : undefined}>
+          title={bytes !== null ? `${bytes.toLocaleString("ko-KR")} B${down ? ` · ${BASE_DOWN_TEXT}` : ""}`
+            : down ? BASE_DOWN_TEXT : none ? "아직 성공한 scan 없음" : undefined}>
         {bytes === null ? "—" : humanBytes(bytes)}{partialSum(t, t.total_bytes, bytes) && MORE}</td>,
       <td key="f" className={TD}>{num(files)}{partialSum(t, t.total_files, files) && MORE}</td>,
       <td key="d" className={TD}>{num(dirs)}{partialSum(t, t.total_directories, dirs) && MORE}</td>,
@@ -167,6 +172,12 @@ function CompareRow({ r, current, now }: { r: RowModel; current: boolean; now: n
           {type !== null && <span className="shrink-0 text-xs text-muted">{type}</span>}
           {!tab.registered && (
             <span className="shrink-0 rounded border border-attn/30 bg-attnbg px-1 text-[11px] leading-4 text-attn">미등록</span>
+          )}
+          {down && (
+            <span className="relative shrink-0 text-attn" title={BASE_DOWN_TEXT}>
+              <AlertTriangle aria-hidden className="h-3.5 w-3.5" />
+              <span className="sr-only">(공유 스토리지 접근 불가 — 합계가 일부만 읽혔습니다)</span>
+            </span>
           )}
         </span>
       </td>

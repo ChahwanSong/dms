@@ -8,8 +8,10 @@ import { ApiError } from "../../lib/api";
 import type { UsageBreakdownBy, UsageScope } from "../../lib/types";
 import { SELECT_FIELD } from "../k8s/parts";
 import {
-  BREAKDOWN_API_UNKNOWN, BREAKDOWN_BYS, PV_BYS, UsageContractError, isBreakdownBy, useUsageBreakdown,
+  BREAKDOWN_API_UNKNOWN, BREAKDOWN_BYS, PV_BYS, UsageContractError, isBreakdownBy, reasonOf, useUsageBaseRecovery,
+  useUsageBreakdown,
 } from "./useUsage";
+import { BaseCheckLink, baseDownText } from "./UsageParts";
 import { useActiveStorage } from "./useActiveStorage";
 import { storageLabel, type StorageTab } from "./usageTabs";
 import { UsageHeader } from "./UsageHeader";
@@ -128,7 +130,10 @@ function BreakdownPanel({ tab, by, onBy }: {
     el?.focus({ preventScroll: true });
   }, [expanded]);
 
-  const reading = fresh !== undefined && count(fresh.pending_count) > 0 && fresh.progressed && !q.isError;
+  // base 접근 불가로 멈춘 응답(2026-11-23)은 「읽는 중」이 아니다(이어 읽지 않는다 -- breakdownOptions) -- 원인 줄이 말한다.
+  const baseReason = fresh === undefined ? null : reasonOf(fresh.unreadable_reason);
+  const reading = fresh !== undefined && count(fresh.pending_count) > 0 && fresh.progressed && !q.isError
+    && baseReason === null;
   const unknownApi = q.error instanceof UsageContractError && q.error.kind === "unknown_api";
   const errText = q.error instanceof UsageContractError || q.error instanceof ApiError ? ` — ${q.error.message}` : "";
 
@@ -151,6 +156,11 @@ function BreakdownPanel({ tab, by, onBy }: {
             <Info aria-hidden className="h-4 w-4 shrink-0" />{NO_PV_TEXT}</p>
         : <ScopeLine storage={storage} scope={data.scope} />)}
       {reading && <span className="whitespace-nowrap text-xs text-muted">{`요약 읽는 중 ${n(count(fresh!.pending_count))}개`}</span>}
+      {baseReason !== null && (
+        <p role="status" className="w-full rounded-lg border border-attn/30 bg-attnbg px-3 py-2 text-xs text-attn break-keep">
+          {`일부 대상의 최신 scan 리포트를 읽지 못해 값을 모릅니다 — ${baseDownText(baseReason)}`}{" "}<BaseCheckLink />
+        </p>
+      )}
     </div>
   );
 
@@ -245,6 +255,9 @@ function BreakdownPanel({ tab, by, onBy }: {
 
 export function BreakdownPage() {
   const [params, setParams] = useSearchParams();
+  // 작업 기록 저장소 접근 불가 사유가 캐시에 있는 동안만 health 를 보다가 복구되면 사용량 쿼리를 한 번 새로 부른다(2026-11-23 --
+  // 화면에 한 번만, useUsage 주석). 사용량 세 화면(경로별·스토리지별·소속별)은 각각 한 라우트라 화면마다 한 번이다.
+  useUsageBaseRecovery();
   const s = useActiveStorage({ purged: null });
   const { tabs, active, activeTab } = s;
   // 「권한 사용자」(기본)와 모르는 값은 생략과 같다 -- 요청·캐시를 한 벌로(서버 규칙도 같다: 생략 = PV 안이 있으면 user).

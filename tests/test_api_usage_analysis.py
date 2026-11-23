@@ -825,7 +825,9 @@ _TOTAL_KEYS = ["storage_name", "computed_at", "truncated", "window_limit", "targ
                "total_bytes", "total_files", "total_directories", "total_symlinks", "total_other", "total_entries",
                "scan_errors", "invalid_name_entries", "broken_paths_total", "hot_ratio", "file_size_histogram",
                "oldest_scan_at",
-               "newest_scan_at", "filesystem"]
+               "newest_scan_at", "filesystem",
+               # 2026-11-23: base 접근 불가로 읽기를 멈췄으면 그 원인(아니면 null) -- routes_usage._unreadable_reason
+               "unreadable_reason"]
 
 
 def _totals(client, storage="s1"):
@@ -1008,6 +1010,7 @@ def test_storage_totals_unrecorded_failure_is_not_progress(tmp_path):
     # 다시 연다(옛 동작으로 돌아갈 뿐, 끝없는 재조회는 없다).
     from dms.api.routes_usage import ReportReadFailures
     art = tmp_path / "artifacts"
+    art.mkdir()     # base 는 보이고 그 리포트만 없다(2026-11-23 -- base 자체가 없으면 pending, test_api_usage_base_unavailable)
     client = _client(tmp_path, art)
     _login(client, "admin", "admin")
     full = ReportReadFailures(cap=1)
@@ -1330,8 +1333,10 @@ _NO_FILTERS = dict.fromkeys(("cluster", "namespace", "pvc", "storage_class", "us
 
 def test_targets_envelope_echoes_filters_and_carries_pv_on_every_row(uw):
     body = _page(uw)
+    # unreadable_reason(2026-11-23): 이번 호출이 base 접근 불가로 리포트 읽기를 멈췄을 때의 원인(아니면 null)
     assert list(body) == ["rows", "matched_count", "window_limit", "window_truncated", "filters",
-                          "offset", "has_more", "pageable_count"]
+                          "offset", "has_more", "pageable_count", "unreadable_reason"]
+    assert body["unreadable_reason"] is None
     assert (body["matched_count"], body["window_limit"], body["window_truncated"]) == (8, 10000, False)
     assert (body["offset"], body["has_more"], body["pageable_count"]) == (0, False, 8)
     assert body["filters"] == {"storage": NFS, "path": None, "q": None, **_NO_FILTERS}
@@ -1399,7 +1404,7 @@ def test_requester_filter_is_per_target_and_rows_keep_their_latest(uw):
     assert _page(uw, ONEFS, requester="nobody") == {
         "rows": [], "matched_count": 0, "window_limit": 10000, "window_truncated": False,
         "filters": {"storage": ONEFS, "path": None, "q": None, **_NO_FILTERS, "requester": "nobody"},
-        "offset": 0, "has_more": False, "pageable_count": 0}
+        "offset": 0, "has_more": False, "pageable_count": 0, "unreadable_reason": None}
 
 
 def test_unsynced_cluster_makes_the_rest_unknown_and_deleted_clusters_fall_back_to_records(uw):

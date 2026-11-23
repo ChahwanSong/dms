@@ -21,9 +21,23 @@
 #
 # The artifact-base hostPath (volume dms-artifacts) is REQUIRED and read-write:
 # routes_artifact_base.py creates and unlinks a probe file under the artifact
-# base (3-hop check), and routes_artifacts.py / routes_scan_paths.py /
-# routes_usage.py read files in the requester-owned <base>/<job_id>/<phase>/
-# directories.
+# base on PUT/validate (write round-trip), and routes_artifacts.py /
+# routes_scan_paths.py / routes_usage.py read files in the requester-owned
+# <base>/<job_id>/<phase>/ directories.
+#
+# Artifact base self-check + startup gate (2026-11-23, api/base_monitor.py):
+# the api process checks the base from ITS OWN node (open dir, first dirent,
+# recent job directories exist -- an empty local directory on a node without
+# the shared mount fails as artifact_base_jobs_missing) and records it in
+# api_base_checks. /readyz holds a NEW pod unready only while a sibling dms-api
+# pod is Ready (rolling surge keeps the old healthy pod serving); once Ready it
+# never goes unready because of the base (warnings only). That relies on the
+# explicit RollingUpdate maxSurge 1 / maxUnavailable 0 below -- pinned by
+# tests/test_release_manifest_contract.py. Break-glass env (lenient parsing,
+# NOT in the shared ConfigMap): DMS_API_ARTIFACT_BASE_STARTUP_GATE=0 turns off
+# only the gate, DMS_API_ARTIFACT_BASE_CHECK_SECONDS=0 turns off the monitor.
+# DMS_NODE_NAME (downward API) labels the check with the node; without it the
+# code falls back to looking up its own pod.
 #
 # 공용 디렉터리(2026-11-03 ③, 설계 v6 3-1·3-2): 이 볼륨은 **<SHARED_DIR>/dms/artifacts 하나**만 같은 경로로 붙인다
 # (hostPath == mountPath — 제어면은 base 를 호스트 경로 문자열 그대로 연다). 여기 경로는 이미지처럼 사이트 중립
@@ -70,7 +84,9 @@
 #
 # `type: Directory` 는 <SHARED_DIR>/dms/artifacts 가 없는 노드(공용 스토리지 미마운트·S0 초기화(deploy/shared-dir-init.sh) 전)에서 이 파드를
 # 띄우지 않는다(2026-11-03 ③) -- 공용 스토리지 계약 G1 이 「모든 마스터·워커의 같은 경로」라 정상 노드에서는 늘 있다.
-# 확인은 deploy/shared-storage-probe.py(S7 동작 프로브). 실패를 DirectoryOrCreate 로 「완화」하지 마라(위 G2).
+# 확인은 deploy/shared-storage-probe.py(S7 동작 프로브). 실패를 DirectoryOrCreate 로 「완화」하지 마라(위 G2) -- 빈 로컬
+# 디렉터리는 존재·쓰기 검사에 건강해 보인다(2026-11-23 사고 모양 -- api 가 모든 잡에 「아티팩트 없음」을 냈다). 또 `Directory` 는
+# 경로가 있다는 것만 증명한다: 공용 스토리지가 그냥 로컬 디렉터리인 노드에서도 파드는 뜬다 -- 그것을 잡는 것은 위 시작 게이트다.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -78,6 +94,15 @@ metadata:
   namespace: dms
 spec:
   replicas: 1
+  # Explicit (same as the replicas-1 default today): the new pod must come up
+  # BESIDE the old one and the old one must stay until the new one is Ready --
+  # the artifact base startup gate (header) only protects a rollout because of
+  # this. Pinned by tests/test_release_manifest_contract.py.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   selector:
     matchLabels:
       app.kubernetes.io/name: dms-api
@@ -139,6 +164,13 @@ spec:
             # already sets this, listed here explicitly for visibility.
             - name: DMS_STATIC_DIR
               value: /app/static
+            # Node this pod runs on -- labels the artifact base self-check
+            # (api_base_checks, admin "mounts" page). Optional: the code falls
+            # back to looking up its own pod.
+            - name: DMS_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
           envFrom:
             - configMapRef:
                 name: dms-config

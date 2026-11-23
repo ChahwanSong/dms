@@ -1,6 +1,9 @@
 import type { LucideIcon } from "lucide-react";
 import { CircleCheck, CircleQuestionMark, CircleX, Hourglass, Lock, Minus, TriangleAlert } from "lucide-react";
-import type { CellState, MountCellData, MountDisk, SharedCellData, SharedMajority, SharedState } from "./types";
+import { reasonText } from "../../lib/api";
+import type {
+  CellState, ControlPod, MountCellData, MountDisk, MountRow, MountStatusResponse, SharedCellData, SharedMajority, SharedState,
+} from "./types";
 
 // 마운트 현황(2026-11-23)의 용어·표기 **단일 출처**(공용 코어 -- k8s 를 모른다). 칸은 색만으로 구분하지 않는다: 아이콘 + 글자 +
 // 면색. 에이전트 원문(Ready/Missing·사유 코드)은 칸에 쓰지 않고 여기서 한국어로 바꾼다 -- 원문 사유 코드는 툴팁·시트 끝에만.
@@ -198,7 +201,97 @@ export function probeModeText(mode: string | null): string {
   return mode === "host_root" ? "호스트 마운트 표" : mode;
 }
 
-export const CORE_ROLE_LABELS: Record<string, string> = { build: "빌드 노드" };
+// DMS 파드 꼬리표(2026-11-23 -- 서버 mount_status_pods). 두 라인 공용 재료라 공용 코어에 둔다(k8s 덧붙임 아님).
+export const POD_ROLE_LABELS: Record<string, string> = { api_pod: "dms-api", controller_pod: "컨트롤러" };
+export const CORE_ROLE_LABELS: Record<string, string> = { build: "빌드 노드", ...POD_ROLE_LABELS };
+export const isPodRole = (role: string): boolean => Object.prototype.hasOwnProperty.call(POD_ROLE_LABELS, role);
+
+/** 행을 「문제 있는 노드」로 세는 공용 디렉터리 상태(서버 mount_status.SHARED_PROBLEM_STATES 와 같다). */
+export const SHARED_PROBLEM_STATES: readonly SharedState[] = ["local", "differs", "missing", "read_only"];
+
+/** 이 노드의 dms-api·컨트롤러 파드가 공용 디렉터리(아티팩트 경로) 점검에 실패했는데 에이전트는 정상으로 보는 칸(2026-11-23 — dms-ssc
+ *  68dcbcdb 와 같은 원칙: 「문제 있는 노드」로 세면서 칸은 초록이면 모순이다). 파드 hostPath·마운트 전파·옛 에이전트일 수 있다. */
+export const POD_FAILED_META: StateMeta = {
+  label: "파드 점검 실패", Icon: CircleX, tone: "bad",
+  help: "이 노드의 dms-api·컨트롤러 파드가 아티팩트 경로를 점검하지 못했습니다 — 에이전트는 공용 디렉터리를 정상으로 봅니다. 파드의 "
+    + "hostPath·마운트 전파·노드의 공유 스토리지 마운트를 확인하세요(아티팩트 경로 화면에 파드별 사유).",
+};
+
+/** 공용 디렉터리 칸의 표시. 에이전트 판정이 이미 문제거나 리포트 지연이면 그대로, 아니면 파드 점검 실패(podFailed)가 칸을 덮는다
+ *  (에이전트 판정은 보조 줄). podFailed = 이 노드 파드 중 read_failed 가 있다(podsOn — 서버 mount_status_pods 와 같은 가름). */
+export function sharedDisplay(cell: SharedCellData, podFailed: boolean): { meta: StateMeta; sub: string | null; overridden: boolean } {
+  const base = SHARED_META[cell.state];
+  if (podFailed && cell.state !== "stale" && !SHARED_PROBLEM_STATES.includes(cell.state))
+    return { meta: POD_FAILED_META, sub: `에이전트: ${base.label}`, overridden: true };
+  return { meta: base, sub: sharedSub(cell), overridden: false };
+}
+
+/** 이 노드에 뜬 DMS 파드(응답의 control_pods -- 덧붙임이 없는 응답이면 빈 목록). */
+export function podsOn(data: Pick<MountStatusResponse, "control_pods">, node: string): ControlPod[] {
+  return (data.control_pods ?? []).filter((p) => p.node_name === node);
+}
+
+/** 이 노드의 DMS 파드 중 아티팩트 경로 점검이 실패한 것이 있나(공용 칸 표시 — sharedDisplay). */
+export function podFailedOn(data: Pick<MountStatusResponse, "control_pods">, node: string): boolean {
+  return podsOn(data, node).some((p) => p.read_failed);
+}
+
+/** 파드 자신의 아티팩트 경로 점검 한 마디. 권한(posture) 사유만인 실패는 경로 점검 실패와 섞지 않는다(read_failed -- 서버 판정).
+ *  read_failed 는 「읽기」만이 아니다 -- 컨트롤러 점검의 쓰기 왕복 실패(artifact_base_not_writable)도 든다 -- 그래서 글자는 중립인
+ *  「점검 실패」이고 무엇이 실패했는지는 사유 문장이 말한다(2026-11-23 이식 리뷰). */
+export function podCheckText(pod: ControlPod): string {
+  if (pod.ok === true) return "아티팩트 경로 점검 정상";
+  if (pod.ok === false) {
+    return `아티팩트 경로 ${pod.read_failed ? "점검 실패" : "권한 문제"} — ${reasonText(pod.reason) || "사유 모름"}`;
+  }
+  return "아티팩트 경로 점검 결과 모름";
+}
+
+// 시작 점검(게이트) 중 사람이 볼 상태만(아티팩트 경로 화면 ArtifactBaseChecks.gateText 의 attn 둘과 같은 뜻 -- 그 모듈은 대시보드까지
+// 끌고 와 여기서 import 하지 않는다).
+const GATE_ATTN: Record<string, string> = {
+  waiting: "시작 점검에 막혀 Ready 대기 중(서비스 밖)",
+  started_degraded: "형제 파드가 없어 점검 실패인 채 서비스 시작",
+};
+
+const podName = (p: ControlPod) => p.instance ?? POD_ROLE_LABELS[p.role] ?? p.role;
+
+/** 파드 한 줄(툴팁·시트): 「dms-api-7f9c: 아티팩트 경로 점검 실패 — … · 시작 점검에 막혀 Ready 대기 중(서비스 밖)」 */
+export function podLine(pod: ControlPod): string {
+  const gate = pod.gate_state !== null ? GATE_ATTN[pod.gate_state] : undefined;
+  return `${podName(pod)}: ${podCheckText(pod)}${gate ? ` · ${gate}` : ""}`;
+}
+
+const POD_IMPACT: Record<string, { sure: string; maybe: string }> = {
+  api_pod: { sure: "여기 뜬 dms-api 는 다른 노드가 쓴 아티팩트·scan 리포트를 읽지 못합니다(포탈에 「공유 스토리지 접근 불가」).",
+             maybe: "여기 뜬 dms-api 가 다른 노드가 쓴 아티팩트·scan 리포트를 못 볼 수 있습니다." },
+  controller_pod: { sure: "여기 뜬 컨트롤러는 작업 결과 요약을 읽지 못합니다(요약 확정이 미뤄집니다).",
+                    maybe: "여기 뜬 컨트롤러가 작업 결과 요약을 못 볼 수 있습니다." },
+};
+
+function sharedImpact(role: string, state: SharedState): string {
+  if (state === "read_only") return SHARED_META.read_only.help;
+  const impact = POD_IMPACT[role];
+  if (impact === undefined) return SHARED_META[state].help;
+  return state === "differs" ? impact.maybe : impact.sure;
+}
+
+export interface PodTagView { role: string; label: string; alert: boolean; lines: string[] }
+
+/** 행의 파드 꼬리표 하나(역할별 -- 같은 노드의 API 파드 둘은 「dms-api ×2」). alert = 이 노드의 공용 디렉터리 칸이 문제(신선한 행
+ *  -- 리포트 지연이면 지금 상태를 모른다)이거나 이 역할 파드의 경로 점검이 실패했다(read_failed) -- 「공용 디렉터리가 문제인 노드 + 거기
+ *  뜬 dms-api」가 2026-11-23 사고의 서명이다. lines = 툴팁·시트 문장(공용 디렉터리 영향 → 파드별 점검). */
+export function podTag(row: MountRow, role: string, pods: ControlPod[]): PodTagView {
+  const mine = pods.filter((p) => p.role === role);
+  const name = POD_ROLE_LABELS[role] ?? role;
+  const shared = row.fresh && row.shared_dir !== null && SHARED_PROBLEM_STATES.includes(row.shared_dir.state)
+    ? row.shared_dir.state : null;
+  const lines: string[] = [];
+  if (shared !== null) lines.push(`이 노드의 DMS 공용 디렉터리: ${SHARED_META[shared].label} — ${sharedImpact(role, shared)}`);
+  lines.push(...mine.map(podLine));
+  return { role, label: mine.length > 1 ? `${name} ×${mine.length}` : name,
+           alert: shared !== null || mine.some((p) => p.read_failed), lines };
+}
 
 /** 행 꼬리표 글자 -- 사이트 덧붙임(extra) > 공용 > 원문. */
 export function roleLabel(role: string, extra?: Record<string, string>): string {

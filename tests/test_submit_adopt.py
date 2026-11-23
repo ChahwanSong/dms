@@ -1284,12 +1284,16 @@ def test_vanished_exec_preflight_pod_terminal_reclaims_the_rm_execution_vcjob(db
     assert len(_events(repos, rid, "unrecorded_reclaimed")) == 1
 
 
-def test_successful_terminal_does_not_look_for_unrecorded_objects(db):
+def test_successful_terminal_does_not_look_for_unrecorded_objects(db, tmp_path):
     # 성공은 마지막 단계(실행)까지 ref 가 기록된 뒤에만 온다 -- 성공 종단마다 라벨 조회(목록 두 번)를 하지 않는다.
+    # base 는 보이는 디렉터리로 둔다(2026-11-23 stepper._defer_summary): 없는 base(/art)면 요약을 못 읽은 성공을 「base 접근
+    # 불가」로 보고 확정을 미뤄 Running 에 남는다 -- 이 테스트가 보는 것(성공 종단의 조회 없음)과 무관한 갈래다.
     repos = Repositories(db)
     _rid, jid = _scan_job(repos)
     k8s = _StrictK8s()
-    tick = lambda: JobStepper(repos, _volcano(repos, k8s), settings=_Settings()).run_once()[jid]  # noqa: E731
+    settings = _Settings()
+    settings.artifact_base_uri = f"file://{tmp_path}"
+    tick = lambda: JobStepper(repos, _volcano(repos, k8s), settings=settings).run_once()[jid]  # noqa: E731
     assert tick() == "Preflight"
     k8s.set_status("Pod", k8s.created[0], {"phase": "Succeeded"})
     assert tick() == "Running"

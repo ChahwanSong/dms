@@ -1,6 +1,7 @@
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
+import { MemoryRouter } from "react-router-dom";
 import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
 import { beforeAll, afterAll, afterEach, test, expect } from "vitest";
@@ -27,7 +28,8 @@ const BASE = {
 
 function wrap() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return render(<QueryClientProvider client={qc}><ArtifactBasePage /></QueryClientProvider>);
+  // 라우터: 검증 카드가 마운트 현황 화면으로 가는 링크를 단다(2026-11-23).
+  return render(<QueryClientProvider client={qc}><MemoryRouter><ArtifactBasePage /></MemoryRouter></QueryClientProvider>);
 }
 
 test("env 소스 배지 + 노드 행의 「확인 대기 중」을 실패와 구분해 렌더한다", async () => {
@@ -275,4 +277,199 @@ test("보존 0 = 자동 만료 꺼짐, 대기·지연 0 은 소음 없이 생략
   wrap();
   await screen.findByText("env 기본");
   expect(screen.queryByText("결과 파일 보존:")).toBeNull();
+});
+
+// ---- API 파드 자체 점검 · 두 관점(2026-11-23 사고: API 파드가 공유 스토리지 미마운트 노드에 떠 아티팩트를 못 읽었는데, 컨트롤러
+// 점검은 자기 노드 기준이라 정상이었다) ----
+const ago = (s: number) => new Date(Date.now() - s * 1000).toISOString();
+const API_OK = {
+  ok: true, reason: null, posture: null, source: "monitor", instance: "dms-api-7c9d-abcde", node_name: "ion2110",
+  checked_at: ago(23), fstype: "ceph", local_fs: false, interval_seconds: 60,
+  availability: { ok: true, reason: null, jobs_checked: 5, jobs_found: 5 },
+  gate: { enabled: true, state: "passed", at: ago(3600) },
+};
+const API_DOWN = {
+  ...API_OK, ok: false, reason: "artifact_base_jobs_missing", instance: "dms-api-7c9d-xyz12", node_name: "s-ssc-dms-26001",
+  fstype: "xfs", local_fs: true, availability: { ok: false, reason: "artifact_base_jobs_missing", jobs_checked: 5, jobs_found: 0 },
+};
+const CTRL_OK = { pending: false, ok: true, reason: null, checked_at: ago(10), node_name: "ion2110" };
+const withChecks = (checks: Record<string, unknown>) => ({ ...BASE, checks: { ...BASE.checks, ...checks } });
+const panel = (name: string) => screen.getByRole("region", { name });
+
+test("두 관점 패널: API 파드(파드·노드·파일시스템·확인 주기·시작 점검)와 컨트롤러(노드)를 따로 보인다", async () => {
+  server.use(http.get("/api/admin/artifact-base", () => HttpResponse.json(withChecks({ api: API_OK, controller: CTRL_OK }))));
+  wrap();
+  await screen.findByText("env 기본");
+  const api = panel("API 파드 관점");
+  expect(within(api).getByText("정상")).toBeInTheDocument();
+  expect(within(api).getByText("dms-api-7c9d-abcde")).toBeInTheDocument();
+  expect(within(api).getByText("ion2110")).toBeInTheDocument();
+  expect(within(api).getByText("ceph")).toBeInTheDocument();
+  expect(within(api).queryByText(/로컬 디스크로 보임/)).toBeNull();
+  expect(within(api).getByText(/^\d+초 전 확인 · 60초 주기$/)).toBeInTheDocument();
+  expect(within(api).getByText("· 최근 작업 기록 5/5개 확인")).toBeInTheDocument();
+  expect(within(api).getByText("통과")).toBeInTheDocument();
+  const ctrl = panel("컨트롤러 관점");
+  expect(within(ctrl).getByText("정상")).toBeInTheDocument();
+  expect(within(ctrl).getByText("ion2110")).toBeInTheDocument();
+  expect(screen.queryByRole("note")).toBeNull();                       // 엇갈림 없음
+});
+
+test("사고 모양: API 만 못 읽고 컨트롤러는 정상 -- 엇갈림 상자가 API 노드를 짚고, 로컬 디스크 주의가 뜬다", async () => {
+  server.use(http.get("/api/admin/artifact-base", () =>
+    HttpResponse.json(withChecks({ api: API_DOWN, controller: CTRL_OK }))));
+  wrap();
+  await screen.findByText("env 기본");
+  const api = panel("API 파드 관점");
+  expect(within(api).getByText("실패")).toBeInTheDocument();
+  expect(within(api).getByText(/^최근 작업의 기록 디렉터리가 이 경로에 없습니다/)).toBeInTheDocument();
+  expect(within(api).getByText("· 최근 작업 기록 0/5개 확인")).toBeInTheDocument();
+  expect(within(api).getByText(/로컬 디스크로 보임/)).toBeInTheDocument();
+  expect(screen.getByRole("note")).toHaveTextContent(
+    "API 파드(노드 s-ssc-dms-26001)만 아티팩트 경로를 읽지 못합니다. 컨트롤러(노드 ion2110)는 같은 경로를 정상으로 봅니다 — "
+    + "노드 s-ssc-dms-26001 에 공유 스토리지가 마운트돼 있는지 확인하세요");
+  expect(within(screen.getByRole("note")).getByRole("link", { name: "마운트 현황 보기" })).toHaveAttribute("href", "/admin/storages/mounts");
+  expect(screen.getByText("문제 1건")).toBeInTheDocument();
+});
+
+test("잡 확인 전에 실패하면(입출력 오류·시간 초과) 「확인할 최근 작업 없음」을 붙이지 않는다", async () => {
+  // jobs_found null 은 「확인할 잡 없음」과 「그 단계 전에 실패」 둘 다다 -- 실패 쪽에 「작업 없음」을 붙이면 거짓(2026-11-23 리뷰).
+  const unreadable = { ...API_DOWN, ok: false, reason: "artifact_base_unreadable",
+                       availability: { ok: false, reason: "artifact_base_unreadable", jobs_checked: 5, jobs_found: null } };
+  server.use(http.get("/api/admin/artifact-base", () =>
+    HttpResponse.json(withChecks({ api: unreadable, controller: CTRL_OK }))));
+  wrap();
+  await screen.findByText("env 기본");
+  const api = panel("API 파드 관점");
+  expect(within(api).getByText(/^경로를 읽을 수 없습니다/)).toBeInTheDocument();
+  expect(within(api).queryByText(/확인할 최근 작업 없음/)).toBeNull();
+  expect(within(api).queryByText(/최근 작업 기록/)).toBeNull();
+});
+
+test("반대 방향: 컨트롤러만 못 읽으면 컨트롤러 노드를 짚는다 -- 노드를 모르면 「노드 모름」", async () => {
+  server.use(http.get("/api/admin/artifact-base", () => HttpResponse.json(withChecks({
+    api: API_OK, controller: { pending: false, ok: false, reason: "artifact_base_missing", checked_at: ago(5), node_name: null },
+  }))));
+  wrap();
+  await screen.findByText("env 기본");
+  expect(screen.getByRole("note")).toHaveTextContent(
+    "컨트롤러(노드 모름)만 아티팩트 경로를 읽지 못합니다. API 파드(노드 ion2110)는 같은 경로를 정상으로 봅니다 — "
+    + "컨트롤러가 뜬 노드에 공유 스토리지가 마운트돼 있는지 확인하세요");
+  expect(within(panel("컨트롤러 관점")).getByText("모름")).toBeInTheDocument();
+});
+
+test("권한(posture) 사유는 엇갈림 상자에 넣지 않는다 -- API 는 읽기 정상 + 권한 주의, 컨트롤러 권한 실패도 마찬가지", async () => {
+  server.use(http.get("/api/admin/artifact-base", () => HttpResponse.json(withChecks({
+    api: { ...API_OK, ok: false, reason: "artifact_base_group_writable", posture: "artifact_base_group_writable" },
+    controller: { ...CTRL_OK, ok: false, reason: "artifact_base_world_writable" },
+  }))));
+  wrap();
+  await screen.findByText("env 기본");
+  const api = panel("API 파드 관점");
+  expect(within(api).getByText("주의")).toBeInTheDocument();
+  expect(within(api).getByText(/^아티팩트 경로\(base\)에 그룹 쓰기 권한/)).toBeInTheDocument();
+  expect(screen.queryByRole("note")).toBeNull();
+  // 요약은 API 를 하나로 센다(권한 문제도 문제) -- API 1 + 컨트롤러 1
+  expect(screen.getByText("문제 2건")).toBeInTheDocument();
+});
+
+test("시작 점검 문구: 대기·형제 없음·비상구·주기 점검 꺼짐(즉석 확인)", async () => {
+  const cases: [Record<string, unknown>, RegExp][] = [
+    [{ gate: { enabled: true, state: "waiting", at: null } }, /^Ready 대기 중$/],
+    [{ gate: { enabled: true, state: "started_degraded", at: null } }, /^형제 파드가 없어 점검 실패인 채 서비스 시작$/],
+    [{ gate: { enabled: false, state: "disabled", at: null } }, /^비상구로 꺼짐$/],
+    [{ gate: { enabled: false, state: "off", at: null }, source: "instant" }, /^주기 점검 꺼짐$/],
+  ];
+  for (const [over, text] of cases) {
+    server.use(http.get("/api/admin/artifact-base", () =>
+      HttpResponse.json(withChecks({ api: { ...API_OK, ...over }, controller: CTRL_OK }))));
+    const view = wrap();
+    await screen.findByText("env 기본");
+    expect(within(panel("API 파드 관점")).getByText(text)).toBeInTheDocument();
+    if (over.source === "instant") expect(within(panel("API 파드 관점")).getByText("조회 시 즉석 확인")).toBeInTheDocument();
+    view.unmount();
+  }
+});
+
+test("API 파드별 카드: 다른 파드가 있을 때만, 보고 끊김은 흐리게 -- 다른 파드의 읽기 실패도 엇갈림 상자가 짚는다", async () => {
+  const pod = (o: Record<string, unknown>) => ({
+    instance: "p", node_name: "n", uri: "file:///cephfs/dms/artifacts", ok: true, reason: null, posture: null,
+    fstype: "ceph", local_fs: false, gate_state: "passed", started_at: ago(7200), checked_at: ago(30), ready_at: ago(7100),
+    fresh: true, this_pod: false, ...o });
+  server.use(http.get("/api/admin/artifact-base", () => HttpResponse.json(withChecks({
+    api: API_OK, controller: CTRL_OK,
+    api_pods: [
+      pod({ instance: "dms-api-7c9d-abcde", node_name: "ion2110", this_pod: true }),
+      pod({ instance: "dms-api-new-q1w2e", node_name: "s-ssc-dms-26001", ok: 0, reason: "artifact_base_jobs_missing",
+            gate_state: "waiting", ready_at: null, fstype: "xfs", local_fs: true }),
+      pod({ instance: "dms-api-old-zz9", node_name: "ion2111", fresh: false }),
+    ],
+  }))));
+  wrap();
+  await screen.findByText("env 기본");
+  const self = screen.getByRole("listitem", { name: "API 파드 dms-api-7c9d-abcde" });
+  expect(within(self).getByText("이 응답")).toBeInTheDocument();
+  const waiting = screen.getByRole("listitem", { name: "API 파드 dms-api-new-q1w2e" });
+  expect(within(waiting).getByText("실패")).toBeInTheDocument();               // DB 정수 0 = 실패
+  expect(within(waiting).getByText("Ready 대기 중")).toBeInTheDocument();
+  expect(within(waiting).getByText("· Ready 전")).toBeInTheDocument();
+  expect(within(waiting).getByText(/로컬 디스크로 보임/)).toBeInTheDocument();
+  const stale = screen.getByRole("listitem", { name: "API 파드 dms-api-old-zz9" });
+  expect(stale.className).toContain("opacity-60");
+  expect(within(stale).getByText("보고 끊김")).toBeInTheDocument();
+  expect(waiting.className).not.toContain("opacity-60");
+  expect(screen.getByRole("note")).toHaveTextContent("API 파드(노드 s-ssc-dms-26001)만 아티팩트 경로를 읽지 못합니다");
+  // 요약은 다른 API 파드(fresh)의 실패도 센다 -- Ready 를 기다리는 새 파드가 실패하는데 「모두 정상」·「확인 대기」만 뜨면 아래
+  // 엇갈림 상자·카드와 모순(2026-11-23 dms-ssc 라이브 확인 — 68dcbcdb). 보고 끊긴 파드는 세지 않는다.
+  expect(screen.getByText("문제 1건")).toBeInTheDocument();
+});
+
+test("응답한 파드 하나뿐이면 파드 카드 목록을 그리지 않는다(패널과 같은 내용)", async () => {
+  server.use(http.get("/api/admin/artifact-base", () => HttpResponse.json(withChecks({
+    api: API_OK, controller: CTRL_OK,
+    api_pods: [{ instance: "dms-api-7c9d-abcde", node_name: "ion2110", uri: null, ok: true, reason: null, posture: null,
+                 fstype: null, local_fs: null, gate_state: "passed", started_at: ago(10), checked_at: ago(5), ready_at: ago(5),
+                 fresh: true, this_pod: true }],
+  }))));
+  wrap();
+  await screen.findByText("env 기본");
+  expect(screen.queryByText("API 파드별 점검")).toBeNull();
+});
+
+test("「지금 다시 점검」은 POST :recheck 이고 응답으로 화면을 바로 바꾼다", async () => {
+  let posted = 0;
+  server.use(
+    http.get("/api/admin/artifact-base", () => HttpResponse.json(withChecks({ api: API_DOWN, controller: CTRL_OK }))),
+    http.post("/api/admin/artifact-base:recheck", () => {
+      posted += 1;
+      return HttpResponse.json(withChecks({ api: API_OK, controller: CTRL_OK }));
+    }),
+  );
+  wrap();
+  await screen.findByText("env 기본");
+  expect(within(panel("API 파드 관점")).getByText("실패")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "지금 다시 점검" }));
+  await waitFor(() => expect(within(panel("API 파드 관점")).getByText("정상")).toBeInTheDocument());
+  expect(posted).toBe(1);
+  expect(screen.queryByRole("note")).toBeNull();
+});
+
+test("다시 점검 실패는 사유를 한 줄로 알린다", async () => {
+  server.use(
+    http.get("/api/admin/artifact-base", () => HttpResponse.json(BASE)),
+    http.post("/api/admin/artifact-base:recheck", () => HttpResponse.json({ detail: "http_500" }, { status: 500 })),
+  );
+  wrap();
+  await screen.findByText("env 기본");
+  await userEvent.click(screen.getByRole("button", { name: "지금 다시 점검" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent(/^다시 점검하지 못했습니다 — /);
+});
+
+test("노드 에이전트 표는 가로 넘침 래퍼 안이고, 빈 로컬 디렉터리도 정상으로 보일 수 있다는 각주와 마운트 현황 링크가 있다", async () => {
+  server.use(http.get("/api/admin/artifact-base", () => HttpResponse.json(BASE)));
+  wrap();
+  await screen.findByText("env 기본");
+  expect(screen.getByText("w1").closest("table")!.parentElement!.className).toContain("overflow-x-auto");
+  const note = screen.getByText(/존재·쓰기만 확인 — 마운트가 빠진 노드의 빈 로컬 디렉터리도 정상으로 보일 수 있음/);
+  expect(within(note).getByRole("link", { name: "마운트 현황" })).toHaveAttribute("href", "/admin/storages/mounts");
 });

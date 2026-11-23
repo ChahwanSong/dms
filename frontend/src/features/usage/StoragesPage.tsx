@@ -5,6 +5,7 @@ import type { StorageTab } from "./usageTabs";
 import { UsageHeader } from "./UsageHeader";
 import { CompareTable } from "./UsageOverview";
 import { NoStorages, sourceNotices } from "./UsageParts";
+import { useUsageBaseRecovery } from "./useUsage";
 
 // 사용량 분석 「스토리지별」(2026-10-29 사용자 결정 「권장사항대로」 -- 예전 경로별 머리말 아래 접힌 「스토리지별 비교」를 탭으로).
 // 스토리지마다 얼마나 쓰고, 파일시스템이 얼마나 찼고, 언제 쟀나 · 정리할 미등록 기록이 있나. 구성: 머리(h1 = 탭·크럼 라벨) → 알림
@@ -36,6 +37,8 @@ export function factsLine(tabs: StorageTab[]): string {
 
 export function StoragesPage() {
   const src = useStorageTabs();
+  // 복구 감시(2026-11-23, useUsage.useUsageBaseRecovery) -- 비교 표의 합계가 base 접근 불가로 멈췄으면 복구될 때 한 번 다시 부른다.
+  useUsageBaseRecovery();
   const current = readPathsMemory()?.storage ?? null;
   const notices = sourceNotices(src);
   const now = Date.now();

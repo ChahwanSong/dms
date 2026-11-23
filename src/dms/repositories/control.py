@@ -198,16 +198,16 @@ class ControlRepository:
                         {"artifact_base_uri": uri, "forced": forced,
                          "affected_jobs": affected_jobs}, actor)
 
-    def set_artifact_base_check(self, *, uri, ok, reason, now_iso=None):
+    def set_artifact_base_check(self, *, uri, ok, reason, now_iso=None, node=None):
         """컨트롤러 관점 검증 결과(설계 §2.4c) 전용 UPDATE. 주기 기록이라 감사를
-        남기지 않고(운영자 변경이 아니다), 검증 4컬럼 밖은 만지지 않는다
-        (set_artifact_base 와 같은 분리 원칙)."""
+        남기지 않고(운영자 변경이 아니다), 검증 컬럼(4 + 점검 노드, 2026-11-23) 밖은
+        만지지 않는다(set_artifact_base 와 같은 분리 원칙). node None = 모름."""
         self._db.execute(
             """UPDATE control_state SET artifact_base_check_uri = :uri,
                    artifact_base_check_ok = :ok, artifact_base_check_reason = :r,
-                   artifact_base_check_at = :at WHERE id = 1""",
+                   artifact_base_check_at = :at, artifact_base_check_node = :node WHERE id = 1""",
             {"uri": uri, "ok": 1 if ok else 0, "r": reason,
-             "at": now_iso or utc_now_iso()})
+             "at": now_iso or utc_now_iso(), "node": node})
 
     def artifact_base_history(self, limit: int = 10) -> list[dict]:
         """아티팩트 base 변경 이력(슬라이스 38) -- 감사 로그에서 artifact_base 만.

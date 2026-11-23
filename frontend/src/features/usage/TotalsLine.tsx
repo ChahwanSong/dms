@@ -7,7 +7,8 @@ import type { UsageAttrFilter, UsageStorageFilesystem, UsageStorageTotals } from
 import { agoText } from "../../lib/datetime";
 import { pctText } from "../../lib/sizeBuckets";
 import { INVALID_NAMES_HELP, INVALID_NAMES_LABEL } from "../../lib/scanCounters";
-import { UsageContractError, hasAttr, useStorageTotals } from "./useUsage";
+import { UsageContractError, hasAttr, reasonOf, useStorageTotals } from "./useUsage";
+import { BASE_DOWN_SHORT, BASE_DOWN_TEXT } from "./UsageParts";
 import { humanBytes } from "./usageStats";
 import {
   FILTER_TOTALS_HELP, StorageTotals, TOTALS_HELP, count, countText, dfAttn, fsShape, hotText, isReading, lowerBound,
@@ -212,6 +213,10 @@ export function TotalsLine({ storage, now, attr, searchQ }: {
           {`${INVALID_NAMES_LABEL} ${n(invalid)}개${lowerBound(t.invalid_name_entries, invalid) ? " 이상" : ""}`}</span>
       )}
       {reading && <span className="whitespace-nowrap text-xs text-muted">{`요약 읽는 중 ${n(count(t.pending_count))}개`}</span>}
+      {/* 작업 기록 저장소 접근 불가로 이번 합계가 읽기를 멈췄다(2026-11-23) -- 숫자의 「이상」이 왜인지 한 조각으로 말한다. */}
+      {reasonOf(t.unreadable_reason) !== null && (
+        <span className="whitespace-nowrap text-xs text-attn" title={BASE_DOWN_TEXT}>{`일부 값 모름 ${BASE_DOWN_SHORT}`}</span>
+      )}
       {searchQ !== "" && <span className="text-xs text-muted break-keep">검색은 합계에 들어가지 않습니다</span>}
       {q.isError && (
         <span className="inline-flex flex-wrap items-baseline gap-x-2 text-xs text-muted">

@@ -1,7 +1,7 @@
 // 마운트 현황 테스트 픽스처(테스트 전용 -- 앱 코드는 import 하지 않는다; k8s/k8sFixtures 선례). LIVE 는 2026-11-23 dmsk8s 라이브
 // 모양(k8s-w1·k8s-w2 × 스토리지 6, w1/cephfs-secondary·w2/cephfs-third 경로 없음, 공용 /dms_shared nfs4)이고 k8s 덧붙임 키가
 // 없다(공용 코어 = dms-ssc 모양). VARIETY 는 칸·공용·꼬리표의 모든 갈래를 한 화면에 모은다.
-import type { MountCellData, MountRow, MountStatusResponse, SharedCellData, StorageColumn } from "./types";
+import type { ControlPod, MountCellData, MountRow, MountStatusResponse, SharedCellData, StorageColumn } from "./types";
 
 export const NOW_ISO = new Date().toISOString();
 
@@ -114,4 +114,29 @@ export const NO_STORAGES: MountStatusResponse = {
   ...LIVE, storages: [],
   nodes: LIVE.nodes.map((r) => ({ ...r, cells: {} })),
   totals: { ...TOTALS, ready: 0, absent: 0 },
+};
+
+export const pod = (role: string, node: string, over: Partial<ControlPod> = {}): ControlPod => ({
+  role, instance: role === "api_pod" ? `dms-api-${node}` : null, node_name: node, ok: true, reason: null, read_failed: false,
+  checked_at: NOW_ISO, gate_state: role === "api_pod" ? "passed" : null, in_table: true, ...over,
+});
+
+// WITH_PODS: VARIETY 위에 DMS 파드 덧붙임(서버 mount_status_pods). 사고 서명 = n-broken(공용 디렉터리 로컬) 위의 dms-api(롤링 중 새 파드 --
+// 시작 점검에 막힘), n-pend 는 에이전트가 공용 디렉터리를 「있음」으로 보는데 dms-api 가 못 읽는다, 컨트롤러는 정상 노드 n-build, 표에
+// 없는 마스터 cp1 의 dms-api 는 정상·cp2 의 dms-api 는 실패.
+export const WITH_PODS: MountStatusResponse = {
+  ...VARIETY,
+  nodes: VARIETY.nodes.map((r) =>
+    r.node_name === "n-build" ? { ...r, roles: ["build", "controller_pod"] }
+    : r.node_name === "n-broken" ? { ...r, roles: ["api_pod"] }
+    : r.node_name === "n-pend" ? { ...r, roles: ["api_pod"], problem: true, problem_count: 1 }
+    : r),
+  totals: { ...VARIETY.totals, problem_nodes: 4 },
+  control_pods: [
+    pod("api_pod", "cp1", { in_table: false }),
+    pod("api_pod", "cp2", { in_table: false, ok: false, reason: "artifact_base_check_timeout", read_failed: true }),
+    pod("api_pod", "n-broken", { ok: false, reason: "artifact_base_jobs_missing", read_failed: true, gate_state: "waiting" }),
+    pod("api_pod", "n-pend", { ok: false, reason: "artifact_base_jobs_missing", read_failed: true }),
+    pod("controller_pod", "n-build"),
+  ],
 };

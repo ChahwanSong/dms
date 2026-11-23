@@ -1,5 +1,7 @@
-import { queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useCallback, useEffect, useRef, useSyncExternalStore } from "react";
+import { queryOptions, useMutation, useQuery, useQueryClient, type Query } from "@tanstack/react-query";
 import { ApiError, apiGet, apiSend } from "../../lib/api";
+import { useArtifactBaseHealth } from "../control/useArtifactBase";
 import type { PurgeStorageHistoryResult, UnregisteredStorage, UsageAttrFilter, UsageBreakdown, UsageBreakdownBy,
               UsageExport, UsageFacets, UsageFiltersEcho, UsageGroupRow, UsageHistory, UsageScope, UsageStorageTotals,
               UsageStorages, UsageTargetsPage } from "../../lib/types";
@@ -139,6 +141,35 @@ function echoMatches(echo: unknown, storage: string, attr: UsageAttrFilter, q?: 
   return ATTR_KEYS.every((k) => (e[k] ?? null) === (attr[k] ?? null));
 }
 
+// ---- 작업 기록 저장소(artifact base) 접근 불가(2026-11-23 사고) ----
+// 서버는 base 수준 점검이 실패한 요청에서만 unreadable_reason 을 싣는다(정상 경로 바이트 동일). 이 응답은 일시 장애의 산물이라
+// 캐시에 굳히지 않는다: staleTime 은 사유가 있는 캐시만 0(다음 마운트·포커스에 다시 묻는다), 데이터 쿼리 자체는 폴링하지 않는다
+// (스토리지마다·지표 정렬 창마다 서버가 DB 를 다시 돈다) -- 가벼운 health 만 보다가 복구되면 사용량 쿼리를 한 번 무효화한다
+// (useUsageBaseRecovery).
+export const reasonOf = (x: unknown): string | null => (typeof x === "string" && x !== "" ? x : null);
+// 목록 한 쪽의 사유: 최상위 값(/targets 의 unreadable_reason), 없으면 행 latest 의 키(행 키가 진실이다).
+export function pageReason(p: UsageTargetsPage | undefined): string | null {
+  if (p === undefined) return null;
+  return reasonOf(p.unreadable_reason)
+    ?? p.rows.reduce<string | null>((acc, r) => acc ?? reasonOf(r.latest?.unreadable_reason), null);
+}
+const freshFor = (ms: number, reason: string | null) => (reason !== null ? 0 : ms);
+// 사용량 쿼리 키 접두 -- 복구 때 무효화하는 범위(작업 삭제의 DELETE_REQUESTS_INVALIDATES 와 같은 접두).
+const USAGE_ROOTS = ["usage-targets", "usage-storages", "usage-history"] as const;
+function cachedReason(q: Query): string | null {
+  const d = q.state.data as unknown;
+  if (d === undefined || d === null || typeof d !== "object") return null;
+  switch (q.queryKey[0]) {
+    case "usage-targets": return pageReason(d as UsageTargetsPage);
+    case "usage-history": return reasonOf((d as UsageHistory).unreadable_reason);
+    case "usage-storages":
+      // 합계(필터 합계 포함)·소속별만 리포트를 읽는다(facets·탭 요약은 DB 만).
+      return q.queryKey[1] === "totals" ? reasonOf((d as UsageStorageTotals).unreadable_reason)
+        : q.queryKey[1] === "breakdown" ? reasonOf((d as UsageBreakdown).unreadable_reason) : null;
+    default: return null;
+  }
+}
+
 // 타깃 목록(2026-10-29 새 봉투 엔드포인트 /targets -- 옛 scan-targets 는 옛 탭 호환으로 동결): 필터가 쿼리키에 들어가 조합별로
 // 캐시된다. 4s 폴링은 불필요 -- scan 이 끝나야 목록이 변하는 저빈도 데이터라 staleTime 30s 로 왕복을 줄인다. 쿼리키의 storage 는
 // 늘 인덱스 1, 필터 조각은 끝(attrKey) -- 접두 ["usage-targets"] 무효화(작업 삭제 등)가 그대로 걸린다.
@@ -165,11 +196,13 @@ export const scanTargetsOptions = (f: TargetFilter, page = 1) => {
       return { ...page_, matched_count: typeof page_.matched_count === "number" ? page_.matched_count : null,
                window_truncated: page_.window_truncated === true,
                offset: echoed, has_more: echoed !== null && body.has_more === true,
-               pageable_count: echoed === null ? null : count(body.pageable_count) };
+               pageable_count: echoed === null ? null : count(body.pageable_count),
+               // base 접근 불가(2026-11-23): 이 요청에서 리포트 읽기를 멈췄으면 그 공개 코드, 아니면 null(옛 서버 = 키 없음 = null).
+               unreadable_reason: reasonOf(body.unreadable_reason) };
     },
     placeholderData: (prev, prevQuery) =>
       (prevQuery?.queryKey[1] === f.storage && prevQuery?.queryKey[5] === ak ? prev : undefined),
-    staleTime: 30_000,
+    staleTime: (q) => freshFor(30_000, pageReason(q.state.data)),
   });
 };
 export const useScanTargets = (f: TargetFilter, page = 1) => useQuery(scanTargetsOptions(f, page));
@@ -237,10 +270,12 @@ export const storageTotalsOptions = (storage: string, attr?: UsageAttrFilter) =>
       if (!echoMatches(body.filters, storage, a)) throw new UsageContractError("filter_mismatch");
       return body as unknown as UsageStorageTotals;
     },
-    staleTime: 30_000,
+    staleTime: (q) => freshFor(30_000, reasonOf(q.state.data?.unreadable_reason)),
+    // base 접근 불가로 멈춘 응답(unreadable_reason)은 이어 읽지 않는다 -- progressed 가 참이어도 다음 호출은 같은 벽에 부딪힌다.
     refetchInterval: (q) => {
       const d = q.state.data;
-      return q.state.status !== "error" && d !== undefined && d.pending_count > 0 && d.progressed === true ? 1_000 : false;
+      return q.state.status !== "error" && d !== undefined && d.pending_count > 0 && d.progressed === true
+        && reasonOf(d.unreadable_reason) === null ? 1_000 : false;
     },
   });
 };
@@ -298,13 +333,16 @@ export const breakdownOptions = (storage: string, by: UsageBreakdownBy | null) =
         rows: body.rows.map(row).filter((r): r is UsageGroupRow => r !== null),
         extras: { outside: row(ex.outside), unknown: row(ex.unknown), none: row(ex.none) },
         pending_count: num(body.pending_count), progressed: body.progressed === true,
+        unreadable_reason: reasonOf(body.unreadable_reason),
       };
     },
     placeholderData: (prev, prevQuery) => (prevQuery?.queryKey[2] === storage ? prev : undefined),
-    staleTime: 30_000,
+    staleTime: (q) => freshFor(30_000, reasonOf(q.state.data?.unreadable_reason)),
+    // 합계와 같다(2026-11-23): base 접근 불가로 멈춘 응답은 이어 읽지 않는다.
     refetchInterval: (q) => {
       const d = q.state.data;
-      return q.state.status !== "error" && d !== undefined && d.pending_count > 0 && d.progressed === true ? 1_000 : false;
+      return q.state.status !== "error" && d !== undefined && d.pending_count > 0 && d.progressed === true
+        && reasonOf(d.unreadable_reason) === null ? 1_000 : false;
     },
   });
 export const useUsageBreakdown = (storage: string, by: UsageBreakdownBy | null) => useQuery(breakdownOptions(storage, by));
@@ -346,8 +384,40 @@ export const useScanHistory = (storage: string | null, target: string | null,
     enabled: storage !== null && target !== null,
     placeholderData: (prev, prevQuery) =>
       (prevQuery?.queryKey[1] === storage && prevQuery?.queryKey[2] === target ? prev : undefined),
-    staleTime: 60_000,
+    staleTime: (q) => freshFor(60_000, reasonOf(q.state.data?.unreadable_reason)),
   });
+
+// 복구 감시(2026-11-23): 사용량 캐시 중 하나라도 base 접근 불가 사유를 들고 있는 동안만 health(15초, 메모리 스냅숏)를 보고, ok 가
+// 참으로 **바뀌는** 순간 사용량 쿼리를 한 번 무효화한다. 사용량 화면에서 한 번만 부른다(컴포넌트마다 부르면 관찰자마다 15초 타이머가
+// 생긴다). 「바뀜」만 보는 이유: health 는 요청을 받은 파드의 스냅숏이라 데이터를 준 파드와 다를 수 있다 -- ok 인 동안 매번
+// 무효화하면 사유가 남는 한 15초마다 데이터 쿼리를 다시 부르는 폴링이 된다. 사유가 사라지면 감시를 끄고 기억도 지운다(다음
+// 장애에서 첫 ok 를 다시 「바뀜」으로 본다).
+export function useUsageBaseRecovery(): boolean {
+  const qc = useQueryClient();
+  const cache = qc.getQueryCache();
+  const subscribe = useCallback((cb: () => void) => cache.subscribe(cb), [cache]);
+  const anyReason = useSyncExternalStore(subscribe, () =>
+    cache.findAll({ predicate: (q) => (USAGE_ROOTS as readonly unknown[]).includes(q.queryKey[0]) })
+      .some((q) => cachedReason(q) !== null));
+  const health = useArtifactBaseHealth(anyReason);
+  const prevOk = useRef<boolean | null>(null);
+  // 사유가 나타난 시각 -- 그보다 오래된 health 캐시(지난 장애의 끝에 받은 ok:true)는 보지 않는다. 안 그러면 새 장애가
+  // 시작되자마자 낡은 ok 를 「바뀜」으로 읽어 사용량 쿼리를 헛되이 한 번 다시 부른다(2026-11-23 리뷰).
+  const since = useRef<number | null>(null);
+  if (anyReason && since.current === null) since.current = Date.now();
+  if (!anyReason) since.current = null;
+  const stamp = health.dataUpdatedAt;
+  const fresh = anyReason && since.current !== null && stamp >= since.current;
+  const ok = fresh ? health.data?.ok ?? null : null;
+  useEffect(() => {
+    if (!anyReason) { prevOk.current = null; return; }
+    if (ok === true && prevOk.current !== true) {
+      for (const k of USAGE_ROOTS) void qc.invalidateQueries({ queryKey: [k] });
+    }
+    prevOk.current = ok === true ? true : ok === false ? false : prevOk.current;
+  }, [anyReason, ok, stamp, qc]);
+  return anyReason;
+}
 
 // 미등록 스토리지(2026-10-12 사용자 요청: 「미등록 스토리지 항목들은 스토리지 항목별로 전체 clean up」). 판정·규모는 서버가
 // 한다(등록 목록 로딩 여부와 무관). 목록과 같은 저빈도 데이터라 staleTime 30s.

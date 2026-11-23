@@ -41,7 +41,7 @@
 | 6 · 7 | 설치 뒤 설정(사용자에게 열기 전) · 스모크 시험 |
 | 8 · 9 | 포탈 빌드 · 포탈 릴리스 |
 | 10 · 11 | 계정·권한·인증 · 인증 메일(Knox 릴레이) |
-| 12 · 12b | 작업(요청) 삭제 · 결과 파일 자동 만료 |
+| 12 · 12b · 12e | 작업(요청) 삭제 · 결과 파일 자동 만료 · 아티팩트 경로 API 파드 점검·시작 게이트 |
 | 14 | 일상 운영·점검·문제 해결 |
 | 부록 Z | 옛 절 번호 대응 |
 
@@ -291,6 +291,7 @@
 | 사내 SSO 켜기·끄기·client secret 교체 | §6-9(·§3b) |
 | 인증 메일 | §11 |
 | 작업 삭제·결과 파일 만료 | §12·§12b |
+| 새 dms-api 파드가 Ready 안 됨·포탈 「공유 스토리지에 지금 접근할 수 없습니다」 | §12e |
 | 일상 점검·정기 작업·노드 정비·문제 해결 | §14 |
 
 ## 1. DMS 이미지 — 최초(부트스트랩)·비상 빌드 (`build-and-push.sh`)
@@ -3314,6 +3315,77 @@ positional 인자(32자 hex 가 아니면 아무것도 지우지 않고 exit 2),
   controller 가 둘 다 새 이미지여야 한다(옛 api 는 만료 표시를 모르고 404 를 낸다). 첫 배포 뒤 오래된 이력이 많으면 며칠에 걸쳐
   따라잡고, 그동안 요청 삭제 정리는 만료 행 뒤에 최대 50행만큼만 선다.
 
+## 12e. 아티팩트 경로 — API 파드 자체 점검·시작 게이트 (2026-11-23)
+
+(dms-ssc 런북에선 §12b 다 — 이 브랜치의 §12b 는 결과 파일 자동 만료라 쓰인 적 없는 번호 12e 에 둔다. §12c·§12d 는 은퇴한 번호, 부록 Z.)
+
+사고: dms-api 가 공유 스토리지(CephFS) 미마운트 노드(`/mgmt_storage` = 로컬 빈 디렉터리)에 떠 모든 잡의 아티팩트·scan 리포트를
+「없음」으로 보였는데, 아티팩트 경로 화면의 컨트롤러 점검(마운트된 다른 노드)은 정상이었다. `hostPath type: Directory` 는 경로
+**존재**만 보므로 빈 로컬 디렉터리 노드에서도 파드가 뜬다(그래서 `DirectoryOrCreate` 로 바꾸지 마라 — 40-api.yaml 헤더, §2d G2).
+
+**API 파드 자체 점검**(`api/base_monitor.py`, `dms api` 만 돈다): API 프로세스가 **자기 노드에서** 아티팩트 경로를 60초마다(첫
+성공 전 5초, 실패 중 15초) 쓰기 없이 본다 — 디렉터리 열기·첫 항목 읽기·**최근 성공 잡 디렉터리**(DB 의 최근 성공 잡 최대 5건 중
+`<base>/<job_id>` 가 하나라도 있는가 — 하나도 없으면 `artifact_base_jobs_missing` = 빈 로컬 디렉터리의 서명, 대상 잡이 0건이면
+판정 생략; 결과 파일이 **만료된** 잡(§12b — 행은 남고 디렉터리만 떼어 낸다)은 표본에서 뺀다 — 보존일을 낮춘 사이트에서 보존일 안에
+성공 잡이 없어도 거짓 실패가 나지 않게). 결과는 메모리·DB(`api_base_checks`, 파드별 1행·24시간)·이벤트(`api-artifact-base`, 상태가 바뀔 때만)·stderr 1줄에
+남는다. 컨트롤러 점검(30초)도 같은 잡 디렉터리 판정과 **점검 노드**를 더한다(`control_state.artifact_base_check_node`). **점검**
+(모니터·실패 경로 프로브·관리 화면 GET·컨트롤러 점검·stepper 요약 지연 판정)은 10초 타임아웃 single-flight 안이라 그 점검 자체가 멈춘
+마운트에 매달리지 않고, 멈춘 마운트가 감지되면 아티팩트 라우트는 파일을 열기 전에 503 을 낸다. 다만 **실제 읽기·쓰기 경로는 여전히
+base 를 직접 만진다** — 아티팩트 열람의 첫 열기(감지 전), 경로 저장·검증(PUT/validate 의 쓰기 왕복), 컨트롤러의 요약·로그 읽기. 그래서
+요약 확정 지연은 **빠진·오류 내는** base(미마운트·EIO)에서 효과가 있고, D 상태로 멈춘 CephFS 에서는 컨트롤러 루프가 요약 읽기에서
+설 수 있다(마운트부터 복구). 같은 이유로 멈춘 마운트가 **감지되기 전**(멈춘 뒤 최대 약 70초 — 점검 주기 60초 + 타임아웃 10초)의
+아티팩트·사용량·scan-stats 첫 열기는 요청 스레드를 D 상태로 묶는다 — 그 스레드가 API 스레드풀(기본 40)을 다 쓰면 `/readyz`(같은 풀)가
+굶어 NotReady 가 된다(replicas 1 이면 포탈 전체가 Service 에서 빠진다; `/healthz` 는 async 라 재시작 루프는 없다). 마운트를 복구한 뒤
+`rollout restart deploy/dms-api` 로 묶인 스레드를 버린다.
+
+**컨트롤러 노드의 base 가 비면 정리가 파일을 못 지운 채 끝날 수 있다**(알려진 위험 — 가드는 BACKLOG §4 「API 자체 artifact base 점검
+후속」). 컨트롤러가 미마운트 노드(로컬 빈 `<SHARED_DIR>/dms/artifacts`, root:root 0755)에 뜨면 작업 삭제·배치 삭제·스케줄 배치 회차
+정리·결과 파일 만료(§12·§12b)의 정리 루프가 그 빈 디렉터리에서 `<base>/<job_id>` 를 「없음」으로 보고 정리 행을 끝낸다 — 공유
+스토리지의 진짜 디렉터리는 영구 고아로 남는다(고아를 추론해 지우지 않는다). 아티팩트 경로 화면의 **컨트롤러 점검**이
+`artifact_base_jobs_missing`·`artifact_base_missing`·`artifact_base_unreadable` 이면 컨트롤러 노드의 마운트부터 복구한다(복구 전에
+정리를 멈춰야 하면 컨트롤 상태 drain — 정리 루프가 쉬지만 새 작업 실행도 멈춘다, §6-3).
+
+**시작 게이트**(`/readyz`): 새 API 파드는 아래 경우에만 Ready 를 미룬다 — (첫 점검이 아직 안 끝났고 시작 60초 이내) 또는 (마지막
+점검 실패 **이고 서비스 중인 형제 dms-api 파드가 있음**). 그래서 포탈 릴리스(롤링, `maxSurge 1 / maxUnavailable 0` — 계약 테스트
+고정)로 새 파드가 나쁜 노드에 뜨면 옛 정상 파드가 계속 서비스하고 릴리스는 `rollout_failed`/`rollout_timeout` 으로 끝난다(옛 파드
+유지). 형제가 없으면(replicas 1 의 재시작·eviction·노드 재부팅·새 설치·공유 스토리지 전체 장애) **막지 않는다** — 실패인 채
+Ready(`started_degraded`), 아티팩트 읽기만 503 이고 나머지 포탈은 산다. 한 번 Ready 가 된 파드는 런타임 실패로 내리지 않는다(경고만).
+게이트 503(`{"status":"starting"}`)은 readyz 자기 종료 카운터를 올리지 않는다. 200 본문의 `"artifact_base":"degraded"` 는 점검
+실패 표시(사유·노드는 공개 `/readyz` 에 싣지 않는다). prod 는 api 가 마스터에 선다(`patch-placement.yaml`) — 「나쁜 노드」는 공용 디렉터리
+(§2d)가 빠진 마스터다.
+
+| 확인 | 방법 |
+|---|---|
+| 지금 이 파드가 보는가 | `GET /api/admin/artifact-base/health` → `{ok, reason, checked_at, instance, node_name}`(메모리만, 포탈 폴링용) |
+| 두 관점·파드별 | `GET /api/admin/artifact-base` 의 `checks.api`(`source` monitor/instant·`availability`·`posture`·`gate.state`)·`checks.api_pods`(Ready 못 된 새 파드 포함 — `fresh`·`this_pod`)·`checks.controller.node_name` — 포탈 **운영 → 아티팩트 경로** 의 API·컨트롤러 두 패널 |
+| 지금 다시 점검 | `POST /api/admin/artifact-base:recheck`(관리자, 최대 12초 대기 후 같은 모양) — 포탈 「지금 다시 점검」 |
+| 노드 × 스토리지 | 포탈 **스토리지 → 마운트 현황**(`GET /api/admin/mount-status`, DB 만 — 에이전트 보고: 노드마다 공용 디렉터리를 덮는 마운트 지점·파일시스템 종류, 덮는 마운트가 `/` 면 「로컬」). dms-api·컨트롤러가 뜬 노드에 「dms-api」·「컨트롤러」 꼬리표(각 파드의 점검 기록 — `control_pods`), 공용 디렉터리 칸이 문제인 노드거나 그 파드의 경로 점검이 실패하면(권한 사유 제외) 꼬리표가 경고(빨강). 에이전트가 없는 노드(prod 마스터)의 파드는 각주 |
+| Ready 안 되는 새 파드 | `kubectl --context <ctx> -n dms get pods -l app.kubernetes.io/name=dms-api -o wide` 로 노드 확인 → 그 노드의 `findmnt -T <base>`(공유 스토리지가 마운트돼 있는가). 마운트하면 재시작 없이 다음 점검에서 Ready(HostToContainer 전파) |
+
+**사용자 화면**: base 접근 불가면 아티팩트 목록·보기·다운로드·scan 리포트·경로 통계는 404 대신 **503 `artifact_base_unavailable`**
+(판정은 base 수준뿐 — 파일별 errno 로 가르지 않는다). 사용량 분석(목록 `/targets`·합계·소속별·이력)은 원인(`unreadable_reason`)을 싣고,
+실패를 리포트 요약 캐시·실패 기억에 넣지 않는다(복구되면 바로 다시 읽는다). 컨트롤러 쪽이 base 를 못 보면 성공 잡의 요약 확정을 최대
+20분(vcjob TTL 의 절반 이하) 미룬다(이벤트 `summary_deferred_base_unavailable`) — 그 뒤엔 예전처럼 `summary_unavailable` 로 확정.
+
+**비상구 env**(관대 파싱 — 잘못된 값은 기본값 + stderr 경고, 기동 거부 없음. 공용 base `20-config.yaml` 엔 넣지 않는다):
+
+| env | 기본 | 뜻 |
+|---|---|---|
+| `DMS_API_ARTIFACT_BASE_STARTUP_GATE` | `1` | `0`/`false`/`off` = 시작 게이트만 끈다(점검·기록은 계속, 화면 「비상구로 꺼짐」) |
+| `DMS_API_ARTIFACT_BASE_CHECK_SECONDS` | `60` | 점검 주기(10–3600 으로 클램프). `0` = 모니터 끔(게이트도 없음 — 화면은 조회 시 즉석 점검) |
+
+넣는 곳은 §3-4 의 두 길이다(api 만 읽는다): 영구는 사이트 `patch-config.yaml` → `--only S11`(설정이 바뀌면 dms-api 를 다시 띄운다),
+임시는 `kubectl --context <ctx> -n dms edit cm dms-config` → `rollout restart deploy/dms-api`(다음 S11 이 되돌린다). `kubectl set env` 로
+넣으면 `apply -k` 가 지우지 않아 **조용히 영구**가 된다 — 쓰지 말고, 썼다면 반드시 되돌린다.
+
+매니페스트(공용 base): 40-api.yaml 에 `strategy`(명시)·`DMS_NODE_NAME`(downward API), 41-controller.yaml 에 `DMS_NODE_NAME`. 포탈
+릴리스는 이미지만 바꾸므로 이 둘은 설치기 S11(`apply -k`) 전엔 라이브에 없다 — 없어도 동작한다(노드 이름은 자기 파드 조회로 폴백,
+strategy 는 replicas 1 의 기본값과 같다). 그래서 이 버전 뒤 **첫 S11**(§9-4 의 포탈 릴리스 뒤 values 태그 맞춤 포함)은 40·41 의
+파드 템플릿이 바뀌어 dms-api·dms-controller 를 **한 번 더 롤링**한다 — dms-api 는 그 롤링에서 시작 게이트도 다시 거친다(guard-images.sh 는
+이미지·hostPath 만 비교하므로 이 apply 를 막지 않는다). 설치기가 `deploy/dms-api rollout 시간 초과` 로 멈추면 위 표의 「Ready 안 되는
+새 파드」다(`/readyz` 가 503 `{"status":"starting"}`). 마이그레이션은 자동(`api_base_checks` 테이블, `control_state.artifact_base_check_node` 칸 — 기배포
+행은 NULL = 노드 모름). 옛 이미지로 내리면 게이트·점검만 멈추고 테이블·칸은 남는다(코드 읽기 — **미검증**).
+
 ## 14. 일상 운영·점검·문제 해결
 
 ### 14-1. 헬스·점검
@@ -3321,7 +3393,8 @@ positional 인자(32자 hex 가 아니면 아무것도 지우지 않고 exit 2),
 **프로브와 엔드포인트**(`deploy/k8s/40-api.yaml`, `api/app.py create_app`)
 - `/healthz` — liveness(30초 주기). 이벤트 루프에서 바로 답한다 — DB 와 무관하다.
 - `/readyz` — readiness(10초 주기). DB 에 `SELECT 1` 을 보낸다. 실패하면 503 으로 Service 에서 빠지고, **30회 연속** 실패(약 5분)하면 프로세스가 스스로
-  끝나 재시작한다(`DMS_READYZ_EXIT_FAILURES`, 0 = 끔). 성공 본문에 재연결 횟수(`reconnects`·`last_reconnect_at`)가 있다.
+  끝나 재시작한다(`DMS_READYZ_EXIT_FAILURES`, 0 = 끔). 성공 본문에 재연결 횟수(`reconnects`·`last_reconnect_at`)가 있다. 새 파드는 아티팩트
+  경로 시작 게이트에 걸리면 503 `{"status":"starting"}`(자기 종료 카운터와 무관), 점검 실패인 채 Ready 면 본문에 `"artifact_base":"degraded"`(§12e).
 
 **설치 호스트에서**
 
@@ -3347,7 +3420,7 @@ kubectl --context <ctx> get pv | grep dms-pgdata                        # Releas
 | 관리 → 보안 이벤트 | 로그인 보호 장치의 현재 값, 인증번호 잠금, 최근 보안 이벤트·출발지 IP(§10-7) |
 | 작업 → 전체 작업 툴바 | 「배치 삭제 중 k건 · 결과 파일·파드 정리 중 N건 · 지연 M건」과 지연 사유(§12), 늘 있는 상한 줄(서버 limits — 2026-11-19). 배치가 오래 「삭제 중」이면 배치 상세 진행 카드의 지연 사유·컨트롤러 이벤트 `batch-delete`(§12 「삭제 지연」) |
 | 작업 → 배치 스케줄러 | 스케줄별 다음 실행(KST)·마지막 회차 결과·자동 일시정지 사유(실행 기록은 행의 「기록」 창 — 최근 50회). 최근 K회차 보존 안내(머리)와 「정리」 열(정리 누적 N건·마지막 시각 — 「아직 정리 없음」은 0 과 다르다, §12 「스케줄 회차 보존 정리」). 자식 요청이 배치 단위 삭제 상한(기본 50000 — `DMS_BATCH_DELETE_MAX_CHILDREN`)의 80% 이상이거나 이미 넘었으면(capped), 또는 항목 수 × 보존 회차가 상한보다 크면 경고(기본 10회차면 항목 5001개부터). 행 「삭제」는 실행 기록만 함께 지운다 — 보존 회차 셈(`batch_rounds`)과 이미 남은 작업은 그대로라 정리만 멈추고, 같은 배치에 스케줄을 다시 만들면 쌓인 회차로 곧 정리가 돈다(추가 창 「곧 정리될 작업」). 배치를 지우면 실행 기록·보존 회차 기록도 함께 지워진다 |
-| 운영 → 아티팩트 경로 | 3홉(API·컨트롤러·노드), DMS 상태 디렉터리와 겹치는 스토리지 경고, 결과 파일 보존·만료·정리 지연(§12b) |
+| 운영 → 아티팩트 경로 | API 파드(파드별 점검·시작 게이트, Ready 못 된 새 파드 포함)·컨트롤러 두 패널과 점검 노드, 엇갈림 상자·「지금 다시 점검」(§12e), 노드별 보고, DMS 상태 디렉터리와 겹치는 스토리지 경고, 결과 파일 보존·만료·정리 지연(§12b) |
 | 운영 → 릴리스 | 이미지 드리프트 배지, 「보안 설정 드리프트」(§9-8 — S11 로만 사라진다) |
 | 스토리지 → 노드 | 에이전트 보고 신선도·스토리지 상태·배치 제외 |
 | 스토리지 → k8s 연동 | 「개요」 탭: 클러스터 상태별 개수, 호출 노드 카드(마지막 호출·성공·실패). 「클러스터」 탭: 클러스터별 마지막 동기화 결과. 메일 stub 경고는 두 탭 모두(§6-5) |
@@ -3420,6 +3493,7 @@ kubectl --context <ctx> get pv | grep dms-pgdata                        # Releas
 | api·controller 로그에 EACCES, 스토리지가 `not_a_mountpoint` 로 Missing(RHEL) | SELinux enforcing | `sh deploy/install.sh --context <ctx> --only S2b`, prod README 「0. 사이트 준비」 2 |
 | ImagePullBackOff | 노드 레지스트리 신뢰(S0-4)·마스터 레지스트리 이미지 고정(S0-5)·태그 없음(S5) | §2e-2·§2e-4, `--only S6` |
 | FailedMount `<SHARED_DIR>/dms/…` | 그 노드에 공용 디렉터리 마운트가 없다, 또는 S0 전 | §2d |
+| 새 dms-api 파드가 Ready 안 됨(readyz 503 `starting`)·포탈 「작업 기록이 저장된 공유 스토리지에 지금 접근할 수 없습니다」(503 `artifact_base_unavailable`) | 그 파드의 노드가 공용 디렉터리를 못 본다(빈 로컬 디렉터리 — `artifact_base_jobs_missing`). 아티팩트 경로 화면의 API 파드 카드·`findmnt -T <base>` | §12e·§2d |
 | 포탈이 안 열린다(연결 실패·TLS 오류·404·502/503) | ① 앱부터: `kubectl --context <ctx> get --raw '/api/v1/namespaces/dms/services/http:dms-api:http/proxy/readyz'` — 실패면 앱·DB(아래 `/readyz` 행). ② 입구: `kubectl --context <ctx> -n dms get ingress dms-portal-traefik`(CLASS·HOSTS), `sh deploy/ingress-probe.sh --context <ctx> --domain <FQDN> --cacert <사내CA>`(노드마다 — NODE 근거: `TRAEFIK DEFAULT CERT` = tls 시크릿·SNI·class, 404 = Traefik 이 Ingress 를 안 집었다, 5xx = dms-api), `kubectl --context <ctx> get pods -A -o wide \| grep -i traefik`(노드마다 Ready). ③ LB: Avi 풀 멤버(Traefik 이 도는 노드 :443) — 모두 DOWN 이면 헬스 모니터(SNI·Host 없는 HTTPS 모니터는 기본 인증서 + 404 라 DOWN)·망 방화벽, 일부만이면 그 노드의 Traefik. ④ 노드 직접(ingress-probe)은 PASS 인데 VIP 경유만 TLS 가 깨진다(`wrong version number`) = LB 가 PROXY v2 를 붙이는데 Traefik websecure 에 trustedIPs 가 없다. ⑤ 인증서: `openssl s_client -connect <VIP-A>:443 -servername <FQDN> -CAfile <사내CA> </dev/null \| openssl x509 -noout -enddate`(만료 감시 없음 — §3b-2). IP 로 접속하면 기본 인증서 + 404 가 정상이다. ⑥ 본문 있는 POST 만 가끔 502 = 앱 keep-alive ≤ Traefik `idleConnTimeout`, 413 = 본문 상한(아래 행). 증상별 표는 §2g-6 「문제 해결」 | §2g-3·§2g-6·§3b-2 |
 | S1 `IngressClass … 없음`·S8 `Traefik 판정 X — …` | 클러스터에 Traefik(IngressClass controller `traefik.io/ingress-controller`·`providers.kubernetesingress`·TLS 진입점)이 없거나 이름이 다르다 — **DMS 는 Traefik 을 설치하지 않는다**. 클러스터 운영자에게(RKE2 는 `rke2-traefik`), 또는 values `INGRESS_CLASS`·`TRAEFIK_ENTRYPOINT` 를 그 Traefik 의 이름으로 | §2g-2·§2g-3 |
 | 413 `request_too_large`(포탈 「요청 본문이 서버 상한(기본 20 MiB)을 넘습니다 — …」) | 요청 본문 > `DMS_MAX_REQUEST_BODY_BYTES`(기본 20MiB) — 클러스터 안 에이전트 요청에도 걸린다. 사용자 요청이면 배치를 나눠 제출, 에이전트 요청(api 로그의 413)이면 키를 올린다 | §2g-2·§3-4 (b) |

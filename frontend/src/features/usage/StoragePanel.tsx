@@ -12,7 +12,7 @@ import type { ApiError } from "../../lib/api";
 import type { Storage, UsageAttrFilter } from "../../lib/types";
 import { downloadCsv, toCsv } from "../../lib/csvExport";
 import { UsageContractError, attrKey, cleanAttr, fetchUsageExport, hasAttr, hasNextPage, hasPvAxis, pageCountOf,
-         scanTargetsOptions, useScanTargets, useUsageFacets, usePurgeUnregisteredStorage, type TargetFilter,
+         pageReason, scanTargetsOptions, useScanTargets, useUsageFacets, usePurgeUnregisteredStorage, type TargetFilter,
          type UsageSort } from "./useUsage";
 import { buildUsageCsv, usageCsvFilename } from "./usageCsv";
 import { TargetTable, type PvDisplay } from "./TargetTable";
@@ -22,7 +22,7 @@ import { TotalsLine } from "./TotalsLine";
 import { storageLabel, type StorageTab } from "./usageTabs";
 import { UsageFilters } from "./UsageFilters";
 import { pvInside, usagePvOf } from "./usageStats";
-import { Empty } from "./UsageParts";
+import { BaseCheckLink, Empty, baseDownText } from "./UsageParts";
 
 // 스토리지 하나의 패널(2026-10-20 탭 패널 → 2026-10-29 바깥 카드 없이 페이지 바탕에 바로 -- 카드 안에 카드를 넣지 않는다). 범위 줄
 // (스토리지 select + 메타 줄)은 페이지가 위에 그린다(StorageSelect). 위에서 아래로: (미등록이면) 경고 띠 → 도구 줄(검색 · 건수 ·
@@ -251,6 +251,9 @@ export function StoragePanel({
     : pvWindowed && !searchInWindow ? `${pvRange(settled!.window_limit)} 안에서 PV 필터에 맞는 것끼리 정렬`
     : `${narrowed ? "필터에 맞는 대상 중 " : ""}최근 스캔된 ${n(settled!.window_limit)}개 안에서 정렬`;
   const failedOnly = tab.unregistered !== null && tab.unregistered.target_count === 0;
+  // 이 쪽을 읽는 동안 작업 기록 저장소(base)에 접근하지 못했다(2026-11-23) -- 몇몇 행의 파일 수·hot 이 「—」이고 용량이 (DB)인
+  // 이유를 표 위에서 한 번 말한다(행마다 되풀이하지 않는다). 자리표시(옛 쪽)의 사유는 말하지 않는다.
+  const listReason = targets.isPlaceholderData ? null : pageReason(page);
   // 기록이 하나도 없다 = 검색도 필터도 없이 빈 목록. 필터가 켜진 빈 목록은 「필터에 맞는 대상이 없다」 -- 툴바(필터 줄)를 남겨
   // 풀 수 있게 한다.
   const noRecords = page !== undefined && !targets.isPlaceholderData && rows.length === 0 && !beyond
@@ -332,6 +335,12 @@ export function StoragePanel({
           0 이면 빈 상태가 말한다(실패 기록만 남은 미등록 스토리지도 0). 미등록 스토리지는 옛 기록의 합계(df 는 없음). 필터가 켜지면 같은
           자리가 필터 합계가 된다(검색은 반영하지 않는다 -- 검색어가 있으면 줄이 그렇게 말한다). */}
       {tab.targetCount !== 0 && <TotalsLine storage={storage} now={now} attr={attr} searchQ={searchQ} />}
+
+      {listReason !== null && rows.length > 0 && (
+        <p role="status" className="rounded-lg border border-attn/30 bg-attnbg px-3 py-2 text-xs text-attn break-keep">
+          {`일부 대상의 최신 scan 리포트를 읽지 못했습니다 — ${baseDownText(listReason)}`}{" "}<BaseCheckLink />
+        </p>
+      )}
 
       {targets.isLoading || (page === undefined && !targets.isError) || (beyond && !targets.isError) ? (
         <div className="space-y-2.5 py-1">

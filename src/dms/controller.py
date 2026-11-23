@@ -4,7 +4,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable
 
-from .artifact_base import controller_check_once
+from .artifact_base import NodeNameResolver, controller_check_once
 from .artifact_expiry import INTERVAL_SECONDS as ARTIFACT_EXPIRY_INTERVAL_SECONDS, ArtifactExpirer
 from .batch_deleter import (COMPONENT as BATCH_DELETE_COMPONENT, INTERVAL_SECONDS as BATCH_DELETE_INTERVAL_SECONDS,
                             BatchDeleter)
@@ -38,6 +38,7 @@ def build_loops(settings: Settings, repos: Repositories, *,
                 execution_adapter=None, build_runner=None,
                 rollout_runner=None, purge_runner=None) -> list[Loop]:
     adapter = execution_adapter if execution_adapter is not None else StubExecutionAdapter()
+    controller_node = NodeNameResolver(rollout_runner, "app.kubernetes.io/name=dms-controller")
     pod_gc = PodGarbageCollector(repos, adapter, after_seconds=settings.pod_gc_after_seconds,
                                  build_runner=build_runner, vcjob_ttl_seconds=settings.vcjob_ttl_seconds)
 
@@ -102,9 +103,10 @@ def build_loops(settings: Settings, repos: Repositories, *,
         Loop("pod-gc", settings.pod_gc_interval_seconds, pod_gc.run_once),
         # 슬라이스 18(설계 §2.4c): 컨트롤러 관점의 아티팩트 base 검증. 간격은 새
         # 설정 키를 만들지 않고 storage-reconciler 와 같은 값을 쓴다 -- 같은
-        # "증거 신선도" 계열이고 운영자가 따로 튜닝할 값이 아니다.
+        # "증거 신선도" 계열이고 운영자가 따로 튜닝할 값이 아니다. 2026-11-23: 점검 노드도
+        # 남긴다(env DMS_NODE_NAME → 없으면 자기 파드 조회, 리졸버가 캐시 -- 루프마다 새로 만들지 않는다).
         Loop("artifact-base-check", settings.reconcile_interval_seconds,
-             lambda: controller_check_once(repos, settings)),
+             lambda: controller_check_once(repos, settings, node_name=controller_node.get())),
         # k8s 인벤토리(2026-10-25 dms-k8s 설계 §4.5, k8s_inventory.py): 에이전트가 올린 동기화 결과의 적용·기한 만료·지운
         # 클러스터 정리. DB 전용(외부 API 를 부르지 않는다) -- 틱 예산 10초 < 리스 max(10*3, 30)=30초.
         Loop("k8s-inventory", settings.k8s_inventory_interval_seconds,

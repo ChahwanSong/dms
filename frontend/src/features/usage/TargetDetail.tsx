@@ -11,9 +11,9 @@ import { kstStampEpoch, kstDay } from "../../lib/datetime";
 import { pctText } from "../../lib/sizeBuckets";
 import { HelpTip } from "../../components/ui/HelpTip";
 import { exactBytes, INVALID_NAMES_HELP, INVALID_NAMES_LABEL, invalidNamesText, scanCount } from "../../lib/scanCounters";
-import { useScanHistory } from "./useUsage";
+import { reasonOf, useScanHistory } from "./useUsage";
 import { HIST_TEMP_CAPTIONS, SizeHistogram, TempHistogram, sizeHistogramTotal } from "./ScanHistograms";
-import { PvHead, SIZE_HELP, SectionHead, Stat } from "./UsageParts";
+import { BaseCheckLink, PvHead, SIZE_HELP, SectionHead, Stat, baseDownText } from "./UsageParts";
 import {
   ATIME_APPROX_NOTE, AXIS_MEANING, HOT_AGE_MAX_DAYS, ageLabel, hotRatio, humanBytes, pointEpoch, stackLayout, tempColorOf,
 } from "./usageStats";
@@ -291,6 +291,11 @@ export function TargetDetail({ storage, target, latest, pv = null, multiCluster 
   const effectiveTempKey = tempKeys.includes(tempKey)
     ? tempKey : (tempKeys[0] ?? tempKey);
   const skipped = history.data?.skipped_unreadable ?? 0;
+  // 원인(2026-11-23): 이력 요청이 작업 기록 저장소(base)에 접근하지 못했다(서버 unreadable_reason). 최신 scan 의 「못 읽음」은 행의
+  // 키가 먼저, 없으면 이력 요청의 판정(지금 base 를 못 읽으면 그 리포트도 못 읽는다). 사유가 없으면 문구는 예전 그대로다.
+  const historyReason = reasonOf(history.data?.unreadable_reason);
+  const latestReason = reasonOf(latest?.unreadable_reason) ?? historyReason;
+  const unreadText = (text: string) => (latestReason === null ? text : `${text} — ${baseDownText(latestReason)}`);
 
   return (
     // 폭 상한 = 실 사용량 차트(TimeSeriesChart max-w-3xl) -- 소제목 줄의 컨트롤이 차트 오른쪽 끝에 맞는다.
@@ -306,11 +311,27 @@ export function TargetDetail({ storage, target, latest, pv = null, multiCluster 
       {history.isLoading ? <p className="text-sm text-muted">이력 불러오는 중…</p>
        : history.isError ? <p className="text-sm text-bad">{(history.error as ApiError).message}</p>
        : points.length === 0 ? (
-        // 리포트를 못 읽어 빠진 스캔만 있으면 「scan 이 없다」가 아니다(목록 행은 DB 용량으로 보인다) -- 그대로 말한다.
-        <p className="text-sm text-muted">{skipped > 0
-          ? `성공 scan ${skipped}건의 리포트를 읽지 못해 표시할 이력이 없습니다`
-          : "이 타깃의 성공 scan 이 없습니다"}</p>
+        // 리포트를 못 읽어 빠진 스캔만 있으면 「scan 이 없다」가 아니다(목록 행은 DB 용량으로 보인다) -- 그대로 말한다. 원인이 base
+        // 접근 불가면(2026-11-23) 그 원인과 점검 화면을 덧붙이고 실패색이다 -- 「리포트가 없다」는 영구 사실로 읽히지 않게.
+        skipped > 0 && historyReason !== null ? (
+          <p className="text-sm text-bad break-keep">
+            {`성공 scan ${skipped}건의 리포트를 읽지 못해 표시할 이력이 없습니다 — ${baseDownText(historyReason)}`}{" "}
+            <BaseCheckLink />
+          </p>
+        ) : (
+          <p className="text-sm text-muted">{skipped > 0
+            ? `성공 scan ${skipped}건의 리포트를 읽지 못해 표시할 이력이 없습니다`
+            : "이 타깃의 성공 scan 이 없습니다"}</p>
+        )
       ) : (<>
+        {/* 이력은 그려지지만 base 접근 불가로 빠진 scan 이 있다 -- 남은 점(캐시된 요약)이 「최신」처럼 보이지 않게 요약 위에서 먼저
+            말한다(사유가 없으면 아래 차트 각주 「리포트를 읽지 못한 스캔 N건 제외」로 충분하다). */}
+        {skipped > 0 && historyReason !== null && (
+          <p role="status" className="rounded-lg border border-attn/30 bg-attnbg px-3 py-2 text-xs text-attn break-keep">
+            {`최근 성공 scan ${skipped}건의 리포트를 읽지 못해 이력·최신 수치에서 빠졌습니다 — ${baseDownText(historyReason)}`}{" "}
+            <BaseCheckLink />
+          </p>
+        )}
         {/* 「최신 scan」 블록(2026-10-21 → 2026-11-16): 수치 줄 + 데이터 온도 히스토그램 + 파일 크기 분포(배치 scan 항목 펼침과 같은
             두 차트 -- 공용 ScanHistograms). 시트(640px, 2026-10-29)에선 수치 4칸 한 줄 + 차트 아래 -- 뷰포트 lg 의 나란히 배치는 시트
             폭에서 분포를 280px 로 눌렀다. sm 아래(전체 화면 시트)는 2칸. 온도 축은 아래 「데이터 온도 추이」와 한 상태다(축을 바꾸면 두
@@ -331,8 +352,10 @@ export function TargetDetail({ storage, target, latest, pv = null, multiCluster 
           </dl>
           {latestUnread ? (
             // 목록 밖 경로에서 가장 늦은 읽힌 포인트가 최신 scan 이 아니다 -- 옛 scan 의 분포를 「최신」이라 그리지 않는다.
-            <p className="text-sm text-muted break-keep">
-              최신 scan 리포트를 읽지 못했습니다 — 온도·크기 분포는 리포트를 읽은 최신 scan 이 생기면 보입니다</p>
+            // 원인이 작업 기록 저장소 접근 불가면(2026-11-23) 그 원인을 덧붙인다 -- 「리포트가 없다」는 영구 사실로 읽히지 않게.
+            <p className="text-sm text-muted break-keep">{latestReason === null
+              ? "최신 scan 리포트를 읽지 못했습니다 — 온도·크기 분포는 리포트를 읽은 최신 scan 이 생기면 보입니다"
+              : `최신 scan 리포트를 읽지 못했습니다 — ${baseDownText(latestReason)}`}</p>
           ) : (<>
             <section aria-labelledby={tempHeadId} className="min-w-0 space-y-2">
               <SectionHead id={tempHeadId} title="데이터 온도 히스토그램" help={HIST_TEMP_CAPTIONS[effectiveTempKey]}>
@@ -342,7 +365,7 @@ export function TargetDetail({ storage, target, latest, pv = null, multiCluster 
                 )}
               </SectionHead>
               <TempHistogram buckets={snap?.time_histograms[effectiveTempKey]} axis={effectiveTempKey} caption="none"
-                             emptyText={unreadable ? "최신 scan 의 리포트를 읽지 못해 온도 분포를 알 수 없습니다"
+                             emptyText={unreadable ? unreadText("최신 scan 의 리포트를 읽지 못해 온도 분포를 알 수 없습니다")
                                : "이 축의 온도 분포 기록이 없습니다"} />
             </section>
             <section aria-labelledby={sizeHeadId} className="min-w-0 space-y-2">
@@ -352,7 +375,7 @@ export function TargetDetail({ storage, target, latest, pv = null, multiCluster 
                 )}
               </SectionHead>
               <SizeHistogram buckets={snap?.file_size_histogram}
-                             emptyText={unreadable ? "최신 scan 의 리포트를 읽지 못해 크기 분포를 알 수 없습니다"
+                             emptyText={unreadable ? unreadText("최신 scan 의 리포트를 읽지 못해 크기 분포를 알 수 없습니다")
                                : "크기 분포 기록이 없습니다(구형 리포트)"} />
             </section>
           </>)}

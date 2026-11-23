@@ -199,12 +199,47 @@ def metrics_infra(request: Request):
     # live 는 유효값(슬라이스 35: DB 오버라이드 → env) -- 다음 잡이 실제로 쓸
     # 이미지다. source 를 함께 실어 프론트가 "다음 kubectl apply 가 되돌립니다"
     # 문구를 정직하게 가른다: DB 오버라이드는 apply 로 되돌아가지 않는다.
-    db_job_image = (request.app.state.repos.control.control_state() or {}).get("job_image")
+    control_row = request.app.state.repos.control.control_state() or {}
+    db_job_image = control_row.get("job_image")
     return {"components": components,
             "job_image": {"live": db_job_image or settings.job_image or None,
                           "manifest": site_image(manifest_job_image(),
                                                  settings.build_registry),
-                          "source": "db" if db_job_image else "env"}}
+                          "source": "db" if db_job_image else "env"},
+            "artifact_base": _artifact_base_summary(request, control_row)}
+
+
+def _artifact_base_summary(request: Request, row: dict) -> dict:
+    """대시보드 컴포넌트 카드의 아티팩트 경로 경고(2026-11-23) -- api 행·controller 행 아래 「실패일 때만」 한 줄. 메모리
+    (이 파드의 모니터 스냅숏)·DB(api_base_checks·control_state)만 읽는다(5초 폴링 -- FS·k8s 를 건드리지 않는다).
+    api: 이 파드의 스냅숏(없으면 null -- 모니터 미시작·첫 회차 전). api_pods_failing: **다른** 파드의 신선 행 중 ok False 인
+    수(이 파드는 api 가 말한다 -- 두 번 세지 않는다; Ready 못 된 새 파드의 실패도 센다). 읽기 실패는 그 축만 null(대시보드
+    fail-soft)."""
+    from ..artifact_base import resolve_artifact_base
+    from .base_monitor import fresh_window_seconds
+    from .routes_artifact_base import _controller_check
+    state = request.app.state
+    monitor = state.base_monitor
+    snap = monitor.snapshot()
+    api = (None if snap is None else
+           {"ok": snap["ok"], "reason": snap["reason"], "node_name": snap["node_name"],
+            "instance": monitor.instance})
+    failing = None
+    try:
+        now = utc_now_iso()
+        cutoff = iso_plus(now, -fresh_window_seconds(monitor.interval))
+        failing = sum(1 for r in state.repos.api_base_checks.list_recent(now_iso=now)
+                      if r["ok"] is False and r["instance"] != monitor.instance
+                      and (r["checked_at"] or r["started_at"]) >= cutoff)
+    except Exception as exc:       # noqa: BLE001
+        logger.warning("metrics/infra api_base_checks failed: %s", exc)
+    try:
+        controller = _controller_check(row, resolve_artifact_base(state.repos.control, state.settings))
+        controller = {k: controller[k] for k in ("pending", "ok", "reason", "node_name")}
+    except Exception as exc:       # noqa: BLE001
+        logger.warning("metrics/infra controller artifact base failed: %s", exc)
+        controller = None
+    return {"api": api, "api_pods_failing": failing, "controller": controller}
 
 
 @router.get("/api/admin/metrics/queue")

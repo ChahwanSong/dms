@@ -11,7 +11,8 @@ import posixpath
 import sys
 import time
 
-from .artifact_base import resolve_artifact_base
+from .artifact_base import (PROCESS_RUNNER, availability_check, identity_job_ids, resolve_artifact_base,
+                            strip_scheme)
 from .batch_cancel import CANCEL_MARK_EVENT, CANCEL_REASON
 from .db import iso_plus, utc_now_iso
 from .domain import (DataJobState, TERMINAL_DATA_JOB_STATES, chown_problem, destructive_operation, managed_abs_path,
@@ -27,6 +28,14 @@ from .repositories.node_exclusions import blocked_nodes, candidate_nodes
 logger = logging.getLogger(__name__)
 
 _SLOW_TICK_SECONDS = 20     # 이보다 긴 틱은 stderr 에 시간 줄을 남긴다(루프 리스 30s 앞의 경고 -- 운영 측정점)
+# 요약 확정 유한 지연(2026-11-23, _defer_summary): 성공 vcjob 의 summary.json 을 못 읽었는데 컨트롤러 쪽 base 가 「접근 불가」
+# (base 수준 판정)면 확정을 이 상한까지 미룬다. 상한은 vcjob 이 GC 되기(ttlSecondsAfterFinished = vcjob_ttl_seconds, 기본
+# 86400) 한참 **전**이어야 한다 -- GC 뒤 poll 은 FAILED(객체 없음)라 SUCCEEDED 잡이 실패로 둔갑한다. 그래서 TTL 이 있으면
+# min(20분, TTL/2). JobStepper 는 매 틱 새로 만들어져 시각·경고 표식은 모듈(프로세스 메모리)에 둔다 -- 컨트롤러가 재시작하면
+# 다시 센다(재시작마다 최대 상한 한 번 더 -- TTL/2 여유가 그 몫이다).
+SUMMARY_DEFER_MAX_SECONDS = 20 * 60
+_summary_deferrals: dict = {}      # job_id -> 처음 미룬 monotonic
+_summary_defer_warned: set = set()  # 경고 이벤트를 이미 남긴 job_id(잡마다 1회)
 
 
 def _summary_fingerprint(summary):
@@ -1339,6 +1348,14 @@ class JobStepper:
             return job["state"]
         if status == ExecStatus.SUCCEEDED:
             summary = self._exec.read_summary(ref)
+            if summary is None and self._defer_summary(job, ref):
+                # 이번 틱은 확정하지 않는다(다음 틱이 다시 읽는다 -- _defer_summary). 큐 뒤로 민다(실행 관문 보류와 같은 touch_held):
+                # claim_steppable 이 updated_at 순 10건이라, 미루는 잡이 앞자리를 차지하면 새 제출·다른 완료 잡이 상한(20분)
+                # 동안 굶는다(2026-11-23 리뷰). 지연 시계는 프로세스 메모리라 뒤로 가도 그대로 흐른다.
+                self._repos.data_jobs.touch_held(job["job_id"], expected_state=job["state"])
+                return job["state"]
+            _summary_deferrals.pop(job["job_id"], None)
+            _summary_defer_warned.discard(job["job_id"])
             if summary is None:
                 # 정상 잡은 job-runner가 summary.json을 항상 쓴다. None은 컨트롤러가
                 # artifact_base 파일시스템을 못 읽는 배포 오구성을 뜻한다 — vcjob phase가
@@ -1365,6 +1382,49 @@ class JobStepper:
         reason = self._run_failure_reason(job, "execution", ref, reason_code="execution_failed")
         self._finalize(job, DataJobState.FAILED, reason_code=reason)
         return DataJobState.FAILED.value
+
+    def summary_defer_cap(self) -> int:
+        ttl = getattr(self._settings, "vcjob_ttl_seconds", 0) or 0
+        return min(SUMMARY_DEFER_MAX_SECONDS, ttl // 2) if ttl > 0 else SUMMARY_DEFER_MAX_SECONDS
+
+    def _defer_summary(self, job, ref) -> bool:
+        """성공 vcjob 의 summary 를 못 읽었을 때 확정을 미룰지(2026-11-23). summary_unavailable 은 **영구 기록**이라 컨트롤러
+        쪽의 일시 장애(마운트 흔들림·미마운트 노드에서 재시작)가 그때 끝난 모든 잡의 요약을 영구 「없음」으로 굳힌다.
+        컨트롤러 프로세스에서 base 수준 가용성(availability_check -- 디렉터리 열기·첫 dirent·최근 잡 디렉터리, runner 10초
+        타임아웃)이 실패일 때만 미룬다 -- base 가 보이는데 이 잡의 파일만 없으면 지금처럼 확정한다. 상한
+        (summary_defer_cap)을 넘으면 지금처럼 확정한다. 경고 이벤트는 잡마다 1회(summary_deferred_base_unavailable).
+        미루는 동안 잡은 실행 상태로 남는다 -- 폴링 중인 실행 잡과 같은 모양이라(claim·pod_gc·배치 집계) 새 상태가 없다."""
+        jid = job["job_id"]
+        now = self._monotonic()
+        cap = self.summary_defer_cap()
+        if len(_summary_deferrals) > 1000:
+            # 지연 중 취소·삭제된 잡의 표식이 쌓이지 않게(그런 잡은 이 분기에 다시 오지 않는다) -- 상한 2배 지난 것을 걷는다.
+            for stale in [j for j, t in _summary_deferrals.items() if now - t > 2 * cap]:
+                _summary_deferrals.pop(stale, None)
+                _summary_defer_warned.discard(stale)
+        first = _summary_deferrals.get(jid)
+        if first is not None and now - first >= cap:
+            return False
+        uri = self._artifact_base()
+        path = strip_scheme(uri)
+        try:
+            job_ids = identity_job_ids(self._repos, self._settings, uri)
+        except Exception:       # noqa: BLE001 -- 잡 판정만 생략(디렉터리 열기는 그대로)
+            job_ids = []
+        result = PROCESS_RUNNER.run(("stepper", path), lambda: availability_check(path, job_ids))
+        reason = None if result.get("ok") is True else result.get("reason")
+        if reason is None:
+            return False
+        if first is None:
+            _summary_deferrals[jid] = now
+        if jid not in _summary_defer_warned:
+            _summary_defer_warned.add(jid)
+            self._repos.observability.record_event(
+                component="stepper", severity="warning",
+                event_type="summary_deferred_base_unavailable",
+                payload={"ref": ref, "reason": reason, "defer_max_seconds": cap},
+                request_id=job.get("request_id"))
+        return True
 
     def _submit_preview(self, job):
         try:

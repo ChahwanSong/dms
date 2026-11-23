@@ -4,7 +4,9 @@ import { Info } from "lucide-react";
 import { Skeleton } from "../../components/ui/Skeleton";
 import type { ApiError } from "../../lib/api";
 import type { UsageAttrFilter } from "../../lib/types";
-import { ATTR_KEYS, PAGE_MAX, USAGE_SORTS, cleanAttr, usePurgeUnregisteredStorage, type UsageSort } from "./useUsage";
+import {
+  ATTR_KEYS, PAGE_MAX, USAGE_SORTS, cleanAttr, usePurgeUnregisteredStorage, useUsageBaseRecovery, type UsageSort,
+} from "./useUsage";
 import { useActiveStorage } from "./useActiveStorage";
 import { storageLabel } from "./usageTabs";
 import { rememberPaths } from "./usageMemory";
@@ -121,6 +123,9 @@ export function UsageAnalysis() {
   const purgedName = purge.isPending || purge.isSuccess ? purge.variables?.storage_name ?? null : null;
   const s = useActiveStorage({ purged: purgedName });
   const { tabs, active, activeTab } = s;
+  // 작업 기록 저장소 접근 불가 사유가 캐시에 있는 동안만 health 를 보다가 복구되면 사용량 쿼리를 한 번 새로 부른다(2026-11-23 --
+  // 화면에 한 번만, useUsage 주석).
+  useUsageBaseRecovery();
   const [progress, setProgress] = useState<number | null>(null);
   const resultRef = useRef<HTMLDivElement>(null);
   const focusResult = () => resultRef.current?.focus();

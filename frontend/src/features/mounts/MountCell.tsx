@@ -4,11 +4,11 @@ import { TriangleAlert } from "lucide-react";
 import { agoText, kstStamp } from "../../lib/datetime";
 import { PlacementBadges } from "../nodes/NodePlacement";
 import {
-  CELL_META, SHARED_META, TONE_CLASS, cellHelp, cellIcon, cellLabel, cellMounted, cellSub, coverText, roleLabel, sharedHelp,
-  sharedSub, usageDetail, writableText, yesNo,
+  CELL_META, SHARED_META, TONE_CLASS, cellHelp, cellIcon, cellLabel, cellMounted, cellSub, coverText, isPodRole, podTag,
+  roleLabel, sharedHelp, sharedDisplay, sharedSub, usageDetail, writableText, yesNo,
 } from "./mountTerms";
-import type { Tone } from "./mountTerms";
-import type { MountCellData, MountRow, SharedCellData, SharedMajority, StorageColumn } from "./types";
+import type { PodTagView, Tone } from "./mountTerms";
+import type { ControlPod, MountCellData, MountRow, SharedCellData, SharedMajority, StorageColumn } from "./types";
 
 // 마운트 현황의 잎 부품(공용 코어 -- features/k8s 를 import 하지 않는다: dms-ssc 에는 그 디렉터리가 없다). 칸 칩·꼬리표·툴팁 내용.
 
@@ -57,9 +57,8 @@ export function MountCellChip({ cell, className = "", ...rest }: { cell: MountCe
 const metaTone = (cell: MountCellData): Tone => CELL_META[cell.state].tone;
 
 /** DMS 공용 디렉터리 칸. */
-export function SharedCellChip({ cell, className = "", ...rest }: { cell: SharedCellData } & SpanProps) {
-  const meta = SHARED_META[cell.state];
-  const sub = sharedSub(cell);
+export function SharedCellChip({ cell, podFailed = false, className = "", ...rest }: { cell: SharedCellData; podFailed?: boolean } & SpanProps) {
+  const { meta, sub } = sharedDisplay(cell, podFailed);
   return (
     <span className={`inline-flex flex-col items-center gap-0.5 ${className}`} {...rest}>
       <StateChip Icon={meta.Icon} label={meta.label} tone={meta.tone} />
@@ -69,7 +68,8 @@ export function SharedCellChip({ cell, className = "", ...rest }: { cell: Shared
 }
 
 /** 문제 노드 꼬리표(행 머리의 노드 이름 옆 -- 표의 고정 첫 열이라 가로로 민 표에서도, 「문제 있는 노드」 필터를 켜지 않아도 보인다).
- *  수 = 서버 problem_count(마운트 문제 + 다른 노드와 다른 읽기 전용 + 공용 디렉터리 문제), 리포트 지연은 「지연」(지금 상태 모름 --
+ *  수 = 서버 problem_count(마운트 문제 + 다른 노드와 다른 읽기 전용 + 공용 디렉터리 문제 -- 이 노드 DMS 파드의 경로 점검 실패도
+ *  공용 디렉터리 한 칸으로 센다, 서버 mount_status_pods), 리포트 지연은 「지연」(지금 상태 모름 --
  *  null ≠ 0). 아이콘 + 글자(색만으로 구분하지 않는다). showStale=false 면 지연 행에는 그리지 않는다(같은 머리에 「리포트 지연」 칩이
  *  이미 있는 노드별 카드). */
 export function ProblemTag({ row, showStale = true }: { row: MountRow; showStale?: boolean }) {
@@ -78,7 +78,8 @@ export function ProblemTag({ row, showStale = true }: { row: MountRow; showStale
   if (count === null && !showStale) return null;
   return (
     <span title={count === null ? "리포트 지연 — 지금 마운트 상태를 모릅니다"
-                 : `문제 ${count}건 — 마운트 문제·다른 노드와 다른 읽기 전용·DMS 공용 디렉터리 문제`}
+                 : `문제 ${count}건 — 마운트 문제·다른 노드와 다른 읽기 전용·DMS 공용 디렉터리 문제(이 노드의 dms-api·컨트롤러가 `
+                   + "경로를 못 읽는 것 포함)"}
           className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-md bg-badbg px-1.5 py-0.5 text-[11px]
                      font-semibold text-bad">
       <TriangleAlert className="h-3 w-3 shrink-0" aria-hidden />
@@ -87,8 +88,25 @@ export function ProblemTag({ row, showStale = true }: { row: MountRow; showStale
   );
 }
 
-/** 행 꼬리표: 배치 제외·cordon·일시 불가(노드 화면과 같은 배지) → control-plane → 역할 → 클러스터에 없음. 없으면 null. */
-export function NodeTags({ row, roleLabels }: { row: MountRow; roleLabels?: Record<string, string> }) {
+/** DMS 파드 꼬리표(dms-api·컨트롤러). 경고(공용 디렉터리가 문제인 노드 또는 파드가 경로를 못 읽음)면 빨간 면 + 아이콘 + 화면 낭독용
+ *  「경고」 -- 색만으로 구분하지 않는다. 문장은 title(마우스)과 노드 시트(키보드)에 같은 것을 싣는다(mountTerms.podTag). */
+export function PodTag({ view }: { view: PodTagView }) {
+  const title = view.lines.join("\n") || undefined;
+  if (!view.alert) return <Chip tone="info" title={title}>{view.label}</Chip>;
+  return (
+    <Chip tone="bad" title={title}>
+      <TriangleAlert className="mr-0.5 h-3 w-3 shrink-0" aria-hidden />
+      <span className="sr-only">경고: </span>
+      {view.label}
+    </Chip>
+  );
+}
+
+/** 행 꼬리표: 배치 제외·cordon·일시 불가(노드 화면과 같은 배지) → control-plane → 역할 → 클러스터에 없음. 없으면 null.
+ *  pods = 이 노드에 뜬 DMS 파드(mountTerms.podsOn) -- api_pod·controller_pod 꼬리표의 경고·문장 재료. */
+export function NodeTags({ row, roleLabels, pods = [] }: {
+  row: MountRow; roleLabels?: Record<string, string>; pods?: ControlPod[];
+}) {
   const node = { report: { k8s_node: row.k8s_node }, exclusion: row.exclusion };
   const any = row.exclusion !== null || row.k8s_node !== null || row.control_plane === true || row.roles.length > 0
     || row.in_cluster === false;
@@ -97,8 +115,9 @@ export function NodeTags({ row, roleLabels }: { row: MountRow; roleLabels?: Reco
     <span className="flex flex-wrap items-center gap-1">
       <PlacementBadges node={node} />
       {row.control_plane === true && <Chip title="k8s control-plane 노드">control-plane</Chip>}
-      {row.roles.map((role) => (
-        <Chip key={role} tone={roleLabels?.[role] !== undefined ? "info" : "neutral"}>{roleLabel(role, roleLabels)}</Chip>
+      {row.roles.map((role) => (isPodRole(role)
+        ? <PodTag key={role} view={podTag(row, role, pods)} />
+        : <Chip key={role} tone={roleLabels?.[role] !== undefined ? "info" : "neutral"}>{roleLabel(role, roleLabels)}</Chip>
       ))}
       {row.in_cluster === false && (
         <Chip tone="warn" title="k8s 노드 목록에 없습니다 — 퇴역한 노드의 옛 보고일 수 있습니다">클러스터에 없음</Chip>
@@ -142,16 +161,18 @@ export function MountTipBody({ nodeName, col, cell, reportedAt, nowMs }: {
 }
 
 /** 공용 디렉터리 칸 툴팁 내용. */
-export function SharedTipBody({ nodeName, path, cell, majority, reportedAt, nowMs }: {
+export function SharedTipBody({ nodeName, path, cell, majority, reportedAt, nowMs, podFailed = false }: {
   nodeName: string; path: string; cell: SharedCellData; majority: SharedMajority | null; reportedAt: string; nowMs: number;
+  podFailed?: boolean;
 }) {
-  const meta = SHARED_META[cell.state];
+  const { meta, overridden } = sharedDisplay(cell, podFailed);
   const ago = agoText(reportedAt, nowMs);
   return (
     <div className="max-w-xs space-y-1.5">
       <div className="font-semibold [overflow-wrap:anywhere]">{`${nodeName} · DMS 공용 디렉터리`}</div>
       <StateChip Icon={meta.Icon} label={meta.label} tone={meta.tone} />
-      <p>{sharedHelp(cell, majority, ago)}</p>
+      {overridden && <p>{meta.help}</p>}
+      <p>{overridden ? `에이전트 보고: ${sharedHelp(cell, majority, ago)}` : sharedHelp(cell, majority, ago)}</p>
       <Dl>
         <Dt>경로</Dt><dd className="font-mono break-all">{path}</dd>
         {cell.reported_path !== null && cell.reported_path !== path && (

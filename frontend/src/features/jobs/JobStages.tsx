@@ -249,6 +249,9 @@ interface RowCtx {
   listLoading: boolean;
   /** 결과 파일이 보존 기간이 지나 지워졌다 -- 출력 칩이 없는 끝난 단계에 「출력 없음」 대신 「결과 파일 만료됨」. */
   expired: boolean;
+  // 목록 조회가 실패했고 보일 데이터도 없다(2026-11-23 -- 503 artifact_base_unavailable 등). 그때 단계마다 「출력 없음」을
+  // 말하면 아래 「출력 파일 목록을 불러오지 못했습니다」와 모순이다(모름 ≠ 없음).
+  listFailed: boolean;
   onSelect: (slot: NavSlot, key: string) => void;
   onClose: (slot: NavSlot) => void;
   chipRef: (key: string, el: HTMLButtonElement | null) => void;
@@ -284,7 +287,7 @@ function StepRow({ step, items, notes, last, ctx }: {
         {items.length > 0 ? (
           <OutputChips label={STEP_COPY[step.id]} items={items} slot={ctx.slot} selectedKey={ctx.selectedKey}
                        live={live} onSelect={ctx.onSelect} chipRef={ctx.chipRef} viewerId={ctx.viewerId} />
-        ) : ended && !ctx.listLoading ? (
+        ) : ended && !ctx.listLoading && !ctx.listFailed ? (
           // 만료된 잡의 빈 단계는 「출력 없음」이 아니다 -- 출력이 있었는데 보존 기간이 지나 지웠다(전체 사유는 카드 아래 줄).
           <p className="mt-1 text-xs text-ink/70">{ctx.expired ? "결과 파일 만료됨" : "출력 없음"}</p>
         ) : null}
@@ -468,6 +471,7 @@ export function JobStages({ job, events, jobCount = 1, refIso, batchChild = fals
   // 결과 파일 자동 만료(2026-10-26): 목록 응답(만료 표시 + 지금 보존일)이 우선, 아직 안 왔으면 잡 행의 표시. 잡의 나머지
   // (단계·요약·사유·로그 칩)는 그대로 그린다 -- 지운 것은 파일뿐이다.
   const expiredAt = artifacts.data?.expired_at ?? job.artifacts_expired_at ?? null;
+  const listFailed = artifacts.isError && !artifacts.data;
   const onClose = (slot: NavSlot) => {
     const key = nav.selected[slot];
     nav.close(slot);
@@ -476,7 +480,7 @@ export function JobStages({ job, events, jobCount = 1, refIso, batchChild = fals
   };
   const ctxFor = (slot: NavSlot): RowCtx => ({
     job, model, refIso, slot, selectedKey: nav.selected[slot], viewerId: viewerId(slot),
-    entrySize, listLoading, expired: expiredAt !== null, onSelect: nav.select, onClose, chipRef,
+    entrySize, listLoading, expired: expiredAt !== null, listFailed, onSelect: nav.select, onClose, chipRef,
   });
 
   const renderSteps = (stage: StageModel) => {

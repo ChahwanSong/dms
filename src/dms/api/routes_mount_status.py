@@ -4,7 +4,9 @@
 계약이다(/api/user/storages). 읽기 전용이라 세션 관리자(require_session_admin)는 필요 없다.
 
 판정·집계는 mount_status(공용 코어 -- dms-ssc 와 같은 계약)가 하고, dms-k8s 덧붙임(스토리지 종류·PV 수·k8s 호출 노드)은
-mount_status_k8s.decorate 한 줄이다(dms-ssc 로 옮길 때 그 줄만 지운다). 포탈이 기존 GET 들을 엮지 않고 이 투영을 따로 두는
+mount_status_k8s.decorate 한 줄이다(dms-ssc 로 옮길 때 그 줄만 지운다). DMS 파드 꼬리표(dms-api·컨트롤러가 뜬 노드 + 그 파드
+자신의 아티팩트 경로 점검 -- 최상위 control_pods)는 mount_status_pods.decorate 다: 재료는 DB 만(api_base_checks·control_state --
+요청마다 k8s API 를 부르지 않는다)이고 dms-ssc 에도 같은 재료가 있어 두 라인 공용이다. 포탈이 기존 GET 들을 엮지 않고 이 투영을 따로 두는
 이유: 에이전트가 없는 k8s 노드·control-plane 여부·PV 수처럼 서버만 아는 재료가 있고, 열 머리 숫자를 스토리지 목록 상태와 같은
 코드(reconciler.summarize_mount_statuses)로 세며, 노드 보고 전체를 10초마다 내려보내지 않는다.
 
@@ -16,10 +18,11 @@ import time
 
 from fastapi import APIRouter, Depends, Request
 
-from .. import mount_status, mount_status_k8s
+from .. import mount_status, mount_status_k8s, mount_status_pods
 from ..artifact_base import resolve_artifact_base, state_root_of, strip_scheme
-from ..db import utc_now_iso
+from ..db import iso_plus, utc_now_iso
 from .auth import require_admin
+from .base_monitor import fresh_window_seconds
 
 logger = logging.getLogger(__name__)
 
@@ -51,12 +54,14 @@ def _cluster_nodes(request: Request):
 def get_mount_status(request: Request):
     settings = request.app.state.settings
     repos = request.app.state.repos
+    now = utc_now_iso()
     nodes = repos.agents.list_nodes(stale_seconds=settings.agent_report_stale_seconds)
     storages = repos.storages.list()
     exclusions = {r["node_name"]: r for r in repos.node_exclusions.list()}
     base_uri = resolve_artifact_base(repos.control, settings)
     base_path = strip_scheme(base_uri) if base_uri else None
-    build_node = (repos.control.control_state() or {}).get("build_node_name")
+    control = repos.control.control_state() or {}
+    build_node = control.get("build_node_name")
     node_list, reason, observed_at = _cluster_nodes(request)
     body = mount_status.build(nodes, storages, exclusions=exclusions, artifact_base_path=base_path or None,
                               state_root=state_root_of(base_uri), build_node=build_node, node_list=node_list)
@@ -64,6 +69,14 @@ def get_mount_status(request: Request):
     mount_status_k8s.decorate(body, storages=storages, k8s_settings=repos.k8s.get_settings(),
                               pv_index=repos.k8s.pv_root_index, maps_for_storage=repos.k8s.maps_for_storage,
                               unsynced=repos.k8s.unsynced_cluster_exists())
+    # DMS 파드 꼬리표(두 라인 공용 -- mount_status_pods). 신선 창은 관리 화면의 API 파드 목록(routes_artifact_base._api_pods)과
+    # 같은 fresh_window_seconds 라 두 화면이 「지금 떠 있는 파드」를 다르게 세지 않는다.
+    api_window = fresh_window_seconds(settings.api_artifact_base_check_seconds)
+    pods = mount_status_pods.pods_from(
+        repos.api_base_checks.list_recent(now_iso=now, within_seconds=api_window), control, base_uri=base_uri,
+        api_cutoff=iso_plus(now, -api_window),
+        controller_cutoff=iso_plus(now, -mount_status_pods.controller_fresh_seconds(settings.reconcile_interval_seconds)))
+    mount_status_pods.decorate(body, pods)
     body["cluster"].update(reason=reason, observed_at=observed_at)
-    return {"generated_at": utc_now_iso(), "stale_seconds": settings.agent_report_stale_seconds,
+    return {"generated_at": now, "stale_seconds": settings.agent_report_stale_seconds,
             "report_interval_seconds": settings.agent_report_interval_seconds, **body}

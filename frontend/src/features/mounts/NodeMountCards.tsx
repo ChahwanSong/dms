@@ -1,7 +1,7 @@
 import { agoText, kstStamp } from "../../lib/datetime";
 import { useNow } from "../../lib/useNow";
 import { Chip, MountCellChip, NodeTags, ProblemTag, SharedCellChip } from "./MountCell";
-import { CELL_META, SHARED_META, cellAriaLabel, cellLabel } from "./mountTerms";
+import { CELL_META, cellAriaLabel, cellLabel, podFailedOn, podsOn, sharedDisplay } from "./mountTerms";
 import type { CellState, MountRow, MountStatusResponse } from "./types";
 
 // 좁은 화면(390·375)의 노드별 카드(2026-11-23). 표를 CSS 로 숨기지 않고 이 보기를 **조건부로** 그린다(MountStatusPage) -- 숨은 표가
@@ -48,7 +48,7 @@ export function NodeMountCards({ data, rows, roleLabels, onOpenNode, registerBut
                   </button>
                   <ProblemTag row={row} showStale={false} />
                 </div>
-                <NodeTags row={row} roleLabels={roleLabels} />
+                <NodeTags row={row} roleLabels={roleLabels} pods={podsOn(data, row.node_name)} />
               </div>
               <span className="whitespace-nowrap text-xs" title={kstStamp(row.reported_at)}>
                 {row.fresh
@@ -60,8 +60,9 @@ export function NodeMountCards({ data, rows, roleLabels, onOpenNode, registerBut
               {data.shared_dir !== null && row.shared_dir !== null && (
                 <div className={LINE}>
                   <span className="text-xs text-muted">DMS 공용</span>
-                  <SharedCellChip cell={row.shared_dir}
-                                  aria-label={cellAriaLabel(row.node_name, "DMS 공용", SHARED_META[row.shared_dir.state].label)} />
+                  <SharedCellChip cell={row.shared_dir} podFailed={podFailedOn(data, row.node_name)}
+                                  aria-label={cellAriaLabel(row.node_name, "DMS 공용",
+                                    sharedDisplay(row.shared_dir, podFailedOn(data, row.node_name)).meta.label)} />
                 </div>
               )}
               {odd.map(({ col, cell }) => (

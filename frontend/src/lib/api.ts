@@ -416,6 +416,13 @@ export const REASON_MESSAGES: Record<string, string> = {
   // g+w·ACL 쓰기 항목은 world-writable 과 같은 위험이다(그 그룹 사용자가 다른 작업의 기록을 바꿔치기 -- 2026-10-07 D6). 3홉
   // 검증·저장에서 나온다(옛 보조 그룹 잡의 preflight 마커도 같은 코드). 고칠 사람은 관리자라 처방을 관리자 몫으로 적는다.
   artifact_base_group_writable: "아티팩트 경로(base)에 그룹 쓰기 권한(또는 ACL 쓰기 항목·기본 ACL)이 있어 작업 계정이 쓸 수 있습니다 — 관리자: chmod g-w, setfacl -b -k (root:root 755 또는 711)",
+  // API 파드 자체 점검(2026-11-23 사고 — dms-api 가 CephFS 미마운트 노드에 떠 아티팩트를 못 읽었는데 「없음」으로만
+  // 보였다). unavailable 은 아티팩트·리포트 읽기 응답(503)의 공개 코드 — base 수준 점검(모든 잡에 공통)으로만 판정한다.
+  // 나머지 셋은 점검 사유(관리 화면·이벤트)다.
+  artifact_base_unavailable: "작업 기록이 저장된 공유 스토리지에 지금 접근할 수 없습니다 — 잠시 뒤 다시 시도하고, 계속되면 관리자에게 문의하세요",
+  artifact_base_unreadable: "경로를 읽을 수 없습니다(입출력 오류·끊긴 마운트)",
+  artifact_base_check_timeout: "경로 점검이 10초 안에 끝나지 않았습니다 — 마운트가 멈췄을 수 있습니다",
+  artifact_base_jobs_missing: "최근 작업의 기록 디렉터리가 이 경로에 없습니다 — 이 노드에 공유 스토리지가 마운트되지 않았을 수 있습니다",
   // 빌드 실패 세분화(슬라이스 21 잔여). 지금까지 전부 build_failed 로 뭉개져
   // 운영자가 로그 단절만 보고 OOM 을 추측해야 했다 — 대응이 서로 다르다.
   build_oom_killed: "빌드가 메모리 한도를 넘어 종료됐습니다 — 빌드 봉투를 늘리거나 빌드를 줄이세요",

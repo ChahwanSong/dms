@@ -3,7 +3,7 @@ import { ExternalLink, HardDrive, Info } from "lucide-react";
 import { Card } from "../../components/ui/Card";
 import { HelpTip } from "../../components/ui/HelpTip";
 import { Highlight, containsToken } from "../../components/ui/Highlight";
-import type { ApiError } from "../../lib/api";
+import { reasonText, type ApiError } from "../../lib/api";
 import type { UsageAttrFilter, UsagePv, UsagePvVolume } from "../../lib/types";
 import type { useStorageTabs } from "./useActiveStorage";
 import { pvInside } from "./usageStats";
@@ -227,5 +227,22 @@ export function NoStorages() {
         <Link to="/admin/storages" className="mt-1 text-sm text-accent hover:underline">스토리지 화면으로</Link>
       </div>
     </Card>
+  );
+}
+
+// 작업 기록 저장소(artifact base) 접근 불가 원인 문구(2026-11-23 사고 -- 「성공 scan N건의 리포트를 읽지 못해…」만으로는 「리포트가
+// 없다」로 읽혔다). 사용량 화면은 관리자 전용이라 공개 코드의 일반 안내(「관리자에게 문의」) 대신 원인과 일시성을 말한다 -- 다른
+// 코드가 오면(새 서버) 번역 문구 그대로. 사유가 없으면 아무 데서도 쓰지 않는다(기존 정확 문자열 유지 -- 테스트 고정).
+export const BASE_DOWN_TEXT = "작업 기록 저장소(공유 스토리지)에 접근할 수 없습니다(일시 장애일 수 있음)";
+export const BASE_DOWN_SHORT = "(공유 스토리지 접근 불가)";
+export const baseDownText = (reason: string) =>
+  (reason === "artifact_base_unavailable" ? BASE_DOWN_TEXT : reasonText(reason));
+
+// 점검 결과 화면으로 가는 링크(어느 파드·노드가 못 읽는지는 아티팩트 경로 화면이 말한다).
+export function BaseCheckLink() {
+  return (
+    <Link to="/admin/artifact-base"
+          className="whitespace-nowrap rounded text-accent hover:underline focus-visible:outline-none focus-visible:ring-2
+                     focus-visible:ring-accent">아티팩트 경로 점검 보기</Link>
   );
 }

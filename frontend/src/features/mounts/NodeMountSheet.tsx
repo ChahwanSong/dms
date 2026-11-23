@@ -2,10 +2,10 @@ import { Link } from "react-router-dom";
 import { Dialog } from "../../components/ui/Dialog";
 import { agoText, kstStamp } from "../../lib/datetime";
 import { useNow } from "../../lib/useNow";
-import { MountCellChip, NodeTags, SharedCellChip } from "./MountCell";
+import { MountCellChip, NodeTags, PodTag, SharedCellChip } from "./MountCell";
 import {
-  SHARED_META, cellAriaLabel, cellHelp, cellLabel, cellMounted, coverText, probeModeText, sharedHelp, usageDetail,
-  writableText, yesNo,
+  cellAriaLabel, cellHelp, cellLabel, cellMounted, coverText, podFailedOn, podTag, podsOn, probeModeText, sharedDisplay,
+  sharedHelp, usageDetail, writableText, yesNo,
 } from "./mountTerms";
 import type { MountRow, MountStatusResponse } from "./types";
 
@@ -21,10 +21,12 @@ export function NodeMountSheet({ row, data, roleLabels, onClose, onCloseAutoFocu
 }) {
   const nowMs = useNow(15_000, row !== null);
   const shared = data.shared_dir;
+  const pods = row !== null ? podsOn(data, row.node_name) : [];
+  const podRoles = [...new Set(pods.map((p) => p.role))];
   return (
     <Dialog side="right" open={row !== null} onOpenChange={(o) => { if (!o) onClose(); }}
             title={row?.node_name ?? ""} titleClassName="font-mono" onCloseAutoFocus={onCloseAutoFocus}
-            subtitle={row !== null ? <NodeTags row={row} roleLabels={roleLabels} /> : undefined}>
+            subtitle={row !== null ? <NodeTags row={row} roleLabels={roleLabels} pods={pods} /> : undefined}>
       {row !== null && (
         <div className="space-y-4 text-sm">
           <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1.5">
@@ -38,8 +40,9 @@ export function NodeMountSheet({ row, data, roleLabels, onClose, onCloseAutoFocu
               <>
                 <dt className="text-muted">DMS 공용 디렉터리</dt>
                 <dd className="space-y-1">
-                  <SharedCellChip cell={row.shared_dir} className="!items-start"
-                                  aria-label={cellAriaLabel(row.node_name, "DMS 공용", SHARED_META[row.shared_dir.state].label)} />
+                  <SharedCellChip cell={row.shared_dir} className="!items-start" podFailed={podFailedOn(data, row.node_name)}
+                                  aria-label={cellAriaLabel(row.node_name, "DMS 공용",
+                                    sharedDisplay(row.shared_dir, podFailedOn(data, row.node_name)).meta.label)} />
                   <p className="font-mono text-xs break-all">{shared.path}</p>
                   <p className="text-xs text-muted">
                     {`존재 ${yesNo(row.shared_dir.exists)} · `
@@ -47,6 +50,27 @@ export function NodeMountSheet({ row, data, roleLabels, onClose, onCloseAutoFocu
                       + `덮는 마운트 ${coverText(row.shared_dir)}`}
                   </p>
                   <p className="text-xs">{sharedHelp(row.shared_dir, shared.majority, agoText(row.reported_at, nowMs))}</p>
+                </dd>
+              </>
+            )}
+            {podRoles.length > 0 && (
+              // 꼬리표의 title 문장을 키보드로도 읽게(행 머리 꼬리표는 탭 정지가 아니다) -- 같은 podTag 문장.
+              <>
+                <dt className="text-muted">이 노드의 DMS 파드</dt>
+                <dd>
+                  <ul aria-label={`${row.node_name} DMS 파드`} className="space-y-1.5">
+                    {podRoles.map((role) => {
+                      const view = podTag(row, role, pods);
+                      return (
+                        <li key={role} className="space-y-0.5">
+                          <PodTag view={view} />
+                          {view.lines.map((line, i) => (
+                            <p key={i} className="text-xs [overflow-wrap:anywhere]">{line}</p>
+                          ))}
+                        </li>
+                      );
+                    })}
+                  </ul>
                 </dd>
               </>
             )}

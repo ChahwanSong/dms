@@ -13,7 +13,9 @@
 # wiring.py::build_summary_reader) -- i.e. it expects that path to exist on
 # the CONTROLLER'S OWN filesystem, not through the k8s API. Without this
 # mount every preview/execution phase would read back None and jobs would
-# stall. controller_check_once (artifact_base.py) also writes a probe file.
+# stall. controller_check_once (artifact_base.py) also writes a probe file,
+# then checks recent job directories exist (an empty local directory on a node
+# without the shared mount shows up as artifact_base_jobs_missing).
 # The request-purge loop's trash (artifact_trash.py, <base>/.dms-trash) and
 # artifact expiry also live under the base, so <SHARED_DIR>/dms/artifacts is
 # the whole footprint -- the controller never needs the rest of <SHARED_DIR>.
@@ -75,6 +77,15 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
+          env:
+            # Node this pod runs on -- labels the controller's artifact base
+            # check (control_state.artifact_base_check_node) so the admin page
+            # can say WHICH node sees the base when api and controller disagree.
+            # Optional: the code falls back to looking up its own pod.
+            - name: DMS_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
           envFrom:
             - configMapRef:
                 name: dms-config

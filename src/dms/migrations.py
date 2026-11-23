@@ -529,6 +529,23 @@ def _apply_migrations(db: Database) -> None:
             blocked_request_id TEXT,
             next_attempt_at TEXT NOT NULL,
             updated_at TEXT NOT NULL)""",
+        # API 파드 자체 artifact base 점검(2026-11-23, api/base_monitor.py): 파드(instance = HOSTNAME)마다 한 행을 upsert
+        # 한다. Ready 가 아닌 파드는 Service 밖이라 HTTP 로는 그 상태가 절대 보이지 않는다 -- 시작 게이트에 걸린 새 파드의
+        # 「노드 X: 아티팩트 경로 점검 실패」는 옛 파드가 서빙하는 포탈에 이 행으로만 보인다. ok NULL = 아직 점검 전(모름 ≠
+        # 실패). 24시간 지난 행은 모니터가 지운다. request·job·batch id 컬럼이 없어 삭제 그물과 무관하다.
+        """CREATE TABLE IF NOT EXISTS api_base_checks (
+            instance TEXT PRIMARY KEY,
+            node_name TEXT,
+            uri TEXT,
+            ok INTEGER,
+            reason TEXT,
+            posture TEXT,
+            fstype TEXT,
+            gate_state TEXT,
+            started_at TEXT NOT NULL,
+            checked_at TEXT,
+            first_ok_at TEXT,
+            ready_at TEXT)""",
         # 노드 배치 제외(2026-10-02, repositories/node_exclusions.py): 관리자가 고른 노드를 DMS 잡 배치 후보에서 뺀다.
         # 행 = 제외 중. 빈 테이블 = 제외 없음(업그레이드 무해 -- sync_pairs 의 "빈 테이블 = 전부 거부"와 반대 방향).
         # agent_nodes 에 플래그를 두지 않는 이유: 그 행은 보고마다 지우고 다시 넣는다(agents.ingest). 새 테이블이라
@@ -784,6 +801,9 @@ def _apply_migrations(db: Database) -> None:
             artifact_base_check_ok INTEGER,
             artifact_base_check_reason TEXT,
             artifact_base_check_at TEXT,
+            -- 컨트롤러 점검을 한 노드(2026-11-23): API 파드 관점(api_base_checks)과 엇갈릴 때 「어느 노드가 못 보나」를
+            -- 화면이 말하게. NULL = 모름(구버전 컨트롤러·노드 이름 조회 실패).
+            artifact_base_check_node TEXT,
             -- 포탈 서브네임(2026-10-02): "AI Storage Portal - SSC" 의 "SSC" 같은 사이트 표시 이름.
             -- NULL = 없음(메인 이름만). 운영자가 포탈(관리 → 포탈 설정)에서 바꾸는 값이라 여기.
             portal_subtitle TEXT,
@@ -1007,6 +1027,8 @@ def _ensure_columns(db):
         ("control_state", "artifact_base_check_ok", "INTEGER"),
         ("control_state", "artifact_base_check_reason", "TEXT"),
         ("control_state", "artifact_base_check_at", "TEXT"),
+        # 컨트롤러 점검 노드(2026-11-23) -- 이중 경로 규약.
+        ("control_state", "artifact_base_check_node", "TEXT"),
         # 포탈 서브네임(2026-10-02) -- 이중 경로 규약.
         ("control_state", "portal_subtitle", "TEXT"),
         ("builds", "log_text", "TEXT"),

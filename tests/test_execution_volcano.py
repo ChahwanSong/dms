@@ -341,6 +341,41 @@ def test_volumes_dsync_job_mounts_both_storages_on_every_task():
             "/mnt-a", "/mnt-b", "/cephfs/dms/artifacts"}, t["name"]
 
 
+def test_every_job_and_preflight_hostpath_is_type_directory():
+    """잡·preflight 파드의 hostPath 는 모두 type: Directory 다(2026-11-23 미마운트 노드 사고 이식 리뷰). 무타입이면 kubelet 이
+    미마운트 노드에 빈 로컬 디렉터리를 만들어 쓰고, 그 디렉터리가 다른 노드 파드에겐 「빈 base」로 보인다 -- 이 type 을 빼면
+    사고 경로가 조용히 다시 열린다. execution_volcano._volumes 의 dict 는 type 이 없고 매니페스트로 바꾸는
+    execution_manifests._pod_volumes 가 붙인다 -- 그 한 곳을 모든 파드 모양에서 고정한다."""
+    def vols(manifest):
+        if manifest["kind"] == "Pod":
+            return [manifest["spec"]["volumes"]]
+        return [t["template"]["spec"]["volumes"] for t in manifest["spec"]["tasks"]]
+
+    nsync_paths = _nsync_preflight_spec().paths
+    cases = [
+        (_adapter, _spec(phase="preflight")),
+        (_adapter, _spec(phase="exec_preflight")),
+        (_adapter, _spec(phase="execution")),
+        (_nsync_adapter, _nsync_preflight_spec()),
+        (_nsync_adapter, _spec(phase="preview", op="sync", tool="nsync",
+                               cand={"source": ["dms-w1"], "destination": ["dms-w4"]}, paths=nsync_paths)),
+        (_nsync_adapter, _spec(phase="execution", op="sync", tool="nsync",
+                               cand={"source": ["dms-w1"], "destination": ["dms-w4"]}, paths=nsync_paths)),
+    ]
+    seen = 0
+    for make, spec in cases:
+        k8s = _FakeK8s()
+        make(k8s).submit(spec)
+        assert k8s.created, spec.phase
+        for manifest in k8s.created:
+            for volumes in vols(manifest):
+                assert volumes, (spec.phase, manifest["metadata"]["name"])
+                for v in volumes:
+                    assert v["hostPath"]["type"] == "Directory", (spec.phase, v)
+                    seen += 1
+    assert seen >= 12
+
+
 # ---- 슬라이스 24 §2.1 층2: raise 가 submit_failed 로 접히되 조용하지 않다 ----
 
 def test_unknown_tool_submit_folds_into_submit_failed_with_the_tool_in_detail():

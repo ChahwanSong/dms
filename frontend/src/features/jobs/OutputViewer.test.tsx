@@ -129,6 +129,22 @@ test("파드가 여럿이면 파드마다 섹션(launcher·제출 실패 원문 
   expect(screen.getAllByText(/^빈 로그/)).toHaveLength(1);
 });
 
+// 2026-11-23: 작업 기록 저장소를 못 읽는 API 파드의 503 은 「아티팩트를 찾을 수 없습니다」(404)가 아니라 빨간 사유 문구 +
+// 「다시 시도」다(409 만 정보 톤).
+test("파일 503 artifact_base_unavailable: 빨간 사유 문구와 다시 시도", async () => {
+  let n = 0;
+  server.use(http.get("/api/user/jobs/0123456789abcdef/artifacts/execution/stdout.log", () => {
+    n += 1;
+    return HttpResponse.json({ detail: "artifact_base_unavailable" }, { status: 503 });
+  }));
+  renderViewer(art("stdout.log"));
+  const msg = await screen.findByText(/^작업 기록이 저장된 공유 스토리지에 지금 접근할 수 없습니다/);
+  expect(msg.className).toContain("text-bad");
+  expect(screen.queryByText("아티팩트를 찾을 수 없습니다")).toBeNull();
+  await userEvent.click(screen.getByRole("button", { name: "다시 시도" }));
+  await waitFor(() => expect(n).toBe(2));
+});
+
 test("라이브 로그 재조회가 502 로 한 번 실패해도 본문은 남고 「내용 갱신에 실패했습니다」 안내만 붙는다(리뷰 V3)", async () => {
   vi.useFakeTimers({ shouldAdvanceTime: true });
   try {

@@ -6,7 +6,7 @@ import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
 import { afterAll, afterEach, beforeAll, expect, test } from "vitest";
 import { MountStatusPage } from "./MountStatusPage";
-import { EMPTY_NODES, LIVE, NO_STORAGES, VARIETY } from "./mountFixtures";
+import { EMPTY_NODES, LIVE, NO_STORAGES, VARIETY, WITH_PODS } from "./mountFixtures";
 import type { MountStatusResponse } from "./types";
 
 const server = setupServer();
@@ -225,4 +225,52 @@ test("k8s 덧붙임 키가 없는 응답(공용 코어 모양)에서 슬롯이 �
   await screen.findByRole("table");
   expect(screen.queryByText(/PV \d+개/)).toBeNull();
   expect(screen.queryByText("파일시스템")).toBeNull();
+});
+
+test("DMS 파드 꼬리표: 공용 디렉터리가 문제인 노드·경로를 못 읽는 파드는 경고, 정상 노드는 정보 꼬리표", async () => {
+  renderPage(WITH_PODS);
+  await screen.findByRole("table");
+  const head = (name: string) => within(table()).getByRole("rowheader", { name: new RegExp(`^${name}`) });
+  // 사고 서명: 공용 디렉터리 로컬(n-broken) + 거기 뜬 dms-api -- 빨간 면·아이콘·낭독용 「경고」, 문장은 title
+  const incident = within(head("n-broken")).getByText("dms-api").closest("span[title]")!;
+  expect(incident).toHaveClass("bg-badbg", "text-bad");
+  expect(incident).toHaveTextContent("경고: dms-api");
+  expect(incident.getAttribute("title")).toMatch(/이 노드의 DMS 공용 디렉터리: 로컬 디렉터리 — 여기 뜬 dms-api 는/);
+  expect(incident.getAttribute("title")).toMatch(/dms-api-n-broken: 아티팩트 경로 점검 실패 .*Ready 대기 중/);
+  // 에이전트는 「있음」인데 dms-api 가 못 읽는 노드(n-pend)도 경고 + 「문제」 꼬리표(서버가 공용 열 한 칸으로 셌다)
+  const pend = within(head("n-pend")).getByText("dms-api").closest("span[title]")!;
+  expect(pend).toHaveClass("bg-badbg");
+  expect(within(head("n-pend")).getByText("문제 1")).toBeInTheDocument();
+  // 정상 노드의 컨트롤러는 정보 꼬리표(경고 아님)
+  const ctl = within(head("n-build")).getByText("컨트롤러").closest("span[title]")!;
+  expect(ctl).toHaveClass("bg-infobg");
+  expect(ctl).not.toHaveTextContent("경고");
+  expect(ctl.getAttribute("title")).toBe("컨트롤러: 아티팩트 경로 점검 정상");
+  // 표 밖 노드(에이전트 없음)의 파드는 각주가 말하고, 못 읽는 파드는 빨갛게
+  const note = screen.getByText(/표에 없는 노드\(에이전트 보고 없음\)에 뜬 DMS 파드/);
+  expect(note).toHaveTextContent("dms-api cp1(아티팩트 경로 점검 정상)");
+  expect(within(note).getByText(/^dms-api cp2\(아티팩트 경로 점검 실패/)).toHaveClass("text-bad");
+  expect(within(note).getByRole("link", { name: "아티팩트 경로" })).toHaveAttribute("href", "/admin/artifact-base");
+  // 「문제 있는 노드」 수는 서버 totals 그대로
+  expect(screen.getByRole("button", { name: "문제 있는 노드 4" })).toBeInTheDocument();
+});
+
+test("DMS 파드 꼬리표는 카드 보기에도, 노드 시트는 같은 문장을 키보드로 읽게 싣는다", async () => {
+  renderPage(WITH_PODS, "/admin/storages/mounts?view=cards");
+  const list = await screen.findByRole("list", { name: "노드별 마운트 현황" });
+  const brokenCard = within(list).getAllByRole("listitem")[1];
+  expect(within(brokenCard).getByText("dms-api").closest("span[title]")).toHaveClass("bg-badbg");
+  await userEvent.click(within(brokenCard).getByRole("button", { name: "n-broken" }));
+  const sheet = await screen.findByRole("dialog");
+  const pods = within(sheet).getByRole("list", { name: "n-broken DMS 파드" });
+  expect(pods).toHaveTextContent(/이 노드의 DMS 공용 디렉터리: 로컬 디렉터리 — 여기 뜬 dms-api 는 다른 노드가 쓴/);
+  expect(pods).toHaveTextContent(/dms-api-n-broken: 아티팩트 경로 점검 실패 — 최근 작업의 기록 디렉터리가/);
+  expect(pods).toHaveTextContent("시작 점검에 막혀 Ready 대기 중(서비스 밖)");
+});
+
+test("파드 덧붙임이 없는 응답(control_pods 없음)이면 파드 꼬리표·각주를 그리지 않는다", async () => {
+  renderPage(VARIETY);
+  await screen.findByRole("table");
+  expect(screen.queryByText("dms-api")).toBeNull();
+  expect(screen.queryByText(/표에 없는 노드/)).toBeNull();
 });
