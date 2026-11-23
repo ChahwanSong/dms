@@ -32,6 +32,9 @@ export function hopSummary(checks: ArtifactBaseInfo["checks"]):
     { label: string; variant: "ok" | "bad" | "busy" } {
   let bad = 0, pending = 0;
   if (!checks.api.ok) bad += 1;
+  // 이 응답을 준 파드 밖의 API 파드(fresh) 실패도 센다 -- 롤링 중 Ready 를 기다리는 새 파드가 실패하는데 머리 배지가 「모두
+  // 정상」이면 바로 아래 엇갈림 상자·파드 카드와 모순된다(2026-11-23 라이브 확인).
+  bad += (checks.api_pods ?? []).filter((p) => !p.this_pod && p.fresh && tri(p.ok) === false).length;
   if (checks.controller.pending) pending += 1;
   else if (!checks.controller.ok) bad += 1;
   for (const n of checks.nodes) {

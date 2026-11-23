@@ -8,7 +8,8 @@ import type { MountBaseCell, MountCell, MountNode } from "../../lib/types";
 import { ageText } from "../nodes/NodesList";
 import { useMounts } from "./useMounts";
 import {
-  BASE_LABEL, CELL_LABEL, baseOf, cellDetail, cellOf, isStale, nodeHasProblem, nodesOf, reasonLong, reasonShort, rolesOf,
+  BASE_LABEL, CELL_LABEL, baseChecksFailed, baseOf, cellDetail, cellOf, isStale, nodeHasProblem, nodesOf, reasonLong,
+  reasonShort, rolesOf,
   storagesOf, summaryOf, tri, type StorageCol,
 } from "./mountView";
 
@@ -141,9 +142,13 @@ function BaseCell({ n, dim }: { n: MountNode; dim: boolean }) {
     ok: tri(b.controller.ok),
     title: `컨트롤러: ${tri(b.controller.ok) === null ? "점검 전" : tri(b.controller.ok) ? "정상" : reasonText(b.controller.reason) || "실패"}`,
   }] : [];
+  // 에이전트는 정상(또는 보고 없음)인데 그 노드의 API·컨트롤러 자체 점검이 실패하면 칸 머리를 「점검 실패」로 -- 초록 「정상」
+  // 아래 빨간 「실패 1」은 한 칸이 두 말을 한다(2026-11-23 라이브 확인; 요약은 이미 이 칸을 문제로 센다).
+  const checksBad = baseChecksFailed(b);
+  const shown = checksBad && (b.status === "ready" || b.status === "unreported") ? "missing" : b.status;
   return (
     <div className="flex flex-col gap-0.5">
-      <StatusMark status={b.status} label={BASE_LABEL[b.status]} dim={dim}
+      <StatusMark status={shown} label={shown !== b.status ? "점검 실패" : BASE_LABEL[b.status]} dim={dim}
                   short={b.status === "missing" ? reasonShort(b.reason) : null} detail={baseDetail(n, b)} />
       {(api.length > 0 || ctrl.length > 0) && (
         <span className="flex flex-wrap gap-x-2 gap-y-0.5 pl-3.5 text-[11px]">
@@ -153,6 +158,13 @@ function BaseCell({ n, dim }: { n: MountNode; dim: boolean }) {
       )}
     </div>
   );
+}
+
+// 아티팩트 경로 칸 바탕: 문제 칸 규칙(baseProblem)과 같게 -- 점검 실패는 없음과 같은 빨강, 읽기 전용만이면 주의 색.
+function baseTint(b: MountBaseCell | null): string {
+  if (b === null) return "";
+  if (b.status === "missing" || baseChecksFailed(b)) return TINT.missing ?? "";
+  return b.status === "readonly" ? TINT.readonly ?? "" : "";
 }
 
 function Legend() {
@@ -272,7 +284,7 @@ function MountsTable({ rows, cols, covering, basePath, now }: {
                   </td>
                 );
               })}
-              <td className="px-3 py-2 align-top"><BaseCell n={n} dim={dim} /></td>
+              <td className={`px-3 py-2 align-top ${dim ? "" : baseTint(baseOf(n))}`}><BaseCell n={n} dim={dim} /></td>
             </tr>
           );
         })}

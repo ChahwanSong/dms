@@ -341,8 +341,9 @@ test("API 파드별 카드: 다른 파드가 있을 때만, 보고 끊김은 흐
   expect(within(stale).getByText("보고 끊김")).toBeInTheDocument();
   expect(waiting.className).not.toContain("opacity-60");
   expect(screen.getByRole("note")).toHaveTextContent("API 파드(노드 s-ssc-dms-26001)만 아티팩트 경로를 읽지 못합니다");
-  // 요약은 응답한 파드 하나만 센다(다른 파드 카드를 더 세지 않는다) -- API 정상·컨트롤러 정상·w2 대기
-  expect(screen.getByText("확인 대기 1건")).toBeInTheDocument();
+  // 요약은 다른 API 파드(fresh)의 실패도 센다 -- Ready 를 기다리는 새 파드가 실패하는데 「모두 정상」·「확인 대기」만 뜨면 아래
+  // 엇갈림 상자·카드와 모순(2026-11-23 라이브 확인). 보고 끊긴 파드(dms-api-old-zz9)는 세지 않는다.
+  expect(screen.getByText("문제 1건")).toBeInTheDocument();
 });
 
 test("응답한 파드 하나뿐이면 파드 카드 목록을 그리지 않는다(패널과 같은 내용)", async () => {

@@ -182,6 +182,20 @@ test("문제 0 이어도 보고가 끊긴 노드가 있으면 「모든 노드�
   expect(screen.getByText("보고 끊김 1대")).toBeInTheDocument();
 });
 
+test("에이전트는 정상인데 그 노드의 API 점검이 실패하면 아티팩트 경로 칸은 「점검 실패」(빨간 바탕) -- 초록 「정상」으로 두지 않는다", async () => {
+  // 2026-11-23 라이브: 롤링 중 Ready 를 기다리는 새 API 파드가 실패하는데 칸 머리가 초록 「정상」이라 한 칸이 두 말을 했다.
+  const failing = node("w5", { roles: ["api"], artifact_base: { ...baseOk,
+    api: [{ instance: "dms-api-new", ok: false, reason: "artifact_base_missing", checked_at: ago(5), gate_state: "waiting" }],
+  } as MountNode["artifact_base"] });
+  renderPage({ ...OVERVIEW, nodes: [failing], summary: undefined as never });
+  const row = (await screen.findByRole("link", { name: "w5" })).closest("tr")!;
+  const cells = within(row).getAllByRole("cell");
+  const baseCell = cells[cells.length - 1];
+  expect(within(baseCell).getByText("점검 실패")).toBeInTheDocument();
+  expect(within(baseCell).queryByText("정상")).toBeNull();
+  expect(baseCell.className).toContain("bg-badbg");
+});
+
 test("보고 중인 노드가 하나도 없으면 「정상」이라고 말하지 않는다(새 설치·에이전트 전체 장애)", async () => {
   renderPage({ ...OVERVIEW, nodes: [node("w9", { fresh: false })],
                summary: { node_count: 1, fresh_node_count: 0, storage_count: 3, problem_cells: 0, problem_nodes: 0,
