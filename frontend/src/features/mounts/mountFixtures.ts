@@ -140,3 +140,68 @@ export const WITH_PODS: MountStatusResponse = {
     pod("controller_pod", "n-build"),
   ],
 };
+
+// wide(2026-11-25 「스토리지가 100개가 될 수도 있어」): 열이 많은 표의 결정적 합성 응답 -- e2e/helpers/mountWide.ts 와 같은 규칙(그쪽은
+// k8s 덧붙임 키·긴 노드 이름·리포트 지연 노드까지 싣는다). 스토리지 i(1부터): 이름 stor-NNN(+ i%7==0 이면 -gpfs-project-archive-cold
+// -- 100열에 14개, 아니고 i%5==0 이면 -nfs-scratch, 아니고 i%11==0 이면 -weka-research-01 -- 25자: 자연 줄바꿈이면 세 줄인 하이픈
+// 이름), 경로 i%3: 0 = 60자 /mgmt_storage/very/long/…/NNN · 1 = /mgmt_storage/<gpfs|onefs|nfs>/projNNN(같은 긴 접두 -- 프로덕션
+// 모양) · 2 = /mnt/sN, 칸(노드 j, 0부터) i%10==3 → j%4==1 마운트 문제 · 6 → j%3==0 읽기 전용(나머지
+// 정상 = 문제) · 9 → 모두 읽기 전용(문제 아님) · 1·4 → j%2==0 없음 · 8 → j%5==0 확인 대기 · 나머지 정상. 문제 있는 스토리지 =
+// i%10∈{3,6}(100열에 20개), archive ∩ 문제 = 56·63. 경로에는 「archive」·「stor-」가 없다(찾기는 경로도 본다). summary·totals·
+// problem_count 는 칸에서 센다(서버 규칙의 거울).
+const pad = (i: number, n: number) => String(i).padStart(n, "0");
+export const wideName = (i: number): string => `stor-${pad(i, 3)}${
+  i % 7 === 0 ? "-gpfs-project-archive-cold" : i % 5 === 0 ? "-nfs-scratch" : i % 11 === 0 ? "-weka-research-01" : ""}`;
+const WIDE_FS = ["gpfs", "onefs", "nfs"];
+const widePath = (i: number) =>
+  (i % 3 === 0 ? `/mgmt_storage/very/long/mount/path/for/testing/truncation/${pad(i, 3)}`
+    : i % 3 === 1 ? `/mgmt_storage/${WIDE_FS[Math.floor(i / 3) % 3]}/proj${pad(i, 3)}` : `/mnt/s${i}`);
+export const WIDE_REASONS = ["not_a_mountpoint", "propagation_stale", "not_readable", "host_root_missing",
+                             "weird_new_reason_code_from_newer_agent"];
+
+function wideCell(i: number, j: number, path: string): MountCellData {
+  const ro = () => ready(path, { state: "read_only", writable: false });
+  switch (i % 10) {
+    case 3: return j % 4 === 1 ? broken(path, WIDE_REASONS[(i + j) % WIDE_REASONS.length]) : ready(path);
+    case 6: return j % 3 === 0 ? ro() : ready(path);
+    case 9: return ro();
+    case 1: case 4: return j % 2 === 0 ? absent(path) : ready(path);
+    case 8: return j % 5 === 0
+      ? { ...ready(path), state: "pending", pending: "not_reported", status: null, reported_path: null, exists: null,
+          is_mountpoint: null, readable: null, writable: null }
+      : ready(path);
+    default: return ready(path, { disk: { total_bytes: 1000, used_bytes: 100 + ((i * 37 + j * 11) % 800) } });
+  }
+}
+
+export function wide(n: number, nodes: number): MountStatusResponse {
+  const ids = Array.from({ length: n }, (_, k) => k + 1);
+  const rows: MountRow[] = Array.from({ length: nodes }, (_, j) =>
+    row(`node-${pad(j, 2)}`, Object.fromEntries(ids.map((i) => [wideName(i), wideCell(i, j, widePath(i))]))));
+  const roOutliers = new Set(ids.map(wideName).filter((name) => rows.some((r) => r.cells[name].state === "ready")));
+  for (const r of rows) {
+    const count = Object.entries(r.cells)
+      .filter(([name, c]) => c.state === "broken" || (c.state === "read_only" && roOutliers.has(name))).length;
+    r.problem_count = count;
+    r.problem = count > 0;
+  }
+  const storages = ids.map((i) => {
+    const name = wideName(i);
+    const states = rows.map((r) => r.cells[name].state);
+    const of = (s: string) => states.filter((x) => x === s).length;
+    const readyN = of("ready") + of("read_only");
+    const total = states.length - of("pending");
+    return column(name, widePath(i), {
+      ready: readyN, total, status: readyN === total ? "Ready" : "Degraded", detail: `ready_nodes=${readyN}/${total}`,
+      broken: of("broken"), read_only: of("read_only"), absent: of("absent"), pending: of("pending"),
+    });
+  });
+  const all = rows.flatMap((r) => Object.values(r.cells).map((c) => c.state));
+  const cnt = (s: string) => all.filter((x) => x === s).length;
+  return {
+    ...LIVE, storages, nodes: rows,
+    totals: { nodes, fresh_nodes: nodes, stale_nodes: 0, ready: cnt("ready"), read_only: cnt("read_only"), absent: cnt("absent"),
+              broken: cnt("broken"), pending: cnt("pending"), shared_ok: nodes, shared_unverified: 0, shared_problem: 0,
+              shared_pending: 0, problem_nodes: rows.filter((r) => r.problem).length },
+  };
+}

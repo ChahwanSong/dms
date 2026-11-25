@@ -1,23 +1,27 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { CircleCheck, TriangleAlert } from "lucide-react";
+import { CircleCheck, Search, TriangleAlert } from "lucide-react";
 import { InfoPanel } from "../../components/ui/InfoPanel";
 import { Segmented } from "../../components/ui/Segmented";
 import { ApiError } from "../../lib/api";
 import { useNow } from "../../lib/useNow";
+import { useSearchField } from "../jobs/searchField";
 import { StateChip } from "./MountCell";
 import { MountMatrix } from "./MountMatrix";
 import { NodeMountCards } from "./NodeMountCards";
 import { NodeMountSheet } from "./NodeMountSheet";
-import { CELL_META, POD_ROLE_LABELS, podCheckText } from "./mountTerms";
-import type { CellState, MountStatusResponse, MountTotals, StorageColumn } from "./types";
+import { CELL_META, POD_ROLE_LABELS, columnProblem, filterColumns, podCheckText } from "./mountTerms";
+import type { CellState, MountRow, MountStatusResponse, MountTotals, StorageColumn } from "./types";
 import { useMountStatus } from "./useMountStatus";
 
 // 스토리지 > 마운트 현황(2026-11-23 사용자 요청 「노드들의 스토리지 마운트 현황을 한눈에 보고 싶어」). 공용 코어 페이지 -- dms-ssc 와
-// 같은 화면이고, 사이트 덧붙임(dms-k8s 의 스토리지 종류·PV 수·k8s 호출 노드 꼬리표·PV 안내)은 슬롯 셋으로만 받는다
-// (renderStorageMeta·roleLabels·footer -- k8sMountParts.K8sMountStatusPage). 이 파일은 features/k8s 를 import 하지 않는다(이식 경계
-// 그물 mountTerms.test).
+// 같은 화면이고, 사이트 덧붙임(dms-k8s 의 스토리지 종류·PV 수·k8s 호출 노드 꼬리표·PV 안내)은 슬롯 넷으로만 받는다
+// (renderStorageMeta·renderStorageTip·roleLabels·footer -- k8sMountParts.K8sMountStatusPage; renderStorageTip 은 열 머리 툴팁과 노드
+// 시트 스토리지 줄 둘에 -- 툴팁은 마우스 전용). 이 파일은 features/k8s 를 import 하지 않는다(이식 경계 그물 mountTerms.test).
+// **이식 의존**: 스토리지 찾기칸은 `../jobs/searchField`(useSearchField -- react 만 쓰는 훅 하나)를 쓰는데 그 파일은 dms-ssc 에 없다
+// (2026-10-25 dms-k8s 「전체 작업」 검색칸) -- dms-ssc 로 옮길 때 features/jobs/searchField.ts 를 함께 가져간다(mountTerms.test 의
+// 이식 의존 그물이 코어의 바깥 import 를 목록으로 묶는다).
 //
 // 같은 날 사고(공용 스토리지가 마운트되지 않은 노드에 dms-api 가 떠 아티팩트를 못 읽음)의 그런 노드를 찾는 도구이기도 하다 -- 「DMS
 // 공용」 열이 노드마다 공용 디렉터리를 덮는 마운트를 보고, 로컬 디렉터리·다른 노드와 다름을 문제로 센다. dms-api·컨트롤러 파드가 뜬
@@ -25,12 +29,16 @@ import { useMountStatus } from "./useMountStatus";
 // 공용 디렉터리 칸이 문제인 노드거나 그 파드가 경로를 못 읽으면 꼬리표가 경고(빨강 + 아이콘)가 된다 -- 그 조합이 사고의 서명이다.
 // 표에 없는 노드(에이전트 없음 -- 예: prod 의 control-plane 마스터)에 뜬 파드는 각주가 따로 말한다.
 //
-// 보기 상태(문제 있는 노드만·표/노드별)는 URL 에 남긴다(?only=problems·?view=table|cards -- 공유·새로고침에 유지). 표와 카드는 조건부로
-// 그린다(CSS 로 숨기지 않는다 -- 숨은 표가 DOM 에 남으면 e2e 칸 수 측정이 공허해진다). view 가 없으면 첫 렌더의 화면 폭(640 미만 =
-// 카드)으로 고른다.
+// 보기 상태는 URL 에 남긴다(공유·새로고침에 유지, replace): ?only=problems(문제 있는 노드만) · ?view=table|cards · ?q=(스토리지 이름·
+// 경로 찾기 -- 「전체 작업」 검색칸과 같은 300ms 디바운스·한글 조합 처리, 주소로 들어온 값은 첫 렌더부터) · ?cols=problems(문제 있는
+// 스토리지만 -- mountTerms.columnProblem). 열 거르기(2026-11-25 「스토리지가 100개가 될 수도 있어」)는 표와 카드에 걸고, 노드 시트는
+// 거르지 않는다(노드 상세는 모든 스토리지). 표와 카드는 조건부로 그린다(CSS 로 숨기지 않는다 -- 숨은 표가 DOM 에 남으면 e2e 칸 수
+// 측정이 공허해진다). view 가 없으면 첫 렌더의 화면 폭(640 미만 = 카드)으로 고른다.
 
 export interface MountStatusPageProps {
   renderStorageMeta?: (col: StorageColumn) => ReactNode;
+  /** 스토리지 열 머리 툴팁의 덧붙임(머리에 다 싣지 못하는 사이트 정보 -- dms-k8s 의 PV 수·클러스터·StorageClass). */
+  renderStorageTip?: (col: StorageColumn) => ReactNode;
   roleLabels?: Record<string, string>;
   footer?: (data: MountStatusResponse) => ReactNode;
 }
@@ -47,6 +55,9 @@ const LEGEND: { state: CellState; text: string; count: (t: MountTotals) => strin
   { state: "pending", text: "다음 보고에 반영", count: (t) => `${t.pending}칸` },
   { state: "stale", text: "리포트 지연", count: (t) => `${t.stale_nodes}대` },
 ];
+
+const NO_COLUMNS: StorageColumn[] = [];
+const NO_ROWS: MountRow[] = [];
 
 function UpdatedAgo({ at }: { at: number }) {
   const now = useNow(5_000, at > 0);
@@ -69,11 +80,20 @@ function Tile({ label, value, sub }: { label: string; value: ReactNode; sub?: Re
   );
 }
 
-export function MountStatusPage({ renderStorageMeta, roleLabels, footer }: MountStatusPageProps) {
+/** 원소가 모두 같은(===) 새 배열이면 앞 배열을 돌려준다 -- 걸러 낸 열 목록이 폴링마다 새 배열이어도 표 머리·행 memo 가 깨지지 않게. */
+function useStableList<T>(list: T[]): T[] {
+  const ref = useRef(list);
+  const prev = ref.current;
+  if (prev !== list && (prev.length !== list.length || prev.some((x, i) => x !== list[i]))) ref.current = list;
+  return ref.current;
+}
+
+export function MountStatusPage({ renderStorageMeta, renderStorageTip, roleLabels, footer }: MountStatusPageProps) {
   const q = useMountStatus();
   const data = q.data;
   const [params, setParams] = useSearchParams();
   const onlyProblems = params.get("only") === "problems";
+  const problemCols = params.get("cols") === "problems";
   const [initialView] = useState<View>(() =>
     (typeof window !== "undefined" && window.matchMedia?.(NARROW)?.matches ? "cards" : "table"));
   const viewParam = params.get("view");
@@ -91,8 +111,44 @@ export function MountStatusPage({ renderStorageMeta, roleLabels, footer }: Mount
     return next;
   }, { replace: true });
 
+  // 스토리지 찾기(?q=): 적용값 → 주소, 밖에서 주소가 바뀌면(사이드바 링크·뒤로 가기) 칸을 주소에 맞춘다. lastUrlQ = 이 화면이 마지막으로
+  // 본(또는 쓴) 주소 값 -- 자기가 쓴 주소 변화에는 칸을 되돌리지 않고, 적용값이 그 값과 같으면 주소를 다시 쓰지 않는다(주소 갱신은
+  // 라우터 전환이라 적용값보다 한 박자 늦게 온다 -- 그 사이의 옛 주소와 비교하면 옛 주소로 덮어쓴다: 「조건 지우기」가 cols 를
+  // 되살렸다).
+  const urlQ = params.get("q") ?? "";
+  const search = useSearchField(urlQ);
+  const lastUrlQ = useRef(urlQ.trim());
+  useEffect(() => {
+    if (urlQ.trim() === lastUrlQ.current) return;
+    lastUrlQ.current = urlQ.trim();
+    if (urlQ.trim() !== search.applied) search.set(urlQ);
+  }, [urlQ]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    const want = search.applied;
+    if (want === lastUrlQ.current) return;
+    lastUrlQ.current = want;
+    setParam("q", want === "" ? null : want);
+  }, [search.applied]); // eslint-disable-line react-hooks/exhaustive-deps
+  const clearColumnFilter = () => {
+    lastUrlQ.current = "";
+    search.set("");
+    setParams((p) => {
+      const next = new URLSearchParams(p);
+      next.delete("q");
+      next.delete("cols");
+      return next;
+    }, { replace: true });
+  };
+
   const t = data?.totals;
-  const rows = data ? (onlyProblems ? data.nodes.filter((r) => r.problem) : data.nodes) : [];
+  const allCols = data?.storages ?? NO_COLUMNS;
+  const allRows = data?.nodes ?? NO_ROWS;
+  const rows = onlyProblems ? allRows.filter((r) => r.problem) : allRows;
+  const problemColCount = useMemo(() => allCols.filter((c) => columnProblem(c, allRows)).length, [allCols, allRows]);
+  const visibleCols = useStableList(useMemo(
+    () => filterColumns(allCols, allRows, { q: search.applied, problemsOnly: problemCols }),
+    [allCols, allRows, search.applied, problemCols]));
+  const colFiltered = search.applied !== "" || problemCols;
   const openRow = data && openNode !== null ? data.nodes.find((r) => r.node_name === openNode) ?? null : null;
   const dash = "–";
 
@@ -149,13 +205,41 @@ export function MountStatusPage({ renderStorageMeta, roleLabels, footer }: Mount
       ) : (
         <>
           <div className="flex flex-wrap items-center gap-2">
-            <Segmented label="보기 범위" value={onlyProblems ? "problems" : "all"}
+            <Segmented label="노드 범위" value={onlyProblems ? "problems" : "all"}
                        onChange={(v) => setParam("only", v === "problems" ? "problems" : null)}
                        options={[{ value: "all", label: `전체 노드 ${data.nodes.length}` },
                                  { value: "problems", label: `문제 있는 노드 ${t!.problem_nodes}` }]} />
+            {data.storages.length > 0 && (
+              <>
+                <Segmented label="스토리지 범위" value={problemCols ? "problems" : "all"}
+                           onChange={(v) => setParam("cols", v === "problems" ? "problems" : null)}
+                           options={[{ value: "all", label: `전체 스토리지 ${data.storages.length}` },
+                                     { value: "problems", label: `문제 있는 스토리지 ${problemColCount}` }]} />
+                <label className="relative w-full sm:w-56">
+                  <span className="sr-only">스토리지 찾기</span>
+                  <Search aria-hidden className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
+                  <input {...search.bind} type="search" maxLength={128} placeholder="스토리지 이름·경로 찾기"
+                         className="w-full rounded-lg border border-line bg-surface py-1.5 pl-8 pr-3 text-sm placeholder:text-muted
+                                    focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/20" />
+                </label>
+                {colFiltered && (
+                  <span className="whitespace-nowrap text-xs tabular-nums text-muted">
+                    {`스토리지 ${visibleCols.length}/${data.storages.length}`}
+                  </span>
+                )}
+              </>
+            )}
             <Segmented label="보기 방식" value={view} onChange={(v) => setParam("view", v)}
                        options={[{ value: "table", label: "표" }, { value: "cards", label: "노드별" }]} />
           </div>
+          {colFiltered && (
+            // 열 거르기는 표·카드의 칸만 줄인다 -- 서버 수(타일·범례·노드 범위·행의 「문제 n」 = problem_count)는 숨긴 스토리지까지 센다.
+            // 이 줄이 없으면 「문제 3」 꼬리표 옆에 정상 칸만 보이는 행(?only=problems&q=…)이 모순처럼 읽혔다(2026-11-25 리뷰).
+            <p className="text-xs text-muted break-keep">
+              스토리지를 거른 보기입니다 — 표·카드의 칸만 거른 스토리지로 그리고, 타일·범례·노드 범위 수와 노드의 「문제 n」 꼬리표는
+              숨긴 스토리지까지 센 전체 기준입니다.
+            </p>
+          )}
           <ul aria-label="범례" className="flex flex-wrap gap-x-4 gap-y-1 text-xs">
             {LEGEND.map(({ state, text, count: countOf }) => {
               const meta = CELL_META[state];
@@ -176,6 +260,17 @@ export function MountStatusPage({ renderStorageMeta, roleLabels, footer }: Mount
               화면</Link>에서 등록하거나 켜세요.
             </InfoPanel>
           )}
+          {data.storages.length > 0 && colFiltered && visibleCols.length === 0 && (
+            // 열이 0개여도 표·카드는 공용 열과 행으로 계속 그린다(공용 디렉터리 문제는 열 거르기와 무관하게 보인다).
+            <InfoPanel className="flex flex-wrap items-center gap-x-3 gap-y-1 break-keep">
+              <span>
+                {"조건에 맞는 스토리지가 없습니다 — "
+                  + [search.applied !== "" ? `「${search.applied}」` : null, problemCols ? "문제 있는 스토리지만" : null]
+                    .filter((x) => x !== null).join(" · ")}
+              </span>
+              <button type="button" onClick={clearColumnFilter} className="text-accent hover:underline">조건 지우기</button>
+            </InfoPanel>
+          )}
 
           {rows.length === 0 ? (
             <InfoPanel className="flex items-start gap-2 break-keep">
@@ -191,16 +286,17 @@ export function MountStatusPage({ renderStorageMeta, roleLabels, footer }: Mount
               ) : "보기 범위에 맞는 노드가 없습니다."}
             </InfoPanel>
           ) : view === "table" ? (
-            <MountMatrix data={data} rows={rows} renderStorageMeta={renderStorageMeta} roleLabels={roleLabels}
-                         onOpenNode={setOpenNode} registerButton={registerButton} />
+            <MountMatrix data={data} rows={rows} cols={visibleCols} renderStorageMeta={renderStorageMeta}
+                         renderStorageTip={renderStorageTip} roleLabels={roleLabels} onOpenNode={setOpenNode}
+                         registerButton={registerButton} />
           ) : (
-            <NodeMountCards data={data} rows={rows} roleLabels={roleLabels} onOpenNode={setOpenNode}
+            <NodeMountCards data={data} rows={rows} cols={visibleCols} roleLabels={roleLabels} onOpenNode={setOpenNode}
                             registerButton={registerButton} />
           )}
 
           <Footnotes data={data} />
           {footer?.(data)}
-          <NodeMountSheet row={openRow} data={data} roleLabels={roleLabels}
+          <NodeMountSheet row={openRow} data={data} roleLabels={roleLabels} renderStorageTip={renderStorageTip}
                           onClose={() => { closedNode.current = openNode; setOpenNode(null); }}
                           onCloseAutoFocus={(e) => {
                             const name = closedNode.current;

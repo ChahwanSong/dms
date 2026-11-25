@@ -3,11 +3,11 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "vitest";
 import {
-  CELL_META, REASON_TEXT, SHARED_META, SHARED_PROBLEM_STATES, TONE_CLASS, cellHelp, cellLabel, cellMounted, cellSub, isPodRole,
-  podCheckText, podFailedHelp, podFailedOn, podFailedRoles, podLine, podTag, podsOn, roleLabel, sharedDisplay, sharedHelp, sharedSub, usageDetail, usageText,
-  writableText,
+  CELL_META, REASON_TEXT, SHARED_META, SHARED_PROBLEM_STATES, TONE_CLASS, cellHelp, cellLabel, cellMounted, cellSub, columnNameLines,
+  columnPathTail, columnProblem, columnRuleText, columnSummaryText, filterColumns, isPodRole, podCheckText, podFailedHelp, podFailedOn,
+  podFailedRoles, podLine, podTag, podsOn, roleLabel, sharedDisplay, sharedHelp, sharedSub, usageDetail, usageText, writableText,
 } from "./mountTerms";
-import { pod, row as mkRow, sharedOk } from "./mountFixtures";
+import { LIVE, VARIETY, absent, column, pod, ready, row as mkRow, sharedOk, wide } from "./mountFixtures";
 import type { CellState, MountCellData, SharedCellData, SharedState } from "./types";
 
 const cell = (over: Partial<MountCellData> = {}): MountCellData => ({
@@ -224,6 +224,34 @@ test("공용 코어 파일은 features/k8s 를 import 하지 않는다", () => {
   }
 });
 
+// 이식 의존 그물(2026-11-25 리뷰): 공용 코어의 바깥 import 는 dms-ssc 에도 있는 모듈(SSC_SHARED)과, dms-ssc 에 없어 이식 때 함께
+// 가져갈 파일(PORT_WITH -- 이유와 함께)만. 위 그물은 features/k8s 만 봐서 MountStatusPage 가 dms-ssc 에 없는 ../jobs/searchField 를
+// 새로 끌어온 것을 못 잡았다 -- 새 바깥 의존이 생기면 여기서 빨간불이 켜지고, 그 모듈이 dms-ssc 에 있는지 확인해 둘 중 하나에 넣는다.
+test("공용 코어 파일의 바깥 import 는 dms-ssc 에도 있는 모듈 + 이식 때 함께 가져갈 목록뿐", () => {
+  const dir = dirname(fileURLToPath(import.meta.url));
+  const core = ["types", "useMountStatus", "mountTerms", "MountCell", "MountMatrix", "NodeMountCards", "NodeMountSheet",
+                "MountStatusPage"];
+  const SSC_SHARED = new Set([
+    "react", "react-router-dom", "lucide-react", "@tanstack/react-query",
+    "../../components/ui/Dialog", "../../components/ui/HoverTip", "../../components/ui/InfoPanel", "../../components/ui/Segmented",
+    "../../lib/api", "../../lib/datetime", "../../lib/types", "../../lib/useNow", "../nodes/NodePlacement",
+  ]);
+  const PORT_WITH = new Set([
+    "../jobs/searchField",   // useSearchField(react 만) -- 2026-10-25 dms-k8s 「전체 작업」 검색칸, dms-ssc 에 없다(MountStatusPage 머리 주석)
+  ]);
+  const files = ["types.ts", "useMountStatus.ts", "mountTerms.ts", "MountCell.tsx", "MountMatrix.tsx", "NodeMountCards.tsx",
+                 "NodeMountSheet.tsx", "MountStatusPage.tsx"];
+  const stray: string[] = [];
+  for (const file of files) {
+    const src = readFileSync(join(dir, file), "utf8");
+    for (const [, spec] of src.matchAll(/from\s+["']([^"']+)["']/g)) {
+      const ok = spec.startsWith("./") ? core.includes(spec.slice(2)) : SSC_SHARED.has(spec) || PORT_WITH.has(spec);
+      if (!ok) stray.push(`${file}: ${spec}`);
+    }
+  }
+  expect(stray).toEqual([]);
+});
+
 test("공용 칸 표시(sharedDisplay): 파드 점검 실패는 에이전트 정상·있음을 덮고, 이미 문제·지연이면 그대로(68dcbcdb 원칙)", () => {
   const ok = { state: "ok", exists: true, writable: true, reported_path: "/s", mount_point: "/s", fstype: "nfs4" } as never;
   const over = sharedDisplay(ok, true);
@@ -260,4 +288,87 @@ test("파드 점검 실패 도움말은 실패한 역할을 이름으로(podFail
   expect(podFailedRoles(data, "n1")).toEqual(["dms-api"]);
   expect(podFailedHelp(podFailedRoles(data, "n1"))).toMatch(/^이 노드의 dms-api 파드가 아티팩트 경로를 점검하지 못했습니다/);
   expect(podFailedHelp([])).toMatch(/^이 노드의 dms-api·컨트롤러 파드가/);
+});
+
+// 열 쪽 표기·거르기(2026-11-25 「스토리지가 100개가 될 수도 있어」).
+describe("열 거르기·요약(columnProblem·filterColumns·columnSummaryText·columnNameLines·columnPathTail)", () => {
+  const ro = (p: string) => ready(p, { state: "read_only", writable: false });
+
+  test("columnProblem: 서버 _ro_outlier_columns 의 열 쪽 거울 -- 마운트 문제, 또는 신선한 ready 가 있는 열의 읽기 전용", () => {
+    const c = column("s", "/s");
+    expect(columnProblem(column("s", "/s", { broken: 1 }), [])).toBe(true);
+    expect(columnProblem(c, [mkRow("a", { s: ro("/s") }), mkRow("b", { s: ready("/s") })])).toBe(true);
+    // 모든 신선한 칸이 ro = 의도된 구성(문제 아님)
+    expect(columnProblem(c, [mkRow("a", { s: ro("/s") }), mkRow("b", { s: ro("/s") })])).toBe(false);
+    // ready 가 리포트 지연 행에만 있으면 세지 않는다(지금 상태 모름)
+    expect(columnProblem(c, [mkRow("a", { s: ro("/s") }), mkRow("b", { s: ready("/s") }, { fresh: false })])).toBe(false);
+    // ro 가 리포트 지연 행에만 있어도 세지 않는다
+    expect(columnProblem(c, [mkRow("a", { s: ro("/s") }, { fresh: false }), mkRow("b", { s: ready("/s") })])).toBe(false);
+    expect(columnProblem(c, [mkRow("a", { s: absent("/s") }), mkRow("b", { s: ready("/s") })])).toBe(false);
+    expect(columnProblem(c, [])).toBe(false);
+  });
+
+  test("filterColumns: 조건 없으면 같은 배열, 이름·경로 부분 일치(대소문자 무시·앞뒤 공백 무시), 문제 열, 둘 다면 AND·순서 유지", () => {
+    const cols = LIVE.storages;
+    expect(filterColumns(cols, LIVE.nodes, { q: "", problemsOnly: false })).toBe(cols);
+    expect(filterColumns(cols, LIVE.nodes, { q: "   ", problemsOnly: false })).toBe(cols);
+    const names = (q: string, problemsOnly = false, data = LIVE) =>
+      filterColumns(data.storages, data.nodes, { q, problemsOnly }).map((c) => c.storage_name);
+    expect(names("PV")).toEqual(["k8s-pv-gpfs", "k8s-pv-nfs", "k8s-pv-onefs"]);
+    expect(names("  Secondary ")).toEqual(["cephfs-secondary"]);
+    expect(names("/k8s_pv/n")).toEqual(["k8s-pv-nfs"]);                 // 경로로도 맞는다
+    expect(names("zzz")).toEqual([]);
+    // VARIETY: ceph 는 마운트 문제·읽기 전용 outlier, sec 은 마운트 문제
+    expect(names("", true, VARIETY)).toEqual(["ceph", "sec"]);
+    expect(names("", true)).toEqual([]);                                 // LIVE 는 없음뿐
+    const w = wide(100, 4);
+    const problems = filterColumns(w.storages, w.nodes, { q: "", problemsOnly: true });
+    expect(problems).toHaveLength(20);
+    expect(filterColumns(w.storages, w.nodes, { q: "archive", problemsOnly: false })).toHaveLength(14);
+    expect(filterColumns(w.storages, w.nodes, { q: "archive", problemsOnly: true }).map((c) => c.storage_name))
+      .toEqual(["stor-056-gpfs-project-archive-cold", "stor-063-gpfs-project-archive-cold"]);
+    // 모든 노드가 ro 인 열(i%10==9)은 문제 아님
+    expect(problems.some((c) => c.storage_name === "stor-009")).toBe(false);
+  });
+
+  test("columnSummaryText: 0 은 빼고 단위(대·칸)를 붙인다, 보고 없음", () => {
+    expect(columnSummaryText(VARIETY.storages[0].summary)).toBe("마운트 3/4대 · 마운트 문제 1칸 · 읽기 전용 1칸");
+    expect(columnSummaryText(VARIETY.storages[1].summary)).toBe("마운트 1/3대 · 마운트 문제 1칸 · 확인 대기 1칸");
+    expect(columnSummaryText(LIVE.storages[1].summary)).toBe("마운트 1/2대 · 없음 1칸");
+    expect(columnSummaryText({ ...LIVE.storages[0].summary, ready: 0, total: 0, pending: 2 })).toBe("보고 없음 · 확인 대기 2칸");
+    expect(columnRuleText("ready_nodes=3/4")).toMatch(/^기준: 신선한 보고만 — 스토리지 목록의 상태\(ready_nodes=3\/4\)/);
+  });
+
+  test("columnNameLines: 13자 이하 한 줄, 26자 이하는 두 조각 다 13자 이하인 마지막 하이픈 뒤(없으면 13자), 넘으면 이름 + 「…」끝 12자", () => {
+    expect(columnNameLines("cephfs-third")).toEqual(["cephfs-third"]);
+    expect(columnNameLines("x".repeat(13))).toEqual(["x".repeat(13)]);
+    expect(columnNameLines("cephfs-secondary")).toEqual(["cephfs-", "secondary"]);
+    // 리뷰 실측: 브라우저 자연 줄바꿈이면 「weka-」/「research-」/「archive-01」 세 줄(-01 앞은 못 꺾는다) -- 두 줄 칸에서 끝이 잘렸다
+    expect(columnNameLines("weka-research-archive-01")).toEqual(["weka-research", "-archive-01"]);
+    expect(columnNameLines("stor-010-nfs-scratch")).toEqual(["stor-010-nfs-", "scratch"]);
+    expect(columnNameLines("stor-011-weka-research-01")).toEqual(["stor-011-weka", "-research-01"]);
+    expect(columnNameLines("x".repeat(24))).toEqual(["x".repeat(13), "x".repeat(11)]);
+    expect(columnNameLines("y".repeat(26))).toEqual(["y".repeat(13), "y".repeat(13)]);
+    for (const name of ["cephfs-secondary", "weka-research-archive-01", "a-b-c-d-e-f-g-h-i-j-k-l-m", "z".repeat(26)]) {
+      const lines = columnNameLines(name);
+      expect(lines.join(""), name).toBe(name);                          // 26자 이하는 두 줄 안에 다(빠지는 글자 없음)
+      expect(lines.every((l) => l.length <= 13), name).toBe(true);
+    }
+    expect(columnNameLines("stor-007-gpfs-project-archive-cold")).toEqual(["stor-007-gpfs-project-archive-cold", "…archive-cold"]);
+  });
+
+  test("columnPathTail: 14자 이하는 null(전체), 넘으면 끝 13자 안의 「/」 경계 끝(8자 이상) 또는 끝 13자 -- 같은 접두도 열마다 다르다", () => {
+    expect(columnPathTail("/k8s_pv/gpfs")).toBeNull();
+    expect(columnPathTail("/x".repeat(7))).toBeNull();                  // 14자
+    expect(columnPathTail("/mgmt_storage/gpfs/proj01")).toBe("/gpfs/proj01");
+    expect(columnPathTail("/mgmt_storage/onefs/home")).toBe("/onefs/home");
+    // 「/」 경계 끝이 짧으면(「/003」) 끝 13자를 그대로 -- 더 많이 보인다
+    expect(columnPathTail("/mgmt_storage/very/long/mount/path/for/testing/truncation/003")).toBe("runcation/003");
+    expect(columnPathTail("/mgmt_storage/project_archive_cold_tier")).toBe("ive_cold_tier");
+    for (const p of ["/mgmt_storage/gpfs/proj01", "/mgmt_storage/onefs/home", "/mgmt_storage/nfs/scratch-long-name"]) {
+      const tail = columnPathTail(p)!;
+      expect(p.endsWith(tail), p).toBe(true);
+      expect([...tail].length, p).toBeLessThanOrEqual(13);               // 「…」 붙여 14자 = 머리 상자 한 줄
+    }
+  });
 });

@@ -1,8 +1,8 @@
 import { render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { expect, test } from "vitest";
-import { MountTipBody, SharedTipBody } from "./MountCell";
-import { LIVE, NOW_ISO, absent, broken, column, ready, row, sharedOk } from "./mountFixtures";
+import { MountTipBody, NodeTags, ProblemTag, SharedHeadTipBody, SharedTipBody, StorageTipBody } from "./MountCell";
+import { LIVE, NOW_ISO, VARIETY, absent, broken, column, ready, row, sharedOk } from "./mountFixtures";
 import { NodeMountSheet } from "./NodeMountSheet";
 import type { MountCellData, MountStatusResponse, SharedCellData } from "./types";
 
@@ -74,4 +74,33 @@ test("시트: 없음·마운트 빠짐 칸과 없는 공용 디렉터리에 「�
 test("시트 대조군: 읽기 전용 칸의 쓰기 열은 「불가(읽기 전용)」", () => {
   const dlg = sheet({ r: readOnly }, sharedOk());
   expect(dlg).toHaveTextContent("불가(읽기 전용)");
+});
+
+// 열 머리 툴팁(2026-11-25 -- 고정 폭 머리에서 잘리는 전체 이름·경로 + 요약 문장 + 기준, 사이트 덧붙임은 extra 슬롯).
+test("열 머리 툴팁: 전체 이름·경로·요약 문장·기준, extra 슬롯은 요약과 기준 사이", () => {
+  const long = column("stor-007-gpfs-project-archive-cold", "/mgmt_storage/very/long/mount/path", {
+    ready: 3, total: 4, detail: "ready_nodes=3/4", broken: 1, read_only: 1,
+  });
+  const el = render(<div><StorageTipBody col={long} extra={<p>덧붙임 슬롯</p>} /></div>).container.firstElementChild as HTMLElement;
+  expect(el).toHaveTextContent("stor-007-gpfs-project-archive-cold");
+  expect(el).toHaveTextContent("/mgmt_storage/very/long/mount/path");
+  expect(el).toHaveTextContent("마운트 3/4대 · 마운트 문제 1칸 · 읽기 전용 1칸");
+  expect(el).toHaveTextContent(/기준: 신선한 보고만 — 스토리지 목록의 상태\(ready_nodes=3\/4\)/);
+  expect(el.textContent!.indexOf("덧붙임 슬롯")).toBeGreaterThan(el.textContent!.indexOf("읽기 전용 1칸"));
+  expect(el.textContent!.indexOf("덧붙임 슬롯")).toBeLessThan(el.textContent!.indexOf("기준:"));
+  const sh = render(<div><SharedHeadTipBody shared={LIVE.shared_dir!} /></div>).container.firstElementChild as HTMLElement;
+  expect(sh).toHaveTextContent("/dms_shared/dms/artifacts");
+  expect(sh).toHaveTextContent("대부분 노드: /dms_shared (nfs4)");
+});
+
+test("행 꼬리표 lead: 맨 앞에 그리고, 다른 꼬리표가 없어도 lead 만으로 그린다(없으면 null)", () => {
+  const broken = VARIETY.nodes[1];     // n-broken: 배치 제외·cordon 배지
+  const el = render(<div><NodeTags row={broken} lead={<ProblemTag row={broken} />} /></div>).container.firstElementChild!;
+  const tags = el.firstElementChild!;
+  expect(tags.firstElementChild).toHaveTextContent("문제 3");
+  expect(tags).toHaveTextContent("배치 제외");
+  const bare = row("n0", {}, { k8s_node: null, problem: true, problem_count: 1 });
+  expect(render(<div><NodeTags row={bare} /></div>).container.firstElementChild!.textContent).toBe("");
+  expect(render(<div><NodeTags row={bare} lead={<ProblemTag row={bare} />} /></div>).container.firstElementChild)
+    .toHaveTextContent(/^문제 1$/);
 });

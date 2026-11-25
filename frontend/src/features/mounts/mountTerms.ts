@@ -2,7 +2,8 @@ import type { LucideIcon } from "lucide-react";
 import { CircleCheck, CircleQuestionMark, CircleX, Hourglass, Lock, Minus, TriangleAlert } from "lucide-react";
 import { reasonText } from "../../lib/api";
 import type {
-  CellState, ControlPod, MountCellData, MountDisk, MountRow, MountStatusResponse, SharedCellData, SharedMajority, SharedState,
+  CellState, ColumnSummary, ControlPod, MountCellData, MountDisk, MountRow, MountStatusResponse, SharedCellData, SharedMajority,
+  SharedState, StorageColumn,
 } from "./types";
 
 // 마운트 현황(2026-11-23)의 용어·표기 **단일 출처**(공용 코어 -- k8s 를 모른다). 칸은 색만으로 구분하지 않는다: 아이콘 + 글자 +
@@ -313,4 +314,85 @@ export function roleLabel(role: string, extra?: Record<string, string>): string 
 /** 칸의 접근성 이름 「k8s-w1 · cephfs-secondary: 없음」 */
 export function cellAriaLabel(node: string, column: string, label: string): string {
   return `${node} · ${column}: ${label}`;
+}
+
+// 열(스토리지) 쪽 표기·거르기(2026-11-25 사용자 요청 「스토리지가 100개가 될 수도 있어」 -- 표 머리 압축·열 거르기).
+
+/** 「문제 있는 스토리지」 열(열 거르기 ?cols=problems) -- 서버 mount_status._ro_outlier_columns·_problem_count 의 열 쪽 거울:
+ *  신선한 마운트 문제 칸(summary.broken > 0)이 있거나, 같은 열에 신선한 ready 칸이 있는데 신선한 읽기 전용 칸이 있다. 모든
+ *  노드가 ro 인 열(의도된 구성)·없음·확인 대기·리포트 지연은 문제로 세지 않는다. rows = 응답의 모든 행(행 필터 전). */
+export function columnProblem(col: StorageColumn, rows: readonly MountRow[]): boolean {
+  if (col.summary.broken > 0) return true;
+  let ready = false;
+  let readOnly = false;
+  for (const r of rows) {
+    if (!r.fresh) continue;
+    const state = r.cells[col.storage_name]?.state;
+    if (state === "ready") ready = true;
+    else if (state === "read_only") readOnly = true;
+    if (ready && readOnly) return true;
+  }
+  return false;
+}
+
+/** q(앞뒤 공백 떼고 대소문자 무시)가 storage_name 또는 mount_path 에 들어 있는 열 ∩ (problemsOnly 면 columnProblem). 응답 순서
+ *  유지. 조건이 없으면 **같은 배열**을 돌려준다(부르는 쪽 memo 가 깨지지 않게). */
+export function filterColumns(cols: StorageColumn[], rows: readonly MountRow[],
+                              f: { q: string; problemsOnly: boolean }): StorageColumn[] {
+  const q = f.q.trim().toLowerCase();
+  if (q === "" && !f.problemsOnly) return cols;
+  return cols.filter((c) =>
+    (q === "" || c.storage_name.toLowerCase().includes(q) || c.mount_path.toLowerCase().includes(q))
+    && (!f.problemsOnly || columnProblem(c, rows)));
+}
+
+/** 열 머리 툴팁의 요약 문장 「마운트 3/4대 · 마운트 문제 1칸 · 읽기 전용 1칸 · 없음 1칸 · 확인 대기 1칸」(0 은 뺀다 -- 신선한 칸만
+ *  센 수). 보고가 하나도 없으면(total 0) 앞머리가 「보고 없음」. */
+export function columnSummaryText(s: ColumnSummary): string {
+  const parts = [s.total > 0 ? `마운트 ${s.ready}/${s.total}대` : "보고 없음"];
+  const counted: [number, string][] = [
+    [s.broken, CELL_META.broken.label], [s.read_only, CELL_META.read_only.label],
+    [s.absent, CELL_META.absent.label], [s.pending, CELL_META.pending.label],
+  ];
+  for (const [n, label] of counted) if (n > 0) parts.push(`${label} ${n}칸`);
+  return parts.join(" · ");
+}
+
+/** 열 머리 툴팁의 기준 문장(예전 th title -- 내장 툴팁은 열 머리 HoverTip 과 겹쳐 뺐다). */
+export const columnRuleText = (detail: string): string =>
+  `기준: 신선한 보고만 — 스토리지 목록의 상태(${detail})와 같은 규칙, 읽기 전용도 마운트로 셉니다`;
+
+/** 열 머리 이름 칸의 보이는 줄(고정 폭 6.5rem 머리의 이름 칸은 두 줄). 머리 상자(w-24 = 96px)에 12px 등폭 글자가 한 줄 13자
+ *  들어간다(스토리지 이름은 [a-z0-9-] -- 저장소 storages._NAME_RE, 등폭 글꼴 advance 약 0.6em = 7.2px).
+ *  - 13자 이하: 한 줄.
+ *  - 26자(두 줄) 이하: **줄을 직접 나눈다** -- 두 조각이 모두 13자 이하가 되는 가장 뒤의 하이픈 뒤(「cephfs-」/「secondary」), 없으면
+ *    13자에서. 브라우저 자연 줄바꿈(하이픈 뒤에서 먼저 꺾고 「-01」 앞은 못 꺾는다)에 맡기면 24자 이름도 세 줄이 돼 두 줄 칸에서
+ *    끝(구별하는 접미)이 잘렸다(2026-11-25 리뷰 실측: 「weka-research-archive-01」 → 「weka-」/「research-…」).
+ *  - 26자 초과: [이름 전체(앞 조각 -- 화면이 말줄임), 「…」 + 끝 12자] -- 같은 접두로 시작하는 스토리지들을 끝으로 가른다(전체 작업
+ *    경로 열의 「끝을 보인다」 선례). */
+export const COLUMN_NAME_LINE = 13;
+export function columnNameLines(name: string): string[] {
+  const chars = [...name];
+  const n = chars.length;
+  const per = COLUMN_NAME_LINE;
+  if (n <= per) return [name];
+  if (n > per * 2) return [name, `…${chars.slice(-(per - 1)).join("")}`];
+  let k = per;
+  for (let i = per; i >= n - per; i--) {
+    if (chars[i - 1] === "-") { k = i; break; }
+  }
+  return [chars.slice(0, k).join(""), chars.slice(k).join("")];
+}
+
+/** 열 머리 경로 줄의 끝 조각(2026-11-25 리뷰) -- 11px 등폭 글자가 머리 상자에 14자 들어간다. 14자 이하면 null(전체를 그린다).
+ *  넘으면 끝 13자 안에서 경로 조각 경계(「/」)로 시작하는 가장 긴 끝(8자 이상일 때 -- 「/gpfs/proj01」), 아니면 그냥 끝 13자 --
+ *  화면은 앞에 「…」를 붙인다(낭독은 전체 경로). 프로덕션 mount_path 는 /mgmt_storage/… 처럼 앞이 길게 같아 앞 조각을 보이면(말줄임)
+ *  모든 열이 「/mgmt_storage…」로 똑같이 보였다. */
+export const COLUMN_PATH_LINE = 14;
+export function columnPathTail(path: string): string | null {
+  const chars = [...path];
+  if (chars.length <= COLUMN_PATH_LINE) return null;
+  const tail = chars.slice(-(COLUMN_PATH_LINE - 1));
+  const slash = tail.indexOf("/");
+  return slash >= 0 && tail.length - slash >= 8 ? tail.slice(slash).join("") : tail.join("");
 }

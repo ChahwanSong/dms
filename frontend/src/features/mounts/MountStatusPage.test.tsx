@@ -6,7 +6,7 @@ import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
 import { afterAll, afterEach, beforeAll, expect, test } from "vitest";
 import { MountStatusPage } from "./MountStatusPage";
-import { EMPTY_NODES, LIVE, NO_STORAGES, VARIETY, WITH_PODS } from "./mountFixtures";
+import { EMPTY_NODES, LIVE, NO_STORAGES, VARIETY, WITH_PODS, wide } from "./mountFixtures";
 import type { MountStatusResponse } from "./types";
 
 const server = setupServer();
@@ -94,9 +94,17 @@ test("칸 글자: 모든 갈래 + 공용 디렉터리 + 행 꼬리표", async ()
   expect(within(rowOf("n-broken")).getByText("배치 제외")).toBeInTheDocument();
   expect(within(rowOf("n-broken")).getByText("cordon")).toBeInTheDocument();
   expect(within(rowOf("n-pend")).getByText("클러스터에 없음")).toBeInTheDocument();
-  expect(within(rowOf("n-stale")).getByText(/^리포트 지연 · 12분 전$/)).toBeInTheDocument();
   // 문제 꼬리표: 고정 첫 열(행 머리)에 수 -- 가로로 민 표·필터 없이도 문제 노드가 보인다. 지연은 「지연」(수 모름)
   const head = (name: string) => within(t).getByRole("rowheader", { name: new RegExp(`^${name}`) });
+  // 보고 시각은 고정 첫 열의 <time>(「보고」 열은 없다 -- 2026-11-25). 지연이면 붉은 글자 + 낭독용 「리포트 지연 · 」, KST 는 title
+  const staleAge = within(head("n-stale")).getByText("12분 전").closest("time")!;
+  expect(staleAge).toHaveTextContent("리포트 지연 · 12분 전");
+  expect(staleAge).toHaveClass("text-bad");
+  expect(staleAge.getAttribute("title")).toMatch(/KST$/);
+  expect(within(head("n-build")).getByText("방금").closest("time")).toHaveClass("text-muted");
+  expect(within(t).queryByRole("columnheader", { name: "보고" })).toBeNull();
+  // 문제 꼬리표는 꼬리표 줄 맨 앞(노드 이름이 고정 폭 첫 열을 다 쓰게)
+  expect(within(head("n-broken")).getByText("문제 3").closest("span.flex-wrap")!.firstElementChild).toHaveTextContent("문제 3");
   expect(within(head("n-broken")).getByText("문제 3")).toBeInTheDocument();
   expect(within(head("n-ro")).getByText("문제 3")).toBeInTheDocument();
   expect(within(head("n-stale")).getByText("지연")).toBeInTheDocument();
@@ -273,4 +281,155 @@ test("파드 덧붙임이 없는 응답(control_pods 없음)이면 파드 꼬리
   await screen.findByRole("table");
   expect(screen.queryByText("dms-api")).toBeNull();
   expect(screen.queryByText(/표에 없는 노드/)).toBeNull();
+});
+
+// 2026-11-25 압축 레이아웃(사용자 요청 「테이블 칸 좌우가 너무 길어 … 스토리지가 100개가 될 수도 있어」).
+test("열 머리 압축: 「마운트 r/t」 + 문제·읽기 전용은 아이콘 + 수(낭독용 낱말은 sr-only), 내장 title 없음", async () => {
+  renderPage(VARIETY);
+  await screen.findByRole("table");
+  const ceph = within(table()).getByRole("columnheader", { name: /^ceph/ });
+  expect(ceph).toHaveTextContent("마운트 3/4");
+  expect(ceph).toHaveTextContent("문제 1");
+  expect(ceph).toHaveTextContent("읽기 전용 1");
+  expect(within(ceph).getByText("문제")).toHaveClass("sr-only");
+  expect(ceph).not.toHaveAttribute("title");
+  expect(ceph.querySelector("[title]")).toBeNull();
+  expect(within(table()).getByRole("columnheader", { name: /DMS 공용/ })).not.toHaveAttribute("title");
+  // 고정 폭 열: 머리 내용은 절대폭 상자(w-24), 칸 칩은 절대 상한(max-w-24) -- auto 표에서 열을 묶는 방법(e2e E19 가 폭을 잰다)
+  expect(ceph).toHaveClass("w-[6.5rem]", "min-w-[6.5rem]");
+  expect(ceph.firstElementChild).toHaveClass("w-24");
+  expect(within(table()).getByLabelText("n-broken · ceph: 마운트 빠짐")).toHaveClass("max-w-24");
+});
+
+test("열 머리에 올리면 툴팁(전체 이름·경로·요약 문장·기준), 벗어나면 닫힌다", async () => {
+  renderPage(VARIETY);
+  await screen.findByRole("table");
+  const ceph = within(table()).getByRole("columnheader", { name: /^ceph/ });
+  fireEvent.mouseEnter(ceph);
+  const tip = await screen.findByRole("tooltip");
+  expect(tip).toHaveTextContent("ceph");
+  expect(tip).toHaveTextContent("/cephfs");
+  expect(tip).toHaveTextContent("마운트 3/4대 · 마운트 문제 1칸 · 읽기 전용 1칸");
+  expect(tip).toHaveTextContent("ready_nodes=3/4");
+  fireEvent.mouseLeave(ceph);
+  await waitFor(() => expect(screen.queryByRole("tooltip")).toBeNull());
+  fireEvent.mouseEnter(within(table()).getByRole("columnheader", { name: /DMS 공용/ }));
+  expect(await screen.findByRole("tooltip")).toHaveTextContent("대부분 노드: /dms_shared (nfs4)");
+});
+
+// cephfs-third 마운트 문제 1 · k8s-pv-gpfs 는 w1 만 ro(w2 는 쓰기 가능 = 문제) · k8s-pv-onefs 는 두 노드 모두 ro(의도된 구성 = 문제 아님)
+const WITH_PROBLEM_COLS: MountStatusResponse = {
+  ...LIVE,
+  storages: LIVE.storages.map((c) => (c.storage_name === "cephfs-third" ? { ...c, summary: { ...c.summary, broken: 1 } }
+    : c.storage_name === "k8s-pv-gpfs" ? { ...c, summary: { ...c.summary, read_only: 1 } }
+    : c.storage_name === "k8s-pv-onefs" ? { ...c, summary: { ...c.summary, read_only: 2 } } : c)),
+  nodes: LIVE.nodes.map((r) => ({
+    ...r,
+    cells: {
+      ...r.cells,
+      ...(r.node_name === "k8s-w1" ? { "k8s-pv-gpfs": { ...r.cells["k8s-pv-gpfs"], state: "read_only" as const, writable: false } } : {}),
+      "k8s-pv-onefs": { ...r.cells["k8s-pv-onefs"], state: "read_only" as const, writable: false },
+    },
+  })),
+};
+
+test("열 거르기: 「문제 있는 스토리지」·스토리지 찾기(이름·경로)는 URL 에 남고, 0열이면 「조건 지우기」", async () => {
+  renderPage(WITH_PROBLEM_COLS);
+  await screen.findByRole("table");
+  const heads = () => within(table()).getAllByRole("columnheader");
+  expect(heads()).toHaveLength(8);                                       // 노드 + DMS 공용 + 6
+  await userEvent.click(screen.getByRole("button", { name: "문제 있는 스토리지 2" }));
+  expect(screen.getByTestId("search")).toHaveTextContent("cols=problems");
+  expect(heads().map((h) => h.getAttribute("data-col")).filter(Boolean)).toEqual(["cephfs-third", "k8s-pv-gpfs"]);
+  expect(screen.getByText("스토리지 2/6")).toBeInTheDocument();
+  const box = screen.getByRole("searchbox", { name: "스토리지 찾기" });
+  await userEvent.type(box, "pv");
+  await waitFor(() => expect(screen.getByTestId("search")).toHaveTextContent("q=pv"));
+  expect(heads().map((h) => h.getAttribute("data-col")).filter(Boolean)).toEqual(["k8s-pv-gpfs"]);
+  await userEvent.clear(box);
+  await userEvent.type(box, "zzz");
+  expect(await screen.findByText(/조건에 맞는 스토리지가 없습니다 — 「zzz」 · 문제 있는 스토리지만/)).toBeInTheDocument();
+  expect(heads()).toHaveLength(2);                                       // 표는 공용 열과 행으로 그대로
+  await userEvent.click(screen.getByRole("button", { name: "조건 지우기" }));
+  await waitFor(() => expect(screen.getByTestId("search")).toHaveTextContent(/^$/));
+  expect(box).toHaveValue("");
+  expect(heads()).toHaveLength(8);
+  expect(screen.queryByText(/스토리지 \d+\/6/)).toBeNull();
+});
+
+test("?view=cards&q=secondary 딥링크: 카드는 거른 스토리지만, 노드 시트는 모든 스토리지", async () => {
+  renderPage(LIVE, "/admin/storages/mounts?view=cards&q=secondary");
+  const list = await screen.findByRole("list", { name: "노드별 마운트 현황" });
+  expect(within(list).getAllByLabelText(/ · cephfs-secondary: /)).toHaveLength(2);
+  expect(within(list).queryAllByLabelText(/ · cephfs-dms: /)).toHaveLength(0);
+  expect(screen.getByRole("searchbox", { name: "스토리지 찾기" })).toHaveValue("secondary");
+  expect(screen.getByText("스토리지 1/6")).toBeInTheDocument();
+  await userEvent.click(within(list).getByRole("button", { name: "k8s-w1" }));
+  const sheet = await screen.findByRole("dialog");
+  expect(within(within(sheet).getByRole("list", { name: "k8s-w1 스토리지별 마운트" })).getAllByRole("listitem")).toHaveLength(6);
+});
+
+test("표 래퍼: 초점 가능한 영역(화살표 키로 민다), 민 방향을 data-scroll 로 알린다(고정 칸 그늘)", async () => {
+  renderPage(LIVE);
+  await screen.findByRole("table");
+  const wrap = screen.getByRole("region", { name: /노드 × 스토리지 표/ });
+  expect(wrap.tabIndex).toBe(0);
+  expect(wrap.firstElementChild).toBe(table());                          // 표는 래퍼의 바로 아래 자식(e2e 가 부모로 래퍼를 찾는다)
+  expect(wrap).not.toHaveAttribute("data-scroll");
+  fireEvent.scroll(wrap, { target: { scrollLeft: 40 } });
+  expect(wrap).toHaveAttribute("data-scroll", "x");
+  fireEvent.scroll(wrap, { target: { scrollTop: 10 } });
+  expect(wrap).toHaveAttribute("data-scroll", "xy");
+  fireEvent.scroll(wrap, { target: { scrollLeft: 0, scrollTop: 0 } });
+  expect(wrap).not.toHaveAttribute("data-scroll");
+});
+
+test("100열 스모크: 머리 102개, 「archive」 찾기 → 14열", async () => {
+  renderPage(wide(100, 4));
+  await screen.findByRole("table");
+  expect(within(table()).getAllByRole("columnheader")).toHaveLength(102);
+  expect(screen.getByRole("button", { name: "문제 있는 스토리지 20" })).toBeInTheDocument();
+  await userEvent.type(screen.getByRole("searchbox", { name: "스토리지 찾기" }), "archive");
+  await waitFor(() => expect(within(table()).getAllByRole("columnheader")).toHaveLength(16));
+  expect(screen.getByText("스토리지 14/100")).toBeInTheDocument();
+  // 긴 이름은 앞 조각 말줄임 + 끝 12자(낭독은 전체 이름 한 번 -- 끝 조각은 aria-hidden)
+  const long = within(table()).getByRole("columnheader", { name: /^stor-007-gpfs-project-archive-cold/ });
+  expect(within(long).getByText("…archive-cold")).toHaveAttribute("aria-hidden");
+});
+
+test("열 머리 이름·경로는 구별되는 끝이 보인다: 26자 이하 이름은 하이픈 뒤에서 두 줄, 긴 경로는 「…」 + 끝 조각(낭독은 전체 한 번)", async () => {
+  // 프로덕션 모양: mount_path 앞이 /mgmt_storage/ 로 길게 같다 -- 앞 조각을 보이면 모든 열이 「/mgmt_storage…」(2026-11-25 리뷰)
+  const body: MountStatusResponse = {
+    ...LIVE,
+    storages: LIVE.storages.map((c) => (c.storage_name === "k8s-pv-gpfs" ? { ...c, mount_path: "/mgmt_storage/gpfs/proj01" }
+      : c.storage_name === "k8s-pv-onefs" ? { ...c, mount_path: "/mgmt_storage/onefs/home" } : c)),
+  };
+  renderPage(body);
+  await screen.findByRole("table");
+  const head = (name: string) => within(table()).getByRole("columnheader", { name: new RegExp(`^${name}`) });
+  const gpfs = head("k8s-pv-gpfs");
+  expect(within(gpfs).getByText("…/gpfs/proj01")).toHaveAttribute("aria-hidden");
+  expect(within(gpfs).getByText("/mgmt_storage/gpfs/proj01")).toHaveClass("sr-only");
+  expect(within(head("k8s-pv-onefs")).getByText("…/onefs/home")).toHaveAttribute("aria-hidden");
+  // 짧은 경로는 그대로 한 줄(낭독 조각 없음)
+  expect(within(head("cephfs-dms")).queryByText(/^…/)).toBeNull();
+  // 이름: 하이픈 뒤에서 직접 나눈 두 줄(aria-hidden) + 낭독용 전체(sr-only)
+  const sec = head("cephfs-secondary");
+  expect(within(sec).getByText("cephfs-")).toHaveAttribute("aria-hidden");
+  expect(within(sec).getByText("secondary")).toHaveAttribute("aria-hidden");
+  expect(within(sec).getByText("cephfs-secondary")).toHaveClass("sr-only");
+});
+
+test("열을 거르면(?q=) 수의 범위를 말한다: 안내 줄 + 카드 요약 줄 「표시한 스토리지 n개 기준」(머리 「문제 n」은 전체 기준)", async () => {
+  const { unmount } = renderPage(VARIETY, "/admin/storages/mounts?view=cards");
+  const all = await screen.findByRole("list", { name: "노드별 마운트 현황" });
+  expect(within(all).getAllByRole("listitem")[1]).not.toHaveTextContent("기준)");
+  expect(screen.queryByText(/스토리지를 거른 보기입니다/)).toBeNull();
+  unmount();
+  renderPage(VARIETY, "/admin/storages/mounts?view=cards&q=sec");
+  const list = await screen.findByRole("list", { name: "노드별 마운트 현황" });
+  expect(screen.getByText(/스토리지를 거른 보기입니다/)).toHaveTextContent("숨긴 스토리지까지 센 전체 기준");
+  const brokenCard = within(list).getAllByRole("listitem")[1];
+  expect(within(brokenCard).getByText("문제 3")).toBeInTheDocument();             // 서버 problem_count -- ceph 의 문제까지 센다
+  expect(brokenCard).toHaveTextContent("마운트 문제 1 (표시한 스토리지 1개 기준)");
 });

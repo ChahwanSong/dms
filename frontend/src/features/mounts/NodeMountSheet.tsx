@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { Dialog } from "../../components/ui/Dialog";
 import { agoText, kstStamp } from "../../lib/datetime";
@@ -7,15 +8,18 @@ import {
   cellAriaLabel, cellHelp, cellLabel, cellMounted, coverText, podFailedHelp, podFailedOn, podFailedRoles, podTag, podsOn, probeModeText,
   sharedDisplay, sharedHelp, usageDetail, writableText, yesNo,
 } from "./mountTerms";
-import type { MountRow, MountStatusResponse } from "./types";
+import type { MountRow, MountStatusResponse, StorageColumn } from "./types";
 
 // 노드 하나의 마운트 상세(측면 시트, 2026-11-23). 표의 칸 툴팁과 같은 내용을 키보드로도 볼 수 있게 하는 진입점이다(칸은 탭 정지가
 // 아니다 -- MountMatrix). 열고 닫기는 부르는 쪽(MountStatusPage)이 하고, 닫으면 그 노드 버튼으로 포커스를 돌려준다(onCloseAutoFocus).
+// renderStorageTip = 열 머리 툴팁의 사이트 덧붙임(dms-k8s 의 종류·선택 가능한 PV·클러스터·StorageClass) -- 열 머리 툴팁은 마우스
+// 전용이라 같은 내용을 스토리지 줄마다 싣는다(2026-11-25 리뷰: 키보드·터치로 PV 수·「모름」을 볼 길이 없었다).
 
-export function NodeMountSheet({ row, data, roleLabels, onClose, onCloseAutoFocus }: {
+export function NodeMountSheet({ row, data, roleLabels, renderStorageTip, onClose, onCloseAutoFocus }: {
   row: MountRow | null;
   data: MountStatusResponse;
   roleLabels?: Record<string, string>;
+  renderStorageTip?: (col: StorageColumn) => ReactNode;
   onClose: () => void;
   onCloseAutoFocus: (e: Event) => void;
 }) {
@@ -96,6 +100,7 @@ export function NodeMountSheet({ row, data, roleLabels, onClose, onCloseAutoFocu
                                      aria-label={cellAriaLabel(row.node_name, col.storage_name, cellLabel(cell))} />
                     </div>
                     <p className="font-mono text-xs text-muted break-all">{col.mount_path}</p>
+                    {renderStorageTip !== undefined && <div className="text-xs">{renderStorageTip(col)}</div>}
                     <p className="text-xs tabular-nums">
                       {`쓰기 ${cell.status === null ? "—" : writableText(cell.writable, cellMounted(cell))}`}
                       {usage !== null && ` · ${usage}`}
