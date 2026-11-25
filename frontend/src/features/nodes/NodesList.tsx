@@ -284,16 +284,19 @@ function NodeDetail({ node }: { node: NodeInfo }) {
               </tr>
             </thead>
             <tbody>
+              {/* 경로 두 열은 최소 9rem + 필요할 때만 줄바꿈([overflow-wrap:anywhere]) -- break-all 이면 열이 한 글자 폭까지 줄어
+                  390 에서 경로가 글자마다 세로로 꺾였다(2026-11-25 d44 실증). 좁은 화면은 Table 래퍼(overflow-x-auto) 안에서
+                  가로로 민다. 상태·쓰기는 nowrap(「아니 오」 꺾임), 사유 코드도 필요할 때만 줄바꿈. */}
               {mounts.map((m, i) => (
                 <tr key={i} className="border-t border-line">
-                  <td className="py-2 font-medium">{m.storage_name}</td>
-                  <td className="break-all">{m.mount_path}</td>
-                  <td className="break-all text-muted">
+                  <td className="py-2 font-medium whitespace-nowrap">{m.storage_name}</td>
+                  <td className="min-w-[9rem] [overflow-wrap:anywhere]">{m.mount_path}</td>
+                  <td className="min-w-[9rem] [overflow-wrap:anywhere] text-muted">
                     {(typeof m.storage_name === "string" ? managedRootOf.get(m.storage_name) : undefined) ?? "—"}
                   </td>
-                  <td><Pill tone={m.status === "Ready" ? "ok" : "bad"}>{m.status}</Pill></td>
-                  <td>{yesNo(m.writable)}</td>
-                  <td className="text-muted">{m.reason ?? "—"}</td>
+                  <td className="whitespace-nowrap"><Pill tone={m.status === "Ready" ? "ok" : "bad"}>{m.status}</Pill></td>
+                  <td className="whitespace-nowrap">{yesNo(m.writable)}</td>
+                  <td className="min-w-[7rem] [overflow-wrap:anywhere] text-muted">{m.reason ?? "—"}</td>
                 </tr>
               ))}
             </tbody>
@@ -456,7 +459,7 @@ export function NodesList() {
                   <td className="py-2 font-medium whitespace-nowrap">{n.node_name}</td>
                   {/* 리포트 지연 행만: 새 이름 힌트(서버 renamed_to) + 「기록 삭제」(2026-11-25 -- 이름이 바뀌었거나 클러스터에서 뺀 노드의
                       옛 행 정리). 정상 행은 지워도 다음 보고에 다시 생겨(서버 409 node_fresh) 버튼을 그리지 않는다. */}
-                  <td>{n.fresh
+                  <td className="pr-3">{n.fresh
                     ? <Pill tone="ok">fresh</Pill>
                     : (
                       <div className="flex flex-col items-start gap-1 py-1">
