@@ -184,6 +184,11 @@ export const REASON_MESSAGES: Record<string, string> = {
   sso_account_not_found: "이 포탈에 계정이 없습니다 — 관리자에게 계정 생성을 요청하세요",
   sso_privileged_account_missing: "운영자 계정은 SSO 로 처음 만들 수 없습니다 — 관리자가 먼저 계정을 만들어야 합니다",
   node_not_found: "노드를 찾을 수 없습니다",
+  // 노드 기록 삭제(2026-11-25, DELETE /api/admin/nodes/{name} -- 리포트 지연 노드의 옛 행 정리). node_in_use 는 서버가
+  // 「node_in_use:<build_node,k8s_primary,…>[;requests=<요청 id,…>]」 복합 코드로 보낸다 -- 기록 삭제 창(ForgetNodeDialog)이 근거를
+  // 한국어로 옮기고 막는 요청은 요청 상세 링크로 그린다.
+  node_fresh: "이 노드는 지금 정상 보고 중이라 기록을 지울 수 없습니다 — 지워도 다음 보고에 다시 생깁니다(리포트 지연 노드만 지울 수 있습니다)",
+  node_in_use: "이 노드를 가리키는 설정이나 진행 중 작업이 있어 기록을 지울 수 없습니다 — 관리 → 컨트롤 상태의 빌드 노드, 스토리지 → k8s 연동의 호출 노드(주·보조)를 다른 노드로 바꾸고, 이 노드에 배치된 진행 중 작업·빌드가 끝나거나 취소된 뒤 다시 시도하세요",
   // 노드 배치 제외(2026-10-02, repositories/node_exclusions.py). nodes_excluded = 계획 거부(쓸 수 있는 노드가 전부
   // 막힘), node_excluded_at_step = 계획 뒤 배정 노드가 막혀 종단, node_excluded = 컨펌 시점에 같은 이유로 종단.
   nodes_excluded: "실행할 수 있는 노드가 모두 배치에서 제외(또는 cordon)되어 있습니다 — 관리자에게 노드 상태를 확인하세요",
@@ -247,7 +252,7 @@ export const REASON_MESSAGES: Record<string, string> = {
   account_username_mismatch: "요청한 계정과 본문의 아이디가 다릅니다 — 화면을 새로고침한 뒤 다시 시도하세요",
   invalid_event_filter: "이벤트 필터 값이 올바르지 않습니다 — 목록에 있는 종류·심각도만 고를 수 있습니다",
   confirm_session_required: "작업 실행 확인(컨펌)은 포탈에 로그인한 사용자만 할 수 있습니다(토큰 인증 불가)",
-  admin_session_required: "빌드·릴리스·컨트롤 상태·레지스트리 삭제·결과 폴더(artifact base) 변경·배치 기록 삭제·작업 삭제는 포탈에 로그인한 관리자만 할 수 있습니다(토큰 인증 불가)",
+  admin_session_required: "빌드·릴리스·컨트롤 상태·레지스트리 삭제·결과 폴더(artifact base) 변경·배치 기록 삭제·노드 기록 삭제·작업 삭제는 포탈에 로그인한 관리자만 할 수 있습니다(토큰 인증 불가)",
   preview_round_required: "배치 확인에는 확인한 미리보기 회차가 필요합니다 — 화면을 새로고침한 뒤 「배치 확인」을 다시 여세요",
   batch_preview_changed: "확인 대화상자를 연 뒤 배치 내용이 바뀌었습니다(항목 추가·재실행으로 다시 미리보기됨) — 대화상자를 닫고 다시 열어 바뀐 내용을 검토하세요",
   // rm 배치 확인은 「되돌릴 수 없음」 동의를 본문에 실어야 한다(2026-10-21 -- 그 체크가 없는 옛 포탈 탭의 확인을 막는다).

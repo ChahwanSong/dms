@@ -15,7 +15,7 @@ from ..config import AGENT_TOOL_NAMES, AgentSettings
 from ..db import utc_now_iso
 from .k8s_fetch import fetch_inventory
 from .probes import (CPU_COUNTER_KEYS, probe_artifact_base, probe_k8s_node,
-                     probe_mounts, probe_os_metrics, probe_tools)
+                     probe_machine_key, probe_mounts, probe_os_metrics, probe_tools)
 
 
 def _read_text(path: str) -> str:
@@ -89,13 +89,21 @@ def carry_node_cpu(last, k8s_node) -> tuple:
     return {**k8s_node, **last, "allocatable_stale": True}, last
 
 
+def _machine_key(fn, host_root):
+    """machine_key 프로브의 버그가 보고 전체를 죽이지 않게(힌트는 부가 정보다) -- 예외는 None(모름)."""
+    try:
+        return fn(host_root)
+    except Exception:
+        return None
+
+
 def build_report(node_name, storages, *, mountinfo_text,
                  tool_names=AGENT_TOOL_NAMES, mounts_fn=None, tools_fn=None,
                  os_fn=None, read_text=None,
                  net_dev_path="/proc/net/dev", virtual_net_path="",
                  artifact_base_path=None, artifact_base_fn=None,
                  host_root="", self_mountinfo_text="",
-                 k8s_node_fn=None, k8s_sync_status=None) -> dict:
+                 k8s_node_fn=None, k8s_sync_status=None, machine_key_fn=None) -> dict:
     """노드 보고 한 건. (2026-10-26 dms-k8s LDAP 코드 삭제: 노드 신원 프로브(identities -- getpwnam)와 nslcd 디렉터리 상태
     (directory)는 싣지 않는다 -- 모든 잡이 root 라 노드의 LDAP 신원 전파를 기다릴 일이 없다.)"""
     mounts_fn = mounts_fn or probe_mounts
@@ -103,6 +111,7 @@ def build_report(node_name, storages, *, mountinfo_text,
     os_fn = os_fn or probe_os_metrics
     artifact_base_fn = artifact_base_fn or probe_artifact_base
     k8s_node_fn = k8s_node_fn or probe_k8s_node
+    machine_key_fn = machine_key_fn or probe_machine_key
     # 이 폴백을 지우면 probe_os_metrics 가 read_text=None 을 받는다 -- 그 안의
     # 호출은 전부 try/except Exception 이라 예외가 삼켜지고 **OS 지표 전체가
     # 조용히 null** 이 된다(테스트는 os_fn 을 주입하므로 초록을 유지한다).
@@ -127,6 +136,9 @@ def build_report(node_name, storages, *, mountinfo_text,
         # (cordon·NoSchedule/NoExecute taint)면 schedulable=False -- planner·stepper 가 이 노드를 후보에서 뺀다.
         # null 은 모름(조회 실패) -- 막지 않는다.
         "k8s_node": k8s_node_fn(node_name),
+        # 같은 장비의 새 이름 힌트(2026-11-25, probes.probe_machine_key): machine-id 의 파생값(원문 아님). 키는 늘 싣는다 --
+        # 모르면 null(서버가 힌트를 만들지 않는다).
+        "machine_key": _machine_key(machine_key_fn, host_root),
     }
     # k8s 인벤토리 워커(2026-10-25): 워커 스레드가 있는 에이전트만 싣는다 -- {"v": 1} 이 곧 능력 선언이다(서버는 선언한
     # 노드에게만 run·클러스터 토큰을 준다). 값은 비밀 없는 워커 상태(idle/running, 진행 중 run, 마지막 결과).

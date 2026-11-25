@@ -54,7 +54,8 @@ PostgreSQL(제어면) + React 포탈 + 노드 에이전트 + Volcano gang-schedu
 - **공유 토큰은 계정·배포 경로를 못 만진다**(2026-10-07). 모든 노드 에이전트가 가진 Bearer 토큰(role admin,
   auth=token)으로 계정을 다시 만들거나 릴리스로 옛 이미지에 롤백하면 특권 게이트가 통째로 무효가 된다 — 계정 변경(관리자 비밀번호
   재설정·인증 잠금 해제 포함, 2026-11-03)은 `accounts_session_required`, 빌드·릴리스·컨트롤 상태·레지스트리 삭제·artifact base 변경·작업(요청) 삭제·배치 기록 삭제(2026-10-26)·배치 스케줄 삭제(2026-11-16)·
-  k8s 연동 변경(호출 노드·주기, 클러스터 등록·주소·토큰·TLS·삭제, StorageClass 매핑 — 2026-10-25, `routes_k8s`)은
+  k8s 연동 변경(호출 노드·주기, 클러스터 등록·주소·토큰·TLS·삭제, StorageClass 매핑 — 2026-10-25, `routes_k8s`)·노드 기록 삭제(
+  `DELETE /api/admin/nodes/{name}` — 2026-11-25, `node_forget`)은
   `auth.require_session_admin`(`admin_session_required`). 그런 새 변경 라우트를 만들면 `require_admin` 이 아니라
   이 의존성을 쓴다. 특권 목록(env `DMS_PRIVILEGED_REQUESTERS` ∪ 계정 화면 부여, 2026-10-12 — 자격 판정은 `privileged.privileged_names`,
   계정 보호는 `privileged.protected_names`(비활성 부여 계정 포함)를 거친다) 이름 계정은 특권 세션 관리자만
@@ -192,8 +193,8 @@ PostgreSQL(제어면) + React 포탈 + 노드 에이전트 + Volcano gang-schedu
 
 ## 테스트·검증
 
-- 백엔드: `PYTHONPATH=<워크트리>/src <venv>/bin/python -m pytest tests -q` (~10분, 6255+ passed · 19 skipped — 2026-11-23 API 파드 artifact base 점검 이식 기준)
-- 프론트: `cd frontend && npx vitest run` (2212+ passed, 130 파일 — 2026-11-23 API 파드 artifact base 점검 이식 기준) · `npx tsc -b`
+- 백엔드: `PYTHONPATH=<워크트리>/src <venv>/bin/python -m pytest tests -q` (~10분, 6321+ passed · 19 skipped — 2026-11-25 stale 노드 기록 정리 기준)
+- 프론트: `cd frontend && npx vitest run` (2235+ passed, 130 파일 — 2026-11-25 stale 노드 기록 정리 기준) · `npx tsc -b`
 - e2e(실 브라우저): `cd frontend && npm run test:e2e` (41 passed, 19 spec — 빌드 포함) — **CI 없음, 수기 게이트**(이미지 빌드 전 게이트는
   `deploy/README.md` §8 「이미지 빌드 전 게이트」)
 - 배포 문서·스크립트 계약: 절 번호·출력 문구를 바꾸면 `tests/test_ingress_contract.py`·`test_install_stages.py`·`test_addons_render.py` 등이

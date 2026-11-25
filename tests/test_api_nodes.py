@@ -51,3 +51,12 @@ def test_node_with_empty_history_returns_empty_list_not_404(client, db):
     # 노드 자체는 여전히 목록에 보인다
     names = [n["node_name"] for n in client.get("/api/admin/nodes", headers=ADMIN).json()]
     assert "node-a" in names
+
+
+def test_nodes_list_carries_renamed_to_for_every_row(client):
+    # 같은 장비의 새 이름 힌트(2026-11-25, node_forget.rename_hints): 필드 하나를 더할 뿐 기존 키는 그대로다. 키가 없거나
+    # fresh 행이면 null -- 판정 세부는 test_node_forget.
+    _ingest(client, "node-a")
+    [node] = client.get("/api/admin/nodes", headers=ADMIN).json()
+    assert node["renamed_to"] is None
+    assert {"node_name", "reported_at", "fresh", "report", "exclusion"} <= set(node)

@@ -54,6 +54,7 @@ dms-k8s 라인의 **완료 기록**이다. 각 항목에는 무엇을 만들었�
 
 | 날짜 | 태그·실증 | 제목 |
 |---|---|---|
+| 11-25 | — (실증 전, 다음 d44+) | stale 노드 기록 정리(기록 삭제·자동 정리·새 이름 힌트) + 노드 상세 「관리 디렉토리」 열 + 빌드·릴리스·컨트롤 상태·아티팩트 경로를 관리 메뉴로 |
 | 11-23 | d42·d43 | 빌드 파드 메모리 상한 1Gi → 2Gi + 프런트 빌드 Node 힙 1024MB 고정 |
 | 11-23 | d40·d41 | API 파드 자체 아티팩트 경로 점검·시작 게이트·「base 접근 불가」 503 사유 + 관리 화면 API/컨트롤러 분리 + 마운트 현황 DMS 파드 꼬리표(dms-ssc 4add57bf 이식) |
 | 11-23 | d38(d37 건너뜀) | 포탈 이미지 빌드의 프런트 타입 검사 heap OOM — 이미지 빌드는 앱 코드만 타입 검사 |
@@ -108,6 +109,114 @@ dms-k8s 라인의 **완료 기록**이다. 각 항목에는 무엇을 만들었�
 ---
 
 ## 상세 기록 (최신순)
+
+### ✨ stale 노드 기록 정리(기록 삭제·자동 정리·새 이름 힌트) + 노드 상세 「관리 디렉토리」 열 + 빌드·릴리스·컨트롤 상태·아티팩트 경로를 관리 메뉴로 — **구현 완료 — 라이브 실증 전**(2026-11-25, 다음 태그 d44+)
+
+사용자(2026-11-25): ① 「스토리지 - 노드에서 상세 버튼을 클릭하면 뜨는 마운트 현황 테이블에 … 마운트 경로뿐 아니라 관리 디렉토리 열도 테이블에
+추가해 줘」 ② 「빌드, 릴리즈, 컨트롤 상태, 아티팩트 경로를 포탈에서는 운영 메뉴 밑에 있는데 관리 메뉴 밑으로 넣어줘」 ③ 프로덕션(OA 사이트) 배포 중
+이슈 — 포털 노드 목록의 「사라지지 않는 stale 노드」 정리 경로(기능 추가, 기존 동작 불변).
+
+- **증상(OA 실측 2026-11-25)**: 호스트 이름 h-aii-dms26001 → h-aii-dms-26001. RKE2 가 노드를 새 이름으로 다시 등록했고 에이전트(노드 이름 =
+  `spec.nodeName` — `50-agent-daemonset.yaml` `DMS_AGENT_NODE_NAME`)는 새 이름으로 정상 보고한다. 옛 이름은 마지막 보고(2026-11-19) 그대로 「리포트
+  지연」으로 영원히 남아 같은 장비가 두 줄 — 노드 수·마운트 현황·지표가 지저분하고 지울 방법이 없었다.
+- **원인**: `repositories/agents.py` 는 보고 때만 agent_nodes 를 갈아 끼우고(INSERT agent_reports + DELETE/INSERT agent_nodes) 지우는 경로가 없다.
+  `retention.prune_agent_reports_once` 는 이력(agent_reports)만 지운다. `/api/admin/nodes` 엔 배치 제외 DELETE 만 있었다. 배치 판정은 fresh 보고만
+  쓰므로(`fresh_reports`) 옛 행이 작업을 받지는 않는다 — 문제는 표시·집계 잡음과 운영자가 정리할 수 없다는 것.
+
+**① 노드 기록 삭제 `DELETE /api/admin/nodes/{name}`**(`api/routes_nodes.py` → `node_forget.forget_node` → `AgentsRepository.forget_node`)
+- **세션 관리자만**(`require_session_admin` — 공유 토큰 403 `admin_session_required`, 비관리자 403 `admin_required`, 무인증 401). 공유 토큰은 모든 노드
+  에이전트가 가진 role admin 자격이라 노드 기록과 배치 제외·보고 이력(마지막 cordon 의 근거)을 지울 수 있으면 안 된다. 유지보수 중에도 허용(배치
+  제외와 같은 정리 동작).
+- **한 트랜잭션**: agent_nodes 행 + node_exclusions 행(있으면) + 그 노드의 agent_reports 전부 + 감사 1행(`mutation_class='agent_node'`, `operation='delete'`,
+  actor = 세션 사용자, before = 마지막 보고 시각·배치 제외 행·지운 이력 수 — 보고 본문은 크므로 싣지 않는다). 200 = `{deleted, reported_at,
+  reports_deleted, exclusion_deleted}`. 같은 이름이 다시 보고하면 새 행으로 다시 생긴다(의도).
+- **거절**: 404 `node_not_found`, 409 `node_fresh`(GET 의 fresh 와 같은 판정 — 살아 있는 노드는 지워도 다음 보고에 다시 생긴다), 409
+  `node_in_use:<토큰,…>`(문자열 합성 — 포탈 `request()` 는 문자열 detail 만 읽는다; 사유 코드 그물은 f-string 접두를 뽑는다). 토큰과 출처(코드로 확인 —
+  `node_forget.REF_KINDS` 순서): `build_node`(control_state.build_node_name), `k8s_primary`·`k8s_secondary`(k8s_sync_settings.primary_node·secondary_node),
+  `active_build`(새 `BuildsRepository.active_on_node` — 그 노드의 Pending·Running 빌드; 빌드 노드를 바꾼 뒤에도 옛 노드에서 돌 수 있다),
+  `active_jobs`(새 `DataJobsRepository.active_jobs_on_node` — 비종단 잡의 worker_pool.candidates). plans 표에는 노드 열이 없고, 표시용 포인터
+  (control_state.artifact_base_check_node·api_base_checks.node_name)는 근거가 아니다. `active_jobs` 면 막는 요청 id 를 최대 5개 상세 꼬리
+  `;requests=<id,…>` 로 싣는다(판정과 같은 스냅숏 — 작업 목록엔 노드 필터가 없어 운영자가 찾을 길이 없었다, 리뷰 반영). 포탈 창은 요청 상세 링크로 보인다.
+- **비종단 잡을 막는 이유**: stepper·`node_exclusions.blocked_nodes` 가 `latest_reports`(신선도 무관)로 후보 노드의 마지막 cordon 을 본다 — 행을
+  지우면 fail-open 이고, ConfirmPending 잡이 확인 뒤 사라진 노드로 제출되면 gang 이 영원히 Pending 이다. 그래서 정확해야 한다: LIKE 사전 필터(JSON
+  직렬화한 이름 + 와일드카드 이스케이프 + `ESCAPE '\'`) 뒤 파싱해 candidates 에 이름이 있는 행만, **깨진 JSON·dict 아님에 이름이 걸리면 쓰는 것으로
+  본다**(fail-closed). planner 순서용 `active_worker_pools`(상한 2000·깨진 행 건너뜀)는 쓰지 않는다.
+- **조건부 DELETE**: 존재·stale·in_use(같은 커넥션의 읽기) 판정 뒤 `DELETE … WHERE reported_at <= 임계` — 0행이면 다시 읽어 404/409. SELECT … FOR UPDATE
+  를 쓰지 않은 이유: PG READ COMMITTED 에서 잠근 옛 행이 동시 ingest(DELETE+INSERT)로 사라지면 그 행을 건너뛰어 「없음」으로 잘못 답한다. 일회용 PG 16
+  두 커넥션으로 「판정 뒤·삭제 전에 다른 커넥션의 보고가 커밋」을 재현 — `node_fresh` 로 거절, 새 행·이력 2건 그대로.
+- **받아들인 위험**(docstring): (a) 이력이 노드당 최대 약 4.3만 행(보존 30일 × 하루 1440 보고)이라 한 트랜잭션이 수 초 — API 단일 커넥션이 그동안
+  막힌다(라이브 실증에서 잰다), (b) retention 청크 삭제와의 드문 PG 교착(500 — 다시 누르면 된다), (c) in_use 판정 뒤의 좁은 계획 창(planner 는 fresh
+  노드만 쓴다).
+
+**② 포탈 노드 화면**(`features/nodes/NodesList.tsx`·새 `ForgetNodeDialog.tsx`·`useNodes.useForgetNode`)
+- 「리포트 지연」 행의 상태 칸에만 「기록 삭제」 버튼(9열 유지) + **페이지 수준** 확인 창 하나(연 순간 스냅숏 — 행 안에 두면 성공·409 뒤 재조회로 함께
+  언마운트돼 콜백·포커스·오류 문구를 잃는다; 보안 이벤트 `GlobalUnlockButton` 과 같은 이유). 창: 되돌릴 수 없음, 같은 이름이 다시 보고하면 새로
+  생김, 배치 제외도 함께 지워짐(있으면), 막는 것(빌드 노드·k8s 호출 노드·진행 중 작업·빌드), 마지막 보고. `node_in_use:` 는 근거 토큰을 한국어로
+  옮겨 보이고, 막는 요청(`;requests=`)은 요청 상세(`/jobs/<id>`) 링크로 그린다. 결과 줄은 늘 그려 둔 role=status(성공 뒤 포커스). 사유 코드 `node_fresh`·`node_in_use` 를 `reasonCodes.json`·`REASON_MESSAGES` 양쪽에,
+  `admin_session_required` 문구에 「노드 기록 삭제」.
+
+**③ 자동 정리(선택, 기본 꺼짐)** — `node_forget.forget_absent_nodes_once`, 컨트롤러 retention 루프(`controller._retention_step`)의 **맨 끝**(새 루프 없음 —
+루프 목록 고정 테스트 불변, k8s 실패가 위 prune 들을 막지 않는다).
+- `DMS_AGENT_NODE_FORGET_SECONDS`(기본 0 = 끔, 켜면 예 604800): 그 시간 이상 보고가 없고 **k8s Node 목록에 그 이름이 없고** in_use 가 아닌 노드만, 같은
+  몸통으로 틱당 **지운 수** 20개까지(in_use 거절은 세지 않는다 — 시도 수에 걸면 이름순 앞자리의 in_use 노드가 매 틱 예산을 다 써서 뒤의 노드가 영원히
+  남는다, 리뷰 반영; 감사 `auto_forget`·actor `system:agent-node-forget`, 이벤트 `agent_node_forgotten`). 꺼짐·후보 0 이면 k8s 를 부르지 않는다. 음수와
+  `0 < 값 < DMS_AGENT_REPORT_STALE_SECONDS` 는 기동 거부. base `20-config.yaml` 에 `"0"`(코드 기본과 같은 사이트 중립값 — 손잡이 한곳).
+- **모름은 지우지 않는다**(null ≠ false): 조회 예외 → 이벤트 `agent_node_forget_skipped`(`k8s_list_failed`), 빈 목록·문자열 이름 없음 → 같은 이벤트
+  (`no_nodes_listed` — 스텁 백엔드의 `build_node_lister` 는 `lambda: []` 라 「노드 없음」으로 읽으면 로컬·CI 의 오래된 행이 전부 지워진다), in_use →
+  `agent_node_forget_in_use`(payload 에 막는 요청 id). k8s 조회는 api 의 no_proxy 힌트와 같은 `wiring.build_node_lister`(core `list_node`, 10초) — 새 k8s 코드 없음, cli 의 `--once`·
+  상주 두 경로에 배선(`test_node_forget` 의 cli 배선 가드).
+- **RBAC — 매니페스트 변경**: 컨트롤러 SA 에는 nodes 권한이 없었다(namespaced Role 뿐 — 그대로면 403 → 아무것도 안 지움). 새 ClusterRole 을 만들지 않고
+  `10-rbac.yaml` 에 ClusterRoleBinding **`dms-controller-nodes-readonly`**(roleRef ClusterRole `dms-api-nodes-readonly` — nodes get·list, subject SA
+  `dms-controller`)를 더했다. 계약 `tests/test_rbac_contract.py`(바인딩 존재·ClusterRole 읽기 전용 그대로·컨트롤러 Role 에 nodes 없음).
+- **한계 — 호스트 이름만 바꾼 경우**: 클러스터가 새 이름으로 Node 를 다시 등록해도 옛 Node 객체는 보통 NotReady 로 남는다(베어메탈·RKE2 는 아무도
+  지우지 않는다) — 그동안 자동 정리는 그 행을 지우지 않는다. OA 사례는 버튼(①②)으로 정리하거나 클러스터 운영자가 옛 Node 를 지운 뒤에 돈다(deploy/README
+  §14-3 ⑤, 리뷰 반영).
+
+**④ 같은 장비의 새 이름 힌트** — 에이전트 보고에 `machine_key`(`agent/probes.probe_machine_key`): 호스트 루트 모드에서만 `/host/root/etc/machine-id` 를
+O_NOFOLLOW·정규 파일·32 hex 검증 후 HMAC-SHA256(key = machine-id 16바이트, msg = `dms-agent/machine-key/v1`) 앞 16 hex — **원문은 어디에도 싣지 않는다**.
+direct 모드·없음·「uninitialized」·전부 0 은 null, 프로브 예외도 null(보고는 그대로). 서버 `node_forget.rename_hints` 가 stale 행의 키와 같은 키를 가진
+**이름이 다른 fresh 행이 정확히 1개**일 때만 GET 행의 `renamed_to` 로 낸다(복제 VM 템플릿처럼 2개 이상이면 없음). 포탈은 「새 이름: X」. 표시뿐 —
+노드 이름 = k8s Node 이름이 계약이라 병합·개명은 하지 않는다. 스키마 변경 없음(보고 JSON 안의 키 하나). **한계**: dms-agent 롤아웃 뒤의 보고부터 —
+OA 의 h-aii-dms26001 처럼 이미 멈춘 옛 이름에는 힌트가 없다(버튼으로 정리).
+
+**⑤ `list_nodes` 호출자 감사**(grep 전수 — 과제 목록 밖 `routes_usage` 1곳 추가 발견) — **계산에 stale 행이 섞이는 곳은 없다, 고친 곳 0**:
+
+| 호출자 | 처리 | 판정 |
+|---|---|---|
+| `routes_nodes.list_nodes` | 표시(fresh 플래그·배치 제외) — `renamed_to` 만 더함 | 표시 |
+| `routes_metrics.metrics_nodes` | 노드별 시계열 카드 + fresh, 노드 간 합산 없음 | 표시 |
+| `routes_k8s._nodes` | 호출 노드 카드의 fresh·reported(보고 지연 표기) | 표시 |
+| `routes_artifact_base._node_checks` | stale → pending(exists·writable null) — 화면 「확인 대기 N건」. 에이전트만 죽은 살아 있는 노드도 stale 이라 빼면 「모두 정상」이 거짓말 | 의도된 모름(퇴역 행은 기록 삭제로) |
+| `request_purger._eligible_nodes` | `if not node["fresh"]: continue` | 계산 — 이미 fresh 만 |
+| `routes_builds.submit_build` | fresh 집합으로 `build_node_report_stale` | 계산 — 이미 fresh 만 |
+| `routes_mount_status` → `mount_status.build` | 열 요약·칸 합계·과반·ro outlier 는 `fresh_rows`; totals.nodes·stale_nodes·problem_nodes 는 stale 포함(신선하지 않은 행은 문제 — docstring 의 의도) | 계산은 fresh 만 |
+| `routes_usage` → `metrics_series.storage_filesystem` | fresh 우선, 같은 신선도 묶음만으로 node_count·consistent, fresh 후보가 없을 때만 stale 폴백 + `fresh:false` 표시 | 섞이지 않음 |
+| (참고) `fresh_reports`(reconciler·planner) / `latest_reports`(stepper·`blocked_nodes`·claim) | fresh 만 / **의도적으로 신선도 무관**(마지막 cordon 을 잊지 않음) | 그래서 `active_jobs` 가드 |
+
+**⑥ 노드 상세 「마운트」 표의 「관리 디렉토리」 열** — 사용자가 말한 표는 마운트 현황 페이지가 아니라 노드 상세 창의 「마운트」 절이다. 에이전트
+마운트 보고엔 managed_root 가 없어 **프런트 조인**(`useStorages` — 지금 등록된 스토리지 값, 상세를 열 때만 읽는다; 모름·미등록은 「—」). 열 순서
+스토리지 | 마운트 경로 | 관리 디렉토리 | 상태 | 쓰기 | 사유. 마운트 현황(`mount_status.build`, dms-ssc 공용 코어)은 바꾸지 않았다(BACKLOG 후보).
+
+**⑦ 사이드바** — 빌드·릴리스·컨트롤 상태·아티팩트 경로를 「운영」에서 「관리」 그룹 끝(포탈 설정 뒤, 같은 상대 순서)으로(`app/navigation.ts` — 경로·화면·
+상세 경로의 부모는 그대로, 크럼만 「관리」). 운영 그룹엔 대시보드·사용량 분석이 남는다. deploy/README 의 「운영 → 빌드·릴리스·컨트롤 상태·아티팩트 경로」
+표기 8곳을 「관리 → …」로.
+
+- **배포**: 이미지 릴리스만으로 삭제 API·버튼·메뉴·열이 동작한다(기본 0 이면 S11 불필요). 힌트는 dms-agent 롤아웃 뒤 새 보고부터. 자동 정리를 **켤
+  때만** S11(prod `sh deploy/install.sh --context <ctx> --site <site> --only S11` — 바인딩은 cluster-admin, 사이트 patch-config 의 키 → dms-config → 재시작).
+  testbed-k8s 는 `kubectl --context dmsk8s apply -k deploy/overlays/testbed-k8s` 뒤 ConfigMap 만 바뀌었으면 rollout restart. OA 정리 절차: 이미지 릴리스 →
+  노드 화면에서 h-aii-dms26001 「기록 삭제」(그 이름이 빌드 노드·호출 노드·진행 중 작업에 걸려 있으면 먼저 정리).
+- **테스트**: 새 `tests/test_node_forget.py`(삭제 API 성공·fresh·404·인증 3갈래·유지보수 중 허용·in_use 다섯 갈래와 순서·종단 빌드/잡은 막지 않음·
+  candidates 만·깨진 JSON fail-closed·LIKE 이스케이프·막는 요청 id(중복 제거·5개 상한·모양 불량 제외)·조건부 DELETE 경합 둘·힌트·자동 정리 켜짐/꺼짐/
+  Node 있음/없음/조회 실패/빈 목록/lister 없음/창 미만/in_use(이벤트의 막는 요청)/틱 상한(지운 수 — 앞자리 in_use 21개 뒤의 노드도 지운다)/retention
+  루프 배선/cli 배선·설정 범위·20-config), `test_rbac_contract`(바인딩 3), `test_agent_probes`(machine_key 파생·direct·형식 불량·끝 링크·정규 파일
+  아님), `test_agent_runner`(키 싣기·프로브 예외), `test_api_nodes`(`renamed_to`). sqlite 와 일회용 PostgreSQL 16 양쪽 통과. 프런트: NodesList(열·버튼
+  노출 조건·창·DELETE·409/403 문구·막는 요청 링크·힌트), navigation(관리 11·운영 2·크럼).
+- **게이트(2026-11-25, 리뷰 반영 뒤 최종)**: 백엔드 전체 6321 passed · 19 skipped(9분 42초), 프런트 vitest 2235 passed(130 파일), `tsc -b` 오류 0,
+  `npm run build:image` 성공·`dist/index.html` 외부 URL 0, e2e 41 passed(19 spec — 사이드바 그룹 소속·노드 표 9열 단언 그대로).
+- **문서**: deploy/README §14-3 「노드 이름이 바뀐 뒤(또는 클러스터에서 뺀 뒤) 옛 행 정리」(절 번호 이동 없음)·§0-4 클러스터 범위 객체 표·§14-1
+  운영 신호·보존 줄·§14-4 색인, ARCHITECTURE(모듈 지도·노드 배치 제외 불변식·공유 토큰 경계), BACKLOG(「agent_nodes 퇴역 행 정리」 해소 + 「노드 기록 정리
+  후속」).
+- **dms-ssc 이식 후보**: 삭제 API·버튼·힌트는 라인 공통 성격(옛 이름 문제는 LDAP 과 무관). 자동 정리는 ssc RBAC 에도 같은 바인딩.
 
 ### 🔧 빌드 파드 메모리 상한 1Gi → 2Gi + 프런트 빌드 Node 힙 1024MB 고정 — **완료·실증**(2026-11-23, d42·d43)
 

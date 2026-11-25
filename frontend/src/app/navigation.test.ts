@@ -6,7 +6,8 @@ import type { NavItem } from "./navigation";
 // 전수"와 어긋나지 않음을 못 박는다. 항목 한 줄이 사라지면 여기가 문다(뮤테이션
 // 증명 대상). 슬라이스 37: 내 스캔 경로·scan 실행 제거(scan 은 단일 작업으로 흡수),
 // 아티팩트 경로는 운영으로 이동. 2026-08-23: 운영에 사용량 분석(/admin/usage)
-// 추가 -- 작업2+스토리지2+운영7+관리4 = 15링크.
+// 추가 -- 작업2+스토리지2+운영7+관리4 = 15링크. 2026-11-25: 빌드·릴리스·컨트롤 상태·아티팩트 경로를 운영 → 관리로
+// 옮겼다(링크 수 불변) -- 지금은 운영2+작업4+스토리지4+관리11 = 21링크.
 
 /** DMS 섹션의 모든 항목을 (그룹 라벨과 함께) 평탄화한다. */
 function dmsItems(): { group: string; groupAdminOnly: boolean; item: NavItem }[] {
@@ -30,13 +31,28 @@ test("현행 사이드바 21링크가 전부 데이터에 있다(전수 -- 초�
   ].sort());
 });
 
-test("관리 그룹(관리자 전용) 순서: 보안 이벤트는 감사 로그 바로 뒤다(2026-11-03)", () => {
+test("관리 그룹(관리자 전용) 순서: 보안 이벤트는 감사 로그 바로 뒤, 빌드~아티팩트 경로는 포탈 설정 뒤다(2026-11-25)", () => {
   const admin = (NAVIGATION[0].groups ?? []).find((g) => g.label === "관리")!;
   expect(admin.adminOnly).toBe(true);
   expect(admin.items.map((i) => i.label))
-    .toEqual(["계정", "정책", "denylist", "감사 로그", "보안 이벤트", "메일 설정", "포탈 설정"]);
+    .toEqual(["계정", "정책", "denylist", "감사 로그", "보안 이벤트", "메일 설정", "포탈 설정",
+              "빌드", "릴리스", "컨트롤 상태", "아티팩트 경로"]);
   expect(breadcrumbFor("/admin/security").map((c) => c.label)).toEqual(["HOME", "DMS", "관리", "보안 이벤트"]);
   expect(activeNavPath("/admin/security")).toBe("/admin/security");
+});
+
+test("운영 그룹(관리자 전용)에는 대시보드·사용량 분석만 남는다(2026-11-25 사용자 결정 -- 빌드 등 넷은 관리로)", () => {
+  const ops = (NAVIGATION[0].groups ?? []).find((g) => g.label === "운영")!;
+  expect(ops.adminOnly).toBe(true);
+  expect(ops.items.map((i) => i.label)).toEqual(["대시보드", "사용량 분석"]);
+});
+
+test.each([
+  ["/admin/builds", "빌드"], ["/admin/releases", "릴리스"], ["/admin/control", "컨트롤 상태"],
+  ["/admin/artifact-base", "아티팩트 경로"],
+])("%s 크럼은 「관리」 아래 「%s」이고 경로는 그대로다(2026-11-25)", (path, label) => {
+  expect(breadcrumbFor(path).map((c) => c.label)).toEqual(["HOME", "DMS", "관리", label]);
+  expect(activeNavPath(path)).toBe(path);
 });
 
 test("스토리지 그룹(관리자 전용) 순서: 스토리지 → 마운트 현황 → k8s 연동 → 노드", () => {
@@ -122,7 +138,7 @@ describe("breadcrumbFor", () => {
   // 이력은 사이드바에 없으므로 DETAIL_ROUTES 를 타야 크럼과 활성 항목(「빌드」)을 얻는다.
   test("빌드 이력은 「빌드」 항목 아래 크럼을 단다", () => {
     expect(breadcrumbFor("/admin/builds/history").map((c) => c.label))
-      .toEqual(["HOME", "DMS", "운영", "빌드", "빌드 이력"]);
+      .toEqual(["HOME", "DMS", "관리", "빌드", "빌드 이력"]);
     expect(activeNavPath("/admin/builds/history")).toBe("/admin/builds");
   });
 

@@ -1,12 +1,21 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
+import { MemoryRouter } from "react-router-dom";
 import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
 import { beforeAll, afterAll, afterEach, test, expect } from "vitest";
-import { NodesList, toolStatusText, ageText, clockSkewSeconds, cpuLoadText } from "./NodesList";
+import { NodesList, toolStatusText, ageText, clockSkewSeconds, cpuLoadText, renameHint } from "./NodesList";
+import { nodeInUseText, parseNodeInUse } from "./ForgetNodeDialog";
+import { reasonText } from "../../lib/api";
 
-const server = setupServer();
+// 상세 창의 마운트 표는 등록 스토리지(GET /api/admin/storages)를 맞붙여 「관리 디렉토리」를 그린다(2026-11-25) -- 기본 핸들러로
+// 둬서(resetHandlers 뒤에도 남는다) 상세를 여는 모든 테스트가 실제 네트워크로 새지 않게 한다. managed_root 는 mount_path 와
+// 다르게 둔다(getByText 다중 일치 회피).
+const STORAGES = [
+  { storage_name: "vol1", mount_path: "/mnt/vol1", managed_root: "/mnt/vol1/dms", backend_type: "nfs", enabled: true },
+];
+const server = setupServer(http.get("/api/admin/storages", () => HttpResponse.json(STORAGES)));
 beforeAll(() => server.listen());
 afterEach(() => server.resetHandlers());
 afterAll(() => server.close());
@@ -428,4 +437,276 @@ test("상세 타일: 구형 에이전트는 CPU 사용률 — (0% 아님), 보�
   expect(within(cpuTile).getByText("—")).toBeInTheDocument();
   expect(within(cpuTile).getByText("128코어")).toBeInTheDocument();
   expect(within(cpuTile).queryByText(/I\/O 대기/)).toBeNull();
+});
+
+
+// ---- 2026-11-25 사용자 요청 1: 노드 상세 마운트 표에 「관리 디렉토리」 열 ----
+
+const cellTexts = (tr: HTMLElement) => [...tr.querySelectorAll("td")].map((td) => td.textContent);
+
+test("상세 마운트 표: 마운트 경로 바로 뒤에 관리 디렉토리(등록 스토리지 값), 등록에 없는 스토리지는 —", async () => {
+  server.use(http.get("/api/admin/nodes", () => HttpResponse.json(NODES)));
+  wrap();
+  const rowA = (await screen.findByText("node-a")).closest("tr")!;
+  await userEvent.click(within(rowA).getByRole("button", { name: "상세" }));
+  const dialog = await screen.findByRole("dialog", { name: "node-a 상세" });
+  const vol1Row = (await within(dialog).findByText("/mnt/vol1/dms")).closest("tr")!;
+  const mountTable = vol1Row.closest("table")!;
+  expect(within(mountTable).getAllByRole("columnheader").map((h) => h.textContent))
+    .toEqual(["스토리지", "마운트 경로", "관리 디렉토리", "상태", "쓰기", "사유"]);
+  expect(cellTexts(vol1Row)).toEqual(["vol1", "/mnt/vol1", "/mnt/vol1/dms", "Ready", "—", "—"]);
+  const vol2Row = within(mountTable).getByText("/mnt/vol2").closest("tr")!;
+  expect(cellTexts(vol2Row)).toEqual(["vol2", "/mnt/vol2", "—", "Error", "—", "not mounted"]);
+  expect(within(dialog).getByText(/관리 디렉토리는 지금 등록된 스토리지 값입니다/)).toBeInTheDocument();
+});
+
+test("상세 마운트 표: 스토리지 목록을 못 읽으면 관리 디렉토리는 — (경로를 지어내지 않는다)", async () => {
+  let storageCalls = 0;
+  server.use(
+    http.get("/api/admin/nodes", () => HttpResponse.json(NODES)),
+    http.get("/api/admin/storages", () => {
+      storageCalls += 1;
+      return HttpResponse.json({ detail: "boom" }, { status: 500 });
+    }),
+  );
+  wrap();
+  const rowA = (await screen.findByText("node-a")).closest("tr")!;
+  await userEvent.click(within(rowA).getByRole("button", { name: "상세" }));
+  const dialog = await screen.findByRole("dialog", { name: "node-a 상세" });
+  await waitFor(() => expect(storageCalls).toBe(1));
+  await new Promise((r) => setTimeout(r, 10));
+  const vol1Row = within(dialog).getByText("/mnt/vol1").closest("tr")!;
+  expect(cellTexts(vol1Row)[2]).toBe("—");
+  expect(within(dialog).queryByText("/mnt/vol1/dms")).toBeNull();
+});
+
+test("목록 화면은 스토리지 목록을 부르지 않는다 -- 상세를 열 때만", async () => {
+  let storageCalls = 0;
+  server.use(
+    http.get("/api/admin/nodes", () => HttpResponse.json(NODES)),
+    http.get("/api/admin/storages", () => { storageCalls += 1; return HttpResponse.json(STORAGES); }),
+  );
+  wrap();
+  await screen.findByText("node-a");
+  await new Promise((r) => setTimeout(r, 10));
+  expect(storageCalls).toBe(0);
+});
+
+
+// ---- 2026-11-25 OA 사이트: 사라지지 않는 리포트 지연 노드의 「기록 삭제」 ----
+
+const EXCLUSION = { node_name: "node-b", reason: "교체", created_by: "ops", created_at: "2026-10-02T00:00:00Z" };
+
+/** 노드 목록 + DELETE /api/admin/nodes/:name. respond 가 없으면 성공(그 노드를 목록에서 뺀다). */
+function renderForget(initial: unknown[], opts: {
+  respond?: () => Response | Promise<Response>;
+  onDelete?: (pathname: string) => void;
+} = {}) {
+  let nodes = initial as { node_name: string; reported_at: string; exclusion?: unknown }[];
+  let gets = 0;
+  server.use(
+    http.get("/api/admin/nodes", () => { gets += 1; return HttpResponse.json(nodes); }),
+    http.delete("/api/admin/nodes/:name", async ({ request, params }) => {
+      opts.onDelete?.(new URL(request.url).pathname);
+      if (opts.respond) return opts.respond();
+      const name = String(params.name);
+      const before = nodes.find((n) => n.node_name === name)!;
+      nodes = nodes.filter((n) => n.node_name !== name);
+      return HttpResponse.json({ deleted: name, reported_at: before.reported_at, reports_deleted: 3,
+                                 exclusion_deleted: !!before.exclusion });
+    }),
+  );
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  // 라우터: node_in_use 거절의 막는 요청은 요청 상세 링크(<Link>)로 그린다.
+  render(<MemoryRouter><QueryClientProvider client={qc}><NodesList /></QueryClientProvider></MemoryRouter>);
+  return { gets: () => gets };
+}
+
+test("「기록 삭제」는 리포트 지연 행에만 있다(nowrap) -- 정상 행엔 없고 표는 9열 그대로", async () => {
+  renderForget(NODES);
+  const rowB = (await screen.findByText("node-b")).closest("tr")!;
+  const btn = within(rowB).getByRole("button", { name: "node-b 기록 삭제" });
+  expect(btn).toHaveTextContent("기록 삭제");
+  expect(btn).toHaveClass("whitespace-nowrap");
+  // 상태 칸의 stale 표기는 그대로(text-bad)
+  expect(within(rowB).getByText("stale")).toHaveClass("text-bad");
+  const rowA = screen.getByText("node-a").closest("tr")!;
+  expect(within(rowA).queryByRole("button", { name: /기록 삭제/ })).toBeNull();
+  expect(screen.getAllByRole("columnheader")).toHaveLength(9);
+  expect(screen.getByText(/리포트 지연 노드의 「기록 삭제」 = 이름이 바뀌었거나 클러스터에서 뺀 노드의 옛 행 정리/))
+    .toBeInTheDocument();
+});
+
+test("확인 창: 되돌릴 수 없음·같은 이름이 다시 보고하면 새로 생김·마지막 보고, 배치 제외가 있으면 함께 지워진다고 말한다", async () => {
+  renderForget([NODES[0], { ...NODES[1], exclusion: EXCLUSION }]);
+  await userEvent.click(await screen.findByRole("button", { name: "node-b 기록 삭제" }));
+  const dlg = await screen.findByRole("dialog", { name: "node-b 기록 삭제" });
+  expect(dlg).toHaveTextContent("최신 보고·보고 이력·배치 제외");
+  expect(dlg).toHaveTextContent("되돌릴 수 없습니다");
+  expect(dlg).toHaveTextContent("같은 이름의 노드가 다시 보고하면 새 행으로 다시 생깁니다");
+  expect(dlg).toHaveTextContent("배치 제외도 함께 지워집니다");
+  expect(dlg).toHaveTextContent("빌드 노드·k8s 호출 노드(주·보조)로 지정돼 있거나");
+  expect(dlg).toHaveTextContent("마지막 보고: 2026-08-05 09:00:00 KST");
+  expect(within(dlg).getByRole("button", { name: "기록 삭제" })).toBeInTheDocument();
+});
+
+test("확인 창: 배치 제외가 없으면 그 문장이 없다", async () => {
+  renderForget(NODES);
+  await userEvent.click(await screen.findByRole("button", { name: "node-b 기록 삭제" }));
+  const dlg = await screen.findByRole("dialog", { name: "node-b 기록 삭제" });
+  expect(dlg).toHaveTextContent("최신 보고·보고 이력)");
+  expect(dlg).not.toHaveTextContent("배치 제외도 함께");
+});
+
+test("기록 삭제 확인 → DELETE /api/admin/nodes/node-b, 성공하면 결과 줄(포커스)·목록 재조회로 행이 사라진다", async () => {
+  const paths: string[] = [];
+  const r = renderForget([NODES[0], { ...NODES[1], exclusion: EXCLUSION }], { onDelete: (p) => paths.push(p) });
+  await userEvent.click(await screen.findByRole("button", { name: "node-b 기록 삭제" }));
+  const dlg = await screen.findByRole("dialog", { name: "node-b 기록 삭제" });
+  const getsBefore = r.gets();
+  await userEvent.click(within(dlg).getByRole("button", { name: "기록 삭제" }));
+  await waitFor(() => expect(paths).toEqual(["/api/admin/nodes/node-b"]));
+  const status = await screen.findByText("node-b 기록을 지웠습니다(보고 이력 3건·배치 제외).");
+  expect(status).toHaveAttribute("role", "status");
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  await waitFor(() => expect(status).toHaveFocus());
+  expect(r.gets()).toBeGreaterThan(getsBefore);
+  expect(screen.queryByText("node-b")).toBeNull();
+  expect(screen.getByText("node-a")).toBeInTheDocument();
+});
+
+test("마지막 노드를 지워 표가 사라져도 결과 줄은 남는다", async () => {
+  renderForget([NODES[1]]);
+  await userEvent.click(await screen.findByRole("button", { name: "node-b 기록 삭제" }));
+  await userEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "기록 삭제" }));
+  const status = await screen.findByText("node-b 기록을 지웠습니다(보고 이력 3건).");
+  await waitFor(() => expect(screen.queryByRole("table")).toBeNull());
+  expect(status).toBeInTheDocument();
+  expect(screen.getByText("보고한 노드 0대")).toBeInTheDocument();
+});
+
+test.each([
+  ["node_fresh", 409, [reasonText("node_fresh")]],
+  ["node_in_use:build_node,active_jobs", 409, [reasonText("node_in_use"), "막는 것: 빌드 노드 · 진행 중 작업"]],
+  ["node_not_found", 404, [reasonText("node_not_found")]],
+  ["admin_session_required", 403, [reasonText("admin_session_required")]],
+])("거절 %s(%i)은 창 안 alert 로 보이고 창은 열린 채다", async (detail, status, expected) => {
+  renderForget(NODES, { respond: () => HttpResponse.json({ detail }, { status }) });
+  await userEvent.click(await screen.findByRole("button", { name: "node-b 기록 삭제" }));
+  const dlg = await screen.findByRole("dialog", { name: "node-b 기록 삭제" });
+  await userEvent.click(within(dlg).getByRole("button", { name: "기록 삭제" }));
+  const alert = await within(dlg).findByRole("alert");
+  for (const text of expected) expect(alert).toHaveTextContent(text);
+  expect(screen.getByRole("dialog", { name: "node-b 기록 삭제" })).toBeInTheDocument();
+});
+
+test("node_in_use 의 막는 요청(;requests=)은 창 안에서 요청 상세 링크로 보인다", async () => {
+  const rid = "0123456789abcdef0123456789abcdef";
+  renderForget(NODES, { respond: () => HttpResponse.json({ detail: `node_in_use:active_jobs;requests=${rid},req-2` },
+                                                           { status: 409 }) });
+  await userEvent.click(await screen.findByRole("button", { name: "node-b 기록 삭제" }));
+  const dlg = await screen.findByRole("dialog", { name: "node-b 기록 삭제" });
+  await userEvent.click(within(dlg).getByRole("button", { name: "기록 삭제" }));
+  const alert = await within(dlg).findByRole("alert");
+  expect(alert).toHaveTextContent("막는 것: 진행 중 작업");
+  expect(alert).not.toHaveTextContent("requests=");
+  const link = within(alert).getByRole("link", { name: rid.slice(0, 12) });
+  expect(link).toHaveAttribute("href", `/jobs/${rid}`);
+  expect(link).toHaveAttribute("title", rid);
+  expect(within(alert).getByRole("link", { name: "req-2" })).toHaveAttribute("href", "/jobs/req-2");
+  expect(alert).toHaveTextContent("요청 상세에서 취소하거나 끝나기를 기다린 뒤 다시 시도하세요");
+});
+
+test("node_in_use 에 요청이 없으면(빌드 노드만) 링크 줄이 없다", async () => {
+  renderForget(NODES, { respond: () => HttpResponse.json({ detail: "node_in_use:build_node" }, { status: 409 }) });
+  await userEvent.click(await screen.findByRole("button", { name: "node-b 기록 삭제" }));
+  const dlg = await screen.findByRole("dialog", { name: "node-b 기록 삭제" });
+  await userEvent.click(within(dlg).getByRole("button", { name: "기록 삭제" }));
+  const alert = await within(dlg).findByRole("alert");
+  expect(alert).toHaveTextContent("막는 것: 빌드 노드");
+  expect(within(alert).queryByRole("link")).toBeNull();
+});
+
+test("거절 뒤 취소로 닫으면 포커스는 연 버튼으로 돌아가고, 다시 열면 옛 오류가 없다", async () => {
+  renderForget(NODES, { respond: () => HttpResponse.json({ detail: "node_fresh" }, { status: 409 }) });
+  await userEvent.click(await screen.findByRole("button", { name: "node-b 기록 삭제" }));
+  let dlg = await screen.findByRole("dialog", { name: "node-b 기록 삭제" });
+  await userEvent.click(within(dlg).getByRole("button", { name: "기록 삭제" }));
+  await within(dlg).findByRole("alert");
+  await userEvent.click(within(dlg).getByRole("button", { name: "취소" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  await waitFor(() => expect(screen.getByRole("button", { name: "node-b 기록 삭제" })).toHaveFocus());
+  await userEvent.click(screen.getByRole("button", { name: "node-b 기록 삭제" }));
+  dlg = await screen.findByRole("dialog", { name: "node-b 기록 삭제" });
+  expect(within(dlg).queryByRole("alert")).toBeNull();
+});
+
+test("보내는 동안은 Esc 로 닫히지 않고 버튼이 잠긴다 -- 응답이 오면 닫힌다", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  renderForget(NODES, { respond: async () => {
+    await gate;
+    return HttpResponse.json({ deleted: "node-b", reported_at: "2026-08-05T00:00:00Z", reports_deleted: 0,
+                               exclusion_deleted: false });
+  } });
+  await userEvent.click(await screen.findByRole("button", { name: "node-b 기록 삭제" }));
+  const dlg = await screen.findByRole("dialog", { name: "node-b 기록 삭제" });
+  await userEvent.click(within(dlg).getByRole("button", { name: "기록 삭제" }));
+  expect(await within(dlg).findByRole("status")).toHaveTextContent("지우는 중");
+  await userEvent.keyboard("{Escape}");
+  expect(screen.getByRole("dialog", { name: "node-b 기록 삭제" })).toBeInTheDocument();
+  expect(within(dlg).getByRole("button", { name: "기록 삭제" })).toBeDisabled();
+  expect(within(dlg).getByRole("button", { name: "취소" })).toBeDisabled();
+  release();
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(await screen.findByText("node-b 기록을 지웠습니다(보고 이력 0건).")).toBeInTheDocument();
+});
+
+test("새 이름 힌트: 리포트 지연 행의 renamed_to 만 그린다(정상 행·null 은 없음), 확인 창·상세에도 보인다", async () => {
+  const nodes = [
+    { ...NODES[0], renamed_to: "should-not-show" },
+    { ...NODES[1], renamed_to: "node-c" },
+    { ...NODES[1], node_name: "node-d", renamed_to: null },
+  ];
+  renderForget(nodes);
+  const rowB = (await screen.findByText("node-b")).closest("tr")!;
+  expect(within(rowB).getByText("새 이름: node-c")).toBeInTheDocument();
+  const rowA = screen.getByText("node-a").closest("tr")!;
+  expect(within(rowA).queryByText(/새 이름/)).toBeNull();
+  const rowD = screen.getByText("node-d").closest("tr")!;
+  expect(within(rowD).queryByText(/새 이름/)).toBeNull();
+  // 확인 창(연 순간의 스냅숏)
+  await userEvent.click(within(rowB).getByRole("button", { name: "node-b 기록 삭제" }));
+  const dlg = await screen.findByRole("dialog", { name: "node-b 기록 삭제" });
+  expect(dlg).toHaveTextContent("같은 장비로 보이는 새 이름: node-c");
+  await userEvent.click(within(dlg).getByRole("button", { name: "취소" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  // 상세 상태 줄
+  await userEvent.click(within(rowB).getByRole("button", { name: "상세" }));
+  const detail = await screen.findByRole("dialog", { name: "node-b 상세" });
+  expect(within(detail).getByText("새 이름: node-c")).toBeInTheDocument();
+});
+
+test("renameHint·nodeInUseText: 표시 조건과 근거 토큰 번역(모르는 토큰은 원문)", () => {
+  expect(renameHint({ fresh: false, renamed_to: "x" })).toBe("x");
+  expect(renameHint({ fresh: true, renamed_to: "x" })).toBeNull();
+  expect(renameHint({ fresh: false, renamed_to: null })).toBeNull();
+  expect(renameHint({ fresh: false, renamed_to: "" })).toBeNull();
+  expect(renameHint({ fresh: false })).toBeNull();
+  const base = reasonText("node_in_use");
+  expect(nodeInUseText("node_in_use:k8s_primary,k8s_secondary,active_build"))
+    .toBe(`${base} (막는 것: k8s 주 호출 노드 · k8s 보조 호출 노드 · 진행 중 빌드)`);
+  expect(nodeInUseText("node_in_use:future_ref")).toBe(`${base} (막는 것: future_ref)`);
+  expect(nodeInUseText("node_in_use")).toBe(base);
+  expect(nodeInUseText("node_in_use:")).toBe(base);
+  // 막는 요청 id 는 문구에 섞지 않는다(창이 링크로 그린다)
+  expect(nodeInUseText("node_in_use:build_node,active_jobs;requests=r1,r2"))
+    .toBe(`${base} (막는 것: 빌드 노드 · 진행 중 작업)`);
+  expect(parseNodeInUse("node_in_use:build_node,active_jobs;requests=r1, r2"))
+    .toEqual({ refs: ["build_node", "active_jobs"], requests: ["r1", "r2"] });
+  expect(parseNodeInUse("node_in_use:active_jobs")).toEqual({ refs: ["active_jobs"], requests: [] });
+  expect(parseNodeInUse("node_in_use:active_jobs;future=x")).toEqual({ refs: ["active_jobs"], requests: [] });
+  expect(parseNodeInUse("node_in_use")).toEqual({ refs: [], requests: [] });
+  // reasonText 의 접두 규칙으로도 번역된다(다른 화면이 이 코드를 받아도 영문 원문이 아니다)
+  expect(reasonText("node_in_use:build_node")).toBe(`${base} (build_node)`);
 });

@@ -17,6 +17,7 @@ from .db import utc_now_iso
 from .domain import DataJobState
 from .execution import StubExecutionAdapter
 from .k8s_inventory import prune_runs_once, run_inventory_once
+from .node_forget import forget_absent_nodes_once
 from .planner import Planner
 from .pod_gc import PodGarbageCollector
 from .reconciler import reconcile_storages_once
@@ -36,7 +37,7 @@ class Loop:
 
 def build_loops(settings: Settings, repos: Repositories, *,
                 execution_adapter=None, build_runner=None,
-                rollout_runner=None, purge_runner=None) -> list[Loop]:
+                rollout_runner=None, purge_runner=None, node_lister=None) -> list[Loop]:
     adapter = execution_adapter if execution_adapter is not None else StubExecutionAdapter()
     controller_node = NodeNameResolver(rollout_runner, "app.kubernetes.io/name=dms-controller")
     pod_gc = PodGarbageCollector(repos, adapter, after_seconds=settings.pod_gc_after_seconds,
@@ -78,6 +79,10 @@ def build_loops(settings: Settings, repos: Repositories, *,
         # k8s 동기화 이력(2026-10-25): 보존일보다 오래된 종단 run. 등록된 클러스터는 최근 50건·마지막 성공 run 을 남기고,
         # 지운 클러스터의 run 은 보존일이 지나면 전부(2026-11-11).
         prune_runs_once(repos, retention_days=settings.k8s_sync_run_retention_days)
+        # 노드 기록 자동 정리(2026-11-25, node_forget.py -- 기본 꺼짐 DMS_AGENT_NODE_FORGET_SECONDS=0): **맨 끝** -- k8s 조회
+        # 실패가 위의 prune 들을 막지 않는다. 오래 보고가 없고 k8s 에 그 Node 가 더는 없을 때만 지운다(모름 = 안 지움).
+        # node_lister 가 없으면(기존 호출자·테스트) 후보가 있어도 「모름」으로 끝난다. 새 루프를 만들지 않는다(같은 정리 계열).
+        forget_absent_nodes_once(repos, settings, node_lister)
 
     loops = [
         Loop("planner", settings.planner_interval_seconds,
@@ -179,10 +184,12 @@ def run_all_once(loops: list[Loop], repos: Repositories, holder: str) -> dict[st
 
 def run_forever(settings: Settings, repos: Repositories, holder: str,
                 *, sleep=time.sleep, execution_adapter=None,
-                build_runner=None, rollout_runner=None, purge_runner=None) -> None:
+                build_runner=None, rollout_runner=None, purge_runner=None,
+                node_lister=None) -> None:
     loops = build_loops(settings, repos,
                         execution_adapter=execution_adapter, build_runner=build_runner,
-                        rollout_runner=rollout_runner, purge_runner=purge_runner)
+                        rollout_runner=rollout_runner, purge_runner=purge_runner,
+                        node_lister=node_lister)
     next_due = {loop.name: 0.0 for loop in loops}
     while True:
         now = time.monotonic()

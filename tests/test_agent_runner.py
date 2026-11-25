@@ -346,3 +346,26 @@ def test_failed_report_still_advances_the_cpu_baseline(monkeypatch):
         state = runner.run_once(state)
     # 실패한 둘째 표본(1000, 1000) 대비 90% -- 첫 표본(0, 0) 대비였다면 (2000-1100)/2000 = 45%
     assert sent[-1]["cpu_used_pct"] == 90.0
+
+
+def test_build_report_carries_the_machine_key():
+    # 같은 장비의 새 이름 힌트(2026-11-25): 키는 늘 싣는다 -- 모르면 null.
+    seen = []
+    report = build_report("node-a", [], mountinfo_text="", host_root="/host/root",
+                          mounts_fn=lambda s, **k: [], tools_fn=lambda n, **k: [], os_fn=lambda s, **k: {},
+                          artifact_base_fn=lambda p, **k: None, k8s_node_fn=lambda n: None,
+                          machine_key_fn=lambda h: seen.append(h) or "0123456789abcdef")
+    assert report["machine_key"] == "0123456789abcdef" and seen == ["/host/root"]
+    direct = build_report("node-a", [], mountinfo_text="",
+                          mounts_fn=lambda s, **k: [], tools_fn=lambda n, **k: [], os_fn=lambda s, **k: {},
+                          artifact_base_fn=lambda p, **k: None, k8s_node_fn=lambda n: None)
+    assert "machine_key" in direct and direct["machine_key"] is None      # direct 모드 기본 프로브 = 모름
+
+
+def test_build_report_survives_a_machine_key_probe_bug():
+    def boom(host_root):
+        raise RuntimeError("bug")
+    report = build_report("node-a", [], mountinfo_text="", host_root="/host/root",
+                          mounts_fn=lambda s, **k: [], tools_fn=lambda n, **k: [], os_fn=lambda s, **k: {},
+                          artifact_base_fn=lambda p, **k: None, k8s_node_fn=lambda n: None, machine_key_fn=boom)
+    assert report["machine_key"] is None and report["node_name"] == "node-a"

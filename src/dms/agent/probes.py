@@ -1,6 +1,10 @@
 """노드 프로브. 시스템 접근(파일/명령)은 전부 파라미터 주입 — 순수 로직만 이 모듈에 둔다."""
+import hashlib
+import hmac
 import os
+import re
 import shutil
+import stat
 
 from ..node_cpu import parse_cpu_millicores
 
@@ -142,6 +146,43 @@ def probe_artifact_base(path, *, isdir=os.path.isdir, access=os.access,
         writable = exists and bool(access(probe, os.W_OK))
     return {"path": path, "exists": exists, "writable": writable,
             "mount_point": mount_point, "fstype": fstype}
+
+
+# 같은 장비의 새 이름 힌트(2026-11-25, dms.node_forget.rename_hints): 보고의 machine_key 길이(hex 자). 서버의
+# node_forget.MACHINE_KEY_RE 와 같은 값이다(tests 가 대조한다).
+MACHINE_KEY_HEX = 16
+_MACHINE_KEY_MSG = b"dms-agent/machine-key/v1"
+_MACHINE_ID_RE = re.compile(r"[0-9a-f]{32}")
+
+
+def probe_machine_key(host_root: str) -> "str | None":
+    """호스트의 안정 식별자 -- /etc/machine-id(systemd, 32 hex)의 **앱 고유 파생값**(HMAC-SHA256(key=machine-id 16바이트,
+    msg=_MACHINE_KEY_MSG) 앞 MACHINE_KEY_HEX 자). 원문은 보고·로그 어디에도 싣지 않는다(machine-id(5): 원문을 밖에 내지 말고
+    앱별 해시로 파생하라). 호스트 이름이 바뀌어도 같은 값이라, 서버가 stale 옛 이름 행에 「새 이름: X」 힌트를 낸다.
+
+    host_root 모드에서만 읽는다: direct(레거시) 모드의 /etc/machine-id 는 **컨테이너 이미지**의 것이라 모든 노드가 같거나
+    비어 있다 -- None. 끝 링크는 따라가지 않는다(O_NOFOLLOW): 호스트의 절대 symlink 는 컨테이너 안에서 host_root 밖으로
+    풀린다. 정규 파일이 아니거나, 32 hex 가 아니거나(「uninitialized」·빈 값), 전부 0 이면 None(모름 -- 지어내지 않는다).
+    읽기 실패도 None 이다."""
+    if not host_root:
+        return None
+    path = host_path(host_root, "/etc/machine-id")
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        data = os.read(fd, 128)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    text = data.decode("ascii", errors="replace").strip()
+    if not _MACHINE_ID_RE.fullmatch(text) or text == "0" * 32:
+        return None
+    return hmac.new(bytes.fromhex(text), _MACHINE_KEY_MSG, hashlib.sha256).hexdigest()[:MACHINE_KEY_HEX]
 
 
 CPU_COUNTER_KEYS = ("cpu_total_jiffies", "cpu_idle_jiffies", "cpu_iowait_jiffies")

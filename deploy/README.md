@@ -232,7 +232,7 @@
 
 | 층(단계) | 객체 |
 |---|---|
-| app(S2·S11) | Namespace `dms`(PSA enforce·audit·warn privileged). PriorityClass `dms-build`(10, preemption Never)·`dms-low`(50)·`dms-mid`(100)·`dms-high`(200). Volcano Queue `dms-data`. ClusterRole + ClusterRoleBinding `dms-agent-readonly`(nodes get)·`dms-api-nodes-readonly`(nodes get·list)·`dms-api-queue-readonly`(queues get — `dms-data` 만) |
+| app(S2·S11) | Namespace `dms`(PSA enforce·audit·warn privileged). PriorityClass `dms-build`(10, preemption Never)·`dms-low`(50)·`dms-mid`(100)·`dms-high`(200). Volcano Queue `dms-data`. ClusterRole + ClusterRoleBinding `dms-agent-readonly`(nodes get)·`dms-api-nodes-readonly`(nodes get·list)·`dms-api-queue-readonly`(queues get — `dms-data` 만). ClusterRoleBinding `dms-controller-nodes-readonly`(2026-11-25 — 같은 ClusterRole `dms-api-nodes-readonly` 를 SA `dms-controller` 에, 노드 기록 자동 정리용 §14-3) |
 | platform/priorityclass(S4) | PriorityClass `dms-addon-critical`(1000 — CNPG 오퍼레이터) |
 | platform/db-volumes(S10) | StorageClass `dms-pg-shared`(no-provisioner·Retain). PV `dms-pgdata-01..05`(hostPath `<SHARED_DIR>/dms/pgdata/…`). ValidatingAdmissionPolicy + Binding `dms-pg-shared-pvc-namespace`(이 클래스의 PVC 는 ns `dms` 에서만) |
 | addons/cnpg(S9 — A 일 때만) | Namespace `cnpg-system`. CRD 11개(`postgresql.cnpg.io`). ClusterRole 7개(`cnpg-manager` + database·publication·subscription 의 editor·viewer) + ClusterRoleBinding `cnpg-manager-rolebinding`. Mutating·ValidatingWebhookConfiguration `cnpg-*` |
@@ -1994,7 +1994,7 @@ dms-api·dms-controller 에는 initContainer `migrate` 가 있다(`deploy/k8s/40
      reapply).
    - 새 커밋이 앱 층만 바꿨으면(`git diff --stat <옛 커밋>..<새 커밋> -- deploy/platform deploy/addons deploy/versions.env deploy/images.lock` 가 빔)
      `--only S11` 로 줄여도 된다.
-5. **빌드**: 개발 PC 에서 같은 커밋으로 「이미지 빌드 전 게이트」(§8)를 통과시킨 뒤, 포탈 운영 → 빌드에서 이미지와 태그를 골라 제출한다(태그는 제안 칩을
+5. **빌드**: 개발 PC 에서 같은 커밋으로 「이미지 빌드 전 게이트」(§8)를 통과시킨 뒤, 포탈 관리 → 빌드에서 이미지와 태그를 골라 제출한다(태그는 제안 칩을
    그대로 — 이 사이트의 다음 번호). 화면의 기본 선택은 `dms` 하나다(`BuildForm.tsx` `DEFAULT_IMAGES`).
    - **6 에서 dms-agent 를 새 태그로 올리려면 세 이미지(`dms-mpifileutils`·`dms`·`dms-agent`)를 모두 체크한다.** dms-agent 는 이 빌드 태그의
      `dms`·`dms-mpifileutils` 를 FROM 한다(`build_manifests._SCRIPT` 의 `MFU_IMAGE=$DMS_BUILD_REGISTRY/dms-mpifileutils:$DMS_BUILD_TAG`). 새 태그에는
@@ -2003,7 +2003,7 @@ dms-api·dms-controller 에는 initContainer `migrate` 가 있다(`deploy/k8s/40
    - 에이전트·잡 러너를 올리지 않을 커밋이면 `dms` 만 빌드하고 6 에서 dms-api·dms-controller 만 새 태그로 낸다(dms-agent·job-image 행은 고르지 않는다 —
      레지스트리에 없는 태그는 422 `unknown_tag`, §9-3).
    성공: 빌드 이력의 그 빌드가 Succeeded. 실패 사유는 §8 3b).
-6. **릴리스**: 운영 → 릴리스에서 dms-agent·dms-api·dms-controller(+ 필요하면 job-image)를 새 태그로 한 번에 제출한다 — **5 에서 빌드한 이미지만**
+6. **릴리스**: 관리 → 릴리스에서 dms-agent·dms-api·dms-controller(+ 필요하면 job-image)를 새 태그로 한 번에 제출한다 — **5 에서 빌드한 이미지만**
    (`routes_releases` 가 레지스트리에 그 태그가 있는지 본다).
    성공: 행마다 `Applied`. 컨트롤러 자기 갱신 동안 화면이 약 30초 멈추는 것은 정상이다(§9-2). 실패하면 남은 행은 `rollout_aborted` 로 닫힌다(§9-7 — §5-1).
 7. **명시 태그를 쓰는 사이트만**: values.env 의 태그를 릴리스한 태그로 바꾼다. 안 바꾸면 다음 S11 의 가드가 exit 3 으로 멈춘다(§3-3).
@@ -2068,7 +2068,7 @@ dms-api·dms-controller 에는 initContainer `migrate` 가 있다(`deploy/k8s/40
 
 ### 5-1. 앱 이미지 되돌리기
 
-- 운영 → 릴리스에서 컴포넌트마다 옛 태그를 골라 다시 릴리스한다. 롤백 버튼은 없다 — 실패한 배치는 남은 행을 `rollout_aborted` 로 닫아 반쯤 섞인
+- 관리 → 릴리스에서 컴포넌트마다 옛 태그를 골라 다시 릴리스한다. 롤백 버튼은 없다 — 실패한 배치는 남은 행을 `rollout_aborted` 로 닫아 반쯤 섞인
   조합을 남기지 않으므로, 이력에서 옛 태그를 골라 다시 내면 된다(§9-7). 잡 이미지도 job-image 행에서 옛 태그로 낸다(다음 잡부터).
 - **`kubectl rollout undo` 를 쓰지 않는다.** 포탈 릴리스 기록·드리프트 판정·values `live` 가 모르는 상태가 되고, 옛 ReplicaSet 은 옛 레지스트리 주소나
   옛 securityContext 를 담고 있을 수 있다(레지스트리를 옮긴 사이트에서는 받을 곳이 없는 이미지로 돌아간다).
@@ -2260,7 +2260,7 @@ PV 권한을 얻는다(맵핑은 계정 이름 기준 — `repositories.k8s.K8sR
 
 ### 6-3. 컨트롤 상태 — 빌드 노드
 
-운영 → 컨트롤 상태(세션 관리자 — `routes_control.put_control_state` 는 `require_session_admin`). **PUT 은 전체 치환**이다 — 화면은 알아서 하지만 API 로 바꿀 때는
+관리 → 컨트롤 상태(세션 관리자 — `routes_control.put_control_state` 는 `require_session_admin`). **PUT 은 전체 치환**이다 — 화면은 알아서 하지만 API 로 바꿀 때는
 GET 한 값에서 바꿀 칸만 고쳐 전 필드를 보낸다(빠진 칸은 NULL).
 
 | 칸 | 값 | 확인 |
@@ -2569,7 +2569,7 @@ kubectl --context <ctx> -n dms get vcjob,pods -l dms.io/job-id=<job_id>   # 워�
 VERIFY_NO_PROBES=1 CACERT=<사내CA> sh deploy/install.sh --context <ctx> --only S12   # RESULT: PASS(설치 호스트가 사내 CA 를 믿으면 CACERT 생략)
 ```
 
-- 포탈 운영 → 아티팩트 경로: 3홉(API·컨트롤러·노드)이 모두 정상, 「DMS 상태 디렉터리」가 `<SHARED_DIR>/dms`, 겹치는 스토리지 경고 없음.
+- 포탈 관리 → 아티팩트 경로: 3홉(API·컨트롤러·노드)이 모두 정상, 「DMS 상태 디렉터리」가 `<SHARED_DIR>/dms`, 겹치는 스토리지 경고 없음.
 - 스토리지 → 노드: 모든 DMS 노드(에이전트가 뜬 노드)의 보고가 신선하다.
 - 요청 상세의 결과 화면·실행 로그가 열린다(결과 파일이 공용 디렉터리에 써졌다는 뜻).
 
@@ -3361,7 +3361,7 @@ Ready(`started_degraded`), 아티팩트 읽기만 503 이고 나머지 포탈은
 | 확인 | 방법 |
 |---|---|
 | 지금 이 파드가 보는가 | `GET /api/admin/artifact-base/health` → `{ok, reason, checked_at, instance, node_name}`(메모리만, 포탈 폴링용) |
-| 두 관점·파드별 | `GET /api/admin/artifact-base` 의 `checks.api`(`source` monitor/instant·`availability`·`posture`·`gate.state`)·`checks.api_pods`(Ready 못 된 새 파드 포함 — `fresh`·`this_pod`)·`checks.controller.node_name` — 포탈 **운영 → 아티팩트 경로** 의 API·컨트롤러 두 패널 |
+| 두 관점·파드별 | `GET /api/admin/artifact-base` 의 `checks.api`(`source` monitor/instant·`availability`·`posture`·`gate.state`)·`checks.api_pods`(Ready 못 된 새 파드 포함 — `fresh`·`this_pod`)·`checks.controller.node_name` — 포탈 **관리 → 아티팩트 경로** 의 API·컨트롤러 두 패널 |
 | 지금 다시 점검 | `POST /api/admin/artifact-base:recheck`(관리자, 최대 12초 대기 후 같은 모양) — 포탈 「지금 다시 점검」 |
 | 노드 × 스토리지 | 포탈 **스토리지 → 마운트 현황**(`GET /api/admin/mount-status`, DB 만 — 에이전트 보고: 노드마다 공용 디렉터리를 덮는 마운트 지점·파일시스템 종류, 덮는 마운트가 `/` 면 「로컬」). dms-api·컨트롤러가 뜬 노드에 「dms-api」·「컨트롤러」 꼬리표(각 파드의 점검 기록 — `control_pods`), 공용 디렉터리 칸이 문제인 노드거나 그 파드의 경로 점검이 실패하면(권한 사유 제외) 꼬리표가 경고(빨강). 에이전트가 없는 노드(prod 마스터)의 파드는 각주 |
 | Ready 안 되는 새 파드 | `kubectl --context <ctx> -n dms get pods -l app.kubernetes.io/name=dms-api -o wide` 로 노드 확인 → 그 노드의 `findmnt -T <base>`(공유 스토리지가 마운트돼 있는가). 마운트하면 재시작 없이 다음 점검에서 Ready(HostToContainer 전파) |
@@ -3424,9 +3424,9 @@ kubectl --context <ctx> get pv | grep dms-pgdata                        # Releas
 | 관리 → 보안 이벤트 | 로그인 보호 장치의 현재 값, 인증번호 잠금, 최근 보안 이벤트·출발지 IP(§10-7) |
 | 작업 → 전체 작업 툴바 | 「배치 삭제 중 k건 · 결과 파일·파드 정리 중 N건 · 지연 M건」과 지연 사유(§12), 늘 있는 상한 줄(서버 limits — 2026-11-19). 배치가 오래 「삭제 중」이면 배치 상세 진행 카드의 지연 사유·컨트롤러 이벤트 `batch-delete`(§12 「삭제 지연」) |
 | 작업 → 배치 스케줄러 | 스케줄별 다음 실행(KST)·마지막 회차 결과·자동 일시정지 사유(실행 기록은 행의 「기록」 창 — 최근 50회). 최근 K회차 보존 안내(머리)와 「정리」 열(정리 누적 N건·마지막 시각 — 「아직 정리 없음」은 0 과 다르다, §12 「스케줄 회차 보존 정리」). 자식 요청이 배치 단위 삭제 상한(기본 50000 — `DMS_BATCH_DELETE_MAX_CHILDREN`)의 80% 이상이거나 이미 넘었으면(capped), 또는 항목 수 × 보존 회차가 상한보다 크면 경고(기본 10회차면 항목 5001개부터). 행 「삭제」는 실행 기록만 함께 지운다 — 보존 회차 셈(`batch_rounds`)과 이미 남은 작업은 그대로라 정리만 멈추고, 같은 배치에 스케줄을 다시 만들면 쌓인 회차로 곧 정리가 돈다(추가 창 「곧 정리될 작업」). 배치를 지우면 실행 기록·보존 회차 기록도 함께 지워진다 |
-| 운영 → 아티팩트 경로 | API 파드(파드별 점검·시작 게이트, Ready 못 된 새 파드 포함)·컨트롤러 두 패널과 점검 노드, 엇갈림 상자·「지금 다시 점검」(§12e), 노드별 보고, DMS 상태 디렉터리와 겹치는 스토리지 경고, 결과 파일 보존·만료·정리 지연(§12b) |
-| 운영 → 릴리스 | 이미지 드리프트 배지, 「보안 설정 드리프트」(§9-8 — S11 로만 사라진다) |
-| 스토리지 → 노드 | 에이전트 보고 신선도·스토리지 상태·배치 제외 |
+| 관리 → 아티팩트 경로 | API 파드(파드별 점검·시작 게이트, Ready 못 된 새 파드 포함)·컨트롤러 두 패널과 점검 노드, 엇갈림 상자·「지금 다시 점검」(§12e), 노드별 보고, DMS 상태 디렉터리와 겹치는 스토리지 경고, 결과 파일 보존·만료·정리 지연(§12b) |
+| 관리 → 릴리스 | 이미지 드리프트 배지, 「보안 설정 드리프트」(§9-8 — S11 로만 사라진다) |
+| 스토리지 → 노드 | 에이전트 보고 신선도·스토리지 상태·배치 제외. 「리포트 지연」 행의 「기록 삭제」·「새 이름: X」 힌트(이름이 바뀌었거나 클러스터에서 뺀 노드의 옛 행 — §14-3) |
 | 스토리지 → k8s 연동 | 「개요」 탭: 클러스터 상태별 개수, 호출 노드 카드(마지막 호출·성공·실패). 「클러스터」 탭: 클러스터별 마지막 동기화 결과. 메일 stub 경고는 두 탭 모두(§6-5) |
 
 **모니터링 연계**
@@ -3440,7 +3440,8 @@ kubectl --context <ctx> get pv | grep dms-pgdata                        # Releas
   점 수를 보고 횟수로 세거나 값이 전부 null 인 점을 정상 보고로 읽는 외부 스크립트는 고친다.
 - 입구의 요청별 로그는 클러스터 Traefik 의 접근 로그다 — 켜고 모으는 것은 클러스터 운영자 몫이다(차트 values `logs.access.enabled`, 기본 꺼짐).
   DMS 는 Traefik 설정을 바꾸지 않는다. 로그인 출발지(원 IP)는 앱 보안 이벤트의 `client_ip`·`peer` 로 본다(§2g-5).
-- 이벤트 보존 30일(`DMS_EVENT_RETENTION_DAYS`), 에이전트 보고 보존 30일(`DMS_AGENT_REPORT_RETENTION_DAYS`).
+- 이벤트 보존 30일(`DMS_EVENT_RETENTION_DAYS`), 에이전트 보고 보존 30일(`DMS_AGENT_REPORT_RETENTION_DAYS`). 보고 보존은 이력만 지운다 — 노드 화면의 행
+  (노드당 최신 1행)은 남는다. 노드 기록 자동 정리(`DMS_AGENT_NODE_FORGET_SECONDS`)는 기본 꺼짐이다(§14-3 「노드 이름이 바뀐 뒤 옛 행 정리」).
 
 ### 14-2. 정기 작업 달력
 
@@ -3470,6 +3471,29 @@ kubectl --context <ctx> get pv | grep dms-pgdata                        # Releas
   전에 LB 풀에서 그 멤버를 빼 두면(비활성) 헬스가 거를 때까지의 새 연결 실패가 없다(§2g-6 「롤링 공백」과 같은 이유). 노드를 더하거나 빼면 LB 풀도
   같이 고친다(기준은 S1 의 `Traefik 파드 Ready N/M (노드: …)` 줄 — §2g-4).
 - 재부팅 직후 첫 잡은 에이전트 첫 보고(30초)·프로브 전이면 `no_ready_sync_candidate` 로 거부될 수 있다 — 1~2분 뒤 다시 낸다.
+- **노드 이름이 바뀐 뒤(또는 클러스터에서 뺀 뒤) 옛 행 정리**(2026-11-25): 에이전트의 노드 이름은 k8s Node 이름(`spec.nodeName`)이다 — 호스트 이름을
+  바꿔 클러스터가 노드를 새 이름으로 다시 등록하면 에이전트는 새 이름으로 보고하고, 옛 이름의 행은 마지막 보고 그대로 「리포트 지연」으로 남는다(노드
+  화면의 행은 보고가 올 때만 바뀐다 — 보고 보존(§14-1)은 이력만 지운다). 그 행은 작업을 받지 않지만(배치는 신선한 보고만 쓴다) 노드 수·마운트 현황·
+  지표에 같은 장비가 두 줄로 보인다. 정리:
+  ① 포탈 스토리지 → 노드에서 옛 이름 행이 「리포트 지연」인지 본다. 새 에이전트(이 기능을 담은 dms-agent 롤아웃 뒤)가 보고한 장비면 옛 행에 「새 이름: X」
+  힌트가 뜬다(같은 호스트 machine-id 의 파생값 — 롤아웃 전에 이미 멈춘 옛 이름에는 안 뜬다).
+  ② 그 이름을 가리키는 것을 먼저 바꾼다: 관리 → 컨트롤 상태의 빌드 노드(§6-3), 스토리지 → k8s 연동의 호출 노드(주·보조), 그 노드에 배치된 진행 중
+  작업(취소하거나 끝나기를 기다린다)·빌드. 작업 목록에는 노드 필터가 없다 — 막는 작업은 ③ 의 거절 창에 요청 상세 링크로 뜬다(최대 5건, API 는
+  상세 꼬리 `;requests=<요청 id,…>`). 링크로 요청 상세를 열어 취소한다.
+  ③ 옛 행의 「기록 삭제」(확인 창 — 되돌릴 수 없다) 또는 `DELETE /api/admin/nodes/<옛 이름>`. **포탈에 로그인한 관리자만**이다 — 공유 토큰 Bearer 는 403
+  `admin_session_required`. 행(최신 보고)·배치 제외·보고 이력을 한 번에 지우고 감사 로그(`agent_node`·`delete`)에 남는다. 거절: 409 `node_fresh`(지금
+  보고 중 — 지워도 다음 보고에 다시 생긴다), 409 `node_in_use:<근거>[;requests=<요청 id,…>]`(`build_node`·`k8s_primary`·`k8s_secondary`·`active_build`·
+  `active_jobs` — ②), 404 `node_not_found`. 스토리지 데이터와 작업 기록은 건드리지 않는다.
+  ④ 같은 이름의 노드가 다시 보고하면 새 행으로 다시 생긴다(배치 제외도 지워졌으니 다시 배치 대상이다).
+  ⑤ (선택) 자동 정리: `DMS_AGENT_NODE_FORGET_SECONDS`(기본 `0` = 끔, 예 `604800` = 7일)를 §3-4 (b) 영구 절차(사이트 patch-config → `--only S11`)로
+  켠다. 컨트롤러 retention 루프(기본 1시간 간격)가 그 시간 이상 보고가 없고 **k8s 에 그 Node 가 더는 없고** ②가 없는 노드만 지운다(틱당 20개, 감사
+  `auto_forget`·actor `system:agent-node-forget`, 이벤트 `agent_node_forgotten`). k8s 조회가 실패하거나 빈 목록이면 아무것도 지우지 않는다(이벤트
+  `agent_node_forget_skipped` — `k8s_list_failed` 가 403 이면 ClusterRoleBinding `dms-controller-nodes-readonly` 가 아직 없다: 이 바인딩도 S11 이 적용한다,
+  §0-4), ②에 걸리면 `agent_node_forget_in_use`(payload 에 막는 요청 id). `0 < 값 < DMS_AGENT_REPORT_STALE_SECONDS` 는 기동 거부.
+  **호스트 이름만 바꾼 경우에는 자동 정리가 돌지 않을 수 있다**: 클러스터가 새 이름으로 Node 를 다시 등록해도 옛 Node 객체는 보통 NotReady 로
+  남는다(베어메탈·RKE2 는 아무도 지우지 않는다). `kubectl --context <ctx> get node <옛 이름>` 이 아직 보이면 자동 정리는 그 행을 지우지 않는다 —
+  클러스터 운영자가 옛 Node 를 지운 뒤에 돌거나, ③ 버튼으로 지운다.
+  노드 이름을 바꾸거나 옛·새 이름 행을 합치는 기능은 없다 — 노드 이름 = k8s Node 이름이 계약이다.
 
 **마스터**(§2f-7 규칙 — 어기면 PG 데이터가 깨질 수 있다)
 - 한 대씩. 다음 대로 넘어가기 전에 `kubectl --context <ctx> -n dms get cluster dms-pg` 가 healthy(readyInstances 3)인지 본다. 그 마스터가 PG primary 면 먼저
@@ -3504,6 +3528,7 @@ kubectl --context <ctx> get pv | grep dms-pgdata                        # Releas
 | 잡이 오래 Pending(미리보기·실행 vcjob 이 시작하지 않음) | 포탈 운영 → 대시보드 「큐 현황」: 큐 `dms-data` 배지(Closed = Volcano 쪽에서 닫혔다 — 클러스터 운영자)와 「지금 대기 중」의 PodGroup 사유(`queue_reader`). 클러스터에서: `kubectl --context <ctx> get queue dms-data -o jsonpath='{.status.state}'`(Open 이어야 한다), `kubectl --context <ctx> -n dms get vcjob,podgroup \| grep <job id 앞 12자>` → `kubectl --context <ctx> -n dms describe vcjob <이름>`(이벤트의 Unschedulable 사유). 흔한 원인: 노드 CPU 상한(`procs_per_node`), 다른 잡이 코어를 차지함, 후보 노드 cordon·배치 제외, Volcano 스케줄러 장애. **DMS 의 시한(미리보기·실행·점검 600초)은 파드가 노드에 붙은 뒤부터 센다**(`execution_manifests._apply_task_deadlines`, `stepper.PREFLIGHT_DEADLINE_SECONDS`) — 노드 CPU 상한이 제출 크기보다 작다고 알려진 경우만 `node_cpu_insufficient` 로 끝내고(`stepper._raise_if_cpu_short`), 그 밖의 이유로 끝내 배치되지 않는 잡은 스스로 끝나지 않는다 — 원인을 풀거나 요청 상세에서 취소한다 | §6-4·§14-3 |
 | `node_cpu_insufficient` | 정책의 `procs_per_node` 를 노드 CPU 상한 이하로 | §6-4 |
 | `no_ready_sync_candidate` | 에이전트 보고가 오래됐거나 그 스토리지 마운트가 없다. 재부팅 직후면 1~2분 뒤 | 14-3 |
+| 노드 화면에 옛 이름(호스트 이름 변경·클러스터에서 뺀 노드)이 「리포트 지연」으로 영원히 남음 | 노드 화면의 행은 보고가 올 때만 바뀐다 — 「기록 삭제」(세션 관리자, 409 `node_fresh`·`node_in_use:<근거>`) 또는 자동 정리(`DMS_AGENT_NODE_FORGET_SECONDS`, 기본 꺼짐) | §14-3 |
 | 제출 403·409·422 | 권한 경로별 사유 | §10-1 |
 | 제출 503 `maintenance_mode` | 컨트롤 상태 유지보수가 켜져 있다 | §6-3 |
 | 잡이 전혀 진행하지 않는다 | 컨트롤 상태 drain 이 켜져 있다(stepper 정지) | §6-3 |

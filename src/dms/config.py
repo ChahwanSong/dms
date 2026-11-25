@@ -20,6 +20,11 @@ _SERVER_INT_KEYS = (
     ("DMS_RECONCILE_INTERVAL_SECONDS", "reconcile_interval_seconds", 30),
     ("DMS_RETENTION_INTERVAL_SECONDS", "retention_interval_seconds", 3600),
     ("DMS_AGENT_REPORT_RETENTION_DAYS", "agent_report_retention_days", 30),
+    # 노드 기록 자동 정리(2026-11-25, node_forget.forget_absent_nodes_once -- 컨트롤러 retention 루프 끝): 마지막 보고가 이
+    # 초 이상 지났고 쿠버네티스에 그 Node 가 더는 없는 노드 기록(agent_nodes·배치 제외·보고 이력)을 지운다. 0 = 끔(기본). 켜면
+    # 예 604800(7일). 음수, 그리고 0 < x < DMS_AGENT_REPORT_STALE_SECONDS 는 기동 거부(「리포트 지연」이 되기 전에 지우는 값은
+    # 뜻이 없다). 켜려면 컨트롤러 SA 의 nodes list 권한(ClusterRoleBinding dms-controller-nodes-readonly -- S11)이 필요하다.
+    ("DMS_AGENT_NODE_FORGET_SECONDS", "agent_node_forget_seconds", 0),
     ("DMS_PLANNER_INTERVAL_SECONDS", "planner_interval_seconds", 10),
     # 노드 CPU 상한의 예비 몫(밀리코어, 2026-10-16 -- node_cpu 모듈 docstring): 상한 = floor((allocatable − launcher 100m −
     # 이 값) / 1000) 코어. DaemonSet·제어면·빌드 파드 몫이다(컨트롤러는 다른 파드의 requests 를 볼 수 없다). 음수는 기동 거부.
@@ -352,6 +357,8 @@ class Settings:
     reconcile_interval_seconds: int = 30
     retention_interval_seconds: int = 3600
     agent_report_retention_days: int = 30
+    # 노드 기록 자동 정리(2026-11-25) -- _SERVER_INT_KEYS 의 주석 참고. 0 = 끔.
+    agent_node_forget_seconds: int = 0
     planner_interval_seconds: int = 10
     node_cpu_reserve_millicores: int = DEFAULT_NODE_CPU_RESERVE_MILLICORES
     stepper_interval_seconds: int = 5
@@ -511,6 +518,10 @@ class Settings:
             port = 0
         extra = {field: _parse_int(environ, env_key, default, problems)
                  for env_key, field, default in _SERVER_INT_KEYS}
+        forget = extra["agent_node_forget_seconds"]
+        if forget < 0 or 0 < forget < extra["agent_report_stale_seconds"]:
+            problems.append("DMS_AGENT_NODE_FORGET_SECONDS must be 0 (off) or >= DMS_AGENT_REPORT_STALE_SECONDS: "
+                            f"{environ.get('DMS_AGENT_NODE_FORGET_SECONDS')!r}")
         if extra["request_delete_quiet_seconds"] < 0:
             problems.append("DMS_REQUEST_DELETE_QUIET_SECONDS must be >= 0: "
                             f"{environ.get('DMS_REQUEST_DELETE_QUIET_SECONDS')!r}")

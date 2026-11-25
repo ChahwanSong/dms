@@ -134,6 +134,12 @@ data:
   # 안 깨지지만, 형제 항목(DMS_AGENT_REPORT_RETENTION_DAYS)처럼 운영자가 여기서 찾을 수
   # 있어야 하므로 명시한다(사이트 값은 오버레이 patch-config 가 덮는다 -- 위 절 머리).
   DMS_EVENT_RETENTION_DAYS: "30"
+  # 노드 기록 자동 정리(2026-11-25, 컨트롤러 retention 루프 끝 -- src/dms/node_forget.py). 마지막 보고가 이 초 이상 지났고
+  # 쿠버네티스에 그 Node 가 더는 없는 노드의 기록(노드 화면의 행·배치 제외·보고 이력)을 지운다. 그 노드를 빌드 노드·k8s 호출
+  # 노드로 쓰거나 진행 중 작업이 있으면 지우지 않고, k8s 조회 실패·빈 목록이면 아무것도 지우지 않는다. 0 = 끔(기본 -- 사람이
+  # 노드 화면 「기록 삭제」로 지운다). 켜면 예 "604800"(7일). 0 < 값 < DMS_AGENT_REPORT_STALE_SECONDS 는 기동 거부. 켤 때는 S11
+  # 이 ClusterRoleBinding dms-controller-nodes-readonly 도 적용한다(deploy/README §14-3). 기본값과 같다(사이트 중립).
+  DMS_AGENT_NODE_FORGET_SECONDS: "0"
   DMS_PLANNER_INTERVAL_SECONDS: "10"
   # 노드 CPU 상한의 예비 몫(밀리코어, 2026-10-16). 워커는 노드당 프로세스 수만큼 CPU 코어를 요청하고(limits 없음,
   # launcher 100m) planner·stepper 가 노드당 프로세스를 floor((노드 allocatable − 100m − 이 값) / 1000) 코어로 줄인다 --

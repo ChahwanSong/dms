@@ -97,3 +97,36 @@ def test_controller_role_untouched_by_queue_visibility():
     grants = [r for r in _rules(doc)
               if "scheduling.volcano.sh" in r.get("apiGroups", [])]
     assert grants == []
+
+
+# 노드 기록 자동 정리(2026-11-25, src/dms/node_forget.py): 컨트롤러가 「k8s 에 그 Node 가 더는 없음」을 확인하려고 nodes 를
+# list 한다. 새 ClusterRole 을 만들지 않고 api 의 dms-api-nodes-readonly(같은 읽기 표면)에 바인딩만 더한다 -- 바인딩이 빠지면
+# 조회가 403 이고 자동 정리는 조용히 아무것도 안 지운다(fail-closed, 이벤트 agent_node_forget_skipped).
+def test_nodes_clusterrole_bound_to_controller_for_auto_forget():
+    doc = workload_doc(RBAC, "ClusterRoleBinding", "dms-controller-nodes-readonly")
+    assert doc is not None, "ClusterRoleBinding dms-controller-nodes-readonly 가 없다 -- 자동 정리가 403 으로 멈춘다"
+    role_ref = [line.strip() for line in _top_block(doc, "roleRef")]
+    assert "kind: ClusterRole" in role_ref
+    assert "name: dms-api-nodes-readonly" in role_ref
+    subjects = [line.strip() for line in _top_block(doc, "subjects")]
+    assert "- kind: ServiceAccount" in subjects
+    assert "name: dms-controller" in subjects
+    assert "namespace: dms" in subjects
+    # api 바인딩은 그대로(no_proxy 힌트)
+    api = workload_doc(RBAC, "ClusterRoleBinding", "dms-api-nodes-readonly")
+    assert api is not None and "name: dms-api" in [line.strip() for line in _top_block(api, "subjects")]
+
+
+def test_nodes_clusterrole_stays_read_only():
+    # 두 SA 가 같이 쓰는 ClusterRole -- 쓰기 동사가 붙으면 컨트롤러까지 노드를 바꿀 수 있게 된다.
+    doc = workload_doc(RBAC, "ClusterRole", "dms-api-nodes-readonly")
+    assert doc is not None
+    [rule] = _rules(doc)
+    assert rule == {"apiGroups": [""], "resources": ["nodes"], "verbs": ["get", "list"]}
+
+
+def test_controller_namespaced_role_has_no_nodes():
+    # Node 는 cluster-scoped 라 namespaced Role 에 넣어도 효과가 없다 -- 넣는 순간 「권한이 있다」는 착시만 남는다.
+    doc = workload_doc(RBAC, "Role", "dms-controller")
+    assert doc is not None
+    assert [r for r in _rules(doc) if "nodes" in r.get("resources", [])] == []
