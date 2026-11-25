@@ -95,6 +95,31 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ✅ stale 노드 기록 삭제(API·버튼·선택 자동 정리·새 이름 힌트) + 노드 상세 관리 디렉토리 열 + 빌드·릴리스·컨트롤 상태·아티팩트 경로 → 관리 메뉴 — **완료·실증**(2026-11-25, d203, dms-ssc)
+
+사용자 요청: 「아래 내용이 dms-k8s 세션에서 구현되있는데, 참고해서 이 dms-ssc 에서도 구현해 줘」 — ① 노드 상세 마운트 표에 관리
+디렉토리 열 ② 빌드·릴리스·컨트롤 상태·아티팩트 경로를 운영 → 관리 메뉴 ③ OA 프로덕션 이슈(호스트 이름 변경 뒤 옛 노드 이름이
+「리포트 지연」으로 영원히 남고 지울 길이 없음). dms-k8s 20950c48·65760717(그 라인 d44·d45)을 이식했다(2bdeb59).
+
+- 이식 워크플로: 백엔드·포탈 병렬 → 3렌즈 리뷰 + 반박 검증(확정 4건 전부 문서 — README 의 prod·ssc 사이트 켜는 법·공용 주석 문구).
+- dms-k8s 와 다른 점: dms-ssc 엔 k8s 연동 호출 노드가 없어 `node_in_use` 근거 = `build_node`·`active_build`·`active_jobs`. 자동 정리를
+  켜는 절차는 사이트별(testbed `apply -k` / prod `deploy/install.sh` / ssc 사이트 `ssc/install.sh` — prod·ssc 오버레이는 틀),
+  deploy/README §12c. 공용 20-config 의 새 키 주석은 두 라인 모두에 맞는 문구로.
+- list_nodes 호출자 감사: 계산에 stale 행이 섞이는 곳 0(바꾼 곳 없음).
+- **라이브 실증**(d203, 가짜 에이전트 보고 `proof-old-n203`·`proof-new-n203` — 마운트 없음이라 배치 후보 아님, 끝나고 둘 다 지움):
+  | 항목 | 결과 |
+  |---|---|
+  | 거절 | fresh 노드 409 `node_fresh`, 공유 토큰 403 `admin_session_required`, 없는 노드 404 `node_not_found` |
+  | 새 이름 힌트 | 옛 이름(stale)과 같은 machine_key 의 새 이름(fresh) 보고 → 옛 행 「새 이름: proof-new-n203」 |
+  | 버튼 삭제 | 「리포트 지연」 행의 「기록 삭제」 → 확인 창(되돌릴 수 없음·같은 이름 재보고 시 새로 생김·새 이름 힌트) → 「proof-old-n203 기록을 지웠습니다(보고 이력 1건)」, 감사 `agent_node/delete` actor mason |
+  | 관리 디렉토리 열 | dms-w1 상세 마운트 표 「관리 디렉토리」 /cephfs/managed 등(375 는 표 안 가로 스크롤, 문서 넘침 0) |
+  | 메뉴 | 운영 = 대시보드·사용량 분석, 관리 끝에 빌드·릴리스·컨트롤 상태·아티팩트 경로(1440·375) |
+  | `apply -k`(d203) | ClusterRoleBinding `dms-controller-nodes-readonly` 생성, DMS_AGENT_NODE_FORGET_SECONDS "0"(꺼짐) — 재롤아웃 없음 |
+- 빌드 노드 디스크: 첫 d203 빌드가 `build_node_disk_low`(여유 18G < 필요 17.7G 경계) — dms-w1 의 옛 dN(d190 미만) 이미지 캐시를 지워
+  23G 로 만든 뒤 성공(레지스트리 원본은 그대로).
+- 검증: 백엔드 전체 4256 passed·38 skipped, vitest 1752, tsc, e2e 32, dist 외부 URL 0.
+- 남은 것: 새 이름 힌트의 machine_key 는 에이전트 이미지를 새로 내야 실린다(테스트베드 에이전트 d192 그대로 — 실증은 가짜 보고로).
+
 ### ✅ API 파드 자체 artifact base 점검·시작 게이트·「공유 스토리지 접근 불가」 503 사유·관리 화면 분리 + 마운트 현황 — **완료·실증**(2026-11-23, d201·d202, dms-ssc)
 
 계기: 2026-11-23 프로덕션 사고 — dms-api 가 CephFS 미마운트 노드(/mgmt_storage = 로컬 빈 디렉터리)에 떠 아티팩트·scan 리포트를 못
