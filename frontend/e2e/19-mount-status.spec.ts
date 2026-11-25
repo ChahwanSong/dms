@@ -210,6 +210,12 @@ test.describe("E19 마운트 현황", () => {
     await page.keyboard.press("ArrowRight");
     await expect.poll(() => wrapper.evaluate((el) => el.scrollLeft), { message: "화살표 키로 표가 밀리지 않는다" })
       .toBeGreaterThan(0);
+    // End = 가로 끝, Home = 가로 처음(100열 끝까지 화살표 수백 번이 아니게)
+    await page.keyboard.press("End");
+    await expect.poll(() => wrapper.evaluate((el) => el.scrollWidth - el.clientWidth - el.scrollLeft), { message: "End 로 가로 끝에 가지 않는다" })
+      .toBeLessThanOrEqual(1);
+    await page.keyboard.press("Home");
+    await expect.poll(() => wrapper.evaluate((el) => el.scrollLeft), { message: "Home 으로 가로 처음에 가지 않는다" }).toBe(0);
     await wrapper.evaluate((el) => { el.scrollLeft = 0; });
 
     // ⑧ 칸·열 머리 툴팁(래퍼 위임) + 열 따라가기 막대: 칸에 올리면 그 열 머리에 data-hot -- 면색은 그대로(bg-surface)이고 바닥 막대는

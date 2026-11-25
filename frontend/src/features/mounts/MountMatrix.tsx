@@ -1,5 +1,5 @@
 import { forwardRef, memo, useCallback, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { MouseEvent, ReactNode, RefObject, UIEvent } from "react";
+import type { KeyboardEvent, MouseEvent, ReactNode, RefObject, UIEvent } from "react";
 import { HoverTip } from "../../components/ui/HoverTip";
 import type { Rect } from "../../components/ui/HoverTip";
 import { agoText, kstStamp } from "../../lib/datetime";
@@ -129,6 +129,13 @@ export function MountMatrix({ data, rows, cols, renderStorageMeta, renderStorage
     tipRef.current?.close();
   };
   const onTipClosed = useCallback(() => { cur.current = null; setHot(); }, [setHot]);
+  // Home/End = 가로 처음·끝(2026-11-25 d46 실증: 화살표 한 번에 40px 라 100열 끝까지 약 246번이었고, Home/End 는 페이지를 세로로
+  // 움직였다). 래퍼 자신에 초점이 있을 때만 -- 안쪽 노드 버튼의 키는 건드리지 않는다.
+  const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (e.target !== e.currentTarget || e.altKey || e.ctrlKey || e.metaKey) return;
+    if (e.key === "Home") { e.currentTarget.scrollLeft = 0; e.preventDefault(); }
+    else if (e.key === "End") { e.currentTarget.scrollLeft = e.currentTarget.scrollWidth; e.preventDefault(); }
+  };
   const onScroll = (e: UIEvent<HTMLDivElement>) => {
     const el = e.currentTarget;
     const x = el.scrollLeft > 0;
@@ -139,8 +146,8 @@ export function MountMatrix({ data, rows, cols, renderStorageMeta, renderStorage
   };
 
   return (
-    <div ref={wrapRef} role="region" aria-label="노드 × 스토리지 표 — 가로·세로로 스크롤" tabIndex={0}
-         onScroll={onScroll} onMouseOver={onMouseOver} onMouseOut={onMouseOut}
+    <div ref={wrapRef} role="region" aria-label="노드 × 스토리지 표 — 가로·세로로 스크롤(Home·End 로 처음·끝)" tabIndex={0}
+         onScroll={onScroll} onKeyDown={onKeyDown} onMouseOver={onMouseOver} onMouseOut={onMouseOut}
          className={WRAP} style={maxHeight === null ? undefined : { maxHeight }}>
       <table className={TABLE}>
         <caption className="sr-only">노드별 스토리지 마운트 현황</caption>
@@ -175,7 +182,8 @@ const MatrixHead = memo(function MatrixHead({ cols, shared, renderStorageMeta }:
         {shared !== null && (
           <th scope="col" data-tip="shared-head" className={SH_HEAD}>
             <div className="mx-auto w-[7.5rem]">
-              <div className="whitespace-nowrap text-xs font-semibold leading-4">DMS 공용</div>
+              {/* 스토리지 열 머리와 같은 두 줄 고정 높이(아래 붙임) -- 「DMS 공용」이 스토리지 이름 끝 줄과 같은 자리에 온다(d46 실증: 16px 위였다). */}
+              <div className="flex h-8 flex-col justify-end whitespace-nowrap text-xs font-semibold leading-4">DMS 공용</div>
               {shared.state_root !== null && (
                 <div className="truncate font-mono text-[11px] font-normal leading-4 text-muted">{shared.state_root}</div>
               )}
