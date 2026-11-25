@@ -36,12 +36,8 @@ export const NAVIGATION: NavSection[] = [
           // 사용량 분석(2026-08-23): 디렉터리별 scan 이력(실 사용량·데이터 온도)
           // 시계열 — 전 요청자 통합이라 운영 그룹(admin 전용)이다.
           { path: "/admin/usage", label: "사용량 분석", icon: TrendingUp },
-          { path: "/admin/builds", label: "빌드", icon: Hammer },
-          { path: "/admin/releases", label: "릴리스", icon: Rocket },
-          { path: "/admin/control", label: "컨트롤 상태", icon: SlidersHorizontal },
-          // 스토리지 그룹에서 이동(사용자 결정 2026-08-18): 아티팩트 경로는 잡
-          // 산출물 저장 위치라 스토리지 등록보다 운영 설정에 가깝다.
-          { path: "/admin/artifact-base", label: "아티팩트 경로", icon: FolderCog },
+          // 빌드·릴리스·컨트롤 상태·아티팩트 경로는 관리 그룹으로 옮겼다(사용자 결정 2026-11-25) -- 운영 그룹은 「보는」 화면
+          // (대시보드·사용량 분석)만 남는다.
         ],
       },
       {
@@ -84,6 +80,13 @@ export const NAVIGATION: NavSection[] = [
           { path: "/admin/mail", label: "메일 설정", icon: Mail },
           // 포탈 설정(2026-10-02): 포탈 이름의 서브네임(사이트 표시 이름).
           { path: "/admin/portal", label: "포탈 설정", icon: Settings },
+          // 운영 그룹에서 이동(사용자 결정 2026-11-25): 빌드·릴리스·컨트롤 상태·아티팩트 경로는 배포·제어면 설정이라 관리 그룹의
+          // 끝에 예전 상대 순서 그대로 둔다. 경로·화면·DETAIL_ROUTES(빌드 이력·이미지 관리·빌드 상세)는 그대로 -- 크럼만 「관리」가 된다.
+          // (아티팩트 경로는 2026-08-18 스토리지 → 운영으로 옮겼던 항목이다 -- 잡 산출물 저장 위치라 스토리지 등록보다 설정에 가깝다.)
+          { path: "/admin/builds", label: "빌드", icon: Hammer },
+          { path: "/admin/releases", label: "릴리스", icon: Rocket },
+          { path: "/admin/control", label: "컨트롤 상태", icon: SlidersHorizontal },
+          { path: "/admin/artifact-base", label: "아티팩트 경로", icon: FolderCog },
         ],
       },
     ],

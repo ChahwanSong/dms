@@ -129,6 +129,13 @@ class BuildsRepository:
         rows = self._by_states(_ACTIVE, limit=1)
         return rows[0] if rows else None
 
+    def active_on_node(self, node_name: str) -> bool:
+        """그 노드에서 도는(Pending·Running) 빌드가 있나 -- 노드 기록 삭제(2026-11-25, dms.node_forget)의 in_use 근거.
+        active() 는 limit 1 이라 쓰지 않는다. 빌드 노드(control_state)를 바꾼 뒤에도 옛 노드의 빌드가 아직 돌 수 있다."""
+        return self._db.query_one(
+            "SELECT 1 AS x FROM builds WHERE node_name = :n AND state IN ('Pending', 'Running') LIMIT 1",
+            {"n": node_name}) is not None
+
     def pending(self):
         return self._by_states(("Pending",))
 

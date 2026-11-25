@@ -207,9 +207,34 @@
 - 🔧 **호스트 콜드부팅 리허설 미실증**(2026-10-22) — VM 단독 재부팅(k8s-w1·k8s-w2)과 hostnet 유닛 재시작은 실증했고, 그 과정에서
   testbed 부팅 가드의 두 겹 마운트 경합을 고쳤다. 호스트 전체 재부팅(8 VM 동시 기동, pkg-01 Ceph 늦게 올라옴)은 세션에서 할 수
   없다 — 다음 호스트 재부팅 뒤 testbed `make post-boot-check WAIT=900` 이 그 실증이다(testbed ARCHITECTURE §18).
-- 🔧 **ssc DB 에 제거된 dms-w4·w5 의 `nodes` 행이 남는다** — 노드 행 삭제 API·화면이 없다(에이전트 보고가 끊긴 노드는 오래된
-  보고로만 보인다). 배치 후보에서는 신선도로 빠지므로 동작 영향은 없고 노드 화면에 흔적만 남는다. 후보: 관리자 「노드 기록
-  삭제」(보고 끊긴 지 N분 넘고 k8s Node 가 없을 때만, 감사 행).
+- ~~🔧 **ssc DB 에 제거된 dms-w4·w5 의 `nodes` 행이 남는다**~~ — 해소(2026-11-25, dms-k8s 20950c48 이식: 노드 화면 「리포트 지연」
+  행의 「기록 삭제」 = `DELETE /api/admin/nodes/{name}`, 선택 자동 정리 `DMS_AGENT_NODE_FORGET_SECONDS`, deploy/README §12c). 남은 일은
+  아래 「노드 기록 정리 후속」.
+
+### 노드 기록 정리 후속 — 2026-11-25
+
+dms-k8s 20950c48(OA 사이트 「사라지지 않는 stale 노드」)의 이식. 지금 동작은 `node_forget` 모듈 docstring·`repositories.agents.forget_node`
+docstring, 운영 절차는 deploy/README §12c. dms-k8s 와 다른 점: in_use 근거에 k8s 호출 노드 주/보조(`k8s_primary`·`k8s_secondary`)가 없다
+(이 라인에 k8s 연동 설정이 없다).
+
+- 🔍 **라이브 실증** — 아직(ssc 다음 태그): ① 「리포트 지연」 행(위 dms-w4·w5 가 그 대상) 기록 삭제·409 두 갈래(`node_fresh`·
+  `node_in_use:build_node`)·공유 토큰 403·404, ② 보고 이력이 많은 노드의 삭제 시간(보존 30일이면 노드당 약 4.3만 행을 한 트랜잭션 —
+  API 단일 커넥션이 그동안 막힌다, readiness 문턱 안이어야 한다), ③ 자동 정리를 켰을 때 `apply -k` 로 ClusterRoleBinding
+  `dms-controller-nodes-readonly` 가 올라가기 전후의 `agent_node_forget_skipped`(k8s_list_failed → 사라짐), ④ 새 에이전트의
+  `machine_key`(호스트 루트 모드 — VM 마다 machine-id 가 다른지; 복제 VM 템플릿이라 같으면 「정확히 1개」 규칙이 힌트를 내지 않는다).
+- 📝 **이미 멈춘 옛 이름에는 「새 이름」 힌트가 없다** — 힌트 재료(`machine_key`)는 이 기능을 담은 dms-agent 릴리스 뒤의 보고부터
+  생긴다. dms-w4·w5 처럼 그 전에 멈춘 행은 버튼으로만 정리한다.
+- 📝 **호스트 이름만 바꾼 경우 자동 정리는 돌지 않을 수 있다** — 옛 Node 객체가 NotReady 로 남아 있으면 「k8s 에 그 Node 가 더는 없을
+  때만」 규칙에 걸려 지우지 않는다. 클러스터 운영자가 옛 Node 를 지우거나 버튼으로 정리한다(deploy/README §12c 5). NotReady 를
+  「없음」으로 읽는 선택지는 만들지 않았다(재부팅·네트워크 단절 중인 살아 있는 노드와 구분할 수 없다).
+- 💡 **노드 화면 「에이전트 없음」 행** — k8s 에 Node 는 있는데 에이전트 보고가 없는 노드(에이전트 파드가 못 뜬 인프라 문제)를 노드
+  화면에 행으로. api 의 nodes 읽기 권한(`dms-api-nodes-readonly`)으로 된다. 마운트 현황(`routes_mounts`)은 지금 에이전트 보고·API·컨트롤러
+  점검이 있는 노드만 행으로 보인다.
+- 💡 **기록 삭제 창의 「k8s 에 이 Node 있음/없음」** — 사람이 지울 때도 클러스터에서 정말 빠졌는지를 창에서 보이게.
+- 🔧 **컨트롤 상태 빌드 노드 선택지의 리포트 지연 표시** — 빌드 노드 select 는 리포트 지연 노드도 라벨 없이 선택지로 보인다. 고르면
+  빌드 제출이 `build_node_report_stale` 로 거절되니 결함은 아니다.
+- 💡 **마운트 현황 열의 관리 디렉토리** — 노드 상세 「마운트」 표에는 2026-11-25 에 넣었다(프런트 조인). 마운트 현황(`GET /api/admin/mounts`)
+  응답의 열 모양은 바꾸지 않았다.
 
 - 🔧 **경로 심링크(포크 보고 ④) — 남은 것은 포크 쪽 루트 고정(B)뿐**. d191 에서 DMS 봉쇄(A)를 넣었다(CHANGELOG d191): sync 소스·목적지와
   rm 대상의 managed_root 아래 어느 성분이든(끝 포함) 심링크면 미리보기 preflight·실행 직전 exec_preflight·도구 직전(sync 워커 셸, rm 러너)

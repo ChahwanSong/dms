@@ -72,18 +72,23 @@ def main(argv=None) -> int:
         # 요청 삭제 정리(2026-10-08): 이 배선이 빠지면 request-purge 루프가 등록되지 않아 삭제한 요청의 파드·
         # 결과 파일이 영원히 남는다(test_cli 가 request-purge=ok 로 고정).
         purge_runner = build_purge_runner(settings, repos)
+        # 노드 기록 자동 정리(2026-11-25, node_forget.py)의 k8s Node 목록 -- api 의 no_proxy 힌트와 같은 조회(스텁 백엔드는
+        # 빈 목록 = 「모름」이라 아무것도 지우지 않는다). 모듈 속성 호출(위 wire_reconnect_event 와 같은 스파이 관례).
+        node_lister = wiring.build_node_lister(settings)
         if args.once:
             loops = build_loops(settings, repos, identity_resolver=identity_resolver,
                                 execution_adapter=execution_adapter,
                                 build_runner=build_runner,
                                 rollout_runner=rollout_runner,
-                                purge_runner=purge_runner)
+                                purge_runner=purge_runner,
+                                node_lister=node_lister)
             results = run_all_once(loops, repos, holder)
             print(" ".join(f"{k}={v}" for k, v in results.items()))
             return 0
         run_forever(settings, repos, holder, identity_resolver=identity_resolver,
                     execution_adapter=execution_adapter, build_runner=build_runner,
-                    rollout_runner=rollout_runner, purge_runner=purge_runner)
+                    rollout_runner=rollout_runner, purge_runner=purge_runner,
+                    node_lister=node_lister)
         return 0
 
     return 2

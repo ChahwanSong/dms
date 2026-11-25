@@ -1392,6 +1392,52 @@ Ready(`started_degraded`), 아티팩트 읽기만 503 이고 나머지 포탈은
 replicas 1 의 기본값과 같다). 마이그레이션은 자동(`api_base_checks` 테이블, `control_state.artifact_base_check_node` 칸 — 기배포
 행은 NULL = 노드 모름). 옛 이미지로 내리면 게이트·점검만 멈추고 테이블·칸은 남는다(코드 읽기 — **미검증**).
 
+## 12c. 노드 기록 정리 — 이름이 바뀐(또는 클러스터에서 뺀) 노드의 옛 행 (2026-11-25)
+
+dms-k8s 라인의 프로덕션 사고(호스트 이름 변경 뒤 옛 이름이 노드 화면에 영원히 남음)를 이식했다(dms-k8s 20950c48). 규칙 원문은
+`src/dms/node_forget.py` 모듈 docstring.
+
+에이전트의 노드 이름은 k8s Node 이름(`spec.nodeName` — 50-agent-daemonset 의 `DMS_AGENT_NODE_NAME`)이다. 호스트 이름을 바꿔
+클러스터가 노드를 새 이름으로 다시 등록하면 에이전트는 새 이름으로 보고하고, 옛 이름의 행은 마지막 보고 그대로 「리포트 지연」으로
+남는다(노드 화면의 행 = `agent_nodes` 는 보고가 올 때만 바뀌고, retention(`DMS_AGENT_REPORT_RETENTION_DAYS`)은 보고 **이력**만
+지운다). 노드를 클러스터에서 빼도 같다. 그 행은 작업을 받지 않지만(배치는 신선한 보고만 쓴다) 노드 수·마운트 현황·지표에 같은 장비가
+두 줄로 보인다. 정리:
+
+1. 포탈 **스토리지 → 노드**에서 옛 이름 행이 「리포트 지연」인지 본다. 새 에이전트(이 기능을 담은 dms-agent 릴리스 뒤)가 보고한
+   장비면 옛 행에 「새 이름: X」 힌트가 뜬다(보고의 `machine_key` = 호스트 `/etc/machine-id` 의 HMAC 파생값 앞 16hex, 원문은 싣지
+   않는다 — 호스트 루트 모드 에이전트만). 릴리스 전에 이미 멈춘 옛 이름에는 재료가 없어 안 뜬다. 힌트는 표시뿐이다.
+2. 그 이름을 가리키는 것을 먼저 바꾼다: 컨트롤 상태의 **빌드 노드**(§8), 그 노드의 진행 중(Pending·Running) **빌드**, 그 노드가
+   후보에 든 **진행 중 작업**(비종단 잡 — 취소하거나 끝나기를 기다린다). 작업 목록에는 노드 필터가 없다 — 막는 작업은 3 의 거절
+   창에 요청 상세 링크로 뜬다(최대 5건, API 는 상세 꼬리 `;requests=<요청 id,…>`).
+3. 옛 행의 **「기록 삭제」**(확인 창 — 되돌릴 수 없다) 또는 `DELETE /api/admin/nodes/<옛 이름>`. **포탈에 로그인한 관리자만**이다 —
+   공유 토큰 Bearer 는 403 `admin_session_required`. 행(최신 보고)·배치 제외·보고 이력을 한 트랜잭션으로 지우고 감사 로그
+   (`agent_node`·`delete`)에 남는다. 유지보수 중에도 된다. 거절: 409 `node_fresh`(지금 보고 중 — 지워도 다음 보고에 다시 생긴다),
+   409 `node_in_use:<근거>[;requests=<요청 id,…>]`(근거 = `build_node`·`active_build`·`active_jobs` — 2), 404 `node_not_found`.
+   스토리지 데이터와 작업 기록은 건드리지 않는다.
+4. 같은 이름의 노드가 다시 보고하면 새 행으로 다시 생긴다(배치 제외도 지워졌으니 다시 배치 대상이다).
+5. (선택) **자동 정리**: `DMS_AGENT_NODE_FORGET_SECONDS`(기본 `"0"` = 끔, 예 `"604800"` = 7일). 컨트롤러 retention 루프(기본 1시간
+   간격)의 맨 끝이 그 시간 이상 보고가 없고 **k8s 에 그 Node 가 더는 없고** 2 에 걸리지 않는 노드만 지운다(틱당 20개, 감사
+   `auto_forget`·actor `system:agent-node-forget`, 이벤트 `agent_node_forgotten`). k8s 조회가 실패하거나 빈 목록이면 아무것도 지우지
+   않는다(이벤트 `agent_node_forget_skipped` — `k8s_list_failed` 가 403 이면 ClusterRoleBinding `dms-controller-nodes-readonly` 가 아직
+   없다), 2 에 걸리면 `agent_node_forget_in_use`(payload 에 막는 요청 id). `0 < 값 < DMS_AGENT_REPORT_STALE_SECONDS` 는 기동 거부.
+   켜는 법 — 사이트마다 다르다(값을 넣는 파일은 그 사이트 오버레이의 `patch-config.yaml`):
+   - **testbed**: `deploy/overlays/testbed/patch-config.yaml` 에 값 → §4 의 가드(`guard-images.sh deploy/overlays/testbed --context
+     dms`) → `kubectl --context dms apply -k deploy/overlays/testbed`.
+   - **프로덕션(prod)**: `deploy/overlays/prod/patch-config.yaml` 에 값 → `sh deploy/overlays/prod/render.sh` 로 미리 본 뒤 `sh
+     deploy/install.sh`(§2c 킬 스위치와 같은 경로). **SSC 사이트**: `deploy/overlays/ssc/patch-config.yaml` 에 값 → `sh
+     deploy/overlays/ssc/install.sh`. prod·ssc 오버레이는 `REPLACE_*` 가 든 **틀**이라 `kubectl apply -k deploy/overlays/prod` 처럼
+     그대로 적용하면 안 된다(가드가 exit 3 으로 막는다 — 렌더 결과 `.prod-rendered`·`.ssc-rendered` 를 install 이 적용한다).
+   어느 경로든 같은 적용이 base `10-rbac.yaml` 의 바인딩(컨트롤러 SA 에 기존 ClusterRole `dms-api-nodes-readonly` = nodes get·list)도
+   올린다. 포탈 릴리스는 이미지만 바꾸므로 바인딩은 적용 전엔 라이브에 없다(없어도 기본값 0 이면 무관). ConfigMap 만 바뀐 적용은
+   컨트롤러가 env 를 다시 읽지 않으니 `kubectl --context <ctx> -n dms rollout restart deploy/dms-controller`.
+   **호스트 이름만 바꾼 경우에는 자동 정리가 돌지 않을 수 있다**: 클러스터가 새 이름으로 Node 를 다시 등록해도 옛 Node 객체는 보통
+   NotReady 로 남는다. `kubectl --context <ctx> get node <옛 이름>` 이 아직 보이면 자동 정리는 그 행을 지우지 않는다 — 클러스터 운영자가
+   옛 Node 를 지운 뒤에 돌거나, 3 의 버튼으로 지운다. NotReady 를 「없음」으로 읽지 않는다(재부팅·네트워크 단절 중인 살아 있는 노드와
+   구분할 수 없다).
+
+노드 이름을 바꾸거나 옛·새 이름 행을 합치는 기능은 없다 — 노드 이름 = k8s Node 이름이 계약이다. 마이그레이션 없음(새 테이블·칸
+없음 — `machine_key` 는 보고 JSON 안의 키).
+
 ---
 
 ## 13. 두 번째 클러스터(`dmsk8s`) — dms-k8s 브랜치 소관 (2026-10-21 구축, 2026-10-22 브랜치 분리)

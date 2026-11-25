@@ -1,14 +1,16 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { AlertTriangle } from "lucide-react";
 import { useNodes, useNodeReports } from "./useNodes";
 import { PlacementBadges, PlacementCell, k8sNodeState } from "./NodePlacement";
+import { ForgetNodeDialog, type ForgetTarget } from "./ForgetNodeDialog";
+import { useStorages } from "../storages/useStorages";
 import { Card } from "../../components/ui/Card";
 import { Table } from "../../components/ui/Table";
 import { Button } from "../../components/ui/Button";
 import { Dialog } from "../../components/ui/Dialog";
 import { ApiError } from "../../lib/api";
 import { kstStamp } from "../../lib/datetime";
-import type { NodeInfo, NodeMount, NodeTool, NodeDisk, NodeReport } from "../../lib/types";
+import type { ForgetNodeResult, NodeInfo, NodeMount, NodeTool, NodeDisk, NodeReport } from "../../lib/types";
 
 // 에이전트 리포트는 스키마 검증 없이 저장된다 — 배열이어야 할 필드가 배열이
 // 아닌 값(예: {})으로 와도 여기서 걸러야 목록 화면 전체가 죽지 않는다.
@@ -188,10 +190,28 @@ function Tile({ label, value, sub }: { label: string; value: string; sub?: strin
 
 const Empty = ({ text }: { text: string }) => <p className="text-sm text-muted">{text}</p>;
 
+/** 새 이름 힌트(2026-11-25): 리포트 지연 행에서만, 서버가 낸 renamed_to 가 비어 있지 않은 문자열일 때만 그 이름. 판정(같은
+    machine_key 의 정상 노드가 정확히 하나)은 서버 몫이고, 정상 행에 값이 와도 그리지 않는다(지금 보고 중인 노드는 개명되지 않았다). */
+export function renameHint(node: Pick<NodeInfo, "fresh" | "renamed_to">): string | null {
+  return !node.fresh && typeof node.renamed_to === "string" && node.renamed_to !== "" ? node.renamed_to : null;
+}
+
+const RENAME_HINT_TITLE = "같은 장비(machine-id)를 보고하는 정상 노드 — 노드 이름이 바뀐 것으로 보입니다";
+
 function NodeDetail({ node }: { node: NodeInfo }) {
   // "최근 리포트"를 누르기 전에는 요청이 나가지 않는다 — enabled는 showHistory 그 자체다.
   const [showHistory, setShowHistory] = useState(false);
   const reportsQ = useNodeReports(node.node_name, showHistory);
+  // 마운트 표의 「관리 디렉토리」(2026-11-25 사용자 요청): 에이전트 마운트 보고엔 managed_root 가 없어 지금 등록된 스토리지 행
+  // (GET /api/admin/storages, 스토리지 화면과 같은 캐시)을 이름으로 맞붙인다. 창 내용은 열 때만 마운트돼 상세를 열 때만 요청한다.
+  // 불러오는 중·실패·등록에 없는 이름(삭제·개명)은 「—」 -- 경로를 지어내지 않는다.
+  const storagesQ = useStorages();
+  const managedRootOf = new Map<string, string>();
+  for (const st of asArray<{ storage_name?: unknown; managed_root?: unknown }>(storagesQ.data)) {
+    if (typeof st.storage_name === "string" && typeof st.managed_root === "string")
+      managedRootOf.set(st.storage_name, st.managed_root);
+  }
+  const hint = renameHint(node);
 
   const report = node.report ?? {};
   const mounts = asArray<NodeMount & { writable?: boolean }>(report.mounts);
@@ -219,6 +239,7 @@ function NodeDetail({ node }: { node: NodeInfo }) {
         <PlacementBadges node={node} />
         <LastReport node={node} nowMs={nowMs} />
         {typeof probeMode === "string" && <span className="text-xs text-muted">프로브: {probeMode}</span>}
+        {hint !== null && <span className="text-xs text-muted" title={RENAME_HINT_TITLE}>{`새 이름: ${hint}`}</span>}
       </div>
       {/* 배치 상태(2026-10-02): 관리자 배치 제외(사유·누가·언제)와 k8s 스케줄 가능 여부(에이전트 보고). k8s 를
           모르면(조회 실패·옛 에이전트) "모름" -- 막지 않는다(서버 fail-open). */}
@@ -252,22 +273,30 @@ function NodeDetail({ node }: { node: NodeInfo }) {
         <p className="mt-2 text-xs text-muted">{LOAD_HELP}</p>
       </div>
 
-      <Section title="마운트" caption="스토리지 마운트 상태 — Ready 가 아니면 그 노드엔 해당 스토리지 작업이 배치되지 않습니다.">
+      <Section title="마운트"
+               caption={"스토리지 마운트 상태 — Ready 가 아니면 그 노드엔 해당 스토리지 작업이 배치되지 않습니다. "
+                 + "관리 디렉토리는 지금 등록된 스토리지 값입니다(마운트 경로는 이 노드의 마지막 보고)."}>
         {mounts.length === 0 ? <Empty text="보고된 마운트가 없습니다" /> : (
           <Table>
             <thead>
               <tr className="text-muted">
-                <th className="py-2">스토리지</th><th>마운트 경로</th><th>상태</th><th>쓰기</th><th>사유</th>
+                <th className="py-2">스토리지</th><th>마운트 경로</th><th>관리 디렉토리</th><th>상태</th><th>쓰기</th><th>사유</th>
               </tr>
             </thead>
             <tbody>
+              {/* 경로 두 열은 최소 9rem + 필요할 때만 줄바꿈([overflow-wrap:anywhere]) -- break-all 이면 열이 한 글자 폭까지 줄어
+                  390 에서 경로가 글자마다 세로로 꺾였다(2026-11-25 dms-k8s d44 실증). 좁은 화면은 Table 래퍼(overflow-x-auto) 안에서
+                  가로로 민다. 상태·쓰기는 nowrap(「아니 오」 꺾임), 사유 코드도 필요할 때만 줄바꿈. */}
               {mounts.map((m, i) => (
                 <tr key={i} className="border-t border-line">
-                  <td className="py-2 font-medium">{m.storage_name}</td>
-                  <td className="break-all">{m.mount_path}</td>
-                  <td><Pill tone={m.status === "Ready" ? "ok" : "bad"}>{m.status}</Pill></td>
-                  <td>{yesNo(m.writable)}</td>
-                  <td className="text-muted">{m.reason ?? "—"}</td>
+                  <td className="py-2 font-medium whitespace-nowrap">{m.storage_name}</td>
+                  <td className="min-w-[9rem] [overflow-wrap:anywhere]">{m.mount_path}</td>
+                  <td className="min-w-[9rem] [overflow-wrap:anywhere] text-muted">
+                    {(typeof m.storage_name === "string" ? managedRootOf.get(m.storage_name) : undefined) ?? "—"}
+                  </td>
+                  <td className="whitespace-nowrap"><Pill tone={m.status === "Ready" ? "ok" : "bad"}>{m.status}</Pill></td>
+                  <td className="whitespace-nowrap">{yesNo(m.writable)}</td>
+                  <td className="min-w-[7rem] [overflow-wrap:anywhere] text-muted">{m.reason ?? "—"}</td>
                 </tr>
               ))}
             </tbody>
@@ -382,6 +411,17 @@ export function NodesList() {
   const q = useNodes();
   const nodes = q.data ?? [];
   const nowMs = Date.now();
+  // 노드 기록 삭제(2026-11-25): 창은 페이지에 하나(ForgetNodeDialog 머리 주석), 행 버튼은 연 순간의 스냅숏만 넘긴다.
+  const [forgetTarget, setForgetTarget] = useState<ForgetTarget | null>(null);
+  const [forgetResult, setForgetResult] = useState<ForgetNodeResult | null>(null);
+  const opener = useRef<HTMLButtonElement | null>(null);
+  const resultLine = useRef<HTMLParagraphElement>(null);
+  const openForget = (el: HTMLButtonElement, n: NodeInfo) => {
+    opener.current = el;
+    setForgetResult(null);
+    setForgetTarget({ node_name: n.node_name, reported_at: n.reported_at, exclusion: n.exclusion ?? null,
+                      renamed_to: renameHint(n) });
+  };
   const staleCount = nodes.filter((n) => !n.fresh).length;
   const excludedCount = nodes.filter((n) => n.exclusion
     || (k8sNodeState(n).schedulable === false && !k8sNodeState(n).transient)).length;
@@ -397,6 +437,19 @@ export function NodesList() {
           </p>
         )}
       </div>
+      {/* 기록 삭제 결과 줄 -- 늘 그려 둔다: 성공 뒤 포커스가 여기로 오고, 마지막 노드를 지워도 남는다. 비었을 땐 sr-only(자리
+          차지 없음) -- display:none 이면 포커스를 받지 못하고, 숨었다 나타난 live region 은 읽히지 않을 수 있다. */}
+      <p role="status" tabIndex={-1} ref={resultLine}
+         className={forgetResult ? "text-sm text-ok focus:outline-none" : "sr-only"}>
+        {forgetResult ? `${forgetResult.deleted} 기록을 지웠습니다(보고 이력 ${forgetResult.reports_deleted}건`
+          + `${forgetResult.exclusion_deleted ? "·배치 제외" : ""}).` : ""}
+      </p>
+      <ForgetNodeDialog target={forgetTarget} onClose={() => setForgetTarget(null)} onDone={setForgetResult}
+                        focusAfterDone={() => resultLine.current?.focus()}
+                        returnFocus={() => {
+                          const el = opener.current;
+                          if (el !== null && el.isConnected) el.focus(); else resultLine.current?.focus();
+                        }} />
       {/* Card 구획(2026-08-19): 다른 목록 화면들과 같은 서피스 */}
       <Card>
       {q.isLoading ? (
@@ -421,9 +474,23 @@ export function NodesList() {
               return (
                 <tr key={n.node_name} className={`border-t border-line ${n.fresh ? "" : "bg-badbg/40"}`}>
                   <td className="py-2 font-medium">{n.node_name}</td>
-                  <td>{n.fresh
+                  {/* 리포트 지연 행만: 새 이름 힌트(서버 renamed_to) + 「기록 삭제」(2026-11-25 -- 이름이 바뀌었거나 클러스터에서 뺀 노드의
+                      옛 행 정리). 정상 행은 지워도 다음 보고에 다시 생겨(서버 409 node_fresh) 버튼을 그리지 않는다. pr-3 = 옆
+                      「배치 제외」 버튼과 간격. */}
+                  <td className="pr-3">{n.fresh
                     ? <Pill tone="ok">fresh</Pill>
-                    : <span className="text-bad font-semibold">stale</span>}</td>
+                    : (
+                      <div className="flex flex-col items-start gap-1 py-1">
+                        <span className="text-bad font-semibold">stale</span>
+                        {renameHint(n) !== null && (
+                          <span className="text-xs text-muted whitespace-nowrap" title={RENAME_HINT_TITLE}>
+                            {`새 이름: ${renameHint(n)}`}
+                          </span>
+                        )}
+                        <Button variant="ghost" className="whitespace-nowrap" aria-label={`${n.node_name} 기록 삭제`}
+                                onClick={(e) => openForget(e.currentTarget, n)}>기록 삭제</Button>
+                      </div>
+                    )}</td>
                   {/* 배치 제외·다시 포함·cordon(NodePlacement) */}
                   <td className="pr-3"><PlacementCell node={n} /></td>
                   <td><ReadyRatio items={asObject(n.report).mounts} /></td>
@@ -458,6 +525,10 @@ export function NodesList() {
         </p>
         <p className="mt-1 text-xs text-muted">
           {`CPU 사용률 = 직전 보고 대비 CPU 가 일한 시간 비율(에이전트 재시작 직후·구형 에이전트는 —). ${LOAD_HELP}`}
+        </p>
+        <p className="mt-1 text-xs text-muted">
+          리포트 지연 노드의 「기록 삭제」 = 이름이 바뀌었거나 클러스터에서 뺀 노드의 옛 행 정리(포탈에 로그인한 관리자만 — 같은
+          이름으로 다시 보고하면 다시 생깁니다). 「새 이름」 = 같은 장비로 보고하는 정상 노드의 이름입니다.
         </p>
         </>
       )}

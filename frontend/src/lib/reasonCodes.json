@@ -121,6 +121,8 @@
   "storage_in_use",
   "storage_not_found",
   "node_not_found",
+  "node_fresh",
+  "node_in_use",
   "nodes_excluded",
   "node_excluded_at_step",
   "node_excluded",

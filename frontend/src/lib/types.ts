@@ -291,11 +291,21 @@ export interface NodeReportBody {
   mounts?: NodeMount[]; tools?: NodeTool[];
   os?: { disks?: NodeDisk[] } & Record<string, unknown>;
   identities?: unknown[];
+  // 같은 장비 식별자(2026-11-25): 호스트 /etc/machine-id 의 HMAC-SHA256 앞 16hex(원문 아님). host_root 모드 에이전트만 채우고
+  // 모르면 null, 옛 에이전트는 키 없음. 화면은 직접 비교하지 않는다 -- 서버가 renamed_to 로 판정해 준다.
+  machine_key?: string | null;
 }
 export interface NodeInfo {
   node_name: string; reported_at: string; fresh: boolean; report: NodeReportBody;
   // 노드 배치 제외(2026-10-02): 관리자가 뺀 노드면 사유·누가·언제, 아니면 null. 옵션(?) = 구형 서버·fixture 호환.
   exclusion?: NodeExclusion | null;
+  // 새 이름 힌트(2026-11-25, 서버 node_forget.rename_hints): 리포트 지연 행과 같은 machine_key 를 보고하는 이름이 다른 정상 노드가
+  // 정확히 하나일 때만 그 이름, 나머지(정상 행 포함)는 null. 옵션(?) = 구형 서버 호환. 화면은 리포트 지연 행에서만 그린다.
+  renamed_to?: string | null;
+}
+// 노드 기록 삭제(DELETE /api/admin/nodes/{name}, 2026-11-25) 응답.
+export interface ForgetNodeResult {
+  deleted: string; reported_at: string; reports_deleted: number; exclusion_deleted: boolean;
 }
 export interface NodeExclusion {
   node_name: string; reason: string | null; created_by: string; created_at: string;

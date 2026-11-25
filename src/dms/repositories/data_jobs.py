@@ -1,8 +1,10 @@
 """data_jobs + plans 저장소: planner가 emit하고 stepper(3b)가 전진시키는 잡 레코드."""
+import json
 import uuid
 from ..db import Database, dump_json, iso_epoch, iso_plus, like_contains, load_json, utc_now_iso
 from ..domain import (DataJobState, RequestState, TERMINAL_DATA_JOB_STATES,
                       TERMINAL_REQUEST_STATES)
+from .node_exclusions import candidate_nodes
 from .observability import ObservabilityRepository
 
 _JSON_COLUMNS = ("options", "worker_pool", "precondition", "result_summary",
@@ -525,6 +527,40 @@ class DataJobsRepository:
                 out.append(load_json(r["worker_pool"]))
             except (ValueError, TypeError):
                 continue
+        return out
+
+    def active_job_ids_on_node(self, node_name: str, *, limit: int = 20) -> list[str]:
+        """active_jobs_on_node 의 job_id 만(job_id 순, 최대 limit)."""
+        return [j["job_id"] for j in self.active_jobs_on_node(node_name, limit=limit)]
+
+    def active_jobs_on_node(self, node_name: str, *, limit: int = 20) -> list[dict]:
+        """노드 기록 삭제(2026-11-25, dms.node_forget)의 in_use 근거 -- 비종단 잡 중 worker_pool.candidates 에 이 노드가 든
+        잡의 {job_id, request_id}(job_id 순, 최대 limit). request_id 는 거절 응답이 막는 요청을 가리키는 데 쓴다(운영자가 요청
+        상세에서 취소하거나 끝나기를 기다린다 -- 작업 목록에는 노드 필터가 없다). 그 노드의 행을 지우면
+        stepper·node_exclusions.blocked_nodes 가 latest_reports(신선도 무관)로 보던 마지막 cordon 을 잃는다(fail-open) --
+        ConfirmPending 잡이 확인 뒤 사라진 노드로 제출되면 gang 이 영원히 Pending 이다. 그래서 정확해야 한다:
+        active_worker_pools(상한 2000·깨진 행 건너뜀 -- planner 순서용 어림값)를 쓰지 않는다.
+
+        LIKE 로 먼저 거른다(JSON 직렬화한 이름 -- dump_json 과 같은 ensure_ascii=False, 따옴표 포함 -- 을 db.like_contains 로
+        와일드카드 이스케이프 + ESCAPE '\\' 짝: 빼면 밑줄·백분율이 든 이름이 덜 맞거나 PG 기본 이스케이프 차이로 fail-open).
+        그다음 파싱해 node_exclusions.candidate_nodes 에 이름이 있는 행만 센다 -- rejections·node_cpu_caps·identity 에만 이름이
+        있으면 아니다. JSON 이 깨졌거나 dict 가 아닌데 LIKE 가 맞았으면 **센다**(fail-closed -- 모르면 지우지 않는다)."""
+        placeholders = ", ".join(f":s{i}" for i in range(len(self._ACTIVE_STATES)))
+        params = {f"s{i}": v for i, v in enumerate(self._ACTIVE_STATES)}
+        params["pat"] = like_contains(json.dumps(node_name, ensure_ascii=False))
+        rows = self._db.query(
+            rf"""SELECT job_id, request_id, worker_pool FROM data_jobs WHERE state IN ({placeholders})
+                AND worker_pool LIKE :pat ESCAPE '\' ORDER BY job_id""", params)
+        out = []
+        for r in rows:
+            try:
+                wp = load_json(r["worker_pool"])
+            except (ValueError, TypeError):
+                wp = None
+            if not isinstance(wp, dict) or node_name in candidate_nodes(wp.get("candidates")):
+                out.append({"job_id": r["job_id"], "request_id": r["request_id"]})
+                if len(out) >= limit:
+                    break
         return out
 
     def set_phase_ref(self, job_id, phase, ref) -> bool:

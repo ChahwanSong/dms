@@ -401,3 +401,61 @@ def test_probe_os_metrics_reads_proc_stat_counters():
     files["/proc/stat"] = "garbage\n"
     out = probe_os_metrics([], read_text=lambda p: files[p], statvfs=lambda p: None)
     assert out["cpu_total_jiffies"] is None and out["load1"] == 1.50
+
+
+# --- 같은 장비의 새 이름 힌트(2026-11-25, probes.probe_machine_key -- 서버 dms.node_forget.rename_hints) ---
+
+MACHINE_ID = "4c4c4544004d3610804bc4c04f4e3832"
+
+
+def _host_with_machine_id(tmp_path, content):
+    etc = tmp_path / "etc"
+    etc.mkdir()
+    (etc / "machine-id").write_text(content)
+    return str(tmp_path)
+
+
+def test_machine_key_is_an_app_specific_derivation_never_the_raw_id(tmp_path):
+    import hashlib
+    import hmac
+    from dms.agent.probes import MACHINE_KEY_HEX, probe_machine_key
+    from dms.node_forget import MACHINE_KEY_RE
+
+    key = probe_machine_key(_host_with_machine_id(tmp_path, MACHINE_ID + "\n"))
+    expected = hmac.new(bytes.fromhex(MACHINE_ID), b"dms-agent/machine-key/v1", hashlib.sha256).hexdigest()
+    assert key == expected[:MACHINE_KEY_HEX]
+    assert MACHINE_KEY_RE.fullmatch(key)                    # 서버가 받는 모양과 같다
+    assert key not in MACHINE_ID and MACHINE_ID[:MACHINE_KEY_HEX] != key   # 원문(의 앞부분)이 아니다
+
+
+def test_machine_key_is_none_in_direct_mode():
+    # direct(레거시) 모드의 /etc/machine-id 는 컨테이너 이미지의 것 -- 모든 노드가 같거나 비어 있다.
+    from dms.agent.probes import probe_machine_key
+    assert probe_machine_key("") is None
+
+
+def test_machine_key_is_none_for_missing_or_malformed_ids(tmp_path):
+    from dms.agent.probes import probe_machine_key
+    assert probe_machine_key(str(tmp_path)) is None                     # 없음
+    for i, content in enumerate(("", "uninitialized\n", "0" * 32 + "\n", MACHINE_ID.upper(), MACHINE_ID[:31],
+                                 MACHINE_ID + "00", "\xff" * 32)):
+        root = tmp_path / f"h{i}"
+        root.mkdir()
+        assert probe_machine_key(_host_with_machine_id(root, content)) is None, repr(content)
+
+
+def test_machine_key_does_not_follow_a_terminal_symlink(tmp_path):
+    # 호스트의 절대 symlink 는 컨테이너 안에서 host_root 밖으로 풀린다 -- 끝 링크는 따라가지 않는다(O_NOFOLLOW).
+    from dms.agent.probes import probe_machine_key
+    real = tmp_path / "real-id"
+    real.write_text(MACHINE_ID + "\n")
+    etc = tmp_path / "host" / "etc"
+    etc.mkdir(parents=True)
+    (etc / "machine-id").symlink_to(real)
+    assert probe_machine_key(str(tmp_path / "host")) is None
+
+
+def test_machine_key_is_none_for_a_non_regular_file(tmp_path):
+    from dms.agent.probes import probe_machine_key
+    (tmp_path / "etc" / "machine-id").mkdir(parents=True)
+    assert probe_machine_key(str(tmp_path)) is None

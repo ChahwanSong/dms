@@ -39,7 +39,8 @@ function renderShell(role: "user" | "admin", at = "/jobs") {
   return { actor, ...view };
 }
 
-// 구 AppShell 실측 16링크(작업4+스토리지3+운영5+관리4). 라벨은 기존 문구 그대로.
+// 관리자 전용 링크 표본(전수·그룹 소속은 navigation.test 가 본다 -- 2026-11-25 빌드·릴리스·컨트롤 상태·아티팩트 경로는 운영 → 관리).
+// 라벨은 기존 문구 그대로.
 // 배치 스케줄러(2026-11-16)는 작업 그룹 안의 관리자 전용 항목 -- 배치 작업과 같은 숨김 규칙. 마운트 현황(2026-11-23)은 스토리지 그룹.
 const ADMIN_ONLY_LABELS = [
   "스토리지", "마운트 현황", "노드", "아티팩트 경로", "대시보드", "배치 작업", "배치 스케줄러",
@@ -160,6 +161,18 @@ test("배치 작업은 작업 그룹 안에 있다 -- 운영을 접어도 보이
   expect(screen.queryByRole("link", { name: "배치 작업" })).toBeNull();
 });
 
+
+test("빌드·릴리스·컨트롤 상태·아티팩트 경로는 관리 그룹 안에 있다 -- 운영을 접어도 보이고, 관리를 접으면 함께 숨는다", async () => {
+  // 사용자 결정(2026-11-25): 넷을 운영 → 관리 그룹으로(경로·화면 그대로).
+  const moved = ["빌드", "릴리스", "컨트롤 상태", "아티팩트 경로"];
+  renderShell("admin", "/admin/dashboard");
+  await screen.findByRole("link", { name: "빌드" });
+  await userEvent.click(screen.getByRole("button", { name: "운영" }));
+  expect(screen.queryByRole("link", { name: "대시보드" })).toBeNull();
+  for (const label of moved) expect(screen.getByRole("link", { name: label })).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "관리" }));
+  for (const label of moved) expect(screen.queryByRole("link", { name: label })).toBeNull();
+});
 
 // 포탈 서브네임(2026-10-02): 사이드바 이름 아래 한 줄 + 브라우저 탭 제목 "메인 - 서브". 없으면 메인 이름만.
 test("서브네임이 있으면 사이드바 이름 아래 줄과 탭 제목에 쓰인다", async () => {

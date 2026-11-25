@@ -121,6 +121,13 @@ data:
   # 안 깨지지만, 형제 항목(DMS_AGENT_REPORT_RETENTION_DAYS)처럼 이 파일이 실 테스트베드의
   # 단일 진실이므로 운영자가 여기서 찾을 수 있어야 한다.
   DMS_EVENT_RETENTION_DAYS: "30"
+  # 노드 기록 자동 정리(2026-11-25, 컨트롤러 retention 루프 끝 -- src/dms/node_forget.py). 마지막 보고가 이 초 이상 지났고
+  # 쿠버네티스에 그 Node 가 더는 없는 노드의 기록(노드 화면의 행·배치 제외·보고 이력)을 지운다. 그 노드를 가리키는 설정(빌드
+  # 노드 등)·진행 중 빌드·작업이 있으면 지우지 않고, k8s 조회 실패·빈 목록이면 아무것도 지우지 않는다. 0 = 끔(기본 -- 사람이
+  # 노드 화면 「기록 삭제」로 지운다). 켜면 예 "604800"(7일). 0 < 값 < DMS_AGENT_REPORT_STALE_SECONDS 는 기동 거부. 켤 때는
+  # 10-rbac.yaml 의 ClusterRoleBinding dms-controller-nodes-readonly 도 클러스터에 적용돼 있어야 한다(각 라인 deploy/README 의
+  # 노드 기록 정리 절). 기본값과 같다(사이트 중립).
+  DMS_AGENT_NODE_FORGET_SECONDS: "0"
   DMS_IDENTITY_PROBE_TTL_SECONDS: "3600"
   DMS_PLANNER_INTERVAL_SECONDS: "10"
   # 슬라이스 16: 신규 사용자의 첫 요청이 노드 신원 전파(최악 ≈130s) 전에 도착하면
