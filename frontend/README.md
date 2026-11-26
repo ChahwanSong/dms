@@ -37,6 +37,10 @@ npx tsc -b          # 타입체크만
 - **상태 설명은 서버 상태와 같은 키** — 서버에 요청·잡·배치 상태를 더하거나 빼면 `src/lib/stateHelp.json` 도 맞춘다(백엔드
   `tests/test_state_help_contract.py` 가 RequestState·DataJobState·배치 상태 집합과 키를 대조 — 2026-11-19 배치 `Deleting` 이 그 예).
 - **null(모름) ≠ 0 ≠ 실패** — 서버가 null 로 준 칸을 0 이나 실패로 그리지 않는다.
+- **본문 폭·가운데는 셸이 정한다** — `app/AppShell.tsx` 의 `main`(최대 90rem = 1440, 사이드바 오른쪽 영역 가운데 — 2026-11-26)이 본문 열이다.
+  화면(루트 section·카드)은 `mx-auto` 로 혼자 가운데로 가지 않고 폭 상한(`max-w-*`)만 둔다 — 기준선은 본문 열의 왼쪽 하나다(2026-08-16
+  「한 기준선」 결정; vitest BuildForm·BuildHistory, e2e 03 「본문 열」(L5 `assertMainColumn`)이 본다). `main`·조상에 `overflow-*` 를 넣으면
+  제출 화면 요약의 sticky 가 죽는다.
 
 ## 의존성 권고(npm audit)
 

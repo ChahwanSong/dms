@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { apiLogin } from "./helpers/session";
-import { assertLayoutSane, assertTableOverflows } from "./helpers/layout";
+import { assertLayoutSane, assertMainColumn, assertTableOverflows } from "./helpers/layout";
 import { STORAGE_NAME } from "./harness/env";
 
 // E3 — 화면 순회 × 2 뷰포트. 이 슬라이스의 회귀 방어 본체다: 9fbef86·6bc2ecb 두
@@ -461,6 +461,46 @@ test.describe("E3 레이아웃 불변식", () => {
     } finally {
       const removed = await page.request.delete(`/api/admin/batch-schedules/${sid}`);
       expect(removed.status(), await removed.text()).toBe(200);
+    }
+  });
+
+  // 본문 열(2026-11-26 사용자 결정 「A안」 -- AppShell main 의 mx-auto max-w-[90rem]): 넓은 창(1920)에서는 최대 1440 열이 사이드바
+  // 오른쪽 영역 가운데에 서고, 1680 이하 창(1280)에서는 예전처럼 여백 없이 영역을 꽉 채운다(L5 -- helpers/layout assertMainColumn).
+  // 네 화면의 h1 왼쪽이 같아야 한다: 기준선은 본문 열의 왼쪽 하나다 -- 한 화면이 스스로 mx-auto 하면(2026-08-16 사용자 지적 유형)
+  // 그 화면 제목만 옆으로 튄다. 화면은 넓은 표(마운트 현황)·목록(전체 작업)·제출 시트(단일 작업)·카드(대시보드) 한 벌씩이다.
+  test("본문 열: 1920 에서 최대 1440 가운데 · 1280 에서 여백 없음 · 화면 제목 기준선 하나", async ({ page }) => {
+    await apiLogin(page);
+    const screens: Array<[string, () => Promise<void>, number]> = [
+      ["대시보드", () => visit(page, "/admin/dashboard", "대시보드"), 0],
+      ["전체 작업", () => visit(page, "/jobs", "전체 작업"), 4],
+      ["단일 작업", () => visit(page, "/jobs/new", "단일 작업"), 0],
+      ["마운트 현황", () => visitMounts(page, "table"), 6],
+    ];
+    for (const [width, height] of [[1920, 1080], [1280, 900]] as const) {
+      await page.setViewportSize({ width, height });
+      const h1Lefts: Array<[string, number | null]> = [];
+      for (const [name, go, minTableCells] of screens) {
+        await go();
+        await assertLayoutSane(page, { minTableCells });
+        const col = await assertMainColumn(page);
+        if (width === 1920) {
+          // 1920 − 240 = 1680 > 1440 -- 열이 실제로 묶이고 좌우에 여백이 생겨야 한다(여백 0 이면 가운데 단언이 공허하다).
+          expect(col.width, `${name} 1920: 본문 열 폭`).toBeLessThanOrEqual(1440.5);
+          expect(col.left - 240, `${name} 1920: 왼쪽 여백이 없다 -- 열이 가운데로 가지 않았다`).toBeGreaterThan(10);
+        } else {
+          expect(Math.abs(col.left - 240), `${name} 1280: main.left ${col.left} -- 좁은 창은 사이드바에 붙어야 한다`).toBeLessThanOrEqual(0.5);
+          expect(Math.abs(col.right - col.clientWidth),
+                 `${name} 1280: main.right ${col.right} ≠ clientWidth ${col.clientWidth} -- 좁은 창에 오른쪽 여백이 생겼다`).toBeLessThanOrEqual(0.5);
+        }
+        h1Lefts.push([name, col.h1Left]);
+      }
+      for (const [name, left] of h1Lefts) expect(left, `${width}: ${name} 화면 제목(h1)이 main 안에 없다`).not.toBeNull();
+      const [firstName, firstLeft] = h1Lefts[0];
+      for (const [name, left] of h1Lefts.slice(1)) {
+        expect(Math.abs((left as number) - (firstLeft as number)),
+               `${width}: ${name} 제목 왼쪽 ${left} ≠ ${firstName} ${firstLeft} -- 화면이 본문 열의 왼쪽 기준선을 벗어났다(혼자 mx-auto?)`)
+          .toBeLessThanOrEqual(0.5);
+      }
     }
   });
 });

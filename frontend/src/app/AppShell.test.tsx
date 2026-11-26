@@ -212,6 +212,24 @@ test("좁은 폭 메뉴: 기본 닫힘(hidden·md:flex), 「메뉴」가 열고 
   expect(btn).toHaveAttribute("aria-expanded", "true");
 });
 
+// 본문 열(2026-11-26 사용자 결정 「A안」): main 이 최대 90rem(1440, 패딩 포함)으로 묶여 사이드바 오른쪽 영역 가운데에 선다.
+// jsdom 은 기하를 계산하지 않으므로 여기선 클래스만 고정한다 -- 실제 폭·가운데·좁은 창 무변화는 e2e 03 「본문 열」 몫이다.
+// 화면(section)은 스스로 mx-auto 하지 않는다(BuildForm·BuildHistory test) -- 가운데 배치는 이 한 곳이다.
+test("본문 열: main 은 mx-auto·max-w-[90rem] 이고 폭 고정·overflow 가 없다(사이드바는 그대로 왼쪽 240)", async () => {
+  const { container } = renderShell("user");
+  await screen.findByText("alice");
+  const main = container.querySelector("main")!;
+  expect(main).toHaveClass("mx-auto", "w-full", "max-w-[90rem]", "p-5");
+  // 고정 폭은 좁은 창에서 줄지 않는다. overflow 는 SubmitLayout 요약의 xl:sticky 를 죽인다(main·조상 모두).
+  expect(main.className).not.toMatch(/(^|\s)w-\[/);
+  for (let el: Element | null = main; el !== null && el !== container; el = el.parentElement)
+    expect(el.className).not.toMatch(/overflow-/);
+  // 본문 열의 부모는 그대로 flex-1 min-w-0(L1), 사이드바는 md:w-60 md:shrink-0(L3) -- 가운데 배치가 aside 를 건드리지 않는다.
+  expect(main.parentElement).toHaveClass("flex-1", "min-w-0");
+  expect(container.querySelector("aside")).toHaveClass("md:w-60", "md:shrink-0");
+  expect(container.querySelector("aside")!.className).not.toMatch(/mx-auto/);
+});
+
 test("서브네임이 없거나 조회가 실패하면 메인 이름만", async () => {
   server.use(http.get("/api/portal-info", () => HttpResponse.json({ detail: "x" }, { status: 500 })));
   renderShell("user");

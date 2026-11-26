@@ -10,7 +10,8 @@ import type { ReactNode } from "react";
 // - 그 아래: 1열(시트 → 요약). lg(1024)에서 2열이면 시트가 ~430px 라 sync 경로 입력이 다시 좁아진다.
 // - DOM 은 한 벌이다. 데스크탑 패널/모바일 하단 바를 따로 그리면(hidden xl:block) jsdom 과 스크린
 //   리더에는 제출 버튼·경고가 두 번 있다 -- 배치만 grid 로 바꾼다.
-// - 폭 상한 max-w-6xl, mx-auto 없음: 왼쪽 기준선(가운데 정렬은 사용자 지적 이력 -- BuildForm 주석).
+// - 폭 상한 max-w-6xl, mx-auto 없음: 셸 본문 열(최대 1440, 가운데 -- AppShell 주석)의 왼쪽 기준선 -- 화면은 mx-auto 로
+//   혼자 가운데로 가지 않는다(가운데 정렬은 사용자 지적 이력 -- BuildForm 주석).
 // - minmax(0,1fr): 1fr 의 자동 최소폭이 긴 무공백 경로에 밀리면 문서가 가로로 넘친다(e2e L1).
 // - 요약은 <aside> 가 아니다: e2e 레이아웃 불변식이 첫 aside = 사이드바(폭 240)로 잰다.
 export function SubmitLayout({ sheet, summary }: { sheet: ReactNode; summary: ReactNode }) {

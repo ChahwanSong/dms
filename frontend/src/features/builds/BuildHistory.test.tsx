@@ -281,7 +281,9 @@ describe("BuildHistory — 빌드 이력", () => {
   });
 
   // ── 정렬: 목록은 폭 제한 없는 전폭(BatchesList·JobsList 관례) ────────────────
-  it("목록은 가운데로 모으지 않고 전폭 왼쪽 기준선에 선다", async () => {
+  // 「전폭」은 셸 본문 열(최대 1440, 가운데 -- AppShell main, 2026-11-26)의 폭이다. 화면만 렌더하므로 단언 뜻은 그대로다:
+  // 화면 자체에 mx-auto·max-w-* 가 없다.
+  it("목록은 혼자 가운데로 모으지 않고 셸 본문 열 전폭·왼쪽 기준선에 선다", async () => {
     const { container } = wrap();
     await screen.findByText("b01234567");
     expect(container.querySelector(".mx-auto")).toBeNull();

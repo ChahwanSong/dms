@@ -178,7 +178,16 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           그래서 안쪽 표의 overflow-x-auto 가 발동하지 못하고 레이아웃 전체가 넓어져
           사이드바를 밀어냈다 -- 이 한 줄이 표를 자기 컨테이너 안에서 스크롤하게 만든다. */}
       <div className="flex-1 min-w-0">
-        <main className="p-5">
+        {/* 본문 열(2026-11-26 사용자 결정 「A안」 -- 넓은 모니터에서 본문이 사이드바 오른쪽 끝까지 늘어져 시선이 멀었다):
+            최대 90rem(1440px, p-5 패딩 포함 -- 내용 1400)으로 묶고 사이드바 오른쪽 영역의 가운데에 둔다.
+            - 1440 근거: 사이드바 240 + 1440 = 1680 이하 창은 지금과 픽셀 동일(여백 0 -- e2e 1280 그물)이고, 가장 넓은
+              실화면인 마운트 현황 표(E19 ⑩, 1920 에서 11열 ≈1272)도 내용 1400 안에 여유 있게 들어간다.
+            - main 만 가운데다: 사이드바는 화면 왼쪽에 붙어 있어야 하고(L3, aside 불변) 셸 전체를 가운데로 보내지 않는다.
+            - 화면(section)은 스스로 mx-auto 하지 않는다: 기준선은 이 본문 열의 왼쪽 하나다 -- 2026-08-16 「왼쪽 기준선」
+              원칙(BuildForm·SubmitLayout 주석)은 그대로이고 열의 위치만 가운데로 옮겼다. 화면은 폭 상한(max-w-*)만 둔다.
+            - 고정 너비가 아니라 최대 폭(max-w)이다(좁은 창에서 줄어야 한다). div.flex-1.min-w-0 은 그대로 둔다(위 주석 L1).
+            - main·조상에 overflow-* 를 넣지 마라: SubmitLayout 요약(SummaryPanel)의 xl:sticky 가 죽는다. */}
+        <main className="mx-auto w-full max-w-[90rem] p-5">
           <Breadcrumb />
           {/* key 가 없으면 AppShell 은 모든 보호 라우트에서 같은 위치의 같은 컴포넌트라
               한 번 에러 상태에 빠지면 화면을 옮겨도 풀리지 않는다. */}

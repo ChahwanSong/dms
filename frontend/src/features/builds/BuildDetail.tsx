@@ -7,8 +7,9 @@ import { formatDuration, spanMs } from "../../lib/duration";
 import { kstStampOrDash } from "../../lib/datetime";
 import { useBuild, useBuildLog } from "./useBuilds";
 
-// 콘텐츠 컬럼. 폭은 제한하되(로그·메타가 화면 끝까지 늘어지면 읽기 어렵다) **왼쪽
-// 기준선**이다 -- mx-auto 를 쓰던 것은 이 앱에서 빌드 화면들뿐이라, 이력에서
+// 콘텐츠 컬럼. 폭은 제한하되(로그·메타가 화면 끝까지 늘어지면 읽기 어렵다) **셸 본문 열(최대 1440, 가운데 --
+// AppShell 주석)의 왼쪽 기준선**이다 -- 화면은 mx-auto 로 혼자 가운데로 가지 않는다. mx-auto 를 쓰던 것은 이 앱에서
+// 빌드 화면들뿐이라, 이력에서
 // 「상세」로 들어오면 글줄이 혼자 가운데로 튀어 다른 화면처럼 읽혔다(사용자 지적).
 // 이제 빌드하기·이력·상세 셋 다 왼쪽에서 시작한다.
 const COLUMN = "w-full max-w-3xl";
