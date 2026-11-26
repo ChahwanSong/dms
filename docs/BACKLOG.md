@@ -21,7 +21,8 @@
 ## 1. 기능 확장 (사용자가 보류 결정)
 
 포탈·잡 기능의 확장과 후속 — 결함이 아니라 아직 안 만든 기능·결정 대기다. 설치·운영 후속은 아래 소절에 있다(2026-11-06 신규 →
-k8s 신원 모드 → 포크 → 사용량 → 포탈 개선·배치 스케줄러 → 사내 SSO → ③~⑦ 설치 묶음 → 테스트베드).
+k8s 신원 모드 → 포크 → 사용량 → 포탈 개선·배치 스케줄러 → 사내 SSO → 마운트 현황·노드 기록 → sync 진행률·단계별 등록 → ③~⑦ 설치 묶음 →
+테스트베드).
 
 - ~~**아티팩트 보존 정책(자동 만료)**~~ — 해소(2026-10-26, CHANGELOG 「BACKLOG 결정 묶음 구현」 — controller `artifact-expiry` 루프,
   `DMS_ARTIFACT_RETENTION_DAYS` 기본 1500·0 = 끔, 열람은 410 `artifact_expired`, 운영은 deploy/README §12b). 남은 후속:
@@ -224,7 +225,8 @@ k8s 신원 모드 → 포크 → 사용량 → 포탈 개선·배치 스케줄�
       `DMS_SESSION_SECRET` 회전(전원)이다(deploy/README §10-6). 처방 후보: 로그아웃도 세대를 회전(그 계정의 다른
       세션도 끝난다 — 의도 확인), 또는 서버 측 세션 저장소. §4 「비활성화는 세션 세대를 회전하지 않는다」와 같은 뿌리.
     - 📝 (테스트베드) **워커 CPU** — 워커 2 vCPU 에 DMS 밖 requests 가 700m 를 넘으면 잡 워커가 노드 CPU 상한에 걸려 Volcano 에서 무기한
-      기다린다(§4 「노드 CPU 상한은 다른 파드의 requests 를 보지 않는다」). **사용자 지시로 손대지 않는다 — 기록만**(2026-11-05).
+      기다린다(§4 「노드 CPU 상한은 다른 파드의 requests 를 보지 않는다」). **사용자 지시로 손대지 않는다 — 기록만**(2026-11-05). 2026-11-26 에
+      실제로 걸렸다: k8s-w1 요청 합 705m(남음 1095m)라 launcher 100m + 워커 1000m 가 5m 모자라 nsync·2노드 dsync 갱이 영구 Pending(§4 같은 항목).
     - 📝 **launcher 파드에 `dms.io/job-id` 라벨이 없다** — vcjob 의 worker task 템플릿은 `dms.io/job-id`·`dms.io/task` 를 달지만
       (`execution_manifests._worker_task_metadata` — 자기참조 anti-affinity 용) launcher task 템플릿에는 metadata 가 없다
       (`execution_manifests.build_volcano_job`·`_build_nsync_job`). `kubectl -l dms.io/job-id=<id>` 로는 launcher 가 안 잡힌다 — Volcano 가
@@ -472,6 +474,59 @@ docstring, 운영 절차는 deploy/README §14-3 「노드 이름이 바뀐 뒤 
   dms-ssc 와 공유하는 공용 코어라 그 응답의 열 모양을 바꾸지 않았다 — 요청이 오면 두 라인을 같이.
 - 💡 **dms-ssc 이식** — 삭제 API·버튼·힌트는 라인 공통 성격이다(옛 이름 문제는 LDAP 과 무관). 자동 정리는 ssc 의 RBAC 매니페스트에 같은 바인딩이
   필요하다.
+
+### sync 진행률 후속 — 2026-11-26
+
+CHANGELOG 「sync 진행률 — 작업 상세 진행 중 실행·미리보기 행의 dsync·nsync 진행 칸 + mpirun 출력 스트리밍·출력 상한」. 지금 동작은
+`dms_job_runner.stream`·`dms_job_runner.progress`·`dms.job_progress` 모듈 docstring, `frontend/src/features/jobs/progressModel.ts` 머리 주석, 계약
+`frontend/src/lib/progressContract.json`, ARCHITECTURE §6 「러너 출력은 스트리밍·상한」·§7 「sync 진행률은 표시 전용」.
+
+- 🔍 **라이브 실증** — 아직(testbed-k8s 다음 태그 d49 — 잡 이미지도 바뀐다: 오버레이 `newTag` 와 `patch-config.yaml` `DMS_JOB_IMAGE` 를 같이 올린다).
+  dsync·nsync 의 실행·미리보기(nsync 는 배치 크기를 줄여서만 — 사용자 지시 「검증할때만 배치사이즈를 줄여서」), 실 브라우저로 진행 칸 갱신·
+  정체 경고·available:false 문구·결과 카드. nsync·2노드 dsync 는 테스트베드 CPU 때문에(아래 §4 「노드 CPU 상한은 다른 파드의 requests 를 보지
+  않는다」의 2026-11-26 사례) 실증 창 동안 되돌림 입구 ingress-nginx 를 0 으로 줄여야 선다 — 그동안 ingress-nginx-admission 웹훅(failurePolicy
+  Fail)이 클러스터의 **모든** Ingress 쓰기를 거부하므로 설치기 S8·S11·손 apply 는 창 밖에서 하고, 끝나면 replicas 를 되돌린다.
+- 🔧 **시간초과·취소의 SIGKILL 이면 넘침 끝 링을 잃는다** — 러너는 SIGTERM 처리기를 두지 않는다(PID 1 신호 의미 유지 — `stream` 모듈 docstring).
+  그래서 넘침 모드의 끝 링(≤ 16 MiB — 최종 요약이 있는 꼬리)과 마지막 1초 이내 로그·쓰기 큐 잔량이 사라진다(앞 64 MiB 와 progress.json 은 남는다).
+  처방 후보: SIGTERM 에서 끝 링만 붙이고 나가는 처리기(유예 시간 안 — PID 1 의미와의 충돌을 먼저 본다).
+- 🔧 **summary.json·조기 종료 stderr.log 의 쓰기 통로** — 아직 `runner._write_text`(경로 기반 open("w"))다. 그중 봉쇄 두 경로(dsync·dscan 봉쇄, rm
+  대상 봉쇄)의 stderr.log 는 chown -R 뒤라 요청자 소유 `<phase>` 안의 경로 쓰기다(ARCHITECTURE §7 「root 제어면」 4 — dms-k8s 는 모든 잡이 root
+  라 위협은 아니다). `stream.ArtifactWriter` 의 dirfd + O_EXCL 통로로 옮기면 같은 절 3 의 소유자 검사를 `== 요청자` 로 좁히는 길도 열린다.
+- 💡 **drm·dscan 진행률** — 같은 장치로 넓힐 수 있다(`progress` 정규식 표에 도구 추가 + 계약 `tools` + `progressModel` 제목). 지금은 sync(dsync·
+  nsync)만 progress.json 을 쓴다.
+- 💡 **실행 중 stdout.log 꼬리 보기** — stdout.log 는 이제 실행 중에도 이어 쓰지만 아티팩트 목록은 잡 상태 전이 때만 다시 읽어 칩은 끝난 뒤
+  보인다(스테퍼는 stdout.log 를 읽지 않는다). 실행 중 로그 칩 폴링은 요청이 오면.
+- 💡 **진행 계약에 심장박동 값**(리뷰 nit 의 남은 몫) — 정체 문턱 `progressModel.STALE_AFTER_S`(90) ≥ 러너 `progress.HEARTBEAT_SECONDS`(30) × 3 은
+  지금 `progressModel.test` 가 러너 소스를 읽어 고정한다. 계약에 `heartbeat_s` 를 더하면 백엔드 형식 시험(`test_job_progress_contract.py` 최상위
+  키 집합)도 같이 바꿔야 해 미뤘다.
+- 📝 **nsync 배치가 1개면 끝날 때까지 수치가 없다**(사용자 승인 「nsync 는 배치 단위로 찍는것 오케이야」 — 포크를 고치지 않는다): 기본
+  `batch_files` 100만이면 100만 항목 미만 sync 는 배치 1개라 진행 칸이 단계와 안내(「nsync 는 배치가 끝날 때만 진행을 알립니다 — 이 작업은 배치가 1개라 끝날 때 한 번 표시됩니다」)만 보인다(막대 없음).
+  배치 안 시간 간격 진행 줄(포크 수정)은 요청이 오면.
+- 📝 **넘침 모드의 dsync 반영 항목 모름** — 항목별 오류·WARN 줄이 파서 상한(결합 메모리 64 MiB)을 넘은 dsync 실행은, 실패가 하나라도 있거나
+  링이 줄을 밀어냈으면 summary `files`·`copied_items` 가 null 이라 통계 합계에서 그 잡 몫이 빠진다(결과 카드에 「도구 출력이 너무 커서 …」 한 줄).
+  예전엔 같은 출력에서 launcher 메모리가 수 GB 까지 늘거나 OOM 으로 잡이 죽을 수 있었다 — 정직한 모름을 고른 대가. 비 BMP 이름이 섞이면 문턱이
+  16 Mi 문자로 내려간다.
+- 📝 **진행 신선도는 노드 시계에 기댄다** — `age_seconds` = API 서버 시각 − progress.json mtime(러너 노드가 찍은 시각 — NTP 가정, 음수는 0).
+- 📝 **dsync 복사 % 는 바이트 기준·배치 안**이다 — 크기가 섞이면 체감과 다르다(2026-11-26 실측: 큰 파일이 먼저면 20초에 73%, 남은 작은 파일
+  10만 개에 21분). 막대에 기준 문구·HelpTip 을 두고 남은 시간은 숨긴다. 도구가 99.5% 부터 「100%」를 찍으므로 `step.done` 이 아니면 99 로 묶는다.
+- ⏸ **잡 목록·배치 화면에서 진행률 모아 보기** — 하지 않음(사용자 결정 2026-11-26 「포탈에서 각 작업 항목에 들어갔을때만」 — `JobsList.test`·
+  `BatchDetail.test` 가 /progress 0건을 고정).
+
+### 단계별 등록(위저드) 후속 — 2026-11-26
+
+CHANGELOG 「단일·배치 등록 상단 스테퍼 — …」. 지금 동작은 `frontend/src/components/form/Wizard.tsx` 머리 주석(규칙 전문)과
+`features/jobs/submitGates.ts`·`features/batches/batchGates.ts`.
+
+- 🔍 **라이브 실증** — 아직(d49, 진행률과 한 빌드): 실 Chrome 1440·1280·768·390 으로 세 역할 × sync/rm(+면제 scan) × PV/직접 경로, 배치
+  scan/sync/rm(자동 확인 켬 포함)·「스토리지를 CSV 로 정하기」·PV 시트·「다음」 더블클릭.
+- 🔍 **터치 연속 탭의 더블클릭 가드** — 가드는 `event.detail > 1` 에 기댄다(`WizardActionBar`). 마우스·Playwright dblclick 은 detail 2 를 내지만(e2e
+  04 그물) 터치 연속 탭의 detail 은 브라우저마다 다를 수 있다 — 실증 때 390 폭(실기기 또는 Chrome 터치 에뮬레이션)으로 마지막 앞 단계 「다음」 두
+  번 탭을 확인하고, 새면 「검토 진입 직후 400ms 제출 잠금」을 시계 주입형(시험은 0)으로 더한다.
+- 💡 **위저드 이탈 경고(beforeunload)** — 입력이 있는 채 사이드바 링크·새로고침으로 떠나면 값이 사라진다(새로고침하면 `?step=` 이 첫 막힘 단계로
+  맞춰진다 — 빈 폼으로 검토를 보이지 않는다).
+- 💡 **스토리지가 많을 때 배치 ② 카드 묶음** — 목업(스토리지 6개)에서는 한 화면이다. 사이트 스토리지가 많아지면 묶음 접기·검색을 더한다.
+- 📝 **브라우저 뒤로 가기의 뜻이 「이전 단계」다** — 제출 뒤 상세에서 뒤로 가면 빈 폼의 옛 단계 항목을 지나야 떠난다(히스토리를 가지칠 수단이
+  없어 제출 성공 이동은 push 그대로 — 사이드바 링크로 떠난다).
 
 ### ③ 공용 디렉터리(SHARED_DIR) 후속 — 2026-11-03
 
@@ -864,6 +919,14 @@ testbed 저장소. 2026-11-06 신규 테스트베드 항목(9·10·12·13 워커
   없다(클러스터 전역 pods list 권한이 필요해 보안 범위를 넓히는 결정이라 하지 않았다). 노드의 DMS 외 requests 합이 예비 + 내림 여유를 넘으면
   워커가 그 노드에 안 들어가 Volcano 대기(Pending 상한 없음)에 머문다 — 운영자가 `kubectl --context <ctx> describe node` 의 Allocated resources 를
   보고 예비를 올린다. 정확히 하려면 에이전트가 자기 노드의 파드 requests 합을 보고하는 경로(노드 범위 pods list)가 먼저다.
+  - **사례(2026-11-26 테스트베드 — sync 진행률 실증 준비)**: k8s-w1 allocatable 1800m, 실행 중 파드 요청 합 705m(cnpg-controller-manager·dms-api·
+    dms-controller·ingress-nginx·cilium init·coredns 각 100m, dms-pg 50m, csi-nfs 30m, dms-agent 25m) → 남음 1095m. 상한은 floor((1800 − 100 − 500)
+    / 1000) = 1 이라 planner 는 w1 에 워커 1개(1000m)를 놓는데, Volcano binpack 이 launcher(100m)를 w1 에 먼저 놓으면 w1 에 1100m 가 필요해
+    **5m 모자라 갱이 영구 Pending** 이다(Insufficient cpu — stepper 의 PENDING 재검사 ③ 은 보고된 상한 1 로만 보므로 회수하지 않는다). nsync 는
+    늘 양 노드(w1 + w2)를 써서 테스트베드에서 DMS 경유 nsync·2노드 dsync 가 서지 않았다(이전 시도 2건 같음). 상한 공식은 launcher 100m 를 노드마다
+    빼지만 DMS 밖 요청이 예비 500m + 내림 여유(이 노드 200m)를 넘은 것이 원인이다. 예비를 701m 이상으로 올리면 상한이 0 이 되어 즉시
+    `node_cpu_insufficient` 로 거부된다(멈춘 Pending 보다 낫지만 w1 을 쓸 수 없다). 실증 때는 되돌림 입구 ingress-nginx 를 줄여 100m 를 확보한다
+    (위 「sync 진행률 후속」의 라이브 실증).
 - 📝 **워커 CPU 요청으로 배치 미리보기가 Volcano 에서 줄을 선다 — 먼저 끝난 형제의 미리보기 TTL(24h) 위험**(2026-10-16). 잡이 노드 코어를
   예약하므로 배치의 미리보기 자식들이 노드 단위로 줄을 서고, Previewing 배치는 미리보기 단계 자식이 하나라도 남으면 PreviewReady 로 넘어가지
   않는다(`batch_orchestrator` 미리보기 집계) — 그동안 먼저 끝난 형제의 `preview_ttl`(24h, 미리보기 성공부터)이 흘러 `preview_expired` 로 Rejected 될 수

@@ -54,6 +54,8 @@ dms-k8s 라인의 **완료 기록**이다. 각 항목에는 무엇을 만들었�
 
 | 날짜 | 태그·실증 | 제목 |
 |---|---|---|
+| 11-26 | — | 단일·배치 등록 상단 스테퍼 — 단일 작업 4단계·배치 생성 5단계(초안 1)·단계 게이트 순수 함수·Enter 는 다음 단계·제출 더블클릭 그물 |
+| 11-26 | — | sync 진행률 — 작업 상세 진행 중 실행·미리보기 행의 dsync·nsync 진행 칸 + mpirun 출력 스트리밍·출력 상한(큰 디렉터리 효율화) |
 | 11-26 | d48 | 포탈 본문 열 최대 1440·가운데(A안) — 넓은 창에서 사이드바 오른쪽 영역 가운데, 화면 기준선은 하나 그대로 |
 | 11-25 | d46·d47 | 마운트 현황 표 압축 레이아웃 — 열 폭 고정·「보고」 열 합침·열 머리 툴팁·100열 열 거르기·고정 칸 그늘·화면 높이 래퍼 |
 | 11-25 | d44·d45 | stale 노드 기록 정리(기록 삭제·자동 정리·새 이름 힌트) + 노드 상세 「관리 디렉토리」 열 + 빌드·릴리스·컨트롤 상태·아티팩트 경로를 관리 메뉴로 |
@@ -111,6 +113,148 @@ dms-k8s 라인의 **완료 기록**이다. 각 항목에는 무엇을 만들었�
 ---
 
 ## 상세 기록 (최신순)
+
+### ✨ 단일·배치 등록 상단 스테퍼 — 단일 작업 4단계·배치 생성 5단계(초안 1)·단계 게이트 순수 함수·Enter 는 다음 단계·제출 더블클릭 그물 — **구현 완료·라이브 실증 전**(2026-11-26, 다음 태그 d49 예정)
+
+사용자(2026-11-26): 「단일작업 / 배치작업 등록 시 화면 한번에 너무 많은 글자 및 정보가 떠. Step별로 페이지가 넘어가면서 진행될수 있도록 개선하고
+싶어. 최신 frotnend UI 및 디자인을 적용해서 초안을 몇가지 작성해서 나한테 보여줘봐.」 → 눌러 볼 수 있는 초안 셋(① 상단 스테퍼 + 단계 카드 + 하단
+고정 바 ② 왼쪽 세로 단계 + 오른쪽 실시간 요약 ③ 한 화면에 한 질문 — artifact 「단계별 등록 초안」 https://claude.ai/artifact/S1X5J3T2hyuuw8Z7JFoZ72,
+①은 입력 단계 글자 수가 지금의 3분의 1 이하) → 「단계별 등록 - 첫번째 안으로 진행해.」 → 설계 최종판(비판 33건을 코드로 검증·반영) → 공용 기반 →
+단일·배치 레인 병렬 → 통합 → 리뷰(위저드 관점 should 1·nit 4) 반영. **백엔드·제출 바디·사유 코드 무변경**(그리는 방식만 바뀐다).
+
+- **2026-10-06 이력과의 관계**: 10-06 에 같은 두 화면의 4스텝 위저드(max-w-xl/2xl 카드)를 걷고 「한 장 시트 + 오른쪽 제출 요약」(SubmitLayout)으로
+  갔다(이관본 「단일 작업·배치 생성 화면 단일 페이지화(시트 + 오른쪽 제출 요약)」, ssc d159·d160 — 사용자 요청 「데스크탑에서 모바일처럼 폭이 좁다」).
+  그때의 실패 넷 — 1440 화면의 오른쪽 절반이 빔, 한 스텝이 드롭다운 하나뿐, 전체를 보려면 다음·이전을 오감, 확인 스텝이 JSON 한 줄 — 을 이렇게
+  피했다: 본문 열 전체 폭(같은 날 A안의 1440 열 — 화면이 max-w·mx-auto 를 두지 않는다), 단계마다 의미 있는 묶음(배치 스토리지는 라디오 카드 묶음,
+  고를 것이 없는 단계는 건너뜀 — 연산이 하나뿐이면 ①을 완료로 두고 ②에서 시작), 스테퍼 아래 값(방문한 단계의 고른 값), 사람이 읽는 검토 카드
+  (SummaryList·OptionTokens 재사용). 그래서 `SubmitLayout`·`SummaryPanel`·`FormSection` 은 지웠다(`components/form/SubmitLayout.tsx` 머리 주석이 이력,
+  남는 FieldRow·SummaryList·SummaryRow·OptionTokens·SubmitHints 는 계약 주석 그대로).
+- **정한 것**(기본값 — 다시 묻지 않음, 설계 0-1): 입력 칸 **Enter = 그 단계가 유효하면 다음 단계, 제출은 절대 안 함**(「경로 칸 Enter 로 제출 안 됨」
+  계약 유지 — 검색 칸 `data-wizard-enter="stay"`·datalist 칸은 단계를 옮기지 않고, 체크박스·라디오는 막기만); **제출 더블클릭 = 두 번째 클릭 무시**;
+  연산이 하나뿐인 사용자(사이트 기본 `DMS_USER_ALLOWED_OPERATIONS=sync`)는 ② 대상에서 시작; 일반 사용자도 4단계 유지 + ②에 「옵션 기본값으로 검토」
+  지름길(옵션을 거친 뒤에는 「검토로 건너뛰기」); 단건 rm 에 새 확인 체크를 더하지 않음(「되돌릴 수 없음」 경고는 검토 바 제출 버튼 위); rm 검토의
+  제출은 빨간 솔리드(새 Button 변형 `destructive` — 단일·배치); 연산 고르기는 카드형 라디오(접근 이름 「연산」·라디오 이름 sync·scan·rm 그대로).
+- **공용 골격** `components/form/Wizard.tsx`(useWizard + WizardStepper·WizardStepCard·WizardActionBar·WizardShell — 규칙 전문은 머리 주석, 규약 요약은
+  `frontend/README.md` 「규약」): 게이트 합집합 불변식(단계 게이트의 합 = 옛 제출 게이트), 도달 규칙(현재 앞의 막힘은 잠금을 만들지 않고 「다음」·
+  「이전」은 현재 게이트만 — 비동기 재조회 실패가 뒤 단계 사용자를 끌어내리지 않고 빨간 점 + 「n단계에서 고치기」), Enter 규칙 ①~⑦(한글 조합·포털
+  안·행 칸 = 같은 열 다음 행), 「다음」은 aria-disabled(막힌 채 누르면 이유 줄 강조 + 첫 aria-invalid/`data-wizard-nudge` 칸 포커스)·제출은 disabled,
+  **「다음」과 제출이 바의 같은 `<Button>`(key 고정) + 바가 제출 onClick 의 `event.detail > 1` 을 거름**, 모든 버튼 `type="button"`, `?step=` 거울(사용자
+  이동 push·맞춤 replace·뒤로/앞으로(POP)에만 반응·처음 렌더는 min(URL, 첫 막힘)), 단계 전환 시 h2 포커스, 단계 카드 aria-label 금지, 바 z-index 금지.
+  단계 부품 `wizardParts.tsx`(MoreText — 요약은 늘·전문은 「자세히」, OptionToggle — 겉모양만 스위치·역할은 체크박스, OperationCards, ReviewCard —
+  「수정: 제목」, SubSection), `optionRules` 요약 상수(HELP_SUMMARY — 전문 상수 옆, 정보 손실 0).
+- **단일 작업** `/jobs/new` — 작업 종류 → 대상 → 옵션(관리자는 옵션·실행 설정) → 검토·제출. `k8sBody()`·잎 계산 무변경(바디 `toEqual` 단언 한 글자도
+  안 바꿈). 게이트 `features/jobs/submitGates.ts`(옛 blocked·hints 의 식·문장·순서 그대로 + 단계 태그 — storageOwnerBad 는 특권 운영자면 ③(chown
+  우회로 — 2026-11-11 결함 재발 방지, 고급 옵션 강제 펼침), 그 밖은 ②). `?pv=` 딥링크는 ②에서. 제출 방어 셋(바의 detail 가드·`handleSubmit` 단계 가드
+  `current !== "review"`·type=button). PV 검색어는 화면 최상위로 끌어올려 단계를 옮겨도 남는다(LocationField `searchField`).
+- **배치 생성** `/admin/batches/new` — 작업 종류 → 스토리지(라디오 카드 — 묶음마다 다른 radio name) → 항목 → 옵션·실행 제어 → 이름·검토. `buildBody()`
+  무변경, 게이트 `features/batches/batchGates.ts`. 「스토리지를 CSV 로 정하기」 탈출구(스토리지 단계 게이트가 생겨도 CSV 의 storage 열로 채우는 흐름 —
+  e2e 14 — 가 산다), 「PV 에서 경로 찾기」는 오른쪽 시트(넣어도 열어 두고 넣은 뒤 lastFocus 를 비움 — 「두 번째 넣기는 새 행」 계약), 방향어 「아래
+  실행 제어」 → 「④ 옵션·실행 제어」(문구 수정 둘). 행 삭제 뒤 포커스는 같은 번호 행 → 이전 행 → 「행 추가」.
+- **설계와 다르게 간 것**(실 Chrome 근거): 스테퍼의 비현재 단계 이름은 lg(1024)부터·값은 xl(1280)부터(설계 md·lg — 768 에서 다섯 이름이 「작.」·「스」로
+  잘렸다, 접근 이름은 sr-only 로 남는다); 더블클릭 가드를 화면이 아니라 바가 쥔다(화면이 빠뜨려도 막힌다 — 그물은 Wizard.test 의 노드 동일성 시험);
+  768 바 상태 줄 꺾임은 바의 flex-wrap + 상태 칸 기준 폭 12rem(sm:basis-48)으로 풀고 지름길은 설계대로 <sm 에서만 숨긴다(리뷰 반영 전엔 lg 아래에서
+  숨겼다); 「검토로 돌아가기」는 바가 그린다; 검토 단계(마지막)에는 완료 체크·빨간 점을 붙이지 않는다.
+- **리뷰 반영**(위저드 몫 5건 + 진행률과 같은 커밋 b1eddc3c): 정책 캡션의 거부 경고(정책 목록 조회 실패·관련 정책 행 비활성·행 부재)는 「자세히」에
+  접지 않고 펼친다(`optionRules.policyCaptionAlert` — 단일 ③·배치 ④ 공용; 접히면 관리자가 비활성 정책을 모른 채 제출할 수 있었다), 지름길 <sm 만
+  숨김, 검토 이유(SubmitHints)·제출 오류를 버튼 줄 위로, rm 에서 PV 안 경로가 비면 빨강 없는 `data-wizard-nudge` 표지(막힌 「다음」이 그 칸으로
+  포커스), 배치 CSV 카드가 스토리지가 채워진 뒤에도 「비어 있는 …」을 말하던 모순(`csvStorageActive`).
+- **테스트**: vitest 신규 `Wizard.test.tsx` 27(스테퍼 aria·도달 규칙·Enter 전 규칙·더블클릭 같은 노드·URL push/POP/비 POP 무시/처음 렌더 보정·type
+  불변식·nudge 문서 순서)·`wizardParts.test.tsx` 9·`submitGates.test.ts`(잎 조합 **786,432** 전수 — 합집합·막힌 단계의 바 이유·옛 hints 일치)·
+  `batchGates.test.ts`(**12,288** 전수), Button destructive. SubmitJob(59)·SubmitJob.k8s(38)·BatchCreate(91)·BatchCreate.k8s(8) 를 단계 흐름으로 다시
+  썼다 — 옮긴 설명은 toBeVisible/not.toBeVisible 로(접혀도 DOM 에 남아 getByText 는 초록이라 의미 변화를 못 잡는다). 변이 확인: Enter preventDefault·
+  POP 검사·제출 key·바 detail 가드·destructive·단계 가드·lastFocus 비우기·검색어 끌어올림을 각각 빼면 빨강. e2e: 03-layout 의 제출 화면 흐름을
+  `helpers/layoutSingle.ts`·`layoutBatch.ts` 로 옮겨 단계마다 L1·L3·L4, 768 spot check(② 지름길이 보이고 바 상태 줄 ≤ 2줄 — flex-wrap 을 되돌리면
+  폭 36px·높이 203px 로 빨강), 375 Tab 포커스가 하단 바에 안 가림, 시트를 열면 바가 덮개 아래·닫으면 연 버튼으로 포커스; 04 는 단계 흐름 + 마지막 앞
+  「다음」 dblclick → 검토에 머묾(실 브라우저 더블클릭 그물); 07·10·11·12·14 단계 흐름(카드 label 클릭 + toBeChecked). e2e 도우미 `e2e/helpers/wizard.ts`
+  (이름 매칭은 exact 또는 앞 고정 정규식 — 막힌 「다음」은 aria-disabled 라 `click({ force: true })`). 실 Chrome(공용 기반 임시 하네스 1280·1024·768·375,
+  배치 1440·1024·768·390)에서 문서 가로 넘침 0.
+- 게이트는 아래 진행률 항목과 같다(두 작업을 한 번에 쟀다).
+- **라이브 실증 전**: d49(진행률과 한 빌드) — 실 Chrome 1440·1280·768·390 으로 세 역할 × sync/rm(+면제 scan) × PV/직접 경로, 배치 scan/sync/rm(자동
+  확인 켬 포함)·CSV 로 정하기·PV 시트·「다음」 더블클릭, 390 폭 터치 연속 탭의 `event.detail`(새면 시계 주입형 400ms 잠금 — BACKLOG 「단계별 등록
+  후속」).
+
+### ✨ sync 진행률 — 작업 상세 진행 중 실행·미리보기 행의 dsync·nsync 진행 칸 + mpirun 출력 스트리밍·출력 상한(큰 디렉터리 효율화) — **구현 완료·라이브 실증 전**(2026-11-26, 다음 태그 d49 예정)
+
+사용자(2026-11-26): 「Sync 작업을 수행할 때, 현재 얼마나 진행됬는지 보고싶어. 일단 dms의 mpifileutils에서 dsync, nsync 수행 시 진행과정이 로그로
+찍히는지 파악해줘. 실증 및 소스코드도 보고 차악해서 어떤 방식으로 (초단위? 파일 단위) 찍히는지 파악해봐.」 → 조사(포크 소스 7a3189c + 테스트베드
+실측, 시험 데이터 100,105 항목·1.381 GiB): dsync 는 **시간 간격**(기본 10초 — 복사 단계 간격 128개 중 122개가 정확히 10.0초)으로 단계별 진행 줄을
+찍고, nsync 는 **배치가 끝날 때마다** 한 줄(`Progress P% batch i/N …`, 남은 시간 없음 — 기본 `--batch-files` 100만이면 100만 항목 미만은 배치 1개라
+끝에 한 줄)이다. 그런데 **DMS 에서는 실행 중에 볼 수 없었다** — 러너가 `subprocess.run(capture_output)` 으로 출력을 끝까지 메모리에 모았다가 한 번에
+써서, 22분 52초짜리 dsync 동안 stdout.log 가 404 였고 세 파일이 도구가 끝난 같은 시각에 한꺼번에 생겼다. 결정(같은 날): 「Sync 포탈 진행률 -
+권장안으로 진행하고, nsync 는 배치 단위로 찍는것 오케이야 그대로 진행해. 검증할때만 배치사이즈를 줄여서 테스트해봐. 잡 목록/배치화면에서 진행률을
+모아 볼 필요는 없고, 포탈에서 각 작업 항목에 들어갔을때만진행률 보여지게 해줘. 디렉토리가 엄청 크면,진행률 로그 파일이 너무 커질수 있으니
+효율화하는 방안도 검토해서 구현에 반영해.」 → 설계 2판(비판 27건 대조·반영) → **계약 먼저 한 커밋**(93158201) → 러너+API·포탈 병렬 → 독립 리뷰
+4관점(러너 동시성·보안 불변식·위저드·진행률 화면 — 진행률 몫 should 4·nit 7, must 0) 전부 반영.
+
+- **정한 것**(기본값 — 다시 묻지 않음): 권장안 = 러너가 도구 줄을 실시간으로 읽어 최신 상태 하나만 담은 `<phase>/progress.json` 을 덮어쓰고 포탈이
+  읽는다. **nsync 포크는 고치지 않는다**(배치 단위 진행 그대로 — 배치가 1개면 화면이 「nsync 는 배치가 끝날 때만 진행을 알립니다 — 이 작업은
+  배치가 1개라 끝날 때 한 번 표시됩니다」를 말하고 막대를 만들지 않는다). 미리보기(dry-run)도 같은 장치. **남은 시간은 보이지 않는다** — 도구의
+  「secs left」 는 평균 속도라 크기가 섞이면 크게 틀렸다(실측: 큰 파일이 먼저면 20초에 73% 뒤 작은 파일 10만 개에 21분, 그동안 8~103초를 오감;
+  반대 순서는 45% 에서 「1088 secs left」 뒤 3.9초에 끝) — progress.json 에도 담지 않는다. 진행 값은 **표시 전용**(확인 게이트·지문·통계·사유 코드에
+  쓰지 않음), DB·컨트롤러 저장 없음, **새 사유 코드 없음**, 러너 SIGTERM 처리기 없음(PID 1 신호 의미 유지).
+- **러너(잡 이미지 `dms-mpifileutils`)** — `dms_job_runner/stream.py`(신규, 불변 T1~T7 은 모듈 docstring): Popen 스트리밍, daemon 리더 2개가
+  원시 fd 를 `os.read` 하고 `io.IncrementalNewlineDecoder(utf-8 replace, translate=True)` 로 디코드(예전 텍스트 모드와 같은 결과 — 청크 경계의
+  멀티바이트·`\r\n` 포함, 실제 자식 프로세스·무작위 읽기 크기 시험), 쓰기 스레드 하나가 모든 파일 I/O(phase dirfd + O_CREAT|O_EXCL|O_NOFOLLOW 새
+  inode, progress.json 은 임시 파일 → rename — 독자는 반쪽 JSON 을 보지 않는다), 진행 슬롯을 로그 큐보다 먼저 씀, 모든 소비자·쓰기 예외는 그 출력만
+  끄고 삼킴(파이프 배수는 멈추지 않는다), launcher stdout/stderr(파드 로그)에 아무것도 찍지 않음, 스레드가 남으면 flush 뒤 `os._exit`.
+  stdout.log·stderr.log 는 이제 **mpirun 시작 때 만들고 도는 동안 이어 쓴다**. `progress.py`(신규): 진행 줄 정규식 표(줄 전체 fullmatch, 오류 줄·4 KiB
+  초과 줄 즉시 탈락, 첫 단어 분기 — 오류 폭주에서도 줄당 µs, dsync·nsync 표 분리, nsync 실행/미리보기 줄 분리) + `Tracker`(스냅숏 v1). `runner.run_job`
+  은 `run_tool`·`open_sink` 를 주입받아 본문이 파일시스템을 직접 만지지 않고(「모든 I/O 는 주입」 유지 — 기존 시험 22곳은 compat 경로 그대로),
+  `workers` 스냅숏은 ALLOWED_TOOLS 검사 직후, `start` 는 mpirun 직전, 끝은 `ended:true`. `parsers.py` 에 넘침 모드 줄 단위 도우미(기존 함수 무변경).
+- **API(`dms` 이미지 — api·controller 공용, controller 코드 변경 없음)** — `GET /api/user/jobs/{job_id}/progress?phase=execution|preview`
+  (`routes_artifacts.get_job_progress`): 기존 열람 사슬 `_owned_job` → `_reject_expired` → `_owner_uid` → `_probe` → `open_artifact_fd` 그대로, 파일
+  없음·사슬 실패·모양 틀림은 모두 200 `{phase, available:false}` 한 몸통이고 그 실패 경로에서만 BaseProbe 로 503 `artifact_base_unavailable`(불변식 16),
+  사슬 안 HTTPException 에도 `Cache-Control: no-store` 를 덧붙여 **모든 응답이 no-store**, `age_seconds` = 서버 시각 − mtime. 중립 모듈
+  `dms/job_progress.py`(신규) 의 `sanitize` 는 계약 서술자의 type·범위·required·const 만 보고 틀린 필드만 뺀다(required 가 틀리거나 16 KiB 초과·비 UTF-8·
+  깨진 JSON·깊은 중첩이면 None — 예외 없음·멱등).
+- **포탈** — `useArtifacts.useJobProgress`(5초, `available:false`·오류면 15초, 숨긴 탭 정지), `progressModel.ts`(순수 — 막대 우선순위 nsync 배치 % > dsync
+  전체 항목(`--batch-files` 블록) > dsync 단계 %(복사는 바이트·배치 안) > 소스 탐색 추정(99% 상한) > 없음; null ≠ 0; 신선도 = 서버 나이 + 받은 뒤 흐른
+  시간, 90초 넘으면 정체 경고(workers·ended 는 끔); available:false 는 단정하지 않음 — 60초 전 「진행 정보를 기다리는 중…」, 뒤는 Pending·이전 잡 이미지를
+  함께 말하는 중립 문구), `JobProgress.tsx`(「진행 · 단계」 + 갱신 → 막대 role=progressbar·기준 문구·HelpTip → 사실 조각 → 안내, aria-live 없음),
+  `JobStages` StepRow 는 **진행 중 ∧ 실행·미리보기 행 ∧ dsync·nsync ∧ 그 단계 ref 있음**일 때만(`showsProgress`). 잡 목록·배치 상세는 /progress 를
+  부르지 않는다(시험 0건 고정 — 사용자 결정). `StageResults` 는 summary `output_truncated` 면 「도구 출력이 너무 커서 일부 수치(…)는 모릅니다」 한 줄.
+- **계약** — `frontend/src/lib/progressContract.json`(스키마 v1 필드 서술자·phase 18개(공통·dsync·nsync)·불변식(since_line_s ≤ phase_since_s ≤
+  elapsed_s, since_line_s ⇔ lines > 0)·금지 키 `line`·금지 글자 left/remaining·예 스냅숏 9개(실측 로그를 전이 규칙으로 흘려 계산, 129~378 B)·예 응답·
+  `poll_ms` 5000/15000)이 러너 Tracker 재생·API 서술자 대조·포탈 progressModel 시험의 **단일 원천**이다(`tests/test_job_progress_contract.py` 가 형식과
+  `types.ts` 의 `ProgressSnapshot`·`JobProgressResponse` 를 대조). summary.json 계약은 그대로이고 `output_truncated` 만 새 선택 키다.
+- **큰 디렉터리 효율화**(사용자 요구 — 원문은 ARCHITECTURE §6 「러너 출력은 스트리밍·상한」):
+  - **progress.json 은 고정 크기·덮어쓰기** — 이력·표본 배열 없이 최신 스냅숏 하나(계약 예 129 B(workers)·322 B(dsync 복사 + 전체 블록)·378 B(nsync 배치), 러너
+    직렬화 상한 4 KiB — 넘으면 그 회차를 건너뜀, API 읽기 상한 16 KiB). 쓰기는 바뀐 것이 있으면 3초 스로틀, 없어도 30초 심장박동, workers·start·끝은
+    즉시 — 시간당 최대 1,320회, dsync 는 진행 줄이 10초 간격이라 약 360회/시간(22분 실측 로그 재생 약 140회). **항목이 1억이어도 파일 크기·쓰기 횟수는
+    같다.** 도구 원문 줄은 담지 않는다(남은 시간 원문이 칩으로 새지 않게, stdout.log 와 중복).
+  - **stdout.log 64 + 16 MiB**(예전 무제한 — 실패 100만 ≈ 250 MB, 1,000만 ≈ 2.5 GB 였다) — 앞 64 MiB(실행 중 실시간) + 끝 16 MiB(메모리 링, 끝날 때
+    붙임) + 사이 `DMS_JR_LOG_GAP reason=size omitted_lines=… omitted_bytes=… head=67108864 tail=16777216` 한 줄(UTF-8 바이트, 최대 약 80 MiB — 다운로드
+    상한 256 MiB 안, 뷰는 끝 256 KiB 라 꼬리를 보인다). stderr.log 는 8 + 2 MiB. 진행 줄은 솎지 않는다(dsync 10초 간격 약 100 B — 1주 6 MB, nsync
+    배치당 1줄 — 10억 항목도 270 KB). 폭주의 원인은 항목별 오류·WARN 줄이다.
+  - **파서 입력 64 MiB(넘침 모드)** — 결합 메모리(문자 수 × 최대 문자 폭) 64 MiB 이하면 지금과 같은 문자열(파서 무변경 — compat·스트리밍 두 경로의
+    summary 동일을 tool_detail 표본 15개로 시험). 넘치면 앞 64 MiB(완결 줄) + 넘친 구간의 요약 후보 줄 링(앞 4 MiB + 끝 4 MiB — 끝 요약은 늘 남는다) +
+    스트리밍 정확 카운터 + 출력 전체의 첫 실패 표본 10개, 위치에 기대는 값은 모름(null) + summary `output_truncated: true`(미리보기·실행 공통). 예외:
+    dsync 실행에서 정확한 copy_failed 가 0 이고 링이 줄을 밀어내지 않았으면 files·copied_items 는 최종 블록 값 그대로(리뷰 should — WARN 줄 폭주로
+    성공한 큰 sync 의 「반영 항목」이 모름이 되던 회귀). launcher 메모리가 출력 크기만큼 늘던 것(수 GB·OOM 가능)이 상한 안으로 들어왔다.
+  - 쓰기 큐 상한 16 MiB(넘치면 블록을 버리고 `DMS_JR_LOG_GAP reason=backlog` 로 센다 — 느린 CephFS 가 도구를 멈추지 않는다).
+- **설계와 다르게 간 것**: 계약의 수 타입을 int·float 둘로 통일(설계 스케치의 num 없음), 예 오류 응답을 `{status, body}` 목록으로(404 가 둘), nsync
+  미리보기의 Phase 5 줄은 실측(M4)이 `planner dryrun complete` 라 정규식을 `planner(?:\+execute| dryrun) complete` 로 넓혀 미리보기도 finishing 을 거친다.
+- **리뷰 반영**(진행률 몫 11건): 넘침 성공 dsync 의 files 보존(위), `sanitize` 의 실수 필드 거대 정수(309자리 넘는 정수가 `math.isfinite` 에서
+  OverflowError → GET progress 500·no-store 없음 — 정수는 범위만 비교 + 본문 예외를 None 으로 접는 2차 방어), echo 링을 넘침 전환 때 머리 끝 줄로 먼저
+  채움(실패 꼬리 발췌가 몇 줄로 줄지 않게), 리더가 정수 fd 대신 파이프 파일 객체를 쥠(막힌 리더의 fd 가 반환 뒤 GC 로 닫혀 재사용되던 구멍), 로그가
+  열리기 전에 꺼낸 첫 블록을 버리지 않음, `artifact_files` 소유자 장벽 docstring 을 실제에 맞게(summary.json·조기 종료 stderr.log 는 아직 `write_text`),
+  dsync 단계 % 의 도구 반올림 100(99.5% 부터)을 `step.done` 이 아니면 99 로, `age_seconds` 부재를 0 으로 치지 않음, 정체 문턱 ≥ 러너 심장박동 × 3 을
+  러너 소스와 시험으로 묶음(계약 키는 BACKLOG), 범위가 드러나는 이름(「지금까지 계획 …」·「이번 배치 …」), nsync 단일 배치 0/1 은 막대 없음.
+- **테스트**: 백엔드 신규 `test_job_runner_stream.py` 122(디코드 동치 R1, 넘침·상한·GAP·backlog, fail-soft 주입, daemon·`os._exit` 서브프로세스,
+  쓰기 경합·리더 fd 생존·echo 꼬리, main 배선), `test_job_runner_progress.py` 83(정규식 표·전이·스로틀·심장박동·계약 예 스냅숏 9개를 같은 로그·같은
+  시각에서 재현 — 실측 로그 픽스처 `tests/fixtures/progress/` 6개), `test_api_job_progress.py` 83(소유·admin·공유 토큰, 422·410·404(job/artifact)·503(빈
+  로컬 base·hung 단락), 심링크·하드링크·FIFO·디렉터리·상한 초과·비 UTF-8·깨진 JSON·깊은 중첩·v 2·bool v·거대 정수 → 같은 몸통, 모든 응답 no-store,
+  서술자 == 계약), `test_job_progress_contract.py` 26(형식 + 변조 15건 음성 확인). 보강: `test_job_runner_runner.py`(main 배선)·`test_job_runner_tool_detail.py`
+  (compat·스트리밍 동일). 프런트 신규 `progressModel.test.ts` 40(계약 예 스냅숏·응답 전부)·`JobProgress.test.tsx` 7, 보강 useArtifacts(가짜 타이머
+  5초/15초·숨김·회복)·JobStages·StageResults·JobsList·BatchDetail(/progress 0건).
+- **게이트**(두 작업 합친 마지막 통합 시점, 2026-11-27 실측): 백엔드 전수 **6657 passed · 19 skipped**(600초 — 기준 6321 에서 +336: 진행률 새 시험 파일 넷 314 + 러너 기존 시험 보강 22), vitest **2398 passed · 136 파일**(기준 2254·130 에서 +144·+6), `tsc -b` 오류 0, `tsc -p tsconfig.e2e.json --noEmit` 오류 0, `npm run build:image` 성공 · `dist/index.html` 외부 URL(http·https) 0건, e2e **43 passed · 19 spec**(3.6분 — 수 그대로, 새 단언은 기존 spec 안). 커밋은 a13ebab9 위 13개(계약 93158201 → 위저드 ed7fe322·fe87a767·219e8870·798480ab·46caffe3·7bfa2be3·5b7263a1 → 진행률 f405873b·abd43c8c·92f7a9f1 → 리뷰 반영 b1eddc3c·ded1a791) + 이 문서 커밋.
+- **라이브 실증 전**: 다음 태그 **d49**(단계별 등록과 한 빌드 — 세 이미지 모두; 진행률은 잡 이미지도 바뀌므로 오버레이 `newTag` 와 `patch-config.yaml`
+  `DMS_JOB_IMAGE` 를 같이 올린다 — 순서는 agent → api·controller → 잡 이미지, controller 롤아웃 뒤 30초). 실증 계획(설계 §8): dsync 실행·미리보기, nsync
+  실행·미리보기(배치 크기를 줄여서만), 실 브라우저로 진행 칸 갱신·정체 경고·available:false 문구·결과 카드. 테스트베드 CPU: k8s-w1 요청 합 705m(남음
+  1095m)라 launcher 를 w1 에 놓으면 nsync 갱이 5m 모자라 영구 Pending 이다(이전 시도 2건 — BACKLOG §4 「노드 CPU 상한은 다른 파드의 requests 를 보지
+  않는다」 사례) → 실증 창 동안 되돌림 입구 ingress-nginx 를 0 으로 줄여 확보(사용자 허락 「다른 리소스를 줄여」 — 그동안 클러스터 Ingress 쓰기 금지라
+  설치는 창 밖에서, 끝나면 replicas 2 원복). **하위 호환**: 옛 잡 이미지로 도는 잡(배포 순간 진행 중·옛 이미지 미리보기)은 progress.json 이 없어
+  available:false → 중립 문구, 새 잡 이미지 + 옛 API 면 progress.json 이 아티팩트 칩 하나로 보일 뿐이다.
 
 ### ✨ 포탈 본문 열 최대 1440·가운데(A안) — 넓은 창에서 사이드바 오른쪽 영역 가운데, 화면 기준선은 하나 그대로 — **완료·실증**(2026-11-26, d48)
 

@@ -193,9 +193,9 @@ PostgreSQL(제어면) + React 포탈 + 노드 에이전트 + Volcano gang-schedu
 
 ## 테스트·검증
 
-- 백엔드: `PYTHONPATH=<워크트리>/src <venv>/bin/python -m pytest tests -q` (~10분, 6321+ passed · 19 skipped — 2026-11-25 stale 노드 기록 정리 기준)
-- 프론트: `cd frontend && npx vitest run` (2254+ passed, 130 파일 — 2026-11-26 본문 열 가운데 기준) · `npx tsc -b`
-- e2e(실 브라우저): `cd frontend && npm run test:e2e` (43 passed, 19 spec — 빌드 포함) — **CI 없음, 수기 게이트**(이미지 빌드 전 게이트는
+- 백엔드: `PYTHONPATH=<워크트리>/src <venv>/bin/python -m pytest tests -q` (~10분, 6657+ passed · 19 skipped — 2026-11-26 sync 진행률·단계별 등록 기준)
+- 프론트: `cd frontend && npx vitest run` (2398+ passed, 136 파일 — 2026-11-26 sync 진행률·단계별 등록 기준) · `npx tsc -b`
+- e2e(실 브라우저): `cd frontend && npm run test:e2e` (43 passed, 19 spec — 빌드 포함, 2026-11-26 sync 진행률·단계별 등록 기준) — **CI 없음, 수기 게이트**(이미지 빌드 전 게이트는
   `deploy/README.md` §8 「이미지 빌드 전 게이트」)
 - 배포 문서·스크립트 계약: 절 번호·출력 문구를 바꾸면 `tests/test_ingress_contract.py`·`test_install_stages.py`·`test_addons_render.py` 등이
   본다 — 번호를 옮기면 가리키는 곳(설치기 출력·주석·다른 문서)을 같은 커밋에서 고치고 `deploy/README.md` 부록 Z 에 대응을 남긴다.

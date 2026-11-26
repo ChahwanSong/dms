@@ -40,7 +40,28 @@ npx tsc -b          # 타입체크만
 - **본문 폭·가운데는 셸이 정한다** — `app/AppShell.tsx` 의 `main`(최대 90rem = 1440, 사이드바 오른쪽 영역 가운데 — 2026-11-26)이 본문 열이다.
   화면(루트 section·카드)은 `mx-auto` 로 혼자 가운데로 가지 않고 폭 상한(`max-w-*`)만 둔다 — 기준선은 본문 열의 왼쪽 하나다(2026-08-16
   「한 기준선」 결정; vitest BuildForm·BuildHistory, e2e 03 「본문 열」(L5 `assertMainColumn`)이 본다). `main`·조상에 `overflow-*` 를 넣으면
-  제출 화면 요약의 sticky 가 죽는다.
+  제출 위저드 하단 액션 바의 sticky 가 죽는다.
+- **제출 화면은 단계별이다**(2026-11-26 — 단일 작업 4단계·배치 생성 5단계, 골격 `components/form/Wizard.tsx`, 규칙 전문은 그 머리 주석):
+  - 입력 칸 Enter 는 (그 단계가 유효하면) 다음 단계로 갈 뿐 **제출하지 않는다** — 검색 칸(`data-wizard-enter="stay"`)·datalist 칸은 단계도 옮기지
+    않고, 체크박스·라디오는 막기만 한다(브라우저는 체크박스 Enter 로도 `<form>` 을 제출한다).
+  - 셸이 그리는 버튼과 화면이 셸 안에 넘기는 버튼은 **모두 `type="button"`** — `Button` 에 type 기본값이 없고 단일 화면은 `<form>` 안이라 type 없는
+    버튼은 submit 이다(검토 「수정」이 form 을 제출하고 Enter 암묵 제출의 기본 버튼이 된다). vitest `test/wizard.ts` 의 `buttonsWithoutType` 이 본다.
+  - **제출 더블클릭 그물**: 「다음」과 제출(「제출」·「배치 생성」)은 하단 바의 같은 자리·같은 `<Button>`(key 고정)이고, 바가 제출 onClick 에서
+    `event.detail > 1`(같은 연속 클릭의 두 번째 이후)을 무시한다 — 마지막 앞 단계의 「다음」 더블클릭이 막 그려진 제출에 떨어지지 않게. vitest 는 노드
+    동일성으로, e2e 04 는 실 브라우저 dblclick 으로 본다. 시간 잠금은 쓰지 않는다. 화면 쪽 방어(`handleSubmit` 단계 가드 `current !== "review"`)도 둔다.
+  - 「다음」은 `aria-disabled`(막힌 채 누르면 이유 줄 강조 + 첫 `aria-invalid`/`data-wizard-nudge` 칸으로 포커스), 제출은 `disabled`. 단계 카드에
+    aria-label 을 달지 않고(Playwright `getByLabel` 부분 일치), 하단 바에 z-index 를 주지 않는다(Radix 덮개 위로 올라온다).
+  - 단계 게이트를 모두 합치면 제출 게이트다 — 식은 화면 밖 순수 함수 `features/jobs/submitGates.ts`·`features/batches/batchGates.ts`(옛 blocked·
+    hints 의 식·문장 그대로 + 단계 태그)이고 잎 조합 전수 시험이 지킨다. 새 판정을 위저드에 넣지 마라. 제출 바디(`k8sBody`·`buildBody`)도 위저드와
+    무관하다(바디 `toEqual` 단언이 그물).
+  - 옛 한 장 시트 부품(`SubmitLayout`·`SummaryPanel`·`FormSection`)은 지웠다. `components/form/SubmitLayout.tsx` 에는 단계 본문·검토 카드가 다시
+    쓰는 `FieldRow`·`SummaryList`·`SummaryRow`·`OptionTokens`·`SubmitHints` 만 남는다(파일 이름은 이력 — 머리 주석). 시트·카드·바 어디에도
+    `<aside>` 를 쓰지 않는다(e2e L3 가 첫 aside = 사이드바로 잰다).
+- **sync 진행률은 작업 상세에서, 진행 중에만 읽는다**(2026-11-26): `features/jobs/useArtifacts.useJobProgress` 는 요청 상세 잡 카드의 진행 중
+  실행·미리보기 행(`progressModel.showsProgress` — dsync·nsync, 그 단계 ref 있음)만 부른다. 간격은 5초, `available:false`·오류면 15초(그 경로는 서버가
+  매번 base 점검을 돈다), 숨긴 탭은 멈추고 다시 보이면 한 번 읽는다. 잡 목록·배치 화면에서 /progress 를 부르지 마라(사용자 결정 — `JobsList.test`·
+  `BatchDetail.test` 가 0건 고정). 키 없음 = 모름(0 으로 그리지 않는다), 남은 시간과 「남은」·「left」 글자는 쓰지 않는다, 진행 값은 표시 전용이다.
+  계약은 `src/lib/progressContract.json` — 런타임 번들에 싣지 않고 시험이 간격(`poll_ms`)·phase·예 스냅숏을 잇는다(백엔드 러너·API 시험도 같은 파일).
 
 ## 의존성 권고(npm audit)
 
