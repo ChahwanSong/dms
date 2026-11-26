@@ -331,12 +331,16 @@ describe("신선도와 안내", () => {
     expect(view(ok({ v: 1, tool: "nsync", phase: "batches", batch: { done: 0, count: 2 } })).caption).toBe(CAPTION.nsyncPerBatch);
   });
 
-  test("nsync 캡션이 없는 경우: 배치 1개(따로 안내)·배치 수 모름·끝 스냅숏·dsync·스냅숏 없음", () => {
+  test("nsync 캡션이 없는 경우: 배치 1개(따로 안내)·배치 수 모름·끝 스냅숏·배치 뒤 단계·dsync·스냅숏 없음", () => {
     const single = view(ok({ v: 1, tool: "nsync", phase: "batches", since_line_s: 1, batch: { done: 0, count: 1 } }));
     expect(single.caption).toBeNull();
     expect(single.note).toEqual({ tone: "info", text: NOTE.nsyncSingleBatch });
     expect(view(ok(SNAP.nsync_scan)).caption).toBeNull();                                      // 배치 수를 아직 모른다
     expect(view(ok({ ...SNAP.nsync_batches_exec, ended: true })).caption).toBeNull();          // 더 갱신되지 않는다
+    // 러너는 batch 를 단계가 바뀌어도 지우지 않는다 -- 모든 배치가 끝난 뒤(finishing·ended 아닌 done)엔 끝날 배치가 더 없다
+    for (const phase of ["finishing", "done"]) {
+      expect(view(ok({ v: 1, tool: "nsync", phase, batch: { done: 6, count: 6 } })).caption, phase).toBeNull();
+    }
     expect(view(ok({ ...SNAP.nsync_batches_exec, batch: { done: 1, count: "6" } } as unknown as ProgressSnapshot)).caption).toBeNull();
     for (const snap of [SNAP.dsync_copy_overall, SNAP.dsync_create]) expect(view(ok(snap)).caption).toBeNull();
     expect(view(RESP.unavailable, { after: 600 }).caption).toBeNull();

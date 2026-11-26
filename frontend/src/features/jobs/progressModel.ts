@@ -336,9 +336,11 @@ function noteOf(tool: string | null, snap: ProgressSnapshot, phase: string, ageN
 }
 
 /** 늘 붙는 캡션: nsync 이고 배치가 2개 이상(배치 수는 스캔 끝의 Batch mode 줄부터 안다 -- 스캔 단계에서도)이면 갱신 주기. 끝
- *  스냅숏(ended)은 더 갱신되지 않으므로 뺀다. 나이와 무관하다(배치가 짧든 길든 늘 같은 말). */
-function captionOf(tool: string | null, snap: ProgressSnapshot): string | null {
-  if (tool !== "nsync" || snap.ended === true) return null;
+ *  스냅숏(ended)은 더 갱신되지 않으므로 뺀다. 나이와 무관하다(배치가 짧든 길든 늘 같은 말). 스캔·배치 단계에서만 -- 러너는 batch 를
+ *  단계가 바뀌어도 지우지 않으므로 모든 배치가 끝난 뒤의 finishing·done 에서도 count 가 남는데, 그때는 끝날 배치가 더 없다. */
+const CAPTION_PHASES: ReadonlySet<string> = new Set(["scan", "batches"]);
+function captionOf(tool: string | null, snap: ProgressSnapshot, phase: string): string | null {
+  if (tool !== "nsync" || snap.ended === true || !CAPTION_PHASES.has(phase)) return null;
   const b = obj(snap.batch);
   const count = b ? num(b.count) : null;
   return count !== null && count >= 2 ? CAPTION.nsyncPerBatch : null;
@@ -377,7 +379,7 @@ export function progressView(resp: JobProgressResponse | undefined, error: unkno
     basisHelp: bar?.help ?? null,
     facts,
     fresh: fresh !== null ? `갱신 ${fresh} 전` : null,
-    caption: captionOf(tool, snap),
+    caption: captionOf(tool, snap, phase),
     note: errNote ?? noteOf(tool, snap, phase, ageNow),
   };
 }
