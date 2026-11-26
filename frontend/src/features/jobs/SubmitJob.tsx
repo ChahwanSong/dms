@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { MouseEvent, SyntheticEvent } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { ArrowRight, ChevronRight } from "lucide-react";
+import { ArrowRight, ChevronRight, Info, TriangleAlert } from "lucide-react";
 import { useSubmitRequest } from "./useJobs";
 import type { SubmitBody } from "./useJobs";
 import { useUserStorages } from "../storages/useUserStorages";
@@ -13,7 +13,7 @@ import { InfoCard } from "../../components/ui/InfoCard";
 import { FieldRow, OptionTokens, SubmitHints, SummaryList, SummaryRow } from "../../components/form/SubmitLayout";
 import { useWizard, WizardActionBar, WizardShell, WizardStepCard, WizardStepper } from "../../components/form/Wizard";
 import type { WizardStep } from "../../components/form/Wizard";
-import { SubSection } from "../../components/form/wizardParts";
+import { MoreText, OperationCards, OptionToggle, ReviewCard, SubSection } from "../../components/form/wizardParts";
 import { submitGates } from "./submitGates";
 import type { SubmitStep } from "./submitGates";
 import { ApiError, REASON_MESSAGES } from "../../lib/api";
@@ -30,7 +30,8 @@ import type { DirectDestOwner, PvOwnerRule } from "../../lib/syncOwnership";
 // (사본이면 미러가 발산한다).
 import { BUFSIZE_HELP, CHMOD_RE, chownFieldError, DIRECT_HELP, directBufsizeError, OPEN_NOATIME_HELP, PRIV_ROOT_HEAD, PRIV_ROOT_SYNC,
          PRIV_ROOT_SYNC_DIRECT_BOTH, PRIV_ROOT_SYNC_PV, PRIV_ROOT_SYNC_PV_ROOT, QUIET_HELP, SCAN_INT_FIELDS, SYNC_INT_FIELDS,
-         SYNC_MAX_ERRORS_NOTE, SYNC_OPTION_HELP, priorityCapText, priorityClampNote, scanIntFieldError, syncIntFieldError }
+         SYNC_MAX_ERRORS_NOTE, SYNC_OPTION_HELP, priorityCapText, priorityClampNote, scanIntFieldError, syncIntFieldError,
+         HELP_SUMMARY, OPERATION_LABEL, SYNC_DSYNC_SPECIAL_FILE_NOTE }
   from "./optionRules";
 // 정책 기본값 캡션(슬라이스 37: 배치 생성과 같은 표시 배선 — 백엔드 무변경).
 import { usePolicies } from "../policies/usePolicies";
@@ -450,7 +451,7 @@ export function SubmitJob() {
 
   // 한 쪽 입력. 직접 경로(면제자)는 StoragePicker + 상대경로 + PathFeedback 이고 라벨은 「소스 스토리지」·「목적지 경로」·
   // 「스토리지」·「대상 경로」(e2e 접점) -- 선택지는 파일시스템·둘 다 종류로 거른다.
-  const locationField = (side: Side) => {
+  const locationField = (side: Side, pickerGridClass?: string) => {
     const L = SIDE_LABELS[side];
     const l = locs[side];
     const raw = (
@@ -472,15 +473,24 @@ export function SubmitJob() {
     return (
       <LocationField side={side} operation={f.operation} loc={l} onChange={setLoc(side)} catalog={catalog}
                      search={search} resolved={resolved[side]} allowRaw={unrestricted} rawSlot={raw}
-                     destOwner={side === "destination" ? destOwner : undefined} searchField={searchFields[side]} />
+                     destOwner={side === "destination" ? destOwner : undefined} searchField={searchFields[side]}
+                     pickerGridClass={pickerGridClass} />
     );
   };
 
   // sync 목적지 조건과 소유권 안내 -- 모든 작업이 root 라 root 실행 기준 문구다(preflight _DEST_TYPE_CHECK·_DEST_CHECK:
-  // 목적지가 없으면 상위 디렉토리가 있어야 하고(root 도 test -w 가 실패하면 거부), 있으면 디렉토리여야 한다).
-  const syncConditions = (
+  // 목적지가 없으면 상위 디렉토리가 있어야 하고(root 도 test -w 가 실패하면 거부), 있으면 디렉토리여야 한다). 단계별 등록(2026-11-26)
+  // 부터 ④ 검토의 오른쪽 카드다(접지 않음) -- 머리 옆 「수정」은 ② 대상으로(이름은 sr-only 내용 -- aria-label 이면 getByLabel 부분
+  // 일치가 겹친다), 끝에 delete 와 무관한 dsync 삭제 한 줄(SYNC_DSYNC_SPECIAL_FILE_NOTE -- ③ 에도 늘 보인다).
+  const syncConditions = (onEdit: () => void) => (
     <InfoCard role="note" aria-label="목적지 조건과 소유권">
-      <p className="font-medium">목적지 조건과 소유권 — root 실행 기준</p>
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <p className="font-medium">목적지 조건과 소유권 — root 실행 기준</p>
+        <button type="button" onClick={onEdit}
+                className="text-xs font-semibold text-accent hover:text-accenthover hover:underline hover:underline-offset-2">
+          <span aria-hidden>수정</span><span className="sr-only">수정: 목적지 조건과 소유권</span>
+        </button>
+      </div>
       <ul className="mt-1 list-disc space-y-0.5 pl-5 text-xs">
         <li>
           <strong>목적지가 없는 경우</strong>: sync 가 목적지 디렉토리를 새로 만듭니다. 목적지의{" "}
@@ -515,6 +525,7 @@ export function SubmitJob() {
         <li>{SYNC_PATH_LINK_RULE}</li>
         <li>조건이 맞지 않으면 미리보기 전에 거부되고 사유가 표시됩니다 — 아무것도 복사되지 않습니다.</li>
       </ul>
+      <p className="mt-2 text-xs text-attn">{SYNC_DSYNC_SPECIAL_FILE_NOTE}</p>
     </InfoCard>
   );
 
@@ -524,12 +535,27 @@ export function SubmitJob() {
   // 이 파일의 지역 render 함수다(수십 개의 파생값을 읽는다 -- 따로 떼면 props 가 폭발하고 「로직 그대로」를 확인하기 어렵다). 단계
   // 상태·URL(?step=)·Enter·포커스·도달 규칙은 useWizard 가 쥔다(규칙 전문은 components/form/Wizard 머리 주석).
   const singleOp = me.data !== undefined && operations.length === 1;
+  // 스테퍼 아래 값(design-wizard §2-3 -- 방문했거나 지난 단계만, 넓은 폭에서 보인다). 대상은 검토와 같은 sideText 문법, 옵션은 켠
+  // 불리언 옵션 이름(늘 켜진 기본 open_noatime·recursive 는 빼고, open_noatime 을 끄면 그 사실을) + 관리자 우선순위.
+  const sideValue = (side: Side) => { const t = sideText(side); return t === "—" ? null : t; };
+  const targetValue = f.operation !== "sync" ? sideValue("target") ?? "미선택"
+    : sideValue("source") === null && sideValue("destination") === null ? "미선택"
+    : `${sideValue("source") ?? "미선택"} → ${sideValue("destination") ?? "미선택"}`;
+  const optionsValue = (() => {
+    const onKeys = Object.entries(currentOptions() ?? {})
+      .filter(([k, v]) => v === true && k !== "open_noatime" && k !== "recursive").map(([k]) => k);
+    if (f.operation === "sync" && !f.openNoatime) onKeys.push("open_noatime 끔");
+    if (isAdmin && f.priority !== "") onKeys.push(`우선순위 ${f.priority}`);
+    return onKeys.length === 0 ? "기본값" : onKeys.join(" · ");
+  })();
   const steps: WizardStep<SubmitStep>[] = [
-    { key: "kind", title: "작업 종류", blocked: gates.gate.kind, reason: gates.barReason("kind") },
-    { key: "target", title: targetTitle, blocked: gates.gate.target, reason: gates.barReason("target") },
-    { key: "options", title: isAdmin ? "옵션·실행 설정" : "옵션", blocked: gates.gate.options, reason: gates.barReason("options") },
+    { key: "kind", title: "작업 종류", blocked: gates.gate.kind, reason: gates.barReason("kind"),
+      value: `${f.operation}${unrestricted && scopeInput !== "" ? ` · 기준 ${scopeInput}` : ""}` },
+    { key: "target", title: targetTitle, blocked: gates.gate.target, reason: gates.barReason("target"), value: targetValue },
+    { key: "options", title: isAdmin ? "옵션·실행 설정" : "옵션", blocked: gates.gate.options, reason: gates.barReason("options"),
+      value: optionsValue },
     // 마지막 단계의 blocked 는 「다음」이 아니라 최종 제출 게이트(= blocked)다.
-    { key: "review", title: "검토·제출", blocked, reason: gates.barReason("review") },
+    { key: "review", title: "검토·제출", blocked, reason: gates.barReason("review"), value: "제출 전 확인" },
   ];
   // 시작 단계(design-wizard §1-6): ?pv= 딥링크(관리자 PV 탐색 「이 PV로 단일 작업」)는 PV 를 미리 골랐으니 ② 대상에서, 연산이 하나뿐인
   // 사용자(사이트 기본 DMS_USER_ALLOWED_OPERATIONS=sync·옛 서버)는 고를 것이 없는 ①을 완료로 두고 ②에서 시작한다. me 가 처음
@@ -570,19 +596,17 @@ export function SubmitJob() {
     </p>
   );
 
-  // ① 작업 종류
+  // ① 작업 종류 -- 연산 카드형 라디오(접근 이름 「연산」·라디오 이름 sync·scan·rm 은 옛 select 와 같다). 선택지는 서버 allowlist
+  // (me.user_operations -- 설계 D15) 그대로다. 표시 게이트일 뿐 진짜 차단은 서버(routes_requests operation_admin_only·
+  // scan_unrestricted_only 403). 카드 설명은 OPERATION_HELP 원문, 부제는 OPERATION_LABEL(optionRules).
   const kindStep = () => (
     <>
-      <div className="grid gap-x-6 gap-y-1 sm:grid-cols-2">
-        <label className="text-sm block">연산
-          <select aria-label="연산" className={field} value={f.operation}
-                  onChange={(e) => setF({ ...f, operation: e.target.value as Operation })}>
-            {/* 서버 allowlist(me.user_operations -- 설계 D15)를 그대로 그린다. 표시 게이트일 뿐 진짜 차단은
-                서버(routes_requests operation_admin_only·scan_unrestricted_only 403). */}
-            {operations.map((o) => <option key={o} value={o}>{o}</option>)}
-          </select>
-        </label>
-        <p className="text-sm text-muted sm:pt-8">{OPERATION_HELP[f.operation]}</p>
+      <div className="space-y-2">
+        <p aria-hidden className="text-sm font-semibold text-ink">연산</p>
+        <OperationCards name="submit-job-operation" value={f.operation}
+                        onChange={(v) => setF({ ...f, operation: v })}
+                        options={operations.map((o) => ({
+                          value: o, subtitle: OPERATION_LABEL[o], description: OPERATION_HELP[o], danger: o === "rm" }))} />
       </div>
       {rootFact}
       {isAdmin && !unrestricted && (
@@ -591,24 +615,26 @@ export function SubmitJob() {
         </p>
       )}
       {unrestricted && (
-        <FieldRow
-          control={<>
-            <label className="text-sm block">권한 기준 사용자
-              <input aria-label="권한 기준 사용자" className={field} list="k8s-scope-users"
-                     aria-invalid={scopeProblem !== null || undefined}
-                     placeholder="비우면 전체 PV 검색 · 예: junwoo.song" autoComplete="off" {...scopeField.bind}
-                     onChange={(e) => { clearSubmitError(); scopeField.bind.onChange(e); }} />
-            </label>
-            <datalist id="k8s-scope-users">
-              {scopeChoices.map((u) => <option key={u} value={u} />)}
-            </datalist>
-            {scopeProblem !== null && (
-              <p className="mt-1 text-bad text-sm">{scopeProblem === "reserved" ? REASON_MESSAGES.username_reserved
-                : scopeProblem === "numeric_only" ? REASON_MESSAGES.username_numeric_only
-                : "계정 아이디 형식이 아닙니다(영소문자·숫자로 시작, 영소문자·숫자·. _ -)"}</p>
-            )}
-          </>}
-          help="적으면 그 사용자의 namespace 권한 안의 PV 만 보이고, 작업에 그 사용자가 「대상 사용자」로 기록됩니다(실행은 그래도 root). 비우면 모든 클러스터의 PV 를 검색합니다." />
+        <div className="border-t border-line pt-5">
+          <FieldRow
+            control={<>
+              <label className="text-sm block">권한 기준 사용자
+                <input aria-label="권한 기준 사용자" className={field} list="k8s-scope-users"
+                       aria-invalid={scopeProblem !== null || undefined}
+                       placeholder="비우면 전체 PV 검색 · 예: junwoo.song" autoComplete="off" {...scopeField.bind}
+                       onChange={(e) => { clearSubmitError(); scopeField.bind.onChange(e); }} />
+              </label>
+              <datalist id="k8s-scope-users">
+                {scopeChoices.map((u) => <option key={u} value={u} />)}
+              </datalist>
+              {scopeProblem !== null && (
+                <p className="mt-1 text-bad text-sm">{scopeProblem === "reserved" ? REASON_MESSAGES.username_reserved
+                  : scopeProblem === "numeric_only" ? REASON_MESSAGES.username_numeric_only
+                  : "계정 아이디 형식이 아닙니다(영소문자·숫자로 시작, 영소문자·숫자·. _ -)"}</p>
+              )}
+            </>}
+            help="적으면 그 사용자의 namespace 권한 안의 PV 만 보이고, 작업에 그 사용자가 「대상 사용자」로 기록됩니다(실행은 그래도 root). 비우면 모든 클러스터의 PV 를 검색합니다." />
+        </div>
       )}
     </>
   );
@@ -618,22 +644,28 @@ export function SubmitJob() {
   // 하므로 카드의 빨간 줄(같은 문장)을 여기에도 늘 보인다.
   const destCondition = `상위 디렉토리 ${destParentAbs ?? "(목적지 경로의 상위)"} 가 있어야 함(root 실행 — 권한 검사 우회). 목적지가 없으면 새로 만듦`;
   const destLine = (
-    <div className="rounded-xl bg-infobg px-4 py-3">
-      <SummaryList>
-        <SummaryRow label="목적지 조건">{destCondition}</SummaryRow>
-        <SummaryRow label="목적지 소유">{ownership.short}</SummaryRow>
-      </SummaryList>
-      <p className="mt-1.5 text-xs text-muted">전문은 ④ 검토·제출에서 봅니다.</p>
-      {storageOwnerBad && (
-        <p className="mt-1 text-xs text-bad">
-          {pvDest ? "이 PV 의 스토리지" : "목적지 스토리지"}에 저장된 기본 소유 값이 올바르지 않아 제출할 수 없습니다 — 관리자가 스토리지 화면에서 기본 소유 uid·gid 를 다시 저장해야 합니다.
-        </p>
-      )}
+    <div className="flex items-start gap-2.5 rounded-xl bg-infobg px-4 py-3">
+      <Info aria-hidden className="mt-0.5 h-4 w-4 shrink-0 text-accent" />
+      <div className="min-w-0 flex-1">
+        <SummaryList>
+          <SummaryRow label="목적지 조건">{destCondition}</SummaryRow>
+          <SummaryRow label="목적지 소유">{ownership.short}</SummaryRow>
+        </SummaryList>
+        <p className="mt-1.5 text-xs text-muted">전문은 ④ 검토·제출에서 봅니다.</p>
+        {storageOwnerBad && (
+          <p className="mt-1 text-xs text-bad">
+            {pvDest ? "이 PV 의 스토리지" : "목적지 스토리지"}에 저장된 기본 소유 값이 올바르지 않아 제출할 수 없습니다 — 관리자가 스토리지 화면에서 기본 소유 uid·gid 를 다시 저장해야 합니다.
+          </p>
+        )}
+      </div>
     </div>
   );
 
   // ② 대상. "경로는 관리 디렉토리 아래 상대경로" 는 스토리지 선택 아래 캡션(StoragePicker)이 이미 말하고, 입력 아래 "지정 경로" 가
-  // 그 결과를 보여 준다 -- 구획 캡션으로 세 번째 반복하지 않는다.
+  // 그 결과를 보여 준다 -- 구획 캡션으로 세 번째 반복하지 않는다. sync 의 두 쪽은 테두리 상자로 묶고(어느 칸이 어느 쪽인지 한눈에),
+  // 두 쪽 상자는 lg 부터 나란히(768 은 사이드바를 빼면 본문이 약 488px 라 위아래로), namespace·PV 이름 두 칸은 넓은 폭에서 한 줄로
+  // 나란히 둔다(쪽 상자가 반폭인 sync 는 xl 부터, 한 쪽뿐인 scan·rm 은 sm 부터).
+  const SIDE_BOX = "min-w-0 rounded-xl border border-line p-4";
   const targetStep = () => (
     <>
       {singleOp && rootFact}
@@ -646,11 +678,11 @@ export function SubmitJob() {
       <CatalogNotice catalog={catalog} search={search} actor={me.data?.actor ?? ""} scopeUser={scopeUser} />
       {f.operation === "sync" ? (
         <>
-          <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]">
-            {locationField("source")}
+          <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]">
+            <div className={SIDE_BOX}>{locationField("source", "grid gap-3 xl:grid-cols-2")}</div>
             <ArrowRight aria-hidden
-                        className="h-5 w-5 rotate-90 justify-self-center text-muted md:mt-8 md:rotate-0" />
-            {locationField("destination")}
+                        className="h-5 w-5 rotate-90 self-center justify-self-center text-muted lg:rotate-0" />
+            <div className={SIDE_BOX}>{locationField("destination", "grid gap-3 xl:grid-cols-2")}</div>
           </div>
           {/* 결과 소유(2026-10-26): 특권 운영자(면제자)만, PV 목적지 sync 에만 -- 기본은 스토리지 기본 소유자, 옵션으로 PV 루트
               소유자. 사용자에겐 조작이 없다(늘 스토리지 기본 -- 목적지 한 줄·검토 카드가 그 값을 말한다). chown 을 지정하면 그
@@ -670,7 +702,7 @@ export function SubmitJob() {
           {destLine}
         </>
       ) : (<>
-        {locationField("target")}
+        <div className={SIDE_BOX}>{locationField("target", "grid gap-3 sm:grid-cols-2")}</div>
         {/* rm 대상의 링크 규칙(d192 이식, 괴리 [14]·[27] -- dms-k8s 는 끝 링크 허용: 2026-10-28 사용자 결정 「rm 끝 링크 허용
             유지」). 중간 단계 링크로 거부된 뒤 「링크가 가리키는 곳」을 다시 내지 않게, 끝 링크면 링크만 지운다는 사실과 함께
             고르는 자리에서 먼저 말한다. */}
@@ -681,42 +713,42 @@ export function SubmitJob() {
     </>
   );
 
-  // ③ 옵션(·실행 설정)
+  // ③ 옵션(·실행 설정). 불리언 옵션은 토글 카드(겉모양만 스위치 -- 역할·접근 이름은 옛 체크박스와 같다): 요약 한 줄이 늘 보이고 전문은
+  // 「자세히」 또는 켜면 펼쳐진다(d192 「direct·quiet 설명은 툴팁이 아니라 칸 옆에」 -- 요약이 핵심 사실을 담는다). delete 와 무관한
+  // dsync 삭제는 delete 를 접어도 사라지지 않게 늘 보이는 한 줄(SYNC_DSYNC_SPECIAL_FILE_NOTE). 사용자에겐 숨은 기본 옵션을 토큰으로
+  // 보인다 -- syncOptions() 에서 delete·contents 를 뺀 값(바디와 같은 함수라 「보이는 것 = 보내는 것」).
   const optionsStep = () => (
     <>
-      <SubSection title="실행 옵션" caption={f.operation === "sync" ? SYNC_MAX_ERRORS_NOTE : undefined}>
+      <SubSection title="실행 옵션"
+                  caption={f.operation === "sync" ? <MoreText summary={HELP_SUMMARY.maxErrors} full={SYNC_MAX_ERRORS_NOTE} /> : undefined}>
         {f.operation === "sync" ? (
           <>
-            {/* 옵션 설명(2026-08-20, 사용자 요청): dsync --delete / --contents. */}
-            <FieldRow align="check"
-              control={<label className="flex items-center gap-2 text-sm">
-                <input type="checkbox" aria-label="delete" checked={f.delete} onChange={on("delete")} /> delete
-              </label>}
-              help={SYNC_OPTION_HELP.delete} />
-            <FieldRow align="check"
-              control={<label className="flex items-center gap-2 text-sm">
-                <input type="checkbox" aria-label="contents" checked={f.contents} onChange={on("contents")} /> contents
-              </label>}
-              help={SYNC_OPTION_HELP.contents} />
-            {/* direct·quiet·고급옵션·우선순위는 운영자 전용(2026-08-20, 사용자
-                결정): 사용자 sync 폼은 delete·contents 만 남긴다. 숨겨도 제출
-                payload 는 동일하다 -- checkedOptions 가 기본값(false)을 이미
-                생략하고, 고급 프리필(batch_files·bufsize)은 도구 기본값이라
-                운영자가 고급을 안 펼친 것과 결과가 같다. */}
-            {/* direct·quiet 도 delete·contents 처럼 설명을 칸 옆에 그대로 보인다(d192 이식): 예전엔 title 툴팁뿐이라 quiet 가
-                실패 원인까지 지운다는 것(괴리 [9]·[13]·[18]·[29])과 direct 의 bufsize 조건([8])이 보이지 않았다. */}
-            {isAdmin && (<>
-              <FieldRow align="check"
-                control={<label className="flex items-center gap-2 text-sm">
-                  <input type="checkbox" aria-label="direct" checked={f.direct} onChange={on("direct")} /> direct
-                </label>}
-                help={DIRECT_HELP} />
-              <FieldRow align="check"
-                control={<label className="flex items-center gap-2 text-sm">
-                  <input type="checkbox" aria-label="quiet" checked={f.quiet} onChange={on("quiet")} /> quiet
-                </label>}
-                help={QUIET_HELP.sync} />
-            </>)}
+            {/* 옵션 설명(2026-08-20, 사용자 요청): dsync --delete / --contents. direct·quiet·고급옵션·우선순위는 운영자 전용
+                (2026-08-20, 사용자 결정): 숨겨도 제출 payload 는 동일하다 -- checkedOptions 가 기본값(false)을 이미 생략하고, 고급
+                프리필(batch_files·bufsize)은 도구 기본값이라 운영자가 고급을 안 펼친 것과 결과가 같다. */}
+            <div className="grid items-start gap-3 lg:grid-cols-2">
+              <OptionToggle label="delete" checked={f.delete} onChange={on("delete")}
+                            summary={HELP_SUMMARY.delete} full={SYNC_OPTION_HELP.delete} />
+              <OptionToggle label="contents" checked={f.contents} onChange={on("contents")}
+                            summary={HELP_SUMMARY.contents} full={SYNC_OPTION_HELP.contents} />
+              {isAdmin && (<>
+                <OptionToggle label="direct" checked={f.direct} onChange={on("direct")}
+                              summary={HELP_SUMMARY.direct} full={DIRECT_HELP} />
+                <OptionToggle label="quiet" checked={f.quiet} onChange={on("quiet")}
+                              summary={HELP_SUMMARY.quietSync} full={QUIET_HELP.sync} />
+              </>)}
+            </div>
+            <p className="flex items-start gap-1.5 text-xs text-attn">
+              <TriangleAlert aria-hidden className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <span>{SYNC_DSYNC_SPECIAL_FILE_NOTE}</span>
+            </p>
+            {!isAdmin && (
+              <div className="flex flex-wrap items-center gap-2 text-xs text-muted">
+                <span>기본으로 함께 실립니다:</span>
+                <OptionTokens options={Object.fromEntries(Object.entries(syncOptions() ?? {})
+                  .filter(([k]) => k !== "delete" && k !== "contents"))} />
+              </div>
+            )}
             {/* 기본 접힘 — 단순 sync 제출 동선을 바꾸지 않기 위해 <details> 로 숨긴다 */}
             {isAdmin && (
               <details className="rounded-lg border border-line"
@@ -804,13 +836,9 @@ export function SubmitJob() {
         ) : f.operation === "scan" ? (
           /* scan 옵션(구 SubmitScan 미러): 생략 = 도구 기본. */
           <>
-            <div className="flex flex-wrap gap-x-6 gap-y-2">
-              <label className="flex items-center gap-2 text-sm">
-                <input type="checkbox" aria-label="verbose" checked={f.verbose} onChange={on("verbose")} /> verbose
-              </label>
-              <label className="flex items-center gap-2 text-sm">
-                <input type="checkbox" aria-label="quiet" checked={f.quiet} onChange={on("quiet")} /> quiet
-              </label>
+            <div className="grid items-start gap-3 lg:grid-cols-2">
+              <OptionToggle label="verbose" checked={f.verbose} onChange={on("verbose")} />
+              <OptionToggle label="quiet" checked={f.quiet} onChange={on("quiet")} />
             </div>
             {verboseQuietConflict && (
               <p className="text-bad text-sm">verbose와 quiet는 함께 쓸 수 없습니다</p>
@@ -842,33 +870,24 @@ export function SubmitJob() {
           </>
         ) : (
           <>
-            <div className="flex flex-wrap gap-x-6 gap-y-2">
-              <label className="flex items-center gap-2 text-sm">
-                <input type="checkbox" aria-label="재귀 삭제(필수)" checked={f.recursive} onChange={on("recursive")} /> 재귀 삭제(필수)
-              </label>
-              <label className="flex items-center gap-2 text-sm">
-                <input type="checkbox" aria-label="stat" checked={f.stat} onChange={on("stat")} /> stat
-              </label>
-              <label className="flex items-center gap-2 text-sm">
-                <input type="checkbox" aria-label="lite" checked={f.lite} onChange={on("lite")} /> lite
-              </label>
+            {/* quiet 는 지우지 못한 항목 목록까지 없앤다 -- 요약이 그 사실을 늘 말하고 전문은 자세히·켜면(sync 와 같은 이유). */}
+            <div className="grid items-start gap-3 lg:grid-cols-2">
+              <OptionToggle label="재귀 삭제(필수)" checked={f.recursive} onChange={on("recursive")}
+                            error={recursiveMissing ? "재귀 옵션이 필요합니다" : null} />
+              <OptionToggle label="stat" checked={f.stat} onChange={on("stat")} />
+              <OptionToggle label="lite" checked={f.lite} onChange={on("lite")} />
+              <OptionToggle label="quiet" checked={f.quiet} onChange={on("quiet")}
+                            summary={HELP_SUMMARY.quietRm} full={QUIET_HELP.rm} />
             </div>
-            {recursiveMissing && <p className="text-bad text-sm">재귀 옵션이 필요합니다</p>}
             {statLiteConflict && <p className="text-bad text-sm">stat과 lite는 함께 쓸 수 없습니다</p>}
-            {/* quiet 는 지우지 못한 항목 목록까지 없앤다 -- 설명을 칸 옆에 보인다(sync 와 같은 이유). */}
-            <FieldRow align="check"
-              control={<label className="flex items-center gap-2 text-sm">
-                <input type="checkbox" aria-label="quiet" checked={f.quiet} onChange={on("quiet")} /> quiet
-              </label>}
-              help={QUIET_HELP.rm} />
           </>
         )}
       </SubSection>
       {/* 실행 설정은 운영자 전용(2026-08-20, 사용자 결정): 사용자 폼에선 우선순위를 정책 기본에 맡긴다(생략 = resolve_priority
-          가 정책값으로 해석). 노드 수·프로세스 수도 정책이 정한다. */}
+          가 정책값으로 해석). 노드 수·프로세스 수도 정책이 정한다 -- 정책 캡션·CPU 상한은 자세히(요약 한 줄은 늘 보인다). */}
       {isAdmin && (
-        <SubSection title="실행 설정"
-                    caption={<>{policyCaption}<span className="block">{NODE_CPU_CAP_NOTE}</span></>}>
+        <SubSection title="실행 설정" className="border-t border-line pt-5"
+                    caption={<MoreText summary={HELP_SUMMARY.policy} full={[policyCaption, NODE_CPU_CAP_NOTE]} />}>
           <FieldRow
             control={<label className="text-sm block">우선순위
               <select aria-label="우선순위" className={field} value={f.priority} onChange={on("priority")}>
@@ -887,74 +906,97 @@ export function SubmitJob() {
     </>
   );
 
-  // ④ 검토·제출 -- 옛 오른쪽 요약의 행 전부(라벨 그대로) + 목적지 조건과 소유권 카드(sync, 접지 않음) / 삭제 규칙(rm).
+  // ④ 검토·제출 -- 옛 오른쪽 요약의 행 전부(라벨 그대로)를 카드 셋(작업 · 소스 → 목적지/대상 · 옵션)으로 나누고, 「수정」은 그 단계로
+  // 간다(go -- 뒤로는 늘 갈 수 있다). 오른쪽: sync 는 목적지 조건과 소유권 전문(접지 않음), rm 은 삭제 규칙 -- 경로는 왼쪽 「대상」
+  // 한 곳에만(같은 카드 안 getByText(경로) 다중 일치 방지), 「되돌릴 수 없음」은 하단 바 strip 한 곳이라 여기 되풀이하지 않는다.
   const reviewStep = () => (
     <div className="grid gap-4 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)] lg:items-start">
-      <div className="min-w-0 rounded-xl border border-line px-4 py-4 sm:px-5">
-      <SummaryList>
-        <SummaryRow label="연산">{f.operation}</SummaryRow>
-        {f.operation === "sync" ? (
-          <>
-            <SummaryRow label="소스">{sideText("source")}</SummaryRow>
-            {sideAbs("source") !== null && (
-              <SummaryRow label="소스 지정 경로">{sideAbs("source")}</SummaryRow>
-            )}
-            <SummaryRow label="목적지">{sideText("destination")}</SummaryRow>
-            {sideAbs("destination") !== null && (
-              <SummaryRow label="목적지 지정 경로">{sideAbs("destination")}</SummaryRow>
-            )}
-            {/* 목적지 조건과 소유권 카드의 요점. root 실행이면 권한 검사가 우회되지만 상위 디렉토리
-                존재는 여전히 필요하다(preflight test -w). */}
-            <SummaryRow label="목적지 조건">
-              {`상위 디렉토리 ${destParentAbs ?? "(목적지 경로의 상위)"} 가 있어야 함(root 실행 — 권한 검사 우회). 목적지가 없으면 새로 만듦`}
+      <div className="min-w-0 space-y-4">
+        <ReviewCard title="작업" onEdit={() => wizard.go("kind")}>
+          <SummaryList>
+            <SummaryRow label="연산">
+              <span className="font-semibold">{f.operation}</span>
+              <span className="text-muted">{` — ${OPERATION_LABEL[f.operation]}`}</span>
             </SummaryRow>
-            <SummaryRow label="목적지 소유">{ownership.short}</SummaryRow>
-          </>
-        ) : (
-          <>
-            <SummaryRow label="대상">{sideText("target")}</SummaryRow>
-            {sideAbs("target") !== null && (
-              <SummaryRow label="지정 경로">{sideAbs("target")}</SummaryRow>
+            {unrestricted && scopeInput !== "" && (
+              <SummaryRow label="대상 사용자">{scopeInput}</SummaryRow>
             )}
-          </>
-        )}
-        <SummaryRow label="옵션"><OptionTokens options={currentOptions()} /></SummaryRow>
-        <SummaryRow label="우선순위">
-          {`${f.priority === "" ? priorityDefaultLabel : f.priority}${priorityClamp !== null ? ` — ${priorityClamp}` : ""}`}
-        </SummaryRow>
-        {unrestricted && scopeInput !== "" && (
-          <SummaryRow label="대상 사용자">{scopeInput}</SummaryRow>
-        )}
-        {/* rm·scan 은 머리만(요청 상세와 같은 PRIV_ROOT_HEAD) -- sync 의 소유 결과 꼬리는 rm·scan 과 관계없다(2026-11-11). */}
-        <SummaryRow label="실행 권한" className="text-bad">
-          {f.operation !== "sync" ? PRIV_ROOT_HEAD
-            : pvDest ? (pvOwnerRule === "pv_root" ? PRIV_ROOT_SYNC_PV_ROOT : PRIV_ROOT_SYNC_PV)
-            : directDest?.rule === "storage" ? PRIV_ROOT_SYNC_PV
-            : directDest?.rule === "storage_if_under_pv" ? PRIV_ROOT_SYNC_DIRECT_BOTH : PRIV_ROOT_SYNC}
-        </SummaryRow>
-      </SummaryList>
+            {/* rm·scan 은 머리만(요청 상세와 같은 PRIV_ROOT_HEAD) -- sync 의 소유 결과 꼬리는 rm·scan 과 관계없다(2026-11-11). */}
+            <SummaryRow label="실행 권한" className="text-bad">
+              {f.operation !== "sync" ? PRIV_ROOT_HEAD
+                : pvDest ? (pvOwnerRule === "pv_root" ? PRIV_ROOT_SYNC_PV_ROOT : PRIV_ROOT_SYNC_PV)
+                : directDest?.rule === "storage" ? PRIV_ROOT_SYNC_PV
+                : directDest?.rule === "storage_if_under_pv" ? PRIV_ROOT_SYNC_DIRECT_BOTH : PRIV_ROOT_SYNC}
+            </SummaryRow>
+          </SummaryList>
+        </ReviewCard>
+        <ReviewCard title={f.operation === "sync" ? "소스 → 목적지" : "대상"} onEdit={() => wizard.go("target")}>
+          <SummaryList>
+            {f.operation === "sync" ? (
+              <>
+                <SummaryRow label="소스">{sideText("source")}</SummaryRow>
+                {sideAbs("source") !== null && (
+                  <SummaryRow label="소스 지정 경로">{sideAbs("source")}</SummaryRow>
+                )}
+                <SummaryRow label="목적지">{sideText("destination")}</SummaryRow>
+                {sideAbs("destination") !== null && (
+                  <SummaryRow label="목적지 지정 경로">{sideAbs("destination")}</SummaryRow>
+                )}
+                {/* 목적지 조건과 소유권 카드의 요점. root 실행이면 권한 검사가 우회되지만 상위 디렉토리 존재는 여전히 필요하다
+                    (preflight test -w). */}
+                <SummaryRow label="목적지 조건">{destCondition}</SummaryRow>
+                <SummaryRow label="목적지 소유">{ownership.short}</SummaryRow>
+              </>
+            ) : (
+              <>
+                <SummaryRow label="대상">{sideText("target")}</SummaryRow>
+                {sideAbs("target") !== null && (
+                  <SummaryRow label="지정 경로">{sideAbs("target")}</SummaryRow>
+                )}
+              </>
+            )}
+          </SummaryList>
+        </ReviewCard>
+        <ReviewCard title={isAdmin ? "옵션·실행 설정" : "옵션"} onEdit={() => wizard.go("options")}>
+          <SummaryList>
+            <SummaryRow label="옵션"><OptionTokens options={currentOptions()} /></SummaryRow>
+            <SummaryRow label="우선순위">
+              {`${f.priority === "" ? priorityDefaultLabel : f.priority}${priorityClamp !== null ? ` — ${priorityClamp}` : ""}`}
+            </SummaryRow>
+          </SummaryList>
+        </ReviewCard>
       </div>
       <div className="min-w-0 space-y-4">
-        {f.operation === "sync" && syncConditions}
-        {/* 삭제 규칙 -- 경로는 왼쪽 「대상」 한 곳에만(같은 카드 안 getByText(경로) 다중 일치 방지), 「되돌릴 수 없음」은 하단 바
-            strip 한 곳이라 여기 되풀이하지 않는다. */}
+        {f.operation === "sync" && syncConditions(() => wizard.go("target"))}
         {f.operation === "rm" && (
-          <p className="rounded-xl border border-bad/30 bg-badbg px-4 py-3 text-xs text-bad">{RM_PATH_LINK_RULE}</p>
+          <ReviewCard title="삭제 규칙" tone="bad" onEdit={() => wizard.go("target")}>
+            <p className="text-xs">{RM_PATH_LINK_RULE}</p>
+          </ReviewCard>
         )}
       </div>
     </div>
   );
 
+  // 단계 카드 머리 한 줄.
+  const STEP_LEDE: Record<SubmitStep, string> = {
+    kind: "무엇을 할지 고르세요. 다음 단계의 입력이 연산에 맞춰 바뀝니다.",
+    target: f.operation === "sync" ? "어디에서 어디로 복사할지 고르세요."
+      : f.operation === "scan" ? "통계를 수집할 경로를 고르세요." : "삭제할 경로를 고르세요.",
+    options: "기본값 그대로도 충분합니다. 켠 옵션은 자세한 안내가 저절로 펼쳐집니다.",
+    review: "제출 전에 한 화면에서 확인하세요. 「수정」을 누르면 그 단계로 돌아갑니다.",
+  };
+
   // 대상 단계의 지름길(design-wizard §1-6 「바로가기」): 옵션 단계를 거치기 전엔 「옵션 기본값으로 검토」, 거친 뒤엔 「검토로 건너뛰기」.
   // 대상 게이트를 통과했을 때만 보이고, 검토로 갈 수 없으면(옵션이 막힘) 잠긴다(aria-disabled -- 눌러도 동작 없음, 이유는 title).
-  // 좁은 폭(<sm)에서는 숨긴다(바 버튼 줄이 넘친다). 검토를 이미 봤고 갈 수 있으면 바가 「검토로 돌아가기」를 대신 그린다.
+  // lg(1024) 아래에서는 숨긴다 -- 768 은 사이드바를 빼면 본문이 약 488px 라 이 버튼까지 서면 바의 상태 줄이 한 글자씩 꺾였다(실 Chrome).
+  // 검토를 이미 봤고 갈 수 있으면 바가 「검토로 돌아가기」를 대신 그린다.
   const reviewReachable = wizard.reachable("review");
   const skipToReview = wizard.current === "target" && !gates.gate.target && (
     <button type="button" aria-disabled={!reviewReachable || undefined}
             title={reviewReachable ? undefined : (gates.barReason("options") ?? undefined)}
             onClick={() => { if (reviewReachable) wizard.go("review"); }}
             className="inline-flex h-10 items-center gap-0.5 whitespace-nowrap rounded-lg px-2 text-sm font-medium text-ink/80
-                       hover:text-ink aria-disabled:cursor-not-allowed aria-disabled:opacity-50 max-sm:hidden">
+                       hover:text-ink aria-disabled:cursor-not-allowed aria-disabled:opacity-50 max-lg:hidden">
       {wizard.visited.has("options") ? "검토로 건너뛰기" : "옵션 기본값으로 검토"}
       <ChevronRight aria-hidden className="h-4 w-4" />
     </button>
@@ -982,7 +1024,12 @@ export function SubmitJob() {
       <form onSubmit={handleSubmit}>
         <WizardShell {...wizard.shellProps}>
           <WizardStepper wizard={wizard} />
-          <WizardStepCard wizard={wizard}>
+          <WizardStepCard wizard={wizard} lede={STEP_LEDE[wizard.current]}
+                          chips={wizard.current === "target" && f.operation === "rm" && (
+                            <span className="whitespace-nowrap rounded-full bg-badbg px-2.5 py-0.5 text-xs font-semibold text-bad">
+                              삭제 — 되돌릴 수 없음
+                            </span>
+                          )}>
             {wizard.current === "kind" ? kindStep()
               : wizard.current === "target" ? targetStep()
               : wizard.current === "options" ? optionsStep()
@@ -995,6 +1042,8 @@ export function SubmitJob() {
             onCancel={() => nav("/jobs")}
             secondary={skipToReview}
             submit={{ label: "제출", onClick: handleSubmitClick, disabled: blocked,
+                      // rm 검토의 제출은 빨간 솔리드(사용자 결정 -- 주 동작 자체가 파괴적일 때만 destructive)
+                      variant: f.operation === "rm" ? "destructive" : "primary",
                       describedBy: hints.length > 0 ? "submit-job-hints" : undefined }}
             strip={wizard.current === "review" && f.operation === "rm"
               ? "삭제는 되돌릴 수 없습니다. 미리보기에서 대상을 확인한 뒤 확인해야 실행됩니다." : undefined}

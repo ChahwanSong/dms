@@ -6,14 +6,14 @@ import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
 import { beforeAll, afterAll, afterEach, test, expect } from "vitest";
 import { SubmitJob } from "./SubmitJob";
-import { DIRECT_HELP, OPEN_NOATIME_HELP, QUIET_HELP, SCAN_INT_FIELDS, SYNC_INT_FIELDS, SYNC_MAX_ERRORS_NOTE }
-  from "./optionRules";
+import { DIRECT_HELP, HELP_SUMMARY, OPEN_NOATIME_HELP, QUIET_HELP, SCAN_INT_FIELDS, SYNC_DSYNC_SPECIAL_FILE_NOTE, SYNC_INT_FIELDS,
+         SYNC_MAX_ERRORS_NOTE } from "./optionRules";
 import { REASON_MESSAGES } from "../../lib/api";
 import { NODE_CPU_CAP_NOTE } from "../../lib/jobTool";
 import type { UserStorage } from "../../lib/types";
 import type { Me } from "../../lib/types";
 import {
-  buttonsWithoutType, goStep, next, nextButton, prevButton, reasonLine, stepCard, stepHeading, toReview,
+  buttonsWithoutType, chooseOp, goStep, next, nextButton, prevButton, reasonLine, stepCard, stepHeading, toReview,
 } from "../../test/wizard";
 
 // 2026-10-06: SubmitJob 이 4스텝 위저드에서 한 장짜리 시트(번호 구획) + 오른쪽 제출 요약이 됐다.
@@ -98,11 +98,14 @@ const submitButton = () => screen.getByRole("button", { name: "제출" });
 const REVIEW = "검토·제출";
 const OPTIONS = "옵션·실행 설정";      // 관리자 ③ 제목
 
-// ① 연산 고르기(단계는 그대로).
+// ① 연산 카드 고르기(단계는 그대로). 라디오 이름 = 연산 이름(옛 select 의 option 과 같다).
 async function pickOp(op: "sync" | "scan" | "rm") {
-  await screen.findByRole("option", { name: op });
-  await userEvent.selectOptions(screen.getByLabelText("연산"), op);
+  await chooseOp(op);
 }
+const opNames = () => within(screen.getByRole("radiogroup", { name: "연산" })).getAllByRole("radio")
+  .map((r) => r.getAttribute("aria-label"));
+// me 로드 대기(면제 관리자 -- rm 카드가 생긴다).
+const meLoaded = () => screen.findByRole("radio", { name: "rm" });
 
 async function rawMode(side: "소스" | "목적지" | "대상") {
   const group = await screen.findByRole("group", { name: `${side} 지정 방식` });
@@ -111,7 +114,7 @@ async function rawMode(side: "소스" | "목적지" | "대상") {
 
 // ① → ②(sync). me(admin) 로드를 기다린다.
 async function toTarget() {
-  await screen.findByRole("option", { name: "rm" });
+  await meLoaded();
   await next("소스와 목적지");
 }
 
@@ -183,40 +186,50 @@ const expectNextOpen = () => expect(nextButton()).not.toHaveAttribute("aria-disa
 
 test("단계 넷(작업 종류 → 소스와 목적지 → 옵션·실행 설정 → 검토·제출) — 지금 단계 본문만 그리고 오른쪽 제출 요약은 없다", async () => {
   const { unmount } = renderPage();
-  await screen.findByRole("option", { name: "rm" });              // me(admin) 로드
+  await meLoaded();              // me(admin) 로드
   const nav = screen.getByRole("navigation", { name: "진행 단계" });
-  expect(within(nav).getAllByRole("button").map((b) => b.getAttribute("title")))
-    .toEqual(["작업 종류", "소스와 목적지", OPTIONS, REVIEW]);
+  const stepButtons = within(nav).getAllByRole("button");
+  expect(stepButtons).toHaveLength(4);
+  ["작업 종류", "소스와 목적지", OPTIONS, REVIEW].forEach((t, i) => expect(stepButtons[i]).toHaveAccessibleName(new RegExp(`^${t}`)));
+  // 스테퍼 아래 값(방문한 단계만): 지금 ① 은 고른 연산
+  expect(stepButtons[0]).toHaveAccessibleName("작업 종류 sync (현재 단계)");
   expect(stepHeading()).toHaveTextContent("작업 종류");
   expect(screen.queryByRole("heading", { level: 2, name: "제출 요약" })).toBeNull();
   expect(screen.getByRole("button", { name: "다음" })).toBeInTheDocument();
   // ① 의 칸만 있다(연산·권한 기준 사용자) -- 대상·옵션 칸은 그 단계에서만 그린다
-  expect(screen.getByLabelText("연산")).toBeInTheDocument();
+  expect(screen.getByRole("radiogroup", { name: "연산" })).toBeInTheDocument();
   expect(screen.getByLabelText("권한 기준 사용자")).toBeInTheDocument();
   expect(screen.queryByRole("group", { name: "소스 지정 방식" })).toBeNull();
   expect(screen.queryByLabelText("delete")).toBeNull();
   await next("소스와 목적지");
   expect(screen.getByRole("group", { name: "소스 지정 방식" })).toBeInTheDocument();
-  expect(screen.queryByLabelText("연산")).toBeNull();
+  expect(screen.queryByRole("radiogroup", { name: "연산" })).toBeNull();
   unmount();
 
   // 사용자(연산 sync 하나뿐): ③ 제목은 「옵션」 -- 실행 설정(우선순위)은 관리자 전용
   server.use(http.get("/api/auth/me", () => HttpResponse.json(meUser)));
   renderPage();
   await screen.findByText(/권한 있는 PV 에서 sync 을 실행합니다/);   // me(user) 로드
-  expect(within(screen.getByRole("navigation", { name: "진행 단계" })).getByRole("button", { name: /^옵션/ }))
-    .toHaveAttribute("title", "옵션");
+  expect(within(screen.getByRole("navigation", { name: "진행 단계" })).getByRole("button", { name: /^옵션/ }).textContent)
+    .not.toContain("실행 설정");
 });
 
-test("연산을 고르면 옆에 무엇이 일어나는지 한 줄로 말하고, ② 제목이 바뀐다", async () => {
+test("연산 카드마다 무엇이 일어나는지 한 줄로 말하고(라디오의 설명), 고르면 ② 제목이 바뀐다 — rm 카드는 「되돌릴 수 없음」", async () => {
   renderPage();
-  expect(await screen.findByText("소스 디렉토리의 내용을 목적지로 복사·동기화합니다.")).toBeInTheDocument();
+  await meLoaded();
+  const radio = (op: string) => screen.getByRole("radio", { name: op });
+  expect(radio("sync")).toBeChecked();
+  expect(radio("sync")).toHaveAccessibleDescription("소스 디렉토리의 내용을 목적지로 복사·동기화합니다.");
+  expect(radio("scan")).toHaveAccessibleDescription("대상 경로의 파일 수·용량·데이터 온도 통계를 수집합니다.");
+  expect(radio("rm")).toHaveAccessibleDescription("대상 경로와 그 아래를 모두 삭제합니다.");
+  expect(radio("rm").closest("label")).toHaveTextContent("되돌릴 수 없음");
   await pickOp("scan");
-  expect(screen.getByText("대상 경로의 파일 수·용량·데이터 온도 통계를 수집합니다.")).toBeInTheDocument();
+  expect(radio("scan")).toBeChecked();
   expect(screen.getByRole("button", { name: /^스캔 대상/ })).toBeInTheDocument();
   await pickOp("rm");
-  expect(screen.getByText("대상 경로와 그 아래를 모두 삭제합니다.")).toBeInTheDocument();
   await next("삭제 대상");
+  // ② 머리 칩 -- 삭제는 되돌릴 수 없다
+  expect(within(stepCard()).getByText("삭제 — 되돌릴 수 없음")).toBeInTheDocument();
 });
 
 test("사용자 화면은 관리자 전용 정책 API 를 부르지 않는다(403 잡음 없음)", async () => {
@@ -243,8 +256,14 @@ test("관리자 화면은 정책을 조회해 ③ 실행 설정에 우선순위 
   await next(OPTIONS);
   expect(await screen.findByRole("option", { name: "(정책 기본: high)" })).toBeInTheDocument();
   expect(asked).toBeGreaterThan(0);
-  // 실행 설정 캡션의 노드 CPU 상한 한 줄(2026-10-16, 배치 생성과 같은 문장)
-  expect(screen.getByText(NODE_CPU_CAP_NOTE)).toBeInTheDocument();
+  // 실행 설정 캡션: 요약 한 줄은 늘 보이고, 정책 캡션·노드 CPU 상한(2026-10-16, 배치 생성과 같은 문장)은 「자세히」
+  const summary = screen.getByText(HELP_SUMMARY.policy);
+  expect(summary).toBeVisible();
+  expect(screen.getByText(NODE_CPU_CAP_NOTE)).not.toBeVisible();
+  expect(screen.getByText(NODE_CPU_CAP_NOTE).tagName).toBe("P");
+  await userEvent.click(within(summary.closest("p")!).getByRole("button", { name: "자세히" }));
+  expect(screen.getByText(NODE_CPU_CAP_NOTE)).toBeVisible();
+  expect(screen.getByText(/^정책 기본\(dsync\): 최대 6노드 · 노드당 4프로세스/)).toBeVisible();
 });
 
 test("실행 신원 칸·root 체크박스가 없다 -- 모든 작업은 root, 사용자 지정은 면제자의 「권한 기준 사용자」뿐", async () => {
@@ -338,7 +357,7 @@ test("조합 중 Enter(keyCode 229 — 한글 조합 확정)는 무시한다", a
 test("type 불변식: 어느 단계에도 type 없는 버튼이 없다(form 안 type 없는 버튼 = submit 버튼)", async () => {
   const captured = captureSubmit();
   const { container } = renderPage();
-  await screen.findByRole("option", { name: "rm" });
+  await meLoaded();
   expect(buttonsWithoutType(container)).toHaveLength(0);                       // ①
   await fillSyncTarget();
   expect(buttonsWithoutType(container)).toHaveLength(0);                       // ② (sync, 직접 경로)
@@ -446,6 +465,19 @@ test("「옵션 기본값으로 검토」: ②에서 바로 검토로 — 바디
   });
 });
 
+test("옵션이 막혀 검토로 갈 수 없으면 ②의 지름길은 잠긴다(aria-disabled — 눌러도 그대로, 이유는 title)", async () => {
+  renderPage();
+  await fillRmTarget();
+  await next(OPTIONS);
+  await userEvent.click(screen.getByLabelText("재귀 삭제(필수)"));
+  await goStep("삭제 대상");
+  const skip = screen.getByRole("button", { name: "검토로 건너뛰기" });     // ③을 거친 뒤의 이름
+  expect(skip).toHaveAttribute("aria-disabled", "true");
+  expect(skip).toHaveAttribute("title", "빨간 안내가 붙은 옵션 값을 고치세요");
+  await userEvent.click(skip);
+  expect(stepHeading()).toHaveTextContent("삭제 대상");
+});
+
 test("제출 바디 동일: ③에서 값을 바꿨다 되돌리고 ①↔④ 를 오가도 바디는 기본 바디와 같다", async () => {
   const captured = captureSubmit();
   renderPage();
@@ -508,8 +540,7 @@ test("연산이 하나뿐이면(sync) ①을 완료로 두고 ②에서 시작�
   await waitFor(() => expect(search().get("step")).toBe("target"));
   // 연산 선택지는 me.user_operations 그대로(표시 게이트 · 서버 403 이 진짜 차단)
   await goStep("작업 종류");
-  const select = screen.getByLabelText("연산") as HTMLSelectElement;
-  expect(Array.from(select.options).map((o) => o.value)).toEqual(["sync"]);
+  expect(opNames()).toEqual(["sync"]);
   await next("소스와 목적지");
   // replace 였으니 ①로 가는 히스토리 항목이 없다 -- 뒤로 두 번(②←① push 하나 + 시작)이면 화면을 떠난다
   fireEvent.click(screen.getByTestId("back"));
@@ -971,29 +1002,47 @@ test("범위 밖 bufsize는 「다음」을 잠근다", async () => {
 
 // ---- 슬라이스 37: scan 연산 ----------------------------------------------------
 
-test("direct·quiet 설명이 칸 옆에 보인다 — quiet 는 실패 원인까지 지운다, direct 는 nsync 무시 + bufsize 조건(d190·d192 이식)", async () => {
+test("direct·quiet 요약은 칸 옆에 늘 보이고 켜면(또는 「자세히」) 전문 — quiet 는 실패 원인까지 지운다, direct 는 nsync 무시 + bufsize 조건(d190·d192 이식)", async () => {
   // 예전엔 title 툴팁(+ sr-only)뿐이었고 quiet 는 「로그를 줄인다」고만 했다(괴리 [9]·[13]·[18]·[29]). 포크 db1e33c: nsync 는
-  // --direct 를 받기만 한다.
+  // --direct 를 받기만 한다. 2026-11-26 토글 카드: 요약 한 줄이 핵심 사실(nsync 에선 무시·bufsize 조건 / 실패 원인까지 지움)을 담는다.
   const view = renderPage();
   await fillSyncTarget();
   await next(OPTIONS);
-  expect(screen.getByText(DIRECT_HELP)).toBeInTheDocument();
+  expect(screen.getByText(HELP_SUMMARY.direct)).toBeVisible();
+  expect(HELP_SUMMARY.direct).toContain("dsync 로 실행될 때만 적용되고 켜면 bufsize 조건이 붙습니다");
+  expect(screen.getByText(DIRECT_HELP)).not.toBeVisible();
   expect(screen.getByLabelText("direct").closest("label")).not.toHaveAttribute("title");
   expect(DIRECT_HELP).toMatch(/dsync 로 실행될 때만 적용되고, .*nsync 로 실행되면 무시됩니다/);
   expect(DIRECT_HELP).toContain("bufsize 는 4 KiB~4 MiB 의 2의 거듭제곱");
-  expect(screen.getByText(QUIET_HELP.sync)).toBeInTheDocument();
+  await userEvent.click(screen.getByLabelText("direct"));                     // 켜면 전문이 펼쳐진 채 고정
+  expect(screen.getByText(DIRECT_HELP)).toBeVisible();
+  expect(screen.getByText(DIRECT_HELP).tagName).toBe("P");
+  expect(screen.getByText(HELP_SUMMARY.quietSync)).toBeVisible();
+  expect(HELP_SUMMARY.quietSync).toContain("실패하면 원인이 일반 사유로만 보입니다");
+  expect(screen.getByText(QUIET_HELP.sync)).not.toBeVisible();
+  const quietSummary = screen.getAllByText(HELP_SUMMARY.quietSync)[0].closest("p")!;
+  await userEvent.click(within(quietSummary).getByRole("button", { name: "자세히" }));   // 「자세히」 -- 켜지 않고 읽기만
+  expect(screen.getByText(QUIET_HELP.sync)).toBeVisible();
+  expect(screen.getByLabelText("quiet")).not.toBeChecked();
   expect(QUIET_HELP.sync).toContain("실패한 항목 목록과 오류 줄도 남지 않아");
   expect(screen.queryByText(/실행 로그를 줄입니다/)).toBeNull();
-  // nsync 실패 한도(괴리 [21] -- 화면 어디에도 없어 멈춘 이유를 알 수 없었다)는 sync 「실행 옵션」 머리
-  expect(screen.getByText(SYNC_MAX_ERRORS_NOTE)).toBeInTheDocument();
+  // nsync 실패 한도(괴리 [21] -- 화면 어디에도 없어 멈춘 이유를 알 수 없었다)는 sync 「실행 옵션」 머리의 요약 + 자세히
+  expect(screen.getByText(HELP_SUMMARY.maxErrors)).toBeVisible();
+  expect(screen.getByText(SYNC_MAX_ERRORS_NOTE)).not.toBeVisible();
   expect(SYNC_MAX_ERRORS_NOTE).toContain("기본 65,000건");
+  // delete 와 무관한 dsync 삭제는 delete 를 접어 둬도 늘 보인다(dsync 미리보기에는 나오지 않는다)
+  expect(screen.getByText(SYNC_DSYNC_SPECIAL_FILE_NOTE)).toBeVisible();
   view.unmount();
   renderPage();
   await fillRmTarget();
   await next(OPTIONS);
-  expect(screen.getByText(QUIET_HELP.rm)).toBeInTheDocument();
+  expect(screen.getByText(HELP_SUMMARY.quietRm)).toBeVisible();
+  expect(screen.getByText(QUIET_HELP.rm)).not.toBeVisible();
+  await userEvent.click(screen.getByLabelText("quiet"));
+  expect(screen.getByText(QUIET_HELP.rm)).toBeVisible();
   expect(QUIET_HELP.rm).toContain("지우지 못한 항목 목록과 오류 줄도 남지 않아");
   expect(screen.queryByText(SYNC_MAX_ERRORS_NOTE)).toBeNull();
+  expect(screen.queryByText(SYNC_DSYNC_SPECIAL_FILE_NOTE)).toBeNull();
 });
 
 test("경로 조건에 심볼릭 링크 규칙이 있다 — sync 는 검토의 목적지 조건 카드(어느 단계든), rm 은 ② 대상 아래(중간 단계만, 끝 링크는 링크만)", async () => {
@@ -1046,10 +1095,9 @@ test("direct 를 켜면 bufsize 는 4096·2^k ≤ 4 MiB 만 — 서버 422 direc
 test("admin scan 제출 바디가 정확하다(프리필 batch_files + 입력 broken_limit)", async () => {
   const captured = captureSubmit();
   renderPage();
-  const select = (await screen.findByLabelText("연산")) as HTMLSelectElement;
   // 면제 관리자는 세 연산 전부 -- scan 은 sync 와 rm 사이(서버 user_operations 순서와 무관하게 화면 순서).
-  await screen.findByRole("option", { name: "scan" });
-  expect(Array.from(select.options).map((o) => o.value)).toEqual(["sync", "scan", "rm"]);
+  await screen.findByRole("radio", { name: "scan" });
+  expect(opNames()).toEqual(["sync", "scan", "rm"]);
   const storageSelect = await chooseOperation("scan");
   await userEvent.selectOptions(storageSelect, "cephfs");
   await userEvent.type(screen.getByLabelText("대상 경로"), "team/data");
@@ -1163,4 +1211,69 @@ test("chown 에 이름을 쓰면 오류로 막는다(잡 컨테이너엔 디렉�
   await userEvent.type(screen.getByLabelText("chown"), "cocoa.song:mig");
   expect(within(fieldBox("chown")).getByText(/chown 은 숫자 uid:gid 만 지정할 수 있습니다/)).toBeInTheDocument();
   expect(nextButton()).toHaveAttribute("aria-disabled", "true");
+});
+
+// ---- 단계별 등록 겉모양(S2): 검토 카드·수정·rm 빨강·스테퍼 값 -------------------------------------------------------
+
+test("검토 카드 「수정」은 그 단계로 가고(제목 포커스) 바의 「검토로 돌아가기」로 돌아온다 — 요청은 나가지 않는다(type=button)", async () => {
+  const captured = captureSubmit();
+  const { container } = renderPage();
+  await fillSyncTarget();
+  await next(OPTIONS);
+  // ③ 「자세히」(form 안 버튼) -- 눌러도 제출되지 않는다
+  await userEvent.click(within(screen.getByText(HELP_SUMMARY.delete).closest("p")!).getByRole("button", { name: "자세히" }));
+  await next(REVIEW);
+  expect(buttonsWithoutType(container)).toHaveLength(0);
+  for (const [name, title] of [["수정: 작업", "작업 종류"], ["수정: 소스 → 목적지", "소스와 목적지"], [`수정: ${OPTIONS}`, OPTIONS],
+                                ["수정: 목적지 조건과 소유권", "소스와 목적지"]] as const) {
+    await userEvent.click(screen.getByRole("button", { name }));
+    expect(stepHeading()).toHaveTextContent(title);
+    expect(stepHeading()).toHaveFocus();
+    await userEvent.click(screen.getByRole("button", { name: "검토로 돌아가기" }));
+    expect(stepHeading()).toHaveTextContent(REVIEW);
+  }
+  await new Promise((r) => setTimeout(r, 100));
+  expect(captured.body).toBeNull();
+});
+
+test("검토의 목적지 조건과 소유권 카드 끝에 delete 와 무관한 dsync 삭제 한 줄이 있다", async () => {
+  renderPage();
+  await fillSyncTarget();
+  await toReview(REVIEW);
+  expect(ownershipCard()).toHaveTextContent(SYNC_DSYNC_SPECIAL_FILE_NOTE);
+  expect(SYNC_DSYNC_SPECIAL_FILE_NOTE).toContain("dsync 미리보기에는 나오지 않습니다");
+});
+
+test("rm 검토의 「제출」은 빨간 솔리드(destructive), sync 는 파랑(primary)", async () => {
+  const view = renderPage();
+  await fillSyncTarget();
+  await toReview(REVIEW);
+  expect(submitButton()).toHaveClass("bg-accent");
+  expect(submitButton()).not.toHaveClass("bg-bad");
+  view.unmount();
+  renderPage();
+  await fillRmTarget();
+  await toReview(REVIEW);
+  expect(submitButton()).toHaveClass("bg-bad");
+  expect(submitButton()).not.toHaveClass("bg-accent");
+  // 삭제 규칙 카드(빨강) -- 경로는 왼쪽 「대상」 카드 한 곳에만
+  expect(screen.getByRole("heading", { level: 3, name: "삭제 규칙" })).toBeInTheDocument();
+  expect(within(stepCard()).getAllByText("cephfs:a/b")).toHaveLength(1);
+});
+
+test("스테퍼 아래 값: 방문한 단계만 — 대상은 「소스 → 목적지」, 옵션은 켠 옵션 이름(없으면 기본값), 검토는 제출 전 확인", async () => {
+  renderPage();
+  await fillSyncTarget();
+  const step = (name: string) => within(screen.getByRole("navigation", { name: "진행 단계" }))
+    .getByRole("button", { name: new RegExp(`^${name}`) });
+  expect(step("소스와 목적지")).toHaveAccessibleName("소스와 목적지 cephfs:a/b → cephfs-secondary:c/d (현재 단계)");
+  expect(step(OPTIONS)).toHaveAccessibleName(OPTIONS);                     // 아직 안 간 단계는 값이 없다
+  await next(OPTIONS);
+  expect(step(OPTIONS)).toHaveAccessibleName(`${OPTIONS} 기본값 (현재 단계)`);
+  await userEvent.click(screen.getByLabelText("delete"));
+  await userEvent.selectOptions(screen.getByLabelText("우선순위"), "high");
+  expect(step(OPTIONS)).toHaveAccessibleName(`${OPTIONS} delete · 우선순위 high (현재 단계)`);
+  await next(REVIEW);
+  expect(step("소스와 목적지")).toHaveAccessibleName("소스와 목적지 cephfs:a/b → cephfs-secondary:c/d (완료)");
+  expect(step(REVIEW)).toHaveAccessibleName(`${REVIEW} 제출 전 확인 (현재 단계)`);
 });

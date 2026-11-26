@@ -2,7 +2,7 @@ import { expect, test } from "@playwright/test";
 import { STORAGE_NAME } from "./harness/env";
 import { apiLogin } from "./helpers/session";
 import { assertLayoutSane } from "./helpers/layout";
-import { expectStep, wizardNext } from "./helpers/wizard";
+import { chooseOperation, expectStep, wizardNext } from "./helpers/wizard";
 
 // E4 — 잡 종단 흐름. 이 파일에만 있는 것: **UI 제출 한 번이 풀스택 배선 전체를
 // 밟는다**. 폼 -> POST /api/user/requests(202) -> 플래너가 에이전트 리포트에서
@@ -25,7 +25,7 @@ test.describe("E4 잡 종단 흐름", () => {
     // 스테퍼」): 작업 종류 → 스캔 대상 → 옵션·실행 설정 → 검토·제출 네 단계 + 하단 고정 바(「다음」과 「제출」이 같은 자리).
     await page.goto("/jobs/new");
     await expect(page.getByRole("heading", { name: "단일 작업" })).toBeVisible();
-    await page.getByLabel("연산", { exact: true }).selectOption("scan");
+    await chooseOperation(page, "scan");
     await wizardNext(page, "스캔 대상");
     // 면제자의 대상은 기본이 「PV」(전체 PV 검색)라 「직접 경로」로 바꾼다(LocationField 의 지정 방식 전환).
     await page.getByRole("group", { name: "대상 지정 방식" }).getByRole("button", { name: "직접 경로", exact: true }).click();

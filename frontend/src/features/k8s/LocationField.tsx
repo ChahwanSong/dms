@@ -47,7 +47,7 @@ export function pvRootDestNote(owner: DestOwner, row: Pick<VolumeRow, "storage_o
 export type PvSearchField = ReturnType<typeof useSearchField>;
 
 export function LocationField({ side, operation, loc, onChange, catalog, search, resolved, allowRaw, rawSlot,
-                               destOwner = { rule: "storage" }, searchField }: {
+                               destOwner = { rule: "storage" }, searchField, pickerGridClass }: {
   side: Side;
   operation: string;
   loc: Loc;
@@ -65,6 +65,8 @@ export function LocationField({ side, operation, loc, onChange, catalog, search,
    *  부품이 언마운트돼 지역 상태의 검색어가 비고, 결과 목록에서 고른 줄이 빠질 수 있었다(고른 PV 는 loc.ref 라 남는다). 생략하면
    *  지금처럼 지역 상태. */
   searchField?: PvSearchField;
+  /** namespace·PV 이름 두 칸을 감쌀 class(선택 -- 예: "grid gap-3 sm:grid-cols-2", 넓은 폭에서 한 줄로 나란히). 생략하면 세로로 쌓는다. */
+  pickerGridClass?: string;
 }) {
   const L = SIDE_LABELS[side];
   const mode: LocMode = allowRaw ? loc.mode : "pv";
@@ -82,7 +84,9 @@ export function LocationField({ side, operation, loc, onChange, catalog, search,
         <>
           {search
             ? <SearchPicker side={side} loc={loc} onChange={onChange} row={row} field={searchField} />
-            : <GroupPicker side={side} loc={loc} onChange={onChange} catalog={catalog} row={row} />}
+            : pickerGridClass !== undefined
+              ? <div className={pickerGridClass}><GroupPicker side={side} loc={loc} onChange={onChange} catalog={catalog} row={row} /></div>
+              : <GroupPicker side={side} loc={loc} onChange={onChange} catalog={catalog} row={row} />}
           <SubField side={side} operation={operation} loc={loc} onChange={onChange} resolved={resolved}
                     destOwner={destOwner} />
         </>

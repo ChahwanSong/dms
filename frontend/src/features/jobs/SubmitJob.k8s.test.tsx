@@ -6,11 +6,11 @@ import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
 import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from "vitest";
 import { SubmitJob } from "./SubmitJob";
-import { SYNC_INT_FIELDS, SYNC_OPTION_HELP } from "./optionRules";
+import { HELP_SUMMARY, SYNC_INT_FIELDS, SYNC_OPTION_HELP } from "./optionRules";
 import { PRIV_ROOT_HEAD, PRIV_ROOT_SYNC_DIRECT_BOTH, PRIV_ROOT_SYNC_PV, PRIV_ROOT_SYNC_PV_ROOT } from "./optionRules";
 import { REASON_MESSAGES } from "../../lib/api";
 import type { Me, UserStorage } from "../../lib/types";
-import { goStep, next, nextButton, reasonLine, stepCard, stepHeading, toReview } from "../../test/wizard";
+import { chooseOp, goStep, next, nextButton, reasonLine, stepCard, stepHeading, toReview } from "../../test/wizard";
 import type { ClusterFreshness, UserVolumesResponse, VolumeRow, VolumesResponse } from "../k8s/types";
 
 // dms-k8s 설계 §7(2026-10-25): k8s 모드 단일 작업 -- 세 역할(일반 사용자 · 목록 밖 관리자 · 면제 관리자) × sync/scan/rm 의 제출
@@ -152,11 +152,12 @@ async function pick(groupLabel: string, pvLabel: string, group: string, pv: stri
     .getByRole("option", { name: pv }));
 }
 
-// ① 연산만 고른다(단계는 그대로).
+// ① 연산 카드만 고른다(단계는 그대로). 라디오 이름 = 연산 이름.
 async function pickOp(op: "sync" | "scan" | "rm") {
-  await screen.findByRole("option", { name: op });
-  await userEvent.selectOptions(screen.getByLabelText("연산"), op);
+  await chooseOp(op);
 }
+const opNames = () => within(screen.getByRole("radiogroup", { name: "연산" })).getAllByRole("radio")
+  .map((r) => r.getAttribute("aria-label"));
 
 // ① 연산을 고르고 ② 대상으로 간다.
 async function choose(op: "scan" | "rm") {
@@ -166,7 +167,7 @@ async function choose(op: "scan" | "rm") {
 
 // ① → ② sync(연산 기본). me 로드를 기다린다.
 async function toSync() {
-  await screen.findByRole("option", { name: "rm" });
+  await screen.findByRole("radio", { name: "rm" });
   await next("소스와 목적지");
 }
 
@@ -230,10 +231,9 @@ test("사용자 sync: namespace (StorageClass) → PV 이름 → PV 안 경로, 
 
 test("사용자 연산 선택지는 me.user_operations -- scan 은 특권 운영자만이라 보이지 않는다(2026-10-26 (g)), 연산이 둘이면 ①에서 시작", async () => {
   renderAs(meUser);
-  await screen.findByRole("option", { name: "rm" });
+  await screen.findByRole("radio", { name: "rm" });
   expect(stepHeading()).toHaveTextContent("작업 종류");
-  const options = within(screen.getByLabelText("연산")).getAllByRole("option").map((o) => o.textContent);
-  expect(options).toEqual(["sync", "rm"]);
+  expect(opNames()).toEqual(["sync", "rm"]);
 });
 
 test("비관리자 sync 옵션은 delete·contents 만 — direct·quiet·고급·우선순위 숨김", async () => {
@@ -244,15 +244,26 @@ test("비관리자 sync 옵션은 delete·contents 만 — direct·quiet·고급
   await pick("목적지 namespace (StorageClass)", "목적지 PV 이름", "team-b (tb-nfs)", "scratch — 5Gi · Bound");
   await next("옵션");
   expect(screen.getByLabelText("delete")).toBeInTheDocument();
-  // delete 설명은 특수 파일의 같은 이름 목적지 항목을 도구별로 말한다(d192 이식, 리뷰 portal-batch-26·contract-39 -- 사용자
-  // 폼도 한 노드(dsync)로 돌 수 있고, dsync 는 종류가 다른 그 항목을 delete 와 무관하게 지운다)
+  // 토글 카드: 요약(원문 첫 문장)은 늘 보이고 전문은 접혀 있다가 켜면 펼쳐진다. delete 전문은 특수 파일의 같은 이름 목적지 항목을
+  // 도구별로 말한다(d192 이식, 리뷰 portal-batch-26·contract-39 -- 사용자 폼도 한 노드(dsync)로 돌 수 있고, dsync 는 종류가 다른 그
+  // 항목을 delete 와 무관하게 지운다)
+  expect(screen.getByText(HELP_SUMMARY.delete)).toBeVisible();
+  expect(SYNC_OPTION_HELP.delete.startsWith(HELP_SUMMARY.delete)).toBe(true);
   const deleteHelp = screen.getByText(SYNC_OPTION_HELP.delete);
+  expect(deleteHelp).not.toBeVisible();
+  await userEvent.click(screen.getByLabelText("delete"));
+  expect(deleteHelp).toBeVisible();
   expect(deleteHelp).toHaveTextContent("노드 간 실행(nsync)은 대상의 같은 이름 항목을 그대로 두고, 한 노드 실행(dsync)은 그 "
     + "이름의 대상 항목이 다른 종류면 이 옵션과 무관하게 지운 뒤 아무것도 만들지 않아 그 이름이 대상에서 사라집니다");
   // contents 는 root 전용 어휘(「실행 신원이 읽을 수 없는」 아님 -- 모든 작업이 root)
   expect(screen.getByText(SYNC_OPTION_HELP.contents)).toHaveTextContent("읽을 수 없는 그런 파일(예: NFS root_squash)");
+  expect(screen.getByText(HELP_SUMMARY.contents)).toBeVisible();
   expect(SYNC_OPTION_HELP.contents).not.toContain("실행 신원");
   expect(screen.getByLabelText("contents")).toBeInTheDocument();
+  // 숨은 기본 옵션은 토큰으로 보인다(바디와 같은 syncOptions() -- 보이는 것 = 보내는 것)
+  const auto = screen.getByText("기본으로 함께 실립니다:").parentElement!;
+  for (const t of ["open_noatime", "batch_files=1000000", "bufsize=4194304"]) expect(within(auto).getByText(t)).toBeVisible();
+  expect(within(auto).queryByText("delete")).toBeNull();
   expect(screen.queryByLabelText("direct")).not.toBeInTheDocument();
   expect(screen.queryByLabelText("quiet")).not.toBeInTheDocument();
   expect(screen.queryByText("고급 옵션")).not.toBeInTheDocument();
@@ -407,8 +418,9 @@ test("목록 밖 관리자: 사용자 흐름 + 안내 한 줄, 직접 경로·�
 
 test("목록 밖 관리자 rm 바디(우선순위 지정 포함) -- scan 은 선택지에 없다(특권 운영자만)", async () => {
   const probe = renderAs(meAdminListed);
-  await screen.findByRole("option", { name: "rm" });
-  expect(within(screen.getByLabelText("연산")).queryByRole("option", { name: "scan" })).toBeNull();
+  await screen.findByRole("radio", { name: "rm" });
+  expect(opNames()).toEqual(["sync", "rm"]);
+  expect(screen.queryByRole("radio", { name: "scan" })).toBeNull();
   probe.unmount();
   for (const op of ["rm"] as const) {
     posted = [];

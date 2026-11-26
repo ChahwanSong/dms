@@ -1,6 +1,6 @@
 import { expect, type Page } from "@playwright/test";
 import { assertLayoutSane, type LayoutOptions } from "./layout";
-import { expectStep, toReview, wizardNext } from "./wizard";
+import { chooseOperation, expectStep, toReview, wizardNext } from "./wizard";
 import { STORAGE_NAME } from "../harness/env";
 
 // E3(03-layout)의 단일 작업 화면 흐름. 단일·배치 흐름을 따로 둔 것은 단일(레인 S)·배치(레인 B) 위저드 작업이 같은 spec 파일을
@@ -18,7 +18,7 @@ async function visit(page: Page, path: string, heading: string): Promise<void> {
 // 검토 dd·"지정 경로" 줄(2026-10-27 d192 에 「실제 경로」에서 개명 -- 괴리 [C2])의 overflow-wrap 이 빠지면 그 칸만
 // 넘친다 -- 문서 L1 엔 안 보일 수 있으므로 아래 assertPathLines·assertReviewCells 가 칸 단위로 잰다.
 async function fillLongScanTarget(page: Page, layout: LayoutOptions): Promise<void> {
-  await page.getByLabel("연산", { exact: true }).selectOption("scan");
+  await chooseOperation(page, "scan");
   await wizardNext(page, "스캔 대상");
   await assertLayoutSane(page, layout);                                     // ② 빈 폼
   // 면제자(하네스 admin)의 대상은 기본이 「PV」라 「직접 경로」로 바꾼다(2026-10-26 -- k8s 신원 모드 전용 화면).

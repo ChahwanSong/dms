@@ -29,7 +29,9 @@ test.describe("E11 — 전체 PV·직접 경로 권한 부여", () => {
     const login = await page2.request.post("/api/auth/login", { data: { username: NEWADM, password: PW } });
     expect(login.status(), await login.text()).toBe(200);
     const scopeBox = page2.getByLabel("권한 기준 사용자", { exact: true });
-    const scanOption = page2.getByLabel("연산", { exact: true }).locator('option[value="scan"]');
+    // 연산은 카드형 라디오 묶음(2026-11-26 단계별 등록 -- 접근 이름 「연산」, 라디오 이름 = 연산 이름). 관리자는 연산이 둘 이상이라
+    // ① 작업 종류에서 시작하므로 아래 안내·권한 기준 사용자 칸도 그대로 ① 에 있다.
+    const scanOption = page2.getByRole("radiogroup", { name: "연산", exact: true }).getByRole("radio", { name: "scan", exact: true });
     await page2.goto("/jobs/new");
     await expect(page2.getByRole("heading", { name: "단일 작업" })).toBeVisible();
     // 목록 밖 관리자: 맵핑 범위 안내 한 줄, 권한 기준 사용자 칸·scan 없음(scan 은 특권 운영자만 -- 서버 me.user_operations)
