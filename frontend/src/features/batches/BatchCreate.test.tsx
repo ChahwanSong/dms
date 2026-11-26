@@ -1261,6 +1261,25 @@ test("rm: 자동 실행을 켜면 빨간 경고 + 필수 동의 체크 — 체�
   expect(captured.body.operation).toBe("rm");
 });
 
+test("rm: 동의 전 막힌 「다음」은 화면 밖 동의 체크로 포커스를 보낸다(빨강 없는 표지 data-wizard-nudge) -- 체크하면 표지가 빠진다", async () => {
+  // 2026-11-27 d49 실증: 경고 상자가 실행 제어 맨 아래라 1440×900 에서도 체크가 화면 밖(top 989 > 900)인데 포커스가 「다음」에 남았다
+  // (Wizard blockedNudge 는 [aria-invalid="true"]·[data-wizard-nudge] 만 찾는다). 바 가림 보정·스크롤은 e2e(layoutBatch ④)가 잰다.
+  renderPage(RM_POLICIES);
+  await fillRm();
+  await toControls();
+  await userEvent.click(screen.getByLabelText("미리보기 후 자동 실행"));
+  const ack = screen.getByLabelText(/되돌릴 수 없다는 것을 이해했습니다/);
+  expect(ack).toHaveAttribute("data-wizard-nudge", "true");
+  expect(ack).not.toHaveAttribute("aria-invalid");                  // 안 적은 것이지 틀린 값이 아니다(이미 빨간 경고 상자 안)
+  expectNextBlocked("자동 실행으로 삭제하려면 경고를 읽고 동의를 체크하세요");
+  await userEvent.click(nextButton());
+  expect(stepHeading()).toHaveTextContent("옵션·실행 제어");
+  expect(ack).toHaveFocus();
+  await userEvent.click(ack);
+  expect(ack).not.toHaveAttribute("data-wizard-nudge");
+  expectNextOpen();
+});
+
 test("rm: 동의는 ④ 를 떠났다 와도 남는다", async () => {
   renderPage(RM_POLICIES);
   await fillRm();

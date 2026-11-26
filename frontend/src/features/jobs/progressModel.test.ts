@@ -6,7 +6,7 @@ import contract from "../../lib/progressContract.json";
 import { ApiError, reasonText } from "../../lib/api";
 import type { JobProgressResponse, ProgressSnapshot, ToolSummary } from "../../lib/types";
 import {
-  BASIS, ENDED_TITLE, NOTE, PHASE_TITLE, STALE_AFTER_S, UNKNOWN_PHASE_TITLE, WAIT_GRACE_S, pctFmt, progressView,
+  BASIS, CAPTION, ENDED_TITLE, NOTE, PHASE_TITLE, STALE_AFTER_S, UNKNOWN_PHASE_TITLE, WAIT_GRACE_S, pctFmt, progressView,
   quietLineText, showsProgress, staleText, type ProgressJobInfo, type ProgressStepInfo, type ProgressView,
 } from "./progressModel";
 import { STATUS_LABEL } from "./stageModel";
@@ -27,7 +27,7 @@ function view(resp: JobProgressResponse | undefined, o: {
   return progressView(resp, o.error ?? null, o.job ?? {}, o.step ?? EXEC, T0 + (o.after ?? 0) * 1000, T0);
 }
 const strings = (v: ProgressView): string[] =>
-  [v.title, v.basis, v.basisHelp, v.fresh, v.note?.text, v.percent !== null ? pctFmt(v.percent) : null, ...v.facts]
+  [v.title, v.basis, v.basisHelp, v.fresh, v.caption, v.note?.text, v.percent !== null ? pctFmt(v.percent) : null, ...v.facts]
     .filter((x): x is string => typeof x === "string");
 const nsyncPlan: ToolSummary = { tool: "nsync", dryrun: true, files: 100105, planned: { copy: 100002, mkdir: 103 },
   planned_bytes: 1482824499 };
@@ -139,7 +139,7 @@ describe("계약 예 스냅숏 전부", () => {
       }
     }
     for (const e of RESP.errors) outs.push(...strings(view(undefined, { error: new ApiError(e.status, e.body.detail, "") })));
-    outs.push(...Object.values(NOTE), staleText("2분"), quietLineText("2분"));
+    outs.push(...Object.values(NOTE), ...Object.values(CAPTION), staleText("2분"), quietLineText("2분"));
     expect(outs.length).toBeGreaterThan(100);
     for (const s of outs) for (const bad of contract.ui_forbidden_substrings) expect(s, s).not.toContain(bad);
   });
@@ -315,10 +315,38 @@ describe("신선도와 안내", () => {
     expect(view(ok({ ...one, batch: { done: 1, count: 1, percent: 100 } })).note).toBeNull();
   });
 
-  test("nsync 배치 여럿 -- 마지막 줄 뒤 30초가 넘으면 「배치가 끝날 때마다 갱신됩니다」", () => {
-    const snap = { ...SNAP.nsync_batches_exec, since_line_s: 20 };
-    expect(view(ok(snap, 5)).note).toBeNull();
-    expect(view(ok(snap, 11)).note).toEqual({ tone: "info", text: NOTE.nsyncPerBatch });
+  test("nsync 배치 여럿 -- 「nsync 는 배치가 끝날 때마다 갱신됩니다」는 나이와 무관하게 늘 캡션(안내 note 가 아니다)", () => {
+    // 2026-11-27 d49 실증: 마지막 줄 뒤 30초가 넘을 때만 안내로 뜨던 때는 배치 3.5~8.6초(N1)에선 한 번도, 배치 약 30초(N1b·N1c)에선
+    // 1초 안에 지워져 사실상 안 보였다.
+    expect(CAPTION.nsyncPerBatch).toBe("nsync 는 배치가 끝날 때마다 갱신됩니다");
+    for (const [since, age] of [[0, 0], [0.4, 0], [20, 5], [20, 11], [60, 25]]) {
+      const v = view(ok({ ...SNAP.nsync_batches_exec, since_line_s: since }, age));
+      expect(v.caption, `since ${since} age ${age}`).toBe(CAPTION.nsyncPerBatch);
+      expect(v.note, `since ${since} age ${age}`).toBeNull();
+    }
+    // 미리보기(배치 계획)도 같다
+    expect(view(ok(SNAP.nsync_batches_dry), { step: PREV }).caption).toBe(CAPTION.nsyncPerBatch);
+    // 배치 수를 아는 순간(스캔 끝 Batch mode 줄)부터 -- 스캔 단계·배치 진행 켜짐(done 0) 직후에도
+    expect(view(ok({ v: 1, tool: "nsync", phase: "scan", batch: { count: 6 } })).caption).toBe(CAPTION.nsyncPerBatch);
+    expect(view(ok({ v: 1, tool: "nsync", phase: "batches", batch: { done: 0, count: 2 } })).caption).toBe(CAPTION.nsyncPerBatch);
+  });
+
+  test("nsync 캡션이 없는 경우: 배치 1개(따로 안내)·배치 수 모름·끝 스냅숏·dsync·스냅숏 없음", () => {
+    const single = view(ok({ v: 1, tool: "nsync", phase: "batches", since_line_s: 1, batch: { done: 0, count: 1 } }));
+    expect(single.caption).toBeNull();
+    expect(single.note).toEqual({ tone: "info", text: NOTE.nsyncSingleBatch });
+    expect(view(ok(SNAP.nsync_scan)).caption).toBeNull();                                      // 배치 수를 아직 모른다
+    expect(view(ok({ ...SNAP.nsync_batches_exec, ended: true })).caption).toBeNull();          // 더 갱신되지 않는다
+    expect(view(ok({ ...SNAP.nsync_batches_exec, batch: { done: 1, count: "6" } } as unknown as ProgressSnapshot)).caption).toBeNull();
+    for (const snap of [SNAP.dsync_copy_overall, SNAP.dsync_create]) expect(view(ok(snap)).caption).toBeNull();
+    expect(view(RESP.unavailable, { after: 600 }).caption).toBeNull();
+    expect(view(undefined).caption).toBeNull();
+  });
+
+  test("nsync 배치 여럿이 90초 넘게 낡으면 정체 경고(attn 안내)와 갱신 주기 캡션이 따로 선다 -- 섞이지 않는다", () => {
+    const v = view(ok({ ...SNAP.nsync_batches_exec, since_line_s: 50 }, STALE_AFTER_S + 5));
+    expect(v.note).toEqual({ tone: "attn", text: staleText("1분 35초") });
+    expect(v.caption).toBe(CAPTION.nsyncPerBatch);
   });
 
   test("dsync 진행 줄 없는 단계 안내, 그 밖은 마지막 줄 뒤 60초가 넘으면 단정하지 않는 안내", () => {

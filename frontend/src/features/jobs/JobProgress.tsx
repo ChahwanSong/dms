@@ -55,6 +55,11 @@ export function JobProgress({ job, step, live = true }: { job: DataJob; step: St
           ))}
         </p>
       )}
+      {v.caption !== null && (
+        // 늘 붙는 캡션(nsync 배치 여럿의 갱신 주기) -- 아이콘·「안내」 표지 없이 작은 회색 한 줄(ink/70 -- AA, muted 는 3.5:1). 아래 안내 줄(정체 경고 attn 포함)과
+        // 모양이 달라 「멈췄다」는 경고로 읽히지 않는다.
+        <p data-progress-caption className="mt-1 text-[11px] leading-4 text-ink/70 break-keep">{v.caption}</p>
+      )}
       {v.note !== null && (
         <p className={`mt-1 flex items-start gap-1.5 ${v.note.tone === "attn" ? "text-attn" : "text-ink/70"}`}>
           {v.note.tone === "attn"

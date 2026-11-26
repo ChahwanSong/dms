@@ -48,6 +48,32 @@ async function assertSheetCoversBar(page: Page, layout: LayoutOptions): Promise<
   await expect(opener).toBeFocused();
 }
 
+// ④ rm 자동 실행을 켜고 동의 전에 막힌 「다음」을 누르면 동의 체크로 포커스·스크롤하고(data-wizard-nudge -- Wizard blockedNudge), 그
+// 칸이 하단 고정 바에 가리지 않는다(2026-11-27 d49 실증: 1440×900 에서 체크 top 989 > 창 900 인데 포커스가 「다음」에 남았다). 맨
+// 위로 올린 뒤 누른다 -- 체크가 처음부터 바 위에 보이면 스크롤을 잰 것이 아니므로 그 전제부터 단언한다. 「다음」은 aria-disabled 라
+// Playwright 행동성 검사(enabled)를 건너뛰는 force 클릭이다(같은 마우스 이벤트 -- 막힌 버튼을 누르는 사람의 동작 그대로).
+async function assertBlockedNextFocusesAck(page: Page): Promise<void> {
+  const ack = page.getByLabel(/되돌릴 수 없다는 것을 이해했습니다/);
+  const next = page.getByRole("button", { name: "다음", exact: true });
+  await expect(next).toHaveAttribute("aria-disabled", "true");
+  await page.evaluate(() => window.scrollTo({ top: 0, behavior: "instant" }));
+  const pos = () => ack.evaluate((el) => {
+    const bar = document.querySelector("[data-wizard-bar]") as HTMLElement;
+    const r = el.getBoundingClientRect();
+    return { top: r.top, bottom: r.bottom, barTop: bar.getBoundingClientRect().top };
+  });
+  const before = await pos();
+  expect(before.bottom, `동의 체크가 처음부터 바 위에 보인다(체크 bottom ${before.bottom} · 바 top ${before.barTop}) -- 스크롤을 재지 못한다`)
+    .toBeGreaterThan(before.barTop);
+  await next.click({ force: true });
+  await expectStep(page, "옵션·실행 제어");
+  await expect(ack, "막힌 「다음」이 동의 체크로 포커스를 보내지 않았다(data-wizard-nudge?)").toBeFocused();
+  await expect.poll(async () => {
+    const p = await pos();
+    return p.top >= 0 && p.bottom <= p.barTop + 0.5 ? "ok" : `체크 top ${p.top} · bottom ${p.bottom} · 바 top ${p.barTop}`;
+  }, { message: "포커스한 동의 체크가 화면 밖이거나 하단 고정 바에 가렸다", timeout: 5000 }).toBe("ok");
+}
+
 /**
  * 제출 화면(배치 생성): 표가 없으므로 하한 0. 폭(width)은 spec 이 이미 맞춘 뷰포트 폭이고(1280·375), md(768) 아래면 L3 를 빼고 입력
  * 방식 세그먼트 한 줄 검사를 더한다. 1280 흐름은 끝에 768×900 으로 줄여 ⑤ 와 ① 을 한 번 더 잰다(스테퍼 다섯 단계·바가 본문 약
@@ -76,6 +102,7 @@ export async function batchLayoutFlow(page: Page, width: number): Promise<void> 
   await page.getByLabel("미리보기 후 자동 실행", { exact: true }).check();
   await expect(page.getByRole("note", { name: "자동 삭제 경고", exact: true })).toBeVisible();
   await assertLayoutSane(page, layout);                                       // ④
+  await assertBlockedNextFocusesAck(page);
   await page.getByLabel(/되돌릴 수 없다는 것을 이해했습니다/).check();
   await wizardNext(page, "이름·검토");
   await expect(page.getByRole("note", { name: "삭제 범위", exact: true })).toBeVisible();

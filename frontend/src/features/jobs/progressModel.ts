@@ -32,6 +32,9 @@ export interface ProgressView {
   facts: string[];
   /** 「갱신 12초 전」(스냅숏이 있고 서버가 잰 나이 age_seconds 를 알 때만). */
   fresh: string | null;
+  /** 늘 붙는 작은 회색 캡션(아이콘 없음) -- 지금은 nsync 배치 여럿의 갱신 주기 하나(CAPTION). 상태 안내(note)와 따로 둬 정체 경고와
+   *  같은 줄·같은 모양이 되지 않게 한다. */
+  caption: string | null;
   note: ProgressNote | null;
 }
 
@@ -61,7 +64,6 @@ export const UNKNOWN_PHASE_TITLE = "진행 단계 알 수 없음";
 export const STALE_AFTER_S = 90;
 // 화면이 아직 아무 스냅숏도 못 받은 동안 「기다리는 중」이라고만 말하는 시간(실행 시작 기준).
 export const WAIT_GRACE_S = 60;
-const NSYNC_BATCH_HINT_AFTER_S = 30;
 const DSYNC_QUIET_LINE_AFTER_S = 60;
 
 // dsync 단계 % 를 막대로 쓰는 단계(도구가 % 를 찍는 진행 줄이 있는 단계).
@@ -77,8 +79,13 @@ export const NOTE = {
   quiet: "quiet 옵션으로 실행 중이라 도구가 진행 정보를 내지 않습니다",
   workers: "워커 파드가 준비되기를 기다리는 중입니다",
   nsyncSingleBatch: "nsync 는 배치가 끝날 때만 진행을 알립니다 — 이 작업은 배치가 1개라 끝날 때 한 번 표시됩니다",
-  nsyncPerBatch: "배치가 끝날 때마다 갱신됩니다",
   dsyncSilentPhase: "이 단계는 도구가 진행 수치를 내지 않습니다",
+} as const;
+// 늘 붙는 캡션(ProgressView.caption). nsync 배치가 2개 이상이면 실행·미리보기 내내 보인다(2026-11-27 d49 실증 후속): 예전엔 마지막
+// 진행 줄 뒤 30초가 넘을 때만 안내(note)로 떠, 배치가 30초보다 짧으면 한 번도 안 보였고 길어도 다음 배치 줄에 1초 안에 지워졌다.
+// 배치 1개는 NOTE.nsyncSingleBatch 가 따로 말한다(끝날 때 한 번).
+export const CAPTION = {
+  nsyncPerBatch: "nsync 는 배치가 끝날 때마다 갱신됩니다",
 } as const;
 export const staleText = (d: string) => `진행 기록이 ${d} 동안 갱신되지 않았습니다`;
 export const quietLineText = (d: string) =>
@@ -139,7 +146,9 @@ function errorCode(error: unknown): string | null {
   return error instanceof Error ? error.message : String(error);
 }
 
-const EMPTY_VIEW: ProgressView = { title: null, percent: null, basis: null, basisHelp: null, facts: [], fresh: null, note: null };
+const EMPTY_VIEW: ProgressView = {
+  title: null, percent: null, basis: null, basisHelp: null, facts: [], fresh: null, caption: null, note: null,
+};
 
 /** 스냅숏이 없을 때(응답 전·available:false) -- 단정하지 않는 문구(늘 info). */
 function waitingView(step: ProgressStepInfo, nowMs: number, answered: boolean): ProgressView {
@@ -297,7 +306,7 @@ function nsyncFacts(snap: ProgressSnapshot, phase: string, dryrun: boolean, job:
 }
 
 /** ageNow = 스냅숏 나이(초). null = 모름(계약 밖 응답 -- available:true 면 늘 age_seconds 가 있다) -- 나이에 기대는 안내(정체 경고·
- *  배치마다 갱신·조용한 줄)는 건너뛴다(0 으로 치면 「방금 갱신」으로 읽혀 정체 경고가 늦거나 안 뜬다, null≠0). */
+ *  조용한 줄)는 건너뛴다(0 으로 치면 「방금 갱신」으로 읽혀 정체 경고가 늦거나 안 뜬다, null≠0). */
 function noteOf(tool: string | null, snap: ProgressSnapshot, phase: string, ageNow: number | null): ProgressNote | null {
   if (snap.quiet === true) return { tone: "info", text: NOTE.quiet };
   // 워커 준비(최대 300초 + hostfile 대기) 동안은 러너 tick 이 없어 심장박동이 없다 -- 정체 경고를 끈다.
@@ -309,13 +318,11 @@ function noteOf(tool: string | null, snap: ProgressSnapshot, phase: string, ageN
   }
   const sinceLine = num(snap.since_line_s);
   if (tool === "nsync" && phase === "batches") {
+    // 배치 여럿의 갱신 주기는 안내가 아니라 늘 붙는 캡션이다(captionOf).
     const b = obj(snap.batch);
     const count = b ? num(b.count) : null;
     const done = b ? num(b.done) : null;
     if (count === 1 && done === 0) return { tone: "info", text: NOTE.nsyncSingleBatch };
-    if (count !== null && count > 1 && sinceLine !== null && ageNow !== null && sinceLine + ageNow > NSYNC_BATCH_HINT_AFTER_S) {
-      return { tone: "info", text: NOTE.nsyncPerBatch };
-    }
     return null;
   }
   if (tool === "dsync") {
@@ -326,6 +333,15 @@ function noteOf(tool: string | null, snap: ProgressSnapshot, phase: string, ageN
     }
   }
   return null;
+}
+
+/** 늘 붙는 캡션: nsync 이고 배치가 2개 이상(배치 수는 스캔 끝의 Batch mode 줄부터 안다 -- 스캔 단계에서도)이면 갱신 주기. 끝
+ *  스냅숏(ended)은 더 갱신되지 않으므로 뺀다. 나이와 무관하다(배치가 짧든 길든 늘 같은 말). */
+function captionOf(tool: string | null, snap: ProgressSnapshot): string | null {
+  if (tool !== "nsync" || snap.ended === true) return null;
+  const b = obj(snap.batch);
+  const count = b ? num(b.count) : null;
+  return count !== null && count >= 2 ? CAPTION.nsyncPerBatch : null;
 }
 
 /**
@@ -361,6 +377,7 @@ export function progressView(resp: JobProgressResponse | undefined, error: unkno
     basisHelp: bar?.help ?? null,
     facts,
     fresh: fresh !== null ? `갱신 ${fresh} 전` : null,
+    caption: captionOf(tool, snap),
     note: errNote ?? noteOf(tool, snap, phase, ageNow),
   };
 }

@@ -7,7 +7,7 @@ import contract from "../../lib/progressContract.json";
 import { reasonText } from "../../lib/api";
 import type { DataJob, JobProgressResponse, ProgressSnapshot } from "../../lib/types";
 import { JobProgress } from "./JobProgress";
-import { BASIS, NOTE } from "./progressModel";
+import { BASIS, CAPTION, NOTE } from "./progressModel";
 import type { StepModel } from "./stageModel";
 
 // 응답·스냅숏은 계약 파일(lib/progressContract.json examples)에서 그대로 -- 손으로 쓴 모의 모양 금지(설계 §11.2).
@@ -118,6 +118,27 @@ test("워커 대기·quiet·nsync 배치 1개 안내", async () => {
   // 배치 1개는 끝날 때까지 0% 막대가 멈춘 것처럼 보인다 -- 막대 없이 수치(0 은 정상값이라 그대로)·안내만
   expect(screen.queryByRole("progressbar")).toBeNull();
   expect(screen.getByText("끝난 배치 0 / 1")).toBeInTheDocument();
+});
+
+test("nsync 배치 여럿: 「nsync 는 배치가 끝날 때마다 갱신됩니다」가 늘 작은 회색 캡션(아이콘·「안내」 표지 없음) -- 정체 경고와 따로 선다", async () => {
+  reply({ phase: "execution", available: true, age_seconds: 0, progress: SNAP.nsync_batches_exec });
+  const v1 = renderProgress({ tool: "nsync" });
+  const g = await screen.findByRole("group", { name: "실행 진행" });
+  const cap = await within(g).findByText(CAPTION.nsyncPerBatch);
+  expect(cap).toHaveAttribute("data-progress-caption");
+  expect(cap).toHaveClass("text-ink/70");
+  expect(cap.querySelector("svg")).toBeNull();
+  expect(within(g).queryByText("안내")).toBeNull();                 // 상태 안내가 아니다(note 없음)
+  v1.unmount();
+  // 90초 넘게 낡으면 정체 경고(주의)가 따로 한 줄, 캡션은 그대로 회색
+  reply({ phase: "execution", available: true, age_seconds: 95, progress: SNAP.nsync_batches_exec });
+  renderProgress({ tool: "nsync" });
+  const g2 = await screen.findByRole("group", { name: "실행 진행" });
+  const warn = await within(g2).findByText(/동안 갱신되지 않았습니다$/);
+  const cap2 = within(g2).getByText(CAPTION.nsyncPerBatch);
+  expect(warn.closest("p")).toHaveClass("text-attn");
+  expect(cap2).not.toHaveClass("text-attn");
+  expect(warn.closest("p")).not.toBe(cap2);
 });
 
 test("계약 예 스냅숏 전부가 「남은」·「left」 없이 그려진다", async () => {

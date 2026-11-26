@@ -920,6 +920,32 @@ test("진행률: 503 이면 사유 문구", async () => {
   expect(await within(g).findByText(reasonText("artifact_base_unavailable"))).toBeInTheDocument();
 });
 
+// 2026-11-27 d49 실증 C1: 취소는 vcjob 을 지워 Cancelled 전이가 러너의 유예 쓰기(stderr.log 꼬리·summary.json)보다 먼저 오거나 같은
+// 순간이고 NFS base 는 다른 노드에서 새 파일이 늦게 보인다 -- 전이 때 한 번 읽은 목록(stderr.log 78 B·summary 없음)이 새로고침 전까지
+// 남았다. 종단 전이 뒤엔 useArtifacts 가 몇 초 뒤 다시 읽는다(JobStages 가 model.terminal 을 넘긴다).
+test("취소 직후: Cancelled 전이 뒤 러너가 늦게 쓴 summary.json·자란 stderr.log 칩이 몇 초 뒤 새로고침 없이 나타난다", async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  let written = false;
+  const early = { entries: [{ phase: "execution", name: "stderr.log", size: 78, modified_at: 1 }], truncated: false };
+  const late = { entries: [{ phase: "execution", name: "stderr.log", size: 672, modified_at: 2 },
+                           { phase: "execution", name: "summary.json", size: 160, modified_at: 2 }], truncated: false };
+  server.use(
+    http.get("/api/user/jobs/j1/artifacts", () => HttpResponse.json(written ? late : early)),
+    http.get("/api/user/jobs/:jid/progress", () => HttpResponse.json(PRESP.available)),
+    http.get("/api/user/jobs/j1/logs", () => HttpResponse.json({ phase: "execution", ref: "vcjob/e", source: "archived", entries: [] })),
+  );
+  const view = renderStages(RUNNING_DSYNC);
+  await screen.findByRole("button", { name: "execution/stderr.log" });
+  view.rerenderJob({ ...RUNNING_DSYNC, state: "Cancelled",
+    transitions: [...EXEC_TR, { from_state: "Executing", to_state: "Cancelled", at: "2026-11-26T08:30:00Z" }] as never });
+  await act(async () => { await vi.advanceTimersByTimeAsync(200); });
+  expect(screen.queryByRole("button", { name: "execution/summary.json" })).toBeNull();   // 전이 때 읽은 목록엔 아직 없다
+  written = true;                                                                          // 러너의 유예 쓰기가 이제 보인다
+  await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+  expect(await screen.findByRole("button", { name: "execution/summary.json" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "execution/stderr.log" })).toHaveTextContent("672 B");
+});
+
 test("결과 카드: 출력이 넘친 요약(output_truncated)은 모르는 수치가 있다고 한 줄로 말한다", async () => {
   progressCounter();
   renderStages({ ...RUNNING_DSYNC, state: "Succeeded", result_summary: { detail_version: 2, returncode: 0, files: null,

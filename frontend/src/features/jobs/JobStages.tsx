@@ -423,9 +423,10 @@ export function JobStages({ job, events, jobCount = 1, refIso, batchChild = fals
 }) {
   // 이벤트는 단계 행 주석(annotationsFor)이 읽는다.
   const model = useMemo(() => deriveJobStages(job), [job]);
-  // 러너는 phase 가 끝날 때 파일을 쓴다 -- 상태나 ref 가 바뀌면 목록을 다시 읽는다(폴링 없음).
+  // 상태나 ref 가 바뀌면 목록을 다시 읽는다(폴링 없음 -- 실행 중 stdout.log 가 자라도 목록 크기는 다음 전이까지 그대로, 진행은 진행 칸
+  // 몫). 종단 전이 뒤엔 몇 초 뒤 몇 번 더 읽는다(취소의 유예 쓰기·NFS 가시 지연 -- useArtifacts 머리 주석).
   const refreshKey = `${job.state}|${Object.keys(model.refs).sort().join(",")}`;
-  const artifacts = useArtifacts(job.job_id, refreshKey);
+  const artifacts = useArtifacts(job.job_id, refreshKey, model.terminal);
   const nav = useStageNav(job.job_id);
   const outputs = useMemo(() => outputsByStep(model, artifacts.data?.entries), [model, artifacts.data]);
   const notes = useMemo(() => annotationsFor(events, job, jobCount, model.flow), [events, job, jobCount, model.flow]);

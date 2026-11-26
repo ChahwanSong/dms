@@ -957,8 +957,11 @@ export function BatchCreate() {
             항목별 지울 대상을 검토하는 「배치 확인」 단계가 없습니다. 항목을 추가하거나 다시 실행해도 그 미리보기가 끝나는
             즉시 삭제됩니다. 결과를 보고 지우려면 자동 실행을 끄세요.
           </p>
+          {/* 동의 전이면 data-wizard-nudge(빨강 없는 「아직 비어 있는 필수 칸」 표지 -- Wizard blockedNudge): 막힌 「다음」·Enter 가 이
+              체크로 포커스·스크롤한다. 경고 상자가 실행 제어 맨 아래라 1440×900 에서도 화면 밖이었다(2026-11-27 d49 실증 — 체크 top
+              989 > 창 900, 포커스가 「다음」에 남았다). 빨갛게 칠하지 않는 이유: 이미 빨간 경고 상자 안이고, 안 적은 것이지 틀린 값이 아니다. */}
           <label className="mt-2 flex items-start gap-2 font-medium">
-            <input type="checkbox" className="mt-0.5" aria-required="true"
+            <input type="checkbox" className="mt-0.5" aria-required="true" data-wizard-nudge={!f.autoConfirmAck || undefined}
                    checked={f.autoConfirmAck} onChange={on("autoConfirmAck")} />
             <span>확인 없이 root 로 삭제되며 되돌릴 수 없다는 것을 이해했습니다(필수)</span>
           </label>
