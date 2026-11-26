@@ -1,12 +1,15 @@
 import json
+import os
+import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
+from .. import job_progress
 from ..artifact_base import resolve_artifact_base
 from ..execution import ExecutionError
 from .artifacts import (ArtifactError, MAX_BYTES, PHASES, job_owner_uid,
-                        list_artifacts, open_artifact_stream, read_artifact,
-                        strip_scheme, stream_artifact_fd, tail_lines)
+                        list_artifacts, open_artifact_fd, open_artifact_stream, read_artifact,
+                        read_capped, strip_scheme, stream_artifact_fd, tail_lines)
 from .auth import Identity, require_user
 from .base_probe import BaseProbe
 from .routes_jobs import _owned_job
@@ -109,6 +112,56 @@ def get_job_artifact(job_id: str, phase: str, name: str, request: Request,
                 raise HTTPException(status_code=503, detail="artifact_base_unavailable")
             raise HTTPException(status_code=404, detail="artifact_not_found")
         raise HTTPException(status_code=422, detail=e.reason_code)
+
+
+NO_STORE = {"Cache-Control": "no-store"}
+
+
+def _no_store(body: dict) -> JSONResponse:
+    return JSONResponse(body, headers=NO_STORE)
+
+
+@router.get("/api/user/jobs/{job_id}/progress")
+def get_job_progress(job_id: str, request: Request, phase: str = Query(default="execution"),
+                     identity: Identity = Depends(require_user)):
+    """sync 진행률(2026-11-26 설계 §4) -- 러너가 <phase>/progress.json 에 덮어쓰는 스냅숏 하나를 걸러서 돌려준다. 포탈은 요청
+    상세의 실행·미리보기 행이 「진행 중」일 때만 부른다(잡 목록·배치 화면은 부르지 않는다). 진행 값은 표시 전용이다.
+
+    열기 사슬은 아티팩트 라우트와 같다(_owned_job → _reject_expired → _owner_uid → _probe → open_artifact_fd -- artifact_files
+    모듈 docstring). 파일 없음·사슬 실패(심링크·nlink>1·남의 소유·FIFO)·상한 초과·모양 틀림은 모두 200 {available:false} 한
+    몸통이다 -- 폴링 경로에서 「아직 없음」은 정상값이고, 갈래를 응답에 드러내면 존재 오라클이 된다. 그 실패 경로에서만 base 수준
+    판정으로 503 artifact_base_unavailable(불변식 16 -- 파일 errno 로 가르지 않는다). 모든 응답(200·422·404·410·503)에
+    Cache-Control: no-store -- 폴링 경로라 중간 캐시가 값이나 오류를 붙잡지 않게. 새 사유 코드는 없다. 신선도(age_seconds)는
+    서버가 잰다(브라우저 시계 무관, 미래 mtime 은 0)."""
+    try:
+        job = _owned_job(request, job_id, identity)              # 남의 잡·없는 잡 = 404 job_not_found(기존)
+        if phase not in job_progress.PHASES:                     # ("preview", "execution")
+            raise HTTPException(status_code=422, detail="invalid_phase")
+        _reject_expired(job)                                     # 410 artifact_expired (소유 확인 뒤에만)
+        owner_uid = _owner_uid(job)                              # None → 404 artifact_not_found (fail-closed)
+        base, probe = _probe(request)                            # 멈춘 마운트 → FS 열기 전 503(hung 단락)
+        try:
+            fd, st = open_artifact_fd(base, job_id, phase, job_progress.FILE_NAME, owner_uid=owner_uid)
+        except ArtifactError:
+            if probe.down:                                       # 실패 경로에서만 base 수준 판정(불변식 16)
+                raise HTTPException(status_code=503, detail="artifact_base_unavailable")
+            return _no_store({"phase": phase, "available": False})
+    except HTTPException as e:
+        # 사슬의 기존 헬퍼(_owned_job·_reject_expired·_owner_uid·_probe)는 headers 없이 던진다 -- 이 라우트의 모든 오류
+        # 응답에도 no-store 를 붙인다(새 HTTPException 을 만들지 않는다 -- 사유 코드 그물과 무관).
+        e.headers = {**(e.headers or {}), **NO_STORE}
+        raise
+    try:
+        raw = None if st.st_size > job_progress.READ_MAX_BYTES else read_capped(fd, job_progress.READ_MAX_BYTES + 1)
+    except OSError:
+        raw = None
+    finally:
+        os.close(fd)
+    snap = job_progress.sanitize(raw)                            # None = 모양이 틀림(상한 초과·비 UTF-8·JSON 깨짐·버전 다름)
+    if snap is None:
+        return _no_store({"phase": phase, "available": False})
+    age = max(0, int(time.time() - st.st_mtime))
+    return _no_store({"phase": phase, "available": True, "age_seconds": age, "progress": snap})
 
 
 @router.get("/api/user/jobs/{job_id}/artifacts/{phase}/{name}/download")

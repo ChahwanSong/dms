@@ -33,10 +33,15 @@ tests/test_wiring_phase3c.py 의 고정 테스트가 지킨다(배선은 wiring.
   (링커 커널의 may_linkat 에서 검사 -- 배포 전제, deploy/README).
 - 소유자: 65532 시절 EACCES 가 조용히 해 주던 세 번째 장벽의 대체. rename(2) 으로
   들여온 남의 정규 파일(nlink=1, 봉쇄 통과)은 소유자가 다르다. 0 을 함께 허용하는
-  이유는 러너가 chown **뒤에** root 로 stdout.log/stderr.log/summary.json 을 새로
-  쓰기 때문 -- 러너가 그 셋을 요청자로 chown 하면 정확히 == 요청자로 좁힐 수 있다
-  (docs/BACKLOG.md). st_uid == 0 만 허용하는 게이트는 쓰지 않는다: 요청자가 미리
+  이유는 러너가 chown **뒤에** root 로 stdout.log/stderr.log/summary.json(2026-11-26
+  부터 sync 는 progress.json 도)을 새로 쓰기 때문 -- 러너가 그것들을 요청자로 chown 하면
+  정확히 == 요청자로 좁힐 수 있다(docs/BACKLOG.md). stdout.log·stderr.log·progress.json
+  은 러너 쓰기 스레드가 dirfd + O_CREAT|O_EXCL|O_NOFOLLOW 새 inode(0644, progress.json 은
+  임시 파일 rename -- dms_job_runner.stream)로, summary.json 은 아직 write_text 로 쓴다.
+  st_uid == 0 만 허용하는 게이트는 쓰지 않는다: 요청자가 미리
   만들어 둔 정규 파일을 root 의 open("w") 가 재사용하면 요청자 소유가 된다(정상).
+  progress.json 이 chown -R 전에 쓰였으면 그 inode 는 요청자 소유가 될 수 있다(허용 --
+  dms-k8s 는 모든 잡이 root 라 사실상 0).
 - 실패는 전부 같은 ArtifactError("artifact_not_found") -- errno·경로가 새면 그
   자체가 존재 오라클이다.
 """
