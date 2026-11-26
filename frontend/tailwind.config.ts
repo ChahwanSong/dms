@@ -101,6 +101,13 @@ export default {
         // 측면 시트(Dialog side="right", 2026-10-29)가 열릴 때 오른쪽에서 들어온다 -- 닫을 때는 움직임 없음(Radix Presence 가
         // 바로 내린다). motion-safe 에만 붙인다.
         "sheet-in": { from: { transform: "translateX(100%)" }, to: { transform: "translateX(0)" } },
+        // 제출 위저드 하단 바의 이유 줄(2026-11-26 단계별 등록): 막힌 「다음」을 누르거나 입력 칸에서 Enter 를 누르면 짧게 흔든다
+        // (components/form/Wizard blockedNudge). motion-safe 에만 붙인다 -- 움직임 줄이기면 굵은 글자만 남는다. 폭 ±4px 라 바 안에서
+        // 끝나고 문서 가로 넘침(e2e L1)을 만들지 않는다. 단계 카드 등장 애니메이션은 두지 않는다(옆으로 미는 등장은 L1 을 흔든다).
+        nudge: {
+          "0%, 100%": { transform: "translateX(0)" }, "25%": { transform: "translateX(-4px)" },
+          "50%": { transform: "translateX(4px)" }, "75%": { transform: "translateX(-2px)" },
+        },
       },
       animation: {
         "flow-x": "flow-x 7s linear infinite",
@@ -115,6 +122,7 @@ export default {
         "dash-down": "dash-down 1.2s linear infinite",
         "dash-up": "dash-up 1.2s linear infinite",
         "sheet-in": "sheet-in 150ms ease-out",
+        nudge: "nudge 380ms ease-in-out",
       },
     },
   },

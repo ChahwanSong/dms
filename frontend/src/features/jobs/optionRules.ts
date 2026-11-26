@@ -126,6 +126,22 @@ export const SYNC_OPTION_HELP = {
     + "(dsync)은 양쪽에 있고 크기가 같은 파일을 바이트 단위로, 노드 간 실행(nsync)은 양쪽 모든 파일의 SHA-256 을 비교하므로 "
     + "읽을 수 없는 그런 파일(예: NFS root_squash)이 하나라도 있으면 미리보기가 실패합니다.",
 } as const;
+// 단계별 등록(2026-11-26)의 토글 카드 요약 한 줄 -- 전문은 바로 위 SYNC_OPTION_HELP(.delete·.contents)이고 요약은 그 **첫 문장
+// 그대로**다(전문 앞부분과 다르면 wizardParts.test 가 빨갛다). 전문은 「자세히」 또는 토글을 켜면 펼쳐진다(components/form/wizardParts
+// MoreText·OptionToggle). 요약을 바꾸려면 전문의 첫 문장을 같이 바꾼다 -- 둘이 따로 낡지 않게.
+const SUMMARY_DELETE = "원본에 없는 항목을 대상에서 지웁니다(미러 동기화).";
+const SUMMARY_CONTENTS = "크기·수정시각 대신 파일 내용으로 비교합니다(더 느리지만 정확).";
+// delete 와 무관한 dsync 삭제(단계별 등록 2026-11-26 -- 옵션 단계에 늘 보이는 한 줄 + 검토의 목적지 조건 카드). 근거 둘:
+//   (1) 앞부분은 SYNC_OPTION_HELP.delete 의 절(「한 노드 실행(dsync)은 그 이름의 대상 항목이 다른 종류면 이 옵션과 무관하게 지운 뒤 …
+//       비어 있지 않은 디렉토리는 이 옵션을 켜야 지워지고, 끄면 실패로 남습니다」)을 다시 쓴 것이다 -- 범위는 원본의 FIFO·소켓·장치와
+//       이름이 같은 경우뿐이고, 비어 있지 않은 디렉토리는 delete 없이는 실패다.
+//   (2) 꼬리 「dsync 미리보기에는 나오지 않습니다」는 위 SYNC_OPTION_HELP 주석의 「dsync 미리보기(dry-run)는 지울 목록을 채우지 않아
+//       이 경우를 미리 말할 수 없다」의 사용자 문장이다. nsync 는 이 항목을 지우지 않으니(비교 단계에서 특수 파일을 뺀다) 「dsync
+//       미리보기」로 좁혔다.
+// delete 토글을 접어도(요약만 보여도) 이 사실이 사라지지 않게 따로 둔다 -- delete 를 꺼 두면 「아무것도 안 지운다」로 읽히기 쉽다.
+export const SYNC_DSYNC_SPECIAL_FILE_NOTE =
+  "delete 를 꺼도 한 노드 실행(dsync)은 원본의 FIFO·소켓·장치 파일과 이름이 같은 대상 항목이 다른 종류면 지웁니다(비어 있지 않은 "
+  + "디렉토리는 실패로 남습니다) — dsync 미리보기에는 나오지 않습니다.";
 // open_noatime·direct 안내(SubmitJob·BatchCreate·배치 실행 설정 공용, dms-ssc d190·d192 이식). dms-k8s 는 모든 작업이 root 라
 // O_NOATIME 의 EPERM(실행 신원 소유가 아닌 파일) 제약이 없어 단건·배치 모두 기본 켬이다(사용자 결정 2026-08-22 -- 소스 atime 오염
 // 방지). nsync 의 --open-noatime 은 포크 db1e33c(잡 이미지 7a3189c)부터 실제로 동작한다 -- 그 전 ae781bd 의 nsync 는 빌드에
@@ -145,6 +161,9 @@ export const DIRECT_HELP =
   "O_DIRECT(페이지 캐시 우회)로 읽고 씁니다 — 두 스토리지를 함께 마운트한 노드에서 dsync 로 실행될 때만 적용되고, 공존 노드가 없어 "
   + "nsync 로 실행되면 무시됩니다. 켜면 bufsize 는 4 KiB~4 MiB 의 2의 거듭제곱(4096·8192·…·4194304)이어야 합니다(dsync 는 4 MiB "
   + "단위로 나눠 읽어 그 약수가 아니면 큰 파일에서 중단됩니다).";
+// 요약 — 전문은 바로 위 DIRECT_HELP. 핵심 사실 둘(nsync 에선 무시·켜면 bufsize 조건)을 요약에 담는다(d192 「설명은 칸 옆에」 결정:
+// 접힌 채로도 무엇이 걸리는지 보인다).
+const SUMMARY_DIRECT = "O_DIRECT(페이지 캐시 우회)로 읽고 씁니다 — dsync 로 실행될 때만 적용되고 켜면 bufsize 조건이 붙습니다.";
 // bufsize 칸 설명(단건·배치 생성 공용). 프리필 계약(2026-09-17)에 direct 조건을 덧붙인다.
 export const BUFSIZE_HELP =
   "미리 채운 4194304 = 4 MiB(서버 기본). 비워도 같은 값이 적용됩니다. direct 를 켜면 4096·8192·…·4194304(4 KiB~4 MiB 의 "
@@ -161,6 +180,8 @@ export const QUIET_HELP = {
     + "실패하면 원인이 일반 사유(「실행에 실패했습니다」)로만 보입니다. 미리보기(dry-run)에는 적용하지 않습니다(지울 대상 수를 "
     + "세는 줄이 사라지므로).",
 } as const;
+// 요약 — 전문은 바로 위 QUIET_HELP(.sync·.rm). 「실패 원인까지 지운다」가 핵심이라 요약에 남긴다(괴리 [9]·[13]·[18]·[29]).
+const SUMMARY_QUIET = "도구 출력을 모두 끕니다 — 실패하면 원인이 일반 사유로만 보입니다.";
 // nsync 실패 한도 안내(d192, 포탈 괴리 [21]): 포크 nsync 는 --max-errors 기본 65,000(NSYNC_DEFAULT_MAX_ERRORS)에 닿으면 배치
 // 사이에서 멈추고(배치 안에서는 목적지 rank 마다 남은 몫에서) 남은 액션을 시도하지 않는다 -- DMS 는 이 값을 넘기지도 바꾸게
 // 하지도 않는다(domain._OPTION_SPECS 에 없음). 멈춘 실행은 sync_stopped_max_errors 로 남는다. sync 옵션 구획 캡션(단건·배치 생성)이
@@ -168,6 +189,8 @@ export const QUIET_HELP = {
 export const SYNC_MAX_ERRORS_NOTE =
   "노드 간 실행(nsync)은 실패한 항목이 허용 한도(기본 65,000건)에 닿으면 남은 항목을 시도하지 않고 멈춥니다 — 원인을 고친 뒤 "
   + "다시 실행하면 이미 맞춘 항목은 건너뛰고 이어서 맞춥니다.";
+// 요약 — 전문은 바로 위 SYNC_MAX_ERRORS_NOTE(옵션 단계 「실행 옵션」 머리의 자세히).
+const SUMMARY_MAX_ERRORS = "실패 한도: nsync 는 실패 65,000건에 닿으면 멈춥니다.";
 // 실행 권한 문구(제출 요약 「실행 권한」 ↔ 요청 상세 「요청 내용」의 「실행 권한」). root 의 어휘·색(text-bad)은 포탈 전체가 같다.
 // 요청 상세는 PRIV_ROOT_HEAD·PRIV_USER(옛 비 root 행 표시) 만 쓴다 -- sync 의 소유 결과는 같은 카드의 「목적지 소유」 행이 말하므로
 // PRIV_ROOT_SYNC(소유 결과를 덧붙인 꼬리)는 제출 요약 전용이다(한 화면에서 같은 사실을 두 번 말하지 않는다). 제출 요약도 rm·scan 은
@@ -236,3 +259,34 @@ export function priorityCapText(byTool: PriorityPolicies, op: string, priority: 
     : rows.map((r) => (r.tool === "dsync" ? `${r.tool}: 기본 ${r.def} · 상한 ${r.cap}` : `${r.tool}: 상한 ${r.cap}`)).join(" / ");
   return `정책 — ${head}. 기본값 적용은 dsync 기준(제출 시점 도구 미정), ${overTail ?? "상한은 실행 도구 기준으로 조정됩니다"}`;
 }
+
+// 단계별 등록(2026-11-26)의 「한 줄 요약 + 자세히」 요약 문장 모음 -- 단일 작업(SubmitJob)·배치 생성(BatchCreate)이 같이 읽는다
+// (components/form/wizardParts MoreText·OptionToggle 의 summary). 전문이 이 파일에 있는 것은 그 상수 바로 옆에서 정의했고(위
+// SUMMARY_*), 전문이 화면·다른 모듈에 있는 넷은 여기서 정의하며 전문의 자리를 적는다. 요약은 전문과 **다른 문장**이거나(정규식
+// 단언이 둘에 겹치지 않게) 전문의 첫 문장 그대로다(정확 일치 단언만 영향 없음) -- design-wizard §3·R12.
+export const HELP_SUMMARY = {
+  delete: SUMMARY_DELETE,
+  contents: SUMMARY_CONTENTS,
+  direct: SUMMARY_DIRECT,
+  quietSync: SUMMARY_QUIET,
+  quietRm: SUMMARY_QUIET,
+  maxErrors: SUMMARY_MAX_ERRORS,
+  // 요약 — 전문은 단일 작업 「실행 설정」의 정책 캡션 + NODE_CPU_CAP_NOTE(lib/jobTool).
+  policy: "노드 수·프로세스 수는 정책이 정합니다.",
+  // 요약 — 전문은 배치 생성 「실행 신원」 칸 도움말(BatchCreate, rm·그 밖 두 갈래).
+  runAs: "기록용 이름입니다 — 실행은 늘 root 입니다.",
+  // 요약 — 전문은 배치 생성 노드 수·노드당 프로세스 칸 아래 정책 캡션·NODE_CPU_CAP_NOTE·nsync 면당 문장(BatchCreate). 칸 오류는
+  // 요약과 무관하게 늘 보인다.
+  controlsPolicy: "비운 칸은 정책 기본이 적용됩니다.",
+  // 요약 — 전문은 배치 생성 「CSV 붙여넣기」 설명(BatchCreate)이고 이것은 그 첫 문장 그대로다.
+  csvApply: "반영하면 표의 행을 통째로 바꿉니다(이어 붙이지 않음).",
+} as const;
+
+// 연산 카드의 짧은 부제(단계별 등록 2026-11-26 -- components/form/wizardParts OperationCards). 카드의 접근 이름은 연산 이름
+// (sync·scan·rm) 그대로이고(테스트·e2e 접점) 이 부제는 보이는 보조 글자다. 설명 한 줄은 화면의 OPERATION_HELP(단일)·
+// OPERATION_HELP/AUTO_HELP(배치)가 맡는다. 배치는 「여러 경로 …」 변형(목업 v1-top-stepper 그대로).
+type WizardOperation = "sync" | "scan" | "rm";
+export const OPERATION_LABEL: Record<WizardOperation, string> = { sync: "복사·동기화", scan: "통계 수집", rm: "삭제" };
+export const OPERATION_LABEL_BATCH: Record<WizardOperation, string> = {
+  sync: "여러 경로 복사", scan: "여러 경로 통계", rm: "여러 경로 삭제",
+};
