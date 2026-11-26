@@ -481,11 +481,17 @@ CHANGELOG 「sync 진행률 — 작업 상세 진행 중 실행·미리보기 �
 `dms_job_runner.stream`·`dms_job_runner.progress`·`dms.job_progress` 모듈 docstring, `frontend/src/features/jobs/progressModel.ts` 머리 주석, 계약
 `frontend/src/lib/progressContract.json`, ARCHITECTURE §6 「러너 출력은 스트리밍·상한」·§7 「sync 진행률은 표시 전용」.
 
-- 🔍 **라이브 실증** — 아직(testbed-k8s 다음 태그 d49 — 잡 이미지도 바뀐다: 오버레이 `newTag` 와 `patch-config.yaml` `DMS_JOB_IMAGE` 를 같이 올린다).
-  dsync·nsync 의 실행·미리보기(nsync 는 배치 크기를 줄여서만 — 사용자 지시 「검증할때만 배치사이즈를 줄여서」), 실 브라우저로 진행 칸 갱신·
-  정체 경고·available:false 문구·결과 카드. nsync·2노드 dsync 는 테스트베드 CPU 때문에(아래 §4 「노드 CPU 상한은 다른 파드의 requests 를 보지
-  않는다」의 2026-11-26 사례) 실증 창 동안 되돌림 입구 ingress-nginx 를 0 으로 줄여야 선다 — 그동안 ingress-nginx-admission 웹훅(failurePolicy
-  Fail)이 클러스터의 **모든** Ingress 쓰기를 거부하므로 설치기 S8·S11·손 apply 는 창 밖에서 하고, 끝나면 replicas 를 되돌린다.
+- 🔍 **라이브 실증의 남은 몫** — d49 실증(2026-11-27)에서 핵심은 통과했다: dsync 1·2노드 실행·미리보기·`batch_files` 배치 되풀이(전체 항목 막대)·복사 중
+  취소, nsync 배치 11개·2개·1개(배치 크기를 줄여서만 — 사용자 지시 「검증할때만 배치사이즈를 줄여서」), /progress 5초·숨김 탭 멈춤·no-store·금지
+  키 0, 수치가 stdout.log 진행 줄과 일치, 잡 목록·배치 화면 /progress 0건. 남은 것: (a) 실증 후속 넷(2026-11-27 — 종단 전이 뒤 아티팩트 목록
+  지연 재조회 `useArtifacts.ARTIFACTS_SETTLE_MS`, 헛걸음 연속 3회부터 느린 폴링 `useArtifacts.PROGRESS_SLOW_AFTER_MISSES`, nsync 배치 여럿의 늘
+  붙는 캡션 `progressModel.CAPTION`, 배치 rm ④ 동의 체크의 `data-wizard-nudge`)을 다음 태그에서 다시 본다 — 복사 중 취소 직후 칩이 새로고침
+  없이 맞춰지는지, 2~10초 미리보기에 수치가 뜨는지, 캡션이 스크린숏에 찍히는지, 막힌 「다음」이 1440×900·390×844 에서 동의 체크로 가는지.
+  (b) 실증에서 밟지 않은 경로 — 파일 생성 %(생성이 늘 10초 미만이었다), 「워커 준비」·「소스 탐색」·「복사 준비」·「스캔·배치 준비」 문구,
+  noneYet 중립 문구, 90초 정체 경고, 연속 3회 뒤 15초 간격 직접 측정, 실제 탭 숨김(헤드리스는 visibilityState 흉내였다). nsync·2노드 dsync 는
+  테스트베드 CPU 때문에(아래 §4 「노드 CPU 상한은 다른 파드의 requests 를 보지 않는다」의 2026-11-26 사례) 실증 창 동안 되돌림 입구
+  ingress-nginx 를 0 으로 줄여야 선다 — 그동안 ingress-nginx-admission 웹훅(failurePolicy Fail)이 클러스터의 **모든** Ingress 쓰기를 거부하므로
+  설치기 S8·S11·손 apply 는 창 밖에서 하고, 끝나면 replicas 를 되돌린다.
 - 🔧 **시간초과·취소의 SIGKILL 이면 넘침 끝 링을 잃는다** — 러너는 SIGTERM 처리기를 두지 않는다(PID 1 신호 의미 유지 — `stream` 모듈 docstring).
   그래서 넘침 모드의 끝 링(≤ 16 MiB — 최종 요약이 있는 꼬리)과 마지막 1초 이내 로그·쓰기 큐 잔량이 사라진다(앞 64 MiB 와 progress.json 은 남는다).
   처방 후보: SIGTERM 에서 끝 링만 붙이고 나가는 처리기(유예 시간 안 — PID 1 의미와의 충돌을 먼저 본다).
@@ -494,8 +500,9 @@ CHANGELOG 「sync 진행률 — 작업 상세 진행 중 실행·미리보기 �
   라 위협은 아니다). `stream.ArtifactWriter` 의 dirfd + O_EXCL 통로로 옮기면 같은 절 3 의 소유자 검사를 `== 요청자` 로 좁히는 길도 열린다.
 - 💡 **drm·dscan 진행률** — 같은 장치로 넓힐 수 있다(`progress` 정규식 표에 도구 추가 + 계약 `tools` + `progressModel` 제목). 지금은 sync(dsync·
   nsync)만 progress.json 을 쓴다.
-- 💡 **실행 중 stdout.log 꼬리 보기** — stdout.log 는 이제 실행 중에도 이어 쓰지만 아티팩트 목록은 잡 상태 전이 때만 다시 읽어 칩은 끝난 뒤
-  보인다(스테퍼는 stdout.log 를 읽지 않는다). 실행 중 로그 칩 폴링은 요청이 오면.
+- 💡 **실행 중 stdout.log 꼬리 보기** — stdout.log 는 이제 실행 중에도 이어 쓰지만 아티팩트 목록은 잡 상태 전이 때만(종단 전이 뒤엔 3·10·30초
+  뒤 한 번씩 더 — `useArtifacts.ARTIFACTS_SETTLE_MS`) 다시 읽어 실행 중 칩 크기는 다음 전이까지 그대로다(진행은 진행 칸의 몫, 스테퍼는
+  stdout.log 를 읽지 않는다). 실행 중 로그 칩 폴링은 요청이 오면 — 공유 base 가 NFS 면 다른 노드에서 최대 약 30초 늦게 보인다(아래 📝).
 - 💡 **진행 계약에 심장박동 값**(리뷰 nit 의 남은 몫) — 정체 문턱 `progressModel.STALE_AFTER_S`(90) ≥ 러너 `progress.HEARTBEAT_SECONDS`(30) × 3 은
   지금 `progressModel.test` 가 러너 소스를 읽어 고정한다. 계약에 `heartbeat_s` 를 더하면 백엔드 형식 시험(`test_job_progress_contract.py` 최상위
   키 집합)도 같이 바꿔야 해 미뤘다.
@@ -507,6 +514,14 @@ CHANGELOG 「sync 진행률 — 작업 상세 진행 중 실행·미리보기 �
   예전엔 같은 출력에서 launcher 메모리가 수 GB 까지 늘거나 OOM 으로 잡이 죽을 수 있었다 — 정직한 모름을 고른 대가. 비 BMP 이름이 섞이면 문턱이
   16 Mi 문자로 내려간다.
 - 📝 **진행 신선도는 노드 시계에 기댄다** — `age_seconds` = API 서버 시각 − progress.json mtime(러너 노드가 찍은 시각 — NTP 가정, 음수는 0).
+- 📝 **공유 base 가 NFS 면 실행 중 stdout.log 는 다른 노드에서 늦게 보인다**(2026-11-27 d49 실증 관찰 — 기능 판정 밖): 쓰는 쪽 launcher(w2)와
+  읽는 쪽 API(w1)에서 목록의 크기·mtime 이 처음 약 4분은 약 31초, 그 뒤 10초 간격으로 한꺼번에 바뀌었고 다운로드한 꼬리가 도구 시각보다 최대
+  약 30초 늦었다(목록 1336 B 직후 다운로드 1244 B 도 한 번). 「1초 주기로 이미 디스크에」(`stream` 설계)는 쓰는 노드 기준이다. rename 으로 쓰는
+  progress.json 은 지연이 없었다(age ≤ 9초) — 진행 칸은 영향 없음. 원인은 NFS 클라이언트 속성 캐시로 추정(확인 안 함). 종단 뒤 칩 재조회의
+  마지막 30초가 이 값에 맞춘 것이다.
+- 📝 **복사 중 취소한 dsync 의 목적지 루트가 0700 root:root 로 남는다**(2026-11-27 d49 실증 C1 관찰 — 이전부터의 dsync 동작, 진행률과 무관):
+  dsync 는 만든 디렉터리의 소유자·권한·시각을 마지막 속성 단계에서 맞추고(`--chown` 결과 소유 규칙 포함 — `execution_manifests._auto_chown`),
+  취소는 그 전에 끊는다. 같은 목적지로 다시 sync 하면 속성 단계가 맞추는지는 아직 안 봤다.
 - 📝 **dsync 복사 % 는 바이트 기준·배치 안**이다 — 크기가 섞이면 체감과 다르다(2026-11-26 실측: 큰 파일이 먼저면 20초에 73%, 남은 작은 파일
   10만 개에 21분). 막대에 기준 문구·HelpTip 을 두고 남은 시간은 숨긴다. 도구가 99.5% 부터 「100%」를 찍으므로 `step.done` 이 아니면 99 로 묶는다.
 - ⏸ **잡 목록·배치 화면에서 진행률 모아 보기** — 하지 않음(사용자 결정 2026-11-26 「포탈에서 각 작업 항목에 들어갔을때만」 — `JobsList.test`·
@@ -517,11 +532,13 @@ CHANGELOG 「sync 진행률 — 작업 상세 진행 중 실행·미리보기 �
 CHANGELOG 「단일·배치 등록 상단 스테퍼 — …」. 지금 동작은 `frontend/src/components/form/Wizard.tsx` 머리 주석(규칙 전문)과
 `features/jobs/submitGates.ts`·`features/batches/batchGates.ts`.
 
-- 🔍 **라이브 실증** — 아직(d49, 진행률과 한 빌드): 실 Chrome 1440·1280·768·390 으로 세 역할 × sync/rm(+면제 scan) × PV/직접 경로, 배치
-  scan/sync/rm(자동 확인 켬 포함)·「스토리지를 CSV 로 정하기」·PV 시트·「다음」 더블클릭.
-- 🔍 **터치 연속 탭의 더블클릭 가드** — 가드는 `event.detail > 1` 에 기댄다(`WizardActionBar`). 마우스·Playwright dblclick 은 detail 2 를 내지만(e2e
-  04 그물) 터치 연속 탭의 detail 은 브라우저마다 다를 수 있다 — 실증 때 390 폭(실기기 또는 Chrome 터치 에뮬레이션)으로 마지막 앞 단계 「다음」 두
-  번 탭을 확인하고, 새면 「검토 진입 직후 400ms 제출 잠금」을 시계 주입형(시험은 0)으로 더한다.
+- 🔍 **라이브 실증의 남은 몫** — d49 실증(2026-11-27, 관리자 세션)에서 실 Chrome 1440·390 으로 단일 sync·rm 과 배치 rm(자동 실행 켬) 단계 이동(가로
+  넘침 0·콘솔 오류 0), rm 제출 빨강, ② 경로 칸 Enter(잘못된 경로면 머묾·유효하면 다음 단계·제출 없음), 실 dsync 위저드 등록을 확인했다. 실증
+  후속(2026-11-27): 배치 rm ④ 에서 동의 전 막힌 「다음」이 화면 밖 동의 체크로 포커스·스크롤하지 않던 것을 `data-wizard-nudge` 로 고쳤다(e2e
+  03 의 `layoutBatch` 가 1280·375 에서 포커스·바 가림을 잰다) — 다음 태그에서 1440×900·390×844 로 다시 본다. 남은 것: 1280·768 실 Chrome, 일반
+  사용자·운영자 역할 × PV/직접 경로, 배치 scan/sync·「스토리지를 CSV 로 정하기」·PV 시트.
+- ~~터치 연속 탭의 더블클릭 가드~~ — 해소(2026-11-27 d49 실증: 390 폭 Chrome 터치 에뮬레이션의 `touchscreen.tap` 두 번·`locator.tap` 두 번 모두
+  둘째 탭이 detail 2 로 제출 노드에 떨어져 걸러졌다 — 제출 요청 0. 실기기 Safari 는 안 봤다).
 - 💡 **위저드 이탈 경고(beforeunload)** — 입력이 있는 채 사이드바 링크·새로고침으로 떠나면 값이 사라진다(새로고침하면 `?step=` 이 첫 막힘 단계로
   맞춰진다 — 빈 폼으로 검토를 보이지 않는다).
 - 💡 **스토리지가 많을 때 배치 ② 카드 묶음** — 목업(스토리지 6개)에서는 한 화면이다. 사이트 스토리지가 많아지면 묶음 접기·검색을 더한다.
