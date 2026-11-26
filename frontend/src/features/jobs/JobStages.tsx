@@ -15,6 +15,8 @@ import { useStageNav, type NavSlot } from "./stageNav";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { OutputViewer, outputIcon } from "./OutputViewer";
 import { ExecutionResult, PreviewResult } from "./StageResults";
+import { JobProgress } from "./JobProgress";
+import { showsProgress } from "./progressModel";
 import {
   FAILED_LIKE, STATUS_LABEL, STEP_COPY, annotationsFor, deriveJobStages, isEstimated, normTransitions, outputsByStep,
   stageCode, stageTitle, stepDuration, type JobStagesModel, type OutputItem, type StageModel, type StepModel,
@@ -279,6 +281,10 @@ function StepRow({ step, items, notes, last, ctx }: {
           <StepMeta step={step} refIso={ctx.refIso} hasRef={step.phase !== null && step.phase in model.refs}
                     estimate={estimate} />
         </div>
+        {/* sync 진행률(2026-11-26): 진행 중인 실행·미리보기 행(dsync·nsync, vcjob 제출 기록 있음)에만. 이 컴포넌트는 요청 상세
+            (JobCard)에서만 그려진다 -- 잡 목록·배치 화면은 진행을 조회하지 않는다(사용자 결정, 시험이 고정). 행이 끝나면 언마운트되어
+            폴링이 멈춘다. */}
+        {showsProgress(step, model.terminal, job.tool, model.refs) && <JobProgress job={job} step={step} live={live} />}
         {/* 실패 행의 사유 문장. 「사유」 라벨은 배너 dl 에만 둔다(스펙 C5: "사유" 정확 일치는 한 곳). */}
         {isFailure && job.reason_code && (
           <p className="mt-1 text-sm text-bad break-keep">{reasonText(job.reason_code)}</p>

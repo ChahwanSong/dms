@@ -61,6 +61,20 @@ function Notes({ notes, label }: { notes: ResultNote[]; label: string }) {
   );
 }
 
+// 도구 출력이 러너의 파서 상한을 넘었다(넘침 모드, 2026-11-26 -- summary output_truncated, 참일 때만 실린다): 위치·개수 규칙에
+// 기대는 값(dsync 반영 항목 수·walk 수 등)은 모름으로 빠지고 정확히 센 실패 수만 남는다. 「모름」 칸이 왜 모름인지 말한다. 크기
+// 숫자는 넣지 않는다(상한이 메모리 기준이라 문자 수와 다르다). stdout.log 는 앞부분 + 끝부분만 남는다 -- 만료됐으면 가리키지 않는다.
+function TruncatedNote({ what, outputExpired }: { what: string; outputExpired: boolean }) {
+  return (
+    <p className="mt-2 flex items-start gap-1.5 text-xs text-ink/70 break-keep">
+      <Info aria-hidden className="mt-px h-3.5 w-3.5 shrink-0" />
+      <span className="min-w-0">
+        {`도구 출력이 너무 커서 일부 수치(${what})는 모릅니다${outputExpired ? "" : " — stdout.log 는 앞부분과 끝부분만 남았습니다"}`}
+      </span>
+    </p>
+  );
+}
+
 // 실패 경로 표시: 제어 문자(dsync·drm 은 이름을 날것으로 찍는다 -- 줄바꿈이 든 이름이 있을 수 있다)를 \xHH 로 보이게
 // 한다. 화면에서 경로 한 줄이 두 줄로 갈라져 다른 항목처럼 읽히지 않게(nsync 는 도구가 이미 이렇게 찍는다).
 export function visiblePath(p: string): string {
@@ -345,6 +359,7 @@ export function ExecutionResult({ summary, job, headingId, onOpenOutput, outputE
         <FailureBlock s={s} tool={tool} phaseWord="실행" onOpenOutput={onOpenOutput} outputExpired={outputExpired} />
       )}
       <Notes notes={notes} label="실행 결과 주의 사항" />
+      {summary.output_truncated === true && <TruncatedNote what="반영 항목 수 등" outputExpired={outputExpired} />}
       {!s.detailed && (
         <p className="mt-2 text-xs text-ink/70 break-keep">
           {/* 옛 요약(d192 이전 잡)은 결과 파일 만료(dms-k8s)와 가장 자주 겹친다 -- 그때는 지워진 stdout.log 를 가리키지 않는다. */}
@@ -419,6 +434,9 @@ export function PreviewResult({ job, summary, failedAt, headingId, onOpenOutput,
         <FailureBlock s={s} tool={tool} phaseWord="미리보기" onOpenOutput={onOpenOutput} outputExpired={outputExpired} />
       )}
       <Notes notes={warnings} label="미리보기 주의 사항" />
+      {isPlainObject(summary) && summary.output_truncated === true && (
+        <TruncatedNote what="항목 수 등" outputExpired={outputExpired} />
+      )}
       {/* rm 의 수가 무엇을 센 것인지(2026-10-12 -- 예전엔 늘 「모름」이라 말할 필요가 없었다): drm walk 항목 수 = 대상
           경로 자신 + 그 아래 파일·디렉터리·링크. 실행의 「삭제한 항목」과 같은 기준이다. 모르면(옛 잡) 목록이 있는 곳. */}
       {/* 실패 시점 결과(failedAt)에는 붙이지 않는다 -- 도구가 아예 돌지 않았을 수 있어(workers_unreachable 등 stdout.log

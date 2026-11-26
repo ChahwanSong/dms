@@ -1,9 +1,12 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider, focusManager } from "@tanstack/react-query";
 import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
 import { beforeAll, afterAll, afterEach, test, expect, vi } from "vitest";
-import { useArtifacts, useArtifactFile, useJobLogs } from "./useArtifacts";
+import contract from "../../lib/progressContract.json";
+import {
+  PROGRESS_POLL_MS, PROGRESS_SLOW_POLL_MS, jobProgressKey, useArtifacts, useArtifactFile, useJobLogs, useJobProgress,
+} from "./useArtifacts";
 
 const server = setupServer();
 beforeAll(() => server.listen()); afterEach(() => server.resetHandlers()); afterAll(() => server.close());
@@ -135,3 +138,102 @@ test("useJobLogs live: 3초마다 다시 읽고, live 가 꺼지면 멈춘다", 
     vi.useRealTimers();
   }
 });
+
+// --- 2026-11-26 sync 진행률: 진행 중인 행에서만 5초, available:false·오류면 15초, 숨긴 탭은 멈춘다 ------------------------------
+// 응답은 계약 파일(lib/progressContract.json examples.responses)을 그대로 돌려준다(손으로 쓴 모의 모양 금지).
+
+const RESP = contract.examples.responses;
+type Reply = { status: number; body: unknown };
+function progressServer(reply: () => Reply) {
+  const urls: string[] = [];
+  server.use(http.get("/api/user/jobs/j1/progress", ({ request }) => {
+    urls.push(request.url);
+    const r = reply();
+    return HttpResponse.json(r.body as Record<string, unknown>, { status: r.status });
+  }));
+  return urls;
+}
+const errorReply = (detail: string): Reply => {
+  const e = RESP.errors.find((x) => x.body.detail === detail)!;
+  return { status: e.status, body: e.body };
+};
+
+async function withFakeTimers(fn: () => Promise<void>) {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  try { await fn(); } finally { vi.useRealTimers(); focusManager.setFocused(undefined); }
+}
+const tick = async (ms: number) => { await act(async () => { await vi.advanceTimersByTimeAsync(ms); }); };
+// 공용 wrapper 는 그릴 때마다 QueryClient 를 새로 만든다 -- rerender(live 끄기) 뒤에도 같은 캐시를 보도록 고정한다.
+function stableWrapper() {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return ({ children }: { children: React.ReactNode }) => <QueryClientProvider client={qc}>{children}</QueryClientProvider>;
+}
+
+test("useJobProgress: 폴링 간격은 계약 poll_ms 와 같고, 쿼리 키는 잡·단계마다 하나", () => {
+  expect(PROGRESS_POLL_MS).toBe(contract.poll_ms.normal);
+  expect(PROGRESS_SLOW_POLL_MS).toBe(contract.poll_ms.slow);
+  expect(jobProgressKey("j1", "preview")).toEqual(["jobprogress", "j1", "preview"]);
+});
+
+test("useJobProgress live: 5초마다 다시 읽고(단계는 phase 질의로), live 가 꺼지면 멈춘다", () => withFakeTimers(async () => {
+  const urls = progressServer(() => ({ status: 200, body: RESP.available }));
+  const { result, rerender } = renderHook(({ live }) => useJobProgress("j1", "execution", live),
+    { wrapper: stableWrapper(), initialProps: { live: true } });
+  await waitFor(() => expect(result.current.data).toEqual(RESP.available));
+  expect(urls).toHaveLength(1);
+  expect(new URL(urls[0]).searchParams.get("phase")).toBe("execution");
+  await tick(PROGRESS_POLL_MS - 200);
+  expect(urls).toHaveLength(1);                     // 간격 전에는 읽지 않는다
+  await tick(300);
+  await waitFor(() => expect(urls).toHaveLength(2));
+  await tick(PROGRESS_POLL_MS + 100);
+  await waitFor(() => expect(urls).toHaveLength(3));
+  rerender({ live: false });
+  await tick(PROGRESS_SLOW_POLL_MS * 2);
+  expect(urls).toHaveLength(3);
+}));
+
+test("useJobProgress: available:false 면 15초 간격(서버가 매번 base 점검을 돈다)", () => withFakeTimers(async () => {
+  const urls = progressServer(() => ({ status: 200, body: RESP.unavailable }));
+  const { result } = renderHook(() => useJobProgress("j1", "preview", true), { wrapper: stableWrapper() });
+  await waitFor(() => expect(result.current.data).toEqual(RESP.unavailable));
+  expect(new URL(urls[0]).searchParams.get("phase")).toBe("preview");
+  await tick(PROGRESS_POLL_MS + 100);
+  expect(urls).toHaveLength(1);
+  await tick(PROGRESS_SLOW_POLL_MS - PROGRESS_POLL_MS);
+  await waitFor(() => expect(urls).toHaveLength(2));
+}));
+
+test("useJobProgress: 503 오류도 15초 간격이고, 회복하면 5초로 돌아온다", () => withFakeTimers(async () => {
+  let fail = true;
+  const urls = progressServer(() => (fail ? errorReply("artifact_base_unavailable") : { status: 200, body: RESP.available }));
+  const { result } = renderHook(() => useJobProgress("j1", "execution", true), { wrapper: stableWrapper() });
+  await waitFor(() => expect(result.current.isError).toBe(true));
+  await tick(PROGRESS_POLL_MS + 100);
+  expect(urls).toHaveLength(1);
+  fail = false;
+  await tick(PROGRESS_SLOW_POLL_MS - PROGRESS_POLL_MS);
+  await waitFor(() => expect(result.current.data).toEqual(RESP.available));
+  expect(urls).toHaveLength(2);
+  await tick(PROGRESS_POLL_MS + 100);
+  await waitFor(() => expect(urls).toHaveLength(3));
+}));
+
+test("useJobProgress: live false(enabled false)면 요청 0", async () => {
+  const urls = progressServer(() => ({ status: 200, body: RESP.available }));
+  const { result } = renderHook(() => useJobProgress("j1", "execution", false), { wrapper: stableWrapper() });
+  await new Promise((r) => setTimeout(r, 20));
+  expect(urls).toHaveLength(0);
+  expect(result.current.fetchStatus).toBe("idle");
+});
+
+test("useJobProgress: 창을 숨기면 멈추고, 다시 보이면 곧바로 한 번 읽는다", () => withFakeTimers(async () => {
+  const urls = progressServer(() => ({ status: 200, body: RESP.available }));
+  const { result } = renderHook(() => useJobProgress("j1", "execution", true), { wrapper: stableWrapper() });
+  await waitFor(() => expect(result.current.isSuccess).toBe(true));
+  act(() => { focusManager.setFocused(false); });
+  await tick(PROGRESS_POLL_MS * 4);
+  expect(urls).toHaveLength(1);
+  act(() => { focusManager.setFocused(true); });
+  await waitFor(() => expect(urls).toHaveLength(2));
+}));

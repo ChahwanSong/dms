@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiGet } from "../../lib/api";
-import type { ArtifactList, ArtifactFile, JobLogs } from "../../lib/types";
+import type { ArtifactList, ArtifactFile, JobLogs, JobProgressResponse } from "../../lib/types";
 
 // refreshKey(요청 상세: `${job.state}|${phase_refs 키}`)가 바뀌면 목록을 다시 읽는다 -- 러너는 phase 가 끝날 때
 // 파일을 쓰므로, 한 번 읽고 끝이면 진행 중에 연 상세는 실행이 끝나도 새 출력 파일을 영영 못 본다. 목록 자체를
@@ -54,4 +54,24 @@ export const useJobLogs = (jobId: string, phase: string, enabled: boolean, opts?
     queryFn: () => apiGet<JobLogs>(`/api/user/jobs/${jobId}/logs?phase=${phase}`),
     enabled,
     refetchInterval: opts?.live ? 3000 : false,
+  });
+
+// sync 진행률(2026-11-26, 계약 lib/progressContract.json): 요청 상세 잡 카드의 「진행 중」 실행·미리보기 행(JobProgress)만 부른다
+// -- 잡 목록·배치 화면은 부르지 않는다(사용자 결정: 각 작업 항목에 들어갔을 때만). live(그 행이 진행 중)인 동안만 5초마다
+// 읽고, available:false(아직 없음·이전 잡 이미지)나 오류면 15초로 늘린다 -- 그 경로는 서버가 매번 base 점검(불변식 16 -- 최근
+// 잡 DB 조회 + fstatat 몇 번)을 돌리므로 성공 경로보다 비싸다. 숨긴 탭은 TanStack 기본값(refetchIntervalInBackground false)대로
+// 멈추고, 다시 보이면 refetchOnWindowFocus 가 곧바로 한 번 읽는다. 간격 값은 계약 poll_ms 와 시험이 잇는다(런타임 번들에 계약
+// 파일을 싣지 않는다 -- reasonCodes.json 과 같은 방식). staleTime 0: 행이 다시 진행 중이 되어 다시 마운트되면 곧바로 읽는다.
+export const PROGRESS_POLL_MS = 5000;
+export const PROGRESS_SLOW_POLL_MS = 15000;
+export type ProgressPhase = "preview" | "execution";
+export const jobProgressKey = (jobId: string, phase: ProgressPhase) => ["jobprogress", jobId, phase] as const;
+export const useJobProgress = (jobId: string, phase: ProgressPhase, live: boolean) =>
+  useQuery({
+    queryKey: jobProgressKey(jobId, phase),
+    queryFn: () => apiGet<JobProgressResponse>(`/api/user/jobs/${jobId}/progress?phase=${phase}`),
+    enabled: live,
+    refetchInterval: (q) => !live ? false
+      : q.state.status === "error" || q.state.data?.available === false ? PROGRESS_SLOW_POLL_MS : PROGRESS_POLL_MS,
+    staleTime: 0,
   });

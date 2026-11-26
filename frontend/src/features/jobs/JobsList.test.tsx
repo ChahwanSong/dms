@@ -1479,3 +1479,15 @@ test("서버가 상한으로 거절한 배치(경합) -- 제외 줄도 같은 �
   await waitFor(() => expect(skipLine(
     "배치 e7 배치: 삭제 불가 — 작업이 한 번에 지울 수 있는 상한 50,000개를 넘습니다(50,001개 이상)")).toBeInTheDocument());
 });
+
+test("sync 진행률(2026-11-26)은 잡 목록에서 조회하지 않는다 -- 진행 중 sync 행이 있어도 /progress 요청 0(요청 상세에서만)", async () => {
+  let progressCalls = 0;
+  server.use(
+    http.get("/api/user/requests", () => HttpResponse.json([row("r1", { state: "Running" }), row("r2", { state: "Previewing" })])),
+    http.get("*/progress", () => { progressCalls += 1; return HttpResponse.json({ phase: "execution", available: false }); }),
+  );
+  wrap(meAdmin);
+  await screen.findByText("r1", { exact: false });
+  await act(async () => { await new Promise((r) => setTimeout(r, 50)); });
+  expect(progressCalls).toBe(0);
+});
