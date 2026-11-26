@@ -3,7 +3,7 @@ import path from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 import { STORAGE_NAME } from "./harness/env";
 import { apiLogin } from "./helpers/session";
-import { wizardNext } from "./helpers/wizard";
+import { chooseOperation, pickStorageCard, wizardNext } from "./helpers/wizard";
 
 // E12 — rm 배치(2026-10-21 사용자 요청 「배치작업에 rm도 할수있도록」). 단위 테스트가 못 보는 것을 여기서 본다:
 // 생성 화면 → 실 서버(rm 허용·겹침 422 미러) → 실 오케스트레이터가 미리보기 뒤 **확인 대기에서 멈추고**(자동 실행은 기본
@@ -55,12 +55,10 @@ test.describe("E12 — rm 배치", () => {
 
     // 단계별 등록(2026-11-26): ① rm → ② 스토리지(삭제 범위 요약) → ③ CSV → ④ 옵션·실행 제어 → ⑤ 검토(삭제 범위 전문) → 「배치 생성」.
     await page.goto("/admin/batches/new");
-    await page.getByLabel("연산", { exact: true }).selectOption("rm");
+    await chooseOperation(page, "rm");
     await wizardNext(page, "스토리지");
     await expect(page.getByRole("note", { name: "삭제 범위 요약", exact: true })).toBeVisible();
-    const st = page.getByLabel("스토리지", { exact: true });
-    await expect(st.getByRole("option", { name: STORAGE_NAME })).toBeAttached();
-    await st.selectOption(STORAGE_NAME);
+    await pickStorageCard(page, "스토리지", STORAGE_NAME);
     await wizardNext(page, "항목");
     const next = page.getByRole("button", { name: "다음", exact: true });
     // 한 배치 안 겹침은 제출 전에 줄끼리 말하고 잠근다 -- 2026-10-26 부터 CSV 는 서버가 해석하고(POST :parse-csv, 생성과 같은
@@ -84,6 +82,7 @@ test.describe("E12 — rm 배치", () => {
     await wizardNext(page, "이름·검토");
     await expect(page.getByRole("note", { name: "삭제 범위", exact: true })).toBeVisible();
     const create = page.getByRole("button", { name: "배치 생성", exact: true });
+    await expect(create).toHaveClass(/bg-bad/);                                  // rm 생성은 빨간 솔리드(destructive)
     await create.click();
     await page.waitForURL(/\/admin\/batches\/[0-9a-f]{32}$/);
     const bid = page.url().split("/").pop()!;

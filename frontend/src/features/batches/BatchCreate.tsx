@@ -1,26 +1,28 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { MouseEvent } from "react";
 import { useNavigate } from "react-router-dom";
-import { ArrowRight, Download, FileDown, FileUp, Plus, X } from "lucide-react";
+import { ArrowRight, Download, FileDown, FileUp, Plus, Search, X } from "lucide-react";
 import { autoConfirmable, useCreateBatch, useParseBatchCsv } from "./useBatches";
 import type { BatchOp, CreateBatchBody, ParseBatchCsvBody } from "./useBatches";
 import { batchCsvTemplateUrl, csvErrorLines, itemsToRows, serializeItemsCsv } from "../../lib/csv";
 import type { ScanRow, SyncRow } from "../../lib/csv";
-import { BatchStoragePicker } from "./BatchStoragePicker";
+import { BatchStorageCards } from "./BatchStoragePicker";
 import { useUserStorages } from "../storages/useUserStorages";
 import { usePolicies } from "../policies/usePolicies";
 import type { Policy } from "../../lib/types";
 import { NODE_CPU_CAP_NOTE } from "../../lib/jobTool";
 import { field } from "../jobs/formFields";
 import {
-  BUFSIZE_HELP, CHMOD_RE, chownFieldError, DIRECT_HELP, directBufsizeError, OPEN_NOATIME_HELP, QUIET_HELP, SCAN_INT_FIELDS,
-  SYNC_INT_FIELDS, SYNC_MAX_ERRORS_NOTE, SYNC_OPTION_HELP, intFieldError, priorityCapText, scanIntFieldError, syncIntFieldError,
+  BUFSIZE_HELP, CHMOD_RE, chownFieldError, DIRECT_HELP, directBufsizeError, HELP_SUMMARY, OPEN_NOATIME_HELP, OPERATION_LABEL_BATCH,
+  QUIET_HELP, SCAN_INT_FIELDS, SYNC_DSYNC_SPECIAL_FILE_NOTE, SYNC_INT_FIELDS, SYNC_MAX_ERRORS_NOTE, SYNC_OPTION_HELP, intFieldError,
+  priorityCapText, scanIntFieldError, syncIntFieldError,
 } from "../jobs/optionRules";
 import { Button } from "../../components/ui/Button";
+import { Dialog } from "../../components/ui/Dialog";
 import { FieldRow, OptionTokens, SubmitHints, SummaryList, SummaryRow } from "../../components/form/SubmitLayout";
 import { useWizard, WizardActionBar, WizardShell, WizardStepCard, WizardStepper } from "../../components/form/Wizard";
 import type { WizardStep } from "../../components/form/Wizard";
-import { SubSection } from "../../components/form/wizardParts";
+import { MoreText, OperationCards, OptionToggle, ReviewCard, SubSection } from "../../components/form/wizardParts";
 import { batchGates } from "./batchGates";
 import type { BatchStep } from "./batchGates";
 import { ApiError } from "../../lib/api";
@@ -29,7 +31,7 @@ import type { DirectDestOwner } from "../../lib/syncOwnership";
 import { storageKindOf, storageOwnerOf } from "../k8s/k8sTerms";
 import { relativePathProblem, RM_PATH_LINK_RULE, SYNC_PATH_LINK_RULE } from "../../lib/storagePaths";
 import { rmTargetOverlaps } from "../../lib/rmTargets";
-import { PvPathPicker } from "../k8s/PvPathPicker";
+import { PV_PATH_PICKER_NOTE, PvPathPicker } from "../k8s/PvPathPicker";
 import type { PvSlot } from "../k8s/PvPathPicker";
 
 // 배치 생성(슬라이스 32). 2026-11-26 단계별 등록(사용자 결정 「초안 1 상단 스테퍼」 -- 단일 작업과 같은 위저드 골격
@@ -137,6 +139,11 @@ export function BatchCreate() {
   // 않고 게이트(batchGates)에만 쓴다. applyParsed 는 「이미 고른 스토리지가 이긴다」(prev.storage || CSV)라 **켜는 순간 고른 스토리지를
   // 비우고**, 스토리지를 고르면 꺼진다(둘 중 하나).
   const [storageFromCsv, setStorageFromCsv] = useState(false);
+  // 「PV 에서 경로 찾기」 시트(Dialog side="right" -- ② 「PV 에서 찾아 정하기」·③ 툴바에서 연다). 넣어도 닫지 않는다(여러 PV 를 이어
+  // 넣는다). 닫으면 연 버튼으로 포커스를 돌린다(pvOpener). 상태 줄(pvInsertMsg)은 넣은 행 번호를 그대로 말한다.
+  const [pvSheetOpen, setPvSheetOpen] = useState(false);
+  const pvOpener = useRef<HTMLElement | null>(null);
+  const [pvInsertMsg, setPvInsertMsg] = useState("");
 
   const storages = storagesQ.data ?? [];
   const loadingStorages = storagesQ.isLoading;
@@ -379,8 +386,10 @@ export function BatchCreate() {
     setCsvErrors([]);                // 수동 편집 = 사용자가 인수 — 파스 오류는 무효
   };
 
-  // PV 검색 패널의 「넣기」: 배치 스토리지가 비어 있으면 그 PV 의 스토리지로 채우고(다르면 패널이 버튼을 잠근다), 경로는
-  // 마지막 포커스 칸 → 첫 빈 칸 → 새 행 순서로 넣는다. 결과를 바로 보이게 표 입력으로 돌아간다.
+  // PV 검색 시트의 「넣기」: 배치 스토리지가 비어 있으면 그 PV 의 스토리지로 채우고(다르면 시트가 버튼을 잠근다), 경로는
+  // 마지막 포커스 칸 → 첫 빈 칸 → 새 행 순서로 넣는다. 표 입력으로 돌아가 둔다(시트를 닫으면 결과가 보인다).
+  // **넣은 직후 lastFocus 를 비운다**(design-wizard §1-2): 시트는 모달이라 열린 동안 표 칸으로 포커스를 옮길 수 없어 lastFocus 가
+  // 그대로다 -- 비우지 않으면 시트를 열기 전 한 번 누른 행을 매번 덮어 앞서 넣은 값이 사라진다(두 번째 넣기는 첫 빈 칸 → 새 행).
   const insertFromPv = (slot: PvSlot, storage: string, path: string) => {
     if (f.op === "sync") {
       if (slot === "a" && f.srcStorage === "") setF({ ...f, srcStorage: storage });
@@ -394,7 +403,34 @@ export function BatchCreate() {
       : rows.map((r, j) => (j === idx ? { ...r, [slot]: path } : r)));
     setCsvErrors([]);
     setTab("table");
+    setLastFocus(null);
+    setPvInsertMsg(`${idx === -1 ? rows.length + 1 : idx + 1}행 ${
+      f.op === "sync" ? (slot === "a" ? "소스" : "목적지") : "경로"} 칸에 넣었습니다`);
   };
+  // ③ 에서 열면 그 직전에 누른 칸이 첫 넣기 자리다. ② 에서 열 때는 비운다(그 전 ③ 에서 누른 칸을 덮지 않게 -- ③ 을 떠날 때도 비운다).
+  const openPvSheet = (opener: HTMLElement, fromStorageStep: boolean) => {
+    pvOpener.current = opener;
+    if (fromStorageStep) setLastFocus(null);
+    setPvInsertMsg("");
+    setPvSheetOpen(true);
+  };
+
+  // 행 삭제 뒤 포커스(design-wizard §1-6): 같은 번호 행의 삭제 버튼, 없으면 이전 행, 행이 없으면 「행 추가」 -- 예전엔 지운 버튼과 함께
+  // 포커스가 <body> 로 떨어졌다.
+  const deleteFocus = useRef<number | null>(null);
+  const deleteRow = (i: number) => {
+    deleteFocus.current = i;
+    setRows(rows.filter((_, j) => j !== i));
+    setCsvErrors([]);
+  };
+  useEffect(() => {
+    const i = deleteFocus.current;
+    if (i === null) return;
+    deleteFocus.current = null;
+    const card = document.querySelector("[data-wizard-card]");
+    const label = rows.length === 0 ? "행 추가" : `${Math.min(i, rows.length - 1) + 1}행 삭제`;
+    card?.querySelector<HTMLElement>(`[aria-label="${label}"]`)?.focus();
+  }, [rows]);
 
   // 입력 방식 전환(세그먼트). 역할은 버튼 그대로(aria-pressed) -- 세 방식은 같은 rows 를 고치는
   // 도구라 탭 패널 구조가 아니고, CSV 반영 성공이 표로 돌아오는 동선(applyParsed)이 있다.
@@ -418,7 +454,7 @@ export function BatchCreate() {
 
   const storageText = f.op !== "sync" ? (f.storage === "" ? "—" : f.storage)
     : `${f.srcStorage === "" ? "—" : f.srcStorage} → ${f.dstStorage === "" ? "—" : f.dstStorage}`;
-  // 목적지 소유 한 줄(② 목적지 한 줄·⑤ 검토 행) -- 제출 바디와 같은 값에서(화면 거짓말 금지).
+  // 목적지 소유 한 줄(② 목적지 한 줄·⑤ 검토) -- 제출 바디와 같은 값에서(화면 거짓말 금지).
   const ownership = syncOwnership({ chown: f.chown, chmod: f.chmod, root: true, runAs: null, self: true, directDest });
 
   // ---- 단계별 등록(design-wizard §1) ------------------------------------------------------------------------------------------
@@ -439,6 +475,11 @@ export function BatchCreate() {
     { key: "review", title: "이름·검토", blocked, reason: gates.barReason("review"), value: f.name.trim() || "이름 없음" },
   ];
   const wizard = useWizard<BatchStep>({ steps, initial: "kind" });
+  // ③ 항목을 떠나면 「마지막으로 포커스한 칸」을 비운다(design-wizard §1-2) -- 다른 단계에서 연 PV 시트의 넣기가 ③ 에서 예전에 누른
+  // 칸을 덮지 않게(넣기는 첫 빈 칸 → 새 행).
+  useEffect(() => {
+    if (wizard.current !== "items") setLastFocus(null);
+  }, [wizard.current]);
 
   // 생성 방어(design-wizard §1-6 「제출 방어」): ① 더블클릭 -- 「다음」과 「배치 생성」은 바의 같은 자리·같은 노드라 ④에서 「다음」을
   // 두 번 누르면 두 번째 클릭이 막 그려진 「배치 생성」에 떨어진다. 같은 연속 클릭의 두 번째 이후(e.detail > 1)를 무시한다(바도 같은
@@ -465,19 +506,16 @@ export function BatchCreate() {
     setTab("paste");                 // ③ 항목에 들어가면 붙여넣기가 열려 있다
   };
 
-  // ① 작업 종류
+  // ① 작업 종류 -- 연산 카드형 라디오(접근 이름 「연산」·라디오 이름 scan·sync·rm 은 옛 select 와 같다). 설명은 OPERATION_HELP 원문,
+  // 고른 카드만 자동 실행이 켜져 있으면 AUTO_HELP(「눌러야 실행·삭제」가 거짓이 된다). 부제는 OPERATION_LABEL_BATCH(optionRules).
   const kindStep = () => (
-    <div className="grid gap-x-6 gap-y-1 sm:grid-cols-2">
-      <label className="text-sm block">연산
-        <select aria-label="연산" className={field} value={f.op} onChange={(e) => chooseOp(e.target.value as BatchOp)}>
-          <option value="scan">scan</option>
-          <option value="sync">sync</option>
-          <option value="rm">rm</option>
-        </select>
-      </label>
-      <p className="text-sm text-muted sm:pt-8">
-        {f.autoConfirm && AUTO_HELP[f.op] !== undefined ? AUTO_HELP[f.op] : OPERATION_HELP[f.op]}
-      </p>
+    <div className="space-y-2">
+      <p aria-hidden className="text-sm font-semibold text-ink">연산</p>
+      <OperationCards name="batch-operation" value={f.op} onChange={chooseOp}
+                      options={(["scan", "sync", "rm"] as const).map((o) => ({
+                        value: o, subtitle: OPERATION_LABEL_BATCH[o], danger: o === "rm",
+                        description: o === f.op && f.autoConfirm && AUTO_HELP[o] !== undefined ? AUTO_HELP[o] : OPERATION_HELP[o],
+                      }))} />
     </div>
   );
 
@@ -490,25 +528,24 @@ export function BatchCreate() {
   const rmScopeHead = <li>각 행의 경로와 그 아래 파일·디렉토리를 모두 삭제합니다 — 되돌릴 수 없습니다.</li>;
   const rmScopeRoot = <li>관리자 특권(root)으로 실행돼 파일 권한·소유와 관계없이 지워집니다.</li>;
   const csvCols = f.op === "sync" ? "source_storage·destination_storage" : "storage";
+  const linkButton = "font-semibold text-accent underline underline-offset-2 hover:text-accenthover";
 
-  // ② 스토리지
+  // ② 스토리지 -- 라디오 카드 묶음(BatchStorageCards, 묶음마다 다른 라디오 name).
   const storageStep = () => (
     <>
       {storagesQ.isError && (
         <p className="text-bad text-sm">{(storagesQ.error as ApiError).message}</p>
       )}
       {f.op !== "sync" ? (
-        <div className="grid gap-3 sm:grid-cols-2">
-          <BatchStoragePicker label="스토리지" value={f.storage} onChange={(v) => pickStorage("storage", v)}
-                              storages={storages} loading={loadingStorages} />
-        </div>
+        <BatchStorageCards label="스토리지" name="batch-storage-single" value={f.storage}
+                           onChange={(v) => pickStorage("storage", v)} storages={storages} loading={loadingStorages} />
       ) : (
-        <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]">
-          <BatchStoragePicker label="소스 스토리지" value={f.srcStorage} onChange={(v) => pickStorage("srcStorage", v)}
-                              storages={storages} loading={loadingStorages} />
-          <ArrowRight aria-hidden className="h-5 w-5 rotate-90 justify-self-center text-muted lg:mt-8 lg:rotate-0" />
-          <BatchStoragePicker label="목적지 스토리지" value={f.dstStorage} onChange={(v) => pickStorage("dstStorage", v)}
-                              storages={storages} loading={loadingStorages} />
+        <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]">
+          <BatchStorageCards label="소스 스토리지" name="batch-storage-src" value={f.srcStorage}
+                             onChange={(v) => pickStorage("srcStorage", v)} storages={storages} loading={loadingStorages} />
+          <ArrowRight aria-hidden className="h-5 w-5 rotate-90 justify-self-center text-muted lg:mt-10 lg:rotate-0" />
+          <BatchStorageCards label="목적지 스토리지" name="batch-storage-dst" value={f.dstStorage}
+                             onChange={(v) => pickStorage("dstStorage", v)} storages={storages} loading={loadingStorages} />
         </div>
       )}
       {f.op === "rm" && (
@@ -523,6 +560,12 @@ export function BatchCreate() {
           각 목적지의 상위 디렉토리는 이미 있어야 합니다 · 결과 소유: {ownership.short} · 전문은 ⑤ 검토에서
         </p>
       )}
+      <p className="flex items-start gap-1.5 text-xs text-muted">
+        <Search aria-hidden className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+        <span>어느 스토리지인지 모르겠다면{" "}
+          <button type="button" className={linkButton} onClick={(e) => openPvSheet(e.currentTarget, true)}>PV 에서 찾아 정하기</button>
+          {" "}— 고른 PV 의 스토리지가 비어 있는 배치 스토리지를 채우고 그 경로가 행에 들어갑니다.</span>
+      </p>
       {/* 「스토리지를 CSV 로 정하기」(storageFromCsv 주석). 좁은 폭에선 설명 위·버튼 아래로 쌓는다. */}
       <div className={`flex flex-col gap-3 rounded-xl border border-dashed p-3 sm:flex-row sm:items-center ${
         storageFromCsv ? "border-accent bg-infobg/60" : "border-line"}`}>
@@ -543,10 +586,21 @@ export function BatchCreate() {
     </>
   );
 
-  // ③ 항목 -- 입력 방식 세그먼트 + (보조 동작) 템플릿·CSV 다운로드 / 본문 / 행 수. 행 칸의 data-row·data-col 은 셸의 Enter 규칙(같은
-  // 열의 다음 행 칸으로, 마지막 행이면 다음 단계)이 읽는다.
+  // ③ 항목 -- 입력 방식 세그먼트 + (보조 동작) PV 시트·템플릿·CSV 다운로드 / 본문 / 행 수. 행 칸의 data-row·data-col 은 셸의 Enter
+  // 규칙(같은 열의 다음 행 칸으로, 마지막 행이면 다음 단계)이 읽는다.
   const itemsStep = () => (
-    <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_22rem] xl:items-start">
+    <>
+      <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted">
+        {storageFromCsv && !storageChosen
+          ? <span>스토리지를 CSV 의 스토리지 열로 채웁니다 — 지난 배치의 items.csv 를 붙여 넣거나 파일로 올리세요.</span>
+          : <>
+              <span className="rounded-full border border-line bg-panel px-2 py-0.5 text-ink [overflow-wrap:anywhere]">{storageText}</span>
+              <span>관리 디렉토리 아래 상대경로로 적습니다.</span>
+            </>}
+        <button type="button" className={linkButton} onClick={() => wizard.go("storage")}>
+          <span aria-hidden>스토리지 수정</span><span className="sr-only">수정: 스토리지</span>
+        </button>
+      </p>
       <div className="min-w-0 rounded-lg border border-line">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-3 py-2">
           {/* 좁은 화면에선 세그먼트가 음절 중간에서 접히지 않고 통째로 다음 줄로 넘어간다. */}
@@ -556,6 +610,9 @@ export function BatchCreate() {
             {segment("upload", "파일 업로드")}
           </div>
           <div className="flex flex-wrap gap-2">
+            <Button type="button" variant="outline" className="gap-1.5" onClick={(e) => openPvSheet(e.currentTarget, false)}>
+              <Search className="h-4 w-4" aria-hidden />PV 에서 경로 찾기
+            </Button>
             {/* 템플릿(경로 열 헤더 + 예시 한 줄)은 서버가 내린다 — 세션 쿠키로 받는 <a download>(로그 다운로드와 같은 길). */}
             <a href={batchCsvTemplateUrl(f.op)} download
                className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-line bg-surface px-3 py-2 text-sm font-medium text-ink">
@@ -594,7 +651,7 @@ export function BatchCreate() {
                     )}
                     <button type="button" aria-label={`${i + 1}행 삭제`}
                             className="grid h-8 w-8 place-items-center rounded-lg text-muted hover:bg-panel hover:text-bad"
-                            onClick={() => { setRows(rows.filter((_, j) => j !== i)); setCsvErrors([]); }}>
+                            onClick={() => deleteRow(i)}>
                       <X className="h-4 w-4" aria-hidden />
                     </button>
                   </div>
@@ -617,11 +674,7 @@ export function BatchCreate() {
                             : "team\nprojects/alpha"}
                           value={csvText} onChange={(e) => setCsvText(e.target.value)} />
               </label>
-              <p className="text-xs text-muted">
-                반영하면 표의 행을 통째로 바꿉니다(이어 붙이지 않음). 서버가 생성과 같은 규칙으로 줄마다 검사하고, 오류가
-                있으면 반영하지 않습니다. 첫 줄이 헤더(target·path / source,destination)면 열 이름으로 읽어 「CSV 내보내기」
-                파일도 그대로 쓸 수 있고, 콤마가 든 경로는 "…" 로 감쌉니다.
-              </p>
+              <MoreText summary={HELP_SUMMARY.csvApply} full={CSV_PASTE_HELP} />
               <Button type="button" variant="outline" disabled={parse.isPending}
                       onClick={() => applyParsed(csvText)}>{parse.isPending ? "검사 중…" : "테이블에 반영"}</Button>
             </div>
@@ -652,86 +705,44 @@ export function BatchCreate() {
         </div>
         <div className="border-t border-line px-3 py-2 text-sm text-muted">행: {rows.length}</div>
       </div>
-      {/* PV 검색으로 직접 경로를 찾아 표에 넣는다(배치는 여전히 직접 경로만 -- 2026-10-26 (e)). */}
-      <PvPathPicker op={f.op}
-                    storages={f.op === "sync" ? { a: f.srcStorage, b: f.dstStorage } : { a: f.storage, b: "" }}
-                    onInsert={insertFromPv} />
-    </div>
+    </>
   );
 
-  // ④ 옵션·실행 제어
+  // ④ 옵션·실행 제어 -- 넓은 폭(lg)에선 [실행 옵션 | 실행 제어] 2열.
   const controlsStep = () => (
-    <>
-      <SubSection title="실행 옵션" caption={f.op === "sync" ? SYNC_MAX_ERRORS_NOTE : undefined}>
+    <div className="grid gap-x-8 gap-y-6 lg:grid-cols-2 lg:items-start">
+      <SubSection title="실행 옵션"
+                  caption={f.op === "sync" ? <MoreText summary={HELP_SUMMARY.maxErrors} full={SYNC_MAX_ERRORS_NOTE} /> : undefined}>
         {f.op === "rm" ? (
           <>
-            {/* 단일 작업(SubmitJob) rm 옵션 미러 — 같은 라벨·같은 즉답(같은 옵션 = 같은 문구). */}
-            <div className="flex flex-wrap gap-x-6 gap-y-2">
-              <label className="flex items-center gap-2 text-sm">
-                <input type="checkbox" aria-label="재귀 삭제(필수)" checked={f.recursive} aria-invalid={recursiveMissing || undefined}
-                       onChange={on("recursive")} /> 재귀 삭제(필수)
-              </label>
-              <label className="flex items-center gap-2 text-sm">
-                <input type="checkbox" aria-label="stat" checked={f.stat} onChange={on("stat")} /> stat
-              </label>
-              <label className="flex items-center gap-2 text-sm">
-                <input type="checkbox" aria-label="lite" checked={f.lite} onChange={on("lite")} /> lite
-              </label>
-            </div>
-            {recursiveMissing && <p className="text-bad text-sm">재귀 옵션이 필요합니다</p>}
-            {statLiteConflict && <p className="text-bad text-sm">stat과 lite는 함께 쓸 수 없습니다</p>}
-            {/* quiet 설명은 칸 옆에 그대로(단건과 같은 문구 -- 지우지 못한 항목 목록까지 없앤다, d192 이식 괴리 [13]). */}
-            <FieldRow align="check"
-              control={<label className="flex items-center gap-2 text-sm">
-                <input type="checkbox" aria-label="quiet" checked={f.quiet} onChange={on("quiet")} /> quiet
-              </label>}
-              help={QUIET_HELP.rm} />
+            {/* 단일 작업(SubmitJob) rm 옵션 미러 — 같은 라벨·같은 즉답(같은 옵션 = 같은 문구). quiet 설명은 단건과 같은 문구(지우지
+                못한 항목 목록까지 없앤다, d192 이식 괴리 [13]) -- 요약은 늘, 전문은 자세히·켜면. */}
+            <OptionToggle label="재귀 삭제(필수)" checked={f.recursive} onChange={on("recursive")}
+                          error={recursiveMissing ? "재귀 옵션이 필요합니다" : null} />
+            <OptionToggle label="stat" checked={f.stat} onChange={on("stat")} />
+            <OptionToggle label="lite" checked={f.lite} onChange={on("lite")}
+                          error={statLiteConflict ? "stat과 lite는 함께 쓸 수 없습니다" : null} />
+            <OptionToggle label="quiet" checked={f.quiet} onChange={on("quiet")} summary={HELP_SUMMARY.quietRm} full={QUIET_HELP.rm} />
           </>
         ) : f.op === "scan" ? (
           <>
-            <div className="flex flex-wrap gap-x-6 gap-y-2">
-              <label className="flex items-center gap-2 text-sm">
-                <input type="checkbox" aria-label="verbose" checked={f.verbose}
-                       onChange={on("verbose")} /> verbose
-              </label>
-              <label className="flex items-center gap-2 text-sm">
-                <input type="checkbox" aria-label="quiet" checked={f.quiet}
-                       onChange={on("quiet")} /> quiet
-              </label>
-            </div>
-            {verboseQuietConflict && (
-              <p className="text-bad text-sm">verbose와 quiet은 함께 쓸 수 없습니다</p>
-            )}
+            <OptionToggle label="verbose" checked={f.verbose} onChange={on("verbose")} />
+            <OptionToggle label="quiet" checked={f.quiet} onChange={on("quiet")}
+                          error={verboseQuietConflict ? "verbose와 quiet은 함께 쓸 수 없습니다" : null} />
             {scanFields}
           </>
         ) : (
           <>
-            {/* 설명은 단일 작업과 같은 문구(같은 dsync 옵션). */}
-            <FieldRow align="check"
-              control={<label className="flex items-center gap-2 text-sm">
-                <input type="checkbox" aria-label="delete" checked={f.delete}
-                       onChange={on("delete")} /> delete
-              </label>}
-              help={SYNC_OPTION_HELP.delete} />
-            <FieldRow align="check"
-              control={<label className="flex items-center gap-2 text-sm">
-                <input type="checkbox" aria-label="contents" checked={f.contents}
-                       onChange={on("contents")} /> contents
-              </label>}
-              help={SYNC_OPTION_HELP.contents} />
-            {/* direct·quiet 설명도 칸 옆에(단건과 같은 문구, d192 이식) -- 예전 sync quiet 는 설명이 아예 없었다(괴리 [9]·[13]). */}
-            <FieldRow align="check"
-              control={<label className="flex items-center gap-2 text-sm">
-                <input type="checkbox" aria-label="direct" checked={f.direct}
-                       onChange={on("direct")} /> direct
-              </label>}
-              help={DIRECT_HELP} />
-            <FieldRow align="check"
-              control={<label className="flex items-center gap-2 text-sm">
-                <input type="checkbox" aria-label="quiet" checked={f.quiet}
-                       onChange={on("quiet")} /> quiet
-              </label>}
-              help={QUIET_HELP.sync} />
+            {/* 설명은 단일 작업과 같은 문구(같은 dsync 옵션) -- 요약은 늘, 전문은 자세히·켜면(direct·quiet 도 d192 「칸 옆에」 그대로). */}
+            <OptionToggle label="delete" checked={f.delete} onChange={on("delete")}
+                          summary={HELP_SUMMARY.delete} full={SYNC_OPTION_HELP.delete} />
+            <OptionToggle label="contents" checked={f.contents} onChange={on("contents")}
+                          summary={HELP_SUMMARY.contents} full={SYNC_OPTION_HELP.contents} />
+            <OptionToggle label="direct" checked={f.direct} onChange={on("direct")}
+                          summary={HELP_SUMMARY.direct} full={DIRECT_HELP} />
+            <OptionToggle label="quiet" checked={f.quiet} onChange={on("quiet")}
+                          summary={HELP_SUMMARY.quietSync} full={QUIET_HELP.sync} />
+            <p className="text-xs text-attn">{SYNC_DSYNC_SPECIAL_FILE_NOTE}</p>
             {advancedPanel}
           </>
         )}
@@ -741,12 +752,13 @@ export function BatchCreate() {
           특권(root) 실행이다 — owner 입력은 특권 스위치가 아니므로 안내문은
           입력과 무관하게 고정이다. 인가의 최종 심판은 서버 게이트
           (403 privileged_not_authorized). */}
-      <SubSection title="실행 제어" className="border-t border-line pt-5" caption={f.op === "rm"
-        ? "이 배치는 관리자 특권(root)으로 삭제합니다 — 파일 권한·소유와 관계없이 지워집니다."
-        : "이 배치는 관리자 특권(root)으로 실행됩니다."}>
+      <SubSection title="실행 제어" className="border-t border-line pt-5 lg:border-l lg:border-t-0 lg:pl-8 lg:pt-0"
+                  caption={f.op === "rm"
+                    ? "이 배치는 관리자 특권(root)으로 삭제합니다 — 파일 권한·소유와 관계없이 지워집니다."
+                    : "이 배치는 관리자 특권(root)으로 실행됩니다."}>
         {controlFields}
       </SubSection>
-    </>
+    </div>
   );
 
   // scan 숫자 칸(④). 프리필 = 서버 기본(domain._OPTION_DEFAULTS, 2026-09-17). 비우면 키가 빠지고 서버가 같은 값을 박는다 --
@@ -781,9 +793,10 @@ export function BatchCreate() {
     </>
   );
 
-  // sync 고급 옵션(④). 접혀 있어도 내용은 마운트돼 있다 -- open_noatime 기본 ON 이 펼치지 않아도 실린다.
+  // sync 고급 옵션(④). 접혀 있어도 내용은 마운트돼 있다 -- open_noatime 기본 ON 이 펼치지 않아도 실린다. 안의 도움말은 이미 접혀
+  // 있으니 그대로 둔다(겉모양만 아코디언 -- 오류면 강제로 펼치는 로직·closest("details") 시험을 그대로 쓴다).
   const advancedPanel = (
-    <details className="rounded-lg border border-line"
+    <details className="rounded-xl border border-line"
              open={advancedOpen || advancedError !== null}
              onToggle={(e) => {
                const el = e.currentTarget;
@@ -854,7 +867,7 @@ export function BatchCreate() {
     </details>
   );
 
-  // 실행 제어 칸(④).
+  // 실행 제어 칸(④). 긴 캡션(실행 신원 도움말·정책·CPU 상한·nsync 면당)은 요약 + 자세히(MoreText -- 전문은 <p>, 칸 오류는 늘 보임).
   const controlFields = (
     <>
       <FieldRow
@@ -874,13 +887,14 @@ export function BatchCreate() {
           생성자가 특권 요청자면 root 로 돌고(identity.PRIVILEGE_IF_ELIGIBLE), 실행
           신원은 기록용 이름일 뿐 파일 권한 검사는 적용되지 않는다(sync 는 목적지
           소유·권한을 소스에 맞춘다). */}
-      <FieldRow
-        control={<label className="text-sm block">실행 신원(선택)
+      <div className="space-y-1">
+        <label className="text-sm block">실행 신원(선택)
           <input aria-label="실행 신원(선택)" placeholder="예: cocoa.song"
                  className={field}
                  value={f.ownerUsername} onChange={on("ownerUsername")} />
-        </label>}
-        help={f.op === "rm" ? RUN_AS_HELP_RM : RUN_AS_HELP} />
+        </label>
+        <MoreText summary={HELP_SUMMARY.runAs} full={f.op === "rm" ? RUN_AS_HELP_RM : RUN_AS_HELP} />
+      </div>
       {/* 잡 하나의 폭(노드 수 × 노드당 프로세스) -- 정책 실값 캡션은 두 칸을 함께 설명한다.
           라벨 길이가 달라도 입력 상자가 한 줄에 서도록 아래 정렬(items-end), 오류는 그 아래. */}
       <div className="space-y-1">
@@ -900,10 +914,10 @@ export function BatchCreate() {
         </div>
         {nodeCountError && <p className="text-bad text-sm">{nodeCountError}</p>}
         {procsPerNodeError && <p className="text-bad text-sm">{procsPerNodeError}</p>}
-        <p className="text-muted text-xs">{policyCaption}</p>
-        {/* 노드 CPU 상한(2026-10-16): 위 두 칸의 값은 노드가 담을 수 있는 만큼까지만 적용된다(src/dms/node_cpu.py). */}
-        <p className="text-muted text-xs">{NODE_CPU_CAP_NOTE}</p>
-        {f.op === "sync" && <p className="text-muted text-xs">{NSYNC_PER_SIDE_NOTE}</p>}
+        {/* 정책 실값 캡션 + 노드 CPU 상한(2026-10-16: 위 두 칸의 값은 노드가 담을 수 있는 만큼까지만 -- src/dms/node_cpu.py) + sync 의
+            nsync 면당 문장 -- 요약 한 줄 뒤 자세히. */}
+        <MoreText summary={HELP_SUMMARY.controlsPolicy}
+                  full={f.op === "sync" ? [policyCaption, NODE_CPU_CAP_NOTE, NSYNC_PER_SIDE_NOTE] : [policyCaption, NODE_CPU_CAP_NOTE]} />
       </div>
       {/* 노드 수와 대구: 위는 잡 하나의 폭, 이것은 잡 몇 개를 나란히 */}
       <FieldRow
@@ -918,15 +932,12 @@ export function BatchCreate() {
         help="동시에 실행할 배치 항목(잡) 수 — 잡 하나가 쓰는 노드 수와 무관합니다." />
       {/* 자동 확인(sync 2026-10-11, rm 2026-10-21): 기본 꺼짐. 켜면 운영자가 미리보기를 보고 누르던 「배치 확인」을
           시스템이 대신 누른다(서버 orchestrator — 같은 확인 함수라 확인 회차·도장 규칙은 그대로). 실행은 root 라 무엇을
-          생략하는지를 도움말이 그대로 말한다. 진행 중에도 배치 화면의 「자동 실행 끄기」로 되돌릴 수 있다. */}
+          생략하는지를 도움말이 그대로 말한다(켜면 전문이 펼쳐진다). 진행 중에도 배치 화면의 「자동 실행 끄기」로 되돌릴 수 있다. */}
       {autoConfirmable(f.op) && (
-        <FieldRow align="check"
-          control={<label className="flex items-center gap-2 text-sm">
-            <input type="checkbox" aria-label="미리보기 후 자동 실행" checked={f.autoConfirm}
-                   onChange={(e) => setF({ ...f, autoConfirm: e.target.checked, autoConfirmAck: false })} />
-            미리보기 후 자동 실행
-          </label>}
-          help={f.op === "rm" ? AUTO_RUN_HELP_RM : AUTO_RUN_HELP} />
+        <OptionToggle label="미리보기 후 자동 실행" checked={f.autoConfirm} danger={f.op === "rm"}
+                      onChange={(e) => setF({ ...f, autoConfirm: e.target.checked, autoConfirmAck: false })}
+                      summary={f.op === "rm" ? AUTO_RUN_SUMMARY_RM : AUTO_RUN_SUMMARY}
+                      full={f.op === "rm" ? AUTO_RUN_HELP_RM : AUTO_RUN_HELP} />
       )}
       {/* rm 자동 실행(2026-10-21): 되돌릴 수 없는 root 삭제를 사람 확인 없이 하는 설정이라, 켜는 순간 경고와 **필수**
           동의 체크를 둔다 — 사람의 rm 「배치 확인」이 매번 받던 「되돌릴 수 없음」 체크를 켜는 순간 한 번 받는다(서버도
@@ -949,13 +960,15 @@ export function BatchCreate() {
     </>
   );
 
-  // ⑤ 이름·검토 -- 이름·메모 입력 + 옛 오른쪽 요약의 행(라벨 그대로) + 오른쪽 전문(sync 목적지 조건과 소유권 / rm 삭제 범위).
+  // ⑤ 이름·검토 -- 왼쪽: 이름·메모 입력 + 옛 생성 요약의 행(라벨 그대로)을 카드 넷(작업 · 스토리지 · 항목 · 옵션·실행 제어)으로
+  // 나누고 「수정」은 그 단계로 간다(go -- 뒤로는 늘 갈 수 있다). 오른쪽: sync 목적지 조건과 소유권 / rm 삭제 범위 전문(접지 않음).
+  const previewRows = body.items.slice(0, 5);
   const reviewStep = () => (
     <div className="grid gap-4 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)] lg:items-start">
       <div className="min-w-0 space-y-4">
         {/* 이름은 목록·상세 헤더에 얹히는 식별자, 메모는 자유 기록 — 역할이
             달라 별도 입력이다. 둘 다 빈값 = 없음(이름은 키 생략, 메모는 null). */}
-        <div className="space-y-2">
+        <ReviewCard title="이름·메모">
           <div className="grid gap-x-6 gap-y-3 sm:grid-cols-2">
             <label className="text-sm block">배치 이름(선택)
               <input aria-label="배치 이름" placeholder="예: 8월 정기 스캔 1차"
@@ -966,9 +979,86 @@ export function BatchCreate() {
                      className={field} value={f.note} onChange={on("note")} />
             </label>
           </div>
-          <p className="text-xs text-muted">둘 다 비워도 됩니다 — 이름은 배치 목록·상세의 제목이 됩니다.</p>
-        </div>
-        <SummaryList>{summaryRows}</SummaryList>
+          <p className="mt-2 text-xs text-muted">둘 다 비워도 됩니다 — 이름은 배치 목록·상세의 제목이 됩니다.</p>
+        </ReviewCard>
+        <ReviewCard title="작업" onEdit={() => wizard.go("kind")}>
+          <SummaryList>
+            <SummaryRow label="연산">
+              <span className="font-semibold">{body.operation}</span>
+              <span className="text-muted">{` — ${OPERATION_LABEL_BATCH[f.op]}`}</span>
+            </SummaryRow>
+            {/* 특권 실행 표시는 고정 행(통일 게이트 — 입력과 무관) */}
+            <SummaryRow label="실행 권한" className={body.operation === "rm" ? "text-bad" : ""}>관리자 특권(root)</SummaryRow>
+          </SummaryList>
+        </ReviewCard>
+        <ReviewCard title="스토리지" onEdit={() => wizard.go("storage")}>
+          <SummaryList>
+            <SummaryRow label="스토리지">{storageText}</SummaryRow>
+            {/* sync 결과 소유(2026-10-01): 배치는 root 라 chown 미지정이면 소스 그대로 -- 목적지 스토리지가 PV 를 담는 종류면 그
+                스토리지 기본 소유자(2026-10-26 사용자 결정 (4), 위 directDest). */}
+            {body.operation === "sync" && (
+              <SummaryRow label="목적지 소유">
+                {syncOwnership({ chown: String(body.options?.chown ?? ""),
+                                 chmod: String(body.options?.chmod ?? ""), root: true,
+                                 runAs: null, self: true, directDest }).short}
+              </SummaryRow>
+            )}
+          </SummaryList>
+        </ReviewCard>
+        <ReviewCard title="항목" onEdit={() => wizard.go("items")}>
+          <SummaryList>
+            <SummaryRow label="항목 수">
+              {incompleteRows > 0 ? `${body.items.length} (경로 빈 항목 ${incompleteRows})` : body.items.length}
+            </SummaryRow>
+          </SummaryList>
+          {/* 앞 5행 미니 표(바디의 items 에서 -- 화면 거짓말 금지). 긴 무공백 경로가 카드를 밀지 않게 고정 표 + 아무 데서나 줄바꿈. */}
+          {previewRows.length > 0 && (
+            <table className="mt-3 w-full table-fixed text-xs">
+              <thead className="text-left text-muted">
+                <tr>
+                  <th className="w-8 pb-1 font-normal">#</th>
+                  <th className="pb-1 font-normal">{body.operation === "sync" ? "소스" : body.operation === "rm" ? "삭제할 경로" : "경로"}</th>
+                  {body.operation === "sync" && <th className="pb-1 font-normal">목적지</th>}
+                </tr>
+              </thead>
+              <tbody>
+                {previewRows.map((it, i) => (
+                  <tr key={i} className="border-t border-line align-top">
+                    <td className="py-1 tabular-nums text-muted">{i + 1}</td>
+                    <td className="py-1 font-mono [overflow-wrap:anywhere]">{"target" in it ? it.target : it.source}</td>
+                    {"destination" in it && <td className="py-1 font-mono [overflow-wrap:anywhere]">{it.destination}</td>}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          {body.items.length > previewRows.length && (
+            <p className="mt-1 text-xs text-muted">{`외 ${body.items.length - previewRows.length}행`}</p>
+          )}
+        </ReviewCard>
+        <ReviewCard title="옵션·실행 제어" onEdit={() => wizard.go("controls")}>
+          <SummaryList>
+            <SummaryRow label="옵션"><OptionTokens options={body.options} /></SummaryRow>
+            <SummaryRow label="우선순위">{body.priority ?? "(정책 기본)"}</SummaryRow>
+            <SummaryRow label="노드 수">{body.node_count ?? "(정책 기본)"}</SummaryRow>
+            <SummaryRow label="노드당 프로세스">{body.procs_per_node ?? "(정책 기본)"}</SummaryRow>
+            {/* 실행 신원 행은 값이 있을 때만(빈값 = 생성자 본인) */}
+            {body.owner_username && <SummaryRow label="실행 신원">{body.owner_username}</SummaryRow>}
+            {/* 실행 확인 방식(sync·rm — scan 은 확인 단계가 없다). 바디에서 파생(화면 거짓말 금지). */}
+            {body.operation === "sync" && (
+              <SummaryRow label="실행 확인">
+                {body.auto_confirm === true ? "자동 — 미리보기가 끝나면 바로 실행" : "직접 — 미리보기 후 「배치 확인」"}
+              </SummaryRow>
+            )}
+            {body.operation === "rm" && (
+              <SummaryRow label="실행 확인" className={body.auto_confirm === true ? "text-bad" : ""}>
+                {body.auto_confirm === true ? "자동 — 미리보기가 끝나면 확인 없이 삭제" : "직접 — 미리보기 후 「배치 확인」"}
+              </SummaryRow>
+            )}
+            {/* 비운 동시 상한은 Number("")=0 이 아니라 "—"(제출은 그 상태로 막힌다) */}
+            <SummaryRow label="동시 상한">{f.mc.trim() === "" ? "—" : body.max_concurrency}</SummaryRow>
+          </SummaryList>
+        </ReviewCard>
       </div>
       <div className="min-w-0 space-y-4">
         {f.op === "sync" && syncConditions}
@@ -977,45 +1067,23 @@ export function BatchCreate() {
     </div>
   );
 
-  // 검토 요약 행 -- 제출 바디에서 파생(화면 거짓말 금지). 라벨은 옛 생성 요약 그대로.
-  const summaryRows = (
-    <>
-      <SummaryRow label="연산">{body.operation}</SummaryRow>
-      <SummaryRow label="스토리지">{storageText}</SummaryRow>
-      <SummaryRow label="항목 수">
-        {incompleteRows > 0 ? `${body.items.length} (경로 빈 항목 ${incompleteRows})` : body.items.length}
-      </SummaryRow>
-      <SummaryRow label="옵션"><OptionTokens options={body.options} /></SummaryRow>
-      <SummaryRow label="우선순위">{body.priority ?? "(정책 기본)"}</SummaryRow>
-      <SummaryRow label="노드 수">{body.node_count ?? "(정책 기본)"}</SummaryRow>
-      <SummaryRow label="노드당 프로세스">{body.procs_per_node ?? "(정책 기본)"}</SummaryRow>
-      {/* 특권 실행 표시는 고정 행(통일 게이트 — 입력과 무관), 실행 신원 행은 값이 있을 때만
-          (빈값 = 생성자 본인) */}
-      <SummaryRow label="실행 권한" className={body.operation === "rm" ? "text-bad" : ""}>관리자 특권(root)</SummaryRow>
-      {/* sync 결과 소유(2026-10-01): 배치는 root 라 chown 미지정이면 소스 그대로 -- 목적지 스토리지가 PV 를 담는 종류면 그
-          스토리지 기본 소유자(2026-10-26 사용자 결정 (4), 위 directDest). */}
-      {body.operation === "sync" && (
-        <SummaryRow label="목적지 소유">
-          {syncOwnership({ chown: String(body.options?.chown ?? ""),
-                           chmod: String(body.options?.chmod ?? ""), root: true,
-                           runAs: null, self: true, directDest }).short}
-        </SummaryRow>
-      )}
-      {body.owner_username && <SummaryRow label="실행 신원">{body.owner_username}</SummaryRow>}
-      {/* 실행 확인 방식(sync·rm — scan 은 확인 단계가 없다). 바디에서 파생(화면 거짓말 금지). */}
-      {body.operation === "sync" && (
-        <SummaryRow label="실행 확인">
-          {body.auto_confirm === true ? "자동 — 미리보기가 끝나면 바로 실행" : "직접 — 미리보기 후 「배치 확인」"}
-        </SummaryRow>
-      )}
-      {body.operation === "rm" && (
-        <SummaryRow label="실행 확인" className={body.auto_confirm === true ? "text-bad" : ""}>
-          {body.auto_confirm === true ? "자동 — 미리보기가 끝나면 확인 없이 삭제" : "직접 — 미리보기 후 「배치 확인」"}
-        </SummaryRow>
-      )}
-      {/* 비운 동시 상한은 Number("")=0 이 아니라 "—"(제출은 그 상태로 막힌다) */}
-      <SummaryRow label="동시 상한">{f.mc.trim() === "" ? "—" : body.max_concurrency}</SummaryRow>
-    </>
+  // 검토 오른쪽 note 머리: 제목 + 「④로 가기」(옵션·실행 제어 -- 소유권·자동 실행을 고치는 곳) + 「수정」(② 스토리지). role="note" 와
+  // aria-label 은 옛 계약 그대로라 ReviewCard 로 감싸지 않는다. 버튼 이름은 내용(sr-only)에서 만든다(aria-label 이면 getByLabel 부분
+  // 일치가 버튼까지 잡는다 -- ReviewCard 주석).
+  const noteHead = (title: string, tone: "info" | "bad") => (
+    <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+      <h3 className={`text-sm font-bold ${tone === "bad" ? "text-bad" : "text-ink"}`}>{title}</h3>
+      <div className="flex flex-wrap items-center gap-3">
+        <button type="button" onClick={() => wizard.go("controls")}
+                className="text-xs font-semibold text-accent hover:text-accenthover hover:underline hover:underline-offset-2">
+          <span aria-hidden>④로 가기</span><span className="sr-only">옵션·실행 제어로 가기</span>
+        </button>
+        <button type="button" onClick={() => wizard.go("storage")}
+                className="text-xs font-semibold text-accent hover:text-accenthover hover:underline hover:underline-offset-2">
+          <span aria-hidden>수정</span><span className="sr-only">{`수정: ${title}`}</span>
+        </button>
+      </div>
+    </div>
   );
 
   // 목적지 조건과 소유권(2026-09-30 상위 디렉토리 조건, 2026-10-01 "목적지가 없는 경우" +
@@ -1027,9 +1095,9 @@ export function BatchCreate() {
   // BatchDetail SyncDestHint 가 "상세 규칙은 배치 생성 화면의 안내" 로 이 노트를 가리킨다.
   // 단계별 등록(2026-11-26)부터 ⑤ 검토에 펼친 채 둔다(② 는 한 줄) -- chown 방향어는 단계 이름(「아래」는 거짓).
   const syncConditions = (
-    <div className="rounded-card bg-infobg p-3 text-xs" role="note" aria-label="목적지 조건과 소유권">
-      <p className="font-medium text-sm">목적지 조건과 소유권</p>
-      <ul className="mt-1 list-disc space-y-0.5 pl-5">
+    <section className="min-w-0 rounded-xl bg-infobg px-4 py-4 text-xs sm:px-5" role="note" aria-label="목적지 조건과 소유권">
+      {noteHead("목적지 조건과 소유권", "info")}
+      <ul className="list-disc space-y-0.5 pl-5">
         <li><strong>목적지가 없는 경우</strong>: sync 가 목적지 디렉토리를 새로 만듭니다 — 각 목적지의
           상위 디렉토리는 이미 있어야 합니다(중간 디렉토리는 만들지 않습니다).</li>
         <li><strong>목적지가 이미 있는 경우</strong>: 디렉토리여야 합니다(파일이면 그 항목은 거부).</li>
@@ -1040,14 +1108,16 @@ export function BatchCreate() {
         <li>{SYNC_PATH_LINK_RULE}</li>
         <li>조건이 맞지 않는 항목은 미리보기 전에 거부됩니다 — 그 항목은 아무것도 복사되지 않습니다.</li>
       </ul>
-    </div>
+      <p className="mt-2 text-xs text-attn">{SYNC_DSYNC_SPECIAL_FILE_NOTE}</p>
+    </section>
   );
 
   // 삭제 범위(2026-10-21, ⑤ 전문): 무엇이·누구 권한으로·언제 지워지는지를 생성 화면이 먼저 말한다.
   const rmScopeNote = (
-    <div className="rounded-card border border-bad/30 bg-badbg p-3 text-xs text-bad" role="note" aria-label="삭제 범위">
-      <p className="text-sm font-medium">삭제 범위</p>
-      <ul className="mt-1 list-disc space-y-0.5 pl-5">
+    <section className="min-w-0 rounded-xl border border-bad/30 bg-badbg px-4 py-4 text-xs text-bad sm:px-5" role="note"
+             aria-label="삭제 범위">
+      {noteHead("삭제 범위", "bad")}
+      <ul className="list-disc space-y-0.5 pl-5">
         {rmScopeHead}
         {rmScopeRoot}
         <li>관리 디렉토리 자신(.)·「..」·「/」로 시작하는 경로는 받지 않고, 한 배치 안에서 겹치는 경로(같은 경로·
@@ -1057,7 +1127,7 @@ export function BatchCreate() {
         <li>{RM_PATH_LINK_RULE}</li>
         {rmWhenBullet}
       </ul>
-    </div>
+    </section>
   );
 
   // 단계 카드 머리 한 줄. 스토리지는 옛 구획 caption 그대로.
@@ -1069,8 +1139,8 @@ export function BatchCreate() {
         ? "한 배치는 하나의 스토리지만 대상으로 합니다 — 행마다 지울 경로를 입력합니다."
         : "한 배치는 하나의 스토리지만 대상으로 합니다 — 행은 경로만 입력합니다.",
     items: "행마다 잡 하나가 만들어집니다 — 경로는 고른 스토리지의 관리 디렉토리 아래 상대경로입니다.",
-    controls: "기본값 그대로도 충분합니다.",
-    review: "만들기 전에 한 화면에서 확인하세요.",
+    controls: "기본값 그대로도 충분합니다. 켠 옵션은 자세한 안내가 저절로 펼쳐집니다.",
+    review: "만들기 전에 한 화면에서 확인하세요. 「수정」을 누르면 그 단계로 돌아갑니다.",
   };
 
   return (
@@ -1094,6 +1164,8 @@ export function BatchCreate() {
           doneHint="생성하면 배치 상세로 이동합니다."
           onCancel={() => nav("/admin/batches")}
           submit={{ label: "배치 생성", onClick: handleSubmit, disabled: blocked,
+                    // rm 검토의 생성은 빨간 솔리드(사용자 결정 -- 주 동작 자체가 파괴적일 때만 destructive)
+                    variant: body.operation === "rm" ? "destructive" : "primary",
                     describedBy: hints.length > 0 ? "batch-create-hints" : undefined }}
           strip={wizard.current === "review" && body.operation === "rm" ? (body.auto_confirm === true
             ? "삭제는 되돌릴 수 없습니다. 자동 실행이 켜져 있어 항목별 미리보기가 끝나는 즉시 「배치 확인」 없이 삭제됩니다."
@@ -1104,20 +1176,35 @@ export function BatchCreate() {
             {create.isError && <p className="text-bad text-sm">{(create.error as ApiError).message}</p>}
           </>) : undefined} />
       </WizardShell>
+      {/* PV 에서 경로 찾기 -- 오른쪽 시트(모달). 셸 밖에 둔다(셸의 Enter 규칙이 시트 안 칸에 닿지 않게 -- 포털이어도 React 이벤트는
+          React 조상으로 버블링한다). 넣은 뒤에도 열어 둔다(상태 줄이 넣은 행을 말한다). 닫으면 연 버튼으로 포커스. */}
+      <Dialog side="right" title="PV 에서 경로 찾기" subtitle={PV_PATH_PICKER_NOTE} open={pvSheetOpen} onOpenChange={setPvSheetOpen}
+              onCloseAutoFocus={(e) => { e.preventDefault(); pvOpener.current?.focus(); }}>
+        <PvPathPicker variant="sheet" op={f.op}
+                      storages={f.op === "sync" ? { a: f.srcStorage, b: f.dstStorage } : { a: f.storage, b: "" }}
+                      onInsert={insertFromPv} />
+        <p role="status" className="mt-3 text-sm text-ok">{pvInsertMsg}</p>
+      </Dialog>
     </section>
   );
 }
 
-// 실행 신원 도움말(④) -- rm·그 밖 두 갈래. 2026-09-30 정정의 「왜」는 실행 신원 칸 주석.
+// CSV 붙여넣기 설명 전문(③ -- 요약은 optionRules HELP_SUMMARY.csvApply = 이 첫 문장).
+const CSV_PASTE_HELP = "반영하면 표의 행을 통째로 바꿉니다(이어 붙이지 않음). 서버가 생성과 같은 규칙으로 줄마다 검사하고, 오류가 "
+  + "있으면 반영하지 않습니다. 첫 줄이 헤더(target·path / source,destination)면 열 이름으로 읽어 「CSV 내보내기」 파일도 그대로 쓸 "
+  + "수 있고, 콤마가 든 경로는 \"…\" 로 감쌉니다.";
+// 실행 신원 도움말(④) -- rm·그 밖 두 갈래(요약은 optionRules HELP_SUMMARY.runAs). 2026-09-30 정정의 「왜」는 실행 신원 칸 주석.
 const RUN_AS_HELP_RM = "배치는 관리자 이관·정리용이라 root 로 실행됩니다 — 실행 신원은 기록용 이름이며 파일 권한 검사는 적용되지 "
   + "않아, 실행 신원이 지울 수 없는 파일도 지웁니다.";
 const RUN_AS_HELP = "배치는 관리자 이관·정리용이라 root 로 실행됩니다 — 실행 신원은 기록용 이름이며 파일 권한 검사는 적용되지 "
   + "않고, sync 는 목적지(이미 있는 디렉토리 포함)의 소유자·권한을 소스와 같게 바꿉니다(chown·chmod 지정 시 그 값).";
 // nsync 면당 캡(placement.py:121-122): resolve_fanout 은 nsync(공존 노드 없음 폴백)에서 max_nodes·요청 node_count 를 출발·목적지
 // **각각**에 min-캡한다 — 입력값이 면당 상한이라 총 노드는 최대 2배. dsync 는 공존 노드 단일 집합(primary)이라 해당 없음. 정책 조회
-// 상태와 무관한 배치 메커니즘 사실이라 sync 에선 항상 표기한다.
+// 상태와 무관한 배치 메커니즘 사실이라 sync 에선 항상 싣는다.
 const NSYNC_PER_SIDE_NOTE = "nsync 폴백 시 입력한 노드 수는 출발·목적지 각각(면당)의 상한이라 총 노드는 최대 2배가 될 수 있습니다.";
-// 자동 실행 도움말(④). 켜면 무엇을 생략하는지를 그대로 말한다(실행은 root).
+// 자동 실행 도움말(④). 켜면 무엇을 생략하는지를 그대로 말한다(실행은 root). 요약 — 전문은 바로 아래 AUTO_RUN_HELP(_RM) 의 첫 절.
+const AUTO_RUN_SUMMARY_RM = "켜면 미리보기가 끝나는 즉시 「배치 확인」 없이 삭제(root)됩니다.";
+const AUTO_RUN_SUMMARY = "켜면 미리보기가 끝나는 즉시 「배치 확인」 없이 실행(root)됩니다.";
 const AUTO_RUN_HELP_RM = "켜면 모든 항목의 미리보기(지울 항목 수)가 끝나는 즉시 「배치 확인」 없이 삭제(root)됩니다 — 지울 대상을 "
   + "보고 확인하는 단계를 건너뜁니다. 미리보기는 그대로 돌고 항목별로 남습니다. 진행 중에도 배치 화면에서 끌 수 있습니다.";
 const AUTO_RUN_HELP = "켜면 모든 항목의 미리보기가 끝나는 즉시 「배치 확인」 없이 실행(root)됩니다 — 미리보기 결과를 보고 "

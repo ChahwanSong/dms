@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { STORAGE_NAME } from "./harness/env";
 import { apiLogin } from "./helpers/session";
-import { wizardNext } from "./helpers/wizard";
+import { chooseOperation, pickStorageCard, wizardNext } from "./helpers/wizard";
 
 // E8 — sync 배치 자동 확인(2026-10-11 사용자 결정: 단건 sync 는 사람이 승인, 배치 sync 는 자동 승인을 옵션으로 —
 // 기본 꺼짐). 단위 테스트가 못 보는 것을 여기서 본다: 생성 화면의 체크박스 → 실 서버 저장 → **실 오케스트레이터가
@@ -25,12 +25,13 @@ test.describe("E8 — sync 배치 자동 확인", () => {
     const stamp = Date.now().toString(36);
     // 단계별 등록(2026-11-26): ① sync → ② 소스·목적지 스토리지 → ③ 1행 → ④ 자동 실행 → ⑤ 「배치 생성」.
     await page.goto("/admin/batches/new");
-    await page.getByLabel("연산", { exact: true }).selectOption("sync");
+    await chooseOperation(page, "sync");
     await wizardNext(page, "스토리지");
-    const src = page.getByLabel("소스 스토리지", { exact: true });
-    await expect(src.getByRole("option", { name: STORAGE_NAME })).toBeAttached();
-    await src.selectOption(STORAGE_NAME);
-    await page.getByLabel("목적지 스토리지", { exact: true }).selectOption(STORAGE_NAME);
+    await pickStorageCard(page, "소스 스토리지", STORAGE_NAME);
+    await pickStorageCard(page, "목적지 스토리지", STORAGE_NAME);
+    // 묶음마다 다른 라디오 name -- 목적지를 골라도 소스 선택이 남는다(실 브라우저 라디오 묶음 규칙)
+    await expect(page.getByRole("radiogroup", { name: "소스 스토리지", exact: true })
+      .getByRole("radio", { name: new RegExp(`^${STORAGE_NAME}( |$)`) })).toBeChecked();
     await wizardNext(page, "항목");
     await page.getByLabel("1행 소스").fill(`auto-src-${stamp}`);
     await page.getByLabel("1행 목적지").fill(`auto-dst-${stamp}`);

@@ -2,6 +2,8 @@
 // 2026-10-06: 4스텝 위저드 → 한 장짜리 시트 + 오른쪽 생성 요약. 2026-11-26: 단계별 등록(사용자 결정 「초안 1 상단 스테퍼」 --
 // 작업 종류 → 스토리지 → 항목 → 옵션·실행 제어 → 이름·검토). 단계의 막힘은 「다음」(aria-disabled) + 바 이유 줄로, 최종 막힘은
 // 「배치 생성」 disabled 로 단언한다. **제출 바디 단언(toEqual)은 원문 보존** -- 단계로 나눠도 바디는 바이트 단위로 같아야 한다.
+// 연산·스토리지는 카드형 라디오(접근 이름은 옛 select·옵션 글자 그대로 -- 연산 이름·「이름 (백엔드)」), 칸 옆 긴 설명은 「요약 + 자세히」
+// (MoreText -- 접혀도 DOM 에 있어 「보인다」는 toBeVisible), 검토는 카드 + 「수정」.
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
@@ -11,13 +13,17 @@ import { http, HttpResponse } from "msw";
 import { beforeAll, afterAll, afterEach, test, expect } from "vitest";
 import { BatchCreate } from "./BatchCreate";
 import { STORAGE_EMPTY_CSV_BAR } from "./batchGates";
-import { BUFSIZE_HELP, DIRECT_HELP, OPEN_NOATIME_HELP, QUIET_HELP, SYNC_INT_FIELDS, SYNC_MAX_ERRORS_NOTE, SYNC_OPTION_HELP }
-  from "../jobs/optionRules";
+import {
+  BUFSIZE_HELP, DIRECT_HELP, HELP_SUMMARY, OPEN_NOATIME_HELP, QUIET_HELP, SYNC_DSYNC_SPECIAL_FILE_NOTE, SYNC_INT_FIELDS,
+  SYNC_MAX_ERRORS_NOTE, SYNC_OPTION_HELP,
+} from "../jobs/optionRules";
 import { RM_PATH_LINK_RULE, SYNC_PATH_LINK_RULE } from "../../lib/storagePaths";
 import { REASON_MESSAGES } from "../../lib/api";
 import { NODE_CPU_CAP_NOTE } from "../../lib/jobTool";
 import { parseCsvHandler } from "../../test/batchCsvFake";
-import { buttonsWithoutType, goStep, next, nextButton, reasonLine, stepCard, stepHeading, toReview } from "../../test/wizard";
+import {
+  buttonsWithoutType, chooseOp, goStep, next, nextButton, pickStorageCard, reasonLine, stepCard, stepHeading, storageChecked, toReview,
+} from "../../test/wizard";
 
 // sync 고급 숫자 옵션의 프리필 기본값(사용자 조정 2026-08-16) — 단건 폼과 **같은**
 // 단일 출처(optionRules)를 읽는다. 프리필이라 sync 배치 바디엔 항상 실린다.
@@ -84,20 +90,14 @@ const createButton = () => screen.getByRole("button", { name: "배치 생성" })
 
 // ---- 단계 이동 헬퍼(끝 상태는 「그 단계에 머문다」 -- 바디 시험은 그 뒤 toReview() → 「배치 생성」) ----------------------------
 
-/** ① 연산 고르기. */
-async function chooseOperation(op: "scan" | "sync" | "rm") {
-  await userEvent.selectOptions(await screen.findByLabelText("연산"), op);
-}
+/** ① 연산 카드 고르기(radiogroup 「연산」 -- 라디오 이름 = 연산 이름). */
+const chooseOperation = chooseOp;
 
-// 스토리지 목록 로드를 option 등장으로 기다린 뒤 고른다(로딩 중 select 는 disabled 라 user-event 가 조용히 무시한다).
-async function pickStorage(label: string, value: string) {
-  const sel = await screen.findByLabelText(label);
-  // 옵션 글자 = 「이름 (백엔드)」(2026-10-26 BatchStoragePicker) -- 이름 앞부분으로 찾고 값(이름)으로 고른다.
-  await within(sel).findByRole("option", { name: new RegExp(`^${value}( |$)`) });
-  await userEvent.selectOptions(sel, value);
-}
+// ② 스토리지 카드 고르기 -- 라디오 접근 이름 = 「이름 (백엔드)」(BatchStoragePicker storageOptionText) 라 이름 앞부분으로 찾는다.
+// 목록 로드를 카드 등장으로 기다린다(findByRole).
+const pickStorage = pickStorageCard;
 /** ② 지금 고른 스토리지 이름(없으면 ""). */
-const storageValue = (label: string) => (screen.getByLabelText(label) as HTMLSelectElement).value;
+const storageValue = (label: string) => (storageChecked(label) as HTMLInputElement | null)?.value ?? "";
 
 const toStorage = () => next("스토리지");
 const toItems = () => next("항목");
@@ -163,7 +163,7 @@ test("스테퍼 다섯 단계 · 현재 단계 카드만 그린다 · 처음은 
 test("단계 바는 남은 입력을 필드 문구와 다른 문장으로 말하고, 다 채우면 다음 단계 이름을 보인다", async () => {
   renderPage();
   await toStorage();
-  await screen.findByRole("option", { name: /^s1 / });
+  await screen.findByRole("radio", { name: /^s1 / });
   expectNextBlocked("스토리지를 고르세요");
   expect(nextButton()).toHaveAccessibleDescription(/스토리지를 고르세요/);
   // 막힌 「다음」을 눌러도 단계는 그대로
@@ -794,15 +794,32 @@ test("sync 기본 제출: open_noatime 기본 ON — 바디에 true 명시, 검�
   expect(captured.body.options).toEqual({ ...SYNC_NUM_DEFAULTS, open_noatime: true });
 });
 
-test("sync 배치 옵션 설명: delete·contents·direct·quiet·open_noatime 이 칸 옆에 보이고 경로 링크 규칙을 말한다(d190·d192 이식)", async () => {
+test("sync 배치 옵션 설명: delete·contents·direct·quiet 은 요약이 늘 보이고 켜거나 「자세히」면 전문 -- 경로 링크 규칙을 말한다(d190·d192 이식)", async () => {
   // d192: 예전 sync quiet 는 설명이 아예 없었고(괴리 [9]·[13]) direct 는 title 툴팁(+ sr-only)뿐, open_noatime 은 「통계를
   // 정직하게」를 조건 없이 약속했다([C3]). delete 는 「완전히 동일하게」([3]·[25]·[28]), contents 는 「바이트 단위」([24]).
+  // 단계별 등록(2026-11-26): 칸 옆 설명은 「요약 한 줄 + 자세히」(MoreText) -- 요약이 핵심 사실(quiet = 실패 원인까지 지움, direct =
+  // nsync 에선 무시 + bufsize 조건)을 담고, 전문은 접혀 있다가 「자세히」 한 번 또는 켜면 보인다. 접혀도 전문은 DOM 에 있어
+  // getByText 는 찾으므로 「보인다」는 toBeVisible 로 단언한다.
   renderPage();
   await fillSync();
   await toControls();
+  for (const summary of [HELP_SUMMARY.delete, HELP_SUMMARY.contents, HELP_SUMMARY.direct, HELP_SUMMARY.quietSync])
+    expect(screen.getAllByText(summary)[0]).toBeVisible();
   for (const help of [SYNC_OPTION_HELP.delete, SYNC_OPTION_HELP.contents, DIRECT_HELP, QUIET_HELP.sync])
-    expect(screen.getByText(help)).toBeInTheDocument();
+    expect(screen.getByText(help)).not.toBeVisible();
+  expect(HELP_SUMMARY.direct).toContain("dsync 로 실행될 때만 적용되고 켜면 bufsize 조건");
+  // 켜면 그 전문이 펼쳐진다(켠 옵션은 설명을 숨기지 않는다)
+  await userEvent.click(screen.getByLabelText("direct"));
+  expect(screen.getByText(DIRECT_HELP)).toBeVisible();
+  // 「자세히」는 버튼(type="button")이고 aria-expanded 로 펼침을 말한다
+  const quietCard = screen.getByLabelText("quiet").closest("div.rounded-xl") as HTMLElement;
+  const more = within(quietCard).getByRole("button", { name: "자세히" });
+  expect(more).toHaveAttribute("aria-expanded", "false");
+  await userEvent.click(more);
+  expect(screen.getByText(QUIET_HELP.sync)).toBeVisible();
   expect(screen.getByLabelText("direct").closest("label")).not.toHaveAttribute("title");
+  // delete 를 꺼도 지우는 dsync 의 경우는 늘 보이는 한 줄(전문을 펼치지 않아도) -- 미리보기에 안 나오는 사실까지
+  expect(screen.getByText(SYNC_DSYNC_SPECIAL_FILE_NOTE)).toBeVisible();
   expect(DIRECT_HELP).toMatch(/dsync 로 실행될 때만 적용되고, .*nsync 로 실행되면 무시됩니다/);
   expect(SYNC_OPTION_HELP.delete).not.toContain("완전히 동일하게");
   expect(SYNC_OPTION_HELP.delete).toContain("끄면 그 항목은 실패로 남습니다");
@@ -817,14 +834,31 @@ test("sync 배치 옵션 설명: delete·contents·direct·quiet·open_noatime �
   expect(SYNC_OPTION_HELP.contents).toContain("미리보기가 실패합니다");
   // dms-k8s: 배치·단건 모두 root 라 open_noatime 문구는 하나(OPEN_NOATIME_HELP -- dms-ssc 의 BATCH_OPEN_NOATIME_HELP 를 두지 않는다)
   await openAdvanced();
-  expect(screen.getByText(OPEN_NOATIME_HELP)).toBeInTheDocument();
+  expect(screen.getByText(OPEN_NOATIME_HELP)).toBeVisible();
   expect(OPEN_NOATIME_HELP).toContain("읽기가 atime 을 바꾸지 않는 곳에선 차이가 없습니다");
   expect(OPEN_NOATIME_HELP).toContain("(끄면 sync 가 읽은 cold 파일이 hot 이 됩니다)");
-  // nsync 실패 한도(괴리 [21])는 sync 실행 옵션 caption
-  expect(screen.getByText(SYNC_MAX_ERRORS_NOTE)).toBeInTheDocument();
+  // nsync 실패 한도(괴리 [21])는 sync 실행 옵션 caption -- 요약은 늘, 전문은 「자세히」
+  expect(screen.getByText(HELP_SUMMARY.maxErrors)).toBeVisible();
+  expect(screen.getByText(SYNC_MAX_ERRORS_NOTE)).not.toBeVisible();
   // d191·통일 봉쇄의 링크 규칙(괴리 [14]) -- ⑤ 검토의 목적지 조건 안내에 들어 있다
   await toReviewStep();
   expect(screen.getByRole("note", { name: "목적지 조건과 소유권" })).toHaveTextContent(SYNC_PATH_LINK_RULE);
+});
+
+test("실행 제어의 긴 캡션(실행 신원·정책·CPU 상한·nsync 면당)은 요약이 늘 보이고 「자세히」면 전문", async () => {
+  renderPage();
+  await fillSync();
+  await toControls();
+  expect(screen.getByText(HELP_SUMMARY.runAs)).toBeVisible();
+  expect(screen.getByText(HELP_SUMMARY.controlsPolicy)).toBeVisible();
+  const policy = await screen.findByText(/^정책 기본\(dsync\): 최대 6노드/);
+  expect(policy).not.toBeVisible();
+  expect(screen.getByText(NODE_CPU_CAP_NOTE)).not.toBeVisible();
+  const box = screen.getByText(HELP_SUMMARY.controlsPolicy).closest("div") as HTMLElement;
+  await userEvent.click(within(box).getByRole("button", { name: "자세히" }));
+  expect(policy).toBeVisible();
+  expect(screen.getByText(NODE_CPU_CAP_NOTE)).toBeVisible();
+  expect(screen.getByText(/총 노드는 최대 2배가 될 수 있습니다/)).toBeVisible();
 });
 
 test("sync 배치: direct 를 켜면 bufsize 는 4096·2^k ≤ 4 MiB 만 — 서버와 같은 문장으로 즉답·잠금, 고친 값은 그대로 실린다", async () => {
@@ -1403,7 +1437,7 @@ test("「스토리지를 CSV 로 정하기」: 스토리지를 비운 채 ③ �
     items: [{ storage: "s2", target: "x" }], errors: [], error_count: 0, rows: 1,
     header: ["storage", "target"], storages: { storage: "s2" } })));
   await toStorage();
-  await screen.findByRole("option", { name: /^s2 / });
+  await screen.findByRole("radio", { name: /^s2 / });
   expectNextBlocked("스토리지를 고르세요");
   await userEvent.click(screen.getByRole("button", { name: "스토리지를 CSV 로 정하기" }));
   expect(screen.getByText("비어 있는 스토리지는 CSV 의 storage 열로 채웁니다")).toBeInTheDocument();
@@ -1476,29 +1510,44 @@ function renderWithStorages(storages: object[]) {
   mount();
 }
 
-test("스토리지 드롭다운: 종류별 묶음 + 「이름 (백엔드)」, 고르면 백엔드·종류·관리 디렉토리 캡션", async () => {
+test("스토리지 카드: 종류별 묶음 + 「이름 (백엔드)」 라디오, 고르면 백엔드·종류·관리 디렉토리 캡션", async () => {
   renderWithStorages([
     { storage_name: "s1", backend_type: "cephfs", status: "Ready", managed_root: "/cephfs/managed", kind: "filesystem" },
     { storage_name: "g1", backend_type: "gpfs", status: "Ready", kind: "both", admin_only: true },
     { storage_name: "n1", backend_type: "nfs", status: "Ready", kind: "pv" },
   ]);
   await toStorage();
-  const sel = await screen.findByLabelText("스토리지");
-  await within(sel).findByRole("option", { name: "s1 (cephfs)" });
-  const groups = within(sel).getAllByRole("group");
-  expect(groups.map((g) => g.getAttribute("label"))).toEqual(["파일시스템", "PV·파일시스템", "PV"]);
-  expect(within(groups[1]).getByRole("option", { name: "g1 (gpfs) · 관리자 전용" })).toBeInTheDocument();
-  expect(within(groups[2]).getByRole("option", { name: "n1 (nfs)" })).toBeInTheDocument();
-  await userEvent.selectOptions(sel, "s1");
+  const group = await screen.findByRole("radiogroup", { name: "스토리지" });
+  await within(group).findByRole("radio", { name: "s1 (cephfs)" });
+  const kinds = within(group).getAllByRole("group");
+  expect(kinds.map((g) => g.getAttribute("aria-label"))).toEqual(["파일시스템", "PV·파일시스템", "PV"]);
+  expect(within(kinds[1]).getByRole("radio", { name: "g1 (gpfs) · 관리자 전용" })).toBeInTheDocument();
+  expect(within(kinds[2]).getByRole("radio", { name: "n1 (nfs)" })).toBeInTheDocument();
+  expect(within(kinds[0]).getByText("/cephfs/managed")).toBeInTheDocument();      // 카드에 관리 디렉토리
+  await pickStorage("스토리지", "s1");
   expect(screen.getByText("cephfs · 파일시스템 · 관리 디렉토리: /cephfs/managed — 입력 경로는 이 아래 상대경로입니다"))
     .toBeInTheDocument();
+  expect(reasonLine()).toHaveTextContent("다음: 항목");
+});
+
+test("스토리지 카드 묶음은 묶음마다 다른 라디오 name 이다 — sync 에서 목적지를 골라도 소스 선택이 남는다", async () => {
+  renderPage();
+  await chooseOperation("sync");
+  await toStorage();
+  await pickStorage("소스 스토리지", "s1");
+  await pickStorage("목적지 스토리지", "s2");
+  expect(storageValue("소스 스토리지")).toBe("s1");
+  expect(storageValue("목적지 스토리지")).toBe("s2");
+  const names = new Set(screen.getAllByRole("radio").map((r) => r.getAttribute("name")));
+  expect(names).toEqual(new Set(["batch-storage-src", "batch-storage-dst"]));
 });
 
 test("스토리지 목록이 비면 스토리지 관리로 가는 길을 말한다", async () => {
   renderWithStorages([]);
   await toStorage();
-  expect(await screen.findByRole("option", { name: "등록된 스토리지가 없습니다" })).toBeInTheDocument();
+  expect(await screen.findByText(/켜진 스토리지가 없습니다/)).toBeInTheDocument();
   expect(screen.getByRole("link", { name: "스토리지 관리" })).toHaveAttribute("href", "/admin/storages");
+  expect(within(screen.getByRole("radiogroup", { name: "스토리지" })).queryAllByRole("radio")).toHaveLength(0);
 });
 
 // 2026-10-26 사용자 결정 (4): 직접 경로 목적지의 스토리지가 PV 를 담는 종류면 그 스토리지 기본 소유자(서버가 자식 생성 때 항목마다
@@ -1538,4 +1587,85 @@ test("sync 배치 목적지 소유: pv 종류는 스토리지 기본 소유자, 
   await userEvent.type(screen.getByLabelText("chown"), "7:7");
   await toReviewStep();
   expect(summaryRow("목적지 소유")).toHaveTextContent("chown 지정값 7:7");
+});
+
+// ---- 검토 카드·수정 점프·겉모양(B2) -------------------------------------------------------------------------------------
+
+test("검토 「수정」은 그 단계로 가 제목에 포커스하고, 바의 「검토로 돌아가기」로 돌아온다 — note 의 「옵션·실행 제어로 가기」는 ④", async () => {
+  renderPage();
+  await fillSync();
+  await toReviewStep();
+  await userEvent.click(screen.getByRole("button", { name: "수정: 스토리지" }));
+  expect(stepHeading()).toHaveTextContent("스토리지");
+  expect(stepHeading()).toHaveFocus();
+  await userEvent.click(screen.getByRole("button", { name: "검토로 돌아가기" }));
+  expect(stepHeading()).toHaveTextContent("이름·검토");
+  const note = screen.getByRole("note", { name: "목적지 조건과 소유권" });
+  await userEvent.click(within(note).getByRole("button", { name: "옵션·실행 제어로 가기" }));
+  expect(stepHeading()).toHaveTextContent("옵션·실행 제어");
+  await userEvent.click(screen.getByRole("button", { name: "검토로 돌아가기" }));
+  for (const [name, title] of [["수정: 작업", "작업 종류"], ["수정: 항목", "항목"], ["수정: 옵션·실행 제어", "옵션·실행 제어"],
+                               ["수정: 목적지 조건과 소유권", "스토리지"]] as const) {
+    await userEvent.click(screen.getByRole("button", { name }));
+    expect(stepHeading()).toHaveTextContent(title);
+    await userEvent.click(screen.getByRole("button", { name: "검토로 돌아가기" }));
+  }
+});
+
+test("검토의 항목 카드는 앞 5행 미니 표 + 「외 N행」(바디의 items 에서)", async () => {
+  renderPage();
+  await fillScan();
+  for (let i = 2; i <= 7; i += 1) {
+    await userEvent.click(screen.getByRole("button", { name: "행 추가" }));
+    await userEvent.type(screen.getByLabelText(`${i}행 경로`), `p${i}`);
+  }
+  await toReviewStep();
+  const table = within(stepCard()).getByRole("table");
+  expect(within(table).getAllByRole("row")).toHaveLength(1 + 5);
+  expect(within(table).getByText("p5")).toBeInTheDocument();
+  expect(within(table).queryByText("p6")).toBeNull();
+  expect(within(stepCard()).getByText("외 2행")).toBeInTheDocument();
+  expect(summaryRow("항목 수")).toHaveTextContent(/^항목 수7$/);
+});
+
+test("rm 검토의 「배치 생성」은 빨간 솔리드(destructive), sync 는 기본 색", async () => {
+  renderPage(RM_POLICIES);
+  await fillRm();
+  await toReviewStep();
+  expect(createButton()).toHaveClass("bg-bad");
+  expect(createButton()).not.toHaveClass("bg-accent");
+  await goStep("작업 종류");
+  await chooseOperation("sync");
+  await toStorage();
+  await pickStorage("소스 스토리지", "s1");
+  await pickStorage("목적지 스토리지", "s2");
+  await toItems();
+  await userEvent.type(screen.getByLabelText("1행 목적지"), "b");
+  await toReviewStep();
+  expect(createButton()).toHaveClass("bg-accent");
+  expect(createButton()).not.toHaveClass("bg-bad");
+});
+
+test("행을 지우면 포커스가 같은 번호 행의 삭제 버튼, 마지막 행이면 이전 행, 행이 없으면 「행 추가」로 간다", async () => {
+  renderPage();
+  await fillScan();
+  await userEvent.click(screen.getByRole("button", { name: "행 추가" }));
+  await userEvent.click(screen.getByRole("button", { name: "행 추가" }));
+  await userEvent.click(screen.getByRole("button", { name: "1행 삭제" }));
+  expect(screen.getByRole("button", { name: "1행 삭제" })).toHaveFocus();      // 같은 번호(옛 2행)
+  await userEvent.click(screen.getByRole("button", { name: "2행 삭제" }));
+  expect(screen.getByRole("button", { name: "1행 삭제" })).toHaveFocus();      // 마지막 행 → 이전 행
+  await userEvent.click(screen.getByRole("button", { name: "1행 삭제" }));
+  expect(screen.getByRole("button", { name: "행 추가" })).toHaveFocus();       // 0행
+});
+
+test("연산 카드: 세 카드가 늘 보이고 rm 은 「되돌릴 수 없음」 칩, 고른 카드만 자동 실행 문장으로 바뀐다", async () => {
+  renderPage();
+  const group = await screen.findByRole("radiogroup", { name: "연산" });
+  expect(within(group).getAllByRole("radio").map((r) => r.getAttribute("aria-label"))).toEqual(["scan", "sync", "rm"]);
+  expect(within(group).getByRole("radio", { name: "scan" })).toBeChecked();
+  expect(within(group).getByText("되돌릴 수 없음")).toBeInTheDocument();
+  await chooseOperation("rm");
+  expect(within(group).getByRole("radio", { name: "rm" })).toBeChecked();
+  expect(within(group).getByRole("radio", { name: "rm" })).toHaveAccessibleDescription(/「배치 확인」을 눌러야 삭제됩니다/);
 });

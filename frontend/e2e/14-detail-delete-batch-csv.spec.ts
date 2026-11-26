@@ -62,9 +62,10 @@ test.describe("E14 상세 삭제 · 배치 CSV", () => {
     await page.goto("/admin/batches/new");
     // 단계별 등록(2026-11-26): ② 「스토리지를 CSV 로 정하기」로 스토리지를 비운 채 ③ 으로 간다(CSV 의 스토리지 열이 채운다).
     await wizardNext(page, "스토리지");
-    // 스토리지 드롭다운: 종류별 묶음 + 「이름 (백엔드)」
-    const st = page.getByLabel("스토리지", { exact: true });
-    await expect(st.getByRole("option", { name: STORAGE_NAME })).toBeAttached();
+    // 스토리지 카드: 종류별 묶음 + 「이름 (백엔드)」 라디오
+    const st = page.getByRole("radiogroup", { name: "스토리지", exact: true })
+      .getByRole("radio", { name: new RegExp(`^${STORAGE_NAME}( |$)`) });
+    await expect(st).toBeAttached();
     await page.getByRole("button", { name: "스토리지를 CSV 로 정하기", exact: true }).click();
     await wizardNext(page, "항목");
 
@@ -83,7 +84,7 @@ test.describe("E14 상세 삭제 · 배치 CSV", () => {
     await page.getByRole("button", { name: "테이블에 반영" }).click();
     await expect(page.getByLabel("2행 경로")).toHaveValue(`${tag}/b,c`);
     await wizardGo(page, "스토리지");
-    await expect(st).toHaveValue(STORAGE_NAME);
+    await expect(st).toBeChecked();
     await toReview(page, "이름·검토");
     await page.getByLabel("배치 이름").fill(tag);
     await page.getByRole("button", { name: "배치 생성", exact: true }).click();

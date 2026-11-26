@@ -13,6 +13,9 @@ import type { VolumeRow } from "./types";
 // 때처럼 검색해서 찾아볼 수 있도록」). 배치 바디는 그대로 직접 경로(스토리지 + 관리 디렉토리 기준 상대경로)다 -- 이 패널은
 // PV 를 검색해 그 PV 의 직접 경로를 표의 칸에 넣어 줄 뿐이다(PV 주소 블록을 싣지 않는다). 검색은 PV 탐색과 같은 관리자 API
 // (배치 생성자는 늘 특권 세션 관리자라 전체 PV 를 본다), 행의 root = 관리 디렉토리 기준 PV 루트(서버가 해석한 값).
+// variant(2026-11-26 단계별 등록): "sheet" = 배치 생성 위저드의 오른쪽 시트(Dialog side="right") 안 -- 머리(제목·설명)는 Dialog 의
+// 제목·subtitle 이 대신하고, 이름 붙은 region 도 두지 않는다(Dialog 이름과 겹친다). "panel" = 홀로 서는 카드(머리 h3 -- 위저드 단계
+// 카드(h2) 안에 놓일 수 있다). 시트는 넣어도 닫지 않는다(여러 PV 를 이어 넣는다 -- 넣은 행 번호는 호출측이 시트 안 상태 줄로 말한다).
 
 export type PvSlot = "a" | "b";   // a = 경로(scan·rm)·소스(sync), b = 목적지(sync)
 
@@ -36,10 +39,11 @@ export function slotProblem(row: VolumeRow, sub: string, op: string, slot: PvSlo
   return null;
 }
 
-export function PvPathPicker({ op, storages, onInsert }: {
+export function PvPathPicker({ op, storages, onInsert, variant = "panel" }: {
   op: string;
   storages: { a: string; b: string };                 // 지금 배치에 고른 스토리지(칸별)
   onInsert: (slot: PvSlot, storage: string, path: string) => void;
+  variant?: "panel" | "sheet";
 }) {
   const s = useSearchField("");
   const q = useK8sVolumes({ q: s.applied, limit: SEARCH_LIMIT });
@@ -52,15 +56,11 @@ export function PvPathPicker({ op, storages, onInsert }: {
     : [{ slot: "a", label: "경로 칸에 넣기" }];
   const path = row !== null ? pvBatchPath(row.root, sub) : null;
   const abs = row !== null ? pvAbsPath(row, sub) : null;
-  return (
-    <section aria-label="PV 에서 경로 찾기" className="rounded-card border border-line bg-surface p-4 shadow-soft">
-      {/* h3: 배치 생성 위저드의 ③ 항목 단계 카드(h2 = 단계 제목) 안에 놓인다. */}
-      <h3 className="text-sm font-bold">PV 에서 경로 찾기</h3>
-      <p className="mt-0.5 text-xs text-muted">
-        PV 를 검색해 그 PV 의 직접 경로를 표에 넣습니다 — 배치는 직접 경로(스토리지 + 경로)로만 만들어집니다.
-      </p>
-      <label className="mt-3 block text-sm">PV 검색
-        {/* data-wizard-enter="stay": 위저드 셸(components/form/Wizard Enter 규칙 ⑥) 안에서 Enter 는 검색일 뿐 단계를 옮기지 않는다. */}
+  const body = (
+    <>
+      <label className={`${variant === "panel" ? "mt-3 " : ""}block text-sm`}>PV 검색
+        {/* data-wizard-enter="stay": 위저드 셸(components/form/Wizard Enter 규칙 ⑥) 안에서 Enter 는 검색일 뿐 단계를 옮기지 않는다
+            (시트는 포털이라 셸 밖이지만, 패널을 셸 안에 둘 때도 맞게 표지를 둔다). */}
         <input aria-label="PV 검색" className={field} placeholder="PV 이름 · namespace · 볼륨 · StorageClass" data-wizard-enter="stay"
                {...s.bind} />
       </label>
@@ -129,6 +129,19 @@ export function PvPathPicker({ op, storages, onInsert }: {
           </div>
         </div>
       )}
+    </>
+  );
+  if (variant === "sheet") return <div className="min-w-0">{body}</div>;
+  return (
+    <section aria-label="PV 에서 경로 찾기" className="rounded-card border border-line bg-surface p-4 shadow-soft">
+      {/* h3: 위저드 단계 카드(h2 = 단계 제목) 안에 놓일 수 있다. */}
+      <h3 className="text-sm font-bold">PV 에서 경로 찾기</h3>
+      <p className="mt-0.5 text-xs text-muted">{PV_PATH_PICKER_NOTE}</p>
+      {body}
     </section>
   );
 }
+
+/** 패널 설명(시트에서는 Dialog subtitle 로 쓴다). */
+export const PV_PATH_PICKER_NOTE =
+  "PV 를 검색해 그 PV 의 직접 경로를 표에 넣습니다 — 배치는 직접 경로(스토리지 + 경로)로만 만들어집니다.";

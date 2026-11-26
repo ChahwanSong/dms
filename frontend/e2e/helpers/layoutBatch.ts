@@ -1,6 +1,6 @@
 import { expect, type Page } from "@playwright/test";
 import { assertLayoutSane, type LayoutOptions } from "./layout";
-import { expectStep, wizardGo, wizardNext } from "./wizard";
+import { chooseOperation, expectStep, pickStorageCard, wizardGo, wizardNext } from "./wizard";
 import { STORAGE_NAME } from "../harness/env";
 
 // E3(03-layout)의 배치 생성 화면 흐름. 단일 흐름(layoutSingle)과 따로 둔 이유는 그 파일 머리 주석 -- 03-layout.spec.ts 는
@@ -27,6 +27,27 @@ async function assertSegmentsOneLine(page: Page): Promise<void> {
   expect(wrapped, "입력 방식 세그먼트 라벨이 두 줄로 접혔다").toEqual([]);
 }
 
+// ③ 「PV 에서 경로 찾기」 시트(모달)를 열면 하단 고정 바가 덮개 **아래**에 있어야 한다 -- 바에 z-index 를 주면 z 없는 Radix 덮개
+// 위로 올라온다(usage/TargetTable 교훈, Wizard.tsx 머리 주석). 바의 왼쪽 안쪽 점에서 맨 위 요소가 바 안이면 실패다. 시트를 닫으면
+// 연 버튼으로 포커스가 돌아온다.
+async function assertSheetCoversBar(page: Page, layout: LayoutOptions): Promise<void> {
+  const opener = page.getByRole("button", { name: "PV 에서 경로 찾기", exact: true });
+  await opener.click();
+  const dlg = page.getByRole("dialog", { name: "PV 에서 경로 찾기", exact: true });
+  await expect(dlg).toBeVisible();
+  await assertLayoutSane(page, layout);
+  const barOnTop = await page.evaluate(() => {
+    const bar = document.querySelector("[data-wizard-bar]") as HTMLElement;
+    const r = bar.getBoundingClientRect();
+    const el = document.elementFromPoint(r.left + 16, r.top + r.height / 2);
+    return el !== null && bar.contains(el);
+  });
+  expect(barOnTop, "시트(모달)를 열었는데 하단 바가 덮개 위에 있다(바에 z-index?)").toBe(false);
+  await dlg.getByRole("button", { name: "닫기", exact: true }).click();
+  await expect(dlg).toHaveCount(0);
+  await expect(opener).toBeFocused();
+}
+
 /**
  * 제출 화면(배치 생성): 표가 없으므로 하한 0. 폭(width)은 spec 이 이미 맞춘 뷰포트 폭이고(1280·375), md(768) 아래면 L3 를 빼고 입력
  * 방식 세그먼트 한 줄 검사를 더한다. 1280 흐름은 끝에 768×900 으로 줄여 ⑤ 와 ① 을 한 번 더 잰다(스테퍼 다섯 단계·바가 본문 약
@@ -38,19 +59,18 @@ export async function batchLayoutFlow(page: Page, width: number): Promise<void> 
   await visit(page, "/admin/batches/new", "배치 생성");
   await expectStep(page, "작업 종류");
   await assertLayoutSane(page, layout);                                       // ①
-  await page.getByLabel("연산", { exact: true }).selectOption("rm");
+  await chooseOperation(page, "rm");
   await assertLayoutSane(page, layout);
   await wizardNext(page, "스토리지");
   // rm(2026-10-21): 「삭제 범위 요약」 안내가 넘치지 않는다.
   await expect(page.getByRole("note", { name: "삭제 범위 요약", exact: true })).toBeVisible();
-  const st = page.getByLabel("스토리지", { exact: true });
-  await expect(st.locator(`option[value="${STORAGE_NAME}"]`)).toHaveCount(1);
-  await st.selectOption(STORAGE_NAME);
-  await assertLayoutSane(page, layout);                                       // ②
+  await pickStorageCard(page, "스토리지", STORAGE_NAME);
+  await assertLayoutSane(page, layout);                                       // ②(카드 묶음)
   await wizardNext(page, "항목");
   await page.getByLabel("1행 경로", { exact: true }).fill("layout/a");
   await assertLayoutSane(page, layout);                                       // ③
   if (narrow) await assertSegmentsOneLine(page);
+  await assertSheetCoversBar(page, layout);
   await wizardNext(page, "옵션·실행 제어");
   // rm 자동 실행(2026-10-21): 켜면 빨간 경고 + 동의 체크가 실행 제어 안에 붙는다 — 그 상자도 넘치지 않는다.
   await page.getByLabel("미리보기 후 자동 실행", { exact: true }).check();

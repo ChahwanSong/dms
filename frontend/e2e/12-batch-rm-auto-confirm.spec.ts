@@ -3,7 +3,7 @@ import path from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 import { STORAGE_NAME } from "./harness/env";
 import { apiLogin } from "./helpers/session";
-import { wizardNext } from "./helpers/wizard";
+import { chooseOperation, pickStorageCard, wizardNext } from "./helpers/wizard";
 
 // E13 — rm 배치 자동 확인(2026-10-21 사용자 요청 「Rm 배치작업에서 sync와 마찬가지로 사용자 확인 버튼 없이 바로 rm 작업 수행하도록
 // (자동 확인) 하는 옵션 추가해줘」). 단위 테스트가 못 보는 것을 여기서 본다: 생성 화면의 자동 실행 체크 → 빨간 경고·**필수** 동의
@@ -52,11 +52,9 @@ test.describe("E13 — rm 배치 자동 확인", () => {
 
     // 단계별 등록(2026-11-26): ① rm → ② 스토리지 → ③ 2행 → ④ 자동 실행 + 동의 → ⑤ 「배치 생성」.
     await page.goto("/admin/batches/new");
-    await page.getByLabel("연산", { exact: true }).selectOption("rm");
+    await chooseOperation(page, "rm");
     await wizardNext(page, "스토리지");
-    const st = page.getByLabel("스토리지", { exact: true });
-    await expect(st.getByRole("option", { name: STORAGE_NAME })).toBeAttached();
-    await st.selectOption(STORAGE_NAME);
+    await pickStorageCard(page, "스토리지", STORAGE_NAME);
     await wizardNext(page, "항목");
     await page.getByLabel("1행 경로").fill(`${base}/a`);
     await page.getByRole("button", { name: "행 추가" }).click();
