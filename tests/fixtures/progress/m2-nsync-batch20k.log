@@ -1,0 +1,24 @@
+17:43:07.454 O Thu Nov 26 08:43:07 UTC 2026
+17:43:07.500 O [2026-11-26T08:43:07] Role assignment mode=map src_ranks=1 dst_ranks=1
+17:43:07.500 O [2026-11-26T08:43:07] Rank 0 role=src host=dms-progress-proof-mpi
+17:43:07.500 O [2026-11-26T08:43:07] Rank 1 role=dst host=dms-progress-proof-mpi
+17:43:08.307 O [2026-11-26T08:43:08] Batch mode enabled: batch-files=20000 batch-count=6 src-items=100105 dst-items=0
+17:43:08.307 O [2026-11-26T08:43:08] Batch spool prepared: scan-records=100105 scan-bytes=10609959 batch-records=100105 batch-sidecar-bytes=800840
+17:43:08.307 O [2026-11-26T08:43:08] Progress logging enabled on console log rank 0 (per batch)
+17:43:40.729 O [2026-11-26T08:43:40] Progress 16.7% batch 1/6 actions=16560 copied-files=16548 copied-volume=576.637 MiB recent(actions=16560 files=16548 volume=576.637 MiB, 510.37 files/s, 17.785 MiB/s over 32.423 s) avg(510.37 files/s, 17.785 MiB/s)
+17:43:56.110 O [2026-11-26T08:43:56] Progress 33.3% batch 2/6 actions=33142 copied-files=33121 copied-volume=641.375 MiB recent(actions=16582 files=16573 volume=64.738 MiB, 1077.44 files/s, 4.209 MiB/s over 15.382 s) avg(692.83 files/s, 13.416 MiB/s)
+17:44:11.274 O [2026-11-26T08:44:11] Progress 50.0% batch 3/6 actions=49984 copied-files=49940 copied-volume=1.190 GiB recent(actions=16842 files=16819 volume=577.695 MiB, 1109.08 files/s, 38.095 MiB/s over 15.165 s) avg(793.08 files/s, 19.360 MiB/s)
+17:44:26.126 O [2026-11-26T08:44:26] Progress 66.7% batch 4/6 actions=66729 copied-files=66662 copied-volume=1.254 GiB recent(actions=16745 files=16722 volume=65.320 MiB, 1125.85 files/s, 4.398 MiB/s over 14.853 s) avg(856.59 files/s, 16.504 MiB/s)
+17:44:43.049 O [2026-11-26T08:44:43] Progress 83.3% batch 5/6 actions=83583 copied-files=83501 copied-volume=1.319 GiB recent(actions=16854 files=16839 volume=65.777 MiB, 994.99 files/s, 3.887 MiB/s over 16.924 s) avg(881.31 files/s, 14.250 MiB/s)
+17:44:56.876 O [2026-11-26T08:44:56] Progress 100.0% batch 6/6 actions=100104 copied-files=100002 copied-volume=1.381 GiB recent(actions=16521 files=16501 volume=64.457 MiB, 1193.38 files/s, 4.662 MiB/s over 13.827 s) avg(921.05 files/s, 13.029 MiB/s)
+17:44:56.881 O [2026-11-26T08:44:56] nsync Phase 5 planner+execute complete
+17:44:56.882 O [2026-11-26T08:44:56] Requested source: /cephfs/secondary/dms-progress-proof-1126/src
+17:44:56.882 O [2026-11-26T08:44:56] Requested target: /cephfs/third/dms-progress-proof-1126/dst-nsync-m2
+17:44:56.882 O [2026-11-26T08:44:56] Options: dryrun=0 batch-files=20000 delete=0 contents=0 role-mode=map imbalance-threshold=3.00 max-errors=65000 open-noatime=0
+17:44:56.882 O [2026-11-26T08:44:56] Role map: 0:src,1:dst
+17:44:56.882 O [2026-11-26T08:44:56] Batch summary: batches=6 src-items=100105 dst-items=0
+17:44:56.882 O [2026-11-26T08:44:56] Metadata diff summary: only-src=100105 only-dst=0 common=0 changed=0
+17:44:56.882 O [2026-11-26T08:44:56] Planned actions: copy=100002 mkdir=103 symlink-update=0 meta-update=0 remove=0 skipped-dst-only=0
+17:44:56.882 O [2026-11-26T08:44:56] Completed actions: copy=100002 mkdir=102 symlink-update=0 meta-update=0 remove=0 copied-bytes=1483341824
+17:44:56.882 O [2026-11-26T08:44:56] Execution completed successfully
+# rc=0

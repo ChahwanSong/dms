@@ -1,0 +1,14 @@
+[2026-11-26T08:28:39] Walking source path
+[2026-11-26T08:28:39] Walking /cephfs/managed/dms-progress-proof-1126/src
+[2026-11-26T08:28:40] Walked 100105 items in 1.232 secs (81286.217 items/sec) ...
+[2026-11-26T08:28:40] Walked 100105 items in 1.234 seconds (81140.003 items/sec)
+[2026-11-26T08:28:40] Walking destination path
+[2026-11-26T08:28:40] Destination does not exist yet; it will be created
+[2026-11-26T08:28:40] Walked 0 items in 0.000 seconds (0.000 items/sec)
+[2026-11-26T08:28:40] Started   : Nov-26-2026, 08:28:40
+[2026-11-26T08:28:40] Completed : Nov-26-2026, 08:28:40
+[2026-11-26T08:28:40] Seconds   : 0.065
+[2026-11-26T08:28:40] Items     : 0
+[2026-11-26T08:28:40] Item Rate : 0 items in 0.065097 seconds (0.000000 items/sec)
+[2026-11-26T08:28:40] Completed updating timestamps
+[2026-11-26T08:28:40] Completed sync

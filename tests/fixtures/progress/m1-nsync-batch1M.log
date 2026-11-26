@@ -1,0 +1,19 @@
+17:41:06.492 O Thu Nov 26 08:41:06 UTC 2026
+17:41:06.575 O [2026-11-26T08:41:06] Role assignment mode=map src_ranks=1 dst_ranks=1
+17:41:06.575 O [2026-11-26T08:41:06] Rank 0 role=src host=dms-progress-proof-mpi
+17:41:06.575 O [2026-11-26T08:41:06] Rank 1 role=dst host=dms-progress-proof-mpi
+17:41:07.280 O [2026-11-26T08:41:07] Batch mode enabled: batch-files=1000000 batch-count=1 src-items=100105 dst-items=0
+17:41:07.280 O [2026-11-26T08:41:07] Batch spool prepared: scan-records=100105 scan-bytes=10609959 batch-records=100105 batch-sidecar-bytes=10609959
+17:41:07.280 O [2026-11-26T08:41:07] Progress logging enabled on console log rank 0 (per batch)
+17:42:53.867 O [2026-11-26T08:42:53] Progress 100.0% batch 1/1 actions=100104 copied-files=100002 copied-volume=1.381 GiB recent(actions=100104 files=100002 volume=1.381 GiB, 938.18 files/s, 13.271 MiB/s over 106.592 s) avg(938.18 files/s, 13.271 MiB/s)
+17:42:53.892 O [2026-11-26T08:42:53] nsync Phase 5 planner+execute complete
+17:42:53.892 O [2026-11-26T08:42:53] Requested source: /cephfs/secondary/dms-progress-proof-1126/src
+17:42:53.892 O [2026-11-26T08:42:53] Requested target: /cephfs/third/dms-progress-proof-1126/dst-nsync-m1
+17:42:53.892 O [2026-11-26T08:42:53] Options: dryrun=0 batch-files=1000000 delete=0 contents=0 role-mode=map imbalance-threshold=3.00 max-errors=65000 open-noatime=0
+17:42:53.892 O [2026-11-26T08:42:53] Role map: 0:src,1:dst
+17:42:53.893 O [2026-11-26T08:42:53] Batch summary: batches=1 src-items=100105 dst-items=0
+17:42:53.893 O [2026-11-26T08:42:53] Metadata diff summary: only-src=100105 only-dst=0 common=0 changed=0
+17:42:53.893 O [2026-11-26T08:42:53] Planned actions: copy=100002 mkdir=103 symlink-update=0 meta-update=0 remove=0 skipped-dst-only=0
+17:42:53.893 O [2026-11-26T08:42:53] Completed actions: copy=100002 mkdir=102 symlink-update=0 meta-update=0 remove=0 copied-bytes=1483341824
+17:42:53.893 O [2026-11-26T08:42:53] Execution completed successfully
+# rc=0

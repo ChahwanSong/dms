@@ -1573,3 +1573,45 @@ def test_summary_is_written_before_the_excerpt(monkeypatch):
                  sleep=lambda s: None, wait_hostfile=_wait)
     assert rc == 1
     assert order.index("/art/summary.json") < order.index("emit")
+
+
+# ---- 2026-11-26 스트리밍 러너(dms_job_runner.stream) -- 파서 입력 동치(설계 §7.1 R6) ----
+# 상한(64 MiB) 안의 출력이면 compat 경로(주입 run 결과를 조각내 흘린다)와 스트리밍 경로(실제 자식 프로세스의 파이프를 원시 fd 로
+# 읽는다) 모두 파서가 지금과 **같은 문자열**을 받고, summary 가 전체 텍스트로 만든 것과 같은 dict 다.
+
+_SAMPLE_NAMES = sorted(name for name, value in list(globals().items())
+                       if isinstance(value, str) and isinstance(globals().get(f"{name}_RC"), int))
+_ECHO_CHILD = ("import sys; sys.stdout.buffer.write(open(sys.argv[1], 'rb').read()); sys.stdout.flush(); "
+               "sys.stderr.buffer.write(open(sys.argv[2], 'rb').read()); sys.exit(int(sys.argv[3]))")
+
+
+def test_r6_sample_set_is_the_real_capture_set():
+    assert len(_SAMPLE_NAMES) == 15 and "DSYNC_PREVIEW" in _SAMPLE_NAMES and "NSYNC_EXEC_OK" in _SAMPLE_NAMES
+
+
+@pytest.mark.parametrize("name", _SAMPLE_NAMES)
+def test_streaming_and_compat_feed_the_parsers_the_same_text(name, tmp_path):
+    import sys
+
+    from dms_job_runner import stream
+    sample, rc = globals()[name], globals()[f"{name}_RC"]
+    out, err = _split(sample)
+    tool = name.split("_")[0].lower()
+    dryrun, quiet = "PREVIEW" in name, "QUIET" in name
+    want = _build_summary(tool, out, rc, "/nonexistent-artifacts", dryrun=dryrun, quiet=quiet, stderr=err)
+
+    class R:
+        returncode, stdout, stderr = rc, out, err
+
+    (tmp_path / "o").write_bytes(out.encode())
+    (tmp_path / "e").write_bytes(err.encode())
+    caps = [stream.compat(lambda command: R())(["mpirun"], sink=stream.NullSink(), tracker=None),
+            stream.run_streaming([sys.executable, "-c", _ECHO_CHILD, str(tmp_path / "o"), str(tmp_path / "e"), str(rc)],
+                                 sink=stream.NullSink(), tracker=None)]
+    for cap in caps:
+        assert (cap.returncode, cap.stdout, cap.stderr, cap.overflow) == (rc, out, err, None)
+        assert _build_summary(tool, cap.stdout, cap.returncode, "/nonexistent-artifacts", dryrun=dryrun, quiet=quiet,
+                              stderr=cap.stderr, overflow=cap.overflow) == want
+        # 실패 꼬리 발췌의 원천도 같은 글이다(상한 안 -- 마지막 4 MiB = 전부).
+        assert runner._tool_failure_report(want.get("reason"), cap.stdout_echo, cap.stderr_echo) == \
+            runner._tool_failure_report(want.get("reason"), out, err)

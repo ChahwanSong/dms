@@ -432,12 +432,19 @@ def test_main_passes_the_real_monotonic_clock(monkeypatch):
         seen.update(kw)
         return 0
     monkeypatch.setattr(runner, "run_job", fake_run_job)
+    # 앞선 시험이 남긴 daemon 스레드가 있으면 exit_process 가 os._exit 로 pytest 를 끝낸다 -- 이 시험만 떼어 놓는다.
+    from dms_job_runner import stream as _stream
+    monkeypatch.setattr(_stream, "_THREADS", [])
     with pytest.raises(SystemExit) as e:
         runner.main()
     assert e.value.code == 0
     assert seen["clock"] is time.monotonic and seen["sleep"] is time.sleep
     # 디코드·쓰기는 테스트되는 모듈 함수다 -- main 이 다시 strict 헬퍼를 품으면 아래 비 UTF-8 테스트가 못 잡는다
     assert seen["run"] is runner._subprocess_run and seen["write_text"] is runner._write_text
+    # 2026-11-26: mpirun 은 스트리밍 러너, 진행·로그는 쓰기 스레드 sink(주입 -- run_job 본문은 파일시스템을 만지지 않는다).
+    # 가짜 run_job 이라 스레드가 없다 -- exit_process 가 sys.exit 를 불러 SystemExit(0) 그대로다.
+    from dms_job_runner import stream
+    assert seen["run_tool"] is stream.run_streaming and seen["open_sink"] is stream.ArtifactWriter.open
 
 
 def test_real_clock_counts_time_spent_inside_probes():
@@ -783,3 +790,37 @@ def test_run_job_scan_with_non_utf8_name_succeeds_end_to_end(tmp_path):
     assert json.loads(summary) == {"returncode": 0, "files": 510971, "bytes": 123, **_v2("dscan")}
     log = (tmp_path / "stdout.log").read_bytes().decode("utf-8")  # strict 로 읽힌다
     assert "BCompare-3.3.5.15075.exe [abnormal_time]" in log and "�" in log
+
+
+# ---- 2026-11-26 스트리밍 러너 -- 파서 입력 동치(설계 §7.1 R6) ----
+# 이 파일의 실측 픽스처를 compat 경로와 스트리밍 경로(실제 자식 프로세스)로 각각 흘려도 summary 가 전체 텍스트의 것과 같다.
+
+_ECHO_CHILD = ("import sys; sys.stdout.buffer.write(open(sys.argv[1], 'rb').read()); sys.stdout.flush(); "
+               "sys.exit(int(sys.argv[2]))")
+
+
+@pytest.mark.parametrize("tool,text,dryrun", [("dsync", DSYNC_STDOUT, False), ("nsync", NSYNC_STDOUT, False),
+                                              ("drm", DRM_STDOUT, False), ("dsync", DSYNC_DRYRUN_STDOUT, True),
+                                              ("drm", DRM_DRYRUN_STDOUT, True)])
+def test_streaming_and_compat_paths_give_the_full_text_summary(tmp_path, tool, text, dryrun):
+    from dms_job_runner import stream
+    want = _build_summary(tool, text, 0, "/tmp/x", dryrun=dryrun)
+    (tmp_path / "o").write_bytes(text.encode())
+    caps = [stream.compat(lambda command: _R(0, text))(["mpirun"], sink=stream.NullSink(), tracker=None),
+            stream.run_streaming([sys.executable, "-c", _ECHO_CHILD, str(tmp_path / "o"), "0"],
+                                 sink=stream.NullSink(), tracker=None)]
+    for cap in caps:
+        assert (cap.returncode, cap.stdout, cap.stderr, cap.overflow) == (0, text, "", None)
+        assert _build_summary(tool, cap.stdout, 0, "/tmp/x", dryrun=dryrun, stderr=cap.stderr,
+                              overflow=cap.overflow) == want
+
+
+def test_run_job_writes_the_logs_and_the_last_progress_snapshot_through_write_text():
+    # compat sink(TextSink): stdout.log·stderr.log·progress.json 을 write_text 로 한 번씩, summary.json 보다 먼저.
+    rec = _Recorder(rc=0, stdout=DSYNC_STDOUT)
+    assert _run(rec, _env(DMS_JR_TOOL="dsync", DMS_JR_OPERATION="sync")) == 0
+    art = "/cephfs/dms/artifacts/j1/execution"
+    assert rec.writes[f"{art}/stdout.log"] == DSYNC_STDOUT and rec.writes[f"{art}/stderr.log"] == ""
+    snap = json.loads(rec.writes[f"{art}/progress.json"])
+    assert (snap["tool"], snap["phase"], snap["ended"], snap["dryrun"]) == ("dsync", "done", True, False)
+    assert "line" not in snap
