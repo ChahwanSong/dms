@@ -30,7 +30,8 @@ import { Button } from "../ui/Button";
 //   (마지막 단계 포함) 뒤: 배치 항목 표의 행 칸(data-row = 행 번호, data-col = 열 이름)이고 다음 행의 같은 열 칸이 있으면 그리로,
 //   마지막 단계면 아무것도 안 한다(**Enter 는 절대 제출하지 않는다** -- 「경로 칸 Enter 로 제출 안 됨」 계약), 그 밖은 next().
 // - **「다음」은 aria-disabled, 제출은 disabled**: 「다음」은 탭 순서에 남아 aria-describedby(이유 줄)로 이유를 읽히고, 막힌 채 누르면
-//   blockedNudge()(이유 줄 강조 + 카드 안 첫 [aria-invalid="true"] 칸이 있으면 그리로 포커스·스크롤, 없으면 포커스 그대로). 제출은
+//   blockedNudge()(이유 줄 강조 + 카드 안 첫 [aria-invalid="true"] 또는 [data-wizard-nudge] 칸(문서 순서)이 있으면 그리로 포커스·스크롤,
+//   없으면 포커스 그대로 -- data-wizard-nudge 는 빨갛게 칠하지 않을 「아직 비어 있는 필수 칸」 표지다: rm 의 PV 안 경로). 제출은
 //   지금 계약대로 disabled 다(마지막 단계라 「누르면 이유」 길이 필요 없다).
 // - **제출 더블클릭 가드**: 「다음」과 제출은 바의 **같은 자리·같은 <Button>(key 고정)** 이라 React 가 DOM 노드를 다시 쓴다 -- 그래서
 //   마지막 앞 단계에서 「다음」을 더블클릭하면 두 번째 클릭이 막 그려진 제출에 떨어진다(그때 current 는 검토·blocked 는 false 라 단계
@@ -187,7 +188,8 @@ export function useWizard<K extends string>({ steps, initial, param = "step" }: 
   const blockedNudge = () => {
     setNudge((n) => n + 1);
     const card = headingRef.current?.closest("[data-wizard-card]");
-    const bad = card?.querySelector<HTMLElement>('[aria-invalid="true"]:not(:disabled)');
+    // 문서 순서의 첫 칸(선택자 목록은 문서 순서로 고른다) -- 빨간 오류 칸과 「비어 있는 필수 칸」 표지(data-wizard-nudge) 중 위에 있는 것.
+    const bad = card?.querySelector<HTMLElement>('[aria-invalid="true"]:not(:disabled), [data-wizard-nudge]:not(:disabled)');
     if (bad) {
       bad.focus({ preventScroll: true });
       bad.scrollIntoView?.({ block: "center", behavior: scrollBehavior() });
@@ -421,8 +423,13 @@ const BAR_BUTTON = "h-10 whitespace-nowrap max-sm:flex-1";
  * secondary(단일 「옵션 기본값으로 검토」). primary 는 마지막 단계가 아니면 「다음」(aria-disabled + aria-describedby=이유 줄, 막힌 채
  * 누르면 blockedNudge), 마지막이면 submit props 의 제출(e.detail > 1 은 바가 거른다) -- 같은 <Button>·같은 key 라 노드가 유지된다
  * (머리 주석 「더블클릭 가드」).
- * details: 검토 단계 바 안의 SubmitHints·제출 오류(화면이 검토에서만 넘긴다). 좁은 폭(<sm): 이유 줄 → 버튼 줄로 쌓고 버튼은 flex-1,
- * 취소는 숨긴다(화면의 secondary 도 좁은 폭에서 숨길지는 화면이 정한다).
+ * details: 검토 단계 바 안의 SubmitHints·제출 오류(화면이 검토에서만 넘긴다) -- 박스 안 첫 줄, 버튼 줄 **위**(design-wizard §1-5
+ * 순서 strip · 이유 목록 · 오류 · 제출). 조건부 칸이라 버튼 줄의 자리(자식 순번)는 그대로다 -- primary 노드 유지(더블클릭 가드)와
+ * 무관하고, 바가 아래에 붙어 있을 때(sticky) 박스는 위로 자라 제출 버튼의 화면 위치도 그대로다.
+ * 폭: 좁은 폭(<sm)은 이유 줄 → 버튼 줄로 쌓고 버튼은 flex-1, 취소는 숨긴다(화면의 secondary 도 좁은 폭에서 숨길지는 화면이 정한다).
+ * sm 이상은 한 줄이되 줄바꿈을 허용한다(flex-wrap): 상태 칸은 기준 폭 12rem(sm:basis-48)이라 그만큼이 버튼 무리 곁에 남지 않으면
+ * 버튼 무리가 통째로 다음 줄(오른쪽 끝)로 내려간다 -- 768(본문 약 488px)에서 지름길까지 서면 상태 줄이 한 글자씩 꺾였다. 기준 폭이
+ * 고정이라 줄바꿈 여부는 상태 문장 길이가 아니라 버튼 무리 폭만으로 갈린다(같은 버튼 무리면 단계가 바뀌어도 버튼 자리가 같다).
  */
 export function WizardActionBar<K extends string>({ wizard, submit, doneHint, onCancel, secondary, strip, details }: {
   wizard: Wizard<K>;
@@ -451,8 +458,11 @@ export function WizardActionBar<K extends string>({ wizard, submit, doneHint, on
         </div>
       )}
       <div className="space-y-2 rounded-xl border border-line bg-surface p-3 shadow-station sm:px-4">
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:gap-4">
-          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1">
+        {details !== undefined && details !== null && details !== false && (
+          <div className="border-b border-line pb-2">{details}</div>
+        )}
+        <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:gap-x-4">
+          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1 sm:basis-48">
             <span aria-hidden className="text-xs text-muted">{`${index + 1}/${n}`}</span>
             <p id={wizard.reasonId} ref={wizard.reasonRef} tabIndex={-1} data-wizard-reason
                className={`flex min-w-0 items-start gap-1.5 text-sm focus:outline-none ${blocked ? "text-attn" : "text-ok"}
@@ -511,9 +521,6 @@ export function WizardActionBar<K extends string>({ wizard, submit, doneHint, on
             )}
           </div>
         </div>
-        {details !== undefined && details !== null && details !== false && (
-          <div className="border-t border-line pt-2">{details}</div>
-        )}
       </div>
     </div>
   );

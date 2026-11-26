@@ -290,6 +290,11 @@ test("PV 루트 rm 차단: '', '.', './' 는 PV 루트라 잠기고 이유를 �
   expectBlocked("삭제할 PV 안 경로를 입력하세요 — PV 전체는 삭제할 수 없습니다");
   const sub = screen.getByLabelText("PV 안 경로");
   expect(sub).not.toHaveAttribute("aria-invalid");          // 빈 칸은 오류가 아니라 안내(아직 안 적었다)
+  // 그래도 rm 의 가장 흔한 막힘이라 막힌 「다음」은 이 칸으로 포커스를 보낸다(빨강 없는 표지 data-wizard-nudge -- Wizard blockedNudge)
+  expect(sub).toHaveAttribute("data-wizard-nudge", "true");
+  await userEvent.click(nextButton());
+  expect(stepHeading()).toHaveTextContent("삭제 대상");
+  expect(sub).toHaveFocus();
   for (const v of [".", "./", ".//."]) {
     await userEvent.clear(sub);
     await userEvent.type(sub, v);

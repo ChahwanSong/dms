@@ -530,6 +530,8 @@ test("정책 캡션(scan): scan 정책 실값이 노드 수 아래에 뜬다", a
   await toControls();
   expect(await screen.findByText(
     "정책 기본: 최대 4노드 · 노드당 8프로세스")).toBeInTheDocument();
+  // 정상(활성) 정책은 요약 한 줄 뒤 「자세히」에 접혀 있다(아래 비활성·부재는 펼친다)
+  expect(screen.getByText("정책 기본: 최대 4노드 · 노드당 8프로세스")).not.toBeVisible();
   // 노드 CPU 상한(2026-10-16): 정책·입력값은 노드가 담을 수 있는 만큼까지만 -- 정책 캡션 옆 한 줄(SubmitJob 과 같은 문장)
   expect(screen.getByText(NODE_CPU_CAP_NOTE)).toBeInTheDocument();
 });
@@ -547,16 +549,19 @@ test("정책 행이 없으면 생략·'—' 대신 정직한 미조회 문구", 
   renderPage([]);
   await fillScan();
   await toControls();
+  // 행 부재는 잡 배치 거부(missing_policy) -- 「자세히」에 접지 않고 펼친다
   expect(await screen.findByText(
-    "정책 미조회 — scan 정책 행이 없습니다")).toBeInTheDocument();
+    "정책 미조회 — scan 정책 행이 없습니다")).toBeVisible();
 });
 
-test("정책 disabled 는 캡션에 그 사실이 표기된다", async () => {
+test("정책 disabled 는 캡션에 그 사실이 표기되고, 「자세히」에 접지 않고 펼친다(잡 배치 거부를 모른 채 생성하지 않게)", async () => {
   renderPage([{ ...POLICIES[0], enabled: 0 }]);
   await fillScan();
   await toControls();
   expect(await screen.findByText(
-    "정책 기본: 최대 4노드 · 노드당 8프로세스 · 비활성(잡 배치 거부)")).toBeInTheDocument();
+    "정책 기본: 최대 4노드 · 노드당 8프로세스 · 비활성(잡 배치 거부)")).toBeVisible();
+  expect(screen.getByText(NODE_CPU_CAP_NOTE)).toBeVisible();
+  expect(within(screen.getByText(HELP_SUMMARY.controlsPolicy).closest("p")!).queryByRole("button", { name: "자세히" })).toBeNull();
 });
 
 // 우선순위 정책 실값(슬라이스 32+): 기본 옵션 라벨은 resolve_priority(domain.py)
@@ -1451,6 +1456,12 @@ test("「스토리지를 CSV 로 정하기」: 스토리지를 비운 채 ③ �
   expect(await screen.findByDisplayValue("x")).toBe(screen.getByLabelText("1행 경로"));
   await goStep("스토리지");
   expect(storageValue("스토리지")).toBe("s2");
+  // CSV 가 스토리지를 채운 뒤 ② CSV 카드는 「비어 있는 스토리지는 …」라고 말하지 않는다 -- 스토리지 카드가 이미 골라져 있다(리뷰 지적의
+  // 모순). 꺼진 모양으로 돌아가고, 게이트는 고른 스토리지로 통과한다.
+  expect(screen.queryByText("비어 있는 스토리지는 CSV 의 storage 열로 채웁니다")).toBeNull();
+  expect(screen.queryByRole("button", { name: "CSV 로 정하기 취소" })).toBeNull();
+  expect(screen.getByRole("button", { name: "스토리지를 CSV 로 정하기" })).toBeInTheDocument();
+  expect(reasonLine()).toHaveTextContent("다음: 항목");
   await toReviewStep();
   expect(summaryRow("스토리지")).toHaveTextContent("s2");
   await userEvent.click(createButton());

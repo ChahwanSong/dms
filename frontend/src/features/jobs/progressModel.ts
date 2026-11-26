@@ -30,7 +30,7 @@ export interface ProgressView {
   basisHelp: string | null;
   /** 사실 조각(「생성 38,308 / 100,002 항목」…) -- 화면이 「 · 」로 잇는다. 모르는 조각은 없다. */
   facts: string[];
-  /** 「갱신 12초 전」(스냅숏이 있을 때만). */
+  /** 「갱신 12초 전」(스냅숏이 있고 서버가 잰 나이 age_seconds 를 알 때만). */
   fresh: string | null;
   note: ProgressNote | null;
 }
@@ -56,7 +56,8 @@ const PHASE_TITLE_PREVIEW: Readonly<Record<string, string>> = { batches: "배치
 export const ENDED_TITLE = "도구 종료 · 결과 정리 중";
 export const UNKNOWN_PHASE_TITLE = "진행 단계 알 수 없음";
 
-// 러너 심장박동(30초)의 3배를 넘게 스냅숏이 낡으면 정체 경고(설계 §5.3 안내 4).
+// 러너 심장박동(30초)의 3배를 넘게 스냅숏이 낡으면 정체 경고(설계 §5.3 안내 4). 러너 dms_job_runner/progress.py HEARTBEAT_SECONDS
+// 와의 연결은 progressModel.test 가 그 소스를 읽어 「3배 이상」으로 고정한다(심장박동을 늘리면 정상 잡에 정체 경고가 뜬다).
 export const STALE_AFTER_S = 90;
 // 화면이 아직 아무 스냅숏도 못 받은 동안 「기다리는 중」이라고만 말하는 시간(실행 시작 기준).
 export const WAIT_GRACE_S = 60;
@@ -116,6 +117,14 @@ const rateFmt = (n: number) => n.toLocaleString("ko-KR", { maximumFractionDigits
 /** % 표기는 소수 1자리 **버림** -- 99.96 을 「100%」로 올려 끝난 것처럼 보이지 않게. */
 export const pctFmt = (p: number) => `${(Math.floor(p * 10) / 10).toLocaleString("ko-KR")}%`;
 
+/** dsync 단계 %(step.percent). 도구는 `%.0f%%` 로 반올림해 찍어 99.5% 부터 「100%」다(실측 dsync 실행 로그: 1.376 / 1.381 GiB 에
+ *  (100%), 27초 뒤에야 done -- TB 규모면 마지막 0.5% 가 수십 분일 수 있다). 도구가 그 단계에 done 을 찍기 전(step.done 이 true 가
+ *  아니면 -- 모름 포함)은 99 로 묶는다: pctFmt 의 버림과 같은 이유로, 아직 도는 단계를 끝난 막대로 보이지 않게. */
+function stepPct(s: Record<string, unknown> | null): number | null {
+  const sp = s ? pct(s.percent) : null;
+  return sp !== null && sp >= 100 && s?.done !== true ? 99 : sp;
+}
+
 /** 실행 시작(ms) = 단계 시작 + 스케줄 대기(StepMeta 「HH:MM 시작」과 같은 식). 모르면 null. */
 function runStartMs(step: ProgressStepInfo): number | null {
   if (step.start === null) return null;
@@ -151,9 +160,13 @@ function barOf(tool: string | null, snap: ProgressSnapshot, phase: string, job: 
     const b = obj(snap.batch);
     const count = b ? num(b.count) : null;
     if (b && count !== null && count >= 1) {
-      // 도구 % 가 없으면(Progress logging enabled 직후 -- done 0) 도구가 준 두 수(끝난 배치·배치 수)의 비율이다.
+      // 도구 % 가 없으면(Progress logging enabled 직후 -- done 0) 도구가 준 두 수(끝난 배치·배치 수)의 비율이다. 단 배치가 1개이고
+      // 아직 하나도 안 끝났으면 막대를 만들지 않는다: 도구는 배치가 끝날 때만 % 를 찍어 그 비율이 끝날 때까지 줄곧 0% 라 멈춘 막대로
+      // 보인다(기본 batch-files 100만이라 실제 잡 대부분이 이 경우 -- 수치·안내 NOTE.nsyncSingleBatch 만, 끝나면 도구 % 100). 배치가
+      // 여럿이면 0 / 6 은 「아직 하나도 안 끝남」이라는 사실이라 0% 그대로다.
       const done = num(b.done);
-      const p = pct(b.percent) ?? (done !== null && done <= count ? (done / count) * 100 : null);
+      const single = count === 1 && done === 0;
+      const p = pct(b.percent) ?? (done !== null && done <= count && !single ? (done / count) * 100 : null);
       if (p !== null) return { percent: p, basis: BASIS.batch, help: BASIS_HELP.batch };
     }
     return null;
@@ -163,7 +176,7 @@ function barOf(tool: string | null, snap: ProgressSnapshot, phase: string, job: 
   const op = o ? pct(o.percent) : null;
   if (op !== null) return { percent: op, basis: BASIS.overall, help: BASIS_HELP.overall };
   const s = obj(snap.step);
-  const sp = s ? pct(s.percent) : null;
+  const sp = stepPct(s);
   if (sp !== null && DSYNC_STEP_PERCENT_PHASES.has(phase)) {
     return { percent: sp, basis: BASIS.step, help: phase === "copy" ? BASIS_HELP.copy : BASIS_HELP.step };
   }
@@ -185,6 +198,10 @@ function dsyncFacts(snap: ProgressSnapshot, phase: string, bar: Bar | null, job:
   const items = s ? num(s.items) : null;
   const total = s ? num(s.total) : null;
   const o = obj(snap.overall);
+  // 배치 모드(--batch-files): 진행 중에 전체 블록(overall -- 배치마다 누적)이 있으면 생성·복사 단계 수치는 **이번 배치 안** 값이다
+  // (실측 dsync M5: 배치마다 「Creating 250 files.」·복사 % 가 다시 센다). 그 곁에 누적 「전체 N / M 항목」이 서므로 범위를 이름에 붙인다.
+  // 첫 배치가 끝나기 전엔 전체 블록이 아직 없어 표지가 없다(배치 모드인지 스냅숏이 따로 말하지 않는다).
+  const inBatch = o !== null ? "이번 배치 " : "";
   if (o) {
     const oi = num(o.items);
     const ot = num(o.total);
@@ -192,7 +209,7 @@ function dsyncFacts(snap: ProgressSnapshot, phase: string, bar: Bar | null, job:
     else if (oi !== null) out.push(`전체 ${countFmt(oi)} 항목 반영`);
   }
   // 막대가 전체 기준이면 단계 % 는 사실 줄로(막대와 다른 값이다).
-  const sp = s ? pct(s.percent) : null;
+  const sp = stepPct(s);
   if (bar?.basis === BASIS.overall && sp !== null) out.push(`현재 단계 ${pctFmt(sp)}`);
   switch (phase) {
     case "walk_src":
@@ -206,15 +223,16 @@ function dsyncFacts(snap: ProgressSnapshot, phase: string, bar: Bar | null, job:
     case "create":
     case "mkdir": {
       const unit = phase === "mkdir" ? "디렉토리" : "항목";
-      if (items !== null) out.push(total !== null ? `생성 ${countFmt(items)} / ${countFmt(total)} ${unit}` : `생성 ${countFmt(items)} ${unit}`);
-      else if (total !== null) out.push(`대상 ${countFmt(total)} ${unit}`);
+      if (items !== null) {
+        out.push(total !== null ? `${inBatch}생성 ${countFmt(items)} / ${countFmt(total)} ${unit}` : `${inBatch}생성 ${countFmt(items)} ${unit}`);
+      } else if (total !== null) out.push(`${inBatch}대상 ${countFmt(total)} ${unit}`);
       break;
     }
     case "copy":
     case "compare_contents": {
       const bytes = s ? num(s.bytes) : null;
       const rate = s ? num(s.rate_bps) : null;
-      if (bytes !== null) out.push(`${phase === "copy" ? "복사" : "비교"} 약 ${humanBytes(bytes)}`);
+      if (bytes !== null) out.push(phase === "copy" ? `${inBatch}복사 약 ${humanBytes(bytes)}` : `비교 약 ${humanBytes(bytes)}`);
       if (rate !== null) out.push(`평균 ${humanBytes(rate)}/s`);
       if (phase === "compare_contents" && total !== null) out.push(`대상 ${countFmt(total)} 항목`);
       break;
@@ -251,12 +269,14 @@ function nsyncFacts(snap: ProgressSnapshot, phase: string, dryrun: boolean, job:
   const count = num(b.count);
   if (phase !== "scan" && done !== null && count !== null) out.push(`끝난 배치 ${countFmt(done)} / ${countFmt(count)}`);
   if (dryrun) {
+    // planned-* 는 끝난 배치까지의 **누적**이다(실측 M4: 3/6 배치에서 planned-copy-files=49940, 6/6 에서 100002) -- 전체 계획 총량처럼
+    // 읽히지 않게 「지금까지」를 붙인다(마지막 배치가 끝나면 그 값이 곧 총량이라 그때도 참이다).
     const acts = num(b.planned_actions);
     const files = num(b.planned_copy_files);
     const bytes = num(b.planned_bytes);
-    if (acts !== null) out.push(`계획 동작 ${countFmt(acts)}`);
-    if (files !== null) out.push(`복사 계획 ${countFmt(files)} 파일`);
-    if (bytes !== null) out.push(`데이터 약 ${humanBytes(bytes)}`);
+    if (acts !== null) out.push(`지금까지 계획 동작 ${countFmt(acts)}`);
+    if (files !== null) out.push(`지금까지 복사 계획 ${countFmt(files)} 파일`);
+    if (bytes !== null) out.push(`지금까지 계획 데이터 약 ${humanBytes(bytes)}`);
     return out;
   }
   // 미리보기 계획은 「미리보기 계획」이라 이름 붙인다(미리보기와 실행 사이에 소스가 바뀔 수 있다). 비율은 만들지 않는다 -- 계획
@@ -276,27 +296,31 @@ function nsyncFacts(snap: ProgressSnapshot, phase: string, dryrun: boolean, job:
   return out;
 }
 
-function noteOf(tool: string | null, snap: ProgressSnapshot, phase: string, ageNow: number): ProgressNote | null {
+/** ageNow = 스냅숏 나이(초). null = 모름(계약 밖 응답 -- available:true 면 늘 age_seconds 가 있다) -- 나이에 기대는 안내(정체 경고·
+ *  배치마다 갱신·조용한 줄)는 건너뛴다(0 으로 치면 「방금 갱신」으로 읽혀 정체 경고가 늦거나 안 뜬다, null≠0). */
+function noteOf(tool: string | null, snap: ProgressSnapshot, phase: string, ageNow: number | null): ProgressNote | null {
   if (snap.quiet === true) return { tone: "info", text: NOTE.quiet };
   // 워커 준비(최대 300초 + hostfile 대기) 동안은 러너 tick 이 없어 심장박동이 없다 -- 정체 경고를 끈다.
   if (phase === "workers") return { tone: "info", text: NOTE.workers };
   // 끝 스냅숏: 러너가 더 쓰지 않는다(스테퍼 전이를 기다리는 몇 초~수십 초) -- 경고 없음.
   if (snap.ended === true) return null;
-  if (ageNow > STALE_AFTER_S) return { tone: "attn", text: staleText(msText(ageNow * 1000) ?? `${Math.round(ageNow)}초`) };
+  if (ageNow !== null && ageNow > STALE_AFTER_S) {
+    return { tone: "attn", text: staleText(msText(ageNow * 1000) ?? `${Math.round(ageNow)}초`) };
+  }
   const sinceLine = num(snap.since_line_s);
   if (tool === "nsync" && phase === "batches") {
     const b = obj(snap.batch);
     const count = b ? num(b.count) : null;
     const done = b ? num(b.done) : null;
     if (count === 1 && done === 0) return { tone: "info", text: NOTE.nsyncSingleBatch };
-    if (count !== null && count > 1 && sinceLine !== null && sinceLine + ageNow > NSYNC_BATCH_HINT_AFTER_S) {
+    if (count !== null && count > 1 && sinceLine !== null && ageNow !== null && sinceLine + ageNow > NSYNC_BATCH_HINT_AFTER_S) {
       return { tone: "info", text: NOTE.nsyncPerBatch };
     }
     return null;
   }
   if (tool === "dsync") {
     if (DSYNC_SILENT_PHASES.has(phase)) return { tone: "info", text: NOTE.dsyncSilentPhase };
-    if (sinceLine !== null && sinceLine + ageNow > DSYNC_QUIET_LINE_AFTER_S) {
+    if (sinceLine !== null && ageNow !== null && sinceLine + ageNow > DSYNC_QUIET_LINE_AFTER_S) {
       const d = msText((sinceLine + ageNow) * 1000);
       if (d !== null) return { tone: "info", text: quietLineText(d) };
     }
@@ -307,7 +331,8 @@ function noteOf(tool: string | null, snap: ProgressSnapshot, phase: string, ageN
 /**
  * 응답·오류·단계 → 그릴 것. resp = 마지막 성공 응답(없으면 undefined), error = 마지막 조회 오류(TanStack 은 재조회가 실패해도 마지막
  * 성공 data 를 남긴다 -- 그때는 스냅숏을 그대로 그리고 안내를 오류로 바꾼다), fetchedAtMs = 그 응답을 받은 시각(dataUpdatedAt).
- * 신선도 = 서버가 잰 나이(age_seconds -- 브라우저 시계 무관) + 받은 뒤 흐른 시간.
+ * 신선도 = 서버가 잰 나이(age_seconds -- 브라우저 시계 무관) + 받은 뒤 흐른 시간. age_seconds 가 없으면(모름) 신선도도 모름이다 --
+ * fresh null, 나이에 기대는 안내 없음(noteOf).
  */
 export function progressView(resp: JobProgressResponse | undefined, error: unknown, job: ProgressJobInfo,
                              step: ProgressStepInfo, nowMs: number, fetchedAtMs: number): ProgressView {
@@ -323,12 +348,12 @@ export function progressView(resp: JobProgressResponse | undefined, error: unkno
   const dryrun = snap.dryrun === true;
   const title = snap.ended === true ? ENDED_TITLE
     : (dryrun ? own(PHASE_TITLE_PREVIEW, phase) : undefined) ?? own(PHASE_TITLE, phase) ?? UNKNOWN_PHASE_TITLE;
-  const age = num(resp?.age_seconds) ?? 0;
-  const ageNow = age + Math.max(0, nowMs - fetchedAtMs) / 1000;
+  const age = num(resp?.age_seconds);
+  const ageNow = age !== null ? age + Math.max(0, nowMs - fetchedAtMs) / 1000 : null;
   const bar = barOf(tool, snap, phase, job, step);
   const facts = tool === "nsync" ? nsyncFacts(snap, phase, dryrun, job)
     : tool === "dsync" ? dsyncFacts(snap, phase, bar, job) : [];
-  const fresh = msText(ageNow * 1000);
+  const fresh = ageNow !== null ? msText(ageNow * 1000) : null;
   return {
     title,
     percent: bar?.percent ?? null,

@@ -19,12 +19,14 @@ interface HarnessProps {
   blocked?: Partial<Record<K, boolean>>;
   initial?: K;
   invalid?: boolean;            // 둘째 단계의 「틀린 칸」에 aria-invalid
+  nudge?: boolean;              // 둘째 단계 맨 위 「빈 필수 칸」에 data-wizard-nudge(빨강 없는 표지)
   destructive?: boolean;
   onSubmit?: (via: string) => void;
   onRender?: (k: K) => void;
 }
 
-function Harness({ blocked: init = {}, initial = "a", invalid = false, destructive = false, onSubmit = () => {}, onRender }: HarnessProps) {
+function Harness({ blocked: init = {}, initial = "a", invalid = false, nudge = false, destructive = false, onSubmit = () => {},
+                   onRender }: HarnessProps) {
   const [blocked, setBlocked] = useState<Record<K, boolean>>({ a: false, b: false, c: false, d: false, ...init });
   const [name, setName] = useState("");
   const [agree, setAgree] = useState(false);
@@ -46,6 +48,7 @@ function Harness({ blocked: init = {}, initial = "a", invalid = false, destructi
           <WizardStepCard wizard={w} lede="설명 한 줄" chips={<span>칩</span>}>
             {w.current === "a" && <input aria-label="첫째 칸" />}
             {w.current === "b" && (<>
+              <input aria-label="빈 필수 칸" data-wizard-nudge={nudge || undefined} />
               <input aria-label="이름" value={name} onChange={(e) => setName(e.target.value)} />
               <input aria-label="틀린 칸" aria-invalid={invalid || undefined} />
               <input aria-label="제안 칸" list="harness-opts" />
@@ -176,6 +179,22 @@ test("막힌 「다음」을 누르면 카드 안 첫 aria-invalid 칸으로 포
   await userEvent.click(nextButton());
   expect(stepHeading()).toHaveTextContent("둘째");
   expect(screen.getByLabelText("틀린 칸")).toHaveFocus();
+});
+
+test("막힌 「다음」 — 빨강 없는 「빈 필수 칸」 표지(data-wizard-nudge)도 포커스 대상이고, 오류 칸과 함께 있으면 문서 순서의 첫 칸", async () => {
+  // rm 의 빈 PV 안 경로(features/k8s/LocationField): aria-invalid 없이 처음부터 빨갛게 칠하지 않지만 막힌 「다음」은 그리로 보낸다.
+  const { unmount } = renderHarness({ blocked: { b: true }, nudge: true });
+  await next("둘째");
+  expect(screen.getByLabelText("빈 필수 칸")).not.toHaveAttribute("aria-invalid");
+  await userEvent.click(nextButton());
+  expect(stepHeading()).toHaveTextContent("둘째");
+  expect(screen.getByLabelText("빈 필수 칸")).toHaveFocus();
+  unmount();
+  // 둘 다 있으면 위에 있는 칸(여기선 표지가 오류 칸보다 위)
+  renderHarness({ blocked: { b: true }, nudge: true, invalid: true });
+  await next("둘째");
+  await userEvent.click(nextButton());
+  expect(screen.getByLabelText("빈 필수 칸")).toHaveFocus();
 });
 
 test("막힘이 풀리면 상태 줄이 「다음: <이름>」 — 「다음」이 다시 움직인다", async () => {
@@ -428,6 +447,11 @@ test("검토 바 — strip·details·doneHint, 제출 props(disabled·describedB
   expect(screen.getByText("힌트 한 줄")).toBeVisible();
   expect(reasonLine()).toHaveTextContent("제출하면 이동합니다.");
   const submit = screen.getByRole("button", { name: "제출" });
+  // details(이유 목록·제출 오류)는 버튼 줄 **위**(design-wizard §1-5 순서 strip · 이유 목록 · 오류 · 제출) -- 상태 줄보다도 위다
+  const follows = (a: Node, b: Node) => (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+  expect(follows(screen.getByText("되돌릴 수 없는 작업입니다."), screen.getByText("힌트 한 줄"))).toBe(true);
+  expect(follows(screen.getByText("힌트 한 줄"), reasonLine()!)).toBe(true);
+  expect(follows(screen.getByText("힌트 한 줄"), submit)).toBe(true);
   expect(submit).toBeEnabled();
   expect(submit).toHaveAttribute("aria-describedby", "harness-hints");
   expect(submit.className).toContain("bg-accent");

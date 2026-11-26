@@ -15,7 +15,7 @@ import { field } from "../jobs/formFields";
 import {
   BUFSIZE_HELP, CHMOD_RE, chownFieldError, DIRECT_HELP, directBufsizeError, HELP_SUMMARY, OPEN_NOATIME_HELP, OPERATION_LABEL_BATCH,
   QUIET_HELP, SCAN_INT_FIELDS, SYNC_DSYNC_SPECIAL_FILE_NOTE, SYNC_INT_FIELDS, SYNC_MAX_ERRORS_NOTE, SYNC_OPTION_HELP, intFieldError,
-  priorityCapText, scanIntFieldError, syncIntFieldError,
+  policyCaptionAlert, priorityCapText, scanIntFieldError, syncIntFieldError,
 } from "../jobs/optionRules";
 import { Button } from "../../components/ui/Button";
 import { Dialog } from "../../components/ui/Dialog";
@@ -165,6 +165,10 @@ export function BatchCreate() {
   const storageChosen = f.op === "sync"
     ? f.srcStorage !== "" && f.dstStorage !== ""
     : f.storage !== "";                                   // scan·rm: 스토리지 하나
+  // 「CSV 로 정하기」가 지금 말이 되는가 -- 켠 뒤 CSV 반영(applyParsed)·PV 시트 넣기(insertFromPv)가 스토리지를 다 채우면 storageFromCsv
+  // 는 켜진 채 남지만(게이트는 storageChosen 으로 어차피 통과) 화면은 「비어 있는 스토리지는 CSV 로 채웁니다」라고 말하지 않는다 -- ②
+  // 카드가 이미 골라져 있는데 CSV 카드만 비어 있다고 말하던 모순(2026-11-26 리뷰). ② CSV 카드·③ 머리·스테퍼 값이 이 하나를 본다.
+  const csvStorageActive = storageFromCsv && !storageChosen;
   const incompleteRows = rows.filter(
     (r) => r.a.trim() === "" || (f.op === "sync" && r.b.trim() === "")).length;
   // rm 행 즉답(2026-10-21) — 보내는 값(trim)으로 본다. ① 경로 형식: 서버 validate_rm_target/validate_relative_path 의
@@ -253,6 +257,8 @@ export function BatchCreate() {
     return `정책 기본(dsync): ${fmtPolicy(dsync)} — 공존 노드가 없으면 `
       + `nsync 정책(${fmtPolicy(nsync)})이 적용됩니다`;
   })();
+  // 캡션이 거부 경고(조회 실패·비활성·행 부재)를 담으면 「자세히」에 접지 않고 펼친 채 둔다(optionRules.policyCaptionAlert).
+  const policyAlert = policyCaptionAlert(byTool, f.op, policiesQ.isLoading);
 
   // --- 우선순위: 정책 기본값 실값 + 상한 캡션 ---
   // 기본 라벨은 resolve_priority(domain.py _OP_POLICY) 미러 — scan→"scan"·rm→"rm" 정책, sync 는
@@ -461,7 +467,7 @@ export function BatchCreate() {
   // 단계 상태·URL(?step=)·Enter·포커스·도달 규칙은 useWizard(규칙 전문은 components/form/Wizard 머리 주석). 단계 본문은 이 파일의 지역
   // render 함수다(수십 개의 파생값을 읽는다 -- 따로 떼면 props 가 폭발하고 「로직 그대로」를 확인하기 어렵다).
   // 스테퍼 아래 값(design-wizard §2-3 -- 방문했거나 지난 단계만, 넓은 폭에서 보인다).
-  const storageValue = storageFromCsv && !storageChosen ? "CSV 의 스토리지 열로"
+  const storageValue = csvStorageActive ? "CSV 의 스토리지 열로"
     : f.op === "sync" ? (f.srcStorage === "" && f.dstStorage === "" ? "미선택"
         : `${f.srcStorage || "?"} → ${f.dstStorage || "?"}`)
     : f.storage || "미선택";
@@ -566,20 +572,21 @@ export function BatchCreate() {
           <button type="button" className={linkButton} onClick={(e) => openPvSheet(e.currentTarget, true)}>PV 에서 찾아 정하기</button>
           {" "}— 고른 PV 의 스토리지가 비어 있는 배치 스토리지를 채우고 그 경로가 행에 들어갑니다.</span>
       </p>
-      {/* 「스토리지를 CSV 로 정하기」(storageFromCsv 주석). 좁은 폭에선 설명 위·버튼 아래로 쌓는다. */}
+      {/* 「스토리지를 CSV 로 정하기」(storageFromCsv 주석). 좁은 폭에선 설명 위·버튼 아래로 쌓는다. 스토리지가 다 채워졌으면 꺼진
+          모양이다(csvStorageActive) -- 다시 누르면 고른 스토리지를 비우고 켠다(csvStorageOn). */}
       <div className={`flex flex-col gap-3 rounded-xl border border-dashed p-3 sm:flex-row sm:items-center ${
-        storageFromCsv ? "border-accent bg-infobg/60" : "border-line"}`}>
+        csvStorageActive ? "border-accent bg-infobg/60" : "border-line"}`}>
         <FileUp aria-hidden className="hidden h-5 w-5 shrink-0 text-muted sm:block" />
         <div className="min-w-0 flex-1">
           <p className="text-sm font-semibold text-ink">
-            {storageFromCsv ? `비어 있는 스토리지는 CSV 의 ${csvCols} 열로 채웁니다` : "스토리지를 CSV 로 정하기"}
+            {csvStorageActive ? `비어 있는 스토리지는 CSV 의 ${csvCols} 열로 채웁니다` : "스토리지를 CSV 로 정하기"}
           </p>
           <p className="mt-0.5 text-xs text-muted">
             지난 배치에서 내려받은 items.csv 처럼 {csvCols} 열이 있는 CSV 를 ③ 항목에서 반영하면 그 값으로 채웁니다(템플릿에는
             스토리지 열이 없습니다).
           </p>
         </div>
-        {storageFromCsv
+        {csvStorageActive
           ? <Button type="button" variant="ghost" className="shrink-0" onClick={() => setStorageFromCsv(false)}>CSV 로 정하기 취소</Button>
           : <Button type="button" variant="outline" className="shrink-0" onClick={csvStorageOn}>스토리지를 CSV 로 정하기</Button>}
       </div>
@@ -591,7 +598,7 @@ export function BatchCreate() {
   const itemsStep = () => (
     <>
       <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted">
-        {storageFromCsv && !storageChosen
+        {csvStorageActive
           ? <span>스토리지를 CSV 의 스토리지 열로 채웁니다 — 지난 배치의 items.csv 를 붙여 넣거나 파일로 올리세요.</span>
           : <>
               <span className="rounded-full border border-line bg-panel px-2 py-0.5 text-ink [overflow-wrap:anywhere]">{storageText}</span>
@@ -915,8 +922,8 @@ export function BatchCreate() {
         {nodeCountError && <p className="text-bad text-sm">{nodeCountError}</p>}
         {procsPerNodeError && <p className="text-bad text-sm">{procsPerNodeError}</p>}
         {/* 정책 실값 캡션 + 노드 CPU 상한(2026-10-16: 위 두 칸의 값은 노드가 담을 수 있는 만큼까지만 -- src/dms/node_cpu.py) + sync 의
-            nsync 면당 문장 -- 요약 한 줄 뒤 자세히. */}
-        <MoreText summary={HELP_SUMMARY.controlsPolicy}
+            nsync 면당 문장 -- 요약 한 줄 뒤 자세히. 캡션이 거부 경고면 펼친 채 고정한다(policyAlert). */}
+        <MoreText summary={HELP_SUMMARY.controlsPolicy} forceOpen={policyAlert}
                   full={f.op === "sync" ? [policyCaption, NODE_CPU_CAP_NOTE, NSYNC_PER_SIDE_NOTE] : [policyCaption, NODE_CPU_CAP_NOTE]} />
       </div>
       {/* 노드 수와 대구: 위는 잡 하나의 폭, 이것은 잡 몇 개를 나란히 */}

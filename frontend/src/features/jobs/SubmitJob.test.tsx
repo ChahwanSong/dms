@@ -266,6 +266,27 @@ test("관리자 화면은 정책을 조회해 ③ 실행 설정에 우선순위 
   expect(screen.getByText(/^정책 기본\(dsync\): 최대 6노드 · 노드당 4프로세스/)).toBeVisible();
 });
 
+test("정책이 비활성이거나 정책 목록 조회에 실패하면 ③ 정책 캡션을 「자세히」에 접지 않고 펼친다 -- 잡 배치 거부를 모른 채 제출하지 않게", async () => {
+  // 2026-11-26 단계별 등록 뒤 지적: 옛 한 장 시트는 캡션이라 늘 보였는데 요약 + 자세히로 접히자 「비활성(잡 배치 거부)」가 숨었다.
+  const row = { tool: "dsync", max_nodes: 6, procs_per_node: 4, queue: "dms-data", default_priority: "mid", max_priority: "high",
+    preview_timeout_seconds: null, execution_timeout_seconds: 3600, enabled: 0, updated_at: "2026-08-05T00:00:00Z", updated_by: "admin" };
+  server.use(http.get("/api/admin/policies", () => HttpResponse.json([row])));
+  const first = renderPage();
+  await fillSyncTarget();
+  await next(OPTIONS);
+  expect(await screen.findByText(/^정책 기본\(dsync\): 최대 6노드 · 노드당 4프로세스 · 비활성\(잡 배치 거부\)/)).toBeVisible();
+  expect(screen.getByText(NODE_CPU_CAP_NOTE)).toBeVisible();
+  expect(screen.getByText(HELP_SUMMARY.policy)).toBeVisible();                       // 요약 한 줄은 그대로
+  expect(within(screen.getByText(HELP_SUMMARY.policy).closest("p")!).queryByRole("button", { name: "자세히" })).toBeNull();
+  first.unmount();
+  // 조회 실패(500) -- 「정책 미조회 — 정책 목록을 불러오지 못했습니다」도 같은 처지
+  server.use(http.get("/api/admin/policies", () => HttpResponse.json({ detail: "boom" }, { status: 500 })));
+  renderPage();
+  await fillSyncTarget();
+  await next(OPTIONS);
+  expect(await screen.findByText("정책 미조회 — 정책 목록을 불러오지 못했습니다")).toBeVisible();
+});
+
 test("실행 신원 칸·root 체크박스가 없다 -- 모든 작업은 root, 사용자 지정은 면제자의 「권한 기준 사용자」뿐", async () => {
   // 2026-10-26 LDAP 정리: 옛 ldap 모드의 「실행 신원(선택)」·「root 권한으로 실행」은 지웠다(서버가 run_as_root 를 강제).
   const { unmount } = renderPage();
@@ -448,6 +469,9 @@ test("「옵션 기본값으로 검토」: ②에서 바로 검토로 — 바디
   renderPage();
   await fillSyncTarget();
   const skip = screen.getByRole("button", { name: "옵션 기본값으로 검토" });
+  // 좁은 폭(<sm)에서만 숨긴다(design-wizard §1-6·§5) -- 640~1023px(태블릿·좁은 창)에서도 일반 사용자가 ③ 을 건너뛸 수 있게
+  expect(skip).toHaveClass("max-sm:hidden");
+  expect(skip.className).not.toMatch(/max-(md|lg|xl):hidden/);
   await userEvent.click(skip);
   expect(stepHeading()).toHaveTextContent(REVIEW);
   expect(stepHeading()).toHaveFocus();

@@ -77,10 +77,28 @@ async function assertFocusAboveBar(page: Page): Promise<void> {
   expect(bottom, "포커스한 입력이 하단 고정 바에 가렸다").toBeLessThanOrEqual(barTop + 0.5);
 }
 
+// 768(본문 약 488px)의 ②: 「옵션 기본값으로 검토」 지름길은 좁은 폭(<sm)에서만 숨기므로(design-wizard §1-6·§5 -- 태블릿 폭에서도
+// 일반 사용자가 ③ 을 건너뛴다) 여기서 보이고, 그 버튼까지 서도 바의 상태 줄이 꺾이지 않아야 한다(지름길을 lg 아래에서 숨기던 때의
+// 실 Chrome 결함: 상태 줄이 한 글자씩 꺾였다 -- 바가 flex-wrap + 상태 칸 기준 폭 12rem 으로 버튼 무리를 다음 줄로 내린다,
+// components/form/Wizard WizardActionBar). 상태 줄 높이가 두 줄을 넘으면 꺾인 것이다. 끝나면 1280 으로 돌린다.
+async function assertTargetBarAt768(page: Page): Promise<void> {
+  await page.setViewportSize({ width: 768, height: 900 });
+  await expect(page.getByRole("button", { name: "옵션 기본값으로 검토", exact: true })).toBeVisible();
+  await assertLayoutSane(page, { sidebarFixed: true, minTableCells: 0 });
+  const { height, width, lineHeight } = await page.evaluate(() => {
+    const p = document.querySelector("[data-wizard-reason]") as HTMLElement;
+    const r = p.getBoundingClientRect();
+    return { height: r.height, width: r.width, lineHeight: parseFloat(getComputedStyle(p).lineHeight) || 20 };
+  });
+  expect(height, `768 ② 바 상태 줄이 꺾였다(폭 ${width}px · 높이 ${height}px)`).toBeLessThanOrEqual(lineHeight * 2 + 1);
+  await page.setViewportSize({ width: 1280, height: 800 });
+}
+
 /**
  * 제출 화면(단일 작업): 표가 없으므로 하한 0 -- L1(가로 넘침)·L3(사이드바 240, 카드·바가 <aside> 가 아님)·L4 가 진다. 폭(width)은
  * spec 이 이미 맞춘 뷰포트 폭이고(1280·375), md(768) 아래면 사이드바가 전폭 블록이라 L3 를 뺀다. 단계마다(①②③④) 잰다. 1280 흐름은
- * 끝에 768×900 으로 줄여 검토(④)를 한 번 더 잰다(스테퍼·바가 본문 약 488px 를 넘지 않는지 -- 1280·375 만으론 그 폭을 안 잰다).
+ * ②(지름길이 선 바 -- assertTargetBarAt768)와 끝의 검토(④)를 768×900 으로 줄여 한 번 더 잰다(스테퍼·바가 본문 약 488px 를 넘지
+ * 않는지 -- 1280·375 만으론 그 폭을 안 잰다).
  */
 export async function singleLayoutFlow(page: Page, width: number): Promise<void> {
   const layout: LayoutOptions = width < 768 ? { sidebarFixed: false, minTableCells: 0 } : { minTableCells: 0 };
@@ -91,6 +109,7 @@ export async function singleLayoutFlow(page: Page, width: number): Promise<void>
   await assertLayoutSane(page, layout);                                     // ② 값이 찬 채
   await assertPathLines(page);
   if (width < 768) await assertFocusAboveBar(page);
+  if (width >= 1280) await assertTargetBarAt768(page);
   await wizardNext(page, "옵션·실행 설정");
   await assertLayoutSane(page, layout);                                     // ③
   await toReview(page, "검토·제출");

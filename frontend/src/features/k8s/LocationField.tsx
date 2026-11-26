@@ -217,11 +217,16 @@ function SubField({ side, operation, loc, onChange, resolved, destOwner }: {
   const abs = row !== null && problem === null ? pvAbsPath(row, loc.sub) : null;
   const fresh = row !== null && resolved.status === "found" ? freshnessOf(resolved.clusters, row.cluster) : null;
   const whole = normalizeSub(loc.sub) === "";
+  // rm 의 빈 PV 안 경로는 처음부터 빨갛게 칠하지 않지만(aria-invalid 없음 -- 아래 회색 안내) PV 를 고른 뒤엔 rm 의 가장 흔한 막힘이다:
+  // 막힌 「다음」·Enter 가 이 칸으로 포커스를 보내도록 표지만 단다(components/form/Wizard blockedNudge -- data-wizard-nudge). PV 를 아직
+  // 안 골랐으면 막힘은 PV 선택이라 달지 않는다.
+  const nudge = rm && loc.ref !== null && loc.sub === "";
   return (
     <div className="min-w-0">
       <label className="text-sm block">{L.sub}
         <input aria-label={L.sub} className={field} value={loc.sub}
                aria-invalid={(problem !== null && !(rm && loc.sub === "")) || undefined}
+               data-wizard-nudge={nudge || undefined}
                placeholder={rm ? "예: sample/old — PV 전체는 삭제할 수 없습니다" : "비우면 PV 전체 · 예: sample/nested"}
                onChange={(e) => onChange({ ...loc, sub: e.target.value })} />
       </label>

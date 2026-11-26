@@ -260,6 +260,23 @@ export function priorityCapText(byTool: PriorityPolicies, op: string, priority: 
   return `정책 — ${head}. 기본값 적용은 dsync 기준(제출 시점 도구 미정), ${overTail ?? "상한은 실행 도구 기준으로 조정됩니다"}`;
 }
 
+/** 정책 캡션(단일 ③ 「실행 설정」·배치 ④ 노드 수 아래)을 「자세히」에 접지 않고 늘 펼칠 때인가 -- 캡션이 「이 요청은 잡 배치에서
+ *  거부될 수 있다」는 경고를 담을 때다(2026-11-26 단계별 등록 뒤 지적: 옛 한 장 시트는 캡션이라 늘 보였는데 요약 + 자세히로 접히자
+ *  관리자가 비활성 정책을 모른 채 제출할 수 있었다). 경고 = 정책 목록 조회 실패 · 걸릴 수 있는 정책 행이 비활성(resolve_fanout
+ *  policy_disabled) · 걸릴 정책 행이 하나도 없음(missing_policy). 조회 중은 경고가 아니다(모름 ≠ 실패). sync 는 dsync·nsync 중 어느
+ *  쪽이 걸릴지 런타임(공존 노드)에야 갈려서, 있는 행 중 하나라도 비활성이면 경고이고 행 부재는 둘 다 없을 때만 경고다(한쪽만 있으면
+ *  캡션이 「미조회」로 말하는 것으로 둔다 -- 공존 노드가 있으면 dsync 하나로 돈다). 캡션 문장은 화면의 policyCaption 그대로다. */
+export function policyCaptionAlert(byTool: Map<string, Pick<Policy, "enabled">> | undefined, op: string,
+                                   loading: boolean): boolean {
+  if (loading) return false;
+  if (byTool === undefined) return true;
+  const rows = (op === "sync" ? ["dsync", "nsync"] : [op]).flatMap((t) => {
+    const p = byTool.get(t);
+    return p === undefined ? [] : [p];
+  });
+  return rows.length === 0 || rows.some((p) => p.enabled !== 1);
+}
+
 // 단계별 등록(2026-11-26)의 「한 줄 요약 + 자세히」 요약 문장 모음 -- 단일 작업(SubmitJob)·배치 생성(BatchCreate)이 같이 읽는다
 // (components/form/wizardParts MoreText·OptionToggle 의 summary). 전문이 이 파일에 있는 것은 그 상수 바로 옆에서 정의했고(위
 // SUMMARY_*), 전문이 화면·다른 모듈에 있는 넷은 여기서 정의하며 전문의 자리를 적는다. 요약은 전문과 **다른 문장**이거나(정규식

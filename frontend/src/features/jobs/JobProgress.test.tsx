@@ -55,7 +55,7 @@ test("머리 「진행 · 단계」·신선도 → 막대(기준 문구·aria) �
   expect(within(g).getByText("39.9%")).toBeInTheDocument();
   expect(within(g).getByText(BASIS.overall)).toBeInTheDocument();
   // 사실 조각은 하나씩(줄이 모자라면 조각 단위로 넘긴다), 사이는 「 · 」
-  const facts = ["전체 40,000 / 100,105 항목", "현재 단계 73%", "복사 약 1.0 GiB", "평균 51.3 MiB/s"];
+  const facts = ["전체 40,000 / 100,105 항목", "현재 단계 73%", "이번 배치 복사 약 1.0 GiB", "평균 51.3 MiB/s"];
   for (const f of facts) expect(within(g).getByText(f)).toHaveClass("inline-block");
   expect(within(g).getByText(facts[0]).parentElement).toHaveTextContent(facts.join(" · "));
   expect(asked).toEqual(["execution"]);
@@ -115,8 +115,9 @@ test("워커 대기·quiet·nsync 배치 1개 안내", async () => {
           progress: { v: 1, tool: "nsync", phase: "batches", since_line_s: 1, batch: { done: 0, count: 1 } } });
   renderProgress({ tool: "nsync" });
   expect(await screen.findByText(NOTE.nsyncSingleBatch)).toBeInTheDocument();
-  const bar = screen.getByRole("progressbar", { name: `실행 진행률(${BASIS.batch})` });
-  expect(bar).toHaveAttribute("aria-valuenow", "0");                 // 끝난 배치 0 / 1 -- 0 은 정상값
+  // 배치 1개는 끝날 때까지 0% 막대가 멈춘 것처럼 보인다 -- 막대 없이 수치(0 은 정상값이라 그대로)·안내만
+  expect(screen.queryByRole("progressbar")).toBeNull();
+  expect(screen.getByText("끝난 배치 0 / 1")).toBeInTheDocument();
 });
 
 test("계약 예 스냅숏 전부가 「남은」·「left」 없이 그려진다", async () => {

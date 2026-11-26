@@ -30,8 +30,8 @@ import type { DirectDestOwner, PvOwnerRule } from "../../lib/syncOwnership";
 // (사본이면 미러가 발산한다).
 import { BUFSIZE_HELP, CHMOD_RE, chownFieldError, DIRECT_HELP, directBufsizeError, OPEN_NOATIME_HELP, PRIV_ROOT_HEAD, PRIV_ROOT_SYNC,
          PRIV_ROOT_SYNC_DIRECT_BOTH, PRIV_ROOT_SYNC_PV, PRIV_ROOT_SYNC_PV_ROOT, QUIET_HELP, SCAN_INT_FIELDS, SYNC_INT_FIELDS,
-         SYNC_MAX_ERRORS_NOTE, SYNC_OPTION_HELP, priorityCapText, priorityClampNote, scanIntFieldError, syncIntFieldError,
-         HELP_SUMMARY, OPERATION_LABEL, SYNC_DSYNC_SPECIAL_FILE_NOTE }
+         SYNC_MAX_ERRORS_NOTE, SYNC_OPTION_HELP, policyCaptionAlert, priorityCapText, priorityClampNote, scanIntFieldError,
+         syncIntFieldError, HELP_SUMMARY, OPERATION_LABEL, SYNC_DSYNC_SPECIAL_FILE_NOTE }
   from "./optionRules";
 // 정책 기본값 캡션(슬라이스 37: 배치 생성과 같은 표시 배선 — 백엔드 무변경).
 import { usePolicies } from "../policies/usePolicies";
@@ -356,6 +356,8 @@ export function SubmitJob() {
     return p === undefined ? `정책 미조회 — ${f.operation} 정책 행이 없습니다`
       : `정책 기본: ${fmtPolicy(p)}`;
   })();
+  // 캡션이 거부 경고(조회 실패·비활성·행 부재)를 담으면 「자세히」에 접지 않고 펼친 채 둔다(optionRules.policyCaptionAlert).
+  const policyAlert = policyCaptionAlert(byTool, f.operation, policiesQ.isLoading);
   // 우선순위 "" = (정책 기본): resolve_priority 미러 — sync 는 dsync 정책 대표.
   const defaultPolicy = byTool?.get(f.operation === "sync" ? "dsync" : f.operation);
   const priorityDefaultLabel = defaultPolicy === undefined
@@ -884,10 +886,12 @@ export function SubmitJob() {
         )}
       </SubSection>
       {/* 실행 설정은 운영자 전용(2026-08-20, 사용자 결정): 사용자 폼에선 우선순위를 정책 기본에 맡긴다(생략 = resolve_priority
-          가 정책값으로 해석). 노드 수·프로세스 수도 정책이 정한다 -- 정책 캡션·CPU 상한은 자세히(요약 한 줄은 늘 보인다). */}
+          가 정책값으로 해석). 노드 수·프로세스 수도 정책이 정한다 -- 정책 캡션·CPU 상한은 자세히(요약 한 줄은 늘 보인다). 캡션이
+          거부 경고(정책 비활성·조회 실패·행 부재)면 펼친 채 고정한다(policyAlert). */}
       {isAdmin && (
         <SubSection title="실행 설정" className="border-t border-line pt-5"
-                    caption={<MoreText summary={HELP_SUMMARY.policy} full={[policyCaption, NODE_CPU_CAP_NOTE]} />}>
+                    caption={<MoreText summary={HELP_SUMMARY.policy} full={[policyCaption, NODE_CPU_CAP_NOTE]}
+                                       forceOpen={policyAlert} />}>
           <FieldRow
             control={<label className="text-sm block">우선순위
               <select aria-label="우선순위" className={field} value={f.priority} onChange={on("priority")}>
@@ -988,15 +992,16 @@ export function SubmitJob() {
 
   // 대상 단계의 지름길(design-wizard §1-6 「바로가기」): 옵션 단계를 거치기 전엔 「옵션 기본값으로 검토」, 거친 뒤엔 「검토로 건너뛰기」.
   // 대상 게이트를 통과했을 때만 보이고, 검토로 갈 수 없으면(옵션이 막힘) 잠긴다(aria-disabled -- 눌러도 동작 없음, 이유는 title).
-  // lg(1024) 아래에서는 숨긴다 -- 768 은 사이드바를 빼면 본문이 약 488px 라 이 버튼까지 서면 바의 상태 줄이 한 글자씩 꺾였다(실 Chrome).
-  // 검토를 이미 봤고 갈 수 있으면 바가 「검토로 돌아가기」를 대신 그린다.
+  // 좁은 폭(<sm)에서만 숨긴다(design-wizard §1-6·§5 -- 일반 사용자 4단계를 유지하는 대가가 이 지름길이라 태블릿 폭에서도 남긴다).
+  // 768(본문 약 488px)에서 이 버튼까지 서면 바의 상태 줄이 한 글자씩 꺾였는데, 그건 바 쪽에서 푼다(WizardActionBar -- 상태 줄 최소
+  // 폭 12rem 이 안 남으면 버튼 무리가 다음 줄로 내려간다). 검토를 이미 봤고 갈 수 있으면 바가 「검토로 돌아가기」를 대신 그린다.
   const reviewReachable = wizard.reachable("review");
   const skipToReview = wizard.current === "target" && !gates.gate.target && (
     <button type="button" aria-disabled={!reviewReachable || undefined}
             title={reviewReachable ? undefined : (gates.barReason("options") ?? undefined)}
             onClick={() => { if (reviewReachable) wizard.go("review"); }}
             className="inline-flex h-10 items-center gap-0.5 whitespace-nowrap rounded-lg px-2 text-sm font-medium text-ink/80
-                       hover:text-ink aria-disabled:cursor-not-allowed aria-disabled:opacity-50 max-lg:hidden">
+                       hover:text-ink aria-disabled:cursor-not-allowed aria-disabled:opacity-50 max-sm:hidden">
       {wizard.visited.has("options") ? "검토로 건너뛰기" : "옵션 기본값으로 검토"}
       <ChevronRight aria-hidden className="h-4 w-4" />
     </button>

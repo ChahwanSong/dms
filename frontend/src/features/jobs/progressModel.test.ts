@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "vitest";
 import contract from "../../lib/progressContract.json";
 import { ApiError, reasonText } from "../../lib/api";
@@ -77,12 +80,12 @@ describe("계약 예 스냅숏 전부", () => {
     expect(v).toMatchObject({ title: "파일 생성", percent: 38, basis: BASIS.step, facts: ["생성 38,308 / 100,002 항목"] });
   });
 
-  test("dsync_copy_overall -- 전체 항목 막대가 우선이고 단계 % 는 사실 줄로", () => {
+  test("dsync_copy_overall -- 전체 항목 막대가 우선이고 단계 % 는 사실 줄로(배치 모드라 복사량은 「이번 배치」)", () => {
     const v = view(ok(SNAP.dsync_copy_overall));
     expect(v.title).toBe("데이터 복사");
     expect(v.percent).toBe(39.958);
     expect(v.basis).toBe(BASIS.overall);
-    expect(v.facts).toEqual(["전체 40,000 / 100,105 항목", "현재 단계 73%", "복사 약 1.0 GiB", "평균 51.3 MiB/s"]);
+    expect(v.facts).toEqual(["전체 40,000 / 100,105 항목", "현재 단계 73%", "이번 배치 복사 약 1.0 GiB", "평균 51.3 MiB/s"]);
     expect(pctFmt(v.percent!)).toBe("39.9%");      // 버림 -- 반올림해 끝난 것처럼 보이지 않게
   });
 
@@ -105,10 +108,10 @@ describe("계약 예 스냅숏 전부", () => {
       "평균 510.4 파일/s"]);
   });
 
-  test("nsync_batches_dry -- 계획 동작·복사 계획·데이터(planned_*)", () => {
+  test("nsync_batches_dry -- 계획 동작·복사 계획·데이터(planned_* -- 끝난 배치까지 누적이라 「지금까지」)", () => {
     const v = view(ok(SNAP.nsync_batches_dry), { step: PREV });
     expect(v).toMatchObject({ percent: 50, basis: BASIS.batch,
-      facts: ["끝난 배치 3 / 6", "계획 동작 49,985", "복사 계획 49,940 파일", "데이터 약 1.2 GiB"] });
+      facts: ["끝난 배치 3 / 6", "지금까지 계획 동작 49,985", "지금까지 복사 계획 49,940 파일", "지금까지 계획 데이터 약 1.2 GiB"] });
   });
 
   test("quiet_start -- quiet 안내가 먼저(정체 경고보다)", () => {
@@ -149,6 +152,12 @@ describe("막대 우선순위(도구가 준 값만)", () => {
     expect(view(ok(SNAP.nsync_batches_exec)).percent).toBe(16.7);
     const on = view(ok({ v: 1, tool: "nsync", phase: "batches", batch: { done: 0, count: 6 } }));
     expect(on).toMatchObject({ percent: 0, basis: BASIS.batch, facts: ["끝난 배치 0 / 6"] });
+    // 배치가 1개면 끝날 때까지 0% 막대가 멈춘 것처럼 보인다 -- 도구 % 가 없는 동안은 막대 없이 수치·안내만, 끝나면 100%
+    const single = view(ok({ v: 1, tool: "nsync", phase: "batches", batch: { done: 0, count: 1 } }));
+    expect(single).toMatchObject({ percent: null, basis: null, facts: ["끝난 배치 0 / 1"],
+      note: { tone: "info", text: NOTE.nsyncSingleBatch } });
+    expect(view(ok({ v: 1, tool: "nsync", phase: "batches", batch: { done: 1, count: 1 } })).percent).toBe(100);
+    expect(view(ok({ v: 1, tool: "nsync", phase: "batches", batch: { done: 1, count: 1, percent: 100 } })).percent).toBe(100);
     // 배치 수가 0·모름이거나 끝난 수가 배치 수보다 크면(이상값) 막대를 만들지 않는다
     expect(view(ok({ v: 1, tool: "nsync", phase: "batches", batch: { done: 0, count: 0 } })).percent).toBeNull();
     expect(view(ok({ v: 1, tool: "nsync", phase: "batches", batch: { done: 0 } })).percent).toBeNull();
@@ -169,6 +178,22 @@ describe("막대 우선순위(도구가 준 값만)", () => {
     expect(view(ok(dsync({ phase: "create", step: { percent: 40 } }))).basisHelp).not.toMatch(/바이트/);
     // walk·metadata 의 step 에는 % 가 없다 -- 있어도(위조·이상값) 막대로 쓰지 않는다
     expect(view(ok(dsync({ phase: "metadata", step: { percent: 40, items: 5 } }))).percent).toBeNull();
+  });
+
+  test("3') 도구가 반올림한 「100%」는 그 단계에 done 이 찍히기 전엔 99 -- 아직 도는 단계를 끝난 막대로 보이지 않게", () => {
+    // 실측(dsync 실행 로그 151~154행): 1.376 / 1.381 GiB(99.6%)에 「(100%) … 5 secs left」, 27초 뒤에야 「done」
+    for (const phase of ["create", "mkdir", "copy", "compare_contents", "delete"]) {
+      expect(view(ok(dsync({ phase, step: { percent: 100, done: false } }))).percent, phase).toBe(99);
+      expect(view(ok(dsync({ phase, step: { percent: 100 } }))).percent, phase).toBe(99);       // done 모름도 묶는다
+      expect(view(ok(dsync({ phase, step: { percent: 100, done: true } }))).percent, phase).toBe(100);
+    }
+    expect(pctFmt(view(ok(dsync({ step: { percent: 100, done: false } }))).percent!)).toBe("99%");
+    expect(view(ok(dsync({ step: { percent: 99.5, done: false } }))).percent).toBe(99.5);       // 100 미만은 그대로
+    // 전체 막대일 때 사실 줄 「현재 단계」도 같은 값
+    const both = view(ok(dsync({ step: { percent: 100, done: false }, overall: { items: 1, total: 4, percent: 25 } })));
+    expect(both.facts).toContain("현재 단계 99%");
+    const fin = view(ok(dsync({ step: { percent: 100, done: true }, overall: { items: 1, total: 4, percent: 25 } })));
+    expect(fin.facts).toContain("현재 단계 100%");
   });
 
   test("4) dsync 소스 탐색 추정 -- 실행 행 ∧ 미리보기 source_items > 0, 99% 에서 멈춘다", () => {
@@ -206,6 +231,17 @@ describe("null 과 0", () => {
     expect(d({ total: 7 }, "create")).toEqual(["대상 7 항목"]);
   });
 
+  test("배치 모드(전체 블록이 있다)의 생성·복사 수치는 배치 안 값이라 「이번 배치」를 붙인다 -- 없으면(단일 실행) 붙이지 않는다", () => {
+    const overall = { items: 250, total: 1001, percent: 24.975 };
+    const d = (step: ProgressSnapshot["step"], phase: string) =>
+      view(ok({ v: 1, tool: "dsync", phase, step, overall })).facts;
+    expect(d({ items: 38, total: 250 }, "create")).toEqual(["전체 250 / 1,001 항목", "이번 배치 생성 38 / 250 항목"]);
+    expect(d({ total: 1 }, "mkdir")).toEqual(["전체 250 / 1,001 항목", "이번 배치 대상 1 디렉토리"]);
+    expect(d({ bytes: 1024 }, "copy")).toEqual(["전체 250 / 1,001 항목", "이번 배치 복사 약 1.0 KiB"]);
+    // 전체 블록이 없으면 단계 수치가 곧 전체다
+    expect(view(ok({ v: 1, tool: "dsync", phase: "create", step: { items: 38, total: 250 } })).facts).toEqual(["생성 38 / 250 항목"]);
+  });
+
   test("미리보기 계획 0 은 「미리보기 계획 0」(비율 없음), 요약 null·planned_bytes 없음 → 계획 조각 없음", () => {
     const zero = view(ok(SNAP.nsync_batches_exec), { job: { preview_summary: { planned: { copy: 0 } } } }).facts;
     expect(zero).toContain("복사 파일 16,548 · 미리보기 계획 0");
@@ -233,6 +269,31 @@ describe("신선도와 안내", () => {
     expect(stale.note).toEqual({ tone: "attn", text: staleText("1분 31초") });
     // 브라우저 시계가 거꾸로 가도(받은 시각보다 앞) 음수 나이를 만들지 않는다
     expect(view(ok(snap, 5), { after: -100 }).fresh).toBe("갱신 5초 전");
+  });
+
+  test("age_seconds 가 없으면(모름) 0 으로 치지 않는다 -- 신선도 없음, 나이에 기대는 안내(정체·조용한 줄·배치마다)도 없음", () => {
+    const noAge = (snap: ProgressSnapshot) =>
+      ({ phase: "execution", available: true, progress: snap }) as unknown as JobProgressResponse;
+    const quiet = view(noAge({ ...SNAP.dsync_copy_overall, since_line_s: 500 }), { after: 1000 });
+    expect(quiet.fresh).toBeNull();
+    expect(quiet.note).toBeNull();
+    expect(quiet.percent).toBe(39.958);                                        // 스냅숏 자체는 그대로 그린다
+    expect(view(noAge({ ...SNAP.nsync_batches_exec, since_line_s: 500 }), { after: 1000 }).note).toBeNull();
+    expect(view(noAge({ v: 1, tool: "dsync", phase: "start", lines: 0 }), { after: 1000 }).note).toBeNull();
+    // 나이와 무관한 안내는 그대로
+    expect(view(noAge({ v: 1, tool: "dsync", phase: "compare" })).note).toEqual({ tone: "info", text: NOTE.dsyncSilentPhase });
+    expect(view(noAge(SNAP.quiet_start)).note).toEqual({ tone: "info", text: NOTE.quiet });
+  });
+
+  test("정체 문턱은 러너 심장박동(dms_job_runner/progress.py HEARTBEAT_SECONDS)의 3배 이상 -- 심장박동을 늘리면 여기서 빨개진다", () => {
+    // 계약 파일(progressContract.json)은 계약 리드만 고치므로 러너 소스의 상수를 직접 읽는다(읽기 전용 -- 값이 바뀌면 이 문턱을 같이 본다).
+    const here = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(here, "../../../../src/dms_job_runner/progress.py"), "utf8");
+    const m = /^HEARTBEAT_SECONDS\s*=\s*([0-9]+(?:\.[0-9]+)?)\s*(?:#.*)?$/m.exec(src);
+    expect(m, "러너 progress.py 에서 HEARTBEAT_SECONDS 를 찾지 못했다").not.toBeNull();
+    const heartbeat = Number(m![1]);
+    expect(heartbeat).toBeGreaterThan(0);
+    expect(STALE_AFTER_S).toBeGreaterThanOrEqual(3 * heartbeat);
   });
 
   test("workers 에서 ageNow 200초 → 정체 경고 없음 + 워커 대기 안내(이 단계엔 심장박동이 없다)", () => {
