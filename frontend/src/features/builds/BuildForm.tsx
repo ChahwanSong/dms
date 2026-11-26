@@ -20,7 +20,7 @@ const field = "mt-1 w-full rounded-lg border border-black/10 px-3 py-2";
 // 가운데로 가지 않는다. mx-auto 로 가운데에 모으던 것(bfc55fd)은 이
 // 앱에서 이 화면 하나뿐이라, 사이드바에서 넘어오면 글줄이 혼자 가운데로 튀어
 // 보였다(사용자 지적). 다른 제출 화면과 같은 관례로 맞춘다: 단일 작업·배치 생성
-// (components/form/SubmitLayout, 시트 + 요약 2열 max-w-6xl)도 mx-auto 가 없다.
+// (components/form/Wizard 단계별 등록 -- 본문 열 전체 폭, 2026-11-26)도 mx-auto 가 없다.
 // 폭을 2xl 로 잡은 근거는 폼 내용이다 -- 확인 박스·안내 카드가 두 줄짜리 문장을
 // 담아 xl(36rem)에서는 접히고, 3xl 은 체크박스 세 줄이 허허벌판이 된다.
 const COLUMN = "w-full max-w-2xl";

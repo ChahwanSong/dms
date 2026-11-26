@@ -54,7 +54,7 @@ import { Button } from "../ui/Button";
 //   화면 위로 벗어났으면 셸을 scrollIntoView(start, 움직임 줄이기면 auto). 처음 마운트는 옮기지 않는다. 셸 onFocusCapture 는 하단 바에
 //   가리는 포커스 요소를 위로 올리는데, 바와 그 요소의 실측 높이가 **둘 다 > 0** 일 때만 잰다(jsdom 은 크기 0 -- 가드가 없으면
 //   0 > 0 − 12 가 참이 되어 jsdom 의 미구현 scrollBy 가 모든 단계 이동 시험에서 불린다).
-// - **단계 카드에 aria-label·aria-labelledby 를 달지 않는다**(FormSection 과 같은 이유 -- 배치 단계 제목 「스토리지」가 이름이 되면
+// - **단계 카드에 aria-label·aria-labelledby 를 달지 않는다**(옛 FormSection 과 같은 이유 -- 배치 단계 제목 「스토리지」가 이름이 되면
 //   Playwright getByLabel("스토리지") 부분 일치가 단계까지 잡는다). 카드 표지는 data-wizard-card(PV 시트의 Dialog 제목도 h2 라 「h2 는
 //   하나뿐」에 기대지 않는다).
 // - **하단 바에 z-index 를 주지 않는다**(usage/TargetTable 교훈 -- z 를 주면 z 없는 Radix 덮개(Dialog) 위로 올라온다). sticky 는 조상에

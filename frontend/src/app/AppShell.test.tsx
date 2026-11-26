@@ -220,7 +220,7 @@ test("본문 열: main 은 mx-auto·max-w-[90rem] 이고 폭 고정·overflow �
   await screen.findByText("alice");
   const main = container.querySelector("main")!;
   expect(main).toHaveClass("mx-auto", "w-full", "max-w-[90rem]", "p-5");
-  // 고정 폭은 좁은 창에서 줄지 않는다. overflow 는 SubmitLayout 요약의 xl:sticky 를 죽인다(main·조상 모두).
+  // 고정 폭은 좁은 창에서 줄지 않는다. overflow 는 제출 위저드 하단 액션 바의 sticky(bottom)를 죽인다(main·조상 모두).
   expect(main.className).not.toMatch(/(^|\s)w-\[/);
   for (let el: Element | null = main; el !== null && el !== container; el = el.parentElement)
     expect(el.className).not.toMatch(/overflow-/);

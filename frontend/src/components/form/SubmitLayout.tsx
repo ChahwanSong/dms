@@ -1,52 +1,17 @@
 import type { ReactNode } from "react";
 
-// 제출 화면 공용 레이아웃(2026-10-06 사용자 요청: "데스크탑에서 모바일처럼 폭이 좁다 — 심플하고
-// 직관적이고 한눈에 보이게"). 단일 작업·배치 생성이 4스텝 위저드(max-w-xl/2xl 카드)였을 때
-// 1440 화면의 오른쪽 절반이 비고, 한 스텝이 드롭다운 하나뿐이라 전체를 보려면 다음·이전을
-// 오가야 했다. 지금은 **한 장의 시트(번호 구획) + 오른쪽 제출 요약**이다.
+// 제출 화면 공용 조각(단일 작업 SubmitJob·배치 생성 BatchCreate). 파일 이름은 이력이다 -- 레이아웃 부품은 더 없다.
 //
-// - xl(1280) 이상: [시트 | 22rem 요약] 2열. 요약은 화면에 붙어 따라오고 제출 버튼을 든다 --
-//   어디까지 스크롤했든 "무엇이 제출되는가"와 "왜 아직 못 내는가"가 늘 보인다.
-// - 그 아래: 1열(시트 → 요약). lg(1024)에서 2열이면 시트가 ~430px 라 sync 경로 입력이 다시 좁아진다.
-// - DOM 은 한 벌이다. 데스크탑 패널/모바일 하단 바를 따로 그리면(hidden xl:block) jsdom 과 스크린
-//   리더에는 제출 버튼·경고가 두 번 있다 -- 배치만 grid 로 바꾼다.
-// - 폭 상한 max-w-6xl, mx-auto 없음: 셸 본문 열(최대 1440, 가운데 -- AppShell 주석)의 왼쪽 기준선 -- 화면은 mx-auto 로
-//   혼자 가운데로 가지 않는다(가운데 정렬은 사용자 지적 이력 -- BuildForm 주석).
-// - minmax(0,1fr): 1fr 의 자동 최소폭이 긴 무공백 경로에 밀리면 문서가 가로로 넘친다(e2e L1).
-// - 요약은 <aside> 가 아니다: e2e 레이아웃 불변식이 첫 aside = 사이드바(폭 240)로 잰다.
-export function SubmitLayout({ sheet, summary }: { sheet: ReactNode; summary: ReactNode }) {
-  return (
-    <div className="grid max-w-6xl gap-5 xl:grid-cols-[minmax(0,1fr)_22rem] xl:items-start">
-      <div className="min-w-0 rounded-card border border-line bg-surface shadow-soft">{sheet}</div>
-      {summary}
-    </div>
-  );
-}
-
-// 시트 안의 번호 붙은 구획. 번호는 장식이 아니라 실제 순서다(종류 → 대상 → 옵션 → 실행).
-// aria-label·aria-labelledby 를 달지 않는다: 섹션 이름이 필드 라벨("연산"·"스토리지")을 품으면
-// Playwright getByLabel(부분 일치)이 섹션까지 잡아 strict 위반이 된다(사이드바 "스토리지" 그룹
-// 버튼에서 실제로 났던 사고 -- AppShell.test). 제목은 h2(셸 규칙: h1 은 화면 제목 하나).
-export function FormSection({ step, title, caption, children }: {
-  step: number; title: string; caption?: ReactNode; children: ReactNode;
-}) {
-  return (
-    <section className="border-t border-line px-5 py-5 first:border-t-0 sm:px-6">
-      <div className="mb-4 flex gap-3">
-        <span aria-hidden
-              className="mt-px grid h-6 w-6 shrink-0 place-items-center rounded-full bg-infobg text-xs font-bold text-accent">
-          {step}
-        </span>
-        <div className="min-w-0">
-          <h2 className="text-base font-bold leading-6">{title}</h2>
-          {caption !== undefined && <div className="mt-0.5 text-xs text-muted">{caption}</div>}
-        </div>
-      </div>
-      {/* 본문을 제목 글자 기준선에 맞춘다(번호 24px + 간격 12px) -- 번호가 왼쪽 레일이 된다 */}
-      <div className="min-w-0 space-y-4 sm:pl-9">{children}</div>
-    </section>
-  );
-}
+// 이력: 2026-10-06(사용자 요청 "데스크탑에서 모바일처럼 폭이 좁다 — 심플하고 직관적이고 한눈에 보이게") 4스텝 위저드(max-w-xl/2xl
+// 카드)를 걷고 **한 장의 시트(번호 구획 FormSection) + 오른쪽 제출 요약(SummaryPanel, xl:sticky)**(SubmitLayout)으로 갔다 -- 그때의
+// 실패 넷: 1440 화면의 오른쪽 절반이 빔, 한 스텝이 드롭다운 하나뿐, 전체를 보려면 다음·이전을 오감, 확인 스텝이 JSON 한 줄.
+// 2026-11-26(사용자 결정 「단계별 등록 — 초안 1 상단 스테퍼」) 다시 단계로 나눴다: 골격은 components/form/Wizard(스테퍼 + 단계 카드 +
+// 하단 고정 바), 단계 본문 부품은 components/form/wizardParts. 그 넷은 이렇게 피한다 -- 본문 열 전체 폭(화면이 max-w·mx-auto 를 두지
+// 않는다), 단계마다 의미 있는 묶음(배치 스토리지는 카드 묶음, 고를 것이 없는 단계는 건너뜀), 스테퍼 아래 값, 사람이 읽는 검토 카드
+// (아래 SummaryList·OptionTokens 를 그대로 쓴다). 그래서 SubmitLayout·SummaryPanel·FormSection 은 지웠고(2026-11-26), 아래 다섯은
+// 단계 본문·검토 카드가 그대로 다시 쓴다 -- 계약 주석은 바꾸지 않았다. 옛 규칙 중 남는 것: 제출 화면의 카드·바·시트 어디에도
+// <aside> 를 쓰지 않는다(e2e 레이아웃 불변식 L3 가 첫 aside = 사이드바 폭 240 으로 잰다), minmax(0,1fr) 없이 긴 무공백 경로를 1fr 열에
+// 넣지 않는다(문서 가로 넘침 L1).
 
 // 입력(왼쪽)과 그 설명(오른쪽)을 한 줄에. 위저드 시절엔 설명이 입력 아래로 쌓여 세로로만 길었다 --
 // 넓은 화면에선 "무엇을 정하나 | 그게 무슨 뜻인가"를 나란히 읽는다. 좁으면(sm 미만) 설명이 아래로 접힌다.
@@ -65,25 +30,6 @@ export function FieldRow({ control, help, align = "field" }: {
           {help}
         </p>
       )}
-    </div>
-  );
-}
-
-// 오른쪽 제출 요약. 본문(dl)만 스크롤되고 버튼 줄(footer)은 패널 바닥에 남는다 -- 요약이 화면보다
-// 길어져도(관리자 sync 의 목적지 조건 문장) 제출 버튼이 화면 밖에 고정되지 않는다.
-// sticky 가 살려면 조상에 overflow 가 없어야 하고(AppShell 체인은 없음), 이 패널은 grid 셀이라
-// 부모의 xl:items-start 로 늘어나지 않게 한다.
-export function SummaryPanel({ title, children, footer }: {
-  title: string; children: ReactNode; footer: ReactNode;
-}) {
-  return (
-    <div className="min-w-0 rounded-card border border-line bg-surface shadow-soft xl:sticky xl:top-5
-                    xl:flex xl:max-h-[calc(100vh-2.5rem)] xl:flex-col">
-      <h2 className="border-b border-line px-5 py-3 text-base font-bold">{title}</h2>
-      <div className="min-h-0 px-5 py-4 xl:overflow-y-auto">{children}</div>
-      <div className="shrink-0 space-y-3 rounded-b-card border-t border-line bg-panel/60 px-5 py-4">
-        {footer}
-      </div>
     </div>
   );
 }

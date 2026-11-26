@@ -184,9 +184,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               실화면인 마운트 현황 표(E19 ⑩, 1920 에서 11열 ≈1272)도 내용 1400 안에 여유 있게 들어간다.
             - main 만 가운데다: 사이드바는 화면 왼쪽에 붙어 있어야 하고(L3, aside 불변) 셸 전체를 가운데로 보내지 않는다.
             - 화면(section)은 스스로 mx-auto 하지 않는다: 기준선은 이 본문 열의 왼쪽 하나다 -- 2026-08-16 「왼쪽 기준선」
-              원칙(BuildForm·SubmitLayout 주석)은 그대로이고 열의 위치만 가운데로 옮겼다. 화면은 폭 상한(max-w-*)만 둔다.
+              원칙(BuildForm 주석)은 그대로이고 열의 위치만 가운데로 옮겼다. 화면은 폭 상한(max-w-*)만 둔다.
             - 고정 너비가 아니라 최대 폭(max-w)이다(좁은 창에서 줄어야 한다). div.flex-1.min-w-0 은 그대로 둔다(위 주석 L1).
-            - main·조상에 overflow-* 를 넣지 마라: SubmitLayout 요약(SummaryPanel)의 xl:sticky 가 죽는다. */}
+            - main·조상에 overflow-* 를 넣지 마라: 제출 위저드 하단 액션 바(components/form/Wizard, sticky bottom)의 sticky 가 죽는다. */}
         <main className="mx-auto w-full max-w-[90rem] p-5">
           <Breadcrumb />
           {/* key 가 없으면 AppShell 은 모든 보호 라우트에서 같은 위치의 같은 컴포넌트라
