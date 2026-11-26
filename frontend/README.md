@@ -58,8 +58,8 @@ npx tsc -b          # 타입체크만
     쓰는 `FieldRow`·`SummaryList`·`SummaryRow`·`OptionTokens`·`SubmitHints` 만 남는다(파일 이름은 이력 — 머리 주석). 시트·카드·바 어디에도
     `<aside>` 를 쓰지 않는다(e2e L3 가 첫 aside = 사이드바로 잰다).
 - **sync 진행률은 작업 상세에서, 진행 중에만 읽는다**(2026-11-26): `features/jobs/useArtifacts.useJobProgress` 는 요청 상세 잡 카드의 진행 중
-  실행·미리보기 행(`progressModel.showsProgress` — dsync·nsync, 그 단계 ref 있음)만 부른다. 간격은 5초, `available:false`·오류면 15초(그 경로는 서버가
-  매번 base 점검을 돈다), 숨긴 탭은 멈추고 다시 보이면 한 번 읽는다. 잡 목록·배치 화면에서 /progress 를 부르지 마라(사용자 결정 — `JobsList.test`·
+  실행·미리보기 행(`progressModel.showsProgress` — dsync·nsync, 그 단계 ref 있음)만 부른다. 간격은 5초, `available:false`·오류가 연속 3회(`PROGRESS_SLOW_AFTER_MISSES`)면 15초(그 경로는 서버가
+  매번 base 점검을 돈다 — 성공 한 번이면 다시 센다), 숨긴 탭은 멈추고 다시 보이면 한 번 읽는다. 잡 목록·배치 화면에서 /progress 를 부르지 마라(사용자 결정 — `JobsList.test`·
   `BatchDetail.test` 가 0건 고정). 키 없음 = 모름(0 으로 그리지 않는다), 남은 시간과 「남은」·「left」 글자는 쓰지 않는다, 진행 값은 표시 전용이다.
   계약은 `src/lib/progressContract.json` — 런타임 번들에 싣지 않고 시험이 간격(`poll_ms`)·phase·예 스냅숏을 잇는다(백엔드 러너·API 시험도 같은 파일).
 

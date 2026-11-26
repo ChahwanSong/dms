@@ -485,7 +485,7 @@ CHANGELOG 「sync 진행률 — 작업 상세 진행 중 실행·미리보기 �
   취소, nsync 배치 11개·2개·1개(배치 크기를 줄여서만 — 사용자 지시 「검증할때만 배치사이즈를 줄여서」), /progress 5초·숨김 탭 멈춤·no-store·금지
   키 0, 수치가 stdout.log 진행 줄과 일치, 잡 목록·배치 화면 /progress 0건. 남은 것: (a) 실증 후속 넷(2026-11-27 — 종단 전이 뒤 아티팩트 목록
   지연 재조회 `useArtifacts.ARTIFACTS_SETTLE_MS`, 헛걸음 연속 3회부터 느린 폴링 `useArtifacts.PROGRESS_SLOW_AFTER_MISSES`, nsync 배치 여럿의 늘
-  붙는 캡션 `progressModel.CAPTION`, 배치 rm ④ 동의 체크의 `data-wizard-nudge`)을 다음 태그에서 다시 본다 — 복사 중 취소 직후 칩이 새로고침
+  붙는 캡션 `progressModel.CAPTION`(스캔·배치 단계만), 배치 rm ④ 동의 체크의 `data-wizard-nudge`)을 다음 태그에서 다시 본다 — 복사 중 취소 직후 칩이 새로고침
   없이 맞춰지는지, 2~10초 미리보기에 수치가 뜨는지, 캡션이 스크린숏에 찍히는지, 막힌 「다음」이 1440×900·390×844 에서 동의 체크로 가는지.
   (b) 실증에서 밟지 않은 경로 — 파일 생성 %(생성이 늘 10초 미만이었다), 「워커 준비」·「소스 탐색」·「복사 준비」·「스캔·배치 준비」 문구,
   noneYet 중립 문구, 90초 정체 경고, 연속 3회 뒤 15초 간격 직접 측정, 실제 탭 숨김(헤드리스는 visibilityState 흉내였다). nsync·2노드 dsync 는
@@ -503,6 +503,12 @@ CHANGELOG 「sync 진행률 — 작업 상세 진행 중 실행·미리보기 �
 - 💡 **실행 중 stdout.log 꼬리 보기** — stdout.log 는 이제 실행 중에도 이어 쓰지만 아티팩트 목록은 잡 상태 전이 때만(종단 전이 뒤엔 3·10·30초
   뒤 한 번씩 더 — `useArtifacts.ARTIFACTS_SETTLE_MS`) 다시 읽어 실행 중 칩 크기는 다음 전이까지 그대로다(진행은 진행 칸의 몫, 스테퍼는
   stdout.log 를 읽지 않는다). 실행 중 로그 칩 폴링은 요청이 오면 — 공유 base 가 NFS 면 다른 노드에서 최대 약 30초 늦게 보인다(아래 📝).
+- 📝 **종단 아닌 전이 뒤의 칩도 NFS 가시 지연에 낡을 수 있다**(2026-11-27 d49 후속 리뷰 관찰 — 이번엔 고치지 않음): 지연 재조회
+  (`useArtifacts.ARTIFACTS_SETTLE_MS`)는 종단 전이에서만 예약한다. 미리보기가 끝나 ConfirmPending 으로 가면 컨트롤러는 summary.json 을 읽고
+  전이했어도 API 노드의 목록에는 아직 없을 수 있고(C1 에서 취소 직후 목록에 없던 execution summary.json 이 약 13초 뒤 조회에서 보였다),
+  ConfirmPending 은 사람이 컨펌할 때까지 다음 전이가 없어 미리보기 단계 칩(summary.json·stderr.log 크기)이 새로고침 전까지 낡은 채 남을 수
+  있다 — 미리보기 결과 카드는 DB(`preview_summary`)를 읽어 영향 없음. 고칠 때는 지연 재조회를 단계가 끝나는 모든 전이(refreshKey 변경 전부, 또는
+  미리보기 → ConfirmPending)로 넓힐지를 비용(전이당 목록 요청 3회)과 함께 정한다.
 - 💡 **진행 계약에 심장박동 값**(리뷰 nit 의 남은 몫) — 정체 문턱 `progressModel.STALE_AFTER_S`(90) ≥ 러너 `progress.HEARTBEAT_SECONDS`(30) × 3 은
   지금 `progressModel.test` 가 러너 소스를 읽어 고정한다. 계약에 `heartbeat_s` 를 더하면 백엔드 형식 시험(`test_job_progress_contract.py` 최상위
   키 집합)도 같이 바꿔야 해 미뤘다.
