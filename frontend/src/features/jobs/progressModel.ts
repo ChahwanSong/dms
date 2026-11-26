@@ -213,11 +213,14 @@ function barOf(tool: string | null, snap: ProgressSnapshot, phase: string, job: 
   }
   // 소스 탐색 추정: 미리보기가 센 소스 전체 walk 수(dsync preview source_items)가 분모다. 생성·복사 단계의 분모가 아니다(재동기화는
   // 바꿀 항목이 일부뿐) -- 탐색에만 쓴다. 미리보기 행 자신은 아직 그 수가 없다(실행 행만).
+  // 분자는 소스 탐색 완료 수(walk.src_items)가 있으면 그것, 없으면 마지막 진행 줄 수(step.items)다: 완료 줄 뒤 다음 머리 줄까지 단계는
+  // walk_src 그대로이고, 그때 사실 줄은 step.items 를 접고 완료 수만 보인다(dsyncFacts) -- 막대도 같은 수로 재야 서로 맞는다.
   if (phase === "walk_src" && step.id === "execution") {
-    const items = s ? num(s.items) : null;
+    const w = obj(snap.walk);
+    const walked = (w ? num(w.src_items) : null) ?? (s ? num(s.items) : null);
     const src = readSummary(job.preview_summary ?? null).sourceItems;
-    if (items !== null && src !== null && src > 0) {
-      return { percent: Math.min(99, (items / src) * 100), basis: BASIS.walkEstimate, help: BASIS_HELP.walkEstimate };
+    if (walked !== null && src !== null && src > 0) {
+      return { percent: Math.min(99, (walked / src) * 100), basis: BASIS.walkEstimate, help: BASIS_HELP.walkEstimate };
     }
   }
   return null;

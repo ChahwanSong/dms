@@ -279,6 +279,18 @@ describe("null 과 0", () => {
     // 소스 탐색 완료 줄 뒤에도 다음 머리 줄까지 단계는 walk_src 이고 step.items 는 마지막 진행 줄(완료 수보다 작다) -- 완료 수만
     expect(view(ok({ v: 1, tool: "dsync", phase: "walk_src", step: { items: 49000 }, walk: { src_items: 50105 } })).facts)
       .toEqual(["소스 탐색 50,105 항목"]);
+    // 같은 창의 실행 행(미리보기 source_items 있음 -- 추정 막대): 막대도 접힌 진행 수(49,000)가 아니라 완료 수로 잰다 -- 같은 수 둘
+    // 곁에 97.7% 막대가 서지 않는다(같으면 99% 에서 멈춘다). 완료 수 0 도 정상 분자다(null≠0 -- 진행 수로 갈음하지 않는다).
+    const est = { tool: "dsync", preview_summary: { ...dsyncPlan, source_items: 50105 } };
+    expect(view(ok({ v: 1, tool: "dsync", phase: "walk_src", step: { items: 49000 }, walk: { src_items: 50105 } }), { job: est }))
+      .toMatchObject({ percent: 99, basis: BASIS.walkEstimate, facts: ["미리보기 소스 50,105 항목", "소스 탐색 50,105 항목"] });
+    expect(view(ok({ v: 1, tool: "dsync", phase: "walk_src", step: { items: 49000 }, walk: { src_items: 25000 } }), { job: est })
+      .percent).toBeCloseTo(49.895, 2);
+    expect(view(ok({ v: 1, tool: "dsync", phase: "walk_src", step: { items: 49000 }, walk: { src_items: 0 } }), { job: est })
+      .percent).toBe(0);
+    // 완료 수가 없으면(모양이 틀린 값 포함) 진행 수가 분자 그대로
+    expect(view(ok({ v: 1, tool: "dsync", phase: "walk_src", step: { items: 49000 },
+      walk: { src_items: "x" } as unknown as ProgressSnapshot["walk"] }), { job: est }).percent).toBeCloseTo(97.794, 2);
     // 목적지 탐색 중엔 그 진행 수가 먼저, 끝난 소스 탐색 수가 뒤
     expect(view(ok({ v: 1, tool: "dsync", phase: "walk_dst", step: { items: 120 }, walk: { src_items: 50105 } })).facts)
       .toEqual(["탐색 120 항목", "소스 탐색 50,105 항목"]);
