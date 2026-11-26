@@ -277,7 +277,8 @@ function aggregate(statuses: StepStatus[]): StepStatus {
   if (statuses.includes("done") && statuses.every((s) => s === "done" || s === "skipped")) return "done";
   return "waiting";
 }
-const ENDED: ReadonlySet<StepStatus> = new Set(["done", "failed", "rejected", "timed_out", "cancelled", "expired"]);
+/** 끝난 단계(돈 뒤 끝났다 -- 대기·진행 중·컨펌 대기·실행 안 됨·모름이 아니다). */
+export const ENDED: ReadonlySet<StepStatus> = new Set(["done", "failed", "rejected", "timed_out", "cancelled", "expired"]);
 
 export function deriveJobStages(job: DataJob): JobStagesModel {
   const flow: Flow = job.operation === "scan" ? "scan" : "previewed";

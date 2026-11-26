@@ -912,6 +912,36 @@ test("진행률: PreviewRunning + nsync → 미리보기 행에 보인다(phase=
   expect(within(screen.getByRole("region", { name: "실행" })).queryByRole("group", { name: /진행$/ })).toBeNull();
 });
 
+// 2026-11-27 d50 실증 F2·F3(p-vp-06): 미리보기가 진행 중인데 1단계 카드 맨 위에 「이 잡은 미리보기 요약이 저장되지 않았습니다」가 떠 실패처럼
+// 읽혔다(2026-10-08 요청 상세 재설계 3f8f515c 부터 -- 미리보기 vcjob 제출(ref)·PreviewRunning 전이만 보고 끝났는지는 보지 않았다).
+const NO_SUMMARY = "이 잡은 미리보기 요약이 저장되지 않았습니다";
+const PREVIEWING: Partial<DataJob> = {
+  operation: "sync", tool: "dsync", state: "PreviewRunning", phase_refs: { preflight: "pod/a", preview: "vcjob/p1" },
+  transitions: [{ from_state: "Pending", to_state: "Preflight", at: "2026-11-26T08:19:50Z" },
+                { from_state: "Preflight", to_state: "PreviewRunning", at: "2026-11-26T08:20:00Z" }] as never,
+};
+test("미리보기 진행 중(PreviewRunning)엔 「미리보기 요약이 저장되지 않았습니다」가 없다 -- 끝났는데 요약이 없을 때만", async () => {
+  progressCounter(() => ({ status: 200, body: PRESP.unavailable }));
+  const view = renderStages(PREVIEWING);
+  const pre = screen.getByRole("region", { name: "사전 점검·미리보기" });
+  await within(pre).findByRole("group", { name: "미리보기 진행" });
+  await settle();
+  expect(screen.queryByText(NO_SUMMARY)).toBeNull();
+  // 끝났는데(ConfirmPending) 요약이 없으면 그 사실을 말한다(배너 「미리보기 결과 보기」의 포커스 대상이기도 하다)
+  view.rerenderJob({ ...PREVIEWING, state: "ConfirmPending",
+    transitions: [...(PREVIEWING.transitions as never[]),
+                  { from_state: "PreviewRunning", to_state: "ConfirmPending", at: "2026-11-26T08:20:05Z" }] as never });
+  expect(await screen.findByText(NO_SUMMARY)).toHaveAttribute("tabindex", "-1");
+});
+
+test("미리보기 중 취소돼 요약이 없으면 「저장되지 않았습니다」 -- 끝난 미리보기다", async () => {
+  progressCounter();
+  renderStages({ ...PREVIEWING, state: "Cancelled",
+    transitions: [...(PREVIEWING.transitions as never[]),
+                  { from_state: "PreviewRunning", to_state: "Cancelled", at: "2026-11-26T08:20:05Z" }] as never });
+  expect(await screen.findByText(NO_SUMMARY)).toBeInTheDocument();
+});
+
 test("진행률: 503 이면 사유 문구", async () => {
   const e = PRESP.errors.find((x) => x.status === 503)!;
   progressCounter(() => ({ status: e.status, body: e.body }));

@@ -18,7 +18,7 @@ import { ExecutionResult, PreviewResult } from "./StageResults";
 import { JobProgress } from "./JobProgress";
 import { showsProgress } from "./progressModel";
 import {
-  FAILED_LIKE, STATUS_LABEL, STEP_COPY, annotationsFor, deriveJobStages, isEstimated, normTransitions, outputsByStep,
+  ENDED, FAILED_LIKE, STATUS_LABEL, STEP_COPY, annotationsFor, deriveJobStages, isEstimated, normTransitions, outputsByStep,
   stageCode, stageTitle, stepDuration, type JobStagesModel, type OutputItem, type StageModel, type StepModel,
   type StepStatus,
 } from "./stageModel";
@@ -511,6 +511,11 @@ export function JobStages({ job, events, jobCount = 1, refIso, batchChild = fals
     const key = `artifact:${phase}/stdout.log`;
     return (outputs.byStep[phase] ?? []).some((i) => i.key === key) ? () => nav.requestReveal(slot, key) : null;
   };
+  // 「요약이 저장되지 않았습니다」는 미리보기가 **끝났는데** 요약이 없을 때만(2026-11-27 d50 실증 F2·F3): 예전엔 미리보기에 닿았는지
+  // (vcjob 제출 ref·PreviewRunning 전이 -- 2026-10-08 재설계부터)만 봐서 미리보기가 도는 동안 1단계 카드 맨 위에 떠 실패처럼
+  // 읽혔다. 도는 동안은 미리보기 행의 「진행 중」 배지·진행 칸이 말한다. 미리보기 중 취소·실패로 끝나 요약이 없는 잡은 그대로 보인다.
+  const previewStep = model.pre.steps.find((s) => s.id === "preview");
+  const previewEnded = previewStep !== undefined && ENDED.has(previewStep.status);
   const previewReached = "preview" in model.refs
     || normTransitions(job.transitions).some((t) => t.to_state === "PreviewRunning");
   const preResult = model.flow === "previewed" ? (
@@ -519,8 +524,8 @@ export function JobStages({ job, events, jobCount = 1, refIso, batchChild = fals
                        onOpenOutput={openOutput("preview", "pre")} outputExpired={expiredAt !== null} />
       : job.preview_summary != null
         ? <PreviewResult job={job} summary={job.preview_summary} failedAt={false} headingId={previewHeadingId} />
-        // 요약이 없어도 「미리보기 결과 보기」(배너)의 포커스 대상은 남긴다(같은 id).
-        : previewReached ? (
+        // 요약이 없어도 「미리보기 결과 보기」(배너 -- 컨펌 대기에서만, 미리보기가 끝난 뒤)의 포커스 대상은 남긴다(같은 id).
+        : previewReached && previewEnded ? (
           <p id={previewHeadingId} tabIndex={-1}
              className="scroll-mt-4 text-sm text-ink/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">
             이 잡은 미리보기 요약이 저장되지 않았습니다
