@@ -1,0 +1,355 @@
+{
+  "_doc": "sync 진행률 계약(2026-11-26) — 러너(dms_job_runner.progress)가 쓰는 <phase>/progress.json, API(dms.job_progress · GET /api/user/jobs/{job_id}/progress), 포탈(lib/types.ts JobProgressResponse·ProgressSnapshot) 셋의 단일 원천. 시험만 이 파일을 읽는다(러너·API 는 런타임에 읽지 않고 같은 상수를 따로 정의한다 — 시험이 잇는다). 진행 값은 표시 전용이다 — 확인 게이트·지문·통계·사유에 쓰지 않는다. 남은 시간은 어떤 키·원문으로도 싣지 않는다. 이 파일은 계약 리드만 고친다(바뀌면 백엔드 tests/test_job_progress_contract.py 와 포탈 시험이 함께 빨개진다).",
+  "schema_version": 1,
+  "file_name": "progress.json",
+  "phases_param": ["preview", "execution"],
+  "api": {
+    "path": "/api/user/jobs/{job_id}/progress",
+    "query_param": "phase",
+    "default_phase": "execution",
+    "headers": {"Cache-Control": "no-store"},
+    "read_max_bytes": 16384,
+    "_doc": "파일 없음·열기 사슬 실패·모양 틀림(상한 초과·비 UTF-8·깨진 JSON·required 틀림)은 모두 200 available:false 한 몸통이다. 그 실패 경로에서만 base 수준 판정으로 503 artifact_base_unavailable. headers 는 200·오류 모든 응답에 붙는다. age_seconds = 서버 시각 − 파일 mtime(음수는 0). 새 사유 코드는 없다(errors 의 detail 은 전부 reasonCodes.json 에 이미 있다).",
+    "response": {
+      "fields": {
+        "phase": {"type": "enum", "values": ["preview", "execution"], "doc": "요청한 단계(phases_param)"},
+        "available": {"type": "bool", "doc": "progress.json 을 읽고 모양이 맞았다"},
+        "age_seconds": {"type": "int", "min": 0, "max": 9223372036854775807, "doc": "서버가 잰 스냅숏 나이(초) — available 일 때만"},
+        "progress": {"type": "snapshot", "doc": "sanitize 를 거친 스냅숏(snapshot.fields) — available 일 때만"}
+      },
+      "available_true_keys": ["phase", "available", "age_seconds", "progress"],
+      "available_false_keys": ["phase", "available"]
+    }
+  },
+  "snapshot": {
+    "_doc": "키 없음 = 모름(0 으로 채우지 않는다). required 필드가 틀리면 스냅숏 전체가 무효(API available:false)이고, 그 밖의 필드는 type·범위가 틀린 그 필드만 버린다. tools(그 도구의 스냅숏에만)·mode(execution = dryrun false, preview = dryrun true 에만)·runner_always·invariants 는 러너가 지키는 출력 모양이다 — API sanitize 는 type·범위·required·const 만 본다.",
+    "max_bytes": 4096,
+    "types": {
+      "int": "JSON 정수(bool 아님), min ≤ x ≤ max(const 가 있으면 그 값)",
+      "float": "유한한 JSON 수(정수 표기 허용, bool 아님), min ≤ x ≤ max",
+      "bool": "true 또는 false",
+      "str": "문자열 — pattern 전체 일치(Python re.fullmatch, JS new RegExp(pattern).test)",
+      "enum": "values 중 하나인 문자열",
+      "obj": "fields 의 키만 담는 객체(한 단계 깊이) — 빈 객체는 쓰지 않는다(모르면 키를 뺀다)",
+      "snapshot": "snapshot.fields 를 만족하는 객체(응답 progress 에만)"
+    },
+    "fields": {
+      "v": {"type": "int", "const": 1, "required": true, "doc": "스키마 버전 — schema_version 과 같다"},
+      "tool": {"type": "enum", "values": ["dsync", "nsync"], "required": true, "doc": "도구"},
+      "dryrun": {"type": "bool", "doc": "미리보기(dry-run) 단계"},
+      "quiet": {"type": "bool", "doc": "-q 실행 — 도구가 진행 줄을 찍지 않는다(미리보기는 tool_argv 가 quiet 를 뺀다)"},
+      "phase": {
+        "type": "str",
+        "pattern": "^[a-z][a-z_]{0,23}$",
+        "required": true,
+        "doc": "단계 — 러너가 내는 값은 snapshot.phases 안. 모양만 맞는 미지 값은 화면이 「진행 단계 알 수 없음」으로 보인다"
+      },
+      "phase_since_s": {"type": "float", "min": 0, "max": 1e+18, "doc": "쓴 시점까지 이 단계에 머문 초(러너 시계)"},
+      "elapsed_s": {"type": "float", "min": 0, "max": 1e+18, "doc": "첫 스냅숏(run_job 맨 앞) 뒤 초"},
+      "since_line_s": {"type": "float", "min": 0, "max": 1e+18, "doc": "마지막으로 인식한 진행·단계 줄 뒤 초 — 아직 없으면 키 없음(lines 0)"},
+      "lines": {"type": "int", "min": 0, "max": 9223372036854775807, "doc": "지금까지 인식한 진행·단계 줄 수(생존 신호·진단)"},
+      "ended": {"type": "bool", "doc": "도구가 끝난 뒤 러너가 쓴 마지막 스냅숏(phase 는 마지막 인식 단계 그대로)"},
+      "step": {
+        "type": "obj",
+        "tools": ["dsync"],
+        "doc": "현재 단계 수치 — 도구가 찍은 것만",
+        "fields": {
+          "items": {"type": "int", "min": 0, "max": 9223372036854775807, "doc": "항목 수(walk·mkdir·create·metadata·delete 진행 줄)"},
+          "total": {
+            "type": "int",
+            "min": 0,
+            "max": 9223372036854775807,
+            "doc": "단계 머리 줄의 N(Creating N files. · Comparing … of N items · Removing N items)"
+          },
+          "percent": {"type": "float", "min": 0, "max": 100, "doc": "도구가 찍은 % — 복사는 바이트 기준·배치 안"},
+          "bytes": {
+            "type": "int",
+            "min": 0,
+            "max": 9223372036854775807,
+            "doc": "사람 단위 → 근사 바이트 round(값 × 단위) — 소수 3자리라 GiB 규모에서 약 0.05% 오차"
+          },
+          "rate_bps": {"type": "int", "min": 0, "max": 9223372036854775807, "doc": "초당 바이트(근사)"},
+          "rate_items": {"type": "float", "min": 0, "max": 1e+18, "doc": "초당 항목(도구 값)"},
+          "done": {"type": "bool", "doc": "도구가 이 단계 진행 줄에 done 을 찍었다"}
+        }
+      },
+      "overall": {
+        "type": "obj",
+        "tools": ["dsync"],
+        "doc": "배치 블록 `Copied X of Y items (P%)` — 배치마다 누적",
+        "fields": {
+          "items": {"type": "int", "min": 0, "max": 9223372036854775807, "doc": "반영한 항목 수(X)"},
+          "total": {"type": "int", "min": 0, "max": 9223372036854775807, "doc": "전체 항목 수(Y)"},
+          "percent": {"type": "float", "min": 0, "max": 100, "doc": "도구 값(P)"}
+        }
+      },
+      "walk": {
+        "type": "obj",
+        "tools": ["dsync"],
+        "doc": "walk 완료 줄(`Walked N items in … seconds (`)의 항목 수",
+        "fields": {
+          "src_items": {"type": "int", "min": 0, "max": 9223372036854775807, "doc": "소스 walk 항목 수"},
+          "dst_items": {"type": "int", "min": 0, "max": 9223372036854775807, "doc": "목적지 walk 항목 수"}
+        }
+      },
+      "batch": {
+        "type": "obj",
+        "tools": ["nsync"],
+        "doc": "배치 진행 — 포크는 배치가 끝날 때마다 한 줄을 찍는다",
+        "fields": {
+          "done": {"type": "int", "min": 0, "max": 9223372036854775807, "doc": "끝난 배치 수(Progress logging enabled 줄에서 0)"},
+          "count": {"type": "int", "min": 0, "max": 9223372036854775807, "doc": "배치 수(batch-count)"},
+          "percent": {"type": "float", "min": 0, "max": 100, "doc": "도구가 찍은 배치 기준 %"},
+          "actions": {"type": "int", "min": 0, "max": 9223372036854775807, "mode": "execution", "doc": "누적 동작 수"},
+          "copied_files": {"type": "int", "min": 0, "max": 9223372036854775807, "mode": "execution", "doc": "누적 복사 파일 수"},
+          "copied_bytes": {"type": "int", "min": 0, "max": 9223372036854775807, "mode": "execution", "doc": "누적 복사량(copied-volume 근사 바이트)"},
+          "avg_files_per_s": {"type": "float", "min": 0, "max": 1e+18, "mode": "execution", "doc": "평균 초당 파일(avg)"},
+          "avg_bps": {"type": "int", "min": 0, "max": 9223372036854775807, "mode": "execution", "doc": "평균 초당 바이트(avg 근사)"},
+          "planned_actions": {"type": "int", "min": 0, "max": 9223372036854775807, "mode": "preview", "doc": "누적 계획 동작 수"},
+          "planned_copy_files": {"type": "int", "min": 0, "max": 9223372036854775807, "mode": "preview", "doc": "누적 계획 복사 파일 수"},
+          "planned_bytes": {"type": "int", "min": 0, "max": 9223372036854775807, "mode": "preview", "doc": "누적 계획량(planned-volume 근사 바이트)"}
+        }
+      },
+      "scan": {
+        "type": "obj",
+        "tools": ["nsync"],
+        "doc": "`Batch mode enabled` 줄",
+        "fields": {
+          "batch_files": {"type": "int", "min": 0, "max": 9223372036854775807, "doc": "배치당 파일 수(batch-files)"},
+          "batch_count": {"type": "int", "min": 0, "max": 9223372036854775807, "doc": "배치 수(batch-count)"},
+          "src_items": {"type": "int", "min": 0, "max": 9223372036854775807, "doc": "소스 스캔 항목 수"},
+          "dst_items": {"type": "int", "min": 0, "max": 9223372036854775807, "doc": "목적지 스캔 항목 수"}
+        }
+      }
+    },
+    "runner_always": ["v", "tool", "dryrun", "quiet", "phase", "phase_since_s", "elapsed_s", "lines", "ended"],
+    "phases": [
+      "workers", "start", "walk_src", "walk_dst", "compare", "compare_contents", "delete", "copy_prep", "mkdir", "create",
+      "copy", "metadata", "metadata_dirs", "timestamps", "done", "scan", "batches", "finishing"
+    ],
+    "phases_by_tool": {
+      "common": ["workers", "start"],
+      "dsync": [
+        "walk_src", "walk_dst", "compare", "compare_contents", "delete", "copy_prep", "mkdir", "create", "copy", "metadata",
+        "metadata_dirs", "timestamps", "done"
+      ],
+      "nsync": ["scan", "batches", "finishing", "done"]
+    },
+    "invariants": {
+      "_doc": "seconds_order: 있는 키끼리 앞 ≤ 뒤(줄은 단계가 시작된 뒤에만 인식되고, 단계는 첫 스냅숏 뒤에만 시작된다). since_line_iff_lines: since_line_s 가 있다 ⇔ lines > 0.",
+      "seconds_order": ["since_line_s", "phase_since_s", "elapsed_s"],
+      "since_line_iff_lines": true
+    },
+    "forbidden_keys": ["line"],
+    "forbidden_substrings": ["left", "remaining"]
+  },
+  "ui_forbidden_substrings": ["남은", "left"],
+  "examples": {
+    "_doc": "2026-11-26 dmsk8s 진행률 실측 로그(dsync 실행·미리보기 1 rank 100,105 항목 1.381 GiB, 수동 nsync M2·M4 — 저장소 밖 실증 산출물)의 줄을 설계 §3.2 전이 규칙으로 흘려 만든 값. 초 값은 그 로그의 줄 시각과 런처 기동 시각에서 계산했다(소수 1자리). responses 의 progress 는 snapshots 의 같은 객체를 펼쳐 둔 것이다.",
+    "snapshots": {
+      "workers": {
+        "v": 1,
+        "tool": "dsync",
+        "dryrun": false,
+        "quiet": false,
+        "phase": "workers",
+        "phase_since_s": 0.0,
+        "elapsed_s": 0.0,
+        "lines": 0,
+        "ended": false
+      },
+      "dsync_walk_src": {
+        "v": 1,
+        "tool": "dsync",
+        "dryrun": true,
+        "quiet": false,
+        "phase": "walk_src",
+        "phase_since_s": 1.3,
+        "elapsed_s": 2.7,
+        "since_line_s": 0.3,
+        "lines": 2,
+        "ended": false,
+        "step": {"items": 100105}
+      },
+      "dsync_create": {
+        "v": 1,
+        "tool": "dsync",
+        "dryrun": false,
+        "quiet": false,
+        "phase": "create",
+        "phase_since_s": 11.5,
+        "elapsed_s": 12.8,
+        "since_line_s": 1.5,
+        "lines": 9,
+        "ended": false,
+        "step": {"items": 38308, "total": 100002, "percent": 38, "rate_items": 3828.142, "done": false},
+        "walk": {"src_items": 100105, "dst_items": 0}
+      },
+      "dsync_copy_overall": {
+        "v": 1,
+        "tool": "dsync",
+        "dryrun": false,
+        "quiet": false,
+        "phase": "copy",
+        "phase_since_s": 23.2,
+        "elapsed_s": 50.5,
+        "since_line_s": 3.2,
+        "lines": 15,
+        "ended": false,
+        "step": {"percent": 73, "bytes": 1076963049, "rate_bps": 53826552, "done": false},
+        "overall": {"items": 40000, "total": 100105, "percent": 39.958},
+        "walk": {"src_items": 100105, "dst_items": 0}
+      },
+      "dsync_ended": {
+        "v": 1,
+        "tool": "dsync",
+        "dryrun": false,
+        "quiet": false,
+        "phase": "done",
+        "phase_since_s": 0.6,
+        "elapsed_s": 1372.9,
+        "since_line_s": 0.6,
+        "lines": 152,
+        "ended": true,
+        "overall": {"items": 100105, "total": 100105, "percent": 100.0},
+        "walk": {"src_items": 100105, "dst_items": 0}
+      },
+      "nsync_scan": {
+        "v": 1,
+        "tool": "nsync",
+        "dryrun": false,
+        "quiet": false,
+        "phase": "scan",
+        "phase_since_s": 0.4,
+        "elapsed_s": 1.5,
+        "since_line_s": 0.4,
+        "lines": 1,
+        "ended": false
+      },
+      "nsync_batches_exec": {
+        "v": 1,
+        "tool": "nsync",
+        "dryrun": false,
+        "quiet": false,
+        "phase": "batches",
+        "phase_since_s": 32.8,
+        "elapsed_s": 34.8,
+        "since_line_s": 0.4,
+        "lines": 4,
+        "ended": false,
+        "batch": {
+          "done": 1,
+          "count": 6,
+          "percent": 16.7,
+          "actions": 16560,
+          "copied_files": 16548,
+          "copied_bytes": 604647719,
+          "avg_files_per_s": 510.37,
+          "avg_bps": 18648924
+        },
+        "scan": {"batch_files": 20000, "batch_count": 6, "src_items": 100105, "dst_items": 0}
+      },
+      "nsync_batches_dry": {
+        "v": 1,
+        "tool": "nsync",
+        "dryrun": true,
+        "quiet": false,
+        "phase": "batches",
+        "phase_since_s": 0.4,
+        "elapsed_s": 2.5,
+        "since_line_s": 0.1,
+        "lines": 6,
+        "ended": false,
+        "batch": {
+          "done": 3,
+          "count": 6,
+          "percent": 50.0,
+          "planned_actions": 49985,
+          "planned_copy_files": 49940,
+          "planned_bytes": 1277752771
+        },
+        "scan": {"batch_files": 20000, "batch_count": 6, "src_items": 100105, "dst_items": 0}
+      },
+      "quiet_start": {
+        "v": 1,
+        "tool": "dsync",
+        "dryrun": false,
+        "quiet": true,
+        "phase": "start",
+        "phase_since_s": 300.0,
+        "elapsed_s": 301.2,
+        "lines": 0,
+        "ended": false
+      }
+    },
+    "sources": {
+      "workers": "dsync 실행 — run_job 맨 앞(ALLOWED_TOOLS 검사 직후) 첫 스냅숏. 런처 DMS_JR_WORKER_READY 08:28:58.78(waited=1s) 직전",
+      "dsync_walk_src": "dsync 미리보기 stdout.log 1~3행(Walking source path → Walked 100105 items in 1.232 secs …) 뒤 0.3초",
+      "dsync_create": "dsync 실행 stdout.log 1~22행(… Created 38308 items (38%) … 08:29:09) 뒤 1.5초",
+      "dsync_copy_overall": "§3.1 예 — dsync 실행 stdout.log 27행 복사 줄(Copied 1.003 GiB (73%) … 51.333 MiB/s, 08:29:45) 뒤 3.2초. 배치 모드(--batch-files, 수동 M5 모양) 상태를 보이려고 배치 경계 OVERALL 줄(40000/100105 — 합성)을 앞에 얹었다",
+      "dsync_ended": "dsync 실행 stdout.log 189행 전체(… Completed sync 08:51:50) — 도구 종료 뒤 끝 스냅숏",
+      "nsync_scan": "수동 M2(nsync --batch-files 20000) Role assignment 줄 뒤 0.4초 — 양쪽 스캔·스풀 중",
+      "nsync_batches_exec": "§3.1 예 — 수동 M2 Progress 16.7% batch 1/6 줄(08:43:40.729) 뒤 0.4초",
+      "nsync_batches_dry": "수동 M4(nsync --dryrun --batch-files 20000) Progress 50.0% batch 3/6 줄 뒤 0.1초",
+      "quiet_start": "dsync 실행 시각(run_job 08:28:57.7 · mpirun 08:28:58.9)에 -q — 도구가 진행 줄을 찍지 않아 start 에 머문 채 30초 심장박동(mpirun 뒤 300초째)"
+    },
+    "responses": {
+      "available": {
+        "phase": "execution",
+        "available": true,
+        "age_seconds": 4,
+        "progress": {
+          "v": 1,
+          "tool": "dsync",
+          "dryrun": false,
+          "quiet": false,
+          "phase": "copy",
+          "phase_since_s": 23.2,
+          "elapsed_s": 50.5,
+          "since_line_s": 3.2,
+          "lines": 15,
+          "ended": false,
+          "step": {"percent": 73, "bytes": 1076963049, "rate_bps": 53826552, "done": false},
+          "overall": {"items": 40000, "total": 100105, "percent": 39.958},
+          "walk": {"src_items": 100105, "dst_items": 0}
+        }
+      },
+      "available_preview": {
+        "phase": "preview",
+        "available": true,
+        "age_seconds": 1,
+        "progress": {
+          "v": 1,
+          "tool": "nsync",
+          "dryrun": true,
+          "quiet": false,
+          "phase": "batches",
+          "phase_since_s": 0.4,
+          "elapsed_s": 2.5,
+          "since_line_s": 0.1,
+          "lines": 6,
+          "ended": false,
+          "batch": {
+            "done": 3,
+            "count": 6,
+            "percent": 50.0,
+            "planned_actions": 49985,
+            "planned_copy_files": 49940,
+            "planned_bytes": 1277752771
+          },
+          "scan": {"batch_files": 20000, "batch_count": 6, "src_items": 100105, "dst_items": 0}
+        }
+      },
+      "unavailable": {"phase": "execution", "available": false},
+      "errors": [
+        {"status": 404, "body": {"detail": "job_not_found"}},
+        {"status": 404, "body": {"detail": "artifact_not_found"}},
+        {"status": 410, "body": {"detail": "artifact_expired"}},
+        {"status": 422, "body": {"detail": "invalid_phase"}},
+        {"status": 503, "body": {"detail": "artifact_base_unavailable"}}
+      ]
+    }
+  },
+  "summary_keys_added": ["output_truncated"],
+  "poll_ms": {"normal": 5000, "slow": 15000}
+}

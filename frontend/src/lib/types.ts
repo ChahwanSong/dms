@@ -191,6 +191,9 @@ export interface ToolSummary {
   tool_errors?: number; aborted?: boolean; reason?: string;
   // 실행 성공인데 summary.json 을 못 읽었을 때 stepper 가 대신 싣는 표식(개수 모름).
   summary_unavailable?: boolean;
+  // 도구 출력이 러너의 파서 상한(넘침 모드, 2026-11-26)을 넘었다 -- 위치·개수 규칙에 기대는 값(반영 항목 수 등)은 빠지고 정확히
+  // 센 실패 수만 남는다. 참일 때만 싣는다(lib/progressContract.json summary_keys_added).
+  output_truncated?: boolean;
 }
 export interface DataJob {
   job_id: string; request_id: string; operation: string; state: string;
@@ -251,6 +254,45 @@ export interface JobLogs {
     waiting_reason?: string | null;   // live 전용 -- 로그가 없는 "이유"의 별 채널
     truncated?: boolean;              // archived 전용 -- 파드당 16KB 꼬리 잘림
   }[];
+}
+// sync 진행률(2026-11-26, GET /api/user/jobs/{job_id}/progress?phase=execution|preview): 러너가 실행 중 <phase>/progress.json
+// 하나를 덮어쓰고 API 가 모양을 거른 사본. 계약의 단일 원천은 lib/progressContract.json(필드 범위·phase 목록·예 스냅숏·응답)이고
+// 백엔드 tests/test_job_progress_contract.py 가 아래 키 집합을 그 파일과 대조한다. 모든 키는 선택이다 -- 키 없음 = 모름(0 으로
+// 읽지 않는다, null≠0). 표시 전용이라 게이트·통계에 쓰지 않는다. 남은 시간은 어떤 키에도 없다. tool·phase 가 string 인 것은
+// 계약 JSON 의 예를 그대로 대입하기 위해서다(미지 phase 는 화면이 「진행 단계 알 수 없음」으로 보인다).
+export interface ProgressStep {
+  items?: number; total?: number; percent?: number; bytes?: number; rate_bps?: number; rate_items?: number;
+  done?: boolean;
+}
+export interface ProgressOverall {
+  items?: number; total?: number; percent?: number;
+}
+export interface ProgressWalk {
+  src_items?: number; dst_items?: number;
+}
+// nsync 배치 -- 실행이면 actions·copied_*·avg_*, 미리보기면 planned_*(계약 mode).
+export interface ProgressBatch {
+  done?: number; count?: number; percent?: number;
+  actions?: number; copied_files?: number; copied_bytes?: number; avg_files_per_s?: number; avg_bps?: number;
+  planned_actions?: number; planned_copy_files?: number; planned_bytes?: number;
+}
+export interface ProgressScan {
+  batch_files?: number; batch_count?: number; src_items?: number; dst_items?: number;
+}
+export interface ProgressSnapshot {
+  v?: number; tool?: string; dryrun?: boolean; quiet?: boolean; phase?: string;
+  phase_since_s?: number; elapsed_s?: number; since_line_s?: number; lines?: number; ended?: boolean;
+  step?: ProgressStep;
+  overall?: ProgressOverall;
+  walk?: ProgressWalk;
+  batch?: ProgressBatch;
+  scan?: ProgressScan;
+}
+// available:false = 아직 없음·읽을 수 없음(모름 -- 실패로 단정하지 않는다). age_seconds·progress 는 available 일 때만 온다.
+export interface JobProgressResponse {
+  phase: string; available: boolean;
+  age_seconds?: number;
+  progress?: ProgressSnapshot;
 }
 export interface Storage {
   storage_name: string; mount_path: string; managed_root: string; backend_type: string;
