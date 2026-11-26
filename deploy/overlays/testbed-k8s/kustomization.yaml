@@ -81,6 +81,7 @@
 #   d46 = 마운트 현황 표 압축(스토리지 열 6.5rem 고정·래퍼 안 좌우 스크롤·열 거르기)
 #   d47 = 마운트 현황 d46 실증 다듬기(DMS 공용 열 머리 줄 맞춤·Home/End 가로 처음·끝)
 #   d48 = 포탈 본문 열 최대 1440·가운데(A안)
+#   d49 = 단계별 등록(상단 스테퍼)·sync 진행률(작업 상세)
 #   태그 bump = 아래 newTag(+ patch-config.yaml 의 DMS_JOB_IMAGE) 커밋 — **dms-k8s 에서만** 한다(2026-10-22 브랜치 분리 뒤
 #   빌드 소스는 /home/mason/dms-dev/dms-k8s 체크아웃 = origin/dms-k8s, main 은 이 클러스터와 무관).
 #   ssc 클러스터의 오버레이(overlays/testbed)는 dms-ssc 브랜치에만 있다(2026-10-26 이 브랜치에서 지웠다 — 체리픽 충돌·엉뚱한 태그 방지).
@@ -111,10 +112,10 @@ resources:
 images:
   - name: set-by-overlay.invalid/dms
     newName: 10.112.0.50:5000/dms
-    newTag: d48
+    newTag: d49
   - name: set-by-overlay.invalid/dms-agent
     newName: 10.112.0.50:5000/dms-agent
-    newTag: d48
+    newTag: d49
 
 patches:
   - path: patch-config.yaml
