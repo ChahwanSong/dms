@@ -83,6 +83,7 @@ export const useJobLogs = (jobId: string, phase: string, enabled: boolean, opts?
 // 서버가 매번 base 점검(불변식 16 -- 최근 잡 DB 조회 + fstatat 몇 번)을 돌리므로 성공 경로보다 비싸다. 첫 한 번에 바로 늘리던 때
 // (2026-11-27 d49 실증)는 2~10초짜리 미리보기가 첫 응답(아직 파일 없음) 뒤 15초를 기다리는 사이에 끝나 진행 칸이 끝까지 「진행
 // 정보를 기다리는 중…」이었다 -- 연속 3회 문턱의 추가 비용은 첫 15초 동안 점검 2회다. 성공(available:true) 한 번이면 다시 센다.
+// 이 수는 간격만 정한다 -- 화면은 헛걸음이 이어져도 한 번 받은 스냅숏을 그대로 그린다(progressModel.nextHeld, JobProgress 가 쥔다).
 // 숨긴 탭은 TanStack 기본값(refetchIntervalInBackground false)대로 멈추고, 다시 보이면 refetchOnWindowFocus 가 곧바로 한 번 읽는다.
 // 간격 값은 계약 poll_ms 와 시험이 잇는다(런타임 번들에 계약 파일을 싣지 않는다 -- reasonCodes.json 과 같은 방식). staleTime 0: 행이
 // 다시 진행 중이 되어 다시 마운트되면 곧바로 읽는다.

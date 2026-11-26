@@ -6,8 +6,9 @@ import contract from "../../lib/progressContract.json";
 import { ApiError, reasonText } from "../../lib/api";
 import type { JobProgressResponse, ProgressSnapshot, ToolSummary } from "../../lib/types";
 import {
-  BASIS, CAPTION, ENDED_TITLE, NOTE, PHASE_TITLE, STALE_AFTER_S, UNKNOWN_PHASE_TITLE, WAIT_GRACE_S, pctFmt, progressView,
-  quietLineText, showsProgress, staleText, type ProgressJobInfo, type ProgressStepInfo, type ProgressView,
+  BASIS, CAPTION, ENDED_TITLE, NOTE, PHASE_TITLE, STALE_AFTER_S, UNKNOWN_PHASE_TITLE, WAIT_GRACE_S, nextHeld, pctFmt,
+  progressView, quietLineText, showsProgress, staleText, type HeldProgress, type ProgressJobInfo, type ProgressStepInfo,
+  type ProgressView,
 } from "./progressModel";
 import { STATUS_LABEL } from "./stageModel";
 
@@ -75,9 +76,10 @@ describe("계약 예 스냅숏 전부", () => {
     expect(v).toMatchObject({ title: "소스 탐색", percent: null, facts: ["탐색 100,105 항목"], note: null });
   });
 
-  test("dsync_create -- 단계 % 막대(현재 단계 기준), 생성 수 / 단계 머리 줄의 N", () => {
+  test("dsync_create -- 단계 % 막대(현재 단계 기준), 생성 수 / 단계 머리 줄의 N, 끝난 탐색 수는 뒤에 보조로", () => {
     const v = view(ok(SNAP.dsync_create));
-    expect(v).toMatchObject({ title: "파일 생성", percent: 38, basis: BASIS.step, facts: ["생성 38,308 / 100,002 항목"] });
+    expect(v).toMatchObject({ title: "파일 생성", percent: 38, basis: BASIS.step,
+      facts: ["생성 38,308 / 100,002 항목", "소스 탐색 100,105 항목", "목적지 탐색 0 항목"] });
   });
 
   test("dsync_copy_overall -- 전체 항목 막대가 우선이고 단계 % 는 사실 줄로(배치 모드라 복사량은 「이번 배치」)", () => {
@@ -85,14 +87,24 @@ describe("계약 예 스냅숏 전부", () => {
     expect(v.title).toBe("데이터 복사");
     expect(v.percent).toBe(39.958);
     expect(v.basis).toBe(BASIS.overall);
-    expect(v.facts).toEqual(["전체 40,000 / 100,105 항목", "현재 단계 73%", "이번 배치 복사 약 1.0 GiB", "평균 51.3 MiB/s"]);
+    expect(v.facts).toEqual(["전체 40,000 / 100,105 항목", "현재 단계 73%", "이번 배치 복사 약 1.0 GiB", "평균 51.3 MiB/s",
+      "소스 탐색 100,105 항목", "목적지 탐색 0 항목"]);
     expect(pctFmt(v.percent!)).toBe("39.9%");      // 버림 -- 반올림해 끝난 것처럼 보이지 않게
   });
 
-  test("dsync_ended -- 끝 제목·전체 100%·경고 없음(나이가 많아도)", () => {
+  test("dsync_ended -- 끝 제목·전체 100%·경고 없음(나이가 많아도), 전체 수가 먼저이고 탐색 수는 보조", () => {
     const v = view(ok(SNAP.dsync_ended, 400));
     expect(v).toMatchObject({ title: ENDED_TITLE, percent: 100, basis: BASIS.overall, note: null,
-      facts: ["전체 100,105 / 100,105 항목"] });
+      facts: ["전체 100,105 / 100,105 항목", "소스 탐색 100,105 항목", "목적지 탐색 0 항목"] });
+  });
+
+  test("dsync 미리보기 끝 스냅숏 -- 도구가 약 2.4초라 화면이 받는 유일한 스냅숏이어도 제목만이 아니라 탐색 수를 보인다", () => {
+    // 2026-11-27 d50 실증 F2(p-el-06): 끝 스냅숏의 walk 를 읽지 않아 「진행 · 도구 종료 · 결과 정리 중」 제목만 남았다. 아래는 그
+    // 잡의 preview/progress.json 그대로다.
+    const end: ProgressSnapshot = { v: 1, tool: "dsync", dryrun: true, quiet: false, phase: "done", phase_since_s: 0.1,
+      elapsed_s: 2.4, since_line_s: 0.1, lines: 6, ended: true, walk: { src_items: 50105, dst_items: 0 } };
+    expect(view(ok(end, 1), { step: PREV, job: { tool: "dsync" } })).toMatchObject({ title: ENDED_TITLE, percent: null,
+      note: null, facts: ["소스 탐색 50,105 항목", "목적지 탐색 0 항목"] });
   });
 
   test("nsync_scan -- 스캔 중엔 막대·수치 없음", () => {
@@ -253,6 +265,27 @@ describe("null 과 0", () => {
     expect(junk.join(" ")).not.toContain("미리보기 계획");
   });
 
+  test("dsync 탐색 완료 수(walk)는 어느 단계에서든 키가 있을 때만 -- 0 은 「0 항목」, 그 쪽 완료 수가 있으면 탐색 중 수는 접는다", () => {
+    const d = (over: ProgressSnapshot) => view(ok({ v: 1, tool: "dsync", phase: "done", ended: true, ...over })).facts;
+    expect(d({})).toEqual([]);
+    expect(d({ walk: {} })).toEqual([]);
+    expect(d({ walk: { src_items: 0 } })).toEqual(["소스 탐색 0 항목"]);
+    expect(d({ walk: { dst_items: 7 } })).toEqual(["목적지 탐색 7 항목"]);
+    expect(d({ walk: { src_items: "5", dst_items: -1 } as unknown as ProgressSnapshot["walk"] })).toEqual([]);
+    expect(d({ walk: [] as unknown as ProgressSnapshot["walk"] })).toEqual([]);
+    for (const phase of ["copy", "metadata", "timestamps", "zzz"]) {
+      expect(view(ok({ v: 1, tool: "dsync", phase, walk: { src_items: 3 } })).facts, phase).toContain("소스 탐색 3 항목");
+    }
+    // 소스 탐색 완료 줄 뒤에도 다음 머리 줄까지 단계는 walk_src 이고 step.items 는 마지막 진행 줄(완료 수보다 작다) -- 완료 수만
+    expect(view(ok({ v: 1, tool: "dsync", phase: "walk_src", step: { items: 49000 }, walk: { src_items: 50105 } })).facts)
+      .toEqual(["소스 탐색 50,105 항목"]);
+    // 목적지 탐색 중엔 그 진행 수가 먼저, 끝난 소스 탐색 수가 뒤
+    expect(view(ok({ v: 1, tool: "dsync", phase: "walk_dst", step: { items: 120 }, walk: { src_items: 50105 } })).facts)
+      .toEqual(["탐색 120 항목", "소스 탐색 50,105 항목"]);
+    // nsync 의 스캔 수는 scan 이 말한다 -- walk 를 읽지 않는다
+    expect(view(ok({ v: 1, tool: "nsync", phase: "finishing", walk: { src_items: 3 } })).facts).toEqual([]);
+  });
+
   test("하위 객체가 객체가 아니거나 비면 그 조각만 빠진다", () => {
     const v = view(ok({ v: 1, tool: "nsync", phase: "batches", batch: [] as unknown as ProgressSnapshot["batch"] }));
     expect(v).toMatchObject({ percent: null, facts: [] });
@@ -405,6 +438,64 @@ describe("신선도와 안내", () => {
       note: { tone: "attn", text: reasonText("artifact_base_unavailable") } });
     // 네트워크 단절(status 0)도 같은 길
     expect(view(undefined, { error: new ApiError(0, "network_error", "") }).note?.text).toBe(reasonText("network_error"));
+  });
+});
+
+describe("한 번 받은 스냅숏은 같은 잡·단계에서 놓지 않는다(held)", () => {
+  // 2026-11-27 d50 실증 F3(net.jsonl 18:16:44.846Z): 실행 중(copy 85%) 응답 하나만 200 available:false 였다(앞뒤 응답의 나이로 보면 러너의
+  // rename 과 같은 순간 -- 공유 NFS 의 읽기 실패로 추정). 그때 화면이 스냅숏을 버리고 5초 동안 「진행 정보가 없습니다 — … 이전 잡
+  // 이미지로 실행 중이거나…」를 보였다.
+  const KEY = "j1/execution";
+  const held = (snap: ProgressSnapshot, age: number, atMs: number): HeldProgress => ({ key: KEY, resp: ok(snap, age), atMs });
+  const at = (resp: JobProgressResponse | undefined, h: HeldProgress | null, o: { after?: number; error?: unknown; step?: ProgressStepInfo } = {}) =>
+    progressView(resp, o.error ?? null, {}, o.step ?? EXEC, T0 + (o.after ?? 0) * 1000, T0, h);
+
+  test("available:false 한 번 -- 마지막 성공 스냅숏을 그대로 그리고 「이전 잡 이미지」 문구를 내지 않는다", () => {
+    const v = at(RESP.unavailable, held(SNAP.dsync_copy_overall, 5, T0 - 5000));
+    expect(v).toMatchObject({ title: "데이터 복사", percent: 39.958, basis: BASIS.overall, note: null, fresh: "갱신 10초 전" });
+    expect(v.facts[0]).toBe("전체 40,000 / 100,105 항목");
+    for (const s of strings(v)) expect(s).not.toMatch(/진행 정보가|이전 잡 이미지/);
+  });
+
+  test("유지하는 동안 갱신 나이는 그 스냅숏 기준으로 계속 늘어 정체 경고 규칙을 그대로 탄다", () => {
+    const h = held({ ...SNAP.dsync_copy_overall, since_line_s: 0 }, 5, T0);
+    expect(at(RESP.unavailable, h, { after: 30 }).fresh).toBe("갱신 35초 전");
+    expect(at(RESP.unavailable, h, { after: STALE_AFTER_S - 5 }).note?.tone).not.toBe("attn");
+    expect(at(RESP.unavailable, h, { after: STALE_AFTER_S - 4 }).note).toEqual({ tone: "attn", text: staleText("1분 31초") });
+    // 끝 스냅숏을 쥐고 있으면 정체 경고 없음(러너가 더 쓰지 않는다)
+    expect(at(RESP.unavailable, held(SNAP.dsync_ended, 1, T0), { after: 600 }).note).toBeNull();
+  });
+
+  test("오류도 스냅숏은 유지하고 안내만 사유 문구로(TanStack 의 마지막 data 가 available:false 여도)", () => {
+    const err = new ApiError(503, "artifact_base_unavailable", "");
+    const v = at(RESP.unavailable, held(SNAP.dsync_create, 1, T0), { error: err });
+    expect(v).toMatchObject({ title: "파일 생성", percent: 38, note: { tone: "attn", text: reasonText("artifact_base_unavailable") } });
+  });
+
+  test("이번 응답이 스냅숏이면 그것이 우선(쥐고 있던 값보다 새것) -- 나이도 이번 응답 기준", () => {
+    const v = at(ok(SNAP.dsync_create, 2), held(SNAP.dsync_copy_overall, 5, T0 - 60_000), { after: 1 });
+    expect(v).toMatchObject({ title: "파일 생성", fresh: "갱신 3초 전" });
+  });
+
+  test("성공을 한 번도 못 받았으면(held 없음) 지금처럼 단정하지 않는 문구", () => {
+    expect(at(RESP.unavailable, null, { after: 600 }).note).toEqual({ tone: "info", text: NOTE.noneRunning });
+    expect(at(undefined, null).note).toEqual({ tone: "info", text: NOTE.loading });
+  });
+
+  test("nextHeld -- available:true 응답만 쥐고, 헛걸음·오류(undefined)엔 그대로, 다른 잡·단계면 버린다", () => {
+    const a = ok(SNAP.dsync_create, 1);
+    const h1 = nextHeld(null, KEY, a, T0);
+    expect(h1).toEqual({ key: KEY, resp: a, atMs: T0 });
+    expect(nextHeld(h1, KEY, a, T0)).toBe(h1);                                // 같은 응답이면 같은 객체(상태를 흔들지 않는다)
+    expect(nextHeld(h1, KEY, RESP.unavailable, T0 + 5000)).toBe(h1);
+    expect(nextHeld(h1, KEY, undefined, T0 + 5000)).toBe(h1);
+    const bad = { phase: "execution", available: true, age_seconds: 3, progress: "x" } as unknown as JobProgressResponse;
+    expect(nextHeld(h1, KEY, bad, T0 + 5000)).toBe(h1);                        // 모양이 틀린 응답은 스냅숏이 아니다
+    expect(nextHeld(null, KEY, RESP.unavailable, T0)).toBeNull();
+    const b = ok(SNAP.dsync_copy_overall, 0);
+    expect(nextHeld(h1, KEY, b, T0 + 5000)).toEqual({ key: KEY, resp: b, atMs: T0 + 5000 });
+    expect(nextHeld(h1, "j2/execution", RESP.unavailable, T0)).toBeNull();
+    expect(nextHeld(h1, "j1/preview", undefined, T0)).toBeNull();
   });
 });
 

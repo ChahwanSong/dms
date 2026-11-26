@@ -1,8 +1,8 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
-import { afterAll, afterEach, beforeAll, expect, test } from "vitest";
+import { afterAll, afterEach, beforeAll, expect, test, vi } from "vitest";
 import contract from "../../lib/progressContract.json";
 import { reasonText } from "../../lib/api";
 import type { DataJob, JobProgressResponse, ProgressSnapshot } from "../../lib/types";
@@ -12,7 +12,7 @@ import type { StepModel } from "./stageModel";
 
 // 응답·스냅숏은 계약 파일(lib/progressContract.json examples)에서 그대로 -- 손으로 쓴 모의 모양 금지(설계 §11.2).
 const server = setupServer();
-beforeAll(() => server.listen()); afterEach(() => server.resetHandlers()); afterAll(() => server.close());
+beforeAll(() => server.listen()); afterEach(() => { server.resetHandlers(); vi.useRealTimers(); }); afterAll(() => server.close());
 
 const SNAP: Record<string, ProgressSnapshot> = contract.examples.snapshots;
 const RESP = contract.examples.responses;
@@ -55,7 +55,8 @@ test("머리 「진행 · 단계」·신선도 → 막대(기준 문구·aria) �
   expect(within(g).getByText("39.9%")).toBeInTheDocument();
   expect(within(g).getByText(BASIS.overall)).toBeInTheDocument();
   // 사실 조각은 하나씩(줄이 모자라면 조각 단위로 넘긴다), 사이는 「 · 」
-  const facts = ["전체 40,000 / 100,105 항목", "현재 단계 73%", "이번 배치 복사 약 1.0 GiB", "평균 51.3 MiB/s"];
+  const facts = ["전체 40,000 / 100,105 항목", "현재 단계 73%", "이번 배치 복사 약 1.0 GiB", "평균 51.3 MiB/s",
+    "소스 탐색 100,105 항목", "목적지 탐색 0 항목"];
   for (const f of facts) expect(within(g).getByText(f)).toHaveClass("inline-block");
   expect(within(g).getByText(facts[0]).parentElement).toHaveTextContent(facts.join(" · "));
   expect(asked).toEqual(["execution"]);
@@ -94,6 +95,31 @@ test("available:false 는 단정하지 않는 안내(info) -- 「주의」가 �
   expect(within(g).getByText("안내")).toHaveClass("sr-only");
   expect(within(g).queryByText("주의")).toBeNull();
   expect(within(g).queryByRole("progressbar")).toBeNull();
+});
+
+// 2026-11-27 d50 실증 F3(net.jsonl 18:16:44.846Z): 실행 중(copy 85%) 응답 하나만 available:false 였는데 화면이 스냅숏을 버리고 5초 동안
+// 「진행 정보가 없습니다 — … 이전 잡 이미지로 실행 중이거나…」를 보였다. 한 번 받은 스냅숏은 같은 잡·단계에서 놓지 않는다.
+test("실행 중 available:false 한 번 -- 마지막 스냅숏을 그대로 두고(나이는 그 스냅숏 기준), 「이전 잡 이미지」 문구를 내지 않는다", async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  const seq: unknown[] = [RESP.available, RESP.unavailable];
+  let n = 0;
+  const asked: string[] = [];
+  server.use(http.get("/api/user/jobs/j1/progress", () => {
+    asked.push("x");
+    return HttpResponse.json((seq[n++] ?? RESP.unavailable) as Record<string, unknown>);
+  }));
+  renderProgress();
+  const g = await screen.findByRole("group", { name: "실행 진행" });
+  expect(await within(g).findByText("진행 · 데이터 복사")).toBeInTheDocument();
+  expect(within(g).getByText("갱신 4초 전")).toBeInTheDocument();
+  await act(async () => { await vi.advanceTimersByTimeAsync(5100); });
+  await waitFor(() => expect(asked).toHaveLength(2));
+  await act(async () => { await vi.advanceTimersByTimeAsync(50); });
+  expect(within(g).getByText("진행 · 데이터 복사")).toBeInTheDocument();
+  expect(within(g).getByRole("progressbar")).toHaveAttribute("aria-valuenow", "39.958");
+  expect(within(g).getByText(/^갱신 (9|10)초 전$/)).toBeInTheDocument();         // 그 스냅숏의 나이 4초 + 받은 뒤 흐른 약 5초
+  expect(within(g).queryByText(NOTE.noneRunning)).toBeNull();
+  expect(g.textContent).not.toMatch(/진행 정보가|이전 잡 이미지/);
 });
 
 test("503 은 사유 문구(주의)", async () => {

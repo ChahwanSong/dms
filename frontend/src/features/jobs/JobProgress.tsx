@@ -1,10 +1,10 @@
-import { Fragment } from "react";
+import { Fragment, useState } from "react";
 import { Info, TriangleAlert } from "lucide-react";
 import { HelpTip } from "../../components/ui/HelpTip";
 import { useNow } from "../../lib/useNow";
 import type { DataJob } from "../../lib/types";
 import { useJobProgress, type ProgressPhase } from "./useArtifacts";
-import { pctFmt, progressView } from "./progressModel";
+import { nextHeld, pctFmt, progressView, type HeldProgress } from "./progressModel";
 import { STEP_COPY, type StepModel } from "./stageModel";
 
 // sync 진행률 한 칸(2026-11-26) -- 요청 상세 잡 카드(JobStages StepRow)의 「진행 중」 실행·미리보기 행 머리 줄 바로 아래에만
@@ -15,11 +15,16 @@ import { STEP_COPY, type StepModel } from "./stageModel";
 // - 머리는 「진행 · {단계}」 -- 단계 배지·StatusPill 글자(「진행 중」 등, e2e 정확 일치 단언)를 단독으로 쓰지 않는다.
 // - 막대는 근거가 있을 때만(percent !== null), 기준 문구를 늘 곁에 둔다(무엇의 % 인지 -- dsync 복사 % 는 바이트·배치 안이다).
 // - 색은 기존 토큰(busy·attn·ink/70)과 번들 아이콘만(airgap).
+// - 한 번 받은 스냅숏은 같은 잡·단계에서 놓지 않는다(progressModel 규약 -- nextHeld). TanStack data 는 마지막 응답이라 available:false
+//   한 번에 스냅숏이 사라지므로 마지막 스냅숏 응답을 상태로 쥔다(렌더 중 갱신 -- 「이전 렌더의 정보 저장」 패턴, 같은 값이면 그대로).
 export function JobProgress({ job, step, live = true }: { job: DataJob; step: StepModel; live?: boolean }) {
   const phase = step.id as ProgressPhase;
   const q = useJobProgress(job.job_id, phase, live);
   const now = useNow(5000, live);
-  const v = progressView(q.data, q.error, job, step, now, q.dataUpdatedAt);
+  const [held, setHeld] = useState<HeldProgress | null>(null);
+  const nextH = nextHeld(held, `${job.job_id}/${phase}`, q.data, q.dataUpdatedAt);
+  if (nextH !== held) setHeld(nextH);
+  const v = progressView(q.data, q.error, job, step, now, q.dataUpdatedAt, nextH);
   const stepName = STEP_COPY[step.id];
   return (
     <div role="group" aria-label={`${stepName} 진행`}

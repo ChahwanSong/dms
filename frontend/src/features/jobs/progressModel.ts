@@ -11,6 +11,11 @@
 //   흔들리는 것은 자기 잡 표시뿐이어야 한다).
 // - available:false 는 **단정하지 않는다**(모름을 실패로 둔갑시키지 않는다): Volcano Pending 과 진행 기록을 남기지 않는 이전 잡
 //   이미지를 화면이 가릴 수 없다 -- 늘 info 톤, 「~일 수 있습니다」.
+// - **한 번 받은 스냅숏은 같은 잡·단계에서 놓지 않는다**(held -- nextHeld, 2026-11-27 d50 실증 F3): 실행 중(copy 85%) 응답 하나만
+//   available:false 였는데(앞뒤 응답의 나이로 보면 러너의 rename 과 같은 순간 -- 공유 NFS 의 읽기 실패로 추정) 화면이 스냅숏을 버리고
+//   「진행 정보가 없습니다 — … 이전 잡 이미지…」를 5초 보였다. 그 뒤의 available:false·오류는 마지막 스냅숏을 그대로 그리고(나이는
+//   그 스냅숏 기준으로 계속 늘어 정체 경고 규칙을 그대로 탄다), 이전 잡 이미지 문구는 성공을 한 번도 못 받았을 때만이다. 오류는
+//   지금처럼 안내 줄만 사유 문구로 바꾼다. 폴링 간격(useJobProgress 의 연속 헛걸음 수)은 이와 무관하게 센다.
 // - 단계 제목은 STATUS_LABEL(「진행 중」 등)·단계 배지 글자와 겹치지 않는다(e2e 정확 일치 단언). 미지 phase 도 「진행 단계 알 수
 //   없음」이다. phase 는 소문자 정규식만 통과하지만 「constructor」처럼 Object.prototype 이름과 겹칠 수 있어 자기 키만 찾는다.
 import { reasonText } from "../../lib/api";
@@ -42,6 +47,8 @@ export interface ProgressView {
 export interface ProgressStepInfo { id: string; start: string | null; schedWaitSec: number | null }
 /** 이 칸이 읽는 잡 조각(DataJob 이 만족한다). */
 export interface ProgressJobInfo { tool?: string | null; preview_summary?: ToolSummary | null }
+/** 같은 잡·단계(key)에서 마지막으로 받은 스냅숏 응답과 받은 시각(dataUpdatedAt) -- 규약의 「놓지 않는다」. */
+export interface HeldProgress { key: string; resp: JobProgressResponse; atMs: number }
 
 // 계약 snapshot.phases 전부(시험이 대조한다). batches 의 미리보기 제목은 PHASE_TITLE_PREVIEW.
 export const PHASE_TITLE: Readonly<Record<string, string>> = {
@@ -140,6 +147,21 @@ function runStartMs(step: ProgressStepInfo): number | null {
   return ms + (step.schedWaitSec ?? 0) * 1000;
 }
 
+/** 응답이 그릴 스냅숏을 담았나(available:true ∧ progress 가 객체) -- 아니면 null(available:false·모양 틀림). */
+function snapshotOf(resp: JobProgressResponse | undefined): ProgressSnapshot | null {
+  return resp !== undefined && resp.available === true && isPlainObject(resp.progress) ? resp.progress : null;
+}
+
+/** 다음 held: 이번 응답이 스냅숏이면 그것(같은 응답·시각이면 같은 객체 -- 상태를 흔들지 않는다), 아니면(available:false·조회 오류로
+ *  data 없음) 같은 key 의 것을 그대로. key(잡·단계)가 바뀌면 버린다 -- 다른 잡·단계의 스냅숏을 이어 그리지 않는다. */
+export function nextHeld(prev: HeldProgress | null, key: string, resp: JobProgressResponse | undefined,
+                         atMs: number): HeldProgress | null {
+  if (resp !== undefined && snapshotOf(resp) !== null) {
+    return prev !== null && prev.key === key && prev.resp === resp && prev.atMs === atMs ? prev : { key, resp, atMs };
+  }
+  return prev !== null && prev.key === key ? prev : null;
+}
+
 function errorCode(error: unknown): string | null {
   if (error === null || error === undefined) return null;
   if (isPlainObject(error) && typeof error.code === "string" && error.code !== "") return error.code;
@@ -203,6 +225,12 @@ function barOf(tool: string | null, snap: ProgressSnapshot, phase: string, job: 
 
 function dsyncFacts(snap: ProgressSnapshot, phase: string, bar: Bar | null, job: ProgressJobInfo): string[] {
   const out: string[] = [];
+  // 탐색 완료 수(walk -- 완료 줄 「… seconds (」)는 단계와 무관하게 남는다: 끝 스냅숏(ended)에도. 미리보기 도구는 수 초라(실측 d50 F2
+  // 2.4초) 화면이 받는 것이 끝 스냅숏 하나뿐인 일이 흔하다 -- 이 줄이 없으면 「도구 종료 · 결과 정리 중」 제목만 남았다. 전체 블록·단계
+  // 수치 뒤에 보조로 둔다. 키가 없는 쪽은 뺀다(null≠0 -- 목적지 0 은 「0 항목」).
+  const w = obj(snap.walk);
+  const walkSrc = w ? num(w.src_items) : null;
+  const walkDst = w ? num(w.dst_items) : null;
   const s = obj(snap.step);
   const items = s ? num(s.items) : null;
   const total = s ? num(s.total) : null;
@@ -223,7 +251,9 @@ function dsyncFacts(snap: ProgressSnapshot, phase: string, bar: Bar | null, job:
   switch (phase) {
     case "walk_src":
     case "walk_dst":
-      if (items !== null) out.push(`탐색 ${countFmt(items)} 항목`);
+      // 그 쪽 탐색 완료 줄(walk)을 봤으면 아래 완료 수가 말한다 -- 다음 머리 줄까지 단계는 그대로이고 step.items 는 마지막 진행 줄의
+      // (완료 수보다 작은) 값이라 둘을 나란히 두면 엇갈려 보인다.
+      if (items !== null && (phase === "walk_src" ? walkSrc : walkDst) === null) out.push(`탐색 ${countFmt(items)} 항목`);
       if (bar?.basis === BASIS.walkEstimate) {
         const src = readSummary(job.preview_summary ?? null).sourceItems;
         if (src !== null) out.push(`미리보기 소스 ${countFmt(src)} 항목`);
@@ -258,6 +288,8 @@ function dsyncFacts(snap: ProgressSnapshot, phase: string, bar: Bar | null, job:
       else if (total !== null) out.push(`삭제 대상 ${countFmt(total)} 항목`);
       break;
   }
+  if (walkSrc !== null) out.push(`소스 탐색 ${countFmt(walkSrc)} 항목`);
+  if (walkDst !== null) out.push(`목적지 탐색 ${countFmt(walkDst)} 항목`);
   return out;
 }
 
@@ -349,15 +381,21 @@ function captionOf(tool: string | null, snap: ProgressSnapshot, phase: string): 
 /**
  * 응답·오류·단계 → 그릴 것. resp = 마지막 성공 응답(없으면 undefined), error = 마지막 조회 오류(TanStack 은 재조회가 실패해도 마지막
  * 성공 data 를 남긴다 -- 그때는 스냅숏을 그대로 그리고 안내를 오류로 바꾼다), fetchedAtMs = 그 응답을 받은 시각(dataUpdatedAt).
- * 신선도 = 서버가 잰 나이(age_seconds -- 브라우저 시계 무관) + 받은 뒤 흐른 시간. age_seconds 가 없으면(모름) 신선도도 모름이다 --
- * fresh null, 나이에 기대는 안내 없음(noteOf).
+ * held = 같은 잡·단계에서 마지막으로 받은 스냅숏(nextHeld) -- resp 가 스냅숏이 아니면(available:false) 그것을 그린다(규약).
+ * 신선도 = 서버가 잰 나이(age_seconds -- 브라우저 시계 무관) + 받은 뒤 흐른 시간(그린 스냅숏을 받은 시각부터). age_seconds 가 없으면
+ * (모름) 신선도도 모름이다 -- fresh null, 나이에 기대는 안내 없음(noteOf).
  */
 export function progressView(resp: JobProgressResponse | undefined, error: unknown, job: ProgressJobInfo,
-                             step: ProgressStepInfo, nowMs: number, fetchedAtMs: number): ProgressView {
+                             step: ProgressStepInfo, nowMs: number, fetchedAtMs: number,
+                             held: HeldProgress | null = null): ProgressView {
   const code = errorCode(error);
   const errNote: ProgressNote | null = code !== null ? { tone: "attn", text: reasonText(code) } : null;
-  const snap = resp && resp.available === true && isPlainObject(resp.progress) ? resp.progress : null;
-  if (snap === null) {
+  // 그릴 응답: 이번 응답이 스냅숏이면 그것, 아니면 같은 잡·단계에서 마지막으로 받은 것(held).
+  const shown: { resp: JobProgressResponse; atMs: number } | null =
+    resp !== undefined && snapshotOf(resp) !== null ? { resp, atMs: fetchedAtMs }
+    : held !== null && snapshotOf(held.resp) !== null ? held : null;
+  const snap = shown !== null ? snapshotOf(shown.resp) : null;
+  if (shown === null || snap === null) {
     if (errNote) return { ...EMPTY_VIEW, note: errNote };
     return waitingView(step, nowMs, resp !== undefined);
   }
@@ -366,8 +404,8 @@ export function progressView(resp: JobProgressResponse | undefined, error: unkno
   const dryrun = snap.dryrun === true;
   const title = snap.ended === true ? ENDED_TITLE
     : (dryrun ? own(PHASE_TITLE_PREVIEW, phase) : undefined) ?? own(PHASE_TITLE, phase) ?? UNKNOWN_PHASE_TITLE;
-  const age = num(resp?.age_seconds);
-  const ageNow = age !== null ? age + Math.max(0, nowMs - fetchedAtMs) / 1000 : null;
+  const age = num(shown.resp.age_seconds);
+  const ageNow = age !== null ? age + Math.max(0, nowMs - shown.atMs) / 1000 : null;
   const bar = barOf(tool, snap, phase, job, step);
   const facts = tool === "nsync" ? nsyncFacts(snap, phase, dryrun, job)
     : tool === "dsync" ? dsyncFacts(snap, phase, bar, job) : [];
