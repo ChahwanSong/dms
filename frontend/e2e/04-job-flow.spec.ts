@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 import { STORAGE_NAME } from "./harness/env";
 import { apiLogin } from "./helpers/session";
 import { assertLayoutSane } from "./helpers/layout";
+import { expectStep, wizardNext } from "./helpers/wizard";
 
 // E4 — 잡 종단 흐름. 이 파일에만 있는 것: **UI 제출 한 번이 풀스택 배선 전체를
 // 밟는다**. 폼 -> POST /api/user/requests(202) -> 플래너가 에이전트 리포트에서
@@ -20,11 +21,12 @@ test.describe("E4 잡 종단 흐름", () => {
     // 경로(시드 스토리지 + 상대경로)로 scan 을 낼 수 있다(2026-10-26 LDAP 정리 -- k8s 신원 모드 전용: 모든 작업이 root 이고
     // 서버가 run_as_root 를 강제한다, root 체크박스는 없다). 하네스엔 k8s 클러스터가 없어 PV 주소는 쓰지 않는다.
     await apiLogin(page);
-    // 슬라이스 37: scan 은 단일 작업(운영자 전용 연산)으로 흡수됐다. 2026-10-06 부터 위저드가
-    // 아니라 한 장짜리 시트 + 오른쪽 제출 요약이다 -- "다음" 없이 한 화면에서 채우고 제출한다.
+    // 슬라이스 37: scan 은 단일 작업(운영자 전용 연산)으로 흡수됐다. 2026-11-26 단계별 등록(사용자 결정 「초안 1 상단
+    // 스테퍼」): 작업 종류 → 스캔 대상 → 옵션·실행 설정 → 검토·제출 네 단계 + 하단 고정 바(「다음」과 「제출」이 같은 자리).
     await page.goto("/jobs/new");
     await expect(page.getByRole("heading", { name: "단일 작업" })).toBeVisible();
     await page.getByLabel("연산", { exact: true }).selectOption("scan");
+    await wizardNext(page, "스캔 대상");
     // 면제자의 대상은 기본이 「PV」(전체 PV 검색)라 「직접 경로」로 바꾼다(LocationField 의 지정 방식 전환).
     await page.getByRole("group", { name: "대상 지정 방식" }).getByRole("button", { name: "직접 경로", exact: true }).click();
 
@@ -42,10 +44,17 @@ test.describe("E4 잡 종단 흐름", () => {
     // **달라야** 한다: 같은 requester+storage+target+options 는 resource_key 가
     // 같아 활성 요청이 있으면 Conflict 로 떨어진다.
     await page.getByLabel("대상 경로", { exact: true }).fill("e4-scan");
-    // 옵션은 기본값 → 제출(버튼은 화면에 붙은 요약 패널에 있다). root 는 서버가 정한다(바디 run_as_root: true).
-    // 제출 직전 기하: 값이 찬 시트 + sticky 요약 2열에서 L1/L3/L4(표가 없어 하한 0). 짧은 입력이라
-    // 긴 무공백 토큰 회귀(minmax(0,1fr)·overflow-wrap)는 여기서 못 잡는다 -- 그 그물은 E3 의
-    // /jobs/new 순회(200자 경로 + 요약 칸 봉쇄 단언)가 맡는다.
+    // 옵션은 기본값. ③에서 「다음」을 **더블클릭**한다 -- 두 번째 클릭은 같은 자리에 막 그려진 「제출」에 떨어지는데(같은 노드),
+    // 제출 onClick 은 같은 연속 클릭의 두 번째(event.detail > 1)를 무시해야 한다(실 브라우저 더블클릭 가드 그물 -- vitest 의
+    // user-event 와 달리 detail 은 브라우저가 센다). 검토에 머물고 요청 상세로 가지 않아야 한다.
+    await wizardNext(page, "옵션·실행 설정");
+    await page.getByRole("button", { name: "다음", exact: true }).dblclick();
+    await expectStep(page, "검토·제출");
+    await page.waitForTimeout(800);
+    await expect(page, "「다음」 더블클릭의 두 번째 클릭이 제출됐다 -- 더블클릭 가드(event.detail > 1) 회귀").toHaveURL(/\/jobs\/new/);
+    // 제출 직전 기하: 검토 카드 + 하단 고정 바에서 L1/L3/L4(표가 없어 하한 0). 짧은 입력이라 긴 무공백 토큰 회귀
+    // (minmax(0,1fr)·overflow-wrap)는 여기서 못 잡는다 -- 그 그물은 E3 의 /jobs/new 순회(200자 경로 + 칸 봉쇄 단언)가 맡는다.
+    // root 는 서버가 정한다(바디 run_as_root: true).
     await assertLayoutSane(page, { minTableCells: 0 });
     await page.getByRole("button", { name: "제출", exact: true }).click();
 

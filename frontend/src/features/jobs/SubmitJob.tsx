@@ -1,15 +1,21 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import type { MouseEvent, SyntheticEvent } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { ArrowRight } from "lucide-react";
+import { ArrowRight, ChevronRight } from "lucide-react";
 import { useSubmitRequest } from "./useJobs";
 import type { SubmitBody } from "./useJobs";
 import { useUserStorages } from "../storages/useUserStorages";
 import { useMe } from "../auth/useAuth";
 import { Button } from "../../components/ui/Button";
 import { InfoCard } from "../../components/ui/InfoCard";
-import {
-  FieldRow, FormSection, OptionTokens, SubmitHints, SubmitLayout, SummaryList, SummaryPanel, SummaryRow,
-} from "../../components/form/SubmitLayout";
+// 2026-11-26 단계별 등록: 한 장 시트 + 오른쪽 요약(SubmitLayout·SummaryPanel·FormSection)을 걷고 위저드 골격(components/form/Wizard)
+// 위에 단계 넷을 그린다. 남은 표시 부품(FieldRow·SummaryList·SummaryRow·OptionTokens·SubmitHints)은 그대로 쓴다.
+import { FieldRow, OptionTokens, SubmitHints, SummaryList, SummaryRow } from "../../components/form/SubmitLayout";
+import { useWizard, WizardActionBar, WizardShell, WizardStepCard, WizardStepper } from "../../components/form/Wizard";
+import type { WizardStep } from "../../components/form/Wizard";
+import { SubSection } from "../../components/form/wizardParts";
+import { submitGates } from "./submitGates";
+import type { SubmitStep } from "./submitGates";
 import { ApiError, REASON_MESSAGES } from "../../lib/api";
 // field·StoragePicker 는 formFields.tsx 에 산다(슬라이스 31 T3) -- 제출 화면이 통째로 갈려도
 // 다른 임포터가 흔들리지 않게 결합을 끊어 둔 것.
@@ -33,7 +39,7 @@ import { NODE_CPU_CAP_NOTE } from "../../lib/jobTool";
 // dms-k8s(설계 §7, 2026-10-25): PV 주소 고르기. 2026-10-26 LDAP 정리로 이 라인은 k8s 신원 모드 전용이다 -- 옛 ldap 모드
 // 화면(스토리지 직접 고르기·실행 신원·root 체크박스·sync 허용 쌍 필터)은 지웠다.
 import { CatalogNotice, LocationField } from "../k8s/LocationField";
-import type { DestOwner } from "../k8s/LocationField";
+import type { DestOwner, PvSearchField } from "../k8s/LocationField";
 import { Segmented } from "../../components/ui/Segmented";
 import { usePvCatalog, useResolvedPv } from "../k8s/usePvCatalog";
 import type { Resolved } from "../k8s/usePvCatalog";
@@ -154,6 +160,12 @@ export function SubmitJob() {
   // 「권한 기준 사용자」(면제자): 비우면 전체 PV 검색, 채우면 그 사용자의 범위(같은 고르기 흐름). 목록 조회는 디바운스된 값으로,
   // 바디·요약은 보이는 값 그대로(보이는 것 = 보내는 것).
   const scopeField = useSearchField("");
+  // 면제자 PV 검색칸(쪽마다 하나 -- 훅 개수 고정). 단계를 옮기면 대상 단계 본문(LocationField·SearchPicker)이 언마운트되는데, 검색어를
+  // 그 지역 상태에 두면 ②→③→② 뒤 검색칸이 비고 결과 목록에서 고른 줄이 빠졌다(고른 PV 는 locs 라 남는다) -- 값은 모두 화면
+  // 최상위에 둔다(design-wizard §1-2).
+  const searchFields: Record<Side, PvSearchField> = {
+    source: useSearchField(""), destination: useSearchField(""), target: useSearchField(""),
+  };
   const scopeInput = unrestricted ? scopeField.bind.value.trim() : "";
   // 거부 이유를 셋으로 가른다(예약어·숫자만·형식 -- 문구가 형식 하나면 「nobody」「1234」처럼 안내 형식에 맞는 입력에 무엇을 고칠지
   // 말하지 못했다, 2026-11-11).
@@ -285,7 +297,6 @@ export function SubmitJob() {
   };
   const checks = activeSides.map(sideCheck);
   const anyRaw = checks.some((c) => c.raw);
-  const k8sPvBad = checks.some((c) => c.pvBad || c.pvLoading);
   const k8sSubBad = checks.some((c) => c.subBad);
   const k8sRmRoot = checks.some((c) => c.rmRoot);
   // PV 목록은 PV 쪽에만 쓰인다 -- 그 조회 실패·미동기화는 PV 를 고르는 쪽이 있을 때만 잠그고 말한다(아래 storagesBlock 의 거울,
@@ -295,14 +306,32 @@ export function SubmitJob() {
   const targetMissing = checks.some((c) => c.missing);
   // 서버가 422 unsafe_path 로 거부할 경로(relativePathProblem 미러) -- 보내기 전에 잠근다.
   const pathInvalid = checks.some((c) => c.invalid);
-  const targetInvalid = targetMissing || pathInvalid
-    || k8sPvBad || k8sSubBad || k8sRmRoot || k8sCatalogError || scopeInvalid || storageOwnerBad;
   const optionsInvalid = recursiveMissing || statLiteConflict || verboseQuietConflict
     || advancedError !== null || scanBatchFilesError !== null || brokenLimitError !== null;
-  // 제출 게이트는 이 하나다(위저드 시절 스텝별 '다음' 게이트의 합집합 + 조회 실패·진행 중).
   // 스토리지 목록은 직접 경로 쪽에만 쓰인다 -- 그 조회 실패는 직접 경로를 고른 동안만 잠근다.
   const storagesBlock = storagesQ.isError && anyRaw;
-  const blocked = submit.isPending || storagesBlock || optionsInvalid || targetInvalid;
+  // 제출 게이트·이유 목록·단계 게이트는 순수 함수 하나가 같은 잎에서 만든다(submitGates -- 식·문장·순서는 옛 한 장 시트의 blocked·
+  // hints 그대로이고 단계 태그만 붙인다; 합집합 불변식은 잎 조합 전수 시험). 잎 계산은 위 그대로 이 화면에 있다.
+  const gates = submitGates({
+    isPending: submit.isPending, storagesBlock, scopeProblem, k8sCatalogError,
+    catalogUnsynced: catalog.status === "ready" && catalog.clusters.every((c) => c.synced_at === null) && anyPv,
+    catalogNoNs: catalog.status === "ready" && catalog.namespaces !== null && catalog.namespaces.length === 0 && anyPv,
+    targetMissing, op: f.operation, anyRaw,
+    pvBad: checks.some((c) => c.pvBad), pvLoading: checks.some((c) => c.pvLoading),
+    k8sRmRoot, k8sSubBad, storageOwnerBad, ownerModeEditable,
+    // 운영자 바 문장의 「② 결과 소유를 PV 루트 소유자로」 갈래는 그 선택이 실제로 보이는 때만(결과 소유 Segmented = 면제자 + PV 목적지).
+    pvDest: pvDest && unrestricted,
+    pathInvalid, optionsInvalid,
+  });
+  const blocked = gates.blocked;
+  // 제출이 잠긴 이유(검토 단계 바, 제출 버튼 위). 필드 옆 빨간 문구와 **다른 문장**으로 짧게 -- 같은 문장을 두 번 그리지 않는다
+  // (SubmitHints 주석). 대상 미입력 안내만은 원문이 여기 한 곳에 산다. 각 단계 바에는 그 단계 태그의 첫 줄(gates.barReason).
+  const hints = gates.hints;
+  // storageOwnerBad 를 운영자가 옵션 단계에서 풀 때(chown 이 우회로 -- submitGates 머리 주석) 고급 옵션을 강제로 펼친다: 바 이유가
+  // 「고급 옵션의 chown 에 …」라 그 칸이 보여야 안내가 참이다(advancedError 와 같은 경로).
+  const ownerFixOpen = storageOwnerBad && ownerModeEditable;
+  // 강제로 펼친 채 chown 을 적으면 ownerFixOpen 이 풀려 패널이 입력 도중 접혔다 -- 펼친 적이 있으면 사용자가 연 것으로 남긴다.
+  useEffect(() => { if (ownerFixOpen) setAdvancedOpen(true); }, [ownerFixOpen]);
 
   // --- 정책 기본값 캡션(슬라이스 37: BatchCreate 미러 — 표시 배선만) ---
   // 정책은 관리자 전용 API -- 사용자에겐 캡션·우선순위가 없으니 조회하지 않는다(요약은 "(정책 기본)").
@@ -416,40 +445,6 @@ export function SubmitJob() {
     return pvSubProblem(l.sub, f.operation) !== null ? null : pvAbsPath(rowOf(side), l.sub);
   };
 
-  // 제출 버튼은 type="button" + onClick 이다(아래 form 주석) -- e 는 옵션으로 받고, form 경유
-  // (강제 submit 등) 때만 기본 동작을 막는다.
-  function handleSubmit(e?: React.SyntheticEvent) {
-    e?.preventDefault();
-    if (blocked) return;
-    submit.mutate(k8sBody(), { onSuccess: (r) => nav(`/jobs/${r.request_id}`) });
-  }
-
-  // 제출이 잠긴 이유(요약 패널, 버튼 위). 필드 옆 빨간 문구와 **다른 문장**으로 짧게 -- 같은 문장을
-  // 두 번 그리지 않는다(SubmitHints 주석). 대상 미입력 안내만은 원문이 여기 한 곳에 산다.
-  const hints: string[] = [];
-  if (submit.isPending) hints.push("제출 중…");
-  if (storagesBlock) hints.push("스토리지 목록 조회 실패 — 새로고침 후 다시 시도하세요");
-  // 필드·구획 머리의 문구와 다른, 짧은 「무엇을 하면 되나」(SubmitHints 계약).
-  if (scopeProblem === "reserved") hints.push("권한 기준 사용자에 시스템 계정 이름이 아닌 계정 아이디를 적으세요");
-  else if (scopeProblem === "numeric_only") hints.push("권한 기준 사용자에 숫자만이 아닌 계정 아이디를 적으세요");
-  else if (scopeProblem === "format") hints.push("권한 기준 사용자를 계정 아이디 형식으로 고치세요");
-  if (k8sCatalogError) hints.push("PV 목록 조회 실패 — 새로고침 후 다시 시도하세요");
-  else if (catalog.status === "ready" && catalog.clusters.every((c) => c.synced_at === null) && anyPv)
-    hints.push("k8s 목록이 아직 동기화되지 않아 PV 를 고를 수 없습니다");
-  else if (catalog.status === "ready" && catalog.namespaces !== null && catalog.namespaces.length === 0 && anyPv)
-    hints.push("권한 있는 namespace 가 없어 지금은 PV 를 고를 수 없습니다");
-  if (targetMissing)
-    hints.push(f.operation === "sync"
-      ? (anyRaw ? "소스·목적지를 모두 고르고 경로를 입력하세요" : "소스·목적지 PV 를 모두 고르세요")
-      : anyRaw ? "스토리지와 대상 경로를 입력하세요" : "대상 PV 를 고르세요");
-  if (checks.some((c) => c.pvBad)) hints.push("고른 PV 를 쓸 수 없습니다 — 다시 고르세요");
-  else if (checks.some((c) => c.pvLoading)) hints.push("고른 PV 정보를 불러오는 중…");
-  if (k8sRmRoot) hints.push("삭제할 PV 안 경로를 입력하세요 — PV 전체는 삭제할 수 없습니다");
-  if (k8sSubBad) hints.push("PV 안 경로를 PV 아래 상대경로로 고치세요");
-  if (storageOwnerBad) hints.push("목적지 스토리지의 기본 소유 값이 올바르지 않습니다 — 관리자에게 스토리지 설정 확인을 요청하세요");
-  if (pathInvalid) hints.push("경로를 관리 디렉토리 아래 상대경로로 고치세요");
-  if (optionsInvalid) hints.push("빨간 안내가 붙은 옵션 값을 고치세요");
-
   const targetTitle = f.operation === "sync" ? "소스와 목적지"
     : f.operation === "scan" ? "스캔 대상" : "삭제 대상";
 
@@ -465,6 +460,7 @@ export function SubmitJob() {
         <div>
           <label className="text-sm block">{L.path}
             <input aria-label={L.path} className={field} value={l.path}
+                   aria-invalid={(l.path.trim() !== "" && relativePathProblem(l.path) !== null) || undefined}
                    placeholder={side === "destination" ? "예: backup/dataset" : side === "source" ? "예: team/dataset"
                      : "예: team/projects"}
                    onChange={(e) => setLoc(side)({ ...l, path: e.target.value })} />
@@ -476,7 +472,7 @@ export function SubmitJob() {
     return (
       <LocationField side={side} operation={f.operation} loc={l} onChange={setLoc(side)} catalog={catalog}
                      search={search} resolved={resolved[side]} allowRaw={unrestricted} rawSlot={raw}
-                     destOwner={side === "destination" ? destOwner : undefined} />
+                     destOwner={side === "destination" ? destOwner : undefined} searchField={searchFields[side]} />
     );
   };
 
@@ -522,105 +518,173 @@ export function SubmitJob() {
     </InfoCard>
   );
 
-  const sheet = (
+  // ---- 단계별 등록(2026-11-26 -- 사용자 결정 「초안 1 상단 스테퍼」, design-wizard §1) -------------------------------------------------
+  // 값·검증·바디는 위 그대로다(k8sBody 무변경 -- 시험의 바디 toEqual 이 바이트 단위 그물). 바뀐 것은 그리는 방식뿐: 단계 넷(작업 종류 →
+  // 대상 → 옵션 → 검토·제출)이고 단계 게이트를 모두 합치면 옛 제출 게이트에서 진행 중 상태를 뺀 것과 같다(submitGates). 단계 본문은
+  // 이 파일의 지역 render 함수다(수십 개의 파생값을 읽는다 -- 따로 떼면 props 가 폭발하고 「로직 그대로」를 확인하기 어렵다). 단계
+  // 상태·URL(?step=)·Enter·포커스·도달 규칙은 useWizard 가 쥔다(규칙 전문은 components/form/Wizard 머리 주석).
+  const singleOp = me.data !== undefined && operations.length === 1;
+  const steps: WizardStep<SubmitStep>[] = [
+    { key: "kind", title: "작업 종류", blocked: gates.gate.kind, reason: gates.barReason("kind") },
+    { key: "target", title: targetTitle, blocked: gates.gate.target, reason: gates.barReason("target") },
+    { key: "options", title: isAdmin ? "옵션·실행 설정" : "옵션", blocked: gates.gate.options, reason: gates.barReason("options") },
+    // 마지막 단계의 blocked 는 「다음」이 아니라 최종 제출 게이트(= blocked)다.
+    { key: "review", title: "검토·제출", blocked, reason: gates.barReason("review") },
+  ];
+  // 시작 단계(design-wizard §1-6): ?pv= 딥링크(관리자 PV 탐색 「이 PV로 단일 작업」)는 PV 를 미리 골랐으니 ② 대상에서, 연산이 하나뿐인
+  // 사용자(사이트 기본 DMS_USER_ALLOWED_OPERATIONS=sync·옛 서버)는 고를 것이 없는 ①을 완료로 두고 ②에서 시작한다. me 가 처음
+  // 렌더부터 있으면(셸이 이미 받아 둔 캐시) 처음 상태로, 늦게 오면 아래 효과가 replace 로 옮긴다 -- 로드 전 대체값도 ["sync"] 라 me
+  // 가 오기 전에는 판정하지 않는다(그러면 모두가 ①을 건너뛴다).
+  const wizard = useWizard<SubmitStep>({
+    steps, initial: parsePvParam(params.get("pv")) !== null || singleOp ? "target" : "kind" });
+  const autoStartChecked = useRef(me.data !== undefined);
+  useEffect(() => {
+    if (autoStartChecked.current || me.data === undefined) return;
+    autoStartChecked.current = true;
+    // 아직 사용자가 단계를 옮기지 않았을 때만(현재 ①이고 URL 에 step 이 없다). ①은 스테퍼로 다시 열 수 있다.
+    if (singleOp && wizard.current === "kind" && !params.has("step")) wizard.jump("target");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [me.data]);
+
+  // 제출 방어 세 겹(design-wizard §1-6 「제출 방어」): ① 더블클릭 -- 「다음」과 「제출」은 바의 같은 자리·같은 노드라 ③에서 「다음」을
+  // 두 번 누르면 두 번째 클릭이 막 그려진 「제출」에 떨어진다. 같은 연속 클릭의 두 번째 이후(e.detail > 1)를 무시한다(바도 같은 줄을 둔다
+  // -- 둘 다 있어도 무해). ② 단계 가드 -- 검토를 안 보고 새어 나온 submit 이벤트(암묵 제출·회귀)는 current !== "review" 로 막는다.
+  // ③ 모든 버튼 type="button"(form 안 type 없는 버튼은 submit 버튼이다). 그래도 새는 submit 은 blocked 가드가 한 번 더 막는다.
+  function handleSubmit(e?: SyntheticEvent) {
+    e?.preventDefault();
+    if (blocked || wizard.current !== "review") return;
+    submit.mutate(k8sBody(), { onSuccess: (r) => nav(`/jobs/${r.request_id}`) });
+  }
+  const handleSubmitClick = (e: MouseEvent<HTMLButtonElement>) => {
+    if (e.detail > 1) return;
+    handleSubmit();
+  };
+
+  // 설계 D2·D4: 모든 작업은 root -- 체크박스 대신 사실 한 줄. 면제자는 「권한 기준 사용자」로 PV 범위를 정하고(비우면 전체 PV 검색),
+  // 목록 밖 관리자는 자기 맵핑 범위만이라 무엇이 더 필요한지 한 줄로 말한다(①). 연산이 하나뿐이라 ①을 건너뛰면 ② 머리로 옮긴다.
+  const rootFact = me.data !== undefined && (
+    <p className="text-sm text-ink/80">
+      모든 작업은 root 로 실행됩니다 — {unrestricted
+        ? "전체 PV·직접 경로 권한이 있어 모든 PV 와 직접 경로를 고를 수 있습니다."
+        : "고를 수 있는 PV 는 내 namespace 권한(rolebinding)으로 정해집니다."}
+    </p>
+  );
+
+  // ① 작업 종류
+  const kindStep = () => (
     <>
-      <FormSection step={1} title="작업 종류">
-        <div className="grid gap-x-6 gap-y-1 sm:grid-cols-2">
-          <label className="text-sm block">연산
-            <select aria-label="연산" className={field} value={f.operation}
-                    onChange={(e) => setF({ ...f, operation: e.target.value as Operation })}>
-              {/* 서버 allowlist(me.user_operations -- 설계 D15)를 그대로 그린다. 표시 게이트일 뿐 진짜 차단은
-                  서버(routes_requests operation_admin_only·scan_unrestricted_only 403). */}
-              {operations.map((o) => <option key={o} value={o}>{o}</option>)}
-            </select>
-          </label>
-          <p className="text-sm text-muted sm:pt-8">{OPERATION_HELP[f.operation]}</p>
-        </div>
-        {/* 설계 D2·D4: 모든 작업은 root -- 체크박스 대신 사실 한 줄. 면제자는 「권한 기준 사용자」로 PV 범위를 정하고
-            (비우면 전체 PV 검색), 목록 밖 관리자는 자기 맵핑 범위만이라 무엇이 더 필요한지 한 줄로 말한다. */}
-        {me.data !== undefined && (
-          <p className="text-sm text-ink/80">
-            모든 작업은 root 로 실행됩니다 — {unrestricted
-              ? "전체 PV·직접 경로 권한이 있어 모든 PV 와 직접 경로를 고를 수 있습니다."
-              : "고를 수 있는 PV 는 내 namespace 권한(rolebinding)으로 정해집니다."}
-          </p>
-        )}
-        {isAdmin && !unrestricted && (
-          <p className="text-xs text-ink/70">
-            직접 경로·사용자 지정은 계정 화면의 「전체 PV·직접 경로 권한」이 필요합니다 — 지금은 내 namespace 권한 안의 PV 만 고릅니다.
-          </p>
-        )}
-        {unrestricted && (
-          <FieldRow
-            control={<>
-              <label className="text-sm block">권한 기준 사용자
-                <input aria-label="권한 기준 사용자" className={field} list="k8s-scope-users"
-                       placeholder="비우면 전체 PV 검색 · 예: junwoo.song" autoComplete="off" {...scopeField.bind}
-                       onChange={(e) => { clearSubmitError(); scopeField.bind.onChange(e); }} />
-              </label>
-              <datalist id="k8s-scope-users">
-                {scopeChoices.map((u) => <option key={u} value={u} />)}
-              </datalist>
-              {scopeProblem !== null && (
-                <p className="mt-1 text-bad text-sm">{scopeProblem === "reserved" ? REASON_MESSAGES.username_reserved
-                  : scopeProblem === "numeric_only" ? REASON_MESSAGES.username_numeric_only
-                  : "계정 아이디 형식이 아닙니다(영소문자·숫자로 시작, 영소문자·숫자·. _ -)"}</p>
-              )}
-            </>}
-            help="적으면 그 사용자의 namespace 권한 안의 PV 만 보이고, 작업에 그 사용자가 「대상 사용자」로 기록됩니다(실행은 그래도 root). 비우면 모든 클러스터의 PV 를 검색합니다." />
-        )}
-      </FormSection>
-
-      {/* "경로는 관리 디렉토리 아래 상대경로" 는 스토리지 선택 아래 캡션(StoragePicker)이 이미 말하고,
-          입력 아래 "지정 경로" 가 그 결과를 보여 준다 -- 구획 캡션으로 세 번째 반복하지 않는다. */}
-      <FormSection step={2} title={targetTitle}>
-        {/* 목록 로드 실패 문구는 스토리지를 고르는 이 구획에 -- 제출 차단은 blocked 가 맡는다 */}
-        {storagesBlock && (
-          <p className="text-bad text-sm">{(storagesQ.error as ApiError).message}</p>
-        )}
-        {/* 쪽마다 LocationField -- namespace (StorageClass) → PV 이름 → PV 안 경로(면제자는 「PV | 직접 경로」·검색). 목록
-            상태(조회 실패·아직 동기화 안 됨·권한 namespace 0개)는 구획 머리에 한 번만. */}
-        <CatalogNotice catalog={catalog} search={search} actor={me.data?.actor ?? ""} scopeUser={scopeUser} />
-        {f.operation === "sync" ? (
-          <>
-            <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]">
-              {locationField("source")}
-              <ArrowRight aria-hidden
-                          className="h-5 w-5 rotate-90 justify-self-center text-muted md:mt-8 md:rotate-0" />
-              {locationField("destination")}
-            </div>
-            {/* 결과 소유(2026-10-26): 특권 운영자(면제자)만, PV 목적지 sync 에만 -- 기본은 스토리지 기본 소유자, 옵션으로 PV 루트
-                소유자. 사용자에겐 조작이 없다(늘 스토리지 기본 -- 아래 안내 카드가 그 값을 말한다). chown 을 지정하면 그 값이
-                이겨 선택은 잠기고 이유를 옆에 말한다. */}
-            {unrestricted && pvDest && (
-              <FieldRow
-                control={<div className="flex flex-wrap items-center gap-2">
-                  <span className="text-sm">결과 소유</span>
-                  <Segmented label="결과 소유" value={pvOwnerChoice} onChange={setPvOwnerChoice} disabled={chownSet}
-                             options={[{ value: "storage", label: "스토리지 기본" },
-                                       { value: "pv_root", label: "PV 루트 소유자" }]} />
-                </div>}
-                help={chownSet
-                  ? `chown 을 지정해 결과는 chown 지정값(${f.chown.trim()})으로 셋업됩니다 — 결과 소유 선택은 쓰이지 않습니다.`
-                  : `기본은 목적지 스토리지 기본 소유자${storageOwnerLabel !== null ? ` ${storageOwnerLabel}` : "(uid:gid)"}입니다(사용자 작업은 늘 이 규칙). 「PV 루트 소유자」는 점검이 잰 목적지 PV 루트의 소유자·그룹으로 맞추며 특권 운영자만 고를 수 있습니다.`} />
+      <div className="grid gap-x-6 gap-y-1 sm:grid-cols-2">
+        <label className="text-sm block">연산
+          <select aria-label="연산" className={field} value={f.operation}
+                  onChange={(e) => setF({ ...f, operation: e.target.value as Operation })}>
+            {/* 서버 allowlist(me.user_operations -- 설계 D15)를 그대로 그린다. 표시 게이트일 뿐 진짜 차단은
+                서버(routes_requests operation_admin_only·scan_unrestricted_only 403). */}
+            {operations.map((o) => <option key={o} value={o}>{o}</option>)}
+          </select>
+        </label>
+        <p className="text-sm text-muted sm:pt-8">{OPERATION_HELP[f.operation]}</p>
+      </div>
+      {rootFact}
+      {isAdmin && !unrestricted && (
+        <p className="text-xs text-ink/70">
+          직접 경로·사용자 지정은 계정 화면의 「전체 PV·직접 경로 권한」이 필요합니다 — 지금은 내 namespace 권한 안의 PV 만 고릅니다.
+        </p>
+      )}
+      {unrestricted && (
+        <FieldRow
+          control={<>
+            <label className="text-sm block">권한 기준 사용자
+              <input aria-label="권한 기준 사용자" className={field} list="k8s-scope-users"
+                     aria-invalid={scopeProblem !== null || undefined}
+                     placeholder="비우면 전체 PV 검색 · 예: junwoo.song" autoComplete="off" {...scopeField.bind}
+                     onChange={(e) => { clearSubmitError(); scopeField.bind.onChange(e); }} />
+            </label>
+            <datalist id="k8s-scope-users">
+              {scopeChoices.map((u) => <option key={u} value={u} />)}
+            </datalist>
+            {scopeProblem !== null && (
+              <p className="mt-1 text-bad text-sm">{scopeProblem === "reserved" ? REASON_MESSAGES.username_reserved
+                : scopeProblem === "numeric_only" ? REASON_MESSAGES.username_numeric_only
+                : "계정 아이디 형식이 아닙니다(영소문자·숫자로 시작, 영소문자·숫자·. _ -)"}</p>
             )}
-            {/* 목적지 조건과 소유권(2026-09-30 "상위 디렉토리 조건을 분명히") -- 사용자가 "분명히" 보이게 해 달라고 한
-                안내라 접지 않는다. */}
-            {syncConditions}
-          </>
-        ) : (<>
-          {locationField("target")}
-          {/* rm 대상의 링크 규칙(d192 이식, 괴리 [14]·[27] -- dms-k8s 는 끝 링크 허용: 2026-10-28 사용자 결정 「rm 끝 링크 허용
-              유지」). 중간 단계 링크로 거부된 뒤 「링크가 가리키는 곳」을 다시 내지 않게, 끝 링크면 링크만 지운다는 사실과 함께
-              고르는 자리에서 먼저 말한다. */}
-          {f.operation === "rm" && (
-            <p className="text-xs text-muted" role="note" aria-label="삭제 경로 조건">{RM_PATH_LINK_RULE}</p>
-          )}
-        </>)}
-      </FormSection>
+          </>}
+          help="적으면 그 사용자의 namespace 권한 안의 PV 만 보이고, 작업에 그 사용자가 「대상 사용자」로 기록됩니다(실행은 그래도 root). 비우면 모든 클러스터의 PV 를 검색합니다." />
+      )}
+    </>
+  );
 
-      <FormSection step={3} title="실행 옵션"
-                   caption={f.operation === "sync" ? SYNC_MAX_ERRORS_NOTE : undefined}>
+  // sync 목적지 한 줄(② -- 원문 둘을 그대로 이어 붙인다, 새 문장 없음): 「목적지 조건」 요약 행 문자열 + 「목적지 소유」 short. 전문(목적지
+  // 조건과 소유권 카드)은 ④ 검토에 접지 않고 둔다(2026-09-30 「분명히 보이게」). storageOwnerBad 면 대상 단계에서 막는 이유가 보여야
+  // 하므로 카드의 빨간 줄(같은 문장)을 여기에도 늘 보인다.
+  const destCondition = `상위 디렉토리 ${destParentAbs ?? "(목적지 경로의 상위)"} 가 있어야 함(root 실행 — 권한 검사 우회). 목적지가 없으면 새로 만듦`;
+  const destLine = (
+    <div className="rounded-xl bg-infobg px-4 py-3">
+      <SummaryList>
+        <SummaryRow label="목적지 조건">{destCondition}</SummaryRow>
+        <SummaryRow label="목적지 소유">{ownership.short}</SummaryRow>
+      </SummaryList>
+      <p className="mt-1.5 text-xs text-muted">전문은 ④ 검토·제출에서 봅니다.</p>
+      {storageOwnerBad && (
+        <p className="mt-1 text-xs text-bad">
+          {pvDest ? "이 PV 의 스토리지" : "목적지 스토리지"}에 저장된 기본 소유 값이 올바르지 않아 제출할 수 없습니다 — 관리자가 스토리지 화면에서 기본 소유 uid·gid 를 다시 저장해야 합니다.
+        </p>
+      )}
+    </div>
+  );
+
+  // ② 대상. "경로는 관리 디렉토리 아래 상대경로" 는 스토리지 선택 아래 캡션(StoragePicker)이 이미 말하고, 입력 아래 "지정 경로" 가
+  // 그 결과를 보여 준다 -- 구획 캡션으로 세 번째 반복하지 않는다.
+  const targetStep = () => (
+    <>
+      {singleOp && rootFact}
+      {/* 목록 로드 실패 문구는 스토리지를 고르는 이 단계에 -- 잠금은 단계 게이트·제출 게이트가 맡는다 */}
+      {storagesBlock && (
+        <p className="text-bad text-sm">{(storagesQ.error as ApiError).message}</p>
+      )}
+      {/* 쪽마다 LocationField -- namespace (StorageClass) → PV 이름 → PV 안 경로(면제자는 「PV | 직접 경로」·검색). 목록
+          상태(조회 실패·아직 동기화 안 됨·권한 namespace 0개)는 단계 머리에 한 번만. */}
+      <CatalogNotice catalog={catalog} search={search} actor={me.data?.actor ?? ""} scopeUser={scopeUser} />
+      {f.operation === "sync" ? (
+        <>
+          <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]">
+            {locationField("source")}
+            <ArrowRight aria-hidden
+                        className="h-5 w-5 rotate-90 justify-self-center text-muted md:mt-8 md:rotate-0" />
+            {locationField("destination")}
+          </div>
+          {/* 결과 소유(2026-10-26): 특권 운영자(면제자)만, PV 목적지 sync 에만 -- 기본은 스토리지 기본 소유자, 옵션으로 PV 루트
+              소유자. 사용자에겐 조작이 없다(늘 스토리지 기본 -- 목적지 한 줄·검토 카드가 그 값을 말한다). chown 을 지정하면 그
+              값이 이겨 선택은 잠기고 이유를 옆에 말한다. */}
+          {unrestricted && pvDest && (
+            <FieldRow
+              control={<div className="flex flex-wrap items-center gap-2">
+                <span className="text-sm">결과 소유</span>
+                <Segmented label="결과 소유" value={pvOwnerChoice} onChange={setPvOwnerChoice} disabled={chownSet}
+                           options={[{ value: "storage", label: "스토리지 기본" },
+                                     { value: "pv_root", label: "PV 루트 소유자" }]} />
+              </div>}
+              help={chownSet
+                ? `chown 을 지정해 결과는 chown 지정값(${f.chown.trim()})으로 셋업됩니다 — 결과 소유 선택은 쓰이지 않습니다.`
+                : `기본은 목적지 스토리지 기본 소유자${storageOwnerLabel !== null ? ` ${storageOwnerLabel}` : "(uid:gid)"}입니다(사용자 작업은 늘 이 규칙). 「PV 루트 소유자」는 점검이 잰 목적지 PV 루트의 소유자·그룹으로 맞추며 특권 운영자만 고를 수 있습니다.`} />
+          )}
+          {destLine}
+        </>
+      ) : (<>
+        {locationField("target")}
+        {/* rm 대상의 링크 규칙(d192 이식, 괴리 [14]·[27] -- dms-k8s 는 끝 링크 허용: 2026-10-28 사용자 결정 「rm 끝 링크 허용
+            유지」). 중간 단계 링크로 거부된 뒤 「링크가 가리키는 곳」을 다시 내지 않게, 끝 링크면 링크만 지운다는 사실과 함께
+            고르는 자리에서 먼저 말한다. */}
+        {f.operation === "rm" && (
+          <p className="text-xs text-muted" role="note" aria-label="삭제 경로 조건">{RM_PATH_LINK_RULE}</p>
+        )}
+      </>)}
+    </>
+  );
+
+  // ③ 옵션(·실행 설정)
+  const optionsStep = () => (
+    <>
+      <SubSection title="실행 옵션" caption={f.operation === "sync" ? SYNC_MAX_ERRORS_NOTE : undefined}>
         {f.operation === "sync" ? (
           <>
             {/* 옵션 설명(2026-08-20, 사용자 요청): dsync --delete / --contents. */}
@@ -656,13 +720,13 @@ export function SubmitJob() {
             {/* 기본 접힘 — 단순 sync 제출 동선을 바꾸지 않기 위해 <details> 로 숨긴다 */}
             {isAdmin && (
               <details className="rounded-lg border border-line"
-                       open={advancedOpen || advancedError !== null}
+                       open={advancedOpen || advancedError !== null || ownerFixOpen}
                        onToggle={(e) => {
                          const el = e.currentTarget;
-                         // 오류가 있는 동안은 접히지 않는다: 접으면 제출이 잠긴 이유(빨간 안내)가 숨는다.
-                         // open prop 은 true→true 라 React 가 DOM 을 다시 열어 주지 않는다 -- 직접 되돌린다
-                         // (위저드 시절엔 스텝 재마운트가 이 함정을 가렸다).
-                         if (!el.open && advancedError !== null) { el.open = true; return; }
+                         // 오류가 있는 동안(운영자의 storageOwnerBad 우회 포함 -- ownerFixOpen)은 접히지 않는다: 접으면 다음 단계로
+                         // 못 가는 이유(빨간 안내·바 이유가 가리키는 chown 칸)가 숨는다. open prop 은 true→true 라 React 가 DOM 을
+                         // 다시 열어 주지 않는다 -- 직접 되돌린다.
+                         if (!el.open && (advancedError !== null || ownerFixOpen)) { el.open = true; return; }
                          setAdvancedOpen(el.open);
                        }}>
                 <summary className="cursor-pointer select-none px-4 py-3 text-sm font-medium">고급 옵션</summary>
@@ -681,6 +745,7 @@ export function SubmitJob() {
                     control={<>
                       <label className="text-sm block">batch_files (선택 · 0..10,000,000)
                         <input aria-label="batch_files" className={field} value={f.batchFiles}
+                               aria-invalid={batchFilesError !== null || undefined}
                                placeholder="비우면 기본 1,000,000 적용 · 0 = 배칭 끔"
                                onChange={on("batchFiles")} />
                       </label>
@@ -691,6 +756,7 @@ export function SubmitJob() {
                     control={<>
                       <label className="text-sm block">bufsize (선택 · 바이트, 4096..1,073,741,824)
                         <input aria-label="bufsize" className={field} value={f.bufsize}
+                               aria-invalid={bufsizeError !== null || undefined}
                                placeholder="비우면 기본 4 MiB 적용"
                                onChange={on("bufsize")} />
                       </label>
@@ -701,6 +767,7 @@ export function SubmitJob() {
                     control={<>
                       <label className="text-sm block">chmod (선택 · 예: D770,F660 — 콤마 구분, D=디렉터리 F=파일)
                         <input aria-label="chmod" className={field} value={ownerModeEditable ? f.chmod : ""}
+                               aria-invalid={chmodError !== null || undefined}
                                disabled={!ownerModeEditable} onChange={on("chmod")} />
                       </label>
                       {chmodError && <p className="mt-1 text-bad text-sm">{chmodError}</p>}
@@ -712,6 +779,7 @@ export function SubmitJob() {
                     control={<>
                       <label className="text-sm block">chown (선택 · 숫자 uid:gid)
                         <input aria-label="chown" className={field} value={ownerModeEditable ? f.chown : ""}
+                               aria-invalid={chownError !== null || undefined}
                                placeholder={ownerModeEditable ? "예: 10003:10000" : "특권 운영자만"}
                                disabled={!ownerModeEditable} onChange={on("chown")} />
                       </label>
@@ -753,6 +821,7 @@ export function SubmitJob() {
               control={<>
                 <label className="text-sm block">batch_files (선택 · 0..1,000,000,000)
                   <input aria-label="batch_files" className={field} value={f.scanBatchFiles}
+                         aria-invalid={scanBatchFilesError !== null || undefined}
                          placeholder="비우면 기본 1,000,000 적용 · 0 = 배칭 안 함"
                          onChange={on("scanBatchFiles")} />
                 </label>
@@ -763,6 +832,7 @@ export function SubmitJob() {
               control={<>
                 <label className="text-sm block">broken_limit (선택 · 0..10,000)
                   <input aria-label="broken_limit" className={field} value={f.brokenLimit}
+                         aria-invalid={brokenLimitError !== null || undefined}
                          placeholder="비우면 기본 100 적용 · 파손 경로 표본 보관 상한"
                          onChange={on("brokenLimit")} />
                 </label>
@@ -793,13 +863,12 @@ export function SubmitJob() {
               help={QUIET_HELP.rm} />
           </>
         )}
-      </FormSection>
-
-      {/* 실행 설정은 운영자 전용(2026-08-20, 사용자 결정): 사용자 폼에선 우선순위를 정책 기본에
-          맡긴다(생략 = resolve_priority 가 정책값으로 해석). 노드 수·프로세스 수도 정책이 정한다. */}
+      </SubSection>
+      {/* 실행 설정은 운영자 전용(2026-08-20, 사용자 결정): 사용자 폼에선 우선순위를 정책 기본에 맡긴다(생략 = resolve_priority
+          가 정책값으로 해석). 노드 수·프로세스 수도 정책이 정한다. */}
       {isAdmin && (
-        <FormSection step={4} title="실행 설정"
-                     caption={<>{policyCaption}<span className="block">{NODE_CPU_CAP_NOTE}</span></>}>
+        <SubSection title="실행 설정"
+                    caption={<>{policyCaption}<span className="block">{NODE_CPU_CAP_NOTE}</span></>}>
           <FieldRow
             control={<label className="text-sm block">우선순위
               <select aria-label="우선순위" className={field} value={f.priority} onChange={on("priority")}>
@@ -808,35 +877,20 @@ export function SubmitJob() {
               </select>
             </label>}
             help={priorityCapCaption} />
-          {/* 실행 신원·root 체크박스는 없다(설계 D2·D4) -- 모든 작업이 root 이고, 사용자 지정은 1구획의 「권한 기준 사용자」
+          {/* 실행 신원·root 체크박스는 없다(설계 D2·D4) -- 모든 작업이 root 이고, 사용자 지정은 ①의 「권한 기준 사용자」
               (면제자만)가 맡는다. */}
           {f.operation === "rm" && (
             <p className="text-xs text-bad">삭제가 root 권한으로 수행됩니다(모든 작업은 root)</p>
           )}
-        </FormSection>
+        </SubSection>
       )}
     </>
   );
 
-  const summary = (
-    <SummaryPanel title="제출 요약" footer={<>
-      {/* rm 경고는 한 곳 -- 제출 버튼 바로 위라 "고른 직후"와 "누르기 직전"을 함께 맡는다.
-          위험=빨강 의미 체계 유지. */}
-      {f.operation === "rm" && (
-        <p className="rounded-lg border border-bad/30 bg-badbg px-3 py-2 text-sm text-bad">
-          삭제는 되돌릴 수 없습니다. 미리보기에서 대상을 확인한 뒤 확인해야 실행됩니다.
-        </p>
-      )}
-      <SubmitHints id="submit-job-hints" items={hints} />
-      {submit.isError && <p className="text-bad text-sm">{(submit.error as ApiError).message}</p>}
-      <div className="flex gap-2">
-        <Button type="button" variant="ghost" onClick={() => nav("/jobs")}>취소</Button>
-        <Button type="button" className="flex-1" disabled={blocked} onClick={handleSubmit}
-                aria-describedby={hints.length > 0 ? "submit-job-hints" : undefined}>
-          제출
-        </Button>
-      </div>
-    </>}>
+  // ④ 검토·제출 -- 옛 오른쪽 요약의 행 전부(라벨 그대로) + 목적지 조건과 소유권 카드(sync, 접지 않음) / 삭제 규칙(rm).
+  const reviewStep = () => (
+    <div className="grid gap-4 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)] lg:items-start">
+      <div className="min-w-0 rounded-xl border border-line px-4 py-4 sm:px-5">
       <SummaryList>
         <SummaryRow label="연산">{f.operation}</SummaryRow>
         {f.operation === "sync" ? (
@@ -879,7 +933,31 @@ export function SubmitJob() {
             : directDest?.rule === "storage_if_under_pv" ? PRIV_ROOT_SYNC_DIRECT_BOTH : PRIV_ROOT_SYNC}
         </SummaryRow>
       </SummaryList>
-    </SummaryPanel>
+      </div>
+      <div className="min-w-0 space-y-4">
+        {f.operation === "sync" && syncConditions}
+        {/* 삭제 규칙 -- 경로는 왼쪽 「대상」 한 곳에만(같은 카드 안 getByText(경로) 다중 일치 방지), 「되돌릴 수 없음」은 하단 바
+            strip 한 곳이라 여기 되풀이하지 않는다. */}
+        {f.operation === "rm" && (
+          <p className="rounded-xl border border-bad/30 bg-badbg px-4 py-3 text-xs text-bad">{RM_PATH_LINK_RULE}</p>
+        )}
+      </div>
+    </div>
+  );
+
+  // 대상 단계의 지름길(design-wizard §1-6 「바로가기」): 옵션 단계를 거치기 전엔 「옵션 기본값으로 검토」, 거친 뒤엔 「검토로 건너뛰기」.
+  // 대상 게이트를 통과했을 때만 보이고, 검토로 갈 수 없으면(옵션이 막힘) 잠긴다(aria-disabled -- 눌러도 동작 없음, 이유는 title).
+  // 좁은 폭(<sm)에서는 숨긴다(바 버튼 줄이 넘친다). 검토를 이미 봤고 갈 수 있으면 바가 「검토로 돌아가기」를 대신 그린다.
+  const reviewReachable = wizard.reachable("review");
+  const skipToReview = wizard.current === "target" && !gates.gate.target && (
+    <button type="button" aria-disabled={!reviewReachable || undefined}
+            title={reviewReachable ? undefined : (gates.barReason("options") ?? undefined)}
+            onClick={() => { if (reviewReachable) wizard.go("review"); }}
+            className="inline-flex h-10 items-center gap-0.5 whitespace-nowrap rounded-lg px-2 text-sm font-medium text-ink/80
+                       hover:text-ink aria-disabled:cursor-not-allowed aria-disabled:opacity-50 max-sm:hidden">
+      {wizard.visited.has("options") ? "검토로 건너뛰기" : "옵션 기본값으로 검토"}
+      <ChevronRight aria-hidden className="h-4 w-4" />
+    </button>
   );
 
   return (
@@ -898,11 +976,33 @@ export function SubmitJob() {
           </p>
         )}
       </div>
-      {/* form 하나가 시트와 요약을 감싼다. 제출 버튼은 type="button" + onClick 이라 경로·권한 기준 사용자
-          입력에서 Enter 를 눌러도 제출되지 않는다(root 실행·rm 을 요약도 안 보고 내는 회귀 방지).
-          새어 나온 submit 이벤트(회귀)는 onSubmit 의 blocked 가드가 이중으로 막는다. */}
+      {/* form 은 남긴다(design-wizard §1-3): 걷어 내면 암묵 제출 부류가 사라지는 대신 「강제 submit 도 막힌다」 시험이 관찰할 입구도
+          사라져 handleSubmit 가드가 죽은 코드가 된다. 대신 모든 버튼 type="button" + 셸이 처리하는 모든 Enter 에 preventDefault(Enter
+          는 다음 단계일 뿐 절대 제출하지 않는다) + handleSubmit 의 단계·blocked 가드로 막는다. */}
       <form onSubmit={handleSubmit}>
-        <SubmitLayout sheet={sheet} summary={summary} />
+        <WizardShell {...wizard.shellProps}>
+          <WizardStepper wizard={wizard} />
+          <WizardStepCard wizard={wizard}>
+            {wizard.current === "kind" ? kindStep()
+              : wizard.current === "target" ? targetStep()
+              : wizard.current === "options" ? optionsStep()
+              : reviewStep()}
+          </WizardStepCard>
+          {/* rm 경고는 한 곳 -- 검토 단계 하단 바, 제출 버튼 바로 위(「누르기 직전」). 위험=빨강 의미 체계 유지. */}
+          <WizardActionBar
+            wizard={wizard}
+            doneHint="제출하면 요청 상세로 이동합니다."
+            onCancel={() => nav("/jobs")}
+            secondary={skipToReview}
+            submit={{ label: "제출", onClick: handleSubmitClick, disabled: blocked,
+                      describedBy: hints.length > 0 ? "submit-job-hints" : undefined }}
+            strip={wizard.current === "review" && f.operation === "rm"
+              ? "삭제는 되돌릴 수 없습니다. 미리보기에서 대상을 확인한 뒤 확인해야 실행됩니다." : undefined}
+            details={wizard.current === "review" && (hints.length > 0 || submit.isError) ? (<>
+              <SubmitHints id="submit-job-hints" items={hints} />
+              {submit.isError && <p className="text-bad text-sm">{(submit.error as ApiError).message}</p>}
+            </>) : undefined} />
+        </WizardShell>
       </form>
     </section>
   );

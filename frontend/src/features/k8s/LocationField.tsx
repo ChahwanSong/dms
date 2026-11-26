@@ -43,8 +43,11 @@ export function pvRootDestNote(owner: DestOwner, row: Pick<VolumeRow, "storage_o
     + `권한·시각은 소스에 맞춰 바뀝니다${tail}`;
 }
 
+/** SearchPicker 검색칸 상태(useSearchField 반환값) -- 제출 화면이 쥐면 단계를 옮겨 이 부품이 언마운트돼도 검색어가 남는다. */
+export type PvSearchField = ReturnType<typeof useSearchField>;
+
 export function LocationField({ side, operation, loc, onChange, catalog, search, resolved, allowRaw, rawSlot,
-                               destOwner = { rule: "storage" } }: {
+                               destOwner = { rule: "storage" }, searchField }: {
   side: Side;
   operation: string;
   loc: Loc;
@@ -58,6 +61,10 @@ export function LocationField({ side, operation, loc, onChange, catalog, search,
   rawSlot: ReactNode;
   /** 목적지 쪽의 결과 소유(생략 = 스토리지 기본 소유자 -- 사용자 기본). 목적지 PV 루트 경고만 읽는다. */
   destOwner?: DestOwner;
+  /** 면제자 PV 검색칸 상태(선택). 단계별 등록(2026-11-26)의 단일 작업은 쪽마다 하나씩 최상위에서 쥐고 넘긴다 -- 단계를 옮기면 이
+   *  부품이 언마운트돼 지역 상태의 검색어가 비고, 결과 목록에서 고른 줄이 빠질 수 있었다(고른 PV 는 loc.ref 라 남는다). 생략하면
+   *  지금처럼 지역 상태. */
+  searchField?: PvSearchField;
 }) {
   const L = SIDE_LABELS[side];
   const mode: LocMode = allowRaw ? loc.mode : "pv";
@@ -74,7 +81,7 @@ export function LocationField({ side, operation, loc, onChange, catalog, search,
       {mode === "path" ? rawSlot : (
         <>
           {search
-            ? <SearchPicker side={side} loc={loc} onChange={onChange} row={row} />
+            ? <SearchPicker side={side} loc={loc} onChange={onChange} row={row} field={searchField} />
             : <GroupPicker side={side} loc={loc} onChange={onChange} catalog={catalog} row={row} />}
           <SubField side={side} operation={operation} loc={loc} onChange={onChange} resolved={resolved}
                     destOwner={destOwner} />
@@ -130,19 +137,23 @@ function GroupPicker({ side, loc, onChange, catalog, row }: {
   );
 }
 
-/** 면제 관리자의 전체 PV 검색(권한 기준 사용자 비움). 결과는 라디오 목록(상한 50 -- 넘으면 좁히라고 말한다). */
-function SearchPicker({ side, loc, onChange, row }: {
-  side: Side; loc: Loc; onChange: (next: Loc) => void; row: VolumeRow | null;
+/** 면제 관리자의 전체 PV 검색(권한 기준 사용자 비움). 결과는 라디오 목록(상한 50 -- 넘으면 좁히라고 말한다).
+ *  검색칸에 data-wizard-enter="stay"(단계별 등록 Enter 규칙 ⑥ -- components/form/Wizard 머리 주석): 검색어를 치고 Enter 를 눌러도
+ *  단계를 옮기지 않는다(옛 PV 를 든 채 다음 단계로 넘어가거나, 아직 안 골라 막힌 단계에서 입력 자리를 잃지 않게). 디바운스 검색은
+ *  그대로 돈다. */
+function SearchPicker({ side, loc, onChange, row, field: lifted }: {
+  side: Side; loc: Loc; onChange: (next: Loc) => void; row: VolumeRow | null; field?: PvSearchField;
 }) {
   const L = SIDE_LABELS[side];
-  const s = useSearchField("");
+  const local = useSearchField("");     // 훅 개수 고정 -- 끌어올린 상태가 있으면 쓰지 않는다
+  const s = lifted ?? local;
   const q = useK8sVolumes({ q: s.applied, limit: SEARCH_LIMIT });
   const rows = Array.isArray(q.data?.volumes) ? q.data!.volumes : [];
   return (
     <div className="min-w-0">
       <label className="text-sm block">{L.search}
         <input aria-label={L.search} className={field} placeholder="PV 이름 · namespace · 볼륨 · StorageClass"
-               {...s.bind} />
+               data-wizard-enter="stay" {...s.bind} />
       </label>
       {q.isError && q.data === undefined ? (
         <p className="mt-1 text-sm text-bad">{`PV 를 검색하지 못했습니다: ${(q.error as Error).message}`}</p>
@@ -206,6 +217,7 @@ function SubField({ side, operation, loc, onChange, resolved, destOwner }: {
     <div className="min-w-0">
       <label className="text-sm block">{L.sub}
         <input aria-label={L.sub} className={field} value={loc.sub}
+               aria-invalid={(problem !== null && !(rm && loc.sub === "")) || undefined}
                placeholder={rm ? "예: sample/old — PV 전체는 삭제할 수 없습니다" : "비우면 PV 전체 · 예: sample/nested"}
                onChange={(e) => onChange({ ...loc, sub: e.target.value })} />
       </label>
