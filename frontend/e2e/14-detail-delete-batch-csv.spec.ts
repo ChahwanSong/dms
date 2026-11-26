@@ -2,6 +2,7 @@ import fs from "node:fs";
 import { expect, test, type Page } from "@playwright/test";
 import { SHARED_TOKEN, STORAGE_NAME } from "./harness/env";
 import { apiLogin } from "./helpers/session";
+import { toReview, wizardGo, wizardNext } from "./helpers/wizard";
 
 // E14 — 2026-10-26 BACKLOG C 묶음: 요청 상세의 단건 삭제 · 배치 CSV 백엔드화(템플릿·서버 해석·내보내기) · 배치 기록 삭제의
 // 세션 경계·감사 · 배치 생성의 스토리지 드롭다운. 단위 테스트가 못 보는 것을 본다: 실 서버의 삭제 트랜잭션과 화면 이동(상세 →
@@ -59,9 +60,13 @@ test.describe("E14 상세 삭제 · 배치 CSV", () => {
     await apiLogin(page);
     const tag = `e14csv${Date.now().toString(36)}`;
     await page.goto("/admin/batches/new");
+    // 단계별 등록(2026-11-26): ② 「스토리지를 CSV 로 정하기」로 스토리지를 비운 채 ③ 으로 간다(CSV 의 스토리지 열이 채운다).
+    await wizardNext(page, "스토리지");
     // 스토리지 드롭다운: 종류별 묶음 + 「이름 (백엔드)」
     const st = page.getByLabel("스토리지", { exact: true });
     await expect(st.getByRole("option", { name: STORAGE_NAME })).toBeAttached();
+    await page.getByRole("button", { name: "스토리지를 CSV 로 정하기", exact: true }).click();
+    await wizardNext(page, "항목");
 
     // 템플릿(서버) -- BOM + 헤더 + 예시 한 줄, 파일 이름은 연산을 담는다
     const [tpl] = await Promise.all([page.waitForEvent("download"), page.getByRole("link", { name: "템플릿 받기" }).click()]);
@@ -77,9 +82,11 @@ test.describe("E14 상세 삭제 · 배치 CSV", () => {
       .fill(`﻿storage,target\r\n${STORAGE_NAME},${tag}/a\r\n${STORAGE_NAME},"${tag}/b,c"\r\n`);
     await page.getByRole("button", { name: "테이블에 반영" }).click();
     await expect(page.getByLabel("2행 경로")).toHaveValue(`${tag}/b,c`);
+    await wizardGo(page, "스토리지");
     await expect(st).toHaveValue(STORAGE_NAME);
+    await toReview(page, "이름·검토");
     await page.getByLabel("배치 이름").fill(tag);
-    await page.getByRole("button", { name: "배치 생성" }).click();
+    await page.getByRole("button", { name: "배치 생성", exact: true }).click();
     await page.waitForURL(/\/admin\/batches\/[0-9a-f]{32}$/);
     const bid = page.url().split("/").pop()!;
     expect((await batchOf(page, bid)).items.map((i) => i.payload.target)).toEqual([`${tag}/a`, `${tag}/b,c`]);

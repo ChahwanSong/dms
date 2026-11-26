@@ -54,12 +54,15 @@ export function PvPathPicker({ op, storages, onInsert }: {
   const abs = row !== null ? pvAbsPath(row, sub) : null;
   return (
     <section aria-label="PV 에서 경로 찾기" className="rounded-card border border-line bg-surface p-4 shadow-soft">
-      <h2 className="text-sm font-bold">PV 에서 경로 찾기</h2>
+      {/* h3: 배치 생성 위저드의 ③ 항목 단계 카드(h2 = 단계 제목) 안에 놓인다. */}
+      <h3 className="text-sm font-bold">PV 에서 경로 찾기</h3>
       <p className="mt-0.5 text-xs text-muted">
         PV 를 검색해 그 PV 의 직접 경로를 표에 넣습니다 — 배치는 직접 경로(스토리지 + 경로)로만 만들어집니다.
       </p>
       <label className="mt-3 block text-sm">PV 검색
-        <input aria-label="PV 검색" className={field} placeholder="PV 이름 · namespace · 볼륨 · StorageClass" {...s.bind} />
+        {/* data-wizard-enter="stay": 위저드 셸(components/form/Wizard Enter 규칙 ⑥) 안에서 Enter 는 검색일 뿐 단계를 옮기지 않는다. */}
+        <input aria-label="PV 검색" className={field} placeholder="PV 이름 · namespace · 볼륨 · StorageClass" data-wizard-enter="stay"
+               {...s.bind} />
       </label>
       {q.isError && q.data === undefined ? (
         <p className="mt-1 text-sm text-bad">{`PV 를 검색하지 못했습니다: ${(q.error as Error).message}`}</p>
@@ -96,7 +99,9 @@ export function PvPathPicker({ op, storages, onInsert }: {
       {row !== null && (
         <div className="mt-3 space-y-2 border-t border-line pt-3">
           <label className="block text-sm">PV 안 경로(비우면 PV 전체)
-            <input aria-label="PV 안 경로" className={field} value={sub} onChange={(e) => setSub(e.target.value)} />
+            {/* 넣기 전 보조 칸이라 Enter 로 단계를 옮기지 않는다(같은 규칙 ⑥). */}
+            <input aria-label="PV 안 경로" className={field} value={sub} data-wizard-enter="stay"
+                   onChange={(e) => setSub(e.target.value)} />
           </label>
           <dl className="space-y-1 text-xs">
             <div className="flex gap-2"><dt className="shrink-0 text-ink/70">스토리지</dt>

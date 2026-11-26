@@ -3,6 +3,7 @@ import path from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 import { STORAGE_NAME } from "./harness/env";
 import { apiLogin } from "./helpers/session";
+import { wizardNext } from "./helpers/wizard";
 
 // E13 — rm 배치 자동 확인(2026-10-21 사용자 요청 「Rm 배치작업에서 sync와 마찬가지로 사용자 확인 버튼 없이 바로 rm 작업 수행하도록
 // (자동 확인) 하는 옵션 추가해줘」). 단위 테스트가 못 보는 것을 여기서 본다: 생성 화면의 자동 실행 체크 → 빨간 경고·**필수** 동의
@@ -49,24 +50,31 @@ test.describe("E13 — rm 배치 자동 확인", () => {
       { storage_name: string; managed_root?: string }[];
     expect(storages.find((s) => s.storage_name === STORAGE_NAME)?.managed_root).toBe(root);
 
+    // 단계별 등록(2026-11-26): ① rm → ② 스토리지 → ③ 2행 → ④ 자동 실행 + 동의 → ⑤ 「배치 생성」.
     await page.goto("/admin/batches/new");
-    await page.getByLabel("연산").selectOption("rm");
-    const st = page.getByLabel("스토리지");
+    await page.getByLabel("연산", { exact: true }).selectOption("rm");
+    await wizardNext(page, "스토리지");
+    const st = page.getByLabel("스토리지", { exact: true });
     await expect(st.getByRole("option", { name: STORAGE_NAME })).toBeAttached();
     await st.selectOption(STORAGE_NAME);
+    await wizardNext(page, "항목");
     await page.getByLabel("1행 경로").fill(`${base}/a`);
     await page.getByRole("button", { name: "행 추가" }).click();
     await page.getByLabel("2행 경로").fill(`${base}/b`);
-    const create = page.getByRole("button", { name: "배치 생성" });
-    await expect(create).toBeEnabled();
+    await wizardNext(page, "옵션·실행 제어");
+    const next = page.getByRole("button", { name: "다음", exact: true });
+    await expect(next).not.toHaveAttribute("aria-disabled", "true");
     const auto = page.getByLabel("미리보기 후 자동 실행");
     await expect(auto).not.toBeChecked();                                   // 기본 꺼짐
     await auto.check();
-    // 켜는 순간 빨간 경고 + 필수 동의 — 체크 전엔 만들 수 없다(서버도 acknowledge_irreversible 을 본다)
+    // 켜는 순간 빨간 경고 + 필수 동의 — 체크 전엔 넘어갈 수 없다(서버도 acknowledge_irreversible 을 본다)
     const warn = page.getByRole("note", { name: "자동 삭제 경고" });
     await expect(warn).toContainText("미리보기가 끝나면 사람 확인 없이 root 권한으로 삭제됩니다 — 되돌릴 수 없습니다");
-    await expect(create).toBeDisabled();
+    await expect(next).toHaveAttribute("aria-disabled", "true");
+    await expect(page.locator("[data-wizard-reason]")).toContainText("자동 실행으로 삭제하려면 경고를 읽고 동의를 체크하세요");
     await page.getByLabel(/되돌릴 수 없다는 것을 이해했습니다/).check();
+    await wizardNext(page, "이름·검토");
+    const create = page.getByRole("button", { name: "배치 생성", exact: true });
     await expect(create).toBeEnabled();
     await create.click();
     await page.waitForURL(/\/admin\/batches\/[0-9a-f]{32}$/);

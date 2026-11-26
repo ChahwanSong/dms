@@ -3,6 +3,7 @@ import path from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 import { STORAGE_NAME } from "./harness/env";
 import { apiLogin } from "./helpers/session";
+import { wizardNext } from "./helpers/wizard";
 
 // E12 — rm 배치(2026-10-21 사용자 요청 「배치작업에 rm도 할수있도록」). 단위 테스트가 못 보는 것을 여기서 본다:
 // 생성 화면 → 실 서버(rm 허용·겹침 422 미러) → 실 오케스트레이터가 미리보기 뒤 **확인 대기에서 멈추고**(자동 실행은 기본
@@ -52,15 +53,16 @@ test.describe("E12 — rm 배치", () => {
       { storage_name: string; managed_root?: string }[];
     expect(storages.find((s) => s.storage_name === STORAGE_NAME)?.managed_root).toBe(root);
 
+    // 단계별 등록(2026-11-26): ① rm → ② 스토리지(삭제 범위 요약) → ③ CSV → ④ 옵션·실행 제어 → ⑤ 검토(삭제 범위 전문) → 「배치 생성」.
     await page.goto("/admin/batches/new");
-    await page.getByLabel("연산").selectOption("rm");
-    await expect(page.getByLabel("미리보기 후 자동 실행")).not.toBeChecked();         // 기본 꺼짐(켠 rm 은 E13)
-    await expect(page.getByRole("note", { name: "삭제 범위" })).toBeVisible();
-    const st = page.getByLabel("스토리지");
+    await page.getByLabel("연산", { exact: true }).selectOption("rm");
+    await wizardNext(page, "스토리지");
+    await expect(page.getByRole("note", { name: "삭제 범위 요약", exact: true })).toBeVisible();
+    const st = page.getByLabel("스토리지", { exact: true });
     await expect(st.getByRole("option", { name: STORAGE_NAME })).toBeAttached();
     await st.selectOption(STORAGE_NAME);
-    await expect(page.getByLabel("재귀 삭제(필수)")).toBeChecked();
-    const create = page.getByRole("button", { name: "배치 생성" });
+    await wizardNext(page, "항목");
+    const next = page.getByRole("button", { name: "다음", exact: true });
     // 한 배치 안 겹침은 제출 전에 줄끼리 말하고 잠근다 -- 2026-10-26 부터 CSV 는 서버가 해석하고(POST :parse-csv, 생성과 같은
     // 판정) 오류가 있으면 표에 반영하지 않는다(물리 줄 3 = 데이터 2행, 상대 줄 2).
     await page.getByRole("button", { name: "CSV 붙여넣기" }).click();
@@ -69,13 +71,19 @@ test.describe("E12 — rm 배치", () => {
     const csvErrs = page.getByRole("list", { name: "반영할 수 없는 줄" });
     await expect(csvErrs).toContainText("3번째 줄: 한 rm 배치에 같은 경로가 두 번 있거나");
     await expect(csvErrs).toContainText("(2번째 줄과 겹침)");
-    await expect(create).toBeDisabled();
+    await expect(next).toHaveAttribute("aria-disabled", "true");
     await page.getByRole("button", { name: "CSV 붙여넣기" }).click();
     await page.getByLabel("CSV", { exact: true }).fill(`target\n${base}/a\n${base}/b\n${base}/typo`);
     await page.getByRole("button", { name: "테이블에 반영" }).click();
     await expect(page.getByLabel("1행 경로")).toHaveValue(`${base}/a`);           // 서버 해석 → 표 반영
     await expect(page.getByRole("list", { name: "반영할 수 없는 줄" })).toHaveCount(0);
     await expect(page.getByRole("list", { name: "겹치는 삭제 경로" })).toHaveCount(0);
+    await wizardNext(page, "옵션·실행 제어");
+    await expect(page.getByLabel("미리보기 후 자동 실행")).not.toBeChecked();         // 기본 꺼짐(켠 rm 은 E13)
+    await expect(page.getByLabel("재귀 삭제(필수)")).toBeChecked();
+    await wizardNext(page, "이름·검토");
+    await expect(page.getByRole("note", { name: "삭제 범위", exact: true })).toBeVisible();
+    const create = page.getByRole("button", { name: "배치 생성", exact: true });
     await create.click();
     await page.waitForURL(/\/admin\/batches\/[0-9a-f]{32}$/);
     const bid = page.url().split("/").pop()!;
