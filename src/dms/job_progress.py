@@ -9,8 +9,10 @@ progress.json 은 요청자 소유 <phase> 디렉터리 안의 파일이다(러�
   - 상한(READ_MAX_BYTES) 초과·비 UTF-8·깨진 JSON·깊은 중첩(RecursionError)·객체 아님·required(v·tool·phase) 틀림 → None
     (라우트는 200 available:false -- 「모름」이지 오류가 아니다).
   - 허용 키만 남긴다(계약 snapshot.fields). 범위·타입이 틀린 **그 필드만** 뺀다(전체 거부 아님). 하위 객체는 한 단계 깊이,
-    비면 키째 뺀다. 정수는 int(bool 아님) 0..2^63-1, 실수는 유한 0..상한(정수 표기 허용), percent 0..100.
-  - 남은 정규화는 타입 검사뿐이라 예외 경로가 없다. 멱등이다(sanitize(계약 예) == 계약 예).
+    비면 키째 뺀다. 정수는 int(bool 아님) 0..2^63-1, 실수는 유한 0..상한(정수 표기 허용 -- float 로 바꾸지 않고 범위만 본다,
+    309자리를 넘는 정수 리터럴도 그 필드만 빠진다), percent 0..100.
+  - 남은 정규화는 타입·범위 검사뿐이고, 그래도 본문의 어떤 예외든 None 으로 접는다(sanitize 의 2차 방어 -- 라우트가 500 이
+    되지 않는다). 멱등이다(sanitize(계약 예) == 계약 예).
 진행 값은 표시 전용이다 -- 확인 게이트·지문·통계·사유 어디에도 쓰지 않는다."""
 import json
 import math
@@ -73,7 +75,11 @@ def _clean(spec, value):
             return value if value == spec["const"] else _DROP
         return value if spec["min"] <= value <= spec["max"] else _DROP
     if t == "float":
-        if type(value) not in (int, float) or not math.isfinite(value):
+        # 정수 표기는 float 로 바꾸지 않고 범위만 본다 -- math.isfinite(int) 는 309자리를 넘는 정수에 OverflowError 다(JSON 의
+        # 400자리 정수 리터럴 하나가 라우트를 500·no-store 없음으로 만들었다). int·float 비교는 큰 정수에서도 정확하다.
+        if type(value) is int:
+            return value if spec["min"] <= value <= spec["max"] else _DROP
+        if type(value) is not float or not math.isfinite(value):
             return _DROP
         return value if spec["min"] <= value <= spec["max"] else _DROP
     if t == "bool":
@@ -96,7 +102,16 @@ def _clean(spec, value):
 
 
 def sanitize(raw):
-    """progress.json 바이트 → 걸러낸 스냅숏 dict, 모양이 틀리면 None(모듈 docstring). 예외를 내지 않는다."""
+    """progress.json 바이트 → 걸러낸 스냅숏 dict, 모양이 틀리면 None(모듈 docstring). 예외를 내지 않는다 -- 본문(_sanitize)의
+    어떤 예외도 None(「모름」)으로 접는 2차 방어다. 라우트는 이 호출을 오류 처리 밖에서 부르므로 여기서 새면 200 available:false
+    대신 500(no-store 없음)이 된다."""
+    try:
+        return _sanitize(raw)
+    except Exception:  # noqa: BLE001 -- 계약상 예외 금지(바꿔치기될 수 있는 파일의 내용이다)
+        return None
+
+
+def _sanitize(raw):
     if not isinstance(raw, (bytes, bytearray)) or len(raw) > READ_MAX_BYTES:
         return None
     try:

@@ -35,9 +35,13 @@ tests/test_wiring_phase3c.py 의 고정 테스트가 지킨다(배선은 wiring.
   들여온 남의 정규 파일(nlink=1, 봉쇄 통과)은 소유자가 다르다. 0 을 함께 허용하는
   이유는 러너가 chown **뒤에** root 로 stdout.log/stderr.log/summary.json(2026-11-26
   부터 sync 는 progress.json 도)을 새로 쓰기 때문 -- 러너가 그것들을 요청자로 chown 하면
-  정확히 == 요청자로 좁힐 수 있다(docs/BACKLOG.md). stdout.log·stderr.log·progress.json
-  은 러너 쓰기 스레드가 dirfd + O_CREAT|O_EXCL|O_NOFOLLOW 새 inode(0644, progress.json 은
-  임시 파일 rename -- dms_job_runner.stream)로, summary.json 은 아직 write_text 로 쓴다.
+  정확히 == 요청자로 좁힐 수 있다(docs/BACKLOG.md). mpirun 출력의 stdout.log·stderr.log 와
+  progress.json 은 러너 쓰기 스레드가 dirfd + O_CREAT|O_EXCL|O_NOFOLLOW 새 inode(0644,
+  progress.json 은 임시 파일 rename -- dms_job_runner.stream)로 쓴다. summary.json 과 조기
+  종료(워커 미준비·경로 봉쇄 -- mpirun 을 돌리지 않은 경로)의 stderr.log 는 아직
+  write_text(경로 기반 open("w") -- runner._write_text)로 쓴다: 그중 봉쇄 두 경로(dsync·dscan
+  봉쇄, rm 대상 봉쇄)는 chown -R 뒤라 요청자 소유 <phase> 디렉터리 안의 경로 쓰기다(dms-k8s 는
+  모든 잡이 root 라 위협은 아니고 동작도 기존 그대로 -- 그 stderr.log 를 안전한 쓰기로 보지 마라).
   st_uid == 0 만 허용하는 게이트는 쓰지 않는다: 요청자가 미리
   만들어 둔 정규 파일을 root 의 open("w") 가 재사용하면 요청자 소유가 된다(정상).
   progress.json 이 chown -R 전에 쓰였으면 그 inode 는 요청자 소유가 될 수 있다(허용 --

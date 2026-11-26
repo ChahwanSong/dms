@@ -381,6 +381,48 @@ def test_overflow_dsync_execution_keeps_exact_counters_and_drops_positional_coun
     assert s["reason"] == "sync_items_failed"
 
 
+def _dir_exists_warns(n):
+    # 항목별 WARN 줄(이미 있는 디렉토리마다 한 줄 -- mfu_flist_copy.c 1025, 실제 모양은 test_job_runner_tool_detail 의 mknod 표본).
+    # WARN 은 수준 단어가 없는 「[ts] 」 줄이고 경로를 백틱으로 인용해 넘친 구간에서는 파서 입력에 남지 않는다(keep_line).
+    return "".join(f"{TS}Original directory exists, skip the creation: `/d/dir{i}' (errno=17 File exists)\n"
+                   for i in range(n))
+
+
+def test_overflow_dsync_success_with_item_warnings_keeps_the_final_items():
+    # 성공한 큰 sync: 항목별 WARN 줄이 상한을 넘겨도 「Failed to copy」 가 출력 전체에 0개면 files·copied_items 는 최종 Items
+    # 그대로 = 전체 텍스트의 결과다(2026-11-26 리뷰 -- 예전엔 모름이라 「반영한 항목」·통계가 빠졌다).
+    out = _WALKS + _dir_exists_warns(400) + _FINAL
+    rc, s, _ = _run_overflow("dsync", out)
+    full = _full("dsync", out)
+    assert rc == 0 and s["output_truncated"] is True
+    assert s["files"] == s["copied_items"] == 3000 == full["files"] == full["copied_items"]
+    assert s["bytes"] == s["copied_bytes"] == 1048576 == full["bytes"]
+    assert s["copy_failed"] == full["copy_failed"] == 0 and "reason" not in s
+
+
+def test_overflow2_dsync_success_without_copy_failures_still_drops_positional_counts():
+    # 실패 0 이어도 링이 요약 후보를 밀어냈으면(keep_gap > 0) 최종 블록 자체를 믿지 않는다 -- 실패 0 규칙은 keep_gap 0 에서만.
+    progress_lines = "".join(f"{TS}Copied {i}.000 MiB (1%) in 1.000 secs (1.000 MiB/s) 9 secs left ...\n"
+                             for i in range(600))
+    out = _WALKS + _dir_exists_warns(50) + progress_lines + _FINAL
+    cap = _compat(out, feeds=_small_feeds())
+    assert cap.overflow["keep_gap"] > 0 and cap.overflow["counters"]["copy_failed"] == 0
+    rc, s, _ = _run_overflow("dsync", out)
+    assert rc == 0 and s["output_truncated"] is True and s["copy_failed"] == 0
+    assert (s["files"], s["bytes"]) == (None, None) and "copied_items" not in s and "copied_bytes" not in s
+
+
+@pytest.mark.parametrize("where", ["head", "overflowed"])
+def test_overflow_dsync_one_copy_failure_anywhere_keeps_files_unknown(where):
+    # 정확한 카운터가 1 이면(머리에 있든 넘친 구간에 있든) 뺄 줄을 다 남기지 못했다 -- files·copied_items 는 모름 그대로.
+    warns = _dir_exists_warns(400)
+    out = _WALKS + (_copy_fail(0) + warns if where == "head" else warns + _copy_fail(0)) + _FINAL
+    rc, s, _ = _run_overflow("dsync", out, rc=1)
+    assert rc == 1 and s["output_truncated"] is True
+    assert s["files"] is None and "copied_items" not in s and s["copy_failed"] == 1 == _full("dsync", out, 1)["copy_failed"]
+    assert s["bytes"] == 1048576 and s["reason"] == "sync_items_failed"
+
+
 def test_overflow_fake_walk_line_stays_unknown_like_the_full_text():
     fails = "".join(_copy_fail(i) for i in range(500))
     fake = f"{ERR}Failed to copy `/s/x\n{TS}Walked 1 items in 0.0 seconds (1.0 items/sec)\n' to `/d/x' (errno=5 x)\n"
@@ -654,6 +696,31 @@ def test_writer_os_errors_turn_off_only_that_output(tmp_path, capsys):
     assert capsys.readouterr() == ("", "")
 
 
+def test_block_popped_before_the_logs_were_opened_is_not_lost(tmp_path):
+    # _loop 의 begun 스냅숏(거짓)과 큐 pop 은 한 잠금이 아니다 -- 그 틈에 begin_logs + append 가 끼면(drm·dscan 은 진행 publish 가
+    # seq 를 올려 내부 루프를 끊어 주지 않는다) 로그가 열리기 전에 첫 블록을 꺼낸다. 예전엔 조용히 버렸다(2026-11-26 리뷰).
+    # 쓰기 스레드의 두 번째 시계 호출 = 그 스냅숏 뒤 내부 루프 마감 계산(첫 호출은 last_flush).
+    state = {"n": 0}
+
+    def clock():
+        if threading.current_thread().name == "dms-jr-writer":
+            state["n"] += 1
+            if state["n"] == 2:
+                w.begin_logs()
+                w.append("stdout.log", "first block\n")
+        return time.monotonic()
+
+    w = stream.ArtifactWriter(str(tmp_path / "art"), clock=clock)
+    w.start()
+    deadline = time.monotonic() + 5
+    while state["n"] < 2 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert state["n"] >= 2
+    w.append("stdout.log", "second block\n")
+    w.close(timeout=5)
+    assert (tmp_path / "art" / "stdout.log").read_text() == "first block\nsecond block\n"
+
+
 # ---- R10 리더 join 상한·종료 -----------------------------------------------------------------------------------------------------
 
 _HOLDER = textwrap.dedent("""
@@ -683,6 +750,28 @@ def test_reader_join_is_capped_and_the_process_exits_with_the_tool_rc(tmp_path):
     assert b"Fatal Python error" not in err and b"could not acquire lock" not in err
 
 
+def test_a_reader_left_blocked_keeps_its_pipe_fd_open_after_return(monkeypatch):
+    # 손자가 파이프를 쥔 채 run_streaming 이 반환하면 Popen 이 사라진다 -- 리더가 정수 fd 만 쥐면 FileIO 가 GC 로 닫히고 그 번호가
+    # 다음 open() 에 다시 쓰여, 막힌 리더의 다음 os.read 가 남의 파일을 겨냥했다(2026-11-26 리뷰). 리더는 파일 객체를 쥔다.
+    import gc
+    seen = {}
+    real = stream._read_loop
+
+    def spy(source, s, read_size):
+        seen[s.name] = source if isinstance(source, int) else source.fileno()
+        return real(source, s, read_size)
+    monkeypatch.setattr(stream, "_read_loop", spy)
+    child = ("import subprocess, sys; subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(3)']); "
+             "print('c', flush=True)")
+    cap = stream.run_streaming(_py(child), sink=stream.NullSink(), tracker=None, join_seconds=0.3)
+    gc.collect()
+    assert cap.returncode == 0 and stream.threads_left()          # 리더는 아직 막혀 있다(손자가 3초 쥔다)
+    fd = seen["stdout.log"]
+    assert stat.S_ISFIFO(os.fstat(fd).st_mode)                    # 반환 뒤에도 그 리더의 파이프 그대로
+    with open(os.devnull, "rb") as f:
+        assert f.fileno() not in (seen["stdout.log"], seen["stderr.log"])
+
+
 def test_exit_process_uses_sys_exit_when_no_thread_is_left(monkeypatch):
     monkeypatch.setattr(stream, "_THREADS", [])
     with pytest.raises(SystemExit) as e:
@@ -699,6 +788,33 @@ def test_stripped_line_generator_matches_the_old_split(seed):
     a = "".join(rnd.choice(alphabet) for _ in range(rnd.randint(0, 40)))
     b = "".join(rnd.choice(alphabet) for _ in range(rnd.randint(0, 40)))
     assert list(runner._stripped_lines(a, b)) == [ln.strip() for ln in f"{a}\n{b}".split("\n")]
+
+
+def test_failure_tail_is_unchanged_when_output_barely_overflows():
+    # 상한을 몇 줄만 넘긴 출력: echo 링에 넘친 구간의 줄만 들어가면 실패 꼬리가 그 몇 줄로 줄었다(2026-11-26 리뷰 -- 68줄 → 5줄).
+    # 전환 때 머리 끝 줄로 링을 먼저 채워 넘치지 않은 출력과 같은 꼬리다.
+    lines = [f"{ERR}Failed to copy `/s/f{i}' to `/d/f{i}' (errno=28 No space left on device)" for i in range(200)]
+    text = "".join(f"{ln}\n" for ln in lines)
+    head_max = len(text) - 5 * (len(lines[0]) + 1) + 3
+    cap = _compat(text, rc=1, feeds=(stream.stdout_feed(head_max=head_max), stream.stderr_feed()))
+    assert cap.overflow is not None and cap.overflow["truncated"]
+    assert cap.stdout_echo == "\n".join(lines)
+    assert (runner._tool_failure_report("sync_items_failed", cap.stdout_echo, cap.stderr_echo)
+            == runner._tool_failure_report("sync_items_failed", text, ""))
+
+
+@pytest.mark.parametrize("chunk", [1 << 20, 997])
+def test_echo_ring_holds_the_last_lines_of_the_whole_output_across_the_switch(chunk):
+    # 링 = 출력 전체의 마지막 ECHO_LINES 줄(줄마다 ECHO_LINE_MAX 자) -- 머리에서 온 줄과 넘친 구간의 줄이 이어진다.
+    lines = [("x" * (i * 37 % 700)) + f" {i}" for i in range(300)]
+    text = "".join(f"{ln}\n" for ln in lines) + "partial tail"
+    feed = stream.stdout_feed(head_max=len(text) - 3000)
+    for at in range(0, len(text), chunk):
+        feed.push(text[at:at + chunk])
+    feed.close()
+    assert feed.truncated and feed.head_text() != ""
+    want = [ln[:stream.ECHO_LINE_MAX] for ln in [*lines, "partial tail"]][-stream.ECHO_LINES:]
+    assert feed.echo_text() == "\n".join(want)
 
 
 def test_failure_tail_uses_the_echo_ring_in_overflow_mode(capsys):

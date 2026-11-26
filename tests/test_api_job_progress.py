@@ -285,6 +285,43 @@ def test_chain_failures_and_bad_shapes_all_fold_into_available_false(env, tmp_pa
     _assert_no_store(r)
 
 
+_HUGE = b"9" * 400                                                # 309자리 초과 -- float 로 바꿀 수 없다(4300자리 상한 안)
+
+
+@pytest.mark.parametrize("raw,want", [
+    (b'{"v":1,"tool":"dsync","phase":"copy","elapsed_s":' + _HUGE + b',"lines":7}',
+     {"v": 1, "tool": "dsync", "phase": "copy", "lines": 7}),
+    (b'{"v":1,"tool":"dsync","phase":"copy","since_line_s":-' + _HUGE + b'}', {"v": 1, "tool": "dsync", "phase": "copy"}),
+    (b'{"v":1,"tool":"dsync","phase":"copy","step":{"items":3,"percent":' + _HUGE + b'}}',
+     {"v": 1, "tool": "dsync", "phase": "copy", "step": {"items": 3}}),
+    (b'{"v":1,"tool":"nsync","phase":"copy","batch":{"avg_files_per_s":' + _HUGE + b'}}',
+     {"v": 1, "tool": "nsync", "phase": "copy"}),
+], ids=["elapsed_s", "negative_since_line_s", "step.percent", "batch.avg_files_per_s_only_key"])
+def test_huge_integer_in_a_float_field_drops_that_field_and_stays_200(env, raw, want):
+    # 실수 필드의 거대 정수 리터럴이 sanitize 에서 OverflowError 로 새어 500(no-store 없음)이 되던 회귀(2026-11-26 리뷰).
+    client, base, jid = env
+    _place(base, jid, raw)
+    r = _get(client, jid)
+    assert r.status_code == 200
+    _assert_no_store(r)
+    body = r.json()
+    assert body["available"] is True and body["progress"] == want
+
+
+def test_unexpected_sanitize_error_folds_into_available_false(env, monkeypatch):
+    # 2차 방어: 본문이 무엇으로 터지든 sanitize 는 None -- 라우트는 200 available:false + no-store(500 이 아니다).
+    client, base, jid = env
+    _place(base, jid, EXAMPLES["workers"])
+
+    def boom(raw):
+        raise OverflowError("simulated")
+    monkeypatch.setattr(job_progress, "_sanitize", boom)
+    assert job_progress.sanitize(_raw(EXAMPLES["workers"])) is None
+    r = _get(client, jid)
+    assert (r.status_code, r.json()) == (200, RESPONSES["unavailable"])
+    _assert_no_store(r)
+
+
 @pytest.mark.skipif(os.getuid() == 0, reason="root 소유 파일은 사슬이 늘 허용한다(st_uid 0)")
 def test_file_owned_by_someone_else_is_available_false(tmp_path):
     base = _base(tmp_path)
@@ -327,9 +364,10 @@ def _out_of_range(desc):
     t = desc["type"]
     bad = [None, "1", [1], {"a": 1}]
     if t == "int":
-        bad += [True, 1.5, desc.get("min", 0) - 1, desc.get("max", 2 ** 63 - 1) + 1]
+        bad += [True, 1.5, desc.get("min", 0) - 1, desc.get("max", 2 ** 63 - 1) + 1, 10 ** 400, -(10 ** 400)]
     elif t == "float":
-        bad += [True, desc["min"] - 1, desc["max"] * 2 + 1, float("inf")]
+        # 309자리를 넘는 정수 표기: float 로 바꾸면 OverflowError 다(math.isfinite) -- 그 필드만 빠져야 한다(라우트 500 회귀).
+        bad += [True, desc["min"] - 1, desc["max"] * 2 + 1, float("inf"), 10 ** 400, -(10 ** 400)]
     elif t == "bool":
         bad += [0, 1, "true"]
     return bad

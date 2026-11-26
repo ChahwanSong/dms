@@ -37,7 +37,8 @@ SIGKILL 은 메모리의 출력을 전부 잃었고, launcher 메모리와 stdou
                 남았으면 exit_process 가 표준 스트림을 flush 하고 os._exit(rc) 한다(아니면 sys.exit -- 시험의 SystemExit 그대로).
   T7 리더는 파일을 만지지 않는다 -- CephFS base 가 멈추면 쓰기 스레드만 선다. 큐(WRITER_QUEUE_MAX, 메모리 측정)가 차면 블록을
                 버리고 수만 센다(자리가 나면 「DMS_JR_LOG_GAP reason=backlog …」 를 먼저 넣는다) -- 도구가 우리 I/O 때문에 멈추지
-                않는다.
+                않는다. 리더가 닫는 것은 EOF 뒤 자기 파이프뿐이다 -- 정수 fd 가 아니라 파이프 파일 객체를 쥐어, 막힌 채 남은
+                리더의 fd 가 run_streaming 반환 뒤 GC 로 닫혀 다른 파일에 재사용되지 않게 한다(_read_loop).
 
 파일 쓰기(ARCHITECTURE §7 「root 제어면」 4 -- 요청자 소유 <phase> 에 경로로 open("w") 금지): 쓰기 스레드가 기동 직후(run_job
 맨 앞, chown 전) phase 디렉터리를 O_DIRECTORY|O_NOFOLLOW dirfd 로 한 번 열고, 로그는 unlink + O_CREAT|O_EXCL|O_NOFOLLOW 새
@@ -243,8 +244,23 @@ class LineFeed:
         self._head = "".join(head)
         del head
         self.truncated = True
+        self._seed_echo(self._head)
         for piece in rest:
             self._overflow(piece)
+
+    def _seed_echo(self, head):
+        """넘침 전환 때 머리의 마지막 줄들(최대 echo 링 길이, 줄마다 ECHO_LINE_MAX 자)로 echo 링을 먼저 채운다 -- 링에는 넘친
+        구간의 줄만 들어가므로, 상한을 조금만 넘긴 출력의 실패 꼬리(runner._tool_failure_report)가 넘친 몇 줄로 줄지 않게
+        (2026-11-26 리뷰). 머리는 완결 줄로 끝난다(_cut_blocks) -- 뒤에서부터 "\\n" 을 찾는다(머리 전체를 나누지 않는다)."""
+        if not head:
+            return
+        lines = []
+        pos = len(head) - 1 if head.endswith("\n") else len(head)
+        while pos >= 0 and len(lines) < self._echo.maxlen:
+            start = head.rfind("\n", 0, pos) + 1
+            lines.append(head[start:min(pos, start + ECHO_LINE_MAX)])
+            pos = start - 1
+        self._echo.extend(reversed(lines))
 
     def _overflow(self, text):
         start = 0
@@ -315,11 +331,12 @@ class LineFeed:
         return self._text
 
     def head_text(self):
-        """넘침 때 머리만(runner._overflow_detail 의 머리 개수·표본 몫). 넘치지 않았으면 원문 전체."""
+        """넘침 때 머리만(runner._overflow_exact 의 머리 개수·_overflow_detail 의 표본 몫). 넘치지 않았으면 원문 전체."""
         return self._head if self.truncated else self.text()
 
     def echo_text(self):
-        """실패 꼬리 발췌(runner._tool_failure_report)의 원천. 넘침 전 = 원문의 마지막 echo_src_max(줄 경계부터), 넘침 = echo 링."""
+        """실패 꼬리 발췌(runner._tool_failure_report)의 원천. 넘침 전 = 원문의 마지막 echo_src_max(줄 경계부터), 넘침 = echo 링
+        (전환 때 머리 끝 줄로 먼저 채운다 -- _seed_echo, 출력 전체의 마지막 echo_lines 줄)."""
         if self.truncated:
             return "\n".join(self._echo)
         text = self.text()
@@ -752,7 +769,12 @@ class ArtifactWriter:
             self._files[name] = lf
 
     def _log(self, name, text):
-        lf = (self._files or {}).get(name)
+        if self._files is None:
+            # 큐에 든 블록은 begin_logs 뒤에만 생긴다(append·_enqueue_gap 가 _begun 을 본다) -- 그러니 여기서 열어도 된다. _loop 의
+            # begun 스냅숏과 큐 pop 은 한 잠금이 아니라, 그 틈에 begin_logs + append 가 끼면 로그가 열리기 전에 첫 블록을 꺼낸다
+            # (2026-11-26 리뷰 -- 예전엔 그 블록을 조용히 버렸다).
+            self._open_logs()
+        lf = self._files.get(name)
         if lf is None or lf.fd is None:
             return
         try:
@@ -882,23 +904,35 @@ class _Stream:
                     self.tracker_ok = False
 
 
-def _read_loop(fd, stream, read_size):
-    """리더 스레드(T2·T3): EOF(또는 OSError)까지 원시 fd 를 읽어 증분 디코드한다. 파일을 만지지 않는다(T7)."""
+def _read_loop(source, stream, read_size):
+    """리더 스레드(T2·T3): EOF(또는 OSError)까지 원시 fd 를 읽어 증분 디코드한다. 아티팩트 파일을 만지지 않는다(T7 -- 닫는
+    것은 자기 파이프뿐이다).
+
+    source 는 파이프의 파일 객체(Popen(bufsize=0) 의 FileIO)다 -- 정수 fd 만 넘기면 run_streaming 이 반환한 뒤 Popen 과 함께 그
+    FileIO 가 GC 로 닫히고, 아직 막혀 있던 리더의 다음 os.read 가 같은 번호로 다시 열린 다른 파일을 겨냥한다(2026-11-26 리뷰
+    실측). 이 프레임(과 Thread 의 args)이 객체를 쥐고 있어 리더가 끝날 때까지 fd 가 살아 있다. 끝나면 리더가 그 파이프를 직접
+    닫는다(마지막 read 뒤라 그 fd 를 읽는 쪽이 없다 -- run_streaming 의 닫기와 겹쳐도 close 는 멱등이다). 정수 fd 도 받는다
+    (시험·도구 -- 그때는 닫지 않는다)."""
+    fd = source if isinstance(source, int) else source.fileno()
     decoder = io.IncrementalNewlineDecoder(codecs.getincrementaldecoder("utf-8")(errors="replace"), translate=True)
-    while True:
-        try:
-            raw = os.read(fd, read_size() if callable(read_size) else read_size)
-        except BaseException:  # noqa: BLE001 -- 더 읽을 수 없다 = EOF
-            raw = b""
-        final = not raw
-        try:
-            text = decoder.decode(raw, final=final)
-        except BaseException:  # noqa: BLE001
-            text = ""
-        if text:
-            stream.deliver(text)
-        if final:
-            return
+    try:
+        while True:
+            try:
+                raw = os.read(fd, read_size() if callable(read_size) else read_size)
+            except BaseException:  # noqa: BLE001 -- 더 읽을 수 없다 = EOF
+                raw = b""
+            final = not raw
+            try:
+                text = decoder.decode(raw, final=final)
+            except BaseException:  # noqa: BLE001
+                text = ""
+            if text:
+                stream.deliver(text)
+            if final:
+                return
+    finally:
+        if not isinstance(source, int):
+            _quiet(source.close)
 
 
 def _finish(returncode, out, err, sink, tracker):
@@ -948,7 +982,8 @@ def run_streaming(command, *, sink, tracker, clock=None, popen=None, read_size=R
     proc = (popen or subprocess.Popen)(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
     readers = []
     for fileobj, stream in ((proc.stdout, out), (proc.stderr, err)):
-        thread = threading.Thread(target=_read_loop, args=(fileobj.fileno(), stream, read_size),
+        # 정수 fd 가 아니라 파일 객체를 넘긴다(_read_loop docstring -- 리더가 끝날 때까지 FileIO 가 GC 로 닫히지 않게).
+        thread = threading.Thread(target=_read_loop, args=(fileobj, stream, read_size),
                                   name=f"dms-jr-{stream.name}", daemon=True)
         _register(thread)
         thread.start()
@@ -962,7 +997,8 @@ def run_streaming(command, *, sink, tracker, clock=None, popen=None, read_size=R
     for thread, _ in readers:
         thread.join(join_seconds)
     for thread, fileobj in readers:
-        # 리더가 끝났을 때만 닫는다 -- 막힌 os.read 아래에서 fd 를 닫으면 그 번호가 다른 파일에 재사용될 수 있다.
+        # 리더가 끝났을 때만 닫는다 -- 막힌 os.read 아래에서 fd 를 닫으면 그 번호가 다른 파일에 재사용될 수 있다. 살아 있는 리더는
+        # 자기 파일 객체를 쥐고 있어(_read_loop) 이 함수가 반환해 Popen 이 사라져도 GC 가 그 fd 를 닫지 않는다.
         if not thread.is_alive():
             _quiet(fileobj.close)
     return _finish(returncode, out, err, sink, tracker)

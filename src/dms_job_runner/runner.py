@@ -450,8 +450,9 @@ def _build_summary(tool, stdout, returncode, artifact_dir, dryrun=False, quiet=F
     overflow(stream.ToolCapture.overflow -- None 이면 출력이 상한 안이라 입력이 지금과 같은 문자열이고 이 함수의 결과도 같다):
     parse_lost(리더의 파서 소비자가 죽었다)면 핵심 3키(files·bytes 모름)만 -- 상세 파싱 실패와 같은 모양. stderr 의 넘친 구간에서
     본 중단 흔적(aborted_seen)은 파서가 보는 stderr 에 한 줄로 덧붙인다(파서가 stderr 에서 쓰는 것은 parse_aborted 하나다).
-    stdout 이 넘쳤으면 _overflow_core·_overflow_detail 이 위치·개수 규칙 값을 모름으로 두고 정확한 줄 카운터·출력 전체의 첫
-    실패 표본으로 바꾼 뒤에 사유를 정한다(미리보기도 -- 미리보기 summary 는 지문 원천이라 축소된 개수가 들어가면 안 된다)."""
+    stdout 이 넘쳤으면 _overflow_core·_overflow_detail 이 위치·개수 규칙 값을 모름으로 두고 정확한 줄 카운터(_overflow_exact 가
+    한 번 센다)·출력 전체의 첫 실패 표본으로 바꾼 뒤에 사유를 정한다(미리보기도 -- 미리보기 summary 는 지문 원천이라 축소된
+    개수가 들어가면 안 된다). dsync 실행의 files·copied_items 는 「Failed to copy」 줄이 출력 전체에 0개면 최종 블록 값 그대로다."""
     if overflow is not None and overflow.get("parse_lost"):
         return {"returncode": returncode, "files": None, "bytes": None}
     if overflow is not None and overflow.get("aborted_seen") and not parse_aborted(stderr):
@@ -485,8 +486,13 @@ def _build_summary(tool, stdout, returncode, artifact_dir, dryrun=False, quiet=F
         # 그 외 도구: 파싱 규칙이 없다 -- (None, None) 그대로 둔다
     except Exception:  # noqa: BLE001 -- fail-soft가 계약이다(설계 §4)
         files = nbytes = None
+    exact = None
     if overflow is not None:
-        files, nbytes = _overflow_core(tool, bool(dryrun), log_quiet, files, nbytes, overflow)
+        try:
+            exact = _overflow_exact(tool, log_quiet, overflow)
+        except Exception:  # noqa: BLE001 -- 정확한 수를 모르면 아래 두 함수가 모름 쪽으로 접는다
+            exact = None
+        files, nbytes = _overflow_core(tool, bool(dryrun), log_quiet, files, nbytes, overflow, exact)
     core = {"returncode": returncode, "files": files, "bytes": nbytes}
     if tool not in ALLOWED_TOOLS:
         return core
@@ -499,7 +505,7 @@ def _build_summary(tool, stdout, returncode, artifact_dir, dryrun=False, quiet=F
         if not isinstance(detail, dict):
             return core
         if overflow is not None:
-            detail = _overflow_detail(tool, bool(dryrun), log_quiet, detail, overflow)
+            detail = _overflow_detail(tool, bool(dryrun), log_quiet, detail, overflow, exact)
         summary = dict(core)
         summary["detail_version"] = SUMMARY_DETAIL_VERSION
         summary["tool"] = tool
@@ -526,30 +532,50 @@ _OVERFLOW_ABORT_LINE = "ABORT: (stderr overflow -- abort seen past the parser he
 _NSYNC_OVERFLOW_KEYS = ("planned", "done", "copied_bytes", "planned_bytes", "aborted")
 
 
-def _overflow_core(tool, dryrun, log_quiet, files, nbytes, overflow):
+def _overflow_exact(tool, log_quiet, overflow):
+    """넘침 모드의 정확한 줄 카운터(parsers.LINE_COUNTERS -- tool_errors·copy_failed·create_failed) = 머리 텍스트 findall + 넘친
+    구간 줄 단위 수(출력 전체의 MULTILINE findall 과 같은 수). 쓰는 곳(_overflow_core·_overflow_detail)이 둘이라 _build_summary 가
+    한 번만 센다(64 MiB 머리를 두 번 훑지 않는다). 쓸 일이 없으면 None."""
+    if not overflow.get("truncated") or log_quiet or tool not in _LOG_PARSED_TOOLS:
+        return None
+    streamed = overflow.get("counters") or {}
+    return {name: n + int(streamed.get(name) or 0) for name, n in count_lines(overflow.get("head_text") or "").items()}
+
+
+def _no_copy_failures(exact):
+    """출력 전체에 「Failed to copy」 줄이 하나도 없었는가(정확한 카운터로 -- None(못 셌다)은 아니다)."""
+    return exact is not None and exact.get("copy_failed") == 0
+
+
+def _overflow_core(tool, dryrun, log_quiet, files, nbytes, overflow, exact=None):
     """넘침 모드의 핵심 2키(설계 §1.4 표). dsync 실행 files 는 최종 Items − 그 앞 「Failed to copy」 줄 수인데 그 줄(오류 줄)을
-    다 남기지 못했다 -- 모름. 링이 요약 후보를 밀어냈으면(keep_gap > 0, overflow2) dsync 는 위치·개수 규칙 값(최종 블록·walk
+    다 남기지 못했다 -- 모름. 단 정확한 카운터(exact -- _overflow_exact)로 그 줄이 출력 **전체에** 0개면 빼는 수가 0 이라 최종
+    Items 그대로가 전체 텍스트의 결과와 같다(parsers._dsync_copied_items 의 실패 줄 정규식은 copy_failed 카운터 정규식에 꼬리만
+    더한 것이라 카운터 0 ⇒ 뺄 줄 0) -- 그대로 둔다(성공한 큰 sync 의 항목별 WARN 줄 폭주로 「반영한 항목」·통계가 모름이 되지
+    않게, 2026-11-26 리뷰). 링이 요약 후보를 밀어냈으면(keep_gap > 0, overflow2) dsync 는 위치·개수 규칙 값(최종 블록·walk
     수)을 믿지 않는다. drm·nsync 의 개수는 끝에 찍히는 요약 줄 하나라 끝 링에 늘 남는다(그대로)."""
     if not overflow.get("truncated") or log_quiet or tool != "dsync":
         return files, nbytes
     if (overflow.get("keep_gap") or 0) > 0:
         return None, None
-    return (files, nbytes) if dryrun else (None, nbytes)
+    return (files, nbytes) if dryrun or _no_copy_failures(exact) else (None, nbytes)
 
 
-def _overflow_detail(tool, dryrun, log_quiet, detail, overflow):
+def _overflow_detail(tool, dryrun, log_quiet, detail, overflow, exact=None):
     """넘침 모드의 상세 키(설계 §1.4 표) -- 사유를 정하기 **전에** 적용한다. 정확한 카운터(tool_errors·copy_failed·
-    create_failed)는 머리 텍스트 findall + 넘친 구간 줄 단위 수로 덮어쓴다(keep 에 든 화이트리스트 오류 줄을 두 번 세지
-    않는다). 실패 표본은 머리 표본 + 넘친 구간 errno 줄 표본의 앞 10개 = 출력 전체의 첫 10개(지금 규칙과 같다 -- 머리가 WARN
-    줄로 차 있어도 넘친 구간의 ENOSPC 가 표본에 들어가 destination_full 이 sync_items_failed 로 떨어지지 않는다). dsync 타입
-    교체 사유(규칙 5)의 근거(_type_change_dir_refused·_remove_errnos)는 빼서 그 규칙을 끈다(일반 항목 실패로 안전하게 떨어진다)."""
+    create_failed -- exact, _overflow_exact)로 덮어쓴다(keep 에 든 화이트리스트 오류 줄을 두 번 세지 않는다). 못 셌으면(None)
+    상세 실패와 같다(핵심 3키 -- _build_summary 의 except). 실패 표본은 머리 표본 + 넘친 구간 errno 줄 표본의 앞 10개 = 출력
+    전체의 첫 10개(지금 규칙과 같다 -- 머리가 WARN 줄로 차 있어도 넘친 구간의 ENOSPC 가 표본에 들어가 destination_full 이
+    sync_items_failed 로 떨어지지 않는다). dsync 실행 copied_items 는 _overflow_core 의 files 와 같은 규칙(「Failed to copy」 0개면
+    최종 블록 값 그대로, 아니면 뺀다). dsync 타입 교체 사유(규칙 5)의 근거(_type_change_dir_refused·_remove_errnos)는 빼서 그
+    규칙을 끈다(일반 항목 실패로 안전하게 떨어진다)."""
     if not overflow.get("truncated"):
         return detail
     if log_quiet or tool not in _LOG_PARSED_TOOLS:
         return {**detail, "output_truncated": True} if tool in _LOG_PARSED_TOOLS else detail
+    if exact is None:
+        raise ValueError("overflow line counters unavailable")
     head = overflow.get("head_text") or ""
-    streamed = overflow.get("counters") or {}
-    exact = {name: n + int(streamed.get(name) or 0) for name, n in count_lines(head).items()}
     samples = (failure_samples(head) + failure_samples("\n".join(overflow.get("errno_lines") or ())))[:10]
     gap = (overflow.get("keep_gap") or 0) > 0
     if tool == "nsync":
@@ -564,7 +590,8 @@ def _overflow_detail(tool, dryrun, log_quiet, detail, overflow):
         out = dict(detail)
         out["tool_errors"] = exact["tool_errors"]
         if not dryrun:
-            out.pop("copied_items", None)
+            if not _no_copy_failures(exact):
+                out.pop("copied_items", None)
             out.pop("_type_change_dir_refused", None)
             out.pop("_remove_errnos", None)
             out["copy_failed"] = exact["copy_failed"]
