@@ -361,6 +361,34 @@ d7a228f2)를 옮겼다. 지금 동작은 `frontend/src/components/form/Wizard.ts
   단계로 맞춰진다 — 빈 폼으로 검토를 보이지 않는다).
 - 💡 **스토리지가 많을 때 배치 ② 카드 격자** — 목록 순서 한 격자다. 사이트 스토리지가 많아지면 백엔드별 묶음·접기·검색을 더한다.
 
+### 마운트 현황 판정 후속 — 2026-11-27 (dms-k8s 210cd166 과 의미 맞춤)
+
+dms-k8s 리뷰(그 라인 210cd166 `mount_status._attached`)가 이 라인 「어디에도 안 붙은 열」 규칙의 퍼짐을 찾았다 — 흔적을 신선한
+ready·readonly 로만 세면 스토리지를 한 노드에만 붙인 구성(nsync 소스·목적지 분리)에서 그 노드 하나의 리포트 지연·끊긴 마운트가 다른
+모든 노드의 absent 를 문제로 만들었다(그 라인 실측 노드 6대에서 문제 노드 1 → 6). 두 라인이 같이 정하기로 했던 의미 차이 셋은 이 라인을
+k8s 쪽에 맞춰 닫았다(규칙 원문 `src/dms/api/routes_mounts.py` 모듈 docstring 「문제 판정」, deploy/README §12b 판정 기준 표):
+① **흔적의 범위** — `routes_mounts.attached`: ready·readonly + 사유가 host_root_missing 이 아닌 missing(끊긴 마운트·마운트 빠짐·전파 안 됨·
+읽기 불가·사유 없음·미지 사유), 에이전트 보고가 있으면 리포트 지연 노드의 칸(마지막 판정)도. 흔적 아님: absent·unreported·disabled·
+host_root_missing. readonly 바깥값의 동료는 그대로 신선한 ready 만. ② **writable 이 없는 Ready**(옛 에이전트) — readonly → ready(placement
+처럼 writable is False 만 뺀다, null ≠ 실패; 칸 플래그는 None 그대로). 아티팩트 경로 칸도 같다. ③ **아티팩트 경로 읽기 전용** — 「ready 인
+동료 base 가 있을 때만」(`base_ready_peer`) → 늘 문제(잡이 어느 노드에서든 써야 한다 — 동료 규칙은 모든 노드 ro 장애를 숨겼다).
+
+- 🔍 **라이브 실증** — 아직(ssc 다음 태그 — dms 이미지만): 한 노드에만 붙인 스토리지에서 그 노드 에이전트를 멈춰 리포트 지연으로 만들어도
+  다른 노드의 「경로 없음」은 회색·「문제 있는 노드」 수가 늘지 않는지, mount_path 오타 시험 스토리지는 여전히 모든 신선 노드에 문제 1인지.
+  확인 뒤 시험 스토리지는 지우고 에이전트를 되살린다.
+- 📝 **알려진 한계: 새로 등록한 한 노드 스토리지의 한 주기 경보** — 흔적(`attached`)에 unreported(그 경로를 아직 보고하지 않음 — k8s 의
+  pending)는 들지 않는다. 새로 등록한 스토리지를 붙인 노드가 아직 그 경로를 보고하기 전이고 다른 노드는 벌써 absent 를 보고했으면, 다음
+  보고(기본 60초)까지 그 다른 노드들이 문제로 보인다. 신선한 unreported 가 있는 열의 판정을 한 주기 미루면 없앨 수 있지만, unreported 가
+  오래 남는 노드(옛 에이전트·스토리지 목록을 못 받는 에이전트)가 오타 검출을 계속 막을 수 있어 두었다(dms-k8s 와 같은 결정). 경보 피로가
+  실제로 보이면 다시 본다.
+- 📝 **dms-k8s 와 남은 모양 차이**(의미는 위 셋으로 맞췄다 — 응답 모양은 두 라인이 같이 정한다): ⓐ 이 라인은 칸·아티팩트 경로 칸마다
+  `problem` 플래그를 싣고 summary 가 그 플래그만 센다(포탈은 플래그 없는 옛 서버에서만 다시 셈, 상태 이름 missing/absent) — k8s 는 행
+  `problem_count` 만 싣고 포탈이 열 규칙을 거울로 다시 잰다(상태 이름 broken/absent, 교차 픽스처 `mountProblemCases.json`). ⓑ 리포트 지연
+  행 — 이 라인은 칸을 문제로 세지 않고 문제 노드 수에도 넣지 않는다(「보고 끊김」 꼬리표), k8s 는 지연 행을 늘 문제로 센다(problem_count
+  null → problem). ⓒ 아티팩트 경로 칸 겹침 — 이 라인은 덮는 등록 스토리지 칸의 missing·absent 를 `covering_storage_missing:<이름>` 으로
+  겹치고, k8s 공용 디렉터리 칸은 에이전트의 덮는 마운트(local·differs)로만 판정한다(「다른 노드와 다름」 differs 를 이 라인이 안 옮긴 것은
+  §4 「API 자체 artifact base 점검 후속」).
+
 ## 2. 의도적 보류 (결정 — "미구현"이 아님)
 
 - ⏸ **회원가입 메일 인증** — 더미(email 기록만, 검증 없음, `routes_auth.py::signup`).

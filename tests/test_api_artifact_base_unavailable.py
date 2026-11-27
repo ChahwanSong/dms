@@ -5,6 +5,7 @@ import json
 import os
 import threading
 
+import pytest
 from fastapi.testclient import TestClient
 
 from dms.api.app import create_app
@@ -440,7 +441,7 @@ def test_mounts_base_column_counts_once_and_ignores_disabled_cover(tmp_path):
                   artifact_base=base_probe)
     _agent_report(repos, "ro", [_mount("mgmt", "/mgmt_storage", "Ready")],
                   artifact_base={**base_probe, "writable": False})
-    # readonly base 는 다른 신선한 노드의 base 가 쓰기 가능(ready)일 때만 문제다(2026-11-27) -- 그 동료
+    # readonly base 는 늘 문제다(2026-11-27 dms-k8s 210cd166 과 맞춤) -- 쓰기 가능한 동료는 문제 아님
     _agent_report(repos, "ok", [_mount("mgmt", "/mgmt_storage", "Ready")], artifact_base=base_probe)
     now = utc_now_iso()
     repos.api_base_checks.upsert({"instance": "api-x", "node_name": "bad", "uri": "file:///mgmt_storage/dms/artifacts",
@@ -498,11 +499,11 @@ def test_mounts_absent_is_not_a_problem_and_readonly_counts_only_beside_a_writab
     assert (body["summary"]["problem_cells"], body["summary"]["problem_nodes"]) == (1, 1)
 
 
-def test_mounts_base_on_root_fs_is_local_dir_and_readonly_base_needs_a_writable_peer(tmp_path):
+def test_mounts_base_on_root_fs_is_local_dir_and_readonly_base_is_always_a_problem(tmp_path):
     # 2026-11-27(dms-k8s d14ee402 이식): 에이전트가 base 를 덮는 마운트를 '/' 로 보고하면(공유 스토리지가 빠지고 노드
     # 루트 fs 의 로컬 디렉터리만 남음) exists·writable 이 참이어도 missing(artifact_base_local_dir). 덮는 등록 스토리지가
-    # 없는 base 라 covering_storage_missing 겹침으로는 못 잡는 모양이다. readonly base 는 다른 신선한 노드의 base 가 ready
-    # 일 때만 문제다 -- local 노드(missing)는 동료가 아니다.
+    # 없는 base 라 covering_storage_missing 겹침으로는 못 잡는 모양이다. readonly base 는 쓰기 가능한 동료가 없어도 문제다
+    # (2026-11-27 dms-k8s 210cd166 과 맞춤 -- 잡이 어느 노드에서든 아티팩트를 써야 한다; 동료 규칙은 모든 노드 ro 장애를 숨겼다).
     client = _client(tmp_path, "/shared/dms/artifacts")
     repos = client.app.state.repos
     shared = {"path": "/shared/dms/artifacts", "exists": True, "writable": True, "mount_point": "/shared",
@@ -516,10 +517,10 @@ def test_mounts_base_on_root_fs_is_local_dir_and_readonly_base_needs_a_writable_
     assert (local["status"], local["reason"], local["problem"]) == ("missing", "artifact_base_local_dir", True)
     assert local["agent"] == {"exists": True, "writable": True, "path_matches": True, "mount_point": "/",
                               "fstype": "ext4"}
-    assert (ro["status"], ro["problem"]) == ("readonly", False)        # 쓰기 가능한 base 동료가 없다
-    assert (body["summary"]["problem_cells"], body["summary"]["problem_nodes"]) == (1, 1)
+    assert (ro["status"], ro["problem"]) == ("readonly", True)         # 쓰기 가능한 base 동료가 없어도 문제
+    assert (body["summary"]["problem_cells"], body["summary"]["problem_nodes"]) == (2, 2)
 
-    # 쓰기 가능한 동료가 생기면 readonly base 는 문제다
+    # 쓰기 가능한 동료가 생겨도 그대로 -- 동료는 문제 아님
     _agent_report(repos, "good", [], artifact_base=shared)
     body = client.get("/api/admin/mounts", headers=ADMIN).json()
     nodes = {n["node_name"]: n for n in body["nodes"]}
@@ -589,10 +590,11 @@ def test_mounts_dead_mount_reporting_missing_mount_path_stays_missing(tmp_path):
     assert (body["summary"]["problem_cells"], body["summary"]["problem_nodes"]) == (1, 1)
 
 
-def test_mounts_storage_absent_on_every_fresh_node_is_a_problem(tmp_path):
-    # 2026-11-27 리뷰: mount_path 오타(/cephf)·마운트 배포 전처럼 신선한 어느 노드에도 그 스토리지가 마운트돼 있지 않으면(같은 열에
-    # 신선한 ready·readonly 가 0) absent 도 문제다 -- 열 전체가 회색 「경로 없음」인데 요약이 「문제 0」이던 구멍. 끊긴 노드의 ready 는
-    # 「어딘가엔 마운트」로 세지 않는다. readonly 만 있는 열이면 그 스토리지는 마운트돼 있다(absent 는 문제 아님).
+def test_mounts_storage_absent_on_every_node_is_a_problem(tmp_path):
+    # 2026-11-27 리뷰: mount_path 오타(/cephf)·마운트 배포 전처럼 어느 노드에도 그 스토리지를 붙인 흔적이 없으면 absent 도 문제다 --
+    # 열 전체가 회색 「경로 없음」인데 요약이 「문제 0」이던 구멍. 리포트 지연 노드는 마지막 판정으로 본다(여기선 그것도 absent --
+    # 흔적 아님; 마지막이 ready 면 흔적이다 -- test_mounts_storage_attached_on_one_node_does_not_spread). readonly 만 있는 열이면 그
+    # 스토리지는 마운트돼 있다(absent 는 문제 아님).
     client = _client(tmp_path, "/shared/dms/artifacts")
     repos = client.app.state.repos
     for name, path in (("typo", "/cephf"), ("src", "/src")):
@@ -602,7 +604,8 @@ def test_mounts_storage_absent_on_every_fresh_node_is_a_problem(tmp_path):
                                 _mount("src", "/src", "Ready", writable=False)])
     _agent_report(repos, "n2", [_mount("typo", "/cephf", "Missing", writable=False, reason="missing_mount_path"),
                                 _mount("src", "/src", "Missing", writable=False, reason="missing_mount_path")])
-    _agent_report(repos, "old", [_mount("typo", "/cephf", "Ready")], reported_at=iso_plus(utc_now_iso(), -3600))
+    _agent_report(repos, "old", [_mount("typo", "/cephf", "Missing", writable=False, reason="missing_mount_path")],
+                  reported_at=iso_plus(utc_now_iso(), -3600))
     body = client.get("/api/admin/mounts", headers=ADMIN).json()
     nodes = {n["node_name"]: n["cells"] for n in body["nodes"]}
     assert [(nodes[n]["typo"]["status"], nodes[n]["typo"]["problem"]) for n in ("n1", "n2")] == [
@@ -611,3 +614,85 @@ def test_mounts_storage_absent_on_every_fresh_node_is_a_problem(tmp_path):
     assert (nodes["n1"]["src"]["status"], nodes["n1"]["src"]["problem"]) == ("readonly", False)
     assert nodes["old"]["typo"]["problem"] is False                                             # 끊긴 노드 칸은 셈 밖
     assert (body["summary"]["problem_cells"], body["summary"]["problem_nodes"]) == (2, 2)
+
+
+_SEC_ABSENT = _mount("sec", "/sec", "Missing", writable=False, reason="missing_mount_path")
+_SEC_DEAD = {"storage_name": "sec", "mount_path": "/sec", "exists": False, "is_mountpoint": True, "readable": False,
+             "writable": False, "status": "Missing", "reason": "missing_mount_path"}
+
+
+@pytest.mark.parametrize("a_mount, a_stale, a_problem, others_problem", [
+    # 붙인 유일한 노드의 마운트가 빠졌다 -- 그 노드만 문제(첫 판은 6대 전부)
+    (_mount("sec", "/sec", "Missing", reason="not_a_mountpoint"), False, True, False),
+    # 끊긴 마운트(호스트엔 마운트, 경로 stat 실패)도 흔적
+    (_SEC_DEAD, False, True, False),
+    # 사유 없음·미지 사유의 Missing 도 흔적(그 칸 자체가 이미 문제)
+    (_mount("sec", "/sec", "Missing", reason=None), False, True, False),
+    (_mount("sec", "/sec", "Missing", reason="weird_new_reason"), False, True, False),
+    # 리포트 지연 노드는 마지막 판정으로 -- 정상·끊김이면 흔적(지연 행의 칸은 문제로 세지 않는다)
+    (_mount("sec", "/sec", "Ready"), True, False, False),
+    (_mount("sec", "/sec", "Missing", reason="not_a_mountpoint"), True, False, False),
+    # 마지막 판정이 absent 면 흔적이 아니다 -- 다른 노드의 absent 는 문제(어디에도 안 붙은 스토리지)
+    (_SEC_ABSENT, True, False, True),
+    # host_root_missing = 그 노드의 마운트를 점검하지 못했다(아무것도 모른다) -- 흔적 아님
+    (_mount("sec", "/sec", "Missing", reason="host_root_missing"), False, True, True),
+], ids=["not_a_mountpoint", "dead_mount", "no_reason", "unknown_reason", "stale_ready", "stale_missing", "stale_absent",
+        "host_root_missing"])
+def test_mounts_storage_attached_on_one_node_does_not_spread(tmp_path, a_mount, a_stale, a_problem, others_problem):
+    # 2026-11-27 dms-k8s 210cd166 리뷰 이식: 스토리지를 한 노드(a)에만 붙인 구성(nsync 소스·목적지 분리)에서 「absent 를 문제로 세지
+    # 않는 흔적」을 신선한 ready·readonly 로만 세면 a 하나의 장애·리포트 지연이 다른 5대의 absent 를 모두 문제로 만들었다(문제 노드
+    # 1 → 6). 흔적 = ready·readonly + host_root_missing 이 아닌 missing, 리포트 지연 노드는 마지막 판정(routes_mounts.attached).
+    client = _client(tmp_path, "/shared/dms/artifacts")
+    repos = client.app.state.repos
+    repos.storages.create(storage_name="sec", mount_path="/sec", managed_root="/sec/m", backend_type="cephfs", actor="t")
+    _agent_report(repos, "a", [a_mount], reported_at=iso_plus(utc_now_iso(), -3600) if a_stale else None)
+    others = [f"b{i}" for i in range(1, 6)]
+    for name in others:
+        _agent_report(repos, name, [_SEC_ABSENT])
+    body = client.get("/api/admin/mounts", headers=ADMIN).json()
+    nodes = {n["node_name"]: n for n in body["nodes"]}
+    assert len(nodes) == 6 and nodes["a"]["fresh"] is (not a_stale)
+    assert nodes["a"]["cells"]["sec"]["problem"] is a_problem
+    assert [(nodes[n]["cells"]["sec"]["status"], nodes[n]["cells"]["sec"]["problem"]) for n in others] == [
+        ("absent", others_problem)] * 5
+    assert body["summary"]["problem_nodes"] == (1 if a_problem else 0) + (5 if others_problem else 0)
+    assert body["summary"]["problem_cells"] == body["summary"]["problem_nodes"]
+
+
+def test_mounts_ready_without_writable_key_is_ready_for_storage_and_base(tmp_path):
+    # 2026-11-27 dms-k8s 210cd166 과 맞춤: writable 키가 없는 Ready(옛 에이전트)는 ready -- placement 처럼 writable is False 만
+    # 뺀다(null ≠ 실패). 플래그는 원값(None) 그대로. 그 ready 는 readonly 바깥값 판정의 쓰기 가능 동료다. 아티팩트 경로도 같다:
+    # exists 이고 writable 이 없으면 ready, 거짓이면 readonly(늘 문제).
+    client = _client(tmp_path, "/shared/dms/artifacts")
+    repos = client.app.state.repos
+    repos.storages.create(storage_name="ceph", mount_path="/cephfs", managed_root="/cephfs/m", backend_type="cephfs",
+                          actor="t")
+    old_mount = {k: v for k, v in _mount("ceph", "/cephfs", "Ready").items() if k != "writable"}
+    _agent_report(repos, "old", [old_mount], artifact_base={"path": "/shared/dms/artifacts", "exists": True})
+    _agent_report(repos, "ro", [_mount("ceph", "/cephfs", "Ready", writable=False)],
+                  artifact_base={"path": "/shared/dms/artifacts", "exists": True, "writable": False})
+    body = client.get("/api/admin/mounts", headers=ADMIN).json()
+    nodes = {n["node_name"]: n for n in body["nodes"]}
+    old, ro = nodes["old"], nodes["ro"]
+    assert old["cells"]["ceph"] == {"status": "ready", "reason": None, "exists": True, "is_mountpoint": True,
+                                    "readable": True, "writable": None, "problem": False}
+    assert (ro["cells"]["ceph"]["status"], ro["cells"]["ceph"]["problem"]) == ("readonly", True)   # old 가 쓰기 가능 동료
+    assert (old["artifact_base"]["status"], old["artifact_base"]["problem"]) == ("ready", False)
+    assert old["artifact_base"]["agent"]["writable"] is None
+    assert (ro["artifact_base"]["status"], ro["artifact_base"]["problem"]) == ("readonly", True)
+    assert (body["summary"]["problem_cells"], body["summary"]["problem_nodes"]) == (2, 1)
+
+
+def test_mounts_base_readonly_on_every_node_is_a_problem_everywhere(tmp_path):
+    # 2026-11-27: 「ready 인 동료 base 가 있을 때만」 세던 첫 판은 모든 노드의 base 가 읽기 전용인 장애를 「문제 0」으로 숨겼다.
+    client = _client(tmp_path, "/shared/dms/artifacts")
+    repos = client.app.state.repos
+    ro_base = {"path": "/shared/dms/artifacts", "exists": True, "writable": False}
+    for name in ("n1", "n2", "n3"):
+        _agent_report(repos, name, [], artifact_base=ro_base)
+    _agent_report(repos, "late", [], artifact_base=ro_base, reported_at=iso_plus(utc_now_iso(), -3600))
+    body = client.get("/api/admin/mounts", headers=ADMIN).json()
+    bases = {n["node_name"]: n["artifact_base"] for n in body["nodes"]}
+    assert [(bases[n]["status"], bases[n]["problem"]) for n in ("n1", "n2", "n3")] == [("readonly", True)] * 3
+    assert (bases["late"]["status"], bases["late"]["problem"]) == ("readonly", False)   # 리포트 지연 행은 셈 밖
+    assert (body["summary"]["problem_cells"], body["summary"]["problem_nodes"]) == (3, 3)

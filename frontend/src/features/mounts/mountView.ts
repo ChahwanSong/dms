@@ -84,26 +84,37 @@ export function baseOf(node: MountNode): MountBaseCell | null {
 
 // 문제 판정(2026-11-27 dms-k8s 판정 기준 이식): 서버가 칸마다 problem 을 실으면 그것이 진실이다(요약 수와 같은 출처). 옛 서버(키
 // 없음)면 같은 규칙으로 로컬 판정한다(서버 routes_mounts 모듈 docstring 「문제 판정」) -- 없음 = 문제, 경로 없음(absent -- 그 스토리지를
-// 제공하지 않는 노드) = 같은 열에 마운트한(ready·readonly) 신선한 노드가 하나라도 있으면 문제 아님(하나도 없으면 그 스토리지는 어디에도
-// 마운트돼 있지 않다 -- mount_path 오타 등, 문제), 읽기 전용 = 같은 열에 쓰기 가능한(ready) 신선한 노드가 하나라도 있을 때만 문제(모든
-// 노드가 ro 로 붙인 스토리지는 의도된 구성). 그 「이웃」 재료는 한 번에 모은다(peersOf). 끊긴 보고의 칸은 옛 사실이라 이웃 재료에서
-// 빼고, 칸 판정은 부르는 쪽이 신선한 행으로 막는다. absent 인지(호스트에 마운트가 없는 「경로 없음」) 자체는 서버가 가른다 -- 화면은
-// 상태를 다시 분류하지 않는다.
-export interface MountPeers { writableCols: ReadonlySet<string>; mountedCols: ReadonlySet<string>; baseWritable: boolean }
+// 제공하지 않는 노드) = 같은 열에 그 스토리지를 붙인 **흔적**(attachedCell)이 하나라도 있으면 문제 아님(하나도 없으면 그 스토리지는
+// 어디에도 마운트돼 있지 않다 -- mount_path 오타·마운트 배포 전, 문제), 읽기 전용 = 같은 열에 쓰기 가능한(ready) 신선한 노드가 하나라도
+// 있을 때만 문제(모든 노드가 ro 로 붙인 스토리지는 의도된 구성). 그 열 재료는 한 번에 모은다(peersOf). 칸 판정은 부르는 쪽이 신선한
+// 행으로 막는다(끊긴 보고의 칸은 문제로 세지 않는다). ready·readonly·absent 의 구분(쓰기 가능 여부·호스트 마운트 유무) 자체는 서버가
+// 가른다 -- 화면은 상태를 다시 분류하지 않는다.
+//
+// 흔적(2026-11-27 dms-k8s 210cd166 mount_status._attached 이식): 정상·읽기 전용 칸, 그리고 host_root_missing(그 노드의 마운트를 점검하지
+// 못했다)이 아닌 없음 칸(끊긴 마운트·마운트 아님·전파 끊김·읽기 불가·모르는 사유 -- 호스트에 그 스토리지의 마운트나 디렉터리가 있다;
+// 그 칸 자체가 이미 문제라 열은 문제 열로 남는다). 보고가 끊긴 노드의 칸도 마지막 보고로 같은 규칙을 본다. 흔적을 신선한 정상·읽기
+// 전용으로만 세면 그 스토리지를 붙인 노드가 하나뿐일 때(소스·목적지 노드 분리) 그 노드 하나의 보고 끊김·끊긴 마운트가 다른 모든 노드의
+// 「경로 없음」을 문제로 퍼뜨렸다(dms-k8s 실측: 노드 6대에서 문제 노드 1 → 6). 흔적이 아닌 것: 경로 없음·보고 없음·비활성·
+// host_root_missing. 알려진 한계: 새로 등록한 스토리지를 붙인 노드가 아직 보고 전이면 다른 노드의 경로 없음이 한 보고 주기 동안 문제로
+// 보인다. 아티팩트 경로의 쓰기 불가는 이웃과 상관없이 문제다(baseProblem) -- 그래서 아티팩트 경로 이웃 재료는 없다.
+export interface MountPeers { writableCols: ReadonlySet<string>; mountedCols: ReadonlySet<string> }
+const HOST_ROOT_MISSING = "host_root_missing";
+export const attachedCell = (c: MountCell): boolean =>
+  c.status === "ready" || c.status === "readonly" || (c.status === "missing" && c.reason !== HOST_ROOT_MISSING);
 export function peersOf(nodes: MountNode[], cols: StorageCol[]): MountPeers {
   const writableCols = new Set<string>();
   const mountedCols = new Set<string>();
-  let baseWritable = false;
   for (const n of nodes) {
-    if (n.fresh !== true) continue;
+    // 에이전트가 없는 노드의 칸은 보고 없음뿐이다(흔적이 될 수 없다). 끊긴 보고의 칸은 마지막 보고 그대로 흔적을 본다.
+    if (n.has_agent === false) continue;
     for (const c of cols) {
-      const st = cellOf(n, c).status;
-      if (st === "ready") writableCols.add(c.storage_name);
-      if (st === "ready" || st === "readonly") mountedCols.add(c.storage_name);
+      const cell = cellOf(n, c);
+      // 쓰기 가능한 이웃은 신선한 행만(끊긴 보고의 「쓰기 가능」은 지금도 그런지 모른다 -- 읽기 전용 바깥값 판정).
+      if (n.fresh === true && cell.status === "ready") writableCols.add(c.storage_name);
+      if (attachedCell(cell)) mountedCols.add(c.storage_name);
     }
-    if (baseOf(n)?.status === "ready") baseWritable = true;
   }
-  return { writableCols, mountedCols, baseWritable };
+  return { writableCols, mountedCols };
 }
 export function cellProblem(c: MountCell, writablePeer: boolean, mountedPeer: boolean): boolean {
   if (typeof c.problem === "boolean") return c.problem;
@@ -123,11 +134,13 @@ export const baseChecksFailed = (b: MountBaseCell) => baseFailedRoles(b).length 
 // 같은 판정을 쓰게 한 곳에 둔다.
 export const baseHeadOverridden = (b: MountBaseCell) =>
   baseChecksFailed(b) && (b.status === "ready" || b.status === "unreported");
-// 아티팩트 경로 칸 문제: 서버 problem 이 있으면 그것(신선 ∧ (없음 ∨ 쓸 수 있는 신선한 이웃이 있는 쓰기 불가) ∨ 자체 점검 실패), 옛
-// 서버면 같은 규칙(신선 조건은 부르는 쪽이 건다 -- 끊긴 행은 행 자체가 문제이고 요약은 신선한 행만 센다).
-export const baseProblem = (b: MountBaseCell | null, baseWritable: boolean) =>
+// 아티팩트 경로 칸 문제: 서버 problem 이 있으면 그것(신선 ∧ (없음 ∨ 쓰기 불가) ∨ 자체 점검 실패), 옛 서버면 같은 규칙(신선 조건은
+// 부르는 쪽이 건다 -- 끊긴 행은 행 자체가 문제이고 요약은 신선한 행만 센다). 쓰기 불가는 이웃과 상관없이 문제다(2026-11-27 dms-k8s 와
+// 맞춤 -- 잡이 작업 기록을 쓰는 곳이라 모든 노드에서 쓸 수 있어야 하고, 「쓸 수 있는 이웃이 있을 때만」 규칙은 모든 노드가 쓰기 불가인
+// 장애를 숨겼다).
+export const baseProblem = (b: MountBaseCell | null) =>
   b !== null && (typeof b.problem === "boolean" ? b.problem
-    : b.status === "missing" || (b.status === "readonly" && baseWritable) || baseChecksFailed(b));
+    : b.status === "missing" || b.status === "readonly" || baseChecksFailed(b));
 
 export const isStale = (n: MountNode) => n.has_agent === true && n.fresh !== true;
 export const rolesOf = (n: MountNode) => arr<string>(n.roles);
@@ -136,7 +149,7 @@ export const rolesOf = (n: MountNode) => arr<string>(n.roles);
 // 점검 실패 포함).
 export function nodeHasProblem(n: MountNode, cols: StorageCol[], peers: MountPeers): boolean {
   if (isStale(n)) return true;
-  if (baseProblem(baseOf(n), peers.baseWritable)) return true;
+  if (baseProblem(baseOf(n))) return true;
   if (n.fresh !== true) return false;
   return cols.some((c) => cellProblemIn(n, c, peers));
 }
@@ -200,7 +213,7 @@ function hasServerFlags(nodes: MountNode[]): boolean {
 // 그 노드의 API·컨트롤러 자체 점검 실패(에이전트 없는 노드·끊긴 노드도 센다).
 function problemCellsOf(n: MountNode, cols: StorageCol[], peers: MountPeers): number {
   const b = baseOf(n);
-  const base = b !== null && baseProblem(b, peers.baseWritable) && (n.fresh === true || baseChecksFailed(b));
+  const base = b !== null && baseProblem(b) && (n.fresh === true || baseChecksFailed(b));
   return (n.fresh === true ? cols.filter((c) => cellProblemIn(n, c, peers)).length : 0) + (base ? 1 : 0);
 }
 // 요약 줄: 서버가 칸 problem 을 실었으면 서버 요약 수가 우선이다(그 플래그만 센다 -- 단일 출처, 모양이 틀린 값만 같은 규칙으로 센다).
@@ -222,22 +235,31 @@ export function summaryOf(d: MountsOverview | undefined, nodes: MountNode[], col
   };
 }
 
-// 셀 설명(title·낭독). 상태 + 사유 + 에이전트 관찰값. problem = 그 칸의 문제 판정(cellProblem) -- 읽기 전용이 왜 문제인지·아닌지를
-// 말한다(끊긴 보고의 칸은 판정하지 않는다).
+// 셀 설명(title·낭독). 상태 + 사유 + 에이전트 관찰값. problem = 그 칸의 문제 판정(cellProblem) -- 읽기 전용·경로 없음이 왜 문제인지·
+// 아닌지를 말한다(끊긴 보고의 칸은 판정하지 않는다). 경로 없음의 문구는 규칙만큼만 말한다 -- 「흔적이 없다」이지 「마운트한 노드가
+// 없다」가 아니다(붙인 노드가 아직 보고 전일 수 있다). 흔적은 이 표의 칸 글자(CELL_LABEL)와 attachedCell 의 예외(호스트 루트 없음)로
+// 적는다 -- 표에 없는 낱말(「마운트 문제」 -- k8s 타일 용어)을 쓰면 운영자가 칸에 대응시키지 못한다.
 export function cellDetail(col: StorageCol, c: MountCell, node: MountNode, problem: boolean): string {
   const head = `${node.node_name} · ${col.storage_name}`;
   switch (c.status) {
-    case "ready": return `${head}: 마운트됨(읽기·쓰기)`;
+    case "ready":
+      // 쓰기 가능 여부를 보고하지 않은 에이전트(옛 에이전트 -- 서버는 placement 처럼 쓸 수 있는 것으로 보고 ready 로 둔다).
+      return c.writable === null
+        ? `${head}: 마운트됨 — 에이전트가 쓰기 가능 여부를 보고하지 않아(옛 에이전트) 작업 배치처럼 쓸 수 있는 것으로 봅니다`
+        : `${head}: 마운트됨(읽기·쓰기)`;
     case "readonly": return `${head}: 마운트됐지만 쓰기 불가(읽기 전용)${node.fresh !== true ? ""
       : problem ? " — 같은 스토리지를 쓰기 가능으로 붙인 노드가 있어 문제로 셉니다"
       : " — 쓰기 가능으로 붙인 노드가 없어 의도된 읽기 전용 구성으로 보고 문제로 세지 않습니다"}`;
     case "missing": return `${head}: ${reasonLong(c.reason) ?? "마운트 없음"}`;
     case "absent":
+      if (node.fresh !== true) return `${head}: 이 노드엔 그 스토리지 경로가 없습니다(제공 안 함)`;
       return problem
-        ? `${head}: 이 노드엔 그 스토리지 경로가 없습니다 — 이 스토리지를 마운트한 노드가 하나도 없어 문제로 셉니다(마운트 경로 `
-          + "오타이거나 아직 어느 노드에도 마운트하지 않은 스토리지일 수 있습니다)"
-        : `${head}: 이 노드엔 그 스토리지 경로가 없습니다(제공 안 함) — 이 스토리지를 붙이지 않는 노드라면 정상이라 문제로 세지 `
-          + "않습니다(그 스토리지 작업은 마운트한 노드에만 배치됩니다)";
+        ? `${head}: 이 노드엔 그 스토리지 경로가 없습니다 — 어느 노드에도 이 스토리지의 마운트 흔적이 없어(마운트됨 · 읽기 전용 · `
+          + "없음[호스트 루트 없음 제외] 칸인 노드가 없음 · 보고 끊긴 노드는 마지막 보고 기준) 문제로 셉니다. 마운트 경로 "
+          + "오타이거나 아직 어느 노드에도 마운트하지 않은 스토리지일 수 있고, 방금 등록한 스토리지라면 붙인 노드가 아직 보고 전일 수 "
+          + "있습니다"
+        : `${head}: 이 노드엔 그 스토리지 경로가 없습니다(제공 안 함) — 다른 노드에 이 스토리지의 마운트 흔적이 있어, 이 스토리지를 `
+          + "붙이지 않는 노드라면 정상이라 문제로 세지 않습니다(그 스토리지 작업은 마운트한 노드에만 배치됩니다)";
     case "disabled": return `${head}: 비활성 스토리지(점검 대상 아님)`;
     default:
       return node.has_agent === false
@@ -256,34 +278,35 @@ export function coverMountText(b: MountBaseCell): string | null {
   return typeof a.fstype === "string" && a.fstype !== "" ? `${mp} (${a.fstype})` : mp;
 }
 
-// 쓰기 불가 아티팩트 경로 칸이 왜 문제인지·아닌지(baseDetail -- 원인별).
-function readonlyWhy(b: MountBaseCell, problem: boolean, baseWritable: boolean): string {
-  if (!problem) return baseWritable ? "(문제로 세지 않습니다)" : "(쓸 수 있는 노드가 없어 문제로 세지 않습니다)";
-  if (baseChecksFailed(b)) {
-    return `(이 노드의 ${baseFailedRoles(b).join("·")} 파드가 아티팩트 경로 점검에 실패해 문제로 셉니다${
-      baseWritable ? " — 다른 노드는 이 경로에 쓸 수 있습니다" : ""})`;
-  }
-  return baseWritable ? "(다른 노드는 이 경로에 쓸 수 있어 문제로 셉니다)" : "(문제로 셉니다)";
+// 쓰기 불가 아티팩트 경로 칸이 왜 문제인지·아닌지(baseDetail). 쓰기 불가는 이웃과 상관없이 문제다(baseProblem) -- 「다른 노드는
+// 쓸 수 있어」 같은 이웃 의존 꼬리는 달지 않는다. 자체 점검도 실패했으면 실패한 역할을 함께 말한다. problem 거짓은 그 판정을 내린
+// 서버(이웃 규칙의 옛 서버)의 말을 그대로 옮길 뿐이다.
+const BASE_WRITABLE_RULE = "아티팩트 경로는 잡이 작업 기록을 쓰는 곳이라 모든 노드에서 쓸 수 있어야 해 문제로 셉니다";
+function readonlyWhy(b: MountBaseCell, problem: boolean): string {
+  if (!problem) return "(문제로 세지 않습니다)";
+  const roles = baseFailedRoles(b);
+  return `(${BASE_WRITABLE_RULE}${roles.length > 0 ? ` — 이 노드의 ${roles.join("·")} 파드도 아티팩트 경로 점검에 실패했습니다` : ""})`;
 }
 // 아티팩트 경로 칸 설명(title·낭독). 머리가 「점검 실패」로 덮이면 실패한 역할부터 말한다 -- 「에이전트가 경로를 확인했습니다」만
 // 남기면 빨간 머리와 설명이 두 말을 한다(dms-k8s e25a2dfb 의 공용 칸 역할 이름 이식). 에이전트 관찰(덮는 마운트 포함)은 뒤에
-// 덧붙인다. problem = 그 칸의 문제 판정(baseProblem), baseWritable = 쓸 수 있는 신선한 이웃이 있다(peers.baseWritable) -- 쓰기 불가가
-// 왜 문제인지·아닌지를 **원인별로** 말한다: 자체 점검 실패면 실패한 역할, 「다른 노드는 쓸 수 있어」는 그런 이웃이 정말 있을 때만
-// (2026-11-27 리뷰 -- 단일 노드에서 컨트롤러 점검 실패로 문제가 된 칸이 「다른 노드는 쓸 수 있어」라고 거짓을 말했다).
-export function baseDetail(n: MountNode, b: MountBaseCell, problem: boolean, baseWritable: boolean): string {
+// 덧붙인다. problem = 그 칸의 문제 판정(baseProblem) -- 쓰기 불가가 왜 문제인지·아닌지를 원인별로 말한다(readonlyWhy).
+export function baseDetail(n: MountNode, b: MountBaseCell, problem: boolean): string {
   const head = `${n.node_name} · 아티팩트 경로`;
   const mismatch = b.agent?.path_matches === false ? " (에이전트가 본 경로가 지금 설정과 다릅니다)" : "";
   const cover = coverMountText(b);
   const mount = cover !== null ? ` · 덮는 마운트 ${cover}` : "";
+  // 에이전트가 쓰기 가능 여부를 보고하지 않았으면(모름) 「쓰기」를 확인했다고 말하지 않는다 -- 서버는 모름을 쓸 수 있는 것으로 보고
+  // 정상(ready)으로 둔다(스토리지 칸·placement 와 같은 태도).
+  const checked = b.agent?.writable === null ? "존재 · 쓰기 가능 여부는 보고되지 않음" : "존재·쓰기";
   if (baseHeadOverridden(b)) {
-    const agent = b.status === "ready" ? `에이전트는 경로를 확인했습니다(존재·쓰기)${mount}`
+    const agent = b.status === "ready" ? `에이전트는 경로를 확인했습니다(${checked})${mount}`
       : n.has_agent === false ? "에이전트가 없어 노드 쪽 경로는 확인되지 않았습니다" : "에이전트 보고에는 경로 확인이 없습니다";
     return `${head}: 이 노드의 ${baseFailedRoles(b).join("·")} 파드가 아티팩트 경로 점검에 실패했습니다 — ${agent}${mismatch}. `
       + "파드의 hostPath·마운트 전파와 노드의 공유 스토리지 마운트를 확인하세요(아티팩트 경로 화면에 파드별 사유)";
   }
   switch (b.status) {
-    case "ready": return `${head}: 에이전트가 경로를 확인했습니다(존재·쓰기)${mount}${mismatch}`;
-    case "readonly": return `${head}: 경로는 있지만 쓰기 불가입니다${n.fresh !== true ? "" : readonlyWhy(b, problem, baseWritable)}`
+    case "ready": return `${head}: 에이전트가 경로를 확인했습니다(${checked})${mount}${mismatch}`;
+    case "readonly": return `${head}: 경로는 있지만 쓰기 불가입니다${n.fresh !== true ? "" : readonlyWhy(b, problem)}`
       + `${mount}${mismatch}`;
     case "missing": return `${head}: ${reasonLong(b.reason) ?? "경로가 없습니다"}${mount}${mismatch}`;
     default: return n.has_agent === false

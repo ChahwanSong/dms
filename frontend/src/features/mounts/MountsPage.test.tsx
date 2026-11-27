@@ -7,8 +7,8 @@ import { http, HttpResponse } from "msw";
 import { afterAll, afterEach, beforeAll, expect, test } from "vitest";
 import { MountsPage } from "./MountsPage";
 import {
-  baseDetail, baseOf, baseProblem, cellProblem, columnNameLines, coverMountText, filterColumns, nodeHasProblem, nodesOf, pathTail,
-  peersOf, reasonLong, reasonShort, storagesOf, summaryOf,
+  attachedCell, baseDetail, baseOf, baseProblem, cellDetail, cellProblem, columnNameLines, coverMountText, filterColumns,
+  nodeHasProblem, nodesOf, pathTail, peersOf, reasonLong, reasonShort, storagesOf, summaryOf,
 } from "./mountView";
 import type { MountBaseCell, MountNode, MountsOverview } from "../../lib/types";
 
@@ -402,13 +402,15 @@ test("서버 problem 이 있으면 그것이 진실: 읽기 전용 problem=true 
   expect(s1ceph.className).toContain("bg-attnbg/60");
   expect(s1gpfs.className).not.toContain("bg-badbg");
   expect(s1base.className).toContain("bg-attnbg/60");
-  // 쓸 수 있는 이웃이 없으니 「다른 노드는 쓸 수 있어」라고 지어내지 않는다(원인을 모르면 판정만 말한다)
-  expect(within(s1base).getByTitle(/^s1 · 아티팩트 경로: 경로는 있지만 쓰기 불가입니다\(문제로 셉니다\)$/)).toBeInTheDocument();
+  // 쓰기 불가는 이웃과 상관없이 문제다 -- 설명은 규칙(모든 노드에서 쓸 수 있어야 함)을 말하고 이웃 의존 꼬리를 달지 않는다
+  expect(within(s1base).getByTitle("s1 · 아티팩트 경로: 경로는 있지만 쓰기 불가입니다(아티팩트 경로는 잡이 작업 기록을 쓰는 곳이라 "
+    + "모든 노드에서 쓸 수 있어야 해 문제로 셉니다)")).toBeInTheDocument();
   const [, s2ceph, , , s2base] = cellsOf("s2");
   expect(s2ceph.className).not.toContain("bg-attnbg");
   expect(s2base.className).not.toContain("bg-attnbg");
   expect(within(s2base).getByText("쓰기 불가").className).toContain("text-ink");
-  expect(within(s2base).getByTitle(/\(쓸 수 있는 노드가 없어 문제로 세지 않습니다\)$/)).toBeInTheDocument();
+  // 서버(이웃 규칙의 옛 서버)가 문제 아님이라 하면 그 판정만 옮긴다 -- 「쓸 수 있는 노드가 없어」 같은 이웃 이유를 지어내지 않는다
+  expect(within(s2base).getByTitle(/: 경로는 있지만 쓰기 불가입니다\(문제로 세지 않습니다\)$/)).toBeInTheDocument();
   // 문제만 보기 = 서버 판정의 문제 행(s1)만, 문제 있는 스토리지 = cephfs 하나(gpfs 의 없음은 서버가 문제 아님이라 했다)
   expect(screen.getByRole("button", { name: /문제만 보기/ })).toHaveTextContent("문제만 보기1");
   expect(screen.getByRole("button", { name: /문제 있는 스토리지만/ })).toHaveTextContent("문제 있는 스토리지만1");
@@ -548,13 +550,14 @@ test("순수 규칙: cellProblem·baseProblem(서버 problem 우선, 없으면 �
   expect(cellProblem({ status: "readonly", reason: null, problem: true }, false, true)).toBe(true);
   expect(cellProblem({ status: "unreported", reason: null }, true, false)).toBe(false);
   const ro = { ...baseOk, status: "readonly" } as unknown as MountBaseCell;
-  expect(baseProblem(ro, false)).toBe(false);
-  expect(baseProblem(ro, true)).toBe(true);
+  expect(baseProblem(ro)).toBe(true);                                 // 쓰기 불가는 이웃과 상관없이 문제(신선 조건은 부르는 쪽)
+  expect(baseProblem({ ...ro, problem: false })).toBe(false);         // 서버가 진실
+  expect(baseProblem(baseOk as unknown as MountBaseCell)).toBe(false);
   const failing = { ...baseOk, api: [{ instance: "a", ok: false, reason: null, checked_at: null, gate_state: null }] } as
     unknown as MountBaseCell;
-  expect(baseProblem(failing, false)).toBe(true);
-  expect(baseProblem({ ...failing, problem: false }, false)).toBe(false);     // 서버가 진실
-  expect(baseProblem(null, true)).toBe(false);
+  expect(baseProblem(failing)).toBe(true);
+  expect(baseProblem({ ...failing, problem: false })).toBe(false);    // 서버가 진실
+  expect(baseProblem(null)).toBe(false);
   // 열 거르기
   const cols = storagesOf(OVERVIEW);
   const nodes = nodesOf(OVERVIEW);
@@ -575,29 +578,131 @@ test("순수 규칙: cellProblem·baseProblem(서버 problem 우선, 없으면 �
 
 // ---- 2026-11-27 리뷰 후속 ----
 
-test("경로 없음이 신선한 모든 노드에서면(그 스토리지를 마운트한 노드가 하나도 없음 -- mount_path 오타 등) 문제다(옛 서버 로컬 규칙)", async () => {
+test("경로 없음이 어느 노드에도 흔적 없는 열이면(mount_path 오타 등) 문제다(옛 서버 로컬 규칙)", async () => {
   const absentLocal = { status: "absent", reason: "missing_mount_path", exists: false, is_mountpoint: false, readable: false,
                         writable: false } as const;
   const nodes = [
     node("a1", { cells: { cephfs: absentLocal, gpfs: absentLocal, "old-nfs": disabledCell } }),
     node("a2", { cells: { cephfs: roCell, gpfs: absentLocal, "old-nfs": disabledCell } }),
-    // 끊긴 노드의 마운트는 「어딘가엔 마운트」로 치지 않는다
-    node("a3", { fresh: false, reported_at: ago(900), cells: { cephfs: ready, gpfs: ready, "old-nfs": disabledCell } }),
+    // 끊긴 노드의 마지막 보고도 경로 없음이면 흔적이 아니다 · 점검 불가(host_root_missing)도 흔적이 아니다
+    node("a3", { fresh: false, reported_at: ago(900), cells: { cephfs: ready, gpfs: absentLocal, "old-nfs": disabledCell } }),
+    // (cephfs 는 ro -- 신선한 정상이 있으면 a2 의 ro 가 바깥값 문제가 된다; 끊긴 a3 의 정상은 그 재료가 아니다)
+    node("a4", { cells: { cephfs: roCell, gpfs: { status: "missing", reason: "host_root_missing" }, "old-nfs": disabledCell } }),
+    // 에이전트 없는 노드의 칸(보고 없음)도 흔적이 아니다
+    node("cp9", { has_agent: false, fresh: false, reported_at: null, cells: {} }),
   ];
   renderPage({ ...OVERVIEW, nodes, summary: undefined });
   await screen.findByRole("table");
-  // gpfs: a1·a2 둘 다 경로 없음이고 신선한 마운트가 없다 -- 2칸·2대. cephfs: a2 가 ro 로 붙였다 -- a1 의 경로 없음은 문제 아님
-  expect(screen.getByText("문제 2칸 · 노드 2대")).toBeInTheDocument();
+  // gpfs: a1·a2 경로 없음(흔적 없는 열 -- 2칸) + a4 점검 불가(없음 -- 1칸). cephfs: a2 가 ro 로 붙였다 -- a1 의 경로 없음은 문제 아님
+  expect(screen.getByText("문제 3칸 · 노드 3대")).toBeInTheDocument();
   const gpfs = cellOfRow("a1", 2);
   expect(gpfs.className).toContain("bg-badbg/60");
   expect(within(gpfs).getByText("경로 없음").className).toContain("text-bad");
-  expect(within(gpfs).getByTitle(/^a1 · gpfs: 이 노드엔 그 스토리지 경로가 없습니다 — 이 스토리지를 마운트한 노드가 하나도 없어 문제로 셉니다/))
-    .toBeInTheDocument();
+  // 설명은 규칙만큼만 -- 「흔적이 없다」(붙인 노드가 아직 보고 전일 수 있다), 「마운트한 노드가 없다」·「의도된 읽기 전용」을 단정하지
+  // 않는다. 흔적은 표의 칸 글자 + 예외(호스트 루트 없음)로 적는다 -- 같은 열의 빨간 「없음 · 호스트 루트 없음」(a4)과 어긋나지 않게,
+  // 표에 없는 낱말(「마운트 문제」)은 쓰지 않는다
+  const title = within(gpfs).getByTitle(/^a1 · gpfs: /).getAttribute("title")!;
+  expect(title).toBe("a1 · gpfs: 이 노드엔 그 스토리지 경로가 없습니다 — 어느 노드에도 이 스토리지의 마운트 흔적이 없어(마운트됨 · "
+    + "읽기 전용 · 없음[호스트 루트 없음 제외] 칸인 노드가 없음 · 보고 끊긴 노드는 마지막 보고 기준) 문제로 셉니다. 마운트 경로 오타이거나 "
+    + "아직 어느 노드에도 마운트하지 않은 스토리지일 수 있고, 방금 등록한 스토리지라면 붙인 노드가 아직 보고 전일 수 있습니다");
+  expect(title).not.toMatch(/마운트 문제|의도된 읽기 전용|마운트한 노드가 하나도/);
   const ceph = cellOfRow("a1", 1);
   expect(ceph.className).not.toMatch(/bg-(bad|attn)bg/);
   expect(within(ceph).getByTitle(/\(제공 안 함\)/)).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: /문제만 보기/ })).toHaveTextContent("문제만 보기3");     // a1·a2 + 끊긴 a3
+  expect(screen.getByRole("button", { name: /문제만 보기/ })).toHaveTextContent("문제만 보기4");     // a1·a2·a4 + 끊긴 a3
   expect(screen.getByRole("button", { name: /문제 있는 스토리지만/ })).toHaveTextContent("문제 있는 스토리지만1");
+  // 끊긴 행의 경로 없음은 판정하지 않는다(문제 여부를 말하지 않는다)
+  expect(within(cellOfRow("a3", 2)).getByTitle("a3 · gpfs: 이 노드엔 그 스토리지 경로가 없습니다(제공 안 함)")).toBeInTheDocument();
+});
+
+// dms-k8s 210cd166 리뷰(노드 6대에서 문제 노드 1 → 6): 그 스토리지를 붙인 노드가 하나뿐일 때 그 노드 하나의 장애가 다른 모든 노드의
+// 경로 없음을 문제로 퍼뜨리지 않는다 -- 흔적은 보고 끊긴 노드의 마지막 값과 끊긴 마운트 칸도 센다.
+const SPREAD_ABSENT = { status: "absent", reason: "missing_mount_path", exists: false, is_mountpoint: false, readable: false,
+                        writable: false } as const;
+const spreadNodes = (attached: MountNode): MountNode[] => [
+  attached,
+  ...["p2", "p3", "p4", "p5", "p6"].map((name) =>
+    node(name, { cells: { cephfs: ready, gpfs: SPREAD_ABSENT, "old-nfs": disabledCell } })),
+];
+
+test("퍼짐 없음: gpfs 를 붙인 유일한 노드의 보고가 끊겨도(마지막 값 정상) 다른 노드의 경로 없음은 문제가 아니다", async () => {
+  const att = node("p1", { fresh: false, reported_at: ago(900), cells: { cephfs: ready, gpfs: ready, "old-nfs": disabledCell } });
+  renderPage({ ...OVERVIEW, nodes: spreadNodes(att), summary: undefined });
+  await screen.findByRole("table");
+  // 문제 행은 끊긴 p1 하나뿐(고치기 전: p2~p6 의 경로 없음까지 6대)
+  expect(screen.getByRole("button", { name: /문제만 보기/ })).toHaveTextContent("문제만 보기1");
+  expect(screen.getByRole("button", { name: /문제 있는 스토리지만/ })).toHaveTextContent("문제 있는 스토리지만0");
+  expect(screen.getByText("보고 중인 노드는 모두 제공하는 스토리지를 정상 마운트하고 있습니다")).toBeInTheDocument();
+  const gpfs = cellOfRow("p2", 2);
+  expect(gpfs.className).not.toMatch(/bg-(bad|attn)bg/);
+  expect(within(gpfs).getByText("경로 없음").className).toContain("text-muted");
+  expect(within(gpfs).getByTitle(/^p2 · gpfs: 이 노드엔 그 스토리지 경로가 없습니다\(제공 안 함\) — 다른 노드에 이 스토리지의 마운트 흔적이 있어/))
+    .toBeInTheDocument();
+});
+
+test("퍼짐 없음: gpfs 를 붙인 유일한 노드의 마운트가 끊겨도(끊긴 마운트·마운트 아님) 그 칸만 문제다", async () => {
+  // 끊긴 마운트(호스트엔 마운트가 있는데 경로가 안 보임 -- 서버가 missing 으로 둔다)와 빈 디렉터리(마운트 아님) 둘 다 흔적이다
+  for (const broken of [
+    { status: "missing", reason: "missing_mount_path", exists: false, is_mountpoint: true, readable: false, writable: false },
+    { status: "missing", reason: "not_a_mountpoint", exists: true, is_mountpoint: false, readable: true, writable: true },
+  ] as const) {
+    const att = node("p1", { cells: { cephfs: ready, gpfs: broken, "old-nfs": disabledCell } });
+    const view = renderPage({ ...OVERVIEW, nodes: spreadNodes(att), summary: undefined });
+    await screen.findByRole("table");
+    expect(screen.getByText("문제 1칸 · 노드 1대")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /문제만 보기/ })).toHaveTextContent("문제만 보기1");
+    expect(cellOfRow("p1", 2).className).toContain("bg-badbg/60");
+    expect(cellOfRow("p6", 2).className).not.toMatch(/bg-(bad|attn)bg/);
+    view.unmount();
+  }
+});
+
+test("흔적(attachedCell)·열 재료(peersOf): 정상·읽기 전용·점검 불가가 아닌 없음, 끊긴 행은 마지막 값 -- 쓰기 가능 이웃은 신선한 행만", () => {
+  expect(attachedCell(ready)).toBe(true);
+  expect(attachedCell(roCell)).toBe(true);
+  expect(attachedCell({ status: "missing", reason: "not_readable" })).toBe(true);
+  expect(attachedCell({ status: "missing", reason: "propagation_stale" })).toBe(true);
+  expect(attachedCell({ status: "missing", reason: "weird_code" })).toBe(true);          // 모르는 사유도
+  expect(attachedCell({ status: "missing", reason: null })).toBe(true);
+  expect(attachedCell({ status: "missing", reason: "host_root_missing" })).toBe(false);  // 그 노드를 점검하지 못했다
+  for (const status of ["absent", "unreported", "disabled"] as const) expect(attachedCell({ status, reason: null })).toBe(false);
+  const cols = storagesOf(OVERVIEW);
+  const stale = node("s", { fresh: false, reported_at: ago(900), cells: { cephfs: ready, gpfs: roCell, "old-nfs": disabledCell } });
+  const peers = peersOf([stale, node("f", { cells: { cephfs: SPREAD_ABSENT, gpfs: SPREAD_ABSENT, "old-nfs": disabledCell } })], cols);
+  expect([...peers.mountedCols].sort()).toEqual(["cephfs", "gpfs"]);
+  expect([...peers.writableCols]).toEqual([]);                        // 끊긴 행의 「쓰기 가능」은 읽기 전용 바깥값 재료가 아니다
+  // 에이전트 없는 노드는 칸이 무엇이든 흔적이 아니다(서버는 보고 없음만 싣는다)
+  const noAgent = node("x", { has_agent: false, fresh: false, cells: { cephfs: ready, gpfs: ready, "old-nfs": disabledCell } });
+  expect(peersOf([noAgent], cols).mountedCols.size).toBe(0);
+});
+
+test("쓰기 가능 여부를 보고하지 않은 정상 칸(옛 에이전트)은 그렇다고 말한다 -- 작업 배치처럼 쓸 수 있는 것으로 본다", () => {
+  const col = storagesOf(OVERVIEW)[0];
+  const n = node("w1");
+  expect(cellDetail(col, { ...ready, writable: null }, n, false))
+    .toBe("w1 · cephfs: 마운트됨 — 에이전트가 쓰기 가능 여부를 보고하지 않아(옛 에이전트) 작업 배치처럼 쓸 수 있는 것으로 봅니다");
+  expect(cellDetail(col, ready, n, false)).toBe("w1 · cephfs: 마운트됨(읽기·쓰기)");
+  const b = { ...baseOk, agent: { exists: true, writable: null, path_matches: true } } as unknown as MountBaseCell;
+  expect(baseDetail(node("w1", { artifact_base: b }), b, false))
+    .toBe("w1 · 아티팩트 경로: 에이전트가 경로를 확인했습니다(존재 · 쓰기 가능 여부는 보고되지 않음)");
+});
+
+test("쓰기 불가 아티팩트 경로는 쓸 수 있는 이웃이 없어도 문제다(옛 서버 로컬 규칙 -- 모든 노드가 쓰기 불가인 장애를 숨기지 않는다)", async () => {
+  const roBase = { ...baseOk, status: "readonly", agent: { exists: true, writable: false, path_matches: true } } as
+    MountNode["artifact_base"];
+  const nodes = [node("b1", { artifact_base: roBase }), node("b2", { artifact_base: roBase }),
+                 // 끊긴 행의 쓰기 불가는 칸 문제로 세지 않는다(행이 문제)
+                 node("b3", { fresh: false, reported_at: ago(900), artifact_base: roBase })];
+  renderPage({ ...OVERVIEW, nodes, summary: undefined });
+  await screen.findByRole("table");
+  expect(screen.getByText("문제 2칸 · 노드 2대")).toBeInTheDocument();
+  const baseOfRow = (name: string) => { const c = cellsOf(name); return c[c.length - 1]; };
+  expect(baseOfRow("b1").className).toContain("bg-attnbg/60");
+  expect(within(baseOfRow("b1")).getByTitle("b1 · 아티팩트 경로: 경로는 있지만 쓰기 불가입니다(아티팩트 경로는 잡이 작업 기록을 "
+    + "쓰는 곳이라 모든 노드에서 쓸 수 있어야 해 문제로 셉니다)")).toBeInTheDocument();
+  expect(baseOfRow("b3").className).not.toContain("bg-attnbg");
+  expect(within(baseOfRow("b3")).getByTitle("b3 · 아티팩트 경로: 경로는 있지만 쓰기 불가입니다")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: /문제만 보기/ })).toHaveTextContent("문제만 보기3");
 });
 
 test("옛 서버(칸 problem 없음)의 요약 수는 쓰지 않고 표와 같은 로컬 규칙으로 다시 센다 -- 플래그가 있으면 서버 수 그대로", async () => {
@@ -627,17 +732,17 @@ test("옛 서버(칸 problem 없음)의 요약 수는 쓰지 않고 표와 같�
     .toMatchObject({ problemCells: 2, problemNodes: 2 });
 });
 
-test("쓰기 불가 아티팩트 경로의 설명은 원인별: 자체 점검 실패면 실패한 역할, 「다른 노드는 쓸 수 있어」는 그런 이웃이 있을 때만", () => {
+test("쓰기 불가 아티팩트 경로의 설명: 규칙(모든 노드에서 쓸 수 있어야 함)을 말하고, 자체 점검도 실패했으면 실패한 역할을 함께", () => {
   const ro = { ...baseOk, status: "readonly", agent: { exists: true, writable: false, path_matches: true } } as unknown as MountBaseCell;
   const failing = { ...ro, controller: { ok: false, reason: "artifact_base_not_writable", checked_at: ago(5) } } as MountBaseCell;
   const solo = node("solo", { roles: ["controller"], artifact_base: failing });
-  // 단일 노드(쓸 수 있는 이웃 없음) + 컨트롤러 점검 실패 -- 문제의 원인은 컨트롤러 점검이다
-  expect(baseProblem(failing, false)).toBe(true);
-  expect(baseDetail(solo, failing, true, false))
-    .toBe("solo · 아티팩트 경로: 경로는 있지만 쓰기 불가입니다(이 노드의 컨트롤러 파드가 아티팩트 경로 점검에 실패해 문제로 셉니다)");
-  expect(baseDetail(solo, failing, true, true)).toBe("solo · 아티팩트 경로: 경로는 있지만 쓰기 불가입니다(이 노드의 컨트롤러 파드가 "
-    + "아티팩트 경로 점검에 실패해 문제로 셉니다 — 다른 노드는 이 경로에 쓸 수 있습니다)");
+  expect(baseProblem(failing)).toBe(true);
+  expect(baseDetail(solo, failing, true)).toBe("solo · 아티팩트 경로: 경로는 있지만 쓰기 불가입니다(아티팩트 경로는 잡이 작업 기록을 "
+    + "쓰는 곳이라 모든 노드에서 쓸 수 있어야 해 문제로 셉니다 — 이 노드의 컨트롤러 파드도 아티팩트 경로 점검에 실패했습니다)");
   const plain = node("p", { artifact_base: ro });
-  expect(baseDetail(plain, ro, true, true)).toBe("p · 아티팩트 경로: 경로는 있지만 쓰기 불가입니다(다른 노드는 이 경로에 쓸 수 있어 문제로 셉니다)");
-  expect(baseDetail(plain, ro, false, false)).toBe("p · 아티팩트 경로: 경로는 있지만 쓰기 불가입니다(쓸 수 있는 노드가 없어 문제로 세지 않습니다)");
+  const text = baseDetail(plain, ro, true);
+  expect(text).toBe("p · 아티팩트 경로: 경로는 있지만 쓰기 불가입니다(아티팩트 경로는 잡이 작업 기록을 쓰는 곳이라 모든 노드에서 쓸 수 "
+    + "있어야 해 문제로 셉니다)");
+  expect(text).not.toMatch(/다른 노드|이웃/);                         // 이웃 의존 꼬리를 달지 않는다
+  expect(baseDetail(plain, ro, false)).toBe("p · 아티팩트 경로: 경로는 있지만 쓰기 불가입니다(문제로 세지 않습니다)");
 });

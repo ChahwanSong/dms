@@ -60,7 +60,8 @@ const DOT: Record<MountCell["status"], { on: string; dim: string; text: string; 
   disabled: { on: "bg-line", dim: "bg-line", text: "text-muted" },
 };
 // 문제 칸의 옅은 바탕(색 알파 -- 쌓임 맥락 없음). 보고가 살아 있는 행의 **문제 칸**에서만(끊긴 보고의 칸은 옛 사실이고, 쓰기
-// 가능으로 붙인 노드가 없는 읽기 전용은 의도된 구성이다). 경로 없음은 그 스토리지를 마운트한 노드가 하나도 없을 때만 문제다.
+// 가능으로 붙인 노드가 없는 읽기 전용은 의도된 구성이다). 경로 없음은 어느 노드에도 그 스토리지의 마운트 흔적이 없을 때만 문제다
+// (mountView 「흔적」).
 const TINT: Partial<Record<MountCell["status"], string>> = {
   missing: "bg-badbg/60", readonly: "bg-attnbg/60", absent: "bg-badbg/60",
 };
@@ -73,7 +74,7 @@ function Dot({ status, dim }: { status: MountCell["status"]; dim: boolean }) {
 // 상태 글자 + 점(첫 줄), 짧은 사유(둘째 줄 -- 고정 폭 칸에서 「없음 · 마운트 아님」이 한 줄에 안 들어간다, 넘치면 말줄임), 긴 설명은
 // title 과 낭독 문장(sr-only). 이 span 에 relative 를 주지 않는다 -- 위치 지정 요소는 스크롤되는 칸에서 쌓임 순서를 흔든다. sr-only
 // (absolute)의 기준 상자는 표 래퍼(relative overflow-auto)라 문서 폭을 넓히지 않고, 1px 로 잘려 보이지도 않는다. 문제가 아닌 읽기
-// 전용은 주의 색 글자를 쓰지 않는다(점은 상태 그대로). 문제인 경로 없음(어느 노드에도 마운트 안 됨)은 빨간 글자.
+// 전용은 주의 색 글자를 쓰지 않는다(점은 상태 그대로). 문제인 경로 없음(어느 노드에도 마운트 흔적 없음)은 빨간 글자.
 function StatusMark({ status, label, short, detail, dim, problem, className = "" }: {
   status: MountCell["status"]; label: string; short: string | null; detail: string; dim: boolean; problem: boolean;
   className?: string;
@@ -155,8 +156,8 @@ function CheckLine({ label, results }: { label: string; results: { ok: boolean |
   );
 }
 
-function BaseCell({ n, b, dim, problem, baseWritable }: {
-  n: MountNode; b: MountBaseCell | null; dim: boolean; problem: boolean; baseWritable: boolean;
+function BaseCell({ n, b, dim, problem }: {
+  n: MountNode; b: MountBaseCell | null; dim: boolean; problem: boolean;
 }) {
   if (b === null) return <span className="text-xs text-muted">—</span>;
   const api = b.api.map((a) => ({
@@ -174,7 +175,7 @@ function BaseCell({ n, b, dim, problem, baseWritable }: {
   return (
     <div className="flex w-48 flex-col gap-0.5">
       <StatusMark status={shown} label={shown !== b.status ? "점검 실패" : BASE_LABEL[b.status]} dim={dim} problem={problem}
-                  short={b.status === "missing" ? reasonShort(b.reason) : null} detail={baseDetail(n, b, problem, baseWritable)} />
+                  short={b.status === "missing" ? reasonShort(b.reason) : null} detail={baseDetail(n, b, problem)} />
       {(api.length > 0 || ctrl.length > 0) && (
         <span className="flex flex-wrap gap-x-2 gap-y-0.5 pl-3.5 text-[11px]">
           <CheckLine label="API" results={api} />
@@ -365,7 +366,7 @@ function MountsTable({ rows, cols, covering, basePath, now, peers }: {
         {rows.map((n, i) => {
           const dim = isStale(n);
           const b = baseOf(n);
-          const bp = baseProblem(b, peers.baseWritable);
+          const bp = baseProblem(b);
           return (
             <tr key={n.node_name} className={i === 0 ? "" : "border-t border-line"}>
               <td className={`sticky left-0 z-[1] bg-surface py-2 pl-2 pr-3 align-top ${edge}`}><NodeCell n={n} now={now} /></td>
@@ -382,7 +383,7 @@ function MountsTable({ rows, cols, covering, basePath, now, peers }: {
                 );
               })}
               <td className={`px-3 py-2 align-top ${dim ? "" : baseTint(b, bp)}`}>
-                <BaseCell n={n} b={b} dim={dim} problem={bp} baseWritable={peers.baseWritable} />
+                <BaseCell n={n} b={b} dim={dim} problem={bp} />
               </td>
             </tr>
           );
@@ -546,13 +547,15 @@ export function MountsPage() {
             )}
             <div className="space-y-1 text-xs text-muted break-keep">
               <p>칸 = 에이전트가 노드에서 본 마운트(경로 존재 · 마운트포인트 · 읽기 · 쓰기). 경로 없음 = 그 노드에 스토리지 경로도
-                호스트 마운트도 없음(그 스토리지를 제공하지 않는 노드 — 문제로 세지 않습니다. 단 그 스토리지를 마운트한 노드가 하나도
-                없으면 문제. 호스트엔 마운트가 있는데 경로가 안 보이는 끊긴 마운트는 없음). 읽기 전용은 같은 스토리지를 쓰기 가능으로 붙인 노드가 있을
+                호스트 마운트도 없음(그 스토리지를 제공하지 않는 노드 — 문제로 세지 않습니다. 단 어느 노드에도 그 스토리지의 마운트
+                흔적[마운트됨 · 읽기 전용 · 없음 — 호스트 루트 없음 제외, 보고가 끊긴 노드는 마지막 보고]이 없으면 문제. 호스트엔 마운트가 있는데 경로가
+                안 보이는 끊긴 마운트는 없음). 읽기 전용은 같은 스토리지를 쓰기 가능으로 붙인 노드가 있을
                 때만 문제로 셉니다(모든 노드가 읽기 전용이면 의도된 구성). 보고 없음 = 그 노드의 보고에 이 스토리지가 없음(에이전트 없음 ·
                 옛 에이전트 · 마운트 경로를 바꾼 직후). 보고가 끊긴 노드는 마지막 보고 기준이라 흐리게 표시합니다.</p>
               <p>아티팩트 경로 = 그 경로를 덮는 스토리지의 마운트와 에이전트의 경로 확인(새 에이전트는 덮는 마운트도 보고해, 그것이 노드
-                루트 「/」면 공유 스토리지가 빠진 「로컬 디렉터리」로 짚습니다), 그리고 그 노드에 뜬 API·컨트롤러의 자체 점검 — 자세한
-                점검은 <Link to="/admin/artifact-base" className="text-accent hover:underline">아티팩트 경로</Link> 화면.</p>
+                루트 「/」면 공유 스토리지가 빠진 「로컬 디렉터리」로 짚습니다), 그리고 그 노드에 뜬 API·컨트롤러의 자체 점검. 잡이 작업
+                기록을 쓰는 곳이라 모든 노드에서 쓸 수 있어야 해 쓰기 불가도 문제로 셉니다 — 자세한 점검은{" "}
+                <Link to="/admin/artifact-base" className="text-accent hover:underline">아티팩트 경로</Link> 화면.</p>
             </div>
           </>)}
         </Card>
