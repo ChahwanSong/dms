@@ -27,17 +27,28 @@ export function normalizedRmTarget(target: string): string | null {
  *  focus 를 주면 그 항목이 낀 겹침만 말한다(항목 추가 — 새 경로 하나만 판정 대상이고, 기존 항목끼리의 옛 겹침은 이
  *  화면이 고칠 수 없다). */
 export function rmTargetOverlaps(entries: RmTargetEntry[], focus?: number): string[] {
+  return rmTargetOverlapDetails(entries, focus).map((d) => d.message);
+}
+
+/** 겹침 한 건 -- message 는 rmTargetOverlaps 의 문장 그대로, at 은 그 문장의 주어 항목 번호(entries 의 인덱스), other 는 겹친
+ *  상대(같은 경로가 처음 나온 항목 또는 조상 항목). 화면이 겹침에 낀 행 칸에 표지(aria-invalid)를 달 때 쓴다(배치 생성 ③). */
+export interface RmTargetOverlap { at: number; other: number; message: string }
+
+/** rmTargetOverlaps 와 같은 판정·순서·문장에 항목 번호를 곁들인다(문장만 필요하면 rmTargetOverlaps). */
+export function rmTargetOverlapDetails(entries: RmTargetEntry[], focus?: number): RmTargetOverlap[] {
   const involved = (i: number, j: number) => focus === undefined || i === focus || j === focus;
   const norms = entries.map((e) => normalizedRmTarget(e.target));
   const firstAt = new Map<string, number>();    // 정규화 경로 → 처음 나온 항목 번호
   norms.forEach((n, i) => { if (n !== null && !firstAt.has(n)) firstAt.set(n, i); });
-  const out: string[] = [];
+  const out: RmTargetOverlap[] = [];
   entries.forEach((e, i) => {
     const n = norms[i];
     if (n === null) return;
     const seen = firstAt.get(n) as number;
     if (seen !== i) {
-      if (involved(i, seen)) out.push(`${e.label}: 같은 경로(${n})가 ${entries[seen].label}에도 있습니다`);
+      if (involved(i, seen)) {
+        out.push({ at: i, other: seen, message: `${e.label}: 같은 경로(${n})가 ${entries[seen].label}에도 있습니다` });
+      }
       return;
     }
     const parts = n.split("/");
@@ -46,8 +57,8 @@ export function rmTargetOverlaps(entries: RmTargetEntry[], focus?: number): stri
       const owner = firstAt.get(anc);
       if (owner !== undefined) {
         if (involved(i, owner)) {
-          out.push(`${e.label}: ${entries[owner].label}의 경로(${anc}) 아래입니다 — 상위 경로를 지우면 함께 `
-            + "지워지니 하나만 남기세요");
+          out.push({ at: i, other: owner, message: `${e.label}: ${entries[owner].label}의 경로(${anc}) 아래입니다 — 상위 경로를 지우면 함께 `
+            + "지워지니 하나만 남기세요" });
         }
         return;
       }

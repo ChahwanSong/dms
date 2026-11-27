@@ -1,6 +1,8 @@
 import { expect, test, type Page } from "@playwright/test";
 import { apiLogin } from "./helpers/session";
 import { assertLayoutSane, assertMainColumn, assertTableOverflows } from "./helpers/layout";
+import { singleLayoutFlow } from "./helpers/layoutSingle";
+import { batchLayoutFlow } from "./helpers/layoutBatch";
 import { STORAGE_NAME } from "./harness/env";
 
 // E3 — 화면 순회 × 2 뷰포트. 이 슬라이스의 회귀 방어 본체다: 9fbef86·6bc2ecb 두
@@ -23,41 +25,8 @@ async function visitUsage(page: Page): Promise<void> {
   await expect(panel.locator("table").first().or(panel.getByText("이 스토리지에는 아직 성공한 scan 이 없습니다"))).toBeVisible();
 }
 
-// 단일 작업 화면에 200자 무공백 경로를 넣는다(제출하지 않음 -- resource_key·검증과 무관).
-// 긴 토큰이 1fr 열을 밀어내던 유형(6bc2ecb)의 재현 재료다: minmax(0,1fr) 이 빠지면 문서가 넘치고(L1),
-// 요약 dd·"지정 경로" 줄(2026-10-27 d192 에 「실제 경로」에서 개명 -- 괴리 [C2])의 overflow-wrap 이 빠지면 그 칸만
-// 넘친다 -- xl 의 요약 본문은 자기 스크롤 상자라 문서 L1 엔 안 보이므로 아래 assertTextContained 가 칸 단위로 잰다.
-async function fillLongScanTarget(page: Page): Promise<void> {
-  await page.getByLabel("연산", { exact: true }).selectOption("scan");
-  const storage = page.getByLabel("스토리지", { exact: true });
-  await expect(storage.locator(`option[value="${STORAGE_NAME}"]`)).toHaveCount(1);
-  await storage.selectOption(STORAGE_NAME);
-  await page.getByLabel("대상 경로", { exact: true }).fill("x".repeat(200));
-}
-
-// 경로 줄 접두는 화면 라벨 그대로(SubmitJob PathFeedback). 2026-10-27 d192 에 「실제 경로」가 「지정 경로」로 바뀌었는데 이
-// 셀렉터는 옛 라벨을 찾아 아무것도 못 잡고 조용히 통과했다(2026-10-28 리뷰 contract-36) -- 그래서 경로 줄을 하나 이상 찾았는지도
-// 함께 단언한다(라벨이 또 바뀌면 여기서 빨간불).
-const PATH_LINE_PREFIX = "지정 경로: ";
-async function assertTextContained(page: Page): Promise<void> {
-  const { leaks, pathLines } = await page.evaluate((prefix) => {
-    const lines = Array.from(document.querySelectorAll("main p")).filter(
-      (p) => (p.textContent ?? "").startsWith(prefix));
-    const els = [
-      ...Array.from(document.querySelectorAll("main dd")),
-      ...Array.from(document.querySelectorAll("main dl")).map((dl) => dl.parentElement!),
-      ...lines,
-    ];
-    return {
-      pathLines: lines.length,
-      leaks: els.filter((el) => el.scrollWidth > el.clientWidth + 1)
-        .map((el) => `${el.tagName} ${el.scrollWidth}>${el.clientWidth}: ${(el.textContent ?? "").slice(0, 40)}`),
-    };
-  }, PATH_LINE_PREFIX);
-  expect(pathLines, `「${PATH_LINE_PREFIX}」 줄을 못 찾았다 -- 라벨이 바뀌었거나 스토리지 뿌리를 몰라 줄이 없다(검사한 게 없다)`)
-    .toBeGreaterThan(0);
-  expect(leaks, "긴 무공백 경로가 요약 칸·지정 경로 줄을 넘쳤다(overflow-wrap/minmax(0,1fr) 회귀)").toEqual([]);
-}
+// 제출 화면 둘(단일 작업·배치 생성)의 흐름은 helpers/layoutSingle·layoutBatch 에 있다(dms-k8s fe87a767 이식 -- 2026-11-27 단계별
+// 등록으로 흐름이 단계마다 길어져 이 spec 에서 뺐다). 이 파일은 폭마다 singleLayoutFlow·batchLayoutFlow 를 부르기만 한다.
 
 // 배치 목록(2026-11-16 「대상 스토리지」 열 추가): 표(배치가 있을 때)나 빈 상태 문구 어느 쪽이든 그려진 뒤에 잰다 -- 목록은
 // heading 보다 늦게 온다.
@@ -137,23 +106,10 @@ test.describe("E3 레이아웃 불변식", () => {
     await visit(page, "/admin/builds/history", "빌드 이력");
     await assertLayoutSane(page, { minTableCells: 8 });
 
-    // 제출 화면 둘(2026-10-06 단일 페이지화): 시트 + 오른쪽 sticky 요약 2열은 xl(1280)부터다.
-    // 표가 없으므로 하한 0 -- L1(가로 넘침)·L3(사이드바 240, 요약이 <aside> 가 아님)·L4 가 진다.
-    await visit(page, "/jobs/new", "단일 작업");
-    await assertLayoutSane(page, { minTableCells: 0 });
-    await fillLongScanTarget(page);
-    await assertLayoutSane(page, { minTableCells: 0 });
-    await assertTextContained(page);
-
-    await visit(page, "/admin/batches/new", "배치 생성");
-    await assertLayoutSane(page, { minTableCells: 0 });
-    // rm(2026-10-21): 「삭제 범위」 안내·rm 옵션 줄·요약 위 경고가 넘치지 않는다.
-    await page.getByLabel("연산").selectOption("rm");
-    await assertLayoutSane(page, { minTableCells: 0 });
-    // rm 자동 실행(2026-10-21): 켜면 빨간 경고 + 동의 체크가 실행 제어 안에 붙는다 — 그 상자도 넘치지 않는다.
-    await page.getByLabel("미리보기 후 자동 실행").check();
-    await expect(page.getByRole("note", { name: "자동 삭제 경고" })).toBeVisible();
-    await assertLayoutSane(page, { minTableCells: 0 });
+    // 제출 화면 둘(2026-11-27 단계별 등록) -- 표가 없으므로 하한 0, 단계마다 L1·L3(사이드바 240, 카드·바가 <aside> 가 아님)·L4 가
+    // 진다(흐름은 helpers/layoutSingle·layoutBatch -- 1280 흐름은 768×900 재측정을 품고 끝에 1280×800 으로 돌린다).
+    await singleLayoutFlow(page, 1280);
+    await batchLayoutFlow(page, 1280);
 
     await visitBatches(page);
     await assertLayoutSane(page, { minTableCells: 0 });
@@ -177,28 +133,10 @@ test.describe("E3 레이아웃 불변식", () => {
     await visit(page, "/jobs", "전체 작업");
     await assertLayoutSane(page, { sidebarFixed: false, minTableCells: 4 });
 
-    // 제출 화면은 1열(시트 → 요약)로 접힌다 -- sync 경로 줄·항목 표가 375 에서 넘치지 않아야 한다.
-    await visit(page, "/jobs/new", "단일 작업");
-    await assertLayoutSane(page, { sidebarFixed: false, minTableCells: 0 });
-    await fillLongScanTarget(page);
-    await assertLayoutSane(page, { sidebarFixed: false, minTableCells: 0 });
-    await assertTextContained(page);
-
-    await visit(page, "/admin/batches/new", "배치 생성");
-    await assertLayoutSane(page, { sidebarFixed: false, minTableCells: 0 });
-    await page.getByLabel("연산").selectOption("rm");
-    await assertLayoutSane(page, { sidebarFixed: false, minTableCells: 0 });
-    await page.getByLabel("미리보기 후 자동 실행").check();
-    await expect(page.getByRole("note", { name: "자동 삭제 경고" })).toBeVisible();
-    await assertLayoutSane(page, { sidebarFixed: false, minTableCells: 0 });
-    await page.getByLabel("연산").selectOption("scan");
-    // 입력 방식 세그먼트는 좁은 폭에서도 라벨이 음절 중간에서 접히지 않는다(통째로 다음 줄로).
-    // L4 는 aside a·table button 만 보므로 여기서 직접 잰다(한 줄 = 높이 < 줄 높이 2배).
-    const wrapped = await page.locator("button[aria-pressed]").evaluateAll((bs) => bs
-      .filter((b) => b.getBoundingClientRect().height
-        >= 2 * parseFloat(getComputedStyle(b).lineHeight) + 1)
-      .map((b) => b.textContent));
-    expect(wrapped, "입력 방식 세그먼트 라벨이 두 줄로 접혔다").toEqual([]);
+    // 제출 화면은 좁은 폭으로 접힌다 -- 경로 줄·검토 칸·항목 표·입력 방식 세그먼트가 375 에서 넘치거나 접히지 않고, 포커스한
+    // 입력·동의 체크가 하단 고정 바에 가리지 않아야 한다(흐름은 helpers).
+    await singleLayoutFlow(page, 375);
+    await batchLayoutFlow(page, 375);
 
     await visitBatches(page);
     await assertLayoutSane(page, { sidebarFixed: false, minTableCells: 0 });
@@ -220,7 +158,7 @@ test.describe("E3 레이아웃 불변식", () => {
   // 최대 1440 열이 사이드바 오른쪽 영역 가운데에 서고, 1680 이하 창(1280)에서는 예전처럼 여백 없이 영역을 꽉 채운다(L5 --
   // helpers/layout assertMainColumn). 네 화면의 h1 왼쪽이 같아야 한다: 기준선은 본문 열의 왼쪽 하나다 -- 한 화면이 스스로
   // mx-auto 하면(2026-08-16 사용자 지적 유형) 그 화면 제목만 옆으로 튄다. 화면은 넓은 표(마운트 현황)·목록(전체 작업)·
-  // 제출 시트(단일 작업)·카드(대시보드) 한 벌씩이다.
+  // 제출 위저드(단일 작업)·카드(대시보드) 한 벌씩이다.
   test("본문 열: 1920 에서 최대 1440 가운데 · 1280 에서 여백 없음 · 화면 제목 기준선 하나", async ({ page }) => {
     await apiLogin(page);
     const screens: Array<[string, () => Promise<void>, number]> = [

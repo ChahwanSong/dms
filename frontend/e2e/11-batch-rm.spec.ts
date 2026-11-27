@@ -3,6 +3,7 @@ import path from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 import { STORAGE_NAME } from "./harness/env";
 import { apiLogin } from "./helpers/session";
+import { chooseOperation, pickStorageCard, wizardNext } from "./helpers/wizard";
 
 // E12 — rm 배치(2026-10-21 사용자 요청 「배치작업에 rm도 할수있도록」). 단위 테스트가 못 보는 것을 여기서 본다:
 // 생성 화면 → 실 서버(rm 허용·겹침 422 미러) → 실 오케스트레이터가 미리보기 뒤 **확인 대기에서 멈추고**(자동 실행은 기본
@@ -52,26 +53,35 @@ test.describe("E12 — rm 배치", () => {
       { storage_name: string; managed_root?: string }[];
     expect(storages.find((s) => s.storage_name === STORAGE_NAME)?.managed_root).toBe(root);
 
+    // 단계별 등록(2026-11-27, dms-k8s 46caffe3·7bfa2be3 이식): ① rm → ② 스토리지 카드(삭제 범위 요약) → ③ CSV → ④ 옵션·실행 제어 →
+    // ⑤ 검토(삭제 범위 전문) → 빨간 「배치 생성」.
     await page.goto("/admin/batches/new");
-    await page.getByLabel("연산").selectOption("rm");
-    await expect(page.getByLabel("미리보기 후 자동 실행")).not.toBeChecked();         // 기본 꺼짐(켠 rm 은 E13)
-    await expect(page.getByRole("note", { name: "삭제 범위" })).toBeVisible();
-    const st = page.getByLabel("스토리지");
-    await expect(st.getByRole("option", { name: STORAGE_NAME })).toBeAttached();
-    await st.selectOption(STORAGE_NAME);
-    await expect(page.getByLabel("재귀 삭제(필수)")).toBeChecked();
-    const create = page.getByRole("button", { name: "배치 생성" });
-    // 한 배치 안 겹침은 제출 전에 행끼리 말하고 잠근다(서버 422 batch_rm_targets_overlap 의 미러)
-    await page.getByRole("button", { name: "CSV 붙여넣기" }).click();
-    await page.getByLabel("CSV").fill(`target\n${base}/a\n${base}/a/sub`);
+    await chooseOperation(page, "rm");
+    await wizardNext(page, "스토리지");
+    await expect(page.getByRole("note", { name: "삭제 범위 요약", exact: true })).toBeVisible();
+    await pickStorageCard(page, "스토리지", STORAGE_NAME);
+    await wizardNext(page, "항목");
+    const next = page.getByRole("button", { name: "다음", exact: true });
+    // 한 배치 안 겹침은 제출 전에 행끼리 말하고 잠근다(서버 422 batch_rm_targets_overlap 의 미러) -- 단계별 등록부터는 ③ 의 「다음」이
+    // 잠긴다(aria-disabled -- 탭 순서에 남아 이유 줄을 읽힌다).
+    await page.getByRole("button", { name: "CSV 붙여넣기", exact: true }).click();
+    await page.getByLabel("CSV", { exact: true }).fill(`target\n${base}/a\n${base}/a/sub`);
     await page.getByRole("button", { name: "테이블에 반영" }).click();
     await expect(page.getByRole("list", { name: "겹치는 삭제 경로" }))
       .toContainText(`2행: 1행의 경로(${base}/a) 아래입니다`);
-    await expect(create).toBeDisabled();
-    await page.getByRole("button", { name: "CSV 붙여넣기" }).click();
-    await page.getByLabel("CSV").fill(`target\n${base}/a\n${base}/b\n${base}/typo`);
+    await expect(next).toHaveAttribute("aria-disabled", "true");
+    await page.getByRole("button", { name: "CSV 붙여넣기", exact: true }).click();
+    await page.getByLabel("CSV", { exact: true }).fill(`target\n${base}/a\n${base}/b\n${base}/typo`);
     await page.getByRole("button", { name: "테이블에 반영" }).click();
+    await expect(page.getByLabel("1행 경로")).toHaveValue(`${base}/a`);           // 반영 성공 → 표로 돌아온다
     await expect(page.getByRole("list", { name: "겹치는 삭제 경로" })).toHaveCount(0);
+    await wizardNext(page, "옵션·실행 제어");
+    await expect(page.getByLabel("미리보기 후 자동 실행")).not.toBeChecked();         // 기본 꺼짐(켠 rm 은 E13)
+    await expect(page.getByLabel("재귀 삭제(필수)")).toBeChecked();
+    await wizardNext(page, "이름·검토");
+    await expect(page.getByRole("note", { name: "삭제 범위", exact: true })).toBeVisible();
+    const create = page.getByRole("button", { name: "배치 생성", exact: true });
+    await expect(create).toHaveClass(/bg-bad/);                                  // rm 생성은 빨간 솔리드(destructive)
     await create.click();
     await page.waitForURL(/\/admin\/batches\/[0-9a-f]{32}$/);
     const bid = page.url().split("/").pop()!;

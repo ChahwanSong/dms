@@ -93,6 +93,14 @@ export default {
         // 더 긴 점선 층을 transform 으로 민다(background-position 은 합성되지 않는다) -- 한 마디를 밀면 처음 무늬와 같다.
         "dash-down": { from: { transform: "translateY(0)" }, to: { transform: "translateY(16px)" } },
         "dash-up": { from: { transform: "translateY(16px)" }, to: { transform: "translateY(0)" } },
+        // 제출 위저드 하단 바의 이유 줄(2026-11-26 단계별 등록, dms-k8s ed7fe322 이식): 막힌 「다음」을 누르거나 입력 칸에서 Enter 를
+        // 누르면 짧게 흔든다(components/form/Wizard blockedNudge). motion-safe 에만 붙인다 -- 움직임 줄이기면 굵은 글자만 남는다. 폭
+        // ±4px 라 바 안에서 끝나고 문서 가로 넘침(e2e L1)을 만들지 않는다. 단계 카드 등장 애니메이션은 두지 않는다(옆으로 미는 등장은
+        // L1 을 흔든다).
+        nudge: {
+          "0%, 100%": { transform: "translateX(0)" }, "25%": { transform: "translateX(-4px)" },
+          "50%": { transform: "translateX(4px)" }, "75%": { transform: "translateX(-2px)" },
+        },
       },
       animation: {
         "flow-x": "flow-x 7s linear infinite",
@@ -106,6 +114,7 @@ export default {
         "dash-flow": "dash-flow 1.2s linear infinite",
         "dash-down": "dash-down 1.2s linear infinite",
         "dash-up": "dash-up 1.2s linear infinite",
+        nudge: "nudge 380ms ease-in-out",
       },
     },
   },

@@ -29,4 +29,11 @@ test("variant 3종이 서로 다른 계층 클래스로 분기된다", () => {
   expect(btn.className).toContain("bg-surface");
   expect(btn.className).not.toMatch(/(^|\s)bg-bad(\s|$)/);
   expect(btn.className).not.toContain("accent");
+
+  // destructive = 빨강 솔리드(2026-11-26 단계별 등록, rm 검토의 제출) -- 주 동작 자체가 파괴적일 때. danger 와 달리 솔리드다.
+  rerender(<Button variant="destructive">확인</Button>);
+  expect(btn.className).toMatch(/(^|\s)bg-bad(\s|$)/);
+  expect(btn.className).toContain("text-white");
+  expect(btn.className).not.toContain("accent");
+  expect(btn.className).not.toContain("border-bad");
 });

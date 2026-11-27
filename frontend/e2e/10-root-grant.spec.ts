@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 import { BASE_URL } from "./harness/env";
 import { apiLogin } from "./helpers/session";
 import { assertLayoutSane } from "./helpers/layout";
+import { expectStep } from "./helpers/wizard";
 
 // E11 — root 실행 자격 부여(2026-10-12 사용자 보고: 「관리 -> 계정 에서 일반 사용자명에게 admin 역할을 줬어. 근데 root로 실행
 // 체크 옵션이 작업 등록할때 안뜨네」). 단위 테스트가 못 보는 것: 실 서버의 세션 두 개 -- 특권 관리자(admin, 하네스 기본 특권
@@ -28,6 +29,9 @@ test.describe("E11 — root 실행 자격 부여", () => {
     const rootBox = page2.getByLabel("root 권한으로 실행", { exact: true });
     await page2.goto("/jobs/new");
     await expect(page2.getByRole("heading", { name: "단일 작업" })).toBeVisible();
+    // 단계별 등록(2026-11-27): 관리자는 연산이 셋이라 ① 작업 종류에서 시작하고, 실행 신원·root 실행(또는 자격 없음 안내)도 ① 에
+    // 있다 -- 아래 안내·체크박스 단언은 모두 이 첫 단계에서 본다(다음 단계로 옮겨지면 여기서 빨간불).
+    await expectStep(page2, "작업 종류");
     await expect(page2.getByText(/「관리 → 계정」의 root 실행에서 줄 수 있습니다/)).toBeVisible();
     await expect(rootBox).toHaveCount(0);
 
@@ -49,6 +53,7 @@ test.describe("E11 — root 실행 자격 부여", () => {
 
     // 새 admin: 다시 로그인하지 않고 화면만 다시 열면 체크박스가 있고 기본 켜짐(자격 있는 관리자의 기본 root)
     await page2.goto("/jobs/new");
+    await expectStep(page2, "작업 종류");
     await expect(rootBox).toBeVisible();
     await expect(rootBox).toBeChecked();
     const me = await (await page2.request.get("/api/auth/me")).json() as { can_run_as_root: boolean };
