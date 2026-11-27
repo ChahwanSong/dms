@@ -15,10 +15,19 @@ hostPath 로 붙여 PV 디렉터리에 접근한다(execution_volcano) -- 칸 �
   항목의 mount_path 가 지금 스토리지 경로와 다르다    → pending(path_changed)  옛 경로로 잰 결과(같은 이유)
   status Ready, writable False                      → read_only              sync 목적지·rm 배치에서 빠진다(placement require_writable)
   status Ready                                      → ready                  writable 키 부재(옛 에이전트)는 placement 처럼 통과 = ready
-  status Missing + missing_mount_path                → absent                 경로 자체가 없다 -- 의도적으로 안 붙인 노드일 수 있어
-                                                                              문제로 세지 않는다(nsync 소스·목적지 노드 분리 구성)
-  그 밖(not_a_mountpoint·propagation_stale·not_readable·host_root_missing·미지 사유·비정상 status) → broken
+  status Missing + missing_mount_path               → absent                 경로 자체가 없다 -- 의도적으로 안 붙인 노드일 수 있어
+    + is_mountpoint 가 참이 아님(False·모름)                                    같은 열에 마운트된 노드가 있으면 문제로 세지 않는다
+                                                                              (nsync 소스·목적지 노드 분리 구성, 「문제 있는 노드」)
+  그 밖(is_mountpoint 참인 missing_mount_path·not_a_mountpoint·propagation_stale·not_readable·host_root_missing·미지 사유·
+  비정상 status) → broken(사유는 에이전트 원문 그대로)
   신선하지 않은 노드(fresh False)는 칸 전부 stale(last = 위 판정) -- reconciler·placement 처럼 신선한 보고만 집계한다.
+
+**끊긴 마운트는 absent 가 아니다**(2026-11-27 -- dms-ssc d207 리뷰가 같은 구멍을 찾아 이식): 에이전트(probe_mounts)는 is_mountpoint 를
+호스트 PID 1 mountinfo 로, exists 를 isdir 로 본다. 죽은 ceph-fuse(ENOTCONN)·낡은 NFS 핸들(ESTALE)은 isdir 가 오류를 삼켜 False 가
+되고, 부모 마운트가 덮이거나 전파가 끊기면 자식 마운트 지점이 에이전트에서 안 보인다 -- 보고는 Missing + missing_mount_path 인데
+is_mountpoint 는 참이다. 이것을 「안 붙인 노드」로 읽으면 이 화면이 잡으려는 끊긴 마운트를 문제 목록에서 숨긴다. 칸 모양은 그대로
+(사유 원문·is_mountpoint 가 이미 칸에 있다) -- 포탈이 broken + missing_mount_path 를 「끊긴 마운트」로 그린다(mountTerms REASON_TEXT).
+is_mountpoint 가 bool 이 아니면(옛·비정상 보고) 모름이라 종전처럼 absent 다(근거 없이 문제로 올리지 않는다).
 
 공용 디렉터리 칸(classify_shared): artifact_base 보고가 지금 유효한 base 경로를 잰 것일 때만 판정한다(아니면 pending --
 routes_artifact_base._node_checks 와 같은 규칙). 없음(missing)은 문제다 -- 스토리지의 absent 와 달리 공용 디렉터리는 모든 노드의 같은
@@ -28,9 +37,15 @@ routes_artifact_base._node_checks 와 같은 규칙). 없음(missing)은 문제�
 다르다; 다른 노드 대다수와 같은지만 본다).
 
 「문제 있는 노드」(행 problem·problem_count): 신선하지 않은 행은 늘 문제(problem_count null -- 지금 상태를 모른다). 신선한 행은
-broken 칸 + **바깥값 read_only** 칸 + 공용 디렉터리 문제(local·differs·missing·read_only) 수다. read_only 는 같은 스토리지를 다른 신선한
-노드가 쓰기 가능(ready)으로 붙였을 때만 센다 -- 이관 소스처럼 모든 노드에 ro 로 붙인 스토리지는 의도된 구성이라(absent 를 세지 않는
-것과 같은 이유 -- 경보 피로) 「문제 있는 노드」 필터가 전체와 같아지지 않게 한다. 칸 상태·totals 의 read_only 수는 그대로다.
+broken 칸 + **바깥값 read_only** 칸 + **어디에도 없는 열의 absent** 칸 + 공용 디렉터리 문제(local·differs·missing·read_only) 수다
+(칸 하나의 판정 = _cell_problem, 열 재료 = _ro_outlier_columns·_mounted_columns -- 둘 다 신선한 행만 본다).
+  - read_only 는 같은 스토리지를 다른 신선한 노드가 쓰기 가능(ready)으로 붙였을 때만 센다 -- 이관 소스처럼 모든 노드에 ro 로 붙인
+    스토리지는 의도된 구성이라(경보 피로) 「문제 있는 노드」 필터가 전체와 같아지지 않게 한다.
+  - absent 는 같은 스토리지를 신선한 노드 하나라도 붙였으면(ready·read_only) 세지 않는다(그 스토리지를 안 붙인 노드). **하나도 없으면
+    센다**(2026-11-27 -- dms-ssc d207 리뷰 이식): 그 스토리지는 어디에도 마운트돼 있지 않다(mount_path 오타·마운트 배포 전) -- 열 전체가
+    회색 「없음」인데 「문제 0」이던 구멍. pending·broken·stale 칸은 마운트 근거가 아니다(리포트 지연 노드의 정상도 -- 지금 상태 모름).
+  칸 상태·totals·열 요약의 read_only·absent 수는 그대로다(문제 여부는 행 수에만 반영 -- 포탈 mountTerms.columnProblem·cellProblem 이
+  같은 열 규칙의 거울, 교차 픽스처 frontend/src/features/mounts/mountProblemCases.json).
 
 열 요약은 reconciler.summarize_mount_statuses 를 그대로 쓴다(스토리지 목록의 상태 배지와 같은 숫자 -- 교차 검사 테스트). 리포트는
 스키마 검증 없이 저장되므로(DB 가 신뢰 경계) 모든 필드를 _bool·_str·_int 로 읽고 절대 예외를 내지 않는다.
@@ -43,8 +58,12 @@ CELL_STATES = ("ready", "read_only", "absent", "broken", "pending", "stale")
 SHARED_STATES = ("ok", "ok_unverified", "local", "differs", "missing", "read_only", "pending", "stale")
 # 행을 「문제 있는 노드」로 세는 공용 디렉터리 상태(absent·pending·ok_unverified 는 세지 않는다 -- 경보 피로)
 SHARED_PROBLEM_STATES = ("local", "differs", "missing", "read_only")
-# 늘 문제로 세는 칸 상태. read_only 는 열에 따라(_ro_outlier_columns -- 모듈 docstring 「문제 있는 노드」)
+# 늘 문제로 세는 칸 상태. read_only·absent 는 열에 따라(_cell_problem -- 모듈 docstring 「문제 있는 노드」)
 CELL_PROBLEM_STATES = ("broken",)
+# 그 노드에 경로 자체가 없다는 에이전트 사유 -- 호스트에 그 지점의 마운트도 없을 때만 absent(모듈 docstring 「끊긴 마운트」)
+ABSENT_REASON = "missing_mount_path"
+# 「이 노드에 붙어 있다」로 세는 칸 상태(absent 열 판정 -- _mounted_columns)
+MOUNTED_STATES = ("ready", "read_only")
 
 
 def _bool(v):
@@ -110,7 +129,8 @@ def classify_cell(report, storage: dict) -> dict:
         cell["state"] = "read_only" if cell["writable"] is False else "ready"
         # 용량은 마운트된 칸에서만(statvfs 는 not_a_mountpoint 노드에선 루트 fs 수치다)
         cell["disk"] = _disk(report, name)
-    elif cell["status"] == "Missing" and cell["reason"] == "missing_mount_path":
+    elif cell["status"] == "Missing" and cell["reason"] == ABSENT_REASON and cell["is_mountpoint"] is not True:
+        # is_mountpoint 참 = 호스트엔 마운트가 있는데 경로가 안 보인다(끊긴 마운트) -- broken 그대로(모듈 docstring)
         cell["state"] = "absent"
     return cell
 
@@ -163,12 +183,24 @@ def _ro_outlier_columns(rows) -> set:
     return {name for r in rows if r["fresh"] for name, c in r["cells"].items() if c["state"] == "ready"}
 
 
-def _problem_count(row, ro_outliers) -> "int | None":
+def _mounted_columns(rows) -> set:
+    """absent 칸을 문제로 세지 **않는** 열: 신선한 ready·read_only 칸이 하나라도 있는 열(그 스토리지가 어딘가엔 붙어 있다)."""
+    return {name for r in rows if r["fresh"] for name, c in r["cells"].items() if c["state"] in MOUNTED_STATES}
+
+
+def _cell_problem(name, cell, ro_outliers, mounted) -> bool:
+    """신선한 행의 칸 하나가 문제인가(모듈 docstring 「문제 있는 노드」 -- 포탈 mountTerms.cellProblem 이 거울)."""
+    state = cell["state"]
+    return (state in CELL_PROBLEM_STATES
+            or (state == "read_only" and name in ro_outliers)
+            or (state == "absent" and name not in mounted))
+
+
+def _problem_count(row, ro_outliers, mounted) -> "int | None":
     """행의 문제 수(모듈 docstring 「문제 있는 노드」) -- 신선하지 않은 행은 None(모름)."""
     if not row["fresh"]:
         return None
-    n = sum(1 for name, c in row["cells"].items()
-            if c["state"] in CELL_PROBLEM_STATES or (c["state"] == "read_only" and name in ro_outliers))
+    n = sum(1 for name, c in row["cells"].items() if _cell_problem(name, c, ro_outliers, mounted))
     sh = row["shared_dir"]
     return n + (1 if sh is not None and sh["state"] in SHARED_PROBLEM_STATES else 0)
 
@@ -224,9 +256,9 @@ def build(nodes, storages, *, exclusions: dict, artifact_base_path, state_root, 
             if r["fresh"] and sh is not None and sh["state"] == "ok" and (sh["mount_point"], sh["fstype"]) != pair:
                 sh["state"] = "differs"
 
-    ro_outliers = _ro_outlier_columns(rows)
+    ro_outliers, mounted = _ro_outlier_columns(rows), _mounted_columns(rows)
     for r in rows:
-        r["problem_count"] = _problem_count(r, ro_outliers)
+        r["problem_count"] = _problem_count(r, ro_outliers, mounted)
         r["problem"] = r["problem_count"] is None or r["problem_count"] > 0
 
     fresh_rows = [(r, _report(n)) for r, n in zip(rows, nodes) if r["fresh"]]

@@ -6,7 +6,7 @@ import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
 import { afterAll, afterEach, beforeAll, expect, test } from "vitest";
 import { MountStatusPage } from "./MountStatusPage";
-import { EMPTY_NODES, LIVE, NO_STORAGES, VARIETY, WITH_PODS, wide } from "./mountFixtures";
+import { EMPTY_NODES, LIVE, NOWHERE, NO_STORAGES, VARIETY, WITH_PODS, wide } from "./mountFixtures";
 import type { MountStatusResponse } from "./types";
 
 const server = setupServer();
@@ -81,7 +81,8 @@ test("칸 글자: 모든 갈래 + 공용 디렉터리 + 행 꼬리표", async ()
   expect(label("n-broken · sec: 전파 안 됨")).toBeInTheDocument();
   expect(label("n-ro · ceph: 읽기 전용")).toBeInTheDocument();
   expect(label("n-ro · sec: 점검 불가")).toBeInTheDocument();
-  expect(label("n-pend · sec: 확인 대기")).toHaveTextContent("경로 바뀜");
+  expect(label("n-pend · ceph: 확인 대기")).toHaveTextContent("경로 바뀜");
+  expect(label("n-pend · sec: 정상")).toBeInTheDocument();           // sec 을 붙인 노드 -- n-build 의 sec 없음은 문제 아님
   expect(label("n-stale · ceph: 모름")).toHaveTextContent("지연");
   expect(label("n-broken · DMS 공용: 로컬 디렉터리")).toBeInTheDocument();
   expect(label("n-ro · DMS 공용: 다른 노드와 다름")).toHaveTextContent("xfs");
@@ -123,6 +124,82 @@ test("칸 글자: 모든 갈래 + 공용 디렉터리 + 행 꼬리표", async ()
   expect(screen.getByText(/비활성 스토리지 1개\(old-nas\)/)).toBeInTheDocument();
   expect(screen.getByText(/k8s 노드 목록을 읽지 못해/)).toBeInTheDocument();
   expect(screen.getByText(/공용 디렉터리의 마운트 지점을 보고하지 않습니다/)).toBeInTheDocument();
+});
+
+// 2026-11-27(dms-ssc d207 리뷰 이식): 끊긴 마운트는 「없음」이 아니라 마운트 문제, 어느 노드에도 마운트되지 않은 스토리지의 없음은
+// 문제 -- 화면(칸·꼬리표·범례·타일·문제 있는 스토리지·툴팁·시트·카드)이 서버 수(problem_count·totals)와 같은 말을 한다.
+const NOWHERE_TYPO = "없음(어느 노드에도 마운트 안 됨)";
+
+test("끊긴 마운트·어디에도 없는 스토리지: 칸·꼬리표·범례·타일·문제 있는 스토리지가 서버 규칙과 같다", async () => {
+  renderPage(NOWHERE);
+  await screen.findByRole("table");
+  const t = table();
+  const label = (s: string) => within(t).getByLabelText(s);
+  const chipOf = (el: HTMLElement) => el.firstElementChild as HTMLElement;     // MountCellChip 의 첫 자식 = 상태 칩
+  expect(label("k8s-w2 · cephfs-dms: 끊긴 마운트")).toBeInTheDocument();
+  expect(chipOf(label("k8s-w2 · cephfs-dms: 끊긴 마운트"))).toHaveClass("text-bad");
+  for (const node of ["k8s-w1", "k8s-w2"]) {
+    const typo = label(`${node} · cephfs-typo: ${NOWHERE_TYPO}`);
+    expect(typo).toHaveTextContent(/^없음$/);                              // 보이는 글자는 「없음」 그대로(낭독이 뜻을 말한다)
+    expect(chipOf(typo)).toHaveClass("text-bad");
+  }
+  // 다른 노드엔 붙은 스토리지의 없음은 회색 그대로(안 붙인 노드 -- 문제 아님)
+  expect(chipOf(label("k8s-w1 · cephfs-secondary: 없음"))).toHaveClass("text-muted");
+  expect(chipOf(label("k8s-w1 · cephfs-secondary: 없음"))).not.toHaveClass("text-bad");
+  // 행 꼬리표 = 서버 problem_count, 범위 버튼 = 서버 totals·거울
+  const head = (name: string) => within(t).getByRole("rowheader", { name: new RegExp(`^${name}`) });
+  expect(within(head("k8s-w1")).getByText("문제 1")).toBeInTheDocument();
+  expect(within(head("k8s-w2")).getByText("문제 2")).toBeInTheDocument();
+  expect(within(head("k8s-w2")).getByText("문제 2").closest("span[title]")!.getAttribute("title"))
+    .toMatch(/끊긴 마운트 포함.*어느 노드에도 마운트되지 않은 스토리지의 없음/);
+  expect(screen.getByRole("button", { name: "문제 있는 노드 2" })).toBeInTheDocument();
+  // 범례·타일: 없음의 두 뜻, 마운트 문제에 끊긴 마운트
+  const legend = screen.getByRole("list", { name: "범례" });
+  expect(legend).toHaveTextContent("없음4칸경로 없음(안 붙인 노드면 정상, 어느 노드에도 없으면 문제)");
+  expect(legend).toHaveTextContent("마운트 문제1칸마운트 빠짐·끊긴 마운트·전파 안 됨");
+  expect(screen.getByText("1칸", { selector: "span.text-bad" })).toBeInTheDocument();
+  expect(screen.getByText("마운트 빠짐·끊긴 마운트·전파 안 됨·읽기 불가·점검 불가", { selector: "div" })).toBeInTheDocument();
+  // 문제 있는 스토리지 = 끊긴 마운트 열 + 어디에도 없는 열
+  await userEvent.click(screen.getByRole("button", { name: "문제 있는 스토리지 2" }));
+  expect(within(table()).getAllByRole("columnheader").map((h) => h.getAttribute("data-col")).filter(Boolean))
+    .toEqual(["cephfs-dms", "cephfs-typo"]);
+});
+
+test("끊긴 마운트·없음 툴팁과 노드 시트·카드: 원인 문장이 열에 따라 갈린다", async () => {
+  const { unmount } = renderPage(NOWHERE);
+  await screen.findByRole("table");
+  const hover = async (name: string) => {
+    fireEvent.mouseEnter(within(table()).getByLabelText(name));
+    return screen.findByRole("tooltip");
+  };
+  const leave = async (name: string) => {
+    fireEvent.mouseLeave(within(table()).getByLabelText(name));
+    await waitFor(() => expect(screen.queryByRole("tooltip")).toBeNull());
+  };
+  const dead = await hover("k8s-w2 · cephfs-dms: 끊긴 마운트");
+  expect(dead).toHaveTextContent(/끊긴 마운트 — 호스트에는 마운트가 있는데 경로에 접근할 수 없습니다/);
+  expect(dead).toHaveTextContent("마운트 지점 예");
+  expect(dead).toHaveTextContent("사유 코드 missing_mount_path");
+  await leave("k8s-w2 · cephfs-dms: 끊긴 마운트");
+  expect(await hover(`k8s-w1 · cephfs-typo: ${NOWHERE_TYPO}`)).toHaveTextContent(/이 스토리지를 마운트한 노드가 하나도 없습니다/);
+  await leave(`k8s-w1 · cephfs-typo: ${NOWHERE_TYPO}`);
+  expect(await hover("k8s-w1 · cephfs-secondary: 없음")).toHaveTextContent(/다른 노드에는 마운트돼 있어/);
+  await leave("k8s-w1 · cephfs-secondary: 없음");
+  // 시트(키보드 진입점): 같은 문장
+  await userEvent.click(within(table()).getByRole("button", { name: "k8s-w2" }));
+  const sheet = await screen.findByRole("dialog");
+  expect(sheet).toHaveTextContent(/끊긴 마운트 — 호스트에는 마운트가 있는데/);
+  expect(sheet).toHaveTextContent(/이 스토리지를 마운트한 노드가 하나도 없습니다/);
+  expect(sheet).toHaveTextContent(/다른 노드에는 마운트돼 있어/);           // w2 의 cephfs-third(w1 엔 붙음)
+  expect(within(sheet).getByLabelText(`k8s-w2 · cephfs-typo: ${NOWHERE_TYPO}`)).toBeInTheDocument();
+  unmount();
+  // 카드: 문제인 없음은 마운트 문제와 같은 자리(앞), 안 붙인 노드의 없음은 맨 뒤
+  renderPage(NOWHERE, "/admin/storages/mounts?view=cards");
+  const list = await screen.findByRole("list", { name: "노드별 마운트 현황" });
+  const w2 = within(list).getAllByRole("listitem")[1];
+  expect(within(w2).getAllByLabelText(/^k8s-w2 · /).map((el) => el.getAttribute("aria-label"))
+    .filter((l) => !l!.endsWith(": 정상")))                               // 공용 칸·접어 둔 정상 칸은 빼고 순서만 본다
+    .toEqual(["k8s-w2 · cephfs-dms: 끊긴 마운트", `k8s-w2 · cephfs-typo: ${NOWHERE_TYPO}`, "k8s-w2 · cephfs-third: 없음"]);
 });
 
 test("「문제 있는 노드」는 없음·확인 대기만 있는 행을 숨기고 URL 에 남긴다", async () => {

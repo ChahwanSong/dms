@@ -8,8 +8,9 @@ import {
   Chip, MountCellChip, MountTipBody, NodeTags, ProblemTag, SharedCellChip, SharedHeadTipBody, SharedTipBody, StorageTipBody,
 } from "./MountCell";
 import {
-  CELL_META, cellAriaLabel, cellLabel, columnNameLines, columnPathTail, podFailedRoles, sharedDisplay,
+  CELL_META, absentNowhere, cellAriaLabel, cellView, columnFacts, columnNameLines, columnPathTail, podFailedRoles, sharedDisplay,
 } from "./mountTerms";
+import type { ColumnFacts } from "./mountTerms";
 import type { ControlPod, MountRow, MountStatusResponse, StorageColumn } from "./types";
 
 // 노드 × 스토리지 표(2026-11-23, 압축 레이아웃 2026-11-25). 노드 = 행(수십 대까지 늘어난다), 열 = [DMS 공용] + 활성 스토리지
@@ -87,6 +88,9 @@ export function MountMatrix({ data, rows, cols, renderStorageMeta, renderStorage
   const tipRef = useRef<TipHandle>(null);
   const maxHeight = useFitMaxHeight(wrapRef);
   const shared = data.shared_dir;
+  // 열 재료(어디에도 마운트되지 않은 열의 「없음」 표시 -- mountTerms.columnFacts)는 행 필터 전 **모든** 행으로 잰다(서버 규칙과 같게).
+  // nodes 가 그대로면 같은 객체라 행 memo 가 깨지지 않는다.
+  const facts = useMemo(() => columnFacts(data.nodes), [data.nodes]);
   // 행 memo 가 깨지지 않게 노드별 파드 배열을 한 번만 만든다(control_pods 가 그대로면 react-query 구조 공유로 같은 배열).
   const podsByNode = useMemo(() => {
     const m = new Map<string, ControlPod[]>();
@@ -154,13 +158,13 @@ export function MountMatrix({ data, rows, cols, renderStorageMeta, renderStorage
         <MatrixHead cols={cols} shared={shared} renderStorageMeta={renderStorageMeta} />
         <tbody>
           {rows.map((row) => (
-            <MatrixRow key={row.node_name} row={row} cols={cols} hasShared={shared !== null}
+            <MatrixRow key={row.node_name} row={row} cols={cols} hasShared={shared !== null} facts={facts}
                        pods={podsByNode.get(row.node_name) ?? NO_PODS} roleLabels={roleLabels} onOpenNode={onOpenNode}
                        registerButton={registerButton} />
           ))}
         </tbody>
       </table>
-      <MatrixTip ref={tipRef} data={data} rows={rows} renderStorageTip={renderStorageTip} onClosed={onTipClosed} />
+      <MatrixTip ref={tipRef} data={data} rows={rows} facts={facts} renderStorageTip={renderStorageTip} onClosed={onTipClosed} />
     </div>
   );
 }
@@ -227,10 +231,11 @@ const MatrixHead = memo(function MatrixHead({ cols, shared, renderStorageMeta }:
   );
 });
 
-const MatrixRow = memo(function MatrixRow({ row, cols, hasShared, pods, roleLabels, onOpenNode, registerButton }: {
+const MatrixRow = memo(function MatrixRow({ row, cols, hasShared, facts, pods, roleLabels, onOpenNode, registerButton }: {
   row: MountRow;
   cols: StorageColumn[];
   hasShared: boolean;
+  facts: ColumnFacts;
   pods: ControlPod[];
   roleLabels?: Record<string, string>;
   onOpenNode: (name: string) => void;
@@ -265,12 +270,13 @@ const MatrixRow = memo(function MatrixRow({ row, cols, hasShared, pods, roleLabe
       )}
       {cols.map((col, i) => {
         const cell = row.cells[col.storage_name];
+        const nowhere = cell !== undefined && absentNowhere(col.storage_name, cell, facts);
         return (
           <td key={col.storage_name} data-tip={cell !== undefined ? "cell" : undefined} data-col={col.storage_name} data-ci={i}
               className={`${CELL} ${dim}`}>
             {cell !== undefined && (
-              <MountCellChip cell={cell} className="max-w-24"
-                             aria-label={cellAriaLabel(row.node_name, col.storage_name, cellLabel(cell))} />
+              <MountCellChip cell={cell} nowhere={nowhere} className="max-w-24"
+                             aria-label={cellAriaLabel(row.node_name, col.storage_name, cellView(cell, nowhere).aria)} />
             )}
           </td>
         );
@@ -297,21 +303,22 @@ function RowAge({ row }: { row: MountRow }) {
 const MatrixTip = forwardRef<TipHandle, {
   data: MountStatusResponse;
   rows: MountRow[];
+  facts: ColumnFacts;
   renderStorageTip?: (col: StorageColumn) => ReactNode;
   onClosed: () => void;
-}>(function MatrixTip({ data, rows, renderStorageTip, onClosed }, ref) {
+}>(function MatrixTip({ data, rows, facts, renderStorageTip, onClosed }, ref) {
   const [active, setActive] = useState<TipTarget | null>(null);
   useImperativeHandle(ref, () => ({ open: setActive, close: () => setActive(null) }), []);
   const nowMs = useNow(15_000, active !== null);
   // HoverTip 의 스크롤 닫기(onClose)는 위임 쪽 기억(cur·data-hot)도 지운다 -- 같은 칸에 다시 올리면 다시 열린다.
   const close = useCallback(() => { setActive(null); onClosed(); }, [onClosed]);
   if (active === null) return null;
-  const body = tipBody(active, data, rows, nowMs, renderStorageTip);
+  const body = tipBody(active, data, rows, facts, nowMs, renderStorageTip);
   if (body === null) return null;
   return <HoverTip anchor={active.rect} onClose={close}>{body}</HoverTip>;
 });
 
-function tipBody(t: TipTarget, data: MountStatusResponse, rows: MountRow[], nowMs: number,
+function tipBody(t: TipTarget, data: MountStatusResponse, rows: MountRow[], facts: ColumnFacts, nowMs: number,
                  renderStorageTip?: (col: StorageColumn) => ReactNode): ReactNode {
   const shared = data.shared_dir;
   if (t.kind === "shared-head") return shared === null ? null : <SharedHeadTipBody shared={shared} />;
@@ -329,7 +336,8 @@ function tipBody(t: TipTarget, data: MountStatusResponse, rows: MountRow[], nowM
   const col = data.storages.find((c) => c.storage_name === t.col);
   const cell = t.col !== undefined ? row.cells[t.col] : undefined;
   if (col === undefined || cell === undefined) return null;
-  return <MountTipBody nodeName={row.node_name} col={col} cell={cell} reportedAt={row.reported_at} nowMs={nowMs} />;
+  return <MountTipBody nodeName={row.node_name} col={col} cell={cell} reportedAt={row.reported_at} nowMs={nowMs}
+                       nowhere={!facts.mounted.has(col.storage_name)} />;
 }
 
 /** 래퍼 높이 상한 = 화면에 남은 높이(창 높이 - 래퍼의 문서 위치 - gap, 최소 min). 노드가 많아도 가로 스크롤바(래퍼 바닥)가 첫

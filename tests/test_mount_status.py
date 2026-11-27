@@ -3,6 +3,7 @@
 규칙 원문은 src/dms/mount_status.py 모듈 docstring. 리포트는 스키마 검증 없이 저장되므로(DB 가 신뢰 경계) 쓰레기 모양에서도
 예외 없이 pending·null 로 내려앉는지를 같이 본다."""
 import ast
+import json
 from pathlib import Path
 
 import pytest
@@ -71,6 +72,29 @@ def test_ready_read_only_and_writable_unknown():
 def test_missing_mount_path_is_absent():
     cell = classify_cell({"mounts": [_m(status="Missing", reason="missing_mount_path")]}, CEPH)
     assert (cell["state"], cell["status"], cell["reason"]) == ("absent", "Missing", "missing_mount_path")
+
+
+def test_dead_or_stale_mount_with_a_host_mountpoint_is_broken_not_absent():
+    """끊긴 마운트(2026-11-27 dms-ssc d207 리뷰 이식): 호스트 PID 1 mountinfo 엔 그 지점의 마운트가 있는데(is_mountpoint True) 경로가
+    안 보인다(isdir 가 ENOTCONN·ESTALE 를 삼켜 False -- 죽은 ceph-fuse·낡은 NFS, 부모 마운트가 덮거나 전파가 끊겨 자식 지점이
+    안 보임). 에이전트는 Missing + missing_mount_path 로 보고하지만 「안 붙인 노드」가 아니다 -- 숨기면 이 화면이 잡으려는 끊긴
+    마운트가 문제 목록에서 빠진다. 사유는 에이전트 원문 그대로(화면이 「끊긴 마운트」로 가른다)."""
+    entry = _m(status="Missing", reason="missing_mount_path", exists=False, is_mountpoint=True)
+    cell = classify_cell({"mounts": [entry]}, CEPH)
+    assert (cell["state"], cell["status"], cell["reason"], cell["is_mountpoint"], cell["exists"]) == (
+        "broken", "Missing", "missing_mount_path", True, False)
+    assert cell["disk"] is None                    # 마운트된 칸이 아니다(statvfs 는 루트 fs 수치일 수 있다)
+
+
+@pytest.mark.parametrize("is_mountpoint", [False, None, "yes", 1, "absent-key"])
+def test_missing_mount_path_without_a_host_mountpoint_stays_absent(is_mountpoint):
+    # 호스트에도 마운트가 없거나(False), 모르면(None·키 없음 -- 옛 보고, 비정상 값) 지금처럼 「안 붙인 노드」(absent)
+    entry = _m(status="Missing", reason="missing_mount_path", is_mountpoint=is_mountpoint)
+    if is_mountpoint == "absent-key":
+        del entry["is_mountpoint"]
+    cell = classify_cell({"mounts": [entry]}, CEPH)
+    expected_flag = False if is_mountpoint is False else None      # bool 이 아닌 값은 모름(None)으로 읽는다
+    assert (cell["state"], cell["reason"], cell["is_mountpoint"]) == ("absent", "missing_mount_path", expected_flag)
 
 
 @pytest.mark.parametrize("status,reason", [
@@ -257,6 +281,88 @@ def test_read_only_counts_as_a_problem_only_beside_a_writable_node():
     assert [(r["problem"], r["problem_count"]) for r in body["nodes"]] == [(False, 0), (True, None)]
 
 
+ABSENT = _m(status="Missing", reason="missing_mount_path")
+DEAD = _m(status="Missing", reason="missing_mount_path", exists=False, is_mountpoint=True)
+
+
+def _counts(body):
+    return [(r["node_name"], r["problem"], r["problem_count"]) for r in body["nodes"]]
+
+
+def test_absent_counts_as_a_problem_only_when_the_column_is_mounted_nowhere():
+    """「없음」(absent)은 같은 열에 신선한 마운트(ready·read_only) 칸이 하나라도 있으면 문제 아님(그 스토리지를 붙이지 않은 노드) --
+    하나도 없으면 그 스토리지는 어디에도 마운트돼 있지 않다(mount_path 오타·마운트 배포 전): 열 전체가 회색 「없음」인데 「문제 0」
+    이던 구멍(2026-11-27 dms-ssc d207 리뷰 이식). read_only 바깥값(_ro_outlier_columns)과 같은 열 단위 판정이다."""
+    # 열 전체가 없음 -- 신선한 두 노드 모두 문제
+    body = _build([_node("a", [ABSENT], ab=_ab()), _node("b", [ABSENT], ab=_ab())], storages=(CEPH,))
+    assert _counts(body) == [("a", True, 1), ("b", True, 1)]
+    t = body["totals"]
+    assert (t["absent"], t["broken"], t["problem_nodes"]) == (2, 0, 2)     # 칸 상태·집계의 없음 수는 그대로
+    assert body["storages"][0]["summary"]["absent"] == 2
+    # 한 노드라도 정상이면 없음은 문제 아님
+    body = _build([_node("a", [_m()], ab=_ab()), _node("b", [ABSENT], ab=_ab())], storages=(CEPH,))
+    assert _counts(body) == [("a", False, 0), ("b", False, 0)]
+    # 읽기 전용도 마운트다(그 ro 자체도 쓰기 가능 노드가 없어 바깥값이 아니다)
+    body = _build([_node("a", [_m(writable=False)], ab=_ab()), _node("b", [ABSENT], ab=_ab())], storages=(CEPH,))
+    assert _counts(body) == [("a", False, 0), ("b", False, 0)]
+    # 리포트 지연 노드의 정상은 근거가 아니다(지금 상태 모름) -- 지연 행은 그대로 None
+    body = _build([_node("a", [ABSENT], ab=_ab()), _node("b", [_m()], fresh=False, ab=_ab())], storages=(CEPH,))
+    assert _counts(body) == [("a", True, 1), ("b", True, None)]
+    # 확인 대기(보고 항목 없음)는 마운트가 아니고 그 칸 자체도 문제 아님 -- 없음 칸만 센다
+    body = _build([_node("a", [ABSENT], ab=_ab()), _node("b", [], ab=_ab())], storages=(CEPH,))
+    assert [r["cells"]["ceph"]["state"] for r in body["nodes"]] == ["absent", "pending"]
+    assert _counts(body) == [("a", True, 1), ("b", False, 0)]
+    # 마운트 문제·끊긴 마운트 옆의 없음도 센다(마운트된 노드가 없다)
+    body = _build([_node("a", [ABSENT], ab=_ab()), _node("b", [_m(status="Missing", reason="not_a_mountpoint")], ab=_ab()),
+                   _node("c", [DEAD], ab=_ab())], storages=(CEPH,))
+    assert [r["cells"]["ceph"]["state"] for r in body["nodes"]] == ["absent", "broken", "broken"]
+    assert _counts(body) == [("a", True, 1), ("b", True, 1), ("c", True, 1)]
+    assert body["totals"]["broken"] == 2 and body["storages"][0]["summary"]["broken"] == 2
+    # 열마다 따로 -- ceph 는 붙어 있고 sec 만 어디에도 없다
+    body = _build([_node("a", [_m(), _m("sec", "/sec", "Missing", "missing_mount_path")], ab=_ab()),
+                   _node("b", [_m("ceph", "/cephfs", "Missing", "missing_mount_path"),
+                               _m("sec", "/sec", "Missing", "missing_mount_path")], ab=_ab())])
+    assert _counts(body) == [("a", True, 1), ("b", True, 1)]
+
+
+CASES = json.loads((Path(__file__).resolve().parent.parent / "frontend" / "src" / "features" / "mounts"
+                    / "mountProblemCases.json").read_text(encoding="utf-8"))
+CASE_CELL_FIELDS = ("state", "last", "status", "reason", "is_mountpoint")
+
+
+def test_problem_rules_cross_fixture_matches_the_server():
+    """서버 ↔ 포탈 교차 픽스처(mountProblemCases.json -- 2026-11-27): 같은 input 의 서버 출력이 expected 와 같다. 포탈
+    mountProblemCases.test.ts 가 같은 expected 로 거울(columnFacts·cellProblem·columnProblem)이 같은 problem_count·problem_columns
+    를 내는지 본다 -- 서버 규칙을 바꾸면 두 시험이 함께 빨개진다."""
+    inp, exp = CASES["input"], CASES["expected"]
+    nodes = [{"node_name": n["node_name"], "reported_at": "2026-11-27T00:00:00Z", "fresh": n["fresh"],
+              "report": {"node_name": n["node_name"], "mounts": n["mounts"]}} for n in inp["nodes"]]
+    body = build(nodes, inp["storages"], exclusions={}, artifact_base_path=None, state_root=None, build_node=None,
+                 node_list=None)
+    assert [{"node_name": r["node_name"], "fresh": r["fresh"], "problem_count": r["problem_count"],
+             "cells": {k: {f: c[f] for f in CASE_CELL_FIELDS} for k, c in r["cells"].items()}}
+            for r in body["nodes"]] == exp["nodes"]
+    assert [{"storage_name": c["storage_name"], "summary": c["summary"]} for c in body["storages"]] == exp["storages"]
+    assert body["totals"] == exp["totals"]
+    # problem_columns = 신선한 행에 서버 칸 판정(_cell_problem)이 참인 칸이 있는 열(포탈 columnProblem 의 정의)
+    ro, mounted = mount_status._ro_outlier_columns(body["nodes"]), mount_status._mounted_columns(body["nodes"])
+    problem_columns = [s["storage_name"] for s in inp["storages"]
+                       if any(r["fresh"] and mount_status._cell_problem(s["storage_name"], r["cells"][s["storage_name"]],
+                                                                         ro, mounted) for r in body["nodes"])]
+    assert problem_columns == exp["problem_columns"]
+
+
+def test_dead_mount_counts_as_a_problem_even_beside_mounted_nodes():
+    # 끊긴 마운트는 broken -- 다른 노드가 붙어 있어도 문제(예전엔 absent 라 「문제 0」으로 숨었다)
+    body = _build([_node("a", [_m()], ab=_ab()), _node("b", [DEAD], ab=_ab())], storages=(CEPH,))
+    assert body["nodes"][1]["cells"]["ceph"]["state"] == "broken"
+    assert _counts(body) == [("a", False, 0), ("b", True, 1)]
+    t = body["totals"]
+    assert (t["absent"], t["broken"], t["problem_nodes"]) == (0, 1, 1)
+    summary = body["storages"][0]["summary"]
+    assert (summary["broken"], summary["absent"], summary["ready"], summary["total"]) == (1, 0, 1, 2)
+
+
 def test_states_stay_within_the_declared_enums():
     nodes = [_node("a", [_m(), _m("sec", "/x")], ab=_ab()), _node("b", fresh=False), _node("c", ab=_ab("/", "ext4"))]
     body = _build(nodes)
@@ -272,13 +378,17 @@ NOW = "2026-08-02T10:00:00Z"
 
 def test_column_summary_matches_the_reconciler_exactly(db):
     repos = Repositories(db)
-    for name, path in (("ceph", "/cephfs"), ("sec", "/sec"), ("third", "/third"), ("nobody", "/nobody")):
+    for name, path in (("ceph", "/cephfs"), ("sec", "/sec"), ("third", "/third"), ("nobody", "/nobody"),
+                       ("dead", "/dead")):
         repos.storages.create(storage_name=name, mount_path=path, managed_root=path, backend_type="cephfs", actor="t")
     fresh_at, stale_at = "2026-08-02T09:59:00Z", "2026-08-02T09:00:00Z"
     reports = {
-        "n1": ([_m(), _m("sec", "/sec"), _m("third", "/third", writable=False)], fresh_at),
+        # dead: n1 은 끊긴 마운트(칸 broken -- 2026-11-27), n2 정상 -- 칸 판정이 바뀌어도 배지 숫자는 그대로여야 한다
+        "n1": ([_m(), _m("sec", "/sec"), _m("third", "/third", writable=False),
+                _m("dead", "/dead", "Missing", "missing_mount_path", exists=False, is_mountpoint=True)], fresh_at),
         "n2": ([_m(), _m("sec", "/sec", "Missing", "missing_mount_path"),
-                _m("third", "/old-third", "Missing", "not_a_mountpoint"), _m("third", "/third")], fresh_at),
+                _m("third", "/old-third", "Missing", "not_a_mountpoint"), _m("third", "/third"), _m("dead", "/dead")],
+               fresh_at),
         "n3": ([_m(status="Missing", reason="not_a_mountpoint"), _m("sec", "/sec")], fresh_at),
         "n4": ([_m(), _m("sec", "/sec"), _m("third", "/third")], stale_at),                     # stale -- 둘 다 무시
     }
@@ -294,11 +404,13 @@ def test_column_summary_matches_the_reconciler_exactly(db):
         row = repos.storages.get(col["storage_name"])
         assert (col["summary"]["status"], col["summary"]["detail"]) == (row["status"], row["status_detail"]), col
         seen += 1
-    assert seen == 4
+    assert seen == 5
     third = next(c for c in body["storages"] if c["storage_name"] == "third")["summary"]
     assert (third["ready"], third["total"]) == (2, 3)          # 경로 불일치 항목·중복도 센다(reconciler 그대로)
     nobody = next(c for c in body["storages"] if c["storage_name"] == "nobody")["summary"]
     assert (nobody["status"], nobody["total"]) == ("Unknown", 0)
+    dead = next(c for c in body["storages"] if c["storage_name"] == "dead")["summary"]
+    assert (dead["status"], dead["detail"], dead["broken"], dead["absent"]) == ("Degraded", "ready_nodes=1/2", 1, 0)
 
 
 # --- 이식 경계: 공용 코어는 k8s·PV·LDAP 를 모른다 ---------------------------------------------------------------------

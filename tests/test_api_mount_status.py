@@ -80,11 +80,39 @@ def test_shape_freshness_disabled_and_base(client, db):
         assert set(row["cells"]) == {"ceph", "sec"}
         assert all(c["state"] in CELL_STATES for c in row["cells"].values())
     t = body["totals"]
+    # problem_nodes 2 = w2(리포트 지연) + w1(sec 는 어느 신선 노드에도 붙어 있지 않아 「없음」도 문제 -- 2026-11-27)
     assert (t["nodes"], t["fresh_nodes"], t["stale_nodes"], t["ready"], t["absent"], t["problem_nodes"]) == (
-        2, 1, 1, 1, 1, 1)
+        2, 1, 1, 1, 1, 2)
+    assert (w1["problem"], w1["problem_count"]) == (True, 1)
     # 스텁 백엔드 노드 목록은 빈 목록 -- 「노드 없음」이 아니라 모름
     assert body["cluster"] == {"known": False, "agentless_nodes": [], "reason": "no_nodes_listed", "observed_at": None}
     assert body["control_pods"] == []                                  # 점검 기록이 없으면 꼬리표도 없다(지어내지 않는다)
+
+
+def test_dead_mount_is_broken_and_a_storage_mounted_nowhere_is_a_problem(client, db):
+    """끝에서 끝(2026-11-27 dms-ssc d207 리뷰 이식): ① 호스트엔 마운트가 있는데 경로가 안 보이는 칸(죽은 FUSE·낡은 NFS --
+    에이전트 보고 Missing + missing_mount_path + is_mountpoint true)은 「없음」이 아니라 마운트 문제(broken, 사유 원문 그대로),
+    ② 어느 신선 노드에도 붙어 있지 않은 스토리지(_seed 의 sec -- w1 경로 없음, w2 는 리포트 지연)의 「없음」은 문제다."""
+    repos = _seed(db)
+    repos.agents.ingest("w3", {"node_name": "w3", "probe_mode": "host_root", "mounts": [
+        {"storage_name": "ceph", "mount_path": "/cephfs", "status": "Missing", "reason": "missing_mount_path",
+         "exists": False, "is_mountpoint": True, "readable": False, "writable": False},
+        {"storage_name": "sec", "mount_path": "/sec", "status": "Missing", "reason": "missing_mount_path",
+         "exists": False, "is_mountpoint": False, "readable": False, "writable": False}]}, reported_at=utc_now_iso())
+    body = client.get(URL, headers=ADMIN).json()
+    w1, w2, w3 = body["nodes"]
+    dead = w3["cells"]["ceph"]
+    assert (dead["state"], dead["status"], dead["reason"], dead["is_mountpoint"]) == (
+        "broken", "Missing", "missing_mount_path", True)
+    assert (w1["cells"]["sec"]["state"], w3["cells"]["sec"]["state"]) == ("absent", "absent")
+    # w1: sec(어디에도 없음) 1 -- ceph 는 붙어 있다 / w3: 끊긴 ceph 1 + sec 1 / w2: 리포트 지연(모름)
+    assert [(r["node_name"], r["problem"], r["problem_count"]) for r in body["nodes"]] == [
+        ("w1", True, 1), ("w2", True, None), ("w3", True, 2)]
+    t = body["totals"]
+    assert (t["ready"], t["absent"], t["broken"], t["problem_nodes"]) == (1, 2, 1, 3)
+    cols = {c["storage_name"]: c["summary"] for c in body["storages"]}
+    assert (cols["ceph"]["broken"], cols["ceph"]["absent"], cols["ceph"]["ready"], cols["ceph"]["total"]) == (1, 0, 1, 2)
+    assert (cols["sec"]["absent"], cols["sec"]["ready"], cols["sec"]["status"]) == (2, 0, "Degraded")
 
 
 def test_no_artifact_base_means_no_shared_column(client, db):
@@ -159,8 +187,9 @@ def test_api_and_controller_pod_tags_come_from_fresh_db_records(client, db):
         ("api_pod", "dms-api-new", "w1", False, True, True, "waiting"),
         ("controller_pod", None, "w1", True, False, True, None)]
     assert body["control_pods"][1]["reason"] == "artifact_base_jobs_missing"
-    # 공용 디렉터리 칸은 에이전트 보고 그대로(정상)지만 이 노드의 dms-api 가 못 읽으므로 「문제 있는 노드」에 든다(공용 열 한 칸)
-    assert (w1["shared_dir"]["state"], w1["problem"], w1["problem_count"]) == ("ok", True, 1)
+    # 공용 디렉터리 칸은 에이전트 보고 그대로(정상)지만 이 노드의 dms-api 가 못 읽으므로 공용 열 한 칸을 더 센다 -- 2 = sec(어느
+    # 신선 노드에도 붙어 있지 않은 스토리지의 「없음」, _seed) 1 + 공용 열 1(API·컨트롤러가 둘 다여도 한 칸)
+    assert (w1["shared_dir"]["state"], w1["problem"], w1["problem_count"]) == ("ok", True, 2)
     assert body["totals"]["problem_nodes"] == 2 and body["totals"]["shared_problem"] == 0
 
 
@@ -174,7 +203,8 @@ def test_stale_controller_record_and_other_base_results(client, db):
     assert [(p["role"], p["ok"], p["reason"], p["read_failed"]) for p in body["control_pods"]] == [
         ("api_pod", None, None, False)]                                  # 옛 base 를 본 결과는 모름 -- 꼬리표만
     w1 = body["nodes"][0]
-    assert (w1["roles"], w1["problem_count"]) == (["api_pod"], 0)
+    # 1 = sec(어느 신선 노드에도 없음, _seed) 뿐 -- 옛 base·옛 기록의 실패는 공용 열에 더하지 않는다
+    assert (w1["roles"], w1["problem_count"]) == (["api_pod"], 1)
 
 
 def test_pv_storages_carry_selectable_pv_counts_and_caller_roles(kclient, world):

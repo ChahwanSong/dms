@@ -1,13 +1,14 @@
+import { useMemo } from "react";
 import { agoText, kstStamp } from "../../lib/datetime";
 import { useNow } from "../../lib/useNow";
 import { Chip, MountCellChip, NodeTags, ProblemTag, SharedCellChip } from "./MountCell";
-import { CELL_META, cellAriaLabel, cellLabel, podFailedOn, podsOn, sharedDisplay } from "./mountTerms";
+import { CELL_META, absentNowhere, cellAriaLabel, cellView, columnFacts, podFailedOn, podsOn, sharedDisplay } from "./mountTerms";
 import type { CellState, MountRow, MountStatusResponse, StorageColumn } from "./types";
 
 // 좁은 화면(390·375)의 노드별 카드(2026-11-23). 표를 CSS 로 숨기지 않고 이 보기를 **조건부로** 그린다(MountStatusPage) -- 숨은 표가
-// DOM 에 남으면 칸 수 측정(e2e)이 공허해진다. 카드는 정상이 아닌 칸만 먼저 보이고(문제 → 읽기 전용 → 확인 대기 → 모름 → 없음),
-// 정상 칸은 접어 둔다. 리포트 지연 카드는 글자를 text-ink/70 으로 흐리되(opacity 금지 -- mountTerms TONE_CLASS) 노드 이름은 흐리지
-// 않는다.
+// DOM 에 남으면 칸 수 측정(e2e)이 공허해진다. 카드는 정상이 아닌 칸만 먼저 보이고(문제 → 읽기 전용 → 확인 대기 → 모름 → 없음 --
+// 어디에도 마운트되지 않은 열의 없음은 문제라 마운트 문제와 같은 자리), 정상 칸은 접어 둔다. 리포트 지연 카드는 글자를 text-ink/70
+// 으로 흐리되(opacity 금지 -- mountTerms TONE_CLASS) 노드 이름은 흐리지 않는다.
 
 const ORDER: CellState[] = ["broken", "read_only", "pending", "stale", "absent"];
 const LINE = "flex items-center justify-between gap-2 border-t border-line py-1.5";
@@ -25,14 +26,16 @@ export function NodeMountCards({ data, rows, cols, roleLabels, onOpenNode, regis
   // 거른 열이면 요약 줄이 「표시한 스토리지」 기준임을 말한다 -- 머리의 「문제 n」(서버 problem_count)은 전체 스토리지 기준이라 숫자가
   // 다를 수 있다(2026-11-25 리뷰: q=sec 에서 「문제 3」 카드의 요약 줄이 「마운트 문제 1」).
   const partial = cols.length < data.storages.length;
+  const facts = useMemo(() => columnFacts(data.nodes), [data.nodes]);       // 행 필터 전 모든 행(서버 규칙과 같게)
   return (
     <ul aria-label="노드별 마운트 현황" className="space-y-3">
       {rows.map((row) => {
         const cells = cols
           .map((col) => ({ col, cell: row.cells[col.storage_name] }))
-          .filter((x) => x.cell !== undefined);
-        const odd = cells.filter((x) => x.cell.state !== "ready")
-          .sort((a, b) => ORDER.indexOf(a.cell.state) - ORDER.indexOf(b.cell.state));
+          .filter((x) => x.cell !== undefined)
+          .map((x) => ({ ...x, nowhere: absentNowhere(x.col.storage_name, x.cell, facts) }));
+        const rank = (x: (typeof cells)[number]) => ORDER.indexOf(x.nowhere ? "broken" : x.cell.state);
+        const odd = cells.filter((x) => x.cell.state !== "ready").sort((a, b) => rank(a) - rank(b));
         const ready = cells.filter((x) => x.cell.state === "ready");
         const counts = new Map<CellState, number>();
         for (const x of cells) counts.set(x.cell.state, (counts.get(x.cell.state) ?? 0) + 1);
@@ -70,11 +73,11 @@ export function NodeMountCards({ data, rows, cols, roleLabels, onOpenNode, regis
                                     sharedDisplay(row.shared_dir, podFailedOn(data, row.node_name)).meta.label)} />
                 </div>
               )}
-              {odd.map(({ col, cell }) => (
+              {odd.map(({ col, cell, nowhere }) => (
                 <div key={col.storage_name} className={LINE}>
                   <span className="min-w-0 truncate font-mono text-xs" title={col.mount_path}>{col.storage_name}</span>
-                  <MountCellChip cell={cell} className="!items-end"
-                                 aria-label={cellAriaLabel(row.node_name, col.storage_name, cellLabel(cell))} />
+                  <MountCellChip cell={cell} nowhere={nowhere} className="!items-end"
+                                 aria-label={cellAriaLabel(row.node_name, col.storage_name, cellView(cell, nowhere).aria)} />
                 </div>
               ))}
               {summary !== "" && (
@@ -89,7 +92,7 @@ export function NodeMountCards({ data, rows, cols, roleLabels, onOpenNode, regis
                     <div key={col.storage_name} className={LINE}>
                       <span className="min-w-0 truncate font-mono" title={col.mount_path}>{col.storage_name}</span>
                       <MountCellChip cell={cell} className="!items-end"
-                                     aria-label={cellAriaLabel(row.node_name, col.storage_name, cellLabel(cell))} />
+                                     aria-label={cellAriaLabel(row.node_name, col.storage_name, cellView(cell).aria)} />
                     </div>
                   ))}
                 </details>

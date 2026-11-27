@@ -1,6 +1,9 @@
 // 마운트 현황 테스트 픽스처(테스트 전용 -- 앱 코드는 import 하지 않는다; k8s/k8sFixtures 선례). LIVE 는 2026-11-23 dmsk8s 라이브
 // 모양(k8s-w1·k8s-w2 × 스토리지 6, w1/cephfs-secondary·w2/cephfs-third 경로 없음, 공용 /dms_shared nfs4)이고 k8s 덧붙임 키가
-// 없다(공용 코어 = dms-ssc 모양). VARIETY 는 칸·공용·꼬리표의 모든 갈래를 한 화면에 모은다.
+// 없다(공용 코어 = dms-ssc 모양). VARIETY 는 칸·공용·꼬리표의 모든 갈래를 한 화면에 모은다. NOWHERE(2026-11-27)는 LIVE 위에 끊긴
+// 마운트 칸과 어느 노드에도 마운트되지 않은 스토리지 열을 얹는다. 문제 수(problem_count·totals)는 서버 규칙(mount_status 「문제 있는
+// 노드」)으로 손으로 센 값이다 -- 칸을 바꾸면 수도 같이 맞춘다(화면이 칸에서 다시 재는 열 재료와 어긋나면 표시가 서버와 두 말을 한다).
+import { cellProblem, columnFacts } from "./mountTerms";
 import type { ControlPod, MountCellData, MountRow, MountStatusResponse, SharedCellData, StorageColumn } from "./types";
 
 export const NOW_ISO = new Date().toISOString();
@@ -21,6 +24,11 @@ export const absent = (path: string): MountCellData => ({
 export const broken = (path: string, reason: string): MountCellData => ({
   state: "broken", last: null, pending: null, status: "Missing", reason, reported_path: path, exists: true,
   is_mountpoint: false, readable: true, writable: false, disk: null,
+});
+/** 끊긴 마운트(서버 classify_cell -- Missing + missing_mount_path 인데 호스트 mountinfo 엔 마운트가 있다: 죽은 FUSE·낡은 NFS). */
+export const deadMount = (path: string): MountCellData => ({
+  state: "broken", last: null, pending: null, status: "Missing", reason: "missing_mount_path", reported_path: path, exists: false,
+  is_mountpoint: true, readable: false, writable: false, disk: null,
 });
 export const sharedOk = (over: Partial<SharedCellData> = {}): SharedCellData => ({
   state: "ok", last: null, reported_path: "/dms_shared/dms/artifacts", exists: true, writable: true,
@@ -68,7 +76,26 @@ export const LIVE: MountStatusResponse = {
 
 const OLD_ISO = new Date(Date.now() - 12 * 60_000).toISOString();
 
-// VARIETY: 스토리지 둘(ceph·sec) × 노드 다섯.
+// NOWHERE: LIVE + 스토리지 cephfs-typo(두 노드 모두 경로 없음 -- mount_path 오타 모양, 어디에도 마운트되지 않아 그 없음은 문제) +
+// k8s-w2 의 cephfs-dms 끊긴 마운트. 문제 = w1 1(typo) · w2 2(typo + 끊긴 cephfs-dms), 문제 있는 스토리지 = cephfs-dms·cephfs-typo.
+export const NOWHERE: MountStatusResponse = {
+  ...LIVE,
+  storages: [
+    ...LIVE.storages.map((c) => (c.storage_name === "cephfs-dms"
+      ? column(c.storage_name, c.mount_path, { ready: 1, total: 2, status: "Degraded", detail: "ready_nodes=1/2", broken: 1 })
+      : c)),
+    column("cephfs-typo", "/cephfs-typo",
+           { ready: 0, total: 2, status: "Degraded", detail: "no_ready_mounts (nodes=2)", absent: 2 }),
+  ],
+  nodes: LIVE.nodes.map((r) => (r.node_name === "k8s-w1"
+    ? { ...r, cells: { ...r.cells, "cephfs-typo": absent("/cephfs-typo") }, problem: true, problem_count: 1 }
+    : { ...r, cells: { ...r.cells, "cephfs-dms": deadMount("/cephfs"), "cephfs-typo": absent("/cephfs-typo") }, problem: true,
+        problem_count: 2 })),
+  totals: { ...TOTALS, ready: 9, absent: 4, broken: 1, problem_nodes: 2 },
+};
+
+// VARIETY: 스토리지 둘(ceph·sec) × 노드 다섯. sec 은 n-pend 만 붙어 있다(정상·쓰기 여부 모름) -- 그래서 n-build 의 sec 없음은 안 붙인
+// 노드(문제 아님, 2026-11-27 열 규칙). n-pend 의 ceph 는 옛 경로로 잰 결과(확인 대기·경로 바뀜).
 const C = "/cephfs";
 const S = "/sec";
 export const VARIETY: MountStatusResponse = {
@@ -89,8 +116,8 @@ export const VARIETY: MountStatusResponse = {
           k8s_node: { schedulable: false, reason: "cordoned", transient: false } }),
     row("n-ro", { ceph: ready(C, { state: "read_only", writable: false }), sec: broken(S, "host_root_missing") },
         { problem: true, problem_count: 3, shared_dir: sharedOk({ state: "differs", mount_point: "/data", fstype: "xfs" }) }),
-    row("n-pend", { ceph: ready(C, { writable: null }),
-                    sec: { ...ready("/old-sec"), state: "pending", pending: "path_changed" } },
+    row("n-pend", { ceph: { ...ready("/old-cephfs"), state: "pending", pending: "path_changed" },
+                    sec: ready(S, { writable: null }) },
         { in_cluster: false, control_plane: null,
           shared_dir: sharedOk({ state: "ok_unverified", mount_point: null, fstype: null }) }),
     row("n-stale", { ceph: { ...ready(C), state: "stale", last: "ready" },
@@ -148,7 +175,8 @@ export const WITH_PODS: MountStatusResponse = {
 // 모양) · 2 = /mnt/sN, 칸(노드 j, 0부터) i%10==3 → j%4==1 마운트 문제 · 6 → j%3==0 읽기 전용(나머지
 // 정상 = 문제) · 9 → 모두 읽기 전용(문제 아님) · 1·4 → j%2==0 없음 · 8 → j%5==0 확인 대기 · 나머지 정상. 문제 있는 스토리지 =
 // i%10∈{3,6}(100열에 20개), archive ∩ 문제 = 56·63. 경로에는 「archive」·「stor-」가 없다(찾기는 경로도 본다). summary·totals·
-// problem_count 는 칸에서 센다(서버 규칙의 거울).
+// problem_count 는 칸에서 센다(서버 규칙의 거울 -- mountTerms.columnFacts·cellProblem; 노드가 1대면 i%10∈{1,4} 열이 어디에도 없는
+// 스토리지가 돼 그 없음도 센다).
 const pad = (i: number, n: number) => String(i).padStart(n, "0");
 export const wideName = (i: number): string => `stor-${pad(i, 3)}${
   i % 7 === 0 ? "-gpfs-project-archive-cold" : i % 5 === 0 ? "-nfs-scratch" : i % 11 === 0 ? "-weka-research-01" : ""}`;
@@ -178,10 +206,9 @@ export function wide(n: number, nodes: number): MountStatusResponse {
   const ids = Array.from({ length: n }, (_, k) => k + 1);
   const rows: MountRow[] = Array.from({ length: nodes }, (_, j) =>
     row(`node-${pad(j, 2)}`, Object.fromEntries(ids.map((i) => [wideName(i), wideCell(i, j, widePath(i))]))));
-  const roOutliers = new Set(ids.map(wideName).filter((name) => rows.some((r) => r.cells[name].state === "ready")));
+  const facts = columnFacts(rows);
   for (const r of rows) {
-    const count = Object.entries(r.cells)
-      .filter(([name, c]) => c.state === "broken" || (c.state === "read_only" && roOutliers.has(name))).length;
+    const count = Object.entries(r.cells).filter(([name, c]) => cellProblem(name, c, facts)).length;
     r.problem_count = count;
     r.problem = count > 0;
   }

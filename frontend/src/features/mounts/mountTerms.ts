@@ -1,5 +1,5 @@
 import type { LucideIcon } from "lucide-react";
-import { CircleCheck, CircleQuestionMark, CircleX, Hourglass, Lock, Minus, TriangleAlert } from "lucide-react";
+import { CircleCheck, CircleQuestionMark, CircleX, Hourglass, Lock, Minus, TriangleAlert, Unplug } from "lucide-react";
 import { reasonText } from "../../lib/api";
 import type {
   CellState, ColumnSummary, ControlPod, MountCellData, MountDisk, MountRow, MountStatusResponse, SharedCellData, SharedMajority,
@@ -26,8 +26,22 @@ export const TONE_CLASS: Record<Tone, string> = {
 
 export interface StateMeta { label: string; Icon: LucideIcon; tone: Tone; help: string }
 
+// 「없음」 설명 셋(2026-11-27 -- 서버 mount_status 「문제 있는 노드」의 열 규칙): 같은 스토리지를 신선한 노드 하나라도 붙였으면(정상·읽기
+// 전용) 안 붙인 노드라 문제 아님, 하나도 없으면 어디에도 마운트되지 않은 스토리지라 문제. 열 재료를 모르는 곳(범례 칩·옛 호출)은 규칙을
+// 함께 말하는 ABSENT_HELP.
 const ABSENT_HELP = "이 노드에 마운트 경로가 없습니다 — 이 스토리지를 붙이지 않은 노드라면 정상입니다(소스·목적지 노드를 나눈 "
-  + "구성). 작업은 이 스토리지를 마운트한 노드에서만 돕니다.";
+  + "구성). 작업은 이 스토리지를 마운트한 노드에서만 돕니다. 단, 어느 노드에도 붙어 있지 않은 스토리지면(마운트된 노드가 하나도 "
+  + "없음) 문제로 셉니다.";
+const ABSENT_ELSEWHERE_HELP = "이 노드에 마운트 경로가 없습니다 — 다른 노드에는 마운트돼 있어, 이 스토리지를 붙이지 않은 노드라면 "
+  + "정상입니다(소스·목적지 노드를 나눈 구성). 작업은 이 스토리지를 마운트한 노드에서만 돕니다.";
+const ABSENT_NOWHERE_HELP = "이 노드에 마운트 경로가 없고, 이 스토리지를 마운트한 노드가 하나도 없습니다 — 마운트 경로 오타이거나 아직 "
+  + "어느 노드에도 마운트하지 않은 스토리지일 수 있어 문제로 셉니다.";
+// 끊긴 마운트(2026-11-27 -- dms-ssc d207 리뷰 이식): 에이전트는 Missing + missing_mount_path 로 보고하지만 호스트 mountinfo 엔 마운트가
+// 있다(is_mountpoint 참). 서버는 이 칸만 broken 으로 둔다(missing_mount_path 인 나머지는 absent) -- 그래서 broken 칸의 이 사유는 늘 끊긴
+// 마운트다(REASON_TEXT).
+const DEAD_MOUNT_HELP = "끊긴 마운트 — 호스트에는 마운트가 있는데 경로에 접근할 수 없습니다(죽은 FUSE·낡은 NFS 핸들·마운트 전파 끊김). "
+  + "노드에서 그 마운트를 다시 붙이세요(죽은 FUSE·낡은 NFS 는 lazy umount 뒤 다시 마운트) — 호스트에서는 경로가 보이면 dms-agent "
+  + "파드를 다시 시작하세요.";
 const UNKNOWN_REASON_HELP = "알 수 없는 사유 코드입니다(에이전트 버전 차이일 수 있음).";
 
 export const CELL_META: Record<CellState, StateMeta> = {
@@ -42,9 +56,11 @@ export const CELL_META: Record<CellState, StateMeta> = {
   stale: { label: "모름", Icon: CircleQuestionMark, tone: "stale", help: "리포트 지연 — 지금 상태는 모릅니다." },
 };
 
-/** 에이전트 마운트 사유(agent.probes.probe_mounts) → 칸 글자(short)·설명(long). */
+/** 에이전트 마운트 사유(agent.probes.probe_mounts) → **마운트 문제(broken) 칸의** 글자(short)·설명(long). missing_mount_path 는
+ *  broken 칸에서만 여기 온다 = 호스트엔 마운트가 있는 끊긴 마운트(서버 classify_cell -- 호스트에도 없으면 「없음」 absent 칸이고
+ *  CELL_META.absent 를 쓴다). */
 export const REASON_TEXT: Record<string, { short: string; long: string; Icon?: LucideIcon }> = {
-  missing_mount_path: { short: "없음", long: ABSENT_HELP },
+  missing_mount_path: { short: "끊긴 마운트", long: DEAD_MOUNT_HELP, Icon: Unplug },
   not_a_mountpoint: {
     short: "마운트 빠짐",
     long: "디렉터리는 있지만 마운트 지점이 아닙니다 — 마운트가 풀렸거나 부팅 때 붙지 않아 빈 로컬 디렉터리만 남았습니다.",
@@ -93,18 +109,72 @@ export function cellIcon(cell: CellLike): LucideIcon {
   return CELL_META[cell.state].Icon;
 }
 
+// 열 단위 문제 판정의 거울(2026-11-27 -- 서버 mount_status._ro_outlier_columns·_mounted_columns·_cell_problem). 둘 다 신선한 행만 본다
+// (리포트 지연 행의 칸은 state stale 이라 근거도 문제도 아니다). 교차 픽스처 mountProblemCases.json 을 서버 시험(tests/test_mount_status.py)과
+// 이 파일의 시험이 함께 읽는다 -- 서버 규칙이 바뀌면 둘이 같이 빨개진다.
+export interface ColumnFacts {
+  /** 신선한 정상(쓰기 가능) 칸이 있는 열 -- 그 열의 읽기 전용은 바깥값(문제). */
+  ready: ReadonlySet<string>;
+  /** 신선한 정상·읽기 전용 칸이 있는 열 -- 그 열의 「없음」은 안 붙인 노드(문제 아님), 없으면 어디에도 없는 스토리지(문제). */
+  mounted: ReadonlySet<string>;
+}
+
+/** 응답의 **모든** 행(행 필터 전)에서 열 재료를 모은다. */
+export function columnFacts(rows: readonly MountRow[]): ColumnFacts {
+  const ready = new Set<string>();
+  const mounted = new Set<string>();
+  for (const r of rows) {
+    if (!r.fresh) continue;
+    for (const [name, c] of Object.entries(r.cells)) {
+      if (c.state === "ready") ready.add(name);
+      if (c.state === "ready" || c.state === "read_only") mounted.add(name);
+    }
+  }
+  return { ready, mounted };
+}
+
+/** 신선한 행의 칸 하나가 문제인가(서버 _cell_problem): 마운트 문제 · 정상 노드가 있는 열의 읽기 전용 · 어디에도 없는 열의 「없음」. */
+export function cellProblem(name: string, cell: Pick<MountCellData, "state">, facts: ColumnFacts): boolean {
+  return cell.state === "broken" || (cell.state === "read_only" && facts.ready.has(name))
+    || (cell.state === "absent" && !facts.mounted.has(name));
+}
+
+/** 어디에도 마운트되지 않은 열의 「없음」 칸인가(그 칸은 문제다 -- 표시·도움말이 갈린다). */
+export const absentNowhere = (name: string, cell: Pick<MountCellData, "state">, facts: ColumnFacts): boolean =>
+  cell.state === "absent" && !facts.mounted.has(name);
+
+/** 어디에도 마운트되지 않은 열의 「없음」 칸 표시: 글자는 「없음」 그대로, 아이콘·면색이 문제를 말하고(색만으로 구분하지 않는다 --
+ *  아이콘이 다르다) 낭독 글자가 뜻을 함께 말한다. */
+const ABSENT_NOWHERE_META: StateMeta = { label: "없음", Icon: TriangleAlert, tone: "bad", help: ABSENT_NOWHERE_HELP };
+const ABSENT_NOWHERE_ARIA = "없음(어느 노드에도 마운트 안 됨)";
+
+export interface CellView { Icon: LucideIcon; label: string; tone: Tone; aria: string }
+
+/** 칸 칩의 표시(아이콘·글자·면색 + 낭독 글자). nowhere = absentNowhere(부르는 쪽이 응답의 모든 행으로 잰 columnFacts). */
+export function cellView(cell: CellLike, nowhere = false): CellView {
+  if (nowhere && cell.state === "absent") {
+    const m = ABSENT_NOWHERE_META;
+    return { Icon: m.Icon, label: m.label, tone: m.tone, aria: ABSENT_NOWHERE_ARIA };
+  }
+  const label = cellLabel(cell);
+  return { Icon: cellIcon(cell), label, tone: CELL_META[cell.state].tone, aria: label };
+}
+
 /** stale 칸의 「마지막 값」 글자 -- last 판정에 원문 사유를 얹어 cellLabel 로. */
 function lastLabel(cell: MountCellData): string {
   return cell.last === null ? "—" : cellLabel({ state: cell.last, reason: cell.reason, status: cell.status });
 }
 
-/** 칸의 긴 설명(툴팁·시트). ago = 마지막 보고 경과(「12분 전」), mountPath = 지금 스토리지 마운트 경로. */
-export function cellHelp(cell: MountCellData, ctx: { mountPath: string; ago: string }): string {
+/** 칸의 긴 설명(툴팁·시트). ago = 마지막 보고 경과(「12분 전」), mountPath = 지금 스토리지 마운트 경로, nowhere = 이 칸의 열에 신선한
+ *  마운트 칸이 하나도 없다(!columnFacts.mounted.has -- 「없음」 칸의 설명이 갈린다; 모르면 생략 = 규칙을 함께 말하는 설명). */
+export function cellHelp(cell: MountCellData, ctx: { mountPath: string; ago: string; nowhere?: boolean }): string {
   switch (cell.state) {
     case "ready":
       return cell.writable === null
         ? `${CELL_META.ready.help} 쓰기 가능 여부는 이 에이전트가 보고하지 않습니다(옛 에이전트).`
         : CELL_META.ready.help;
+    case "absent":
+      return ctx.nowhere === true ? ABSENT_NOWHERE_HELP : ctx.nowhere === false ? ABSENT_ELSEWHERE_HELP : ABSENT_HELP;
     case "broken":
       return (cell.reason !== null ? REASON_TEXT[cell.reason]?.long : undefined) ?? UNKNOWN_REASON_HELP;
     case "pending":
@@ -311,28 +381,25 @@ export function roleLabel(role: string, extra?: Record<string, string>): string 
   return extra?.[role] ?? CORE_ROLE_LABELS[role] ?? role;
 }
 
-/** 칸의 접근성 이름 「k8s-w1 · cephfs-secondary: 없음」 */
+/** 칸의 접근성 이름 「k8s-w1 · cephfs-secondary: 없음」(label = cellView(...).aria) */
 export function cellAriaLabel(node: string, column: string, label: string): string {
   return `${node} · ${column}: ${label}`;
 }
 
 // 열(스토리지) 쪽 표기·거르기(2026-11-25 사용자 요청 「스토리지가 100개가 될 수도 있어」 -- 표 머리 압축·열 거르기).
 
-/** 「문제 있는 스토리지」 열(열 거르기 ?cols=problems) -- 서버 mount_status._ro_outlier_columns·_problem_count 의 열 쪽 거울:
- *  신선한 마운트 문제 칸(summary.broken > 0)이 있거나, 같은 열에 신선한 ready 칸이 있는데 신선한 읽기 전용 칸이 있다. 모든
- *  노드가 ro 인 열(의도된 구성)·없음·확인 대기·리포트 지연은 문제로 세지 않는다. rows = 응답의 모든 행(행 필터 전). */
-export function columnProblem(col: StorageColumn, rows: readonly MountRow[]): boolean {
+/** 「문제 있는 스토리지」 열(열 거르기 ?cols=problems) -- 서버 「문제 있는 노드」 칸 판정(_cell_problem)의 열 쪽 거울: 신선한 행에
+ *  문제 칸(cellProblem)이 하나라도 있는 열 = 마운트 문제(끊긴 마운트 포함 -- summary.broken > 0), 신선한 ready 가 있는 열의 읽기
+ *  전용, 신선한 마운트(정상·읽기 전용) 칸이 하나도 없는 열의 「없음」(어디에도 마운트되지 않은 스토리지 -- 2026-11-27). 모든 노드가
+ *  ro 인 열(의도된 구성)·다른 노드엔 붙은 열의 없음·확인 대기·리포트 지연은 문제로 세지 않는다. rows = 응답의 모든 행(행 필터 전),
+ *  facts = 같은 rows 의 columnFacts(열마다 다시 재지 않게 부르는 쪽이 한 번 넘겨도 된다). */
+export function columnProblem(col: StorageColumn, rows: readonly MountRow[], facts: ColumnFacts = columnFacts(rows)): boolean {
   if (col.summary.broken > 0) return true;
-  let ready = false;
-  let readOnly = false;
-  for (const r of rows) {
-    if (!r.fresh) continue;
-    const state = r.cells[col.storage_name]?.state;
-    if (state === "ready") ready = true;
-    else if (state === "read_only") readOnly = true;
-    if (ready && readOnly) return true;
-  }
-  return false;
+  const name = col.storage_name;
+  return rows.some((r) => {
+    const cell = r.cells[name];
+    return r.fresh && cell !== undefined && cellProblem(name, cell, facts);
+  });
 }
 
 /** q(앞뒤 공백 떼고 대소문자 무시)가 storage_name 또는 mount_path 에 들어 있는 열 ∩ (problemsOnly 면 columnProblem). 응답 순서
@@ -341,9 +408,10 @@ export function filterColumns(cols: StorageColumn[], rows: readonly MountRow[],
                               f: { q: string; problemsOnly: boolean }): StorageColumn[] {
   const q = f.q.trim().toLowerCase();
   if (q === "" && !f.problemsOnly) return cols;
+  const facts = f.problemsOnly ? columnFacts(rows) : undefined;
   return cols.filter((c) =>
     (q === "" || c.storage_name.toLowerCase().includes(q) || c.mount_path.toLowerCase().includes(q))
-    && (!f.problemsOnly || columnProblem(c, rows)));
+    && (facts === undefined || columnProblem(c, rows, facts)));
 }
 
 /** 열 머리 툴팁의 요약 문장 「마운트 3/4대 · 마운트 문제 1칸 · 읽기 전용 1칸 · 없음 1칸 · 확인 대기 1칸」(0 은 뺀다 -- 신선한 칸만

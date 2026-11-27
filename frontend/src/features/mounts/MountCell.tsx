@@ -4,7 +4,7 @@ import { TriangleAlert } from "lucide-react";
 import { agoText, kstStamp } from "../../lib/datetime";
 import { PlacementBadges } from "../nodes/NodePlacement";
 import {
-  CELL_META, SHARED_META, TONE_CLASS, cellHelp, cellIcon, cellLabel, cellMounted, cellSub, columnRuleText, columnSummaryText,
+  SHARED_META, TONE_CLASS, cellHelp, cellMounted, cellSub, cellView, columnRuleText, columnSummaryText,
   coverText, isPodRole, podTag, roleLabel, sharedHelp, podFailedHelp, sharedDisplay, usageDetail, writableText, yesNo,
 } from "./mountTerms";
 import type { PodTagView, Tone } from "./mountTerms";
@@ -50,18 +50,18 @@ const SUB = "max-w-full truncate text-[11px] leading-tight text-muted tabular-nu
 type SpanProps = HTMLAttributes<HTMLSpanElement>;
 
 /** 스토리지 칸: 칩 + 보조 줄(사용률·경로 바뀜·지연). 나머지 props(aria-label·폭 상한 className)는 바깥 span 에 -- 표의 칸 툴팁은
- *  칸(td)에 위임으로 건다(MountMatrix). */
-export function MountCellChip({ cell, className = "", ...rest }: { cell: MountCellData } & SpanProps) {
+ *  칸(td)에 위임으로 건다(MountMatrix). nowhere = 어디에도 마운트되지 않은 열의 「없음」(mountTerms.absentNowhere -- 문제로 센다;
+ *  aria-label 은 부르는 쪽이 cellView(cell, nowhere).aria 로). */
+export function MountCellChip({ cell, nowhere = false, className = "", ...rest }: { cell: MountCellData; nowhere?: boolean } & SpanProps) {
   const sub = cellSub(cell);
+  const view = cellView(cell, nowhere);
   return (
     <span className={`inline-flex flex-col items-center gap-0.5 ${className}`} {...rest}>
-      <StateChip Icon={cellIcon(cell)} label={cellLabel(cell)} tone={metaTone(cell)} />
+      <StateChip Icon={view.Icon} label={view.label} tone={view.tone} />
       {sub !== null && <span className={SUB}>{sub}</span>}
     </span>
   );
 }
-
-const metaTone = (cell: MountCellData): Tone => CELL_META[cell.state].tone;
 
 /** DMS 공용 디렉터리 칸. */
 export function SharedCellChip({ cell, podFailed = false, className = "", ...rest }: { cell: SharedCellData; podFailed?: boolean } & SpanProps) {
@@ -76,8 +76,9 @@ export function SharedCellChip({ cell, podFailed = false, className = "", ...res
 
 /** 문제 노드 꼬리표(표는 행 머리 꼬리표 줄 맨 앞 -- NodeTags lead, 노드별 카드는 이름 옆. 표의 고정 첫 열이라 가로로 민 표에서도,
  *  「문제 있는 노드」 필터를 켜지 않아도 보인다).
- *  수 = 서버 problem_count(마운트 문제 + 다른 노드와 다른 읽기 전용 + 공용 디렉터리 문제 -- 이 노드 DMS 파드의 경로 점검 실패도
- *  공용 디렉터리 한 칸으로 센다, 서버 mount_status_pods), 리포트 지연은 「지연」(지금 상태 모름 --
+ *  수 = 서버 problem_count(마운트 문제(끊긴 마운트 포함) + 다른 노드와 다른 읽기 전용 + 어디에도 마운트되지 않은 스토리지의 없음 +
+ *  공용 디렉터리 문제 -- 이 노드 DMS 파드의 경로 점검 실패도 공용 디렉터리 한 칸으로 센다, 서버 mount_status_pods), 리포트 지연은
+ *  「지연」(지금 상태 모름 --
  *  null ≠ 0). 아이콘 + 글자(색만으로 구분하지 않는다). showStale=false 면 지연 행에는 그리지 않는다(같은 머리에 「리포트 지연」 칩이
  *  이미 있는 노드별 카드). */
 export function ProblemTag({ row, showStale = true }: { row: MountRow; showStale?: boolean }) {
@@ -86,8 +87,8 @@ export function ProblemTag({ row, showStale = true }: { row: MountRow; showStale
   if (count === null && !showStale) return null;
   return (
     <span title={count === null ? "리포트 지연 — 지금 마운트 상태를 모릅니다"
-                 : `문제 ${count}건 — 마운트 문제·다른 노드와 다른 읽기 전용·DMS 공용 디렉터리 문제(이 노드의 dms-api·컨트롤러가 `
-                   + "경로를 못 읽는 것 포함)"}
+                 : `문제 ${count}건 — 마운트 문제(끊긴 마운트 포함)·다른 노드와 다른 읽기 전용·어느 노드에도 마운트되지 않은 `
+                   + "스토리지의 없음·DMS 공용 디렉터리 문제(이 노드의 dms-api·컨트롤러가 경로를 못 읽는 것 포함)"}
           className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-md bg-badbg px-1.5 py-0.5 text-[11px]
                      font-semibold leading-4 text-bad">
       <TriangleAlert className="h-3 w-3 shrink-0" aria-hidden />
@@ -141,17 +142,19 @@ function Dl({ children }: { children: ReactNode }) {
 }
 const Dt = ({ children }: { children: ReactNode }) => <dt className="whitespace-nowrap text-muted">{children}</dt>;
 
-/** 스토리지 칸 툴팁 내용. */
-export function MountTipBody({ nodeName, col, cell, reportedAt, nowMs }: {
-  nodeName: string; col: StorageColumn; cell: MountCellData; reportedAt: string; nowMs: number;
+/** 스토리지 칸 툴팁 내용. nowhere = 이 칸의 열에 신선한 마운트 칸이 하나도 없다(!columnFacts.mounted.has -- 「없음」 칸의 표시·
+ *  설명이 갈린다; 모르면 생략). */
+export function MountTipBody({ nodeName, col, cell, reportedAt, nowMs, nowhere }: {
+  nodeName: string; col: StorageColumn; cell: MountCellData; reportedAt: string; nowMs: number; nowhere?: boolean;
 }) {
   const ago = agoText(reportedAt, nowMs);
   const usage = usageDetail(cell.disk);
+  const view = cellView(cell, nowhere === true);
   return (
     <div className="max-w-xs space-y-1.5">
       <div className="font-semibold [overflow-wrap:anywhere]">{`${nodeName} · ${col.storage_name}`}</div>
-      <StateChip Icon={cellIcon(cell)} label={cellLabel(cell)} tone={metaTone(cell)} />
-      <p>{cellHelp(cell, { mountPath: col.mount_path, ago })}</p>
+      <StateChip Icon={view.Icon} label={view.label} tone={view.tone} />
+      <p>{cellHelp(cell, { mountPath: col.mount_path, ago, nowhere })}</p>
       <Dl>
         <Dt>마운트 경로</Dt><dd className="font-mono break-all">{col.mount_path}</dd>
         {cell.reported_path !== null && cell.reported_path !== col.mount_path && (

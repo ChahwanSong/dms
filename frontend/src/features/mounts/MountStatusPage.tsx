@@ -11,7 +11,7 @@ import { StateChip } from "./MountCell";
 import { MountMatrix } from "./MountMatrix";
 import { NodeMountCards } from "./NodeMountCards";
 import { NodeMountSheet } from "./NodeMountSheet";
-import { CELL_META, POD_ROLE_LABELS, columnProblem, filterColumns, podCheckText } from "./mountTerms";
+import { CELL_META, POD_ROLE_LABELS, columnFacts, columnProblem, filterColumns, podCheckText } from "./mountTerms";
 import type { CellState, MountRow, MountStatusResponse, MountTotals, StorageColumn } from "./types";
 import { useMountStatus } from "./useMountStatus";
 
@@ -47,11 +47,12 @@ type View = "table" | "cards";
 const NARROW = "(max-width: 639px)";
 
 // 범례: 칸과 같은 칩 + 개수(신선한 칸은 「칸」, 모름만 리포트 지연 노드 「대」 -- 단위를 붙여 노드 수와 헷갈리지 않게) + 짧은 뜻.
+// 없음의 뜻은 서버 「문제 있는 노드」 열 규칙과 같다(어느 노드에도 마운트되지 않은 스토리지의 없음은 문제 -- 칸은 경고 아이콘·빨강).
 const LEGEND: { state: CellState; text: string; count: (t: MountTotals) => string }[] = [
   { state: "ready", text: "마운트·읽기 가능", count: (t) => `${t.ready}칸` },
   { state: "read_only", text: "sync 목적지·rm 제외", count: (t) => `${t.read_only}칸` },
-  { state: "absent", text: "경로 없음(안 붙인 노드면 정상)", count: (t) => `${t.absent}칸` },
-  { state: "broken", text: "마운트 빠짐·전파 안 됨·읽기 불가·점검 불가", count: (t) => `${t.broken}칸` },
+  { state: "absent", text: "경로 없음(안 붙인 노드면 정상, 어느 노드에도 없으면 문제)", count: (t) => `${t.absent}칸` },
+  { state: "broken", text: "마운트 빠짐·끊긴 마운트·전파 안 됨·읽기 불가·점검 불가", count: (t) => `${t.broken}칸` },
   { state: "pending", text: "다음 보고에 반영", count: (t) => `${t.pending}칸` },
   { state: "stale", text: "리포트 지연", count: (t) => `${t.stale_nodes}대` },
 ];
@@ -144,7 +145,10 @@ export function MountStatusPage({ renderStorageMeta, renderStorageTip, roleLabel
   const allCols = data?.storages ?? NO_COLUMNS;
   const allRows = data?.nodes ?? NO_ROWS;
   const rows = onlyProblems ? allRows.filter((r) => r.problem) : allRows;
-  const problemColCount = useMemo(() => allCols.filter((c) => columnProblem(c, allRows)).length, [allCols, allRows]);
+  const problemColCount = useMemo(() => {
+    const facts = columnFacts(allRows);
+    return allCols.filter((c) => columnProblem(c, allRows, facts)).length;
+  }, [allCols, allRows]);
   const visibleCols = useStableList(useMemo(
     () => filterColumns(allCols, allRows, { q: search.applied, problemsOnly: problemCols }),
     [allCols, allRows, search.applied, problemCols]));
@@ -177,7 +181,7 @@ export function MountStatusPage({ renderStorageMeta, renderStorageTip, roleLabel
               value={t === undefined ? dash : t.broken === 0
                 ? <><CircleCheck className="h-5 w-5 text-ok" aria-hidden /><span className="text-ok">없음</span></>
                 : <><TriangleAlert className="h-5 w-5 text-bad" aria-hidden /><span className="text-bad">{`${t.broken}칸`}</span></>}
-              sub="마운트 빠짐·전파 안 됨·읽기 불가·점검 불가" />
+              sub="마운트 빠짐·끊긴 마운트·전파 안 됨·읽기 불가·점검 불가" />
         <Tile label="읽기 전용" value={t ? `${t.read_only}칸` : dash} sub="sync 목적지·rm 배치에서 빠짐" />
         <Tile label="공용 디렉터리"
               value={t === undefined || data === undefined || data.shared_dir === null ? dash : (

@@ -82,7 +82,10 @@ export function wideMountStatus(nowMs = Date.now()): Record<string, unknown> {
   const fresh = WIDE_FRESH_NODES.map((name, j) => ({
     name, cells: Object.fromEntries(ids.map((i) => [wideName(i), cellOf(i, j, widePath(i))])) as Record<string, Cell>,
   }));
+  // 「문제 있는 노드」 수 = 서버 mount_status._cell_problem 의 거울(앱 코드를 import 하지 않아 여기 따로 둔다): 마운트 문제 · 정상
+  // 노드가 있는 열의 읽기 전용 · 정상·읽기 전용 노드가 하나도 없는 열의 없음(2026-11-27 -- 23노드라 이 합성 응답에는 없다).
   const roOutliers = new Set(ids.map(wideName).filter((n) => fresh.some((r) => r.cells[n].state === "ready")));
+  const mounted = new Set(ids.map(wideName).filter((n) => fresh.some((r) => ["ready", "read_only"].includes(r.cells[n].state))));
   const row = (name: string, cells: Record<string, Cell>, over: Record<string, unknown> & { problem: boolean }) => ({
     node_name: name, reported_at: now, fresh: true, probe_mode: "host_root", exclusion: null,
     k8s_node: { schedulable: true, reason: null, transient: false }, roles: [] as string[], control_plane: false,
@@ -90,7 +93,8 @@ export function wideMountStatus(nowMs = Date.now()): Record<string, unknown> {
   });
   const nodes = fresh.map(({ name, cells }, j) => {
     const count = Object.entries(cells)
-      .filter(([n, c]) => c.state === "broken" || (c.state === "read_only" && roOutliers.has(n))).length;
+      .filter(([n, c]) => c.state === "broken" || (c.state === "read_only" && roOutliers.has(n))
+        || (c.state === "absent" && !mounted.has(n))).length;
     const roles = j === 1 ? ["build", "k8s_primary"] : j === 2 ? ["k8s_secondary"] : [];
     return row(name, cells, { roles, problem: count > 0, problem_count: count });
   });

@@ -1,0 +1,122 @@
+{
+  "_doc": [
+    "마운트 현황 「문제 있는 노드」 교차 픽스처(2026-11-27). 서버(src/dms/mount_status.py build)와 포탈 거울(frontend/src/features/mounts/",
+    "mountTerms.ts columnFacts·cellProblem·columnProblem·cellView)이 같은 입력에서 같은 답을 내는지 두 시험이 함께 본다:",
+    "tests/test_mount_status.py 는 input 을 build() 에 넣어 expected(칸 상태·사유·is_mountpoint·problem_count·열 요약·totals)와",
+    "problem_columns(신선한 행에 문제 칸이 있는 열)가 서버 출력과 같은지, mountProblemCases.test.ts 는 expected 를 응답 모양으로 펴서",
+    "거울이 같은 problem_count·problem_columns 를 내는지 본다. 서버 규칙을 바꾸면 여기를 고치고(서버 시험) 거울을 맞춘다(포탈 시험).",
+    "열: split(안 붙인 노드 있음 -- 문제 아님) · nowhere(신선한 노드 모두 없음, 지연 노드만 정상 -- 문제) · dead(n2 끊긴 마운트 --",
+    "Missing+missing_mount_path+is_mountpoint true = broken) · ro-all(모두 ro -- 의도된 구성) · ro-outlier(정상 옆 ro -- 문제) ·",
+    "ro-absent(ro 하나 + 없음 -- ro 도 마운트라 문제 아님) · pending-absent(없음 + 확인 대기 -- 마운트 없음이라 문제) ·",
+    "legacy-absent(is_mountpoint 키 없는 옛 보고의 없음은 absent, n3 마운트 빠짐). n4 는 리포트 지연(problem_count null)."
+  ],
+  "input": {
+    "storages": [
+      {"storage_name": "split", "mount_path": "/split", "enabled": 1, "user_enabled": 1, "backend_type": "cephfs"},
+      {"storage_name": "nowhere", "mount_path": "/nowhere", "enabled": 1, "user_enabled": 1, "backend_type": "cephfs"},
+      {"storage_name": "dead", "mount_path": "/dead", "enabled": 1, "user_enabled": 1, "backend_type": "cephfs"},
+      {"storage_name": "ro-all", "mount_path": "/ro-all", "enabled": 1, "user_enabled": 1, "backend_type": "cephfs"},
+      {"storage_name": "ro-outlier", "mount_path": "/ro-outlier", "enabled": 1, "user_enabled": 1, "backend_type": "cephfs"},
+      {"storage_name": "ro-absent", "mount_path": "/ro-absent", "enabled": 1, "user_enabled": 1, "backend_type": "cephfs"},
+      {"storage_name": "pending-absent", "mount_path": "/pending-absent", "enabled": 1, "user_enabled": 1, "backend_type": "cephfs"},
+      {"storage_name": "legacy-absent", "mount_path": "/legacy-absent", "enabled": 1, "user_enabled": 1, "backend_type": "cephfs"}
+    ],
+    "nodes": [
+      {"node_name": "n1", "fresh": true, "mounts": [
+        {"storage_name": "split", "mount_path": "/split", "status": "Ready", "reason": null, "exists": true, "is_mountpoint": true, "readable": true, "writable": true},
+        {"storage_name": "nowhere", "mount_path": "/nowhere", "status": "Missing", "reason": "missing_mount_path", "exists": false, "is_mountpoint": false, "readable": false, "writable": false},
+        {"storage_name": "dead", "mount_path": "/dead", "status": "Ready", "reason": null, "exists": true, "is_mountpoint": true, "readable": true, "writable": true},
+        {"storage_name": "ro-all", "mount_path": "/ro-all", "status": "Ready", "reason": null, "exists": true, "is_mountpoint": true, "readable": true, "writable": false},
+        {"storage_name": "ro-outlier", "mount_path": "/ro-outlier", "status": "Ready", "reason": null, "exists": true, "is_mountpoint": true, "readable": true, "writable": true},
+        {"storage_name": "ro-absent", "mount_path": "/ro-absent", "status": "Ready", "reason": null, "exists": true, "is_mountpoint": true, "readable": true, "writable": false},
+        {"storage_name": "pending-absent", "mount_path": "/pending-absent", "status": "Missing", "reason": "missing_mount_path", "exists": false, "is_mountpoint": false, "readable": false, "writable": false},
+        {"storage_name": "legacy-absent", "mount_path": "/legacy-absent", "status": "Ready", "reason": null, "exists": true, "is_mountpoint": true, "readable": true, "writable": true}
+      ]},
+      {"node_name": "n2", "fresh": true, "mounts": [
+        {"storage_name": "split", "mount_path": "/split", "status": "Missing", "reason": "missing_mount_path", "exists": false, "is_mountpoint": false, "readable": false, "writable": false},
+        {"storage_name": "nowhere", "mount_path": "/nowhere", "status": "Missing", "reason": "missing_mount_path", "exists": false, "is_mountpoint": false, "readable": false, "writable": false},
+        {"storage_name": "dead", "mount_path": "/dead", "status": "Missing", "reason": "missing_mount_path", "exists": false, "is_mountpoint": true, "readable": false, "writable": false},
+        {"storage_name": "ro-all", "mount_path": "/ro-all", "status": "Ready", "reason": null, "exists": true, "is_mountpoint": true, "readable": true, "writable": false},
+        {"storage_name": "ro-outlier", "mount_path": "/ro-outlier", "status": "Ready", "reason": null, "exists": true, "is_mountpoint": true, "readable": true, "writable": false},
+        {"storage_name": "ro-absent", "mount_path": "/ro-absent", "status": "Missing", "reason": "missing_mount_path", "exists": false, "is_mountpoint": false, "readable": false, "writable": false},
+        {"storage_name": "legacy-absent", "mount_path": "/legacy-absent", "status": "Missing", "reason": "missing_mount_path", "exists": false, "readable": false, "writable": false}
+      ]},
+      {"node_name": "n3", "fresh": true, "mounts": [
+        {"storage_name": "split", "mount_path": "/split", "status": "Ready", "reason": null, "exists": true, "is_mountpoint": true, "readable": true, "writable": true},
+        {"storage_name": "nowhere", "mount_path": "/nowhere", "status": "Missing", "reason": "missing_mount_path", "exists": false, "is_mountpoint": false, "readable": false, "writable": false},
+        {"storage_name": "dead", "mount_path": "/dead", "status": "Ready", "reason": null, "exists": true, "is_mountpoint": true, "readable": true, "writable": true},
+        {"storage_name": "ro-all", "mount_path": "/ro-all", "status": "Ready", "reason": null, "exists": true, "is_mountpoint": true, "readable": true, "writable": false},
+        {"storage_name": "ro-outlier", "mount_path": "/ro-outlier", "status": "Ready", "reason": null, "exists": true, "is_mountpoint": true, "readable": true, "writable": true},
+        {"storage_name": "ro-absent", "mount_path": "/ro-absent", "status": "Missing", "reason": "missing_mount_path", "exists": false, "is_mountpoint": false, "readable": false, "writable": false},
+        {"storage_name": "pending-absent", "mount_path": "/pending-absent", "status": "Missing", "reason": "missing_mount_path", "exists": false, "is_mountpoint": false, "readable": false, "writable": false},
+        {"storage_name": "legacy-absent", "mount_path": "/legacy-absent", "status": "Missing", "reason": "not_a_mountpoint", "exists": true, "is_mountpoint": false, "readable": true, "writable": false}
+      ]},
+      {"node_name": "n4", "fresh": false, "mounts": [
+        {"storage_name": "split", "mount_path": "/split", "status": "Ready", "reason": null, "exists": true, "is_mountpoint": true, "readable": true, "writable": true},
+        {"storage_name": "nowhere", "mount_path": "/nowhere", "status": "Ready", "reason": null, "exists": true, "is_mountpoint": true, "readable": true, "writable": true},
+        {"storage_name": "dead", "mount_path": "/dead", "status": "Ready", "reason": null, "exists": true, "is_mountpoint": true, "readable": true, "writable": true},
+        {"storage_name": "ro-all", "mount_path": "/ro-all", "status": "Ready", "reason": null, "exists": true, "is_mountpoint": true, "readable": true, "writable": true},
+        {"storage_name": "ro-outlier", "mount_path": "/ro-outlier", "status": "Ready", "reason": null, "exists": true, "is_mountpoint": true, "readable": true, "writable": true},
+        {"storage_name": "ro-absent", "mount_path": "/ro-absent", "status": "Ready", "reason": null, "exists": true, "is_mountpoint": true, "readable": true, "writable": true},
+        {"storage_name": "pending-absent", "mount_path": "/pending-absent", "status": "Ready", "reason": null, "exists": true, "is_mountpoint": true, "readable": true, "writable": true},
+        {"storage_name": "legacy-absent", "mount_path": "/legacy-absent", "status": "Ready", "reason": null, "exists": true, "is_mountpoint": true, "readable": true, "writable": true}
+      ]}
+    ]
+  },
+  "expected": {
+    "problem_columns": ["nowhere", "dead", "ro-outlier", "pending-absent", "legacy-absent"],
+    "nodes": [
+      {"node_name": "n1", "fresh": true, "problem_count": 2, "cells": {
+        "split": {"state": "ready", "last": null, "status": "Ready", "reason": null, "is_mountpoint": true},
+        "nowhere": {"state": "absent", "last": null, "status": "Missing", "reason": "missing_mount_path", "is_mountpoint": false},
+        "dead": {"state": "ready", "last": null, "status": "Ready", "reason": null, "is_mountpoint": true},
+        "ro-all": {"state": "read_only", "last": null, "status": "Ready", "reason": null, "is_mountpoint": true},
+        "ro-outlier": {"state": "ready", "last": null, "status": "Ready", "reason": null, "is_mountpoint": true},
+        "ro-absent": {"state": "read_only", "last": null, "status": "Ready", "reason": null, "is_mountpoint": true},
+        "pending-absent": {"state": "absent", "last": null, "status": "Missing", "reason": "missing_mount_path", "is_mountpoint": false},
+        "legacy-absent": {"state": "ready", "last": null, "status": "Ready", "reason": null, "is_mountpoint": true}
+      }},
+      {"node_name": "n2", "fresh": true, "problem_count": 3, "cells": {
+        "split": {"state": "absent", "last": null, "status": "Missing", "reason": "missing_mount_path", "is_mountpoint": false},
+        "nowhere": {"state": "absent", "last": null, "status": "Missing", "reason": "missing_mount_path", "is_mountpoint": false},
+        "dead": {"state": "broken", "last": null, "status": "Missing", "reason": "missing_mount_path", "is_mountpoint": true},
+        "ro-all": {"state": "read_only", "last": null, "status": "Ready", "reason": null, "is_mountpoint": true},
+        "ro-outlier": {"state": "read_only", "last": null, "status": "Ready", "reason": null, "is_mountpoint": true},
+        "ro-absent": {"state": "absent", "last": null, "status": "Missing", "reason": "missing_mount_path", "is_mountpoint": false},
+        "pending-absent": {"state": "pending", "last": null, "status": null, "reason": null, "is_mountpoint": null},
+        "legacy-absent": {"state": "absent", "last": null, "status": "Missing", "reason": "missing_mount_path", "is_mountpoint": null}
+      }},
+      {"node_name": "n3", "fresh": true, "problem_count": 3, "cells": {
+        "split": {"state": "ready", "last": null, "status": "Ready", "reason": null, "is_mountpoint": true},
+        "nowhere": {"state": "absent", "last": null, "status": "Missing", "reason": "missing_mount_path", "is_mountpoint": false},
+        "dead": {"state": "ready", "last": null, "status": "Ready", "reason": null, "is_mountpoint": true},
+        "ro-all": {"state": "read_only", "last": null, "status": "Ready", "reason": null, "is_mountpoint": true},
+        "ro-outlier": {"state": "ready", "last": null, "status": "Ready", "reason": null, "is_mountpoint": true},
+        "ro-absent": {"state": "absent", "last": null, "status": "Missing", "reason": "missing_mount_path", "is_mountpoint": false},
+        "pending-absent": {"state": "absent", "last": null, "status": "Missing", "reason": "missing_mount_path", "is_mountpoint": false},
+        "legacy-absent": {"state": "broken", "last": null, "status": "Missing", "reason": "not_a_mountpoint", "is_mountpoint": false}
+      }},
+      {"node_name": "n4", "fresh": false, "problem_count": null, "cells": {
+        "split": {"state": "stale", "last": "ready", "status": "Ready", "reason": null, "is_mountpoint": true},
+        "nowhere": {"state": "stale", "last": "ready", "status": "Ready", "reason": null, "is_mountpoint": true},
+        "dead": {"state": "stale", "last": "ready", "status": "Ready", "reason": null, "is_mountpoint": true},
+        "ro-all": {"state": "stale", "last": "ready", "status": "Ready", "reason": null, "is_mountpoint": true},
+        "ro-outlier": {"state": "stale", "last": "ready", "status": "Ready", "reason": null, "is_mountpoint": true},
+        "ro-absent": {"state": "stale", "last": "ready", "status": "Ready", "reason": null, "is_mountpoint": true},
+        "pending-absent": {"state": "stale", "last": "ready", "status": "Ready", "reason": null, "is_mountpoint": true},
+        "legacy-absent": {"state": "stale", "last": "ready", "status": "Ready", "reason": null, "is_mountpoint": true}
+      }}
+    ],
+    "storages": [
+      {"storage_name": "split", "summary": {"ready": 2, "total": 3, "status": "Degraded", "detail": "ready_nodes=2/3", "broken": 0, "read_only": 0, "absent": 1, "pending": 0}},
+      {"storage_name": "nowhere", "summary": {"ready": 0, "total": 3, "status": "Degraded", "detail": "no_ready_mounts (nodes=3)", "broken": 0, "read_only": 0, "absent": 3, "pending": 0}},
+      {"storage_name": "dead", "summary": {"ready": 2, "total": 3, "status": "Degraded", "detail": "ready_nodes=2/3", "broken": 1, "read_only": 0, "absent": 0, "pending": 0}},
+      {"storage_name": "ro-all", "summary": {"ready": 3, "total": 3, "status": "Ready", "detail": "ready_nodes=3", "broken": 0, "read_only": 3, "absent": 0, "pending": 0}},
+      {"storage_name": "ro-outlier", "summary": {"ready": 3, "total": 3, "status": "Ready", "detail": "ready_nodes=3", "broken": 0, "read_only": 1, "absent": 0, "pending": 0}},
+      {"storage_name": "ro-absent", "summary": {"ready": 1, "total": 3, "status": "Degraded", "detail": "ready_nodes=1/3", "broken": 0, "read_only": 1, "absent": 2, "pending": 0}},
+      {"storage_name": "pending-absent", "summary": {"ready": 0, "total": 2, "status": "Degraded", "detail": "no_ready_mounts (nodes=2)", "broken": 0, "read_only": 0, "absent": 2, "pending": 1}},
+      {"storage_name": "legacy-absent", "summary": {"ready": 1, "total": 3, "status": "Degraded", "detail": "ready_nodes=1/3", "broken": 1, "read_only": 0, "absent": 1, "pending": 0}}
+    ],
+    "totals": {"nodes": 4, "fresh_nodes": 3, "stale_nodes": 1, "ready": 7, "read_only": 5, "absent": 9, "broken": 2, "pending": 1, "shared_ok": 0, "shared_unverified": 0, "shared_problem": 0, "shared_pending": 0, "problem_nodes": 4}
+  }
+}

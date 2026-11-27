@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { Dialog } from "../../components/ui/Dialog";
@@ -5,8 +6,8 @@ import { agoText, kstStamp } from "../../lib/datetime";
 import { useNow } from "../../lib/useNow";
 import { MountCellChip, NodeTags, PodTag, SharedCellChip } from "./MountCell";
 import {
-  cellAriaLabel, cellHelp, cellLabel, cellMounted, coverText, podFailedHelp, podFailedOn, podFailedRoles, podTag, podsOn, probeModeText,
-  sharedDisplay, sharedHelp, usageDetail, writableText, yesNo,
+  absentNowhere, cellAriaLabel, cellHelp, cellMounted, cellView, columnFacts, coverText, podFailedHelp, podFailedOn, podFailedRoles,
+  podTag, podsOn, probeModeText, sharedDisplay, sharedHelp, usageDetail, writableText, yesNo,
 } from "./mountTerms";
 import type { MountRow, MountStatusResponse, StorageColumn } from "./types";
 
@@ -27,6 +28,7 @@ export function NodeMountSheet({ row, data, roleLabels, renderStorageTip, onClos
   const shared = data.shared_dir;
   const pods = row !== null ? podsOn(data, row.node_name) : [];
   const podRoles = [...new Set(pods.map((p) => p.role))];
+  const facts = useMemo(() => columnFacts(data.nodes), [data.nodes]);       // 「없음」 칸의 표시·설명(어디에도 마운트되지 않은 열)
   return (
     <Dialog side="right" open={row !== null} onOpenChange={(o) => { if (!o) onClose(); }}
             title={row?.node_name ?? ""} titleClassName="font-mono" onCloseAutoFocus={onCloseAutoFocus}
@@ -92,12 +94,13 @@ export function NodeMountSheet({ row, data, roleLabels, renderStorageTip, onClos
                 const cell = row.cells[col.storage_name];
                 if (cell === undefined) return null;
                 const usage = usageDetail(cell.disk);
+                const nowhere = absentNowhere(col.storage_name, cell, facts);
                 return (
                   <li key={col.storage_name} className="rounded-lg border border-line px-3 py-2.5 space-y-1">
                     <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
                       <span className="font-mono text-xs font-medium break-all">{col.storage_name}</span>
-                      <MountCellChip cell={cell} className="!items-end"
-                                     aria-label={cellAriaLabel(row.node_name, col.storage_name, cellLabel(cell))} />
+                      <MountCellChip cell={cell} nowhere={nowhere} className="!items-end"
+                                     aria-label={cellAriaLabel(row.node_name, col.storage_name, cellView(cell, nowhere).aria)} />
                     </div>
                     <p className="font-mono text-xs text-muted break-all">{col.mount_path}</p>
                     {renderStorageTip !== undefined && <div className="text-xs">{renderStorageTip(col)}</div>}
@@ -107,7 +110,8 @@ export function NodeMountSheet({ row, data, roleLabels, renderStorageTip, onClos
                     </p>
                     {cell.state !== "ready" && (
                       <p className="text-xs">
-                        {cellHelp(cell, { mountPath: col.mount_path, ago: agoText(row.reported_at, nowMs) })}
+                        {cellHelp(cell, { mountPath: col.mount_path, ago: agoText(row.reported_at, nowMs),
+                                          nowhere: !facts.mounted.has(col.storage_name) })}
                         {cell.reason !== null && <span className="mt-0.5 block font-mono text-muted">{cell.reason}</span>}
                       </p>
                     )}

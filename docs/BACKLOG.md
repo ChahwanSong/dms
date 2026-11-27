@@ -436,6 +436,20 @@ CHANGELOG 「스토리지 > 마운트 현황(노드 × 스토리지 매트릭스
   문제인 노드거나 파드의 경로 점검이 실패하면(권한 사유 제외 — 컨트롤러 쓰기 왕복 실패 포함) 꼬리표가 경고(그 조합이 사고 서명), 그런
   행은 「문제 있는 노드」에 든다(공용 열 한 칸), 표 밖 노드(prod 마스터 — 에이전트 없음)의 파드는 각주. 라이브 실증은 아직(testbed-k8s 다음 태그 — 롤링 때 새 파드가 시작 게이트에
   막힌 노드의 꼬리표가 보이는지).
+- 🔍 **판정 구멍 둘 수정의 라이브 실증** — 2026-11-27(CHANGELOG 「마운트 현황 판정 구멍 둘」, dms-ssc d207 리뷰 이식) 아직: ① 끊긴 마운트 —
+  테스트베드 한 노드에서 FUSE 마운트를 죽이거나(또는 그 노드의 다음 보고 전 가짜 보고 ingest — `is_mountpoint: true`·`exists: false`) 칸이
+  「끊긴 마운트」(빨강)·「문제 n」·「마운트 문제」 타일·「문제 있는 스토리지」에 드는지, 스토리지 목록 배지(Degraded)는 종전과 같은지 ② 어디에도
+  없는 스토리지 — 없는 mount_path 로 스토리지를 등록(다음 보고 뒤) 열 전체가 경고 아이콘 「없음」·모든 신선 노드에 「문제 1」 ③ 다른 노드엔
+  붙은 스토리지의 없음(라이브 w1/cephfs-secondary 모양)은 그대로 회색·문제 0. 확인 뒤 등록한 시험 스토리지는 지운다.
+- 📝 **dms-ssc 와 남은 차이(같은 날 이식 기준)** — 규칙(끊긴 마운트는 문제, 어디에도 없는 열의 없음은 문제, ro 는 정상 노드 옆에서만)은
+  같고 모양이 다르다: ssc `routes_mounts` 는 칸·아티팩트 경로 칸마다 `problem` 플래그를 싣고 요약 수가 그 플래그만 세며(포탈은 플래그가 없는
+  옛 서버에서만 다시 셈), 상태 이름이 missing/absent 다. k8s 는 행 `problem_count` 만 싣고 포탈이 열 규칙을 거울(`mountTerms.columnFacts`·
+  `cellProblem`)로 다시 재며 상태 이름이 broken/absent 다(교차 픽스처 `mountProblemCases.json` 이 서버·포탈을 묶는다). ssc 는 아티팩트 경로
+  칸에 덮는 스토리지 칸의 missing·absent 를 겹치지만(`covering_storage_missing:<이름>`), k8s 공용 디렉터리 칸은 에이전트의 덮는 마운트
+  (mount_point·fstype — local·differs)로만 판정한다. 칸마다 problem 플래그를 실을지는 두 라인을 같이 정한다(응답 모양 — 공용 코어 계약).
+- 💡 **에이전트가 끊긴 마운트를 직접 가리기** — 지금은 서버가 `is_mountpoint` 로 추론한다(Missing + missing_mount_path + is_mountpoint true).
+  에이전트가 경로 stat 의 errno(ENOTCONN·ESTALE·EIO)를 따로 사유로 싣으면 죽은 FUSE·낡은 NFS 와 전파 끊김(부모 마운트가 덮음)을 구별해
+  조치 문장을 나눌 수 있다(두 라인 공용 에이전트 — dms-agent 재빌드 필요).
 - 💡 **`/api/admin/artifact-base` 의 checks.nodes 에 mount_point·fstype** — 아티팩트 경로 화면의 「3홉 검증」 노드 표도 로컬 디렉터리를 구별하게.
 - 💡 **공유 마운트 source(서버:경로) 비교** — 지금 「다른 노드와 다름」은 (마운트 지점, fstype) 과반만 본다. 같은 nfs4 라도 다른 서버를 붙인
   노드는 못 가린다(에이전트가 mountinfo 의 source 를 더 실어야 한다).
