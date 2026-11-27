@@ -425,9 +425,15 @@ d7a228f2)를 옮겼다. 지금 동작은 `frontend/src/components/form/Wizard.ts
 ## 4. 알려진 해석·잔여 리스크 (문서)
 
 - 📝 **API 자체 artifact base 점검 후속**(2026-11-23 — ARCHITECTURE §7 불변식 16, deploy/README §12b). 남은 것:
-  - 에이전트의 `artifact_base` 프로브에 fstype(덮는 마운트의 파일시스템)을 더해 마운트 현황의 「아티팩트 경로」 칸이 빈 로컬 디렉터리를
-    exists/writable 만으로 정상으로 보지 않게(지금은 덮는 등록 스토리지 셀이 missing 일 때만 겹쳐 잡는다 — base 를 덮는 스토리지가
-    등록돼 있지 않으면 못 잡는다). 에이전트 재빌드 필요.
+  - ~~에이전트의 `artifact_base` 프로브에 fstype~~ — 2026-11-27 해소(dms-k8s d14ee402 이식): 프로브가 덮는 마운트 `mount_point`·
+    `fstype` 을 싣고, 마운트 현황은 '/' 면 「로컬 디렉터리」(missing `artifact_base_local_dir`)로 본다. 남은 것:
+    - 💡 **「다른 노드와 다름」 판정** — dms-k8s 는 신선한 정상 행들의 (mount_point, fstype) 엄격 과반과 다른 행을 `differs` 로 문제
+      셈한다. 이 라인은 옮기지 않았다(덮는 마운트는 정보로만 보인다 — '/' 가 아닌 다른 로컬 마운트(예: 별도 디스크 /data)에 남은
+      디렉터리는 아직 못 잡는다). 실사이트에서 base 를 노드마다 다른 마운트로 붙이는 구성이 있는지 보고 결정.
+    - 💡 **purge 노드 선택에서 로컬 디렉터리 노드 빼기** — `request_purger._eligible_nodes` 는 exists∧writable 만 본다. 덮는 마운트가 '/'
+      인 노드를 빼면 로컬 빈 디렉터리에서 삭제가 「성공」하는 거짓 정리를 막는다(dms-k8s 에도 없음, 별도 판단).
+    - 📝 **base 가 정말 루트 fs 인 구성은 오탐** — 단일 노드 개발 설치처럼 아티팩트 경로를 일부러 루트 fs 디렉터리에 두면 모든 노드가
+      「로컬 디렉터리」(문제)로 보인다. 공유 스토리지를 전제로 한 판정이다.
   - 미리보기 단계의 같은 굳음: `stepper._poll_preview` 의 summary None 은 지금도 즉시 `empty_preview`(Rejected)로 끝난다 — 실행 단계와
     같은 유한 지연(`_defer_summary`)을 걸지 결정. 실행 단계 지연은 컨트롤러 프로세스 메모리라 재시작마다 상한 한 번이 더 붙는다(TTL/2
     여유가 그 몫 — 재시작이 TTL 안에 여러 번이면 GC 뒤 FAILED 로 둔갑할 수 있다; 지속하려면 잡 행에 처음 미룬 시각).

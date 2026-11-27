@@ -7,6 +7,7 @@ DaemonSet 이 호스트 `/` 를 읽기 전용·HostToContainer 로 /host/root �
      access 를 쓰면 placement(require_writable) 가 sync 목적지를 전부 배제한다.
   2. 전파 자가 진단 -- 호스트엔 마운트포인트인데 /host/root 아래에 안 보이면
      propagation_stale(호스트 `/` 가 shared 가 아니거나 전파 없음)."""
+import errno
 import os
 
 from dms.agent.probes import (host_path, parse_mount_table, probe_artifact_base,
@@ -103,17 +104,116 @@ def test_legacy_direct_mode_is_unchanged_without_host_root():
 def test_artifact_base_writable_from_covering_mount_options():
     base = probe_artifact_base("/mgmt_storage/dms/artifacts", isdir=_isdir_base,
                                access=_access_ro_bind, host_root=ROOT, mountinfo_text=HOST_MI)
-    assert base == {"path": "/mgmt_storage/dms/artifacts", "exists": True, "writable": True}
+    assert base == {"path": "/mgmt_storage/dms/artifacts", "exists": True, "writable": True,
+                    "mount_point": "/mgmt_storage", "fstype": "ceph"}
     base = probe_artifact_base("/archive/dms", isdir=_isdir_base, access=_access_ro_bind,
                                host_root=ROOT, mountinfo_text=HOST_MI)
     assert base["writable"] is False        # 덮는 마운트 /archive 가 ro
+    assert (base["mount_point"], base["fstype"]) == ("/archive", "nfs4")
     base = probe_artifact_base("/nowhere/x", isdir=lambda p: False, access=_access_ro_bind,
                                host_root=ROOT, mountinfo_text=HOST_MI)
-    assert base == {"path": "/nowhere/x", "exists": False, "writable": False}
+    # 없는 경로여도 덮는 마운트('/')는 정보로 싣는다 -- 판정은 exists 가 먼저다(routes_mounts._base_cell)
+    assert base == {"path": "/nowhere/x", "exists": False, "writable": False,
+                    "mount_point": "/", "fstype": "ext4"}
+
+
+def test_artifact_base_reports_covering_shared_mount_and_fstype():
+    # 2026-11-27(dms-k8s d14ee402 이식): base 가 공유 마운트(nfs4) 아래면 그 지점·종류를 싣는다
+    mi = HOST_MI + "50 22 0:40 / /dms_shared rw,relatime shared:9 - nfs4 10.10.10.1:/data/dms_shared rw\n"
+    base = probe_artifact_base("/dms_shared/dms/artifacts",
+                               isdir=lambda p: p == "/host/root/dms_shared/dms/artifacts",
+                               access=_access_ro_bind, host_root=ROOT, mountinfo_text=mi)
+    assert base == {"path": "/dms_shared/dms/artifacts", "exists": True, "writable": True,
+                    "mount_point": "/dms_shared", "fstype": "nfs4"}
+
+
+def test_artifact_base_local_directory_without_shared_mount_reports_root():
+    # 2026-11-23 사고의 모양: 공유 마운트가 빠지고 같은 경로의 로컬 디렉터리만 남은 노드 -- exists·writable 은 참이라
+    # 정상으로 보이지만 덮는 마운트가 '/'(루트 fs) 다. 서버는 이것을 missing(artifact_base_local_dir)으로 판정한다.
+    base = probe_artifact_base("/dms_shared/dms/artifacts",
+                               isdir=lambda p: p == "/host/root/dms_shared/dms/artifacts",
+                               access=_access_ro_bind, host_root=ROOT, mountinfo_text=HOST_MI)
+    assert base == {"path": "/dms_shared/dms/artifacts", "exists": True, "writable": True,
+                    "mount_point": "/", "fstype": "ext4"}
+
+
+def test_artifact_base_without_any_covering_mount_is_unknown():
+    # '/' 조차 없는 mountinfo -- 덮는 마운트를 모르면 지어내지 않는다(둘 다 None, writable 은 종전대로 False)
+    mi = "40 22 0:33 / /mgmt_storage rw,relatime shared:2 - ceph 10.0.0.1:/ rw\n"
+    base = probe_artifact_base("/dms_shared/dms/artifacts", isdir=lambda p: True,
+                               access=_access_ro_bind, host_root=ROOT, mountinfo_text=mi)
+    assert base == {"path": "/dms_shared/dms/artifacts", "exists": True, "writable": False,
+                    "mount_point": None, "fstype": None}
+
+
+def test_artifact_base_fstype_missing_in_mountinfo_is_none():
+    # '-' 구분자가 없는 줄(fstype 칸 없음)은 빈 문자열 대신 None(모름) -- 서버가 빈 이름을 보이지 않게
+    mi = "22 1 0:20 / / rw,relatime shared:1\n"
+    base = probe_artifact_base("/x", isdir=lambda p: True, access=_access_ro_bind,
+                               host_root=ROOT, mountinfo_text=mi)
+    assert (base["mount_point"], base["fstype"]) == ("/", None)
 
 
 def _isdir_base(p):
     return p in {"/host/root/mgmt_storage/dms/artifacts", "/host/root/archive/dms"}
+
+
+# 2026-11-27 리뷰: 심링크 base 접두(allowlist 가 「/data → /cephfs/x」를 허용)는 덮는 마운트를 **host_root 안에서 푼 경로**로 찾는다
+# -- 글자 그대로 찾으면 '/' 아래로 보여 모든 노드가 「로컬 디렉터리」(문제)가 됐다.
+SYM_MI = """\
+22 1 0:20 / / rw,relatime shared:1 - ext4 /dev/root rw
+40 22 0:33 / /cephfs rw,relatime shared:2 - ceph 10.0.0.1:/ rw
+"""
+
+
+def _sym_root(tmp_path):
+    root = tmp_path / "root"
+    (root / "cephfs" / "x" / "dms" / "artifacts").mkdir(parents=True)
+    (root / "opt").mkdir()
+    return root
+
+
+def test_artifact_base_relative_symlink_resolves_inside_host_root(tmp_path):
+    root = _sym_root(tmp_path)
+    (root / "data").symlink_to("cephfs/x")                    # 상대 대상: 지금 디렉터리(/)에서 푼다
+    (root / "opt" / "base").symlink_to("../cephfs/x")          # '..' 를 거치는 상대 대상
+    for path in ("/data/dms/artifacts", "/opt/base/dms/artifacts"):
+        base = probe_artifact_base(path, host_root=str(root), mountinfo_text=SYM_MI)
+        assert base == {"path": path, "exists": True, "writable": True, "mount_point": "/cephfs", "fstype": "ceph"}
+
+
+def test_artifact_base_absolute_symlink_is_rerooted_under_host_root(tmp_path):
+    root = _sym_root(tmp_path)
+    (root / "data").symlink_to("/cephfs/x")                   # 호스트 절대 대상 -- 컨테이너 루트가 아니라 host_root 아래로
+    base = probe_artifact_base("/data/dms/artifacts", host_root=str(root), mountinfo_text=SYM_MI)
+    assert (base["mount_point"], base["fstype"]) == ("/cephfs", "ceph")
+    from dms.agent.probes import resolve_in_host_root
+    assert resolve_in_host_root(str(root), "/data/dms/artifacts") == "/cephfs/x/dms/artifacts"
+    # 없는 조각은 남은 조각과 함께 글자 그대로('..' 만 접는다) -- 없는 base 여도 덮는 마운트는 정보로 싣는다
+    assert resolve_in_host_root(str(root), "/data/nope/../dms/z") == "/cephfs/x/dms/z"
+    assert resolve_in_host_root(str(root), "/nowhere/x") == "/nowhere/x"
+
+
+def test_artifact_base_symlink_loop_or_unreadable_link_reports_no_cover(tmp_path):
+    root = _sym_root(tmp_path)
+    (root / "l1").symlink_to("l2")
+    (root / "l2").symlink_to("/l1")
+    base = probe_artifact_base("/l1/dms", host_root=str(root), mountinfo_text=SYM_MI)
+    # 고리면 덮는 마운트를 모른다 -- 로컬 디렉터리 판정을 하지 않게 None(지어내지 않는다)
+    assert base == {"path": "/l1/dms", "exists": False, "writable": False, "mount_point": None, "fstype": None}
+    from dms.agent.probes import resolve_in_host_root
+    (root / "a").symlink_to("b")
+    (root / "b").symlink_to("cephfs")
+    assert resolve_in_host_root(str(root), "/a/x", max_hops=2) == "/cephfs/x"
+    assert resolve_in_host_root(str(root), "/a/x", max_hops=1) is None      # 상한을 넘으면 못 푼 것
+    # EINVAL(심링크 아님)·ENOENT·ENOTDIR 밖의 오류(끊긴 마운트의 ENOTCONN 등)도 못 푼 것 -- writable 은 글자 그대로의 덮는 마운트로
+
+    def broken(p):
+        raise OSError(errno.ENOTCONN, "Transport endpoint is not connected")
+    base = probe_artifact_base("/cephfs/x/dms/artifacts", isdir=lambda p: True, host_root=str(root),
+                               mountinfo_text=SYM_MI, readlink=broken)
+    assert base == {"path": "/cephfs/x/dms/artifacts", "exists": True, "writable": True, "mount_point": None,
+                    "fstype": None}
 
 
 def test_os_metrics_statvfs_uses_translated_path():

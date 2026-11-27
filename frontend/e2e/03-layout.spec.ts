@@ -73,7 +73,8 @@ async function visitMounts(page: Page): Promise<void> {
 //                    2026-10-20 스토리지 탭 줄(가로 스크롤)이 새 L1 위험이라 순회에 넣는다 -- 탭 안 sr-only 노드가 화면
 //                    밖으로 문서를 넓히던 유형(StatusPill 619/375). 행·펼침 상세의 375 불변식은 E10(09)이 기록과 함께 잰다.
 //   /admin/mounts    th 3(노드·e2e-store·아티팩트 경로) + e2e-node 1행 × td 3 = 6 -- 이 파일 시점엔 스토리지 1·보고 노드 1이다.
-//                    「본문 열」 테스트(가장 넓은 표 화면)에서만 순회한다.
+//                    「본문 열」 테스트(가장 넓은 표 화면)와 375 spot check(2026-11-27 표 압축 -- 거르기 줄·고정 머리 래퍼)에서
+//                    순회한다.
 test.describe("E3 레이아웃 불변식", () => {
   test("1280x800 주요 화면 순회", async ({ page }) => {
     await apiLogin(page);
@@ -147,6 +148,11 @@ test.describe("E3 레이아웃 불변식", () => {
     // 사용량 분석 스토리지 탭 줄은 375 에서 줄바꿈 없이 가로 스크롤한다 -- 줄 자체만 넘치고 문서는 넘치지 않아야 한다(L1).
     await visitUsage(page);
     await assertLayoutSane(page, { sidebarFixed: false, minTableCells: 0 });
+
+    // 마운트 현황(2026-11-27 표 압축 -- dms-k8s 7a172d1d 이식): 거르기 줄(토글 둘 + 스토리지 찾기 칸)·범례는 375 에서 접히고, 고정
+    // 머리·노드 칸 표는 자기 래퍼(가로·세로 스크롤) 안에서만 넘친다 -- 문서는 넘치지 않는다(L1).
+    await visitMounts(page);
+    await assertLayoutSane(page, { sidebarFixed: false, minTableCells: 6 });
 
     // 대시보드 노드 칸(2026-10-16 CPU 사용률 추가로 5칸): md 아래는 2열로 쌓여 375 에서 넘치지 않아야 한다.
     await visit(page, "/admin/dashboard", "대시보드");

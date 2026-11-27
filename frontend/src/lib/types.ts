@@ -774,22 +774,33 @@ export interface ArtifactBaseHealth {
 }
 
 // 마운트 현황(GET /api/admin/mounts, 2026-11-23 -- 서버 routes_mounts: DB 만 읽는 노드 × 스토리지 표). 셀 status:
-// ready = 마운트됨(쓰기 가능), readonly = 마운트됐지만 쓰기 불가, missing = 없음(reason = 에이전트 사유), unreported = 그
-// 스토리지 보고 없음(옛 프로브·에이전트 없음), disabled = 비활성 스토리지(문제 아님).
-export type MountCellStatus = "ready" | "readonly" | "missing" | "unreported" | "disabled";
+// ready = 마운트됨(쓰기 가능), readonly = 마운트됐지만 쓰기 불가, missing = 없음(reason = 에이전트 사유), absent = 그 노드에
+// 스토리지 경로 자체가 없음(에이전트 사유 missing_mount_path -- 그 스토리지를 제공하지 않는 노드, 문제 아님 -- 2026-11-27 dms-k8s
+// 판정 기준 이식), unreported = 그 스토리지 보고 없음(옛 프로브·에이전트 없음), disabled = 비활성 스토리지(문제 아님).
+// problem(2026-11-27~, 옛 서버엔 없다) = 서버가 내린 문제 판정(missing → true, absent → false, readonly → 같은 열에 쓰기 가능한
+// 신선한 노드가 있을 때만 true, 끊긴 보고의 칸은 false) -- 화면은 있으면 이 값을, 없으면 같은 규칙의 로컬 판정을 쓴다.
+export type MountCellStatus = "ready" | "readonly" | "missing" | "absent" | "unreported" | "disabled";
 export interface MountCell {
   status: MountCellStatus; reason: string | null;
   exists?: boolean | null; is_mountpoint?: boolean | null; readable?: boolean | null; writable?: boolean | null;
+  problem?: boolean;
 }
 export interface MountBaseApiCheck {
   instance: string; ok: boolean | null; reason: string | null; checked_at: string | null; gate_state: ApiGateState | null;
 }
 export interface MountBaseCell {
-  // missing 의 reason 은 에이전트 사유 또는 "covering_storage_missing:<스토리지>"(base 를 덮는 스토리지가 그 노드에 없다).
-  status: Exclude<MountCellStatus, "disabled">; reason: string | null;
-  agent: { exists: boolean | null; writable: boolean | null; path_matches: boolean | null } | null;
+  // missing 의 reason 은 에이전트 사유, "covering_storage_missing:<스토리지>"(base 를 덮는 스토리지가 그 노드에 없다) 또는
+  // "artifact_base_local_dir"(에이전트가 본 덮는 마운트가 노드 루트 '/' -- 공유 스토리지가 빠진 로컬 디렉터리, 2026-11-27).
+  status: Exclude<MountCellStatus, "disabled" | "absent">; reason: string | null;
+  // mount_point·fstype(2026-11-27~ 새 에이전트) = base 를 덮는 가장 깊은 마운트(호스트 루트 모드만, 못 찾으면·옛 에이전트면 null/없음).
+  agent: {
+    exists: boolean | null; writable: boolean | null; path_matches: boolean | null;
+    mount_point?: string | null; fstype?: string | null;
+  } | null;
   api: MountBaseApiCheck[];
   controller: { ok: boolean | null; reason: string | null; checked_at: string | null } | null;
+  // 서버 문제 판정(옛 서버엔 없다): 신선 ∧ (missing ∨ 다른 신선한 노드에 쓰기 가능한 base 가 있는 readonly) ∨ API·컨트롤러 점검 실패.
+  problem?: boolean;
 }
 export interface MountNode {
   node_name: string; has_agent: boolean; fresh: boolean; reported_at: string | null; probe_mode: string | null;

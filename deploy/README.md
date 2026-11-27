@@ -1379,8 +1379,31 @@ Ready(`started_degraded`), 아티팩트 읽기만 503 이고 나머지 포탈은
 | 지금 이 파드가 보는가 | `GET /api/admin/artifact-base/health` → `{ok, reason, checked_at, instance, node_name}`(메모리만, 포탈 폴링용) |
 | 두 관점·파드별 | `GET /api/admin/artifact-base` 의 `checks.api`(`source` monitor/instant·`availability`·`posture`·`gate.state`)·`checks.api_pods`(Ready 못 된 새 파드 포함 — `fresh`·`this_pod`)·`checks.controller.node_name` |
 | 지금 다시 점검 | `POST /api/admin/artifact-base:recheck`(관리자, 최대 12초 대기 후 같은 모양) — 포탈 「지금 다시 점검」 |
-| 노드 × 스토리지 | 포탈 **스토리지 → 마운트 현황**(`GET /api/admin/mounts`, DB 만 — 에이전트 보고 + API·컨트롤러 점검) |
+| 노드 × 스토리지 | 포탈 **스토리지 → 마운트 현황**(`GET /api/admin/mounts`, DB 만 — 에이전트 보고 + API·컨트롤러 점검, 판정 기준은 아래) |
 | Ready 안 되는 새 파드 | `kubectl --context dms -n dms get pods -l app.kubernetes.io/name=dms-api -o wide` 로 노드 확인 → 그 노드의 `findmnt -T <base>`(공유 스토리지가 마운트돼 있는가). 마운트하면 재시작 없이 다음 점검에서 Ready(HostToContainer 전파) |
+
+**마운트 현황 판정 기준**(2026-11-27, dms-k8s 판정 이식 — 규칙 원문은 `src/dms/api/routes_mounts.py` 모듈 docstring). 「문제」 수는
+서버가 칸마다 단 `problem` 플래그만 센다. 플래그가 없는 옛 서버(롤링 릴리스 중 옛 API 파드가 답한 경우)면 포탈이 그 서버의 요약 수를
+버리고 아래 같은 규칙으로 칸·요약 줄·「문제만 보기」·「문제 있는 스토리지만」을 모두 로컬에서 판정한다(옛 서버의 요약은 읽기 전용을
+전부 센 예전 규칙이라 표와 어긋난다):
+
+| 칸 | 문제인가 |
+|---|---|
+| 없음(마운트 아님·전파 끊김·읽기 불가 등) | 문제 |
+| 경로 없음(에이전트 사유 `missing_mount_path` **이고** 호스트 mountinfo 에 그 지점의 마운트도 없음) | **문제 아님** — 그 스토리지를 일부러 안 붙인 노드일 수 있다(nsync 소스·목적지 노드 분리 등). 단 **신선한 어느 노드에도** 그 스토리지가 마운트(쓰기 가능·읽기 전용)돼 있지 않으면 문제(mount_path 오타·마운트 배포 전) |
+| `missing_mount_path` 인데 호스트엔 마운트가 있음(`is_mountpoint` 참) | 「없음」 — 문제. 죽은 ceph-fuse(ENOTCONN)·낡은 NFS(ESTALE)·부모 마운트 전파 끊김으로 자식 마운트 지점이 안 보이는 끊긴 마운트다 |
+| 읽기 전용 | 같은 스토리지를 **다른 신선한 노드가 쓰기 가능으로** 붙였을 때만 문제 — 모든 노드에 ro 로 붙인 이관 소스는 의도된 구성 |
+| 아티팩트 경로 | 없음·로컬 디렉터리·덮는 스토리지 없음은 문제. 읽기 전용은 다른 신선한 노드의 경로가 쓰기 가능일 때만. 이 노드의 API 파드·컨트롤러 점검 실패도 문제(한 칸이라 최대 1) |
+| 리포트 지연 노드 | 칸은 문제로 세지 않는다(지금 상태를 모른다 — 「보고 끊김」 꼬리표) |
+
+**로컬 디렉터리 판정**: 에이전트가 아티팩트 경로를 덮는 호스트 마운트(`mount_point`·`fstype`)를 보고하고, 그 지점이 `/` 면(공유
+스토리지가 빠지고 노드 루트 fs 에 같은 경로의 디렉터리만 남음 — 위 사고) exists·writable 이 참이어도 「없음」(`artifact_base_local_dir`)
+이다. 덮는 등록 스토리지가 없는 경로도 잡힌다(예전엔 덮는 등록 스토리지가 미마운트일 때만 겹쳐 잡았다). **dms-agent 이미지를 이
+변경이 든 태그로 올려야** 보고가 생긴다(dms-agent 는 같은 태그의 dms-mpifileutils 가 필요 — 포탈 빌드). 옛 에이전트·direct(레거시)
+모드 에이전트는 덮는 마운트를 보고하지 않아(null) 예전 판정 그대로다. 아티팩트 경로를 일부러 루트 fs 에 둔 단일 노드 설치는
+모든 노드가 「로컬 디렉터리」로 보인다(공유 스토리지 전제 — BACKLOG §4). 노드마다 다른 마운트에 붙은 경우(dms-k8s 의 「다른 노드와
+다름」)는 판정하지 않는다. 경로 접두가 심링크(`/data → /cephfs/x`)여도 에이전트가 호스트 루트 안에서 심링크를 풀어(절대 대상은 호스트
+루트 아래로) 덮는 마운트를 찾는다 — 못 풀면(고리·오류) 덮는 마운트는 모름(null)이고 로컬 디렉터리 판정을 하지 않는다.
 
 **사용자 화면**: base 접근 불가면 아티팩트 목록·보기·다운로드·scan 리포트·경로 통계는 404 대신 **503 `artifact_base_unavailable`**
 (판정은 base 수준뿐 — 파일별 errno 로 가르지 않는다). 사용량 분석은 원인(`unreadable_reason`)을 싣고, 실패를 리포트 요약 캐시·실패

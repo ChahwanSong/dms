@@ -1,4 +1,5 @@
 """노드 프로브. 시스템 접근(파일/명령)은 전부 파라미터 주입 — 순수 로직만 이 모듈에 둔다."""
+import errno
 import grp
 import hashlib
 import hmac
@@ -127,8 +128,61 @@ def probe_identities(usernames, *, getpwnam=pwd.getpwnam, getgrall=grp.getgrall)
     return results
 
 
+# 호스트 경로를 host_root 안에서 풀 때 따라갈 심링크 수 상한(커널 MAXSYMLINKS 와 같은 40) -- 넘으면 고리로 보고 모른다.
+MAX_SYMLINK_HOPS = 40
+
+
+def resolve_in_host_root(host_root: str, path: str, *, readlink=os.readlink,
+                         max_hops: int = MAX_SYMLINK_HOPS) -> "str | None":
+    """호스트 경로 path 의 심링크를 **host_root 안에서** 풀어 호스트 기준 절대 경로로 돌려준다(못 풀면 None).
+
+    왜(2026-11-27 리뷰): 아티팩트 base 접두는 심링크일 수 있다(artifact_base.allowlist_reason 이 「/data → /cephfs/x」를 허용).
+    덮는 마운트를 글자 그대로의 경로로 찾으면 /data/dms/artifacts 가 '/' 아래로 보여 모든 노드가 「로컬 디렉터리」(문제)가 된다.
+    컨테이너의 os.path.realpath 는 못 쓴다 -- 호스트의 절대 심링크가 컨테이너 루트 기준으로 풀려 host_root 밖으로 샌다. 그래서
+    조각마다 readlink 하고 절대 대상은 host_root 아래로 다시 뿌리 내리며(chroot 와 같은 뜻 -- '..' 은 루트에서 멈춘다), 상대 대상은
+    지금 디렉터리에서 푼다. 없는 조각(ENOENT·ENOTDIR)은 남은 조각과 함께 글자 그대로 잇는다(realpath 비엄격과 같다 -- 없는 base
+    여도 덮는 마운트는 정보로 싣는다). 심링크가 max_hops 를 넘거나(고리) 그 밖의 오류(EACCES·끊긴 마운트의 ENOTCONN 등)면 None
+    -- 지어내지 않는다."""
+    pending = [c for c in path.split("/") if c not in ("", ".")]
+    pending.reverse()                       # 끝에서 꺼낸다(pop) -- 심링크 대상의 조각을 앞에 끼우기 쉽게
+    resolved: list = []
+    hops = 0
+    while pending:
+        comp = pending.pop()
+        if comp in ("", "."):
+            continue
+        if comp == "..":
+            if resolved:
+                resolved.pop()
+            continue
+        candidate = resolved + [comp]
+        try:
+            target = readlink(host_path(host_root, "/" + "/".join(candidate)))
+        except OSError as e:
+            if e.errno == errno.EINVAL:     # 심링크가 아니다
+                resolved = candidate
+                continue
+            if e.errno in (errno.ENOENT, errno.ENOTDIR):
+                resolved = candidate
+                for rest in reversed(pending):  # 남은 조각은 글자 그대로('..' 만 접는다)
+                    if rest == "..":
+                        if resolved:
+                            resolved.pop()
+                    elif rest not in ("", "."):
+                        resolved.append(rest)
+                break
+            return None
+        hops += 1
+        if hops > max_hops:
+            return None
+        if target.startswith("/"):
+            resolved = []                   # 절대 대상 = host_root 아래로 다시 뿌리 내린다
+        pending.extend(reversed(target.split("/")))
+    return "/" + "/".join(resolved)
+
+
 def probe_artifact_base(path, *, isdir=os.path.isdir, access=os.access,
-                        host_root="", mountinfo_text=""):
+                        host_root="", mountinfo_text="", readlink=os.readlink):
     """아티팩트 base 프로브(슬라이스 18 설계 §2.4b). **mounts 배열에 섞지 않는다**:
     reconciler 가 mounts 를 storage_name 기준으로 storages.status 에 매핑하므로
     섞으면 스토리지 판정이 오염된다 -- 리포트 최상위의 별도 필드로만 나른다
@@ -139,21 +193,38 @@ def probe_artifact_base(path, *, isdir=os.path.isdir, access=os.access,
     writable 은 **에이전트 프로세스 uid** 의 W_OK 지 잡 파드 요청자 uid 가 아니다
     -- 정직한 한계로 화면이 문구로 표기한다. probe_mounts 의 status 판정이
     writable 을 반영하지 않는 것과 같은 이유로, 소비자는 status 같은 요약이 아니라
-    이 두 필드를 직접 본다."""
+    이 두 필드를 직접 본다.
+
+    mount_point·fstype(2026-11-27, dms-k8s d14ee402 이식): base 를 덮는 가장 깊은 마운트 지점과 그 파일시스템 종류
+    (호스트 루트 모드에서만 -- 호스트 mountinfo 로 안다). exists·writable 만으로는 공유 스토리지가 빠지고 같은 경로의
+    **로컬 디렉터리만 남은 노드**가 정상으로 보인다(덮는 마운트가 '/' 이고 rw -- 2026-11-23 사고: 공유 스토리지가
+    마운트되지 않은 노드에 dms-api 가 떠 아티팩트를 못 읽었다). 서버(routes_mounts)는 mount_point == '/' 를 「로컬
+    디렉터리」로 판정한다. fstype 이름으로 공유 여부를 판정하지 않는다(사이트마다 NFS·CephFS·GPFS 다 -- 정보용).
+    exists 가 거짓이어도 덮는 마운트는 계산해 싣는다(정보용 -- 판정은 exists 가 먼저다). direct(레거시) 모드와 덮는
+    마운트를 못 찾은 경우("/" 조차 없는 mountinfo)는 둘 다 None(모름) -- 지어내지 않는다. 다섯 키는 늘 싣는다.
+    덮는 마운트는 **host_root 안에서 심링크를 푼 경로**로 찾는다(resolve_in_host_root -- 심링크 base 접두가 '/' 로 보이는
+    오탐, 2026-11-27 리뷰). 못 풀면(고리·오류) mount_point·fstype 은 None(로컬 디렉터리 판정 안 함)이고 writable 만 종전대로
+    글자 그대로의 경로를 덮는 마운트로 본다."""
     if not path:
         return None    # 서버가 아직 대상을 내리지 않았다(부트스트랩) -- 모름
     probe = host_path(host_root, path)
     exists = bool(isdir(probe))
+    mount_point = fstype = None
     if host_root:
         # 호스트 루트는 ro 바인드라 W_OK 는 항상 거짓 -- base 를 덮는 마운트의
         # 옵션(rw/ro)이 답이다(probe_mounts 와 같은 이유). 덮는 마운트를 못 찾으면
         # ("/" 조차 없는 mountinfo) 모른다고 지어내지 않고 False.
         table = parse_mount_table(mountinfo_text)
-        cover = _covering_mount(table, path)
-        writable = exists and cover is not None and _mount_rw(table[cover])
+        real = resolve_in_host_root(host_root, path, readlink=readlink)
+        cover = _covering_mount(table, real) if real is not None else None
+        wcover = cover if real is not None else _covering_mount(table, path)
+        writable = exists and wcover is not None and _mount_rw(table[wcover])
+        mount_point = cover
+        fstype = (table[cover]["fstype"] or None) if cover is not None else None
     else:
         writable = exists and bool(access(probe, os.W_OK))
-    return {"path": path, "exists": exists, "writable": writable}
+    return {"path": path, "exists": exists, "writable": writable,
+            "mount_point": mount_point, "fstype": fstype}
 
 
 # 같은 장비의 새 이름 힌트(2026-11-25, dms.node_forget.rename_hints): 보고의 machine_key 길이(hex 자). 서버의

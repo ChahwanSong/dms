@@ -357,11 +357,15 @@ export function ArtifactBaseChecks({ d, now }: { d: ArtifactBaseInfo; now: numbe
       )}
       {/* 정직한 한계 표기(설계 §2.4b): W_OK 판정 주체를 화면에 그대로 적는다 */}
       <p className="mt-2 text-xs text-muted">쓰기 가능 여부는 에이전트 프로세스(uid) 기준입니다 — 잡 파드 요청자 권한과 다를 수 있습니다</p>
-      {/* 에이전트는 존재·쓰기만 본다 -- 공유 스토리지가 빠진 노드의 빈 로컬 디렉터리(hostPath DirectoryOrCreate)도 「있음·가능」이다
-          (2026-11-23 사고). 노드별 마운트는 마운트 현황 화면이 본다. */}
+      {/* 이 표는 존재·쓰기만 보인다 -- 공유 스토리지가 빠진 노드의 빈 로컬 디렉터리(hostPath DirectoryOrCreate)도 「있음·가능」이다
+          (2026-11-23 사고). 2026-11-27~ 에이전트는 경로를 덮는 마운트(mount_point·fstype)도 보고하고, 마운트 현황(routes_mounts)이
+          그것이 노드 루트 '/' 면 「로컬 디렉터리」로 짚는다(dms-k8s d14ee402 이식) -- 그 에이전트 이미지가 나가기 전·옛 에이전트는
+          여전히 존재·쓰기뿐이라 한계 표기를 남긴다. */}
       <p className="mt-1 text-xs text-muted break-keep">
-        존재·쓰기만 확인 — 마운트가 빠진 노드의 빈 로컬 디렉터리도 정상으로 보일 수 있음(
-        <Link to="/admin/mounts" className="text-accent hover:underline">마운트 현황</Link> 화면 참고)
+        이 표는 존재·쓰기만 보입니다 — 덮는 마운트를 보고하는 새 에이전트면{" "}
+        <Link to="/admin/mounts" className="text-accent hover:underline">마운트 현황</Link> 화면이 경로를 덮는 마운트까지 보고, 그것이
+        노드 루트(/)면(공유 스토리지 미마운트) 「로컬 디렉터리」로 짚습니다. 옛 에이전트는 존재·쓰기만 확인하므로 마운트가 빠진 노드의
+        빈 로컬 디렉터리도 정상으로 보일 수 있음
       </p>
     </Card>
   );

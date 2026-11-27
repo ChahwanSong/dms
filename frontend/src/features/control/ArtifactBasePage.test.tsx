@@ -463,11 +463,13 @@ test("다시 점검 실패는 사유를 한 줄로 알린다", async () => {
   expect(await screen.findByRole("alert")).toHaveTextContent(/^다시 점검하지 못했습니다 — /);
 });
 
-test("노드 에이전트 표는 가로 넘침 래퍼 안이고, 빈 로컬 디렉터리도 정상으로 보일 수 있다는 각주와 마운트 현황 링크가 있다", async () => {
+test("노드 에이전트 표는 가로 넘침 래퍼 안이고, 각주가 새 에이전트의 덮는 마운트(로컬 디렉터리 판정)와 옛 에이전트의 한계를 말한다", async () => {
   server.use(http.get("/api/admin/artifact-base", () => HttpResponse.json(BASE)));
   wrap();
   await screen.findByText("env 기본");
   expect(screen.getByText("w1").closest("table")!.parentElement!.className).toContain("overflow-x-auto");
-  const note = screen.getByText(/존재·쓰기만 확인 — 마운트가 빠진 노드의 빈 로컬 디렉터리도 정상으로 보일 수 있음/);
+  const note = screen.getByText(/^이 표는 존재·쓰기만 보입니다 — 덮는 마운트를 보고하는 새 에이전트면/);
+  expect(note).toHaveTextContent(/마운트 현황 화면이 경로를 덮는 마운트까지 보고, 그것이 노드 루트\(\/\)면\(공유 스토리지 미마운트\) 「로컬 디렉터리」로 짚습니다/);
+  expect(note).toHaveTextContent(/옛 에이전트는 존재·쓰기만 확인하므로 마운트가 빠진 노드의 빈 로컬 디렉터리도 정상으로 보일 수 있음$/);
   expect(within(note).getByRole("link", { name: "마운트 현황" })).toHaveAttribute("href", "/admin/mounts");
 });

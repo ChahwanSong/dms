@@ -8,11 +8,31 @@ k8s_node), 노드 배치 제외(node_exclusions), API 파드 점검(api_base_che
 - 비활성 스토리지 = disabled(문제 아님).
 - 보고(mounts[])에 그 스토리지가 없거나 보고의 mount_path 가 지금 등록값과 다르면 unreported(옛 프로브 -- 지금 경로를 본 적이
   없다, 모름 ≠ 실패).
-- Ready ∧ writable = ready, Ready ∧ ¬writable = readonly, Missing = missing(사유는 에이전트 사유 그대로: missing_mount_path·
-  not_a_mountpoint·propagation_stale·not_readable·host_root_missing).
-아티팩트 경로 칸: 에이전트의 artifact_base 프로브(exists/writable -- 마운트 여부는 모른다)에, base 를 덮는 등록 스토리지
-(가장 긴 mount_path 접두)의 셀이 missing 이면 missing(사유 covering_storage_missing:<이름>)을 겹친다 -- 마운트가 빠진 노드의
-빈 로컬 디렉터리는 exists/writable 만으로는 정상으로 보이기 때문이다(2026-11-23 사고).
+- Ready ∧ writable = ready, Ready ∧ ¬writable = readonly, Missing ∧ 사유 missing_mount_path ∧ 호스트 mountinfo 에 그 지점의
+  마운트가 없음(is_mountpoint 가 참이 아님) = absent(그 노드엔 그 스토리지가 없다 -- 의도적으로 안 붙인 노드일 수 있다, 2026-11-27
+  dms-k8s 판정 이식), 그 밖의 Missing = missing(사유는 에이전트 사유 그대로: not_a_mountpoint·propagation_stale·not_readable·
+  host_root_missing). absent 도 사유를 그대로 싣는다. **is_mountpoint 가 참인 missing_mount_path 는 missing 이다**(2026-11-27
+  리뷰): 호스트엔 마운트가 있는데 경로가 안 보이는 것 -- 죽은 ceph-fuse(ENOTCONN)·낡은 NFS(ESTALE)는 isdir 가 오류를 삼켜
+  False 가 되고, 부모 마운트의 전파가 끊기면 자식 마운트 지점이 컨테이너에서 사라진다. 이걸 「제공 안 함」으로 읽으면 이 화면이
+  잡으려는 끊긴 마운트를 숨긴다.
+아티팩트 경로 칸: 에이전트의 artifact_base 프로브(exists/writable + 덮는 마운트 mount_point·fstype -- 2026-11-27, 호스트 루트
+모드 에이전트만)로 판정한다. exists 이고 덮는 마운트가 '/' 면 missing(사유 artifact_base_local_dir -- 공유 스토리지가 빠지고
+노드 루트 fs 의 로컬 디렉터리만 남았다). 그 위에 base 를 덮는 등록 스토리지(가장 긴 mount_path 접두)의 셀이 missing·absent 면
+missing(사유 covering_storage_missing:<이름>)을 겹친다 -- 마운트가 빠진 노드의 빈 로컬 디렉터리는 exists/writable 만으로는
+정상으로 보이기 때문이다(2026-11-23 사고; mount_point 를 싣지 않는 옛 에이전트도 이 겹침으로 잡힌다). base 는 모든 노드에 있어야
+하므로 덮는 스토리지의 absent 는 base 칸에선 문제다.
+
+문제(problem) 판정 -- 서버가 진실이고 summary.problem_cells·problem_nodes 는 이 플래그만 센다(포탈은 플래그가 있으면 그대로 쓰고,
+없는 옛 서버에서만 자기 규칙으로 센다):
+- 셀: 신선한 노드의 missing 은 문제. absent 는 **같은 열에 신선한 ready·readonly 노드가 하나라도 있으면** 문제 아님(그 스토리지를
+  붙이지 않은 노드) -- 하나도 없으면 그 스토리지는 어디에도 마운트돼 있지 않은 것이라(mount_path 오타·마운트 배포 전) 문제다
+  (2026-11-27 리뷰 -- 열 전체가 회색 「경로 없음」인데 「문제 0」이던 구멍). readonly 는 **같은 열에 신선한 ready 노드가 하나라도
+  있을 때만** 문제(이관 소스처럼 모든 노드에 ro 로 붙인 스토리지는 의도된 구성 -- 경보 피로). ready·unreported·disabled 와
+  신선하지 않은 노드의 칸은 문제 아님.
+- 아티팩트 경로 칸: (신선 ∧ (missing ∨ (readonly ∧ 다른 신선한 노드의 base 가 ready))) ∨ 이 노드 API 파드 점검 실패 ∨ 컨트롤러
+  점검 실패 -- 한 칸이라 최대 1.
+dms-k8s 의 「다른 노드와 다름(differs -- 신선한 정상 행들의 (mount_point, fstype) 엄격 과반과 다른 행)」 판정은 옮기지 않았다
+(2026-11-27 -- 화면은 덮는 마운트를 정보로만 보인다, BACKLOG).
 """
 from fastapi import APIRouter, Depends, Request
 
@@ -23,7 +43,11 @@ from .base_monitor import fresh_window_seconds
 
 router = APIRouter(dependencies=[Depends(require_admin)])
 
-_PROBLEM_CELL_STATES = ("missing", "readonly")
+# 에이전트 Missing 사유 중 「그 노드엔 그 스토리지가 없다」(경로 자체가 없음) -- 호스트에 그 지점의 마운트도 없을 때만 absent 로
+# 가른다(마운트가 있는데 경로가 안 보이면 끊긴 마운트 -- missing, 모듈 docstring).
+ABSENT_REASON = "missing_mount_path"
+# 덮는 마운트가 이것이면 base 는 공유 스토리지가 아니라 노드 루트 fs 의 로컬 디렉터리다.
+_ROOT_MOUNT = "/"
 
 
 def _covers(mount_path: str, path: str) -> bool:
@@ -48,6 +72,10 @@ def _bool_or_none(value):
     return value if isinstance(value, bool) else None
 
 
+def _str_or_none(value):
+    return value if isinstance(value, str) and value != "" else None
+
+
 def _unreported():
     return {"status": "unreported", "reason": None, "exists": None, "is_mountpoint": None,
             "readable": None, "writable": None}
@@ -65,8 +93,22 @@ def storage_cell(storage: dict, mounts_by_name: dict) -> dict:
         return {"status": "ready" if flags["writable"] is True else "readonly", "reason": None, **flags}
     if status == "Missing":
         reason = m.get("reason")
-        return {"status": "missing", "reason": reason if isinstance(reason, str) else None, **flags}
+        reason = reason if isinstance(reason, str) else None
+        absent = reason == ABSENT_REASON and flags["is_mountpoint"] is not True
+        return {"status": "absent" if absent else "missing", "reason": reason, **flags}
     return {**_unreported(), **flags}
+
+
+def cell_problem(cell: dict, *, fresh: bool, column_has_ready: bool, column_mounted: bool) -> bool:
+    """셀의 문제 여부(모듈 docstring 「문제 판정」). column_has_ready = 같은 열에 신선한 ready 노드가 있다, column_mounted = 같은
+    열에 신선한 ready·readonly 노드가 있다(그 스토리지가 어딘가엔 마운트돼 있다)."""
+    if not fresh:
+        return False
+    if cell["status"] == "missing":
+        return True
+    if cell["status"] == "absent":
+        return not column_mounted
+    return cell["status"] == "readonly" and column_has_ready
 
 
 def _base_cell(report: "dict | None", path: str, covering: "str | None", cells: dict,
@@ -75,15 +117,19 @@ def _base_cell(report: "dict | None", path: str, covering: "str | None", cells: 
     agent = None
     status, reason = "unreported", None
     if isinstance(ab, dict):
+        # mount_point·fstype: 키 없는 옛 에이전트·direct 모드·덮는 마운트를 못 찾음은 모두 None(모름 -- 판정하지 않는다).
         agent = {"exists": _bool_or_none(ab.get("exists")), "writable": _bool_or_none(ab.get("writable")),
-                 "path_matches": ab.get("path") == path}
+                 "path_matches": ab.get("path") == path,
+                 "mount_point": _str_or_none(ab.get("mount_point")), "fstype": _str_or_none(ab.get("fstype"))}
         if agent["path_matches"]:
             if agent["exists"] is False:
                 status, reason = "missing", "artifact_base_missing"
+            elif agent["exists"] is True and agent["mount_point"] == _ROOT_MOUNT:
+                status, reason = "missing", "artifact_base_local_dir"
             elif agent["exists"] is True:
                 status = "ready" if agent["writable"] is True else "readonly"
     cover_cell = cells.get(covering) if covering is not None else None
-    if cover_cell is not None and cover_cell["status"] == "missing":
+    if cover_cell is not None and cover_cell["status"] in ("missing", "absent"):
         status, reason = "missing", f"covering_storage_missing:{covering}"
     return {"status": status, "reason": reason, "agent": agent,
             "api": [{"instance": r["instance"], "ok": r["ok"], "reason": r["reason"],
@@ -126,7 +172,7 @@ def mounts(request: Request):
         controller_node = None
 
     names = set(agent_nodes) | set(api_by_node) | ({controller_node} if controller_node else set())
-    nodes, problem_cells, problem_nodes = [], 0, 0
+    nodes, checks = [], {}
     for name in sorted(names):
         agent = agent_nodes.get(name)
         report = (agent or {}).get("report") if agent is not None else None
@@ -145,18 +191,7 @@ def mounts(request: Request):
         k8s = k8s if isinstance(k8s, dict) else {}
         roles = (["api"] if api_rows else []) + (["controller"] if ctl is not None else [])
         fresh = bool(agent["fresh"]) if agent is not None else False
-        problems = 0
-        if fresh:
-            problems += sum(1 for s in storages
-                            if s["enabled"] and cells[s["storage_name"]]["status"] in _PROBLEM_CELL_STATES)
-        # 「아티팩트 경로」 열은 **한 칸**이다 -- 에이전트 프로브(missing·readonly)·이 노드 API 파드 점검·컨트롤러 점검 중
-        # 하나라도 문제면 1(포탈 mountView.baseProblem 과 같은 규칙; 예전엔 최대 3번 세어 「문제 3칸」 위에 빨간 칸이 2개였다).
-        base_problem = ((fresh and base["status"] in _PROBLEM_CELL_STATES)
-                        or any(r["ok"] is False for r in api_rows)
-                        or (ctl is not None and ctl["ok"] is False))
-        problems += 1 if base_problem else 0
-        problem_cells += problems
-        problem_nodes += 1 if problems else 0
+        checks[name] = (any(r["ok"] is False for r in api_rows) or (ctl is not None and ctl["ok"] is False))
         schedulable = k8s.get("schedulable")
         nodes.append({
             "node_name": name, "has_agent": agent is not None, "fresh": fresh,
@@ -166,6 +201,26 @@ def mounts(request: Request):
             "schedulable_reason": k8s.get("reason") if isinstance(k8s.get("reason"), str) else None,
             "excluded": name in excluded, "roles": roles, "cells": cells, "artifact_base": base,
         })
+
+    # 문제 플래그(모듈 docstring 「문제 판정」) -- 열 단위 판정(readonly·absent 의 바깥값)이 있어 모든 행을 모은 뒤에 단다.
+    ready_columns = {sn for n in nodes if n["fresh"] for sn, c in n["cells"].items() if c["status"] == "ready"}
+    mounted_columns = {sn for n in nodes if n["fresh"] for sn, c in n["cells"].items()
+                       if c["status"] in ("ready", "readonly")}
+    base_ready_peer = any(n["fresh"] and n["artifact_base"]["status"] == "ready" for n in nodes)
+    problem_cells = problem_nodes = 0
+    for n in nodes:
+        for sn, c in n["cells"].items():
+            c["problem"] = cell_problem(c, fresh=n["fresh"], column_has_ready=sn in ready_columns,
+                                        column_mounted=sn in mounted_columns)
+        base = n["artifact_base"]
+        # 「아티팩트 경로」 열은 **한 칸**이다 -- 에이전트 프로브·이 노드 API 파드 점검·컨트롤러 점검 중 하나라도 문제면 1
+        # (예전엔 최대 3번 세어 「문제 3칸」 위에 빨간 칸이 2개였다).
+        base["problem"] = bool((n["fresh"] and (base["status"] == "missing"
+                                                or (base["status"] == "readonly" and base_ready_peer)))
+                               or checks[n["node_name"]])
+        problems = sum(1 for c in n["cells"].values() if c["problem"]) + (1 if base["problem"] else 0)
+        problem_cells += problems
+        problem_nodes += 1 if problems else 0
     return {
         "generated_at": now,
         "artifact_base": {"uri": uri, "path": path, "covering_storage": covering},

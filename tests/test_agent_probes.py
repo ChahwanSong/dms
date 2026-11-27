@@ -342,13 +342,33 @@ def test_probe_artifact_base_reports_exists_and_writable():
     from dms.agent.probes import probe_artifact_base
     r = probe_artifact_base("/base", isdir=lambda p: True,
                             access=lambda p, mode: False)
-    assert r == {"path": "/base", "exists": True, "writable": False}
+    # direct(레거시) 모드는 덮는 마운트를 모른다 -- mount_point·fstype 은 None(모름, 2026-11-27)
+    assert r == {"path": "/base", "exists": True, "writable": False, "mount_point": None, "fstype": None}
     r = probe_artifact_base("/nope", isdir=lambda p: False,
                             access=lambda p, mode: True)
     # 존재하지 않으면 writable 도 False 다(없는 디렉터리에 쓸 수 없다)
-    assert r == {"path": "/nope", "exists": False, "writable": False}
+    assert r == {"path": "/nope", "exists": False, "writable": False, "mount_point": None, "fstype": None}
     assert probe_artifact_base(None) is None
     assert probe_artifact_base("") is None
+
+
+def test_probe_artifact_base_direct_mode_ignores_mountinfo():
+    # direct 모드는 mountinfo 가 와도 덮는 마운트를 싣지 않는다 -- 컨테이너 자신의 마운트라 호스트 사실이 아니다
+    from dms.agent.probes import probe_artifact_base
+    mi = "22 1 0:20 / / rw,relatime shared:1 - ext4 /dev/root rw\n"
+    r = probe_artifact_base("/base", isdir=lambda p: True, access=lambda p, mode: True, mountinfo_text=mi)
+    assert (r["mount_point"], r["fstype"], r["writable"]) == (None, None, True)
+
+
+def test_build_report_carries_new_artifact_base_keys_verbatim():
+    # 2026-11-27: 새 키(mount_point·fstype)는 build_report 가 손대지 않고 그대로 싣는다 -- mounts 에 섞지 않는다
+    from dms.agent.runner import build_report
+    ab = {"path": "/s/dms/artifacts", "exists": True, "writable": True, "mount_point": "/s", "fstype": "nfs4"}
+    report = build_report("n1", [], [], mountinfo_text="", mounts_fn=lambda s, **k: [],
+                          tools_fn=lambda n, **k: [], identities_fn=lambda u, **k: [], os_fn=lambda s, **k: {},
+                          artifact_base_path="/s/dms/artifacts", artifact_base_fn=lambda p, **k: dict(ab))
+    assert report["artifact_base"] == ab
+    assert report["mounts"] == []
 
 
 # ---- CPU 사용률 원재료: /proc/stat 집계 행(2026-10-16 사용자 보고 「코어수가 128이어도 200이 넘어가고」) ----------
