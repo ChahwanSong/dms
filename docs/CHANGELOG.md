@@ -131,28 +131,43 @@ e2976baf `routes_mounts.storage_cell`·`cell_problem`), dms-k8s 판정(`classify
   플러그 아이콘, 설명 = 원인 셋 + lazy umount 뒤 재마운트·호스트에선 보이면 dms-agent 재시작)로 그린다.
 - **구멍 ② 어디에도 마운트되지 않은 스토리지**: absent 는 늘 문제 아님이라 mount_path 오타·마운트 배포 전처럼 **열 전체가 회색 「없음」**
   인데 「문제 0」이었다. → read_only 바깥값(`_ro_outlier_columns`)과 같은 열 단위 판정 `_mounted_columns`(신선한 ready·read_only 칸이 있는
-  열)를 더하고, 칸 판정을 `_cell_problem` 하나로 모았다: broken · 정상 노드가 있는 열의 read_only · **마운트된 신선 노드가 하나도 없는 열의
-  absent**. pending·broken·리포트 지연 행의 정상은 마운트 근거가 아니다. 칸 상태·totals·열 요약의 수는 그대로이고(문제 여부는 행
+  열 — 흔적의 범위는 아래 「이식 리뷰 후속」에서 넓혔다)를 더하고, 칸 판정을 `_cell_problem` 하나로 모았다: broken · 정상 노드가 있는 열의
+  read_only · **그 스토리지를 붙인 흔적이 하나도 없는 열의 absent**. 칸 상태·totals·열 요약의 수는 그대로이고(문제 여부는 행
   problem_count·problem·totals.problem_nodes 에만), 스토리지 목록 배지(`reconciler.summarize_mount_statuses`)는 원문 status 를 세므로 바뀌지
   않는다(교차 검사 `test_column_summary_matches_the_reconciler_exactly` 에 끊긴 마운트 열을 더해 고정). `mount_status_k8s.decorate`·
   `mount_status_pods.decorate` 는 판정을 건드리지 않는다(파드 덧붙임은 problem_count 에 공용 열 한 칸을 더할 뿐).
 - **포탈 거울**(`features/mounts`): `mountTerms.columnFacts`·`cellProblem`(서버 `_ro_outlier_columns`·`_mounted_columns`·`_cell_problem`)·
   `columnProblem`(?cols=problems·「문제 있는 스토리지 n」 — 이제 칸 판정 하나에서), 어디에도 없는 열의 없음 칸 = 경고 아이콘 + 빨강 + 낭독
-  「없음(어느 노드에도 마운트 안 됨)」(글자는 「없음」 그대로 — 색만으로 구분하지 않는다), 없음 설명은 열에 따라 셋(다른 노드엔 붙음 = 정상
+  「없음(어느 노드에도 마운트 흔적 없음)」(글자는 「없음」 그대로 — 색만으로 구분하지 않는다), 없음 설명은 열에 따라 셋(다른 노드엔 붙음 = 정상
   · 어디에도 없음 = 문제 · 모름 = 규칙을 함께), 카드는 문제인 없음을 마운트 문제와 같은 자리(앞)에. 범례·타일·「문제 n」 꼬리표 title·
   types 주석 문구. 픽스처 VARIETY 는 sec 을 n-pend 가 붙이도록 바꿔 서버 규칙과 맞췄고(n-pend 의 경로 바뀜 칸은 ceph 로), 새 픽스처
   NOWHERE(LIVE + 끊긴 cephfs-dms + 어디에도 없는 cephfs-typo), `wide()`·e2e `helpers/mountWide.ts` 의 문제 수도 같은 규칙.
-- **교차 픽스처** `frontend/src/features/mounts/mountProblemCases.json`(새 파일): 8열 × 4노드(안 붙인 노드·어디에도 없음·끊긴 마운트·모두 ro·
-  ro 바깥값·ro + 없음·없음 + 확인 대기·옛 보고의 없음 + 마운트 빠짐, 리포트 지연 1대). 서버 시험이 input → build() 출력 = expected(칸 상태·
-  사유·is_mountpoint·problem_count·열 요약·totals) + problem_columns 를, 포탈 `mountProblemCases.test.ts` 가 expected 에 거울을 대 같은
-  problem_count(2·3·3·null — 옛 규칙이면 0·1·1)·problem_columns 를 본다. 서버 규칙을 바꾸면 둘이 같이 빨개진다.
+- **교차 픽스처** `frontend/src/features/mounts/mountProblemCases.json`(새 파일): 11열 × 4노드(안 붙인 노드·어디에도 없음·끊긴 마운트·모두 ro·
+  ro 바깥값·ro + 없음·없음 + 확인 대기·옛 보고의 없음 + 마운트 빠짐, 리뷰 후속의 지연 노드만 붙임·끊긴 노드만 붙임·점검 불가 + 없음, 리포트
+  지연 1대). 서버 시험이 input → build() 출력 = expected(칸 상태·사유·is_mountpoint·problem_count·열 요약·totals) + problem_columns 를, 포탈
+  `mountProblemCases.test.ts` 가 expected 에 거울을 대 같은 problem_count(3·5·4·null — 고치기 전 규칙이면 0·2·1, 흔적을 신선한
+  정상·읽기 전용으로만 세던 첫 판이면 5·6·6)·problem_columns 를 본다. 서버 규칙을 바꾸면 둘이 같이 빨개진다.
+- **이식 리뷰 후속(같은 날)**: ① 흔적을 신선한 정상·읽기 전용으로만 세던 첫 판은 그 스토리지를 붙인 노드가 **하나뿐**일 때(소스·목적지
+  노드 분리 — 테스트베드 cephfs-secondary·cephfs-third 모양) 그 노드의 리포트 지연·끊긴 마운트·마운트 빠짐을 다른 모든 노드의 「없음」
+  문제로 퍼뜨렸다(build() 실측: 노드 6대에서 문제 노드 1 → 6; 지연 행의 정상은 모름인데 그것이 다른 칸을 문제로 만드는 근거였다). →
+  흔적(`mount_status._attached` ↔ 포탈 `mountTerms.attachedCell`) = ready·read_only + host_root_missing 이 아닌 broken(호스트에 마운트나
+  디렉터리가 있다 — 그 칸 자체는 이미 문제), 리포트 지연 칸은 마지막 값으로. mount_path 오타(모든 노드가 is_mountpoint 거짓인
+  missing_mount_path)는 그대로 잡히고 고장 난 노드만 문제로 남는다. 새로 등록한 스토리지를 붙인 노드가 점검 전(pending)인 한 주기의
+  일시 경보는 알려진 한계(BACKLOG). ② 「마운트 문제」 타일이 totals.broken 만 봐 어디에도 없는 열만 있는 응답에서 초록 「없음」이었다 →
+  그런 스토리지 수를 빨갛게 덧붙인다(`mountTerms.nowhereColumnCount`). ③ 범례 없음 줄에 빨간 경고 칩도 그린다(표의 칩과 1:1). ④ 문구가
+  규칙보다 강했다(「마운트한 노드가 하나도 없습니다」) → 「마운트 흔적이 없습니다(…)」·확인 대기 가능성, 낭독 「없음(어느 노드에도 마운트
+  흔적 없음)」. ⑤ 표의 열 재료를 내용 기준으로 안정화(`sameColumnFacts` — 10초 폴링마다 모든 행을 다시 그리던 것). ⑥ VARIETY 픽스처의 열
+  요약을 칸과 맞추고 픽스처 열 요약 = 칸 수 그물을 더했다. ⑦ 모듈 docstring 「끊긴 마운트」에 네임스페이스가 다른 direct 구성(옛 스토리지별
+  hostPath DaemonSet)의 같은 모양 한 줄, ARCHITECTURE·`ABSENT_REASON` 주석의 absent 조건을 「is_mountpoint 가 참이 아님(False·모름)」으로.
 - 시험: 백엔드 classify_cell(끊긴 마운트 → broken·사유 보존, is_mountpoint False·None·키 없음·비정상 값 → absent)·열 규칙 7갈래·교차 픽스처·
   라우트 끝에서 끝(`test_dead_mount_is_broken_and_a_storage_mounted_nowhere_is_a_problem`), 라우트 기존 시험 셋은 `_seed` 의 sec(어느 신선
   노드에도 없음)이 이제 문제라 수를 고쳤다. 새 시험은 고치기 전 코드에서 빨갛고, 변이 11개(서버 4: is_mountpoint 무시·absent 규칙 제거·
   read_only 를 마운트로 안 셈·지연 행을 셈 / 포탈 7: 같은 넷의 거울 + 끊긴 마운트 글자·nowhere 표시·없음 설명)가 모두 잡혔다.
 - 검증: 백엔드 전수 6667 passed · 19 skipped(첫 회는 e2e 와 겹쳐 돌려 시간 민감 시험 `test_job_runner_stream` 하나가 흔들렸다 — 단독
   122/122, 부하 없이 다시 돌린 전수 통과), vitest 137 파일 2430 passed, `tsc -b`·`tsc -p tsconfig.e2e.json` 통과, e2e 43 passed(빌드 포함).
-- 남은 것: 라이브 실증(BACKLOG 「마운트 현황 후속」), dms-ssc 와 남은 차이(같은 절).
+  리뷰 후속 뒤: 백엔드 전수 6668 passed · 19 skipped, vitest 137 파일 2432 passed, `tsc -b`·`tsc -p tsconfig.e2e.json` 통과,
+  `npm run build:image` 뒤 `dist/index.html` 외부 URL 0, e2e 43 passed(빌드 포함). 라이브 실증 전.
+- 남은 것: 라이브 실증(BACKLOG 「마운트 현황 후속」), dms-ssc 와 남은 차이(같은 절 — 흔적 범위는 이번에 두 라인이 갈렸다).
 
 ### ✨ 단일·배치 등록 상단 스테퍼 — 단일 작업 4단계·배치 생성 5단계(초안 1)·단계 게이트 순수 함수·Enter 는 다음 단계·제출 더블클릭 그물 — **완료·실증**(2026-11-27, d49 → d51)
 

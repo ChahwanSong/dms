@@ -8,7 +8,8 @@ import {
   Chip, MountCellChip, MountTipBody, NodeTags, ProblemTag, SharedCellChip, SharedHeadTipBody, SharedTipBody, StorageTipBody,
 } from "./MountCell";
 import {
-  CELL_META, absentNowhere, cellAriaLabel, cellView, columnFacts, columnNameLines, columnPathTail, podFailedRoles, sharedDisplay,
+  CELL_META, absentNowhere, cellAriaLabel, cellView, columnFacts, columnNameLines, columnPathTail, podFailedRoles, sameColumnFacts,
+  sharedDisplay,
 } from "./mountTerms";
 import type { ColumnFacts } from "./mountTerms";
 import type { ControlPod, MountRow, MountStatusResponse, StorageColumn } from "./types";
@@ -70,6 +71,14 @@ const SH_CELL = "border-b border-r-2 border-line bg-panel/60 px-1 py-1.5 text-ce
 
 const NO_PODS: ControlPod[] = [];
 
+/** columnFacts(nodes) -- 열 집합이 앞 렌더와 같으면 앞 객체(MountStatusPage useStableList 와 같은 방식). */
+function useStableFacts(nodes: readonly MountRow[]): ColumnFacts {
+  const next = useMemo(() => columnFacts(nodes), [nodes]);
+  const ref = useRef(next);
+  if (ref.current !== next && !sameColumnFacts(ref.current, next)) ref.current = next;
+  return ref.current;
+}
+
 type TipKind = "cell" | "shared" | "head" | "shared-head";
 interface TipTarget { kind: TipKind; node: string | undefined; col: string | undefined; rect: Rect }
 interface TipHandle { open: (t: TipTarget) => void; close: () => void }
@@ -88,9 +97,10 @@ export function MountMatrix({ data, rows, cols, renderStorageMeta, renderStorage
   const tipRef = useRef<TipHandle>(null);
   const maxHeight = useFitMaxHeight(wrapRef);
   const shared = data.shared_dir;
-  // 열 재료(어디에도 마운트되지 않은 열의 「없음」 표시 -- mountTerms.columnFacts)는 행 필터 전 **모든** 행으로 잰다(서버 규칙과 같게).
-  // nodes 가 그대로면 같은 객체라 행 memo 가 깨지지 않는다.
-  const facts = useMemo(() => columnFacts(data.nodes), [data.nodes]);
+  // 열 재료(어디에도 마운트 흔적이 없는 열의 「없음」 표시 -- mountTerms.columnFacts)는 행 필터 전 **모든** 행으로 잰다(서버 규칙과
+  // 같게). 노드는 약 60초 주기로 따로 보고해 10초 폴링마다 거의 늘 어느 행의 reported_at 이 바뀐다 -- data.nodes 는 매번 새 배열이라
+  // 내용(열 집합)이 같으면 앞 객체를 돌려준다(useStableFacts -- 행 memo 가 깨지지 않게).
+  const facts = useStableFacts(data.nodes);
   // 행 memo 가 깨지지 않게 노드별 파드 배열을 한 번만 만든다(control_pods 가 그대로면 react-query 구조 공유로 같은 배열).
   const podsByNode = useMemo(() => {
     const m = new Map<string, ControlPod[]>();

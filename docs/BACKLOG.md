@@ -439,14 +439,29 @@ CHANGELOG 「스토리지 > 마운트 현황(노드 × 스토리지 매트릭스
 - 🔍 **판정 구멍 둘 수정의 라이브 실증** — 2026-11-27(CHANGELOG 「마운트 현황 판정 구멍 둘」, dms-ssc d207 리뷰 이식) 아직: ① 끊긴 마운트 —
   테스트베드 한 노드에서 FUSE 마운트를 죽이거나(또는 그 노드의 다음 보고 전 가짜 보고 ingest — `is_mountpoint: true`·`exists: false`) 칸이
   「끊긴 마운트」(빨강)·「문제 n」·「마운트 문제」 타일·「문제 있는 스토리지」에 드는지, 스토리지 목록 배지(Degraded)는 종전과 같은지 ② 어디에도
-  없는 스토리지 — 없는 mount_path 로 스토리지를 등록(다음 보고 뒤) 열 전체가 경고 아이콘 「없음」·모든 신선 노드에 「문제 1」 ③ 다른 노드엔
-  붙은 스토리지의 없음(라이브 w1/cephfs-secondary 모양)은 그대로 회색·문제 0. 확인 뒤 등록한 시험 스토리지는 지운다.
-- 📝 **dms-ssc 와 남은 차이(같은 날 이식 기준)** — 규칙(끊긴 마운트는 문제, 어디에도 없는 열의 없음은 문제, ro 는 정상 노드 옆에서만)은
-  같고 모양이 다르다: ssc `routes_mounts` 는 칸·아티팩트 경로 칸마다 `problem` 플래그를 싣고 요약 수가 그 플래그만 세며(포탈은 플래그가 없는
+  없는 스토리지 — 없는 mount_path 로 스토리지를 등록(다음 보고 뒤) 열 전체가 경고 아이콘 「없음」·모든 신선 노드에 「문제 1」·「마운트 문제」
+  타일에 「마운트 흔적 없는 스토리지 1개」(빨강) ③ 다른 노드엔 붙은 스토리지의 없음(라이브 w1/cephfs-secondary 모양)은 그대로 회색·문제 0
+  ④ 퍼지지 않음(이식 리뷰 후속) — cephfs-secondary 를 붙인 유일한 노드(w2)의 에이전트를 멈춰 리포트 지연으로 만들어도 w1 의 없음은 회색·
+  「문제 있는 노드」는 w2 하나. 확인 뒤 등록한 시험 스토리지는 지우고 에이전트를 되살린다.
+- 📝 **알려진 한계: 새로 등록한 한 노드 스토리지의 한 주기 경보** — 2026-11-27 이식 리뷰 후속(CHANGELOG 같은 절). 「없음」을 문제로 세지 않는
+  흔적(`mount_status._attached`)에 확인 대기(pending)는 들지 않는다 — 새로 등록한 스토리지를 붙인 노드가 아직 점검 전이고 다른 노드는 벌써
+  「없음」을 보고했으면, 다음 보고(약 1~2분)까지 그 다른 노드들이 「문제 있는 노드」에 든다. 신선한 pending 이 있는 열의 판정을 한 주기
+  미루면 없앨 수 있지만, pending 이 오래 남는 노드(옛 에이전트·목록을 못 받는 에이전트)가 오타 검출을 계속 막을 수 있고 「없음」 설명에
+  넷째 갈래(점검 대기 중)가 필요해 지금은 두었다(설명 문장은 확인 대기 가능성을 말한다). 경보 피로가 실제로 보이면 다시 본다.
+- 📝 **dms-ssc 와 남은 차이(같은 날 이식 기준)** — 큰 규칙(끊긴 마운트는 문제, 어디에도 없는 열의 없음은 문제, ro 는 정상 노드 옆에서만)은
+  같고(세부 의미 차이 셋은 이 항목 끝) 모양이 다르다: ssc `routes_mounts` 는 칸·아티팩트 경로 칸마다 `problem` 플래그를 싣고 요약 수가 그 플래그만 세며(포탈은 플래그가 없는
   옛 서버에서만 다시 셈), 상태 이름이 missing/absent 다. k8s 는 행 `problem_count` 만 싣고 포탈이 열 규칙을 거울(`mountTerms.columnFacts`·
   `cellProblem`)로 다시 재며 상태 이름이 broken/absent 다(교차 픽스처 `mountProblemCases.json` 이 서버·포탈을 묶는다). ssc 는 아티팩트 경로
   칸에 덮는 스토리지 칸의 missing·absent 를 겹치지만(`covering_storage_missing:<이름>`), k8s 공용 디렉터리 칸은 에이전트의 덮는 마운트
   (mount_point·fstype — local·differs)로만 판정한다. 칸마다 problem 플래그를 실을지는 두 라인을 같이 정한다(응답 모양 — 공용 코어 계약).
+  같은 날 이식 리뷰가 찾은 **의미 차이** 셋(두 라인이 함께 정할 일 — 코드는 각자 그대로):
+  ① 「없음」을 문제로 세지 않는 **흔적의 범위** — ssc `cell_problem`·`mounted_columns` 는 신선한 ready·readonly 만 센다. k8s 는 이식 리뷰
+  후속에서 host_root_missing 이 아닌 broken 과 리포트 지연 칸의 마지막 값(ready·read_only·그런 broken)까지 넓혔다(`_attached`) — 그 스토리지를
+  붙인 노드가 하나뿐일 때 그 노드의 지연·끊김이 모든 노드로 퍼지던 것(ssc 에 같은 퍼짐이 남아 있다). ② **writable 이 없는 Ready**(writable
+  키가 없는 옛 에이전트) — ssc `storage_cell` 은 readonly(`"ready" if writable is True else "readonly"`), k8s `classify_cell` 은 ready(writable
+  is False 일 때만 read_only). 옛 에이전트 노드가 낀 열에서 ro 바깥값 판정이 갈린다(k8s 는 문제, ssc 는 아님) — 없음 열 규칙은 두 상태 모두
+  흔적이라 같다. ③ **공용 디렉터리(base) 읽기 전용** — ssc 는 ready 인 동료 base 가 있을 때만 문제(`base_ready_peer`), k8s 는 늘 문제
+  (`SHARED_PROBLEM_STATES`). 「ro 는 정상 노드 옆에서만」은 k8s 에선 스토리지 칸에만 적용된다.
 - 💡 **에이전트가 끊긴 마운트를 직접 가리기** — 지금은 서버가 `is_mountpoint` 로 추론한다(Missing + missing_mount_path + is_mountpoint true).
   에이전트가 경로 stat 의 errno(ENOTCONN·ESTALE·EIO)를 따로 사유로 싣으면 죽은 FUSE·낡은 NFS 와 전파 끊김(부모 마운트가 덮음)을 구별해
   조치 문장을 나눌 수 있다(두 라인 공용 에이전트 — dms-agent 재빌드 필요).

@@ -11,7 +11,9 @@ import { StateChip } from "./MountCell";
 import { MountMatrix } from "./MountMatrix";
 import { NodeMountCards } from "./NodeMountCards";
 import { NodeMountSheet } from "./NodeMountSheet";
-import { CELL_META, POD_ROLE_LABELS, columnFacts, columnProblem, filterColumns, podCheckText } from "./mountTerms";
+import {
+  ABSENT_NOWHERE_META, CELL_META, POD_ROLE_LABELS, columnFacts, columnProblem, filterColumns, nowhereColumnCount, podCheckText,
+} from "./mountTerms";
 import type { CellState, MountRow, MountStatusResponse, MountTotals, StorageColumn } from "./types";
 import { useMountStatus } from "./useMountStatus";
 
@@ -47,11 +49,12 @@ type View = "table" | "cards";
 const NARROW = "(max-width: 639px)";
 
 // 범례: 칸과 같은 칩 + 개수(신선한 칸은 「칸」, 모름만 리포트 지연 노드 「대」 -- 단위를 붙여 노드 수와 헷갈리지 않게) + 짧은 뜻.
-// 없음의 뜻은 서버 「문제 있는 노드」 열 규칙과 같다(어느 노드에도 마운트되지 않은 스토리지의 없음은 문제 -- 칸은 경고 아이콘·빨강).
+// 없음의 뜻은 서버 「문제 있는 노드」 열 규칙과 같다(어느 노드에도 마운트 흔적이 없는 스토리지의 없음은 문제 -- 칸은 경고 아이콘·빨강,
+// 범례 줄에도 그 칩을 함께 그린다: 표의 칩 모양과 1:1).
 const LEGEND: { state: CellState; text: string; count: (t: MountTotals) => string }[] = [
   { state: "ready", text: "마운트·읽기 가능", count: (t) => `${t.ready}칸` },
   { state: "read_only", text: "sync 목적지·rm 제외", count: (t) => `${t.read_only}칸` },
-  { state: "absent", text: "경로 없음(안 붙인 노드면 정상, 어느 노드에도 없으면 문제)", count: (t) => `${t.absent}칸` },
+  { state: "absent", text: "경로 없음(안 붙인 노드면 정상 · 경고 아이콘·빨강 = 어느 노드에도 마운트 흔적이 없어 문제)", count: (t) => `${t.absent}칸` },
   { state: "broken", text: "마운트 빠짐·끊긴 마운트·전파 안 됨·읽기 불가·점검 불가", count: (t) => `${t.broken}칸` },
   { state: "pending", text: "다음 보고에 반영", count: (t) => `${t.pending}칸` },
   { state: "stale", text: "리포트 지연", count: (t) => `${t.stale_nodes}대` },
@@ -145,9 +148,12 @@ export function MountStatusPage({ renderStorageMeta, renderStorageTip, roleLabel
   const allCols = data?.storages ?? NO_COLUMNS;
   const allRows = data?.nodes ?? NO_ROWS;
   const rows = onlyProblems ? allRows.filter((r) => r.problem) : allRows;
-  const problemColCount = useMemo(() => {
+  // nowhereCols = 어느 노드에도 마운트 흔적이 없는 스토리지 수 -- 그 칸은 상태가 absent 라 서버 totals.broken 에 없지만 문제다(빨간
+  // 「없음」 칩). 「마운트 문제」 타일이 broken 만 보면 그 칸·「문제 n」 꼬리표 옆에서 초록 「없음」이라고 말한다(같은 날 이식 리뷰).
+  const { problemColCount, nowhereCols } = useMemo(() => {
     const facts = columnFacts(allRows);
-    return allCols.filter((c) => columnProblem(c, allRows, facts)).length;
+    return { problemColCount: allCols.filter((c) => columnProblem(c, allRows, facts)).length,
+             nowhereCols: nowhereColumnCount(allCols, allRows, facts) };
   }, [allCols, allRows]);
   const visibleCols = useStableList(useMemo(
     () => filterColumns(allCols, allRows, { q: search.applied, problemsOnly: problemCols }),
@@ -178,9 +184,20 @@ export function MountStatusPage({ renderStorageMeta, renderStorageTip, roleLabel
                 ? <span className="font-medium text-bad">{`리포트 지연 ${t.stale_nodes}대`}</span>
                 : t.nodes === 0 ? "보고한 노드 없음" : "모두 정상 보고"} />
         <Tile label="마운트 문제"
-              value={t === undefined ? dash : t.broken === 0
+              value={t === undefined ? dash : t.broken === 0 && nowhereCols === 0
                 ? <><CircleCheck className="h-5 w-5 text-ok" aria-hidden /><span className="text-ok">없음</span></>
-                : <><TriangleAlert className="h-5 w-5 text-bad" aria-hidden /><span className="text-bad">{`${t.broken}칸`}</span></>}
+                : (
+                  <>
+                    <TriangleAlert className="h-5 w-5 text-bad" aria-hidden />
+                    {t.broken > 0 && <span className="text-bad">{`${t.broken}칸`}</span>}
+                    {nowhereCols > 0 && (
+                      // 좁은 화면 2열 타일(약 165px)에 한 줄로 안 들어간다 -- nowrap 이면 타일 밖으로 넘친다, 낱말 단위로 꺾는다
+                      <span className="min-w-0 break-keep text-sm font-semibold text-bad">
+                        {`마운트 흔적 없는 스토리지 ${nowhereCols}개`}
+                      </span>
+                    )}
+                  </>
+                )}
               sub="마운트 빠짐·끊긴 마운트·전파 안 됨·읽기 불가·점검 불가" />
         <Tile label="읽기 전용" value={t ? `${t.read_only}칸` : dash} sub="sync 목적지·rm 배치에서 빠짐" />
         <Tile label="공용 디렉터리"
@@ -251,6 +268,9 @@ export function MountStatusPage({ renderStorageMeta, renderStorageTip, roleLabel
               return (
                 <li key={state} className="flex items-center gap-1.5">
                   <StateChip Icon={meta.Icon} label={meta.label} tone={meta.tone} />
+                  {state === "absent" && (
+                    <StateChip Icon={ABSENT_NOWHERE_META.Icon} label={ABSENT_NOWHERE_META.label} tone={ABSENT_NOWHERE_META.tone} />
+                  )}
                   <span className="tabular-nums font-medium">{count}</span>
                   <span className="text-muted">{text}</span>
                 </li>

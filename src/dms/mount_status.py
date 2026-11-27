@@ -16,8 +16,8 @@ hostPath 로 붙여 PV 디렉터리에 접근한다(execution_volcano) -- 칸 �
   status Ready, writable False                      → read_only              sync 목적지·rm 배치에서 빠진다(placement require_writable)
   status Ready                                      → ready                  writable 키 부재(옛 에이전트)는 placement 처럼 통과 = ready
   status Missing + missing_mount_path               → absent                 경로 자체가 없다 -- 의도적으로 안 붙인 노드일 수 있어
-    + is_mountpoint 가 참이 아님(False·모름)                                    같은 열에 마운트된 노드가 있으면 문제로 세지 않는다
-                                                                              (nsync 소스·목적지 노드 분리 구성, 「문제 있는 노드」)
+    + is_mountpoint 가 참이 아님(False·모름)                                    같은 열에 그 스토리지를 붙인 흔적이 있으면 문제로 세지
+                                                                              않는다(nsync 소스·목적지 노드 분리 구성, 「문제 있는 노드」)
   그 밖(is_mountpoint 참인 missing_mount_path·not_a_mountpoint·propagation_stale·not_readable·host_root_missing·미지 사유·
   비정상 status) → broken(사유는 에이전트 원문 그대로)
   신선하지 않은 노드(fresh False)는 칸 전부 stale(last = 위 판정) -- reconciler·placement 처럼 신선한 보고만 집계한다.
@@ -27,7 +27,10 @@ hostPath 로 붙여 PV 디렉터리에 접근한다(execution_volcano) -- 칸 �
 되고, 부모 마운트가 덮이거나 전파가 끊기면 자식 마운트 지점이 에이전트에서 안 보인다 -- 보고는 Missing + missing_mount_path 인데
 is_mountpoint 는 참이다. 이것을 「안 붙인 노드」로 읽으면 이 화면이 잡으려는 끊긴 마운트를 문제 목록에서 숨긴다. 칸 모양은 그대로
 (사유 원문·is_mountpoint 가 이미 칸에 있다) -- 포탈이 broken + missing_mount_path 를 「끊긴 마운트」로 그린다(mountTerms REASON_TEXT).
-is_mountpoint 가 bool 이 아니면(옛·비정상 보고) 모름이라 종전처럼 absent 다(근거 없이 문제로 올리지 않는다).
+is_mountpoint 가 bool 이 아니면(옛·비정상 보고) 모름이라 종전처럼 absent 다(근거 없이 문제로 올리지 않는다). 이 읽기는 에이전트가
+mountinfo 와 isdir 를 같은 마운트 네임스페이스에서 볼 때만 맞다 -- mountinfo 만 호스트 것을 가리키고 host_root 가 없는 direct 구성(옛
+스토리지별 hostPath DaemonSet)에선 hostPath 를 안 단 스토리지도 같은 모양으로 나온다. 출하 매니페스트는 host_root 고정이라(base
+50-agent-daemonset·계약 테스트) 해당 없고, bare-metal direct 모드는 같은 네임스페이스라 맞다.
 
 공용 디렉터리 칸(classify_shared): artifact_base 보고가 지금 유효한 base 경로를 잰 것일 때만 판정한다(아니면 pending --
 routes_artifact_base._node_checks 와 같은 규칙). 없음(missing)은 문제다 -- 스토리지의 absent 와 달리 공용 디렉터리는 모든 노드의 같은
@@ -38,12 +41,19 @@ routes_artifact_base._node_checks 와 같은 규칙). 없음(missing)은 문제�
 
 「문제 있는 노드」(행 problem·problem_count): 신선하지 않은 행은 늘 문제(problem_count null -- 지금 상태를 모른다). 신선한 행은
 broken 칸 + **바깥값 read_only** 칸 + **어디에도 없는 열의 absent** 칸 + 공용 디렉터리 문제(local·differs·missing·read_only) 수다
-(칸 하나의 판정 = _cell_problem, 열 재료 = _ro_outlier_columns·_mounted_columns -- 둘 다 신선한 행만 본다).
+(칸 하나의 판정 = _cell_problem, 열 재료 = _ro_outlier_columns(신선한 행만)·_mounted_columns(지연 행은 마지막 값)).
   - read_only 는 같은 스토리지를 다른 신선한 노드가 쓰기 가능(ready)으로 붙였을 때만 센다 -- 이관 소스처럼 모든 노드에 ro 로 붙인
     스토리지는 의도된 구성이라(경보 피로) 「문제 있는 노드」 필터가 전체와 같아지지 않게 한다.
-  - absent 는 같은 스토리지를 신선한 노드 하나라도 붙였으면(ready·read_only) 세지 않는다(그 스토리지를 안 붙인 노드). **하나도 없으면
-    센다**(2026-11-27 -- dms-ssc d207 리뷰 이식): 그 스토리지는 어디에도 마운트돼 있지 않다(mount_path 오타·마운트 배포 전) -- 열 전체가
-    회색 「없음」인데 「문제 0」이던 구멍. pending·broken·stale 칸은 마운트 근거가 아니다(리포트 지연 노드의 정상도 -- 지금 상태 모름).
+  - absent 는 같은 열에 그 스토리지를 붙인(붙이려 한) **흔적**이 있으면 세지 않는다(그 스토리지를 안 붙인 노드). **흔적이 하나도
+    없으면 센다**(2026-11-27 -- dms-ssc d207 리뷰 이식): 그 스토리지는 어디에도 마운트돼 있지 않다(mount_path 오타·마운트 배포 전) --
+    열 전체가 회색 「없음」인데 「문제 0」이던 구멍. 흔적(_attached)은 ready·read_only 칸과 host_root_missing 이 아닌 broken 칸(호스트에
+    마운트나 디렉터리가 있다 -- 끊긴 마운트·마운트 빠짐·전파 안 됨·읽기 불가; 미지 사유·비정상 status 도 든다 -- 그 칸 자체가 이미
+    문제라 열은 문제 열로 남는다)이고, 리포트 지연 칸은 마지막 값(last)으로 같은 규칙을 본다. 흔적을 신선한 정상·읽기 전용으로만 세면 그 스토리지를 붙인 노드가 하나뿐일 때(소스·목적지
+    분리 -- 테스트베드 cephfs-secondary·cephfs-third 가 그 모양) 그 노드 하나의 리포트 지연·끊긴 마운트가 다른 모든 노드의 「없음」을
+    문제로 퍼뜨렸다(같은 날 이식 리뷰 -- 노드 6대에서 문제 노드 1 → 6; 지연 행의 정상은 모름인데 그것을 다른 칸을 문제로 만드는 근거로
+    쓰던 셈). 흔적이 아닌 것: absent·pending·host_root_missing(그 노드에 대해 아무것도 모른다)과 마지막 값이 그런 지연 칸. 그래서
+    mount_path 오타(모든 노드가 is_mountpoint 거짓인 missing_mount_path)는 그대로 잡힌다. 알려진 한계: 새로 등록한 스토리지를 붙인
+    노드가 아직 점검 전(pending)이면 다른 노드의 「없음」이 한 보고 주기 동안 문제로 보인다(docs/BACKLOG.md).
   칸 상태·totals·열 요약의 read_only·absent 수는 그대로다(문제 여부는 행 수에만 반영 -- 포탈 mountTerms.columnProblem·cellProblem 이
   같은 열 규칙의 거울, 교차 픽스처 frontend/src/features/mounts/mountProblemCases.json).
 
@@ -60,10 +70,13 @@ SHARED_STATES = ("ok", "ok_unverified", "local", "differs", "missing", "read_onl
 SHARED_PROBLEM_STATES = ("local", "differs", "missing", "read_only")
 # 늘 문제로 세는 칸 상태. read_only·absent 는 열에 따라(_cell_problem -- 모듈 docstring 「문제 있는 노드」)
 CELL_PROBLEM_STATES = ("broken",)
-# 그 노드에 경로 자체가 없다는 에이전트 사유 -- 호스트에 그 지점의 마운트도 없을 때만 absent(모듈 docstring 「끊긴 마운트」)
+# 그 노드에 경로 자체가 없다는 에이전트 사유 -- is_mountpoint 가 참이 아닐 때만(False 또는 모름 -- 옛 보고) absent, 참이면 호스트에
+# 그 지점의 마운트가 있는 끊긴 마운트라 broken(모듈 docstring 「끊긴 마운트」)
 ABSENT_REASON = "missing_mount_path"
-# 「이 노드에 붙어 있다」로 세는 칸 상태(absent 열 판정 -- _mounted_columns)
+# 「이 노드에 붙어 있다」로 세는 칸 상태(absent 열 판정의 흔적 -- _attached)
 MOUNTED_STATES = ("ready", "read_only")
+# 그 노드의 마운트를 점검하지 못했다는 사유 -- broken 이지만 붙인 흔적이 아니다(_attached)
+HOST_ROOT_MISSING = "host_root_missing"
 
 
 def _bool(v):
@@ -183,9 +196,16 @@ def _ro_outlier_columns(rows) -> set:
     return {name for r in rows if r["fresh"] for name, c in r["cells"].items() if c["state"] == "ready"}
 
 
+def _attached(cell) -> bool:
+    """칸이 그 스토리지를 이 노드에 붙인(붙이려 한) 흔적인가 -- ready·read_only, 또는 host_root_missing 이 아닌 broken. 리포트 지연
+    칸은 마지막 값으로 본다(모듈 docstring 「문제 있는 노드」)."""
+    state = cell["last"] if cell["state"] == "stale" else cell["state"]
+    return state in MOUNTED_STATES or (state == "broken" and cell["reason"] != HOST_ROOT_MISSING)
+
+
 def _mounted_columns(rows) -> set:
-    """absent 칸을 문제로 세지 **않는** 열: 신선한 ready·read_only 칸이 하나라도 있는 열(그 스토리지가 어딘가엔 붙어 있다)."""
-    return {name for r in rows if r["fresh"] for name, c in r["cells"].items() if c["state"] in MOUNTED_STATES}
+    """absent 칸을 문제로 세지 **않는** 열: 붙인 흔적(_attached) 칸이 하나라도 있는 열 -- 리포트 지연 행도 본다(마지막 값)."""
+    return {name for r in rows for name, c in r["cells"].items() if _attached(c)}
 
 
 def _cell_problem(name, cell, ro_outliers, mounted) -> bool:

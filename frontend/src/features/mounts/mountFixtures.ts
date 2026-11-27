@@ -1,7 +1,7 @@
 // 마운트 현황 테스트 픽스처(테스트 전용 -- 앱 코드는 import 하지 않는다; k8s/k8sFixtures 선례). LIVE 는 2026-11-23 dmsk8s 라이브
 // 모양(k8s-w1·k8s-w2 × 스토리지 6, w1/cephfs-secondary·w2/cephfs-third 경로 없음, 공용 /dms_shared nfs4)이고 k8s 덧붙임 키가
 // 없다(공용 코어 = dms-ssc 모양). VARIETY 는 칸·공용·꼬리표의 모든 갈래를 한 화면에 모은다. NOWHERE(2026-11-27)는 LIVE 위에 끊긴
-// 마운트 칸과 어느 노드에도 마운트되지 않은 스토리지 열을 얹는다. 문제 수(problem_count·totals)는 서버 규칙(mount_status 「문제 있는
+// 마운트 칸과 어느 노드에도 마운트 흔적이 없는 스토리지 열을 얹는다. 문제 수(problem_count·totals)는 서버 규칙(mount_status 「문제 있는
 // 노드」)으로 손으로 센 값이다 -- 칸을 바꾸면 수도 같이 맞춘다(화면이 칸에서 다시 재는 열 재료와 어긋나면 표시가 서버와 두 말을 한다).
 import { cellProblem, columnFacts } from "./mountTerms";
 import type { ControlPod, MountCellData, MountRow, MountStatusResponse, SharedCellData, StorageColumn } from "./types";
@@ -76,7 +76,7 @@ export const LIVE: MountStatusResponse = {
 
 const OLD_ISO = new Date(Date.now() - 12 * 60_000).toISOString();
 
-// NOWHERE: LIVE + 스토리지 cephfs-typo(두 노드 모두 경로 없음 -- mount_path 오타 모양, 어디에도 마운트되지 않아 그 없음은 문제) +
+// NOWHERE: LIVE + 스토리지 cephfs-typo(두 노드 모두 경로 없음 -- mount_path 오타 모양, 어디에도 마운트 흔적이 없어 그 없음은 문제) +
 // k8s-w2 의 cephfs-dms 끊긴 마운트. 문제 = w1 1(typo) · w2 2(typo + 끊긴 cephfs-dms), 문제 있는 스토리지 = cephfs-dms·cephfs-typo.
 export const NOWHERE: MountStatusResponse = {
   ...LIVE,
@@ -94,8 +94,8 @@ export const NOWHERE: MountStatusResponse = {
   totals: { ...TOTALS, ready: 9, absent: 4, broken: 1, problem_nodes: 2 },
 };
 
-// VARIETY: 스토리지 둘(ceph·sec) × 노드 다섯. sec 은 n-pend 만 붙어 있다(정상·쓰기 여부 모름) -- 그래서 n-build 의 sec 없음은 안 붙인
-// 노드(문제 아님, 2026-11-27 열 규칙). n-pend 의 ceph 는 옛 경로로 잰 결과(확인 대기·경로 바뀜).
+// VARIETY: 스토리지 둘(ceph·sec) × 노드 다섯. sec 은 n-pend 가 붙였고(정상·쓰기 여부 모름) n-broken 도 붙이려 했다(전파 안 됨) --
+// 그래서 n-build 의 sec 없음은 안 붙인 노드(문제 아님, 2026-11-27 열 규칙). n-pend 의 ceph 는 옛 경로로 잰 결과(확인 대기·경로 바뀜).
 const C = "/cephfs";
 const S = "/sec";
 export const VARIETY: MountStatusResponse = {
@@ -103,8 +103,9 @@ export const VARIETY: MountStatusResponse = {
   shared_dir: { path: "/dms_shared/dms/artifacts", state_root: "/dms_shared/dms",
                 majority: { mount_point: "/dms_shared", fstype: "nfs4", nodes: 2 } },
   storages: [
-    column("ceph", C, { ready: 3, total: 4, status: "Degraded", detail: "ready_nodes=3/4", read_only: 1, broken: 1 }),
-    column("sec", S, { ready: 1, total: 3, status: "Degraded", detail: "ready_nodes=1/3", broken: 1, pending: 1, absent: 0 }),
+    // 서버 규칙으로 센 열 요약(ready·total = 신선한 보고의 status 원문 -- 경로 바뀜 칸도 옛 경로 항목의 Ready 로 든다)
+    column("ceph", C, { ready: 3, total: 4, status: "Degraded", detail: "ready_nodes=3/4", read_only: 1, broken: 1, pending: 1 }),
+    column("sec", S, { ready: 1, total: 4, status: "Degraded", detail: "ready_nodes=1/4", broken: 2, absent: 1 }),
   ],
   disabled_storages: ["old-nas"],
   nodes: [

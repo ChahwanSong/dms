@@ -83,9 +83,12 @@ export function wideMountStatus(nowMs = Date.now()): Record<string, unknown> {
     name, cells: Object.fromEntries(ids.map((i) => [wideName(i), cellOf(i, j, widePath(i))])) as Record<string, Cell>,
   }));
   // 「문제 있는 노드」 수 = 서버 mount_status._cell_problem 의 거울(앱 코드를 import 하지 않아 여기 따로 둔다): 마운트 문제 · 정상
-  // 노드가 있는 열의 읽기 전용 · 정상·읽기 전용 노드가 하나도 없는 열의 없음(2026-11-27 -- 23노드라 이 합성 응답에는 없다).
+  // 노드가 있는 열의 읽기 전용 · 마운트 흔적(_attached -- 정상·읽기 전용·점검 불가가 아닌 마운트 문제, 리포트 지연 행은 마지막 값)이
+  // 하나도 없는 열의 없음(2026-11-27 -- 23노드라 이 합성 응답에는 없다; 지연 행의 마지막 값은 노드 0 의 칸과 같아 fresh 만 보면 된다).
+  const attached = (c: Cell) => c.state === "ready" || c.state === "read_only"
+    || (c.state === "broken" && c.reason !== "host_root_missing");
   const roOutliers = new Set(ids.map(wideName).filter((n) => fresh.some((r) => r.cells[n].state === "ready")));
-  const mounted = new Set(ids.map(wideName).filter((n) => fresh.some((r) => ["ready", "read_only"].includes(r.cells[n].state))));
+  const mounted = new Set(ids.map(wideName).filter((n) => fresh.some((r) => attached(r.cells[n]))));
   const row = (name: string, cells: Record<string, Cell>, over: Record<string, unknown> & { problem: boolean }) => ({
     node_name: name, reported_at: now, fresh: true, probe_mode: "host_root", exclusion: null,
     k8s_node: { schedulable: true, reason: null, transient: false }, roles: [] as string[], control_plane: false,

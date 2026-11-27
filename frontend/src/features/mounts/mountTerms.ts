@@ -26,16 +26,20 @@ export const TONE_CLASS: Record<Tone, string> = {
 
 export interface StateMeta { label: string; Icon: LucideIcon; tone: Tone; help: string }
 
-// 「없음」 설명 셋(2026-11-27 -- 서버 mount_status 「문제 있는 노드」의 열 규칙): 같은 스토리지를 신선한 노드 하나라도 붙였으면(정상·읽기
-// 전용) 안 붙인 노드라 문제 아님, 하나도 없으면 어디에도 마운트되지 않은 스토리지라 문제. 열 재료를 모르는 곳(범례 칩·옛 호출)은 규칙을
-// 함께 말하는 ABSENT_HELP.
+// 「없음」 설명 셋(2026-11-27 -- 서버 mount_status 「문제 있는 노드」의 열 규칙): 같은 열에 그 스토리지를 붙인 흔적(정상·읽기 전용·점검
+// 불가가 아닌 마운트 문제, 리포트 지연 노드는 마지막 값 -- columnFacts)이 있으면 안 붙인 노드라 문제 아님, 하나도 없으면 어디에도
+// 마운트되지 않은 스토리지라 문제. 문구는 규칙만큼만 말한다(흔적이 없다 ≠ 단정) -- 열 재료를 모르는 곳(옛 호출)은 규칙을 함께 말하는
+// ABSENT_HELP.
 const ABSENT_HELP = "이 노드에 마운트 경로가 없습니다 — 이 스토리지를 붙이지 않은 노드라면 정상입니다(소스·목적지 노드를 나눈 "
-  + "구성). 작업은 이 스토리지를 마운트한 노드에서만 돕니다. 단, 어느 노드에도 붙어 있지 않은 스토리지면(마운트된 노드가 하나도 "
-  + "없음) 문제로 셉니다.";
-const ABSENT_ELSEWHERE_HELP = "이 노드에 마운트 경로가 없습니다 — 다른 노드에는 마운트돼 있어, 이 스토리지를 붙이지 않은 노드라면 "
-  + "정상입니다(소스·목적지 노드를 나눈 구성). 작업은 이 스토리지를 마운트한 노드에서만 돕니다.";
-const ABSENT_NOWHERE_HELP = "이 노드에 마운트 경로가 없고, 이 스토리지를 마운트한 노드가 하나도 없습니다 — 마운트 경로 오타이거나 아직 "
-  + "어느 노드에도 마운트하지 않은 스토리지일 수 있어 문제로 셉니다.";
+  + "구성). 작업은 이 스토리지를 마운트한 노드에서만 돕니다. 단, 어느 노드에도 마운트 흔적이 없는 스토리지면 문제로 셉니다.";
+const ABSENT_ELSEWHERE_HELP = "이 노드에 마운트 경로가 없습니다 — 다른 노드에 이 스토리지의 마운트 흔적이 있어(마운트 문제·리포트 지연 "
+  + "노드의 마지막 값 포함), 이 스토리지를 붙이지 않은 노드라면 정상입니다(소스·목적지 노드를 나눈 구성). 작업은 이 스토리지를 "
+  + "마운트한 노드에서만 돕니다.";
+// (「읽기 전용」이라는 낱말은 쓰지 않는다 -- 붙지 않은 칸의 시트에 그 낱말이 보이면 ro 마운트를 의심하게 만든다: MountCell.test 그물)
+const ABSENT_NOWHERE_HELP = "이 노드에 마운트 경로가 없고, 어느 노드에도 이 스토리지의 마운트 흔적이 없습니다(마운트돼 있거나 마운트 문제로 "
+  + "보고한 노드가 하나도 없고, 리포트 지연 노드의 마지막 값도 그렇습니다) — 마운트 경로 오타이거나 아직 어느 노드에도 마운트하지 않은 "
+  + "스토리지일 수 있어 문제로 셉니다. 방금 등록한 스토리지라면 아직 점검하지 않은 노드(확인 대기)가 있을 수 있습니다 — 다음 보고 뒤 "
+  + "다시 보세요.";
 // 끊긴 마운트(2026-11-27 -- dms-ssc d207 리뷰 이식): 에이전트는 Missing + missing_mount_path 로 보고하지만 호스트 mountinfo 엔 마운트가
 // 있다(is_mountpoint 참). 서버는 이 칸만 broken 으로 둔다(missing_mount_path 인 나머지는 absent) -- 그래서 broken 칸의 이 사유는 늘 끊긴
 // 마운트다(REASON_TEXT).
@@ -109,14 +113,22 @@ export function cellIcon(cell: CellLike): LucideIcon {
   return CELL_META[cell.state].Icon;
 }
 
-// 열 단위 문제 판정의 거울(2026-11-27 -- 서버 mount_status._ro_outlier_columns·_mounted_columns·_cell_problem). 둘 다 신선한 행만 본다
-// (리포트 지연 행의 칸은 state stale 이라 근거도 문제도 아니다). 교차 픽스처 mountProblemCases.json 을 서버 시험(tests/test_mount_status.py)과
-// 이 파일의 시험이 함께 읽는다 -- 서버 규칙이 바뀌면 둘이 같이 빨개진다.
+// 열 단위 문제 판정의 거울(2026-11-27 -- 서버 mount_status._ro_outlier_columns·_mounted_columns·_attached·_cell_problem). ready 는 신선한
+// 행만 본다(리포트 지연 행의 정상은 지금 쓰기 가능한지 모른다). mounted 는 리포트 지연 행도 마지막 값으로 본다 -- 그 스토리지를 붙인 노드가
+// 하나뿐일 때 그 노드의 지연·끊긴 마운트를 다른 모든 노드의 「없음」 문제로 퍼뜨리지 않게(같은 날 이식 리뷰). 교차 픽스처
+// mountProblemCases.json 을 서버 시험(tests/test_mount_status.py)과 이 파일의 시험이 함께 읽는다 -- 서버 규칙이 바뀌면 둘이 같이 빨개진다.
 export interface ColumnFacts {
   /** 신선한 정상(쓰기 가능) 칸이 있는 열 -- 그 열의 읽기 전용은 바깥값(문제). */
   ready: ReadonlySet<string>;
-  /** 신선한 정상·읽기 전용 칸이 있는 열 -- 그 열의 「없음」은 안 붙인 노드(문제 아님), 없으면 어디에도 없는 스토리지(문제). */
+  /** 그 스토리지를 붙인 흔적(attachedCell)이 있는 열 -- 그 열의 「없음」은 안 붙인 노드(문제 아님), 없으면 어디에도 없는 스토리지(문제). */
   mounted: ReadonlySet<string>;
+}
+
+/** 칸이 그 스토리지를 이 노드에 붙인(붙이려 한) 흔적인가(서버 _attached): 정상·읽기 전용, 또는 점검 불가(host_root_missing)가 아닌
+ *  마운트 문제(끊긴 마운트·마운트 빠짐·전파 안 됨·읽기 불가 -- 호스트에 마운트나 디렉터리가 있다). 리포트 지연 칸은 마지막 값으로. */
+export function attachedCell(cell: Pick<MountCellData, "state" | "last" | "reason">): boolean {
+  const s = cell.state === "stale" ? cell.last : cell.state;
+  return s === "ready" || s === "read_only" || (s === "broken" && cell.reason !== "host_root_missing");
 }
 
 /** 응답의 **모든** 행(행 필터 전)에서 열 재료를 모은다. */
@@ -124,13 +136,18 @@ export function columnFacts(rows: readonly MountRow[]): ColumnFacts {
   const ready = new Set<string>();
   const mounted = new Set<string>();
   for (const r of rows) {
-    if (!r.fresh) continue;
     for (const [name, c] of Object.entries(r.cells)) {
-      if (c.state === "ready") ready.add(name);
-      if (c.state === "ready" || c.state === "read_only") mounted.add(name);
+      if (r.fresh && c.state === "ready") ready.add(name);
+      if (attachedCell(c)) mounted.add(name);
     }
   }
   return { ready, mounted };
+}
+
+/** 두 열 재료가 같은 열 집합인가(폴링마다 새 객체여도 행 memo 를 깨지 않게 -- MountMatrix). */
+export function sameColumnFacts(a: ColumnFacts, b: ColumnFacts): boolean {
+  const same = (x: ReadonlySet<string>, y: ReadonlySet<string>) => x.size === y.size && [...x].every((v) => y.has(v));
+  return a === b || (same(a.ready, b.ready) && same(a.mounted, b.mounted));
 }
 
 /** 신선한 행의 칸 하나가 문제인가(서버 _cell_problem): 마운트 문제 · 정상 노드가 있는 열의 읽기 전용 · 어디에도 없는 열의 「없음」. */
@@ -144,9 +161,9 @@ export const absentNowhere = (name: string, cell: Pick<MountCellData, "state">, 
   cell.state === "absent" && !facts.mounted.has(name);
 
 /** 어디에도 마운트되지 않은 열의 「없음」 칸 표시: 글자는 「없음」 그대로, 아이콘·면색이 문제를 말하고(색만으로 구분하지 않는다 --
- *  아이콘이 다르다) 낭독 글자가 뜻을 함께 말한다. */
-const ABSENT_NOWHERE_META: StateMeta = { label: "없음", Icon: TriangleAlert, tone: "bad", help: ABSENT_NOWHERE_HELP };
-const ABSENT_NOWHERE_ARIA = "없음(어느 노드에도 마운트 안 됨)";
+ *  아이콘이 다르다) 낭독 글자가 뜻을 함께 말한다(범례도 이 칩을 그린다 -- MountStatusPage). */
+export const ABSENT_NOWHERE_META: StateMeta = { label: "없음", Icon: TriangleAlert, tone: "bad", help: ABSENT_NOWHERE_HELP };
+const ABSENT_NOWHERE_ARIA = "없음(어느 노드에도 마운트 흔적 없음)";
 
 export interface CellView { Icon: LucideIcon; label: string; tone: Tone; aria: string }
 
@@ -165,8 +182,8 @@ function lastLabel(cell: MountCellData): string {
   return cell.last === null ? "—" : cellLabel({ state: cell.last, reason: cell.reason, status: cell.status });
 }
 
-/** 칸의 긴 설명(툴팁·시트). ago = 마지막 보고 경과(「12분 전」), mountPath = 지금 스토리지 마운트 경로, nowhere = 이 칸의 열에 신선한
- *  마운트 칸이 하나도 없다(!columnFacts.mounted.has -- 「없음」 칸의 설명이 갈린다; 모르면 생략 = 규칙을 함께 말하는 설명). */
+/** 칸의 긴 설명(툴팁·시트). ago = 마지막 보고 경과(「12분 전」), mountPath = 지금 스토리지 마운트 경로, nowhere = 이 칸의 열에 그
+ *  스토리지를 붙인 흔적이 하나도 없다(!columnFacts.mounted.has -- 「없음」 칸의 설명이 갈린다; 모르면 생략 = 규칙을 함께 말하는 설명). */
 export function cellHelp(cell: MountCellData, ctx: { mountPath: string; ago: string; nowhere?: boolean }): string {
   switch (cell.state) {
     case "ready":
@@ -390,8 +407,8 @@ export function cellAriaLabel(node: string, column: string, label: string): stri
 
 /** 「문제 있는 스토리지」 열(열 거르기 ?cols=problems) -- 서버 「문제 있는 노드」 칸 판정(_cell_problem)의 열 쪽 거울: 신선한 행에
  *  문제 칸(cellProblem)이 하나라도 있는 열 = 마운트 문제(끊긴 마운트 포함 -- summary.broken > 0), 신선한 ready 가 있는 열의 읽기
- *  전용, 신선한 마운트(정상·읽기 전용) 칸이 하나도 없는 열의 「없음」(어디에도 마운트되지 않은 스토리지 -- 2026-11-27). 모든 노드가
- *  ro 인 열(의도된 구성)·다른 노드엔 붙은 열의 없음·확인 대기·리포트 지연은 문제로 세지 않는다. rows = 응답의 모든 행(행 필터 전),
+ *  전용, 붙인 흔적(attachedCell)이 하나도 없는 열의 「없음」(어디에도 마운트되지 않은 스토리지 -- 2026-11-27). 모든 노드가 ro 인
+ *  열(의도된 구성)·다른 노드에 흔적이 있는 열의 없음·확인 대기·리포트 지연은 문제로 세지 않는다. rows = 응답의 모든 행(행 필터 전),
  *  facts = 같은 rows 의 columnFacts(열마다 다시 재지 않게 부르는 쪽이 한 번 넘겨도 된다). */
 export function columnProblem(col: StorageColumn, rows: readonly MountRow[], facts: ColumnFacts = columnFacts(rows)): boolean {
   if (col.summary.broken > 0) return true;
@@ -400,6 +417,16 @@ export function columnProblem(col: StorageColumn, rows: readonly MountRow[], fac
     const cell = r.cells[name];
     return r.fresh && cell !== undefined && cellProblem(name, cell, facts);
   });
+}
+
+/** 신선한 행에 어디에도 마운트되지 않은 열의 「없음」 칸(absentNowhere)이 있는 스토리지 수 -- 「마운트 문제」 타일(서버 totals.broken 은
+ *  이 칸을 세지 않는다: 칸 상태는 absent 그대로). rows = 응답의 모든 행, facts = 같은 rows 의 columnFacts. */
+export function nowhereColumnCount(cols: readonly StorageColumn[], rows: readonly MountRow[],
+                                   facts: ColumnFacts = columnFacts(rows)): number {
+  return cols.filter((col) => rows.some((r) => {
+    const cell = r.cells[col.storage_name];
+    return r.fresh && cell !== undefined && absentNowhere(col.storage_name, cell, facts);
+  })).length;
 }
 
 /** q(앞뒤 공백 떼고 대소문자 무시)가 storage_name 또는 mount_path 에 들어 있는 열 ∩ (problemsOnly 면 columnProblem). 응답 순서

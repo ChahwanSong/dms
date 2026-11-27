@@ -28,7 +28,7 @@ export function NodeMountSheet({ row, data, roleLabels, renderStorageTip, onClos
   const shared = data.shared_dir;
   const pods = row !== null ? podsOn(data, row.node_name) : [];
   const podRoles = [...new Set(pods.map((p) => p.role))];
-  const facts = useMemo(() => columnFacts(data.nodes), [data.nodes]);       // 「없음」 칸의 표시·설명(어디에도 마운트되지 않은 열)
+  const facts = useMemo(() => columnFacts(data.nodes), [data.nodes]);       // 「없음」 칸의 표시·설명(어디에도 마운트 흔적이 없는 열)
   return (
     <Dialog side="right" open={row !== null} onOpenChange={(o) => { if (!o) onClose(); }}
             title={row?.node_name ?? ""} titleClassName="font-mono" onCloseAutoFocus={onCloseAutoFocus}

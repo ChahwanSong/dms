@@ -3,12 +3,14 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "vitest";
 import {
-  CELL_META, REASON_TEXT, SHARED_META, SHARED_PROBLEM_STATES, TONE_CLASS, absentNowhere, cellHelp, cellLabel, cellMounted, cellProblem,
-  cellSub, cellView, columnFacts, columnNameLines, columnPathTail, columnProblem, columnRuleText, columnSummaryText, filterColumns,
-  isPodRole, podCheckText, podFailedHelp, podFailedOn, podFailedRoles, podLine, podTag, podsOn, roleLabel, sharedDisplay, sharedHelp,
-  sharedSub, usageDetail, usageText, writableText,
+  CELL_META, REASON_TEXT, SHARED_META, SHARED_PROBLEM_STATES, TONE_CLASS, absentNowhere, attachedCell, cellHelp, cellLabel, cellMounted,
+  cellProblem, cellSub, cellView, columnFacts, columnNameLines, columnPathTail, columnProblem, columnRuleText, columnSummaryText,
+  filterColumns, isPodRole, nowhereColumnCount, podCheckText, podFailedHelp, podFailedOn, podFailedRoles, podLine, podTag, podsOn,
+  roleLabel, sameColumnFacts, sharedDisplay, sharedHelp, sharedSub, usageDetail, usageText, writableText,
 } from "./mountTerms";
-import { LIVE, NOWHERE, VARIETY, absent, column, pod, ready, row as mkRow, sharedOk, wide } from "./mountFixtures";
+import {
+  LIVE, NOWHERE, VARIETY, absent, broken, column, deadMount as deadMountOf, pod, ready, row as mkRow, sharedOk, wide,
+} from "./mountFixtures";
 import type { CellState, MountCellData, MountStatusResponse, SharedCellData, SharedState } from "./types";
 
 const cell = (over: Partial<MountCellData> = {}): MountCellData => ({
@@ -76,20 +78,23 @@ describe("사유", () => {
   });
 });
 
-test("「없음」 설명은 열에 따라(2026-11-27): 다른 노드엔 붙음 = 정상, 어디에도 없음 = 문제, 모름 = 규칙을 함께", () => {
+test("「없음」 설명은 열에 따라(2026-11-27): 다른 노드에 흔적 = 정상, 어디에도 흔적 없음 = 문제, 모름 = 규칙을 함께", () => {
   const abs = cell({ state: "absent", status: "Missing", reason: "missing_mount_path", exists: false, is_mountpoint: false });
   const elsewhere = cellHelp(abs, { ...CTX, nowhere: false });
-  expect(elsewhere).toMatch(/다른 노드에는 마운트돼 있어/);
+  expect(elsewhere).toMatch(/다른 노드에 이 스토리지의 마운트 흔적이 있어\(마운트 문제·리포트 지연 노드의 마지막 값 포함\)/);
   expect(elsewhere).not.toMatch(/문제로 셉니다/);
   const nowhere = cellHelp(abs, { ...CTX, nowhere: true });
-  expect(nowhere).toMatch(/이 스토리지를 마운트한 노드가 하나도 없습니다/);
+  // 규칙만큼만 말한다(같은 날 이식 리뷰 -- 「마운트한 노드가 하나도 없다」는 단정이었다): 흔적의 범위와 확인 대기 가능성까지
+  expect(nowhere).toMatch(/어느 노드에도 이 스토리지의 마운트 흔적이 없습니다\(마운트돼 있거나 마운트 문제로 보고한 노드가 하나도 없고, 리포트 지연/);
   expect(nowhere).toMatch(/마운트 경로 오타/);
   expect(nowhere).toMatch(/문제로 셉니다/);
+  expect(nowhere).toMatch(/아직 점검하지 않은 노드\(확인 대기\)/);
+  expect(nowhere).not.toMatch(/마운트한 노드가 하나도 없습니다/);
   const generic = cellHelp(abs, CTX);
   expect(generic).toBe(CELL_META.absent.help);
-  expect(generic).toMatch(/어느 노드에도 붙어 있지 않은 스토리지면\(마운트된 노드가 하나도 없음\) 문제로 셉니다/);
+  expect(generic).toMatch(/어느 노드에도 마운트 흔적이 없는 스토리지면 문제로 셉니다/);
   // 칩: 어디에도 없는 열의 없음만 경고 아이콘·빨강(글자는 「없음」 그대로, 낭독이 뜻을 말한다), 다른 상태는 nowhere 와 무관
-  expect(cellView(abs, true)).toMatchObject({ label: "없음", tone: "bad", aria: "없음(어느 노드에도 마운트 안 됨)" });
+  expect(cellView(abs, true)).toMatchObject({ label: "없음", tone: "bad", aria: "없음(어느 노드에도 마운트 흔적 없음)" });
   expect(cellView(abs, false)).toMatchObject({ label: "없음", tone: "muted", aria: "없음" });
   expect(cellView(cell(), true)).toMatchObject({ label: "정상", tone: "ok", aria: "정상" });
   expect(cellView(cell({ state: "pending", pending: "not_reported" }), true).tone).toBe("busy");
@@ -346,22 +351,38 @@ describe("열 거르기·요약(columnProblem·filterColumns·columnSummaryText�
     expect(columnProblem(c, [])).toBe(false);
   });
 
-  test("columnProblem·cellProblem: 어디에도 마운트되지 않은 열의 없음은 문제(서버 _mounted_columns 거울, 2026-11-27)", () => {
+  test("columnProblem·cellProblem: 어디에도 마운트 흔적이 없는 열의 없음은 문제(서버 _mounted_columns·_attached 거울, 2026-11-27)", () => {
     const c = column("s", "/s");
     const pend = { ...ready("/s"), state: "pending" as const, pending: "not_reported" as const, status: null };
+    const staleOf = (x: MountCellData) => ({ ...x, state: "stale" as const, last: x.state });
     // 신선한 칸이 모두 없음 -- 문제
     expect(columnProblem(c, [mkRow("a", { s: absent("/s") }), mkRow("b", { s: absent("/s") })])).toBe(true);
     // 읽기 전용도 마운트 -- 없음은 안 붙인 노드(그 ro 도 정상 노드가 없어 바깥값이 아니다)
     expect(columnProblem(c, [mkRow("a", { s: ro("/s") }), mkRow("b", { s: absent("/s") })])).toBe(false);
-    // 정상이 리포트 지연 행에만 있으면 근거가 아니다
-    expect(columnProblem(c, [mkRow("a", { s: absent("/s") }), mkRow("b", { s: ready("/s") }, { fresh: false })])).toBe(true);
-    // 확인 대기는 마운트가 아니다
+    // 그 스토리지를 붙인 유일한 노드가 리포트 지연이면 마지막 값(정상)이 흔적 -- 그 노드 하나의 지연을 퍼뜨리지 않는다(같은 날 이식 리뷰)
+    expect(columnProblem(c, [mkRow("a", { s: absent("/s") }), mkRow("b", { s: staleOf(ready("/s")) }, { fresh: false })]))
+      .toBe(false);
+    // 지연 행의 마지막 값이 없음이면 흔적이 아니다
+    expect(columnProblem(c, [mkRow("a", { s: absent("/s") }), mkRow("b", { s: staleOf(absent("/s")) }, { fresh: false })]))
+      .toBe(true);
+    // 그 노드가 끊기거나 빠졌으면 그 칸만 문제 -- 없음은 안 붙인 노드(열은 broken 칸 때문에 여전히 문제 열)
+    const rows = (x: MountCellData) => [mkRow("a", { s: absent("/s") }), mkRow("b", { s: x })];
+    for (const x of [deadMountOf("/s"), broken("/s", "not_a_mountpoint"), broken("/s", "propagation_stale")]) {
+      const f = columnFacts(rows(x));
+      expect([cellProblem("s", absent("/s"), f), cellProblem("s", x, f)], x.reason ?? "").toEqual([false, true]);
+    }
+    // 점검 불가(host_root_missing)는 흔적이 아니다 -- 없음도 문제(지연 행의 마지막 값이어도)
+    const hrm = broken("/s", "host_root_missing");
+    expect(cellProblem("s", absent("/s"), columnFacts(rows(hrm)))).toBe(true);
+    expect(cellProblem("s", absent("/s"), columnFacts([mkRow("a", { s: absent("/s") }),
+                                                       mkRow("b", { s: staleOf(hrm) }, { fresh: false })]))).toBe(true);
+    // 확인 대기는 흔적이 아니다(알려진 한계 -- 새로 등록한 스토리지는 한 주기 동안 문제로 보일 수 있다, BACKLOG)
     expect(columnProblem(c, [mkRow("a", { s: absent("/s") }), mkRow("b", { s: pend })])).toBe(true);
     // 없음이 리포트 지연 행에만 있으면(신선한 칸은 확인 대기뿐) 문제 아님
     expect(columnProblem(c, [mkRow("a", { s: absent("/s") }, { fresh: false }), mkRow("b", { s: pend })])).toBe(false);
     // 칸 판정: 같은 재료에서 없음만 열에 따라 갈린다
-    const rows = [mkRow("a", { s: absent("/s"), t: absent("/t") }), mkRow("b", { s: absent("/s"), t: ready("/t") })];
-    const facts = columnFacts(rows);
+    const both = [mkRow("a", { s: absent("/s"), t: absent("/t") }), mkRow("b", { s: absent("/s"), t: ready("/t") })];
+    const facts = columnFacts(both);
     expect([cellProblem("s", absent("/s"), facts), cellProblem("t", absent("/t"), facts)]).toEqual([true, false]);
     expect([absentNowhere("s", absent("/s"), facts), absentNowhere("t", absent("/t"), facts)]).toEqual([true, false]);
     expect(cellProblem("t", ready("/t"), facts)).toBe(false);
@@ -383,6 +404,32 @@ describe("열 거르기·요약(columnProblem·filterColumns·columnSummaryText�
         : null));
     };
     for (const data of [LIVE, NOWHERE, VARIETY]) expect(mirror(data)).toEqual(data.nodes.map((r) => r.problem_count));
+  });
+
+  test("attachedCell·nowhereColumnCount·sameColumnFacts", () => {
+    const staleOf = (x: MountCellData) => ({ ...x, state: "stale" as const, last: x.state });
+    expect([ready("/s"), ready("/s", { state: "read_only" }), deadMountOf("/s"), broken("/s", "not_a_mountpoint"),
+            broken("/s", "brand_new_reason"), staleOf(ready("/s")), staleOf(deadMountOf("/s"))].map(attachedCell))
+      .toEqual([true, true, true, true, true, true, true]);
+    const pend = { ...ready("/s"), state: "pending" as const, pending: "not_reported" as const };
+    expect([absent("/s"), pend, broken("/s", "host_root_missing"), staleOf(absent("/s")), staleOf(pend),
+            staleOf(broken("/s", "host_root_missing"))].map(attachedCell))
+      .toEqual([false, false, false, false, false, false]);
+    // 타일 재료: 신선한 행에 흔적 없는 열의 없음 칸이 있는 스토리지 수
+    expect(nowhereColumnCount(NOWHERE.storages, NOWHERE.nodes)).toBe(1);
+    expect(nowhereColumnCount(LIVE.storages, LIVE.nodes)).toBe(0);
+    expect(nowhereColumnCount(VARIETY.storages, VARIETY.nodes)).toBe(0);
+    // 없음이 리포트 지연 행에만 있으면 세지 않는다(칸이 문제가 아니다)
+    expect(nowhereColumnCount([column("s", "/s")], [mkRow("a", { s: staleOf(absent("/s")) }, { fresh: false })])).toBe(0);
+    // 열 재료 비교: 같은 열 집합이면 같다(새 객체여도), 하나라도 다르면 다르다
+    const a = columnFacts(NOWHERE.nodes);
+    expect(sameColumnFacts(a, columnFacts(NOWHERE.nodes.map((r) => ({ ...r }))))).toBe(true);
+    expect(sameColumnFacts(a, columnFacts(LIVE.nodes))).toBe(true);     // 흔적 없는 열·끊긴 칸이 더해져도 열 집합은 같다
+    const typoMounted = NOWHERE.nodes.map((r, j) => (j === 0
+      ? { ...r, cells: { ...r.cells, "cephfs-typo": ready("/cephfs-typo", { state: "read_only", writable: false }) } } : r));
+    expect(sameColumnFacts(a, columnFacts(typoMounted))).toBe(false);  // mounted 만 다르다
+    expect(sameColumnFacts(columnFacts([mkRow("a", { s: ready("/s") })]),
+                           columnFacts([mkRow("a", { s: ready("/s", { state: "read_only" }) })]))).toBe(false);   // ready 만 다르다
   });
 
   test("filterColumns: 조건 없으면 같은 배열, 이름·경로 부분 일치(대소문자 무시·앞뒤 공백 무시), 문제 열, 둘 다면 AND·순서 유지", () => {
@@ -409,10 +456,19 @@ describe("열 거르기·요약(columnProblem·filterColumns·columnSummaryText�
   });
 
   test("columnSummaryText: 0 은 빼고 단위(대·칸)를 붙인다, 보고 없음", () => {
-    expect(columnSummaryText(VARIETY.storages[0].summary)).toBe("마운트 3/4대 · 마운트 문제 1칸 · 읽기 전용 1칸");
-    expect(columnSummaryText(VARIETY.storages[1].summary)).toBe("마운트 1/3대 · 마운트 문제 1칸 · 확인 대기 1칸");
+    expect(columnSummaryText(VARIETY.storages[0].summary)).toBe("마운트 3/4대 · 마운트 문제 1칸 · 읽기 전용 1칸 · 확인 대기 1칸");
+    expect(columnSummaryText(VARIETY.storages[1].summary)).toBe("마운트 1/4대 · 마운트 문제 2칸 · 없음 1칸");
     expect(columnSummaryText(LIVE.storages[1].summary)).toBe("마운트 1/2대 · 없음 1칸");
     expect(columnSummaryText({ ...LIVE.storages[0].summary, ready: 0, total: 0, pending: 2 })).toBe("보고 없음 · 확인 대기 2칸");
+    // 픽스처의 열 요약 칸 수 = 신선한 행의 칸 상태 수(칸을 바꾸면 수도 같이 -- 같은 날 이식 리뷰: VARIETY 가 칸과 어긋나 있었다)
+    for (const data of [LIVE, NOWHERE, VARIETY]) {
+      for (const col of data.storages) {
+        const states = data.nodes.filter((r) => r.fresh).map((r) => r.cells[col.storage_name]?.state);
+        const n = (s: CellState) => states.filter((x) => x === s).length;
+        expect([col.summary.broken, col.summary.read_only, col.summary.absent, col.summary.pending], col.storage_name)
+          .toEqual([n("broken"), n("read_only"), n("absent"), n("pending")]);
+      }
+    }
     expect(columnRuleText("ready_nodes=3/4")).toMatch(/^기준: 신선한 보고만 — 스토리지 목록의 상태\(ready_nodes=3\/4\)/);
   });
 

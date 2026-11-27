@@ -290,9 +290,10 @@ def _counts(body):
 
 
 def test_absent_counts_as_a_problem_only_when_the_column_is_mounted_nowhere():
-    """「없음」(absent)은 같은 열에 신선한 마운트(ready·read_only) 칸이 하나라도 있으면 문제 아님(그 스토리지를 붙이지 않은 노드) --
-    하나도 없으면 그 스토리지는 어디에도 마운트돼 있지 않다(mount_path 오타·마운트 배포 전): 열 전체가 회색 「없음」인데 「문제 0」
-    이던 구멍(2026-11-27 dms-ssc d207 리뷰 이식). read_only 바깥값(_ro_outlier_columns)과 같은 열 단위 판정이다."""
+    """「없음」(absent)은 같은 열에 그 스토리지를 붙인 흔적(_attached -- ready·read_only, host_root_missing 이 아닌 broken, 리포트 지연
+    칸은 마지막 값)이 하나라도 있으면 문제 아님(그 스토리지를 붙이지 않은 노드) -- 하나도 없으면 그 스토리지는 어디에도 마운트돼 있지
+    않다(mount_path 오타·마운트 배포 전): 열 전체가 회색 「없음」인데 「문제 0」이던 구멍(2026-11-27 dms-ssc d207 리뷰 이식).
+    read_only 바깥값(_ro_outlier_columns)과 같은 열 단위 판정이다."""
     # 열 전체가 없음 -- 신선한 두 노드 모두 문제
     body = _build([_node("a", [ABSENT], ab=_ab()), _node("b", [ABSENT], ab=_ab())], storages=(CEPH,))
     assert _counts(body) == [("a", True, 1), ("b", True, 1)]
@@ -305,19 +306,33 @@ def test_absent_counts_as_a_problem_only_when_the_column_is_mounted_nowhere():
     # 읽기 전용도 마운트다(그 ro 자체도 쓰기 가능 노드가 없어 바깥값이 아니다)
     body = _build([_node("a", [_m(writable=False)], ab=_ab()), _node("b", [ABSENT], ab=_ab())], storages=(CEPH,))
     assert _counts(body) == [("a", False, 0), ("b", False, 0)]
-    # 리포트 지연 노드의 정상은 근거가 아니다(지금 상태 모름) -- 지연 행은 그대로 None
+    # 그 스토리지를 붙인 유일한 노드가 리포트 지연이면 마지막 값(정상)이 흔적이다 -- 그 노드 하나의 지연을 다른 노드의 문제로
+    # 퍼뜨리지 않는다(같은 날 이식 리뷰). 지연 행 자신은 그대로 None
     body = _build([_node("a", [ABSENT], ab=_ab()), _node("b", [_m()], fresh=False, ab=_ab())], storages=(CEPH,))
+    assert _counts(body) == [("a", False, 0), ("b", True, None)]
+    # 지연 행의 마지막 값이 없음이면 흔적이 아니다 -- 열 전체가 없음
+    body = _build([_node("a", [ABSENT], ab=_ab()), _node("b", [ABSENT], fresh=False, ab=_ab())], storages=(CEPH,))
     assert _counts(body) == [("a", True, 1), ("b", True, None)]
-    # 확인 대기(보고 항목 없음)는 마운트가 아니고 그 칸 자체도 문제 아님 -- 없음 칸만 센다
+    # 확인 대기(보고 항목 없음)는 흔적이 아니고 그 칸 자체도 문제 아님 -- 없음 칸만 센다(알려진 한계: 새로 등록한 스토리지를
+    # 붙인 노드가 점검 전이면 한 주기 동안 문제로 보인다 -- BACKLOG)
     body = _build([_node("a", [ABSENT], ab=_ab()), _node("b", [], ab=_ab())], storages=(CEPH,))
     assert [r["cells"]["ceph"]["state"] for r in body["nodes"]] == ["absent", "pending"]
     assert _counts(body) == [("a", True, 1), ("b", False, 0)]
-    # 마운트 문제·끊긴 마운트 옆의 없음도 센다(마운트된 노드가 없다)
+    # 그 스토리지를 붙인 노드의 마운트가 끊기거나(끊긴 마운트) 빠졌으면(마운트 빠짐 -- 디렉터리는 있다) 그 칸만 문제다 -- 다른
+    # 노드의 없음은 안 붙인 노드(퍼뜨리지 않는다)
     body = _build([_node("a", [ABSENT], ab=_ab()), _node("b", [_m(status="Missing", reason="not_a_mountpoint")], ab=_ab()),
                    _node("c", [DEAD], ab=_ab())], storages=(CEPH,))
     assert [r["cells"]["ceph"]["state"] for r in body["nodes"]] == ["absent", "broken", "broken"]
-    assert _counts(body) == [("a", True, 1), ("b", True, 1), ("c", True, 1)]
+    assert _counts(body) == [("a", False, 0), ("b", True, 1), ("c", True, 1)]
     assert body["totals"]["broken"] == 2 and body["storages"][0]["summary"]["broken"] == 2
+    # 점검 불가(host_root_missing)는 그 노드에 대해 아무것도 모른다 -- 흔적이 아니라 없음은 센다(지연 행의 마지막 값이어도 같다)
+    hrm = _m(status="Missing", reason="host_root_missing")
+    body = _build([_node("a", [ABSENT], ab=_ab()), _node("b", [hrm], ab=_ab()), _node("c", [hrm], fresh=False, ab=_ab())],
+                  storages=(CEPH,))
+    assert _counts(body) == [("a", True, 1), ("b", True, 1), ("c", True, None)]
+    # 미지 사유·비정상 status 의 broken 은 흔적으로 본다(그 칸 자체가 문제라 열은 여전히 문제 열이다 -- 퍼뜨리지만 않는다)
+    body = _build([_node("a", [ABSENT], ab=_ab()), _node("b", [_m(status="Error", reason=None)], ab=_ab())], storages=(CEPH,))
+    assert _counts(body) == [("a", False, 0), ("b", True, 1)]
     # 열마다 따로 -- ceph 는 붙어 있고 sec 만 어디에도 없다
     body = _build([_node("a", [_m(), _m("sec", "/sec", "Missing", "missing_mount_path")], ab=_ab()),
                    _node("b", [_m("ceph", "/cephfs", "Missing", "missing_mount_path"),
@@ -361,6 +376,26 @@ def test_dead_mount_counts_as_a_problem_even_beside_mounted_nodes():
     assert (t["absent"], t["broken"], t["problem_nodes"]) == (0, 1, 1)
     summary = body["storages"][0]["summary"]
     assert (summary["broken"], summary["absent"], summary["ready"], summary["total"]) == (1, 0, 1, 2)
+
+
+def test_one_node_storage_failure_does_not_spread_to_every_node():
+    """같은 날 이식 리뷰가 build() 로 잰 모양: 노드 6대, sec 은 w2 에만 붙인다(소스·목적지 노드 분리 -- 테스트베드 cephfs-secondary·
+    cephfs-third 모양). 흔적을 신선한 정상·읽기 전용으로만 세던 규칙은 w2 하나의 리포트 지연·끊긴 마운트·마운트 빠짐을 문제 노드 6대로
+    퍼뜨렸다 -- 지금은 고장 난 노드 하나만(지연이면 그 행만) 문제다."""
+    sec_ok = _m("sec", "/sec")
+    sec_absent = _m("sec", "/sec", "Missing", "missing_mount_path")
+
+    def problem_nodes(w2_sec, *, w2_fresh=True):
+        nodes = [_node(f"w{i}", [_m(), w2_sec if i == 2 else sec_absent], fresh=w2_fresh or i != 2, ab=_ab())
+                 for i in range(1, 7)]
+        body = _build(nodes)
+        return body["totals"]["problem_nodes"], [r["node_name"] for r in body["nodes"] if r["problem"]]
+
+    assert problem_nodes(sec_ok) == (0, [])
+    assert problem_nodes(sec_ok, w2_fresh=False) == (1, ["w2"])
+    assert problem_nodes(_m("sec", "/sec", "Missing", "missing_mount_path", exists=False, is_mountpoint=True)) == (1, ["w2"])
+    assert problem_nodes(_m("sec", "/sec", "Missing", "not_a_mountpoint")) == (1, ["w2"])
+    assert problem_nodes(_m("sec", "/sec", "Missing", "propagation_stale")) == (1, ["w2"])
 
 
 def test_states_stay_within_the_declared_enums():

@@ -35,7 +35,9 @@ describe("교차 픽스처(mountProblemCases.json) -- 서버 출력에 거울을
     const mirror = ROWS.map((r) => (r.fresh
       ? Object.entries(r.cells).filter(([name, c]) => cellProblem(name, c, FACTS)).length : null));
     expect(mirror).toEqual(CASES.expected.nodes.map((n) => n.problem_count));
-    expect(mirror).toEqual([2, 3, 3, null]);                         // 픽스처가 공허하지 않다(옛 규칙이면 0·1·1)
+    // 픽스처가 공허하지 않다: 고치기 전 규칙(끊긴 마운트 = 없음, 없음은 늘 문제 아님)이면 0·2·1, 흔적을 신선한 정상·읽기 전용으로만
+    // 세던 규칙(한 노드의 지연·끊김을 퍼뜨림)이면 5·6·6
+    expect(mirror).toEqual([3, 5, 4, null]);
   });
 
   test("문제 있는 스토리지(columnProblem·filterColumns) = 서버 problem_columns", () => {
@@ -57,18 +59,23 @@ describe("교차 픽스처(mountProblemCases.json) -- 서버 출력에 거울을
     expect(cellHelp(dead, { mountPath: "/dead", ago: "방금" })).toMatch(/^끊긴 마운트 — 호스트에는 마운트가 있는데 경로에 접근할 수 없습니다/);
   });
 
-  test("「없음」 표시는 열에 따라: 어디에도 없는 열은 경고 아이콘·빨강·낭독 뜻, 다른 노드엔 붙은 열은 회색 그대로", () => {
+  test("「없음」 표시는 열에 따라: 어디에도 흔적 없는 열은 경고 아이콘·빨강·낭독 뜻, 다른 노드에 흔적 있는 열은 회색 그대로", () => {
     const nowhere = cellOf("n1", "nowhere");
     expect(absentNowhere("nowhere", nowhere, FACTS)).toBe(true);
-    expect(cellView(nowhere, true)).toMatchObject({ label: "없음", tone: "bad", aria: "없음(어느 노드에도 마운트 안 됨)" });
+    expect(cellView(nowhere, true)).toMatchObject({ label: "없음", tone: "bad", aria: "없음(어느 노드에도 마운트 흔적 없음)" });
     expect(cellView(nowhere, true).Icon).not.toBe(CELL_META.absent.Icon);      // 색만으로 구분하지 않는다
-    for (const [node, col] of [["n2", "split"], ["n2", "ro-absent"], ["n2", "legacy-absent"]] as const) {
+    for (const [node, col] of [["n2", "split"], ["n2", "ro-absent"], ["n2", "legacy-absent"], ["n1", "stale-only"],
+                               ["n3", "dead-only"]] as const) {
       const cell = cellOf(node, col);
       expect(absentNowhere(col, cell, FACTS), `${node}/${col}`).toBe(false);
       expect(cellView(cell, false)).toMatchObject({ label: "없음", tone: "muted", aria: "없음" });
     }
-    // 리포트 지연 노드(n4)의 정상은 근거가 아니다 -- nowhere 열은 n4 에서 정상이었다
-    expect(cellOf("n4", "nowhere")).toMatchObject({ state: "stale", last: "ready" });
-    expect(FACTS.mounted.has("nowhere")).toBe(false);
+    // 흔적의 범위(서버 _attached): 지연 노드의 마지막 값 정상·끊긴 마운트는 흔적, 지연 노드의 마지막 값 없음·점검 불가는 아니다
+    expect(cellOf("n4", "stale-only")).toMatchObject({ state: "stale", last: "ready" });
+    expect(cellOf("n2", "dead-only")).toMatchObject({ state: "broken", reason: "missing_mount_path", is_mountpoint: true });
+    expect(cellOf("n4", "nowhere")).toMatchObject({ state: "stale", last: "absent" });
+    expect(cellOf("n2", "hrm-absent")).toMatchObject({ state: "broken", reason: "host_root_missing" });
+    expect(["stale-only", "dead-only", "nowhere", "hrm-absent"].map((c) => FACTS.mounted.has(c))).toEqual([true, true, false, false]);
+    expect(absentNowhere("hrm-absent", cellOf("n1", "hrm-absent"), FACTS)).toBe(true);
   });
 });

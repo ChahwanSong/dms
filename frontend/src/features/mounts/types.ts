@@ -62,7 +62,7 @@ export interface MountRow {
   control_plane: boolean | null;                   // null = 모름(k8s 노드 목록 없음·클러스터에 없음)
   in_cluster: boolean | null;
   problem: boolean;
-  /** 문제 수(마운트 문제(끊긴 마운트 포함) + 다른 노드가 쓰기 가능으로 붙인 스토리지의 읽기 전용 + 어느 노드에도 마운트되지 않은
+  /** 문제 수(마운트 문제(끊긴 마운트 포함) + 다른 노드가 쓰기 가능으로 붙인 스토리지의 읽기 전용 + 어느 노드에도 마운트 흔적이 없는
    *  스토리지의 없음 + 공용 디렉터리 문제 -- 이 노드 DMS 파드의 경로 읽기 실패도 공용 디렉터리 한 칸으로, 서버 mount_status_pods) --
    *  null = 리포트 지연(모름). 칸 판정의 거울은 mountTerms.cellProblem. */
   problem_count: number | null;

@@ -7,7 +7,7 @@ import type { CellState, MountRow, MountStatusResponse, StorageColumn } from "./
 
 // 좁은 화면(390·375)의 노드별 카드(2026-11-23). 표를 CSS 로 숨기지 않고 이 보기를 **조건부로** 그린다(MountStatusPage) -- 숨은 표가
 // DOM 에 남으면 칸 수 측정(e2e)이 공허해진다. 카드는 정상이 아닌 칸만 먼저 보이고(문제 → 읽기 전용 → 확인 대기 → 모름 → 없음 --
-// 어디에도 마운트되지 않은 열의 없음은 문제라 마운트 문제와 같은 자리), 정상 칸은 접어 둔다. 리포트 지연 카드는 글자를 text-ink/70
+// 어디에도 마운트 흔적이 없는 열의 없음은 문제라 마운트 문제와 같은 자리), 정상 칸은 접어 둔다. 리포트 지연 카드는 글자를 text-ink/70
 // 으로 흐리되(opacity 금지 -- mountTerms TONE_CLASS) 노드 이름은 흐리지 않는다.
 
 const ORDER: CellState[] = ["broken", "read_only", "pending", "stale", "absent"];

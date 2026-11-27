@@ -128,7 +128,7 @@ test("칸 글자: 모든 갈래 + 공용 디렉터리 + 행 꼬리표", async ()
 
 // 2026-11-27(dms-ssc d207 리뷰 이식): 끊긴 마운트는 「없음」이 아니라 마운트 문제, 어느 노드에도 마운트되지 않은 스토리지의 없음은
 // 문제 -- 화면(칸·꼬리표·범례·타일·문제 있는 스토리지·툴팁·시트·카드)이 서버 수(problem_count·totals)와 같은 말을 한다.
-const NOWHERE_TYPO = "없음(어느 노드에도 마운트 안 됨)";
+const NOWHERE_TYPO = "없음(어느 노드에도 마운트 흔적 없음)";
 
 test("끊긴 마운트·어디에도 없는 스토리지: 칸·꼬리표·범례·타일·문제 있는 스토리지가 서버 규칙과 같다", async () => {
   renderPage(NOWHERE);
@@ -151,18 +151,46 @@ test("끊긴 마운트·어디에도 없는 스토리지: 칸·꼬리표·범례
   expect(within(head("k8s-w1")).getByText("문제 1")).toBeInTheDocument();
   expect(within(head("k8s-w2")).getByText("문제 2")).toBeInTheDocument();
   expect(within(head("k8s-w2")).getByText("문제 2").closest("span[title]")!.getAttribute("title"))
-    .toMatch(/끊긴 마운트 포함.*어느 노드에도 마운트되지 않은 스토리지의 없음/);
+    .toMatch(/끊긴 마운트 포함.*어느 노드에도 마운트 흔적이 없는 스토리지의 없음/);
   expect(screen.getByRole("button", { name: "문제 있는 노드 2" })).toBeInTheDocument();
-  // 범례·타일: 없음의 두 뜻, 마운트 문제에 끊긴 마운트
+  // 범례·타일: 없음의 두 뜻(범례 줄에 두 칩 -- 회색·경고), 마운트 문제에 끊긴 마운트
   const legend = screen.getByRole("list", { name: "범례" });
-  expect(legend).toHaveTextContent("없음4칸경로 없음(안 붙인 노드면 정상, 어느 노드에도 없으면 문제)");
+  expect(legend).toHaveTextContent("없음없음4칸경로 없음(안 붙인 노드면 정상 · 경고 아이콘·빨강 = 어느 노드에도 마운트 흔적이 없어 문제)");
+  const absentItem = within(legend).getAllByRole("listitem")[2];
+  expect([...absentItem.querySelectorAll(":scope > span.rounded-full")].map((c) => c.classList.contains("text-bad")))
+    .toEqual([false, true]);                                             // 표의 두 「없음」 칩과 1:1
   expect(legend).toHaveTextContent("마운트 문제1칸마운트 빠짐·끊긴 마운트·전파 안 됨");
-  expect(screen.getByText("1칸", { selector: "span.text-bad" })).toBeInTheDocument();
+  const tile = screen.getByText("마운트 문제", { selector: "div.text-xs" }).parentElement!;
+  expect(tile).toHaveTextContent("1칸마운트 흔적 없는 스토리지 1개");
+  expect(within(tile).getByText("1칸", { selector: "span.text-bad" })).toBeInTheDocument();
   expect(screen.getByText("마운트 빠짐·끊긴 마운트·전파 안 됨·읽기 불가·점검 불가", { selector: "div" })).toBeInTheDocument();
   // 문제 있는 스토리지 = 끊긴 마운트 열 + 어디에도 없는 열
   await userEvent.click(screen.getByRole("button", { name: "문제 있는 스토리지 2" }));
   expect(within(table()).getAllByRole("columnheader").map((h) => h.getAttribute("data-col")).filter(Boolean))
     .toEqual(["cephfs-dms", "cephfs-typo"]);
+});
+
+test("어디에도 마운트 흔적이 없는 열만 있는 응답(마운트 문제 0칸): 「마운트 문제」 타일이 초록 「없음」이 아니다", async () => {
+  // NOWHERE 에서 끊긴 마운트를 뺀 모양 -- mount_path 오타 열 하나뿐(서버 totals.broken 0, 문제 노드 2). 같은 날 이식 리뷰: 타일이
+  // broken 만 보면 빨간 「없음」 칸·「문제 1」 꼬리표 옆에서 초록 체크 「없음」이라고 말했다.
+  const typoOnly: MountStatusResponse = {
+    ...NOWHERE,
+    storages: NOWHERE.storages.map((c) => (c.storage_name === "cephfs-dms" ? LIVE.storages[0] : c)),
+    nodes: NOWHERE.nodes.map((r) => ({ ...r, cells: { ...r.cells, "cephfs-dms": LIVE.nodes[0].cells["cephfs-dms"] },
+                                        problem: true, problem_count: 1 })),
+    totals: { ...NOWHERE.totals, ready: 10, broken: 0, problem_nodes: 2 },
+  };
+  renderPage(typoOnly);
+  await screen.findByRole("table");
+  const tile = screen.getByText("마운트 문제", { selector: "div.text-xs" }).parentElement!;
+  expect(within(tile).queryByText("없음")).toBeNull();
+  expect(tile).toHaveTextContent("마운트 흔적 없는 스토리지 1개");
+  expect(within(tile).getByText("마운트 흔적 없는 스토리지 1개")).toHaveClass("text-bad");
+  expect(tile.querySelector("svg.text-bad")).not.toBeNull();             // 경고 아이콘(초록 체크가 아니다)
+  expect(tile.querySelector("svg.text-ok")).toBeNull();
+  expect(within(tile).queryByText(/칸$/)).toBeNull();                    // 마운트 문제 칸 수는 0 이라 쓰지 않는다
+  expect(screen.getByRole("button", { name: "문제 있는 노드 2" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "문제 있는 스토리지 1" })).toBeInTheDocument();
 });
 
 test("끊긴 마운트·없음 툴팁과 노드 시트·카드: 원인 문장이 열에 따라 갈린다", async () => {
@@ -181,16 +209,16 @@ test("끊긴 마운트·없음 툴팁과 노드 시트·카드: 원인 문장이
   expect(dead).toHaveTextContent("마운트 지점 예");
   expect(dead).toHaveTextContent("사유 코드 missing_mount_path");
   await leave("k8s-w2 · cephfs-dms: 끊긴 마운트");
-  expect(await hover(`k8s-w1 · cephfs-typo: ${NOWHERE_TYPO}`)).toHaveTextContent(/이 스토리지를 마운트한 노드가 하나도 없습니다/);
+  expect(await hover(`k8s-w1 · cephfs-typo: ${NOWHERE_TYPO}`)).toHaveTextContent(/어느 노드에도 이 스토리지의 마운트 흔적이 없습니다/);
   await leave(`k8s-w1 · cephfs-typo: ${NOWHERE_TYPO}`);
-  expect(await hover("k8s-w1 · cephfs-secondary: 없음")).toHaveTextContent(/다른 노드에는 마운트돼 있어/);
+  expect(await hover("k8s-w1 · cephfs-secondary: 없음")).toHaveTextContent(/다른 노드에 이 스토리지의 마운트 흔적이 있어/);
   await leave("k8s-w1 · cephfs-secondary: 없음");
   // 시트(키보드 진입점): 같은 문장
   await userEvent.click(within(table()).getByRole("button", { name: "k8s-w2" }));
   const sheet = await screen.findByRole("dialog");
   expect(sheet).toHaveTextContent(/끊긴 마운트 — 호스트에는 마운트가 있는데/);
-  expect(sheet).toHaveTextContent(/이 스토리지를 마운트한 노드가 하나도 없습니다/);
-  expect(sheet).toHaveTextContent(/다른 노드에는 마운트돼 있어/);           // w2 의 cephfs-third(w1 엔 붙음)
+  expect(sheet).toHaveTextContent(/어느 노드에도 이 스토리지의 마운트 흔적이 없습니다/);
+  expect(sheet).toHaveTextContent(/다른 노드에 이 스토리지의 마운트 흔적이 있어/);   // w2 의 cephfs-third(w1 엔 붙음)
   expect(within(sheet).getByLabelText(`k8s-w2 · cephfs-typo: ${NOWHERE_TYPO}`)).toBeInTheDocument();
   unmount();
   // 카드: 문제인 없음은 마운트 문제와 같은 자리(앞), 안 붙인 노드의 없음은 맨 뒤
