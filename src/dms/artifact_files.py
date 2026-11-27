@@ -33,10 +33,22 @@ tests/test_wiring_phase3c.py 의 고정 테스트가 지킨다(배선은 wiring.
   (링커 커널의 may_linkat 에서 검사 -- 배포 전제, deploy/README).
 - 소유자: 65532 시절 EACCES 가 조용히 해 주던 세 번째 장벽의 대체. rename(2) 으로
   들여온 남의 정규 파일(nlink=1, 봉쇄 통과)은 소유자가 다르다. 0 을 함께 허용하는
-  이유는 러너가 chown **뒤에** root 로 stdout.log/stderr.log/summary.json 을 새로
-  쓰기 때문 -- 러너가 그 셋을 요청자로 chown 하면 정확히 == 요청자로 좁힐 수 있다
-  (docs/BACKLOG.md). st_uid == 0 만 허용하는 게이트는 쓰지 않는다: 요청자가 미리
+  이유는 러너가 chown **뒤에** root 로 stdout.log/stderr.log/summary.json(2026-11-27
+  부터 sync 는 progress.json 도)을 새로 쓰기 때문 -- 러너가 그것들을 요청자로 chown 하면
+  정확히 == 요청자로 좁힐 수 있다(docs/BACKLOG.md). mpirun 출력의 stdout.log·stderr.log 와
+  progress.json 은 러너 쓰기 스레드가 dirfd + O_CREAT|O_EXCL|O_NOFOLLOW 새 inode(0644,
+  progress.json 은 임시 파일 rename -- dms_job_runner.stream)로 쓴다. summary.json 과 조기
+  종료(워커 미준비·rm 대상 봉쇄·rm 대상 종류 바뀜 -- mpirun 을 돌리지 않은 경로)의 stderr.log
+  는 아직 write_text(경로 기반 open("w") -- runner._write_text)로 쓴다: 워커 미준비 경로만
+  chown -R 전(root 소유 디렉터리)이고, rm 두 경로(6c·6d)와 mpirun 뒤 summary.json 은 chown -R
+  뒤라 요청자 소유 <phase> 디렉터리 안의 경로 쓰기다(dms-ssc 는 랭크가 요청자로 돌아 그
+  디렉터리를 요청자가 바꿀 수 있다 -- docs/ARCHITECTURE.md §7 「root 제어면」 4 의 **남은 결함**
+  (BACKLOG §4 「러너 root 쓰기가 심링크를 따라간다」) 그대로다, 그 쓰기를 안전한 쓰기로 보지 마라).
+  st_uid == 0 만 허용하는 게이트는 쓰지 않는다: 요청자가 미리
   만들어 둔 정규 파일을 root 의 open("w") 가 재사용하면 요청자 소유가 된다(정상).
+  progress.json 의 첫 스냅숏(workers)은 chown -R 전에 쓰일 수 있어 그 inode 가 요청자
+  소유가 될 수 있다(허용 -- 그 뒤의 스냅숏은 rename 으로 들인 root 소유 새 inode). 요청자가 바꿔치기할 수
+  있는 파일이라 API 는 내용을 믿지 않는다(dms.job_progress.sanitize -- 자기 잡의 표시만 바뀐다).
 - 실패는 전부 같은 ArtifactError("artifact_not_found") -- errno·경로가 새면 그
   자체가 존재 오라클이다.
 """

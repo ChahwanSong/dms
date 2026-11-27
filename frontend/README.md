@@ -14,6 +14,24 @@ npx tsc -b       # 타입체크만
 npm audit        # 아래 "알려진 advisory" 먼저 읽을 것
 ```
 
+## 규약 — sync 진행률 (2026-11-27, dms-k8s 이식)
+
+저장소 전체 규약은 [`CLAUDE.md`](../CLAUDE.md), API·포탈 불변식은 [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md) §7
+「sync 진행률은 표시 전용」.
+
+- **sync 진행률은 작업 상세에서, 진행 중에만 읽는다**: `features/jobs/useArtifacts.useJobProgress` 는 요청 상세 잡 카드의 진행 중
+  실행·미리보기 행(`progressModel.showsProgress` — dsync·nsync, 그 단계 ref 있음)만 부른다. 간격은 5초, `available:false`·오류가 연속
+  3회(`PROGRESS_SLOW_AFTER_MISSES`)면 15초(그 경로는 서버가 매번 base 점검을 돈다 — 성공 한 번이면 다시 센다), 숨긴 탭은 멈추고 다시
+  보이면 한 번 읽는다. 잡 목록·배치 화면에서 /progress 를 부르지 마라(dms-k8s 사용자 결정 — `JobsList.test`·`BatchDetail.test` 가 0건
+  고정).
+- 키 없음 = 모름(0 으로 그리지 않는다), 남은 시간과 「남은」·「left」 글자는 쓰지 않는다(계약 `ui_forbidden_substrings`), 진행 값은 표시
+  전용이다. 한 번 받은 스냅숏은 같은 잡·단계에서 놓지 않는다(`progressModel.nextHeld` — 그 뒤의 `available:false`·오류도 마지막
+  스냅숏을 그리고 나이는 그 스냅숏 기준, 「이전 잡 이미지」 문구는 성공을 한 번도 못 받았을 때만).
+- 출력 목록(`useArtifacts`)은 종단 전이 뒤 3·10·30초에 한 번씩 더 읽는다(`ARTIFACTS_SETTLE_MS` — 취소의 유예 쓰기·공유 스토리지 가시
+  지연). 결과 파일 만료가 없는 라인이라 dms-k8s 의 만료 갈래(`outputExpired`·410)는 옮기지 않았다.
+- 계약은 `src/lib/progressContract.json` — 런타임 번들에 싣지 않고 시험이 간격(`poll_ms`)·phase·예 스냅숏을 잇는다(백엔드 러너·API
+  시험도 같은 파일). 한쪽만 바꾸지 마라.
+
 ## 알려진 advisory — `GHSA-qwww-vcr4-c8h2` (react-router, high) — 열려 있음, 의도적
 
 슬라이스 12 Task 5(`react-router-dom` 6 → 7 업그레이드, 커밋 `9696c67`)에서

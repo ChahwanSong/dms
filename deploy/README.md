@@ -1448,6 +1448,40 @@ dms-k8s 라인의 프로덕션 사고(호스트 이름 변경 뒤 옛 이름이 
 노드 이름을 바꾸거나 옛·새 이름 행을 합치는 기능은 없다 — 노드 이름 = k8s Node 이름이 계약이다. 마이그레이션 없음(새 테이블·칸
 없음 — `machine_key` 는 보고 JSON 안의 키).
 
+## 12d. sync 진행률 — 잡 이미지도 함께 올린다 (2026-11-27, dms-k8s 이식)
+
+요청 상세의 진행 중 dsync·nsync 실행·미리보기 행에 진행 칸(단계·막대·항목 수·나이)이 생긴다. 잡 러너는 mpirun 출력을 도는 동안 받아
+`stdout.log`·`stderr.log` 를 실행 중에 이어 쓰고(stdout 앞 64 MiB + 끝 16 MiB, stderr 8 + 2 MiB — 넘친 가운데는 `DMS_JR_LOG_GAP` 한 줄),
+sync 는 `<base>/<job_id>/<phase>/progress.json`(스냅숏 하나, 4 KiB 이하)을 덮어쓴다. 규칙은 `docs/ARCHITECTURE.md` §6 「러너 출력은
+스트리밍·상한」·§7 「sync 진행률은 표시 전용」, 남은 일은 `docs/BACKLOG.md` 「sync 진행률 후속」.
+
+**두 이미지가 모두 필요하다.** 진행 칸과 `GET /api/user/jobs/{job_id}/progress` 는 `dms`(api·포탈)에, progress.json 을 쓰는 러너
+(`dms_job_runner`)는 `dms-mpifileutils`(잡 이미지 — `Dockerfile.mpifileutils` 가 `src` 를 싣는다)에 있다. `dms-agent` 는 바꿀 필요가 없다.
+
+1. 포탈 「빌드하기」에서 같은 태그로 `dms` 와 **`dms-mpifileutils` 를 직접 체크해** 빌드한다(§8 5 — 잡 이미지는 기본 선택이 아니고
+   mpifileutils 를 소스에서 컴파일해 오래 걸린다).
+2. 「릴리스」에서 `dms-api`·`dms-controller`(dms 계보)와 `job-image`(같은 태그의 `dms-mpifileutils`)를 고른다. job-image 는 DB
+   오버라이드라 적용 즉시 **다음에 제출되는 잡 단계**부터 쓴다(파드 재시작 없음 — 이미 도는 잡은 제출 때의 이미지 그대로).
+3. 오버레이 태그를 맞춘다(§9): 테스트베드는 `deploy/overlays/testbed/kustomization.yaml` 의 dms 계보 `newTag` + `patch-config.yaml` 의
+   `DMS_JOB_IMAGE`(이 기능 전 `d194` → 새 태그), prod·ssc 사이트는 `values.env` 의 `DMS_TAG`·`MFU_TAG`(또는 `live`).
+
+DB 마이그레이션·매니페스트 env·새 사유 코드·에이전트 이미지 변경은 없다.
+
+**섞인 상태는 안전하다**(릴리스 순서 무관, 한쪽만 롤백해도 된다):
+
+| api·포탈 | 잡 이미지 | 보이는 것 |
+|---|---|---|
+| 새 | 옛 | progress.json 이 없어 /progress 가 200 `available:false` — 진행 칸은 처음 60초 「진행 정보를 기다리는 중…」, 그 뒤 「진행 정보가 없습니다 — 진행 기록을 남기지 않는 이전 잡 이미지…」 중립 문구. 잡은 예전 그대로 돈다 |
+| 옛 | 새 | 진행 칸이 없다. progress.json 은 출력 목록에 파일 칩으로만 보인다(새 포탈에서도 칩은 보인다). summary.json 핵심 3키 계약은 그대로이고, 출력이 상한을 넘은 잡에만 새 키 `output_truncated` 가 붙는다(옛 포탈은 안내 없이 원문 칸에 키로만 보인다) |
+
+같은 잡의 미리보기와 실행이 서로 다른 잡 이미지로 돌아도 된다 — 잡 이미지는 단계를 제출할 때마다 읽고, 확인 지문은 저장된 미리보기
+summary 의 것이다.
+
+**릴리스 뒤 확인**(테스트베드 — 러너가 네 도구 모두의 mpirun 경로를 바꿨다): dscan·dsync·drm·nsync 미리보기·실행과 복사 중 취소가
+예전처럼 끝나는지(결과 카드 수치·실패 사유), drm 링크 대상이 「링크만 지움」으로 묶이는지, 비 root dsync 실행 중 진행 칸이 5초마다
+바뀌고 끝난 뒤 출력 칩이 맞춰지는지, 잡 파드 로그에 도구 출력이 흘러나오지 않는지(실패하면 사유 마커 + 꼬리 발췌만). 남은 실증 목록은
+BACKLOG 「sync 진행률 후속」의 라이브 실증 항목.
+
 ---
 
 ## 13. 두 번째 클러스터(`dmsk8s`) — dms-k8s 브랜치 소관 (2026-10-21 구축, 2026-10-22 브랜치 분리)

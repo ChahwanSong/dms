@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
@@ -834,6 +834,27 @@ test("nsync 항목은 양면 노드 수까지 — 요청 상세와 같은 문구
   renderDetailed();
   await userEvent.click(await screen.findByRole("button", { name: "항목 0 상세" }));
   expect(await screen.findByText("nsync · 소스 2 + 목적지 2 노드")).toBeInTheDocument();
+});
+
+test("sync 진행률(2026-11-26, dms-k8s 이식)은 배치 화면에서 조회하지 않는다 -- 진행 중 dsync 자식을 펼쳐도 /progress 요청 0(요청 상세에서만)", async () => {
+  let progressCalls = 0;
+  server.use(
+    serveBatch(batch({ operation: "sync", status: "Running", items: [
+      { seq: 0, payload: { source_storage: "s1", source: "a", destination_storage: "s2", destination: "b" },
+        status: "Materialized", request_id: "r1", reason_code: null, request_state: "Running", job_state: "Executing" }] })),
+    http.get("/api/user/requests/r1/jobs", () => HttpResponse.json([jobRow({ operation: "sync", tool: "dsync",
+      state: "Executing", phase_refs: { preflight: "pod/a", preview: "vcjob/b", exec_preflight: "pod/c", execution: "vcjob/d" },
+      exec_submitted_at: "2026-11-26T08:28:56Z", sched_wait_seconds: 2 })])),
+    http.get("*/progress", () => { progressCalls += 1; return HttpResponse.json({ phase: "execution", available: false }); }),
+  );
+  const qc = new QueryClient({ defaultOptions:{ queries:{ retry:false }}});
+  render(<QueryClientProvider client={qc}><MemoryRouter initialEntries={["/admin/batches/b1"]}>
+    <Routes><Route path="/admin/batches/:batchId" element={<BatchDetail/>} /></Routes>
+  </MemoryRouter></QueryClientProvider>);
+  await userEvent.click(await screen.findByRole("button", { name: "항목 0 상세" }));
+  expect(await screen.findByText("도구")).toBeInTheDocument();       // 자식 잡을 읽었다(진행 중 dsync)
+  await act(async () => { await new Promise((r) => setTimeout(r, 50)); });
+  expect(progressCalls).toBe(0);
 });
 
 test("잡이 없으면(계획 전·미 materialize) 도구 행 자체를 생략한다", async () => {

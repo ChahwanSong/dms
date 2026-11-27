@@ -253,7 +253,8 @@ docstring, 운영 절차는 deploy/README §12c. dms-k8s 와 다른 점: in_use 
   O_CREAT 로 되살린다) 메타데이터 단계에서 그 이름을 건너뛴다 — nsync 는 이미 「실패한 전송이 만든·자른 파일만 지운다」(nsync.md §13.3).
 - 📝 **dsync·drm 의 원시 경로로 사유 판정을 흔들 수 있다**(d192 리뷰 contract-35, 낮음). dsync·drm 은 오류 줄에 경로를 이스케이프 없이
   찍어, 줄바꿈이 든 이름이 가짜 `… (errno=28 …)` 줄을 더하면 그 잡의 사유가 `destination_full`·`destination_read_only` 로 바뀔 수 있다
-  (수 판정은 최종 블록·마지막 줄만 믿어 막혔고, abort 는 stderr 만 본다). 자기 잡의 표시만 바뀐다 — 처방: 포크 dsync·drm 오류 줄 경로
+  (수 판정은 최종 블록(2026-11-27 부터 마지막 walk 요약 뒤·timestamp 머리 줄 앞에 정확히 하나 — `parsers._sync_final_block`, dms-k8s
+  51300ed2 이식)·마지막 줄만 믿어 막혔고, abort 는 stderr 만 본다). 자기 잡의 표시만 바뀐다 — 처방: 포크 dsync·drm 오류 줄 경로
   이스케이프(nsync 처럼).
 - 📝 **dsync walk 오류는 삭제가 켜졌을 때만 보인다**(d192). `Errors detected walking source path` 는 `--delete` 일 때만 찍혀(삭제를 끄는
   안내라서) 삭제 꺼진 dsync 는 소스 일부를 못 읽어도 summary 에 `scan_incomplete` 가 없다(rc 도 0). 처방(포크): walk 오류 수를 늘
@@ -271,6 +272,62 @@ docstring, 운영 절차는 deploy/README §12c. dms-k8s 와 다른 점: in_use 
 - 🔧 **포크(`nsync-fixes-d189` 7a3189c = 라이브 d192, 2026-10-28 포크 main 에도 ff)의 남은 것**. P3: 배치 여럿에서 ENOSPC 정지 뒤 배치의
   삭제는 돌지 않음(다음 실행이 이어 감) · ENOSPC 뒤에도 진행 중이던 전송은 끝까지 읽혀 버려짐 · 비 root 가 이미 있는 0555 목적지 디렉터리에
   새 자식을 못 만듦 · dsync 미리보기 변경 계획·실패 파일 잔여·경로 이스케이프·walk 오류 수(위 항목들).
+
+### sync 진행률 후속 — 2026-11-27 (dms-k8s 이식)
+
+dms-k8s 의 sync 진행률(그 라인 2026-11-26~27 — 계약 93158201, API f405873b, 러너 abd43c8c·ded1a791, 포탈 92f7a9f1 과 실증 후속)을 옮겼다.
+지금 동작은 `dms_job_runner.stream`·`dms_job_runner.progress`·`dms.job_progress` 모듈 docstring, `frontend/src/features/jobs/progressModel.ts`
+머리 주석, 계약 `frontend/src/lib/progressContract.json`, ARCHITECTURE §6 「러너 출력은 스트리밍·상한」·§7 「sync 진행률은 표시 전용」, 배포는
+deploy/README §12d. dms-k8s 와 다른 점: 결과 파일 만료가 없어 410 갈래가 없다(계약 오류 예·라우트·포탈), drm 대상 종류(runner 6c·6d,
+summary `target_kind`)를 그대로 두고 parse_lost 조기 반환에도 싣는다(미리보기 종류 묶기의 유일한 재료), dms-k8s 의 경로 봉쇄 재확인
+(`contain.py`·nsync 봉쇄 마커 7b)은 옮기지 않았다, dsync 최종 블록 위조 방어(dms-k8s 51300ed2 — 넘침 시험의 전제)를 같이 옮겼다.
+
+- 🔍 **라이브 실증** — 아직(ssc 다음 태그 — 잡 이미지 재빌드·릴리스가 먼저, deploy/README §12d). ① 러너가 **네 도구 모두**의 mpirun
+  경로를 바꿨다: dscan·dsync·drm·nsync 의 미리보기·실행과 복사 중 취소가 예전처럼 끝나는지(summary 핵심 3키·사유 마커·실패 꼬리),
+  drm 링크 대상의 「링크만 지움」·미리보기 종류 묶기(`target_kind`)가 그대로인지. ② 비 root dsync(랭크 = 요청자)의 실행·미리보기에서
+  /progress 5초·`available:true`·나이, 숨긴 탭 멈춤, no-store, 금지 키 0, 수치가 stdout.log 진행 줄과 일치, 잡 목록·배치 화면 /progress
+  0건, 실행 중 stdout.log 가 자라는지. ③ progress.json 소유자(첫 workers 스냅숏 뒤엔 rename 으로 들인 root 소유 inode — API 소유자
+  검사 통과)와 임시 파일 `.progress.json.tmp~` 가 출력 목록에 안 뜨는지. ④ dms-k8s 실증 후속 — 종단 전이 뒤 칩 지연 재조회
+  (`useArtifacts.ARTIFACTS_SETTLE_MS`), 헛걸음 연속 3회부터 느린 폴링(`PROGRESS_SLOW_AFTER_MISSES`), nsync 배치 여럿의 캡션(스캔·배치
+  단계만), dsync 끝 스냅숏의 탐색 수 사실 줄, 일시 `available:false` 에 스냅숏 유지(`progressModel.nextHeld`), 미리보기 진행 중 「미리보기
+  요약이 저장되지 않았습니다」 숨김. ⑤ dms-k8s 도 밟지 않은 경로 — 파일 생성 %, 「워커 준비 대기」·「소스 탐색」·「복사 준비」·「스캔·배치
+  준비」 문구, noneYet 중립 문구, 90초 정체 경고, 연속 3회 뒤 15초 간격, 실제 탭 숨김. nsync·2노드 dsync 는 테스트베드 노드 CPU 상한
+  (노드당 1 — Volcano 에서 기다리는 것은 정상)을 먼저 보고, nsync 배치 여럿은 검증할 때만 배치 크기를 줄여서 본다(dms-k8s 방식).
+- 🔧 **summary.json·조기 종료 stderr.log 의 쓰기 통로** — 아래 §4 「러너 root 쓰기가 심링크를 따라간다」의 남은 절반. 이 라인은 랭크가
+  요청자로 돌아 dms-k8s 보다 무겁다.
+- 🔧 **시간초과·취소의 SIGKILL 이면 넘침 끝 링을 잃는다** — 러너는 SIGTERM 처리기를 두지 않는다(PID 1 신호 의미 유지 — `stream` 모듈
+  docstring). 그래서 넘침 모드의 끝 링(≤ 16 MiB — 최종 요약이 있는 꼬리)과 마지막 1초 이내 로그·쓰기 큐 잔량이 사라진다(앞 64 MiB 와
+  progress.json 은 남는다). 처방 후보: SIGTERM 에서 끝 링만 붙이고 나가는 처리기(유예 시간 안 — PID 1 의미와의 충돌을 먼저 본다).
+- 📝 **dsync 최종 블록 위조 방어로 files·bytes 가 모름이 되는 모양이 늘었다** — walk 요약 0개·3개 이상, 「Updating timestamps」 머리 줄
+  2개 이상, 그 구간 안 최종 블록 2개 이상이면 null(`parsers._sync_final_block`). 진짜 dsync 출력은 walk 요약 2·머리 줄 ≤ 1·블록 1 이라
+  평소엔 일어나지 않는다(dms-k8s 는 2026-10-28 51300ed2 부터 이 규칙). 받아들인 남는 위험(구간 안 날 경로 줄 하나에 심은 블록)은 그 docstring.
+- 📝 **실행 중 응답 하나만 available:false 가 될 수 있다**(dms-k8s d50 실증 F3 — 공유 NFS 에서 러너 rename 과 같은 순간의 읽기로 추정):
+  포탈은 같은 잡·단계에서 한 번 받은 스냅숏을 놓지 않아 보이지 않는다. 이 라인 base(CephFS)에서도 생기는지는 모른다. API 처방 후보
+  (실패 경로에서 원인 구분 없이 한 번 더 열기 — errno 로 가르지 않고 base 판정은 그 뒤 `BaseProbe` 그대로, 불변식 16)는 화면 문제가 없어
+  하지 않았다.
+- 📝 **종단 아닌 전이 뒤의 칩은 낡을 수 있다** — 지연 재조회(`ARTIFACTS_SETTLE_MS`)는 종단 전이에서만 예약한다. 미리보기가 끝나
+  ConfirmPending 으로 가면 사람이 컨펌할 때까지 다음 전이가 없어, API 노드에 파일이 늦게 보이면(dms-k8s 는 NFS 에서 관찰) 미리보기 칩
+  (summary.json·stderr.log 크기)이 새로고침 전까지 낡은 채 남을 수 있다 — 미리보기 결과 카드는 DB(`preview_summary`)라 무관. 넓힐 때의
+  비용은 전이당 목록 요청 3회.
+- 💡 **drm·dscan 진행률** — 같은 장치로 넓힐 수 있다(`progress` 정규식 표에 도구 추가 + 계약 + `progressModel` 제목). 지금은 sync(dsync·
+  nsync)만 progress.json 을 쓴다.
+- 💡 **실행 중 stdout.log 꼬리 보기** — stdout.log 는 이제 실행 중에도 이어 쓰지만 출력 목록은 잡 상태 전이 때만(종단 전이 뒤엔 3·10·30초
+  뒤 한 번씩 더) 다시 읽어 실행 중 칩 크기는 다음 전이까지 그대로다(진행은 진행 칸의 몫, 스테퍼는 stdout.log 를 읽지 않는다).
+- 💡 **진행 계약에 심장박동 값** — 정체 문턱 `progressModel.STALE_AFTER_S`(90) ≥ 러너 `progress.HEARTBEAT_SECONDS`(30) × 3 은 지금
+  `progressModel.test` 가 러너 소스를 읽어 고정한다. 계약에 `heartbeat_s` 를 더하면 `test_job_progress_contract.py` 최상위 키 집합도 바꾼다.
+- 📝 **nsync 배치가 1개면 끝날 때까지 수치가 없다**(dms-k8s 사용자 승인 「nsync 는 배치 단위로 찍는것 오케이야」 — 포크를 고치지 않는다):
+  기본 `batch_files` 100만이면 100만 항목 미만 sync 는 배치 1개라 진행 칸이 단계와 안내만 보인다(막대 없음).
+- 📝 **넘침 모드의 dsync 반영 항목 모름** — 항목별 오류·WARN 줄이 파서 상한(결합 메모리 64 MiB)을 넘은 dsync 실행은, 실패가 하나라도
+  있거나 링이 줄을 밀어냈으면 summary `files`·`copied_items` 가 null 이라 통계 합계에서 그 잡 몫이 빠진다(결과 카드에 한 줄 안내).
+  예전엔 같은 출력에서 launcher 메모리가 수 GB 까지 늘 수 있었다 — 정직한 모름을 고른 대가.
+- 📝 **진행 신선도는 노드 시계에 기댄다** — `age_seconds` = API 서버 시각 − progress.json mtime(러너 노드가 찍은 시각 — NTP 가정, 음수는 0).
+- 📝 **dsync 복사 % 는 바이트 기준·배치 안**이다 — 크기가 섞이면 체감과 다르다(dms-k8s 실측: 큰 파일이 먼저면 20초에 73%, 남은 작은 파일
+  10만 개에 21분). 막대에 기준 문구·HelpTip 을 두고 남은 시간은 숨긴다. 도구가 99.5% 부터 「100%」를 찍으므로 끝나기 전엔 99 로 묶는다.
+- 📝 **바꿀 것 없는 재동기화의 결과 카드가 「모름」**(dms-k8s d51 관찰 — 이전부터의 동작, 같은 파서): dsync 는 복사가 없으면 개수 줄을 내지
+  않아 summary `files`·`bytes` 가 null 이다 — null≠0 규약에는 맞지만 「0건 반영」이 「모름」으로 보인다. 비교 통계에서 0 을 확정할 수
+  있는지 파서 쪽 검토 후보.
+- ⏸ **잡 목록·배치 화면에서 진행률 모아 보기** — 하지 않음(dms-k8s 사용자 결정 「포탈에서 각 작업 항목에 들어갔을때만」을 그대로 옮겼다 —
+  `JobsList.test`·`BatchDetail.test` 가 /progress 0건을 고정).
 
 ## 2. 의도적 보류 (결정 — "미구현"이 아님)
 
@@ -438,15 +495,18 @@ docstring, 운영 절차는 deploy/README §12c. dms-k8s 와 다른 점: in_use 
   관례(dNN 단조 증가)로만 완화. 같은 태그 재빌드는 노드가 옛 이미지를 쓸 수 있다.
 - 📝 **`/cephfs` hostPath `type: Directory`** — 비-cephfs 노드가 스케줄 풀에 들어오면
   파드 admission 실패.
-- 🔧 **러너 root 쓰기가 심링크를 따라간다**(`src/dms_job_runner/runner.py` `main().write_text`
-  → `open(path, "w")`; 2026-09-09 root 전환 검토에서 확인, 전환과 무관한 기존 결함) —
-  요청자가 chown 이후 자기 phase 디렉터리에 `stdout.log`/`summary.json` 심링크를 심으면
-  root 가 그 잡의 스토리지 마운트·artifact base 아래 임의 경로를 truncate/덮어쓴다(내용은
-  도구 stdout). 처방: chown 전에 phase dirfd 를 잡아 `os.open(name, O_WRONLY|O_CREAT|O_EXCL|
-  O_NOFOLLOW, dir_fd=dfd)` 로 쓰고, 마지막 쓰기 뒤 그 세 파일을 요청자로 chown. 그러면 API
-  소유자 검사(`artifact_files.inode_allowed`, 현재 `{0, 요청자}`)를 `== 요청자` 로 좁힐 수
-  있다. **잡 이미지(dms-mpifileutils) 재빌드가 필요**해 제어면 root 전환(d128)과 분리했다.
-  같은 계열: `parsers.py` 의 dscan-report.json following open(카운트만 파싱, fail-soft).
+- 🔧 **러너 root 쓰기가 심링크를 따라간다**(`src/dms_job_runner/runner.py` `_write_text` → `open(path, "w")`; 2026-09-09 root
+  전환 검토에서 확인, 전환과 무관한 기존 결함) — **2026-11-27 sync 진행률 이식(dms-k8s)으로 절반이 닫혔다**: mpirun 출력의
+  `stdout.log`·`stderr.log` 와 `progress.json` 은 `stream.ArtifactWriter` 가 run_job 맨 앞(chown 전)에 연 phase dirfd +
+  `O_CREAT|O_EXCL|O_NOFOLLOW` 로 쓴다(ARCHITECTURE §7 「root 제어면」 4). 남은 것은 chown -R **뒤의** 경로 쓰기 — mpirun 뒤
+  `summary.json`, rm 대상 봉쇄(6c)·대상 종류 바뀜(6d) 조기 종료의 `stderr.log`·`summary.json`. 요청자가 chown 이후 자기 phase
+  디렉터리에 그 이름의 심링크를 심으면 root 가 그 잡의 스토리지 마운트·artifact base 아래 임의 경로를 truncate/덮어쓴다(내용은
+  summary JSON·사유 마커 줄). 이 라인은 비 root 잡의 랭크가 요청자로 돌아(mpirun 이 도는 동안 그 디렉터리를 요청자 프로세스가
+  만진다) 모든 잡이 root 인 dms-k8s 보다 실제 위협이다. chown -R **전의** 경로 쓰기(`mpi-hostfile`·`rank.sh`·워커 미준비 조기
+  종료)는 러너가 root 로 만든 디렉터리 안이다(파드 `restartPolicy: Never` — 같은 단계를 다시 돌지 않는다). 처방: 남은 쓰기도
+  `ArtifactWriter` 의 dirfd 통로(이미 열려 있다)로 옮기고, 마지막 쓰기 뒤 결과 파일을 요청자로 chown(fd 로) — 그러면 API 소유자
+  검사(`artifact_files.inode_allowed`, 현재 `{0, 요청자}`)를 `== 요청자` 로 좁힐 수 있다. **잡 이미지(dms-mpifileutils) 재빌드가
+  필요**하다. 같은 계열: `parsers.py` 의 dscan-report.json following open(카운트만 파싱, fail-soft).
 - 📝 **컨트롤러 롤아웃 겹침 창** — Deployment 롤아웃 직후 옛 파드가 종료 유예(30s) 안에
   마지막 틱을 마치며 옛 코드로 잡을 스텝할 수 있다(2026-09-09 d129 실증: 새 파드의
   preflight 파드 2초 뒤 옛 파드가 preview vcjob 을 구 마운트로 제출 → 그 잡만 실패,

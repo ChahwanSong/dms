@@ -11,9 +11,10 @@ dsync Items와 일치」는 틀렸다(포탈 괴리 [20]): nsync 합은 계획�
   nsync 미리보기 = Planned 합(skipped-dst-only 제외) = 변경 예정 / planned-volume
   nsync 실행     = Completed 합 = 실제로 반영된 것(실패·차단·미시도는 Planned 에만 있다) / Completed copied-bytes
                    (Completed 줄이 없으면 files 는 모름, bytes 는 마지막 copied-volume 으로 물러난다)
-  dsync 미리보기 = 소스 walk 항목 수(첫 walk 줄) / null
+  dsync 미리보기 = 소스 walk 항목 수(첫 walk 줄 -- walk 줄 횟수 상한 안에서만) / null
   dsync 실행     = 최종 블록 Items − mknod 실패가 아닌 「Failed to copy」 줄 수 / 최종 블록 Data (N bytes)
-                   (최종 블록 = 바로 앞 줄이 패딩 없는 "Seconds: X" 인 Items -- 없으면 둘 다 모름. 중단(aborted)이면 둘 다 모름)
+                   (최종 블록 = 바로 앞 줄이 패딩 없는 "Seconds: X" 인 Items 이고 배치 진행 블록이 아닌 것, 마지막 walk 요약
+                   뒤·timestamp 단계 머리 줄 앞에 **정확히 하나** -- 없거나 둘 이상이면 둘 다 모름. 중단(aborted)이면 둘 다 모름)
   drm 미리보기   = walk 항목 수(= 지울 대상) / null
   drm 실행       = Removed N items(포크 7a3189c 부터 실제로 지운 수 -- 시도 수가 아니다) / null
   dscan          = 리포트 summary.total_entries / 히스토그램 bytes 합
@@ -37,9 +38,19 @@ ERROR: ")에 붙여 MULTILINE 으로 줄 머리부터 맞춘다 -- 앵커가 없
 요약 블록은 항목별 줄보다 뒤에 찍히므로 마지막 매치를 쓴다. nsync 는 경로의 제어 문자·\\·:·= 를 \\xHH 로 찍어 이름으로 줄을
 위조할 수 없지만 dsync·drm 은 경로를 날것으로 찍는다(이름에 줄바꿈이 들어갈 수 있다 -- validate_relative_path 도 파일시스템도
 막지 않는다). 그 위조는 줄마다의 규칙이 막는다: walk 횟수 상한(아래), drm Removed 는 마지막 매치(drm 은 요약 뒤에 경로를
-찍지 않는다), dsync Removed 는 한 번만(넘치면 모름), Remove failed 는 마지막 Removed **뒤**의 첫 줄만. 남는 위험: dsync·drm
-의 항목 실패 줄(failure_samples·errno)은 이름에 심은 가짜 줄로 **더해질** 수 있다(진짜 줄을 지우지는 못한다) -- 러너의 사유
-규칙이 이를 어디까지 믿는지는 runner._derive_reason 이 적는다."""
+찍지 않는다), dsync Removed 는 한 번만(넘치면 모름), Remove failed 는 마지막 Removed **뒤**의 첫 줄만, dsync 최종 블록은
+마지막 walk 요약과 timestamp 단계 머리 줄 사이에 정확히 하나만(_sync_final_block). 남는 위험: dsync·drm 의 항목 실패 줄
+(failure_samples·errno)은 이름에 심은 가짜 줄로 **더해질** 수 있다(진짜 줄을 지우지는 못한다) -- 러너의 사유 규칙이 이를
+어디까지 믿는지는 runner._derive_reason 이 적는다. dsync 최종 블록에 남는 위험은 _sync_final_block 이 적는다.
+
+넘침 모드(2026-11-26 sync 진행률 설계 §1.4 -- 러너가 출력을 스트리밍으로 받는다, stream.LineFeed): 결합 문자열의 메모리가
+상한(64 MiB) 이하면 파서는 지금과 **같은 문자열**을 받는다(이 모듈의 함수는 그대로). 넘치면 파서 입력은 「앞부분(완결 줄만) +
+넘친 구간에서 keep_line 이 고른 줄(앞 4 MiB + 끝 4 MiB 링)」 -- 원문의 **부분 수열**이다. keep_line 은 요약·진행·단계 머리
+줄(_TS 로 시작, 오류 줄 아님, 백틱 없음 -- 백틱 조건은 경로를 인용하는 항목별 WARN 줄을 빼려는 것)과 요약형 오류 줄
+화이트리스트(_KEEP_ERROR_LINES)만 남긴다. 그래서 끝에 찍히는 요약(dsync 최종 블록·timestamp 머리 줄·drm Removed·nsync
+Planned/Completed)은 늘 남고, 링이 줄을 밀어내지 않았으면(keep_gap 0) 진짜 요약 줄이 빠지지 않아 「가짜는 더할 수만 있다」와
+개수 상한 규칙이 그대로 선다. 넘친 구간의 항목 줄은 줄 단위로만 센다(LINE_COUNTERS -- MULTILINE findall 과 같은 수,
+errno_line·abort_line). 어느 값을 믿고 어느 값을 모름으로 두는지는 runner._overflow_detail 이 정한다."""
 import json
 import re
 
@@ -55,9 +66,17 @@ _INT64_MAX = 2 ** 63 - 1
 # 예전엔 「마지막 매치 = 최종 블록」이라 믿었는데, 복사 중에 중단·강제 종료되면 최종 블록이 없어 계획 줄이 마지막이 됐다(재현:
 # direct+bufsize MPI_Abort 출력 -- 계획 수가 files·「반영한 항목」·통계 합계로 들어갔다). 그래서 바로 앞 줄이 패딩 없는 "Seconds: X" 인
 # Items 만 받는다: walk 단계 비교 블록은 "Seconds   :"·"Items     :"(콜론 앞 패딩)라 배제되고, 계획 줄 앞은 "Copying to" 다.
-# --batch-files 의 배치별 진행 블록("Current:"·"Seconds:"·"Items:"·"Data: (N bytes)" -- 누적값)도 같은 모양이고, 최종 블록이
-# 그 뒤라 마지막 매치가 최종이다. [ \t]* 인 이유: \s* 는 줄바꿈을 삼켜 다음 줄 끝의 $ 에 붙는다.
+# --batch-files(DMS sync 기본 100만)의 배치별 진행 블록("Started:"·"Current:"·"Seconds:"·"Items:"·"Data: (N bytes)" -- 누적값,
+# mfu_flist_copy.c 2682-2689)도 같은 모양이라 Seconds 바로 앞 줄이 "Current:" 인 것은 뺀다(_DSYNC_BATCH_CURRENT -- 최종 블록의
+# 그 자리는 "Completed:", 2795-2797). 어느 매치를 믿는지(마지막 매치가 아니다 -- 위조)는 _sync_final_block 이 정한다.
+# [ \t]* 인 이유: \s* 는 줄바꿈을 삼켜 다음 줄 끝의 $ 에 붙는다.
 _SYNC_FINAL_ITEMS = re.compile(_TS + r"Seconds: \d+(?:\.\d+)?[ \t]*\n" + _TS + r"Items: (\d+)[ \t]*$", re.MULTILINE)
+_DSYNC_BATCH_CURRENT = re.compile(_TS + r"Current: ", re.MULTILINE)
+# 실행의 timestamp 단계 머리 줄(dsync.c 2382 -- rank 0 이 dsync_sync_files(제거·복사) **뒤**에 정확히 한 번, dryrun 이면 안
+# 찍는다). 진짜 최종 블록은 언제나 이 줄 앞이고, 이 줄 뒤에는 메타데이터 갱신 실패 줄("Failed to change ownership/permissions/
+# timestamps on `<날 목적지 경로>'")이 온다 -- 그 이름에 심은 가짜 블록을 이 줄로 잘라 낸다. 둘 이상이면 위조가 섞였다(모름).
+_DSYNC_UPDATING = re.compile(_TS + r"Updating timestamps on newly copied files[ \t]*$", re.MULTILINE)
+_DSYNC_MAX_UPDATING = 1
 # 같은 블록의 "Data: X (N bytes)" -- Items 바로 뒤(하위 줄 "  Directories/Files/Links: N" 최대 3개를 건너) 에서만 본다.
 # "Copy data: X (N bytes)" 는 복사 **시도** 합이라(실측: Copy data 6 bytes, 최종 Data 3 bytes -- 열지 못한 파일 몫) 바이트 출처가
 # 아니다. "(N bytes in S seconds)"(Rate)는 괄호가 바로 닫히지 않아 배제, 줄 끝 앵커라 경로에 박힌 "(999 bytes)" 도 행세 못 한다.
@@ -193,6 +212,46 @@ _FAILURE_PATH_MAX = 256
 _ABORT_STDERR = re.compile(r"MPI_ABORT was invoked|(?:^| )ABORT: ", re.MULTILINE)
 
 
+# ---- 넘침 모드 줄 단위 헬퍼(모듈 docstring 「넘침 모드」 -- stream.LineFeed 가 넘친 구간의 줄마다 부른다) ----
+# 줄 단위 카운터: 이름 → 줄 머리 정규식. 모두 한 줄 안에서 끝나는 머리 고정 패턴이라 줄마다 .match 한 합 == 전체 텍스트
+# MULTILINE findall 의 수다(줄 경계는 "\n" 하나 -- 텍스트 모드라 "\r" 은 남지 않는다).
+LINE_COUNTERS = (("tool_errors", _ERR_LINE), ("copy_failed", _DSYNC_COPY_FAILED), ("create_failed", _DSYNC_CREATE_FAILED))
+# 넘친 구간에서도 남기는 요약형 오류 줄(항목당 한 줄이 아니라 실행당 몇 줄 -- 개수·사유 규칙이 쓴다).
+_KEEP_ERROR_LINES = (_RM_FAILED, _NSYNC_FAILED_ITEMS, _NSYNC_STOPPED_EARLY_RC, _NSYNC_SCAN_ERRORS, _NSYNC_META_FAILED,
+                     _DSYNC_TYPE_REFUSED, _DSYNC_WALK_ERRORS)
+_TS_LINE = re.compile(_TS)
+
+
+def keep_line(line: str) -> bool:
+    """넘친 구간에서 파서 입력에 남길 줄인가(개행 없는 한 줄). 모듈 docstring 「넘침 모드」."""
+    if _ERR_LINE.match(line) is not None:
+        return any(rx.match(line) is not None for rx in _KEEP_ERROR_LINES)
+    return _TS_LINE.match(line) is not None and "`" not in line
+
+
+def count_lines(text: str) -> dict:
+    """LINE_COUNTERS 각각의 전체 텍스트 줄 수(MULTILINE findall 의 수 -- 목록을 만들지 않고 센다) -- 넘침 때 머리 텍스트 몫."""
+    return {name: sum(1 for _ in rx.finditer(text or "")) for name, rx in LINE_COUNTERS}
+
+
+def errno_line(line: str) -> bool:
+    """dsync·drm 항목 실패 줄(errno 꼬리)인가 -- 넘친 구간의 실패 표본 후보(_mfu_failures 와 같은 정규식)."""
+    return _MFU_ERRNO_LINE.match(line) is not None
+
+
+def abort_line(line: str) -> bool:
+    """stderr 줄 하나에 MPI 중단 흔적이 있는가(parse_aborted 와 같은 정규식 -- 넘친 stderr 구간용)."""
+    return _ABORT_STDERR.search(line) is not None
+
+
+def failure_samples(text: str) -> list:
+    """dsync·drm 실패 표본(출력 순서 앞 10개 -- _mfu_failures 의 표본 몫)."""
+    try:
+        return _mfu_failures(text or "")[0]
+    except Exception:  # noqa: BLE001 -- 계약상 예외 금지
+        return []
+
+
 def _to_int(text) -> "int | None":
     """정수 문자열 -> 0..INT64 정수, 아니면 None. int() 는 4300자 넘는 숫자에 ValueError 다 -- 계약상 예외 금지."""
     try:
@@ -215,18 +274,56 @@ def _last_match(pattern: "re.Pattern[str]", text: str):
 
 
 def _sync_final_block(text: str):
-    """dsync 최종 블록 -> (그 Items 줄의 시작 위치, Items, 같은 블록의 Data 바이트). 블록(바로 앞 줄이 "Seconds: X" 인 Items)이
-    없으면 (None, None, None) -- 복사 계획 "Items:" 만 있는 출력(중단·강제 종료) 포함."""
-    m = _last_match(_SYNC_FINAL_ITEMS, text)
-    if m is None:
+    """dsync 최종 블록 -> (그 블록 머리(Seconds 줄)의 시작 위치, Items, 같은 블록의 Data 바이트). 못 믿으면 (None, None, None).
+
+    블록 = 바로 앞 줄이 "Seconds: X" 인 Items(_SYNC_FINAL_ITEMS) 중 배치 진행 블록(앞 줄 "Current:")이 아닌 것. 받는 것은
+    **마지막 walk 요약 뒤 ~ timestamp 단계 머리 줄(_DSYNC_UPDATING) 앞**에 정확히 하나 있을 때뿐이다(d192 리뷰
+    d192-dsync-final-block-spoof). dsync 는 경로를 날것으로 찍어 이름에 "\\n[ts] Seconds: 1\\n[ts] Items: N\\n[ts] Data: x
+    (N bytes)" 를 심으면 줄 머리부터 맞는 가짜 블록이 생긴다. 예전 「마지막 매치」는 (a) 복사할 것이 없는 실행(진짜 블록이
+    없다 -- dsync.c copy_size 0 이면 mfu_flist_copy 를 부르지 않는다)에서 walk 오류 줄("Path name is too long ... '<경로>'")에
+    심은 블록을, (b) 진짜 블록 **뒤**의 메타데이터 갱신 실패 줄에 심은 블록을 그대로 받아 files·bytes(통계 합계까지)를 지어냈다.
+    가짜 줄은 **더할** 수만 있으므로:
+      - walk 요약은 진짜 실행에서 정확히 둘(소스·목적지 -- 없는 목적지도 "Walked 0" 을 찍는다, dsync.c 3925-3934)이다 -- 1~2개
+        일 때만 마지막 것 뒤를 본다(0 = 진짜 요약이 없는 출력, 3 이상 = 위조가 섞였다 -> 모름). walk 오류 줄의 가짜는 그 앞이라
+        빠진다(a).
+      - timestamp 머리 줄은 진짜 실행에서 많아야 하나다 -- 둘 이상이면 모름, 하나면 그 앞만 본다. 갱신 실패 줄의 가짜는 그 뒤라
+        빠지고 진짜 블록 값은 그대로 남는다(b).
+      - 그 사이 블록이 둘 이상이면 모름(dsync 는 mfu_flist_copy 를 한 번 부르고 최종 블록은 그 끝에 한 번이다 -- dsync
+        Removed 와 같은 규칙). 복사·제거 단계 오류 줄의 가짜는 진짜 블록과 함께 둘이 된다.
+    남는 위험(받아들인다 -- 바뀌는 것은 이름을 지은 사람 자신의 잡 개수와 그 몫의 통계다): 진짜 블록이 없는 출력에서 구간 안의
+    날 경로 줄 하나에 심은 블록은 받힌다 -- 복사할 것이 없는 --delete 실행의 제거 실패 줄(root 라 root_squash NFS·경합 정도),
+    다른 rank 의 갱신 실패 줄이 rank 0 의 timestamp 머리 줄보다 먼저 전달된 경우(mpirun 출력 순서는 rank 사이에 보장되지
+    않는다), 신호로 죽어 timestamp 줄까지 가지 못한 출력. 구간의 왼쪽 끝을 더 당기는 규칙(예: 마지막 Removed 뒤)은 넣지 않는다 --
+    가짜 줄로 옮길 수 있는 경계는 진짜 블록만 잘라 내고 가짜 하나를 남길 수 있다(위 둘은 진짜 줄 수가 고정이라 상한으로 막힌다)."""
+    walks = list(_SYNC_WALKED.finditer(text))
+    if not 0 < len(walks) <= _DSYNC_MAX_WALKS:
         return None, None, None
+    updating = list(_DSYNC_UPDATING.finditer(text))
+    if len(updating) > _DSYNC_MAX_UPDATING:
+        return None, None, None
+    lo = walks[-1].end()
+    hi = updating[0].start() if updating else len(text)
+    blocks = [m for m in _SYNC_FINAL_ITEMS.finditer(text)
+              if lo <= m.start() and m.end() <= hi and not _batch_progress_block(text, m.start())]
+    if len(blocks) != 1:
+        return None, None, None
+    m = blocks[0]
     data = _SYNC_FINAL_DATA.match(text, m.end())
     return m.start(), _to_int(m.group(1)), (_to_int(data.group(1)) if data is not None else None)
 
 
+def _batch_progress_block(text: str, seconds_at: int) -> bool:
+    """seconds_at 의 "Seconds:" 줄 바로 앞 줄이 --batch-files 배치 진행 블록의 "Current:" 인가."""
+    if seconds_at == 0:
+        return False
+    prev = text.rfind("\n", 0, seconds_at - 1) + 1
+    return _DSYNC_BATCH_CURRENT.match(text, prev) is not None
+
+
 def parse_sync_counts(stdout: str) -> "tuple[int | None, int | None]":
-    """dsync stdout -> (최종 블록 Items, 같은 블록의 Data 바이트). 최종 블록이 없으면 둘 다 None(복사 계획 줄로 지어내지 않는다).
-    Items 는 도구가 센 항목 수 그대로(복사 실패 차감 전) -- 실행의 files 는 parse_dsync_counts 가 실패를 뺀 값이다."""
+    """dsync 실행 stdout -> (최종 블록 Items, 같은 블록의 Data 바이트). 최종 블록을 못 믿으면(없음·위조 의심 -- _sync_final_block)
+    둘 다 None(복사 계획 줄로 지어내지 않는다). Items 는 도구가 센 항목 수 그대로(복사 실패 차감 전) -- 실행의 files 는
+    parse_dsync_counts 가 실패를 뺀 값이다."""
     _, items, nbytes = _sync_final_block(stdout or "")
     return items, nbytes
 
@@ -238,12 +335,11 @@ def _dsync_source_items(stdout: str) -> "int | None":
 
 
 def parse_sync_dryrun_counts(stdout: str) -> "tuple[int | None, int | None]":
-    """dsync --dryrun stdout -> (소스 walk 항목 수, None). 복사 요약이 있으면(도구가
-    언젠가 dry-run 요약을 찍게 되면) 그쪽이 우선 -- 실행 파서와 같은 값 체계."""
-    files, nbytes = parse_sync_counts(stdout)
-    if files is None:
-        files = _dsync_source_items(stdout)
-    return files, nbytes
+    """dsync --dryrun stdout -> (소스 walk 항목 수, None). walk 줄만 본다: dryrun 은 mfu_flist_copy 를 부르지 않아(dsync.c
+    !options.dry_run 분기) 복사 요약이 절대 나오지 않는다. 예전의 「복사 요약이 있으면 우선」 분기는 walk 오류 줄 이름에 심은
+    가짜 블록 하나로 walk 횟수 상한(_DSYNC_MAX_WALKS)을 건너뛰었다(d192 리뷰 -- 미리보기 files 1, 실제 소스 25만 -- 배치 확인
+    감사의 files_total 로 들어간다)."""
+    return _dsync_source_items(stdout), None
 
 
 def parse_dsync_counts(stdout: str, aborted: bool = False) -> "tuple[int | None, int | None]":

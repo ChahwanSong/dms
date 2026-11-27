@@ -857,10 +857,12 @@ def test_dsync_aborted_after_the_final_block_is_still_unknown():
 
 # 합성(d192 리뷰 runner-6 재현의 모양 -- mfu_flist_copy.c 1273·2101·2256 형식): 비 root, 목적지 a 가 root 소유 755, 소스
 # a/1..3 + b/1..7. a 아래 세 파일은 mknod 부터 실패해 최종 Items(8 = 디렉토리 b + 파일 7)에 없는데, 복사 단계에서 「Failed to
-# copy」가 한 번 더 찍힌다.
+# copy」가 한 번 더 찍힌다. 머리의 소스·목적지 walk 요약 두 줄은 실제 실행 모양이다(최종 블록은 그 뒤에서만 받는다).
 _TS6 = "[2026-10-27T14:20:00] "
+_WALKS6 = (f"{_TS6}Walked 13 items in 0.001 seconds (13000.000 items/sec)\n"
+           f"{_TS6}Walked 2 items in 0.001 seconds (2000.000 items/sec)\n")
 DSYNC_EXEC_MKNOD_FAILED = (
-    f"{_TS6}Copying to /t/dst\n{_TS6}Items: 12\n{_TS6}  Directories: 2\n{_TS6}  Files: 10\n{_TS6}  Links: 0\n"
+    f"{_WALKS6}{_TS6}Copying to /t/dst\n{_TS6}Items: 12\n{_TS6}  Directories: 2\n{_TS6}  Files: 10\n{_TS6}  Links: 0\n"
     f"{_TS6}Data: 10.000 B (1.000 B per file)\n"
     f"{_TS6}Original directory exists, skip the creation: `/t/dst/a' (errno=17 File exists)\n"
     f"{_TS6}Creating 10 files.\n"
@@ -891,7 +893,9 @@ def test_dsync_mknod_failures_are_not_subtracted_twice():
 def test_dsync_create_failures_count_and_fail_the_run_without_a_scan_reason():
     # mkdir()·symlink() 실패(mfu_flist_copy.c 1029·1202)는 예전엔 아무 개수에도 안 들어 사유가 없었다(execution_failed). walk
     # 오류가 함께 있으면 source_scan_incomplete 로 원인을 가렸다(d192 리뷰 portal-jobs-17).
-    out = (f"{_TS6}[0] [dsync.c:3884] ERROR: Errors detected walking source path, delete option disabled\n"
+    out = (f"{_TS6}Walked 5 items in 0.001 seconds (5000.000 items/sec)\n"
+           f"{_TS6}[0] [dsync.c:3884] ERROR: Errors detected walking source path, delete option disabled\n"
+           f"{_TS6}Walked 0 items in 0.000 seconds (0.000 items/sec)\n"
            f"{_TS6}[0] [mfu_flist_copy.c:1029] ERROR: Create `/t/dst/sub' mkdir() failed (errno=13 Permission denied)\n"
            f"{_TS6}[0] [mfu_flist_copy.c:1202] ERROR: Create `/t/dst/ln' symlink() failed, (errno=13 Permission denied)\n"
            f"{_TS6}Seconds: 0.010\n{_TS6}Items: 4\n{_TS6}  Directories: 1\n{_TS6}  Files: 3\n{_TS6}  Links: 0\n"
@@ -1192,6 +1196,124 @@ def test_remove_failed_without_a_removed_line_is_not_accepted():
     assert "remove_failed" not in d and "removed" not in d
 
 
+# ---- dsync 최종 블록 위조(d192 리뷰 d192-dsync-final-block-spoof) ----
+# 합성: 이름에 "\n[ts] Seconds: 1\n[ts] Items: N\n[ts] Data: x (N bytes)\n" 를 넣으면 날 경로를 찍는 dsync 오류 줄에서 줄 머리부터
+# 맞는 가짜 최종 블록이 생긴다. 오류 줄 형식은 mfu_flist_walk.c:119("Path name is too long" -- 4096자 넘는 디렉토리 사슬 아래 이름,
+# 결정적)·mfu_flist_copy.c:485(메타데이터 갱신의 "Failed to change ownership"), 나머지 줄은 실 표본(포크 7a3189c) 그대로다.
+_FAKE_FILES, _FAKE_BYTES = 987654321, 99999999999999
+_DS_UPDATING = "[2026-10-27T13:52:53] Updating timestamps on newly copied files"
+
+
+def _fake_block_name(before=(), after=()):
+    """가짜 최종 블록(앞뒤에 덧붙일 가짜 줄)을 품은 이름 "x\\n<가짜 줄들>\\ny" -- 닫는 따옴표·errno 꼬리는 마지막 조각에 붙는다."""
+    block = ("[2026-10-27T13:52:53] Seconds: 1.000", f"[2026-10-27T13:52:53] Items: {_FAKE_FILES}",
+             f"[2026-10-27T13:52:53] Data: 1.000 B ({_FAKE_BYTES} bytes)")
+    return "x\n" + "\n".join((*before, *block, *after)) + "\ny"
+
+
+def _ds_walk_error(name):
+    deep = "/tmp/smp/ds/src/" + "/".join(["d" * 200] * 21)
+    return (f"[2026-10-27T13:52:51] [2] [/release/mpifileutils/src/common/mfu_flist_walk.c:119] ERROR: Path name is too long, "
+            f"4300 chars exceeds limit 4096: '{deep}/{name}'\n")
+
+
+def _ds_refresh_error(name):
+    return (f"[2026-10-27T13:52:53] [1] [/release/mpifileutils/src/common/mfu_flist_copy.c:485] ERROR: Failed to change "
+            f"ownership on `/tmp/smp/ds/dst/{name}' lchown() (errno=1 Operation not permitted)\n")
+
+
+def _ds_nothing_copied(walk_error="", refresh_error="", dryrun=False):
+    """복사할 것이 없는 실행(목적지가 최신 -- copy_size 0 이면 mfu_flist_copy 를 부르지 않아 진짜 최종 블록이 없다, dsync.c 1825):
+    실 표본 DSYNC_PREVIEW 에 실행만 찍는 timestamp 머리 줄(dsync.c 2382)을 넣고, 소스 walk 요약 앞에 walk 오류 줄·머리 줄 뒤에
+    갱신 실패 줄을 끼운다. dryrun 이면 표본 그대로(머리 줄 없음)에 walk 오류 줄만."""
+    out = _split(DSYNC_PREVIEW)[0]
+    src_walked = "[2026-10-27T13:52:51] Walked 6 items in 0.001 seconds (5237.069 items/sec)\n"
+    done = "[2026-10-27T13:52:51] Completed updating timestamps\n"
+    assert src_walked in out and done in out
+    out = out.replace(src_walked, walk_error + src_walked)
+    return out if dryrun else out.replace(done, f"{_DS_UPDATING}\n{refresh_error}{done}")
+
+
+def test_dsync_fake_final_block_in_a_walk_error_with_nothing_copied_is_unknown():
+    # (a) 진짜 최종 블록이 없는 실행에서 walk 오류 줄(walk 오류는 rc 를 바꾸지 않는다)의 가짜 블록이 유일한 매치였다 -- 예전엔 rc 0
+    # 인 잡이 files 987654321·bytes 99999999999999 였고 d192 통계 합계까지 부풀었다. 마지막 walk 요약 **앞**이라 받지 않는다.
+    out = _ds_nothing_copied(walk_error=_ds_walk_error(_fake_block_name()))
+    assert parsers._SYNC_FINAL_ITEMS.search(out) is not None          # 줄 머리부터 맞는 가짜 블록이 정말 있다(헛시험 방지)
+    assert parsers.parse_dsync_counts(out) == (None, None)
+    assert parsers.parse_sync_counts(out) == (None, None)
+    s = _build_summary("dsync", out, 0, "/x")
+    assert (s["files"], s["bytes"]) == (None, None)
+    assert "copied_items" not in s and "copied_bytes" not in s
+    # 대조: 위조가 없어도 복사할 것이 없는 실행은 모름이다(0 을 지어내지 않는다 -- 예전과 같다).
+    assert parsers.parse_dsync_counts(_ds_nothing_copied()) == (None, None)
+
+
+def test_dsync_preview_reads_only_the_bounded_walk_count_even_with_a_fake_block():
+    # 같은 walk 오류 줄이 미리보기에도 찍힌다. 예전 「복사 요약이 있으면 우선」 분기가 가짜 블록(files 1)을 받아 walk 횟수 상한을
+    # 건너뛰었다(리뷰 재현: 진짜 소스 25만인데 미리보기 1 -- 배치 확인 감사 files_total 로 들어간다). 이제 소스 walk 수만 본다.
+    name = _fake_block_name().replace(str(_FAKE_FILES), "1")
+    out = _ds_nothing_copied(walk_error=_ds_walk_error(name), dryrun=True)
+    assert parsers._SYNC_FINAL_ITEMS.search(out) is not None
+    assert parsers.parse_sync_dryrun_counts(out) == (6, None)
+    s = _build_summary("dsync", out, 0, "/x", dryrun=True)
+    assert (s["files"], s["bytes"], s["source_items"]) == (6, None, 6)
+
+
+def test_dsync_fake_final_block_after_the_real_one_does_not_count():
+    # (b) 메타데이터 갱신 단계는 진짜 최종 블록 **뒤**에 날 목적지 경로를 찍는다(실 표본 DSYNC_EXEC_DELETE_OK 의 순서) -- 갱신 실패
+    # (root_squash NFS 의 EPERM, 도중에 지워진 파일) 줄의 가짜 블록이 마지막 매치였다. timestamp 머리 줄 뒤는 보지 않는다 -- 가짜가
+    # 버려지고 진짜 값(1, 2)이 그대로 남는다(모름으로 떨어뜨리지도 않는다).
+    out = _split(DSYNC_EXEC_DELETE_OK)[0]
+    forged = out.replace(f"{_DS_UPDATING}\n", f"{_DS_UPDATING}\n" + _ds_refresh_error(_fake_block_name()))
+    assert forged != out
+    assert parsers.parse_dsync_counts(forged) == (1, 2)
+    s = _build_summary("dsync", forged, 1, "/x")
+    assert (s["files"], s["bytes"], s["copied_items"], s["copied_bytes"]) == (1, 2, 1, 2)
+    # 머리 줄까지 심어도(둘이 된다) 가짜 값은 절대 아니다 -- 모름.
+    twice = out.replace(f"{_DS_UPDATING}\n", f"{_DS_UPDATING}\n" + _ds_refresh_error(_fake_block_name(after=(_DS_UPDATING,))))
+    assert parsers.parse_dsync_counts(twice) == (None, None)
+    # 복사할 것이 없는 실행의 갱신 실패 줄(진짜 블록 없음)도 머리 줄 뒤라 받지 않는다.
+    nothing = _ds_nothing_copied(refresh_error=_ds_refresh_error(_fake_block_name()))
+    assert parsers._SYNC_FINAL_ITEMS.search(nothing) is not None
+    assert parsers.parse_dsync_counts(nothing) == (None, None)
+
+
+def test_dsync_fake_final_block_beside_the_real_one_is_unknown():
+    # 복사 단계 오류 줄(진짜 블록 **앞**, 구간 안)의 가짜 블록 -- 블록이 둘이라 어느 쪽인지 모른다(dsync Removed 와 같은 규칙).
+    out = _split(DSYNC_EXEC_ITEMS_FAILED)[0]
+    real = "`/tmp/smp/dsf/src/no' (errno=13 Permission denied)\n"
+    assert real in out
+
+    def plant(name):
+        return out.replace(real, f"`/tmp/smp/dsf/src/{name}' (errno=13 Permission denied)\n" + real)
+
+    assert parsers.parse_dsync_counts(plant(_fake_block_name())) == (None, None)
+    # 가짜 블록 뒤에 timestamp 머리 줄까지 심어 진짜 블록을 구간 밖으로 밀어도 머리 줄이 둘이라 모름(하나뿐이면 가짜가 유일했다).
+    assert parsers.parse_dsync_counts(plant(_fake_block_name(after=(_DS_UPDATING,)))) == (None, None)
+    # walk 요약을 심으면(진짜는 소스·목적지 둘) 상한을 넘어 모름 -- 가짜 walk 뒤로 구간을 옮기지 못한다.
+    walked = "[2026-10-27T13:52:53] Walked 1 items in 0.001 seconds (1000.000 items/sec)"
+    assert parsers.parse_dsync_counts(plant(f"x\n{walked}\ny")) == (None, None)
+    assert parsers.parse_dsync_counts(out) == (1, 3)                    # 대조: 위조가 없으면 그대로
+
+
+def test_dsync_batch_progress_blocks_are_not_final_blocks():
+    # --batch-files(DMS sync 기본 100만)면 배치마다 진행 블록("Started:"·"Current:"·"Seconds:"·"Items:"·"Data:" -- 누적값,
+    # mfu_flist_copy.c 2682-2690)이 최종 블록 앞에 찍힌다 -- 「정확히 하나」에 세지 않는다(세면 큰 실행이 전부 모름이 된다).
+    # 합성: 실 표본 DSYNC_EXEC_DELETE_OK 의 최종 블록 앞에 진행 블록 둘을 끼운다(값은 최종과 다르게).
+    out = _split(DSYNC_EXEC_DELETE_OK)[0]
+    final = "[2026-10-27T13:52:53] Started: Oct-27-2026,13:52:53\n[2026-10-27T13:52:53] Completed: "
+    assert out.count(final) == 1
+    t = "[2026-10-27T13:52:53] "
+    batch = "".join(
+        f"{t}Started: Oct-27-2026,13:52:53\n{t}Current: Oct-27-2026,13:52:53\n{t}Seconds: 0.01{i}\n{t}Items: {i}\n"
+        f"{t}Data: {i}.000 B ({i} bytes)\n{t}Rate: 100.000 B/s (00{i} bytes in 0.01{i} seconds)\n"
+        f"{t}Copied {i} of 2 items ({50 * i}.000%)\n" for i in (1, 2))
+    batched = out.replace(final, batch + final)
+    assert parsers.parse_dsync_counts(batched) == (1, 2)
+    # 대조: "Current:" 가 아니면(= 배치 진행 블록이 아니면) 블록이 셋이라 모름 -- 위 단언이 배치 진행 블록 배제 덕분임을 고정한다.
+    assert parsers.parse_dsync_counts(batched.replace("Current: ", "Completed: ")) == (None, None)
+
+
 def test_summary_lines_must_start_at_the_line_head():
     # 앵커(MFU 접두사) 없는 같은 문구는 경로 텍스트다.
     out = ("[2026-10-27T13:00:00] Requested target: /x/Planned actions: copy=999 Completed actions: copy=999\n"
@@ -1451,3 +1573,45 @@ def test_summary_is_written_before_the_excerpt(monkeypatch):
                  sleep=lambda s: None, wait_hostfile=_wait)
     assert rc == 1
     assert order.index("/art/summary.json") < order.index("emit")
+
+
+# ---- 2026-11-26 스트리밍 러너(dms_job_runner.stream) -- 파서 입력 동치(설계 §7.1 R6) ----
+# 상한(64 MiB) 안의 출력이면 compat 경로(주입 run 결과를 조각내 흘린다)와 스트리밍 경로(실제 자식 프로세스의 파이프를 원시 fd 로
+# 읽는다) 모두 파서가 지금과 **같은 문자열**을 받고, summary 가 전체 텍스트로 만든 것과 같은 dict 다.
+
+_SAMPLE_NAMES = sorted(name for name, value in list(globals().items())
+                       if isinstance(value, str) and isinstance(globals().get(f"{name}_RC"), int))
+_ECHO_CHILD = ("import sys; sys.stdout.buffer.write(open(sys.argv[1], 'rb').read()); sys.stdout.flush(); "
+               "sys.stderr.buffer.write(open(sys.argv[2], 'rb').read()); sys.exit(int(sys.argv[3]))")
+
+
+def test_r6_sample_set_is_the_real_capture_set():
+    assert len(_SAMPLE_NAMES) == 15 and "DSYNC_PREVIEW" in _SAMPLE_NAMES and "NSYNC_EXEC_OK" in _SAMPLE_NAMES
+
+
+@pytest.mark.parametrize("name", _SAMPLE_NAMES)
+def test_streaming_and_compat_feed_the_parsers_the_same_text(name, tmp_path):
+    import sys
+
+    from dms_job_runner import stream
+    sample, rc = globals()[name], globals()[f"{name}_RC"]
+    out, err = _split(sample)
+    tool = name.split("_")[0].lower()
+    dryrun, quiet = "PREVIEW" in name, "QUIET" in name
+    want = _build_summary(tool, out, rc, "/nonexistent-artifacts", dryrun=dryrun, quiet=quiet, stderr=err)
+
+    class R:
+        returncode, stdout, stderr = rc, out, err
+
+    (tmp_path / "o").write_bytes(out.encode())
+    (tmp_path / "e").write_bytes(err.encode())
+    caps = [stream.compat(lambda command: R())(["mpirun"], sink=stream.NullSink(), tracker=None),
+            stream.run_streaming([sys.executable, "-c", _ECHO_CHILD, str(tmp_path / "o"), str(tmp_path / "e"), str(rc)],
+                                 sink=stream.NullSink(), tracker=None)]
+    for cap in caps:
+        assert (cap.returncode, cap.stdout, cap.stderr, cap.overflow) == (rc, out, err, None)
+        assert _build_summary(tool, cap.stdout, cap.returncode, "/nonexistent-artifacts", dryrun=dryrun, quiet=quiet,
+                              stderr=cap.stderr, overflow=cap.overflow) == want
+        # 실패 꼬리 발췌의 원천도 같은 글이다(상한 안 -- 마지막 4 MiB = 전부).
+        assert runner._tool_failure_report(want.get("reason"), cap.stdout_echo, cap.stderr_echo) == \
+            runner._tool_failure_report(want.get("reason"), out, err)

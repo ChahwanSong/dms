@@ -15,8 +15,10 @@ import { useStageNav, type NavSlot } from "./stageNav";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { OutputViewer, outputIcon } from "./OutputViewer";
 import { ExecutionResult, PreviewResult } from "./StageResults";
+import { JobProgress } from "./JobProgress";
+import { showsProgress } from "./progressModel";
 import {
-  FAILED_LIKE, STATUS_LABEL, STEP_COPY, annotationsFor, deriveJobStages, isEstimated, normTransitions, outputsByStep,
+  ENDED, FAILED_LIKE, STATUS_LABEL, STEP_COPY, annotationsFor, deriveJobStages, isEstimated, normTransitions, outputsByStep,
   stageCode, stageTitle, stepDuration, type JobStagesModel, type OutputItem, type StageModel, type StepModel,
   type StepStatus,
 } from "./stageModel";
@@ -261,6 +263,10 @@ function StepRow({ step, items, notes, last, ctx }: {
           <StepMeta step={step} refIso={ctx.refIso} hasRef={step.phase !== null && step.phase in model.refs}
                     estimate={estimate} />
         </div>
+        {/* sync 진행률(2026-11-26, dms-k8s 이식): 진행 중인 실행·미리보기 행(dsync·nsync, vcjob 제출 기록 있음)에만. 이 컴포넌트는
+            요청 상세(JobCard)에서만 그려진다 -- 잡 목록·배치 화면은 진행을 조회하지 않는다(사용자 결정, 시험이 고정). 행이 끝나면
+            언마운트되어 폴링이 멈춘다. */}
+        {showsProgress(step, model.terminal, job.tool, model.refs) && <JobProgress job={job} step={step} live={live} />}
         {/* 실패 행의 사유 문장. 「사유」 라벨은 배너 dl 에만 둔다(스펙 C5: "사유" 정확 일치는 한 곳). */}
         {isFailure && job.reason_code && (
           <p className="mt-1 text-sm text-bad break-keep">{reasonText(job.reason_code)}</p>
@@ -396,9 +402,10 @@ export function JobStages({ job, events, requestTerminal = false, jobCount = 1, 
   // 이벤트도 넘긴다 -- 제출 보류(identity_recheck_deferred)·관문 모호성 해소가 이 잡의 이벤트를 본다(RequestDetail 의
   // 배너용 모델과 같은 입력이라 둘이 같은 이야기를 한다).
   const model = useMemo(() => deriveJobStages(job, events, { requestTerminal }), [job, events, requestTerminal]);
-  // 러너는 phase 가 끝날 때 파일을 쓴다 -- 상태나 ref 가 바뀌면 목록을 다시 읽는다(폴링 없음).
+  // 상태나 ref 가 바뀌면 목록을 다시 읽는다(폴링 없음 -- 실행 중 stdout.log 가 자라도 목록 크기는 다음 전이까지 그대로, 진행은 진행 칸
+  // 몫). 종단 전이 뒤엔 몇 초 뒤 몇 번 더 읽는다(취소의 유예 쓰기·공유 base 가시 지연 -- useArtifacts 머리 주석).
   const refreshKey = `${job.state}|${Object.keys(model.refs).sort().join(",")}`;
-  const artifacts = useArtifacts(job.job_id, refreshKey);
+  const artifacts = useArtifacts(job.job_id, refreshKey, model.terminal);
   const nav = useStageNav(job.job_id);
   const outputs = useMemo(() => outputsByStep(model, artifacts.data?.entries), [model, artifacts.data]);
   const notes = useMemo(() => annotationsFor(events, job, jobCount, model.flow), [events, job, jobCount, model.flow]);
@@ -477,6 +484,11 @@ export function JobStages({ job, events, requestTerminal = false, jobCount = 1, 
     const key = `artifact:${phase}/stdout.log`;
     return (outputs.byStep[phase] ?? []).some((i) => i.key === key) ? () => nav.requestReveal(slot, key) : null;
   };
+  // 「요약이 저장되지 않았습니다」는 미리보기가 **끝났는데** 요약이 없을 때만(2026-11-27, dms-k8s e5e5bbbc 이식): 예전엔 미리보기에
+  // 닿았는지(vcjob 제출 ref·PreviewRunning 전이 -- 2026-10-08 재설계부터)만 봐서 미리보기가 도는 동안 1단계 카드 맨 위에 떠 실패처럼
+  // 읽혔다. 도는 동안은 미리보기 행의 「진행 중」 배지·진행 칸이 말한다. 미리보기 중 취소·실패로 끝나 요약이 없는 잡은 그대로 보인다.
+  const previewStep = model.pre.steps.find((s) => s.id === "preview");
+  const previewEnded = previewStep !== undefined && ENDED.has(previewStep.status);
   const previewReached = "preview" in model.refs
     || normTransitions(job.transitions).some((t) => t.to_state === "PreviewRunning");
   const preResult = model.flow === "previewed" ? (
@@ -485,8 +497,8 @@ export function JobStages({ job, events, requestTerminal = false, jobCount = 1, 
                        onOpenOutput={openOutput("preview", "pre")} />
       : job.preview_summary != null
         ? <PreviewResult job={job} summary={job.preview_summary} failedAt={false} headingId={previewHeadingId} />
-        // 요약이 없어도 「미리보기 결과 보기」(배너)의 포커스 대상은 남긴다(같은 id).
-        : previewReached ? (
+        // 요약이 없어도 「미리보기 결과 보기」(배너 -- 컨펌 대기에서만, 미리보기가 끝난 뒤)의 포커스 대상은 남긴다(같은 id).
+        : previewReached && previewEnded ? (
           <p id={previewHeadingId} tabIndex={-1}
              className="scroll-mt-4 text-sm text-ink/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">
             이 잡은 미리보기 요약이 저장되지 않았습니다

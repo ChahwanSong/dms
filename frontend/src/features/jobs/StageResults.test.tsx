@@ -466,3 +466,38 @@ describe("PreviewResult — 도구별 뜻 + 컨펌 전 주의", () => {
     expect(screen.queryByText(/삭제합니다|이번 실행에서는/)).toBeNull();
   });
 });
+
+// 2026-11-26 러너 넘침 모드(summary output_truncated, dms-k8s 이식): 위치·개수 규칙 값이 모름으로 빠진 이유를 한 줄로 말한다. 크기
+// 숫자는 넣지 않는다. dms-ssc 는 결과 파일 만료가 없어 stdout.log 를 늘 가리킨다(dms-k8s 의 outputExpired 갈래 시험은 옮기지 않았다).
+// 키가 없거나 참이 아니면(옛 잡·정상 출력) 말하지 않는다.
+describe("output_truncated 한 줄", () => {
+  const OVER = { detail_version: 2, returncode: 0, files: null, bytes: 1073741824, tool: "dsync", dryrun: false,
+    copy_failed: 0, create_failed: 0, tool_errors: 0, output_truncated: true };
+  const EXEC_LINE = "도구 출력이 너무 커서 일부 수치(반영 항목 수 등)는 모릅니다 — stdout.log 는 앞부분과 끝부분만 남았습니다";
+
+  test("실행 결과: 참이면 한 줄(stdout.log 의 앞·끝만 남았다는 것까지)", () => {
+    render(<ExecutionResult summary={OVER} job={{ operation: "sync", tool: "dsync" }} />);
+    expect(screen.getByText(EXEC_LINE)).toBeInTheDocument();
+  });
+
+  test("미리보기 결과도 같은 사실(넘침은 미리보기·실행 모두 적용)", () => {
+    render(<PreviewResult job={{ operation: "sync", tool: "dsync" }} failedAt={false} headingId="h"
+                          summary={{ ...OVER, dryrun: true, bytes: null, output_truncated: true }} />);
+    expect(screen.getByText("도구 출력이 너무 커서 일부 수치(항목 수 등)는 모릅니다 — stdout.log 는 앞부분과 끝부분만 남았습니다"))
+      .toBeInTheDocument();
+  });
+
+  test("없거나 참이 아니면 말하지 않는다(실행·미리보기)", () => {
+    for (const v of [undefined, false, "true", 1]) {
+      const { unmount } = render(<ExecutionResult summary={{ ...OVER, output_truncated: v }} job={{ operation: "sync", tool: "dsync" }} />);
+      expect(screen.queryByText(/도구 출력이 너무 커서/)).toBeNull();
+      unmount();
+    }
+    for (const v of [undefined, false, "true", 1]) {
+      const { unmount } = render(<PreviewResult job={{ operation: "sync", tool: "dsync" }} failedAt={false} headingId="h"
+                                                summary={{ ...OVER, dryrun: true, output_truncated: v }} />);
+      expect(screen.queryByText(/도구 출력이 너무 커서/)).toBeNull();
+      unmount();
+    }
+  });
+});

@@ -1,14 +1,24 @@
-"""잡 파드 launcher에서 도는 오케스트레이션. 모든 I/O는 주입 — main()이 실제 구현을 넣는다."""
+"""잡 파드 launcher에서 도는 오케스트레이션. 모든 I/O는 주입 — main()이 실제 구현을 넣는다.
+
+도구 출력(2026-11-26 sync 진행률 설계 §1): mpirun 은 run_tool 로 돌린다 -- main 은 stream.run_streaming(Popen + 리더 스레드,
+실행 중 stdout.log·stderr.log 이어쓰기, sync 는 progress.json), 시험은 생략(stream.compat(run) -- 주입 run 그대로). 진행·로그
+쓰기 장치(sink)도 open_sink 로 주입한다(main 은 stream.ArtifactWriter.open, 생략하면 stream.TextSink 가 write_text 로 끝에 한
+번씩) -- run_job 본문은 sink·tracker 를 부를 뿐 파일시스템을 직접 만지지 않는다. 진행 줄은 표시 전용이고(게이트·지문·통계·
+사유에 쓰지 않는다), 도구 출력과 진행·sink 진단은 파드 로그로 흘리지 않는다(실패 꼬리 발췌만 9 가 정한 모양으로 -- 스테퍼가
+파드 로그에서 사유 마커를 읽는다). 출력이 상한(파서 64 MiB·로그 앞 64 MiB + 끝 16 MiB)을 넘으면 「넘침 모드」(stream 모듈
+docstring) -- 위치에 기대는 값은 모름으로 두고 summary 에 output_truncated 를 싣는다(_overflow_core·_overflow_detail)."""
 import ipaddress
 import json
 import os
 import sys
 
+from . import progress, stream
 from .commands import (
     getent_hosts_command, mpirun_command, nsync_role_map, passwd_line,
     ssh_key_copy_command, ssh_probe_command)
-from .parsers import (parse_aborted, parse_dsync_counts, parse_nsync_counts, parse_rm_counts, parse_rm_dryrun_counts,
-                      parse_scan_counts, parse_sync_dryrun_counts, parse_tool_detail)
+from .parsers import (count_lines, failure_samples, parse_aborted, parse_dsync_counts, parse_nsync_counts,
+                      parse_rm_counts, parse_rm_dryrun_counts, parse_scan_counts, parse_sync_dryrun_counts,
+                      parse_tool_detail)
 
 # 워커 준비 대기(2026-10-02 프로덕션 간헐 실패 수리): 모든 워커가 "IP 로 풀리고 + 그 IP 로 ssh 가 되는" 상태가
 # 될 때까지 기다리는 **전체** 제한 시간. 예전엔 getent 를 한 번만 하고 실패하면 DNS 이름을 그대로 hostfile 에
@@ -155,7 +165,7 @@ def target_kind(path, *, lstat=os.lstat):
 
 
 def run_job(env, *, run, write_text, read_text, sleep, wait_hostfile,
-            make_executable=lambda path: None, clock=None) -> int:
+            make_executable=lambda path: None, clock=None, run_tool=None, open_sink=None) -> int:
     username = env["DMS_JR_USERNAME"]
     uid = int(env["DMS_JR_UID"])
     gid = int(env["DMS_JR_GID"])
@@ -175,6 +185,20 @@ def run_job(env, *, run, write_text, read_text, sleep, wait_hostfile,
         write_text(f"{artifact_dir}/summary.json",
                    json.dumps({"returncode": 1, "files": None, "bytes": None}))
         return 1
+
+    # 0. 진행·로그 장치(설계 §1.5) -- 순수 계산만 앞당기고(단계·quiet 판정, 가상 시계), sink 를 연다(주입 -- run_job 본문은
+    #    파일시스템을 만지지 않는다). sync 는 첫 스냅숏 workers 를 바로 쓴다: 실행 단계는 Volcano RUNNING 이 관측된 뒤에만
+    #    화면에서 「진행 중」이 되므로 그때 launcher 는 이미 떠 있다 -- 워커 준비 대기(최대 300초) 동안 화면이 「진행 정보
+    #    없음」을 보이지 않게. 이 경로 뒤의 조기 종료(워커 미준비·6c rm 대상 봉쇄·6d 종류 묶기)는 sink 를 닫지 않는다 -- 잡은 곧
+    #    종단이라 화면이 묻지 않고, 로그 파일은 mpirun 시작 때만 만든다(빈 stdout.log 칩이 생기지 않는다).
+    dryrun = "--dryrun" in argv
+    quiet = "--quiet" in argv or "-q" in argv
+    if clock is None:
+        clock = _VirtualClock(sleep)
+        sleep = clock.sleep
+    sink = _open_sink(open_sink, write_text, artifact_dir)
+    tracker = _new_tracker(tool, dryrun, quiet, clock)
+    stream.publish(sink, tracker, phase="workers")
 
     # 1. identity 물질화 (launcher 자신의 /etc/passwd)
     write_text("/etc/passwd", passwd_line(username, uid, gid, home) + "\n", append=True)
@@ -196,10 +220,8 @@ def run_job(env, *, run, write_text, read_text, sleep, wait_hostfile,
     #    IP 로 ssh 가 될 때까지 기다린다(전체 제한 WORKER_READY_TIMEOUT_SECONDS). hostfile 에는 **IP 만** 쓴다 --
     #    mpirun(orted 기동 ssh) 시점에 DNS 를 전혀 쓰지 않는다. 제한 안에 준비되지 않으면 mpirun 을 돌리지 않고
     #    사유 마커(stepper 가 workers_unreachable 로 승격)와 summary 를 남기고 끝낸다 -- 예전처럼 이름을 남긴 채
-    #    진행해 "Could not resolve hostname" rc 255 로 죽게 두지 않는다.
-    if clock is None:
-        clock = _VirtualClock(sleep)
-        sleep = clock.sleep
+    #    진행해 "Could not resolve hostname" rc 255 로 죽게 두지 않는다. (시계를 주입하지 않았을 때의 가상 시계는 0 단계에서
+    #    앞당겨 만들었다.)
     ips, problem = _wait_workers_ready(ordered_hosts, run=run, sleep=sleep, clock=clock,
                                        timeout=_ready_timeout(env))
     if problem is not None:
@@ -273,28 +295,52 @@ def run_job(env, *, run, write_text, read_text, sleep, wait_hostfile,
                        json.dumps({"returncode": None, "files": None, "bytes": None}))
             return 1
 
-    # 7. mpirun — runuser로 요청자 신원, OMPI env + -x 전파(commands.mpirun_command)
-    proc = run(mpirun_command(process_count=process_count, hostfile=hostfile_path,
-                              username=username, rank_script=rank_path))
-    stdout = proc.stdout or ""
-    stderr = getattr(proc, "stderr", None) or ""
-    write_text(f"{artifact_dir}/stdout.log", stdout)
-    write_text(f"{artifact_dir}/stderr.log", stderr)
+    # 7. mpirun — runuser로 요청자 신원, OMPI env + -x 전파(commands.mpirun_command). run_tool 이 출력을 스트리밍으로 받아
+    #    stdout.log·stderr.log 를 실행 중에 이어 쓰고(앞 64 MiB + 끝 16 MiB + GAP 표식), sync 는 progress.json 을 갱신한다
+    #    (stream 모듈 docstring -- 리더 스레드는 daemon·fail-soft, 도구가 우리 I/O 때문에 멈추지 않는다). stdout·stderr 는
+    #    파서 입력이다: 결합 메모리 64 MiB 이하면 지금과 같은 문자열, 넘치면 넘침 모드(capture.overflow).
+    capture = (run_tool or stream.compat(run))(
+        mpirun_command(process_count=process_count, hostfile=hostfile_path, username=username, rank_script=rank_path),
+        sink=sink, tracker=tracker, clock=clock)
+    stdout, stderr = capture.stdout, capture.stderr
 
     # 8. summary — 도구별 파싱(설계 §3, d192 summary v2). preview/execution 공통 계약(핵심 3키 + 상세 키)이되,
     #    dsync·drm --dryrun 은 복사·삭제 요약을 찍지 않아 walk 항목 수로 대신한다(parsers
     #    .parse_sync_dryrun_counts·parse_rm_dryrun_counts). 제어면은 이 사본을 preview_summary 로 저장하고
     #    지문도 이 객체의 해시다(2026-09-17) -- null 이면 지문이 상수가 된다.
-    summary = _build_summary(tool, stdout, proc.returncode, artifact_dir,
-                             dryrun="--dryrun" in argv, quiet=("--quiet" in argv or "-q" in argv), stderr=stderr,
-                             rm_kind=rm_kind)
+    #    summary.json 3키 계약·returncode 의 뜻(proc.wait() -- 신호면 음수)은 스트리밍 전과 같다. 넘쳤을 때만 output_truncated.
+    summary = _build_summary(tool, stdout, capture.returncode, artifact_dir, dryrun=dryrun, quiet=quiet, stderr=stderr,
+                             rm_kind=rm_kind, overflow=capture.overflow)
     write_text(f"{artifact_dir}/summary.json", json.dumps(summary))
 
     # 9. 도구 실패(d192 spec §2): 사유 마커를 **먼저**(mpirun 뒤 첫 출력), 이어서 도구 출력 꼬리를 launcher 로그에 남긴다.
-    #    summary.json 을 쓴 **뒤**라 여기서 무엇이 잘못돼도 결과는 이미 남았다.
-    if proc.returncode != 0:
-        _emit(_tool_failure_report(summary.get("reason"), stdout, stderr))
-    return proc.returncode
+    #    summary.json 을 쓴 **뒤**라 여기서 무엇이 잘못돼도 결과는 이미 남았다. 꼬리의 원천은 capture 의 echo(넘치지 않으면
+    #    출력의 마지막 4 MiB -- 마지막 80줄만 쓰므로 결과가 같다, 넘치면 마지막 256줄 링).
+    if capture.returncode != 0:
+        _emit(_tool_failure_report(summary.get("reason"), capture.stdout_echo, capture.stderr_echo))
+    return capture.returncode
+
+
+def _open_sink(open_sink, write_text, artifact_dir):
+    """진행·로그 sink(설계 D10). 생략 = compat TextSink(write_text 로 끝에 한 번씩). 팩토리 계약은 「예외 없음」이고 이것은 2차
+    방어다 -- 실패하면 NullSink(잡은 계속, 기록만 없다)."""
+    if open_sink is None:
+        return stream.TextSink(write_text, artifact_dir)
+    try:
+        sink = open_sink(artifact_dir)
+    except Exception:  # noqa: BLE001 -- 진행·로그 기록이 잡을 죽이지 않는다(T5)
+        return stream.NullSink()
+    return sink if sink is not None else stream.NullSink()
+
+
+def _new_tracker(tool, dryrun, quiet, clock):
+    """sync 도구만 진행률을 쓴다(dscan·drm 은 없음 -- BACKLOG). 만들지 못하면 None(진행 기록 없음)."""
+    if tool not in _SYNC_TOOLS:
+        return None
+    try:
+        return progress.Tracker(tool, dryrun=dryrun, quiet=quiet, clock=clock)
+    except Exception:  # noqa: BLE001 -- T5
+        return None
 
 
 def _tool_failure_report(reason, stdout, stderr):
@@ -422,7 +468,8 @@ def _wait_workers_ready(hosts, *, run, sleep, clock, timeout):
     return ips, None
 
 
-def _build_summary(tool, stdout, returncode, artifact_dir, dryrun=False, quiet=False, stderr="", rm_kind=None):
+def _build_summary(tool, stdout, returncode, artifact_dir, dryrun=False, quiet=False, stderr="", rm_kind=None,
+                   overflow=None):
     """summary.json v2(2026-10-27 d192 spec §1) = 핵심 3키 {"returncode", "files", "bytes"}(모르면 null, 설계 §2.3) +
     머리 키 {"detail_version": 2, "tool", "dryrun", "quiet"(참일 때만)} + drm 의 "target_kind"(rm_kind -- 러너의 lstat,
     2026-10-28) + 상세 키(parsers.parse_tool_detail -- 찾은 것만)
@@ -436,7 +483,22 @@ def _build_summary(tool, stdout, returncode, artifact_dir, dryrun=False, quiet=F
     파싱이 잡을 죽이는 경로는 없다(설계 §4): 개수 파싱의 어떤 예외든 files/bytes 를 null 로 강등하고, 상세 파싱이 실패하면
     핵심 3키만 쓴다(detail_version 없음 = 상세를 계산하지 못했다 -- reason 도 없다). 제어면 _as_count(bool·비int·음수
     거부)가 2차 방어로 이미 배포되어 있다(d24). 파싱 규칙이 없는 도구(allowlist 밖 -- run_job 은 거기까지 오지 않는다)는
-    핵심 3키 그대로다."""
+    핵심 3키 그대로다.
+
+    overflow(stream.ToolCapture.overflow -- None 이면 출력이 상한 안이라 입력이 지금과 같은 문자열이고 이 함수의 결과도 같다):
+    parse_lost(리더의 파서 소비자가 죽었다)면 핵심 3키(files·bytes 모름)만 -- 상세 파싱 실패와 같은 모양(drm 의 target_kind 는
+    그 경로에도 싣는다 -- 아래 「rm 대상 종류」와 같은 이유: 도구 출력이 아니라 러너의 lstat 값이다). stderr 의 넘친 구간에서
+    본 중단 흔적(aborted_seen)은 파서가 보는 stderr 에 한 줄로 덧붙인다(파서가 stderr 에서 쓰는 것은 parse_aborted 하나다).
+    stdout 이 넘쳤으면 _overflow_core·_overflow_detail 이 위치·개수 규칙 값을 모름으로 두고 정확한 줄 카운터(_overflow_exact 가
+    한 번 센다)·출력 전체의 첫 실패 표본으로 바꾼 뒤에 사유를 정한다(미리보기도 -- 미리보기 summary 는 지문 원천이라 축소된
+    개수가 들어가면 안 된다). dsync 실행의 files·copied_items 는 「Failed to copy」 줄이 출력 전체에 0개면 최종 블록 값 그대로다."""
+    if overflow is not None and overflow.get("parse_lost"):
+        lost = {"returncode": returncode, "files": None, "bytes": None}
+        if tool == "drm" and rm_kind in RM_TARGET_KINDS:
+            lost["target_kind"] = rm_kind
+        return lost
+    if overflow is not None and overflow.get("aborted_seen") and not parse_aborted(stderr):
+        stderr = f"{stderr}\n{_OVERFLOW_ABORT_LINE}\n"
     log_quiet = bool(quiet) and tool in _LOG_PARSED_TOOLS
     files = nbytes = None
     try:
@@ -466,6 +528,13 @@ def _build_summary(tool, stdout, returncode, artifact_dir, dryrun=False, quiet=F
         # 그 외 도구: 파싱 규칙이 없다 -- (None, None) 그대로 둔다
     except Exception:  # noqa: BLE001 -- fail-soft가 계약이다(설계 §4)
         files = nbytes = None
+    exact = None
+    if overflow is not None:
+        try:
+            exact = _overflow_exact(tool, log_quiet, overflow)
+        except Exception:  # noqa: BLE001 -- 정확한 수를 모르면 아래 두 함수가 모름 쪽으로 접는다
+            exact = None
+        files, nbytes = _overflow_core(tool, bool(dryrun), log_quiet, files, nbytes, overflow, exact)
     core = {"returncode": returncode, "files": files, "bytes": nbytes}
     if tool not in ALLOWED_TOOLS:
         return core
@@ -481,6 +550,8 @@ def _build_summary(tool, stdout, returncode, artifact_dir, dryrun=False, quiet=F
             detail = parse_tool_detail(tool, stdout, stderr, bool(dryrun))
         if not isinstance(detail, dict):
             return core
+        if overflow is not None:
+            detail = _overflow_detail(tool, bool(dryrun), log_quiet, detail, overflow, exact)
         summary = dict(core)
         summary["detail_version"] = SUMMARY_DETAIL_VERSION
         summary["tool"] = tool
@@ -498,6 +569,88 @@ def _build_summary(tool, stdout, returncode, artifact_dir, dryrun=False, quiet=F
         return summary
     except Exception:  # noqa: BLE001 -- 상세는 덤이다: 실패하면 핵심 3키만(spec §1 fail-soft)
         return core
+
+
+# stderr 의 넘친 구간에서 본 MPI 중단 흔적(_build_summary docstring) -- parsers._ABORT_STDERR 가 맞추는 모양.
+_OVERFLOW_ABORT_LINE = "ABORT: (stderr overflow -- abort seen past the parser head)"
+# nsync 넘침에서 남기는 상세(핵심 수 -- Planned·Completed 줄은 끝에 찍혀 끝 링에 남는다). 실패 상세(표본·멈춘 원인·사유 근거)는
+# 뺀다: 포크가 실패 목록을 32 MiB 레코드로 묶어 실질적으로 넘치지 않지만, 넘쳤다면 그 상세는 믿을 수 없다.
+_NSYNC_OVERFLOW_KEYS = ("planned", "done", "copied_bytes", "planned_bytes", "aborted")
+
+
+def _overflow_exact(tool, log_quiet, overflow):
+    """넘침 모드의 정확한 줄 카운터(parsers.LINE_COUNTERS -- tool_errors·copy_failed·create_failed) = 머리 텍스트 findall + 넘친
+    구간 줄 단위 수(출력 전체의 MULTILINE findall 과 같은 수). 쓰는 곳(_overflow_core·_overflow_detail)이 둘이라 _build_summary 가
+    한 번만 센다(64 MiB 머리를 두 번 훑지 않는다). 쓸 일이 없으면 None."""
+    if not overflow.get("truncated") or log_quiet or tool not in _LOG_PARSED_TOOLS:
+        return None
+    streamed = overflow.get("counters") or {}
+    return {name: n + int(streamed.get(name) or 0) for name, n in count_lines(overflow.get("head_text") or "").items()}
+
+
+def _no_copy_failures(exact):
+    """출력 전체에 「Failed to copy」 줄이 하나도 없었는가(정확한 카운터로 -- None(못 셌다)은 아니다)."""
+    return exact is not None and exact.get("copy_failed") == 0
+
+
+def _overflow_core(tool, dryrun, log_quiet, files, nbytes, overflow, exact=None):
+    """넘침 모드의 핵심 2키(설계 §1.4 표). dsync 실행 files 는 최종 Items − 그 앞 「Failed to copy」 줄 수인데 그 줄(오류 줄)을
+    다 남기지 못했다 -- 모름. 단 정확한 카운터(exact -- _overflow_exact)로 그 줄이 출력 **전체에** 0개면 빼는 수가 0 이라 최종
+    Items 그대로가 전체 텍스트의 결과와 같다(parsers._dsync_copied_items 의 실패 줄 정규식은 copy_failed 카운터 정규식에 꼬리만
+    더한 것이라 카운터 0 ⇒ 뺄 줄 0) -- 그대로 둔다(성공한 큰 sync 의 항목별 WARN 줄 폭주로 「반영한 항목」·통계가 모름이 되지
+    않게, 2026-11-26 리뷰). 링이 요약 후보를 밀어냈으면(keep_gap > 0, overflow2) dsync 는 위치·개수 규칙 값(최종 블록·walk
+    수)을 믿지 않는다. drm·nsync 의 개수는 끝에 찍히는 요약 줄 하나라 끝 링에 늘 남는다(그대로)."""
+    if not overflow.get("truncated") or log_quiet or tool != "dsync":
+        return files, nbytes
+    if (overflow.get("keep_gap") or 0) > 0:
+        return None, None
+    return (files, nbytes) if dryrun or _no_copy_failures(exact) else (None, nbytes)
+
+
+def _overflow_detail(tool, dryrun, log_quiet, detail, overflow, exact=None):
+    """넘침 모드의 상세 키(설계 §1.4 표) -- 사유를 정하기 **전에** 적용한다. 정확한 카운터(tool_errors·copy_failed·
+    create_failed -- exact, _overflow_exact)로 덮어쓴다(keep 에 든 화이트리스트 오류 줄을 두 번 세지 않는다). 못 셌으면(None)
+    상세 실패와 같다(핵심 3키 -- _build_summary 의 except). 실패 표본은 머리 표본 + 넘친 구간 errno 줄 표본의 앞 10개 = 출력
+    전체의 첫 10개(지금 규칙과 같다 -- 머리가 WARN 줄로 차 있어도 넘친 구간의 ENOSPC 가 표본에 들어가 destination_full 이
+    sync_items_failed 로 떨어지지 않는다). dsync 실행 copied_items 는 _overflow_core 의 files 와 같은 규칙(「Failed to copy」 0개면
+    최종 블록 값 그대로, 아니면 뺀다). dsync 타입 교체 사유(규칙 5)의 근거(_type_change_dir_refused·_remove_errnos)는 빼서 그
+    규칙을 끈다(일반 항목 실패로 안전하게 떨어진다)."""
+    if not overflow.get("truncated"):
+        return detail
+    if log_quiet or tool not in _LOG_PARSED_TOOLS:
+        return {**detail, "output_truncated": True} if tool in _LOG_PARSED_TOOLS else detail
+    if exact is None:
+        raise ValueError("overflow line counters unavailable")
+    head = overflow.get("head_text") or ""
+    samples = (failure_samples(head) + failure_samples("\n".join(overflow.get("errno_lines") or ())))[:10]
+    gap = (overflow.get("keep_gap") or 0) > 0
+    if tool == "nsync":
+        out = {k: detail[k] for k in _NSYNC_OVERFLOW_KEYS if k in detail}
+    elif tool == "dsync" and gap:
+        out = {k: detail[k] for k in ("aborted",) if k in detail}
+        out["tool_errors"] = exact["tool_errors"]
+        if not dryrun:
+            out["copy_failed"] = exact["copy_failed"]
+            out["create_failed"] = exact["create_failed"]
+    elif tool == "dsync":
+        out = dict(detail)
+        out["tool_errors"] = exact["tool_errors"]
+        if not dryrun:
+            if not _no_copy_failures(exact):
+                out.pop("copied_items", None)
+            out.pop("_type_change_dir_refused", None)
+            out.pop("_remove_errnos", None)
+            out["copy_failed"] = exact["copy_failed"]
+            out["create_failed"] = exact["create_failed"]
+    else:
+        out = dict(detail)
+        out["tool_errors"] = exact["tool_errors"]
+    if tool in ("dsync", "drm"):
+        out.pop("failure_samples", None)
+        if samples:
+            out["failure_samples"] = samples
+    out["output_truncated"] = True
+    return out
 
 
 def _positive(value) -> bool:
@@ -595,7 +748,10 @@ def _shquote(s):
 
 
 def _subprocess_run(command):
-    """자식 프로세스 출력의 유일한 디코드 지점(main 의 run). 도구는 파일 이름 바이트를 그대로 찍는다 -- dscan --print 의
+    """자식 프로세스 출력의 디코드 지점 둘 중 하나(main 의 run -- 보조 명령·compat). 다른 하나는 mpirun 의
+    stream.run_streaming(원시 fd + io.IncrementalNewlineDecoder(utf-8 replace, translate=True))이다 -- 둘 다 UTF-8
+    errors="replace"·줄바꿈 정규화로 같은 규칙이고, tests/test_job_runner_stream.py 의 실제 자식 프로세스 시험이 둘의 동치를
+    지킨다(2026-11-26). 도구는 파일 이름 바이트를 그대로 찍는다 -- dscan --print 의
     broken 목록, drm --dryrun 의 항목 목록, 오류·경고 줄. 2026-10-20 프로덕션: CP949 이름(「다운로드」 b4 d9 …) 하나가
     strict 디코드에서 UnicodeDecodeError 를 던져, 도구는 전부 처리하고 rc 0 으로 끝났는데 러너가 죽어 잡이 Failed 였다
     (rm 은 미리보기에서 죽어 컨펌조차 못 했다). errors="replace" 인 이유: 결과 str 은 로그 파일(_write_text)·summary·
@@ -608,7 +764,9 @@ def _subprocess_run(command):
 
 def _write_text(path, content, *, append=False):
     """main 의 write_text. encoding 명시(로케일과 무관하게 UTF-8). 내용은 _subprocess_run(replace)·json.dumps(ASCII)
-    산출이라 strict 로 인코드된다 -- 여기서 errors 를 느슨하게 하지 않는다(서로게이트가 섞였다면 위 디코드의 회귀다)."""
+    산출이라 strict 로 인코드된다 -- 여기서 errors 를 느슨하게 하지 않는다(서로게이트가 섞였다면 위 디코드의 회귀다).
+    2026-11-26 부터 mpirun 의 stdout.log·stderr.log·progress.json 은 이 함수가 아니라 stream.ArtifactWriter(dirfd + O_EXCL|
+    O_NOFOLLOW 새 inode)가 쓴다 -- 남은 호출은 summary.json·rank.sh·mpi-hostfile·조기 종료 stderr.log·/etc/passwd 다."""
     os.makedirs(os.path.dirname(path), exist_ok=True) if "/" in path[1:] else None
     with open(path, "a" if append else "w", encoding="utf-8") as f:
         f.write(content)
@@ -652,6 +810,9 @@ def main():  # pragma: no cover - 실증에서 실행
     def make_executable(path):
         os.chmod(path, 0o755)
 
-    sys.exit(run_job(dict(os.environ), run=run, write_text=write_text,
-                     read_text=read_text, sleep=time.sleep, wait_hostfile=wait_hostfile,
-                     make_executable=make_executable, clock=time.monotonic))
+    # mpirun 은 스트리밍(run_tool), 진행·로그는 쓰기 스레드 sink(open_sink). 끝은 stream.exit_process -- 리더·쓰기 스레드가
+    # 남았으면(손자가 파이프를 쥠·멈춘 마운트·조기 종료로 닫지 않은 sink) os._exit(rc), 아니면 지금처럼 sys.exit(rc).
+    stream.exit_process(run_job(dict(os.environ), run=run, write_text=write_text,
+                                read_text=read_text, sleep=time.sleep, wait_hostfile=wait_hostfile,
+                                make_executable=make_executable, clock=time.monotonic,
+                                run_tool=stream.run_streaming, open_sink=stream.ArtifactWriter.open))

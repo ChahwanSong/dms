@@ -1,0 +1,23 @@
+17:58:01.546 O Thu Nov 26 08:58:01 UTC 2026
+17:58:01.584 O [2026-11-26T08:58:01] Role assignment mode=map src_ranks=1 dst_ranks=1
+17:58:01.584 O [2026-11-26T08:58:01] Rank 0 role=src host=dms-progress-proof-mpi
+17:58:01.584 O [2026-11-26T08:58:01] Rank 1 role=dst host=dms-progress-proof-mpi
+17:58:02.626 O [2026-11-26T08:58:02] Batch mode enabled: batch-files=20000 batch-count=6 src-items=100105 dst-items=0
+17:58:02.633 O [2026-11-26T08:58:02] Batch spool prepared: scan-records=100105 scan-bytes=10609959 batch-records=100105 batch-sidecar-bytes=800840
+17:58:02.633 O [2026-11-26T08:58:02] Progress logging enabled on console log rank 0 (per batch)
+17:58:02.720 O [2026-11-26T08:58:02] Progress 16.7% batch 1/6 planned-actions=16561 planned-copy-files=16548 planned-volume=576.637 MiB
+17:58:02.805 O [2026-11-26T08:58:02] Progress 33.3% batch 2/6 planned-actions=33143 planned-copy-files=33121 planned-volume=641.375 MiB
+17:58:02.887 O [2026-11-26T08:58:02] Progress 50.0% batch 3/6 planned-actions=49985 planned-copy-files=49940 planned-volume=1.190 GiB
+17:58:02.977 O [2026-11-26T08:58:02] Progress 66.7% batch 4/6 planned-actions=66730 planned-copy-files=66662 planned-volume=1.254 GiB
+17:58:03.053 O [2026-11-26T08:58:03] Progress 83.3% batch 5/6 planned-actions=83584 planned-copy-files=83501 planned-volume=1.319 GiB
+17:58:03.133 O [2026-11-26T08:58:03] Progress 100.0% batch 6/6 planned-actions=100105 planned-copy-files=100002 planned-volume=1.381 GiB
+17:58:03.154 O [2026-11-26T08:58:03] nsync Phase 5 planner dryrun complete
+17:58:03.155 O [2026-11-26T08:58:03] Requested source: /cephfs/secondary/dms-progress-proof-1126/src
+17:58:03.155 O [2026-11-26T08:58:03] Requested target: /cephfs/third/dms-progress-proof-1126/dst-nsync-dry
+17:58:03.155 O [2026-11-26T08:58:03] Options: dryrun=1 batch-files=20000 delete=0 contents=0 role-mode=map imbalance-threshold=3.00 max-errors=65000 open-noatime=0
+17:58:03.155 O [2026-11-26T08:58:03] Role map: 0:src,1:dst
+17:58:03.155 O [2026-11-26T08:58:03] Batch summary: batches=6 src-items=100105 dst-items=0
+17:58:03.155 O [2026-11-26T08:58:03] Metadata diff summary: only-src=100105 only-dst=0 common=0 changed=0
+17:58:03.155 O [2026-11-26T08:58:03] Planned actions: copy=100002 mkdir=103 symlink-update=0 meta-update=0 remove=0 skipped-dst-only=0
+17:58:03.155 O [2026-11-26T08:58:03] Dryrun enabled: planner generated actions but no filesystem changes were made.
+# rc=0

@@ -6,6 +6,8 @@ import { http, HttpResponse } from "msw";
 import { beforeAll, afterAll, afterEach, test, expect, vi } from "vitest";
 import { JobStages, StageBadge } from "./JobStages";
 import type { DataJob } from "../../lib/types";
+import contract from "../../lib/progressContract.json";
+import { reasonText } from "../../lib/api";
 
 // 옛 JobViewer.test(17건)를 하네스만 바꿔 옮겼다(2026-10-08 요청 상세 재설계). 칩의 접근성 이름은 옛 탭 이름 그대로
 // (「execution/stdout.log」·「preflight 로그」)라 이름·문구·href 단언은 전부 그대로다. 기본 상태가 Succeeded 라 자동
@@ -747,4 +749,185 @@ test("d192 실패 항목의 「stdout.log 열기」: 실행 stdout.log 가 목�
   const btn = await within(within(exec2).getByRole("region", { name: "실패 항목" })).findByRole("button", { name: "stdout.log 열기" });
   await userEvent.click(btn);
   expect(await within(exec2).findByRole("button", { name: "execution/stdout.log", pressed: true })).toBeInTheDocument();
+});
+
+// --- 2026-11-26 sync 진행률(dms-k8s 이식): 진행 중인 실행·미리보기 행(dsync·nsync)에만 진행 칸 ------------------------------------
+// 응답은 계약 파일(lib/progressContract.json examples.responses) 그대로. 진행 요청은 단계(phase 질의)별로 센다.
+
+const PRESP = contract.examples.responses;
+const EXEC_TR = [
+  { from_state: "Preflight", to_state: "PreviewRunning", at: "2026-11-26T08:20:00Z" },
+  { from_state: "PreviewRunning", to_state: "ConfirmPending", at: "2026-11-26T08:25:00Z" },
+  { from_state: "ConfirmPending", to_state: "Executing", at: "2026-11-26T08:28:40Z" },
+  { from_state: "Executing", to_state: "Executing", at: "2026-11-26T08:28:56Z" },
+];
+const RUNNING_DSYNC: Partial<DataJob> = {
+  operation: "sync", tool: "dsync", state: "Executing", phase_refs: ALL_REFS, transitions: EXEC_TR as never,
+  exec_submitted_at: "2026-11-26T08:28:56Z", sched_wait_seconds: 2,
+};
+function progressCounter(reply: () => { status: number; body: unknown } = () => ({ status: 200, body: PRESP.available })) {
+  const asked: string[] = [];
+  server.use(
+    http.get("/api/user/jobs/j1/artifacts", () => HttpResponse.json({ entries: [], truncated: false })),
+    http.get("/api/user/jobs/:jid/progress", ({ request }) => {
+      asked.push(new URL(request.url).searchParams.get("phase") ?? "");
+      const r = reply();
+      return HttpResponse.json(r.body as Record<string, unknown>, { status: r.status });
+    }),
+  );
+  return asked;
+}
+// 진행 칸이 없다는 단언은 조회가 착지할 틈을 준 뒤에 한다(마운트 직후 0 은 아무것도 증명하지 않는다).
+const settle = () => act(async () => { await new Promise((r) => setTimeout(r, 30)); });
+
+test("진행률: Executing + dsync + 실행 ref + 스케줄 대기 관측 → 실행 행 머리 아래 진행 칸, 막대 값은 응답 %", async () => {
+  const asked = progressCounter();
+  renderStages(RUNNING_DSYNC);
+  const exec = screen.getByRole("region", { name: "실행" });
+  const g = await within(exec).findByRole("group", { name: "실행 진행" });
+  const bar = await within(g).findByRole("progressbar");
+  expect(bar).toHaveAttribute("aria-valuenow", String(PRESP.available.progress.overall.percent));
+  expect(within(g).getByText("진행 · 데이터 복사")).toBeInTheDocument();
+  expect(asked).toEqual(["execution"]);
+  // 미리보기 구획에는 없다(끝난 단계)
+  expect(within(screen.getByRole("region", { name: "사전 점검·미리보기" })).queryByRole("group", { name: /진행$/ })).toBeNull();
+  // 칸은 「실행」 행(실행 단계 목록의 마지막 행) 안에 있다 -- 실행 직전 재점검 행이 아니다
+  const rows = within(within(exec).getByRole("list", { name: "실행 단계" })).getAllByRole("listitem");
+  expect(within(rows[rows.length - 1]).getByRole("group", { name: "실행 진행" })).toBe(g);
+});
+
+test("진행률: 스케줄 대기 중(RUNNING 관측 전)인 실행 행은 진행 칸도 요청도 없다", async () => {
+  const asked = progressCounter();
+  renderStages({ ...RUNNING_DSYNC, sched_wait_seconds: null });
+  await screen.findByText(/스케줄 대기 중/);
+  await settle();
+  expect(screen.queryByRole("group", { name: /진행$/ })).toBeNull();
+  expect(asked).toEqual([]);
+});
+
+test("진행률: 실행 직전 재점검 중(실행 ref 전)이면 없다", async () => {
+  const asked = progressCounter();
+  renderStages({ ...RUNNING_DSYNC, phase_refs: { preflight: "pod/a", preview: "pod/b", exec_preflight: "pod/c" },
+    exec_submitted_at: null, sched_wait_seconds: null });
+  await settle();
+  expect(screen.queryByRole("group", { name: /진행$/ })).toBeNull();
+  expect(asked).toEqual([]);
+});
+
+test("진행률: 끝나면(Succeeded) 진행 칸이 사라지고 더 묻지 않는다 -- 처음부터 끝난 잡은 요청 0", async () => {
+  const asked = progressCounter();
+  const view = renderStages(RUNNING_DSYNC);
+  await screen.findByRole("group", { name: "실행 진행" });
+  expect(asked).toEqual(["execution"]);
+  view.rerenderJob({ ...RUNNING_DSYNC, state: "Succeeded",
+    transitions: [...EXEC_TR, { from_state: "Executing", to_state: "Succeeded", at: "2026-11-26T08:51:51Z" }] as never });
+  await waitFor(() => expect(screen.queryByRole("group", { name: "실행 진행" })).toBeNull());
+  view.unmount();
+
+  const asked2 = progressCounter();
+  renderStages({ ...RUNNING_DSYNC, state: "Succeeded" });
+  await settle();
+  expect(screen.queryByRole("group", { name: /진행$/ })).toBeNull();
+  expect(asked2).toEqual([]);
+});
+
+test("진행률: scan(dscan)·rm(drm) 진행 중 행에는 없다(sync 도구만)", async () => {
+  const asked = progressCounter();
+  const scan = renderStages({ operation: "scan", tool: "dscan", state: "Running",
+    phase_refs: { preflight: "pod/a", execution: "vcjob/j1" } });
+  await settle();
+  expect(screen.queryByRole("group", { name: /진행$/ })).toBeNull();
+  scan.unmount();
+  renderStages({ ...RUNNING_DSYNC, operation: "rm", tool: "drm" });
+  await settle();
+  expect(screen.queryByRole("group", { name: /진행$/ })).toBeNull();
+  expect(asked).toEqual([]);
+});
+
+test("진행률: PreviewRunning + nsync → 미리보기 행에 보인다(phase=preview)", async () => {
+  const asked = progressCounter(() => ({ status: 200, body: PRESP.available_preview }));
+  renderStages({ operation: "sync", tool: "nsync", state: "PreviewRunning",
+    phase_refs: { preflight: "pod/a", preview: "vcjob/p1" },
+    transitions: [{ from_state: "Preflight", to_state: "PreviewRunning", at: "2026-11-26T08:20:00Z" }] as never });
+  const pre = screen.getByRole("region", { name: "사전 점검·미리보기" });
+  const g = await within(pre).findByRole("group", { name: "미리보기 진행" });
+  expect(await within(g).findByText("진행 · 배치 계획")).toBeInTheDocument();
+  expect(within(g).getByRole("progressbar")).toHaveAttribute("aria-valuenow", "50");
+  expect(asked).toEqual(["preview"]);
+  expect(within(screen.getByRole("region", { name: "실행" })).queryByRole("group", { name: /진행$/ })).toBeNull();
+});
+
+// 2026-11-27 dms-k8s d50 실증 F2·F3(p-vp-06): 미리보기가 진행 중인데 1단계 카드 맨 위에 「이 잡은 미리보기 요약이 저장되지 않았습니다」가 떠 실패처럼
+// 읽혔다(2026-10-08 요청 상세 재설계 3f8f515c 부터 -- 미리보기 vcjob 제출(ref)·PreviewRunning 전이만 보고 끝났는지는 보지 않았다).
+const NO_SUMMARY = "이 잡은 미리보기 요약이 저장되지 않았습니다";
+const PREVIEWING: Partial<DataJob> = {
+  operation: "sync", tool: "dsync", state: "PreviewRunning", phase_refs: { preflight: "pod/a", preview: "vcjob/p1" },
+  transitions: [{ from_state: "Pending", to_state: "Preflight", at: "2026-11-26T08:19:50Z" },
+                { from_state: "Preflight", to_state: "PreviewRunning", at: "2026-11-26T08:20:00Z" }] as never,
+};
+test("미리보기 진행 중(PreviewRunning)엔 「미리보기 요약이 저장되지 않았습니다」가 없다 -- 끝났는데 요약이 없을 때만", async () => {
+  progressCounter(() => ({ status: 200, body: PRESP.unavailable }));
+  const view = renderStages(PREVIEWING);
+  const pre = screen.getByRole("region", { name: "사전 점검·미리보기" });
+  await within(pre).findByRole("group", { name: "미리보기 진행" });
+  await settle();
+  expect(screen.queryByText(NO_SUMMARY)).toBeNull();
+  // 끝났는데(ConfirmPending) 요약이 없으면 그 사실을 말한다(배너 「미리보기 결과 보기」의 포커스 대상이기도 하다)
+  view.rerenderJob({ ...PREVIEWING, state: "ConfirmPending",
+    transitions: [...(PREVIEWING.transitions as never[]),
+                  { from_state: "PreviewRunning", to_state: "ConfirmPending", at: "2026-11-26T08:20:05Z" }] as never });
+  expect(await screen.findByText(NO_SUMMARY)).toHaveAttribute("tabindex", "-1");
+});
+
+test("미리보기 중 취소돼 요약이 없으면 「저장되지 않았습니다」 -- 끝난 미리보기다", async () => {
+  progressCounter();
+  renderStages({ ...PREVIEWING, state: "Cancelled",
+    transitions: [...(PREVIEWING.transitions as never[]),
+                  { from_state: "PreviewRunning", to_state: "Cancelled", at: "2026-11-26T08:20:05Z" }] as never });
+  expect(await screen.findByText(NO_SUMMARY)).toBeInTheDocument();
+});
+
+test("진행률: 503 이면 사유 문구", async () => {
+  const e = PRESP.errors.find((x) => x.status === 503)!;
+  progressCounter(() => ({ status: e.status, body: e.body }));
+  renderStages(RUNNING_DSYNC);
+  const g = await screen.findByRole("group", { name: "실행 진행" });
+  expect(await within(g).findByText(reasonText("artifact_base_unavailable"))).toBeInTheDocument();
+});
+
+// 2026-11-27 dms-k8s d49 실증 C1: 취소는 vcjob 을 지워 Cancelled 전이가 러너의 유예 쓰기(stderr.log 꼬리·summary.json)보다 먼저 오거나 같은
+// 순간이고 NFS base 는 다른 노드에서 새 파일이 늦게 보인다 -- 전이 때 한 번 읽은 목록(stderr.log 78 B·summary 없음)이 새로고침 전까지
+// 남았다. 종단 전이 뒤엔 useArtifacts 가 몇 초 뒤 다시 읽는다(JobStages 가 model.terminal 을 넘긴다).
+test("취소 직후: Cancelled 전이 뒤 러너가 늦게 쓴 summary.json·자란 stderr.log 칩이 몇 초 뒤 새로고침 없이 나타난다", async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  let written = false;
+  const early = { entries: [{ phase: "execution", name: "stderr.log", size: 78, modified_at: 1 }], truncated: false };
+  const late = { entries: [{ phase: "execution", name: "stderr.log", size: 672, modified_at: 2 },
+                           { phase: "execution", name: "summary.json", size: 160, modified_at: 2 }], truncated: false };
+  server.use(
+    http.get("/api/user/jobs/j1/artifacts", () => HttpResponse.json(written ? late : early)),
+    http.get("/api/user/jobs/:jid/progress", () => HttpResponse.json(PRESP.available)),
+    http.get("/api/user/jobs/j1/logs", () => HttpResponse.json({ phase: "execution", ref: "vcjob/e", source: "archived", entries: [] })),
+  );
+  const view = renderStages(RUNNING_DSYNC);
+  await screen.findByRole("button", { name: "execution/stderr.log" });
+  view.rerenderJob({ ...RUNNING_DSYNC, state: "Cancelled",
+    transitions: [...EXEC_TR, { from_state: "Executing", to_state: "Cancelled", at: "2026-11-26T08:30:00Z" }] as never });
+  await act(async () => { await vi.advanceTimersByTimeAsync(200); });
+  expect(screen.queryByRole("button", { name: "execution/summary.json" })).toBeNull();   // 전이 때 읽은 목록엔 아직 없다
+  written = true;                                                                          // 러너의 유예 쓰기가 이제 보인다
+  await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+  expect(await screen.findByRole("button", { name: "execution/summary.json" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "execution/stderr.log" })).toHaveTextContent("672 B");
+});
+
+test("결과 카드: 출력이 넘친 요약(output_truncated)은 모르는 수치가 있다고 한 줄로 말한다", async () => {
+  progressCounter();
+  renderStages({ ...RUNNING_DSYNC, state: "Succeeded", result_summary: { detail_version: 2, returncode: 0, files: null,
+    bytes: 1073741824, tool: "dsync", dryrun: false, copy_failed: 0, create_failed: 0, tool_errors: 0,
+    output_truncated: true } });
+  const exec = screen.getByRole("region", { name: "실행" });
+  expect(within(exec).getByText(
+    "도구 출력이 너무 커서 일부 수치(반영 항목 수 등)는 모릅니다 — stdout.log 는 앞부분과 끝부분만 남았습니다"))
+    .toBeInTheDocument();
 });

@@ -367,7 +367,8 @@ function aggregate(statuses: StepStatus[]): StepStatus {
   if (statuses.includes("done") && statuses.every((s) => s === "done" || s === "skipped")) return "done";
   return "waiting";
 }
-const ENDED: ReadonlySet<StepStatus> = new Set(["done", "failed", "rejected", "timed_out", "cancelled", "expired"]);
+/** 끝난 단계(돈 뒤 끝났다 -- 대기·진행 중·컨펌 대기·실행 안 됨·모름이 아니다). */
+export const ENDED: ReadonlySet<StepStatus> = new Set(["done", "failed", "rejected", "timed_out", "cancelled", "expired"]);
 
 // events = 요청 상세 응답의 events(요청 단위, 최신 100건 오름차순). 이 잡의 것만 쓴다(제출 보류·관문 모호성 해소).
 // opts.requestTerminal = **같은 응답**의 요청 상태가 종단인가(관문 이벤트 부재를 믿는 조건 -- ALSO_POD_MARKER 주석).

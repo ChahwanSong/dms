@@ -10,6 +10,9 @@ from dms_job_runner.parsers import (parse_dsync_counts, parse_nsync_counts, pars
                                     parse_scan_counts, parse_sync_counts, parse_tool_detail)
 
 TS = "[2026-10-27T13:00:00] "
+# d192 리뷰(d192-dsync-final-block-spoof): dsync 실행의 최종 블록은 마지막 walk 요약 **뒤**에서만 받는다(진짜 실행은 소스·목적지
+# 두 번 walk 한다). walk 줄 없는 합성 입력은 무엇을 넣어도 None 이 되어 아무것도 시험하지 않는다 -- 합성 실행 출력은 이 줄로 연다.
+WALKED = f"{TS}Walked 1 items in 0.001 seconds (1000.000 items/sec)\n"
 
 # 실측 dsync stdout(잡 60d24700, 파싱 관련 줄 전체). 같은 stdout에 walk 단계의
 # 패딩 요약("Items     : 0"), 복사 단계 중간 요약(Items: 10 + per-file Data),
@@ -41,6 +44,7 @@ DSYNC_STDOUT = """\
 # 실측 캡처는 중간·최종 값이 같아(10/50) "최종 블록이 이긴다"를 증명하지 못한다.
 # 값을 달리한 합성 변형으로 규칙을 고정한다: 복사 계획(Items: 4 + per-file Data)·Copy data(시도 합)는 최종 블록이 아니다.
 DSYNC_STDOUT_MID_DIFFERS = """\
+[2026-08-04T02:14:12] Walked 10 items in 0.001 seconds (15463.025 items/sec)
 [2026-08-04T02:14:12] Copying to /d
 [2026-08-04T02:14:12] Items: 4
 [2026-08-04T02:14:12] Data: 20.000 B (5.000 B per file)
@@ -144,8 +148,8 @@ def test_sync_copy_plan_alone_is_not_the_final_block():
     assert parse_sync_counts(plan_only) == (None, None)
     assert parse_dsync_counts(plan_only) == (None, None)
     # 앞 줄이 Seconds 가 아닌 Items 는 최종 블록이 아니다(패딩된 walk 비교 블록 "Seconds   :" 도 아니다).
-    assert parse_sync_counts(f"{TS}Items: 7\n{TS}Data: 7.000 B (7 bytes)\n") == (None, None)
-    assert parse_sync_counts(f"{TS}Seconds   : 0.000\n{TS}Items: 7\n") == (None, None)
+    assert parse_sync_counts(f"{WALKED}{TS}Items: 7\n{TS}Data: 7.000 B (7 bytes)\n") == (None, None)
+    assert parse_sync_counts(f"{WALKED}{TS}Seconds   : 0.000\n{TS}Items: 7\n") == (None, None)
     # 중단(aborted)이면 최종 블록이 있어도 모름(d192 D6)
     assert parse_dsync_counts(DSYNC_STDOUT, aborted=True) == (None, None)
 
@@ -153,33 +157,34 @@ def test_sync_copy_plan_alone_is_not_the_final_block():
 def test_sync_padded_walk_items_is_not_matched():
     # walk 단계 "Items     : 0"(콜론 앞 패딩)은 "Items: " 형태가 아니라 자연 배제 --
     # 이것만 있으면 최종 요약이 없는 것이므로 None(설계 §3)
-    assert parse_sync_counts(f"{TS}Seconds   : 0.000\n{TS}Items     : 0\n") == (None, None)
-    assert parse_sync_counts(f"{TS}Seconds: 0.001\n{TS}Items: 0\n") == (0, None)   # 대조: 최종 블록 모양은 읽힌다(0 은 정상값)
+    assert parse_sync_counts(f"{WALKED}{TS}Seconds   : 0.000\n{TS}Items     : 0\n") == (None, None)
+    assert parse_sync_counts(f"{WALKED}{TS}Seconds: 0.001\n{TS}Items: 0\n") == (0, None)   # 대조: 최종 블록 모양은 읽힌다(0 은 정상값)
 
 
 def test_sync_bytes_in_rate_line_is_not_matched():
     # "(50 bytes in 0.015 seconds)"는 "bytes" 뒤에 닫는 괄호가 바로 오지 않아
     # 배제된다 -- 전송률이 총량으로 새면 안 된다(설계 §3)
-    out = f"{TS}Copy rate: 3.284 KiB/s (50 bytes in 0.015 seconds)\n"
-    assert parse_sync_counts(out) == (None, None)
+    out = f"{WALKED}{TS}Seconds: 0.015\n{TS}Items: 1\n{TS}Copy rate: 3.284 KiB/s (50 bytes in 0.015 seconds)\n"
+    assert parse_sync_counts(out) == (1, None)
 
 
 def test_sync_bytes_embedded_mid_line_is_not_matched():
     # 요약 줄은 "Data:"/"Copy data:" 로 시작해 "(N bytes)"로 끝난다 -- 다른 줄 끝에 박힌 같은 모양(예: 경로
     # 이름에 든 "(999 bytes)")이 총량 행세를 하면 안 된다.
-    assert parse_sync_counts(f"{TS}copying /backup (999 bytes)/f.bin to x\n") == (None, None)
-    assert parse_sync_counts(f"{TS}Copying to /backup (999 bytes)\n") == (None, None)
+    block = f"{WALKED}{TS}Seconds: 0.1\n{TS}Items: 1\n"
+    assert parse_sync_counts(f"{block}{TS}copying /backup (999 bytes)/f.bin to x\n") == (1, None)
+    assert parse_sync_counts(f"{block}{TS}Copying to /backup (999 bytes)\n") == (1, None)
 
 
 def test_sync_items_with_trailing_text_is_not_matched():
     # "Items: 10 (done)"처럼 숫자 뒤에 내용이 붙으면 요약 줄이 아니다 -- $ 앵커가 배제
-    assert parse_sync_counts(f"{TS}Seconds: 0.1\n{TS}Items: 10 (done)\n") == (None, None)
-    assert parse_sync_counts(f"{TS}Seconds: 0.1\n{TS}Items: 10\n") == (10, None)       # 대조
+    assert parse_sync_counts(f"{WALKED}{TS}Seconds: 0.1\n{TS}Items: 10 (done)\n") == (None, None)
+    assert parse_sync_counts(f"{WALKED}{TS}Seconds: 0.1\n{TS}Items: 10\n") == (10, None)       # 대조
 
 
 def test_sync_summary_must_start_at_the_line_head():
     # d192: 줄 머리 앵커. 경로 텍스트 안의 "Items: 999" 줄 끝 모양(dsync 오류 줄은 경로를 날것으로 찍는다)은 요약이 아니다.
-    out = (f"{TS}[0] [mfu_flist_copy.c:2092] ERROR: Failed to open input file `/a Items: 999\n"
+    out = (f"{WALKED}{TS}[0] [mfu_flist_copy.c:2092] ERROR: Failed to open input file `/a Items: 999\n"
            f"{TS}Walking /b/Data: 1 B (999 bytes)\n")
     assert parse_sync_counts(out) == (None, None)
 
@@ -188,7 +193,7 @@ def test_sync_summary_must_start_at_the_line_head():
 
 def test_dsync_execution_files_subtract_failed_copies():
     # 최종 Items 는 inode 를 만든 항목 -- 데이터를 열지 못한 파일도 들어 있다. 실제로 만든 항목 = Items − 「Failed to copy」 줄 수.
-    out = (f"{TS}[0] [mfu_flist_copy.c:2092] ERROR: Failed to open input file `/s/no' (errno=13 Permission denied)\n"
+    out = (f"{WALKED}{TS}[0] [mfu_flist_copy.c:2092] ERROR: Failed to open input file `/s/no' (errno=13 Permission denied)\n"
            f"{TS}[0] [mfu_flist_copy.c:2256] ERROR: Failed to copy `/s/no' to `/d/no'\n"
            f"{TS}Seconds: 0.010\n{TS}Items: 2\n{TS}Data: 3.000 B (3 bytes)\n")
     assert parse_dsync_counts(out) == (1, 3)
@@ -198,8 +203,8 @@ def test_dsync_execution_files_subtract_failed_copies():
     assert parse_dsync_counts(out.replace(f"{TS}Items: 2\n", f"{TS}Items: 0\n")) == (0, 3)
     assert parse_dsync_counts("") == (None, None)
     # mknod 부터 실패한 파일은 Items 에 없다 -- 그 「Failed to copy」 는 빼지 않는다(d192 리뷰 runner-6, 두 번 빼기).
-    mknod = (f"{TS}[0] [mfu_flist_copy.c:1273] ERROR: File `/d/no' mknod() failed (errno=13 Permission denied)\n"
-             + out.replace(f"{TS}Items: 2\n", f"{TS}Items: 1\n"))
+    mknod = (WALKED + f"{TS}[0] [mfu_flist_copy.c:1273] ERROR: File `/d/no' mknod() failed (errno=13 Permission denied)\n"
+             + out.replace(WALKED, "").replace(f"{TS}Items: 2\n", f"{TS}Items: 1\n"))
     assert parse_dsync_counts(mknod) == (1, 3)
     # 날 경로에 "' to `" 가 들어 있어도 목적지를 맞춘다(가능한 분할 전부)
     odd = mknod.replace("/d/no", "/d/n' to `o").replace("/s/no", "/s/n' to `o")
@@ -530,7 +535,7 @@ def test_parsers_accept_none_stdout():
 def test_pathological_numbers_do_not_raise_or_overflow():
     # int() 는 4300자 넘는 숫자 문자열에 ValueError -- 계약상 예외 금지. int64 를 넘는 값은 BIGINT 승격 컬럼을 깨므로 모름.
     huge = "9" * 5000
-    assert parse_sync_counts(f"{TS}Seconds: 0.1\n{TS}Items: {huge}\n") == (None, None)
+    assert parse_sync_counts(f"{WALKED}{TS}Seconds: 0.1\n{TS}Items: {huge}\n") == (None, None)
     assert parse_rm_counts(f"{TS}Removed {2 ** 63} items in 0.1 seconds (1.0 items/sec)\n") == (None, None)
     assert parse_rm_counts(f"{TS}Removed {2 ** 63 - 1} items in 0.1 seconds (1.0 items/sec)\n") == (2 ** 63 - 1, None)
     assert parse_nsync_counts(f"{TS}Planned actions: copy={huge} mkdir=1\n", dryrun=True) == (None, None)
@@ -569,10 +574,11 @@ def test_sync_dryrun_uses_source_walk_items_and_null_bytes():
     assert parse_sync_dryrun_counts(DSYNC_DRYRUN_STDOUT) == (2, None)  # 소스 walk = 2, 목적지 0 아님
 
 
-def test_sync_dryrun_prefers_copy_summary_when_present():
-    # 도구가 언젠가 dry-run 에서도 복사 요약을 찍으면 실행 파서와 같은 값을 쓴다.
+def test_sync_dryrun_never_reads_a_copy_summary():
+    # d192 리뷰(d192-dsync-final-block-spoof): dryrun 은 mfu_flist_copy 를 부르지 않아 복사 요약이 절대 나오지 않는다 -- 예전의
+    # 「복사 요약이 있으면 우선」은 walk 오류 줄 이름에 심은 블록 하나로 walk 횟수 상한을 건너뛰었다. 이제 walk 줄만 본다(바이트 null).
     from dms_job_runner.parsers import parse_sync_dryrun_counts
-    assert parse_sync_dryrun_counts(DSYNC_STDOUT) == (10, 50)
+    assert parse_sync_dryrun_counts(DSYNC_STDOUT) == (10, None)
 
 
 def test_sync_dryrun_without_any_walk_line_is_null():
