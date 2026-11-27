@@ -57,7 +57,8 @@ function spentText(b: Build, now: number): string {
  *  폭을 제한하지 않는다(전폭): 다른 목록 화면(BatchesList·JobsList·계정 등)이
  *  전부 전폭이고, 8열 표는 좁히면 정보가 줄지 않고 **접히기만** 한다(bfc55fd 에서
  *  3xl 로 눌러 봤을 때 시각·ref·이미지가 2~4줄로 접혀 행 높이가 들쭉날쭉해졌다).
- *  가운데 정렬(mx-auto)도 쓰지 않는다 -- 이 앱의 모든 화면이 왼쪽 기준선이다.
+ *  가운데 정렬(mx-auto)도 쓰지 않는다 -- 이 앱의 모든 화면이 셸 본문 열(최대 1440, 가운데 -- AppShell 주석)의
+ *  왼쪽 기준선이다(화면은 mx-auto 로 혼자 가운데로 가지 않는다).
  */
 export function BuildHistory() {
   const q = useBuilds();

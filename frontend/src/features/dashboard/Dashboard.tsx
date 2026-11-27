@@ -50,7 +50,15 @@ export function artifactBaseWarning(component: string, ab: InfraArtifactBase | n
       return `API 파드(${where})가 아티팩트 경로를 읽지 못합니다 — 작업 출력·scan 리포트가 보이지 않을 수 있습니다`
         + (ab.api?.reason ? ` (${reasonText(ab.api.reason)})` : "");
     }
-    if (others > 0) return `다른 API 파드 ${others}개가 아티팩트 경로 점검에 실패했습니다 — 그 파드로 간 조회는 작업 출력이 보이지 않을 수 있습니다`;
+    if (others > 0) {
+      // 시작 게이트에 막혀 Ready 를 기다리는 파드(서비스 밖)로는 조회가 가지 않는다 -- 그때 맞는 말은 「롤아웃이 멈춤」이다
+      // (dms-k8s e25a2dfb d40 실증 이식). 옛 서버(키 없음·null)는 대기 수를 모르니 전부 서비스 중으로 본다(이전 문구).
+      const waiting = typeof ab.api_pods_failing_waiting === "number" ? Math.min(ab.api_pods_failing_waiting, others) : 0;
+      const serving = others - waiting;
+      if (serving > 0) return `다른 API 파드 ${serving}개가 아티팩트 경로 점검에 실패했습니다 — 그 파드로 간 조회는 작업 출력이 보이지 않을 수 있습니다`;
+      return `새 API 파드 ${waiting}개가 아티팩트 경로 점검에 실패해 Ready 를 기다립니다(서비스 밖 — 옛 파드가 계속 서비스) — 롤아웃이 멈춰 `
+        + "있으니 그 노드의 공유 스토리지 마운트를 확인하세요";
+    }
     return null;
   }
   if (component === "dms-controller") {

@@ -112,7 +112,10 @@ class Database:
         쓴다 -- 갈라지면 재연결된 커넥션만 row_factory/PRAGMA 를 잃는다."""
         if url.startswith("sqlite:///"):
             path = url[len("sqlite:///"):]
-            conn = sqlite3.connect(path, check_same_thread=False)
+            # timeout=30(잠금 대기, 기본 5초): sqlite 는 개발·e2e 전용인데 e2e 하네스는 api·controller 두 프로세스가 한 파일을
+            # 쓴다 -- 부하 중 한쪽 쓰기가 5초를 넘기면 다른 쪽이 `database is locked` 로 죽었다(2026-11-27 e2e 에서 컨트롤러가
+            # 리스 획득 중 종료). 운영(PostgreSQL)과 무관하다.
+            conn = sqlite3.connect(path, check_same_thread=False, timeout=30)
             conn.row_factory = sqlite3.Row
             conn.isolation_level = None  # 명시적 트랜잭션 제어
             conn.execute("PRAGMA foreign_keys = ON")

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { NavLink, useLocation } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import { ChevronDown, HardDrive } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useMe } from "../features/auth/useAuth";
@@ -22,15 +22,18 @@ const linkCls = (active: boolean) =>
  *
  *  활성 판정은 NavLink 의 isActive(접두 일치)가 아니라 activeNavPath(최장 일치
  *  하나)다: /jobs/new 에서 /jobs(내 작업)까지 함께 음영되던 결함(사용자 보고)의
- *  수리이고, 상세 경로(/jobs/:id 등)에서는 여전히 부모 항목이 켜진다. */
+ *  수리이고, 상세 경로(/jobs/:id 등)에서는 여전히 부모 항목이 켜진다.
+ *  aria-current 도 같은 판정 하나로 단다(dms-k8s d1b806e2 이식): NavLink 는 음영과 별개로 접두 일치마다
+ *  aria-current="page"·active 클래스를 붙여 /jobs/new 에서 「단일 작업」과 「전체 작업」(/jobs)이 화면 낭독기에
+ *  둘 다 현재 페이지로 읽혔다. */
 function NavItemLink({ path, label, icon: Icon, active }: {
   path: string; label: string; icon: LucideIcon; active: boolean;
 }) {
   return (
-    <NavLink to={path} className={linkCls(active)}>
+    <Link to={path} className={linkCls(active)} aria-current={active ? "page" : undefined}>
       <Icon className="h-4 w-4 shrink-0" aria-hidden />
       {label}
-    </NavLink>
+    </Link>
   );
 }
 
@@ -157,7 +160,16 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           그래서 안쪽 표의 overflow-x-auto 가 발동하지 못하고 레이아웃 전체가 넓어져
           사이드바를 밀어냈다 -- 이 한 줄이 표를 자기 컨테이너 안에서 스크롤하게 만든다. */}
       <div className="flex-1 min-w-0">
-        <main className="p-5">
+        {/* 본문 열(dms-k8s 08cba773 이식 -- 2026-11-26 사용자 결정 「A안」: 넓은 모니터에서 본문이 사이드바 오른쪽 끝까지
+            늘어져 시선이 멀었다): 최대 90rem(1440px, p-5 패딩 포함 -- 내용 1400)으로 묶고 사이드바 오른쪽 영역의 가운데에 둔다.
+            - 1440 근거: 사이드바 240 + 1440 = 1680 이하 창은 지금과 픽셀 동일(여백 0 -- e2e 1280 그물). 넓은 표(마운트 현황)는
+              자기 overflow-x-auto 래퍼 안에서 스크롤하므로 열이 좁아져도 레이아웃은 깨지지 않는다.
+            - main 만 가운데다: 사이드바는 화면 왼쪽에 붙어 있어야 하고(L3, aside 불변) 셸 전체를 가운데로 보내지 않는다.
+            - 화면(section)은 스스로 mx-auto 하지 않는다: 기준선은 이 본문 열의 왼쪽 하나다 -- 2026-08-16 「왼쪽 기준선」
+              원칙(BuildForm·SubmitLayout 주석)은 그대로이고 열의 위치만 가운데로 옮겼다. 화면은 폭 상한(max-w-*)만 둔다.
+            - 고정 너비가 아니라 최대 폭(max-w)이다(좁은 창에서 줄어야 한다). div.flex-1.min-w-0 은 그대로 둔다(위 주석 L1).
+            - main·조상에 overflow-* 를 넣지 마라: SubmitLayout 요약(SummaryPanel)의 xl:sticky 가 죽는다. */}
+        <main className="mx-auto w-full max-w-[90rem] p-5">
           <Breadcrumb />
           {/* key 가 없으면 AppShell 은 모든 보호 라우트에서 같은 위치의 같은 컴포넌트라
               한 번 에러 상태에 빠지면 화면을 옮겨도 풀리지 않는다. */}

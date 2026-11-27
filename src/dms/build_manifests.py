@@ -505,16 +505,23 @@ def build_build_pod(*, build_id, source_path, tag, images, node, namespace,
                 #   막히지 않고, 빌드가 날뛰어도 잡+제어면 몫 800m 이 남는다.
                 # - memory requests 128Mi 를 일부러 작게: 실압박에서 빌드가 항상
                 #   "requests 초과" 축출 그룹에 들어 dms-build(10)가 방향을 가른다.
-                # - memory limit 1Gi: 노드 eviction 전에 빌드가 먼저, 혼자
-                #   OOM-kill 되는 의도된 1차 방어(M8 재현 방지). npm(vite) 빌드가
-                #   1Gi 안에서 도는지는 실증(§6-2)이 확정한다.
+                # - memory limit 2Gi(2026-11-23 1Gi → 2Gi): 상한은 노드 eviction 전에
+                #   빌드가 먼저 혼자 OOM-kill 되는 1차 방어(M8 재현 방지)다. 1Gi 는
+                #   옛 워커(allocatable 1355Mi) 역산이었는데, Node 는 힙 상한을 이
+                #   cgroup 상한의 약 절반(실측 ~505MB)으로 잡아 포탈 tsc 가 힙
+                #   510~550MB 를 넘자 d37 빌드가 heap out of memory 로 죽었다(사이트
+                #   무관 -- 노드 크기가 아니라 이 상한이 정한다). 지금은 Dockerfile 이
+                #   NODE_OPTIONS --max-old-space-size=1024 로 힙을 고정하고(앱 코드만
+                #   검사하는 build:image 는 ~400MB) 2Gi 는 그 위의 buildah·RSS 여유다.
+                #   requests 128Mi 는 그대로라 압박 때 축출·커널 OOM 순위(oom_score_adj
+                #   ~958)는 여전히 빌드가 맨 앞이다.
                 # - eph limits 12Gi ≥ sizeLimit 10Gi: limits 는 emptyDir 포함
                 #   파드 단위 집행 -- sizeLimit 이 레이어 상한, limits 가 로그·
                 #   쓰기층 오버플로 캐치다(§2.4 3중 방어의 ②③).
                 "resources": {
                     "requests": {"cpu": "250m", "memory": "128Mi",
                                  "ephemeral-storage": f"{BUILD_SIZELIMIT_GIB}Gi"},
-                    "limits": {"cpu": "1000m", "memory": "1Gi",
+                    "limits": {"cpu": "1000m", "memory": "2Gi",
                                "ephemeral-storage":
                                    f"{BUILD_SIZELIMIT_GIB + BUILD_DISK_MARGIN_GIB}Gi"},
                 },

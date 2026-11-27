@@ -200,6 +200,16 @@ test("artifactBaseWarning: 실패만 경고 -- 모름(null)·확인 대기는 �
     .toBe("API 파드(노드 모름)가 아티팩트 경로를 읽지 못합니다 — 작업 출력·scan 리포트가 보이지 않을 수 있습니다");
   expect(artifactBaseWarning("dms-api", { ...ok, api_pods_failing: 2 }))
     .toBe("다른 API 파드 2개가 아티팩트 경로 점검에 실패했습니다 — 그 파드로 간 조회는 작업 출력이 보이지 않을 수 있습니다");
+  // 시작 게이트 대기(서비스 밖) 파드뿐이면 「그 파드로 간 조회」가 아니라 「롤아웃이 멈춤」(dms-k8s e25a2dfb d40 실증 이식)
+  expect(artifactBaseWarning("dms-api", { ...ok, api_pods_failing: 1, api_pods_failing_waiting: 1 }))
+    .toBe("새 API 파드 1개가 아티팩트 경로 점검에 실패해 Ready 를 기다립니다(서비스 밖 — 옛 파드가 계속 서비스) — 롤아웃이 멈춰 "
+      + "있으니 그 노드의 공유 스토리지 마운트를 확인하세요");
+  // 서비스 중인 실패 파드가 하나라도 있으면 그 수로 조회 경고
+  expect(artifactBaseWarning("dms-api", { ...ok, api_pods_failing: 3, api_pods_failing_waiting: 1 }))
+    .toBe("다른 API 파드 2개가 아티팩트 경로 점검에 실패했습니다 — 그 파드로 간 조회는 작업 출력이 보이지 않을 수 있습니다");
+  // 대기 수를 모르면(null = 읽기 실패) 이전 문구 그대로 -- 0 으로 뭉개 「롤아웃 멈춤」이라 하지 않는다
+  expect(artifactBaseWarning("dms-api", { ...ok, api_pods_failing: 2, api_pods_failing_waiting: null }))
+    .toBe("다른 API 파드 2개가 아티팩트 경로 점검에 실패했습니다 — 그 파드로 간 조회는 작업 출력이 보이지 않을 수 있습니다");
   expect(artifactBaseWarning("dms-agent", { ...ok, api: { ...ok.api, ok: false } })).toBeNull();
 });
 

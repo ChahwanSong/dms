@@ -8,8 +8,8 @@ import type { MountBaseCell, MountCell, MountNode } from "../../lib/types";
 import { ageText } from "../nodes/NodesList";
 import { useMounts } from "./useMounts";
 import {
-  BASE_LABEL, CELL_LABEL, baseChecksFailed, baseOf, cellDetail, cellOf, isStale, nodeHasProblem, nodesOf, reasonLong,
-  reasonShort, rolesOf,
+  BASE_LABEL, CELL_LABEL, baseChecksFailed, baseDetail, baseHeadOverridden, baseOf, cellDetail, cellOf, isStale, nodeHasProblem,
+  nodesOf, reasonShort, rolesOf,
   storagesOf, summaryOf, tri, type StorageCol,
 } from "./mountView";
 
@@ -119,18 +119,6 @@ function CheckLine({ label, results }: { label: string; results: { ok: boolean |
   );
 }
 
-function baseDetail(n: MountNode, b: MountBaseCell): string {
-  const head = `${n.node_name} · 아티팩트 경로`;
-  const mismatch = b.agent?.path_matches === false ? " (에이전트가 본 경로가 지금 설정과 다릅니다)" : "";
-  switch (b.status) {
-    case "ready": return `${head}: 에이전트가 경로를 확인했습니다(존재·쓰기)${mismatch}`;
-    case "readonly": return `${head}: 경로는 있지만 쓰기 불가입니다${mismatch}`;
-    case "missing": return `${head}: ${reasonLong(b.reason) ?? "경로가 없습니다"}${mismatch}`;
-    default: return n.has_agent === false
-      ? `${head}: 에이전트가 없어 경로를 보고하지 않습니다` : `${head}: 에이전트 보고에 경로 확인이 없습니다${mismatch}`;
-  }
-}
-
 function BaseCell({ n, dim }: { n: MountNode; dim: boolean }) {
   const b = baseOf(n);
   if (b === null) return <span className="text-xs text-muted">—</span>;
@@ -143,9 +131,9 @@ function BaseCell({ n, dim }: { n: MountNode; dim: boolean }) {
     title: `컨트롤러: ${tri(b.controller.ok) === null ? "점검 전" : tri(b.controller.ok) ? "정상" : reasonText(b.controller.reason) || "실패"}`,
   }] : [];
   // 에이전트는 정상(또는 보고 없음)인데 그 노드의 API·컨트롤러 자체 점검이 실패하면 칸 머리를 「점검 실패」로 -- 초록 「정상」
-  // 아래 빨간 「실패 1」은 한 칸이 두 말을 한다(2026-11-23 라이브 확인; 요약은 이미 이 칸을 문제로 센다).
-  const checksBad = baseChecksFailed(b);
-  const shown = checksBad && (b.status === "ready" || b.status === "unreported") ? "missing" : b.status;
+  // 아래 빨간 「실패 1」은 한 칸이 두 말을 한다(2026-11-23 라이브 확인; 요약은 이미 이 칸을 문제로 센다). 설명(baseDetail)도
+  // 같은 판정으로 실패한 역할을 말한다.
+  const shown = baseHeadOverridden(b) ? "missing" : b.status;
   return (
     <div className="flex flex-col gap-0.5">
       <StatusMark status={shown} label={shown !== b.status ? "점검 실패" : BASE_LABEL[b.status]} dim={dim}

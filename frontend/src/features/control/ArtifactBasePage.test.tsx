@@ -346,6 +346,82 @@ test("API 파드별 카드: 다른 파드가 있을 때만, 보고 끊김은 흐
   expect(screen.getByText("문제 1건")).toBeInTheDocument();
 });
 
+test("엇갈림 상자: 실패한 API 파드의 노드에 정상 파드(컨트롤러·옛 API 파드)가 있으면 노드 마운트가 아니라 파드 쪽을 짚는다", async () => {
+  // dms-k8s e25a2dfb(d40 실증) 이식: 같은 노드의 컨트롤러·옛 API 파드는 정상인데 「노드 … 에 공유 스토리지가 마운트돼 있는지」라고 했다.
+  const pod = (o: Record<string, unknown>) => ({
+    instance: "p", node_name: "n", uri: "file:///cephfs/dms/artifacts", ok: true, reason: null, posture: null,
+    fstype: "ceph", local_fs: false, gate_state: "passed", started_at: ago(7200), checked_at: ago(30), ready_at: ago(7100),
+    fresh: true, this_pod: false, ...o });
+  server.use(http.get("/api/admin/artifact-base", () => HttpResponse.json(withChecks({
+    api: API_OK, controller: CTRL_OK,                                        // 둘 다 ion2110
+    api_pods: [
+      pod({ instance: "dms-api-7c9d-abcde", node_name: "ion2110", this_pod: true }),
+      pod({ instance: "dms-api-new-q1w2e", node_name: "ion2110", ok: 0, reason: "artifact_base_jobs_missing",
+            gate_state: "waiting", ready_at: null, fstype: "xfs", local_fs: true }),
+    ],
+  }))));
+  wrap();
+  await screen.findByText("env 기본");
+  const note = screen.getByRole("note");
+  expect(note).toHaveTextContent("API 파드(노드 ion2110)만 아티팩트 경로를 읽지 못합니다");
+  expect(note).toHaveTextContent("같은 노드의 다른 DMS 파드(컨트롤러 노드 ion2110)는 정상입니다");
+  expect(note).toHaveTextContent("노드 마운트가 아니라 그 파드의 hostPath·마운트 전파");
+  expect(note).not.toHaveTextContent("공유 스토리지가 마운트돼 있는지 확인하세요");
+});
+
+test("엇갈림 상자: 같은 노드의 정상 파드가 컨트롤러가 아니면 「다른 API 파드」, 노드 모르는 실패 파드가 섞이면 파드 쪽 단정 안 함", async () => {
+  // 2026-11-27 리뷰: 컨트롤러가 다른 노드(ion2110)인데 「컨트롤러 노드 ion2110 는 정상」이라고 같은 노드처럼 불렀다.
+  const pod = (o: Record<string, unknown>) => ({
+    instance: "p", node_name: "n", uri: "file:///cephfs/dms/artifacts", ok: true, reason: null, posture: null,
+    fstype: "ceph", local_fs: false, gate_state: "passed", started_at: ago(7200), checked_at: ago(30), ready_at: ago(7100),
+    fresh: true, this_pod: false, ...o });
+  const failing = { ok: false, reason: "artifact_base_jobs_missing", gate_state: "waiting", ready_at: null };
+  server.use(http.get("/api/admin/artifact-base", () => HttpResponse.json(withChecks({
+    api: { ...API_OK, node_name: "w7" }, controller: CTRL_OK,          // 이 응답 파드는 w7, 컨트롤러는 ion2110
+    api_pods: [
+      pod({ instance: "dms-api-self", node_name: "w7", this_pod: true }),
+      pod({ instance: "dms-api-new", node_name: "w7", ...failing }),
+    ],
+  }))));
+  const { unmount } = wrap();
+  await screen.findByText("env 기본");
+  expect(screen.getByRole("note")).toHaveTextContent("같은 노드의 다른 DMS 파드(다른 API 파드)는 정상입니다");
+  unmount();
+  server.use(http.get("/api/admin/artifact-base", () => HttpResponse.json(withChecks({
+    api: { ...API_OK, node_name: "w7" }, controller: CTRL_OK,
+    api_pods: [
+      pod({ instance: "dms-api-self", node_name: "w7", this_pod: true }),
+      pod({ instance: "dms-api-new", node_name: "w7", ...failing }),
+      pod({ instance: "dms-api-nonode", node_name: null, ...failing }),
+    ],
+  }))));
+  wrap();
+  await screen.findByText("env 기본");
+  expect(screen.getByRole("note")).not.toHaveTextContent("hostPath");
+});
+
+test("엇갈림 상자: 실패 노드 중 하나라도 정상 파드가 없으면 노드 마운트를 짚는다(보고 끊긴 정상 파드는 세지 않는다)", async () => {
+  const pod = (o: Record<string, unknown>) => ({
+    instance: "p", node_name: "n", uri: "file:///cephfs/dms/artifacts", ok: true, reason: null, posture: null,
+    fstype: "ceph", local_fs: false, gate_state: "passed", started_at: ago(7200), checked_at: ago(30), ready_at: ago(7100),
+    fresh: true, this_pod: false, ...o });
+  server.use(http.get("/api/admin/artifact-base", () => HttpResponse.json(withChecks({
+    api: API_OK, controller: CTRL_OK,
+    api_pods: [
+      pod({ instance: "dms-api-7c9d-abcde", node_name: "ion2110", this_pod: true }),
+      pod({ instance: "dms-api-a", node_name: "ion2110", ok: false, reason: "artifact_base_jobs_missing", gate_state: "waiting" }),
+      pod({ instance: "dms-api-b", node_name: "s-ssc-dms-26001", ok: false, reason: "artifact_base_jobs_missing" }),
+      pod({ instance: "dms-api-gone", node_name: "s-ssc-dms-26001", fresh: false }),
+    ],
+  }))));
+  wrap();
+  await screen.findByText("env 기본");
+  const note = screen.getByRole("note");
+  expect(note).toHaveTextContent("API 파드(노드 ion2110, 노드 s-ssc-dms-26001)만 아티팩트 경로를 읽지 못합니다");
+  expect(note).toHaveTextContent("노드 ion2110, 노드 s-ssc-dms-26001 에 공유 스토리지가 마운트돼 있는지 확인하세요");
+  expect(note).not.toHaveTextContent("hostPath");
+});
+
 test("응답한 파드 하나뿐이면 파드 카드 목록을 그리지 않는다(패널과 같은 내용)", async () => {
   server.use(http.get("/api/admin/artifact-base", () => HttpResponse.json(withChecks({
     api: API_OK, controller: CTRL_OK,

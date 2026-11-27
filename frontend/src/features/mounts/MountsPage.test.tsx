@@ -194,6 +194,44 @@ test("에이전트는 정상인데 그 노드의 API 점검이 실패하면 아�
   expect(within(baseCell).getByText("점검 실패")).toBeInTheDocument();
   expect(within(baseCell).queryByText("정상")).toBeNull();
   expect(baseCell.className).toContain("bg-badbg");
+  // 설명(title·낭독)도 덮인 머리와 같은 말 -- 실패한 역할부터, 에이전트 관찰은 뒤에(dms-k8s e25a2dfb 역할 이름 이식).
+  const detail = "w5 · 아티팩트 경로: 이 노드의 API 파드가 아티팩트 경로 점검에 실패했습니다 — 에이전트는 경로를 확인했습니다(존재·쓰기). "
+    + "파드의 hostPath·마운트 전파와 노드의 공유 스토리지 마운트를 확인하세요(아티팩트 경로 화면에 파드별 사유)";
+  expect(within(baseCell).getByTitle(detail)).toBeInTheDocument();
+  expect(within(baseCell).getByText(`(${detail})`)).toHaveClass("sr-only");
+  expect(within(baseCell).queryByTitle(/에이전트가 경로를 확인했습니다/)).toBeNull();
+});
+
+test("「점검 실패」 설명은 실패한 역할만 이름으로 -- 컨트롤러만·둘 다, 에이전트 없는 노드는 에이전트 확인 없음을 말한다", async () => {
+  const ctrlOnly = node("w6", { roles: ["api", "controller"], artifact_base: { ...baseOk,
+    api: [{ instance: "dms-api-a", ok: true, reason: null, checked_at: ago(5), gate_state: "passed" }],
+    controller: { ok: false, reason: "artifact_base_not_writable", checked_at: ago(5) },
+  } as MountNode["artifact_base"] });
+  const both = node("cp2", { has_agent: false, fresh: false, reported_at: null, probe_mode: null, roles: ["api", "controller"],
+    cells: {}, artifact_base: { status: "unreported", reason: null, agent: null,
+      api: [{ instance: "dms-api-b", ok: 0, reason: "artifact_base_missing", checked_at: ago(5), gate_state: "waiting" }],
+      controller: { ok: false, reason: "artifact_base_missing", checked_at: ago(5) } } as unknown as MountNode["artifact_base"] });
+  // 에이전트가 이미 문제(없음)면 머리를 덮지 않고 설명도 에이전트 사유 그대로
+  const agentBad = node("w7", { roles: ["api"], artifact_base: { status: "missing", reason: "not_a_mountpoint",
+    agent: { exists: true, writable: true, path_matches: true },
+    api: [{ instance: "dms-api-c", ok: false, reason: "artifact_base_jobs_missing", checked_at: ago(5), gate_state: "passed" }],
+    controller: null } as MountNode["artifact_base"] });
+  renderPage({ ...OVERVIEW, nodes: [ctrlOnly, both, agentBad], summary: undefined as never });
+  const baseCellOf = async (name: string) => {
+    const cells = within((await screen.findByRole("link", { name })).closest("tr")!).getAllByRole("cell");
+    return cells[cells.length - 1];
+  };
+  expect(within(await baseCellOf("w6")).getByTitle(
+    /^w6 · 아티팩트 경로: 이 노드의 컨트롤러 파드가 아티팩트 경로 점검에 실패했습니다 — 에이전트는 경로를 확인했습니다/))
+    .toBeInTheDocument();
+  const cp2 = await baseCellOf("cp2");
+  expect(within(cp2).getByText("점검 실패")).toBeInTheDocument();
+  expect(within(cp2).getByTitle(
+    /^cp2 · 아티팩트 경로: 이 노드의 API·컨트롤러 파드가 아티팩트 경로 점검에 실패했습니다 — 에이전트가 없어 노드 쪽 경로는 확인되지 않았습니다\. /))
+    .toBeInTheDocument();
+  const w7 = await baseCellOf("w7");
+  expect(within(w7).queryByText("점검 실패")).toBeNull();
+  expect(within(w7).getByTitle(/^w7 · 아티팩트 경로: 경로는 있지만 마운트포인트가 아닙니다/)).toBeInTheDocument();
 });
 
 test("보고 중인 노드가 하나도 없으면 「정상」이라고 말하지 않는다(새 설치·에이전트 전체 장애)", async () => {

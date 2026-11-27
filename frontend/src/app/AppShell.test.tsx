@@ -72,6 +72,22 @@ test("기본은 전 그룹 펼침: 대시보드 마운트에도 작업·스토�
     expect(screen.getByRole("button", { name: group })).toHaveAttribute("aria-expanded", "true");
 });
 
+test("aria-current 는 최장 일치 항목 하나에만 -- /jobs/new 에서 「단일 작업」만이고 접두 부모(전체 작업)는 아니다", async () => {
+  // dms-k8s d1b806e2 이식: NavLink 가 음영(activeNavPath)과 별개로 접두 일치마다 aria-current="page"·active 클래스를 붙여
+  // /jobs/new 에서 「전체 작업」(/jobs)까지 현재 페이지로 읽혔다. 상세 경로(요청 상세·빌드 이력)는 음영과 같은 판정으로
+  // 부모 항목 하나가 현재다 -- Link 로 바꾸며 이 부모 표시를 잃지 않는지도 함께 본다.
+  for (const [at, label] of [
+    ["/jobs/new", "단일 작업"], ["/jobs", "전체 작업"], ["/jobs/req-1", "전체 작업"], ["/admin/builds/history", "빌드"],
+  ] as const) {
+    const { unmount, container } = renderShell("admin", at);
+    expect(await screen.findByRole("link", { name: "대시보드" })).toBeInTheDocument();
+    const current = [...container.querySelectorAll('aside [aria-current="page"]')].map((a) => a.textContent);
+    expect(current, at).toEqual([label]);
+    expect(container.querySelector("aside a.active")).toBeNull();
+    unmount();
+  }
+});
+
 test("독립 토글: 스토리지를 접어도 운영은 열린 채다", async () => {
   renderShell("admin", "/admin/dashboard");
   await screen.findByRole("link", { name: "노드" });
@@ -172,6 +188,24 @@ test("빌드·릴리스·컨트롤 상태·아티팩트 경로는 관리 그룹 
   for (const label of moved) expect(screen.getByRole("link", { name: label })).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "관리" }));
   for (const label of moved) expect(screen.queryByRole("link", { name: label })).toBeNull();
+});
+
+// 본문 열(dms-k8s 08cba773 이식 -- 2026-11-26 사용자 결정 「A안」): main 이 최대 90rem(1440, 패딩 포함)으로 묶여 사이드바 오른쪽
+// 영역 가운데에 선다. jsdom 은 기하를 계산하지 않으므로 여기선 클래스만 고정한다 -- 실제 폭·가운데·좁은 창 무변화는 e2e 03
+// 「본문 열」 몫이다. 화면(section)은 스스로 mx-auto 하지 않는다(BuildForm·BuildHistory test) -- 가운데 배치는 이 한 곳이다.
+test("본문 열: main 은 mx-auto·max-w-[90rem] 이고 폭 고정·overflow 가 없다(사이드바는 그대로 왼쪽 240)", async () => {
+  const { container } = renderShell("user");
+  await screen.findByText("alice");
+  const main = container.querySelector("main")!;
+  expect(main).toHaveClass("mx-auto", "w-full", "max-w-[90rem]", "p-5");
+  // 고정 폭은 좁은 창에서 줄지 않는다. overflow 는 SubmitLayout 요약의 xl:sticky 를 죽인다(main·조상 모두).
+  expect(main.className).not.toMatch(/(^|\s)w-\[/);
+  for (let el: Element | null = main; el !== null && el !== container; el = el.parentElement)
+    expect(el.className).not.toMatch(/overflow-/);
+  // 본문 열의 부모는 그대로 flex-1 min-w-0(L1), 사이드바는 md:w-60 md:shrink-0(L3) -- 가운데 배치가 aside 를 건드리지 않는다.
+  expect(main.parentElement).toHaveClass("flex-1", "min-w-0");
+  expect(container.querySelector("aside")).toHaveClass("md:w-60", "md:shrink-0");
+  expect(container.querySelector("aside")!.className).not.toMatch(/mx-auto/);
 });
 
 // 포탈 서브네임(2026-10-02): 사이드바 이름 아래 한 줄 + 브라우저 탭 제목 "메인 - 서브". 없으면 메인 이름만.

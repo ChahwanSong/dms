@@ -256,7 +256,7 @@ _FAILED_REF = f"{BUILD_REF_PREFIX}/dms-build-0123456789ab"
 
 
 def test_failure_reason_distinguishes_oom_kill():
-    # memory limit(1Gi) 초과로 cgroup 이 빌드를 죽인 경우. 지금까지는 전부
+    # memory limit(2Gi — build_manifests) 초과로 cgroup 이 빌드를 죽인 경우. 지금까지는 전부
     # build_failed 로 뭉개져 "로그가 급단절된 build_failed 를 만나면 OOM 을
     # 의심하라"는 문서에 의존해야 했다(슬라이스 21 설계 §4 가 한계로 명시).
     k8s = _FakeK8s()

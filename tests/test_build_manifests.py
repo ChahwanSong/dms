@@ -161,12 +161,14 @@ def test_build_container_resource_envelope_pins_the_design_numbers():
     # - cpu limit 1000m 이 실질 보호막 -- 빌드가 날뛰어도 잡+제어면 몫 800m 이 남는다.
     # - memory requests 128Mi 는 일부러 작게 -- 실압박에서 빌드가 항상 "requests
     #   초과" 축출 그룹에 들어 ②priority(dms-build 10)가 방향을 가른다.
-    # - memory limit 1Gi 는 노드 eviction 전에 빌드가 먼저 혼자 OOM-kill 되는
-    #   의도된 1차 방어(M8 재발 방지).
+    # - memory limit 2Gi(2026-11-23 1Gi → 2Gi) 는 노드 eviction 전에 빌드가 먼저 혼자
+    #   OOM-kill 되는 1차 방어(M8 재발 방지) -- 1Gi 에서 Node 힙 자동 상한(~505MB)이
+    #   포탈 tsc 를 못 담았다(d37). Dockerfile 의 NODE_OPTIONS 힙 1024MB 와 짝이다
+    #   (tests/test_portal_image_build.py).
     c = _pod()["spec"]["containers"][0]
     assert c["resources"] == {
         "requests": {"cpu": "250m", "memory": "128Mi", "ephemeral-storage": "10Gi"},
-        "limits": {"cpu": "1000m", "memory": "1Gi", "ephemeral-storage": "12Gi"},
+        "limits": {"cpu": "1000m", "memory": "2Gi", "ephemeral-storage": "12Gi"},
     }
 
 

@@ -329,12 +329,14 @@ describe("BuildForm — 빌드하기(기본 하위 페이지)", () => {
       .toHaveAttribute("href", "/admin/builds/history");
   });
 
-  // ── 정렬: 가운데가 아니라 왼쪽 기준선(BatchCreate·SubmitJob 관례) ────────────
-  it("폼은 가운데 정렬이 아니다 — 다른 제출 화면과 같은 왼쪽 기준선에 선다", async () => {
+  // ── 정렬: 화면이 혼자 가운데로 가지 않는다 — 셸 본문 열(최대 1440, 가운데)의 왼쪽 기준선(BatchCreate·SubmitJob 관례) ──
+  // 본문 열의 가운데 배치는 셸(AppShell main 의 mx-auto max-w-[90rem], 2026-11-26)이 하고 AppShell.test 가 고정한다 -- 여기는
+  // 화면만 렌더하므로 「화면 자체에 mx-auto 가 없다」는 뜻 그대로다.
+  it("폼은 혼자 가운데로 가지 않는다 — 다른 제출 화면과 같은 셸 본문 열의 왼쪽 기준선에 선다", async () => {
     const { container } = wrap();
     await ready();
     expect(container.querySelector(".mx-auto")).toBeNull();
-    // 폭은 여전히 제한한다(글줄이 너무 길면 폼이 읽기 어렵다) -- 정렬만 왼쪽이다.
+    // 폭은 여전히 제한한다(글줄이 너무 길면 폼이 읽기 어렵다) -- 정렬만 본문 열의 왼쪽이다.
     expect(container.querySelector("section")?.className).toContain("max-w-2xl");
   });
 });

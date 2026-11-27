@@ -841,7 +841,7 @@ ClusterFirstWithHostNet` + `buildah bud --network=host`. 셋이 한 스위치인
 **d1** 이다.
 
 **3c) 빌드는 데이터 잡과 같은 워커에서 동시에 돈다.** 빌드 노드를 잡 풀에서 빼지
-않는다. 빌드 파드는 봉투(cpu 250m/1000m, mem 128Mi/1Gi, eph 10Gi/12Gi)와
+않는다. 빌드 파드는 봉투(cpu 250m/1000m, mem 128Mi/2Gi, eph 10Gi/12Gi)와
 PriorityClass `dms-build`(10 < `dms-low` 50)를 달고 돈다 — cpu limit 이 실질
 보호막이고(allocatable 1800m 중 최소 800m 이 남는다), 노드가 압박받으면 **빌드가
 먼저 죽는다**. 실증: 빌드 중 scan 잡이 평시와 동일한 대기(`sched_wait=5`)로 완료,
@@ -852,6 +852,16 @@ launcher 100m — 그 전 실증은 잡이 전부 BestEffort 이던 때다). 이
 타임아웃 안에서). 노드 CPU 상한은 allocatable 에서 launcher 100m 와 예비(`DMS_NODE_CPU_RESERVE_MILLICORES`, 기본
 500m — DaemonSet·제어면·빌드 몫)를 빼고 코어 단위로 내린 값이라, 테스트베드(1800m)는 워커 1000m + launcher 100m 를
 예약해도 700m 가 남는다(DMS 외 requests 최악 425m + 빌드 250m). 노드의 DMS 외 requests 가 그보다 크면 예비를 올린다.
+
+메모리 상한 2Gi 는 2026-11-23 에 1Gi 에서 올렸다(dms-k8s 7953c78d 이식) — Node 는 힙 상한을 컨테이너 상한의 약 절반으로 잡아
+(1Gi → 약 505MB) 포탈 타입 검사가 그 힙을 넘자 빌드가 `heap out of memory`(exit 134 — 빌드 로그 끝)로 죽었다(dms-k8s d37). 노드
+크기와 무관하게 이 상한이 정하므로 모든 사이트에 같다. 지금은 Dockerfile 이 힙을 1024MB 로 고정하고(`NODE_OPTIONS`), 이미지 빌드는 앱
+코드만 타입 검사한다(`npm run build:image` — 테스트 타입 검사는 개발 게이트 `npx tsc -b`). requests(128Mi)는 그대로라 압박 때 먼저
+죽는 순서도 그대로다. 새 상한은 그 dms 이미지를 컨트롤러에 릴리스한 **뒤의** 빌드부터 걸린다(build-watcher 가 빌드 파드를 만든다 —
+그 전 빌드는 1Gi 상한에 힙 1024MB 고정이지만 `build:image` 실 RSS 약 630MB 라 그 안에서 돈다).
+**ssc 테스트베드 주의**: 워커 allocatable 은 약 1.32Gi(1355Mi, 2026-08-11 실측)로 2Gi 상한보다 작다. 그 노드에선 cgroup 상한보다
+노드 압박이 먼저 와서 「빌드가 노드보다 먼저 혼자 죽는」 1차 방어가 없고, kubelet 축출·커널 OOM 순위(requests 128Mi·`dms-build`
+10 — 여전히 빌드가 맨 앞)가 그 몫을 한다. 실 RSS(약 630MB)라 평시엔 닿지 않는다 — 잔여 리스크는 `docs/BACKLOG.md` §4.
 
 **4) 만들어진 태그를 실제로 쓰려면 매니페스트를 손으로 바꿔 apply해야 한다.**
 빌드 성공은 레지스트리에 새 태그를 push하는 것으로 끝난다 — 그 태그로의 자동

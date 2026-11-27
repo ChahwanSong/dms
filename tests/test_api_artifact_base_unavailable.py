@@ -301,6 +301,7 @@ def test_metrics_infra_carries_artifact_base_summary(tmp_path):
     ab = client.get("/api/admin/metrics/infra", headers=ADMIN).json()["artifact_base"]
     assert ab["api"] is None                                     # 모니터 미시작 = 모름
     assert ab["api_pods_failing"] == 1                           # 신선 행만
+    assert ab["api_pods_failing_waiting"] == 1                   # 그 파드는 시작 게이트 대기(서비스 밖)
     assert ab["controller"] == {"pending": False, "ok": True, "reason": None, "node_name": "n1"}
     mon = client.app.state.base_monitor
     mon.instance = "api-me"
@@ -312,6 +313,25 @@ def test_metrics_infra_carries_artifact_base_summary(tmp_path):
     mon.instance = "api-x"
     ab = client.get("/api/admin/metrics/infra", headers=ADMIN).json()["artifact_base"]
     assert ab["api_pods_failing"] == 0
+    assert ab["api_pods_failing_waiting"] == 0
+
+
+def test_metrics_infra_failing_waiting_counts_only_gate_waiting_pods(tmp_path):
+    """api_pods_failing_waiting = 신선한 실패 행 중 gate_state waiting 인 수(서비스 밖) -- 서비스 중 실패(passed·
+    started_degraded)·성공인 대기 파드·보고 끊긴 대기 파드는 세지 않는다(dms-k8s e25a2dfb 이식)."""
+    base = _mkbase(tmp_path)
+    client = _client(tmp_path, base)
+    repos = client.app.state.repos
+    now = utc_now_iso()
+    old = iso_plus(now, -3600)
+    for inst, ok, gate, at in (("api-wait", False, "waiting", now), ("api-serving", False, "passed", now),
+                               ("api-degraded", False, "started_degraded", now), ("api-wait-ok", True, "waiting", now),
+                               ("api-wait-stale", False, "waiting", old)):
+        repos.api_base_checks.upsert({"instance": inst, "ok": ok, "uri": "u", "gate_state": gate,
+                                      "started_at": at, "checked_at": at})
+    ab = client.get("/api/admin/metrics/infra", headers=ADMIN).json()["artifact_base"]
+    assert ab["api_pods_failing"] == 3
+    assert ab["api_pods_failing_waiting"] == 1
 
 
 # ---- 마운트 현황 ------------------------------------------------------------------------------------------------------------

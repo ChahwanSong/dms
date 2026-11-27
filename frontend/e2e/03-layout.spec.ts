@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { apiLogin } from "./helpers/session";
-import { assertLayoutSane, assertTableOverflows } from "./helpers/layout";
+import { assertLayoutSane, assertMainColumn, assertTableOverflows } from "./helpers/layout";
 import { STORAGE_NAME } from "./harness/env";
 
 // E3 — 화면 순회 × 2 뷰포트. 이 슬라이스의 회귀 방어 본체다: 9fbef86·6bc2ecb 두
@@ -72,6 +72,13 @@ async function visitSchedules(page: Page): Promise<void> {
   await expect(page.locator("main table").first().or(page.getByText(/^스케줄이 없습니다/))).toBeVisible();
 }
 
+// 마운트 현황(2026-11-23): 표는 노드 보고(global-setup 의 에이전트 e2e-node)가 와야 그려진다 -- heading 보다 늦게 오므로 노드 칸의
+// 이름 링크가 보일 때까지 기다린다.
+async function visitMounts(page: Page): Promise<void> {
+  await visit(page, "/admin/mounts", "마운트 현황");
+  await expect(page.getByRole("table").getByRole("link", { name: "e2e-node", exact: true })).toBeVisible();
+}
+
 // 각 화면의 minTableCells 는 **소스 실측치**다(완화가 아니라 실측으로 정한다):
 //   /admin/accounts  th 6 + (admin 1 + e2ewide 3)행 × td 6 = 30 >= 24
 //   /jobs            th 10(관리자 선택 열 1 + 관리자 배치 열 1 + 요청·요청자·작업·대상·우선순위·상태·생성·갱신 8)
@@ -96,6 +103,8 @@ async function visitSchedules(page: Page): Promise<void> {
 //   /admin/usage     표는 고른 스토리지 탭에 성공 scan 이 있을 때만 그려진다(이 파일 시점엔 보통 없다) -> 하한 0.
 //                    2026-10-20 스토리지 탭 줄(가로 스크롤)이 새 L1 위험이라 순회에 넣는다 -- 탭 안 sr-only 노드가 화면
 //                    밖으로 문서를 넓히던 유형(StatusPill 619/375). 행·펼침 상세의 375 불변식은 E10(09)이 기록과 함께 잰다.
+//   /admin/mounts    th 3(노드·e2e-store·아티팩트 경로) + e2e-node 1행 × td 3 = 6 -- 이 파일 시점엔 스토리지 1·보고 노드 1이다.
+//                    「본문 열」 테스트(가장 넓은 표 화면)에서만 순회한다.
 test.describe("E3 레이아웃 불변식", () => {
   test("1280x800 주요 화면 순회", async ({ page }) => {
     await apiLogin(page);
@@ -205,5 +214,46 @@ test.describe("E3 레이아웃 불변식", () => {
     await visit(page, "/admin/dashboard", "대시보드");
     await expect(page.getByRole("group", { name: / CPU 사용률$/ }).first()).toBeVisible();
     await assertLayoutSane(page, { sidebarFixed: false, minTableCells: 0 });
+  });
+
+  // 본문 열(dms-k8s 08cba773 이식 -- 2026-11-26 사용자 결정 「A안」, AppShell main 의 mx-auto max-w-[90rem]): 넓은 창(1920)에서는
+  // 최대 1440 열이 사이드바 오른쪽 영역 가운데에 서고, 1680 이하 창(1280)에서는 예전처럼 여백 없이 영역을 꽉 채운다(L5 --
+  // helpers/layout assertMainColumn). 네 화면의 h1 왼쪽이 같아야 한다: 기준선은 본문 열의 왼쪽 하나다 -- 한 화면이 스스로
+  // mx-auto 하면(2026-08-16 사용자 지적 유형) 그 화면 제목만 옆으로 튄다. 화면은 넓은 표(마운트 현황)·목록(전체 작업)·
+  // 제출 시트(단일 작업)·카드(대시보드) 한 벌씩이다.
+  test("본문 열: 1920 에서 최대 1440 가운데 · 1280 에서 여백 없음 · 화면 제목 기준선 하나", async ({ page }) => {
+    await apiLogin(page);
+    const screens: Array<[string, () => Promise<void>, number]> = [
+      ["대시보드", () => visit(page, "/admin/dashboard", "대시보드"), 0],
+      ["전체 작업", () => visit(page, "/jobs", "전체 작업"), 4],
+      ["단일 작업", () => visit(page, "/jobs/new", "단일 작업"), 0],
+      ["마운트 현황", () => visitMounts(page), 6],
+    ];
+    for (const [width, height] of [[1920, 1080], [1280, 900]] as const) {
+      await page.setViewportSize({ width, height });
+      const h1Lefts: Array<[string, number | null]> = [];
+      for (const [name, go, minTableCells] of screens) {
+        await go();
+        await assertLayoutSane(page, { minTableCells });
+        const col = await assertMainColumn(page);
+        if (width === 1920) {
+          // 1920 − 240 = 1680 > 1440 -- 열이 실제로 묶이고 좌우에 여백이 생겨야 한다(여백 0 이면 가운데 단언이 공허하다).
+          expect(col.width, `${name} 1920: 본문 열 폭`).toBeLessThanOrEqual(1440.5);
+          expect(col.left - 240, `${name} 1920: 왼쪽 여백이 없다 -- 열이 가운데로 가지 않았다`).toBeGreaterThan(10);
+        } else {
+          expect(Math.abs(col.left - 240), `${name} 1280: main.left ${col.left} -- 좁은 창은 사이드바에 붙어야 한다`).toBeLessThanOrEqual(0.5);
+          expect(Math.abs(col.right - col.clientWidth),
+                 `${name} 1280: main.right ${col.right} ≠ clientWidth ${col.clientWidth} -- 좁은 창에 오른쪽 여백이 생겼다`).toBeLessThanOrEqual(0.5);
+        }
+        h1Lefts.push([name, col.h1Left]);
+      }
+      for (const [name, left] of h1Lefts) expect(left, `${width}: ${name} 화면 제목(h1)이 main 안에 없다`).not.toBeNull();
+      const [firstName, firstLeft] = h1Lefts[0];
+      for (const [name, left] of h1Lefts.slice(1)) {
+        expect(Math.abs((left as number) - (firstLeft as number)),
+               `${width}: ${name} 제목 왼쪽 ${left} ≠ ${firstName} ${firstLeft} -- 화면이 본문 열의 왼쪽 기준선을 벗어났다(혼자 mx-auto?)`)
+          .toBeLessThanOrEqual(0.5);
+      }
+    }
   });
 });

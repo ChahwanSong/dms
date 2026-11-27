@@ -78,9 +78,17 @@ export function baseOf(node: MountNode): MountBaseCell | null {
   return { ...b, status: STATUSES.has(b.status) && b.status !== ("disabled" as string) ? b.status : "unreported",
            api: arr<MountBaseCell["api"][number]>(b.api), controller: b.controller ?? null };
 }
-// API·컨트롤러 자체 점검이 이 노드에서 실패했다(점검 전·모름은 실패가 아니다).
-export const baseChecksFailed = (b: MountBaseCell) =>
-  b.api.some((a) => tri(a.ok) === false) || tri(b.controller?.ok) === false;
+// 이 노드에서 자체 점검이 실패한 역할(아래 줄 CheckLine 과 같은 이름 「API」·「컨트롤러」). 점검 전·모름은 실패가 아니다.
+export function baseFailedRoles(b: MountBaseCell): string[] {
+  return [...(b.api.some((a) => tri(a.ok) === false) ? ["API"] : []),
+          ...(tri(b.controller?.ok) === false ? ["컨트롤러"] : [])];
+}
+// API·컨트롤러 자체 점검이 이 노드에서 실패했다.
+export const baseChecksFailed = (b: MountBaseCell) => baseFailedRoles(b).length > 0;
+// 에이전트는 정상(또는 보고 없음)인데 자체 점검이 실패하면 칸 머리를 「점검 실패」로 덮는다 -- 머리(BaseCell)와 설명(baseDetail)이
+// 같은 판정을 쓰게 한 곳에 둔다.
+export const baseHeadOverridden = (b: MountBaseCell) =>
+  baseChecksFailed(b) && (b.status === "ready" || b.status === "unreported");
 export const baseProblem = (b: MountBaseCell | null) =>
   b !== null && (b.status === "missing" || b.status === "readonly" || baseChecksFailed(b));
 
@@ -127,5 +135,25 @@ export function cellDetail(col: StorageCol, c: MountCell, node: MountNode): stri
       return node.has_agent === false
         ? `${head}: 이 노드엔 에이전트가 없어 마운트를 보고하지 않습니다`
         : `${head}: 보고에 이 스토리지가 없습니다(옛 에이전트이거나 마운트 경로가 바뀐 뒤 아직 보고 전)`;
+  }
+}
+
+// 아티팩트 경로 칸 설명(title·낭독). 머리가 「점검 실패」로 덮이면 실패한 역할부터 말한다 -- 「에이전트가 경로를 확인했습니다」만
+// 남기면 빨간 머리와 설명이 두 말을 한다(dms-k8s e25a2dfb 의 공용 칸 역할 이름 이식). 에이전트 관찰은 뒤에 덧붙인다.
+export function baseDetail(n: MountNode, b: MountBaseCell): string {
+  const head = `${n.node_name} · 아티팩트 경로`;
+  const mismatch = b.agent?.path_matches === false ? " (에이전트가 본 경로가 지금 설정과 다릅니다)" : "";
+  if (baseHeadOverridden(b)) {
+    const agent = b.status === "ready" ? "에이전트는 경로를 확인했습니다(존재·쓰기)"
+      : n.has_agent === false ? "에이전트가 없어 노드 쪽 경로는 확인되지 않았습니다" : "에이전트 보고에는 경로 확인이 없습니다";
+    return `${head}: 이 노드의 ${baseFailedRoles(b).join("·")} 파드가 아티팩트 경로 점검에 실패했습니다 — ${agent}${mismatch}. `
+      + "파드의 hostPath·마운트 전파와 노드의 공유 스토리지 마운트를 확인하세요(아티팩트 경로 화면에 파드별 사유)";
+  }
+  switch (b.status) {
+    case "ready": return `${head}: 에이전트가 경로를 확인했습니다(존재·쓰기)${mismatch}`;
+    case "readonly": return `${head}: 경로는 있지만 쓰기 불가입니다${mismatch}`;
+    case "missing": return `${head}: ${reasonLong(b.reason) ?? "경로가 없습니다"}${mismatch}`;
+    default: return n.has_agent === false
+      ? `${head}: 에이전트가 없어 경로를 보고하지 않습니다` : `${head}: 에이전트 보고에 경로 확인이 없습니다${mismatch}`;
   }
 }

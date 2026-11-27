@@ -513,6 +513,7 @@ docstring, 운영 절차는 deploy/README §12c. dms-k8s 와 다른 점: in_use 
   외 requests 합이 예비 + 내림 여유를 넘으면 워커가 그 노드에 안 들어가 Volcano 대기(Pending 상한
   없음)에 머문다 — 운영자가 `kubectl describe node` 의 Allocated resources 를 보고 예비를 올린다.
   정확히 하려면 에이전트가 자기 노드의 파드 requests 합을 보고하는 경로(노드 범위 pods list)가 먼저다.
+- 📝 **빌드 파드 memory limit 2Gi > ssc 테스트베드 워커 allocatable(약 1.32Gi)**(2026-11-27, dms-k8s 7953c78d 이식 — deploy/README §8 3c) — 그 노드에선 cgroup 상한이 노드 압박보다 늦어 「빌드가 먼저 혼자 죽는」 1차 방어가 없고 축출·커널 OOM 순위(여전히 빌드가 맨 앞)에 기댄다. 실 RSS 약 630MB 라 평시엔 닿지 않음 — 워커 메모리를 늘리거나 빌드 노드를 큰 노드로 고르면 해소(코드 상수는 k8s 와 같게 둔다).
 - 📝 **워커 CPU 요청으로 배치 미리보기가 Volcano 에서 줄을 선다 — 먼저 끝난 형제의 미리보기 TTL(24h)
   위험**(2026-10-16). 예전엔 잡이 전부 BestEffort 라 Volcano 대기가 5~10초였다. 이제 노드 코어를 예약하므로
   배치의 미리보기 자식들이 노드 단위로 줄을 서고(테스트베드는 노드당 워커 1개), Previewing 배치는 미리보기

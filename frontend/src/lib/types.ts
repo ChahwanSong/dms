@@ -913,6 +913,8 @@ export interface InfraComponent {
 export interface InfraArtifactBase {
   api: { ok: boolean | null; reason: string | null; node_name: string | null; instance: string | null } | null;
   api_pods_failing?: number | null;
+  // 그중 시작 게이트에 막혀 Ready 를 기다리는(서비스 밖) 수 — 옵션 = 구형 서버, null = 읽기 실패(모름).
+  api_pods_failing_waiting?: number | null;
   controller: { pending: boolean; ok: boolean | null; reason: string | null; node_name: string | null } | null;
 }
 export interface InfraMetrics {

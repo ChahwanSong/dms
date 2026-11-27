@@ -7,6 +7,8 @@ Vite + React + TypeScript SPA. 백엔드 API는 `src/dms/api.py` (repo root), �
 npm install
 npm run dev      # vite dev server
 npm run build    # tsc -b && vite build
+npm run build:image  # 이미지 빌드용(Dockerfile.dms) — 앱 코드만 타입 검사(tsconfig.build.json) + vite build. 이미지 빌드는
+                     #   힙을 NODE_OPTIONS 1024MB 로 고정하고 빌드 파드 상한은 2Gi 다 — 2026-11-23 dms-k8s d37 은 1Gi(힙 약 505MB)에서 tsc -b 가 heap OOM
 npm test         # vitest run
 npx tsc -b       # 타입체크만
 npm audit        # 아래 "알려진 advisory" 먼저 읽을 것

@@ -6,7 +6,8 @@ import { expect, type Page } from "@playwright/test";
  * 단위 테스트(jsdom)는 **기하를 계산하지 않는다** -- 9fbef86(계정 표 뭉개짐)·
  * 6bc2ecb(사이드바 밀림) 두 결함은 그래서 228건을 전부 통과하며 라이브까지 갔다.
  * 여기 네 불변식이 그 사각지대의 그물이고, 각 실패 메시지는 `[L1]`~`[L4]` 라벨로
- * **어느 불변식이 먼저 물었는지**를 남긴다.
+ * **어느 불변식이 먼저 물었는지**를 남긴다. `[L5]`(본문 열, 2026-11-26)는 따로 부르는
+ * assertMainColumn 이다 -- 폭마다 기대가 달라(넓으면 가운데, 좁으면 여백 0) 호출자가 고른다.
  *
  * 단언 재료는 기하·개수·display 뿐이다(설계 §2.1) -- 문구·사유 코드는 vitest 영토.
  */
@@ -220,4 +221,50 @@ export async function assertTableOverflows(page: Page): Promise<void> {
       `넘치지 않았다) -- 시드 데이터가 표를 컨테이너보다 넓게 만들지 못했다. ` +
       `불변식을 완화하지 말고 시드(global-setup 의 이메일 길이)를 늘려라`,
   );
+}
+
+// ── L5 본문 열(2026-11-26 사용자 결정 「A안」) ─────────────────────────────────────
+// AppShell main = `mx-auto w-full max-w-[90rem] p-5`: 본문 열은 최대 1440(패딩 포함)이고 사이드바 오른쪽 영역의 가운데에 선다.
+// 기대는 한 식이다 -- main.width == min(1440, clientWidth − 240), (main.left − 240) == (clientWidth − main.right).
+// 1680 이하 창은 열이 영역을 꽉 채워(여백 0) 예전과 픽셀이 같다(1280 에서 left 240·right clientWidth 로 따로 잰다).
+// 폭 기준은 뷰포트가 아니라 documentElement.clientWidth 다: 고전 스크롤바(≈15px) 환경이면 뷰포트보다 좁고, 오버레이면 같다 --
+// 어느 쪽이든 본문 영역의 실제 오른쪽 끝이 clientWidth 다.
+const MAIN_MAX_WIDTH_PX = 1440;
+
+export interface MainColumn {
+  left: number;
+  right: number;
+  width: number;
+  clientWidth: number;
+  /** 화면 제목(h1)의 왼쪽 -- 화면들이 같은 기준선에 서는지(스스로 mx-auto 하지 않는지) 호출자가 비교한다. */
+  h1Left: number | null;
+}
+
+export async function assertMainColumn(page: Page): Promise<MainColumn> {
+  const where = at(page);
+  const col = await page.evaluate(() => {
+    const main = document.querySelector("main");
+    if (main === null) return null;
+    const r = main.getBoundingClientRect();
+    const h1 = main.querySelector("h1");
+    return {
+      left: r.left, right: r.right, width: r.width, clientWidth: document.documentElement.clientWidth,
+      h1Left: h1 === null ? null : h1.getBoundingClientRect().left,
+    };
+  });
+  expect(col, `[L5] ${where}: main 을 찾지 못했다`).not.toBeNull();
+  const c = col as MainColumn;
+  const expected = Math.min(MAIN_MAX_WIDTH_PX, c.clientWidth - SIDEBAR_WIDTH_PX);
+  expect(c.width, `[L5] ${where}: 본문 열 폭 ${c.width} > 상한 ${MAIN_MAX_WIDTH_PX} -- 넓은 창에서 열이 묶이지 않았다`)
+    .toBeLessThanOrEqual(MAIN_MAX_WIDTH_PX + 0.5);
+  expect(Math.abs(c.width - expected),
+         `[L5] ${where}: 본문 열 폭 ${c.width} (기대 min(${MAIN_MAX_WIDTH_PX}, ${c.clientWidth}−${SIDEBAR_WIDTH_PX}) = ${expected}) ` +
+           `-- 열이 영역(또는 상한)을 채우지 못했다`).toBeLessThanOrEqual(0.5);
+  const leftGap = c.left - SIDEBAR_WIDTH_PX;
+  const rightGap = c.clientWidth - c.right;
+  expect(leftGap, `[L5] ${where}: main.left ${c.left} < 사이드바 ${SIDEBAR_WIDTH_PX} -- 본문이 사이드바 아래로 들어갔다`)
+    .toBeGreaterThanOrEqual(-0.5);
+  expect(Math.abs(leftGap - rightGap),
+         `[L5] ${where}: 본문 열이 가운데가 아니다(왼쪽 여백 ${leftGap}, 오른쪽 여백 ${rightGap})`).toBeLessThanOrEqual(1);
+  return c;
 }

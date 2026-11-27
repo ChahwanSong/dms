@@ -1,0 +1,18 @@
+{
+  // 이미지 빌드 전용 타입 검사(2026-11-23, deploy/docker/Dockerfile.dms 의 `npm run build:image`) — 앱 코드만 본다.
+  // 왜: 2026-11-23 dms-k8s d37 빌드가 빌드 파드 memory limit 1Gi(build_manifests)의 Node 힙 자동 상한(약 505MB)에서 죽었다 —
+  // 테스트 128개 파일까지 보는 `tsc -b`(tsconfig.json)는 힙 510~550MB 가 필요하다(로컬 재현: --max-old-space-size=500 이면 rc 134).
+  // 앱 코드만이면 약 400MB(350 에서 실패). 지금은 상한 2Gi + Dockerfile 힙 1024MB 고정이지만 이미지 빌드는 계속 앱 코드만 본다.
+  // 테스트 타입 검사는 그대로 개발 게이트 `npx tsc -b`(tsconfig.json — CLAUDE.md 「테스트·검증」)와 vitest 가 한다.
+  // exclude 는 include 글롭에서만 뺀다 — 앱 코드가 import 하는 파일은 그래도 검사된다(테스트 전용 파일을 앱이 import 하면 드러난다).
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "types": [] },
+  "include": ["src"],
+  "exclude": [
+    "src/**/*.test.ts",
+    "src/**/*.test.tsx",
+    "src/test",
+    "src/**/*Fixtures.ts",
+    "src/**/*TestKit.tsx"
+  ]
+}

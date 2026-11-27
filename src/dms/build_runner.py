@@ -124,7 +124,7 @@ class BuildRunner:
     def failure_reason(self, ref) -> str:
         """실패한 빌드 파드의 사유를 구분한다(슬라이스 21 설계 §4 의 한계 해소).
 
-        지금까지 OOMKilled(memory limit 1Gi 초과)와 Evicted(emptyDir sizeLimit 초과
+        지금까지 OOMKilled(memory limit 초과 -- 2026-11-27 부터 2Gi)와 Evicted(emptyDir sizeLimit 초과
         또는 노드 압박)가 전부 파드 phase Failed 로 접혀 `build_failed` 로 뭉개졌다 --
         운영자는 "로그가 급단절된 build_failed 를 만나면 OOM 을 의심하라"는 문서에
         의존해야 했다. 이 둘은 대응이 완전히 다르다: OOM 은 봉투를 키우거나 빌드를
