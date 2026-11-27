@@ -95,6 +95,30 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ✅ sync 진행률 — 러너 출력 스트리밍·progress.json·출력 상한 + 진행 API + 요청 상세 진행 칸 — **완료·실증**(2026-11-27, d205, dms-ssc)
+
+사용자 요청(「Dms-k8s 에서 최근 적용한 것들을 dms-ssc 에 동일하게」)의 둘째 묶음 — dms-k8s 93158201·f405873b·abd43c8c·ded1a791·
+92f7a9f1·후속(d7a228f2 진행률 몫·f9218f07·e5e5bbbc·f9e4443a·071ec168) 이식(07519d5).
+
+- 러너: stream.py·progress.py 는 dms-k8s 최종본, runner.py 손 병합 — stdout.log·stderr.log·progress.json 은 dirfd + O_EXCL|O_NOFOLLOW
+  (임시 파일 rename), 로그 상한 넘침 모드. dms-ssc 고유 rm target_kind(6c·6d, parse_lost 경로 포함) 유지, dms-k8s contain.py·7b 제외,
+  dsync 가짜 최종 블록 방어 함께. 진행률은 dsync·nsync 만, 스트리밍·상한은 네 도구 모두.
+- API GET /api/user/jobs/{id}/progress(open_artifact_fd·BaseProbe·200 available:false·no-store), 계약 progressContract.json(410 제외).
+- 포탈: 요청 상세 진행 중 dsync·nsync 행 진행 칸(5초, 헛걸음 3회부터 15초, 마지막 스냅숏 유지, 종단 뒤 칩 3·10·30초 재조회).
+- 리뷰: 3렌즈(러너 동작 대조·러너 보안·API/포탈) — 러너 결함 0, nit 2건 반영.
+- **라이브 실증**(d205 — dms + dms-mpifileutils 같은 태그 빌드, api·controller·job-image 릴리스; 첫 빌드는 호스트 재부팅에 끊겨
+  `build_failed` → 같은 태그로 재빌드 성공, 끊긴 빌드 파드가 메모리 상한 2Gi 로 떠 있던 것으로 d204 빌드 상한 변경도 확인. 일회용
+  /cephfs/managed·/cephfs-third·/cephfs-secondary 의 proof205, 끝나고 지움):
+  | 항목 | 결과 |
+  |---|---|
+  | dsync(같은 스토리지, 3,041 항목·54MB) | 미리보기 진행 workers → done(탐색 3,041) / 실행 workers → start → copy → done 100% → Succeeded(복사 3,041·54,231,040B), 요청 상세에 「진행 · 데이터 복사 — 소스 탐색 3,041 항목」(375 넘침 0·콘솔 오류 0) |
+  | nsync(cephfs-third → cephfs-secondary 비동거) | 미리보기 workers → start → scan → done(배치 100%, planned copy 3010·mkdir 31) / 실행 배치 4/4 100% → Succeeded(done copy 3010) |
+  | 실행 중 취소(20,041 항목) | 진행이 보인 순간 취소 → Cancelled(cancelled_by_user), vcjob·파드 남지 않음 |
+  | rm(디렉터리) | 미리보기·결과 target_kind "dir"(3,041 삭제) — dms-ssc 고유 값 유지 |
+  | scan | Succeeded(3,041·54MB) |
+  | 아티팩트 | 실행 phase 에 progress.json 추가, stdout.log 꼬리 dsync 완료 블록 정상 |
+- 검증: 백엔드 전체 4576 passed·38 skipped(러너 403), vitest 1845, tsc, build:image(dist 외부 URL 0), e2e 33.
+
 ### ✅ 포탈 이미지 빌드 OOM 방지·본문 열 1440 가운데·사이드바 aria-current 하나·base 점검 다듬기 — **완료·실증**(2026-11-27, d204, dms-ssc)
 
 사용자 요청: 「Dms-k8s 에서 최근 적용한 것들을 dms-ssc 에 동일하게」 → 조사(다섯 묶음) 뒤 「권하는 순서로 모두 작업 시작해」. 첫 묶음 =
