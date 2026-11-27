@@ -95,6 +95,28 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ✅ 에이전트 아티팩트 경로 덮는 마운트 보고(로컬 디렉터리 판정) + 마운트 현황 판정 기준·표 다듬기 — **완료·실증**(2026-11-27, d207, dms-ssc)
+
+사용자 요청(「Dms-k8s 에서 최근 적용한 것들을 dms-ssc 에 동일하게」)의 마지막 묶음 — dms-k8s d14ee402·7a172d1d·b8d4395f 를 dms-ssc 의
+자체 마운트 현황에 아이디어로 이식(e2976ba). 이로써 다섯 묶음(d204~d207) 이식이 끝났다.
+
+- 에이전트: probe_artifact_base 가 host_root 모드에서 base 를 덮는 마운트 mount_point·fstype(host_root 안에서 심링크를 풀어) 보고.
+- 서버: 덮는 마운트가 "/" → base missing `artifact_base_local_dir`(2026-11-23 사고 모양을 노드 화면에서 직접). 칸 "absent"(경로도 호스트
+  마운트도 없음 = 제공 안 함 — 문제 아님, 단 어느 신선 노드에도 마운트가 없는 열이면 문제), 죽은·stale 마운트는 missing 유지, readonly
+  는 같은 열에 쓰기 가능 노드가 있을 때만 문제, 칸·base problem 플래그가 요약의 유일한 근거. k8s 의 엄격 과반 differs 는 생략(BACKLOG).
+- 포탈: 서버 플래그 우선(옛 서버면 같은 규칙으로 표·요약 재계산), absent 표시·범례, 스토리지 열 고정 폭·이름 두 줄·경로 끝, 고정 머리·
+  노드 열, 초점 가능한 표 영역·Home/End, ?only=problems·?cols=problems·?q= URL 상태.
+- 리뷰(적대 2렌즈) 확정 6건 반영 — 중요 1건: 죽은·stale 마운트(호스트 mountinfo 엔 있는데 stat 실패)가 absent 로 숨던 것(dms-k8s
+  classify_cell 에도 같은 구멍 — 그 라인 참고용).
+- **라이브 실증**(d207 — dms-mpifileutils·dms·dms-agent 같은 태그, 릴리스 agent → api → controller, 잡 이미지도 d207 로 맞춤):
+  | 항목 | 결과 |
+  |---|---|
+  | 새 에이전트 보고 | 세 노드 모두 아티팩트 경로를 덮는 마운트 `/cephfs (ceph)` |
+  | 판정 기준 | dms-w3 cephfs-third(경로 없음) → 「경로 없음(제공 안 함)」·문제 아님, dms-w1·w2 cephfs-secondary(마운트 아님) → 문제 — 문제 칸 3 → 2 |
+  | URL 필터 | `?only=problems` 2행, `?cols=problems` 문제 열(cephfs-secondary)+아티팩트 경로, `?q=third` cephfs-third 만 |
+  | 화면 | 1440·375 가로 넘침 0·콘솔 오류 0, 열 고정 폭·이름 두 줄·경로 끝(「…hfs-secondary」) |
+- 검증: 백엔드 전체 4591 passed·38 skipped, vitest 1951, tsc -b·tsc e2e, build:image(dist 외부 URL 0), e2e 33.
+
 ### ✅ 단계별 등록 — 단일 작업 4단계·배치 생성 5단계 상단 스테퍼 위저드 — **완료·실증**(2026-11-27, d206, dms-ssc)
 
 사용자 요청(「Dms-k8s 에서 최근 적용한 것들을 dms-ssc 에 동일하게」)의 셋째 묶음 — dms-k8s ed7fe322·fe87a767·219e8870·798480ab·
